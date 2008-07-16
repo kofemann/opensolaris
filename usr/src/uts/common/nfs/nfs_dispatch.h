@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -39,6 +39,8 @@
 #ifdef	__cplusplus
 extern "C" {
 #endif
+
+#include <nfs/nfs41_fhtype.h>
 
 /*
  * RPC dispatch table
@@ -77,6 +79,15 @@ typedef struct rpc_disptable {
 } rpc_disptable_t;
 
 void	rpc_null(caddr_t *, caddr_t *);
+
+struct compound_node;
+struct exportinfo;
+
+int rfs41_dispatch(struct svc_req *, SVCXPRT *, char *,
+    nfs41_fh_type_t);
+extern void mds_compound(struct compound_node *,
+    COMPOUND4args *, COMPOUND4res *,
+    struct exportinfo *, struct svc_req *, int *);
 
 #ifdef	__cplusplus
 }

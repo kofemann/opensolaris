@@ -1182,8 +1182,6 @@ rfs3_read_getfh(READ3args *args)
 	return (&args->file);
 }
 
-#define	MAX_IOVECS	12
-
 #ifdef DEBUG
 static int rfs3_write_hits = 0;
 static int rfs3_write_misses = 0;
@@ -1201,7 +1199,7 @@ rfs3_write(WRITE3args *args, WRITE3res *resp, struct exportinfo *exi,
 	struct vattr ava;
 	u_offset_t rlimit;
 	struct uio uio;
-	struct iovec iov[MAX_IOVECS];
+	struct iovec iov[NFS_MAX_IOVECS];
 	mblk_t *m;
 	struct iovec *iovp;
 	int iovcnt;
@@ -1319,7 +1317,7 @@ rfs3_write(WRITE3args *args, WRITE3res *resp, struct exportinfo *exi,
 		iovcnt = 0;
 		for (m = args->mblk; m != NULL; m = m->b_cont)
 			iovcnt++;
-		if (iovcnt <= MAX_IOVECS) {
+		if (iovcnt <= NFS_MAX_IOVECS) {
 #ifdef DEBUG
 			rfs3_write_hits++;
 #endif
@@ -2791,11 +2789,9 @@ rfs3_rename(RENAME3args *args, RENAME3res *resp, struct exportinfo *exi,
 	}
 
 	/*
-	 * Check for renaming over a delegated file.  Check rfs4_deleg_policy
-	 * first to avoid VOP_LOOKUP if possible.
+	 * Check for renaming over a delegated file.
 	 */
-	if (rfs4_deleg_policy != SRV_NEVER_DELEGATE &&
-	    VOP_LOOKUP(tvp, args->to.name, &targvp, NULL, 0, NULL, cr,
+	if (VOP_LOOKUP(tvp, args->to.name, &targvp, NULL, 0, NULL, cr,
 	    NULL, NULL, NULL) == 0) {
 
 		if (rfs4_check_delegated(FWRITE, targvp, TRUE)) {

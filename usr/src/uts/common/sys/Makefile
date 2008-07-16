@@ -193,6 +193,8 @@ CHKHDRS=			\
 	door.h			\
 	door_data.h		\
 	door_impl.h		\
+	dserv.h			\
+	dserv_impl.h		\
 	dtrace.h		\
 	dtrace_impl.h		\
 	dumpadm.h		\

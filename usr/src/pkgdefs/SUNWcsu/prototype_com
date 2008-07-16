@@ -357,6 +357,7 @@ d none usr/lib/devfsadm/linkmod 755 root sys
 f none usr/lib/devfsadm/linkmod/SUNW_audio_link.so 755 root sys
 f none usr/lib/devfsadm/linkmod/SUNW_cfg_link.so 755 root sys
 f none usr/lib/devfsadm/linkmod/SUNW_disk_link.so 755 root sys
+f none usr/lib/devfsadm/linkmod/SUNW_dserv_link.so 755 root sys
 f none usr/lib/devfsadm/linkmod/SUNW_fssnap_link.so 755 root sys
 f none usr/lib/devfsadm/linkmod/SUNW_lofi_link.so 755 root sys
 f none usr/lib/devfsadm/linkmod/SUNW_md_link.so 755 root sys

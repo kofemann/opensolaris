@@ -59,6 +59,7 @@ SUNWprivate_1.1 {
 	zfs_iter_children;
 	zfs_iter_dependents;
 	zfs_iter_filesystems;
+	zfs_iter_pnfs;
 	zfs_iter_root;
 	zfs_iter_snapshots;
 	zfs_mount;

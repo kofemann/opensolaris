@@ -880,20 +880,25 @@ NFS_OBJS +=	nfs_client.o	nfs_common.o	nfs_dump.o \
 		nfs_xdr.o	nfs_sys.o	nfs_strerror.o \
 		nfs3_vfsops.o	nfs3_vnops.o	nfs3_xdr.o \
 		nfs_acl_vnops.o	nfs_acl_xdr.o	nfs4_vfsops.o \
-		nfs4_vnops.o	nfs4_xdr.o 	nfs4_idmap.o \
-		nfs4_shadow.o	nfs4_subr.o \
+		nfs4_vnops.o	nfs4_xdr.o 	nfs41_xdr.o \
+		nfs4_idmap.o	nfs4_shadow.o	nfs4_subr.o \
 		nfs4_attr.o	nfs4_rnode.o	nfs4_client.o \
 		nfs4_acache.o	nfs4_common.o	nfs4_client_state.o \
 		nfs4_callback.o	nfs4_recovery.o nfs4_client_secinfo.o \
 		nfs4_client_debug.o	nfs_stats.o \
-		nfs4_acl.o	nfs4_stub_vnops.o
+		nfs4_acl.o	nfs4_stub_vnops.o	nfs4_pnfs.o \
+		nfs41_filehandle_xdr.o ds_filehandle_xdr.o
 
-NFSSRV_OBJS +=	nfs_server.o	nfs_srv.o	nfs3_srv.o \
-		nfs_acl_srv.o	nfs_auth.o	nfs_auth_xdr.o \
-		nfs_export.o	nfs_log.o	nfs_log_xdr.o \
-		nfs4_srv.o	nfs4_state.o	nfs4_srv_attr.o \
-		nfs4_srv_ns.o	nfs4_db.o	nfs4_srv_deleg.o \
-		nfs4_deleg_ops.o nfs4_srv_readdir.o nfs4_dispatch.o
+NFSSRV_OBJS +=	nfs_server.o nfs_srv.o nfs3_srv.o nfs_acl_srv.o		\
+    		nfs_auth.o nfs_auth_xdr.o				\
+		nfs_export.o	nfs_log.o	nfs_log_xdr.o		\
+		nfs4_srv.o	nfs4_state.o	nfs4_srv_attr.o		\
+		nfs4_srv_ns.o	nfs4_db.o	nfs4_srv_deleg.o	\
+		nfs4_deleg_ops.o nfs4_srv_readdir.o nfs4_dispatch.o	\
+		nfs41_dispatch.o nfs41_srv.o	ds_srv.o		\
+    		nfs41_filehandle.o nfs41_srv_readdir.o nfs41_state.o	\
+		nnode.o
+
 
 SMBSRV_SHARED_OBJS += \
 		smb_match.o \
@@ -1003,6 +1008,8 @@ SMBSRV_OBJS +=	$(SMBSRV_SHARED_OBJS)			\
 		smb_write.o				\
 		smb_write_raw.o				\
 		smb_xlate.o
+
+DSERV_OBJS +=	dserv_ioctl.o	dserv_server.o	dserv_mds.o
 
 PCFS_OBJS +=	pc_alloc.o	pc_dir.o	pc_node.o	pc_subr.o \
 		pc_vfsops.o	pc_vnops.o
@@ -1145,6 +1152,7 @@ ZFS_OBJS +=			\
 	zfs_dir.o		\
 	zfs_ioctl.o		\
 	zfs_log.o		\
+	zfs_pnfs.o		\
 	zfs_replay.o		\
 	zfs_rlock.o		\
 	rrwlock.o		\
@@ -1189,8 +1197,8 @@ RPCMOD_OBJS +=	rpcmod.o	clnt_cots.o	clnt_clts.o \
 		clnt_gen.o	clnt_perr.o	mt_rpcinit.o	rpc_calmsg.o \
 		rpc_prot.o	rpc_sztypes.o	rpc_subr.o	rpcb_prot.o \
 		svc.o		svc_clts.o	svc_gen.o	svc_cots.o \
-		rpcsys.o	xdr_sizeof.o	clnt_rdma.o	svc_rdma.o \
-		xdr_rdma.o	rdma_subr.o	xdrrdma_sizeof.o
+		rpcsys.o	rpc_tags.o 	xdr_sizeof.o	clnt_rdma.o \
+		svc_rdma.o	xdr_rdma.o	rdma_subr.o	xdrrdma_sizeof.o
 
 TLIMOD_OBJS +=	tlimod.o	t_kalloc.o	t_kbind.o	t_kclose.o \
 		t_kconnect.o	t_kfree.o	t_kgtstate.o	t_kopen.o \

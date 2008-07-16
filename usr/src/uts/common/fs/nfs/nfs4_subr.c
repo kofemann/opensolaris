@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -54,6 +54,8 @@
 #include <nfs/nfs4.h>
 #include <nfs/rnode4.h>
 #include <nfs/nfs4_clnt.h>
+#include <nfs/nfs41_sessions.h>
+#include <nfs/nfs4_clnt_impl.h>
 
 /*
  * client side statistics
@@ -92,7 +94,6 @@ struct clstat4_debug clstat4_debug = {
  */
 static list_t nfs4_clnt_list;
 static kmutex_t nfs4_clnt_list_lock;
-static zone_key_t nfs4clnt_zone_key;
 
 static struct kmem_cache *chtab4_cache;
 
@@ -409,6 +410,8 @@ geterrno4(enum nfsstat4 status)
 		return (EPROTO);
 	case NFS4ERR_CB_PATH_DOWN:
 		return (EPROTO);
+	case NFS4ERR_BADSESSION:
+		return (EIO);
 	default:
 #ifdef DEBUG
 		zcmn_err(getzoneid(), CE_WARN, "geterrno4: got status %d",
@@ -966,6 +969,8 @@ top:
 	(void) CLNT_CONTROL(cp->ch_client, CLSET_PROGRESS, NULL);
 	auth_destroy(cp->ch_client->cl_auth);
 
+
+
 	/*
 	 * Get an auth handle.
 	 */
@@ -985,7 +990,7 @@ top:
 	return (0);
 }
 
-static int
+int
 nfs_clget4(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr, CLIENT **newcl,
     struct chtab **chp, struct nfs4_clnt *nfscl)
 {
@@ -1060,6 +1065,16 @@ clfree4(CLIENT *cl, struct chtab *cp, struct nfs4_clnt *nfscl)
 	if (cl->cl_auth != NULL) {
 		sec_clnt_freeh(cl->cl_auth);
 		cl->cl_auth = NULL;
+	}
+
+	if (!CLNT_CONTROL(cl, CLSET_TAG_CLEAR, (char *)NULL))
+		zcmn_err(getzoneid(), CE_WARN,
+		    "Failed to clear tag on freed client handle");
+
+	if (!(CLNT_CONTROL(cl, CLSET_BACKCHANNEL_CLEAR, NULL))) {
+		zcmn_err(getzoneid(), CE_WARN,
+		    "Unable to clear backchannel on freed client handle %p",
+		    (void *)cl);
 	}
 
 	/*
@@ -1206,7 +1221,8 @@ static unsigned int minimum_timeo[] = {
 #define	dobackoff(tim)	((((tim) << 1) > MAXTIMO) ? MAXTIMO : ((tim) << 1))
 
 static int
-nfs4_rfscall(mntinfo4_t *mi, rpcproc_t which, xdrproc_t xdrargs, caddr_t argsp,
+nfs4_rfscall(mntinfo4_t *mi, servinfo4_t *svp,
+    rpcproc_t which, xdrproc_t xdrargs, caddr_t argsp,
     xdrproc_t xdrres, caddr_t resp, cred_t *icr, int *doqueue,
     enum clnt_stat *rpc_statusp, int flags, struct nfs4_clnt *nfscl)
 {
@@ -1216,16 +1232,18 @@ nfs4_rfscall(mntinfo4_t *mi, rpcproc_t which, xdrproc_t xdrargs, caddr_t argsp,
 	struct rpc_err rpcerr;
 	enum clnt_stat status;
 	int error;
+	int ctlret;
 	struct timeval wait;
 	int timeo;		/* in units of hz */
 	bool_t tryagain, is_recov;
 	bool_t cred_cloned = FALSE;
 	k_sigset_t smask;
-	servinfo4_t *svp;
 #ifdef DEBUG
 	char *bufp;
 #endif
 	int firstcall;
+	struct nfs41_cb_info    *cbi;
+	struct nfs4_server	*np;
 
 	rpcerr.re_status = RPC_SUCCESS;
 
@@ -1251,10 +1269,62 @@ nfs4_rfscall(mntinfo4_t *mi, rpcproc_t which, xdrproc_t xdrargs, caddr_t argsp,
 	 * clget() calls clnt_tli_kinit() which clears the xid, so we
 	 * are guaranteed to reprocess the retry as a new request.
 	 */
-	svp = mi->mi_curr_serv;
+	if (svp == NULL)
+		svp = mi->mi_curr_serv;
 	rpcerr.re_errno = nfs_clget4(mi, svp, cr, &client, &ch, nfscl);
 	if (rpcerr.re_errno != 0)
 		return (rpcerr.re_errno);
+
+	if (NFS4_MINORVERSION(mi) == 1) {
+		mutex_enter(&nfs4_server_lst_lock);
+		np = servinfo4_to_nfs4_server(svp);
+		mutex_exit(&nfs4_server_lst_lock);
+
+		if (np) {
+			if (np->s_program != 0 && (flags & RFS4CALL_SETCB)) {
+				cbi = np->zone_globals->nfs4prog2cbinfo
+				    [np->s_program-NFS4_CALLBACK];
+				if (cbi != NULL) {
+					ctlret = CLNT_CONTROL(
+					    client, CLSET_CBSERVER_SETUP,
+					    (char *)&cbi->cb_rpc);
+					if (ctlret == 0) {
+						zcmn_err(getzoneid(), CE_WARN,
+						    "Failed to set client"
+						    " handle as callback");
+					}
+				}
+
+				if (!np->ssx.bi_rpc) {
+					ctlret = CLNT_CONTROL(client,
+					    CLSET_BACKCHANNEL, NULL);
+					if (ctlret == 0) {
+						zcmn_err(getzoneid(), CE_WARN,
+						    "Failed to set client"
+						    " handle as callback");
+					}
+				}
+
+				/*
+				 * In case of non birpc, make sure rpc layer
+				 * reflects the same -- the below call sets
+				 * the RPC flag  non birpc.
+				 */
+				if (NFS41_CHECK(mi, nfs41_birpc) == FALSE) {
+					(void) CLNT_CONTROL(client,
+					    CLSET_NON_BIRPC, (char *)NULL);
+				}
+			}
+
+			if (!CLNT_CONTROL(client, CLSET_TAG,
+			    (char *)(np->ssx.sessionid)))
+				zcmn_err(getzoneid(), CE_WARN,
+				    "Failed to set tag on client handle");
+
+			mutex_exit(&np->s_lock);
+			nfs4_server_rele(np);
+		}
+	}
 
 	timeo = (mi->mi_timeo * hz) / 10;
 
@@ -1361,6 +1431,11 @@ nfs4_rfscall(mntinfo4_t *mi, rpcproc_t which, xdrproc_t xdrargs, caddr_t argsp,
 			 */
 			rpcerr.re_status = RPC_INTR;
 			rpcerr.re_errno = EINTR;
+			break;
+
+		case RPC_CONN_NOT_BOUND:
+			rpcerr.re_status = status;
+			rpcerr.re_errno = EIO;
 			break;
 
 		case RPC_UDERROR:
@@ -1558,10 +1633,13 @@ nfs4_rfscall(mntinfo4_t *mi, rpcproc_t which, xdrproc_t xdrargs, caddr_t argsp,
 
 /*
  * rfs4call - general wrapper for RPC calls initiated by the client
+ * KLR-make this a nosequence rfs4call which will not add a sequence op
+ * XXXrsb - External callers now user rfs4call() with RFS4CALL_NOSEQ.
  */
-void
-rfs4call(mntinfo4_t *mi, COMPOUND4args_clnt *argsp, COMPOUND4res_clnt *resp,
-    cred_t *cr, int *doqueue, int flags, nfs4_error_t *ep)
+static void
+rfs4call_nosequence(mntinfo4_t *mi, servinfo4_t *svp, COMPOUND4args_clnt *argsp,
+    COMPOUND4res_clnt *resp, cred_t *cr, int *doqueue, int flags,
+    nfs4_error_t *ep)
 {
 	int i, error;
 	enum clnt_stat rpc_status = NFS4_OK;
@@ -1575,18 +1653,36 @@ rfs4call(mntinfo4_t *mi, COMPOUND4args_clnt *argsp, COMPOUND4res_clnt *resp,
 	nfscl->nfscl_stat.calls.value.ui64++;
 	mi->mi_reqs[NFSPROC4_COMPOUND].value.ui64++;
 
+	/* XXX - Set up minorversion */
+	argsp->minor_vers = mi->mi_minorversion;
+
 	/* Set up the results struct for XDR usage */
 	resp->argsp = argsp;
 	resp->array = NULL;
 	resp->status = 0;
 	resp->decode_len = 0;
 
-	error = nfs4_rfscall(mi, NFSPROC4_COMPOUND,
+	error = nfs4_rfscall(mi, svp, NFSPROC4_COMPOUND,
 	    xdr_COMPOUND4args_clnt, (caddr_t)argsp,
 	    xdr_COMPOUND4res_clnt, (caddr_t)resp, cr,
 	    doqueue, &rpc_status, flags, nfscl);
 
-	/* Return now if it was an RPC error */
+	/*
+	 * Map the connection not bound rpc error to nfs
+	 * error. Currently with no connection binding enforcement
+	 * by the client, we won't hit this. With connection binding
+	 * enforcement in the future (with SSV), the below method is
+	 * needed to drive a bind_conn_to_session after a connection
+	 * loss by the client (See section - 2.10.10.1.4 of the draft)
+	 */
+	if (error && rpc_status == RPC_CONN_NOT_BOUND) {
+		ep->error = 0;
+		ep->rpc_status = 0;
+		ep->stat = NFS4ERR_CONN_NOT_BOUND_TO_SESSION;
+		return;
+	}
+
+	/* Return now if it was any other RPC error */
 	if (error) {
 		ep->error = error;
 		ep->stat = resp->status;
@@ -1609,6 +1705,179 @@ rfs4call(mntinfo4_t *mi, COMPOUND4args_clnt *argsp, COMPOUND4res_clnt *resp,
 	ep->error = 0;
 	ep->stat = resp->status;
 	ep->rpc_status = rpc_status;
+}
+
+void
+rfs41_call(mntinfo4_t *mi, servinfo4_t *svp, COMPOUND4args_clnt *argsp,
+	COMPOUND4res_clnt *resp, cred_t *cr, int *doqueue, int flags,
+	nfs4_error_t *ep)
+{
+	nfs4_slot_t		*slot;
+	SEQUENCE4res		*seqres;
+	struct nfs4_server	*np;
+	COMPOUND4args_clnt	rfs_args, *rfsargp;
+	COMPOUND4res_clnt	rfs_res, *rfsresp;
+	int			add_seq = 0;
+
+	/*
+	 * XXXrsb - The following code is likely to change
+	 * For now, we have a pointer from the servinfo4 to the nfs4_server
+	 * If we have a servinfo4 and the pointer is valid, then use it.
+	 * One note, we may have to deal with the "np == NULL" case.
+	 */
+	if (svp && svp->sv_ds_n4sp) {
+		np = svp->sv_ds_n4sp;
+		nfs4_server_hold(np);
+	} else {
+		np = find_nfs4_server(mi);
+		ASSERT(np != NULL);
+		mutex_exit(&np->s_lock);
+	}
+
+
+	/*
+	 * Allocate another args array so we can insert
+	 * a SEQUENCE Op as the first operation, copy already
+	 * built args into it also.
+	 */
+	if (argsp->array->argop != OP_SEQUENCE) {
+		rfs_args.ctag = argsp->ctag;
+		rfs_args.array_len = argsp->array_len + 1;
+		rfs_args.array = kmem_zalloc(sizeof (nfs_argop4) *
+		    rfs_args.array_len, KM_SLEEP);
+
+		bcopy(argsp->array, rfs_args.array + 1,
+		    sizeof (nfs_argop4) * argsp->array_len);
+
+		ASSERT(argsp->array_len >= 1);
+		rfs_args.array->argop = OP_SEQUENCE;
+		rfsargp = &rfs_args;
+		rfsresp = &rfs_res;
+		add_seq = 1;
+	} else {
+		rfsargp = argsp;
+		rfsresp = resp;
+	}
+
+	/* Set up the sequence OP */
+
+	nfs4sequence_setup(&np->ssx, rfsargp, &slot);
+
+	/*
+	 * Send it using rfs4call_nosequence()
+	 * XXXrsb - this will likely be refactored with the rest of
+	 * the rfs4call() family
+	 */
+	rfs4call_nosequence(mi, svp, rfsargp, rfsresp, cr, doqueue, flags, ep);
+
+#if	0
+	zcmn_err(mi->mi_zone->zone_id, CE_WARN,
+	    "Tag: %x SEQUENCE slot: %x seq: %x estatus: %x nstatus: %x",
+	    rfsargp->ctag,
+	    rfsargp->array->nfs_argop4_u.opsequence.sa_slotid,
+	    rfsargp->array->nfs_argop4_u.opsequence.sa_sequenceid,
+	    ep->error,
+	    rfsresp->array != NULL ?
+	    rfsresp->array->nfs_resop4_u.opsequence.status : 0);
+
+	if (ep->error || ep->stat || ep->rpc_status)
+		cmn_err(CE_WARN, "rfs4call failed: %d, %d, %d",
+		    ep->error, ep->stat, ep->rpc_status);
+#endif
+
+	nfs4sequence_fin(&np->ssx, rfsresp, slot, ep);
+
+	/*
+	 * If the OTW call failed completely, or if the
+	 * results array is NULL, just get out
+	 */
+	if (ep->error || (ep->stat && rfsresp->array == NULL)) {
+
+		if (ep->error == 0) {
+			ep->error = geterrno4(ep->stat);
+		}
+
+		if (add_seq)
+			kmem_free(rfs_args.array,
+			    sizeof (nfs_argop4) * rfs_args.array_len);
+
+		nfs4_server_rele(np);
+		return;
+	}
+
+	/*
+	 * Check the results of the sequence op.  If it failed and we
+	 * added it for the caller, then we don't have any results
+	 * to return.
+	 */
+	seqres = &rfsresp->array->nfs_resop4_u.opsequence;
+	if (seqres->sr_status != NFS4_OK) {
+
+		cmn_err(CE_WARN, "rfs4call: sequence OP failed %d",
+		    seqres->sr_status);
+
+		if (add_seq) {
+			kmem_free(rfs_args.array,
+			    sizeof (nfs_argop4) * rfs_args.array_len);
+			resp->status = seqres->sr_status;
+			resp->array_len = resp->decode_len = 0;
+			resp->array = NULL;
+		}
+		/* XXX - xdr_free? free cpy */
+		nfs4_server_rele(np);
+		return;
+	}
+
+	/*
+	 * Update lease time if we have state since SEQUENCE op was successful
+	 */
+	mutex_enter(&np->s_lock);
+	if (np->lease_valid == NFS4_LEASE_VALID && np->state_ref_count)
+		np->last_renewal_time = gethrestime_sec();
+	mutex_exit(&np->s_lock);
+
+	/*
+	 * We some results of interest to the, so
+	 * Allocate an additional response array which doesn't have
+	 * SEQUENCE op results, copy results to it if not just a
+	 * SEQUENCE op for lease renewal.
+	 */
+	if (add_seq) {
+		resp->status = rfsresp->status;
+		resp->array_len =
+		    rfsresp->array_len == 0 ? 0 :rfsresp->array_len - 1;
+		resp->decode_len = rfsresp->decode_len == 0 ? 0 :
+		    rfsresp->decode_len - 1;
+		resp->argsp = argsp;
+		if (resp->array_len > 0) {
+			ASSERT(rfs_res.array != NULL);
+			resp->array =
+			    kmem_alloc(sizeof (nfs_resop4) *
+			    resp->array_len, KM_SLEEP);
+			bcopy(rfsresp->array + 1, resp->array,
+			    sizeof (nfs_resop4) * resp->array_len);
+		} else {
+			resp->array = NULL;
+		}
+		kmem_free(rfs_args.array,
+		    sizeof (nfs_argop4) * rfs_args.array_len);
+		kmem_free(rfs_res.array,
+		    sizeof (nfs_resop4) * rfs_res.array_len);
+	}
+	nfs4_server_rele(np);
+}
+
+void
+rfs4call(mntinfo4_t *mi, servinfo4_t *svp, COMPOUND4args_clnt *argsp,
+	COMPOUND4res_clnt *resp, cred_t *cr, int *doqueue, int flags,
+	nfs4_error_t *ep)
+{
+	if (NFS4_MINORVERSION(mi) == 0 || (flags & RFS4CALL_NOSEQ)) {
+		rfs4call_nosequence(mi, svp, argsp, resp, cr, doqueue,
+		    flags, ep);
+		return;
+	}
+	rfs41_call(mi, svp, argsp, resp, cr, doqueue, flags, ep);
 }
 
 /*
@@ -1679,7 +1948,7 @@ remap_lookup(nfs4_fname_t *fname, vnode_t *rootvp,
 	lookuparg.resp = &res;
 	lookuparg.header_len = 1;	/* Putfh */
 	lookuparg.trailer_len = 0;
-	lookuparg.ga_bits = NFS4_VATTR_MASK;
+	lookuparg.ga_bits = MI4_DEFAULT_ATTRMAP(mi);
 	lookuparg.mi = VTOMI4(rootvp);
 
 	(void) nfs4lookup_setup(path, &lookuparg, 1);
@@ -1691,7 +1960,7 @@ remap_lookup(nfs4_fname_t *fname, vnode_t *rootvp,
 
 	num_argops = args.array_len;
 
-	rfs4call(mi, &args, &res, cr, &doqueue, RFSCALL_SOFT, ep);
+	rfs4call(mi, NULL, &args, &res, cr, &doqueue, RFSCALL_SOFT, ep);
 
 	if (ep->error || res.status != NFS4_OK)
 		goto exit;
@@ -2270,6 +2539,14 @@ sv4_free(servinfo4_t *svp)
 			kmem_free(svp->sv_path, svp->sv_pathlen);
 		}
 		nfs_rw_destroy(&svp->sv_lock);
+
+		/*
+		 * If we have an nfs4_server from a pnfs data server...
+		 * XXXrsb This may go away or change
+		 */
+		if (svp->sv_ds_n4sp)
+			nfs4_server_rele(svp->sv_ds_n4sp);
+
 		kmem_free(svp, sizeof (*svp));
 		svp = next;
 	}
@@ -2972,7 +3249,8 @@ static struct try_failover_tab {
 	RPC_CANTCONNECT,	ECONNREFUSED,
 	RPC_XPRTFAILED,		ECONNABORTED,
 	RPC_CANTCREATESTREAM,	ECONNREFUSED,
-	RPC_CANTSTORE,		ENOBUFS
+	RPC_CANTSTORE,		ENOBUFS,
+	RPC_CONN_NOT_BOUND,	0
 };
 
 /*
@@ -3120,3 +3398,332 @@ rnode4info(rnode4_t *rp)
 	return (buf);
 }
 #endif
+
+int nfs4_sessions_debug;
+
+void
+nfs4sequence_setup(nfs4_session_t *np, COMPOUND4args_clnt *rfsargp,
+	nfs4_slot_t **slotpp)
+{
+	int			slot_id = 0;
+	nfs4_slot_t		*slot;
+
+	bcopy(&np->sessionid,
+	    rfsargp->array->nfs_argop4_u.opsequence.sa_sessionid,
+	    sizeof (sessionid4));
+
+	/*
+	 * Find a slot to use.
+	 */
+	(void) nfs_rw_enter_sig(&np->slot_table_rwlock, RW_READER, 0);
+	mutex_enter(&np->slot_lock);
+	slot_id = np->next_slot;
+	while ((np->slot_table[slot_id]->slot_inuse != 0) ||
+	    (np->slot_table[slot_id]->slot_bad != 0)) {
+		/*
+		 * Can drop the rwlock here so we don't hold it over
+		 * a possible cv_wait.
+		 */
+		nfs_rw_exit(&np->slot_table_rwlock);
+
+		/*
+		 * This slot is still in use.
+		 * Check next slot if there are still some available.
+		 */
+
+		while (np->slots_available == 0) {
+			if (nfs4_sessions_debug)
+				cmn_err(CE_WARN, "Waiting for Available Slot");
+			cv_wait(&np->slot_wait, &np->slot_lock);
+		}
+		slot_id++;
+		if (slot_id == np->maxslots)
+			slot_id = 0;
+		(void) nfs_rw_enter_sig(&np->slot_table_rwlock, RW_READER, 0);
+	}
+	*slotpp = slot = np->slot_table[slot_id];
+	slot->slot_inuse = 1;
+	np->slots_available--;
+	np->next_slot = slot_id + 1 == np->maxslots ? 0 : slot_id + 1;
+
+	/*
+	 * Update SEQUENCE args
+	 */
+	rfsargp->array->nfs_argop4_u.opsequence.sa_sequenceid =
+	    slot->slot_seqid;
+	rfsargp->array->nfs_argop4_u.opsequence.sa_slotid = slot->slot_id;
+	rfsargp->array->nfs_argop4_u.opsequence.sa_highest_slotid  =
+	    np->maxslots - np->slots_available;
+	/* XXX - rick - need sr_target_highest_slotid */
+	mutex_exit(&np->slot_lock);
+	nfs_rw_exit(&np->slot_table_rwlock);
+}
+
+void
+nfs4sequence_fin(nfs4_session_t *np, COMPOUND4res_clnt *rfsresp,
+	nfs4_slot_t *slot, nfs4_error_t *ep)
+{
+	SEQUENCE4resok		*seqres;
+
+	mutex_enter(&np->slot_lock);
+
+	ASSERT(slot->slot_inuse);
+	slot->slot_inuse = 0;
+
+	/* if call started but not completed, mark slot as bad */
+	if ((ep->error != 0) &&
+	    ((ep->rpc_status == RPC_TIMEDOUT) ||
+	    (ep->rpc_status == RPC_INTR))) {
+		cmn_err(CE_WARN, "SEQUENCE failed %d, bad slot %d:%d",
+		    ep->rpc_status, slot->slot_id, slot->slot_seqid);
+		slot->slot_bad = 1;
+	} else {
+		if (slot->slot_id < np->next_slot)
+			np->next_slot = slot->slot_id;
+
+		/* Update slot seqid on successful op_sequence */
+		if (ep->error == 0 && (rfsresp->array != NULL &&
+		    rfsresp->array->nfs_resop4_u.opsequence.sr_status ==
+		    NFS4_OK))
+			slot->slot_seqid++;
+
+		if (np->slots_available++ == 0) {
+			if (nfs4_sessions_debug)
+				cmn_err(CE_WARN, "Slots Available");
+			cv_broadcast(&np->slot_wait);
+		}
+	}
+
+	mutex_exit(&np->slot_lock);
+
+	/* SEQUENCE Op Successful? */
+	if (ep->error != 0 || rfsresp->status != NFS4_OK ||
+	    (rfsresp->array != NULL &&
+	    rfsresp->array->nfs_resop4_u.opsequence.sr_status != NFS4_OK)) {
+		/*
+		 * cmn_err(CE_WARN, "sequence op failed or missing\n");
+		 */
+		return;
+	}
+
+	seqres = &rfsresp->array->nfs_resop4_u.opsequence.
+	    SEQUENCE4res_u.sr_resok4;
+
+	/*
+	 * Sequence Op Successful, Handle Errors and maxslot changes.
+	 */
+
+	if (seqres->sr_status_flags & SEQ4_STATUS_CB_PATH_DOWN) {
+#ifdef	notyet
+		nfs4_delegreturn_all(np);
+#else
+		cmn_err(CE_WARN, "SEQ4_STATUS_CB_PATH_DOWN not handled");
+#endif
+	}
+
+	if (seqres->sr_status_flags & SEQ4_STATUS_CB_GSS_CONTEXTS_EXPIRING) {
+		cmn_err(CE_WARN, "SEQUENCE got CB_GSS_CONTEXTS_EXPIRING");
+	}
+
+	if (seqres->sr_status_flags & SEQ4_STATUS_CB_GSS_CONTEXTS_EXPIRED) {
+		cmn_err(CE_WARN, "SEQUENCE got CB_GSS_CONTEXTS_EXPIRED");
+	}
+
+	if (seqres->sr_status_flags & SEQ4_STATUS_EXPIRED_ALL_STATE_REVOKED) {
+		cmn_err(CE_WARN, "SEQUENCE got EXIPRED_ALL_STATE_REVOKED");
+	}
+
+	if (seqres->sr_status_flags & SEQ4_STATUS_EXPIRED_SOME_STATE_REVOKED) {
+		cmn_err(CE_WARN, "SEQUENCE got EXPIRED_SOME_STATE_REVOKED");
+	}
+
+	if (seqres->sr_status_flags & SEQ4_STATUS_ADMIN_STATE_REVOKED) {
+		cmn_err(CE_WARN, "SEQUENCE got ADMIN_STATE_REVOKED");
+	}
+
+	if (seqres->sr_status_flags & SEQ4_STATUS_RECALLABLE_STATE_REVOKED) {
+		cmn_err(CE_WARN, "SEQUENCE got RECALLABLE_STATE_REVOKED");
+	}
+
+	if (seqres->sr_status_flags & SEQ4_STATUS_LEASE_MOVED) {
+		cmn_err(CE_WARN, "SEQUENCE got LEASE_MOVED");
+	}
+}
+
+kmutex_t nfs4_session_lst_lock;
+list_t nfs4_session_list;
+
+void
+nfs4session_init()
+{
+	mutex_init(&nfs4_session_lst_lock, NULL, MUTEX_DEFAULT, NULL);
+	list_create(&nfs4_session_list, sizeof (nfs4_session_t),
+	    offsetof(nfs4_session_t, ssx_list));
+}
+
+/*
+ * Compare 2 netbufs, return true of they match
+ */
+int
+netbuf_match(struct netbuf *n1, struct netbuf *n2)
+{
+	if (n1->len == n2->len && bcmp(n1->buf, n2->buf, n1->len) == 0)
+		return (1);
+	return (0);
+}
+
+void *
+new_string(void *cur)
+{
+	void *v;
+
+	v = kmem_alloc(strlen(cur)+1, KM_SLEEP);
+	(void) strcpy(v, cur);
+	return (v);
+}
+
+servinfo4_t *
+new_servinfo4(struct knetconfig *knc, struct netbuf *nb, int flags)
+{
+	servinfo4_t *svp;
+	struct sec_data *secdata;
+
+	/*
+	 * Allocate a servinfo4 struct.
+	 */
+	svp = kmem_zalloc(sizeof (*svp), KM_SLEEP);
+	nfs_rw_init(&svp->sv_lock, NULL, RW_DEFAULT, NULL);
+	svp->sv_flags = flags;
+
+	svp->sv_knconf = kmem_alloc(sizeof (*knc), KM_SLEEP);
+	svp->sv_knconf->knc_semantics = knc->knc_semantics;
+	svp->sv_knconf->knc_protofmly = new_string(knc->knc_protofmly);
+	svp->sv_knconf->knc_proto = new_string(knc->knc_proto);
+	svp->sv_knconf->knc_rdev = knc->knc_rdev;
+	bzero(svp->sv_knconf->knc_unused, sizeof (knc->knc_unused));
+
+	svp->sv_addr.maxlen = nb->maxlen;
+	svp->sv_addr.len = nb->len;
+	svp->sv_addr.buf = kmem_alloc(nb->maxlen, KM_SLEEP);
+	bcopy(nb->buf, svp->sv_addr.buf, nb->len);
+
+	/* XXX, ought to inherit sec data from parent servinfo4 */
+	secdata = kmem_alloc(sizeof (*secdata), KM_SLEEP);
+	secdata->secmod = secdata->rpcflavor = AUTH_SYS;
+	secdata->data = NULL;
+	svp->sv_secdata = secdata;
+
+	/* XXX */
+	svp->sv_path = "/";
+	svp->sv_pathlen = 1;
+	svp->sv_hostname = "data-server";
+	svp->sv_hostnamelen = strlen("data-server");
+
+	return (svp);
+}
+
+/*
+ * XXX - this will be eliminated once everyone is calling rfs4call()
+ * emulate the behavior of rfs4call for those who call
+ * CLNT_CALL directly
+ */
+void
+nfs4_error_set(nfs4_error_t *ep, enum clnt_stat rpc_status, enum nfsstat4 stat)
+{
+	if (rpc_status == RPC_SUCCESS) {
+		ep->error = 0;	/* geterrno4 happens higher up */
+		ep->stat = stat;
+		ep->rpc_status = RPC_SUCCESS;
+	} else {
+		ep->error = EPROTO;	/* XXX */
+		ep->stat = 0;
+		ep->rpc_status = rpc_status;
+	}
+}
+
+/*
+ * A function to interface with RPC tags.
+ * Returns 0 on success
+ */
+int
+nfs4_tag_ctl(nfs4_server_t *np, mntinfo4_t *mi, sessionid4 oldsid, int cmd,
+	cred_t *cr)
+{
+	int error;
+	servinfo4_t *svp;
+	CLIENT *client;
+	struct chtab *ch;
+	struct nfs4_clnt *nfscl;
+
+	nfscl = zone_getspecific(nfs4clnt_zone_key, nfs_zone());
+	ASSERT(nfscl != NULL);
+
+	/*
+	 * We just pick the current servinfo ptr. Even if
+	 * this changes midstream, we should be alright, since
+	 * we are not really going OTW. Just used to get a
+	 * client handle.
+	 */
+
+	mutex_enter(&mi->mi_lock);
+	svp = mi->mi_curr_serv;
+	mutex_exit(&mi->mi_lock);
+
+	error = nfs_clget4(mi, svp, cr, &client, &ch, nfscl);
+
+	if (error)
+		return (error);
+
+	switch (cmd) {
+	case NFS4_TAG_SWAP:
+
+		/*
+		 * To do the sessid swap first set the old tag and
+		 * then call to swap to the new one
+		 */
+
+		if (!CLNT_CONTROL(client, CLSET_TAG, (char *)oldsid)) {
+			zcmn_err(getzoneid(), CE_WARN,
+			    "Failed to set tag on client handle");
+			error = EIO;
+			break;
+		}
+
+		/*
+		 * This switches the tag value in the RPC layer
+		 * The client handle's tag (client->cku_tag) is set
+		 * to new tag as well.
+		 */
+
+		if (!CLNT_CONTROL(client, CLSET_TAG_SWAP,
+		    (char *)(np->ssx.sessionid))) {
+			zcmn_err(getzoneid(), CE_WARN,
+			    "Failed to swap rpc tags");
+			error = EIO;
+		}
+
+		break;
+
+	case NFS4_TAG_DESTROY:
+
+		if (!CLNT_CONTROL(client, CLSET_TAG_DESTROY,
+		    (char *)(np->ssx.sessionid))) {
+			zcmn_err(getzoneid(), CE_WARN,
+			    "Failed destroy rpc tags");
+			error = EIO;
+		}
+		break;
+
+	case NFS4_CBSERVER_CLEANUP:
+		if (!CLNT_CONTROL(client, CLSET_CBSERVER_CLEANUP,
+		    (char *)(np->ssx.sessionid))) {
+			zcmn_err(getzoneid(), CE_WARN,
+			    "Failed destroy rpc tags");
+			error = EIO;
+		}
+		break;
+	}
+
+	clfree4(client, ch, nfscl);
+	return (error);
+}

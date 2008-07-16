@@ -148,6 +148,7 @@ boolean_t socktpi_direct = B_TRUE;
  * result in a new vnode being created. This routine single-threads
  * open/closes for a given vnode which is probably not needed.
  */
+/*ARGSUSED*/
 int
 socktpi_open(struct vnode **vpp, int flag, struct cred *cr,
     caller_context_t *ct)

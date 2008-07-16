@@ -262,6 +262,7 @@ RPCSVC_GEN_HDRS = \
 	mount.h		\
 	nfs_prot.h	\
 	nfs4_prot.h	\
+	nfs41_prot.h	\
 	nis.h		\
 	nis_cache.h	\
 	nis_callback.h	\
@@ -274,7 +275,9 @@ RPCSVC_GEN_HDRS = \
 	spray.h		\
 	nispasswd.h	\
 	ufs_prot.h	\
-	nfs_acl.h
+	nfs_acl.h	\
+	nfs41_prot.h	\
+	ds_prot.h
 
 LVMRPCHDRS = \
 mhdx.h mdiox.h meta_basic.h metad.h metamed.h metamhd.h metacl.h
@@ -425,6 +428,7 @@ check:	$(CHECKHDRS)
 clean clobber:
 	$(RM) $(LVMRPCHDRS); 
 	cd rpcsvc ; $(RM) $(RPCSVC_GEN_HDRS)
+	cd $(ROOT)/usr/include/rpcsvc; $(RM) $(RPCSVC_GEN_HDRS)
 
 $(ROOTDIRS):
 	$(INS.dir)

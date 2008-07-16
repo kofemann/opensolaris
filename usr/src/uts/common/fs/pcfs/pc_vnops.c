@@ -69,9 +69,9 @@
 
 #include <fs/fs_subr.h>
 
-static int pcfs_open(struct vnode **, int, struct cred *, caller_context_t *ct);
+static int pcfs_open(struct vnode **, int, struct cred *, caller_context_t *);
 static int pcfs_close(struct vnode *, int, int, offset_t, struct cred *,
-	caller_context_t *ct);
+	caller_context_t *);
 static int pcfs_read(struct vnode *, struct uio *, int, struct cred *,
 	caller_context_t *);
 static int pcfs_write(struct vnode *, struct uio *, int, struct cred *,

@@ -216,6 +216,7 @@ tsol_fifo_access(vnode_t *vp, int flag, cred_t *crp)
  * before the end waiting in open ever wakes up.
  * Note: namefs pipes come through this routine too.
  */
+/*ARGSUSED*/
 int
 fifo_open(vnode_t **vpp, int flag, cred_t *crp, caller_context_t *ct)
 {

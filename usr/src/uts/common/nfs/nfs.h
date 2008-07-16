@@ -110,6 +110,8 @@ extern rpcvers_t nfs_versmax;
 #define	ECTSIZE	2048
 #define	IETSIZE	8192
 
+#define	NFS_MAX_IOVECS 12
+
 /*
  * WebNFS error status
  */
@@ -807,6 +809,8 @@ struct exportinfo;	/* defined in nfs/export.h */
 struct servinfo;	/* defined in nfs/nfs_clnt.h */
 struct mntinfo;		/* defined in nfs/nfs_clnt.h */
 
+extern int	sec_svc_getcred(struct svc_req *, cred_t *,  caddr_t *, int *);
+
 extern void rfs_getattr(fhandle_t *, struct nfsattrstat *,
 			struct exportinfo *, struct svc_req *, cred_t *);
 extern void *rfs_getattr_getfh(fhandle_t *);
@@ -986,6 +990,14 @@ extern zone_key_t nfsstat_zone_key;
  */
 extern void *nfsstat_zone_init(zoneid_t);
 extern void nfsstat_zone_fini(zoneid_t, void *);
+
+/* macro to ease AVL trees */
+
+#define	NFS_AVL_RETURN(rc) \
+	if (rc < 0) \
+		return (-1); \
+	if (rc > 0) \
+		return (1);
 
 #endif	/* _KERNEL */
 
@@ -2276,8 +2288,6 @@ extern bool_t rfs4_check_delegated(int mode, vnode_t *, bool_t trunc);
  * if no delegation is present.
  */
 extern int rfs4_delegated_getattr(vnode_t *, vattr_t *, int, cred_t *);
-extern void rfs4_hold_deleg_policy(void);
-extern void rfs4_rele_deleg_policy(void);
 #endif	/* _KERNEL */
 
 #ifdef	__cplusplus

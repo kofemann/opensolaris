@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -49,7 +49,9 @@
 #include <nfs/nfs.h>
 #include <nfs/export.h>
 #include <nfs/nfs4.h>
-
+#include <nfs/nfs4_attrmap.h>
+#include <nfs/nfs4_srv_readdir.h>
+#include <nfs/nfs4_srv_attr.h>
 
 /*
  * RFS4_MINLEN_ENTRY4: XDR-encoded size of smallest possible dirent.
@@ -87,6 +89,7 @@
 	(DIRENT64_RECLEN(1) + DIRENT64_RECLEN(2) + DIRENT64_RECLEN(MAXNAMELEN))
 
 
+
 #ifdef	nextdp
 #undef nextdp
 #endif
@@ -94,10 +97,15 @@
 
 verifier4	Readdir4verf = 0x0;
 
-static nfs_ftype4 vt_to_nf4[] = {
+nfs_ftype4 vt_to_nf4[] = {
 	0, NF4REG, NF4DIR, NF4BLK, NF4CHR, NF4LNK, NF4FIFO, 0, 0, NF4SOCK, 0
 };
 
+attrmap4 rfs4_minimal_rd_attrmap = {RFS4_MINIMAL_RD_MASK, 0};
+attrmap4 rfs4_minimal_rd_fileid_attrmap =
+	{FATTR4_RDATTR_ERROR_MASK | FATTR4_FILEID_MASK, 0};
+attrmap4 rfs4_minimal_rd_mntfileid_attrmap =
+	{FATTR4_RDATTR_ERROR_MASK | FATTR4_MOUNTED_ON_FILEID_MASK, 0};
 
 int
 nfs4_readdir_getvp(vnode_t *dvp, char *d_name, vnode_t **vpp,
@@ -212,16 +220,8 @@ nfs4_readdir_getvp(vnode_t *dvp, char *d_name, vnode_t **vpp,
 	return (0);
 }
 
-/* This is the set of pathconf data for vfs */
-typedef struct {
-	uint64_t maxfilesize;
-	uint32_t maxlink;
-	uint32_t maxname;
-} rfs4_pc_encode_t;
-
-
-static int
-rfs4_get_pc_encode(vnode_t *vp, rfs4_pc_encode_t *pce, bitmap4 ar, cred_t *cr)
+int
+rfs4_get_pc_encode(vnode_t *vp, rfs4_pc_encode_t *pce, attrmap4 *ar, cred_t *cr)
 {
 	int error;
 	ulong_t pc_val;
@@ -230,7 +230,7 @@ rfs4_get_pc_encode(vnode_t *vp, rfs4_pc_encode_t *pce, bitmap4 ar, cred_t *cr)
 	pce->maxlink = 0;
 	pce->maxname = 0;
 
-	if (ar & FATTR4_MAXFILESIZE_MASK) {
+	if (ATTR_ISSET(*ar, MAXFILESIZE)) {
 		/* Maximum File Size */
 		if (error = VOP_PATHCONF(vp, _PC_FILESIZEBITS, &pc_val, cr,
 		    NULL))
@@ -242,7 +242,7 @@ rfs4_get_pc_encode(vnode_t *vp, rfs4_pc_encode_t *pce, bitmap4 ar, cred_t *cr)
 			pce->maxfilesize = ((1LL << pc_val) - 1);
 	}
 
-	if (ar & FATTR4_MAXLINK_MASK) {
+	if (ATTR_ISSET(*ar, MAXLINK)) {
 		/* Maximum Link Count */
 		if (error = VOP_PATHCONF(vp, _PC_LINK_MAX, &pc_val, cr, NULL))
 			return (error);
@@ -250,7 +250,7 @@ rfs4_get_pc_encode(vnode_t *vp, rfs4_pc_encode_t *pce, bitmap4 ar, cred_t *cr)
 		pce->maxlink = pc_val;
 	}
 
-	if (ar & FATTR4_MAXNAME_MASK) {
+	if (ATTR_ISSET(*ar, MAXNAME)) {
 		/* Maximum Name Length */
 		if (error = VOP_PATHCONF(vp, _PC_NAME_MAX, &pc_val, cr, NULL))
 			return (error);
@@ -261,17 +261,7 @@ rfs4_get_pc_encode(vnode_t *vp, rfs4_pc_encode_t *pce, bitmap4 ar, cred_t *cr)
 	return (0);
 }
 
-/* This is the set of statvfs data that is ready for encoding */
-typedef struct {
-	uint64_t space_avail;
-	uint64_t space_free;
-	uint64_t space_total;
-	u_longlong_t fa;
-	u_longlong_t ff;
-	u_longlong_t ft;
-} rfs4_sb_encode_t;
-
-static int
+int
 rfs4_get_sb_encode(vfs_t *vfsp, rfs4_sb_encode_t *psbe)
 {
 	int error;
@@ -285,31 +275,31 @@ rfs4_get_sb_encode(vfs_t *vfsp, rfs4_sb_encode_t *psbe)
 	/* Calculate space available */
 	if (sb.f_bavail != (fsblkcnt64_t)-1) {
 		psbe->space_avail =
-			(fattr4_space_avail) sb.f_frsize *
-			(fattr4_space_avail) sb.f_bavail;
+		    (fattr4_space_avail) sb.f_frsize *
+		    (fattr4_space_avail) sb.f_bavail;
 	} else {
 		psbe->space_avail =
-			(fattr4_space_avail) sb.f_bavail;
+		    (fattr4_space_avail) sb.f_bavail;
 	}
 
 	/* Calculate space free */
 	if (sb.f_bfree != (fsblkcnt64_t)-1) {
 		psbe->space_free =
-			(fattr4_space_free) sb.f_frsize *
-			(fattr4_space_free) sb.f_bfree;
+		    (fattr4_space_free) sb.f_frsize *
+		    (fattr4_space_free) sb.f_bfree;
 	} else {
 		psbe->space_free =
-			(fattr4_space_free) sb.f_bfree;
+		    (fattr4_space_free) sb.f_bfree;
 	}
 
 	/* Calculate space total */
 	if (sb.f_blocks != (fsblkcnt64_t)-1) {
 		psbe->space_total =
-			(fattr4_space_total) sb.f_frsize *
-			(fattr4_space_total) sb.f_blocks;
+		    (fattr4_space_total) sb.f_frsize *
+		    (fattr4_space_total) sb.f_blocks;
 	} else {
 		psbe->space_total =
-			(fattr4_space_total) sb.f_blocks;
+		    (fattr4_space_total) sb.f_blocks;
 	}
 
 	/* For use later on attr encode */
@@ -320,27 +310,6 @@ rfs4_get_sb_encode(vfs_t *vfsp, rfs4_sb_encode_t *psbe)
 	return (0);
 }
 
-/*
- * Macros to handle if we have don't have enough space for the requested
- * attributes and this is the first entry and the
- * requested attributes are more than the minimal useful
- * set, reset the attributes to the minimal set and
- * retry the encoding. If the client has asked for both
- * mounted_on_fileid and fileid, prefer mounted_on_fileid.
- */
-#define	MINIMAL_RD_ATTRS						\
-	(FATTR4_MOUNTED_ON_FILEID_MASK|					\
-	FATTR4_FILEID_MASK|						\
-	FATTR4_RDATTR_ERROR_MASK)
-
-#define	MINIMIZE_ATTR_MASK(m) {						\
-	if ((m) & FATTR4_MOUNTED_ON_FILEID_MASK)			\
-	    (m) &= FATTR4_RDATTR_ERROR_MASK|FATTR4_MOUNTED_ON_FILEID_MASK;\
-	else								\
-	    (m) &= FATTR4_RDATTR_ERROR_MASK|FATTR4_FILEID_MASK;		\
-}
-
-#define	IS_MIN_ATTR_MASK(m)	(((m) & ~MINIMAL_RD_ATTRS) == 0)
 /*
  * If readdir only needs to return FILEID, we can take it from the
  * dirent struct and save doing the lookup.
@@ -379,6 +348,7 @@ rfs4_op_readdir(nfs_argop4 *argop, nfs_resop4 *resop,
 	uint32_t *ptr, *ptr_redzone;
 	uint32_t *beginning_ptr;
 	uint32_t *lastentry_ptr;
+	uint32_t attrmask_len;
 	uint32_t *attrmask_ptr;
 	uint32_t *attr_offset_ptr;
 	uint32_t attr_length;
@@ -386,8 +356,9 @@ rfs4_op_readdir(nfs_argop4 *argop, nfs_resop4 *resop,
 	uint32_t namelen;
 	uint32_t rddirattr_error = 0;
 	int nents;
-	bitmap4 ar = args->attr_request & NFS4_SRV_RDDIR_SUPPORTED_ATTRS;
-	bitmap4 ae;
+	attrmap4 ar;
+	attrmap4 ae;
+	attrmap4 minrddir;
 	rfs4_pc_encode_t dpce, pce;
 	ulong_t pc_val;
 	uint64_t maxread;
@@ -399,9 +370,20 @@ rfs4_op_readdir(nfs_argop4 *argop, nfs_resop4 *resop,
 	int lu_set, lg_set;
 	utf8string owner, group;
 	int owner_error, group_error;
+	attrvers_t avers;
 
 	DTRACE_NFSV4_2(op__readdir__start, struct compound_state *, cs,
 	    READDIR4args *, args);
+
+	avers = RFS4_ATTRVERS(cs);
+	ar = args->attr_request;
+	ATTRMAP_MASK(ar, RFS4_RDDIR_SUPP_ATTRMAP(avers));
+	minrddir = ar;
+	if (ATTR_ISSET(ar, MOUNTED_ON_FILEID)) {
+		ATTRMAP_MASK(minrddir, RFS4_MINRDDIR_MNTFILEID(avers));
+	} else {
+		ATTRMAP_MASK(minrddir, RFS4_MINRDDIR_FILEID(avers));
+	}
 
 	lu_set = lg_set = 0;
 	owner.utf8string_len = group.utf8string_len = 0;
@@ -439,8 +421,8 @@ rfs4_op_readdir(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * If write-only attrs are requested, then fail the readdir op
 	 */
-	if (args->attr_request &
-	    (FATTR4_TIME_MODIFY_SET_MASK | FATTR4_TIME_ACCESS_SET_MASK)) {
+	if (ATTR_ISSET(ar, TIME_MODIFY_SET) ||
+	    ATTR_ISSET(ar, TIME_ACCESS_SET)) {
 		*cs->statusp = resp->status = NFS4ERR_INVAL;
 		goto out;
 	}
@@ -458,15 +440,15 @@ rfs4_op_readdir(nfs_argop4 *argop, nfs_resop4 *resop,
 
 	/* Is there pseudo-fs work that is needed for this readdir? */
 	check_visible = PSEUDO(cs->exi) ||
-		! is_exported_sec(cs->nfsflavor, cs->exi) ||
-		cs->access & CS_ACCESS_LIMITED;
+	    ! is_exported_sec(cs->nfsflavor, cs->exi) ||
+	    cs->access & CS_ACCESS_LIMITED;
 
 	/* Check the requested attributes and only do the work if needed */
 
-	if (ar & (FATTR4_MAXFILESIZE_MASK |
-		FATTR4_MAXLINK_MASK |
-		FATTR4_MAXNAME_MASK)) {
-		if (error = rfs4_get_pc_encode(cs->vp, &dpce, ar, cs->cr)) {
+	if (ATTR_ISSET(ar, MAXFILESIZE) ||
+	    ATTR_ISSET(ar, MAXLINK) ||
+	    ATTR_ISSET(ar, MAXNAME)) {
+		if (error = rfs4_get_pc_encode(cs->vp, &dpce, &ar, cs->cr)) {
 			*cs->statusp = resp->status = puterrno4(error);
 			goto out;
 		}
@@ -474,13 +456,7 @@ rfs4_op_readdir(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	/* If there is statvfs data requested, pick it up once */
-	if (ar &
-	    (FATTR4_FILES_AVAIL_MASK |
-	    FATTR4_FILES_FREE_MASK |
-	    FATTR4_FILES_TOTAL_MASK |
-	    FATTR4_FILES_AVAIL_MASK |
-	    FATTR4_FILES_FREE_MASK |
-	    FATTR4_FILES_TOTAL_MASK)) {
+	if (ATTRMAP_TST(ar, RFS4_FS_SPACE_ATTRMAP(avers))) {
 		if (error = rfs4_get_sb_encode(dvp->v_vfsp, &dsbe)) {
 			*cs->statusp = resp->status = puterrno4(error);
 			goto out;
@@ -530,7 +506,7 @@ rfs4_op_readdir(nfs_argop4 *argop, nfs_resop4 *resop,
 		if (mpcount > MAXBSIZE)
 			args->maxcount = mpcount = MAXBSIZE;
 		mp = allocb_wait(RNDUP(mpcount), BPRI_MED,
-				STR_NOSIG, &alloc_err);
+		    STR_NOSIG, &alloc_err);
 	}
 
 	ASSERT(mp != NULL);
@@ -553,10 +529,10 @@ rfs4_op_readdir(nfs_argop4 *argop, nfs_resop4 *resop,
 	 */
 	if (args->maxcount < (mpcount - 128))
 		ptr_redzone =
-			(uint32_t *)(((char *)ptr) + RNDUP(args->maxcount));
+		    (uint32_t *)(((char *)ptr) + RNDUP(args->maxcount));
 	else
 		ptr_redzone =
-			(uint32_t *)((((char *)ptr) + RNDUP(mpcount)) - 128);
+		    (uint32_t *)((((char *)ptr) + RNDUP(mpcount)) - 128);
 
 	/*
 	 * Set the dircount; this will be used as the size for the
@@ -646,7 +622,7 @@ readagain:
 	lastentry_ptr = ptr;
 	no_space = 0;
 	for (dp = (struct dirent64 *)rddir_data;
-			!no_space && rddir_result_size > 0; dp = nextdp(dp)) {
+	    !no_space && rddir_result_size > 0; dp = nextdp(dp)) {
 
 		/* reset expseudo */
 		expseudo = 0;
@@ -681,10 +657,9 @@ readagain:
 		 * encoded later in the "attributes" section.
 		 */
 		ae = ar;
-		if (ar != 0) {
+		if (! ATTRMAP_EMPTY(ar)) {
 			error = nfs4_readdir_getvp(dvp, dp->d_name,
-						&vp, &newexi, req, cs,
-						expseudo);
+			    &vp, &newexi, req, cs, expseudo);
 			if (error == ENOENT) {
 				rddir_next_offset = dp->d_off;
 				continue;
@@ -700,35 +675,29 @@ readagain:
 			 */
 			if (vp &&
 			    (vfs_different = (dvp->v_vfsp != vp->v_vfsp))) {
-				if (ar & (FATTR4_FILES_AVAIL_MASK |
-					FATTR4_FILES_FREE_MASK |
-					FATTR4_FILES_TOTAL_MASK |
-					FATTR4_FILES_AVAIL_MASK |
-					FATTR4_FILES_FREE_MASK |
-					FATTR4_FILES_TOTAL_MASK)) {
-				    if (error =
-					rfs4_get_sb_encode(dvp->v_vfsp, &sbe)) {
-					    /* Remove attrs from encode */
-					    ae &= ~(FATTR4_FILES_AVAIL_MASK |
-						FATTR4_FILES_FREE_MASK |
-						FATTR4_FILES_TOTAL_MASK |
-						FATTR4_FILES_AVAIL_MASK |
-						FATTR4_FILES_FREE_MASK |
-						FATTR4_FILES_TOTAL_MASK);
-					    rddirattr_error = error;
-				    }
+				if (ATTRMAP_TST(ar,
+				    RFS4_FS_SPACE_ATTRMAP(avers))) {
+					if (error =
+					    rfs4_get_sb_encode(dvp->v_vfsp,
+					    &sbe)) {
+						/* Remove attrs from encode */
+						ATTRMAP_CLR(ae,
+						    RFS4_FS_SPACE_ATTRMAP(
+						    avers));
+						rddirattr_error = error;
+					}
 				}
-				if (ar & (FATTR4_MAXFILESIZE_MASK |
-					FATTR4_MAXLINK_MASK |
-					FATTR4_MAXNAME_MASK)) {
-				    if (error =
-					rfs4_get_pc_encode(cs->vp,
-							&pce, ar, cs->cr)) {
-					    ar &= ~(FATTR4_MAXFILESIZE_MASK |
-						    FATTR4_MAXLINK_MASK |
-						    FATTR4_MAXNAME_MASK);
-					    rddirattr_error = error;
-				    }
+				if (ATTR_ISSET(ar, MAXFILESIZE) ||
+				    ATTR_ISSET(ar, MAXLINK) ||
+				    ATTR_ISSET(ar, MAXNAME)) {
+					if (error =
+					    rfs4_get_pc_encode(cs->vp,
+					    &pce, &ar, cs->cr)) {
+						ATTR_CLR(ar, MAXFILESIZE);
+						ATTR_CLR(ar, MAXLINK);
+						ATTR_CLR(ar, MAXNAME);
+						rddirattr_error = error;
+					}
 				}
 			}
 		}
@@ -785,27 +754,28 @@ reencode_attrs:
 		 * Also note that the readdir_attr_error is left in the
 		 * encoding mask if requested and so is the mounted_on_fileid.
 		 */
-		if (ae != 0) {
+		if (! ATTRMAP_EMPTY(ae)) {
 			if (!vp) {
-				ae = ar & (FATTR4_RDATTR_ERROR_MASK |
-					FATTR4_MOUNTED_ON_FILEID_MASK);
+				ae = ar;
+				ATTRMAP_MASK(ae,
+				    RFS4_MINRDDIR_ATTRMAP(avers));
 			} else {
 				va.va_mask = AT_ALL;
 				rddirattr_error =
-					VOP_GETATTR(vp, &va, 0, cs->cr, NULL);
-				if (rddirattr_error)
-					ae = ar & (FATTR4_RDATTR_ERROR_MASK |
-						FATTR4_MOUNTED_ON_FILEID_MASK);
+				    VOP_GETATTR(vp, &va, 0, cs->cr, NULL);
+				if (rddirattr_error) {
+					ae = ar;
+					ATTRMAP_MASK(ae,
+					    RFS4_MINRDDIR_ATTRMAP(avers));
+				}
 			}
 		}
 
 		/* START OF ATTRIBUTE ENCODING */
 
-		/* encode the LENGTH of the BITMAP4 array */
-		IXDR_PUT_U_INT32(ptr, 2);
 		/* encode the BITMAP4 */
-		attrmask_ptr = ptr;
-		IXDR_PUT_HYPER(ptr, ae);
+		IXDR_PUT_FATTR4_BITMAP(ptr, ae, attrmask_ptr, attrmask_len,
+		    avers);
 		attr_offset_ptr = ptr;
 		/* encode the default LENGTH of the attributes for entry */
 		IXDR_PUT_U_INT32(ptr, 0);
@@ -816,353 +786,325 @@ reencode_attrs:
 		}
 
 		/* Check if any of the first 32 attributes are being encoded */
-		if (ae & 0xffffffff00000000) {
+		if (ae.w.w0) {
 			/*
+			 * [SUPPORTED_ATTRS - RDATTR_ERROR]
 			 * Redzone check is done at the end of this section.
 			 * This particular section will encode a maximum of
 			 * 18 * BYTES_PER_XDR_UNIT of data
 			 */
-			if (ae &
-			    (FATTR4_SUPPORTED_ATTRS_MASK |
-			    FATTR4_TYPE_MASK |
-			    FATTR4_FH_EXPIRE_TYPE_MASK |
-			    FATTR4_CHANGE_MASK |
-			    FATTR4_SIZE_MASK |
-			    FATTR4_LINK_SUPPORT_MASK |
-			    FATTR4_SYMLINK_SUPPORT_MASK |
-			    FATTR4_NAMED_ATTR_MASK |
-			    FATTR4_FSID_MASK |
-			    FATTR4_UNIQUE_HANDLES_MASK |
-			    FATTR4_LEASE_TIME_MASK |
-			    FATTR4_RDATTR_ERROR_MASK)) {
-
-				if (ae & FATTR4_SUPPORTED_ATTRS_MASK) {
-					IXDR_PUT_INT32(ptr, 2);
-					IXDR_PUT_HYPER(ptr,
-							rfs4_supported_attrs);
-				}
-				if (ae & FATTR4_TYPE_MASK) {
-					uint_t ftype = vt_to_nf4[va.va_type];
-					if (dvp->v_flag & V_XATTRDIR) {
-						if (va.va_type == VDIR)
-							ftype = NF4ATTRDIR;
-						else
-							ftype = NF4NAMEDATTR;
-					}
-					IXDR_PUT_U_INT32(ptr, ftype);
-				}
-				if (ae & FATTR4_FH_EXPIRE_TYPE_MASK) {
-					uint_t expire_type = FH4_PERSISTENT;
-					IXDR_PUT_U_INT32(ptr, expire_type);
-				}
-				if (ae & FATTR4_CHANGE_MASK) {
-					u_longlong_t change;
-					NFS4_SET_FATTR4_CHANGE(change,
-							va.va_ctime);
-					IXDR_PUT_HYPER(ptr, change);
-				}
-				if (ae & FATTR4_SIZE_MASK) {
-					u_longlong_t size = va.va_size;
-					IXDR_PUT_HYPER(ptr, size);
-				}
-				if (ae & FATTR4_LINK_SUPPORT_MASK) {
-					IXDR_PUT_U_INT32(ptr, true);
-				}
-				if (ae & FATTR4_SYMLINK_SUPPORT_MASK) {
-					IXDR_PUT_U_INT32(ptr, true);
-				}
-				if (ae & FATTR4_NAMED_ATTR_MASK) {
-					uint_t isit;
-					pc_val = FALSE;
-
-					if (!(vp->v_vfsp->vfs_flag &
-						VFS_XATTR)) {
-						isit = FALSE;
-					} else {
-						(void) VOP_PATHCONF(vp,
-							_PC_XATTR_EXISTS,
-							&pc_val, cs->cr, NULL);
-					}
-					isit = (pc_val ? TRUE : FALSE);
-					IXDR_PUT_U_INT32(ptr, isit);
-				}
-				if (ae & FATTR4_FSID_MASK) {
-					u_longlong_t major, minor;
-					struct exportinfo *exi;
-
-					exi = newexi ? newexi : cs->exi;
-					if (exi->exi_volatile_dev) {
-						int *pmaj = (int *)&major;
-
-						pmaj[0] = exi->exi_fsid.val[0];
-						pmaj[1] = exi->exi_fsid.val[1];
-						minor = 0;
-					} else {
-						major = getmajor(va.va_fsid);
-						minor = getminor(va.va_fsid);
-					}
-					IXDR_PUT_HYPER(ptr, major);
-					IXDR_PUT_HYPER(ptr, minor);
-				}
-				if (ae & FATTR4_UNIQUE_HANDLES_MASK) {
-					IXDR_PUT_U_INT32(ptr, false);
-				}
-				if (ae & FATTR4_LEASE_TIME_MASK) {
-					uint_t lt = rfs4_lease_time;
-					IXDR_PUT_U_INT32(ptr, lt);
-				}
-				if (ae & FATTR4_RDATTR_ERROR_MASK) {
-					rddirattr_error =
-						(rddirattr_error == 0 ?
-						0 : puterrno4(rddirattr_error));
-					IXDR_PUT_U_INT32(ptr, rddirattr_error);
-				}
-
-				/* Check the redzone boundary */
-				if (ptr > ptr_redzone) {
-					if (nents || IS_MIN_ATTR_MASK(ar)) {
-						no_space = TRUE;
-						continue;
-					}
-					MINIMIZE_ATTR_MASK(ar);
-					ae = ar;
-					ptr = lastentry_ptr;
-					goto reencode_attrs;
-				}
+			if (ATTR_ISSET(ae, SUPPORTED_ATTRS)) {
+				IXDR_PUT_BITMAP4(ptr,
+				    RFS4_SUPP_ATTRMAP(avers));
 			}
+			if (ATTR_ISSET(ae, TYPE)) {
+				uint_t ftype = vt_to_nf4[va.va_type];
+				if (dvp->v_flag & V_XATTRDIR) {
+					if (va.va_type == VDIR)
+						ftype = NF4ATTRDIR;
+					else
+						ftype = NF4NAMEDATTR;
+				}
+				IXDR_PUT_U_INT32(ptr, ftype);
+			}
+			if (ATTR_ISSET(ae, FH_EXPIRE_TYPE)) {
+				uint_t expire_type = FH4_PERSISTENT;
+				IXDR_PUT_U_INT32(ptr, expire_type);
+			}
+			if (ATTR_ISSET(ae, CHANGE)) {
+				u_longlong_t change;
+				NFS4_SET_FATTR4_CHANGE(change,
+				    va.va_ctime);
+				IXDR_PUT_HYPER(ptr, change);
+			}
+			if (ATTR_ISSET(ae, SIZE)) {
+				u_longlong_t size = va.va_size;
+				IXDR_PUT_HYPER(ptr, size);
+			}
+			if (ATTR_ISSET(ae, LINK_SUPPORT)) {
+				IXDR_PUT_U_INT32(ptr, true);
+			}
+			if (ATTR_ISSET(ae, SYMLINK_SUPPORT)) {
+				IXDR_PUT_U_INT32(ptr, true);
+			}
+			if (ATTR_ISSET(ae, NAMED_ATTR)) {
+				uint_t isit;
+				pc_val = FALSE;
+
+				if (!(vp->v_vfsp->vfs_flag & VFS_XATTR)) {
+					isit = FALSE;
+				} else {
+					(void) VOP_PATHCONF(vp,
+					    _PC_XATTR_EXISTS, &pc_val, cs->cr,
+					    NULL);
+				}
+				isit = (pc_val ? TRUE : FALSE);
+				IXDR_PUT_U_INT32(ptr, isit);
+			}
+			if (ATTR_ISSET(ae, FSID)) {
+				u_longlong_t major, minor;
+				struct exportinfo *exi;
+
+				exi = newexi ? newexi : cs->exi;
+				if (exi->exi_volatile_dev) {
+					int *pmaj = (int *)&major;
+
+					pmaj[0] = exi->exi_fsid.val[0];
+					pmaj[1] = exi->exi_fsid.val[1];
+					minor = 0;
+				} else {
+					major = getmajor(va.va_fsid);
+					minor = getminor(va.va_fsid);
+				}
+				IXDR_PUT_HYPER(ptr, major);
+				IXDR_PUT_HYPER(ptr, minor);
+			}
+			if (ATTR_ISSET(ae, UNIQUE_HANDLES)) {
+				IXDR_PUT_U_INT32(ptr, false);
+			}
+			if (ATTR_ISSET(ae, LEASE_TIME)) {
+				uint_t lt = rfs4_lease_time;
+				IXDR_PUT_U_INT32(ptr, lt);
+			}
+			if (ATTR_ISSET(ae, RDATTR_ERROR)) {
+				rddirattr_error = (rddirattr_error == 0 ? 0 :
+				    puterrno4(rddirattr_error));
+				IXDR_PUT_U_INT32(ptr, rddirattr_error);
+			}
+
 			/*
+			 * [SUPPORTED_ATTRS - RDATTR_ERROR]
+			 * Check the redzone boundary
+			 */
+			if (ptr > ptr_redzone) {
+				if (nents || IS_MIN_ATTRMAP(ar)) {
+					no_space = TRUE;
+					continue;
+				}
+				MINIMIZE_ATTRMAP(ar, minrddir);
+				ae = ar;
+				ptr = lastentry_ptr;
+				goto reencode_attrs;
+			}
+
+			/*
+			 * [ACL - CHOWN_RESTRICTED]
 			 * Redzone check is done at the end of this section.
 			 * This particular section will encode a maximum of
 			 * 4 * BYTES_PER_XDR_UNIT of data.
 			 * NOTE: that if ACLs are supported that the
 			 * redzone calculations will need to change.
 			 */
-			if (ae &
-			    (FATTR4_ACL_MASK |
-			    FATTR4_ACLSUPPORT_MASK |
-			    FATTR4_ARCHIVE_MASK |
-			    FATTR4_CANSETTIME_MASK |
-			    FATTR4_CASE_INSENSITIVE_MASK |
-			    FATTR4_CASE_PRESERVING_MASK |
-			    FATTR4_CHOWN_RESTRICTED_MASK)) {
+			ASSERT(ATTR_ISSET(ae, ACL) == 0);
+			ASSERT(ATTR_ISSET(ae, ACLSUPPORT) == 0);
+			ASSERT(ATTR_ISSET(ae, ARCHIVE) == 0);
 
-				if (ae & FATTR4_ACL_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_ACLSUPPORT_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_ARCHIVE_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_CANSETTIME_MASK) {
-					IXDR_PUT_U_INT32(ptr, true);
-				}
-				if (ae & FATTR4_CASE_INSENSITIVE_MASK) {
-					IXDR_PUT_U_INT32(ptr, false);
-				}
-				if (ae & FATTR4_CASE_PRESERVING_MASK) {
-					IXDR_PUT_U_INT32(ptr, true);
-				}
-				if (ae & FATTR4_CHOWN_RESTRICTED_MASK) {
-					uint_t isit;
-					pc_val = FALSE;
-					(void) VOP_PATHCONF(vp,
-							_PC_CHOWN_RESTRICTED,
-							&pc_val, cs->cr, NULL);
-					isit = (pc_val ? TRUE : FALSE);
-					IXDR_PUT_U_INT32(ptr, isit);
-				}
-				/* Check the redzone boundary */
-				if (ptr > ptr_redzone) {
-					if (nents || IS_MIN_ATTR_MASK(ar)) {
-						no_space = TRUE;
-						continue;
-					}
-					MINIMIZE_ATTR_MASK(ar);
-					ae = ar;
-					ptr = lastentry_ptr;
-					goto reencode_attrs;
-				}
+			if (ATTR_ISSET(ae, CANSETTIME)) {
+				IXDR_PUT_U_INT32(ptr, true);
 			}
+			if (ATTR_ISSET(ae, CASE_INSENSITIVE)) {
+				IXDR_PUT_U_INT32(ptr, false);
+			}
+			if (ATTR_ISSET(ae, CASE_PRESERVING)) {
+				IXDR_PUT_U_INT32(ptr, true);
+			}
+			if (ATTR_ISSET(ae, CHOWN_RESTRICTED)) {
+				uint_t isit;
+				pc_val = FALSE;
+				(void) VOP_PATHCONF(vp, _PC_CHOWN_RESTRICTED,
+				    &pc_val, cs->cr, NULL);
+				isit = (pc_val ? TRUE : FALSE);
+				IXDR_PUT_U_INT32(ptr, isit);
+			}
+			/*
+			 * [ACL - CHOWN_RESTRICTED]
+			 * Check the redzone boundary
+			 */
+			if (ptr > ptr_redzone) {
+				if (nents || IS_MIN_ATTRMAP(ar)) {
+					no_space = TRUE;
+					continue;
+				}
+				MINIMIZE_ATTRMAP(ar, minrddir);
+				ae = ar;
+				ptr = lastentry_ptr;
+				goto reencode_attrs;
+			}
+
 			/*
 			 * Redzone check is done before the filehandle
 			 * is encoded.
 			 */
-			if (ae &
-			    (FATTR4_FILEHANDLE_MASK |
-			    FATTR4_FILEID_MASK)) {
+			if (ATTR_ISSET(ae, FILEHANDLE)) {
+				struct {
+					uint_t len;
+					char *val;
+					char fh[NFS_FH4_LEN];
+				} fh;
+				fh.len = 0;
+				fh.val = fh.fh;
+				(void) makefh4((nfs_fh4 *)&fh, vp,
+				    (newexi ? newexi : cs->exi));
 
-				if (ae & FATTR4_FILEHANDLE_MASK) {
-					struct {
-						uint_t len;
-						char *val;
-						char fh[NFS_FH4_LEN];
-					} fh;
-					fh.len = 0;
-					fh.val = fh.fh;
-					(void) makefh4((nfs_fh4 *)&fh, vp,
-					    (newexi ? newexi : cs->exi));
-
-					if (!xdr_inline_encode_nfs_fh4(
-					    &ptr, ptr_redzone,
-					    (nfs_fh4_fmt_t *)fh.val)) {
-						if (nents ||
-						    IS_MIN_ATTR_MASK(ar)) {
-							no_space = TRUE;
-							continue;
-						}
-						MINIMIZE_ATTR_MASK(ar);
-						ae = ar;
-						ptr = lastentry_ptr;
-						goto reencode_attrs;
-					}
-				}
-				if (ae & FATTR4_FILEID_MASK) {
-					IXDR_PUT_HYPER(ptr, va.va_nodeid);
-				}
-				/* Check the redzone boundary */
-				if (ptr > ptr_redzone) {
-					if (nents || IS_MIN_ATTR_MASK(ar)) {
+				if (!xdr_inline_encode_nfs_fh4(
+				    &ptr, ptr_redzone,
+				    (nfs_fh4_fmt_t *)fh.val)) {
+					if (nents ||
+					    IS_MIN_ATTRMAP(ar)) {
 						no_space = TRUE;
 						continue;
 					}
-					MINIMIZE_ATTR_MASK(ar);
+					MINIMIZE_ATTRMAP(ar, minrddir);
 					ae = ar;
 					ptr = lastentry_ptr;
 					goto reencode_attrs;
 				}
 			}
+			if (ATTR_ISSET(ae, FILEID)) {
+				IXDR_PUT_HYPER(ptr, va.va_nodeid);
+			}
 			/*
+			 * [FILEHANDLE - FILEID]
+			 * Check the redzone boundary
+			 */
+			if (ptr > ptr_redzone) {
+				if (nents || IS_MIN_ATTRMAP(ar)) {
+					no_space = TRUE;
+					continue;
+				}
+				MINIMIZE_ATTRMAP(ar, minrddir);
+				ae = ar;
+				ptr = lastentry_ptr;
+				goto reencode_attrs;
+			}
+
+			/*
+			 * [FILES_AVAIL - MAXWRITE]
 			 * Redzone check is done at the end of this section.
 			 * This particular section will encode a maximum of
 			 * 15 * BYTES_PER_XDR_UNIT of data.
 			 */
-			if (ae &
-			    (FATTR4_FILES_AVAIL_MASK |
-			    FATTR4_FILES_FREE_MASK |
-			    FATTR4_FILES_TOTAL_MASK |
-			    FATTR4_FS_LOCATIONS_MASK |
-			    FATTR4_HIDDEN_MASK |
-			    FATTR4_HOMOGENEOUS_MASK |
-			    FATTR4_MAXFILESIZE_MASK |
-			    FATTR4_MAXLINK_MASK |
-			    FATTR4_MAXNAME_MASK |
-			    FATTR4_MAXREAD_MASK |
-			    FATTR4_MAXWRITE_MASK)) {
+			if (ATTR_ISSET(ae, FILES_AVAIL)) {
+				IXDR_PUT_HYPER(ptr, sbe.fa);
+			}
+			if (ATTR_ISSET(ae, FILES_FREE)) {
+				IXDR_PUT_HYPER(ptr, sbe.ff);
+			}
+			if (ATTR_ISSET(ae, FILES_TOTAL)) {
+				IXDR_PUT_HYPER(ptr, sbe.ft);
+			}
+			ASSERT(ATTR_ISSET(ae, FS_LOCATIONS) == 0);
+			ASSERT(ATTR_ISSET(ae, HIDDEN) == 0);
 
-				if (ae & FATTR4_FILES_AVAIL_MASK) {
-					IXDR_PUT_HYPER(ptr, sbe.fa);
+			if (ATTR_ISSET(ae, HOMOGENEOUS)) {
+				IXDR_PUT_U_INT32(ptr, true);
+			}
+			if (ATTR_ISSET(ae, MAXFILESIZE)) {
+				IXDR_PUT_HYPER(ptr, pce.maxfilesize);
+			}
+			if (ATTR_ISSET(ae, MAXLINK)) {
+				IXDR_PUT_U_INT32(ptr, pce.maxlink);
+			}
+			if (ATTR_ISSET(ae, MAXNAME)) {
+				IXDR_PUT_U_INT32(ptr, pce.maxname);
+			}
+			if (ATTR_ISSET(ae, MAXREAD)) {
+				IXDR_PUT_HYPER(ptr, maxread);
+			}
+			if (ATTR_ISSET(ae, MAXWRITE)) {
+				IXDR_PUT_HYPER(ptr, maxwrite);
+			}
+			/*
+			 * [FILES_AVAIL - MAXWRITE]
+			 * Check the redzone boundary
+			 */
+			if (ptr > ptr_redzone) {
+				if (nents || IS_MIN_ATTRMAP(ar)) {
+					no_space = TRUE;
+					continue;
 				}
-				if (ae & FATTR4_FILES_FREE_MASK) {
-					IXDR_PUT_HYPER(ptr, sbe.ff);
-				}
-				if (ae & FATTR4_FILES_TOTAL_MASK) {
-					IXDR_PUT_HYPER(ptr, sbe.ft);
-				}
-				if (ae & FATTR4_FS_LOCATIONS_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_HIDDEN_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_HOMOGENEOUS_MASK) {
-					IXDR_PUT_U_INT32(ptr, true);
-				}
-				if (ae & FATTR4_MAXFILESIZE_MASK) {
-					IXDR_PUT_HYPER(ptr, pce.maxfilesize);
-				}
-				if (ae & FATTR4_MAXLINK_MASK) {
-					IXDR_PUT_U_INT32(ptr, pce.maxlink);
-				}
-				if (ae & FATTR4_MAXNAME_MASK) {
-					IXDR_PUT_U_INT32(ptr, pce.maxname);
-				}
-				if (ae & FATTR4_MAXREAD_MASK) {
-					IXDR_PUT_HYPER(ptr, maxread);
-				}
-				if (ae & FATTR4_MAXWRITE_MASK) {
-					IXDR_PUT_HYPER(ptr, maxwrite);
-				}
-				/* Check the redzone boundary */
-				if (ptr > ptr_redzone) {
-					if (nents || IS_MIN_ATTR_MASK(ar)) {
-						no_space = TRUE;
-						continue;
-					}
-					MINIMIZE_ATTR_MASK(ar);
-					ae = ar;
-					ptr = lastentry_ptr;
-					goto reencode_attrs;
-				}
+				MINIMIZE_ATTRMAP(ar, minrddir);
+				ae = ar;
+				ptr = lastentry_ptr;
+				goto reencode_attrs;
 			}
 		}
-		if (ae & 0x00000000ffffffff) {
+
+		if (ae.w.w1) {
 			/*
+			 * [MIMETYPE - NUMLINKS]
 			 * Redzone check is done at the end of this section.
 			 * This particular section will encode a maximum of
 			 * 3 * BYTES_PER_XDR_UNIT of data.
 			 */
-			if (ae &
-			    (FATTR4_MIMETYPE_MASK |
-			    FATTR4_MODE_MASK |
-			    FATTR4_NO_TRUNC_MASK |
-			    FATTR4_NUMLINKS_MASK)) {
+			if (ATTR_ISSET(ae, MIMETYPE) ||
+			    ATTR_ISSET(ae, MODE) ||
+			    ATTR_ISSET(ae, NO_TRUNC) ||
+			    ATTR_ISSET(ae, NUMLINKS)) {
 
-				if (ae & FATTR4_MIMETYPE_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_MODE_MASK) {
+				ASSERT(ATTR_ISSET(ae, MIMETYPE) == 0);
+
+				if (ATTR_ISSET(ae, MODE)) {
 					uint_t m = va.va_mode;
 					IXDR_PUT_U_INT32(ptr, m);
 				}
-				if (ae & FATTR4_NO_TRUNC_MASK) {
+				if (ATTR_ISSET(ae, NO_TRUNC)) {
 					IXDR_PUT_U_INT32(ptr, true);
 				}
-				if (ae & FATTR4_NUMLINKS_MASK) {
+
+				if (ATTR_ISSET(ae, NUMLINKS)) {
 					IXDR_PUT_U_INT32(ptr, va.va_nlink);
 				}
-				/* Check the redzone boundary */
+				/*
+				 * [MIMETYPE - NUMLINKS]
+				 * Check the redzone boundary
+				 */
 				if (ptr > ptr_redzone) {
-					if (nents || IS_MIN_ATTR_MASK(ar)) {
+					if (nents || IS_MIN_ATTRMAP(ar)) {
 						no_space = TRUE;
 						continue;
 					}
-					MINIMIZE_ATTR_MASK(ar);
+					MINIMIZE_ATTRMAP(ar, minrddir);
 					ae = ar;
 					ptr = lastentry_ptr;
 					goto reencode_attrs;
 				}
 			}
 			/*
+			 * OWNER
 			 * Redzone check is done before the encoding of the
 			 * owner string since the length is indeterminate.
 			 */
-			if (ae & FATTR4_OWNER_MASK) {
+			if (ATTR_ISSET(ae, OWNER)) {
 				if (!lu_set) {
-				    owner_error = nfs_idmap_uid_str(va.va_uid,
-								&owner, TRUE);
-				    if (!owner_error) {
-					    lu_set = TRUE;
-					    lastuid = va.va_uid;
-				    }
-				} else {
-				    if (va.va_uid != lastuid) {
-					if (owner.utf8string_len != 0) {
-					    kmem_free(owner.utf8string_val,
-						owner.utf8string_len);
-						owner.utf8string_len = 0;
-						owner.utf8string_val = NULL;
-					}
-					owner_error = nfs_idmap_uid_str(
-							va.va_uid,
-							&owner, TRUE);
+					owner_error =
+					    nfs_idmap_uid_str(va.va_uid,
+					    &owner, TRUE);
 					if (!owner_error) {
+						lu_set = TRUE;
 						lastuid = va.va_uid;
-					} else {
-						lu_set = FALSE;
 					}
-				    }
+				} else {
+					if (va.va_uid != lastuid) {
+						if (owner.utf8string_len != 0) {
+							kmem_free(
+							    owner.
+							    utf8string_val,
+							    owner.
+							    utf8string_len);
+							owner.utf8string_len =
+							    0;
+							owner.utf8string_val =
+							    NULL;
+						}
+						owner_error = nfs_idmap_uid_str(
+						    va.va_uid, &owner, TRUE);
+						if (!owner_error) {
+							lastuid = va.va_uid;
+						} else {
+							lu_set = FALSE;
+						}
+					}
 				}
 				if (!owner_error) {
 					if ((ptr +
@@ -1170,57 +1112,62 @@ reencode_attrs:
 					    BYTES_PER_XDR_UNIT)
 					    + 2) > ptr_redzone) {
 						if (nents ||
-						    IS_MIN_ATTR_MASK(ar)) {
+						    IS_MIN_ATTRMAP(ar)) {
 							no_space = TRUE;
 							continue;
 						}
-						MINIMIZE_ATTR_MASK(ar);
+						MINIMIZE_ATTRMAP(ar, minrddir);
 						ae = ar;
 						ptr = lastentry_ptr;
 						goto reencode_attrs;
 					}
 					/* encode the LENGTH of owner string */
 					IXDR_PUT_U_INT32(ptr,
-							owner.utf8string_len);
+					    owner.utf8string_len);
 					/* encode the RNDUP FILL first */
 					rndup = RNDUP(owner.utf8string_len) /
-						BYTES_PER_XDR_UNIT;
+					    BYTES_PER_XDR_UNIT;
 					ptr[rndup - 1] = 0;
 					/* encode the OWNER */
 					bcopy(owner.utf8string_val, ptr,
-						owner.utf8string_len);
+					    owner.utf8string_len);
 					ptr += rndup;
 				}
 			}
 			/*
+			 * OWNER_GROUP
 			 * Redzone check is done before the encoding of the
 			 * group string since the length is indeterminate.
 			 */
-			if (ae & FATTR4_OWNER_GROUP_MASK) {
+			if (ATTR_ISSET(ae, OWNER_GROUP)) {
 				if (!lg_set) {
-				    group_error =
-					    nfs_idmap_gid_str(va.va_gid,
-							&group, TRUE);
-				    if (!group_error) {
-					    lg_set = TRUE;
-					    lastgid = va.va_gid;
-				    }
-				} else {
-				    if (va.va_gid != lastgid) {
-					if (group.utf8string_len != 0) {
-					    kmem_free(group.utf8string_val,
-						group.utf8string_len);
-					    group.utf8string_len = 0;
-					    group.utf8string_val = NULL;
-					}
-					group_error =
-						nfs_idmap_gid_str(va.va_gid,
-								&group, TRUE);
-					if (!group_error)
+					group_error = nfs_idmap_gid_str(
+					    va.va_gid, &group, TRUE);
+					if (!group_error) {
+						lg_set = TRUE;
 						lastgid = va.va_gid;
-					else
-						lg_set = FALSE;
-				    }
+					}
+				} else {
+					if (va.va_gid != lastgid) {
+						if (group.utf8string_len != 0) {
+							kmem_free(
+							    group.
+							    utf8string_val,
+							    group.
+							    utf8string_len);
+							group.utf8string_len =
+							    0;
+							group.utf8string_val =
+							    NULL;
+						}
+						group_error =
+						    nfs_idmap_gid_str(va.va_gid,
+						    &group, TRUE);
+						if (!group_error)
+							lastgid = va.va_gid;
+						else
+							lg_set = FALSE;
+					}
 				}
 				if (!group_error) {
 					if ((ptr +
@@ -1228,166 +1175,133 @@ reencode_attrs:
 					    BYTES_PER_XDR_UNIT)
 					    + 2) > ptr_redzone) {
 						if (nents ||
-						    IS_MIN_ATTR_MASK(ar)) {
+						    IS_MIN_ATTRMAP(ar)) {
 							no_space = TRUE;
 							continue;
 						}
-						MINIMIZE_ATTR_MASK(ar);
+						MINIMIZE_ATTRMAP(ar, minrddir);
 						ae = ar;
 						ptr = lastentry_ptr;
 						goto reencode_attrs;
 					}
 					/* encode the LENGTH of owner string */
 					IXDR_PUT_U_INT32(ptr,
-							group.utf8string_len);
+					    group.utf8string_len);
 					/* encode the RNDUP FILL first */
 					rndup = RNDUP(group.utf8string_len) /
-						BYTES_PER_XDR_UNIT;
+					    BYTES_PER_XDR_UNIT;
 					ptr[rndup - 1] = 0;
 					/* encode the OWNER */
 					bcopy(group.utf8string_val, ptr,
-						group.utf8string_len);
+					    group.utf8string_len);
 					ptr += rndup;
 				}
 			}
-			if (ae &
-			    (FATTR4_QUOTA_AVAIL_HARD_MASK |
-			    FATTR4_QUOTA_AVAIL_SOFT_MASK |
-			    FATTR4_QUOTA_USED_MASK)) {
-				if (ae & FATTR4_QUOTA_AVAIL_HARD_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_QUOTA_AVAIL_SOFT_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_QUOTA_USED_MASK) {
-					ASSERT(0);
-				}
-			}
+
+			ASSERT(ATTR_ISSET(ae, QUOTA_AVAIL_HARD) == 0);
+			ASSERT(ATTR_ISSET(ae, QUOTA_AVAIL_SOFT) == 0);
+			ASSERT(ATTR_ISSET(ae, QUOTA_USED) == 0);
+
 			/*
+			 * [RAWDEV - SYSTEM]
 			 * Redzone check is done at the end of this section.
 			 * This particular section will encode a maximum of
 			 * 10 * BYTES_PER_XDR_UNIT of data.
 			 */
-			if (ae &
-			    (FATTR4_RAWDEV_MASK |
-			    FATTR4_SPACE_AVAIL_MASK |
-			    FATTR4_SPACE_FREE_MASK |
-			    FATTR4_SPACE_TOTAL_MASK |
-			    FATTR4_SPACE_USED_MASK |
-			    FATTR4_SYSTEM_MASK)) {
-
-				if (ae & FATTR4_RAWDEV_MASK) {
-					fattr4_rawdev rd;
-					rd.specdata1 =
-						(uint32)getmajor(va.va_rdev);
-					rd.specdata2 =
-						(uint32)getminor(va.va_rdev);
-					IXDR_PUT_U_INT32(ptr, rd.specdata1);
+			if (ATTR_ISSET(ae, RAWDEV)) {
+				fattr4_rawdev rd;
+				rd.specdata1 = (uint32)getmajor(va.va_rdev);
+				rd.specdata2 = (uint32)getminor(va.va_rdev);
+				IXDR_PUT_U_INT32(ptr, rd.specdata1);
 					IXDR_PUT_U_INT32(ptr, rd.specdata2);
-				}
-				if (ae & FATTR4_SPACE_AVAIL_MASK) {
-					IXDR_PUT_HYPER(ptr, sbe.space_avail);
-				}
-				if (ae & FATTR4_SPACE_FREE_MASK) {
-					IXDR_PUT_HYPER(ptr, sbe.space_free);
-				}
-				if (ae & FATTR4_SPACE_TOTAL_MASK) {
-					IXDR_PUT_HYPER(ptr, sbe.space_total);
-				}
-				if (ae & FATTR4_SPACE_USED_MASK) {
-					u_longlong_t su;
-					su = (fattr4_space_used) DEV_BSIZE *
-					    (fattr4_space_used) va.va_nblocks;
-					IXDR_PUT_HYPER(ptr, su);
-				}
-				if (ae & FATTR4_SYSTEM_MASK) {
-					ASSERT(0);
-				}
-				/* Check the redzone boundary */
-				if (ptr > ptr_redzone) {
-					if (nents || IS_MIN_ATTR_MASK(ar)) {
-						no_space = TRUE;
-						continue;
-					}
-					MINIMIZE_ATTR_MASK(ar);
-					ae = ar;
-					ptr = lastentry_ptr;
-					goto reencode_attrs;
-				}
 			}
+			if (ATTR_ISSET(ae, SPACE_AVAIL)) {
+				IXDR_PUT_HYPER(ptr, sbe.space_avail);
+			}
+			if (ATTR_ISSET(ae, SPACE_FREE)) {
+				IXDR_PUT_HYPER(ptr, sbe.space_free);
+			}
+			if (ATTR_ISSET(ae, SPACE_TOTAL)) {
+				IXDR_PUT_HYPER(ptr, sbe.space_total);
+			}
+			if (ATTR_ISSET(ae, SPACE_USED)) {
+				u_longlong_t su;
+				su = (fattr4_space_used) DEV_BSIZE *
+				    (fattr4_space_used) va.va_nblocks;
+				IXDR_PUT_HYPER(ptr, su);
+			}
+			ASSERT(ATTR_ISSET(ae, SYSTEM) == 0);
+
 			/*
+			 * [RAWDEV - SYSTEM]
+			 * Check the redzone boundary
+			 */
+			if (ptr > ptr_redzone) {
+				if (nents || IS_MIN_ATTRMAP(ar)) {
+					no_space = TRUE;
+					continue;
+				}
+				MINIMIZE_ATTRMAP(ar, minrddir);
+				ae = ar;
+				ptr = lastentry_ptr;
+				goto reencode_attrs;
+			}
+
+			/*
+			 * [TIME_ACCESS - MOUNTED_ON_FILEID]
 			 * Redzone check is done at the end of this section.
 			 * This particular section will encode a maximum of
 			 * 14 * BYTES_PER_XDR_UNIT of data.
 			 */
-			if (ae &
-			    (FATTR4_TIME_ACCESS_MASK |
-			    FATTR4_TIME_ACCESS_SET_MASK |
-			    FATTR4_TIME_BACKUP_MASK |
-			    FATTR4_TIME_CREATE_MASK |
-			    FATTR4_TIME_DELTA_MASK |
-			    FATTR4_TIME_METADATA_MASK |
-			    FATTR4_TIME_MODIFY_MASK |
-			    FATTR4_TIME_MODIFY_SET_MASK |
-			    FATTR4_MOUNTED_ON_FILEID_MASK)) {
+			if (ATTR_ISSET(ae, TIME_ACCESS)) {
+				u_longlong_t sec =
+				    (u_longlong_t)va.va_atime.tv_sec;
+				uint_t nsec = (uint_t)va.va_atime.tv_nsec;
+				IXDR_PUT_HYPER(ptr, sec);
+				IXDR_PUT_INT32(ptr, nsec);
+			}
+			ASSERT(ATTR_ISSET(ae, TIME_ACCESS_SET) == 0);
+			ASSERT(ATTR_ISSET(ae, TIME_BACKUP) == 0);
+			ASSERT(ATTR_ISSET(ae, TIME_CREATE) == 0);
 
-				if (ae & FATTR4_TIME_ACCESS_MASK) {
-					u_longlong_t sec =
-					    (u_longlong_t)va.va_atime.tv_sec;
-					uint_t nsec =
-						(uint_t)va.va_atime.tv_nsec;
-					IXDR_PUT_HYPER(ptr, sec);
-					IXDR_PUT_INT32(ptr, nsec);
+			if (ATTR_ISSET(ae, TIME_DELTA)) {
+				u_longlong_t sec = 0;
+				uint_t nsec = 1000;
+				IXDR_PUT_HYPER(ptr, sec);
+				IXDR_PUT_INT32(ptr, nsec);
+			}
+			if (ATTR_ISSET(ae, TIME_METADATA)) {
+				u_longlong_t sec =
+				    (u_longlong_t)va.va_ctime.tv_sec;
+				uint_t nsec = (uint_t)va.va_ctime.tv_nsec;
+				IXDR_PUT_HYPER(ptr, sec);
+				IXDR_PUT_INT32(ptr, nsec);
+			}
+			if (ATTR_ISSET(ae, TIME_MODIFY)) {
+				u_longlong_t sec =
+				    (u_longlong_t)va.va_mtime.tv_sec;
+				uint_t nsec = (uint_t)va.va_mtime.tv_nsec;
+				IXDR_PUT_HYPER(ptr, sec);
+				IXDR_PUT_INT32(ptr, nsec);
+			}
+			ASSERT(ATTR_ISSET(ae, TIME_MODIFY_SET) == 0);
+
+			if (ATTR_ISSET(ae, MOUNTED_ON_FILEID)) {
+				IXDR_PUT_HYPER(ptr, dp->d_ino);
+			}
+			/*
+			 * [TIME_ACCESS - MOUNTED_ON_FILEID]
+			 * Check the redzone boundary
+			 */
+			if (ptr > ptr_redzone) {
+				if (nents || IS_MIN_ATTRMAP(ar)) {
+					no_space = TRUE;
+					continue;
 				}
-				if (ae & FATTR4_TIME_ACCESS_SET_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_TIME_BACKUP_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_TIME_CREATE_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_TIME_DELTA_MASK) {
-					u_longlong_t sec = 0;
-					uint_t nsec = 1000;
-					IXDR_PUT_HYPER(ptr, sec);
-					IXDR_PUT_INT32(ptr, nsec);
-				}
-				if (ae & FATTR4_TIME_METADATA_MASK) {
-					u_longlong_t sec =
-					    (u_longlong_t)va.va_ctime.tv_sec;
-					uint_t nsec =
-						(uint_t)va.va_ctime.tv_nsec;
-					IXDR_PUT_HYPER(ptr, sec);
-					IXDR_PUT_INT32(ptr, nsec);
-				}
-				if (ae & FATTR4_TIME_MODIFY_MASK) {
-					u_longlong_t sec =
-					    (u_longlong_t)va.va_mtime.tv_sec;
-					uint_t nsec =
-						(uint_t)va.va_mtime.tv_nsec;
-					IXDR_PUT_HYPER(ptr, sec);
-					IXDR_PUT_INT32(ptr, nsec);
-				}
-				if (ae & FATTR4_TIME_MODIFY_SET_MASK) {
-					ASSERT(0);
-				}
-				if (ae & FATTR4_MOUNTED_ON_FILEID_MASK) {
-					IXDR_PUT_HYPER(ptr, dp->d_ino);
-				}
-				/* Check the redzone boundary */
-				if (ptr > ptr_redzone) {
-					if (nents || IS_MIN_ATTR_MASK(ar)) {
-						no_space = TRUE;
-						continue;
-					}
-					MINIMIZE_ATTR_MASK(ar);
-					ae = ar;
-					ptr = lastentry_ptr;
-					goto reencode_attrs;
-				}
+				MINIMIZE_ATTRMAP(ar, minrddir);
+				ae = ar;
+				ptr = lastentry_ptr;
+				goto reencode_attrs;
 			}
 		}
 
@@ -1399,10 +1313,8 @@ reencode_attrs:
 		}
 
 		/* "go back" and encode the attributes' length */
-		attr_length =
-			(char *)ptr -
-			(char *)attr_offset_ptr -
-			BYTES_PER_XDR_UNIT;
+		attr_length = (char *)ptr - (char *)attr_offset_ptr -
+		    BYTES_PER_XDR_UNIT;
 		IXDR_PUT_U_INT32(attr_offset_ptr, attr_length);
 
 		/*
@@ -1413,10 +1325,11 @@ reencode_attrs:
 		 */
 		if (owner_error || group_error) {
 			if (owner_error)
-				ae &= ~FATTR4_OWNER_MASK;
+				ATTR_CLR(ae, OWNER);
 			if (group_error)
-				ae &= ~FATTR4_OWNER_GROUP_MASK;
-			IXDR_PUT_HYPER(attrmask_ptr, ae);
+				ATTR_CLR(ae, OWNER_GROUP);
+			IXDR_REWRITE_FATTR4_BITMAP(attrmask_ptr, ae,
+			    attrmask_len, avers);
 		}
 
 		/* END OF ATTRIBUTE ENCODING */

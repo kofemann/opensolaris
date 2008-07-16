@@ -114,6 +114,10 @@ typedef enum dmu_object_type {
 	DMU_OT_SYSACL,			/* SYSACL */
 	DMU_OT_FUID,			/* FUID table (Packed NVLIST UINT8) */
 	DMU_OT_FUID_SIZE,		/* FUID table size UINT64 */
+	/* pNFS Data Server: */
+	DMU_OT_PNFS_DATA,
+	DMU_OT_PNFS_INFO,		/* ZAP */
+	DMU_OT_NNODE,			/* NFS NODE */
 	DMU_OT_NUMTYPES
 } dmu_object_type_t;
 
@@ -124,6 +128,8 @@ typedef enum dmu_objset_type {
 	DMU_OST_ZVOL,
 	DMU_OST_OTHER,			/* For testing only! */
 	DMU_OST_ANY,			/* Be careful! */
+	DMU_OST_PNFS,			/* pNFS dserv data store container */
+	DMU_OST_PNFSOBJS,		/* pNFS dserv data store objects */
 	DMU_OST_NUMTYPES
 } dmu_objset_type_t;
 
@@ -200,6 +206,13 @@ typedef void dmu_buf_evict_func_t(struct dmu_buf *db, void *user_ptr);
 #define	DMU_POOL_HISTORY		"history"
 #define	DMU_POOL_PROPS			"pool_props"
 #define	DMU_POOL_L2CACHE		"l2cache"
+
+/*
+ * pNFS Object ID "claims"
+ */
+#define	DMU_PNFS_METADATA_OBJECT	1	/* DMU_OT_PNFS_DATA */
+#define	DMU_PNFS_FID_TO_OBJID_OBJECT	1	/* ZAP - DMU_OT_PNFS_INFO */
+#define	DMU_PNFS_SID_TO_DSGUID_OBJECT	1	/* ZAP - DMU_OT_PNFS_INFO */
 
 /*
  * Allocate an object from this objset.  The range of object numbers

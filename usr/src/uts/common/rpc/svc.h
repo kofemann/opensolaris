@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 /* Copyright (c) 1983, 1984, 1985, 1986, 1987, 1988, 1989 AT&T */
@@ -48,6 +48,7 @@
 #ifdef	_KERNEL
 #include <rpc/svc_auth.h>
 #include <sys/callb.h>
+#include <rpc/rpc_tags.h>
 #endif	/* _KERNEL */
 
 /*
@@ -189,8 +190,23 @@ struct svc_ops {
 		/* destroy a clone xprt */
 	void	(*xp_start)(SVCMASTERXPRT *);
 		/* `ready-to-receive' */
+	int	(*xp_ctl)(SVCXPRT *, int, void *);
+		/* kernel level control */
 };
+
+/*
+ * Kernel SVC Control Requests.
+ */
+#define	SVCCTL_SET_ASD		1
+#define	SVCCTL_GET_ASD		2
+#define	SVCCTL_SET_CBCONN	3
+#define	SVCCTL_SET_TAG		4
+#define	SVCCTL_SET_TAG_CLEAR	5
+#define	SVCCTL_CMP_TAG		6
+
+
 #else	/* _KERNEL */
+
 /*
  *	Service control requests
  */
@@ -384,14 +400,16 @@ struct __svcpool {
  * to destroy/free the data structure.
  */
 typedef struct __svcxprt_common {
-	struct file	*xpc_fp;
-	struct svc_ops	*xpc_ops;
-	queue_t		*xpc_wq;	/* queue to write onto		*/
-	cred_t		*xpc_cred;	/* cached cred for server to use */
-	int32_t		xpc_type;	/* transport type		*/
-	int		xpc_msg_size;	/* TSDU or TIDU size		*/
-	struct netbuf	xpc_rtaddr;	/* remote transport address	*/
-	SVC_CALLOUT_TABLE *xpc_sct;
+	struct file		*xpc_fp;
+	struct svc_ops		*xpc_ops;
+	queue_t			*xpc_wq;	/* queue to write onto */
+	cred_t			*xpc_cred;	/* cached cred 4 server's use */
+	int32_t			 xpc_type;	/* transport type */
+	int			 xpc_msg_size;	/* TSDU or TIDU size */
+	struct netbuf		xpc_rtaddr;	/* remote transport address */
+	struct netbuf		xpc_lcladdr;	/* local transport address */
+	void			*xpc_tags;	/* xprt's tag list */
+	SVC_CALLOUT_TABLE	*xpc_sct;
 } __SVCXPRT_COMMON;
 
 #define	xp_fp		xp_xpc.xpc_fp
@@ -401,7 +419,9 @@ typedef struct __svcxprt_common {
 #define	xp_type		xp_xpc.xpc_type
 #define	xp_msg_size	xp_xpc.xpc_msg_size
 #define	xp_rtaddr	xp_xpc.xpc_rtaddr
+#define	xp_lcladdr	xp_xpc.xpc_lcladdr
 #define	xp_sct		xp_xpc.xpc_sct
+#define	xp_tags		xp_xpc.xpc_tags
 
 struct __svcmasterxprt {
 	SVCMASTERXPRT 	*xp_next;	/* Next transport in the list	*/
@@ -421,6 +441,27 @@ struct __svcmasterxprt {
 
 	caddr_t		xp_p2;		/* private: for use by svc ops  */
 };
+
+#define	SVCCB_DEAD	1	/* This callback is dead, don't accept on it */
+
+typedef struct __svccb {
+	queue_t		*r_q;
+	mblk_t		*r_mp;
+	kmutex_t	r_lock;
+	kmutex_t	r_mlock;
+	kcondvar_t	r_cbwait;
+	int		r_flags;
+	rpcprog_t	r_prog;
+} SVCCB;
+
+typedef struct __svccb_args {
+	SVCMASTERXPRT *xprt;
+	rpcprog_t prog;
+	rpcvers_t vers;
+	int family;
+	void *tag;
+} SVCCB_ARGS;
+
 
 /*
  * Service thread `clone' transport handle (SVCXPRT)
@@ -458,6 +499,7 @@ struct __svcxprt {
 	/* Private for svc ops */
 	char		xp_p2buf[SVC_P2LEN]; /* udp_data or cots_data_t */
 						/* or clone_rdma_data_t */
+	void		*xp_asd;
 };
 #else	/* _KERNEL */
 struct __svcxprt {
@@ -491,6 +533,7 @@ struct __svcxprt {
 	 */
 	svc_errorhandler_t xp_closeclnt;
 };
+
 #endif	/* _KERNEL */
 
 /*
@@ -499,6 +542,7 @@ struct __svcxprt {
  */
 #define	svc_getrpccaller(x) (&(x)->xp_rtaddr)
 #ifdef _KERNEL
+#define	svc_getendpoint(x) (&(x)->xp_lcladdr.buf)
 #define	svc_getcaller(x) (&(x)->xp_rtaddr.buf)
 #define	svc_getaddrmask(x) (&(x)->xp_master->xp_addrmask)
 #define	svc_getnetid(x) ((x)->xp_master->xp_netid)
@@ -563,6 +607,9 @@ struct __svcxprt {
 #define	SVC_START(xprt) \
 	(*(xprt)->xp_ops->xp_start)(xprt)
 
+#define	SVC_CTL(clone_xprt, rq, arg) \
+	(*(clone_xprt)->xp_ops->xp_ctl)((clone_xprt), (rq), (arg))
+
 #else	/* _KERNEL */
 
 #define	SVC_RECV(xprt, msg) \
@@ -616,12 +663,14 @@ struct __svcxprt {
 #endif	/* _KERNEL */
 
 /*
- * Pool id's reserved for NFS, NLM, and the NFSv4 callback program.
+ * Pool id's reserved for NFS, NLM, the NFSv4 callback program and DSERV.
  */
 #define	NFS_SVCPOOL_ID		0x01
 #define	NLM_SVCPOOL_ID		0x02
 #define	NFS_CB_SVCPOOL_ID	0x03
 #define	RDC_SVCPOOL_ID		0x05	/* SNDR, PSARC 2001/699 */
+#define	DSERV_SVCPOOL_ID	0x06
+#define	UNIQUE_SVCPOOL_ID	0x07	/* MUST be largest value here */
 
 struct svcpool_args {
 	uint32_t	id;		/* Pool id */
@@ -736,20 +785,26 @@ extern bool_t	svc_sendreply(const SVCXPRT *, const xdrproc_t,	const caddr_t);
 extern void	svcerr_decode(const SVCXPRT *);
 extern void	svcerr_weakauth(const SVCXPRT *);
 extern void	svcerr_noproc(const SVCXPRT *);
+extern SVCXPRT *svc_clone_init(void);
+extern void	svc_init_clone_xprt(SVCXPRT *, queue_t *);
 extern void	svcerr_progvers(const SVCXPRT *, const rpcvers_t,
     const rpcvers_t);
 extern void	svcerr_auth(const SVCXPRT *, const enum auth_stat);
 extern void	svcerr_noprog(const SVCXPRT *);
 extern void	svcerr_systemerr(const SVCXPRT *);
+extern void	svcerr_badcred(const SVCXPRT *);
 #else	/* __STDC__ */
 extern bool_t	svc_sendreply();
 extern void	svcerr_decode();
 extern void	svcerr_weakauth();
 extern void	svcerr_noproc();
+extern void	svc_init_clone_xprt();
+extern SVCXPRT *svc_clone_init();
 extern void	svcerr_progvers();
 extern void	svcerr_auth();
 extern void	svcerr_noprog();
 extern void	svcerr_systemerr();
+extern void	svcerr_badcred();
 #endif	/* __STDC__ */
 
 #ifdef	_KERNEL

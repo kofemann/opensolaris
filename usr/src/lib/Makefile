@@ -234,6 +234,8 @@ SUBDIRS += \
 	libshare	\
 	libsqlite	\
 	libidmap	\
+	libdserv	\
+	libnfs		\
 	libipmi		\
 	libexacct/demo	\
 	libvscan	\
@@ -433,6 +435,8 @@ HDRSUBDIRS=		\
 	libidmap	\
 	libvscan	\
 	smbsrv		\
+	libdserv	\
+	libnfs		\
 	scsi		\
 	$($(MACH)_HDRSUBDIRS)
 
@@ -556,6 +560,8 @@ libzfs:		libdevinfo libdevid libgen libnvpair libuutil libiscsitgt
 libzfs_jni:	libdiskmgt libnvpair libzfs
 libzpool:	libavl libumem libnvpair
 libsec:		libavl
+libdserv:	libc libumem libuutil libscf
+libnfs:		libc libumem libuutil libscf libzfs
 brand:		libc libsocket
 libshare:	libscf libzfs libuuid libfsmgt libsecdb libumem libsmbfs
 libexacct/demo:	libexacct libproject libsocket libnsl

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -43,6 +43,7 @@
 
 /* NFS server */
 
+#include <nfs/libnfs.h>
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -75,6 +76,7 @@
 #include <rpcsvc/daemon_utils.h>
 #include <rpcsvc/nfs4_prot.h>
 #include <libnvpair.h>
+#include <libintl.h>
 #include "nfs_tbind.h"
 #include "thrpool.h"
 
@@ -129,13 +131,11 @@ int	nfs_server_delegation = NFS_SERVER_DELEGATION_DEFAULT;
 int
 main(int ac, char *av[])
 {
+	libnfs_handle_t *libhandle;
 	char *dir = "/";
 	int allflag = 0;
 	int df_allflag = 0;
-	int opt_cnt = 0;
 	int maxservers = 1;	/* zero allows inifinte number of threads */
-	int maxservers_set = 0;
-	int logmaxservers = 0;
 	int pid;
 	int i;
 	char *provider = (char *)NULL;
@@ -149,6 +149,11 @@ main(int ac, char *av[])
 	uint_t dss_npaths = 0;
 	char **dss_pathnames = NULL;
 	sigset_t sgset;
+
+	libhandle = libnfs_handle_create(LIBNFS_VERSION);
+	libnfs_error_mode_set(libhandle, LIBNFS_ERRMODE_DIE);
+	(void) libnfs_myinstance(libhandle);
+	(void) libnfs_dserv_open(libhandle);
 
 	MyName = *av;
 
@@ -173,105 +178,34 @@ main(int ac, char *av[])
 	 * Read in the values from config file first before we check
 	 * commandline options so the options override the file.
 	 */
-	if ((defopen(NFSADMIN)) == 0) {
-		if ((defval = defread("NFSD_MAX_CONNECTIONS=")) != NULL) {
-			errno = 0;
-			max_conns_allowed = strtol(defval, (char **)NULL, 10);
-			if (errno != 0) {
-				max_conns_allowed = -1;
-			}
-		}
-		if ((defval = defread("NFSD_LISTEN_BACKLOG=")) != NULL) {
-			errno = 0;
-			listen_backlog = strtol(defval, (char **)NULL, 10);
-			if (errno != 0) {
-				listen_backlog = 32;
-			}
-		}
-		if ((defval = defread("NFSD_PROTOCOL=")) != NULL) {
-			df_proto = strdup(defval);
-			opt_cnt++;
-			if (strncasecmp("ALL", defval, 3) == 0) {
-				free(df_proto);
-				df_proto = NULL;
-				df_allflag = 1;
-			}
-		}
-		if ((defval = defread("NFSD_DEVICE=")) != NULL) {
-			df_provider = strdup(defval);
-			opt_cnt++;
-		}
-		if ((defval = defread("NFSD_SERVERS=")) != NULL) {
-			errno = 0;
-			maxservers = strtol(defval, (char **)NULL, 10);
-			if (errno != 0) {
-				maxservers = 1;
-			} else {
-				maxservers_set = 1;
-			}
-		}
-		if ((defval = defread("NFS_SERVER_VERSMIN=")) != NULL) {
-			errno = 0;
-			nfs_server_vers_min =
-			    strtol(defval, (char **)NULL, 10);
-			if (errno != 0) {
-				nfs_server_vers_min = NFS_VERSMIN_DEFAULT;
-			}
-		}
-		if ((defval = defread("NFS_SERVER_VERSMAX=")) != NULL) {
-			errno = 0;
-			nfs_server_vers_max =
-			    strtol(defval, (char **)NULL, 10);
-			if (errno != 0) {
-				nfs_server_vers_max = NFS_VERSMAX_DEFAULT;
-			}
-		}
-		if ((defval = defread("NFS_SERVER_DELEGATION=")) != NULL) {
-			if (strcmp(defval, "off") == 0) {
-				nfs_server_delegation = FALSE;
-			}
-		}
 
-		/* close defaults file */
-		defopen(NULL);
+	max_conns_allowed = libnfs_prop_num(libhandle,
+	    LIBNFS_PROP_SERVER_MAX_CONNECTIONS);
+	listen_backlog = libnfs_prop_num(libhandle,
+	    LIBNFS_PROP_SERVER_LISTEN_BACKLOG);
+	df_proto = libnfs_prop_string(libhandle,
+	    LIBNFS_PROP_SERVER_PROTOCOL);
+	if (strncasecmp("ALL", df_proto, 3) == 0) {
+		libnfs_strfree(libhandle, df_proto);
+		df_proto = NULL;
+		df_allflag = 1;
 	}
+	df_provider = libnfs_prop_string(libhandle,
+	    LIBNFS_PROP_SERVER_DEVICE);
+	maxservers = libnfs_prop_num(libhandle,
+	    LIBNFS_PROP_SERVER_SERVERS);
+	nfs_server_vers_min = libnfs_prop_num(libhandle,
+	    LIBNFS_PROP_SERVER_VERSMIN);
+	nfs_server_vers_max = libnfs_prop_num(libhandle,
+	    LIBNFS_PROP_SERVER_VERSMAX);
+	libnfs_log(libhandle, LOG_DEBUG,
+	    "vers min/max = %d/%d",
+	    nfs_server_vers_min, nfs_server_vers_max);
+	nfs_server_delegation = libnfs_prop_boolean(libhandle,
+	    LIBNFS_PROP_SERVER_DELEGATION);
 
-	/*
-	 * Conflict options error messages.
-	 */
-	if (opt_cnt > 1) {
-		(void) fprintf(stderr, "\nConflicting options, only one of "
-		    "the following options can be specified\n"
-		    "in " NFSADMIN ":\n"
-		    "\tNFSD_PROTOCOL=ALL\n"
-		    "\tNFSD_PROTOCOL=protocol\n"
-		    "\tNFSD_DEVICE=device\n\n");
-		usage();
-	}
-	opt_cnt = 0;
-
-	while ((i = getopt(ac, av, "ac:p:s:t:l:")) != EOF) {
+	while ((i = getopt(ac, av, "s:")) != EOF) {
 		switch (i) {
-		case 'a':
-			free(df_proto);
-			df_proto = NULL;
-			free(df_provider);
-			df_provider = NULL;
-
-			allflag = 1;
-			opt_cnt++;
-			break;
-
-		case 'c':
-			max_conns_allowed = atoi(optarg);
-			break;
-
-		case 'p':
-			proto = optarg;
-			df_allflag = 0;
-			opt_cnt++;
-			break;
-
 		/*
 		 * DSS: NFSv4 distributed stable storage.
 		 *
@@ -305,16 +239,6 @@ main(int ac, char *av[])
 			}
 			break;
 
-		case 't':
-			provider = optarg;
-			df_allflag = 0;
-			opt_cnt++;
-			break;
-
-		case 'l':
-			listen_backlog = atoi(optarg);
-			break;
-
 		case '?':
 			usage();
 			/* NOTREACHED */
@@ -326,19 +250,6 @@ main(int ac, char *av[])
 		proto = df_proto;
 	if (provider == NULL)
 		provider = df_provider;
-
-	/*
-	 * Conflict options error messages.
-	 */
-	if (opt_cnt > 1) {
-		(void) fprintf(stderr, "\nConflicting options, only one of "
-		    "the following options can be specified\n"
-		    "on the command line:\n"
-		    "\t-a\n"
-		    "\t-p protocol\n"
-		    "\t-t transport\n\n");
-		usage();
-	}
 
 	if (proto != NULL &&
 	    strncasecmp(proto, NC_UDP, strlen(NC_UDP)) == 0) {
@@ -359,48 +270,35 @@ main(int ac, char *av[])
 		}
 	}
 
-	/*
-	 * If there is exactly one more argument, it is the number of
-	 * servers.
-	 */
-	if (optind == ac - 1) {
-		maxservers = atoi(av[optind]);
-		maxservers_set = 1;
-	}
-	/*
-	 * If there are two or more arguments, then this is a usage error.
-	 */
-	else if (optind < ac - 1)
+	if (optind < ac)
 		usage();
 	/*
 	 * Check the ranges for min/max version specified
 	 */
-	else if ((nfs_server_vers_min > nfs_server_vers_max) ||
-	    (nfs_server_vers_min < NFS_VERSMIN) ||
-	    (nfs_server_vers_max > NFS_VERSMAX))
-		usage();
-	/*
-	 * There are no additional arguments, and we haven't set maxservers
-	 * explicitly via the config file, we use a default number of
-	 * servers.  We will log this.
-	 */
-	else if (maxservers_set == 0)
-		logmaxservers = 1;
+	if (nfs_server_vers_min > nfs_server_vers_max) {
+		libnfs_log(libhandle, LOG_ERR,
+		    gettext("minimum version > maximum "
+		    "(%d > %d)"), nfs_server_vers_min, nfs_server_vers_max);
+		abort();
+	}
+	if (nfs_server_vers_min < NFS_VERSMIN) {
+		libnfs_log(libhandle, LOG_ERR,
+		    gettext("minimum version too low "
+		    "(%d)"), nfs_server_vers_min);
+		abort();
+	}
+	if (nfs_server_vers_max > NFS_VERSMAX) {
+		libnfs_log(libhandle, LOG_ERR,
+		    gettext("maximum version too high "
+		    "(%d)"), nfs_server_vers_max);
+		abort();
+	}
 
 	/*
-	 * Basic Sanity checks on options
-	 *
-	 * max_conns_allowed must be positive, except for the special
-	 * value of -1 which is used internally to mean unlimited, -1 isn't
-	 * documented but we allow it anyway.
-	 *
-	 * maxservers must be positive
-	 * listen_backlog must be positive or zero
+	 * handle pNFS data server stuff
 	 */
-	if (((max_conns_allowed != -1) && (max_conns_allowed <= 0)) ||
-	    (listen_backlog < 0) || (maxservers <= 0)) {
-		usage();
-	}
+
+	(void) libnfs_dserv_push_inst_datasets(libhandle);
 
 	/*
 	 * Set current dir to server root
@@ -437,24 +335,6 @@ main(int ac, char *av[])
 	openlog(MyName, LOG_PID | LOG_NDELAY, LOG_DAEMON);
 
 	/*
-	 * establish our lock on the lock file and write our pid to it.
-	 * exit if some other process holds the lock, or if there's any
-	 * error in writing/locking the file.
-	 */
-	pid = _enter_daemon_lock(NFSD);
-	switch (pid) {
-	case 0:
-		break;
-	case -1:
-		syslog(LOG_ERR, "error locking for %s: %s", NFSD,
-		    strerror(errno));
-		exit(2);
-	default:
-		/* daemon was already running */
-		exit(0);
-	}
-
-	/*
 	 * If we've been given a list of paths to be used for distributed
 	 * stable storage, and provided we're going to run a version
 	 * that supports it, setup the DSS paths.
@@ -472,12 +352,6 @@ main(int ac, char *av[])
 	 */
 	(void) sigfillset(&sgset);
 	(void) thr_sigsetmask(SIG_BLOCK, &sgset, NULL);
-
-	if (logmaxservers) {
-		(void) syslog(LOG_INFO,
-		    "Number of servers not specified. Using default of %d.",
-		    maxservers);
-	}
 
 	/*
 	 * Make sure to unregister any previous versions in case the
@@ -537,10 +411,12 @@ main(int ac, char *av[])
 	protobp->versmin = nfs_server_vers_min;
 	protobp->versmax = nfs_server_vers_max;
 	protobp->program = NFS_PROGRAM;
+	protobp->flags = 0;
 
 	protobp->next = (struct protob *)malloc(sizeof (struct protob));
 	protobp = protobp->next;
 	protobp->serv = "NFS_ACL";		/* not used */
+	protobp->flags = 0;
 	protobp->versmin = nfs_server_vers_min;
 	/* XXX - this needs work to get the version just right */
 	protobp->versmax = (nfs_server_vers_max > NFS_ACL_V3) ?
@@ -606,6 +482,8 @@ done:
 	 */
 	poll_for_action();
 
+	libnfs_handle_destroy(libhandle);
+
 	/*
 	 * If we get here, something failed in poll_for_action().
 	 */
@@ -660,21 +538,8 @@ static void
 usage(void)
 {
 	(void) fprintf(stderr,
-"usage: %s [ -a ] [ -c max_conns ] [ -p protocol ] [ -t transport ] ", MyName);
+	    "usage: %s ", MyName);
 	(void) fprintf(stderr, "\n[ -l listen_backlog ] [ nservers ]\n");
-	(void) fprintf(stderr,
-"\twhere -a causes <nservers> to be started on each appropriate transport,\n");
-	(void) fprintf(stderr,
-"\tmax_conns is the maximum number of concurrent connections allowed,\n");
-	(void) fprintf(stderr, "\t\tand max_conns must be a decimal number");
-	(void) fprintf(stderr, "> zero,\n");
-	(void) fprintf(stderr, "\tprotocol is a protocol identifier,\n");
-	(void) fprintf(stderr,
-	    "\ttransport is a transport provider name (i.e. device),\n");
-	(void) fprintf(stderr,
-	    "\tlisten_backlog is the TCP listen backlog,\n");
-	(void) fprintf(stderr,
-	    "\tand <nservers> must be a decimal number > zero.\n");
 	exit(1);
 }
 

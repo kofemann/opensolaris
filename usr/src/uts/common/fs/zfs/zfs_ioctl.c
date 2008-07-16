@@ -62,6 +62,7 @@
 #include <sys/fs/zfs.h>
 #include <sys/zfs_ctldir.h>
 #include <sys/zfs_dir.h>
+#include <sys/zfs_pnfs.h>
 #include <sys/zvol.h>
 #include <sharefs/share.h>
 #include <sys/dmu_objset.h>
@@ -1876,7 +1877,7 @@ zfs_fill_zplprops(const char *dataset, nvlist_t *createprops,
 
 /*
  * inputs:
- * zc_objset_type	type of objset to create (fs vs zvol)
+ * zc_objset_type	type of objset to create (fs vs zvol vs pnfs)
  * zc_name		name of new objset
  * zc_value		name of snapshot to clone from (may be empty)
  * zc_nvlist_src{_size}	nvlist of properties to apply
@@ -1901,6 +1902,10 @@ zfs_ioc_create(zfs_cmd_t *zc)
 
 	case DMU_OST_ZVOL:
 		cbfunc = zvol_create_cb;
+		break;
+
+	case DMU_OST_PNFS:
+		cbfunc = zfs_pnfs_create_cb;
 		break;
 
 	default:
@@ -2027,6 +2032,11 @@ zfs_ioc_create(zfs_cmd_t *zc)
 				nvlist_free(zct.zct_zplprops);
 				return (error);
 			}
+			/*
+			 * If creating a pNFS dataset, we do not have anything
+			 * to check right now.  In the future, we may want
+			 * to version the pNFS datasets.
+			 */
 		}
 		error = dmu_objset_create(zc->zc_name, type, NULL,
 		    is_insensitive ? DS_FLAG_CI_DATASET : 0, cbfunc, &zct);

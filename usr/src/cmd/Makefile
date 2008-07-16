@@ -134,6 +134,7 @@ COMMON_SUBDIRS=		\
 	dispadmin	\
 	dladm		\
 	dmesg		\
+	dserv		\
 	dtrace		\
 	du		\
 	dumpadm		\
@@ -552,6 +553,7 @@ MSGSUBDIRS=		\
 	diff		\
 	diffmk		\
 	dladm		\
+	dserv		\
 	du		\
 	dumpcs		\
 	ed		\

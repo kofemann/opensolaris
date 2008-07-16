@@ -1,0 +1,60 @@
+#
+# CDDL HEADER START
+#
+# The contents of this file are subject to the terms of the
+# Common Development and Distribution License (the "License").
+# You may not use this file except in compliance with the License.
+#
+# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+# or http://www.opensolaris.org/os/licensing.
+# See the License for the specific language governing permissions
+# and limitations under the License.
+#
+# When distributing Covered Code, include this CDDL HEADER in each
+# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+# If applicable, add the following below this CDDL HEADER, with the
+# fields enclosed by brackets "[]" replaced with your own identifying
+# information: Portions Copyright [yyyy] [name of copyright owner]
+#
+# CDDL HEADER END
+#
+#
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Use is subject to license terms.
+#
+# ident	"%Z%%M%	%I%	%E% SMI"
+#
+
+SUNWprivate_1.1 {
+    global:
+	dserv_log;
+	dserv_handle_create;
+	dserv_handle_destroy;
+	dserv_error;
+	dserv_error_reset;
+	dserv_strerror;
+	dserv_setinstance;
+	dserv_dropinstance;
+	dserv_myinstance;
+	dserv_enable;
+	dserv_disable;
+	dserv_maintenance;
+	dserv_refresh;
+	dserv_create_instance;
+	dserv_destroy_instance;
+	dserv_set_pool_id;
+	dserv_addprop;
+	dserv_dropprop;
+	dserv_firstpool;
+	dserv_nextpool;
+	dserv_getmds;
+	dserv_kmod_open;
+	dserv_kmod_regpool;
+	dserv_kmod_setmds;
+	dserv_kmod_svc;
+	dserv_kmod_setport;
+	dserv_kmod_reportavail;
+	dserv_kmod_instance_shutdown;
+    local:
+	*;
+};

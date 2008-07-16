@@ -371,6 +371,9 @@ extern int clnt_clts_kcreate(struct knetconfig *config, struct netbuf *addr,
 extern int clnt_cots_kcreate(dev_t dev, struct netbuf *addr, int family,
 	rpcprog_t, rpcvers_t, uint_t max_msgsize, struct cred *cred,
 	CLIENT **ncl);
+
+extern void clnt_cots_cb_list_nuke(queue_t *q);
+
 /*
  * kRPC internal function. Not for general use. Subject to rapid change.
  */
@@ -404,8 +407,8 @@ extern void clnt_rdma_kinit(CLIENT *h, char *proto, void *handle,
 /*
  * kRPC internal function. Not for general use. Subject to rapid change.
  */
-extern bool_t clnt_dispatch_notify(mblk_t *, zoneid_t);
-
+extern bool_t clnt_dispatch_notify(mblk_t *, zoneid_t, uint32_t);
+extern bool_t clnt_dir_xid(mblk_t *, uint32_t *, uint32_t *);
 /*
  * kRPC internal function. Not for general use. Subject to rapid change.
  */
@@ -461,6 +464,13 @@ extern void clnt_cots_fini(void);
  * kRPC internal function. Not for general use. Subject to rapid change.
  */
 extern void clnt_clts_dispatch_notify(mblk_t *, int, zoneid_t);
+
+/*
+ * kRPC internal function. Not for general use. Subject to rapid change.
+ */
+
+extern int connmgr_cb_create(void *, rpcprog_t, rpcvers_t, int, void *);
+extern	void connmgr_cb_destroy(queue_t *);
 
 extern void rpc_poptimod(struct vnode *);
 extern int kstr_push(struct vnode *, char *);
@@ -652,17 +662,55 @@ typedef enum {
 /*
  * Connection oriented only control operation.
  */
-#define	CLSET_PROGRESS		10000	/* Report RPC_INPROGRESS if a request */
-					/* has been sent but no reply */
-					/* received yet. */
-#define	CLSET_BCAST		10001	/* Set RPC Broadcast hint */
-#define	CLGET_BCAST		10002	/* Get RPC Broadcast hint */
-#define	CLSET_NODELAYONERR	10003	/* Set enable/disable of delay on */
-					/* connection setup error	  */
-#define	CLGET_NODELAYONERR	10004	/* Get enable/disable of delay on */
-					/* connection setup error	  */
-#define	CLSET_BINDRESVPORT	10005	/* Set preference for reserve port */
-#define	CLGET_BINDRESVPORT	10006	/* Get preference for reserve port */
+#define	CLSET_PROGRESS			10000	/* Report RPC_INPROGRESS if a */
+						/* request has been sent but */
+						/* no reply received yet. */
+
+#define	CLSET_BCAST			10001	/* Set RPC Broadcast hint */
+#define	CLGET_BCAST			10002	/* Get RPC Broadcast hint */
+
+#define	CLSET_NODELAYONERR		10003	/* Set enable/disable of */
+						/* delay on connection setup */
+						/* error */
+
+#define	CLGET_NODELAYONERR		10004	/* Get enable/disable of */
+						/* delay on connection */
+						/* setup error */
+
+#define	CLSET_BINDRESVPORT		10005	/* Set preference for */
+						/* reserve port */
+
+#define	CLGET_BINDRESVPORT		10006	/* Get preference for */
+						/* reserve port */
+
+#define	CLSET_CBCLIENT			10007	/* Use callback conn */
+						/* nfs server side only */
+
+#define	CLSET_CBSERVER_SETUP		10008	/* Init back channel info */
+#define	CLSET_CBSERVER_CLEAR		10009	/* Clear bc setup flags */
+#define	CLSET_BACKCHANNEL		10010	/* Use backchannel connection */
+#define	CLSET_BACKCHANNEL_CLEAR		10011	/* Clear backchannel flag */
+#define	CLSET_TAG			10012	/* set rpc tags */
+#define	CLSET_TAG_CLEAR			10013	/* clear rpc tags */
+#define	CLSET_TAG_SWAP			10014	/* swap the tags */
+#define	CLSET_CB_TEST			10015	/* used to test cb conn's */
+						/* for a specific tag */
+
+#define	CLGET_CB_UNTESTED		10016	/* return untested */
+						/* callback connections */
+
+#define	CLSET_CB_TEST_CLEAR		10017	/* clear previous flag */
+#define	CLSET_NON_BIRPC			10018	/* non bi-directional rpc */
+#define	CLSET_BINDCONN_TO_TAG		10019	/* associate a connection */
+						/* with the tag */
+#define	CLSET_CLEAR_BINDCONN		10020	/* clear the previous flag */
+#define	CLSET_TAG_CONN_UNBIND		10021	/* remove associated conn */
+						/* for the tag */
+#define	CLSET_TAG_DESTROY		10022	/* destroy the tag and */
+						/* dis-associate any conn */
+#define	CLSET_CBSERVER_CLEANUP		10023	/* clear cbinfo in a */
+						/* tags conn */
+
 #endif
 
 /*

@@ -41,6 +41,7 @@
 #include <sys/disp.h>
 #include <sys/list.h>
 #include <sys/sdt.h>
+#include <nfs/nfs4_clnt_impl.h>
 
 extern r4hashq_t *rtable4;
 
@@ -158,6 +159,9 @@ static void reclaim_one_lock(vnode_t *, flock64_t *, nfs4_error_t *, int *);
 static void recov_bad_seqid(recov_info_t *);
 static void recov_badstate(recov_info_t *, vnode_t *, nfsstat4);
 static void recov_clientid(recov_info_t *, nfs4_server_t *);
+static void recov_session(recov_info_t *, nfs4_server_t *);
+static void recov_badsession(recov_info_t *, nfs4_server_t *);
+static void recov_bc2session(recov_info_t *, nfs4_server_t *);
 static void recov_done(mntinfo4_t *, recov_info_t *);
 static void recov_filehandle(nfs4_recov_t, mntinfo4_t *, vnode_t *);
 static void recov_newserver(recov_info_t *, nfs4_server_t **, bool_t *);
@@ -211,8 +215,10 @@ nfs4_needs_recovery(nfs4_error_t *ep, bool_t stateful, vfs_t *vfsp)
 		 */
 		return (stateful);
 	}
+
 	if (ep->error != 0)
 		return (0);
+
 
 	/* stat values are listed alphabetically */
 	/*
@@ -234,6 +240,17 @@ nfs4_needs_recovery(nfs4_error_t *ep, bool_t stateful, vfs_t *vfsp)
 	case NFS4ERR_STALE_STATEID:
 	case NFS4ERR_WRONGSEC:
 	case NFS4ERR_STALE:
+
+	/*
+	 * Session related errors
+	 */
+
+	case NFS4ERR_BADSESSION:
+	case NFS4ERR_BADSLOT:
+	case NFS4ERR_BAD_HIGH_SLOT:
+	case NFS4ERR_CONN_NOT_BOUND_TO_SESSION:
+	case NFS4ERR_SEQ_MISORDERED:
+	case NFS4ERR_SEQ_FALSE_RETRY:
 		recov = 1;
 		break;
 #ifdef DEBUG
@@ -406,6 +423,7 @@ static void
 start_recovery(recov_info_t *recovp, mntinfo4_t *mi,
     vnode_t *vp1, vnode_t *vp2, nfs4_server_t *sp)
 {
+	int is_recov = 0;
 	NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
 	    "start_recovery: mi %p, what %s", (void*)mi,
 	    nfs4_recov_action_to_str(recovp->rc_action)));
@@ -416,6 +434,10 @@ start_recovery(recov_info_t *recovp, mntinfo4_t *mi,
 	 */
 	VFS_HOLD(mi->mi_vfsp);
 	MI4_HOLD(mi);
+	mutex_enter(&mi->mi_lock);
+	is_recov = (curthread == mi->mi_recovthread);
+	mutex_exit(&mi->mi_lock);
+
 again:
 	switch (recovp->rc_action) {
 	case NR_FAILOVER:
@@ -564,6 +586,67 @@ again:
 	case NR_LOST_STATE_RQST:
 	case NR_LOST_LOCK:
 		nfs4_enqueue_lost_rqst(recovp, mi);
+		break;
+
+	case NR_BADSESSION:
+	case NR_BC2S:
+		/*
+		 * sp == NULL means the calling thread could not find a
+		 * nfs4_server_t, possibly because NFS4_THREAD_EXIT is set.
+		 * Don't start a new session if server is on the way out.
+		 */
+		if (sp == NULL)
+			goto out_no_thread;
+
+		/*
+		 * If nobody else is working on recovery, mark the
+		 * session as being no longer set. Then mark the specific
+		 * filesystem being worked on.
+		 */
+		if (!nfs4_server_in_recovery(sp) || is_recov) {
+			mutex_enter(&sp->s_lock);
+			if (recovp->rc_action == NR_BC2S) {
+				sp->s_flags |= N4S_NEED_BC2S;
+			} else {
+				/* NR_BADSESSION case */
+
+				sp->s_flags &= ~N4S_SESSION_CREATED;
+
+				/*
+				 * The session is dead and we are going
+				 * in recovery -- signal the sequence hb
+				 * thread to exit.
+				 */
+
+				sp->seqhb_flags |= NFS4_SEQHB_EXIT;
+
+				/*
+				 * sequence heartbeat thread releases the lists
+				 * reference to the nfs4_server. But we need the
+				 * nfs4_server to stick around, so add an extra
+				 * reference here.
+				 * XXX Need a double check on the requirement of
+				 * this ugliness.
+				 */
+				sp->s_refcnt++;
+				cv_broadcast(&sp->cv_thread_exit);
+			}
+			mutex_exit(&sp->s_lock);
+		}
+
+		ASSERT(nfs_rw_lock_held(&mi->mi_recovlock, RW_READER) ||
+		    nfs_rw_lock_held(&mi->mi_recovlock, RW_WRITER));
+
+		mutex_enter(&mi->mi_lock);
+
+		if (recovp->rc_action == NR_BC2S)
+			mi->mi_recovflags |= MI4R_NEED_BC2S;
+		else
+			mi->mi_recovflags |= MI4R_NEED_SESSION;
+
+		if (recovp->rc_srv_reboot)
+			mi->mi_recovflags |= MI4R_SRV_REBOOT;
+		mutex_exit(&mi->mi_lock);
 		break;
 
 	default:
@@ -852,6 +935,7 @@ get_sp:
 				nfs_rw_exit(&sp->s_recovlock);
 				mutex_enter(&sp->s_lock);
 				sp->s_otw_call_count--;
+				cv_broadcast(&sp->s_cv_otw_count);
 				mutex_exit(&sp->s_lock);
 				nfs4_server_rele(sp);
 				sp = NULL;
@@ -926,6 +1010,7 @@ out:
 	if (sp != NULL) {
 		mutex_enter(&sp->s_lock);
 		sp->s_otw_call_count--;
+		cv_broadcast(&sp->s_cv_otw_count);
 		mutex_exit(&sp->s_lock);
 		nfs4_server_rele(sp);
 		rsp->rs_sp = NULL;
@@ -1052,6 +1137,17 @@ wait_for_recovery(mntinfo4_t *mi, nfs4_op_hint_t op_hint)
 		if (OH_IS_STATE_RELE(op_hint) &&
 		    (curthread->t_proc_flag & TP_LWPEXIT))
 			break;
+		/*
+		 * don't wait for clientid/session recovery in the case of
+		 * OP_SEQUENCE coming from sequence_heart_beat_thread.
+		 */
+
+		if ((op_hint == OH_SEQUENCE) &&
+		    ((mi->mi_recovflags & MI4R_NEED_CLIENTID) ||
+		    (mi->mi_recovflags & MI4R_NEED_SESSION))) {
+			error = EDEADLK;
+			break;
+		}
 
 		if (lwp != NULL)
 			lwp->lwp_nostop++;
@@ -1201,6 +1297,7 @@ nfs4_recov_thread(recov_info_t *recovp)
 	bool_t recov_fail = FALSE;
 	callb_cpr_t cpr_info;
 	kmutex_t cpr_lock;
+	int recov_sess;
 
 	nfs4_queue_event(RE_START, mi, NULL, mi->mi_recovflags,
 	    recovp->rc_vp1, recovp->rc_vp2, 0, NULL, 0, TAG_NONE, TAG_NONE,
@@ -1231,6 +1328,7 @@ nfs4_recov_thread(recov_info_t *recovp)
 	 */
 
 	do {
+		recov_sess = 0;
 		mutex_enter(&mi->mi_lock);
 		if (FS_OR_ZONE_GONE4(mi->mi_vfsp)) {
 			bool_t activesrv;
@@ -1296,7 +1394,7 @@ nfs4_recov_thread(recov_info_t *recovp)
 					 * dead, so that nobody will attach
 					 * a new filesystem.
 					 */
-					nfs4_mark_srv_dead(sp);
+					nfs4_mark_srv_dead(sp, 0);
 				}
 			}
 			if (sp != NULL)
@@ -1319,8 +1417,8 @@ nfs4_recov_thread(recov_info_t *recovp)
 			mutex_exit(&mi->mi_lock);
 
 		/*
-		 * Check if we need to recover the clientid.  This
-		 * must be done before file and lock recovery, and it
+		 * Check if we need to recover the clientid and/or session.
+		 * This must be done before file and lock recovery, and it
 		 * potentially affects the recovery threads for other
 		 * filesystems, so it gets special treatment.
 		 */
@@ -1340,6 +1438,41 @@ nfs4_recov_thread(recov_info_t *recovp)
 				mutex_exit(&mi->mi_lock);
 				mutex_exit(&sp->s_lock);
 			}
+
+			/*
+			 * Recover a session in case v4.1. If we've already
+			 * tried to recover the clientid and failed, then
+			 * don't bother. (modelled like the clientid
+			 * recovery above)
+			 */
+
+			if (NFS41_SERVER(sp)) {
+				mutex_enter(&sp->s_lock);
+				if (NFS4_NEED_SESS_RECOV(sp) &&
+				    !(mi->mi_flags & MI4_RECOV_FAIL)) {
+					mutex_exit(&sp->s_lock);
+
+					recov_session(recovp, sp);
+					/*
+					 * session recovery may have failed due
+					 * to a stale CLIENTID. Make one more
+					 * pass to correct that.
+					 */
+					continue;
+				} else {
+					/*
+					 * If another recovery thread has
+					 * already completed this recovery,
+					 * unset mi flags.
+					 */
+					mutex_enter(&mi->mi_lock);
+					mi->mi_recovflags &= ~MI4R_NEED_SESSION;
+					mi->mi_recovflags &= ~MI4R_NEED_BC2S;
+					mutex_exit(&mi->mi_lock);
+					mutex_exit(&sp->s_lock);
+				}
+			}
+
 		}
 
 		/*
@@ -1418,6 +1551,20 @@ nfs4_recov_thread(recov_info_t *recovp)
 			nfs_rw_exit(&mi->mi_recovlock);
 		} else {
 			mutex_exit(&mi->mi_lock);
+		}
+
+
+		/*
+		 * If we received sessions related errors in the middle
+		 * of other recovery actions, then loop again to recover.
+		 */
+		if ((sp != NULL) && NFS41_SERVER(sp)) {
+			mutex_enter(&sp->s_lock);
+			recov_sess = NFS4_NEED_SESS_RECOV(sp);
+			mutex_exit(&sp->s_lock);
+
+			if (recov_sess)
+				continue;
 		}
 
 		/*
@@ -1742,12 +1889,16 @@ recov_clientid(recov_info_t *recovp, nfs4_server_t *sp)
 
 	if (still_stale) {
 		nfs4_error_t n4e;
+		/*
+		 * First cleanup old session.
+		 */
+		if (NFS41_SERVER(sp))
+			nfs4_cleanup_oldsession(sp);
 
 		nfs4_error_zinit(&n4e);
-		nfs4setclientid(mi, kcred, TRUE, &n4e);
+		nfs4_set_clientid(mi, kcred, TRUE, &n4e);
 		error = n4e.error;
 		if (error != 0) {
-
 			/*
 			 * nfs4setclientid may have set MI4R_NEED_NEW_SERVER,
 			 * if so, just return and let recov_thread drive
@@ -1825,6 +1976,120 @@ recov_clientid(recov_info_t *recovp, nfs4_server_t *sp)
 
 		nfs_rw_exit(&sp->s_recovlock);
 	}
+}
+
+static void
+recov_session(recov_info_t *recovp, nfs4_server_t *np)
+{
+	mntinfo4_t *mi = recovp->rc_mi;
+	int bad_sess = 0;
+	int needbc2s = 0;
+
+	ASSERT(np != NULL);
+
+	(void) nfs_rw_enter_sig(&np->s_recovlock, RW_WRITER, 0);
+	(void) nfs_rw_enter_sig(&mi->mi_recovlock, RW_WRITER, 0);
+	mutex_enter(&np->s_lock);
+	bad_sess = ((np->s_flags & N4S_SESSION_CREATED) == 0);
+	needbc2s = (np->s_flags & N4S_NEED_BC2S);
+	mutex_exit(&np->s_lock);
+
+	/*
+	 * Another recovery thread already took care of it.
+	 * nothing to do.
+	 */
+	if (!bad_sess && !needbc2s) {
+		mutex_enter(&mi->mi_lock);
+		mi->mi_recovflags &= ~MI4R_NEED_SESSION;
+		mi->mi_recovflags &= ~MI4R_NEED_BC2S;
+		mutex_exit(&mi->mi_lock);
+		nfs_rw_exit(&mi->mi_recovlock);
+		nfs_rw_exit(&np->s_recovlock);
+		return;
+	}
+
+	if (bad_sess)
+		recov_badsession(recovp, np);
+	else
+		recov_bc2session(recovp, np);
+
+	nfs_rw_exit(&mi->mi_recovlock);
+	nfs_rw_exit(&np->s_recovlock);
+
+}
+
+static void
+recov_badsession(recov_info_t *recovp, nfs4_server_t *np)
+{
+	mntinfo4_t *mi = recovp->rc_mi;
+	nfs4_error_t e;
+
+	/*
+	 * Cleanup the current session.
+	 */
+
+	nfs4_cleanup_oldsession(np);
+
+	nfs4create_session(mi, mi->mi_curr_serv, kcred, np, &e);
+
+	/*
+	 * XXX
+	 * Currently all the CREATE_SESSION errors are handled
+	 * as if  (e.stat == NFS4ERR_STALE_CLIENTID), ie. we
+	 * handle it by performing a EXCHANGEID and start fresh.
+	 * We will need to handle some of the other CREATE_SESSION
+	 * errors differently.
+	 */
+
+	if (e.stat) {
+		mutex_enter(&np->s_lock);
+		np->s_flags &= ~N4S_CLIENTID_SET;
+		mutex_exit(&np->s_lock);
+		mutex_enter(&mi->mi_lock);
+		mi->mi_recovflags |= MI4R_NEED_CLIENTID;
+		if (recovp->rc_srv_reboot)
+			mi->mi_recovflags |= MI4R_SRV_REBOOT;
+		mutex_exit(&mi->mi_lock);
+	}
+
+	mutex_enter(&mi->mi_lock);
+	mi->mi_recovflags &= ~MI4R_NEED_SESSION;
+	mi->mi_recovflags &= ~MI4R_NEED_BC2S;
+	mutex_exit(&mi->mi_lock);
+}
+
+static void
+recov_bc2session(recov_info_t *recovp, nfs4_server_t *np)
+{
+	channel_dir_from_client4 dir;
+	int error;
+	mntinfo4_t *mi = recovp->rc_mi;
+
+	mutex_enter(&np->s_lock);
+
+	/*
+	 * If not bi-dir rpc, then bind to fore channel only
+	 */
+	if (!np->ssx.bi_rpc)
+		dir = CDFC4_FORE;
+	else
+		dir = CDFC4_FORE_OR_BOTH;
+
+	if ((error = nfs4bind_conn_to_session(np, NULL, recovp->rc_mi,
+	    kcred, dir))) {
+		DTRACE_PROBE3(nfsc__e__recovbc2s, char *,
+		    "bind_conn_to_session failed", int, error,
+		    channel_dir_from_client4, dir);
+		return;
+	}
+
+	/* Successful bc2s */
+	np->s_flags &= ~N4S_NEED_BC2S;
+	mutex_exit(&np->s_lock);
+
+	mutex_enter(&mi->mi_lock);
+	mi->mi_recovflags &= ~MI4R_NEED_BC2S;
+	mutex_exit(&mi->mi_lock);
 }
 
 /*
@@ -2471,6 +2736,8 @@ recov_openfiles(recov_info_t *recovp, nfs4_server_t *sp)
 	fattr4_change pre_change;
 
 	ASSERT(sp != NULL);
+
+	pnfs_trash_devtree(mi);
 
 	/*
 	 * This check is to allow a 10ms pause before we reopen files
@@ -3194,6 +3461,23 @@ errs_to_action(recov_info_t *recovp,
 		case NFS4ERR_STALE:
 			action = NR_STALE;
 			break;
+
+		/*
+		 * The following errors related to sessions are best
+		 * handled with destroying and re-creating the session
+		 * again.
+		 */
+		case NFS4ERR_BADSLOT:
+		case NFS4ERR_BADSESSION:
+		case NFS4ERR_BAD_HIGH_SLOT:
+		case NFS4ERR_SEQ_FALSE_RETRY:
+		case NFS4ERR_SEQ_MISORDERED:
+			action = NR_BADSESSION;
+			break;
+		case NFS4ERR_CONN_NOT_BOUND_TO_SESSION:
+			action = NR_BC2S;
+			break;
+
 		default:
 			nfs4_queue_event(RE_UNEXPECTED_STATUS, mi, NULL, 0,
 			    NULL, NULL, stat, NULL, 0, TAG_NONE, TAG_NONE,

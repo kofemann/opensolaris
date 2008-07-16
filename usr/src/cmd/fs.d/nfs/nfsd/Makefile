@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # ident	"%Z%%M%	%I%	%E% SMI"
@@ -31,7 +31,7 @@ ATTMK=		$(TYPEPROG)
 
 include		../../Makefile.fstype
 
-LDLIBS +=	-lnsl -lnvpair
+LDLIBS +=	-lnfs -lnsl -lnvpair
 
 LOCAL=		nfsd.o
 OBJS=		$(LOCAL) nfs_tbind.o thrpool.o

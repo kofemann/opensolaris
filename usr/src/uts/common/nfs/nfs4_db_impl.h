@@ -2,9 +2,8 @@
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
- * Common Development and Distribution License, Version 1.0 only
- * (the "License").  You may not use this file except in compliance
- * with the License.
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
  * or http://www.opensolaris.org/os/licensing.
@@ -20,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2004 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -37,14 +36,6 @@
 #ifdef	__cplusplus
 extern "C" {
 #endif
-
-#define	SEARCH_DEBUG	0x0001
-#define	CREATE_DEBUG	0x0002
-#define	CACHED_DEBUG	0x0004
-#define	DESTROY_DEBUG	0x0008
-#define	REAP_DEBUG	0x0010
-#define	OTHER_DEBUG	0x0020
-#define	WALK_DEBUG	0x0040
 
 /*
  * A database is made up of a collection of tables.
@@ -67,6 +58,7 @@ struct rfs4_dbe {
 	unsigned invalid:1;		/* invalid/"freed" entry */
 	unsigned reserved:31;
 	time_t	 time_rele;		/* Time of last rele */
+	caddr_t  inval_hint;
 	id_t	 id;			/* unique identifier */
 	kcondvar_t cv[1];
 	rfs4_entry_t data;
@@ -108,17 +100,18 @@ struct rfs4_table {
 	uint32_t maxcnt;			/* max # of indices */
 	uint32_t ccnt;				/* # of creatable entries */
 	rfs4_index_t *indices;			/* list of indices */
-	/* Given entry and data construct entry */
-	bool_t (*create)(rfs4_entry_t, void *data);
+	/* entry constructor */
+	bool_t (*create)(nfs_server_instance_t *, rfs4_entry_t, void *data);
 	void (*destroy)(rfs4_entry_t);		/* Destroy entry */
 	bool_t (*expiry)(rfs4_entry_t);		/* Has this entry expired */
 	kmem_cache_t *mem_cache;		/* Cache for table entries */
-	uint32_t debug;				/* Debug Flags */
+	uint32_t debug;			/* table Flags */
 	/* set of vars used for managing the reaper thread */
 	unsigned	reaper_shutdown:1;	/* table shutting down? */
 	kcondvar_t reaper_wait;			/* reaper thread waits here */
 	kmutex_t	reaper_cv_lock;		/* lock used for cpr wait */
 	callb_cpr_t	reaper_cpr_info;	/* cpr the reaper thread */
+	nfs_server_instance_t *instp;
 };
 
 struct rfs4_database {

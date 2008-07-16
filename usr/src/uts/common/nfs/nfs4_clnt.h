@@ -48,6 +48,7 @@
 #include <sys/avl.h>
 #include <sys/list.h>
 #include <rpc/auth.h>
+#include <sys/taskq.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -55,11 +56,28 @@ extern "C" {
 
 #define	NFS4_SIZE_OK(size)	((size) <= MAXOFFSET_T)
 
+/* Client Sequence Heartbeat Flag bits */
+#define	NFS4_SEQHB_STARTED		1
+#define	NFS4_SEQHB_EXITING		2
+#define	NFS4_SEQHB_EXIT			4
+#define	NFS4_SEQHB_DESTROY		8
+
 /* Four states of nfs4_server's lease_valid */
 #define	NFS4_LEASE_INVALID		0
 #define	NFS4_LEASE_VALID		1
 #define	NFS4_LEASE_UNINITIALIZED	2
 #define	NFS4_LEASE_NOT_STARTED		3
+
+/*
+ * rfs4call() flags
+ * NOTE: rfscall() can take RFSCALL_SOFT which is defined as 1 so start at 2
+ */
+#define	RFS4CALL_SETCB	0x00000002
+#define	RFS4CALL_NOSEQ	0x00000004	/* Don't add sequence op (4.1+ only) */
+
+#define	NFS4_TAG_SWAP		0x001
+#define	NFS4_TAG_DESTROY	0x002
+#define	NFS4_CBSERVER_CLEANUP	0x004
 
 /* flag to tell the renew thread it should exit */
 #define	NFS4_THREAD_EXIT	1
@@ -122,6 +140,21 @@ extern "C" {
  */
 #define	NFS4_FRC_UNMT_ERR(err, vfsp) \
 	((err) == EIO && FS_OR_ZONE_GONE4((vfsp)))
+
+
+/*
+ * Returns TRUE if there are sessions related recoverable errors
+ */
+#define	NFS4_NEED_SESS_RECOV(np) \
+	    (!(np->s_flags & N4S_SESSION_CREATED) || \
+	    (np->s_flags & N4S_NEED_BC2S))
+
+#define	NFS41_SERVER(np) (np->s_minorversion == 1)
+
+/*
+ * Client zone key for global zone list of callback info.
+ */
+zone_key_t nfs4clnt_zone_key;
 
 /*
  * Due to the way the address space callbacks are used to execute a delmap,
@@ -352,7 +385,18 @@ typedef enum nfs4_tag_type {
 	TAG_SETCLIENTID,
 	TAG_SETCLIENTID_CF,
 	TAG_SYMLINK,
-	TAG_WRITE
+	TAG_WRITE,
+	TAG_EXCHANGE_ID,			/* XXX - rick */
+	TAG_CREATE_SESSION,
+	TAG_BIND_CONN_TO_SESSION,
+	TAG_PNFS_READ,
+	TAG_PNFS_WRITE,
+	TAG_PNFS_LAYOUTGET,
+	TAG_PNFS_LAYOUTRETURN,
+	TAG_PNFS_GETDEVLIST,
+	TAG_SEQUENCE,
+	TAG_DESTROY_SESSION,
+	TAG_PNFS_GETDEVINFO
 } nfs4_tag_type_t;
 
 #define	NFS4_TAG_INITIALIZER	{				\
@@ -473,7 +517,29 @@ typedef enum nfs4_tag_type {
 		{TAG_SYMLINK,		"symlink",		\
 			{0x73796d6c, 0x696e6b20, 0x20202020}},	\
 		{TAG_WRITE,		"write",		\
-			{0x77726974, 0x65202020, 0x20202020}}	\
+			{0x77726974, 0x65202020, 0x20202020}},	\
+		{TAG_EXCHANGE_ID,	"exchange_id",	\
+			{0x65786368, 0x616e6765, 0x5f696420}},	\
+		{TAG_CREATE_SESSION,	"create_session",	\
+			{0x63726561, 0x74655f73, 0x65737369}},	\
+		{TAG_BIND_CONN_TO_SESSION,	"bind_conn_to_session", \
+			{0x62696e64, 0x5f636f6e, 0x6e5f746f}},	\
+		{TAG_PNFS_READ,		"pnfs read",		\
+			{0x706e6673, 0x20726561, 0x64202020}},	\
+		{TAG_PNFS_WRITE,		"pnfs write",	\
+			{0x706e6673, 0x20777269, 0x74652020}},	\
+		{TAG_PNFS_LAYOUTGET,		"layoutget",	\
+			{0x6c61796f, 0x75746765, 0x74202020}},	\
+		{TAG_PNFS_LAYOUTRETURN,		"layoutreturn",	\
+			{0x6c61796f, 0x75747265, 0x7475726e}},	\
+		{TAG_PNFS_GETDEVLIST,		"pnfs devlist",	\
+			{0x706e6673, 0x20646576, 0x6c697374}},	\
+		{TAG_SEQUENCE,			"sequence",	\
+			{0x73657175, 0x656e6365, 0x20202020}},	\
+		{TAG_DESTROY_SESSION,		"destroy session", \
+			{0x64657374, 0x726f7920, 0x73657373}},	\
+		{TAG_PNFS_GETDEVINFO,		"getdeviceinf", \
+			{0x67657464, 0x65766963, 0x65696e66}}	\
 	}
 
 /*
@@ -602,9 +668,16 @@ typedef struct servinfo4 {
 	char		  *sv_hostname;	/* server's hostname */
 	int		   sv_hostnamelen;  /* server's hostname length */
 	fattr4_fsid		sv_fsid;    /* fsid of shared obj	*/
-	fattr4_supported_attrs	sv_supp_attrs;
+	attrmap4	sv_supp_attrs;
 	struct servinfo4  *sv_next;	/* next in list */
 	nfs_rwlock_t	   sv_lock;
+	/*
+	 * XXXrsb - the following (sv_ds_n4sp) is likely to change.
+	 * If the servinfo4 refers to a pnfs data server, then the following
+	 * is a pointer to the corresponding nfs4_server.  Otherwise, NULL.
+	 */
+	struct nfs4_server *sv_ds_n4sp;
+	attrmap4	sv_supp_exclcreat;
 } servinfo4_t;
 
 /* sv_flags fields */
@@ -612,6 +685,7 @@ typedef struct servinfo4 {
 #define	SV4_TRYSECDEFAULT	0x002	/* try a default flavor */
 #define	SV4_NOTINUSE		0x004	/* servinfo4_t had fatal errors */
 #define	SV4_ROOT_STALE		0x008	/* root vnode got ESTALE */
+#define	SV4_ISA_DS		0x010	/* this is a data server! */
 
 /*
  * Lock call types.  See nfs4frlock().
@@ -701,7 +775,9 @@ typedef enum {
 	NR_DELAY,
 	NR_LOST_LOCK,
 	NR_LOST_STATE_RQST,
-	NR_STALE
+	NR_STALE,
+	NR_BADSESSION,
+	NR_BC2S
 } nfs4_recov_t;
 
 /*
@@ -903,6 +979,7 @@ typedef struct mntinfo4 {
 	struct servinfo4 *mi_curr_serv; /* current server */
 	struct nfs4_sharedfh *mi_rootfh; /* root filehandle */
 	struct nfs4_sharedfh *mi_srvparentfh; /* root's parent on server */
+	uint32_t	mi_minorversion;
 	kcondvar_t	mi_failover_cv;	/* failover synchronization */
 	struct vfs	*mi_vfsp;	/* back pointer to vfs */
 	enum vtype	mi_type;	/* file type of the root vnode */
@@ -1002,6 +1079,15 @@ typedef struct mntinfo4 {
 	avl_tree_t			mi_filehandles;
 
 	/*
+	 * pNFS support
+	 */
+	kmutex_t	mi_pnfs_lock;
+	avl_tree_t	mi_devid_tree;
+	taskq_t		*mi_pnfs_io_taskq;
+	taskq_t		*mi_pnfs_other_taskq;
+	clock_t		mi_last_getdevicelist;
+
+	/*
 	 * Debug message queue.
 	 */
 	list_t			mi_msg_list;
@@ -1023,6 +1109,7 @@ typedef struct mntinfo4 {
 	 */
 	struct nfs4_ephemeral		*mi_ephemeral;
 	struct nfs4_ephemeral_tree	*mi_ephemeral_tree;
+	attrvers_t			mi_attrvers;
 } mntinfo4_t;
 
 /*
@@ -1042,6 +1129,7 @@ typedef struct mntinfo4 {
  *	MI4_EPHEMERAL_RECURSED	 an ephemeral mount being unmounted
  *				 due to a recursive call - no need
  *				 for additional recursion
+ *	MI4_PNFS		 server supports pNFS
  *	MI4_ACL			 server supports NFSv4 ACLs
  *	MI4_MIRRORMOUNT		 is a mirrormount
  *	MI4_NOPRINT		 don't print messages
@@ -1075,7 +1163,7 @@ typedef struct mntinfo4 {
 #define	MI4_ACL			 0x2000
 /* MI4_MIRRORMOUNT is also defined in nfsstat.c */
 #define	MI4_MIRRORMOUNT		 0x4000
-/* 0x8000 is available */
+#define	MI4_PNFS		0x8000
 /* 0x10000 is available */
 #define	MI4_NOPRINT		 0x20000
 #define	MI4_DIRECTIO		 0x40000
@@ -1118,6 +1206,8 @@ typedef struct mntinfo4 {
 #define	MI4R_SRV_REBOOT		0x20	/* server has rebooted */
 #define	MI4R_LOST_STATE		0x40
 #define	MI4R_BAD_SEQID		0x80
+#define	MI4R_NEED_SESSION	0x100
+#define	MI4R_NEED_BC2S		0x200
 
 #define	MI4_HOLD(mi) {		\
 	mi_hold(mi);		\
@@ -1126,6 +1216,8 @@ typedef struct mntinfo4 {
 #define	MI4_RELE(mi) {		\
 	mi_rele(mi);		\
 }
+
+#define	NFS4_MINORVERSION(mi)	(mi->mi_minorversion)
 
 /*
  * vfs pointer to mount info
@@ -1207,6 +1299,64 @@ typedef struct mntinfo4 {
  */
 struct nfs4_callback_globals;
 
+typedef struct nfs41_cb_slot {
+	sequenceid4		cb_seq;
+	int			cb_slot_id;
+	int			cb_inuse;
+	kmutex_t		cb_lock;
+	void			*cb_response;
+} nfs41_cb_slot_t;
+
+typedef struct nfs4_slot {
+	sequenceid4		slot_seqid;
+	int			slot_id;
+	int			slot_inuse;
+	int			slot_bad;
+} nfs4_slot_t;
+
+/*
+ * The nfs4_fsidlt_t will be the structure inserted as a node onto
+ * the nfs4_server_t's fsidlt (fsid layout tree).  There will be one
+ * per fsid that has done a layoutget.  Note that the fsid structures,
+ * once added to the fsidlt, will remain there until the nfs4_server_t
+ * is destroyed, even if all layouts have been returned for the fsid.
+ *
+ * The locking order is that, the s_lt_lock in the nfs4_server_t will
+ * lock the fsidlt tree.  Once the appropriate fsidlt node is found, it
+ * will be locked via its lt_rtl_lock, then the s_lt_lock can be dropped.
+ *
+ * Also note, that if the rnode4->r_statelock and the lt_rtl_lock are both
+ * required, the lt_rtl_lock must be taken out before the r_statelock
+ * and the lt_rtl_lock must be release after the r_statelock is released.
+ */
+typedef struct nfs4_fsidlt
+{
+	fsid4		lt_fsid; /* fsid */
+	avl_node_t	lt_node; /* link to nfs4_fsidlt tree */
+	kmutex_t	lt_rlt_lock; /* rnode layout tree lock */
+	avl_tree_t	lt_rlayout_tree; /* rnode layout tree by fh */
+} nfs4_fsidlt_t;
+
+typedef struct nfs4_session {
+	sessionid4		sessionid;
+	sequenceid4		sequenceid;
+	nfs4_slot_t		**slot_table;
+	int			next_slot;
+	int			slots_available;
+	int			maxslots;	/* maxslots size from server */
+	int			slot_table_size; /* Total slots in table */
+	kmutex_t		slot_lock;
+	kcondvar_t		slot_wait;	/* Wait for available slot */
+	nfs_rwlock_t		slot_table_rwlock;
+	nfs41_cb_slot_t		**cb_slot_table;
+	int			cb_slot_table_size;
+	int			bi_rpc;
+	channel_attrs4		fore_chan_attr;
+	channel_attrs4		back_chan_attr;
+	list_node_t		ssx_list;
+	struct netbuf		saddr;
+} nfs4_session_t;
+
 typedef struct nfs4_server {
 	struct nfs4_server	*forw;
 	struct nfs4_server	*back;
@@ -1215,7 +1365,14 @@ typedef struct nfs4_server {
 	uint_t			s_refcnt;
 	clientid4		clientid;	/* what we get from server */
 	nfs_client_id4		clidtosend;	/* what we send to server */
+
+	/* seqid for the next CREATE_SESSION */
+	sequenceid4		csa_seqid;
+
+	nfs4_session_t		ssx;		/* sessions extension */
+	int			seqhb_flags;
 	mntinfo4_t		*mntinfo4_list;
+	uint32_t		s_minorversion;	/* last tried minorversion */
 	int			lease_valid;
 	time_t			s_lease_time;
 	time_t			last_renewal_time;
@@ -1234,6 +1391,10 @@ typedef struct nfs4_server {
 	kcondvar_t		wait_cb_null; /* used to wait for CB_NULL */
 	zoneid_t		zoneid;	/* zone using this nfs4_server_t */
 	struct nfs4_callback_globals *zone_globals;	/* globals */
+	kcondvar_t		ssx_wait;	/* wait for destroy session */
+	servinfo4_t		*s_ds_svp; /* for dataservers, the servinfo4 */
+	kmutex_t		s_lt_lock; /* layout tree lock */
+	avl_tree_t		s_fsidlt; /* fsid layout tree */
 } nfs4_server_t;
 
 /* nfs4_server flags */
@@ -1243,9 +1404,14 @@ typedef struct nfs4_server {
 #define	N4S_CB_WAITER		0x8	/* is/has wait{ing/ed} for cb_null */
 #define	N4S_INSERTED		0x10	/* list has reference for server */
 #define	N4S_BADOWNER_DEBUG	0x20	/* bad owner err msg per client */
+#define	N4S_USE_PNFS_MDS	0x40	/* server is a pnfs MDS server */
+#define	N4S_USE_PNFS_DS		0x80	/* server is a pnfs DS server */
+#define	N4S_SESSION_CREATED	0x100	/* Session Created To Server */
+#define	N4S_EXID_FAILED		0x200	/* Exchange ID failed */
+#define	N4S_USE_NON_PNFS	0x400	/* server is a non pNFS 4.1 server */
+#define	N4S_NEED_BC2S		0x800	/* need bind_conn_to_session */
 
 #define	N4S_CB_PAUSE_TIME	10000	/* Amount of time to pause (10ms) */
-
 struct lease_time_arg {
 	time_t	lease_time;
 };
@@ -1280,7 +1446,8 @@ typedef enum {
 	OH_GETACL,
 	OH_GETATTR,
 	OH_LOOKUP,
-	OH_READDIR
+	OH_READDIR,
+	OH_SEQUENCE
 } nfs4_op_hint_t;
 
 /*
@@ -1407,6 +1574,8 @@ typedef struct nfs4_ephemeral_tree {
 
 #ifdef _KERNEL
 
+extern int	layoutcmp(const void *, const void *);
+extern void	nfs4_set_mod(vnode_t *);
 extern void	nfs4_async_manager(struct vfs *);
 extern void	nfs4_async_manager_stop(struct vfs *);
 extern void	nfs4_async_stop(struct vfs *);
@@ -1432,12 +1601,13 @@ extern int	nfs4_putpages(vnode_t *, u_offset_t, size_t, int, cred_t *);
 extern int	nfs4_setopts(vnode_t *, model_t, struct nfs_args *);
 extern void	nfs4_mnt_kstat_init(struct vfs *);
 
-extern void	rfs4call(struct mntinfo4 *, struct COMPOUND4args_clnt *,
-			struct COMPOUND4res_clnt *, cred_t *, int *, int,
-			nfs4_error_t *);
+extern void	rfs4call(struct mntinfo4 *, servinfo4_t *,
+			struct COMPOUND4args_clnt *,
+			struct COMPOUND4res_clnt *,
+			cred_t *, int *, int, nfs4_error_t *);
 extern void	nfs4_acl_fill_cache(struct rnode4 *, vsecattr_t *);
 extern int	nfs4_attr_otw(vnode_t *, nfs4_tag_type_t,
-				nfs4_ga_res_t *, bitmap4, cred_t *);
+				nfs4_ga_res_t *, attrmap4 *, cred_t *);
 
 extern void	nfs4_attrcache_noinval(vnode_t *, nfs4_ga_res_t *, hrtime_t);
 extern void	nfs4_attr_cache(vnode_t *, nfs4_ga_res_t *,
@@ -1458,7 +1628,9 @@ extern void	nfs4args_copen_free(OPEN4cargs *);
 extern void	nfs4_printfhandle(nfs4_fhandle_t *);
 
 extern void	nfs_free_mi4(mntinfo4_t *);
+extern servinfo4_t *new_servinfo4(struct knetconfig *, struct netbuf *, int);
 extern void	sv4_free(servinfo4_t *);
+
 extern void	nfs4_mi_zonelist_add(mntinfo4_t *);
 extern int	nfs4_mi_zonelist_remove(mntinfo4_t *);
 extern int 	nfs4_secinfo_recov(mntinfo4_t *, vnode_t *, vnode_t *);
@@ -1470,7 +1642,7 @@ extern void	secinfo_free(sv_secinfo_t *);
 extern void	save_mnt_secinfo(servinfo4_t *);
 extern void	check_mnt_secinfo(servinfo4_t *, vnode_t *);
 extern int	vattr_to_fattr4(vattr_t *, vsecattr_t *, fattr4 *, int,
-				enum nfs_opnum4, bitmap4 supp_mask);
+    enum nfs_opnum4, attrmap4 *, int, file_layouthint4 *);
 extern int	nfs4_putapage(vnode_t *, page_t *, u_offset_t *, size_t *,
 			int, cred_t *);
 extern void	nfs4_write_error(vnode_t *, int, cred_t *);
@@ -1483,6 +1655,7 @@ extern void	nfs4open_confirm(vnode_t *, seqid4*, stateid4 *, cred_t *,
 extern void	nfs4_error_zinit(nfs4_error_t *);
 extern void	nfs4_error_init(nfs4_error_t *, int);
 extern void	nfs4_free_args(struct nfs_args *);
+extern void	nfs4_error_set(nfs4_error_t *, enum clnt_stat, enum nfsstat4);
 
 extern void 	mi_hold(mntinfo4_t *);
 extern void	mi_rele(mntinfo4_t *);
@@ -1732,6 +1905,14 @@ typedef struct nfs4_stateid_types {
 } nfs4_stateid_types_t;
 
 /*
+ * Flags used to determine stateid we want.
+ */
+
+#define	GETSID_TRYNEXT	0x00000001	/* Try next stateid */
+#define	GETSID_LAYOUT	0x00000002	/* Need Stateid For Layoutget */
+
+
+/*
  * Per-zone data for dealing with callbacks.  Included here solely for the
  * benefit of MDB.
  */
@@ -1753,7 +1934,33 @@ struct nfs4_callback_stats {
 	kstat_named_t	return_limit_addmap;
 	kstat_named_t	deleg_recover;
 	kstat_named_t	cb_illegal;
+	kstat_named_t	cb_sequence;
 };
+
+struct nfs41_cb_info {
+	rpcprog_t		cb_prog;
+	rpcvers_t		cb_versmin;
+	rpcvers_t		cb_versmax;
+	SVCCB			*cb_rpc;
+	SVC_DISPATCH		*cb_callback;
+	CLIENT			*cb_client;
+	struct nfs4_clnt	*cb_nfscl;
+	int			cb_state;
+	kthread_t		*cb_thread;	/*  server calls */
+	kmutex_t		cb_cbconn_lock;
+	kcondvar_t		cb_cbconn_wait;	/* cbconn heartbeat */
+	int			cb_cbconn_exit;
+	int			cb_flags;
+	int			cb_refcnt;
+	kmutex_t		cb_reflock;
+	kcondvar_t		cb_destroy_wait;
+} nfs41_cb_info_t;
+
+/*
+ * cb_flags
+ */
+
+#define	NFS41_CB_THREAD_EXIT	0x01	/* signal to cbserver thread exit */
 
 struct nfs4_callback_globals {
 	kmutex_t nfs4_cb_lock;
@@ -1761,6 +1968,7 @@ struct nfs4_callback_globals {
 	int nfs4_program_hint;
 	/* this table maps the program number to the nfs4_server structure */
 	struct nfs4_server **nfs4prog2server;
+	struct nfs41_cb_info **nfs4prog2cbinfo;
 	list_t nfs4_dlist;
 	list_t nfs4_cb_ports;
 	struct nfs4_callback_stats nfs4_callback_stats;
@@ -1792,6 +2000,11 @@ typedef struct nfs4_bseqid_entry {
 	list_node_t		bs_node;
 } nfs4_bseqid_entry_t;
 
+typedef struct nfs4_tagswap {
+	sessionid4 ts_oldtag;
+	sessionid4 *ts_newtag;
+} nfs4_tagswap_t;
+
 #ifdef _KERNEL
 
 extern void	nfs4close_one(vnode_t *, nfs4_open_stream_t *, cred_t *, int,
@@ -1821,21 +2034,24 @@ extern void nfs4_setlockowner_args(lock_owner4 *, struct rnode4 *, pid_t);
 extern void	nfs4_set_open_seqid(seqid4, nfs4_open_owner_t *,
 		    nfs4_tag_type_t);
 extern void	nfs4_set_lock_seqid(seqid4, nfs4_lock_owner_t *);
-extern void	nfs4_get_and_set_next_open_seqid(nfs4_open_owner_t *,
-		    nfs4_tag_type_t);
 extern void	nfs4_end_open_seqid_sync(nfs4_open_owner_t *);
 extern int	nfs4_start_open_seqid_sync(nfs4_open_owner_t *, mntinfo4_t *);
 extern void	nfs4_end_lock_seqid_sync(nfs4_lock_owner_t *);
 extern int	nfs4_start_lock_seqid_sync(nfs4_lock_owner_t *, mntinfo4_t *);
 extern void	nfs4_setup_lock_args(nfs4_lock_owner_t *, nfs4_open_owner_t *,
-			nfs4_open_stream_t *, clientid4, locker4 *);
+			nfs4_open_stream_t *, mntinfo4_t *, locker4 *);
 extern void	nfs4_destroy_open_owner(nfs4_open_owner_t *);
 
 extern void		nfs4_renew_lease_thread(nfs4_server_t *);
+extern void		nfs4_sequence_heartbeat_thread(nfs4_server_t *);
+extern void		nfs4_cbconn_thread(nfs4_server_t *);
 extern nfs4_server_t	*find_nfs4_server(mntinfo4_t *);
 extern nfs4_server_t	*find_nfs4_server_all(mntinfo4_t *, int all);
+extern nfs4_server_t	*find_nfs4_server_by_addr(struct netbuf *,
+				struct knetconfig *);
 extern nfs4_server_t	*new_nfs4_server(servinfo4_t *,	cred_t *);
-extern void		nfs4_mark_srv_dead(nfs4_server_t *);
+extern nfs4_server_t	*add_new_nfs4_server(servinfo4_t *, cred_t *);
+extern void		nfs4_mark_srv_dead(nfs4_server_t *, uint_t);
 extern nfs4_server_t	*servinfo4_to_nfs4_server(servinfo4_t *);
 extern void		nfs4_inc_state_ref_count(mntinfo4_t *);
 extern void		nfs4_inc_state_ref_count_nolock(nfs4_server_t *,
@@ -1866,11 +2082,20 @@ extern void	nfs4_save_stateid(stateid4 *, nfs4_stateid_types_t *);
 
 extern kmutex_t nfs4_server_lst_lock;
 
+extern void 	nfs4_cleanup_oldsession(nfs4_server_t *);
+extern void	nfs4destroy_session(nfs4_server_t *, CLIENT *);
+extern void	nfs4destroy_session_otw(nfs4_session_t *, CLIENT *);
+extern void	nfs41_cbinfo_rele(struct nfs41_cb_info *);
 extern void	nfs4callback_destroy(nfs4_server_t *);
 extern void	nfs4_callback_init(void);
 extern void	nfs4_callback_fini(void);
-extern void	nfs4_cb_args(nfs4_server_t *, struct knetconfig *,
+
+extern void	nfs41_cb_args(nfs4_server_t *, struct knetconfig *,
+			CREATE_SESSION4args *);
+extern void 	nfs4_cb_args(nfs4_server_t *, struct knetconfig *,
 			SETCLIENTID4args *);
+extern void	nfs41set_callback(nfs4_server_t *, servinfo4_t *,
+			mntinfo4_t *, cred_t *);
 extern void	nfs4delegreturn_async(struct rnode4 *, int, bool_t);
 
 extern enum nfs4_delegreturn_policy nfs4_delegreturn_policy;
@@ -1879,6 +2104,7 @@ extern void	nfs4_add_mi_to_server(nfs4_server_t *, mntinfo4_t *);
 extern void	nfs4_remove_mi_from_server(mntinfo4_t *, nfs4_server_t *);
 extern nfs4_server_t *nfs4_move_mi(mntinfo4_t *, servinfo4_t *, servinfo4_t *);
 extern bool_t	nfs4_fs_active(nfs4_server_t *);
+extern void	nfs4_server_hold(nfs4_server_t *);
 extern void	nfs4_server_rele(nfs4_server_t *);
 extern bool_t	inlease(nfs4_server_t *);
 extern bool_t	nfs4_has_pages(vnode_t *);
@@ -1937,8 +2163,14 @@ typedef struct {
 
 extern int	nfs4_is_otw_open_necessary(nfs4_open_owner_t *, int,
 			vnode_t *, int, int *, int, nfs4_recov_state_t *);
-extern void	nfs4setclientid(struct mntinfo4 *, struct cred *, bool_t,
+extern void	nfs4exchange_id(struct mntinfo4 *, struct cred *, bool_t,
 			nfs4_error_t *);
+extern void 	nfs4create_session(mntinfo4_t *, servinfo4_t *, cred_t *,
+			nfs4_server_t *, nfs4_error_t *);
+extern int	nfs4bind_conn_to_session(nfs4_server_t *, servinfo4_t *,
+			struct mntinfo4 *, cred_t *, channel_dir_from_client4);
+extern int	nfs4_tag_ctl(nfs4_server_t *, mntinfo4_t *, sessionid4,
+		    int, cred_t *);
 extern void	nfs4_reopen(vnode_t *, nfs4_open_stream_t *, nfs4_error_t *,
 			open_claim_type4, bool_t, bool_t);
 extern void	nfs4_remap_root(struct mntinfo4 *, nfs4_error_t *, int);
@@ -2010,6 +2242,13 @@ extern void	nfs4_mi_kstat_inc_delay(mntinfo4_t *);
 extern void	nfs4_mi_kstat_inc_no_grace(mntinfo4_t *);
 extern char	*nfs4_stat_to_str(nfsstat4);
 extern char	*nfs4_op_to_str(nfs_opnum4);
+extern void	nfs4exchange_id_otw(mntinfo4_t *, servinfo4_t *, cred_t *,
+			nfs4_server_t *, nfs4_error_t *, int *);
+extern void	nfs4sequence_setup(nfs4_session_t *, COMPOUND4args_clnt *,
+			nfs4_slot_t **);
+extern void	nfs4sequence_fin(nfs4_session_t *, COMPOUND4res_clnt *,
+			nfs4_slot_t *, nfs4_error_t *);
+extern void	nfs4session_init(void);
 
 extern void	nfs4_queue_event(nfs4_event_type_t, mntinfo4_t *, char *,
 		    uint_t, vnode_t *, vnode_t *, nfsstat4, char *, pid_t,
@@ -2105,7 +2344,6 @@ extern char *fn_name(nfs4_fname_t *);
 extern char *fn_path(nfs4_fname_t *);
 extern void fn_move(nfs4_fname_t *, nfs4_fname_t *, char *);
 extern nfs4_fname_t *fn_parent(nfs4_fname_t *);
-
 #endif
 
 /*

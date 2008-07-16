@@ -77,6 +77,7 @@
 #include <nfs/nfs4_kprot.h>
 #include <nfs/rnode4.h>
 #include <nfs/nfs4_clnt.h>
+#include <nfs/nfs4_clnt_impl.h>
 
 #include <vm/hat.h>
 #include <vm/as.h>
@@ -91,6 +92,22 @@
 
 #include <sys/ddi.h>
 #include <sys/int_fmtio.h>
+
+/*
+ * nfs4_dfl_lohint exists simply to verify that the client
+ * can use the attr plumbing to send a layout hint on create.
+ *
+ * valid bit (used for decoding only)
+ * care flags (sparse packing, commit to DS, specify stripe size and count)
+ * util (stripe size 128k)
+ * stripe count
+ */
+file_layouthint4 nfs4_dfl_lohint = {
+	1,
+	NFLH4_CARE_STRIPE_UNIT_SIZE | NFLH4_CARE_STRIPE_COUNT,
+	NFS41_DEFAULT_LAYOUT_STRIPELEN,
+	NFS41_DEFAULT_LAYOUT_NUMSTRIPE
+};
 
 typedef struct {
 	nfs4_ga_res_t	*di_garp;
@@ -147,7 +164,6 @@ static int	nfs4_sync_putapage(vnode_t *, page_t *, u_offset_t, size_t,
 static int	nfs4_sync_pageio(vnode_t *, page_t *, u_offset_t, size_t,
 			int, cred_t *);
 static int	nfs4_commit(vnode_t *, offset4, count4, cred_t *);
-static void	nfs4_set_mod(vnode_t *);
 static void	nfs4_get_commit(vnode_t *);
 static void	nfs4_get_commit_range(vnode_t *, u_offset_t, size_t);
 static int	nfs4_putpage_commit(vnode_t *, offset_t, size_t, cred_t *);
@@ -187,11 +203,11 @@ static int	nfs4_create_getsecattr_return(vsecattr_t *, vsecattr_t *,
 static void	nfs4args_lock_free(nfs_argop4 *);
 static void	nfs4args_lockt_free(nfs_argop4 *);
 static void	nfs4args_setattr(nfs_argop4 *, vattr_t *, vsecattr_t *,
-			int, rnode4_t *, cred_t *, bitmap4, int *,
-			nfs4_stateid_types_t *);
+			int, rnode4_t *, cred_t *, attrmap4 *, int *,
+			nfs4_stateid_types_t *, int);
 static void	nfs4args_setattr_free(nfs_argop4 *);
 static int	nfs4args_verify(nfs_argop4 *, vattr_t *, enum nfs_opnum4,
-			bitmap4);
+			attrmap4 *, int);
 static void	nfs4args_verify_free(nfs_argop4 *);
 static void	nfs4args_write(nfs_argop4 *, stable_how4, rnode4_t *, cred_t *,
 			WRITE4args **, nfs4_stateid_types_t *);
@@ -481,8 +497,8 @@ nfs4args_lockt_free(nfs_argop4 *argop)
 
 static void
 nfs4args_setattr(nfs_argop4 *argop, vattr_t *vap, vsecattr_t *vsap, int flags,
-    rnode4_t *rp, cred_t *cr, bitmap4 supp, int *error,
-    nfs4_stateid_types_t *sid_types)
+    rnode4_t *rp, cred_t *cr, attrmap4 *supp, int *error,
+    nfs4_stateid_types_t *sid_types, int avers)
 {
 	fattr4		*attr = &argop->nfs_argop4_u.opsetattr.obj_attributes;
 	mntinfo4_t	*mi;
@@ -504,13 +520,14 @@ nfs4args_setattr(nfs_argop4 *argop, vattr_t *vap, vsecattr_t *vsap, int flags,
 
 		argop->nfs_argop4_u.opsetattr.stateid =
 		    nfs4_get_stateid(cr, rp, curproc->p_pidp->pid_id, mi,
-		    OP_SETATTR, sid_types, FALSE);
+		    OP_SETATTR, sid_types, 0);
 	} else {
 		bzero(&argop->nfs_argop4_u.opsetattr.stateid,
 		    sizeof (stateid4));
 	}
 
-	*error = vattr_to_fattr4(vap, vsap, attr, flags, OP_SETATTR, supp);
+	*error = vattr_to_fattr4(vap, vsap, attr, flags, OP_SETATTR, supp,
+	    avers, NULL);
 	if (*error)
 		bzero(attr, sizeof (*attr));
 }
@@ -523,7 +540,7 @@ nfs4args_setattr_free(nfs_argop4 *argop)
 
 static int
 nfs4args_verify(nfs_argop4 *argop, vattr_t *vap, enum nfs_opnum4 op,
-    bitmap4 supp)
+    attrmap4 *supp, int vers)
 {
 	fattr4 *attr;
 	int error = 0;
@@ -540,7 +557,8 @@ nfs4args_verify(nfs_argop4 *argop, vattr_t *vap, enum nfs_opnum4 op,
 		return (EINVAL);
 	}
 	if (!error)
-		error = vattr_to_fattr4(vap, NULL, attr, 0, op, supp);
+		error = vattr_to_fattr4(vap, NULL, attr, 0, op, supp, vers,
+		    NULL);
 	if (error)
 		bzero(attr, sizeof (*attr));
 	return (error);
@@ -571,7 +589,7 @@ nfs4args_write(nfs_argop4 *argop, stable_how4 stable, rnode4_t *rp, cred_t *cr,
 	argop->argop = OP_WRITE;
 	wargs->stable = stable;
 	wargs->stateid = nfs4_get_w_stateid(cr, rp, curproc->p_pidp->pid_id,
-	    mi, OP_WRITE, sid_tp);
+	    mi, OP_WRITE, sid_tp, NFS4_WSID_NOPNFS);
 	wargs->mblk = NULL;
 	*wargs_pp = wargs;
 }
@@ -610,9 +628,10 @@ nfs4_open(vnode_t **vpp, int flag, cred_t *cr, caller_context_t *ct)
 	int error;
 	int just_been_created;
 	char fn[MAXNAMELEN];
+	mntinfo4_t *mi = VTOMI4(*vpp);
 
 	NFS4_DEBUG(nfs4_client_state_debug, (CE_NOTE, "nfs4_open: "));
-	if (nfs_zone() != VTOMI4(*vpp)->mi_zone)
+	if (nfs_zone() != mi->mi_zone)
 		return (EIO);
 	rp = VTOR4(*vpp);
 
@@ -781,7 +800,7 @@ nfs4open_otw(vnode_t *dvp, char *file_name, struct vattr *in_va,
 	OPEN4cargs *open_args;
 	nfs4_open_owner_t	*oop = NULL;
 	nfs4_open_stream_t	*osp = NULL;
-	seqid4 seqid = 0;
+	seqid4 seqid;
 	bool_t retry_open = FALSE;
 	nfs4_recov_state_t recov_state;
 	nfs4_lost_rqst_t lost_rqst;
@@ -796,6 +815,7 @@ nfs4open_otw(vnode_t *dvp, char *file_name, struct vattr *in_va,
 	int fh_differs = 0;
 	int numops, setgid_flag;
 	int num_bseqid_retry = NFS4_NUM_RETRY_BAD_SEQID + 1;
+	mntinfo4_t *mi = VTOMI4(dvp);
 
 	/*
 	 * Make sure we properly deal with setting the right gid on
@@ -955,7 +975,7 @@ recov_retry:
 			open_args->createhow4_u.createverf = *(uint64_t *)&verf;
 		} else {
 			int v_error;
-			bitmap4 supp_attrs;
+			attrmap4 supp_attrs;
 			servinfo4_t *svp;
 
 			attr = &open_args->createhow4_u.createattrs;
@@ -967,7 +987,7 @@ recov_retry:
 
 			/* GUARDED4 or UNCHECKED4 */
 			v_error = vattr_to_fattr4(in_va, NULL, attr, 0, OP_OPEN,
-			    supp_attrs);
+			    &supp_attrs, MI4_ATTRVERS(mi), &nfs4_dfl_lohint);
 			if (v_error) {
 				bzero(attr, sizeof (*attr));
 				nfs4args_copen_free(open_args);
@@ -986,7 +1006,8 @@ recov_retry:
 
 	if (recov_state.rs_sp != NULL) {
 		mutex_enter(&recov_state.rs_sp->s_lock);
-		open_args->owner.clientid = recov_state.rs_sp->clientid;
+		open_args->owner.clientid = (NFS4_MINORVERSION(mi) == 0) ?
+		    recov_state.rs_sp->clientid : 0;
 		mutex_exit(&recov_state.rs_sp->s_lock);
 	} else {
 		/* XXX should we just fail here? */
@@ -1017,7 +1038,7 @@ recov_retry:
 	open_args->owner.owner_val =
 	    kmem_alloc(open_args->owner.owner_len, KM_SLEEP);
 
-	e.error = nfs4_start_open_seqid_sync(oop, VTOMI4(dvp));
+	e.error = NFS4_START_OSEQID_SYNC(oop, mi);
 	if (e.error == EAGAIN) {
 		open_owner_rele(oop);
 		nfs4args_copen_free(open_args);
@@ -1042,8 +1063,7 @@ recov_retry:
 			 * (error != 0).  In either case, tidy
 			 * up and return.
 			 */
-
-			nfs4_end_open_seqid_sync(oop);
+			NFS4_END_OSEQID_SYNC(oop, VTOMI4(dvp));
 			open_owner_rele(oop);
 			nfs4args_copen_free(open_args);
 			nfs4_end_op(VTOMI4(dvp), dvp, vpi, &recov_state, FALSE);
@@ -1057,16 +1077,16 @@ recov_retry:
 	bcopy(&oop->oo_name, open_args->owner.owner_val,
 	    open_args->owner.owner_len);
 
-	seqid = nfs4_get_open_seqid(oop) + 1;
+	seqid = NFS4_GET_OSEQID(oop, VTOMI4(dvp));
+
 	open_args->seqid = seqid;
+
 	open_args->share_access = 0;
 	if (open_flag & FREAD)
 		open_args->share_access |= OPEN4_SHARE_ACCESS_READ;
 	if (open_flag & FWRITE)
 		open_args->share_access |= OPEN4_SHARE_ACCESS_WRITE;
 	open_args->share_deny = OPEN4_SHARE_DENY_NONE;
-
-
 
 	/*
 	 * getfh w/sanity check for idx_open/idx_fattr
@@ -1076,13 +1096,15 @@ recov_retry:
 
 	/* getattr */
 	argop[idx_fattr].argop = OP_GETATTR;
-	argop[idx_fattr].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[idx_fattr].nfs_argop4_u.opgetattr.attr_request =
+	    NFS4_VPDFL_ATTRMAP(dvp);
 	argop[idx_fattr].nfs_argop4_u.opgetattr.mi = VTOMI4(dvp);
+
 
 	if (setgid_flag) {
 		vattr_t	_v;
 		servinfo4_t *svp;
-		bitmap4	supp_attrs;
+		attrmap4 supp_attrs;
 
 		svp = drp->r_server;
 		(void) nfs_rw_enter_sig(&svp->sv_lock, RW_READER, 0);
@@ -1099,7 +1121,8 @@ recov_retry:
 		argop[5].nfs_argop4_u.opcputfh.sfh = drp->r_fh;
 
 		argop[6].argop = OP_GETATTR;
-		argop[6].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+		argop[6].nfs_argop4_u.opgetattr.attr_request =
+		    NFS4_VPDFL_ATTRMAP(dvp);
 		argop[6].nfs_argop4_u.opgetattr.mi = VTOMI4(dvp);
 
 		argop[7].argop = OP_RESTOREFH;
@@ -1110,7 +1133,7 @@ recov_retry:
 		_v.va_mask = AT_GID;
 		_v.va_gid = in_va->va_gid;
 		if (!(e.error = nfs4args_verify(&argop[8], &_v, OP_NVERIFY,
-		    supp_attrs))) {
+		    &supp_attrs, MI4_ATTRVERS(mi)))) {
 
 			/*
 			 * setattr
@@ -1121,7 +1144,7 @@ recov_retry:
 			 * interested in setting owner_group attributes.
 			 */
 			nfs4args_setattr(&argop[9], &_v, NULL, 0, NULL, cr,
-			    supp_attrs, &e.error, 0);
+			    &supp_attrs, &e.error, 0, MI4_ATTRVERS(mi));
 			if (e.error)
 				nfs4args_verify_free(&argop[8]);
 		}
@@ -1131,7 +1154,7 @@ recov_retry:
 			 * XXX - Revisit the last argument to nfs4_end_op()
 			 *	 once 5020486 is fixed.
 			 */
-			nfs4_end_open_seqid_sync(oop);
+			NFS4_END_OSEQID_SYNC(oop, VTOMI4(dvp));
 			open_owner_rele(oop);
 			nfs4args_copen_free(open_args);
 			nfs4_end_op(VTOMI4(dvp), dvp, vpi, &recov_state, TRUE);
@@ -1150,8 +1173,10 @@ recov_retry:
 		argop[5].argop = OP_RESTOREFH;
 
 		argop[6].argop = OP_GETATTR;
-		argop[6].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+		argop[6].nfs_argop4_u.opgetattr.attr_request =
+		    NFS4_VPDFL_ATTRMAP(dvp);
 		argop[6].nfs_argop4_u.opgetattr.mi = VTOMI4(dvp);
+
 	}
 
 	NFS4_DEBUG(nfs4_client_call_debug, (CE_NOTE,
@@ -1161,10 +1186,10 @@ recov_retry:
 
 	t = gethrtime();
 
-	rfs4call(VTOMI4(dvp), &args, &res, cred_otw, &doqueue, 0, &e);
+	rfs4call(VTOMI4(dvp), NULL, &args, &res, cred_otw, &doqueue, 0, &e);
 
 	if (!e.error && nfs4_need_to_bump_seqid(&res))
-		nfs4_set_open_seqid(seqid, oop, args.ctag);
+		NFS4_SET_OSEQID(oop, VTOMI4(dvp), seqid, args.ctag);
 
 	needrecov = nfs4_needs_recovery(&e, TRUE, dvp->v_vfsp);
 
@@ -1195,7 +1220,7 @@ recov_retry:
 			if (abort == TRUE && e.error == 0)
 				e.error = geterrno4(res.status);
 		}
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, VTOMI4(dvp));
 		open_owner_rele(oop);
 		nfs4_end_op(VTOMI4(dvp), dvp, vpi, &recov_state, needrecov);
 		nfs4args_copen_free(open_args);
@@ -1229,7 +1254,7 @@ recov_retry:
 		 */
 
 		/* Signal our end of use of the open seqid */
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, VTOMI4(dvp));
 
 		/*
 		 * This will destroy the open owner if it was just created,
@@ -1277,7 +1302,7 @@ recov_retry:
 	    (createmode == UNCHECKED4 || createmode == GUARDED4)) {
 		/* make sure attrset returned is what we asked for */
 		/* XXX Ignore this 'error' for now */
-		if (attr->attrmask != op_res->attrset)
+		if (ATTRMAP_EQL(attr->attrmask, op_res->attrset))
 			/* EMPTY */;
 	}
 #endif
@@ -1343,7 +1368,7 @@ recov_retry:
 		mutex_exit(&(VTOR4(vp))->r_statelock);
 
 		if (rnode_err) {
-			nfs4_end_open_seqid_sync(oop);
+			NFS4_END_OSEQID_SYNC(oop, VTOMI4(dvp));
 			nfs4args_copen_free(open_args);
 			if (setgid_flag) {
 				nfs4args_verify_free(&argop[8]);
@@ -1383,7 +1408,7 @@ recov_retry:
 		    &retry_open, oop, FALSE, &e, &num_bseqid_retry);
 
 		if (e.error || e.stat) {
-			nfs4_end_open_seqid_sync(oop);
+			NFS4_END_OSEQID_SYNC(oop, VTOMI4(dvp));
 			nfs4args_copen_free(open_args);
 			if (setgid_flag) {
 				nfs4args_verify_free(&argop[8]);
@@ -1451,7 +1476,7 @@ recov_retry:
 		NFS4_DEBUG(nfs4_seqid_sync, (CE_NOTE, "nfs4open_otw: "
 		    "signal our end of use of the open seqid"));
 
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, VTOMI4(dvp));
 		open_owner_rele(oop);
 		nfs4args_copen_free(open_args);
 		if (setgid_flag) {
@@ -1483,7 +1508,7 @@ recov_retry:
 	 * going to OTW CLOSE the file, got a non-recoverable error, and before
 	 * we could retry the CLOSE, OPENed the file again.
 	 */
-	ASSERT(osp->os_open_owner->oo_seqid_inuse);
+	VERS40_ASSERT(osp->os_open_owner->oo_seqid_inuse, VTOMI4(dvp));
 	osp->os_final_close = 0;
 	osp->os_force_close = 0;
 #ifdef DEBUG
@@ -1496,7 +1521,7 @@ recov_retry:
 
 	mutex_exit(&osp->os_sync_lock);
 
-	nfs4_end_open_seqid_sync(oop);
+	NFS4_END_OSEQID_SYNC(oop, VTOMI4(dvp));
 
 	if (created_osp && recov_state.rs_sp != NULL) {
 		mutex_enter(&recov_state.rs_sp->s_lock);
@@ -1718,7 +1743,7 @@ top:
 	}
 	open_owner_hold(oop);
 
-	ep->error = nfs4_start_open_seqid_sync(oop, mi);
+	ep->error = NFS4_START_OSEQID_SYNC(oop, mi);
 	if (ep->error) {
 		open_owner_rele(oop);
 		oop = NULL;
@@ -1848,7 +1873,7 @@ top:
 		open_args->open_claim4_u.delegate_cur_info.cfile = fn;
 	}
 	open_args->opentype = OPEN4_NOCREATE;
-	open_args->owner.clientid = mi2clientid(mi);
+	open_args->owner.clientid = NFS4_GET_CLIENTID(mi);
 	open_args->owner.owner_len = sizeof (oop->oo_name);
 	open_args->owner.owner_val =
 	    kmem_alloc(open_args->owner.owner_len, KM_SLEEP);
@@ -1875,7 +1900,8 @@ top:
 		open_args->share_deny |= OPEN4_SHARE_DENY_WRITE;
 	mutex_exit(&osp->os_sync_lock);
 
-	seqid = nfs4_get_open_seqid(oop) + 1;
+	seqid = NFS4_GET_OSEQID(oop, mi);
+
 	open_args->seqid = seqid;
 
 	/* Construct the getfh part of the compound */
@@ -1883,12 +1909,13 @@ top:
 
 	/* Construct the getattr part of the compound */
 	argop[3].argop = OP_GETATTR;
-	argop[3].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[3].nfs_argop4_u.opgetattr.attr_request =
+	    MI4_DEFAULT_ATTRMAP(mi);
 	argop[3].nfs_argop4_u.opgetattr.mi = mi;
 
 	t = gethrtime();
 
-	rfs4call(mi, &args, &res, cred_otw, &doqueue, 0, ep);
+	rfs4call(mi, NULL, &args, &res, cred_otw, &doqueue, 0, ep);
 
 	if (ep->error) {
 		if (!is_recov && !frc_use_claim_previous &&
@@ -1910,7 +1937,7 @@ top:
 			crfree(cred_otw);
 			cred_otw = cr;
 			crhold(cred_otw);
-			nfs4_end_open_seqid_sync(oop);
+			NFS4_END_OSEQID_SYNC(oop, mi);
 			open_owner_rele(oop);
 			oop = NULL;
 			goto top;
@@ -1922,7 +1949,7 @@ top:
 	}
 
 	if (nfs4_need_to_bump_seqid(&res))
-		nfs4_set_open_seqid(seqid, oop, args.ctag);
+		NFS4_SET_OSEQID(oop, mi, seqid, args.ctag);
 
 	switch (res.status) {
 	case NFS4_OK:
@@ -1942,7 +1969,7 @@ top:
 
 		nfs4args_copen_free(open_args);
 		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 		oop = NULL;
 		kmem_free(bsep, sizeof (*bsep));
@@ -1951,7 +1978,7 @@ top:
 	case NFS4ERR_NO_GRACE:
 		nfs4args_copen_free(open_args);
 		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 		oop = NULL;
 		if (claim == CLAIM_PREVIOUS) {
@@ -1975,7 +2002,7 @@ top:
 		nfs4_set_grace_wait(mi);
 		nfs4args_copen_free(open_args);
 		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 		oop = NULL;
 		ep->error = nfs4_wait_for_grace(mi, &recov);
@@ -1986,7 +2013,7 @@ top:
 		nfs4_set_delay_wait(vp);
 		nfs4args_copen_free(open_args);
 		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 		oop = NULL;
 		ep->error = nfs4_wait_for_delay(vp, &recov);
@@ -2000,7 +2027,7 @@ top:
 		    mi, vp, NULL, NULL, NULL, OP_OPEN, NULL);
 		nfs4args_copen_free(open_args);
 		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 		oop = NULL;
 		if (abort == FALSE)
@@ -2017,7 +2044,7 @@ top:
 		 */
 		nfs4args_copen_free(open_args);
 		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 		oop = NULL;
 		goto bailout;
@@ -2028,7 +2055,7 @@ top:
 			crhold(cred_otw);
 			nfs4args_copen_free(open_args);
 			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-			nfs4_end_open_seqid_sync(oop);
+			NFS4_END_OSEQID_SYNC(oop, mi);
 			open_owner_rele(oop);
 			oop = NULL;
 			goto top;
@@ -2128,10 +2155,12 @@ top:
 	/*
 	 * If the server wanted an OPEN_CONFIRM but that fails, just start
 	 * over.  Presumably if there is a persistent error it will show up
-	 * when we resend the OPEN.
+	 * when we resend the OPEN. Applicable only for NFSv4.0 clients.
 	 */
 	if (op_res->rflags & OPEN4_RESULT_CONFIRM) {
 		bool_t retry_open = FALSE;
+
+		ASSERT((NFS4_MINORVERSION(mi) == 0));
 
 		nfs4open_confirm(vp, &seqid, &op_res->stateid,
 		    cred_otw, is_recov, &retry_open,
@@ -2139,7 +2168,7 @@ top:
 		if (ep->error || ep->stat) {
 			nfs4args_copen_free(open_args);
 			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-			nfs4_end_open_seqid_sync(oop);
+			NFS4_END_OSEQID_SYNC(oop, mi);
 			open_owner_rele(oop);
 			oop = NULL;
 			goto top;
@@ -2154,14 +2183,15 @@ top:
 	 * going to OTW CLOSE the file, got a non-recoverable error, and before
 	 * we could retry the CLOSE, OPENed the file again.
 	 */
-	ASSERT(osp->os_open_owner->oo_seqid_inuse);
+
+	VERS40_ASSERT(osp->os_open_owner->oo_seqid_inuse, mi);
 	osp->os_final_close = 0;
 	osp->os_force_close = 0;
 	if (claim == CLAIM_DELEGATE_CUR || claim == CLAIM_PREVIOUS)
 		osp->os_dc_openacc = open_args->share_access;
 	mutex_exit(&osp->os_sync_lock);
 
-	nfs4_end_open_seqid_sync(oop);
+	NFS4_END_OSEQID_SYNC(oop, mi);
 
 	/* accept delegation, if any */
 	nfs4_delegation_accept(rp, claim, op_res, garp, cred_otw);
@@ -2190,7 +2220,7 @@ failed_reopen:
 	mutex_exit(&osp->os_sync_lock);
 bailout:
 	if (oop != NULL) {
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 	}
 	if (cr != NULL)
@@ -2411,7 +2441,7 @@ nfs4close_otw(rnode4_t *rp, cred_t *cred_otw, nfs4_open_owner_t *oop,
 	COMPOUND4res_clnt res;
 	CLOSE4args *close_args;
 	nfs_resop4 *resop;
-	nfs_argop4 argop[3];
+	nfs_argop4 argop[4];
 	int doqueue = 1;
 	mntinfo4_t *mi;
 	seqid4 seqid;
@@ -2419,6 +2449,7 @@ nfs4close_otw(rnode4_t *rp, cred_t *cred_otw, nfs4_open_owner_t *oop,
 	bool_t needrecov = FALSE;
 	nfs4_lost_rqst_t lost_rqst;
 	hrtime_t t;
+	int xop;
 
 	ASSERT(nfs_zone() == VTOMI4(RTOV4(rp))->mi_zone);
 
@@ -2448,18 +2479,67 @@ nfs4close_otw(rnode4_t *rp, cred_t *cred_otw, nfs4_open_owner_t *oop,
 	/* putfh target fh */
 	argop[0].argop = OP_CPUTFH;
 	argop[0].nfs_argop4_u.opcputfh.sfh = rp->r_fh;
+	xop = 1;
 
-	argop[1].argop = OP_GETATTR;
-	argop[1].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
-	argop[1].nfs_argop4_u.opgetattr.mi = mi;
+	/*
+	 * If pNFS is in effect, send a layoutcommit with close
+	 * before the getattr.
+	 */
+	mutex_enter(&rp->r_statelock);
+	if (rp->r_flags & R4LAYOUTVALID) {
+		/*
+		 * Our implementation only cares about newoffset, the last
+		 * byte written.  However, we go through with the
+		 * layoutcommit any time we have a layout (and presumably
+		 * we did a pnfs_write), because other implementations
+		 * require this.
+		 */
+		args.array_len = 4;
+		argop[1].argop = OP_LAYOUTCOMMIT;
+		argop[1].nfs_argop4_u.oplayoutcommit.loca_offset = 0;
+		argop[1].nfs_argop4_u.oplayoutcommit.loca_length = ~0;
+		argop[1].nfs_argop4_u.oplayoutcommit.loca_reclaim = FALSE;
+		argop[1].nfs_argop4_u.oplayoutcommit.loca_stateid =
+		    pnfs_get_losid(rp);
+		if (rp->r_flags & R4LASTBYTE) {
+			argop[1].nfs_argop4_u.oplayoutcommit.\
+			    loca_last_write_offset.no_newoffset = TRUE;
+			argop[1].nfs_argop4_u.oplayoutcommit.\
+			    loca_last_write_offset.newoffset4_u.no_offset = \
+			    rp->r_last_write_offset;
+			/* XXX timechanged should be true here */
+			argop[1].nfs_argop4_u.oplayoutcommit.loca_time_modify.\
+			    nt_timechanged = FALSE;
+		} else {
+			argop[1].nfs_argop4_u.oplayoutcommit.\
+			    loca_last_write_offset.no_newoffset = FALSE;
+			argop[1].nfs_argop4_u.oplayoutcommit.loca_time_modify.\
+			    nt_timechanged = FALSE;
+		}
+		argop[1].nfs_argop4_u.oplayoutcommit.loca_layoutupdate.\
+		    lou_type = LAYOUT4_NFSV4_1_FILES;
+		argop[1].nfs_argop4_u.oplayoutcommit.loca_layoutupdate.\
+		    lou_body.lou_body_len = 0;
+		argop[1].nfs_argop4_u.oplayoutcommit.loca_layoutupdate.\
+		    lou_body.lou_body_val = NULL;
+		xop++;
+	}
+	mutex_exit(&rp->r_statelock);
 
-	argop[2].argop = OP_CLOSE;
-	close_args = &argop[2].nfs_argop4_u.opclose;
+	argop[xop].argop = OP_GETATTR;
+	argop[xop].nfs_argop4_u.opgetattr.attr_request =
+	    MI4_DEFAULT_ATTRMAP(mi);
+	argop[xop].nfs_argop4_u.opgetattr.mi = mi;
+	xop++;
 
-	seqid = nfs4_get_open_seqid(oop) + 1;
+	argop[xop].argop = OP_CLOSE;
+	close_args = &argop[xop].nfs_argop4_u.opclose;
+
+	seqid = NFS4_GET_OSEQID(oop, mi);
 
 	close_args->seqid = seqid;
 	close_args->open_stateid = osp->open_stateid;
+
 
 	NFS4_DEBUG(nfs4_client_call_debug, (CE_NOTE,
 	    "nfs4close_otw: %s call, rp %s", needrecov ? "recov" : "first",
@@ -2467,11 +2547,13 @@ nfs4close_otw(rnode4_t *rp, cred_t *cred_otw, nfs4_open_owner_t *oop,
 
 	t = gethrtime();
 
-	rfs4call(mi, &args, &res, cred_otw, &doqueue, 0, ep);
+	rfs4call(mi, NULL, &args, &res, cred_otw, &doqueue, 0, ep);
 
 	if (!ep->error && nfs4_need_to_bump_seqid(&res)) {
-		nfs4_set_open_seqid(seqid, oop, args.ctag);
+		NFS4_SET_OSEQID(oop, mi, seqid, args.ctag);
 	}
+
+	/* XXX seqid recovery not needed for v4.1 */
 
 	needrecov = nfs4_needs_recovery(ep, TRUE, mi->mi_vfsp);
 	if (ep->error && !needrecov) {
@@ -2516,7 +2598,7 @@ nfs4close_otw(rnode4_t *rp, cred_t *cred_otw, nfs4_open_owner_t *oop,
 		    OP_CLOSE, bsep);
 
 		/* drop open seq sync, and let the calling function regrab it */
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, mi);
 		*did_start_seqid_syncp = 0;
 
 		if (bsep)
@@ -2548,9 +2630,10 @@ nfs4close_otw(rnode4_t *rp, cred_t *cred_otw, nfs4_open_owner_t *oop,
 
 	mutex_enter(&rp->r_statev4_lock);
 	rp->created_v4 = 0;
+	rp->r_flags &= ~R4LASTBYTE;
 	mutex_exit(&rp->r_statev4_lock);
 
-	resop = &res.array[2];
+	resop = &res.array[xop];
 	osp->open_stateid = resop->nfs_resop4_u.opclose.open_stateid;
 	osp->os_valid = 0;
 
@@ -2568,7 +2651,7 @@ nfs4close_otw(rnode4_t *rp, cred_t *cred_otw, nfs4_open_owner_t *oop,
 
 	if (!ep->error)
 		nfs4_attr_cache(vp,
-		    &res.array[1].nfs_resop4_u.opgetattr.ga_res,
+		    &res.array[xop-1].nfs_resop4_u.opgetattr.ga_res,
 		    t, cred_otw, TRUE, NULL);
 
 	NFS4_DEBUG(nfs4_client_state_debug, (CE_NOTE, "nfs4close_otw:"
@@ -3100,8 +3183,8 @@ nfs4rdwr_check_osid(vnode_t *vp, nfs4_error_t *ep, cred_t *cr)
  * chunks that the server can handle.  Write is synchronous.
  */
 static int
-nfs4write(vnode_t *vp, caddr_t base, u_offset_t offset, int count, cred_t *cr,
-    stable_how4 *stab_comm)
+nfs4write_normal(vnode_t *vp, caddr_t base, u_offset_t offset,
+    int count, cred_t *cr, stable_how4 *stab_comm)
 {
 	mntinfo4_t *mi;
 	COMPOUND4args_clnt args;
@@ -3175,7 +3258,7 @@ recov_retry:
 		else
 			tsize = MIN(mi->mi_curwrite, count);
 		wargs->data_len = (uint_t)tsize;
-		rfs4call(mi, &args, &res, cr, &doqueue, 0, &e);
+		rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
 
 		if (mi->mi_io_kstats) {
 			mutex_enter(&mi->mi_lock);
@@ -3335,12 +3418,28 @@ recov_retry:
 	return (e.error);
 }
 
+static int
+nfs4write(vnode_t *vp, caddr_t base, u_offset_t offset, int count, cred_t *cr,
+	stable_how4 *stab_comm)
+{
+	int error;
+
+	error = pnfs_write(vp, base, offset, count, cr, stab_comm);
+	if (error == 0)
+		return (0);
+
+	if (error != EAGAIN)
+		return (error);
+
+	return (nfs4write_normal(vp, base, offset, count, cr, stab_comm));
+}
+
 /*
  * Read from a file.  Reads data in largest chunks our interface can handle.
  */
 static int
-nfs4read(vnode_t *vp, caddr_t base, offset_t offset, int count,
-    size_t *residp, cred_t *cr, bool_t async, struct uio *uiop)
+nfs4read_normal(vnode_t *vp, caddr_t base, offset_t offset, int count,
+	size_t *residp, cred_t *cr, bool_t async, struct uio *uiop)
 {
 	mntinfo4_t *mi;
 	COMPOUND4args_clnt args;
@@ -3387,7 +3486,7 @@ recov_retry:
 	argop[1].argop = OP_READ;
 	rargs = &argop[1].nfs_argop4_u.opread;
 	rargs->stateid = nfs4_get_stateid(cr, rp, curproc->p_pidp->pid_id, mi,
-	    OP_READ, &sid_types, async);
+	    OP_READ, &sid_types, (async ? GETSID_TRYNEXT : 0));
 
 	do {
 		if (mi->mi_io_kstats) {
@@ -3419,7 +3518,7 @@ recov_retry:
 			rargs->res_data_val_alt = base;
 		rargs->res_maxsize = tsize;
 
-		rfs4call(mi, &args, &res, cr, &doqueue, 0, &e);
+		rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
 #ifdef	DEBUG
 		if (nfs4read_error_inject) {
 			res.status = nfs4read_error_inject;
@@ -3565,6 +3664,29 @@ recov_retry:
 	nfs4_end_fop(mi, vp, NULL, OH_READ, &recov_state, needrecov);
 
 	return (e.error);
+}
+
+static int
+nfs4read(vnode_t *vp, caddr_t base, offset_t offset, int count,
+	size_t *residp, cred_t *cr, bool_t async, struct uio *uiop)
+{
+	int error;
+
+	error = pnfs_read(vp, base, offset, count, residp, cr, async, uiop);
+	if (error == 0)
+		return (0);
+
+	/*
+	 * pnfs_read will return EAGAIN if R4LAYOUTVALID is not
+	 * set.  In this case, fall back to the mds.  This would
+	 * be the case if the mds had no layouts or if the mds
+	 * was a 4.1 only server (ie. not an mds at all).
+	 */
+	if (error != EAGAIN)
+		return (error);
+
+	return (nfs4read_normal(vp, base, offset, count,
+	    residp, cr, async, uiop));
 }
 
 /* ARGSUSED */
@@ -3733,7 +3855,7 @@ nfs4setattr(vnode_t *vp, struct vattr *vap, int flags, cred_t *cr,
 	hrtime_t t;
 	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
 	servinfo4_t *svp;
-	bitmap4 supp_attrs;
+	attrmap4 supp_attrs;
 
 	ASSERT(nfs_zone() == VTOMI4(vp)->mi_zone);
 	rp = VTOR4(vp);
@@ -3811,7 +3933,8 @@ recov_retry:
 		 */
 		/* getattr */
 		argop[1].argop = OP_GETATTR;
-		argop[1].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+		argop[1].nfs_argop4_u.opgetattr.attr_request =
+		    NFS4_VPDFL_ATTRMAP(vp);
 		argop[1].nfs_argop4_u.opgetattr.mi = VTOMI4(vp);
 
 		/* verify - set later in loop */
@@ -3825,7 +3948,7 @@ recov_retry:
 	nfs_rw_exit(&svp->sv_lock);
 
 	nfs4args_setattr(&argop[setattr_argop], vap, vsap, flags, rp, cr,
-	    supp_attrs, &e.error, &sid_types);
+	    &supp_attrs, &e.error, &sid_types, MI4_ATTRVERS(VTOMI4(vp)));
 	stateid = argop[setattr_argop].nfs_argop4_u.opsetattr.stateid;
 	if (e.error) {
 		/* req time field(s) overflow - return immediately */
@@ -3838,15 +3961,15 @@ recov_retry:
 
 	/* getattr */
 	argop[numops-1].argop = OP_GETATTR;
-	argop[numops-1].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[numops-1].ga_arg_attrreq = NFS4_VPDFL_ATTRMAP(vp);
+
 	/*
 	 * If we are setting the ACL (indicated only by vsap != NULL), request
 	 * the ACL in this getattr.  The ACL returned from this getattr will be
 	 * used in updating the ACL cache.
 	 */
-	if (vsap != NULL)
-		argop[numops-1].nfs_argop4_u.opgetattr.attr_request |=
-		    FATTR4_ACL_MASK;
+	if (vsap)
+		ATTR_SET(argop[numops-1].ga_arg_attrreq, ACL);
 	argop[numops-1].nfs_argop4_u.opgetattr.mi = VTOMI4(vp);
 
 	/*
@@ -3866,7 +3989,7 @@ recov_retry:
 			supp_attrs = svp->sv_supp_attrs;
 			nfs_rw_exit(&svp->sv_lock);
 			e.error = nfs4args_verify(&argop[verify_argop], &va,
-			    OP_VERIFY, supp_attrs);
+			    OP_VERIFY, &supp_attrs, MI4_ATTRVERS(VTOMI4(vp)));
 			if (e.error) {
 				/* req time field(s) overflow - return */
 				nfs4_end_op(VTOMI4(vp), vp, NULL, &recov_state,
@@ -3879,7 +4002,7 @@ recov_retry:
 
 		t = gethrtime();
 
-		rfs4call(VTOMI4(vp), &args, &res, cr, &doqueue, 0, &e);
+		rfs4call(VTOMI4(vp), NULL, &args, &res, cr, &doqueue, 0, &e);
 
 		/*
 		 * Purge the access cache and ACL cache if changing either the
@@ -4110,7 +4233,7 @@ recov_retry:
 	 */
 	e.error = nfs4_update_attrcache(res.status, garp, t, vp, cr);
 	if (garp != NULL) {
-		if (garp->n4g_resbmap & FATTR4_ACL_MASK) {
+		if (ATTR_ISSET(garp->n4g_resbmap, ACL)) {
 			nfs4_acl_fill_cache(rp, &garp->n4g_vsa);
 			vs_ace4_destroy(&garp->n4g_vsa);
 		} else {
@@ -4323,7 +4446,8 @@ recov_retry:
 	/* getattr */
 	if (do_getattr) {
 		argop[2].argop = OP_GETATTR;
-		argop[2].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+		argop[2].nfs_argop4_u.opgetattr.attr_request =
+		    MI4_DEFAULT_ATTRMAP(mi);
 		argop[2].nfs_argop4_u.opgetattr.mi = mi;
 	}
 
@@ -4333,7 +4457,7 @@ recov_retry:
 
 	doqueue = 1;
 	t = gethrtime();
-	rfs4call(VTOMI4(vp), &args, &res, cred, &doqueue, 0, &e);
+	rfs4call(VTOMI4(vp), NULL, &args, &res, cred, &doqueue, 0, &e);
 	rpc_error = e.error;
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, vp->v_vfsp);
@@ -4480,7 +4604,7 @@ recov_retry:
 
 	/* 2. getattr */
 	argop[2].argop = OP_GETATTR;
-	argop[2].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[2].nfs_argop4_u.opgetattr.attr_request = NFS4_VPDFL_ATTRMAP(vp);
 	argop[2].nfs_argop4_u.opgetattr.mi = VTOMI4(vp);
 
 	doqueue = 1;
@@ -4491,7 +4615,7 @@ recov_retry:
 
 	t = gethrtime();
 
-	rfs4call(VTOMI4(vp), &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(VTOMI4(vp), NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, vp->v_vfsp);
 	if (needrecov) {
@@ -4780,6 +4904,10 @@ redo:
 		}
 	}
 
+	mutex_enter(&rp->r_statelock);
+	pnfs_layout_free(vp, cr, LR_SYNC);
+	mutex_exit(&rp->r_statelock);
+
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 recov_retry_remove:
@@ -4825,7 +4953,7 @@ recov_retry_remove:
 	 * nfs3_cache_wcc_data may result in calls to
 	 * dnlc_purge_XXX.  This will result in a deadlock.
 	 */
-	rfs4call(VTOMI4(unldvp), &args, &res, unlcred, &doqueue, 0, &e);
+	rfs4call(VTOMI4(unldvp), NULL, &args, &res, unlcred, &doqueue, 0, &e);
 	if (e.error) {
 		PURGE_ATTRCACHE4(unldvp);
 		resp = NULL;
@@ -4853,7 +4981,7 @@ recov_retry_remove:
 		nfs4_update_dircaches(&rm_res->cinfo, unldvp, NULL, NULL, NULL);
 	}
 #else
-	rfs4call(VTOMI4(unldvp), &args, &res, unlcred, &doqueue, 0, &e);
+	rfs4call(VTOMI4(unldvp), NULL, &args, &res, unlcred, &doqueue, 0, &e);
 
 	PURGE_ATTRCACHE4(unldvp);
 #endif
@@ -5242,7 +5370,8 @@ recov_retry:
 	/* 1. nverify the change info */
 	argop[1].argop = OP_NVERIFY;
 	ver_fattr = &argop[1].nfs_argop4_u.opnverify.obj_attributes;
-	ver_fattr->attrmask = FATTR4_CHANGE_MASK;
+	ver_fattr->attrmask = nfs4_empty_attrmap;
+	ATTR_SET(ver_fattr->attrmask, CHANGE);
 	ver_fattr->attrlist4 = (char *)&dchange;
 	ptr = (int32_t *)&dchange;
 	IXDR_PUT_HYPER(ptr, VTOR4(dvp)->r_change);
@@ -5250,7 +5379,8 @@ recov_retry:
 
 	/* 2. getattr directory */
 	argop[2].argop = OP_GETATTR;
-	argop[2].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[2].nfs_argop4_u.opgetattr.attr_request =
+	    NFS4_VPDFL_ATTRMAP(dvp);
 	argop[2].nfs_argop4_u.opgetattr.mi = VTOMI4(dvp);
 
 	/* 3. access directory */
@@ -5271,13 +5401,14 @@ recov_retry:
 
 	/* 6. resulting file attributes */
 	argop[6].argop = OP_GETATTR;
-	argop[6].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[6].nfs_argop4_u.opgetattr.attr_request =
+	    NFS4_VPDFL_ATTRMAP(dvp);
 	argop[6].nfs_argop4_u.opgetattr.mi = VTOMI4(dvp);
 
 	doqueue = 1;
 	t = gethrtime();
 
-	rfs4call(VTOMI4(dvp), &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(VTOMI4(dvp), NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	if (nfs4_needs_recovery(&e, FALSE, dvp->v_vfsp)) {
 		/*
@@ -5676,7 +5807,8 @@ recov_retry:
 
 	/* 4. resulting file attributes */
 	argop[4].argop = OP_GETATTR;
-	argop[4].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[4].nfs_argop4_u.opgetattr.attr_request =
+	    NFS4_VPDFL_ATTRMAP(dvp);
 	argop[4].nfs_argop4_u.opgetattr.mi = VTOMI4(dvp);
 
 	/* 5. restorefh back the directory for the nverify */
@@ -5685,7 +5817,8 @@ recov_retry:
 	/* 6. nverify the change info */
 	argop[6].argop = OP_NVERIFY;
 	ver_fattr = &argop[6].nfs_argop4_u.opnverify.obj_attributes;
-	ver_fattr->attrmask = FATTR4_CHANGE_MASK;
+	ver_fattr->attrmask = nfs4_empty_attrmap;
+	ATTR_SET(ver_fattr->attrmask, CHANGE);
 	ver_fattr->attrlist4 = (char *)&dchange;
 	ptr = (int32_t *)&dchange;
 	IXDR_PUT_HYPER(ptr, VTOR4(dvp)->r_change);
@@ -5693,7 +5826,8 @@ recov_retry:
 
 	/* 7. getattr directory */
 	argop[7].argop = OP_GETATTR;
-	argop[7].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[7].nfs_argop4_u.opgetattr.attr_request =
+	    NFS4_VPDFL_ATTRMAP(dvp);
 	argop[7].nfs_argop4_u.opgetattr.mi = VTOMI4(dvp);
 
 	/* 8. access directory */
@@ -5704,7 +5838,7 @@ recov_retry:
 	doqueue = 1;
 	t = gethrtime();
 
-	rfs4call(VTOMI4(dvp), &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(VTOMI4(dvp), NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	if (nfs4_needs_recovery(&e, FALSE, dvp->v_vfsp)) {
 		/*
@@ -6317,7 +6451,8 @@ recov_retry:
 
 	/* getattr */
 	argop[3].argop = OP_GETATTR;
-	argop[3].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[3].nfs_argop4_u.opgetattr.attr_request =
+	    NFS4_VPDFL_ATTRMAP(dvp);
 	argop[3].nfs_argop4_u.opgetattr.mi = VTOMI4(dvp);
 
 	NFS4_DEBUG(nfs4_client_call_debug, (CE_NOTE,
@@ -6326,7 +6461,7 @@ recov_retry:
 
 	t = gethrtime();
 
-	rfs4call(VTOMI4(dvp), &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(VTOMI4(dvp), NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, dvp->v_vfsp);
 	if (needrecov) {
@@ -6742,7 +6877,7 @@ call_nfs4_create_req(vnode_t *dvp, char *nm, void *data, struct vattr *va,
 	int numops, argoplist_size, setgid_flag, idx_create, idx_fattr;
 	dirattr_info_t dinfo, *dinfop;
 	servinfo4_t *svp;
-	bitmap4 supp_attrs;
+	attrmap4 supp_attrs;
 
 	ASSERT(type == NF4DIR || type == NF4LNK || type == NF4BLK ||
 	    type == NF4CHR || type == NF4SOCK || type == NF4FIFO);
@@ -6857,7 +6992,8 @@ recov_retry:
 	supp_attrs = svp->sv_supp_attrs;
 	nfs_rw_exit(&svp->sv_lock);
 
-	if (vattr_to_fattr4(va, NULL, crattr, 0, OP_CREATE, supp_attrs)) {
+	if (vattr_to_fattr4(va, NULL, crattr, 0, OP_CREATE, &supp_attrs,
+	    MI4_ATTRVERS(mi), NULL)) {
 		nfs_rw_exit(&drp->r_rwlock);
 		nfs4_end_op(mi, dvp, NULL, &recov_state, needrecov);
 		e.error = EINVAL;
@@ -6871,7 +7007,8 @@ recov_retry:
 
 	/* 3/4: getattr of new object */
 	argop[idx_fattr].argop = OP_GETATTR;
-	argop[idx_fattr].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[idx_fattr].nfs_argop4_u.opgetattr.attr_request =
+	    MI4_DEFAULT_ATTRMAP(mi);
 	argop[idx_fattr].nfs_argop4_u.opgetattr.mi = mi;
 
 	if (setgid_flag) {
@@ -6883,7 +7020,8 @@ recov_retry:
 		argop[5].nfs_argop4_u.opcputfh.sfh = drp->r_fh;
 
 		argop[6].argop = OP_GETATTR;
-		argop[6].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+		argop[6].nfs_argop4_u.opgetattr.attr_request =
+		    MI4_DEFAULT_ATTRMAP(mi);
 		argop[6].nfs_argop4_u.opgetattr.mi = mi;
 
 		argop[7].argop = OP_RESTOREFH;
@@ -6897,7 +7035,7 @@ recov_retry:
 		_v.va_mask = AT_GID;
 		_v.va_gid = va->va_gid;
 		if (e.error = nfs4args_verify(&argop[8], &_v, OP_NVERIFY,
-		    supp_attrs)) {
+		    &supp_attrs, MI4_ATTRVERS(mi))) {
 			nfs4_end_op(mi, dvp, *vpp, &recov_state, TRUE);
 			nfs_rw_exit(&drp->r_rwlock);
 			nfs4_fattr4_free(crattr);
@@ -6913,8 +7051,8 @@ recov_retry:
 		 * rp since we're only interested in setting owner_group
 		 * attributes.
 		 */
-		nfs4args_setattr(&argop[9], &_v, NULL, 0, NULL, cr, supp_attrs,
-		    &e.error, 0);
+		nfs4args_setattr(&argop[9], &_v, NULL, 0, NULL, cr, &supp_attrs,
+		    &e.error, 0, MI4_ATTRVERS(mi));
 
 		if (e.error) {
 			nfs4_end_op(mi, dvp, *vpp, &recov_state, TRUE);
@@ -6930,7 +7068,8 @@ recov_retry:
 		argop[5].argop = OP_RESTOREFH;
 
 		argop[6].argop = OP_GETATTR;
-		argop[6].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+		argop[6].nfs_argop4_u.opgetattr.attr_request =
+		    MI4_DEFAULT_ATTRMAP(mi);
 		argop[6].nfs_argop4_u.opgetattr.mi = mi;
 	}
 
@@ -6938,7 +7077,7 @@ recov_retry:
 
 	doqueue = 1;
 	t = gethrtime();
-	rfs4call(mi, &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
 	if (e.error) {
@@ -7264,6 +7403,14 @@ nfs4_remove(vnode_t *dvp, char *nm, cred_t *cr, caller_context_t *ct, int flags)
 
 	mi = VTOMI4(dvp);
 
+	/*
+	 * Return the layout, if one exists.  This is needed
+	 * not because the layout is no longer valid, but the
+	 * removal may cause the file handle to go stale.
+	 */
+	mutex_enter(&rp->r_statelock);
+	pnfs_layout_free(vp, cr, LR_SYNC);
+	mutex_exit(&rp->r_statelock);
 	(void) nfs4delegreturn(rp, NFS4_DR_REOPEN);
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
@@ -7293,12 +7440,13 @@ recov_retry:
 
 	/* getattr dir */
 	argop[2].argop = OP_GETATTR;
-	argop[2].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[2].nfs_argop4_u.opgetattr.attr_request =
+	    MI4_DEFAULT_ATTRMAP(mi);
 	argop[2].nfs_argop4_u.opgetattr.mi = mi;
 
 	doqueue = 1;
 	dinfo.di_time_call = gethrtime();
-	rfs4call(mi, &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	PURGE_ATTRCACHE4(vp);
 
@@ -7452,7 +7600,8 @@ recov_retry:
 
 	/* 4. Get attributes of dir */
 	argop[4].argop = OP_GETATTR;
-	argop[4].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[4].nfs_argop4_u.opgetattr.attr_request =
+	    MI4_DEFAULT_ATTRMAP(mi);
 	argop[4].nfs_argop4_u.opgetattr.mi = mi;
 
 	/* 5. If link was successful, restore current vp to file */
@@ -7460,7 +7609,8 @@ recov_retry:
 
 	/* 6. Get attributes of linked object */
 	argop[6].argop = OP_GETATTR;
-	argop[6].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[6].nfs_argop4_u.opgetattr.attr_request =
+	    MI4_DEFAULT_ATTRMAP(mi);
 	argop[6].nfs_argop4_u.opgetattr.mi = mi;
 
 	dnlc_remove(tdvp, tnm);
@@ -7468,7 +7618,7 @@ recov_retry:
 	doqueue = 1;
 	t = gethrtime();
 
-	rfs4call(VTOMI4(svp), &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(VTOMI4(svp), NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, svp->v_vfsp);
 	if (e.error != 0 && !needrecov) {
@@ -7818,6 +7968,11 @@ link_call:
 			mutex_exit(&rp->r_statelock);
 		}
 
+		/* Return the layout of the file being renamed over */
+		mutex_enter(&VTOR4(nvp)->r_statelock);
+		pnfs_layout_free(nvp, cr, LR_SYNC);
+		mutex_exit(&VTOR4(nvp)->r_statelock);
+
 		(void) nfs4delegreturn(VTOR4(nvp), NFS4_DR_PUSH|NFS4_DR_REOPEN);
 
 		ASSERT(nfs4_consistent_type(nvp));
@@ -7877,6 +8032,16 @@ link_call:
 		}
 		return (EINVAL);
 	}
+
+	/*
+	 * XXX - does renaming a file require the layout to
+	 * be returned?
+	 */
+#ifdef	NOTYET
+	mutex_enter(&rp->r_statelock);
+	pnfs_layout_free(ovp, cr, LR_SYNC);
+	mutex_exit(&rp->r_statelock);
+#endif
 
 	(void) nfs4delegreturn(VTOR4(ovp), NFS4_DR_PUSH|NFS4_DR_REOPEN);
 
@@ -8103,7 +8268,8 @@ recov_retry:
 
 	/* 4: getattr (targetdir) */
 	argop[4].argop = OP_GETATTR;
-	argop[4].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[4].nfs_argop4_u.opgetattr.attr_request =
+	    MI4_DEFAULT_ATTRMAP(mi);
 	argop[4].nfs_argop4_u.opgetattr.mi = mi;
 
 	if (ndvp != odvp) {
@@ -8114,7 +8280,8 @@ recov_retry:
 
 		/* 6: getattr (sourcedir) */
 		argop[6].argop = OP_GETATTR;
-		argop[6].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+		argop[6].nfs_argop4_u.opgetattr.attr_request =
+		    MI4_DEFAULT_ATTRMAP(mi);
 		argop[6].nfs_argop4_u.opgetattr.mi = mi;
 	}
 
@@ -8123,7 +8290,7 @@ recov_retry:
 
 	doqueue = 1;
 	dinfo.di_time_call = gethrtime();
-	rfs4call(mi, &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
 	if (e.error) {
@@ -8336,7 +8503,8 @@ recov_retry:
 
 	/* 6: getattr of target dir (post op attrs) */
 	argop[6].argop = OP_GETATTR;
-	argop[6].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[6].nfs_argop4_u.opgetattr.attr_request =
+	    MI4_DEFAULT_ATTRMAP(mi);
 	argop[6].nfs_argop4_u.opgetattr.mi = mi;
 
 	/* 7: Lookup post-rename fh of renamed object */
@@ -8348,7 +8516,8 @@ recov_retry:
 
 	/* 9: getattr of renamed object */
 	argop[9].argop = OP_GETATTR;
-	argop[9].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[9].nfs_argop4_u.opgetattr.attr_request =
+	    MI4_DEFAULT_ATTRMAP(mi);
 	argop[9].nfs_argop4_u.opgetattr.mi = mi;
 
 	/*
@@ -8362,7 +8531,8 @@ recov_retry:
 
 		/* 11: getattr (sourcedir) */
 		argop[11].argop = OP_GETATTR;
-		argop[11].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+		argop[11].nfs_argop4_u.opgetattr.attr_request =
+		    MI4_DEFAULT_ATTRMAP(mi);
 		argop[11].nfs_argop4_u.opgetattr.mi = mi;
 	}
 
@@ -8371,7 +8541,7 @@ recov_retry:
 
 	doqueue = 1;
 	t = gethrtime();
-	rfs4call(mi, &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
 	if (e.error) {
@@ -8651,12 +8821,13 @@ recov_retry:
 
 	/* getattr (postop attrs for dir that contained removed dir) */
 	argop[2].argop = OP_GETATTR;
-	argop[2].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+	argop[2].nfs_argop4_u.opgetattr.attr_request =
+	    MI4_DEFAULT_ATTRMAP(mi);
 	argop[2].nfs_argop4_u.opgetattr.mi = mi;
 
 	dinfo.di_time_call = gethrtime();
 	doqueue = 1;
-	rfs4call(mi, &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	PURGE_ATTRCACHE4(vp);
 
@@ -9054,7 +9225,7 @@ nfs4readdir(vnode_t *vp, rddir4_cache *rdc, cred_t *cr)
 	COMPOUND4res_clnt res;
 	READDIR4args *rargs;
 	READDIR4res_clnt *rd_res;
-	bitmap4 rd_bitsval;
+	attrmap4 rd_attrmap;
 	nfs_argop4 argop[5];
 	nfs_resop4 *resop;
 	rnode4_t *rp = VTOR4(vp);
@@ -9138,15 +9309,10 @@ recov_retry:
 	 * Determine which attrs to request for dirents.  This code
 	 * must be protected by nfs4_start/end_fop because of r_server
 	 * (which will change during failover recovery).
-	 *
 	 */
 	if (rp->r_flags & (R4LOOKUP | R4READDIRWATTR)) {
-		/*
-		 * Get all vattr attrs plus filehandle and rdattr_error
-		 */
-		rd_bitsval = NFS4_VATTR_MASK |
-		    FATTR4_RDATTR_ERROR_MASK |
-		    FATTR4_FILEHANDLE_MASK;
+
+		rd_attrmap = MI4_RDDIR_ATTRMAP(mi);
 
 		if (rp->r_flags & R4READDIRWATTR) {
 			mutex_enter(&rp->r_statelock);
@@ -9154,24 +9320,14 @@ recov_retry:
 			mutex_exit(&rp->r_statelock);
 		}
 	} else {
-		servinfo4_t *svp = rp->r_server;
-
 		/*
 		 * Already read directory. Use readdir with
 		 * no attrs (except for mounted_on_fileid) for updates.
 		 */
-		rd_bitsval = FATTR4_RDATTR_ERROR_MASK;
-
-		/*
-		 * request mounted on fileid if supported, else request
-		 * fileid.  maybe we should verify that fileid is supported
-		 * and request something else if not.
-		 */
-		(void) nfs_rw_enter_sig(&svp->sv_lock, RW_READER, 0);
-		if (svp->sv_supp_attrs & FATTR4_MOUNTED_ON_FILEID_MASK)
-			rd_bitsval |= FATTR4_MOUNTED_ON_FILEID_MASK;
-		nfs_rw_exit(&svp->sv_lock);
+		rd_attrmap = MI4_MINRDDIR_ATTRMAP(mi);
 	}
+
+	ATTRMAP_MASK(rd_attrmap, rp->r_server->sv_supp_attrs);
 
 	/* putfh directory fh */
 	argop[0].argop = OP_CPUTFH;
@@ -9179,6 +9335,7 @@ recov_retry:
 
 	argop[1].argop = OP_READDIR;
 	rargs = &argop[1].nfs_argop4_u.opreaddir;
+
 	/*
 	 * 1 and 2 are reserved for client "." and ".." entry offset.
 	 * cookie 0 should be used over-the-wire to start reading at
@@ -9197,12 +9354,11 @@ recov_retry:
 	}
 	rargs->dircount = MIN(rdc->buflen, mi->mi_tsize);
 	rargs->maxcount = mi->mi_tsize;
-	rargs->attr_request = rd_bitsval;
+	rargs->attr_request = rd_attrmap;
 	rargs->rdc = rdc;
 	rargs->dvp = vp;
 	rargs->mi = mi;
 	rargs->cr = cr;
-
 
 	/*
 	 * If count < than the minimum required, we return no entries
@@ -9223,7 +9379,8 @@ recov_retry:
 
 		/* getattr parent */
 		argop[4].argop = OP_GETATTR;
-		argop[4].nfs_argop4_u.opgetattr.attr_request = NFS4_VATTR_MASK;
+		argop[4].nfs_argop4_u.opgetattr.attr_request =
+		    MI4_DEFAULT_ATTRMAP(mi);
 		argop[4].nfs_argop4_u.opgetattr.mi = mi;
 	}
 
@@ -9238,7 +9395,7 @@ recov_retry:
 	/* capture the time of this call */
 	rargs->t = t = gethrtime();
 
-	rfs4call(mi, &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	if (mi->mi_io_kstats) {
 		mutex_enter(&mi->mi_lock);
@@ -11202,6 +11359,7 @@ nfs4_pathconf(vnode_t *vp, int cmd, ulong_t *valp, cred_t *cr,
 	rnode4_t *rp;
 	nfs4_ga_res_t gar;
 	nfs4_ga_ext_res_t ger;
+	attrmap4 attrmap;
 
 	gar.n4g_ext_res = &ger;
 
@@ -11281,8 +11439,8 @@ nfs4_pathconf(vnode_t *vp, int cmd, ulong_t *valp, cred_t *cr,
 #endif
 
 	t = gethrtime();
-
-	error = nfs4_attr_otw(vp, TAG_PATHCONF, &gar, NFS4_PATHCONF_MASK, cr);
+	attrmap = nfs4_pathconf_attrmap;
+	error = nfs4_attr_otw(vp, TAG_PATHCONF, &gar, &attrmap, cr);
 
 	if (error) {
 		mutex_enter(&rp->r_statelock);
@@ -11624,7 +11782,7 @@ get_commit_cred:
 	args.ctag = TAG_COMMIT;
 recov_retry:
 	/*
-	 * Commit ops: putfh file; commit
+	 * Commit ops: putfh file; commit; layoutcommit (optional)
 	 */
 	args.array_len = 2;
 	args.array = argop;
@@ -11648,7 +11806,7 @@ recov_retry:
 	argop[1].nfs_argop4_u.opcommit.count = count;
 
 	doqueue = 1;
-	rfs4call(mi, &args, &res, cred_otw, &doqueue, 0, &e);
+	rfs4call(mi, NULL, &args, &res, cred_otw, &doqueue, 0, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
 	if (!needrecov && e.error) {
@@ -11717,6 +11875,7 @@ recov_retry:
 		resop = &res.array[1];	/* commit res */
 		cm_res = &resop->nfs_resop4_u.opcommit;
 		mutex_enter(&rp->r_statelock);
+
 		if (cm_res->writeverf == rp->r_writeverf) {
 			mutex_exit(&rp->r_statelock);
 			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
@@ -11742,14 +11901,20 @@ recov_retry:
 	return (e.error);
 }
 
-static void
+void
 nfs4_set_mod(vnode_t *vp)
 {
 	page_t *pp;
 	kmutex_t *vphm;
 	rnode4_t *rp;
 
+	/*
+	 * XXX dropping this assert; since pNFS uses task queues and may not
+	 * be running in the "right" zone.
+	 */
+#if 0
 	ASSERT(nfs_zone() == VTOMI4(vp)->mi_zone);
+#endif
 
 	/* make sure we're looking at the master vnode, not a shadow */
 
@@ -12260,7 +12425,7 @@ nfs4_getsecattr(vnode_t *vp, vsecattr_t *vsecattr, int flag, cred_t *cr,
 			return (error);
 		}
 
-		if (!(gar.n4g_resbmap & FATTR4_ACL_MASK)) {
+		if (! ATTR_ISSET(gar.n4g_resbmap, ACL)) {
 			/*
 			 * No error was returned, but according to the response
 			 * bitmap, neither was an acl.
@@ -12609,6 +12774,7 @@ nfs4open_confirm(vnode_t *vp, seqid4 *seqid, stateid4 *stateid, cred_t *cr,
 
 	ASSERT(nfs_zone() == VTOMI4(vp)->mi_zone);
 #if DEBUG
+	ASSERT(NFS4_MINORVERSION(VTOMI4(vp)) == 0);
 	mutex_enter(&oop->oo_lock);
 	ASSERT(oop->oo_seqid_inuse);
 	mutex_exit(&oop->oo_lock);
@@ -12639,10 +12805,10 @@ recov_retry_confirm:
 
 	mi = VTOMI4(vp);
 
-	rfs4call(mi, &args, &res, cr, &doqueue, 0, ep);
+	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, ep);
 
 	if (!ep->error && nfs4_need_to_bump_seqid(&res)) {
-		nfs4_set_open_seqid((*seqid), oop, args.ctag);
+		NFS4_SET_OSEQID(oop, mi, (*seqid), args.ctag);
 	}
 
 	needrecov = nfs4_needs_recovery(ep, FALSE, mi->mi_vfsp);
@@ -12979,7 +13145,7 @@ nfs4frlock_setup_resend_lock_args(nfs4_lost_rqst_t *resend_rqstp,
 	*oopp = resend_rqstp->lr_oop;
 	if (resend_rqstp->lr_oop) {
 		open_owner_hold(resend_rqstp->lr_oop);
-		error = nfs4_start_open_seqid_sync(resend_rqstp->lr_oop, mi);
+		error = NFS4_START_OSEQID_SYNC(resend_rqstp->lr_oop, mi);
 		ASSERT(error == 0);	/* recov thread always succeeds */
 	}
 
@@ -12987,7 +13153,7 @@ nfs4frlock_setup_resend_lock_args(nfs4_lost_rqst_t *resend_rqstp,
 	ASSERT(resend_rqstp->lr_lop != NULL);
 	*lopp = resend_rqstp->lr_lop;
 	lock_owner_hold(resend_rqstp->lr_lop);
-	error = nfs4_start_lock_seqid_sync(resend_rqstp->lr_lop, mi);
+	error = NFS4_START_LSEQID_SYNC(resend_rqstp->lr_lop, mi);
 	ASSERT(error == 0);	/* recov thread always succeeds */
 
 	*ospp = resend_rqstp->lr_osp;
@@ -13007,7 +13173,7 @@ nfs4frlock_setup_resend_lock_args(nfs4_lost_rqst_t *resend_rqstp,
 		if (lock_args->length == 0)
 			lock_args->length = ~lock_args->length;
 		nfs4_setup_lock_args(*lopp, *oopp, *ospp,
-		    mi2clientid(mi), &lock_args->locker);
+		    mi, &lock_args->locker);
 
 		switch (resend_rqstp->lr_ctype) {
 		case NFS4_LCK_CTYPE_RESEND:
@@ -13030,7 +13196,7 @@ nfs4frlock_setup_resend_lock_args(nfs4_lost_rqst_t *resend_rqstp,
 		argop->argop = OP_LOCKU;
 		*locku_argsp = locku_args = &argop->nfs_argop4_u.oplocku;
 		locku_args->locktype = READ_LT;
-		locku_args->seqid = lop->lock_seqid + 1;
+		locku_args->seqid = NFS4_GET_LSEQID(lop, mi);
 		mutex_enter(&lop->lo_lock);
 		locku_args->lock_stateid = lop->lock_stateid;
 		mutex_exit(&lop->lo_lock);
@@ -13062,8 +13228,9 @@ nfs4frlock_setup_lockt_args(nfs4_lock_call_type_t ctype, nfs_argop4 *argop,
     rnode4_t *rp)
 {
 	LOCKT4args *lockt_args;
+	mntinfo4_t *mi = VTOMI4(RTOV4(rp));
 
-	ASSERT(nfs_zone() == VTOMI4(RTOV4(rp))->mi_zone);
+	ASSERT(nfs_zone() == mi->mi_zone);
 	ASSERT(ctype == NFS4_LCK_CTYPE_NORM);
 	argop->argop = OP_LOCKT;
 	argsp->ctag = TAG_LOCKT;
@@ -13081,7 +13248,7 @@ nfs4frlock_setup_lockt_args(nfs4_lock_call_type_t ctype, nfs_argop4 *argop,
 	else
 		lockt_args->locktype = READ_LT;
 
-	lockt_args->owner.clientid = mi2clientid(VTOMI4(RTOV4(rp)));
+	lockt_args->owner.clientid = NFS4_GET_CLIENTID(mi);
 	/* set the lock owner4 args */
 	nfs4_setlockowner_args(&lockt_args->owner, rp,
 	    ctype == NFS4_LCK_CTYPE_NORM ? curproc->p_pidp->pid_id :
@@ -13283,7 +13450,11 @@ nfs4frlock_setup_locku_args(nfs4_lock_call_type_t ctype, nfs_argop4 *argop,
 		return;
 	}
 
-	ep->error = nfs4_start_lock_seqid_sync(lop, VTOMI4(vp));
+	/*
+	 * lock seqid synchronization for 4.0 clients
+	 */
+
+	ep->error = NFS4_START_LSEQID_SYNC(lop, VTOMI4(vp));
 	if (ep->error == EAGAIN) {
 		lock_owner_rele(lop);
 		*lopp = NULL;
@@ -13293,7 +13464,7 @@ nfs4frlock_setup_locku_args(nfs4_lock_call_type_t ctype, nfs_argop4 *argop,
 	mutex_enter(&lop->lo_lock);
 	locku_args->lock_stateid = lop->lock_stateid;
 	mutex_exit(&lop->lo_lock);
-	locku_args->seqid = lop->lock_seqid + 1;
+	locku_args->seqid = NFS4_GET_LSEQID(lop, VTOMI4(vp));
 
 	/* leave the ref count on lop, rele after RPC call */
 
@@ -13356,7 +13527,7 @@ nfs4frlock_setup_lock_args(nfs4_lock_call_type_t ctype, LOCK4args **lock_argsp,
 	if (ep->stat != NFS4_OK)
 		goto out;
 
-	nfs4_setup_lock_args(lop, oop, osp, mi2clientid(VTOMI4(vp)),
+	nfs4_setup_lock_args(lop, oop, osp, VTOMI4(vp),
 	    &lock_args->locker);
 
 	lock_args->offset = flk->l_start;
@@ -13456,21 +13627,22 @@ nfs4frlock_save_lost_rqst(nfs4_lock_call_type_t ctype, int error,
  * send the resend request again.)
  */
 
+/* ARGSUSED */
 static void
 nfs4frlock_bump_seqid(LOCK4args *lock_args, LOCKU4args *locku_args,
-    nfs4_open_owner_t *oop, nfs4_lock_owner_t *lop, nfs4_tag_type_t tag_type)
+    nfs4_open_owner_t *oop, nfs4_lock_owner_t *lop, mntinfo4_t *mi,
+    nfs4_tag_type_t tag_type)
 {
-	if (lock_args) {
-		if (lock_args->locker.new_lock_owner == TRUE)
-			nfs4_get_and_set_next_open_seqid(oop, tag_type);
-		else {
-			ASSERT(lop->lo_flags & NFS4_LOCK_SEQID_INUSE);
-			nfs4_set_lock_seqid(lop->lock_seqid + 1, lop);
-		}
-	} else if (locku_args) {
-		ASSERT(lop->lo_flags & NFS4_LOCK_SEQID_INUSE);
-		nfs4_set_lock_seqid(lop->lock_seqid +1, lop);
+	seqid4 seqid;
+	if (lock_args && lock_args->locker.new_lock_owner == TRUE) {
+		/*
+		 * Bump the current open seqid for the open owner
+		 */
+		seqid = oop->oo_seqid + 1;
+		NFS4_SET_OSEQID(oop, mi, seqid, tag_type);
+		return;
 	}
+	NFS4_SET_LSEQID(lop, mi, lop->lock_seqid + 1);
 }
 
 /*
@@ -13507,7 +13679,7 @@ nfs4frlock_check_access(vnode_t *vp, nfs4_op_hint_t op_hint,
 	*respp = NULL;
 
 	if (lop) {
-		nfs4_end_lock_seqid_sync(lop);
+		NFS4_END_LSEQID_SYNC(lop, VTOMI4(vp));
 		lock_owner_rele(lop);
 		*lopp = NULL;
 	}
@@ -13520,7 +13692,7 @@ nfs4frlock_check_access(vnode_t *vp, nfs4_op_hint_t op_hint,
 
 	/* need to free up the reference on oop for lock args */
 	if (oop != NULL) {
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, VTOMI4(vp));
 		open_owner_rele(oop);
 		*oopp = NULL;
 	}
@@ -13636,7 +13808,7 @@ nfs4frlock_recovery(int needrecov, nfs4_error_t *ep,
 	}
 
 	if (lop != NULL) {
-		nfs4_end_lock_seqid_sync(lop);
+		NFS4_END_LSEQID_SYNC(lop, VTOMI4(vp));
 		lock_owner_rele(lop);
 	}
 
@@ -13650,7 +13822,7 @@ nfs4frlock_recovery(int needrecov, nfs4_error_t *ep,
 
 	/* need to free up the reference on oop for lock args */
 	if (oop != NULL) {
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, VTOMI4(vp));
 		open_owner_rele(oop);
 		*oopp = NULL;
 	}
@@ -13737,7 +13909,7 @@ nfs4frlock_results_denied(nfs4_lock_call_type_t ctype, LOCK4args *lock_args,
 				    (caddr_t)*respp);
 			*argspp = NULL;
 			*respp = NULL;
-			nfs4_end_lock_seqid_sync(lop);
+			NFS4_END_LSEQID_SYNC(lop, VTOMI4(vp));
 			lock_owner_rele(lop);
 			*lopp = NULL;
 			if (osp != NULL) {
@@ -13745,7 +13917,7 @@ nfs4frlock_results_denied(nfs4_lock_call_type_t ctype, LOCK4args *lock_args,
 				*ospp = NULL;
 			}
 			if (oop != NULL) {
-				nfs4_end_open_seqid_sync(oop);
+				NFS4_END_OSEQID_SYNC(oop, VTOMI4(vp));
 				open_owner_rele(oop);
 				*oopp = NULL;
 			}
@@ -13785,6 +13957,13 @@ nfs4frlock_results_denied(nfs4_lock_call_type_t ctype, LOCK4args *lock_args,
 		NFS4_DEBUG(nfs4_client_lock_debug, (CE_NOTE,
 		    "nfs4frlock_results_denied: OP_LOCKT DENIED"));
 
+		/*
+		 * XXX - the NFSv4.1 client sends a clientid of
+		 * 0 for lockt_args->owner.clientid.  Restore our
+		 * clientid for the call to denied_to_flk so we
+		 * can detect locks held by this client.
+		 */
+		lockt_args->owner.clientid = mi2clientid(VTOMI4(vp));
 		denied_to_flk(&resop->nfs_resop4_u.oplockt.denied,
 		    flk, lockt_args);
 
@@ -13891,6 +14070,7 @@ nfs4frlock_update_state(LOCK4args *lock_args, LOCKU4args *locku_args,
 
 		/* Update the stateid with the server's response */
 		nfs4_set_lock_stateid(lop, locku_res->lock_stateid);
+
 	} else if (lockt_args) {
 		/* Switch the lock type to express success, see fcntl */
 		flk->l_type = F_UNLCK;
@@ -13972,7 +14152,7 @@ nfs4frlock_final_cleanup(nfs4_lock_call_type_t ctype, COMPOUND4args_clnt *argsp,
 
 	/* free the reference on the lock owner */
 	if (lop != NULL) {
-		nfs4_end_lock_seqid_sync(lop);
+		NFS4_END_LSEQID_SYNC(lop, mi);
 		lock_owner_rele(lop);
 	}
 
@@ -13982,7 +14162,7 @@ nfs4frlock_final_cleanup(nfs4_lock_call_type_t ctype, COMPOUND4args_clnt *argsp,
 
 	/* need to free up the reference on oop for lock args */
 	if (oop != NULL) {
-		nfs4_end_open_seqid_sync(oop);
+		NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 	}
 
@@ -14249,7 +14429,7 @@ recov_retry:
 	/*
 	 * Do the OTW call.
 	 */
-	rfs4call(VTOMI4(vp), argsp, resp, cred_otw, &doqueue, 0, ep);
+	rfs4call(VTOMI4(vp), NULL, argsp, resp, cred_otw, &doqueue, 0, ep);
 
 	NFS4_DEBUG(nfs4_client_lock_debug, (CE_NOTE,
 	    "nfs4frlock: error %d, status %d", ep->error, resp->status));
@@ -14260,7 +14440,7 @@ recov_retry:
 
 	if (ep->error == 0 && nfs4_need_to_bump_seqid(resp))
 		nfs4frlock_bump_seqid(lock_args, locku_args, oop, lop,
-		    args.ctag);
+		    VTOMI4(vp), args.ctag);
 
 	/*
 	 * Check if one of these mutually exclusive error cases has
@@ -15098,7 +15278,7 @@ recov_retry:
 	 */
 	if (recovonly == FALSE) {
 		/* need to grab the open owner sync before 'os_sync_lock' */
-		ep->error = nfs4_start_open_seqid_sync(oop, mi);
+		ep->error = NFS4_START_OSEQID_SYNC(oop, mi);
 		if (ep->error == EAGAIN) {
 			ASSERT(!isrecov);
 			if (did_start_op)
@@ -15312,7 +15492,7 @@ recov_retry:
 				goto out;
 
 			if (did_start_seqid_sync) {
-				nfs4_end_open_seqid_sync(oop);
+				NFS4_END_OSEQID_SYNC(oop, mi);
 				did_start_seqid_sync = 0;
 			}
 			open_stream_rele(osp, rp);
@@ -15423,7 +15603,7 @@ recov_retry:
 			have_sync_lock = 0;
 		}
 		if (did_start_seqid_sync) {
-			nfs4_end_open_seqid_sync(oop);
+			NFS4_END_OSEQID_SYNC(oop, mi);
 			did_start_seqid_sync = 0;
 		}
 		open_stream_rele(osp, rp);
@@ -15495,7 +15675,7 @@ out:
 		open_stream_rele(osp, rp);
 	if (oop) {
 		if (did_start_seqid_sync)
-			nfs4_end_open_seqid_sync(oop);
+			NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 	}
 }

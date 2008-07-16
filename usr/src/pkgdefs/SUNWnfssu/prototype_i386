@@ -47,3 +47,10 @@
 #
 d none usr/lib/fs/nfs/amd64 755 root sys
 f none usr/lib/fs/nfs/amd64/libshare_nfs.so.1 755 root bin
+d none usr/lib/amd64 755 root bin
+f none usr/lib/amd64/libdserv.so.1 755 root bin
+s none usr/lib/amd64/libdserv.so=./libdserv.so.1
+f none usr/lib/amd64/llib-ldserv.ln 644 root bin
+f none usr/lib/amd64/libnfs.so.1 755 root bin
+s none usr/lib/amd64/libnfs.so=./libnfs.so.1
+f none usr/lib/amd64/llib-lnfs.ln 644 root bin

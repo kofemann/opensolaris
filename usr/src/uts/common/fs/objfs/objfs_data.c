@@ -492,8 +492,7 @@ objfs_data_access(vnode_t *vp, int mode, int flags, cred_t *cr,
 
 /* ARGSUSED */
 int
-objfs_data_open(vnode_t **cpp, int flag, cred_t *cr,
-	caller_context_t *ct)
+objfs_data_open(vnode_t **cpp, int flag, cred_t *cr, caller_context_t *ct)
 {
 	if (flag & FWRITE)
 		return (EINVAL);

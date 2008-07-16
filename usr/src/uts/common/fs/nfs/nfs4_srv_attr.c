@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -30,11 +30,11 @@
 #include <nfs/nfs.h>
 #include <nfs/export.h>
 #include <nfs/nfs4.h>
+#include <nfs/nfs4_srv_attr.h>
 #include <sys/ddi.h>
+#include <sys/sdt.h>
+#include <nfs/nfs41_filehandle.h>
 
-void	rfs4_init_compound_state(struct compound_state *);
-
-bitmap4 rfs4_supported_attrs;
 int MSG_PRT_DEBUG = FALSE;
 
 /* If building with DEBUG enabled, enable mandattr tunable by default */
@@ -59,8 +59,8 @@ int rfs4_mandattr_only = 0;
 #define	RFS4_MANDATTR_ONLY 0
 #endif
 
+file_mdsthreshold4 mds_default_mdsthreshold = {0, 0, 0, 0};
 
-static void rfs4_ntov_init(void);
 static int rfs4_fattr4_supported_attrs();
 static int rfs4_fattr4_type();
 static int rfs4_fattr4_fh_expire_type();
@@ -73,7 +73,6 @@ static int rfs4_fattr4_fsid();
 static int rfs4_fattr4_unique_handles();
 static int rfs4_fattr4_lease_time();
 static int rfs4_fattr4_rdattr_error();
-static int rfs4_fattr4_acl();
 static int rfs4_fattr4_aclsupport();
 static int rfs4_fattr4_archive();
 static int rfs4_fattr4_cansettime();
@@ -116,48 +115,6 @@ static int rfs4_fattr4_time_delta();
 static int rfs4_fattr4_time_metadata();
 static int rfs4_fattr4_time_modify();
 static int rfs4_fattr4_time_modify_set();
-
-/*
- * Initialize the supported attributes
- */
-void
-rfs4_attr_init()
-{
-	int i;
-	struct nfs4_svgetit_arg sarg;
-	struct compound_state cs;
-	struct statvfs64 sb;
-
-	rfs4_init_compound_state(&cs);
-	cs.vp = rootvp;
-	cs.fh.nfs_fh4_val = NULL;
-	cs.cr = kcred;
-
-	/*
-	 * Get all the supported attributes
-	 */
-	sarg.op = NFS4ATTR_SUPPORTED;
-	sarg.cs = &cs;
-	sarg.vap->va_mask = AT_ALL;
-	sarg.sbp = &sb;
-	sarg.flag = 0;
-	sarg.rdattr_error = NFS4_OK;
-	sarg.rdattr_error_req = FALSE;
-
-	rfs4_ntov_init();
-
-	rfs4_supported_attrs = 0;
-	for (i = 0; i < NFS4_MAXNUM_ATTRS; i++) {
-#ifdef RFS4_SUPPORT_MANDATTR_ONLY
-		if (rfs4_mandattr_only == TRUE && i > NFS4_LAST_MANDATTR)
-			continue;
-#endif
-		if ((*nfs4_ntov_map[i].sv_getit)(NFS4ATTR_SUPPORTED,
-		    &sarg, NULL) == 0) {
-			rfs4_supported_attrs |= nfs4_ntov_map[i].fbit;
-		}
-	}
-}
 
 /*
  * The following rfs4_fattr4_* functions convert between the fattr4
@@ -214,7 +171,8 @@ rfs4_fattr4_supported_attrs(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 			error = EINVAL;
 		break;		/* this attr is supported */
 	case NFS4ATTR_GETIT:
-		na->supported_attrs = rfs4_supported_attrs;
+		na->supported_attrs =
+		    RFS4_SUPP_ATTRMAP(sarg->cs->instp->attrvers);
 		break;
 	case NFS4ATTR_SETIT:
 		/*
@@ -222,14 +180,20 @@ rfs4_fattr4_supported_attrs(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		 */
 		error = EINVAL;
 		break;
-	case NFS4ATTR_VERIT:
+	case NFS4ATTR_VERIT: {
+		int avers = sarg->cs->instp->attrvers;
+
 		/*
-		 * Compare the input bitmap to the server's bitmap
+		 * Compare the input bitmap to the server's supported attrs
+		 * bitmap.  XDR decode zeros kbitmap4 words not provided by
+		 * the client.
 		 */
-		if (na->supported_attrs != rfs4_supported_attrs) {
+		if (! ATTRMAP_EQL(na->supported_attrs,
+		    RFS4_SUPP_ATTRMAP(avers))) {
 			error = -1;	/* no match */
 		}
 		break;
+	}
 	case NFS4ATTR_FREEIT:
 		break;
 	}
@@ -311,7 +275,7 @@ fattr4_get_fh_expire_type(struct exportinfo *exi, uint32_t *fh_expire_typep)
 		return (ESTALE);
 	ex_flags = exi->exi_export.ex_flags;
 	if ((ex_flags & (EX_VOLFH | EX_VOLRNM | EX_VOLMIG | EX_NOEXPOPEN))
-		== 0) {
+	    == 0) {
 		*fh_expire_typep = FH4_PERSISTENT;
 		return (0);
 	}
@@ -364,7 +328,7 @@ rfs4_fattr4_fh_expire_type(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		break;		/* this attr is supported */
 	case NFS4ATTR_GETIT:
 		error = fattr4_get_fh_expire_type(sarg->cs->exi,
-				&na->fh_expire_type);
+		    &na->fh_expire_type);
 		break;
 	case NFS4ATTR_SETIT:
 		/*
@@ -374,7 +338,7 @@ rfs4_fattr4_fh_expire_type(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		break;
 	case NFS4ATTR_VERIT:
 		error = fattr4_get_fh_expire_type(sarg->cs->exi,
-				&fh_expire_type);
+		    &fh_expire_type);
 		if (!error && (na->fh_expire_type != fh_expire_type))
 			error = -1;	/* no match */
 		break;
@@ -575,7 +539,7 @@ rfs4_fattr4_named_attr(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		 */
 		if (sarg->cs->vp->v_vfsp->vfs_flag & VFS_XATTR) {
 			error = VOP_PATHCONF(sarg->cs->vp, _PC_XATTR_EXISTS,
-					&val, sarg->cs->cr, NULL);
+			    &val, sarg->cs->cr, NULL);
 			if (error)
 				break;
 		} else
@@ -592,7 +556,7 @@ rfs4_fattr4_named_attr(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		ASSERT(sarg->cs->vp != NULL);
 		if (sarg->cs->vp->v_vfsp->vfs_flag & VFS_XATTR) {
 			error = VOP_PATHCONF(sarg->cs->vp, _PC_XATTR_EXISTS,
-					&val, sarg->cs->cr, NULL);
+			    &val, sarg->cs->cr, NULL);
 			if (error)
 				break;
 		} else
@@ -732,7 +696,7 @@ rfs4_fattr4_rdattr_error(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 	switch (cmd) {
 	case NFS4ATTR_SUPPORTED:
 		if ((sarg->op == NFS4ATTR_SETIT) ||
-			(sarg->op == NFS4ATTR_VERIT))
+		    (sarg->op == NFS4ATTR_VERIT))
 			error = EINVAL;
 		break;		/* this attr is supported */
 	case NFS4ATTR_GETIT:
@@ -778,6 +742,8 @@ rfs4_fattr4_filehandle(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 {
 	nfs_fh4 *fh;
 
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS40);
+
 	switch (cmd) {
 	case NFS4ATTR_SUPPORTED:
 		if (sarg->op == NFS4ATTR_SETIT)
@@ -795,6 +761,9 @@ rfs4_fattr4_filehandle(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 			ASSERT(sarg->cs->vp != NULL);
 			na->filehandle.nfs_fh4_val =
 			    kmem_alloc(NFS_FH4_LEN, KM_SLEEP);
+			if (sarg->cs->sp)
+				return (mknfs41_fh(&na->filehandle,
+				    sarg->cs->vp, sarg->cs->exi));
 			return (makefh4(&na->filehandle, sarg->cs->vp,
 			    sarg->cs->exi));
 		}
@@ -831,13 +800,148 @@ rfs4_fattr4_filehandle(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 }
 
 /*
+ * Server side compare of a filehandle from the wire to a native
+ * server filehandle.
+ */
+static int
+rfs41fhcmp(nfs_fh4 *wirefh, nfs_fh4 *srvfh)
+{
+	nfs41_fh_fmt_t fh;
+	XDR xdr;
+
+	if (wirefh->nfs_fh4_len != srvfh->nfs_fh4_len)
+		return (1);
+
+	ASSERT(IS_P2ALIGNED(wirefh->nfs_fh4_val, sizeof (uint32_t)));
+	bzero(&fh, sizeof (nfs41_fh_fmt_t));
+	xdrmem_create(&xdr, wirefh->nfs_fh4_val, wirefh->nfs_fh4_len,
+	    XDR_DECODE);
+
+
+	if (! xdr_nfs41_fh_fmt(&xdr, &fh))
+		return (1);
+
+	/* xdrmem_destroy(&xdrs); */	/* NO-OP */
+	return (bcmp(srvfh->nfs_fh4_val, &fh, srvfh->nfs_fh4_len));
+}
+
+/* ARGSUSED */
+static int
+rfs41_fattr4_filehandle(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	nfs_fh4 *fh;
+
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+
+	switch (cmd) {
+	case NFS4ATTR_SUPPORTED:
+		if (sarg->op == NFS4ATTR_SETIT)
+			return (EINVAL);
+		return (0);	/* this attr is supported */
+	case NFS4ATTR_GETIT:
+		/*
+		 * If sarg->cs->fh is all zeros then should makefh a new
+		 * one, otherwise, copy that one over.
+		 */
+		fh = &sarg->cs->fh;
+		if (sarg->cs->fh.nfs_fh4_len == 0) {
+			if (sarg->rdattr_error && (sarg->cs->vp == NULL))
+				return (-1);	/* okay if rdattr_error */
+			ASSERT(sarg->cs->vp != NULL);
+			na->filehandle.nfs_fh4_val =
+			    kmem_alloc(NFS41_FH_LEN, KM_SLEEP);
+			return (mknfs41_fh(&na->filehandle, sarg->cs->vp,
+			    sarg->cs->exi));
+		}
+		na->filehandle.nfs_fh4_val =
+		    kmem_alloc(fh->nfs_fh4_len, KM_SLEEP);
+		nfs_fh4_copy(fh, &na->filehandle);
+		return (0);
+	case NFS4ATTR_SETIT:
+		/*
+		 * read-only attr
+		 */
+		return (EINVAL);
+	case NFS4ATTR_VERIT:
+		/*
+		 * A verify of a filehandle will have the client sending
+		 * the raw format which needs to be compared to the
+		 * native format.
+		 */
+		if (rfs41fhcmp(&na->filehandle, &sarg->cs->fh) == 1)
+			return (-1);	/* no match */
+		return (0);
+	case NFS4ATTR_FREEIT:
+		if (sarg->op != NFS4ATTR_GETIT)
+			return (0);
+		if (na->filehandle.nfs_fh4_val == NULL)
+			return (0);
+		kmem_free(na->filehandle.nfs_fh4_val,
+		    na->filehandle.nfs_fh4_len);
+		na->filehandle.nfs_fh4_val = NULL;
+		na->filehandle.nfs_fh4_len = 0;
+		return (0);
+	}
+	return (0);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_suppattr_exclcreat(nfs4_attr_cmd_t cmd,
+    struct nfs4_svgetit_arg *sarg, union nfs4_attr_u *na)
+{
+	int error = 0;
+	attrvers_t avers;
+
+	/*
+	 * nfs41 attribute -- not supp for nfs40
+	 */
+	avers = RFS4_ATTRVERS(sarg->cs);
+	ASSERT(avers == AV_NFS41);
+	if (sarg->cs->instp->attrvers != AV_NFS41)
+		return (ENOTSUP);
+
+	switch (cmd) {
+	case NFS4ATTR_SUPPORTED:
+		if (sarg->op == NFS4ATTR_SETIT)
+			error = EINVAL;
+		break;		/* this attr is supported */
+	case NFS4ATTR_GETIT:
+		na->supp_exclcreat = RFS41_EXCLCREAT_ATTRMAP(avers);
+		break;
+	case NFS4ATTR_SETIT:
+		/*
+		 * read-only attr
+		 */
+		error = EINVAL;
+		break;
+	case NFS4ATTR_VERIT:
+		/*
+		 * Compare the input bitmap to the server's supported attrs
+		 * bitmap.  XDR decode zeros kbitmap4 words not provided by
+		 * the client.
+		 */
+		if (! ATTRMAP_EQL(na->supp_exclcreat,
+		    RFS41_EXCLCREAT_ATTRMAP(avers))) {
+			error = -1;	/* no match */
+		}
+		break;
+	case NFS4ATTR_FREEIT:
+		break;
+	}
+	return (error);
+}
+
+
+/*
  * Recommended attributes
  */
 
 /* ARGSUSED */
-static int
+int
 rfs4_fattr4_acl(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
-	union nfs4_attr_u *na)
+    union nfs4_attr_u *na)
 {
 	int error = 0;
 	vsecattr_t vs_native, vs_ace4;
@@ -1102,7 +1206,7 @@ rfs4_fattr4_cansettime(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 /* ARGSUSED */
 static int
 rfs4_fattr4_case_insensitive(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
-	union nfs4_attr_u *na)
+    union nfs4_attr_u *na)
 {
 	int error = 0;
 
@@ -1191,7 +1295,7 @@ rfs4_fattr4_chown_restricted(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		}
 		ASSERT(sarg->cs->vp != NULL);
 		error = VOP_PATHCONF(sarg->cs->vp,
-				_PC_CHOWN_RESTRICTED, &val, sarg->cs->cr, NULL);
+		    _PC_CHOWN_RESTRICTED, &val, sarg->cs->cr, NULL);
 		if (error)
 			break;
 
@@ -1206,7 +1310,7 @@ rfs4_fattr4_chown_restricted(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 	case NFS4ATTR_VERIT:
 		ASSERT(sarg->cs->vp != NULL);
 		error = VOP_PATHCONF(sarg->cs->vp,
-				_PC_CHOWN_RESTRICTED, &val, sarg->cs->cr, NULL);
+		    _PC_CHOWN_RESTRICTED, &val, sarg->cs->cr, NULL);
 		if (error)
 			break;
 		if (na->chown_restricted != (val == 1))
@@ -1559,7 +1663,7 @@ rfs4_fattr4_maxfilesize(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		}
 		ASSERT(sarg->cs->vp != NULL);
 		error = VOP_PATHCONF(sarg->cs->vp, _PC_FILESIZEBITS, &val,
-				sarg->cs->cr, NULL);
+		    sarg->cs->cr, NULL);
 		if (error)
 			break;
 		if (val >= (sizeof (uint64_t) * 8))
@@ -1576,7 +1680,7 @@ rfs4_fattr4_maxfilesize(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 	case NFS4ATTR_VERIT:
 		ASSERT(sarg->cs->vp != NULL);
 		error = VOP_PATHCONF(sarg->cs->vp, _PC_FILESIZEBITS, &val,
-				sarg->cs->cr, NULL);
+		    sarg->cs->cr, NULL);
 		if (error)
 			break;
 		if (val >= (sizeof (uint64_t) * 8))
@@ -1615,7 +1719,7 @@ rfs4_fattr4_maxlink(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		}
 		ASSERT(sarg->cs->vp != NULL);
 		error = VOP_PATHCONF(sarg->cs->vp, _PC_LINK_MAX, &val,
-				sarg->cs->cr, NULL);
+		    sarg->cs->cr, NULL);
 		if (error == 0) {
 			na->maxlink = val;
 		}
@@ -1629,7 +1733,7 @@ rfs4_fattr4_maxlink(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 	case NFS4ATTR_VERIT:
 		ASSERT(sarg->cs->vp != NULL);
 		error = VOP_PATHCONF(sarg->cs->vp, _PC_LINK_MAX, &val,
-				sarg->cs->cr, NULL);
+		    sarg->cs->cr, NULL);
 		if (!error && (na->maxlink != (uint32_t)val))
 			error = -1;	/* no match */
 		break;
@@ -1662,7 +1766,7 @@ rfs4_fattr4_maxname(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		}
 		ASSERT(sarg->cs->vp != NULL);
 		error = VOP_PATHCONF(sarg->cs->vp, _PC_NAME_MAX, &val,
-				sarg->cs->cr, NULL);
+		    sarg->cs->cr, NULL);
 		if (error == 0) {
 			na->maxname = val;
 		}
@@ -1676,7 +1780,7 @@ rfs4_fattr4_maxname(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 	case NFS4ATTR_VERIT:
 		ASSERT(sarg->cs->vp != NULL);
 		error = VOP_PATHCONF(sarg->cs->vp, _PC_NAME_MAX, &val,
-				sarg->cs->cr, NULL);
+		    sarg->cs->cr, NULL);
 		if (!error && (na->maxname != val))
 			error = -1;	/* no match */
 		break;
@@ -1791,7 +1895,7 @@ rfs4_fattr4_mode(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		 * the setuid and setgid bits.
 		 */
 		if (sarg->cs->vp->v_type == VREG &&
-			(sarg->cs->exi->exi_export.ex_flags & EX_NOSUID))
+		    (sarg->cs->exi->exi_export.ex_flags & EX_NOSUID))
 			sarg->vap->va_mode &= ~(VSUID | VSGID);
 		break;
 	case NFS4ATTR_VERIT:
@@ -2098,7 +2202,7 @@ rfs4_fattr4_owner_group(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 			if (na->owner_group.utf8string_val) {
 				UTF8STRING_FREE(na->owner_group)
 				bzero(&na->owner_group,
-					sizeof (na->owner_group));
+				    sizeof (na->owner_group));
 			}
 		}
 		break;
@@ -2164,9 +2268,9 @@ rfs4_fattr4_rawdev(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 	case NFS4ATTR_VERIT:
 		ASSERT(sarg->vap->va_mask & AT_RDEV);
 		if ((na->rawdev.specdata1 !=
-			(uint32)getmajor(sarg->vap->va_rdev)) ||
+		    (uint32)getmajor(sarg->vap->va_rdev)) ||
 		    (na->rawdev.specdata2 !=
-			(uint32)getminor(sarg->vap->va_rdev)))
+		    (uint32)getminor(sarg->vap->va_rdev)))
 			error = -1;	/* no match */
 		break;
 	case NFS4ATTR_FREEIT:
@@ -2198,11 +2302,11 @@ rfs4_fattr4_space_avail(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		ASSERT(sarg->sbp != NULL);
 		if (sarg->sbp->f_bavail != (fsblkcnt64_t)-1) {
 			na->space_avail =
-				(fattr4_space_avail) sarg->sbp->f_frsize *
-				(fattr4_space_avail) sarg->sbp->f_bavail;
+			    (fattr4_space_avail)sarg->sbp->f_frsize *
+			    (fattr4_space_avail)sarg->sbp->f_bavail;
 		} else {
 			na->space_avail =
-				(fattr4_space_avail) sarg->sbp->f_bavail;
+			    (fattr4_space_avail)sarg->sbp->f_bavail;
 		}
 		break;
 	case NFS4ATTR_SETIT:
@@ -2245,11 +2349,11 @@ rfs4_fattr4_space_free(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		ASSERT(sarg->sbp != NULL);
 		if (sarg->sbp->f_bfree != (fsblkcnt64_t)-1) {
 			na->space_free =
-				(fattr4_space_free) sarg->sbp->f_frsize *
-				(fattr4_space_free) sarg->sbp->f_bfree;
+			    (fattr4_space_free)sarg->sbp->f_frsize *
+			    (fattr4_space_free)sarg->sbp->f_bfree;
 		} else {
 			na->space_free =
-				(fattr4_space_free) sarg->sbp->f_bfree;
+			    (fattr4_space_free)sarg->sbp->f_bfree;
 		}
 		break;
 	case NFS4ATTR_SETIT:
@@ -2292,11 +2396,11 @@ rfs4_fattr4_space_total(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		ASSERT(sarg->sbp != NULL);
 		if (sarg->sbp->f_blocks != (fsblkcnt64_t)-1) {
 			na->space_total =
-				(fattr4_space_total) sarg->sbp->f_frsize *
-				(fattr4_space_total) sarg->sbp->f_blocks;
+			    (fattr4_space_total)sarg->sbp->f_frsize *
+			    (fattr4_space_total)sarg->sbp->f_blocks;
 		} else {
 			na->space_total =
-				(fattr4_space_total) sarg->sbp->f_blocks;
+			    (fattr4_space_total)sarg->sbp->f_blocks;
 		}
 		break;
 	case NFS4ATTR_SETIT:
@@ -2337,8 +2441,8 @@ rfs4_fattr4_space_used(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 			break;
 		}
 		ASSERT(sarg->vap->va_mask & AT_NBLOCKS);
-		na->space_used =  (fattr4_space_used) DEV_BSIZE *
-			(fattr4_space_used) sarg->vap->va_nblocks;
+		na->space_used =  (fattr4_space_used)DEV_BSIZE *
+		    (fattr4_space_used)sarg->vap->va_nblocks;
 		break;
 	case NFS4ATTR_SETIT:
 		/*
@@ -2531,7 +2635,7 @@ rfs4_fattr4_time_metadata(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		}
 		ASSERT(sarg->vap->va_mask & AT_CTIME);
 		error = nfs4_time_vton(&sarg->vap->va_ctime,
-				&na->time_metadata);
+		    &na->time_metadata);
 		break;
 	case NFS4ATTR_SETIT:
 		/*
@@ -2645,65 +2749,461 @@ rfs4_fattr4_time_modify_set(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 	return (error);
 }
 
+/* ARGSUSED */
+static int
+rfs4_fattr4_fs_layout_types(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	int error = 0;
 
-static void
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+
+	if (RFS4_MANDATTR_ONLY)
+		return (ENOTSUP);
+
+	switch (cmd) {
+	case NFS4ATTR_SUPPORTED:
+		if (sarg->op == NFS4ATTR_SETIT)
+			error = EINVAL;
+		break;		/* this attr is supported */
+
+	case NFS4ATTR_GETIT:
+		*(uint32_t *)&na->fs_layout_types = 0;
+		na->fs_layout_types.lot_nfsv4_1_files = 1;
+		break;
+
+	case NFS4ATTR_SETIT:
+		/*
+		 * read-only attr
+		 */
+		error = EINVAL;
+		break;
+
+	case NFS4ATTR_VERIT:
+		if (! na->fs_layout_types.lot_nfsv4_1_files)
+			error = 1;
+		break;
+	case NFS4ATTR_FREEIT:
+		break;
+	}
+	return (error);
+}
+
+/* ARGSUSED */
+int
+rfs4_fattr4_layout_hint(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	int error = 0;
+
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+
+	if (RFS4_MANDATTR_ONLY)
+		return (ENOTSUP);
+
+	switch (cmd) {
+	case NFS4ATTR_SUPPORTED:
+		if ((sarg->op == NFS4ATTR_GETIT) ||
+		    (sarg->op == NFS4ATTR_VERIT))
+			error = EINVAL;
+		break;		/* this attr is supported */
+	case NFS4ATTR_GETIT:
+	case NFS4ATTR_VERIT:
+		/*
+		 * write only attr
+		 */
+		error = EINVAL;
+		break;
+	case NFS4ATTR_SETIT:
+		/*
+		 * Eventually, we'll tell SPE about the hint.  For
+		 * now just copy it into the sarg struct.
+		 */
+		sarg->file_layouthint = na->file_layouthint;
+		break;
+	}
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_layout_types(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	int error = 0;
+
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+
+	if (RFS4_MANDATTR_ONLY)
+		return (ENOTSUP);
+
+	switch (cmd) {
+	case NFS4ATTR_SUPPORTED:
+		if (sarg->op == NFS4ATTR_SETIT)
+			error = EINVAL;
+		break;		/* this attr is supported */
+
+	case NFS4ATTR_GETIT:
+		*(uint32_t *)&na->layout_types = 0;
+		na->layout_types.lot_nfsv4_1_files = 1;
+		break;
+
+	case NFS4ATTR_SETIT:
+		/*
+		 * read-only attr
+		 */
+		error = EINVAL;
+		break;
+
+	case NFS4ATTR_VERIT:
+		if (! na->layout_types.lot_nfsv4_1_files)
+			error = 1;
+		break;
+	case NFS4ATTR_FREEIT:
+		break;
+	}
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_layout_blksize(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	int error = 0;
+
+	if (RFS4_MANDATTR_ONLY)
+		return (ENOTSUP);
+
+	switch (cmd) {
+	case NFS4ATTR_SUPPORTED:
+		if (sarg->op == NFS4ATTR_SETIT)
+			error = EINVAL;
+		break;		/* this attr is supported */
+
+	case NFS4ATTR_GETIT:
+		na->layout_blksize = RFS41_DEFAULT_LAYOUT_BLKSIZE;
+		break;
+
+	case NFS4ATTR_SETIT:
+		/*
+		 * read-only attr
+		 */
+		error = EINVAL;
+		break;
+
+	case NFS4ATTR_VERIT:
+		if (na->layout_blksize != RFS41_DEFAULT_LAYOUT_BLKSIZE)
+			error = -1;  /* no match */
+		break;
+	}
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_layout_alignment(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	int error = 0;
+
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+
+	if (RFS4_MANDATTR_ONLY)
+		return (ENOTSUP);
+
+	switch (cmd) {
+	case NFS4ATTR_SUPPORTED:
+		if (sarg->op == NFS4ATTR_SETIT)
+			error = EINVAL;
+		break;		/* this attr is supported */
+
+	case NFS4ATTR_GETIT:
+		na->layout_alignment = RFS41_DEFAULT_LAYOUT_ALIGNMENT;
+		break;
+
+	case NFS4ATTR_SETIT:
+		/*
+		 * read-only attr
+		 */
+		error = EINVAL;
+		break;
+
+	case NFS4ATTR_VERIT:
+		if (na->layout_alignment != RFS41_DEFAULT_LAYOUT_ALIGNMENT)
+			error = -1;  /* no match */
+		break;
+	}
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_mdsthreshold(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	int error = 0;
+
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+
+	if (RFS4_MANDATTR_ONLY)
+		return (ENOTSUP);
+
+	switch (cmd) {
+	case NFS4ATTR_SUPPORTED:
+		if (sarg->op == NFS4ATTR_SETIT)
+			error = EINVAL;
+		break;		/* this attr is supported */
+
+	case NFS4ATTR_GETIT:
+		na->file_mdsthreshold = mds_default_mdsthreshold;
+		break;
+
+	case NFS4ATTR_SETIT:
+		/*
+		 * read-only attr
+		 */
+		error = EINVAL;
+		break;
+
+	case NFS4ATTR_VERIT:
+		if (na->file_mdsthreshold.fth_rdsize !=
+		    mds_default_mdsthreshold.fth_rdsize)
+			error = -1;  /* no match */
+
+		if (na->file_mdsthreshold.fth_wrsize !=
+		    mds_default_mdsthreshold.fth_wrsize)
+			error = -1;  /* no match */
+
+		if (na->file_mdsthreshold.fth_rdiosize !=
+		    mds_default_mdsthreshold.fth_rdiosize)
+			error = -1;  /* no match */
+
+		if (na->file_mdsthreshold.fth_wriosize !=
+		    mds_default_mdsthreshold.fth_wriosize)
+			error = -1;  /* no match */
+		break;
+	}
+	return (error);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_dir_notif_delay(nfs4_attr_cmd_t cmd,
+    struct nfs4_svgetit_arg *sarg, union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_dirent_notif_delay(nfs4_attr_cmd_t cmd,
+    struct nfs4_svgetit_arg *sarg, union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_dacl(nfs4_attr_cmd_t cmd,
+    struct nfs4_svgetit_arg *sarg, union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_sacl(nfs4_attr_cmd_t cmd,
+    struct nfs4_svgetit_arg *sarg, union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_chang_policy(nfs4_attr_cmd_t cmd,
+    struct nfs4_svgetit_arg *sarg, union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_fs_status(nfs4_attr_cmd_t cmd,
+    struct nfs4_svgetit_arg *sarg, union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_fs_locations_info(nfs4_attr_cmd_t cmd,
+    struct nfs4_svgetit_arg *sarg, union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_retention_get(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+/* ARGSUSED */
+static int
+rfs4_fattr4_retention_set(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+/* ARGSUSED */
+static int
+rfs4_fattr4_retentevt_get(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_retentevt_set(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_retention_hold(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_mode_set_masked(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+/* ARGSUSED */
+static int
+rfs4_fattr4_fs_charset_cap(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
+	union nfs4_attr_u *na)
+{
+	ASSERT(RFS4_ATTRVERS(sarg->cs) == AV_NFS41);
+	return (ENOTSUP);
+}
+
+void
 rfs4_ntov_init(void)
 {
+	int i;
+
 	/* index must be same as corresponding FATTR4_* define */
-	nfs4_ntov_map[0].sv_getit = rfs4_fattr4_supported_attrs;
-	nfs4_ntov_map[1].sv_getit = rfs4_fattr4_type;
-	nfs4_ntov_map[2].sv_getit = rfs4_fattr4_fh_expire_type;
-	nfs4_ntov_map[3].sv_getit = rfs4_fattr4_change;
-	nfs4_ntov_map[4].sv_getit = rfs4_fattr4_size;
-	nfs4_ntov_map[5].sv_getit = rfs4_fattr4_link_support;
-	nfs4_ntov_map[6].sv_getit = rfs4_fattr4_symlink_support;
-	nfs4_ntov_map[7].sv_getit = rfs4_fattr4_named_attr;
-	nfs4_ntov_map[8].sv_getit = rfs4_fattr4_fsid;
-	nfs4_ntov_map[9].sv_getit = rfs4_fattr4_unique_handles;
-	nfs4_ntov_map[10].sv_getit = rfs4_fattr4_lease_time;
-	nfs4_ntov_map[11].sv_getit = rfs4_fattr4_rdattr_error;
-	nfs4_ntov_map[12].sv_getit = rfs4_fattr4_acl;
-	nfs4_ntov_map[13].sv_getit = rfs4_fattr4_aclsupport;
-	nfs4_ntov_map[14].sv_getit = rfs4_fattr4_archive;
-	nfs4_ntov_map[15].sv_getit = rfs4_fattr4_cansettime;
-	nfs4_ntov_map[16].sv_getit = rfs4_fattr4_case_insensitive;
-	nfs4_ntov_map[17].sv_getit = rfs4_fattr4_case_preserving;
-	nfs4_ntov_map[18].sv_getit = rfs4_fattr4_chown_restricted;
-	nfs4_ntov_map[19].sv_getit = rfs4_fattr4_filehandle;
-	nfs4_ntov_map[20].sv_getit = rfs4_fattr4_fileid;
-	nfs4_ntov_map[21].sv_getit = rfs4_fattr4_files_avail;
-	nfs4_ntov_map[22].sv_getit = rfs4_fattr4_files_free;
-	nfs4_ntov_map[23].sv_getit = rfs4_fattr4_files_total;
-	nfs4_ntov_map[24].sv_getit = rfs4_fattr4_fs_locations;
-	nfs4_ntov_map[25].sv_getit = rfs4_fattr4_hidden;
-	nfs4_ntov_map[26].sv_getit = rfs4_fattr4_homogeneous;
-	nfs4_ntov_map[27].sv_getit = rfs4_fattr4_maxfilesize;
-	nfs4_ntov_map[28].sv_getit = rfs4_fattr4_maxlink;
-	nfs4_ntov_map[29].sv_getit = rfs4_fattr4_maxname;
-	nfs4_ntov_map[30].sv_getit = rfs4_fattr4_maxread;
-	nfs4_ntov_map[31].sv_getit = rfs4_fattr4_maxwrite;
-	nfs4_ntov_map[32].sv_getit = rfs4_fattr4_mimetype;
-	nfs4_ntov_map[33].sv_getit = rfs4_fattr4_mode;
-	nfs4_ntov_map[34].sv_getit = rfs4_fattr4_no_trunc;
-	nfs4_ntov_map[35].sv_getit = rfs4_fattr4_numlinks;
-	nfs4_ntov_map[36].sv_getit = rfs4_fattr4_owner;
-	nfs4_ntov_map[37].sv_getit = rfs4_fattr4_owner_group;
-	nfs4_ntov_map[38].sv_getit = rfs4_fattr4_quota_avail_hard;
-	nfs4_ntov_map[39].sv_getit = rfs4_fattr4_quota_avail_soft;
-	nfs4_ntov_map[40].sv_getit = rfs4_fattr4_quota_used;
-	nfs4_ntov_map[41].sv_getit = rfs4_fattr4_rawdev;
-	nfs4_ntov_map[42].sv_getit = rfs4_fattr4_space_avail;
-	nfs4_ntov_map[43].sv_getit = rfs4_fattr4_space_free;
-	nfs4_ntov_map[44].sv_getit = rfs4_fattr4_space_total;
-	nfs4_ntov_map[45].sv_getit = rfs4_fattr4_space_used;
-	nfs4_ntov_map[46].sv_getit = rfs4_fattr4_system;
-	nfs4_ntov_map[47].sv_getit = rfs4_fattr4_time_access;
-	nfs4_ntov_map[48].sv_getit = rfs4_fattr4_time_access_set;
-	nfs4_ntov_map[49].sv_getit = rfs4_fattr4_time_backup;
-	nfs4_ntov_map[50].sv_getit = rfs4_fattr4_time_create;
-	nfs4_ntov_map[51].sv_getit = rfs4_fattr4_time_delta;
-	nfs4_ntov_map[52].sv_getit = rfs4_fattr4_time_metadata;
-	nfs4_ntov_map[53].sv_getit = rfs4_fattr4_time_modify;
-	nfs4_ntov_map[54].sv_getit = rfs4_fattr4_time_modify_set;
-	nfs4_ntov_map[55].sv_getit = rfs4_fattr4_mounted_on_fileid;
+	nfs40_ntov_map[0].sv_getit = rfs4_fattr4_supported_attrs;
+	nfs40_ntov_map[1].sv_getit = rfs4_fattr4_type;
+	nfs40_ntov_map[2].sv_getit = rfs4_fattr4_fh_expire_type;
+	nfs40_ntov_map[3].sv_getit = rfs4_fattr4_change;
+	nfs40_ntov_map[4].sv_getit = rfs4_fattr4_size;
+	nfs40_ntov_map[5].sv_getit = rfs4_fattr4_link_support;
+	nfs40_ntov_map[6].sv_getit = rfs4_fattr4_symlink_support;
+	nfs40_ntov_map[7].sv_getit = rfs4_fattr4_named_attr;
+	nfs40_ntov_map[8].sv_getit = rfs4_fattr4_fsid;
+	nfs40_ntov_map[9].sv_getit = rfs4_fattr4_unique_handles;
+	nfs40_ntov_map[10].sv_getit = rfs4_fattr4_lease_time;
+	nfs40_ntov_map[11].sv_getit = rfs4_fattr4_rdattr_error;
+	nfs40_ntov_map[12].sv_getit = rfs4_fattr4_acl;
+	nfs40_ntov_map[13].sv_getit = rfs4_fattr4_aclsupport;
+	nfs40_ntov_map[14].sv_getit = rfs4_fattr4_archive;
+	nfs40_ntov_map[15].sv_getit = rfs4_fattr4_cansettime;
+	nfs40_ntov_map[16].sv_getit = rfs4_fattr4_case_insensitive;
+	nfs40_ntov_map[17].sv_getit = rfs4_fattr4_case_preserving;
+	nfs40_ntov_map[18].sv_getit = rfs4_fattr4_chown_restricted;
+	nfs40_ntov_map[19].sv_getit = rfs4_fattr4_filehandle;
+	nfs40_ntov_map[20].sv_getit = rfs4_fattr4_fileid;
+	nfs40_ntov_map[21].sv_getit = rfs4_fattr4_files_avail;
+	nfs40_ntov_map[22].sv_getit = rfs4_fattr4_files_free;
+	nfs40_ntov_map[23].sv_getit = rfs4_fattr4_files_total;
+	nfs40_ntov_map[24].sv_getit = rfs4_fattr4_fs_locations;
+	nfs40_ntov_map[25].sv_getit = rfs4_fattr4_hidden;
+	nfs40_ntov_map[26].sv_getit = rfs4_fattr4_homogeneous;
+	nfs40_ntov_map[27].sv_getit = rfs4_fattr4_maxfilesize;
+	nfs40_ntov_map[28].sv_getit = rfs4_fattr4_maxlink;
+	nfs40_ntov_map[29].sv_getit = rfs4_fattr4_maxname;
+	nfs40_ntov_map[30].sv_getit = rfs4_fattr4_maxread;
+	nfs40_ntov_map[31].sv_getit = rfs4_fattr4_maxwrite;
+	nfs40_ntov_map[32].sv_getit = rfs4_fattr4_mimetype;
+	nfs40_ntov_map[33].sv_getit = rfs4_fattr4_mode;
+	nfs40_ntov_map[34].sv_getit = rfs4_fattr4_no_trunc;
+	nfs40_ntov_map[35].sv_getit = rfs4_fattr4_numlinks;
+	nfs40_ntov_map[36].sv_getit = rfs4_fattr4_owner;
+	nfs40_ntov_map[37].sv_getit = rfs4_fattr4_owner_group;
+	nfs40_ntov_map[38].sv_getit = rfs4_fattr4_quota_avail_hard;
+	nfs40_ntov_map[39].sv_getit = rfs4_fattr4_quota_avail_soft;
+	nfs40_ntov_map[40].sv_getit = rfs4_fattr4_quota_used;
+	nfs40_ntov_map[41].sv_getit = rfs4_fattr4_rawdev;
+	nfs40_ntov_map[42].sv_getit = rfs4_fattr4_space_avail;
+	nfs40_ntov_map[43].sv_getit = rfs4_fattr4_space_free;
+	nfs40_ntov_map[44].sv_getit = rfs4_fattr4_space_total;
+	nfs40_ntov_map[45].sv_getit = rfs4_fattr4_space_used;
+	nfs40_ntov_map[46].sv_getit = rfs4_fattr4_system;
+	nfs40_ntov_map[47].sv_getit = rfs4_fattr4_time_access;
+	nfs40_ntov_map[48].sv_getit = rfs4_fattr4_time_access_set;
+	nfs40_ntov_map[49].sv_getit = rfs4_fattr4_time_backup;
+	nfs40_ntov_map[50].sv_getit = rfs4_fattr4_time_create;
+	nfs40_ntov_map[51].sv_getit = rfs4_fattr4_time_delta;
+	nfs40_ntov_map[52].sv_getit = rfs4_fattr4_time_metadata;
+	nfs40_ntov_map[53].sv_getit = rfs4_fattr4_time_modify;
+	nfs40_ntov_map[54].sv_getit = rfs4_fattr4_time_modify_set;
+	nfs40_ntov_map[55].sv_getit = rfs4_fattr4_mounted_on_fileid;
+
+	/*
+	 * All nfs40 attrs except fattr4_filehandle inherit the
+	 * attr func from nfs40_ntov_map.
+	 */
+	for (i = 0; i < NFS40_ATTR_COUNT; i++)
+		nfs41_ntov_map[i].sv_getit = nfs40_ntov_map[i].sv_getit;
+	nfs41_ntov_map[19].sv_getit = rfs41_fattr4_filehandle;
+
+	/*
+	 * new attrs defined by NFS 4.1
+	 */
+	nfs41_ntov_map[56].sv_getit = rfs4_fattr4_dir_notif_delay;
+	nfs41_ntov_map[57].sv_getit = rfs4_fattr4_dirent_notif_delay;
+	nfs41_ntov_map[58].sv_getit = rfs4_fattr4_sacl;
+	nfs41_ntov_map[59].sv_getit = rfs4_fattr4_sacl;
+	nfs41_ntov_map[60].sv_getit = rfs4_fattr4_chang_policy;
+	nfs41_ntov_map[61].sv_getit = rfs4_fattr4_fs_status;
+	nfs41_ntov_map[62].sv_getit = rfs4_fattr4_fs_layout_types;
+	nfs41_ntov_map[63].sv_getit = rfs4_fattr4_layout_hint;
+	nfs41_ntov_map[64].sv_getit = rfs4_fattr4_layout_types;
+	nfs41_ntov_map[65].sv_getit = rfs4_fattr4_layout_blksize;
+	nfs41_ntov_map[66].sv_getit = rfs4_fattr4_layout_alignment;
+	nfs41_ntov_map[67].sv_getit = rfs4_fattr4_fs_locations_info;
+	nfs41_ntov_map[68].sv_getit = rfs4_fattr4_mdsthreshold;
+	nfs41_ntov_map[69].sv_getit = rfs4_fattr4_retention_get;
+	nfs41_ntov_map[70].sv_getit = rfs4_fattr4_retention_set;
+	nfs41_ntov_map[71].sv_getit = rfs4_fattr4_retentevt_get;
+	nfs41_ntov_map[72].sv_getit = rfs4_fattr4_retentevt_set;
+	nfs41_ntov_map[73].sv_getit = rfs4_fattr4_retention_get;
+	nfs41_ntov_map[74].sv_getit = rfs4_fattr4_mode_set_masked;
+	nfs41_ntov_map[75].sv_getit = rfs4_fattr4_suppattr_exclcreat;
+	nfs41_ntov_map[76].sv_getit = rfs4_fattr4_fs_charset_cap;
 }

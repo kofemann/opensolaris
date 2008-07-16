@@ -228,6 +228,7 @@ DRV_KMODS	+= cryptoadm
 DRV_KMODS	+= devinfo
 DRV_KMODS	+= dld
 DRV_KMODS_32	+= dnet
+DRV_KMODS	+= dserv
 DRV_KMODS	+= dump
 DRV_KMODS	+= ecpp
 DRV_KMODS	+= fd

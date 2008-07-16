@@ -1086,7 +1086,17 @@ usr/lib/amd64/libsmbfs.so		i386
 usr/lib/llib-lsmbfs			i386
 usr/lib/llib-lsmbfs.ln			i386
 usr/lib/amd64/llib-lsmbfs.ln		i386
+
 #
 # demo & test program for smbfs (private) ACL support
 #
 usr/lib/fs/smbfs/lsacl		i386
+
+#
+# Until we have product, let's not worry about how/what
+# to package. For now, ignore the new NFSv4.1 headers.
+#
+usr/include/nfs/nfs41_kprot.h		i386
+usr/include/nfs/nfs4_ext_defs.h		i386
+usr/include/nfs/nfs_serv_inst.h		i386
+usr/include/nfs/nfs4_pnfs.h		i386

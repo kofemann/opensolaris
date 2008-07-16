@@ -2,9 +2,8 @@
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
- * Common Development and Distribution License, Version 1.0 only
- * (the "License").  You may not use this file except in compliance
- * with the License.
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
  * or http://www.opensolaris.org/os/licensing.
@@ -20,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2004 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -29,12 +28,101 @@
 
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
 
+#ifdef _KERNEL
 #ifdef	__cplusplus
 extern "C" {
 #endif
 
+#include <nfs/nfs4_attrmap.h>
+
+/*
+ * dword-relative bit offsets of bitmap words
+ * bitmap word 0 is most significant word of dword0
+ * bitmap word 1 is least significant word of dword0
+ */
 #define	FATTR4_WORD0	32
 #define	FATTR4_WORD1	0
+#define	FATTR4_WORD2	FATTR4_WORD0
+#define	FATTR4_WORD3	FATTR4_WORD1
+
+#define	__dw_SUPPORTED_ATTRS	d.d0
+#define	__dw_TYPE		d.d0
+#define	__dw_FH_EXPIRE_TYPE	d.d0
+#define	__dw_CHANGE		d.d0
+#define	__dw_SIZE		d.d0
+#define	__dw_LINK_SUPPORT	d.d0
+#define	__dw_SYMLINK_SUPPORT	d.d0
+#define	__dw_NAMED_ATTR		d.d0
+#define	__dw_FSID		d.d0
+#define	__dw_UNIQUE_HANDLES	d.d0
+#define	__dw_LEASE_TIME		d.d0
+#define	__dw_RDATTR_ERROR	d.d0
+#define	__dw_FILEHANDLE		d.d0
+#define	__dw_ACL		d.d0
+#define	__dw_ACLSUPPORT		d.d0
+#define	__dw_ARCHIVE		d.d0
+#define	__dw_CANSETTIME		d.d0
+#define	__dw_CASE_INSENSITIVE	d.d0
+#define	__dw_CASE_PRESERVING	d.d0
+#define	__dw_CHOWN_RESTRICTED	d.d0
+#define	__dw_FILEID		d.d0
+#define	__dw_FILES_AVAIL	d.d0
+#define	__dw_FILES_FREE		d.d0
+#define	__dw_FILES_TOTAL	d.d0
+#define	__dw_FS_LOCATIONS	d.d0
+#define	__dw_HIDDEN		d.d0
+#define	__dw_HOMOGENEOUS	d.d0
+#define	__dw_MAXFILESIZE	d.d0
+#define	__dw_MAXLINK		d.d0
+#define	__dw_MAXNAME		d.d0
+#define	__dw_MAXREAD		d.d0
+#define	__dw_MAXWRITE		d.d0
+#define	__dw_MIMETYPE		d.d0
+#define	__dw_MODE		d.d0
+#define	__dw_NO_TRUNC		d.d0
+#define	__dw_NUMLINKS		d.d0
+#define	__dw_OWNER		d.d0
+#define	__dw_OWNER_GROUP	d.d0
+#define	__dw_QUOTA_AVAIL_HARD	d.d0
+#define	__dw_QUOTA_AVAIL_SOFT	d.d0
+#define	__dw_QUOTA_USED		d.d0
+#define	__dw_RAWDEV		d.d0
+#define	__dw_SPACE_AVAIL	d.d0
+#define	__dw_SPACE_FREE		d.d0
+#define	__dw_SPACE_TOTAL	d.d0
+#define	__dw_SPACE_USED		d.d0
+#define	__dw_SYSTEM		d.d0
+#define	__dw_TIME_ACCESS	d.d0
+#define	__dw_TIME_ACCESS_SET	d.d0
+#define	__dw_TIME_BACKUP	d.d0
+#define	__dw_TIME_CREATE	d.d0
+#define	__dw_TIME_DELTA		d.d0
+#define	__dw_TIME_METADATA	d.d0
+#define	__dw_TIME_MODIFY	d.d0
+#define	__dw_TIME_MODIFY_SET	d.d0
+#define	__dw_MOUNTED_ON_FILEID	d.d0
+#define	__dw_DIR_NOTIF_DELAY	d.d0
+#define	__dw_DIRENT_NOTIF_DELAY	d.d0
+#define	__dw_DACL		d.d0
+#define	__dw_SACL		d.d0
+#define	__dw_CHANGE_POLICY	d.d0
+#define	__dw_FS_STATUS		d.d0
+#define	__dw_FS_LAYOUT_TYPE	d.d0
+#define	__dw_LAYOUT_HINT	d.d0
+
+#define	__dw_LAYOUT_TYPE	d.d1
+#define	__dw_LAYOUT_BLKSIZE	d.d1
+#define	__dw_LAYOUT_ALIGNMENT	d.d1
+#define	__dw_FS_LOCATIONS_INFO	d.d1
+#define	__dw_MDSTHRESHOLD	d.d1
+#define	__dw_RETENTION_GET	d.d1
+#define	__dw_RETENTION_SET	d.d1
+#define	__dw_RETENTEVT_GET	d.d1
+#define	__dw_RETENTEVT_SET	d.d1
+#define	__dw_RETENTION_HOLD	d.d1
+#define	__dw_MODE_SET_MASKED	d.d1
+#define	__dw_SUPPATTR_EXCLCREAT	d.d1
+#define	__dw_FS_CHARSET_CAP	d.d1
 
 /*
  * Attributes
@@ -96,27 +184,84 @@ extern "C" {
 #define	FATTR4_TIME_MODIFY_MASK		(1ULL << (FATTR4_WORD1 + 21))
 #define	FATTR4_TIME_MODIFY_SET_MASK	(1ULL << (FATTR4_WORD1 + 22))
 #define	FATTR4_MOUNTED_ON_FILEID_MASK	(1ULL << (FATTR4_WORD1 + 23))
+#define	FATTR4_DIR_NOTIF_DELAY_MASK	(1ULL << (FATTR4_WORD1 + 24))
+#define	FATTR4_DIRENT_NOTIF_DELAY_MASK	(1ULL << (FATTR4_WORD1 + 25))
+#define	FATTR4_DACL_MASK		(1ULL << (FATTR4_WORD1 + 26))
+#define	FATTR4_SACL_MASK		(1ULL << (FATTR4_WORD1 + 27))
+#define	FATTR4_CHANGE_POLICY_MASK	(1ULL << (FATTR4_WORD1 + 28))
+#define	FATTR4_FS_STATUS_MASK		(1ULL << (FATTR4_WORD1 + 29))
+#define	FATTR4_FS_LAYOUT_TYPE_MASK	(1ULL << (FATTR4_WORD1 + 30))
+#define	FATTR4_LAYOUT_HINT_MASK		(1ULL << (FATTR4_WORD1 + 31))
+
+#define	FATTR4_LAYOUT_TYPE_MASK		(1ULL << (FATTR4_WORD2 + 0))
+#define	FATTR4_LAYOUT_BLKSIZE_MASK	(1ULL << (FATTR4_WORD2 + 1))
+#define	FATTR4_LAYOUT_ALIGNMENT_MASK	(1ULL << (FATTR4_WORD2 + 2))
+#define	FATTR4_FS_LOCATIONS_INFO_MASK	(1ULL << (FATTR4_WORD2 + 3))
+#define	FATTR4_MDSTHRESHOLD_MASK	(1ULL << (FATTR4_WORD2 + 4))
+#define	FATTR4_RETENTION_GET_MASK	(1ULL << (FATTR4_WORD2 + 5))
+#define	FATTR4_RETENTION_SET_MASK	(1ULL << (FATTR4_WORD2 + 6))
+#define	FATTR4_RETENTEVT_GET_MASK	(1ULL << (FATTR4_WORD2 + 7))
+#define	FATTR4_RETENTEVT_SET_MASK	(1ULL << (FATTR4_WORD2 + 8))
+#define	FATTR4_RETENTION_HOLD_MASK	(1ULL << (FATTR4_WORD2 + 9))
+#define	FATTR4_MODE_SET_MASKED_MASK	(1ULL << (FATTR4_WORD2 + 10))
+#define	FATTR4_SUPPATTR_EXCLCREAT_MASK	(1ULL << (FATTR4_WORD2 + 11))
+#define	FATTR4_FS_CHARSET_CAP_MASK	(1ULL << (FATTR4_WORD2 + 12))
+#define	FATTR4_77_MASK			(1ULL << (FATTR4_WORD2 + 13))
+#define	FATTR4_78_MASK			(1ULL << (FATTR4_WORD2 + 14))
+#define	FATTR4_79_MASK			(1ULL << (FATTR4_WORD2 + 15))
+#define	FATTR4_80_MASK			(1ULL << (FATTR4_WORD2 + 16))
+#define	FATTR4_81_MASK			(1ULL << (FATTR4_WORD2 + 17))
+#define	FATTR4_82_MASK			(1ULL << (FATTR4_WORD2 + 18))
+#define	FATTR4_83_MASK			(1ULL << (FATTR4_WORD2 + 19))
+#define	FATTR4_84_MASK			(1ULL << (FATTR4_WORD2 + 20))
+#define	FATTR4_85_MASK			(1ULL << (FATTR4_WORD2 + 21))
+#define	FATTR4_86_MASK			(1ULL << (FATTR4_WORD2 + 22))
+#define	FATTR4_87_MASK			(1ULL << (FATTR4_WORD2 + 23))
+#define	FATTR4_88_MASK			(1ULL << (FATTR4_WORD2 + 24))
+#define	FATTR4_89_MASK			(1ULL << (FATTR4_WORD2 + 25))
+#define	FATTR4_90_MASK			(1ULL << (FATTR4_WORD2 + 26))
+#define	FATTR4_91_MASK			(1ULL << (FATTR4_WORD2 + 27))
+#define	FATTR4_92_MASK			(1ULL << (FATTR4_WORD2 + 28))
+#define	FATTR4_93_MASK			(1ULL << (FATTR4_WORD2 + 29))
+#define	FATTR4_94_MASK			(1ULL << (FATTR4_WORD2 + 30))
+#define	FATTR4_95_MASK			(1ULL << (FATTR4_WORD2 + 31))
+
+#define	FATTR4_96_MASK	(1ULL << (FATTR4_WORD3 + 0))
+#define	FATTR4_97_MASK	(1ULL << (FATTR4_WORD3 + 1))
+#define	FATTR4_98_MASK	(1ULL << (FATTR4_WORD3 + 2))
+#define	FATTR4_99_MASK	(1ULL << (FATTR4_WORD3 + 3))
+#define	FATTR4_100_MASK	(1ULL << (FATTR4_WORD3 + 4))
+#define	FATTR4_101_MASK	(1ULL << (FATTR4_WORD3 + 5))
+#define	FATTR4_102_MASK	(1ULL << (FATTR4_WORD3 + 6))
+#define	FATTR4_103_MASK	(1ULL << (FATTR4_WORD3 + 7))
+#define	FATTR4_104_MASK	(1ULL << (FATTR4_WORD3 + 8))
+#define	FATTR4_105_MASK	(1ULL << (FATTR4_WORD3 + 9))
+#define	FATTR4_106_MASK	(1ULL << (FATTR4_WORD3 + 10))
+#define	FATTR4_107_MASK	(1ULL << (FATTR4_WORD3 + 11))
+#define	FATTR4_108_MASK	(1ULL << (FATTR4_WORD3 + 12))
+#define	FATTR4_109_MASK	(1ULL << (FATTR4_WORD3 + 13))
+#define	FATTR4_110_MASK	(1ULL << (FATTR4_WORD3 + 14))
+#define	FATTR4_111_MASK	(1ULL << (FATTR4_WORD3 + 15))
+#define	FATTR4_112_MASK	(1ULL << (FATTR4_WORD3 + 16))
+#define	FATTR4_113_MASK	(1ULL << (FATTR4_WORD3 + 17))
+#define	FATTR4_114_MASK	(1ULL << (FATTR4_WORD3 + 18))
+#define	FATTR4_115_MASK	(1ULL << (FATTR4_WORD3 + 19))
+#define	FATTR4_116_MASK	(1ULL << (FATTR4_WORD3 + 20))
+#define	FATTR4_117_MASK	(1ULL << (FATTR4_WORD3 + 21))
+#define	FATTR4_118_MASK	(1ULL << (FATTR4_WORD3 + 22))
+#define	FATTR4_119_MASK	(1ULL << (FATTR4_WORD3 + 23))
+#define	FATTR4_120_MASK	(1ULL << (FATTR4_WORD3 + 24))
+#define	FATTR4_121_MASK	(1ULL << (FATTR4_WORD3 + 25))
+#define	FATTR4_122_MASK	(1ULL << (FATTR4_WORD3 + 26))
+#define	FATTR4_123_MASK	(1ULL << (FATTR4_WORD3 + 27))
+#define	FATTR4_124_MASK	(1ULL << (FATTR4_WORD3 + 28))
+#define	FATTR4_125_MASK	(1ULL << (FATTR4_WORD3 + 29))
+#define	FATTR4_126_MASK	(1ULL << (FATTR4_WORD3 + 30))
+#define	FATTR4_127_MASK	(1ULL << (FATTR4_WORD3 + 31))
 
 /*
- * Common bitmap4 of file attributes to be gathered
+ * NFS4 attrs which map directly to vattr_t attrs
  */
-#define	NFS4_NTOV_ATTR_MASK (		\
-	FATTR4_TYPE_MASK |		\
-	FATTR4_CHANGE_MASK |		\
-	FATTR4_SIZE_MASK |		\
-	FATTR4_FSID_MASK |		\
-	FATTR4_FILEID_MASK |		\
-	FATTR4_MODE_MASK |		\
-	FATTR4_OWNER_MASK |		\
-	FATTR4_OWNER_GROUP_MASK |	\
-	FATTR4_NUMLINKS_MASK |		\
-	FATTR4_TIME_ACCESS_MASK |	\
-	FATTR4_TIME_MODIFY_MASK |	\
-	FATTR4_TIME_METADATA_MASK |	\
-	FATTR4_RAWDEV_MASK |		\
-	FATTR4_SPACE_USED_MASK |	\
-	FATTR4_MOUNTED_ON_FILEID_MASK)
-
 #define	NFS4_VATTR_MASK (		\
 	FATTR4_TYPE_MASK |		\
 	FATTR4_CHANGE_MASK |		\
@@ -133,6 +278,26 @@ extern "C" {
 	FATTR4_RAWDEV_MASK |		\
 	FATTR4_SPACE_USED_MASK |	\
 	FATTR4_MOUNTED_ON_FILEID_MASK)
+
+#define	NFS4_NTOV_ATTR_MASK NFS4_VATTR_MASK
+
+/*
+ * NFS4 attrs requested by default.
+ *
+ * DEBUG: The pNFS attrs are included in the default
+ * NFS41 set for now just to exercise the new attr code.
+ * It doesn't cause misbehavior to request the pNFS attrs
+ * if the server does not support them; however, it would
+ * be better to stop requesting pnfs attrs from servers
+ * and that don't support pNFS.
+ */
+#define	NFS41_DEFAULT_MASK0	NFS4_VATTR_MASK
+
+#define	NFS41_DEFAULT_MASK1 (		\
+	FATTR4_LAYOUT_TYPE_MASK |	\
+	FATTR4_LAYOUT_BLKSIZE_MASK |	\
+	FATTR4_LAYOUT_ALIGNMENT_MASK |	\
+	FATTR4_MDSTHRESHOLD_MASK)
 
 #define	NFS4_PATHCONF_MASK (		\
 	NFS4_VATTR_MASK |		\
@@ -180,12 +345,7 @@ extern "C" {
 	FATTR4_SPACE_TOTAL_MASK)
 
 #define	NFS4_STATFS_ATTR_MASK (		\
-	FATTR4_FILES_AVAIL_MASK |	\
-	FATTR4_FILES_FREE_MASK |	\
-	FATTR4_FILES_TOTAL_MASK |	\
-	FATTR4_SPACE_AVAIL_MASK |	\
-	FATTR4_SPACE_FREE_MASK |	\
-	FATTR4_SPACE_TOTAL_MASK |	\
+	NFS4_FS_ATTR_MASK |		\
 	FATTR4_MAXNAME_MASK)
 
 /*
@@ -232,17 +392,22 @@ extern "C" {
 	AT_ATIME |			\
 	AT_MTIME)
 
-/* solaris-supported, non-vattr_t per-vnode scoped attrs */
-#define	NFS4_VP_ATTR_MASK (		\
+#define	FATTR4_MANDATTR_MASK0 (		\
+	FATTR4_SUPPORTED_ATTRS_MASK |	\
+	FATTR4_TYPE_MASK |		\
+	FATTR4_FH_EXPIRE_TYPE_MASK |	\
 	FATTR4_CHANGE_MASK |		\
-	FATTR4_CHOWN_RESTRICTED_MASK |	\
-	FATTR4_FILEHANDLE_MASK |	\
-	FATTR4_MAXFILESIZE_MASK |	\
-	FATTR4_MAXLINK_MASK |		\
-	FATTR4_MAXNAME_MASK |		\
-	FATTR4_MOUNTED_ON_FILEID_MASK)
+	FATTR4_SIZE_MASK |		\
+	FATTR4_LINK_SUPPORT_MASK |	\
+	FATTR4_SYMLINK_SUPPORT_MASK |	\
+	FATTR4_NAMED_ATTR_MASK |	\
+	FATTR4_FSID_MASK |		\
+	FATTR4_UNIQUE_HANDLES_MASK |	\
+	FATTR4_LEASE_TIME_MASK |	\
+	FATTR4_RDATTR_ERROR_MASK |	\
+	FATTR4_FILEHANDLE_MASK)
 
-#define	FATTR4_FSINFO_MASK (		\
+#define	NFS4_FSINFO_MASK (		\
 	FATTR4_SUPPORTED_ATTRS_MASK |	\
 	FATTR4_TYPE_MASK |		\
 	FATTR4_FH_EXPIRE_TYPE_MASK |	\
@@ -253,10 +418,96 @@ extern "C" {
 	FATTR4_MAXREAD_MASK |		\
 	FATTR4_MAXWRITE_MASK)
 
+#define	NFS41_FSINFO_MASK0 (		\
+	NFS4_FSINFO_MASK |		\
+	FATTR4_FS_LAYOUT_TYPE_MASK)
+
+#define	NFS41_FSINFO_MASK1	FATTR4_SUPPATTR_EXCLCREAT_MASK
+
+/*
+ * default layout alignment / blksizes for now
+ */
+#define	RFS41_DEFAULT_LAYOUT_ALIGNMENT  8192
+#define	RFS41_DEFAULT_LAYOUT_BLKSIZE    131072
+#define	NFS41_DEFAULT_LAYOUT_STRIPELEN	131072
+#define	NFS41_DEFAULT_LAYOUT_NUMSTRIPE	2
+
+enum attrvers {
+	AV_NFS40 = 0,
+	AV_NFS41,
+	AV_COUNT
+};
+typedef enum attrvers attrvers_t;
+
+#define	NFS4_ATTR_COUNT(avers)	\
+	((avers) == AV_NFS40 ? NFS40_ATTR_COUNT : NFS41_ATTR_COUNT)
+
+#define	NFS4_NTOV_MAP_SIZE(avers)	NFS4_ATTR_COUNT(avers)
+
+#define	NFS4_NTOV_MAP(avers)	\
+	((avers) == AV_NFS40 ? nfs40_ntov_map : nfs41_ntov_map)
+
+extern attrmap4 nfs4_empty_attrmap;
+extern attrmap4 nfs4_pathconf_attrmap;
+extern attrmap4 nfs4_vattr_attrmap;
+extern attrmap4 nfs4_statfs_attrmap;
+extern attrmap4 nfs4_extres_attrmap;
+extern attrmap4 nfs4_minrddir_attrmap;
+extern attrmap4 rfs41_supp_exclcreat_attrmap;
+extern attrmap4 nfs4_attrcache_attrmap;
+extern attrmap4 nfs4_leasetime_attrmap;
+extern attrmap4 rfs4_fsspace_attrmap;
+
+/*
+ * These macros take and ignore vers just for consistency.
+ * attr vers 0 and vers 1 contain the same bits.
+ */
+#define	NFS4_EMPTY_ATTRMAP(vers)	nfs4_empty_attrmap
+#define	NFS4_PATHCONF_ATTRMAP(vers)	nfs4_pathconf_attrmap
+#define	NFS4_VATTR_ATTRMAP(vers)	nfs4_vattr_attrmap
+#define	NFS4_STATFS_ATTRMAP(vers)	nfs4_statfs_attrmap
+#define	NFS4_EXTRES_ATTRMAP(vers)	nfs4_extres_attrmap
+#define	NFS4_MINRDDIR_ATTRMAP(vers)	nfs4_minrddir_attrmap
+#define	RFS41_EXCLCREAT_ATTRMAP(vers)	rfs41_supp_exclcreat_attrmap
+#define	NFS4_ATTRCACHE_ATTRMAP(vers)	nfs4_attrcache_attrmap
+#define	NFS4_LEASETIME_ATTRMAP(vers)	nfs4_leasetime_attrmap
+#define	RFS4_FS_SPACE_ATTRMAP(vers)	rfs4_fsspace_attrmap
+
+#define	MI4_ATTRVERS(m)			((m)->mi_attrvers)
+#define	MI4_EMPTY_ATTRMAP(m)		NFS4_EMPTY_ATTRMAP(MI4_ATTRVERS(m))
+#define	MI4_PATHCONF_ATTRMAP(m)		NFS4_PATHCONF_ATTRMAP(MI4_ATTRVERS(m))
+#define	MI4_VATTR_ATTRMAP(m)		NFS4_VATTR_ATTRMAP(MI4_ATTRVERS(m))
+#define	MI4_STATFS_ATTRMAP(m)		NFS4_STATFS_ATTRMAP(MI4_ATTRVERS(m))
+#define	MI4_EXTRES_ATTRMAP(m)		NFS4_EXTRES_ATTRMAP(MI4_ATTRVERS(m))
+#define	MI4_MINRDDIR_ATTRMAP(m)		NFS4_MINRDDIR_ATTRMAP(MI4_ATTRVERS(m))
+#define	MI4_ATTRCACHE_ATTRMAP(m)	NFS4_ATTRCACHE_ATTRMAP(MI4_ATTRVERS(m))
+#define	MI4_LEASETIME_ATTRMAP(m)	NFS4_LEASETIME_ATTRMAP(MI4_ATTRVERS(m))
+
+extern attrmap4 nfs4_default_attrmap[];
+extern attrmap4 nfs4_fsinfo_attrmap[];
+extern attrmap4 nfs4_mandatory_attrmap[];
+extern attrmap4 nfs4_rddir_attrmap[];
+extern attrmap4 rfs4_supp_attrmap[];
+extern attrmap4 rfs4_rddir_supp_attrmap[];
+
+#define	NFS4_DEFAULT_ATTRMAP(vers)	nfs4_default_attrmap[vers]
+#define	NFS4_FSINFO_ATTRMAP(vers)	nfs4_fsinfo_attrmap[vers]
+#define	NFS4_MAND_ATTRMAP(vers)		nfs4_mandatory_attrmap[vers]
+#define	NFS4_RDDIR_ATTRMAP(vers)	nfs4_rddir_attrmap[vers]
+#define	RFS4_SUPP_ATTRMAP(vers)		rfs4_supp_attrmap[vers]
+#define	RFS4_RDDIR_SUPP_ATTRMAP(vers)	rfs4_rddir_supp_attrmap[vers]
+
+#define	MI4_DEFAULT_ATTRMAP(m)		NFS4_DEFAULT_ATTRMAP(MI4_ATTRVERS(m))
+#define	MI4_FSINFO_ATTRMAP(m)		NFS4_FSINFO_ATTRMAP(MI4_ATTRVERS(m))
+#define	MI4_MAND_ATTRMAP(m)		NFS4_MAND_ATTRMAP(MI4_ATTRVERS(m))
+#define	MI4_RDDIR_ATTRMAP(m)		NFS4_RDDIR_ATTRMAP(MI4_ATTRVERS(m))
+
+#define	NFS4_VPDFL_ATTRMAP(vp)		(MI4_DEFAULT_ATTRMAP(VTOMI4(vp)))
+
 /*
  * These are the support attributes for the NFSv4 server
  */
-#define	NFS4_SRV_RDDIR_SUPPORTED_ATTRS (	\
+#define	NFS4_SRV_RDDIR_SUPP_MASK (	\
 	FATTR4_SUPPORTED_ATTRS_MASK |	\
 	FATTR4_TYPE_MASK |		\
 	FATTR4_FH_EXPIRE_TYPE_MASK |	\
@@ -301,15 +552,72 @@ extern "C" {
 	FATTR4_MOUNTED_ON_FILEID_MASK	\
 )
 
+#define	NFS4_SRV_SUPP_MASK (		\
+	NFS4_SRV_RDDIR_SUPP_MASK |	\
+	FATTR4_ACL_MASK |		\
+	FATTR4_ACLSUPPORT_MASK |	\
+	FATTR4_TIME_ACCESS_SET_MASK |	\
+	FATTR4_TIME_MODIFY_SET_MASK	\
+)
 
-#define	FATTR4_FSID_EQ(a, b)	\
+#define	NFS41_SRV_SUPP_MASK0 (		\
+	NFS4_SRV_SUPP_MASK |		\
+	FATTR4_FS_LAYOUT_TYPE_MASK |	\
+	FATTR4_LAYOUT_HINT_MASK		\
+)
+
+#define	NFS41_SRV_SUPP_MASK1 (		\
+	FATTR4_LAYOUT_TYPE_MASK |	\
+	FATTR4_LAYOUT_BLKSIZE_MASK |	\
+	FATTR4_LAYOUT_ALIGNMENT_MASK |	\
+	FATTR4_MDSTHRESHOLD_MASK |	\
+	FATTR4_SUPPATTR_EXCLCREAT_MASK	\
+)
+
+#define	NFS41_SRV_RDDIR_SUPP_MASK0 (	\
+	NFS4_SRV_RDDIR_SUPP_MASK |	\
+	NFS41_SRV_SUPP_MASK0		\
+)
+#define	NFS41_SRV_RDDIR_SUPP_MASK1 NFS41_SRV_SUPP_MASK1
+
+/*
+ * other settable attrs
+ * hidden
+ * mimetype
+ * archive
+ * system
+ * time_backup
+ * time_create
+ * dacl
+ * sacl
+ * retentevt_set
+ * retention_set
+ * retention_hold
+ * mode_set_masked
+ *
+ * Note: time_modify_set not in mask because time_modify is the
+ * verifier used to implement exclusive create
+ */
+#define	NFS41_SRV_EXCLCREAT_ATTRS (		\
+	FATTR4_SIZE_MASK		|	\
+	FATTR4_MODE_MASK		|	\
+	FATTR4_ACL_MASK			|	\
+	FATTR4_OWNER_MASK		|	\
+	FATTR4_OWNER_GROUP_MASK		|	\
+	FATTR4_LAYOUT_HINT_MASK		|	\
+	FATTR4_TIME_ACCESS_SET_MASK)
+
+#define	ga_arg_attrreq	nfs_argop4_u.opgetattr.attr_request
+
+#define	FATTR4_FSID_EQ(a, b)					\
 	((a)->major == (b)->major && (a)->minor == (b)->minor)
 
-#define	NFS4_MAXNUM_BITWORDS	2
-#define	NFS4_MAXNUM_ATTRS	56
+#define	NFS4_MAXNUM_BITWORDS	3
+#define	NFS4_MAXNUM_ATTRS	(FATTR4_FS_CHARSET_CAP + 1)
+
 
 union nfs4_attr_u {
-	fattr4_supported_attrs		supported_attrs;
+	attrmap4			supported_attrs;
 	fattr4_type			type;
 	fattr4_fh_expire_type		fh_expire_type;
 	fattr4_change			change;
@@ -365,6 +673,13 @@ union nfs4_attr_u {
 	fattr4_time_modify		time_modify;
 	fattr4_time_modify_set		time_modify_set;
 	fattr4_mounted_on_fileid	mounted_on_fileid;
+	layouttypes4_t			fs_layout_types;
+	file_layouthint4		file_layouthint;
+	layouttypes4_t			layout_types;
+	fattr4_layout_blksize		layout_blksize;
+	fattr4_layout_alignment		layout_alignment;
+	file_mdsthreshold4		file_mdsthreshold;
+	attrmap4			supp_exclcreat;
 };
 
 /*
@@ -388,7 +703,7 @@ union nfs4_attr_u {
 #define	NFS4_GETATTR_MAXWRITE_ERR	15
 #define	NFS4_GETATTR_NOCACHE_OK		16
 
-typedef struct nfs4_pathconf_info {
+struct nfs4_pathconf_info {
 	unsigned pc4_cache_valid:1;	/* When in rnode4, is data valid? */
 	unsigned pc4_no_trunc:1;
 	unsigned pc4_chown_restricted:1;
@@ -404,13 +719,28 @@ typedef struct nfs4_pathconf_info {
 	uint_t	pc4_link_max;
 	uint_t	pc4_name_max;
 	uint_t	pc4_filesizebits;
-} nfs4_pathconf_info_t;
+};
+typedef struct nfs4_pathconf_info nfs4_pathconf_info_t;
+
+struct nfs4_pnfs_attr {
+	layouttypes4_t		n4g_fs_layout_type;
+	layouttypes4_t		n4g_layout_type;
+	fattr4_layout_alignment	n4g_layout_alignment;
+	fattr4_layout_blksize	n4g_layout_blksize;
+	/*
+	 * client only decodes layout hint and mdsthreshold associated
+	 * with file-typed layouts.
+	 */
+	file_layouthint4	n4g_layouthint;
+	file_mdsthreshold4	n4g_file_mdsthreshold;
+};
+typedef struct nfs4_pnfs_attr nfs4_pnfs_attr_t;
 
 /*
  * Used for client only to process incoming getattr results.
  */
 typedef struct nfs4_ga_ext_res {
-	bitmap4				n4g_suppattrs;
+	attrmap4			n4g_suppattrs;
 	nfsstat4			n4g_rdattr_error;
 	fattr4_fh_expire_type		n4g_fet;
 	fattr4_lease_time		n4g_leasetime;
@@ -436,12 +766,12 @@ typedef struct nfs4_ga_ext_res {
 	 * ACL4_SUPPORT_ALARM_ACL
 	 */
 	fattr4_aclsupport		n4g_aclsupport;
+	attrmap4			n4g_supp_exclcreat;
+	nfs4_pnfs_attr_t		n4g_pnfs;
 } nfs4_ga_ext_res_t;
-
-extern bitmap4 rfs4_supported_attrs;
 
 #ifdef	__cplusplus
 }
 #endif
-
+#endif /* _KERNEL */
 #endif /* _NFS4_ATTR_H */

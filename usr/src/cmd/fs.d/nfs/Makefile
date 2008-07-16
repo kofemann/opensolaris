@@ -21,7 +21,7 @@
 #
 #ident	"%Z%%M%	%I%	%E% SMI"
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # cmd/fs.d/nfs/Makefile
@@ -34,7 +34,7 @@ include $(SRC)/Makefile.master
 
 SUBDIR1=	exportfs nfsd rquotad \
 		statd nfsstat mountd dfshares \
-		nfsfind nfs4cbd share
+		nfsfind nfs4cbd share mdsadm
 SUBDIR2=	clear_locks umount showmount \
 		mount dfmounts nfslog nfsmapid
 

@@ -2,9 +2,8 @@
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
- * Common Development and Distribution License, Version 1.0 only
- * (the "License").  You may not use this file except in compliance
- * with the License.
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
  * or http://www.opensolaris.org/os/licensing.
@@ -20,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2005 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -107,6 +106,9 @@
  *	  TASKQ_CPR_SAFE: This flag specifies that users of the task queue will
  * 		use their own protocol for handling CPR issues. This flag is not
  *		supported for DYNAMIC task queues.
+ *
+ *	  TASKQ_PERZONE: Confines the taskq threads to a particular zone as that
+ *		of the caller
  *
  *	The 'pri' field specifies the default priority for the threads that
  *	service all scheduled tasks.
@@ -384,6 +386,7 @@
 #include <sys/sysmacros.h>
 #include <sys/cpuvar.h>
 #include <sys/sdt.h>
+#include <sys/zone.h>
 
 static kmem_cache_t *taskq_ent_cache, *taskq_cache;
 
@@ -1074,6 +1077,7 @@ taskq_thread(void *arg)
 	taskq_ent_t *tqe;
 	callb_cpr_t cprinfo;
 	hrtime_t start, end;
+	int gz = 1;
 
 	if (tq->tq_flags & TASKQ_CPR_SAFE) {
 		CALLB_CPR_INIT_SAFE(curthread, tq->tq_name);
@@ -1116,10 +1120,19 @@ taskq_thread(void *arg)
 
 		taskq_ent_free(tq, tqe);
 	}
+
+	if (tq->tq_zoneid != GLOBAL_ZONEID)
+		gz = 0;
+
 	tq->tq_nthreads--;
 	cv_broadcast(&tq->tq_wait_cv);
 	ASSERT(!(tq->tq_flags & TASKQ_CPR_SAFE));
 	CALLB_CPR_EXIT(&cprinfo);
+
+	if (!gz) {
+		zthread_exit();
+	}
+
 	thread_exit();
 }
 
@@ -1135,6 +1148,7 @@ taskq_d_thread(taskq_ent_t *tqe)
 	kcondvar_t	*cv = &tqe->tqent_cv;
 	callb_cpr_t	cprinfo;
 	clock_t		w;
+	int 		gz = 1;
 
 	CALLB_CPR_INIT(&cprinfo, lock, callb_generic_cpr, tq->tq_name);
 
@@ -1249,9 +1263,14 @@ taskq_d_thread(taskq_ent_t *tqe)
 			tqe->tqent_thread = NULL;
 			mutex_enter(&tq->tq_lock);
 			tq->tq_tdeaths++;
+			if (tq->tq_zoneid != GLOBAL_ZONEID)
+				gz = 0;
 			mutex_exit(&tq->tq_lock);
 			CALLB_CPR_EXIT(&cprinfo);
 			kmem_cache_free(taskq_ent_cache, tqe);
+			if (!gz) {
+				zthread_exit();
+			}
 			thread_exit();
 		}
 	}
@@ -1334,6 +1353,10 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 	tq->tq_maxalloc = maxalloc;
 	tq->tq_nbuckets = bsize;
 	tq->tq_pri = pri;
+	if (flags & TASKQ_PERZONE)
+		tq->tq_zoneid = getzoneid();
+	else
+		tq->tq_zoneid = GLOBAL_ZONEID;
 
 	if (flags & TASKQ_PREPOPULATE) {
 		mutex_enter(&tq->tq_lock);
@@ -1343,8 +1366,12 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 	}
 
 	if (nthreads == 1) {
-		tq->tq_thread = thread_create(NULL, 0, taskq_thread, tq,
-		    0, &p0, TS_RUN, pri);
+		if (tq->tq_zoneid == GLOBAL_ZONEID)
+			tq->tq_thread = thread_create(NULL, 0, taskq_thread, tq,
+			    0, &p0, TS_RUN, pri);
+		else
+			tq->tq_thread = zthread_create(NULL, 0, taskq_thread,
+			    tq, 0, pri);
 		/*
 		 * No need to take thread_lock to change the field: no one can
 		 * reference it at this point.
@@ -1358,8 +1385,12 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 
 		mutex_enter(&tq->tq_lock);
 		while (nthreads-- > 0) {
-			*tpp = thread_create(NULL, 0, taskq_thread, tq,
-			    0, &p0, TS_RUN, pri);
+			if (tq->tq_zoneid == GLOBAL_ZONEID)
+				*tpp = thread_create(NULL, 0, taskq_thread, tq,
+				    0, &p0, TS_RUN, pri);
+			else
+				*tpp = zthread_create(NULL, 0, taskq_thread,
+				    tq, 0, pri);
 			(*tpp)->t_taskq = tq;
 			tpp++;
 		}
@@ -1401,10 +1432,10 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 	}
 
 	if (flags & TASKQ_DYNAMIC) {
-		if ((tq->tq_kstat = kstat_create("unix", instance,
-			tq->tq_name, "taskq_d", KSTAT_TYPE_NAMED,
-			sizeof (taskq_d_kstat) / sizeof (kstat_named_t),
-			KSTAT_FLAG_VIRTUAL)) != NULL) {
+		if ((tq->tq_kstat = kstat_create_zone("unix", instance,
+		    tq->tq_name, "taskq_d", KSTAT_TYPE_NAMED,
+		    sizeof (taskq_d_kstat) / sizeof (kstat_named_t),
+		    KSTAT_FLAG_VIRTUAL, tq->tq_zoneid)) != NULL) {
 			tq->tq_kstat->ks_lock = &taskq_d_kstat_lock;
 			tq->tq_kstat->ks_data = &taskq_d_kstat;
 			tq->tq_kstat->ks_update = taskq_d_kstat_update;
@@ -1412,10 +1443,10 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 			kstat_install(tq->tq_kstat);
 		}
 	} else {
-		if ((tq->tq_kstat = kstat_create("unix", instance, tq->tq_name,
-			"taskq", KSTAT_TYPE_NAMED,
-			sizeof (taskq_kstat) / sizeof (kstat_named_t),
-			KSTAT_FLAG_VIRTUAL)) != NULL) {
+		if ((tq->tq_kstat = kstat_create_zone("unix", instance,
+		    tq->tq_name, "taskq", KSTAT_TYPE_NAMED,
+		    sizeof (taskq_kstat) / sizeof (kstat_named_t),
+		    KSTAT_FLAG_VIRTUAL, tq->tq_zoneid)) != NULL) {
 			tq->tq_kstat->ks_lock = &taskq_kstat_lock;
 			tq->tq_kstat->ks_data = &taskq_kstat;
 			tq->tq_kstat->ks_update = taskq_kstat_update;
@@ -1583,8 +1614,13 @@ taskq_bucket_extend(void *arg)
 	 * Create a thread in a TS_STOPPED state first. If it is successfully
 	 * created, place the entry on the free list and start the thread.
 	 */
-	tqe->tqent_thread = thread_create(NULL, 0, taskq_d_thread, tqe,
-	    0, &p0, TS_STOPPED, tq->tq_pri);
+
+	if (tq->tq_zoneid == GLOBAL_ZONEID)
+		tqe->tqent_thread = thread_create(NULL, 0, taskq_d_thread, tqe,
+		    0, &p0, TS_STOPPED, tq->tq_pri);
+	else
+		tqe->tqent_thread = zthread_create_tstopped(
+		    NULL, 0, taskq_d_thread, tqe, 0, tq->tq_pri);
 
 	/*
 	 * Once the entry is ready, link it to the the bucket free list.

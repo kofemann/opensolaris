@@ -48,14 +48,14 @@ typedef struct rfs4_drc {
  * NFSv4 Duplicate request cache entry.
  */
 typedef struct rfs4_dupreq {
-	list_node_t 	dr_bkt_next;
-	list_node_t	dr_next;
-	list_t		*dr_bkt;
-	rfs4_drc_t	*drc;
-	int		dr_state;
-	uint32_t	dr_xid;
-	struct netbuf	dr_addr;
-	COMPOUND4res 	dr_res;
+	list_node_t		 dr_bkt_next;
+	list_node_t		 dr_next;
+	list_t			*dr_bkt;
+	rfs4_drc_t		*drc;
+	int			 dr_state;
+	uint32_t		 dr_xid;
+	struct netbuf		 dr_addr;
+	COMPOUND4res_srv	 dr_res;
 } rfs4_dupreq_t;
 
 /*

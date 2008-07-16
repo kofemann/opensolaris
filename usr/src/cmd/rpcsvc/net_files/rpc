@@ -1,5 +1,5 @@
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # CDDL HEADER START
@@ -92,3 +92,7 @@ metamhd		100230	metamhd
 metamedd	100242	metamedd
 smserverd	100155	smserverd
 idmap		100172	idmap
+pnfsctlmds	104000
+pnfsctlds	104001
+pnfsctlmv	104002
+

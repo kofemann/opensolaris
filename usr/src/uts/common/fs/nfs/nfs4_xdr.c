@@ -19,8 +19,8 @@
  * CDDL HEADER END
  */
 /*
- *	Copyright 2007 Sun Microsystems, Inc.
- *	All rights reserved.  Use is subject to license terms.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Use is subject to license terms.
  */
 
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
@@ -45,6 +45,176 @@
 #include <nfs/nfs4_clnt.h>
 #include <sys/sdt.h>
 #include <rpc/rpc_rdma.h>
+#include <sys/cmn_err.h>
+
+#include <nfs/nfs41_filehandle.h>
+
+#ifdef DEBUG
+/*
+ * Just for testing to validate both attr decode paths
+ * (inline and not-inline).  Set to 0 to avoid the
+ * fattr4 inline decode path.
+ */
+int nfs4_allow_inline_attrs = 1;
+#endif
+
+/*
+ * FATTR4_SUPPATTR_EXCLCREAT is a mandatory attribute, and
+ * if the server refuses to support or provide a value for
+ * a mand attr, the client returns an error to the caller.
+ *
+ * To continue to interoperate with servers that don't yet support
+ * this attribute, the default value for nfs41_fail_missing_supp_exclcreat
+ * causes the client to silently ignore servers that don't support
+ * suppattr_exclcreat.
+ */
+int nfs41_fail_missing_supp_exclcreat = 0;
+
+bool_t
+xdr_attrmap4(XDR *xdrs, attrmap4 *a)
+{
+	int32_t len;
+
+	if (xdrs->x_op == XDR_FREE)
+		return (TRUE);
+
+	if (xdrs->x_op == XDR_ENCODE) {
+
+		/*
+		 * The 4th word is not defined by NFSv4.1 and must always
+		 * be set to zero.  A bitmap4 is encoded which has a bm4_len
+		 * of the largest non-zero attrmap4 word.
+		 */
+		ASSERT(a->w.w3 == 0);
+		a->w.w3 = 0;
+
+		len = a->w.w2 ? 3 : (a->w.w1 ? 2 : (a->w.w0 ? 1 : 0));
+		if (!XDR_PUTINT32(xdrs, &len)) {
+			DTRACE_PROBE1(nfsx__e__attrmap4, char *, "e:len");
+			return (FALSE);
+		}
+
+		if (len == 0) {
+			DTRACE_PROBE1(nfsx__e__attrmap4, char *, "e:empty map");
+			return (TRUE);
+		}
+
+		if (!XDR_PUTINT32(xdrs, (int32_t *)&a->w.w0)) {
+			DTRACE_PROBE1(nfsx__e__attrmap4, char *, "e:w0");
+			return (FALSE);
+		}
+		if (len == 1)
+			return (TRUE);
+
+		if (!XDR_PUTINT32(xdrs, (int32_t *)&a->w.w1)) {
+			DTRACE_PROBE1(nfsx__e__attrmap4, char *, "e:w1");
+			return (FALSE);
+		}
+		if (len == 2)
+			return (TRUE);
+
+		if (!XDR_PUTINT32(xdrs, (int32_t *)&a->w.w2)) {
+			DTRACE_PROBE1(nfsx__e__attrmap4, char *, "e:w2");
+			return (FALSE);
+		}
+		return (TRUE);
+	}
+
+	/*
+	 * DECODE
+	 *
+	 * Both dwords are always preinitialized to 0 to avoid
+	 * uninitialized data when short bitmaps are received.
+	 */
+	a->d.d0 = 0;
+	a->d.d1 = 0;
+	if (!XDR_GETINT32(xdrs, (int32_t *)&len)) {
+		DTRACE_PROBE1(nfsx__e__attrmap4, char *, "d:len");
+		return (FALSE);
+	}
+
+	if (len > 0) {
+		uint32_t size;
+
+		if (!XDR_GETINT32(xdrs, (int32_t *)&a->w.w0)) {
+			DTRACE_PROBE1(nfsx__e__attrmap4, char *, "d:w0");
+			return (FALSE);
+		}
+		if (len == 1)
+			return (TRUE);
+
+		if (!XDR_GETINT32(xdrs, (int32_t *)&a->w.w1)) {
+			DTRACE_PROBE1(nfsx__e__attrmap4, char *, "d:w1");
+			return (FALSE);
+		}
+		if (len == 2)
+			return (TRUE);
+
+		if (!XDR_GETINT32(xdrs, (int32_t *)&a->w.w2)) {
+			DTRACE_PROBE1(nfsx__e__attrmap4, char *, "d:w2");
+			return (FALSE);
+		}
+		if (len == 3)
+			return (TRUE);
+
+		/*
+		 * bitmap is larger than needed to convey nfs41 attrs,
+		 * so skip remaining words.
+		 */
+		size = (len - 3) * BYTES_PER_XDR_UNIT;
+		if (!XDR_CONTROL(xdrs, XDR_SKIPBYTES, &size)) {
+			DTRACE_PROBE1(nfsx__e__attrmap4, char *, "d:skipbytes");
+			return (FALSE);
+		}
+		return (TRUE);
+	}
+
+	/*
+	 * len < 0 is illegal, len == 0 is dubious but allowed.
+	 */
+	return (len == 0);
+}
+
+void
+xdr_get_attrmap4_inline(uint32_t **iptr, attrmap4 *a)
+{
+	uint32_t len;
+	uint32_t *ptr = *iptr;
+
+	/*
+	 * preinitialize all (4) bmap words to 0
+	 */
+	a->d.d0 = 0;
+	a->d.d1 = 0;
+
+	if ((len = IXDR_GET_U_INT32(ptr)) == 0) {
+		*iptr = ptr;
+		return;
+	}
+
+	a->w.w0 = IXDR_GET_U_INT32(ptr);
+	if (--len == 0) {
+		*iptr = ptr;
+		return;
+	}
+
+	a->w.w1 = IXDR_GET_U_INT32(ptr);
+	if (--len == 0) {
+		*iptr = ptr;
+		return;
+	}
+
+	a->w.w2 = IXDR_GET_U_INT32(ptr);
+	if (--len == 0) {
+		*iptr = ptr;
+		return;
+	}
+
+	/*
+	 * NFS4.1 attrs only require 3 bmap words.  skip the rest.
+	 */
+	*iptr = ptr + len;
+}
 
 bool_t
 xdr_bitmap4(XDR *xdrs, bitmap4 *objp)
@@ -67,13 +237,13 @@ xdr_bitmap4(XDR *xdrs, bitmap4 *objp)
 
 #if defined(_LITTLE_ENDIAN)
 		if (XDR_PUTINT32(xdrs, (int32_t *)((char *)objp +
-						BYTES_PER_XDR_UNIT)) == TRUE) {
+		    BYTES_PER_XDR_UNIT)) == TRUE) {
 			return (XDR_PUTINT32(xdrs, (int32_t *)objp));
 		}
 #elif defined(_BIG_ENDIAN)
 		if (XDR_PUTINT32(xdrs, (int32_t *)objp) == TRUE) {
 			return (XDR_PUTINT32(xdrs, (int32_t *)((char *)objp +
-						BYTES_PER_XDR_UNIT)));
+			    BYTES_PER_XDR_UNIT)));
 		}
 #endif
 		return (FALSE);
@@ -88,13 +258,13 @@ xdr_bitmap4(XDR *xdrs, bitmap4 *objp)
 	if (len == 2) {
 #if defined(_LITTLE_ENDIAN)
 		if (XDR_GETINT32(xdrs, (int32_t *)((char *)objp +
-					BYTES_PER_XDR_UNIT)) == TRUE) {
+		    BYTES_PER_XDR_UNIT)) == TRUE) {
 			return (XDR_GETINT32(xdrs, (int32_t *)objp));
 		}
 #elif defined(_BIG_ENDIAN)
 		if (XDR_GETINT32(xdrs, (int32_t *)objp) == TRUE) {
 			return (XDR_GETINT32(xdrs, (int32_t *)((char *)objp +
-					BYTES_PER_XDR_UNIT)));
+			    BYTES_PER_XDR_UNIT)));
 		}
 #endif
 		return (FALSE);
@@ -132,13 +302,257 @@ xdr_bitmap4(XDR *xdrs, bitmap4 *objp)
 	return (XDR_CONTROL(xdrs, XDR_SKIPBYTES, &size));
 }
 
+bool_t
+xdr_clientid4(XDR *xdrs, clientid4 *objp)
+{
+	if (!xdr_uint64_t(xdrs, objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_component4(XDR *xdrs, component4 *objp)
+{
+	if (!xdr_utf8string(xdrs, objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_count4(XDR *xdrs, count4 *objp)
+{
+	if (!xdr_uint32_t(xdrs, objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_fsid4(XDR *xdrs, fsid4 *objp)
+{
+	if (!xdr_uint64_t(xdrs, &objp->major))
+		return (FALSE);
+	if (!xdr_uint64_t(xdrs, &objp->minor))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_length4(XDR *xdrs, length4 *objp)
+{
+	if (!xdr_uint64_t(xdrs, objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_limit_by4(XDR *xdrs, limit_by4 *objp)
+{
+	if (!xdr_enum(xdrs, (enum_t *)objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_lock_owner4(XDR *xdrs, lock_owner4 *objp)
+{
+	if (!xdr_clientid4(xdrs, &objp->clientid))
+		return (FALSE);
+	if (!xdr_bytes(xdrs, (char **)&objp->owner_val,
+	    (uint_t *)&objp->owner_len, NFS4_OPAQUE_LIMIT))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_mode4(XDR *xdrs, mode4 *objp)
+{
+	if (!xdr_uint32_t(xdrs, objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_netaddr4(XDR *xdrs, netaddr4 *objp)
+{
+	if (!xdr_string(xdrs, &objp->na_r_netid, ~0))
+		return (FALSE);
+	if (!xdr_string(xdrs, &objp->na_r_addr, ~0))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_nfs_cookie4(XDR *xdrs, nfs_cookie4 *objp)
+{
+	if (!xdr_uint64_t(xdrs, objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+
+bool_t
+xdr_nfs_modified_limit4(XDR *xdrs, nfs_modified_limit4 *objp)
+{
+	if (!xdr_uint32_t(xdrs, &objp->num_blocks))
+		return (FALSE);
+	if (!xdr_uint32_t(xdrs, &objp->bytes_per_block))
+		return (FALSE);
+	return (TRUE);
+}
+
+
+bool_t
+xdr_nfs_space_limit4(XDR *xdrs, nfs_space_limit4 *objp)
+{
+	if (!xdr_limit_by4(xdrs, &objp->limitby))
+		return (FALSE);
+	switch (objp->limitby) {
+	case NFS_LIMIT_SIZE:
+		if (!xdr_uint64_t(xdrs, &objp->nfs_space_limit4_u.filesize))
+			return (FALSE);
+		break;
+	case NFS_LIMIT_BLOCKS:
+		if (!xdr_nfs_modified_limit4(xdrs,
+		    &objp->nfs_space_limit4_u.mod_blocks))
+			return (FALSE);
+		break;
+	default:
+		return (FALSE);
+	}
+	return (TRUE);
+}
+
+bool_t
+xdr_nfsstat4(XDR *xdrs, nfsstat4 *objp)
+{
+	if (!xdr_enum(xdrs, (enum_t *)objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_offset4(XDR *xdrs, offset4 *objp)
+{
+	if (!xdr_uint64_t(xdrs, objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_open_claim_type4(XDR *xdrs, open_claim_type4 *objp)
+{
+	if (!xdr_enum(xdrs, (enum_t *)objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_open_delegation_type4(XDR *xdrs, open_delegation_type4 *objp)
+{
+	if (!xdr_enum(xdrs, (enum_t *)objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_open_read_delegation4(XDR *xdrs, open_read_delegation4 *objp)
+{
+	if (!xdr_stateid4(xdrs, &objp->stateid))
+		return (FALSE);
+	if (!xdr_bool(xdrs, &objp->recall))
+		return (FALSE);
+	if (!xdr_nfsace4(xdrs, &objp->permissions))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_open_write_delegation4(XDR *xdrs, open_write_delegation4 *objp)
+{
+	if (!xdr_stateid4(xdrs, &objp->stateid))
+		return (FALSE);
+	if (!xdr_bool(xdrs, &objp->recall))
+		return (FALSE);
+	if (!xdr_nfs_space_limit4(xdrs, &objp->space_limit))
+		return (FALSE);
+	if (!xdr_nfsace4(xdrs, &objp->permissions))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_pathname4(XDR *xdrs, pathname4 *objp)
+{
+	if (!xdr_array(xdrs, (char **)&objp->pathname4_val,
+	    (uint_t *)&objp->pathname4_len, ~0, sizeof (component4),
+	    (xdrproc_t)xdr_component4))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_sec_oid4(XDR *xdrs, sec_oid4 *objp)
+{
+	if (!xdr_bytes(xdrs, (char **)&objp->sec_oid4_val,
+	    (uint_t *)&objp->sec_oid4_len, ~0))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_rpc_gss_svc_t(XDR *xdrs, rpc_gss_svc_t *objp)
+{
+	if (!xdr_enum(xdrs, (enum_t *)objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_stateid4(XDR *xdrs, stateid4 *objp)
+{
+	if (!xdr_uint32_t(xdrs, &objp->seqid))
+		return (FALSE);
+	if (!xdr_opaque(xdrs, objp->other, 12))
+		return (FALSE);
+	return (TRUE);
+}
+
+
+/*
+ * Modified version of xdr_verifier4:  The original is not used because
+ * we use a uint64_t value for our verifier.
+ */
+bool_t
+xdr_verifier4(XDR *xdrs, verifier4 *objp)
+{
+	if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_utf8str_cis(XDR *xdrs, utf8str_cis *objp)
+{
+	if (!xdr_utf8string(xdrs, objp))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_utf8str_cs(XDR *xdrs, utf8str_cs *objp)
+{
+	if (!xdr_utf8string(xdrs, objp))
+		return (FALSE);
+	return (TRUE);
+}
+
 /* Called by xdr_array, nfsid_map_xdr */
 bool_t
 xdr_utf8string(XDR *xdrs, utf8string *objp)
 {
 	if (xdrs->x_op != XDR_FREE)
 		return (xdr_bytes(xdrs, (char **)&objp->utf8string_val,
-			(uint_t *)&objp->utf8string_len, NFS4_MAX_UTF8STRING));
+		    (uint_t *)&objp->utf8string_len, NFS4_MAX_UTF8STRING));
 
 	if (objp->utf8string_val != NULL) {
 		kmem_free(objp->utf8string_val, objp->utf8string_len);
@@ -466,13 +880,22 @@ xdr_encode_nfs_fh4(XDR *xdrs, nfs_fh4 *objp)
 	return (ret);
 }
 
+bool_t
+xdr_nfs_fh4(XDR *xdrs, nfs_fh4 *objp)
+{
+	if (!xdr_bytes(xdrs, (char **)&objp->nfs_fh4_val,
+	    (uint_t *)&objp->nfs_fh4_len, NFS4_FHSIZE))
+		return (FALSE);
+	return (TRUE);
+}
+
 /*
  * XDR a NFSv4 filehandle.
  * Encoding interprets the contents (server).
  * Decoding the contents are opaque (client).
  */
 bool_t
-xdr_nfs_fh4(XDR *xdrs, nfs_fh4 *objp)
+xdr_nfs_fh4_modified(XDR *xdrs, nfs_fh4 *objp)
 {
 	switch (xdrs->x_op) {
 	case XDR_ENCODE:
@@ -495,17 +918,16 @@ static bool_t
 xdr_fs_location4(XDR *xdrs, fs_location4 *objp)
 {
 	if (!xdr_array(xdrs, (char **)&objp->server_val,
-			(uint_t *)&objp->server_len, NFS4_FS_LOCATIONS_LIMIT,
-			sizeof (utf8string), (xdrproc_t)xdr_utf8string))
+	    (uint_t *)&objp->server_len, NFS4_FS_LOCATIONS_LIMIT,
+	    sizeof (utf8string), (xdrproc_t)xdr_utf8string))
 		return (FALSE);
 	return (xdr_array(xdrs, (char **)&objp->rootpath.pathname4_val,
-			(uint_t *)&objp->rootpath.pathname4_len,
-			NFS4_MAX_PATHNAME4,
-			sizeof (utf8string), (xdrproc_t)xdr_utf8string));
+	    (uint_t *)&objp->rootpath.pathname4_len, NFS4_MAX_PATHNAME4,
+	    sizeof (utf8string), (xdrproc_t)xdr_utf8string));
 }
 
 /* Called by xdr_array */
-static bool_t
+bool_t
 xdr_nfsace4(XDR *xdrs, nfsace4 *objp)
 {
 	if (xdrs->x_op != XDR_FREE) {
@@ -522,8 +944,7 @@ xdr_nfsace4(XDR *xdrs, nfsace4 *objp)
 		}
 
 		return (xdr_bytes(xdrs, (char **)&objp->who.utf8string_val,
-			(uint_t *)&objp->who.utf8string_len,
-			NFS4_MAX_UTF8STRING));
+		    (uint_t *)&objp->who.utf8string_len, NFS4_MAX_UTF8STRING));
 	}
 
 	/*
@@ -555,21 +976,20 @@ bool_t
 xdr_fattr4_acl(XDR *xdrs, fattr4_acl *objp)
 {
 	return (xdr_array(xdrs, (char **)&objp->fattr4_acl_val,
-			(uint_t *)&objp->fattr4_acl_len, NFS4_ACL_LIMIT,
-			sizeof (nfsace4), (xdrproc_t)xdr_nfsace4));
+	    (uint_t *)&objp->fattr4_acl_len, NFS4_ACL_LIMIT,
+	    sizeof (nfsace4), (xdrproc_t)xdr_nfsace4));
 }
 
 bool_t
 xdr_fattr4_fs_locations(XDR *xdrs, fattr4_fs_locations *objp)
 {
 	if (!xdr_array(xdrs, (char **)&objp->fs_root.pathname4_val,
-			(uint_t *)&objp->fs_root.pathname4_len,
-			NFS4_MAX_PATHNAME4,
-			sizeof (utf8string), (xdrproc_t)xdr_utf8string))
+	    (uint_t *)&objp->fs_root.pathname4_len, NFS4_MAX_PATHNAME4,
+	    sizeof (utf8string), (xdrproc_t)xdr_utf8string))
 		return (FALSE);
 	return (xdr_array(xdrs, (char **)&objp->locations_val,
-			(uint_t *)&objp->locations_len, NFS4_FS_LOCATIONS_LIMIT,
-			sizeof (fs_location4), (xdrproc_t)xdr_fs_location4));
+	    (uint_t *)&objp->locations_len, NFS4_FS_LOCATIONS_LIMIT,
+	    sizeof (fs_location4), (xdrproc_t)xdr_fs_location4));
 }
 
 bool_t
@@ -708,45 +1128,43 @@ xdr_ga_prefill_statvfs(struct nfs4_ga_ext_res *gesp, struct mntinfo4 *mi)
 }
 
 static bool_t
-xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
-		bitmap4 argbmap, struct mntinfo4 *mi, ug_cache_t *pug)
+xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, attrmap4 *presbmap,
+		attrmap4 *pargbmap, struct mntinfo4 *mi, ug_cache_t *pug)
 {
 	int truefalse;
 	struct nfs4_ga_ext_res ges, *gesp;
 	vattr_t *vap = &garp->n4g_va;
 	vsecattr_t *vsap = &garp->n4g_vsa;
+	attrmap4 argbmap, resbmap;
 
 	ASSERT(xdrs->x_op == XDR_DECODE);
-
-	if (garp->n4g_ext_res)
-		gesp = garp->n4g_ext_res;
-	else
-		gesp = &ges;
-
+	gesp = garp->n4g_ext_res ? garp->n4g_ext_res : &ges;
 	vap->va_mask = 0;
 
-	/* Check to see if the vattr should be pre-filled */
-	if (argbmap & NFS4_VATTR_MASK)
+	argbmap = *pargbmap;
+	resbmap = *presbmap;
+
+	/*
+	 * If nfs4 attrs were requested which directly map to vattr_t attrs,
+	 * prefill the vattr_t in the garp with suitable defaults.
+	 */
+	if (ATTRMAP_TST(argbmap, MI4_VATTR_ATTRMAP(mi)))
 		xdr_ga_prefill_vattr(garp, mi);
 
-	if (argbmap & NFS4_STATFS_ATTR_MASK)
+	/*
+	 * If nfs4 attrs were requested which directly map to statvfs attrs,
+	 * prefill the statvfs in the garp with suitable defaults.
+	 */
+	if (ATTRMAP_TST(argbmap, MI4_STATFS_ATTRMAP(mi)))
 		xdr_ga_prefill_statvfs(gesp, mi);
 
-	if (resbmap &
-	    (FATTR4_SUPPORTED_ATTRS_MASK |
-	    FATTR4_TYPE_MASK |
-	    FATTR4_FH_EXPIRE_TYPE_MASK |
-	    FATTR4_CHANGE_MASK |
-	    FATTR4_SIZE_MASK |
-	    FATTR4_LINK_SUPPORT_MASK |
-	    FATTR4_SYMLINK_SUPPORT_MASK |
-	    FATTR4_NAMED_ATTR_MASK)) {
+	if (resbmap.w.w0) {
 
-		if (resbmap & FATTR4_SUPPORTED_ATTRS_MASK) {
-			if (!xdr_bitmap4(xdrs, &gesp->n4g_suppattrs))
+		if (ATTR_ISSET(resbmap, SUPPORTED_ATTRS)) {
+			if (!xdr_attrmap4(xdrs, &gesp->n4g_suppattrs))
 				return (FALSE);
 		}
-		if (resbmap & FATTR4_TYPE_MASK) {
+		if (ATTR_ISSET(resbmap, TYPE)) {
 			if (!XDR_GETINT32(xdrs, (int *)&vap->va_type))
 				return (FALSE);
 
@@ -760,19 +1178,19 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 
 			vap->va_mask |= AT_TYPE;
 		}
-		if (resbmap & FATTR4_FH_EXPIRE_TYPE_MASK) {
+		if (ATTR_ISSET(resbmap, FH_EXPIRE_TYPE)) {
 			if (!XDR_GETINT32(xdrs, (int *)&gesp->n4g_fet))
 				return (FALSE);
 		}
-		if (resbmap & FATTR4_CHANGE_MASK) {
+		if (ATTR_ISSET(resbmap, CHANGE)) {
 			if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&garp->n4g_change))
+			    (u_longlong_t *)&garp->n4g_change))
 				return (FALSE);
 			garp->n4g_change_valid = 1;
 		}
-		if (resbmap & FATTR4_SIZE_MASK) {
+		if (ATTR_ISSET(resbmap, SIZE)) {
 			if (!xdr_u_longlong_t(xdrs,
-					(u_longlong_t *)&vap->va_size))
+			    (u_longlong_t *)&vap->va_size))
 				return (FALSE);
 			if (!NFS4_SIZE_OK(vap->va_size)) {
 				garp->n4g_attrerr = EFBIG;
@@ -781,63 +1199,49 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 				vap->va_mask |= AT_SIZE;
 			}
 		}
-		if (resbmap & FATTR4_LINK_SUPPORT_MASK) {
+		if (ATTR_ISSET(resbmap, LINK_SUPPORT)) {
 			if (!XDR_GETINT32(xdrs, (int *)&truefalse))
 				return (FALSE);
 			gesp->n4g_pc4.pc4_link_support =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_SYMLINK_SUPPORT_MASK) {
+		if (ATTR_ISSET(resbmap, SYMLINK_SUPPORT)) {
 			if (!XDR_GETINT32(xdrs, (int *)&truefalse))
 				return (FALSE);
 			gesp->n4g_pc4.pc4_symlink_support =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_NAMED_ATTR_MASK) {
+		if (ATTR_ISSET(resbmap, NAMED_ATTR)) {
 			if (!XDR_GETINT32(xdrs, (int *)&truefalse))
 				return (FALSE);
 			gesp->n4g_pc4.pc4_xattr_exists = TRUE;
 			gesp->n4g_pc4.pc4_xattr_exists =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-	}
-	if (resbmap &
-	    (FATTR4_FSID_MASK |
-	    FATTR4_UNIQUE_HANDLES_MASK |
-	    FATTR4_LEASE_TIME_MASK |
-	    FATTR4_RDATTR_ERROR_MASK)) {
-
-		if (resbmap & FATTR4_FSID_MASK) {
-		    if ((!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&garp->n4g_fsid.major)) ||
-			(!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&garp->n4g_fsid.minor)))
+		if (ATTR_ISSET(resbmap, FSID)) {
+			if ((!xdr_u_longlong_t(xdrs,
+			    (u_longlong_t *)&garp->n4g_fsid.major)) ||
+			    (!xdr_u_longlong_t(xdrs,
+			    (u_longlong_t *)&garp->n4g_fsid.minor)))
 				return (FALSE);
-		    garp->n4g_fsid_valid = 1;
+			garp->n4g_fsid_valid = 1;
 		}
-		if (resbmap & FATTR4_UNIQUE_HANDLES_MASK) {
+		if (ATTR_ISSET(resbmap, UNIQUE_HANDLES)) {
 			if (!XDR_GETINT32(xdrs, (int *)&truefalse))
 				return (FALSE);
 			gesp->n4g_pc4.pc4_unique_handles =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_LEASE_TIME_MASK) {
+		if (ATTR_ISSET(resbmap, LEASE_TIME)) {
 			if (!XDR_GETINT32(xdrs, (int *)&gesp->n4g_leasetime))
 				return (FALSE);
 		}
-		if (resbmap & FATTR4_RDATTR_ERROR_MASK) {
+		if (ATTR_ISSET(resbmap, RDATTR_ERROR)) {
 			if (!XDR_GETINT32(xdrs,
-					(int *)&gesp->n4g_rdattr_error))
+			    (int *)&gesp->n4g_rdattr_error))
 				return (FALSE);
 		}
-	}
-	if (resbmap &
-	    (FATTR4_ACL_MASK |
-	    FATTR4_ACLSUPPORT_MASK |
-	    FATTR4_ARCHIVE_MASK |
-	    FATTR4_CANSETTIME_MASK)) {
-
-		if (resbmap & FATTR4_ACL_MASK) {
+		if (ATTR_ISSET(resbmap, ACL)) {
 			fattr4_acl	acl;
 
 			acl.fattr4_acl_val = NULL;
@@ -852,165 +1256,123 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 			vsap->vsa_aclentsz = vsap->vsa_aclcnt * sizeof (ace_t);
 
 		}
-		if (resbmap & FATTR4_ACLSUPPORT_MASK) {
+		if (ATTR_ISSET(resbmap, ACLSUPPORT)) {
 			if (!XDR_GETINT32(xdrs, (int *)&gesp->n4g_aclsupport))
 				return (FALSE);
 		}
-		if (resbmap & FATTR4_ARCHIVE_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_CANSETTIME_MASK) {
+		ASSERT(ATTR_ISSET(resbmap, ARCHIVE) == 0);
+
+		if (ATTR_ISSET(resbmap, CANSETTIME)) {
 			if (!XDR_GETINT32(xdrs, (int *)&truefalse))
 				return (FALSE);
 			gesp->n4g_pc4.pc4_cansettime =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-	}
-	if (resbmap &
-	    (FATTR4_CASE_INSENSITIVE_MASK |
-	    FATTR4_CASE_PRESERVING_MASK |
-	    FATTR4_CHOWN_RESTRICTED_MASK |
-	    FATTR4_FILEHANDLE_MASK |
-	    FATTR4_FILEID_MASK |
-	    FATTR4_FILES_AVAIL_MASK |
-	    FATTR4_FILES_FREE_MASK |
-	    FATTR4_FILES_TOTAL_MASK)) {
-
-		if (resbmap & FATTR4_CASE_INSENSITIVE_MASK) {
+		if (ATTR_ISSET(resbmap, CASE_INSENSITIVE)) {
 			if (!XDR_GETINT32(xdrs, (int *)&truefalse))
 				return (FALSE);
 			gesp->n4g_pc4.pc4_case_insensitive =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_CASE_PRESERVING_MASK) {
+		if (ATTR_ISSET(resbmap, CASE_PRESERVING)) {
 			if (!XDR_GETINT32(xdrs, (int *)&truefalse))
 				return (FALSE);
 			gesp->n4g_pc4.pc4_case_preserving =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_CHOWN_RESTRICTED_MASK) {
+		if (ATTR_ISSET(resbmap, CHOWN_RESTRICTED)) {
 			if (!XDR_GETINT32(xdrs, (int *)&truefalse))
 				return (FALSE);
 			gesp->n4g_pc4.pc4_chown_restricted =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_FILEHANDLE_MASK) {
+		if (ATTR_ISSET(resbmap, FILEHANDLE)) {
 			gesp->n4g_fh_u.nfs_fh4_alt.len = 0;
 			gesp->n4g_fh_u.nfs_fh4_alt.val =
-				gesp->n4g_fh_u.nfs_fh4_alt.data;
+			    gesp->n4g_fh_u.nfs_fh4_alt.data;
 			if (!xdr_bytes(xdrs,
 			    (char **)&gesp->n4g_fh_u.n4g_fh.nfs_fh4_val,
 			    (uint_t *)&gesp->n4g_fh_u.n4g_fh.nfs_fh4_len,
 			    NFS4_FHSIZE))
 				return (FALSE);
 		}
-		if (resbmap & FATTR4_FILEID_MASK) {
+		if (ATTR_ISSET(resbmap, FILEID)) {
 			if (!xdr_u_longlong_t(xdrs,
-					(u_longlong_t *)&vap->va_nodeid))
+			    (u_longlong_t *)&vap->va_nodeid))
 				return (FALSE);
 			vap->va_mask |= AT_NODEID;
 		}
-		if (resbmap & FATTR4_FILES_AVAIL_MASK) {
+		if (ATTR_ISSET(resbmap, FILES_AVAIL)) {
 			if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&gesp->n4g_sb.f_favail))
+			    (u_longlong_t *)&gesp->n4g_sb.f_favail))
 				return (FALSE);
 		}
-		if (resbmap & FATTR4_FILES_FREE_MASK) {
+		if (ATTR_ISSET(resbmap, FILES_FREE)) {
 			if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&gesp->n4g_sb.f_ffree))
+			    (u_longlong_t *)&gesp->n4g_sb.f_ffree))
 				return (FALSE);
 		}
-		if (resbmap & FATTR4_FILES_TOTAL_MASK) {
+		if (ATTR_ISSET(resbmap, FILES_TOTAL)) {
 			if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&gesp->n4g_sb.f_files))
+			    (u_longlong_t *)&gesp->n4g_sb.f_files))
 				return (FALSE);
 		}
-	}
-	if (resbmap &
-	    (FATTR4_FS_LOCATIONS_MASK |
-	    FATTR4_HIDDEN_MASK |
-	    FATTR4_HOMOGENEOUS_MASK)) {
 
-		if (resbmap & FATTR4_FS_LOCATIONS_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_HIDDEN_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_HOMOGENEOUS_MASK) {
+		ASSERT(ATTR_ISSET(resbmap, FS_LOCATIONS) == 0);
+		ASSERT(ATTR_ISSET(resbmap, HIDDEN) == 0);
+
+		if (ATTR_ISSET(resbmap, HOMOGENEOUS)) {
 			if (!XDR_GETINT32(xdrs, (int *)&truefalse))
 				return (FALSE);
 			gesp->n4g_pc4.pc4_homogeneous =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-	}
-	if (resbmap &
-	    (FATTR4_MAXFILESIZE_MASK |
-	    FATTR4_MAXLINK_MASK |
-	    FATTR4_MAXNAME_MASK |
-	    FATTR4_MAXREAD_MASK |
-	    FATTR4_MAXWRITE_MASK)) {
-
-		if (resbmap & FATTR4_MAXFILESIZE_MASK) {
+		if (ATTR_ISSET(resbmap, MAXFILESIZE)) {
 			if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&gesp->n4g_maxfilesize))
+			    (u_longlong_t *)&gesp->n4g_maxfilesize))
 				return (FALSE);
 		}
-		if (resbmap & FATTR4_MAXLINK_MASK) {
+		if (ATTR_ISSET(resbmap, MAXLINK)) {
 			if (!XDR_GETINT32(xdrs,
-					(int *)&gesp->n4g_pc4.pc4_link_max))
+			    (int *)&gesp->n4g_pc4.pc4_link_max))
 				return (FALSE);
 		}
-		if (resbmap & FATTR4_MAXNAME_MASK) {
+		if (ATTR_ISSET(resbmap, MAXNAME)) {
 			if (!XDR_GETINT32(xdrs,
-					(int *)&gesp->n4g_pc4.pc4_name_max))
+			    (int *)&gesp->n4g_pc4.pc4_name_max))
 				return (FALSE);
 			gesp->n4g_sb.f_namemax = gesp->n4g_pc4.pc4_name_max;
 		}
-		if (resbmap & FATTR4_MAXREAD_MASK) {
+		if (ATTR_ISSET(resbmap, MAXREAD)) {
 			if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&gesp->n4g_maxread))
+			    (u_longlong_t *)&gesp->n4g_maxread))
 				return (FALSE);
 		}
-		if (resbmap & FATTR4_MAXWRITE_MASK) {
+		if (ATTR_ISSET(resbmap, MAXWRITE)) {
 			if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&gesp->n4g_maxwrite))
+			    (u_longlong_t *)&gesp->n4g_maxwrite))
 				return (FALSE);
 		}
 	}
-	if (resbmap &
-	    (FATTR4_MIMETYPE_MASK |
-	    FATTR4_MODE_MASK |
-	    FATTR4_NO_TRUNC_MASK |
-	    FATTR4_NUMLINKS_MASK)) {
-
-		if (resbmap & FATTR4_MIMETYPE_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_MODE_MASK) {
+	if (resbmap.w.w0) {
+		ASSERT(ATTR_ISSET(resbmap, MIMETYPE) == 0);
+		if (ATTR_ISSET(resbmap, MODE)) {
 			if (!XDR_GETINT32(xdrs, (int *)&vap->va_mode))
 				return (FALSE);
 			vap->va_mask |= AT_MODE;
 		}
-		if (resbmap & FATTR4_NO_TRUNC_MASK) {
+		if (ATTR_ISSET(resbmap, NO_TRUNC)) {
 			if (!XDR_GETINT32(xdrs, (int *)&truefalse))
 				return (FALSE);
 			gesp->n4g_pc4.pc4_no_trunc =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_NUMLINKS_MASK) {
+		if (ATTR_ISSET(resbmap, NUMLINKS)) {
 			if (!XDR_GETINT32(xdrs, (int *)&vap->va_nlink))
 				return (FALSE);
 			vap->va_mask |= AT_NLINK;
 		}
-	}
-	if (resbmap &
-	    (FATTR4_OWNER_MASK |
-	    FATTR4_OWNER_GROUP_MASK |
-	    FATTR4_QUOTA_AVAIL_HARD_MASK |
-	    FATTR4_QUOTA_AVAIL_SOFT_MASK)) {
-
-		if (resbmap & FATTR4_OWNER_MASK) {
+		if (ATTR_ISSET(resbmap, OWNER)) {
 			uint_t *owner_length, ol;
 			char *owner_val = NULL;
 			char *owner_alloc = NULL;
@@ -1032,7 +1394,7 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 			/* find memory to store the decode */
 			if (*owner_length > MAX_OG_NAME || pug == NULL)
 				owner_val = owner_alloc =
-					kmem_alloc(*owner_length, KM_SLEEP);
+				    kmem_alloc(*owner_length, KM_SLEEP);
 			else
 				owner_val = pug->u_curr.utf8string_val;
 
@@ -1047,7 +1409,7 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 			if (pug &&
 			    *owner_length == pug->u_last.utf8string_len &&
 			    bcmp(owner_val, pug->u_last.utf8string_val,
-					*owner_length) == 0) {
+			    *owner_length) == 0) {
 				vap->va_uid = pug->uid;
 				vap->va_mask |= AT_UID;
 			} else {
@@ -1064,13 +1426,13 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 				if (error == ENOTSUP) {
 					error = 0;
 					garp->n4g_attrwhy =
-						NFS4_GETATTR_NOCACHE_OK;
+					    NFS4_GETATTR_NOCACHE_OK;
 				}
 
 				if (error) {
 					garp->n4g_attrerr = error;
 					garp->n4g_attrwhy =
-						NFS4_GETATTR_ATUID_ERR;
+					    NFS4_GETATTR_ATUID_ERR;
 				} else {
 					vap->va_uid = uid;
 					vap->va_mask |= AT_UID;
@@ -1083,7 +1445,7 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 					kmem_free(owner_alloc, *owner_length);
 			}
 		}
-		if (resbmap & FATTR4_OWNER_GROUP_MASK) {
+		if (ATTR_ISSET(resbmap, OWNER_GROUP)) {
 			uint_t *group_length, gl;
 			char *group_val = NULL;
 			char *group_alloc = NULL;
@@ -1105,7 +1467,7 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 			/* find memory to store the decode */
 			if (*group_length > MAX_OG_NAME || pug == NULL)
 				group_val = group_alloc =
-					kmem_alloc(*group_length, KM_SLEEP);
+				    kmem_alloc(*group_length, KM_SLEEP);
 			else
 				group_val = pug->g_curr.utf8string_val;
 
@@ -1120,7 +1482,7 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 			if (pug &&
 			    *group_length == pug->g_last.utf8string_len &&
 			    bcmp(group_val, pug->g_last.utf8string_val,
-					*group_length) == 0) {
+			    *group_length) == 0) {
 				vap->va_gid = pug->gid;
 				vap->va_mask |= AT_GID;
 			} else {
@@ -1137,13 +1499,13 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 				if (error == ENOTSUP) {
 					error = 0;
 					garp->n4g_attrwhy =
-						NFS4_GETATTR_NOCACHE_OK;
+					    NFS4_GETATTR_NOCACHE_OK;
 				}
 
 				if (error) {
 					garp->n4g_attrerr = error;
 					garp->n4g_attrwhy =
-						NFS4_GETATTR_ATGID_ERR;
+					    NFS4_GETATTR_ATGID_ERR;
 				} else {
 					vap->va_gid = gid;
 					vap->va_mask |= AT_GID;
@@ -1157,59 +1519,44 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 				}
 			}
 		}
-		if (resbmap & FATTR4_QUOTA_AVAIL_HARD_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_QUOTA_AVAIL_SOFT_MASK) {
-			ASSERT(0);
-		}
-	}
-	if (resbmap &
-	    (FATTR4_QUOTA_USED_MASK |
-	    FATTR4_SPACE_AVAIL_MASK |
-	    FATTR4_SPACE_FREE_MASK |
-	    FATTR4_SPACE_TOTAL_MASK |
-	    FATTR4_SPACE_USED_MASK |
-	    FATTR4_SYSTEM_MASK)) {
-
-		if (resbmap & FATTR4_QUOTA_USED_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_RAWDEV_MASK) {
+		ASSERT(ATTR_ISSET(resbmap, QUOTA_AVAIL_HARD) == 0);
+		ASSERT(ATTR_ISSET(resbmap, QUOTA_AVAIL_SOFT) == 0);
+		ASSERT(ATTR_ISSET(resbmap, QUOTA_USED) == 0);
+		if (ATTR_ISSET(resbmap, RAWDEV)) {
 			fattr4_rawdev rawdev;
 			if (!xdr_fattr4_rawdev(xdrs, &rawdev))
 				return (FALSE);
 
 			if (vap->va_type == VCHR || vap->va_type == VBLK) {
 				vap->va_rdev = makedevice(rawdev.specdata1,
-							rawdev.specdata2);
+				    rawdev.specdata2);
 			} else {
 				vap->va_rdev = 0;
 			}
 			vap->va_mask |= AT_RDEV;
 		}
-		if (resbmap & FATTR4_SPACE_AVAIL_MASK) {
+		if (ATTR_ISSET(resbmap, SPACE_AVAIL)) {
 			if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&gesp->n4g_sb.f_bavail))
+			    (u_longlong_t *)&gesp->n4g_sb.f_bavail))
 				return (FALSE);
 			gesp->n4g_sb.f_bavail /= DEV_BSIZE;
 		}
-		if (resbmap & FATTR4_SPACE_FREE_MASK) {
+		if (ATTR_ISSET(resbmap, SPACE_FREE)) {
 			if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&gesp->n4g_sb.f_bfree))
+			    (u_longlong_t *)&gesp->n4g_sb.f_bfree))
 				return (FALSE);
 			gesp->n4g_sb.f_bfree /= DEV_BSIZE;
 		}
-		if (resbmap & FATTR4_SPACE_TOTAL_MASK) {
+		if (ATTR_ISSET(resbmap, SPACE_TOTAL)) {
 			if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&gesp->n4g_sb.f_blocks))
+			    (u_longlong_t *)&gesp->n4g_sb.f_blocks))
 				return (FALSE);
 			gesp->n4g_sb.f_blocks /= DEV_BSIZE;
 		}
-		if (resbmap & FATTR4_SPACE_USED_MASK) {
+		if (ATTR_ISSET(resbmap, SPACE_USED)) {
 			uint64_t space_used;
 			if (!xdr_u_longlong_t(xdrs,
-						(u_longlong_t *)&space_used))
+			    (u_longlong_t *)&space_used))
 				return (FALSE);
 
 			/* Compute space depending on device type */
@@ -1217,34 +1564,20 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 			if (vap->va_type == VREG || vap->va_type == VDIR ||
 			    vap->va_type == VLNK) {
 				vap->va_nblocks = (u_longlong_t)
-					((space_used + (offset4)DEV_BSIZE -
-					(offset4)1) / (offset4)DEV_BSIZE);
+				    ((space_used + (offset4)DEV_BSIZE -
+				    (offset4)1) / (offset4)DEV_BSIZE);
 			} else {
 				vap->va_nblocks = 0;
 			}
 			vap->va_mask |= AT_NBLOCKS;
 		}
-		if (resbmap & FATTR4_SYSTEM_MASK) {
-			ASSERT(0);
-		}
-	}
-	if (resbmap &
-	    (FATTR4_TIME_ACCESS_MASK |
-	    FATTR4_TIME_ACCESS_SET_MASK |
-	    FATTR4_TIME_BACKUP_MASK |
-	    FATTR4_TIME_CREATE_MASK |
-	    FATTR4_TIME_DELTA_MASK |
-	    FATTR4_TIME_METADATA_MASK |
-	    FATTR4_TIME_MODIFY_MASK |
-	    FATTR4_TIME_MODIFY_SET_MASK |
-	    FATTR4_MOUNTED_ON_FILEID_MASK)) {
-
-		if (resbmap & FATTR4_TIME_ACCESS_MASK) {
+		ASSERT(ATTR_ISSET(resbmap, SYSTEM) == 0);
+		if (ATTR_ISSET(resbmap, TIME_ACCESS)) {
 			nfstime4 atime;
 			int error;
 
 			if (!xdr_longlong_t(xdrs,
-					    (longlong_t *)&atime.seconds))
+			    (longlong_t *)&atime.seconds))
 				return (FALSE);
 			if (!XDR_GETINT32(xdrs, (int *)&atime.nseconds))
 				return (FALSE);
@@ -1255,22 +1588,17 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 			}
 			vap->va_mask |= AT_ATIME;
 		}
-		if (resbmap & FATTR4_TIME_ACCESS_SET_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_TIME_BACKUP_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_TIME_CREATE_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_TIME_DELTA_MASK) {
+		ASSERT(ATTR_ISSET(resbmap, TIME_ACCESS_SET) == 0);
+		ASSERT(ATTR_ISSET(resbmap, TIME_BACKUP) == 0);
+		ASSERT(ATTR_ISSET(resbmap, TIME_CREATE) == 0);
+
+		if (ATTR_ISSET(resbmap, TIME_DELTA)) {
 			if ((!xdr_u_longlong_t(xdrs,
 			    (u_longlong_t *)&gesp->n4g_delta.seconds)) ||
 			    (!xdr_u_int(xdrs, &gesp->n4g_delta.nseconds)))
 				return (FALSE);
 		}
-		if (resbmap & FATTR4_TIME_METADATA_MASK) {
+		if (ATTR_ISSET(resbmap, TIME_METADATA)) {
 			nfstime4 mdt;
 			int error;
 
@@ -1285,12 +1613,12 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 			}
 			vap->va_mask |= AT_CTIME;
 		}
-		if (resbmap & FATTR4_TIME_MODIFY_MASK) {
+		if (ATTR_ISSET(resbmap, TIME_MODIFY)) {
 			nfstime4 mtime;
 			int error;
 
 			if (!xdr_longlong_t(xdrs,
-					    (longlong_t *)&mtime.seconds))
+			    (longlong_t *)&mtime.seconds))
 				return (FALSE);
 			if (!XDR_GETINT32(xdrs, (int32_t *)&mtime.nseconds))
 				return (FALSE);
@@ -1301,18 +1629,71 @@ xdr_ga_fattr_res(XDR *xdrs, struct nfs4_ga_res *garp, bitmap4 resbmap,
 			}
 			vap->va_mask |= AT_MTIME;
 		}
-		if (resbmap & FATTR4_TIME_MODIFY_SET_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_MOUNTED_ON_FILEID_MASK) {
+		ASSERT(ATTR_ISSET(resbmap, TIME_MODIFY_SET) == 0);
+
+		if (ATTR_ISSET(resbmap, MOUNTED_ON_FILEID)) {
 			if (!xdr_u_longlong_t(xdrs,
-					(u_longlong_t *)&garp->n4g_mon_fid))
+			    (u_longlong_t *)&garp->n4g_mon_fid))
 				return (FALSE);
 			garp->n4g_mon_fid_valid = 1;
 		}
+		ASSERT(ATTR_ISSET(resbmap, DIR_NOTIF_DELAY) == 0);
+		ASSERT(ATTR_ISSET(resbmap, DIRENT_NOTIF_DELAY) == 0);
+		ASSERT(ATTR_ISSET(resbmap, DACL) == 0);
+		ASSERT(ATTR_ISSET(resbmap, SACL) == 0);
+		ASSERT(ATTR_ISSET(resbmap, CHANGE_POLICY) == 0);
+		ASSERT(ATTR_ISSET(resbmap, FS_STATUS) == 0);
+
+		if (ATTR_ISSET(resbmap, FS_LAYOUT_TYPE)) {
+			if (!xdr_layouttypes4(xdrs,
+			    &gesp->n4g_pnfs.n4g_fs_layout_type))
+				return (FALSE);
+		}
+
+		/* write only attr */
+		ASSERT(ATTR_ISSET(resbmap, LAYOUT_HINT) == 0);
 	}
 
-	if (resbmap & ~(NFS4_VATTR_MASK | FATTR4_ACL_MASK)) {
+	if (resbmap.w.w2) {
+		if (ATTR_ISSET(resbmap, LAYOUT_TYPE)) {
+			if (!xdr_layouttypes4(xdrs,
+			    &gesp->n4g_pnfs.n4g_layout_type))
+				return (FALSE);
+		}
+		if (ATTR_ISSET(resbmap, LAYOUT_BLKSIZE)) {
+			if (!XDR_GETINT32(xdrs,
+			    (int32_t *)&gesp->n4g_pnfs.n4g_layout_blksize))
+				return (FALSE);
+		}
+		if (ATTR_ISSET(resbmap, LAYOUT_ALIGNMENT)) {
+			if (!XDR_GETINT32(xdrs,
+			    (int32_t *)&gesp->n4g_pnfs.n4g_layout_alignment))
+				return (FALSE);
+		}
+		ASSERT(ATTR_ISSET(resbmap, FS_LOCATIONS_INFO) == 0);
+
+		if (ATTR_ISSET(resbmap, MDSTHRESHOLD)) {
+			if (!xdr_file_mdsthreshold4(xdrs,
+			    &gesp->n4g_pnfs.n4g_file_mdsthreshold))
+				return (FALSE);
+		}
+
+		ASSERT(ATTR_ISSET(resbmap, RETENTION_GET) == 0);
+		ASSERT(ATTR_ISSET(resbmap, RETENTION_SET) == 0);
+		ASSERT(ATTR_ISSET(resbmap, RETENTEVT_GET) == 0);
+		ASSERT(ATTR_ISSET(resbmap, RETENTEVT_SET) == 0);
+		ASSERT(ATTR_ISSET(resbmap, RETENTION_HOLD) == 0);
+		ASSERT(ATTR_ISSET(resbmap, MODE_SET_MASKED) == 0);
+
+		if (ATTR_ISSET(resbmap, SUPPATTR_EXCLCREAT)) {
+			if (!xdr_attrmap4(xdrs, &gesp->n4g_supp_exclcreat))
+				return (FALSE);
+		}
+
+		ASSERT(ATTR_ISSET(resbmap, FS_CHARSET_CAP) == 0);
+	}
+
+	if (ATTRMAP_TST(resbmap, MI4_EXTRES_ATTRMAP(mi))) {
 		/* copy only if not provided */
 		if (garp->n4g_ext_res == NULL) {
 			garp->n4g_ext_res = kmem_alloc(sizeof (ges), KM_SLEEP);
@@ -1338,7 +1719,7 @@ xdr_get_bitmap4_inline(uint32_t **iptr)
 
 	/* Inline the bitmap and attrlen for common case of two word map */
 	if (resbmaplen == 2) {
-		IXDR_GET_HYPER(ptr, bm);
+		IXDR_GET_U_HYPER(ptr, bm);
 		*iptr = ptr;
 		return (bm);
 	}
@@ -1381,41 +1762,40 @@ xdr_get_bitmap4_inline(uint32_t **iptr)
 
 static bool_t
 xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
-			bitmap4 resbmap, bitmap4 argbmap, struct mntinfo4 *mi,
-			ug_cache_t *pug)
+    attrmap4 *presbmap, attrmap4 *pargbmap, struct mntinfo4 *mi,
+    ug_cache_t *pug)
 {
 	int truefalse;
 	struct nfs4_ga_ext_res ges, *gesp;
 	vattr_t *vap = &garp->n4g_va;
+	attrmap4 argbmap, resbmap;
 
-	if (garp->n4g_ext_res)
-		gesp = garp->n4g_ext_res;
-	else
-		gesp = &ges;
-
+	gesp = garp->n4g_ext_res ? garp->n4g_ext_res : &ges;
 	vap->va_mask = 0;
 
-	/* Check to see if the vattr should be pre-filled */
-	if (argbmap & NFS4_VATTR_MASK)
+	argbmap = *pargbmap;
+	resbmap = *presbmap;
+
+	/*
+	 * If nfs4 attrs were requested which directly map to vattr_t attrs,
+	 * prefill the vattr_t in the garp with suitable defaults.
+	 */
+	if (ATTRMAP_TST(argbmap, MI4_VATTR_ATTRMAP(mi)))
 		xdr_ga_prefill_vattr(garp, mi);
 
-	if (argbmap & NFS4_STATFS_ATTR_MASK)
+	/*
+	 * If nfs4 attrs were requested which directly map to statvfs attrs,
+	 * prefill the statvfs in the garp with suitable defaults.
+	 */
+	if (ATTRMAP_TST(argbmap, MI4_STATFS_ATTRMAP(mi)))
 		xdr_ga_prefill_statvfs(gesp, mi);
 
-	if (resbmap &
-	    (FATTR4_SUPPORTED_ATTRS_MASK |
-	    FATTR4_TYPE_MASK |
-	    FATTR4_FH_EXPIRE_TYPE_MASK |
-	    FATTR4_CHANGE_MASK |
-	    FATTR4_SIZE_MASK |
-	    FATTR4_LINK_SUPPORT_MASK |
-	    FATTR4_SYMLINK_SUPPORT_MASK |
-	    FATTR4_NAMED_ATTR_MASK)) {
+	if (resbmap.w.w0) {
 
-		if (resbmap & FATTR4_SUPPORTED_ATTRS_MASK) {
-			gesp->n4g_suppattrs = xdr_get_bitmap4_inline(&ptr);
-		}
-		if (resbmap & FATTR4_TYPE_MASK) {
+		if (ATTR_ISSET(resbmap, SUPPORTED_ATTRS))
+			xdr_get_attrmap4_inline(&ptr, &gesp->n4g_suppattrs);
+
+		if (ATTR_ISSET(resbmap, TYPE)) {
 			vap->va_type = IXDR_GET_U_INT32(ptr);
 
 			if (vap->va_type < NF4REG ||
@@ -1428,14 +1808,14 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 
 			vap->va_mask |= AT_TYPE;
 		}
-		if (resbmap & FATTR4_FH_EXPIRE_TYPE_MASK) {
+		if (ATTR_ISSET(resbmap, FH_EXPIRE_TYPE)) {
 			gesp->n4g_fet = IXDR_GET_U_INT32(ptr);
 		}
-		if (resbmap & FATTR4_CHANGE_MASK) {
+		if (ATTR_ISSET(resbmap, CHANGE)) {
 			IXDR_GET_U_HYPER(ptr, garp->n4g_change);
 			garp->n4g_change_valid = 1;
 		}
-		if (resbmap & FATTR4_SIZE_MASK) {
+		if (ATTR_ISSET(resbmap, SIZE)) {
 			IXDR_GET_U_HYPER(ptr, vap->va_size);
 
 			if (!NFS4_SIZE_OK(vap->va_size)) {
@@ -1445,189 +1825,140 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 				vap->va_mask |= AT_SIZE;
 			}
 		}
-		if (resbmap & FATTR4_LINK_SUPPORT_MASK) {
+		if (ATTR_ISSET(resbmap, LINK_SUPPORT)) {
 			truefalse = IXDR_GET_U_INT32(ptr);
 			gesp->n4g_pc4.pc4_link_support =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_SYMLINK_SUPPORT_MASK) {
+		if (ATTR_ISSET(resbmap, SYMLINK_SUPPORT)) {
 			truefalse = IXDR_GET_U_INT32(ptr);
 			gesp->n4g_pc4.pc4_symlink_support =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_NAMED_ATTR_MASK) {
+		if (ATTR_ISSET(resbmap, NAMED_ATTR)) {
 			truefalse = IXDR_GET_U_INT32(ptr);
 			gesp->n4g_pc4.pc4_xattr_exists = TRUE;
 			gesp->n4g_pc4.pc4_xattr_exists =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-	}
-	if (resbmap &
-	    (FATTR4_FSID_MASK |
-	    FATTR4_UNIQUE_HANDLES_MASK |
-	    FATTR4_LEASE_TIME_MASK |
-	    FATTR4_RDATTR_ERROR_MASK)) {
 
-		if (resbmap & FATTR4_FSID_MASK) {
+		if (ATTR_ISSET(resbmap, FSID)) {
 			IXDR_GET_U_HYPER(ptr, garp->n4g_fsid.major);
 			IXDR_GET_U_HYPER(ptr, garp->n4g_fsid.minor);
 			garp->n4g_fsid_valid = 1;
 		}
-		if (resbmap & FATTR4_UNIQUE_HANDLES_MASK) {
+		if (ATTR_ISSET(resbmap, UNIQUE_HANDLES)) {
 			truefalse = IXDR_GET_U_INT32(ptr);
 			gesp->n4g_pc4.pc4_unique_handles =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_LEASE_TIME_MASK) {
+		if (ATTR_ISSET(resbmap, LEASE_TIME)) {
 			gesp->n4g_leasetime = IXDR_GET_U_INT32(ptr);
 		}
-		if (resbmap & FATTR4_RDATTR_ERROR_MASK) {
+		if (ATTR_ISSET(resbmap, RDATTR_ERROR)) {
 			gesp->n4g_rdattr_error = IXDR_GET_U_INT32(ptr);
 		}
-	}
-	if (resbmap &
-	    (FATTR4_ACL_MASK |
-	    FATTR4_ACLSUPPORT_MASK |
-	    FATTR4_ARCHIVE_MASK |
-	    FATTR4_CANSETTIME_MASK)) {
 
-		if (resbmap & FATTR4_ACL_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_ACLSUPPORT_MASK) {
+		ASSERT(ATTR_ISSET(resbmap, ACL) == 0);
+
+		if (ATTR_ISSET(resbmap, ACLSUPPORT)) {
 			gesp->n4g_aclsupport = IXDR_GET_U_INT32(ptr);
 		}
-		if (resbmap & FATTR4_ARCHIVE_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_CANSETTIME_MASK) {
+
+		ASSERT(ATTR_ISSET(resbmap, ARCHIVE) == 0);
+
+		if (ATTR_ISSET(resbmap, CANSETTIME)) {
 			truefalse = IXDR_GET_U_INT32(ptr);
 			gesp->n4g_pc4.pc4_cansettime =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-	}
-	if (resbmap &
-	    (FATTR4_CASE_INSENSITIVE_MASK |
-	    FATTR4_CASE_PRESERVING_MASK |
-	    FATTR4_CHOWN_RESTRICTED_MASK |
-	    FATTR4_FILEHANDLE_MASK |
-	    FATTR4_FILEID_MASK |
-	    FATTR4_FILES_AVAIL_MASK |
-	    FATTR4_FILES_FREE_MASK |
-	    FATTR4_FILES_TOTAL_MASK)) {
 
-		if (resbmap & FATTR4_CASE_INSENSITIVE_MASK) {
+		if (ATTR_ISSET(resbmap, CASE_INSENSITIVE)) {
 			truefalse = IXDR_GET_U_INT32(ptr);
 			gesp->n4g_pc4.pc4_case_insensitive =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_CASE_PRESERVING_MASK) {
+		if (ATTR_ISSET(resbmap, CASE_PRESERVING)) {
 			truefalse = IXDR_GET_U_INT32(ptr);
 			gesp->n4g_pc4.pc4_case_preserving =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_CHOWN_RESTRICTED_MASK) {
+		if (ATTR_ISSET(resbmap, CHOWN_RESTRICTED)) {
 			truefalse = IXDR_GET_U_INT32(ptr);
 			gesp->n4g_pc4.pc4_chown_restricted =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_FILEHANDLE_MASK) {
+		if (ATTR_ISSET(resbmap, FILEHANDLE)) {
 			int len = IXDR_GET_U_INT32(ptr);
 
 			gesp->n4g_fh_u.nfs_fh4_alt.len = 0;
 			gesp->n4g_fh_u.nfs_fh4_alt.val =
-				gesp->n4g_fh_u.nfs_fh4_alt.data;
+			    gesp->n4g_fh_u.nfs_fh4_alt.data;
 			gesp->n4g_fh_u.n4g_fh.nfs_fh4_len = len;
 
 			bcopy(ptr, gesp->n4g_fh_u.n4g_fh.nfs_fh4_val, len);
 
 			ptr += RNDUP(len) / BYTES_PER_XDR_UNIT;
 		}
-		if (resbmap & FATTR4_FILEID_MASK) {
+		if (ATTR_ISSET(resbmap, FILEID)) {
 			IXDR_GET_U_HYPER(ptr, vap->va_nodeid);
 			vap->va_mask |= AT_NODEID;
 		}
-		if (resbmap & FATTR4_FILES_AVAIL_MASK) {
+		if (ATTR_ISSET(resbmap, FILES_AVAIL)) {
 			IXDR_GET_U_HYPER(ptr, gesp->n4g_sb.f_favail);
 		}
-		if (resbmap & FATTR4_FILES_FREE_MASK) {
+		if (ATTR_ISSET(resbmap, FILES_FREE)) {
 			IXDR_GET_U_HYPER(ptr, gesp->n4g_sb.f_ffree);
 		}
-		if (resbmap & FATTR4_FILES_TOTAL_MASK) {
+		if (ATTR_ISSET(resbmap, FILES_TOTAL)) {
 			IXDR_GET_U_HYPER(ptr, gesp->n4g_sb.f_files);
 		}
-	}
-	if (resbmap &
-	    (FATTR4_FS_LOCATIONS_MASK |
-	    FATTR4_HIDDEN_MASK |
-	    FATTR4_HOMOGENEOUS_MASK)) {
 
-		if (resbmap & FATTR4_FS_LOCATIONS_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_HIDDEN_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_HOMOGENEOUS_MASK) {
+		ASSERT(ATTR_ISSET(resbmap, FS_LOCATIONS) == 0);
+		ASSERT(ATTR_ISSET(resbmap, HIDDEN) == 0);
+
+		if (ATTR_ISSET(resbmap, HOMOGENEOUS)) {
 			truefalse = IXDR_GET_U_INT32(ptr);
 			gesp->n4g_pc4.pc4_homogeneous =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-	}
-	if (resbmap &
-	    (FATTR4_MAXFILESIZE_MASK |
-	    FATTR4_MAXLINK_MASK |
-	    FATTR4_MAXNAME_MASK |
-	    FATTR4_MAXREAD_MASK |
-	    FATTR4_MAXWRITE_MASK)) {
 
-		if (resbmap & FATTR4_MAXFILESIZE_MASK) {
+		if (ATTR_ISSET(resbmap, MAXFILESIZE)) {
 			IXDR_GET_U_HYPER(ptr, gesp->n4g_maxfilesize);
 		}
-		if (resbmap & FATTR4_MAXLINK_MASK) {
+		if (ATTR_ISSET(resbmap, MAXLINK)) {
 			gesp->n4g_pc4.pc4_link_max = IXDR_GET_U_INT32(ptr);
 		}
-		if (resbmap & FATTR4_MAXNAME_MASK) {
+		if (ATTR_ISSET(resbmap, MAXNAME)) {
 			gesp->n4g_pc4.pc4_name_max = IXDR_GET_U_INT32(ptr);
 			gesp->n4g_sb.f_namemax = gesp->n4g_pc4.pc4_name_max;
 		}
-		if (resbmap & FATTR4_MAXREAD_MASK) {
+		if (ATTR_ISSET(resbmap, MAXREAD)) {
 			IXDR_GET_U_HYPER(ptr, gesp->n4g_maxread);
 		}
-		if (resbmap & FATTR4_MAXWRITE_MASK) {
+		if (ATTR_ISSET(resbmap, MAXWRITE)) {
 			IXDR_GET_U_HYPER(ptr, gesp->n4g_maxwrite);
 		}
 	}
-	if (resbmap &
-	    (FATTR4_MIMETYPE_MASK |
-	    FATTR4_MODE_MASK |
-	    FATTR4_NO_TRUNC_MASK |
-	    FATTR4_NUMLINKS_MASK)) {
 
-		if (resbmap & FATTR4_MIMETYPE_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_MODE_MASK) {
+	if (resbmap.w.w1) {
+		ASSERT(ATTR_ISSET(resbmap, MIMETYPE) == 0);
+
+		if (ATTR_ISSET(resbmap, MODE)) {
 			vap->va_mode = IXDR_GET_U_INT32(ptr);
 			vap->va_mask |= AT_MODE;
 		}
-		if (resbmap & FATTR4_NO_TRUNC_MASK) {
+		if (ATTR_ISSET(resbmap, NO_TRUNC)) {
 			truefalse = IXDR_GET_U_INT32(ptr);
 			gesp->n4g_pc4.pc4_no_trunc =
-				(truefalse ? TRUE : FALSE);
+			    (truefalse ? TRUE : FALSE);
 		}
-		if (resbmap & FATTR4_NUMLINKS_MASK) {
+		if (ATTR_ISSET(resbmap, NUMLINKS)) {
 			vap->va_nlink = IXDR_GET_U_INT32(ptr);
 			vap->va_mask |= AT_NLINK;
 		}
-	}
-	if (resbmap &
-	    (FATTR4_OWNER_MASK |
-	    FATTR4_OWNER_GROUP_MASK |
-	    FATTR4_QUOTA_AVAIL_HARD_MASK |
-	    FATTR4_QUOTA_AVAIL_SOFT_MASK)) {
 
-		if (resbmap & FATTR4_OWNER_MASK) {
+		if (ATTR_ISSET(resbmap, OWNER)) {
 			uint_t *owner_length, ol;
 			char *owner_val = NULL;
 			utf8string ov;
@@ -1654,7 +1985,7 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 			if (pug &&
 			    *owner_length == pug->u_last.utf8string_len &&
 			    bcmp(owner_val, pug->u_last.utf8string_val,
-					*owner_length) == 0) {
+			    *owner_length) == 0) {
 				vap->va_uid = pug->uid;
 				vap->va_mask |= AT_UID;
 			} else {
@@ -1671,13 +2002,13 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 				if (error == ENOTSUP) {
 					error = 0;
 					garp->n4g_attrwhy =
-						NFS4_GETATTR_NOCACHE_OK;
+					    NFS4_GETATTR_NOCACHE_OK;
 				}
 
 				if (error) {
 					garp->n4g_attrerr = error;
 					garp->n4g_attrwhy =
-						NFS4_GETATTR_ATUID_ERR;
+					    NFS4_GETATTR_ATUID_ERR;
 				} else {
 					vap->va_uid = uid;
 					vap->va_mask |= AT_UID;
@@ -1685,16 +2016,17 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 					if (pug && ol <= MAX_OG_NAME) {
 						pug->uid = uid;
 						pug->u_curr.utf8string_len =
-							ov.utf8string_len;
+						    ov.utf8string_len;
 						bcopy(owner_val,
-						pug->u_curr.utf8string_val, ol);
+						    pug->u_curr.utf8string_val,
+						    ol);
 						U_SWAP_CURR_LAST(pug);
 					}
 				}
 			}
 			ptr += RNDUP(ol) / BYTES_PER_XDR_UNIT;
 		}
-		if (resbmap & FATTR4_OWNER_GROUP_MASK) {
+		if (ATTR_ISSET(resbmap, OWNER_GROUP)) {
 			uint_t *group_length, gl;
 			char *group_val = NULL;
 			utf8string gv;
@@ -1721,7 +2053,7 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 			if (pug &&
 			    *group_length == pug->g_last.utf8string_len &&
 			    bcmp(group_val, pug->g_last.utf8string_val,
-					*group_length) == 0) {
+			    *group_length) == 0) {
 				vap->va_gid = pug->gid;
 				vap->va_mask |= AT_GID;
 			} else {
@@ -1738,20 +2070,20 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 				if (error == ENOTSUP) {
 					error = 0;
 					garp->n4g_attrwhy =
-						NFS4_GETATTR_NOCACHE_OK;
+					    NFS4_GETATTR_NOCACHE_OK;
 				}
 
 				if (error) {
 					garp->n4g_attrerr = error;
 					garp->n4g_attrwhy =
-						NFS4_GETATTR_ATGID_ERR;
+					    NFS4_GETATTR_ATGID_ERR;
 				} else {
 					vap->va_gid = gid;
 					vap->va_mask |= AT_GID;
 					if (pug && gl <= MAX_OG_NAME) {
 						pug->gid = gid;
 						pug->g_curr.utf8string_len =
-							gv.utf8string_len;
+						    gv.utf8string_len;
 						bcopy(group_val,
 						    pug->g_curr.utf8string_val,
 						    gl);
@@ -1761,25 +2093,11 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 			}
 			ptr += RNDUP(gl) / BYTES_PER_XDR_UNIT;
 		}
-		if (resbmap & FATTR4_QUOTA_AVAIL_HARD_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_QUOTA_AVAIL_SOFT_MASK) {
-			ASSERT(0);
-		}
-	}
-	if (resbmap &
-	    (FATTR4_QUOTA_USED_MASK |
-	    FATTR4_SPACE_AVAIL_MASK |
-	    FATTR4_SPACE_FREE_MASK |
-	    FATTR4_SPACE_TOTAL_MASK |
-	    FATTR4_SPACE_USED_MASK |
-	    FATTR4_SYSTEM_MASK)) {
+		ASSERT(ATTR_ISSET(resbmap, QUOTA_AVAIL_HARD) == 0);
+		ASSERT(ATTR_ISSET(resbmap, QUOTA_AVAIL_SOFT) == 0);
+		ASSERT(ATTR_ISSET(resbmap, QUOTA_USED) == 0);
 
-		if (resbmap & FATTR4_QUOTA_USED_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_RAWDEV_MASK) {
+		if (ATTR_ISSET(resbmap, RAWDEV)) {
 			fattr4_rawdev rawdev;
 
 			rawdev.specdata1 = IXDR_GET_U_INT32(ptr);
@@ -1787,25 +2105,25 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 
 			if (vap->va_type == VCHR || vap->va_type == VBLK) {
 				vap->va_rdev = makedevice(rawdev.specdata1,
-							rawdev.specdata2);
+				    rawdev.specdata2);
 			} else {
 				vap->va_rdev = 0;
 			}
 			vap->va_mask |= AT_RDEV;
 		}
-		if (resbmap & FATTR4_SPACE_AVAIL_MASK) {
+		if (ATTR_ISSET(resbmap, SPACE_AVAIL)) {
 			IXDR_GET_U_HYPER(ptr, gesp->n4g_sb.f_bavail);
 			gesp->n4g_sb.f_bavail /= DEV_BSIZE;
 		}
-		if (resbmap & FATTR4_SPACE_FREE_MASK) {
+		if (ATTR_ISSET(resbmap, SPACE_FREE)) {
 			IXDR_GET_U_HYPER(ptr, gesp->n4g_sb.f_bfree);
 			gesp->n4g_sb.f_bfree /= DEV_BSIZE;
 		}
-		if (resbmap & FATTR4_SPACE_TOTAL_MASK) {
+		if (ATTR_ISSET(resbmap, SPACE_TOTAL)) {
 			IXDR_GET_U_HYPER(ptr, gesp->n4g_sb.f_blocks);
 			gesp->n4g_sb.f_blocks /= DEV_BSIZE;
 		}
-		if (resbmap & FATTR4_SPACE_USED_MASK) {
+		if (ATTR_ISSET(resbmap, SPACE_USED)) {
 			uint64_t space_used;
 			IXDR_GET_U_HYPER(ptr, space_used);
 
@@ -1814,29 +2132,16 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 			if (vap->va_type == VREG || vap->va_type == VDIR ||
 			    vap->va_type == VLNK) {
 				vap->va_nblocks = (u_longlong_t)
-					((space_used + (offset4)DEV_BSIZE -
-					(offset4)1) / (offset4)DEV_BSIZE);
+				    ((space_used + (offset4)DEV_BSIZE -
+				    (offset4)1) / (offset4)DEV_BSIZE);
 			} else {
 				vap->va_nblocks = 0;
 			}
 			vap->va_mask |= AT_NBLOCKS;
 		}
-		if (resbmap & FATTR4_SYSTEM_MASK) {
-			ASSERT(0);
-		}
-	}
-	if (resbmap &
-	    (FATTR4_TIME_ACCESS_MASK |
-	    FATTR4_TIME_ACCESS_SET_MASK |
-	    FATTR4_TIME_BACKUP_MASK |
-	    FATTR4_TIME_CREATE_MASK |
-	    FATTR4_TIME_DELTA_MASK |
-	    FATTR4_TIME_METADATA_MASK |
-	    FATTR4_TIME_MODIFY_MASK |
-	    FATTR4_TIME_MODIFY_SET_MASK |
-	    FATTR4_MOUNTED_ON_FILEID_MASK)) {
+		ASSERT(ATTR_ISSET(resbmap, SYSTEM) == 0);
 
-		if (resbmap & FATTR4_TIME_ACCESS_MASK) {
+		if (ATTR_ISSET(resbmap, TIME_ACCESS)) {
 			nfstime4 atime;
 			int error;
 
@@ -1850,20 +2155,16 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 			}
 			vap->va_mask |= AT_ATIME;
 		}
-		if (resbmap & FATTR4_TIME_ACCESS_SET_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_TIME_BACKUP_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_TIME_CREATE_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_TIME_DELTA_MASK) {
+
+		ASSERT(ATTR_ISSET(resbmap, TIME_ACCESS_SET) == 0);
+		ASSERT(ATTR_ISSET(resbmap, TIME_BACKUP) == 0);
+		ASSERT(ATTR_ISSET(resbmap, TIME_CREATE) == 0);
+
+		if (ATTR_ISSET(resbmap, TIME_DELTA)) {
 			IXDR_GET_U_HYPER(ptr, gesp->n4g_delta.seconds);
 			gesp->n4g_delta.nseconds = IXDR_GET_U_INT32(ptr);
 		}
-		if (resbmap & FATTR4_TIME_METADATA_MASK) {
+		if (ATTR_ISSET(resbmap, TIME_METADATA)) {
 			nfstime4 mdt;
 			int error;
 
@@ -1877,7 +2178,7 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 			}
 			vap->va_mask |= AT_CTIME;
 		}
-		if (resbmap & FATTR4_TIME_MODIFY_MASK) {
+		if (ATTR_ISSET(resbmap, TIME_MODIFY)) {
 			nfstime4 mtime;
 			int error;
 
@@ -1891,20 +2192,71 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 			}
 			vap->va_mask |= AT_MTIME;
 		}
-		if (resbmap & FATTR4_TIME_MODIFY_SET_MASK) {
-			ASSERT(0);
-		}
-		if (resbmap & FATTR4_MOUNTED_ON_FILEID_MASK) {
+		ASSERT(ATTR_ISSET(resbmap, TIME_MODIFY_SET) == 0);
+
+		if (ATTR_ISSET(resbmap, MOUNTED_ON_FILEID)) {
 			IXDR_GET_U_HYPER(ptr, garp->n4g_mon_fid);
 			garp->n4g_mon_fid_valid = 1;
 		}
+
+		ASSERT(ATTR_ISSET(resbmap, DIR_NOTIF_DELAY) == 0);
+		ASSERT(ATTR_ISSET(resbmap, DIRENT_NOTIF_DELAY) == 0);
+		ASSERT(ATTR_ISSET(resbmap, DACL) == 0);
+		ASSERT(ATTR_ISSET(resbmap, SACL) == 0);
+		ASSERT(ATTR_ISSET(resbmap, CHANGE_POLICY) == 0);
+		ASSERT(ATTR_ISSET(resbmap, FS_STATUS) == 0);
+
+		if (ATTR_ISSET(resbmap, FS_LAYOUT_TYPE))
+			xdr_get_layouttypes4_inline(&ptr,
+			    &gesp->n4g_pnfs.n4g_fs_layout_type);
+
+		/* write only attr */
+		ASSERT(ATTR_ISSET(resbmap, LAYOUT_HINT) == 0);
+	}
+
+	if (resbmap.w.w2) {
+
+		if (ATTR_ISSET(resbmap, LAYOUT_TYPE))
+			xdr_get_layouttypes4_inline(&ptr,
+			    &gesp->n4g_pnfs.n4g_layout_type);
+
+		if (ATTR_ISSET(resbmap, LAYOUT_BLKSIZE))
+			gesp->n4g_pnfs.n4g_layout_blksize =
+			    IXDR_GET_U_INT32(ptr);
+
+		if (ATTR_ISSET(resbmap, LAYOUT_ALIGNMENT))
+			gesp->n4g_pnfs.n4g_layout_alignment =
+			    IXDR_GET_U_INT32(ptr);
+
+		ASSERT(ATTR_ISSET(resbmap, FS_LOCATIONS_INFO) == 0);
+
+		if (ATTR_ISSET(resbmap, MDSTHRESHOLD))
+			xdr_get_file_mdsthreshold4_inline(&ptr,
+			    &gesp->n4g_pnfs.n4g_file_mdsthreshold);
+
+		ASSERT(ATTR_ISSET(resbmap, RETENTION_GET) == 0);
+		ASSERT(ATTR_ISSET(resbmap, RETENTION_SET) == 0);
+		ASSERT(ATTR_ISSET(resbmap, RETENTEVT_GET) == 0);
+		ASSERT(ATTR_ISSET(resbmap, RETENTEVT_SET) == 0);
+		ASSERT(ATTR_ISSET(resbmap, RETENTION_HOLD) == 0);
+		ASSERT(ATTR_ISSET(resbmap, MODE_SET_MASKED) == 0);
+
+		if (ATTR_ISSET(resbmap, SUPPATTR_EXCLCREAT)) {
+			xdr_get_attrmap4_inline(&ptr,
+			    &gesp->n4g_supp_exclcreat);
+		}
+
+		ASSERT(ATTR_ISSET(resbmap, FS_CHARSET_CAP) == 0);
+
 	}
 
 	/*
-	 * FATTR4_ACL_MASK is not yet supported by this function, but
-	 * we check against it anyway, in case it ever is.
+	 * The extres attrmap identifies all attributes stored
+	 * within n4g_ext_res.  If any extres attrs were decoded
+	 * and the caller provided a null n4g_ext_res, then allocate
+	 * one here for the caller.
 	 */
-	if (resbmap & ~(NFS4_VATTR_MASK | FATTR4_ACL_MASK)) {
+	if (ATTRMAP_TST(resbmap, MI4_EXTRES_ATTRMAP(mi))) {
 		/* copy only if not provided */
 		if (garp->n4g_ext_res == NULL) {
 			garp->n4g_ext_res = kmem_alloc(sizeof (ges), KM_SLEEP);
@@ -1914,7 +2266,6 @@ xdr_ga_fattr_res_inline(uint32_t *ptr, struct nfs4_ga_res *garp,
 
 	return (TRUE);
 }
-
 
 /*
  * "." and ".." buffers for filling in on read and readdir
@@ -1976,7 +2327,7 @@ xdr_READDIR4res_clnt(XDR *xdrs, READDIR4res_clnt *objp, READDIR4args *aobjp)
 	dirent64_t *dp = NULL;
 	int entry_length = 0;
 	int space_left = 0;
-	bitmap4 resbmap;
+	attrmap4 resbmap;
 	uint32_t attrlen;
 	nfs4_ga_res_t gar;
 	struct nfs4_ga_ext_res ges;
@@ -2011,26 +2362,26 @@ xdr_READDIR4res_clnt(XDR *xdrs, READDIR4res_clnt *objp, READDIR4args *aobjp)
 
 	/* Fill in dot and dot-dot if needed */
 	if (rdc->nfs4_cookie == (nfs_cookie4) 0 ||
-		    rdc->nfs4_cookie == (nfs_cookie4) 1) {
+	    rdc->nfs4_cookie == (nfs_cookie4) 1) {
 
 		if (rdc->nfs4_cookie == (nfs_cookie4)0) {
 			bcopy(nfs4_dot_entries, rdc->entries,
-				    DIRENT64_RECLEN(1) + DIRENT64_RECLEN(2));
+			    DIRENT64_RECLEN(1) + DIRENT64_RECLEN(2));
 			objp->dotp = dp;
 			dp = (struct dirent64 *)(((char *)dp) +
-							DIRENT64_RECLEN(1));
+			    DIRENT64_RECLEN(1));
 			objp->dotdotp = dp;
 			dp = (struct dirent64 *)(((char *)dp) +
-							DIRENT64_RECLEN(2));
+			    DIRENT64_RECLEN(2));
 			space_left -= DIRENT64_RECLEN(1) + DIRENT64_RECLEN(2);
 
 		} else	{	/* for ".." entry */
 			bcopy(nfs4_dot_dot_entry, rdc->entries,
-						DIRENT64_RECLEN(2));
+			    DIRENT64_RECLEN(2));
 			objp->dotp = NULL;
 			objp->dotdotp = dp;
 			dp = (struct dirent64 *)(((char *)dp) +
-							DIRENT64_RECLEN(2));
+			    DIRENT64_RECLEN(2));
 			space_left -= DIRENT64_RECLEN(2);
 		}
 		/* Magic NFSv4 number for entry after start */
@@ -2045,7 +2396,8 @@ xdr_READDIR4res_clnt(XDR *xdrs, READDIR4res_clnt *objp, READDIR4args *aobjp)
 	if (!xdr_bool(xdrs, &more_data))
 		goto noentries;
 
-	if (aobjp->attr_request & (FATTR4_OWNER_MASK | FATTR4_OWNER_GROUP_MASK))
+	if (ATTR_ISSET(aobjp->attr_request, OWNER) ||
+	    ATTR_ISSET(aobjp->attr_request, OWNER_GROUP))
 		pug = alloc_ugcache();
 
 	skip_to_end = 0;
@@ -2083,7 +2435,7 @@ xdr_READDIR4res_clnt(XDR *xdrs, READDIR4res_clnt *objp, READDIR4args *aobjp)
 			if (!xdr_opaque(xdrs, dp->d_name, namelen))
 				goto noentries;
 			bzero(&dp->d_name[namelen],
-				DIRENT64_NAMELEN(entry_length) - namelen);
+			    DIRENT64_NAMELEN(entry_length) - namelen);
 			dp->d_off = last_cookie = cookie;
 			dp->d_reclen = entry_length;
 		} else {
@@ -2092,7 +2444,7 @@ xdr_READDIR4res_clnt(XDR *xdrs, READDIR4res_clnt *objp, READDIR4args *aobjp)
 		}
 
 		/* Get the attribute BITMAP */
-		if (!xdr_bitmap4(xdrs, &resbmap))
+		if (!xdr_attrmap4(xdrs, &resbmap))
 			goto noentries;
 		/* Get the LENGTH of the attributes */
 		if (!xdr_u_int(xdrs, (uint_t *)&attrlen))
@@ -2102,17 +2454,19 @@ xdr_READDIR4res_clnt(XDR *xdrs, READDIR4res_clnt *objp, READDIR4args *aobjp)
 		if (!skip_to_end) {
 			uint32_t *ptr;
 
-			if (!(resbmap & FATTR4_ACL_MASK) &&
+			if (! ATTR_ISSET(resbmap, ACL) &&
+#ifdef DEBUG
+			    nfs4_allow_inline_attrs &&
+#endif
 			    (ptr = (uint32_t *)XDR_INLINE(xdrs, attrlen))
 			    != NULL) {
-				if (!xdr_ga_fattr_res_inline(ptr, &gar, resbmap,
-							aobjp->attr_request,
-							aobjp->mi, pug))
+				if (!xdr_ga_fattr_res_inline(ptr, &gar,
+				    &resbmap, &aobjp->attr_request,
+				    aobjp->mi, pug))
 					goto noentries;
 			} else {
-				if (!xdr_ga_fattr_res(xdrs, &gar, resbmap,
-							aobjp->attr_request,
-							aobjp->mi, pug))
+				if (!xdr_ga_fattr_res(xdrs, &gar, &resbmap,
+				    &aobjp->attr_request, aobjp->mi, pug))
 					goto noentries;
 			}
 
@@ -2132,21 +2486,21 @@ xdr_READDIR4res_clnt(XDR *xdrs, READDIR4res_clnt *objp, READDIR4args *aobjp)
 				dp->d_ino = 0;
 
 			/* See about creating an rnode for this entry */
-			if ((resbmap &
+			if ((resbmap.d.d0 &
 			    (NFS4_VATTR_MASK | FATTR4_FILEHANDLE_MASK)) ==
 			    (NFS4_VATTR_MASK | FATTR4_FILEHANDLE_MASK)) {
 				nfs4_sharedfh_t *sfhp;
 				vnode_t *vp;
 
 				sfhp = sfh4_put(&ges.n4g_fh_u.n4g_fh,
-							aobjp->mi, NULL);
+				    aobjp->mi, NULL);
 				vp = makenfs4node(sfhp, &gar,
-					aobjp->dvp->v_vfsp,
-					aobjp->t,
-					aobjp->cr,
-					aobjp->dvp,
-					fn_get(VTOSV(aobjp->dvp)->sv_name,
-						dp->d_name));
+				    aobjp->dvp->v_vfsp,
+				    aobjp->t,
+				    aobjp->cr,
+				    aobjp->dvp,
+				    fn_get(VTOSV(aobjp->dvp)->sv_name,
+				    dp->d_name));
 				sfh4_rele(&sfhp);
 				dnlc_update(aobjp->dvp, dp->d_name, vp);
 				VN_RELE(vp);
@@ -2257,16 +2611,17 @@ static bool_t
 xdr_ga_res(XDR *xdrs, GETATTR4res *objp, GETATTR4args *aobjp)
 {
 	uint32_t *ptr;
-	bitmap4 resbmap;
+	attrmap4 resbmap;
 	uint32_t attrlen;
 
 	ASSERT(xdrs->x_op == XDR_DECODE);
 
 	/* Initialize objp attribute error values */
 	objp->ga_res.n4g_attrerr =
-		objp->ga_res.n4g_attrwhy = NFS4_GETATTR_OP_OK;
+	    objp->ga_res.n4g_attrwhy = NFS4_GETATTR_OP_OK;
 
-	if (!xdr_bitmap4(xdrs, &resbmap))
+	resbmap = MI4_EMPTY_ATTRMAP(aobjp->mi);
+	if (!xdr_attrmap4(xdrs, &resbmap))
 		return (FALSE);
 
 	/* save the response bitmap for the caller */
@@ -2279,16 +2634,19 @@ xdr_ga_res(XDR *xdrs, GETATTR4res *objp, GETATTR4args *aobjp)
 	/*
 	 * Handle case where request and response bitmaps don't match.
 	 */
-	if (aobjp->attr_request && aobjp->attr_request != resbmap) {
-		bitmap4 deltabmap;
+	if (! ATTRMAP_EQL(aobjp->attr_request, resbmap)) {
+		attrmap4 delta, mand;
 
 		/*
 		 * Return error for case where server sent extra attributes
 		 * because the "unknown" attributes may be anywhere in the
 		 * xdr stream and can't be properly processed.
 		 */
-		deltabmap = ((aobjp->attr_request ^ resbmap) & resbmap);
-		if (deltabmap) {
+		delta = aobjp->attr_request;
+		ATTRMAP_XOR(delta, resbmap);
+		ATTRMAP_MASK(delta, resbmap);
+
+		if (! ATTRMAP_EMPTY(delta)) {
 			objp->ga_res.n4g_attrerr = EINVAL;
 			objp->ga_res.n4g_attrwhy = NFS4_GETATTR_BITMAP_ERR;
 			return (TRUE);
@@ -2300,9 +2658,19 @@ xdr_ga_res(XDR *xdrs, GETATTR4res *objp, GETATTR4args *aobjp)
 		 * missing recommended attributes are evaluated in the
 		 * specific routines that decode the server response.
 		 */
-		deltabmap = ((aobjp->attr_request ^ resbmap)
-				& aobjp->attr_request);
-		if ((deltabmap & FATTR4_MANDATTR_MASK)) {
+		delta = aobjp->attr_request;
+		ATTRMAP_XOR(delta, resbmap);
+		ATTRMAP_MASK(delta, aobjp->attr_request);
+
+		/*
+		 * SUPPATTR_EXCLCREAT is a new (v4.1) mandatory attr.
+		 * Ignore servers that don't yet implement it unless
+		 * nfs41_fail_missing_supp_exclcreat is non-zero.
+		 */
+		mand = MI4_MAND_ATTRMAP(aobjp->mi);
+		if (ATTRMAP_TST(delta, mand) &&
+		    (! ATTR_ISSET(delta, SUPPATTR_EXCLCREAT) ||
+		    nfs41_fail_missing_supp_exclcreat)) {
 			objp->ga_res.n4g_attrerr = EINVAL;
 			objp->ga_res.n4g_attrwhy = NFS4_GETATTR_MANDATTR_ERR;
 			return (TRUE);
@@ -2310,15 +2678,16 @@ xdr_ga_res(XDR *xdrs, GETATTR4res *objp, GETATTR4args *aobjp)
 	}
 
 	/* Check to see if the attrs can be inlined and go for it if so */
-	if (!(resbmap & FATTR4_ACL_MASK) &&
+	if (! ATTR_ISSET(resbmap, ACL) &&
+#ifdef DEBUG
+	    nfs4_allow_inline_attrs &&
+#endif
 	    (ptr = (uint32_t *)XDR_INLINE(xdrs, attrlen)) != NULL)
 		return (xdr_ga_fattr_res_inline(ptr, &objp->ga_res,
-					resbmap, aobjp->attr_request,
-					aobjp->mi, NULL));
-	else
-		return (xdr_ga_fattr_res(xdrs, &objp->ga_res,
-					resbmap, aobjp->attr_request,
-					aobjp->mi, NULL));
+		    &resbmap, &aobjp->attr_request, aobjp->mi, NULL));
+
+	return (xdr_ga_fattr_res(xdrs, &objp->ga_res, &resbmap,
+	    &aobjp->attr_request, aobjp->mi, NULL));
 }
 
 #if defined(DEBUG) && !defined(lint)
@@ -2347,14 +2716,14 @@ xdr_settime4(XDR *xdrs, settime4 *objp)
 	return (xdr_u_int(xdrs, &objp->time.nseconds));
 }
 
-static bool_t
+bool_t
 xdr_fattr4(XDR *xdrs, fattr4 *objp)
 {
 	if (xdrs->x_op != XDR_FREE) {
-		if (!xdr_bitmap4(xdrs, &objp->attrmask))
+		if (!xdr_attrmap4(xdrs, &objp->attrmask))
 			return (FALSE);
 		return (xdr_bytes(xdrs, (char **)&objp->attrlist4,
-			(uint_t *)&objp->attrlist4_len, NFS4_FATTR4_LIMIT));
+		    (uint_t *)&objp->attrlist4_len, NFS4_FATTR4_LIMIT));
 	}
 
 	/*
@@ -2427,8 +2796,8 @@ xdr_CREATE4args(XDR *xdrs, CREATE4args *objp)
 			break;	/* server should return NFS4ERR_BADTYPE */
 		}
 		if (!xdr_bytes(xdrs, (char **)&objp->objname.utf8string_val,
-				(uint_t *)&objp->objname.utf8string_len,
-				NFS4_MAX_UTF8STRING))
+		    (uint_t *)&objp->objname.utf8string_len,
+		    NFS4_MAX_UTF8STRING))
 			return (FALSE);
 		return (xdr_fattr4(xdrs, &objp->createattrs));
 	}
@@ -2439,11 +2808,11 @@ xdr_CREATE4args(XDR *xdrs, CREATE4args *objp)
 	if (objp->type == NF4LNK) {
 		if (objp->ftype4_u.linkdata.utf8string_val != NULL)
 			kmem_free(objp->ftype4_u.linkdata.utf8string_val,
-				objp->ftype4_u.linkdata.utf8string_len);
+			    objp->ftype4_u.linkdata.utf8string_len);
 	}
 	if (objp->objname.utf8string_val != NULL)
 		kmem_free(objp->objname.utf8string_val,
-			objp->objname.utf8string_len);
+		    objp->objname.utf8string_len);
 	return (xdr_fattr4(xdrs, &objp->createattrs));
 }
 
@@ -2469,10 +2838,10 @@ xdr_CREATE4cargs(XDR *xdrs, CREATE4cargs *objp)
 	case NF4BLK:
 	case NF4CHR:
 		if (!XDR_PUTINT32(xdrs,
-				(int32_t *)&objp->ftype4_u.devdata.specdata1))
+		    (int32_t *)&objp->ftype4_u.devdata.specdata1))
 			return (FALSE);
 		if (!XDR_PUTINT32(xdrs,
-				(int32_t *)&objp->ftype4_u.devdata.specdata2))
+		    (int32_t *)&objp->ftype4_u.devdata.specdata2))
 			return (FALSE);
 		break;
 	case NF4SOCK:
@@ -2506,7 +2875,7 @@ xdr_CREATE4res(XDR *xdrs, CREATE4res *objp)
 		return (FALSE);
 	if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)&objp->cinfo.after))
 		return (FALSE);
-	return (xdr_bitmap4(xdrs, &objp->attrset));
+	return (xdr_attrmap4(xdrs, &objp->attrset));
 }
 
 static bool_t
@@ -2539,42 +2908,40 @@ xdr_LOCK4args(XDR *xdrs, LOCK4args *objp)
 			return (FALSE);
 		if (objp->locker.new_lock_owner == TRUE) {
 			if (!xdr_u_int(xdrs, &objp->locker.locker4_u.open_owner.
-							open_seqid))
+			    open_seqid))
 				return (FALSE);
 			if (!xdr_u_int(xdrs, &objp->locker.locker4_u.open_owner.
-							open_stateid.seqid))
+			    open_stateid.seqid))
 				return (FALSE);
 			if (!xdr_opaque(xdrs, objp->locker.locker4_u.open_owner.
-							open_stateid.other,
-				    12))
+			    open_stateid.other, 12))
 				return (FALSE);
 			if (!xdr_u_int(xdrs, &objp->locker.locker4_u.open_owner.
-							lock_seqid))
+			    lock_seqid))
 				return (FALSE);
 			if (!xdr_u_longlong_t(xdrs,
-				    (u_longlong_t *)&objp->locker.locker4_u.
-					open_owner.lock_owner.clientid))
+			    (u_longlong_t *)&objp->locker.locker4_u.
+			    open_owner.lock_owner.clientid))
 				return (FALSE);
 			return (xdr_bytes(xdrs,
-				(char **)&objp->locker.locker4_u.open_owner.
-				    lock_owner.owner_val,
-				(uint_t *)&objp->locker.locker4_u.open_owner.
-				    lock_owner.owner_len,
-				NFS4_OPAQUE_LIMIT));
+			    (char **)&objp->locker.locker4_u.open_owner.
+			    lock_owner.owner_val,
+			    (uint_t *)&objp->locker.locker4_u.open_owner.
+			    lock_owner.owner_len,
+			    NFS4_OPAQUE_LIMIT));
 		}
 
 		if (objp->locker.new_lock_owner != FALSE)
 			return (FALSE);
 
 		if (!xdr_u_int(xdrs, &objp->locker.locker4_u.lock_owner.
-							lock_stateid.seqid))
+		    lock_stateid.seqid))
 			return (FALSE);
 		if (!xdr_opaque(xdrs, objp->locker.locker4_u.lock_owner.
-							lock_stateid.other,
-			    12))
+		    lock_stateid.other, 12))
 			return (FALSE);
 		return (xdr_u_int(xdrs, &objp->locker.locker4_u.lock_owner.
-							lock_seqid));
+		    lock_seqid));
 	}
 
 	/*
@@ -2582,11 +2949,11 @@ xdr_LOCK4args(XDR *xdrs, LOCK4args *objp)
 	 */
 	if (objp->locker.new_lock_owner == TRUE) {
 		if (objp->locker.locker4_u.open_owner.lock_owner.owner_val !=
-								NULL) {
+		    NULL) {
 			kmem_free(objp->locker.locker4_u.open_owner.lock_owner.
-							owner_val,
-				objp->locker.locker4_u.open_owner.lock_owner.
-							owner_len);
+			    owner_val,
+			    objp->locker.locker4_u.open_owner.lock_owner.
+			    owner_len);
 		}
 	}
 
@@ -2601,29 +2968,29 @@ xdr_LOCK4res(XDR *xdrs, LOCK4res *objp)
 			return (FALSE);
 		if (objp->status == NFS4_OK) {
 			if (!xdr_u_int(xdrs,
-					&objp->LOCK4res_u.lock_stateid.seqid))
+			    &objp->LOCK4res_u.lock_stateid.seqid))
 				return (FALSE);
 			return (xdr_opaque(xdrs,
-				objp->LOCK4res_u.lock_stateid.other, 12));
+			    objp->LOCK4res_u.lock_stateid.other, 12));
 		}
 		if (objp->status != NFS4ERR_DENIED)
 			return (TRUE);
 
 		if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)&objp->LOCK4res_u.
-				denied.offset))
+		    denied.offset))
 			return (FALSE);
 		if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)&objp->LOCK4res_u.
-				denied.length))
+		    denied.length))
 			return (FALSE);
 		if (!xdr_int(xdrs, (int *)&objp->LOCK4res_u.denied.locktype))
 			return (FALSE);
 		if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)&objp->LOCK4res_u.
-				denied.owner.clientid))
+		    denied.owner.clientid))
 			return (FALSE);
 		return (xdr_bytes(xdrs,
-			    (char **)&objp->LOCK4res_u.denied.owner.owner_val,
-			    (uint_t *)&objp->LOCK4res_u.denied.owner.owner_len,
-			    NFS4_OPAQUE_LIMIT));
+		    (char **)&objp->LOCK4res_u.denied.owner.owner_val,
+		    (uint_t *)&objp->LOCK4res_u.denied.owner.owner_len,
+		    NFS4_OPAQUE_LIMIT));
 	}
 
 	/*
@@ -2634,7 +3001,7 @@ xdr_LOCK4res(XDR *xdrs, LOCK4res *objp)
 
 	if (objp->LOCK4res_u.denied.owner.owner_val != NULL)
 		kmem_free(objp->LOCK4res_u.denied.owner.owner_val,
-			objp->LOCK4res_u.denied.owner.owner_len);
+		    objp->LOCK4res_u.denied.owner.owner_len);
 	return (TRUE);
 }
 
@@ -2649,11 +3016,11 @@ xdr_LOCKT4args(XDR *xdrs, LOCKT4args *objp)
 		if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)&objp->length))
 			return (FALSE);
 		if (!xdr_u_longlong_t(xdrs,
-					(u_longlong_t *)&objp->owner.clientid))
+		    (u_longlong_t *)&objp->owner.clientid))
 			return (FALSE);
 		return (xdr_bytes(xdrs, (char **)&objp->owner.owner_val,
-			(uint_t *)&objp->owner.owner_len,
-			NFS4_OPAQUE_LIMIT));
+		    (uint_t *)&objp->owner.owner_len,
+		    NFS4_OPAQUE_LIMIT));
 	}
 
 	/*
@@ -2676,15 +3043,15 @@ xdr_LOCKT4res(XDR *xdrs, LOCKT4res *objp)
 			return (TRUE);
 		/* xdr_LOCK4denied */
 		if (!xdr_u_longlong_t(xdrs,
-					(u_longlong_t *)&objp->denied.offset))
+		    (u_longlong_t *)&objp->denied.offset))
 			return (FALSE);
 		if (!xdr_u_longlong_t(xdrs,
-					(u_longlong_t *)&objp->denied.length))
+		    (u_longlong_t *)&objp->denied.length))
 			return (FALSE);
 		if (!xdr_int(xdrs, (int *)&objp->denied.locktype))
 			return (FALSE);
 		if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&objp->denied.owner.clientid))
+		    (u_longlong_t *)&objp->denied.owner.clientid))
 			return (FALSE);
 		return (xdr_bytes(xdrs,
 		    (char **)&objp->denied.owner.owner_val,
@@ -2699,7 +3066,7 @@ xdr_LOCKT4res(XDR *xdrs, LOCKT4res *objp)
 		return (TRUE);
 	if (objp->denied.owner.owner_val != NULL)
 		kmem_free(objp->denied.owner.owner_val,
-				objp->denied.owner.owner_len);
+		    objp->denied.owner.owner_len);
 	return (TRUE);
 }
 
@@ -2732,11 +3099,11 @@ xdr_OPEN4args(XDR *xdrs, OPEN4args *objp)
 
 		/* xdr_open_owner4 */
 		if (!xdr_u_longlong_t(xdrs,
-					(u_longlong_t *)&objp->owner.clientid))
+		    (u_longlong_t *)&objp->owner.clientid))
 			return (FALSE);
 		if (!xdr_bytes(xdrs, (char **)&objp->owner.owner_val,
-				(uint_t *)&objp->owner.owner_len,
-				NFS4_OPAQUE_LIMIT))
+		    (uint_t *)&objp->owner.owner_len,
+		    NFS4_OPAQUE_LIMIT))
 			return (FALSE);
 
 		/* xdr_openflag4 */
@@ -2751,7 +3118,7 @@ xdr_OPEN4args(XDR *xdrs, OPEN4args *objp)
 			case UNCHECKED4:
 			case GUARDED4:
 				if (!xdr_fattr4(xdrs,
-					    &objp->createhow4_u.createattrs))
+				    &objp->createhow4_u.createattrs))
 					return (FALSE);
 				break;
 			case EXCLUSIVE4:
@@ -2760,47 +3127,21 @@ xdr_OPEN4args(XDR *xdrs, OPEN4args *objp)
 				    createverf))
 					return (FALSE);
 				break;
+			case EXCLUSIVE4_1:
+				if (!xdr_creatverfattr(xdrs,
+				    &objp->createhow4_u.ch_createboth))
+					return (FALSE);
+				break;
 			default:
 				return (FALSE);
 			}
 		}
 
 		/* xdr_open_claim4 */
-		if (!xdr_int(xdrs, (int *)&objp->claim))
+		if (!xdr_open_claim4(xdrs, (open_claim4 *)&objp->claim))
 			return (FALSE);
 
-		switch (objp->claim) {
-		case CLAIM_NULL:
-			return (xdr_bytes(xdrs, (char **)&objp->open_claim4_u.
-					file.utf8string_val,
-				(uint_t *)&objp->open_claim4_u.file.
-					utf8string_len,
-				NFS4_MAX_UTF8STRING));
-		case CLAIM_PREVIOUS:
-			return (xdr_int(xdrs,
-				(int *)&objp->open_claim4_u.delegate_type));
-		case CLAIM_DELEGATE_CUR:
-			if (!xdr_u_int(xdrs, (uint_t *)&objp->open_claim4_u.
-				    delegate_cur_info.delegate_stateid.seqid))
-				return (FALSE);
-			if (!xdr_opaque(xdrs, objp->open_claim4_u.
-				    delegate_cur_info.delegate_stateid.other,
-				    12))
-				return (FALSE);
-			return (xdr_bytes(xdrs, (char **)&objp->open_claim4_u.
-				delegate_cur_info.file.utf8string_val,
-			    (uint_t *)&objp->open_claim4_u.
-				delegate_cur_info.file.utf8string_len,
-			    NFS4_MAX_UTF8STRING));
-		case CLAIM_DELEGATE_PREV:
-			return (xdr_bytes(xdrs, (char **)&objp->open_claim4_u.
-				file_delegate_prev.utf8string_val,
-			    (uint_t *)&objp->open_claim4_u.
-				file_delegate_prev.utf8string_len,
-			    NFS4_MAX_UTF8STRING));
-		default:
-			return (FALSE);
-		}
+		return (TRUE);
 	}
 
 	/*
@@ -2814,43 +3155,15 @@ xdr_OPEN4args(XDR *xdrs, OPEN4args *objp)
 		case UNCHECKED4:
 		case GUARDED4:
 			(void) xdr_fattr4(xdrs,
-					&objp->createhow4_u.createattrs);
+			    &objp->createhow4_u.createattrs);
 			break;
 		case EXCLUSIVE4:
 		default:
 			break;
 		}
 	}
-
-	switch (objp->claim) {
-	case CLAIM_NULL:
-		if (objp->open_claim4_u.file.utf8string_val != NULL)
-			kmem_free(objp->open_claim4_u.file.utf8string_val,
-				objp->open_claim4_u.file.utf8string_len);
-		return (TRUE);
-	case CLAIM_PREVIOUS:
-		return (TRUE);
-	case CLAIM_DELEGATE_CUR:
-		if (objp->open_claim4_u.delegate_cur_info.file.utf8string_val !=
-								NULL) {
-			kmem_free(objp->open_claim4_u.delegate_cur_info.file.
-							utf8string_val,
-				objp->open_claim4_u.delegate_cur_info.file.
-							utf8string_len);
-		}
-		return (TRUE);
-	case CLAIM_DELEGATE_PREV:
-		if (objp->open_claim4_u.file_delegate_prev.utf8string_val !=
-								NULL) {
-			kmem_free(objp->open_claim4_u.file_delegate_prev.
-							utf8string_val,
-				objp->open_claim4_u.file_delegate_prev.
-							utf8string_len);
-		}
-		return (TRUE);
-	default:
-		return (TRUE);
-	}
+	(void) xdr_open_claim4(xdrs, (open_claim4 *)&objp->claim);
+	return (TRUE);
 }
 
 static bool_t
@@ -2903,12 +3216,12 @@ xdr_OPEN4cargs(XDR *xdrs, OPEN4cargs *objp)
 
 		/* xdr_open_owner4 */
 		if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&objp->owner.clientid))
+		    (u_longlong_t *)&objp->owner.clientid))
 			return (FALSE);
 		if (!XDR_PUTINT32(xdrs, (int32_t *)&objp->owner.owner_len))
 			return (FALSE);
 		if (!xdr_opaque(xdrs, objp->owner.owner_val,
-				objp->owner.owner_len))
+		    objp->owner.owner_len))
 			return (FALSE);
 
 		/* xdr_openflag4 */
@@ -2924,7 +3237,7 @@ xdr_OPEN4cargs(XDR *xdrs, OPEN4cargs *objp)
 		case UNCHECKED4:
 		case GUARDED4:
 			if (!xdr_fattr4(xdrs,
-				    &objp->createhow4_u.createattrs))
+			    &objp->createhow4_u.createattrs))
 				return (FALSE);
 			break;
 		case EXCLUSIVE4:
@@ -2949,27 +3262,25 @@ xdr_OPEN4cargs(XDR *xdrs, OPEN4cargs *objp)
 			return (FALSE);
 		if (XDR_PUTINT32(xdrs, &len)) {
 			return (xdr_opaque(xdrs,
-				objp->open_claim4_u.cfile, len));
+			    objp->open_claim4_u.cfile, len));
 		}
 		return (FALSE);
 	case CLAIM_PREVIOUS:
 		return (XDR_PUTINT32(xdrs,
-			(int32_t *)&objp->open_claim4_u.delegate_type));
+		    (int32_t *)&objp->open_claim4_u.delegate_type));
 	case CLAIM_DELEGATE_CUR:
 		if (!XDR_PUTINT32(xdrs, (int32_t *)&objp->open_claim4_u.
-				delegate_cur_info.delegate_stateid.seqid))
+		    delegate_cur_info.delegate_stateid.seqid))
 			return (FALSE);
 		if (!xdr_opaque(xdrs, objp->open_claim4_u.
-				delegate_cur_info.delegate_stateid.other,
-				12))
+		    delegate_cur_info.delegate_stateid.other, 12))
 			return (FALSE);
 		len = strlen(objp->open_claim4_u.delegate_cur_info.cfile);
 		if (len > NFS4_MAX_UTF8STRING)
 			return (FALSE);
 		if (XDR_PUTINT32(xdrs, &len)) {
 			return (xdr_opaque(xdrs,
-				objp->open_claim4_u.delegate_cur_info.cfile,
-				len));
+			    objp->open_claim4_u.delegate_cur_info.cfile, len));
 		}
 		return (FALSE);
 	case CLAIM_DELEGATE_PREV:
@@ -2978,9 +3289,16 @@ xdr_OPEN4cargs(XDR *xdrs, OPEN4cargs *objp)
 			return (FALSE);
 		if (XDR_PUTINT32(xdrs, &len)) {
 			return (xdr_opaque(xdrs,
-				objp->open_claim4_u.cfile_delegate_prev, len));
+			    objp->open_claim4_u.cfile_delegate_prev, len));
 		}
 		return (FALSE);
+	case CLAIM_FH: /* NFSv4.1 */
+		return (TRUE);
+	case CLAIM_DELEG_PREV_FH: /* NFSv4.1 */
+		return (TRUE);
+	case CLAIM_DELEG_CUR_FH: /* NFSv4.1 */
+		return (xdr_stateid4(xdrs,
+		    &objp->open_claim4_u.coc_delegate_stateid));
 	default:
 		return (FALSE);
 	}
@@ -3001,77 +3319,18 @@ xdr_OPEN4res(XDR *xdrs, OPEN4res *objp)
 		if (!xdr_bool(xdrs, &objp->cinfo.atomic))
 			return (FALSE);
 		if (!xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&objp->cinfo.before))
+		    (u_longlong_t *)&objp->cinfo.before))
 			return (FALSE);
 		if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)&objp->cinfo.after))
 			return (FALSE);
 		if (!xdr_u_int(xdrs, &objp->rflags))
 			return (FALSE);
-		if (!xdr_bitmap4(xdrs, &objp->attrset))
+		if (!xdr_attrmap4(xdrs, &objp->attrset))
 			return (FALSE);
-		if (!xdr_int(xdrs,
-			    (int *)&objp->delegation.delegation_type))
+		if (!xdr_open_delegation4(xdrs,
+		    (open_delegation4 *)&objp->delegation))
 			return (FALSE);
-		switch (objp->delegation.delegation_type) {
-		case OPEN_DELEGATE_NONE:
-			return (TRUE);
-		case OPEN_DELEGATE_READ:
-			if (!xdr_u_int(xdrs, &objp->delegation.
-					open_delegation4_u.read.stateid.seqid))
-				return (FALSE);
-			if (!xdr_opaque(xdrs, objp->delegation.
-					open_delegation4_u.read.stateid.other,
-					12))
-				return (FALSE);
-			if (!xdr_bool(xdrs, &objp->delegation.
-					open_delegation4_u.read.recall))
-				return (FALSE);
-			return (xdr_nfsace4(xdrs, &objp->delegation.
-					open_delegation4_u.read.permissions));
-		case OPEN_DELEGATE_WRITE:
-			if (!xdr_u_int(xdrs, &objp->delegation.
-					open_delegation4_u.write.stateid.seqid))
-				return (FALSE);
-			if (!xdr_opaque(xdrs, objp->delegation.
-					open_delegation4_u.write.stateid.other,
-					12))
-				return (FALSE);
-			if (!xdr_bool(xdrs, &objp->delegation.
-					open_delegation4_u.write.recall))
-				return (FALSE);
-			if (!xdr_int(xdrs, (int *)&objp->delegation.
-					open_delegation4_u.write.space_limit.
-					limitby))
-				return (FALSE);
-			switch (objp->delegation.
-					open_delegation4_u.write.space_limit.
-					limitby) {
-			case NFS_LIMIT_SIZE:
-				if (!xdr_u_longlong_t(xdrs,
-				    (u_longlong_t *)&objp->delegation.
-				    open_delegation4_u.write.space_limit.
-				    nfs_space_limit4_u.filesize))
-					return (FALSE);
-				break;
-			case NFS_LIMIT_BLOCKS:
-				if (!xdr_u_int(xdrs,
-				    &objp->delegation.open_delegation4_u.write.
-				    space_limit.nfs_space_limit4_u.
-				    mod_blocks.num_blocks))
-					return (FALSE);
-				if (!xdr_u_int(xdrs, &objp->delegation.
-				    open_delegation4_u.write.space_limit.
-				    nfs_space_limit4_u.mod_blocks.
-				    bytes_per_block))
-					return (FALSE);
-				break;
-			default:
-				return (FALSE);
-			}
-			return (xdr_nfsace4(xdrs, &objp->delegation.
-			    open_delegation4_u.write.permissions));
-		}
-		return (FALSE);
+		return (TRUE);
 	}
 
 	/*
@@ -3080,25 +3339,8 @@ xdr_OPEN4res(XDR *xdrs, OPEN4res *objp)
 	if (objp->status != NFS4_OK)
 		return (TRUE);
 
-	switch (objp->delegation.delegation_type) {
-	case OPEN_DELEGATE_NONE:
-		return (TRUE);
-	case OPEN_DELEGATE_READ:
-		return (xdr_nfsace4(xdrs, &objp->delegation.
-					open_delegation4_u.read.permissions));
-	case OPEN_DELEGATE_WRITE:
-		switch (objp->delegation.
-				open_delegation4_u.write.space_limit.limitby) {
-		case NFS_LIMIT_SIZE:
-		case NFS_LIMIT_BLOCKS:
-			break;
-		default:
-			return (FALSE);
-		}
-		return (xdr_nfsace4(xdrs, &objp->delegation.
-				open_delegation4_u.write.permissions));
-	}
-	return (FALSE);
+	return (xdr_open_delegation4(xdrs,
+	    (open_delegation4 *)&objp->delegation));
 }
 
 static bool_t
@@ -3184,7 +3426,7 @@ xdr_READ4res(XDR *xdrs, READ4res *objp)
 	if (mp != NULL && xdrs->x_ops == &xdrmblk_ops) {
 		mp->b_wptr += objp->data_len;
 		rndup = BYTES_PER_XDR_UNIT -
-			(objp->data_len % BYTES_PER_XDR_UNIT);
+		    (objp->data_len % BYTES_PER_XDR_UNIT);
 		if (rndup != BYTES_PER_XDR_UNIT)
 			for (i = 0; i < rndup; i++)
 				*mp->b_wptr++ = '\0';
@@ -3194,8 +3436,7 @@ xdr_READ4res(XDR *xdrs, READ4res *objp)
 		}
 	}
 	return (xdr_bytes(xdrs, (char **)&objp->data_val,
-			(uint_t *)&objp->data_len,
-			objp->data_len));
+	    (uint_t *)&objp->data_len, objp->data_len));
 }
 
 static bool_t
@@ -3254,7 +3495,7 @@ xdr_READ4res_clnt(XDR *xdrs, READ4res *objp, READ4args *aobjp)
 				if ((n = MIN(uiop->uio_resid, n)) != 0) {
 
 					error =	uiomove((char *)mp->b_rptr, n,
-							UIO_READ, uiop);
+					    UIO_READ, uiop);
 					if (error)
 						return (FALSE);
 					mp->b_rptr += n;
@@ -3284,7 +3525,7 @@ xdr_READ4res_clnt(XDR *xdrs, READ4res *objp, READ4args *aobjp)
 		size = (int)objp->data_len;
 		if ((ptr = XDR_INLINE(xdrs, size)) != NULL)
 			return (uiomove(ptr, size, UIO_READ, uiop) ?
-				FALSE : TRUE);
+			    FALSE : TRUE);
 
 		/*
 		 * Handle some other (unlikely) stream type that will
@@ -3309,8 +3550,7 @@ xdr_READ4res_clnt(XDR *xdrs, READ4res *objp, READ4args *aobjp)
 	 */
 	if (aobjp->res_data_val_alt)
 		return (xdr_bytes(xdrs, (char **)&aobjp->res_data_val_alt,
-				(uint_t *)&objp->data_len,
-				aobjp->res_maxsize));
+		    (uint_t *)&objp->data_len, aobjp->res_maxsize));
 
 	/* caller didn't set things up right if we got this far */
 	return (FALSE);
@@ -3327,7 +3567,7 @@ xdr_READDIR4args(XDR *xdrs, READDIR4args *objp)
 		return (FALSE);
 	if (!xdr_u_int(xdrs, &objp->maxcount))
 		return (FALSE);
-	return (xdr_bitmap4(xdrs, &objp->attr_request));
+	return (xdr_attrmap4(xdrs, &objp->attr_request));
 }
 
 /* ARGSUSED */
@@ -3361,8 +3601,7 @@ xdr_READDIR4res(XDR *xdrs, READDIR4res *objp)
 		return (FALSE);
 
 	if (xdrs->x_ops == &xdrmblk_ops) {
-		if (xdrmblk_putmblk_rd(xdrs, mp)
-				    == TRUE) {
+		if (xdrmblk_putmblk_rd(xdrs, mp) == TRUE) {
 			/* mblk successfully inserted into outgoing chain */
 			objp->mblk = NULL;
 			return (TRUE);
@@ -3398,8 +3637,8 @@ xdr_READLINK4res(XDR *xdrs, READLINK4res *objp)
 		if (objp->status != NFS4_OK)
 			return (TRUE);
 		return (xdr_bytes(xdrs, (char **)&objp->link.utf8string_val,
-			(uint_t *)&objp->link.utf8string_len,
-			NFS4_MAX_UTF8STRING));
+		    (uint_t *)&objp->link.utf8string_len,
+		    NFS4_MAX_UTF8STRING));
 	}
 
 	/*
@@ -3424,7 +3663,7 @@ xdr_REMOVE4res(XDR *xdrs, REMOVE4res *objp)
 	if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)&objp->cinfo.before))
 		return (FALSE);
 	return (xdr_u_longlong_t(xdrs,
-		(u_longlong_t *)&objp->cinfo.after));
+	    (u_longlong_t *)&objp->cinfo.after));
 }
 
 static bool_t
@@ -3448,7 +3687,7 @@ xdr_RENAME4res(XDR *xdrs, RENAME4res *objp)
 	    (u_longlong_t *)&objp->target_cinfo.before))
 		return (FALSE);
 	return (xdr_u_longlong_t(xdrs,
-		(u_longlong_t *)&objp->target_cinfo.after));
+	    (u_longlong_t *)&objp->target_cinfo.after));
 }
 
 static bool_t
@@ -3460,9 +3699,9 @@ xdr_secinfo4(XDR *xdrs, secinfo4 *objp)
 		if (objp->flavor != RPCSEC_GSS)
 			return (TRUE);
 		if (!xdr_bytes(xdrs,
-			    (char **)&objp->flavor_info.oid.sec_oid4_val,
-			    (uint_t *)&objp->flavor_info.oid.sec_oid4_len,
-			    NFS4_MAX_SECOID4))
+		    (char **)&objp->flavor_info.oid.sec_oid4_val,
+		    (uint_t *)&objp->flavor_info.oid.sec_oid4_len,
+		    NFS4_MAX_SECOID4))
 			return (FALSE);
 		if (!xdr_u_int(xdrs, &objp->flavor_info.qop))
 			return (FALSE);
@@ -3477,8 +3716,20 @@ xdr_secinfo4(XDR *xdrs, secinfo4 *objp)
 
 	if (objp->flavor_info.oid.sec_oid4_val != NULL)
 		kmem_free(objp->flavor_info.oid.sec_oid4_val,
-			objp->flavor_info.oid.sec_oid4_len);
+		    objp->flavor_info.oid.sec_oid4_len);
 	return (TRUE);
+}
+
+bool_t
+xdr_SECINFO4res(XDR *xdrs, SECINFO4res *objp)
+{
+	if (!xdr_int(xdrs, (int32_t *)&objp->status))
+		return (FALSE);
+	if (objp->status != NFS4_OK)
+		return (TRUE);
+	return (xdr_array(xdrs, (char **)&objp->SECINFO4resok_val,
+	    (uint_t *)&objp->SECINFO4resok_len, ~0, sizeof (secinfo4),
+	    (xdrproc_t)xdr_secinfo4));
 }
 
 static bool_t
@@ -3486,18 +3737,18 @@ xdr_SETCLIENTID4args(XDR *xdrs, SETCLIENTID4args *objp)
 {
 	if (xdrs->x_op != XDR_FREE) {
 		if (!xdr_u_longlong_t(xdrs,
-					(u_longlong_t *)&objp->client.verifier))
+		    (u_longlong_t *)&objp->client.verifier))
 			return (FALSE);
 		if (!xdr_bytes(xdrs, (char **)&objp->client.id_val,
-			    (uint_t *)&objp->client.id_len, NFS4_OPAQUE_LIMIT))
+		    (uint_t *)&objp->client.id_len, NFS4_OPAQUE_LIMIT))
 			return (FALSE);
 		if (!xdr_u_int(xdrs, &objp->callback.cb_program))
 			return (FALSE);
 		if (!xdr_string(xdrs, &objp->callback.cb_location.r_netid,
-						NFS4_OPAQUE_LIMIT))
+		    NFS4_OPAQUE_LIMIT))
 			return (FALSE);
 		if (!xdr_string(xdrs, &objp->callback.cb_location.r_addr,
-						NFS4_OPAQUE_LIMIT))
+		    NFS4_OPAQUE_LIMIT))
 			return (FALSE);
 		return (xdr_u_int(xdrs, &objp->callback_ident));
 	}
@@ -3508,9 +3759,9 @@ xdr_SETCLIENTID4args(XDR *xdrs, SETCLIENTID4args *objp)
 	if (objp->client.id_val != NULL)
 		kmem_free(objp->client.id_val, objp->client.id_len);
 	(void) xdr_string(xdrs, &objp->callback.cb_location.r_netid,
-							NFS4_OPAQUE_LIMIT);
+	    NFS4_OPAQUE_LIMIT);
 	return (xdr_string(xdrs, &objp->callback.cb_location.r_addr,
-							NFS4_OPAQUE_LIMIT));
+	    NFS4_OPAQUE_LIMIT));
 }
 
 static bool_t
@@ -3527,15 +3778,15 @@ xdr_SETCLIENTID4res(XDR *xdrs, SETCLIENTID4res *objp)
 				return (FALSE);
 			return (xdr_u_longlong_t(xdrs,
 			    (u_longlong_t *)&objp->SETCLIENTID4res_u.
-						resok4.setclientid_confirm));
+			    resok4.setclientid_confirm));
 		case NFS4ERR_CLID_INUSE:
 			if (!xdr_string(xdrs,
-				    &objp->SETCLIENTID4res_u.client_using.
-				    r_netid, NFS4_OPAQUE_LIMIT))
+			    &objp->SETCLIENTID4res_u.client_using.
+			    r_netid, NFS4_OPAQUE_LIMIT))
 				return (FALSE);
 			return (xdr_string(xdrs,
-				    &objp->SETCLIENTID4res_u.client_using.
-				    r_addr, NFS4_OPAQUE_LIMIT));
+			    &objp->SETCLIENTID4res_u.client_using.
+			    r_addr, NFS4_OPAQUE_LIMIT));
 		}
 		return (TRUE);
 	}
@@ -3547,10 +3798,10 @@ xdr_SETCLIENTID4res(XDR *xdrs, SETCLIENTID4res *objp)
 		return (TRUE);
 
 	if (!xdr_string(xdrs, &objp->SETCLIENTID4res_u.client_using.r_netid,
-							NFS4_OPAQUE_LIMIT))
+	    NFS4_OPAQUE_LIMIT))
 		return (FALSE);
 	return (xdr_string(xdrs, &objp->SETCLIENTID4res_u.client_using.r_addr,
-							NFS4_OPAQUE_LIMIT));
+	    NFS4_OPAQUE_LIMIT));
 }
 
 static bool_t
@@ -3569,13 +3820,13 @@ xdr_WRITE4args(XDR *xdrs, WRITE4args *objp)
 			if (xdrs->x_ops == &xdrmblk_ops) {
 				objp->data_val = NULL;
 				return (xdrmblk_getmblk(xdrs, &objp->mblk,
-							&objp->data_len));
+				    &objp->data_len));
 			}
 			/* Else fall thru for the xdr_bytes(). */
 			objp->mblk = NULL;
 		}
 		return (xdr_bytes(xdrs, (char **)&objp->data_val,
-				(uint_t *)&objp->data_len, NFS4_DATA_LIMIT));
+		    (uint_t *)&objp->data_len, NFS4_DATA_LIMIT));
 	}
 
 	/*
@@ -3598,7 +3849,7 @@ xdr_WRITE4res(XDR *xdrs, WRITE4res *objp)
 	if (!xdr_int(xdrs, (int *)&objp->committed))
 		return (FALSE);
 	return (xdr_u_longlong_t(xdrs,
-			(u_longlong_t *)&objp->writeverf));
+	    (u_longlong_t *)&objp->writeverf));
 }
 
 static bool_t
@@ -3625,11 +3876,11 @@ xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len)
 		switch (array[i].argop) {
 		case OP_PUTFH:
 			if (array[i].nfs_argop4_u.opputfh.object.nfs_fh4_val !=
-								NULL) {
+			    NULL) {
 				kmem_free(array[i].nfs_argop4_u.opputfh.object.
-								nfs_fh4_val,
-					array[i].nfs_argop4_u.opputfh.object.
-								nfs_fh4_len);
+				    nfs_fh4_val,
+				    array[i].nfs_argop4_u.opputfh.object.
+				    nfs_fh4_len);
 			}
 			continue;
 		case OP_GETATTR:
@@ -3637,16 +3888,16 @@ xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len)
 			continue;
 		case OP_LOOKUP:
 			if (array[i].nfs_argop4_u.oplookup.objname.
-						utf8string_val != NULL) {
+			    utf8string_val != NULL) {
 				kmem_free(array[i].nfs_argop4_u.oplookup.
-						objname.utf8string_val,
-					array[i].nfs_argop4_u.oplookup.
-						objname.utf8string_len);
+				    objname.utf8string_val,
+				    array[i].nfs_argop4_u.oplookup.
+				    objname.utf8string_len);
 			}
 			continue;
 		case OP_OPEN:
 			(void) xdr_OPEN4args(xdrs,
-						&array[i].nfs_argop4_u.opopen);
+			    &array[i].nfs_argop4_u.opopen);
 			continue;
 		case OP_CLOSE:
 		case OP_ACCESS:
@@ -3654,7 +3905,7 @@ xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len)
 			continue;
 		case OP_WRITE:
 			(void) xdr_WRITE4args(xdrs,
-						&array[i].nfs_argop4_u.opwrite);
+			    &array[i].nfs_argop4_u.opwrite);
 			continue;
 		case OP_DELEGRETURN:
 		case OP_LOOKUPP:
@@ -3662,37 +3913,37 @@ xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len)
 			continue;
 		case OP_REMOVE:
 			if (array[i].nfs_argop4_u.opremove.target.
-						utf8string_val != NULL) {
+			    utf8string_val != NULL) {
 				kmem_free(array[i].nfs_argop4_u.opremove.target.
-							utf8string_val,
-					array[i].nfs_argop4_u.opremove.target.
-							utf8string_len);
+				    utf8string_val,
+				    array[i].nfs_argop4_u.opremove.target.
+				    utf8string_len);
 			}
 			continue;
 		case OP_COMMIT:
 			continue;
 		case OP_CREATE:
 			(void) xdr_CREATE4args(xdrs,
-					&array[i].nfs_argop4_u.opcreate);
+			    &array[i].nfs_argop4_u.opcreate);
 			continue;
 		case OP_DELEGPURGE:
 			continue;
 		case OP_LINK:
 			if (array[i].nfs_argop4_u.oplink.newname.
-						utf8string_val != NULL) {
+			    utf8string_val != NULL) {
 				kmem_free(array[i].nfs_argop4_u.oplink.newname.
-							utf8string_val,
-					array[i].nfs_argop4_u.oplink.newname.
-							utf8string_len);
+				    utf8string_val,
+				    array[i].nfs_argop4_u.oplink.newname.
+				    utf8string_len);
 			}
 			continue;
 		case OP_LOCK:
 			(void) xdr_LOCK4args(xdrs,
-						&array[i].nfs_argop4_u.oplock);
+			    &array[i].nfs_argop4_u.oplock);
 			continue;
 		case OP_LOCKT:
 			(void) xdr_LOCKT4args(xdrs,
-						&array[i].nfs_argop4_u.oplockt);
+			    &array[i].nfs_argop4_u.oplockt);
 			continue;
 		case OP_LOCKU:
 			continue;
@@ -3709,18 +3960,18 @@ xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len)
 			continue;
 		case OP_RENAME:
 			if (array[i].nfs_argop4_u.oprename.oldname.
-						utf8string_val != NULL) {
+			    utf8string_val != NULL) {
 				kmem_free(array[i].nfs_argop4_u.oprename.
-						oldname.utf8string_val,
-					array[i].nfs_argop4_u.oprename.
-						oldname.utf8string_len);
+				    oldname.utf8string_val,
+				    array[i].nfs_argop4_u.oprename.
+				    oldname.utf8string_len);
 			}
 			if (array[i].nfs_argop4_u.oprename.newname.
-						utf8string_val != NULL) {
+			    utf8string_val != NULL) {
 				kmem_free(array[i].nfs_argop4_u.oprename.
-						newname.utf8string_val,
-					array[i].nfs_argop4_u.oprename.
-						newname.utf8string_len);
+				    newname.utf8string_val,
+				    array[i].nfs_argop4_u.oprename.
+				    newname.utf8string_len);
 			}
 			continue;
 		case OP_RENEW:
@@ -3729,11 +3980,11 @@ xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len)
 			continue;
 		case OP_SECINFO:
 			if (array[i].nfs_argop4_u.opsecinfo.name.
-						utf8string_val != NULL) {
+			    utf8string_val != NULL) {
 				kmem_free(array[i].nfs_argop4_u.opsecinfo.name.
-							utf8string_val,
-					array[i].nfs_argop4_u.opsecinfo.name.
-							utf8string_len);
+				    utf8string_val,
+				    array[i].nfs_argop4_u.opsecinfo.name.
+				    utf8string_len);
 			}
 			continue;
 		case OP_SETATTR:
@@ -3742,20 +3993,20 @@ xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len)
 			continue;
 		case OP_SETCLIENTID:
 			(void) xdr_SETCLIENTID4args(xdrs,
-					&array[i].nfs_argop4_u.opsetclientid);
+			    &array[i].nfs_argop4_u.opsetclientid);
 			continue;
 		case OP_SETCLIENTID_CONFIRM:
 			continue;
 		case OP_VERIFY:
 			(void) xdr_fattr4(xdrs,
-				&array[i].nfs_argop4_u.opverify.obj_attributes);
+			    &array[i].nfs_argop4_u.opverify.obj_attributes);
 			continue;
 		case OP_RELEASE_LOCKOWNER:
 			if (array[i].nfs_argop4_u.oprelease_lockowner.
-						lock_owner.owner_val != NULL) {
+			    lock_owner.owner_val != NULL) {
 				kmem_free(array[i].nfs_argop4_u.
 				    oprelease_lockowner.lock_owner.owner_val,
-					array[i].nfs_argop4_u.
+				    array[i].nfs_argop4_u.
 				    oprelease_lockowner.lock_owner.owner_len);
 			}
 			continue;
@@ -3777,8 +4028,13 @@ xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len)
 	return (TRUE);
 }
 
+/*
+ * This function handles all of the operations introduced in NFSv4.0.
+ * The NFSv4.1 specific operations are handled in xdr_nfs_argop4(), defined
+ * in nfs41_xdr.c.
+ */
 static bool_t
-xdr_nfs_argop4(XDR *xdrs, nfs_argop4 *objp)
+xdr_nfs_argop4_minorversion_0(XDR *xdrs, nfs_argop4 *objp)
 {
 	/*
 	 * These should be ordered by frequency of use
@@ -3790,23 +4046,22 @@ xdr_nfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 		    (uint_t *)&objp->nfs_argop4_u.opputfh.object.nfs_fh4_len,
 		    NFS4_FHSIZE));
 	case OP_GETATTR:
-		return (xdr_bitmap4(xdrs,
-				&objp->nfs_argop4_u.opgetattr.attr_request));
+		return (xdr_attrmap4(xdrs,
+		    &objp->nfs_argop4_u.opgetattr.attr_request));
 	case OP_GETFH:
 		return (TRUE);
 	case OP_LOOKUP:
 		return (xdr_bytes(xdrs, (char **)&objp->nfs_argop4_u.oplookup.
-				objname.utf8string_val,
-			(uint_t *)&objp->nfs_argop4_u.oplookup.
-				objname.utf8string_len,
-			NFS4_MAX_UTF8STRING));
+		    objname.utf8string_val,
+		    (uint_t *)&objp->nfs_argop4_u.oplookup.
+		    objname.utf8string_len,
+		    NFS4_MAX_UTF8STRING));
 	case OP_OPEN:
 		return (xdr_OPEN4args(xdrs, &objp->nfs_argop4_u.opopen));
 	case OP_CLOSE:
 		return (xdr_CLOSE4args(xdrs, &objp->nfs_argop4_u.opclose));
 	case OP_ACCESS:
-		return (xdr_u_int(xdrs,
-				&objp->nfs_argop4_u.opaccess.access));
+		return (xdr_u_int(xdrs, &objp->nfs_argop4_u.opaccess.access));
 	case OP_READ:
 		return (xdr_READ4args(xdrs, &objp->nfs_argop4_u.opread));
 	case OP_WRITE:
@@ -3823,10 +4078,10 @@ xdr_nfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 		return (xdr_READDIR4args(xdrs, &objp->nfs_argop4_u.opreaddir));
 	case OP_REMOVE:
 		return (xdr_bytes(xdrs, (char **)&objp->nfs_argop4_u.opremove.
-				target.utf8string_val,
-			(uint_t *)&objp->nfs_argop4_u.opremove.
-				target.utf8string_len,
-			NFS4_MAX_UTF8STRING));
+		    target.utf8string_val,
+		    (uint_t *)&objp->nfs_argop4_u.opremove.
+		    target.utf8string_len,
+		    NFS4_MAX_UTF8STRING));
 	case OP_COMMIT:
 		if (!xdr_u_longlong_t(xdrs,
 		    (u_longlong_t *)&objp->nfs_argop4_u.opcommit.offset))
@@ -3850,22 +4105,22 @@ xdr_nfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 		return (xdr_LOCKU4args(xdrs, &objp->nfs_argop4_u.oplocku));
 	case OP_NVERIFY:
 		return (xdr_fattr4(xdrs,
-				&objp->nfs_argop4_u.opnverify.obj_attributes));
+		    &objp->nfs_argop4_u.opnverify.obj_attributes));
 	case OP_OPENATTR:
 		return (xdr_bool(xdrs,
-				&objp->nfs_argop4_u.opopenattr.createdir));
+		    &objp->nfs_argop4_u.opopenattr.createdir));
 	case OP_OPEN_CONFIRM:
 		if (!xdr_u_int(xdrs, &objp->nfs_argop4_u.opopen_confirm.
-						open_stateid.seqid))
+		    open_stateid.seqid))
 			return (FALSE);
 		if (!xdr_opaque(xdrs, objp->nfs_argop4_u.opopen_confirm.
-						open_stateid.other, 12))
+		    open_stateid.other, 12))
 			return (FALSE);
 		return (xdr_u_int(xdrs, &objp->nfs_argop4_u.opopen_confirm.
-						seqid));
+		    seqid));
 	case OP_OPEN_DOWNGRADE:
 		return (xdr_OPEN_DOWNGRADE4args(xdrs,
-				&objp->nfs_argop4_u.opopen_downgrade));
+		    &objp->nfs_argop4_u.opopen_downgrade));
 	case OP_PUTPUBFH:
 		return (TRUE);
 	case OP_PUTROOTFH:
@@ -3874,19 +4129,19 @@ xdr_nfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 		return (TRUE);
 	case OP_RENAME:
 		if (!xdr_bytes(xdrs, (char **)&objp->nfs_argop4_u.oprename.
-						oldname.utf8string_val,
-			    (uint_t *)&objp->nfs_argop4_u.oprename.
-						oldname.utf8string_len,
-			    NFS4_MAX_UTF8STRING))
+		    oldname.utf8string_val,
+		    (uint_t *)&objp->nfs_argop4_u.oprename.
+		    oldname.utf8string_len,
+		    NFS4_MAX_UTF8STRING))
 			return (FALSE);
 		return (xdr_bytes(xdrs, (char **)&objp->nfs_argop4_u.oprename.
-						newname.utf8string_val,
-			    (uint_t *)&objp->nfs_argop4_u.oprename.
-						newname.utf8string_len,
-			    NFS4_MAX_UTF8STRING));
+		    newname.utf8string_val,
+		    (uint_t *)&objp->nfs_argop4_u.oprename.
+		    newname.utf8string_len,
+		    NFS4_MAX_UTF8STRING));
 	case OP_RENEW:
 		return (xdr_u_longlong_t(xdrs,
-			(u_longlong_t *)&objp->nfs_argop4_u.oprenew.clientid));
+		    (u_longlong_t *)&objp->nfs_argop4_u.oprenew.clientid));
 	case OP_RESTOREFH:
 		return (TRUE);
 	case OP_SAVEFH:
@@ -3898,63 +4153,76 @@ xdr_nfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 		    NFS4_MAX_UTF8STRING));
 	case OP_SETATTR:
 		if (!xdr_u_int(xdrs, &objp->nfs_argop4_u.opsetattr.
-						stateid.seqid))
+		    stateid.seqid))
 			return (FALSE);
 		if (!xdr_opaque(xdrs, objp->nfs_argop4_u.opsetattr.
-						stateid.other, 12))
+		    stateid.other, 12))
 			return (FALSE);
 		return (xdr_fattr4(xdrs, &objp->nfs_argop4_u.opsetattr.
-						obj_attributes));
+		    obj_attributes));
 	case OP_SETCLIENTID:
 		return (xdr_SETCLIENTID4args(xdrs,
-				&objp->nfs_argop4_u.opsetclientid));
+		    &objp->nfs_argop4_u.opsetclientid));
 	case OP_SETCLIENTID_CONFIRM:
 		if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)&objp->nfs_argop4_u.
-				opsetclientid_confirm.clientid))
+		    opsetclientid_confirm.clientid))
 			return (FALSE);
 		return (xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&objp->nfs_argop4_u.
-				opsetclientid_confirm.setclientid_confirm));
+		    (u_longlong_t *)&objp->nfs_argop4_u.
+		    opsetclientid_confirm.setclientid_confirm));
 	case OP_VERIFY:
 		return (xdr_fattr4(xdrs,
-				&objp->nfs_argop4_u.opverify.obj_attributes));
+		    &objp->nfs_argop4_u.opverify.obj_attributes));
 	case OP_RELEASE_LOCKOWNER:
 		if (!xdr_u_longlong_t(xdrs,
-			    (u_longlong_t *)&objp->nfs_argop4_u.
-				oprelease_lockowner.lock_owner.clientid))
+		    (u_longlong_t *)&objp->nfs_argop4_u.
+		    oprelease_lockowner.lock_owner.clientid))
 			return (FALSE);
 		return (xdr_bytes(xdrs,
-			(char **)&objp->nfs_argop4_u.oprelease_lockowner.
-				lock_owner.owner_val,
-			(uint_t *)&objp->nfs_argop4_u.oprelease_lockowner.
-				lock_owner.owner_len, NFS4_OPAQUE_LIMIT));
+		    (char **)&objp->nfs_argop4_u.oprelease_lockowner.
+		    lock_owner.owner_val,
+		    (uint_t *)&objp->nfs_argop4_u.oprelease_lockowner.
+		    lock_owner.owner_len, NFS4_OPAQUE_LIMIT));
 	case OP_ILLEGAL:
 		return (TRUE);
+	default:
+		return (xdr_nfs_argop4(xdrs, objp));
 	}
-	return (FALSE);
 }
-
 static bool_t
 xdr_cnfs_argop4_wrap(XDR *xdrs, nfs_argop4 *objp)
 {
 	if (!xdr_int(xdrs, (int *)&objp->argop))
 		return (FALSE);
 
-	return (xdr_nfs_argop4(xdrs, objp));
+	return (xdr_nfs_argop4_minorversion_0(xdrs, objp));
 }
 
+
 static bool_t
-xdr_snfs_argop4(XDR *xdrs, nfs_argop4 *objp)
+xdr_snfs_argop4(XDR *xdrs, nfs_argop4 *objp, COMPOUND4args_srv *ap)
 {
 	if (!xdr_int(xdrs, (int *)&objp->argop))
 		return (FALSE);
 
 	switch (objp->argop) {
 	case OP_PUTFH:
-		return (xdr_decode_nfs_fh4(xdrs,
-			&objp->nfs_argop4_u.opputfh.object));
+		if (ap->minorversion == 0)
+			return (xdr_decode_nfs_fh4(xdrs,
+			    &objp->nfs_argop4_u.opputfh.object));
+		else
+			return (xdr_decode_nfs41_fh(xdrs,
+			    &objp->nfs_argop4_u.opputfh.object));
+
+	case OP_SEQUENCE:
+		if (xdr_SEQUENCE4args(xdrs, &objp->nfs_argop4_u.opsequence)) {
+			ap->sargs = &objp->nfs_argop4_u.opsequence;
+			return (TRUE);
+		}
+		ap->sargs = NULL;
+		return (FALSE);
 	default:
-		return (xdr_nfs_argop4(xdrs, objp));
+		return (xdr_nfs_argop4_minorversion_0(xdrs, objp));
 	}
 }
 
@@ -4000,7 +4268,7 @@ xdr_cnfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 		 */
 		if (!(len % BYTES_PER_XDR_UNIT) &&
 		    (ptr = XDR_INLINE(xdrs, 2 * BYTES_PER_XDR_UNIT + len)) !=
-									NULL) {
+		    NULL) {
 			IXDR_PUT_U_INT32(ptr, OP_PUTFH);
 			IXDR_PUT_U_INT32(ptr, len);
 			bcopy(sfh->sfh_fh.nfs_fh4_val, ptr, len);
@@ -4036,8 +4304,8 @@ xdr_cnfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 		if (XDR_PUTINT32(xdrs, &op)) {
 			if (XDR_PUTINT32(xdrs, &len)) {
 				return (xdr_opaque(xdrs,
-					objp->nfs_argop4_u.opclookup.cname,
-					len));
+				    objp->nfs_argop4_u.opclookup.cname,
+				    len));
 			}
 		}
 		return (FALSE);
@@ -4052,8 +4320,8 @@ xdr_cnfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 		if (XDR_PUTINT32(xdrs, &op)) {
 			if (XDR_PUTINT32(xdrs, &len)) {
 				return (xdr_opaque(xdrs,
-					objp->nfs_argop4_u.opcremove.ctarget,
-					len));
+				    objp->nfs_argop4_u.opcremove.ctarget,
+				    len));
 			}
 		}
 		return (FALSE);
@@ -4070,8 +4338,8 @@ xdr_cnfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 		if (XDR_PUTINT32(xdrs, &op)) {
 			if (XDR_PUTINT32(xdrs, &len)) {
 				return (xdr_opaque(xdrs,
-					objp->nfs_argop4_u.opclink.cnewname,
-					len));
+				    objp->nfs_argop4_u.opclink.cnewname,
+				    len));
 			}
 		}
 		return (FALSE);
@@ -4085,14 +4353,14 @@ xdr_cnfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 		if (!XDR_PUTINT32(xdrs, &len))
 			return (FALSE);
 		if (!xdr_opaque(xdrs,
-				objp->nfs_argop4_u.opcrename.coldname, len))
+		    objp->nfs_argop4_u.opcrename.coldname, len))
 			return (FALSE);
 		len = strlen(objp->nfs_argop4_u.opcrename.cnewname);
 		if (len > NFS4_MAX_UTF8STRING)
 			return (FALSE);
 		if (XDR_PUTINT32(xdrs, &len)) {
 			return (xdr_opaque(xdrs,
-				objp->nfs_argop4_u.opcrename.cnewname, len));
+			    objp->nfs_argop4_u.opcrename.cnewname, len));
 		}
 		return (FALSE);
 	case OP_CSECINFO:
@@ -4103,8 +4371,8 @@ xdr_cnfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 		if (XDR_PUTINT32(xdrs, &op)) {
 			if (XDR_PUTINT32(xdrs, &len)) {
 				return (xdr_opaque(xdrs,
-					objp->nfs_argop4_u.opcsecinfo.cname,
-					len));
+				    objp->nfs_argop4_u.opcsecinfo.cname,
+				    len));
 			}
 		}
 		return (FALSE);
@@ -4143,33 +4411,32 @@ xdr_nfs_resop4_free(XDR *xdrs, nfs_resop4 **arrayp, int len, int decode_len)
 				continue;
 			if (array[i].nfs_resop4_u.opgetattr.ga_res.n4g_ext_res)
 				kmem_free(array[i].nfs_resop4_u.opgetattr.
-					ga_res.n4g_ext_res,
-					sizeof (struct nfs4_ga_ext_res));
+				    ga_res.n4g_ext_res,
+				    sizeof (struct nfs4_ga_ext_res));
 			continue;
 		case OP_GETFH:
 			if (array[i].nfs_resop4_u.opgetfh.status != NFS4_OK)
 				continue;
 			if (array[i].nfs_resop4_u.opgetfh.object.nfs_fh4_val !=
-							NULL) {
+			    NULL) {
 				kmem_free(array[i].nfs_resop4_u.opgetfh.object.
-							nfs_fh4_val,
-					array[i].nfs_resop4_u.opgetfh.object.
-							nfs_fh4_len);
+				    nfs_fh4_val,
+				    array[i].nfs_resop4_u.opgetfh.object.
+				    nfs_fh4_len);
 			}
 			continue;
 		case OP_LOOKUP:
 			continue;
 		case OP_OPEN:
 			(void) xdr_OPEN4res(xdrs, &array[i].nfs_resop4_u.
-								opopen);
+			    opopen);
 			continue;
 		case OP_CLOSE:
 		case OP_ACCESS:
 			continue;
 		case OP_READ:
 			(void) xdr_READ4res(xdrs,
-					    &array[i].nfs_resop4_u.
-								opread);
+			    &array[i].nfs_resop4_u.opread);
 			continue;
 		case OP_WRITE:
 		case OP_DELEGRETURN:
@@ -4183,11 +4450,11 @@ xdr_nfs_resop4_free(XDR *xdrs, nfs_resop4 **arrayp, int len, int decode_len)
 			continue;
 		case OP_LOCK:
 			(void) xdr_LOCK4res(xdrs, &array[i].nfs_resop4_u.
-								oplock);
+			    oplock);
 			continue;
 		case OP_LOCKT:
 			(void) xdr_LOCKT4res(xdrs, &array[i].nfs_resop4_u.
-								oplockt);
+			    oplockt);
 			continue;
 		case OP_LOCKU:
 		case OP_NVERIFY:
@@ -4203,20 +4470,20 @@ xdr_nfs_resop4_free(XDR *xdrs, nfs_resop4 **arrayp, int len, int decode_len)
 			continue;
 		case OP_READLINK:
 			(void) xdr_READLINK4res(xdrs, &array[i].nfs_resop4_u.
-								opreadlink);
+			    opreadlink);
 			continue;
 		case OP_SECINFO:
 			(void) xdr_array(xdrs,
-				(char **)&array[i].nfs_resop4_u.opsecinfo.
-					SECINFO4resok_val,
-				(uint_t *)&array[i].nfs_resop4_u.opsecinfo.
-					SECINFO4resok_len,
-				NFS4_SECINFO_LIMIT, sizeof (secinfo4),
-				(xdrproc_t)xdr_secinfo4);
+			    (char **)&array[i].nfs_resop4_u.opsecinfo.
+			    SECINFO4resok_val,
+			    (uint_t *)&array[i].nfs_resop4_u.opsecinfo.
+			    SECINFO4resok_len,
+			    NFS4_SECINFO_LIMIT, sizeof (secinfo4),
+			    (xdrproc_t)xdr_secinfo4);
 			continue;
 		case OP_SETCLIENTID:
 			(void) xdr_SETCLIENTID4res(xdrs,
-					&array[i].nfs_resop4_u.opsetclientid);
+			    &array[i].nfs_resop4_u.opsetclientid);
 			continue;
 		case OP_SETATTR:
 		case OP_SETCLIENTID_CONFIRM:
@@ -4235,7 +4502,17 @@ xdr_nfs_resop4_free(XDR *xdrs, nfs_resop4 **arrayp, int len, int decode_len)
 		}
 	}
 
-	kmem_free(*arrayp, len * sizeof (nfs_resop4));
+	/*
+	 * This shouldn't be here.  It's a manifestation of the
+	 * was rfs4call adds sequence ops.  If the sequence op
+	 * fails, then rfs4call has no results array to return
+	 * since rfs4call added the failing op itself.  Still,
+	 * we must return the error properly (especially in cases
+	 * like NFS4ERR_EXPIRED to kick off recovery).
+	 */
+
+	if (len > 0 && *arrayp != NULL)
+		kmem_free(*arrayp, len * sizeof (nfs_resop4));
 	*arrayp = NULL;
 	return (TRUE);
 }
@@ -4246,27 +4523,33 @@ xdr_snfs_resop4_free(XDR *xdrs, nfs_resop4 **arrayp, int len, int decode_len)
 	return (xdr_nfs_resop4_free(xdrs, arrayp, len, decode_len));
 }
 
+/*
+ * This function handles the operations introduced in NFSv4.0.
+ * The NFSv4.1 specific operations are handled in xdr_nfs_resop4(), defined in
+ * nfs41_xdr.c
+ */
 static bool_t
-xdr_nfs_resop4(XDR *xdrs, nfs_resop4 *objp)
+xdr_nfs_resop4_minorversion_0(XDR *xdrs, nfs_resop4 *objp)
 {
 	/*
 	 * These should be ordered by frequency of use
 	 */
+	/* direct copy from nfs4_xdr */
 	switch (objp->resop) {
 	case OP_PUTFH:
 		return (xdr_int(xdrs,
-				(int32_t *)&objp->nfs_resop4_u.opputfh.status));
+		    (int32_t *)&objp->nfs_resop4_u.opputfh.status));
 	case OP_GETATTR:
 		if (!xdr_int(xdrs,
-			    (int32_t *)&objp->nfs_resop4_u.opgetattr.status))
+		    (int32_t *)&objp->nfs_resop4_u.opgetattr.status))
 			return (FALSE);
 		if (objp->nfs_resop4_u.opgetattr.status != NFS4_OK)
 			return (TRUE);
 		return (xdr_fattr4(xdrs,
-			    &objp->nfs_resop4_u.opgetattr.obj_attributes));
+		    &objp->nfs_resop4_u.opgetattr.obj_attributes));
 	case OP_GETFH:
 		if (!xdr_int(xdrs,
-				(int32_t *)&objp->nfs_resop4_u.opgetfh.status))
+		    (int32_t *)&objp->nfs_resop4_u.opgetfh.status))
 			return (FALSE);
 		if (objp->nfs_resop4_u.opgetfh.status != NFS4_OK)
 			return (TRUE);
@@ -4276,7 +4559,7 @@ xdr_nfs_resop4(XDR *xdrs, nfs_resop4 *objp)
 		    NFS4_FHSIZE));
 	case OP_LOOKUP:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.oplookup.status));
+		    (int32_t *)&objp->nfs_resop4_u.oplookup.status));
 	case OP_OPEN:
 		return (xdr_OPEN4res(xdrs, &objp->nfs_resop4_u.opopen));
 	case OP_CLOSE:
@@ -4289,10 +4572,10 @@ xdr_nfs_resop4(XDR *xdrs, nfs_resop4 *objp)
 		return (xdr_WRITE4res(xdrs, &objp->nfs_resop4_u.opwrite));
 	case OP_DELEGRETURN:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opdelegreturn.status));
+		    (int32_t *)&objp->nfs_resop4_u.opdelegreturn.status));
 	case OP_LOOKUPP:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.oplookupp.status));
+		    (int32_t *)&objp->nfs_resop4_u.oplookupp.status));
 	case OP_READDIR:
 		return (xdr_READDIR4res(xdrs, &objp->nfs_resop4_u.opreaddir));
 	case OP_REMOVE:
@@ -4300,18 +4583,18 @@ xdr_nfs_resop4(XDR *xdrs, nfs_resop4 *objp)
 
 	case OP_COMMIT:
 		if (!xdr_int(xdrs,
-			    (int32_t *)&objp->nfs_resop4_u.opcommit.status))
+		    (int32_t *)&objp->nfs_resop4_u.opcommit.status))
 			return (FALSE);
 		if (objp->nfs_resop4_u.opcommit.status != NFS4_OK)
 			return (TRUE);
 		return (xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&objp->nfs_resop4_u.opcommit.
-						writeverf));
+		    (u_longlong_t *)&objp->nfs_resop4_u.opcommit.
+		    writeverf));
 	case OP_CREATE:
 		return (xdr_CREATE4res(xdrs, &objp->nfs_resop4_u.opcreate));
 	case OP_DELEGPURGE:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opdelegpurge.status));
+		    (int32_t *)&objp->nfs_resop4_u.opdelegpurge.status));
 	case OP_LINK:
 		return (xdr_LINK4res(xdrs, &objp->nfs_resop4_u.oplink));
 	case OP_LOCK:
@@ -4320,7 +4603,7 @@ xdr_nfs_resop4(XDR *xdrs, nfs_resop4 *objp)
 		return (xdr_LOCKT4res(xdrs, &objp->nfs_resop4_u.oplockt));
 	case OP_LOCKU:
 		if (!xdr_int(xdrs,
-				(int32_t *)&objp->nfs_resop4_u.oplocku.status))
+		    (int32_t *)&objp->nfs_resop4_u.oplocku.status))
 			return (FALSE);
 		if (objp->nfs_resop4_u.oplocku.status != NFS4_OK)
 			return (TRUE);
@@ -4328,75 +4611,75 @@ xdr_nfs_resop4(XDR *xdrs, nfs_resop4 *objp)
 		    &objp->nfs_resop4_u.oplocku.lock_stateid.seqid))
 			return (FALSE);
 		return (xdr_opaque(xdrs,
-		    objp->nfs_resop4_u.oplocku.lock_stateid.other,
-		    12));
+		    objp->nfs_resop4_u.oplocku.lock_stateid.other, 12));
 	case OP_NVERIFY:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opnverify.status));
+		    (int32_t *)&objp->nfs_resop4_u.opnverify.status));
 	case OP_OPENATTR:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opopenattr.status));
+		    (int32_t *)&objp->nfs_resop4_u.opopenattr.status));
 	case OP_OPEN_CONFIRM:
 		return (xdr_OPEN_CONFIRM4res(xdrs,
-				&objp->nfs_resop4_u.opopen_confirm));
+		    &objp->nfs_resop4_u.opopen_confirm));
 	case OP_OPEN_DOWNGRADE:
 		return (xdr_OPEN_DOWNGRADE4res(xdrs,
-				&objp->nfs_resop4_u.opopen_downgrade));
+		    &objp->nfs_resop4_u.opopen_downgrade));
 	case OP_PUTPUBFH:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opputpubfh.status));
+		    (int32_t *)&objp->nfs_resop4_u.opputpubfh.status));
 	case OP_PUTROOTFH:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opputrootfh.status));
+		    (int32_t *)&objp->nfs_resop4_u.opputrootfh.status));
 	case OP_READLINK:
 		return (xdr_READLINK4res(xdrs, &objp->nfs_resop4_u.opreadlink));
 	case OP_RENAME:
 		return (xdr_RENAME4res(xdrs, &objp->nfs_resop4_u.oprename));
 	case OP_RENEW:
 		return (xdr_int(xdrs,
-				(int32_t *)&objp->nfs_resop4_u.oprenew.status));
+		    (int32_t *)&objp->nfs_resop4_u.oprenew.status));
 	case OP_RESTOREFH:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.oprestorefh.status));
+		    (int32_t *)&objp->nfs_resop4_u.oprestorefh.status));
 	case OP_SAVEFH:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opsavefh.status));
+		    (int32_t *)&objp->nfs_resop4_u.opsavefh.status));
 	case OP_SECINFO:
 		if (!xdr_int(xdrs, (int32_t *)&objp->nfs_resop4_u.opsecinfo.
-					status))
+		    status))
 			return (FALSE);
 		if (objp->nfs_resop4_u.opsecinfo.status != NFS4_OK)
 			return (TRUE);
 		return (xdr_array(xdrs, (char **)&objp->nfs_resop4_u.opsecinfo.
-					SECINFO4resok_val,
-			(uint_t *)&objp->nfs_resop4_u.opsecinfo.
-					SECINFO4resok_len,
-			NFS4_SECINFO_LIMIT, sizeof (secinfo4),
-			(xdrproc_t)xdr_secinfo4));
+		    SECINFO4resok_val,
+		    (uint_t *)&objp->nfs_resop4_u.opsecinfo.
+		    SECINFO4resok_len,
+		    NFS4_SECINFO_LIMIT, sizeof (secinfo4),
+		    (xdrproc_t)xdr_secinfo4));
 	case OP_SETATTR:
 		if (!xdr_int(xdrs, (int32_t *)&objp->nfs_resop4_u.opsetattr.
-						status))
+		    status))
 			return (FALSE);
-		return (xdr_bitmap4(xdrs,
-				&objp->nfs_resop4_u.opsetattr.attrsset));
+		return (xdr_attrmap4(xdrs,
+		    &objp->nfs_resop4_u.opsetattr.attrsset));
 	case OP_SETCLIENTID:
 		return (xdr_SETCLIENTID4res(xdrs,
-				&objp->nfs_resop4_u.opsetclientid));
+		    &objp->nfs_resop4_u.opsetclientid));
 	case OP_SETCLIENTID_CONFIRM:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opsetclientid_confirm.
-					status));
+		    (int32_t *)&objp->nfs_resop4_u.opsetclientid_confirm.
+		    status));
 	case OP_VERIFY:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opverify.status));
+		    (int32_t *)&objp->nfs_resop4_u.opverify.status));
 	case OP_RELEASE_LOCKOWNER:
 		return (xdr_int(xdrs,
 		    (int32_t *)&objp->nfs_resop4_u.oprelease_lockowner.status));
 	case OP_ILLEGAL:
 		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opillegal.status));
+		    (int32_t *)&objp->nfs_resop4_u.opillegal.status));
+	default: /* Handle NFSv4.1 specific operations */
+		return (xdr_nfs_resop4(xdrs, objp));
 	}
-	return (FALSE);
 }
 
 static bool_t
@@ -4412,176 +4695,42 @@ xdr_snfs_resop4(XDR *xdrs, nfs_resop4 *objp)
 			return (FALSE);
 		if (objp->nfs_resop4_u.opgetfh.status != NFS4_OK)
 			return (TRUE);
-		return (xdr_encode_nfs_fh4(xdrs,
+		return (xdr_encode_nfs_fh4(xdrs,	/* NFSv4.0 FH */
 		    &objp->nfs_resop4_u.opgetfh.object));
 	default:
-		return (xdr_nfs_resop4(xdrs, objp));
+		return (xdr_nfs_resop4_minorversion_0(xdrs, objp));
 	}
 }
 
+/*
+ * No simple way of passing minor version info down this deep w/o
+ * causing major rip-up. Doing lazy approach (ie. separate functions)
+ * for each min version. We'll fix later when we redo the XDR layer.
+ */
 static bool_t
-xdr_nfs_resop4_clnt(XDR *xdrs, nfs_resop4 *objp, nfs_argop4 *aobjp)
+xdr_snfs_resop41(XDR *xdrs, nfs_resop4 *objp)
 {
 	if (!xdr_int(xdrs, (int *)&objp->resop))
 		return (FALSE);
-	/*
-	 * These should be ordered by frequency of use
-	 */
+
 	switch (objp->resop) {
-	case OP_PUTFH:
-		return (xdr_int(xdrs,
-				(int32_t *)&objp->nfs_resop4_u.opputfh.status));
-	case OP_GETATTR:
-		if (!xdr_int(xdrs,
-			    (int32_t *)&objp->nfs_resop4_u.opgetattr.status))
-			return (FALSE);
-		if (objp->nfs_resop4_u.opgetattr.status != NFS4_OK)
-			return (TRUE);
-		return (xdr_ga_res(xdrs,
-				(GETATTR4res *)&objp->nfs_resop4_u.opgetattr,
-				&aobjp->nfs_argop4_u.opgetattr));
 	case OP_GETFH:
-		if (!xdr_int(xdrs,
-				(int32_t *)&objp->nfs_resop4_u.opgetfh.status))
+		if (!XDR_PUTINT32(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opgetfh.status))
 			return (FALSE);
 		if (objp->nfs_resop4_u.opgetfh.status != NFS4_OK)
 			return (TRUE);
-		return (xdr_bytes(xdrs,
-		    (char **)&objp->nfs_resop4_u.opgetfh.object.nfs_fh4_val,
-		    (uint_t *)&objp->nfs_resop4_u.opgetfh.object.nfs_fh4_len,
-		    NFS4_FHSIZE));
-	case OP_LOOKUP:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.oplookup.status));
-	case OP_NVERIFY:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opnverify.status));
-	case OP_OPEN:
-		return (xdr_OPEN4res(xdrs, &objp->nfs_resop4_u.opopen));
-	case OP_CLOSE:
-		return (xdr_CLOSE4res(xdrs, &objp->nfs_resop4_u.opclose));
-	case OP_ACCESS:
-		return (xdr_ACCESS4res(xdrs, &objp->nfs_resop4_u.opaccess));
-	case OP_READ:
-		return (xdr_READ4res_clnt(xdrs, &objp->nfs_resop4_u.opread,
-					&aobjp->nfs_argop4_u.opread));
-	case OP_WRITE:
-		return (xdr_WRITE4res(xdrs, &objp->nfs_resop4_u.opwrite));
-	case OP_DELEGRETURN:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opdelegreturn.status));
-	case OP_LOOKUPP:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.oplookupp.status));
-	case OP_READDIR:
-		return (xdr_READDIR4res_clnt(xdrs,
-				&objp->nfs_resop4_u.opreaddirclnt,
-				&aobjp->nfs_argop4_u.opreaddir));
-	case OP_REMOVE:
-		return (xdr_REMOVE4res(xdrs, &objp->nfs_resop4_u.opremove));
-
-	case OP_COMMIT:
-		if (!xdr_int(xdrs,
-			    (int32_t *)&objp->nfs_resop4_u.opcommit.status))
-			return (FALSE);
-		if (objp->nfs_resop4_u.opcommit.status != NFS4_OK)
-			return (TRUE);
-		return (xdr_u_longlong_t(xdrs,
-				(u_longlong_t *)&objp->nfs_resop4_u.opcommit.
-						writeverf));
-	case OP_CREATE:
-		return (xdr_CREATE4res(xdrs, &objp->nfs_resop4_u.opcreate));
-	case OP_DELEGPURGE:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opdelegpurge.status));
-	case OP_LINK:
-		return (xdr_LINK4res(xdrs, &objp->nfs_resop4_u.oplink));
-	case OP_LOCK:
-		return (xdr_LOCK4res(xdrs, &objp->nfs_resop4_u.oplock));
-	case OP_LOCKT:
-		return (xdr_LOCKT4res(xdrs, &objp->nfs_resop4_u.oplockt));
-	case OP_LOCKU:
-		if (!xdr_int(xdrs,
-				(int32_t *)&objp->nfs_resop4_u.oplocku.status))
-			return (FALSE);
-		if (objp->nfs_resop4_u.oplocku.status != NFS4_OK)
-			return (TRUE);
-		if (!xdr_u_int(xdrs,
-		    &objp->nfs_resop4_u.oplocku.lock_stateid.seqid))
-			return (FALSE);
-		return (xdr_opaque(xdrs,
-		    objp->nfs_resop4_u.oplocku.lock_stateid.other,
-		    12));
-	case OP_OPENATTR:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opopenattr.status));
-	case OP_OPEN_CONFIRM:
-		return (xdr_OPEN_CONFIRM4res(xdrs,
-				&objp->nfs_resop4_u.opopen_confirm));
-	case OP_OPEN_DOWNGRADE:
-		return (xdr_OPEN_DOWNGRADE4res(xdrs,
-				&objp->nfs_resop4_u.opopen_downgrade));
-	case OP_PUTPUBFH:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opputpubfh.status));
-	case OP_PUTROOTFH:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opputrootfh.status));
-	case OP_READLINK:
-		return (xdr_READLINK4res(xdrs, &objp->nfs_resop4_u.opreadlink));
-	case OP_RENAME:
-		return (xdr_RENAME4res(xdrs, &objp->nfs_resop4_u.oprename));
-	case OP_RENEW:
-		return (xdr_int(xdrs,
-				(int32_t *)&objp->nfs_resop4_u.oprenew.status));
-	case OP_RESTOREFH:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.oprestorefh.status));
-	case OP_SAVEFH:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opsavefh.status));
-	case OP_SECINFO:
-		if (!xdr_int(xdrs, (int32_t *)&objp->nfs_resop4_u.opsecinfo.
-					status))
-			return (FALSE);
-		if (objp->nfs_resop4_u.opsecinfo.status != NFS4_OK)
-			return (TRUE);
-		return (xdr_array(xdrs, (char **)&objp->nfs_resop4_u.opsecinfo.
-					SECINFO4resok_val,
-			(uint_t *)&objp->nfs_resop4_u.opsecinfo.
-					SECINFO4resok_len,
-			~0, sizeof (secinfo4), (xdrproc_t)xdr_secinfo4));
-	case OP_SETATTR:
-		if (!xdr_int(xdrs, (int32_t *)&objp->nfs_resop4_u.opsetattr.
-						status))
-			return (FALSE);
-		return (xdr_bitmap4(xdrs,
-				&objp->nfs_resop4_u.opsetattr.attrsset));
-	case OP_SETCLIENTID:
-		return (xdr_SETCLIENTID4res(xdrs,
-				&objp->nfs_resop4_u.opsetclientid));
-	case OP_SETCLIENTID_CONFIRM:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opsetclientid_confirm.
-					status));
-	case OP_VERIFY:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opverify.status));
-	case OP_RELEASE_LOCKOWNER:
-		return (xdr_int(xdrs,
-		    (int32_t *)&objp->nfs_resop4_u.oprelease_lockowner.status));
-	case OP_ILLEGAL:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_resop4_u.opillegal.status));
+		return (xdr_encode_nfs41_fh(xdrs,	/* NFSv4.1 FH */
+		    &objp->nfs_resop4_u.opgetfh.object));
+	default:
+		return (xdr_nfs_resop4_minorversion_0(xdrs, objp));
 	}
-	return (FALSE);
 }
 
 bool_t
 xdr_COMPOUND4args_clnt(XDR *xdrs, COMPOUND4args_clnt *objp)
 {
 	static int32_t twelve = 12;
-	static int32_t minorversion = NFS4_MINORVERSION;
 	uint32_t *ctagp;
 	rpc_inline_t *ptr;
 
@@ -4608,7 +4757,7 @@ xdr_COMPOUND4args_clnt(XDR *xdrs, COMPOUND4args_clnt *objp)
 		/*
 		 * Fixed minor version for now
 		 */
-		IXDR_PUT_U_INT32(ptr, NFS4_MINORVERSION);
+		IXDR_PUT_U_INT32(ptr, objp->minor_vers);
 	} else {
 		if (!XDR_PUTINT32(xdrs, &twelve))
 			return (FALSE);
@@ -4618,30 +4767,227 @@ xdr_COMPOUND4args_clnt(XDR *xdrs, COMPOUND4args_clnt *objp)
 			return (FALSE);
 		if (!XDR_PUTINT32(xdrs, (int32_t *)&ctagp[2]))
 			return (FALSE);
-		if (!XDR_PUTINT32(xdrs, (int32_t *)&minorversion))
+		if (!XDR_PUTINT32(xdrs, (int32_t *)&objp->minor_vers))
 			return (FALSE);
 	}
 
 	return (xdr_array(xdrs, (char **)&objp->array,
-			(uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
-			sizeof (nfs_argop4), (xdrproc_t)xdr_cnfs_argop4));
+	    (uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
+	    sizeof (nfs_argop4), (xdrproc_t)xdr_cnfs_argop4));
 }
 
 bool_t
-xdr_COMPOUND4args_srv(XDR *xdrs, COMPOUND4args *objp)
+xdr_COMPOUND4args_srv(XDR *xdrs, COMPOUND4args_srv *objp)
 {
-	if (!xdr_bytes(xdrs, (char **)&objp->tag.utf8string_val,
-			(uint_t *)&objp->tag.utf8string_len,
-			NFS4_MAX_UTF8STRING))
+	/* DECODE or FREE Server Side Args, only */
+	if (xdrs->x_op == XDR_ENCODE)
 		return (FALSE);
-	if (!xdr_u_int(xdrs, &objp->minorversion))
-		return (FALSE);
-	if (xdrs->x_op != XDR_FREE)
-		return (xdr_array(xdrs, (char **)&objp->array,
-			(uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
-			sizeof (nfs_argop4), (xdrproc_t)xdr_snfs_argop4));
 
-	return (xdr_snfs_argop4_free(xdrs, &objp->array, objp->array_len));
+	if (xdrs->x_op != XDR_FREE) {
+		uint32_t	 len;
+		nfs_argop4	*argop;
+
+		if (!xdr_bytes(xdrs, (char **)&objp->tag.utf8string_val,
+		    (uint_t *)&objp->tag.utf8string_len, NFS4_MAX_UTF8STRING))
+			return (FALSE);
+		if (!xdr_u_int(xdrs, &objp->minorversion))
+			goto retfalse;
+		if (!xdr_int(xdrs, (int32_t *)&objp->array_len))
+			goto retfalse;
+
+		/*
+		 * Alloc the arguments array
+		 */
+		objp->sargs = objp->slp = NULL;
+		len = objp->array_len * sizeof (nfs_argop4);
+		objp->array = argop = kmem_zalloc(len, KM_SLEEP);
+		for (len = 0; len < objp->array_len; len++, argop++) {
+			if (!xdr_snfs_argop4(xdrs, argop, objp)) {
+				/*
+				 * Couldn't decode args, free all
+				 */
+				xdrs->x_op = XDR_FREE;
+				(void) xdr_snfs_argop4_free(xdrs, &objp->array,
+				    objp->array_len);
+				goto retfalse;
+			}
+		}
+		return (TRUE);
+	} else {
+		/* XDR_FREE */
+		if (objp->tag.utf8string_val)
+			UTF8STRING_FREE(objp->tag)
+
+		return (xdr_snfs_argop4_free(xdrs, &objp->array,
+		    objp->array_len));
+	}
+
+retfalse:
+	if (objp->tag.utf8string_val)
+		UTF8STRING_FREE(objp->tag)
+	return (FALSE);
+}
+
+
+/*
+ * This function handles the operations introduced in NFSv4.0.
+ * The NFSv4.1 specific operations are handled in xdr_nfs_resop4(), defined in
+ * nfs41_xdr.c
+ */
+static bool_t
+xdr_nfs_resop4_clnt(XDR *xdrs, nfs_resop4 *objp, nfs_argop4 *aobjp)
+{
+	if (!xdr_int(xdrs, (int *)&objp->resop))
+		return (FALSE);
+	/*
+	 * These should be ordered by frequency of use
+	 */
+	switch (objp->resop) {
+	case OP_PUTFH:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opputfh.status));
+	case OP_GETATTR:
+		if (!xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opgetattr.status))
+			return (FALSE);
+		if (objp->nfs_resop4_u.opgetattr.status != NFS4_OK)
+			return (TRUE);
+		return (xdr_ga_res(xdrs,
+		    (GETATTR4res *)&objp->nfs_resop4_u.opgetattr,
+		    &aobjp->nfs_argop4_u.opgetattr));
+	case OP_GETFH:
+		if (!xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opgetfh.status))
+			return (FALSE);
+		if (objp->nfs_resop4_u.opgetfh.status != NFS4_OK)
+			return (TRUE);
+		return (xdr_bytes(xdrs,
+		    (char **)&objp->nfs_resop4_u.opgetfh.object.nfs_fh4_val,
+		    (uint_t *)&objp->nfs_resop4_u.opgetfh.object.nfs_fh4_len,
+		    NFS4_FHSIZE));
+	case OP_LOOKUP:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.oplookup.status));
+	case OP_NVERIFY:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opnverify.status));
+	case OP_OPEN:
+		return (xdr_OPEN4res(xdrs, &objp->nfs_resop4_u.opopen));
+	case OP_CLOSE:
+		return (xdr_CLOSE4res(xdrs, &objp->nfs_resop4_u.opclose));
+	case OP_ACCESS:
+		return (xdr_ACCESS4res(xdrs, &objp->nfs_resop4_u.opaccess));
+	case OP_READ:
+		return (xdr_READ4res_clnt(xdrs, &objp->nfs_resop4_u.opread,
+		    &aobjp->nfs_argop4_u.opread));
+	case OP_WRITE:
+		return (xdr_WRITE4res(xdrs, &objp->nfs_resop4_u.opwrite));
+	case OP_DELEGRETURN:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opdelegreturn.status));
+	case OP_LOOKUPP:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.oplookupp.status));
+	case OP_READDIR:
+		return (xdr_READDIR4res_clnt(xdrs,
+		    &objp->nfs_resop4_u.opreaddirclnt,
+		    &aobjp->nfs_argop4_u.opreaddir));
+	case OP_REMOVE:
+		return (xdr_REMOVE4res(xdrs, &objp->nfs_resop4_u.opremove));
+
+	case OP_COMMIT:
+		if (!xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opcommit.status))
+			return (FALSE);
+		if (objp->nfs_resop4_u.opcommit.status != NFS4_OK)
+			return (TRUE);
+		return (xdr_u_longlong_t(xdrs,
+		    (u_longlong_t *)&objp->nfs_resop4_u.opcommit.writeverf));
+	case OP_CREATE:
+		return (xdr_CREATE4res(xdrs, &objp->nfs_resop4_u.opcreate));
+	case OP_DELEGPURGE:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opdelegpurge.status));
+	case OP_LINK:
+		return (xdr_LINK4res(xdrs, &objp->nfs_resop4_u.oplink));
+	case OP_LOCK:
+		return (xdr_LOCK4res(xdrs, &objp->nfs_resop4_u.oplock));
+	case OP_LOCKT:
+		return (xdr_LOCKT4res(xdrs, &objp->nfs_resop4_u.oplockt));
+	case OP_LOCKU:
+		if (!xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.oplocku.status))
+			return (FALSE);
+		if (objp->nfs_resop4_u.oplocku.status != NFS4_OK)
+			return (TRUE);
+		if (!xdr_u_int(xdrs,
+		    &objp->nfs_resop4_u.oplocku.lock_stateid.seqid))
+			return (FALSE);
+		return (xdr_opaque(xdrs,
+		    objp->nfs_resop4_u.oplocku.lock_stateid.other, 12));
+	case OP_OPENATTR:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opopenattr.status));
+	case OP_OPEN_CONFIRM:
+		return (xdr_OPEN_CONFIRM4res(xdrs,
+		    &objp->nfs_resop4_u.opopen_confirm));
+	case OP_OPEN_DOWNGRADE:
+		return (xdr_OPEN_DOWNGRADE4res(xdrs,
+		    &objp->nfs_resop4_u.opopen_downgrade));
+	case OP_PUTPUBFH:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opputpubfh.status));
+	case OP_PUTROOTFH:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opputrootfh.status));
+	case OP_READLINK:
+		return (xdr_READLINK4res(xdrs, &objp->nfs_resop4_u.opreadlink));
+	case OP_RENAME:
+		return (xdr_RENAME4res(xdrs, &objp->nfs_resop4_u.oprename));
+	case OP_RENEW:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.oprenew.status));
+	case OP_RESTOREFH:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.oprestorefh.status));
+	case OP_SAVEFH:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opsavefh.status));
+	case OP_SECINFO:
+		if (!xdr_int(xdrs, (int32_t *)&objp->nfs_resop4_u.opsecinfo.
+		    status))
+			return (FALSE);
+		if (objp->nfs_resop4_u.opsecinfo.status != NFS4_OK)
+			return (TRUE);
+		return (xdr_array(xdrs, (char **)&objp->nfs_resop4_u.opsecinfo.
+		    SECINFO4resok_val,
+		    (uint_t *)&objp->nfs_resop4_u.opsecinfo.SECINFO4resok_len,
+		    ~0, sizeof (secinfo4), (xdrproc_t)xdr_secinfo4));
+	case OP_SETATTR:
+		if (!xdr_int(xdrs, (int32_t *)&objp->nfs_resop4_u.opsetattr.
+		    status))
+			return (FALSE);
+		return (xdr_attrmap4(xdrs,
+		    &objp->nfs_resop4_u.opsetattr.attrsset));
+	case OP_SETCLIENTID:
+		return (xdr_SETCLIENTID4res(xdrs,
+		    &objp->nfs_resop4_u.opsetclientid));
+	case OP_SETCLIENTID_CONFIRM:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opsetclientid_confirm.
+		    status));
+	case OP_VERIFY:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opverify.status));
+	case OP_RELEASE_LOCKOWNER:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.oprelease_lockowner.status));
+	case OP_ILLEGAL:
+		return (xdr_int(xdrs,
+		    (int32_t *)&objp->nfs_resop4_u.opillegal.status));
+	default: /* Handle NFSv4.1 specific operations */
+		return (xdr_nfs_resop4(xdrs, objp));
+	}
 }
 
 bool_t
@@ -4693,7 +5039,7 @@ xdr_COMPOUND4res_clnt(XDR *xdrs, COMPOUND4res_clnt *objp)
 		objp->array = resop = kmem_zalloc(len, KM_SLEEP);
 
 		for (len = 0; len < objp->array_len;
-			len++, resop++, argop++, objp->decode_len++) {
+		    len++, resop++, argop++, objp->decode_len++) {
 			if (!xdr_nfs_resop4_clnt(xdrs, resop, argop)) {
 				/*
 				 * Make sure to free anything that may
@@ -4701,34 +5047,40 @@ xdr_COMPOUND4res_clnt(XDR *xdrs, COMPOUND4res_clnt *objp)
 				 */
 				xdrs->x_op = XDR_FREE;
 				(void) xdr_nfs_resop4_free(xdrs, &objp->array,
-							    objp->array_len,
-							    objp->decode_len);
+				    objp->array_len, objp->decode_len);
 				return (FALSE);
 			}
 		}
 		return (TRUE);
 	}
 	return (xdr_nfs_resop4_free(xdrs, &objp->array,
-				    objp->array_len, objp->decode_len));
+	    objp->array_len, objp->decode_len));
 }
 
 bool_t
-xdr_COMPOUND4res_srv(XDR *xdrs, COMPOUND4res *objp)
+xdr_COMPOUND4res_srv(XDR *xdrs, COMPOUND4res_srv *objp)
 {
+	xdrproc_t	rproc;
+
 	if (!xdr_int(xdrs, (int32_t *)&objp->status))
 		return (FALSE);
 	if (!xdr_bytes(xdrs, (char **)&objp->tag.utf8string_val,
-			(uint_t *)&objp->tag.utf8string_len,
-			NFS4_MAX_UTF8STRING))
+	    (uint_t *)&objp->tag.utf8string_len,
+	    NFS4_MAX_UTF8STRING))
 		return (FALSE);
 
-	if (xdrs->x_op != XDR_FREE)
-		return (xdr_array(xdrs, (char **)&objp->array,
-			(uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
-			sizeof (nfs_resop4), (xdrproc_t)xdr_snfs_resop4));
+	if (xdrs->x_op == XDR_FREE)
+		return (xdr_snfs_resop4_free(xdrs, &objp->array,
+		    objp->array_len, objp->array_len));
 
-	return (xdr_snfs_resop4_free(xdrs, &objp->array,
-				    objp->array_len, objp->array_len));
+	if (objp->minorversion == NFS4_MINOR_v0)
+		rproc = (xdrproc_t)xdr_snfs_resop4;
+	else
+		rproc = (xdrproc_t)xdr_snfs_resop41;
+
+	return (xdr_array(xdrs, (char **)&objp->array,
+	    (uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
+	    sizeof (nfs_resop4), rproc));
 }
 
 /*
@@ -4753,7 +5105,7 @@ xdr_snfs_cb_argop4(XDR *xdrs, nfs_cb_argop4 *objp)
 
 		if (!xdr_encode_nfs_fh4(xdrs, &gargs->fh))
 			return (FALSE);
-		return (xdr_bitmap4(xdrs, &gargs->attr_request));
+		return (xdr_attrmap4(xdrs, &gargs->attr_request));
 	case OP_CB_RECALL:
 		rargs = &objp->nfs_cb_argop4_u.opcbrecall;
 
@@ -4764,10 +5116,43 @@ xdr_snfs_cb_argop4(XDR *xdrs, nfs_cb_argop4 *objp)
 		if (!XDR_PUTINT32(xdrs, (int32_t *)&rargs->truncate))
 			return (FALSE);
 		return (xdr_encode_nfs_fh4(xdrs, &rargs->fh));
-	case OP_CB_ILLEGAL:
-		return (TRUE);
+	default:
+		return (xdr_nfs_cb_argop4(xdrs, objp));
 	}
-	return (FALSE);
+}
+
+
+static bool_t
+xdr_snfs_cb_argop41(XDR *xdrs, nfs_cb_argop4 *objp)
+{
+	CB_GETATTR4args *gargs;
+	CB_RECALL4args *rargs;
+
+	ASSERT(xdrs->x_op == XDR_ENCODE);
+
+	if (!XDR_PUTINT32(xdrs, (int32_t *)&objp->argop))
+		return (FALSE);
+
+	switch (objp->argop) {
+	case OP_CB_GETATTR:
+		gargs = &objp->nfs_cb_argop4_u.opcbgetattr;
+
+		if (!xdr_encode_nfs41_fh(xdrs, &gargs->fh))
+			return (FALSE);
+		return (xdr_attrmap4(xdrs, &gargs->attr_request));
+	case OP_CB_RECALL:
+		rargs = &objp->nfs_cb_argop4_u.opcbrecall;
+
+		if (!XDR_PUTINT32(xdrs, (int32_t *)&rargs->stateid.seqid))
+			return (FALSE);
+		if (!xdr_opaque(xdrs, rargs->stateid.other, 12))
+			return (FALSE);
+		if (!XDR_PUTINT32(xdrs, (int32_t *)&rargs->truncate))
+			return (FALSE);
+		return (xdr_encode_nfs41_fh(xdrs, &rargs->fh));
+	default:
+		return (xdr_nfs_cb_argop4(xdrs, objp));
+	}
 }
 
 /*
@@ -4791,7 +5176,7 @@ xdr_cnfs_cb_argop4(XDR *xdrs, nfs_cb_argop4 *objp)
 		if (!xdr_bytes(xdrs, (char **)&gargs->fh.nfs_fh4_val,
 		    (uint_t *)&gargs->fh.nfs_fh4_len, NFS4_FHSIZE))
 			return (FALSE);
-		return (xdr_bitmap4(xdrs, &gargs->attr_request));
+		return (xdr_attrmap4(xdrs, &gargs->attr_request));
 	case OP_CB_RECALL:
 		rargs = &objp->nfs_cb_argop4_u.opcbrecall;
 
@@ -4803,36 +5188,9 @@ xdr_cnfs_cb_argop4(XDR *xdrs, nfs_cb_argop4 *objp)
 			return (FALSE);
 		return (xdr_bytes(xdrs, (char **)&rargs->fh.nfs_fh4_val,
 		    (uint_t *)&rargs->fh.nfs_fh4_len, NFS4_FHSIZE));
-	case OP_CB_ILLEGAL:
-		return (TRUE);
+	default:
+		return (xdr_nfs_cb_argop4(xdrs, objp));
 	}
-	return (FALSE);
-}
-
-static bool_t
-xdr_nfs_cb_resop4(XDR *xdrs, nfs_cb_resop4 *objp)
-{
-	if (!xdr_u_int(xdrs, &objp->resop))
-		return (FALSE);
-	switch (objp->resop) {
-	case OP_CB_GETATTR:
-		if (!xdr_int(xdrs,
-				(int32_t *)&objp->nfs_cb_resop4_u.opcbgetattr.
-				    status))
-			return (FALSE);
-		if (objp->nfs_cb_resop4_u.opcbgetattr.status != NFS4_OK)
-			return (TRUE);
-		return (xdr_fattr4(xdrs,
-				&objp->nfs_cb_resop4_u.opcbgetattr.
-				    obj_attributes));
-	case OP_CB_RECALL:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_cb_resop4_u.opcbrecall.status));
-	case OP_CB_ILLEGAL:
-		return (xdr_int(xdrs,
-			(int32_t *)&objp->nfs_cb_resop4_u.opcbillegal.status));
-	}
-	return (FALSE);
 }
 
 /*
@@ -4842,16 +5200,16 @@ bool_t
 xdr_CB_COMPOUND4args_clnt(XDR *xdrs, CB_COMPOUND4args *objp)
 {
 	if (!xdr_bytes(xdrs, (char **)&objp->tag.utf8string_val,
-			(uint_t *)&objp->tag.utf8string_len,
-			NFS4_MAX_UTF8STRING))
+	    (uint_t *)&objp->tag.utf8string_len,
+	    NFS4_MAX_UTF8STRING))
 		return (FALSE);
 	if (!xdr_u_int(xdrs, &objp->minorversion))
 		return (FALSE);
 	if (!xdr_u_int(xdrs, &objp->callback_ident))
 		return (FALSE);
 	return (xdr_array(xdrs, (char **)&objp->array,
-			(uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
-			sizeof (nfs_cb_argop4), (xdrproc_t)xdr_cnfs_cb_argop4));
+	    (uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
+	    sizeof (nfs_cb_argop4), (xdrproc_t)xdr_cnfs_cb_argop4));
 }
 
 /*
@@ -4861,16 +5219,21 @@ bool_t
 xdr_CB_COMPOUND4args_srv(XDR *xdrs, CB_COMPOUND4args *objp)
 {
 	if (!xdr_bytes(xdrs, (char **)&objp->tag.utf8string_val,
-			(uint_t *)&objp->tag.utf8string_len,
-			NFS4_MAX_UTF8STRING))
+	    (uint_t *)&objp->tag.utf8string_len,
+	    NFS4_MAX_UTF8STRING))
 		return (FALSE);
 	if (!xdr_u_int(xdrs, &objp->minorversion))
 		return (FALSE);
 	if (!xdr_u_int(xdrs, &objp->callback_ident))
 		return (FALSE);
-	return (xdr_array(xdrs, (char **)&objp->array,
-			(uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
-			sizeof (nfs_cb_argop4), (xdrproc_t)xdr_snfs_cb_argop4));
+	if (objp->minorversion == 1)
+		return (xdr_array(xdrs, (char **)&objp->array,
+		    (uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
+		    sizeof (nfs_cb_argop4), (xdrproc_t)xdr_snfs_cb_argop41));
+	else
+		return (xdr_array(xdrs, (char **)&objp->array,
+		    (uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
+		    sizeof (nfs_cb_argop4), (xdrproc_t)xdr_snfs_cb_argop4));
 }
 
 bool_t
@@ -4879,10 +5242,10 @@ xdr_CB_COMPOUND4res(XDR *xdrs, CB_COMPOUND4res *objp)
 	if (!xdr_int(xdrs, (int32_t *)&objp->status))
 		return (FALSE);
 	if (!xdr_bytes(xdrs, (char **)&objp->tag.utf8string_val,
-			(uint_t *)&objp->tag.utf8string_len,
-			NFS4_MAX_UTF8STRING))
+	    (uint_t *)&objp->tag.utf8string_len,
+	    NFS4_MAX_UTF8STRING))
 		return (FALSE);
 	return (xdr_array(xdrs, (char **)&objp->array,
-			(uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
-			sizeof (nfs_cb_resop4), (xdrproc_t)xdr_nfs_cb_resop4));
+	    (uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
+	    sizeof (nfs_cb_resop4), (xdrproc_t)xdr_nfs_cb_resop4));
 }

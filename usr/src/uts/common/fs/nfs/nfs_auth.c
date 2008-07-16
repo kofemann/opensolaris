@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -99,8 +99,8 @@ nfsauth_init(void)
 	 * Allocate nfsauth cache handle
 	 */
 	exi_cache_handle = kmem_cache_create("exi_cache_handle",
-		sizeof (struct auth_cache), 0, NULL, NULL,
-		exi_cache_reclaim, NULL, NULL, 0);
+	    sizeof (struct auth_cache), 0, NULL, NULL,
+	    exi_cache_reclaim, NULL, NULL, 0);
 }
 
 /*
@@ -245,6 +245,8 @@ nfsauth_cache_get(struct exportinfo *exi, struct svc_req *req, int flavor)
 	addrmask(&addr, svc_getaddrmask(req->rq_xprt));
 	head = &exi->exi_cache[hash(&addr)];
 
+	DTRACE_PROBE1(nfss__i__nfsauth_clnt, char *, addr.buf);
+
 	rw_enter(&exi->exi_cache_lock, RW_READER);
 	for (ap = *head; ap; ap = ap->auth_next) {
 		if (EQADDR(&addr, &ap->auth_addr) && flavor == ap->auth_flavor)
@@ -259,6 +261,7 @@ nfsauth_cache_get(struct exportinfo *exi, struct svc_req *req, int flavor)
 	rw_exit(&exi->exi_cache_lock);
 
 	if (ap) {
+		DTRACE_PROBE1(nfss__i__nfsauth_cached, int, access);
 		kmem_free(addr.buf, addr.len);
 		return (access);
 	}
@@ -314,7 +317,7 @@ retry:
 	 * info _or_ properly encode the arguments, there's really no
 	 * point in continuting, so we fail the request.
 	 */
-	DTRACE_PROBE1(nfsserv__func__nfsauth__varg, varg_t *, &varg);
+	DTRACE_PROBE1(nfss__i__nfsauth_varg, varg_t *, &varg);
 	if ((absz = xdr_sizeof(xdr_varg, (void *)&varg)) == 0) {
 		door_ki_rele(dh);
 		kmem_free(addr.buf, addr.len);
@@ -351,7 +354,7 @@ retry:
 				 * get control of the thread (and exit
 				 * gracefully).
 				 */
-				DTRACE_PROBE1(nfsserv__func__nfsauth__door__nil,
+				DTRACE_PROBE1(nfss__i__nfsauth_door_nil,
 				    door_arg_t *, &da);
 				door_ki_rele(dh);
 				goto fail;
@@ -461,7 +464,7 @@ retry:
 		goto fail;
 	XDR_DESTROY(&xdrs_r);
 
-	DTRACE_PROBE1(nfsserv__func__nfsauth__results, nfsauth_res_t *, &res);
+	DTRACE_PROBE1(nfss__i__nfsauth_results, nfsauth_res_t *, &res);
 	switch (res.stat) {
 		case NFSAUTH_DR_OKAY:
 			access = res.ares.auth_perm;

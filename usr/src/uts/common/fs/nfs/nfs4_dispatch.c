@@ -104,7 +104,7 @@ rfs4_fini_drc(rfs4_drc_t *drc)
 	for (drp = list_head(&(drc->dr_cache)); drp != NULL; drp = drp_next) {
 
 		if (drp->dr_state == NFS4_DUP_REPLAY)
-			rfs4_compound_free(&(drp->dr_res));
+			rfs4_compound_free((COMPOUND4res *)&(drp->dr_res));
 
 		if (drp->dr_addr.buf != NULL)
 			kmem_free(drp->dr_addr.buf, drp->dr_addr.maxlen);
@@ -151,7 +151,7 @@ rfs4_dr_chstate(rfs4_dupreq_t *drp, int new_state)
 	 */
 	list_remove(drp->dr_bkt, drp);
 	list_remove(&(drc->dr_cache), drp);
-	rfs4_compound_free(&(drp->dr_res));
+	rfs4_compound_free((COMPOUND4res *)&(drp->dr_res));
 }
 
 /*
@@ -242,9 +242,7 @@ rfs4_find_dr(struct svc_req *req, rfs4_drc_t *drc, rfs4_dupreq_t **dup)
 	    &(drc->dr_buckets[(the_xid % drc->dr_hash)]);
 
 	DTRACE_PROBE3(nfss__i__drc_bktdex,
-	    int, bktdex,
-	    uint32_t, the_xid,
-	    list_t *, dr_bkt);
+	    int, bktdex, uint32_t, the_xid, list_t *, dr_bkt);
 
 	*dup = NULL;
 
@@ -372,40 +370,33 @@ rfs4_find_dr(struct svc_req *req, rfs4_drc_t *drc, rfs4_dupreq_t **dup)
  * drp		is the duplicate request entry
  *
  */
+/* ARGSUSED */
 int
-rfs4_dispatch(struct rpcdisp *disp, struct svc_req *req,
-		SVCXPRT *xprt, char *ap)
+rfs4_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 {
 
-	COMPOUND4res res_buf, *rbp;
-	COMPOUND4args *cap;
+	COMPOUND4res_srv	 res_buf;
+	COMPOUND4res_srv	*rbp;
+	COMPOUND4args		*cap;
+	int			 error = 0;
+	int			 dis_flags = 0;
+	int			 dr_stat = NFS4_NOT_DUP;
+	rfs4_dupreq_t		*drp = NULL;
+	int			 rv;
 
-	cred_t 	*cr = NULL;
-	int	error = 0;
-	int 	dis_flags = 0;
-	int 	dr_stat = NFS4_NOT_DUP;
-	rfs4_dupreq_t *drp = NULL;
-
-	ASSERT(disp);
+	/* NULL Proc now checked in rfs4_mvdemux() */
 
 	/*
-	 * Short circuit the RPC_NULL proc.
+	 * minorversion should be "0" for NFSv4.0
 	 */
-	if (disp->dis_proc == rpc_null) {
-		DTRACE_NFSV4_1(null__start, struct svc_req *, req);
-		if (!svc_sendreply(xprt, xdr_void, NULL)) {
-			DTRACE_NFSV4_1(null__done, struct svc_req *, req);
-			svcerr_systemerr(xprt);
-			return (1);
-		}
-		DTRACE_NFSV4_1(null__done, struct svc_req *, req);
-		return (0);
-	}
-
-	/* Only NFSv4 Compounds from this point onward */
-
+	bzero(&res_buf, sizeof (res_buf));
 	rbp = &res_buf;
+	/* bzero took care of rbp->minorversion = 0 */
 	cap = (COMPOUND4args *)ap;
+	if (cap->minorversion != NFS4_MINOR_v0) {
+		rbp->status = NFS4ERR_MINOR_VERS_MISMATCH;
+		goto sndreply;
+	}
 
 	/*
 	 * Figure out the disposition of the whole COMPOUND
@@ -443,9 +434,11 @@ rfs4_dispatch(struct rpcdisp *disp, struct svc_req *req,
 		case NFS4_DUP_NEW:
 			curthread->t_flag |= T_DONTPEND;
 			/* NON-IDEMPOTENT proc call */
-			rfs4_compound(cap, rbp, NULL, req, cr);
-
+			rfs4_compound(cap, (COMPOUND4res *)rbp, NULL, req, &rv);
 			curthread->t_flag &= ~T_DONTPEND;
+
+			if (rv)		/* short ckt sendreply on error */
+				return (rv);
 
 			/*
 			 * dr_res must be initialized before calling
@@ -474,22 +467,25 @@ rfs4_dispatch(struct rpcdisp *disp, struct svc_req *req,
 	} else {
 		curthread->t_flag |= T_DONTPEND;
 		/* IDEMPOTENT proc call */
-		rfs4_compound(cap, rbp, NULL, req, cr);
-
+		rfs4_compound(cap, (COMPOUND4res *)rbp, NULL, req, &rv);
 		curthread->t_flag &= ~T_DONTPEND;
+
+		if (rv)		/* short ckt sendreply on error */
+			return (rv);
+
 		if (curthread->t_flag & T_WOULDBLOCK) {
 			curthread->t_flag &= ~T_WOULDBLOCK;
 			return (1);
 		}
 	}
 
+sndreply:
 	/*
 	 * Send out the replayed reply or the 'real' one.
 	 */
 	if (!svc_sendreply(xprt,  xdr_COMPOUND4res_srv, (char *)rbp)) {
 		DTRACE_PROBE2(nfss__e__dispatch_sendfail,
-		    struct svc_req *, xprt,
-		    char *, rbp);
+		    struct svc_req *, xprt, char *, rbp);
 		svcerr_systemerr(xprt);
 		error++;
 	}
@@ -515,7 +511,7 @@ rfs4_dispatch(struct rpcdisp *disp, struct svc_req *req,
 		rfs4_dr_chstate(drp, NFS4_DUP_REPLAY);
 		mutex_exit(&drp->drc->lock);
 	} else if (dr_stat == NFS4_NOT_DUP) {
-		rfs4_compound_free(rbp);
+		rfs4_compound_free((COMPOUND4res *)rbp);
 	}
 
 	return (error);
@@ -524,8 +520,9 @@ rfs4_dispatch(struct rpcdisp *disp, struct svc_req *req,
 bool_t
 rfs4_minorvers_mismatch(struct svc_req *req, SVCXPRT *xprt, void *args)
 {
-	COMPOUND4args *argsp;
-	COMPOUND4res res_buf, *resp;
+	COMPOUND4args		*argsp;
+	COMPOUND4res_srv	 res_buf;
+	COMPOUND4res_srv	*resp;
 
 	if (req->rq_vers != 4)
 		return (FALSE);
@@ -547,12 +544,44 @@ rfs4_minorvers_mismatch(struct svc_req *req, SVCXPRT *xprt, void *args)
 	    resp->tag.utf8string_len);
 	resp->array_len = 0;
 	resp->array = NULL;
+	resp->minorversion = argsp->minorversion;
 	resp->status = NFS4ERR_MINOR_VERS_MISMATCH;
 	if (!svc_sendreply(xprt,  xdr_COMPOUND4res_srv, (char *)resp)) {
 		DTRACE_PROBE2(nfss__e__minorvers_mismatch,
 		    SVCXPRT *, xprt, char *, resp);
 		svcerr_systemerr(xprt);
 	}
-	rfs4_compound_free(resp);
+	rfs4_compound_free((COMPOUND4res *)resp);
 	return (TRUE);
+}
+
+/*
+ * Process NULL procedure for either NFSv4 minor version,
+ * then dispatch based on minor version.
+ */
+
+/*
+ * XXXX: Temp. passing in the persona while multiple NFS
+ * state store instances framework is under construction.
+ */
+int
+rfs4_minor_version_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap,
+    nfs41_fh_type_t persona)
+{
+	COMPOUND4args	*cmp;
+	int		 error = 0;
+
+	cmp = (COMPOUND4args *)ap;
+	ASSERT(cmp != NULL);
+
+	switch (cmp->minorversion) {
+	case 1:
+		error = rfs41_dispatch(req, xprt, ap, persona);
+		break;
+
+	case 0:
+		error = rfs4_dispatch(req, xprt, ap);
+		break;
+	}
+	return (error);
 }

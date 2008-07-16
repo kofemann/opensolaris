@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -577,8 +577,14 @@ svc_pool_register(struct svc_globals *svc, SVCPOOL *pool, int id)
 	 */
 	mutex_enter(&svc->svc_plock);
 
-	if (old_pool = svc_pool_find(svc, id))
+	if (id == UNIQUE_SVCPOOL_ID) {
+		for (old_pool = svc_pool_find(svc, id);
+		    old_pool != NULL;
+		    old_pool = svc_pool_find(svc, id))
+			++id;
+	} if (old_pool = svc_pool_find(svc, id)) {
 		svc_pool_unregister(svc, old_pool);
+	}
 
 	/* Insert into the doubly linked list */
 	pool->p_id = id;
@@ -704,6 +710,7 @@ svc_pool_create(struct svcpool_args *args)
 
 	/* Register the pool with the global pool list */
 	svc_pool_register(svc, pool, args->id);
+	args->id = pool->p_id;
 
 	return (0);
 }
@@ -1206,6 +1213,22 @@ svcerr_weakauth(const SVCXPRT *clone_xprt)
 }
 
 /*
+ * Authentication error; bad credentials
+ */
+void
+svcerr_badcred(const SVCXPRT *clone_xprt)
+{
+	struct rpc_msg	rply;
+
+	rply.rm_direction = REPLY;
+	rply.rm_reply.rp_stat = MSG_DENIED;
+	rply.rjcted_rply.rj_stat = AUTH_ERROR;
+	rply.rjcted_rply.rj_why = AUTH_BADCRED;
+	SVC_FREERES((SVCXPRT *)clone_xprt);
+	SVC_REPLY((SVCXPRT *)clone_xprt, &rply);
+}
+
+/*
  * Program unavailable error reply
  *
  * PSARC 2003/523 Contract Private Interface
@@ -1430,7 +1453,7 @@ svc_getreq(
 /*
  * Allocate new clone transport handle.
  */
-static SVCXPRT *
+SVCXPRT *
 svc_clone_init(void)
 {
 	SVCXPRT *clone_xprt;
@@ -1438,6 +1461,15 @@ svc_clone_init(void)
 	clone_xprt = kmem_zalloc(sizeof (SVCXPRT), KM_SLEEP);
 	clone_xprt->xp_cred = crget();
 	return (clone_xprt);
+}
+
+void
+svc_init_clone_xprt(SVCXPRT *clone_xprt, queue_t *wq)
+{
+	extern struct svc_ops svc_cots_op;
+	clone_xprt->xp_ops = &svc_cots_op;
+	clone_xprt->xp_wq = wq;
+
 }
 
 /*

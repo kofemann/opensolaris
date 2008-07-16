@@ -574,6 +574,13 @@ struct zsd_entry {
  */
 extern kthread_t *zthread_create(caddr_t, size_t, void (*)(), void *, size_t,
     pri_t);
+
+/*
+ * Similar to zthread_create() but returns thread in TS_STOPPED state.
+ */
+extern kthread_t *zthread_create_tstopped(caddr_t, size_t, void (*)(), void *,
+    size_t, pri_t);
+
 extern void zthread_exit(void);
 
 /*

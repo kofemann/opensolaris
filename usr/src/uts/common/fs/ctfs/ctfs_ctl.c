@@ -112,6 +112,7 @@ ctfs_ctl_access(
  * Just checks to make sure the mode bits are set, and that the
  * constraints imposed by ctfs_ctl_access are met.
  */
+/* ARGSUSED */
 static int
 ctfs_ctl_open(vnode_t **vpp, int flag, cred_t *cr, caller_context_t *ct)
 {

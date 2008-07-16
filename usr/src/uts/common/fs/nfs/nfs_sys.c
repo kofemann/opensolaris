@@ -44,6 +44,8 @@
 #include <rpc/auth.h>
 #include <rpc/rpcsys.h>
 #include <rpc/svc.h>
+#include <rpc/xdr.h>
+#include <sys/cmn_err.h>
 
 /*
  * This is filled in with an appropriate address for the
@@ -54,6 +56,9 @@
  * function pointer.
  */
 void (*rfs4_client_clrst)(struct nfs4clrst_args *) = NULL;
+void (*mds_addlo)(struct mds_addlo_args *) = NULL;
+int  (*mds_adddev)(char *) = NULL;
+int (*mds_recall_lo)(struct mds_reclo_args *, cred_t *) = NULL;
 
 /* This filled in by nfssrv:_init() */
 void (*nfs_srv_quiesce_func)(void) = NULL;
@@ -99,6 +104,96 @@ nfssys(enum nfssys_op opcode, void *arg)
 		return (set_errno(EPERM));
 
 	switch (opcode) {
+	case MDS_RECALL_LAYOUT: {
+		struct mds_reclo_args rargs;
+		int plen = 0;
+		int buf[2] = {0, 0};
+		XDR xdrs;
+
+		if (copyin(arg, (char *)buf, sizeof (buf)))
+			return (set_errno(EFAULT));
+
+		xdrmem_create(&xdrs, (char *)buf, sizeof (buf), XDR_DECODE);
+
+		if (! xdr_int(&xdrs, &rargs.lo_type) ||
+		    ! xdr_int(&xdrs, &plen) || (plen > MAXNAMELEN))
+			return (set_errno(EINVAL));
+
+		rargs.lo_fname = kmem_alloc(plen + 1, KM_SLEEP);
+		rargs.lo_fname[plen] = '\0';
+		error = copyin((char *)arg + BYTES_PER_XDR_UNIT * 2,
+		    rargs.lo_fname, plen);
+
+		if (error) {
+			kmem_free(rargs.lo_fname, plen + 1);
+			return (set_errno(EFAULT));
+		}
+
+		error = mds_recall_lo(&rargs, CRED());
+		kmem_free(rargs.lo_fname, plen + 1);
+		break;
+	}
+
+	case MDS_ADD_LAYOUT: {
+		struct mds_addlo_args lo_arg;
+		STRUCT_DECL(mds_addlo_args, ua);
+		int i;
+
+		/*
+		 * If the mds_server is not loaded then no point in
+		 * doing anything  :-)
+		 */
+		if (mds_addlo == NULL) {
+			break;
+		}
+
+		if (!INGLOBALZONE(curproc))
+			return (set_errno(EPERM));
+
+		STRUCT_INIT(ua, get_udatamodel());
+
+		if (copyin(arg, STRUCT_BUF(ua), STRUCT_SIZE(ua)))
+			return (set_errno(EFAULT));
+
+		lo_arg.loid = STRUCT_FGET(ua, loid);
+		lo_arg.lo_stripe_unit = STRUCT_FGET(ua, lo_stripe_unit);
+
+		for (i = 0; i < 20; i++)
+			lo_arg.lo_devs[i] = STRUCT_FGET(ua, lo_devs[i]);
+
+		mds_addlo(&lo_arg);
+		break;
+	}
+
+	case MDS_ADD_DEVICE: {
+		char *adev;
+		int rc;
+
+		/*
+		 * If the mds_server is not loaded then no point in
+		 * doing anything  :-)
+		 */
+		if (mds_adddev == NULL) {
+			printf("NFS Server not loaded\n");
+			break;
+		}
+
+		if (!INGLOBALZONE(curproc))
+			return (set_errno(EPERM));
+
+		adev = kmem_alloc(MAXNAMELEN, KM_SLEEP);
+
+		rc = copyinstr(arg, adev, MAXNAMELEN, NULL);
+
+		if (rc != 0) {
+			kmem_free(adev, MAXNAMELEN);
+			return (set_errno(EFAULT));
+		}
+
+		error = mds_adddev(adev);
+		break;
+	}
+
 	case NFS4_CLR_STATE: { /* Clear NFS4 client state */
 		struct nfs4clrst_args clr;
 		STRUCT_DECL(nfs4clrst_args, u_clr);
@@ -137,6 +232,9 @@ nfssys(enum nfssys_op opcode, void *arg)
 			return (set_errno(EFAULT));
 
 		error = svc_pool_create(&p);
+
+		if (copyout(&p, arg, sizeof (p)))
+			return (set_errno(EFAULT));
 		break;
 	}
 

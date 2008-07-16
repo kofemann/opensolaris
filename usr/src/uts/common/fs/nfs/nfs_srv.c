@@ -924,8 +924,6 @@ rfs_read_getfh(struct nfsreadargs *ra)
 	return (&ra->ra_fhandle);
 }
 
-#define	MAX_IOVECS	12
-
 #ifdef DEBUG
 static int rfs_write_sync_hits = 0;
 static int rfs_write_sync_misses = 0;
@@ -947,7 +945,7 @@ rfs_write_sync(struct nfswriteargs *wa, struct nfsattrstat *ns,
 	rlim64_t rlimit;
 	struct vattr va;
 	struct uio uio;
-	struct iovec iov[MAX_IOVECS];
+	struct iovec iov[NFS_MAX_IOVECS];
 	mblk_t *m;
 	struct iovec *iovp;
 	int iovcnt;
@@ -1095,7 +1093,7 @@ rfs_write_sync(struct nfswriteargs *wa, struct nfsattrstat *ns,
 		iovcnt = 0;
 		for (m = wa->wa_mblk; m != NULL; m = m->b_cont)
 			iovcnt++;
-		if (iovcnt <= MAX_IOVECS) {
+		if (iovcnt <= NFS_MAX_IOVECS) {
 #ifdef DEBUG
 			rfs_write_sync_hits++;
 #endif
@@ -2206,10 +2204,8 @@ rfs_rename(struct nfsrnmargs *args, enum nfsstat *status,
 
 	/* Check for delegation on the file being renamed over, if it exists */
 
-	if (rfs4_deleg_policy != SRV_NEVER_DELEGATE &&
-	    VOP_LOOKUP(tovp, args->rna_to.da_name, &targvp, NULL, 0, NULL, cr,
+	if (VOP_LOOKUP(tovp, args->rna_to.da_name, &targvp, NULL, 0, NULL, cr,
 	    NULL, NULL, NULL) == 0) {
-
 		if (rfs4_check_delegated(FWRITE, targvp, TRUE)) {
 			VN_RELE(tovp);
 			VN_RELE(fromvp);

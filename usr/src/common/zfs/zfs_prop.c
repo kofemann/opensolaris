@@ -153,12 +153,14 @@ zfs_prop_init(void)
 
 	/* inherit index properties */
 	register_index(ZFS_PROP_CHECKSUM, "checksum", ZIO_CHECKSUM_DEFAULT,
-	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
+	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME |
+	    ZFS_TYPE_PNFS | ZFS_TYPE_PNFSOBJS,
 	    "on | off | fletcher2 | fletcher4 | sha256", "CHECKSUM",
 	    checksum_table);
 	register_index(ZFS_PROP_COMPRESSION, "compression",
 	    ZIO_COMPRESS_DEFAULT, PROP_INHERIT,
-	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME | ZFS_TYPE_PNFS |
+	    ZFS_TYPE_PNFSOBJS,
 	    "on | off | lzjb | gzip | gzip-[1-9]", "COMPRESS", compress_table);
 	register_index(ZFS_PROP_SNAPDIR, "snapdir", ZFS_SNAPDIR_HIDDEN,
 	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM,
@@ -171,7 +173,8 @@ zfs_prop_init(void)
 	    "discard | noallow | restricted | passthrough",
 	    "ACLINHERIT", acl_inherit_table);
 	register_index(ZFS_PROP_COPIES, "copies", 1,
-	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
+	    PROP_INHERIT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME |
+	    ZFS_TYPE_PNFS | ZFS_TYPE_PNFSOBJS,
 	    "1 | 2 | 3", "COPIES", copies_table);
 
 	/* inherit index (boolean) properties */
@@ -190,7 +193,9 @@ zfs_prop_init(void)
 	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME, "on | off", "RDONLY",
 	    boolean_table);
 	register_index(ZFS_PROP_ZONED, "zoned", 0, PROP_INHERIT,
-	    ZFS_TYPE_FILESYSTEM, "on | off", "ZONED", boolean_table);
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_PNFS | ZFS_TYPE_PNFSOBJS,
+	    "on | off", "ZONED",
+	    boolean_table);
 	register_index(ZFS_PROP_XATTR, "xattr", 1, PROP_INHERIT,
 	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT, "on | off", "XATTR",
 	    boolean_table);
@@ -200,6 +205,9 @@ zfs_prop_init(void)
 	register_index(ZFS_PROP_NBMAND, "nbmand", 0, PROP_INHERIT,
 	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT, "on | off", "NBMAND",
 	    boolean_table);
+	register_index(ZFS_PROP_SHAREPNFS, "sharepnfs", 0, PROP_INHERIT,
+	    ZFS_TYPE_PNFS, "on | off", "SHAREPNFS", boolean_table);
+
 
 	/* default index properties */
 	register_index(ZFS_PROP_VERSION, "version", 0, PROP_DEFAULT,
@@ -226,6 +234,8 @@ zfs_prop_init(void)
 	register_index(ZFS_PROP_UTF8ONLY, "utf8only", 0, PROP_ONETIME,
 	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT,
 	    "on | off", "UTF8ONLY", boolean_table);
+	register_index(ZFS_PROP_PNFS, "pnfs", 0, PROP_ONETIME,
+	    ZFS_TYPE_FILESYSTEM, "on | off", "PNFS", boolean_table);
 
 	/* string properties */
 	register_string(ZFS_PROP_ORIGIN, "origin", NULL, PROP_READONLY,
@@ -235,17 +245,23 @@ zfs_prop_init(void)
 	register_string(ZFS_PROP_SHARENFS, "sharenfs", "off", PROP_INHERIT,
 	    ZFS_TYPE_FILESYSTEM, "on | off | share(1M) options", "SHARENFS");
 	register_string(ZFS_PROP_SHAREISCSI, "shareiscsi", "off", PROP_INHERIT,
-	    ZFS_TYPE_DATASET, "on | off | type=<type>", "SHAREISCSI");
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT | ZFS_TYPE_VOLUME,
+	    "on | off | type=<type>", "SHAREISCSI");
 	register_string(ZFS_PROP_TYPE, "type", NULL, PROP_READONLY,
-	    ZFS_TYPE_DATASET, "filesystem | volume | snapshot", "TYPE");
+	    ZFS_TYPE_DATASET, "filesystem | volume | snapshot | pnfsdata",
+	    "TYPE");
 	register_string(ZFS_PROP_SHARESMB, "sharesmb", "off", PROP_INHERIT,
 	    ZFS_TYPE_FILESYSTEM, "on | off | sharemgr(1M) options", "SHARESMB");
+	register_string(ZFS_PROP_MDS, "mds", "none", PROP_INHERIT,
+	    ZFS_TYPE_PNFS, "<host | IPv4 | IPv6> | none", "MDS");
+
 
 	/* readonly number properties */
 	register_number(ZFS_PROP_USED, "used", 0, PROP_READONLY,
 	    ZFS_TYPE_DATASET, "<size>", "USED");
 	register_number(ZFS_PROP_AVAILABLE, "available", 0, PROP_READONLY,
-	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME, "<size>", "AVAIL");
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME | ZFS_TYPE_PNFS |
+	    ZFS_TYPE_PNFSOBJS, "<size>", "AVAIL");
 	register_number(ZFS_PROP_REFERENCED, "referenced", 0, PROP_READONLY,
 	    ZFS_TYPE_DATASET, "<size>", "REFER");
 	register_number(ZFS_PROP_COMPRESSRATIO, "compressratio", 0,
@@ -257,21 +273,26 @@ zfs_prop_init(void)
 
 	/* default number properties */
 	register_number(ZFS_PROP_QUOTA, "quota", 0, PROP_DEFAULT,
-	    ZFS_TYPE_FILESYSTEM, "<size> | none", "QUOTA");
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_PNFS | ZFS_TYPE_PNFSOBJS,
+	    "<size> | none", "QUOTA");
 	register_number(ZFS_PROP_RESERVATION, "reservation", 0, PROP_DEFAULT,
-	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME, "<size> | none", "RESERV");
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME | ZFS_TYPE_PNFS |
+	    ZFS_TYPE_PNFSOBJS, "<size> | none", "RESERV");
 	register_number(ZFS_PROP_VOLSIZE, "volsize", 0, PROP_DEFAULT,
 	    ZFS_TYPE_VOLUME, "<size>", "VOLSIZE");
 	register_number(ZFS_PROP_REFQUOTA, "refquota", 0, PROP_DEFAULT,
-	    ZFS_TYPE_FILESYSTEM, "<size> | none", "REFQUOTA");
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_PNFS | ZFS_TYPE_PNFSOBJS,
+	    "<size> | none", "REFQUOTA");
 	register_number(ZFS_PROP_REFRESERVATION, "refreservation", 0,
-	    PROP_DEFAULT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME,
+	    PROP_DEFAULT, ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME |
+	    ZFS_TYPE_PNFS | ZFS_TYPE_PNFSOBJS,
 	    "<size> | none", "REFRESERV");
 
 	/* inherit number properties */
 	register_number(ZFS_PROP_RECORDSIZE, "recordsize", SPA_MAXBLOCKSIZE,
 	    PROP_INHERIT,
-	    ZFS_TYPE_FILESYSTEM, "512 to 128k, power of 2", "RECSIZE");
+	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_PNFS | ZFS_TYPE_PNFSOBJS,
+	    "512 to 128k, power of 2", "RECSIZE");
 
 	/* hidden properties */
 	register_hidden(ZFS_PROP_CREATETXG, "createtxg", PROP_TYPE_NUMBER,

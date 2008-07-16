@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -480,7 +480,7 @@ retry:
 	    "secinfo_tryroot_otw: %s call, mi 0x%p",
 	    needrecov ? "recov" : "first", (void*)mi));
 
-	rfs4call(mi, &args, &res, cr, &doqueue, RFSCALL_SOFT, &e);
+	rfs4call(mi, NULL, &args, &res, cr, &doqueue, RFSCALL_SOFT, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
 	if (e.error && !needrecov) {
@@ -653,7 +653,7 @@ retry:
 	lookuparg.resp = &res;
 	lookuparg.header_len = 1;	/* Putrootfh */
 	lookuparg.trailer_len = 1;	/* Secinfo */
-	lookuparg.ga_bits = NULL;
+	lookuparg.ga_bits = MI4_EMPTY_ATTRMAP(mi);
 	lookuparg.mi = mi;
 
 	/* setup LOOKUPs for parent path */
@@ -678,7 +678,7 @@ retry:
 	    "nfs4secinfo_otw: %s call, mi 0x%p",
 	    needrecov ? "recov" : "first", (void*)mi));
 
-	rfs4call(mi, &args, &res, cr, &doqueue, RFSCALL_SOFT, &e);
+	rfs4call(mi, NULL, &args, &res, cr, &doqueue, RFSCALL_SOFT, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
 	if (e.error && !needrecov) {
@@ -939,7 +939,7 @@ nfs4_secinfo_fh_otw(mntinfo4_t *mi, nfs4_sharedfh_t *fh, char *nm, cred_t *cr)
 
 	doqueue = 1;
 
-	rfs4call(mi, &args, &res, cr, &doqueue, RFSCALL_SOFT, &e);
+	rfs4call(mi, NULL, &args, &res, cr, &doqueue, RFSCALL_SOFT, &e);
 
 	if (e.error)
 		return (e.error);

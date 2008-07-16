@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -198,6 +198,8 @@ r4flushpages(rnode4_t *rp, cred_t *cr)
 	 * activity is done on this rnode.  This will allow all
 	 * asynchronous read ahead and write behind i/o's to
 	 * finish.
+	 *
+	 * XXX add pNFS goodness here
 	 */
 	mutex_enter(&rp->r_statelock);
 	while (rp->r_count > 0)
@@ -654,6 +656,7 @@ start:
 	rp->r_lo_head.lo_next_rnode = &rp->r_lo_head;
 	cv_init(&rp->r_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&rp->r_commit.c_cv, NULL, CV_DEFAULT, NULL);
+	cv_init(&rp->r_lowait, NULL, CV_DEFAULT, NULL);
 	rp->r_flags = R4READDIRWATTR;
 	rp->r_fh = fh;
 	rp->r_hashq = rhtp;
@@ -728,6 +731,7 @@ uninit_rnode4(rnode4_t *rp)
 	mutex_destroy(&rp->r_os_lock);
 	cv_destroy(&rp->r_cv);
 	cv_destroy(&rp->r_commit.c_cv);
+	cv_destroy(&rp->r_lowait);
 	nfs_rw_destroy(&rp->r_deleg_recall_lock);
 	if (rp->r_flags & R4DELMAPLIST)
 		list_destroy(&rp->r_indelmap);
@@ -787,6 +791,12 @@ rp4_addfree(rnode4_t *rp, cred_t *cr)
 			(void) nfs4delegreturn(rp,
 			    NFS4_DR_FORCE|NFS4_DR_PUSH|NFS4_DR_REOPEN);
 		}
+		/*
+		 * Return the layout, if present
+		 */
+		mutex_enter(&rp->r_statelock);
+		pnfs_layout_free(vp, cr, LR_SYNC);
+		mutex_exit(&rp->r_statelock);
 
 		r4inactive(rp, cr);
 
@@ -851,6 +861,21 @@ again:
 		    NFS4_DR_FORCE|NFS4_DR_PUSH|NFS4_DR_REOPEN);
 		goto again;
 	}
+	/*
+	 * Last chance check for layouts.  If a layout now exists
+	 * due to race conditions during de-activation, then drop the
+	 * hashq lock, return the layout and go back up to the top.
+	 * It's ok to drop the locks out of order, so long as they are
+	 * always taken in the right order.
+	 */
+	mutex_enter(&rp->r_statelock);
+	if (rp->r_flags & R4LAYOUTVALID) {
+		rw_exit(&rp->r_hashq->r_lock);
+		pnfs_layout_free(vp, cr, LR_SYNC);
+		mutex_exit(&rp->r_statelock);
+		goto again;
+	}
+	mutex_exit(&rp->r_statelock);
 
 	/*
 	 * Now that we have the hash queue lock, and we know there
@@ -1135,6 +1160,54 @@ check_rtable4(struct vfs *vfsp)
 		rw_exit(&rtable4[index].r_lock);
 	}
 	return (0);
+}
+
+/* ARGSUSED */
+void
+layoutreturn_all(struct vfs *vfsp, cred_t *cr)
+{
+	rnode4_t *rp;
+	vnode_t *vp;
+	int index;
+
+	for (index = 0; index < rtable4size; index++) {
+start_again:
+		rw_enter(&rtable4[index].r_lock, RW_READER);
+		for (rp = rtable4[index].r_hashf;
+		    rp != (rnode4_t *)(&rtable4[index]);
+		    rp = rp->r_hashf) {
+			vp = RTOV4(rp);
+			if (vp->v_vfsp == vfsp) {
+				mutex_enter(&rp->r_statelock);
+				if (rp->r_flags & R4LAYOUTVALID) {
+					VN_HOLD(vp);
+					rw_exit(&rtable4[index].r_lock);
+
+					pnfs_layout_free(vp, cr, LR_SYNC);
+
+					/*
+					 * pnfs_layout_free() may choose
+					 * not to make otw calls. But we are
+					 * unmounting. So make sure to free
+					 * all layouts unconditionally.
+					 */
+					pnfs_layout_rele(rp);
+
+					/*
+					 * Release r_statelock first, since,
+					 * VN_RELE() could end up calling
+					 * nfs4_inactive(), which acquires
+					 * r_statelock again.
+					 */
+					mutex_exit(&rp->r_statelock);
+					VN_RELE(vp);
+					goto start_again;
+				}
+				mutex_exit(&rp->r_statelock);
+			}
+		}
+		rw_exit(&rtable4[index].r_lock);
+	}
 }
 
 /*

@@ -2910,16 +2910,33 @@ zone_set_name(zone_t *zone, const char *uname)
 /*
  * Similar to thread_create(), but makes sure the thread is in the appropriate
  * zone's zsched process (curproc->p_zone->zone_zsched) before returning.
+ * Thread returned in TS_RUN state.
  */
 /*ARGSUSED*/
 kthread_t *
-zthread_create(
-    caddr_t stk,
-    size_t stksize,
-    void (*proc)(),
-    void *arg,
-    size_t len,
-    pri_t pri)
+zthread_create(caddr_t stk, size_t stksize, void (*proc)(), void *arg,
+    size_t len, pri_t pri)
+{
+	kthread_t *t;
+
+	t = zthread_create_tstopped(stk, stksize, proc, arg, len, pri);
+	/*
+	 * thread returned in TS_STOPPED state, let it run.
+	 */
+	thread_lock(t);
+	t->t_schedflag |= TS_ALLSTART;
+	setrun_locked(t);
+	thread_unlock(t);
+	return (t);
+}
+
+/*
+ * Returns the thread in TS_STOPPED state. Caller to start the thread
+ */
+/*ARGSUSED*/
+kthread_t *
+zthread_create_tstopped(caddr_t stk, size_t stksize, void (*proc)(),
+    void *arg, size_t len, pri_t pri)
 {
 	kthread_t *t;
 	zone_t *zone = curproc->p_zone;
@@ -2958,15 +2975,6 @@ zthread_create(
 	t->t_proc_flag |= TP_ZTHREAD;
 	project_rele(t->t_proj);
 	t->t_proj = project_hold(pp->p_task->tk_proj);
-
-	/*
-	 * Setup complete, let it run.
-	 */
-	thread_lock(t);
-	t->t_schedflag |= TS_ALLSTART;
-	setrun_locked(t);
-	thread_unlock(t);
-
 	mutex_exit(&pp->p_lock);
 
 	return (t);

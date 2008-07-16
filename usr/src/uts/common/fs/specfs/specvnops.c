@@ -558,6 +558,7 @@ spec_clone(struct vnode **vpp, dev_t newdev, int vtype, struct stdata *stp)
 	return (0);
 }
 
+/*ARGSUSED*/
 static int
 spec_open(struct vnode **vpp, int flag, struct cred *cr, caller_context_t *cc)
 {

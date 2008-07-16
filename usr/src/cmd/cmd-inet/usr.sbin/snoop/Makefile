@@ -43,7 +43,7 @@ OBJS=	nfs4_xdr.o snoop.o snoop_aarp.o snoop_adsp.o snoop_aecho.o \
 	snoop_tcp.o snoop_tftp.o snoop_udp.o snoop_zip.o
 
 SRCS=	$(OBJS:.o=.c)
-HDRS=	snoop.h snoop_mip.h at.h snoop_ospf.h snoop_ospf6.h
+HDRS=	snoop.h snoop_mip.h at.h snoop_ospf.h snoop_ospf6.h nfs4_prot.h
 
 include	../../../Makefile.cmd
 

@@ -966,6 +966,14 @@ usr/include/scfutil.h			sparc
 usr/sbin/sparcv9/sharemgr		sparc
 usr/sbin/sparcv7/sharemgr		sparc
 #
+# Until we have product, let's not worry about how/what
+# to package. For now, ignore the new NFSv4.1 headers.
+#
+usr/include/nfs/nfs41_kprot.h		sparc
+usr/include/nfs/nfs4_ext_defs.h		sparc
+usr/include/nfs/nfs_serv_inst.h		sparc
+usr/include/nfs/nfs4_pnfs.h		sparc
+#
 # These files are installed in the proto area by the build of libpri for
 # the benefit of the builds of FMA libldom, Zeus, picld plugins, and/or
 # other libpri consumers. However, the libpri interfaces are private to

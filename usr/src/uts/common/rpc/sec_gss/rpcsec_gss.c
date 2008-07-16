@@ -998,8 +998,9 @@ validate_seqwin(rpc_gss_data *ap)
 
 	if (major != GSS_S_COMPLETE) {
 		RPCGSS_LOG1(1,
-		    "validate_seqwin: kgss_verify failed GSS Major "
-		    "%x Minor %x\n", major, minor);
+		    "validate_seqwin: kgss_verify failed GSS "
+		    "Major %x Minor %x\n",
+		    major, minor);
 		RPCGSS_LOG1(1, "seq_window %d, verf len %d ", ap->seq_window,
 		    ap->verifier->oa_length);
 		return (FALSE);

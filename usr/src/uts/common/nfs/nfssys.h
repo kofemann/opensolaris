@@ -51,7 +51,8 @@ enum nfssys_op	{ OLD_NFS_SVC, OLD_ASYNC_DAEMON, EXPORTFS, OLD_NFS_GETFH,
     LOG_FLUSH, SVCPOOL_CREATE, NFS_SVC, LM_SVC, SVCPOOL_WAIT, SVCPOOL_RUN,
     NFS4_SVC, RDMA_SVC_INIT, NFS4_CLR_STATE, NFS_IDMAP,
     NFS4_SVC_REQUEST_QUIESCE, NFS_GETFH, NFS4_DSS_SETPATHS,
-    NFS4_DSS_SETPATHS_SIZE, NFS4_EPHEMERAL_MOUNT_TO, MOUNTD_ARGS };
+    NFS4_DSS_SETPATHS_SIZE, NFS4_EPHEMERAL_MOUNT_TO, MOUNTD_ARGS,
+    MDS_ADD_LAYOUT, MDS_ADD_DEVICE, MDS_RECALL_LAYOUT};
 
 struct nfs_svc_args {
 	int		fd;		/* Connection endpoint */
@@ -209,6 +210,48 @@ struct nfs4clrst_args32 {
 };
 #endif
 
+struct mds_reclo_args {
+	char	*lo_fname;
+	int	lo_type;
+};
+
+#ifdef _SYSCALL32
+struct mds_reclo_args32 {
+	caddr32_t	*lo_fname;
+	int32_t		lo_type;
+};
+#endif
+
+struct mds_addlo_args {
+	int loid;
+	int lo_stripe_unit;
+	int lo_devs[100];
+};
+
+#ifdef _SYSCALL32
+struct mds_addlo_args32 {
+	int32_t	loid;
+	int32_t lo_stripe_unit;
+	int32_t lo_devs[100];
+};
+#endif
+
+struct mds_adddev_args {
+	int	dev_id;
+	char	*dev_netid;
+	char	*dev_addr;
+	char    *ds_addr;
+};
+
+#ifdef _SYSCALL32
+struct mds_adddev_args32 {
+	int32_t	dev_id;
+	caddr32_t dev_netid;
+	caddr32_t dev_addr;
+	caddr32_t ds_addr;
+};
+#endif
+
 struct nfsidmap_args {
 	uint_t		state;	/* Flushes caches, set state up 1 or down 0 */
 	uint_t		did;	/* Door id to upcall */
@@ -231,6 +274,7 @@ union nfssysargs {
 	struct svcpool_args	*svcpool_args_u;	/* svcpool args */
 	struct nfs4clrst_args   *nfs4clrst_u;		/* nfs4 clear state */
 	struct nfsidmap_args	*nfsidmap_u;		/* nfsidmap */
+	struct mds_adddev_args  *adddev_u;
 };
 
 struct nfssysa {
@@ -260,6 +304,7 @@ union nfssysargs32 {
 	caddr32_t nfsl_flush_args_u;	/* nfsl_flush args */
 	caddr32_t svcpool_args_u;
 	caddr32_t nfs4clrst_u;
+	caddr32_t adddev_u;
 };
 struct nfssysa32 {
 	enum nfssys_op		opcode;	/* operation discriminator */

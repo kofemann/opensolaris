@@ -84,6 +84,8 @@ const dmu_object_type_info_t dmu_ot[DMU_OT_NUMTYPES] = {
 	{	byteswap_uint8_array,	TRUE,	"ZFS SYSACL"		},
 	{	byteswap_uint8_array,	TRUE,	"FUID table"		},
 	{	byteswap_uint64_array,	TRUE,	"FUID table size"	},
+	{	byteswap_uint8_array,	FALSE,	"pNFS Data"		},
+	{	zap_byteswap,		TRUE,	"pNFS FH Map"		}
 };
 
 int

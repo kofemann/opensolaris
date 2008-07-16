@@ -82,6 +82,8 @@
 #include <nfs/lm.h>
 #include <nfs/nfs_dispatch.h>
 #include <nfs/nfs4_drc.h>
+#include <nfs/ds.h>
+#include <nfs/nnode.h>
 
 #include <sys/modctl.h>
 #include <sys/cladm.h>
@@ -181,7 +183,7 @@ static	int	checkauth(struct exportinfo *, struct svc_req *, cred_t *, int,
 			bool_t);
 static char	*client_name(struct svc_req *req);
 static char	*client_addr(struct svc_req *req, char *buf);
-extern	int	sec_svc_getcred(struct svc_req *, cred_t *cr, char **, int *);
+
 extern	bool_t	sec_svc_inrootlist(int, caddr_t, int, caddr_t *);
 
 #define	NFSLOG_COPY_NETBUF(exi, xprt, nb)	{		\
@@ -196,6 +198,8 @@ extern	bool_t	sec_svc_inrootlist(int, caddr_t, int, caddr_t *);
  */
 static int	MCLpath(char **);
 static void	URLparse(char *);
+
+void nfs_ds_cp_dispatch(struct svc_req *, SVCXPRT *);
 
 /*
  * NFS callout table.
@@ -218,7 +222,8 @@ static SVC_CALLOUT_TABLE nfs_sct_clts = {
 
 static SVC_CALLOUT __nfs_sc_cots[] = {
 	{ NFS_PROGRAM,	   NFS_VERSMIN,	    NFS_VERSMAX,	rfs_dispatch },
-	{ NFS_ACL_PROGRAM, NFS_ACL_VERSMIN, NFS_ACL_VERSMAX,	acl_dispatch }
+	{ NFS_ACL_PROGRAM, NFS_ACL_VERSMIN, NFS_ACL_VERSMAX,	acl_dispatch },
+	{ PNFSCTLDS, PNFSCTLDS_V1, PNFSCTLDS_V1, nfs_ds_cp_dispatch }
 };
 
 static SVC_CALLOUT_TABLE nfs_sct_cots = {
@@ -228,6 +233,7 @@ static SVC_CALLOUT_TABLE nfs_sct_cots = {
 static SVC_CALLOUT __nfs_sc_rdma[] = {
 	{ NFS_PROGRAM,	   NFS_VERSMIN,	    NFS_VERSMAX,	rfs_dispatch },
 	{ NFS_ACL_PROGRAM, NFS_ACL_VERSMIN, NFS_ACL_VERSMAX,	acl_dispatch }
+	/* DSERV_PROGRAM for RDMA later */
 };
 
 static SVC_CALLOUT_TABLE nfs_sct_rdma = {
@@ -258,7 +264,8 @@ static	kcondvar_t nfs_server_upordown_cv;
  */
 nvlist_t *rfs4_dss_paths, *rfs4_dss_oldpaths;
 
-int rfs4_dispatch(struct rpcdisp *, struct svc_req *, SVCXPRT *, char *);
+int	rfs4_minor_version_dispatch(struct svc_req *, SVCXPRT *, char *,
+    nfs41_fh_type_t);
 bool_t rfs4_minorvers_mismatch(struct svc_req *, SVCXPRT *, void *);
 
 /*
@@ -455,8 +462,8 @@ nfs_svc(struct nfs_svc_args *arg, model_t model)
 
 	/* Double check the vers min/max ranges */
 	if ((nfs_versmin > nfs_versmax) ||
-		(nfs_versmin < NFS_VERSMIN) ||
-		(nfs_versmax > NFS_VERSMAX)) {
+	    (nfs_versmin < NFS_VERSMIN) ||
+	    (nfs_versmax > NFS_VERSMAX)) {
 		nfs_versmin = NFS_VERSMIN_DEFAULT;
 		nfs_versmax = NFS_VERSMAX_DEFAULT;
 	}
@@ -474,7 +481,7 @@ nfs_svc(struct nfs_svc_args *arg, model_t model)
 
 	/* Create a transport handle. */
 	error = svc_tli_kcreate(fp, readsize, buf, &addrmask, &xprt,
-				sctp, NULL, NFS_SVCPOOL_ID, TRUE);
+	    sctp, NULL, NFS_SVCPOOL_ID, TRUE);
 
 	if (error)
 		kmem_free(addrmask.buf, addrmask.maxlen);
@@ -500,7 +507,7 @@ rfs4_server_start(int nfs4_srv_delegation)
 	if (nfs_server_upordown != NFS_SERVER_RUNNING) {
 		/* Do we need to stop and wait on the previous server? */
 		while (nfs_server_upordown == NFS_SERVER_STOPPING ||
-			nfs_server_upordown == NFS_SERVER_OFFLINE)
+		    nfs_server_upordown == NFS_SERVER_OFFLINE)
 			cv_wait(&nfs_server_upordown_cv,
 			    &nfs_server_upordown_lock);
 
@@ -527,15 +534,20 @@ rfs4_server_start(int nfs4_srv_delegation)
 				/* cold start */
 				rfs4_state_init();
 				nfs4_drc = rfs4_init_drc(nfs4_drc_max,
-							nfs4_drc_hash);
+				    nfs4_drc_hash);
+				mds_state_init();
 			}
 
 			/*
 			 * Check to see if delegation is to be
 			 * enabled at the server
 			 */
-			if (nfs4_srv_delegation != FALSE)
-				rfs4_set_deleg_policy(SRV_NORMAL_DELEGATE);
+			if (nfs4_srv_delegation != FALSE) {
+				rfs4_set_deleg_policy(&nfs4_server,
+				    SRV_NORMAL_DELEGATE);
+				rfs4_set_deleg_policy(&mds_server,
+				    SRV_NORMAL_DELEGATE);
+			}
 
 			nfs_server_upordown = NFS_SERVER_RUNNING;
 		}
@@ -556,8 +568,8 @@ rdma_start(struct rdma_svc_args *rsa)
 
 	/* Double check the vers min/max ranges */
 	if ((rsa->nfs_versmin > rsa->nfs_versmax) ||
-		(rsa->nfs_versmin < NFS_VERSMIN) ||
-		(rsa->nfs_versmax > NFS_VERSMAX)) {
+	    (rsa->nfs_versmin < NFS_VERSMIN) ||
+	    (rsa->nfs_versmax > NFS_VERSMAX)) {
 		rsa->nfs_versmin = NFS_VERSMIN_DEFAULT;
 		rsa->nfs_versmax = NFS_VERSMAX_DEFAULT;
 	}
@@ -1416,6 +1428,15 @@ auth_tooweak(struct svc_req *req, char *res)
 }
 
 
+/*
+ * This function handles dispatching for inbound ACL v2,
+ * v3; NFS v2, v3, v4.0 and v4.1 programs and v4 minor
+ * versions.
+ *
+ * It Assumes that Proceedure number zero is the RPC
+ * NULL Proc.
+ *
+ */
 static void
 common_dispatch(struct svc_req *req, SVCXPRT *xprt, rpcvers_t min_vers,
 		rpcvers_t max_vers, char *pgmname,
@@ -1511,13 +1532,26 @@ common_dispatch(struct svc_req *req, SVCXPRT *xprt, rpcvers_t min_vers,
 	}
 
 	/*
-	 * If Version 4 use that specific dispatch function.
+	 * Handle the NULL Proc here
 	 */
-	if (req->rq_vers == 4) {
-		error += rfs4_dispatch(disp, req, xprt, args);
+	if (which == RFS_NULL) {
+		if (!svc_sendreply(xprt, xdr_void, NULL))
+			error++;
 		goto done;
 	}
 
+	/*
+	 * If Version 4 figure out specific dispatch function.
+	 */
+	if (req->rq_vers == 4) {
+		error += rfs4_minor_version_dispatch(req, xprt, args,
+		    FH41_TYPE_NFS);
+		goto done;
+	}
+
+	/*
+	 *  Non Version 4 traffic processing from this point onward
+	 */
 	dis_flags = disp->dis_flags;
 
 	/*
@@ -1631,7 +1665,7 @@ common_dispatch(struct svc_req *req, SVCXPRT *xprt, rpcvers_t min_vers,
 
 	if (!(dis_flags & RPC_IDEMPOTENT)) {
 		dupstat = SVC_DUP_EXT(xprt, req, res, disp->dis_ressz, &dr,
-				&dupcached);
+		    &dupcached);
 
 		switch (dupstat) {
 		case DUP_ERROR:
@@ -1655,7 +1689,7 @@ common_dispatch(struct svc_req *req, SVCXPRT *xprt, rpcvers_t min_vers,
 			if (curthread->t_flag & T_WOULDBLOCK) {
 				curthread->t_flag &= ~T_WOULDBLOCK;
 				SVC_DUPDONE_EXT(xprt, dr, res, NULL,
-					disp->dis_ressz, DUP_DROP);
+				    disp->dis_ressz, DUP_DROP);
 				if (res != (char *)&res_buf)
 					SVC_FREERES(xprt);
 				error++;
@@ -1663,12 +1697,12 @@ common_dispatch(struct svc_req *req, SVCXPRT *xprt, rpcvers_t min_vers,
 			}
 			if (dis_flags & RPC_AVOIDWORK) {
 				SVC_DUPDONE_EXT(xprt, dr, res, NULL,
-					disp->dis_ressz, DUP_DROP);
+				    disp->dis_ressz, DUP_DROP);
 			} else {
 				SVC_DUPDONE_EXT(xprt, dr, res,
-					disp->dis_resfree == nullfree ? NULL :
-					disp->dis_resfree,
-					disp->dis_ressz, DUP_DONE);
+				    disp->dis_resfree == nullfree ? NULL :
+				    disp->dis_resfree,
+				    disp->dis_ressz, DUP_DONE);
 				dupcached = TRUE;
 			}
 			break;
@@ -1754,7 +1788,7 @@ common_dispatch(struct svc_req *req, SVCXPRT *xprt, rpcvers_t min_vers,
 	 */
 	if (logging_enabled) {
 		nfslog_write_record(nfslog_exi, req, args, (char *)&res_buf,
-			cr, &nb, nfslog_rec_id, NFSLOG_ONE_BUFFER);
+		    cr, &nb, nfslog_rec_id, NFSLOG_ONE_BUFFER);
 		exi_rele(nfslog_exi);
 		kmem_free((&nb)->buf, (&nb)->len);
 	}
@@ -1795,7 +1829,7 @@ static void
 rfs_dispatch(struct svc_req *req, SVCXPRT *xprt)
 {
 	common_dispatch(req, xprt, NFS_VERSMIN, NFS_VERSMAX,
-		"NFS", rfs_disptable);
+	    "NFS", rfs_disptable);
 }
 
 static char *aclcallnames_v2[] = {
@@ -1921,7 +1955,7 @@ static void
 acl_dispatch(struct svc_req *req, SVCXPRT *xprt)
 {
 	common_dispatch(req, xprt, NFS_ACL_VERSMIN, NFS_ACL_VERSMAX,
-		"ACL", acl_disptable);
+	    "ACL", acl_disptable);
 }
 
 int
@@ -2056,14 +2090,14 @@ checkauth(struct exportinfo *exi, struct svc_req *req, cred_t *cr, int anon_ok,
 	switch (rpcflavor) {
 	case AUTH_NONE:
 		anon_res = crsetugid(cr, exi->exi_export.ex_anon,
-				exi->exi_export.ex_anon);
+		    exi->exi_export.ex_anon);
 		(void) crsetgroups(cr, 0, NULL);
 		break;
 
 	case AUTH_UNIX:
 		if (!stat || crgetuid(cr) == 0 && !(access & NFSAUTH_ROOT)) {
 			anon_res = crsetugid(cr, exi->exi_export.ex_anon,
-					exi->exi_export.ex_anon);
+			    exi->exi_export.ex_anon);
 			(void) crsetgroups(cr, 0, NULL);
 		}
 		break;
@@ -2106,7 +2140,7 @@ checkauth(struct exportinfo *exi, struct svc_req *req, cred_t *cr, int anon_ok,
 		 * to anon.
 		 */
 		if (principal && sec_svc_inrootlist(rpcflavor, principal,
-			secp->s_rootcnt, secp->s_rootnames)) {
+		    secp->s_rootcnt, secp->s_rootnames)) {
 			if (crgetuid(cr) == 0)
 				return (1);
 
@@ -2135,7 +2169,7 @@ checkauth(struct exportinfo *exi, struct svc_req *req, cred_t *cr, int anon_ok,
 			return (1);
 
 		anon_res = crsetugid(cr, exi->exi_export.ex_anon,
-			exi->exi_export.ex_anon);
+		    exi->exi_export.ex_anon);
 		(void) crsetgroups(cr, 0, NULL);
 		break;
 	default:
@@ -2227,14 +2261,14 @@ checkauth4(struct compound_state *cs, struct svc_req *req)
 	switch (rpcflavor) {
 	case AUTH_NONE:
 		anon_res = crsetugid(cr, exi->exi_export.ex_anon,
-				exi->exi_export.ex_anon);
+		    exi->exi_export.ex_anon);
 		(void) crsetgroups(cr, 0, NULL);
 		break;
 
 	case AUTH_UNIX:
 		if (crgetuid(cr) == 0 && !(access & NFSAUTH_ROOT)) {
 			anon_res = crsetugid(cr, exi->exi_export.ex_anon,
-					exi->exi_export.ex_anon);
+			    exi->exi_export.ex_anon);
 			(void) crsetgroups(cr, 0, NULL);
 		}
 		break;
@@ -2276,7 +2310,7 @@ checkauth4(struct compound_state *cs, struct svc_req *req)
 		 * to anon.
 		 */
 		if (principal && sec_svc_inrootlist(rpcflavor, principal,
-			secp->s_rootcnt, secp->s_rootnames)) {
+		    secp->s_rootcnt, secp->s_rootnames)) {
 			if (crgetuid(cr) == 0)
 				return (1);
 
@@ -2305,7 +2339,7 @@ checkauth4(struct compound_state *cs, struct svc_req *req)
 			return (1);
 
 		anon_res = crsetugid(cr, exi->exi_export.ex_anon,
-			exi->exi_export.ex_anon);
+		    exi->exi_export.ex_anon);
 		(void) crsetgroups(cr, 0, NULL);
 		break;
 	} /* switch on rpcflavor */
@@ -2318,11 +2352,11 @@ checkauth4(struct compound_state *cs, struct svc_req *req)
 
 	if (anon_res != 0) {
 		cmn_err(CE_NOTE,
-			"nfs_server: client %s%ssent wrong "
-			"authentication for %s",
-			client_name(req), client_addr(req, buf),
-			exi->exi_export.ex_path ?
-			exi->exi_export.ex_path : "?");
+		    "nfs_server: client %s%ssent wrong "
+		    "authentication for %s",
+		    client_name(req), client_addr(req, buf),
+		    exi->exi_export.ex_path ?
+		    exi->exi_export.ex_path : "?");
 		return (0);
 	}
 
@@ -2373,14 +2407,14 @@ client_addr(struct svc_req *req, char *buf)
 	ca = (struct sockaddr *)svc_getrpccaller(req->rq_xprt)->buf;
 
 	if (ca->sa_family == AF_INET) {
-	    b = (uchar_t *)&((struct sockaddr_in *)ca)->sin_addr;
-	    (void) sprintf(buf, "%s(%d.%d.%d.%d) ", frontspace,
-		b[0] & 0xFF, b[1] & 0xFF, b[2] & 0xFF, b[3] & 0xFF);
+		b = (uchar_t *)&((struct sockaddr_in *)ca)->sin_addr;
+		(void) sprintf(buf, "%s(%d.%d.%d.%d) ", frontspace,
+		    b[0] & 0xFF, b[1] & 0xFF, b[2] & 0xFF, b[3] & 0xFF);
 	} else if (ca->sa_family == AF_INET6) {
 		struct sockaddr_in6 *sin6;
 		sin6 = (struct sockaddr_in6 *)ca;
 		(void) kinet_ntop6((uchar_t *)&sin6->sin6_addr,
-				buf, INET6_ADDRSTRLEN);
+		    buf, INET6_ADDRSTRLEN);
 
 	} else {
 
@@ -2424,6 +2458,8 @@ nfs_srvinit(void)
 	cv_init(&nfs_server_upordown_cv, NULL, CV_DEFAULT, NULL);
 	mutex_init(&rdma_wait_mutex, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&rdma_wait_cv, NULL, CV_DEFAULT, NULL);
+
+	nnode_mod_init();
 
 	return (0);
 }
@@ -2592,7 +2628,7 @@ rfs_publicfh_mclookup(char *p, vnode_t *dvp, cred_t *cr, vnode_t **vpp,
 				VN_RELE(*vpp);
 				*vpp = realvp;
 			} else
-			    break;
+				break;
 		/* LINTED */
 		} while (TRUE);
 
@@ -2610,8 +2646,8 @@ rfs_publicfh_mclookup(char *p, vnode_t *dvp, cred_t *cr, vnode_t **vpp,
 		if (vn_mountedvfs(mc_dvp) != NULL) {
 			error = traverse(&mc_dvp);
 			if (error) {
-			    VN_RELE(*vpp);
-			    goto publicfh_done;
+				VN_RELE(*vpp);
+				goto publicfh_done;
 			}
 		}
 
@@ -3011,10 +3047,11 @@ hanfsv4_failover(void)
 	if (numadded_paths > 0) {
 		/* create a new server instance, and start its grace period */
 		start_grace = 1;
-		rfs4_servinst_create(start_grace, numadded_paths, added_paths);
+		rfs4_servinst_create(&nfs4_server,
+		    start_grace, numadded_paths, added_paths);
 
 		/* read in the stable storage state from these paths */
-		rfs4_dss_readstate(numadded_paths, added_paths);
+		rfs4_dss_readstate(&nfs4_server, numadded_paths, added_paths);
 
 		/*
 		 * Multiple failovers during a grace period will cause
@@ -3024,7 +3061,7 @@ hanfsv4_failover(void)
 		 * group must be subject to the same grace period,
 		 * we need to reset all currently active grace periods.
 		 */
-		rfs4_grace_reset_all();
+		rfs4_grace_reset_all(&nfs4_server);
 	}
 
 	if (rfs4_dss_numnewpaths > 0)

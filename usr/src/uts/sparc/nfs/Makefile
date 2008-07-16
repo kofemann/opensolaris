@@ -21,7 +21,7 @@
 #
 # uts/sparc/nfs/Makefile
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #ident	"%Z%%M%	%I%	%E% SMI"
@@ -41,10 +41,16 @@ UTSBASE	= ../..
 #	Define the module and object file sets.
 #
 MODULE		= nfs
-OBJECTS		= $(NFS_OBJS:%=$(OBJS_DIR)/%)
+OBJECTS		= $(NFS_OBJS:%=$(OBJS_DIR)/%) $(OBJS_DIR)/ds_xdr.o \
+		$(OBJS_DIR)/ds_nfs_xdr.o
 LINTS		= $(NFS_OBJS:%.o=$(LINTS_DIR)/%.ln)
 ROOTMODULE	= $(ROOT_FS_DIR)/$(MODULE)
 ROOTLINK	= $(ROOT_SYS_DIR)/$(MODULE)
+
+PROTOCOL_DIR	= $(UTSBASE)/../head/rpcsvc
+NFSHDR		= $(UTSBASE)/common/nfs
+DERIVED_HDRS	= $(NFSHDR)/ds_prot.h 
+DERIVED_FILES	= ds_xdr.c $(DERIVED_HDRS)
 
 #
 #	Include common rules.
@@ -88,8 +94,10 @@ def:		$(DEF_DEPS)
 all:		$(ALL_DEPS)
 
 clean:		$(CLEAN_DEPS)
+	$(RM)	$(DERIVED_FILES)
 
 clobber:	$(CLOBBER_DEPS)
+	$(RM)	$(DERIVED_FILES)
 
 lint:		$(LINT_DEPS)
 
@@ -98,6 +106,31 @@ modlintlib:	$(MODLINTLIB_DEPS)
 clean.lint:	$(CLEAN_LINT_DEPS)
 
 install:	$(INSTALL_DEPS)
+
+$(NFSHDR)/ds_prot.h: $(PROTOCOL_DIR)/ds_prot.x
+	cd $(NFSHDR); $(MAKE) $(@F)
+
+
+$(NFSHDR)/ds_nfs_xdr.h: $(PROTOCOL_DIR)/ds_nfs_com.x
+	cd $(NFSHDR); $(MAKE) $(@F)
+
+
+ds_xdr.c: $(PROTOCOL_DIR)/ds_prot.x
+	$(RPCGEN) -C -c $(PROTOCOL_DIR)/ds_prot.x | \
+		$(EGREP) -v '^#include.+/ds_prot\.h"' > $@
+
+$(OBJS_DIR)/ds_xdr.o: ds_xdr.c $(NFSHDR)/ds.h $(DERIVED_HDRS)
+	$(COMPILE.c) -o $@ ds_xdr.c
+	$(CTFCONVERT_O)
+
+
+ds_nfs_xdr.c: $(PROTOCOL_DIR)/ds_nfs_com.x
+	$(RPCGEN) -C -c $(PROTOCOL_DIR)/ds_nfs_com.x | \
+		$(EGREP) -v '^#include.+/ds_nfs_com\.h"' > $@
+
+$(OBJS_DIR)/ds_nfs_xdr.o: ds_nfs_xdr.c $(NFSHDR)/ds.h $(DERIVED_HDRS)
+	$(COMPILE.c) -o $@ ds_nfs_xdr.c
+	$(CTFCONVERT_O)
 
 $(ROOTLINK):	$(ROOT_SYS_DIR) $(ROOTMODULE)
 	-$(RM) $@; ln $(ROOTMODULE) $@

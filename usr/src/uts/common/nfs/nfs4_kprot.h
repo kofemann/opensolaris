@@ -2,9 +2,8 @@
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
- * Common Development and Distribution License, Version 1.0 only
- * (the "License").  You may not use this file except in compliance
- * with the License.
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
  * or http://www.opensolaris.org/os/licensing.
@@ -20,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -40,6 +39,7 @@ extern "C" {
 
 #include <rpc/rpc.h>
 #include <sys/stream.h>
+#include <nfs/nfs4_attrmap.h>
 
 #define	NFS4_FHSIZE 128
 #define	NFS4_VERIFIER_SIZE 8
@@ -68,75 +68,10 @@ enum nfs_ftype4 {
 };
 typedef enum nfs_ftype4 nfs_ftype4;
 
-enum nfsstat4 {
-	NFS4_OK = 0,
-	NFS4ERR_PERM = 1,
-	NFS4ERR_NOENT = 2,
-	NFS4ERR_IO = 5,
-	NFS4ERR_NXIO = 6,
-	NFS4ERR_ACCESS = 13,
-	NFS4ERR_EXIST = 17,
-	NFS4ERR_XDEV = 18,
-	NFS4ERR_NOTDIR = 20,
-	NFS4ERR_ISDIR = 21,
-	NFS4ERR_INVAL = 22,
-	NFS4ERR_FBIG = 27,
-	NFS4ERR_NOSPC = 28,
-	NFS4ERR_ROFS = 30,
-	NFS4ERR_MLINK = 31,
-	NFS4ERR_NAMETOOLONG = 63,
-	NFS4ERR_NOTEMPTY = 66,
-	NFS4ERR_DQUOT = 69,
-	NFS4ERR_STALE = 70,
-	NFS4ERR_BADHANDLE = 10001,
-	NFS4ERR_BAD_COOKIE = 10003,
-	NFS4ERR_NOTSUPP = 10004,
-	NFS4ERR_TOOSMALL = 10005,
-	NFS4ERR_SERVERFAULT = 10006,
-	NFS4ERR_BADTYPE = 10007,
-	NFS4ERR_DELAY = 10008,
-	NFS4ERR_SAME = 10009,
-	NFS4ERR_DENIED = 10010,
-	NFS4ERR_EXPIRED = 10011,
-	NFS4ERR_LOCKED = 10012,
-	NFS4ERR_GRACE = 10013,
-	NFS4ERR_FHEXPIRED = 10014,
-	NFS4ERR_SHARE_DENIED = 10015,
-	NFS4ERR_WRONGSEC = 10016,
-	NFS4ERR_CLID_INUSE = 10017,
-	NFS4ERR_RESOURCE = 10018,
-	NFS4ERR_MOVED = 10019,
-	NFS4ERR_NOFILEHANDLE = 10020,
-	NFS4ERR_MINOR_VERS_MISMATCH = 10021,
-	NFS4ERR_STALE_CLIENTID = 10022,
-	NFS4ERR_STALE_STATEID = 10023,
-	NFS4ERR_OLD_STATEID = 10024,
-	NFS4ERR_BAD_STATEID = 10025,
-	NFS4ERR_BAD_SEQID = 10026,
-	NFS4ERR_NOT_SAME = 10027,
-	NFS4ERR_LOCK_RANGE = 10028,
-	NFS4ERR_SYMLINK = 10029,
-	NFS4ERR_RESTOREFH = 10030,
-	NFS4ERR_LEASE_MOVED = 10031,
-	NFS4ERR_ATTRNOTSUPP = 10032,
-	NFS4ERR_NO_GRACE = 10033,
-	NFS4ERR_RECLAIM_BAD = 10034,
-	NFS4ERR_RECLAIM_CONFLICT = 10035,
-	NFS4ERR_BADXDR = 10036,
-	NFS4ERR_LOCKS_HELD = 10037,
-	NFS4ERR_OPENMODE = 10038,
-	NFS4ERR_BADOWNER = 10039,
-	NFS4ERR_BADCHAR = 10040,
-	NFS4ERR_BADNAME = 10041,
-	NFS4ERR_BAD_RANGE = 10042,
-	NFS4ERR_LOCK_NOTSUPP = 10043,
-	NFS4ERR_OP_ILLEGAL = 10044,
-	NFS4ERR_DEADLOCK = 10045,
-	NFS4ERR_FILE_OPEN = 10046,
-	NFS4ERR_ADMIN_REVOKED = 10047,
-	NFS4ERR_CB_PATH_DOWN = 10048
-};
-typedef enum nfsstat4 nfsstat4;
+/*
+ * XXX - nfsstat4 was extended by NFSv4.1. It
+ *	 is now defined in nfs4_ext_defs.h
+ */
 
 /*
  * A bitmap can only be 56 bits, treat it as a uint64_t for now
@@ -250,6 +185,7 @@ typedef uint32_t aceflag4;
 #define	ACE4_SUCCESSFUL_ACCESS_ACE_FLAG 0x00000010
 #define	ACE4_FAILED_ACCESS_ACE_FLAG 0x00000020
 #define	ACE4_IDENTIFIER_GROUP 0x00000040
+#define	ACE4_INHERITED_ACE 0x00000080			/* 4.1 */
 /*
  * This defines all valid flag bits, as defined by RFC 3530.  If
  * any additional flag bits are deemed part of the NFSv4 spec,
@@ -277,6 +213,9 @@ typedef uint32_t acemask4;
 #define	ACE4_DELETE_CHILD 0x00000040
 #define	ACE4_READ_ATTRIBUTES 0x00000080
 #define	ACE4_WRITE_ATTRIBUTES 0x00000100
+
+/* XXX - ACE4_WRITE_RETENTION{_HOLD} defined by NFSv4.1 */
+
 #define	ACE4_DELETE 0x00010000
 #define	ACE4_READ_ACL 0x00020000
 #define	ACE4_WRITE_ACL 0x00040000
@@ -323,6 +262,20 @@ struct nfsace4 {
 	utf8string who;
 };
 typedef struct nfsace4 nfsace4;
+
+typedef uint32_t aclflag4;				/* 4.1 */
+#define	ACL4_AUTO_INHERIT 0x00000001
+#define	ACL4_PROTECTED 0x00000002
+#define	ACL4_DEFAULTED 0x00000004
+
+struct nfsacl41 {					/* 4.1 */
+	aclflag4 na41_flag;
+	struct {
+		uint_t na41_aces_len;
+		nfsace4 *na41_aces_val;
+	} na41_aces;
+};
+typedef struct nfsacl41 nfsacl41;
 #define	MODE4_SUID 0x800
 #define	MODE4_SGID 0x400
 #define	MODE4_SVTX 0x200
@@ -335,6 +288,12 @@ typedef struct nfsace4 nfsace4;
 #define	MODE4_ROTH 0x004
 #define	MODE4_WOTH 0x002
 #define	MODE4_XOTH 0x001
+
+struct mode_masked4 {					/* 4.1 */
+	mode4 mm_value_to_set;
+	mode4 mm_mask_bits;
+};
+typedef struct mode_masked4 mode_masked4;
 
 /*
  * ACL conversion helpers
@@ -383,7 +342,7 @@ typedef struct specdata4 specdata4;
 #define	FH4_VOL_MIGRATION 0x00000004
 #define	FH4_VOL_RENAME 0x00000008
 
-typedef bitmap4 fattr4_supported_attrs;
+typedef attrmap4 fattr4_supported_attrs;
 
 typedef nfs_ftype4 fattr4_type;
 
@@ -404,6 +363,9 @@ typedef fsid4 fattr4_fsid;
 typedef bool_t fattr4_unique_handles;
 
 typedef uint32_t fattr4_lease_time;
+
+/* XXX - 4.0 extended type definitions */
+#include <nfs/nfs4_ext_defs.h>
 
 typedef nfsstat4 fattr4_rdattr_error;
 
@@ -453,6 +415,8 @@ typedef uint64_t fattr4_maxwrite;
 typedef utf8string fattr4_mimetype;
 
 typedef mode4 fattr4_mode;
+
+typedef mode_masked4 fattr4_mode_set_masked;		/* 4.1 */
 
 typedef uint64_t fattr4_mounted_on_fileid;
 
@@ -554,8 +518,11 @@ typedef settime4 fattr4_time_modify_set;
 #define	FATTR4_TIME_MODIFY_SET 54
 #define	FATTR4_MOUNTED_ON_FILEID 55
 
+#define	NFS40_ATTR_COUNT (FATTR4_MOUNTED_ON_FILEID + 1)
+
+
 struct fattr4 {
-	bitmap4 attrmask;
+	attrmap4 attrmask;
 	char *attrlist4;
 	uint_t attrlist4_len;
 };
@@ -593,6 +560,8 @@ struct nfs_client_id4 {
 };
 typedef struct nfs_client_id4 nfs_client_id4;
 
+/* XXX - client_owner4 is a new NFSv4.1 addition */
+
 struct open_owner4 {
 	clientid4 clientid;
 	uint_t owner_len;
@@ -614,6 +583,7 @@ enum nfs_lock_type4 {
 	WRITEW_LT = 4
 };
 typedef enum nfs_lock_type4 nfs_lock_type4;
+
 #define	ACCESS4_READ 0x00000001
 #define	ACCESS4_LOOKUP 0x00000002
 #define	ACCESS4_MODIFY 0x00000004
@@ -682,7 +652,7 @@ typedef struct CREATE4cargs CREATE4cargs;
 struct CREATE4res {
 	nfsstat4 status;
 	change_info4 cinfo;
-	bitmap4 attrset;
+	attrmap4 attrset;
 };
 typedef struct CREATE4res CREATE4res;
 
@@ -709,7 +679,7 @@ typedef struct DELEGRETURN4res DELEGRETURN4res;
 struct mntinfo4;
 
 struct GETATTR4args {
-	bitmap4 attr_request;
+	attrmap4 attr_request;
 	struct mntinfo4 *mi;
 };
 typedef struct GETATTR4args GETATTR4args;
@@ -723,7 +693,7 @@ struct nfs4_ga_res {
 	unsigned			n4g_fsid_valid:1;
 	uint_t				n4g_attrerr;
 	uint_t				n4g_attrwhy;
-	bitmap4				n4g_resbmap;
+	attrmap4			n4g_resbmap;
 	fattr4_change			n4g_change;
 	fattr4_fsid			n4g_fsid;
 	fattr4_mounted_on_fileid	n4g_mon_fid;
@@ -873,7 +843,8 @@ typedef struct NVERIFY4res NVERIFY4res;
 enum createmode4 {
 	UNCHECKED4 = 0,
 	GUARDED4 = 1,
-	EXCLUSIVE4 = 2
+	EXCLUSIVE4 = 2,
+	EXCLUSIVE4_1 = 3	/* Added in NFSv4.1 */
 };
 typedef enum createmode4 createmode4;
 
@@ -911,20 +882,11 @@ typedef struct nfs_space_limit4 nfs_space_limit4;
 #define	OPEN4_SHARE_DENY_WRITE 0x00000002
 #define	OPEN4_SHARE_DENY_BOTH 0x00000003
 
-enum open_delegation_type4 {
-	OPEN_DELEGATE_NONE = 0,
-	OPEN_DELEGATE_READ = 1,
-	OPEN_DELEGATE_WRITE = 2
-};
-typedef enum open_delegation_type4 open_delegation_type4;
-
-enum open_claim_type4 {
-	CLAIM_NULL = 0,
-	CLAIM_PREVIOUS = 1,
-	CLAIM_DELEGATE_CUR = 2,
-	CLAIM_DELEGATE_PREV = 3
-};
-typedef enum open_claim_type4 open_claim_type4;
+/*
+ * XXX - open_delegation_type4 and open_claim_type4 were
+ *	 extended by NFSv4.1. These are now defined in
+ *	 nfs4_ext_defs.h
+ */
 
 struct open_claim_delegate_cur4 {
 	stateid4 delegate_stateid;
@@ -938,6 +900,24 @@ struct copen_claim_delegate_cur4 {
 };
 typedef struct copen_claim_delegate_cur4 copen_claim_delegate_cur4;
 
+struct open_claim4 {
+	open_claim_type4 claim;
+	union {
+		component4 file;
+		open_delegation_type4 delegate_type;
+		open_claim_delegate_cur4 delegate_cur_info;
+		component4 file_delegate_prev;
+		stateid4 oc_delegate_stateid;
+	} open_claim4_u;
+};
+typedef struct open_claim4 open_claim4;
+
+struct creatverfattr {
+	verifier4 cva_verf;
+	fattr4 cva_attrs;
+};
+typedef struct creatverfattr creatverfattr;
+
 struct OPEN4args {
 	seqid4 seqid;
 	uint32_t share_access;
@@ -948,6 +928,7 @@ struct OPEN4args {
 	union {
 		fattr4 createattrs;
 		verifier4 createverf;
+		creatverfattr ch_createboth;
 	} createhow4_u;
 	open_claim_type4 claim;
 	union {
@@ -955,6 +936,7 @@ struct OPEN4args {
 		open_delegation_type4 delegate_type;
 		open_claim_delegate_cur4 delegate_cur_info;
 		component4 file_delegate_prev;
+		stateid4 oc_delegate_stateid;
 	} open_claim4_u;
 };
 typedef struct OPEN4args OPEN4args;
@@ -969,6 +951,7 @@ struct OPEN4cargs {
 	union {
 		fattr4 createattrs;
 		verifier4 createverf;
+		creatverfattr ch_createboth;
 	} createhow4_u;
 	open_claim_type4 claim;
 	union {
@@ -976,6 +959,7 @@ struct OPEN4cargs {
 		open_delegation_type4 delegate_type;
 		copen_claim_delegate_cur4 delegate_cur_info;
 		char *cfile_delegate_prev;
+		stateid4 coc_delegate_stateid;
 	} open_claim4_u;
 };
 typedef struct OPEN4cargs OPEN4cargs;
@@ -995,23 +979,32 @@ struct open_write_delegation4 {
 };
 typedef struct open_write_delegation4 open_write_delegation4;
 
+/*
+ * XXX - We inline the NFSv4.1 modifications to open_delegation4
+ *	 here since we need the two types above in order to craft
+ *	 the open_delegation4 type. open_none_delegation4 is a new
+ *	 type, but we've already included it in nfs4_ext_defs.h
+ */
 struct open_delegation4 {
 	open_delegation_type4 delegation_type;
 	union {
 		open_read_delegation4 read;
 		open_write_delegation4 write;
+		open_none_delegation4 od_whynone;	/* XXX - NFSv4.1 */
 	} open_delegation4_u;
 };
 typedef struct open_delegation4 open_delegation4;
 #define	OPEN4_RESULT_CONFIRM 0x00000002
 #define	OPEN4_RESULT_LOCKTYPE_POSIX 0x00000004
+#define	OPEN4_RESULT_PRESERVE_UNLINKED 0x00000008	/* XXX - NFSv4.1 */
+#define	OPEN4_RESULT_MAY_NOTIFY_LOCK 0x00000020		/* XXX - NFSv4.1 */
 
 struct OPEN4res {
 	nfsstat4 status;
 	stateid4 stateid;
 	change_info4 cinfo;
 	uint32_t rflags;
-	bitmap4 attrset;
+	attrmap4 attrset;
 	open_delegation4 delegation;
 };
 typedef struct OPEN4res OPEN4res;
@@ -1111,7 +1104,7 @@ struct READDIR4args {
 	verifier4 cookieverf;
 	count4 dircount;
 	count4 maxcount;
-	bitmap4 attr_request;
+	attrmap4 attr_request;
 	vnode_t *dvp;
 	struct mntinfo4 *mi;
 	cred_t *cr;
@@ -1243,7 +1236,7 @@ typedef struct SETATTR4args SETATTR4args;
 
 struct SETATTR4res {
 	nfsstat4 status;
-	bitmap4 attrsset;
+	attrmap4 attrsset;
 };
 typedef struct SETATTR4res SETATTR4res;
 
@@ -1335,151 +1328,11 @@ struct ILLEGAL4res {
 };
 typedef struct ILLEGAL4res ILLEGAL4res;
 
-enum nfs_opnum4 {
-	OP_ACCESS = 3,
-	OP_CLOSE = 4,
-	OP_COMMIT = 5,
-	OP_CREATE = 6,
-	OP_DELEGPURGE = 7,
-	OP_DELEGRETURN = 8,
-	OP_GETATTR = 9,
-	OP_GETFH = 10,
-	OP_LINK = 11,
-	OP_LOCK = 12,
-	OP_LOCKT = 13,
-	OP_LOCKU = 14,
-	OP_LOOKUP = 15,
-	OP_LOOKUPP = 16,
-	OP_NVERIFY = 17,
-	OP_OPEN = 18,
-	OP_OPENATTR = 19,
-	OP_OPEN_CONFIRM = 20,
-	OP_OPEN_DOWNGRADE = 21,
-	OP_PUTFH = 22,
-	OP_PUTPUBFH = 23,
-	OP_PUTROOTFH = 24,
-	OP_READ = 25,
-	OP_READDIR = 26,
-	OP_READLINK = 27,
-	OP_REMOVE = 28,
-	OP_RENAME = 29,
-	OP_RENEW = 30,
-	OP_RESTOREFH = 31,
-	OP_SAVEFH = 32,
-	OP_SECINFO = 33,
-	OP_SETATTR = 34,
-	OP_SETCLIENTID = 35,
-	OP_SETCLIENTID_CONFIRM = 36,
-	OP_VERIFY = 37,
-	OP_WRITE = 38,
-	OP_RELEASE_LOCKOWNER = 39,
-	OP_ILLEGAL = 10044,
 /*
- * These are internal client pseudo ops that *MUST* never go over the wire
+ * XXX - nfs_opnum4, nfs_argop4, and nfs_resop4 were all
+ *	 extended by NFSv4.1 ; These are now defined in
+ *	 nfs41_kprot.h
  */
-#define	SUNW_PRIVATE_OP	0x10000000
-#define	REAL_OP4(op)	((op) & ~SUNW_PRIVATE_OP)
-	OP_CCREATE = OP_CREATE | SUNW_PRIVATE_OP,
-	OP_CLINK = OP_LINK | SUNW_PRIVATE_OP,
-	OP_CLOOKUP = OP_LOOKUP | SUNW_PRIVATE_OP,
-	OP_COPEN = OP_OPEN | SUNW_PRIVATE_OP,
-	OP_CPUTFH = OP_PUTFH | SUNW_PRIVATE_OP,
-	OP_CREMOVE = OP_REMOVE | SUNW_PRIVATE_OP,
-	OP_CRENAME = OP_RENAME | SUNW_PRIVATE_OP,
-	OP_CSECINFO = OP_SECINFO | SUNW_PRIVATE_OP
-};
-typedef enum nfs_opnum4 nfs_opnum4;
-
-struct nfs_argop4 {
-	nfs_opnum4 argop;
-	union {
-		ACCESS4args opaccess;
-		CLOSE4args opclose;
-		COMMIT4args opcommit;
-		CREATE4args opcreate;
-		CREATE4cargs opccreate;
-		DELEGPURGE4args opdelegpurge;
-		DELEGRETURN4args opdelegreturn;
-		GETATTR4args opgetattr;
-		LINK4args oplink;
-		LINK4cargs opclink;
-		LOCK4args oplock;
-		LOCKT4args oplockt;
-		LOCKU4args oplocku;
-		LOOKUP4args oplookup;
-		LOOKUP4cargs opclookup;
-		NVERIFY4args opnverify;
-		OPEN4args opopen;
-		OPEN4cargs opcopen;
-		OPENATTR4args opopenattr;
-		OPEN_CONFIRM4args opopen_confirm;
-		OPEN_DOWNGRADE4args opopen_downgrade;
-		PUTFH4args opputfh;
-		PUTFH4cargs opcputfh;
-		READ4args opread;
-		READDIR4args opreaddir;
-		REMOVE4args opremove;
-		REMOVE4cargs opcremove;
-		RENAME4args oprename;
-		RENAME4cargs opcrename;
-		RENEW4args oprenew;
-		SECINFO4args opsecinfo;
-		SECINFO4cargs opcsecinfo;
-		SETATTR4args opsetattr;
-		SETCLIENTID4args opsetclientid;
-		SETCLIENTID_CONFIRM4args opsetclientid_confirm;
-		VERIFY4args opverify;
-		WRITE4args opwrite;
-		RELEASE_LOCKOWNER4args oprelease_lockowner;
-	} nfs_argop4_u;
-};
-typedef struct nfs_argop4 nfs_argop4;
-
-struct nfs_resop4 {
-	nfs_opnum4 resop;
-	union {
-		ACCESS4res opaccess;
-		CLOSE4res opclose;
-		COMMIT4res opcommit;
-		CREATE4res opcreate;
-		DELEGPURGE4res opdelegpurge;
-		DELEGRETURN4res opdelegreturn;
-		GETATTR4res opgetattr;
-		GETFH4res opgetfh;
-		LINK4res oplink;
-		LOCK4res oplock;
-		LOCKT4res oplockt;
-		LOCKU4res oplocku;
-		LOOKUP4res oplookup;
-		LOOKUPP4res oplookupp;
-		NVERIFY4res opnverify;
-		OPEN4res opopen;
-		OPENATTR4res opopenattr;
-		OPEN_CONFIRM4res opopen_confirm;
-		OPEN_DOWNGRADE4res opopen_downgrade;
-		PUTFH4res opputfh;
-		PUTPUBFH4res opputpubfh;
-		PUTROOTFH4res opputrootfh;
-		READ4res opread;
-		READDIR4res opreaddir;
-		READDIR4res_clnt opreaddirclnt;
-		READLINK4res opreadlink;
-		REMOVE4res opremove;
-		RENAME4res oprename;
-		RENEW4res oprenew;
-		RESTOREFH4res oprestorefh;
-		SAVEFH4res opsavefh;
-		SECINFO4res opsecinfo;
-		SETATTR4res opsetattr;
-		SETCLIENTID4res opsetclientid;
-		SETCLIENTID_CONFIRM4res opsetclientid_confirm;
-		VERIFY4res opverify;
-		WRITE4res opwrite;
-		RELEASE_LOCKOWNER4res oprelease_lockowner;
-		ILLEGAL4res opillegal;
-	} nfs_resop4_u;
-};
-typedef struct nfs_resop4 nfs_resop4;
 
 /*
  * Fixed size tag string for easy client encoding
@@ -1494,8 +1347,41 @@ typedef struct _ctag ctag_t;
 /*
  * Client-only encode-only version
  */
+struct CB_GETATTR4args {
+	nfs_fh4 fh;
+	attrmap4 attr_request;
+};
+typedef struct CB_GETATTR4args CB_GETATTR4args;
+
+struct CB_GETATTR4res {
+	nfsstat4 status;
+	fattr4 obj_attributes;
+};
+typedef struct CB_GETATTR4res CB_GETATTR4res;
+
+struct CB_RECALL4args {
+	stateid4 stateid;
+	bool_t truncate;
+	nfs_fh4 fh;
+};
+typedef struct CB_RECALL4args CB_RECALL4args;
+
+struct CB_RECALL4res {
+	nfsstat4 status;
+};
+typedef struct CB_RECALL4res CB_RECALL4res;
+
+struct CB_ILLEGAL4res {
+	nfsstat4 status;
+};
+typedef struct CB_ILLEGAL4res CB_ILLEGAL4res;
+
+/* XXX - NFSv4.1 protocol defs */
+#include <nfs/nfs41_kprot.h>
+
 struct COMPOUND4args_clnt {
 	int ctag;
+	uint32_t minor_vers;
 	uint_t array_len;
 	nfs_argop4 *array;
 };
@@ -1526,60 +1412,20 @@ struct COMPOUND4res {
 };
 typedef struct COMPOUND4res COMPOUND4res;
 
-struct CB_GETATTR4args {
-	nfs_fh4 fh;
-	bitmap4 attr_request;
-};
-typedef struct CB_GETATTR4args CB_GETATTR4args;
-
-struct CB_GETATTR4res {
+struct COMPOUND4res_srv {
 	nfsstat4 status;
-	fattr4 obj_attributes;
+	utf8string tag;
+	uint_t array_len;
+	nfs_resop4 *array;
+	uint32_t minorversion;	/* won't go otw */
 };
-typedef struct CB_GETATTR4res CB_GETATTR4res;
+typedef struct COMPOUND4res_srv COMPOUND4res_srv;
 
-struct CB_RECALL4args {
-	stateid4 stateid;
-	bool_t truncate;
-	nfs_fh4 fh;
-};
-typedef struct CB_RECALL4args CB_RECALL4args;
-
-struct CB_RECALL4res {
-	nfsstat4 status;
-};
-typedef struct CB_RECALL4res CB_RECALL4res;
-
-struct CB_ILLEGAL4res {
-	nfsstat4 status;
-};
-typedef struct CB_ILLEGAL4res CB_ILLEGAL4res;
-
-enum nfs_cb_opnum4 {
-	OP_CB_GETATTR = 3,
-	OP_CB_RECALL = 4,
-	OP_CB_ILLEGAL = 10044
-};
-typedef enum nfs_cb_opnum4 nfs_cb_opnum4;
-
-struct nfs_cb_argop4 {
-	uint_t argop;
-	union {
-		CB_GETATTR4args opcbgetattr;
-		CB_RECALL4args opcbrecall;
-	} nfs_cb_argop4_u;
-};
-typedef struct nfs_cb_argop4 nfs_cb_argop4;
-
-struct nfs_cb_resop4 {
-	uint_t resop;
-	union {
-		CB_GETATTR4res opcbgetattr;
-		CB_RECALL4res opcbrecall;
-		CB_ILLEGAL4res opcbillegal;
-	} nfs_cb_resop4_u;
-};
-typedef struct nfs_cb_resop4 nfs_cb_resop4;
+/*
+ * XXX - nfs_cb_opnum4, nfs_cb_argop4, and nfs_cb_resop4 were
+ *	 all extended by NFSv4.1 ; These are now defined in
+ *	 nfs41_kprot.h
+ */
 
 struct CB_COMPOUND4args {
 	utf8string tag;
@@ -1609,22 +1455,24 @@ typedef struct CB_COMPOUND4res CB_COMPOUND4res;
 #define	CB_COMPOUND		1
 
 extern  bool_t xdr_bitmap4(XDR *, bitmap4 *);
+extern  bool_t xdr_attrmap4(XDR *, attrmap4 *);
 extern  bool_t xdr_utf8string(XDR *, utf8string *);
 extern  bool_t xdr_nfs_fh4(XDR *, nfs_fh4 *);
+extern  bool_t xdr_nfs_fh4_modified(XDR *, nfs_fh4 *);
 extern  bool_t xdr_fattr4_fsid(XDR *, fattr4_fsid *);
 extern  bool_t xdr_fattr4_acl(XDR *, fattr4_acl *);
 extern  bool_t xdr_fattr4_fs_locations(XDR *, fattr4_fs_locations *);
 extern  bool_t xdr_fattr4_rawdev(XDR *, fattr4_rawdev *);
 extern  bool_t xdr_nfstime4(XDR *, nfstime4 *);
 extern  bool_t xdr_settime4(XDR *, settime4 *);
+extern	bool_t xdr_open_claim4(XDR *, open_claim4 *);
 extern  bool_t xdr_COMPOUND4args_clnt(XDR *, COMPOUND4args_clnt *);
-extern  bool_t xdr_COMPOUND4args_srv(XDR *, COMPOUND4args *);
+extern  bool_t xdr_COMPOUND4args_srv(XDR *, COMPOUND4args_srv *);
 extern  bool_t xdr_COMPOUND4res_clnt(XDR *, COMPOUND4res_clnt *);
-extern  bool_t xdr_COMPOUND4res_srv(XDR *, COMPOUND4res *);
+extern  bool_t xdr_COMPOUND4res_srv(XDR *, COMPOUND4res_srv *);
 extern  bool_t xdr_CB_COMPOUND4args_clnt(XDR *, CB_COMPOUND4args *);
 extern  bool_t xdr_CB_COMPOUND4args_srv(XDR *, CB_COMPOUND4args *);
 extern  bool_t xdr_CB_COMPOUND4res(XDR *, CB_COMPOUND4res *);
-
 
 #ifdef __cplusplus
 }

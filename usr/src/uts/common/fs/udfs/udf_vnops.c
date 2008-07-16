@@ -236,11 +236,8 @@ const fs_operation_def_t udf_vnodeops_template[] = {
 
 /* ARGSUSED */
 static int32_t
-udf_open(
-	struct vnode **vpp,
-	int32_t flag,
-	struct cred *cr,
-	caller_context_t *ct)
+udf_open(struct vnode **vpp, int32_t flag, struct cred *cr,
+    caller_context_t *ct)
 {
 	ud_printf("udf_open\n");
 

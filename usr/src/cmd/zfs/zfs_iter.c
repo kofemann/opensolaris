@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -103,6 +103,8 @@ zfs_callback(zfs_handle_t *zhp, void *data)
 	if (cb->cb_recurse) {
 		if (zfs_get_type(zhp) == ZFS_TYPE_FILESYSTEM)
 			(void) zfs_iter_filesystems(zhp, zfs_callback, data);
+		if (zfs_get_type(zhp) == ZFS_TYPE_PNFS)
+			(void) zfs_iter_pnfs(zhp, zfs_callback, data);
 		if (zfs_get_type(zhp) != ZFS_TYPE_SNAPSHOT &&
 		    (cb->cb_types & ZFS_TYPE_SNAPSHOT))
 			(void) zfs_iter_snapshots(zhp, zfs_callback, data);

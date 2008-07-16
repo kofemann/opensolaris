@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- *	Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ *	Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  *	Use is subject to license terms.
  */
 
@@ -326,6 +326,11 @@ typedef struct rnode4 {
 					/* stub type was set		    */
 	nfs4_stub_type_t	r_stub_type;
 					/* e.g. mirror-mount */
+	struct pnfs_layout *r_layout;	/* pNFS layout */
+	kcondvar_t	r_lowait;	/* Wait For Layout */
+	clock_t		r_last_layoutget; /* time of last layoutget attempt */
+	offset4		r_last_write_offset; /* used in LAYOUTCOMMIT */
+	avl_node_t	r_avl;		/* layout avl tree */
 } rnode4_t;
 
 #define	r_vnode	r_svnode.sv_r_vnode
@@ -354,6 +359,11 @@ typedef struct rnode4 {
 #define	R4PGFLUSH	0x80000	/* page flush thread active */
 #define	R4INCACHEPURGE	0x100000 /* purging caches due to file size change */
 #define	R4LOOKUP	0x200000 /* a lookup has been done in the directory */
+#define	R4LAYOUTVALID	0x400000 /* a pNFS layout is available */
+#define	R4LASTBYTE	0x800000 /* pNFS last_write_offset is valid */
+#define	R4LAYOUTUNAVAIL 0x1000000 /* to be moved to pnfs_layout later */
+#define	R4LOGET		0x2000000 /* Layout Get In Progress */
+
 /*
  * Convert between vnode and rnode
  */
@@ -448,7 +458,7 @@ extern int	writerp4(rnode4_t *, caddr_t, int, struct uio *, int);
 extern void	nfs4_set_nonvattrs(rnode4_t *, struct nfs4attr_to_vattr *);
 extern void	nfs4delegabandon(rnode4_t *);
 extern stateid4 nfs4_get_w_stateid(cred_t *, rnode4_t *, pid_t, mntinfo4_t *,
-			nfs_opnum4, nfs4_stateid_types_t *);
+		nfs_opnum4, nfs4_stateid_types_t *, int flags);
 extern stateid4 nfs4_get_stateid(cred_t *, rnode4_t *, pid_t, mntinfo4_t *,
 			nfs_opnum4, nfs4_stateid_types_t *, bool_t);
 extern nfsstat4 nfs4_find_or_create_lock_owner(pid_t, rnode4_t *, cred_t *,
@@ -457,6 +467,11 @@ extern nfsstat4 nfs4_find_or_create_lock_owner(pid_t, rnode4_t *, cred_t *,
 extern cred_t   *nfs4_get_otw_cred_by_osp(rnode4_t *, cred_t *,
 			nfs4_open_stream_t **, bool_t *, bool_t *);
 
+/*
+ * Define flags for nfs4_get_w_stateid
+ */
+#define	NFS4_WSID_NOPNFS	0x0	/* Get stateid for non-pnfs write */
+#define	NFS4_WSID_PNFS		0x1	/* Get stateid for pNFS write to DS */
 
 /*
  * Defines for the flag argument of nfs4delegreturn
