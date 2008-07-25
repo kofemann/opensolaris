@@ -30,7 +30,6 @@
 
 static kmem_cache_t *file_io_read_cache;
 static kmem_cache_t *read_task_cache;
-static kmem_cache_t *file_layout_cache;
 static kmem_cache_t *stripe_dev_cache;
 static kmem_cache_t *pnfs_read_compound_cache;
 static kmem_cache_t *pnfs_layout_cache;
@@ -124,71 +123,13 @@ stripe_dev_rele(stripe_dev_t **handle)
 	kmem_cache_free(stripe_dev_cache, stripe);
 }
 
-/*ARGSUSED*/
-static int
-file_layout_construct(void *vlayout, void *foo, int bar)
-{
-	file_layout_t *layout = vlayout;
 
-	mutex_init(&layout->fl_lock, NULL, MUTEX_DEFAULT, NULL);
-
-	return (0);
-}
-
-/*ARGSUSED*/
-static void
-file_layout_destroy(void *vlayout, void *foo)
-{
-	file_layout_t *layout = vlayout;
-
-	mutex_destroy(&layout->fl_lock);
-}
-
-static file_layout_t *
-file_layout_alloc()
-{
-	file_layout_t *rc;
-
-	rc = kmem_cache_alloc(file_layout_cache, KM_SLEEP);
-	rc->fl_refcount = 1;
-
-	return (rc);
-}
-
-static void
-file_layout_hold(file_layout_t *layout)
-{
-	mutex_enter(&layout->fl_lock);
-	layout->fl_refcount++;
-	mutex_exit(&layout->fl_lock);
-}
-
-static void
-file_layout_rele(file_layout_t **handle)
-{
-	file_layout_t *layout = *handle;
-	int i;
-
-	mutex_enter(&layout->fl_lock);
-	*handle = NULL;
-	layout->fl_refcount--;
-	if (layout->fl_refcount > 0) {
-		mutex_exit(&layout->fl_lock);
-		return;
-	}
-	mutex_exit(&layout->fl_lock);
-
-	for (i = 0; i < layout->fl_stripe_count; i++)
-		stripe_dev_rele(layout->fl_stripe_dev + i);
-	kmem_free(layout->fl_stripe_dev,
-	    layout->fl_stripe_count * sizeof (stripe_dev_t *));
-	kmem_cache_free(file_layout_cache, layout);
-}
 
 stateid4
 pnfs_get_losid(rnode4_t *rp)
 {
-	return (rp->r_layout->lo_stateid);
+	ASSERT(MUTEX_HELD(&rp->r_statelock));
+	return (rp->r_lostateid);
 }
 
 /* stolen from nfs4_srv_deleg.c */
@@ -287,11 +228,16 @@ stripe_dev_destroy(void *vstripe, void *foo)
 static int
 pnfs_layout_construct(void *vlayout, void *foo, int bar)
 {
-#if	0
 	pnfs_layout_t *layout = vlayout;
-#endif
 
-	/* AVL for segments */
+	mutex_init(&layout->plo_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&layout->plo_wait, NULL, CV_DEFAULT, NULL);
+	layout->plo_inusecnt = 0;
+	layout->plo_length = 0;
+	layout->plo_offset = 0;
+	layout->plo_flags = 0;
+	bzero(&layout->plo_stateid, sizeof (layout->plo_stateid));
+
 	return (0);
 }
 
@@ -299,9 +245,11 @@ pnfs_layout_construct(void *vlayout, void *foo, int bar)
 static void
 pnfs_layout_destroy(void *vlayout, void *foo)
 {
-#if	0
+
 	pnfs_layout_t *layout = vlayout;
-#endif
+
+	mutex_destroy(&layout->plo_lock);
+	cv_destroy(&layout->plo_wait);
 
 	/* AVL for segments */
 }
@@ -480,10 +428,6 @@ nfs4_pnfs_init()
 	    sizeof (write_task_t), 0,
 	    NULL, NULL, NULL,
 	    NULL, NULL, 0);
-	file_layout_cache = kmem_cache_create("file_layout_cache",
-	    sizeof (file_layout_t), 0,
-	    file_layout_construct, file_layout_destroy, NULL,
-	    NULL, NULL, 0);
 	stripe_dev_cache = kmem_cache_create("stripe_dev_cache",
 	    sizeof (stripe_dev_t), 0,
 	    stripe_dev_construct, stripe_dev_destroy, NULL,
@@ -549,7 +493,6 @@ nfs4_pnfs_fini()
 	kmem_cache_destroy(read_task_cache);
 	kmem_cache_destroy(file_io_write_cache);
 	kmem_cache_destroy(write_task_cache);
-	kmem_cache_destroy(file_layout_cache);
 	kmem_cache_destroy(stripe_dev_cache);
 	kmem_cache_destroy(pnfs_read_compound_cache);
 	kmem_cache_destroy(pnfs_layout_cache);
@@ -1341,10 +1284,9 @@ out:
 }
 
 static pnfs_layout_t *
-layoutget_to_layout(LAYOUTGET4res *res, mntinfo4_t *mi)
+layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 {
-	pnfs_layout_t *rc = NULL;
-	file_layout_t *file_layout;
+	pnfs_layout_t *layout = NULL;
 	layout4 *l4;
 	nfsv4_1_file_layout4	*file_layout4;
 	XDR xdr;
@@ -1378,21 +1320,19 @@ layoutget_to_layout(LAYOUTGET4res *res, mntinfo4_t *mi)
 		cmn_err(CE_WARN, "could not decode file_layouttype4");
 		return (NULL);
 	}
-	file_layout = file_layout_alloc();
-	rc = kmem_cache_alloc(pnfs_layout_cache, KM_SLEEP);
-	rc->type = LAYOUT4_NFSV4_1_FILES;
-	rc->layout = file_layout;
-	rc->iomode = l4->lo_iomode;
-	rc->lo_roc = res->LAYOUTGET4res_u.logr_resok4.logr_return_on_close;
-	rc->lo_stateid = res->LAYOUTGET4res_u.logr_resok4.logr_stateid;
 
-	DEV_ASSIGN(file_layout->fl_deviceid, file_layout4->nfl_deviceid);
-	file_layout->fl_first_stripe_index =
+	layout = kmem_cache_alloc(pnfs_layout_cache, KM_SLEEP);
+	layout->plo_iomode = l4->lo_iomode;
+	if (res->LAYOUTGET4res_u.logr_resok4.logr_return_on_close)
+		layout->plo_flags |= PLO_ROC;
+
+	DEV_ASSIGN(layout->plo_deviceid, file_layout4->nfl_deviceid);
+	layout->plo_first_stripe_index =
 	    file_layout4->nfl_first_stripe_index;
-	file_layout->fl_stripe_type =
+	layout->plo_stripe_type =
 	    (file_layout4->nfl_util & NFL4_UFLG_DENSE) ?
 	    STRIPE4_DENSE : STRIPE4_SPARSE;
-	file_layout->fl_stripe_unit =
+	layout->plo_stripe_unit =
 	    file_layout4->nfl_util & NFL4_UFLG_STRIPE_UNIT_SIZE_MASK;
 #ifdef	WEBXXX
 	if (file_layout4->N_LEN > 0) {
@@ -1405,24 +1345,32 @@ layoutget_to_layout(LAYOUTGET4res *res, mntinfo4_t *mi)
 	}
 #endif
 	/* stripe count is the number of file handles in the list */
-	file_layout->fl_stripe_count =
+	layout->plo_stripe_count =
 	    file_layout4->nfl_fh_list.nfl_fh_list_len;
 
-	file_layout->fl_stripe_dev = kmem_alloc(file_layout->fl_stripe_count *
+	layout->plo_stripe_dev = kmem_alloc(layout->plo_stripe_count *
 	    sizeof (stripe_dev_t *), KM_SLEEP);
-	for (i = 0; i < file_layout->fl_stripe_count; i++) {
+	for (i = 0; i < layout->plo_stripe_count; i++) {
 		stripe_dev_t *sd;
 
 		sd = stripe_dev_alloc();
-		file_layout->fl_stripe_dev[i] = sd;
+		layout->plo_stripe_dev[i] = sd;
 		sd->fh = sfh4_get(
 		    &file_layout4->nfl_fh_list.nfl_fh_list_val[i], mi);
-
 		DEV_ASSIGN(sd->sd_devid, file_layout4->nfl_deviceid);
 	}
 	/* XXX free memory and stuff */
+	layout->plo_refcount = 1;
 
-	return (rc);
+	rp->r_lostateid = res->LAYOUTGET4res_u.logr_resok4.logr_stateid;
+	rp->r_flags |= R4LAYOUTVALID;
+	/*
+	 * Insert pnfs_layout_t into list, just add at head for now since we
+	 * are only dealing with single layouts.
+	 */
+	list_insert_head(&rp->r_layout, layout);
+
+	return (layout);
 }
 
 static void
@@ -1518,6 +1466,7 @@ pnfs_task_layoutget(void *v)
 	task_layoutget_t *task = v;
 	mntinfo4_t *mi = task->tlg_mi;
 	nfs4_server_t *np;
+	pnfs_layout_t *layout;
 	rnode4_t *rp = VTOR4(task->tlg_vp);
 	COMPOUND4args_clnt args;
 	COMPOUND4res_clnt res;
@@ -1562,21 +1511,30 @@ pnfs_task_layoutget(void *v)
 	nfs4_init_stateid_types(&sid_types);
 
 recov_retry:
-	if (nfs4_start_op(mi, NULL, NULL, &recov_state))
-		goto out;
+
 	arg->loga_stateid = nfs4_get_stateid(cr, rp, -1, mi, OP_READ,
 	    &sid_types, (GETSID_LAYOUT | trynext_sid));
+
+	/*
+	 * If we ended up with the special stateid, this means the
+	 * file isn't opened and does not have a delegation stateid to use
+	 * either.  At this point we can not get a layout.
+	 */
+	if (sid_types.cur_sid_type == SPEC_SID)
+		goto out;
+
+	if (nfs4_start_op(mi, NULL, NULL, &recov_state))
+		goto out;
 
 	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
 
 	if ((e.error == 0) && (e.stat == NFS4_OK)) {
 		LAYOUTGET4res *resp = &res.array[1].nfs_resop4_u.oplayoutget;
 		mutex_enter(&rp->r_statelock);
-		if (rp->r_flags & R4LAYOUTVALID)
-			pnfs_layout_free(task->tlg_vp, cr, LR_ASYNC);
-		rp->r_layout = layoutget_to_layout(resp, mi);
-		if (rp->r_layout)
-			rp->r_flags |= R4LAYOUTVALID;
+		if (rp->r_flags & R4LAYOUTVALID) {
+			pnfs_layout_return(task->tlg_vp, cr, LR_ASYNC);
+		}
+		layout = layoutget_to_layout(resp, rp, mi);
 		mutex_exit(&rp->r_statelock);
 
 		/*
@@ -1732,11 +1690,12 @@ pnfs_layoutget(vnode_t *vp, cred_t *cr, layoutiomode4 mode)
 }
 
 void
-pnfs_layout_free(vnode_t *vp, cred_t *cr, int aflag)
+pnfs_layout_return(vnode_t *vp, cred_t *cr, int aflag)
 {
 	rnode4_t *rp = VTOR4(vp);
 	mntinfo4_t *mi = VTOMI4(vp);
 	task_layoutreturn_t *task;
+	pnfs_layout_t *layout;
 	layoutiomode4 iomode;
 	stateid4 losid;
 
@@ -1748,14 +1707,17 @@ pnfs_layout_free(vnode_t *vp, cred_t *cr, int aflag)
 		return;
 	}
 
-	/* XXX assert file layout type? */
 	ASSERT(MUTEX_HELD(&rp->r_statelock));
-	iomode = rp->r_layout->iomode;
-	losid = rp->r_layout->lo_stateid;
-	file_layout_rele((file_layout_t **)&rp->r_layout->layout);
-	kmem_cache_free(pnfs_layout_cache, rp->r_layout);
-	rp->r_layout = NULL;
+
+	layout = list_head(&rp->r_layout);
+
+	if (layout == NULL)
+		return;
+
+	iomode = layout->plo_iomode;
+	losid = layout->plo_stateid;
 	rp->r_flags &= ~R4LAYOUTVALID;
+	pnfs_layout_rele(rp);
 
 	task = kmem_cache_alloc(task_layoutreturn_cache, KM_SLEEP);
 	VN_HOLD(vp);
@@ -1784,16 +1746,42 @@ pnfs_layout_free(vnode_t *vp, cred_t *cr, int aflag)
 }
 
 void
-pnfs_layout_rele(rnode4_t *rp)
+
+pnfs_layout_hold(rnode4_t *rp, pnfs_layout_t *layout)
 {
 	ASSERT(MUTEX_HELD(&rp->r_statelock));
+	layout->plo_refcount++;
+}
 
-	if (rp->r_flags & R4LAYOUTVALID) {
-		file_layout_rele((file_layout_t **)&rp->r_layout->layout);
-		kmem_cache_free(pnfs_layout_cache, rp->r_layout);
-		rp->r_layout = NULL;
-		rp->r_flags &= ~R4LAYOUTVALID;
-	}
+void
+pnfs_layout_rele(rnode4_t *rp)
+{
+	pnfs_layout_t	*layout = NULL;
+	int i;
+
+	ASSERT(MUTEX_HELD(&rp->r_statelock));
+
+	/*
+	 * Only 1 layout for now.
+	 */
+	layout = list_head(&rp->r_layout);
+	if (layout == NULL)
+		return;
+	layout->plo_refcount--;
+	if (layout->plo_refcount > 0)
+		return;
+	ASSERT((layout->plo_flags & (PLO_RETURN|PLO_GET|PLO_RECALL)) == 0);
+	ASSERT(layout->plo_inusecnt == 0);
+
+	list_remove(&rp->r_layout, layout);
+
+	for (i = 0; i < layout->plo_stripe_count; i++)
+		stripe_dev_rele(layout->plo_stripe_dev + i);
+
+	kmem_free(layout->plo_stripe_dev,
+	    layout->plo_stripe_count * sizeof (stripe_dev_t *));
+
+	kmem_cache_free(pnfs_layout_cache, layout);
 }
 
 int
@@ -1804,9 +1792,9 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 	mntinfo4_t *mi = VTOMI4(vp);
 	int i, error = 0;
 	int remaining = 0;
-	file_layout_t *layout;
 	file_io_read_t *job;
 	read_task_t *task;
+	pnfs_layout_t *layout = NULL;
 	uint32_t stripenum, stripeoff;
 	length4 stripewidth;
 	nfs4_stateid_types_t sid_types;
@@ -1816,19 +1804,21 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 	caddr_t xbase;
 
 	mutex_enter(&rp->r_statelock);
-	if (mi->mi_flags & MI4_PNFS &&
-	    !(rp->r_flags & (R4LAYOUTVALID|R4LAYOUTUNAVAIL))) {
+	layout = list_head(&rp->r_layout);
+	if ((! (rp->r_flags & R4LAYOUTVALID)) || layout == NULL) {
 		mutex_exit(&rp->r_statelock);
 		pnfs_layoutget(vp, cr, LAYOUTIOMODE4_RW);
 		mutex_enter(&rp->r_statelock);
+		layout = list_head(&rp->r_layout);
 	}
 
 
-	if ((! (rp->r_flags & R4LAYOUTVALID)) ||
-	    (rp->r_layout->type != LAYOUT4_NFSV4_1_FILES)) {
+	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
 		mutex_exit(&rp->r_statelock);
 		return (EAGAIN);
 	}
+	pnfs_layout_hold(rp, layout);
+	mutex_exit(&rp->r_statelock);
 
 	/*
 	 * Check for a user address in the uio.  If so, then
@@ -1842,15 +1832,13 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		xbase = base = kmem_alloc(count, KM_SLEEP);
 	}
 
-	layout = rp->r_layout->layout;
-	file_layout_hold(layout);
-	mutex_exit(&rp->r_statelock);
-
-	for (i = 0; i < layout->fl_stripe_count; i++) {
-		error = stripe_dev_prepare(mi, layout->fl_stripe_dev[i],
-		    layout->fl_first_stripe_index, i, cr);
+	for (i = 0; i < layout->plo_stripe_count; i++) {
+		error = stripe_dev_prepare(mi, layout->plo_stripe_dev[i],
+		    layout->plo_first_stripe_index, i, cr);
 		if (error) {
-			file_layout_rele(&layout);
+			mutex_enter(&rp->r_statelock);
+			pnfs_layout_rele(rp);
+			mutex_exit(&rp->r_statelock);
 			return (error);
 		}
 	}
@@ -1861,14 +1849,16 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 	    mi, OP_READ, &sid_types, (async ? GETSID_TRYNEXT : 0));
 
 	while (count > 0) {
-		stripenum = off / layout->fl_stripe_unit;
-		stripeoff = off % layout->fl_stripe_unit;
-		stripewidth = layout->fl_stripe_unit * layout->fl_stripe_count;
+		stripenum = off / layout->plo_stripe_unit;
+		stripeoff = off % layout->plo_stripe_unit;
+		stripewidth = layout->plo_stripe_unit *
+		    layout->plo_stripe_count;
 
 		task = kmem_cache_alloc(read_task_cache, KM_SLEEP);
 		task->rt_job = job;
 		task->rt_dev =
-		    layout->fl_stripe_dev[stripenum % layout->fl_stripe_count];
+		    layout->plo_stripe_dev[stripenum %
+		    layout->plo_stripe_count];
 		stripe_dev_hold(task->rt_dev);
 		VN_HOLD(vp);	/* VN_RELE() in pnfs_call() */
 		task->rt_vp = vp;
@@ -1876,11 +1866,12 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		crhold(cr);
 
 		task->rt_offset = off;
-		if (layout->fl_stripe_type == STRIPE4_DENSE)
+		if (layout->plo_stripe_type == STRIPE4_DENSE)
 			task->rt_offset = (off / stripewidth)
-			    * layout->fl_stripe_unit
+			    * layout->plo_stripe_unit
 			    + stripeoff;
-		task->rt_count = MIN(layout->fl_stripe_unit - stripeoff, count);
+		task->rt_count = MIN(layout->plo_stripe_unit - stripeoff,
+		    count);
 		task->rt_base = base;
 		nfs4_error_zinit(&task->rt_err);
 		if (uiop) {
@@ -1933,14 +1924,9 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		kmem_free(xbase, orig_count);
 	}
 
-	if (error) {
-		mutex_enter(&rp->r_statelock);
-#if 0
-		pnfs_layout_free(vp, cr, LR_ASYNC);
-#endif
-		mutex_exit(&rp->r_statelock);
-	}
-	file_layout_rele(&layout);
+	mutex_enter(&rp->r_statelock);
+	pnfs_layout_rele(rp);
+	mutex_exit(&rp->r_statelock);
 
 	(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
 	    pnfs_task_read_free, job, 0);
@@ -1960,7 +1946,7 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 	file_io_write_t *job;
 	write_task_t *task;
 	rnode4_t *rp = VTOR4(vp);
-	file_layout_t *layout;
+	pnfs_layout_t *layout;
 	uint32_t stripenum, stripeoff;
 	length4 stripewidth;
 	mntinfo4_t *mi = VTOMI4(vp);
@@ -1969,28 +1955,30 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 	int nosig;
 
 	mutex_enter(&rp->r_statelock);
-	if (mi->mi_flags & MI4_PNFS &&
-	    !(rp->r_flags & (R4LAYOUTVALID|R4LAYOUTUNAVAIL))) {
+	layout = list_head(&rp->r_layout);
+	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
 		mutex_exit(&rp->r_statelock);
 		pnfs_layoutget(vp, cr, LAYOUTIOMODE4_RW);
 		mutex_enter(&rp->r_statelock);
+		layout = list_head(&rp->r_layout);
 	}
 
 	/* XXX refactor needed with pnfs_read() above */
-	if (! (rp->r_flags & R4LAYOUTVALID)) {
+	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
 		mutex_exit(&rp->r_statelock);
 		return (EAGAIN);
 	}
 
-	layout = rp->r_layout->layout; /* XXX assumes correct type */
-	file_layout_hold(layout);
+	pnfs_layout_hold(rp, layout);
 	mutex_exit(&rp->r_statelock);
 
-	for (i = 0; i < layout->fl_stripe_count; i++) {
-		error = stripe_dev_prepare(mi, layout->fl_stripe_dev[i],
-		    layout->fl_first_stripe_index, i, cr);
+	for (i = 0; i < layout->plo_stripe_count; i++) {
+		error = stripe_dev_prepare(mi, layout->plo_stripe_dev[i],
+		    layout->plo_first_stripe_index, i, cr);
 		if (error) {
-			file_layout_rele(&layout);
+			mutex_enter(&rp->r_statelock);
+			pnfs_layout_rele(rp);
+			mutex_exit(&rp->r_statelock);
 			return (error);
 		}
 	}
@@ -2001,9 +1989,10 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 	    mi, OP_WRITE, &sid_types, NFS4_WSID_PNFS);
 	job->fiw_vp = vp;
 	while (count > 0) {
-		stripenum = off / layout->fl_stripe_unit;
-		stripeoff = off % layout->fl_stripe_unit;
-		stripewidth = layout->fl_stripe_unit * layout->fl_stripe_count;
+		stripenum = off / layout->plo_stripe_unit;
+		stripeoff = off % layout->plo_stripe_unit;
+		stripewidth = layout->plo_stripe_unit *
+		    layout->plo_stripe_count;
 
 		task = kmem_cache_alloc(write_task_cache, KM_SLEEP);
 		task->wt_job = job;
@@ -2014,17 +2003,19 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		nfs4_error_zinit(&task->wt_err);
 		task->wt_offset = off;
 		task->wt_voff = off;
-		if (layout->fl_stripe_type == STRIPE4_DENSE)
+		if (layout->plo_stripe_type == STRIPE4_DENSE)
 			task->wt_offset = (off / stripewidth)
-			    * layout->fl_stripe_unit
+			    * layout->plo_stripe_unit
 			    + stripeoff;
 		task->wt_dev =
-		    layout->fl_stripe_dev[stripenum % layout->fl_stripe_count];
+		    layout->plo_stripe_dev[stripenum %
+		    layout->plo_stripe_count];
 		stripe_dev_hold(task->wt_dev);
 
 		task->wt_base = base;
 		/* XXX do we need a more conservative calculation? */
-		task->wt_count = MIN(layout->fl_stripe_unit - stripeoff, count);
+		task->wt_count = MIN(layout->plo_stripe_unit - stripeoff,
+		    count);
 
 		off += task->wt_count;
 		base += task->wt_count;
@@ -2042,17 +2033,13 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		if ((nosig == 0) && (job->fiw_error == 0))
 			job->fiw_error = EINTR;
 	}
+
 	error = job->fiw_error;
 	mutex_exit(&job->fiw_lock);
 
-	if (error) {
-		mutex_enter(&rp->r_statelock);
-#if 0
-		pnfs_layout_free(vp, cr, LR_ASYNC);
-#endif
-		mutex_exit(&rp->r_statelock);
-	}
-	file_layout_rele(&layout);
+	mutex_enter(&rp->r_statelock);
+	pnfs_layout_rele(rp);
+	mutex_exit(&rp->r_statelock);
 
 	*stab = FILE_SYNC4; /* XXX */
 

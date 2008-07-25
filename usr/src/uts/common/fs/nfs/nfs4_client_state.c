@@ -729,7 +729,6 @@ open_stateid:
 		}
 	}
 special_stateid:
-	ASSERT(!(flags & GETSID_LAYOUT));
 	bzero(&sid, sizeof (stateid4));
 	sid_tp->cur_sid_type = SPEC_SID;
 	return	(sid);

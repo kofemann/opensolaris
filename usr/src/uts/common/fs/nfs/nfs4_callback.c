@@ -632,7 +632,7 @@ layoutrecall_all(nfs4_server_t *np)
 			vp = RTOV4(rp);
 			VN_HOLD(vp);
 			mutex_enter(&rp->r_statelock);
-			pnfs_layout_free(vp, kcred, LR_ASYNC);
+			pnfs_layout_return(vp, kcred, LR_ASYNC);
 			mutex_exit(&rp->r_statelock);
 			VN_RELE(vp);
 		}
@@ -682,7 +682,7 @@ layoutrecall_fsid(fsid4 *recallfsid, nfs4_server_t *np)
 		vp = RTOV4(rp);
 		VN_HOLD(vp);
 		mutex_enter(&rp->r_statelock);
-		pnfs_layout_free(vp, kcred, LR_ASYNC);
+		pnfs_layout_return(vp, kcred, LR_ASYNC);
 		mutex_exit(&rp->r_statelock);
 		VN_RELE(vp);
 		nstatus = NFS4_OK;
@@ -722,7 +722,7 @@ layoutrecall_file(layoutrecall_file4 *lrf, nfs4_server_t *np)
 			vp = RTOV4(rp);
 			VN_HOLD(vp);
 			mutex_enter(&rp->r_statelock);
-			pnfs_layout_free(vp, kcred, LR_ASYNC);
+			pnfs_layout_return(vp, kcred, LR_ASYNC);
 			mutex_exit(&rp->r_statelock);
 			mutex_exit(&ltp->lt_rlt_lock);
 			VN_RELE(vp);

@@ -38,6 +38,7 @@ extern "C" {
 #include <nfs/rnode.h>		/* for symlink_cache, nfs_rwlock_t, etc. */
 #include <nfs/nfs4.h>
 #include <nfs/nfs4_clnt.h>
+#include <nfs/nfs4_pnfs.h>
 #include <sys/thread.h>
 #include <sys/sysmacros.h>	/* for offsetof */
 
@@ -326,7 +327,8 @@ typedef struct rnode4 {
 					/* stub type was set		    */
 	nfs4_stub_type_t	r_stub_type;
 					/* e.g. mirror-mount */
-	struct pnfs_layout *r_layout;	/* pNFS layout */
+	list_t 		r_layout;	/* pNFS layout(s) */
+	stateid4	r_lostateid;	/* layout stateid */
 	kcondvar_t	r_lowait;	/* Wait For Layout */
 	clock_t		r_last_layoutget; /* time of last layoutget attempt */
 	offset4		r_last_write_offset; /* used in LAYOUTCOMMIT */

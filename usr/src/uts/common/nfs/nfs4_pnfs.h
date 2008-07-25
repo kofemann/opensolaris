@@ -92,26 +92,39 @@ enum stripetype4 {
 	STRIPE4_DENSE = 1
 };
 
-typedef struct {
-	deviceid4	fl_deviceid;
-	uint32_t	fl_stripe_type;	/* WEBXXX from nfl_util */
-	length4		fl_stripe_unit;	/* WEBXXX from nfl_util */
-	uint32_t	fl_first_stripe_index;
-	uint32_t	fl_stripe_count;
-	stripe_dev_t	**fl_stripe_dev;
-	kmutex_t	fl_lock;
-	uint32_t	fl_refcount;
-} file_layout_t;
+
 
 /* per-rnode generic layout */
 typedef struct pnfs_layout {
-	layouttype4		type;
-	void			*layout;
-	avl_tree_t		segments;
-	layoutiomode4	iomode;
-	stateid4		lo_stateid;
-	int			lo_roc:1;	/* return on close */
+	list_node_t		plo_list;
+	layoutiomode4		plo_iomode;
+	stateid4		plo_stateid;
+	int			plo_flags;
+	offset4			plo_offset;
+	length4			plo_length;
+	uint32_t		plo_inusecnt;
+	kcondvar_t		plo_wait;
+	deviceid4		plo_deviceid;
+	uint32_t		plo_stripe_type;
+	length4			plo_stripe_unit;
+	uint32_t		plo_first_stripe_index;
+	uint32_t		plo_stripe_count;
+	stripe_dev_t		**plo_stripe_dev;
+	kmutex_t		plo_lock;
+	uint32_t		plo_refcount;
 } pnfs_layout_t;
+
+/* Layout Flag Fields */
+
+#define	PLO_ROC		0x1	/* Return Layout On Close */
+#define	PLO_RETURN	0x02	/* Layout Being Returned */
+#define	PLO_GET		0x04	/* Layoutget In Progress */
+#define	PLO_RECALL	0x08	/* Layout Being Recalled */
+#define	PLO_BAD		0x10	/* Layout Is Bad */
+#define	PLO_UNAVAIL	0x20	/* Layout Unavailable From MDS */
+#define	PLO_COM2MDS	0x40	/* Commit To MDS */
+#define	PLO_TRYLATER	0x80	/* RETRY From MDS on Layoutget, Try Later */
+
 
 /* a batch of read i/o work requested of pNFS */
 typedef struct {
@@ -199,6 +212,9 @@ typedef struct {
 	layouttype4 tlr_layout_type;
 	stateid4 tlr_stateid;
 } task_layoutreturn_t;
+
+
+extern void	pnfs_layout_hold(struct rnode4 *, struct pnfs_layout *);
 
 #ifdef __cplusplus
 }

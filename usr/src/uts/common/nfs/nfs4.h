@@ -1620,8 +1620,9 @@ extern void	pnfs_layoutget(vnode_t *, cred_t *, layoutiomode4);
 extern void	pnfs_layout_set(struct mntinfo4 *, struct rnode4 *);
 #define	LR_ASYNC	0
 #define	LR_SYNC		1
-extern void	pnfs_layout_free(vnode_t *, cred_t *, int);
+extern void	pnfs_layout_return(vnode_t *, cred_t *, int);
 extern void	pnfs_layout_rele(struct rnode4 *);
+
 extern void	layoutreturn_all(struct vfs *, cred_t *);
 extern int	pnfs_read(vnode_t *, caddr_t, offset_t, int, size_t *,
     cred_t *, bool_t, struct uio *);
@@ -1638,6 +1639,7 @@ extern struct nfs4_ntov_map nfs40_ntov_map[];
 extern struct nfs4_ntov_map nfs41_ntov_map[];
 
 extern kstat_named_t	*rfsproccnt_v4_ptr;
+
 extern struct vfsops	*nfs4_vfsops;
 extern struct vnodeops	*nfs4_vnodeops;
 extern const struct	fs_operation_def nfs4_vnodeops_template[];

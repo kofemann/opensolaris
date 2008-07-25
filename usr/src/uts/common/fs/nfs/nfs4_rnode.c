@@ -253,6 +253,7 @@ r4inactive(rnode4_t *rp, cred_t *cr)
 	rp->r_secattr = NULL;
 	xattr = rp->r_xattr_dir;
 	rp->r_xattr_dir = NULL;
+	pnfs_layout_return(vp, cr, LR_SYNC);
 	mutex_exit(&rp->r_statelock);
 
 	/*
@@ -650,6 +651,8 @@ start:
 	mutex_init(&rp->r_statev4_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&rp->r_os_lock, NULL, MUTEX_DEFAULT, NULL);
 	rp->created_v4 = 0;
+	list_create(&rp->r_layout, sizeof (pnfs_layout_t),
+	    offsetof(pnfs_layout_t, plo_list));
 	list_create(&rp->r_open_streams, sizeof (nfs4_open_stream_t),
 	    offsetof(nfs4_open_stream_t, os_node));
 	rp->r_lo_head.lo_prev_rnode = &rp->r_lo_head;
@@ -715,6 +718,7 @@ uninit_rnode4(rnode4_t *rp)
 	ASSERT(rp->r_freef == NULL && rp->r_freeb == NULL);
 	nfs4_clear_open_streams(rp);
 	list_destroy(&rp->r_open_streams);
+	list_destroy(&rp->r_layout);
 
 	/*
 	 * Destroy the rddir cache first since we need to grab the r_statelock.
@@ -795,7 +799,7 @@ rp4_addfree(rnode4_t *rp, cred_t *cr)
 		 * Return the layout, if present
 		 */
 		mutex_enter(&rp->r_statelock);
-		pnfs_layout_free(vp, cr, LR_SYNC);
+		pnfs_layout_return(vp, cr, LR_SYNC);
 		mutex_exit(&rp->r_statelock);
 
 		r4inactive(rp, cr);
@@ -871,7 +875,7 @@ again:
 	mutex_enter(&rp->r_statelock);
 	if (rp->r_flags & R4LAYOUTVALID) {
 		rw_exit(&rp->r_hashq->r_lock);
-		pnfs_layout_free(vp, cr, LR_SYNC);
+		pnfs_layout_return(vp, cr, LR_SYNC);
 		mutex_exit(&rp->r_statelock);
 		goto again;
 	}
@@ -1183,10 +1187,10 @@ start_again:
 					VN_HOLD(vp);
 					rw_exit(&rtable4[index].r_lock);
 
-					pnfs_layout_free(vp, cr, LR_SYNC);
+					pnfs_layout_return(vp, cr, LR_SYNC);
 
 					/*
-					 * pnfs_layout_free() may choose
+					 * pnfs_layout_return() may choose
 					 * not to make otw calls. But we are
 					 * unmounting. So make sure to free
 					 * all layouts unconditionally.
