@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <nfs/nfs4_pnfs.h>
 #include <sys/cmn_err.h>
 
@@ -1283,7 +1281,7 @@ out:
 	return (e.error ? EAGAIN : e.error);
 }
 
-static pnfs_layout_t *
+void
 layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 {
 	pnfs_layout_t *layout = NULL;
@@ -1293,18 +1291,18 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 	int i;
 
 	if ((res == NULL) || (res->logr_status != NFS4_OK))
-		return (NULL);
+		return;
 
 	if (res->LAYOUTGET4res_u.logr_resok4.logr_layout.logr_layout_len > 1) {
 		cmn_err(CE_WARN, "too many entries in layout; dropping");
-		return (NULL);
+		return;
 	}
 
 	l4 = res->LAYOUTGET4res_u.logr_resok4.logr_layout.logr_layout_val;
 
 	if (l4->lo_content.loc_type != LAYOUT4_NFSV4_1_FILES) {
 		cmn_err(CE_WARN, "non-file layout; dropping");
-		return (NULL);
+		return;
 	}
 
 	/* XXX deal with byte ranges and i/o modes */
@@ -1318,7 +1316,7 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 	file_layout4 = kmem_zalloc(sizeof (*file_layout4), KM_SLEEP);
 	if (!xdr_nfsv4_1_file_layout4(&xdr, file_layout4)) {
 		cmn_err(CE_WARN, "could not decode file_layouttype4");
-		return (NULL);
+		return;
 	}
 
 	layout = kmem_cache_alloc(pnfs_layout_cache, KM_SLEEP);
@@ -1341,7 +1339,7 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 		    (void *)l4->lo_content.loc_body.loc_body_val,
 		    l4->lo_content.loc_body.loc_body_len, file_layout4->N_LEN);
 		/* XXX free memory and stuff */
-		return (NULL);
+		return;
 	}
 #endif
 	/* stripe count is the number of file handles in the list */
@@ -1369,8 +1367,6 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 	 * are only dealing with single layouts.
 	 */
 	list_insert_head(&rp->r_layout, layout);
-
-	return (layout);
 }
 
 static void
@@ -1466,7 +1462,6 @@ pnfs_task_layoutget(void *v)
 	task_layoutget_t *task = v;
 	mntinfo4_t *mi = task->tlg_mi;
 	nfs4_server_t *np;
-	pnfs_layout_t *layout;
 	rnode4_t *rp = VTOR4(task->tlg_vp);
 	COMPOUND4args_clnt args;
 	COMPOUND4res_clnt res;
@@ -1534,7 +1529,7 @@ recov_retry:
 		if (rp->r_flags & R4LAYOUTVALID) {
 			pnfs_layout_return(task->tlg_vp, cr, LR_ASYNC);
 		}
-		layout = layoutget_to_layout(resp, rp, mi);
+		layoutget_to_layout(resp, rp, mi);
 		mutex_exit(&rp->r_statelock);
 
 		/*
@@ -1805,7 +1800,9 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 
 	mutex_enter(&rp->r_statelock);
 	layout = list_head(&rp->r_layout);
-	if ((! (rp->r_flags & R4LAYOUTVALID)) || layout == NULL) {
+	if ((mi->mi_flags & MI4_PNFS) &&
+	    (!(rp->r_flags & (R4LAYOUTVALID|R4LAYOUTUNAVAIL))) ||
+	    layout == NULL) {
 		mutex_exit(&rp->r_statelock);
 		pnfs_layoutget(vp, cr, LAYOUTIOMODE4_RW);
 		mutex_enter(&rp->r_statelock);
@@ -1956,14 +1953,16 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 
 	mutex_enter(&rp->r_statelock);
 	layout = list_head(&rp->r_layout);
-	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
+	if ((mi->mi_flags & MI4_PNFS) &&
+	    (layout == NULL || !(rp->r_flags &
+	    (R4LAYOUTUNAVAIL|R4LAYOUTVALID)))) {
 		mutex_exit(&rp->r_statelock);
 		pnfs_layoutget(vp, cr, LAYOUTIOMODE4_RW);
 		mutex_enter(&rp->r_statelock);
 		layout = list_head(&rp->r_layout);
 	}
 
-	/* XXX refactor needed with pnfs_read() above */
+	/* iXX refactor needed with pnfs_read() above */
 	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
 		mutex_exit(&rp->r_statelock);
 		return (EAGAIN);
