@@ -20,8 +20,8 @@
  */
 /*
  * This file was machine generated for
- *  draft-ietf-nfsv4-minorversion1-19
- * Last updated Tue Jan 29 02:57:06 CST 2008
+ *  draft-ietf-nfsv4-minorversion1-23
+ * Last updated Mon May 12 09:14:57 CDT 2008
  */
 /*
  *  Copyright (C) The IETF Trust (2007-2008)
@@ -178,7 +178,7 @@ enum nfsstat4 {
  NFS4ERR_NOMATCHING_LAYOUT = 10060,
  NFS4ERR_RECALLCONFLICT = 10061,
  NFS4ERR_UNKNOWN_LAYOUTTYPE = 10062,
- NFS4ERR_SEQ_MISORDERED = 10063,/* unexpected seq.id in req*/
+ NFS4ERR_SEQ_MISORDERED = 10063,/* unexpected seq.ID in req*/
  NFS4ERR_SEQUENCE_POS   = 10064,/* [CB_]SEQ. op not 1st op */
  NFS4ERR_REQ_TOO_BIG    = 10065,/* request too big         */
  NFS4ERR_REP_TOO_BIG    = 10066,/* reply too big           */
@@ -188,7 +188,7 @@ enum nfsstat4 {
  NFS4ERR_TOO_MANY_OPS   = 10070,/*too many ops in [CB_]COMP*/
  NFS4ERR_OP_NOT_IN_SESSION =10071,/* op needs [CB_]SEQ. op */
  NFS4ERR_HASH_ALG_UNSUPP = 10072, /* hash alg. not supp.   */
- NFS4ERR_CONN_BINDING_NOT_ENFORCED =10073,/* SET_SSV not OK*/
+				/* Error 10073 is unused.  */
  NFS4ERR_CLIENTID_BUSY  = 10074,/* clientid has state      */
  NFS4ERR_PNFS_IO_HOLE   = 10075,/* IO to _SPARSE file hole */
  NFS4ERR_SEQ_FALSE_RETRY= 10076,/* Retry != original req.  */
@@ -199,7 +199,7 @@ enum nfsstat4 {
  NFS4ERR_NOT_ONLY_OP    = 10081,/* addl ops not allowed    */
  NFS4ERR_WRONG_CRED     = 10082,/* op done by wrong cred   */
  NFS4ERR_WRONG_TYPE     = 10083,/* op on wrong type object */
- NFS4ERR_DIRDELEG_UNAVAIL= 10084,/* delegation not avail.  */
+ NFS4ERR_DIRDELEG_UNAVAIL=10084,/* delegation not avail.   */
  NFS4ERR_REJECT_DELEG   = 10085,/* cb rejected delegation  */
  NFS4ERR_RETURNCONFLICT = 10086 /* layout get before return*/
 };
@@ -431,6 +431,7 @@ struct nfsacl41 {
         nfsace4         na41_aces<>;
 };
 
+
 /*
  * Field definitions for the fattr4_mode
  * and fattr4_mode_set_masked attributes.
@@ -507,9 +508,9 @@ struct stateid4 {
 };
 
 enum layouttype4 {
-        LAYOUT4_NFSV4_1_FILES   = 1,
-        LAYOUT4_OSD2_OBJECTS    = 2,
-        LAYOUT4_BLOCK_VOLUME    = 3
+        LAYOUT4_NFSV4_1_FILES   = 0x1,
+        LAYOUT4_OSD2_OBJECTS    = 0x2,
+        LAYOUT4_BLOCK_VOLUME    = 0x3
 };
 
 struct layout_content4 {
@@ -556,11 +557,6 @@ struct device_addr4 {
 };
 
 
-struct devlist_item4 {
-        deviceid4                 dli_id;
-        device_addr4              dli_device_addr;
-};
-
 struct layoutupdate4 {
         layouttype4             lou_type;
         opaque                  lou_body<>;
@@ -599,10 +595,11 @@ enum fs4_status_type {
         STATUS4_UPDATED = 2,
         STATUS4_VERSIONED = 3,
         STATUS4_WRITABLE = 4,
-        STATUS4_ABSENT = 5
+        STATUS4_REFERRAL = 5
 };
 
 struct fs4_status {
+	bool		fss_absent;
         fs4_status_type fss_type;
         utf8str_cs      fss_source;
         utf8str_cs      fss_current;
@@ -853,7 +850,7 @@ struct nfs_client_id4 {
 };
 
 /*
- * NFSv4.1 Client Owner (aka long hand client id)
+ * NFSv4.1 Client Owner (aka long hand client ID)
  */
 struct client_owner4 {
         verifier4       co_verifier;
@@ -2406,7 +2403,6 @@ const SEQ4_STATUS_CB_PATH_DOWN_SESSION          = 0x00000200;
 const SEQ4_STATUS_BACKCHANNEL_FAULT             = 0x00000400;
 const SEQ4_STATUS_DEVID_CHANGED                 = 0x00000800;
 const SEQ4_STATUS_DEVID_DELETED                 = 0x00001000;
-const SEQ4_STATUS_DEVID_DELETED_ALL             = 0x00002000;
 
 struct SEQUENCE4resok {
         sessionid4      sr_sessionid;
@@ -2470,6 +2466,7 @@ union deleg_claim4 switch (open_claim_type4 dc_claim) {
  * by filehandle.
  */
 case CLAIM_FH: /* new to v4.1 */
+	/* CURRENT_FH: object being delegated */
         void;
 
 /*
@@ -2699,7 +2696,7 @@ union nfs_argop4 switch (nfs_opnum4 argop) {
  case OP_ILLEGAL:       void;
 };
 
-union nfs_resop4 switch (nfs_opnum4 resop){
+union nfs_resop4 switch (nfs_opnum4 resop) {
  case OP_ACCESS:        ACCESS4res opaccess;
  case OP_CLOSE:         CLOSE4res opclose;
  case OP_COMMIT:        COMMIT4res opcommit;
@@ -2803,7 +2800,7 @@ union nfs_resop4 switch (nfs_opnum4 resop){
 
  case OP_DESTROY_CLIENTID:
                         DESTROY_CLIENTID4res
-                                opwant_destroy_clientid;
+                                opdestroy_clientid;
 
  case OP_RECLAIM_COMPLETE:
                         RECLAIM_COMPLETE4res
@@ -3005,10 +3002,9 @@ const RCA4_TYPE_MASK_RDATA_DLG          = 0;
 const RCA4_TYPE_MASK_WDATA_DLG          = 1;
 const RCA4_TYPE_MASK_DIR_DLG            = 2;
 const RCA4_TYPE_MASK_FILE_LAYOUT        = 3;
-const RCA4_TYPE_MASK_BLK_LAYOUT_MIN     = 4;
-const RCA4_TYPE_MASK_BLK_LAYOUT_MAX     = 7;
+const RCA4_TYPE_MASK_BLK_LAYOUT         = 4;
 const RCA4_TYPE_MASK_OBJ_LAYOUT_MIN     = 8;
-const RCA4_TYPE_MASK_OBJ_LAYOUT_MAX     = 11;
+const RCA4_TYPE_MASK_OBJ_LAYOUT_MAX     = 9;
 const RCA4_TYPE_MASK_OTHER_LAYOUT_MIN   = 12;
 const RCA4_TYPE_MASK_OTHER_LAYOUT_MAX   = 15;
 
@@ -3166,7 +3162,7 @@ union nfs_cb_argop4 switch (unsigned argop) {
  case OP_CB_ILLEGAL:            void;
 };
 
-union nfs_cb_resop4 switch (unsigned resop){
+union nfs_cb_resop4 switch (unsigned resop) {
  case OP_CB_GETATTR:    CB_GETATTR4res  opcbgetattr;
  case OP_CB_RECALL:     CB_RECALL4res   opcbrecall;
 

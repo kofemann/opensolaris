@@ -86,9 +86,9 @@ struct nfs_impl_id4 {
 typedef struct nfs_impl_id4 nfs_impl_id4;
 
 enum layouttype4 {
-	LAYOUT4_NFSV4_1_FILES = 1,
-	LAYOUT4_OSD2_OBJECTS = 2,
-	LAYOUT4_BLOCK_VOLUME = 3
+	LAYOUT4_NFSV4_1_FILES = 0x1,
+	LAYOUT4_OSD2_OBJECTS = 0x2,
+	LAYOUT4_BLOCK_VOLUME = 0x3
 };
 typedef enum layouttype4 layouttype4;
 #define	LAYOUT_TYPE4_MAX_COUNT 3
@@ -140,12 +140,6 @@ struct device_addr4 {
 };
 typedef struct device_addr4 device_addr4;
 
-struct devlist_item4 {
-	deviceid4 dli_id;
-	device_addr4 dli_device_addr;
-};
-typedef struct devlist_item4 devlist_item4;
-
 struct layoutupdate4 {
 	layouttype4 lou_type;
 	struct {
@@ -192,11 +186,12 @@ enum fs4_status_type {
 	STATUS4_UPDATED = 2,
 	STATUS4_VERSIONED = 3,
 	STATUS4_WRITABLE = 4,
-	STATUS4_ABSENT = 5
+	STATUS4_REFERRAL = 5
 };
 typedef enum fs4_status_type fs4_status_type;
 
 struct fs4_status {
+	bool_t fss_absent;
 	fs4_status_type fss_type;
 	utf8str_cs fss_source;
 	utf8str_cs fss_current;
@@ -1052,7 +1047,6 @@ typedef struct SEQUENCE4args SEQUENCE4args;
 #define	SEQ4_STATUS_BACKCHANNEL_FAULT 0x00000400
 #define	SEQ4_STATUS_DEVID_CHANGED 0x00000800
 #define	SEQ4_STATUS_DEVID_DELETED 0x00001000
-#define	SEQ4_STATUS_DEVID_DELETED_ALL 0x00002000
 
 struct SEQUENCE4resok {
 	sessionid4 sr_sessionid;
@@ -1542,10 +1536,9 @@ typedef struct CB_PUSH_DELEG4res CB_PUSH_DELEG4res;
 #define	RCA4_TYPE_MASK_WDATA_DLG 1
 #define	RCA4_TYPE_MASK_DIR_DLG 2
 #define	RCA4_TYPE_MASK_FILE_LAYOUT 3
-#define	RCA4_TYPE_MASK_BLK_LAYOUT_MIN 4
-#define	RCA4_TYPE_MASK_BLK_LAYOUT_MAX 7
+#define	RCA4_TYPE_MASK_BLK_LAYOUT 4
 #define	RCA4_TYPE_MASK_OBJ_LAYOUT_MIN 8
-#define	RCA4_TYPE_MASK_OBJ_LAYOUT_MAX 11
+#define	RCA4_TYPE_MASK_OBJ_LAYOUT_MAX 9
 #define	RCA4_TYPE_MASK_OTHER_LAYOUT_MIN 12
 #define	RCA4_TYPE_MASK_OTHER_LAYOUT_MAX 15
 
@@ -1783,7 +1776,6 @@ extern	bool_t xdr_layoutiomode4(XDR *, layoutiomode4 *);
 extern	bool_t xdr_layout4(XDR *, layout4 *);
 extern	bool_t xdr_deviceid4(XDR *, deviceid4);
 extern	bool_t xdr_device_addr4(XDR *, device_addr4 *);
-extern	bool_t xdr_devlist_item4(XDR *, devlist_item4 *);
 extern	bool_t xdr_layoutupdate4(XDR *, layoutupdate4 *);
 extern	bool_t xdr_layoutreturn_type4(XDR *, layoutreturn_type4 *);
 extern	bool_t xdr_layoutreturn_file4(XDR *, layoutreturn_file4 *);

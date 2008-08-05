@@ -101,9 +101,9 @@ enum stable_how4 {
  * data structures new to NFSv4.1
  */
 enum layouttype4 {
-	LAYOUT4_NFSV4_1_FILES  = 1,
-	LAYOUT4_OSD2_OBJECTS   = 2,
-	LAYOUT4_BLOCK_VOLUME   = 3
+	LAYOUT4_NFSV4_1_FILES  = 0x1,
+	LAYOUT4_OSD2_OBJECTS   = 0x2,
+	LAYOUT4_BLOCK_VOLUME   = 0x3
 };
 
 struct layout_content4 {

@@ -4489,8 +4489,7 @@ status_name(int status)
 		p = "NFS4ERR_OP_NOT_IN_SESSION"; break;
 	case NFS4ERR_HASH_ALG_UNSUPP:		/* 10072 */
 		p = "NFS4ERR_HASH_ALG_UNSUPP"; break;
-	case NFS4ERR_CONN_BINDING_NOT_ENFORCED:	/* 10073 */
-		p = "NFS4ERR_CONN_BINDING_NOT_ENFORCED"; break;
+	/* Error 10073 is unused. */
 	case NFS4ERR_CLIENTID_BUSY:		/* 10074 */
 		p = "NFS4ERR_CLIENTID_BUSY"; break;
 	case NFS4ERR_PNFS_IO_HOLE:		/* 10075 */

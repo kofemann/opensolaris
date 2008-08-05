@@ -688,19 +688,6 @@ xdr_device_addr4(XDR *xdrs, device_addr4 *objp)
 }
 
 bool_t
-xdr_devlist_item4(XDR *xdrs, devlist_item4 *objp)
-{
-
-	rpc_inline_t *buf;
-
-	if (!xdr_deviceid4(xdrs, objp->dli_id))
-		return (FALSE);
-	if (!xdr_device_addr4(xdrs, &objp->dli_device_addr))
-		return (FALSE);
-	return (TRUE);
-}
-
-bool_t
 xdr_layoutupdate4(XDR *xdrs, layoutupdate4 *objp)
 {
 
@@ -782,6 +769,8 @@ xdr_fs4_status(XDR *xdrs, fs4_status *objp)
 
 	rpc_inline_t *buf;
 
+	if (!xdr_bool(xdrs, &objp->fss_absent))
+		return (FALSE);
 	if (!xdr_fs4_status_type(xdrs, &objp->fss_type))
 		return (FALSE);
 	if (!xdr_utf8str_cs(xdrs, &objp->fss_source))
@@ -5684,7 +5673,7 @@ xdr_nfs_resop4(XDR *xdrs, nfs_resop4 *objp)
 		break;
 	case OP_DESTROY_CLIENTID:
 		if (!xdr_DESTROY_CLIENTID4res(xdrs,
-		    &objp->nfs_resop4_u.opwant_destroy_clientid))
+		    &objp->nfs_resop4_u.opdestroy_clientid))
 			return (FALSE);
 		break;
 	case OP_RECLAIM_COMPLETE:
