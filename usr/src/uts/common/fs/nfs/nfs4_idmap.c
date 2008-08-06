@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * There are well defined policies for mapping uid and gid values to and
  * from utf8 strings, as specified in RFC 3530. The protocol ops that are
