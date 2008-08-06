@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * This file contains the xdr for datatypes and operations that are
  * specific to NFSv4 minor version 1 (i.e., datatypes that

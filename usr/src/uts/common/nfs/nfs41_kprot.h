@@ -25,8 +25,6 @@
 #ifndef _NFS41_KPROT_H
 #define	_NFS41_KPROT_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * Kernel specific version
  * NFSv4 Minor Version 1

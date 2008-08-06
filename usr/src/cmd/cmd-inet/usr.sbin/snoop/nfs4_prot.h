@@ -26,8 +26,6 @@
 #ifndef _NFS4_PROT_H
 #define	_NFS4_PROT_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <rpc/rpc.h>
 
 #ifdef __cplusplus
