@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -27,25 +27,15 @@
 
 #include "ns_sldap.h"
 #include "ns_internal.h"
+#include "ns_connmgmt.h"
 #include <syslog.h>
 
 #pragma init(ns_ldap_init)
-
-thread_key_t ns_mtckey;
 
 static void
 ns_ldap_init()
 {
 	get_environment();	/* load environment debugging options */
 
-	/*
-	 * ns_mtckey is needed to allow the sharing of an
-	 * ldap connection among multiple threads. Used
-	 * mainly in ns_connect.c.
-	 */
-	if (thr_keycreate(&ns_mtckey, ns_tsd_cleanup) != 0) {
-		syslog(LOG_ERR, "libsldap: unable to create the thread "
-		"key needed for sharing ldap connections");
-		MTperConn = 0;
-	}
+	(void) __s_api_conn_mgmt_init();
 }

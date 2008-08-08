@@ -38,6 +38,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <zone.h>
+#include <netdb.h>
 
 #include <iscsitgt_impl.h>
 #include "cmdparse.h"
@@ -222,7 +223,7 @@ optionRules_t optionRules[] = {
 	{TPGT, DELETE, "Ai", B_TRUE, NULL},
 	{TPGT, LIST,   "v", B_FALSE, NULL},
 	{ADMIN, MODIFY, "dHCRrPSsf", B_TRUE, NULL},
-	{STATS, SHOW, "vIN", B_FALSE, NULL},
+	{STATS, SHOW, "IN", B_FALSE, NULL},
 };
 
 
@@ -597,8 +598,14 @@ modifyInitiator(int operandLen, char *operand[], cmdOptions_t *options)
 	for (; optionList->optval; optionList++) {
 		switch (optionList->optval) {
 		case 'H': /* chap-name */
-			tgt_buf_add(&first_str, XML_ELEMENT_CHAPNAME,
-			    optionList->optarg);
+			if (strlen(optionList->optarg) != 0) {
+				tgt_buf_add(&first_str, XML_ELEMENT_CHAPNAME,
+				    optionList->optarg);
+			} else {
+				tgt_buf_add(&first_str,
+				    XML_ELEMENT_DELETE_CHAPNAME,
+				    OPT_TRUE);
+			}
 			break;
 		case 'C': /* chap-secret */
 			ret = getSecret((char *)&chapSecret[0], &secretLen,
@@ -609,8 +616,14 @@ modifyInitiator(int operandLen, char *operand[], cmdOptions_t *options)
 				return (ret);
 			}
 			chapSecret[secretLen] = '\0';
-			tgt_buf_add(&first_str, XML_ELEMENT_CHAPSECRET,
-			    chapSecret);
+			if (secretLen != 0) {
+				tgt_buf_add(&first_str, XML_ELEMENT_CHAPSECRET,
+				    chapSecret);
+			} else {
+				tgt_buf_add(&first_str,
+				    XML_ELEMENT_DELETE_CHAPSECRET,
+				    OPT_TRUE);
+			}
 			break;
 		default:
 			(void) fprintf(stderr, "%s: %c: %s\n",
@@ -720,11 +733,18 @@ modifyAdmin(int operandLen, char *operand[], cmdOptions_t *options)
 				(void) getcwd(newdir, sizeof (newdir));
 				tgt_buf_add(&first_str, XML_ELEMENT_BASEDIR,
 				    newdir);
-				chdir(olddir);
+				(void) chdir(olddir);
 				break;
 			case 'H': /* chap name */
-				tgt_buf_add(&first_str, XML_ELEMENT_CHAPNAME,
-				    optionList->optarg);
+				if (strlen(optionList->optarg) != 0) {
+					tgt_buf_add(&first_str,
+					    XML_ELEMENT_CHAPNAME,
+					    optionList->optarg);
+				} else {
+					tgt_buf_add(&first_str,
+					    XML_ELEMENT_DELETE_CHAPNAME,
+					    OPT_TRUE);
+				}
 				break;
 			case 'C': /* chap secert */
 				ret = getSecret((char *)&chapSecret[0],
@@ -739,8 +759,15 @@ modifyAdmin(int operandLen, char *operand[], cmdOptions_t *options)
 					return (ret);
 				}
 				chapSecret[secretLen] = '\0';
-				tgt_buf_add(&first_str, XML_ELEMENT_CHAPSECRET,
-				    chapSecret);
+				if (secretLen != 0) {
+					tgt_buf_add(&first_str,
+					    XML_ELEMENT_CHAPSECRET,
+					    chapSecret);
+				} else {
+					tgt_buf_add(&first_str,
+					    XML_ELEMENT_DELETE_CHAPSECRET,
+					    OPT_TRUE);
+				}
 				break;
 			case 'R': /* radius access */
 				if (strcmp(optionList->optarg,
@@ -762,8 +789,15 @@ modifyAdmin(int operandLen, char *operand[], cmdOptions_t *options)
 				}
 				break;
 			case 'r': /* radius server */
-				tgt_buf_add(&first_str, XML_ELEMENT_RAD_SERV,
-				    optionList->optarg);
+				if (strlen(optionList->optarg) != 0) {
+					tgt_buf_add(&first_str,
+					    XML_ELEMENT_RAD_SERV,
+					    optionList->optarg);
+				} else {
+					tgt_buf_add(&first_str,
+					    XML_ELEMENT_DELETE_RAD_SERV,
+					    OPT_TRUE);
+				}
 				break;
 			case 'P': /* radius secret */
 				ret = getSecret((char *)&chapSecret[0],
@@ -778,8 +812,15 @@ modifyAdmin(int operandLen, char *operand[], cmdOptions_t *options)
 					return (ret);
 				}
 				chapSecret[secretLen] = '\0';
-				tgt_buf_add(&first_str, XML_ELEMENT_RAD_SECRET,
-				    chapSecret);
+				if (secretLen != 0) {
+					tgt_buf_add(&first_str,
+					    XML_ELEMENT_RAD_SECRET,
+					    chapSecret);
+				} else {
+					tgt_buf_add(&first_str,
+					    XML_ELEMENT_DELETE_RAD_SECRET,
+					    OPT_TRUE);
+				}
 				break;
 			case 'S': /* iSNS access */
 				if (strcmp(optionList->optarg,
@@ -801,6 +842,13 @@ modifyAdmin(int operandLen, char *operand[], cmdOptions_t *options)
 				}
 				break;
 			case 's': /* iSNS server */
+				if (strlen(optionList->optarg) >
+				    MAXHOSTNAMELEN) {
+					(void) fprintf(stderr, "%s: %s\n",
+					    cmdName,
+					    gettext("option too long"));
+					return (1);
+				}
 				tgt_buf_add(&first_str, XML_ELEMENT_ISNS_SERV,
 				    optionList->optarg);
 				break;
@@ -1384,6 +1432,19 @@ showAdmin(int operandLen, char *operand[], cmdOptions_t *options)
 	n2 = tgt_node_next_child(n1, XML_ELEMENT_ISNS_SERV, NULL);
 	(void) printf("%s%s: %s\n", dospace(1), gettext("iSNS Server"),
 	    n2 ? n2->x_value : gettext("Not set"));
+
+	n2 = tgt_node_next_child(n1, XML_ELEMENT_ISNS_SERVER_STATUS, NULL);
+	if (n2) {
+		/*
+		 * if NULL, that means either the isns discovery is
+		 * disabled or the server address is not set.
+		 */
+		if (n2->x_value != NULL) {
+			(void) printf("%s%s: ", dospace(1),
+			    gettext("iSNS Server Status"));
+			(void) printf("%s\n", n2->x_value);
+		}
+	}
 
 	n2 = tgt_node_next_child(n1, XML_ELEMENT_FAST, NULL);
 	(void) printf("%s%s: ", dospace(1), gettext("Fast Write ACK"));

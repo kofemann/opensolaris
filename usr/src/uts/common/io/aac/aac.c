@@ -1,5 +1,5 @@
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -132,17 +132,17 @@
 
 #define	PCI_MEM_GET32(softs, off) \
 	ddi_get32((softs)->pci_mem_handle, \
-	    (uint32_t *)((softs)->pci_mem_base_vaddr + (off)))
+	    (void *)((softs)->pci_mem_base_vaddr + (off)))
 #define	PCI_MEM_PUT32(softs, off, val) \
 	ddi_put32((softs)->pci_mem_handle, \
-	    (uint32_t *)((softs)->pci_mem_base_vaddr + (off)), \
+	    (void *)((softs)->pci_mem_base_vaddr + (off)), \
 	    (uint32_t)(val))
 #define	PCI_MEM_GET16(softs, off) \
 	ddi_get16((softs)->pci_mem_handle, \
-	(uint16_t *)((softs)->pci_mem_base_vaddr + (off)))
+	(void *)((softs)->pci_mem_base_vaddr + (off)))
 #define	PCI_MEM_PUT16(softs, off, val) \
 	ddi_put16((softs)->pci_mem_handle, \
-	(uint16_t *)((softs)->pci_mem_base_vaddr + (off)), (uint16_t)(val))
+	(void *)((softs)->pci_mem_base_vaddr + (off)), (uint16_t)(val))
 /* Write host data at valp to device mem[off] repeatedly count times */
 #define	PCI_MEM_REP_PUT8(softs, off, valp, count) \
 	ddi_rep_put8((softs)->pci_mem_handle, (uint8_t *)(valp), \
@@ -219,6 +219,9 @@ static int aac_reset(dev_info_t *, ddi_reset_cmd_t);
 /*
  * Interrupt handler functions
  */
+static int aac_query_intrs(struct aac_softstate *, int);
+static int aac_add_intrs(struct aac_softstate *);
+static void aac_remove_intrs(struct aac_softstate *);
 static uint_t aac_intr_old(caddr_t);
 static uint_t aac_intr_new(caddr_t);
 static uint_t aac_softintr(caddr_t);
@@ -700,6 +703,7 @@ aac_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	int instance, i;
 	struct aac_softstate *softs = NULL;
 	int attach_state = 0;
+	int intr_types;
 
 	DBCALLED(NULL, 1);
 
@@ -761,28 +765,48 @@ aac_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 	AAC_DISABLE_INTR(softs);
 
-	if (ddi_intr_hilevel(dip, 0)) {
+	/* Get the type of device intrrupts */
+	if (ddi_intr_get_supported_types(dip, &intr_types) != DDI_SUCCESS) {
 		AACDB_PRINT(softs, CE_WARN,
-		    "High level interrupt is not supported!");
+		    "ddi_intr_get_supported_types() failed");
+		goto error;
+	}
+	AACDB_PRINT(softs, CE_NOTE,
+	    "ddi_intr_get_supported_types() ret: 0x%x", intr_types);
+
+	/* Query interrupt, and alloc/init all needed struct */
+	if (intr_types & DDI_INTR_TYPE_MSI) {
+		if (aac_query_intrs(softs, DDI_INTR_TYPE_MSI)
+		    != DDI_SUCCESS) {
+			AACDB_PRINT(softs, CE_WARN,
+			    "MSI interrupt query failed");
+			goto error;
+		}
+		softs->intr_type = DDI_INTR_TYPE_MSI;
+	} else if (intr_types & DDI_INTR_TYPE_FIXED) {
+		if (aac_query_intrs(softs, DDI_INTR_TYPE_FIXED)
+		    != DDI_SUCCESS) {
+			AACDB_PRINT(softs, CE_WARN,
+			    "FIXED interrupt query failed");
+			goto error;
+		}
+		softs->intr_type = DDI_INTR_TYPE_FIXED;
+	} else {
+		AACDB_PRINT(softs, CE_WARN,
+		    "Device cannot suppport both FIXED and MSI interrupts");
 		goto error;
 	}
 
 	/* Init mutexes */
-	if (ddi_get_iblock_cookie(dip, 0, &softs->iblock_cookie) !=
-	    DDI_SUCCESS) {
-		AACDB_PRINT(softs, CE_WARN,
-		    "Can not get interrupt block cookie!");
-		goto error;
-	}
 	mutex_init(&softs->q_comp_mutex, NULL,
-	    MUTEX_DRIVER, (void *)softs->iblock_cookie);
+	    MUTEX_DRIVER, DDI_INTR_PRI(softs->intr_pri));
 	cv_init(&softs->event, NULL, CV_DRIVER, NULL);
 	mutex_init(&softs->aifq_mutex, NULL,
-	    MUTEX_DRIVER, (void *)softs->iblock_cookie);
+	    MUTEX_DRIVER, DDI_INTR_PRI(softs->intr_pri));
 	cv_init(&softs->aifv, NULL, CV_DRIVER, NULL);
 	cv_init(&softs->drain_cv, NULL, CV_DRIVER, NULL);
 	mutex_init(&softs->io_lock, NULL, MUTEX_DRIVER,
-	    (void *)softs->iblock_cookie);
+	    DDI_INTR_PRI(softs->intr_pri));
 	attach_state |= AAC_ATTACH_KMUTEX_INITED;
 
 	/*
@@ -812,11 +836,10 @@ aac_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	}
 	attach_state |= AAC_ATTACH_SOFT_INTR_SETUP;
 
-	if (ddi_add_intr(dip, 0, &softs->iblock_cookie,
-	    (ddi_idevice_cookie_t *)0,
-	    (softs->flags & AAC_FLAGS_NEW_COMM) ?
-	    aac_intr_new : aac_intr_old, (caddr_t)softs) != DDI_SUCCESS) {
-		AACDB_PRINT(softs, CE_WARN, "Can not setup interrupt handler!");
+	if (aac_add_intrs(softs) != DDI_SUCCESS) {
+		AACDB_PRINT(softs, CE_WARN,
+		    "Interrupt registration failed, intr type: %s",
+		    softs->intr_type == DDI_INTR_TYPE_MSI ? "MSI" : "FIXED");
 		goto error;
 	}
 	attach_state |= AAC_ATTACH_HARD_INTR_SETUP;
@@ -868,7 +891,7 @@ error:
 		scsi_hba_tran_free(AAC_DIP2TRAN(dip));
 	}
 	if (attach_state & AAC_ATTACH_HARD_INTR_SETUP)
-		ddi_remove_intr(dip, 0, softs->iblock_cookie);
+		aac_remove_intrs(softs);
 	if (attach_state & AAC_ATTACH_SOFT_INTR_SETUP)
 		ddi_remove_softintr(softs->softint_id);
 	if (attach_state & AAC_ATTACH_KMUTEX_INITED) {
@@ -920,7 +943,7 @@ aac_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	ddi_remove_minor_node(dip, "devctl");
 
 	mutex_exit(&softs->io_lock);
-	ddi_remove_intr(dip, 0, softs->iblock_cookie);
+	aac_remove_intrs(softs);
 	ddi_remove_softintr(softs->softint_id);
 
 	aac_common_detach(softs);
@@ -988,7 +1011,7 @@ aac_shutdown(struct aac_softstate *softs)
 static uint_t
 aac_softintr(caddr_t arg)
 {
-	struct aac_softstate *softs = (struct aac_softstate *)arg;
+	struct aac_softstate *softs = (void *)arg;
 
 	if (!AAC_IS_Q_EMPTY(&softs->q_comp)) {
 		aac_drain_comp_q(softs);
@@ -1009,7 +1032,7 @@ aac_set_arq_data(struct scsi_pkt *pkt, uchar_t key,
 
 	pkt->pkt_state |= STATE_GOT_STATUS | STATE_ARQ_DONE;
 
-	arqstat = (struct scsi_arq_status *)(pkt->pkt_scbp);
+	arqstat = (void *)(pkt->pkt_scbp);
 	arqstat->sts_status.sts_chk = 1; /* CHECK CONDITION */
 	arqstat->sts_rqpkt_reason = CMD_CMPLT;
 	arqstat->sts_rqpkt_resid = 0;
@@ -1068,7 +1091,7 @@ aac_set_arq_data_hwerr(struct aac_cmd *acp)
 	union scsi_cdb *cdbp;
 	uint64_t err_blkno;
 
-	cdbp = (union scsi_cdb *)acp->pkt->pkt_cdbp;
+	cdbp = (void *)acp->pkt->pkt_cdbp;
 	err_blkno = AAC_GETGXADDR(acp->cmdlen, cdbp);
 	aac_set_arq_data(acp->pkt, KEY_HARDWARE_ERROR, 0x00, 0x00, err_blkno);
 }
@@ -1184,7 +1207,7 @@ aac_handle_io(struct aac_softstate *softs, int index)
 			    &slotp->fibp->Header.XferState,
 			    state | AAC_FIBSTATE_DONEADAP);
 			ddi_put32(slotp->fib_acc_handle,
-			    (uint32_t *)&slotp->fibp->data[0], ST_OK);
+			    (void *)&slotp->fibp->data[0], ST_OK);
 		}
 
 		/* Handle completed ac */
@@ -1278,7 +1301,7 @@ aac_process_intr_new(struct aac_softstate *softs)
 static uint_t
 aac_intr_new(caddr_t arg)
 {
-	struct aac_softstate *softs = (struct aac_softstate *)arg;
+	struct aac_softstate *softs = (void *)arg;
 	uint_t rval;
 
 	mutex_enter(&softs->io_lock);
@@ -1365,7 +1388,7 @@ aac_process_intr_old(struct aac_softstate *softs)
 			if (fib_xfer_state & AAC_FIBSTATE_FROMADAP) {
 				ddi_put32(acc, &fibp0->Header.XferState,
 				    fib_xfer_state | AAC_FIBSTATE_DONEHOST);
-				ddi_put32(acc, (uint32_t *)&fibp0->data[0],
+				ddi_put32(acc, (void *)&fibp0->data[0],
 				    ST_OK);
 				if (fib_size0 > AAC_FIB_SIZE)
 					ddi_put16(acc, &fibp0->Header.Size,
@@ -1426,7 +1449,7 @@ aac_process_intr_old(struct aac_softstate *softs)
 static uint_t
 aac_intr_old(caddr_t arg)
 {
-	struct aac_softstate *softs = (struct aac_softstate *)arg;
+	struct aac_softstate *softs = (void *)arg;
 	int rval;
 
 	mutex_enter(&softs->io_lock);
@@ -1438,6 +1461,179 @@ aac_intr_old(caddr_t arg)
 
 	aac_drain_comp_q(softs);
 	return (rval);
+}
+
+/*
+ * Query FIXED or MSI interrupts
+ */
+static int
+aac_query_intrs(struct aac_softstate *softs, int intr_type)
+{
+	dev_info_t *dip = softs->devinfo_p;
+	int avail, actual, intr_size, count;
+	int i, flag, ret;
+
+	AACDB_PRINT(softs, CE_NOTE,
+	    "aac_query_intrs:interrupt type 0x%x", intr_type);
+
+	/* Get number of interrupts */
+	ret = ddi_intr_get_nintrs(dip, intr_type, &count);
+	if ((ret != DDI_SUCCESS) || (count == 0)) {
+		AACDB_PRINT(softs, CE_WARN,
+		    "ddi_intr_get_nintrs() failed, ret %d count %d",
+		    ret, count);
+		return (DDI_FAILURE);
+	}
+
+	/* Get number of available interrupts */
+	ret = ddi_intr_get_navail(dip, intr_type, &avail);
+	if ((ret != DDI_SUCCESS) || (avail == 0)) {
+		AACDB_PRINT(softs, CE_WARN,
+		    "ddi_intr_get_navail() failed, ret %d avail %d",
+		    ret, avail);
+		return (DDI_FAILURE);
+	}
+
+	AACDB_PRINT(softs, CE_NOTE,
+	    "ddi_intr_get_nvail returned %d, navail() returned %d",
+	    count, avail);
+
+	/* Allocate an array of interrupt handles */
+	intr_size = count * sizeof (ddi_intr_handle_t);
+	softs->htable = kmem_alloc(intr_size, KM_SLEEP);
+
+	if (intr_type == DDI_INTR_TYPE_MSI) {
+		count = 1; /* only one vector needed by now */
+		flag = DDI_INTR_ALLOC_STRICT;
+	} else { /* must be DDI_INTR_TYPE_FIXED */
+		flag = DDI_INTR_ALLOC_NORMAL;
+	}
+
+	/* Call ddi_intr_alloc() */
+	ret = ddi_intr_alloc(dip, softs->htable, intr_type, 0,
+	    count, &actual, flag);
+
+	if ((ret != DDI_SUCCESS) || (actual == 0)) {
+		AACDB_PRINT(softs, CE_WARN,
+		    "ddi_intr_alloc() failed, ret = %d", ret);
+		actual = 0;
+		goto error;
+	}
+
+	if (actual < count) {
+		AACDB_PRINT(softs, CE_NOTE,
+		    "Requested: %d, Received: %d", count, actual);
+		goto error;
+	}
+
+	softs->intr_cnt = actual;
+
+	/* Get priority for first msi, assume remaining are all the same */
+	if ((ret = ddi_intr_get_pri(softs->htable[0],
+	    &softs->intr_pri)) != DDI_SUCCESS) {
+		AACDB_PRINT(softs, CE_WARN,
+		    "ddi_intr_get_pri() failed, ret = %d", ret);
+		goto error;
+	}
+
+	/* Test for high level mutex */
+	if (softs->intr_pri >= ddi_intr_get_hilevel_pri()) {
+		AACDB_PRINT(softs, CE_WARN,
+		    "aac_query_intrs: Hi level interrupt not supported");
+		goto error;
+	}
+
+	return (DDI_SUCCESS);
+
+error:
+	/* Free already allocated intr */
+	for (i = 0; i < actual; i++)
+		(void) ddi_intr_free(softs->htable[i]);
+
+	kmem_free(softs->htable, intr_size);
+	return (DDI_FAILURE);
+}
+
+/*
+ * Register FIXED or MSI interrupts, and enable them
+ */
+static int
+aac_add_intrs(struct aac_softstate *softs)
+{
+	int i, ret;
+	int intr_size, actual;
+	ddi_intr_handler_t *aac_intr;
+
+	actual = softs->intr_cnt;
+	intr_size = actual * sizeof (ddi_intr_handle_t);
+	aac_intr = (ddi_intr_handler_t *)((softs->flags & AAC_FLAGS_NEW_COMM) ?
+	    aac_intr_new : aac_intr_old);
+
+	/* Call ddi_intr_add_handler() */
+	for (i = 0; i < actual; i++) {
+		if ((ret = ddi_intr_add_handler(softs->htable[i],
+		    aac_intr, (caddr_t)softs, NULL)) != DDI_SUCCESS) {
+			cmn_err(CE_WARN,
+			    "ddi_intr_add_handler() failed ret = %d", ret);
+
+			/* Free already allocated intr */
+			for (i = 0; i < actual; i++)
+				(void) ddi_intr_free(softs->htable[i]);
+
+			kmem_free(softs->htable, intr_size);
+			return (DDI_FAILURE);
+		}
+	}
+
+	if ((ret = ddi_intr_get_cap(softs->htable[0], &softs->intr_cap))
+	    != DDI_SUCCESS) {
+		cmn_err(CE_WARN, "ddi_intr_get_cap() failed, ret = %d", ret);
+
+		/* Free already allocated intr */
+		for (i = 0; i < actual; i++)
+			(void) ddi_intr_free(softs->htable[i]);
+
+		kmem_free(softs->htable, intr_size);
+		return (DDI_FAILURE);
+	}
+
+	/* Enable interrupts */
+	if (softs->intr_cap & DDI_INTR_FLAG_BLOCK) {
+		/* for MSI block enable */
+		(void) ddi_intr_block_enable(softs->htable, softs->intr_cnt);
+	} else {
+		/* Call ddi_intr_enable() for legacy/MSI non block enable */
+		for (i = 0; i < softs->intr_cnt; i++)
+			(void) ddi_intr_enable(softs->htable[i]);
+	}
+
+	return (DDI_SUCCESS);
+}
+
+/*
+ * Unregister FIXED or MSI interrupts
+ */
+static void
+aac_remove_intrs(struct aac_softstate *softs)
+{
+	int i;
+
+	/* Disable all interrupts */
+	if (softs->intr_cap & DDI_INTR_FLAG_BLOCK) {
+		/* Call ddi_intr_block_disable() */
+		(void) ddi_intr_block_disable(softs->htable, softs->intr_cnt);
+	} else {
+		for (i = 0; i < softs->intr_cnt; i++)
+			(void) ddi_intr_disable(softs->htable[i]);
+	}
+
+	/* Call ddi_intr_remove_handler() */
+	for (i = 0; i < softs->intr_cnt; i++) {
+		(void) ddi_intr_remove_handler(softs->htable[i]);
+		(void) ddi_intr_free(softs->htable[i]);
+	}
+
+	kmem_free(softs->htable, softs->intr_cnt * sizeof (ddi_intr_handle_t));
 }
 
 /*
@@ -1681,7 +1877,7 @@ aac_check_firmware(struct aac_softstate *softs)
 	uint32_t options;
 	uint32_t atu_size;
 	ddi_acc_handle_t pci_handle;
-	char *pci_mbr;
+	uint8_t *pci_mbr;
 	uint32_t max_fibs;
 	uint32_t max_fib_size;
 	uint32_t sg_tablesize;
@@ -2434,8 +2630,8 @@ aac_fib_enqueue(struct aac_softstate *softs, int queue, uint32_t fib_addr,
 	ASSERT(queue == AAC_ADAP_NORM_CMD_Q || queue == AAC_ADAP_NORM_RESP_Q);
 
 	/* Get the producer/consumer indices */
-	(void) ddi_dma_sync(dma, (uint8_t *)softs->qtablep->qt_qindex[queue] - \
-	    (uint8_t *)softs->comm_space, sizeof (uint32_t) * 2,
+	(void) ddi_dma_sync(dma, (uintptr_t)softs->qtablep->qt_qindex[queue] - \
+	    (uintptr_t)softs->comm_space, sizeof (uint32_t) * 2,
 	    DDI_DMA_SYNC_FORCPU);
 	if (aac_check_dma_handle(dma) != DDI_SUCCESS) {
 		ddi_fm_service_impact(softs->devinfo_p, DDI_SERVICE_UNAFFECTED);
@@ -2461,16 +2657,16 @@ aac_fib_enqueue(struct aac_softstate *softs, int queue, uint32_t fib_addr,
 	/* Fill in queue entry */
 	ddi_put32(acc, &((softs->qentries[queue] + pi)->aq_fib_size), fib_size);
 	ddi_put32(acc, &((softs->qentries[queue] + pi)->aq_fib_addr), fib_addr);
-	(void) ddi_dma_sync(dma, (uint8_t *)(softs->qentries[queue] + pi) - \
-	    (uint8_t *)softs->comm_space, sizeof (struct aac_queue_entry),
+	(void) ddi_dma_sync(dma, (uintptr_t)(softs->qentries[queue] + pi) - \
+	    (uintptr_t)softs->comm_space, sizeof (struct aac_queue_entry),
 	    DDI_DMA_SYNC_FORDEV);
 
 	/* Update producer index */
 	ddi_put32(acc, &softs->qtablep->qt_qindex[queue][AAC_PRODUCER_INDEX],
 	    pi + 1);
 	(void) ddi_dma_sync(dma,
-	    (uint8_t *)&softs->qtablep->qt_qindex[queue][AAC_PRODUCER_INDEX] - \
-	    (uint8_t *)softs->comm_space, sizeof (uint32_t),
+	    (uintptr_t)&softs->qtablep->qt_qindex[queue][AAC_PRODUCER_INDEX] - \
+	    (uintptr_t)softs->comm_space, sizeof (uint32_t),
 	    DDI_DMA_SYNC_FORDEV);
 
 	if (aac_qinfo[queue].notify != 0)
@@ -2495,8 +2691,8 @@ aac_fib_dequeue(struct aac_softstate *softs, int queue, int *idxp)
 	ASSERT(idxp);
 
 	/* Get the producer/consumer indices */
-	(void) ddi_dma_sync(dma, (uint8_t *)softs->qtablep->qt_qindex[queue] - \
-	    (uint8_t *)softs->comm_space, sizeof (uint32_t) * 2,
+	(void) ddi_dma_sync(dma, (uintptr_t)softs->qtablep->qt_qindex[queue] - \
+	    (uintptr_t)softs->comm_space, sizeof (uint32_t) * 2,
 	    DDI_DMA_SYNC_FORCPU);
 	pi = ddi_get32(acc,
 	    &softs->qtablep->qt_qindex[queue][AAC_PRODUCER_INDEX]);
@@ -2522,8 +2718,8 @@ aac_fib_dequeue(struct aac_softstate *softs, int queue, int *idxp)
 		ci = 0;
 
 	/* Fetch the entry */
-	(void) ddi_dma_sync(dma, (uint8_t *)(softs->qentries[queue] + pi) - \
-	    (uint8_t *)softs->comm_space, sizeof (struct aac_queue_entry),
+	(void) ddi_dma_sync(dma, (uintptr_t)(softs->qentries[queue] + pi) - \
+	    (uintptr_t)softs->comm_space, sizeof (struct aac_queue_entry),
 	    DDI_DMA_SYNC_FORCPU);
 	if (aac_check_dma_handle(dma) != DDI_SUCCESS) {
 		ddi_fm_service_impact(softs->devinfo_p, DDI_SERVICE_UNAFFECTED);
@@ -2552,8 +2748,8 @@ aac_fib_dequeue(struct aac_softstate *softs, int queue, int *idxp)
 	ddi_put32(acc, &softs->qtablep->qt_qindex[queue][AAC_CONSUMER_INDEX],
 	    ci + 1);
 	(void) ddi_dma_sync(dma,
-	    (uint8_t *)&softs->qtablep->qt_qindex[queue][AAC_CONSUMER_INDEX] - \
-	    (uint8_t *)softs->comm_space, sizeof (uint32_t),
+	    (uintptr_t)&softs->qtablep->qt_qindex[queue][AAC_CONSUMER_INDEX] - \
+	    (uintptr_t)softs->comm_space, sizeof (uint32_t),
 	    DDI_DMA_SYNC_FORDEV);
 
 	if (unfull && aac_qinfo[queue].notify != 0)
@@ -3024,7 +3220,8 @@ aac_inquiry(struct aac_softstate *softs, struct scsi_pkt *pkt,
 		switch (page) {
 		case 0x00:
 			/* Supported VPD pages */
-			if (vpdp == NULL)
+			if (vpdp == NULL ||
+			    bp->b_bcount < (AAC_VPD_PAGE_DATA + 3))
 				return;
 			bzero(vpdp, AAC_VPD_PAGE_LENGTH);
 			vpdp[AAC_VPD_PAGE_CODE] = 0x00;
@@ -3039,7 +3236,8 @@ aac_inquiry(struct aac_softstate *softs, struct scsi_pkt *pkt,
 
 		case 0x80:
 			/* Unit serial number page */
-			if (vpdp == NULL)
+			if (vpdp == NULL ||
+			    bp->b_bcount < (AAC_VPD_PAGE_DATA + 8))
 				return;
 			bzero(vpdp, AAC_VPD_PAGE_LENGTH);
 			vpdp[AAC_VPD_PAGE_CODE] = 0x80;
@@ -3053,7 +3251,8 @@ aac_inquiry(struct aac_softstate *softs, struct scsi_pkt *pkt,
 
 		case 0x83:
 			/* Device identification page */
-			if (vpdp == NULL)
+			if (vpdp == NULL ||
+			    bp->b_bcount < (AAC_VPD_PAGE_DATA + 32))
 				return;
 			bzero(vpdp, AAC_VPD_PAGE_LENGTH);
 			vpdp[AAC_VPD_PAGE_CODE] = 0x83;
@@ -3075,10 +3274,11 @@ aac_inquiry(struct aac_softstate *softs, struct scsi_pkt *pkt,
 			sp = aac_vendor_id(softs, sp);
 			sp = aac_product_id(softs, sp);
 			sp = aac_lun_serialno(softs, tgt, sp);
-			idp[AAC_VPD_ID_LENGTH] = sp - &idp[AAC_VPD_ID_DATA];
+			idp[AAC_VPD_ID_LENGTH] = (uintptr_t)sp - \
+			    (uintptr_t)&idp[AAC_VPD_ID_DATA];
 
-			vpdp[AAC_VPD_PAGE_LENGTH] =
-			    sp - &vpdp[AAC_VPD_PAGE_DATA];
+			vpdp[AAC_VPD_PAGE_LENGTH] = (uintptr_t)sp - \
+			    (uintptr_t)&vpdp[AAC_VPD_PAGE_DATA];
 			pkt->pkt_state |= STATE_XFERRED_DATA;
 			break;
 
@@ -3096,7 +3296,7 @@ aac_inquiry(struct aac_softstate *softs, struct scsi_pkt *pkt,
 			    0x24, 0x00, 0);
 			return;
 		}
-		if (inqp == NULL)
+		if (inqp == NULL || bp->b_bcount < len)
 			return;
 
 		bzero(inqp, len);
@@ -3125,10 +3325,17 @@ aac_mode_sense(struct aac_softstate *softs, struct scsi_pkt *pkt,
     union scsi_cdb *cdbp, struct buf *bp, int capacity)
 {
 	uchar_t pagecode;
-	struct mode_format *page3p;
-	struct mode_geometry *page4p;
 	struct mode_header *headerp;
+	struct mode_header_g1 *g1_headerp;
 	unsigned int ncyl;
+	caddr_t sense_data;
+	caddr_t next_page;
+	size_t sdata_size;
+	size_t pages_size;
+	int unsupport_page = 0;
+
+	ASSERT(cdbp->scc_cmd == SCMD_MODE_SENSE ||
+	    cdbp->scc_cmd == SCMD_MODE_SENSE_G1);
 
 	if (!(bp && bp->b_un.b_addr && bp->b_bcount))
 		return;
@@ -3136,25 +3343,89 @@ aac_mode_sense(struct aac_softstate *softs, struct scsi_pkt *pkt,
 	if (bp->b_flags & (B_PHYS | B_PAGEIO))
 		bp_mapin(bp);
 	pkt->pkt_state |= STATE_XFERRED_DATA;
-	pagecode = cdbp->cdb_un.sg.scsi[0];
-	headerp = (struct mode_header *)(bp->b_un.b_addr);
-	headerp->bdesc_length = MODE_BLK_DESC_LENGTH;
+	pagecode = cdbp->cdb_un.sg.scsi[0] & 0x3F;
 
+	/* calculate the size of needed buffer */
+	if (cdbp->scc_cmd == SCMD_MODE_SENSE)
+		sdata_size = MODE_HEADER_LENGTH;
+	else /* must be SCMD_MODE_SENSE_G1 */
+		sdata_size = MODE_HEADER_LENGTH_G1;
+
+	pages_size = 0;
 	switch (pagecode) {
-	/* SBC-3 7.1.3.3 Format device page */
 	case SD_MODE_SENSE_PAGE3_CODE:
-		page3p = (struct mode_format *)((caddr_t)headerp +
-		    MODE_HEADER_LENGTH + MODE_BLK_DESC_LENGTH);
+		pages_size += sizeof (struct mode_format);
+		break;
+
+	case SD_MODE_SENSE_PAGE4_CODE:
+		pages_size += sizeof (struct mode_geometry);
+		break;
+
+	case MODEPAGE_CTRL_MODE:
+		if (softs->flags & AAC_FLAGS_LBA_64BIT) {
+			pages_size += sizeof (struct mode_control_scsi3);
+		} else {
+			unsupport_page = 1;
+		}
+		break;
+
+	case MODEPAGE_ALLPAGES:
+		if (softs->flags & AAC_FLAGS_LBA_64BIT) {
+			pages_size += sizeof (struct mode_format) +
+			    sizeof (struct mode_geometry) +
+			    sizeof (struct mode_control_scsi3);
+		} else {
+			pages_size += sizeof (struct mode_format) +
+			    sizeof (struct mode_geometry);
+		}
+		break;
+
+	default:
+		/* unsupported pages */
+		unsupport_page = 1;
+	}
+
+	/* allocate buffer to fill the send data */
+	sdata_size += pages_size;
+	sense_data = kmem_zalloc(sdata_size, KM_SLEEP);
+
+	if (cdbp->scc_cmd == SCMD_MODE_SENSE) {
+		headerp = (struct mode_header *)sense_data;
+		headerp->length = MODE_HEADER_LENGTH + pages_size -
+		    sizeof (headerp->length);
+		headerp->bdesc_length = 0;
+		next_page = sense_data + sizeof (struct mode_header);
+	} else {
+		g1_headerp = (void *)sense_data;
+		g1_headerp->length = BE_16(MODE_HEADER_LENGTH_G1 + pages_size -
+		    sizeof (g1_headerp->length));
+		g1_headerp->bdesc_length = 0;
+		next_page = sense_data + sizeof (struct mode_header_g1);
+	}
+
+	if (unsupport_page)
+		goto finish;
+
+	if (pagecode == SD_MODE_SENSE_PAGE3_CODE ||
+	    pagecode == MODEPAGE_ALLPAGES) {
+		/* SBC-3 7.1.3.3 Format device page */
+		struct mode_format *page3p;
+
+		page3p = (void *)next_page;
 		page3p->mode_page.code = SD_MODE_SENSE_PAGE3_CODE;
 		page3p->mode_page.length = sizeof (struct mode_format);
 		page3p->data_bytes_sect = BE_16(AAC_SECTOR_SIZE);
 		page3p->sect_track = BE_16(AAC_SECTORS_PER_TRACK);
-		break;
 
-	/* SBC-3 7.1.3.8 Rigid disk device geometry page */
-	case SD_MODE_SENSE_PAGE4_CODE:
-		page4p = (struct mode_geometry *)((caddr_t)headerp +
-		    MODE_HEADER_LENGTH + MODE_BLK_DESC_LENGTH);
+		next_page += sizeof (struct mode_format);
+	}
+
+	if (pagecode == SD_MODE_SENSE_PAGE4_CODE ||
+	    pagecode == MODEPAGE_ALLPAGES) {
+		/* SBC-3 7.1.3.8 Rigid disk device geometry page */
+		struct mode_geometry *page4p;
+
+		page4p = (void *)next_page;
 		page4p->mode_page.code = SD_MODE_SENSE_PAGE4_CODE;
 		page4p->mode_page.length = sizeof (struct mode_geometry);
 		page4p->heads = AAC_NUMBER_OF_HEADS;
@@ -3163,28 +3434,27 @@ aac_mode_sense(struct aac_softstate *softs, struct scsi_pkt *pkt,
 		page4p->cyl_lb = ncyl & 0xff;
 		page4p->cyl_mb = (ncyl >> 8) & 0xff;
 		page4p->cyl_ub = (ncyl >> 16) & 0xff;
-		break;
 
-	case MODEPAGE_CTRL_MODE: /* 64-bit LBA need large sense data */
-		if (softs->flags & AAC_FLAGS_LBA_64BIT) {
-			struct mode_control_scsi3 *mctl;
-
-			mctl = (struct mode_control_scsi3 *)((caddr_t)headerp +
-			    MODE_HEADER_LENGTH + MODE_BLK_DESC_LENGTH);
-			mctl->mode_page.code = MODEPAGE_CTRL_MODE;
-			mctl->mode_page.length =
-			    sizeof (struct mode_control_scsi3) -
-			    sizeof (struct mode_page);
-			mctl->d_sense = 1;
-		} else {
-			bzero(bp->b_un.b_addr, bp->b_bcount);
-		}
-		break;
-
-	default:
-		bzero(bp->b_un.b_addr, bp->b_bcount);
-		break;
+		next_page += sizeof (struct mode_geometry);
 	}
+
+	if ((pagecode == MODEPAGE_CTRL_MODE || pagecode == MODEPAGE_ALLPAGES) &&
+	    softs->flags & AAC_FLAGS_LBA_64BIT) {
+		/* 64-bit LBA need large sense data */
+		struct mode_control_scsi3 *mctl;
+
+		mctl = (void *)next_page;
+		mctl->mode_page.code = MODEPAGE_CTRL_MODE;
+		mctl->mode_page.length =
+		    sizeof (struct mode_control_scsi3) -
+		    sizeof (struct mode_page);
+		mctl->d_sense = 1;
+	}
+
+finish:
+	/* copyout the valid data. */
+	bcopy(sense_data, bp->b_un.b_addr, min(sdata_size, bp->b_bcount));
+	kmem_free(sense_data, sdata_size);
 }
 
 /*ARGSUSED*/
@@ -3678,7 +3948,7 @@ static void
 aac_unknown_scmd(struct aac_softstate *softs, struct aac_cmd *acp)
 {
 	AACDB_PRINT(softs, CE_CONT, "SCMD 0x%x not supported",
-	    ((union scsi_cdb *)acp->pkt->pkt_cdbp)->scc_cmd);
+	    ((union scsi_cdb *)(void *)acp->pkt->pkt_cdbp)->scc_cmd);
 	aac_free_dmamap(acp);
 	aac_set_arq_data(acp->pkt, KEY_ILLEGAL_REQUEST, 0x20, 0x00, 0);
 	aac_soft_callback(softs, acp);
@@ -3698,7 +3968,7 @@ aac_tran_start_ld(struct aac_softstate *softs, struct aac_cmd *acp)
 
 	dvp = acp->dvp;
 	pkt = acp->pkt;
-	cdbp = (union scsi_cdb *)pkt->pkt_cdbp;
+	cdbp = (void *)pkt->pkt_cdbp;
 	bp = acp->bp;
 
 	switch (cdbp->scc_cmd) {
@@ -3726,7 +3996,7 @@ aac_tran_start_ld(struct aac_softstate *softs, struct aac_cmd *acp)
 			aac_free_dmamap(acp);
 			if (bp->b_flags & (B_PHYS|B_PAGEIO))
 				bp_mapin(bp);
-			bcopy(&cap, bp->b_un.b_addr, 8);
+			bcopy(&cap, bp->b_un.b_addr, min(bp->b_bcount, 8));
 			pkt->pkt_state |= STATE_XFERRED_DATA;
 		}
 		aac_soft_callback(softs, acp);
@@ -3741,13 +4011,14 @@ aac_tran_start_ld(struct aac_softstate *softs, struct aac_cmd *acp)
 				int cap_len = sizeof (struct scsi_capacity_16);
 
 				bzero(&cap16, cap_len);
-				cap16.sc_capacity = BE_64(dvp->size);
+				cap16.sc_capacity = BE_64(dvp->size - 1);
 				cap16.sc_lbasize = BE_32(AAC_SECTOR_SIZE);
 
 				aac_free_dmamap(acp);
 				if (bp->b_flags & (B_PHYS | B_PAGEIO))
 					bp_mapin(bp);
-				bcopy(&cap16, bp->b_un.b_addr, cap_len);
+				bcopy(&cap16, bp->b_un.b_addr,
+				    min(bp->b_bcount, cap_len));
 				pkt->pkt_state |= STATE_XFERRED_DATA;
 			}
 			aac_soft_callback(softs, acp);
@@ -5305,7 +5576,7 @@ aac_sync_tick(struct aac_softstate *softs)
 	ddi_acc_handle_t acc = softs->sync_slot.fib_acc_handle;
 	struct aac_fib *fibp = softs->sync_slot.fibp;
 
-	ddi_put32(acc, (uint32_t *)&fibp->data[0], ddi_get_time());
+	ddi_put32(acc, (void *)&fibp->data[0], ddi_get_time());
 	return (aac_sync_fib(softs, SendHostTime, AAC_FIB_SIZEOF(uint32_t)));
 }
 
@@ -6235,7 +6506,7 @@ aac_print_scmd(struct aac_softstate *softs, struct aac_cmd *acp)
 	int ctl = ddi_get_instance(softs->devinfo_p);
 	int tgt = ap->a_target;
 	int lun = ap->a_lun;
-	union scsi_cdb *cdbp = (union scsi_cdb *)pkt->pkt_cdbp;
+	union scsi_cdb *cdbp = (void *)pkt->pkt_cdbp;
 	uchar_t cmd = cdbp->scc_cmd;
 	char *desc;
 
@@ -6317,19 +6588,19 @@ aac_print_fib(struct aac_softstate *softs, struct aac_fib *fibp)
 			    LE_32(pContainer->CTCommand.param[2]));
 			return;
 		case VM_Ioctl:
-			sub_cmd = LE_32(((int32_t *)pContainer)[4]);
+			sub_cmd = LE_32(((int32_t *)(void *)pContainer)[4]);
 			subcmdstr = aac_cmd_name(sub_cmd, aac_ioctl_subcmds);
 			break;
 		}
 		break;
 
 	case ClusterCommand:
-		sub_cmd = LE_32(((int32_t *)fibp->data)[0]);
+		sub_cmd = LE_32(((int32_t *)(void *)fibp->data)[0]);
 		subcmdstr = aac_cmd_name(sub_cmd, aac_cl_subcmds);
 		break;
 
 	case AifRequest:
-		sub_cmd = LE_32(((int32_t *)fibp->data)[0]);
+		sub_cmd = LE_32(((int32_t *)(void *)fibp->data)[0]);
 		subcmdstr = aac_cmd_name(sub_cmd, aac_aif_subcmds);
 		break;
 

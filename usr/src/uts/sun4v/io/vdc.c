@@ -181,7 +181,7 @@ static int 	vdc_do_sync_op(vdc_t *vdcp, int operation, caddr_t addr,
 		    void *cb_arg, vio_desc_direction_t dir, boolean_t);
 
 static int	vdc_wait_for_response(vdc_t *vdcp, vio_msg_t *msgp);
-static int	vdc_drain_response(vdc_t *vdcp);
+static int	vdc_drain_response(vdc_t *vdcp, struct buf *buf);
 static int	vdc_depopulate_descriptor(vdc_t *vdc, uint_t idx);
 static int	vdc_populate_mem_hdl(vdc_t *vdcp, vdc_local_desc_t *ldep);
 static int	vdc_verify_seq_num(vdc_t *vdc, vio_dring_msg_t *dring_msg);
@@ -386,6 +386,7 @@ vdc_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	kt_did_t failfast_tid, ownership_tid;
 	int	instance;
 	int	rv;
+	vdc_server_t *srvr;
 	vdc_t	*vdc = NULL;
 
 	switch (cmd) {
@@ -450,12 +451,13 @@ vdc_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	vdc->lifecycle	= VDC_LC_DETACHING;
 
 	/*
-	 * try and disable callbacks to prevent another handshake
+	 * Try and disable callbacks to prevent another handshake. We have to
+	 * disable callbacks for all servers.
 	 */
-	if (vdc->curr_server != NULL) {
-		rv = ldc_set_cb_mode(vdc->curr_server->ldc_handle,
-		    LDC_CB_DISABLE);
-		DMSG(vdc, 0, "callback disabled (rv=%d)\n", rv);
+	for (srvr = vdc->server_list; srvr != NULL; srvr = srvr->next) {
+		rv = ldc_set_cb_mode(srvr->ldc_handle, LDC_CB_DISABLE);
+		DMSG(vdc, 0, "callback disabled (ldc=%lu, rv=%d)\n",
+		    srvr->ldc_id, rv);
 	}
 
 	if (vdc->initialized & VDC_THREAD) {
@@ -1386,7 +1388,7 @@ vdc_dump(dev_t dev, caddr_t addr, daddr_t blkno, int nblk)
 	}
 
 	if (ddi_in_panic())
-		(void) vdc_drain_response(vdc);
+		(void) vdc_drain_response(vdc, NULL);
 
 	DMSG(vdc, 0, "[%d] End\n", instance);
 
@@ -1450,6 +1452,8 @@ vdc_strategy(struct buf *buf)
 		DMSG(vdc, 0, "Failed to read/write (err=%d)\n", rv);
 		bioerror(buf, rv);
 		biodone(buf);
+	} else if (ddi_in_panic()) {
+		(void) vdc_drain_response(vdc, buf);
 	}
 
 	return (0);
@@ -1662,11 +1666,11 @@ vdc_init_attr_negotiation(vdc_t *vdc)
 	status = vdc_send(vdc, (caddr_t)&pkt, &msglen);
 	DMSG(vdc, 0, "Attr info sent (status = %d)\n", status);
 
-	if ((status != 0) || (msglen != sizeof (vio_ver_msg_t))) {
+	if ((status != 0) || (msglen != sizeof (vd_attr_msg_t))) {
 		DMSG(vdc, 0, "[%d] Failed to send Attr negotiation info: "
 		    "id(%lx) rv(%d) size(%ld)", vdc->instance,
 		    vdc->curr_server->ldc_handle, status, msglen);
-		if (msglen != sizeof (vio_ver_msg_t))
+		if (msglen != sizeof (vd_attr_msg_t))
 			status = ENOMSG;
 	}
 
@@ -2378,12 +2382,12 @@ vdc_init_ports(vdc_t *vdc, md_t *mdp, mde_cookie_t vd_nodep)
 		}
 
 		/* add server to list */
-		if (prev_srvr) {
+		if (prev_srvr)
 			prev_srvr->next = srvr;
-		} else {
+		else
 			vdc->server_list = srvr;
-			prev_srvr = srvr;
-		}
+
+		prev_srvr = srvr;
 
 		/* inc numbers of servers */
 		vdc->num_servers++;
@@ -3211,22 +3215,26 @@ vdc_do_sync_op(vdc_t *vdcp, int operation, caddr_t addr, size_t nbytes,
  * 	handled differently because interrupts are disabled and vdc
  * 	will not get messages. We have to poll for the messages instead.
  *
- *	Note: since we don't have a buf_t available we cannot implement
- *	the io:::done DTrace probe in this specific case.
+ *	Note: since we are panicking we don't implement	the io:::done
+ *	DTrace probe or update the I/O statistics kstats.
  *
  * Arguments:
  *	vdc	- soft state pointer for this instance of the device driver.
+ *	buf	- if buf is NULL then we drain all responses, otherwise we
+ *		  poll until we receive a ACK/NACK for the specific I/O
+ *		  described by buf.
  *
  * Return Code:
  *	0	- Success
  */
 static int
-vdc_drain_response(vdc_t *vdc)
+vdc_drain_response(vdc_t *vdc, struct buf *buf)
 {
 	int 			rv, idx, retries;
 	size_t			msglen;
 	vdc_local_desc_t 	*ldep = NULL;	/* Local Dring Entry Pointer */
 	vio_dring_msg_t		dmsg;
+	struct buf		*mbuf;
 
 	mutex_enter(&vdc->lock);
 
@@ -3293,6 +3301,17 @@ vdc_drain_response(vdc_t *vdc)
 			continue;
 		}
 
+		if (buf != NULL && ldep->cb_type == CB_STRATEGY) {
+			mbuf = ldep->cb_arg;
+			mbuf->b_resid = mbuf->b_bcount -
+			    ldep->dep->payload.nbytes;
+			bioerror(mbuf, (rv == EAGAIN)? EIO:
+			    ldep->dep->payload.status);
+			biodone(mbuf);
+		} else {
+			mbuf = NULL;
+		}
+
 		DMSG(vdc, 1, "[%d] Depopulating idx=%d state=%d\n",
 		    vdc->instance, idx, ldep->dep->hdr.dstate);
 
@@ -3303,9 +3322,24 @@ vdc_drain_response(vdc_t *vdc)
 			    vdc->instance, idx);
 		}
 
-		/* if this is the last descriptor - break out of loop */
-		if ((idx + 1) % vdc->dring_len == vdc->dring_curr_idx)
+		/* we have received an ACK/NACK for the specified buffer */
+		if (buf != NULL && buf == mbuf) {
+			rv = 0;
 			break;
+		}
+
+		/* if this is the last descriptor - break out of loop */
+		if ((idx + 1) % vdc->dring_len == vdc->dring_curr_idx) {
+			if (buf != NULL) {
+				/*
+				 * We never got a response for the specified
+				 * buffer so we fail the I/O.
+				 */
+				bioerror(buf, EIO);
+				biodone(buf);
+			}
+			break;
+		}
 	}
 
 	mutex_exit(&vdc->lock);
@@ -4094,8 +4128,6 @@ vdc_switch_server(vdc_t *vdcp)
 	/* switch the server */
 	vdcp->curr_server = new_server;
 
-	cmn_err(CE_NOTE, "Successfully failed over from VDS on port@%ld to "
-	    "VDS on port@%ld.\n", curr_server->id, new_server->id);
 	DMSG(vdcp, 0, "[%d] Switched to next vdisk server, port@%ld, ldc@%ld\n",
 	    vdcp->instance, vdcp->curr_server->id, vdcp->curr_server->ldc_id);
 }
@@ -4340,6 +4372,10 @@ done:
 				vdcp->ownership |= VDC_OWNERSHIP_RESET;
 			cv_signal(&vdcp->ownership_cv);
 
+			cmn_err(CE_CONT, "?vdisk@%d is online using "
+			    "ldc@%ld,%ld\n", vdcp->instance,
+			    vdcp->curr_server->ldc_id, vdcp->curr_server->id);
+
 			mutex_exit(&vdcp->lock);
 
 			for (;;) {
@@ -4360,6 +4396,9 @@ done:
 			}
 
 			mutex_enter(&vdcp->lock);
+
+			cmn_err(CE_CONT, "?vdisk@%d is offline\n",
+			    vdcp->instance);
 
 			vdcp->state = VDC_STATE_RESETTING;
 			vdcp->self_reset = B_TRUE;

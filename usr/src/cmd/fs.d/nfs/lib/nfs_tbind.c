@@ -202,6 +202,14 @@ nfslib_transport_open(struct netconfig *nconf)
 		return (-1);
 	}
 
+	/*
+	 * Enable options of returning the ip's for udp.
+	 */
+	if (strcmp(nconf->nc_netid, "udp6") == 0)
+		__rpc_tli_set_options(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, 1);
+	else if (strcmp(nconf->nc_netid, "udp") == 0)
+		__rpc_tli_set_options(fd, IPPROTO_IP, IP_RECVDSTADDR, 1);
+
 	return (fd);
 }
 
@@ -512,11 +520,11 @@ do_one(char *provider, NETSELDECL(proto), struct protob *protobp0,
 	l = strlen(NC_UDP);
 	for (protobp = protobp0; protobp; protobp = protobp->next) {
 		for (vers = protobp->versmin; vers <= protobp->versmax;
-		     vers++) {
+		    vers++) {
 			if ((protobp->program == NFS_PROGRAM ||
-				protobp->program == NFS_ACL_PROGRAM) &&
-				vers == NFS_V4 &&
-				strncasecmp(retnconf->nc_proto, NC_UDP, l) == 0)
+			    protobp->program == NFS_ACL_PROGRAM) &&
+			    vers == NFS_V4 &&
+			    strncasecmp(retnconf->nc_proto, NC_UDP, l) == 0)
 				continue;
 
 			if (protobp->flags & PROTOB_NO_REGISTER)
@@ -560,7 +568,7 @@ do_one(char *provider, NETSELDECL(proto), struct protob *protobp0,
 
 		if (svc == NULL && Mysvc4 != NULL)
 			err = (*Mysvc4)(sock, &addrmask, retnconf,
-					NFS4_SETPORT|NFS4_KRPC_START, retaddr);
+			    NFS4_SETPORT|NFS4_KRPC_START, retaddr);
 		else
 			err = (*svc)(sock, addrmask, retnconf);
 
@@ -639,7 +647,7 @@ poll_for_action(void)
 			 */
 			switch (errno) {
 			case EINTR:
-			    continue;
+				continue;
 
 			case EAGAIN:
 			case ENOMEM:
@@ -670,10 +678,10 @@ poll_for_action(void)
 				if (conn_polled[i].nc.nc_semantics ==
 				    NC_TPI_CLTS) {
 					errno = do_poll_clts_action(
-						poll_array[i].fd, i);
+					    poll_array[i].fd, i);
 				} else {
 					errno = do_poll_cots_action(
-						poll_array[i].fd, i);
+					    poll_array[i].fd, i);
 				}
 
 				if (errno == 0)
@@ -698,7 +706,7 @@ poll_for_action(void)
 	}
 
 	(void) syslog(LOG_ERR,
-		"All transports have been closed with errors. Exiting.");
+	    "All transports have been closed with errors. Exiting.");
 }
 
 /*
@@ -1331,10 +1339,10 @@ cots_listen_event(int fd, int conn_index)
 #ifdef DEBUG
 					printf(
 	"cots_listen_event(%s): T_DISCONNECT during accept processing\n",
-	    nconf->nc_proto);
+					    nconf->nc_proto);
 #endif
 					(void) discon_get(fd, nconf,
-								&conn_head);
+					    &conn_head);
 					continue;
 				default:
 					syslog(LOG_ERR,
@@ -1359,7 +1367,7 @@ cots_listen_event(int fd, int conn_index)
 		/* Tell KRPC about the new stream. */
 		if (Mysvc4 != NULL)
 			ret = (*Mysvc4)(new_fd, &addrmask, nconf,
-				NFS4_KRPC_START, &call->addr);
+			    NFS4_KRPC_START, &call->addr);
 		else
 			ret = (*Mysvc)(new_fd, addrmask, nconf);
 
@@ -1464,7 +1472,7 @@ printf("do_poll_cots_action(%s,%d): ", nconf->nc_proto, fd);
 printf("initiating orderly release of idle connection\n");
 #endif
 				if (nconf->nc_semantics == NC_TPI_COTS ||
-					connent->closing != 0) {
+				    connent->closing != 0) {
 					(void) t_snddis(fd, (struct t_call *)0);
 					goto fdclose;
 				}
@@ -1531,11 +1539,11 @@ printf("do_poll_cots_action(%s,%d): T_DISCONNECT event\n", nconf->nc_proto, fd);
 		case T_ERROR:
 		default:
 			if (event == T_ERROR || t_errno == TSYSERR) {
-			    if ((errorstr = strerror(errno)) == NULL) {
-				(void) sprintf(buf, "Unknown error num %d",
-									errno);
-				errorstr = (const char *) buf;
-			    }
+				if ((errorstr = strerror(errno)) == NULL) {
+					(void) sprintf(buf,
+					    "Unknown error num %d", errno);
+					errorstr = (const char *) buf;
+				}
 			} else if (event == -1)
 				errorstr = t_strerror(t_errno);
 			else
@@ -1595,7 +1603,7 @@ bind_to_provider(char *provider, char *serv, struct netbuf **addr,
 		    strcmp(nconf->nc_device, provider) == 0) {
 			*retnconf = nconf;
 			return (nfslib_bindit(nconf, addr, &hs,
-				listen_backlog));
+			    listen_backlog));
 		}
 	}
 	(void) endnetconfig(nc);
@@ -1624,7 +1632,7 @@ bind_to_proto(NETSELDECL(proto), char *serv, struct netbuf **addr,
 		if (OK_TPI_TYPE(nconf) && NETSELEQ(nconf->nc_proto, proto)) {
 			*retnconf = nconf;
 			return (nfslib_bindit(nconf, addr, &hs,
-				listen_backlog));
+			    listen_backlog));
 		}
 	}
 	(void) endnetconfig(nc);

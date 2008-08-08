@@ -180,7 +180,6 @@ s none etc/init=../sbin/init
 d none etc/init.d 755 root sys
 e initd etc/init.d/PRESERVE 744 root sys
 e initd etc/init.d/README 644 root sys
-e initd etc/init.d/acctadm 744 root sys
 e initd etc/init.d/cachefs.daemon 744 root sys
 e initd etc/init.d/deallocate 744 root sys
 f initd etc/init.d/ldap.client 744 root sys
@@ -358,6 +357,7 @@ f none lib/svc/method/identity-node 0555 root bin
 f none lib/svc/method/identity-domain 0555 root bin
 f none lib/svc/method/inetd-upgrade 0555 root bin
 f none lib/svc/method/keymap 0555 root bin
+f none lib/svc/method/ldap-client 0555 root bin
 f none lib/svc/method/manifest-import 0555 root bin
 f none lib/svc/method/mpxio-upgrade 0555 root bin
 f none lib/svc/method/net-init 0555 root bin
@@ -522,7 +522,7 @@ d none var/svc/manifest/platform 755 root sys
 d none var/svc/manifest/site 755 root sys
 d none var/svc/manifest/system 755 root sys
 f manifest var/svc/manifest/system/boot-archive.xml 0444 root sys
-f none var/svc/manifest/system/boot-archive-update.xml 0444 root sys
+f manifest var/svc/manifest/system/boot-archive-update.xml 0444 root sys
 d none var/svc/manifest/system/device 755 root sys
 f manifest var/svc/manifest/system/device/devices-local.xml 0444 root sys
 f manifest var/svc/manifest/system/device/mpxio-upgrade.xml 0444 root sys
@@ -538,6 +538,7 @@ f manifest var/svc/manifest/system/console-login.xml 0444 root sys
 f manifest var/svc/manifest/system/coreadm.xml 0444 root sys
 f manifest var/svc/manifest/system/cron.xml 0444 root sys
 f manifest var/svc/manifest/system/cryptosvc.xml 0444 root sys
+f manifest var/svc/manifest/system/extended-accounting.xml 0444 root sys
 f manifest var/svc/manifest/system/identity.xml 0444 root sys
 f manifest var/svc/manifest/system/idmap.xml 0444 root sys
 f manifest var/svc/manifest/system/keymap.xml 0444 root sys

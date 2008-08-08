@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -746,6 +746,10 @@ pcmcia_ctlops(dev_info_t *dip, dev_info_t *rdip,
 		return (DDI_FAILURE);
 		/* These CTLOPS will need to be implemented for new form */
 		/* let CardServices know about this */
+	case DDI_CTLOPS_DETACH:
+		return (DDI_SUCCESS);
+	case DDI_CTLOPS_ATTACH:
+		return (DDI_SUCCESS);
 
 	default:
 		/* if we don't understand, pass up the tree */
@@ -1561,7 +1565,7 @@ pcm_search_devinfo(dev_info_t *self, struct pcm_device_info *info, int socket)
 	char bf[256];
 	struct pcmcia_parent_private *ppd;
 	dev_info_t *dip;
-	int circular;
+	int circ;
 
 #if defined(PCMCIA_DEBUG)
 	if (pcmcia_debug)
@@ -1571,7 +1575,7 @@ pcm_search_devinfo(dev_info_t *self, struct pcm_device_info *info, int socket)
 		    info->pd_vers1_name, info->pd_flags);
 #endif
 
-	ndi_devi_enter(self, &circular);
+	ndi_devi_enter(self, &circ);
 	/* do searches in compatible property order */
 	for (dip = (dev_info_t *)DEVI(self)->devi_child;
 	    dip != NULL;
@@ -1640,7 +1644,7 @@ pcm_search_devinfo(dev_info_t *self, struct pcm_device_info *info, int socket)
 				break;
 		}
 	}
-	ndi_devi_exit(self, circular);
+	ndi_devi_exit(self, circ);
 	return (dip);
 }
 
@@ -1953,35 +1957,36 @@ SocketServices(int function, ...)
 			break;
 		}
 
-		for (func = 0; func < sockp->ls_functions; func++) {
-			/*
-			 * break the association of dip and socket
-			 * for all functions on that socket
-			 */
-			dip = sockp->ls_dip[func];
-			sockp->ls_dip[func] = NULL;
-			if (dip != NULL) {
-				struct pcmcia_parent_private *ppd;
-				ppd = (struct pcmcia_parent_private *)
-				    ddi_get_parent_data(dip);
-				ppd->ppd_active = 0;
-				(void) ndi_devi_offline(dip,
-				    NDI_DEVI_REMOVE);
+		if (!(sockp->ls_flags & PCS_SUSPENDED)) {
+			for (func = 0; func < sockp->ls_functions; func++) {
+				/*
+				 * break the association of dip and socket
+				 * for all functions on that socket
+				 */
+				dip = sockp->ls_dip[func];
+				sockp->ls_dip[func] = NULL;
+				if (dip != NULL) {
+					struct pcmcia_parent_private *ppd;
+					ppd = (struct pcmcia_parent_private *)
+					    ddi_get_parent_data(dip);
+					ppd->ppd_active = 0;
+					(void) ndi_devi_offline(dip,
+					    NDI_DEVI_REMOVE);
 
-				pcmcia_ppd_free(ppd);
-			}
+					pcmcia_ppd_free(ppd);
+				}
 #if defined(PCMCIA_DEBUG)
-			else {
-				if (pcmcia_debug)
-					cmn_err(CE_CONT,
-					    "CardRemoved: no "
-					    "dip present "
-					    "on socket %d!\n",
-					    (int)args[0]);
-			}
+				else {
+					if (pcmcia_debug)
+						cmn_err(CE_CONT,
+						    "CardRemoved: no "
+						    "dip present "
+						    "on socket %d!\n",
+						    (int)args[0]);
+				}
 #endif
-		}
-		if (sockp->ls_flags & PCS_SUSPENDED) {
+			}
+		} else {
 			mutex_enter(&pcmcia_global_lock);
 			sockp->ls_flags &= ~PCS_SUSPENDED;
 			cv_broadcast(&pcmcia_condvar);
@@ -3991,6 +3996,7 @@ pcmcia_create_device(ss_make_device_node_t *init)
 int
 pcmcia_get_minors(dev_info_t *dip, struct pcm_make_dev **minors)
 {
+	int circ;
 	int count = 0;
 	struct ddi_minor_data *dp;
 	struct pcm_make_dev *md;
@@ -4000,7 +4006,7 @@ pcmcia_get_minors(dev_info_t *dip, struct pcm_make_dev **minors)
 
 	socket = ddi_getprop(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
 	    PCM_DEV_SOCKET, -1);
-	mutex_enter(&(DEVI(dip)->devi_lock));
+	ndi_devi_enter(dip, &circ);
 	if (DEVI(dip)->devi_minor != (struct ddi_minor_data *)NULL) {
 		for (dp = DEVI(dip)->devi_minor;
 			dp != (struct ddi_minor_data *)NULL;
@@ -4055,7 +4061,7 @@ pcmcia_get_minors(dev_info_t *dip, struct pcm_make_dev **minors)
 			count = 0;
 		}
 	}
-	mutex_exit(&(DEVI(dip)->devi_lock));
+	ndi_devi_exit(dip, circ);
 	return (count);
 }
 
@@ -4065,6 +4071,7 @@ static char *ddmtypes[] = { "minor", "alias", "default", "internal" };
 static void
 pcmcia_dump_minors(dev_info_t *dip)
 {
+	int circ;
 	int count = 0;
 	struct ddi_minor_data *dp;
 	int unit, major;
@@ -4088,7 +4095,7 @@ pcmcia_dump_minors(dev_info_t *dip)
 			cmn_err(CE_CONT, "\tsibs: %s %s %s\n",
 				ddi_binding_name(np), cf2, cur);
 
-			mutex_enter(&(DEVI(np)->devi_lock));
+			ndi_devi_enter(np, &circ);
 			if (DEVI(np)->devi_minor !=
 			    (struct ddi_minor_data *)NULL) {
 				for (dp = DEVI(np)->devi_minor;
@@ -4112,7 +4119,7 @@ pcmcia_dump_minors(dev_info_t *dip)
 						ddi_binding_name(np));
 				}
 			}
-			mutex_exit(&(DEVI(np)->devi_lock));
+			ndi_devi_exit(np, circ);
 		}
 	}
 }
@@ -4245,6 +4252,38 @@ pcmcia_begin_resume(dev_info_t *dip)
 	}
 }
 
+/*
+ * mark a cardbus card as "suspended" in the pcmcia module
+ */
+void
+pcmcia_cb_suspended(int socket)
+{
+	mutex_enter(&pcmcia_global_lock);
+	pcmcia_sockets[socket]->ls_flags |= PCS_SUSPENDED;
+	mutex_exit(&pcmcia_global_lock);
+
+}
+
+/*
+ * mark a cardbus card as "resumed" in the pcmcia module
+ */
+void
+pcmcia_cb_resumed(int socket)
+{
+	if (pcmcia_sockets[socket]->ls_flags & PCS_SUSPENDED) {
+		mutex_enter(&pcmcia_global_lock);
+		pcmcia_sockets[socket]->ls_flags &= ~PCS_SUSPENDED;
+		cv_broadcast(&pcmcia_condvar);
+		mutex_exit(&pcmcia_global_lock);
+#ifdef PCMCIA_DEBUG
+		if (pcmcia_debug) {
+			cmn_err(CE_NOTE, "pcmcia_cb_resume RESUMED");
+		}
+#endif
+	}
+
+}
+
 void
 pcmcia_wait_insert(dev_info_t *dip)
 {
@@ -4272,6 +4311,14 @@ pcmcia_wait_insert(dev_info_t *dip)
 				if (pcmcia_sockets[s] &&
 				    pcmcia_sockets[s]->ls_flags &
 				    PCS_SUSPENDED) {
+
+#ifdef PCMCIA_DEBUG
+					if (pcmcia_debug) {
+						cmn_err(CE_NOTE,
+						"pcmcia_wait_insert: "
+						"socket in SUSPENDED state");
+					}
+#endif
 					done = 0;
 					break;
 				}
@@ -4285,6 +4332,10 @@ pcmcia_wait_insert(dev_info_t *dip)
 			tries = 0;
 		}
 		mutex_exit(&pcmcia_global_lock);
+	}
+
+	if (tries == 0) {
+		cmn_err(CE_NOTE, "pcmcia_wait_insert timed out");
 	}
 
 	nexus = (anp_t *)ddi_get_driver_private(dip);
@@ -4590,9 +4641,9 @@ pcmcia_free_resources(dev_info_t *self)
 	struct regspec *assigned;
 	int len;
 	dev_info_t *dip;
-	int circular;
+	int circ;
 
-	ndi_devi_enter(self, &circular);
+	ndi_devi_enter(self, &circ);
 	/* do searches in compatible property order */
 	for (dip = (dev_info_t *)DEVI(self)->devi_child;
 	    dip != NULL;
@@ -4611,7 +4662,7 @@ pcmcia_free_resources(dev_info_t *self)
 			kmem_free(assigned, len);
 		}
 	}
-	ndi_devi_exit(self, circular);
+	ndi_devi_exit(self, circ);
 }
 
 /*

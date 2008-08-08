@@ -228,7 +228,7 @@ create_target(tgt_node_t *x)
 			goto error;
 		}
 		if ((node_name = create_node_name(name, alias)) == NULL) {
-			xml_rtn_msg(&msg, ERR_CREATE_NAME_TO_LONG);
+			xml_rtn_msg(&msg, ERR_CREATE_NAME_TOO_LONG);
 			goto error;
 		}
 		if (create_target_dir(node_name, name) == False) {
@@ -264,8 +264,10 @@ create_target(tgt_node_t *x)
 
 	if (create_lun(node_name, name, type, lun, size, backing, &code)
 	    == True) {
-		if (mgmt_config_save2scf() == False)
+		if (mgmt_config_save2scf() == False) {
+			xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
 			goto error;
+		}
 
 		/* Only isns register on the 1st creation of the target */
 		if (lun == 0 && isns_enabled() == True) {
@@ -283,10 +285,10 @@ create_target(tgt_node_t *x)
 		 */
 		(void) snprintf(path, sizeof (path), "%s/%s",
 		    target_basedir, node_name);
-		rmdir(path);
+		(void) rmdir(path);
 		(void) snprintf(path, sizeof (path), "%s/%s",
 		    target_basedir, name);
-		unlink(path);
+		(void) unlink(path);
 		tgt_node_remove(targets_config, n, MatchBoth);
 	} else
 		tgt_node_remove(c, l, MatchBoth);
@@ -328,7 +330,7 @@ create_initiator(tgt_node_t *x)
 		goto error;
 	}
 	if (strlen(iscsi_name) >= ISCSI_MAX_NAME_LEN) {
-		xml_rtn_msg(&msg, ERR_NAME_TO_LONG);
+		xml_rtn_msg(&msg, ERR_NAME_TOO_LONG);
 		goto error;
 	}
 
@@ -347,6 +349,8 @@ create_initiator(tgt_node_t *x)
 
 	if (mgmt_config_save2scf() == True)
 		xml_rtn_msg(&msg, ERR_SUCCESS);
+	else
+		xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
 
 error:
 	if (name)
@@ -393,6 +397,8 @@ create_tpgt(tgt_node_t *x)
 
 	if (mgmt_config_save2scf() == True)
 		xml_rtn_msg(&msg, ERR_SUCCESS);
+	else
+		xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
 
 error:
 	if (tpgt)
@@ -469,7 +475,7 @@ create_zfs(tgt_node_t *x, ucred_t *cred)
 			tgt_node_add(n, c);
 			free(name);
 		} else {
-			xml_rtn_msg(&msg, ERR_CREATE_NAME_TO_LONG);
+			xml_rtn_msg(&msg, ERR_CREATE_NAME_TOO_LONG);
 			goto error;
 		}
 
@@ -569,22 +575,25 @@ create_zfs(tgt_node_t *x, ucred_t *cred)
 	c = tgt_node_alloc(XML_ELEMENT_SIZE, Uint64, &size);
 	tgt_node_add(l, c);
 
-	/* register with iSNS */
-	if (isns_enabled() == True) {
-		cptr = NULL;
-		if (tgt_find_value_str(n, XML_ELEMENT_INAME, &cptr) == True) {
-			if (isns_reg(cptr) != 0) {
-				xml_rtn_msg(&msg, ERR_ISNS_ERROR);
-				goto error;
-			}
-		}
+	cptr = NULL;
+	if (tgt_find_value_str(n, XML_ELEMENT_INAME, &cptr) != True) {
+		xml_rtn_msg(&msg, ERR_SYNTAX_MISSING_INAME);
+		goto error; /* xml node contruction has an issue. */
 	}
 
 	/*
 	 * Add ZVOL target to config of all targets
 	 */
 	tgt_node_add(targets_config, n);
-	n = NULL;
+	n = NULL; /* don't remove the node from the targets_config. */
+
+	/* register with iSNS */
+	if (isns_enabled() == True) {
+		if (isns_reg(cptr) != 0) {
+			xml_rtn_msg(&msg, ERR_ISNS_ERROR);
+			goto error;
+		}
+	}
 
 	xml_rtn_msg(&msg, ERR_SUCCESS);
 
@@ -836,7 +845,7 @@ create_lun(char *targ_name, char *local_name, char *type, int lun,
 		tgt_node_add(n, pn);
 	}
 
-	mgmt_param_save2scf(n, local_name, lun);
+	(void) mgmt_param_save2scf(n, local_name, lun);
 
 	if ((strcmp(type, TGT_TYPE_DISK) == 0) ||
 	    (strcmp(type, TGT_TYPE_TAPE) == 0)) {
@@ -896,9 +905,9 @@ create_lun_common(char *targ_name, char *local_name, int lun, uint64_t size,
 	(void) lseek(fd, size - 512LL, 0);
 	bzero(buf, sizeof (buf));
 	if (write(fd, buf, sizeof (buf)) != sizeof (buf)) {
-		unlink(path);
+		(void) unlink(path);
 		if (errno == EFBIG)
-			*code = ERR_FILE_TO_BIG;
+			*code = ERR_FILE_TOO_BIG;
 		else
 			*code = ERR_FAILED_TO_CREATE_LU;
 		goto error;
@@ -944,7 +953,7 @@ create_lun_common(char *targ_name, char *local_name, int lun, uint64_t size,
 		} else if ((fs.f_frsize * fs.f_bfree) < size) {
 			queue_prt(mgmtq, Q_STE_ERRS,
 			    "GEN  Not enough space for LU");
-			*code = ERR_FILE_TO_BIG;
+			*code = ERR_FILE_TOO_BIG;
 			goto error;
 		}
 
@@ -973,7 +982,7 @@ create_lun_common(char *targ_name, char *local_name, int lun, uint64_t size,
 			queue_message_free(queue_message_get(tp->q));
 		}
 	} else {
-		mgmt_get_param(&node, local_name, lun);
+		(void) mgmt_get_param(&node, local_name, lun);
 
 		c = tgt_node_alloc(XML_ELEMENT_STATUS, String,
 		    TGT_STATUS_ONLINE);
@@ -1057,10 +1066,10 @@ setup_disk_backing(err_code_t *code, char *path, char *backing, tgt_node_t *n,
 				*code = ERR_FAILED_TO_CREATE_LU;
 				return (False);
 			}
-			lseek(fd, *size - 512LL, 0);
+			(void) lseek(fd, *size - 512LL, 0);
 			bzero(buf, sizeof (buf));
 			(void) write(fd, buf, sizeof (buf));
-			close(fd);
+			(void) close(fd);
 		}
 	} else if (*size != 0) {
 		*code = ERR_DISK_BACKING_SIZE_OR_FILE;
@@ -1249,7 +1258,7 @@ get_zfs_shareiscsi(char *dataset, tgt_node_t **n, uint64_t *size, ucred_t *cred)
 	char			*cp;	/* current pair */
 	char			*np;	/* next pair */
 	char			*vp;	/* value pointer */
-	int			status;
+	int			status  = ERR_SUCCESS;
 
 	if (((zh = libzfs_init()) == NULL) ||
 	    ((zfsh = zfs_open(zh, dataset, ZFS_TYPE_DATASET)) == NULL)) {
@@ -1299,6 +1308,7 @@ get_zfs_shareiscsi(char *dataset, tgt_node_t **n, uint64_t *size, ucred_t *cred)
 	 * is called is an error.
 	 * Currently we only look for 'type=<value>' and ignore others.
 	 */
+
 	for (cp = prop; cp; cp = np) {
 		if (np = strchr(cp, ','))
 			*np++ = '\0';
@@ -1307,7 +1317,7 @@ get_zfs_shareiscsi(char *dataset, tgt_node_t **n, uint64_t *size, ucred_t *cred)
 			continue;
 		}
 		if (strcmp(cp, "off") == 0) {
-			status = ERR_INTERNAL_ERROR;
+			status = ERR_ZFS_ISCSISHARE_OFF;
 			goto error;
 		}
 		if (vp = strchr(cp, '='))
@@ -1326,7 +1336,7 @@ get_zfs_shareiscsi(char *dataset, tgt_node_t **n, uint64_t *size, ucred_t *cred)
 	 */
 	*prop = '\0';
 	if (zfs_prop_get(zfsh, ZFS_PROP_ISCSIOPTIONS, prop, ZFS_PROP_SIZE, NULL,
-	    NULL, 0, B_TRUE)) {
+	    NULL, 0, B_TRUE) && (status != ERR_ZFS_ISCSISHARE_OFF)) {
 		status = ERR_INTERNAL_ERROR;
 		goto error;
 	}
@@ -1348,7 +1358,7 @@ get_zfs_shareiscsi(char *dataset, tgt_node_t **n, uint64_t *size, ucred_t *cred)
 			}
 
 			/* Cleanup XML data */
-			xmlTextReaderClose(xml_ptr);
+			(void) xmlTextReaderClose(xml_ptr);
 			xmlFreeTextReader(xml_ptr);
 			xmlCleanupParser();
 
@@ -1362,7 +1372,6 @@ get_zfs_shareiscsi(char *dataset, tgt_node_t **n, uint64_t *size, ucred_t *cred)
 				free(cp);
 			}
 
-			status = ERR_SUCCESS;
 		} else {
 			status = ERR_NULL_XML_MESSAGE;
 		}

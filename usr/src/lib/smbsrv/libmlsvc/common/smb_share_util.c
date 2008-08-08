@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -30,7 +30,9 @@
 #include <strings.h>
 #include <stdlib.h>
 #include <libshare.h>
-#include <smbsrv/lmshare.h>
+#include <smbsrv/smb_share.h>
+
+#include <syslog.h>
 
 static pthread_mutex_t smb_group_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -38,37 +40,44 @@ static pthread_mutex_t smb_group_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void
 smb_build_lmshare_info(char *share_name, char *path,
-    sa_optionset_t opts, lmshare_info_t *si)
+    sa_resource_t resource, smb_share_t *si)
 {
 	sa_property_t prop;
 	char *val = NULL;
+	sa_optionset_t opts;
+	sa_share_t share;
 
-	bzero(si, sizeof (lmshare_info_t));
+	bzero(si, sizeof (smb_share_t));
 	/* Share is read from SMF so it should be permanent */
-	si->mode = LMSHRM_PERM;
+	si->shr_flags = SMB_SHRF_PERM;
 
-	(void) strlcpy(si->directory, path, sizeof (si->directory));
-	(void) strlcpy(si->share_name, share_name, sizeof (si->share_name));
+	(void) strlcpy(si->shr_path, path, sizeof (si->shr_path));
+	(void) strlcpy(si->shr_name, share_name, sizeof (si->shr_name));
 
+	val = sa_get_resource_description(resource);
+	if (val == NULL) {
+		share = sa_get_resource_parent(resource);
+		val = sa_get_resource_description(share);
+	}
+
+	if (val != NULL) {
+		(void) strlcpy(si->shr_cmnt, val, sizeof (si->shr_cmnt));
+		sa_free_share_description(val);
+	}
+
+	opts = sa_get_derived_optionset(resource, SMB_PROTOCOL_NAME, 1);
 	if (opts == NULL)
 		return;
 
-	prop = (sa_property_t)sa_get_property(opts, SHOPT_AD_CONTAINER);
+	prop = (sa_property_t)sa_get_property(opts, SMB_SHROPT_AD_CONTAINER);
 	if (prop != NULL) {
 		if ((val = sa_get_property_attr(prop, "value")) != NULL) {
-			(void) strlcpy(si->container, val,
-			    sizeof (si->container));
+			(void) strlcpy(si->shr_container, val,
+			    sizeof (si->shr_container));
 			free(val);
 		}
 	}
-
-	prop = (sa_property_t)sa_get_property(opts, "description");
-	if (prop != NULL) {
-		if ((val = sa_get_property_attr(prop, "value")) != NULL) {
-			(void) strlcpy(si->comment, val, sizeof (si->comment));
-			free(val);
-		}
-	}
+	sa_free_derived_optionset(opts);
 }
 
 /*

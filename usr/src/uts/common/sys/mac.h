@@ -32,7 +32,6 @@
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
 #include <sys/stream.h>
-#include <sys/dld.h>
 
 /*
  * MAC Services Module
@@ -95,6 +94,45 @@ typedef enum {
 	LINK_FLOWCTRL_TX,
 	LINK_FLOWCTRL_BI
 } link_flowctrl_t;
+
+typedef uint32_t datalink_id_t;
+
+/*
+ * Encodings for public properties.
+ * A most significant bit value of 1 indicates private property, intended
+ * to allow private property implementations to use internal encodings
+ * if desired.
+ *
+ * Note that there are 2 sets of parameters: the *_EN_*
+ * values are those that the Administrator configures for autonegotiation.
+ * The _ADV_* values are those that are currently exposed over the wire.
+ */
+#define	MAXLINKPROPNAME		256
+#define	MAC_PROP_DEFAULT	0x0001
+typedef enum {
+	MAC_PROP_DUPLEX = 0x00000001,
+	MAC_PROP_SPEED,
+	MAC_PROP_STATUS,
+	MAC_PROP_AUTONEG,
+	MAC_PROP_EN_AUTONEG,
+	MAC_PROP_MTU,
+	MAC_PROP_FLOWCTRL,
+	MAC_PROP_ADV_1000FDX_CAP,
+	MAC_PROP_EN_1000FDX_CAP,
+	MAC_PROP_ADV_1000HDX_CAP,
+	MAC_PROP_EN_1000HDX_CAP,
+	MAC_PROP_ADV_100FDX_CAP,
+	MAC_PROP_EN_100FDX_CAP,
+	MAC_PROP_ADV_100HDX_CAP,
+	MAC_PROP_EN_100HDX_CAP,
+	MAC_PROP_ADV_10FDX_CAP,
+	MAC_PROP_EN_10FDX_CAP,
+	MAC_PROP_ADV_10HDX_CAP,
+	MAC_PROP_EN_10HDX_CAP,
+	MAC_PROP_ADV_100T4_CAP,
+	MAC_PROP_EN_100T4_CAP,
+	MAC_PROP_PRIVATE = -1
+} mac_prop_id_t;
 
 /*
  * Maximum MAC address length
@@ -244,7 +282,7 @@ typedef enum {
 	MAC_CAPAB_SHARES	= 0x200, /* data is mac_capab_share_t */
 
 	/* The following capabilities are specific to softmac. */
-	MAC_CAPAB_LEGACY	= 0x8001, /* data is mac_capab_legacy_t */
+	MAC_CAPAB_LEGACY	= 0x8000 /* data is mac_capab_legacy_t */
 } mac_capab_t;
 
 typedef int mac_addr_slot_t;
@@ -861,9 +899,9 @@ extern void			mactype_free(mactype_register_t *);
 extern int			mactype_register(mactype_register_t *);
 extern int			mactype_unregister(const char *);
 extern int			mac_set_prop(mac_handle_t, mac_prop_t *,
-    void *, uint_t);
+				    void *, uint_t);
 extern int			mac_get_prop(mac_handle_t, mac_prop_t *,
-    void *, uint_t);
+				    void *, uint_t);
 
 #endif	/* _KERNEL */
 

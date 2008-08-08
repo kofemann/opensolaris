@@ -109,6 +109,13 @@ ixgbe_m_stat(void *arg, uint_t stat, uint64_t *val)
 		*val = ixgbe_ks->tor.value.ui64;
 		break;
 
+	case MAC_STAT_OBYTES:
+		for (i = 0; i < 16; i++)
+			ixgbe_ks->tot.value.ui64 +=
+			    IXGBE_READ_REG(hw, IXGBE_QBTC(i));
+		*val = ixgbe_ks->tot.value.ui64;
+		break;
+
 	case MAC_STAT_IPACKETS:
 		ixgbe_ks->tpr.value.ui64 +=
 		    IXGBE_READ_REG(hw, IXGBE_TPR);
@@ -713,6 +720,17 @@ ixgbe_m_getcapab(void *arg, mac_capab_t cap, void *cap_data)
 
 		*tx_hcksum_flags = HCKSUM_INET_PARTIAL | HCKSUM_IPHDRCKSUM;
 		break;
+	}
+	case MAC_CAPAB_LSO: {
+		mac_capab_lso_t *cap_lso = cap_data;
+
+		if (ixgbe->lso_enable) {
+			cap_lso->lso_flags = LSO_TX_BASIC_TCP_IPV4;
+			cap_lso->lso_basic_tcp_ipv4.lso_max = IXGBE_LSO_MAXLEN;
+			break;
+		} else {
+			return (B_FALSE);
+		}
 	}
 	case MAC_CAPAB_MULTIADDRESS: {
 		multiaddress_capab_t *mmacp = cap_data;

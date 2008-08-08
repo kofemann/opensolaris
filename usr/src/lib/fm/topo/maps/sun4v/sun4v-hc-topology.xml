@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <!DOCTYPE topology SYSTEM "/usr/share/lib/xml/dtd/topology.dtd.1">
 <!--
- Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  Use is subject to license terms.
 
  CDDL HEADER START
@@ -27,21 +27,10 @@
 -->
 
 <topology name='sun4v' scheme='hc'>
-  <range name='motherboard' min='0' max='0'>
-    <node instance='0'>
-     <propgroup name='protocol' version='1'
-        name-stability='Private' data-stability='Private' >
-        <propval name='label' type='string'
-          value='MB' />
-      </propgroup>
-    </node>
-    <dependents grouping='children'>
-     <range name='chip' min='0' max='32'>
-       <enum-method name='chip' version='1' />
-     </range>
-     <range name='hostbridge' min='0' max='254'>
-       <enum-method name='hostbridge' version='1' />
-     </range>
-    </dependents>
+  <range name='chassis' min='0' max='0'>
+    <enum-method name='sun4vpi' version='1' />
+  </range>
+  <range name='ses-enclosure' min='0' max='1024'>
+    <enum-method name='ses' version='1' />
   </range>
 </topology>

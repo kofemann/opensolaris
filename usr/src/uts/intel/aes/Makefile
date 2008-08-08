@@ -39,8 +39,11 @@ COM_DIR = $(COMMONBASE)/crypto/aes
 #	Define the module and object file sets.
 #
 MODULE		= aes
-OBJECTS		= $(AESPROV_OBJS:%=$(OBJS_DIR)/%)
 LINTS		= $(AESPROV_OBJS:%.o=$(LINTS_DIR)/%.ln)
+AESPROV_OBJS_32	=
+AESPROV_OBJS_64	= aes_amd64.o aeskey.o
+AESPROV_OBJS	+= $(AESPROV_OBJS_$(CLASS))
+OBJECTS		= $(AESPROV_OBJS:%=$(OBJS_DIR)/%)
 ROOTMODULE	= $(ROOT_CRYPTO_DIR)/$(MODULE)
 
 #
@@ -59,11 +62,12 @@ LINT_TARGET	= $(MODULE).lint
 INSTALL_TARGET	= $(BINARY) $(ROOTMODULE)
 
 #
-# Linkage dependencies
+#	Linkage dependencies
 #
-LDFLAGS += -dy
+LDFLAGS += -dy -Nmisc/kcf
 
-CPPFLAGS	+= -I$(COM_DIR) -DCRYPTO_PROVIDER_NAME=\"$(MODULE)\"
+CPPFLAGS	+= -I$(COM_DIR) -I$(COM_DIR)/..
+CPPFLAGS	+= -DCRYPTO_PROVIDER_NAME=\"$(MODULE)\"
 
 #
 # For now, disable these lint checks; maintainers should endeavor
@@ -72,7 +76,6 @@ CPPFLAGS	+= -I$(COM_DIR) -DCRYPTO_PROVIDER_NAME=\"$(MODULE)\"
 #
 LINTTAGS	+= -erroff=E_BAD_PTR_CAST_ALIGN
 LINTTAGS	+= -erroff=E_SUPPRESSION_DIRECTIVE_UNUSED
-LINTTAGS	+= -erroff=E_PTRDIFF_OVERFLOW
 
 #
 #	Default build targets.
@@ -99,3 +102,17 @@ install:	$(INSTALL_DEPS)
 #	Include common targets.
 #
 include $(UTSBASE)/intel/Makefile.targ
+
+$(OBJS_DIR)/%.ln: $(COM_DIR)/amd64/%.c
+	@($(LHEAD) $(LINT.c) $(COM_DIR)/amd64/${@F:.ln=.c} $(LTAIL))
+
+$(OBJS_DIR)/%.o:  $(COM_DIR)/amd64/%.c
+	$(COMPILE.c) -o $@ $(COM_DIR)/amd64/${@F:.o=.c}
+	$(POST_PROCESS_O)
+
+$(OBJS_DIR)/aes_amd64.o: $(COM_DIR)/amd64/aes_amd64.s
+	$(COMPILE.s) -o $@ $(COM_DIR)/amd64/${@F:.o=.s}
+	$(POST_PROCESS_O)
+
+$(OBJS_DIR)/aes_amd64.ln: $(COM_DIR)/amd64/aes_amd64.s
+	@($(LHEAD) $(LINT.s) $(COM_DIR)/amd64/${@F:.ln=.s} $(LTAIL))

@@ -30,9 +30,9 @@
 
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
 
-#pragma weak ptrace = _ptrace
+#pragma weak _ptrace = ptrace
 
-#include "synonyms.h"
+#include "lint.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -467,7 +467,7 @@ Dupfd(int fd, int dfd)
 static void
 MakeProcName(char *procname, pid_t pid)
 {
-	(void) sprintf(procname, "/proc/%d", pid);
+	(void) sprintf(procname, "/proc/%ld", pid);
 }
 
 /*

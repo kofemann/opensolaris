@@ -40,7 +40,7 @@ SUNW_1.23 {
 	enable_extended_FILE_stdio;
 	lio_listio64;
 	mkstemps64;
-	_mkstemps64;
+	posix_fadvise64;
 	posix_fallocate64;
 };
 
@@ -257,10 +257,13 @@ SYSVABI_1.3 {
 	_daylight;
 	environ = NODIRECT;
 	_environ = NODIRECT;
+	__flt_rounds;
+	_fp_hw;
 	free = NODIRECT;
 	frexp = FUNCTION FILTER libm.so.2;
 	getdate_err;
 	_getdate_err;
+	getenv;
 	__huge_val;
 	__iob;
 	isnan = FUNCTION FILTER libm.so.2;
@@ -383,7 +386,6 @@ SYSVABI_1.3 {
 	fileno;
 	_fileno;
 	__flsbuf;
-	__flt_rounds;
 	fmtmsg;
 	_fmtmsg;
 	fopen;
@@ -391,7 +393,6 @@ SYSVABI_1.3 {
 	fork;
 	fpathconf;
 	_fpathconf;
-	_fp_hw;
 	fprintf;
 	_fpstart;
 	__fpstart;
@@ -423,7 +424,6 @@ SYSVABI_1.3 {
 	_getdate;
 	getegid;
 	_getegid;
-	getenv;
 	geteuid;
 	_geteuid;
 	getgid;
@@ -849,6 +849,7 @@ SUNWprivate_1.1 {
 	_dlopen = FUNCTION FILTER /usr/lib/ld.so.1;
 	_dlsym = FUNCTION FILTER /usr/lib/ld.so.1;
 	_ld_libc = FUNCTION FILTER /usr/lib/ld.so.1;
+	_sse_hw;
 	_sys_errlist;
 	_sys_errs;
 	_sys_index;
@@ -882,7 +883,6 @@ SUNWprivate_1.1 {
 	_snprintf_c89;
 	_sprintf_c89;
 	_sscanf_c89;
-	_sse_hw;
 	_strtoimax_c89;
 	_strtoumax_c89;
 	_swprintf_c89;
@@ -924,6 +924,7 @@ SUNWprivate_1.1 {
 	__xtoull;
 
     local:
+	_syscall6 =		NODYNSORT;
 	__systemcall6 =		NODYNSORT;
 	_seekdir64 =		NODYNSORT;
 	_telldir64 =		NODYNSORT;

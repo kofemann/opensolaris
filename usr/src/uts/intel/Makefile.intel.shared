@@ -234,6 +234,7 @@ DRV_KMODS	+= ecpp
 DRV_KMODS	+= fd
 DRV_KMODS	+= fdc
 DRV_KMODS	+= fssnap
+DRV_KMODS	+= hxge
 DRV_KMODS	+= i8042
 DRV_KMODS	+= i915
 DRV_KMODS	+= icmp
@@ -329,7 +330,6 @@ DRV_KMODS	+= xge
 DRV_KMODS	+= zcons
 DRV_KMODS	+= chxge
 DRV_KMODS	+= nsmb
-DRV_KMODS	+= hxge
 
 #
 # Don't build some of these for OpenSolaris, since they will be
@@ -349,7 +349,6 @@ $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= mpt
 $(CLOSED_BUILD)CLOSED_DRV_KMODS_32	+= ncrs
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= pcn
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= rtls
-$(CLOSED_BUILD)CLOSED_DRV_KMODS_32	+= sbpro
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= atiatom
 
 #
@@ -575,6 +574,8 @@ MISC_KMODS	+= scsi_vhci_f_sym_hds
 MISC_KMODS	+= scsi_vhci_f_sym
 MISC_KMODS	+= scsi_vhci_f_tpgs
 MISC_KMODS	+= scsi_vhci_f_asym_sun
+MISC_KMODS	+= scsi_vhci_f_tape
+MISC_KMODS	+= scsi_vhci_f_tpgs_tape
 
 $(CLOSED_BUILD)CLOSED_MISC_KMODS	+= amsrc1
 $(CLOSED_BUILD)CLOSED_MISC_KMODS	+= klmmod klmops
@@ -648,7 +649,7 @@ DACF_KMODS	+= usb_ac_dacf
 #
 #	Performance Counter BackEnd modules (/usr/kernel/pcbe)
 #
-PCBE_KMODS	+= p123_pcbe p4_pcbe opteron_pcbe
+PCBE_KMODS	+= p123_pcbe p4_pcbe opteron_pcbe core_pcbe
 
 #
 #	MAC-Type Plugin Modules (/kernel/mac)

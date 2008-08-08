@@ -49,12 +49,6 @@ extern "C" {
 #define	IDMAP_FATAL_ERROR(rc)	(rc == IDMAP_ERR_MEMORY ||\
 				rc == IDMAP_ERR_DB)
 
-/* Direction in which mapping is valid */
-#define	IDMAP_DIRECTION_UNDEF	-1	/* not defined */
-#define	IDMAP_DIRECTION_BI	0	/* bi-directional */
-#define	IDMAP_DIRECTION_W2U	1	/* windows to unix only */
-#define	IDMAP_DIRECTION_U2W	2	/* unix to windows only */
-
 
 /* is_user values */
 
@@ -62,11 +56,38 @@ extern "C" {
 #define	IDMAP_NO 0
 #define	IDMAP_UNKNOWN -1
 
+#define	CHECK_NULL(s)	(s != NULL ? s : "null")
+#define	EMPTY_STRING(str)	(str == NULL || *str == '\0')
+
 /* Opaque handle to batch config add/remove operations */
 typedef struct idmap_udt_handle idmap_udt_handle_t;
 
 /* Opaque iterator */
 typedef struct idmap_iter idmap_iter_t;
+
+
+/*
+ * Directory based name map API
+ */
+
+typedef struct idmap_nm_handle idmap_nm_handle_t;
+
+/* Set namemap */
+extern idmap_stat idmap_set_namemap(idmap_nm_handle_t *, char *, char *,
+    int, int, int);
+
+/* Unset namemap */
+extern idmap_stat idmap_unset_namemap(idmap_nm_handle_t *, char *, char *,
+    int, int, int);
+
+extern idmap_stat idmap_get_namemap(idmap_nm_handle_t *p, int *, char **,
+    char **, int *, char **,  char **);
+
+extern void idmap_fini_namemaps(idmap_nm_handle_t *);
+
+extern idmap_stat idmap_init_namemaps(idmap_handle_t *, idmap_nm_handle_t **,
+    char *, char *, char *, char *, int);
+
 
 /*
  * Update API

@@ -68,6 +68,7 @@
 int zio_taskq_threads = 8;
 
 static void spa_sync_props(void *arg1, void *arg2, cred_t *cr, dmu_tx_t *tx);
+static boolean_t spa_has_active_shared_spare(spa_t *spa);
 
 /*
  * ==========================================================================
@@ -271,8 +272,6 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 		zpool_prop_t prop;
 		char *propname, *strval;
 		uint64_t intval;
-		vdev_t *rvdev;
-		char *vdev_type;
 		objset_t *os;
 		char *slash;
 
@@ -303,15 +302,9 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 			}
 
 			/*
-			 * A bootable filesystem can not be on a RAIDZ pool
-			 * nor a striped pool with more than 1 device.
+			 * Make sure the vdev config is bootable
 			 */
-			rvdev = spa->spa_root_vdev;
-			vdev_type =
-			    rvdev->vdev_child[0]->vdev_ops->vdev_op_type;
-			if (rvdev->vdev_children > 1 ||
-			    strcmp(vdev_type, VDEV_TYPE_RAIDZ) == 0 ||
-			    strcmp(vdev_type, VDEV_TYPE_MISSING) == 0) {
+			if (!vdev_is_bootable(spa->spa_root_vdev)) {
 				error = ENOTSUP;
 				break;
 			}
@@ -321,6 +314,8 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 			error = nvpair_value_string(elem, &strval);
 
 			if (!error) {
+				uint64_t compress;
+
 				if (strval == NULL || strval[0] == '\0') {
 					objnum = zpool_prop_default_numeric(
 					    ZPOOL_PROP_BOOTFS);
@@ -330,7 +325,16 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 				if (error = dmu_objset_open(strval, DMU_OST_ZFS,
 				    DS_MODE_USER | DS_MODE_READONLY, &os))
 					break;
-				objnum = dmu_objset_id(os);
+
+				/* We don't support gzip bootable datasets */
+				if ((error = dsl_prop_get_integer(strval,
+				    zfs_prop_to_name(ZFS_PROP_COMPRESSION),
+				    &compress, NULL)) == 0 &&
+				    !BOOTFS_COMPRESS_VALID(compress)) {
+					error = ENOTSUP;
+				} else {
+					objnum = dmu_objset_id(os);
+				}
 				dmu_objset_close(os);
 			}
 			break;
@@ -952,6 +956,32 @@ spa_check_removed(vdev_t *vd)
 }
 
 /*
+ * Check for missing log devices
+ */
+int
+spa_check_logs(spa_t *spa)
+{
+	switch (spa->spa_log_state) {
+	case SPA_LOG_MISSING:
+		/* need to recheck in case slog has been restored */
+	case SPA_LOG_UNKNOWN:
+		if (dmu_objset_find(spa->spa_name, zil_check_log_chain, NULL,
+		    DS_FIND_CHILDREN)) {
+			spa->spa_log_state = SPA_LOG_MISSING;
+			return (1);
+		}
+		break;
+
+	case SPA_LOG_CLEAR:
+		(void) dmu_objset_find(spa->spa_name, zil_clear_log_chain, NULL,
+		    DS_FIND_CHILDREN);
+		break;
+	}
+	spa->spa_log_state = SPA_LOG_GOOD;
+	return (0);
+}
+
+/*
  * Load an existing storage pool, using the pool's builtin spa_config as a
  * source of configuration information.
  */
@@ -967,6 +997,7 @@ spa_load(spa_t *spa, nvlist_t *config, spa_load_state_t state, int mosconfig)
 	uint64_t version;
 	zio_t *zio;
 	uint64_t autoreplace = 0;
+	char *ereport = FM_EREPORT_ZFS_POOL;
 
 	spa->spa_load_state = state;
 
@@ -1255,6 +1286,15 @@ spa_load(spa_t *spa, nvlist_t *config, spa_load_state_t state, int mosconfig)
 		spa_config_exit(spa, FTAG);
 	}
 
+	if (spa_check_logs(spa)) {
+		vdev_set_state(rvd, B_TRUE, VDEV_STATE_CANT_OPEN,
+		    VDEV_AUX_BAD_LOG);
+		error = ENXIO;
+		ereport = FM_EREPORT_ZFS_LOG_REPLAY;
+		goto out;
+	}
+
+
 	spa->spa_delegation = zpool_prop_default_numeric(ZPOOL_PROP_DELEGATION);
 
 	error = zap_lookup(spa->spa_meta_objset, DMU_POOL_DIRECTORY_OBJECT,
@@ -1362,8 +1402,9 @@ spa_load(spa_t *spa, nvlist_t *config, spa_load_state_t state, int mosconfig)
 
 	error = 0;
 out:
+	spa->spa_minref = refcount_count(&spa->spa_refcount);
 	if (error && error != EBADF)
-		zfs_ereport_post(FM_EREPORT_ZFS_POOL, spa, NULL, NULL, 0, 0);
+		zfs_ereport_post(ereport, spa, NULL, NULL, 0, 0);
 	spa->spa_load_state = SPA_LOAD_NONE;
 	spa->spa_ena = 0;
 
@@ -1387,7 +1428,6 @@ spa_open_common(const char *pool, spa_t **spapp, void *tag, nvlist_t **config)
 {
 	spa_t *spa;
 	int error;
-	int loaded = B_FALSE;
 	int locked = B_FALSE;
 
 	*spapp = NULL;
@@ -1453,17 +1493,9 @@ spa_open_common(const char *pool, spa_t **spapp, void *tag, nvlist_t **config)
 		} else {
 			spa->spa_last_open_failed = B_FALSE;
 		}
-
-		loaded = B_TRUE;
 	}
 
 	spa_open_ref(spa, tag);
-
-	/*
-	 * If we just loaded the pool, resilver anything that's out of date.
-	 */
-	if (loaded && (spa_mode & FWRITE))
-		VERIFY(spa_scrub(spa, POOL_SCRUB_RESILVER, B_TRUE) == 0);
 
 	if (locked)
 		mutex_exit(&spa_namespace_lock);
@@ -1548,7 +1580,8 @@ spa_add_spares(spa_t *spa, nvlist_t *config)
 		for (i = 0; i < nspares; i++) {
 			VERIFY(nvlist_lookup_uint64(spares[i],
 			    ZPOOL_CONFIG_GUID, &guid) == 0);
-			if (spa_spare_exists(guid, &pool) && pool != 0ULL) {
+			if (spa_spare_exists(guid, &pool, NULL) &&
+			    pool != 0ULL) {
 				VERIFY(nvlist_lookup_uint64_array(
 				    spares[i], ZPOOL_CONFIG_STATS,
 				    (uint64_t **)&vs, &vsc) == 0);
@@ -1834,7 +1867,7 @@ spa_l2cache_drop(spa_t *spa)
  */
 int
 spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
-    const char *history_str)
+    const char *history_str, nvlist_t *zplprops)
 {
 	spa_t *spa;
 	char *altroot = NULL;
@@ -1943,7 +1976,7 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 		spa->spa_l2cache.sav_sync = B_TRUE;
 	}
 
-	spa->spa_dsl_pool = dp = dsl_pool_create(spa, txg);
+	spa->spa_dsl_pool = dp = dsl_pool_create(spa, zplprops, txg);
 	spa->spa_meta_objset = dp->dp_meta_objset;
 
 	tx = dmu_tx_create_assigned(dp, txg);
@@ -2020,6 +2053,8 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 
 	mutex_exit(&spa_namespace_lock);
 
+	spa->spa_minref = refcount_count(&spa->spa_refcount);
+
 	return (0);
 }
 
@@ -2037,7 +2072,6 @@ spa_import_common(const char *pool, nvlist_t *config, nvlist_t *props,
 	nvlist_t *nvroot;
 	nvlist_t **spares, **l2cache;
 	uint_t nspares, nl2cache;
-	int mosconfig = isroot? B_FALSE : B_TRUE;
 
 	/*
 	 * If a pool with this name exists, return failure.
@@ -2062,10 +2096,11 @@ spa_import_common(const char *pool, nvlist_t *config, nvlist_t *props,
 
 	/*
 	 * Pass off the heavy lifting to spa_load().
-	 * Pass TRUE for mosconfig because the user-supplied config
-	 * is actually the one to trust when doing an import.
+	 * Pass TRUE for mosconfig (unless this is a root pool) because
+	 * the user-supplied config is actually the one to trust when
+	 * doing an import.
 	 */
-	loaderr = error = spa_load(spa, config, SPA_LOAD_IMPORT, mosconfig);
+	loaderr = error = spa_load(spa, config, SPA_LOAD_IMPORT, !isroot);
 
 	spa_config_enter(spa, RW_WRITER, FTAG);
 	/*
@@ -2159,13 +2194,6 @@ spa_import_common(const char *pool, nvlist_t *config, nvlist_t *props,
 		 * Update the config cache to include the newly-imported pool.
 		 */
 		spa_config_update_common(spa, SPA_CONFIG_UPDATE_POOL, isroot);
-
-		/*
-		 * Resilver anything that's out of date.
-		 */
-		if (!isroot)
-			VERIFY(spa_scrub(spa, POOL_SCRUB_RESILVER,
-			    B_TRUE) == 0);
 	}
 
 	spa->spa_import_faulted = B_FALSE;
@@ -2216,27 +2244,24 @@ spa_build_rootpool_config(nvlist_t *config)
  * Get the root pool information from the root disk, then import the root pool
  * during the system boot up time.
  */
-extern nvlist_t *vdev_disk_read_rootlabel(char *);
+extern nvlist_t *vdev_disk_read_rootlabel(char *, char *);
 
-void
-spa_check_rootconf(char *devpath, char **bestdev, nvlist_t **bestconf,
+int
+spa_check_rootconf(char *devpath, char *devid, nvlist_t **bestconf,
     uint64_t *besttxg)
 {
 	nvlist_t *config;
 	uint64_t txg;
 
-	if ((config = vdev_disk_read_rootlabel(devpath)) == NULL)
-		return;
+	if ((config = vdev_disk_read_rootlabel(devpath, devid)) == NULL)
+		return (-1);
 
 	VERIFY(nvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_TXG, &txg) == 0);
 
-	if (txg > *besttxg) {
-		*besttxg = txg;
-		if (*bestconf != NULL)
-			nvlist_free(*bestconf);
+	if (bestconf != NULL)
 		*bestconf = config;
-		*bestdev = devpath;
-	}
+	*besttxg = txg;
+	return (0);
 }
 
 boolean_t
@@ -2246,20 +2271,99 @@ spa_rootdev_validate(nvlist_t *nv)
 
 	if (nvlist_lookup_uint64(nv, ZPOOL_CONFIG_OFFLINE, &ival) == 0 ||
 	    nvlist_lookup_uint64(nv, ZPOOL_CONFIG_FAULTED, &ival) == 0 ||
-	    nvlist_lookup_uint64(nv, ZPOOL_CONFIG_DEGRADED, &ival) == 0 ||
 	    nvlist_lookup_uint64(nv, ZPOOL_CONFIG_REMOVED, &ival) == 0)
 		return (B_FALSE);
 
 	return (B_TRUE);
 }
 
+
+/*
+ * Given the boot device's physical path or devid, check if the device
+ * is in a valid state.  If so, return the configuration from the vdev
+ * label.
+ */
+int
+spa_get_rootconf(char *devpath, char *devid, nvlist_t **bestconf)
+{
+	nvlist_t *conf = NULL;
+	uint64_t txg = 0;
+	nvlist_t *nvtop, **child;
+	char *type;
+	char *bootpath = NULL;
+	uint_t children, c;
+	char *tmp;
+
+	if (devpath && ((tmp = strchr(devpath, ' ')) != NULL))
+		*tmp = '\0';
+	if (spa_check_rootconf(devpath, devid, &conf, &txg) < 0) {
+		cmn_err(CE_NOTE, "error reading device label");
+		nvlist_free(conf);
+		return (EINVAL);
+	}
+	if (txg == 0) {
+		cmn_err(CE_NOTE, "this device is detached");
+		nvlist_free(conf);
+		return (EINVAL);
+	}
+
+	VERIFY(nvlist_lookup_nvlist(conf, ZPOOL_CONFIG_VDEV_TREE,
+	    &nvtop) == 0);
+	VERIFY(nvlist_lookup_string(nvtop, ZPOOL_CONFIG_TYPE, &type) == 0);
+
+	if (strcmp(type, VDEV_TYPE_DISK) == 0) {
+		if (spa_rootdev_validate(nvtop)) {
+			goto out;
+		} else {
+			nvlist_free(conf);
+			return (EINVAL);
+		}
+	}
+
+	ASSERT(strcmp(type, VDEV_TYPE_MIRROR) == 0);
+
+	VERIFY(nvlist_lookup_nvlist_array(nvtop, ZPOOL_CONFIG_CHILDREN,
+	    &child, &children) == 0);
+
+	/*
+	 * Go thru vdevs in the mirror to see if the given device
+	 * has the most recent txg. Only the device with the most
+	 * recent txg has valid information and should be booted.
+	 */
+	for (c = 0; c < children; c++) {
+		char *cdevid, *cpath;
+		uint64_t tmptxg;
+
+		if (nvlist_lookup_string(child[c], ZPOOL_CONFIG_PHYS_PATH,
+		    &cpath) != 0)
+			return (EINVAL);
+		if (nvlist_lookup_string(child[c], ZPOOL_CONFIG_DEVID,
+		    &cdevid) != 0)
+			return (EINVAL);
+		if ((spa_check_rootconf(cpath, cdevid, NULL,
+		    &tmptxg) == 0) && (tmptxg > txg)) {
+			txg = tmptxg;
+			VERIFY(nvlist_lookup_string(child[c],
+			    ZPOOL_CONFIG_PATH, &bootpath) == 0);
+		}
+	}
+
+	/* Does the best device match the one we've booted from? */
+	if (bootpath) {
+		cmn_err(CE_NOTE, "try booting from '%s'", bootpath);
+		return (EINVAL);
+	}
+out:
+	*bestconf = conf;
+	return (0);
+}
+
 /*
  * Import a root pool.
  *
- * For x86. devpath_list will consist the physpath name of the vdev in a single
- * disk root pool or a list of physnames for the vdevs in a mirrored rootpool.
- * e.g.
- *	"/pci@1f,0/ide@d/disk@0,0:a /pci@1f,o/ide@d/disk@2,0:a"
+ * For x86. devpath_list will consist of devid and/or physpath name of
+ * the vdev (e.g. "id1,sd@SSEAGATE..." or "/pci@1f,0/ide@d/disk@0,0:a").
+ * The GRUB "findroot" command will return the vdev we should boot.
  *
  * For Sparc, devpath_list consists the physpath name of the booting device
  * no matter the rootpool is a single device pool or a mirrored pool.
@@ -2267,10 +2371,9 @@ spa_rootdev_validate(nvlist_t *nv)
  *	"/pci@1f,0/ide@d/disk@0,0:a"
  */
 int
-spa_import_rootpool(char *devpath_list)
+spa_import_rootpool(char *devpath, char *devid)
 {
 	nvlist_t *conf = NULL;
-	char *dev = NULL;
 	char *pname;
 	int error;
 
@@ -2278,7 +2381,7 @@ spa_import_rootpool(char *devpath_list)
 	 * Get the vdev pathname and configuation from the most
 	 * recently updated vdev (highest txg).
 	 */
-	if (error = spa_get_rootconf(devpath_list, &dev, &conf))
+	if (error = spa_get_rootconf(devpath, devid, &conf))
 		goto msg_out;
 
 	/*
@@ -2302,12 +2405,12 @@ spa_import_rootpool(char *devpath_list)
 	return (error);
 
 msg_out:
-	cmn_err(CE_NOTE, "\n\n"
+	cmn_err(CE_NOTE, "\n"
 	    "  ***************************************************  \n"
 	    "  *  This device is not bootable!                   *  \n"
 	    "  *  It is either offlined or detached or faulted.  *  \n"
 	    "  *  Please try to boot from a different device.    *  \n"
-	    "  ***************************************************  \n\n");
+	    "  ***************************************************  ");
 
 	return (error);
 }
@@ -2433,7 +2536,8 @@ spa_tryimport(nvlist_t *tryconfig)
  * configuration from the cache afterwards.
  */
 static int
-spa_export_common(char *pool, int new_state, nvlist_t **oldconfig)
+spa_export_common(char *pool, int new_state, nvlist_t **oldconfig,
+    boolean_t force)
 {
 	spa_t *spa;
 
@@ -2468,7 +2572,6 @@ spa_export_common(char *pool, int new_state, nvlist_t **oldconfig)
 		 * Objsets may be open only because they're dirty, so we
 		 * have to force it to sync before checking spa_refcnt.
 		 */
-		spa_scrub_suspend(spa);
 		txg_wait_synced(spa->spa_dsl_pool, 0);
 
 		/*
@@ -2479,14 +2582,23 @@ spa_export_common(char *pool, int new_state, nvlist_t **oldconfig)
 		if (!spa_refcount_zero(spa) ||
 		    (spa->spa_inject_ref != 0 &&
 		    new_state != POOL_STATE_UNINITIALIZED)) {
-			spa_scrub_resume(spa);
 			spa_async_resume(spa);
 			mutex_exit(&spa_namespace_lock);
 			return (EBUSY);
 		}
 
-		spa_scrub_resume(spa);
-		VERIFY(spa_scrub(spa, POOL_SCRUB_NONE, B_TRUE) == 0);
+		/*
+		 * A pool cannot be exported if it has an active shared spare.
+		 * This is to prevent other pools stealing the active spare
+		 * from an exported pool. At user's own will, such pool can
+		 * be forcedly exported.
+		 */
+		if (!force && new_state == POOL_STATE_EXPORTED &&
+		    spa_has_active_shared_spare(spa)) {
+			spa_async_resume(spa);
+			mutex_exit(&spa_namespace_lock);
+			return (EXDEV);
+		}
 
 		/*
 		 * We want this to be reflected on every label,
@@ -2527,16 +2639,16 @@ spa_export_common(char *pool, int new_state, nvlist_t **oldconfig)
 int
 spa_destroy(char *pool)
 {
-	return (spa_export_common(pool, POOL_STATE_DESTROYED, NULL));
+	return (spa_export_common(pool, POOL_STATE_DESTROYED, NULL, B_FALSE));
 }
 
 /*
  * Export a storage pool.
  */
 int
-spa_export(char *pool, nvlist_t **oldconfig)
+spa_export(char *pool, nvlist_t **oldconfig, boolean_t force)
 {
-	return (spa_export_common(pool, POOL_STATE_EXPORTED, oldconfig));
+	return (spa_export_common(pool, POOL_STATE_EXPORTED, oldconfig, force));
 }
 
 /*
@@ -2546,9 +2658,9 @@ spa_export(char *pool, nvlist_t **oldconfig)
 int
 spa_reset(char *pool)
 {
-	return (spa_export_common(pool, POOL_STATE_UNINITIALIZED, NULL));
+	return (spa_export_common(pool, POOL_STATE_UNINITIALIZED, NULL,
+	    B_FALSE));
 }
-
 
 /*
  * ==========================================================================
@@ -2834,12 +2946,9 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing)
 	(void) spa_vdev_exit(spa, newrootvd, open_txg, 0);
 
 	/*
-	 * Kick off a resilver to update newvd.  We need to grab the namespace
-	 * lock because spa_scrub() needs to post a sysevent with the pool name.
+	 * Kick off a resilver to update newvd.
 	 */
-	mutex_enter(&spa_namespace_lock);
-	VERIFY(spa_scrub(spa, POOL_SCRUB_RESILVER, B_TRUE) == 0);
-	mutex_exit(&spa_namespace_lock);
+	VERIFY3U(spa_scrub(spa, POOL_SCRUB_RESILVER), ==, 0);
 
 	return (0);
 }
@@ -3192,7 +3301,6 @@ spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
 	vd = spa_lookup_by_guid(spa, guid, B_FALSE);
 
 	if (spa->spa_spares.sav_vdevs != NULL &&
-	    spa_spare_exists(guid, NULL) &&
 	    nvlist_lookup_nvlist_array(spa->spa_spares.sav_config,
 	    ZPOOL_CONFIG_SPARES, &spares, &nspares) == 0) {
 		if ((error = spa_remove_spares(&spa->spa_spares, guid, unspare,
@@ -3204,7 +3312,6 @@ spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
 	}
 
 	if (spa->spa_l2cache.sav_vdevs != NULL &&
-	    spa_l2cache_exists(guid, NULL) &&
 	    nvlist_lookup_nvlist_array(spa->spa_l2cache.sav_config,
 	    ZPOOL_CONFIG_L2CACHE, &l2cache, &nl2cache) == 0) {
 		if ((error = spa_remove_l2cache(&spa->spa_l2cache, guid,
@@ -3367,404 +3474,36 @@ spa_vdev_setpath(spa_t *spa, uint64_t guid, const char *newpath)
  * ==========================================================================
  */
 
-static void
-spa_scrub_io_done(zio_t *zio)
-{
-	spa_t *spa = zio->io_spa;
-
-	arc_data_buf_free(zio->io_data, zio->io_size);
-
-	mutex_enter(&spa->spa_scrub_lock);
-	if (zio->io_error && !(zio->io_flags & ZIO_FLAG_SPECULATIVE)) {
-		vdev_t *vd = zio->io_vd ? zio->io_vd : spa->spa_root_vdev;
-		spa->spa_scrub_errors++;
-		mutex_enter(&vd->vdev_stat_lock);
-		vd->vdev_stat.vs_scrub_errors++;
-		mutex_exit(&vd->vdev_stat_lock);
-	}
-
-	if (--spa->spa_scrub_inflight < spa->spa_scrub_maxinflight)
-		cv_broadcast(&spa->spa_scrub_io_cv);
-
-	ASSERT(spa->spa_scrub_inflight >= 0);
-
-	mutex_exit(&spa->spa_scrub_lock);
-}
-
-static void
-spa_scrub_io_start(spa_t *spa, blkptr_t *bp, int priority, int flags,
-    zbookmark_t *zb)
-{
-	size_t size = BP_GET_LSIZE(bp);
-	void *data;
-
-	mutex_enter(&spa->spa_scrub_lock);
-	/*
-	 * Do not give too much work to vdev(s).
-	 */
-	while (spa->spa_scrub_inflight >= spa->spa_scrub_maxinflight) {
-		cv_wait(&spa->spa_scrub_io_cv, &spa->spa_scrub_lock);
-	}
-	spa->spa_scrub_inflight++;
-	mutex_exit(&spa->spa_scrub_lock);
-
-	data = arc_data_buf_alloc(size);
-
-	if (zb->zb_level == -1 && BP_GET_TYPE(bp) != DMU_OT_OBJSET)
-		flags |= ZIO_FLAG_SPECULATIVE;	/* intent log block */
-
-	flags |= ZIO_FLAG_SCRUB_THREAD | ZIO_FLAG_CANFAIL;
-
-	zio_nowait(zio_read(NULL, spa, bp, data, size,
-	    spa_scrub_io_done, NULL, priority, flags, zb));
-}
-
-/* ARGSUSED */
-static int
-spa_scrub_cb(traverse_blk_cache_t *bc, spa_t *spa, void *a)
-{
-	blkptr_t *bp = &bc->bc_blkptr;
-	vdev_t *vd = spa->spa_root_vdev;
-	dva_t *dva = bp->blk_dva;
-	int needs_resilver = B_FALSE;
-	int d;
-
-	if (bc->bc_errno) {
-		/*
-		 * We can't scrub this block, but we can continue to scrub
-		 * the rest of the pool.  Note the error and move along.
-		 */
-		mutex_enter(&spa->spa_scrub_lock);
-		spa->spa_scrub_errors++;
-		mutex_exit(&spa->spa_scrub_lock);
-
-		mutex_enter(&vd->vdev_stat_lock);
-		vd->vdev_stat.vs_scrub_errors++;
-		mutex_exit(&vd->vdev_stat_lock);
-
-		return (ERESTART);
-	}
-
-	ASSERT(bp->blk_birth < spa->spa_scrub_maxtxg);
-
-	for (d = 0; d < BP_GET_NDVAS(bp); d++) {
-		vd = vdev_lookup_top(spa, DVA_GET_VDEV(&dva[d]));
-
-		ASSERT(vd != NULL);
-
-		/*
-		 * Keep track of how much data we've examined so that
-		 * zpool(1M) status can make useful progress reports.
-		 */
-		mutex_enter(&vd->vdev_stat_lock);
-		vd->vdev_stat.vs_scrub_examined += DVA_GET_ASIZE(&dva[d]);
-		mutex_exit(&vd->vdev_stat_lock);
-
-		if (spa->spa_scrub_type == POOL_SCRUB_RESILVER) {
-			if (DVA_GET_GANG(&dva[d])) {
-				/*
-				 * Gang members may be spread across multiple
-				 * vdevs, so the best we can do is look at the
-				 * pool-wide DTL.
-				 * XXX -- it would be better to change our
-				 * allocation policy to ensure that this can't
-				 * happen.
-				 */
-				vd = spa->spa_root_vdev;
-			}
-			if (vdev_dtl_contains(&vd->vdev_dtl_map,
-			    bp->blk_birth, 1))
-				needs_resilver = B_TRUE;
-		}
-	}
-
-	if (spa->spa_scrub_type == POOL_SCRUB_EVERYTHING)
-		spa_scrub_io_start(spa, bp, ZIO_PRIORITY_SCRUB,
-		    ZIO_FLAG_SCRUB, &bc->bc_bookmark);
-	else if (needs_resilver)
-		spa_scrub_io_start(spa, bp, ZIO_PRIORITY_RESILVER,
-		    ZIO_FLAG_RESILVER, &bc->bc_bookmark);
-
-	return (0);
-}
-
-static void
-spa_scrub_thread(spa_t *spa)
-{
-	callb_cpr_t cprinfo;
-	traverse_handle_t *th = spa->spa_scrub_th;
-	vdev_t *rvd = spa->spa_root_vdev;
-	pool_scrub_type_t scrub_type = spa->spa_scrub_type;
-	int error = 0;
-	boolean_t complete;
-
-	CALLB_CPR_INIT(&cprinfo, &spa->spa_scrub_lock, callb_generic_cpr, FTAG);
-
-	/*
-	 * If we're restarting due to a snapshot create/delete,
-	 * wait for that to complete.
-	 */
-	txg_wait_synced(spa_get_dsl(spa), 0);
-
-	dprintf("start %s mintxg=%llu maxtxg=%llu\n",
-	    scrub_type == POOL_SCRUB_RESILVER ? "resilver" : "scrub",
-	    spa->spa_scrub_mintxg, spa->spa_scrub_maxtxg);
-
-	spa_config_enter(spa, RW_WRITER, FTAG);
-	vdev_reopen(rvd);		/* purge all vdev caches */
-	vdev_config_dirty(rvd);		/* rewrite all disk labels */
-	vdev_scrub_stat_update(rvd, scrub_type, B_FALSE);
-	spa_config_exit(spa, FTAG);
-
-	mutex_enter(&spa->spa_scrub_lock);
-	spa->spa_scrub_errors = 0;
-	spa->spa_scrub_active = 1;
-	ASSERT(spa->spa_scrub_inflight == 0);
-
-	while (!spa->spa_scrub_stop) {
-		CALLB_CPR_SAFE_BEGIN(&cprinfo);
-		while (spa->spa_scrub_suspended) {
-			spa->spa_scrub_active = 0;
-			cv_broadcast(&spa->spa_scrub_cv);
-			cv_wait(&spa->spa_scrub_cv, &spa->spa_scrub_lock);
-			spa->spa_scrub_active = 1;
-		}
-		CALLB_CPR_SAFE_END(&cprinfo, &spa->spa_scrub_lock);
-
-		if (spa->spa_scrub_restart_txg != 0)
-			break;
-
-		mutex_exit(&spa->spa_scrub_lock);
-		error = traverse_more(th);
-		mutex_enter(&spa->spa_scrub_lock);
-		if (error != EAGAIN)
-			break;
-	}
-
-	while (spa->spa_scrub_inflight)
-		cv_wait(&spa->spa_scrub_io_cv, &spa->spa_scrub_lock);
-
-	spa->spa_scrub_active = 0;
-	cv_broadcast(&spa->spa_scrub_cv);
-
-	mutex_exit(&spa->spa_scrub_lock);
-
-	spa_config_enter(spa, RW_WRITER, FTAG);
-
-	mutex_enter(&spa->spa_scrub_lock);
-
-	/*
-	 * Note: we check spa_scrub_restart_txg under both spa_scrub_lock
-	 * AND the spa config lock to synchronize with any config changes
-	 * that revise the DTLs under spa_vdev_enter() / spa_vdev_exit().
-	 */
-	if (spa->spa_scrub_restart_txg != 0)
-		error = ERESTART;
-
-	if (spa->spa_scrub_stop)
-		error = EINTR;
-
-	/*
-	 * Even if there were uncorrectable errors, we consider the scrub
-	 * completed.  The downside is that if there is a transient error during
-	 * a resilver, we won't resilver the data properly to the target.  But
-	 * if the damage is permanent (more likely) we will resilver forever,
-	 * which isn't really acceptable.  Since there is enough information for
-	 * the user to know what has failed and why, this seems like a more
-	 * tractable approach.
-	 */
-	complete = (error == 0);
-
-	dprintf("end %s to maxtxg=%llu %s, traverse=%d, %llu errors, stop=%u\n",
-	    scrub_type == POOL_SCRUB_RESILVER ? "resilver" : "scrub",
-	    spa->spa_scrub_maxtxg, complete ? "done" : "FAILED",
-	    error, spa->spa_scrub_errors, spa->spa_scrub_stop);
-
-	mutex_exit(&spa->spa_scrub_lock);
-
-	/*
-	 * If the scrub/resilver completed, update all DTLs to reflect this.
-	 * Whether it succeeded or not, vacate all temporary scrub DTLs.
-	 */
-	vdev_dtl_reassess(rvd, spa_last_synced_txg(spa) + 1,
-	    complete ? spa->spa_scrub_maxtxg : 0, B_TRUE);
-	vdev_scrub_stat_update(rvd, POOL_SCRUB_NONE, complete);
-	spa_errlog_rotate(spa);
-
-	if (scrub_type == POOL_SCRUB_RESILVER && complete)
-		spa_event_notify(spa, NULL, ESC_ZFS_RESILVER_FINISH);
-
-	spa_config_exit(spa, FTAG);
-
-	mutex_enter(&spa->spa_scrub_lock);
-
-	/*
-	 * We may have finished replacing a device.
-	 * Let the async thread assess this and handle the detach.
-	 */
-	spa_async_request(spa, SPA_ASYNC_RESILVER_DONE);
-
-	/*
-	 * If we were told to restart, our final act is to start a new scrub.
-	 */
-	if (error == ERESTART)
-		spa_async_request(spa, scrub_type == POOL_SCRUB_RESILVER ?
-		    SPA_ASYNC_RESILVER : SPA_ASYNC_SCRUB);
-
-	spa->spa_scrub_type = POOL_SCRUB_NONE;
-	spa->spa_scrub_active = 0;
-	spa->spa_scrub_thread = NULL;
-	cv_broadcast(&spa->spa_scrub_cv);
-	CALLB_CPR_EXIT(&cprinfo);	/* drops &spa->spa_scrub_lock */
-	thread_exit();
-}
-
-void
-spa_scrub_suspend(spa_t *spa)
-{
-	mutex_enter(&spa->spa_scrub_lock);
-	spa->spa_scrub_suspended++;
-	while (spa->spa_scrub_active) {
-		cv_broadcast(&spa->spa_scrub_cv);
-		cv_wait(&spa->spa_scrub_cv, &spa->spa_scrub_lock);
-	}
-	while (spa->spa_scrub_inflight)
-		cv_wait(&spa->spa_scrub_io_cv, &spa->spa_scrub_lock);
-	mutex_exit(&spa->spa_scrub_lock);
-}
-
-void
-spa_scrub_resume(spa_t *spa)
-{
-	mutex_enter(&spa->spa_scrub_lock);
-	ASSERT(spa->spa_scrub_suspended != 0);
-	if (--spa->spa_scrub_suspended == 0)
-		cv_broadcast(&spa->spa_scrub_cv);
-	mutex_exit(&spa->spa_scrub_lock);
-}
-
-void
-spa_scrub_restart(spa_t *spa, uint64_t txg)
-{
-	/*
-	 * Something happened (e.g. snapshot create/delete) that means
-	 * we must restart any in-progress scrubs.  The itinerary will
-	 * fix this properly.
-	 */
-	mutex_enter(&spa->spa_scrub_lock);
-	spa->spa_scrub_restart_txg = txg;
-	mutex_exit(&spa->spa_scrub_lock);
-}
-
 int
-spa_scrub(spa_t *spa, pool_scrub_type_t type, boolean_t force)
+spa_scrub(spa_t *spa, pool_scrub_type_t type)
 {
-	space_seg_t *ss;
-	uint64_t mintxg, maxtxg;
-	vdev_t *rvd = spa->spa_root_vdev;
-
-	ASSERT(MUTEX_HELD(&spa_namespace_lock));
 	ASSERT(!spa_config_held(spa, RW_WRITER));
 
 	if ((uint_t)type >= POOL_SCRUB_TYPES)
 		return (ENOTSUP);
 
-	mutex_enter(&spa->spa_scrub_lock);
-
 	/*
-	 * If there's a scrub or resilver already in progress, stop it.
+	 * If a resilver was requested, but there is no DTL on a
+	 * writeable leaf device, we have nothing to do.
 	 */
-	while (spa->spa_scrub_thread != NULL) {
-		/*
-		 * Don't stop a resilver unless forced.
-		 */
-		if (spa->spa_scrub_type == POOL_SCRUB_RESILVER && !force) {
-			mutex_exit(&spa->spa_scrub_lock);
-			return (EBUSY);
-		}
-		spa->spa_scrub_stop = 1;
-		cv_broadcast(&spa->spa_scrub_cv);
-		cv_wait(&spa->spa_scrub_cv, &spa->spa_scrub_lock);
-	}
-
-	/*
-	 * Terminate the previous traverse.
-	 */
-	if (spa->spa_scrub_th != NULL) {
-		traverse_fini(spa->spa_scrub_th);
-		spa->spa_scrub_th = NULL;
-	}
-
-	if (rvd == NULL) {
-		ASSERT(spa->spa_scrub_stop == 0);
-		ASSERT(spa->spa_scrub_type == type);
-		ASSERT(spa->spa_scrub_restart_txg == 0);
-		mutex_exit(&spa->spa_scrub_lock);
+	if (type == POOL_SCRUB_RESILVER &&
+	    !vdev_resilver_needed(spa->spa_root_vdev, NULL, NULL)) {
+		spa_async_request(spa, SPA_ASYNC_RESILVER_DONE);
 		return (0);
 	}
 
-	mintxg = TXG_INITIAL - 1;
-	maxtxg = spa_last_synced_txg(spa) + 1;
+	if (type == POOL_SCRUB_EVERYTHING &&
+	    spa->spa_dsl_pool->dp_scrub_func != SCRUB_FUNC_NONE &&
+	    spa->spa_dsl_pool->dp_scrub_isresilver)
+		return (EBUSY);
 
-	mutex_enter(&rvd->vdev_dtl_lock);
-
-	if (rvd->vdev_dtl_map.sm_space == 0) {
-		/*
-		 * The pool-wide DTL is empty.
-		 * If this is a resilver, there's nothing to do except
-		 * check whether any in-progress replacements have completed.
-		 */
-		if (type == POOL_SCRUB_RESILVER) {
-			type = POOL_SCRUB_NONE;
-			spa_async_request(spa, SPA_ASYNC_RESILVER_DONE);
-		}
+	if (type == POOL_SCRUB_EVERYTHING || type == POOL_SCRUB_RESILVER) {
+		return (dsl_pool_scrub_clean(spa->spa_dsl_pool));
+	} else if (type == POOL_SCRUB_NONE) {
+		return (dsl_pool_scrub_cancel(spa->spa_dsl_pool));
 	} else {
-		/*
-		 * The pool-wide DTL is non-empty.
-		 * If this is a normal scrub, upgrade to a resilver instead.
-		 */
-		if (type == POOL_SCRUB_EVERYTHING)
-			type = POOL_SCRUB_RESILVER;
+		return (EINVAL);
 	}
-
-	if (type == POOL_SCRUB_RESILVER) {
-		/*
-		 * Determine the resilvering boundaries.
-		 *
-		 * Note: (mintxg, maxtxg) is an open interval,
-		 * i.e. mintxg and maxtxg themselves are not included.
-		 *
-		 * Note: for maxtxg, we MIN with spa_last_synced_txg(spa) + 1
-		 * so we don't claim to resilver a txg that's still changing.
-		 */
-		ss = avl_first(&rvd->vdev_dtl_map.sm_root);
-		mintxg = ss->ss_start - 1;
-		ss = avl_last(&rvd->vdev_dtl_map.sm_root);
-		maxtxg = MIN(ss->ss_end, maxtxg);
-
-		spa_event_notify(spa, NULL, ESC_ZFS_RESILVER_START);
-	}
-
-	mutex_exit(&rvd->vdev_dtl_lock);
-
-	spa->spa_scrub_stop = 0;
-	spa->spa_scrub_type = type;
-	spa->spa_scrub_restart_txg = 0;
-
-	if (type != POOL_SCRUB_NONE) {
-		spa->spa_scrub_mintxg = mintxg;
-		spa->spa_scrub_maxtxg = maxtxg;
-		spa->spa_scrub_th = traverse_init(spa, spa_scrub_cb, NULL,
-		    ADVANCE_PRE | ADVANCE_PRUNE | ADVANCE_ZIL,
-		    ZIO_FLAG_CANFAIL);
-		traverse_add_pool(spa->spa_scrub_th, mintxg, maxtxg);
-		spa->spa_scrub_thread = thread_create(NULL, 0,
-		    spa_scrub_thread, spa, 0, &p0, TS_RUN, minclsyspri);
-	}
-
-	mutex_exit(&spa->spa_scrub_lock);
-
-	return (0);
 }
 
 /*
@@ -3836,25 +3575,10 @@ spa_async_thread(spa_t *spa)
 		spa_vdev_resilver_done(spa);
 
 	/*
-	 * Kick off a scrub.  When starting a RESILVER scrub (or an EVERYTHING
-	 * scrub which can become a resilver), we need to hold
-	 * spa_namespace_lock() because the sysevent we post via
-	 * spa_event_notify() needs to get the name of the pool.
-	 */
-	if (tasks & SPA_ASYNC_SCRUB) {
-		mutex_enter(&spa_namespace_lock);
-		VERIFY(spa_scrub(spa, POOL_SCRUB_EVERYTHING, B_TRUE) == 0);
-		mutex_exit(&spa_namespace_lock);
-	}
-
-	/*
 	 * Kick off a resilver.
 	 */
-	if (tasks & SPA_ASYNC_RESILVER) {
-		mutex_enter(&spa_namespace_lock);
-		VERIFY(spa_scrub(spa, POOL_SCRUB_RESILVER, B_TRUE) == 0);
-		mutex_exit(&spa_namespace_lock);
-	}
+	if (tasks & SPA_ASYNC_RESILVER)
+		VERIFY(spa_scrub(spa, POOL_SCRUB_RESILVER) == 0);
 
 	/*
 	 * Let the world know that we're done.
@@ -4211,6 +3935,19 @@ spa_sync(spa_t *spa, uint64_t txg)
 		}
 	}
 
+	if (spa->spa_ubsync.ub_version < SPA_VERSION_ORIGIN &&
+	    spa->spa_uberblock.ub_version >= SPA_VERSION_ORIGIN) {
+		dsl_pool_create_origin(dp, tx);
+
+		/* Keeping the origin open increases spa_minref */
+		spa->spa_minref += 3;
+	}
+
+	if (spa->spa_ubsync.ub_version < SPA_VERSION_NEXT_CLONES &&
+	    spa->spa_uberblock.ub_version >= SPA_VERSION_NEXT_CLONES) {
+		dsl_pool_upgrade_clones(dp, tx);
+	}
+
 	/*
 	 * If anything has changed in this txg, push the deferred frees
 	 * from the previous txg.  If not, leave them alone so that we
@@ -4295,20 +4032,11 @@ spa_sync(spa_t *spa, uint64_t txg)
 		spa->spa_config_syncing = NULL;
 	}
 
-	/*
-	 * Make a stable copy of the fully synced uberblock.
-	 * We use this as the root for pool traversals.
-	 */
-	spa->spa_traverse_wanted = 1;	/* tells traverse_more() to stop */
-
-	spa_scrub_suspend(spa);		/* stop scrubbing and finish I/Os */
-
+	spa->spa_traverse_wanted = B_TRUE;
 	rw_enter(&spa->spa_traverse_lock, RW_WRITER);
-	spa->spa_traverse_wanted = 0;
+	spa->spa_traverse_wanted = B_FALSE;
 	spa->spa_ubsync = spa->spa_uberblock;
 	rw_exit(&spa->spa_traverse_lock);
-
-	spa_scrub_resume(spa);		/* resume scrub with new ubsync */
 
 	/*
 	 * Clean up the ZIL records for the synced txg.
@@ -4389,7 +4117,6 @@ spa_evict_all(void)
 		mutex_exit(&spa_namespace_lock);
 		spa_async_suspend(spa);
 		mutex_enter(&spa_namespace_lock);
-		VERIFY(spa_scrub(spa, POOL_SCRUB_NONE, B_TRUE) == 0);
 		spa_close(spa, FTAG);
 
 		if (spa->spa_state != POOL_STATE_UNINITIALIZED) {
@@ -4456,6 +4183,27 @@ spa_has_spare(spa_t *spa, uint64_t guid)
 	for (i = 0; i < sav->sav_npending; i++) {
 		if (nvlist_lookup_uint64(sav->sav_pending[i], ZPOOL_CONFIG_GUID,
 		    &spareguid) == 0 && spareguid == guid)
+			return (B_TRUE);
+	}
+
+	return (B_FALSE);
+}
+
+/*
+ * Check if a pool has an active shared spare device.
+ * Note: reference count of an active spare is 2, as a spare and as a replace
+ */
+static boolean_t
+spa_has_active_shared_spare(spa_t *spa)
+{
+	int i, refcnt;
+	uint64_t pool;
+	spa_aux_vdev_t *sav = &spa->spa_spares;
+
+	for (i = 0; i < sav->sav_count; i++) {
+		if (spa_spare_exists(sav->sav_vdevs[i]->vdev_guid, &pool,
+		    &refcnt) && pool != 0ULL && pool == spa_guid(spa) &&
+		    refcnt > 2)
 			return (B_TRUE);
 	}
 

@@ -6352,8 +6352,12 @@ udp_xmit(queue_t *q, mblk_t *mp, ire_t *ire, conn_t *connp, zoneid_t zoneid)
 		    ipst->ips_ipv4firewall_physical_out,
 		    NULL, ill, ipha, mp, mp, ll_multicast, ipst);
 		DTRACE_PROBE1(ip4__physical__out__end, mblk_t *, mp);
-		if (mp != NULL)
+		if (mp != NULL) {
+			DTRACE_IP7(send, mblk_t *, mp, conn_t *, NULL,
+			    void_ip_t *, ipha, __dtrace_ipsr_ill_t *, ill,
+			    ipha_t *, ipha, ip6_t *, NULL, int, 0);
 			putnext(ire->ire_stq, mp);
+		}
 	}
 
 	IRE_REFRELE(ire);
@@ -8152,12 +8156,11 @@ udp_rcv_enqueue(queue_t *q, udp_t *udp, mblk_t *mp, uint_t pkt_len)
 	 * datagram upstream and call STR_WAKEUP_SET() again when there
 	 * are still data remaining in our receive queue.
 	 */
-	if (udp->udp_rcv_list_head == NULL) {
-		STR_WAKEUP_SET(STREAM(q));
+	STR_WAKEUP_SENDSIG(STREAM(q), udp->udp_rcv_list_head);
+	if (udp->udp_rcv_list_head == NULL)
 		udp->udp_rcv_list_head = mp;
-	} else {
+	else
 		udp->udp_rcv_list_tail->b_next = mp;
-	}
 	udp->udp_rcv_list_tail = mp;
 	udp->udp_rcv_cnt += pkt_len;
 	udp->udp_rcv_msgcnt++;
@@ -8167,8 +8170,6 @@ udp_rcv_enqueue(queue_t *q, udp_t *udp, mblk_t *mp, uint_t pkt_len)
 	    udp->udp_rcv_msgcnt >= udp->udp_rcv_hiwat)
 		udp->udp_drain_qfull = B_TRUE;
 
-	/* Update poll events and send SIGPOLL/SIGIO if necessary */
-	STR_SENDSIG(STREAM(q));
 	mutex_exit(&udp->udp_drain_lock);
 }
 

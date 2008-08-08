@@ -183,6 +183,10 @@ const in6_addr_t ipv6_solicited_node_mcast =
 #define	OK_RESOLVER_MP_V6(mp)						\
 		((mp) && ((mp)->b_wptr - (mp)->b_rptr) >= (2 * IPV6_ADDR_LEN))
 
+#define	IP6_MBLK_OK		0
+#define	IP6_MBLK_HDR_ERR	1
+#define	IP6_MBLK_LEN_ERR	2
+
 static void	icmp_inbound_too_big_v6(queue_t *, mblk_t *, ill_t *ill,
     boolean_t, zoneid_t);
 static void	icmp_pkt_v6(queue_t *, mblk_t *, void *, size_t,
@@ -6285,6 +6289,7 @@ ip_process_options_v6(queue_t *q, mblk_t *mp, ip6_t *ip6h,
 	const char *errtype;
 	zoneid_t zoneid;
 	ill_t *ill = q->q_ptr;
+	ipif_t *ipif;
 
 	first_mp = mp;
 	if (mp->b_datap->db_type == M_CTL) {
@@ -6452,6 +6457,25 @@ ip_process_options_v6(queue_t *q, mblk_t *mp, ip6_t *ip6h,
 					    B_FALSE, B_FALSE, zoneid, ipst);
 					return (-1);
 				case IP6OPT_TYPE_FORCEICMP:
+					/*
+					 * If we don't have a zone and the dst
+					 * addr is multicast, then pick a zone
+					 * based on the inbound interface.
+					 */
+					if (zoneid == ALL_ZONES &&
+					    IN6_IS_ADDR_MULTICAST(
+					    &ip6h->ip6_dst)) {
+						ipif = ipif_select_source_v6(
+						    ill, &ip6h->ip6_src,
+						    RESTRICT_TO_GROUP,
+						    IPV6_PREFER_SRC_DEFAULT,
+						    ALL_ZONES);
+						if (ipif != NULL) {
+							zoneid =
+							    ipif->ipif_zoneid;
+							ipif_refrele(ipif);
+						}
+					}
 					if (zoneid == ALL_ZONES) {
 						freemsg(first_mp);
 						return (-1);
@@ -6572,9 +6596,11 @@ ip_process_rthdr(queue_t *q, mblk_t *mp, ip6_t *ip6h, ip6_rthdr_t *rth,
 		    B_FALSE, B_FALSE, GLOBAL_ZONEID, ipst);
 		return;
 	}
-	if (ip_check_v6_mblk(mp, ill) == 0) {
+	if (ip_check_v6_mblk(mp, ill) == IP6_MBLK_OK) {
 		ip6h = (ip6_t *)mp->b_rptr;
 		ip_rput_data_v6(q, ill, mp, ip6h, flags, hada_mp, dl_mp);
+	} else {
+		freemsg(mp);
 	}
 	return;
 hada_drop:
@@ -6599,6 +6625,7 @@ ip_rput_v6(queue_t *q, mblk_t *mp)
 	uint_t 		flags = 0;
 	mblk_t		*dl_mp;
 	ip_stack_t	*ipst;
+	int		check;
 
 	ill = (ill_t *)q->q_ptr;
 	ipst = ill->ill_ipst;
@@ -6792,10 +6819,25 @@ ip_rput_v6(queue_t *q, mblk_t *mp)
 		mp = first_mp->b_cont;
 	}
 
-	if (ip_check_v6_mblk(mp, ill) == -1)
+	if ((check = ip_check_v6_mblk(mp, ill)) == IP6_MBLK_HDR_ERR) {
+		freemsg(mp);
 		return;
+	}
 
 	ip6h = (ip6_t *)mp->b_rptr;
+
+	/*
+	 * ip:::receive must see ipv6 packets with a full header,
+	 * and so is placed after the IP6_MBLK_HDR_ERR check.
+	 */
+	DTRACE_IP7(receive, mblk_t *, first_mp, conn_t *, NULL, void_ip_t *,
+	    ip6h, __dtrace_ipsr_ill_t *, ill, ipha_t *, NULL, ip6_t *, ip6h,
+	    int, 0);
+
+	if (check != IP6_MBLK_OK) {
+		freemsg(mp);
+		return;
+	}
 
 	DTRACE_PROBE4(ip6__physical__in__start,
 	    ill_t *, ill, ill_t *, NULL,
@@ -7055,8 +7097,7 @@ ip_check_v6_mblk(mblk_t *mp, ill_t *ill)
 		if (!pullupmsg(mp, IPV6_HDR_LEN)) {
 			BUMP_MIB(ill->ill_ip_mib, ipIfStatsInDiscards);
 			ip1dbg(("ip_rput_v6: pullupmsg failed\n"));
-			freemsg(mp);
-			return (-1);
+			return (IP6_MBLK_HDR_ERR);
 		}
 		ip6h = (ip6_t *)mp->b_rptr;
 	}
@@ -7081,19 +7122,17 @@ ip_check_v6_mblk(mblk_t *mp, ill_t *ill)
 			ip1dbg(("ip_rput_data_v6: packet too short %d %d\n",
 			    ip6_len, pkt_len));
 			BUMP_MIB(ill->ill_ip_mib, ipIfStatsInTruncatedPkts);
-			freemsg(mp);
-			return (-1);
+			return (IP6_MBLK_LEN_ERR);
 		}
 		diff = (ssize_t)(pkt_len - ip6_len);
 
 		if (!adjmsg(mp, -diff)) {
 			ip1dbg(("ip_rput_data_v6: adjmsg failed\n"));
 			BUMP_MIB(ill->ill_ip_mib, ipIfStatsInDiscards);
-			freemsg(mp);
-			return (-1);
+			return (IP6_MBLK_LEN_ERR);
 		}
 	}
-	return (0);
+	return (IP6_MBLK_OK);
 }
 
 /*
@@ -8738,7 +8777,7 @@ ip_rput_frag_v6(queue_t *q, mblk_t *mp, ip6_t *ip6h,
 		/* Update per ipfb and ill byte counts */
 		ipfb->ipfb_count += ipf->ipf_count;
 		ASSERT(ipfb->ipfb_count > 0);	/* Wraparound */
-		ill->ill_frag_count += ipf->ipf_count;
+		atomic_add_32(&ill->ill_frag_count, ipf->ipf_count);
 		/* If the frag timer wasn't already going, start it. */
 		mutex_enter(&ill->ill_lock);
 		ill_frag_timer_start(ill);
@@ -8785,7 +8824,7 @@ ip_rput_frag_v6(queue_t *q, mblk_t *mp, ip6_t *ip6h,
 		/* Update per ipfb and ill byte counts */
 		ipfb->ipfb_count += msg_len;
 		ASSERT(ipfb->ipfb_count > 0);	/* Wraparound */
-		ill->ill_frag_count += msg_len;
+		atomic_add_32(&ill->ill_frag_count, msg_len);
 		if (more_frags) {
 			/* More to come. */
 			ipf->ipf_end = end;
@@ -8816,7 +8855,7 @@ ip_rput_frag_v6(queue_t *q, mblk_t *mp, ip6_t *ip6h,
 			/* Update per ipfb and ill byte counts */
 			ipfb->ipfb_count += count;
 			ASSERT(ipfb->ipfb_count > 0);	/* Wraparound */
-			ill->ill_frag_count += count;
+			atomic_add_32(&ill->ill_frag_count, count);
 		}
 		if (ret == IP_REASS_PARTIAL) {
 			goto partial_reass_done;
@@ -8869,7 +8908,7 @@ ip_rput_frag_v6(queue_t *q, mblk_t *mp, ip6_t *ip6h,
 	if (ipf)
 		ipf->ipf_ptphn = ipfp;
 	ipfp[0] = ipf;
-	ill->ill_frag_count -= count;
+	atomic_add_32(&ill->ill_frag_count, -count);
 	ASSERT(ipfb->ipfb_count >= count);
 	ipfb->ipfb_count -= count;
 	ipfb->ipfb_frag_pkts--;
@@ -10527,6 +10566,10 @@ ip_wput_local_v6(queue_t *q, ill_t *ill, ip6_t *ip6h, mblk_t *first_mp,
 	if (first_mp == NULL)
 		return;
 
+	DTRACE_IP7(receive, mblk_t *, first_mp, conn_t *, NULL, void_ip_t *,
+	    ip6h, __dtrace_ipsr_ill_t *, ill, ipha_t *, NULL, ip6_t *, ip6h,
+	    int, 1);
+
 	nexthdr = ip6h->ip6_nxt;
 	mibptr = ill->ill_ip_mib;
 
@@ -10940,6 +10983,17 @@ ip_wput_ire_v6(queue_t *q, mblk_t *mp, ire_t *ire, int unspec_src,
 					DTRACE_PROBE1(
 					    ip6__loopback__out__end,
 					    mblk_t *, nmp);
+
+					/*
+					 * DTrace this as ip:::send.  A blocked
+					 * packet will fire the send probe, but
+					 * not the receive probe.
+					 */
+					DTRACE_IP7(send, mblk_t *, nmp,
+					    conn_t *, NULL, void_ip_t *, nip6h,
+					    __dtrace_ipsr_ill_t *, ill,
+					    ipha_t *, NULL, ip6_t *, nip6h,
+					    int, 1);
 
 					if (nmp != NULL) {
 						/*
@@ -11366,6 +11420,13 @@ ip_wput_ire_v6(queue_t *q, mblk_t *mp, ire_t *ire, int unspec_src,
 		ASSERT(mp == first_mp);
 		ip_xmit_v6(mp, ire, reachable, connp, caller, NULL);
 	} else {
+		/*
+		 * DTrace this as ip:::send.  A blocked packet will fire the
+		 * send probe, but not the receive probe.
+		 */
+		DTRACE_IP7(send, mblk_t *, first_mp, conn_t *, NULL,
+		    void_ip_t *, ip6h, __dtrace_ipsr_ill_t *, ill, ipha_t *,
+		    NULL, ip6_t *, ip6h, int, 1);
 		DTRACE_PROBE4(ip6__loopback__out__start,
 		    ill_t *, NULL, ill_t *, ill,
 		    ip6_t *, ip6h, mblk_t *, first_mp);
@@ -12284,6 +12345,11 @@ ip_xmit_v6(mblk_t *mp, ire_t *ire, uint_t flags, conn_t *connp,
 				UPDATE_MIB(ill->ill_ip_mib,
 				    ipIfStatsHCOutOctets,
 				    ntohs(ip6h->ip6_plen) + IPV6_HDR_LEN);
+				DTRACE_IP7(send, mblk_t *, mp, conn_t *, NULL,
+				    void_ip_t *, ip6h, __dtrace_ipsr_ill_t *,
+				    out_ill, ipha_t *, NULL, ip6_t *, ip6h,
+				    int, 0);
+
 				putnext(stq, mp);
 			} else {
 				/*
@@ -12301,6 +12367,11 @@ ip_xmit_v6(mblk_t *mp, ire_t *ire, uint_t flags, conn_t *connp,
 					    ipIfStatsHCOutOctets,
 					    ntohs(ip6h->ip6_plen) +
 					    IPV6_HDR_LEN);
+					DTRACE_IP7(send, mblk_t *, mp,
+					    conn_t *, NULL, void_ip_t *, ip6h,
+					    __dtrace_ipsr_ill_t *, out_ill,
+					    ipha_t *, NULL, ip6_t *, ip6h, int,
+					    0);
 					ipsec_hw_putnext(stq, mp);
 				}
 			}

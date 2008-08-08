@@ -93,6 +93,11 @@ typedef struct zfs_ioc_vec {
 	boolean_t		zvec_his_log;
 } zfs_ioc_vec_t;
 
+static void clear_props(char *dataset, nvlist_t *props);
+static int zfs_fill_zplprops_root(uint64_t, nvlist_t *, nvlist_t *,
+    boolean_t *);
+int zfs_set_prop_nvlist(const char *, nvlist_t *);
+
 /* _NOTE(PRINTFLIKE(4)) - this is printf-like, but lint is too whiney */
 void
 __dprintf(const char *file, const char *func, int line, const char *fmt, ...)
@@ -156,14 +161,37 @@ history_str_get(zfs_cmd_t *zc)
 }
 
 /*
- * zfs_check_version
+ * Check to see if the named dataset is currently defined as bootable
+ */
+static boolean_t
+zfs_is_bootfs(const char *name)
+{
+	spa_t *spa;
+	boolean_t ret = B_FALSE;
+
+	if (spa_open(name, &spa, FTAG) == 0) {
+		if (spa->spa_bootfs) {
+			objset_t *os;
+
+			if (dmu_objset_open(name, DMU_OST_ZFS,
+			    DS_MODE_USER | DS_MODE_READONLY, &os) == 0) {
+				ret = (dmu_objset_id(os) == spa->spa_bootfs);
+				dmu_objset_close(os);
+			}
+		}
+		spa_close(spa, FTAG);
+	}
+	return (ret);
+}
+
+/*
+ * zfs_earlier_version
  *
  *	Return non-zero if the spa version is less than requested version.
  */
 static int
-zfs_check_version(const char *name, int version)
+zfs_earlier_version(const char *name, int version)
 {
-
 	spa_t *spa;
 
 	if (spa_open(name, &spa, FTAG) == 0) {
@@ -719,6 +747,8 @@ zfs_ioc_pool_create(zfs_cmd_t *zc)
 {
 	int error;
 	nvlist_t *config, *props = NULL;
+	nvlist_t *rootprops = NULL;
+	nvlist_t *zplprops = NULL;
 	char *buf;
 
 	if (error = get_nvlist(zc->zc_nvlist_conf, zc->zc_nvlist_conf_size,
@@ -731,17 +761,52 @@ zfs_ioc_pool_create(zfs_cmd_t *zc)
 		return (error);
 	}
 
+	if (props) {
+		nvlist_t *nvl = NULL;
+		uint64_t version = SPA_VERSION;
+
+		(void) nvlist_lookup_uint64(props,
+		    zpool_prop_to_name(ZPOOL_PROP_VERSION), &version);
+		if (version < SPA_VERSION_INITIAL || version > SPA_VERSION) {
+			error = EINVAL;
+			goto pool_props_bad;
+		}
+		(void) nvlist_lookup_nvlist(props, ZPOOL_ROOTFS_PROPS, &nvl);
+		if (nvl) {
+			error = nvlist_dup(nvl, &rootprops, KM_SLEEP);
+			if (error != 0) {
+				nvlist_free(config);
+				nvlist_free(props);
+				return (error);
+			}
+			(void) nvlist_remove_all(props, ZPOOL_ROOTFS_PROPS);
+		}
+		VERIFY(nvlist_alloc(&zplprops, NV_UNIQUE_NAME, KM_SLEEP) == 0);
+		error = zfs_fill_zplprops_root(version, rootprops,
+		    zplprops, NULL);
+		if (error)
+			goto pool_props_bad;
+	}
+
 	buf = history_str_get(zc);
 
-	error = spa_create(zc->zc_name, config, props, buf);
+	error = spa_create(zc->zc_name, config, props, buf, zplprops);
+
+	/*
+	 * Set the remaining root properties
+	 */
+	if (!error &&
+	    (error = zfs_set_prop_nvlist(zc->zc_name, rootprops)) != 0)
+		(void) spa_destroy(zc->zc_name);
 
 	if (buf != NULL)
 		history_str_free(buf);
 
+pool_props_bad:
+	nvlist_free(rootprops);
+	nvlist_free(zplprops);
 	nvlist_free(config);
-
-	if (props)
-		nvlist_free(props);
+	nvlist_free(props);
 
 	return (error);
 }
@@ -793,8 +858,10 @@ static int
 zfs_ioc_pool_export(zfs_cmd_t *zc)
 {
 	int error;
+	boolean_t force = (boolean_t)zc->zc_cookie;
+
 	zfs_log_history(zc);
-	error = spa_export(zc->zc_name, NULL);
+	error = spa_export(zc->zc_name, NULL, force);
 	return (error);
 }
 
@@ -877,9 +944,7 @@ zfs_ioc_pool_scrub(zfs_cmd_t *zc)
 	if ((error = spa_open(zc->zc_name, &spa, FTAG)) != 0)
 		return (error);
 
-	mutex_enter(&spa_namespace_lock);
-	error = spa_scrub(spa, zc->zc_cookie, B_FALSE);
-	mutex_exit(&spa_namespace_lock);
+	error = spa_scrub(spa, zc->zc_cookie);
 
 	spa_close(spa, FTAG);
 
@@ -1132,7 +1197,6 @@ zfs_ioc_vdev_setpath(zfs_cmd_t *zc)
  * zc_objset_stats	stats
  * zc_nvlist_dst	property nvlist
  * zc_nvlist_dst_size	size of property nvlist
- * zc_value		alternate root
  */
 static int
 zfs_ioc_objset_stats(zfs_cmd_t *zc)
@@ -1163,8 +1227,6 @@ zfs_ioc_objset_stats(zfs_cmd_t *zc)
 		error = put_nvlist(zc, nv);
 		nvlist_free(nv);
 	}
-
-	spa_altroot(dmu_objset_spa(os), zc->zc_value, sizeof (zc->zc_value));
 
 	dmu_objset_close(os);
 	return (error);
@@ -1242,7 +1304,6 @@ zfs_ioc_objset_zplprops(zfs_cmd_t *zc)
  * zc_objset_stats	stats
  * zc_nvlist_dst	property nvlist
  * zc_nvlist_dst_size	size of property nvlist
- * zc_value		alternate root
  */
 static int
 zfs_ioc_dataset_list_next(zfs_cmd_t *zc)
@@ -1294,7 +1355,6 @@ zfs_ioc_dataset_list_next(zfs_cmd_t *zc)
  * zc_objset_stats	stats
  * zc_nvlist_dst	property nvlist
  * zc_nvlist_dst_size	size of property nvlist
- * zc_value		alternate root
  */
 static int
 zfs_ioc_snapshot_list_next(zfs_cmd_t *zc)
@@ -1376,17 +1436,29 @@ zfs_set_prop_nvlist(const char *name, nvlist_t *nvl)
 			 * we'll catch them later.
 			 */
 			if (nvpair_type(elem) == DATA_TYPE_UINT64 &&
-			    nvpair_value_uint64(elem, &intval) == 0 &&
-			    intval >= ZIO_COMPRESS_GZIP_1 &&
-			    intval <= ZIO_COMPRESS_GZIP_9) {
-				if (zfs_check_version(name,
+			    nvpair_value_uint64(elem, &intval) == 0) {
+				if (intval >= ZIO_COMPRESS_GZIP_1 &&
+				    intval <= ZIO_COMPRESS_GZIP_9 &&
+				    zfs_earlier_version(name,
 				    SPA_VERSION_GZIP_COMPRESSION))
 					return (ENOTSUP);
+
+				/*
+				 * If this is a bootable dataset then
+				 * verify that the compression algorithm
+				 * is supported for booting. We must return
+				 * something other than ENOTSUP since it
+				 * implies a downrev pool version.
+				 */
+				if (zfs_is_bootfs(name) &&
+				    !BOOTFS_COMPRESS_VALID(intval))
+					return (ERANGE);
 			}
 			break;
 
 		case ZFS_PROP_COPIES:
-			if (zfs_check_version(name, SPA_VERSION_DITTO_BLOCKS))
+			if (zfs_earlier_version(name,
+			    SPA_VERSION_DITTO_BLOCKS))
 				return (ENOTSUP);
 			break;
 
@@ -1395,8 +1467,6 @@ zfs_set_prop_nvlist(const char *name, nvlist_t *nvl)
 				return (ENOTSUP);
 			break;
 		}
-		if ((error = zfs_secpolicy_setprop(name, prop, CRED())) != 0)
-			return (error);
 	}
 
 	elem = NULL;
@@ -1509,6 +1579,7 @@ zfs_set_prop_nvlist(const char *name, nvlist_t *nvl)
  * zc_name		name of filesystem
  * zc_value		name of property to inherit
  * zc_nvlist_src{_size}	nvlist of properties to apply
+ * zc_cookie		clear existing local props?
  *
  * outputs:		none
  */
@@ -1521,6 +1592,21 @@ zfs_ioc_set_prop(zfs_cmd_t *zc)
 	if ((error = get_nvlist(zc->zc_nvlist_src, zc->zc_nvlist_src_size,
 	    &nvl)) != 0)
 		return (error);
+
+	if (zc->zc_cookie) {
+		nvlist_t *origprops;
+		objset_t *os;
+
+		if (dmu_objset_open(zc->zc_name, DMU_OST_ANY,
+		    DS_MODE_USER | DS_MODE_READONLY, &os) == 0) {
+			if (dsl_prop_get_all(os, &origprops, TRUE) == 0) {
+				clear_props(zc->zc_name, origprops);
+				nvlist_free(origprops);
+			}
+			dmu_objset_close(os);
+		}
+
+	}
 
 	error = zfs_set_prop_nvlist(zc->zc_name, nvl);
 
@@ -1770,11 +1856,14 @@ zfs_create_cb(objset_t *os, void *arg, cred_t *cr, dmu_tx_t *tx)
 
 /*
  * inputs:
- * createprops	list of properties requested by creator
- * dataset	name of dataset we are creating
+ * createprops		list of properties requested by creator
+ * default_zplver	zpl version to use if unspecified in createprops
+ * fuids_ok		fuids allowed in this version of the spa?
+ * os			parent objset pointer (NULL if root fs)
  *
  * outputs:
  * zplprops	values for the zplprops we attach to the master node object
+ * is_ci	true if requested file system will be purely case-insensitive
  *
  * Determine the settings for utf8only, normalization and
  * casesensitivity.  Specific values may have been requested by the
@@ -1786,28 +1875,23 @@ zfs_create_cb(objset_t *os, void *arg, cred_t *cr, dmu_tx_t *tx)
  * processing.
  */
 static int
-zfs_fill_zplprops(const char *dataset, nvlist_t *createprops,
-    nvlist_t *zplprops, uint64_t zplver, boolean_t *is_ci)
+zfs_fill_zplprops_impl(objset_t *os, uint64_t default_zplver,
+    boolean_t fuids_ok, nvlist_t *createprops, nvlist_t *zplprops,
+    boolean_t *is_ci)
 {
-	objset_t *os;
-	char parentname[MAXNAMELEN];
-	char *cp;
+	uint64_t zplver = default_zplver;
 	uint64_t sense = ZFS_PROP_UNDEFINED;
 	uint64_t norm = ZFS_PROP_UNDEFINED;
 	uint64_t u8 = ZFS_PROP_UNDEFINED;
-	int error = 0;
 
 	ASSERT(zplprops != NULL);
-
-	(void) strlcpy(parentname, dataset, sizeof (parentname));
-	cp = strrchr(parentname, '/');
-	ASSERT(cp != NULL);
-	cp[0] = '\0';
 
 	/*
 	 * Pull out creator prop choices, if any.
 	 */
 	if (createprops) {
+		(void) nvlist_lookup_uint64(createprops,
+		    zfs_prop_to_name(ZFS_PROP_VERSION), &zplver);
 		(void) nvlist_lookup_uint64(createprops,
 		    zfs_prop_to_name(ZFS_PROP_NORMALIZE), &norm);
 		(void) nvlist_remove_all(createprops,
@@ -1823,15 +1907,16 @@ zfs_fill_zplprops(const char *dataset, nvlist_t *createprops,
 	}
 
 	/*
-	 * If the file system or pool is version is too "young" to
-	 * support normalization and the creator tried to set a value
-	 * for one of the props, error out.  We only need check the
-	 * ZPL version because we've already checked by now that the
-	 * SPA version is compatible with the selected ZPL version.
+	 * If the zpl version requested is whacky or the file system
+	 * or pool is version is too "young" to support normalization
+	 * and the creator tried to set a value for one of the props,
+	 * error out.
 	 */
-	if (zplver < ZPL_VERSION_NORMALIZATION &&
+	if ((zplver < ZPL_VERSION_INITIAL || zplver > ZPL_VERSION) ||
+	    (zplver >= ZPL_VERSION_FUID && !fuids_ok) ||
+	    (zplver < ZPL_VERSION_NORMALIZATION &&
 	    (norm != ZFS_PROP_UNDEFINED || u8 != ZFS_PROP_UNDEFINED ||
-	    sense != ZFS_PROP_UNDEFINED))
+	    sense != ZFS_PROP_UNDEFINED)))
 		return (ENOTSUP);
 
 	/*
@@ -1839,14 +1924,6 @@ zfs_fill_zplprops(const char *dataset, nvlist_t *createprops,
 	 */
 	VERIFY(nvlist_add_uint64(zplprops,
 	    zfs_prop_to_name(ZFS_PROP_VERSION), zplver) == 0);
-
-	/*
-	 * Open parent object set so we can inherit zplprop values if
-	 * necessary.
-	 */
-	if (error = dmu_objset_open(parentname,
-	    DMU_OST_ANY, DS_MODE_USER | DS_MODE_READONLY, &os))
-		return (error);
 
 	if (norm == ZFS_PROP_UNDEFINED)
 		VERIFY(zfs_get_zplprop(os, ZFS_PROP_NORMALIZE, &norm) == 0);
@@ -1871,8 +1948,59 @@ zfs_fill_zplprops(const char *dataset, nvlist_t *createprops,
 	if (is_ci)
 		*is_ci = (sense == ZFS_CASE_INSENSITIVE);
 
-	dmu_objset_close(os);
 	return (0);
+}
+
+static int
+zfs_fill_zplprops(const char *dataset, nvlist_t *createprops,
+    nvlist_t *zplprops, boolean_t *is_ci)
+{
+	boolean_t fuids_ok = B_TRUE;
+	uint64_t zplver = ZPL_VERSION;
+	objset_t *os = NULL;
+	char parentname[MAXNAMELEN];
+	char *cp;
+	int error;
+
+	(void) strlcpy(parentname, dataset, sizeof (parentname));
+	cp = strrchr(parentname, '/');
+	ASSERT(cp != NULL);
+	cp[0] = '\0';
+
+	if (zfs_earlier_version(dataset, SPA_VERSION_FUID)) {
+		zplver = ZPL_VERSION_FUID - 1;
+		fuids_ok = B_FALSE;
+	}
+
+	/*
+	 * Open parent object set so we can inherit zplprop values.
+	 */
+	if ((error = dmu_objset_open(parentname, DMU_OST_ANY,
+	    DS_MODE_USER | DS_MODE_READONLY, &os)) != 0)
+		return (error);
+
+	error = zfs_fill_zplprops_impl(os, zplver, fuids_ok, createprops,
+	    zplprops, is_ci);
+	dmu_objset_close(os);
+	return (error);
+}
+
+static int
+zfs_fill_zplprops_root(uint64_t spa_vers, nvlist_t *createprops,
+    nvlist_t *zplprops, boolean_t *is_ci)
+{
+	boolean_t fuids_ok = B_TRUE;
+	uint64_t zplver = ZPL_VERSION;
+	int error;
+
+	if (spa_vers < SPA_VERSION_FUID) {
+		zplver = ZPL_VERSION_FUID - 1;
+		fuids_ok = B_FALSE;
+	}
+
+	error = zfs_fill_zplprops_impl(NULL, zplver, fuids_ok, createprops,
+	    zplprops, is_ci);
+	return (error);
 }
 
 /*
@@ -1987,35 +2115,7 @@ zfs_ioc_create(zfs_cmd_t *zc)
 				return (error);
 			}
 		} else if (type == DMU_OST_ZFS) {
-			uint64_t version;
 			int error;
-
-			/*
-			 * Default ZPL version to non-FUID capable if the
-			 * pool is not upgraded to support FUIDs.
-			 */
-			if (zfs_check_version(zc->zc_name, SPA_VERSION_FUID))
-				version = ZPL_VERSION_FUID - 1;
-			else
-				version = ZPL_VERSION;
-
-			/*
-			 * Potentially override default ZPL version based
-			 * on creator's request.
-			 */
-			(void) nvlist_lookup_uint64(nvprops,
-			    zfs_prop_to_name(ZFS_PROP_VERSION), &version);
-
-			/*
-			 * Make sure version we ended up with is kosher
-			 */
-			if ((version < ZPL_VERSION_INITIAL ||
-			    version > ZPL_VERSION) ||
-			    (version >= ZPL_VERSION_FUID &&
-			    zfs_check_version(zc->zc_name, SPA_VERSION_FUID))) {
-				nvlist_free(nvprops);
-				return (ENOTSUP);
-			}
 
 			/*
 			 * We have to have normalization and
@@ -2026,7 +2126,7 @@ zfs_ioc_create(zfs_cmd_t *zc)
 			VERIFY(nvlist_alloc(&zct.zct_zplprops,
 			    NV_UNIQUE_NAME, KM_SLEEP) == 0);
 			error = zfs_fill_zplprops(zc->zc_name, nvprops,
-			    zct.zct_zplprops, version, &is_insensitive);
+			    zct.zct_zplprops, &is_insensitive);
 			if (error != 0) {
 				nvlist_free(nvprops);
 				nvlist_free(zct.zct_zplprops);
@@ -2054,6 +2154,27 @@ zfs_ioc_create(zfs_cmd_t *zc)
 	return (error);
 }
 
+struct snap_prop_arg {
+	nvlist_t *nvprops;
+	const char *snapname;
+};
+
+static int
+set_snap_props(char *name, void *arg)
+{
+	struct snap_prop_arg *snpa = arg;
+	int len = strlen(name) + strlen(snpa->snapname) + 2;
+	char *buf = kmem_alloc(len, KM_SLEEP);
+	int err;
+
+	(void) snprintf(buf, len, "%s@%s", name, snpa->snapname);
+	err = zfs_set_prop_nvlist(buf, snpa->nvprops);
+	if (err)
+		(void) dmu_objset_destroy(buf);
+	kmem_free(buf, len);
+	return (err);
+}
+
 /*
  * inputs:
  * zc_name	name of filesystem
@@ -2065,10 +2186,40 @@ zfs_ioc_create(zfs_cmd_t *zc)
 static int
 zfs_ioc_snapshot(zfs_cmd_t *zc)
 {
+	nvlist_t *nvprops = NULL;
+	int error;
+	boolean_t recursive = zc->zc_cookie;
+
 	if (snapshot_namecheck(zc->zc_value, NULL, NULL) != 0)
 		return (EINVAL);
-	return (dmu_objset_snapshot(zc->zc_name,
-	    zc->zc_value, zc->zc_cookie));
+
+	if (zc->zc_nvlist_src != NULL &&
+	    (error = get_nvlist(zc->zc_nvlist_src, zc->zc_nvlist_src_size,
+	    &nvprops)) != 0)
+		return (error);
+
+	error = dmu_objset_snapshot(zc->zc_name, zc->zc_value, recursive);
+
+	/*
+	 * It would be nice to do this atomically.
+	 */
+	if (error == 0) {
+		struct snap_prop_arg snpa;
+		snpa.nvprops = nvprops;
+		snpa.snapname = zc->zc_value;
+		if (recursive) {
+			error = dmu_objset_find(zc->zc_name,
+			    set_snap_props, &snpa, DS_FIND_CHILDREN);
+			if (error) {
+				(void) dmu_snapshots_destroy(zc->zc_name,
+				    zc->zc_value);
+			}
+		} else {
+			error = set_snap_props(zc->zc_name, &snpa);
+		}
+	}
+	nvlist_free(nvprops);
+	return (error);
 }
 
 int
@@ -2527,6 +2678,21 @@ zfs_ioc_clear(zfs_cmd_t *zc)
 	vdev_t *vd;
 	uint64_t txg;
 	int error;
+
+	/*
+	 * On zpool clear we also fix up missing slogs
+	 */
+	mutex_enter(&spa_namespace_lock);
+	spa = spa_lookup(zc->zc_name);
+	if (spa == NULL) {
+		mutex_exit(&spa_namespace_lock);
+		return (EIO);
+	}
+	if (spa->spa_log_state == SPA_LOG_MISSING) {
+		/* we need to let spa_open/spa_load clear the chains */
+		spa->spa_log_state = SPA_LOG_CLEAR;
+	}
+	mutex_exit(&spa_namespace_lock);
 
 	if ((error = spa_open(zc->zc_name, &spa, FTAG)) != 0)
 		return (error);

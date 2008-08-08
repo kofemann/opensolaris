@@ -308,6 +308,32 @@ ehci_hcdi_pm_support(dev_info_t *dip)
 	return (USB_FAILURE);
 }
 
+void
+ehci_dma_attr_workaround(ehci_state_t	*ehcip)
+{
+	/*
+	 * Some Nvidia chips can not handle qh dma address above 2G.
+	 * The bit 31 of the dma address might be omitted and it will
+	 * cause system crash or other unpredicable result. So force
+	 * the dma address allocated below 2G to make ehci work.
+	 */
+	if (PCI_VENDOR_NVIDIA == ehcip->ehci_vendor_id) {
+		switch (ehcip->ehci_device_id) {
+			case PCI_DEVICE_NVIDIA_CK804:
+				USB_DPRINTF_L2(PRINT_MASK_ATTA,
+				    ehcip->ehci_log_hdl,
+				    "ehci_dma_attr_workaround: NVIDIA dma "
+				    "workaround enabled, force dma address "
+				    "to be allocated below 2G");
+				ehcip->ehci_dma_attr.dma_attr_addr_hi =
+				    0x7fffffffull;
+				break;
+			default:
+				break;
+
+		}
+	}
+}
 
 /*
  * Host Controller Driver (HCD) initialization functions
@@ -349,6 +375,7 @@ ehci_set_dma_attributes(ehci_state_t	*ehcip)
 	ehcip->ehci_dma_attr.dma_attr_sgllen = 1;
 	ehcip->ehci_dma_attr.dma_attr_granular = EHCI_DMA_ATTR_GRANULAR;
 	ehcip->ehci_dma_attr.dma_attr_flags = 0;
+	ehci_dma_attr_workaround(ehcip);
 }
 
 
@@ -451,6 +478,8 @@ ehci_allocate_pools(ehci_state_t	*ehcip)
 	    DDI_DMA_SLEEP,
 	    0,
 	    &ehcip->ehci_qh_pool_dma_handle) != DDI_SUCCESS) {
+		USB_DPRINTF_L2(PRINT_MASK_ATTA, ehcip->ehci_log_hdl,
+		    "ehci_allocate_pools: ddi_dma_alloc_handle failed");
 
 		goto failure;
 	}
@@ -465,6 +494,8 @@ ehci_allocate_pools(ehci_state_t	*ehcip)
 	    (caddr_t *)&ehcip->ehci_qh_pool_addr,
 	    &real_length,
 	    &ehcip->ehci_qh_pool_mem_handle) != DDI_SUCCESS) {
+		USB_DPRINTF_L2(PRINT_MASK_ATTA, ehcip->ehci_log_hdl,
+		    "ehci_allocate_pools: ddi_dma_mem_alloc failed");
 
 		goto failure;
 	}
@@ -639,7 +670,7 @@ ehci_map_regs(ehci_state_t	*ehcip)
 
 	USB_DPRINTF_L4(PRINT_MASK_ATTA, ehcip->ehci_log_hdl,
 	    "ehci_map_regs: Capsp 0x%p Regsp 0x%p\n",
-	    ehcip->ehci_capsp, ehcip->ehci_regsp);
+	    (void *)ehcip->ehci_capsp, (void *)ehcip->ehci_regsp);
 
 	return (DDI_SUCCESS);
 }
@@ -2264,7 +2295,8 @@ ehci_allocate_classic_tt_bandwidth(
 
 	USB_DPRINTF_L3(PRINT_MASK_BW, ehcip->ehci_log_hdl,
 	    "ehci_allocate_classic_tt_bandwidth: "
-	    "child_ud 0x%p parent_ud 0x%p", child_ud, parent_ud);
+	    "child_ud 0x%p parent_ud 0x%p",
+	    (void *)child_ud, (void *)parent_ud);
 
 	/*
 	 * Calculate the length in bytes of a transaction on this
@@ -3664,7 +3696,7 @@ ehci_do_soft_reset(ehci_state_t	*ehcip)
 	    Get_OpReg(ehci_periodic_list_base);
 
 	USB_DPRINTF_L3(PRINT_MASK_INTR, ehcip->ehci_log_hdl,
-	    "ehci_do_soft_reset: Save reg = 0x%p", ehci_save_regs);
+	    "ehci_do_soft_reset: Save reg = 0x%p", (void *)ehci_save_regs);
 
 	/* Disable all list processing and interrupts */
 	Set_OpReg(ehci_command, Get_OpReg(ehci_command) &
@@ -3775,7 +3807,8 @@ ehci_do_soft_reset(ehci_state_t	*ehcip)
 	USB_DPRINTF_L4(PRINT_MASK_INTR, ehcip->ehci_log_hdl,
 	    "ehci_do_soft_reset: Before Frame Number 0x%llx "
 	    "After Frame Number 0x%llx",
-	    before_frame_number, after_frame_number);
+	    (unsigned long long)before_frame_number,
+	    (unsigned long long)after_frame_number);
 
 	if ((after_frame_number <= before_frame_number) &&
 	    (Get_OpReg(ehci_status) & EHCI_STS_HOST_CTRL_HALTED)) {
@@ -3870,7 +3903,8 @@ ehci_get_current_frame_number(ehci_state_t *ehcip)
 	    "ehci_get_current_frame_number: "
 	    "Current usb uframe number = 0x%llx "
 	    "Current usb frame number  = 0x%llx",
-	    micro_frame_number, usb_frame_number);
+	    (unsigned long long)micro_frame_number,
+	    (unsigned long long)usb_frame_number);
 
 	return (usb_frame_number);
 }
@@ -3930,7 +3964,9 @@ ehci_wait_for_sof(ehci_state_t	*ehcip)
 
 	USB_DPRINTF_L3(PRINT_MASK_LISTS, ehcip->ehci_log_hdl,
 	    "ehci_wait_for_sof: framenumber: before 0x%llx "
-	    "after 0x%llx", before_frame_number, after_frame_number);
+	    "after 0x%llx",
+	    (unsigned long long)before_frame_number,
+	    (unsigned long long)after_frame_number);
 
 	/* Return failure, if usb frame number has not been changed */
 	if (after_frame_number <= before_frame_number) {
@@ -3946,12 +3982,7 @@ ehci_wait_for_sof(ehci_state_t	*ehcip)
 			return (USB_FAILURE);
 		}
 
-		/* Get new usb frame number */
-		after_frame_number = before_frame_number =
-		    ehci_get_current_frame_number(ehcip);
 	}
-
-	ASSERT(after_frame_number > before_frame_number);
 
 	return (USB_SUCCESS);
 }

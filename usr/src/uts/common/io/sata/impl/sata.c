@@ -257,6 +257,7 @@ static	sata_pkt_t *sata_pkt_alloc(sata_pkt_txlate_t *, int (*)(caddr_t));
 static	void sata_pkt_free(sata_pkt_txlate_t *);
 static	int sata_dma_buf_setup(sata_pkt_txlate_t *, int, int (*)(caddr_t),
     caddr_t, ddi_dma_attr_t *);
+static	void sata_common_free_dma_rsrcs(sata_pkt_txlate_t *);
 static	int sata_probe_device(sata_hba_inst_t *, sata_device_t *);
 static	sata_drive_info_t *sata_get_device_info(sata_hba_inst_t *,
     sata_device_t *);
@@ -1637,6 +1638,24 @@ sata_free_error_retrieval_pkt(sata_pkt_t *sata_pkt)
 
 }
 
+/*
+ * sata_name_child is for composing the name of the node
+ * the format of the name is "target,0".
+ */
+static int
+sata_name_child(dev_info_t *dip, char *name, int namelen)
+{
+	int target;
+
+	target = ddi_prop_get_int(DDI_DEV_T_ANY, dip,
+	    DDI_PROP_DONTPASS, "target", -1);
+	if (target == -1)
+		return (DDI_FAILURE);
+	(void) snprintf(name, namelen, "%x,0", target);
+	return (DDI_SUCCESS);
+}
+
+
 
 /* ****************** SCSA required entry points *********************** */
 
@@ -1664,6 +1683,15 @@ sata_scsi_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 	char			fw[SATA_ID_FW_LEN + 1];
 	char			*vid, *pid;
 	int			i;
+
+	/*
+	 * Fail tran_tgt_init for .conf stub node
+	 */
+	if (ndi_dev_is_persistent_node(tgt_dip) == 0) {
+		(void) ndi_merge_node(tgt_dip, sata_name_child);
+		ddi_set_name_addr(tgt_dip, NULL);
+		return (DDI_FAILURE);
+	}
 
 	sata_hba_inst = (sata_hba_inst_t *)(hba_tran->tran_hba_private);
 
@@ -1923,7 +1951,6 @@ sata_scsi_init_pkt(struct scsi_address *ap, struct scsi_pkt *pkt,
 		if ((bp == NULL) || (bp->b_bcount == 0)) {
 			return (pkt);
 		}
-		ASSERT(spx->txlt_buf_dma_handle != NULL);
 
 		/* Pkt is available already: spx->txlt_scsi_pkt == pkt; */
 	}
@@ -1955,8 +1982,6 @@ sata_scsi_init_pkt(struct scsi_address *ap, struct scsi_pkt *pkt,
 	 */
 	if ((rval = sata_dma_buf_setup(spx, flags, callback, arg,
 	    &cur_dma_attr)) != DDI_SUCCESS) {
-		spx->txlt_sata_pkt->satapkt_cmd.satacmd_bp = NULL;
-		sata_pkt_free(spx);
 		/*
 		 * If a DMA allocation request fails with
 		 * DDI_DMA_NOMAPPING, indicate the error by calling
@@ -1964,6 +1989,8 @@ sata_scsi_init_pkt(struct scsi_address *ap, struct scsi_pkt *pkt,
 		 * If a DMA allocation request fails with
 		 * DDI_DMA_TOOBIG, indicate the error by calling
 		 * bioerror(9F) with bp and an error code of EINVAL.
+		 * For DDI_DMA_NORESOURCES, we may have some of them allocated.
+		 * Request may be repeated later - there is no real error.
 		 */
 		switch (rval) {
 		case DDI_DMA_NORESOURCES:
@@ -1978,8 +2005,24 @@ sata_scsi_init_pkt(struct scsi_address *ap, struct scsi_pkt *pkt,
 			bioerror(bp, EINVAL);
 			break;
 		}
-		if (new_pkt == TRUE)
-			scsi_hba_pkt_free(ap, pkt);
+		if (new_pkt == TRUE) {
+			/*
+			 * Since this is a new packet, we can clean-up
+			 * everything
+			 */
+			sata_scsi_destroy_pkt(ap, pkt);
+		} else {
+			/*
+			 * This is a re-used packet. It will be target driver's
+			 * responsibility to eventually destroy it (which
+			 * will free allocated resources).
+			 * Here, we just "complete" the request, leaving
+			 * allocated resources intact, so the request may
+			 * be retried.
+			 */
+			spx->txlt_sata_pkt->satapkt_cmd.satacmd_bp = NULL;
+			sata_pkt_free(spx);
+		}
 		return (NULL);
 	}
 	/* Set number of bytes that are not yet accounted for */
@@ -2573,31 +2616,8 @@ sata_scsi_destroy_pkt(struct scsi_address *ap, struct scsi_pkt *pkt)
 
 	spx = (sata_pkt_txlate_t *)pkt->pkt_ha_private;
 
-	if (spx->txlt_buf_dma_handle != NULL) {
-		if (spx->txlt_tmp_buf != NULL)  {
-			ASSERT(spx->txlt_tmp_buf_handle != 0);
-			/*
-			 * Intermediate DMA buffer was allocated.
-			 * Free allocated buffer and associated access handle.
-			 */
-			ddi_dma_mem_free(&spx->txlt_tmp_buf_handle);
-			spx->txlt_tmp_buf = NULL;
-		}
-		/*
-		 * Free DMA resources - cookies and handles
-		 */
-		if (spx->txlt_dma_cookie_list != NULL) {
-			if (spx->txlt_dma_cookie_list !=
-			    &spx->txlt_dma_cookie) {
-				(void) kmem_free(spx->txlt_dma_cookie_list,
-				    spx->txlt_dma_cookie_list_len *
-				    sizeof (ddi_dma_cookie_t));
-				spx->txlt_dma_cookie_list = NULL;
-			}
-		}
-		(void) ddi_dma_unbind_handle(spx->txlt_buf_dma_handle);
-		(void) ddi_dma_free_handle(&spx->txlt_buf_dma_handle);
-	}
+	sata_common_free_dma_rsrcs(spx);
+
 	spx->txlt_sata_pkt->satapkt_cmd.satacmd_bp = NULL;
 	sata_pkt_free(spx);
 
@@ -2620,32 +2640,7 @@ sata_scsi_dmafree(struct scsi_address *ap, struct scsi_pkt *pkt)
 	ASSERT(pkt != NULL);
 	spx = (sata_pkt_txlate_t *)pkt->pkt_ha_private;
 
-	if (spx->txlt_buf_dma_handle != NULL) {
-		if (spx->txlt_tmp_buf != NULL)  {
-			/*
-			 * Intermediate DMA buffer was allocated.
-			 * Free allocated buffer and associated access handle.
-			 */
-			ddi_dma_mem_free(&spx->txlt_tmp_buf_handle);
-			spx->txlt_tmp_buf = NULL;
-		}
-		/*
-		 * Free DMA resources - cookies and handles
-		 */
-		/* ASSERT(spx->txlt_dma_cookie_list != NULL); */
-		if (spx->txlt_dma_cookie_list != NULL) {
-			if (spx->txlt_dma_cookie_list !=
-			    &spx->txlt_dma_cookie) {
-				(void) kmem_free(spx->txlt_dma_cookie_list,
-				    spx->txlt_dma_cookie_list_len *
-				    sizeof (ddi_dma_cookie_t));
-				spx->txlt_dma_cookie_list = NULL;
-			}
-		}
-		(void) ddi_dma_unbind_handle(spx->txlt_buf_dma_handle);
-		(void) ddi_dma_free_handle(&spx->txlt_buf_dma_handle);
-		spx->txlt_buf_dma_handle = NULL;
-	}
+	sata_common_free_dma_rsrcs(spx);
 }
 
 /*
@@ -5239,7 +5234,6 @@ sata_hba_start(sata_pkt_txlate_t *spx, int *rval)
 	    spx->txlt_sata_pkt);
 
 	mutex_enter(&(SATA_CPORT_MUTEX(sata_hba_inst, cport)));
-	sdinfo = sata_get_device_info(sata_hba_inst, sata_device);
 	/*
 	 * If sata pkt was accepted and executed in asynchronous mode, i.e.
 	 * with the sata callback, the sata_pkt could be already destroyed
@@ -5249,8 +5243,7 @@ sata_hba_start(sata_pkt_txlate_t *spx, int *rval)
 	 * should be no references to it. In other cases, sata_pkt still
 	 * exists.
 	 */
-	switch (stat) {
-	case SATA_TRAN_ACCEPTED:
+	if (stat == SATA_TRAN_ACCEPTED) {
 		/*
 		 * pkt accepted for execution.
 		 * If it was executed synchronously, it is already completed
@@ -5258,7 +5251,10 @@ sata_hba_start(sata_pkt_txlate_t *spx, int *rval)
 		 */
 		*rval = TRAN_ACCEPT;
 		return (0);
+	}
 
+	sdinfo = sata_get_device_info(sata_hba_inst, sata_device);
+	switch (stat) {
 	case SATA_TRAN_QUEUE_FULL:
 		/*
 		 * Controller detected queue full condition.
@@ -7509,13 +7505,18 @@ sata_get_atapi_inquiry_data(sata_hba_inst_t *sata_hba,
 		SATADBG1(SATA_DBG_ATAPI, sata_hba,
 		    "sata_get_atapi_inquiry_data: "
 		    "Packet completed successfully - ret: %02x", rval);
+		if (spx->txlt_buf_dma_handle != NULL) {
+			/*
+			 * Sync buffer. Handle is in usual place in translate
+			 * struct.
+			 */
+			rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
+			    DDI_DMA_SYNC_FORCPU);
+			ASSERT(rval == DDI_SUCCESS);
+		}
 		/*
-		 * Sync buffer. Handle is in usual place in translate struct.
 		 * Normal completion - copy data into caller's buffer
 		 */
-		rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
-		    DDI_DMA_SYNC_FORCPU);
-		ASSERT(rval == DDI_SUCCESS);
 		bcopy(bp->b_un.b_addr, (uint8_t *)inq,
 		    sizeof (struct scsi_inquiry));
 #ifdef SATA_DEBUG
@@ -7700,12 +7701,14 @@ sata_test_atapi_packet_command(sata_hba_inst_t *sata_hba_inst, int cport)
 	}
 	mutex_exit(&SATA_CPORT_INFO(sata_hba_inst, cport)->cport_mutex);
 
-	/*
-	 * Sync buffer. Handle is in usual place in translate struct.
-	 */
-	rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
-	    DDI_DMA_SYNC_FORCPU);
-	ASSERT(rval == DDI_SUCCESS);
+	if (spx->txlt_buf_dma_handle != NULL) {
+		/*
+		 * Sync buffer. Handle is in usual place in translate struct.
+		 */
+		rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
+		    DDI_DMA_SYNC_FORCPU);
+		ASSERT(rval == DDI_SUCCESS);
+	}
 	if (spkt->satapkt_reason == SATA_PKT_COMPLETED) {
 		sata_log(sata_hba_inst, CE_WARN,
 		    "sata_test_atapi_packet_command: "
@@ -9543,25 +9546,26 @@ static void
 sata_free_local_buffer(sata_pkt_txlate_t *spx)
 {
 	ASSERT(spx->txlt_sata_pkt != NULL);
-	ASSERT(spx->txlt_dma_cookie_list != NULL);
-	ASSERT(spx->txlt_dma_cookie_list_len != 0);
-	ASSERT(spx->txlt_buf_dma_handle != NULL);
 	ASSERT(spx->txlt_sata_pkt->satapkt_cmd.satacmd_bp != NULL);
 
 	spx->txlt_sata_pkt->satapkt_cmd.satacmd_num_dma_cookies = 0;
 	spx->txlt_sata_pkt->satapkt_cmd.satacmd_dma_cookie_list = NULL;
 
-	/* Free DMA resources */
-	(void) ddi_dma_unbind_handle(spx->txlt_buf_dma_handle);
-	ddi_dma_free_handle(&spx->txlt_buf_dma_handle);
-	spx->txlt_buf_dma_handle = 0;
+	if (spx->txlt_buf_dma_handle != NULL) {
+		/* Free DMA resources */
+		(void) ddi_dma_unbind_handle(spx->txlt_buf_dma_handle);
+		ddi_dma_free_handle(&spx->txlt_buf_dma_handle);
+		spx->txlt_buf_dma_handle = 0;
 
-	if (spx->txlt_dma_cookie_list != &spx->txlt_dma_cookie) {
-		kmem_free(spx->txlt_dma_cookie_list,
-		    spx->txlt_dma_cookie_list_len * sizeof (ddi_dma_cookie_t));
-		spx->txlt_dma_cookie_list = NULL;
-		spx->txlt_dma_cookie_list_len = 0;
+		if (spx->txlt_dma_cookie_list != &spx->txlt_dma_cookie) {
+			kmem_free(spx->txlt_dma_cookie_list,
+			    spx->txlt_dma_cookie_list_len *
+			    sizeof (ddi_dma_cookie_t));
+			spx->txlt_dma_cookie_list = NULL;
+			spx->txlt_dma_cookie_list_len = 0;
+		}
 	}
+
 	/* Free buffer */
 	scsi_free_consistent_buf(spx->txlt_sata_pkt->satapkt_cmd.satacmd_bp);
 	spx->txlt_sata_pkt->satapkt_cmd.satacmd_bp = NULL;
@@ -10084,6 +10088,58 @@ sata_dma_buf_setup(sata_pkt_txlate_t *spx, int flags,
 	return (DDI_SUCCESS);
 }
 
+/*
+ * Common routine for releasing DMA resources
+ */
+static void
+sata_common_free_dma_rsrcs(sata_pkt_txlate_t *spx)
+{
+	if (spx->txlt_buf_dma_handle != NULL) {
+		if (spx->txlt_tmp_buf != NULL)  {
+			/*
+			 * Intermediate DMA buffer was allocated.
+			 * Free allocated buffer and associated access handle.
+			 */
+			ddi_dma_mem_free(&spx->txlt_tmp_buf_handle);
+			spx->txlt_tmp_buf = NULL;
+		}
+		/*
+		 * Free DMA resources - cookies and handles
+		 */
+		/* ASSERT(spx->txlt_dma_cookie_list != NULL); */
+		if (spx->txlt_dma_cookie_list != NULL) {
+			if (spx->txlt_dma_cookie_list !=
+			    &spx->txlt_dma_cookie) {
+				(void) kmem_free(spx->txlt_dma_cookie_list,
+				    spx->txlt_dma_cookie_list_len *
+				    sizeof (ddi_dma_cookie_t));
+				spx->txlt_dma_cookie_list = NULL;
+			}
+		}
+		(void) ddi_dma_unbind_handle(spx->txlt_buf_dma_handle);
+		(void) ddi_dma_free_handle(&spx->txlt_buf_dma_handle);
+		spx->txlt_buf_dma_handle = NULL;
+	}
+}
+
+/*
+ * Free DMA resources
+ * Used by the HBA driver to release DMA resources that it does not use.
+ *
+ * Returns Void
+ */
+void
+sata_free_dma_resources(sata_pkt_t *sata_pkt)
+{
+	sata_pkt_txlate_t *spx;
+
+	if (sata_pkt == NULL)
+		return;
+
+	spx = (sata_pkt_txlate_t *)sata_pkt->satapkt_framework_private;
+
+	sata_common_free_dma_rsrcs(spx);
+}
 
 /*
  * Fetch Device Identify data.
@@ -10176,9 +10232,11 @@ sata_fetch_device_identify_data(sata_hba_inst_t *sata_hba_inst,
 
 	if (rval == SATA_TRAN_ACCEPTED &&
 	    spkt->satapkt_reason == SATA_PKT_COMPLETED) {
-		rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
-		    DDI_DMA_SYNC_FORKERNEL);
-		ASSERT(rval == DDI_SUCCESS);
+		if (spx->txlt_buf_dma_handle != NULL) {
+			rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
+			    DDI_DMA_SYNC_FORKERNEL);
+			ASSERT(rval == DDI_SUCCESS);
+		}
 		if ((((sata_id_t *)(bp->b_un.b_addr))->ai_config &
 		    SATA_INCOMPLETE_DATA) == SATA_INCOMPLETE_DATA) {
 			SATA_LOG_D((sata_hba_inst, CE_WARN,
@@ -12919,9 +12977,11 @@ sata_fetch_smart_data(
 	} else {
 		mutex_enter(&(SATA_CPORT_MUTEX(sata_hba_inst,
 		    sdinfo->satadrv_addr.cport)));
-		rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
-		    DDI_DMA_SYNC_FORKERNEL);
-		ASSERT(rval == DDI_SUCCESS);
+		if (spx->txlt_buf_dma_handle != NULL) {
+			rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
+			    DDI_DMA_SYNC_FORKERNEL);
+			ASSERT(rval == DDI_SUCCESS);
+		}
 		bcopy(scmd->satacmd_bp->b_un.b_addr, (uint8_t *)smart_data,
 		    sizeof (struct smart_data));
 	}
@@ -13024,9 +13084,11 @@ sata_ext_smart_selftest_read_log(
 		mutex_enter(&(SATA_CPORT_MUTEX(sata_hba_inst,
 		    sdinfo->satadrv_addr.cport)));
 
-		rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
-		    DDI_DMA_SYNC_FORKERNEL);
-		ASSERT(rval == DDI_SUCCESS);
+		if (spx->txlt_buf_dma_handle != NULL) {
+			rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
+			    DDI_DMA_SYNC_FORKERNEL);
+			ASSERT(rval == DDI_SUCCESS);
+		}
 		bcopy(scmd->satacmd_bp->b_un.b_addr,
 		    (uint8_t *)ext_selftest_log,
 		    sizeof (struct smart_ext_selftest_log));
@@ -13125,9 +13187,11 @@ sata_smart_selftest_log(
 	} else {
 		mutex_enter(&(SATA_CPORT_MUTEX(sata_hba_inst,
 		    sdinfo->satadrv_addr.cport)));
-		rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
-		    DDI_DMA_SYNC_FORKERNEL);
-		ASSERT(rval == DDI_SUCCESS);
+		if (spx->txlt_buf_dma_handle != NULL) {
+			rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
+			    DDI_DMA_SYNC_FORKERNEL);
+			ASSERT(rval == DDI_SUCCESS);
+		}
 		bcopy(scmd->satacmd_bp->b_un.b_addr, (uint8_t *)selftest_log,
 		    sizeof (struct smart_selftest_log));
 		rval = 0;
@@ -13225,9 +13289,11 @@ sata_smart_read_log(
 		mutex_enter(&(SATA_CPORT_MUTEX(sata_hba_inst,
 		    sdinfo->satadrv_addr.cport)));
 
-		rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
-		    DDI_DMA_SYNC_FORKERNEL);
-		ASSERT(rval == DDI_SUCCESS);
+		if (spx->txlt_buf_dma_handle != NULL) {
+			rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
+			    DDI_DMA_SYNC_FORKERNEL);
+			ASSERT(rval == DDI_SUCCESS);
+		}
 		bcopy(scmd->satacmd_bp->b_un.b_addr, smart_log, log_size * 512);
 		rval = 0;
 	}
@@ -13324,9 +13390,11 @@ sata_read_log_ext_directory(
 	} else {
 		mutex_enter(&(SATA_CPORT_MUTEX(sata_hba_inst,
 		    sdinfo->satadrv_addr.cport)));
-		rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
-		    DDI_DMA_SYNC_FORKERNEL);
-		ASSERT(rval == DDI_SUCCESS);
+		if (spx->txlt_buf_dma_handle != NULL) {
+			rval = ddi_dma_sync(spx->txlt_buf_dma_handle, 0, 0,
+			    DDI_DMA_SYNC_FORKERNEL);
+			ASSERT(rval == DDI_SUCCESS);
+		}
 		bcopy(scmd->satacmd_bp->b_un.b_addr, (uint8_t *)logdir,
 		    sizeof (struct read_log_ext_directory));
 		rval = 0;

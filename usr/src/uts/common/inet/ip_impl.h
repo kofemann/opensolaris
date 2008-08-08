@@ -450,9 +450,23 @@ typedef struct ip_pdescinfo_s PDESCINFO_STRUCT(2)	ip_pdescinfo_t;
 	mutex_exit(&stp->sd_lock);					\
 }
 
-#define	STR_SENDSIG(stp) {						\
+/*
+ * Combined wakeup and sendsig to avoid dropping and reacquiring the
+ * sd_lock. The list of messages waiting at the synchronous barrier is
+ * supplied in order to determine whether a wakeup needs to occur. We
+ * only send a wakeup to the application when necessary, i.e. during
+ * the first enqueue when the received messages list will be NULL.
+ */
+#define	STR_WAKEUP_SENDSIG(stp, rcv_list) {				\
 	int _events;							\
 	mutex_enter(&stp->sd_lock);					\
+	if (rcv_list == NULL) {						\
+		if (stp->sd_flag & RSLEEP) {				\
+			stp->sd_flag &= ~RSLEEP;			\
+			cv_broadcast(&_RD(stp->sd_wrq)->q_wait);	\
+		}							\
+		stp->sd_wakeq |= RSLEEP;				\
+	}								\
 	if ((_events = stp->sd_sigflags & (S_INPUT | S_RDNORM)) != 0)	\
 		strsendsig(stp->sd_siglist, _events, 0, 0);		\
 	if (stp->sd_rput_opt & SR_POLLIN) {				\
@@ -506,8 +520,12 @@ typedef struct ip_pdescinfo_s PDESCINFO_STRUCT(2)	ip_pdescinfo_t;
 	    ipst->ips_ipv4firewall_physical_out,			\
 	    NULL, ill, ipha, mp, mp, 0, ipst);				\
 	DTRACE_PROBE1(ip4__physical__out__end, mblk_t *, mp);		\
-	if (mp != NULL)							\
+	if (mp != NULL)	{						\
+		DTRACE_IP7(send, mblk_t *, mp, conn_t *, NULL,		\
+		    void_ip_t *, ipha, __dtrace_ipsr_ill_t *, ill,	\
+		    ipha_t *, ipha, ip6_t *, NULL, int,	0);		\
 		ill_dls->ill_tx(ill_dls->ill_tx_handle, mp);		\
+	}								\
 }
 
 extern int	ip_wput_frag_mdt_min;

@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -60,6 +60,17 @@ typedef struct thick_provo {
 	target_queue_t		*q;
 } thick_provo_t;
 
+/*
+ * in_mark presents the state in validate_xml()
+ * in_lt means it enters a '<' and wants a '>' to return normal
+ * in_amp means it meets a '&' and wants a ';' to return normal
+ */
+typedef enum {
+	in_none,
+	in_lt,
+	in_amp
+} in_mark_t;
+
 void util_init();
 int read_retry(int fd, char *buf, int count);
 Boolean_t parse_text(iscsi_conn_t *c, int dlen, char **text,
@@ -78,13 +89,14 @@ Boolean_t check_access(tgt_node_t *targ, char *initiator_name,
     Boolean_t req_chap);
 tgt_node_t *find_target_node(char *targ_name);
 void util_title(target_queue_t *q, int type, int num, char *title);
-Boolean_t util_create_guid(char **guid);
+Boolean_t util_create_guid(char **guid, uchar_t id_type);
 Boolean_t strtoll_multiplier(char *str, uint64_t *sp);
 void thick_provo_stop(char *targ, int lun);
 void *thick_provo_start(void *v);
 Boolean_t thick_provo_chk_thr(char *targ, int lun);
 void remove_target_common(char *name, int lun, char **msg);
 char *get_local_name(char *iname);
+Boolean_t validate_xml(char *req);
 
 
 #ifdef __cplusplus

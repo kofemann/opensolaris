@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -127,6 +127,21 @@ faultevent_lookup_index_exact(sunFmProblem_data_t *data, ulong_t index)
 	return (data->d_suspects[index - 1]);
 }
 
+static sunFmFaultStatus_data_t
+faultstatus_lookup_index_exact(sunFmProblem_data_t *data, ulong_t index)
+{
+	if (index > data->d_nsuspects)
+		return (0);
+
+	if (data->d_statuses == NULL)
+		return (0);
+
+	if (data->d_valid != valid_stamp)
+		return (0);
+
+	return (data->d_statuses[index - 1]);
+}
+
 /*ARGSUSED*/
 static int
 problem_update_one(const fmd_adm_caseinfo_t *acp, void *arg)
@@ -188,6 +203,11 @@ problem_update_one(const fmd_adm_caseinfo_t *acp, void *arg)
 
 		ASSERT(nelem == data->d_nsuspects);
 
+		(void) nvlist_lookup_uint8_array(data->d_aci_event,
+		    FM_SUSPECT_FAULT_STATUS, &data->d_statuses, &nelem);
+
+		ASSERT(nelem == data->d_nsuspects);
+
 		uu_avl_node_init(data, &data->d_uuid_avl,
 		    problem_uuid_avl_pool);
 		(void) uu_avl_find(problem_uuid_avl, data, NULL, &idx);
@@ -197,6 +217,19 @@ problem_update_one(const fmd_adm_caseinfo_t *acp, void *arg)
 
 		DEBUGMSGTL((MODNAME_STR, "completed new problem %s@%p\n",
 		    data->d_aci_uuid, data));
+	} else {
+		uint8_t *statuses;
+		int i;
+
+		(void) nvlist_lookup_uint8_array(acp->aci_event,
+		    FM_SUSPECT_FAULT_STATUS, &statuses, &nelem);
+
+		ASSERT(nelem == data->d_nsuspects);
+
+		for (i = 0; i < nelem; i++)
+			data->d_statuses[i] = statuses[i];
+
+		data->d_valid = valid_stamp;
 	}
 
 	/*
@@ -553,7 +586,7 @@ sunFmProblemTable_pr(netsnmp_handler_registration *reginfo,
  */
 static sunFmFaultEvent_data_t *
 sunFmFaultEventTable_nextfe(netsnmp_handler_registration *reginfo,
-    netsnmp_table_request_info *table_info)
+    netsnmp_table_request_info *table_info, sunFmFaultStatus_data_t *statusp)
 {
 	sunFmProblem_data_t	*data;
 	sunFmFaultEvent_data_t	*rv;
@@ -575,6 +608,8 @@ sunFmFaultEventTable_nextfe(netsnmp_handler_registration *reginfo,
 
 			if ((data = sunFmProblemTable_pr(reginfo,
 			    table_info)) != NULL &&
+			    (*statusp = faultstatus_lookup_index_exact(data,
+			    index)) != 0 &&
 			    (rv = faultevent_lookup_index_exact(data, index)) !=
 			    NULL) {
 				snmp_set_var_typed_value(
@@ -638,7 +673,7 @@ sunFmFaultEventTable_nextfe(netsnmp_handler_registration *reginfo,
 
 static sunFmFaultEvent_data_t *
 sunFmFaultEventTable_fe(netsnmp_handler_registration *reginfo,
-    netsnmp_table_request_info *table_info)
+    netsnmp_table_request_info *table_info, sunFmFaultStatus_data_t *statusp)
 {
 	sunFmProblem_data_t	*data;
 
@@ -647,6 +682,10 @@ sunFmFaultEventTable_fe(netsnmp_handler_registration *reginfo,
 	if ((data = sunFmProblemTable_pr(reginfo, table_info)) == NULL)
 		return (NULL);
 
+	*statusp = faultstatus_lookup_index_exact(data,
+	    *(ulong_t *)table_info->indexes->next_variable->val.integer);
+	if (*statusp == 0)
+		return (NULL);
 	return (faultevent_lookup_index_exact(data,
 	    *(ulong_t *)table_info->indexes->next_variable->val.integer));
 }
@@ -828,6 +867,7 @@ sunFmFaultEventTable_return(unsigned int reg, void *arg)
 	netsnmp_table_request_info	*table_info;
 	sunFmProblem_data_t		*pdata;
 	sunFmFaultEvent_data_t		*data;
+	sunFmFaultStatus_data_t		status;
 
 	ASSERT(netsnmp_handler_check_cache(cache) != NULL);
 
@@ -871,8 +911,8 @@ sunFmFaultEventTable_return(unsigned int reg, void *arg)
 
 	switch (reqinfo->mode) {
 	case MODE_GET:
-		if ((data = sunFmFaultEventTable_fe(reginfo, table_info)) ==
-		    NULL) {
+		if ((data = sunFmFaultEventTable_fe(reginfo, table_info,
+		    &status)) == NULL) {
 			netsnmp_free_delegated_cache(cache);
 			(void) pthread_mutex_unlock(&update_lock);
 			return;
@@ -880,8 +920,8 @@ sunFmFaultEventTable_return(unsigned int reg, void *arg)
 		break;
 	case MODE_GETNEXT:
 	case MODE_GETBULK:
-		if ((data = sunFmFaultEventTable_nextfe(reginfo, table_info)) ==
-		    NULL) {
+		if ((data = sunFmFaultEventTable_nextfe(reginfo, table_info,
+		    &status)) == NULL) {
 			netsnmp_free_delegated_cache(cache);
 			(void) pthread_mutex_unlock(&update_lock);
 			return;
@@ -976,6 +1016,33 @@ sunFmFaultEventTable_return(unsigned int reg, void *arg)
 		netsnmp_table_build_result(reginfo, request, table_info,
 		    ASN_OCTET_STR, (uchar_t *)fmri, strlen(fmri));
 		free(str);
+		break;
+	}
+	case SUNFMFAULTEVENT_COL_STATUS:
+	{
+		ulong_t	pl = SUNFMFAULTEVENT_STATE_OTHER;
+
+		if (status & FM_SUSPECT_FAULTY)
+			pl = SUNFMFAULTEVENT_STATE_FAULTY;
+		else if (status & FM_SUSPECT_NOT_PRESENT)
+			pl = SUNFMFAULTEVENT_STATE_REMOVED;
+		else if (status & FM_SUSPECT_REPLACED)
+			pl = SUNFMFAULTEVENT_STATE_REPLACED;
+		else if (status & FM_SUSPECT_REPAIRED)
+			pl = SUNFMFAULTEVENT_STATE_REPAIRED;
+		else if (status & FM_SUSPECT_ACQUITTED)
+			pl = SUNFMFAULTEVENT_STATE_ACQUITTED;
+		netsnmp_table_build_result(reginfo, request, table_info,
+		    ASN_INTEGER, (uchar_t *)&pl, sizeof (pl));
+		break;
+	}
+	case SUNFMFAULTEVENT_COL_LOCATION:
+	{
+		char	*location = "-";
+
+		(void) nvlist_lookup_string(data, FM_FAULT_LOCATION, &location);
+		netsnmp_table_build_result(reginfo, request, table_info,
+		    ASN_OCTET_STR, (uchar_t *)location, strlen(location));
 		break;
 	}
 	default:

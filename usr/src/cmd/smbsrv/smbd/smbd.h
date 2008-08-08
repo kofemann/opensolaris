@@ -38,15 +38,11 @@ extern "C" {
 #include <smbsrv/libsmb.h>
 #include <smbsrv/libmlsvc.h>
 
-extern int smb_winpipe_doorsvc_start(void);
-extern void smb_winpipe_doorsvc_stop(void);
-extern int smb_lmshrd_srv_start(void);
-extern void smb_lmshrd_srv_stop(void);
+extern int smbd_opipe_dsrv_start(void);
+extern void smbd_opipe_dsrv_stop(void);
 
-extern int smb_doorsrv_start(void);
-extern void smb_doorsrv_stop(void);
-extern int smb_ntgroup_doorsrv_start(void);
-extern void smb_ntgroup_doorsrv_stop(void);
+extern int smb_share_dsrv_start(void);
+extern void smb_share_dsrv_stop(void);
 
 extern int smb_netlogon_init(void);
 extern void smb_set_netlogon_cred(void);
@@ -55,6 +51,7 @@ extern smb_token_t *smbd_user_auth_logon(netr_client_t *);
 extern void smbd_user_nonauth_logon(uint32_t);
 extern void smbd_user_auth_logoff(uint32_t);
 extern uint32_t smbd_join(smb_joininfo_t *);
+
 
 typedef struct smbd {
 	const char	*s_version;	/* smbd version string */
@@ -69,7 +66,7 @@ typedef struct smbd {
 	boolean_t	s_kbound;	/* B_TRUE if bound to kernel */
 	int		s_door_lmshr;
 	int		s_door_srv;
-	int		s_door_winpipe;
+	int		s_door_opipe;
 	int		s_secmode;	/* Current security mode */
 	smb_kmod_cfg_t	s_kcfg;		/* Current Kernel configuration */
 } smbd_t;

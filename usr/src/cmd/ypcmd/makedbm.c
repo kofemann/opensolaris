@@ -2,9 +2,8 @@
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
- * Common Development and Distribution License, Version 1.0 only
- * (the "License").  You may not use this file except in compliance
- * with the License.
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
  * or http://www.opensolaris.org/os/licensing.
@@ -18,8 +17,10 @@
  * information: Portions Copyright [yyyy] [name of copyright owner]
  *
  * CDDL HEADER END
- *
- * Copyright 2005 Sun Microsystems, Inc.  All rights reserved.
+ */
+
+/*
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -73,30 +74,31 @@ static void unmake();
 static void usage();
 
 int   inode_dev_valid = 0;
-ino_t inode;
+ino64_t inode;
 dev_t dev;
 
 /*
- * Interpose _close(2) to enable us to keep one of the output
+ * Interpose close(2) to enable us to keep one of the output
  * files open until process exit.
  */
+#pragma weak _close = close
 int
-_close(int filedes) {
+close(int filedes) {
 
-	struct stat	sb;
+	struct stat64	sb;
 	static int	(*fptr)() = 0;
 
 	if (fptr == 0) {
-		fptr = (int (*)())dlsym(RTLD_NEXT, "_close");
+		fptr = (int (*)())dlsym(RTLD_NEXT, "close");
 		if (fptr == 0) {
-			fprintf(stderr, "makedbm: dlopen(_close): %s\n",
+			fprintf(stderr, "makedbm: dlopen(close): %s\n",
 				dlerror());
 			errno = ELIBACC;
 			return (-1);
 		}
 	}
 
-	if (inode_dev_valid != 0 && fstat(filedes, &sb) == 0) {
+	if (inode_dev_valid != 0 && fstat64(filedes, &sb) == 0) {
 		if (sb.st_ino == inode && sb.st_dev == dev) {
 			/* Keep open; pretend successful */
 			return (0);
@@ -130,7 +132,7 @@ main(argc, argv)
 	char local_host[MAX_MASTER_NAME];
 	int cnt, i;
 	DBM *fdb;
-	struct stat statbuf;
+	struct stat64 statbuf;
 	int num_del_to_match = 0;
 	/* flag to indicate if matching char can be escaped */
 	int count_esp = 0;
@@ -311,7 +313,7 @@ main(argc, argv)
 
 		if (strcmp(infile, "-") != 0)
 			infp = fopen(infile, "r");
-		else if (fstat(fileno(stdin), &statbuf) == -1) {
+		else if (fstat64(fileno(stdin), &statbuf) == -1) {
 			fprintf(stderr, "makedbm: can't open stdin\n");
 			exit(1);
 		} else
@@ -330,7 +332,7 @@ main(argc, argv)
 
 		if (lockf(fileno(outfp), F_TLOCK, 0) == 0) {
 			/* Got exclusive access; save inode and dev */
-			if (fstat(fileno(outfp), &statbuf) != 0) {
+			if (fstat64(fileno(outfp), &statbuf) != 0) {
 				fprintf(stderr, "makedbm: can't fstat ");
 				perror(tmpdirbuf);
 				exit(1);

@@ -28,6 +28,7 @@
 
 #include <sys/types.h>
 #include <sys/fm/protocol.h>
+#include <fm/topo_hc.h>
 
 #include <unistd.h>
 #include <signal.h>
@@ -495,6 +496,12 @@ fmd_hdl_register(fmd_hdl_t *hdl, int version, const fmd_hdl_info_t *mip)
 	mp->mod_info->fmdi_props = NULL;
 
 	/*
+	 * Store a copy of module version in mp for fmd_scheme_fmd_present()
+	 */
+	if (mp->mod_vers == NULL)
+		mp->mod_vers = fmd_strdup(mip->fmdi_vers, FMD_SLEEP);
+
+	/*
 	 * Allocate an FMRI representing this module.  We'll use this later
 	 * if the module decides to publish any events (e.g. list.suspects).
 	 */
@@ -726,10 +733,9 @@ fmd_hdl_topo_rele(fmd_hdl_t *hdl, topo_hdl_t *thp)
 	fmd_module_unlock(mp);
 }
 
-void *
-fmd_hdl_alloc(fmd_hdl_t *hdl, size_t size, int flags)
+static void *
+fmd_hdl_alloc_locked(fmd_module_t *mp, size_t size, int flags)
 {
-	fmd_module_t *mp = fmd_api_module_lock(hdl);
 	void *data;
 
 	if (mp->mod_stats->ms_memlimit.fmds_value.ui64 -
@@ -742,6 +748,17 @@ fmd_hdl_alloc(fmd_hdl_t *hdl, size_t size, int flags)
 
 	if ((data = fmd_alloc(size, flags)) != NULL)
 		mp->mod_stats->ms_memtotal.fmds_value.ui64 += size;
+
+	return (data);
+}
+
+void *
+fmd_hdl_alloc(fmd_hdl_t *hdl, size_t size, int flags)
+{
+	fmd_module_t *mp = fmd_api_module_lock(hdl);
+	void *data;
+
+	data = fmd_hdl_alloc_locked(mp, size, flags);
 
 	fmd_module_unlock(mp);
 	return (data);
@@ -758,13 +775,19 @@ fmd_hdl_zalloc(fmd_hdl_t *hdl, size_t size, int flags)
 	return (data);
 }
 
+static void
+fmd_hdl_free_locked(fmd_module_t *mp, void *data, size_t size)
+{
+	fmd_free(data, size);
+	mp->mod_stats->ms_memtotal.fmds_value.ui64 -= size;
+}
+
 void
 fmd_hdl_free(fmd_hdl_t *hdl, void *data, size_t size)
 {
 	fmd_module_t *mp = fmd_api_module_lock(hdl);
 
-	fmd_free(data, size);
-	mp->mod_stats->ms_memtotal.fmds_value.ui64 -= size;
+	fmd_hdl_free_locked(mp, data, size);
 
 	fmd_module_unlock(mp);
 }
@@ -1114,6 +1137,20 @@ fmd_case_uuclosed(fmd_hdl_t *hdl, const char *uuid)
 	return (rv);
 }
 
+void
+fmd_case_uuresolved(fmd_hdl_t *hdl, const char *uuid)
+{
+	fmd_module_t *mp = fmd_api_module_lock(hdl);
+	fmd_case_t *cp = fmd_case_hash_lookup(fmd.d_cases, uuid);
+
+	if (cp != NULL) {
+		fmd_case_transition(cp, FMD_CASE_RESOLVED, 0);
+		fmd_case_rele(cp);
+	}
+
+	fmd_module_unlock(mp);
+}
+
 static int
 fmd_case_instate(fmd_hdl_t *hdl, fmd_case_t *cp, uint_t state)
 {
@@ -1179,6 +1216,10 @@ fmd_case_add_suspect(fmd_hdl_t *hdl, fmd_case_t *cp, nvlist_t *nvl)
 	fmd_module_t *mp = fmd_api_module_lock(hdl);
 	fmd_case_impl_t *cip = fmd_api_case_impl(mp, cp);
 	char *class;
+	topo_hdl_t *thp;
+	int err;
+	nvlist_t *rsrc = NULL, *asru = NULL, *fru = NULL;
+	char *loc = NULL, *serial = NULL;
 
 	if (cip->ci_state >= FMD_CASE_SOLVED) {
 		fmd_api_error(mp, EFMD_CASE_STATE, "cannot add suspect to "
@@ -1190,6 +1231,77 @@ fmd_case_add_suspect(fmd_hdl_t *hdl, fmd_case_t *cp, nvlist_t *nvl)
 		fmd_api_error(mp, EFMD_CASE_EVENT, "cannot add suspect to "
 		    "%s: suspect event is missing a class\n", cip->ci_uuid);
 	}
+
+	thp = fmd_module_topo_hold(mp);
+	(void) nvlist_lookup_nvlist(nvl, FM_FAULT_RESOURCE, &rsrc);
+	(void) nvlist_lookup_nvlist(nvl, FM_FAULT_ASRU, &asru);
+	(void) nvlist_lookup_nvlist(nvl, FM_FAULT_FRU, &fru);
+	if (rsrc != NULL) {
+		if (strncmp(class, "defect", 6) == 0) {
+			if (asru == NULL && topo_fmri_getprop(thp, rsrc,
+			    TOPO_PGROUP_IO, TOPO_IO_MODULE, rsrc,
+			    &asru, &err) == 0) {
+				(void) nvlist_add_nvlist(nvl, FM_FAULT_ASRU,
+				    asru);
+				nvlist_free(asru);
+				(void) nvlist_lookup_nvlist(nvl, FM_FAULT_ASRU,
+				    &asru);
+			}
+		} else {
+			if (topo_fmri_asru(thp, rsrc, &asru, &err) == 0) {
+				(void) nvlist_remove(nvl, FM_FAULT_ASRU,
+				    DATA_TYPE_NVLIST);
+				(void) nvlist_add_nvlist(nvl, FM_FAULT_ASRU,
+				    asru);
+				nvlist_free(asru);
+				(void) nvlist_lookup_nvlist(nvl, FM_FAULT_ASRU,
+				    &asru);
+			}
+			if (topo_fmri_fru(thp, rsrc, &fru, &err) == 0) {
+				(void) nvlist_remove(nvl, FM_FAULT_FRU,
+				    DATA_TYPE_NVLIST);
+				(void) nvlist_add_nvlist(nvl, FM_FAULT_FRU,
+				    fru);
+				nvlist_free(fru);
+				(void) nvlist_lookup_nvlist(nvl, FM_FAULT_FRU,
+				    &fru);
+			}
+		}
+	}
+
+	/*
+	 * Try to find the location label for this resource
+	 */
+	if (fru != NULL)
+		(void) topo_fmri_label(thp, fru, &loc, &err);
+	else if (rsrc != NULL)
+		(void) topo_fmri_label(thp, rsrc, &loc, &err);
+	if (loc != NULL) {
+		(void) nvlist_remove(nvl, FM_FAULT_LOCATION, DATA_TYPE_STRING);
+		(void) nvlist_add_string(nvl, FM_FAULT_LOCATION, loc);
+		topo_hdl_strfree(thp, loc);
+	}
+
+	/*
+	 * In some cases, serial information for the resource will not be
+	 * available at enumeration but may instead be available by invoking
+	 * a dynamic property method on the FRU.  In order to ensure the serial
+	 * number is persisted properly in the ASRU cache, we'll fetch the
+	 * property, if it exists, and add it to the resource and fru fmris.
+	 */
+	if (fru != NULL) {
+		(void) topo_fmri_serial(thp, fru, &serial, &err);
+		if (serial != NULL) {
+			if (rsrc != NULL)
+				(void) nvlist_add_string(rsrc, "serial",
+				    serial);
+			(void) nvlist_add_string(fru, "serial", serial);
+			topo_hdl_strfree(thp, serial);
+		}
+	}
+
+	err = fmd_module_topo_rele(mp, thp);
+	ASSERT(err == 0);
 
 	fmd_case_insert_suspect(cp, nvl);
 	fmd_module_unlock(mp);
@@ -1682,44 +1794,13 @@ fmd_nvl_create_fault(fmd_hdl_t *hdl, const char *class,
     uint8_t certainty, nvlist_t *asru, nvlist_t *fru, nvlist_t *rsrc)
 {
 	fmd_module_t *mp;
-	topo_hdl_t *thp;
 	nvlist_t *nvl;
-	char *loc = NULL, *serial = NULL;
-	int err;
 
 	mp = fmd_api_module_lock(hdl);
 	if (class == NULL || class[0] == '\0')
 		fmd_api_error(mp, EFMD_NVL_INVAL, "invalid fault class\n");
 
-	thp = fmd_module_topo_hold(mp);
-
-	/*
-	 * Try to find the location label for this resource
-	 */
-	(void) topo_fmri_label(thp, fru, &loc, &err);
-
-	/*
-	 * In some cases, serial information for the resource will not be
-	 * available at enumeration but may instead be available by invoking
-	 * a dynamic property method on the FRU.  In order to ensure the serial
-	 * number is persisted properly in the ASRU cache, we'll fetch the
-	 * property, if it exists, and add it to the resource and fru fmris.
-	 */
-	if (fru != NULL) {
-		(void) topo_fmri_serial(thp, fru, &serial, &err);
-		if (serial != NULL) {
-			(void) nvlist_add_string(rsrc, "serial", serial);
-			(void) nvlist_add_string(fru, "serial", serial);
-			topo_hdl_strfree(thp, serial);
-		}
-	}
-	nvl = fmd_protocol_fault(class, certainty, asru, fru, rsrc, loc);
-
-	if (loc != NULL)
-		topo_hdl_strfree(thp, loc);
-
-	err = fmd_module_topo_rele(mp, thp);
-	ASSERT(err == 0);
+	nvl = fmd_protocol_fault(class, certainty, asru, fru, rsrc, NULL);
 
 	fmd_module_unlock(mp);
 
@@ -1779,6 +1860,23 @@ fmd_nvl_fmri_present(fmd_hdl_t *hdl, nvlist_t *nvl)
 }
 
 int
+fmd_nvl_fmri_replaced(fmd_hdl_t *hdl, nvlist_t *nvl)
+{
+	fmd_module_t *mp = fmd_api_module_lock(hdl);
+	int rv;
+
+	if (nvl == NULL) {
+		fmd_api_error(mp, EFMD_NVL_INVAL,
+		    "invalid nvlist %p\n", (void *)nvl);
+	}
+
+	rv = fmd_fmri_replaced(nvl);
+	fmd_module_unlock(mp);
+
+	return (rv);
+}
+
+int
 fmd_nvl_fmri_unusable(fmd_hdl_t *hdl, nvlist_t *nvl)
 {
 	fmd_module_t *mp = fmd_api_module_lock(hdl);
@@ -1801,23 +1899,91 @@ fmd_nvl_fmri_unusable(fmd_hdl_t *hdl, nvlist_t *nvl)
 }
 
 int
-fmd_nvl_fmri_faulty(fmd_hdl_t *hdl, nvlist_t *nvl)
+fmd_nvl_fmri_service_state(fmd_hdl_t *hdl, nvlist_t *nvl)
 {
 	fmd_module_t *mp = fmd_api_module_lock(hdl);
-	fmd_asru_hash_t *ahp = fmd.d_asrus;
-	fmd_asru_t *ap;
-	int rv = 0;
+	int rv;
 
 	if (nvl == NULL) {
 		fmd_api_error(mp, EFMD_NVL_INVAL,
 		    "invalid nvlist %p\n", (void *)nvl);
 	}
 
-	if ((ap = fmd_asru_hash_lookup_nvl(ahp, nvl)) != NULL) {
-		rv = (ap->asru_flags & FMD_ASRU_FAULTY) != 0;
-		fmd_asru_hash_release(ahp, ap);
+	rv = fmd_fmri_service_state(nvl);
+	if (rv < 0)
+		rv = fmd_fmri_unusable(nvl) ? FMD_SERVICE_STATE_UNUSABLE :
+		    FMD_SERVICE_STATE_OK;
+	fmd_module_unlock(mp);
+
+	if (rv < 0) {
+		fmd_api_error(mp, EFMD_FMRI_OP, "invalid fmri for "
+		    "fmd_nvl_fmri_service_state\n");
 	}
 
+	return (rv);
+}
+
+typedef struct {
+	const char	*class;
+	int	*rvp;
+} fmd_has_fault_arg_t;
+
+static void
+fmd_rsrc_has_fault(fmd_asru_link_t *alp, void *arg)
+{
+	fmd_has_fault_arg_t *fhfp = (fmd_has_fault_arg_t *)arg;
+	char *class;
+
+	if (fhfp->class == NULL) {
+		if (alp->al_flags & FMD_ASRU_FAULTY)
+			*fhfp->rvp = 1;
+	} else {
+		if ((alp->al_flags & FMD_ASRU_FAULTY) &&
+		    alp->al_event != NULL && nvlist_lookup_string(alp->al_event,
+		    FM_CLASS, &class) == 0 && fmd_strmatch(class, fhfp->class))
+			*fhfp->rvp = 1;
+	}
+}
+
+int
+fmd_nvl_fmri_has_fault(fmd_hdl_t *hdl, nvlist_t *nvl, int type, char *class)
+{
+	fmd_module_t *mp = fmd_api_module_lock(hdl);
+	fmd_asru_hash_t *ahp = fmd.d_asrus;
+	int rv = 0;
+	char *name;
+	int namelen;
+	fmd_has_fault_arg_t fhf;
+
+	if (nvl == NULL) {
+		fmd_api_error(mp, EFMD_NVL_INVAL,
+		    "invalid nvlist %p\n", (void *)nvl);
+	}
+	if ((namelen = fmd_fmri_nvl2str(nvl, NULL, 0)) == -1)
+		fmd_api_error(mp, EFMD_NVL_INVAL,
+		    "invalid nvlist: %p\n", (void *)nvl);
+	name = fmd_alloc(namelen + 1, FMD_SLEEP);
+	if (fmd_fmri_nvl2str(nvl, name, namelen + 1) == -1) {
+		if (name != NULL)
+			fmd_free(name, namelen + 1);
+		fmd_api_error(mp, EFMD_NVL_INVAL,
+		    "invalid nvlist: %p\n", (void *)nvl);
+	}
+
+	fhf.class = class;
+	fhf.rvp = &rv;
+	if (type == FMD_HAS_FAULT_RESOURCE)
+		fmd_asru_hash_apply_by_rsrc(ahp, name, fmd_rsrc_has_fault,
+		    &fhf);
+	else if (type == FMD_HAS_FAULT_ASRU)
+		fmd_asru_hash_apply_by_asru(ahp, name, fmd_rsrc_has_fault,
+		    &fhf);
+	else if (type == FMD_HAS_FAULT_FRU)
+		fmd_asru_hash_apply_by_fru(ahp, name, fmd_rsrc_has_fault,
+		    &fhf);
+
+	if (name != NULL)
+		fmd_free(name, namelen + 1);
 	fmd_module_unlock(mp);
 	return (rv);
 }
@@ -1858,6 +2024,102 @@ fmd_nvl_fmri_translate(fmd_hdl_t *hdl, nvlist_t *fmri, nvlist_t *auth)
 	xfmri = fmd_fmri_translate(fmri, auth);
 	fmd_module_unlock(mp);
 	return (xfmri);
+}
+
+static int
+fmd_nvl_op_init(nv_alloc_t *ops, va_list ap)
+{
+	fmd_module_t *mp = va_arg(ap, fmd_module_t *);
+
+	ops->nva_arg = mp;
+
+	return (0);
+}
+
+static void *
+fmd_nvl_op_alloc_sleep(nv_alloc_t *ops, size_t size)
+{
+	fmd_module_t *mp = ops->nva_arg;
+
+	return (fmd_hdl_alloc_locked(mp, size, FMD_SLEEP));
+}
+
+static void *
+fmd_nvl_op_alloc_nosleep(nv_alloc_t *ops, size_t size)
+{
+	fmd_module_t *mp = ops->nva_arg;
+
+	return (fmd_hdl_alloc_locked(mp, size, FMD_NOSLEEP));
+}
+
+static void
+fmd_nvl_op_free(nv_alloc_t *ops, void *data, size_t size)
+{
+	fmd_module_t *mp = ops->nva_arg;
+
+	fmd_hdl_free_locked(mp, data, size);
+}
+
+nv_alloc_ops_t fmd_module_nva_ops_sleep = {
+	fmd_nvl_op_init,
+	NULL,
+	fmd_nvl_op_alloc_sleep,
+	fmd_nvl_op_free,
+	NULL
+};
+
+nv_alloc_ops_t fmd_module_nva_ops_nosleep = {
+	fmd_nvl_op_init,
+	NULL,
+	fmd_nvl_op_alloc_nosleep,
+	fmd_nvl_op_free,
+	NULL
+};
+
+nvlist_t *
+fmd_nvl_alloc(fmd_hdl_t *hdl, int flags)
+{
+	fmd_module_t *mp = fmd_api_module_lock(hdl);
+	nv_alloc_t *nva;
+	nvlist_t *nvl;
+	int ret;
+
+	if (flags == FMD_SLEEP)
+		nva = &mp->mod_nva_sleep;
+	else
+		nva = &mp->mod_nva_nosleep;
+
+	ret = nvlist_xalloc(&nvl, NV_UNIQUE_NAME, nva);
+
+	fmd_module_unlock(mp);
+
+	if (ret != 0)
+		return (NULL);
+	else
+		return (nvl);
+}
+
+nvlist_t *
+fmd_nvl_dup(fmd_hdl_t *hdl, nvlist_t *src, int flags)
+{
+	fmd_module_t *mp = fmd_api_module_lock(hdl);
+	nv_alloc_t *nva;
+	nvlist_t *nvl;
+	int ret;
+
+	if (flags == FMD_SLEEP)
+		nva = &mp->mod_nva_sleep;
+	else
+		nva = &mp->mod_nva_nosleep;
+
+	ret = nvlist_xdup(src, &nvl, nva);
+
+	fmd_module_unlock(mp);
+
+	if (ret != 0)
+		return (NULL);
+	else
+		return (nvl);
 }
 
 int

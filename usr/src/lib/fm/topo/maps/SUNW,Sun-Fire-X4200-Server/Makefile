@@ -31,8 +31,8 @@
 
 ARCH = i86pc
 CLASS = arch
-DTDFILE =
-TOPOFILE = Sun-Fire-X4200-Server-hc-topology.xml
+DTDFILE = topology.dtd.1
+TOPOFILE = Sun-Fire-X4200-Server-disk-hc-topology.xml
 SRCDIR = ../SUNW,Sun-Fire-X4200-Server
 
 PLATFORM = Sun-Fire-X4200

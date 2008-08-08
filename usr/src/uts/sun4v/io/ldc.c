@@ -151,7 +151,7 @@ static struct modlinkage ml = {
 
 static uint64_t ldc_sup_minor;		/* Supported minor number */
 static hsvc_info_t ldc_hsvc = {
-	HSVC_REV_1, NULL, HSVC_GROUP_LDC, 1, 0, "ldc"
+	HSVC_REV_1, NULL, HSVC_GROUP_LDC, 1, 1, "ldc"
 };
 
 /*
@@ -239,9 +239,10 @@ ldcdebug(int64_t id, const char *fmt, ...)
 	cmn_err(CE_CONT, "?%s", buf);
 }
 
-#define	LDC_ERR_RESET	0x1
-#define	LDC_ERR_PKTLOSS	0x2
-#define	LDC_ERR_DQFULL	0x4
+#define	LDC_ERR_RESET		0x1
+#define	LDC_ERR_PKTLOSS		0x2
+#define	LDC_ERR_DQFULL		0x4
+#define	LDC_ERR_DRNGCLEAR	0x8
 
 static boolean_t
 ldc_inject_error(ldc_chan_t *ldcp, uint64_t error)
@@ -300,6 +301,8 @@ if (ldcdbg & 0x04)	\
 #define	LDC_INJECT_RESET(_ldcp)	ldc_inject_error(_ldcp, LDC_ERR_RESET)
 #define	LDC_INJECT_PKTLOSS(_ldcp) ldc_inject_error(_ldcp, LDC_ERR_PKTLOSS)
 #define	LDC_INJECT_DQFULL(_ldcp) ldc_inject_error(_ldcp, LDC_ERR_DQFULL)
+#define	LDC_INJECT_DRNGCLEAR(_ldcp) ldc_inject_error(_ldcp, LDC_ERR_DRNGCLEAR)
+extern void i_ldc_mem_inject_dring_clear(ldc_chan_t *ldcp);
 
 #else
 
@@ -315,6 +318,7 @@ if (ldcdbg & 0x04)	\
 #define	LDC_INJECT_RESET(_ldcp)	(B_FALSE)
 #define	LDC_INJECT_PKTLOSS(_ldcp) (B_FALSE)
 #define	LDC_INJECT_DQFULL(_ldcp) (B_FALSE)
+#define	LDC_INJECT_DRNGCLEAR(_ldcp) (B_FALSE)
 
 #endif
 
@@ -356,6 +360,7 @@ int
 _init(void)
 {
 	int status;
+	extern void i_ldc_mem_set_hsvc_vers(uint64_t major, uint64_t minor);
 
 	status = hsvc_register(&ldc_hsvc, &ldc_sup_minor);
 	if (status != 0) {
@@ -365,6 +370,9 @@ _init(void)
 		    ldc_hsvc.hsvc_major, ldc_hsvc.hsvc_minor, status);
 		return (-1);
 	}
+
+	/* Initialize shared memory HV API version checking */
+	i_ldc_mem_set_hsvc_vers(ldc_hsvc.hsvc_major, ldc_sup_minor);
 
 	/* allocate soft state structure */
 	ldcssp = kmem_zalloc(sizeof (ldc_soft_state_t), KM_SLEEP);
@@ -942,7 +950,7 @@ i_ldc_rx_hdlr(caddr_t arg1, caddr_t arg2)
 	ldc_chan_t	*ldcp;
 	boolean_t	notify;
 	uint64_t	event;
-	int		rv;
+	int		rv, status;
 
 	/* Get the channel for which interrupt was received */
 	if (arg1 == NULL) {
@@ -964,7 +972,7 @@ i_ldc_rx_hdlr(caddr_t arg1, caddr_t arg2)
 	/* Mark the interrupt as being actively handled */
 	ldcp->rx_intr_state = LDC_INTR_ACTIVE;
 
-	(void) i_ldc_rx_process_hvq(ldcp, &notify, &event);
+	status = i_ldc_rx_process_hvq(ldcp, &notify, &event);
 
 	if (ldcp->mode != LDC_MODE_RELIABLE) {
 		/*
@@ -996,15 +1004,24 @@ i_ldc_rx_hdlr(caddr_t arg1, caddr_t arg2)
 	}
 
 	if (ldcp->mode == LDC_MODE_RELIABLE) {
-		/*
-		 * If we are using a secondary data queue, clear the
-		 * interrupt. We should have processed all CTRL packets
-		 * and copied all DATA packets to the secondary queue.
-		 * Even if secondary queue filled up, clear the interrupts,
-		 * this will trigger another interrupt and force the
-		 * handler to copy more data.
-		 */
-		i_ldc_clear_intr(ldcp, CNEX_RX_INTR);
+		if (status == ENOSPC) {
+			/*
+			 * Here, ENOSPC indicates the secondary data
+			 * queue is full and the Rx queue is non-empty.
+			 * Much like how reliable and raw modes are
+			 * handled above, since the Rx queue is non-
+			 * empty, we mark the interrupt as pending to
+			 * indicate it has not yet been cleared.
+			 */
+			ldcp->rx_intr_state = LDC_INTR_PEND;
+		} else {
+			/*
+			 * We have processed all CTRL packets and
+			 * copied all DATA packets to the secondary
+			 * queue. Clear the interrupt.
+			 */
+			i_ldc_clear_intr(ldcp, CNEX_RX_INTR);
+		}
 	}
 
 	mutex_exit(&ldcp->lock);
@@ -2208,6 +2225,8 @@ force_reset:
 #ifdef DEBUG
 		if (LDC_INJECT_RESET(ldcp))
 			goto force_reset;
+		if (LDC_INJECT_DRNGCLEAR(ldcp))
+			i_ldc_mem_inject_dring_clear(ldcp);
 #endif
 		if (trace_length) {
 			TRACE_RXHVQ_LENGTH(ldcp, rx_head, rx_tail);
@@ -2424,6 +2443,7 @@ loop_exit:
 				*notify_client = B_TRUE;
 				*notify_event = LDC_EVT_RESET;
 			}
+			return (rv);
 		} else {
 			ldcp->rx_ack_head = ACKPEEK_HEAD_INVALID;
 		}
@@ -3643,6 +3663,24 @@ ldc_read(ldc_handle_t handle, caddr_t bufp, size_t *sizep)
 	} else if (ldcp->mode == LDC_MODE_RELIABLE) {
 		TRACE_RXDQ_LENGTH(ldcp);
 		exit_val = ldcp->read_p(ldcp, bufp, sizep);
+
+		/*
+		 * For reliable mode channels, the interrupt
+		 * state is only set to pending during
+		 * interrupt handling when the secondary data
+		 * queue became full, leaving unprocessed
+		 * packets on the Rx queue. If the interrupt
+		 * state is pending and space is now available
+		 * on the data queue, clear the interrupt.
+		 */
+		if (ldcp->rx_intr_state == LDC_INTR_PEND &&
+		    Q_CONTIG_SPACE(ldcp->rx_dq_head, ldcp->rx_dq_tail,
+		    ldcp->rx_dq_entries << LDC_PACKET_SHIFT) >=
+		    LDC_PACKET_SIZE) {
+			/* data queue is not full */
+			i_ldc_clear_intr(ldcp, CNEX_RX_INTR);
+		}
+
 		mutex_exit(&ldcp->lock);
 		return (exit_val);
 	} else {

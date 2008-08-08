@@ -543,8 +543,8 @@ extern int modload_qualified(const char *,
     const char *, const char *, const char *, uint_t[], int, int *);
 
 extern void	mod_setup(void);
-extern int	modload(char *, char *);
-extern int	modloadonly(char *, char *);
+extern int	modload(const char *, const char *);
+extern int	modloadonly(const char *, const char *);
 extern int	modunload(int);
 extern int	mod_hold_stub(struct mod_stub_info *);
 extern void	modunload_disable(void);
@@ -612,7 +612,7 @@ extern int mod_getsysnum(char *);
 
 extern char *mod_containing_pc(caddr_t);
 extern int mod_in_autounload(void);
-extern char	*mod_modname(struct modlinkage *);
+extern const char *mod_modname(struct modlinkage *);
 
 extern int dev_minorperm(dev_info_t *, char *, mperm_t *);
 extern void dev_devices_cleanup(void);

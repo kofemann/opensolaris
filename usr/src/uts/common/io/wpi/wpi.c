@@ -1078,10 +1078,10 @@ wpi_alloc_tx_ring(wpi_sc_t *sc, wpi_tx_ring_t *ring, int count, int qid)
 
 		data->desc = desc_h + i;
 		data->paddr_desc = paddr_desc_h +
-		    ((caddr_t)data->desc - (caddr_t)desc_h);
+		    ((uintptr_t)data->desc - (uintptr_t)desc_h);
 		data->cmd = cmd_h + i;
 		data->paddr_cmd = paddr_cmd_h +
-		    ((caddr_t)data->cmd - (caddr_t)cmd_h);
+		    ((uintptr_t)data->cmd - (uintptr_t)cmd_h);
 	}
 
 	return (err);
@@ -2235,7 +2235,7 @@ wpi_m_stat(void *arg, uint_t stat, uint64_t *val)
 	case MAC_STAT_IFSPEED:
 		*val = ((ic->ic_fixed_rate == IEEE80211_FIXED_RATE_NONE) ?
 		    (rs->ir_rates[in->in_txrate] & IEEE80211_RATE_VAL)
-		    : ic->ic_fixed_rate) * 5000000ull;
+		    : ic->ic_fixed_rate) / 2 * 1000000;
 		break;
 	case MAC_STAT_NOXMTBUF:
 		*val = sc->sc_tx_nobuf;
@@ -2768,7 +2768,7 @@ wpi_scan(wpi_sc_t *sc)
 	}
 
 	/* setup length of probe request */
-	hdr->pbrlen = LE_16(frm - (uint8_t *)wh);
+	hdr->pbrlen = LE_16((uintptr_t)frm - (uintptr_t)wh);
 
 	/* align on a 4-byte boundary */
 	chan = (wpi_scan_chan_t *)frm;
@@ -2782,7 +2782,7 @@ wpi_scan(wpi_sc_t *sc)
 		frm += sizeof (wpi_scan_chan_t);
 	}
 
-	pktlen = frm - (uint8_t *)cmd;
+	pktlen = (uintptr_t)frm - (uintptr_t)cmd;
 
 	desc->flags = LE_32(WPI_PAD32(pktlen) << 28 | 1 << 24);
 	desc->segs[0].addr = LE_32(data->dma_data.cookie.dmac_address);

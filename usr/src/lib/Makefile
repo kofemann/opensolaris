@@ -63,6 +63,7 @@ $(CLOSED_BUILD)SUBDIRS += \
 SUBDIRS += \
 	libc			.WAIT	\
 	../cmd/sgs/libelf	.WAIT	\
+	c_synonyms			\
 	libmd				\
 	libmd5				\
 	librsm				\
@@ -262,6 +263,7 @@ FM_sparc_DEPLIBS= libpri
 fm:			\
 	libexacct	\
 	libipmi		\
+	scsi		\
 	$(FM_$(MACH)_DEPLIBS)
 
 #
@@ -535,7 +537,7 @@ libsip:		libmd5
 libsmbfs:	libsocket libnsl libkrb5
 libsocket:	libnsl
 libldap5:	libsasl libsocket libnsl libmd
-libsldap:	libldap5 libtsol
+libsldap:	libldap5 libtsol libnsl libc libscf libresolv
 libpool:	libnvpair libexacct
 libpp:		libast
 libzonecfg:	libc libsocket libnsl libuuid libnvpair libsysevent libsec \

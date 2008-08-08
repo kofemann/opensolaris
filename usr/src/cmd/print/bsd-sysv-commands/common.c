@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  */
@@ -193,6 +193,8 @@ print_job_line(FILE *fp, int count, papi_job_t job, int fmt, int ac, char *av[])
 
 	(void) papiAttributeListGetInteger(list, NULL,
 					"job-id", &id);
+	(void) papiAttributeListGetInteger(list, NULL,
+					"job-id-requested", &id);
 	(void) papiAttributeListGetString(list, NULL,
 					"job-originating-user-name", &user);
 	(void) papiAttributeListGetString(list, NULL,
@@ -238,16 +240,20 @@ cancel_job(papi_service_t svc, FILE *fp, char *printer, papi_job_t job,
 	papi_status_t status;
 	papi_attribute_t **list = papiJobGetAttributeList(job);
 	int id = 0;
+	int rid = 0;
 	char *user = "";
 	char *mesg = gettext("cancelled");
 
 	papiAttributeListGetInteger(list, NULL,
 					"job-id", &id);
+	papiAttributeListGetInteger(list, NULL,
+					"job-id-requested", &rid);
 	papiAttributeListGetString(list, NULL,
 					"job-originating-user-name", &user);
 
 	/* if we are looking and it doesn't match, return early */
-	if ((ac > 0) && (match_job(id, user, ac, av) < 0))
+	if ((ac > 0) && (match_job(id, user, ac, av) < 0) &&
+	    (match_job(rid, user, ac, av) < 0))
 		return;
 
 	status = papiJobCancel(svc, printer, id);
@@ -267,7 +273,7 @@ berkeley_queue_report(papi_service_t svc, FILE *fp, char *dest, int fmt,
 	char *pattrs[] = { "printer-name", "printer-state",
 			"printer-state-reasons", NULL };
 	char *jattrs[] = { "job-name", "job-octets", "job-k-octets", "job-id",
-			"job-originating-user-name",
+			"job-originating-user-name", "job-id-requested",
 			"job-originating-host-name",
 			"number-of-intervening-jobs", NULL };
 	int num_jobs = 0;
@@ -315,7 +321,8 @@ berkeley_cancel_request(papi_service_t svc, FILE *fp, char *dest,
 {
 	papi_status_t status;
 	papi_job_t *jobs = NULL;
-	char *jattrs[] = { "job-originating-user-name", "job-id", NULL };
+	char *jattrs[] = { "job-originating-user-name", "job-id",
+			"job-id-requested", NULL };
 
 	status = papiPrinterListJobs(svc, dest, jattrs, PAPI_LIST_JOBS_ALL,
 					0, &jobs);
@@ -393,8 +400,8 @@ strsplit(char *string, const char *seperators)
 }
 
 papi_status_t
-jobSubmitSTDIN(papi_service_t svc, char *printer, papi_attribute_t **list,
-		papi_job_t *job)
+jobSubmitSTDIN(papi_service_t svc, char *printer, char *prefetch, int len,
+		papi_attribute_t **list, papi_job_t *job)
 {
 	papi_status_t status;
 	papi_stream_t stream = NULL;
@@ -402,6 +409,10 @@ jobSubmitSTDIN(papi_service_t svc, char *printer, papi_attribute_t **list,
 	char buf[BUFSIZ];
 
 	status = papiJobStreamOpen(svc, printer, list, NULL, &stream);
+
+	if (len > 0)
+		status = papiJobStreamWrite(svc, stream, prefetch, len);
+
 	while ((status == PAPI_OK) && ((rc = read(0, buf, sizeof (buf))) > 0))
 		status = papiJobStreamWrite(svc, stream, buf, rc);
 
@@ -419,25 +430,35 @@ jobSubmitSTDIN(papi_service_t svc, char *printer, papi_attribute_t **list,
 #define	PS_MAGIC	"%!"
 #define	PC_PS_MAGIC	"^D%!"
 int
-is_postscript(const char *file)
+is_postscript_stream(int fd, char *buf, int *len)
 {
-	char buf[3];
-	int fd;
-
-	if ((fd = open(file, O_RDONLY)) < 0)
-		return (-1);
-
-	if (read(fd, buf, sizeof (buf)) < 0) {
+	if ((*len = read(fd, buf, *len)) < 0) {
 		close(fd);
 		return (-1);
 	}
-	close(fd);
 
 	if ((strncmp(buf, PS_MAGIC, sizeof (PS_MAGIC) - 1) == 0) ||
 	    (strncmp(buf, PC_PS_MAGIC, sizeof (PC_PS_MAGIC) - 1) == 0))
 		return (1);
 	else
 		return (0);
+}
+
+int
+is_postscript(const char *file)
+{
+	int rc = -1;
+	int fd;
+
+	if ((fd = open(file, O_RDONLY)) >= 0) {
+		char buf[3];
+		int len = sizeof (buf);
+
+		rc = is_postscript_stream(fd, buf, &len);
+		close(fd);
+	}
+
+	return (rc);
 }
 
 static char **

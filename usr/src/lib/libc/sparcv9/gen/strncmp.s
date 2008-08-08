@@ -20,13 +20,11 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
-	.file	"%M%"
+	.file	"strncmp.s"
 
 /*
  * strncmp(s1, s2, n)
@@ -50,7 +48,6 @@
  */
 
 #include <sys/asm_linkage.h>
-#include "synonyms.h"
 
 	ENTRY(strncmp)
 	save	%sp, -SA(WINDOWSIZE), %sp

@@ -54,9 +54,13 @@ my @platforms = (
 		count => 2,
 		fru => "self"
 	    }, {
+	        fac_enum => 1,
+		provider => "fac_prov_ipmi",
 		count => 3,
 		label => "FT %d FM %d",
 		entity_ref => "ft%d.fm%d.led",
+		entity_ref_nparams => 2,
+		fm_service_indctr => "ft%d.fm%d.led",
 		fru => "self"
 	    }
 	]
@@ -72,12 +76,21 @@ my @platforms = (
 	set => "Sun-Fire-X4500|Sun-Fire-X4540",
 	topology => [
 	    {
+	        fac_enum => 0,
+		provider => "fac_prov_ipmi",
 		label => "FT %d",
 		count => 5,
 		fru => "self",
 		entity_ref => "ft%d.prsnt",
+		entity_ref_nparams => 1,
+		fm_service_indctr => "ft%d.service.led",
+		fm_ok2rm_indctr => "ft%d.ok2rm.led",
 	    }, {
+	        fac_enum => 1,
+		provider => "fac_prov_ipmi",
 		count => 2,
+		entity_ref => "ft%d.f%d.speed",
+		entity_ref_nparams => 2,
 		fru => "parent"
 	    }
 	]
@@ -86,8 +99,10 @@ my @platforms = (
     #
     # Fan Module/Fan topology for all G1N/G2N platforms.
     #
-    # These systems have 6 fan modules, with each fan module containing 2 fans.
-    # The FRU's for the individual fans are the containing fan module.
+    # There are two fan boards, which are FRU's.  Each fan board has
+    # 3 fan modules for a total of 6 fan modules, with each fan module
+    # containing 2 fans.  The FRU's for the individual fans are the
+    # containing fan module.
     #
     # Unfortunately, the IPMI topology on these systems is rather broken, and
     # all the SDRs that should be separate entities in fact refer to the same
@@ -99,26 +114,49 @@ my @platforms = (
 	topology => [
 	    {
 		count => 2,
-		label => "FT %d",
+		label => "FANBD%d",
 		fru => "self"
 	    }, {
-		label => "FT %d FM %d",
+		fac_enum => 1,
+		provider => "fac_prov_ipmi",
+		label => "FANBD%d FM%d",
 		count => 3,
 		fru => "self",
 		entity_present => "fb%d.fm%d.prsnt",
+		entity_ref => "fb%d.fm%d.prsnt",
+		entity_ref_nparams => 2,
+		fm_service_indctr=> "fb%d.fm%d.led",
 	    }, {
 		count => 2,
 		fru => "parent"
 	    }
 
 	]
+    },
+
+    #
+    # Fan Module/Fan topology for G4F platforms.
+    #
+    # These systems have 4 fan assemblies with a single fan per assembly.
+    # Each fan assembly is a FRU.  The fan assemblies have a service LED
+    # but no other indicators.
+    #
+    {
+	set => "Sun-Fire-X4600-M2",
+	topology => [
+	    {
+	        fac_enum => 1,
+		provider => "fac_prov_ipmi",
+		count => 4,
+		label => "FT %d",
+		fru => "self",
+		entity_ref => "ft%d.fm0.prsnt",
+		entity_ref_nparams => 1,
+		fm_service_indctr => "ft%d.fm0.led"
+	    }	
+	]
     }
 );
-
-sub usage
-{
-	print STDERR "Usage: xml-gen -p <platform> -i <input_xml_file> -o <output_xml_file>\n";
-}
 
 #
 # Process an entry in the topology list.  We are passed the indentation level,
@@ -132,84 +170,149 @@ sub process_topology
 	my $level = shift @topo;
 	my $type = $#topo == -1 ? "fan" : "fanmodule";
 
-	printf(OFILE "%*s<range name='%s' min='%d' max='%d'>\n",
+	printf("%*s<range name='%s' min='%d' max='%d'>\n",
 	    $indent, "", $type, 0, $level->{count} - 1);
 	$indent += 2;
 
 	for (my $i = 0; $i < $level->{count}; $i++) {
 		push @indices, $i;
 
-		printf(OFILE "%*s<node instance='%d'>\n", $indent, "", $i);
+		printf("%*s<node instance='%d'>\n", $indent, "", $i);
 
 		$indent += 2;
 
+		# Facility enumerator
+		if ($level->{fac_enum}) {
+			printf("%*s<fac-enum provider='",
+			    $indent, "");
+			printf($level->{provider}, @indices);
+			printf("' />\n");
+		}
+
+		# Facility nodes for service and ok2rm LED's
+		if ($level->{fm_service_indctr}) {
+			printf("%*s<facility name='service' type='indicator' ".
+			    "provider='fac_prov_ipmi' >\n", $indent+2, "");
+			printf("%*s<propgroup name='facility' version='1' ".
+			    "name-stability='Private' data-stability='Private' >\n",
+			    $indent+4, "");
+			printf("%*s<propval name='type' type='uint32' ".
+			    "value='1' />\n", $indent+6, "");
+			printf("%*s<propmethod name='ipmi_entity' version='0' ".
+			    "propname='entity_ref' proptype='string' >\n",
+			    $indent+6, "");
+			printf("%*s<argval name='format' type='string' ".
+			    "value='%s' />\n", $indent+8, "",
+			    $level->{fm_service_indctr});
+			printf("%*s<argval name='offset' type='uint32' ".
+			    "value='0' />\n", $indent+8, "");
+			printf("%*s<argval name='nparams' type='uint32' ".
+			    "value='%d' />\n", $indent+8, "",
+			    $level->{entity_ref_nparams});
+			printf("%*s</propmethod>\n", $indent+6, "");
+			printf("%*s<propmethod name='ipmi_indicator_mode' ".
+			    "version='0' propname='mode' proptype='uint32' ".
+			    "mutable='1' >\n", $indent+6, "");
+			printf("%*s</propmethod>\n", $indent+6, "");
+			printf("%*s</propgroup>\n", $indent+4, "");
+			printf("%*s</facility>\n", $indent+2, "");
+		}
+		if ($level->{fm_ok2rm_indctr}) {
+			printf("%*s<facility name='ok2rm' type='indicator' ".
+			    "provider='fac_prov_ipmi' >\n", $indent+2, "");
+			printf("%*s<propgroup name='facility' version='1' ".
+			    "name-stability='Private' data-stability='Private' >\n",
+			    $indent+4, "");
+			printf("%*s<propval name='type' type='uint32' ".
+			    "value='2' />\n", $indent+6, "");
+			printf("%*s<propmethod name='ipmi_entity' version='0' ".
+			    "propname='entity_ref' proptype='string' >\n",
+			    $indent+6, "");
+			printf("%*s<argval name='format' type='string' ".
+			    "value='%s' />\n", $indent+8, "",
+			    $level->{fm_ok2rm_indctr});
+			printf("%*s<argval name='offset' type='uint32' ".
+			    "value='0' />\n", $indent+8, "");
+			printf("%*s<argval name='nparams' type='uint32' ".
+			    "value='%d' />\n", $indent+8, "",
+			    $level->{entity_ref_nparams});
+			printf("%*s</propmethod>\n", $indent+6, "");
+			printf("%*s<propmethod name='ipmi_indicator_mode' ".
+			    "version='0' propname='mode' proptype='uint32' mutable='1' >\n",
+			    $indent+6, "");
+			printf("%*s</propmethod>\n", $indent+6, "");
+			printf("%*s</propgroup>\n", $indent+4, "");
+			printf("%*s</facility>\n", $indent+2, "");
+		}
+
 		# Protocol properties (label, fmri)
-		printf(OFILE "%*s<propgroup name='protocol' version='1' " .
+		printf("%*s<propgroup name='protocol' version='1' " .
 		    "name-stability='Private' data-stability='Private'>\n",
 		    $indent, "");
 
 		$indent += 2;
 
 		if ($level->{label}) {
-			printf(OFILE "%*s<propval name='label' type='string' " .
+			printf("%*s<propval name='label' type='string' " .
 			    "value='", $indent, "");
-			printf(OFILE $level->{label}, @indices);
-			printf(OFILE "' />\n");
+			printf($level->{label}, @indices);
+			printf("' />\n");
 		}
 
-		printf(OFILE "%*s<propmethod name='ipmi_fru_fmri' " .
+		printf("%*s<propmethod name='ipmi_fru_fmri' " .
 		    "version='0' propname='FRU' proptype='fmri'>\n",
 		    $indent, "");
-		printf(OFILE "%*s<argval name='entity' type='string' " .
+		printf("%*s<argval name='entity' type='string' " .
 		    "value='%s' />\n", $indent + 2, "", $level->{fru});
-		printf(OFILE "%*s</propmethod>\n", $indent, "");
+		printf("%*s</propmethod>\n", $indent, "");
 
 		$indent -= 2;
 
-		printf(OFILE "%*s</propgroup>\n", $indent, "");
+		printf("%*s</propgroup>\n", $indent, "");
 
 		#
-		# Entity reference (if any)
+		# Entity references (if any)
 		#
 		if ($level->{entity_ref} || $level->{entity_present}) {
 			my $name = $level->{entity_ref} ? "entity_ref" :
 			    "entity_present";
 			my $val = $level->{$name};
-			printf(OFILE "%*s<propgroup name='ipmi' version='1' " .
+			printf("%*s<propgroup name='ipmi' version='1' " .
 			    "name-stability='Private' " .
 			    "data-stability='Private' >\n", $indent, "");
-			printf(OFILE "%*s<propval name='%s' " .
+			printf("%*s<propval name='%s' " .
 			    "type='string' value='", $indent + 2, "", $name);
-			printf(OFILE $val, @indices);
-			printf(OFILE "' />\n");
-			printf(OFILE "%*s</propgroup>\n", $indent, "");
-		}
-
-
-		#
-		# Children (if any)
-		#
-		if ($#topo != -1) {
-			printf(OFILE "%*s<dependents grouping='children'>\n",
-			    $indent, "");
-			process_topology($indent + 2, \@topo, @indices);
-			printf(OFILE "%*s</dependents>\n", $indent, "");
+			printf($val, @indices);
+			printf("' />\n");
+			printf("%*s</propgroup>\n", $indent, "");
 		}
 
 		#
 		# Post-process IPMI enumerator method
 		#
-		printf(OFILE "%*s<enum-method name='ipmi' version='1' />\n",
-		   $indent, "");
+		if ($level->{provider}) {
+			printf("%*s<enum-method name='ipmi' version='1' ".
+			    "/>\n", $indent, "");
+		}
+
+		#
+		# Children (if any)
+		#
+		if ($#topo != -1) {
+			printf("%*s<dependents grouping='children'>\n",
+			    $indent, "");
+			process_topology($indent + 2, \@topo, @indices);
+			printf("%*s</dependents>\n", $indent, "");
+		}
 
 		$indent -= 2;
 
-		printf(OFILE "%*s</node>\n", $indent, "");
+		printf("%*s</node>\n", $indent, "");
 		pop @indices;
 	}
 
 	$indent -= 2;
-	printf(OFILE "%*s</range>\n", $indent, "");
+	printf("%*s</range>\n", $indent, "");
 }
 
 #
@@ -220,50 +323,19 @@ sub process_platform
 	my ($desc) = @_;
 	my $indent = 2;
 
-	printf(OFILE "%*s<set type='product' setlist='%s'>\n", $indent, "",
+	printf("%*s<set type='product' setlist='%s'>\n", $indent, "",
 	    $desc->{set});
 
 	process_topology($indent + 2, $desc->{topology});
 
-	printf(OFILE "%*s</set>\n", $indent, "");
+	printf("%*s</set>\n", $indent, "");
 }
 
-my %options;
-getopts("p:i:o:h", \%options);
-if ($options{'h'}) {
-	usage();
-	exit (1);
-} 
-
-my $platform = $options{'p'};
-my $input_file = $options{'i'};
-my $output_file = $options{'o'};
-
-if (!$platform || !$input_file || !$output_file) {
-	usage();
-	exit (1);
-}
-
-open(IFILE, "< $input_file") || die("$input_file cannot be opened.");
-open(OFILE, "> $output_file") || die("$output_file cannot be opened.");
-
-#
-# Open the file and read in the header until we reach the <topology> node.
-#
-while (<IFILE>) {
-	last if /<topology/;
-	print OFILE;
-}
-
-#
-# Construct the framework.
-#
-print OFILE "<topology name='fan' scheme='hc'>\n";
+print "<topology name='fan' scheme='hc'>\n";
 
 my $desc;
 foreach $desc (@platforms) {
-	my $set = $desc->{set};
 	process_platform($desc);
 }
 
-print OFILE "</topology>\n";
+print "</topology>\n";

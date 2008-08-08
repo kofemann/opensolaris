@@ -20,6 +20,11 @@
  */
 
 /*
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Use is subject to license terms.
+ */
+
+/*
  * Copyright (c) 2008, Intel Corporation
  * All rights reserved.
  */
@@ -28,12 +33,10 @@
  * Assembler support routines to getcpuid information used to set
  * cache size information. Cache information used by memset, strcpy, etc..
  */
-	.ident	"%Z%%M%	%I%	%E% SMI"
 
-	.file	"%M%"
+	.file	"proc64_support.s"
 
 #include <sys/asm_linkage.h>
-#include "synonyms.h"
 #include "proc64_id.h"
 
 	.global .memops_method

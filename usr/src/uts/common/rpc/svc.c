@@ -1218,6 +1218,22 @@ svcerr_weakauth(const SVCXPRT *clone_xprt)
 void
 svcerr_badcred(const SVCXPRT *clone_xprt)
 {
+	struct rpc_msg rply;
+
+	rply.rm_direction = REPLY;
+	rply.rm_reply.rp_stat = MSG_DENIED;
+	rply.rjcted_rply.rj_stat = AUTH_ERROR;
+	rply.rjcted_rply.rj_why = AUTH_BADCRED;
+	SVC_FREERES((SVCXPRT *)clone_xprt);
+	SVC_REPLY((SVCXPRT *)clone_xprt, &rply);
+}
+
+/*
+ * Authentication error; bad credentials
+ */
+void
+svcerr_badcred(const SVCXPRT *clone_xprt)
+{
 	struct rpc_msg	rply;
 
 	rply.rm_direction = REPLY;

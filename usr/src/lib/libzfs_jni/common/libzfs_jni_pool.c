@@ -133,6 +133,7 @@ static zjni_field_mapping_t zpool_status_map[] = {
 	{ ZPOOL_STATUS_HOSTID_MISMATCH, "ZPOOL_STATUS_HOSTID_MISMATCH" },
 	{ ZPOOL_STATUS_FAULTED_DEV_R, "ZPOOL_STATUS_FAULTED_DEV_R" },
 	{ ZPOOL_STATUS_FAULTED_DEV_NR, "ZPOOL_STATUS_FAULTED_DEV_NR" },
+	{ ZPOOL_STATUS_BAD_LOG, "ZPOOL_STATUS_BAD_LOG" },
 	{ ZPOOL_STATUS_VERSION_OLDER, "ZPOOL_STATUS_VERSION_OLDER" },
 	{ ZPOOL_STATUS_RESILVERING, "ZPOOL_STATUS_RESILVERING" },
 	{ ZPOOL_STATUS_OFFLINE_DEV, "ZPOOL_STATUS_OFFLINE_DEV" },
@@ -1137,7 +1138,7 @@ zjni_pool_status_to_obj(JNIEnv *env, zpool_status_t status)
 int
 zjni_ipool_iter(int argc, char **argv, zjni_ipool_iter_f func, void *data)
 {
-	nvlist_t *pools = zpool_find_import(g_zfs, argc, argv, B_FALSE);
+	nvlist_t *pools = zpool_find_import(g_zfs, argc, argv);
 
 	if (pools != NULL) {
 		nvpair_t *elem = NULL;

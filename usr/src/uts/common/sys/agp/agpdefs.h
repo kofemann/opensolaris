@@ -99,6 +99,7 @@ extern "C" {
 #define	INTEL_BR_Q35			0x29b08086
 #define	INTEL_BR_G33			0x29c08086
 #define	INTEL_BR_Q33			0x29d08086
+#define	INTEL_BR_GM45			0x2a408086
 
 /* AGP common register offset in pci configuration space */
 #define	AGP_CONF_MISC			0x51 /* one byte */
@@ -162,6 +163,8 @@ extern "C" {
 #define	INTEL_IGD_Q35			0x29b28086
 #define	INTEL_IGD_G33			0x29c28086
 #define	INTEL_IGD_Q33			0x29d28086
+#define	INTEL_IGD_GM45			0x2a428086
+
 /* register offsets in PCI config space */
 #define	I8XX_CONF_GMADR			0x10 /* GMADR of i8xx series */
 #define	I915_CONF_GMADR			0x18 /* GMADR of i915 series */
@@ -187,10 +190,10 @@ extern "C" {
 #define	GTT_TABLE_VALID			0x1
 #define	GTT_BASE_MASK			0xfffff000
 #define	GTT_MB_TO_PAGES(m)		((m) << 8)
-#define	GTT_POINTER_MASK		0xffffffff
+#define	GTT_POINTER_MASK		0xffffffff00000000
 
 /* Intel i810 register offset */
-#define	I810_POINTER_MASK		0x3fffffff
+#define	I810_POINTER_MASK		0xffffffffc0000000
 #define	I810_CONF_SMRAM			0x70 /* offset in PCI config space */
 #define	I810_GMS_MASK			0xc0 /* smram register mask */
 /*
@@ -256,7 +259,7 @@ extern "C" {
  */
 
 /* Intel agp bridge specific */
-#define	AGP_INTEL_POINTER_MASK		0xffffffff
+#define	AGP_INTEL_POINTER_MASK		0xffffffff00000000
 
 /* Amd64 cpu gart device reigster offset */
 #define	AMD64_APERTURE_CONTROL		0x90
@@ -269,7 +272,7 @@ extern "C" {
 #define	AMD64_APERBASE_MASK		0x00007fff
 #define	AMD64_GARTBASE_SHIFT		8
 #define	AMD64_GARTBASE_MASK		0xfffffff0
-#define	AMD64_POINTER_MASK		0xffffffffff
+#define	AMD64_POINTER_MASK		0xffffff0000000000
 #define	AMD64_INVALID_CACHE		0x1
 #define	AMD64_GART_SHIFT		12
 #define	AMD64_RESERVE_SHIFT		4

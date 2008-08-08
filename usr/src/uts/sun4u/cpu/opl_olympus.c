@@ -311,9 +311,9 @@ cpu_fix_alljupiter(void)
 	cpu_hwcap_flags |= AV_SPARC_IMA;
 
 	/*
-	 * Enable shared context support.
+	 * Disable shared context support.
 	 */
-	shctx_on = 1;
+	shctx_on = 0;
 }
 
 #ifdef	OLYMPUS_C_REV_B_ERRATA_XCALL
@@ -2171,7 +2171,7 @@ cpu_mp_init(void)
 	mutex_exit(&cpu_lock);
 }
 
-int heaplp_use_stlb = -1;
+int heaplp_use_stlb = 0;
 
 void
 mmu_init_kernel_pgsz(struct hat *hat)

@@ -24,18 +24,12 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
-	.file	"%M%"
-
-#include <sys/asm_linkage.h>
-
-	ANSI_PRAGMA_WEAK(sysi86,function)
+	.file	"sysi86.s"
 
 #include "SYS.h"
 
-	ENTRY(_sysi86)
-	SYSTRAP_RVAL1(sysi86)
-	SYSCERROR
+	ANSI_PRAGMA_WEAK(sysi86,function)
+
+	SYSCALL_RVAL1(sysi86)
 	RET
-	SET_SIZE(_sysi86)
+	SET_SIZE(sysi86)

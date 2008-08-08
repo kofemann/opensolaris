@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -2161,7 +2161,7 @@ make_aliases(struct bind **bhash)
 		return;
 
 	state = AL_NEW;
-	major = (major_t)-1;
+	major = DDI_MAJOR_T_NONE;
 	while (!done) {
 		token = kobj_lex(file, tokbuf, sizeof (tokbuf));
 		switch (token) {
@@ -2188,7 +2188,7 @@ make_aliases(struct bind **bhash)
 				break;
 			case AL_DRVNAME:
 				major = mod_name_to_major(drvbuf);
-				if (major == (major_t)-1) {
+				if (major == DDI_MAJOR_T_NONE) {
 					kobj_find_eol(file);
 					state = AL_NEW;
 				} else {
@@ -2238,7 +2238,7 @@ make_aliases(struct bind **bhash)
 
 			kobj_newline(file);
 			state = AL_NEW;
-			major = (major_t)-1;
+			major = DDI_MAJOR_T_NONE;
 			break;
 		default:
 			kobj_file_err(CE_WARN, file, tok_err, tokbuf);
@@ -2908,7 +2908,7 @@ impl_parlist_to_major(struct par_list *pl, char parents[])
 		}
 
 		/* parent specs cannot be mapped to a driver */
-		if (pl->par_major != (major_t)-1)
+		if (pl->par_major != DDI_MAJOR_T_NONE)
 			continue;
 
 		/* class spec */
@@ -2920,7 +2920,7 @@ impl_parlist_to_major(struct par_list *pl, char parents[])
 			if (strcmp(hwcp->hwc_class_name, hcl->class_name) != 0)
 				continue;
 			major = ddi_name_to_major(hcl->class_exporter);
-			ASSERT(major != (major_t)-1);
+			ASSERT(major != DDI_MAJOR_T_NONE);
 			if (parents[major] == 0) {
 				parents[major] = 1;
 				nmajor++;
@@ -3129,13 +3129,13 @@ append(struct hwc_spec *spec, struct par_list *par)
 static major_t
 get_major(char *parent)
 {
-	major_t major = (major_t)-1;
+	major_t major = DDI_MAJOR_T_NONE;
 	char *tmp, *driver = NULL;
 
 	if (*parent == '/')
 		major = path_to_major(parent);
 
-	if (major != (major_t)-1)
+	if (major != DDI_MAJOR_T_NONE)
 		return (major);
 
 	/* extract the name between '/' and '@' */
@@ -3160,8 +3160,9 @@ add_spec(struct hwc_spec *spec, struct par_list **par)
 	major_t maj;
 	struct par_list *pl, *par_last = NULL;
 	char *parent = spec->hwc_parent_name;
+	char *class = spec->hwc_class_name;
 
-	ASSERT(parent || spec->hwc_class_name);
+	ASSERT(parent || class);
 
 	/*
 	 * If given a parent=/full-pathname, see if the platform
@@ -3175,7 +3176,7 @@ add_spec(struct hwc_spec *spec, struct par_list **par)
 	 */
 	if (parent) {
 		maj = get_major(parent);
-		if (maj == (major_t)-1) {
+		if (maj == DDI_MAJOR_T_NONE) {
 			if ((*parent == '/') &&
 			    (strncmp(parent, "/pseudo", 7) != 0)) {
 				maj = (major_t)-2;
@@ -3188,13 +3189,17 @@ add_spec(struct hwc_spec *spec, struct par_list **par)
 			}
 		}
 	} else
-		maj = (major_t)-1;
+		maj = DDI_MAJOR_T_NONE;
 
 	/*
-	 * Scan the list looking for a matching parent.
+	 * Scan the list looking for a matching parent. When parent is
+	 * not NULL, we match the parent by major. If parent is NULL but
+	 * class is not NULL, we mache the pl by class name.
 	 */
 	for (pl = *par; pl; pl = pl->par_next) {
-		if (maj == pl->par_major) {
+		if ((parent && (maj == pl->par_major)) || ((parent == NULL) &&
+		    class && pl->par_specs->hwc_class_name && (strncmp(class,
+		    pl->par_specs->hwc_class_name, strlen(class)) == 0))) {
 			append(spec, pl);
 			return;
 		}
@@ -3212,7 +3217,7 @@ add_spec(struct hwc_spec *spec, struct par_list **par)
 		return;
 	}
 	/* put "class=" entries last (lower pri if dups) */
-	if (maj == (major_t)-1) {
+	if (maj == DDI_MAJOR_T_NONE) {
 		par_last->par_next = pl;
 		return;
 	}

@@ -815,7 +815,7 @@ stubs_base:
 	NO_UNLOAD_STUB(doorfs, door_ki_open,		nomod_einval);
 	NO_UNLOAD_STUB(doorfs, door_ki_lookup,		nomod_zero);
 	WSTUB(doorfs, door_ki_upcall,			nomod_einval);
-	WSTUB(doorfs, door_ki_upcall_cred,		nomod_einval);
+	WSTUB(doorfs, door_ki_upcall_limited,		nomod_einval);
 	WSTUB(doorfs, door_ki_hold,			nomod_zero);
 	WSTUB(doorfs, door_ki_rele,			nomod_zero);
 	WSTUB(doorfs, door_ki_info,			nomod_einval);
@@ -1214,6 +1214,7 @@ stubs_base:
 	STUB(dls, dls_devnet_mac, nomod_zero);
 	STUB(dls, dls_devnet_hold_tmp, nomod_einval);
 	STUB(dls, dls_devnet_rele_tmp, nomod_void);
+	STUB(dls, dls_devnet_prop_task_wait, nomod_void);
 	STUB(dls, dls_mgmt_get_linkid, nomod_einval);
 	END_MODULE(dls);
 #endif

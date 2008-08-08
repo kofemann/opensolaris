@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -84,6 +84,8 @@ const dmu_object_type_info_t dmu_ot[DMU_OT_NUMTYPES] = {
 	{	byteswap_uint8_array,	TRUE,	"ZFS SYSACL"		},
 	{	byteswap_uint8_array,	TRUE,	"FUID table"		},
 	{	byteswap_uint64_array,	TRUE,	"FUID table size"	},
+	{	zap_byteswap,		TRUE,	"DSL dataset next clones"},
+	{	zap_byteswap,		TRUE,	"scrub work queue"	},
 	{	byteswap_uint8_array,	FALSE,	"pNFS Data"		},
 	{	zap_byteswap,		TRUE,	"pNFS FH Map"		}
 };
@@ -364,6 +366,152 @@ dmu_prefetch(objset_t *os, uint64_t object, uint64_t offset, uint64_t len)
 	rw_exit(&dn->dn_struct_rwlock);
 
 	dnode_rele(dn, FTAG);
+}
+
+static int
+get_next_chunk(dnode_t *dn, uint64_t *offset, uint64_t limit)
+{
+	uint64_t len = limit - *offset;
+	uint64_t chunk_len = dn->dn_datablksz * DMU_MAX_DELETEBLKCNT;
+	uint64_t dn_used;
+	int err;
+
+	ASSERT(limit <= *offset);
+
+	dn_used = dn->dn_phys->dn_used <<
+	    (dn->dn_phys->dn_flags & DNODE_FLAG_USED_BYTES ? 0 : DEV_BSHIFT);
+	if (len <= chunk_len || dn_used <= chunk_len) {
+		*offset = limit;
+		return (0);
+	}
+
+	while (*offset > limit) {
+		uint64_t initial_offset = *offset;
+		uint64_t delta;
+
+		/* skip over allocated data */
+		err = dnode_next_offset(dn,
+		    DNODE_FIND_HOLE|DNODE_FIND_BACKWARDS, offset, 1, 1, 0);
+		if (err == ESRCH)
+			*offset = limit;
+		else if (err)
+			return (err);
+
+		ASSERT3U(*offset, <=, initial_offset);
+		delta = initial_offset - *offset;
+		if (delta >= chunk_len) {
+			*offset += delta - chunk_len;
+			return (0);
+		}
+		chunk_len -= delta;
+
+		/* skip over unallocated data */
+		err = dnode_next_offset(dn,
+		    DNODE_FIND_BACKWARDS, offset, 1, 1, 0);
+		if (err == ESRCH)
+			*offset = limit;
+		else if (err)
+			return (err);
+
+		if (*offset < limit)
+			*offset = limit;
+		ASSERT3U(*offset, <, initial_offset);
+	}
+	return (0);
+}
+
+static int
+dmu_free_long_range_impl(objset_t *os, dnode_t *dn, uint64_t offset,
+    uint64_t length, boolean_t free_dnode)
+{
+	dmu_tx_t *tx;
+	uint64_t object_size, start, end, len;
+	boolean_t trunc = (length == DMU_OBJECT_END);
+	int align, err;
+
+	align = 1 << dn->dn_datablkshift;
+	ASSERT(align > 0);
+	object_size = align == 1 ? dn->dn_datablksz :
+	    (dn->dn_maxblkid + 1) << dn->dn_datablkshift;
+
+	if (trunc || (end = offset + length) > object_size)
+		end = object_size;
+	if (end <= offset)
+		return (0);
+	length = end - offset;
+
+	while (length) {
+		start = end;
+		err = get_next_chunk(dn, &start, offset);
+		if (err)
+			return (err);
+		len = trunc ? DMU_OBJECT_END : end - start;
+
+		tx = dmu_tx_create(os);
+		dmu_tx_hold_free(tx, dn->dn_object, start, len);
+		err = dmu_tx_assign(tx, TXG_WAIT);
+		if (err) {
+			dmu_tx_abort(tx);
+			return (err);
+		}
+
+		dnode_free_range(dn, start, trunc ? -1 : len, tx);
+
+		if (start == 0 && trunc && free_dnode)
+			dnode_free(dn, tx);
+
+		length -= end - start;
+
+		dmu_tx_commit(tx);
+		end = start;
+		trunc = FALSE;
+	}
+	return (0);
+}
+
+int
+dmu_free_long_range(objset_t *os, uint64_t object,
+    uint64_t offset, uint64_t length)
+{
+	dnode_t *dn;
+	int err;
+
+	err = dnode_hold(os->os, object, FTAG, &dn);
+	if (err != 0)
+		return (err);
+	err = dmu_free_long_range_impl(os, dn, offset, length, FALSE);
+	dnode_rele(dn, FTAG);
+	return (err);
+}
+
+int
+dmu_free_object(objset_t *os, uint64_t object)
+{
+	dnode_t *dn;
+	dmu_tx_t *tx;
+	int err;
+
+	err = dnode_hold_impl(os->os, object, DNODE_MUST_BE_ALLOCATED,
+	    FTAG, &dn);
+	if (err != 0)
+		return (err);
+	if (dn->dn_nlevels == 1) {
+		tx = dmu_tx_create(os);
+		dmu_tx_hold_bonus(tx, object);
+		dmu_tx_hold_free(tx, dn->dn_object, 0, DMU_OBJECT_END);
+		err = dmu_tx_assign(tx, TXG_WAIT);
+		if (err == 0) {
+			dnode_free_range(dn, 0, DMU_OBJECT_END, tx);
+			dnode_free(dn, tx);
+			dmu_tx_commit(tx);
+		} else {
+			dmu_tx_abort(tx);
+		}
+	} else {
+		err = dmu_free_long_range_impl(os, dn, 0, DMU_OBJECT_END, TRUE);
+	}
+	dnode_rele(dn, FTAG);
+	return (err);
 }
 
 int
@@ -699,6 +847,7 @@ dmu_sync(zio_t *pio, dmu_buf_t *db_fake,
 	dbuf_dirty_record_t *dr;
 	dmu_sync_arg_t *in;
 	zbookmark_t zb;
+	writeprops_t wp = { 0 };
 	zio_t *zio;
 	int zio_flags;
 	int err;
@@ -814,12 +963,16 @@ dmu_sync(zio_t *pio, dmu_buf_t *db_fake,
 	zio_flags = ZIO_FLAG_MUSTSUCCEED;
 	if (dmu_ot[db->db_dnode->dn_type].ot_metadata || zb.zb_level != 0)
 		zio_flags |= ZIO_FLAG_METADATA;
-	zio = arc_write(pio, os->os_spa,
-	    zio_checksum_select(db->db_dnode->dn_checksum, os->os_checksum),
-	    zio_compress_select(db->db_dnode->dn_compress, os->os_compress),
-	    dmu_get_replication_level(os, &zb, db->db_dnode->dn_type),
-	    txg, bp, dr->dt.dl.dr_data, NULL, dmu_sync_done, in,
-	    ZIO_PRIORITY_SYNC_WRITE, zio_flags, &zb);
+	wp.wp_type = db->db_dnode->dn_type;
+	wp.wp_copies = os->os_copies;
+	wp.wp_level = db->db_level;
+	wp.wp_dnchecksum = db->db_dnode->dn_checksum;
+	wp.wp_oschecksum = os->os_checksum;
+	wp.wp_dncompress = db->db_dnode->dn_compress;
+	wp.wp_oscompress = os->os_compress;
+	zio = arc_write(pio, os->os_spa, &wp,
+	    DBUF_IS_L2CACHEABLE(db), txg, bp, dr->dt.dl.dr_data, NULL,
+	    dmu_sync_done, in, ZIO_PRIORITY_SYNC_WRITE, zio_flags, &zb);
 
 	if (pio) {
 		zio_nowait(zio);
@@ -875,21 +1028,6 @@ dmu_object_set_compress(objset_t *os, uint64_t object, uint8_t compress,
 }
 
 int
-dmu_get_replication_level(objset_impl_t *os,
-    zbookmark_t *zb, dmu_object_type_t ot)
-{
-	int ncopies = os->os_copies;
-
-	/* If it's the mos, it should have max copies set. */
-	ASSERT(zb->zb_objset != 0 ||
-	    ncopies == spa_max_replication(os->os_spa));
-
-	if (dmu_ot[ot].ot_metadata || zb->zb_level != 0)
-		ncopies++;
-	return (MIN(ncopies, spa_max_replication(os->os_spa)));
-}
-
-int
 dmu_offset_next(objset_t *os, uint64_t object, boolean_t hole, uint64_t *off)
 {
 	dnode_t *dn;
@@ -914,7 +1052,7 @@ dmu_offset_next(objset_t *os, uint64_t object, boolean_t hole, uint64_t *off)
 			return (err);
 	}
 
-	err = dnode_next_offset(dn, hole, off, 1, 1, 0);
+	err = dnode_next_offset(dn, (hole ? DNODE_FIND_HOLE : 0), off, 1, 1, 0);
 	dnode_rele(dn, FTAG);
 
 	return (err);

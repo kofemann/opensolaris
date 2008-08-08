@@ -27,6 +27,7 @@
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <sys/utsname.h>
 #include <unistd.h>
@@ -36,6 +37,7 @@
 #include <strings.h>
 #include <dirent.h>
 #include <priv.h>
+#include <syslog.h>
 
 #include <iscsitgt_impl.h>
 #include "utility.h"
@@ -46,6 +48,7 @@
 #include "port.h"
 #include "errcode.h"
 #include "mgmt_scf.h"
+#include "isns_client.h"
 
 static char *list_targets(tgt_node_t *x);
 static char *list_initiator(tgt_node_t *x);
@@ -269,6 +272,8 @@ list_admin(tgt_node_t *x)
 	char		*msg	= NULL;
 	admin_table_t	*p;
 	tgt_node_t	*node	= NULL;
+	tgt_node_t	*isns_srv_node	= NULL;
+	Boolean_t	enabled = False;
 
 	tgt_buf_add_tag_and_attr(&msg, XML_ELEMENT_RESULT, "version='1.0'");
 	tgt_buf_add_tag(&msg, XML_ELEMENT_ADMIN, Tag_Start);
@@ -277,11 +282,47 @@ list_admin(tgt_node_t *x)
 	for (p = admin_prop_list; p->name != NULL; p++) {
 		node = tgt_node_next_child(main_config, p->name, NULL);
 		if (node) {
-			if (strcmp(p->name, XML_ELEMENT_CHAPSECRET) == 0)
+			if (strcmp(p->name, XML_ELEMENT_CHAPSECRET) == 0) {
 				tgt_buf_add(&msg, p->name, "Set");
-			else
+			} else if (strcmp(p->name, XML_ELEMENT_ISNS_ACCESS)
+			    == 0) {
 				tgt_buf_add(&msg, p->name, node->x_value);
+				/* check the isns discovery */
+				if (node->x_value &&
+				    strcmp(node->x_value, "true") == 0) {
+					enabled = True;
+				}
+			} else if (strcmp(p->name, XML_ELEMENT_ISNS_SERV)
+			    == 0) {
+				tgt_buf_add(&msg, p->name, node->x_value);
+				/*
+				 * check the state of isns server connection.
+				 */
+				if (node->x_value != NULL) {
+					isns_srv_node = node;
+				}
+			} else {
+				tgt_buf_add(&msg, p->name, node->x_value);
+			}
 		}
+	}
+
+	/*
+	 * check the state of isns server connection and add the node.
+	 * the conncection state is dynamic so it doesn't get stored in
+	 * incore config.
+	 */
+	if (enabled && isns_srv_node) {
+		if (isns_open(isns_srv_node->x_value) == -1) {
+			tgt_buf_add(&msg, XML_ELEMENT_ISNS_SERVER_STATUS,
+			    "Unavailable");
+		} else {
+			tgt_buf_add(&msg, XML_ELEMENT_ISNS_SERVER_STATUS,
+			    "Available");
+		}
+	} else {
+		tgt_buf_add(&msg, XML_ELEMENT_ISNS_SERVER_STATUS,
+		"Not applicable");
 	}
 
 	tgt_buf_add_tag(&msg, XML_ELEMENT_ADMIN, Tag_End);
@@ -358,6 +399,7 @@ target_info(char **msg, char *targ_name, tgt_node_t *tnode)
 	tgt_node_t		*params;
 	int			lun_num;
 	Boolean_t		incore;
+	struct stat		s;
 
 	if ((lnode = tgt_node_next(tnode, XML_ELEMENT_ACLLIST, NULL)) !=
 	    NULL) {
@@ -406,7 +448,8 @@ target_info(char **msg, char *targ_name, tgt_node_t *tnode)
 		if (incore == False) {
 			local_name = get_local_name(targ_name);
 			if (local_name != NULL) {
-				mgmt_get_param(&params, local_name, lun_num);
+				(void) mgmt_get_param(&params, local_name,
+				    lun_num);
 				free(local_name);
 			} else {
 				continue;
@@ -416,7 +459,7 @@ target_info(char **msg, char *targ_name, tgt_node_t *tnode)
 		}
 
 		tgt_buf_add_tag(msg, XML_ELEMENT_LUN, Tag_Start);
-		snprintf(lun_buf, sizeof (lun_buf), "%d", lun_num);
+		(void) snprintf(lun_buf, sizeof (lun_buf), "%d", lun_num);
 		tgt_buf_add_tag(msg, lun_buf, Tag_String);
 
 		if (tgt_find_value_str(params, XML_ELEMENT_GUID, &prop) ==
@@ -444,14 +487,16 @@ target_info(char **msg, char *targ_name, tgt_node_t *tnode)
 			tgt_buf_add(msg, XML_ELEMENT_SIZE, prop);
 			free(prop);
 		}
-		if (tgt_find_value_str(params, XML_ELEMENT_STATUS, &prop) ==
-		    True) {
-			tgt_buf_add(msg, XML_ELEMENT_STATUS, prop);
-			free(prop);
-		}
 		if (tgt_find_value_str(params, XML_ELEMENT_BACK, &prop) ==
 		    True) {
 			tgt_buf_add(msg, XML_ELEMENT_BACK, prop);
+			if (stat(prop, &s) == 0) {
+				tgt_buf_add(msg, XML_ELEMENT_STATUS,
+				    TGT_STATUS_ONLINE);
+			} else {
+				tgt_buf_add(msg, XML_ELEMENT_STATUS,
+				    strerror(errno));
+			}
 			free(prop);
 		}
 		tgt_buf_add_tag(msg, XML_ELEMENT_LUN, Tag_End);

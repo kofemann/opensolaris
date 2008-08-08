@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -33,7 +33,7 @@
 extern "C" {
 #endif
 
-#include <topo_list.h>
+#include <fm/topo_list.h>
 
 typedef struct topo_imethod {
 	topo_list_t tim_list;		/* next/prev pointers */
@@ -63,36 +63,35 @@ extern int topo_prop_method_version_register(tnode_t *, const char *,
 #define	TOPO_METH_FMRI			"topo_fmri"
 #define	TOPO_METH_NVL2STR		"topo_nvl2str"
 #define	TOPO_METH_STR2NVL		"topo_str2nvl"
-#define	TOPO_METH_CONTAINS		"topo_contains"
 #define	TOPO_METH_COMPARE		"topo_compare"
 #define	TOPO_METH_PROP_GET		"topo_prop_get"
 #define	TOPO_METH_PGRP_GET		"topo_pgrp_get"
 #define	TOPO_METH_PROP_SET		"topo_prop_set"
+#define	TOPO_METH_FACILITY		"topo_facility"
 
 #define	TOPO_METH_FMRI_VERSION			0
 #define	TOPO_METH_FRU_COMPUTE_VERSION		0
 #define	TOPO_METH_ASRU_COMPUTE_VERSION		0
 #define	TOPO_METH_NVL2STR_VERSION		0
 #define	TOPO_METH_STR2NVL_VERSION		0
-#define	TOPO_METH_CONTAINS_VERSION		0
 #define	TOPO_METH_COMPARE_VERSION		0
 #define	TOPO_METH_PROP_GET_VERSION		0
 #define	TOPO_METH_PGRP_GET_VERSION		0
 #define	TOPO_METH_PROP_SET_VERSION		0
+#define	TOPO_METH_FACILITY_VERSION		0
 
 #define	TOPO_METH_ASRU_COMPUTE_DESC	"Dynamic ASRU constructor"
 #define	TOPO_METH_FRU_COMPUTE_DESC	"Dynamic FRU constructor"
 #define	TOPO_METH_FMRI_DESC		"Dynamic FMRI constructor"
 #define	TOPO_METH_NVL2STR_DESC		"FMRI to string"
 #define	TOPO_METH_STR2NVL_DESC		"string to FMRI"
-#define	TOPO_METH_CONTAINS_DESC		"FMRI contains sub-FMRI"
 #define	TOPO_METH_COMPARE_DESC		"compare two FMRIs"
 #define	TOPO_METH_PROP_GET_DESC		"get properties for FMRI"
 #define	TOPO_METH_PGRP_GET_DESC		"get property group for FMRI"
 #define	TOPO_METH_PROP_SET_DESC		"set properties for FMRI"
+#define	TOPO_METH_FACILITY_DESC		"get facility for FMRI"
 
 #define	TOPO_METH_COMPARE_RET		"contains-return"
-#define	TOPO_METH_CONTAINS_RET		"contains-return"
 
 #define	TOPO_METH_FMRI_ARG_NAME		"child-name"
 #define	TOPO_METH_FMRI_ARG_INST		"child-inst"

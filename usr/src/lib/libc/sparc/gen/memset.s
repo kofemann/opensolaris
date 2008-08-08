@@ -24,9 +24,7 @@
  * Use is subject to license terms.
  */
 
-	.ident	"%Z%%M%	%I%	%E% SMI"
-
-	.file	"%M%"
+	.file	"memset.s"
 
 /*
  * char *memset(sp, c, n)
@@ -53,8 +51,6 @@
 #include <sys/asm_linkage.h>
 
 	ANSI_PRAGMA_WEAK(memset,function)
-
-#include "synonyms.h"
 
 	ENTRY(memset)
 	mov	%o0, %o5		! copy sp before using it

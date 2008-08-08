@@ -1,0 +1,256 @@
+#
+# CDDL HEADER START
+#
+# The contents of this file are subject to the terms of the
+# Common Development and Distribution License (the "License").
+# You may not use this file except in compliance with the License.
+#
+# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+# or http://www.opensolaris.org/os/licensing.
+# See the License for the specific language governing permissions
+# and limitations under the License.
+#
+# When distributing Covered Code, include this CDDL HEADER in each
+# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+# If applicable, add the following below this CDDL HEADER, with the
+# fields enclosed by brackets "[]" replaced with your own identifying
+# information: Portions Copyright [yyyy] [name of copyright owner]
+#
+# CDDL HEADER END
+#
+
+#
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Use is subject to license terms.
+#
+# ident	"%Z%%M%	%I%	%E% SMI"
+#
+
+#
+# open-tree exception list
+#
+# See README.exception_lists for details
+#
+
+#
+# Ignore oddly-named text files scattered about -- someday these should be
+# suffixed with .txt so we don't have to list them.
+#
+./src/cmd/oawk/EXPLAIN
+./src/cmd/rpcsvc/nis/rpc.nisd/resolv_server/DNS_FWD
+./src/cmd/vi/port/ex.news
+./src/cmd/ssh/doc
+
+#
+# Ignore everything under trees that may be resynched from outside ON.
+#
+./src/cmd/perl
+./src/cmd/sqlite
+./src/lib/libsqlite
+./src/cmd/tcpd
+./src/common/openssl
+./src/grub
+./src/uts/intel/sys/acpi
+
+#
+# Ignore ksh93/ast-related files that are only used to resync our build
+# configuration with upstream.
+#
+./src/lib/libast/*/src/lib/libast/FEATURE
+./src/lib/libast/common/comp/conf.*
+./src/lib/libast/common/features
+./src/lib/libast/common/include/ast_windows.h
+./src/lib/libast/common/port/lc.tab
+./src/lib/libast/common/port/lcgen.c
+./src/lib/libcmd/*/src/lib/libcmd/FEATURE
+./src/lib/libcmd/common/features
+./src/lib/libdll/*/src/lib/libdll/FEATURE
+./src/lib/libdll/common/features
+./src/lib/libpp/*/pp.*
+./src/lib/libpp/common/gentab.sh
+./src/lib/libpp/common/ppsym.c
+./src/lib/libpp/i386/ppdebug.h
+./src/lib/libpp/sparc/ppdebug.h
+./src/lib/libshell/*/src/cmd/ksh93/FEATURE
+./src/lib/libshell/common/data/math.tab
+./src/lib/libshell/common/features
+./src/lib/libshell/misc/buildksh93.ksh
+./src/lib/libshell/misc/buildksh93.readme
+
+#
+# Ignore ksh93/ast-related test programs.
+#
+./src/cmd/ast/msgcc/msgcc.tst
+./src/lib/libast/common/port/astmath.c
+
+#
+# Ignore ksh93/ast-related source components that are not currently
+# used but may be useful later.
+#
+./src/lib/libcmd/common/cksum.c
+./src/lib/libcmd/common/md5sum.c
+./src/lib/libcmd/common/sum.c
+./src/lib/libshell/common/bltins/mkservice.c
+./src/lib/libshell/common/bltins/shopen.c
+./src/lib/libshell/common/data/bash_pre_rc.sh
+./src/lib/libshell/common/include/env.h
+./src/lib/libshell/common/sh/bash.c
+./src/lib/libshell/common/sh/env.c
+./src/lib/libshell/common/sh/shcomp.c
+./src/lib/libshell/common/sh/suid_exec.c
+
+#
+# Ignore any files built as part of the nightly program itself.
+#
+# ISUSED - let checkpaths know that the next entry is good.
+./src/*.out
+# ISUSED - let checkpaths know that the next entry is good.
+./src/*.ref
+
+#
+# Ignore warlock-related goop; not used during a nightly.
+#
+./src/uts/sparc/amsrc*/main.c
+
+#
+# Ignore internal test directories and test programs.
+#
+*/tests
+*/test
+*Test.java
+*_test.[ch]
+./src/cmd/ldap/common/*test.c
+./src/cmd/logadm/tester
+./src/cmd/print/printmgr/com/sun/admin/pm/client/helptools/extract
+./src/cmd/print/printmgr/com/sun/admin/pm/server/pmtest
+./src/cmd/sendmail/libsm/t-*.c
+./src/cmd/sort/common/convert.c
+./src/cmd/sort/common/invoke.c
+./src/lib/crypt_modules/sha256/test.c
+./src/lib/efcode/fcode_test
+./src/lib/libkvm/common/test.c
+
+#
+# Ignore debugging code.
+#
+./src/cmd/fs.d/pcfs/fsck/inject.c
+./src/cmd/sort/common/statistics.c
+
+#
+# Ignore internal packages, scripts, and tools that are intentionally not
+# built or used during a nightly.
+#
+./src/cmd/mdb/packages
+./src/cmd/sgs/packages
+./src/cmd/sgs/rtld.4.x
+./src/prototypes
+./src/cmd/pools/poold/com/sun/solaris/*/*/package.html
+./src/uts/intel/io/acpica/cmp_ca.sh
+
+#
+# Ignore files that are only used by internal packages.
+#
+./src/cmd/sgs/*/*/*chk.msg
+
+#
+# Ignore files that get used during a EXPORT_SRC or CRYPT_SRC build only.
+#
+./src/common/crypto/aes/Makefile
+./src/common/crypto/arcfour/Makefile
+./src/common/crypto/blowfish/Makefile
+./src/common/crypto/des/Makefile
+./src/common/crypto/rsa/Makefile
+./src/lib/gss_mechs/mech_dh/backend/mapfile-vers
+./src/lib/gss_mechs/mech_dh/dh1024/mapfile-vers
+./src/lib/gss_mechs/mech_dh/dh192/mapfile-vers
+./src/lib/gss_mechs/mech_dh/dh640/mapfile-vers
+./src/lib/gss_mechs/mech_krb5/mapfile-vers-clean
+./src/lib/gss_mechs/mech_spnego/mapfile-vers-clean
+./src/lib/pkcs11/pkcs11_softtoken/common/Makefile
+./src/uts/common/Makefile
+./src/uts/common/crypto/io/Makefile
+./src/uts/common/gssapi/include/Makefile
+./src/uts/common/gssapi/mechs/dummy/Makefile
+./src/uts/common/gssapi/mechs/krb5/Makefile
+./src/xmod
+
+#
+# Ignore Makefiles which are used by developers but not used by nightly
+# itself.  This is a questionable practice, since they tend to rot.
+#
+./src/cmd/syslogd/sparcv9/Makefile
+./src/uts/sparc/uhci/Makefile
+./src/lib/pam_modules/smb/amd64/Makefile
+./src/lib/pam_modules/smb/sparcv9/Makefile
+
+#
+# Ignore dtrace scripts only used by developers
+#
+./src/cmd/vscan/vscand/vscan.d
+
+#
+# Ignore sample source code.
+#
+./src/cmd/sendmail/libmilter/example.c
+./src/lib/libdhcpsvc/modules/templates
+
+#
+# Ignore .xcl files that aren't used because the program is statically linked.
+#
+./src/cmd/cmd-inet/sbin/dhcpagent/dhcpagent.xcl
+
+#
+# Ignore sendmail files included for completeness' sake, but which won't
+# be used until certain _FFR (for future release) #define's go live.
+#
+./src/cmd/sendmail/src/statusd_shm.h
+
+#
+# Ignore files originally supplied by ISC (Internet Software Consortium) 
+# as part of a BIND release.
+#
+./src/lib/libresolv2/common/cylink/bn68000.c
+./src/lib/libresolv2/common/cylink/bn8086.c
+./src/lib/libresolv2/common/cylink/lbn68000.c
+./src/lib/libresolv2/common/cylink/lbn68000.h
+./src/lib/libresolv2/common/cylink/lbn68020.c
+./src/lib/libresolv2/common/cylink/lbn68020.h
+./src/lib/libresolv2/common/cylink/lbn80386.h
+./src/lib/libresolv2/common/cylink/lbn8086.h
+./src/lib/libresolv2/common/cylink/lbnppc.c
+./src/lib/libresolv2/common/cylink/lbnppc.h
+./src/lib/libresolv2/common/cylink/ppcasm.h
+./src/lib/libresolv2/common/cylink/sizetest.c
+./src/lib/libresolv2/common/irs/getaddrinfo.c
+./src/lib/libresolv2/common/irs/nis_p.h
+./src/lib/libresolv2/common/resolv/res_mkupdate.h
+./src/lib/libresolv2/include/err.h
+
+#
+# Ignore mont_mulf.c. It is used as a starting point for some hand optimized
+# assembly files. We keep it around for future reference.
+#
+./src/common/bignum/mont_mulf.c
+
+#
+# Ignore the sparc Makefiles for x86-only drivers;
+# they're used to build warlock only.
+#
+./src/uts/sparc/sata/Makefile
+./src/uts/sparc/si3124/Makefile
+./src/uts/sparc/nv_sata/Makefile
+./src/uts/sparc/ahci/Makefile
+./src/uts/sparc/audioixp/Makefile
+
+#
+# Ignore any files that get used during a gcc build only.
+#
+./src/cmd/sgs/rtld/common/mapfile-order-gcc
+
+#
+# Ignore compiler dependent header files for fpscrubber
+# and sparc prototype files
+#
+./src/cmd/fps/fptest/singdoub*
+./src/pkgdefs/SUNWfsu/prototype_gcc_sparc
+./src/pkgdefs/SUNWfsu/prototype_cc_sparc

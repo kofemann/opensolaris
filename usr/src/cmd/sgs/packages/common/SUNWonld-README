@@ -1356,3 +1356,16 @@ Bugid   Risk Synopsis
 6701798 ld can enter infinite loop processing bad mapfile
 6706401 direct binding copy relocation fallback is insufficient for ild
 	generated objects
+6705846 multithreaded C++ application seems to get deadlocked in the dynamic
+	linker code
+6686343 ldd(1) - unused search path diagnosis should be enabled
+6599700 librtld_db needs better plugin support (link-editor components only)
+6713830 mdb dumped core reading a gcore
+6712292 ld.so.1 should fall back to an interposer for failed direct bindings
+6716350 usr/src/cmd/sgs should be linted by nightly builds
+6720509 usr/src/cmd/sgs/sgsdemangler should be removed
+6617475 gas creates erroneous FILE symbols [was: ld.so.1 is reported as
+	false positive by wsdiff]
+6724311 dldump() mishandles R_AMD64_JUMP_SLOT relocations
+6724774 elfdump -n doesn't print siginfo structure
+6728555 Fix for amd64 aw (6617475) breaks pure gcc builds

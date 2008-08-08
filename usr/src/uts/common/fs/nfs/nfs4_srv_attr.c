@@ -534,16 +534,24 @@ rfs4_fattr4_named_attr(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 
 		/*
 		 * Solaris xattr model requires that VFS_XATTR is set
-		 * in file systems enabled for xattr.  If VFS_XATTR
-		 * not set, no need to call pathconf.
+		 * in file systems enabled for generic xattr.  If VFS_XATTR
+		 * not set, no need to call pathconf for _PC_XATTR_EXISTS..
+		 *
+		 * However the VFS_XATTR flag doesn't indicate sysattr support
+		 * so always check for sysattrs and then only do the
+		 * _PC_XATTR_EXISTS pathconf if needed.
 		 */
-		if (sarg->cs->vp->v_vfsp->vfs_flag & VFS_XATTR) {
-			error = VOP_PATHCONF(sarg->cs->vp, _PC_XATTR_EXISTS,
-			    &val, sarg->cs->cr, NULL);
+
+		val = 0;
+		error = VOP_PATHCONF(sarg->cs->vp, _PC_SATTR_EXISTS,
+		    &val, sarg->cs->cr, NULL);
+		if ((error || val == 0) &&
+		    sarg->cs->vp->v_vfsp->vfs_flag & VFS_XATTR) {
+			error = VOP_PATHCONF(sarg->cs->vp,
+			    _PC_XATTR_EXISTS, &val, sarg->cs->cr, NULL);
 			if (error)
 				break;
-		} else
-			val = 0;
+		}
 		na->named_attr = (val ? TRUE : FALSE);
 		break;
 	case NFS4ATTR_SETIT:
@@ -555,8 +563,12 @@ rfs4_fattr4_named_attr(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 	case NFS4ATTR_VERIT:
 		ASSERT(sarg->cs->vp != NULL);
 		if (sarg->cs->vp->v_vfsp->vfs_flag & VFS_XATTR) {
-			error = VOP_PATHCONF(sarg->cs->vp, _PC_XATTR_EXISTS,
+			error = VOP_PATHCONF(sarg->cs->vp, _PC_SATTR_EXISTS,
 			    &val, sarg->cs->cr, NULL);
+			if (error || val == 0)
+				error = VOP_PATHCONF(sarg->cs->vp,
+				    _PC_XATTR_EXISTS, &val,
+				    sarg->cs->cr, NULL);
 			if (error)
 				break;
 		} else
@@ -2302,11 +2314,11 @@ rfs4_fattr4_space_avail(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		ASSERT(sarg->sbp != NULL);
 		if (sarg->sbp->f_bavail != (fsblkcnt64_t)-1) {
 			na->space_avail =
-			    (fattr4_space_avail)sarg->sbp->f_frsize *
-			    (fattr4_space_avail)sarg->sbp->f_bavail;
+			    (fattr4_space_avail) sarg->sbp->f_frsize *
+			    (fattr4_space_avail) sarg->sbp->f_bavail;
 		} else {
 			na->space_avail =
-			    (fattr4_space_avail)sarg->sbp->f_bavail;
+			    (fattr4_space_avail) sarg->sbp->f_bavail;
 		}
 		break;
 	case NFS4ATTR_SETIT:
@@ -2349,11 +2361,11 @@ rfs4_fattr4_space_free(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		ASSERT(sarg->sbp != NULL);
 		if (sarg->sbp->f_bfree != (fsblkcnt64_t)-1) {
 			na->space_free =
-			    (fattr4_space_free)sarg->sbp->f_frsize *
-			    (fattr4_space_free)sarg->sbp->f_bfree;
+			    (fattr4_space_free) sarg->sbp->f_frsize *
+			    (fattr4_space_free) sarg->sbp->f_bfree;
 		} else {
 			na->space_free =
-			    (fattr4_space_free)sarg->sbp->f_bfree;
+			    (fattr4_space_free) sarg->sbp->f_bfree;
 		}
 		break;
 	case NFS4ATTR_SETIT:
@@ -2396,11 +2408,11 @@ rfs4_fattr4_space_total(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 		ASSERT(sarg->sbp != NULL);
 		if (sarg->sbp->f_blocks != (fsblkcnt64_t)-1) {
 			na->space_total =
-			    (fattr4_space_total)sarg->sbp->f_frsize *
-			    (fattr4_space_total)sarg->sbp->f_blocks;
+			    (fattr4_space_total) sarg->sbp->f_frsize *
+			    (fattr4_space_total) sarg->sbp->f_blocks;
 		} else {
 			na->space_total =
-			    (fattr4_space_total)sarg->sbp->f_blocks;
+			    (fattr4_space_total) sarg->sbp->f_blocks;
 		}
 		break;
 	case NFS4ATTR_SETIT:
@@ -2441,8 +2453,8 @@ rfs4_fattr4_space_used(nfs4_attr_cmd_t cmd, struct nfs4_svgetit_arg *sarg,
 			break;
 		}
 		ASSERT(sarg->vap->va_mask & AT_NBLOCKS);
-		na->space_used =  (fattr4_space_used)DEV_BSIZE *
-		    (fattr4_space_used)sarg->vap->va_nblocks;
+		na->space_used =  (fattr4_space_used) DEV_BSIZE *
+		    (fattr4_space_used) sarg->vap->va_nblocks;
 		break;
 	case NFS4ATTR_SETIT:
 		/*

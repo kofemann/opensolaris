@@ -24,9 +24,7 @@
  * Use is subject to license terms.
  */
 
-	.ident	"%Z%%M%	%I%	%E% SMI"
-
-	.file	"%M%"
+	.file	"memcpy.s"
 
 /*
  * memcpy(s1, s2, len)
@@ -51,11 +49,9 @@
  *	}
  */
 
-#include <sys/asm_linkage.h>
+#include "SYS.h"
 
 	ANSI_PRAGMA_WEAK(memcpy,function)
-
-#include "synonyms.h"
 
 	ENTRY(memcpy)
 	st	%o0, [%sp + 68]		! save des address for return val

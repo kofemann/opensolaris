@@ -325,18 +325,19 @@ extern int spa_open(const char *pool, spa_t **, void *tag);
 extern int spa_get_stats(const char *pool, nvlist_t **config,
     char *altroot, size_t buflen);
 extern int spa_create(const char *pool, nvlist_t *config, nvlist_t *props,
-    const char *history_str);
-extern void spa_check_rootconf(char *devpath, char **the_dev_p,
-    nvlist_t **the_conf_p, uint64_t *the_txg_p);
+    const char *history_str, nvlist_t *zplprops);
+extern int spa_check_rootconf(char *devpath, char *devid,
+    nvlist_t **bestconf, uint64_t *besttxg);
 extern boolean_t spa_rootdev_validate(nvlist_t *nv);
-extern int spa_import_rootpool(char *devpath);
+extern int spa_import_rootpool(char *devpath, char *devid);
 extern int spa_import(const char *pool, nvlist_t *config, nvlist_t *props);
 extern int spa_import_faulted(const char *, nvlist_t *, nvlist_t *);
 extern nvlist_t *spa_tryimport(nvlist_t *tryconfig);
 extern int spa_destroy(char *pool);
-extern int spa_export(char *pool, nvlist_t **oldconfig);
+extern int spa_export(char *pool, nvlist_t **oldconfig, boolean_t force);
 extern int spa_reset(char *pool);
 extern void spa_async_request(spa_t *spa, int flag);
+extern void spa_async_unrequest(spa_t *spa, int flag);
 extern void spa_async_suspend(spa_t *spa);
 extern void spa_async_resume(spa_t *spa);
 extern spa_t *spa_inject_addref(char *pool);
@@ -344,7 +345,6 @@ extern void spa_inject_delref(spa_t *spa);
 
 #define	SPA_ASYNC_REMOVE	0x01
 #define	SPA_ASYNC_RESILVER_DONE	0x02
-#define	SPA_ASYNC_SCRUB		0x04
 #define	SPA_ASYNC_RESILVER	0x08
 #define	SPA_ASYNC_CONFIG_UPDATE	0x10
 
@@ -359,7 +359,7 @@ extern int spa_vdev_setpath(spa_t *spa, uint64_t guid, const char *newpath);
 /* spare state (which is global across all pools) */
 extern void spa_spare_add(vdev_t *vd);
 extern void spa_spare_remove(vdev_t *vd);
-extern boolean_t spa_spare_exists(uint64_t guid, uint64_t *pool);
+extern boolean_t spa_spare_exists(uint64_t guid, uint64_t *pool, int *refcnt);
 extern void spa_spare_activate(vdev_t *vd);
 
 /* L2ARC state (which is global across all pools) */
@@ -371,14 +371,14 @@ extern void spa_l2cache_drop(spa_t *spa);
 extern void spa_l2cache_space_update(vdev_t *vd, int64_t space, int64_t alloc);
 
 /* scrubbing */
-extern int spa_scrub(spa_t *spa, pool_scrub_type_t type, boolean_t force);
-extern void spa_scrub_suspend(spa_t *spa);
-extern void spa_scrub_resume(spa_t *spa);
-extern void spa_scrub_restart(spa_t *spa, uint64_t txg);
+extern int spa_scrub(spa_t *spa, pool_scrub_type_t type);
 
 /* spa syncing */
 extern void spa_sync(spa_t *spa, uint64_t txg); /* only for DMU use */
 extern void spa_sync_allpools(void);
+
+/* spa namespace global mutex */
+extern kmutex_t spa_namespace_lock;
 
 /*
  * SPA configuration functions in spa_config.c
@@ -422,7 +422,7 @@ extern int spa_vdev_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error);
 
 /* Accessor functions */
 extern krwlock_t *spa_traverse_rwlock(spa_t *spa);
-extern int spa_traverse_wanted(spa_t *spa);
+extern boolean_t spa_traverse_wanted(spa_t *spa);
 extern struct dsl_pool *spa_get_dsl(spa_t *spa);
 extern blkptr_t *spa_get_rootblkptr(spa_t *spa);
 extern void spa_set_rootblkptr(spa_t *spa, const blkptr_t *bp);

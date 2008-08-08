@@ -220,6 +220,8 @@ svc_cots_kcreate(file_t *fp, uint_t max_msgsize, struct T_info_ack *tinfo,
 
 	SVCMASTERXPRT *xprt;
 	struct rpcstat *rpcstat;
+	struct T_addr_ack *ack_p;
+	struct strioctl getaddr;
 
 	struct strioctl   getaddr;
 	struct T_addr_ack *ack_p;
@@ -231,13 +233,10 @@ svc_cots_kcreate(file_t *fp, uint_t max_msgsize, struct T_info_ack *tinfo,
 	ASSERT(rpcstat != NULL);
 
 	xprt = kmem_zalloc(sizeof (SVCMASTERXPRT), KM_SLEEP);
+	cmd = kmem_zalloc(sizeof (*cmd) + sizeof (*ack_p)
+	    + (2 * sizeof (sin6_t)), KM_SLEEP);
 
-	/*
-	 * Size such that we can fit the maximum possible reply.
-	 * cots_master_data includes a T_addr_ack struct.
-	 */
-	cmd_sz = sizeof (*cmd) + (2 * sizeof (sin6_t));
-	cmd = kmem_zalloc(cmd_sz, KM_SLEEP);
+	ack_p = (struct T_addr_ack *)&cmd[1];
 
 	if ((tinfo->TIDU_size > COTS_MAX_ALLOCSIZE) ||
 	    (tinfo->TIDU_size <= 0))
@@ -251,12 +250,11 @@ svc_cots_kcreate(file_t *fp, uint_t max_msgsize, struct T_info_ack *tinfo,
 	xprt->xp_p2 = (caddr_t)cmd;
 	cmd->cmd_xprt_started = 0;
 	cmd->cmd_stats = rpcstat->rpc_cots_server;
-	ack_p = &cmd->cmd_addrs;
-	ack_p_sz = sizeof (*ack_p) + (2 * sizeof (sin6_t));
+
 
 	getaddr.ic_cmd = TI_GETINFO;
 	getaddr.ic_timout = -1;
-	getaddr.ic_len = ack_p_sz;
+	getaddr.ic_len = sizeof (*ack_p) + (2 * sizeof (sin6_t));
 	getaddr.ic_dp = (char *)ack_p;
 	ack_p->PRIM_type = T_ADDR_REQ;
 
@@ -264,13 +262,17 @@ svc_cots_kcreate(file_t *fp, uint_t max_msgsize, struct T_info_ack *tinfo,
 	    0, K_TO_K, CRED(), &retval);
 
 	if (err || retval) {
+		kmem_free(cmd, sizeof (*cmd) + sizeof (*ack_p) +
+		    (2 * sizeof (sin6_t)));
 		kmem_free(xprt, sizeof (SVCMASTERXPRT));
-		kmem_free(cmd, cmd_sz);
 		return (err);
 	}
 
 	xprt->xp_rtaddr.maxlen = ack_p->REMADDR_length;
 	xprt->xp_rtaddr.len = ack_p->REMADDR_length;
+	cmd->cmd_src_addr = xprt->xp_rtaddr.buf =
+	    (char *)ack_p + ack_p->REMADDR_offset;
+
 	xprt->xp_rtaddr.buf = (char *)ack_p + ack_p->REMADDR_offset;
 
 	xprt->xp_lcladdr.maxlen = ack_p->LOCADDR_length;
@@ -295,6 +297,7 @@ svc_cots_kcreate(file_t *fp, uint_t max_msgsize, struct T_info_ack *tinfo,
 	}
 
 	*nxprt = xprt;
+
 	return (0);
 }
 
@@ -336,7 +339,9 @@ svc_cots_kdestroy(SVCMASTERXPRT *xprt)
 	mutex_destroy(&xprt->xp_req_lock);
 	mutex_destroy(&xprt->xp_thread_lock);
 
-	kmem_free(cmd, sizeof (*cmd) + (2 * sizeof (sin6_t)));
+	kmem_free(cmd, sizeof (*cmd) + sizeof (struct T_addr_ack) +
+	    (2 * sizeof (sin6_t)));
+
 	kmem_free(xprt, sizeof (SVCMASTERXPRT));
 }
 

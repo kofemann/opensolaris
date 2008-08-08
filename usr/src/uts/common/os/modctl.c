@@ -682,7 +682,7 @@ modctl_load_drvconf(major_t major)
 {
 	int ret;
 
-	if (major != (major_t)-1) {
+	if (major != DDI_MAJOR_T_NONE) {
 		ret = i_ddi_load_drvconf(major);
 		if (ret == 0)
 			i_ddi_bind_devs();
@@ -698,7 +698,7 @@ modctl_load_drvconf(major_t major)
 	 * boot performance.
 	 */
 	if (new_vfs_in_modpath()) {
-		(void) i_ddi_load_drvconf((major_t)-1);
+		(void) i_ddi_load_drvconf(DDI_MAJOR_T_NONE);
 		/*
 		 * If we are still initializing io subsystem,
 		 * load drivers with ddi-forceattach property
@@ -789,7 +789,7 @@ modctl_getmaj(char *uname, uint_t ulen, int *umajorp)
 	if ((retval = copyinstr(uname, name,
 	    (ulen < 256) ? ulen : 256, 0)) != 0)
 		return (retval);
-	if ((major = mod_name_to_major(name)) == (major_t)-1)
+	if ((major = mod_name_to_major(name)) == DDI_MAJOR_T_NONE)
 		return (ENODEV);
 	if (copyout(&major, umajorp, sizeof (major_t)) != 0)
 		return (EFAULT);
@@ -1099,6 +1099,7 @@ modctl_devid2paths(ddi_devid_t udevid, char *uminor_name, uint_t flag,
 	int		devid_len;
 	char		*minor_name = NULL;
 	dev_info_t	*dip = NULL;
+	int		circ;
 	struct ddi_minor_data   *dmdp;
 	char		*path = NULL;
 	int		ulens;
@@ -1185,6 +1186,7 @@ modctl_devid2paths(ddi_devid_t udevid, char *uminor_name, uint_t flag,
 			continue;
 
 		/* loop over all the minor nodes, skipping ones we don't want */
+		ndi_devi_enter(dip, &circ);
 		for (dmdp = DEVI(dip)->devi_minor; dmdp; dmdp = dmdp->next) {
 			if ((dmdp->ddm_dev != devlist[i]) ||
 			    (dmdp->type != DDM_MINOR))
@@ -1227,6 +1229,7 @@ modctl_devid2paths(ddi_devid_t udevid, char *uminor_name, uint_t flag,
 				upaths += len;
 			}
 		}
+		ndi_devi_exit(dip, circ);
 		ddi_release_devi(dip);
 		dip = NULL;
 	}
@@ -1239,8 +1242,10 @@ modctl_devid2paths(ddi_devid_t udevid, char *uminor_name, uint_t flag,
 	}
 	ret = 0;
 
-out:	if (dip)
+out:	if (dip) {
+		ndi_devi_exit(dip, circ);
 		ddi_release_devi(dip);
+	}
 	if (path)
 		kmem_free(path, MAXPATHLEN);
 	if (devlist)
@@ -1692,7 +1697,7 @@ process_minorperm(int cmd, nvlist_t *nvl)
 		is_clone = 0;
 		(void) nvpair_value_string(nvp, &minor);
 		major = ddi_name_to_major(name);
-		if (major != (major_t)-1) {
+		if (major != DDI_MAJOR_T_NONE) {
 			mp = kmem_zalloc(sizeof (*mp), KM_SLEEP);
 			if (minor == NULL || strlen(minor) == 0) {
 				if (moddebug & MODDEBUG_MINORPERM) {
@@ -1714,7 +1719,7 @@ process_minorperm(int cmd, nvlist_t *nvl)
 			 */
 			if (strcmp(name, "clone") == 0) {
 				minmaj = ddi_name_to_major(minor);
-				if (minmaj != (major_t)-1) {
+				if (minmaj != DDI_MAJOR_T_NONE) {
 					if (moddebug & MODDEBUG_MINORPERM) {
 						cmn_err(CE_CONT,
 						    "mapping %s:%s to %s:*\n",
@@ -2442,7 +2447,7 @@ modload_thread(struct loadmt *ltp)
  * returned (-1 on error).
  */
 static int
-modrload(char *subdir, char *filename, struct modctl **rmodp)
+modrload(const char *subdir, const char *filename, struct modctl **rmodp)
 {
 	struct modctl *modp;
 	size_t size;
@@ -2467,7 +2472,7 @@ modrload(char *subdir, char *filename, struct modctl **rmodp)
 		fullname = kmem_zalloc(size, KM_SLEEP);
 		(void) sprintf(fullname, "%s/%s", subdir, filename);
 	} else {
-		fullname = filename;
+		fullname = (char *)filename;
 	}
 
 	modp = mod_hold_installed_mod(fullname, 1, 0, &retval);
@@ -2496,7 +2501,7 @@ done:	if (subdir != NULL)
  * _fini/mod_remove implementation to determine if unload will succeed.
  */
 int
-modload(char *subdir, char *filename)
+modload(const char *subdir, const char *filename)
 {
 	return (modrload(subdir, filename, NULL));
 }
@@ -2575,7 +2580,7 @@ modload_qualified(const char *subdir, const char *p1,
  * Load a module.
  */
 int
-modloadonly(char *subdir, char *filename)
+modloadonly(const char *subdir, const char *filename)
 {
 	struct modctl *modp;
 	char *fullname;
@@ -2590,7 +2595,7 @@ modloadonly(char *subdir, char *filename)
 		fullname = kmem_zalloc(size, KM_SLEEP);
 		(void) sprintf(fullname, "%s/%s", subdir, filename);
 	} else {
-		fullname = filename;
+		fullname = (char *)filename;
 	}
 
 	modp = mod_hold_loaded_mod(NULL, fullname, &retval);
@@ -3463,7 +3468,7 @@ detach_driver(char *name)
 		return (0);
 
 	major = ddi_name_to_major(name);
-	if (major == (major_t)-1)
+	if (major == DDI_MAJOR_T_NONE)
 		return (0);
 
 	error = ndi_devi_unconfig_driver(ddi_root_node(),
@@ -4323,17 +4328,18 @@ gmatch(const char *s, const char *p)
 static int
 dev_alias_minorperm(dev_info_t *dip, char *minor_name, mperm_t *rmp)
 {
-	major_t major;
-	struct devnames *dnp;
-	mperm_t *mp;
-	char *alias = NULL;
-	dev_info_t *cdevi;
-	struct ddi_minor_data *dmd;
+	major_t			major;
+	struct devnames		*dnp;
+	mperm_t			*mp;
+	char			*alias = NULL;
+	dev_info_t		*cdevi;
+	int			circ;
+	struct ddi_minor_data	*dmd;
 
 	major = ddi_name_to_major(minor_name);
 
 	ASSERT(dip == clone_dip);
-	ASSERT(major != (major_t)-1);
+	ASSERT(major != DDI_MAJOR_T_NONE);
 
 	/*
 	 * Attach the driver named by the minor node, then
@@ -4347,14 +4353,14 @@ dev_alias_minorperm(dev_info_t *dip, char *minor_name, mperm_t *rmp)
 	LOCK_DEV_OPS(&dnp->dn_lock);
 
 	if ((cdevi = dnp->dn_head) != NULL) {
-		mutex_enter(&DEVI(cdevi)->devi_lock);
+		ndi_devi_enter(cdevi, &circ);
 		for (dmd = DEVI(cdevi)->devi_minor; dmd; dmd = dmd->next) {
 			if (dmd->type == DDM_ALIAS) {
 				alias = i_ddi_strdup(dmd->ddm_name, KM_SLEEP);
 				break;
 			}
 		}
-		mutex_exit(&DEVI(cdevi)->devi_lock);
+		ndi_devi_exit(cdevi, circ);
 	}
 
 	UNLOCK_DEV_OPS(&dnp->dn_lock);
@@ -4427,7 +4433,7 @@ dev_minorperm(dev_info_t *dip, char *name, mperm_t *rmp)
 	 */
 	if (dip == clone_dip) {
 		major = ddi_name_to_major(minor_name);
-		if (major == (major_t)-1) {
+		if (major == DDI_MAJOR_T_NONE) {
 			if (moddebug & MODDEBUG_MINORPERM)
 				cmn_err(CE_CONT, "dev_minorperm: "
 				    "%s: no such driver\n", minor_name);
@@ -4436,7 +4442,7 @@ dev_minorperm(dev_info_t *dip, char *name, mperm_t *rmp)
 		is_clone = 1;
 	} else {
 		major = ddi_driver_major(dip);
-		ASSERT(major != (major_t)-1);
+		ASSERT(major != DDI_MAJOR_T_NONE);
 	}
 
 	dnp = &devnamesp[major];

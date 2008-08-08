@@ -773,7 +773,7 @@ dump_dsl_dataset(objset_t *os, uint64_t object, void *data, size_t size)
 	nicenum(ds->ds_unique_bytes, unique);
 	sprintf_blkptr(blkbuf, BP_SPRINTF_LEN, &ds->ds_bp);
 
-	(void) printf("\t\tdataset_obj = %llu\n",
+	(void) printf("\t\tdir_obj = %llu\n",
 	    (u_longlong_t)ds->ds_dir_obj);
 	(void) printf("\t\tprev_snap_obj = %llu\n",
 	    (u_longlong_t)ds->ds_prev_snap_obj);
@@ -800,6 +800,10 @@ dump_dsl_dataset(objset_t *os, uint64_t object, void *data, size_t size)
 	    (u_longlong_t)ds->ds_guid);
 	(void) printf("\t\tflags = %llx\n",
 	    (u_longlong_t)ds->ds_flags);
+	(void) printf("\t\tnext_clones_obj = %llu\n",
+	    (u_longlong_t)ds->ds_next_clones_obj);
+	(void) printf("\t\tprops_obj = %llu\n",
+	    (u_longlong_t)ds->ds_props_obj);
 	(void) printf("\t\tbp = %s\n", blkbuf);
 }
 
@@ -1007,6 +1011,8 @@ static object_viewer_t *object_viewer[DMU_OT_NUMTYPES] = {
 	dump_uint8,		/* ZFS SYSACL			*/
 	dump_none,		/* FUID nvlist			*/
 	dump_packed_nvlist,	/* FUID nvlist size		*/
+	dump_zap,		/* DSL dataset next clones	*/
+	dump_zap,		/* DSL scrub queue		*/
 };
 
 static void
@@ -1093,13 +1099,13 @@ dump_object(objset_t *os, uint64_t object, int verbosity, int *print_header)
 		}
 
 		for (;;) {
-			error = dnode_next_offset(dn, B_FALSE, &start, minlvl,
-			    blkfill, 0);
+			error = dnode_next_offset(dn,
+			    0, &start, minlvl, blkfill, 0);
 			if (error)
 				break;
 			end = start;
-			error = dnode_next_offset(dn, B_TRUE, &end, minlvl,
-			    blkfill, 0);
+			error = dnode_next_offset(dn,
+			    DNODE_FIND_HOLE, &end, minlvl, blkfill, 0);
 			nicenum(end - start, segsize);
 			(void) printf("\t\tsegment [%016llx, %016llx)"
 			    " size %5s\n", (u_longlong_t)start,
@@ -1172,6 +1178,9 @@ dump_dir(objset_t *os)
 		    dmu_objset_ds(os)->ds_phys->ds_deadlist_obj, "Deadlist");
 
 	if (verbosity < 2)
+		return;
+
+	if (os->os->os_rootbp->blk_birth == 0)
 		return;
 
 	if (zopt_objects != 0) {
@@ -2315,19 +2324,16 @@ pool_match(nvlist_t *config, char *tgt)
 }
 
 static int
-find_exported_zpool(char *pool_id, nvlist_t **configp, char *vdev_dir,
-    char *cachefile)
+find_exported_zpool(char *pool_id, nvlist_t **configp, char *vdev_dir)
 {
 	nvlist_t *pools;
 	int error = ENOENT;
 	nvlist_t *match = NULL;
 
 	if (vdev_dir != NULL)
-		pools = zpool_find_import(g_zfs, 1, &vdev_dir, B_TRUE);
-	else if (cachefile != NULL)
-		pools = zpool_find_import_cached(g_zfs, cachefile, B_TRUE);
+		pools = zpool_find_import_activeok(g_zfs, 1, &vdev_dir);
 	else
-		pools = zpool_find_import(g_zfs, 0, NULL, B_TRUE);
+		pools = zpool_find_import_activeok(g_zfs, 0, NULL);
 
 	if (pools != NULL) {
 		nvpair_t *elem = NULL;
@@ -2366,7 +2372,6 @@ main(int argc, char **argv)
 	int flag, set;
 	int exported = 0;
 	char *vdev_dir = NULL;
-	char *cachefile = NULL;
 
 	(void) setrlimit(RLIMIT_NOFILE, &rl);
 	(void) enable_extended_FILE_stdio(-1, -1);
@@ -2434,7 +2439,7 @@ main(int argc, char **argv)
 			verbose++;
 			break;
 		case 'U':
-			cachefile = optarg;
+			spa_config_path = optarg;
 			break;
 		case 'e':
 			exported = 1;
@@ -2491,10 +2496,7 @@ main(int argc, char **argv)
 
 	if (argc < 1) {
 		if (dump_opt['C']) {
-			if (cachefile != NULL)
-				dump_cachefile(cachefile);
-			else
-				dump_config(NULL);
+			dump_cachefile(spa_config_path);
 			return (0);
 		}
 		usage();
@@ -2530,7 +2532,7 @@ main(int argc, char **argv)
 		dump_config(argv[0]);
 
 	error = 0;
-	if (exported || cachefile != NULL) {
+	if (exported) {
 		/*
 		 * Check to see if the name refers to an exported zpool
 		 */
@@ -2540,8 +2542,7 @@ main(int argc, char **argv)
 		if ((slash = strchr(argv[0], '/')) != NULL)
 			*slash = '\0';
 
-		error = find_exported_zpool(argv[0], &exported_conf, vdev_dir,
-		    cachefile);
+		error = find_exported_zpool(argv[0], &exported_conf, vdev_dir);
 		if (error == 0) {
 			nvlist_t *nvl = NULL;
 

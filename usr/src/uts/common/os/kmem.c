@@ -985,6 +985,7 @@ int kmem_flags = KMF_AUDIT | KMF_DEADBEEF | KMF_REDZONE | KMF_CONTENTS;
 int kmem_flags = 0;
 #endif
 int kmem_ready;
+static boolean_t kmem_mp_init_done = B_FALSE;
 
 static kmem_cache_t	*kmem_slab_cache;
 static kmem_cache_t	*kmem_bufctl_cache;
@@ -1056,6 +1057,7 @@ static struct {
 	uint64_t kms_disbelief;
 	uint64_t kms_already_pending;
 	uint64_t kms_callback_alloc_fail;
+	uint64_t kms_callback_taskq_fail;
 	uint64_t kms_endscan_slab_destroyed;
 	uint64_t kms_endscan_nomem;
 	uint64_t kms_endscan_slab_all_used;
@@ -3148,7 +3150,7 @@ kmem_partial_slab_cmp(const void *p0, const void *p1)
 static void
 kmem_check_destructor(kmem_cache_t *cp)
 {
-	ASSERT(taskq_member(kmem_move_taskq, curthread));
+	void *buf;
 
 	if (cp->cache_destructor == NULL)
 		return;
@@ -3159,7 +3161,7 @@ kmem_check_destructor(kmem_cache_t *cp)
 	 * Allocate from the slab layer to ensure that the client has not
 	 * touched the buffer.
 	 */
-	void *buf = kmem_slab_alloc(cp, KM_NOSLEEP);
+	buf = kmem_slab_alloc(cp, KM_NOSLEEP);
 	if (buf == NULL)
 		return;
 
@@ -3473,10 +3475,8 @@ kmem_cache_create(
 	if (kmem_ready)
 		kmem_cache_magazine_enable(cp);
 
-	if (kmem_move_taskq != NULL && cp->cache_destructor != NULL) {
-		(void) taskq_dispatch(kmem_move_taskq,
-		    (task_func_t *)kmem_check_destructor, cp,
-		    TQ_NOSLEEP);
+	if (kmem_mp_init_done && cp->cache_destructor != NULL) {
+		kmem_check_destructor(cp);
 	}
 
 	return (cp);
@@ -3983,8 +3983,6 @@ kmem_thread_init(void)
 	kmem_move_init();
 	kmem_taskq = taskq_create_instance("kmem_taskq", 0, 1, minclsyspri,
 	    300, INT_MAX, TASKQ_PREPOPULATE);
-	kmem_cache_applyall(kmem_check_destructor, kmem_move_taskq,
-	    TQ_NOSLEEP);
 }
 
 void
@@ -3995,6 +3993,13 @@ kmem_mp_init(void)
 	mutex_exit(&cpu_lock);
 
 	kmem_update_timeout(NULL);
+
+	kmem_mp_init_done = B_TRUE;
+	/*
+	 * Defer checking destructors until now to avoid constructor
+	 * dependencies during startup.
+	 */
+	kmem_cache_applyall(kmem_check_destructor, NULL, 0);
 }
 
 /*
@@ -4434,10 +4439,11 @@ kmem_move_begin(kmem_cache_t *cp, kmem_slab_t *sp, void *buf, int flags)
 
 	if (!taskq_dispatch(kmem_move_taskq, (task_func_t *)kmem_move_buffer,
 	    callback, TQ_NOSLEEP)) {
+		KMEM_STAT_ADD(kmem_move_stats.kms_callback_taskq_fail);
 		mutex_enter(&cp->cache_lock);
 		avl_remove(&cp->cache_defrag->kmd_moves_pending, callback);
 		mutex_exit(&cp->cache_lock);
-		kmem_slab_free_constructed(cp, to_buf, B_FALSE);
+		kmem_slab_free(cp, to_buf);
 		kmem_cache_free(kmem_move_cache, callback);
 		return (B_FALSE);
 	}

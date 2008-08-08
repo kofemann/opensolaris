@@ -112,15 +112,19 @@ typedef struct cmd_table {
 } cmd_table_t;
 
 admin_table_t admin_prop_list[] = {
-	{XML_ELEMENT_BASEDIR,		update_basedir},
-	{XML_ELEMENT_CHAPSECRET,	0},
-	{XML_ELEMENT_CHAPNAME,		0},
-	{XML_ELEMENT_RAD_ACCESS,	0},
-	{XML_ELEMENT_RAD_SERV,		valid_radius_srv},
-	{XML_ELEMENT_RAD_SECRET,	0},
-	{XML_ELEMENT_ISNS_ACCESS,	0},
-	{XML_ELEMENT_ISNS_SERV,		valid_isns_srv},
-	{XML_ELEMENT_FAST,		0},
+	{XML_ELEMENT_BASEDIR,		update_basedir,	NULL},
+	{XML_ELEMENT_CHAPSECRET,	0,	NULL},
+	{XML_ELEMENT_CHAPNAME,		0,	NULL},
+	{XML_ELEMENT_RAD_ACCESS,	0,	NULL},
+	{XML_ELEMENT_RAD_SERV,		valid_radius_srv, NULL},
+	{XML_ELEMENT_RAD_SECRET,	0,	NULL},
+	{XML_ELEMENT_ISNS_ACCESS,	0,	NULL},
+	{XML_ELEMENT_ISNS_SERV,		valid_isns_srv,	NULL},
+	{XML_ELEMENT_FAST,		0,	NULL},
+	{XML_ELEMENT_DELETE_CHAPSECRET,	0,	XML_ELEMENT_CHAPSECRET},
+	{XML_ELEMENT_DELETE_CHAPNAME,	0,	XML_ELEMENT_CHAPNAME},
+	{XML_ELEMENT_DELETE_RAD_SECRET,	0,	XML_ELEMENT_RAD_SECRET},
+	{XML_ELEMENT_DELETE_RAD_SERV,	0,	XML_ELEMENT_RAD_SERV},
 	{0,				0}
 };
 
@@ -290,9 +294,12 @@ logout_targ(char *targ)
 
 	(void) pthread_mutex_lock(&port_mutex);
 	for (conn = conn_head; conn; conn = conn->c_next) {
-		if ((conn->c_state == S5_LOGGED_IN) &&
-		    (strcmp(conn->c_sess->s_t_name, targ) == 0)) {
+		if (conn->c_state != S5_LOGGED_IN)
+			continue;
+		if (conn->c_sess->s_type == SessionDiscovery)
+			continue;
 
+		if (strcmp(conn->c_sess->s_t_name, targ) == 0) {
 			queue_message_set(conn->c_dataq, 0, msg_mgmt_rqst, &m);
 			msg_sent++;
 		}
@@ -431,6 +438,14 @@ server_for_door(void *cookie, char *argp, size_t arg_size, door_desc_t *dp,
 	 */
 	if (door_ucred(&uc) != 0) {
 		xml_rtn_msg(&err_rply, ERR_BAD_CREDS);
+		(void) strlcpy(argp, err_rply, arg_size);
+		free(err_rply);
+		(void) door_return(argp, strlen(argp) + 1, NULL, 0);
+		return;
+	}
+
+	if (validate_xml(argp) != True) {
+		xml_rtn_msg(&err_rply, ERR_INVALID_XML_REQUEST);
 		strlcpy(argp, err_rply, arg_size);
 		free(err_rply);
 		(void) door_return(argp, strlen(argp) + 1, NULL, 0);
@@ -455,10 +470,10 @@ server_for_door(void *cookie, char *argp, size_t arg_size, door_desc_t *dp,
 
 			queue_message_set(mgmtq, 0, msg_mgmt_rqst, &m);
 			if ((msg = queue_message_get(m.m_q)) == NULL) {
-				xmlFreeTextReader(r);
-				xmlCleanupParser();
-				ucred_free(uc);
-				door_return("", 1, NULL, 0);
+				(void) xmlFreeTextReader(r);
+				(void) xmlCleanupParser();
+				(void) ucred_free(uc);
+				(void) door_return("", 1, NULL, 0);
 			}
 
 			/*
@@ -493,7 +508,7 @@ server_for_door(void *cookie, char *argp, size_t arg_size, door_desc_t *dp,
 	if (node != NULL)
 		tgt_node_free(node);
 	if (err_rply != NULL) {
-		strlcpy(argp, err_rply, arg_size);
+		(void) strlcpy(argp, err_rply, arg_size);
 		free(err_rply);
 	}
 	if (m.m_q != NULL)
@@ -793,7 +808,7 @@ main(int argc, char **argv)
 	port_init();
 	queue_init();
 	util_init();
-	isns_init(q);
+	(void) isns_init(q);
 
 	/*
 	 * If there's no MAC address currently available don't worry about

@@ -501,8 +501,12 @@ zfs_read(vnode_t *vp, uio_t *uio, int ioflag, cred_t *cr, caller_context_t *ct)
 			error = mappedread(vp, nbytes, uio);
 		else
 			error = dmu_read_uio(os, zp->z_id, uio, nbytes);
-		if (error)
+		if (error) {
+			/* convert checksum errors into IO errors */
+			if (error == ECKSUM)
+				error = EIO;
 			break;
+		}
 
 		n -= nbytes;
 	}
@@ -612,16 +616,8 @@ zfs_write(vnode_t *vp, uio_t *uio, int ioflag, cred_t *cr, caller_context_t *ct)
 	ssize_t		n, nbytes;
 	rl_t		*rl;
 	int		max_blksz = zfsvfs->z_max_blksz;
-	uint64_t	pflags = zp->z_phys->zp_flags;
+	uint64_t	pflags;
 	int		error;
-
-	/*
-	 * If immutable or not appending then return EPERM
-	 */
-	if ((pflags & (ZFS_IMMUTABLE | ZFS_READONLY)) ||
-	    ((pflags & ZFS_APPENDONLY) && !(ioflag & FAPPEND) &&
-	    (uio->uio_loffset < zp->z_phys->zp_size)))
-		return (EPERM);
 
 	/*
 	 * Fasttrack empty write
@@ -635,6 +631,18 @@ zfs_write(vnode_t *vp, uio_t *uio, int ioflag, cred_t *cr, caller_context_t *ct)
 
 	ZFS_ENTER(zfsvfs);
 	ZFS_VERIFY_ZP(zp);
+
+	/*
+	 * If immutable or not appending then return EPERM
+	 */
+	pflags = zp->z_phys->zp_flags;
+	if ((pflags & (ZFS_IMMUTABLE | ZFS_READONLY)) ||
+	    ((pflags & ZFS_APPENDONLY) && !(ioflag & FAPPEND) &&
+	    (uio->uio_loffset < zp->z_phys->zp_size))) {
+		ZFS_EXIT(zfsvfs);
+		return (EPERM);
+	}
+
 	zilog = zfsvfs->z_log;
 
 	/*
@@ -1300,15 +1308,10 @@ top:
 		 */
 		if ((ZTOV(zp)->v_type == VREG) &&
 		    (vap->va_mask & AT_SIZE) && (vap->va_size == 0)) {
+			/* we can't hold any locks when calling zfs_freesp() */
+			zfs_dirent_unlock(dl);
+			dl = NULL;
 			error = zfs_freesp(zp, 0, 0, mode, TRUE);
-			if (error == ERESTART &&
-			    zfsvfs->z_assign == TXG_NOWAIT) {
-				/* NB: we already did dmu_tx_wait() */
-				zfs_dirent_unlock(dl);
-				VN_RELE(ZTOV(zp));
-				goto top;
-			}
-
 			if (error == 0) {
 				vnevent_create(ZTOV(zp), ct);
 			}
@@ -1375,7 +1378,7 @@ zfs_remove(vnode_t *dvp, char *name, cred_t *cr, caller_context_t *ct,
 	zfs_dirlock_t	*dl;
 	dmu_tx_t	*tx;
 	boolean_t	may_delete_now, delete_now = FALSE;
-	boolean_t	unlinked;
+	boolean_t	unlinked, toobig = FALSE;
 	uint64_t	txtype;
 	pathname_t	*realnmp = NULL;
 	pathname_t	realnm;
@@ -1438,8 +1441,13 @@ top:
 	tx = dmu_tx_create(zfsvfs->z_os);
 	dmu_tx_hold_zap(tx, dzp->z_id, FALSE, name);
 	dmu_tx_hold_bonus(tx, zp->z_id);
-	if (may_delete_now)
-		dmu_tx_hold_free(tx, zp->z_id, 0, DMU_OBJECT_END);
+	if (may_delete_now) {
+		toobig =
+		    zp->z_phys->zp_size > zp->z_blksz * DMU_MAX_DELETEBLKCNT;
+		/* if the file is too big, only hold_free a token amount */
+		dmu_tx_hold_free(tx, zp->z_id, 0,
+		    (toobig ? DMU_MAX_ACCESS : DMU_OBJECT_END));
+	}
 
 	/* are there any extended attributes? */
 	if ((xattr_obj = zp->z_phys->zp_xattr) != 0) {
@@ -1483,7 +1491,7 @@ top:
 
 	if (unlinked) {
 		mutex_enter(&vp->v_lock);
-		delete_now = may_delete_now &&
+		delete_now = may_delete_now && !toobig &&
 		    vp->v_count == 1 && !vn_has_cached_data(vp) &&
 		    zp->z_phys->zp_xattr == xattr_obj &&
 		    zp->z_phys->zp_acl.z_acl_extern_obj == acl_obj;
@@ -1529,7 +1537,7 @@ out:
 	if (!delete_now) {
 		VN_RELE(vp);
 	} else if (xzp) {
-		/* this rele delayed to prevent nesting transactions */
+		/* this rele is delayed to prevent nesting transactions */
 		VN_RELE(ZTOV(xzp));
 	}
 
@@ -2447,10 +2455,8 @@ top:
 		 * block if there are locks present... this
 		 * should be addressed in openat().
 		 */
-		do {
-			err = zfs_freesp(zp, vap->va_size, 0, 0, FALSE);
-			/* NB: we already did dmu_tx_wait() if necessary */
-		} while (err == ERESTART && zfsvfs->z_assign == TXG_NOWAIT);
+		/* XXX - would it be OK to generate a log record here? */
+		err = zfs_freesp(zp, vap->va_size, 0, 0, FALSE);
 		if (err) {
 			ZFS_EXIT(zfsvfs);
 			return (err);
@@ -2721,6 +2727,7 @@ top:
 	if (mask & AT_MTIME)
 		ZFS_TIME_ENCODE(&vap->va_mtime, pzp->zp_mtime);
 
+	/* XXX - shouldn't this be done *before* the ATIME/MTIME checks? */
 	if (mask & AT_SIZE)
 		zfs_time_stamper_locked(zp, CONTENT_MODIFIED, tx);
 	else if (mask != 0)
@@ -3136,6 +3143,9 @@ top:
 			zfs_log_rename(zilog, tx,
 			    TX_RENAME | (flags & FIGNORECASE ? TX_CI : 0),
 			    sdzp, sdl->dl_name, tdzp, tdl->dl_name, szp);
+
+			/* Update path information for the target vnode */
+			vn_renamepath(tdvp, ZTOV(szp), tnm, strlen(tnm));
 		}
 	}
 
@@ -3891,6 +3901,9 @@ zfs_fillpage(vnode_t *vp, u_offset_t off, struct seg *seg,
 		if (err) {
 			/* On error, toss the entire kluster */
 			pvn_read_done(pp, B_ERROR);
+			/* convert checksum errors into IO errors */
+			if (err == ECKSUM)
+				err = EIO;
 			return (err);
 		}
 		cur_pp = cur_pp->p_next;
@@ -4229,7 +4242,6 @@ zfs_space(vnode_t *vp, int cmd, flock64_t *bfp, int flag,
 	ZFS_ENTER(zfsvfs);
 	ZFS_VERIFY_ZP(zp);
 
-top:
 	if (cmd != F_FREESP) {
 		ZFS_EXIT(zfsvfs);
 		return (EINVAL);
@@ -4248,10 +4260,7 @@ top:
 	off = bfp->l_start;
 	len = bfp->l_len; /* 0 means from off to end of file */
 
-	do {
-		error = zfs_freesp(zp, off, len, flag, TRUE);
-		/* NB: we already did dmu_tx_wait() if necessary */
-	} while (error == ERESTART && zfsvfs->z_assign == TXG_NOWAIT);
+	error = zfs_freesp(zp, off, len, flag, TRUE);
 
 	ZFS_EXIT(zfsvfs);
 	return (error);

@@ -88,6 +88,7 @@ typedef struct
 	char	m_machine[MAXNAMELEN];	/* machine name e.g. sun4u */
 	uint_t	m_num_fpus;	/* num of fpus in the system */
 	uint_t	m_num_on_fpuids;	/* num of online cpus */
+	int	m_max_cpuid;	/* maximum cpuid for this system */
 	fps_cpu_t	*m_cpus;	/* array of cpus to test */
 	int		m_cpuids_size;	/* size of previous array */
 	int	m_num_cpus_to_test;	/* Num cpus to run test */
@@ -147,8 +148,6 @@ extern int  sys_pm_state;	/* fpsd_esutil.c */
 /* Util Functions */
 
 extern  uint64_t  get_free_swap(void);	/* fpsd_util.c */
-extern  uint64_t  get_total_swap(void);	/* fpsd_util.c */
-extern  uint64_t	get_physmem(void);	/* fpsd_util.c */
 extern  void	fps_wait_secs(int secs);	/* fpsd_util.c */
 
 extern  void  *test_fpu_thr(void *arg);	/* in fpsd_sched.c */

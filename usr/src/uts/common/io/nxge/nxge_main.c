@@ -146,13 +146,42 @@ nxge_rxbuf_type_t nxge_rx_buf_size_type = RCR_PKTBUFSZ_0;
 nxge_rxbuf_threshold_t nxge_rx_threshold_lo = NXGE_RX_COPY_3;
 
 /* Use kmem_alloc() to allocate data buffers. */
-#if !defined(__i386)
+#if defined(_BIG_ENDIAN)
 uint32_t	nxge_use_kmem_alloc = 1;
 #else
 uint32_t	nxge_use_kmem_alloc = 0;
 #endif
 
 rtrace_t npi_rtracebuf;
+
+/*
+ * The hardware sometimes fails to allow enough time for the link partner
+ * to send an acknowledgement for packets that the hardware sent to it. The
+ * hardware resends the packets earlier than it should be in those instances.
+ * This behavior caused some switches to acknowledge the wrong packets
+ * and it triggered the fatal error.
+ * This software workaround is to set the replay timer to a value
+ * suggested by the hardware team.
+ *
+ * PCI config space replay timer register:
+ *     The following replay timeout value is 0xc
+ *     for bit 14:18.
+ */
+#define	PCI_REPLAY_TIMEOUT_CFG_OFFSET	0xb8
+#define	PCI_REPLAY_TIMEOUT_SHIFT	14
+
+uint32_t	nxge_set_replay_timer = 1;
+uint32_t	nxge_replay_timeout = 0xc;
+
+/*
+ * The transmit serialization sometimes causes
+ * longer sleep before calling the driver transmit
+ * function as it sleeps longer than it should.
+ * The performace group suggests that a time wait tunable
+ * can be used to set the maximum wait time when needed
+ * and the default is set to 1 tick.
+ */
+uint32_t	nxge_tx_serial_maxsleep = 1;
 
 #if	defined(sun4v)
 /*
@@ -281,6 +310,7 @@ static int nxge_get_priv_prop(nxge_t *, const char *, uint_t, uint_t,
 static int nxge_get_def_val(nxge_t *, mac_prop_id_t, uint_t, void *);
 
 static void nxge_niu_peu_reset(p_nxge_t nxgep);
+static void nxge_set_pci_replay_timeout(nxge_t *);
 
 mac_priv_prop_t nxge_priv_props[] = {
 	{"_adv_10gfdx_cap", MAC_PROP_PERM_RW},
@@ -594,6 +624,13 @@ nxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		goto nxge_attach_fail4;
 	}
 
+	/*
+	 * Software workaround: set the replay timer.
+	 */
+	if (nxgep->niu_type != N2_NIU) {
+		nxge_set_pci_replay_timeout(nxgep);
+	}
+
 #if defined(sun4v)
 	/* This is required by nxge_hio_init(), which follows. */
 	if ((status = nxge_hsvc_register(nxgep)) != DDI_SUCCESS)
@@ -796,7 +833,7 @@ nxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	 */
 	nxge_intrs_enable(nxgep);
 
-	// If a guest, register with vio_net instead.
+	/* If a guest, register with vio_net instead. */
 	if ((status = nxge_mac_register(nxgep)) != NXGE_OK) {
 		NXGE_DEBUG_MSG((nxgep, DDI_CTL,
 		    "unable to register to mac layer (%d)", status));
@@ -808,6 +845,7 @@ nxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	NXGE_DEBUG_MSG((nxgep, DDI_CTL,
 	    "registered to mac (instance %d)", instance));
 
+	/* nxge_link_monitor calls xcvr.check_link recursively */
 	(void) nxge_link_monitor(nxgep, LINK_MONITOR_START);
 
 	goto nxge_attach_exit;
@@ -1091,6 +1129,10 @@ nxge_map_regs(p_nxge_t nxgep)
 	NXGE_DEBUG_MSG((nxgep, DDI_CTL,
 	    "nxge_map_regs: pathname devname %s", devname));
 
+	/*
+	 * The driver is running on a N2-NIU system if devname is something
+	 * like "/niu@80/network@0"
+	 */
 	if (strstr(devname, n2_siu_name)) {
 		/* N2/NIU */
 		nxgep->niu_type = N2_NIU;
@@ -4533,20 +4575,20 @@ nxge_param_locked(mac_prop_id_t pr_num)
 	 * the device is in any sort of loopback mode ...
 	 */
 	switch (pr_num) {
-		case DLD_PROP_ADV_1000FDX_CAP:
-		case DLD_PROP_EN_1000FDX_CAP:
-		case DLD_PROP_ADV_1000HDX_CAP:
-		case DLD_PROP_EN_1000HDX_CAP:
-		case DLD_PROP_ADV_100FDX_CAP:
-		case DLD_PROP_EN_100FDX_CAP:
-		case DLD_PROP_ADV_100HDX_CAP:
-		case DLD_PROP_EN_100HDX_CAP:
-		case DLD_PROP_ADV_10FDX_CAP:
-		case DLD_PROP_EN_10FDX_CAP:
-		case DLD_PROP_ADV_10HDX_CAP:
-		case DLD_PROP_EN_10HDX_CAP:
-		case DLD_PROP_AUTONEG:
-		case DLD_PROP_FLOWCTRL:
+		case MAC_PROP_ADV_1000FDX_CAP:
+		case MAC_PROP_EN_1000FDX_CAP:
+		case MAC_PROP_ADV_1000HDX_CAP:
+		case MAC_PROP_EN_1000HDX_CAP:
+		case MAC_PROP_ADV_100FDX_CAP:
+		case MAC_PROP_EN_100FDX_CAP:
+		case MAC_PROP_ADV_100HDX_CAP:
+		case MAC_PROP_EN_100HDX_CAP:
+		case MAC_PROP_ADV_10FDX_CAP:
+		case MAC_PROP_EN_10FDX_CAP:
+		case MAC_PROP_ADV_10HDX_CAP:
+		case MAC_PROP_EN_10HDX_CAP:
+		case MAC_PROP_AUTONEG:
+		case MAC_PROP_FLOWCTRL:
 			return (B_TRUE);
 	}
 	return (B_FALSE);
@@ -4585,48 +4627,48 @@ nxge_m_setprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 
 	val = *(uint8_t *)pr_val;
 	switch (pr_num) {
-		case DLD_PROP_EN_1000FDX_CAP:
+		case MAC_PROP_EN_1000FDX_CAP:
 			nxgep->param_en_1000fdx = val;
 			param_arr[param_anar_1000fdx].value = val;
 
 			goto reprogram;
 
-		case DLD_PROP_EN_100FDX_CAP:
+		case MAC_PROP_EN_100FDX_CAP:
 			nxgep->param_en_100fdx = val;
 			param_arr[param_anar_100fdx].value = val;
 
 			goto reprogram;
 
-		case DLD_PROP_EN_10FDX_CAP:
+		case MAC_PROP_EN_10FDX_CAP:
 			nxgep->param_en_10fdx = val;
 			param_arr[param_anar_10fdx].value = val;
 
 			goto reprogram;
 
-		case DLD_PROP_EN_1000HDX_CAP:
-		case DLD_PROP_EN_100HDX_CAP:
-		case DLD_PROP_EN_10HDX_CAP:
-		case DLD_PROP_ADV_1000FDX_CAP:
-		case DLD_PROP_ADV_1000HDX_CAP:
-		case DLD_PROP_ADV_100FDX_CAP:
-		case DLD_PROP_ADV_100HDX_CAP:
-		case DLD_PROP_ADV_10FDX_CAP:
-		case DLD_PROP_ADV_10HDX_CAP:
-		case DLD_PROP_STATUS:
-		case DLD_PROP_SPEED:
-		case DLD_PROP_DUPLEX:
+		case MAC_PROP_EN_1000HDX_CAP:
+		case MAC_PROP_EN_100HDX_CAP:
+		case MAC_PROP_EN_10HDX_CAP:
+		case MAC_PROP_ADV_1000FDX_CAP:
+		case MAC_PROP_ADV_1000HDX_CAP:
+		case MAC_PROP_ADV_100FDX_CAP:
+		case MAC_PROP_ADV_100HDX_CAP:
+		case MAC_PROP_ADV_10FDX_CAP:
+		case MAC_PROP_ADV_10HDX_CAP:
+		case MAC_PROP_STATUS:
+		case MAC_PROP_SPEED:
+		case MAC_PROP_DUPLEX:
 			err = EINVAL; /* cannot set read-only properties */
 			NXGE_DEBUG_MSG((nxgep, NXGE_CTL,
 			    "==> nxge_m_setprop:  read only property %d",
 			    pr_num));
 			break;
 
-		case DLD_PROP_AUTONEG:
+		case MAC_PROP_AUTONEG:
 			param_arr[param_autoneg].value = val;
 
 			goto reprogram;
 
-		case DLD_PROP_MTU:
+		case MAC_PROP_MTU:
 			if (nxgep->nxge_mac_state == NXGE_MAC_STARTED) {
 				err = EBUSY;
 				break;
@@ -4678,7 +4720,7 @@ nxge_m_setprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 			    new_mtu, nxgep->mac.maxframesize));
 			break;
 
-		case DLD_PROP_FLOWCTRL:
+		case MAC_PROP_FLOWCTRL:
 			bcopy(pr_val, &fl, sizeof (fl));
 			switch (fl) {
 			default:
@@ -4706,7 +4748,7 @@ reprogram:
 				}
 			}
 			break;
-		case DLD_PROP_PRIVATE:
+		case MAC_PROP_PRIVATE:
 			NXGE_DEBUG_MSG((nxgep, NXGE_CTL,
 			    "==> nxge_m_setprop: private property"));
 			err = nxge_set_priv_prop(nxgep, pr_name, pr_valsize,
@@ -4736,7 +4778,7 @@ nxge_m_getprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 	link_flowctrl_t	fl;
 	uint64_t	tmp = 0;
 	link_state_t	ls;
-	boolean_t	is_default = (pr_flags & DLD_DEFAULT);
+	boolean_t	is_default = (pr_flags & MAC_PROP_DEFAULT);
 
 	NXGE_DEBUG_MSG((nxgep, NXGE_CTL,
 	    "==> nxge_m_getprop: pr_num %d", pr_num));
@@ -4744,28 +4786,28 @@ nxge_m_getprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 	if (pr_valsize == 0)
 		return (EINVAL);
 
-	if ((is_default) && (pr_num != DLD_PROP_PRIVATE)) {
+	if ((is_default) && (pr_num != MAC_PROP_PRIVATE)) {
 		err = nxge_get_def_val(nxgep, pr_num, pr_valsize, pr_val);
 		return (err);
 	}
 
 	bzero(pr_val, pr_valsize);
 	switch (pr_num) {
-		case DLD_PROP_DUPLEX:
+		case MAC_PROP_DUPLEX:
 			*(uint8_t *)pr_val = statsp->mac_stats.link_duplex;
 			NXGE_DEBUG_MSG((nxgep, NXGE_CTL,
 			    "==> nxge_m_getprop: duplex mode %d",
 			    *(uint8_t *)pr_val));
 			break;
 
-		case DLD_PROP_SPEED:
+		case MAC_PROP_SPEED:
 			if (pr_valsize < sizeof (uint64_t))
 				return (EINVAL);
 			tmp = statsp->mac_stats.link_speed * 1000000ull;
 			bcopy(&tmp, pr_val, sizeof (tmp));
 			break;
 
-		case DLD_PROP_STATUS:
+		case MAC_PROP_STATUS:
 			if (pr_valsize < sizeof (link_state_t))
 				return (EINVAL);
 			if (!statsp->mac_stats.link_up)
@@ -4775,12 +4817,12 @@ nxge_m_getprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 			bcopy(&ls, pr_val, sizeof (ls));
 			break;
 
-		case DLD_PROP_AUTONEG:
+		case MAC_PROP_AUTONEG:
 			*(uint8_t *)pr_val =
 			    param_arr[param_autoneg].value;
 			break;
 
-		case DLD_PROP_FLOWCTRL:
+		case MAC_PROP_FLOWCTRL:
 			if (pr_valsize < sizeof (link_flowctrl_t))
 				return (EINVAL);
 
@@ -4791,43 +4833,43 @@ nxge_m_getprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 			bcopy(&fl, pr_val, sizeof (fl));
 			break;
 
-		case DLD_PROP_ADV_1000FDX_CAP:
+		case MAC_PROP_ADV_1000FDX_CAP:
 			*(uint8_t *)pr_val =
 			    param_arr[param_anar_1000fdx].value;
 			break;
 
-		case DLD_PROP_EN_1000FDX_CAP:
+		case MAC_PROP_EN_1000FDX_CAP:
 			*(uint8_t *)pr_val = nxgep->param_en_1000fdx;
 			break;
 
-		case DLD_PROP_ADV_100FDX_CAP:
+		case MAC_PROP_ADV_100FDX_CAP:
 			*(uint8_t *)pr_val =
 			    param_arr[param_anar_100fdx].value;
 			break;
 
-		case DLD_PROP_EN_100FDX_CAP:
+		case MAC_PROP_EN_100FDX_CAP:
 			*(uint8_t *)pr_val = nxgep->param_en_100fdx;
 			break;
 
-		case DLD_PROP_ADV_10FDX_CAP:
+		case MAC_PROP_ADV_10FDX_CAP:
 			*(uint8_t *)pr_val =
 			    param_arr[param_anar_10fdx].value;
 			break;
 
-		case DLD_PROP_EN_10FDX_CAP:
+		case MAC_PROP_EN_10FDX_CAP:
 			*(uint8_t *)pr_val = nxgep->param_en_10fdx;
 			break;
 
-		case DLD_PROP_EN_1000HDX_CAP:
-		case DLD_PROP_EN_100HDX_CAP:
-		case DLD_PROP_EN_10HDX_CAP:
-		case DLD_PROP_ADV_1000HDX_CAP:
-		case DLD_PROP_ADV_100HDX_CAP:
-		case DLD_PROP_ADV_10HDX_CAP:
+		case MAC_PROP_EN_1000HDX_CAP:
+		case MAC_PROP_EN_100HDX_CAP:
+		case MAC_PROP_EN_10HDX_CAP:
+		case MAC_PROP_ADV_1000HDX_CAP:
+		case MAC_PROP_ADV_100HDX_CAP:
+		case MAC_PROP_ADV_10HDX_CAP:
 			err = ENOTSUP;
 			break;
 
-		case DLD_PROP_PRIVATE:
+		case MAC_PROP_PRIVATE:
 			err = nxge_get_priv_prop(nxgep, pr_name, pr_flags,
 			    pr_valsize, pr_val);
 			break;
@@ -5116,6 +5158,10 @@ nxge_set_priv_prop(p_nxge_t nxgep, const char *pr_name, uint_t pr_valsize,
 
 		return (err);
 	}
+	/*
+	 * Commands like "ndd -set /dev/nxge0 adv_10gfdx_cap 1" cause the
+	 * following code to be executed.
+	 */
 	if (strcmp(pr_name, "_adv_10gfdx_cap") == 0) {
 		err = nxge_param_set_mac(nxgep, NULL, NULL, (char *)pr_val,
 		    (caddr_t)&param_arr[param_anar_10gfdx]);
@@ -5138,7 +5184,7 @@ nxge_get_priv_prop(p_nxge_t nxgep, const char *pr_name, uint_t pr_flags,
 	char		valstr[MAXNAMELEN];
 	int		err = EINVAL;
 	uint_t		strsize;
-	boolean_t	is_default = (pr_flags & DLD_DEFAULT);
+	boolean_t	is_default = (pr_flags & MAC_PROP_DEFAULT);
 
 	NXGE_DEBUG_MSG((nxgep, NXGE_CTL,
 	    "==> nxge_get_priv_prop: property %s", pr_name));
@@ -5207,6 +5253,16 @@ nxge_get_priv_prop(p_nxge_t nxgep, const char *pr_name, uint_t pr_flags,
 		case PORT_1G_SERDES:
 			(void) snprintf(valstr, sizeof (valstr), "1G serdes %s",
 			    nxgep->hot_swappable_phy ?
+			    "[hot swappable]" : "");
+			break;
+		case PORT_1G_TN1010:
+			(void) snprintf(valstr, sizeof (valstr),
+			    "1G TN1010 copper %s", nxgep->hot_swappable_phy ?
+			    "[hot swappable]" : "");
+			break;
+		case PORT_10G_TN1010:
+			(void) snprintf(valstr, sizeof (valstr),
+			    "10G TN1010 copper %s", nxgep->hot_swappable_phy ?
 			    "[hot swappable]" : "");
 			break;
 		case PORT_1G_RGMII_FIBER:
@@ -6468,6 +6524,8 @@ static void
 nxge_uninit_common_dev(p_nxge_t nxgep)
 {
 	p_nxge_hw_list_t	hw_p, h_hw_p;
+	p_nxge_dma_pt_cfg_t	p_dma_cfgp;
+	p_nxge_hw_pt_cfg_t	p_cfgp;
 	dev_info_t 		*p_dip;
 
 	NXGE_DEBUG_MSG((nxgep, MOD_CTL, "==> nxge_uninit_common_device"));
@@ -6494,6 +6552,17 @@ nxge_uninit_common_dev(p_nxge_t nxgep)
 			    hw_p,
 			    p_dip,
 			    hw_p->ndevs));
+
+			/*
+			 * Release the RDC table, a shared resoruce
+			 * of the nxge hardware.  The RDC table was
+			 * assigned to this instance of nxge in
+			 * nxge_use_cfg_dma_config().
+			 */
+			p_dma_cfgp = (p_nxge_dma_pt_cfg_t)&nxgep->pt_config;
+			p_cfgp = (p_nxge_hw_pt_cfg_t)&p_dma_cfgp->hw_config;
+			(void) nxge_fzc_rdc_tbl_unbind(nxgep,
+			    p_cfgp->def_mac_rxdma_grpid);
 
 			if (hw_p->ndevs) {
 				hw_p->ndevs--;
@@ -6615,6 +6684,7 @@ nxge_create_msi_property(p_nxge_t nxgep)
 	switch (nxgep->mac.portmode) {
 	case PORT_10G_COPPER:
 	case PORT_10G_FIBER:
+	case PORT_10G_TN1010:
 		(void) ddi_prop_create(DDI_DEV_T_NONE, nxgep->dip,
 		    DDI_PROP_CANSLEEP, "#msix-request", NULL, 0);
 		/*
@@ -6655,21 +6725,21 @@ nxge_get_def_val(nxge_t *nxgep, mac_prop_id_t pr_num, uint_t pr_valsize,
 	link_flowctrl_t fl;
 
 	switch (pr_num) {
-	case DLD_PROP_AUTONEG:
+	case MAC_PROP_AUTONEG:
 		*(uint8_t *)pr_val = 1;
 		break;
-	case DLD_PROP_FLOWCTRL:
+	case MAC_PROP_FLOWCTRL:
 		if (pr_valsize < sizeof (link_flowctrl_t))
 			return (EINVAL);
 		fl = LINK_FLOWCTRL_RX;
 		bcopy(&fl, pr_val, sizeof (fl));
 		break;
-	case DLD_PROP_ADV_1000FDX_CAP:
-	case DLD_PROP_EN_1000FDX_CAP:
+	case MAC_PROP_ADV_1000FDX_CAP:
+	case MAC_PROP_EN_1000FDX_CAP:
 		*(uint8_t *)pr_val = 1;
 		break;
-	case DLD_PROP_ADV_100FDX_CAP:
-	case DLD_PROP_EN_100FDX_CAP:
+	case MAC_PROP_ADV_100FDX_CAP:
+	case MAC_PROP_EN_100FDX_CAP:
 		*(uint8_t *)pr_val = 1;
 		break;
 	default:
@@ -6787,4 +6857,53 @@ nxge_niu_peu_reset(p_nxge_t nxgep)
 
 	MUTEX_EXIT(&hw_p->nxge_cfg_lock);
 	NXGE_DEBUG_MSG((nxgep, NXGE_ERR_CTL, "<== nxge_niu_peu_reset"));
+}
+
+static void
+nxge_set_pci_replay_timeout(p_nxge_t nxgep)
+{
+	p_dev_regs_t 	dev_regs;
+	uint32_t	value;
+
+	NXGE_DEBUG_MSG((nxgep, DDI_CTL, "==> nxge_set_pci_replay_timeout"));
+
+	if (!nxge_set_replay_timer) {
+		NXGE_DEBUG_MSG((nxgep, DDI_CTL,
+		    "==> nxge_set_pci_replay_timeout: will not change "
+		    "the timeout"));
+		return;
+	}
+
+	dev_regs = nxgep->dev_regs;
+	NXGE_DEBUG_MSG((nxgep, DDI_CTL,
+	    "==> nxge_set_pci_replay_timeout: dev_regs 0x%p pcireg 0x%p",
+	    dev_regs, dev_regs->nxge_pciregh));
+
+	if (dev_regs == NULL || (dev_regs->nxge_pciregh == NULL)) {
+		NXGE_DEBUG_MSG((nxgep, DDI_CTL,
+		    "==> nxge_set_pci_replay_timeout: NULL dev_regs $%p or "
+		    "no PCI handle",
+		    dev_regs));
+		return;
+	}
+	value = (pci_config_get32(dev_regs->nxge_pciregh,
+	    PCI_REPLAY_TIMEOUT_CFG_OFFSET) |
+	    (nxge_replay_timeout << PCI_REPLAY_TIMEOUT_SHIFT));
+
+	NXGE_DEBUG_MSG((nxgep, DDI_CTL,
+	    "nxge_set_pci_replay_timeout: replay timeout value before set 0x%x "
+	    "(timeout value to set 0x%x at offset 0x%x) value 0x%x",
+	    pci_config_get32(dev_regs->nxge_pciregh,
+	    PCI_REPLAY_TIMEOUT_CFG_OFFSET), nxge_replay_timeout,
+	    PCI_REPLAY_TIMEOUT_CFG_OFFSET, value));
+
+	pci_config_put32(dev_regs->nxge_pciregh, PCI_REPLAY_TIMEOUT_CFG_OFFSET,
+	    value);
+
+	NXGE_DEBUG_MSG((nxgep, DDI_CTL,
+	    "nxge_set_pci_replay_timeout: replay timeout value after set 0x%x",
+	    pci_config_get32(dev_regs->nxge_pciregh,
+	    PCI_REPLAY_TIMEOUT_CFG_OFFSET)));
+
+	NXGE_DEBUG_MSG((nxgep, DDI_CTL, "<== nxge_set_pci_replay_timeout"));
 }

@@ -79,6 +79,7 @@ typedef struct idmapd_state {
 	uid_t		limit_uid;
 	gid_t		limit_gid;
 	int		new_eph_db;	/* was the ephem ID db [re-]created? */
+	bool_t		eph_map_unres_sids;
 	ad_t		*ad;
 } idmapd_state_t;
 extern idmapd_state_t	_idmapdstate;
@@ -100,6 +101,7 @@ typedef struct lookup_state {
 	bool_t			pid2sid_done;
 	int			ad_nqueries;
 	int			nldap_nqueries;
+	bool_t			eph_map_unres_sids;
 	uint_t			curpos;
 	hashentry_t		*sid_history;
 	uint_t			sid_history_size;
@@ -190,8 +192,6 @@ typedef struct msg_table {
 #define	IDMAP_CACHEDIR	"/var/run/idmap"
 #define	IDMAP_DBNAME	IDMAP_DBDIR "/idmap.db"
 #define	IDMAP_CACHENAME	IDMAP_CACHEDIR "/idmap.db"
-
-#define	EMPTY_STRING(str)	(str == NULL || *str == 0)
 
 #define	IS_BATCH_SID(batch, i) \
 	(batch.idmap_mapping_batch_val[i].id1.idtype == IDMAP_SID ||	\

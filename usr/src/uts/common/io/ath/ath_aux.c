@@ -230,7 +230,8 @@ ath_setcurmode(ath_t *asc, enum ieee80211_phymode mode)
 	ASSERT(rt != NULL);
 
 	for (i = 0; i < rt->rateCount; i++)
-		asc->asc_rixmap[rt->info[i].dot11Rate & IEEE80211_RATE_VAL] = i;
+		asc->asc_rixmap[rt->info[i].dot11Rate & IEEE80211_RATE_VAL] =
+		    (uint8_t)i;
 
 	asc->asc_currates = rt;
 	asc->asc_curmode = mode;
@@ -560,7 +561,7 @@ ath_beacon_config(ath_t *asc)
 		bs.bs_bmissthreshold = ic->ic_bmissthreshold;
 		if (bs.bs_bmissthreshold > 10)
 			bs.bs_bmissthreshold = 10;
-		else if (bs.bs_bmissthreshold <= 0)
+		else if (bs.bs_bmissthreshold < 1)
 			bs.bs_bmissthreshold = 1;
 		/*
 		 * Calculate sleep duration.  The configuration is

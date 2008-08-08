@@ -18,27 +18,26 @@
  *
  * CDDL HEADER END
  */
+
 /*
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*	Copyright (c) 1988 AT&T	*/
 /*	  All Rights Reserved  	*/
 
+#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /* sysconf(3C) - returns system configuration information */
 
-#pragma weak sysconf = _sysconf
+#pragma weak _sysconf = sysconf
 
-#include "synonyms.h"
+#include "lint.h"
 #include <mtlib.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/sysconfig.h>
-#include <sys/errno.h>
 #include <limits.h>
 #include <time.h>
 #include <errno.h>
@@ -378,7 +377,7 @@ sysconf(int name)
 			return (-1L);
 
 		case _SC_THREAD_STACK_MIN:
-			return ((long)_thr_min_stack());
+			return ((long)thr_min_stack());
 
 		case _SC_THREAD_THREADS_MAX:
 			return (-1L);
@@ -470,6 +469,9 @@ sysconf(int name)
 		case _SC_SHELL:
 			return ((long)_POSIX_SHELL);
 
+		case _SC_ADVISORY_INFO:
+			return ((long)_POSIX_ADVISORY_INFO);
+
 		case _SC_HOST_NAME_MAX:
 			return ((long)_POSIX_HOST_NAME_MAX);
 
@@ -507,7 +509,6 @@ sysconf(int name)
 		case _SC_2_PBS_LOCATE:
 		case _SC_2_PBS_MESSAGE:
 		case _SC_2_PBS_TRACK:
-		case _SC_ADVISORY_INFO:
 		case _SC_CPUTIME:
 		case _SC_SPORADIC_SERVER:
 		case _SC_SS_REPL_MAX:

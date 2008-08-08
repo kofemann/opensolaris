@@ -18,20 +18,20 @@
 #
 # CDDL HEADER END
 #
+
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # ident	"%Z%%M%	%I%	%E% SMI"
 #
-# lib/brand/lx/librtld_db/amd64/Makefile
 
-ISASRCDIR=.
-
-ASFLAGS	+= -P -D_ASM
+COBJS64 =	lx_librtld_db64.o
 
 include ../Makefile.com
 include $(SRC)/lib/Makefile.lib.64
+
+DYNFLAGS +=	-Mmapfile-vers
 
 CLOBBERFILES = $(ROOTLIBDIR64)/$(DYNLIB)
 

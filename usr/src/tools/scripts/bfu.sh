@@ -82,7 +82,6 @@ export ARCHIVE=${ARCHIVEPATH}
 all_zones_files="
 	etc/.login
 	etc/acct/holidays
-	etc/acctadm.conf
 	etc/auto_*
 	etc/cron.d/at.deny
 	etc/cron.d/cron.deny
@@ -762,6 +761,34 @@ update_etc_mach_i386()
 	fi
 }
 
+# check and update driver class for scsi-self-identifying
+chk_update_drv_class()
+{
+
+    drvclassfile=$rootprefix/etc/driver_classes
+    name2majorfile=$rootprefix/etc/name_to_major
+    drvname=$1
+    classentry="^$drvname[ 	].*scsi-self-identifying"
+
+    [ -f $drvclassfile ] || return
+    [ -f $name2majorfile ] || return
+
+    grep -w $drvname $name2majorfile > /dev/null 2>&1 || return
+
+    egrep -s "$classentry" $drvclassfile
+    if [ $? -ne 0 ]; then
+	echo "$drvname	scsi-self-identifying" >> $drvclassfile
+    fi
+}
+
+update_drvclass_i386()
+{
+    chk_update_drv_class ahci
+    chk_update_drv_class si3124
+    chk_update_drv_class marvell88sx
+    chk_update_drv_class nv_sata
+}
+
 update_policy_conf() {
 	# update /etc/security/policy.conf with the default
 	# Solaris crypt(3c) policy.
@@ -1048,6 +1075,76 @@ migrate_rcap_conf() {
 }
 
 #
+# Migrate an existing extended accounting configuration from /etc/acctadm.conf
+# to the smf(5) repository upon reboot.  Enable the instance if the 
+# configuration differs from the default configuration.
+#
+migrate_acctadm_conf()
+{
+	cat >> $rootprefix/var/svc/profile/upgrade <<\_EOF
+	if [ -f /etc/acctadm.conf ]; then 
+		. /etc/acctadm.conf
+
+		fmri="svc:/system/extended-accounting:flow"
+		svccfg -s $fmri setprop config/file = \
+		    ${ACCTADM_FLOW_FILE:="none"}
+		svccfg -s $fmri setprop config/tracked = \
+		    ${ACCTADM_FLOW_TRACKED:="none"}
+		svccfg -s $fmri setprop config/untracked = \
+		    ${ACCTADM_FLOW_UNTRACKED:="extended"}
+		if [ ${ACCTADM_FLOW_ENABLE:="no"} = "yes" ]; then
+			svccfg -s $fmri setprop config/enabled = "true"
+		else
+			svccfg -s $fmri setprop config/enabled = "false"
+		fi
+		if [ $ACCTADM_FLOW_ENABLE = "yes" -o \
+		    $ACCTADM_FLOW_FILE != "none" -o \
+		    $ACCTADM_FLOW_TRACKED != "none" ]; then
+			svcadm enable $fmri
+		fi
+
+		fmri="svc:/system/extended-accounting:process"
+		svccfg -s $fmri setprop config/file = \
+		    ${ACCTADM_PROC_FILE:="none"}
+		svccfg -s $fmri setprop config/tracked = \
+		    ${ACCTADM_PROC_TRACKED:="none"}
+		svccfg -s $fmri setprop config/untracked = \
+		    ${ACCTADM_PROC_UNTRACKED:="extended"}
+		if [ ${ACCTADM_PROC_ENABLE:="no"} = "yes" ]; then
+			svccfg -s $fmri setprop config/enabled = "true"
+		else
+			svccfg -s $fmri setprop config/enabled = "false"
+		fi
+		if [ $ACCTADM_PROC_ENABLE = "yes" -o \
+		    $ACCTADM_PROC_FILE != "none" -o \
+		    $ACCTADM_PROC_TRACKED != "none" ]; then
+			svcadm enable $fmri
+		fi
+
+		fmri="svc:/system/extended-accounting:task"
+		svccfg -s $fmri setprop config/file = \
+		    ${ACCTADM_TASK_FILE:="none"}
+		svccfg -s $fmri setprop config/tracked = \
+		    ${ACCTADM_TASK_TRACKED:="none"}
+		svccfg -s $fmri setprop config/untracked = \
+		    ${ACCTADM_TASK_UNTRACKED:="extended"}
+		if [ ${ACCTADM_TASK_ENABLE:="no"} = "yes" ]; then
+			svccfg -s $fmri setprop config/enabled = "true"
+		else
+			svccfg -s $fmri setprop config/enabled = "false"
+		fi
+		if [ $ACCTADM_TASK_ENABLE = "yes" -o \
+		    $ACCTADM_TASK_FILE != "none" -o \
+		    $ACCTADM_TASK_TRACKED != "none" ]; then
+			svcadm enable $fmri
+		fi
+
+		rm /etc/acctadm.conf
+	fi
+_EOF
+}
+
+#
 # smf(5) "Greenline" doesn't install the init.d or rc*.d scripts for
 # converted services.  Clean up previous scripts for such services.
 #
@@ -1055,6 +1152,7 @@ smf_obsolete_rc_files="
 	etc/init.d/ANNOUNCE
 	etc/init.d/MOUNTFSYS
 	etc/init.d/RMTMPFILES
+	etc/init.d/acctadm
 	etc/init.d/audit
 	etc/init.d/autofs
 	etc/init.d/coreadm
@@ -1798,6 +1896,8 @@ smf_apply_conf () {
 		migrate_rcap_conf
 	fi
 
+	migrate_acctadm_conf
+
 	if [ $zone = global ]; then
 		if [ -f $rootprefix/etc/dfs/dfstab ] &&
 		    grep '^[ 	]*[^# 	]' $rootprefix/etc/dfs/dfstab \
@@ -2019,6 +2119,12 @@ EOFA
 	smf_import_service network/dlmgmt.xml \
 	    svc:/network/datalink-management:default
 
+	#
+	# Import the ldap/client service. This is to get the service
+	# (with correct dependencies) in the repository before reboot.
+	#
+	smf_import_service network/ldap/client.xml
+
 	# Enable new NFS status and nlockmgr services if client is enabled
 	cat >> $rootprefix/var/svc/profile/upgrade <<-EOF
 	    cl="svc:/network/nfs/client:default"
@@ -2094,6 +2200,69 @@ EOF
 EOF
 
 	smf_fix_i86pc_profile
+}
+
+tx_check_update() {
+#
+# If a lbl_edition file is found it's a likely sign that old unbundled
+# Trusted Extensions packages are installed and TX is active.  Update
+# etc/system if needed, to complete enabling of the bundled TX.
+#
+	LMOD1=$rootprefix/kernel/sys/lbl_edition
+	LMOD2=$rootprefix/kernel/sys/amd64/lbl_edition
+	LMOD3=$rootprefix/kernel/sys/sparcv9/lbl_edition
+
+	grep "^set sys_labeling=" $rootprefix/bfu.child/etc/system > \
+	    /dev/null 2>&1
+	if [ $? -eq 0 ]; then
+		return
+	fi
+
+	if [ -f $LMOD1 -o -f $LMOD2 -o -f $LMOD3 ]; then
+		echo "set sys_labeling=1" >> $rootprefix/bfu.child/etc/system
+		if [ $? -ne 0 ]; then
+    			echo "cannot set sys_labeling in $rootprefix/bfu.child/etc/system"
+			return
+		fi
+
+		rm -f $LMOD1 $LMOD2 $LMOD3
+	fi
+}
+
+tx_check_bkbfu() {
+#
+# Emit a warning message if bfu'ing a Trusted Extensions-enabled system
+# backwards to pre TX-merge bits.  In this case, unbundled packages must
+# be reinstalled to complete restoration of old TX bits.
+#
+	bsmconv=$rootprefix/etc/security/bsmconv
+
+	# This check is only needed in global zone
+	if [[ $zone != global ]]; then
+		return
+	fi
+
+	# No warning needed if TX is not currently enabled
+	grep "^set sys_labeling=" $rootprefix/bfu.child/etc/system > \
+	    /dev/null 2>&1
+	if [ $? -ne 0 ]; then
+		return
+	fi
+
+	if [ ! -f $bsmconv ]; then
+		return
+	fi
+	grep " -x /usr/bin/plabel " $bsmconv > /dev/null 2>&1
+	if [ $? != 0 ]; then
+		return
+	fi
+
+	print ""
+	print "*************************************************************"
+	print " WARNING: BFU'ing TX backwards across 6533113."
+	print " Must re-install unbundled TX packages to remain Trusted."
+	print "*************************************************************"
+	print ""
 }
 
 #
@@ -4458,6 +4627,20 @@ then
 		umount /platform/sun4u-us3/lib/sparcv9/libc_psr.so.1
 	fi
 
+	# 
+	# The libpiclsbl.so.1 library has been moved from
+	# /usr/platform/SUNW,Sun-Fire-T200/lib/... to
+	# /usr/platform/sun4v/lib/... .  Other sun4v platforms create
+	# symbolic link to T200's libpiclsbl.so.1. Therefore check
+	# if library is present in T200's directory and then remove
+	# it and the symbolic links.
+	if [ -a \
+	    $usr/platform/SUNW,Sun-Fire-T200/lib/picl/plugins/libpiclsbl.so.1 ]
+	then
+		print "Removing libpiclsbl.so library ..."
+		find $usr/platform -name libpiclsbl\* -exec rm {} \;
+	fi
+
 	if [ -x /usr/sbin/zoneadm ]; then
 		#
 		# Stop any running zones: the init script will print a
@@ -5510,6 +5693,11 @@ mondo_loop() {
 	# initial arrival.
 	#
 	smf_handle_new_services
+
+	#
+	# Handle unbundled TX conversion if needed
+	#
+	tx_check_update
 
       	# Reflect SUNWcsr's pre-install change, ensures
 	# the i.hosts action script works during 'acr'	
@@ -6714,6 +6902,17 @@ mondo_loop() {
 	fi
 
 	#
+	# Remove EOF sbpro driver and supporting header file
+	# (Note that .conf file may also appear in /platform)
+	#
+	if [ $target_isa = i386 ]; then
+		rm -f $root/kernel/drv/sbpro
+		rm -f $root/kernel/drv/sbpro.conf
+		rm -f $root/platform/i86pc/kernel/drv/sbpro.conf
+		rm -f $usr/include/sys/sbpro.h
+	fi
+
+	#
 	# Diskless clients have already extracted /usr so don't delete this
 	# Non-global zones never extracts /usr so don't delete these
 	#
@@ -7276,6 +7475,25 @@ mondo_loop() {
 	rm -f $usr/platform/sun4u/include/sys/us_drv.h
 
 	#
+	# Remove device private and legacy sun headers we don't need
+	#
+	rm -f $usr/include/sys/aflt.h
+	rm -f $usr/include/sys/bmac.h
+	rm -f $usr/include/sys/bw2reg.h
+	rm -f $usr/include/sys/bw2var.h
+	rm -f $usr/include/sys/cursor_impl.h
+	rm -f $usr/include/sys/eri.h
+	rm -f $usr/include/sys/eri_common.h
+	rm -f $usr/include/sys/eri_mac.h
+	rm -f $usr/include/sys/eri_msg.h
+	rm -f $usr/include/sys/eri_phy.h
+	rm -f $usr/include/sys/i82586.h
+	rm -f $usr/include/sys/isdnio.h
+	rm -f $usr/include/sys/mace.h
+	rm -f $usr/include/sys/memfb.h
+	rm -f $usr/include/sys/memreg.h
+
+	#
 	# Remove new files in order to go backward.
 	#
 	rm -f $root/usr/lib/rcm/modules/SUNW_vlan_rcm.so
@@ -7283,6 +7501,12 @@ mondo_loop() {
 	rm -f $root/kernel/drv/softmac
 	rm -f $root/kernel/drv/sparcv9/softmac
 	rm -f $root/kernel/drv/amd64/softmac
+
+	#
+	# Remove libtopo platform XML files that have been replaced by propmap
+	# files.
+	#
+	rm -f $root/usr/platform/i86pc/lib/fm/topo/maps/Sun-Fire-*-topology.xml
 
 	# End of pre-archive extraction hacks.
 
@@ -7302,11 +7526,18 @@ mondo_loop() {
 		case $target_isa in
 		    sparc)
 			if [[ "$rootfstype" = zfs ]]; then
+				print "Extracting usr/sbin/installboot for " \
+				    "zfs boot block installation ... \c" |
+				    tee -a $EXTRACT_LOG
+				do_extraction $cpiodir/generic.usr$ZFIX \
+				    'usr/sbin/installboot' | \
+				    tee -a $EXTRACT_LOG
 				cd $usr/platform/$karch/lib/fs/zfs
 				get_rootdev_list | while read physlice
 				do
 					print "Installing bootblk on $physlice."
-                                        installboot -F zfs ./bootblk $physlice
+                                        $usr/sbin/installboot -F zfs ./bootblk \
+					    $physlice
                                 done
 			elif [[ "$rootslice" = /dev/rdsk/* ]]; then
 				print "Installing boot block on $rootslice."
@@ -7323,6 +7554,10 @@ mondo_loop() {
 			fi
 			;;
 		    i386)
+			print "Extracting grub for boot " \
+			    "block ... \c" | tee -a $EXTRACT_LOG
+			do_extraction $cpiodir/$karch.boot$ZFIX  | \
+				tee -a $EXTRACT_LOG
 			$rootprefix/boot/solaris/bin/update_grub -R $root
 			;;
 		    *)
@@ -7474,6 +7709,11 @@ mondo_loop() {
 		rm -f $rootprefix/etc/datalink.conf
 	fi
 
+	#
+	# Force xVM privilege fixups to occur on next boot.
+	#
+	rm -f $rootprefix/var/lib/xend/.xvmuser
+	
 	print "\nRestoring configuration files.\n"
 
 	cd $root
@@ -7756,10 +7996,16 @@ mondo_loop() {
 
 	update_policy_conf
 
+	tx_check_bkbfu
+
 	if [ $target_isa = i386 ]; then
 	    update_mptconf_i386
 
 	    update_etc_mach_i386
+	fi
+
+	if [ $target_isa = i386 ]; then
+	    update_drvclass_i386
 	fi
 
 	if [ $zone != global ]; then

@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # ident	"%Z%%M%	%I%	%E% SMI"
@@ -28,6 +28,7 @@
 PROG=	ldap_cachemgr
 
 MANIFEST=	client.xml
+SVCMETHOD=	ldap-client
 
 include ../Makefile.cmd
 
@@ -43,7 +44,7 @@ ROOTLDAPPROG=	$(PROG:%=$(ROOTLDAPLIB)/%)
 
 ROOTMANIFESTDIR=	$(ROOTSVCNETWORKLDAP)
 
-OBJS=	cachemgr.o cachemgr_getldap.o cachemgr_parse.o
+OBJS=	cachemgr.o cachemgr_getldap.o cachemgr_parse.o cachemgr_change.o
 
 SRCS=	${OBJS:%.o=%.c} 
 
@@ -62,7 +63,7 @@ LINTOUT=        lint.out
 # GPROF_FLAG=	-xpg
 # DEBUG_FLAG=	-g
 
-LDLIBS += 	-lsldap -lldap -lnsl
+LDLIBS += 	-lumem -lsldap
 
 # install macros and rule
 #
@@ -74,6 +75,7 @@ OWNER=	root
 clean := TARGET= clean
 clobber := TARGET= clobber
 
+$(ROOTSVCMETHOD) := FILEMODE = 0555
 
 all: $(PROG)
 
@@ -95,7 +97,7 @@ lint:
 cstyle:
 	${CSTYLE} ${SRCS}
 
-install: all $(ROOTLDAPLIB) $(ROOTLDAPPROG) $(ROOTMANIFEST)
+install: all $(ROOTLDAPLIB) $(ROOTLDAPPROG) $(ROOTMANIFEST) $(ROOTSVCMETHOD)
 
 check:	$(CHKMANIFEST)
 

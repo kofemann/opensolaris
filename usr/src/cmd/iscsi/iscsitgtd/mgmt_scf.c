@@ -67,6 +67,8 @@
 #include "errcode.h"
 #include "t10.h"
 
+#define	PGNAME_SIZE	64
+
 static Boolean_t create_pg(targ_scf_t *h, char *pgname, char *prop);
 static void new_property(targ_scf_t *h, tgt_node_t *n);
 static void new_value_list(targ_scf_t *h, tgt_node_t *p);
@@ -74,6 +76,9 @@ static int isnumber(char *s);
 static void backup(char *file, char *ext);
 static pthread_mutex_t scf_conf_mutex;
 static pthread_mutex_t scf_param_mutex;
+
+static void pgname_encode(char *instr, char *outstr, int max_len);
+static void pgname_decode(char *instr);
 
 Boolean_t
 mgmt_scf_init()
@@ -203,9 +208,9 @@ mgmt_transaction_end(targ_scf_t *h)
 
 	if (scf_transaction_commit(h->t_trans) < 0)
 		ret = False;
-	scf_pg_update(h->t_pg);
-	scf_transaction_destroy_children(h->t_trans);
-	scf_transaction_destroy(h->t_trans);
+	(void) scf_pg_update(h->t_pg);
+	(void) scf_transaction_destroy_children(h->t_trans);
+	(void) scf_transaction_destroy(h->t_trans);
 	h->t_trans = NULL;
 	return (ret);
 }
@@ -221,15 +226,32 @@ mgmt_transaction_abort(targ_scf_t *h)
 	}
 }
 
+/*
+ * process property group name first
+ * a reasonable buf to receive encoded pgname is double size of pgname
+ */
+#define	PG_FACTOR	2
 static Boolean_t
 create_pg(targ_scf_t *h, char *pgname, char *prop)
 {
-	if (scf_service_get_pg(h->t_service, pgname, h->t_pg) != 0) {
-		if (scf_service_add_pg(h->t_service, pgname,
+	int len;
+	char *buf = NULL;
+
+	len = strlen(pgname);
+	buf = (char *)calloc(1, len * PG_FACTOR);
+	if (buf == NULL)
+		return (False);
+
+	pgname_encode(pgname, buf, len * PG_FACTOR);
+
+	if (scf_service_get_pg(h->t_service, buf, h->t_pg) != 0) {
+		if (scf_service_add_pg(h->t_service, buf,
 		    prop, 0, h->t_pg) != 0) {
+			free(buf);
 			return (False);
 		}
 	}
+	free(buf);
 	return (True);
 }
 
@@ -286,9 +308,9 @@ mgmt_get_main_config(tgt_node_t **node)
 	}
 
 	while (scf_iter_next_property(iter, prop) > 0) {
-		scf_property_get_value(prop, value);
-		scf_value_get_as_string(value, valuebuf, MAXPATHLEN);
-		scf_property_get_name(prop, pname, sizeof (pname));
+		(void) scf_property_get_value(prop, value);
+		(void) scf_value_get_as_string(value, valuebuf, MAXPATHLEN);
+		(void) scf_property_get_name(prop, pname, sizeof (pname));
 
 		/* avoid load auth to incore data */
 		if (strcmp(pname, ISCSI_READ_AUTHNAME) == 0 ||
@@ -322,7 +344,8 @@ mgmt_get_main_config(tgt_node_t **node)
 	while (scf_iter_next_pg(iter, h->t_pg) > 0) {
 		char *iname;
 
-		scf_pg_get_name(h->t_pg, pname, sizeof (pname));
+		(void) scf_pg_get_name(h->t_pg, pname, sizeof (pname));
+		pgname_decode(pname);
 		iname = strchr(pname, '_');
 		if (iname == NULL) {
 			/* the pg found here is not a tgt/initiator/tpgt */
@@ -347,7 +370,8 @@ mgmt_get_main_config(tgt_node_t **node)
 			/* there may be many values in one property */
 			char *vname;
 
-			scf_property_get_name(prop, pname, sizeof (pname));
+			(void) scf_property_get_name(prop, pname,
+			    sizeof (pname));
 			/* avoid load auth to incore data */
 			if (strcmp(pname, ISCSI_READ_AUTHNAME) == 0 ||
 			    strcmp(pname, ISCSI_MODIFY_AUTHNAME) == 0 ||
@@ -356,8 +380,8 @@ mgmt_get_main_config(tgt_node_t **node)
 
 			vname = strstr(pname, "-list");
 			if (vname == NULL) {
-				scf_property_get_value(prop, value);
-				scf_value_get_as_string(value, valuebuf,
+				(void) scf_property_get_value(prop, value);
+				(void) scf_value_get_as_string(value, valuebuf,
 				    MAXPATHLEN);
 
 				pn = tgt_node_alloc(pname, String, valuebuf);
@@ -372,11 +396,11 @@ mgmt_get_main_config(tgt_node_t **node)
 				*vname = '\0';
 
 				iter_pv = scf_iter_create(h->t_handle);
-				scf_iter_property_values(iter_pv, prop);
+				(void) scf_iter_property_values(iter_pv, prop);
 				while (scf_iter_next_value(iter_pv, value)
 				    > 0) {
-					scf_value_get_as_string(value, valuebuf,
-					    MAXPATHLEN);
+					(void) scf_value_get_as_string(
+					    value, valuebuf, MAXPATHLEN);
 					/*
 					 * map 'acl' to 'initiator' since that
 					 * is what used inside the acl-list.
@@ -410,9 +434,11 @@ mgmt_get_main_config(tgt_node_t **node)
 		}
 
 		while (scf_iter_next_property(iter, prop) > 0) {
-			scf_property_get_value(prop, value);
-			scf_value_get_as_string(value, valuebuf, MAXPATHLEN);
-			scf_property_get_name(prop, pname, sizeof (pname));
+			(void) scf_property_get_value(prop, value);
+			(void) scf_value_get_as_string(value, valuebuf,
+			    MAXPATHLEN);
+			(void) scf_property_get_name(prop, pname,
+			    sizeof (pname));
 
 			/* avoid load auth to incore data */
 			if (strcmp(pname, ISCSI_READ_AUTHNAME) == 0 ||
@@ -421,8 +447,8 @@ mgmt_get_main_config(tgt_node_t **node)
 				continue;
 
 			/* max length of decoded passwd is 16B */
-			sasl_decode64(valuebuf, strlen(valuebuf), passcode,
-			    sizeof (passcode), &outlen);
+			(void) sasl_decode64(valuebuf, strlen(valuebuf),
+			    passcode, sizeof (passcode), &outlen);
 
 			if (strcmp(pname, "radius") == 0) {
 				pn = tgt_node_alloc(XML_ELEMENT_RAD_SECRET,
@@ -506,9 +532,9 @@ new_property(targ_scf_t *h,
 	} else {
 		type = SCF_TYPE_ASTRING;
 	}
-	scf_transaction_property_new(h->t_trans, e, n->x_name, type);
-	scf_value_set_from_string(v, type, n->x_value);
-	scf_entry_add_value(e, v);
+	(void) scf_transaction_property_new(h->t_trans, e, n->x_name, type);
+	(void) scf_value_set_from_string(v, type, n->x_value);
+	(void) scf_entry_add_value(e, v);
 }
 
 static void
@@ -524,12 +550,13 @@ new_value_list(targ_scf_t *h,
 
 	name = p->x_name;
 	e = scf_entry_create(h->t_handle);
-	scf_transaction_property_new(h->t_trans, e, name, SCF_TYPE_ASTRING);
+	(void) scf_transaction_property_new(h->t_trans, e, name,
+	    SCF_TYPE_ASTRING);
 
 	for (c = p->x_child; c; c = c->x_sibling) {
 		v = scf_value_create(h->t_handle);
-		scf_value_set_astring(v, c->x_value);
-		scf_entry_add_value(e, v);
+		(void) scf_value_set_astring(v, c->x_value);
+		(void) scf_entry_add_value(e, v);
 	}
 }
 
@@ -544,8 +571,9 @@ mgmt_config_save2scf()
 	scf_property_t *prop = NULL;
 	scf_value_t *value = NULL;
 	scf_iter_t *iter = NULL;
-	char pgname[64];
+	char pgname[PGNAME_SIZE];
 	char passcode[32];
+	char *incore = NULL;
 	unsigned int	outlen;
 	tgt_node_t	*n = NULL;
 	tgt_node_t	*pn = NULL;
@@ -566,13 +594,13 @@ mgmt_config_save2scf()
 	(void) pthread_mutex_lock(&scf_conf_mutex);
 
 	if (mgmt_transaction_start(h, "iscsitgt", "basic") == True) {
-		scf_pg_delete(h->t_pg);
-		mgmt_transaction_end(h);
+		(void) scf_pg_delete(h->t_pg);
+		(void) mgmt_transaction_end(h);
 	}
 
 	if (mgmt_transaction_start(h, "passwords", "application") == True) {
-		scf_pg_delete(h->t_pg);
-		mgmt_transaction_end(h);
+		(void) scf_pg_delete(h->t_pg);
+		(void) mgmt_transaction_end(h);
 	}
 
 	if (scf_iter_service_pgs_typed(iter, h->t_service, "configuration")
@@ -582,9 +610,9 @@ mgmt_config_save2scf()
 
 	tx = scf_transaction_create(h->t_handle);
 	while (scf_iter_next_pg(iter, h->t_pg) > 0) {
-		scf_transaction_start(tx, h->t_pg);
-		scf_pg_delete(h->t_pg);
-		scf_transaction_commit(tx);
+		(void) scf_transaction_start(tx, h->t_pg);
+		(void) scf_pg_delete(h->t_pg);
+		(void) scf_transaction_commit(tx);
 	}
 	scf_transaction_reset(tx);
 	scf_transaction_destroy(tx);
@@ -594,6 +622,20 @@ mgmt_config_save2scf()
 
 	if (mgmt_transaction_start(h, "iscsitgt", "basic") == True) {
 		for (n = main_config->x_child; n; n = n->x_sibling) {
+			if ((tgt_find_attr_str(n, XML_ELEMENT_INCORE, &incore))
+			    == True) {
+				if (strcmp(incore, "true") == 0) {
+					/*
+					 * Ignore in core only elements.
+					 * zvol target is the only one with
+					 * incore attr as of now.
+					 */
+					free(incore);
+					continue;
+				}
+				/* if incore is false continue on */
+				free(incore);
+			}
 			if (strcmp(n->x_name,
 			    XML_ELEMENT_CHAPSECRET) == 0) {
 				sl_tail->next =  (secret_list_t *)
@@ -626,7 +668,7 @@ mgmt_config_save2scf()
 		    ISCSI_AUTH_VALUE);
 		new_property(h, n);
 		tgt_node_free(n);
-		mgmt_transaction_end(h);
+		(void) mgmt_transaction_end(h);
 	}
 
 	/* now update target/initiator/tpgt information */
@@ -634,7 +676,22 @@ mgmt_config_save2scf()
 		if (n->x_child == NULL)
 			continue;
 
-		snprintf(pgname, sizeof (pgname), "%s_%s", n->x_name,
+		if ((tgt_find_attr_str(n, XML_ELEMENT_INCORE, &incore))
+		    == True) {
+			if (strcmp(incore, "true") == 0) {
+				/*
+				 * Ignore in core only elements.
+				 * zvol target is the only one with
+				 * incore attr as of now.
+				 */
+				free(incore);
+				continue;
+			}
+			/* if incore is false continue on */
+			free(incore);
+		}
+
+		(void) snprintf(pgname, sizeof (pgname), "%s_%s", n->x_name,
 		    n->x_value);
 
 		if (mgmt_transaction_start(h, pgname, "configuration")
@@ -647,7 +704,7 @@ mgmt_config_save2scf()
 					sl_tail = sl_tail->next;
 					sl_tail->name = (char *)
 					    calloc(1, strlen(n->x_value) + 3);
-					snprintf(sl_tail->name,
+					(void) snprintf(sl_tail->name,
 					    strlen(n->x_value) + 3,
 					    "I_%s", n->x_value);
 					sl_tail->secret = strdup(pn->x_value);
@@ -669,8 +726,9 @@ mgmt_config_save2scf()
 				new_property(h, tn);
 				tgt_node_free(tn);
 			}
-			mgmt_transaction_end(h);
-		}
+			(void) mgmt_transaction_end(h);
+		} else
+			goto error;
 	}
 
 	if (mgmt_transaction_start(h, "passwords", "application") == True) {
@@ -679,7 +737,7 @@ mgmt_config_save2scf()
 			sl_tail = sl_head->next;
 			if (sl_head->name) {
 				/* max length of encoded passwd is 24B */
-				sasl_encode64(sl_head->secret,
+				(void) sasl_encode64(sl_head->secret,
 				    strlen(sl_head->secret), passcode,
 				    sizeof (passcode), &outlen);
 
@@ -707,7 +765,7 @@ mgmt_config_save2scf()
 		    ISCSI_AUTH_MODIFY);
 		new_property(h, n);
 		tgt_node_free(n);
-		mgmt_transaction_end(h);
+		(void) mgmt_transaction_end(h);
 	}
 
 	if (smf_refresh_instance(SA_TARGET_SVC_INSTANCE_FMRI) != 0)
@@ -735,7 +793,7 @@ mgmt_param_save2scf(tgt_node_t *node, char *target_name, int lun)
 	scf_property_t *prop = NULL;
 	scf_value_t *value = NULL;
 	scf_iter_t *iter = NULL;
-	char pgname[64];
+	char pgname[PGNAME_SIZE];
 	tgt_node_t	*n = NULL;
 
 	h = mgmt_handle_init();
@@ -743,13 +801,14 @@ mgmt_param_save2scf(tgt_node_t *node, char *target_name, int lun)
 	if (h == NULL)
 		return (False);
 
-	snprintf(pgname, sizeof (pgname), "param_%s_%d", target_name, lun);
+	(void) snprintf(pgname, sizeof (pgname), "param_%s_%d", target_name,
+	    lun);
 
 	(void) pthread_mutex_lock(&scf_param_mutex);
 
 	if (mgmt_transaction_start(h, pgname, "parameter") == True) {
-		scf_pg_delete(h->t_pg);
-		mgmt_transaction_end(h);
+		(void) scf_pg_delete(h->t_pg);
+		(void) mgmt_transaction_end(h);
 	}
 
 	if (mgmt_transaction_start(h, pgname, "parameter") == True) {
@@ -768,7 +827,7 @@ mgmt_param_save2scf(tgt_node_t *node, char *target_name, int lun)
 		    ISCSI_AUTH_MODIFY);
 		new_property(h, n);
 		tgt_node_free(n);
-		mgmt_transaction_end(h);
+		(void) mgmt_transaction_end(h);
 	}
 
 	(void) pthread_mutex_unlock(&scf_param_mutex);
@@ -799,11 +858,14 @@ mgmt_get_param(tgt_node_t **node, char *target_name, int lun)
 	scf_value_t *value = NULL;
 	scf_iter_t *iter = NULL;
 	char pname[64];
-	char pgname[64];
+	char expgname[PGNAME_SIZE * PG_FACTOR];
+	char pgname[PGNAME_SIZE];
 	char valuebuf[MAXPATHLEN];
 	tgt_node_t	*n;
 	Boolean_t status = False;
 
+	/* Set NULL as default output value */
+	*node = NULL;
 	h = mgmt_handle_init();
 
 	if (h == NULL)
@@ -813,11 +875,13 @@ mgmt_get_param(tgt_node_t **node, char *target_name, int lun)
 	value = scf_value_create(h->t_handle);
 	iter = scf_iter_create(h->t_handle);
 
-	snprintf(pgname, sizeof (pgname), "param_%s_%d", target_name, lun);
+	(void) snprintf(pgname, sizeof (pgname), "param_%s_%d", target_name,
+	    lun);
+	pgname_encode(pgname, expgname, PGNAME_SIZE);
 
 	(void) pthread_mutex_lock(&scf_param_mutex);
 
-	if (scf_service_get_pg(h->t_service, pgname, h->t_pg) == -1) {
+	if (scf_service_get_pg(h->t_service, expgname, h->t_pg) == -1) {
 		goto error;
 	}
 
@@ -830,9 +894,9 @@ mgmt_get_param(tgt_node_t **node, char *target_name, int lun)
 	}
 
 	while (scf_iter_next_property(iter, prop) > 0) {
-		scf_property_get_value(prop, value);
-		scf_value_get_as_string(value, valuebuf, MAXPATHLEN);
-		scf_property_get_name(prop, pname, sizeof (pname));
+		(void) scf_property_get_value(prop, value);
+		(void) scf_value_get_as_string(value, valuebuf, MAXPATHLEN);
+		(void) scf_property_get_name(prop, pname, sizeof (pname));
 
 		/* avoid load auth to incore data */
 		if (strcmp(pname, ISCSI_READ_AUTHNAME) == 0 ||
@@ -867,18 +931,19 @@ Boolean_t
 mgmt_param_remove(char *target_name, int lun)
 {
 	targ_scf_t *h = NULL;
-	char pgname[64];
+	char pgname[PGNAME_SIZE];
 
 	h = mgmt_handle_init();
 	if (h == NULL)
 		return (False);
 
-	snprintf(pgname, sizeof (pgname), "param_%s_%d", target_name, lun);
+	(void) snprintf(pgname, sizeof (pgname), "param_%s_%d", target_name,
+	    lun);
 
 	if (mgmt_transaction_start(h, pgname, "parameter") == True) {
-		scf_pg_delete(h->t_pg);
-		mgmt_transaction_end(h);
-		mgmt_handle_fini(h);
+		(void) scf_pg_delete(h->t_pg);
+		(void) mgmt_transaction_end(h);
+		(void) mgmt_handle_fini(h);
 		return (True);
 	} else {
 		mgmt_handle_fini(h);
@@ -939,7 +1004,7 @@ mgmt_convert_param(char *dir, tgt_node_t *tnode)
 		}
 		params = NULL;
 		(void) close(xml_fd);
-		xmlTextReaderClose(r);
+		(void) xmlTextReaderClose(r);
 		xmlFreeTextReader(r);
 	}
 
@@ -1008,7 +1073,7 @@ mgmt_convert_conf()
 			    ISCSI_AUTH_VALUE);
 			new_property(h, node);
 			tgt_node_free(node);
-			mgmt_transaction_end(h);
+			(void) mgmt_transaction_end(h);
 		} else {
 			syslog(LOG_ERR, "Creating empty entry failed");
 			ret = CONVERT_FAIL;
@@ -1028,7 +1093,7 @@ mgmt_convert_conf()
 			    ISCSI_AUTH_VALUE);
 			new_property(h, node);
 			tgt_node_free(node);
-			mgmt_transaction_end(h);
+			(void) mgmt_transaction_end(h);
 		} else {
 			syslog(LOG_ERR, "Creating empty entry failed");
 			ret = CONVERT_FAIL;
@@ -1064,7 +1129,7 @@ mgmt_convert_conf()
 		/* Now convert targets' config if possible */
 		if (xml_fd != -1)
 			(void) close(xml_fd);
-		xmlTextReaderClose(r);
+		(void) xmlTextReaderClose(r);
 		xmlFreeTextReader(r);
 		xmlCleanupParser();
 		r = NULL;
@@ -1107,7 +1172,7 @@ mgmt_convert_conf()
 				syslog(LOG_ERR, "Converting config failed");
 				if (xml_fd != -1)
 					(void) close(xml_fd);
-				xmlTextReaderClose(r);
+				(void) xmlTextReaderClose(r);
 				xmlFreeTextReader(r);
 				xmlCleanupParser();
 				ret = CONVERT_FAIL;
@@ -1147,7 +1212,7 @@ mgmt_convert_conf()
 			ret = CONVERT_OK;
 			syslog(LOG_NOTICE, "Conversion succeeded");
 
-			xmlTextReaderClose(r);
+			(void) xmlTextReaderClose(r);
 			xmlFreeTextReader(r);
 			xmlCleanupParser();
 		} else {
@@ -1190,7 +1255,7 @@ backup(char *file, char *ext)
 	}
 
 	if (fork() == 0) {
-		execl("/bin/mv", "mv", file, dest, (char *)0);
+		(void) execl("/bin/mv", "mv", file, dest, (char *)0);
 		exit(0);
 	}
 }
@@ -1229,7 +1294,7 @@ check_auth_addremove(ucred_t *cred)
 		}
 
 		eset = ucred_getprivset(cred, PRIV_EFFECTIVE);
-		setppriv(PRIV_ON, PRIV_EFFECTIVE, eset);
+		(void) setppriv(PRIV_ON, PRIV_EFFECTIVE, eset);
 
 		h = mgmt_handle_init();
 
@@ -1237,8 +1302,8 @@ check_auth_addremove(ucred_t *cred)
 			exit(1);
 		}
 		if (mgmt_transaction_start(h, "dummy", "dummy") == True) {
-			scf_pg_delete(h->t_pg);
-			mgmt_transaction_end(h);
+			(void) scf_pg_delete(h->t_pg);
+			(void) mgmt_transaction_end(h);
 			exit_code = 0;
 		} else {
 			exit_code = 1;
@@ -1250,7 +1315,7 @@ check_auth_addremove(ucred_t *cred)
 		/* Fail to fork */
 		exit(SMF_EXIT_ERR_CONFIG);
 	default:
-		wait(&exit_code);
+		(void) wait(&exit_code);
 		exit_code = exit_code >> 8;
 		if (exit_code == 0)
 			ret = True;
@@ -1297,7 +1362,7 @@ check_auth_modify(ucred_t *cred)
 		}
 
 		eset = ucred_getprivset(cred, PRIV_EFFECTIVE);
-		setppriv(PRIV_ON, PRIV_EFFECTIVE, eset);
+		(void) setppriv(PRIV_ON, PRIV_EFFECTIVE, eset);
 
 		h = mgmt_handle_init();
 
@@ -1323,11 +1388,11 @@ check_auth_modify(ucred_t *cred)
 		if (mgmt_transaction_start(h, "iscsitgt", "basic") == True) {
 			ent = scf_entry_create(h->t_handle);
 			if (ent) {
-				scf_transaction_property_delete(h->t_trans,
-				    ent, "dummy");
+				(void) scf_transaction_property_delete(
+				    h->t_trans, ent, "dummy");
 			}
 		}
-		mgmt_transaction_end(h);
+		(void) mgmt_transaction_end(h);
 
 		mgmt_handle_fini(h);
 		exit(exit_code);
@@ -1336,7 +1401,7 @@ check_auth_modify(ucred_t *cred)
 		/* Fail to fork */
 		exit(SMF_EXIT_ERR_CONFIG);
 	default:
-		wait(&exit_code);
+		(void) wait(&exit_code);
 		exit_code = exit_code >> 8;
 		if (exit_code == 0)
 			ret = True;
@@ -1346,4 +1411,78 @@ check_auth_modify(ucred_t *cred)
 	}
 
 	return (ret);
+}
+
+/*
+ * Following two functions replace ':' and '.' in target/initiator
+ * names into '__2' and '__1' when write to SMF, and do a reverse
+ * replacement when read from SMF.
+ * pgname_encode's buffers are allocated by caller.
+ * see CR 6626684
+ */
+#define	SMF_COLON	"__2"
+#define	SMF_DOT		"__1"
+
+static void
+pgname_encode(char *instr, char *outstr, int max_len)
+{
+	int i = 0;
+
+	assert(instr != NULL && outstr != NULL);
+	for (; *instr != '\0'; instr++) {
+		switch (*instr) {
+		case ':':
+			strcpy(outstr + i, SMF_COLON);
+			i += 3;
+			break;
+		case '.':
+			strcpy(outstr + i, SMF_DOT);
+			i += 3;
+			break;
+		default:
+			*(outstr + i) = *instr;
+			i ++;
+			break;
+		}
+		/* in case of next possible ':' or '.', we cease on len-3 */
+		if (i >= max_len - 3)
+			break;
+	}
+	outstr[i] = '\0';
+}
+
+/*
+ * pgname_decode use original buffer, since it reduces string length
+ */
+static void
+pgname_decode(char *instr)
+{
+	char *buf;
+	char *rec;
+
+	assert(instr != NULL);
+	buf = strdup(instr);
+
+	if (buf == NULL)
+		return;
+
+	rec = buf;
+	for (; *buf != '\0'; buf++) {
+		if (*buf == '_') {
+			if (memcmp(buf, SMF_COLON, strlen(SMF_COLON)) == 0) {
+				*instr = ':';
+				buf += 2;
+			} else if (memcmp(buf, SMF_DOT, strlen(SMF_DOT)) == 0) {
+				*instr = '.';
+				buf += 2;
+			} else {
+				*instr = *buf;
+			}
+		} else {
+			*instr = *buf;
+		}
+		instr ++;
+	}
+	*instr = '\0';
+	free(rec);
 }

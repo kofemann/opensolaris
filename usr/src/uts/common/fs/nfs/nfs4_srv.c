@@ -2984,9 +2984,20 @@ rfs4_op_openattr(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		goto out;
 	}
 
-	if ((VOP_ACCESS(cs->vp, VREAD, 0, cs->cr, NULL) != 0) &&
-	    (VOP_ACCESS(cs->vp, VWRITE, 0, cs->cr, NULL) != 0) &&
-	    (VOP_ACCESS(cs->vp, VEXEC, 0, cs->cr, NULL) != 0)) {
+	/*
+	 * If file system supports passing ACE mask to VOP_ACCESS then
+	 * check for ACE_READ_NAMED_ATTRS, otherwise do legacy checks
+	 */
+
+	if (vfs_has_feature(cs->vp->v_vfsp, VFSFT_ACEMASKONACCESS))
+		error = VOP_ACCESS(cs->vp, ACE_READ_NAMED_ATTRS,
+		    V_ACE_MASK, cs->cr, NULL);
+	else
+		error = ((VOP_ACCESS(cs->vp, VREAD, 0, cs->cr, NULL) != 0) &&
+		    (VOP_ACCESS(cs->vp, VWRITE, 0, cs->cr, NULL) != 0) &&
+		    (VOP_ACCESS(cs->vp, VEXEC, 0, cs->cr, NULL) != 0));
+
+	if (error) {
 		*cs->statusp = resp->status = puterrno4(EACCES);
 		goto out;
 	}
@@ -4327,18 +4338,8 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 			VN_RELE(tvp);
 		}
 	}
-	if (error == 0) {
-		char *tmp;
-
-		/* fix the path name for the renamed file */
-		mutex_enter(&srcvp->v_lock);
-		tmp = srcvp->v_path;
-		srcvp->v_path = NULL;
-		mutex_exit(&srcvp->v_lock);
-		vn_setpath(rootdir, ndvp, srcvp, nnm, nlen - 1);
-		if (tmp != NULL)
-			kmem_free(tmp, strlen(tmp) + 1);
-	}
+	if (error == 0)
+		vn_renamepath(ndvp, srcvp, nnm, nlen - 1);
 
 	if (in_crit_src)
 		nbl_end_crit(srcvp);
@@ -5465,11 +5466,10 @@ out:
 /* ARGSUSED */
 void
 rfs4_compound(COMPOUND4args *args, COMPOUND4res *resp, struct exportinfo *exi,
-	struct svc_req *req, int *rv)
+	struct svc_req *req, cred_t *cr, int *rv)
 {
 	uint_t i;
 	struct compound_state cs;
-	cred_t *cr;
 
 	if (rv != NULL)
 		*rv = 0;

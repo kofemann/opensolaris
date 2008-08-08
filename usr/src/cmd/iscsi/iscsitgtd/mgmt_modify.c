@@ -39,6 +39,8 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <libgen.h>
+#include <libzfs.h>
+#include <syslog.h>
 
 #include <iscsitgt_impl.h>
 #include "queue.h"
@@ -54,7 +56,9 @@ static char *modify_initiator(tgt_node_t *x);
 static char *modify_admin(tgt_node_t *x);
 static char *modify_tpgt(tgt_node_t *x);
 static char *modify_zfs(tgt_node_t *x, ucred_t *cred);
+static char *validate_zfs_iscsitgt(tgt_node_t *x);
 static Boolean_t modify_element(char *, char *, tgt_node_t *, match_type_t);
+static Boolean_t delete_element(char *,  tgt_node_t *, match_type_t);
 
 /*
  * []----
@@ -155,13 +159,13 @@ modify_target(tgt_node_t *x, ucred_t *cred)
 	 * storage. Therefore we can easily get IQN name from target
 	 * name by read the symbolic link content.
 	 */
-	snprintf(path, sizeof (path), "%s/%s", target_basedir, name);
+	(void) snprintf(path, sizeof (path), "%s/%s", target_basedir, name);
 	bzero(iscsi_path, sizeof (iscsi_path));
-	readlink(path, iscsi_path, sizeof (iscsi_path));
+	(void) readlink(path, iscsi_path, sizeof (iscsi_path));
 	iscsi = basename(iscsi_path);
 
 	/* ---- Finished with these so go ahead and release the memory ---- */
-	strncpy(targ_name, name, sizeof (targ_name));
+	(void) strncpy(targ_name, name, sizeof (targ_name));
 	free(name);
 
 	/*
@@ -194,7 +198,7 @@ modify_target(tgt_node_t *x, ucred_t *cred)
 		(void) tgt_find_value_int(x, XML_ELEMENT_LUN, &lun);
 
 		/* ---- read in current parameters ---- */
-		mgmt_get_param(&node, targ_name, lun);
+		(void) mgmt_get_param(&node, targ_name, lun);
 
 		/* ---- validate that we're indeed growing the LU ---- */
 		if (tgt_find_value_str(node, XML_ELEMENT_SIZE, &prop) ==
@@ -228,8 +232,8 @@ modify_target(tgt_node_t *x, ucred_t *cred)
 		free(prop);
 
 		/* ---- validate the backing store is a regular file ---- */
-		snprintf(path, sizeof (path), "%s/%s/%s%d", target_basedir,
-		    iscsi, LUNBASE, lun);
+		(void) snprintf(path, sizeof (path), "%s/%s/%s%d",
+		    target_basedir, iscsi, LUNBASE, lun);
 		if (stat(path, &st) == -1) {
 			xml_rtn_msg(&msg, ERR_STAT_BACKING_FAILED);
 			return (msg);
@@ -250,11 +254,11 @@ modify_target(tgt_node_t *x, ucred_t *cred)
 		tgt_node_free(c);
 
 		/* ---- now update params file ---- */
-		mgmt_param_save2scf(node, targ_name, lun);
+		(void) mgmt_param_save2scf(node, targ_name, lun);
 
 		/* ---- grow lu backing store ---- */
-		snprintf(path, sizeof (path), "%s/%s/%s%d", target_basedir,
-		    iscsi, LUNBASE, lun);
+		(void) snprintf(path, sizeof (path), "%s/%s/%s%d",
+		    target_basedir, iscsi, LUNBASE, lun);
 		if ((fd = open(path, O_RDWR|O_CREAT|O_LARGEFILE, 0600)) < 0) {
 			xml_rtn_msg(&msg, ERR_LUN_NOT_FOUND);
 			return (msg);
@@ -404,7 +408,7 @@ modify_target(tgt_node_t *x, ucred_t *cred)
 			xml_rtn_msg(&msg, ERR_NO_MEM);
 			return (msg);
 		}
-		snprintf(prop, 32, "%d", val);
+		(void) snprintf(prop, 32, "%d", val);
 
 		if (modify_element(XML_ELEMENT_MAXRECV, prop, t, MatchName) ==
 		    False) {
@@ -424,7 +428,7 @@ modify_target(tgt_node_t *x, ucred_t *cred)
 		}
 		if (isns_enabled() == True) {
 			if (isns_dev_update(t->x_value, isns_mods) != 0) {
-				xml_rtn_msg(&msg, ERR_UPDATE_TARGCFG_FAILED);
+				xml_rtn_msg(&msg, ERR_ISNS_ERROR);
 				return (msg);
 			}
 		}
@@ -481,10 +485,29 @@ modify_initiator(tgt_node_t *x)
 
 		if (modify_element(XML_ELEMENT_CHAPSECRET, prop, inode,
 		    MatchName) == False) {
+			free(prop);
 			xml_rtn_msg(&msg, ERR_NO_MEM);
 			return (msg);
 		}
 		free(prop);
+		changes_made = True;
+	}
+
+	if (tgt_find_value_str(x, XML_ELEMENT_DELETE_CHAPSECRET,
+	    &prop) == True) {
+		if (prop == NULL || strcmp(prop, XML_VALUE_TRUE) != 0) {
+			if (prop != NULL)
+				free(prop);
+			xml_rtn_msg(&msg, ERR_SYNTAX_MISSING_OPERAND);
+			return (msg);
+		}
+		free(prop);
+
+		if (delete_element(XML_ELEMENT_CHAPSECRET, inode,
+		    MatchName) == False) {
+			xml_rtn_msg(&msg, ERR_NO_MEM);
+			return (msg);
+		}
 		changes_made = True;
 	}
 
@@ -503,9 +526,30 @@ modify_initiator(tgt_node_t *x)
 		changes_made = True;
 	}
 
+	if (tgt_find_value_str(x, XML_ELEMENT_DELETE_CHAPNAME, &prop) == True) {
+		if (prop == NULL || strcmp(prop, XML_VALUE_TRUE) != 0) {
+			if (prop != NULL)
+				free(prop);
+			xml_rtn_msg(&msg, ERR_SYNTAX_MISSING_OPERAND);
+			return (msg);
+		}
+		free(prop);
+
+
+		if (delete_element(XML_ELEMENT_CHAPNAME, inode,
+		    MatchName) == False) {
+			xml_rtn_msg(&msg, ERR_NO_MEM);
+			return (msg);
+		}
+		changes_made = True;
+	}
+
 	if (changes_made == True) {
-		if (mgmt_config_save2scf() == True)
+		if (mgmt_config_save2scf() == True) {
 			xml_rtn_msg(&msg, ERR_SUCCESS);
+		} else {
+			xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
+		}
 	} else {
 		xml_rtn_msg(&msg, ERR_SYNTAX_MISSING_OPERAND);
 	}
@@ -524,6 +568,7 @@ modify_admin(tgt_node_t *x)
 	char		*msg	= NULL;
 	char		*prop;
 	Boolean_t	changes_made = False;
+	Boolean_t	update_isns = False;
 	admin_table_t	*ap;
 
 	for (ap = admin_prop_list; ap->name; ap++) {
@@ -537,13 +582,37 @@ modify_admin(tgt_node_t *x)
 			 * will allow possible checking to be done first.
 			 */
 			if (ap->func) {
-				if ((msg = (*ap->func)(ap->name, prop)) != NULL)
+				msg = (*ap->func)(ap->name, prop);
+				if (msg != NULL) {
+					free(prop);
 					return (msg);
+				}
 			}
-			if (modify_element(ap->name, prop, main_config,
-			    MatchName) == False) {
-				xml_rtn_msg(&msg, ERR_NO_MEM);
-				return (msg);
+
+			if (ap->delete_name == NULL) {
+				if (modify_element(ap->name, prop, main_config,
+				    MatchName) == False) {
+					xml_rtn_msg(&msg, ERR_NO_MEM);
+					free(prop);
+					return (msg);
+				}
+			} else {
+				if (strcmp(prop, XML_VALUE_TRUE) != 0) {
+					xml_rtn_msg(&msg,
+					    ERR_SYNTAX_MISSING_OPERAND);
+					free(prop);
+					return (msg);
+				}
+				if (delete_element(ap->delete_name,
+				    main_config, MatchName) == False) {
+					xml_rtn_msg(&msg, ERR_NO_MEM);
+					free(prop);
+					return (msg);
+				}
+			}
+			if (0 == strcmp(ap->name, XML_ELEMENT_ISNS_ACCESS) ||
+			    0 == strcmp(ap->name, XML_ELEMENT_ISNS_SERV)) {
+				update_isns = True;
 			}
 			free(prop);
 			changes_made = True;
@@ -552,12 +621,17 @@ modify_admin(tgt_node_t *x)
 
 	if (changes_made == True) {
 		/* isns_update updates isns_access & isns server name */
-		if (isns_update() != 0) {
-			xml_rtn_msg(&msg, ERR_ISNS_ERROR);
-			return (msg);
+		if (update_isns == True) {
+			if (isns_update() != 0) {
+				xml_rtn_msg(&msg, ERR_ISNS_ERROR);
+				return (msg);
+			}
 		}
-		if (mgmt_config_save2scf() == True)
+		if (mgmt_config_save2scf() == True) {
 			xml_rtn_msg(&msg, ERR_SUCCESS);
+		} else {
+			xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
+		}
 	} else {
 		xml_rtn_msg(&msg, ERR_SYNTAX_MISSING_OPERAND);
 	}
@@ -606,15 +680,19 @@ modify_tpgt(tgt_node_t *x)
 		return (msg);
 	}
 
-	if (mgmt_config_save2scf() == True)
+	if (mgmt_config_save2scf() == True) {
 		xml_rtn_msg(&msg, ERR_SUCCESS);
+	} else {
+		/* tpgt change should be updated to smf */
+		xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
+	}
 
 	/*
 	 * Re-register all targets, currently there's no method to
 	 * update TPGT for individual target
 	 */
 	if (isns_enabled() == True) {
-		isns_reg_all();
+		(void) isns_reg_all();
 	}
 
 error:
@@ -646,10 +724,18 @@ modify_zfs(tgt_node_t *x, ucred_t *cred)
 	uint64_t	size;
 	int		status;
 	int		val;
+	char		*tru = "true";
 
 	if (tgt_find_value_str(x, XML_ELEMENT_NAME, &dataset) == False) {
 		xml_rtn_msg(&msg, ERR_SYNTAX_MISSING_NAME);
 		return (msg);
+	}
+
+	/*
+	 * Validate request
+	 */
+	if (tgt_find_value_str(x, XML_ELEMENT_VALIDATE, &tru)) {
+		return (validate_zfs_iscsitgt(x));
 	}
 
 	/*
@@ -818,6 +904,59 @@ error:
 }
 
 /*
+ * Just checking the existance of the given target. Here we check whether
+ * both zfs and iscsitarget aware of the given target/volume. It neither
+ * care about the credentials nor SHAREISCSI properties.
+ */
+static char *
+validate_zfs_iscsitgt(tgt_node_t *x)
+{
+	char		*msg		= NULL;
+	char		*prop		= NULL;
+	char		*dataset	= NULL;
+	libzfs_handle_t	*zh		= NULL;
+	zfs_handle_t	*zfsh		= NULL;
+	tgt_node_t	*n		= NULL;
+
+	if (tgt_find_value_str(x, XML_ELEMENT_NAME, &dataset) == False) {
+		xml_rtn_msg(&msg, ERR_SYNTAX_MISSING_NAME);
+		return (msg);
+	}
+
+	if (((zh = libzfs_init()) == NULL) ||
+	    ((zfsh = zfs_open(zh, dataset, ZFS_TYPE_DATASET)) == NULL)) {
+		xml_rtn_msg(&msg, ERR_TARG_NOT_FOUND);
+		goto error;
+	}
+
+	while ((n = tgt_node_next_child(targets_config, XML_ELEMENT_TARG, n)) !=
+	    NULL) {
+		if (strcmp(n->x_value, dataset) == 0)
+			break;
+	}
+	if (n == NULL) {
+		xml_rtn_msg(&msg, ERR_TARG_NOT_FOUND);
+		goto error;
+	}
+
+	xml_rtn_msg(&msg, ERR_SUCCESS);
+
+error:
+	if (zfsh)
+		zfs_close(zfsh);
+	if (prop)
+		free(prop);
+	if (zh)
+		libzfs_fini(zh);
+	if (dataset)
+		free(dataset);
+
+	return (msg);
+
+}
+
+
+/*
  * []----
  * | modify_element -- helper function to create node and add it to parent
  * |
@@ -837,6 +976,26 @@ modify_element(char *name, char *value, tgt_node_t *p, match_type_t m)
 		tgt_node_free(c);
 		return (True);
 	}
+}
+
+/*
+ * []----
+ * | delete_element -- helper function to remove a node from a parent
+ * |
+ * | A False return value indicates a failure to allocate enough memory.
+ * []----
+ */
+static Boolean_t
+delete_element(char *name, tgt_node_t *p, match_type_t m)
+{
+	tgt_node_t	*c;
+
+	if ((c = tgt_node_alloc(name, String, NULL)) == NULL) {
+		return (False);
+	}
+	tgt_node_remove(p, c, m);
+	tgt_node_free(c);
+	return (True);
 }
 
 /*
@@ -949,6 +1108,11 @@ valid_isns_srv(char *name, char *prop)
 	int		so;
 	int		port;
 
+	if (strlen(prop) > MAXHOSTNAMELEN) {
+		xml_rtn_msg(&msg, ERR_INVALID_ISNS_SRV);
+		return (msg);
+	}
+
 	if ((sp = strdup(prop)) == NULL) {
 		xml_rtn_msg(&msg, ERR_NO_MEM);
 		return (msg);
@@ -964,11 +1128,16 @@ valid_isns_srv(char *name, char *prop)
 	}
 
 	so = isns_open(sp);
-	if (so < 0)
-		xml_rtn_msg(&msg, ERR_INVALID_ISNS_SRV);
-	else
+	if (so < 0) {
+		if (isns_enabled() == True) {
+			xml_rtn_msg(&msg, ERR_INVALID_ISNS_SRV);
+		} else { /* Just print a warning and accept the server */
+			syslog(LOG_ALERT,
+			    "Check if the server:%s is valid", sp);
+		}
+	} else {
 		isns_close(so);
-
+	}
 	free(sp);
 	return (msg);
 }

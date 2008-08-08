@@ -24,9 +24,7 @@
  * Use is subject to license terms.
  */
 
-	.ident	"%Z%%M%	%I%	%E% SMI"
-
-	.file	"%M%"
+	.file	"memcpy.s"
 
 /*
  * memcpy(s1, s2, len)
@@ -57,8 +55,6 @@
 #include <sys/asm_linkage.h>
 
 	ANSI_PRAGMA_WEAK(memcpy,function)
-
-#include "synonyms.h"
 
 	ENTRY(memcpy)
 	ENTRY(__align_cpy_1)

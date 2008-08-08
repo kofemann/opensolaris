@@ -18,14 +18,14 @@
  *
  * CDDL HEADER END
  */
+
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
-.ident	"%Z%%M%	%I%	%E% SMI"
-
 	.file	"memset.s"
+
 /*
  * char *memset(sp, c, n)
  *
@@ -68,8 +68,6 @@
 #include <sys/asi.h>
 
 	ANSI_PRAGMA_WEAK(memset,function)
-
-#include "synonyms.h"
 
 	.section        ".text"
 	.align 32

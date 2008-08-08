@@ -83,8 +83,8 @@ fps_nvlist_create()
 	(void) nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0);
 
 	while (nvl == NULL && nr_malloc < 10) {
-		select(1, NULL, NULL, NULL, &timeout);
-		nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0);
+		(void) select(1, NULL, NULL, NULL, &timeout);
+		(void) nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0);
 		nr_malloc++;
 	}
 
@@ -198,7 +198,7 @@ fps_post_ereport(nvlist_t *ereport)
 
 	(void) sleep(1);
 
-	fflush(NULL);
+	(void) fflush(NULL);
 	sysevent_evc_unbind(scp);
 
 	return (0);
@@ -246,24 +246,23 @@ fps_get_cpu_brand(uint32_t cpu_id)
 		return (NULL);
 	}
 
-	/* LINTED */
 	if ((ksp = kstat_lookup(kc, "cpu_info", (int)cpu_id, NULL)) == NULL) {
-		kstat_close(kc);
+		(void) kstat_close(kc);
 		return (NULL);
 	}
 
 	if ((kstat_read(kc, ksp, NULL)) == -1) {
-		kstat_close(kc);
+		(void) kstat_close(kc);
 		return (NULL);
 	}
 
 	if ((knp = kstat_data_lookup(ksp, "brand")) == NULL) {
-		kstat_close(kc);
+		(void) kstat_close(kc);
 		return (NULL);
 	}
 
 	brand = fps_convert_cpu_brand(KSTAT_NAMED_STR_PTR(knp));
-	kstat_close(kc);
+	(void) kstat_close(kc);
 
 	if (brand == NULL)
 		return (NULL);
@@ -282,7 +281,6 @@ fps_generate_ereport_struct(struct fps_test_ereport *report)
 	char class_name[FM_MAX_CLASS];
 	char *cpu_brand;
 	char *string_data;
-	int detector_available;
 	int expect_size;
 	int is_valid_cpu;
 	int mask;
@@ -300,8 +298,9 @@ fps_generate_ereport_struct(struct fps_test_ereport *report)
 	uint64_t *observe;
 
 	if (report == NULL)
-		return (1);
+		return (FPU_EREPORT_FAIL);
 
+	ret = FPU_FOROFFLINE;
 	cpu_id = report->cpu_id;
 	test = report->test_id;
 	mask = report->mask;
@@ -311,15 +310,13 @@ fps_generate_ereport_struct(struct fps_test_ereport *report)
 	observe_size = report->observed_size;
 	observe = report->observed;
 	string_data = report->info;
-	detector_available = 1;
 
 	/* allocate nvlists */
 	if ((ereport = fps_nvlist_create()) == NULL)
 		_exit(FPU_EREPORT_FAIL);
 
 	if ((detector = fps_nvlist_create()) == NULL) {
-		detector_available = 0;
-		ret = FPU_EREPORT_INCOM;
+		_exit(FPU_EREPORT_FAIL);
 	}
 
 	/* setup class */
@@ -336,8 +333,7 @@ fps_generate_ereport_struct(struct fps_test_ereport *report)
 
 	/* setup detector */
 	if (fps_fmri_svc_set(detector, getenv("SMF_FMRI")) != 0) {
-		detector_available = 0;
-		ret = FPU_EREPORT_INCOM;
+		_exit(FPU_EREPORT_FAIL);
 	}
 
 	/* setup fps-version */
@@ -360,21 +356,19 @@ fps_generate_ereport_struct(struct fps_test_ereport *report)
 
 	if (ena != 0) {
 		if (nvlist_add_uint64(ereport, NAME_FPS_ENA, ena) != 0)
-			ret = FPU_EREPORT_INCOM;
+			_exit(FPU_EREPORT_FAIL);
 	} else
-		ret = FPU_EREPORT_INCOM;
+		_exit(FPU_EREPORT_FAIL);
 
-	if (detector_available) {
-		if (nvlist_add_nvlist(ereport, NAME_FPS_DETECTOR,
-		    (nvlist_t *)detector) != 0)
-			ret = FPU_EREPORT_INCOM;
-	}
+	if (nvlist_add_nvlist(ereport, NAME_FPS_DETECTOR,
+	    (nvlist_t *)detector) != 0)
+		_exit(FPU_EREPORT_FAIL);
 
 	if (nvlist_add_uint8(ereport, NAME_FPS_VERSION, fps_ver) != 0)
 		_exit(FPU_EREPORT_FAIL);
 
 	if (nvlist_add_uint32(ereport, NAME_FPS_TEST_ID, test) != 0)
-		_exit(FPU_EREPORT_FAIL);
+		ret = FPU_EREPORT_INCOM;
 
 	if (nvlist_add_uint64_array(ereport, NAME_FPS_EXPECTED_VALUE,
 	    expect, expect_size) != 0)
@@ -398,7 +392,7 @@ fps_generate_ereport_struct(struct fps_test_ereport *report)
 
 	/* publish */
 	if (fps_post_ereport(ereport)) {
-		_exit(FPU_EREPORT_FAIL);
+		ret = FPU_EREPORT_FAIL;
 	}
 
 	/* free nvlists */
@@ -492,7 +486,7 @@ setup_fps_test_struct(int mask, struct fps_test_ereport *rep, ...)
 			return;
 		}
 
-		strlcpy(rep->info, data, MAX_INFO_SIZE-1);
+		(void) strlcpy(rep->info, data, MAX_INFO_SIZE-1);
 	}
 
 	va_end(argptr);

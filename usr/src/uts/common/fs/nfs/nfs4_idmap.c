@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -403,7 +403,7 @@ retry:
 	door_args.rbuf = (char *)mapresp;
 	door_args.rsize = sizeof (struct mapid_res);
 
-	error = door_ki_upcall(dh, &door_args);
+	error = door_ki_upcall_limited(dh, &door_args, NULL, SIZE_MAX, 0);
 	if (!error) {
 		resp = (struct mapid_res *)door_args.rbuf;
 
@@ -599,7 +599,7 @@ retry:
 	door_args.rbuf = (char *)mapresp;
 	door_args.rsize = sizeof (struct mapid_res);
 
-	error = door_ki_upcall(dh, &door_args);
+	error = door_ki_upcall_limited(dh, &door_args, NULL, SIZE_MAX, 0);
 	if (!error) {
 		resp = (struct mapid_res *)door_args.rbuf;
 
@@ -782,7 +782,7 @@ retry:
 	door_args.rbuf = (char *)mapresp;
 	door_args.rsize = sizeof (struct mapid_res);
 
-	error = door_ki_upcall(dh, &door_args);
+	error = door_ki_upcall_limited(dh, &door_args, NULL, SIZE_MAX, 0);
 	if (!error) {
 		resp = (struct mapid_res *)door_args.rbuf;
 
@@ -979,7 +979,7 @@ retry:
 	door_args.rbuf = (char *)mapresp;
 	door_args.rsize = sizeof (struct mapid_res);
 
-	error = door_ki_upcall(dh, &door_args);
+	error = door_ki_upcall_limited(dh, &door_args, NULL, SIZE_MAX, 0);
 	if (!error) {
 		resp = (struct mapid_res *)door_args.rbuf;
 

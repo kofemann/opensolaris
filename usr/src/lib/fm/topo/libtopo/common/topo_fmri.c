@@ -26,12 +26,15 @@
 
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
 
+#include <ctype.h>
 #include <string.h>
 #include <limits.h>
 #include <fm/topo_mod.h>
+#include <fm/fmd_fmri.h>
 #include <sys/fm/protocol.h>
 #include <topo_alloc.h>
 #include <topo_error.h>
+#include <topo_hc.h>
 #include <topo_method.h>
 #include <topo_subr.h>
 #include <topo_string.h>
@@ -48,8 +51,10 @@
  *
  *	- expand
  *	- present
+ *	- replaced
  *	- contains
  *	- unusable
+ *	- service_state
  *	- nvl2str
  *
  * In addition, the following operations are supported per-FMRI:
@@ -197,6 +202,34 @@ topo_fmri_present(topo_hdl_t *thp, nvlist_t *fmri, int *err)
 }
 
 int
+topo_fmri_replaced(topo_hdl_t *thp, nvlist_t *fmri, int *err)
+{
+	uint32_t replaced = FMD_OBJ_STATE_NOT_PRESENT;
+	char *scheme;
+	nvlist_t *out = NULL;
+	tnode_t *rnode;
+
+	if (nvlist_lookup_string(fmri, FM_FMRI_SCHEME, &scheme) != 0)
+		return (set_error(thp, ETOPO_FMRI_MALFORM, err,
+		    TOPO_METH_REPLACED, out));
+
+	if ((rnode = topo_hdl_root(thp, scheme)) == NULL)
+		return (set_error(thp, ETOPO_METHOD_NOTSUP, err,
+		    TOPO_METH_REPLACED, out));
+
+	if (topo_method_invoke(rnode, TOPO_METH_REPLACED,
+	    TOPO_METH_REPLACED_VERSION, fmri, &out, err) < 0) {
+		(void) set_error(thp, *err, err, TOPO_METH_REPLACED, out);
+		return (FMD_OBJ_STATE_UNKNOWN);
+	}
+
+	(void) nvlist_lookup_uint32(out, TOPO_METH_REPLACED_RET, &replaced);
+	nvlist_free(out);
+
+	return (replaced);
+}
+
+int
 topo_fmri_contains(topo_hdl_t *thp, nvlist_t *fmri, nvlist_t *subfmri, int *err)
 {
 	uint32_t contains;
@@ -262,6 +295,34 @@ topo_fmri_unusable(topo_hdl_t *thp, nvlist_t *fmri, int *err)
 	nvlist_free(out);
 
 	return (unusable);
+}
+
+int
+topo_fmri_service_state(topo_hdl_t *thp, nvlist_t *fmri, int *err)
+{
+	char *scheme;
+	uint32_t service_state = FMD_SERVICE_STATE_UNKNOWN;
+	nvlist_t *out = NULL;
+	tnode_t *rnode;
+
+	if (nvlist_lookup_string(fmri, FM_FMRI_SCHEME, &scheme) != 0)
+		return (set_error(thp, ETOPO_FMRI_MALFORM, err,
+		    TOPO_METH_SERVICE_STATE, out));
+
+	if ((rnode = topo_hdl_root(thp, scheme)) == NULL)
+		return (set_error(thp, ETOPO_METHOD_NOTSUP, err,
+		    TOPO_METH_SERVICE_STATE, out));
+
+	if (topo_method_invoke(rnode, TOPO_METH_SERVICE_STATE,
+	    TOPO_METH_SERVICE_STATE_VERSION, fmri, &out, err) < 0)
+		return (set_error(thp, *err, err, TOPO_METH_SERVICE_STATE,
+		    out));
+
+	(void) nvlist_lookup_uint32(out, TOPO_METH_SERVICE_STATE_RET,
+	    &service_state);
+	nvlist_free(out);
+
+	return (service_state);
 }
 
 int
@@ -604,4 +665,133 @@ topo_fmri_create(topo_hdl_t *thp, const char *scheme, const char *name,
 	}
 	nvlist_free(ins);
 	return (out);
+}
+
+/*
+ * These private utility functions are used by fmd to maintain its resource
+ * cache.  Because hc instance numbers are not guaranteed, it's possible to
+ * have two different FMRI strings represent the same logical entity.  These
+ * functions hide this implementation detail from unknowing consumers such as
+ * fmd.
+ *
+ * Ideally, we'd like to do a str2nvl() and then a full FMRI hash and
+ * comparison, but these functions are designed to be fast and efficient.
+ * Given that there is only a single hc node that has this property
+ * (ses-enclosure), we hard-code this behavior here.  If there are more
+ * instances of this behavior in the future, this function could be made more
+ * generic.
+ */
+static ulong_t
+topo_fmri_strhash_one(const char *fmri, size_t len)
+{
+	ulong_t g, h = 0;
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		h = (h << 4) + fmri[i];
+
+		if ((g = (h & 0xf0000000)) != 0) {
+			h ^= (g >> 24);
+			h ^= g;
+		}
+	}
+
+	return (h);
+}
+
+/*ARGSUSED*/
+ulong_t
+topo_fmri_strhash(topo_hdl_t *thp, const char *fmri)
+{
+	char *e;
+	ulong_t h;
+
+	if (strncmp(fmri, "hc://", 5) != 0 ||
+	    (e = strstr(fmri, SES_ENCLOSURE)) == NULL)
+		return (topo_fmri_strhash_one(fmri, strlen(fmri)));
+
+	h = topo_fmri_strhash_one(fmri, e - fmri);
+	e += sizeof (SES_ENCLOSURE);
+
+	while (isdigit(*e))
+		e++;
+
+	h += topo_fmri_strhash_one(e, strlen(e));
+
+	return (h);
+}
+
+/*ARGSUSED*/
+boolean_t
+topo_fmri_strcmp(topo_hdl_t *thp, const char *a, const char *b)
+{
+	char *ea, *eb;
+
+	if (strncmp(a, "hc://", 5) != 0 ||
+	    strncmp(b, "hc://", 5) != 0 ||
+	    (ea = strstr(a, SES_ENCLOSURE)) == NULL ||
+	    (eb = strstr(b, SES_ENCLOSURE)) == NULL)
+		return (strcmp(a, b) == 0);
+
+	if ((ea - a) != (eb - b))
+		return (B_FALSE);
+
+	if (strncmp(a, b, ea - a) != 0)
+		return (B_FALSE);
+
+	ea += sizeof (SES_ENCLOSURE);
+	eb += sizeof (SES_ENCLOSURE);
+
+	while (isdigit(*ea))
+		ea++;
+	while (isdigit(*eb))
+		eb++;
+
+	return (strcmp(ea, eb) == 0);
+}
+
+int
+topo_fmri_facility(topo_hdl_t *thp, nvlist_t *rsrc, const char *fac_type,
+    uint32_t fac_subtype, topo_walk_cb_t cb, void *cb_args, int *err)
+{
+	int rv;
+	nvlist_t *in = NULL, *out;
+	tnode_t *rnode;
+	char *scheme;
+
+	if (nvlist_lookup_string(rsrc, FM_FMRI_SCHEME, &scheme) != 0)
+		return (set_error(thp, ETOPO_FMRI_MALFORM, err,
+		    TOPO_METH_PROP_GET, in));
+
+	if ((rnode = topo_hdl_root(thp, scheme)) == NULL)
+		return (set_error(thp, ETOPO_METHOD_NOTSUP, err,
+		    TOPO_METH_PROP_GET, in));
+
+	if (topo_hdl_nvalloc(thp, &in, NV_UNIQUE_NAME) != 0)
+		return (set_error(thp, ETOPO_FMRI_NVL, err,
+		    TOPO_METH_PROP_GET, in));
+
+	rv = nvlist_add_nvlist(in, TOPO_PROP_RESOURCE, rsrc);
+	rv |= nvlist_add_string(in, FM_FMRI_FACILITY_TYPE, fac_type);
+	rv |= nvlist_add_uint32(in, "type", fac_subtype);
+#ifdef _LP64
+	rv |= nvlist_add_uint64(in, "callback", (uint64_t)cb);
+	rv |= nvlist_add_uint64(in, "callback-args", (uint64_t)cb_args);
+#else
+	rv |= nvlist_add_uint32(in, "callback", (uint32_t)cb);
+	rv |= nvlist_add_uint32(in, "callback-args", (uint32_t)cb_args);
+#endif
+	if (rv != 0)
+		return (set_error(thp, ETOPO_FMRI_NVL, err,
+		    TOPO_METH_PROP_GET, in));
+
+	rv = topo_method_invoke(rnode, TOPO_METH_FACILITY,
+	    TOPO_METH_FACILITY_VERSION, in, &out, err);
+
+	nvlist_free(in);
+
+	if (rv != 0)
+		return (-1); /* *err is set for us */
+
+	return (0);
 }

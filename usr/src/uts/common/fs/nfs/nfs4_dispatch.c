@@ -383,6 +383,7 @@ rfs4_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 	int			 dr_stat = NFS4_NOT_DUP;
 	rfs4_dupreq_t		*drp = NULL;
 	int			 rv;
+	cred_t			*cr = NULL;
 
 	/* NULL Proc now checked in rfs4_mvdemux() */
 
@@ -434,7 +435,7 @@ rfs4_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 		case NFS4_DUP_NEW:
 			curthread->t_flag |= T_DONTPEND;
 			/* NON-IDEMPOTENT proc call */
-			rfs4_compound(cap, (COMPOUND4res *)rbp, NULL, req, &rv);
+			rfs4_compound(cap, (COMPOUND4res *)rbp, NULL, req, cr, &rv);
 			curthread->t_flag &= ~T_DONTPEND;
 
 			if (rv)		/* short ckt sendreply on error */
@@ -467,7 +468,7 @@ rfs4_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 	} else {
 		curthread->t_flag |= T_DONTPEND;
 		/* IDEMPOTENT proc call */
-		rfs4_compound(cap, (COMPOUND4res *)rbp, NULL, req, &rv);
+		rfs4_compound(cap, (COMPOUND4res *)rbp, NULL, req, cr, &rv);
 		curthread->t_flag &= ~T_DONTPEND;
 
 		if (rv)		/* short ckt sendreply on error */

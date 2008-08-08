@@ -45,11 +45,7 @@
  * for some Broadcom chips due to known MSI hardware issues. Currently MSI
  * is enabled only for 5714C A2 and 5715C A2 broadcom chips.
  */
-#if defined(__sparc)
 boolean_t bge_enable_msi = B_TRUE;
-#else
-boolean_t bge_enable_msi = B_FALSE;
-#endif
 
 /*
  * PCI-X/PCI-E relaxed ordering tunable for OS/Nexus driver
@@ -91,7 +87,6 @@ static char knownids_propname[] = "bge-known-subsystems";
  *		differ significantly from the values recommended in the PRM.
  */
 static uint32_t bge_autorecover = 1;
-static uint32_t bge_mlcr_default = MLCR_DEFAULT;
 static uint32_t bge_mlcr_default_5714 = MLCR_DEFAULT_5714;
 
 static uint32_t bge_dma_rdprio = 1;
@@ -157,7 +152,6 @@ static uint16_t bge_dma_miss_limit	= 20;
 static uint32_t bge_stop_start_on_sync	= 0;
 
 boolean_t bge_jumbo_enable		= B_TRUE;
-static uint32_t bge_default_jumbo_size	= BGE_JUMBO_BUFF_SIZE;
 
 /*
  * bge_intr_max_loop controls the maximum loop number within bge_intr.
@@ -181,72 +175,6 @@ static int bge_intr_max_loop = 1;
 
 #if	BGE_CFG_IO8
 
-/*
- * 8- and 16-bit set/clr operations are not used; all the config registers
- * that we need to do bit-twiddling on are 32 bits wide.  I'll leave the
- * code here, though, in case we ever find that we do want it after all ...
- */
-
-static void bge_cfg_set8(bge_t *bgep, bge_regno_t regno, uint8_t bits);
-#pragma	inline(bge_cfg_set8)
-
-static void
-bge_cfg_set8(bge_t *bgep, bge_regno_t regno, uint8_t bits)
-{
-	uint8_t regval;
-
-	BGE_TRACE(("bge_cfg_set8($%p, 0x%lx, 0x%x)",
-	    (void *)bgep, regno, bits));
-
-	regval = pci_config_get8(bgep->cfg_handle, regno);
-
-	BGE_DEBUG(("bge_cfg_set8($%p, 0x%lx, 0x%x): 0x%x => 0x%x",
-	    (void *)bgep, regno, bits, regval, regval | bits));
-
-	regval |= bits;
-	pci_config_put8(bgep->cfg_handle, regno, regval);
-}
-
-static void bge_cfg_clr8(bge_t *bgep, bge_regno_t regno, uint8_t bits);
-#pragma	inline(bge_cfg_clr8)
-
-static void
-bge_cfg_clr8(bge_t *bgep, bge_regno_t regno, uint8_t bits)
-{
-	uint8_t regval;
-
-	BGE_TRACE(("bge_cfg_clr8($%p, 0x%lx, 0x%x)",
-	    (void *)bgep, regno, bits));
-
-	regval = pci_config_get8(bgep->cfg_handle, regno);
-
-	BGE_DEBUG(("bge_cfg_clr8($%p, 0x%lx, 0x%x): 0x%x => 0x%x",
-	    (void *)bgep, regno, bits, regval, regval & ~bits));
-
-	regval &= ~bits;
-	pci_config_put8(bgep->cfg_handle, regno, regval);
-}
-
-static void bge_cfg_set16(bge_t *bgep, bge_regno_t regno, uint16_t bits);
-#pragma	inline(bge_cfg_set16)
-
-static void
-bge_cfg_set16(bge_t *bgep, bge_regno_t regno, uint16_t bits)
-{
-	uint16_t regval;
-
-	BGE_TRACE(("bge_cfg_set16($%p, 0x%lx, 0x%x)",
-	    (void *)bgep, regno, bits));
-
-	regval = pci_config_get16(bgep->cfg_handle, regno);
-
-	BGE_DEBUG(("bge_cfg_set16($%p, 0x%lx, 0x%x): 0x%x => 0x%x",
-	    (void *)bgep, regno, bits, regval, regval | bits));
-
-	regval |= bits;
-	pci_config_put16(bgep->cfg_handle, regno, regval);
-}
-
 static void bge_cfg_clr16(bge_t *bgep, bge_regno_t regno, uint16_t bits);
 #pragma	inline(bge_cfg_clr16)
 
@@ -268,26 +196,6 @@ bge_cfg_clr16(bge_t *bgep, bge_regno_t regno, uint16_t bits)
 }
 
 #endif	/* BGE_CFG_IO8 */
-
-static void bge_cfg_set32(bge_t *bgep, bge_regno_t regno, uint32_t bits);
-#pragma	inline(bge_cfg_set32)
-
-static void
-bge_cfg_set32(bge_t *bgep, bge_regno_t regno, uint32_t bits)
-{
-	uint32_t regval;
-
-	BGE_TRACE(("bge_cfg_set32($%p, 0x%lx, 0x%x)",
-	    (void *)bgep, regno, bits));
-
-	regval = pci_config_get32(bgep->cfg_handle, regno);
-
-	BGE_DEBUG(("bge_cfg_set32($%p, 0x%lx, 0x%x): 0x%x => 0x%x",
-	    (void *)bgep, regno, bits, regval, regval | bits));
-
-	regval |= bits;
-	pci_config_put32(bgep->cfg_handle, regno, regval);
-}
 
 static void bge_cfg_clr32(bge_t *bgep, bge_regno_t regno, uint32_t bits);
 #pragma	inline(bge_cfg_clr32)
@@ -1871,6 +1779,8 @@ bge_nvmem_id(bge_t *bgep)
 	case DEVICE_ID_5705_2:
 	case DEVICE_ID_5706:
 	case DEVICE_ID_5782:
+	case DEVICE_ID_5787:
+	case DEVICE_ID_5787M:
 	case DEVICE_ID_5788:
 	case DEVICE_ID_5789:
 	case DEVICE_ID_5751:
@@ -2098,6 +2008,24 @@ bge_chip_id_init(bge_t *bgep)
 		cidp->tx_rings = BGE_SEND_RINGS_MAX_5705;
 		cidp->flags |= CHIP_FLAG_NO_JUMBO;
 		cidp->flags |= CHIP_FLAG_PARTIAL_CSUM;
+		cidp->statistic_type = BGE_STAT_REG;
+		dev_ok = B_TRUE;
+		break;
+
+	case DEVICE_ID_5787:
+	case DEVICE_ID_5787M:
+		cidp->chip_label = 5787;
+		cidp->pci_type = BGE_PCI_E;
+		cidp->mbuf_lo_water_rdma = RDMA_MBUF_LOWAT_5705;
+		cidp->mbuf_lo_water_rmac = MAC_RX_MBUF_LOWAT_5705;
+		cidp->mbuf_hi_water = MBUF_HIWAT_5705;
+		cidp->mbuf_base = bge_mbuf_pool_base_5705;
+		cidp->mbuf_length = bge_mbuf_pool_len_5705;
+		cidp->recv_slots = BGE_RECV_SLOTS_5705;
+		cidp->bge_mlcr_default |= MLCR_MISC_PINS_OUTPUT_ENABLE_1;
+		cidp->rx_rings = BGE_RECV_RINGS_MAX_5705;
+		cidp->tx_rings = BGE_SEND_RINGS_MAX_5705;
+		cidp->flags |= CHIP_FLAG_NO_JUMBO;
 		cidp->statistic_type = BGE_STAT_REG;
 		dev_ok = B_TRUE;
 		break;
@@ -3039,6 +2967,8 @@ bge_poll_firmware(bge_t *bgep)
 	for (i = 0; i < 1000; ++i) {
 		drv_usecwait(1000);
 		gen = bge_nic_get64(bgep, NIC_MEM_GENCOMM) >> 32;
+		if (i == 0 && DEVICE_5704_SERIES_CHIPSETS(bgep))
+			drv_usecwait(100000);
 		mac = bge_reg_get64(bgep, MAC_ADDRESS_REG(0));
 #ifdef BGE_IPMI_ASF
 		if (!bgep->asf_enabled) {
@@ -3973,7 +3903,7 @@ uint_t bge_intr(caddr_t arg1, caddr_t arg2);
 uint_t
 bge_intr(caddr_t arg1, caddr_t arg2)
 {
-	bge_t *bgep = (bge_t *)arg1;		/* private device info	*/
+	bge_t *bgep = (void *)arg1;		/* private device info	*/
 	bge_status_t *bsp;
 	uint64_t flags;
 	uint32_t regval;
@@ -4398,7 +4328,7 @@ bge_chip_factotum(caddr_t arg)
 	boolean_t linkchg;
 	int dma_state;
 
-	bgep = (bge_t *)arg;
+	bgep = (void *)arg;
 
 	BGE_TRACE(("bge_chip_factotum($%p)", (void *)bgep));
 
@@ -5025,7 +4955,7 @@ bge_pp_ioctl(bge_t *bgep, int cmd, mblk_t *mp, struct iocblk *iocp)
 		return (IOC_INVAL);
 	if (mp->b_cont == NULL)
 		return (IOC_INVAL);
-	ppd = (bge_peekpoke_t *)mp->b_cont->b_rptr;
+	ppd = (void *)mp->b_cont->b_rptr;
 
 	/*
 	 * Validate request parameters
@@ -5249,7 +5179,7 @@ bge_mii_ioctl(bge_t *bgep, int cmd, mblk_t *mp, struct iocblk *iocp)
 		return (IOC_INVAL);
 	if (mp->b_cont == NULL)
 		return (IOC_INVAL);
-	miirwp = (struct bge_mii_rw *)mp->b_cont->b_rptr;
+	miirwp = (void *)mp->b_cont->b_rptr;
 
 	/*
 	 * Validate request parameters ...
@@ -5293,7 +5223,7 @@ bge_see_ioctl(bge_t *bgep, int cmd, mblk_t *mp, struct iocblk *iocp)
 		return (IOC_INVAL);
 	if (mp->b_cont == NULL)
 		return (IOC_INVAL);
-	seerwp = (struct bge_see_rw *)mp->b_cont->b_rptr;
+	seerwp = (void *)mp->b_cont->b_rptr;
 
 	/*
 	 * Validate request parameters ...
@@ -5337,7 +5267,7 @@ bge_flash_ioctl(bge_t *bgep, int cmd, mblk_t *mp, struct iocblk *iocp)
 		return (IOC_INVAL);
 	if (mp->b_cont == NULL)
 		return (IOC_INVAL);
-	flashrwp = (struct bge_flash_rw *)mp->b_cont->b_rptr;
+	flashrwp = (void *)mp->b_cont->b_rptr;
 
 	/*
 	 * Validate request parameters ...

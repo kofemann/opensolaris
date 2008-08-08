@@ -407,21 +407,6 @@ zfs_dirlook(znode_t *dzp, char *name, vnode_t **vpp, int flags,
 	return (error);
 }
 
-static char *
-zfs_unlinked_hexname(char namebuf[17], uint64_t x)
-{
-	char *name = &namebuf[16];
-	const char digits[16] = "0123456789abcdef";
-
-	*name = '\0';
-	do {
-		*--name = digits[x & 0xf];
-		x >>= 4;
-	} while (x != 0);
-
-	return (name);
-}
-
 /*
  * unlinked Set (formerly known as the "delete queue") Error Handling
  *
@@ -440,15 +425,12 @@ void
 zfs_unlinked_add(znode_t *zp, dmu_tx_t *tx)
 {
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
-	char obj_name[17];
-	int error;
 
 	ASSERT(zp->z_unlinked);
 	ASSERT3U(zp->z_phys->zp_links, ==, 0);
 
-	error = zap_add(zfsvfs->z_os, zfsvfs->z_unlinkedobj,
-	    zfs_unlinked_hexname(obj_name, zp->z_id), 8, 1, &zp->z_id, tx);
-	ASSERT3U(error, ==, 0);
+	VERIFY3U(0, ==,
+	    zap_add_int(zfsvfs->z_os, zfsvfs->z_unlinkedobj, zp->z_id, tx));
 }
 
 /*
@@ -574,7 +556,6 @@ zfs_rmnode(znode_t *zp)
 	zfsvfs_t	*zfsvfs = zp->z_zfsvfs;
 	objset_t	*os = zfsvfs->z_os;
 	znode_t		*xzp = NULL;
-	char		obj_name[17];
 	dmu_tx_t	*tx;
 	uint64_t	acl_obj;
 	int		error;
@@ -589,12 +570,25 @@ zfs_rmnode(znode_t *zp)
 		if (zfs_purgedir(zp) != 0) {
 			/*
 			 * Not enough space to delete some xattrs.
-			 * Leave it on the unlinked set.
+			 * Leave it in the unlinked set.
 			 */
 			zfs_znode_dmu_fini(zp);
 			zfs_znode_free(zp);
 			return;
 		}
+	}
+
+	/*
+	 * Free up all the data in the file.
+	 */
+	error = dmu_free_long_range(os, zp->z_id, 0, DMU_OBJECT_END);
+	if (error) {
+		/*
+		 * Not enough space.  Leave the file in the unlinked set.
+		 */
+		zfs_znode_dmu_fini(zp);
+		zfs_znode_free(zp);
+		return;
 	}
 
 	/*
@@ -609,7 +603,7 @@ zfs_rmnode(znode_t *zp)
 	acl_obj = zp->z_phys->zp_acl.z_acl_extern_obj;
 
 	/*
-	 * Set up the transaction.
+	 * Set up the final transaction.
 	 */
 	tx = dmu_tx_create(os);
 	dmu_tx_hold_free(tx, zp->z_id, 0, DMU_OBJECT_END);
@@ -643,9 +637,8 @@ zfs_rmnode(znode_t *zp)
 	}
 
 	/* Remove this znode from the unlinked set */
-	error = zap_remove(os, zfsvfs->z_unlinkedobj,
-	    zfs_unlinked_hexname(obj_name, zp->z_id), tx);
-	ASSERT3U(error, ==, 0);
+	VERIFY3U(0, ==,
+	    zap_remove_int(zfsvfs->z_os, zfsvfs->z_unlinkedobj, zp->z_id, tx));
 
 	zfs_znode_delete(zp, tx);
 

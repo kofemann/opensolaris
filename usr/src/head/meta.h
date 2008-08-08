@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -767,6 +767,8 @@ extern	major_t		meta_getmajor(md_dev64_t dev64);
 extern	md_dev64_t	meta_expldev(md_dev64_t dev);
 extern	dev32_t		meta_cmpldev(md_dev64_t dev64);
 
+extern	int		meta_fix_compnames(mdsetname_t *sp,
+			    mdname_t *namep, md_dev64_t dev, md_error_t *ep);
 extern	int		meta_getdevs(mdsetname_t *sp, mdname_t *namep,
 			    mdnamelist_t **nlpp, md_error_t *ep);
 extern	int		meta_getalldevs(mdsetname_t *sp, mdnamelist_t **nlpp,
@@ -864,6 +866,12 @@ extern	int		clnt_med_upd_rec(md_h_t *mdhp, mdsetname_t *sp,
 			    med_rec_t *medrp, md_error_t *ep);
 extern	int		clnt_med_hostname(char *hostname, char **ret_hostname,
 			    md_error_t *ep);
+extern	int		clnt_user_med_upd_data(md_h_t *mdhp, bool_t obandiskset,
+			    char *setname, uint_t setnum, med_data_t *meddp,
+			    md_error_t *ep);
+extern	int		clnt_user_med_get_data(md_h_t *mdhp, bool_t obandiskset,
+			    char *setname, uint_t setnum, med_data_t  *meddp,
+			    md_error_t *ep);
 
 extern	int		meta_med_hnm2ip(md_hi_arr_t *mp, md_error_t *ep);
 extern	int		meta_h2hi(md_h_arr_t *mdhp, md_hi_arr_t *mdhip,
@@ -872,6 +880,8 @@ extern	int		meta_hi2h(md_hi_arr_t *mdhip, md_h_arr_t *mdhp,
 			    md_error_t *ep);
 extern	int		setup_med_cfg(mdsetname_t *sp, mddb_config_t *cp,
 			    int force, md_error_t *ep);
+extern	int		meta_mediator_info_from_file(char *sname, int verbose,
+			    md_error_t *ep);
 
 /* meta_mem.c */
 #ifdef	_DEBUG_MALLOC_INC
@@ -1356,6 +1366,8 @@ extern	int		meta_print_devid(mdsetname_t *sp, FILE *fp,
 			    mddevid_t *mddevidp, md_error_t *ep);
 
 /* meta_raid.c */
+extern	int		meta_raid_check_component(mdsetname_t *sp,
+			    mdname_t *np, md_dev64_t dev, md_error_t *ep);
 extern	int		meta_get_raid_names(mdsetname_t *sp,
 			    mdnamelist_t **nlpp, int options, md_error_t *ep);
 extern	void		meta_free_raid(md_raid_t *raidp);
@@ -1573,6 +1585,8 @@ extern	int		meta_smf_isonline(uint_t flags, md_error_t *ep);
 extern	int		meta_smf_getmask();
 
 /* meta_sp.c */
+extern	int		meta_sp_check_component(mdsetname_t *sp,
+			    mdname_t *np, md_error_t *ep);
 extern	int		meta_get_sp_names(mdsetname_t *sp, mdnamelist_t **nlpp,
 			    int options, md_error_t *ep);
 extern	int		meta_check_insp(mdsetname_t *sp, mdname_t *np,
@@ -1630,6 +1644,8 @@ extern	int		meta_stat(const char *, struct stat *);
 extern	void		metaflushstatcache(void);
 
 /* meta_stripe.c */
+extern	int		meta_stripe_check_component(mdsetname_t *sp,
+			    mdname_t *np, md_dev64_t dev, md_error_t *ep);
 extern	int		meta_stripe_replace(mdsetname_t *sp, mdname_t *stripenp,
 			    mdname_t *oldnp, mdname_t *newnp,
 			    mdcmdopts_t options, md_error_t *ep);
@@ -1808,6 +1824,9 @@ extern  mdname_t	*meta_get_current_root_dev(mdsetname_t *sp,
 extern  int		meta_gettimeofday(md_timeval32_t *tv);
 
 /* meta_devadm.c */
+extern	int		meta_update_namespace(set_t setno, side_t sideno,
+			    char *devname, md_dev64_t dev, mdkey_t key,
+			    char *pname, md_error_t *ep);
 extern	int		meta_fixdevid(mdsetname_t *sp, mddevopts_t options,
 			    char *diskname, md_error_t *ep);
 extern	int		meta_upd_ctdnames(mdsetname_t **sp, set_t setno,

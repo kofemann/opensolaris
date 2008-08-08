@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -330,18 +330,48 @@ pci_save_config_regs(dev_info_t *dip)
 	uint32_t *regbuf, *p;
 	uint8_t *maskbuf;
 	size_t maskbufsz, regbufsz, capbufsz;
+#ifdef __sparc
 	ddi_acc_hdl_t *hp;
+#else
+	ddi_device_acc_attr_t attr;
+	caddr_t cfgaddr;
+#endif
 	off_t offset = 0;
 	uint8_t cap_ptr, cap_id;
 	int pcie = 0;
+	uint16_t status;
+
 	PMD(PMD_SX, ("pci_save_config_regs %s:%d\n", ddi_driver_name(dip),
 	    ddi_get_instance(dip)))
 
+#ifdef __sparc
 	if (pci_config_setup(dip, &confhdl) != DDI_SUCCESS) {
 		cmn_err(CE_WARN, "%s%d can't get config handle",
 		    ddi_driver_name(dip), ddi_get_instance(dip));
 
 		return (DDI_FAILURE);
+	}
+#else
+	/* Set up cautious config access handle */
+	attr.devacc_attr_version = DDI_DEVICE_ATTR_V1;
+	attr.devacc_attr_endian_flags = DDI_STRUCTURE_LE_ACC;
+	attr.devacc_attr_dataorder = DDI_STRICTORDER_ACC;
+	attr.devacc_attr_access = DDI_CAUTIOUS_ACC;
+	if (ddi_regs_map_setup(dip, 0, &cfgaddr, 0, 0, &attr, &confhdl)
+	    != DDI_SUCCESS) {
+		cmn_err(CE_WARN, "%s%d can't setup cautious config handle",
+		    ddi_driver_name(dip), ddi_get_instance(dip));
+
+		return (DDI_FAILURE);
+	}
+#endif
+
+	/*
+	 * Determine if it implements capabilities
+	 */
+	status = pci_config_get16(confhdl, PCI_CONF_STAT);
+	if (!(status & 0x10)) {
+		goto no_cap;
 	}
 	/*
 	 * Determine if it is a pci express device. If it is, save entire
@@ -362,7 +392,7 @@ pci_save_config_regs(dev_info_t *dip)
 		cap_ptr = pci_config_get8(confhdl,
 		    cap_ptr + PCI_CAP_NEXT_PTR);
 	}
-
+no_cap:
 	if (pcie) {
 		/* PCI express device. Can have data in all 4k space */
 		regbuf = (uint32_t *)kmem_zalloc((size_t)PCIE_CONF_HDR_SIZE,
@@ -375,10 +405,22 @@ pci_save_config_regs(dev_info_t *dip)
 		maskbufsz = (size_t)((PCIE_CONF_HDR_SIZE/ sizeof (uint32_t)) >>
 		    INDEX_SHIFT);
 		maskbuf = (uint8_t *)kmem_zalloc(maskbufsz, KM_SLEEP);
+#ifdef __sparc
 		hp = impl_acc_hdl_get(confhdl);
+#endif
 		for (i = 0; i < (PCIE_CONF_HDR_SIZE / sizeof (uint32_t)); i++) {
-			if (ddi_peek32(dip, (int32_t *)(hp->ah_addr + offset),
-			    (int32_t *)p) == DDI_SUCCESS) {
+#ifdef __sparc
+			ret = ddi_peek32(dip, (int32_t *)(hp->ah_addr + offset),
+			    (int32_t *)p);
+			if (ret == DDI_SUCCESS) {
+#else
+			/*
+			 * ddi_peek doesn't work on x86, so we use cautious pci
+			 * config access instead.
+			 */
+			*p = pci_config_get32(confhdl, offset);
+			if (*p != -1) {
+#endif
 				/* it is readable register. set the bit */
 				maskbuf[i >> INDEX_SHIFT] |=
 				    (uint8_t)(1 << (i & BITMASK));
@@ -492,11 +534,20 @@ cap_walk_and_save(ddi_acc_handle_t confhdl, uint32_t *regbuf,
     pci_cap_save_desc_t *cap_descp, uint32_t *ncapsp, int xspace)
 {
 	pci_cap_entry_t *pci_cap_entp;
-	uint16_t cap_id, offset;
+	uint16_t cap_id, offset, status;
 	uint32_t words_saved = 0, nwords = 0;
 	uint16_t cap_ptr = PCI_CAP_NEXT_PTR_NULL;
 
 	*ncapsp = 0;
+
+	/*
+	 * Determine if it implements capabilities
+	 */
+	status = pci_config_get16(confhdl, PCI_CONF_STAT);
+	if (!(status & 0x10)) {
+		return (words_saved);
+	}
+
 	if (!xspace)
 		cap_ptr = pci_config_get8(confhdl, PCI_BCNF_CAP_PTR);
 	/*
@@ -697,7 +748,7 @@ pci_restore_config_regs(dev_info_t *dip)
 		    (uchar_t **)&regbuf, &elements) != DDI_PROP_SUCCESS) {
 
 			pci_config_teardown(&confhdl);
-			return (DDI_FAILURE);
+			return (DDI_SUCCESS);
 		}
 
 		chs_p = (pci_config_header_state_t *)regbuf;
@@ -1014,9 +1065,8 @@ pci_pre_resume(dev_info_t *dip)
 	suspend_level = p->ppc_suspend_level;
 #endif
 	ddi_prop_free(p);
-	if ((flags & PPCF_NOPMCAP) != 0) {
-		return (DDI_SUCCESS);
-	}
+	if ((flags & PPCF_NOPMCAP) != 0)
+		goto done;
 #if defined(__x86)
 	/*
 	 * Turn platform wake enable back off
@@ -1037,6 +1087,7 @@ pci_pre_resume(dev_info_t *dip)
 	pci_config_put16(hdl, pmcap + PCI_PMCSR, pmcsr);
 	delay(drv_usectohz(10000));	/* PCI PM spec D3->D0 (10ms) */
 	pci_config_teardown(&hdl);
+done:
 	(void) pci_restore_config_regs(dip);	/* fudges D-state! */
 	return (DDI_SUCCESS);
 }

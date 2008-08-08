@@ -70,14 +70,15 @@ extern target_queue_t	*mgmtq;
  * eid_ip: Entity IP info
  */
 static	int scn_port = 0;
-static	esi_scn_arg_t	isns_args;
+static	esi_scn_arg_t	isns_args = {{0}, {0}, 0};
 static	ip_t	eid_ip;
 static	int	num_reg = 0;
 static	pthread_t	scn_tid = 0;
-static	Boolean_t	isns_shutdown = False;
-
-Boolean_t	isns_initialized = False;
-sema_t		isns_sema;
+static	pthread_t	isns_tid = 0;
+static	Boolean_t	isns_shutdown = True;
+static	Boolean_t	connection_thr_bail_out = False;
+static int ISNS_SLEEP_SECS = 20;
+Boolean_t	isns_server_connection_thr_running = False;
 target_queue_t	*mgmtq = NULL;
 
 static	int	get_ip_addr(char *node, ip_t *sa);
@@ -93,6 +94,8 @@ static	int	isns_scn_reg(int, char *);
 static	int	isns_scn_dereg(int so, char *node);
 static	tgt_node_t	*find_tgt_by_name(char *, char **);
 static	tgt_node_t	*find_next_tgt(tgt_node_t *, char **);
+static int isns_populate_and_update_server_info(Boolean_t state);
+static int get_addr_family(char *node);
 
 /*
  * find_tgt_by_name searches DB by iscsi name or local name, if found
@@ -148,7 +151,8 @@ append_tpgt(tgt_node_t *tgt, isns_pdu_t *cmd)
 	ip_t		eid;
 
 	/* Always add the default TPGT (1) */
-	isns_append_attr(cmd, ISNS_PG_TAG_ATTR_ID, ISNS_PG_TAG_SZ, NULL, 1);
+	(void) isns_append_attr(cmd, ISNS_PG_TAG_ATTR_ID, ISNS_PG_TAG_SZ, NULL,
+	    1);
 	if (isns_append_attr(cmd, ISNS_PG_PORTAL_IP_ADDR_ATTR_ID,
 	    eid_ip.ai_addrlen, (void *)&eid_ip.ip_adr,
 	    eid_ip.ip_len) != 0) {
@@ -184,7 +188,7 @@ append_tpgt(tgt_node_t *tgt, isns_pdu_t *cmd)
 
 			/* get ip-addr & port */
 			for (x = tpgt->x_child; x; x = x->x_sibling) {
-				get_ip_addr(x->x_value, &eid);
+				(void) get_ip_addr(x->x_value, &eid);
 				if (isns_append_attr(cmd,
 				    ISNS_PG_PORTAL_IP_ADDR_ATTR_ID,
 				    eid.ai_addrlen, (void *)&eid.ip_adr,
@@ -286,7 +290,7 @@ process_scn(int so, isns_pdu_t *scn)
 				case ISNS_OBJ_UPDATED:
 					queue_prt(mgmtq, Q_ISNS_DBG,
 					    "PROCESS_SCN OBJ ADDED");
-					isns_update();
+					(void) isns_update();
 					break;
 				case ISNS_OBJ_REMOVED:
 					queue_prt(mgmtq, Q_ISNS_DBG,
@@ -350,44 +354,143 @@ process_esi(int so, isns_pdu_t *esi)
 	isns_free_pdu(cmd);
 }
 
+static int
+is_isns_server_up(char *server) {
+	int			so;
+	socklen_t		len;
+	struct sockaddr		sa;
+
+	/* no server specified */
+	if (server == NULL) {
+		return (-1);
+	}
+	/*
+	 * open isns server connect and determine which PF_INET to use
+	 */
+	if ((so = isns_open(server)) < 0) {
+		syslog(LOG_ERR,
+		    "isns server %s not found",
+			server);
+		return (-1);
+	}
+	len = sizeof (sa);
+	if (getsockname(so, &sa, &len) < 0) {
+		isns_close(so);
+		syslog(LOG_ALERT,
+			"isns getsockname failed");
+		return (-1);
+	}
+	isns_close(so);
+
+	if (sa.sa_family != PF_INET &&
+		sa.sa_family != PF_INET6) {
+		syslog(LOG_ERR,
+			"isns unknown domain type");
+		return (-1);
+	}
+	return (0);
+}
+
+/*
+ * This thread sit's in a loop and ensures that it keeps checking for
+ * connection to isns_server. Once the connection works it registers
+ * with the isns and bails out.
+ * We expect the isns server to be fault taulerant and has persistence
+ * for the registered entries.
+ */
+static void *
+isns_server_connection_thr(void *arg)
+{
+	Boolean_t registered_targets = False;
+	char server[MAXHOSTNAMELEN + 1] = {0};
+
+	while (isns_shutdown == False &&
+	    connection_thr_bail_out == False) {
+		/* current server */
+		strcpy(server, isns_args.server);
+
+		if (is_isns_server_up(server) == 0) {
+			if (registered_targets == False) {
+				/*
+				 * register all targets, what happens if
+				 * no targets are created yet? this should
+				 * not be a failure, when new target gets
+				 * created, update gets call. what if SCN
+				 * register fails?
+				 */
+				if (isns_reg_all() == 0) {
+					/* scn register all targets */
+					if (isns_op_all(ISNS_SCN_REG) != 0) {
+						syslog(LOG_ERR,
+						    "SCN registrations"
+						    " failed\n");
+						(void) isns_op_all(
+						    ISNS_DEV_DEREG);
+						registered_targets = False;
+					} else {
+						registered_targets = True;
+						break;
+					}
+				}
+			}
+		} else {
+			syslog(LOG_INFO,
+			    "isns server %s is not reachable",
+			    server);
+			registered_targets = False;
+		}
+		(void) sleep(ISNS_SLEEP_SECS);
+		/* If isns was disabled, deregister and close the thread */
+		if (isns_enabled() == False) {
+			syslog(LOG_INFO,
+			    "isns server is disabled, dergister target");
+			isns_fini();
+			break;
+		}
+
+	}
+	queue_message_set(mgmtq, 0, msg_pthread_join,
+	    (void *)(uintptr_t)pthread_self());
+
+	return (NULL);
+}
+
 /*
  * esi_scn_thr() is the thread creates an end point to receive and process
  * ESI & SCN messages.  This thread is created when isns_access is enabled
  * and for the duration of the iscsi daemon
  */
-static void
-*esi_scn_thr(void *arg)
+static void *
+esi_scn_thr(void *arg)
 {
 	struct sockaddr		sa, *ai;
 	struct sockaddr_in	sin;
 	struct sockaddr_in6	sin6;
-	int			so, fd;
+	int			so, fd, pf;
 	socklen_t		len;
 	char			strport[NI_MAXSERV];
-	int	pf;
-	esi_scn_arg_t		*args = (esi_scn_arg_t *)arg;
 	isns_pdu_t		*scn = NULL;
+	struct timeval timeout;
+	fd_set fdset;
+	int socket_ready = 0;
 
-	/*
-	 * open isns server connect and determine which PF_INET
-	 * to use
-	 */
-	if ((so = isns_open(args->server)) < 0) {
-		syslog(LOG_ERR,
-		    "esi_scn_thr: isns server %s not found", args->server);
-		return (NULL);
-	}
-	len = sizeof (sa);
-	if (getsockname(so, &sa, &len) < 0) {
-		isns_close(so);
-		syslog(LOG_ALERT, "getsockname failed");
-		return (NULL);
-	}
-	pf = sa.sa_family;
-	isns_close(so);
-
-	if (pf != PF_INET && pf != PF_INET6) {
-		syslog(LOG_ERR, "esi_scn_thr: unknown domain type");
+	pf = get_addr_family(isns_args.entity);
+	if (pf == PF_INET) {
+		bzero(&sin, sizeof (sin));
+		sin.sin_family = PF_INET;
+		sin.sin_port = htons(0);
+		sin.sin_addr.s_addr = INADDR_ANY;
+		ai = (struct sockaddr *)&sin;
+		len = sizeof (sin);
+	} else if (pf == PF_INET6) {
+		bzero(&sin6, sizeof (sin6));
+		sin6.sin6_family = PF_INET6;
+		sin6.sin6_port = htons(0);
+		sin6.sin6_addr = in6addr_any;
+		ai = (struct sockaddr *)&sin6;
+		len = sizeof (sin6);
+	} else {
+		syslog(LOG_ERR, "Bad address family. Exit esi_scn_thr");
 		return (NULL);
 	}
 
@@ -396,60 +499,72 @@ static void
 	 * save the scn port info
 	 */
 	if ((so = socket(pf, SOCK_STREAM, 0)) == -1) {
-		syslog(LOG_ALERT, "socket failed");
+		syslog(LOG_ALERT, "create isns socket failed");
 		return (NULL);
-	}
-
-	if (pf == PF_INET) {
-		bzero(&sin, sizeof (sin));
-		sin.sin_family = PF_INET;
-		sin.sin_port = htons(0);
-		sin.sin_addr.s_addr = INADDR_ANY;
-		ai = (struct sockaddr *)&sin;
-		len = sizeof (sin);
-	} else {
-		bzero(&sin6, sizeof (sin6));
-		sin6.sin6_family = PF_INET6;
-		sin6.sin6_port = htons(0);
-		sin6.sin6_addr = in6addr_any;
-		ai = (struct sockaddr *)&sin6;
-		len = sizeof (sin6);
 	}
 
 	(void) setsockopt(so, SOL_SOCKET, SO_REUSEADDR, 0, 0);
 
 	if (bind(so, ai, len) < 0) {
 		syslog(LOG_ALERT, "esi_scn_thr: bind failed");
+		(void) close(so);
 		return (NULL);
 	}
 
 	/* get scn port info */
 	len = sizeof (sa);
 	if (getsockname(so, &sa, &len) < 0) {
-		syslog(LOG_ALERT, "getsockname failed");
+		syslog(LOG_ALERT, "isns getsockname failed");
+		(void) close(so);
 		return (NULL);
 	}
 	if (getnameinfo(&sa, len, NULL, 0, strport, NI_MAXSERV,
 	    NI_NUMERICSERV) != 0) {
-		syslog(LOG_ALERT, "getnameinfo failed");
+		syslog(LOG_ALERT, "isns getnameinfo failed");
+		(void) close(so);
 		return (NULL);
 	}
 	scn_port = atoi(strport);
 
-	sema_post(&isns_sema);
 
 	if (listen(so, 5) < 0) {
 		syslog(LOG_ALERT, "esi_scn_thr: failed listen");
+		(void) close(so);
 		return (NULL);
 	}
 
 	/* listen for esi or scn messages */
 	while (isns_shutdown == False) {
-		if ((fd = accept(so, &sa, &len)) < 0) {
-			syslog(LOG_ALERT, "esi_scn_thr: failed accept");
-			continue;
+		/* ISNS_ESI_INTERVAL_ATTR_ID is set to 10s */
+		timeout.tv_sec = 10;
+		timeout.tv_usec = 0;
+		FD_ZERO(&fdset);
+		FD_SET(so, &fdset);
+
+		socket_ready = select(so + 1, &fdset, NULL, NULL, &timeout);
+
+		/* If disabled bail out, dont care about packets */
+		if (isns_enabled() == False) {
+			syslog(LOG_INFO,
+			    "isns server is disabled, dergister target");
+			isns_fini();
+			(void) close(so);
+			return (NULL);
 		}
 
+		if (socket_ready < 0) {
+			syslog(LOG_ERR,
+			    "esi_scn_thr: select failed, retrying.");
+			continue;
+		} else if (socket_ready == 0) { /* timeout */
+			continue;
+		} else {
+			/* Socket is ready */
+			if ((fd = accept(so, &sa, &len)) < 0) {
+				syslog(LOG_ALERT, "esi_scn_thr: failed accept");
+				continue;
+			}
+		}
 		if (isns_recv(fd, (isns_rsp_t **)&scn) == 0) {
 			/* Just return success for ESI */
 			switch (scn->func_id) {
@@ -472,8 +587,9 @@ static void
 			syslog(LOG_ALERT, "esi_scn_thr fails isns_recv ");
 		}
 
-		close(fd);
+		(void) close(fd);
 	}
+	(void) close(so);
 	return (NULL);
 }
 
@@ -487,8 +603,16 @@ isns_op_all(uint16_t op)
 	tgt_node_t	*tgt = NULL;
 	char		*iname;
 
+	if (isns_server_connection_thr_running == False) {
+		syslog(LOG_ERR,
+		    "isns_op_all: iSNS discovery is not running."
+		    " Check the previous iSNS initialization error.");
+		return (-1);
+	}
+
 	if ((so = isns_open(isns_args.server)) == -1) {
-		syslog(LOG_ERR, "isns_reg failed");
+		syslog(LOG_ERR, "isns_op_all: failed to open isns server %s",
+		    isns_args.server);
 		return (-1);
 	}
 
@@ -528,9 +652,60 @@ isns_op_all(uint16_t op)
 
 		free(iname);
 	}
-
 	isns_close(so);
 	return (0);
+}
+
+static int
+isns_populate_and_update_server_info(Boolean_t update) {
+	char		*isns_srv, *isns_port;
+	int retcode = 0;
+
+	/* get isns server info */
+	tgt_find_value_str(main_config, XML_ELEMENT_ISNS_SERV, &isns_srv);
+	if (isns_srv == NULL) {
+		syslog(LOG_INFO,
+		    "The server has not been setup, "
+		    "but enabling the isns access");
+		retcode = -1;
+		return (retcode);
+	}
+	isns_port = strchr(isns_srv, ':');
+	if (isns_port == NULL) {
+		isns_args.isns_port = ISNS_DEFAULT_SERVER_PORT;
+	} else {
+		isns_args.isns_port = strtoul(isns_port + 1, NULL, 0);
+		if (isns_args.isns_port == 0) {
+			isns_args.isns_port = ISNS_DEFAULT_SERVER_PORT;
+		}
+		*isns_port = '\0';
+	}
+
+	if (update == True) {
+		/* isns_server changed */
+		if (strcmp(isns_srv, isns_args.server) != 0) {
+			/* de-reg from old iSNS server if it is setup */
+			syslog(LOG_INFO,
+			    "Detected a new isns server, deregistering"
+			    " %s", isns_args.server);
+			(void) isns_dereg_all();
+			strcpy(isns_args.server, isns_srv);
+			/* Register with the new server */
+			if (isns_reg_all() == 0) {
+				/* scn register all targets */
+				if (isns_op_all(ISNS_SCN_REG) != 0) {
+					syslog(LOG_ERR,
+					    "SCN registrations failed\n");
+					(void) isns_op_all(ISNS_DEV_DEREG);
+					retcode = -1;
+				}
+			}
+		}
+	} else {
+		strcpy(isns_args.server, isns_srv);
+	}
+	free(isns_srv);
+	return (retcode);
 }
 
 /*
@@ -541,66 +716,40 @@ isns_op_all(uint16_t op)
 int
 isns_init(target_queue_t *q)
 {
-	char		*isns_srv, *isns_port;
-
 	if (q != NULL)
 		mgmtq = q;
 
 	if (isns_enabled() == False)
 		return (0);
 
-	/* initialize */
-	sema_init(&isns_sema, 0, USYNC_THREAD, NULL);
-
-	/* get isns server info */
-	tgt_find_value_str(main_config, XML_ELEMENT_ISNS_SERV, &isns_srv);
-	isns_port = strchr(isns_srv, ':');
-	if (isns_port == NULL) {
-		isns_args.isns_port = ISNS_DEFAULT_SERVER_PORT;
-	} else {
-		isns_args.isns_port = strtoul(isns_port + 1, NULL, 0);
-		if (isns_args.isns_port == 0) {
-			isns_args.isns_port = ISNS_DEFAULT_SERVER_PORT;
-		}
-		*isns_port = '\0';
-	}
-	bcopy(isns_srv, isns_args.server, MAXHOSTNAMELEN);
-	free(isns_srv);
-
 	/* get local hostname for entity usage */
 	if ((gethostname(isns_args.entity, MAXHOSTNAMELEN) < 0) ||
 	    (get_ip_addr(isns_args.entity, &eid_ip) < 0)) {
-		syslog(LOG_ERR, "ISNS fails to get ENTITY properties");
+		syslog(LOG_ERR, "isns_init: failed to get host name or host ip"
+		    " address for ENTITY properties");
 		return (-1);
 	}
 
-	if (pthread_create(&scn_tid, NULL, esi_scn_thr, (void *)&isns_args) !=
+	isns_shutdown = False;
+
+	(void) isns_populate_and_update_server_info(False);
+	if (pthread_create(&scn_tid, NULL,
+	    esi_scn_thr, (void *)&isns_args) !=
 	    0) {
 		syslog(LOG_ALERT, "isns_init failed to pthread_create");
+		pthread_kill(isns_tid, SIGKILL);
 		return (-1);
 	}
 
-	if (sema_wait(&isns_sema) != 0) {
-		syslog(LOG_ERR, "sema_wait error\n");
+	if (pthread_create(&isns_tid, NULL, isns_server_connection_thr,
+	    (void *)NULL) != 0) {
+		syslog(LOG_ALERT,
+		    "isns_init failed to create the "
+		    "isns connection thr");
+		return (-1);
 	}
 
-	isns_initialized = True;
-
-	/*
-	 * register all targets, what happens if no targets are created yet?
-	 * this should not be a failure, when new target gets created, update
-	 * gets call.
-	 * what if SCN register fails?
-	 */
-	if (isns_reg_all() == 0) {
-		/* scn register all targets */
-		if (isns_op_all(ISNS_SCN_REG) != 0) {
-			syslog(LOG_ERR, "SCN registrations failed\n");
-			isns_op_all(ISNS_DEV_DEREG);
-			return (-1);
-		}
-	}
-
+	isns_server_connection_thr_running = True;
 	return (0);
 }
 
@@ -611,69 +760,56 @@ isns_init(target_queue_t *q)
 int
 isns_update()
 {
-	char	*isns_srv = NULL, *isns_port;
-
-	if (isns_initialized == False) {
-		/* isns enabled after iscsi started */
-		if (isns_enabled() == True) {
-			isns_init(NULL);
+	Boolean_t is_isns_enabled = isns_enabled();
+	/*
+	 * If the isns thread was not started before and we are going
+	 * enabled from disabled start the threads.
+	 */
+	if (isns_server_connection_thr_running == False) {
+		if (is_isns_enabled == True) {
+			if (isns_init(NULL) != 0) {
+				return (-1);
+			} else {
+				return (0);
+			}
+		} else {
+			syslog(LOG_INFO,
+			    "isns_update: isns is disabled");
 		}
-		return (0);
-	}
-
-	/*
-	 * isns is disabled after enabled,
-	 * log off all targets and fini isns service
-	 */
-	if (isns_initialized == True && isns_enabled() == False) {
-		isns_fini();
-		return (0);
-	}
-
-	/*
-	 * isns is already initialized and isns_access is still enabled,
-	 * let's update the isns_server name
-	 */
-	tgt_find_value_str(main_config, XML_ELEMENT_ISNS_SERV, &isns_srv);
-	isns_port = strchr(isns_srv, ':');
-	if (isns_port == NULL) {
-		isns_args.isns_port = ISNS_DEFAULT_SERVER_PORT;
 	} else {
-		isns_args.isns_port = strtoul(isns_port + 1, NULL, 0);
-		if (isns_args.isns_port == 0) {
-			isns_args.isns_port = ISNS_DEFAULT_SERVER_PORT;
-		}
-		*isns_port = '\0';
-	}
+		/*
+		 * isns is disabled after enabled,
+		 * log off all targets and fini isns service
+		 */
+		if (is_isns_enabled == False) {
+			isns_shutdown = True;
+			/* pthread_join for the isns thread */
+			pthread_join(isns_tid, NULL);
+			pthread_join(scn_tid, NULL);
+			isns_server_connection_thr_running = False;
+		} else {
+			/*
+			 * Incase the original thread is still running
+			 * we should reap it
+			 */
+			connection_thr_bail_out = True;
+			pthread_join(isns_tid, NULL);
+			connection_thr_bail_out = False;
 
-	/*
-	 * If the iSNS server is different, then dregister all from
-	 * the old iSNS server, and register all to the new iSNS server
-	 */
-
-	if (strcmp(isns_srv, isns_args.server) != 0) {
-		/* de-reg from old iSNS server */
-		(void) isns_dereg_all();
-
-		bcopy(isns_srv, isns_args.server, MAXHOSTNAMELEN);
-
-		if (isns_reg_all() == 0) {
-			/* scn register all targets */
-			if (isns_op_all(ISNS_SCN_REG) != 0) {
-				syslog(LOG_ERR, "SCN registrations failed\n");
-				isns_op_all(ISNS_DEV_DEREG);
+			/*
+			 * Read the configuration file incase the server
+			 * has changed.
+			 */
+			if (isns_populate_and_update_server_info(True) == -1) {
 				return (-1);
 			}
 		}
 	}
-	if (isns_srv != NULL)
-		free(isns_srv);
-
 	return (0);
 }
 
 /*
- * isns_fini is called when isns access is disable
+ * isns_fini is called when isns access is disabled
  */
 void
 isns_fini()
@@ -682,13 +818,24 @@ isns_fini()
 	 * de-register all targets 1st, this prevents initiator from
 	 * logging back in
 	 */
-	isns_op_all(ISNS_SCN_DEREG);
-	isns_op_all(ISNS_DEV_DEREG);
+	(void) isns_op_all(ISNS_SCN_DEREG);
+	(void) isns_op_all(ISNS_DEV_DEREG);
 
 	/* log off all targets */
-	isns_op_all(ISNS_TGT_LOGOUT);
+	(void) isns_op_all(ISNS_TGT_LOGOUT);
+}
 
-	isns_initialized = False;
+static int
+get_addr_family(char *node) {
+	struct addrinfo		*ai = NULL;
+	int ret;
+
+	if ((ret = getaddrinfo(node, NULL, NULL, &ai)) != 0) {
+		syslog(LOG_ALERT, "get_addr_family: server %s not found : %s",
+		    node, gai_strerror(ret));
+		return (-1);
+	}
+	return (ai->ai_family);
 }
 
 static int
@@ -697,9 +844,11 @@ get_ip_addr(char *node, ip_t *sa)
 	struct addrinfo		*ai = NULL, *aip;
 	struct sockaddr_in	*sin;
 	struct sockaddr_in6	*sin6;
+	int	ret;
 
-	if (getaddrinfo(node, NULL, NULL, &ai) != 0) {
-		syslog(LOG_ALERT, "ISNS server not found");
+	if ((ret = getaddrinfo(node, NULL, NULL, &ai)) != 0) {
+		syslog(LOG_ALERT, "get_ip_addr: %s not found : %s",
+		    node, gai_strerror(ret));
 		return (-1);
 	}
 
@@ -813,7 +962,15 @@ isns_dev_attr_dereg(int so, char *node)
 
 	/* process response */
 	if (process_rsp(cmd, rsp) == 0) {
-		num_reg--;
+		/*
+		 * Keep the num_reg to a non-negative number.
+		 * num_reg is used to keep track of whether there was
+		 * any registration occurred or not. Deregstration should
+		 * be followed by registration but in case dereg occurs
+		 * and somehow it is succeeded keeping num_reg to 0 prevent
+		 * any negative effect on subsequent registration.
+		 */
+		if (num_reg > 0) num_reg--;
 		ret = 0;
 	}
 
@@ -874,6 +1031,7 @@ isns_dev_attr_reg(int so, tgt_node_t *tgt, char *node, char *alias)
 			}
 			if (tgt == src) {
 				free(src_nm);
+				src_nm = NULL;
 				continue;
 			} else {
 				found = True;
@@ -1236,8 +1394,16 @@ isns_reg(char *targ)
 	tgt_node_t	*tgt;
 	char		*iqn;
 
+	if (isns_server_connection_thr_running == False) {
+		syslog(LOG_ERR,
+		    "isns_reg: iSNS discovery is not running."
+		    " Check the previous iSNS initialization error.");
+		return (-1);
+	}
+
 	if ((so = isns_open(isns_args.server)) == -1) {
-		syslog(LOG_ERR, "isns_reg failed");
+		syslog(LOG_ERR, "isns_reg failed with server: %s",
+		    isns_args.server);
 		return (-1);
 	}
 
@@ -1269,8 +1435,8 @@ isns_reg_all()
 {
 	int so;
 	uint32_t	flags = ISNS_FLAG_REPLACE_REG;
-	isns_pdu_t	*cmd;
-	isns_rsp_t	*rsp;
+	isns_pdu_t	*cmd = NULL;
+	isns_rsp_t	*rsp = NULL;
 	char		*n = NULL;
 	char		*a = NULL;
 	char		alias[MAXNAMELEN];
@@ -1278,6 +1444,13 @@ isns_reg_all()
 	tgt_node_t	*tgt = NULL;
 	int		ret = -1;
 	int		tgt_cnt = 0;
+
+	if (isns_server_connection_thr_running == False) {
+		syslog(LOG_ERR,
+		    "isns_reg_all: iSNS discovery is not running."
+		    " Check the previous iSNS initialization error.");
+		return (-1);
+	}
 
 	/*
 	 * get the 1st target and use it for the source attribute
@@ -1295,9 +1468,8 @@ isns_reg_all()
 		syslog(LOG_ALERT, "ISNS: no XML_ELEMENT_INAME found\n");
 		return (-1);
 	}
-	strcpy(iname, n);
+	(void) strcpy(iname, n);
 	free(n);
-
 	if ((so = isns_open(isns_args.server)) == -1) {
 		syslog(LOG_ALERT, "ISNS: fails to connect to %s\n",
 		    isns_args.server);
@@ -1380,19 +1552,19 @@ isns_reg_all()
 			continue;
 		}
 		/* use this value as alias if alias is not set */
-		strcpy(alias, tgt->x_value);
+		(void) strcpy(alias, tgt->x_value);
 
 		if (tgt_find_value_str(tgt, XML_ELEMENT_INAME, &n)
 		    == FALSE) {
 			continue;
 		}
-		strcpy(iname, n);
+		(void) strcpy(iname, n);
 		free(n);
 
 		/* find alias */
 		if (tgt_find_value_str(tgt, XML_ELEMENT_ALIAS, &a)
 		    == TRUE) {
-			strcpy(alias, a);
+			(void) strcpy(alias, a);
 			free(a);
 		}
 
@@ -1455,6 +1627,13 @@ isns_dereg(char *name)
 	int so;
 	int ret;
 
+	if (isns_server_connection_thr_running == False) {
+		syslog(LOG_ERR,
+		    "isns_dereg: iSNS discovery is not running."
+		    " Check the previous iSNS initialization error.");
+		return (-1);
+	}
+
 	if ((so = isns_open(isns_args.server)) == -1) {
 		return (-1);
 	}
@@ -1484,13 +1663,20 @@ isns_dev_update(char *targ, uint32_t mods)
 	if (mods == 0)
 		return (0);
 
+	if (isns_server_connection_thr_running == False) {
+		syslog(LOG_ERR,
+		    "isns_dev_update: iSNS discovery is not running."
+		    " Check the previous iSNS initialization error.");
+		return (-1);
+	}
+
 	if ((tgt = find_tgt_by_name(targ, &iname)) != NULL) {
 		if (tgt_find_value_str(tgt, XML_ELEMENT_ALIAS, &dummy) ==
 		    True) {
-			strcpy(alias, dummy);
+			(void) strcpy(alias, dummy);
 			free(dummy);
 		} else
-			strcpy(alias, tgt->x_value);
+			(void) strcpy(alias, tgt->x_value);
 
 		if ((so = isns_open(isns_args.server)) < 0) {
 			goto error;
@@ -1517,9 +1703,9 @@ isns_dev_update(char *targ, uint32_t mods)
 		 * get current operating attributes, alias & portal group
 		 * objects, these should be the only things that get change
 		 */
-		isns_append_attr(cmd, ISNS_ISCSI_NAME_ATTR_ID, STRLEN(iname),
-		    iname, 0);
-		isns_append_attr(cmd, ISNS_ISCSI_NODE_TYPE_ATTR_ID,
+		(void) isns_append_attr(cmd, ISNS_ISCSI_NAME_ATTR_ID,
+		    STRLEN(iname), iname, 0);
+		(void) isns_append_attr(cmd, ISNS_ISCSI_NODE_TYPE_ATTR_ID,
 		    ISNS_NODE_TYP_SZ, NULL, ISNS_TARGET_NODE_TYPE);
 
 		if (mods & ISNS_MOD_ALIAS)
@@ -1600,6 +1786,13 @@ isns_qry_initiator(char *target, char *initiator)
 {
 	int so;
 	int ret;
+
+	if (isns_server_connection_thr_running == False) {
+		syslog(LOG_ERR,
+		    "isns_qry_initiator: iSNS discovery is not running"
+		    " Check the previous iSNS initialization error.");
+		return (-1);
+	}
 
 	if ((so = isns_open(isns_args.server)) == -1) {
 		syslog(LOG_ERR, "isns_qry failed");

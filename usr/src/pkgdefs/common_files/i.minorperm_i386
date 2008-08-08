@@ -69,8 +69,6 @@ make_chattr_list()
 cat > /tmp/chattr.$$ << EOF
 vol:volctl		0600 root sys 0666 root sys	/dev/volctl
 clone:llc1		0600 root sys 0666 root sys	/dev/llc1
-clone:sound,sbpro	0666 root sys 0600 root sys	/dev/sound/*
-sbpro:*			0666 root sys 0600 root sys	/dev/sound/*
 log:conslog		0620 root sys 0666 root sys	/dev/conslog
 sy:tty			0666 root sys 0666 root tty	/dev/tty
 icmp:icmp		0600 root sys 0666 root sys	/dev/rawip
@@ -105,6 +103,7 @@ profile:profile		0600 root sys 0644 root sys /dev/dtrace/provider/profile
 sdt:sdt			0600 root sys 0644 root sys /dev/dtrace/provider/sdt
 systrace:systrace	0600 root sys 0644 root sys /dev/dtrace/provider/systrace
 clone:bge		0600 root sys 0666 root sys	/dev/bge
+clone:igb		0600 root sys 0666 root sys	/dev/igb
 clone:ixgbe		0600 root sys 0666 root sys	/dev/ixgbe
 clone:rge		0600 root sys 0666 root sys	/dev/rge
 clone:xge		0600 root sys 0666 root sys	/dev/xge
@@ -126,6 +125,7 @@ clone:afe		0600 root sys 0666 root sys	/dev/afe
 clone:dmfe		0600 root sys 0666 root sys	/dev/dmfe
 clone:mxfe		0600 root sys 0666 root sys	/dev/mxfe
 bge:*			0600 root sys 0666 root sys	/dev/bge*
+igb:*			0600 root sys 0666 root sys	/dev/igb*
 ixgbe:*			0600 root sys 0666 root sys	/dev/ixgbe*
 rge:*			0600 root sys 0666 root sys	/dev/rge*
 xge:*			0600 root sys 0666 root sys	/dev/xge*
@@ -147,6 +147,11 @@ wpi:*			0600 root sys 0666 root sys	/dev/wpi*
 afe:*			0600 root sys 0666 root sys	/dev/afe*
 dmfe:*			0600 root sys 0666 root sys	/dev/dmfe*
 mxfe:*			0600 root sys 0666 root sys	/dev/mxfe*
+balloon:*		0600 root sys 0444 root sys	/dev/xen/balloon
+domcaps:*		0600 root sys 0444 root sys	/dev/xen/domcaps
+evtchn:*		0600 root sys 0666 root sys	/dev/xen/evtchn
+privcmd:*		0600 root sys 0666 root sys	/dev/xen/privcmd
+xenbus:*		0600 root sys 0666 root sys	/dev/xen/xenbus
 EOF
 }
 
@@ -179,7 +184,9 @@ clone:ipsecesp
 clone:keysock
 clone:smc
 clone:tr
+clone:sbpro
 elx:*
+sbpro:*
 win:*
 cmtp:*
 profile:profile
@@ -265,6 +272,7 @@ sctp6:*
 vni:*
 cpuid:self
 clone:bge
+clone:igb
 clone:ixgbe
 clone:rge
 clone:xge
@@ -287,6 +295,7 @@ clone:afe
 clone:dmfe
 clone:mxfe
 bge:*
+igb:*
 ixgbe:*
 rge:*
 xge:*
@@ -331,6 +340,11 @@ acpi_drv:*
 smbsrv:*
 vscan:*
 nsmb:*
+balloon:*
+domcaps:*
+evtchn:*
+privcmd:*
+xenbus:*
 EOF
 }
 

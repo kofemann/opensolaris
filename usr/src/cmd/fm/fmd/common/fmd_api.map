@@ -18,7 +18,7 @@
 #
 # CDDL HEADER END
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #ident	"%Z%%M%	%I%	%E% SMI"
@@ -49,6 +49,7 @@
 	fmd_case_uuclosed = FUNCTION extern;
 	fmd_case_uuid = FUNCTION extern;
 	fmd_case_uulookup = FUNCTION extern;
+	fmd_case_uuresolved = FUNCTION extern;
 
 	fmd_event_local = FUNCTION extern;
 	fmd_event_ena_create = FUNCTION extern;
@@ -74,12 +75,16 @@
 	fmd_hdl_verror = FUNCTION extern;
 	fmd_hdl_zalloc = FUNCTION extern;
 
+	fmd_nvl_alloc = FUNCTION extern;
 	fmd_nvl_class_match = FUNCTION extern;
 	fmd_nvl_create_fault = FUNCTION extern;
+	fmd_nvl_dup = FUNCTION extern;
 	fmd_nvl_fmri_expand = FUNCTION extern;
 	fmd_nvl_fmri_present = FUNCTION extern;
+	fmd_nvl_fmri_replaced = FUNCTION extern;
 	fmd_nvl_fmri_unusable = FUNCTION extern;
-	fmd_nvl_fmri_faulty = FUNCTION extern;
+	fmd_nvl_fmri_service_state = FUNCTION extern;
+	fmd_nvl_fmri_has_fault = FUNCTION extern;
 	fmd_nvl_fmri_contains = FUNCTION extern;
 	fmd_nvl_fmri_translate = FUNCTION extern;
 

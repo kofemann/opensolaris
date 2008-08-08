@@ -26,20 +26,7 @@
 
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
 
-#pragma weak mq_open = _mq_open
-#pragma weak mq_close = _mq_close
-#pragma weak mq_unlink = _mq_unlink
-#pragma weak mq_send = _mq_send
-#pragma weak mq_timedsend = _mq_timedsend
-#pragma weak mq_reltimedsend_np = _mq_reltimedsend_np
-#pragma weak mq_receive = _mq_receive
-#pragma weak mq_timedreceive = _mq_timedreceive
-#pragma weak mq_reltimedreceive_np = _mq_reltimedreceive_np
-#pragma weak mq_notify = _mq_notify
-#pragma weak mq_setattr = _mq_setattr
-#pragma weak mq_getattr = _mq_getattr
-
-#include "synonyms.h"
+#include "lint.h"
 #include "mtlib.h"
 #define	_KMEMUSER
 #include <sys/param.h>		/* _MQ_OPEN_MAX, _MQ_PRIO_MAX, _SEM_VALUE_MAX */
@@ -95,6 +82,7 @@ typedef struct mq_des {
 	struct mq_header *mqd_mq;	/* address pointer of message Q */
 	struct mq_dn	*mqd_mqdn;	/* open	description */
 	thread_communication_data_t *mqd_tcd;	/* SIGEV_THREAD notification */
+	int		mqd_ownerdead;	/* mq_exclusive is inconsistent */
 } mqdes_t;
 
 /*
@@ -199,9 +187,10 @@ mq_init(mqhdr_t *mqhp, size_t msgsize, ssize_t maxmsg)
 	/*
 	 * We only need to initialize the non-zero fields.  The use of
 	 * ftruncate() on the message queue file assures that the
-	 * pages will be zfod.
+	 * pages will be zero-filled.
 	 */
-	(void) mutex_init(&mqhp->mq_exclusive, USYNC_PROCESS, NULL);
+	(void) mutex_init(&mqhp->mq_exclusive,
+	    USYNC_PROCESS | LOCK_ROBUST, NULL);
 	(void) sem_init(&mqhp->mq_rblocked, 1, 0);
 	(void) sem_init(&mqhp->mq_notempty, 1, 0);
 	(void) sem_init(&mqhp->mq_spawner, 1, 0);
@@ -348,12 +337,47 @@ mq_putmsg(mqhdr_t *mqhp, const char *msgp, ssize_t len, uint_t prio)
 	}
 }
 
+/*
+ * Send a notification and also delete the registration.
+ */
+static void
+do_notify(mqhdr_t *mqhp)
+{
+	(void) __signotify(SN_SEND, NULL, &mqhp->mq_sigid);
+	if (mqhp->mq_ntype == SIGEV_THREAD ||
+	    mqhp->mq_ntype == SIGEV_PORT)
+		(void) sem_post(&mqhp->mq_spawner);
+	mqhp->mq_ntype = 0;
+	mqhp->mq_des = 0;
+}
+
+/*
+ * Called when the mq_exclusive lock draws EOWNERDEAD or ENOTRECOVERABLE.
+ * Wake up anyone waiting on mq_*send() or mq_*receive() and ensure that
+ * they fail with errno == EBADMSG.  Trigger any registered notification.
+ */
+static void
+owner_dead(mqdes_t *mqdp, int error)
+{
+	mqhdr_t *mqhp = mqdp->mqd_mq;
+
+	mqdp->mqd_ownerdead = 1;
+	(void) sem_post(&mqhp->mq_notfull);
+	(void) sem_post(&mqhp->mq_notempty);
+	if (error == EOWNERDEAD) {
+		if (mqhp->mq_sigid.sn_pid != 0)
+			do_notify(mqhp);
+		(void) mutex_unlock(&mqhp->mq_exclusive);
+	}
+	errno = EBADMSG;
+}
+
 mqd_t
-_mq_open(const char *path, int oflag, /* mode_t mode, mq_attr *attr */ ...)
+mq_open(const char *path, int oflag, /* mode_t mode, mq_attr *attr */ ...)
 {
 	va_list		ap;
-	mode_t		mode;
-	struct mq_attr	*attr;
+	mode_t		mode = 0;
+	struct mq_attr	*attr = NULL;
 	int		fd;
 	int		err;
 	int		cr_flag = 0;
@@ -511,6 +535,7 @@ _mq_open(const char *path, int oflag, /* mode_t mode, mq_attr *attr */ ...)
 	mqdp->mqd_mqdn = mqdnp;
 	mqdp->mqd_magic = MQ_MAGIC;
 	mqdp->mqd_tcd = NULL;
+	mqdp->mqd_ownerdead = 0;
 	if (__pos4obj_unlock(path, MQ_LOCK_TYPE) == 0) {
 		lmutex_lock(&mq_list_lock);
 		mqdp->mqd_next = mq_list;
@@ -551,7 +576,8 @@ mq_close_cleanup(mqdes_t *mqdp)
 
 	/* invalidate the descriptor before freeing it */
 	mqdp->mqd_magic = 0;
-	(void) mutex_unlock(&mqhp->mq_exclusive);
+	if (!mqdp->mqd_ownerdead)
+		(void) mutex_unlock(&mqhp->mq_exclusive);
 
 	lmutex_lock(&mq_list_lock);
 	if (mqdp->mqd_next)
@@ -568,11 +594,12 @@ mq_close_cleanup(mqdes_t *mqdp)
 }
 
 int
-_mq_close(mqd_t mqdes)
+mq_close(mqd_t mqdes)
 {
 	mqdes_t *mqdp = (mqdes_t *)mqdes;
 	mqhdr_t *mqhp;
 	thread_communication_data_t *tcdp;
+	int error;
 
 	if (!mq_is_valid(mqdp)) {
 		errno = EBADF;
@@ -580,7 +607,12 @@ _mq_close(mqd_t mqdes)
 	}
 
 	mqhp = mqdp->mqd_mq;
-	(void) mutex_lock(&mqhp->mq_exclusive);
+	if ((error = mutex_lock(&mqhp->mq_exclusive)) != 0) {
+		mqdp->mqd_ownerdead = 1;
+		if (error == EOWNERDEAD)
+			(void) mutex_unlock(&mqhp->mq_exclusive);
+		/* carry on regardless, without holding mq_exclusive */
+	}
 
 	if (mqhp->mq_des == (uintptr_t)mqdp &&
 	    mqhp->mq_sigid.sn_pid == getpid()) {
@@ -601,7 +633,7 @@ _mq_close(mqd_t mqdes)
 }
 
 int
-_mq_unlink(const char *path)
+mq_unlink(const char *path)
 {
 	int err;
 
@@ -683,7 +715,10 @@ __mq_timedsend(mqd_t mqdes, const char *msg_ptr, size_t msg_len,
 	 * By the time we're here, we know that we've got the capacity
 	 * to add to the queue...now acquire the exclusive lock.
 	 */
-	(void) mutex_lock(&mqhp->mq_exclusive);
+	if ((err = mutex_lock(&mqhp->mq_exclusive)) != 0) {
+		owner_dead(mqdp, err);
+		return (-1);
+	}
 
 	/*
 	 * Now determine if we want to kick the notification.  POSIX
@@ -716,12 +751,7 @@ __mq_timedsend(mqd_t mqdes, const char *msg_ptr, size_t msg_len,
 
 	if (notify) {
 		/* notify and also delete the registration */
-		(void) __signotify(SN_SEND, NULL, &mqhp->mq_sigid);
-		if (mqhp->mq_ntype == SIGEV_THREAD ||
-		    mqhp->mq_ntype == SIGEV_PORT)
-			(void) sem_post(&mqhp->mq_spawner);
-		mqhp->mq_ntype = 0;
-		mqhp->mq_des = 0;
+		do_notify(mqhp);
 	}
 
 	MQ_ASSERT_SEMVAL_LEQ(&mqhp->mq_notempty, ((int)mqhp->mq_maxmsg));
@@ -731,14 +761,14 @@ __mq_timedsend(mqd_t mqdes, const char *msg_ptr, size_t msg_len,
 }
 
 int
-_mq_send(mqd_t mqdes, const char *msg_ptr, size_t msg_len, uint_t msg_prio)
+mq_send(mqd_t mqdes, const char *msg_ptr, size_t msg_len, uint_t msg_prio)
 {
 	return (__mq_timedsend(mqdes, msg_ptr, msg_len, msg_prio,
 	    NULL, ABS_TIME));
 }
 
 int
-_mq_timedsend(mqd_t mqdes, const char *msg_ptr, size_t msg_len,
+mq_timedsend(mqd_t mqdes, const char *msg_ptr, size_t msg_len,
 	uint_t msg_prio, const timespec_t *abs_timeout)
 {
 	return (__mq_timedsend(mqdes, msg_ptr, msg_len, msg_prio,
@@ -746,7 +776,7 @@ _mq_timedsend(mqd_t mqdes, const char *msg_ptr, size_t msg_len,
 }
 
 int
-_mq_reltimedsend_np(mqd_t mqdes, const char *msg_ptr, size_t msg_len,
+mq_reltimedsend_np(mqd_t mqdes, const char *msg_ptr, size_t msg_len,
 	uint_t msg_prio, const timespec_t *rel_timeout)
 {
 	return (__mq_timedsend(mqdes, msg_ptr, msg_len, msg_prio,
@@ -833,7 +863,10 @@ __mq_timedreceive(mqd_t mqdes, char *msg_ptr, size_t msg_len,
 		}
 	}
 
-	(void) mutex_lock(&mqhp->mq_exclusive);
+	if ((err = mutex_lock(&mqhp->mq_exclusive)) != 0) {
+		owner_dead(mqdp, err);
+		return (-1);
+	}
 	msg_size = mq_getmsg(mqhp, msg_ptr, msg_prio);
 	(void) sem_post(&mqhp->mq_notfull);
 	MQ_ASSERT_SEMVAL_LEQ(&mqhp->mq_notfull, ((int)mqhp->mq_maxmsg));
@@ -843,14 +876,14 @@ __mq_timedreceive(mqd_t mqdes, char *msg_ptr, size_t msg_len,
 }
 
 ssize_t
-_mq_receive(mqd_t mqdes, char *msg_ptr, size_t msg_len, uint_t *msg_prio)
+mq_receive(mqd_t mqdes, char *msg_ptr, size_t msg_len, uint_t *msg_prio)
 {
 	return (__mq_timedreceive(mqdes, msg_ptr, msg_len, msg_prio,
 	    NULL, ABS_TIME));
 }
 
 ssize_t
-_mq_timedreceive(mqd_t mqdes, char *msg_ptr, size_t msg_len,
+mq_timedreceive(mqd_t mqdes, char *msg_ptr, size_t msg_len,
 	uint_t *msg_prio, const timespec_t *abs_timeout)
 {
 	return (__mq_timedreceive(mqdes, msg_ptr, msg_len, msg_prio,
@@ -858,7 +891,7 @@ _mq_timedreceive(mqd_t mqdes, char *msg_ptr, size_t msg_len,
 }
 
 ssize_t
-_mq_reltimedreceive_np(mqd_t mqdes, char *msg_ptr, size_t msg_len,
+mq_reltimedreceive_np(mqd_t mqdes, char *msg_ptr, size_t msg_len,
 	uint_t *msg_prio, const timespec_t *rel_timeout)
 {
 	return (__mq_timedreceive(mqdes, msg_ptr, msg_len, msg_prio,
@@ -866,7 +899,7 @@ _mq_reltimedreceive_np(mqd_t mqdes, char *msg_ptr, size_t msg_len,
 }
 
 /*
- * Only used below, in _mq_notify().
+ * Only used below, in mq_notify().
  * We already have a spawner thread.
  * Verify that the attributes match; cancel it if necessary.
  */
@@ -874,7 +907,7 @@ static int
 cancel_if_necessary(thread_communication_data_t *tcdp,
 	const struct sigevent *sigevp)
 {
-	int do_cancel = !_pthread_attr_equal(tcdp->tcd_attrp,
+	int do_cancel = !pthread_attr_equal(tcdp->tcd_attrp,
 	    sigevp->sigev_notify_attributes);
 
 	if (do_cancel) {
@@ -898,7 +931,7 @@ cancel_if_necessary(thread_communication_data_t *tcdp,
 }
 
 int
-_mq_notify(mqd_t mqdes, const struct sigevent *sigevp)
+mq_notify(mqd_t mqdes, const struct sigevent *sigevp)
 {
 	mqdes_t *mqdp = (mqdes_t *)mqdes;
 	mqhdr_t *mqhp;
@@ -911,6 +944,7 @@ _mq_notify(mqd_t mqdes, const struct sigevent *sigevp)
 	int rval = -1;
 	int ntype;
 	int port;
+	int error;
 
 	if (!mq_is_valid(mqdp)) {
 		errno = EBADF;
@@ -919,7 +953,13 @@ _mq_notify(mqd_t mqdes, const struct sigevent *sigevp)
 
 	mqhp = mqdp->mqd_mq;
 
-	(void) mutex_lock(&mqhp->mq_exclusive);
+	if ((error = mutex_lock(&mqhp->mq_exclusive)) != 0) {
+		mqdp->mqd_ownerdead = 1;
+		sigevp = NULL;
+		if (error == EOWNERDEAD)
+			(void) mutex_unlock(&mqhp->mq_exclusive);
+		/* carry on regardless, without holding mq_exclusive */
+	}
 
 	if (sigevp == NULL) {		/* remove notification */
 		if (mqhp->mq_des == (uintptr_t)mqdp &&
@@ -1025,12 +1065,17 @@ _mq_notify(mqd_t mqdes, const struct sigevent *sigevp)
 
 	rval = 0;	/* success */
 bad:
-	(void) mutex_unlock(&mqhp->mq_exclusive);
+	if (error == 0) {
+		(void) mutex_unlock(&mqhp->mq_exclusive);
+	} else {
+		errno = EBADMSG;
+		rval = -1;
+	}
 	return (rval);
 }
 
 int
-_mq_setattr(mqd_t mqdes, const struct mq_attr *mqstat, struct mq_attr *omqstat)
+mq_setattr(mqd_t mqdes, const struct mq_attr *mqstat, struct mq_attr *omqstat)
 {
 	mqdes_t *mqdp = (mqdes_t *)mqdes;
 	mqhdr_t *mqhp;
@@ -1062,7 +1107,7 @@ _mq_setattr(mqd_t mqdes, const struct mq_attr *mqstat, struct mq_attr *omqstat)
 }
 
 int
-_mq_getattr(mqd_t mqdes, struct mq_attr *mqstat)
+mq_getattr(mqd_t mqdes, struct mq_attr *mqstat)
 {
 	mqdes_t *mqdp = (mqdes_t *)mqdes;
 	mqhdr_t *mqhp;

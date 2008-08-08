@@ -1557,10 +1557,9 @@ ufs_ioctl(
 	/*
 	 * forcibly unmounted
 	 */
-	if (ufsvfsp == NULL) {
+	if (ufsvfsp == NULL || vp->v_vfsp == NULL ||
+	    vp->v_vfsp->vfs_flag & VFS_UNMOUNTED)
 		return (EIO);
-	}
-
 	fs = ufsvfsp->vfs_fs;
 
 	if (cmd == Q_QUOTACTL) {
@@ -4587,7 +4586,7 @@ retrylock:
 	 * is held in bmap routines.
 	 */
 	beyond_eof = uoff + len >
-	    ((ip->i_size + PAGEOFFSET) & (uintptr_t)PAGEMASK);
+	    P2ROUNDUP_TYPED(ip->i_size, PAGESIZE, u_offset_t);
 	if (beyond_eof && seg != segkmap) {
 		if (dolock) {
 			rw_exit(&ip->i_contents);

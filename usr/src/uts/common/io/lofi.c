@@ -101,7 +101,6 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <sys/sysmacros.h>
-#include <sys/cmn_err.h>
 #include <sys/uio.h>
 #include <sys/kmem.h>
 #include <sys/cred.h>
@@ -253,6 +252,11 @@ lofi_free_handle(dev_t dev, minor_t minor, struct lofi_state *lsp,
 	if (lsp->ls_kstat) {
 		kstat_delete(lsp->ls_kstat);
 		mutex_destroy(&lsp->ls_kstat_lock);
+	}
+
+	if (lsp->ls_uncomp_seg_sz > 0) {
+		kmem_free(lsp->ls_comp_index_data, lsp->ls_comp_index_data_sz);
+		lsp->ls_uncomp_seg_sz = 0;
 	}
 	ddi_soft_state_free(lofi_statep, minor);
 }
@@ -1242,7 +1246,7 @@ lofi_map_file(dev_t dev, struct lofi_ioctl *ulip, int pickminor,
 	}
 	zalloced = 1;
 	(void) snprintf(namebuf, sizeof (namebuf), "%d", newminor);
-	(void) ddi_create_minor_node(lofi_dip, namebuf, S_IFBLK, newminor,
+	error = ddi_create_minor_node(lofi_dip, namebuf, S_IFBLK, newminor,
 	    DDI_PSEUDO, NULL);
 	if (error != DDI_SUCCESS) {
 		error = ENXIO;
@@ -1454,11 +1458,6 @@ lofi_unmap_file(dev_t dev, struct lofi_ioctl *ulip, int byfilename,
 		mutex_exit(&lofi_lock);
 		free_lofi_ioctl(klip);
 		return (EBUSY);
-	}
-
-	if (lsp->ls_uncomp_seg_sz > 0) {
-		kmem_free(lsp->ls_comp_index_data, lsp->ls_comp_index_data_sz);
-		lsp->ls_uncomp_seg_sz = 0;
 	}
 
 	lofi_free_handle(dev, minor, lsp, credp);

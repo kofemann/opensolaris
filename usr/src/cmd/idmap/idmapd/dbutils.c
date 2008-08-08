@@ -1077,6 +1077,10 @@ load_cfg_in_state(lookup_state_t *state)
 	state->nm_sidgid = IDMAP_NM_NONE;
 	RDLOCK_CONFIG();
 
+	state->eph_map_unres_sids = 0;
+	if (_idmapdstate.cfg->pgcfg.eph_map_unres_sids)
+		state->eph_map_unres_sids = 1;
+
 	if (_idmapdstate.cfg->pgcfg.default_domain != NULL) {
 		state->defdom =
 		    strdup(_idmapdstate.cfg->pgcfg.default_domain);
@@ -1086,7 +1090,7 @@ load_cfg_in_state(lookup_state_t *state)
 		}
 	} else {
 		UNLOCK_CONFIG();
-		return (IDMAP_ERR_DOMAIN_NOTFOUND);
+		return (IDMAP_SUCCESS);
 	}
 	if (_idmapdstate.cfg->pgcfg.ds_name_mapping_enabled == FALSE) {
 		UNLOCK_CONFIG();
@@ -1828,6 +1832,19 @@ ad_lookup_batch(lookup_state_t *state, idmap_mapping_batch *batch,
 	if (state->ad_nqueries == 0)
 		return (IDMAP_SUCCESS);
 
+	for (i = 0; i < batch->idmap_mapping_batch_len; i++) {
+		req = &batch->idmap_mapping_batch_val[i];
+		res = &result->ids.ids_val[i];
+
+		/* Skip if not marked for AD lookup or already in error. */
+		if (!(req->direction & _IDMAP_F_LOOKUP_AD) ||
+		    res->retcode != IDMAP_SUCCESS)
+			continue;
+
+		/* Init status */
+		res->retcode = IDMAP_ERR_RETRIABLE_NET_ERR;
+	}
+
 retry:
 	retcode = idmap_lookup_batch_start(_idmapdstate.ad, state->ad_nqueries,
 	    &qs);
@@ -1855,9 +1872,7 @@ retry:
 		if (!(req->direction & _IDMAP_F_LOOKUP_AD))
 			continue;
 
-		if (retries == 0)
-			res->retcode = IDMAP_ERR_RETRIABLE_NET_ERR;
-		else if (res->retcode != IDMAP_ERR_RETRIABLE_NET_ERR)
+		if (res->retcode != IDMAP_ERR_RETRIABLE_NET_ERR)
 			continue;
 
 		if (IS_REQUEST_SID(*req, 1)) {
@@ -1998,8 +2013,13 @@ retry:
 		}
 	}
 
-	if (retcode == IDMAP_SUCCESS && add)
-		retcode = idmap_lookup_batch_end(&qs);
+	if (retcode == IDMAP_SUCCESS) {
+		/* add keeps track if we added an entry to the batch */
+		if (add)
+			retcode = idmap_lookup_batch_end(&qs);
+		else
+			idmap_lookup_release_batch(&qs);
+	}
 
 	if (retcode == IDMAP_ERR_RETRIABLE_NET_ERR && retries++ < 2)
 		goto retry;
@@ -2581,7 +2601,8 @@ name_based_mapping_sid2pid(lookup_state_t *state,
 	i = 0;
 	if (windomain == NULL)
 		windomain = "";
-	else if (strcasecmp(state->defdom, windomain) == 0)
+	else if (state->defdom != NULL &&
+	    strcasecmp(state->defdom, windomain) == 0)
 		i = 1;
 
 	if ((lower_winname = tolower_u8(winname)) == NULL)
@@ -2890,6 +2911,19 @@ sid2pid_second_pass(lookup_state_t *state,
 
 	/* Get status from previous pass */
 	retcode = res->retcode;
+	if (retcode != IDMAP_SUCCESS && state->eph_map_unres_sids &&
+	    !EMPTY_STRING(req->id1.idmap_id_u.sid.prefix) &&
+	    EMPTY_STRING(req->id1name)) {
+		/*
+		 * We are asked to map an unresolvable SID to a UID or
+		 * GID, but, which?  We'll treat all unresolvable SIDs
+		 * as users unless the caller specified which of a UID
+		 * or GID they want.
+		 */
+		if (res->id.idtype == IDMAP_POSIXID)
+			res->id.idtype = IDMAP_UID;
+		goto do_eph;
+	}
 	if (retcode != IDMAP_SUCCESS)
 		goto out;
 
@@ -2987,6 +3021,7 @@ sid2pid_second_pass(lookup_state_t *state,
 	if (retcode != IDMAP_ERR_NOTFOUND)
 		goto out;
 
+do_eph:
 	/* If not found, do ephemeral mapping */
 	retcode = dynamic_ephemeral_mapping(state, req, res);
 
@@ -4196,10 +4231,19 @@ get_w2u_mapping(sqlite *cache, sqlite *db, idmap_mapping *request,
 				retcode = IDMAP_ERR_MEMORY;
 		} else if (lookup_wksids_name2sid(winname, NULL, NULL, NULL,
 		    NULL) != IDMAP_SUCCESS) {
-			/* well-known SIDs don't need domain */
-			mapping->id1domain = strdup(state.defdom);
-			if (mapping->id1domain == NULL)
-				retcode = IDMAP_ERR_MEMORY;
+			if (state.defdom == NULL) {
+				/*
+				 * We have a non-qualified winname which is
+				 * neither the name of a well-known SID nor
+				 * there is a default domain with which we can
+				 * qualify it.
+				 */
+				retcode = IDMAP_ERR_DOMAIN_NOTFOUND;
+			} else {
+				mapping->id1domain = strdup(state.defdom);
+				if (mapping->id1domain == NULL)
+					retcode = IDMAP_ERR_MEMORY;
+			}
 		}
 		if (retcode != IDMAP_SUCCESS)
 			goto out;

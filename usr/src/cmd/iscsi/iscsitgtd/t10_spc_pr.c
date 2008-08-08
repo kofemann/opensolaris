@@ -134,10 +134,8 @@ spc_pgr_is_conflicting(uint8_t *cdb, uint_t type)
 			 * As per SPC-3, Revision 23, Section 6.23
 			 */
 			switch ((cdb[1] & 0x1f)) {
-				/* SCMD_REPORT_SUPPORTED_OPERATION_CODES */
-				case 0x0c:
-				/* SCMD_REPORT_SUPPORTED_MANAGEMENT_FUNCTIONS */
-				case 0x0d:
+				case SSVC_ACTION_GET_SUPPORTED_OPERATIONS:
+				case SSVC_SCTION_GET_SUPPORTED_MANAGEMENT:
 
 					conflict = True;
 					break;
@@ -149,10 +147,10 @@ spc_pgr_is_conflicting(uint8_t *cdb, uint_t type)
 			 * SPC-3, Revision 23, Section 6.29
 			 */
 			switch ((cdb[1] & 0x1F)) {
-				case SCMD_SET_DEVICE_IDENTIFIER:
-				case SCMD_SET_PRIORITY:
-				case SCMD_SET_TARGET_PORT_GROUPS:
-				case SCMD_SET_TIMESTAMP:
+				case SSVC_ACTION_SET_DEVICE_IDENTIFIER:
+				case SSVC_ACTION_SET_PRIORITY:
+				case SSVC_ACTION_SET_TARGET_PORT_GROUPS:
+				case SSVC_ACTION_SET_TIMESTAMP:
 				conflict = True;
 				break;
 			}
@@ -174,8 +172,46 @@ spc_pgr_is_conflicting(uint8_t *cdb, uint_t type)
 
 /*
  * []----
+ * | spc_npr_check --  NON-PERSISTENT RESERVE check of I_T_L
+ * |	Refer to SPC-2, Section 5.5.1, Tables 10
+ * []----
+ */
+Boolean_t
+spc_npr_check(t10_cmd_t *cmd, uint8_t *cdb)
+{
+	disk_params_t		*p = (disk_params_t *)T10_PARAMS_AREA(cmd);
+	sbc_reserve_t		*res = &p->d_sbc_reserve;
+	Boolean_t		conflict = False;
+
+	/*
+	 * If a logical unit has been reserved by any RESERVE command and
+	 * is still reserved by any initiator, all PERSISTENT RESERVE IN
+	 * and all PRESISTENT RESERVE OUT commands shall conflict regardless
+	 * of initiator or service action and shall terminate with a
+	 * RESERVATION CONLICT status. SPC-2 section 5.5.1.
+	 */
+	if ((cdb[0] == SCMD_PERSISTENT_RESERVE_IN) ||
+	    (cdb[0] == SCMD_PERSISTENT_RESERVE_OUT) ||
+	    (res->res_owner != cmd->c_lu)) {
+		conflict = True;
+	}
+
+	queue_prt(mgmtq, Q_PR_IO,
+	    "NPR%x LUN%d CDB:%s - spc_npr_check(Reservation:%s)\n",
+	    cmd->c_lu->l_targ->s_targ_num,
+	    cmd->c_lu->l_common->l_num,
+	    cmd->c_lu->l_cmd_table[cmd->c_cdb[0]].cmd_name == NULL
+	    ? "(no name)"
+	    : cmd->c_lu->l_cmd_table[cmd->c_cdb[0]].cmd_name,
+	    (conflict) ? "Conflict" : "Allowed");
+
+	return (conflict);
+}
+
+/*
+ * []----
  * | spc_pgr_check --  PERSISTENT_RESERVE {IN|OUT} check of I_T_L
- * |	Refer to SPC-3, Section ?.?, Tables ?? and ??
+ * |	Refer to SPC-3, Section 5.6.1, Tables 31
  * []----
  */
 Boolean_t
@@ -191,8 +227,27 @@ spc_pgr_check(t10_cmd_t *cmd, uint8_t *cdb)
 	 * If no reservations exist, allow all remaining command types.
 	 */
 	assert(res->res_type == RT_PGR);
-	if (pgr->pgr_numrsrv == 0) {
+	if ((cdb[0] == SCMD_PERSISTENT_RESERVE_IN) ||
+	    (cdb[0] == SCMD_TEST_UNIT_READY) ||
+	    (pgr->pgr_numrsrv == 0)) {
 		conflict = False;
+		goto done;
+	}
+
+	/*
+	 * If a logical unit has executed a PERSISTENT RESERVE OUT command
+	 * with the REGISTER or REGISTER AND IGNORE EXISTING KEY service
+	 * action and is still registered by any initiator, all RESERVE
+	 * commands and all RELEASE commands regardless of initiator shall
+	 * conflict and shall terminate with a RESERVATION CONFLICT status.
+	 * SPC-2 section 5.5.1.
+	 *
+	 * CRH bit 0, no support for exception defined in
+	 * SPC-3 section 5.6.3.
+	 */
+	if ((cdb[0] == SCMD_RESERVE) ||
+	    (cdb[0] == SCMD_RELEASE)) {
+		conflict = True;
 		goto done;
 	}
 
@@ -252,12 +307,10 @@ done:
 	    : cmd->c_lu->l_cmd_table[cmd->c_cdb[0]].cmd_name,
 	    (rsrv == NULL)
 	    ? "<none>"
-	    : (rsrv->r_type == PR_IN_READ_KEYS)
-	    ? "Write Exclusive"
 	    : (rsrv->r_type == PGR_TYPE_WR_EX)
-	    ? "Exclusive Access"
+	    ? "Write Exclusive"
 	    : (rsrv->r_type == PGR_TYPE_EX_AC)
-	    ? "Report capabilties"
+	    ? "Exclusive Access"
 	    : (rsrv->r_type == PGR_TYPE_WR_EX_RO)
 	    ? "Write Exclusive, Registrants Only"
 	    : (rsrv->r_type == PGR_TYPE_EX_AC_RO)
@@ -270,6 +323,88 @@ done:
 	    (conflict) ? "Conflict" : "Allowed");
 
 	return (conflict);
+}
+
+/*
+ * []----
+ * | spc_cmd_reserve6 -- RESERVE(6) command
+ * []----
+ */
+/*ARGSUSED*/
+void
+spc_cmd_reserve6(t10_cmd_t *cmd, uint8_t *cdb, size_t cdb_len)
+{
+	disk_params_t	*p = (disk_params_t *)T10_PARAMS_AREA(cmd);
+	sbc_reserve_t	*res = &p->d_sbc_reserve;
+	t10_lu_impl_t	*lu;
+
+	if (cdb[1] & 0xe0 || SAM_CONTROL_BYTE_RESERVED(cdb[5])) {
+		spc_sense_create(cmd, KEY_ILLEGAL_REQUEST, 0);
+		spc_sense_ascq(cmd, SPC_ASC_INVALID_CDB, 0x00);
+		trans_send_complete(cmd, STATUS_CHECK);
+		return;
+	}
+
+	pthread_rwlock_wrlock(&res->res_rwlock);
+	/*
+	 * The ways to get in here are,
+	 * 1) to be the owner of the reservation (SPC-2 section 7.21.2)
+	 * 2) reservation not applied, nobody is the owner.
+	 */
+	if (res->res_owner != cmd->c_lu) {
+		lu = avl_first(&cmd->c_lu->l_common->l_all_open);
+		do {
+			if (lu != cmd->c_lu)
+				lu->l_cmd = sbc_cmd_reserved;
+			lu = AVL_NEXT(&cmd->c_lu->l_common->l_all_open, lu);
+		} while (lu != NULL);
+		res->res_owner = cmd->c_lu;
+	}
+	res->res_type = RT_NPR;
+	pthread_rwlock_unlock(&res->res_rwlock);
+
+	trans_send_complete(cmd, STATUS_GOOD);
+}
+
+/*
+ * []----
+ * | spc_cmd_release6 -- RELEASE(6) command
+ * []----
+ */
+/*ARGSUSED*/
+void
+spc_cmd_release6(t10_cmd_t *cmd, uint8_t *cdb, size_t cdb_len)
+{
+	disk_params_t	*p = (disk_params_t *)T10_PARAMS_AREA(cmd);
+	sbc_reserve_t	*res = &p->d_sbc_reserve;
+	t10_lu_impl_t	*lu;
+
+	if (cdb[1] & 0xe0 || cdb[3] || cdb[4] ||
+	    SAM_CONTROL_BYTE_RESERVED(cdb[5])) {
+		spc_sense_create(cmd, KEY_ILLEGAL_REQUEST, 0);
+		spc_sense_ascq(cmd, SPC_ASC_INVALID_CDB, 0x00);
+		trans_send_complete(cmd, STATUS_CHECK);
+		return;
+	}
+
+	pthread_rwlock_wrlock(&res->res_rwlock);
+	/*
+	 * The ways to get in here are,
+	 * 1) to be the owner of the reservation
+	 * 2) reservation not applied, nobody is the owner.
+	 */
+	if (res->res_owner != NULL) {
+		lu = avl_first(&cmd->c_lu->l_common->l_all_open);
+		do {
+			lu->l_cmd = sbc_cmd;
+			lu = AVL_NEXT(&cmd->c_lu->l_common->l_all_open, lu);
+		} while (lu != NULL);
+		res->res_owner = NULL;
+		res->res_type = RT_NONE;
+	}
+	pthread_rwlock_unlock(&res->res_rwlock);
+
+	trans_send_complete(cmd, STATUS_GOOD);
 }
 
 /*
@@ -347,7 +482,7 @@ spc_cmd_pr_in(t10_cmd_t *cmd, uint8_t *cdb, size_t cdb_len)
 	/*
 	 * Start processing, lock reservation
 	 */
-	pthread_rwlock_rdlock(&res->res_rwlock);
+	(void) pthread_rwlock_rdlock(&res->res_rwlock);
 
 	queue_prt(mgmtq, Q_PR_NONIO, "PGR%x LUN%d action:%s\n",
 	    cmd->c_lu->l_targ->s_targ_num, cmd->c_lu->l_common->l_num,
@@ -386,7 +521,7 @@ spc_cmd_pr_in(t10_cmd_t *cmd, uint8_t *cdb, size_t cdb_len)
 	/*
 	 * Complete processing, unlock reservation
 	 */
-	pthread_rwlock_unlock(&res->res_rwlock);
+	(void) pthread_rwlock_unlock(&res->res_rwlock);
 
 	/*
 	 * Now send the selected Persistent Reservation response back
@@ -507,7 +642,7 @@ spc_pr_in_repcap(
 {
 	scsi_prin_rpt_cap_t	*buf = (scsi_prin_rpt_cap_t *)bp;
 
-	buf->crh = 0;			/* Supports Reserve / Release */
+	buf->crh = 0;			/* Support Reserve/Release Exceptions */
 	buf->sip_c = 1;			/* Specify Initiator Ports Capable */
 	buf->atp_c = 1;			/* All Target Ports Capable */
 	buf->ptpl_c = 1;		/* Persist Through Power Loss C */
@@ -566,7 +701,8 @@ spc_pr_in_fullstat(
 			buf->full_desc[i].trans_id.format_code =
 			    WW_UID_DEVICE_NAME;
 			SCSI_WRITE16(buf->full_desc[i].trans_id.add_len, 0);
-			sprintf(buf->full_desc[i].trans_id.iscsi_name, "");
+			(void) sprintf(buf->full_desc[i].trans_id.iscsi_name,
+			    "");
 
 			i++;
 		}
@@ -691,7 +827,7 @@ spc_cmd_pr_out_data(t10_cmd_t *cmd, emul_handle_t id, size_t offset, char *data,
 	 * If this is the first time using the persistance data,
 	 * initialize the reservation and resource key queues
 	 */
-	pthread_rwlock_wrlock(&res->res_rwlock);
+	(void) pthread_rwlock_wrlock(&res->res_rwlock);
 	if (pgr->pgr_rsrvlist.lnk_fwd == NULL) {
 		spc_pr_initialize(pgr);
 	}
@@ -767,7 +903,7 @@ spc_cmd_pr_out_data(t10_cmd_t *cmd, emul_handle_t id, size_t offset, char *data,
 		/*
 		 * Check condition required.
 		 */
-		pthread_rwlock_unlock(&res->res_rwlock);
+		(void) pthread_rwlock_unlock(&res->res_rwlock);
 		spc_sense_create(cmd, KEY_ILLEGAL_REQUEST, 0);
 		spc_sense_ascq(cmd, cmd->c_lu->l_asc, cmd->c_lu->l_ascq);
 		trans_send_complete(cmd, STATUS_CHECK);
@@ -778,7 +914,7 @@ spc_cmd_pr_out_data(t10_cmd_t *cmd, emul_handle_t id, size_t offset, char *data,
 	 * Handle Failed processing status
 	 */
 	if (status != STATUS_GOOD) {
-		pthread_rwlock_unlock(&res->res_rwlock);
+		(void) pthread_rwlock_unlock(&res->res_rwlock);
 		trans_send_complete(cmd, status);
 		return;
 	}
@@ -795,7 +931,7 @@ spc_cmd_pr_out_data(t10_cmd_t *cmd, emul_handle_t id, size_t offset, char *data,
 	 * this PGR data on disk
 	 */
 	if (plist->aptpl || pgr->pgr_aptpl)
-		spc_pr_write(cmd);
+		(void) spc_pr_write(cmd);
 
 	/*
 	 * When the last registration is removed, PGR is no longer
@@ -823,7 +959,7 @@ spc_cmd_pr_out_data(t10_cmd_t *cmd, emul_handle_t id, size_t offset, char *data,
 	/*
 	 * Processing is complete, release mutex
 	 */
-	pthread_rwlock_unlock(&res->res_rwlock);
+	(void) pthread_rwlock_unlock(&res->res_rwlock);
 
 	/*
 	 * Send back a succesful response
@@ -1781,7 +1917,7 @@ spc_pr_read(t10_cmd_t *cmd)
 	 */
 	if (status == False) {
 		if (pfd >= 0)
-			close(pfd);
+			(void) close(pfd);
 		if (buf)
 			free(buf);
 		return;
@@ -1919,9 +2055,9 @@ spc_pr_write(t10_cmd_t *cmd)
 
 		klist[i].rectype = PGRDISKKEY;
 		klist[i].key = key->k_key;
-		strncpy(klist[i].i_name, key->k_i_name,
+		(void) strncpy(klist[i].i_name, key->k_i_name,
 		    sizeof (klist[i].i_name));
-		strncpy(klist[i].transportID, key->k_transportID,
+		(void) strncpy(klist[i].transportID, key->k_transportID,
 		    sizeof (klist[i].transportID));
 	}
 
@@ -1938,9 +2074,9 @@ spc_pr_write(t10_cmd_t *cmd)
 		rlist[i].key = rsrv->r_key;
 		rlist[i].scope = rsrv->r_scope;
 		rlist[i].type = rsrv->r_type;
-		strncpy(rlist[i].i_name, rsrv->r_i_name,
+		(void) strncpy(rlist[i].i_name, rsrv->r_i_name,
 		    sizeof (rlist[i].i_name));
-		strncpy(rlist[i].transportID, rsrv->r_transportID,
+		(void) strncpy(rlist[i].transportID, rsrv->r_transportID,
 		    sizeof (rlist[i].transportID));
 	}
 
@@ -1952,7 +2088,7 @@ spc_pr_write(t10_cmd_t *cmd)
 	    PERSISTANCEBASE, cmd->c_lu->l_common->l_num);
 	if ((pfd = open(path, O_WRONLY|O_CREAT, 0600)) >= 0) {
 		length = write(pfd, buf, bufsize);
-		close(pfd);
+		(void) close(pfd);
 	} else {
 		if ((pfd < 0) || (length != bufsize))
 			status = False;

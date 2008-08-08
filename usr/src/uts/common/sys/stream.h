@@ -721,11 +721,6 @@ typedef struct cmdblk {
 #define	STRLOW	1024
 
 /*
- * Block allocation parameters
- */
-#define	MAXIOCBSZ	1024		/* max ioctl data block size */
-
-/*
  * qwriter perimeter types
  */
 #define	PERIM_INNER	1		/* The inner perimeter */
@@ -848,6 +843,7 @@ extern int rwnext(queue_t *, struiod_t *);
 extern int infonext(queue_t *, infod_t *);
 extern int isuioq(queue_t *);
 extern void create_putlocks(queue_t *, int);
+extern int mp_cont_len(mblk_t *, int *);
 
 /*
  * shared or externally configured data structures

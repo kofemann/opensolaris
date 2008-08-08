@@ -36,6 +36,8 @@
 #include <sys/door_data.h>
 #include <sys/proc.h>
 #include <sys/thread.h>
+#include <sys/prsystm.h>
+#include <sys/procfs.h>
 #include <sys/class.h>
 #include <sys/cred.h>
 #include <sys/kmem.h>
@@ -514,6 +516,7 @@ door_call(int did, void *args)
 	void		*destarg;
 	model_t		datamodel;
 	int		gotresults = 0;
+	int		needcleanup = 0;
 	int		cancel_pending;
 
 	lwp = ttolwp(curthread);
@@ -561,6 +564,14 @@ door_call(int did, void *args)
 	 */
 	VN_HOLD(DTOV(dp));
 	releasef(did);
+
+	/*
+	 * This should be done in shuttle_resume(), just before going to
+	 * sleep, but we want to avoid overhead while holding door_knob.
+	 * prstop() is just a no-op if we don't really go to sleep.
+	 */
+	if (lwp && lwp->lwp_nostop == 0)
+		prstop(PR_REQUESTED, 0);
 
 	mutex_enter(&door_knob);
 	if (DOOR_INVALID(dp)) {
@@ -773,7 +784,7 @@ shuttle_return:
 		 * descriptors.
 		 */
 		if (!ct->d_args_done) {
-			door_fp_close(ct->d_fpp, ct->d_args.desc_num);
+			needcleanup = 1;
 			ct->d_args_done = 1;
 		}
 
@@ -789,6 +800,9 @@ shuttle_return:
 	if (--dp->door_active == 0 && (dp->door_flags & DOOR_DELAY))
 		door_deliver_unref(dp);
 	mutex_exit(&door_knob);
+
+	if (needcleanup)
+		door_fp_close(ct->d_fpp, ct->d_args.desc_num);
 
 results:
 	/*
@@ -1215,7 +1229,7 @@ door_server_dispatch(door_client_t *ct, door_node_t *dp)
 	 * to let unref notifications through, though.
 	 */
 	if (datap == DOOR_UNREF_DATA) {
-		if (ct->d_upcall)
+		if (ct->d_upcall != NULL)
 			datasize = 0;
 		else
 			datap = NULL;
@@ -1260,7 +1274,7 @@ door_server_dispatch(door_client_t *ct, door_node_t *dp)
 	if (layout->dl_datap != NULL) {
 		ASSERT(datasize != 0);
 		datap = layout->dl_datap;
-		if (ct->d_upcall || datasize <= door_max_arg) {
+		if (ct->d_upcall != NULL || datasize <= door_max_arg) {
 			if (door_stack_copyout(ct->d_buf, datap, datasize)) {
 				error = E2BIG;
 				goto fail;
@@ -1368,11 +1382,13 @@ door_return(caddr_t data_ptr, size_t data_size,
 	st->d_ssize = ssize;		/* and its size */
 
 	/*
-	 * before we release our stack to the whims of our next caller,
-	 * copy in the syscall arguments if we're being traced by /proc.
+	 * This should be done in shuttle_resume(), just before going to
+	 * sleep, but we want to avoid overhead while holding door_knob.
+	 * prstop() is just a no-op if we don't really go to sleep.
 	 */
-	if (curthread->t_post_sys && PTOU(ttoproc(curthread))->u_systrap)
-		(void) save_syscall_args();
+	lwp = ttolwp(curthread);
+	if (lwp && lwp->lwp_nostop == 0)
+		prstop(PR_REQUESTED, 0);
 
 	/* Make sure the caller hasn't gone away */
 	mutex_enter(&door_knob);
@@ -1459,7 +1475,6 @@ out:
 	 * We've sprung to life. Determine if we are part of a door
 	 * invocation, or just interrupted
 	 */
-	lwp = ttolwp(curthread);
 	mutex_enter(&door_knob);
 	if ((dp = st->d_active) != NULL) {
 		/*
@@ -1648,6 +1663,7 @@ door_ucred(struct ucred_s *uch)
 	kthread_t	*caller;
 	door_server_t	*st;
 	door_client_t	*ct;
+	door_upcall_t	*dup;
 	struct proc	*p;
 	struct ucred_s	*res;
 	int		err;
@@ -1672,12 +1688,10 @@ door_ucred(struct ucred_s *uch)
 	 * If the credentials are not specified by the client, get the one
 	 * associated with the calling process.
 	 */
-	if (ct->d_cred == NULL) {
-		res = pgetucred(p);
-	} else {
-		res = cred2ucred(ct->d_cred, ct->d_upcall ?
-		    p0.p_pid : p->p_pid, NULL, CRED());
-	}
+	if ((dup = ct->d_upcall) != NULL)
+		res = cred2ucred(dup->du_cred, p0.p_pid, NULL, CRED());
+	else
+		res = cred2ucred(caller->t_cred, p->p_pid, NULL, CRED());
 
 	mutex_enter(&door_knob);
 	DOOR_T_RELEASE(ct);
@@ -2149,7 +2163,13 @@ door_unref(void)
 		dp->door_flags |= DOOR_UNREF_ACTIVE;
 		mutex_exit(&door_knob);
 
-		(void) door_upcall(DTOV(dp), &unref_args, NULL);
+		(void) door_upcall(DTOV(dp), &unref_args, NULL, SIZE_MAX, 0);
+
+		if (unref_args.rbuf != 0) {
+			kmem_free(unref_args.rbuf, unref_args.rsize);
+			unref_args.rbuf = NULL;
+			unref_args.rsize = 0;
+		}
 
 		mutex_enter(&door_knob);
 		ASSERT(dp->door_flags & DOOR_UNREF_ACTIVE);
@@ -2707,6 +2727,7 @@ door_results(kthread_t *caller, caddr_t data_ptr, size_t data_size,
 		door_desc_t *desc_ptr, uint_t desc_num)
 {
 	door_client_t	*ct = DOOR_CLIENT(caller->t_door);
+	door_upcall_t	*dup = ct->d_upcall;
 	size_t		dsize;
 	size_t		rlen;
 	size_t		result_size;
@@ -2731,7 +2752,13 @@ door_results(kthread_t *caller, caddr_t data_ptr, size_t data_size,
 	if ((result_size = rlen + dsize) == 0)
 		return (0);
 
-	if (ct->d_upcall) {
+	if (dup != NULL) {
+		if (desc_num > dup->du_max_descs)
+			return (EMFILE);
+
+		if (data_size > dup->du_max_data)
+			return (E2BIG);
+
 		/*
 		 * Handle upcalls
 		 */
@@ -3046,9 +3073,11 @@ door_copy(struct as *as, caddr_t src, caddr_t dest, uint_t len)
  *	for holding a reference to the cred passed in.
  */
 int
-door_upcall(vnode_t *vp, door_arg_t *param, struct cred *cred)
+door_upcall(vnode_t *vp, door_arg_t *param, struct cred *cred,
+    size_t max_data, uint_t max_descs)
 {
 	/* Locals */
+	door_upcall_t	*dup;
 	door_node_t	*dp;
 	kthread_t	*server_thread;
 	int		error = 0;
@@ -3067,6 +3096,19 @@ door_upcall(vnode_t *vp, door_arg_t *param, struct cred *cred)
 	lwp = ttolwp(curthread);
 	ct = door_my_client(1);
 	dp = VTOD(vp);	/* Convert to a door_node_t */
+
+	dup = kmem_zalloc(sizeof (*dup), KM_SLEEP);
+	dup->du_cred = (cred != NULL) ? cred : curthread->t_cred;
+	dup->du_max_data = max_data;
+	dup->du_max_descs = max_descs;
+
+	/*
+	 * This should be done in shuttle_resume(), just before going to
+	 * sleep, but we want to avoid overhead while holding door_knob.
+	 * prstop() is just a no-op if we don't really go to sleep.
+	 */
+	if (lwp && lwp->lwp_nostop == 0)
+		prstop(PR_REQUESTED, 0);
 
 	mutex_enter(&door_knob);
 	if (DOOR_INVALID(dp)) {
@@ -3133,8 +3175,7 @@ door_upcall(vnode_t *vp, door_arg_t *param, struct cred *cred)
 		}
 	}
 
-	ct->d_upcall = 1;
-	ct->d_cred = cred;
+	ct->d_upcall = dup;
 	if (param->rsize == 0)
 		ct->d_noresults = 1;
 	else
@@ -3286,14 +3327,15 @@ shuttle_return:
 	*param = ct->d_args;		/* structure assignment */
 
 out:
+	kmem_free(dup, sizeof (*dup));
+
 	if (ct->d_fpp) {
 		kmem_free(ct->d_fpp, ct->d_fpp_size);
 		ct->d_fpp = NULL;
 		ct->d_fpp_size = 0;
 	}
 
-	ct->d_cred = NULL;
-	ct->d_upcall = 0;
+	ct->d_upcall = NULL;
 	ct->d_noresults = 0;
 	ct->d_buf = NULL;
 	ct->d_bufsize = 0;
@@ -3350,23 +3392,28 @@ door_list_delete(door_node_t *dp)
 int
 door_ki_upcall(door_handle_t dh, door_arg_t *param)
 {
-	return (door_ki_upcall_cred(dh, param, NULL));
+	return (door_ki_upcall_limited(dh, param, NULL, SIZE_MAX, UINT_MAX));
 }
 
 /*
- * door_ki_upcall_cred invokes a user-level door server from the kernel with
- * the given credentials. If the "cred" argument is NULL, uses the credentials
- * associated with current thread.
+ * door_ki_upcall_limited invokes a user-level door server from the
+ * kernel with the given credentials and reply limits.  If the "cred"
+ * argument is NULL, uses the credentials associated with current
+ * thread.  max_data limits the maximum length of the returned data (the
+ * client will get E2BIG if they go over), and max_desc limits the
+ * number of returned descriptors (the client will get EMFILE if they
+ * go over).
  */
 int
-door_ki_upcall_cred(door_handle_t dh, door_arg_t *param, struct cred *cred)
+door_ki_upcall_limited(door_handle_t dh, door_arg_t *param, struct cred *cred,
+    size_t max_data, uint_t max_desc)
 {
 	file_t *fp = DHTOF(dh);
 	vnode_t *realvp;
 
 	if (VOP_REALVP(fp->f_vnode, &realvp, NULL))
 		realvp = fp->f_vnode;
-	return (door_upcall(realvp, param, cred));
+	return (door_upcall(realvp, param, cred, max_data, max_desc));
 }
 
 /*

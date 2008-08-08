@@ -239,12 +239,13 @@ conn_process(void *v)
 	util_title(c->c_mgmtq, Q_CONN_LOGIN, c->c_num,
 	    ctime_r(&tval, debug, sizeof (debug)));
 
-	(void) pthread_create(&c->c_thr_id_poller, NULL,
-	    conn_poller, (void *)c);
 	c->c_thr_id_process = pthread_self();
 
 	assert(c->c_state == S1_FREE);
 	conn_state(c, T3);
+
+	(void) pthread_create(&c->c_thr_id_poller, NULL,
+	    conn_poller, (void *)c);
 
 	do {
 		m = queue_message_get(c->c_dataq);
@@ -407,12 +408,15 @@ conn_process(void *v)
 		 * Make sure to free the resources that the T10
 		 * layer still has allocated. These are commands which
 		 * the T10 layer couldn't release directly during it's
-		 * shutdown because the state had been changed to
-		 * indicate the commands was now "owned" by the
-		 * transport.
+		 * shutdown.
 		 */
-		if (cmd->c_t10_cmd)
-			t10_cmd_shoot_event(cmd->c_t10_cmd, T10_Cmd_T6);
+		if (cmd->c_t10_cmd) {
+			if (cmd->c_t10_dup) {
+				iscsi_cancel_dups(cmd, T10_Cmd_T8);
+			} else {
+				t10_cmd_shoot_event(cmd->c_t10_cmd, T10_Cmd_T8);
+			}
+		}
 
 		/*
 		 * Perform the final clean up which is done during
@@ -1074,7 +1078,11 @@ queue_noop_in(iscsi_conn_t *c)
 	if (in == NULL)
 		return;
 
-	in->opcode = ISCSI_OP_NOOP_IN | ISCSI_OP_IMMEDIATE;
+	/*
+	 * Immediate flag is reserved in nop-in command. RFC-3720 10.19.
+	 * See CR 6597310.
+	 */
+	in->opcode = ISCSI_OP_NOOP_IN;
 	in->flags = ISCSI_FLAG_FINAL;
 	in->ttt = cmd->c_ttt;
 	in->itt = ISCSI_RSVD_TASK_TAG;
@@ -1307,16 +1315,20 @@ conn_state(iscsi_conn_t *c, iscsi_transition_t t)
 			if (c->c_last_pkg) {
 				iscsi_logout_rsp_hdr_t *rsp =
 				    (iscsi_logout_rsp_hdr_t *)c->c_last_pkg;
-				assert(rsp->opcode ==
-				    ISCSI_OP_LOGOUT_RSP);
+				assert(rsp->opcode == ISCSI_OP_LOGOUT_RSP);
 
 				if (ISCSI_LOGOUT_RESPONSE_ENABLED()) {
 					uiscsiproto_t info;
 					char nil = '\0';
 
+					info.uip_target_addr =
+					    &c->c_target_sockaddr;
+					info.uip_initiator_addr =
+					    &c->c_initiator_sockaddr;
+					info.uip_target = &nil;
+
 					info.uip_initiator =
 					    c->c_sess->s_i_name;
-					info.uip_target = &nil;
 					info.uip_lun = 0;
 
 					info.uip_itt = rsp->itt;

@@ -32,13 +32,17 @@
  */
 
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/types.h>
 #include <sys/ethernet.h>
 #include <libdllink.h>
 #include <libdlvnic.h>
+#include <libdlpi.h>
+
+typedef struct vnic_attr {
+	dladm_vnic_attr_sys_t attr;
+	char *name;
+} vnic_attr_t;
 
 /*ARGSUSED*/
 static int
@@ -82,8 +86,10 @@ v_list(void)
 static int
 v_find(datalink_id_t vnic_id, void *arg)
 {
-	dladm_vnic_attr_sys_t *specp = arg;
+	vnic_attr_t *vattr = arg;
+	dladm_vnic_attr_sys_t *specp = &vattr->attr;
 	dladm_vnic_attr_sys_t attr;
+	char linkname[MAXLINKNAMELEN];
 
 	if (dladm_vnic_info(vnic_id, &attr, DLADM_OPT_ACTIVE) !=
 	    DLADM_STATUS_OK) {
@@ -101,23 +107,88 @@ v_find(datalink_id_t vnic_id, void *arg)
 		return (DLADM_WALK_CONTINUE);
 	}
 
+	if (vattr->name != NULL) {
+		/* Names must match. */
+		if (dladm_datalink_id2info(vnic_id, NULL, NULL, NULL, linkname,
+		    sizeof (linkname)) != DLADM_STATUS_OK) {
+			return (DLADM_WALK_CONTINUE);
+		}
+
+		if (strcmp(vattr->name, linkname) != 0)
+			return (DLADM_WALK_CONTINUE);
+	}
+
 	specp->va_vnic_id = attr.va_vnic_id;
 
 	return (DLADM_WALK_TERMINATE);
+}
+
+#define	ETHERTYPE_LOOPBACK	(0x9000)	/* loopback packet */
+
+/*
+ * Broadcasst a loopback ethernet packet via "link"
+ */
+static int
+v_broadcast(char *link)
+{
+	int rval;
+	dlpi_handle_t dh;
+	dlpi_info_t dlinfo;
+	struct ether_header eh;
+
+	if ((rval = dlpi_open(link, &dh, DLPI_RAW)) != DLPI_SUCCESS) {
+		(void) fprintf(stderr,
+		    "dlpi_open failed, link name: %s, err=%d\n", link, rval);
+		return (-1);
+	}
+
+	if ((rval = dlpi_bind(dh, DLPI_ANY_SAP, NULL)) != DLPI_SUCCESS) {
+		(void) fprintf(stderr, "dlpi_bind failed, err=%d\n", rval);
+		dlpi_close(dh);
+		return (-1);
+	}
+
+	if ((rval = dlpi_info(dh, &dlinfo, 0)) != DLPI_SUCCESS) {
+		(void) fprintf(stderr, "dlpi_info failed, err=%d\n", rval);
+		dlpi_close(dh);
+		return (-1);
+	}
+
+	if (dlinfo.di_bcastaddrlen == 0) {
+		(void) fprintf(stderr,
+		    "no broadcast address for link: %s\n", link);
+		dlpi_close(dh);
+		return (-1);
+	}
+
+	(void) memcpy(&eh.ether_dhost, dlinfo.di_bcastaddr, ETHERADDRL);
+	(void) memcpy(&eh.ether_shost, dlinfo.di_physaddr, ETHERADDRL);
+	eh.ether_type = htons(ETHERTYPE_LOOPBACK);
+
+	rval = dlpi_send(dh, NULL, 0, &eh, sizeof (struct ether_header), NULL);
+	if (rval != DLPI_SUCCESS) {
+		(void) fprintf(stderr, "dlpi_send failed, err=%d\n", rval);
+		dlpi_close(dh);
+		return (-1);
+	}
+
+	dlpi_close(dh);
+	return (0);
 }
 
 /*
  * Print out the link name of the VNIC.
  */
 static int
-v_add(char *link, char *addr)
+v_add(char *link, char *addr, char *name)
 {
 	struct ether_addr *ea;
-	dladm_vnic_attr_sys_t spec;
+	vnic_attr_t vattr;
 	datalink_id_t vnic_id, linkid;
 	char vnic[MAXLINKNAMELEN];
 	dladm_status_t status;
 	char buf[DLADM_STRSIZE];
+	boolean_t created = B_FALSE;
 
 	ea = ether_aton(addr);
 	if (ea == NULL) {
@@ -133,21 +204,22 @@ v_add(char *link, char *addr)
 
 	/*
 	 * If a VNIC already exists over the specified link
-	 * with this MAC address, use it.
+	 * with this MAC address and name, use it.
 	 */
-	spec.va_vnic_id = DATALINK_INVALID_LINKID;
-	spec.va_link_id = linkid;
-	spec.va_mac_len = ETHERADDRL;
-	(void) memcpy(spec.va_mac_addr, (uchar_t *)ea->ether_addr_octet,
-	    spec.va_mac_len);
+	vattr.attr.va_vnic_id = DATALINK_INVALID_LINKID;
+	vattr.attr.va_link_id = linkid;
+	vattr.attr.va_mac_len = ETHERADDRL;
+	(void) memcpy(vattr.attr.va_mac_addr, (uchar_t *)ea->ether_addr_octet,
+	    vattr.attr.va_mac_len);
+	vattr.name = name;
 
-	(void) dladm_walk_datalink_id(v_find, &spec, DATALINK_CLASS_VNIC,
+	(void) dladm_walk_datalink_id(v_find, &vattr, DATALINK_CLASS_VNIC,
 	    DATALINK_ANY_MEDIATYPE, DLADM_OPT_ACTIVE);
-	if (spec.va_vnic_id == DATALINK_INVALID_LINKID) {
+	if (vattr.attr.va_vnic_id == DATALINK_INVALID_LINKID) {
 		/*
 		 * None found, so create.
 		 */
-		status = dladm_vnic_create(NULL, linkid,
+		status = dladm_vnic_create(name, linkid,
 		    VNIC_MAC_ADDR_TYPE_FIXED, (uchar_t *)ea->ether_addr_octet,
 		    ETHERADDRL, &vnic_id, DLADM_OPT_ACTIVE);
 		if (status != DLADM_STATUS_OK) {
@@ -155,18 +227,27 @@ v_add(char *link, char *addr)
 			    dladm_status2str(status, buf));
 			return (-1);
 		}
+		created = B_TRUE;
 	} else {
-		vnic_id = spec.va_vnic_id;
+		vnic_id = vattr.attr.va_vnic_id;
 	}
 
 	if ((status = dladm_datalink_id2info(vnic_id, NULL, NULL, NULL, vnic,
 	    sizeof (vnic))) != DLADM_STATUS_OK) {
 		(void) fprintf(stderr, "dladm_datalink_id2info: %s\n",
 		    dladm_status2str(status, buf));
-		if (spec.va_vnic_id == DATALINK_INVALID_LINKID)
+		if (vattr.attr.va_vnic_id == DATALINK_INVALID_LINKID)
 			(void) dladm_vnic_delete(vnic_id, DLADM_OPT_ACTIVE);
 		return (-1);
 	}
+
+	/*
+	 * Before we hand this newly created vnic over to caller, we want to
+	 * broadcast its MAC address to make sure that the <MAC,port> mapping
+	 * in the switch is correct.
+	 */
+	if (created)
+		(void) v_broadcast(vnic);
 
 	(void) printf("%s\n", vnic);
 
@@ -215,12 +296,13 @@ main(int argc, char *argv[])
 		return (v_remove(argv[1]));
 		/* NOTREACHED */
 	case 3:
+	case 4:
 		/* Add operation. */
-		return (v_add(argv[1], argv[2]));
+		return (v_add(argv[1], argv[2], (argc == 3 ? NULL : argv[3])));
 		/* NOTREACHED */
 	default:
 		(void) fprintf(stderr, "Incorrect number of arguments - "
-		    "must have 0, 1 or 2.\n");
+		    "must have 0, 1, 2 or 3.\n");
 		return (-1);
 		/* NOTREACHED */
 	}

@@ -829,14 +829,20 @@ reencode_attrs:
 			}
 			if (ATTR_ISSET(ae, NAMED_ATTR)) {
 				uint_t isit;
+				int sattr_error;
 				pc_val = FALSE;
 
 				if (!(vp->v_vfsp->vfs_flag & VFS_XATTR)) {
 					isit = FALSE;
 				} else {
-					(void) VOP_PATHCONF(vp,
-					    _PC_XATTR_EXISTS, &pc_val, cs->cr,
-					    NULL);
+					sattr_error = VOP_PATHCONF(vp,
+					    _PC_SATTR_EXISTS,
+					    &pc_val, cs->cr, NULL);
+					if (sattr_error || pc_val == 0)
+						(void) VOP_PATHCONF(vp,
+						    _PC_XATTR_EXISTS,
+						    &pc_val,
+						    cs->cr, NULL);
 				}
 				isit = (pc_val ? TRUE : FALSE);
 				IXDR_PUT_U_INT32(ptr, isit);

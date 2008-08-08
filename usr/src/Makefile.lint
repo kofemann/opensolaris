@@ -248,6 +248,7 @@ COMMON_SUBDIRS = \
 	cmd/sdpadm \
 	cmd/setpgrp \
 	cmd/smbios \
+	cmd/sgs \
 	cmd/smbsrv \
 	cmd/smserverd \
 	cmd/sort \
@@ -302,6 +303,7 @@ COMMON_SUBDIRS = \
 	cmd/ztest \
 	lib/abi \
 	lib/auditd_plugins \
+	lib/brand/native \
 	lib/brand/sn1 \
 	lib/crypt_modules \
 	lib/extendedFILE \

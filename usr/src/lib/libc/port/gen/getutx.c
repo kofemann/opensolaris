@@ -45,30 +45,7 @@
  * on systems with MAXPID <= SHRT_MAX.
  */
 
-#pragma weak getutxent = _getutxent
-#pragma weak getutent = _getutent
-#pragma weak getutxid = _getutxid
-#pragma weak getutid = _getutid
-#pragma weak getutxline = _getutxline
-#pragma weak getutline = _getutline
-#pragma weak getutmpx = _getutmpx
-#pragma weak getutmp = _getutmp
-#pragma weak makeutx = _makeutx
-#pragma weak makeut = _makeut
-#pragma weak modutx = _modutx
-#pragma weak modut = _modut
-#pragma weak pututxline = _pututxline
-#pragma weak pututline = _pututline
-#pragma weak setutxent = _setutxent
-#pragma weak setutent = _setutent
-#pragma weak endutxent = _endutxent
-#pragma weak endutent = _endutent
-#pragma weak utmpxname = _utmpxname
-#pragma weak utmpname = _utmpname
-#pragma weak updwtmpx = _updwtmpx
-#pragma weak updwtmp = _updwtmp
-
-#include "synonyms.h"
+#include "lint.h"
 #include <sys/types.h>
 #include <stdio.h>
 #include <sys/param.h>
@@ -505,7 +482,7 @@ getutline(const struct utmp *entry)
 static struct utmpx *
 invoke_utmp_update(const struct utmpx *entryx)
 {
-	extern char **environ;
+	extern char **_environ;
 
 	posix_spawnattr_t attr;
 	int status;
@@ -582,7 +559,7 @@ invoke_utmp_update(const struct utmpx *entryx)
 		errno = error;
 		goto out;
 	}
-	error = posix_spawn(&child, UTMP_UPDATE, NULL, &attr, argvec, environ);
+	error = posix_spawn(&child, UTMP_UPDATE, NULL, &attr, argvec, _environ);
 	(void) posix_spawnattr_destroy(&attr);
 	if (error) {
 		errno = error;

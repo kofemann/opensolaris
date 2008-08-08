@@ -56,12 +56,15 @@ extern void vdev_reopen(vdev_t *);
 extern int vdev_validate_aux(vdev_t *vd);
 extern int vdev_probe(vdev_t *);
 
+extern boolean_t vdev_is_bootable(vdev_t *vd);
 extern vdev_t *vdev_lookup_top(spa_t *spa, uint64_t vdev);
 extern vdev_t *vdev_lookup_by_guid(vdev_t *vd, uint64_t guid);
 extern void vdev_dtl_dirty(space_map_t *sm, uint64_t txg, uint64_t size);
 extern int vdev_dtl_contains(space_map_t *sm, uint64_t txg, uint64_t size);
 extern void vdev_dtl_reassess(vdev_t *vd, uint64_t txg, uint64_t scrub_txg,
     int scrub_done);
+extern boolean_t vdev_resilver_needed(vdev_t *vd,
+    uint64_t *minp, uint64_t *maxp);
 
 extern const char *vdev_description(vdev_t *vd);
 

@@ -20,13 +20,22 @@
 #
 
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # ident	"%Z%%M%	%I%	%E% SMI"
 
-SUBDIRS = chip cpuboard hostbridge pcibus motherboard niu platform-cpu \
-	xaui zambezi
-
+SUBDIRS = chip \
+	cpuboard \
+	dimm \
+	hostbridge \
+	pcibus \
+	motherboard \
+	niu \
+	platform-cpu \
+	platform-mem \
+	sun4vpi \
+	xaui \
+	zambezi
 
 include ../../../Makefile.subdirs

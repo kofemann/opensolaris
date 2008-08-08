@@ -257,6 +257,13 @@ nvl2subr(fmd_hdl_t *hdl, nvlist_t *nvl, nvlist_t **asrup)
 	char *scheme;
 	uint8_t version;
 	char *fltclass = "(unknown)";
+	boolean_t retire;
+
+	if (nvlist_lookup_boolean_value(nvl, FM_SUSPECT_RETIRE, &retire) == 0 &&
+	    retire == 0) {
+		fmd_hdl_debug(hdl, "cma_recv: retire suppressed");
+		return (NULL);
+	}
 
 	if (nvlist_lookup_nvlist(nvl, FM_FAULT_ASRU, &asru) != 0 ||
 	    nvlist_lookup_string(asru, FM_FMRI_SCHEME, &scheme) != 0 ||
@@ -282,13 +289,15 @@ nvl2subr(fmd_hdl_t *hdl, nvlist_t *nvl, nvlist_t **asrup)
 }
 
 static void
-cma_recv_list(fmd_hdl_t *hdl, nvlist_t *nvl, boolean_t repair)
+cma_recv_list(fmd_hdl_t *hdl, nvlist_t *nvl, const char *class)
 {
 	char *uuid = NULL;
 	nvlist_t **nva;
 	uint_t nvc = 0;
 	uint_t keepopen;
 	int err = 0;
+	nvlist_t *asru;
+	uint32_t index;
 
 	err |= nvlist_lookup_string(nvl, FM_SUSPECT_UUID, &uuid);
 	err |= nvlist_lookup_nvlist_array(nvl, FM_SUSPECT_FAULT_LIST,
@@ -299,10 +308,11 @@ cma_recv_list(fmd_hdl_t *hdl, nvlist_t *nvl, boolean_t repair)
 	}
 
 	keepopen = nvc;
-	while (nvc-- != 0 && (repair || !fmd_case_uuclosed(hdl, uuid))) {
+	while (nvc-- != 0 && (strcmp(class, FM_LIST_SUSPECT_CLASS) != 0 ||
+	    !fmd_case_uuclosed(hdl, uuid))) {
 		nvlist_t *nvl = *nva++;
 		const cma_subscriber_t *subr;
-		nvlist_t *asru;
+		int has_fault;
 
 		if ((subr = nvl2subr(hdl, nvl, &asru)) == NULL)
 			continue;
@@ -314,15 +324,31 @@ cma_recv_list(fmd_hdl_t *hdl, nvlist_t *nvl, boolean_t repair)
 		 * A handler must not close the case itself.
 		 */
 		if (subr->subr_func != NULL) {
-			err = subr->subr_func(hdl, nvl, asru, uuid, repair);
-
+			has_fault = fmd_nvl_fmri_has_fault(hdl, asru,
+			    FMD_HAS_FAULT_ASRU, NULL);
+			if (strcmp(class, FM_LIST_SUSPECT_CLASS) == 0) {
+				if (has_fault == 1)
+					err = subr->subr_func(hdl, nvl, asru,
+					    uuid, 0);
+			} else {
+				if (has_fault == 0)
+					err = subr->subr_func(hdl, nvl, asru,
+					    uuid, 1);
+			}
 			if (err == CMA_RA_SUCCESS)
 				keepopen--;
 		}
 	}
-
-	if (!keepopen && !repair)
-		fmd_case_uuclose(hdl, uuid);
+	/*
+	 * Do not close the case if we are handling cache faults.
+	 */
+	if (nvlist_lookup_uint32(asru, FM_FMRI_CPU_CACHE_INDEX, &index) != 0) {
+		if (!keepopen && strcmp(class, FM_LIST_SUSPECT_CLASS) == 0) {
+			fmd_case_uuclose(hdl, uuid);
+		}
+	}
+	if (!keepopen && strcmp(class, FM_LIST_REPAIRED_CLASS) == 0)
+		fmd_case_uuresolved(hdl, uuid);
 }
 
 static void
@@ -334,21 +360,23 @@ cma_recv_one(fmd_hdl_t *hdl, nvlist_t *nvl)
 	if ((subr = nvl2subr(hdl, nvl, &asru)) == NULL)
 		return;
 
-	if (subr->subr_func != NULL)
-		(void) subr->subr_func(hdl, nvl, asru, NULL, 0);
+	if (subr->subr_func != NULL) {
+		if (fmd_nvl_fmri_has_fault(hdl, asru,
+		    FMD_HAS_FAULT_ASRU, NULL) == 1)
+			(void) subr->subr_func(hdl, nvl, asru, NULL, 0);
+	}
 }
 
 /*ARGSUSED*/
 static void
 cma_recv(fmd_hdl_t *hdl, fmd_event_t *ep, nvlist_t *nvl, const char *class)
 {
-	boolean_t repair = B_FALSE;
-
 	fmd_hdl_debug(hdl, "received %s\n", class);
 
 	if (strcmp(class, FM_LIST_SUSPECT_CLASS) == 0 ||
-	    (repair = (strcmp(class, FM_LIST_REPAIRED_CLASS) == 0)))
-		cma_recv_list(hdl, nvl, repair);
+	    strcmp(class, FM_LIST_REPAIRED_CLASS) == 0 ||
+	    strcmp(class, FM_LIST_UPDATED_CLASS) == 0)
+		cma_recv_list(hdl, nvl, class);
 	else
 		cma_recv_one(hdl, nvl);
 }
@@ -435,7 +463,6 @@ _fmd_init(fmd_hdl_t *hdl)
 	if (fmd_hdl_register(hdl, FMD_API_VERSION, &fmd_info) != 0)
 		return; /* invalid data in configuration file */
 
-	fmd_hdl_subscribe(hdl, "list.repaired");
 	fmd_hdl_subscribe(hdl, "fault.cpu.*");
 	fmd_hdl_subscribe(hdl, "fault.memory.*");
 #ifdef opl

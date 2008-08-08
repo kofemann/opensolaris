@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -39,57 +39,34 @@
 #include <sys/errno.h>
 #endif
 
-#include <smbsrv/lmshare.h>
+#include <smbsrv/smb_share.h>
 #include <smbsrv/smb_common_door.h>
-#include <smbsrv/lmshare_door.h>
 #include <smbsrv/alloc.h>
 #include <smbsrv/smbinfo.h>
 
 void
-smb_dr_get_kconfig(smb_dr_ctx_t *ctx, smb_kmod_cfg_t *cfg)
-{
-	if (ctx->status == 0) {
-		(void) memcpy(cfg, ctx->ptr, sizeof (smb_kmod_cfg_t));
-		ctx->ptr += sizeof (smb_kmod_cfg_t);
-	}
-	else
-		bzero(cfg, sizeof (smb_kmod_cfg_t));
-}
-
-void
-smb_dr_put_kconfig(smb_dr_ctx_t *ctx, smb_kmod_cfg_t *cfg)
-{
-	if (ctx->ptr + sizeof (smb_kmod_cfg_t) <= ctx->end_ptr) {
-		(void) memcpy(ctx->ptr, cfg, sizeof (smb_kmod_cfg_t));
-		ctx->ptr += sizeof (smb_kmod_cfg_t);
-	}
-	else
-		ctx->status = ENOSPC;
-}
-
-void
-smb_dr_get_lmshare(smb_dr_ctx_t *ctx, lmshare_info_t *si)
+smb_dr_get_share(smb_dr_ctx_t *ctx, smb_share_t *si)
 {
 	if (ctx->status == 0) {
 		if (smb_dr_get_int32(ctx)) {
-			(void) memcpy(si, ctx->ptr, sizeof (lmshare_info_t));
-			ctx->ptr += sizeof (lmshare_info_t);
+			(void) memcpy(si, ctx->ptr, sizeof (smb_share_t));
+			ctx->ptr += sizeof (smb_share_t);
 		}
 		else
-			bzero(si, sizeof (lmshare_info_t));
+			bzero(si, sizeof (smb_share_t));
 	}
 	else
-		bzero(si, sizeof (lmshare_info_t));
+		bzero(si, sizeof (smb_share_t));
 }
 
 void
-smb_dr_put_lmshare(smb_dr_ctx_t *ctx, lmshare_info_t *si)
+smb_dr_put_share(smb_dr_ctx_t *ctx, smb_share_t *si)
 {
 	if (si) {
 		smb_dr_put_int32(ctx, 1);
-		if (ctx->ptr + sizeof (lmshare_info_t) <= ctx->end_ptr) {
-			(void) memcpy(ctx->ptr, si, sizeof (lmshare_info_t));
-			ctx->ptr += sizeof (lmshare_info_t);
+		if (ctx->ptr + sizeof (smb_share_t) <= ctx->end_ptr) {
+			(void) memcpy(ctx->ptr, si, sizeof (smb_share_t));
+			ctx->ptr += sizeof (smb_share_t);
 		}
 		else
 			ctx->status = ENOSPC;
@@ -98,55 +75,31 @@ smb_dr_put_lmshare(smb_dr_ctx_t *ctx, lmshare_info_t *si)
 		smb_dr_put_int32(ctx, 0);
 }
 
-uint64_t
-smb_dr_get_lmshr_iterator(smb_dr_ctx_t *ctx)
-{
-	uint64_t lmshr_iter;
-
-	if (smb_dr_get_int32(ctx))
-		lmshr_iter = smb_dr_get_uint64(ctx);
-	else
-		lmshr_iter = 0;
-
-	return (lmshr_iter);
-}
-
 void
-smb_dr_put_lmshr_iterator(smb_dr_ctx_t *ctx, uint64_t lmshr_iter)
-{
-	if (lmshr_iter) {
-		smb_dr_put_int32(ctx, 1);
-		smb_dr_put_uint64(ctx, lmshr_iter);
-	}
-	else
-		smb_dr_put_int32(ctx, 0);
-}
-
-void
-smb_dr_get_lmshr_list(smb_dr_ctx_t *ctx, lmshare_list_t *shrlist)
+smb_dr_get_shrlist(smb_dr_ctx_t *ctx, smb_shrlist_t *shrlist)
 {
 	if (ctx->status == 0) {
 		if (smb_dr_get_int32(ctx)) {
 			(void) memcpy(shrlist,
-			    ctx->ptr, sizeof (lmshare_list_t));
-			ctx->ptr += sizeof (lmshare_list_t);
+			    ctx->ptr, sizeof (smb_shrlist_t));
+			ctx->ptr += sizeof (smb_shrlist_t);
 		}
 		else
-			bzero(shrlist, sizeof (lmshare_list_t));
+			bzero(shrlist, sizeof (smb_shrlist_t));
 	}
 	else
-		bzero(shrlist, sizeof (lmshare_list_t));
+		bzero(shrlist, sizeof (smb_shrlist_t));
 }
 
 void
-smb_dr_put_lmshr_list(smb_dr_ctx_t *ctx, lmshare_list_t *shrlist)
+smb_dr_put_shrlist(smb_dr_ctx_t *ctx, smb_shrlist_t *shrlist)
 {
 	if (shrlist) {
 		smb_dr_put_int32(ctx, 1);
-		if (ctx->ptr + sizeof (lmshare_list_t) <= ctx->end_ptr) {
+		if (ctx->ptr + sizeof (smb_shrlist_t) <= ctx->end_ptr) {
 			(void) memcpy(ctx->ptr,
-			    shrlist, sizeof (lmshare_list_t));
-			ctx->ptr += sizeof (lmshare_list_t);
+			    shrlist, sizeof (smb_shrlist_t));
+			ctx->ptr += sizeof (smb_shrlist_t);
 		}
 		else
 			ctx->status = ENOSPC;

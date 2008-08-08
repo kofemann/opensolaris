@@ -65,10 +65,12 @@
 #define	__inline__	inline
 #endif
 
-#if !defined(__FUNCTION__) && defined(C99)
+#if !defined(__FUNCTION__)
+#if defined(C99)
 #define	__FUNCTION__ __func__
 #else
 #define	__FUNCTION__	" "
+#endif
 #endif
 
 /* DRM space units */
@@ -672,6 +674,11 @@ struct drm_device {
 	u32 *drw_bitfield;
 	unsigned int drw_info_length;
 	drm_drawable_info_t **drw_info;
+
+	/*
+	 * Saving S3 context
+	 */
+	void		  *s3_private;
 };
 
 /* Memory management support (drm_memory.c) */

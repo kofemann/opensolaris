@@ -376,8 +376,10 @@ boot_mapin(caddr_t addr, size_t size)
 		 * If the cage is on but doesn't yet contain this page,
 		 * mark it as non-relocatable.
 		 */
-		if (kcage_on && !PP_ISNORELOC(pp))
+		if (kcage_on && !PP_ISNORELOC(pp)) {
 			PP_SETNORELOC(pp);
+			PLCNT_XFER_NORELOC(pp);
+		}
 
 		(void) page_hashin(pp, &kvp, (u_offset_t)(uintptr_t)addr, NULL);
 		pp->p_lckcnt = 1;
@@ -403,8 +405,13 @@ boot_alloc(void *inaddr, size_t size, uint_t align)
 		    "BOP_GONE");
 
 	size = ptob(btopr(size));
+#ifdef __sparc
+	if (bop_alloc_chunk(addr, size, align) != (caddr_t)addr)
+		panic("boot_alloc: bop_alloc_chunk failed");
+#else
 	if (BOP_ALLOC(bootops, addr, size, align) != addr)
 		panic("boot_alloc: BOP_ALLOC failed");
+#endif
 	boot_mapin((caddr_t)addr, size);
 	return (addr);
 }

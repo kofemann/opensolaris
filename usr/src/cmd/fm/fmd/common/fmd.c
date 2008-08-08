@@ -255,7 +255,7 @@ static const fmd_conf_formal_t _fmd_conf[] = {
 { "debug", &fmd_debug_ops, NULL },		/* daemon debugging flags */
 { "dictdir", &fmd_conf_string, "usr/lib/fm/dict" }, /* default diagcode dir */
 { "domain", &fmd_conf_string, NULL },		/* domain id for de auth */
-{ "fakenotpresent", &fmd_conf_bool, "false" },	/* simulate rsrc not present */
+{ "fakenotpresent", &fmd_conf_uint32, "0" },	/* simulate rsrc not present */
 { "fg", &fmd_conf_bool, "false" },		/* run daemon in foreground */
 { "gc_interval", &fmd_conf_time, "1d" },	/* garbage collection intvl */
 { "ids.avg", &fmd_conf_uint32, "4" },		/* desired idspace chain len */
@@ -272,6 +272,8 @@ static const fmd_conf_formal_t _fmd_conf[] = {
 { "machine", &fmd_conf_string, _fmd_uts.machine }, /* machine name (uname -m) */
 { "nodiagcode", &fmd_conf_string, "-" },	/* diagcode to use if error */
 { "repaircode", &fmd_conf_string, "-" },	/* diagcode for list.repaired */
+{ "resolvecode", &fmd_conf_string, "-" },	/* diagcode for list.resolved */
+{ "updatecode", &fmd_conf_string, "-" },	/* diagcode for list.updated */
 { "osrelease", &fmd_conf_string, _fmd_uts.release }, /* release (uname -r) */
 { "osversion", &fmd_conf_string, _fmd_uts.version }, /* version (uname -v) */
 { "platform", &fmd_conf_string, _fmd_plat },	/* platform string (uname -i) */
@@ -510,7 +512,6 @@ fmd_destroy(fmd_t *dp)
 	(void) fmd_conf_getprop(fmd.d_conf, "core", &core);
 
 	fmd_rpc_fini();
-	fmd_dr_fini();
 
 	if (dp->d_xprt_ids != NULL)
 		fmd_xprt_suspend_all();
@@ -748,6 +749,8 @@ fmd_run(fmd_t *dp, int pfd)
 {
 	char *nodc_key[] = { FMD_FLT_NODC, NULL };
 	char *repair_key[] = { FM_LIST_REPAIRED_CLASS, NULL };
+	char *resolve_key[] = { FM_LIST_RESOLVED_CLASS, NULL };
+	char *update_key[] = { FM_LIST_UPDATED_CLASS, NULL };
 	char code_str[128];
 	struct sigaction act;
 
@@ -897,6 +900,14 @@ fmd_run(fmd_t *dp, int pfd)
 		    sizeof (code_str)) == 0)
 			(void) fmd_conf_setprop(dp->d_conf, "repaircode",
 			    code_str);
+		if (fmd_module_dc_key2code(dp->d_self, resolve_key, code_str,
+		    sizeof (code_str)) == 0)
+			(void) fmd_conf_setprop(dp->d_conf, "resolvecode",
+			    code_str);
+		if (fmd_module_dc_key2code(dp->d_self, update_key, code_str,
+		    sizeof (code_str)) == 0)
+			(void) fmd_conf_setprop(dp->d_conf, "updatecode",
+			    code_str);
 	}
 
 	fmd_rpc_init();
@@ -924,11 +935,6 @@ fmd_run(fmd_t *dp, int pfd)
 	fmd_modhash_loadall(dp->d_mod_hash, pap, &fmd_proc_ops, NULL);
 
 	/*
-	 * Subscribe to sysevents after all modules have been loaded.
-	 */
-	fmd_dr_init();
-
-	/*
 	 * With all modules loaded, replay fault events from the ASRU cache for
 	 * any ASRUs that must be retired, replay error events from the errlog
 	 * that did not finish processing the last time ran, and then release
@@ -943,6 +949,11 @@ fmd_run(fmd_t *dp, int pfd)
 
 	dp->d_mod_event = NULL;
 	fmd_event_rele(e);
+
+	/*
+	 * Now replay list.updated and list.repaired events
+	 */
+	fmd_case_repair_replay();
 
 	/*
 	 * Finally, awaken any threads associated with receiving events from

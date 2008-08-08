@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -151,7 +151,8 @@ static void *vhci_mpapi_get_rel_tport_pair(struct scsi_vhci *vhci,
  */
 extern void	*vhci_softstate;
 extern char	vhci_version_name[];
-extern int	(*tpgs_set_target_groups)(struct scsi_address *, int, int);
+extern int vhci_tpgs_set_target_groups(struct scsi_address *, int, int);
+
 
 extern void mdi_vhci_walk_phcis(dev_info_t *,
     int (*)(dev_info_t *, void *), void *);
@@ -1572,8 +1573,8 @@ vhci_set_tpg_access_state(struct scsi_vhci *vhci, mp_iocdata_t *mpioc,
 		ap = &svp->svp_psd->sd_address;
 		ASSERT(ap != NULL);
 
-		retval = (*tpgs_set_target_groups)
-		    (ap, desired_state, t10_tpgid);
+		retval = vhci_tpgs_set_target_groups(ap, desired_state,
+		    t10_tpgid);
 		if (retval != 0) {
 			VHCI_DEBUG(1, (CE_WARN, NULL, "vhci_set_tpg_access_"
 			    "state:(ALUA) FAILOVER FAILED: %x", retval));
@@ -2685,8 +2686,8 @@ vhci_mpapi_create_item(struct scsi_vhci *vhci, uint8_t obj_type, void* res)
 			(void) strlcat(lu->prop.deviceFileName, lu->prop.name,
 			    sizeof (lu->prop.deviceFileName));
 
-			if ((svl->svl_fops != NULL) &&
-			    !SCSI_FAILOVER_IS_SYM(svl->svl_fops)) {
+			if ((svl != NULL) &&
+			    SCSI_FAILOVER_IS_ASYM(svl)) {
 				lu->prop.asymmetric = 1;
 			}
 
@@ -3229,7 +3230,7 @@ vhci_mpapi_synthesize_tpg_data(struct scsi_vhci *vhci, scsi_vhci_lun_t *vlun,
 			tpg_data = tpg_list->item->idata;
 		}
 
-		if (!SCSI_FAILOVER_IS_SYM(vlun->svl_fops)) {
+		if ((vlun != NULL) && SCSI_FAILOVER_IS_ASYM(vlun)) {
 			tpg_data->prop.explicitFailover = 1;
 		}
 
@@ -4048,27 +4049,40 @@ vhci_mpapi_update_tpg_acc_state_for_lu(struct scsi_vhci *vhci,
 		path_list = lu_data->path_list->head;
 		while (path_list != NULL) {
 			path_data = path_list->item->idata;
-			if ((path_data->valid == 1) &&
-			    (strncmp(path_data->pclass, tpg_data->pclass,
-			    strlen(tpg_data->pclass)) == 0)) {
-				VHCI_DEBUG(4, (CE_NOTE, NULL, "vhci_mpapi_"
-				    "update_tpg_acc_state_for_lu: Operating on "
-				    "LUN(%s), PATH(%p), TPG(%x: %s)\n",
-				    lu_data->prop.name, path_data->resp,
-				    tpg_data->prop.tpgId, tpg_data->pclass));
-				if (MDI_PI_IS_ONLINE(path_data->resp)) {
-					tpg_data->prop.accessState =
-					    MP_DRVR_ACCESS_STATE_ACTIVE;
-					break;
-				} else if (MDI_PI_IS_STANDBY(path_data->resp)) {
+			if (strncmp(path_data->pclass, tpg_data->pclass,
+			    strlen(tpg_data->pclass)) == 0) {
+				if (path_data->valid == 1) {
+					VHCI_DEBUG(4, (CE_NOTE, NULL,
+					    "vhci_mpapi_update_tpg_acc_state_"
+					    "for_ lu: Operating on LUN(%s), "
+					    " PATH(%p), TPG(%x: %s)\n",
+					    lu_data->prop.name, path_data->resp,
+					    tpg_data->prop.tpgId,
+					    tpg_data->pclass));
+					if (MDI_PI_IS_ONLINE(path_data->resp)) {
+						tpg_data->prop.accessState =
+						    MP_DRVR_ACCESS_STATE_ACTIVE;
+						break;
+					} else if (MDI_PI_IS_STANDBY(
+					    path_data->resp)) {
 					tpg_data->prop.accessState =
 					    MP_DRVR_ACCESS_STATE_STANDBY;
-					break;
+						break;
+					} else {
+					tpg_data->prop.accessState =
+					    MP_DRVR_ACCESS_STATE_UNAVAILABLE;
+					}
 				} else {
+					/*
+					 * if path is not valid any more,
+					 * mark the associated tpg as
+					 * unavailable.
+					 */
 					tpg_data->prop.accessState =
 					    MP_DRVR_ACCESS_STATE_UNAVAILABLE;
 				}
 			}
+
 			path_list = path_list->next;
 		}
 		tpg_list = tpg_list->next;

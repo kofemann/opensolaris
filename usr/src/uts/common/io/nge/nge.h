@@ -75,8 +75,6 @@ extern int secpolicy_net_config(const cred_t *, boolean_t);
 #include <sys/netlb.h>
 #include <sys/miiregs.h>
 
-#include <sys/dld.h>
-
 #include "nge_chip.h"
 
 #define	PIO_ADDR(ngep, offset)	((void *)((caddr_t)(ngep)->io_regs+(offset)))
@@ -721,6 +719,7 @@ typedef struct nge {
 	enum nge_mac_state	nge_mac_state;	/* definitions above	*/
 	enum nge_chip_state	nge_chip_state; /* definitions above	*/
 	boolean_t		promisc;
+	boolean_t		record_promisc;
 	boolean_t		suspended;
 
 	int			resched_needed;

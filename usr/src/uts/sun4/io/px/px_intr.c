@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -463,7 +463,7 @@ px_class_val_t px_default_pil [] = {
 	{0x010000, 0xff0000, 0x4},	/* Mass Storage Controller */
 	{0x020000, 0xff0000, 0x6},	/* Network Controller */
 	{0x030000, 0xff0000, 0x9},	/* Display Controller */
-	{0x040000, 0xff0000, 0x9},	/* Multimedia Controller */
+	{0x040000, 0xff0000, 0x8},	/* Multimedia Controller */
 	{0x050000, 0xff0000, 0x9},	/* Memory Controller */
 	{0x060000, 0xff0000, 0x9},	/* Bridge Controller */
 	{0x0c0000, 0xffff00, 0x9},	/* Serial Bus, FireWire (IEEE 1394) */
@@ -984,7 +984,11 @@ px_ks_update(kstat_t *ksp, int rw)
 	sysino_t sysino;
 
 	ino = ino_p->ino_ino;
-	(void) px_lib_intr_devino_to_sysino(px_p->px_dip, ino, &sysino);
+	if (px_lib_intr_devino_to_sysino(px_p->px_dip, ino, &sysino) !=
+	    DDI_SUCCESS) {
+		cmn_err(CE_WARN, "px_ks_update: px_lib_intr_devino_to_sysino "
+		    "failed");
+	}
 
 	(void) snprintf(pxintr_ks_template.pxintr_ks_name.value.c, maxlen,
 	    "%s%d", ddi_driver_name(ih_p->ih_dip),

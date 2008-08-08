@@ -206,6 +206,12 @@ libzfs_error_description(libzfs_handle_t *hdl)
 	case EZFS_VDEVNOTSUP:
 		return (dgettext(TEXT_DOMAIN, "vdev specification is not "
 		    "supported"));
+	case EZFS_NOTSUP:
+		return (dgettext(TEXT_DOMAIN, "operation not supported "
+		    "on this dataset"));
+	case EZFS_ACTIVE_SPARE:
+		return (dgettext(TEXT_DOMAIN, "pool has active shared spare "
+		    "device"));
 	case EZFS_UNKNOWN:
 		return (dgettext(TEXT_DOMAIN, "unknown error"));
 	default:
@@ -587,6 +593,7 @@ libzfs_fini(libzfs_handle_t *hdl)
 	zfs_uninit_libshare(hdl);
 	if (hdl->libzfs_log_str)
 		(void) free(hdl->libzfs_log_str);
+	zpool_free_handles(hdl);
 	namespace_clear(hdl);
 	free(hdl);
 }

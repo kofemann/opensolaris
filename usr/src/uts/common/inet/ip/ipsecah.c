@@ -477,10 +477,8 @@ ipsecah_open(queue_t *q, dev_t *devp, int flag, int sflag, cred_t *credp)
 	netstack_t	*ns;
 	ipsecah_stack_t	*ahstack;
 
-	if (secpolicy_ip_config(credp, B_FALSE) != 0) {
-		ah0dbg(("Non-privileged user trying to open ipsecah.\n"));
+	if (secpolicy_ip_config(credp, B_FALSE) != 0)
 		return (EPERM);
-	}
 
 	if (q->q_ptr != NULL)
 		return (0);  /* Re-open of an already open instance. */
@@ -1014,6 +1012,9 @@ ah_add_sa_finish(mblk_t *mp, sadb_msg_t *samsg, keysock_in_t *ksi,
 		if ((larval == NULL) ||
 		    (larval->ipsa_state != IPSA_STATE_LARVAL)) {
 			*diagnostic = SADB_X_DIAGNOSTIC_SA_NOTFOUND;
+			if (larval != NULL) {
+				IPSA_REFRELE(larval);
+			}
 			ah0dbg(("Larval update, but larval disappeared.\n"));
 			return (ESRCH);
 		} /* Else sadb_common_add unlinks it for me! */
@@ -1145,10 +1146,7 @@ ah_add_sa(mblk_t *mp, keysock_in_t *ksi, int *diagnostic, netstack_t *ns)
 		*diagnostic = SADB_X_DIAGNOSTIC_ENCR_NOTSUPP;
 		return (EINVAL);
 	}
-	if (assoc->sadb_sa_flags &
-	    ~(SADB_SAFLAGS_NOREPLAY | SADB_X_SAFLAGS_TUNNEL |
-	    SADB_X_SAFLAGS_OUTBOUND | SADB_X_SAFLAGS_INBOUND |
-	    SADB_X_SAFLAGS_PAIRED)) {
+	if (assoc->sadb_sa_flags & ~ahstack->ah_sadb.s_addflags) {
 		*diagnostic = SADB_X_DIAGNOSTIC_BAD_SAFLAGS;
 		return (EINVAL);
 	}
@@ -1886,14 +1884,17 @@ ah_send_acquire(ipsacq_t *acqrec, mblk_t *extended, netstack_t *ns)
 
 	AH_BUMP_STAT(ahstack, acquire_requests);
 
-	if (ahstack->ah_pfkey_q == NULL)
+	if (ahstack->ah_pfkey_q == NULL) {
+		mutex_exit(&acqrec->ipsacq_lock);
 		return;
+	}
 
 	/* Set up ACQUIRE. */
 	pfkeymp = sadb_setup_acquire(acqrec, SADB_SATYPE_AH,
 	    ns->netstack_ipsec);
 	if (pfkeymp == NULL) {
 		ah0dbg(("sadb_setup_acquire failed.\n"));
+		mutex_exit(&acqrec->ipsacq_lock);
 		return;
 	}
 	ASSERT(MUTEX_HELD(&ipss->ipsec_alg_lock));

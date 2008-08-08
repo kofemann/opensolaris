@@ -40,17 +40,6 @@
 #include "i915_drm.h"
 #include "i915_drv.h"
 
-#define IS_I965G(dev)  (dev->pci_device == 0x2972 || \
-			dev->pci_device == 0x2982 || \
-			dev->pci_device == 0x2992 || \
-			dev->pci_device == 0x29A2 || \
-    			dev->pci_device == 0x2A02 || \
-    			dev->pci_device == 0x2A12)
-
-#define	IS_G33(dev)	(dev->pci_device == 0x29b2 || \
-			dev->pci_device == 0x29c2 || \
-			dev->pci_device == 0x29d2)
-
 
 
 /* Really want an OS-independent resettable timer.  Would like to have
@@ -151,6 +140,10 @@ static int i915_initialize(drm_device_t * dev,
 		return (EINVAL);
 	}
 
+	/*
+	 * mmio_map will be destoried after DMA clean up.  We should not
+	 * access mmio_map in suspend or resume process.
+	 */
 	dev_priv->mmio_map = drm_core_findmap(dev, init->mmio_offset);
 	if (!dev_priv->mmio_map) {
 		dev->dev_private = (void *)dev_priv;
@@ -159,7 +152,7 @@ static int i915_initialize(drm_device_t * dev,
 		return (EINVAL);
 	}
 
-	dev_priv->sarea_priv = (drm_i915_sarea_t *)
+	dev_priv->sarea_priv = (drm_i915_sarea_t *)(void *)
 	    ((u8 *) dev_priv->sarea->handle + init->sarea_priv_offset);
 
 	dev_priv->ring.Start = init->ring_start;
@@ -425,7 +418,7 @@ static int i915_emit_box(drm_device_t * dev,
 		return (EFAULT);
 	}
 
-	if (box.y2 <= box.y1 || box.x2 <= box.x1 || box.y2 <= 0 || box.x2 <= 0) {
+	if (box.y2 <= box.y1 || box.x2 <= box.x1) {
 		DRM_ERROR("Bad box %d,%d..%d,%d\n",
 			  box.x1, box.y1, box.x2, box.y2);
 		return (EINVAL);
@@ -518,7 +511,7 @@ static int i915_dispatch_cmdbuffer(drm_device_t * dev,
 				return ret;
 		}
 
-		ret = i915_emit_cmds(dev, (int __user *)cmd->buf, cmd->sz / 4);
+		ret = i915_emit_cmds(dev, (int __user *)(void *)cmd->buf, cmd->sz / 4);
 		if (ret)
 			return ret;
 	}

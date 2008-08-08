@@ -58,8 +58,8 @@ static vdev_ops_t *vdev_ops_table[] = {
 	NULL
 };
 
-/* maximum scrub/resilver I/O queue */
-int zfs_scrub_limit = 70;
+/* maximum scrub/resilver I/O queue per leaf vdev */
+int zfs_scrub_limit = 10;
 
 /*
  * Given a vdev type, return the appropriate ops vector.
@@ -137,11 +137,12 @@ vdev_lookup_top(spa_t *spa, uint64_t vdev)
 {
 	vdev_t *rvd = spa->spa_root_vdev;
 
-	ASSERT(spa_config_held(spa, RW_READER) ||
-	    curthread == spa->spa_scrub_thread);
+	ASSERT(spa_config_held(spa, RW_READER));
 
-	if (vdev < rvd->vdev_children)
+	if (vdev < rvd->vdev_children) {
+		ASSERT(rvd->vdev_child[vdev] != NULL);
 		return (rvd->vdev_child[vdev]);
+	}
 
 	return (NULL);
 }
@@ -970,6 +971,19 @@ vdev_open(vdev_t *vd)
 		    (vdev_psize_to_asize(vd, 1<<17) >> SPA_MINBLOCKSHIFT);
 	}
 
+	/*
+	 * If a leaf vdev has a DTL, and seems healthy, then kick off a
+	 * resilver.  But don't do this if we are doing a reopen for a
+	 * scrub, since this would just restart the scrub we are already
+	 * doing.
+	 */
+	if (vd->vdev_children == 0 && !vd->vdev_spa->spa_scrub_reopen) {
+		mutex_enter(&vd->vdev_dtl_lock);
+		if (vd->vdev_dtl_map.sm_space != 0 && vdev_writeable(vd))
+			spa_async_request(vd->vdev_spa, SPA_ASYNC_RESILVER);
+		mutex_exit(&vd->vdev_dtl_lock);
+	}
+
 	return (0);
 }
 
@@ -1038,14 +1052,15 @@ vdev_validate(vdev_t *vd)
 		if (spa->spa_load_state == SPA_LOAD_OPEN &&
 		    state != POOL_STATE_ACTIVE)
 			return (EBADF);
-	}
 
-	/*
-	 * If we were able to open and validate a vdev that was previously
-	 * marked permanently unavailable, clear that state now.
-	 */
-	if (vd->vdev_not_present)
-		vd->vdev_not_present = 0;
+		/*
+		 * If we were able to open and validate a vdev that was
+		 * previously marked permanently unavailable, clear that state
+		 * now.
+		 */
+		if (vd->vdev_not_present)
+			vd->vdev_not_present = 0;
+	}
 
 	return (0);
 }
@@ -1211,22 +1226,27 @@ vdev_dtl_reassess(vdev_t *vd, uint64_t txg, uint64_t scrub_txg, int scrub_done)
 	spa_t *spa = vd->vdev_spa;
 	int c;
 
-	ASSERT(spa_config_held(spa, RW_WRITER));
+	ASSERT(spa_config_held(spa, RW_READER));
 
 	if (vd->vdev_children == 0) {
 		mutex_enter(&vd->vdev_dtl_lock);
-		/*
-		 * We're successfully scrubbed everything up to scrub_txg.
-		 * Therefore, excise all old DTLs up to that point, then
-		 * fold in the DTLs for everything we couldn't scrub.
-		 */
-		if (scrub_txg != 0) {
+		if (scrub_txg != 0 &&
+		    (spa->spa_scrub_started || spa->spa_scrub_errors == 0)) {
+			/* XXX should check scrub_done? */
+			/*
+			 * We completed a scrub up to scrub_txg.  If we
+			 * did it without rebooting, then the scrub dtl
+			 * will be valid, so excise the old region and
+			 * fold in the scrub dtl.  Otherwise, leave the
+			 * dtl as-is if there was an error.
+			 */
 			space_map_excise(&vd->vdev_dtl_map, 0, scrub_txg);
 			space_map_union(&vd->vdev_dtl_map, &vd->vdev_dtl_scrub);
 		}
 		if (scrub_done)
 			space_map_vacate(&vd->vdev_dtl_scrub, NULL, NULL);
 		mutex_exit(&vd->vdev_dtl_lock);
+
 		if (txg != 0)
 			vdev_dirty(vd->vdev_top, VDD_DTL, vd, txg);
 		return;
@@ -1349,6 +1369,49 @@ vdev_dtl_sync(vdev_t *vd, uint64_t txg)
 	dmu_buf_rele(db, FTAG);
 
 	dmu_tx_commit(tx);
+}
+
+/*
+ * Determine if resilver is needed, and if so the txg range.
+ */
+boolean_t
+vdev_resilver_needed(vdev_t *vd, uint64_t *minp, uint64_t *maxp)
+{
+	boolean_t needed = B_FALSE;
+	uint64_t thismin = UINT64_MAX;
+	uint64_t thismax = 0;
+
+	if (vd->vdev_children == 0) {
+		mutex_enter(&vd->vdev_dtl_lock);
+		if (vd->vdev_dtl_map.sm_space != 0 && vdev_writeable(vd)) {
+			space_seg_t *ss;
+
+			ss = avl_first(&vd->vdev_dtl_map.sm_root);
+			thismin = ss->ss_start - 1;
+			ss = avl_last(&vd->vdev_dtl_map.sm_root);
+			thismax = ss->ss_end;
+			needed = B_TRUE;
+		}
+		mutex_exit(&vd->vdev_dtl_lock);
+	} else {
+		int c;
+		for (c = 0; c < vd->vdev_children; c++) {
+			vdev_t *cvd = vd->vdev_child[c];
+			uint64_t cmin, cmax;
+
+			if (vdev_resilver_needed(cvd, &cmin, &cmax)) {
+				thismin = MIN(thismin, cmin);
+				thismax = MAX(thismax, cmax);
+				needed = B_TRUE;
+			}
+		}
+	}
+
+	if (needed && minp) {
+		*minp = thismin;
+		*maxp = thismax;
+	}
+	return (needed);
 }
 
 void
@@ -1655,7 +1718,7 @@ vdev_online(spa_t *spa, uint64_t guid, uint64_t flags,
 	 * w/pool name.
 	 */
 	mutex_enter(&spa_namespace_lock);
-	VERIFY(spa_scrub(spa, POOL_SCRUB_RESILVER, B_TRUE) == 0);
+	VERIFY3U(spa_scrub(spa, POOL_SCRUB_RESILVER), ==, 0);
 	mutex_exit(&spa_namespace_lock);
 
 	return (0);
@@ -1746,16 +1809,20 @@ vdev_clear(spa_t *spa, vdev_t *vd, boolean_t reopen_wanted)
 		vdev_clear(spa, vd->vdev_child[c], reopen_wanted);
 
 	/*
-	 * If we're in the FAULTED state, then clear the persistent state and
-	 * attempt to reopen the device.  We also mark the vdev config dirty, so
-	 * that the new faulted state is written out to disk.
+	 * If we're in the FAULTED state or have experienced failed I/O, then
+	 * clear the persistent state and attempt to reopen the device.  We
+	 * also mark the vdev config dirty, so that the new faulted state is
+	 * written out to disk.
 	 */
-	if (reopen_wanted && (vd->vdev_faulted || vd->vdev_degraded)) {
+	if (reopen_wanted && (vd->vdev_faulted || vd->vdev_degraded ||
+	    vd->vdev_stat.vs_aux == VDEV_AUX_IO_FAILURE)) {
+		boolean_t resilver = (vd->vdev_faulted || vd->vdev_degraded);
+
 		vd->vdev_faulted = vd->vdev_degraded = 0;
 		vdev_reopen(vd);
 		vdev_config_dirty(vd->vdev_top);
 
-		if (vd->vdev_faulted && vd->vdev_aux == NULL)
+		if (resilver && vd->vdev_aux == NULL && !vdev_is_dead(vd))
 			spa_async_request(spa, SPA_ASYNC_RESILVER);
 
 		spa_event_notify(spa, vd, ESC_ZFS_VDEV_CLEAR);
@@ -1826,6 +1893,7 @@ vdev_get_stats(vdev_t *vd, vdev_stat_t *vs)
 
 	mutex_enter(&vd->vdev_stat_lock);
 	bcopy(&vd->vdev_stat, vs, sizeof (*vs));
+	vs->vs_scrub_errors = vd->vdev_spa->spa_scrub_errors;
 	vs->vs_timestamp = gethrtime() - vs->vs_timestamp;
 	vs->vs_state = vd->vdev_state;
 	vs->vs_rsize = vdev_get_rsize(vd);
@@ -1849,7 +1917,6 @@ vdev_get_stats(vdev_t *vd, vdev_stat_t *vs)
 			vs->vs_write_errors += cvs->vs_write_errors;
 			vs->vs_checksum_errors += cvs->vs_checksum_errors;
 			vs->vs_scrub_examined += cvs->vs_scrub_examined;
-			vs->vs_scrub_errors += cvs->vs_scrub_errors;
 			mutex_exit(&vd->vdev_stat_lock);
 		}
 	}
@@ -1951,7 +2018,6 @@ vdev_scrub_stat_update(vdev_t *vd, pool_scrub_type_t type, boolean_t complete)
 		vs->vs_scrub_complete = 0;
 		vs->vs_scrub_examined = 0;
 		vs->vs_scrub_repaired = 0;
-		vs->vs_scrub_errors = 0;
 		vs->vs_scrub_start = gethrestime_sec();
 		vs->vs_scrub_end = 0;
 	}
@@ -2098,12 +2164,21 @@ vdev_propagate_state(vdev_t *vd)
 	if (vd->vdev_children > 0) {
 		for (c = 0; c < vd->vdev_children; c++) {
 			child = vd->vdev_child[c];
-			if (vdev_is_dead(child) && !vdev_readable(child))
-				faulted++;
-			else if (child->vdev_stat.vs_aux == VDEV_AUX_IO_FAILURE)
-				faulted++;
-			else if (child->vdev_state <= VDEV_STATE_DEGRADED)
+
+			if ((vdev_is_dead(child) && !vdev_readable(child)) ||
+			    child->vdev_stat.vs_aux == VDEV_AUX_IO_FAILURE) {
+				/*
+				 * Root special: if there is a top-level log
+				 * device, treat the root vdev as if it were
+				 * degraded.
+				 */
+				if (child->vdev_islog && vd == rvd)
+					degraded++;
+				else
+					faulted++;
+			} else if (child->vdev_state <= VDEV_STATE_DEGRADED) {
 				degraded++;
+			}
 
 			if (child->vdev_stat.vs_aux == VDEV_AUX_CORRUPT_DATA)
 				corrupted++;
@@ -2123,7 +2198,7 @@ vdev_propagate_state(vdev_t *vd)
 			    VDEV_AUX_CORRUPT_DATA);
 	}
 
-	if (vd->vdev_parent && !vd->vdev_islog)
+	if (vd->vdev_parent)
 		vdev_propagate_state(vd->vdev_parent);
 }
 
@@ -2249,4 +2324,36 @@ vdev_set_state(vdev_t *vd, boolean_t isopen, vdev_state_t state, vdev_aux_t aux)
 
 	if (!isopen)
 		vdev_propagate_state(vd);
+}
+
+/*
+ * Check the vdev configuration to ensure that it's capable of supporting
+ * a root pool. Currently, we do not support RAID-Z or partial configuration.
+ * In addition, only a single top-level vdev is allowed and none of the leaves
+ * can be wholedisks.
+ */
+boolean_t
+vdev_is_bootable(vdev_t *vd)
+{
+	int c;
+
+	if (!vd->vdev_ops->vdev_op_leaf) {
+		char *vdev_type = vd->vdev_ops->vdev_op_type;
+
+		if (strcmp(vdev_type, VDEV_TYPE_ROOT) == 0 &&
+		    vd->vdev_children > 1) {
+			return (B_FALSE);
+		} else if (strcmp(vdev_type, VDEV_TYPE_RAIDZ) == 0 ||
+		    strcmp(vdev_type, VDEV_TYPE_MISSING) == 0) {
+			return (B_FALSE);
+		}
+	} else if (vd->vdev_wholedisk == 1) {
+		return (B_FALSE);
+	}
+
+	for (c = 0; c < vd->vdev_children; c++) {
+		if (!vdev_is_bootable(vd->vdev_child[c]))
+			return (B_FALSE);
+	}
+	return (B_TRUE);
 }

@@ -135,7 +135,7 @@ static struct dev_ops ehci_ops = {
  */
 static struct modldrv modldrv = {
 	&mod_driverops, 	/* Type of module. This one is a driver */
-	"USB EHCI Driver %I%", /* Name of the module. */
+	"USB EHCI Driver", /* Name of the module. */
 	&ehci_ops,		/* Driver ops */
 };
 
@@ -245,29 +245,9 @@ ehci_attach(dev_info_t		*dip,
 	USB_DPRINTF_L4(PRINT_MASK_ATTA, ehcip->ehci_log_hdl,
 	    "ehcip = 0x%p", (void *)ehcip);
 
-	/* Initialize the DMA attributes */
-	ehci_set_dma_attributes(ehcip);
-
 	/* Save the dip and instance */
 	ehcip->ehci_dip = dip;
 	ehcip->ehci_instance = instance;
-
-	/* Initialize the DMA attributes */
-	ehci_create_stats(ehcip);
-
-	/* Create the qtd and qh pools */
-	if (ehci_allocate_pools(ehcip) != DDI_SUCCESS) {
-		(void) ehci_cleanup(ehcip);
-
-		return (DDI_FAILURE);
-	}
-
-	/* Initialize the isochronous resources */
-	if (ehci_isoc_init(ehcip) != DDI_SUCCESS) {
-		(void) ehci_cleanup(ehcip);
-
-		return (DDI_FAILURE);
-	}
 
 	/* Map the registers */
 	if (ehci_map_regs(ehcip) != DDI_SUCCESS) {
@@ -283,6 +263,26 @@ ehci_attach(dev_info_t		*dip,
 	    ehcip->ehci_config_handle, PCI_CONF_DEVID);
 	ehcip->ehci_rev_id = pci_config_get8(
 	    ehcip->ehci_config_handle, PCI_CONF_REVID);
+
+	/* Initialize the DMA attributes */
+	ehci_set_dma_attributes(ehcip);
+
+	/* Initialize kstat structures */
+	ehci_create_stats(ehcip);
+
+	/* Create the qtd and qh pools */
+	if (ehci_allocate_pools(ehcip) != DDI_SUCCESS) {
+		(void) ehci_cleanup(ehcip);
+
+		return (DDI_FAILURE);
+	}
+
+	/* Initialize the isochronous resources */
+	if (ehci_isoc_init(ehcip) != DDI_SUCCESS) {
+		(void) ehci_cleanup(ehcip);
+
+		return (DDI_FAILURE);
+	}
 
 	/* Register interrupts */
 	if (ehci_register_intrs_and_init_mutex(ehcip) != DDI_SUCCESS) {
@@ -588,7 +588,8 @@ ehci_intr(caddr_t arg1, caddr_t arg2)
 	ehci_state_t		*ehcip = (ehci_state_t *)arg1;
 
 	USB_DPRINTF_L4(PRINT_MASK_INTR, ehcip->ehci_log_hdl,
-	    "ehci_intr: Interrupt occurred, arg1 0x%p arg2 0x%p", arg1, arg2);
+	    "ehci_intr: Interrupt occurred, arg1 0x%p arg2 0x%p",
+	    (void *)arg1, (void *)arg2);
 
 	/* Get the ehci global mutex */
 	mutex_enter(&ehcip->ehci_int_mutex);
@@ -1105,7 +1106,7 @@ ehci_hcdi_pipe_ctrl_xfer(
 
 	USB_DPRINTF_L4(PRINT_MASK_HCDI, ehcip->ehci_log_hdl,
 	    "ehci_hcdi_pipe_ctrl_xfer: ph = 0x%p reqp = 0x%p flags = %x",
-	    (void *)ph, ctrl_reqp, usb_flags);
+	    (void *)ph, (void *)ctrl_reqp, usb_flags);
 
 	mutex_enter(&ehcip->ehci_int_mutex);
 	rval = ehci_state_is_operational(ehcip);
@@ -1215,7 +1216,7 @@ ehci_hcdi_pipe_bulk_xfer(
 
 	USB_DPRINTF_L4(PRINT_MASK_HCDI, ehcip->ehci_log_hdl,
 	    "ehci_hcdi_pipe_bulk_xfer: ph = 0x%p reqp = 0x%p flags = %x",
-	    (void *)ph, bulk_reqp, usb_flags);
+	    (void *)ph, (void *)bulk_reqp, usb_flags);
 
 	mutex_enter(&ehcip->ehci_int_mutex);
 	rval = ehci_state_is_operational(ehcip);
@@ -1272,7 +1273,7 @@ ehci_hcdi_pipe_intr_xfer(
 
 	USB_DPRINTF_L4(PRINT_MASK_HCDI, ehcip->ehci_log_hdl,
 	    "ehci_hcdi_pipe_intr_xfer: ph = 0x%p reqp = 0x%p flags = %x",
-	    (void *)ph, intr_reqp, usb_flags);
+	    (void *)ph, (void *)intr_reqp, usb_flags);
 
 	mutex_enter(&ehcip->ehci_int_mutex);
 	rval = ehci_state_is_operational(ehcip);
@@ -1365,7 +1366,7 @@ ehci_hcdi_get_current_frame_number(
 
 	USB_DPRINTF_L4(PRINT_MASK_HCDI, ehcip->ehci_log_hdl,
 	    "ehci_hcdi_get_current_frame_number: "
-	    "Current frame number 0x%llx", frame_number);
+	    "Current frame number 0x%llx", (unsigned long long)(*frame_number));
 
 	return (rval);
 }
@@ -1400,7 +1401,7 @@ ehci_hcdi_get_max_isoc_pkts(
 	USB_DPRINTF_L4(PRINT_MASK_HCDI, ehcip->ehci_log_hdl,
 	    "ehci_hcdi_get_max_isoc_pkts: maximum isochronous"
 	    "packets per usb isochronous request = 0x%x",
-	    max_isoc_pkts_per_request);
+	    *max_isoc_pkts_per_request);
 
 	return (rval);
 }
@@ -1423,7 +1424,7 @@ ehci_hcdi_pipe_isoc_xfer(
 
 	USB_DPRINTF_L4(PRINT_MASK_HCDI, ehcip->ehci_log_hdl,
 	    "ehci_hcdi_pipe_isoc_xfer: ph = 0x%p reqp = 0x%p flags = 0x%x",
-	    (void *)ph, isoc_reqp, usb_flags);
+	    (void *)ph, (void *)isoc_reqp, usb_flags);
 
 	mutex_enter(&ehcip->ehci_int_mutex);
 	rval = ehci_state_is_operational(ehcip);

@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # ident	"%Z%%M%	%I%	%E% SMI"
@@ -30,11 +30,13 @@ SUNWprivate {
 	md_find_name;
 	md_find_node_prop;
 	md_fini;
+	md_get_prop_arcs;
 	md_get_prop_str;
 	md_get_prop_val;
 	md_init_intern;
 	md_node_count;
 	md_scan_dag;
+	md_walk_dag;
     local:
 	*;
 };

@@ -81,6 +81,9 @@ static const topo_method_t rank_methods[] = {
 	{ TOPO_METH_PRESENT, TOPO_METH_PRESENT_DESC,
 	    TOPO_METH_PRESENT_VERSION, TOPO_STABILITY_INTERNAL,
 	    rank_fmri_present },
+	{ TOPO_METH_REPLACED, TOPO_METH_REPLACED_DESC,
+	    TOPO_METH_REPLACED_VERSION, TOPO_STABILITY_INTERNAL,
+	    rank_fmri_replaced },
 	{ NULL }
 };
 
@@ -484,6 +487,8 @@ amd_cs_create(topo_mod_t *mod, tnode_t *pnode, const char *name, nvlist_t *mc,
 
 		(void) topo_node_asru_set(csnode, fmri, 0, &err);
 
+		(void) topo_node_fru_set(csnode, fmri, 0, &err);
+
 		(void) topo_pgroup_create(csnode, &cs_pgroup, &err);
 
 		for (nvp = nvlist_next_nvpair(csarr[i], NULL); nvp != NULL;
@@ -503,6 +508,7 @@ amd_dramchan_create(topo_mod_t *mod, tnode_t *pnode, const char *name,
 	nvlist_t *fmri;
 	char *socket;
 	int i, nchan;
+	nvlist_t *pfmri = NULL;
 	int err, nerr = 0;
 
 	/*
@@ -521,6 +527,8 @@ amd_dramchan_create(topo_mod_t *mod, tnode_t *pnode, const char *name,
 	if (topo_node_range_create(mod, pnode, name, 0, nchan - 1) < 0)
 		return (-1);
 
+	(void) topo_node_fru(pnode, &pfmri, NULL, &err);
+
 	for (i = 0; i < nchan; i++) {
 		if (mkrsrc(mod, pnode, name, i, auth, &fmri) != 0) {
 			whinge(mod, &nerr, "amd_dramchan_create: mkrsrc "
@@ -536,6 +544,10 @@ amd_dramchan_create(topo_mod_t *mod, tnode_t *pnode, const char *name,
 			continue;
 		}
 
+		(void) topo_node_asru_set(chnode, fmri, 0, &err);
+		if (pfmri)
+			(void) topo_node_fru_set(chnode, pfmri, 0, &err);
+
 		nvlist_free(fmri);
 
 		(void) topo_pgroup_create(chnode, &chan_pgroup, &err);
@@ -543,6 +555,8 @@ amd_dramchan_create(topo_mod_t *mod, tnode_t *pnode, const char *name,
 		(void) topo_prop_set_string(chnode, PGNAME(CHAN), "channel",
 		    TOPO_PROP_IMMUTABLE, i == 0 ? "A" : "B", &err);
 	}
+	if (pfmri)
+		nvlist_free(pfmri);
 
 	return (nerr == 0 ? 0 : -1);
 }

@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * This code is MKS code ported to Solaris originally with minimum
  * modifications so that upgrades from MKS would readily integrate.
@@ -45,15 +43,17 @@
  *
  */
 
-#pragma	weak wordexp = _wordexp
-#pragma	weak wordfree = _wordfree
+#pragma ident	"%Z%%M%	%I%	%E% SMI"
+
+#pragma	weak _wordexp = wordexp
+#pragma	weak _wordfree = wordfree
 
 /* Safeguard against mistakes in the Makefiles */
 #ifndef WORDEXP_KSH93
 #error "WORDEXP_KSH93 not set. Please check the Makefile flags."
 #endif
 
-#include "synonyms.h"
+#include "lint.h"
 #include <stdio.h>
 #include <unistd.h>
 #include <limits.h>
@@ -335,7 +335,7 @@ extern	int __xpg4;	/* defined in _xpg4.c; 0 if not xpg4-compiled program */
  * Needs no locking if fetched only once.
  * See getenv()/putenv()/setenv().
  */
-extern	const char **environ;
+extern	const char **_environ;
 
 /*
  * Do word expansion.
@@ -436,7 +436,8 @@ wordexp(const char *word, wordexp_t *wp, int flags)
 	/*
 	 * Make sure PWD is in the environment.
 	 */
-	if ((envp = environ) == NULL) {		/* can't happen? */
+	if ((envp = _environ) == NULL) {
+		/* can happen when processing a SunOS 4.x AOUT file */
 		ev = NULL;
 		n = 0;
 	} else {

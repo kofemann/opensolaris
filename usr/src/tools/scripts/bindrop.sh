@@ -195,8 +195,6 @@ delete="$delete
 	kernel/drv/ifp.conf
 	kernel/drv/pcn
 	kernel/drv/pcn.conf
-	kernel/drv/sbpro
-	kernel/drv/sbpro.conf
 	kernel/drv/sparcv9/audioens
 	kernel/drv/sparcv9/ifp
 	kernel/drv/sparcv9/isp
@@ -218,7 +216,6 @@ delete="$delete
 	usr/include/smartcard/
 	usr/include/sys/audio/audioens.h
 	usr/include/sys/phx.h
-	usr/include/sys/sbpro.h
 	usr/include/sys/scsi/adapters/ifpcmd.h
 	usr/include/sys/scsi/adapters/ifpio.h
 	usr/include/sys/scsi/adapters/ifpmail.h
@@ -357,6 +354,8 @@ csfiles="
 	platform/sun4u-us3/kernel/crypto/sparcv9/aes
 	platform/sun4u/kernel/crypto/sparcv9/arcfour
 	platform/sun4u/kernel/crypto/sparcv9/des
+	SUNWcakr.v
+	platform/sun4v/kernel/drv/sparcv9/ncp
 	SUNWckr
 	kernel/crypto/sparcv9/aes
 	kernel/crypto/sparcv9/arcfour
@@ -367,6 +366,8 @@ csfiles="
 	usr/lib/security/sparcv9/pkcs11_softtoken.so.1
 	SUNWdcar
 	kernel/drv/sparcv9/dca
+	SUNWn2cp.v
+	platform/sun4v/kernel/drv/sparcv9/n2cp
 "
 # x86-only
 cxfiles="

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -337,7 +337,7 @@ fill_address(pnode_t curnode, char *namep)
 			*wkp->wk_vaddrp = (caddr_t)(uintptr_t)vaddr;
 #ifdef VPRINTF
 			VPRINTF("fill_address: %s mapped to %p\n", namep,
-			    *wkp->wk_vaddrp);
+			    (void *)*wkp->wk_vaddrp);
 #endif /* VPRINTF */
 		}
 		if (wkp->wk_func != NULL)
@@ -1027,7 +1027,7 @@ check_cpus_set(void)
 			max_ncpus = set_max_ncpus();
 			if (max_ncpus < ncpunode)
 				max_ncpus = ncpunode;
-			boot_max_ncpus = ncpunode;
+			boot_ncpus = boot_max_ncpus = ncpunode;
 		} else {
 			max_ncpus = ncpunode;
 		}

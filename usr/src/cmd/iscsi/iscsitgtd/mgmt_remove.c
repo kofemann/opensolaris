@@ -120,7 +120,9 @@ remove_zfs(tgt_node_t *x, ucred_t *cred)
 	 * Check for existance of ZFS shareiscsi properties
 	 */
 	status = get_zfs_shareiscsi(dataset, &n, &size, cred);
-	if ((status != ERR_SUCCESS) && (status != ERR_NULL_XML_MESSAGE)) {
+
+	if ((status != ERR_SUCCESS) && (status != ERR_ZFS_ISCSISHARE_OFF) &&
+	    (status != ERR_NULL_XML_MESSAGE)) {
 		xml_rtn_msg(&msg, ERR_TARG_NOT_FOUND);
 		goto error;
 	}
@@ -130,14 +132,28 @@ remove_zfs(tgt_node_t *x, ucred_t *cred)
 		if (strcmp(t->x_value, dataset) == 0)
 			break;
 	}
+
 	if (t == NULL) {
-		xml_rtn_msg(&msg, ERR_TARG_NOT_FOUND);
+		if (status == ERR_ZFS_ISCSISHARE_OFF) {
+			/*
+			 * This is iscsishare=off  request from zfs on a target
+			 * which is already unshared. In that case, zfs expects
+			 * "success" result.
+			 */
+			xml_rtn_msg(&msg, ERR_SUCCESS);
+		} else {
+			xml_rtn_msg(&msg, ERR_TARG_NOT_FOUND);
+		}
 		goto error;
 	}
 
 	if (tgt_find_value_str(x, XML_ELEMENT_TPGT, &prop) == True) {
 		if (prop == NULL) {
 			xml_rtn_msg(&msg, ERR_SYNTAX_EMPTY_TPGT);
+			goto error;
+		}
+		if (status == ERR_ZFS_ISCSISHARE_OFF) {
+			xml_rtn_msg(&msg, status);
 			goto error;
 		}
 
@@ -157,7 +173,7 @@ remove_zfs(tgt_node_t *x, ucred_t *cred)
 		    NULL) {
 			tgt_node_remove(list, c, MatchBoth);
 			if (list->x_child == NULL)
-				(void) tgt_node_remove(t, list, MatchName);
+				(void) tgt_node_remove(n, list, MatchName);
 		}
 		tgt_node_free(c);
 
@@ -176,6 +192,10 @@ remove_zfs(tgt_node_t *x, ucred_t *cred)
 			xml_rtn_msg(&msg, ERR_SYNTAX_EMPTY_ACL);
 			return (msg);
 		}
+		if (status == ERR_ZFS_ISCSISHARE_OFF) {
+			xml_rtn_msg(&msg, status);
+			goto error;
+		}
 		/*
 		 * Due to the fact that the targets_config differs from the
 		 * ZVOL properties stored in zfs_shareiscsi, two lists need to
@@ -192,7 +212,7 @@ remove_zfs(tgt_node_t *x, ucred_t *cred)
 		    NULL) {
 			tgt_node_remove(list, c, MatchBoth);
 			if (list->x_child == NULL)
-				(void) tgt_node_remove(t, list, MatchName);
+				(void) tgt_node_remove(n, list, MatchName);
 		}
 		tgt_node_free(c);
 		free(prop);
@@ -204,6 +224,12 @@ remove_zfs(tgt_node_t *x, ucred_t *cred)
 		if (tgt_find_value_str(t, XML_ELEMENT_INAME, &prop) == False) {
 			xml_rtn_msg(&msg, ERR_TARGCFG_MISSING_INAME);
 			goto error;
+		}
+
+		/* deregister zovl target from iSNS server. */
+		if (isns_enabled() == True) {
+			if (isns_dereg(prop) != 0)
+				syslog(LOG_INFO, "ISNS dereg failed\n");
 		}
 
 		tgt_node_remove(targets_config, t, MatchBoth);
@@ -357,8 +383,11 @@ remove_target(tgt_node_t *x, ucred_t *cred)
 	}
 
 	if (change_made == True) {
-		if (mgmt_config_save2scf() == True)
+		if (mgmt_config_save2scf() == True) {
 			xml_rtn_msg(&msg, ERR_SUCCESS);
+		} else {
+			xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
+		}
 	} else {
 		xml_rtn_msg(&msg, ERR_SYNTAX_MISSING_OPERAND);
 	}
@@ -400,8 +429,11 @@ remove_initiator(tgt_node_t *x)
 	}
 	(void) tgt_node_remove(main_config, node, MatchBoth);
 
-	if (mgmt_config_save2scf() == True)
+	if (mgmt_config_save2scf() == True) {
 		xml_rtn_msg(&msg, ERR_SUCCESS);
+	} else {
+		xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
+	}
 
 	return (msg);
 }
@@ -469,9 +501,12 @@ remove_tpgt(tgt_node_t *x)
 	if (change_made == True) {
 		/* Isns re-register all target */
 		if (isns_enabled() == True)
-			isns_reg_all();
-		if (mgmt_config_save2scf() == True)
+			(void) isns_reg_all();
+		if (mgmt_config_save2scf() == True) {
 			xml_rtn_msg(&msg, ERR_SUCCESS);
+		} else {
+			xml_rtn_msg(&msg, ERR_INTERNAL_ERROR);
+		}
 	} else {
 		xml_rtn_msg(&msg, ERR_SYNTAX_MISSING_OPERAND);
 	}

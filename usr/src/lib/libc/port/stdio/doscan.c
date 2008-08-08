@@ -2,9 +2,8 @@
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
- * Common Development and Distribution License, Version 1.0 only
- * (the "License").  You may not use this file except in compliance
- * with the License.
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
  * or http://www.opensolaris.org/os/licensing.
@@ -19,18 +18,18 @@
  *
  * CDDL HEADER END
  */
-/*	Copyright (c) 1988 AT&T	*/
-/*	  All Rights Reserved  	*/
-
 
 /*
- * Copyright 2004 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
+/*	Copyright (c) 1988 AT&T	*/
+/*	  All Rights Reserved  	*/
+
 #pragma ident	"%Z%%M%	%I%	%E% SMI"
 
-#include "synonyms.h"
+#include "lint.h"
 #include <sys/types.h>
 #include "mtlib.h"
 #include "file64.h"
@@ -152,8 +151,8 @@ __doscan_u(FILE *iop, const char *sfmt, va_list va_Alist, int scflag)
 	const char	*sformat = sfmt; /* save the beginning of the format */
 #endif /* _WIDE */
 	int		fpos = 1;	/* 1 if first postional parameter */
-	stva_list	args,	/* used to step through the argument list */
-		sargs;	/* used to save the start of the argument list */
+	stva_list	args;	/* used to step through the argument list */
+	stva_list	sargs;	/* used to save start of the argument list */
 	stva_list	arglst[MAXARGS];
 					/*
 					 * array giving the appropriate values
@@ -197,7 +196,7 @@ __doscan_u(FILE *iop, const char *sfmt, va_list va_Alist, int scflag)
 		if (iswspace(ch)) {
 			if (!flag_eof) {
 				while (iswspace(inchar =
-					    _wd_getwc(&chcount, iop)))
+				    _wd_getwc(&chcount, iop)))
 					;
 				if (_wd_ungetwc(&chcount, inchar, iop) == WEOF)
 					flag_eof = 1;
@@ -205,6 +204,16 @@ __doscan_u(FILE *iop, const char *sfmt, va_list va_Alist, int scflag)
 			continue;
 		}
 		if (ch != '%' || (ch = *fmt++) == '%') {
+			if (ch == '%') {
+				if (!flag_eof) {
+					while (iswspace(inchar =
+					    _wd_getwc(&chcount, iop)))
+						;
+					if (_wd_ungetwc(&chcount, inchar, iop)
+					    == WEOF)
+						flag_eof = 1;
+				}
+			}
 			if ((inchar = _wd_getwc(&chcount, iop)) == ch)
 				continue;
 			if (_wd_ungetwc(&chcount, inchar, iop) != WEOF) {
@@ -224,6 +233,15 @@ __doscan_u(FILE *iop, const char *sfmt, va_list va_Alist, int scflag)
 			continue;
 		}
 		if (ch != '%' || (ch = *fmt++) == '%') {
+			if (ch == '%') {
+				if (!flag_eof) {
+					while (isspace(inchar =
+					    locgetc(chcount)))
+						;
+					if (locungetc(chcount, inchar) == EOF)
+						flag_eof = 1;
+				}
+			}
 			if ((inchar = locgetc(chcount)) == ch)
 				continue;
 			if (locungetc(chcount, inchar) != EOF) {
@@ -243,7 +261,7 @@ charswitch:	/* target of a goto 8-( */
 
 #ifdef	_WIDE
 		for (len = 0; ((ch >= 0) && (ch < 256) && isdigit(ch));
-								ch = *fmt++)
+		    ch = *fmt++)
 			len = len * 10 + ch - '0';
 #else  /* _WIDE */
 		for (len = 0; isdigit(ch); ch = *fmt++)
@@ -285,12 +303,12 @@ charswitch:	/* target of a goto 8-( */
 			len = MAXINT;
 #ifdef	_WIDE
 		if ((size = ch) == 'l' || (size == 'h') || (size == 'L') ||
-			(size == 'j') || (size == 't') || (size == 'z'))
+		    (size == 'j') || (size == 't') || (size == 'z'))
 			ch = *fmt++;
 #else  /* _WIDE */
 		if ((size = ch) == 'l' || (size == 'h') || (size == 'L') ||
-			(size == 'w') || (size == 'j') || (size == 't') ||
-			(size == 'z'))
+		    (size == 'w') || (size == 'j') || (size == 't') ||
+		    (size == 'z'))
 			ch = *fmt++;
 #endif /* _WIDE */
 		if (size == 'l' && ch == 'l') {
@@ -304,8 +322,7 @@ charswitch:	/* target of a goto 8-( */
 		} else if (size == 'j') {
 #ifndef _LP64
 			/* check scflag for size of u/intmax_t (32-bit libc) */
-			if (!(scflag & _F_INTMAX32))
-			{
+			if (!(scflag & _F_INTMAX32)) {
 #endif
 				size = 'm';
 #ifndef _LP64
@@ -347,13 +364,13 @@ charswitch:	/* target of a goto 8-( */
 			fmt++;
 			len += 2;
 			wbracket_str = (wchar_t *)
-				malloc(sizeof (wchar_t) * (len + 1));
+			    malloc(sizeof (wchar_t) * (len + 1));
 			if (wbracket_str == NULL) {
 				errno = ENOMEM;
 				return (EOF);
 			} else {
 				(void) wmemcpy(wbracket_str,
-						(const wchar_t *)p, len);
+				    (const wchar_t *)p, len);
 				*(wbracket_str + len) = L'\0';
 				if (negflg && *(wbracket_str + 1) == '^') {
 					*(wbracket_str + 1) = L'!';
@@ -366,14 +383,14 @@ charswitch:	/* target of a goto 8-( */
 				return (EOF);
 			}
 			bracket_str = (unsigned char *)
-				malloc(sizeof (unsigned char) * (clen + 1));
+			    malloc(sizeof (unsigned char) * (clen + 1));
 			if (bracket_str == NULL) {
 				free(wbracket_str);
 				errno = ENOMEM;
 				return (EOF);
 			}
 			clen = wcstombs((char *)bracket_str, wbracket_str,
-				wlen + 1);
+			    wlen + 1);
 			free(wbracket_str);
 			if (clen == (size_t)-1) {
 				free(bracket_str);
@@ -406,7 +423,7 @@ charswitch:	/* target of a goto 8-( */
 						fmt++;
 					} else {
 						i = mblen((const char *)fmt,
-							MB_CUR_MAX);
+						    MB_CUR_MAX);
 						if (i <= 0) {
 							return (EOF);
 						} else {
@@ -418,14 +435,13 @@ charswitch:	/* target of a goto 8-( */
 				fmt++;
 				len += 2;
 				bracket_str = (unsigned char *)
-					malloc(sizeof (unsigned char) *
-					(len + 1));
+				    malloc(sizeof (unsigned char) * (len + 1));
 				if (bracket_str == NULL) {
 					errno = ENOMEM;
 					return (EOF);
 				} else {
 					(void) strncpy((char *)bracket_str,
-						(const char *)p, len);
+					    (const char *)p, len);
 					*(bracket_str + len) = '\0';
 					if (negflg &&
 					    *(bracket_str + 1) == '^') {
@@ -453,9 +469,9 @@ charswitch:	/* target of a goto 8-( */
 					b = *(fmt - 1);
 					d = *(fmt + 1);
 					if ((c == '-') && (d != ']') &&
-								(b < d)) {
+					    (b < d)) {
 						(void) memset(&tab[b], t,
-								d - b + 1);
+						    d - b + 1);
 						fmt += 2;
 					} else {
 						tab[c] = t;
@@ -469,7 +485,7 @@ charswitch:	/* target of a goto 8-( */
 
 #ifdef	_WIDE
 		if ((ch >= 0) && (ch < 256) &&
-			isupper((int)ch)) { /* no longer documented */
+		    isupper((int)ch)) { /* no longer documented */
 			if (_lib_version == c_issue_4) {
 				if (size != 'm' && size != 'L')
 					size = 'l';
@@ -479,7 +495,7 @@ charswitch:	/* target of a goto 8-( */
 		if (ch != 'n' && !flag_eof) {
 			if (ch != 'c' && ch != 'C' && ch != '[') {
 				while (iswspace(inchar =
-						_wd_getwc(&chcount, iop)))
+				    _wd_getwc(&chcount, iop)))
 					;
 				if (_wd_ungetwc(&chcount, inchar, iop) == WEOF)
 					break;
@@ -513,33 +529,31 @@ charswitch:	/* target of a goto 8-( */
 			if ((size == 'l') || (size == 'C') || (size == 'S'))
 #else  /* _WIDE */
 			if ((size == 'w') || (size == 'l') || (size == 'C') ||
-				(size == 'S'))
+			    (size == 'S'))
 #endif /* _WIDE */
 			{
 				size = wstring(&chcount, &flag_eof, stow,
-					(int)ch, len, iop, &args.ap);
+				    (int)ch, len, iop, &args.ap);
 			} else {
 				size = string(&chcount, &flag_eof, stow,
-					(int)ch, len, tab, iop, &args.ap);
+				    (int)ch, len, tab, iop, &args.ap);
 			}
 			break;
 		case '[':
 			if (size == 'l') {
 				size = wbrstring(&chcount, &flag_eof, stow,
-					(int)ch, len, iop, bracket_str,
-					&args.ap);
+				    (int)ch, len, iop, bracket_str, &args.ap);
 				free(bracket_str);
 				bracket_str = NULL;
 			} else {
 #ifdef	_WIDE
 				size = brstring(&chcount, &flag_eof, stow,
-					(int)ch, len, iop, bracket_str,
-					&args.ap);
+				    (int)ch, len, iop, bracket_str, &args.ap);
 				free(bracket_str);
 				bracket_str = NULL;
 #else  /* _WIDE */
 				size = string(&chcount, &flag_eof, stow,
-					ch, len, tab, iop, &args.ap);
+				    ch, len, tab, iop, &args.ap);
 #endif /* _WIDE */
 			}
 			break;
@@ -555,7 +569,7 @@ charswitch:	/* target of a goto 8-( */
 				*va_arg(args.ap, long *) = (long)chcount;
 			else if (size == 'm') /* long long */
 				*va_arg(args.ap, long long *) =
-					(long long) chcount;
+				    (long long) chcount;
 			else
 				*va_arg(args.ap, int *) = (int)chcount;
 			continue;
@@ -563,7 +577,7 @@ charswitch:	/* target of a goto 8-( */
 		case 'i':
 		default:
 			size = number(&chcount, &flag_eof, stow, (int)ch,
-				len, (int)size, iop, &args.ap);
+			    len, (int)size, iop, &args.ap);
 			break;
 		}
 		if (size)
@@ -589,8 +603,8 @@ number(int *chcount, int *flag_eof, int stow, int type, int len, int size,
 	char	numbuf[64];
 	char	*np = numbuf;
 	int	c, base, inchar, lookahead;
-	int		digitseen = 0, floater = 0, negflg = 0;
-	int		lc;
+	int	digitseen = 0, floater = 0, negflg = 0;
+	int	lc;
 	long long	lcval = 0LL;
 
 	switch (type) {
@@ -666,8 +680,7 @@ number(int *chcount, int *flag_eof, int stow, int type, int len, int size,
 			if (size == 'L') {		/* long double */
 				if ((int)form < 0)
 					__hex_to_quadruple(&dr, dm.rd,
-					    va_arg(*listp, quadruple *),
-					    &efs);
+					    va_arg(*listp, quadruple *), &efs);
 				else
 					decimal_to_quadruple(
 					    va_arg(*listp, quadruple *),
@@ -678,8 +691,7 @@ number(int *chcount, int *flag_eof, int stow, int type, int len, int size,
 			if (size == 'L') {		/* long double */
 				if ((int)form < 0)
 					__hex_to_extended(&dr, dm.rd,
-					    va_arg(*listp, extended *),
-					    &efs);
+					    va_arg(*listp, extended *), &efs);
 				else
 					decimal_to_extended(
 					    va_arg(*listp, extended *),
@@ -738,7 +750,7 @@ number(int *chcount, int *flag_eof, int stow, int type, int len, int size,
 		if ((type != 'i' && type != 'x') || (len <= 1))
 			break;
 		if (((inchar = locgetc((*chcount))) == 'x') ||
-			(inchar == 'X')) {
+		    (inchar == 'X')) {
 			lookahead = readchar(iop, chcount);
 			if (isxdigit(lookahead)) {
 				base = 16;
@@ -765,12 +777,12 @@ number(int *chcount, int *flag_eof, int stow, int type, int len, int size,
 	}
 	for (; --len  >= 0; *np++ = (char)c, c = locgetc((*chcount))) {
 		if (np > numbuf + 62) {
-		    errno = ERANGE;
-		    return (0);
+			errno = ERANGE;
+			return (0);
 		}
 		if (isdigit(c) || base == 16 && isxdigit(c)) {
 			int digit = c - (isdigit(c) ? '0' :
-				isupper(c) ? 'A' - 10 : 'a' - 10);
+			    isupper(c) ? 'A' - 10 : 'a' - 10);
 			if (digit >= base)
 				break;
 			if (stow)
@@ -804,7 +816,7 @@ number(int *chcount, int *flag_eof, int stow, int type, int len, int size,
 		}
 	}
 	if (locungetc((*chcount), c) == EOF)
-	    *flag_eof = 1;
+		*flag_eof = 1;
 	return (digitseen); /* successful match if non-zero */
 }
 
@@ -842,11 +854,11 @@ string(int *chcount, int *flag_eof, int stow, int type, int len, char *tab,
 		len = 1;
 #ifdef	_WIDE
 	while ((ch = locgetc((*chcount))) != EOF &&
-		!(((type == 's') || (type == 'S')) && isspace(ch))) {
+	    !(((type == 's') || (type == 'S')) && isspace(ch))) {
 #else  /* _WIDE */
 	while ((ch = locgetc((*chcount))) != EOF &&
-		!(((type == 's') || (type == 'S')) &&
-			isspace(ch) || type == '[' && tab[ch])) {
+	    !(((type == 's') || (type == 'S')) &&
+	    isspace(ch) || type == '[' && tab[ch])) {
 #endif /* _WIDE */
 		if (stow)
 			*ptr = (char)ch;
@@ -917,7 +929,7 @@ _mkarglst(const char *fmt, stva_list args, stva_list arglst[])
 
 		fmt += STRSPN(fmt, SPNSTR2);
 		if (*fmt == '[') {
-			int		i;
+			int	i;
 			fmt++; /* has to be at least on item in scan list */
 			if (*fmt == ']') {
 				fmt++;
@@ -934,7 +946,7 @@ _mkarglst(const char *fmt, stva_list args, stva_list arglst[])
 					fmt++;
 				} else {
 					i = mblen((const char *)
-						fmt, MB_CUR_MAX);
+					    fmt, MB_CUR_MAX);
 					if (i <= 0) {
 						return (-1);
 					} else {
@@ -958,6 +970,7 @@ _mkarglst(const char *fmt, stva_list args, stva_list arglst[])
 /*
  * For wide character handling
  */
+
 #ifdef	_WIDE
 static int
 wstring(int *chcount, int *flag_eof, int stow, int type,
@@ -973,7 +986,7 @@ wstring(int *chcount, int *flag_eof, int stow, int type,
 	if ((type == 'c') && len == MAXINT)
 		len = 1;
 	while (((wch = _wd_getwc(chcount, iop)) != WEOF) &&
-		!(type == 's' && iswspace(wch))) {
+	    !(type == 's' && iswspace(wch))) {
 		if (stow)
 			*ptr = wch;
 		ptr++;
@@ -993,6 +1006,7 @@ wstring(int *chcount, int *flag_eof, int stow, int type,
 		*ptr = '\0';
 	return (1); /* successful match */
 }
+
 #else  /* _WIDE */
 static int
 wstring(int *chcount, int *flag_eof, int stow, int type, int len, FILE *iop,
@@ -1007,7 +1021,7 @@ wstring(int *chcount, int *flag_eof, int stow, int type, int len, FILE *iop,
 	if ((type == 'c') && len == MAXINT)
 		len = 1;
 	while (((wch = _bi_getwc(iop)) != EOF) &&
-		!(type == 's' && (isascii(wch) ? isspace(wch) : 0))) {
+	    !(type == 's' && (isascii(wch) ? isspace(wch) : 0))) {
 		(*chcount) += _scrwidth((wchar_t)wch);
 		if (stow)
 			*ptr = wch;
@@ -1047,7 +1061,7 @@ _wd_getwc(int *chcount, FILE *iop)
 		if (*iop->_ptr == '\0')
 			return (WEOF);
 		len = mbtowc((wchar_t *)&wc, (const char *)iop->_ptr,
-								MB_CUR_MAX);
+		    MB_CUR_MAX);
 		if (len == -1)
 			return (WEOF);
 		iop->_ptr += len;
@@ -1094,7 +1108,7 @@ _watoi(wchar_t *fmt)
 	if ((ch >= 0) && (ch < 256) && isdigit((int)ch)) {
 		n = ch - '0';
 		while (((ch = *++fmt) >= 0) && (ch < 256) &&
-				isdigit((int)ch)) {
+		    isdigit((int)ch)) {
 			n *= 10;
 			n += ch - '0';
 		}
@@ -1129,7 +1143,7 @@ wbrstring(int *chcount, int *flag_eof, int stow, int type,
 		}
 		str[i] = '\0';
 		if (fnmatch((const char *)brstr, (const char *)str,
-			FNM_NOESCAPE)) {
+		    FNM_NOESCAPE)) {
 			break;
 		} else {
 			if (len > 0) {
@@ -1188,7 +1202,7 @@ brstring(int *chcount, int *flag_eof, int stow, int type,
 		}
 		str[i] = '\0';
 		if (fnmatch((const char *)brstr, (const char *)str,
-			FNM_NOESCAPE)) {
+		    FNM_NOESCAPE)) {
 			break;
 		} else {
 			if (len >= i) {

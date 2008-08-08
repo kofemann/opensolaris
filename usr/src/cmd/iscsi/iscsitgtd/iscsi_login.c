@@ -688,10 +688,12 @@ check_for_valid_I_T(iscsi_conn_t *c)
 {
 	iscsi_sess_t	*s = c->c_sess;
 	if (s->s_type == SessionDiscovery)
-		return ((s->s_i_name == NULL) ? False : True);
+		return (s->s_i_name == NULL || strlen(s->s_i_name) == 0) ?
+		    False : True;
 	else
-		return (((s->s_t_name == NULL) ||
-		    (s->s_i_name == NULL)) ? False : True);
+		return (s->s_t_name == NULL || strlen(s->s_t_name) == 0) ||
+		    (s->s_i_name == NULL || strlen(s->s_i_name) == 0) ?
+		    False : True;
 }
 
 static iscsi_login_rsp_hdr_t *
@@ -740,8 +742,9 @@ make_login_response(iscsi_conn_t *c, iscsi_login_hdr_t *lhp)
 	if (c->c_sess != NULL) {
 		(void) pthread_mutex_lock(&c->c_sess->s_mutex);
 		/* ---- cmdsn is not advanced during login ---- */
-		r->expcmdsn		= htonl(c->c_sess->s_seencmdsn);
-		r->maxcmdsn		= htonl(c->c_sess->s_seencmdsn + 1);
+		r->expcmdsn	= htonl(c->c_sess->s_seencmdsn);
+		r->maxcmdsn	= htonl(CMD_MAXOUTSTANDING +
+		    c->c_sess->s_seencmdsn);
 		(void) pthread_mutex_unlock(&c->c_sess->s_mutex);
 	}
 
@@ -800,6 +803,7 @@ login_set_auth(iscsi_sess_t *s)
 	char *possible = NULL;
 	iscsi_auth_t *sess_auth = &(s->sess_auth);
 	int comp = 0;
+	int username_len = 0;
 
 	bzero(sess_auth->username_in, sizeof (sess_auth->username_in));
 	bzero(sess_auth->password_in, sizeof (sess_auth->password_in));
@@ -825,8 +829,10 @@ login_set_auth(iscsi_sess_t *s)
 				    XML_ELEMENT_CHAPNAME,
 				    &szChapName) == True) {
 					/*CSTYLED*/
-					(void) strcpy((char *)sess_auth->username_in,
+					(void) strcpy(
+					    (char *)sess_auth->username_in,
 					    szChapName);
+					username_len = strlen(szChapName);
 					free(szChapName);
 				}
 
@@ -834,7 +840,8 @@ login_set_auth(iscsi_sess_t *s)
 				    XML_ELEMENT_CHAPSECRET,
 				    &szChapSecret) == True) {
 					/*CSTYLED*/
-					(void) strcpy((char *)sess_auth->password_in,
+					(void) strcpy(
+					    (char *)sess_auth->password_in,
 					    szChapSecret);
 					sess_auth->password_length_in =
 					    strlen(szChapSecret);
@@ -860,7 +867,7 @@ login_set_auth(iscsi_sess_t *s)
 	 * If iSNS enabled set LOGIN_AUTH
 	 */
 	if (isns_enabled() == True) {
-		if (sess_auth->password_length_in == 0)
+		if (username_len == 0)
 			return (LOGIN_NO_AUTH);
 		return (LOGIN_AUTH);
 	}
@@ -872,8 +879,8 @@ login_set_auth(iscsi_sess_t *s)
 	 * If acc_list exists for the target, and
 	 * If the initiator not in the list, drop it.
 	 * If the initiator in the list, and
-	 * If no CHAP secret for the initiator, transit.
-	 * If a CHAP secret exists for the initiator, it must be authed.
+	 * If no CHAP name for the initiator, transit.
+	 * If a CHAP name exists for the initiator, it must be authed.
 	 */
 
 	while ((xnTarget = tgt_node_next_child(targets_config, XML_ELEMENT_TARG,
@@ -895,7 +902,7 @@ login_set_auth(iscsi_sess_t *s)
 				/*
 				 * No acl_list found, return auth or no auth
 				 */
-				if (sess_auth->password_length_in == 0)
+				if (username_len == 0)
 					return (LOGIN_NO_AUTH);
 				return (LOGIN_AUTH);
 			}
@@ -920,7 +927,7 @@ login_set_auth(iscsi_sess_t *s)
 					 * authentication needed
 					 */
 					free(possible);
-					if (sess_auth->password_length_in == 0)
+					if (username_len == 0)
 						return (LOGIN_NO_AUTH);
 					else
 						return (LOGIN_AUTH);

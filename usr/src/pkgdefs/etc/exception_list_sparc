@@ -371,7 +371,6 @@ usr/include/inet/tun.h			sparc
 #
 # The following are win and graphics related also ignore and do NOT replace.
 #
-usr/include/sys/cms.h			sparc
 usr/include/sys/ieeefp.h		sparc
 usr/include/sys/memvar.h		sparc
 usr/include/sys/pixrect.h		sparc
@@ -1061,8 +1060,6 @@ usr/include/smbsrv/libsmbrdr.h		sparc
 usr/include/smbsrv/lm.h			sparc
 usr/include/smbsrv/lmdfs.h		sparc
 usr/include/smbsrv/lmerr.h		sparc
-usr/include/smbsrv/lmshare.h		sparc
-usr/include/smbsrv/lmshare_door.h	sparc
 usr/include/smbsrv/lsalib.h		sparc
 usr/include/smbsrv/mac_cifs.h		sparc
 usr/include/smbsrv/mailslot.h		sparc
@@ -1095,10 +1092,10 @@ usr/include/smbsrv/smb_kproto.h		sparc
 usr/include/smbsrv/smb_kstat.h		sparc
 usr/include/smbsrv/smb_ktypes.h		sparc
 usr/include/smbsrv/smb_privilege.h	sparc
+usr/include/smbsrv/smb_share.h		sparc
 usr/include/smbsrv/smb_sid.h		sparc
 usr/include/smbsrv/smb_token.h		sparc
 usr/include/smbsrv/smb_vops.h		sparc
-usr/include/smbsrv/smb_winpipe.h	sparc
 usr/include/smbsrv/smb_xdr.h		sparc
 usr/include/smbsrv/smbfmt.h		sparc
 usr/include/smbsrv/smbinfo.h		sparc

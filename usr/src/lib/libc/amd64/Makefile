@@ -109,10 +109,7 @@ GENOBJS=			\
 	errlst.o		\
 	amd64_data.o		\
 	ldivide.o		\
-	lexp10.o		\
-	llog10.o		\
 	lock.o			\
-	ltostr.o		\
 	makectxt.o		\
 	memccpy.o		\
 	memchr.o		\
@@ -452,10 +449,12 @@ PORTGEN=			\
 	l64a.o			\
 	lckpwdf.o		\
 	lconstants.o		\
+	lexp10.o		\
 	lfind.o			\
 	lfmt.o			\
 	lfmt_log.o		\
 	lldiv.o			\
+	llog10.o		\
 	lltostr.o		\
 	lmath.o			\
 	localtime.o		\
@@ -489,6 +488,10 @@ PORTGEN=			\
 	pfmt_print.o		\
 	plock.o			\
 	poll.o			\
+	posix_fadvise.o		\
+	posix_fallocate.o	\
+	posix_madvise.o		\
+	posix_memalign.o	\
 	priocntl.o		\
 	privlib.o		\
 	priv_str_xlate.o	\
@@ -723,7 +726,6 @@ AIOOBJS=			\
 
 RTOBJS=				\
 	clock_timer.o		\
-	fallocate.o		\
 	mqueue.o		\
 	pos4obj.o		\
 	sched.o			\
@@ -988,9 +990,6 @@ SRCS=							\
 	$(FPOBJS:%.o=fp/%.c)				\
 	$(I386FPOBJS:%.o=../i386/fp/%.c)		\
 	$(LIBCBASE)/gen/ecvt.c				\
-	$(LIBCBASE)/gen/lexp10.c			\
-	$(LIBCBASE)/gen/llog10.c			\
-	$(LIBCBASE)/gen/ltostr.c			\
 	$(LIBCBASE)/gen/makectxt.c			\
 	$(LIBCBASE)/gen/siginfolst.c			\
 	$(LIBCBASE)/gen/siglongjmp.c			\

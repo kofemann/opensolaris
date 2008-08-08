@@ -3273,111 +3273,112 @@ recov_retry:
 				    &recov_state, needrecov);
 				return (e.error);
 			}
+		} else {
+			if (e.error)
+				return (e.error);
+		}
 
-
-			/*
-			 * Do handling of OLD_STATEID outside
-			 * of the normal recovery framework.
-			 *
-			 * If write receives a BAD stateid error while using a
-			 * delegation stateid, retry using the open stateid
-			 * (if it exists).  If it doesn't have an open stateid,
-			 * reopen the * file first, then retry.
-			 */
-			if (!e.error && res.status == NFS4ERR_OLD_STATEID &&
-			    sid_types.cur_sid_type != SPEC_SID) {
-				nfs4_save_stateid(&wargs->stateid, &sid_types);
+		/*
+		 * Do handling of OLD_STATEID outside
+		 * of the normal recovery framework.
+		 *
+		 * If write receives a BAD stateid error while using a
+		 * delegation stateid, retry using the open stateid (if it
+		 * exists).  If it doesn't have an open stateid, reopen the
+		 * file first, then retry.
+		 */
+		if (!e.error && res.status == NFS4ERR_OLD_STATEID &&
+		    sid_types.cur_sid_type != SPEC_SID) {
+			nfs4_save_stateid(&wargs->stateid, &sid_types);
+			if (!recov)
 				nfs4_end_fop(VTOMI4(vp), vp, NULL, OH_WRITE,
 				    &recov_state, needrecov);
-				(void) xdr_free(xdr_COMPOUND4res_clnt,
-				    (caddr_t)&res);
-				goto recov_retry;
-			} else if (e.error == 0 &&
-			    res.status == NFS4ERR_BAD_STATEID &&
-			    sid_types.cur_sid_type == DEL_SID) {
-				nfs4_save_stateid(&wargs->stateid, &sid_types);
-				mutex_enter(&rp->r_statev4_lock);
-				rp->r_deleg_return_pending = TRUE;
-				mutex_exit(&rp->r_statev4_lock);
-				if (nfs4rdwr_check_osid(vp, &e, cr)) {
+			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+			goto recov_retry;
+		} else if (e.error == 0 && res.status == NFS4ERR_BAD_STATEID &&
+		    sid_types.cur_sid_type == DEL_SID) {
+			nfs4_save_stateid(&wargs->stateid, &sid_types);
+			mutex_enter(&rp->r_statev4_lock);
+			rp->r_deleg_return_pending = TRUE;
+			mutex_exit(&rp->r_statev4_lock);
+			if (nfs4rdwr_check_osid(vp, &e, cr)) {
+				if (!recov)
 					nfs4_end_fop(mi, vp, NULL, OH_WRITE,
 					    &recov_state, needrecov);
-					(void) xdr_free(xdr_COMPOUND4res_clnt,
-					    (caddr_t)&res);
-					return (EIO);
-				}
-				nfs4_end_fop(mi, vp, NULL, OH_WRITE,
-				    &recov_state, needrecov);
-				/* hold needed for nfs4delegreturn_thread */
-				VN_HOLD(vp);
-				nfs4delegreturn_async(rp,
-				    (NFS4_DR_PUSH|NFS4_DR_REOPEN|
-				    NFS4_DR_DISCARD), FALSE);
 				(void) xdr_free(xdr_COMPOUND4res_clnt,
 				    (caddr_t)&res);
-				goto recov_retry;
+				return (EIO);
 			}
-
-			if (needrecov) {
-				bool_t abort;
-
-				NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
-				    "nfs4write: client got error %d, "
-				    "res.status %d, so start recovery",
-				    e.error, res.status));
-
-				abort = nfs4_start_recovery(&e,
-				    VTOMI4(vp), vp, NULL, &wargs->stateid,
-				    NULL, OP_WRITE, NULL);
-				if (!e.error) {
-					e.error = geterrno4(res.status);
-					(void) xdr_free(xdr_COMPOUND4res_clnt,
-					    (caddr_t)&res);
-				}
-				nfs4_end_fop(VTOMI4(vp), vp, NULL, OH_WRITE,
+			if (!recov)
+				nfs4_end_fop(mi, vp, NULL, OH_WRITE,
 				    &recov_state, needrecov);
-				if (abort == FALSE)
-					goto recov_retry;
-				return (e.error);
-			}
+			/* hold needed for nfs4delegreturn_thread */
+			VN_HOLD(vp);
+			nfs4delegreturn_async(rp, (NFS4_DR_PUSH|NFS4_DR_REOPEN|
+			    NFS4_DR_DISCARD), FALSE);
+			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+			goto recov_retry;
+		}
 
-			if (res.status) {
+		if (needrecov) {
+			bool_t abort;
+
+			NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
+			    "nfs4write: client got error %d, res.status %d"
+			    ", so start recovery", e.error, res.status));
+
+			abort = nfs4_start_recovery(&e,
+			    VTOMI4(vp), vp, NULL, &wargs->stateid,
+			    NULL, OP_WRITE, NULL);
+			if (!e.error) {
 				e.error = geterrno4(res.status);
 				(void) xdr_free(xdr_COMPOUND4res_clnt,
 				    (caddr_t)&res);
+			}
+			nfs4_end_fop(VTOMI4(vp), vp, NULL, OH_WRITE,
+			    &recov_state, needrecov);
+			if (abort == FALSE)
+				goto recov_retry;
+			return (e.error);
+		}
+
+		if (res.status) {
+			e.error = geterrno4(res.status);
+			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+			if (!recov)
 				nfs4_end_fop(VTOMI4(vp), vp, NULL, OH_WRITE,
 				    &recov_state, needrecov);
-				return (e.error);
-			}
+			return (e.error);
+		}
 
-			resop = &res.array[1];	/* write res */
-			wres = &resop->nfs_resop4_u.opwrite;
+		resop = &res.array[1];	/* write res */
+		wres = &resop->nfs_resop4_u.opwrite;
 
-			if ((int)wres->count > tsize) {
+		if ((int)wres->count > tsize) {
+			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+
+			zcmn_err(getzoneid(), CE_WARN,
+			    "nfs4write: server wrote %u, requested was %u",
+			    (int)wres->count, tsize);
+			if (!recov)
+				nfs4_end_fop(VTOMI4(vp), vp, NULL, OH_WRITE,
+				    &recov_state, needrecov);
+			return (EIO);
+		}
+		if (wres->committed == UNSTABLE4) {
+			*stab_comm = UNSTABLE4;
+			if (wargs->stable == DATA_SYNC4 ||
+			    wargs->stable == FILE_SYNC4) {
 				(void) xdr_free(xdr_COMPOUND4res_clnt,
 				    (caddr_t)&res);
-
 				zcmn_err(getzoneid(), CE_WARN,
-				    "nfs4write: server wrote %u, requested "
-				    "was %u", (int)wres->count, tsize);
-				nfs4_end_fop(VTOMI4(vp), vp, NULL, OH_WRITE,
-				    &recov_state, needrecov);
-				return (EIO);
-			}
-			if (wres->committed == UNSTABLE4) {
-				*stab_comm = UNSTABLE4;
-				if (wargs->stable == DATA_SYNC4 ||
-				    wargs->stable == FILE_SYNC4) {
-					(void) xdr_free(xdr_COMPOUND4res_clnt,
-					    (caddr_t)&res);
-					zcmn_err(getzoneid(), CE_WARN,
-					    "nfs4write: server %s did not "
-					    "commit to stable storage",
-					    rp->r_server->sv_hostname);
+				    "nfs4write: server %s did not commit "
+				    "to stable storage",
+				    rp->r_server->sv_hostname);
+				if (!recov)
 					nfs4_end_fop(VTOMI4(vp), vp, NULL,
 					    OH_WRITE, &recov_state, needrecov);
-					return (EIO);
-				}
+				return (EIO);
 			}
 		}
 
@@ -11349,6 +11350,21 @@ fattr4_maxfilesize_to_bits(uint64_t ll)
 	return (l);
 }
 
+static int
+nfs4_have_xattrs(vnode_t *vp, ulong_t *valp, cred_t *cr)
+{
+	vnode_t *avp = NULL;
+	int error;
+
+	if ((error = nfs4lookup_xattr(vp, "", &avp,
+	    LOOKUP_XATTR, cr)) == 0)
+		error = do_xattr_exists_check(avp, valp, cr);
+	if (avp)
+		VN_RELE(avp);
+
+	return (error);
+}
+
 /* ARGSUSED */
 int
 nfs4_pathconf(vnode_t *vp, int cmd, ulong_t *valp, cred_t *cr,
@@ -11377,12 +11393,11 @@ nfs4_pathconf(vnode_t *vp, int cmd, ulong_t *valp, cred_t *cr,
 	rp = VTOR4(vp);
 	if (cmd == _PC_XATTR_EXISTS) {
 		/*
-		 * Eventually should attempt small client readdir before
-		 * going otw with GETATTR(FATTR4_NAMED_ATTR).  For now
-		 * just drive the OTW getattr.  This is required because
-		 * _PC_XATTR_EXISTS can only return true if attributes
-		 * exist -- simply checking for existence of the attrdir
-		 * is not sufficient.
+		 * The existence of the xattr directory is not sufficient
+		 * for determining whether generic user attributes exists.
+		 * The attribute directory could only be a transient directory
+		 * used for Solaris sysattr support.  Do a small readdir
+		 * to verify if the only entries are sysattrs or not.
 		 *
 		 * pc4_xattr_valid can be only be trusted when r_xattr_dir
 		 * is NULL.  Once the xadir vp exists, we can create xattrs,
@@ -11392,8 +11407,7 @@ nfs4_pathconf(vnode_t *vp, int cmd, ulong_t *valp, cred_t *cr,
 		 */
 		if (ATTRCACHE4_VALID(vp) && rp->r_pathconf.pc4_xattr_valid &&
 		    rp->r_xattr_dir == NULL) {
-			*valp = rp->r_pathconf.pc4_xattr_exists;
-			return (0);
+			return (nfs4_have_xattrs(vp, valp, cr));
 		}
 	} else {  /* OLD CODE */
 		if (ATTRCACHE4_VALID(vp)) {
@@ -11474,7 +11488,10 @@ nfs4_pathconf(vnode_t *vp, int cmd, ulong_t *valp, cred_t *cr,
 		*valp = gar.n4g_ext_res->n4g_pc4.pc4_no_trunc;
 		break;
 	case _PC_XATTR_EXISTS:
-		*valp = gar.n4g_ext_res->n4g_pc4.pc4_xattr_exists;
+		if (gar.n4g_ext_res->n4g_pc4.pc4_xattr_exists) {
+			if (error = nfs4_have_xattrs(vp, valp, cr))
+				return (error);
+		}
 		break;
 	default:
 		return (EINVAL);

@@ -24,13 +24,7 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
-	.file	"%M%"
-
-#include <sys/asm_linkage.h>
-
-	ANSI_PRAGMA_WEAK(_lwp_mutex_unlock,function)
+	.file	"_lwp_mutex_unlock.s"
 
 #include "SYS.h"
 #include <../assym.h>

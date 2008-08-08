@@ -115,6 +115,8 @@ enum {
 	EZFS_BADCACHE,		/* bad cache file */
 	EZFS_ISL2CACHE,		/* device is for the level 2 ARC */
 	EZFS_VDEVNOTSUP,	/* unsupported vdev type */
+	EZFS_NOTSUP,		/* ops not supported on this dataset */
+	EZFS_ACTIVE_SPARE,	/* pool has active shared spare devices */
 	EZFS_UNKNOWN
 };
 
@@ -185,6 +187,7 @@ extern void zpool_close(zpool_handle_t *);
 extern const char *zpool_get_name(zpool_handle_t *);
 extern int zpool_get_state(zpool_handle_t *);
 extern char *zpool_state_to_name(vdev_state_t, vdev_aux_t);
+extern void zpool_free_handles(libzfs_handle_t *);
 
 /*
  * Iterate over all active pools in the system.
@@ -196,7 +199,7 @@ extern int zpool_iter(libzfs_handle_t *, zpool_iter_f, void *);
  * Functions to create and destroy pools
  */
 extern int zpool_create(libzfs_handle_t *, const char *, nvlist_t *,
-    nvlist_t *);
+    nvlist_t *, nvlist_t *);
 extern int zpool_destroy(zpool_handle_t *);
 extern int zpool_add(zpool_handle_t *, nvlist_t *);
 
@@ -257,6 +260,7 @@ typedef enum {
 	ZPOOL_STATUS_IO_FAILURE_CONTINUE, /* failed I/O, failmode 'continue' */
 	ZPOOL_STATUS_FAULTED_DEV_R,	/* faulted device with replicas */
 	ZPOOL_STATUS_FAULTED_DEV_NR,	/* faulted device with no replicas */
+	ZPOOL_STATUS_BAD_LOG,		/* cannot read log chain(s) */
 
 	/*
 	 * The following are not faults per se, but still an error possibly
@@ -286,7 +290,7 @@ extern int zpool_get_errlog(zpool_handle_t *, nvlist_t **);
 /*
  * Import and export functions
  */
-extern int zpool_export(zpool_handle_t *);
+extern int zpool_export(zpool_handle_t *, boolean_t);
 extern int zpool_import(libzfs_handle_t *, nvlist_t *, const char *,
     char *altroot);
 extern int zpool_import_props(libzfs_handle_t *, nvlist_t *, const char *,
@@ -295,9 +299,14 @@ extern int zpool_import_props(libzfs_handle_t *, nvlist_t *, const char *,
 /*
  * Search for pools to import
  */
-extern nvlist_t *zpool_find_import(libzfs_handle_t *, int, char **, boolean_t);
+extern nvlist_t *zpool_find_import(libzfs_handle_t *, int, char **);
 extern nvlist_t *zpool_find_import_cached(libzfs_handle_t *, const char *,
-boolean_t);
+    char *, uint64_t);
+extern nvlist_t *zpool_find_import_byname(libzfs_handle_t *, int, char **,
+    char *);
+extern nvlist_t *zpool_find_import_byguid(libzfs_handle_t *, int, char **,
+    uint64_t);
+extern nvlist_t *zpool_find_import_activeok(libzfs_handle_t *, int, char **);
 
 /*
  * Miscellaneous pool functions
@@ -334,6 +343,9 @@ extern const char *zfs_prop_default_string(zfs_prop_t);
 extern uint64_t zfs_prop_default_numeric(zfs_prop_t);
 extern const char *zfs_prop_column_name(zfs_prop_t);
 extern boolean_t zfs_prop_align_right(zfs_prop_t);
+
+extern nvlist_t *zfs_valid_proplist(libzfs_handle_t *, zfs_type_t,
+    nvlist_t *, uint64_t, zfs_handle_t *, const char *);
 
 extern const char *zfs_prop_to_name(zfs_prop_t);
 extern int zfs_prop_set(zfs_handle_t *, const char *, const char *);
@@ -421,7 +433,7 @@ extern int zfs_create_ancestors(libzfs_handle_t *, const char *);
 extern int zfs_destroy(zfs_handle_t *);
 extern int zfs_destroy_snaps(zfs_handle_t *, char *);
 extern int zfs_clone(zfs_handle_t *, const char *, nvlist_t *);
-extern int zfs_snapshot(libzfs_handle_t *, const char *, boolean_t);
+extern int zfs_snapshot(libzfs_handle_t *, const char *, boolean_t, nvlist_t *);
 extern int zfs_rollback(zfs_handle_t *, zfs_handle_t *, boolean_t);
 extern int zfs_rename(zfs_handle_t *, const char *, boolean_t);
 extern int zfs_send(zfs_handle_t *, const char *, const char *,

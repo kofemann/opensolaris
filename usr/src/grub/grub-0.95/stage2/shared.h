@@ -21,7 +21,6 @@
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  *  Generic defines to use anywhere
@@ -576,6 +575,7 @@ typedef enum
   ERR_BAD_GZIP_CRC,
   ERR_FILESYSTEM_NOT_FOUND,
   ERR_NO_BOOTPATH,
+  ERR_NEWER_VERSION,
 
   MAX_ERR_NUM
 } grub_error_t;
@@ -666,7 +666,11 @@ extern char current_rootpool[MAXNAMELEN];
 extern char current_bootfs[MAXNAMELEN];
 extern char current_bootpath[MAXNAMELEN];
 extern unsigned long long current_bootfs_obj;
+extern char current_devid[MAXNAMELEN];
 extern int is_zfs_mount;
+extern unsigned long best_drive;
+extern unsigned long best_part;
+extern int find_best_root;
 
 extern int fsys_type;
 

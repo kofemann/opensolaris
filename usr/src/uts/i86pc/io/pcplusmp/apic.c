@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -73,9 +73,6 @@
  *	Local Function Prototypes
  */
 static void apic_init_intr();
-static void apic_ret();
-static int get_apic_cmd1();
-static int get_apic_pri();
 static void apic_nmi_intr(caddr_t arg, struct regs *rp);
 
 /*
@@ -97,6 +94,7 @@ static void	apic_set_idlecpu(processorid_t cpun);
 static void	apic_unset_idlecpu(processorid_t cpun);
 static int	apic_intr_enter(int ipl, int *vect);
 static void	apic_setspl(int ipl);
+static void	x2apic_setspl(int ipl);
 static int	apic_addspl(int ipl, int vector, int min_ipl, int max_ipl);
 static int	apic_delspl(int ipl, int vector, int min_ipl, int max_ipl);
 static void	apic_shutdown(int cmd, int fcn);
@@ -249,7 +247,7 @@ static struct	psm_info apic_psm_info = {
 	PSM_OWN_EXCLUSIVE,			/* ownership */
 	(struct psm_ops *)&apic_ops,		/* operation */
 	APIC_PCPLUSMP_NAME,			/* machine name */
-	"pcplusmp v1.4 compatible %I%",
+	"pcplusmp v1.4 compatible",
 };
 
 static void *apic_hdlp;
@@ -429,9 +427,9 @@ apic_error_intr()
 	 * We need to write before read as per 7.4.17 of system prog manual.
 	 * We do both and or the results to be safe
 	 */
-	error0 = apicadr[APIC_ERROR_STATUS];
-	apicadr[APIC_ERROR_STATUS] = 0;
-	error1 = apicadr[APIC_ERROR_STATUS];
+	error0 = apic_reg_ops->apic_read(APIC_ERROR_STATUS);
+	apic_reg_ops->apic_write(APIC_ERROR_STATUS, 0);
+	error1 = apic_reg_ops->apic_read(APIC_ERROR_STATUS);
 	error = error0 | error1;
 
 	/*
@@ -439,8 +437,8 @@ apic_error_intr()
 	 * (two writes are required due to the semantics of accessing the
 	 * error status register.)
 	 */
-	apicadr[APIC_ERROR_STATUS] = 0;
-	apicadr[APIC_ERROR_STATUS] = 0;
+	apic_reg_ops->apic_write(APIC_ERROR_STATUS, 0);
+	apic_reg_ops->apic_write(APIC_ERROR_STATUS, 0);
 
 	/*
 	 * Prevent more than 1 CPU from handling error interrupt causing
@@ -503,60 +501,120 @@ apic_error_intr()
 static void
 apic_cpcovf_mask_clear(void)
 {
-	apicadr[APIC_PCINT_VECT] &= ~APIC_LVT_MASK;
+	apic_reg_ops->apic_write(APIC_PCINT_VECT,
+	    (apic_reg_ops->apic_read(APIC_PCINT_VECT) & ~APIC_LVT_MASK));
 }
 
 static void
 apic_init_intr()
 {
 	processorid_t	cpun = psm_get_cpu_id();
+	uint_t nlvt;
+	uint32_t svr = AV_UNIT_ENABLE | APIC_SPUR_INTR;
 
-#if defined(__amd64)
-	setcr8((ulong_t)(APIC_MASK_ALL >> APIC_IPL_SHIFT));
-#else
-	apicadr[APIC_TASK_REG] = APIC_MASK_ALL;
-#endif
+	/*
+	 * On BSP we would have enabled x2apic, if supported by processor,
+	 * in acpi_probe(), but on AP we do it here.
+	 */
+	if (apic_detect_x2apic()) {
+		apic_enable_x2apic();
+	}
 
-	if (apic_flat_model)
-		apicadr[APIC_FORMAT_REG] = APIC_FLAT_MODEL;
-	else
-		apicadr[APIC_FORMAT_REG] = APIC_CLUSTER_MODEL;
-	apicadr[APIC_DEST_REG] = AV_HIGH_ORDER >> cpun;
+	apic_reg_ops->apic_write_task_reg(APIC_MASK_ALL);
+
+	if (apic_mode == LOCAL_APIC) {
+		/*
+		 * We are running APIC in MMIO mode.
+		 */
+		if (apic_flat_model) {
+			apic_reg_ops->apic_write(APIC_FORMAT_REG,
+			    APIC_FLAT_MODEL);
+		} else {
+			apic_reg_ops->apic_write(APIC_FORMAT_REG,
+			    APIC_CLUSTER_MODEL);
+		}
+
+		apic_reg_ops->apic_write(APIC_DEST_REG,
+		    AV_HIGH_ORDER >> cpun);
+	}
+
+	if (apic_direct_EOI) {
+		/*
+		 * Set 12th bit in Spurious Interrupt Vector
+		 * Register to support level triggered interrupt
+		 * directed EOI.
+		 */
+		svr |= (0x1 << APIC_SVR);
+	}
 
 	/* need to enable APIC before unmasking NMI */
-	apicadr[APIC_SPUR_INT_REG] = AV_UNIT_ENABLE | APIC_SPUR_INTR;
+	apic_reg_ops->apic_write(APIC_SPUR_INT_REG, svr);
 
-	apicadr[APIC_LOCAL_TIMER] = AV_MASK;
-	apicadr[APIC_INT_VECT0]	= AV_MASK;	/* local intr reg 0 */
-	apicadr[APIC_INT_VECT1] = AV_NMI;	/* enable NMI */
+	/*
+	 * Presence of an invalid vector with delivery mode AV_FIXED can
+	 * cause an error interrupt, even if the entry is masked...so
+	 * write a valid vector to LVT entries along with the mask bit
+	 */
 
-	if (apic_cpus[cpun].aci_local_ver < APIC_INTEGRATED_VERS)
-		return;
+	/* All APICs have timer and LINT0/1 */
+	apic_reg_ops->apic_write(APIC_LOCAL_TIMER, AV_MASK|APIC_RESV_IRQ);
+	apic_reg_ops->apic_write(APIC_INT_VECT0, AV_MASK|APIC_RESV_IRQ);
+	apic_reg_ops->apic_write(APIC_INT_VECT1, AV_NMI);	/* enable NMI */
 
-	/* Enable performance counter overflow interrupt */
+	/*
+	 * On integrated APICs, the number of LVT entries is
+	 * 'Max LVT entry' + 1; on 82489DX's (non-integrated
+	 * APICs), nlvt is "3" (LINT0, LINT1, and timer)
+	 */
 
-	if ((x86_feature & X86_MSR) != X86_MSR)
-		apic_enable_cpcovf_intr = 0;
-	if (apic_enable_cpcovf_intr) {
-		if (apic_cpcovf_vect == 0) {
-			int ipl = APIC_PCINT_IPL;
-			int irq = apic_get_ipivect(ipl, -1);
+	if (apic_cpus[cpun].aci_local_ver < APIC_INTEGRATED_VERS) {
+		nlvt = 3;
+	} else {
+		nlvt = ((apicadr[APIC_VERS_REG] >> 16) & 0xFF) + 1;
+	}
 
-			ASSERT(irq != -1);
-			apic_cpcovf_vect = apic_irq_table[irq]->airq_vector;
-			ASSERT(apic_cpcovf_vect);
-			(void) add_avintr(NULL, ipl,
-			    (avfunc)kcpc_hw_overflow_intr,
-			    "apic pcint", irq, NULL, NULL, NULL, NULL);
-			kcpc_hw_overflow_intr_installed = 1;
-			kcpc_hw_enable_cpc_intr = apic_cpcovf_mask_clear;
+	if (nlvt >= 5) {
+		/* Enable performance counter overflow interrupt */
+
+		if ((x86_feature & X86_MSR) != X86_MSR)
+			apic_enable_cpcovf_intr = 0;
+		if (apic_enable_cpcovf_intr) {
+			if (apic_cpcovf_vect == 0) {
+				int ipl = APIC_PCINT_IPL;
+				int irq = apic_get_ipivect(ipl, -1);
+
+				ASSERT(irq != -1);
+				apic_cpcovf_vect =
+				    apic_irq_table[irq]->airq_vector;
+				ASSERT(apic_cpcovf_vect);
+				(void) add_avintr(NULL, ipl,
+				    (avfunc)kcpc_hw_overflow_intr,
+				    "apic pcint", irq, NULL, NULL, NULL, NULL);
+				kcpc_hw_overflow_intr_installed = 1;
+				kcpc_hw_enable_cpc_intr =
+				    apic_cpcovf_mask_clear;
+			}
+			apic_reg_ops->apic_write(APIC_PCINT_VECT,
+			    apic_cpcovf_vect);
 		}
-		apicadr[APIC_PCINT_VECT] = apic_cpcovf_vect;
+	}
+
+	if (nlvt >= 6) {
+		/* Only mask TM intr if the BIOS apparently doesn't use it */
+
+		uint32_t lvtval;
+
+		lvtval = apic_reg_ops->apic_read(APIC_THERM_VECT);
+		if (((lvtval & AV_MASK) == AV_MASK) ||
+		    ((lvtval & AV_DELIV_MODE) != AV_SMI)) {
+			apic_reg_ops->apic_write(APIC_THERM_VECT,
+			    AV_MASK|APIC_RESV_IRQ);
+		}
 	}
 
 	/* Enable error interrupt */
 
-	if (apic_enable_error_intr) {
+	if (nlvt >= 4 && apic_enable_error_intr) {
 		if (apic_errvect == 0) {
 			int ipl = 0xf;	/* get highest priority intr */
 			int irq = apic_get_ipivect(ipl, -1);
@@ -572,22 +630,32 @@ apic_init_intr()
 			    (avfunc)apic_error_intr, "apic error intr",
 			    irq, NULL, NULL, NULL, NULL);
 		}
-		apicadr[APIC_ERR_VECT] = apic_errvect;
-		apicadr[APIC_ERROR_STATUS] = 0;
-		apicadr[APIC_ERROR_STATUS] = 0;
+		apic_reg_ops->apic_write(APIC_ERR_VECT, apic_errvect);
+		apic_reg_ops->apic_write(APIC_ERROR_STATUS, 0);
+		apic_reg_ops->apic_write(APIC_ERROR_STATUS, 0);
 	}
+
 }
 
 static void
 apic_disable_local_apic()
 {
-	apicadr[APIC_TASK_REG] = APIC_MASK_ALL;
-	apicadr[APIC_LOCAL_TIMER] = AV_MASK;
-	apicadr[APIC_INT_VECT0] = AV_MASK;	/* local intr reg 0 */
-	apicadr[APIC_INT_VECT1] = AV_MASK;	/* disable NMI */
-	apicadr[APIC_ERR_VECT] = AV_MASK;	/* and error interrupt */
-	apicadr[APIC_PCINT_VECT] = AV_MASK;	/* and perf counter intr */
-	apicadr[APIC_SPUR_INT_REG] = APIC_SPUR_INTR;
+	apic_reg_ops->apic_write_task_reg(APIC_MASK_ALL);
+	apic_reg_ops->apic_write(APIC_LOCAL_TIMER, AV_MASK);
+
+	/* local intr reg 0 */
+	apic_reg_ops->apic_write(APIC_INT_VECT0, AV_MASK);
+
+	/* disable NMI */
+	apic_reg_ops->apic_write(APIC_INT_VECT1, AV_MASK);
+
+	/* and error interrupt */
+	apic_reg_ops->apic_write(APIC_ERR_VECT, AV_MASK);
+
+	/* and perf counter intr */
+	apic_reg_ops->apic_write(APIC_PCINT_VECT, AV_MASK);
+
+	apic_reg_ops->apic_write(APIC_SPUR_INT_REG, APIC_SPUR_INTR);
 }
 
 static void
@@ -595,6 +663,7 @@ apic_picinit(void)
 {
 	int i, j;
 	uint_t isr;
+	uint32_t ver;
 
 	/*
 	 * On UniSys Model 6520, the BIOS leaves vector 0x20 isr
@@ -605,10 +674,12 @@ apic_picinit(void)
 	 * If not, EOIs are issued to clear the bits.
 	 */
 	for (i = 7; i >= 1; i--) {
-		if ((isr = apicadr[APIC_ISR_REG + (i * 4)]) != 0)
+		isr = apic_reg_ops->apic_read(APIC_ISR_REG + (i * 4));
+		if (isr != 0)
 			for (j = 0; ((j < 32) && (isr != 0)); j++)
 				if (isr & (1 << j)) {
-					apicadr[APIC_EOI_REG] = 0;
+					apic_reg_ops->apic_write(
+					    APIC_EOI_REG, 0);
 					isr &= ~(1 << j);
 					apic_error |= APIC_ERR_BOOT_EOI;
 				}
@@ -628,6 +699,16 @@ apic_picinit(void)
 	if (!psm_add_nmintr(0, (avfunc) apic_nmi_intr,
 	    "pcplusmp NMI handler", (caddr_t)NULL))
 		cmn_err(CE_WARN, "pcplusmp: Unable to add nmi handler");
+
+	ver = apic_reg_ops->apic_read(APIC_VERS_REG);
+	/*
+	 * In order to determine support for Directed EOI capability,
+	 * we check for 24th bit in Local APIC Version Register.
+	 */
+	if (ver & (0x1 << APIC_DIRECTED_EOI)) {
+		apic_direct_EOI = 1;
+		apic_change_eoi();
+	}
 
 	apic_init_intr();
 
@@ -650,7 +731,7 @@ apic_cpu_start(processorid_t cpun, caddr_t arg)
 	uint_t		cpu_id;
 	ulong_t		iflag;
 
-	cpu_id = apic_cpus[cpun].aci_local_id;
+	cpu_id =  apic_cpus[cpun].aci_local_id;
 
 	apic_cmos_ssb_set = 1;
 
@@ -664,23 +745,21 @@ apic_cpu_start(processorid_t cpun, caddr_t arg)
 	outb(CMOS_ADDR, SSB);
 	outb(CMOS_DATA, BIOS_SHUTDOWN);
 
-	while (get_apic_cmd1() & AV_PENDING)
+	while (apic_reg_ops->apic_read(APIC_INT_CMD1) & AV_PENDING)
 		apic_ret();
 
 	/* for integrated - make sure there is one INIT IPI in buffer */
 	/* for external - it will wake up the cpu */
-	apicadr[APIC_INT_CMD2] = cpu_id << APIC_ICR_ID_BIT_OFFSET;
-	apicadr[APIC_INT_CMD1] = AV_ASSERT | AV_RESET;
+	apic_reg_ops->apic_write_int_cmd(cpu_id, AV_ASSERT | AV_RESET);
 
 	/* If only 1 CPU is installed, PENDING bit will not go low */
 	for (loop_count = 0x1000; loop_count; loop_count--)
-		if (get_apic_cmd1() & AV_PENDING)
+		if (apic_reg_ops->apic_read(APIC_INT_CMD1) & AV_PENDING)
 			apic_ret();
 		else
 			break;
 
-	apicadr[APIC_INT_CMD2] = cpu_id << APIC_ICR_ID_BIT_OFFSET;
-	apicadr[APIC_INT_CMD1] = AV_DEASSERT | AV_RESET;
+	apic_reg_ops->apic_write_int_cmd(cpu_id, AV_DEASSERT | AV_RESET);
 
 	drv_usecwait(20000);		/* 20 milli sec */
 
@@ -691,13 +770,11 @@ apic_cpu_start(processorid_t cpun, caddr_t arg)
 		    (APIC_VECTOR_MASK | APIC_IPL_MASK);
 
 		/* to offset the INIT IPI queue up in the buffer */
-		apicadr[APIC_INT_CMD2] = cpu_id << APIC_ICR_ID_BIT_OFFSET;
-		apicadr[APIC_INT_CMD1] = vector | AV_STARTUP;
+		apic_reg_ops->apic_write_int_cmd(cpu_id, vector | AV_STARTUP);
 
 		drv_usecwait(200);		/* 20 micro sec */
 
-		apicadr[APIC_INT_CMD2] = cpu_id << APIC_ICR_ID_BIT_OFFSET;
-		apicadr[APIC_INT_CMD1] = vector | AV_STARTUP;
+		apic_reg_ops->apic_write_int_cmd(cpu_id, vector | AV_STARTUP);
 
 		drv_usecwait(200);		/* 20 micro sec */
 	}
@@ -759,13 +836,21 @@ apic_intr_enter(int ipl, int *vectorp)
 		/* We will avoid all the book keeping overhead for clock */
 		nipl = apic_ipls[vector];
 
-#if defined(__amd64)
-		setcr8((ulong_t)apic_cr8pri[nipl]);
-#else
-		apicadr[APIC_TASK_REG] = apic_ipltopri[nipl];
-#endif
 		*vectorp = apic_vector_to_irq[vector + APIC_BASE_VECT];
-		apicadr[APIC_EOI_REG] = 0;
+		if (apic_mode == LOCAL_APIC) {
+#if defined(__amd64)
+			setcr8((ulong_t)(apic_ipltopri[nipl] >>
+			    APIC_IPL_SHIFT));
+#else
+			LOCAL_APIC_WRITE_REG(APIC_TASK_REG,
+			    (uint32_t)apic_ipltopri[nipl]);
+#endif
+			LOCAL_APIC_WRITE_REG(APIC_EOI_REG, 0);
+		} else {
+			X2APIC_WRITE(APIC_TASK_REG, apic_ipltopri[nipl]);
+			X2APIC_WRITE(APIC_EOI_REG, 0);
+		}
+
 		return (nipl);
 	}
 
@@ -795,11 +880,16 @@ apic_intr_enter(int ipl, int *vectorp)
 	nipl = apic_ipls[vector];
 	*vectorp = irq = apic_vector_to_irq[vector + APIC_BASE_VECT];
 
+	if (apic_mode == LOCAL_APIC) {
 #if defined(__amd64)
-	setcr8((ulong_t)apic_cr8pri[nipl]);
+		setcr8((ulong_t)(apic_ipltopri[nipl] >> APIC_IPL_SHIFT));
 #else
-	apicadr[APIC_TASK_REG] = apic_ipltopri[nipl];
+		LOCAL_APIC_WRITE_REG(APIC_TASK_REG,
+		    (uint32_t)apic_ipltopri[nipl]);
 #endif
+	} else {
+		X2APIC_WRITE(APIC_TASK_REG, apic_ipltopri[nipl]);
+	}
 
 	cpu_infop->aci_current[nipl] = (uchar_t)irq;
 	cpu_infop->aci_curipl = (uchar_t)nipl;
@@ -810,8 +900,12 @@ apic_intr_enter(int ipl, int *vectorp)
 	 * but, having it as a character array is more efficient in terms of
 	 * cache usage. So, we leave it as is.
 	 */
-	if (!apic_level_intr[irq])
-		apicadr[APIC_EOI_REG] = 0;
+	if (!apic_level_intr[irq]) {
+		if (apic_mode == LOCAL_APIC)
+			LOCAL_APIC_WRITE_REG(APIC_EOI_REG, 0);
+		else
+			X2APIC_WRITE(APIC_EOI_REG, 0);
+	}
 
 #ifdef	DEBUG
 	APIC_DEBUG_BUF_PUT(vector);
@@ -827,6 +921,24 @@ apic_intr_enter(int ipl, int *vectorp)
 	return (nipl);
 }
 
+/*
+ * This macro is a common code used by MMIO local apic and x2apic
+ * local apic.
+ */
+#define	APIC_INTR_EXIT() \
+{ \
+	cpu_infop = &apic_cpus[psm_get_cpu_id()]; \
+	if (apic_level_intr[irq]) \
+		apic_reg_ops->apic_send_eoi(irq); \
+	cpu_infop->aci_curipl = (uchar_t)prev_ipl; \
+	/* ISR above current pri could not be in progress */ \
+	cpu_infop->aci_ISR_in_progress &= (2 << prev_ipl) - 1; \
+}
+
+/*
+ * Any changes made to this function must also change x2apic
+ * version of intr_exit.
+ */
 void
 apic_intr_exit(int prev_ipl, int irq)
 {
@@ -838,23 +950,35 @@ apic_intr_exit(int prev_ipl, int irq)
 	apicadr[APIC_TASK_REG] = apic_ipltopri[prev_ipl];
 #endif
 
-	cpu_infop = &apic_cpus[psm_get_cpu_id()];
-	if (apic_level_intr[irq])
-		apicadr[APIC_EOI_REG] = 0;
+	APIC_INTR_EXIT();
+}
 
-	cpu_infop->aci_curipl = (uchar_t)prev_ipl;
-	/* ISR above current pri could not be in progress */
-	cpu_infop->aci_ISR_in_progress &= (2 << prev_ipl) - 1;
+/*
+ * Same as apic_intr_exit() except it uses MSR rather than MMIO
+ * to access local apic registers.
+ */
+void
+x2apic_intr_exit(int prev_ipl, int irq)
+{
+	apic_cpus_info_t *cpu_infop;
+
+	X2APIC_WRITE(APIC_TASK_REG, apic_ipltopri[prev_ipl]);
+	APIC_INTR_EXIT();
 }
 
 intr_exit_fn_t
 psm_intr_exit_fn(void)
 {
+	if (apic_mode == LOCAL_X2APIC)
+		return (x2apic_intr_exit);
+
 	return (apic_intr_exit);
 }
 
 /*
- * Mask all interrupts below or equal to the given IPL
+ * Mask all interrupts below or equal to the given IPL.
+ * Any changes made to this function must also change x2apic
+ * version of setspl.
  */
 static void
 apic_setspl(int ipl)
@@ -874,7 +998,20 @@ apic_setspl(int ipl)
 	 * during the idle() loop.
 	 */
 	if (apic_setspl_delay)
-		(void) get_apic_pri();
+		(void) apic_reg_ops->apic_get_pri();
+}
+
+/*
+ * x2apic version of setspl.
+ * Mask all interrupts below or equal to the given IPL
+ */
+static void
+x2apic_setspl(int ipl)
+{
+	X2APIC_WRITE(APIC_TASK_REG, apic_ipltopri[ipl]);
+
+	/* interrupts at ipl above this cannot be in progress */
+	apic_cpus[psm_get_cpu_id()].aci_ISR_in_progress &= (2 << ipl) - 1;
 }
 
 /*
@@ -888,14 +1025,15 @@ apic_send_ipi(int cpun, int ipl)
 
 	vector = apic_resv_vector[ipl];
 
+	ASSERT((vector >= APIC_BASE_VECT) && (vector <= APIC_SPUR_INTR));
+
 	flag = intr_clear();
 
-	while (get_apic_cmd1() & AV_PENDING)
+	while (apic_reg_ops->apic_read(APIC_INT_CMD1) & AV_PENDING)
 		apic_ret();
 
-	apicadr[APIC_INT_CMD2] =
-	    apic_cpus[cpun].aci_local_id << APIC_ICR_ID_BIT_OFFSET;
-	apicadr[APIC_INT_CMD1] = vector;
+	apic_reg_ops->apic_write_int_cmd(apic_cpus[cpun].aci_local_id,
+	    vector);
 
 	intr_restore(flag);
 }
@@ -914,25 +1052,9 @@ apic_unset_idlecpu(processorid_t cpun)
 }
 
 
-static void
+void
 apic_ret()
 {
-}
-
-static int
-get_apic_cmd1()
-{
-	return (apicadr[APIC_INT_CMD1]);
-}
-
-static int
-get_apic_pri()
-{
-#if defined(__amd64)
-	return ((int)getcr8());
-#else
-	return (apicadr[APIC_TASK_REG]);
-#endif
 }
 
 /*
@@ -981,7 +1103,7 @@ apic_gethrtime()
 	int curr_timeval, countval, elapsed_ticks;
 	int old_hrtime_stamp, status;
 	hrtime_t temp;
-	uchar_t	cpun;
+	uint32_t cpun;
 	ulong_t oflags;
 
 	/*
@@ -997,7 +1119,9 @@ apic_gethrtime()
 
 	oflags = intr_clear();	/* prevent migration */
 
-	cpun = (uchar_t)((uint_t)apicadr[APIC_LID_REG] >> APIC_ID_BIT_OFFSET);
+	cpun = apic_reg_ops->apic_read(APIC_LID_REG);
+	if (apic_mode == LOCAL_APIC)
+		cpun >>= APIC_ID_BIT_OFFSET;
 
 	lock_set(&apic_gethrtime_lock);
 
@@ -1011,20 +1135,21 @@ gethrtime_again:
 	 * counter.  If on another CPU, issue a remote read command to CPU 0.
 	 */
 	if (cpun == apic_cpus[0].aci_local_id) {
-		countval = apicadr[APIC_CURR_COUNT];
+		countval = apic_reg_ops->apic_read(APIC_CURR_COUNT);
 	} else {
-		while (get_apic_cmd1() & AV_PENDING)
+		while (apic_reg_ops->apic_read(APIC_INT_CMD1) & AV_PENDING)
 			apic_ret();
 
-		apicadr[APIC_INT_CMD2] =
-		    apic_cpus[0].aci_local_id << APIC_ICR_ID_BIT_OFFSET;
-		apicadr[APIC_INT_CMD1] = APIC_CURR_ADD|AV_REMOTE;
+		apic_reg_ops->apic_write_int_cmd(
+		    apic_cpus[0].aci_local_id, APIC_CURR_ADD | AV_REMOTE);
 
-		while ((status = get_apic_cmd1()) & AV_READ_PENDING)
+		while ((status = apic_reg_ops->apic_read(APIC_INT_CMD1))
+		    & AV_READ_PENDING) {
 			apic_ret();
+		}
 
 		if (status & AV_REMOTE_STATUS)	/* 1 = valid */
-			countval = apicadr[APIC_REMOTE_READ];
+			countval = apic_reg_ops->apic_read(APIC_REMOTE_READ);
 		else {	/* 0 = invalid */
 			apic_remote_hrterr++;
 			/*
@@ -1119,11 +1244,8 @@ apic_delspl(int irqno, int ipl, int min_ipl, int max_ipl)
 static int
 apic_post_cpu_start()
 {
-	int i, cpun;
-	ulong_t iflag;
-	apic_irq_t *irq_ptr;
+	int cpun;
 
-	splx(ipltospl(LOCK_LEVEL));
 	apic_init_intr();
 
 	/*
@@ -1132,33 +1254,18 @@ apic_post_cpu_start()
 	 */
 	setcr0(getcr0() & ~(CR0_CD | CR0_NW));
 
-	while (get_apic_cmd1() & AV_PENDING)
+	while (apic_reg_ops->apic_read(APIC_INT_CMD1) & AV_PENDING)
 		apic_ret();
 
+	/*
+	 * We may be booting, or resuming from suspend; aci_status will
+	 * be APIC_CPU_INTR_ENABLE if coming from suspend, so we add the
+	 * APIC_CPU_ONLINE flag here rather than setting aci_status completely.
+	 */
 	cpun = psm_get_cpu_id();
-	apic_cpus[cpun].aci_status = APIC_CPU_ONLINE | APIC_CPU_INTR_ENABLE;
+	apic_cpus[cpun].aci_status |= APIC_CPU_ONLINE;
 
-	for (i = apic_min_device_irq; i <= apic_max_device_irq; i++) {
-		irq_ptr = apic_irq_table[i];
-		if ((irq_ptr == NULL) ||
-		    ((irq_ptr->airq_cpu & ~IRQ_USER_BOUND) != cpun))
-			continue;
-
-		while (irq_ptr) {
-			if (irq_ptr->airq_temp_cpu != IRQ_UNINIT) {
-				iflag = intr_clear();
-				lock_set(&apic_ioapic_lock);
-
-				(void) apic_rebind(irq_ptr, cpun, NULL);
-
-				lock_clear(&apic_ioapic_lock);
-				intr_restore(iflag);
-			}
-			irq_ptr = irq_ptr->airq_next;
-		}
-	}
-
-	apicadr[APIC_DIVIDE_REG] = apic_divide_reg_init;
+	apic_reg_ops->apic_write(APIC_DIVIDE_REG, apic_divide_reg_init);
 	return (PSM_SUCCESS);
 }
 
@@ -1233,8 +1340,9 @@ apic_calibrate(volatile uint32_t *addr, uint16_t *pit_ticks_adj)
 	uint16_t	pit_tick, target_pit_tick;
 	uint32_t	start_apic_tick, end_apic_tick;
 	ulong_t		iflag;
+	uint32_t	reg;
 
-	addr += APIC_CURR_COUNT;
+	reg = addr + APIC_CURR_COUNT - apicadr;
 
 	iflag = intr_clear();
 
@@ -1255,7 +1363,7 @@ apic_calibrate(volatile uint32_t *addr, uint16_t *pit_ticks_adj)
 		pit_tick = (inb(PITCTR0_PORT) << 8) | pit_tick_lo;
 	} while (pit_tick > target_pit_tick || pit_tick_lo < 0x10);
 
-	start_apic_tick = *addr;
+	start_apic_tick = apic_reg_ops->apic_read(reg);
 
 	/*
 	 * Wait for the 8254 to decrement by
@@ -1267,7 +1375,7 @@ apic_calibrate(volatile uint32_t *addr, uint16_t *pit_ticks_adj)
 		pit_tick = (inb(PITCTR0_PORT) << 8) | pit_tick_lo;
 	} while (pit_tick > target_pit_tick || pit_tick_lo < 0x10);
 
-	end_apic_tick = *addr;
+	end_apic_tick = apic_reg_ops->apic_read(reg);
 
 	*pit_ticks_adj = target_pit_tick - pit_tick;
 
@@ -1303,8 +1411,8 @@ apic_clkinit(int hertz)
 	if (firsttime) {
 		/* first time calibrate on CPU0 only */
 
-		apicadr[APIC_DIVIDE_REG] = apic_divide_reg_init;
-		apicadr[APIC_INIT_COUNT] = APIC_MAXVAL;
+		apic_reg_ops->apic_write(APIC_DIVIDE_REG, apic_divide_reg_init);
+		apic_reg_ops->apic_write(APIC_INIT_COUNT, APIC_MAXVAL);
 		apic_ticks = apic_calibrate(apicadr, &pit_ticks_adj);
 
 		/* total number of PIT ticks corresponding to apic_ticks */
@@ -1350,9 +1458,9 @@ apic_clkinit(int hertz)
 		ret = (int)APIC_TICKS_TO_NSECS(1);
 	} else {
 		/* program the local APIC to interrupt at the given frequency */
-		apicadr[APIC_INIT_COUNT] = apic_hertz_count;
-		apicadr[APIC_LOCAL_TIMER] =
-		    (apic_clkvect + APIC_BASE_VECT) | AV_TIME;
+		apic_reg_ops->apic_write(APIC_INIT_COUNT, apic_hertz_count);
+		apic_reg_ops->apic_write(APIC_LOCAL_TIMER,
+		    (apic_clkvect + APIC_BASE_VECT) | AV_TIME);
 		apic_oneshot = 0;
 		ret = NANOSEC / hertz;
 	}
@@ -1388,10 +1496,11 @@ apic_shutdown(int cmd, int fcn)
 
 	/* Send NMI to all CPUs except self to do per processor shutdown */
 	iflag = intr_clear();
-	while (get_apic_cmd1() & AV_PENDING)
+	while (apic_reg_ops->apic_read(APIC_INT_CMD1) & AV_PENDING)
 		apic_ret();
 	apic_shutdown_processors = 1;
-	apicadr[APIC_INT_CMD1] = AV_NMI | AV_LEVEL | AV_SH_ALL_EXCSELF;
+	apic_reg_ops->apic_write(APIC_INT_CMD1,
+	    AV_NMI | AV_LEVEL | AV_SH_ALL_EXCSELF);
 
 	/* restore cmos shutdown byte before reboot */
 	if (apic_cmos_ssb_set) {
@@ -1637,6 +1746,11 @@ apic_disable_intr(processorid_t cpun)
 		return (PSM_SUCCESS);
 }
 
+/*
+ * Bind interrupts to the CPU's local APIC.
+ * Interrupts should not be bound to a CPU's local APIC until the CPU
+ * is ready to receive interrupts.
+ */
 static void
 apic_enable_intr(processorid_t cpun)
 {
@@ -1721,8 +1835,7 @@ apic_timer_reprogram(hrtime_t time)
 	if (ticks < apic_min_timer_ticks)
 		ticks = apic_min_timer_ticks;
 
-	apicadr[APIC_INIT_COUNT] = ticks;
-
+	apic_reg_ops->apic_write(APIC_INIT_COUNT, ticks);
 }
 
 /*
@@ -1736,12 +1849,13 @@ apic_timer_enable(void)
 	 * so kpreempt is disabled.
 	 */
 
-	if (!apic_oneshot)
-		apicadr[APIC_LOCAL_TIMER] =
-		    (apic_clkvect + APIC_BASE_VECT) | AV_TIME;
-	else {
+	if (!apic_oneshot) {
+		apic_reg_ops->apic_write(APIC_LOCAL_TIMER,
+		    (apic_clkvect + APIC_BASE_VECT) | AV_TIME);
+	} else {
 		/* one shot */
-		apicadr[APIC_LOCAL_TIMER] = (apic_clkvect + APIC_BASE_VECT);
+		apic_reg_ops->apic_write(APIC_LOCAL_TIMER,
+		    (apic_clkvect + APIC_BASE_VECT));
 	}
 }
 
@@ -1755,8 +1869,8 @@ apic_timer_disable(void)
 	 * We should be Called from high PIL context (CBE_HIGH_PIL),
 	 * so kpreempt is disabled.
 	 */
-
-	apicadr[APIC_LOCAL_TIMER] = (apic_clkvect + APIC_BASE_VECT) | AV_MASK;
+	apic_reg_ops->apic_write(APIC_LOCAL_TIMER,
+	    (apic_clkvect + APIC_BASE_VECT) | AV_MASK);
 }
 
 
@@ -1912,7 +2026,8 @@ apic_alloc_msi_vectors(dev_info_t *dip, int inum, int count, int pri,
     int behavior)
 {
 	int	rcount, i;
-	uchar_t	start, irqno, cpu;
+	uchar_t	start, irqno;
+	uint32_t cpu;
 	major_t	major;
 	apic_irq_t	*irqptr;
 
@@ -2148,6 +2263,15 @@ ioapic_write(int ioapic_ix, uint32_t reg, uint32_t value)
 	ioapic[APIC_IO_DATA] = value;
 }
 
+void
+ioapic_write_eoi(int ioapic_ix, uint32_t value)
+{
+	volatile uint32_t *ioapic;
+
+	ioapic = apicioadr[ioapic_ix];
+	ioapic[APIC_IO_EOI] = value;
+}
+
 static processorid_t
 apic_find_cpu(int flag)
 {
@@ -2220,4 +2344,19 @@ char *
 apic_get_apic_type()
 {
 	return (apic_psm_info.p_mach_idstring);
+}
+
+void
+x2apic_update_psm()
+{
+	struct psm_ops *pops = &apic_ops;
+
+	ASSERT(pops != NULL);
+
+	pops->psm_send_ipi =  x2apic_send_ipi;
+	pops->psm_intr_exit = x2apic_intr_exit;
+	pops->psm_setspl = x2apic_setspl;
+
+	/* global functions */
+	send_dirintf = pops->psm_send_ipi;
 }

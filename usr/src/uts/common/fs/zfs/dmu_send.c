@@ -200,10 +200,9 @@ backup_cb(traverse_blk_cache_t *bc, spa_t *spa, void *arg)
 			zb.zb_object = object;
 			zb.zb_level = level;
 			zb.zb_blkid = blkid;
-			(void) arc_read(NULL, spa, bp,
-			    dmu_ot[type].ot_byteswap, arc_getbuf_func, &abuf,
-			    ZIO_PRIORITY_ASYNC_READ, ZIO_FLAG_MUSTSUCCEED,
-			    &aflags, &zb);
+			(void) arc_read_nolock(NULL, spa, bp,
+			    arc_getbuf_func, &abuf, ZIO_PRIORITY_ASYNC_READ,
+			    ZIO_FLAG_MUSTSUCCEED, &aflags, &zb);
 
 			if (abuf) {
 				err = dump_data(ba, type, object, blkid * blksz,
@@ -241,11 +240,12 @@ dmu_sendbackup(objset_t *tosnap, objset_t *fromsnap, boolean_t fromorigin,
 		return (EXDEV);
 
 	if (fromorigin) {
+		dsl_pool_t *dp = ds->ds_dir->dd_pool;
+
 		if (fromsnap)
 			return (EINVAL);
 
-		if (ds->ds_dir->dd_phys->dd_origin_obj != NULL) {
-			dsl_pool_t *dp = ds->ds_dir->dd_pool;
+		if (dsl_dir_is_clone(ds->ds_dir)) {
 			rw_enter(&dp->dp_config_rwlock, RW_READER);
 			err = dsl_dataset_hold_obj(dp,
 			    ds->ds_dir->dd_phys->dd_origin_obj, FTAG, &fromds);
@@ -407,7 +407,7 @@ recv_full_existing_check(void *arg1, void *arg2, dmu_tx_t *tx)
 		return (EINVAL);
 
 	/* must not be a clone ds */
-	if (ds->ds_prev != NULL)
+	if (dsl_dir_is_clone(ds->ds_dir))
 		return (EINVAL);
 
 	err = dsl_dataset_destroy_check(ds, rbsa->tag, tx);
@@ -443,7 +443,7 @@ recv_full_existing_sync(void *arg1, void *arg2, cred_t *cr, dmu_tx_t *tx)
 	 */
 	dsl_dataset_destroy_sync(ds, rbsa->tag, cr, tx);
 
-	dsobj = dsl_dataset_create_sync_impl(dd, rbsa->origin, flags, tx);
+	dsobj = dsl_dataset_create_sync_dd(dd, rbsa->origin, flags, tx);
 
 	rbsa->ds = recv_full_sync_impl(dd->dd_pool, dsobj,
 	    rbsa->origin ? DMU_OST_NONE : rbsa->type, cr, tx);
@@ -877,23 +877,14 @@ restore_freeobjects(struct restorearg *ra, objset_t *os,
 	for (obj = drrfo->drr_firstobj;
 	    obj < drrfo->drr_firstobj + drrfo->drr_numobjs;
 	    (void) dmu_object_next(os, &obj, FALSE, 0)) {
-		dmu_tx_t *tx;
 		int err;
 
 		if (dmu_object_info(os, obj, NULL) != 0)
 			continue;
 
-		tx = dmu_tx_create(os);
-		dmu_tx_hold_bonus(tx, obj);
-		err = dmu_tx_assign(tx, TXG_WAIT);
-		if (err) {
-			dmu_tx_abort(tx);
+		err = dmu_free_object(os, obj);
+		if (err)
 			return (err);
-		}
-		err = dmu_object_free(os, obj, tx);
-		dmu_tx_commit(tx);
-		if (err && err != ENOENT)
-			return (EINVAL);
 	}
 	return (0);
 }
@@ -939,7 +930,6 @@ static int
 restore_free(struct restorearg *ra, objset_t *os,
     struct drr_free *drrf)
 {
-	dmu_tx_t *tx;
 	int err;
 
 	if (drrf->drr_length != -1ULL &&
@@ -949,18 +939,8 @@ restore_free(struct restorearg *ra, objset_t *os,
 	if (dmu_object_info(os, drrf->drr_object, NULL) != 0)
 		return (EINVAL);
 
-	tx = dmu_tx_create(os);
-
-	dmu_tx_hold_free(tx, drrf->drr_object,
+	err = dmu_free_long_range(os, drrf->drr_object,
 	    drrf->drr_offset, drrf->drr_length);
-	err = dmu_tx_assign(tx, TXG_WAIT);
-	if (err) {
-		dmu_tx_abort(tx);
-		return (err);
-	}
-	err = dmu_free_range(os, drrf->drr_object,
-	    drrf->drr_offset, drrf->drr_length, tx);
-	dmu_tx_commit(tx);
 	return (err);
 }
 

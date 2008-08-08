@@ -617,6 +617,8 @@ static sd_disk_config_t sd_disk_table[] = {
 	{ "IBM     1814",	SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
 	{ "IBM     1814-200",	SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
 	{ "IBM     1818",	SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
+	{ "DELL    MD3000",	SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
+	{ "DELL    MD3000i",	SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
 	{ "LSI     INF",	SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
 	{ "ENGENIO INF",	SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
 	{ "SGI     TP",		SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
@@ -2146,7 +2148,7 @@ _init(void)
 	int	err;
 
 	/* establish driver name from module name */
-	sd_label = mod_modname(&modlinkage);
+	sd_label = (char *)mod_modname(&modlinkage);
 
 	err = ddi_soft_state_init(&sd_state, sizeof (struct sd_lun),
 	    SD_MAXUNIT);
@@ -2172,7 +2174,7 @@ _init(void)
 
 	/*
 	 * Creating taskq before mod_install ensures that all callers (threads)
-	 * that enter the module after a successfull mod_install encounter
+	 * that enter the module after a successful mod_install encounter
 	 * a valid taskq.
 	 */
 	sd_taskq_create();
@@ -2599,36 +2601,15 @@ static int
 sd_prop_op(dev_t dev, dev_info_t *dip, ddi_prop_op_t prop_op, int mod_flags,
 	char *name, caddr_t valuep, int *lengthp)
 {
-	int		instance = ddi_get_instance(dip);
 	struct sd_lun	*un;
-	uint64_t	nblocks64;
-	uint_t		dblk;
 
-	/*
-	 * Our dynamic properties are all device specific and size oriented.
-	 * Requests issued under conditions where size is valid are passed
-	 * to ddi_prop_op_nblocks with the size information, otherwise the
-	 * request is passed to ddi_prop_op. Size depends on valid geometry.
-	 */
-	un = ddi_get_soft_state(sd_state, instance);
-	if ((dev == DDI_DEV_T_ANY) || (un == NULL)) {
+	if ((un = ddi_get_soft_state(sd_state, ddi_get_instance(dip))) == NULL)
 		return (ddi_prop_op(dev, dip, prop_op, mod_flags,
 		    name, valuep, lengthp));
-	} else if (!SD_IS_VALID_LABEL(un)) {
-		return (ddi_prop_op(dev, dip, prop_op, mod_flags, name,
-		    valuep, lengthp));
-	}
 
-	/* get nblocks value */
-	ASSERT(!mutex_owned(SD_MUTEX(un)));
-
-	(void) cmlb_partinfo(un->un_cmlbhandle, SDPART(dev),
-	    (diskaddr_t *)&nblocks64, NULL, NULL, NULL, (void *)SD_PATH_DIRECT);
-
-	/* report size in target size blocks */
-	dblk = un->un_tgt_blocksize / un->un_sys_blocksize;
-	return (ddi_prop_op_nblocks_blksize(dev, dip, prop_op, mod_flags,
-	    name, valuep, lengthp, nblocks64 / dblk, un->un_tgt_blocksize));
+	return (cmlb_prop_op(un->un_cmlbhandle,
+	    dev, dip, prop_op, mod_flags, name, valuep, lengthp,
+	    SDPART(dev), (void *)SD_PATH_DIRECT));
 }
 
 /*
@@ -4590,8 +4571,6 @@ sd_get_virtual_geometry(struct sd_lun *un, cmlb_geom_t *lgeom_p,
 static void
 sd_update_block_info(struct sd_lun *un, uint32_t lbasize, uint64_t capacity)
 {
-	uint_t		dblk;
-
 	if (lbasize != 0) {
 		un->un_tgt_blocksize = lbasize;
 		un->un_f_tgt_blocksize_is_valid	= TRUE;
@@ -4600,32 +4579,6 @@ sd_update_block_info(struct sd_lun *un, uint32_t lbasize, uint64_t capacity)
 	if (capacity != 0) {
 		un->un_blockcount		= capacity;
 		un->un_f_blockcount_is_valid	= TRUE;
-	}
-
-	/*
-	 * Update device capacity properties.
-	 *
-	 *   'device-nblocks'	number of blocks in target's units
-	 *   'device-blksize'	data bearing size of target's block
-	 *
-	 * NOTE: math is complicated by the fact that un_tgt_blocksize may
-	 * not be a power of two for checksumming disks with 520/528 byte
-	 * sectors.
-	 */
-	if (un->un_f_tgt_blocksize_is_valid &&
-	    un->un_f_blockcount_is_valid &&
-	    un->un_sys_blocksize) {
-		dblk = un->un_tgt_blocksize / un->un_sys_blocksize;
-		(void) ddi_prop_update_int64(DDI_DEV_T_NONE, SD_DEVINFO(un),
-		    "device-nblocks", un->un_blockcount / dblk);
-		/*
-		 * To save memory, only define "device-blksize" when its
-		 * value is differnet than the default DEV_BSIZE value.
-		 */
-		if ((un->un_sys_blocksize * dblk) != DEV_BSIZE)
-			(void) ddi_prop_update_int(DDI_DEV_T_NONE,
-			    SD_DEVINFO(un), "device-blksize",
-			    un->un_sys_blocksize * dblk);
 	}
 }
 
@@ -4704,11 +4657,11 @@ sd_register_devid(struct sd_lun *un, dev_info_t *devi, int reservation_flag)
 	}
 
 	/*
-	 * We check the availibility of the World Wide Name (0x83) and Unit
+	 * We check the availability of the World Wide Name (0x83) and Unit
 	 * Serial Number (0x80) pages in sd_check_vpd_page_support(), and using
 	 * un_vpd_page_mask from them, we decide which way to get the WWN.  If
-	 * 0x83 is availible, that is the best choice.  Our next choice is
-	 * 0x80.  If neither are availible, we munge the devid from the device
+	 * 0x83 is available, that is the best choice.  Our next choice is
+	 * 0x80.  If neither are available, we munge the devid from the device
 	 * vid/pid/serial # for Sun qualified disks, or use the ddi framework
 	 * to fabricate a devid for non-Sun qualified disks.
 	 */
@@ -5042,7 +4995,7 @@ sd_write_deviceid(struct sd_lun *un)
  *
  * Description: This routine sends an inquiry command with the EVPD bit set and
  *		a page code of 0x00 to the device. It is used to determine which
- *		vital product pages are availible to find the devid. We are
+ *		vital product pages are available to find the devid. We are
  *		looking for pages 0x83 or 0x80.  If we return a negative 1, the
  *		device does not support that command.
  *
@@ -5274,7 +5227,7 @@ sd_setup_pm(struct sd_lun *un, dev_info_t *devi)
 
 		/*
 		 * If the Log sense for Page( Start/stop cycle counter page)
-		 * succeeds, then power managment is supported and we can
+		 * succeeds, then power management is supported and we can
 		 * enable auto-pm.
 		 */
 		if (rval == 0)  {
@@ -6039,7 +5992,7 @@ sdpower(dev_info_t *devi, int component, int level)
 			 * To effect this behavior, call pm_busy_component to
 			 * indicate to the framework this device is busy.
 			 * By not adjusting un_pm_count the rest of PM in
-			 * the driver will function normally, and independant
+			 * the driver will function normally, and independent
 			 * of this but because the framework is told the device
 			 * is busy it won't attempt powering down until it gets
 			 * a matching idle. The timeout handler sends this.
@@ -6208,7 +6161,7 @@ sdpower(dev_info_t *devi, int component, int level)
 				un->un_swr_token = NULL;
 				mutex_exit(SD_MUTEX(un));
 				(void) scsi_watch_request_terminate(temp_token,
-				    SCSI_WATCH_TERMINATE_WAIT);
+				    SCSI_WATCH_TERMINATE_ALL_WAIT);
 			} else {
 				mutex_exit(SD_MUTEX(un));
 			}
@@ -6544,7 +6497,7 @@ sd_unit_attach(dev_info_t *devi)
 	 * Note: This driver is currently compiled as two binaries, a parallel
 	 * scsi version (sd) and a fibre channel version (ssd). All functional
 	 * differences are determined at compile time. In the future a single
-	 * binary will be provided and the inteconnect type will be used to
+	 * binary will be provided and the interconnect type will be used to
 	 * differentiate between fibre and parallel scsi behaviors. At that time
 	 * it will be necessary for all fibre channel HBAs to support this
 	 * property.
@@ -6806,7 +6759,7 @@ sd_unit_attach(dev_info_t *devi)
 	 * configuration file (.conf) for this unit and update the soft state
 	 * for the device as needed for the indicated properties.
 	 * Note: the property configuration needs to occur here as some of the
-	 * following routines may have dependancies on soft state flags set
+	 * following routines may have dependencies on soft state flags set
 	 * as part of the driver property configuration.
 	 */
 	sd_read_unit_properties(un);
@@ -7261,7 +7214,7 @@ sd_unit_attach(dev_info_t *devi)
 	 * "retry-on-reservation-conflict") (1189689)
 	 *
 	 * Note: The use of a global here can have unintended consequences. A
-	 * per instance variable is preferrable to match the capabilities of
+	 * per instance variable is preferable to match the capabilities of
 	 * different underlying hba's (4402600)
 	 */
 	sd_retry_on_reservation_conflict = ddi_getprop(DDI_DEV_T_ANY, devi,
@@ -7335,7 +7288,7 @@ sd_unit_attach(dev_info_t *devi)
 
 #if (defined(__fibre))
 	/*
-	 * Register callbacks for fibre only.  You can't do this soley
+	 * Register callbacks for fibre only.  You can't do this solely
 	 * on the basis of the devid_type because this is hba specific.
 	 * We need to query our hba capabilities to find out whether to
 	 * register or not.
@@ -11842,6 +11795,8 @@ sd_initpkt_for_buf(struct buf *bp, struct scsi_pkt **pktpp)
 	SD_TRACE(SD_LOG_IO_CORE, un,
 	    "sd_initpkt_for_buf: entry: buf:0x%p\n", bp);
 
+	mutex_exit(SD_MUTEX(un));
+
 #if defined(__i386) || defined(__amd64)	/* DMAFREE for x86 only */
 	if (xp->xb_pkt_flags & SD_XB_DMA_FREED) {
 		/*
@@ -11863,15 +11818,7 @@ sd_initpkt_for_buf(struct buf *bp, struct scsi_pkt **pktpp)
 	startblock = xp->xb_blkno;	/* Absolute block num. */
 	blockcount = SD_BYTES2TGTBLOCKS(un, bp->b_bcount);
 
-#if defined(__i386) || defined(__amd64)	/* DMAFREE for x86 only */
-
 	cmd_flags = un->un_pkt_flags | (xp->xb_pkt_flags & SD_XB_INITPKT_MASK);
-
-#else
-
-	cmd_flags = un->un_pkt_flags | xp->xb_pkt_flags;
-
-#endif
 
 	/*
 	 * sd_setup_rw_pkt will determine the appropriate CDB group to use,
@@ -11918,6 +11865,7 @@ sd_initpkt_for_buf(struct buf *bp, struct scsi_pkt **pktpp)
 		xp->xb_pkt_flags &= ~SD_XB_DMA_FREED;
 #endif
 
+		mutex_enter(SD_MUTEX(un));
 		return (SD_PKT_ALLOC_SUCCESS);
 
 	}
@@ -11935,6 +11883,7 @@ sd_initpkt_for_buf(struct buf *bp, struct scsi_pkt **pktpp)
 		 * is waiting on resource allocations. The driver will not
 		 * suspend, pm_suspend, or detatch while the state is RWAIT.
 		 */
+		mutex_enter(SD_MUTEX(un));
 		New_state(un, SD_STATE_RWAIT);
 
 		SD_ERROR(SD_LOG_IO_CORE, un,
@@ -11956,6 +11905,7 @@ sd_initpkt_for_buf(struct buf *bp, struct scsi_pkt **pktpp)
 		    "lba:0x%08lx  len:0x%08lx\n", startblock, blockcount);
 		SD_ERROR(SD_LOG_IO_CORE, un,
 		    "sd_initpkt_for_buf: No cp. exit bp:0x%p\n", bp);
+		mutex_enter(SD_MUTEX(un));
 		return (SD_PKT_ALLOC_FAILURE_CDB_TOO_SMALL);
 
 	}
@@ -21231,13 +21181,12 @@ sd_check_media(dev_t dev, enum dkio_state state)
 	}
 done:
 	un->un_f_watcht_stopped = FALSE;
-	if (un->un_swr_token) {
 		/*
 		 * Use of this local token and the mutex ensures that we avoid
 		 * some race conditions associated with terminating the
 		 * scsi watch.
 		 */
-		token = un->un_swr_token;
+	if (token) {
 		un->un_swr_token = (opaque_t)NULL;
 		mutex_exit(SD_MUTEX(un));
 		(void) scsi_watch_request_terminate(token,
@@ -22128,7 +22077,7 @@ sd_check_mhd(dev_t dev, int interval)
 			un->un_mhd_token = NULL;
 			mutex_exit(SD_MUTEX(un));
 			(void) scsi_watch_request_terminate(token,
-			    SCSI_WATCH_TERMINATE_WAIT);
+			    SCSI_WATCH_TERMINATE_ALL_WAIT);
 			mutex_enter(SD_MUTEX(un));
 		} else {
 			mutex_exit(SD_MUTEX(un));
@@ -26060,12 +26009,6 @@ sr_ejected(struct sd_lun *un)
 		stp = (struct sd_errstats *)un->un_errstats->ks_data;
 		stp->sd_capacity.value.ui64 = 0;
 	}
-
-	/* remove "capacity-of-device" properties */
-	(void) ddi_prop_remove(DDI_DEV_T_NONE, SD_DEVINFO(un),
-	    "device-nblocks");
-	(void) ddi_prop_remove(DDI_DEV_T_NONE, SD_DEVINFO(un),
-	    "device-blksize");
 }
 
 
@@ -26795,7 +26738,7 @@ sddump_do_read_of_rmw(struct sd_lun *un, uint64_t blkno, uint64_t nblk,
 	bp = scsi_alloc_consistent_buf(SD_ADDRESS(un), (struct buf *)NULL,
 	    (size_t)(nblk * target_blocksize), B_READ, NULL_FUNC, NULL);
 	if (bp == NULL) {
-		scsi_log(SD_DEVINFO(un), sd_label, CE_CONT,
+		scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 		    "no resources for dumping; giving up");
 		err = ENOMEM;
 		goto done;
@@ -26805,7 +26748,7 @@ sddump_do_read_of_rmw(struct sd_lun *un, uint64_t blkno, uint64_t nblk,
 	    blkno, nblk);
 	if (rval != 0) {
 		scsi_free_consistent_buf(bp);
-		scsi_log(SD_DEVINFO(un), sd_label, CE_CONT,
+		scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 		    "no resources for dumping; giving up");
 		err = ENOMEM;
 		goto done;
@@ -28229,7 +28172,7 @@ sd_tg_getinfo(dev_info_t *devi, int cmd, void *arg, void *tg_cookie)
 	case TG_GETPHYGEOM:
 	case TG_GETVIRTGEOM:
 	case TG_GETCAPACITY:
-	case  TG_GETBLOCKSIZE:
+	case TG_GETBLOCKSIZE:
 		mutex_enter(SD_MUTEX(un));
 
 		if ((un->un_f_blockcount_is_valid == TRUE) &&

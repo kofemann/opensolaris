@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -283,7 +283,7 @@ static struct dev_ops usbvc_ops = {
 
 static struct modldrv usbvc_modldrv =	{
 	&mod_driverops,
-	"USB video class driver %I%",
+	"USB video class driver",
 	&usbvc_ops
 };
 
@@ -717,6 +717,10 @@ usbvc_close(dev_t dev, int flag, int otyp, cred_t *cred_p)
 	mutex_enter(&usbvcp->usbvc_mutex);
 
 	usbvc_free_read_bufs(usbvcp, strm_if);
+
+	/* reset the desired read buf number to the default value on close */
+	strm_if->buf_read_num = USBVC_DEFAULT_READ_BUF_NUM;
+
 	usbvc_free_map_bufs(usbvcp, strm_if);
 	usbvcp->usbvc_drv_state &= ~USBVC_OPEN;
 
@@ -1020,8 +1024,9 @@ usbvc_devmap(dev_t dev, devmap_cookie_t handle, offset_t off,
 	}
 
 	USB_DPRINTF_L3(PRINT_MASK_DEVMAP, usbvcp->usbvc_log_handle,
-	    "devmap: memory map for instance(%d), off=%llx, len=%d, maplen=%d,"
-	    " model=%d", getminor(dev), off, len, maplen, model);
+	    "devmap: memory map for instance(%d), off=%llx,"
+	    "len=%ld, maplen=%ld, model=%d", getminor(dev), off,
+	    len, *maplen, model);
 
 	mutex_enter(&usbvcp->usbvc_mutex);
 	(void) usbvc_serialize_access(usbvcp, USBVC_SER_NOSIG);
@@ -1055,7 +1060,7 @@ usbvc_devmap(dev_t dev, devmap_cookie_t handle, offset_t off,
 	len = ptob(btopr(len));
 	if (len > ptob(btopr(buf->len))) {
 		USB_DPRINTF_L2(PRINT_MASK_DEVMAP, usbvcp->usbvc_log_handle,
-		    "usbvc_devmap: len=%x", len);
+		    "usbvc_devmap: len=0x%lx", len);
 		mutex_exit(&usbvcp->usbvc_mutex);
 
 		return (ENXIO);
@@ -1084,7 +1089,7 @@ usbvc_devmap(dev_t dev, devmap_cookie_t handle, offset_t off,
  */
 
 /*
- * usbvc_power :
+ *  usbvc_power :
  *	Power entry point, the workhorse behind pm_raise_power, pm_lower_power,
  *	usb_req_raise_power and usb_req_lower_power.
  */
@@ -1208,7 +1213,7 @@ usbvc_init_power_mgmt(usbvc_state_t *usbvcp)
 
 
 /*
- * usbvc_destroy_power_mgmt:
+ *  usbvc_destroy_power_mgmt:
  *	Shut down and destroy power management and remote wakeup functionality.
  */
 static void
@@ -1509,7 +1514,7 @@ usbvc_cpr_resume(dev_info_t *dip)
 
 
 /*
- * usbvc_restore_device_state:
+ *  usbvc_restore_device_state:
  *	Called during hotplug-reconnect and resume.
  *		reenable power management
  *		Verify the device is the same as before the disconnect/suspend.
@@ -2224,6 +2229,12 @@ usbvc_parse_stream_if(usbvc_state_t *usbvcp, int if_num)
 
 	/* initialize MJPEC FID toggle */
 	strm_if->fid = 0xff;
+
+	/*
+	 * initialize desired number of buffers used internally in read() mode
+	 */
+	strm_if->buf_read_num = USBVC_DEFAULT_READ_BUF_NUM;
+
 	USB_DPRINTF_L4(PRINT_MASK_ATTA, usbvcp->usbvc_log_handle,
 	    "usbvc_parse_stream_if: return. max_isoc_payload=%x",
 	    strm_if->max_isoc_payload);
@@ -2364,7 +2375,7 @@ usbvc_parse_color_still(usbvc_state_t *usbvcp, usbvc_format_group_t *fmtgrp,
 	}
 	USB_DPRINTF_L4(PRINT_MASK_ATTA, usbvcp->usbvc_log_handle,
 	    "usbvc_parse_color_still: still=%p, color=%p",
-	    fmtgrp->still, fmtgrp->color);
+	    (void *)fmtgrp->still, (void *)fmtgrp->color);
 }
 
 
@@ -2436,7 +2447,7 @@ usbvc_parse_frames(usbvc_state_t *usbvcp, usbvc_format_group_t *fmtgrp,
 				continue;
 			}
 
-			frm->dwFrameInterval = (uint32_t *)&cvs_buf[26];
+			frm->dwFrameInterval = (uint8_t *)&cvs_buf[26];
 		} else {	/* Continuous interval */
 			if (cvs_buf_len < USBVC_FRAME_LEN_CON) {
 				frm->descr = NULL;
@@ -2578,7 +2589,7 @@ usbvc_parse_format_groups(usbvc_state_t *usbvcp, usbvc_stream_if_t *strm_if)
 
 	/* Save the number of parsed format groups. */
 	strm_if->fmtgrp_cnt = fmtgrp_num;
-	USB_DPRINTF_L2(PRINT_MASK_ATTA, usbvcp->usbvc_log_handle,
+	USB_DPRINTF_L3(PRINT_MASK_ATTA, usbvcp->usbvc_log_handle,
 	    "usbvc_parse_format_groups: acctually %d formats parsed",
 	    fmtgrp_num);
 
@@ -2596,7 +2607,7 @@ usbvc_parse_format_groups(usbvc_state_t *usbvcp, usbvc_stream_if_t *strm_if)
 		return (USB_FAILURE);
 	}
 	strm_if->format_group = fmtgrp;
-	USB_DPRINTF_L2(PRINT_MASK_ATTA, usbvcp->usbvc_log_handle,
+	USB_DPRINTF_L3(PRINT_MASK_ATTA, usbvcp->usbvc_log_handle,
 	    "usbvc_parse_format_groups: %d format groups parsed", fmtgrp_num);
 
 	return (USB_SUCCESS);
@@ -2621,7 +2632,7 @@ usbvc_parse_stream_header(usbvc_state_t *usbvcp, usbvc_stream_if_t *strm_if)
 	cvs_data = if_alt_data->altif_cvs;
 	for (cvs_num = 0; cvs_num < if_alt_data->altif_n_cvs; cvs_num++) {
 		cvs_buf = cvs_data[cvs_num].cvs_buf;
-		USB_DPRINTF_L2(PRINT_MASK_ATTA, usbvcp->usbvc_log_handle,
+		USB_DPRINTF_L3(PRINT_MASK_ATTA, usbvcp->usbvc_log_handle,
 		    "usbvc_parse_stream_header: cvs_num= %d", cvs_num);
 
 		/*
@@ -2699,7 +2710,7 @@ usbvc_alloc_read_bufs(usbvc_state_t *usbvcp, usbvc_stream_if_t *strm_if)
 
 		return (USB_FAILURE);
 	}
-	for (i = 0; i < USBVC_READ_BUF_NUM; i++) {
+	for (i = 0; i < strm_if->buf_read_num; i++) {
 		mutex_exit(&usbvcp->usbvc_mutex);
 		buf = (usbvc_buf_t *)kmem_zalloc(sizeof (usbvc_buf_t),
 		    KM_SLEEP);
@@ -2709,7 +2720,7 @@ usbvc_alloc_read_bufs(usbvc_state_t *usbvcp, usbvc_stream_if_t *strm_if)
 		buf->len = len;
 		list_insert_tail(&(strm_if->buf_read.uv_buf_free), buf);
 	}
-	strm_if->buf_read.buf_cnt = USBVC_READ_BUF_NUM;
+	strm_if->buf_read.buf_cnt = strm_if->buf_read_num;
 	USB_DPRINTF_L4(PRINT_MASK_READ, usbvcp->usbvc_log_handle,
 	    "read_bufs: %d bufs allocated", strm_if->buf_read.buf_cnt);
 
@@ -2729,8 +2740,8 @@ usbvc_read_buf(usbvc_state_t *usbvcp, struct buf *bp)
 	buf = list_head(&usbvcp->usbvc_curr_strm->buf_read.uv_buf_done);
 	USB_DPRINTF_L4(PRINT_MASK_OPEN, usbvcp->usbvc_log_handle,
 	    "usbvc_read_buf: buf=%p, buf->filled=%d, bfu->len=%d,"
-	    " bp->b_bcount=%d, bp->b_resid=%d",
-	    buf, buf->filled, buf->len, bp->b_bcount, bp->b_resid);
+	    " bp->b_bcount=%ld, bp->b_resid=%lu",
+	    (void *)buf, buf->filled, buf->len, bp->b_bcount, bp->b_resid);
 
 	list_remove(&usbvcp->usbvc_curr_strm->buf_read.uv_buf_done, buf);
 	bcopy(buf->data, bp->b_un.b_addr, buf->filled);
@@ -2841,7 +2852,7 @@ usbvc_alloc_map_bufs(usbvc_state_t *usbvcp, usbvc_stream_if_t *strm_if,
 		bufs[i].v4l2_buf.flags = V4L2_MEMORY_MMAP;
 
 		list_insert_tail(&strm_if->buf_map.uv_buf_free, &bufs[i]);
-		USB_DPRINTF_L2(PRINT_MASK_OPEN, usbvcp->usbvc_log_handle,
+		USB_DPRINTF_L4(PRINT_MASK_OPEN, usbvcp->usbvc_log_handle,
 		    "usbvc_alloc_map_bufs: prepare %d buffers of %d bytes",
 		    buf_cnt, bufs[i].len);
 	}
@@ -2886,7 +2897,7 @@ usbvc_free_map_bufs(usbvc_state_t *usbvcp, usbvc_stream_if_t *strm_if)
 	strm_if->buf_map.buf_cnt = 0;
 	strm_if->buf_map.buf_head = NULL;
 
-	USB_DPRINTF_L2(PRINT_MASK_CLOSE, usbvcp->usbvc_log_handle,
+	USB_DPRINTF_L4(PRINT_MASK_CLOSE, usbvcp->usbvc_log_handle,
 	    "usbvc_free_map_bufs: return");
 }
 
@@ -2921,7 +2932,8 @@ usbvc_open_isoc_pipe(usbvc_state_t *usbvcp, usbvc_stream_if_t *strm_if)
 	strm_if->start_polling = 0;
 
 	USB_DPRINTF_L4(PRINT_MASK_OPEN, usbvcp->usbvc_log_handle,
-	    "usbvc_open_isoc_pipe: success, datain_ph=%p", strm_if->datain_ph);
+	    "usbvc_open_isoc_pipe: success, datain_ph=%p",
+	    (void *)strm_if->datain_ph);
 
 	return (rval);
 }
@@ -2966,15 +2978,18 @@ usbvc_start_isoc_polling(usbvc_state_t *usbvcp, usbvc_stream_if_t *strm_if,
 	uint32_t	frame_size;
 
 	ASSERT(mutex_owned(&usbvcp->usbvc_mutex));
-	pkt_size = strm_if->curr_ep->wMaxPacketSize;
+	pkt_size = HS_PKT_SIZE(strm_if->curr_ep->wMaxPacketSize);
 	if_num = strm_if->if_descr->if_alt->altif_descr.bInterfaceNumber;
 	LE_TO_UINT32(strm_if->ctrl_pc.dwMaxVideoFrameSize, 0, frame_size);
-	n_pkt = (frame_size + HS_PKT_SIZE(pkt_size) -1)
-	    / HS_PKT_SIZE(pkt_size);
+	n_pkt = (frame_size + (pkt_size) - 1) / (pkt_size);
+
 	USB_DPRINTF_L3(PRINT_MASK_IOCTL, usbvcp->usbvc_log_handle,
 	    "usbvc_start_isoc_polling: if_num=%d, alt=%d, n_pkt=%d,"
-	    " pkt_size=0x%x, frame_size=0x%x",
-	    if_num, strm_if->curr_alt, n_pkt, pkt_size, frame_size);
+	    " pkt_size=0x%x, MaxPacketSize=0x%x(Tsac#=%d), frame_size=0x%x",
+	    if_num, strm_if->curr_alt, n_pkt, pkt_size,
+	    strm_if->curr_ep->wMaxPacketSize,
+	    (1 + ((strm_if->curr_ep->wMaxPacketSize>> 11) & 3)),
+	    frame_size);
 
 	if (n_pkt > USBVC_MAX_PKTS) {
 		n_pkt = USBVC_MAX_PKTS;
@@ -3047,9 +3062,9 @@ usbvc_isoc_cb(usb_pipe_handle_t ph, usb_isoc_req_t *isoc_req)
 	USB_DPRINTF_L3(PRINT_MASK_CB, usbvcp->usbvc_log_handle,
 	    "usbvc_isoc_cb: rq=0x%p, fno=%" PRId64 ", n_pkts=%u, flag=0x%x,"
 	    " data=0x%p, cnt=%d",
-	    isoc_req, isoc_req->isoc_frame_no, isoc_req->isoc_pkts_count,
-	    isoc_req->isoc_attributes, isoc_req->isoc_data,
-	    isoc_req->isoc_error_count);
+	    (void *)isoc_req, isoc_req->isoc_frame_no,
+	    isoc_req->isoc_pkts_count, isoc_req->isoc_attributes,
+	    (void *)isoc_req->isoc_data, isoc_req->isoc_error_count);
 
 	ASSERT((isoc_req->isoc_cb_flags & USB_CB_INTR_CONTEXT) != 0);
 	for (i = 0; i < isoc_req->isoc_pkts_count; i++) {
@@ -3100,8 +3115,8 @@ usbvc_isoc_cb(usb_pipe_handle_t ph, usb_isoc_req_t *isoc_req)
 				}
 			}
 		}
-		data->b_rptr +=
-		    HS_PKT_SIZE(isoc_req->isoc_pkt_descr[i].isoc_pkt_length);
+
+		data->b_rptr += isoc_req->isoc_pkt_descr[i].isoc_pkt_length;
 	}
 	mutex_exit(&usbvcp->usbvc_mutex);
 	usb_free_isoc_req(isoc_req);
@@ -3127,7 +3142,7 @@ usbvc_isoc_exc_cb(usb_pipe_handle_t ph, usb_isoc_req_t *isoc_req)
 
 	completion_reason = isoc_req->isoc_completion_reason;
 
-	USB_DPRINTF_L2(PRINT_MASK_CB, usbvcp->usbvc_log_handle,
+	USB_DPRINTF_L3(PRINT_MASK_CB, usbvcp->usbvc_log_handle,
 	    "usbvc_isoc_exc_cb: ph=0x%p, isoc_req=0x%p, cr=%d",
 	    (void *)ph, (void *)isoc_req, completion_reason);
 

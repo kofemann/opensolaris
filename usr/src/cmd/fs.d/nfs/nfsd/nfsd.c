@@ -68,6 +68,7 @@
 #include <unistd.h>
 #include <stropts.h>
 #include <sys/tihdr.h>
+#include <sys/wait.h>
 #include <poll.h>
 #include <priv_utils.h>
 #include <sys/tiuser.h>
@@ -94,6 +95,9 @@ static	void	usage(void);
 int		qstrcmp(const void *s1, const void *s2);
 
 extern	int	_nfssys(int, void *);
+
+extern int	daemonize_init(void);
+extern void	daemonize_fini(int fd);
 
 /* signal handlers */
 static void sigflush(int);
@@ -150,6 +154,8 @@ main(int ac, char *av[])
 	char **dss_pathnames = NULL;
 	sigset_t sgset;
 
+	int pipe_fd = -1;
+
 	libhandle = libnfs_handle_create(LIBNFS_VERSION);
 	libnfs_error_mode_set(libhandle, LIBNFS_ERRMODE_DIE);
 	(void) libnfs_myinstance(libhandle);
@@ -176,7 +182,7 @@ main(int ac, char *av[])
 
 	/*
 	 * Read in the values from config file first before we check
-	 * commandline options so the options override the file.
+	 * command line options so the options override the file.
 	 */
 
 	max_conns_allowed = libnfs_prop_num(libhandle,
@@ -255,9 +261,6 @@ main(int ac, char *av[])
 	    strncasecmp(proto, NC_UDP, strlen(NC_UDP)) == 0) {
 		if (nfs_server_vers_max == NFS_V4) {
 			if (nfs_server_vers_min == NFS_V4) {
-				syslog(LOG_ERR,
-				    "NFS version 4 is not supported "
-				    "with the UDP protocol.  Exiting\n");
 				fprintf(stderr,
 				    "NFS version 4 is not supported "
 				    "with the UDP protocol.  Exiting\n");
@@ -310,28 +313,9 @@ main(int ac, char *av[])
 	}
 
 #ifndef DEBUG
-	/*
-	 * Background
-	 */
-	pid = fork();
-	if (pid < 0) {
-		perror("nfsd: fork");
-		exit(1);
-	}
-	if (pid != 0)
-		exit(0);
-
-	/*
-	 * Close existing file descriptors, open "/dev/null" as
-	 * standard input, output, and error, and detach from
-	 * controlling terminal.
-	 */
-	closefrom(0);
-	(void) open("/dev/null", O_RDONLY);
-	(void) open("/dev/null", O_WRONLY);
-	(void) dup(1);
-	(void) setsid();
+	pipe_fd = daemonize_init();
 #endif
+
 	openlog(MyName, LOG_PID | LOG_NDELAY, LOG_DAEMON);
 
 	/*
@@ -341,7 +325,7 @@ main(int ac, char *av[])
 	 */
 	if (dss_pathnames != NULL && nfs_server_vers_max >= DSS_VERSMIN) {
 		if (dss_init(dss_npaths, dss_pathnames) != 0) {
-			syslog(LOG_ERR, "dss_init failed. Exiting.");
+			fprintf(stderr, "%s", "dss_init failed. Exiting.");
 			exit(1);
 		}
 	}
@@ -367,18 +351,17 @@ main(int ac, char *av[])
 	 * Set up kernel RPC thread pool for the NFS server.
 	 */
 	if (nfssvcpool(maxservers)) {
-		(void) syslog(LOG_ERR,
-		    "Can't set up kernel NFS service: %m. Exiting");
+		fprintf(stderr, "Can't set up kernel NFS service: %s. Exiting",
+		    strerror(errno));
 		exit(1);
 	}
-
 
 	/*
 	 * Set up blocked thread to do LWP creation on behalf of the kernel.
 	 */
 	if (svcwait(NFS_SVCPOOL_ID)) {
-		(void) syslog(LOG_ERR,
-		    "Can't set up NFS pool creator: %m, Exiting");
+		fprintf(stderr, "Can't set up NFS pool creator: %s. Exiting",
+		    strerror(errno));
 		exit(1);
 	}
 
@@ -391,8 +374,8 @@ main(int ac, char *av[])
 	 */
 	if (svcrdma(NFS_SVCPOOL_ID, nfs_server_vers_min, nfs_server_vers_max,
 	    nfs_server_delegation)) {
-		(void) syslog(LOG_ERR,
-		    "Can't set up RDMA creator thread : %m.");
+		fprintf(stderr, "Can't set up RDMA creator thread : %s",
+		    strerror(errno));
 	}
 
 	/*
@@ -425,15 +408,19 @@ main(int ac, char *av[])
 	protobp->next = (struct protob *)NULL;
 
 	if (allflag) {
-		if (do_all(protobp0, nfssvc, 0) == -1)
+		if (do_all(protobp0, nfssvc, 0) == -1) {
+			fprintf(stderr, "setnetconfig failed : %s",
+			    strerror(errno));
 			exit(1);
+		}
 	} else if (proto) {
 		/* there's more than one match for the same protocol */
 		struct netconfig *nconf;
 		NCONF_HANDLE *nc;
 		bool_t	protoFound = FALSE;
 		if ((nc = setnetconfig()) == (NCONF_HANDLE *) NULL) {
-			syslog(LOG_ERR, "setnetconfig failed: %m");
+			fprintf(stderr, "setnetconfig failed : %s",
+			    strerror(errno));
 			goto done;
 		}
 		while (nconf = getnetconfig(nc)) {
@@ -444,10 +431,11 @@ main(int ac, char *av[])
 			}
 		}
 		(void) endnetconfig(nc);
-		if (protoFound == FALSE)
-			syslog(LOG_ERR, "couldn't find netconfig entry \
-			    for protocol %s", proto);
-
+		if (protoFound == FALSE) {
+			fprintf(stderr,
+			    "couldn't find netconfig entry for protocol %s",
+			    proto);
+		}
 	} else if (provider)
 		do_one(provider, proto, protobp0, nfssvc, 0);
 	else {
@@ -462,14 +450,18 @@ done:
 	free(protobp);
 	free(protobp0);
 
-
 	if (num_fds == 0) {
-		(void) syslog(LOG_ERR,
-		"Could not start NFS service for any protocol. Exiting");
+		fprintf(stderr, "Could not start NFS service for any protocol."
+		    " Exiting");
 		exit(1);
 	}
 
 	end_listen_fds = num_fds;
+
+	/*
+	 * nfsd is up and running as far as we are concerned.
+	 */
+	daemonize_fini(pipe_fd);
 
 	/*
 	 * Get rid of unneeded privileges.
@@ -660,7 +652,7 @@ dss_mkleafdir(char *dir, char *leaf, char *tmppath)
 {
 	/* MAXPATHLEN includes the terminating NUL */
 	if (strlen(dir) + strlen(leaf) > MAXPATHLEN - 1) {
-		syslog(LOG_ERR, "stable storage path too long: %s%s. Exiting",
+		fprintf(stderr, "stable storage path too long: %s%s. Exiting",
 		    dir, leaf);
 		exit(1);
 	}
@@ -669,7 +661,7 @@ dss_mkleafdir(char *dir, char *leaf, char *tmppath)
 
 	/* the directory may already exist: that's OK */
 	if (mkdir(tmppath, NFS4_DSS_DIR_MODE) == -1 && errno != EEXIST) {
-		syslog(LOG_ERR, "error creating stable storage directory: "
+		fprintf(stderr, "error creating stable storage directory: "
 		    "%s: %s. Exiting", strerror(errno), tmppath);
 		exit(1);
 	}
@@ -726,7 +718,7 @@ dss_init(uint_t npaths, char **pathnames)
 			sz = nreal * sizeof (char *);
 			tmp_pathnames = (char **)malloc(sz);
 			if (tmp_pathnames == NULL) {
-				syslog(LOG_ERR, "tmp_pathnames malloc failed");
+				fprintf(stderr, "tmp_pathnames malloc failed");
 				exit(1);
 			}
 
@@ -746,7 +738,7 @@ dss_init(uint_t npaths, char **pathnames)
 	/* Create the name-value pair list */
 	error = nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0);
 	if (error) {
-		syslog(LOG_ERR, "nvlist_alloc failed: %s.", strerror(errno));
+		fprintf(stderr, "nvlist_alloc failed: %s.", strerror(errno));
 		return (1);
 	}
 
@@ -754,7 +746,7 @@ dss_init(uint_t npaths, char **pathnames)
 	error = nvlist_add_string_array(nvl, NFS4_DSS_NVPAIR_NAME,
 	    pathnames, npaths);
 	if (error) {
-		syslog(LOG_ERR, "nvlist_add_string_array failed: %s.",
+		fprintf(stderr, "nvlist_add_string_array failed: %s.",
 		    strerror(errno));
 		nvlist_free(nvl);
 		return (1);
@@ -769,7 +761,7 @@ dss_init(uint_t npaths, char **pathnames)
 	bufp = NULL;
 	error = nvlist_pack(nvl, &bufp, &buflen, NV_ENCODE_XDR, 0);
 	if (error) {
-		syslog(LOG_ERR, "nvlist_pack failed: %s.", strerror(errno));
+		fprintf(stderr, "nvlist_pack failed: %s.", strerror(errno));
 		nvlist_free(nvl);
 		return (1);
 	}
@@ -788,7 +780,7 @@ dss_init(uint_t npaths, char **pathnames)
 	bufsize = (uint32_t)buflen;
 	error = _nfssys(NFS4_DSS_SETPATHS_SIZE, &bufsize);
 	if (error) {
-		syslog(LOG_ERR,
+		fprintf(stderr,
 		    "_nfssys(NFS4_DSS_SETPATHS_SIZE) failed: %s. ",
 		    strerror(errno));
 		free(bufp);
@@ -798,7 +790,7 @@ dss_init(uint_t npaths, char **pathnames)
 	/* Pass the packed buffer to the kernel */
 	error = _nfssys(NFS4_DSS_SETPATHS, bufp);
 	if (error) {
-		syslog(LOG_ERR,
+		fprintf(stderr,
 		    "_nfssys(NFS4_DSS_SETPATHS) failed: %s. ", strerror(errno));
 		free(bufp);
 		return (1);

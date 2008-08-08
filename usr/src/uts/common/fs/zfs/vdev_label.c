@@ -421,7 +421,7 @@ vdev_inuse(vdev_t *vd, uint64_t crtxg, vdev_labeltype_t reason,
 	 */
 	if (state != POOL_STATE_SPARE && state != POOL_STATE_L2CACHE &&
 	    !spa_guid_exists(pool_guid, device_guid) &&
-	    !spa_spare_exists(device_guid, NULL) &&
+	    !spa_spare_exists(device_guid, NULL, NULL) &&
 	    !spa_l2cache_exists(device_guid, NULL))
 		return (B_FALSE);
 
@@ -441,7 +441,7 @@ vdev_inuse(vdev_t *vd, uint64_t crtxg, vdev_labeltype_t reason,
 	 * spa_has_spare() here because it may be on our pending list of spares
 	 * to add.  We also check if it is an l2cache device.
 	 */
-	if (spa_spare_exists(device_guid, &spare_pool) ||
+	if (spa_spare_exists(device_guid, &spare_pool, NULL) ||
 	    spa_has_spare(spa, device_guid)) {
 		if (spare_guid)
 			*spare_guid = device_guid;
@@ -691,7 +691,7 @@ vdev_label_init(vdev_t *vd, uint64_t crtxg, vdev_labeltype_t reason)
 	 */
 	if (error == 0 && !vd->vdev_isspare &&
 	    (reason == VDEV_LABEL_SPARE ||
-	    spa_spare_exists(vd->vdev_guid, NULL)))
+	    spa_spare_exists(vd->vdev_guid, NULL, NULL)))
 		spa_spare_add(vd);
 
 	if (error == 0 && !vd->vdev_isl2cache &&
@@ -913,6 +913,15 @@ vdev_label_sync_top_done(zio_t *zio)
 }
 
 /*
+ * We ignore errors for log and cache devices, simply free the private data.
+ */
+static void
+vdev_label_sync_ignore_done(zio_t *zio)
+{
+	kmem_free(zio->io_private, sizeof (uint64_t));
+}
+
+/*
  * Write all even or odd labels to all leaves of the specified vdev.
  */
 static void
@@ -984,7 +993,9 @@ vdev_label_sync_list(spa_t *spa, int l, int flags, uint64_t txg)
 	for (vd = list_head(dl); vd != NULL; vd = list_next(dl, vd)) {
 		uint64_t *good_writes = kmem_zalloc(sizeof (uint64_t),
 		    KM_SLEEP);
-		zio_t *vio = zio_null(nio, spa, vdev_label_sync_top_done,
+		zio_t *vio = zio_null(nio, spa,
+		    (vd->vdev_islog || vd->vdev_aux != NULL) ?
+		    vdev_label_sync_ignore_done : vdev_label_sync_top_done,
 		    good_writes, flags);
 		vdev_label_sync(vio, vd, l, txg);
 		zio_nowait(vio);

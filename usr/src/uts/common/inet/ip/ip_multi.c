@@ -159,7 +159,7 @@ static int	ip_opt_delete_group_excl_v6(conn_t *connp,
 
 #define	IPSQ_EXIT(ipsq)	\
 	if (ipsq != NULL)	\
-		ipsq_exit(ipsq, B_TRUE, B_TRUE);
+		ipsq_exit(ipsq);
 
 #define	ILG_WALKER_HOLD(connp)	(connp)->conn_ilg_walker_cnt++
 
@@ -1256,6 +1256,13 @@ ip_multicast_loopback(queue_t *q, ill_t *ill, mblk_t *mp_orig, int fanout_flags,
 
 	iph = (ipha_t *)mp->b_rptr;
 
+	/*
+	 * DTrace this as ip:::send.  A blocked packet will fire the send
+	 * probe, but not the receive probe.
+	 */
+	DTRACE_IP7(send, mblk_t *, ipsec_mp, conn_t *, NULL, void_ip_t *, iph,
+	    __dtrace_ipsr_ill_t *, ill, ipha_t *, iph, ip6_t *, NULL, int, 1);
+
 	DTRACE_PROBE4(ip4__loopback__out__start,
 	    ill_t *, NULL, ill_t *, ill,
 	    ipha_t *, iph, mblk_t *, ipsec_mp);
@@ -1324,9 +1331,8 @@ ill_create_squery(ill_t *ill, ipaddr_t ipaddr, uint32_t addrlen,
 }
 
 /*
- * Create a dlpi message with room for phys+sap. When we come back in
- * ip_wput_ctl() we will strip the sap for those primitives which
- * only need a physical address.
+ * Create a DLPI message; for DL_{ENAB,DISAB}MULTI_REQ, room is left for
+ * the hardware address.
  */
 static mblk_t *
 ill_create_dl(ill_t *ill, uint32_t dl_primitive, uint32_t length,
@@ -1400,41 +1406,61 @@ ill_create_dl(ill_t *ill, uint32_t dl_primitive, uint32_t length,
 	return (mp);
 }
 
-void
-ip_wput_ctl(queue_t *q, mblk_t *mp_orig)
+/*
+ * Writer processing for ip_wput_ctl(): send the DL_{ENAB,DISAB}MULTI_REQ
+ * messages that had been delayed until we'd heard back from ARP.  One catch:
+ * we need to ensure that no one else becomes writer on the IPSQ before we've
+ * received the replies, or they'll incorrectly process our replies as part of
+ * their unrelated IPSQ operation.  To do this, we start a new IPSQ operation,
+ * which will complete when we process the reply in ip_rput_dlpi_writer().
+ */
+/* ARGSUSED */
+static void
+ip_wput_ctl_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *arg)
 {
-	ill_t	*ill = (ill_t *)q->q_ptr;
-	mblk_t	*mp = mp_orig;
-	area_t	*area = (area_t *)mp->b_rptr;
+	ill_t *ill = q->q_ptr;
+	t_uscalar_t prim = ((union DL_primitives *)mp->b_rptr)->dl_primitive;
 
-	/* Check that we have a AR_ENTRY_SQUERY with a tacked on mblk */
-	if (MBLKL(mp) < sizeof (area_t) || mp->b_cont == NULL ||
-	    area->area_cmd != AR_ENTRY_SQUERY) {
-		putnext(q, mp);
-		return;
-	}
-	mp = mp->b_cont;
+	ASSERT(IAM_WRITER_ILL(ill));
+	ASSERT(prim == DL_ENABMULTI_REQ || prim == DL_DISABMULTI_REQ);
+	ip1dbg(("ip_wput_ctl_writer: %s\n", dl_primstr(prim)));
 
-	/*
-	 * Update dl_addr_length and dl_addr_offset for primitives that
-	 * have physical addresses as opposed to full saps
-	 */
-	switch (((union DL_primitives *)mp->b_rptr)->dl_primitive) {
-	case DL_ENABMULTI_REQ:
+	if (prim == DL_ENABMULTI_REQ) {
 		/* Track the state if this is the first enabmulti */
 		if (ill->ill_dlpi_multicast_state == IDS_UNKNOWN)
 			ill->ill_dlpi_multicast_state = IDS_INPROGRESS;
-		ip1dbg(("ip_wput_ctl: ENABMULTI\n"));
-		break;
-	case DL_DISABMULTI_REQ:
-		ip1dbg(("ip_wput_ctl: DISABMULTI\n"));
-		break;
-	default:
-		ip1dbg(("ip_wput_ctl: default\n"));
-		break;
 	}
-	freeb(mp_orig);
+
+	ipsq_current_start(ipsq, ill->ill_ipif, 0);
 	ill_dlpi_send(ill, mp);
+}
+
+void
+ip_wput_ctl(queue_t *q, mblk_t *mp)
+{
+	ill_t	*ill = q->q_ptr;
+	mblk_t	*dlmp = mp->b_cont;
+	area_t	*area = (area_t *)mp->b_rptr;
+	t_uscalar_t prim;
+
+	/* Check that we have an AR_ENTRY_SQUERY with a tacked on mblk */
+	if (MBLKL(mp) < sizeof (area_t) || area->area_cmd != AR_ENTRY_SQUERY ||
+	    dlmp == NULL) {
+		putnext(q, mp);
+		return;
+	}
+
+	/* Check that the tacked on mblk is a DL_{DISAB,ENAB}MULTI_REQ */
+	prim = ((union DL_primitives *)dlmp->b_rptr)->dl_primitive;
+	if (prim != DL_DISABMULTI_REQ && prim != DL_ENABMULTI_REQ) {
+		putnext(q, mp);
+		return;
+	}
+	freeb(mp);
+
+	/* See comments above ip_wput_ctl_writer() for details */
+	ill_refhold(ill);
+	qwriter_ip(ill, ill->ill_wq, dlmp, ip_wput_ctl_writer, NEW_OP, B_FALSE);
 }
 
 /*
@@ -1738,7 +1764,7 @@ ilm_add_v6(ipif_t *ipif, const in6_addr_t *v6group, ilg_stat_t ilgstat,
 	return (ilm);
 }
 
-static void
+void
 ilm_inactive(ilm_t *ilm)
 {
 	FREE_SLIST(ilm->ilm_filter);
@@ -1786,6 +1812,7 @@ ilm_walker_cleanup(ill_t *ill)
 				DTRACE_PROBE3(ill__decr__cnt,
 				    (ill_t *), ill,
 				    (char *), "ilm", (void *), ilm);
+				ASSERT(ill->ill_ilm_cnt > 0);
 				ill->ill_ilm_cnt--;
 				if (ILL_FREE_OK(ill))
 					need_wakeup = B_TRUE;
@@ -1855,6 +1882,7 @@ ilm_delete(ilm_t *ilm)
 	} else {
 		DTRACE_PROBE3(ill__decr__cnt, (ill_t *), ill,
 		    (char *), "ilm", (void *), ilm);
+		ASSERT(ill->ill_ilm_cnt > 0);
 		ill->ill_ilm_cnt--;
 		if (ILL_FREE_OK(ill))
 			need_wakeup = B_TRUE;
@@ -2112,7 +2140,8 @@ ip_set_srcfilter(conn_t *connp, struct group_filter *gf,
     struct ip_msfilter *imsf, ipaddr_t grp, ipif_t *ipif, boolean_t isv4mapped)
 {
 	ilg_t *ilg;
-	int i, err, insrcs, infmode, new_fmode;
+	int i, err, infmode, new_fmode;
+	uint_t insrcs;
 	struct sockaddr_in *sin;
 	struct sockaddr_in6 *sin6;
 	struct in_addr *addrp;
@@ -2481,7 +2510,7 @@ ip_sioctl_msfilter(ipif_t *ipif, sin_t *dummy_sin, queue_t *q, mblk_t *mp,
 	/* existence verified in ip_wput_nondata() */
 	mblk_t *data_mp = mp->b_cont->b_cont;
 	int datalen, err, cmd, minsize;
-	int expsize = 0;
+	uint_t expsize = 0;
 	conn_t *connp;
 	boolean_t isv6, is_v4only_api, getcmd;
 	struct sockaddr_in *gsin;
@@ -3840,7 +3869,7 @@ retry:
 			 * to a failover or unplumb. Retry on the same ilg.
 			 */
 			mutex_exit(&connp->conn_lock);
-			ipsq_exit(ipsq, B_TRUE, B_TRUE);
+			ipsq_exit(ipsq);
 			mutex_enter(&connp->conn_lock);
 			continue;
 		}
@@ -3857,7 +3886,7 @@ retry:
 			(void) ip_delmulti_v6(&v6group, ill, orig_ifindex,
 			    connp->conn_zoneid, B_FALSE, B_TRUE);
 
-		ipsq_exit(ipsq, B_TRUE, B_TRUE);
+		ipsq_exit(ipsq);
 		mutex_enter(&connp->conn_lock);
 		/* Go to the next ilg */
 		i--;

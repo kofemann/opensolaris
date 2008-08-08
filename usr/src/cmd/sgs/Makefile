@@ -27,6 +27,13 @@
 
 include		$(SRC)/cmd/Makefile.cmd
 
+# Note: Why SUBDIRS-common isn't sorted alphabetically
+#
+# The items under SGS are not independent of each other.
+# They must be built in an order that ensures that
+# all dependencies of an item have been built before the
+# item itself.
+#
 SUBDIRS-common= libconv		\
 		.WAIT		\
 		libdl		\
@@ -38,7 +45,6 @@ SUBDIRS-common= libconv		\
 		libldstab	\
 		librtld		\
 		libcrle		\
-		sgsdemangler	\
 		.WAIT		\
 		0@0		\
 		ld		\

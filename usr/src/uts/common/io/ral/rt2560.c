@@ -139,7 +139,7 @@ static ddi_device_acc_attr_t ral_desc_accattr = {
 static ddi_dma_attr_t ral_dma_attr = {
 	DMA_ATTR_V0,			/* dma_attr version */
 	0x0000000000000000ull,		/* dma_attr_addr_lo */
-	0xFFFFFFFFFFFFFFFFull,		/* dma_attr_addr_hi */
+	0xFFFFFFFF,			/* dma_attr_addr_hi */
 	0x00000000FFFFFFFFull,		/* dma_attr_count_max */
 	0x0000000000000001ull,		/* dma_attr_align */
 	0x00000FFF,			/* dma_attr_burstsizes */
@@ -1287,6 +1287,7 @@ skip:		desc->flags = LE_32(RT2560_RX_BUSY);
 uint_t
 ral_softint_handler(caddr_t data)
 {
+	/* LINTED E_BAD_PTR_CAST_ALIGN */
 	struct rt2560_softc *sc = (struct rt2560_softc *)data;
 
 	/*
@@ -1297,7 +1298,7 @@ ral_softint_handler(caddr_t data)
 	if (sc->sc_rx_pend) {
 		sc->sc_rx_pend = 0;
 		RAL_UNLOCK(sc);
-		rt2560_rx_intr((struct rt2560_softc *)data);
+		rt2560_rx_intr(sc);
 		return (DDI_INTR_CLAIMED);
 	}
 	RAL_UNLOCK(sc);
@@ -1513,6 +1514,7 @@ rt2560_mgmt_send(ieee80211com_t *ic, mblk_t *mp, uint8_t type)
 
 		dur = rt2560_txtime(RAL_ACK_SIZE, rate, ic->ic_flags) +
 		    RAL_SIFS;
+		/* LINTED E_BAD_PTR_CAST_ALIGN */
 		*(uint16_t *)wh->i_dur = LE_16(dur);
 
 		/* tell hardware to add timestamp for probe responses */
@@ -1672,6 +1674,7 @@ rt2560_send(ieee80211com_t *ic, mblk_t *mp)
 
 		dur = rt2560_txtime(RAL_ACK_SIZE, rt2560_ack_rate(ic, rate),
 		    ic->ic_flags) + RAL_SIFS;
+		/* LINTED E_BAD_PTR_CAST_ALIGN */
 		*(uint16_t *)wh->i_dur = LE_16(dur);
 	}
 
@@ -2153,7 +2156,7 @@ rt2560_m_stat(void *arg, uint_t stat, uint64_t *val)
 	case MAC_STAT_IFSPEED:
 		*val = ((ic->ic_fixed_rate == IEEE80211_FIXED_RATE_NONE) ?
 		    (rs->ir_rates[ni->in_txrate] & IEEE80211_RATE_VAL)
-		    : ic->ic_fixed_rate) * 5000000ull;
+		    : ic->ic_fixed_rate) / 2 * 1000000;
 		break;
 	case MAC_STAT_NOXMTBUF:
 		*val = sc->sc_tx_nobuf;
@@ -2207,6 +2210,7 @@ rt2560_m_stat(void *arg, uint_t stat, uint64_t *val)
 static uint_t
 rt2560_intr(caddr_t arg)
 {
+	/* LINTED E_BAD_PTR_CAST_ALIGN */
 	struct rt2560_softc *sc = (struct rt2560_softc *)arg;
 	uint32_t r;
 
@@ -2328,8 +2332,10 @@ rt2560_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 		cachelsz = 0x10;
 	sc->sc_cachelsz = cachelsz << 2;
 
-	vendor_id = ddi_get16(ioh, (uint16_t *)(regs + PCI_CONF_VENID));
-	device_id = ddi_get16(ioh, (uint16_t *)(regs + PCI_CONF_DEVID));
+	vendor_id = ddi_get16(ioh,
+	    (uint16_t *)((uintptr_t)regs + PCI_CONF_VENID));
+	device_id = ddi_get16(ioh,
+	    (uint16_t *)((uintptr_t)regs + PCI_CONF_DEVID));
 
 	RAL_DEBUG(RAL_DBG_GLD, "ral: rt2560_attach(): vendor 0x%x, "
 	    "device id 0x%x, cache size %d\n", vendor_id, device_id, cachelsz);
@@ -2339,7 +2345,7 @@ rt2560_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 	 * and enabe bus master.
 	 */
 	command = PCI_COMM_MAE | PCI_COMM_ME;
-	ddi_put16(ioh, (uint16_t *)(regs + PCI_CONF_COMM), command);
+	ddi_put16(ioh, (uint16_t *)((uintptr_t)regs + PCI_CONF_COMM), command);
 	RAL_DEBUG(RAL_DBG_GLD, "ral: rt2560_attach(): "
 	    "set command reg to 0x%x \n", command);
 

@@ -298,7 +298,7 @@ zfs_sort(const void *larg, const void *rarg, void *data)
 
 		if (lstr)
 			ret = strcmp(lstr, rstr);
-		if (lnum < rnum)
+		else if (lnum < rnum)
 			ret = -1;
 		else if (lnum > rnum)
 			ret = 1;

@@ -192,6 +192,7 @@ struct cpuid_info {
 	uint32_t cpi_socket;		/* Chip package/socket type */
 
 	struct mwait_info cpi_mwait;	/* fn 5: monitor/mwait info */
+	uint32_t cpi_apicid;
 };
 
 
@@ -221,6 +222,7 @@ static struct cpuid_info cpuid_info0;
 #define	CPI_MAXEAX_MAX		0x100		/* sanity control */
 #define	CPI_XMAXEAX_MAX		0x80000100
 #define	CPI_FN4_ECX_MAX		0x20		/* sanity: max fn 4 levels */
+#define	CPI_FNB_ECX_MAX		0x20		/* sanity: max fn B levels */
 
 /*
  * Function 4 (Deterministic Cache Parameters) macros
@@ -232,6 +234,7 @@ static struct cpuid_info cpuid_info0;
 #define	CPI_SELF_INIT_CACHE(regs)	BITX((regs)->cp_eax, 8, 8)
 #define	CPI_CACHE_LVL(regs)		BITX((regs)->cp_eax, 7, 5)
 #define	CPI_CACHE_TYPE(regs)		BITX((regs)->cp_eax, 4, 0)
+#define	CPI_CPU_LEVEL_TYPE(regs)	BITX((regs)->cp_ecx, 15, 8)
 
 #define	CPI_CACHE_WAYS(regs)		BITX((regs)->cp_ebx, 31, 22)
 #define	CPI_CACHE_PARTS(regs)		BITX((regs)->cp_ebx, 21, 12)
@@ -1297,6 +1300,8 @@ cpuid_pass1(cpu_t *cpu)
 		}
 	}
 
+	cpi->cpi_apicid = CPI_APIC_ID(cpi);
+
 	/*
 	 * Synthesize chip "revision" and socket type
 	 */
@@ -1457,6 +1462,55 @@ cpuid_pass2(cpu_t *cpu)
 		}
 		default:
 			break;
+		}
+	}
+
+	if (cpi->cpi_maxeax >= 0xB && cpi->cpi_vendor == X86_VENDOR_Intel) {
+		cp->cp_eax = 0xB;
+		cp->cp_ecx = 0;
+
+		(void) __cpuid_insn(cp);
+
+		/*
+		 * Check CPUID.EAX=0BH, ECX=0H:EBX is non-zero, which
+		 * indicates that the extended topology enumeration leaf is
+		 * available.
+		 */
+		if (cp->cp_ebx) {
+			uint32_t x2apic_id;
+			uint_t coreid_shift = 0;
+			uint_t ncpu_per_core = 1;
+			uint_t chipid_shift = 0;
+			uint_t ncpu_per_chip = 1;
+			uint_t i;
+			uint_t level;
+
+			for (i = 0; i < CPI_FNB_ECX_MAX; i++) {
+				cp->cp_eax = 0xB;
+				cp->cp_ecx = i;
+
+				(void) __cpuid_insn(cp);
+				level = CPI_CPU_LEVEL_TYPE(cp);
+
+				if (level == 1) {
+					x2apic_id = cp->cp_edx;
+					coreid_shift = BITX(cp->cp_eax, 4, 0);
+					ncpu_per_core = BITX(cp->cp_ebx, 15, 0);
+				} else if (level == 2) {
+					x2apic_id = cp->cp_edx;
+					chipid_shift = BITX(cp->cp_eax, 4, 0);
+					ncpu_per_chip = BITX(cp->cp_ebx, 15, 0);
+				}
+			}
+
+			cpi->cpi_apicid = x2apic_id;
+			cpi->cpi_ncpu_per_chip = ncpu_per_chip;
+			cpi->cpi_ncore_per_chip = ncpu_per_chip /
+			    ncpu_per_core;
+			cpi->cpi_chipid = x2apic_id >> chipid_shift;
+			cpi->cpi_clogid = x2apic_id & ((1 << chipid_shift) - 1);
+			cpi->cpi_coreid = x2apic_id >> coreid_shift;
+			cpi->cpi_pkgcoreid = cpi->cpi_clogid >> coreid_shift;
 		}
 	}
 
@@ -1996,7 +2050,7 @@ cpuid_pass3(cpu_t *cpu)
 		shft = 0;
 		for (i = 1; i < cpi->cpi_ncpu_shr_last_cache; i <<= 1)
 			shft++;
-		cpi->cpi_last_lvl_cacheid = CPI_APIC_ID(cpi) >> shft;
+		cpi->cpi_last_lvl_cacheid = cpi->cpi_apicid >> shft;
 	}
 
 	/*
@@ -2932,6 +2986,7 @@ static const char l2_cache_str[] = "l2-cache";
 static const char l3_cache_str[] = "l3-cache";
 static const char itlb4k_str[] = "itlb-4K";
 static const char dtlb4k_str[] = "dtlb-4K";
+static const char itlb2M_str[] = "itlb-2M";
 static const char itlb4M_str[] = "itlb-4M";
 static const char dtlb4M_str[] = "dtlb-4M";
 static const char dtlb24_str[] = "dtlb0-2M-4M";
@@ -2951,7 +3006,14 @@ static const struct cachetab {
 	size_t		ct_size;
 	const char	*ct_label;
 } intel_ctab[] = {
-	/* maintain descending order! */
+	/*
+	 * maintain descending order!
+	 *
+	 * Codes ignored - Reason
+	 * ----------------------
+	 * 40H - intel_cpuid_4_cache_info() disambiguates l2/l3 cache
+	 * f0H/f1H - Currently we do not interpret prefetch size by design
+	 */
 	{ 0xe4, 16, 64, 8*1024*1024, l3_cache_str},
 	{ 0xe3, 16, 64, 4*1024*1024, l3_cache_str},
 	{ 0xe2, 16, 64, 2*1024*1024, l3_cache_str},
@@ -2965,6 +3027,8 @@ static const struct cachetab {
 	{ 0xd1, 4, 64, 1*1024*1024, l3_cache_str},
 	{ 0xd0, 4, 64, 512*1024, l3_cache_str},
 	{ 0xca, 4, 0, 512, sh_l2_tlb4k_str},
+	{ 0xc0, 4, 0, 8, dtlb44_str },
+	{ 0xba, 4, 0, 64, dtlb4k_str },
 	{ 0xb4, 4, 0, 256, dtlb4k_str },
 	{ 0xb3, 4, 0, 128, dtlb4k_str },
 	{ 0xb2, 4, 0, 64, itlb4k_str },
@@ -2975,6 +3039,7 @@ static const struct cachetab {
 	{ 0x84, 8, 32, 1024*1024, l2_cache_str},
 	{ 0x83, 8, 32, 512*1024, l2_cache_str},
 	{ 0x82, 8, 32, 256*1024, l2_cache_str},
+	{ 0x80, 8, 64, 512*1024, l2_cache_str},
 	{ 0x7f, 2, 64, 512*1024, l2_cache_str},
 	{ 0x7d, 8, 64, 2*1024*1024, sl2_cache_str},
 	{ 0x7c, 8, 64, 1024*1024, sl2_cache_str},
@@ -2994,15 +3059,21 @@ static const struct cachetab {
 	{ 0x5c, 0, 0, 128, dtlb44_str},
 	{ 0x5b, 0, 0, 64, dtlb44_str},
 	{ 0x5a, 4, 0, 32, dtlb24_str},
+	{ 0x59, 0, 0, 16, dtlb4k_str},
+	{ 0x57, 4, 0, 16, dtlb4k_str},
+	{ 0x56, 4, 0, 16, dtlb4M_str},
 	{ 0x55, 0, 0, 7, itlb24_str},
 	{ 0x52, 0, 0, 256, itlb424_str},
 	{ 0x51, 0, 0, 128, itlb424_str},
 	{ 0x50, 0, 0, 64, itlb424_str},
+	{ 0x4f, 0, 0, 32, itlb4k_str},
+	{ 0x4e, 24, 64, 6*1024*1024, l2_cache_str},
 	{ 0x4d, 16, 64, 16*1024*1024, l3_cache_str},
 	{ 0x4c, 12, 64, 12*1024*1024, l3_cache_str},
 	{ 0x4b, 16, 64, 8*1024*1024, l3_cache_str},
 	{ 0x4a, 12, 64, 6*1024*1024, l3_cache_str},
 	{ 0x49, 16, 64, 4*1024*1024, l3_cache_str},
+	{ 0x48, 12, 64, 3*1024*1024, l2_cache_str},
 	{ 0x47, 8, 64, 8*1024*1024, l3_cache_str},
 	{ 0x46, 4, 64, 4*1024*1024, l3_cache_str},
 	{ 0x45, 4, 32, 2*1024*1024, l2_cache_str},
@@ -3022,12 +3093,14 @@ static const struct cachetab {
 	{ 0x25, 8, 64, 2048*1024, sl3_cache_str},
 	{ 0x23, 8, 64, 1024*1024, sl3_cache_str},
 	{ 0x22, 4, 64, 512*1024, sl3_cache_str},
+	{ 0x0e, 6, 64, 24*1024, l1_dcache_str},
 	{ 0x0d, 4, 32, 16*1024, l1_dcache_str},
 	{ 0x0c, 4, 32, 16*1024, l1_dcache_str},
 	{ 0x0b, 4, 0, 4, itlb4M_str},
 	{ 0x0a, 2, 32, 8*1024, l1_dcache_str},
 	{ 0x08, 4, 32, 16*1024, l1_icache_str},
 	{ 0x06, 4, 32, 8*1024, l1_icache_str},
+	{ 0x05, 4, 0, 32, dtlb4M_str},
 	{ 0x04, 4, 0, 8, dtlb4M_str},
 	{ 0x03, 4, 0, 64, dtlb4k_str},
 	{ 0x02, 4, 0, 2, itlb4M_str},
@@ -3102,7 +3175,7 @@ intel_walk_cacheinfo(struct cpuid_info *cpi,
     void *arg, int (*func)(void *, const struct cachetab *))
 {
 	const struct cachetab *ct;
-	struct cachetab des_49_ct;
+	struct cachetab des_49_ct, des_b1_ct;
 	uint8_t *dp;
 	int i;
 
@@ -3113,10 +3186,24 @@ intel_walk_cacheinfo(struct cpuid_info *cpi,
 		 * For overloaded descriptor 0x49 we use cpuid function 4
 		 * if supported by the current processor, to create
 		 * cache information.
+		 * For overloaded descriptor 0xb1 we use X86_PAE flag
+		 * to disambiguate the cache information.
 		 */
 		if (*dp == 0x49 && cpi->cpi_maxeax >= 0x4 &&
 		    intel_cpuid_4_cache_info(&des_49_ct, cpi) == 1) {
 				ct = &des_49_ct;
+		} else if (*dp == 0xb1) {
+			des_b1_ct.ct_code = 0xb1;
+			des_b1_ct.ct_assoc = 4;
+			des_b1_ct.ct_line_size = 0;
+			if (x86_feature & X86_PAE) {
+				des_b1_ct.ct_size = 8;
+				des_b1_ct.ct_label = itlb2M_str;
+			} else {
+				des_b1_ct.ct_size = 4;
+				des_b1_ct.ct_label = itlb4M_str;
+			}
+			ct = &des_b1_ct;
 		} else {
 			if ((ct = find_cacheent(intel_ctab, *dp)) == NULL) {
 				continue;
@@ -3625,7 +3712,7 @@ add_cpunode2devtree(processorid_t cpu_id, struct cpuid_info *cpi)
 		(void) ndi_prop_update_int(DDI_DEV_T_NONE, cpu_devi,
 		    "chunks", CPI_CHUNKS(cpi));
 		(void) ndi_prop_update_int(DDI_DEV_T_NONE, cpu_devi,
-		    "apic-id", CPI_APIC_ID(cpi));
+		    "apic-id", cpi->cpi_apicid);
 		if (cpi->cpi_chipid >= 0) {
 			(void) ndi_prop_update_int(DDI_DEV_T_NONE, cpu_devi,
 			    "chip#", cpi->cpi_chipid);

@@ -605,7 +605,8 @@ static int	conn_set_held_ipif(conn_t *, ipif_t **, ipif_t *);
 
 static int	ip_open(queue_t *q, dev_t *devp, int flag, int sflag,
 		    cred_t *credp, boolean_t isv6);
-static mblk_t	*ip_wput_attach_llhdr(mblk_t *, ire_t *, ip_proc_t, uint32_t);
+static mblk_t	*ip_wput_attach_llhdr(mblk_t *, ire_t *, ip_proc_t, uint32_t,
+		    ipha_t **);
 
 static void	icmp_frag_needed(queue_t *, mblk_t *, int, zoneid_t,
 		    ip_stack_t *);
@@ -3790,12 +3791,6 @@ ip_arp_excl(ipsq_t *ipsq, queue_t *rq, mblk_t *mp, void *dummy_arg)
 	arh = (arh_t *)mp->b_cont->b_rptr;
 	bcopy((char *)&arh[1] + arh->arh_hlen, &src, IP_ADDR_LEN);
 
-	/* Handle failures due to probes */
-	if (src == 0) {
-		bcopy((char *)&arh[1] + 2 * arh->arh_hlen + IP_ADDR_LEN, &src,
-		    IP_ADDR_LEN);
-	}
-
 	(void) mac_colon_addr((uint8_t *)(arh + 1), arh->arh_hlen, hbuf,
 	    sizeof (hbuf));
 	(void) ip_dot_addr(src, sbuf);
@@ -5492,7 +5487,7 @@ ip_modclose(ill_t *ill)
 	mi_close_free((IDP)ill);
 	q->q_ptr = WR(q)->q_ptr = NULL;
 
-	ipsq_exit(ipsq, B_TRUE, B_TRUE);
+	ipsq_exit(ipsq);
 
 	return (0);
 }
@@ -6841,8 +6836,9 @@ zero_spi_check(queue_t *q, mblk_t *mp, ire_t *ire, ill_t *recv_ill,
 	ipha_t *ipha;
 	udpha_t *udpha;
 	uint32_t *spi;
+	uint32_t esp_ports;
 	uint8_t *orptr;
-	boolean_t udp_pkt, free_ire;
+	boolean_t free_ire;
 
 	if (DB_TYPE(mp) == M_CTL) {
 		/*
@@ -6907,17 +6903,18 @@ zero_spi_check(queue_t *q, mblk_t *mp, ire_t *ire, ill_t *recv_ill,
 	orptr = mp->b_rptr;
 	mp->b_rptr += shift;
 
+	udpha = (udpha_t *)(orptr + iph_len);
 	if (*spi == 0) {
 		ASSERT((uint8_t *)ipha == orptr);
-		udpha = (udpha_t *)(orptr + iph_len);
 		udpha->uha_length = htons(plen - shift - iph_len);
 		iph_len += sizeof (udpha_t);	/* For the call to ovbcopy(). */
-		udp_pkt = B_TRUE;
+		esp_ports = 0;
 	} else {
-		udp_pkt = B_FALSE;
+		esp_ports = *((uint32_t *)udpha);
+		ASSERT(esp_ports != 0);
 	}
 	ovbcopy(orptr, orptr + shift, iph_len);
-	if (!udp_pkt) /* Punt up for ESP processing. */ {
+	if (esp_ports != 0) /* Punt up for ESP processing. */ {
 		ipha = (ipha_t *)(orptr + shift);
 
 		free_ire = (ire == NULL);
@@ -6936,12 +6933,12 @@ zero_spi_check(queue_t *q, mblk_t *mp, ire_t *ire, ill_t *recv_ill,
 			}
 		}
 
-		ip_proto_input(q, mp, ipha, ire, recv_ill, B_TRUE);
+		ip_proto_input(q, mp, ipha, ire, recv_ill, esp_ports);
 		if (free_ire)
 			ire_refrele(ire);
 	}
 
-	return (udp_pkt);
+	return (esp_ports == 0);
 }
 
 /*
@@ -9696,7 +9693,7 @@ ip_modopen(queue_t *q, dev_t *devp, int flag, int sflag, cred_t *credp)
 	}
 
 	/* ill_init initializes the ipsq marking this thread as writer */
-	ipsq_exit(ill->ill_phyint->phyint_ipsq, B_TRUE, B_TRUE);
+	ipsq_exit(ill->ill_phyint->phyint_ipsq);
 	/* Wait for the DL_INFO_ACK */
 	mutex_enter(&ill->ill_lock);
 	while (ill->ill_state_flags & ILL_LL_SUBNET_PENDING) {
@@ -12470,7 +12467,7 @@ reass_done:
 		/* Update per ipfb and ill byte counts */
 		ipfb->ipfb_count += ipf->ipf_count;
 		ASSERT(ipfb->ipfb_count > 0);	/* Wraparound */
-		ill->ill_frag_count += ipf->ipf_count;
+		atomic_add_32(&ill->ill_frag_count, ipf->ipf_count);
 		/* If the frag timer wasn't already going, start it. */
 		mutex_enter(&ill->ill_lock);
 		ill_frag_timer_start(ill);
@@ -12516,7 +12513,7 @@ reass_done:
 		/* Update per ipfb and ill byte counts */
 		ipfb->ipfb_count += msg_len;
 		ASSERT(ipfb->ipfb_count > 0);	/* Wraparound */
-		ill->ill_frag_count += msg_len;
+		atomic_add_32(&ill->ill_frag_count, msg_len);
 		if (frag_offset_flags & IPH_MF) {
 			/* More to come. */
 			ipf->ipf_end = end;
@@ -12541,7 +12538,7 @@ reass_done:
 			/* Update per ipfb and ill byte counts */
 			ipfb->ipfb_count += count;
 			ASSERT(ipfb->ipfb_count > 0); /* Wraparound */
-			ill->ill_frag_count += count;
+			atomic_add_32(&ill->ill_frag_count, count);
 		}
 		if (ret == IP_REASS_PARTIAL) {
 			goto reass_done;
@@ -12580,7 +12577,7 @@ reass_done:
 	if (ipf != NULL)
 		ipf->ipf_ptphn = ipfp;
 	ipfp[0] = ipf;
-	ill->ill_frag_count -= count;
+	atomic_add_32(&ill->ill_frag_count, -count);
 	ASSERT(ipfb->ipfb_count >= count);
 	ipfb->ipfb_count -= count;
 	ipfb->ipfb_frag_pkts--;
@@ -14038,6 +14035,11 @@ ip_fast_forward(ire_t *ire, ipaddr_t dst,  ill_t *ill, mblk_t *mp)
 		DTRACE_PROBE1(ip4__physical__out__end, mblk_t *, mp);
 		if (mp == NULL)
 			goto drop;
+
+		DTRACE_IP7(send, mblk_t *, mp, conn_t *, NULL, void_ip_t *,
+		    ipha, __dtrace_ipsr_ill_t *, stq_ill, ipha_t *, ipha,
+		    ip6_t *, NULL, int, 0);
+
 		putnext(ire->ire_stq, mp);
 	}
 	return (ire);
@@ -14391,7 +14393,7 @@ ip_rput_process_broadcast(queue_t **qp, mblk_t *mp, ire_t *ire, ipha_t *ipha,
 					break;
 				default:
 					ip_proto_input(q, mp1, ipha, ire, ill,
-					    B_FALSE);
+					    0);
 					break;
 				}
 			}
@@ -15066,6 +15068,10 @@ ip_input(ill_t *ill, ill_rx_ring_t *ip_ring, mblk_t *mp_chain,
 		/* Obtain the dst of the current packet */
 		dst = ipha->ipha_dst;
 
+		DTRACE_IP7(receive, mblk_t *, first_mp, conn_t *, NULL,
+		    void_ip_t *, ipha, __dtrace_ipsr_ill_t *, ill, ipha_t *,
+		    ipha, ip6_t *, NULL, int, 0);
+
 		/*
 		 * The following test for loopback is faster than
 		 * IP_LOOPBACK_ADDR(), because it avoids any bitwise
@@ -15381,7 +15387,7 @@ local:
 			ire = NULL;
 			continue;
 		default:
-			ip_proto_input(q, first_mp, ipha, ire, ill, B_FALSE);
+			ip_proto_input(q, first_mp, ipha, ire, ill, 0);
 			continue;
 		}
 	}
@@ -15447,111 +15453,91 @@ ip_rput_dlpi(queue_t *q, mblk_t *mp)
 {
 	dl_ok_ack_t	*dloa = (dl_ok_ack_t *)mp->b_rptr;
 	dl_error_ack_t	*dlea = (dl_error_ack_t *)dloa;
-	ill_t		*ill = (ill_t *)q->q_ptr;
-	boolean_t	pending;
+	ill_t		*ill = q->q_ptr;
+	t_uscalar_t	prim = dloa->dl_primitive;
+	t_uscalar_t	reqprim = DL_PRIM_INVAL;
 
 	ip1dbg(("ip_rput_dlpi"));
-	if (dloa->dl_primitive == DL_ERROR_ACK) {
-		ip2dbg(("ip_rput_dlpi(%s): DL_ERROR_ACK %s (0x%x): "
-		    "%s (0x%x), unix %u\n", ill->ill_name,
-		    dl_primstr(dlea->dl_error_primitive),
-		    dlea->dl_error_primitive,
-		    dl_errstr(dlea->dl_errno),
-		    dlea->dl_errno,
-		    dlea->dl_unix_errno));
-	}
 
 	/*
 	 * If we received an ACK but didn't send a request for it, then it
 	 * can't be part of any pending operation; discard up-front.
 	 */
-	switch (dloa->dl_primitive) {
-	case DL_NOTIFY_IND:
-		pending = B_TRUE;
-		break;
+	switch (prim) {
 	case DL_ERROR_ACK:
-		pending = ill_dlpi_pending(ill, dlea->dl_error_primitive);
+		reqprim = dlea->dl_error_primitive;
+		ip2dbg(("ip_rput_dlpi(%s): DL_ERROR_ACK for %s (0x%x): %s "
+		    "(0x%x), unix %u\n", ill->ill_name, dl_primstr(reqprim),
+		    reqprim, dl_errstr(dlea->dl_errno), dlea->dl_errno,
+		    dlea->dl_unix_errno));
 		break;
 	case DL_OK_ACK:
-		pending = ill_dlpi_pending(ill, dloa->dl_correct_primitive);
+		reqprim = dloa->dl_correct_primitive;
 		break;
 	case DL_INFO_ACK:
-		pending = ill_dlpi_pending(ill, DL_INFO_REQ);
+		reqprim = DL_INFO_REQ;
 		break;
 	case DL_BIND_ACK:
-		pending = ill_dlpi_pending(ill, DL_BIND_REQ);
+		reqprim = DL_BIND_REQ;
 		break;
 	case DL_PHYS_ADDR_ACK:
-		pending = ill_dlpi_pending(ill, DL_PHYS_ADDR_REQ);
+		reqprim = DL_PHYS_ADDR_REQ;
 		break;
 	case DL_NOTIFY_ACK:
-		pending = ill_dlpi_pending(ill, DL_NOTIFY_REQ);
+		reqprim = DL_NOTIFY_REQ;
 		break;
 	case DL_CONTROL_ACK:
-		pending = ill_dlpi_pending(ill, DL_CONTROL_REQ);
+		reqprim = DL_CONTROL_REQ;
 		break;
 	case DL_CAPABILITY_ACK:
-		pending = ill_dlpi_pending(ill, DL_CAPABILITY_REQ);
+		reqprim = DL_CAPABILITY_REQ;
 		break;
-	default:
-		/* Not a DLPI message we support or were expecting */
-		freemsg(mp);
-		return;
 	}
 
-	if (!pending) {
-		freemsg(mp);
-		return;
-	}
-
-	switch (dloa->dl_primitive) {
-	case DL_ERROR_ACK:
-		if (dlea->dl_error_primitive == DL_UNBIND_REQ) {
-			mutex_enter(&ill->ill_lock);
-			ill->ill_state_flags &= ~ILL_DL_UNBIND_IN_PROGRESS;
-			cv_signal(&ill->ill_cv);
-			mutex_exit(&ill->ill_lock);
+	if (prim != DL_NOTIFY_IND) {
+		if (reqprim == DL_PRIM_INVAL ||
+		    !ill_dlpi_pending(ill, reqprim)) {
+			/* Not a DLPI message we support or expected */
+			freemsg(mp);
+			return;
 		}
+		ip1dbg(("ip_rput: received %s for %s\n", dl_primstr(prim),
+		    dl_primstr(reqprim)));
+	}
+
+	switch (reqprim) {
+	case DL_UNBIND_REQ:
+		/*
+		 * NOTE: we mark the unbind as complete even if we got a
+		 * DL_ERROR_ACK, since there's not much else we can do.
+		 */
+		mutex_enter(&ill->ill_lock);
+		ill->ill_state_flags &= ~ILL_DL_UNBIND_IN_PROGRESS;
+		cv_signal(&ill->ill_cv);
+		mutex_exit(&ill->ill_lock);
 		break;
 
-	case DL_OK_ACK:
-		ip1dbg(("ip_rput: DL_OK_ACK for %s\n",
-		    dl_primstr((int)dloa->dl_correct_primitive)));
-		switch (dloa->dl_correct_primitive) {
-		case DL_UNBIND_REQ:
-			mutex_enter(&ill->ill_lock);
-			ill->ill_state_flags &= ~ILL_DL_UNBIND_IN_PROGRESS;
-			cv_signal(&ill->ill_cv);
-			mutex_exit(&ill->ill_lock);
-			break;
-
-		case DL_ENABMULTI_REQ:
+	case DL_ENABMULTI_REQ:
+		if (prim == DL_OK_ACK) {
 			if (ill->ill_dlpi_multicast_state == IDS_INPROGRESS)
 				ill->ill_dlpi_multicast_state = IDS_OK;
-			break;
 		}
-		break;
-	default:
 		break;
 	}
 
 	/*
-	 * We know the message is one we're waiting for (or DL_NOTIFY_IND),
-	 * and we need to become writer to continue to process it. If it's not
-	 * a DL_NOTIFY_IND, we assume we're in the middle of an exclusive
-	 * operation and pass CUR_OP.  If this isn't true, we'll end up doing
-	 * some work as part of the current exclusive operation that actually
-	 * is not part of it -- which is wrong, but better than the
-	 * alternative of deadlock (if NEW_OP is always used).  Someday, we
-	 * should track which DLPI requests have ACKs that we wait on
-	 * synchronously so we can know whether to use CUR_OP or NEW_OP.
+	 * The message is one we're waiting for (or DL_NOTIFY_IND), but we
+	 * need to become writer to continue to process it.  Because an
+	 * exclusive operation doesn't complete until replies to all queued
+	 * DLPI messages have been received, we know we're in the middle of an
+	 * exclusive operation and pass CUR_OP (except for DL_NOTIFY_IND).
 	 *
 	 * As required by qwriter_ip(), we refhold the ill; it will refrele.
 	 * Since this is on the ill stream we unconditionally bump up the
 	 * refcount without doing ILL_CAN_LOOKUP().
 	 */
 	ill_refhold(ill);
-	if (dloa->dl_primitive == DL_NOTIFY_IND)
+	if (prim == DL_NOTIFY_IND)
 		qwriter_ip(ill, q, mp, ip_rput_dlpi_writer, NEW_OP, B_FALSE);
 	else
 		qwriter_ip(ill, q, mp, ip_rput_dlpi_writer, CUR_OP, B_FALSE);
@@ -15610,9 +15596,13 @@ ip_rput_dlpi_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
 		    dl_primstr(dlea->dl_error_primitive)));
 
 		switch (dlea->dl_error_primitive) {
+		case DL_DISABMULTI_REQ:
+			if (!ill->ill_isv6)
+				ipsq_current_finish(ipsq);
+			ill_dlpi_done(ill, dlea->dl_error_primitive);
+			break;
 		case DL_PROMISCON_REQ:
 		case DL_PROMISCOFF_REQ:
-		case DL_DISABMULTI_REQ:
 		case DL_UNBIND_REQ:
 		case DL_ATTACH_REQ:
 		case DL_INFO_REQ:
@@ -15697,6 +15687,8 @@ ip_rput_dlpi_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
 			}
 			break;
 		case DL_ENABMULTI_REQ:
+			if (!ill->ill_isv6)
+				ipsq_current_finish(ipsq);
 			ill_dlpi_done(ill, DL_ENABMULTI_REQ);
 
 			if (ill->ill_dlpi_multicast_state == IDS_INPROGRESS)
@@ -16214,10 +16206,14 @@ ip_rput_dlpi_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
 		    dl_primstr((int)dloa->dl_correct_primitive),
 		    dloa->dl_correct_primitive));
 		switch (dloa->dl_correct_primitive) {
-		case DL_PROMISCON_REQ:
-		case DL_PROMISCOFF_REQ:
 		case DL_ENABMULTI_REQ:
 		case DL_DISABMULTI_REQ:
+			if (!ill->ill_isv6)
+				ipsq_current_finish(ipsq);
+			ill_dlpi_done(ill, dloa->dl_correct_primitive);
+			break;
+		case DL_PROMISCON_REQ:
+		case DL_PROMISCOFF_REQ:
 		case DL_UNBIND_REQ:
 		case DL_ATTACH_REQ:
 			ill_dlpi_done(ill, dloa->dl_correct_primitive);
@@ -17017,7 +17013,7 @@ ip_fanout_proto_again(mblk_t *ipsec_mp, ill_t *ill, ill_t *recv_ill, ire_t *ire)
 				break;
 			default:
 				ip_proto_input(ill->ill_rq, ipsec_mp, ipha, ire,
-				    recv_ill, B_FALSE);
+				    recv_ill, 0);
 				if (ire_need_rele)
 					ire_refrele(ire);
 				break;
@@ -17127,8 +17123,9 @@ ill_frag_timer_start(ill_t *ill)
  */
 void
 ip_proto_input(queue_t *q, mblk_t *mp, ipha_t *ipha, ire_t *ire,
-    ill_t *recv_ill, boolean_t esp_in_udp_packet)
+    ill_t *recv_ill, uint32_t esp_udp_ports)
 {
+	boolean_t esp_in_udp_packet = (esp_udp_ports != 0);
 	ill_t	*ill = (ill_t *)q->q_ptr;
 	uint32_t	sum;
 	uint32_t	u1;
@@ -17606,6 +17603,8 @@ ip_proto_input(queue_t *q, mblk_t *mp, ipha_t *ipha, ire_t *ire,
 		} else {
 			ii = (ipsec_in_t *)first_mp->b_rptr;
 		}
+
+		ii->ipsec_in_esp_udp_ports = esp_udp_ports;
 
 		if (!ipsec_loaded(ipss)) {
 			ip_proto_not_sup(q, first_mp, IP_FF_SEND_ICMP,
@@ -23428,6 +23427,14 @@ nullstq:
 			 */
 			out_ill = ire_to_ill(ire);
 
+			/*
+			 * DTrace this as ip:::send.  A blocked packet will
+			 * fire the send probe, but not the receive probe.
+			 */
+			DTRACE_IP7(send, mblk_t *, first_mp, conn_t *, NULL,
+			    void_ip_t *, ipha, __dtrace_ipsr_ill_t *, out_ill,
+			    ipha_t *, ipha, ip6_t *, NULL, int, 1);
+
 			DTRACE_PROBE4(ip4__loopback__out__start,
 			    ill_t *, NULL, ill_t *, out_ill,
 			    ipha_t *, ipha, mblk_t *, first_mp);
@@ -23453,6 +23460,14 @@ nullstq:
 		}
 
 		out_ill = ire_to_ill(ire);
+
+		/*
+		 * DTrace this as ip:::send.  A blocked packet will fire the
+		 * send probe, but not the receive probe.
+		 */
+		DTRACE_IP7(send, mblk_t *, first_mp, conn_t *, NULL,
+		    void_ip_t *, ipha, __dtrace_ipsr_ill_t *, out_ill,
+		    ipha_t *, ipha, ip6_t *, NULL, int, 1);
 
 		DTRACE_PROBE4(ip4__loopback__out__start,
 		    ill_t *, NULL, ill_t *, out_ill,
@@ -23985,6 +24000,10 @@ free_mmd:		IP_STAT(ipst, ip_frag_mdt_discarded);
 		 * the header, so this is easy to pass to ip_csum.
 		 */
 		ipha->ipha_hdr_checksum = ip_csum_hdr(ipha);
+
+		DTRACE_IP7(send, mblk_t *, md_mp, conn_t *, NULL, void_ip_t *,
+		    ipha, __dtrace_ipsr_ill_t *, ill, ipha_t *, ipha, ip6_t *,
+		    NULL, int, 0);
 
 		/*
 		 * Record offset and size of header and data of the next packet
@@ -24529,6 +24548,10 @@ ip_wput_frag(ire_t *ire, mblk_t *mp_orig, ip_pkt_t pkt_type, uint32_t max_frag,
 		DTRACE_PROBE1(ip4__physical__out__end, mblk_t *, xmit_mp);
 
 		if (xmit_mp != NULL) {
+			DTRACE_IP7(send, mblk_t *, xmit_mp, conn_t *, NULL,
+			    void_ip_t *, ipha, __dtrace_ipsr_ill_t *, out_ill,
+			    ipha_t *, ipha, ip6_t *, NULL, int, 0);
+
 			putnext(q, xmit_mp);
 
 			BUMP_MIB(out_ill->ill_ip_mib, ipIfStatsHCOutTransmits);
@@ -24834,6 +24857,11 @@ ip_wput_frag(ire_t *ire, mblk_t *mp_orig, ip_pkt_t pkt_type, uint32_t max_frag,
 				mp_orig = mp;
 
 			if (xmit_mp != NULL) {
+				DTRACE_IP7(send, mblk_t *, xmit_mp, conn_t *,
+				    NULL, void_ip_t *, ipha,
+				    __dtrace_ipsr_ill_t *, out_ill, ipha_t *,
+				    ipha, ip6_t *, NULL, int, 0);
+
 				putnext(q, xmit_mp);
 
 				BUMP_MIB(out_ill->ill_ip_mib,
@@ -25050,6 +25078,10 @@ ip_wput_local(queue_t *q, ill_t *ill, ipha_t *ipha, mblk_t *mp, ire_t *ire,
 
 	if (first_mp == NULL)
 		return;
+
+	DTRACE_IP7(receive, mblk_t *, first_mp, conn_t *, NULL, void_ip_t *,
+	    ipha, __dtrace_ipsr_ill_t *, ill, ipha_t *, ipha, ip6_t *, NULL,
+	    int, 1);
 
 	ipst->ips_loopback_packets++;
 
@@ -25478,7 +25510,8 @@ ip_wput_multicast(queue_t *q, mblk_t *mp, ipif_t *ipif, zoneid_t zoneid)
  * marking, if needed.
  */
 static mblk_t *
-ip_wput_attach_llhdr(mblk_t *mp, ire_t *ire, ip_proc_t proc, uint32_t ill_index)
+ip_wput_attach_llhdr(mblk_t *mp, ire_t *ire, ip_proc_t proc,
+    uint32_t ill_index, ipha_t **iphap)
 {
 	uint_t	hlen;
 	ipha_t *ipha;
@@ -25571,8 +25604,15 @@ unlock_err:
 			ip_process(proc, &mp1, ill_index);
 			if (mp1 == NULL)
 				return (NULL);
+
+			if (mp1->b_cont == NULL)
+				ipha = NULL;
+			else
+				ipha = (ipha_t *)mp1->b_cont->b_rptr;
 		}
 	}
+
+	*iphap = ipha;
 	return (mp1);
 #undef rptr
 }
@@ -25766,6 +25806,14 @@ send:
 
 		/* PFHooks: LOOPBACK_OUT */
 		out_ill = ire_to_ill(ire);
+
+		/*
+		 * DTrace this as ip:::send.  A blocked packet will fire the
+		 * send probe, but not the receive probe.
+		 */
+		DTRACE_IP7(send, mblk_t *, ipsec_mp, conn_t *, NULL,
+		    void_ip_t *, ip6h, __dtrace_ipsr_ill_t *, out_ill,
+		    ipha_t *, NULL, ip6_t *, ip6h, int, 1);
 
 		DTRACE_PROBE4(ip6__loopback__out__start,
 		    ill_t *, NULL, ill_t *, out_ill,
@@ -26102,6 +26150,14 @@ send:
 
 		/* PFHooks: LOOPBACK_OUT */
 		out_ill = ire_to_ill(ire);
+
+		/*
+		 * DTrace this as ip:::send.  A blocked packet will fire the
+		 * send probe, but not the receive probe.
+		 */
+		DTRACE_IP7(send, mblk_t *, ipsec_mp, conn_t *, NULL,
+		    void_ip_t *, ipha, __dtrace_ipsr_ill_t *, out_ill,
+		    ipha_t *, ipha, ip6_t *, NULL, int, 1);
 
 		DTRACE_PROBE4(ip4__loopback__out__start,
 		    ill_t *, NULL, ill_t *, out_ill,
@@ -27100,7 +27156,7 @@ ip_process_ioctl(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *arg)
 	ip_ioctl_finish(q, mp, err, IPI2MODE(ipip), ipsq);
 
 	if (entered_ipsq)
-		ipsq_exit(ipsq, B_TRUE, B_TRUE);
+		ipsq_exit(ipsq);
 }
 
 /*
@@ -29843,6 +29899,7 @@ ipxmit_state_t
 ip_xmit_v4(mblk_t *mp, ire_t *ire, ipsec_out_t *io, boolean_t flow_ctl_enabled)
 {
 	nce_t		*arpce;
+	ipha_t		*ipha;
 	queue_t		*q;
 	int		ill_index;
 	mblk_t		*nxt_mp, *first_mp;
@@ -29890,13 +29947,14 @@ ip_xmit_v4(mblk_t *mp, ire_t *ire, ipsec_out_t *io, boolean_t flow_ctl_enabled)
 			out_ill = ire_to_ill(ire);
 			ill_index = out_ill->ill_phyint->phyint_ifindex;
 			first_mp = ip_wput_attach_llhdr(mp, ire, proc,
-			    ill_index);
+			    ill_index, &ipha);
 			if (first_mp == NULL) {
 				xmit_drop = B_TRUE;
 				BUMP_MIB(out_ill->ill_ip_mib,
 				    ipIfStatsOutDiscards);
 				goto next_mp;
 			}
+
 			/* non-ipsec hw accel case */
 			if (io == NULL || !io->ipsec_out_accelerated) {
 				/* send it */
@@ -29917,6 +29975,12 @@ ip_xmit_v4(mblk_t *mp, ire_t *ire, ipsec_out_t *io, boolean_t flow_ctl_enabled)
 					}
 					UPDATE_IP_MIB_OB_COUNTERS(out_ill,
 					    pkt_len);
+
+					DTRACE_IP7(send, mblk_t *, first_mp,
+					    conn_t *, NULL, void_ip_t *, ipha,
+					    __dtrace_ipsr_ill_t *, out_ill,
+					    ipha_t *, ipha, ip6_t *, NULL, int,
+					    0);
 
 					putnext(q, first_mp);
 				} else {
@@ -29941,6 +30005,13 @@ ip_xmit_v4(mblk_t *mp, ire_t *ire, ipsec_out_t *io, boolean_t flow_ctl_enabled)
 				} else {
 					UPDATE_IP_MIB_OB_COUNTERS(ill1,
 					    pkt_len);
+
+					DTRACE_IP7(send, mblk_t *, first_mp,
+					    conn_t *, NULL, void_ip_t *, ipha,
+					    __dtrace_ipsr_ill_t *, ill1,
+					    ipha_t *, ipha, ip6_t *, NULL,
+					    int, 0);
+
 					ipsec_hw_putnext(ire->ire_stq, mp);
 				}
 			}

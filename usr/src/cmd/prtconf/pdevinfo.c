@@ -128,10 +128,10 @@ static const dumpops_t sysprop_dumpops = {
 #define	NUM_ELEMENTS(A) (sizeof (A) / sizeof (A[0]))
 
 static int prop_type_guess(const dumpops_t *, void *, void **, int *);
-static void dump_prop_list_common(const dumpops_t *, int, void *);
 static void walk_driver(di_node_t, di_devlink_handle_t);
 static int dump_devs(di_node_t, void *);
-static int dump_prop_list(const dumpops_t *, const char *, int, di_node_t);
+static int dump_prop_list(const dumpops_t *, const char *,
+				int, void *, dev_t, int *);
 static int _error(const char *, ...);
 static int is_openprom();
 static void walk(uchar_t *, uint_t, int);
@@ -141,6 +141,7 @@ static void dump_prodinfo(di_prom_handle_t, di_node_t, const char **,
 static di_node_t find_node_by_name(di_prom_handle_t, di_node_t, char *);
 static int get_propval_by_name(di_prom_handle_t, di_node_t,
 				const char *, uchar_t **);
+static int dump_compatible(char *, int, di_node_t);
 static void dump_pathing_data(int, di_node_t);
 static void dump_minor_data(int, di_node_t, di_devlink_handle_t);
 static void dump_link_data(int, di_node_t, di_devlink_handle_t);
@@ -415,7 +416,6 @@ minor_ptr_set(di_minor_t minor, void *ptr)
 	di_minor_private_set(minor, (void *)data);
 }
 
-
 /*
  * In this comment typed properties are those of type DI_PROP_TYPE_UNDEF_IT,
  * DI_PROP_TYPE_BOOLEAN, DI_PROP_TYPE_INT, DI_PROP_TYPE_INT64,
@@ -502,20 +502,90 @@ prop_type_guess(const dumpops_t *propops, void *prop, void **prop_data,
 	return (len);
 }
 
-static void
-dump_prop_list_common(const dumpops_t *dumpops, int ilev, void *node)
+/*
+ * Returns 0 if nothing is printed, 1 otherwise
+ */
+static int
+dump_prop_list(const dumpops_t *dumpops, const char *name, int ilev,
+    void *node, dev_t dev, int *compat_printed)
 {
-	void *prop = DI_PROP_NIL, *prop_data;
-	char *p;
-	int i, prop_type, nitems;
+	void		*prop = DI_PROP_NIL, *prop_data;
+	di_minor_t	minor;
+	char		*p;
+	int		i, prop_type, nitems;
+	dev_t		pdev;
+	int		nprop = 0;
+
+	if (compat_printed)
+		*compat_printed = 0;
 
 	while ((prop = NEXTPROP(dumpops)(node, prop)) != DI_PROP_NIL) {
-		nitems = prop_type_guess(dumpops, prop, &prop_data, &prop_type);
+
+		/* Skip properties a dev_t oriented caller is not requesting */
+		if (PROPDEVT(dumpops)) {
+			pdev = PROPDEVT(dumpops)(prop);
+
+			if (dev == DDI_DEV_T_ANY) {
+				/*
+				 * Caller requesting print all properties
+				 */
+				goto print;
+			} else if (dev == DDI_DEV_T_NONE) {
+				/*
+				 * Caller requesting print of properties
+				 * associated with devinfo (not minor).
+				 */
+				if ((pdev == DDI_DEV_T_ANY) ||
+				    (pdev == DDI_DEV_T_NONE))
+					goto print;
+
+				/*
+				 * Property has a minor association, see if
+				 * we have a minor with this dev_t. If there
+				 * is no such minor we print the property now
+				 * so it gets displayed.
+				 */
+				minor = DI_MINOR_NIL;
+				while ((minor = di_minor_next((di_node_t)node,
+				    minor)) != DI_MINOR_NIL) {
+					if (di_minor_devt(minor) == pdev)
+						break;
+				}
+				if (minor == DI_MINOR_NIL)
+					goto print;
+			} else if (dev == pdev) {
+				/*
+				 * Caller requesting print of properties
+				 * associated with a specific matching minor
+				 * node.
+				 */
+				goto print;
+			}
+
+			/* otherwise skip print */
+			continue;
+		}
+
+print:		nitems = prop_type_guess(dumpops, prop, &prop_data, &prop_type);
 		if (nitems < 0)
 			continue;
 
+		if (nprop == 0) {
+			if (name) {
+				indent_to_level(ilev);
+				(void) printf("%s properties:\n", name);
+			}
+			ilev++;
+		}
+		nprop++;
+
 		indent_to_level(ilev);
 		(void) printf("name='%s' type=", PROPNAME(dumpops)(prop));
+
+		/* report 'compatible' as processed */
+		if (compat_printed &&
+		    (strcmp(PROPNAME(dumpops)(prop), "compatible") == 0))
+			*compat_printed = 1;
 
 		switch (prop_type) {
 		case DI_PROP_TYPE_UNDEF_IT:
@@ -548,15 +618,13 @@ dump_prop_list_common(const dumpops_t *dumpops, int ilev, void *node)
 			(void) printf(" items=%i", nitems);
 
 		/* print the major and minor numbers for a device property */
-		if (PROPDEVT(dumpops) != NULL) {
-			dev_t dev;
-
-			dev = PROPDEVT(dumpops)(prop);
-			if (dev != DDI_DEV_T_NONE) {
-				(void) printf(" dev=(%u,%u)",
-				    (uint_t)major(dev), (uint_t)minor(dev));
-			} else {
+		if (PROPDEVT(dumpops)) {
+			if ((pdev == DDI_DEV_T_NONE) ||
+			    (pdev == DDI_DEV_T_ANY)) {
 				(void) printf(" dev=none");
+			} else {
+				(void) printf(" dev=(%u,%u)",
+				    (uint_t)major(pdev), (uint_t)minor(pdev));
 			}
 		}
 
@@ -598,6 +666,8 @@ dump_prop_list_common(const dumpops_t *dumpops, int ilev, void *node)
 
 		(void) putchar('\n');
 	}
+
+	return (nprop ? 1 : 0);
 }
 
 /*
@@ -627,6 +697,8 @@ dump_devs(di_node_t node, void *arg)
 	int			ilev = 0;	/* indentation level */
 	char			*driver_name;
 	di_node_t		root_node, tmp;
+	int			compat_printed;
+	int			printed;
 
 	if (dbg.d_debug) {
 		char *path = di_devfs_path(node);
@@ -682,17 +754,25 @@ dump_devs(di_node_t node, void *arg)
 
 	if (opts.o_verbose)  {
 		if (dump_prop_list(&sysprop_dumpops, "System", ilev + 1,
-		    node)) {
+		    node, DDI_DEV_T_ANY, NULL)) {
 			(void) dump_prop_list(&globprop_dumpops, NULL, ilev + 1,
-			    node);
+			    node, DDI_DEV_T_ANY, NULL);
 		} else {
 			(void) dump_prop_list(&globprop_dumpops,
-			    "System software", ilev + 1, node);
+			    "System software", ilev + 1,
+			    node, DDI_DEV_T_ANY, NULL);
 		}
 		(void) dump_prop_list(&drvprop_dumpops, "Driver", ilev + 1,
-		    node);
-		(void) dump_prop_list(&hwprop_dumpops, "Hardware", ilev + 1,
-		    node);
+		    node, DDI_DEV_T_NONE, NULL);
+
+		printed = dump_prop_list(&hwprop_dumpops, "Hardware",
+		    ilev + 1, node, DDI_DEV_T_ANY, &compat_printed);
+
+		/* Ensure that 'compatible' is printed under Hardware header */
+		if (!compat_printed)
+			(void) dump_compatible(printed ? NULL : "Hardware",
+			    ilev + 1, node);
+
 		dump_priv_data(ilev + 1, node);
 		dump_pathing_data(ilev + 1, node);
 		dump_link_data(ilev + 1, node, devlink_hdl);
@@ -707,26 +787,6 @@ dump_devs(di_node_t node, void *arg)
 
 	return (DI_WALK_CONTINUE);
 }
-
-/*
- * Returns 0 if nothing is printed, 1 otherwise
- */
-static int
-dump_prop_list(const dumpops_t *dumpops, const char *name, int ilev,
-    di_node_t node)
-{
-	if (NEXTPROP(dumpops)(node, DI_PROP_NIL) == DI_PROP_NIL)
-		return (0);
-
-	if (name != NULL)  {
-		indent_to_level(ilev);
-		(void) printf("%s properties:\n", name);
-	}
-
-	dump_prop_list_common(dumpops, ilev + 1, node);
-	return (1);
-}
-
 
 /* _error([no_perror, ] fmt [, arg ...]) */
 static int
@@ -979,8 +1039,8 @@ dump_pathing_data(int ilev, di_node_t node)
 		indent_to_level(ilev);
 		(void) printf("%s#%d (%s)\n", di_driver_name(phci_node),
 		    di_instance(phci_node), path_state_name(di_path_state(pi)));
-
-		dump_prop_list_common(&pathprop_dumpops, ilev + 1, pi);
+		(void) dump_prop_list(&pathprop_dumpops, NULL, ilev + 1,
+		    pi, DDI_DEV_T_ANY, NULL);
 	}
 }
 
@@ -1325,6 +1385,10 @@ dump_minor_data(int ilev, di_node_t node, di_devlink_handle_t devlink_hdl)
 
 		/* display who has this device minor node open */
 		dump_minor_link_data(ilev + 1, node, devt, devlink_hdl);
+
+		/* display properties associated with this devt */
+		(void) dump_prop_list(&drvprop_dumpops, "Minor",
+		    ilev + 1, node, devt, NULL);
 	}
 
 	/*
@@ -1787,4 +1851,49 @@ dump_prodinfo(di_prom_handle_t promh, di_node_t node, const char **propstr,
 			free(prop_valp);
 		}
 	}
+}
+
+static int
+dump_compatible(char *name, int ilev, di_node_t node)
+{
+	int	ncompat;
+	char	*compat_array;
+	char	*p, *q;
+	int	i;
+
+	if (node == DI_PATH_NIL)
+		return (0);
+
+	ncompat = di_compatible_names(node, &compat_array);
+	if (ncompat <= 0)
+		return (0);	/* no 'compatible' available */
+
+	/* verify integrety of compat_array */
+	for (i = 0, p = compat_array; i < ncompat; i++, p += strlen(p) + 1) {
+		if (strlen(p) == 0)
+			return (0);		/* NULL string */
+		for (q = p; *q; q++) {
+			if (!(isascii(*q) && (isprint(*q) || isspace(*q))))
+				return (0);	/* Not printable or space */
+		}
+	}
+
+	/* If name is non-NULL, produce header */
+	if (name) {
+		indent_to_level(ilev);
+		(void) printf("%s properties:\n", name);
+	}
+	ilev++;
+
+	/* process like a string array property */
+	indent_to_level(ilev);
+	(void) printf("name='compatible' type=string items=%d\n", ncompat);
+	indent_to_level(ilev);
+	(void) printf("    value=");
+	for (i = 0, p = compat_array; i < (ncompat - 1);
+	    i++, p += strlen(p) + 1)
+		(void) printf("'%s' + ", p);
+	(void) printf("'%s'", p);
+	(void) putchar('\n');
+	return (1);
 }

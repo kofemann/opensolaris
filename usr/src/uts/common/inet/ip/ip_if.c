@@ -141,7 +141,7 @@ static int	ip_sioctl_dstaddr_tail(ipif_t *ipif, sin_t *sin, queue_t *q,
 static int	ip_sioctl_slifzone_tail(ipif_t *ipif, zoneid_t zoneid,
     queue_t *q, mblk_t *mp, boolean_t need_up);
 static int	ip_sioctl_flags_tail(ipif_t *ipif, uint64_t flags, queue_t *q,
-    mblk_t *mp, boolean_t need_up);
+    mblk_t *mp);
 static int	ip_sioctl_netmask_tail(ipif_t *ipif, sin_t *sin, queue_t *q,
     mblk_t *mp);
 static int	ip_sioctl_subnet_tail(ipif_t *ipif, in6_addr_t, in6_addr_t,
@@ -419,7 +419,6 @@ static arc_t	ip_aroff_template = {
 	sizeof (arc_t),		/* Name offset */
 	sizeof (arc_t)		/* Name length (set by ill_arp_alloc) */
 };
-
 
 static arma_t	ip_arma_multi_template = {
 	AR_MAPPING_ADD,
@@ -913,7 +912,6 @@ ill_delete_tail(ill_t *ill)
 		nd_unload(&ipst->ips_ip_g_nd, ill->ill_ndd_name);
 	rw_exit(&ipst->ips_ip_g_nd_lock);
 
-
 	if (ill->ill_frag_ptr != NULL) {
 		uint_t count;
 
@@ -1298,6 +1296,7 @@ ipsq_pending_mp_cleanup(ill_t *ill, conn_t *connp)
 	ipsq->ipsq_waitfor = 0;
 	ipsq->ipsq_current_ipif = NULL;
 	ipsq->ipsq_current_ioctl = 0;
+	ipsq->ipsq_current_done = B_TRUE;
 	mutex_exit(&ipsq->ipsq_lock);
 
 	if (DB_TYPE(mp) == M_IOCTL || DB_TYPE(mp) == M_IOCDATA) {
@@ -1486,7 +1485,7 @@ conn_ioctl_cleanup(conn_t *connp)
 			if (!ipsq_pending_mp_cleanup(ill, connp))
 				ipsq_xopq_mp_cleanup(ill, connp);
 			ipsq = ill->ill_phyint->phyint_ipsq;
-			ipsq_exit(ipsq, B_TRUE, B_TRUE);
+			ipsq_exit(ipsq);
 			return;
 		}
 	}
@@ -1551,7 +1550,6 @@ conn_cleanup_ill(conn_t *connp, caddr_t arg)
 		}
 	}
 	mutex_exit(&connp->conn_lock);
-
 }
 
 /* ARGSUSED */
@@ -2093,7 +2091,6 @@ ill_enable_promisc_notify(ill_t *ill)
 
 	return (B_TRUE);
 }
-
 
 /*
  * Allocate an IPsec capability request which will be filled by our
@@ -3490,7 +3487,6 @@ ill_capability_lso_ack(ill_t *ill, mblk_t *mp, dl_capability_sub_t *isub)
 	}
 }
 
-
 static void
 ill_capability_lso_reset(ill_t *ill, mblk_t **sc_mp)
 {
@@ -3658,7 +3654,7 @@ ill_frag_timeout(ill_t *ill, time_t dead_interval)
 				IP_REASS_SET_END(mp, 0);
 			}
 			mp = ipf->ipf_mp->b_cont;
-			ill->ill_frag_count -= ipf->ipf_count;
+			atomic_add_32(&ill->ill_frag_count, -ipf->ipf_count);
 			ASSERT(ipfb->ipfb_count >= ipf->ipf_count);
 			ipfb->ipfb_count -= ipf->ipf_count;
 			ASSERT(ipfb->ipfb_frag_pkts > 0);
@@ -3791,8 +3787,7 @@ ill_frag_prune(ill_t *ill, uint_t max_count)
 	}
 	/*
 	 * While the reassembly list for this ILL is too big, prune a fragment
-	 * queue by age, oldest first.  Note that the per ILL count is
-	 * approximate, while the per frag hash bucket counts are accurate.
+	 * queue by age, oldest first.
 	 */
 	while (ill->ill_frag_count > max_count) {
 		int	ix;
@@ -3811,12 +3806,9 @@ ill_frag_prune(ill_t *ill, uint_t max_count)
 			count += ipfb->ipfb_count;
 			mutex_exit(&ipfb->ipfb_lock);
 		}
-		/* Refresh the per ILL count */
-		ill->ill_frag_count = count;
-		if (oipfb == NULL) {
-			ill->ill_frag_count = 0;
+		if (oipfb == NULL)
 			break;
-		}
+
 		if (count <= max_count)
 			return;	/* Somebody beat us to it, nothing to do */
 		mutex_enter(&oipfb->ipfb_lock);
@@ -3851,7 +3843,7 @@ ill_frag_free_pkts(ill_t *ill, ipfb_t *ipfb, ipf_t *ipf, int free_cnt)
 			IP_REASS_SET_START(tmp, 0);
 			IP_REASS_SET_END(tmp, 0);
 		}
-		ill->ill_frag_count -= count;
+		atomic_add_32(&ill->ill_frag_count, -count);
 		ASSERT(ipfb->ipfb_count >= count);
 		ipfb->ipfb_count -= count;
 		ASSERT(ipfb->ipfb_frag_pkts > 0);
@@ -4228,7 +4220,6 @@ ill_find_by_name(char *name, boolean_t isv6, queue_t *q, mblk_t *mp,
 		}
 	}
 
-
 	if (ifp == (ill_if_t *)&IP_VX_ILL_G_LIST(list, ipst)) {
 		/*
 		 * Even the interface type does not exist.
@@ -4581,10 +4572,8 @@ ill_glist_insert(ill_t *ill, char *name, boolean_t isv6)
 				vmem_free(ill_interface->illif_ppa_arena,
 				    (void *)(uintptr_t)(ill->ill_ppa+1), 1);
 			}
-			if (avl_numnodes(&ill_interface->illif_avl_by_ppa) ==
-			    0) {
+			if (avl_numnodes(&ill_interface->illif_avl_by_ppa) == 0)
 				ill_delete_interface_type(ill->ill_ifptr);
-			}
 
 			return (EINVAL);
 		}
@@ -4712,7 +4701,6 @@ ill_init(queue_t *q, ill_t *ill)
 
 	ill->ill_state_flags |= ILL_LL_SUBNET_PENDING;
 
-
 	/* Frag queue limit stuff */
 	ill->ill_frag_count = 0;
 	ill->ill_ipf_gen = 0;
@@ -4823,7 +4811,6 @@ loopback_kstat_update(kstat_t *ksp, int rw)
 	netstack_rele(ns);
 	return (0);
 }
-
 
 /*
  * Has ifindex been plumbed already.
@@ -4985,7 +4972,8 @@ ill_lookup_on_name(char *name, boolean_t do_alloc, boolean_t isv6,
 	ill->ill_name = (char *)ill + sizeof (*ill);
 	(void) strcpy(ill->ill_name, ipif_loopback_name);
 	ill->ill_name_length = sizeof (ipif_loopback_name);
-	/* Set ill_name_set for ill_phyint_reinit to work properly */
+	/* Set ill_dlpi_pending for ipsq_current_finish() to work properly */
+	ill->ill_dlpi_pending = DL_PRIM_INVAL;
 
 	ill->ill_global_timer = INFINITY;
 	ill->ill_mcast_v1_time = ill->ill_mcast_v2_time = 0;
@@ -5262,7 +5250,6 @@ ill_get_next_ifindex(uint_t index, boolean_t isv6, ip_stack_t *ipst)
 	return (ifindex);
 }
 
-
 /*
  * Return the ifindex for the named interface.
  * If there is no next ifindex for the interface, return 0.
@@ -5288,7 +5275,6 @@ ill_get_ifindex_by_name(char *name, ip_stack_t *ipst)
 
 	return (ifindex);
 }
-
 
 /*
  * Obtain a reference to the ill. The ill_refcnt is a dynamic refcnt
@@ -7816,7 +7802,7 @@ qwriter_ip(ill_t *ill, queue_t *q, mblk_t *mp, ipsq_func_t func, int type,
 	ill_refrele(ill);
 	if (ipsq != NULL) {
 		(*func)(ipsq, q, mp, NULL);
-		ipsq_exit(ipsq, B_TRUE, B_TRUE);
+		ipsq_exit(ipsq);
 	}
 }
 
@@ -7830,7 +7816,7 @@ qwriter_ip(ill_t *ill, queue_t *q, mblk_t *mp, ipsq_func_t func, int type,
  * Called by a thread that is currently exclusive on this ipsq.
  */
 void
-ipsq_exit(ipsq_t *ipsq, boolean_t start_igmp_timer, boolean_t start_mld_timer)
+ipsq_exit(ipsq_t *ipsq)
 {
 	queue_t	*q;
 	mblk_t	*mp;
@@ -7969,39 +7955,40 @@ again:
 		 */
 		ipsq_delete(ipsq);
 	}
+
 	/*
-	 * Now start any igmp or mld timers that could not be started
-	 * while inside the ipsq. The timers can't be started while inside
-	 * the ipsq, since igmp_start_timers may need to call untimeout()
-	 * which can't be done while holding a lock i.e. the ipsq. Otherwise
-	 * there could be a deadlock since the timeout handlers
-	 * mld_timeout_handler / igmp_timeout_handler also synchronously
-	 * wait in ipsq_enter() trying to get the ipsq.
+	 * Now that we're outside the IPSQ, start any IGMP/MLD timers.  We
+	 * can't start these inside the IPSQ since e.g. igmp_start_timers() ->
+	 * untimeout() (inside the IPSQ, waiting for an executing timeout to
+	 * finish) could deadlock with igmp_timeout_handler() -> ipsq_enter()
+	 * (executing the timeout, waiting to get inside the IPSQ).
 	 *
-	 * However there is one exception to the above. If this thread is
-	 * itself the igmp/mld timeout handler thread, then we don't want
-	 * to start any new timer until the current handler is done. The
-	 * handler thread passes in B_FALSE for start_igmp/mld_timers, while
-	 * all others pass B_TRUE.
+	 * However, there is one exception to the above: if this thread *is*
+	 * the IGMP/MLD timeout handler thread, then we must not start its
+	 * timer until the current handler is done.
 	 */
-	if (start_igmp_timer) {
-		mutex_enter(&ipst->ips_igmp_timer_lock);
+	mutex_enter(&ipst->ips_igmp_timer_lock);
+	if (curthread != ipst->ips_igmp_timer_thread) {
 		next = ipst->ips_igmp_deferred_next;
 		ipst->ips_igmp_deferred_next = INFINITY;
 		mutex_exit(&ipst->ips_igmp_timer_lock);
 
 		if (next != INFINITY)
 			igmp_start_timers(next, ipst);
+	} else {
+		mutex_exit(&ipst->ips_igmp_timer_lock);
 	}
 
-	if (start_mld_timer) {
-		mutex_enter(&ipst->ips_mld_timer_lock);
+	mutex_enter(&ipst->ips_mld_timer_lock);
+	if (curthread != ipst->ips_mld_timer_thread) {
 		next = ipst->ips_mld_deferred_next;
 		ipst->ips_mld_deferred_next = INFINITY;
 		mutex_exit(&ipst->ips_mld_timer_lock);
 
 		if (next != INFINITY)
 			mld_start_timers(next, ipst);
+	} else {
+		mutex_exit(&ipst->ips_mld_timer_lock);
 	}
 }
 
@@ -8017,39 +8004,49 @@ ipsq_current_start(ipsq_t *ipsq, ipif_t *ipif, int ioccmd)
 	mutex_enter(&ipsq->ipsq_lock);
 	ASSERT(ipsq->ipsq_current_ipif == NULL);
 	ASSERT(ipsq->ipsq_current_ioctl == 0);
+	ipsq->ipsq_current_done = B_FALSE;
 	ipsq->ipsq_current_ipif = ipif;
 	ipsq->ipsq_current_ioctl = ioccmd;
 	mutex_exit(&ipsq->ipsq_lock);
 }
 
 /*
- * Finish the current exclusive operation on `ipsq'.  Note that other
- * operations will not be able to proceed until an ipsq_exit() is done.
+ * Finish the current exclusive operation on `ipsq'.  Usually, this will allow
+ * the next exclusive operation to begin once we ipsq_exit().  However, if
+ * pending DLPI operations remain, then we will wait for the queue to drain
+ * before allowing the next exclusive operation to begin.  This ensures that
+ * DLPI operations from one exclusive operation are never improperly processed
+ * as part of a subsequent exclusive operation.
  */
 void
 ipsq_current_finish(ipsq_t *ipsq)
 {
 	ipif_t *ipif = ipsq->ipsq_current_ipif;
+	t_uscalar_t dlpi_pending = DL_PRIM_INVAL;
 
 	ASSERT(IAM_WRITER_IPSQ(ipsq));
 
 	/*
 	 * For SIOCSLIFREMOVEIF, the ipif has been already been blown away
-	 * (but we're careful to never set IPIF_CHANGING in that case).
+	 * (but in that case, IPIF_CHANGING will already be clear and no
+	 * pending DLPI messages can remain).
 	 */
 	if (ipsq->ipsq_current_ioctl != SIOCLIFREMOVEIF) {
-		mutex_enter(&ipif->ipif_ill->ill_lock);
-		ipif->ipif_state_flags &= ~IPIF_CHANGING;
+		ill_t *ill = ipif->ipif_ill;
 
+		mutex_enter(&ill->ill_lock);
+		dlpi_pending = ill->ill_dlpi_pending;
+		ipif->ipif_state_flags &= ~IPIF_CHANGING;
 		/* Send any queued event */
-		ill_nic_info_dispatch(ipif->ipif_ill);
-		mutex_exit(&ipif->ipif_ill->ill_lock);
+		ill_nic_info_dispatch(ill);
+		mutex_exit(&ill->ill_lock);
 	}
 
 	mutex_enter(&ipsq->ipsq_lock);
-	ASSERT(ipsq->ipsq_current_ipif != NULL);
-	ipsq->ipsq_current_ipif = NULL;
 	ipsq->ipsq_current_ioctl = 0;
+	ipsq->ipsq_current_done = B_TRUE;
+	if (dlpi_pending == DL_PRIM_INVAL)
+		ipsq->ipsq_current_ipif = NULL;
 	mutex_exit(&ipsq->ipsq_lock);
 }
 
@@ -8761,7 +8758,6 @@ ip_sioctl_get_lifsrcof(ipif_t *dummy_ipif, sin_t *dummy_sin, queue_t *q,
 		return (err);
 	}
 
-
 	/* Allocate a buffer to hold requested information */
 	numlifs = ip_get_lifsrcofnum(ipif->ipif_ill);
 	lifs_bufsize = numlifs * sizeof (struct lifreq);
@@ -9239,7 +9235,6 @@ next_dst:
 	}
 	miocack(q, mp, iocp->ioc_count, 0);
 }
-
 
 /*
  * Check if this is an address assigned to this machine.
@@ -9932,7 +9927,7 @@ done:
 	if (CONN_Q(q))
 		CONN_OPER_PENDING_DONE(Q_TO_CONN(q));
 	if (entered_ipsq)
-		ipsq_exit(ipsq, B_TRUE, B_TRUE);
+		ipsq_exit(ipsq);
 }
 
 /*
@@ -9996,7 +9991,7 @@ ip_sioctl_plink_ipmod(ipsq_t *ipsq, queue_t *q, mblk_t *mp, int ioccmd,
 		if ((islink && ill->ill_ip_muxid != 0) ||
 		    (!islink && ill->ill_arp_muxid != 0)) {
 			if (entered_ipsq)
-				ipsq_exit(ipsq, B_TRUE, B_TRUE);
+				ipsq_exit(ipsq);
 			return (EINVAL);
 		}
 	}
@@ -10031,7 +10026,7 @@ ip_sioctl_plink_ipmod(ipsq_t *ipsq, queue_t *q, mblk_t *mp, int ioccmd,
 	}
 
 	if (entered_ipsq)
-		ipsq_exit(ipsq, B_TRUE, B_TRUE);
+		ipsq_exit(ipsq);
 
 	return (0);
 }
@@ -10789,7 +10784,7 @@ ip_sioctl_addif(ipif_t *dummy_ipif, sin_t *dummy_sin, queue_t *q, mblk_t *mp,
 	}
 
 done:
-	ipsq_exit(ipsq, B_TRUE, B_TRUE);
+	ipsq_exit(ipsq);
 	return (err);
 }
 
@@ -11101,7 +11096,6 @@ ip_sioctl_addr(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
 
 		IN6_IPADDR_TO_V4MAPPED(addr, &v6addr);
 	}
-
 
 	/*
 	 * Even if there is no change we redo things just to rerun
@@ -11662,7 +11656,6 @@ ip_sioctl_flags(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
 	uint64_t turn_on;
 	uint64_t turn_off;
 	int	err;
-	boolean_t need_up = B_FALSE;
 	phyint_t *phyi;
 	ill_t *ill;
 	uint64_t intf_flags;
@@ -11694,7 +11687,7 @@ ip_sioctl_flags(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
 	intf_flags = ipif->ipif_flags | ill->ill_flags | phyi->phyint_flags;
 
 	/*
-	 * Has the flags been set correctly till now ?
+	 * Have the flags been set correctly until now?
 	 */
 	ASSERT((phyi->phyint_flags & ~(IFF_PHYINT_FLAGS)) == 0);
 	ASSERT((ill->ill_flags & ~(IFF_PHYINTINST_FLAGS)) == 0);
@@ -11988,7 +11981,6 @@ ip_sioctl_flags(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
 
 		if (((ipif->ipif_flags | turn_on) & IPIF_UP) &&
 		    !(turn_off & IPIF_UP)) {
-			need_up = B_TRUE;
 			if (ipif->ipif_flags & IPIF_UP)
 				ill->ill_logical_down = 1;
 			turn_on &= ~IPIF_UP;
@@ -11999,12 +11991,11 @@ ip_sioctl_flags(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
 			return (err);
 		ipif_down_tail(ipif);
 	}
-	return (ip_sioctl_flags_tail(ipif, flags, q, mp, need_up));
+	return (ip_sioctl_flags_tail(ipif, flags, q, mp));
 }
 
 static int
-ip_sioctl_flags_tail(ipif_t *ipif, uint64_t flags, queue_t *q, mblk_t *mp,
-    boolean_t need_up)
+ip_sioctl_flags_tail(ipif_t *ipif, uint64_t flags, queue_t *q, mblk_t *mp)
 {
 	ill_t	*ill;
 	phyint_t *phyi;
@@ -12067,7 +12058,7 @@ ip_sioctl_flags_tail(ipif_t *ipif, uint64_t flags, queue_t *q, mblk_t *mp,
 	else
 		ipif->ipif_v6src_addr = ipif->ipif_v6lcl_addr;
 
-	if (need_up) {
+	if ((flags & IFF_UP) && !(ipif->ipif_flags & IPIF_UP)) {
 		/*
 		 * XXX ipif_up really does not know whether a phyint flags
 		 * was modified or not. So, it sends up information on
@@ -12103,37 +12094,28 @@ ip_sioctl_flags_tail(ipif_t *ipif, uint64_t flags, queue_t *q, mblk_t *mp,
 }
 
 /*
- * Restart entry point to restart the flags restart operation after the
- * refcounts have dropped to zero.
+ * Restart the flags operation now that the refcounts have dropped to zero.
  */
 /* ARGSUSED */
 int
 ip_sioctl_flags_restart(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
     ip_ioctl_cmd_t *ipip, void *if_req)
 {
-	int	err;
-	struct ifreq *ifr = (struct ifreq *)if_req;
-	struct lifreq *lifr = (struct lifreq *)if_req;
+	uint64_t flags;
+	struct ifreq *ifr = if_req;
+	struct lifreq *lifr = if_req;
 
 	ip1dbg(("ip_sioctl_flags_restart(%s:%u %p)\n",
 	    ipif->ipif_ill->ill_name, ipif->ipif_id, (void *)ipif));
 
 	ipif_down_tail(ipif);
 	if (ipip->ipi_cmd_type == IF_CMD) {
-		/*
-		 * Since ip_sioctl_flags expects an int and ifr_flags
-		 * is a short we need to cast ifr_flags into an int
-		 * to avoid having sign extension cause bits to get
-		 * set that should not be.
-		 */
-		err = ip_sioctl_flags_tail(ipif,
-		    (uint64_t)(ifr->ifr_flags & 0x0000ffff),
-		    q, mp, B_TRUE);
+		/* cast to uint16_t prevents unwanted sign extension */
+		flags = (uint16_t)ifr->ifr_flags;
 	} else {
-		err = ip_sioctl_flags_tail(ipif, lifr->lifr_flags,
-		    q, mp, B_TRUE);
+		flags = lifr->lifr_flags;
 	}
-	return (err);
+	return (ip_sioctl_flags_tail(ipif, flags, q, mp));
 }
 
 /*
@@ -12519,13 +12501,11 @@ ip_sioctl_metric(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
 	return (0);
 }
 
-
 /* ARGSUSED */
 int
 ip_sioctl_get_metric(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
     ip_ioctl_cmd_t *ipip, void *if_req)
 {
-
 	/* Get interface metric. */
 	ip1dbg(("ip_sioctl_get_metric(%s:%u %p)\n",
 	    ipif->ipif_ill->ill_name, ipif->ipif_id, (void *)ipif));
@@ -13004,15 +12984,9 @@ ip_sioctl_lnkinfo(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
 				ire->ire_max_frag = ipif->ipif_mtu;
 				ire_refrele(ire);
 			}
-			if (ill->ill_isv6) {
-				ire_walk_ill_v6(MATCH_IRE_ILL, 0,
-				    ipif_mtu_change, (char *)nipif,
-				    ill);
-			} else {
-				ire_walk_ill_v4(MATCH_IRE_ILL, 0,
-				    ipif_mtu_change, (char *)nipif,
-				    ill);
-			}
+
+			ire_walk_ill(MATCH_IRE_ILL, 0, ipif_mtu_change,
+			    nipif, ill);
 		}
 	}
 
@@ -14340,7 +14314,6 @@ ill_up_ipifs(ill_t *ill, queue_t *q, mblk_t *mp)
 	ill_t *from_ill;
 	int err = 0;
 
-
 	ASSERT(IAM_WRITER_ILL(ill));
 
 	/*
@@ -14882,7 +14855,7 @@ ill_merge_groups(ill_t *from_ill, ill_t *to_ill, char *groupname, mblk_t *mp,
 	 * a set groupname or failover/failback.
 	 */
 	if (became_writer_on_new_sq)
-		ipsq_exit(new_ipsq, B_TRUE, B_TRUE);
+		ipsq_exit(new_ipsq);
 
 	/*
 	 * syncq has been changed and all the messages have been moved.
@@ -14890,6 +14863,7 @@ ill_merge_groups(ill_t *from_ill, ill_t *to_ill, char *groupname, mblk_t *mp,
 	mutex_enter(&old_ipsq->ipsq_lock);
 	old_ipsq->ipsq_current_ipif = NULL;
 	old_ipsq->ipsq_current_ioctl = 0;
+	old_ipsq->ipsq_current_done = B_TRUE;
 	mutex_exit(&old_ipsq->ipsq_lock);
 	return (EINPROGRESS);
 }
@@ -15793,13 +15767,8 @@ ill_handoff_responsibility(ill_t *ill, ill_group_t *illgrp)
 	 * deleted and IRE_CACHES that are not pointing at this ill will
 	 * be left alone.
 	 */
-	if (ill->ill_isv6) {
-		ire_walk_ill_v6(MATCH_IRE_ILL | MATCH_IRE_TYPE,
-		    IRE_CACHE, illgrp_cache_delete, (char *)ill, ill);
-	} else {
-		ire_walk_ill_v4(MATCH_IRE_ILL | MATCH_IRE_TYPE,
-		    IRE_CACHE, illgrp_cache_delete, (char *)ill, ill);
-	}
+	ire_walk_ill(MATCH_IRE_ILL | MATCH_IRE_TYPE, IRE_CACHE,
+	    illgrp_cache_delete, ill, ill);
 
 	/*
 	 * Some conn may have cached one of the IREs deleted above. By removing
@@ -16187,7 +16156,6 @@ phyint_lookup_group_ifindex(uint_t group_ifindex, ip_stack_t *ipst)
 	}
 	return (NULL);
 }
-
 
 /*
  * MT notes on creation and deletion of IPMP groups
@@ -16730,7 +16698,6 @@ ilm_send_multicast_reqs(ill_t *from_ill, ill_t *to_ill)
 			continue;		/* Must be IRE_IF_NORESOLVER */
 		}
 
-
 		if (to_ill->ill_phyint->phyint_flags & PHYI_MULTI_BCAST) {
 			ip1dbg(("ilm_send_multicast_reqs: "
 			    "to_ill MULTI_BCAST\n"));
@@ -16927,6 +16894,12 @@ ilm_move_v6(ill_t *from_ill, ill_t *to_ill, int ifindex)
 					 */
 					*ilmp = ilm->ilm_next;
 					ilm->ilm_next = NULL;
+					DTRACE_PROBE3(ill__decr__cnt,
+					    (ill_t *), from_ill,
+					    (char *), "ilm", (void *), ilm);
+					ASSERT(from_ill->ill_ilm_cnt > 0);
+					from_ill->ill_ilm_cnt--;
+
 					new_ilm = ilm;
 				}
 
@@ -16939,7 +16912,11 @@ ilm_move_v6(ill_t *from_ill, ill_t *to_ill, int ifindex)
 				    &new_ilm->ilm_v6addr, ALL_ZONES) == NULL)
 					new_ilm->ilm_notify_driver = B_TRUE;
 
+				DTRACE_PROBE3(ill__incr__cnt, (ill_t *), to_ill,
+				    (char *), "ilm", (void *), new_ilm);
 				new_ilm->ilm_ill = to_ill;
+				to_ill->ill_ilm_cnt++;
+
 				/* Add to the to_ill's list */
 				new_ilm->ilm_next = to_ill->ill_ilm;
 				to_ill->ill_ilm = new_ilm;
@@ -17054,6 +17031,10 @@ ilm_move_v6(ill_t *from_ill, ill_t *to_ill, int ifindex)
 					new_ilm->ilm_notify_driver = B_TRUE;
 
 				new_ilm->ilm_ill = to_ill;
+				DTRACE_PROBE3(ill__incr__cnt, (ill_t *), to_ill,
+				    (char *), "ilm", (void *), new_ilm);
+				to_ill->ill_ilm_cnt++;
+
 				/* Add to the to_ill's list */
 				new_ilm->ilm_next = to_ill->ill_ilm;
 				to_ill->ill_ilm = new_ilm;
@@ -17122,6 +17103,12 @@ ilm_move_v6(ill_t *from_ill, ill_t *to_ill, int ifindex)
 					new_ilm->ilm_filter = NULL;
 				} else {
 					*ilmp = ilm->ilm_next;
+					DTRACE_PROBE3(ill__decr__cnt,
+					    (ill_t *), from_ill,
+					    (char *), "ilm", (void *), ilm);
+					ASSERT(from_ill->ill_ilm_cnt > 0);
+					from_ill->ill_ilm_cnt--;
+
 					new_ilm = ilm;
 				}
 				/*
@@ -17138,6 +17125,9 @@ ilm_move_v6(ill_t *from_ill, ill_t *to_ill, int ifindex)
 				to_ill->ill_ilm = new_ilm;
 				ASSERT(ilm->ilm_ipif == NULL);
 				new_ilm->ilm_ill = to_ill;
+				DTRACE_PROBE3(ill__incr__cnt, (ill_t *), to_ill,
+				    (char *), "ilm", (void *), new_ilm);
+				to_ill->ill_ilm_cnt++;
 				new_ilm->ilm_is_new = B_TRUE;
 			}
 
@@ -17156,12 +17146,15 @@ bottom:
 		if (new_ilm != ilm) {
 			if (from_ill->ill_ilm_walker_cnt == 0) {
 				*ilmp = ilm->ilm_next;
-				ilm->ilm_next = NULL;
-				FREE_SLIST(ilm->ilm_filter);
-				FREE_SLIST(ilm->ilm_pendsrcs);
-				FREE_SLIST(ilm->ilm_rtx.rtx_allow);
-				FREE_SLIST(ilm->ilm_rtx.rtx_block);
-				mi_free((char *)ilm);
+
+				ASSERT(ilm->ilm_ipif == NULL); /* ipv6 */
+				DTRACE_PROBE3(ill__decr__cnt, (ill_t *),
+				    from_ill, (char *), "ilm", (void *), ilm);
+				ASSERT(from_ill->ill_ilm_cnt > 0);
+				from_ill->ill_ilm_cnt--;
+
+				ilm_inactive(ilm); /* frees this ilm */
+
 			} else {
 				ilm->ilm_flags |= ILM_DELETED;
 				from_ill->ill_ilm_cleanup_reqd = 1;
@@ -17219,6 +17212,14 @@ ilm_move_v4(ill_t *from_ill, ill_t *to_ill, ipif_t *ipif)
 				new_ilm->ilm_is_new = B_TRUE;
 				new_ilm->ilm_fmode = MODE_IS_EXCLUDE;
 				CLEAR_SLIST(new_ilm->ilm_filter);
+				ASSERT(ilm->ilm_ipif == ipif);
+				ASSERT(ilm->ilm_ipif->ipif_ilm_cnt > 0);
+				if (from_ill->ill_ilm_walker_cnt == 0) {
+					DTRACE_PROBE3(ill__decr__cnt,
+					    (ill_t *), from_ill,
+					    (char *), "ilm", (void *), ilm);
+					ASSERT(ilm->ilm_ipif->ipif_ilm_cnt > 0);
+				}
 				goto delete_ilm;
 			}
 			/*
@@ -17254,6 +17255,9 @@ ilm_move_v4(ill_t *from_ill, ill_t *to_ill, ipif_t *ipif)
 				continue;
 			}
 			*new_ilm = *ilm;
+			DTRACE_PROBE3(ipif__incr__cnt, (ipif_t *), ipif,
+			    (char *), "ilm", (void *), ilm);
+			new_ilm->ilm_ipif->ipif_ilm_cnt++;
 			/* We don't want new_ilm linked to ilm's filter list */
 			new_ilm->ilm_filter = NULL;
 		} else {
@@ -17290,11 +17294,12 @@ delete_ilm:
 				/* Remove from the list */
 				*ilmp = ilm->ilm_next;
 				ilm->ilm_next = NULL;
-				FREE_SLIST(ilm->ilm_filter);
-				FREE_SLIST(ilm->ilm_pendsrcs);
-				FREE_SLIST(ilm->ilm_rtx.rtx_allow);
-				FREE_SLIST(ilm->ilm_rtx.rtx_block);
-				mi_free((char *)ilm);
+				DTRACE_PROBE3(ipif__decr__cnt,
+				    (ipif_t *), ilm->ilm_ipif,
+				    (char *), "ilm", (void *), ilm);
+				ASSERT(ilm->ilm_ipif->ipif_ilm_cnt > 0);
+				ilm->ilm_ipif->ipif_ilm_cnt--;
+				ilm_inactive(ilm);
 			} else {
 				ilm->ilm_flags |= ILM_DELETED;
 				from_ill->ill_ilm_cleanup_reqd = 1;
@@ -17719,7 +17724,6 @@ ill_move(ill_t *from_ill, ill_t *to_ill, queue_t *q, mblk_t *mp)
 		}
 	}
 
-
 	ill_down_ipifs(from_ill, mp, ifindex, B_TRUE);
 
 	GRAB_ILL_LOCKS(from_ill, to_ill);
@@ -17800,7 +17804,6 @@ ip_extract_move_args(queue_t *q, mblk_t *mp, ill_t **ill_from_v4,
 		ipst = CONNQ_TO_IPST(q);
 	else
 		ipst = ILLQ_TO_IPST(q);
-
 
 	if ((mp1 = mp->b_cont) == NULL)
 		return (EPROTO);
@@ -18246,7 +18249,7 @@ ill_dlpi_dispatch(ill_t *ill, mblk_t *mp)
 static void
 ill_dlpi_send_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *arg)
 {
-	ill_dlpi_send((ill_t *)q->q_ptr, mp);
+	ill_dlpi_send(q->q_ptr, mp);
 }
 
 /*
@@ -18356,15 +18359,20 @@ ill_dlpi_pending(ill_t *ill, t_uscalar_t prim)
 }
 
 /*
- * Called when an DLPI control message has been acked or nacked to
- * send down the next queued message (if any).
+ * Complete the current DLPI operation associated with `prim' on `ill' and
+ * start the next queued DLPI operation (if any).  If there are no queued DLPI
+ * operations and the ill's current exclusive IPSQ operation has finished
+ * (i.e., ipsq_current_finish() was called), then clear ipsq_current_ipif to
+ * allow the next exclusive IPSQ operation to begin upon ipsq_exit().  See
+ * the comments above ipsq_current_finish() for details.
  */
 void
 ill_dlpi_done(ill_t *ill, t_uscalar_t prim)
 {
 	mblk_t *mp;
+	ipsq_t *ipsq = ill->ill_phyint->phyint_ipsq;
 
-	ASSERT(IAM_WRITER_ILL(ill));
+	ASSERT(IAM_WRITER_IPSQ(ipsq));
 	mutex_enter(&ill->ill_lock);
 
 	ASSERT(prim != DL_PRIM_INVAL);
@@ -18375,6 +18383,12 @@ ill_dlpi_done(ill_t *ill, t_uscalar_t prim)
 
 	if ((mp = ill->ill_dlpi_deferred) == NULL) {
 		ill->ill_dlpi_pending = DL_PRIM_INVAL;
+
+		mutex_enter(&ipsq->ipsq_lock);
+		if (ipsq->ipsq_current_done)
+			ipsq->ipsq_current_ipif = NULL;
+		mutex_exit(&ipsq->ipsq_lock);
+
 		cv_signal(&ill->ill_cv);
 		mutex_exit(&ill->ill_lock);
 		return;
@@ -18867,7 +18881,6 @@ ipif_down_delete_ire(ire_t *ire, char *ipif_arg)
 			return;
 		}
 	}
-
 
 	if (ire->ire_ipif != ipif) {
 		/*
@@ -21154,7 +21167,6 @@ if_unitsel_restart(ipif_t *ipif, sin_t *dummy_sin, queue_t *q, mblk_t *mp,
 	return (ipif_set_values_tail(ipif->ipif_ill, ipif, mp, q));
 }
 
-
 /*
  * Can operate on either a module or a driver queue.
  * Returns an error if not a module queue.
@@ -22086,7 +22098,6 @@ ip_sioctl_get_lifusesrc(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
 	return (0);
 }
 
-
 /* Find the previous ILL in this usesrc group */
 static ill_t *
 ill_prev_usesrc(ill_t *uill)
@@ -22352,7 +22363,7 @@ done:
 		mutex_exit(&usesrc_cli_ill->ill_lock);
 	}
 	if (ipsq != NULL)
-		ipsq_exit(ipsq, B_TRUE, B_TRUE);
+		ipsq_exit(ipsq);
 	/* The refrele on the lifr_name ipif is done by ip_process_ioctl */
 	ill_refrele(usesrc_ill);
 	return (err);
@@ -23021,7 +23032,7 @@ ipif_set_values(queue_t *q, mblk_t *mp, char *interf_name, uint_t *new_ppa_ptr)
 		ASSERT(ipsq->ipsq_current_ipif == ipif);
 
 	error = ipif_set_values_tail(ill, ipif, mp, q);
-	ipsq_exit(ipsq, B_TRUE, B_TRUE);
+	ipsq_exit(ipsq);
 	if (error != 0 && error != EINPROGRESS) {
 		/*
 		 * restore previous values
@@ -23142,7 +23153,6 @@ ipif_lookup_onlink_addr(ipaddr_t addr, zoneid_t zoneid, ip_stack_t *ipst)
 	return (best_ipif);
 }
 
-
 /*
  * Save enough information so that we can recreate the IRE if
  * the interface goes down and then up.
@@ -23174,7 +23184,6 @@ ipif_save_ire(ipif_t *ipif, ire_t *ire)
 	}
 }
 
-
 static void
 ipif_remove_ire(ipif_t *ipif, ire_t *ire)
 {
@@ -23205,7 +23214,6 @@ ipif_remove_ire(ipif_t *ipif, ire_t *ire)
 	}
 	mutex_exit(&ipif->ipif_saved_ire_lock);
 }
-
 
 /*
  * IP multirouting broadcast routes handling
@@ -23510,7 +23518,6 @@ done:
 		ill_refrele(ill);
 	return (B_FALSE);
 }
-
 
 /*
  * Add a new ill to the list of IPsec capable ills.

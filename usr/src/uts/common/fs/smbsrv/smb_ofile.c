@@ -184,8 +184,6 @@ smb_ofile_open(
     uint32_t		create_options,
     uint32_t		share_access,
     uint16_t		ftype,
-    char		*pipe_name,
-    uint32_t		rpc_fid,
     uint32_t		uniqid,
     smb_error_t		*err)
 {
@@ -221,12 +219,7 @@ smb_ofile_open(
 	of->f_state = SMB_OFILE_STATE_OPEN;
 
 	if (ftype == SMB_FTYPE_MESG_PIPE) {
-		of->f_pipe_info = kmem_alloc(sizeof (mlsvc_pipe_t), KM_SLEEP);
-		bzero(of->f_pipe_info, sizeof (mlsvc_pipe_t));
-		of->f_pipe_info->pipe_name = pipe_name;
-		of->f_pipe_info->fid = rpc_fid;
-		mutex_init(&of->f_pipe_info->mutex, NULL, MUTEX_DEFAULT, NULL);
-		cv_init(&of->f_pipe_info->cv, NULL, CV_DEFAULT, NULL);
+		of->f_pipe = kmem_zalloc(sizeof (smb_opipe_t), KM_SLEEP);
 	} else {
 		ASSERT(ftype == SMB_FTYPE_DISK); /* Regular file, not a pipe */
 		ASSERT(node);
@@ -294,12 +287,12 @@ smb_ofile_close(
 		mutex_exit(&of->f_mutex);
 
 		if (of->f_ftype == SMB_FTYPE_MESG_PIPE) {
-			smb_rpc_close(of);
+			smb_opipe_close(of);
 		} else {
 			if (of->f_node->flags & NODE_CREATED_READONLY) {
 				smb_node_set_dosattr(of->f_node,
 				    of->f_node->attr.sa_dosattr |
-				    SMB_FA_READONLY);
+				    FILE_ATTRIBUTE_READONLY);
 				of->f_node->flags &= ~NODE_CREATED_READONLY;
 			}
 
@@ -701,8 +694,8 @@ smb_ofile_delete(
 	atomic_dec_32(&of->f_session->s_file_cnt);
 
 	if (of->f_ftype == SMB_FTYPE_MESG_PIPE) {
-		kmem_free(of->f_pipe_info, sizeof (mlsvc_pipe_t));
-		of->f_pipe_info = NULL;
+		kmem_free(of->f_pipe, sizeof (smb_opipe_t));
+		of->f_pipe = NULL;
 	} else {
 		ASSERT(of->f_ftype == SMB_FTYPE_DISK);
 		ASSERT(of->f_node != NULL);
@@ -744,5 +737,183 @@ smb_ofile_access(smb_ofile_t *of, cred_t *cr, uint32_t access)
 		return (NT_STATUS_ACCESS_DENIED);
 	}
 
+	return (NT_STATUS_SUCCESS);
+}
+
+
+/*
+ * smb_ofile_open_check
+ *
+ * check file sharing rules for current open request
+ * against existing open instances of the same file
+ *
+ * Returns NT_STATUS_SHARING_VIOLATION if there is any
+ * sharing conflict, otherwise returns NT_STATUS_SUCCESS.
+ */
+uint32_t
+smb_ofile_open_check(
+    smb_ofile_t *of,
+    cred_t *cr,
+    uint32_t desired_access,
+    uint32_t share_access)
+{
+	smb_node_t *node;
+
+	ASSERT(of->f_magic == SMB_OFILE_MAGIC);
+
+	node = of->f_node;
+
+	mutex_enter(&of->f_mutex);
+
+	if (of->f_state != SMB_OFILE_STATE_OPEN) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_INVALID_HANDLE);
+	}
+
+	/*
+	 * It appears that share modes are not relevant to
+	 * directories, but this check will remain as it is not
+	 * clear whether it was originally put here for a reason.
+	 */
+	if (node->attr.sa_vattr.va_type == VDIR) {
+		if (SMB_DENY_RW(of->f_share_access) &&
+		    (node->n_orig_uid != crgetuid(cr))) {
+			mutex_exit(&of->f_mutex);
+			return (NT_STATUS_SHARING_VIOLATION);
+		}
+
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_SUCCESS);
+	}
+
+	/* if it's just meta data */
+	if ((of->f_granted_access & FILE_DATA_ALL) == 0) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_SUCCESS);
+	}
+
+	/*
+	 * Check requested share access against the
+	 * open granted (desired) access
+	 */
+	if (SMB_DENY_DELETE(share_access) && (of->f_granted_access & DELETE)) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_SHARING_VIOLATION);
+	}
+
+	if (SMB_DENY_READ(share_access) &&
+	    (of->f_granted_access & (FILE_READ_DATA | FILE_EXECUTE))) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_SHARING_VIOLATION);
+	}
+
+	if (SMB_DENY_WRITE(share_access) &&
+	    (of->f_granted_access & (FILE_WRITE_DATA | FILE_APPEND_DATA))) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_SHARING_VIOLATION);
+	}
+
+	/* check requested desired access against the open share access */
+	if (SMB_DENY_DELETE(of->f_share_access) && (desired_access & DELETE)) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_SHARING_VIOLATION);
+	}
+
+	if (SMB_DENY_READ(of->f_share_access) &&
+	    (desired_access & (FILE_READ_DATA | FILE_EXECUTE))) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_SHARING_VIOLATION);
+	}
+
+	if (SMB_DENY_WRITE(of->f_share_access) &&
+	    (desired_access & (FILE_WRITE_DATA | FILE_APPEND_DATA))) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_SHARING_VIOLATION);
+	}
+
+	mutex_exit(&of->f_mutex);
+	return (NT_STATUS_SUCCESS);
+}
+
+/*
+ * smb_ofile_rename_check
+ *
+ * An open file can be renamed if
+ *
+ *  1. isn't opened for data writing or deleting
+ *
+ *  2. Opened with "Deny Delete" share mode
+ *         But not opened for data reading or executing
+ *         (opened for accessing meta data)
+ */
+
+uint32_t
+smb_ofile_rename_check(smb_ofile_t *of)
+{
+	ASSERT(of->f_magic == SMB_OFILE_MAGIC);
+
+	mutex_enter(&of->f_mutex);
+
+	if (of->f_state != SMB_OFILE_STATE_OPEN) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_INVALID_HANDLE);
+	}
+
+	if (of->f_granted_access &
+	    (FILE_WRITE_DATA | FILE_APPEND_DATA | DELETE)) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_SHARING_VIOLATION);
+	}
+
+	if ((of->f_share_access & FILE_SHARE_DELETE) == 0) {
+		if (of->f_granted_access &
+		    (FILE_READ_DATA | FILE_EXECUTE)) {
+			mutex_exit(&of->f_mutex);
+			return (NT_STATUS_SHARING_VIOLATION);
+		}
+	}
+
+	mutex_exit(&of->f_mutex);
+	return (NT_STATUS_SUCCESS);
+}
+
+/*
+ * smb_ofile_delete_check
+ *
+ * An open file can be deleted only if opened for
+ * accessing meta data. Share modes aren't important
+ * in this case.
+ *
+ * NOTE: there is another mechanism for deleting an
+ * open file that NT clients usually use.
+ * That's setting "Delete on close" flag for an open
+ * file.  In this way the file will be deleted after
+ * last close. This flag can be set by SmbTrans2SetFileInfo
+ * with FILE_DISPOSITION_INFO information level.
+ * For setting this flag, the file should be opened by
+ * DELETE access in the FID that is passed in the Trans2
+ * request.
+ */
+
+uint32_t
+smb_ofile_delete_check(smb_ofile_t *of)
+{
+	ASSERT(of->f_magic == SMB_OFILE_MAGIC);
+
+	mutex_enter(&of->f_mutex);
+
+	if (of->f_state != SMB_OFILE_STATE_OPEN) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_INVALID_HANDLE);
+	}
+
+	if (of->f_granted_access &
+	    (FILE_READ_DATA | FILE_WRITE_DATA |
+	    FILE_APPEND_DATA | FILE_EXECUTE | DELETE)) {
+		mutex_exit(&of->f_mutex);
+		return (NT_STATUS_SHARING_VIOLATION);
+	}
+
+	mutex_exit(&of->f_mutex);
 	return (NT_STATUS_SUCCESS);
 }

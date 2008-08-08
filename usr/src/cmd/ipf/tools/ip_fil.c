@@ -3,7 +3,7 @@
  *
  * See the IPFILTER.LICENCE file for details on licencing.
  *
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -362,8 +362,6 @@ int mode;
 		if (!(mode & FWRITE))
 			error = EPERM;
 		else {
-			bzero((char *)ifs->ifs_frcache,
-			    sizeof(ifs->ifs_frcache[0]) * 2);
 			*(u_int *)data = ifs->ifs_fr_active;
 			ifs->ifs_fr_active = 1 - ifs->ifs_fr_active;
 		}
@@ -481,7 +479,8 @@ ipf_stack_t *ifs;
 			f->fr_ifa = (void *)-1;
 #endif
 	RWLOCK_EXIT(&ifs->ifs_ipf_mutex);
-	fr_natifpsync(IPFSYNC_OLDIFP, ifp, NULL, ifs);
+	fr_natifpsync(IPFSYNC_OLDIFP, 4, ifp, NULL, ifs);
+	fr_natifpsync(IPFSYNC_OLDIFP, 6, ifp, NULL, ifs);
 }
 
 
@@ -1024,4 +1023,51 @@ ipf_stack_t *ifs;
 		return fr_ifpfillv4addr(atype, sin, &mask, inp, inpmask);
 	}
 	return 0;
+}
+
+
+/*    
+ * This function is not meant to be random, rather just produce a
+ * sequence of numbers that isn't linear to show "randomness".
+ */
+u_32_t ipf_random() 
+{
+	static u_int last = 0xa5a5a5a5;
+	static int calls = 0;
+	int number;
+
+	calls++;
+
+	/*
+	 * These are deliberately chosen to ensure that there is some
+	 * attempt to test whether the output covers the range in test n18.
+	 */
+	switch (calls)
+	{
+	case 1 :
+		number = 0;
+		break;
+	case 2 :
+		number = 4;
+		break;
+	case 3 :
+		number = 3999;
+		break;
+	case 4 :
+		number = 4000;
+		break;
+	case 5 :
+		number = 48999;
+		break;
+	case 6 :
+		number = 49000;
+		break;
+	default :
+		number = last;
+		last *= calls;
+		last++;
+		number ^= last;
+		break;
+	}
+	return number;
 }

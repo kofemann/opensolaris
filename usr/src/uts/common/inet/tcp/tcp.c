@@ -1464,6 +1464,11 @@ int cl_tcp_walk_list(int (*callback)(cl_tcp_info_t *, void *), void *arg);
 static int cl_tcp_walk_list_stack(int (*callback)(cl_tcp_info_t *, void *),
     void *arg, tcp_stack_t *tcps);
 
+#define	DTRACE_IP_FASTPATH(mp, iph, ill, ipha, ip6h) 			\
+	DTRACE_IP7(send, mblk_t *, mp, conn_t *, NULL, void_ip_t *,	\
+	    iph, __dtrace_ipsr_ill_t *, ill, ipha_t *, ipha,		\
+	    ip6_t *, ip6h, int, 0);
+
 /*
  * Figure out the value of window scale opton.  Note that the rwnd is
  * ASSUMED to be rounded up to the nearest MSS before the calculation.
@@ -11761,6 +11766,12 @@ tcp_rcv_drain(queue_t *q, tcp_t *tcp)
 	/* Can't be sodirect enabled */
 	ASSERT(SOD_NOT_ENABLED(tcp));
 
+	/* No need for the push timer now. */
+	if (tcp->tcp_push_tid != 0) {
+		(void) TCP_TIMER_CANCEL(tcp, tcp->tcp_push_tid);
+		tcp->tcp_push_tid = 0;
+	}
+
 	/*
 	 * Handle two cases here: we are currently fused or we were
 	 * previously fused and have some urgent data to be delivered
@@ -11817,11 +11828,6 @@ tcp_rcv_drain(queue_t *q, tcp_t *tcp)
 			ret = TH_ACK_NEEDED;
 		}
 		tcp->tcp_rwnd = q->q_hiwat;
-	}
-	/* No need for the push timer now. */
-	if (tcp->tcp_push_tid != 0) {
-		(void) TCP_TIMER_CANCEL(tcp, tcp->tcp_push_tid);
-		tcp->tcp_push_tid = 0;
 	}
 	return (ret);
 }
@@ -18430,20 +18436,26 @@ tcp_accept_finish(void *arg, mblk_t *mp, void *arg2)
 		/* There is some data, add them back to get the max. */
 		tcp->tcp_rq->q_hiwat = tcp->tcp_rwnd + tcp->tcp_rcv_cnt;
 	}
-
-	stropt->so_flags = SO_HIWAT;
-	stropt->so_hiwat = MAX(q->q_hiwat, tcps->tcps_sth_rcv_hiwat);
-
-	stropt->so_flags |= SO_MAXBLK;
-	stropt->so_maxblk = tcp_maxpsz_set(tcp, B_FALSE);
-
 	/*
 	 * This is the first time we run on the correct
 	 * queue after tcp_accept. So fix all the q parameters
 	 * here.
 	 */
-	/* Allocate room for SACK options if needed. */
-	stropt->so_flags |= SO_WROFF;
+	stropt->so_flags = SO_HIWAT | SO_MAXBLK | SO_WROFF;
+	stropt->so_maxblk = tcp_maxpsz_set(tcp, B_FALSE);
+
+	/*
+	 * Record the stream head's high water mark for this endpoint;
+	 * this is used for flow-control purposes.
+	 */
+	stropt->so_hiwat = tcp->tcp_fused ?
+	    tcp_fuse_set_rcv_hiwat(tcp, q->q_hiwat) :
+	    MAX(q->q_hiwat, tcps->tcps_sth_rcv_hiwat);
+
+	/*
+	 * Determine what write offset value to use depending on SACK and
+	 * whether the endpoint is fused or not.
+	 */
 	if (tcp->tcp_fused) {
 		ASSERT(tcp->tcp_loopback);
 		ASSERT(tcp->tcp_loopback_peer != NULL);
@@ -18455,11 +18467,6 @@ tcp_accept_finish(void *arg, mblk_t *mp, void *arg2)
 		 * Non-fused tcp loopback case is handled separately below.
 		 */
 		stropt->so_wroff = 0;
-		/*
-		 * Record the stream head's high water mark for this endpoint;
-		 * this is used for flow-control purposes in tcp_fuse_output().
-		 */
-		stropt->so_hiwat = tcp_fuse_set_rcv_hiwat(tcp, q->q_hiwat);
 		/*
 		 * Update the peer's transmit parameters according to
 		 * our recently calculated high water mark value.
@@ -18604,8 +18611,6 @@ tcp_accept_finish(void *arg, mblk_t *mp, void *arg2)
 		tcp->tcp_hard_binding = B_FALSE;
 		tcp->tcp_hard_bound = B_TRUE;
 	}
-
-	tcp->tcp_detached = B_FALSE;
 
 	/* We can enable synchronous streams now */
 	if (tcp->tcp_fused) {
@@ -18918,8 +18923,11 @@ no_more_eagers:
 		 * but we still have an extra refs on eager (apart from the
 		 * usual tcp references). The ref was placed in tcp_rput_data
 		 * before sending the conn_ind in tcp_send_conn_ind.
-		 * The ref will be dropped in tcp_accept_finish().
+		 * The ref will be dropped in tcp_accept_finish(). As sockfs
+		 * has already established this tcp with it's own stream,
+		 * it's OK to set tcp_detached to B_FALSE.
 		 */
+		econnp->conn_tcp->tcp_detached = B_FALSE;
 		squeue_enter_nodrain(econnp->conn_sqp, opt_mp,
 		    tcp_accept_finish, econnp, SQTAG_TCP_ACCEPT_FINISH_Q0);
 		return;
@@ -19408,13 +19416,8 @@ tcp_send_find_ire(tcp_t *tcp, ipaddr_t *dst, ire_t **irep)
 		}
 
 		IRE_REFHOLD_NOTR(ire);
-		/*
-		 * Since we are inside the squeue, there cannot be another
-		 * thread in TCP trying to set the conn_ire_cache now.  The
-		 * check for IRE_MARK_CONDEMNED ensures that an interface
-		 * unplumb thread has not yet started cleaning up the conns.
-		 * Hence we don't need to grab the conn lock.
-		 */
+
+		mutex_enter(&connp->conn_lock);
 		if (CONN_CACHE_IRE(connp)) {
 			rw_enter(&ire->ire_bucket->irb_lock, RW_READER);
 			if (!(ire->ire_marks & IRE_MARK_CONDEMNED)) {
@@ -19424,6 +19427,7 @@ tcp_send_find_ire(tcp_t *tcp, ipaddr_t *dst, ire_t **irep)
 			}
 			rw_exit(&ire->ire_bucket->irb_lock);
 		}
+		mutex_exit(&connp->conn_lock);
 
 		/*
 		 * We can continue to use the ire but since it was
@@ -19661,8 +19665,11 @@ tcp_send_data(tcp_t *tcp, queue_t *q, mblk_t *mp)
 		    ipst->ips_ipv4firewall_physical_out,
 		    NULL, out_ill, ipha, mp, mp, 0, ipst);
 		DTRACE_PROBE1(ip4__physical__out__end, mblk_t *, mp);
-		if (mp != NULL)
+
+		if (mp != NULL) {
+			DTRACE_IP_FASTPATH(mp, ipha, out_ill, ipha, NULL);
 			putnext(ire->ire_stq, mp);
+		}
 	}
 	IRE_REFRELE(ire);
 }
@@ -20708,6 +20715,10 @@ legacy_send_no_md:
 		do {
 			len = seg_len;
 
+			/* one must remain NULL for DTRACE_IP_FASTPATH */
+			ipha = NULL;
+			ip6h = NULL;
+
 			ASSERT(len > 0);
 			ASSERT(max_pld >= 0);
 			ASSERT(!add_buffer || cur_pld_off == 0);
@@ -21259,6 +21270,7 @@ legacy_send_no_md:
 					 * Need to pass it to normal path.
 					 */
 					CALL_IP_WPUT(tcp->tcp_connp, q, mp);
+					mp = NULL;
 				} else if (mp == NULL ||
 				    mp->b_rptr != pkt_info->hdr_rptr ||
 				    mp->b_wptr != pkt_info->hdr_wptr ||
@@ -21304,7 +21316,7 @@ legacy_send_no_md:
 						    q, mp);
 					} while (mp1 != NULL);
 
-					fw_mp_head = NULL;
+					fw_mp_head = mp = NULL;
 				} else {
 					if (fw_mp_head == NULL)
 						fw_mp_head = mp;
@@ -21312,6 +21324,11 @@ legacy_send_no_md:
 						fw_mp_head->b_prev->b_next = mp;
 					fw_mp_head->b_prev = mp;
 				}
+			}
+
+			if (mp != NULL) {
+				DTRACE_IP_FASTPATH(md_hbuf, pkt_info->hdr_rptr,
+				    ill, ipha, ip6h);
 			}
 
 			/* advance header offset */
@@ -21612,8 +21629,11 @@ tcp_lsosend_data(tcp_t *tcp, mblk_t *mp, ire_t *ire, ill_t *ill, const int mss,
 		    ipst->ips_ipv4firewall_physical_out,
 		    NULL, out_ill, ipha, mp, mp, 0, ipst);
 		DTRACE_PROBE1(ip4__physical__out__end, mblk_t *, mp);
-		if (mp != NULL)
+
+		if (mp != NULL) {
+			DTRACE_IP_FASTPATH(mp, ipha, out_ill, ipha, NULL);
 			putnext(ire->ire_stq, mp);
+		}
 	}
 }
 

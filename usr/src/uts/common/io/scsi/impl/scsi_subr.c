@@ -39,6 +39,8 @@
 
 extern uintptr_t scsi_callback_id;
 
+extern uchar_t scsi_cdb_size[];
+
 /*
  * Common buffer for scsi_log
  */
@@ -2114,15 +2116,22 @@ scsi_uscsi_alloc_and_copyin(intptr_t arg, int flag, struct scsi_address *ap,
 		goto done;
 	}
 
-	/*
-	 * If the length of the CDB is greater than 16 bytes, it must be
-	 * a variable length CDB (i.e. the opcode must be 0x7f).
-	 */
-	if (uscmd->uscsi_cdblen > SCSI_CDB_SIZE &&
-	    uscmd->uscsi_cdb[0] != SCMD_VAR_LEN) {
-		kmem_free(uscmd->uscsi_cdb, (size_t)uscmd->uscsi_cdblen);
-		rval = EINVAL;
-		goto done;
+	if (uscmd->uscsi_cdb[0] != SCMD_VAR_LEN) {
+		if (uscmd->uscsi_cdblen > SCSI_CDB_SIZE ||
+		    scsi_cdb_size[CDB_GROUPID(uscmd->uscsi_cdb[0])] >
+		    uscmd->uscsi_cdblen) {
+			kmem_free(uscmd->uscsi_cdb,
+			    (size_t)uscmd->uscsi_cdblen);
+			rval = EINVAL;
+			goto done;
+		}
+	} else {
+		if ((uscmd->uscsi_cdblen % 4) != 0) {
+			kmem_free(uscmd->uscsi_cdb,
+			    (size_t)uscmd->uscsi_cdblen);
+			rval = EINVAL;
+			goto done;
+		}
 	}
 
 	/*
@@ -2331,6 +2340,8 @@ scsi_uscsi_pktinit(struct uscsi_cmd *uscmd, struct scsi_pkt *pkt)
 		return (0);		/* failure */
 	}
 
+	/* set path_instance */
+	pkt->pkt_flags |= FLAG_PKT_PATH_INSTANCE;
 	pkt->pkt_path_instance = path_instance;
 	return (1);			/* success */
 }
@@ -2365,6 +2376,8 @@ scsi_uscsi_pktfini(struct scsi_pkt *pkt, struct uscsi_cmd *uscmd)
 	}
 
 	uscmd->uscsi_path_instance = pkt->pkt_path_instance;
+	/* reset path_instance */
+	pkt->pkt_flags &= ~FLAG_PKT_PATH_INSTANCE;
 	pkt->pkt_path_instance = 0;
 	return (1);			/* success */
 }

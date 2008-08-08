@@ -150,7 +150,8 @@ static vfsdef_t vfw = {
 	VFSDEF_VERSION,
 	"hsfs",
 	hsfsinit,
-	VSW_HASPROTO|VSW_STATS,	/* We don't suppport remounting */
+	/* We don't suppport remounting */
+	VSW_HASPROTO|VSW_STATS|VSW_CANLOFI,
 	&hsfs_proto_opttbl
 };
 
@@ -595,8 +596,8 @@ hs_mountfs(
 	size_t		pathbufsz = strlen(path) + 1;
 	int		redo_rootvp;
 
-	struct hs_volume *svp;		/* Supplemental VD for ISO-9660:1999 */
-	struct hs_volume *jvp;		/* Joliet VD */
+	struct hs_volume *svp = NULL;	/* Supplemental VD for ISO-9660:1999 */
+	struct hs_volume *jvp = NULL;	/* Joliet VD */
 
 	/*
 	 * The rules for which extension will be used are:

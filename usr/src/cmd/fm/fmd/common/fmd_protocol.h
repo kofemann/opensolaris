@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -39,9 +39,11 @@ extern "C" {
 
 #define	FMD_RSRC_CLASS		FM_RSRC_CLASS ".fm."
 #define	FMD_CTL_CLASS		FMD_RSRC_CLASS "fmd."
+#define	SYSEVENT_RSRC_CLASS	FM_RSRC_CLASS ".sysevent."
 
 #define	FMD_RSRC_CLASS_LEN	(sizeof (FMD_RSRC_CLASS) - 1)
 #define	FMD_CTL_CLASS_LEN	(sizeof (FMD_CTL_CLASS) - 1)
+#define	SYSEVENT_RSRC_CLASS_LEN	(sizeof (SYSEVENT_RSRC_CLASS) - 1)
 
 #define	FMD_CTL_ADDHRT		FMD_CTL_CLASS "clock.addhrtime"
 #define	FMD_CTL_ADDHRT_VERS1	1
@@ -74,7 +76,7 @@ extern nvlist_t *fmd_protocol_list(const char *, nvlist_t *,
     struct timeval *);
 extern nvlist_t *fmd_protocol_rsrc_asru(const char *, nvlist_t *,
     const char *, const char *, boolean_t, boolean_t, boolean_t, nvlist_t *,
-    struct timeval *);
+    struct timeval *m, boolean_t, boolean_t, boolean_t);
 extern nvlist_t *fmd_protocol_fmderror(int, const char *, va_list);
 extern nvlist_t *fmd_protocol_moderror(struct fmd_module *, int, const char *);
 extern nvlist_t *fmd_protocol_xprt_ctl(struct fmd_module *,

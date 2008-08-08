@@ -2,9 +2,8 @@
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
- * Common Development and Distribution License, Version 1.0 only
- * (the "License").  You may not use this file except in compliance
- * with the License.
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
  * or http://www.opensolaris.org/os/licensing.
@@ -19,16 +18,16 @@
  *
  * CDDL HEADER END
  */
+
 /*
- * Copyright 2004 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*	Copyright (c) 1988 AT&T	*/
 /*	  All Rights Reserved  	*/
 
+#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * This routine converts time as follows.
@@ -77,9 +76,7 @@
  * may also be called explicitly by the user.
  */
 
-#pragma weak asctime_r = _asctime_r
-
-#include "synonyms.h"
+#include "lint.h"
 #include <mtlib.h>
 #include <sys/types.h>
 #include <time.h>
@@ -93,13 +90,13 @@
 #define	CBUFSIZ 26
 
 static char *
-ct_numb(char *cp, int n)
+ct_numb(char *cp, int n, char pad)
 {
 	cp++;
 	if (n >= 10)
 		*cp++ = (n / 10) % 10 + '0';
 	else
-		*cp++ = ' ';		/* Pad with blanks */
+		*cp++ = pad;
 	*cp++ = n % 10 + '0';
 	return (cp);
 }
@@ -113,41 +110,38 @@ __posix_asctime_r(const struct tm *t, char *cbuf)
 {
 	char *cp;
 	const char *ncp;
-	const int *tp;
-	const char *Date = "Day Mon 00 00:00:00 1900\n";
+	const char *Date = "Day Mon 00 00:00:00 YYYY\n";
 	const char *Day  = "SunMonTueWedThuFriSat";
 	const char *Month = "JanFebMarAprMayJunJulAugSepOctNovDec";
 
+	int year = t->tm_year + 1900;
+
 	cp = cbuf;
-	for (ncp = Date; *cp++ = *ncp++; /* */);
+	for (ncp = Date; *cp++ = *ncp++; /* */)
+		;
 	ncp = Day + (3 * t->tm_wday);
 	cp = cbuf;
 	*cp++ = *ncp++;
 	*cp++ = *ncp++;
 	*cp++ = *ncp++;
 	cp++;
-	tp = &t->tm_mon;
-	ncp = Month + ((*tp) * 3);
+	ncp = Month + (3 * t->tm_mon);
 	*cp++ = *ncp++;
 	*cp++ = *ncp++;
 	*cp++ = *ncp++;
-	cp = ct_numb(cp, *--tp);
-	cp = ct_numb(cp, *--tp + 100);
-	cp = ct_numb(cp, *--tp + 100);
-	--tp;
-	cp = ct_numb(cp, *tp + 100);
-	if (t->tm_year < 100) {
-		/* Common case: "19" already in buffer */
-		cp += 2;
-	} else if (t->tm_year < 8100) {
-		cp = ct_numb(cp, (1900 + t->tm_year) / 100);
-		cp--;
-	} else {
-		/* Only 4-digit years are supported */
+	cp = ct_numb(cp, t->tm_mday, ' ');
+	cp = ct_numb(cp, t->tm_hour, '0');
+	cp = ct_numb(cp, t->tm_min, '0');
+	cp = ct_numb(cp, t->tm_sec, '0');
+
+	if (year < 0 || year >= 10000) {
+		/* Only positive, 4-digit years are supported */
 		errno = EOVERFLOW;
 		return (NULL);
 	}
-	(void) ct_numb(cp, t->tm_year + 100);
+	cp = ct_numb(cp, year / 100, '0');
+	cp--;
+	(void) ct_numb(cp, year, '0');
 	return (cbuf);
 }
 
