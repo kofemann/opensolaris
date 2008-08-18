@@ -1801,8 +1801,8 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 	mutex_enter(&rp->r_statelock);
 	layout = list_head(&rp->r_layout);
 	if ((mi->mi_flags & MI4_PNFS) &&
-	    (!(rp->r_flags & (R4LAYOUTVALID|R4LAYOUTUNAVAIL))) ||
-	    layout == NULL) {
+	    (!(rp->r_flags & (R4LAYOUTVALID|R4LAYOUTUNAVAIL)) ||
+	    layout == NULL)) {
 		mutex_exit(&rp->r_statelock);
 		pnfs_layoutget(vp, cr, LAYOUTIOMODE4_RW);
 		mutex_enter(&rp->r_statelock);
