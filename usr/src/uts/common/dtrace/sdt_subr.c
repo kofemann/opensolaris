@@ -23,7 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/sdt_impl.h>
 
@@ -180,6 +179,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv3", "op-getattr-done", 1, 1, "nfsv3oparg_t *",
 	    "nfsv3opinfo_t *" },
 	{ "nfsv3", "op-getattr-done", 2, 3, "GETATTR3res *" },
+
 	{ "nfsv3", "op-setattr-start", 0, 0, "struct svc_req *",
 	    "conninfo_t *" },
 	{ "nfsv3", "op-setattr-start", 1, 1, "nfsv3oparg_t *",
@@ -190,6 +190,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv3", "op-setattr-done", 1, 1, "nfsv3oparg_t *",
 	    "nfsv3opinfo_t *" },
 	{ "nfsv3", "op-setattr-done", 2, 3, "SETATTR3res *" },
+
 	{ "nfsv3", "op-lookup-start", 0, 0, "struct svc_req *",
 	    "conninfo_t *" },
 	{ "nfsv3", "op-lookup-start", 1, 1, "nfsv3oparg_t *",
@@ -200,6 +201,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv3", "op-lookup-done", 1, 1, "nfsv3oparg_t *",
 	    "nfsv3opinfo_t *" },
 	{ "nfsv3", "op-lookup-done", 2, 3, "LOOKUP3res *" },
+
 	{ "nfsv3", "op-access-start", 0, 0, "struct svc_req *",
 	    "conninfo_t *" },
 	{ "nfsv3", "op-access-start", 1, 1, "nfsv3oparg_t *",
@@ -210,6 +212,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv3", "op-access-done", 1, 1, "nfsv3oparg_t *",
 	    "nfsv3opinfo_t *" },
 	{ "nfsv3", "op-access-done", 2, 3, "ACCESS3res *" },
+
 	{ "nfsv3", "op-commit-start", 0, 0, "struct svc_req *",
 	    "conninfo_t *" },
 	{ "nfsv3", "op-commit-start", 1, 1, "nfsv3oparg_t *",
@@ -220,6 +223,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv3", "op-commit-done", 1, 1, "nfsv3oparg_t *",
 	    "nfsv3opinfo_t *" },
 	{ "nfsv3", "op-commit-done", 2, 3, "COMMIT3res *" },
+
 	{ "nfsv3", "op-create-start", 0, 0, "struct svc_req *",
 	    "conninfo_t *" },
 	{ "nfsv3", "op-create-start", 1, 1, "nfsv3oparg_t *",
@@ -230,6 +234,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv3", "op-create-done", 1, 1, "nfsv3oparg_t *",
 	    "nfsv3opinfo_t *" },
 	{ "nfsv3", "op-create-done", 2, 3, "CREATE3res *" },
+
 	{ "nfsv3", "op-fsinfo-start", 0, 0, "struct svc_req *",
 	    "conninfo_t *" },
 	{ "nfsv3", "op-fsinfo-start", 1, 1, "nfsv3oparg_t *",
@@ -388,6 +393,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv3", "op-symlink-done", 1, 1, "nfsv3oparg_t *",
 	    "nfsv3opinfo_t *" },
 	{ "nfsv3", "op-symlink-done", 2, 3, "SYMLINK3res *" },
+
 	{ "nfsv3", "op-write-start", 0, 0, "struct svc_req *",
 	    "conninfo_t *" },
 	{ "nfsv3", "op-write-start", 1, 1, "nfsv3oparg_t *",
@@ -401,6 +407,7 @@ sdt_argdesc_t sdt_args[] = {
 
 	{ "nfsv4", "null-start", 0, 0, "struct svc_req *", "conninfo_t *" },
 	{ "nfsv4", "null-done", 0, 0, "struct svc_req *", "conninfo_t *" },
+
 	{ "nfsv4", "compound-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "compound-start", 1, 0, "struct compound_state *",
@@ -411,6 +418,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "compound-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "compound-done", 2, 1, "COMPOUND4res *" },
+
 	{ "nfsv4", "op-access-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *"},
 	{ "nfsv4", "op-access-start", 1, 0, "struct compound_state *",
@@ -461,6 +469,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-delegpurge-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-delegpurge-done", 2, 1, "DELEGPURGE4res *" },
+
 	{ "nfsv4", "op-delegreturn-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-delegreturn-start", 1, 0, "struct compound_state *",
@@ -471,6 +480,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-delegreturn-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-delegreturn-done", 2, 1, "DELEGRETURN4res *" },
+
 	{ "nfsv4", "op-getattr-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-getattr-start", 1, 0, "struct compound_state *",
@@ -481,6 +491,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-getattr-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-getattr-done", 2, 1, "GETATTR4res *" },
+
 	{ "nfsv4", "op-getfh-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-getfh-start", 1, 0, "struct compound_state *",
@@ -490,6 +501,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-getfh-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-getfh-done", 2, 1, "GETFH4res *" },
+
 	{ "nfsv4", "op-link-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-link-start", 1, 0, "struct compound_state *",
@@ -500,6 +512,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-link-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-link-done", 2, 1, "LINK4res *" },
+
 	{ "nfsv4", "op-lock-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-lock-start", 1, 0, "struct compound_state *",
@@ -540,6 +553,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-lookup-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-lookup-done", 2, 1, "LOOKUP4res *" },
+
 	{ "nfsv4", "op-lookupp-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-lookupp-start", 1, 0, "struct compound_state *",
@@ -549,6 +563,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-lookupp-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-lookupp-done", 2, 1, "LOOKUPP4res *" },
+
 	{ "nfsv4", "op-nverify-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-nverify-start", 1, 0, "struct compound_state *",
@@ -559,6 +574,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-nverify-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-nverify-done", 2, 1, "NVERIFY4res *" },
+
 	{ "nfsv4", "op-open-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-open-start", 1, 0, "struct compound_state *",
@@ -569,6 +585,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-open-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-open-done", 2, 1, "OPEN4res *" },
+
 	{ "nfsv4", "op-open-confirm-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-open-confirm-start", 1, 0, "struct compound_state *",
@@ -579,6 +596,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-open-confirm-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-open-confirm-done", 2, 1, "OPEN_CONFIRM4res *" },
+
 	{ "nfsv4", "op-open-downgrade-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-open-downgrade-start", 1, 0, "struct compound_state *",
@@ -589,6 +607,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-open-downgrade-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-open-downgrade-done", 2, 1, "OPEN_DOWNGRADE4res *" },
+
 	{ "nfsv4", "op-openattr-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-openattr-start", 1, 0, "struct compound_state *",
@@ -599,6 +618,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-openattr-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-openattr-done", 2, 1, "OPENATTR4res *" },
+
 	{ "nfsv4", "op-putfh-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-putfh-start", 1, 0, "struct compound_state *",
@@ -609,6 +629,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-putfh-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-putfh-done", 2, 1, "PUTFH4res *" },
+
 	{ "nfsv4", "op-putpubfh-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-putpubfh-start", 1, 0, "struct compound_state *",
@@ -618,6 +639,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-putpubfh-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-putpubfh-done", 2, 1, "PUTPUBFH4res *" },
+
 	{ "nfsv4", "op-putrootfh-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-putrootfh-start", 1, 0, "struct compound_state *",
@@ -627,6 +649,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-putrootfh-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-putrootfh-done", 2, 1, "PUTROOTFH4res *" },
+
 	{ "nfsv4", "op-read-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-read-start", 1, 0, "struct compound_state *",
@@ -637,6 +660,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-read-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-read-done", 2, 1, "READ4res *" },
+
 	{ "nfsv4", "op-readdir-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-readdir-start", 1, 0, "struct compound_state *",
@@ -647,6 +671,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-readdir-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-readdir-done", 2, 1, "READDIR4res *" },
+
 	{ "nfsv4", "op-readlink-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-readlink-start", 1, 0, "struct compound_state *",
@@ -656,6 +681,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-readlink-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-readlink-done", 2, 1, "READLINK4res *" },
+
 	{ "nfsv4", "op-release-lockowner-start", 0, 0,
 	    "struct compound_state *", "conninfo_t *" },
 	{ "nfsv4", "op-release-lockowner-start", 1, 0,
@@ -668,6 +694,7 @@ sdt_argdesc_t sdt_args[] = {
 	    "struct compound_state *", "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-release-lockowner-done", 2, 1,
 	    "RELEASE_LOCKOWNER4res *" },
+
 	{ "nfsv4", "op-remove-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-remove-start", 1, 0, "struct compound_state *",
@@ -678,6 +705,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-remove-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-remove-done", 2, 1, "REMOVE4res *" },
+
 	{ "nfsv4", "op-rename-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-rename-start", 1, 0, "struct compound_state *",
@@ -688,6 +716,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-rename-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-rename-done", 2, 1, "RENAME4res *" },
+
 	{ "nfsv4", "op-renew-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-renew-start", 1, 0, "struct compound_state *",
@@ -698,6 +727,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-renew-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-renew-done", 2, 1, "RENEW4res *" },
+
 	{ "nfsv4", "op-restorefh-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-restorefh-start", 1, 0, "struct compound_state *",
@@ -707,6 +737,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-restorefh-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-restorefh-done", 2, 1, "RESTOREFH4res *" },
+
 	{ "nfsv4", "op-savefh-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-savefh-start", 1, 0, "struct compound_state *",
@@ -716,6 +747,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-savefh-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-savefh-done", 2, 1, "SAVEFH4res *" },
+
 	{ "nfsv4", "op-secinfo-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-secinfo-start", 1, 0, "struct compound_state *",
@@ -726,6 +758,17 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-secinfo-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-secinfo-done", 2, 1, "SECINFO4res *" },
+
+	{ "nfsv4", "op-secinfo-no-name-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-secinfo-no-name-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-secinfo-no-name-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-secinfo-no-name-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-secinfo-no-name-done", 2, 1, "SECINFO_NO_NAME4res *" },
+
 	{ "nfsv4", "op-setattr-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-setattr-start", 1, 0, "struct compound_state *",
@@ -758,6 +801,7 @@ sdt_argdesc_t sdt_args[] = {
 	    "struct compound_state *", "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-setclientid-confirm-done", 2, 1,
 	    "SETCLIENTID_CONFIRM4res *" },
+
 	{ "nfsv4", "op-verify-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-verify-start", 1, 0, "struct compound_state *",
@@ -768,6 +812,7 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "op-verify-done", 1, 0, "struct compound_state *",
 	    "nfsv4opinfo_t *" },
 	{ "nfsv4", "op-verify-done", 2, 1, "VERIFY4res *" },
+
 	{ "nfsv4", "op-write-start", 0, 0, "struct compound_state *",
 	    "conninfo_t *" },
 	{ "nfsv4", "op-write-start", 1, 0, "struct compound_state *",
@@ -788,6 +833,143 @@ sdt_argdesc_t sdt_args[] = {
 	{ "nfsv4", "cb-recall-done", 1, 1, "rfs4_deleg_state_t *",
 	    "nfsv4cbinfo_t *" },
 	{ "nfsv4", "cb-recall-done", 2, 2, "CB_RECALL4res *" },
+
+	{ "nfsv4", "op-bind-conn-to-session-start", 0, 0,
+	    "struct compound_state *", "conninfo_t *" },
+	{ "nfsv4", "op-bind-conn-to-session-start", 1, 0,
+	    "struct compound_state *", "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-bind-conn-to-session-start", 2, 1,
+	    "BIND_CONN_TO_SESSION4args *" },
+	{ "nfsv4", "op-bind-conn-to-session-done", 0, 0,
+	    "struct compound_state *", "conninfo_t *" },
+	{ "nfsv4", "op-bind-conn-to-session-done", 1, 0,
+	    "struct compound_state *", "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-bind-conn-to-session-done", 2, 1,
+	    "BIND_CONN_TO_SESSION4res *" },
+
+	{ "nfsv4", "op-exchange-id-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-exchange-id-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-exchange-id-start", 2, 1, "EXCHANGE_ID4args *" },
+	{ "nfsv4", "op-exchange-id-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-exchange-id-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-exchange-id-done", 2, 1, "EXCHANGE_ID4res *" },
+
+	{ "nfsv4", "op-create-session-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-create-session-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-create-session-start", 2, 1, "CREATE_SESSION4args *" },
+	{ "nfsv4", "op-create-session-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-create-session-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-create-session-done", 2, 1, "CREATE_SESSION4res *" },
+
+	{ "nfsv4", "op-destroy-session-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-destroy-session-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-destroy-session-start", 2, 1, "DESTROY_SESSION4args *" },
+	{ "nfsv4", "op-destroy-session-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-destroy-session-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-destroy-session-done", 2, 1, "DESTROY_SESSION4res *" },
+
+	{ "nfsv4", "op-getdeviceinfo-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-getdeviceinfo-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-getdeviceinfo-start", 2, 1, "GETDEVICEINFO4args *" },
+	{ "nfsv4", "op-getdeviceinfo-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-getdeviceinfo-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-getdeviceinfo-done", 2, 1, "GETDEVICEINFO4res *" },
+
+	{ "nfsv4", "op-getdevicelist-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-getdevicelist-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-getdevicelist-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-getdevicelist-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-getdevicelist-done", 2, 1, "GETDEVICELIST4res *" },
+
+	{ "nfsv4", "op-layoutget-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-layoutget-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-layoutget-start", 2, 1, "LAYOUTGET4args *" },
+	{ "nfsv4", "op-layoutget-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-layoutget-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-layoutget-done", 2, 1, "LAYOUTGET4res *" },
+
+	{ "nfsv4", "op-sequence-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-sequence-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-sequence-start", 2, 1, "SEQUENCE4args *" },
+	{ "nfsv4", "op-sequence-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-sequence-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-sequence-done", 2, 1, "SEQUENCE4res *" },
+
+	{ "nfsv4", "op-layoutreturn-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-layoutreturn-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-layoutreturn-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-layoutreturn-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-layoutreturn-done", 2, 1, "LAYOUTRETURN4res *" },
+
+	{ "nfsv4", "op-layoutcommit-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-layoutcommit-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-layoutcommit-start", 2, 1, "LAYOUTCOMMIT4args *" },
+	{ "nfsv4", "op-layoutcommit-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-layoutcommit-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-layoutcommit-done", 2, 1, "LAYOUTCOMMIT4res *" },
+
+	{ "nfsv4", "op-illegal-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-illegal-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-illegal-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-illegal-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+
+	{ "nfsv4", "op-notsup-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-notsup-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-notsup-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-notsup-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+
+	{ "nfsv4", "op-inval-start", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-inval-start", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
+	{ "nfsv4", "op-inval-done", 0, 0, "struct compound_state *",
+	    "conninfo_t *" },
+	{ "nfsv4", "op-inval-done", 1, 0, "struct compound_state *",
+	    "nfsv4opinfo_t *" },
 
 	{ "ip", "send", 0, 0, "mblk_t *", "pktinfo_t *" },
 	{ "ip", "send", 1, 1, "conn_t *", "csinfo_t *" },
