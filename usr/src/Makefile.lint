@@ -23,8 +23,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
-#
 
 # include global definitions
 include Makefile.master
@@ -191,6 +189,7 @@ COMMON_SUBDIRS = \
 	cmd/mkfile \
 	cmd/mkmsgs \
 	cmd/mknod \
+	cmd/mms	\
 	cmd/msgfmt \
 	cmd/msgid \
 	cmd/mt \
@@ -305,6 +304,7 @@ COMMON_SUBDIRS = \
 	lib/auditd_plugins \
 	lib/brand/native \
 	lib/brand/sn1 \
+	lib/cfgadm_plugins/sdcard \
 	lib/crypt_modules \
 	lib/extendedFILE \
 	lib/libadt_jni \
@@ -397,6 +397,7 @@ COMMON_SUBDIRS = \
 	lib/libzoneinfo \
 	lib/lvm \
 	lib/madv \
+	lib/mms	\
 	lib/mpss \
 	lib/nametoaddr \
 	lib/ncad_addr \

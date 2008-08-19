@@ -28,8 +28,6 @@
  *	All Rights Reserved
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -1161,7 +1159,7 @@ proceed:
 	 * Time to tie in the mirror mount info at last!
 	 */
 	if (flags & NFSMNT_EPHEMERAL)
-		nfs4_record_ephemeral_mount(mi, mvp);
+		error = nfs4_record_ephemeral_mount(mi, mvp);
 
 errout:
 	if (error) {
@@ -2440,7 +2438,7 @@ nfs4_unmount(vfs_t *vfsp, int flag, cred_t *cr)
 	ushort_t		omax;
 	int			removed;
 
-	bool_t			must_unlock = FALSE;
+	bool_t			must_unlock;
 
 	nfs4_ephemeral_tree_t	*eph_tree;
 
@@ -2497,13 +2495,7 @@ nfs4_unmount(vfs_t *vfsp, int flag, cred_t *cr)
 	 */
 	if (nfs4_ephemeral_umount(mi, flag, cr,
 	    &must_unlock, &eph_tree)) {
-
-		/*
-		 * Note that we ignore must_unlock
-		 * because it is garbage at this point.
-		 * I.e., it only has meaning upon
-		 * success.
-		 */
+		ASSERT(must_unlock == FALSE);
 		mutex_enter(&mi->mi_async_lock);
 		mi->mi_max_threads = omax;
 		mutex_exit(&mi->mi_async_lock);
@@ -4227,7 +4219,7 @@ nfs4_free_mount(vfs_t *vfsp, int flag, cred_t *cr)
 	boolean_t		async_thread;
 	int			removed;
 
-	bool_t			must_unlock = FALSE;
+	bool_t			must_unlock;
 	nfs4_ephemeral_tree_t	*eph_tree;
 
 	/*

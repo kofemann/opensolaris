@@ -23,8 +23,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
-#
 
 include $(SRC)/Makefile.master
 
@@ -99,7 +97,8 @@ sparc_SUBDIRS= \
 	SUNWstc.u \
 	SUNWus.u \
 	SUNWust1.v \
-	SUNWust2.v
+	SUNWust2.v \
+	SUNWwbsd
 
 sparc_XMODS=
 
@@ -277,6 +276,8 @@ COMMON_SUBDIRS= \
 	SUNWmdr \
 	SUNWmdu \
 	SUNWmibii \
+	SUNWmmsr \
+	SUNWmmsu \
 	SUNWmxfe \
 	SUNWncar \
 	SUNWncau \
@@ -371,6 +372,7 @@ COMMON_SUBDIRS= \
 	SUNWscplp  \
 	SUNWscsa1394  \
 	SUNWscsip \
+	SUNWsdcard \
 	SUNWses \
 	SUNWsfe \
 	SUNWslpr \

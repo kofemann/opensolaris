@@ -22,8 +22,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
-#
 
 PROG=		dlmgmtd
 OBJS=		dlmgmt_main.o dlmgmt_door.o dlmgmt_util.o dlmgmt_db.o
@@ -42,7 +40,7 @@ $(ROOTCFGFILES)	:= OWNER= dladm
 $(ROOTCFGFILES)	:= GROUP= sys
 $(ROOTCFGDIR)/datalink.conf	:= FILEMODE= 644
 
-LDLIBS += -ldladm -ldlpi -lavl
+LDLIBS += -ldladm -ldlpi -lavl -lnvpair -lsysevent
 
 .KEEP_STATE:
 

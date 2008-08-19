@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/types.h>
 #include <sys/thread.h>
 #include <sys/cpuvar.h>
@@ -390,12 +388,10 @@ mp_startup_init(int cpun)
 	 */
 	cpuid_alloc_space(cp);
 
-#if !defined(__xpv)
 	/*
 	 * alloc space for ucode_info
 	 */
 	ucode_alloc_space(cp);
-#endif
 
 	hat_cpu_online(cp);
 
@@ -486,9 +482,7 @@ mp_startup_fini(struct cpu *cp, int error)
 
 	cpuid_free_space(cp);
 
-#if !defined(__xpv)
 	ucode_free_space(cp);
-#endif
 
 	if (cp->cpu_idt != CPU->cpu_idt)
 		kmem_free(cp->cpu_idt, PAGESIZE);
@@ -1401,10 +1395,8 @@ start_other_cpus(int cprboot)
 			CPUSET_DEL(mp_cpus, who);
 	}
 
-#if !defined(__xpv)
 	/* Free the space allocated to hold the microcode file */
 	ucode_free();
-#endif
 
 	affinity_clear();
 
@@ -1565,12 +1557,10 @@ mp_startup(void)
 		(*dtrace_cpu_init)(cp->cpu_id);
 	}
 
-#if !defined(__xpv)
 	/*
 	 * Fill out cpu_ucode_info.  Update microcode if necessary.
 	 */
 	ucode_check(cp);
-#endif
 
 	mutex_exit(&cpu_lock);
 
@@ -1609,7 +1599,8 @@ mp_startup(void)
 		cmi_hdl_t hdl;
 
 		if ((hdl = cmi_init(CMI_HDL_NATIVE, cmi_ntv_hwchipid(CPU),
-		    cmi_ntv_hwcoreid(CPU), cmi_ntv_hwstrandid(CPU))) != NULL) {
+		    cmi_ntv_hwcoreid(CPU), cmi_ntv_hwstrandid(CPU),
+		    cmi_ntv_hwmstrand(CPU))) != NULL) {
 			if (x86_feature & X86_MCA)
 				cmi_mca_init(hdl);
 		}

@@ -26,9 +26,6 @@
 #ifndef	_SYS_SCSI_TARGETS_SDDEF_H
 #define	_SYS_SCSI_TARGETS_SDDEF_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
-
 #include <sys/dktp/fdisk.h>
 #include <sys/note.h>
 #include <sys/mhd.h>
@@ -291,6 +288,7 @@ struct sd_lun {
 	 */
 	ushort_t un_cmd_timeout;	/* Timeout for completion */
 	ushort_t un_uscsi_timeout;	/* Timeout for USCSI completion */
+	ushort_t un_busy_timeout;	/* Timeout for busy retry */
 
 	/*
 	 * Info on current states, statuses, etc. (Updated frequently)
@@ -432,7 +430,10 @@ struct sd_lun {
 						/* write cache */
 	    un_f_sync_nv_supported	:1,	/* SYNC_NV */
 						/* bit is supported */
-	    un_f_reserved		:14;
+	    un_f_sync_cache_required	:1,	/* flag to check if */
+						/* SYNC CACHE needs to be */
+						/* sent in sdclose */
+	    un_f_reserved		:13;
 
 	/* Ptr to table of strings for ASC/ASCQ error message printing */
 	struct scsi_asq_key_strings	*un_additional_codes;

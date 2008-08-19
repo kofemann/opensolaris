@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * This file contains all the routines used when modifying on-disk SPA state.
  * This includes opening, importing, destroying, exporting a pool, and syncing a
@@ -2784,11 +2782,13 @@ int
 spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing)
 {
 	uint64_t txg, open_txg;
-	int error;
 	vdev_t *rvd = spa->spa_root_vdev;
 	vdev_t *oldvd, *newvd, *newrootvd, *pvd, *tvd;
 	vdev_ops_t *pvops;
-	int is_log;
+	dmu_tx_t *tx;
+	char *oldvdpath, *newvdpath;
+	int newvd_isspare;
+	int error;
 
 	txg = spa_vdev_enter(spa);
 
@@ -2820,8 +2820,7 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing)
 	/*
 	 * Spares can't replace logs
 	 */
-	is_log = oldvd->vdev_islog;
-	if (is_log && newvd->vdev_isspare)
+	if (oldvd->vdev_top->vdev_islog && newvd->vdev_isspare)
 		return (spa_vdev_exit(spa, newrootvd, txg, ENOTSUP));
 
 	if (!replacing) {
@@ -2937,6 +2936,9 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing)
 
 	if (newvd->vdev_isspare)
 		spa_spare_activate(newvd);
+	oldvdpath = spa_strdup(vdev_description(oldvd));
+	newvdpath = spa_strdup(vdev_description(newvd));
+	newvd_isspare = newvd->vdev_isspare;
 
 	/*
 	 * Mark newvd's DTL dirty in this txg.
@@ -2944,6 +2946,21 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing)
 	vdev_dirty(tvd, VDD_DTL, newvd, txg);
 
 	(void) spa_vdev_exit(spa, newrootvd, open_txg, 0);
+
+	tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
+	if (dmu_tx_assign(tx, TXG_WAIT) == 0) {
+		spa_history_internal_log(LOG_POOL_VDEV_ATTACH, spa, tx,
+		    CRED(),  "%s vdev=%s %s vdev=%s",
+		    replacing && newvd_isspare ? "spare in" :
+		    replacing ? "replace" : "attach", newvdpath,
+		    replacing ? "for" : "to", oldvdpath);
+		dmu_tx_commit(tx);
+	} else {
+		dmu_tx_abort(tx);
+	}
+
+	spa_strfree(oldvdpath);
+	spa_strfree(newvdpath);
 
 	/*
 	 * Kick off a resilver to update newvd.
@@ -3305,12 +3322,13 @@ spa_vdev_remove(spa_t *spa, uint64_t guid, boolean_t unspare)
 	    ZPOOL_CONFIG_SPARES, &spares, &nspares) == 0) {
 		if ((error = spa_remove_spares(&spa->spa_spares, guid, unspare,
 		    spares, nspares, vd)) != 0)
-			goto out;
+			goto cache;
 		spa_load_spares(spa);
 		spa->spa_spares.sav_sync = B_TRUE;
 		goto out;
 	}
 
+cache:
 	if (spa->spa_l2cache.sav_vdevs != NULL &&
 	    nvlist_lookup_nvlist_array(spa->spa_l2cache.sav_config,
 	    ZPOOL_CONFIG_L2CACHE, &l2cache, &nl2cache) == 0) {
@@ -3515,26 +3533,23 @@ spa_scrub(spa_t *spa, pool_scrub_type_t type)
 static void
 spa_async_remove(spa_t *spa, vdev_t *vd)
 {
-	vdev_t *tvd;
 	int c;
 
-	for (c = 0; c < vd->vdev_children; c++) {
-		tvd = vd->vdev_child[c];
-		if (tvd->vdev_remove_wanted) {
-			tvd->vdev_remove_wanted = 0;
-			vdev_set_state(tvd, B_FALSE, VDEV_STATE_REMOVED,
-			    VDEV_AUX_NONE);
-			vdev_clear(spa, tvd, B_TRUE);
-			vdev_config_dirty(tvd->vdev_top);
-		}
-		spa_async_remove(spa, tvd);
+	if (vd->vdev_remove_wanted) {
+		vd->vdev_remove_wanted = 0;
+		vdev_set_state(vd, B_FALSE, VDEV_STATE_REMOVED, VDEV_AUX_NONE);
+		vdev_clear(spa, vd, B_TRUE);
+		vdev_config_dirty(vd->vdev_top);
 	}
+
+	for (c = 0; c < vd->vdev_children; c++)
+		spa_async_remove(spa, vd->vdev_child[c]);
 }
 
 static void
 spa_async_thread(spa_t *spa)
 {
-	int tasks;
+	int tasks, i;
 	uint64_t txg;
 
 	ASSERT(spa->spa_sync_on);
@@ -3565,6 +3580,10 @@ spa_async_thread(spa_t *spa)
 	    spa_state(spa) != POOL_STATE_IO_FAILURE) {
 		txg = spa_vdev_enter(spa);
 		spa_async_remove(spa, spa->spa_root_vdev);
+		for (i = 0; i < spa->spa_l2cache.sav_count; i++)
+			spa_async_remove(spa, spa->spa_l2cache.sav_vdevs[i]);
+		for (i = 0; i < spa->spa_spares.sav_count; i++)
+			spa_async_remove(spa, spa->spa_spares.sav_vdevs[i]);
 		(void) spa_vdev_exit(spa, NULL, txg, 0);
 	}
 

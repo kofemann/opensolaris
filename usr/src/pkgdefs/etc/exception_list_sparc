@@ -22,8 +22,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
-#
 # Exception List for protocmp
 #
 ###########################################
@@ -332,6 +330,8 @@ usr/lib/llib-like.ln			sparc
 usr/lib/llib-lipsecutil			sparc
 usr/lib/libipsecutil.so			sparc
 usr/lib/llib-lipsecutil.ln		sparc
+usr/lib/sparcv9/libipsecutil.so		sparc
+usr/lib/sparcv9/llib-lipsecutil.ln	sparc
 #
 # The following files are used by the dhcpmgr.
 #
@@ -1082,7 +1082,6 @@ usr/include/smbsrv/samlib.h		sparc
 usr/include/smbsrv/smb.h		sparc
 usr/include/smbsrv/smb_common_door.h	sparc
 usr/include/smbsrv/smb_door_svc.h	sparc
-usr/include/smbsrv/smb_fsd.h		sparc
 usr/include/smbsrv/smb_fsops.h		sparc
 usr/include/smbsrv/smb_i18n.h		sparc
 usr/include/smbsrv/smb_idmap.h		sparc
@@ -1164,6 +1163,13 @@ usr/include/libvscan.h	sparc
 #
 usr/lib/vscan/llib-lvscan	sparc
 usr/lib/vscan/llib-lvscan.ln	sparc
+#
+# Private sdcard framework headers
+#
+usr/include/sys/sdcard			sparc
+usr/include/sys/sdcard/sda.h		sparc
+usr/include/sys/sdcard/sda_impl.h	sparc
+usr/include/sys/sdcard/sda_ioctl.h	sparc
 #
 # libsmbfs is private
 #

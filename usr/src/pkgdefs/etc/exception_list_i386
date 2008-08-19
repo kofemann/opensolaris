@@ -22,8 +22,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
-#
 # Exception List for protocmp
 #
 ###########################################
@@ -352,6 +350,8 @@ usr/lib/llib-like.ln			i386
 usr/lib/llib-lipsecutil			i386
 usr/lib/libipsecutil.so			i386
 usr/lib/llib-lipsecutil.ln		i386
+usr/lib/amd64/libipsecutil.so		i386
+usr/lib/amd64/llib-lipsecutil.ln	i386
 #
 usr/include/inet/arp_impl.h		i386
 usr/include/inet/rawip_impl.h		i386
@@ -989,7 +989,6 @@ usr/include/smbsrv/samlib.h		i386
 usr/include/smbsrv/smb.h		i386
 usr/include/smbsrv/smb_common_door.h	i386
 usr/include/smbsrv/smb_door_svc.h	i386
-usr/include/smbsrv/smb_fsd.h		i386
 usr/include/smbsrv/smb_fsops.h		i386
 usr/include/smbsrv/smb_i18n.h		i386
 usr/include/smbsrv/smb_idmap.h		i386
@@ -1076,6 +1075,13 @@ usr/lib/vscan/llib-lvscan.ln	i386
 # drivers.  There is no usr/ component to this sub-platform, but the
 # directory is created in the proto area to keep other tools happy.
 usr/platform/i86hvm		i386
+#
+# Private sdcard framework headers
+#
+usr/include/sys/sdcard			i386
+usr/include/sys/sdcard/sda.h		i386
+usr/include/sys/sdcard/sda_impl.h	i386
+usr/include/sys/sdcard/sda_ioctl.h	i386
 #
 # libsmbfs is private
 #

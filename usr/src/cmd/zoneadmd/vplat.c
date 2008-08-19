@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * This module contains functions used to bring up and tear down the
  * Virtual Platform: [un]mounting file-systems, [un]plumbing network
@@ -153,6 +151,9 @@ static priv_set_t *zprivs = NULL;
 
 /* from libsocket, not in any header file */
 extern int getnetmaskbyaddr(struct in_addr, struct in_addr *);
+
+/* from zoneadmd */
+extern char query_hook[];
 
 /*
  * An optimization for build_mnttable: reallocate (and potentially copy the
@@ -2609,28 +2610,8 @@ configure_shared_network_interfaces(zlog_t *zlogp)
 	return (0);
 }
 
-static void
-show_owner(zlog_t *zlogp, char *dlname)
-{
-	zoneid_t dl_owner_zid;
-	char dl_owner_zname[ZONENAME_MAX];
-
-	dl_owner_zid = ALL_ZONES;
-	if (zone_check_datalink(&dl_owner_zid, dlname) != 0)
-		(void) snprintf(dl_owner_zname, ZONENAME_MAX, "<unknown>");
-	else if (getzonenamebyid(dl_owner_zid, dl_owner_zname, ZONENAME_MAX)
-	    < 0)
-		(void) snprintf(dl_owner_zname, ZONENAME_MAX, "<%d>",
-		    dl_owner_zid);
-
-	errno = EPERM;
-	zerror(zlogp, B_TRUE, "WARNING: skipping network interface '%s' "
-	    "which is used by the non-global zone '%s'.\n",
-	    dlname, dl_owner_zname);
-}
-
 static int
-add_datalink(zlog_t *zlogp, zoneid_t zoneid, char *dlname)
+add_datalink(zlog_t *zlogp, char *zone_name, char *dlname)
 {
 	/* First check if it's in use by global zone. */
 	if (zonecfg_ifname_exists(AF_INET, dlname) ||
@@ -2641,22 +2622,10 @@ add_datalink(zlog_t *zlogp, zoneid_t zoneid, char *dlname)
 		return (-1);
 	}
 
-	/* Add access control information */
-	if (zone_add_datalink(zoneid, dlname) != 0) {
-		/* If someone got this link before us, show its name */
-		if (errno == EPERM)
-			show_owner(zlogp, dlname);
-		else
-			zerror(zlogp, B_TRUE, "WARNING: unable to add network "
-			    "interface '%s'.", dlname);
-		return (-1);
-	}
-
 	/* Set zoneid of this link. */
-	if (dladm_setzid(dlname, zoneid) != DLADM_STATUS_OK) {
+	if (dladm_setzid(dlname, zone_name) != DLADM_STATUS_OK) {
 		zerror(zlogp, B_TRUE, "WARNING: unable to add network "
 		    "interface '%s'.", dlname);
-		(void) zone_remove_datalink(zoneid, dlname);
 		return (-1);
 	}
 
@@ -2664,22 +2633,10 @@ add_datalink(zlog_t *zlogp, zoneid_t zoneid, char *dlname)
 }
 
 static int
-remove_datalink(zlog_t *zlogp, zoneid_t zoneid, char *dlname)
+remove_datalink(zlog_t *zlogp, char *dlname)
 {
-	/*
-	 * Remove access control information.
-	 * If the errno is ENXIO, the interface is not added yet,
-	 * nothing to report then.
-	 */
-	if (zone_remove_datalink(zoneid, dlname) != 0) {
-		if (errno == ENXIO)
-			return (0);
-		zerror(zlogp, B_TRUE, "unable to remove network interface '%s'",
-		    dlname);
-		return (-1);
-	}
-
-	if (dladm_setzid(dlname, GLOBAL_ZONEID) != DLADM_STATUS_OK) {
+	if (dladm_setzid(dlname, GLOBAL_ZONENAME)
+	    != DLADM_STATUS_OK) {
 		zerror(zlogp, B_TRUE, "unable to release network "
 		    "interface '%s'", dlname);
 		return (-1);
@@ -2697,16 +2654,10 @@ configure_exclusive_network_interfaces(zlog_t *zlogp)
 {
 	zone_dochandle_t handle;
 	struct zone_nwiftab nwiftab;
-	zoneid_t zoneid;
 	char rootpath[MAXPATHLEN];
 	char path[MAXPATHLEN];
 	di_prof_t prof = NULL;
 	boolean_t added = B_FALSE;
-
-	if ((zoneid = getzoneidbyname(zone_name)) == -1) {
-		zerror(zlogp, B_TRUE, "unable to get zoneid");
-		return (-1);
-	}
 
 	if ((handle = zonecfg_init_handle()) == NULL) {
 		zerror(zlogp, B_TRUE, "getting zone configuration handle");
@@ -2758,24 +2709,14 @@ configure_exclusive_network_interfaces(zlog_t *zlogp)
 		 * created in that case.  The /dev/net entry is always
 		 * accessible.
 		 */
-		if (add_datalink(zlogp, zoneid, nwiftab.zone_nwif_physical)
+		if (add_datalink(zlogp, zone_name, nwiftab.zone_nwif_physical)
 		    == 0) {
-			char		name[DLPI_LINKNAME_MAX];
-			datalink_id_t	linkid;
-
-			if (dladm_name2info(nwiftab.zone_nwif_physical,
-			    &linkid, NULL, NULL, NULL) == DLADM_STATUS_OK &&
-			    dladm_linkid2legacyname(linkid, name,
-			    sizeof (name)) == DLADM_STATUS_OK) {
-				if (di_prof_add_dev(prof, name) != 0) {
-					(void) zonecfg_endnwifent(handle);
-					zonecfg_fini_handle(handle);
-					zerror(zlogp, B_TRUE,
-					    "failed to add network device");
-					return (-1);
-				}
-				added = B_TRUE;
-			}
+			added = B_TRUE;
+		} else {
+			(void) zonecfg_endnwifent(handle);
+			zonecfg_fini_handle(handle);
+			zerror(zlogp, B_TRUE, "failed to add network device");
+			return (-1);
 		}
 	}
 	(void) zonecfg_endnwifent(handle);
@@ -2832,7 +2773,7 @@ again:
 	ptr = dlnames;
 	for (i = 0; i < dlnum; i++) {
 		/* Remove access control information */
-		if (remove_datalink(zlogp, zoneid, ptr) != 0) {
+		if (remove_datalink(zlogp, ptr) != 0) {
 			free(dlnames);
 			return (-1);
 		}
@@ -2846,7 +2787,7 @@ again:
  * Get the list of the data-links from configuration, and try to remove it
  */
 static int
-unconfigure_exclusive_network_interfaces_static(zlog_t *zlogp, zoneid_t zoneid)
+unconfigure_exclusive_network_interfaces_static(zlog_t *zlogp)
 {
 	zone_dochandle_t handle;
 	struct zone_nwiftab nwiftab;
@@ -2868,7 +2809,7 @@ unconfigure_exclusive_network_interfaces_static(zlog_t *zlogp, zoneid_t zoneid)
 		if (zonecfg_getnwifent(handle, &nwiftab) != Z_OK)
 			break;
 		/* Remove access control information */
-		if (remove_datalink(zlogp, zoneid, nwiftab.zone_nwif_physical)
+		if (remove_datalink(zlogp, nwiftab.zone_nwif_physical)
 		    != 0) {
 			(void) zonecfg_endnwifent(handle);
 			zonecfg_fini_handle(handle);
@@ -2888,8 +2829,7 @@ static int
 unconfigure_exclusive_network_interfaces(zlog_t *zlogp, zoneid_t zoneid)
 {
 	if (unconfigure_exclusive_network_interfaces_run(zlogp, zoneid) != 0) {
-		return (unconfigure_exclusive_network_interfaces_static(zlogp,
-		    zoneid));
+		return (unconfigure_exclusive_network_interfaces_static(zlogp));
 	}
 
 	return (0);
@@ -3200,6 +3140,24 @@ out:
 }
 
 static int
+get_implicit_datasets(zlog_t *zlogp, char **retstr)
+{
+	char cmdbuf[2 * MAXPATHLEN];
+
+	if (query_hook[0] == '\0')
+		return (0);
+
+	if (snprintf(cmdbuf, sizeof (cmdbuf), "%s datasets", query_hook)
+	    > sizeof (cmdbuf))
+		return (-1);
+
+	if (do_subproc(zlogp, cmdbuf, retstr) != 0)
+		return (-1);
+
+	return (0);
+}
+
+static int
 get_datasets(zlog_t *zlogp, char **bufp, size_t *bufsizep)
 {
 	zone_dochandle_t handle;
@@ -3207,6 +3165,8 @@ get_datasets(zlog_t *zlogp, char **bufp, size_t *bufsizep)
 	size_t total, offset, len;
 	int error = -1;
 	char *str = NULL;
+	char *implicit_datasets = NULL;
+	int implicit_len = 0;
 
 	*bufp = NULL;
 	*bufsizep = 0;
@@ -3221,6 +3181,11 @@ get_datasets(zlog_t *zlogp, char **bufp, size_t *bufsizep)
 		return (-1);
 	}
 
+	if (get_implicit_datasets(zlogp, &implicit_datasets) != 0) {
+		zerror(zlogp, B_FALSE, "getting implicit datasets failed");
+		goto out;
+	}
+
 	if (zonecfg_setdsent(handle) != Z_OK) {
 		zerror(zlogp, B_FALSE, "%s failed", "zonecfg_setdsent");
 		goto out;
@@ -3230,6 +3195,11 @@ get_datasets(zlog_t *zlogp, char **bufp, size_t *bufsizep)
 	while (zonecfg_getdsent(handle, &dstab) == Z_OK)
 		total += strlen(dstab.zone_dataset_name) + 1;
 	(void) zonecfg_enddsent(handle);
+
+	if (implicit_datasets != NULL)
+		implicit_len = strlen(implicit_datasets);
+	if (implicit_len > 0)
+		total += implicit_len + 1;
 
 	if (total == 0) {
 		error = 0;
@@ -3256,6 +3226,9 @@ get_datasets(zlog_t *zlogp, char **bufp, size_t *bufsizep)
 	}
 	(void) zonecfg_enddsent(handle);
 
+	if (implicit_len > 0)
+		(void) strlcpy(str + offset, implicit_datasets, total - offset);
+
 	error = 0;
 	*bufp = str;
 	*bufsizep = total;
@@ -3265,6 +3238,8 @@ out:
 		free(str);
 	if (handle != NULL)
 		zonecfg_fini_handle(handle);
+	if (implicit_datasets != NULL)
+		free(implicit_datasets);
 
 	return (error);
 }
@@ -4595,7 +4570,7 @@ vplat_teardown(zlog_t *zlogp, boolean_t unmount_cmd, boolean_t rebooting)
 	brand_close(bh);
 
 	if ((strlen(cmdbuf) > EXEC_LEN) &&
-	    (do_subproc(zlogp, cmdbuf) != Z_OK)) {
+	    (do_subproc(zlogp, cmdbuf, NULL) != Z_OK)) {
 		zerror(zlogp, B_FALSE, "%s failed", cmdbuf);
 		goto error;
 	}
