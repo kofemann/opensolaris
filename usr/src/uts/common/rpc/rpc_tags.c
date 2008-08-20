@@ -23,7 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -434,7 +433,6 @@ rpc_remove_xprt(rpc_tag_hd_t *taghd, rpc_tag_t *tag, void *xprt)
 	while (rtxp) {
 		if (rtxp->rtx_xprt == xprt) {
 			list_remove(&tag->rt_xplist, rtxp);
-			rtxp->rtx_xprt = NULL;
 			kmem_free(rtxp, sizeof (rpc_tag_xprt_t));
 			rpc_tag_rele_nolock(tag);
 			break;
@@ -460,10 +458,9 @@ rpc_remove_all_xprt(rpc_tag_hd_t *taghd, rpc_tag_t *tag)
 	while (rtxp) {
 		list_remove(&tag->rt_xplist, rtxp);
 		rpc_remove_tag(taghd, rtxp->rtx_xprt, tag->rt_id);
-		rtxp->rtx_xprt = NULL;
 		kmem_free(rtxp, sizeof (rpc_tag_xprt_t));
 		rpc_tag_rele_nolock(tag);
-		rtxp = list_next(&tag->rt_xplist, rtxp);
+		rtxp = list_head(&tag->rt_xplist);
 	}
 }
 
