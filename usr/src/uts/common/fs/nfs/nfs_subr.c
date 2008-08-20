@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -171,12 +169,6 @@ static const struct clstat clstat_tmpl = {
 	{ "badcalls",	KSTAT_DATA_UINT64 },
 	{ "clgets",	KSTAT_DATA_UINT64 },
 	{ "cltoomany",	KSTAT_DATA_UINT64 },
-#ifdef DEBUG
-	{ "clalloc",	KSTAT_DATA_UINT64 },
-	{ "noresponse",	KSTAT_DATA_UINT64 },
-	{ "failover",	KSTAT_DATA_UINT64 },
-	{ "remap",	KSTAT_DATA_UINT64 },
-#endif
 };
 
 /*
@@ -185,6 +177,10 @@ static const struct clstat clstat_tmpl = {
  */
 #ifdef DEBUG
 static struct clstat_debug {
+	kstat_named_t	clalloc;		/* number of client handles */
+	kstat_named_t	noresponse;		/* server not responding cnt */
+	kstat_named_t	failover;		/* server failover count */
+	kstat_named_t	remap;			/* server remap count */
 	kstat_named_t	nrnode;			/* number of allocated rnodes */
 	kstat_named_t	access;			/* size of access cache */
 	kstat_named_t	dirent;			/* size of readdir cache */
@@ -196,6 +192,10 @@ static struct clstat_debug {
 	kstat_named_t	r_reclaim;		/* number of rnode reclaims */
 	kstat_named_t	rpath;			/* bytes used to store rpaths */
 } clstat_debug = {
+	{ "clalloc",	KSTAT_DATA_UINT64 },
+	{ "noresponse",	KSTAT_DATA_UINT64 },
+	{ "failover",	KSTAT_DATA_UINT64 },
+	{ "remap",	KSTAT_DATA_UINT64 },
 	{ "nrnode",	KSTAT_DATA_UINT64 },
 	{ "access",	KSTAT_DATA_UINT64 },
 	{ "dirent",	KSTAT_DATA_UINT64 },
@@ -406,7 +406,7 @@ top:
 	 * a new one and use that.
 	 */
 #ifdef DEBUG
-	atomic_add_64(&nfscl->nfscl_stat.clalloc.value.ui64, 1);
+	atomic_add_64(&clstat_debug.clalloc.value.ui64, 1);
 #endif
 	mutex_exit(&nfscl->nfscl_chtable_lock);
 
@@ -427,7 +427,7 @@ top:
 	if (error != 0) {
 		kmem_cache_free(chtab_cache, cp);
 #ifdef DEBUG
-		atomic_add_64(&nfscl->nfscl_stat.clalloc.value.ui64, -1);
+		atomic_add_64(&clstat_debug.clalloc.value.ui64, -1);
 #endif
 		/*
 		 * Warning is unnecessary if error is EINTR.
@@ -446,7 +446,7 @@ top:
 		CLNT_DESTROY(cp->ch_client);
 		kmem_cache_free(chtab_cache, cp);
 #ifdef DEBUG
-		atomic_add_64(&nfscl->nfscl_stat.clalloc.value.ui64, -1);
+		atomic_add_64(&clstat_debug.clalloc.value.ui64, -1);
 #endif
 		return ((error != 0) ? error : EINTR);
 	}
@@ -714,7 +714,7 @@ clreclaim_zone(struct nfs_clnt *nfscl, uint_t cl_holdtime)
 	 * Update clalloc so that nfsstat shows the current number
 	 * of allocated client handles.
 	 */
-	atomic_add_64(&nfscl->nfscl_stat.clalloc.value.ui64, -n);
+	atomic_add_64(&clstat_debug.clalloc.value.ui64, -n);
 #endif
 }
 
@@ -1173,7 +1173,7 @@ failoverretry:
 			mi->mi_noresponse++;
 			mutex_exit(&mi->mi_lock);
 #ifdef DEBUG
-			nfscl->nfscl_stat.noresponse.value.ui64++;
+			clstat_debug.noresponse.value.ui64++;
 #endif
 
 			if (!(mi->mi_flags & MI_HARD)) {
@@ -1759,7 +1759,7 @@ failoverretry:
 			mi->mi_noresponse++;
 			mutex_exit(&mi->mi_lock);
 #ifdef DEBUG
-			nfscl->nfscl_stat.noresponse.value.ui64++;
+			clstat_debug.noresponse.value.ui64++;
 #endif
 
 			if (!(mi->mi_flags & MI_HARD)) {
@@ -3326,29 +3326,35 @@ cl_snapshot(kstat_t *ksp, void *buf, int rw)
 	ksp->ks_snaptime = gethrtime();
 	if (rw == KSTAT_WRITE) {
 		bcopy(buf, ksp->ks_private, sizeof (clstat_tmpl));
+	} else {
+		bcopy(ksp->ks_private, buf, sizeof (clstat_tmpl));
+	}
+	return (0);
+}
+
 #ifdef DEBUG
+static int
+cl_debug_snapshot(kstat_t *ksp, void *buf, int rw)
+{
+	ksp->ks_snaptime = gethrtime();
+	if (rw == KSTAT_WRITE) {
 		/*
 		 * Currently only the global zone can write to kstats, but we
 		 * add the check just for paranoia.
 		 */
 		if (INGLOBALZONE(curproc))
-			bcopy((char *)buf + sizeof (clstat_tmpl), &clstat_debug,
-			    sizeof (clstat_debug));
-#endif
+			bcopy(buf, &clstat_debug, sizeof (clstat_debug));
 	} else {
-		bcopy(ksp->ks_private, buf, sizeof (clstat_tmpl));
-#ifdef DEBUG
 		/*
 		 * If we're displaying the "global" debug kstat values, we
 		 * display them as-is to all zones since in fact they apply to
 		 * the system as a whole.
 		 */
-		bcopy(&clstat_debug, (char *)buf + sizeof (clstat_tmpl),
-		    sizeof (clstat_debug));
-#endif
+		bcopy(&clstat_debug, buf, sizeof (clstat_debug));
 	}
 	return (0);
 }
+#endif
 
 static void *
 clinit_zone(zoneid_t zoneid)
@@ -3364,9 +3370,6 @@ clinit_zone(zoneid_t zoneid)
 
 	bcopy(&clstat_tmpl, &nfscl->nfscl_stat, sizeof (clstat_tmpl));
 	ndata = sizeof (clstat_tmpl) / sizeof (kstat_named_t);
-#ifdef DEBUG
-	ndata += sizeof (clstat_debug) / sizeof (kstat_named_t);
-#endif
 	if ((nfs_client_kstat = kstat_create_zone("nfs", 0, "nfs_client",
 	    "misc", KSTAT_TYPE_NAMED, ndata,
 	    KSTAT_FLAG_VIRTUAL | KSTAT_FLAG_WRITABLE, zoneid)) != NULL) {
@@ -3433,6 +3436,23 @@ nfs_subrinit(void)
 {
 	int i;
 	ulong_t nrnode_max;
+#ifdef DEBUG
+	uint_t ndata;
+	kstat_t *nfs_debug_kstat;
+
+	/*
+	 * Create a kstat to maintain debug statistics across all zones
+	 */
+	ndata = sizeof (clstat_debug) / sizeof (kstat_named_t);
+	if ((nfs_debug_kstat = kstat_create("nfs", 0, "nfs_client_debug",
+	    "misc", KSTAT_TYPE_NAMED, ndata,
+	    KSTAT_FLAG_VIRTUAL | KSTAT_FLAG_WRITABLE)) != NULL) {
+		nfs_debug_kstat->ks_private = &clstat_debug;
+		nfs_debug_kstat->ks_snapshot = cl_debug_snapshot;
+		kstat_install(nfs_debug_kstat);
+	}
+#endif
+
 
 	/*
 	 * Allocate and initialize the rnode hash queues
@@ -3540,6 +3560,12 @@ nfs_subrfini(void)
 		rw_destroy(&acache[i].lock);
 	kmem_free(acache, acachesize * sizeof (*acache));
 
+#ifdef DEBUG
+	/*
+	 * Delete the kstat that maintains statistics across zones.
+	 */
+	kstat_delete_byname("nfs", 0, "nfs_client_debug");
+#endif
 	/*
 	 * Deallocate the client handle cache
 	 */
@@ -4398,7 +4424,7 @@ done:
 		mi->mi_curr_serv = svp;
 		mi->mi_failover++;
 #ifdef DEBUG
-	nfscl->nfscl_stat.failover.value.ui64++;
+	clstat_debug.failover.value.ui64++;
 #endif
 	}
 	cv_broadcast(&mi->mi_failover_cv);
@@ -4590,7 +4616,7 @@ failover_remap(failinfo_t *fi)
 	mi->mi_remap++;
 	mutex_exit(&mi->mi_lock);
 #ifdef DEBUG
-	nfscl->nfscl_stat.remap.value.ui64++;
+	clstat_debug.remap.value.ui64++;
 #endif
 
 	/*

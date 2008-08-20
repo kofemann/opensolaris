@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/kstat.h>
@@ -32,6 +30,7 @@
 #include <sys/systm.h>
 
 #include <nfs/nfs.h>
+#include <nfs/nfs4.h>
 #include <nfs/nfs4_kprot.h>
 
 /*
@@ -108,7 +107,7 @@ nfsstat_zone_init_server(zoneid_t zoneid, kstat_named_t *svstatp[])
 
 	for (vers = NFS_VERSION; vers <= NFS_V4; vers++) {
 		svstatp[vers] = nfsstat_zone_init_common(zoneid, "nfs", vers,
-			    "nfs_server", svstat_tmpl, sizeof (svstat_tmpl));
+		"nfs_server", svstat_tmpl, sizeof (svstat_tmpl));
 		if (zoneid == GLOBAL_ZONEID)
 			global_svstat_ptr[vers] = svstatp[vers];
 	}
@@ -466,21 +465,97 @@ static const kstat_named_t rfsreqcnt_v4_tmpl[] = {
 	{ "setclientid",	KSTAT_DATA_UINT64 },
 	{ "setclientid_confirm",	KSTAT_DATA_UINT64 },
 	{ "verify", KSTAT_DATA_UINT64 },
-	{ "write",	KSTAT_DATA_UINT64 }
+	{ "write",	KSTAT_DATA_UINT64 },
+	{ "release_lockowner",	KSTAT_DATA_UINT64 }
+};
+
+/*
+ * NFSv4.1 client stats
+ */
+static const kstat_named_t rfsreqcnt_v41_tmpl[] = {
+	{ "null",	KSTAT_DATA_UINT64 },
+	{ "compound",	KSTAT_DATA_UINT64 },
+	{ "reserved",	KSTAT_DATA_UINT64 },
+	{ "access",	KSTAT_DATA_UINT64 },
+	{ "close",	KSTAT_DATA_UINT64 },
+	{ "commit",	KSTAT_DATA_UINT64 },
+	{ "create",	KSTAT_DATA_UINT64 },
+	{ "delegpurge",	KSTAT_DATA_UINT64 },
+	{ "delegreturn",	KSTAT_DATA_UINT64 },
+	{ "getattr",	KSTAT_DATA_UINT64 },
+	{ "getfh",	KSTAT_DATA_UINT64 },
+	{ "link",	KSTAT_DATA_UINT64 },
+	{ "lock",	KSTAT_DATA_UINT64 },
+	{ "lockt",	KSTAT_DATA_UINT64 },
+	{ "locku",	KSTAT_DATA_UINT64 },
+	{ "lookup",	KSTAT_DATA_UINT64 },
+	{ "lookupp",	KSTAT_DATA_UINT64 },
+	{ "nverify",	KSTAT_DATA_UINT64 },
+	{ "open",	KSTAT_DATA_UINT64 },
+	{ "openattr",	KSTAT_DATA_UINT64 },
+	{ "open_confirm",	KSTAT_DATA_UINT64 },
+	{ "open_downgrade",	KSTAT_DATA_UINT64 },
+	{ "putfh",	KSTAT_DATA_UINT64 },
+	{ "putpubfh",	KSTAT_DATA_UINT64 },
+	{ "putrootfh",	KSTAT_DATA_UINT64 },
+	{ "read",	KSTAT_DATA_UINT64 },
+	{ "readdir",	KSTAT_DATA_UINT64 },
+	{ "readlink",	KSTAT_DATA_UINT64 },
+	{ "remove",	KSTAT_DATA_UINT64 },
+	{ "rename",	KSTAT_DATA_UINT64 },
+	{ "renew",	KSTAT_DATA_UINT64 },
+	{ "restorefh",	KSTAT_DATA_UINT64 },
+	{ "savefh",	KSTAT_DATA_UINT64 },
+	{ "secinfo",	KSTAT_DATA_UINT64 },
+	{ "setattr",	KSTAT_DATA_UINT64 },
+	{ "setclientid",	KSTAT_DATA_UINT64 },
+	{ "setclientid_confirm",	KSTAT_DATA_UINT64 },
+	{ "verify",	KSTAT_DATA_UINT64 },
+	{ "write",	KSTAT_DATA_UINT64 },
+	{ "release_lockowner",	KSTAT_DATA_UINT64 },
+	{ "backchannel_ctl", 	KSTAT_DATA_UINT64 },
+	{ "bind_conn_to_session", 	KSTAT_DATA_UINT64 },
+	{ "exchange_id", 	KSTAT_DATA_UINT64 },
+	{ "create_session", 	KSTAT_DATA_UINT64 },
+	{ "destroy_session", 	KSTAT_DATA_UINT64 },
+	{ "free_stateid", 	KSTAT_DATA_UINT64 },
+	{ "get_dir_delegation", 	KSTAT_DATA_UINT64 },
+	{ "getdeviceinfo", 	KSTAT_DATA_UINT64 },
+	{ "getdevicelist", 	KSTAT_DATA_UINT64 },
+	{ "layoutcommit", 	KSTAT_DATA_UINT64 },
+	{ "layoutget", 	KSTAT_DATA_UINT64 },
+	{ "layoutreturn", 	KSTAT_DATA_UINT64 },
+	{ "secinfo_no_name", 	KSTAT_DATA_UINT64 },
+	{ "sequence", 	KSTAT_DATA_UINT64 },
+	{ "set_ssv", 	KSTAT_DATA_UINT64 },
+	{ "test_stateid", 	KSTAT_DATA_UINT64 },
+	{ "want_delegation", 	KSTAT_DATA_UINT64 },
+	{ "destroy_clientid", 	KSTAT_DATA_UINT64 },
+	{ "reclaim_complete", 	KSTAT_DATA_UINT64 }
 };
 
 static void
 nfsstat_zone_init_rfsreq_v4(zoneid_t zoneid, struct nfs_version_stats *statsp)
 {
-	statsp->rfsreqcnt_ptr = nfsstat_zone_init_common(zoneid, "nfs", 0,
-	    "rfsreqcnt_v4", rfsreqcnt_v4_tmpl, sizeof (rfsreqcnt_v4_tmpl));
+	statsp[NFS4_MINOR_v0].rfsreqcnt_ptr = nfsstat_zone_init_common(zoneid,
+	    "nfs", 0, "rfsreqcnt_v4", rfsreqcnt_v4_tmpl,
+	    sizeof (rfsreqcnt_v4_tmpl));
+
+	statsp[NFS4_MINOR_v1].rfsreqcnt_ptr = nfsstat_zone_init_common(zoneid,
+	    "nfs", 0, "rfsreqcnt_v41", rfsreqcnt_v41_tmpl,
+	    sizeof (rfsreqcnt_v41_tmpl));
 }
 
 static void
 nfsstat_zone_fini_rfsreq_v4(zoneid_t zoneid, struct nfs_version_stats *statsp)
 {
 	nfsstat_zone_fini_common(zoneid, "nfs", 0, "rfsreqcnt_v4");
-	kmem_free(statsp->rfsreqcnt_ptr, sizeof (rfsreqcnt_v4_tmpl));
+	kmem_free(statsp[NFS4_MINOR_v0].rfsreqcnt_ptr,
+	    sizeof (rfsreqcnt_v4_tmpl));
+
+	nfsstat_zone_fini_common(zoneid, "nfs", 0, "rfsreqcnt_v41");
+	kmem_free(statsp[NFS4_MINOR_v1].rfsreqcnt_ptr,
+	    sizeof (rfsreqcnt_v41_tmpl));
 }
 
 /*
@@ -532,6 +607,73 @@ static const kstat_named_t rfsproccnt_v4_tmpl[] = {
 
 kstat_named_t *rfsproccnt_v4_ptr;
 
+/*
+ * NFSv4.1 server stats
+ */
+static const kstat_named_t rfsproccnt_v41_tmpl[] = {
+	{ "null",	KSTAT_DATA_UINT64 },
+	{ "compound",	KSTAT_DATA_UINT64 },
+	{ "reserved",	KSTAT_DATA_UINT64 },
+	{ "access",	KSTAT_DATA_UINT64 },
+	{ "close",	KSTAT_DATA_UINT64 },
+	{ "commit",	KSTAT_DATA_UINT64 },
+	{ "create",	KSTAT_DATA_UINT64 },
+	{ "delegpurge",	KSTAT_DATA_UINT64 },
+	{ "delegreturn",	KSTAT_DATA_UINT64 },
+	{ "getattr",	KSTAT_DATA_UINT64 },
+	{ "getfh",	KSTAT_DATA_UINT64 },
+	{ "link",	KSTAT_DATA_UINT64 },
+	{ "lock",	KSTAT_DATA_UINT64 },
+	{ "lockt",	KSTAT_DATA_UINT64 },
+	{ "locku",	KSTAT_DATA_UINT64 },
+	{ "lookup",	KSTAT_DATA_UINT64 },
+	{ "lookupp",	KSTAT_DATA_UINT64 },
+	{ "nverify",	KSTAT_DATA_UINT64 },
+	{ "open",	KSTAT_DATA_UINT64 },
+	{ "openattr",	KSTAT_DATA_UINT64 },
+	{ "open_confirm",	KSTAT_DATA_UINT64 },
+	{ "open_downgrade",	KSTAT_DATA_UINT64 },
+	{ "putfh",	KSTAT_DATA_UINT64 },
+	{ "putpubfh",	KSTAT_DATA_UINT64 },
+	{ "putrootfh",	KSTAT_DATA_UINT64 },
+	{ "read",	KSTAT_DATA_UINT64 },
+	{ "readdir",	KSTAT_DATA_UINT64 },
+	{ "readlink",	KSTAT_DATA_UINT64 },
+	{ "remove",	KSTAT_DATA_UINT64 },
+	{ "rename",	KSTAT_DATA_UINT64 },
+	{ "renew",	KSTAT_DATA_UINT64 },
+	{ "restorefh",	KSTAT_DATA_UINT64 },
+	{ "savefh",	KSTAT_DATA_UINT64 },
+	{ "secinfo",	KSTAT_DATA_UINT64 },
+	{ "setattr",	KSTAT_DATA_UINT64 },
+	{ "setclientid",	KSTAT_DATA_UINT64 },
+	{ "setclientid_confirm",	KSTAT_DATA_UINT64 },
+	{ "verify",	KSTAT_DATA_UINT64 },
+	{ "write",	KSTAT_DATA_UINT64 },
+	{ "release_lockowner",	KSTAT_DATA_UINT64 },
+	{ "backchannel_ctl", 	KSTAT_DATA_UINT64 },
+	{ "bind_conn_to_session", 	KSTAT_DATA_UINT64 },
+	{ "exchange_id", 	KSTAT_DATA_UINT64 },
+	{ "create_session", 	KSTAT_DATA_UINT64 },
+	{ "destroy_session", 	KSTAT_DATA_UINT64 },
+	{ "free_stateid", 	KSTAT_DATA_UINT64 },
+	{ "get_dir_delegation", 	KSTAT_DATA_UINT64 },
+	{ "getdeviceinfo", 	KSTAT_DATA_UINT64 },
+	{ "getdevicelist", 	KSTAT_DATA_UINT64 },
+	{ "layoutcommit", 	KSTAT_DATA_UINT64 },
+	{ "layoutget", 	KSTAT_DATA_UINT64 },
+	{ "layoutreturn", 	KSTAT_DATA_UINT64 },
+	{ "secinfo_no_name", 	KSTAT_DATA_UINT64 },
+	{ "sequence", 	KSTAT_DATA_UINT64 },
+	{ "set_ssv", 	KSTAT_DATA_UINT64 },
+	{ "test_stateid", 	KSTAT_DATA_UINT64 },
+	{ "want_delegation", 	KSTAT_DATA_UINT64 },
+	{ "destroy_clientid", 	KSTAT_DATA_UINT64 },
+	{ "reclaim_complete", 	KSTAT_DATA_UINT64 },
+	{ "illegal",	KSTAT_DATA_UINT64 }
+};
+kstat_named_t *rfsproccnt_v41_ptr;
+
 static void
 nfsstat_zone_init_rfsproc_v4(zoneid_t zoneid, struct nfs_version_stats *statsp)
 {
@@ -539,9 +681,17 @@ nfsstat_zone_init_rfsproc_v4(zoneid_t zoneid, struct nfs_version_stats *statsp)
 
 	ks_data = nfsstat_zone_init_common(zoneid, "nfs", 0, "rfsproccnt_v4",
 	    rfsproccnt_v4_tmpl, sizeof (rfsproccnt_v4_tmpl));
-	statsp->rfsproccnt_ptr = ks_data;
+	statsp[NFS4_MINOR_v0].rfsproccnt_ptr = ks_data;
 	if (zoneid == GLOBAL_ZONEID)
 		rfsproccnt_v4_ptr = ks_data;
+
+
+	ks_data = nfsstat_zone_init_common(zoneid, "nfs", 0, "rfsproccnt_v41",
+	    rfsproccnt_v41_tmpl, sizeof (rfsproccnt_v41_tmpl));
+	statsp[NFS4_MINOR_v1].rfsproccnt_ptr = ks_data;
+	if (zoneid == GLOBAL_ZONEID)
+		rfsproccnt_v41_ptr = ks_data;
+
 }
 
 static void
@@ -550,7 +700,14 @@ nfsstat_zone_fini_rfsproc_v4(zoneid_t zoneid, struct nfs_version_stats *statsp)
 	if (zoneid == GLOBAL_ZONEID)
 		rfsproccnt_v4_ptr = NULL;
 	nfsstat_zone_fini_common(zoneid, "nfs", 0, "rfsproccnt_v4");
-	kmem_free(statsp->rfsproccnt_ptr, sizeof (rfsproccnt_v4_tmpl));
+	kmem_free(statsp[NFS4_MINOR_v0].rfsproccnt_ptr,
+	    sizeof (rfsproccnt_v4_tmpl));
+
+	if (zoneid == GLOBAL_ZONEID)
+		rfsproccnt_v41_ptr = NULL;
+	nfsstat_zone_fini_common(zoneid, "nfs", 0, "rfsproccnt_v41");
+	kmem_free(statsp[NFS4_MINOR_v1].rfsproccnt_ptr,
+	    sizeof (rfsproccnt_v41_tmpl));
 }
 
 /*
@@ -562,18 +719,37 @@ static const kstat_named_t aclreqcnt_v4_tmpl[] = {
 	{ "setacl",	KSTAT_DATA_UINT64 },
 };
 
+/*
+ * NFSv4.1 client ACL stats
+ */
+static const kstat_named_t aclreqcnt_v41_tmpl[] = {
+	{ "null",	KSTAT_DATA_UINT64 },
+	{ "getacl",	KSTAT_DATA_UINT64 },
+	{ "setacl",	KSTAT_DATA_UINT64 },
+};
+
 static void
 nfsstat_zone_init_aclreq_v4(zoneid_t zoneid, struct nfs_version_stats *statsp)
 {
-	statsp->aclreqcnt_ptr = nfsstat_zone_init_common(zoneid, "nfs_acl", 0,
-	    "aclreqcnt_v4", aclreqcnt_v4_tmpl, sizeof (aclreqcnt_v4_tmpl));
+	statsp[NFS4_MINOR_v0].aclreqcnt_ptr = nfsstat_zone_init_common(zoneid,
+	    "nfs_acl", 0, "aclreqcnt_v4", aclreqcnt_v4_tmpl,
+	    sizeof (aclreqcnt_v4_tmpl));
+
+	statsp[NFS4_MINOR_v1].aclreqcnt_ptr = nfsstat_zone_init_common(zoneid,
+	    "nfs_acl", 0, "aclreqcnt_v41", aclreqcnt_v41_tmpl,
+	    sizeof (aclreqcnt_v41_tmpl));
 }
 
 static void
 nfsstat_zone_fini_aclreq_v4(zoneid_t zoneid, struct nfs_version_stats *statsp)
 {
 	nfsstat_zone_fini_common(zoneid, "nfs_acl", 0, "aclreqcnt_v4");
-	kmem_free(statsp->aclreqcnt_ptr, sizeof (aclreqcnt_v4_tmpl));
+	kmem_free(statsp[NFS4_MINOR_v0].aclreqcnt_ptr,
+	    sizeof (aclreqcnt_v4_tmpl));
+
+	nfsstat_zone_fini_common(zoneid, "nfs_acl", 0, "aclreqcnt_v41");
+	kmem_free(statsp[NFS4_MINOR_v1].aclreqcnt_ptr,
+	    sizeof (aclreqcnt_v41_tmpl));
 }
 
 /*
@@ -587,6 +763,17 @@ static const kstat_named_t aclproccnt_v4_tmpl[] = {
 
 kstat_named_t *aclproccnt_v4_ptr;
 
+/*
+ * NFSv4.1 server ACL stats
+ */
+static const kstat_named_t aclproccnt_v41_tmpl[] = {
+	{ "null",	KSTAT_DATA_UINT64 },
+	{ "getacl",	KSTAT_DATA_UINT64 },
+	{ "setacl",	KSTAT_DATA_UINT64 }
+};
+
+kstat_named_t *aclproccnt_v41_ptr;
+
 static void
 nfsstat_zone_init_aclproc_v4(zoneid_t zoneid, struct nfs_version_stats *statsp)
 {
@@ -595,9 +782,16 @@ nfsstat_zone_init_aclproc_v4(zoneid_t zoneid, struct nfs_version_stats *statsp)
 	ks_data = nfsstat_zone_init_common(zoneid, "nfs_acl", 0,
 	    "aclproccnt_v4", aclproccnt_v4_tmpl,
 	    sizeof (aclproccnt_v4_tmpl));
-	statsp->aclproccnt_ptr = ks_data;
+	statsp[NFS4_MINOR_v0].aclproccnt_ptr = ks_data;
 	if (zoneid == GLOBAL_ZONEID)
 		aclproccnt_v4_ptr = ks_data;
+
+	ks_data = nfsstat_zone_init_common(zoneid, "nfs_acl", 0,
+	    "aclproccnt_v41", aclproccnt_v41_tmpl,
+	    sizeof (aclproccnt_v41_tmpl));
+	statsp[NFS4_MINOR_v1].aclproccnt_ptr = ks_data;
+	if (zoneid == GLOBAL_ZONEID)
+		aclproccnt_v41_ptr = ks_data;
 }
 
 static void
@@ -606,7 +800,14 @@ nfsstat_zone_fini_aclproc_v4(zoneid_t zoneid, struct nfs_version_stats *statsp)
 	if (zoneid == GLOBAL_ZONEID)
 		aclproccnt_v4_ptr = NULL;
 	nfsstat_zone_fini_common(zoneid, "nfs_acl", 0, "aclproccnt_v4");
-	kmem_free(statsp->aclproccnt_ptr, sizeof (aclproccnt_v4_tmpl));
+	kmem_free(statsp[NFS4_MINOR_v0].aclproccnt_ptr,
+	    sizeof (aclproccnt_v4_tmpl));
+
+	if (zoneid == GLOBAL_ZONEID)
+		aclproccnt_v41_ptr = NULL;
+	nfsstat_zone_fini_common(zoneid, "nfs_acl", 0, "aclproccnt_v41");
+	kmem_free(statsp[NFS4_MINOR_v1].aclproccnt_ptr,
+	    sizeof (aclproccnt_v41_tmpl));
 }
 
 /*
@@ -639,12 +840,12 @@ nfsstat_zone_init(zoneid_t zoneid)
 	nfsstat_zone_init_aclreq_v3(zoneid, &nfs_stats_ptr->nfs_stats_v3);
 	nfsstat_zone_init_aclproc_v3(zoneid, &nfs_stats_ptr->nfs_stats_v3);
 	/*
-	 * Initialize v4 stats
+	 * Initialize v4 stats for each minor version
 	 */
-	nfsstat_zone_init_rfsreq_v4(zoneid, &nfs_stats_ptr->nfs_stats_v4);
-	nfsstat_zone_init_rfsproc_v4(zoneid, &nfs_stats_ptr->nfs_stats_v4);
-	nfsstat_zone_init_aclreq_v4(zoneid, &nfs_stats_ptr->nfs_stats_v4);
-	nfsstat_zone_init_aclproc_v4(zoneid, &nfs_stats_ptr->nfs_stats_v4);
+	nfsstat_zone_init_rfsreq_v4(zoneid, nfs_stats_ptr->nfs_stats_v4);
+	nfsstat_zone_init_rfsproc_v4(zoneid, nfs_stats_ptr->nfs_stats_v4);
+	nfsstat_zone_init_aclreq_v4(zoneid, nfs_stats_ptr->nfs_stats_v4);
+	nfsstat_zone_init_aclproc_v4(zoneid, nfs_stats_ptr->nfs_stats_v4);
 
 	return (nfs_stats_ptr);
 }
@@ -677,12 +878,12 @@ nfsstat_zone_fini(zoneid_t zoneid, void *data)
 	nfsstat_zone_fini_aclreq_v3(zoneid, &nfs_stats_ptr->nfs_stats_v3);
 	nfsstat_zone_fini_aclproc_v3(zoneid, &nfs_stats_ptr->nfs_stats_v3);
 	/*
-	 * Free v4 stats
+	 * Free v4 stats for each minor version
 	 */
-	nfsstat_zone_fini_rfsreq_v4(zoneid, &nfs_stats_ptr->nfs_stats_v4);
-	nfsstat_zone_fini_rfsproc_v4(zoneid, &nfs_stats_ptr->nfs_stats_v4);
-	nfsstat_zone_fini_aclreq_v4(zoneid, &nfs_stats_ptr->nfs_stats_v4);
-	nfsstat_zone_fini_aclproc_v4(zoneid, &nfs_stats_ptr->nfs_stats_v4);
+	nfsstat_zone_fini_rfsreq_v4(zoneid, nfs_stats_ptr->nfs_stats_v4);
+	nfsstat_zone_fini_rfsproc_v4(zoneid, nfs_stats_ptr->nfs_stats_v4);
+	nfsstat_zone_fini_aclreq_v4(zoneid, nfs_stats_ptr->nfs_stats_v4);
+	nfsstat_zone_fini_aclproc_v4(zoneid, nfs_stats_ptr->nfs_stats_v4);
 
 	kmem_free(nfs_stats_ptr, sizeof (*nfs_stats_ptr));
 }

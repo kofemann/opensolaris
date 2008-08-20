@@ -29,7 +29,6 @@
 #ifndef	_NFS_NFS_H
 #define	_NFS_NFS_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 /*	nfs.h 2.38 88/08/19 SMI 	*/
 
 #include <sys/isa_defs.h>
@@ -68,6 +67,11 @@ extern "C" {
 #define	NFS_VERSMAX	((rpcvers_t)4)
 #define	NFS_VERSION	((rpcvers_t)2)
 #define	NFS_PORT	2049
+
+/*
+ * Minor versioning support
+ */
+#define	NFS4_MINORVERSMAX 1
 
 /*
  * Used to determine registration and service handling of versions
@@ -977,7 +981,7 @@ struct nfs_stats {
 	kstat_named_t		*nfs_stats_svstat_ptr[NFS_VERSMAX + 1];
 	struct nfs_version_stats	nfs_stats_v2;
 	struct nfs_version_stats	nfs_stats_v3;
-	struct nfs_version_stats	nfs_stats_v4;
+	struct nfs_version_stats	nfs_stats_v4[NFS4_MINORVERSMAX + 1];
 };
 
 /*

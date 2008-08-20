@@ -27,8 +27,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * nfsstat: Network File System statistics
  *
@@ -65,6 +63,7 @@
 #include <sys/time.h>
 #include <strings.h>
 #include <ctype.h>
+#include <nfs/nfs4.h>
 
 
 static kstat_ctl_t *kc = NULL;		/* libkstat cookie */
@@ -75,8 +74,10 @@ static kstat_t *nfs_client_kstat, *nfs_server_v2_kstat, *nfs_server_v3_kstat;
 static kstat_t *nfs4_client_kstat, *nfs_server_v4_kstat;
 static kstat_t *rfsproccnt_v2_kstat, *rfsproccnt_v3_kstat, *rfsproccnt_v4_kstat;
 static kstat_t *rfsreqcnt_v2_kstat, *rfsreqcnt_v3_kstat, *rfsreqcnt_v4_kstat;
+static kstat_t *nfs41_client_kstat, *rfsproccnt_v41_kstat, *rfsreqcnt_v41_kstat;
 static kstat_t *aclproccnt_v2_kstat, *aclproccnt_v3_kstat;
 static kstat_t *aclreqcnt_v2_kstat, *aclreqcnt_v3_kstat;
+static kstat_t *nfs4_debug_kstat, *nfs_debug_kstat;
 static kstat_t *ksum_kstat;
 
 static void handle_sig(int);
@@ -95,9 +96,9 @@ static void sn_print(int, int);
 static void ca_print(int, int);
 static void sa_print(int, int);
 static void req_print(kstat_t *, kstat_t *, int, int, int);
-static void req_print_v4(kstat_t *, kstat_t *, int, int);
+static void req_print_v4(kstat_t *, kstat_t *, int, int, int);
 static void stat_print(const char *, kstat_t *, kstat_t *, int, int);
-static void kstat_sum(kstat_t *, kstat_t *, kstat_t *);
+static void kstat_sum(kstat_t *, kstat_t *, kstat_t *, kstat_t *);
 static void stats_timer(int);
 static void safe_zalloc(void **, uint_t, int);
 static int safe_strtoi(char const *, char *);
@@ -113,6 +114,19 @@ static void mi_print(void);
 static int ignore(char *);
 static int interval;		/* interval between stats */
 static int count;		/* number of iterations the stat is printed */
+/*
+ * NFS ops that are not supported in NFS version 4, minor version 1, must
+ * be included here as follows.
+ */
+#define	NUM_OPS_TOSKIP 5
+nfs_opnum4 ops_toskip_v41[NUM_OPS_TOSKIP] =  {
+	OP_OPEN_CONFIRM,
+	OP_RENEW,
+	OP_SETCLIENTID,
+	OP_SETCLIENTID_CONFIRM,
+	OP_RELEASE_LOCKOWNER
+};
+
 #define	MAX_COLUMNS	80
 #define	MAX_PATHS	50	/* max paths that can be taken by -m */
 
@@ -142,10 +156,13 @@ static old_kstat_t old_rpc_cots_client_kstat, old_rpc_cots_server_kstat;
 static old_kstat_t old_rpc_rdma_client_kstat, old_rpc_rdma_server_kstat;
 static old_kstat_t old_nfs_client_kstat, old_nfs_server_v2_kstat;
 static old_kstat_t old_nfs_server_v3_kstat, old_ksum_kstat;
-static old_kstat_t old_nfs4_client_kstat, old_nfs_server_v4_kstat;
-static old_kstat_t old_rfsproccnt_v2_kstat, old_rfsproccnt_v3_kstat;
-static old_kstat_t old_rfsproccnt_v4_kstat, old_rfsreqcnt_v2_kstat;
+static old_kstat_t old_nfs4_client_kstat, old_nfs41_client_kstat;
+static old_kstat_t old_nfs4_debug_kstat, old_nfs_debug_kstat;
+static old_kstat_t old_nfs_server_v4_kstat, old_rfsproccnt_v2_kstat;
+static old_kstat_t old_rfsproccnt_v3_kstat, old_rfsproccnt_v4_kstat;
+static old_kstat_t old_rfsreqcnt_v2_kstat;
 static old_kstat_t old_rfsreqcnt_v3_kstat, old_rfsreqcnt_v4_kstat;
+static old_kstat_t old_rfsreqcnt_v41_kstat;
 static old_kstat_t old_aclproccnt_v2_kstat, old_aclproccnt_v3_kstat;
 static old_kstat_t old_aclreqcnt_v2_kstat, old_aclreqcnt_v3_kstat;
 
@@ -197,8 +214,11 @@ main(int argc, char *argv[])
 			break;
 		case 'v':
 			vflag = atoi(optarg);
-			if ((vflag < 2) || (vflag > 4))
-				fail(0, "Invalid version number\n");
+			if (vflag != 41) {
+				if ((vflag < 2) || (vflag > 4)) {
+					fail(0, "Invalid version number\n");
+				}
+			}
 			break;
 		case '?':
 		default:
@@ -349,9 +369,21 @@ getstats_nfs(void)
 		safe_kstat_read(kc, nfs_client_kstat, NULL);
 		field_width = stat_width(nfs_client_kstat, field_width);
 	}
+	if (nfs_debug_kstat != NULL) {
+		safe_kstat_read(kc, nfs_debug_kstat, NULL);
+		field_width = stat_width(nfs_debug_kstat, field_width);
+	}
 	if (nfs4_client_kstat != NULL) {
 		safe_kstat_read(kc, nfs4_client_kstat, NULL);
 		field_width = stat_width(nfs4_client_kstat, field_width);
+	}
+	if (nfs4_debug_kstat != NULL) {
+		safe_kstat_read(kc, nfs4_debug_kstat, NULL);
+		field_width = stat_width(nfs4_debug_kstat, field_width);
+	}
+	if (nfs41_client_kstat != NULL) {
+		safe_kstat_read(kc, nfs41_client_kstat, NULL);
+		field_width = stat_width(nfs41_client_kstat, field_width);
 	}
 	if (nfs_server_v2_kstat != NULL) {
 		safe_kstat_read(kc, nfs_server_v2_kstat, NULL);
@@ -404,6 +436,11 @@ getstats_rfsreq(int ver)
 		safe_kstat_read(kc, rfsreqcnt_v4_kstat, NULL);
 		field_width = req_width(rfsreqcnt_v4_kstat, field_width);
 	}
+	if ((ver == 41) && (rfsreqcnt_v41_kstat != NULL)) {
+		safe_kstat_read(kc, rfsreqcnt_v41_kstat, NULL);
+		field_width = req_width(rfsreqcnt_v41_kstat, field_width);
+	}
+
 	return (field_width);
 }
 
@@ -448,8 +485,14 @@ putstats(void)
 		safe_kstat_write(kc, rpc_rdma_client_kstat, NULL);
 	if (nfs_client_kstat != NULL)
 		safe_kstat_write(kc, nfs_client_kstat, NULL);
+	if (nfs_debug_kstat != NULL)
+		safe_kstat_write(kc, nfs_debug_kstat, NULL);
 	if (nfs4_client_kstat != NULL)
 		safe_kstat_write(kc, nfs4_client_kstat, NULL);
+	if (nfs4_debug_kstat != NULL)
+		safe_kstat_write(kc, nfs4_debug_kstat, NULL);
+	if (nfs41_client_kstat != NULL)
+		safe_kstat_write(kc, nfs41_client_kstat, NULL);
 	if (rpc_clts_server_kstat != NULL)
 		safe_kstat_write(kc, rpc_clts_server_kstat, NULL);
 	if (rpc_cots_server_kstat != NULL)
@@ -474,6 +517,8 @@ putstats(void)
 		safe_kstat_write(kc, rfsreqcnt_v3_kstat, NULL);
 	if (rfsreqcnt_v4_kstat != NULL)
 		safe_kstat_write(kc, rfsreqcnt_v4_kstat, NULL);
+	if (rfsreqcnt_v41_kstat != NULL)
+		safe_kstat_write(kc, rfsreqcnt_v41_kstat, NULL);
 	if (aclproccnt_v2_kstat != NULL)
 		safe_kstat_write(kc, aclproccnt_v2_kstat, NULL);
 	if (aclproccnt_v3_kstat != NULL)
@@ -492,6 +537,11 @@ setup(void)
 
 	/* malloc space for our temporary kstat */
 	ksum_kstat = malloc(sizeof (kstat_t));
+	/*
+	 * kstat_sum function assumes implicitly that ks_data is NULL. It may
+	 * not always be the case.
+	 */
+	ksum_kstat->ks_data = NULL;
 	rpc_clts_client_kstat = kstat_lookup(kc, "unix", 0, "rpc_clts_client");
 	rpc_clts_server_kstat = kstat_lookup(kc, "unix", 0, "rpc_clts_server");
 	rpc_cots_client_kstat = kstat_lookup(kc, "unix", 0, "rpc_cots_client");
@@ -500,15 +550,25 @@ setup(void)
 	rpc_rdma_server_kstat = kstat_lookup(kc, "unix", 0, "rpc_rdma_server");
 	nfs_client_kstat = kstat_lookup(kc, "nfs", 0, "nfs_client");
 	nfs4_client_kstat = kstat_lookup(kc, "nfs", 0, "nfs4_client");
+	/*
+	 * Holds the debug stats as the sum across the minor versions for v4.
+	 * No easy way to separate them in the kernel on the basis of minor
+	 * version as of now.
+	 */
+	nfs4_debug_kstat = kstat_lookup(kc, "nfs", 0, "nfs4_client_debug");
+	nfs_debug_kstat = kstat_lookup(kc, "nfs", 0, "nfs_client_debug");
+	nfs41_client_kstat = kstat_lookup(kc, "nfs", 0, "nfs41_client");
 	nfs_server_v2_kstat = kstat_lookup(kc, "nfs", 2, "nfs_server");
 	nfs_server_v3_kstat = kstat_lookup(kc, "nfs", 3, "nfs_server");
 	nfs_server_v4_kstat = kstat_lookup(kc, "nfs", 4, "nfs_server");
 	rfsproccnt_v2_kstat = kstat_lookup(kc, "nfs", 0, "rfsproccnt_v2");
 	rfsproccnt_v3_kstat = kstat_lookup(kc, "nfs", 0, "rfsproccnt_v3");
 	rfsproccnt_v4_kstat = kstat_lookup(kc, "nfs", 0, "rfsproccnt_v4");
+	rfsproccnt_v41_kstat = kstat_lookup(kc, "nfs", 0, "rfsproccnt_v41");
 	rfsreqcnt_v2_kstat = kstat_lookup(kc, "nfs", 0, "rfsreqcnt_v2");
 	rfsreqcnt_v3_kstat = kstat_lookup(kc, "nfs", 0, "rfsreqcnt_v3");
 	rfsreqcnt_v4_kstat = kstat_lookup(kc, "nfs", 0, "rfsreqcnt_v4");
+	rfsreqcnt_v41_kstat = kstat_lookup(kc, "nfs", 0, "rfsreqcnt_v41");
 	aclproccnt_v2_kstat = kstat_lookup(kc, "nfs_acl", 0, "aclproccnt_v2");
 	aclproccnt_v3_kstat = kstat_lookup(kc, "nfs_acl", 0, "aclproccnt_v3");
 	aclreqcnt_v2_kstat = kstat_lookup(kc, "nfs_acl", 0, "aclreqcnt_v2");
@@ -619,19 +679,48 @@ cn_print(int zflag, int vflag)
 		return;
 
 	if (vflag == 0) {
-		kstat_sum(nfs_client_kstat, nfs4_client_kstat, ksum_kstat);
-		stat_print("\nClient nfs:", ksum_kstat, &old_ksum_kstat.kst,
-		    field_width, zflag);
+		kstat_sum(nfs_client_kstat, nfs4_client_kstat,
+		    nfs41_client_kstat, ksum_kstat);
+		stat_print("\nClient nfs (sum):", ksum_kstat,
+		    &old_ksum_kstat.kst, field_width, zflag);
+		if (zflag) {
+			/*
+			 * The following statements ensure that the
+			 * individual client counts are also zeroed when
+			 * -z flag is issued without any version.
+			 */
+			stat_print("\nClient nfs (v2/3):", nfs_client_kstat,
+			    &old_nfs_client_kstat.kst, field_width, zflag);
+			stat_print("\nClient nfs (v4):", nfs4_client_kstat,
+			    &old_nfs4_client_kstat.kst, field_width, zflag);
+			stat_print("\nClient nfs (v41):", nfs41_client_kstat,
+			    &old_nfs41_client_kstat.kst, field_width, zflag);
+		}
 	}
 
 	if (vflag == 2 || vflag == 3) {
 		stat_print("\nClient nfs:", nfs_client_kstat,
 		    &old_nfs_client_kstat.kst, field_width, zflag);
+		if (nfs_debug_kstat != NULL) {
+		stat_print("\nClient nfs debug statistics:", nfs_debug_kstat,
+		    &old_nfs_debug_kstat.kst, field_width, zflag);
+		}
 	}
 
 	if (vflag == 4) {
 		stat_print("\nClient nfs:", nfs4_client_kstat,
 		    &old_nfs4_client_kstat.kst, field_width, zflag);
+		if (nfs4_debug_kstat != NULL) {
+			stat_print("\nClient nfs debug statistics "
+			    "across minor versions:", nfs4_debug_kstat,
+			    &old_nfs4_debug_kstat.kst,
+			    field_width, zflag);
+		}
+	}
+
+	if (vflag == 41) {
+		stat_print("\nClient nfs:", nfs41_client_kstat,
+		    &old_nfs41_client_kstat.kst, field_width, zflag);
 	}
 
 	if (vflag == 2 || vflag == 0) {
@@ -642,15 +731,22 @@ cn_print(int zflag, int vflag)
 
 	if (vflag == 3 || vflag == 0) {
 		field_width = getstats_rfsreq(3);
-		req_print(rfsreqcnt_v3_kstat, &old_rfsreqcnt_v3_kstat.kst, 3,
-		    field_width, zflag);
+		req_print(rfsreqcnt_v3_kstat, &old_rfsreqcnt_v3_kstat.kst,
+		    3, field_width, zflag);
 	}
 
 	if (vflag == 4 || vflag == 0) {
 		field_width = getstats_rfsreq(4);
 		req_print_v4(rfsreqcnt_v4_kstat, &old_rfsreqcnt_v4_kstat.kst,
-		    field_width, zflag);
+		    4, field_width, zflag);
 	}
+
+	if (vflag == 41 || vflag == 0) {
+		field_width = getstats_rfsreq(41);
+		req_print_v4(rfsreqcnt_v41_kstat, &old_rfsreqcnt_v41_kstat.kst,
+		    41, field_width, zflag);
+	}
+
 }
 
 static void
@@ -692,7 +788,7 @@ sn_print(int zflag, int vflag)
 	if (vflag == 4 || vflag == 0) {
 		field_width = getstats_rfsproc(4);
 		req_print_v4(rfsproccnt_v4_kstat, &old_rfsproccnt_v4_kstat.kst,
-		    field_width, zflag);
+		    4, field_width, zflag);
 	}
 }
 
@@ -825,7 +921,8 @@ req_print(kstat_t *req, kstat_t *req_old, int ver, int field_width,
 #define	COUNT	2
 
 static void
-req_print_v4(kstat_t *req, kstat_t *req_old, int field_width, int zflag)
+req_print_v4
+(kstat_t *req, kstat_t *req_old, int ver, int field_width, int zflag)
 {
 	int i, j, nreq, per, ncolumns;
 	uint64_t tot, tot_ops, old_tot, old_tot_ops;
@@ -833,6 +930,8 @@ req_print_v4(kstat_t *req, kstat_t *req_old, int field_width, int zflag)
 	kstat_named_t *kptr;
 	kstat_named_t *knp;
 	kstat_named_t *kptr_old;
+	nfs_opnum4 op_toskip;
+	int skip_count = 0;
 
 	if (req == NULL)
 		return;
@@ -864,7 +963,7 @@ req_print_v4(kstat_t *req, kstat_t *req_old, int field_width, int zflag)
 		tot_ops -= old_tot_ops;
 	}
 
-	printf("Version 4: (%" PRIu64 " calls)\n", tot);
+	printf("Version %d: (%" PRIu64 " calls)\n", ver, tot);
 
 	knp = kstat_data_lookup(req, "null");
 	nreq = req->ks_ndata - (knp - KSTAT_NAMED_PTR(req));
@@ -891,12 +990,15 @@ req_print_v4(kstat_t *req, kstat_t *req_old, int field_width, int zflag)
 		printf("\n");
 	}
 
-	printf("Version 4: (%" PRIu64 " operations)\n", tot_ops);
+	op_toskip = ops_toskip_v41[skip_count];
+	printf("Version %d: (%" PRIu64 " operations)\n", ver, tot_ops);
 	for (i = 2; i < nreq; i += ncolumns) {
 		for (j = i; j < MIN(i + ncolumns, nreq); j++) {
 			printf("%-*s", field_width, knp[j].name);
 		}
 		printf("\n");
+
+
 		for (j = i; j < MIN(i + ncolumns, nreq); j++) {
 			if (tot_ops && interval && kptr_old != NULL)
 				per = (int)((knp[j].value.ui64 -
@@ -905,10 +1007,21 @@ req_print_v4(kstat_t *req, kstat_t *req_old, int field_width, int zflag)
 				per = (int)(knp[j].value.ui64 * 100 / tot_ops);
 			else
 				per = 0;
-			(void) sprintf(fixlen, "%" PRIu64 " %d%% ",
-			    ((interval && kptr_old != NULL) ?
-			    (knp[j].value.ui64 - kptr_old[j].value.ui64)
-			    : knp[j].value.ui64), per);
+			if (ver == 41 && j == op_toskip) {
+				(void) sprintf(fixlen, "%" PRIu64 " n/a",
+				    ((interval && kptr_old != NULL) ?
+				    (knp[j].value.ui64 - kptr_old[j].value.ui64)
+				    : knp[j].value.ui64), per);
+				skip_count++;
+				if (skip_count < NUM_OPS_TOSKIP) {
+					op_toskip = ops_toskip_v41[skip_count];
+				}
+			} else {
+				(void) sprintf(fixlen, "%" PRIu64 " %d%% ",
+				    ((interval && kptr_old != NULL) ?
+				    (knp[j].value.ui64 - kptr_old[j].value.ui64)
+				    : knp[j].value.ui64), per);
+			}
 			printf("%-*s", field_width, fixlen);
 		}
 		printf("\n");
@@ -975,21 +1088,28 @@ stat_print(const char *title_string, kstat_t *req, kstat_t  *req_old,
 }
 
 static void
-kstat_sum(kstat_t *kstat1, kstat_t *kstat2, kstat_t *sum)
+kstat_sum(kstat_t *kstat1, kstat_t *kstat2, kstat_t *kstat3, kstat_t *sum)
 {
 	int i;
-	kstat_named_t *knp1, *knp2, *knpsum;
-	if (kstat1 == NULL || kstat2 == NULL)
+	kstat_named_t *knp1, *knp2, *knp3, *knpsum;
+
+	if (kstat1 == NULL || kstat2 == NULL || kstat3 == NULL) {
 		return;
+	}
 
 	knp1 = KSTAT_NAMED_PTR(kstat1);
 	knp2 = KSTAT_NAMED_PTR(kstat2);
-	if (sum->ks_data == NULL)
+	knp3 = KSTAT_NAMED_PTR(kstat3);
+
+	if (sum->ks_data == NULL) {
 		kstat_copy(kstat1, sum, 0);
+	}
 	knpsum = KSTAT_NAMED_PTR(sum);
 
-	for (i = 0; i < (kstat1->ks_ndata); i++)
-		knpsum[i].value.ui64 =  knp1[i].value.ui64 + knp2[i].value.ui64;
+	for (i = 0; i < (kstat1->ks_ndata); i++) {
+		knpsum[i].value.ui64 =  knp1[i].value.ui64 +
+		    knp2[i].value.ui64 + knp3[i].value.ui64;
+	}
 }
 
 /*

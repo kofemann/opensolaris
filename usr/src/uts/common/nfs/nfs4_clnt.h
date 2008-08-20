@@ -196,12 +196,6 @@ struct clstat4 {
 	kstat_named_t	badcalls;		/* rpc failures */
 	kstat_named_t	clgets;			/* client handle gets */
 	kstat_named_t	cltoomany;		/* client handle cache misses */
-#ifdef DEBUG
-	kstat_named_t	clalloc;		/* number of client handles */
-	kstat_named_t	noresponse;		/* server not responding cnt */
-	kstat_named_t	failover;		/* server failover count */
-	kstat_named_t	remap;			/* server remap count */
-#endif
 };
 
 #ifdef DEBUG
@@ -210,6 +204,10 @@ struct clstat4 {
  * whole and don't correspond to any particular zone.
  */
 struct clstat4_debug {
+	kstat_named_t	clalloc;		/* number of client handles */
+	kstat_named_t	noresponse;		/* server not responding cnt */
+	kstat_named_t	failover;		/* server failover count */
+	kstat_named_t	remap;			/* server remap count */
 	kstat_named_t	nrnode;			/* number of allocated rnodes */
 	kstat_named_t	access;			/* size of access cache */
 	kstat_named_t	dirent;			/* size of readdir cache */
@@ -2357,7 +2355,11 @@ struct nfs4_clnt {
 	kmutex_t	nfscl_chtable4_lock;
 	zoneid_t	nfscl_zoneid;
 	list_node_t	nfscl_node;
-	struct clstat4	nfscl_stat;
+	/*
+	 * nfscl_stat[0] for minor version 0
+	 * nfscl_stat[1] for minor version 1
+	 */
+	struct clstat4 nfscl_stat[NFS4_MINORVERSMAX + 1];
 };
 
 #ifdef	__cplusplus

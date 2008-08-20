@@ -26,8 +26,6 @@
 #ifndef _NFS4_H
 #define	_NFS4_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/types.h>
 #include <sys/vnode.h>
 #include <sys/fem.h>
@@ -1669,7 +1667,7 @@ extern stateid4 clnt_special1;
  */
 
 extern void	rfs4_compound(COMPOUND4args *, COMPOUND4res *,
-		    struct exportinfo *, struct svc_req *, cred_t *, int *);
+    struct exportinfo *, struct svc_req *, cred_t *, int *);
 extern void	rfs4_compound_free(COMPOUND4res *);
 extern void	rfs4_compound_flagproc(COMPOUND4args *, int *);
 

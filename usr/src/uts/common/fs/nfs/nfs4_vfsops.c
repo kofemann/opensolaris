@@ -106,21 +106,42 @@ extern void sec_clnt_freeinfo(struct sec_data *);
  * The order and contents of this structure must be kept in sync with that of
  * rfsreqcnt_v4_tmpl in nfs_stats.c
  */
-static char *rfsnames_v4[] = {
-	"null", "compound", "reserved",	"access", "close", "commit", "create",
-	"delegpurge", "delegreturn", "getattr",	"getfh", "link", "lock",
-	"lockt", "locku", "lookup", "lookupp", "nverify", "open", "openattr",
-	"open_confirm",	"open_downgrade", "putfh", "putpubfh", "putrootfh",
-	"read", "readdir", "readlink", "remove", "rename", "renew",
-	"restorefh", "savefh", "secinfo", "setattr", "setclientid",
-	"setclientid_confirm", "verify", "write"
+static char *v40_ops[] = {
+	"null", "compound", "reserved",	"access", "close", "commit",
+	"create", "delegpurge", "delegreturn", "getattr", "getfh", "link",
+	"lock", "lockt", "locku", "lookup", "lookupp", "nverify", "open",
+	"openattr", "open_confirm", "open_downgrade", "putfh", "putpubfh",
+	"putrootfh", "read", "readdir", "readlink", "remove", "rename",
+	"renew", "restorefh", "savefh", "secinfo", "setattr", "setclientid",
+	"setclientid_confirm", "verify", "write", "release_lockowner"
 };
 
 /*
- * nfs4_max_mount_retry is the number of times the client will redrive
- * a mount compound before giving up and returning failure.  The intent
- * is to redrive mount compounds which fail NFS4ERR_STALE so that
- * if a component of the server path being mounted goes stale, it can
+ * The order and contents of this structure must be kept in sync with that of
+ * rfsreqcnt_v41_tmpl in nfs_stats.c
+ */
+static char *v41_ops[] = {
+	"null", "compound", "reserved",	"access",
+	"close", "commit", "create", "delegpurge", "delegreturn",
+	"getattr",	"getfh", "link", "lock", "lockt", "locku",
+	"lookup", "lookupp", "nverify", "open", "openattr",
+	"open_confirm", "open_downgrade", "putfh", "putpubfh",
+	"putrootfh", "read", "readdir", "readlink", "remove", "rename",
+	"renew", "restorefh", "savefh", "secinfo", "setattr",
+	"setclientid", "setclientid_confirm", "verify", "write",
+	"release_lockowner", "backchannel_ctl", "bind_conn_to_session",
+	"exchange_id", "create_session", "destroy_session",
+	"free_stateid", "get_dir_delegation", "getdeviceinfo",
+	"getdevicelist", "layoutcommit", "layoutget", "layoutreturn",
+	"secinfo_no_name", "sequence", "set_ssv", "test_stateid",
+	"want_delegation", "destroy_clientid", "reclaim_complete"};
+
+static char **rfsnames_v4[NFS4_MINORVERSMAX + 1] = {v40_ops, v41_ops};
+/*
+ * nfs4_max_mount_retry is the number of times the client will redrive a
+ * mount compound before giving up and returning failure.  The intent is
+ * to redrive mount compounds which fail NFS4ERR_STALE so that if a
+ * component of the server path being mounted goes stale, it can
  * "recover" by redriving the mount compund (LOOKUP ops).  This recovery
  * code is needed outside of the recovery framework because mount is a
  * special case.  The client doesn't create vnodes/rnodes for components
@@ -130,12 +151,12 @@ static char *rfsnames_v4[] = {
  *
  * We could just fail the mount on the first time, but that would
  * instantly trigger failover (from nfs4_mount), and the client should
- * try to re-lookup the STALE FH before doing failover.  The easiest
- * way to "re-lookup" is to simply redrive the mount compound.
+ * try to re-lookup the STALE FH before doing failover.  The easiest way
+ * to "re-lookup" is to simply redrive the mount compound.
  */
 static int nfs4_max_mount_retry = 2;
 
-uint32_t nfs4_max_minor_version = 1;
+uint32_t nfs4_max_minor_version = NFS4_MINORVERSMAX;
 uint32_t nfs4_min_minor_version = 0;
 
 /*
@@ -1474,6 +1495,7 @@ out:
 int
 nfs4check_minorvers_mismatch(mntinfo4_t *mi, nfs4_error_t *ep)
 {
+	struct nfs_stats *nfsstatsp;
 
 	if (ep->stat == NFS4ERR_MINOR_VERS_MISMATCH ||
 	    ep->rpc_status == RPC_CANTDECODEARGS) {
@@ -1481,6 +1503,20 @@ nfs4check_minorvers_mismatch(mntinfo4_t *mi, nfs4_error_t *ep)
 		if (NFS4_MINORVERSION(mi) > nfs4_min_minor_version) {
 			mi->mi_minorversion -= 1;
 			mi->mi_attrvers = mi->mi_minorversion;
+			nfsstatsp = zone_getspecific(nfsstat_zone_key,
+			    nfs_zone());
+			ASSERT(nfsstatsp != NULL);
+			/*
+			 * Update the mi fields to that of the correct
+			 * minor version.  Note that we are not adjusting
+			 * the kstat count for the previous MISMATCHED
+			 * compound since we want the mismatched compound
+			 * to be accounted against the mismatched
+			 * version.
+			 */
+			mi->mi_reqs = nfsstatsp->
+			    nfs_stats_v4[mi->mi_minorversion].rfsreqcnt_ptr;
+			mi->mi_rfsnames = rfsnames_v4[mi->mi_minorversion];
 			mutex_exit(&mi->mi_lock);
 			return (1);
 		}
@@ -2037,12 +2073,12 @@ nfs4rootvp(vnode_t **rtvpp, vfs_t *vfsp, struct servinfo4 *svp_head,
 	nfs4_oo_hash_bucket_t *bucketp;
 	nfs_fh4 fh;
 	char *droptext = "";
-	struct nfs_stats *nfsstatsp;
 	nfs4_fname_t *mfname;
 	nfs4_error_t e;
 	char *orig_sv_path;
 	int orig_sv_pathlen, num_retry, removed;
 	cred_t *lcr = NULL, *tcr = cr;
+	struct nfs_stats *nfsstatsp;
 
 	nfsstatsp = zone_getspecific(nfsstat_zone_key, nfs_zone());
 	ASSERT(nfsstatsp != NULL);
@@ -2077,8 +2113,6 @@ nfs4rootvp(vnode_t **rtvpp, vfs_t *vfsp, struct servinfo4 *svp_head,
 		mi->mi_timeo = NFS_TIMEO;
 	mi->mi_prog = NFS_PROGRAM;
 	mi->mi_vers = NFS_V4;
-	mi->mi_rfsnames = rfsnames_v4;
-	mi->mi_reqs = nfsstatsp->nfs_stats_v4.rfsreqcnt_ptr;
 	cv_init(&mi->mi_failover_cv, NULL, CV_DEFAULT, NULL);
 	mi->mi_servers = svp;
 	mi->mi_curr_serv = svp;
@@ -2104,10 +2138,13 @@ nfs4rootvp(vnode_t **rtvpp, vfs_t *vfsp, struct servinfo4 *svp_head,
 	mi->mi_flags |= MI4_MOUNTING;
 
 	/*
-	 * Until a time when the user can set minorversion, do
-	 * auto negotiation
+	 * Until a time when the user can set minorversion, do auto
+	 * negotiation.
 	 */
 	nfs4_set_minorversion(mi, nfs4_max_minor_version);
+	mi->mi_reqs = nfsstatsp->
+	    nfs_stats_v4[nfs4_max_minor_version].rfsreqcnt_ptr;
+	mi->mi_rfsnames = rfsnames_v4[nfs4_max_minor_version];
 
 	/*
 	 * Make a vfs struct for nfs.  We do this here instead of below

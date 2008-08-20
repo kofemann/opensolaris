@@ -2,9 +2,8 @@
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
- * Common Development and Distribution License, Version 1.0 only
- * (the "License").  You may not use this file except in compliance
- * with the License.
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
  * or http://www.opensolaris.org/os/licensing.
@@ -20,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2005 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -29,8 +28,6 @@
 
 #ifndef	_NFS_NFS_CLNT_H
 #define	_NFS_NFS_CLNT_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/utsname.h>
 #include <sys/kstat.h>
@@ -593,12 +590,6 @@ struct clstat {
 	kstat_named_t	badcalls;		/* rpc failures */
 	kstat_named_t	clgets;			/* client handle gets */
 	kstat_named_t	cltoomany;		/* client handle cache misses */
-#ifdef DEBUG
-	kstat_named_t	clalloc;		/* number of client handles */
-	kstat_named_t	noresponse;		/* server not responding cnt */
-	kstat_named_t	failover;		/* server failover count */
-	kstat_named_t	remap;			/* server remap count */
-#endif
 };
 
 struct nfs_clnt {

@@ -28,8 +28,6 @@
  *	All Rights Reserved
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -64,17 +62,14 @@ static const struct clstat4 clstat4_tmpl = {
 	{ "calls",	KSTAT_DATA_UINT64 },
 	{ "badcalls",	KSTAT_DATA_UINT64 },
 	{ "clgets",	KSTAT_DATA_UINT64 },
-	{ "cltoomany",	KSTAT_DATA_UINT64 },
+	{ "cltoomany",	KSTAT_DATA_UINT64 }
+};
 #ifdef DEBUG
+struct clstat4_debug clstat4_debug = {
 	{ "clalloc",	KSTAT_DATA_UINT64 },
 	{ "noresponse",	KSTAT_DATA_UINT64 },
 	{ "failover",	KSTAT_DATA_UINT64 },
 	{ "remap",	KSTAT_DATA_UINT64 },
-#endif
-};
-
-#ifdef DEBUG
-struct clstat4_debug clstat4_debug = {
 	{ "nrnode",	KSTAT_DATA_UINT64 },
 	{ "access",	KSTAT_DATA_UINT64 },
 	{ "dirent",	KSTAT_DATA_UINT64 },
@@ -84,7 +79,7 @@ struct clstat4_debug clstat4_debug = {
 	{ "f_reclaim",	KSTAT_DATA_UINT64 },
 	{ "a_reclaim",	KSTAT_DATA_UINT64 },
 	{ "r_reclaim",	KSTAT_DATA_UINT64 },
-	{ "r_path",	KSTAT_DATA_UINT64 },
+	{ "r_path",	KSTAT_DATA_UINT64 }
 };
 #endif
 
@@ -822,7 +817,7 @@ authget(servinfo4_t *svp, CLIENT *ch_client, cred_t *cr)
  */
 int
 clget4(clinfo_t *ci, servinfo4_t *svp, cred_t *cr, CLIENT **newcl,
-    struct chtab **chp, struct nfs4_clnt *nfscl)
+    struct chtab **chp, struct nfs4_clnt *nfscl, mntinfo4_t *mi)
 {
 	struct chhead *ch, *newch;
 	struct chhead **plistp;
@@ -840,7 +835,10 @@ clget4(clinfo_t *ci, servinfo4_t *svp, cred_t *cr, CLIENT **newcl,
 	 * Find an unused handle or create one
 	 */
 	newch = NULL;
-	nfscl->nfscl_stat.clgets.value.ui64++;
+	/*
+	 * Update statistics based on minor version number
+	 */
+	nfscl->nfscl_stat[NFS4_MINORVERSION(mi)].clgets.value.ui64++;
 top:
 	/*
 	 * Find the correct entry in the cache to check for free
@@ -930,15 +928,15 @@ top:
 	}
 
 	/*
-	 * There weren't any free client handles which fit, so allocate
-	 * a new one and use that.
+	 * There weren't any free client handles which fit, so allocate a
+	 * new one and use that.
 	 */
 #ifdef DEBUG
-	atomic_add_64(&nfscl->nfscl_stat.clalloc.value.ui64, 1);
+	atomic_add_64(&clstat4_debug.clalloc.value.ui64, 1);
 #endif
 	mutex_exit(&nfscl->nfscl_chtable4_lock);
 
-	nfscl->nfscl_stat.cltoomany.value.ui64++;
+	nfscl->nfscl_stat[NFS4_MINORVERSION(mi)].cltoomany.value.ui64++;
 	if (newch != NULL) {
 		kmem_free(newch->ch_protofmly, strlen(newch->ch_protofmly) + 1);
 		kmem_free(newch, sizeof (*newch));
@@ -955,7 +953,7 @@ top:
 	if (error != 0) {
 		kmem_cache_free(chtab4_cache, cp);
 #ifdef DEBUG
-		atomic_add_64(&nfscl->nfscl_stat.clalloc.value.ui64, -1);
+	atomic_add_64(&clstat4_debug.clalloc.value.ui64, -1);
 #endif
 		/*
 		 * Warning is unnecessary if error is EINTR.
@@ -979,7 +977,7 @@ top:
 		CLNT_DESTROY(cp->ch_client);
 		kmem_cache_free(chtab4_cache, cp);
 #ifdef DEBUG
-		atomic_add_64(&nfscl->nfscl_stat.clalloc.value.ui64, -1);
+	atomic_add_64(&clstat4_debug.clalloc.value.ui64, -1);
 #endif
 		return ((error != 0) ? error : EINTR);
 	}
@@ -1029,7 +1027,7 @@ nfs_clget4(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr, CLIENT **newcl,
 	firstcall = 1;
 
 	do {
-		error = clget4(&ci, svp, cr, newcl, chp, nfscl);
+		error = clget4(&ci, svp, cr, newcl, chp, nfscl, mi);
 
 		if (error == 0)
 			break;
@@ -1179,10 +1177,10 @@ clreclaim4_zone(struct nfs4_clnt *nfscl, uint_t cl_holdtime)
 
 #ifdef DEBUG
 	/*
-	 * Update clalloc so that nfsstat shows the current number
-	 * of allocated client handles.
+	 * Update clalloc so that nfsstat shows the current number of
+	 * allocated client handles.
 	 */
-	atomic_add_64(&nfscl->nfscl_stat.clalloc.value.ui64, -n);
+	atomic_add_64(&clstat4_debug.clalloc.value.ui64, -n);
 #endif
 }
 
@@ -1469,7 +1467,7 @@ nfs4_rfscall(mntinfo4_t *mi, servinfo4_t *svp,
 			mi->mi_noresponse++;
 			mutex_exit(&mi->mi_lock);
 #ifdef DEBUG
-			nfscl->nfscl_stat.noresponse.value.ui64++;
+			clstat4_debug.noresponse.value.ui64++;
 #endif
 			/*
 			 * On zone shutdown, mark server dead and move on.
@@ -1544,7 +1542,7 @@ nfs4_rfscall(mntinfo4_t *mi, servinfo4_t *svp,
 		 */
 		if (status == RPC_INPROGRESS)
 			status = RPC_TIMEDOUT;
-		nfscl->nfscl_stat.badcalls.value.ui64++;
+		nfscl->nfscl_stat[NFS4_MINORVERSION(mi)].badcalls.value.ui64++;
 		if (status != RPC_INTR) {
 			mutex_enter(&mi->mi_lock);
 			mi->mi_flags |= MI4_DOWN;
@@ -1649,12 +1647,20 @@ rfs4call_nosequence(mntinfo4_t *mi, servinfo4_t *svp, COMPOUND4args_clnt *argsp,
 	ASSERT(nfs_zone() == mi->mi_zone);
 	nfscl = zone_getspecific(nfs4clnt_zone_key, nfs_zone());
 	ASSERT(nfscl != NULL);
-
-	nfscl->nfscl_stat.calls.value.ui64++;
+	/*
+	 * Note that the first call will be accounted for the default
+	 * minor version, even if there are no mounts for that minor
+	 * version. The call may result in a minor vesion mismatch and
+	 * subsequent calls will get accounted correctly. It makes sense
+	 * to account the first call for the default minor version,
+	 * because the client thought that this call is for that minor
+	 * version. Same goes for the compound procedure as well.
+	 */
+	nfscl->nfscl_stat[NFS4_MINORVERSION(mi)].calls.value.ui64++;
 	mi->mi_reqs[NFSPROC4_COMPOUND].value.ui64++;
 
-	/* XXX - Set up minorversion */
-	argsp->minor_vers = mi->mi_minorversion;
+		/* XXX - Set up minorversion */
+	argsp->minor_vers = NFS4_MINORVERSION(mi);
 
 	/* Set up the results struct for XDR usage */
 	resp->argsp = argsp;
@@ -1689,17 +1695,27 @@ rfs4call_nosequence(mntinfo4_t *mi, servinfo4_t *svp, COMPOUND4args_clnt *argsp,
 		ep->rpc_status = rpc_status;
 		return;
 	}
-
-	/* else we'll count the processed operations */
+	/*
+	 * else we'll count the processed operations. Note that we will
+	 * NOT enter here in case of NFS4ERR_MINOR_VERS_MISMATCH.
+	 */
 	num_resops = resp->decode_len;
 	for (i = 0; i < num_resops; i++) {
 		/*
 		 * Count the individual operations
 		 * processed by the server.
 		 */
-		if (resp->array[i].resop >= NFSPROC4_NULL &&
-		    resp->array[i].resop <= OP_WRITE)
-			mi->mi_reqs[resp->array[i].resop].value.ui64++;
+		if (NFS4_MINORVERSION(mi) == NFS4_MINOR_v1) {
+			if (resp->array[i].resop >= NFSPROC4_NULL &&
+			    resp->array[i].resop <= OP_RECLAIM_COMPLETE) {
+				mi->mi_reqs[resp->array[i].resop].value.ui64++;
+			}
+		} else if (NFS4_MINORVERSION(mi) == NFS4_MINOR_v0) {
+			if (resp->array[i].resop >= NFSPROC4_NULL &&
+			    resp->array[i].resop <= OP_RELEASE_LOCKOWNER) {
+				mi->mi_reqs[resp->array[i].resop].value.ui64++;
+			}
+		}
 	}
 
 	ep->error = 0;
@@ -2965,29 +2981,36 @@ cl4_snapshot(kstat_t *ksp, void *buf, int rw)
 	ksp->ks_snaptime = gethrtime();
 	if (rw == KSTAT_WRITE) {
 		bcopy(buf, ksp->ks_private, sizeof (clstat4_tmpl));
+	} else {
+		bcopy(ksp->ks_private, buf, sizeof (clstat4_tmpl));
+	}
+	return (0);
+}
+
 #ifdef DEBUG
+static int
+cl4_debug_snapshot(kstat_t *ksp, void *buf, int rw)
+{
+	ksp->ks_snaptime = gethrtime();
+	if (rw == KSTAT_WRITE) {
 		/*
 		 * Currently only the global zone can write to kstats, but we
 		 * add the check just for paranoia.
 		 */
-		if (INGLOBALZONE(curproc))
-			bcopy((char *)buf + sizeof (clstat4_tmpl),
-			    &clstat4_debug, sizeof (clstat4_debug));
-#endif
+		if (INGLOBALZONE(curproc)) {
+			bcopy(buf, &clstat4_debug, sizeof (clstat4_debug));
+		}
 	} else {
-		bcopy(ksp->ks_private, buf, sizeof (clstat4_tmpl));
-#ifdef DEBUG
 		/*
 		 * If we're displaying the "global" debug kstat values, we
 		 * display them as-is to all zones since in fact they apply to
 		 * the system as a whole.
 		 */
-		bcopy(&clstat4_debug, (char *)buf + sizeof (clstat4_tmpl),
-		    sizeof (clstat4_debug));
-#endif
+		bcopy(&clstat4_debug, buf, sizeof (clstat4_debug));
 	}
 	return (0);
 }
+#endif
 
 
 
@@ -2998,6 +3021,7 @@ static void *
 clinit4_zone(zoneid_t zoneid)
 {
 	kstat_t *nfs4_client_kstat;
+	kstat_t *nfs41_client_kstat;
 	struct nfs4_clnt *nfscl;
 	uint_t ndata;
 
@@ -3006,18 +3030,29 @@ clinit4_zone(zoneid_t zoneid)
 	nfscl->nfscl_chtable4 = NULL;
 	nfscl->nfscl_zoneid = zoneid;
 
-	bcopy(&clstat4_tmpl, &nfscl->nfscl_stat, sizeof (clstat4_tmpl));
+	bcopy(&clstat4_tmpl, &nfscl->nfscl_stat[NFS4_MINOR_v0],
+	    sizeof (clstat4_tmpl));
 	ndata = sizeof (clstat4_tmpl) / sizeof (kstat_named_t);
-#ifdef DEBUG
-	ndata += sizeof (clstat4_debug) / sizeof (kstat_named_t);
-#endif
 	if ((nfs4_client_kstat = kstat_create_zone("nfs", 0, "nfs4_client",
 	    "misc", KSTAT_TYPE_NAMED, ndata,
 	    KSTAT_FLAG_VIRTUAL | KSTAT_FLAG_WRITABLE, zoneid)) != NULL) {
-		nfs4_client_kstat->ks_private = &nfscl->nfscl_stat;
+		nfs4_client_kstat->ks_private =
+		    &nfscl->nfscl_stat[NFS4_MINOR_v0];
 		nfs4_client_kstat->ks_snapshot = cl4_snapshot;
 		kstat_install(nfs4_client_kstat);
 	}
+
+	bcopy(&clstat4_tmpl, &nfscl->nfscl_stat[NFS4_MINOR_v1],
+	    sizeof (clstat4_tmpl));
+	if ((nfs41_client_kstat = kstat_create_zone("nfs", 0, "nfs41_client",
+	    "misc", KSTAT_TYPE_NAMED, ndata,
+	    KSTAT_FLAG_VIRTUAL | KSTAT_FLAG_WRITABLE, zoneid)) != NULL) {
+		nfs41_client_kstat->ks_private =
+		    &nfscl->nfscl_stat[NFS4_MINOR_v1];
+		nfs41_client_kstat->ks_snapshot = cl4_snapshot;
+		kstat_install(nfs41_client_kstat);
+	}
+
 	mutex_enter(&nfs4_clnt_list_lock);
 	list_insert_head(&nfs4_clnt_list, nfscl);
 	mutex_exit(&nfs4_clnt_list_lock);
@@ -3044,6 +3079,7 @@ clfini4_zone(zoneid_t zoneid, void *arg)
 		kmem_free(chp, sizeof (*chp));
 	}
 	kstat_delete_byname_zone("nfs", 0, "nfs4_client", zoneid);
+	kstat_delete_byname_zone("nfs", 0, "nfs41_client", zoneid);
 	mutex_destroy(&nfscl->nfscl_chtable4_lock);
 	kmem_free(nfscl, sizeof (*nfscl));
 }
@@ -3078,9 +3114,28 @@ nfs4_subr_init(void)
 	/*
 	 * Allocate and initialize the client handle cache
 	 */
+#ifdef DEBUG
+	uint_t ndata;
+	kstat_t *nfs4_debug_kstat;
+#endif
 	chtab4_cache = kmem_cache_create("client_handle4_cache",
 	    sizeof (struct chtab), 0, NULL, NULL, clreclaim4, NULL,
 	    NULL, 0);
+
+#ifdef DEBUG
+	/*
+	 * Create a kstat to maintain debug statistics across all zones
+	 */
+	ndata = sizeof (clstat4_debug) / sizeof (kstat_named_t);
+	if ((nfs4_debug_kstat = kstat_create("nfs", 0, "nfs4_client_debug",
+	    "misc", KSTAT_TYPE_NAMED, ndata,
+	    KSTAT_FLAG_VIRTUAL | KSTAT_FLAG_WRITABLE)) != NULL) {
+		nfs4_debug_kstat->ks_private = &clstat4_debug;
+		nfs4_debug_kstat->ks_snapshot = cl4_debug_snapshot;
+		kstat_install(nfs4_debug_kstat);
+	}
+#endif
+
 
 	/*
 	 * Initialize the list of per-zone client handles (and associated data).
@@ -3107,6 +3162,9 @@ nfs4_subr_fini(void)
 	 * Deallocate the client handle cache
 	 */
 	kmem_cache_destroy(chtab4_cache);
+#ifdef DEBUG
+	kstat_delete_byname("nfs", 0, "nfs4_client_debug");
+#endif
 
 	/*
 	 * Destroy the zone_key
