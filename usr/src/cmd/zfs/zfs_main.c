@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -365,7 +363,7 @@ usage(boolean_t requested)
 
 		(void) fprintf(fp, gettext("\nSizes are specified in bytes "
 		    "with standard units such as K, M, G, etc.\n"));
-		(void) fprintf(fp, gettext("\n\nUser-defined properties can "
+		(void) fprintf(fp, gettext("\nUser-defined properties can "
 		    "be specified by using a name containing a colon (:).\n"));
 
 	} else if (show_permissions) {
@@ -1784,13 +1782,13 @@ zfs_do_list(int argc, char **argv)
 	    "name,used,available,referenced,mountpoint";
 	int types = ZFS_TYPE_DATASET;
 	char *fields = NULL;
-	char *basic_fields = default_fields;
 	list_cbdata_t cb = { 0 };
 	char *value;
 	int ret;
 	char *type_subopts[] = { "filesystem", "volume", "snapshot",
 	    "pnfsdata", NULL };
 	zfs_sort_column_t *sortcol = NULL;
+	boolean_t gottypes = B_FALSE;
 
 	/* check options */
 	while ((c = getopt(argc, argv, ":o:rt:Hs:S:")) != -1) {
@@ -1821,6 +1819,7 @@ zfs_do_list(int argc, char **argv)
 			}
 			break;
 		case 't':
+			gottypes = B_TRUE;
 			types = 0;
 			while (*optarg != '\0') {
 				switch (getsubopt(&optarg, type_subopts,
@@ -1861,7 +1860,14 @@ zfs_do_list(int argc, char **argv)
 	argv += optind;
 
 	if (fields == NULL)
-		fields = basic_fields;
+		fields = default_fields;
+
+	/*
+	 * If they only specified "-o space" and no types, don't display
+	 * snapshots.
+	 */
+	if (strcmp(fields, "space") == 0 && !gottypes)
+		types &= ~ZFS_TYPE_SNAPSHOT;
 
 	/*
 	 * If the user specifies '-o all', the zprop_get_list() doesn't
@@ -3559,8 +3565,17 @@ unshare_unmount_path(int op, char *path, int flags, boolean_t is_manual)
 	    ZFS_TYPE_FILESYSTEM)) == NULL)
 		return (1);
 
-
 	ret = 1;
+	if (stat64(entry.mnt_mountp, &statbuf) != 0) {
+		(void) fprintf(stderr, gettext("cannot %s '%s': %s\n"),
+		    cmdname, path, strerror(errno));
+		goto out;
+	} else if (statbuf.st_ino != path_inode) {
+		(void) fprintf(stderr, gettext("cannot "
+		    "%s '%s': not a mountpoint\n"), cmdname, path);
+		goto out;
+	}
+
 	if (op == OP_SHARE) {
 		char nfs_mnt_prop[ZFS_MAXPROPLEN];
 		char smbshare_prop[ZFS_MAXPROPLEN];
@@ -3588,13 +3603,7 @@ unshare_unmount_path(int op, char *path, int flags, boolean_t is_manual)
 		verify(zfs_prop_get(zhp, ZFS_PROP_MOUNTPOINT, mtpt_prop,
 		    sizeof (mtpt_prop), NULL, NULL, 0, B_FALSE) == 0);
 
-		if (stat64(entry.mnt_mountp, &statbuf) != 0) {
-			(void) fprintf(stderr, gettext("cannot %s '%s': %s\n"),
-			    cmdname, path, strerror(errno));
-		} else if (statbuf.st_ino != path_inode) {
-			(void) fprintf(stderr, gettext("cannot "
-			    "unmount '%s': not a mountpoint\n"), path);
-		} else if (is_manual) {
+		if (is_manual) {
 			ret = zfs_unmount(zhp, NULL, flags);
 		} else if (strcmp(mtpt_prop, "legacy") == 0) {
 			(void) fprintf(stderr, gettext("cannot unmount "
@@ -3607,6 +3616,7 @@ unshare_unmount_path(int op, char *path, int flags, boolean_t is_manual)
 		}
 	}
 
+out:
 	zfs_close(zhp);
 
 	return (ret != 0);

@@ -37,8 +37,6 @@
 #ifndef	_RPC_SVC_H
 #define	_RPC_SVC_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <rpc/rpc_com.h>
 #include <rpc/rpc_msg.h>
 #include <sys/tihdr.h>
@@ -476,7 +474,7 @@ typedef struct __svccb_args {
  * transport type.
  */
 
-#define	SVC_P2LEN   64
+#define	SVC_P2LEN   128
 
 struct __svcxprt {
 	__SVCXPRT_COMMON xp_xpc;

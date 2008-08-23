@@ -23,7 +23,7 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+#pragma ident	"@(#)nfs4_xdr.c	1.27	08/08/11 SMI"
 
 /*
  * A handcoded version based on the original rpcgen code.
@@ -922,7 +922,8 @@ xdr_fs_location4(XDR *xdrs, fs_location4 *objp)
 	    sizeof (utf8string), (xdrproc_t)xdr_utf8string))
 		return (FALSE);
 	return (xdr_array(xdrs, (char **)&objp->rootpath.pathname4_val,
-	    (uint_t *)&objp->rootpath.pathname4_len, NFS4_MAX_PATHNAME4,
+	    (uint_t *)&objp->rootpath.pathname4_len,
+	    NFS4_MAX_PATHNAME4,
 	    sizeof (utf8string), (xdrproc_t)xdr_utf8string));
 }
 
@@ -944,7 +945,8 @@ xdr_nfsace4(XDR *xdrs, nfsace4 *objp)
 		}
 
 		return (xdr_bytes(xdrs, (char **)&objp->who.utf8string_val,
-		    (uint_t *)&objp->who.utf8string_len, NFS4_MAX_UTF8STRING));
+		    (uint_t *)&objp->who.utf8string_len,
+		    NFS4_MAX_UTF8STRING));
 	}
 
 	/*
@@ -984,7 +986,8 @@ bool_t
 xdr_fattr4_fs_locations(XDR *xdrs, fattr4_fs_locations *objp)
 {
 	if (!xdr_array(xdrs, (char **)&objp->fs_root.pathname4_val,
-	    (uint_t *)&objp->fs_root.pathname4_len, NFS4_MAX_PATHNAME4,
+	    (uint_t *)&objp->fs_root.pathname4_len,
+	    NFS4_MAX_PATHNAME4,
 	    sizeof (utf8string), (xdrproc_t)xdr_utf8string))
 		return (FALSE);
 	return (xdr_array(xdrs, (char **)&objp->locations_val,
@@ -3384,13 +3387,55 @@ xdr_OPEN_DOWNGRADE4res(XDR *xdrs, OPEN_DOWNGRADE4res *objp)
 static bool_t
 xdr_READ4args(XDR *xdrs, READ4args *objp)
 {
+	rdma_chunkinfo_t rci;
+	rdma_wlist_conn_info_t rwci;
+	struct xdr_ops *xops = xdrrdma_xops();
+
 	if (!xdr_u_int(xdrs, &objp->stateid.seqid))
 		return (FALSE);
 	if (!xdr_opaque(xdrs, objp->stateid.other, 12))
 		return (FALSE);
 	if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)&objp->offset))
 		return (FALSE);
-	return (xdr_u_int(xdrs, &objp->count));
+	if (!xdr_u_int(xdrs, &objp->count))
+		return (FALSE);
+
+	DTRACE_PROBE1(xdr__i__read4args_buf_len,
+	    int, objp->count);
+
+	objp->wlist = NULL;
+
+	if (xdrs->x_ops == xops && xdrs->x_op == XDR_ENCODE) {
+		rci.rci_type = RCI_WRITE_ADDR_CHUNK;
+		rci.rci_len = objp->count;
+		(void) XDR_CONTROL(xdrs, XDR_RDMA_ADD_CHUNK, &rci);
+	}
+
+	if (xdrs->x_ops != &xdrrdma_ops || xdrs->x_op == XDR_FREE)
+		return (TRUE);
+
+	if (xdrs->x_op == XDR_ENCODE) {
+		if (objp->res_uiop != NULL) {
+			rci.rci_type = RCI_WRITE_UIO_CHUNK;
+			rci.rci_a.rci_uiop = objp->res_uiop;
+			rci.rci_len = objp->count;
+			rci.rci_clpp = &objp->wlist;
+		} else {
+			rci.rci_type = RCI_WRITE_ADDR_CHUNK;
+			rci.rci_a.rci_addr = objp->res_data_val_alt;
+			rci.rci_len = objp->count;
+			rci.rci_clpp = &objp->wlist;
+		}
+
+		return (XDR_CONTROL(xdrs, XDR_RDMA_ADD_CHUNK, &rci));
+	}
+
+	/* XDR_DECODE case */
+	(void) XDR_CONTROL(xdrs, XDR_RDMA_GET_WCINFO, &rwci);
+	objp->wlist = rwci.rwci_wlist;
+	objp->conn = rwci.rwci_conn;
+
+	return (TRUE);
 }
 
 static bool_t
@@ -3434,7 +3479,28 @@ xdr_READ4res(XDR *xdrs, READ4res *objp)
 			objp->mblk = NULL;
 			return (TRUE);
 		}
+	} else if (mp == NULL) {
+		if (xdr_u_int(xdrs, &objp->data_len) == FALSE) {
+			return (FALSE);
+		}
+		/*
+		 * If read data sent by wlist (RDMA_WRITE), don't do
+		 * xdr_bytes() below.   RDMA_WRITE transfers the data.
+		 * Note: this is encode-only because the client code
+		 * uses xdr_READ4res_clnt to decode results.
+		 */
+		if (objp->wlist) {
+			if (objp->wlist->c_len != objp->data_len) {
+				objp->wlist->c_len = objp->data_len;
+			}
+			if (objp->data_len != 0) {
+				return (xdrrdma_send_read_data(
+				    xdrs, objp->wlist));
+			}
+			return (TRUE);
+		}
 	}
+
 	return (xdr_bytes(xdrs, (char **)&objp->data_val,
 	    (uint_t *)&objp->data_len, objp->data_len));
 }
@@ -3446,6 +3512,7 @@ xdr_READ4res_clnt(XDR *xdrs, READ4res *objp, READ4args *aobjp)
 	size_t n;
 	int error;
 	uint_t size = aobjp->res_maxsize;
+	count4 ocount;
 
 	if (xdrs->x_op == XDR_ENCODE)
 		return (FALSE);
@@ -3509,9 +3576,46 @@ xdr_READ4res_clnt(XDR *xdrs, READ4res *objp, READ4args *aobjp)
 			return (TRUE);
 		}
 
+		if (xdrs->x_ops == &xdrrdma_ops) {
+			struct clist *cl;
+
+			XDR_CONTROL(xdrs, XDR_RDMA_GET_WLIST, &cl);
+
+			objp->wlist = cl;
+
+			if (objp->wlist) {
+				/* opaque count */
+				if (!xdr_u_int(xdrs, &ocount)) {
+					objp->wlist = NULL;
+					return (FALSE);
+				}
+
+				objp->wlist_len = cl->c_len;
+				objp->data_len = objp->wlist_len;
+
+				if (ocount != objp->data_len) {
+					DTRACE_PROBE2(
+					    xdr__e__read4resuio_clnt_fail,
+					    int, ocount,
+					    int, objp->data_len);
+					objp->wlist = NULL;
+					return (FALSE);
+				}
+
+				uiop->uio_resid -= objp->data_len;
+				uiop->uio_iov->iov_len -= objp->data_len;
+				uiop->uio_iov->iov_base += objp->data_len;
+				uiop->uio_loffset += objp->data_len;
+
+				objp->wlist = NULL;
+				return (TRUE);
+			}
+		}
+
 		/*
-		 * This isn't an xdrmblk stream.   Handle the likely
-		 * case that it can be inlined (ex. xdrmem).
+		 * This isn't an xdrmblk stream nor RDMA.
+		 * Handle the likely case that it can be
+		 * inlined (ex. xdrmem).
 		 */
 		if (!XDR_GETINT32(xdrs, (int32_t *)&objp->data_len))
 			return (FALSE);
@@ -3548,17 +3652,67 @@ xdr_READ4res_clnt(XDR *xdrs, READ4res *objp, READ4args *aobjp)
 	 * Check for the other special case of the caller providing
 	 * the target area for the data.
 	 */
-	if (aobjp->res_data_val_alt)
-		return (xdr_bytes(xdrs, (char **)&aobjp->res_data_val_alt,
-		    (uint_t *)&objp->data_len, aobjp->res_maxsize));
+	if (aobjp->res_data_val_alt == NULL)
+		return (FALSE);
 
-	/* caller didn't set things up right if we got this far */
-	return (FALSE);
+	/*
+	 * If read data received via RDMA_WRITE, don't do xdr_bytes().
+	 * RDMA_WRITE already moved the data so decode length of
+	 * RDMA_WRITE.
+	 */
+	if (xdrs->x_ops == &xdrrdma_ops) {
+		struct clist *cl;
+
+		XDR_CONTROL(xdrs, XDR_RDMA_GET_WLIST, &cl);
+
+		objp->wlist = cl;
+
+		/*
+		 * Data transferred through inline if
+		 * objp->wlist == NULL
+		 */
+		if (objp->wlist) {
+			/* opaque count */
+			if (!xdr_u_int(xdrs, &ocount)) {
+				objp->wlist = NULL;
+				return (FALSE);
+			}
+
+			objp->wlist_len = cl->c_len;
+			objp->data_len = objp->wlist_len;
+
+			if (ocount != objp->data_len) {
+				DTRACE_PROBE2(
+				    xdr__e__read4res_clnt_fail,
+				    int, ocount,
+				    int, objp->data_len);
+				objp->wlist = NULL;
+				return (FALSE);
+			}
+
+			objp->wlist = NULL;
+			return (TRUE);
+		}
+	}
+
+	return (xdr_bytes(xdrs, (char **)&aobjp->res_data_val_alt,
+	    (uint_t *)&objp->data_len,
+	    aobjp->res_maxsize));
 }
 
 static bool_t
 xdr_READDIR4args(XDR *xdrs, READDIR4args *objp)
 {
+	rdma_chunkinfo_t rci;
+	struct xdr_ops *xops = xdrrdma_xops();
+
+	if ((xdrs->x_ops == &xdrrdma_ops || xdrs->x_ops == xops) &&
+	    xdrs->x_op == XDR_ENCODE) {
+		rci.rci_type = RCI_REPLY_CHUNK;
+		rci.rci_len = objp->maxcount;
+		XDR_CONTROL(xdrs, XDR_RDMA_ADD_CHUNK, &rci);
+	}
+
 	if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)&objp->cookie))
 		return (FALSE);
 	if (!xdr_u_longlong_t(xdrs, (u_longlong_t *)&objp->cookieverf))
@@ -3601,7 +3755,8 @@ xdr_READDIR4res(XDR *xdrs, READDIR4res *objp)
 		return (FALSE);
 
 	if (xdrs->x_ops == &xdrmblk_ops) {
-		if (xdrmblk_putmblk_rd(xdrs, mp) == TRUE) {
+		if (xdrmblk_putmblk_rd(xdrs, mp)
+		    == TRUE) {
 			/* mblk successfully inserted into outgoing chain */
 			objp->mblk = NULL;
 			return (TRUE);
@@ -3611,20 +3766,27 @@ xdr_READDIR4res(XDR *xdrs, READDIR4res *objp)
 	ASSERT(mp->b_cont == NULL);
 
 	/*
-	 * If running over RDMA, the pre-encoded m_blk needs to be moved
+	 * If transport is RDMA, the pre-encoded m_blk needs to be moved
 	 * without being chunked.
-	 * Check if chunking is disabled for this xdr stream. If not disable
-	 * it for this op and then enable it back on.
+	 * Check if chunking is enabled for the xdr stream.
+	 * If it is enabled, disable it temporarily for this op,
+	 * then re-enable.
 	 */
-	XDR_CONTROL(xdrs, XDR_RDMAGET, &flags);
-	if (flags & RDMA_NOCHUNK)
+	XDR_CONTROL(xdrs, XDR_RDMA_GET_FLAGS, &flags);
+
+	if (!(flags & XDR_RDMA_CHUNK))
 		return (xdr_opaque(xdrs, (char *)mp->b_rptr, objp->data_len));
 
-	flags |= RDMA_NOCHUNK;
-	(void) XDR_CONTROL(xdrs, XDR_RDMASET, &flags);
+	flags &= ~XDR_RDMA_CHUNK;
+
+	(void) XDR_CONTROL(xdrs, XDR_RDMA_SET_FLAGS, &flags);
+
 	ret_val = xdr_opaque(xdrs, (char *)mp->b_rptr, objp->data_len);
-	flags &= ~RDMA_NOCHUNK;
-	(void) XDR_CONTROL(xdrs, XDR_RDMASET, &flags);
+
+	flags |= XDR_RDMA_CHUNK;
+
+	(void) XDR_CONTROL(xdrs, XDR_RDMA_SET_FLAGS, &flags);
+
 	return (ret_val);
 }
 
@@ -3822,11 +3984,29 @@ xdr_WRITE4args(XDR *xdrs, WRITE4args *objp)
 				return (xdrmblk_getmblk(xdrs, &objp->mblk,
 				    &objp->data_len));
 			}
-			/* Else fall thru for the xdr_bytes(). */
 			objp->mblk = NULL;
+			if (xdrs->x_ops == &xdrrdmablk_ops) {
+				int retval;
+				retval = xdrrdma_getrdmablk(xdrs,
+				    &objp->rlist,
+				    &objp->data_len,
+				    &objp->conn, NFS4_DATA_LIMIT);
+				if (retval == FALSE)
+					return (FALSE);
+				return (xdrrdma_read_from_client(&objp->rlist,
+				    &objp->conn, objp->data_len));
+			}
 		}
+		/* Else fall thru for the xdr_bytes(). */
 		return (xdr_bytes(xdrs, (char **)&objp->data_val,
 		    (uint_t *)&objp->data_len, NFS4_DATA_LIMIT));
+	}
+	if (objp->rlist != NULL) {
+		(void) xdrrdma_free_clist(objp->conn, objp->rlist);
+		objp->rlist = NULL;
+		objp->data_val = NULL;
+
+		return (TRUE);
 	}
 
 	/*
@@ -4036,6 +4216,9 @@ xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len)
 static bool_t
 xdr_nfs_argop4_minorversion_0(XDR *xdrs, nfs_argop4 *objp)
 {
+	rdma_chunkinfo_t rci;
+	struct xdr_ops *xops = xdrrdma_xops();
+
 	/*
 	 * These should be ordered by frequency of use
 	 */
@@ -4126,6 +4309,12 @@ xdr_nfs_argop4_minorversion_0(XDR *xdrs, nfs_argop4 *objp)
 	case OP_PUTROOTFH:
 		return (TRUE);
 	case OP_READLINK:
+		if ((xdrs->x_ops == &xdrrdma_ops || xdrs->x_ops == xops) &&
+		    xdrs->x_op == XDR_ENCODE) {
+			rci.rci_type = RCI_REPLY_CHUNK;
+			rci.rci_len = MAXPATHLEN;
+			XDR_CONTROL(xdrs, XDR_RDMA_ADD_CHUNK, &rci);
+		}
 		return (TRUE);
 	case OP_RENAME:
 		if (!xdr_bytes(xdrs, (char **)&objp->nfs_argop4_u.oprename.
@@ -4733,6 +4922,8 @@ xdr_COMPOUND4args_clnt(XDR *xdrs, COMPOUND4args_clnt *objp)
 	static int32_t twelve = 12;
 	uint32_t *ctagp;
 	rpc_inline_t *ptr;
+	rdma_chunkinfo_t rci;
+	struct xdr_ops *xops = xdrrdma_xops();
 
 	/*
 	 * XDR_ENCODE only
@@ -4769,6 +4960,11 @@ xdr_COMPOUND4args_clnt(XDR *xdrs, COMPOUND4args_clnt *objp)
 			return (FALSE);
 		if (!XDR_PUTINT32(xdrs, (int32_t *)&objp->minor_vers))
 			return (FALSE);
+	}
+	if (xdrs->x_ops == &xdrrdma_ops || xdrs->x_ops == xops) {
+		rci.rci_type = RCI_REPLY_CHUNK;
+		rci.rci_len = MAXPATHLEN * 2;
+		XDR_CONTROL(xdrs, XDR_RDMA_ADD_CHUNK, &rci);
 	}
 
 	return (xdr_array(xdrs, (char **)&objp->array,

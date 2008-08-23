@@ -26,8 +26,6 @@
 #ifndef _NFS4_KPROT_H
 #define	_NFS4_KPROT_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * Kernel specific version.
  * NFS Version 4 protocol definitions.  From nfs4_prot.x rev 1.119.
@@ -38,6 +36,9 @@ extern "C" {
 #endif
 
 #include <rpc/rpc.h>
+#ifdef _KERNEL
+#include <rpc/rpc_rdma.h>
+#endif
 #include <sys/stream.h>
 #include <nfs/nfs4_attrmap.h>
 
@@ -1084,7 +1085,10 @@ struct READ4args {
 	mblk_t *res_mblk;
 	struct uio *res_uiop;
 	uint_t res_maxsize;
-
+#ifdef _KERNEL
+	struct clist *wlist;
+	CONN *conn;
+#endif
 };
 typedef struct READ4args READ4args;
 
@@ -1094,6 +1098,10 @@ struct READ4res {
 	uint_t data_len;
 	char *data_val;
 	mblk_t *mblk;
+#ifdef _KERNEL
+	struct clist *wlist;
+	uint_t wlist_len;
+#endif
 };
 typedef struct READ4res READ4res;
 
@@ -1302,6 +1310,10 @@ struct WRITE4args {
 	uint_t data_len;
 	char *data_val;
 	mblk_t *mblk;
+#ifdef _KERNEL
+	struct clist *rlist;
+	CONN *conn;
+#endif
 };
 typedef struct WRITE4args WRITE4args;
 
