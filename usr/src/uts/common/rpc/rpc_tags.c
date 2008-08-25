@@ -132,13 +132,13 @@ rpc_tag_hold(rpc_tag_hd_t *taghd, rpc_tag_t *tag)
  */
 
 rpc_tag_t *
-rpc_lookup_tag(rpc_tag_hd_t *taghd, void *tagid, int creat)
+rpc_lookup_tag(rpc_tag_hd_t *taghd, void *tgid, int creat)
 {
 	rpc_tag_t *tag;
 	mutex_enter(&taghd->rth_lock);
 	tag = list_head(&taghd->rth_list);
 	while (tag) {
-		if (RPC_TAG_CMP(tag->rt_id, tagid) == 0) {
+		if (RPC_TAG_CMP(tag->rt_id, tgid) == 0) {
 			mutex_enter(&tag->rt_lock);
 			tag->rt_ref++;
 			mutex_exit(&tag->rt_lock);
@@ -157,7 +157,7 @@ rpc_lookup_tag(rpc_tag_hd_t *taghd, void *tagid, int creat)
 	 * Create a new one
 	 */
 	tag = (rpc_tag_t *)kmem_zalloc(sizeof (rpc_tag_t), KM_SLEEP);
-	bcopy(tagid, tag->rt_id, sizeof (tagid));
+	bcopy(tgid, tag->rt_id, sizeof (tagid));
 
 	mutex_init(&tag->rt_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&tag->rt_cv, NULL, CV_DEFAULT, NULL);
@@ -254,7 +254,7 @@ rpc_cmp_tag_nolock(rpc_xprt_taglist_t *xtlst, void *tgid)
  */
 
 void
-rpc_add_tag(rpc_tag_hd_t *taghd, void *xprt, void *tagid)
+rpc_add_tag(rpc_tag_hd_t *taghd, void *xprt, void *tgid)
 {
 	rpc_xprt_taglist_t *xtlst;
 	rpc_xprt_tag_t *xptag;
@@ -267,7 +267,7 @@ rpc_add_tag(rpc_tag_hd_t *taghd, void *xprt, void *tagid)
 	 * allocated.
 	 */
 
-	tag = rpc_lookup_tag(taghd, tagid, TRUE);
+	tag = rpc_lookup_tag(taghd, tgid, TRUE);
 
 
 	xtlst = *(XPRT2TLST(xprt, taghd->rth_xpoff));
@@ -278,7 +278,7 @@ rpc_add_tag(rpc_tag_hd_t *taghd, void *xprt, void *tagid)
 	 * Verify that the tag is not already on the list
 	 */
 
-	if (rpc_cmp_tag_nolock(xtlst, tagid)) {
+	if (rpc_cmp_tag_nolock(xtlst, tgid)) {
 		mutex_exit(&xtlst->rxtl_lock);
 		return;
 	}
@@ -548,12 +548,11 @@ tryagain:
 	 * the global tag list, wait till they finish and try
 	 * again.
 	 */
-	if (tag->rt_ref > 0) {
+	if (tag->rt_ref > 1) {
 		cv_wait(&tag->rt_cv, &tag->rt_lock);
 		goto tryagain;
 	}
 
-	tag->rt_ref = 0;
 	mutex_exit(&tag->rt_lock);
 	mutex_destroy(&tag->rt_lock);
 	cv_destroy(&tag->rt_cv);

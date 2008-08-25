@@ -202,6 +202,8 @@ static int nfs4fstyp;
  */
 extern int rdma_debug;
 
+extern int nfs41_birpc;
+
 int
 nfs4init(int fstyp, char *name)
 {
@@ -3636,6 +3638,13 @@ new_nfs4_server(struct servinfo4 *svp, cred_t *cr)
 	 * Dummy session id untill CREATE_SESSION is completed
 	 */
 	(void) snprintf(np->ssx.sessionid, sizeof (sessionid4), tag, curthread);
+
+	/*
+	 * By default, we begin with bi-dir rpc
+	 */
+	if (nfs41_birpc) {
+		np->ssx.bi_rpc = 1;
+	}
 
 	/*
 	 * Initialize Slot management fields

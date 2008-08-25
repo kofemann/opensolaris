@@ -26,7 +26,6 @@
 /* Copyright (c) 1983, 1984, 1985, 1986, 1987, 1988, 1989 AT&T */
 /* All Rights Reserved */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/disp.h>
 #include <nfs/nfs4_clnt.h>
@@ -2844,10 +2843,8 @@ nfs4create_session(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 
 	np->csa_seqid++;
 
-	if (!nfs41_birpc) {
-		np->ssx.bi_rpc = 0;
-	} else {
-		/* check if the server allows bi-rpc */
+	if (nfs41_birpc) {
+		/* make sure the server allows bi-rpc as well */
 		np->ssx.bi_rpc =
 		    (s_resok->csr_flags & CREATE_SESSION4_FLAG_CONN_BACK_CHAN);
 	}

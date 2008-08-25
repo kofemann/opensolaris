@@ -33,7 +33,6 @@
  * under license from the Regents of the University of California.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * Implements a kernel based, client side RPC over Connection Oriented
@@ -844,7 +843,7 @@ clnt_cots_kcontrol(CLIENT *h, int cmd, char *arg)
 		return (TRUE);
 
 	case CLSET_TAG_DESTROY:
-		rpc_destroy_tag(&cm_tag_hd, p->cku_tag);
+		rpc_destroy_tag(&cm_tag_hd, (void *)arg);
 		return (TRUE);
 
 	default:
@@ -2006,7 +2005,7 @@ connmgr_tag_unbind(cku_private_t *p)
 		    ((back_chan && !xprt->x_cb) ||
 		    (!back_chan && xprt->x_cb))) {
 			xprt =
-			(struct cm_xprt *)rpc_get_next_xprt(tag, &cookie);
+			    (struct cm_xprt *)rpc_get_next_xprt(tag, &cookie);
 			continue;
 		}
 
@@ -2129,7 +2128,7 @@ connmgr_cbget(struct netbuf *retryaddr, const struct timeval *waitp,
 		if ((retryaddr != NULL) &&
 		    (NETBUF_CMP(retryaddr, srcaddr) != 0)) {
 			cm_entry =
-			(struct cm_xprt *)rpc_get_next_xprt(tag, &cookie);
+			    (struct cm_xprt *)rpc_get_next_xprt(tag, &cookie);
 			continue;
 		}
 
@@ -2141,7 +2140,7 @@ connmgr_cbget(struct netbuf *retryaddr, const struct timeval *waitp,
 		if (cbconn_test &&
 		    (cm_entry->x_cb_tested == TRUE)) {
 			cm_entry =
-			(struct cm_xprt *)rpc_get_next_xprt(tag, &cookie);
+			    (struct cm_xprt *)rpc_get_next_xprt(tag, &cookie);
 			continue;
 		}
 
@@ -3000,10 +2999,11 @@ connmgr_close(struct cm_xprt *cm_entry)
 		 * server address in the update function
 		 */
 		if (((struct cm_kstat_xprt *)(cm_entry->x_ksp->ks_data))->
-			x_server.value.str.addr.ptr != NULL)
+		    x_server.value.str.addr.ptr != NULL) {
 			kmem_free(((struct cm_kstat_xprt *)(cm_entry->x_ksp->
 			    ks_data))->x_server.value.str.addr.ptr,
 			    INET6_ADDRSTRLEN);
+		}
 		kmem_free(cm_entry->x_ksp->ks_data,
 		    cm_entry->x_ksp->ks_data_size);
 		kstat_delete(cm_entry->x_ksp);
