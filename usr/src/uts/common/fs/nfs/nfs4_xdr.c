@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"@(#)nfs4_xdr.c	1.27	08/08/11 SMI"
-
 /*
  * A handcoded version based on the original rpcgen code.
  *
@@ -3480,9 +3478,6 @@ xdr_READ4res(XDR *xdrs, READ4res *objp)
 			return (TRUE);
 		}
 	} else if (mp == NULL) {
-		if (xdr_u_int(xdrs, &objp->data_len) == FALSE) {
-			return (FALSE);
-		}
 		/*
 		 * If read data sent by wlist (RDMA_WRITE), don't do
 		 * xdr_bytes() below.   RDMA_WRITE transfers the data.
@@ -3490,6 +3485,9 @@ xdr_READ4res(XDR *xdrs, READ4res *objp)
 		 * uses xdr_READ4res_clnt to decode results.
 		 */
 		if (objp->wlist) {
+			if (xdr_u_int(xdrs, &objp->data_len) == FALSE) {
+				return (FALSE);
+			}
 			if (objp->wlist->c_len != objp->data_len) {
 				objp->wlist->c_len = objp->data_len;
 			}
