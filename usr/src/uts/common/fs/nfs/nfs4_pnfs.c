@@ -1322,8 +1322,14 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 
 	layout = kmem_cache_alloc(pnfs_layout_cache, KM_SLEEP);
 	layout->plo_iomode = l4->lo_iomode;
+	layout->plo_offset = l4->lo_offset;
+	layout->plo_length = l4->lo_length;
+
 	if (res->LAYOUTGET4res_u.logr_resok4.logr_return_on_close)
 		layout->plo_flags |= PLO_ROC;
+
+	if (file_layout4->nfl_util & NFL4_UFLG_COMMIT_THRU_MDS)
+		layout->plo_flags |= PLO_COMMIT_MDS;
 
 	DEV_ASSIGN(layout->plo_deviceid, file_layout4->nfl_deviceid);
 	layout->plo_first_stripe_index =

@@ -115,13 +115,13 @@ typedef struct pnfs_layout {
 /* Layout Flag Fields */
 
 #define	PLO_ROC		0x1	/* Return Layout On Close */
-#define	PLO_RETURN	0x02	/* Layout Being Returned */
-#define	PLO_GET		0x04	/* Layoutget In Progress */
-#define	PLO_RECALL	0x08	/* Layout Being Recalled */
-#define	PLO_BAD		0x10	/* Layout Is Bad */
-#define	PLO_UNAVAIL	0x20	/* Layout Unavailable From MDS */
-#define	PLO_COM2MDS	0x40	/* Commit To MDS */
-#define	PLO_TRYLATER	0x80	/* RETRY From MDS on Layoutget, Try Later */
+#define	PLO_COMMIT_MDS	0x02	/* Commit to MDS */
+#define	PLO_RETURN	0x04	/* Layout Being Returned */
+#define	PLO_GET		0x08	/* Layoutget In Progress */
+#define	PLO_RECALL	0x10	/* Layout Being Recalled */
+#define	PLO_BAD		0x20	/* Layout Is Bad */
+#define	PLO_UNAVAIL	0x40	/* Layout Unavailable From MDS */
+#define	PLO_TRYLATER	0x100	/* RETRY From MDS on Layoutget, Try Later */
 
 
 /* a batch of read i/o work requested of pNFS */
