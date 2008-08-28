@@ -26,8 +26,6 @@
 #ifndef _NFS4_PNFS_H
 #define	_NFS4_PNFS_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * Generic and file layout specific pNFS support.
  */
@@ -211,6 +209,7 @@ typedef struct {
 	layoutiomode4 tlr_iomode;
 	layouttype4 tlr_layout_type;
 	stateid4 tlr_stateid;
+	layoutreturn_type4 tlr_return_type;
 } task_layoutreturn_t;
 
 

@@ -385,7 +385,8 @@ task_layoutget_free(task_layoutget_t *task)
 static void
 task_layoutreturn_free(task_layoutreturn_t *task)
 {
-	VN_RELE(task->tlr_vp);
+	if (task->tlr_vp)
+		VN_RELE(task->tlr_vp);
 	MI4_RELE(task->tlr_mi);
 	crfree(task->tlr_cr);
 
@@ -1369,6 +1370,33 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 	list_insert_head(&rp->r_layout, layout);
 }
 
+void
+pnfs_layout_discard(rnode4_t *rp, nfs4_fsidlt_t *ltp, nfs4_server_t *np)
+{
+	ASSERT(MUTEX_HELD(&ltp->lt_rlt_lock));
+	mutex_enter(&rp->r_statelock);
+	if (!(rp->r_flags & R4LAYOUTVALID)) {
+		mutex_exit(&rp->r_statelock);
+		return;
+	}
+	pnfs_layout_rele(rp);
+	if (list_head(&rp->r_layout)) {
+		/*
+		 * There are still layouts present.  This will
+		 * need to be handled by synchronizing layout
+		 * usage with recalls, but this is good enough
+		 * for now.
+		 */
+		mutex_exit(&rp->r_statelock);
+		cmn_err(CE_WARN, "pnfs_layout_discard: dangling layout");
+		return;
+	}
+	rp->r_flags &= ~ R4LAYOUTVALID;
+	mutex_exit(&rp->r_statelock);
+	avl_remove(&ltp->lt_rlayout_tree, rp);
+	nfs4_server_rele(np);
+}
+
 static void
 pnfs_task_layoutreturn(void *v)
 {
@@ -1376,33 +1404,50 @@ pnfs_task_layoutreturn(void *v)
 	mntinfo4_t *mi = task->tlr_mi;
 	nfs4_server_t	*np;
 	nfs4_fsidlt_t *ltp, lt;
-	rnode4_t *found, *rp = VTOR4(task->tlr_vp);
+	rnode4_t *found, *rp;
 	COMPOUND4args_clnt args;
 	COMPOUND4res_clnt res;
 	nfs_argop4 argop[2];
 	LAYOUTRETURN4args *arg;
 	layoutreturn_file4 *lrf;
 	nfs4_error_t e = {0, NFS4_OK, RPC_SUCCESS};
-	int doqueue = 1;
+	int doqueue = 1, opx;
 	nfs4_recov_state_t recov_state;
 	avl_index_t	where;
 
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 
+	/*
+	 * XXX - todo need to pass vp for LAYOUTRETURN4_FILE
+	 * XXX - if start_op fails, should we remove the layout from the tree?
+	 */
 	if (nfs4_start_op(mi, NULL, NULL, &recov_state))
 		goto out;
 
 	args.ctag = TAG_PNFS_LAYOUTRETURN;
-	args.array_len = 2;
 	args.array = argop;
 
-	argop[0].argop = OP_CPUTFH;
-	argop[0].nfs_argop4_u.opcputfh.sfh = rp->r_fh;
+	if (task->tlr_return_type == LAYOUTRETURN4_FILE) {
+		rp = VTOR4(task->tlr_vp);
+		argop[0].argop = OP_CPUTFH;
+		argop[0].nfs_argop4_u.opcputfh.sfh = rp->r_fh;
+		args.array_len = 2;
+		opx = 1;
+	} else if (task->tlr_return_type == LAYOUTRETURN4_FSID) {
+		argop[0].argop = OP_CPUTFH;
+		argop[0].nfs_argop4_u.opcputfh.sfh = mi->mi_rootfh;
+		args.array_len = 2;
+		opx = 1;
+	} else {
+		ASSERT(task->tlr_return_type == LAYOUTRETURN4_ALL);
+		opx = 0;
+		args.array_len = 1;
+	}
 
-	argop[1].argop = OP_LAYOUTRETURN;
-	arg = &argop[1].nfs_argop4_u.oplayoutreturn;
-	arg->lora_layoutreturn.lr_returntype = LAYOUTRETURN4_FILE; /* XXX */
+	argop[opx].argop = OP_LAYOUTRETURN;
+	arg = &argop[opx].nfs_argop4_u.oplayoutreturn;
+	arg->lora_layoutreturn.lr_returntype = task->tlr_return_type;
 	lrf = &arg->lora_layoutreturn.layoutreturn4_u.lr_layout;
 	lrf->lrf_offset = task->tlr_offset;
 	lrf->lrf_length = task->tlr_length;
@@ -1413,6 +1458,12 @@ pnfs_task_layoutreturn(void *v)
 	arg->lora_layout_type = task->tlr_layout_type;
 
 	rfs4call(mi, NULL, &args, &res, task->tlr_cr, &doqueue, 0, &e);
+
+	/* XXX need needs_recovery/start_recovery logic here */
+
+	if (task->tlr_return_type == LAYOUTRETURN4_FSID ||
+	    task->tlr_return_type == LAYOUTRETURN4_ALL)
+		goto done;
 
 	np = find_nfs4_server(mi);
 	ASSERT(np != NULL);
@@ -1444,6 +1495,9 @@ pnfs_task_layoutreturn(void *v)
 	}
 
 	nfs4_server_rele(np);
+done:
+	if (e.error == 0 && e.rpc_status == RPC_SUCCESS)
+		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 	nfs4_end_op(mi, NULL, NULL, &recov_state, 0);
 	/*
 	 * At this point, we don't worry about failure.  We will either
@@ -1728,6 +1782,7 @@ pnfs_layout_return(vnode_t *vp, cred_t *cr, int aflag)
 	task->tlr_iomode = iomode;
 	task->tlr_layout_type = LAYOUT4_NFSV4_1_FILES;
 	task->tlr_stateid = losid;
+	task->tlr_return_type = LAYOUTRETURN4_FILE;
 
 	if (aflag == LR_ASYNC)
 		(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
@@ -1741,7 +1796,31 @@ pnfs_layout_return(vnode_t *vp, cred_t *cr, int aflag)
 }
 
 void
+pnfs_layoutreturn_bulk(mntinfo4_t *mi, cred_t *cr, int how)
+{
+	task_layoutreturn_t *task;
 
+	task = kmem_cache_alloc(task_layoutreturn_cache, KM_SLEEP);
+	task->tlr_vp = NULL;
+	task->tlr_mi = mi;
+	MI4_HOLD(mi);
+	task->tlr_cr = cr;
+	crhold(cr);
+
+	task->tlr_offset = 0;
+	task->tlr_length = ~0;
+	/* the spec says reclaim is always false for FSID or ALL */
+	task->tlr_reclaim = 0;
+	task->tlr_iomode = LAYOUTIOMODE4_ANY;
+	task->tlr_layout_type = LAYOUT4_NFSV4_1_FILES;
+	task->tlr_stateid = clnt_special0;
+	task->tlr_return_type = how;
+
+	(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
+	    pnfs_task_layoutreturn, task, 0);
+}
+
+void
 pnfs_layout_hold(rnode4_t *rp, pnfs_layout_t *layout)
 {
 	ASSERT(MUTEX_HELD(&rp->r_statelock));

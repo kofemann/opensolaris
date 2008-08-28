@@ -26,8 +26,6 @@
 /* Copyright (c) 1983, 1984, 1985, 1986, 1987, 1988, 1989 AT&T */
 /* All Rights Reserved */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -615,12 +613,14 @@ layoutrecall_all(nfs4_server_t *np)
 {
 	vnode_t *vp;
 	rnode4_t *rp;
+	mntinfo4_t *mi = NULL;
 	nfs4_fsidlt_t *ltp;
 	nfsstat4 nstatus = NFS4ERR_NOMATCHING_LAYOUT;
 
 	/*
-	 * Walk thru all of the fsid layout trees, and all of their
-	 * rnode layout trees and asynchronously return and free each layout.
+	 * Walk thru all of the layout trees, and discard all
+	 * all the layouts, effectively discarding all the layouts
+	 * from this particular server, then do LAYOUTRETURN4_ALL.
 	 */
 	mutex_enter(&np->s_lt_lock);
 	for (ltp = avl_first(&np->s_fsidlt); ltp;
@@ -628,17 +628,30 @@ layoutrecall_all(nfs4_server_t *np)
 		mutex_enter(&ltp->lt_rlt_lock);
 		for (rp = avl_first(&ltp->lt_rlayout_tree); rp;
 		    rp = AVL_NEXT(&ltp->lt_rlayout_tree, rp)) {
-			nstatus = NFS4_OK;
+
 			vp = RTOV4(rp);
 			VN_HOLD(vp);
-			mutex_enter(&rp->r_statelock);
-			pnfs_layout_return(vp, kcred, LR_ASYNC);
-			mutex_exit(&rp->r_statelock);
+			pnfs_layout_discard(rp, ltp, np);
+			/*
+			 * Hold the mi to prevent it from disappearing
+			 * after we drop the reference on the vnode.  This
+			 * will remain held until we send the request down
+			 * the taskq.
+			 */
+			if (mi == NULL) {
+				mi = VTOMI4(vp);
+				MI4_HOLD(mi);
+			}
 			VN_RELE(vp);
+			nstatus = NFS4_OK;
 		}
 		mutex_exit(&ltp->lt_rlt_lock);
 	}
 	mutex_exit(&np->s_lt_lock);
+	if (nstatus == NFS4_OK) {
+		pnfs_layoutreturn_bulk(mi, kcred, LAYOUTRETURN4_ALL);
+		MI4_RELE(mi);
+	}
 	return (nstatus);
 }
 
@@ -648,6 +661,7 @@ layoutrecall_fsid(fsid4 *recallfsid, nfs4_server_t *np)
 {
 	vnode_t *vp;
 	rnode4_t *rp;
+	mntinfo4_t *mi = NULL;
 	nfs4_fsidlt_t *ltp, lt;
 	nfsstat4 nstatus = NFS4ERR_NOMATCHING_LAYOUT;
 
@@ -677,17 +691,25 @@ layoutrecall_fsid(fsid4 *recallfsid, nfs4_server_t *np)
 	    rp = AVL_NEXT(&ltp->lt_rlayout_tree, rp)) {
 		/*
 		 * For each rnode on this fsid's layout tree,
-		 * asynchronously return and free the layout.
+		 * discard the layout.  We do not return each
+		 * layout individually, instead we return in
+		 * bulk, at the end.
 		 */
 		vp = RTOV4(rp);
 		VN_HOLD(vp);
-		mutex_enter(&rp->r_statelock);
-		pnfs_layout_return(vp, kcred, LR_ASYNC);
-		mutex_exit(&rp->r_statelock);
+		pnfs_layout_discard(rp, ltp, np);
+		if (mi == NULL) {
+			mi = VTOMI4(vp);
+			MI4_HOLD(mi);
+		}
 		VN_RELE(vp);
 		nstatus = NFS4_OK;
 	}
 	mutex_exit(&ltp->lt_rlt_lock);
+	if (nstatus == NFS4_OK) {
+		pnfs_layoutreturn_bulk(mi, kcred, LAYOUTRETURN4_FSID);
+		MI4_RELE(mi);
+	}
 	return (nstatus);
 }
 

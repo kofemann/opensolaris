@@ -1677,6 +1677,12 @@ extern void	rfs4_state_init(void);
 extern void	mds_state_init(void);
 extern void	rfs4_state_fini(void);
 
+extern void   pnfs_layoutreturn_bulk(struct mntinfo4 *, cred_t *, int);
+struct nfs4_fsidlt;
+struct nfs4_server;
+extern void   pnfs_layout_discard(struct rnode4 *, struct nfs4_fsidlt *,
+    struct nfs4_server *);
+
 #endif
 #ifdef	__cplusplus
 }
