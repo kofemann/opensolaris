@@ -4792,6 +4792,15 @@ nfs4_inactive(vnode_t *vp, cred_t *cr, caller_context_t *ct)
 		nfs4_async_inactive(vp, cr);
 		return;
 	}
+
+	if (rp->r_flags & R4LAYOUTVALID) {
+		mutex_exit(&rp->r_statev4_lock);
+		mutex_exit(&rp->r_statelock);
+		mutex_exit(&rp->r_os_lock);
+		nfs4_async_inactive(vp, cr);
+		return;
+	}
+
 	mutex_exit(&rp->r_statev4_lock);
 	mutex_exit(&rp->r_statelock);
 	mutex_exit(&rp->r_os_lock);
