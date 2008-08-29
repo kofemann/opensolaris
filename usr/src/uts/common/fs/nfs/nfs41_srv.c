@@ -28,7 +28,6 @@
  *	All Rights Reserved
  */
 
-
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -55,6 +54,7 @@
 #include <sys/fem.h>
 #include <sys/sdt.h>
 #include <sys/ddi.h>
+#include <sys/modctl.h>
 
 #include <rpc/types.h>
 #include <rpc/auth.h>
@@ -4497,11 +4497,18 @@ bail:
 	}
 }
 
-/*
- * Once the dot-x file is updated in the gate this will become
- * a compile-time error and will need to be removed :)
- */
-#define	NFS4ERR_NOT_ONLY_OP	10081
+void
+rfs41_err_resp(COMPOUND4args *args, COMPOUND4res *resp, nfsstat4 err)
+{
+	size_t	sz;
+
+	resp->array_len = 1;
+	sz = resp->array_len * sizeof (nfs_resop4);
+	resp->array = kmem_zalloc(sz, KM_SLEEP);
+
+	resp->array[0].resop = args->array[0].argop;
+	resp->array[0].nfs_resop4_u.opillegal.status = err;
+}
 
 
 /* ARGSUSED */
@@ -4512,6 +4519,7 @@ mds_compound(compound_node_t *cn,
 {
 	struct compound_state *cs = cn->cn_state;
 	cred_t *cr;
+	size_t	reslen;
 
 	if (rv != NULL)
 		*rv = 0;
@@ -4525,10 +4533,6 @@ mds_compound(compound_node_t *cn,
 
 	bcopy(args->tag.utf8string_val, resp->tag.utf8string_val,
 	    resp->tag.utf8string_len);
-
-	cs->op_len = resp->array_len = args->array_len;
-	resp->array = kmem_zalloc(args->array_len * sizeof (nfs_resop4),
-	    KM_SLEEP);
 
 	ASSERT(exi == NULL);
 
@@ -4552,7 +4556,6 @@ mds_compound(compound_node_t *cn,
 			*rv = 1;
 		return;
 	}
-
 	cs->basecr = cr;
 	cs->req = req;
 
@@ -4598,20 +4601,23 @@ mds_compound(compound_node_t *cn,
 		 * Should be the _only_ op in compound
 		 */
 		if (args->array_len != 1) {
-			resp->array[0].resop = args->array[0].argop;
-			resp->array[0].nfs_resop4_u.opillegal.status =
-			    *cs->statusp = NFS4ERR_NOT_ONLY_OP;
+			*cs->statusp = NFS4ERR_NOT_ONLY_OP;
+			rfs41_err_resp(args, resp, *cs->statusp);
 			goto out;
 		}
 		break;
 
 	default:
-		resp->array_len = 1;
-		resp->array[0].resop = args->array[0].argop;
-		resp->array[0].nfs_resop4_u.opillegal.status =
-		    *cs->statusp = NFS4ERR_OP_NOT_IN_SESSION;
+		*cs->statusp = NFS4ERR_OP_NOT_IN_SESSION;
+		rfs41_err_resp(args, resp, *cs->statusp);
 		goto out;
 	}
+
+	/*
+	 * Everything kosher; allocate results array
+	 */
+	reslen = cs->op_len = resp->array_len = args->array_len;
+	resp->array = kmem_zalloc(reslen * sizeof (nfs_resop4), KM_SLEEP);
 
 	/*
 	 * Iterate over the compound until we have exhausted the operations
@@ -5070,6 +5076,92 @@ mds_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
 	return (status);
 }
 
+/*
+ * 1) CB RACE           <kill stored rs record>		[done]
+ * 2) slot reuse	<kill stored rs record>		[done]
+ * 3) CB_RECALL		<(typical/normal case) use new sessid in deleg_state
+ *			 to find session originally granted the delegation to
+ *			 issue recall over _that_ session's back channel>
+ *			XXX - <<< check spec >>>
+ */
+void
+rfs41_rs_record(struct compound_state *cs, stateid_type_t type, void *p)
+{
+	rfs4_deleg_state_t	*dsp;
+	slot41_t		*slp;
+#ifdef	DEBUG_VERBOSE
+	/*
+	 * XXX - Do not change this to a static D probe;
+	 *	 this is not intended for production !!!
+	 */
+	ulong_t			 offset;
+	char			*who;
+	who = modgetsymname((uintptr_t)caller(), &offset);
+#endif	/* DEBUG_VERBOSE */
+
+	switch (type) {
+	case DELEGID:			/* sessid/slot/seqid + rsid */
+		ASSERT(cs != NULL && cs->sp != NULL);
+
+		dsp = (rfs4_deleg_state_t *)p;
+		ASSERT(dsp != NULL);
+#ifdef	DEBUG_VERBOSE
+		cmn_err(CE_NOTE, "rfs41_rs_record: (%s, dsp = 0x%p)", who, dsp);
+#endif	/* DEBUG_VERBOSE */
+
+		/* delegation state id stored in rfs4_deleg_state_t */
+		bcopy(cs->sp->sn_sessid, dsp->rs.sessid, sizeof (sessionid4));
+		dsp->rs.seqid = cs->seqid;
+		dsp->rs.slotno = cs->slotno;
+		rfs41_deleg_rs_hold(dsp);
+
+		/* add it to slrc slot to track slot-reuse case */
+		slp = &cs->sp->sn_slrc->sc_slot[cs->slotno];
+		ASSERT(slp != NULL);
+		ASSERT(slp->p == NULL);
+		slp->p = (rfs4_deleg_state_t *)dsp;
+		rfs4_dbe_hold(dsp->dbe);	/* added ref to deleg_state */
+		break;
+
+	case LAYOUTID:
+		/*
+		 * Layout stateid race detection will be done
+		 * using the stateid's embedded seqid field.
+		 */
+		/* FALLTHROUGH */
+	default:
+		break;
+	}
+}
+
+void
+rfs41_rs_erase(void *p)
+{
+	rfs4_deleg_state_t	*dsp = (rfs4_deleg_state_t *)p;
+#ifdef	DEBUG_VERBOSE
+	/*
+	 * XXX - Do not change this to a static D probe;
+	 *	 this is not intended for production !!!
+	 */
+	ulong_t			 offset;
+	char			*who;
+	who = modgetsymname((uintptr_t)caller(), &offset);
+	cmn_err(CE_NOTE, "rfs41_rs_erase: (%s, dsp = 0x%p)", who, dsp);
+#endif	/* DEBUG_VERBOSE */
+
+	ASSERT(dsp != NULL);
+	rfs41_deleg_rs_rele(dsp);
+	rfs4_deleg_state_rele(dsp);
+}
+
+#ifdef	DEBUG
+/*
+ * XXX - This is a handy way to force the server to "wait" before
+ *	granting a delegation to the requesting client (thereby
+ *	forcing the CB_RACE condition). rsec == # of secs to wait.
+ */
+int	rsec = 0;
+#endif
 
 /*ARGSUSED*/
 static void
@@ -5262,7 +5354,6 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	 * we must honor the delegation requested. If necessary we can
 	 * set the recall flag.
 	 */
-
 	dsp = rfs4_grant_delegation(cs, deleg, state, &recall);
 
 	cs->deleg = (file->dinfo->dtype == OPEN_DELEGATE_WRITE);
@@ -5276,7 +5367,14 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 
 	if (dsp) {
 		rfs4_set_deleg_response(dsp, &resp->delegation, NULL, recall);
+		rfs41_rs_record(cs, DELEGID, dsp);
 		rfs4_deleg_state_rele(dsp);
+#ifdef	DEBUG
+		if (rsec) {
+			/* add delay here to force CB_RACE; rick */
+			delay(SEC_TO_TICK(rsec));
+		}
+#endif
 	}
 
 	rfs4_file_rele(file);
@@ -7333,7 +7431,7 @@ replay:
 	rok->csr_sequence = cp->contrived.xi_sid;
 	bcopy(sp->sn_sessid, rok->csr_sessionid, sizeof (sessionid4));
 	bcopy(sp->sn_sessid, crp->csr_sessionid, sizeof (sessionid4));
-	rok->csr_flags = crp->csr_flags = sp->sn_flags;
+	rok->csr_flags = crp->csr_flags = sp->sn_csflags;
 
 	/*
 	 * XXX: struct assignment of channel4_attrs is broken because
@@ -7702,13 +7800,23 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 		 * New request.
 		 */
 		slp->status = NFS4_OK;	/* SLRC_NR_INPROG */
-		/* XXX - need some serialization here */
 		slp->seqid = args->sa_sequenceid;
+		if (slp->p != NULL) {
+			/*
+			 * slot previously used to return recallable state;
+			 * since slot reused (NEW request) we are guaranteed
+			 * the client saw the reply, so it's safe to nuke the
+			 * race-detection accounting info.
+			 */
+			rfs41_rs_erase(slp->p);
+			slp->p = NULL;
+		}
 	}
 
 	/*
 	 * Update access time and lease
 	 */
+	cs->slotno = slot;
 	cs->seqid = slp->seqid;
 	cp = sp->sn_clnt;
 	sp->sn_laccess = gethrestime_sec();
@@ -7770,15 +7878,20 @@ rfs41_bc_setup(mds_session_t *sp)
 	 * Initialize back channel specific data
 	 */
 	if (bcp_init) {
-		bsdp = CTOBSD(bcp);
-		mutex_enter(&bsdp->bsd_lock);
-		bsdp->bsd_slot[0].cb_seqid = 1;
-		bsdp->bsd_slot[0].cb_inuse = 0;
-		bsdp->bsd_slot[0].cb_want = 0;
-		cv_signal(&bsdp->bsd_cv);
-		mutex_exit(&bsdp->bsd_lock);
+		if ((bsdp = CTOBSD(bcp)) == NULL) {
+			cmn_err(CE_PANIC, "Back Chan Spec Data Not Set\t"
+			    "<Internal Inconsistency>");
+		}
+		rw_enter(&bsdp->bsd_rwlock, RW_WRITER);
+		/*
+		 * XXX - 08/15/2008 (rick) if we're barely creating the
+		 *	back channel, then the back channel attrs should
+		 *	have been saved off by the originating CREATE_SESSION
+		 *	call. If that's not the case, default to MAXSLOTS.
+		 */
+		bsdp->bsd_stok = sltab_create(MAXSLOTS);	/* XXX - 4now */
+		rw_exit(&bsdp->bsd_rwlock);
 	}
-
 	rw_exit(&bcp->cn_lock);
 
 	/*
@@ -7799,7 +7912,7 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	BIND_CONN_TO_SESSION4args	*args = &argop->a_bc2s;
 	BIND_CONN_TO_SESSION4res	*resp = &resop->r_bc2s;
 	BIND_CONN_TO_SESSION4resok	*rok = &resp->rok_bc2s;
-	mds_session_t			*bc2sp;
+	mds_session_t			*sp;
 	SVCMASTERXPRT			*mxprt;
 	rpcprog_t			 prog;
 	SVCCB_ARGS			cbargs;
@@ -7812,17 +7925,17 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Find session and check for clientid and lease expiration
 	 */
-	if ((bc2sp = mds_findsession_by_id(args->bctsa_sessid)) == NULL) {
+	if ((sp = mds_findsession_by_id(args->bctsa_sessid)) == NULL) {
 		*cs->statusp = resp->bctsr_status = NFS4ERR_BADSESSION;
 		goto final;
 	}
-	mds_refresh(bc2sp);
+	mds_refresh(sp);
 
 	bzero(rok, sizeof (SEQUENCE4resok));
 
-	rfs4_dbe_lock(bc2sp->dbe);
-	prog = bc2sp->sn_bc.progno;
-	rfs4_dbe_unlock(bc2sp->dbe);
+	rfs4_dbe_lock(sp->dbe);
+	prog = sp->sn_bc.progno;
+	rfs4_dbe_unlock(sp->dbe);
 
 	rok->bctsr_use_conn_in_rdma_mode = FALSE;
 	mxprt = (SVCMASTERXPRT *)req->rq_xprt->xp_master;
@@ -7832,7 +7945,7 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 		/* always map to Fore */
 		rok->bctsr_dir = CDFS4_FORE;
 		SVC_CTL(
-		    req->rq_xprt, SVCCTL_SET_TAG, (void *)bc2sp->sn_sessid);
+		    req->rq_xprt, SVCCTL_SET_TAG, (void *)sp->sn_sessid);
 		break;
 
 	case CDFC4_BACK:
@@ -7840,18 +7953,21 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 		/* always map to Back */
 
 		rok->bctsr_dir = CDFS4_BACK;
-		rfs41_bc_setup(bc2sp);
+		rfs41_bc_setup(sp);
 		SVC_CTL(
-		    req->rq_xprt, SVCCTL_SET_TAG, (void *)bc2sp->sn_sessid);
+		    req->rq_xprt, SVCCTL_SET_TAG, (void *)sp->sn_sessid);
 
 		cbargs.xprt = mxprt;
 		cbargs.prog = prog;
 		cbargs.vers = NFS_CB;
 		cbargs.family = AF_INET;
-		cbargs.tag = (void *)bc2sp->sn_sessid;
+		cbargs.tag = (void *)sp->sn_sessid;
 
 		SVC_CTL(req->rq_xprt, SVCCTL_SET_CBCONN, (void *)&cbargs);
 
+		/* Recall: these bits denote # of active back chan conns */
+		rfs41_seq4_hold(&sp->sn_seq4, SEQ4_STATUS_CB_PATH_DOWN_SESSION);
+		rfs41_seq4_hold(&sp->sn_clnt->seq4, SEQ4_STATUS_CB_PATH_DOWN);
 		break;
 
 	default:
@@ -7861,17 +7977,14 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Handcraft the results !
 	 */
-	bcopy(bc2sp->sn_sessid, rok->bctsr_sessid, sizeof (sessionid4));
-
+	bcopy(sp->sn_sessid, rok->bctsr_sessid, sizeof (sessionid4));
 	*cs->statusp = NFS4_OK;
-
-	rfs41_session_rele(bc2sp);
+	rfs41_session_rele(sp);
 
 final:
 	DTRACE_NFSV4_2(op__bind__conn__to__session__done,
 	    struct compound_state *, cs,
 	    BIND_CONN_TO_SESSION4res *, resp);
-
 }
 
 /* located in nfs4_state */

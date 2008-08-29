@@ -393,6 +393,67 @@ typedef struct rfs4_deleg_list {
 } rfs4_deleg_list_t;
 
 /*
+ * Per-(SEQ4 Status Bit) accounting info
+ */
+#define	WORDSZ		sizeof (uint32_t)
+#define	BITS_PER_WORD	(WORDSZ * 8)
+
+typedef struct {
+	uint32_t	ba_bit;
+	uint32_t	ba_refcnt;
+	time_t		ba_trigger;
+	uint32_t	ba_sonly;
+} bit_attr_t;
+
+extern uint32_t	pow2(uint32_t);
+extern uint32_t	log2(uint32_t);
+extern void	rfs41_seq4_hold(void *, uint32_t);
+extern void	rfs41_seq4_rele(void *, uint32_t);
+
+/*
+ * NFSv4.1: slot support (nfs41_slrc)
+ */
+typedef enum {
+	SLOT_ERROR		= -1,	/* slot error */
+	SLOT_FREE		= 0,	/* free slot */
+	SLOT_INUSE		= 1	/* slot in use */
+} slot_state_t;
+
+typedef struct slot_ent {
+	kmutex_t	  se_lock;
+	kcondvar_t	  se_wait;
+	slotid4		  se_sltno;
+	sequenceid4	  se_seqid;
+	slot_state_t	  se_state;
+	CLIENT		 *se_clnt;	/* XXX - for now; generalize ! */
+} slot_ent_t;
+
+typedef struct slot_tab_token {
+	uint_t		  st_currw;	/* current width of slot table */
+	uint_t		  st_fslots;	/* current # of available slots */
+	slot_ent_t	**st_sltab;	/* array of 'currw' pointers */
+	kmutex_t	  st_lock;	/* cache lock; resize or destroy */
+	kcondvar_t	  st_wait;
+} stok_t;
+
+typedef enum {
+	SLT_NOSLEEP	= 0,
+	SLT_SLEEP	= 1
+} slt_wait_t;
+
+#define	SA_SLOT_ANY	0x0001
+#define	SA_SLOT_SPEC	0x0002
+
+typedef struct {
+	slotid4		sa_sltno;
+	uint16_t	sa_flags;
+} slt_arg_t;
+
+typedef enum {
+	SLT_MAXSLOT	= 1
+} slt_query_t;
+
+/*
  * NFSv4.1 Sessions
  */
 typedef enum {
@@ -408,14 +469,19 @@ typedef struct slot41 {
 	nfsstat4		 status;
 	sequenceid4		 seqid;
 	COMPOUND4res_srv	 res;
+	void			*p;
 } slot41_t;
 
-typedef struct cb_slot {
-	sequenceid4	  cb_seqid;
-	CLIENT		**cb_clnt;
-	int		  cb_inuse;
-	int		  cb_want;
-} cb_slot_t;
+/*
+ * 4.1 only: delegation recallable state info.
+ * struct contents meaningful iff refcnt > 0
+ */
+typedef struct {
+	uint32_t	refcnt;
+	sessionid4	sessid;
+	sequenceid4	seqid;
+	slotid4		slotno;
+} rfs41_drs_info_t;
 
 typedef struct rfs41_csr {	/* contrived create_session result */
 	sequenceid4		xi_sid;		/* seqid response to EXCHG_ID */
@@ -434,6 +500,7 @@ typedef struct rfs41_csr {	/* contrived create_session result */
  *
  * cn_lock:	cn_lock
  * bsd_lock:	cn_lock -> bsd_lock
+ * bsd_rwlock:	cn_lock -> bsd_rwlock
  */
 typedef enum {
 	CB_PING_INIT	= 0,
@@ -451,10 +518,10 @@ typedef enum {
 
 #define		MAX_CH_CACHE	10
 typedef struct {				/* Back Chan Specific Data */
-	cb_slot_t		  bsd_slot[1];
+	stok_t			 *bsd_stok;	/* opaque token for slot tab */
 	nfsstat4		  bsd_stat;
-	kmutex_t		  bsd_lock;
-	kcondvar_t		  bsd_cv;
+	kmutex_t		  bsd_lock;	/* XXX can we use rwlock ? */
+	krwlock_t		  bsd_rwlock;	/* protect slot tab info */
 	uint64_t		  bsd_idx;	/* Index of next spare CLNT */
 	uint64_t		  bsd_cur;	/* Most recent added CLNT */
 	int			  bsd_ch_free;
@@ -671,6 +738,10 @@ extern void		rfs4_dbe_walk(rfs4_table_t *,
  * contrived -  NFSv4.1 create_session res
  * state_prot - NFSv4.1 state protection
  * clid_scope - NFSv4.1 scope of client id (DS, MDS or BOTH)
+ * seq4 - NFSv4.1 sequence result bit accounting info (client scope)
+ *	CB_PATH_DOWN, EXPIRED_ALL_STATE_REVOKED, EXPIRED_SOME_STATE_REVOKED,
+ *	ADMIN_STATE_REVOKED, RECALLABLE_STATE_REVOKED, LEASE_MOVED,
+ *	RESTART_RECLAIM_NEEDED, DEVID_CHANGED, DEVID_DELETED
  */
 typedef struct rfs4_client {
 	rfs4_dbe_t		*dbe;
@@ -696,6 +767,7 @@ typedef struct rfs4_client {
 	rfs41_csr_t		contrived;
 	rfs41_sprot_t		state_prot;
 	int			clid_scope;
+	bit_attr_t		seq4[BITS_PER_WORD];
 } rfs4_client_t;
 
 /*
@@ -830,6 +902,7 @@ typedef struct rfs4_deleg_state {
 	rfs4_client_t		*client;
 	rfs4_deleg_list_t	delegationlist;
 	rfs4_deleg_list_t	clientdeleglist;
+	rfs41_drs_info_t	rs;			/* 4.1 only */
 } rfs4_deleg_state_t;
 
 
@@ -943,6 +1016,11 @@ typedef struct {
 	CREATE_SESSION4args	 cs_aotw;
 } session41_create_t;
 
+/*
+ * sn_seq4 - sequence result bit accounting info (session scope)
+ *	CB_PATH_DOWN_SESSION, CB_GSS_CONTEXT_EXPIRING,
+ *	CB_GSS_CONTEXT_EXPIRED, BACKCHANNEL_FAULT
+ */
 typedef struct mds_session {
 	rfs4_dbe_t		*dbe;
 	sessionid4		 sn_sessid;	/* session id */
@@ -952,8 +1030,9 @@ typedef struct mds_session {
 	rfs41_slrc_t		*sn_slrc;	/* sessions slot replay cache */
 	rfs41_digest_t		 sn_digest;	/* digest; for use in SSV op */
 	time_t			 sn_laccess;	/* struct was last accessed */
-	int			 sn_flags;
+	int			 sn_csflags;	/* create_session only flags */
 	bool_t			 sn_bdrpc;
+	uint32_t		 sn_flags;	/* SEQ4 status bits */
 	struct	{
 		uint32_t	pngcnt;		/* conn pings outstanding */
 		uint32_t	paths;		/* callback paths verified */
@@ -963,6 +1042,7 @@ typedef struct mds_session {
 		uint32_t	pnginprog:1;
 		uint32_t	_reserved:30;
 	} sn_bc;
+	bit_attr_t		 sn_seq4[BITS_PER_WORD];
 } mds_session_t;
 
 #define	SN_CB_CHAN_EST(x)	(((mds_session_t *)(x))->sn_back != NULL)
@@ -1002,9 +1082,6 @@ extern void	rfs4_dss_readstate(nfs_server_instance_t *, int, char **);
 
 extern void rfs4_disable_delegation(void);
 extern void rfs4_enable_delegation(void);
-
-cb_slot_t *cb_sess_getslot(mds_session_t *);
-void cb_sess_slotfree(mds_session_t *, cb_slot_t *);
 
 /*
  * Request types for delegation. These correspond with
@@ -1349,6 +1426,7 @@ struct compound_state {
 	char 		fhbuf[NFS4_FHSIZE];
 
 	/* additions for NFSv4.1 */
+	slotid4		slotno;
 	sequenceid4	seqid;
 	int		sequenced;
 	mds_session_t	*sp;
@@ -1652,6 +1730,23 @@ extern bool_t	xdr_inline_decode_nfs_fh4(uint32_t *, nfs_fh4_fmt_t *,
 extern bool_t	xdr_inline_encode_nfs_fh4(uint32_t **, uint32_t *,
 			nfs_fh4_fmt_t *);
 
+extern void		 rfs41_deleg_rs_hold(rfs4_deleg_state_t *);
+extern void		 rfs41_deleg_rs_rele(rfs4_deleg_state_t *);
+extern void		 rfs41_set_client_sessions(rfs4_client_t *, uint32_t);
+
+/* NFSv4.1: slot support */
+extern void		*sltab_create(uint_t);
+extern uint_t		 sltab_resize(void *, uint_t);
+extern void		 sltab_query(void *, slt_query_t, void *);
+extern void		 sltab_destroy(void *);
+extern slot_ent_t	*slot_alloc(void *, slt_wait_t, slt_arg_t *);
+extern void		 slot_free(void *, slot_ent_t *);
+extern nfsstat4		 slot_cb_status(void *);
+extern slotid4		 svc_slot_maxslot(mds_session_t *);
+extern slot_ent_t	*svc_slot_alloc(mds_session_t *);
+extern void		 svc_slot_free(mds_session_t *, slot_ent_t *);
+extern void		 svc_slot_cb_seqid(CB_COMPOUND4res *, slot_ent_t *);
+
 #ifdef DEBUG
 extern int		rfs4_do_pre_op_attr;
 extern int		rfs4_do_post_op_attr;
@@ -1667,7 +1762,7 @@ extern stateid4 clnt_special1;
  */
 
 extern void	rfs4_compound(COMPOUND4args *, COMPOUND4res *,
-    struct exportinfo *, struct svc_req *, cred_t *, int *);
+		    struct exportinfo *, struct svc_req *, cred_t *, int *);
 extern void	rfs4_compound_free(COMPOUND4res *);
 extern void	rfs4_compound_flagproc(COMPOUND4args *, int *);
 

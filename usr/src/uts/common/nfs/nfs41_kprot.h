@@ -1045,6 +1045,7 @@ typedef struct SEQUENCE4args SEQUENCE4args;
 #define	SEQ4_STATUS_BACKCHANNEL_FAULT 0x00000400
 #define	SEQ4_STATUS_DEVID_CHANGED 0x00000800
 #define	SEQ4_STATUS_DEVID_DELETED 0x00001000
+#define	SEQ4_HIGH_BIT SEQ4_STATUS_DEVID_DELETED /* highest defined flag */
 
 struct SEQUENCE4resok {
 	sessionid4 sr_sessionid;
@@ -1378,6 +1379,10 @@ typedef struct nfs_resop4 nfs_resop4;
 #define	a_bc2s		nfs_argop4_u.opbind_conn_to_session
 #define	r_bc2s		nfs_resop4_u.opbind_conn_to_session
 #define	rok_bc2s	BIND_CONN_TO_SESSION4res_u.bctsr_resok4
+#define	csa_rcall_llen	csa_referring_call_lists.csa_referring_call_lists_len
+#define	csa_rcall_lval	csa_referring_call_lists.csa_referring_call_lists_val
+#define	rcl_len		rcl_referring_calls.rcl_referring_calls_len
+#define	rcl_val		rcl_referring_calls.rcl_referring_calls_val
 
 struct COMPOUND4args_srv {
 	utf8string	tag;
@@ -2103,6 +2108,7 @@ extern	bool_t xdr_CB_WANTS_CANCELLED4res(XDR *, CB_WANTS_CANCELLED4res *);
 extern	bool_t xdr_CB_NOTIFY_LOCK4args(XDR *, CB_NOTIFY_LOCK4args *);
 extern	bool_t xdr_CB_NOTIFY_LOCK4res(XDR *, CB_NOTIFY_LOCK4res *);
 extern  bool_t xdr_notify_deviceid_type4(XDR *, notify_deviceid_type4*);
+extern	bool_t xdr_notify_deviceid_delete4(XDR *, notify_deviceid_delete4 *);
 extern  bool_t xdr_notify_deviceid_change4(XDR *, notify_deviceid_change4*);
 extern  bool_t xdr_CB_NOTIFY_DEVICEID4args(XDR *, CB_NOTIFY_DEVICEID4args*);
 extern  bool_t xdr_CB_NOTIFY_DEVICEID4res(XDR *, CB_NOTIFY_DEVICEID4res*);

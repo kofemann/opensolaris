@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/systm.h>
 #include <rpc/auth.h>
 #include <rpc/clnt.h>
@@ -62,6 +60,7 @@ int mds_cbrecall_no_session = 0;
 
 static void rfs4_recall_file(rfs4_file_t *, bool_t, rfs4_client_t *);
 static	void		rfs4_revoke_deleg(rfs4_deleg_state_t *);
+static	void		rfs41_revoke_deleg(rfs4_deleg_state_t *);
 static	void		rfs4_revoke_file(rfs4_file_t *);
 static	void		rfs4_cb_chflush(rfs4_cbinfo_t *);
 static	CLIENT		*rfs4_cb_getch(rfs4_cbinfo_t *);
@@ -69,9 +68,6 @@ static	void		rfs4_cb_freech(rfs4_cbinfo_t *, CLIENT *, bool_t);
 static rfs4_deleg_state_t *rfs4_deleg_state(struct compound_state *,
 					    rfs4_state_t *,
 					    open_delegation_type4, int *);
-
-cb_slot_t *cb_sess_getslot(mds_session_t *);
-void cb_sess_slotfree(mds_session_t *, cb_slot_t *);
 
 /*
  * Convert a universal address to an transport specific
@@ -858,6 +854,27 @@ rfs4args_cb_recall_free(nfs_cb_argop4 *argop)
 		kmem_free(rec_argp->fh.nfs_fh4_val, rec_argp->fh.nfs_fh4_len);
 }
 
+/* XXX - this only works for one entry in the referring_call_list4 - rick */
+void
+rfs41args_cb_sequence_free(nfs_cb_argop4 *argop)
+{
+	CB_SEQUENCE4args	*ap;
+	referring_call_list4	*rp;
+	uint_t			 len;
+
+	ap = &argop->nfs_cb_argop4_u.opcbsequence;
+	if ((rp = ap->csa_rcall_lval) != NULL) {
+		if (rp->rcl_val != NULL) {
+			len = rp->rcl_len;
+			kmem_free(rp->rcl_val, len * sizeof (referring_call4));
+			rp->rcl_val = NULL;
+		}
+		len = ap->csa_rcall_llen;
+		kmem_free(rp, len * sizeof (referring_call_list4));
+		ap->csa_rcall_lval = NULL;
+	}
+}
+
 /* ARGSUSED */
 static void
 rfs4args_cb_getattr_free(nfs_cb_argop4 *argop)
@@ -883,6 +900,10 @@ rfs4freeargres(CB_COMPOUND4args *args, CB_COMPOUND4res *resp)
 	for (i = 0; i < arglen; i++, argop++) {
 
 		switch (argop->argop) {
+		case OP_CB_SEQUENCE:
+			rfs41args_cb_sequence_free(argop);
+			break;
+
 		case OP_CB_RECALL:
 			rfs4args_cb_recall_free(argop);
 			break;
@@ -904,77 +925,96 @@ rfs4freeargres(CB_COMPOUND4args *args, CB_COMPOUND4res *resp)
 		(void) xdr_free(xdr_CB_COMPOUND4res, (caddr_t)resp);
 }
 
-
-cb_slot_t *
-cb_sess_getslot(mds_session_t *sp)
+slotid4
+svc_slot_maxslot(mds_session_t *sp)
 {
-	int		 err;
-	cb_slot_t	*bsl;
+	slotid4		 ms;
 	sess_channel_t	*bcp;
 	sess_bcsd_t	*bsdp;
 
-	/*
-	 * Only 1 callback slot per session (for now)
-	 */
 	rfs4_dbe_lock(sp->dbe);
 	bcp = SNTOBC(sp);
 	rfs4_dbe_unlock(sp->dbe);
 
 	rw_enter(&bcp->cn_lock, RW_READER);
 	if ((bsdp = CTOBSD(bcp)) == NULL)
-		cmn_err(CE_PANIC, "cb_sess_getslot: BC Specific Data Not Set");
+		cmn_err(CE_PANIC, "svc_slot_maxslot: BC Specific Data Not Set");
 
-	mutex_enter(&bsdp->bsd_lock);
-	bsl = &bsdp->bsd_slot[0];
-	do {
-		if (! bsl->cb_inuse) {
-			bsl->cb_inuse = 1;
-			mutex_exit(&bsdp->bsd_lock);
-			rw_exit(&bcp->cn_lock);
-			return (bsl);
-		}
-		bsl->cb_want++;
-		err = cv_timedwait_sig(&bsdp->bsd_cv, &bsdp->bsd_lock,
-		    SEC_TO_TICK(rfs4_lease_time));
-	} while (err > 0);
+	rw_enter(&bsdp->bsd_rwlock, RW_READER);
+	sltab_query(bsdp->bsd_stok, SLT_MAXSLOT, &ms);
+	rw_exit(&bsdp->bsd_rwlock);
 
-	/*
-	 * Signal pending or timeout reached.  Either way, just return a NULL
-	 * slot ptr abort the recall.  If another thread is waiting for the
-	 * client handle and no request is in progress, wake it up.
-	 */
-	bsl->cb_want--;
-	if (bsl->cb_want > 0 && ! bsl->cb_inuse)
-		cv_signal(&bsdp->bsd_cv);
-	mutex_exit(&bsdp->bsd_lock);
 	rw_exit(&bcp->cn_lock);
-	return (NULL);
+	return (ms);
 }
 
+/*
+ * Server-side slot allocations from BC's sltab
+ */
+slot_ent_t *
+svc_slot_alloc(mds_session_t *sp)
+{
+	slot_ent_t	*p;
+	sess_channel_t	*bcp;
+	sess_bcsd_t	*bsdp;
+
+	rfs4_dbe_lock(sp->dbe);
+	bcp = SNTOBC(sp);
+	rfs4_dbe_unlock(sp->dbe);
+
+	rw_enter(&bcp->cn_lock, RW_READER);
+	if ((bsdp = CTOBSD(bcp)) == NULL)
+		cmn_err(CE_PANIC, "svc_slot_alloc: BC Specific Data Not Set");
+
+	rw_enter(&bsdp->bsd_rwlock, RW_READER);
+	p = slot_alloc(bsdp->bsd_stok, SLT_SLEEP, NULL);
+	rw_exit(&bsdp->bsd_rwlock);
+
+	rw_exit(&bcp->cn_lock);
+	return (p);
+}
+
+/*
+ * Server-side slot allocations from BC's sltab
+ */
+void
+svc_slot_free(mds_session_t *sp, slot_ent_t *p)
+{
+	sess_channel_t	*bcp;
+	sess_bcsd_t	*bsdp;
+
+	ASSERT(sp != NULL);
+	ASSERT(p != NULL);
+	rfs4_dbe_lock(sp->dbe);
+	bcp = SNTOBC(sp);
+	rfs4_dbe_unlock(sp->dbe);
+
+	rw_enter(&bcp->cn_lock, RW_READER);
+	if ((bsdp = CTOBSD(bcp)) == NULL)
+		cmn_err(CE_PANIC, "svc_slot_free: BC Specific Data Not Set");
+
+	rw_enter(&bsdp->bsd_rwlock, RW_READER);
+	slot_free(bsdp->bsd_stok, p);
+	rw_exit(&bsdp->bsd_rwlock);
+
+	rw_exit(&bcp->cn_lock);
+}
 
 void
-cb_sess_slotfree(mds_session_t *sp, cb_slot_t *sl)
+svc_slot_cb_seqid(CB_COMPOUND4res *resp, slot_ent_t *p)
 {
-	sess_channel_t	*bcp;
-	sess_bcsd_t	*bsdp;
+	CB_SEQUENCE4res	*rp;
 
-	rfs4_dbe_lock(sp->dbe);
-	bcp = SNTOBC(sp);
-	rfs4_dbe_unlock(sp->dbe);
+	if (resp == NULL || resp->array == NULL)
+		return;
 
-	rw_enter(&bcp->cn_lock, RW_READER);
-	if ((bsdp = CTOBSD(bcp)) == NULL)
-		cmn_err(CE_PANIC, "cb_sess_slotfree: BC Specific Data Not Set");
-
-	mutex_enter(&bsdp->bsd_lock);
-	ASSERT(sl->cb_inuse);
-	sl->cb_inuse = 0;
-	if (sl->cb_want > 0)
-		cv_signal(&bsdp->bsd_cv);
-	mutex_exit(&bsdp->bsd_lock);
-	rw_exit(&bcp->cn_lock);
+	ASSERT(resp->array->resop == OP_CB_SEQUENCE);
+	rp = &resp->array->nfs_cb_resop4_u.opcbsequence;
+	if (rp->csr_status == NFS4_OK) {
+		atomic_add_32(&p->se_seqid, 1);
+		cmn_err(CE_NOTE, "svc_slot_cb_seqid: %d", p->se_seqid);
+	}
 }
-
 
 /*
  * General callback routine for the server to the client.
@@ -1133,9 +1173,78 @@ rfs4_do_cb_recall(rfs4_deleg_state_t *dsp, bool_t trunc)
 	rfs4freeargres(&cb4_args, &cb4_res);
 }
 
+bool_t
+rfs41_file_still_delegated(rfs4_deleg_state_t *dsp)
+{
+	rfs4_file_t	*fp;
+
+	ASSERT(dsp != NULL);
+	ASSERT(dsp->finfo != NULL);
+	fp = dsp->finfo;
+
+	/* do we have a delegation on this file? */
+	rfs4_dbe_lock(fp->dbe);
+	if (fp->dinfo->dtype == OPEN_DELEGATE_NONE) {	/* check type */
+		rfs4_dbe_unlock(fp->dbe);
+		return (FALSE);
+	}
+
+	if (fp->mds_deleg_list.next->dsp == NULL) {	/* check deleg cnt */
+		rfs4_dbe_unlock(fp->dbe);
+		return (FALSE);
+	}
+	rfs4_dbe_unlock(fp->dbe);
+	return (TRUE);
+}
+
+void
+rfs41_cb_seq_rcl_args(CB_SEQUENCE4args *ap, rfs4_deleg_state_t *dsp)
+{
+	referring_call_list4	*rp;
+	referring_call4		*rcp;
+
+	ASSERT(ap != NULL);
+
+	/* construct one entry in referring_call_list4 */
+	ap->csa_rcall_llen = 1;
+	rp = (referring_call_list4 *)kmem_zalloc(sizeof (referring_call_list4),
+	    KM_SLEEP);
+	ap->csa_rcall_lval = rp;
+
+	/* construct one referring_call4 entry in list above */
+	rp->rcl_len = 1;
+	rcp = (referring_call4 *)kmem_zalloc(sizeof (referring_call4),
+	    KM_SLEEP);
+	rp->rcl_val = rcp;
+
+	/* set the necessary arg fields */
+	bcopy(&dsp->rs.sessid, &rp->rcl_sessionid, sizeof (sessionid4));
+	rcp->rc_sequenceid = dsp->rs.seqid;
+	rcp->rc_slotid = dsp->rs.slotno;
+}
+
+void
+rfs41_cb_path_down(mds_session_t *sp, uint32_t sonly)
+{
+	uint32_t	cp_flag = SEQ4_STATUS_CB_PATH_DOWN;
+	uint32_t	sn_flag = SEQ4_STATUS_CB_PATH_DOWN_SESSION;
+	uint32_t	idx = log2(sn_flag);
+
+	ASSERT(sp != NULL);
+	ASSERT(sp->sn_clnt != NULL);
+
+	/* NB - refcnt for both these bits == active cb connections */
+
+	/* session */
+	sp->sn_seq4[idx].ba_sonly = sonly;
+	rfs41_seq4_rele(&sp->sn_seq4, sn_flag);
+
+	/* clientid */
+	rfs41_seq4_rele(&sp->sn_clnt->seq4, cp_flag);
+}
 
 /*
- * Place the actual cb_recall otw call to client.
+ * Place the actual cb_recall otw call to client. (using slot_XXX api)
  */
 /*ARGSUSED*/
 static void
@@ -1143,20 +1252,21 @@ mds_do_cb_recall(rfs4_deleg_state_t *dsp, bool_t trunc)
 {
 	CB_COMPOUND4args	cb4_args;
 	CB_COMPOUND4res		cb4_res;
-	CB_SEQUENCE4args	*seq_argp;
-	CB_RECALL4args		*rec_argp;
+	CB_SEQUENCE4args	*cbsap;
+	CB_RECALL4args		*cbrap;
 	mds_session_t		*sp;
+	slot_ent_t		*p;
 	nfs_cb_argop4		*argops;
 	int			numops;
 	int			argoplist_size;
 	struct timeval		timeout;
 	nfs_fh4			*fhp;
 	enum clnt_stat		call_stat = RPC_FAILED;
-	cb_slot_t		*sl;
 	int			zilch = 0;
-	CLIENT			*cbch;
-
-	NFS4_DEBUG(rfs4_deleg_debug, (CE_NOTE, "mds_do_cb_recall: enter"));
+	CLIENT			*ch;
+	int			rcl = 0;	/* referring call list */
+	int			retried = 0;
+	uint32_t		sc = 0;		/* session ctxt */
 
 	/*
 	 * get the session id
@@ -1179,12 +1289,12 @@ mds_do_cb_recall(rfs4_deleg_state_t *dsp, bool_t trunc)
 	argops = kmem_zalloc(argoplist_size, KM_SLEEP);
 
 	argops[0].argop = OP_CB_SEQUENCE;
-	seq_argp = &argops[0].nfs_cb_argop4_u.opcbsequence;
+	cbsap = &argops[0].nfs_cb_argop4_u.opcbsequence;
 
 	argops[1].argop = OP_CB_RECALL;
-	rec_argp = &argops[1].nfs_cb_argop4_u.opcbrecall;
+	cbrap = &argops[1].nfs_cb_argop4_u.opcbrecall;
 
-	(void) str_to_utf8("cb_recall", &cb4_args.tag);
+	(void) str_to_utf8("mds_cb_recall", &cb4_args.tag);
 	cb4_args.minorversion = CB4_MINOR_v1;
 
 	cb4_args.callback_ident = sp->sn_bc.progno;
@@ -1195,67 +1305,143 @@ mds_do_cb_recall(rfs4_deleg_state_t *dsp, bool_t trunc)
 	cb4_res.array = NULL;
 
 	/*
-	 * fill in the args struct
+	 * CB_SEQUENCE
 	 */
+	bcopy(sp->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
+	p = svc_slot_alloc(sp);
+	mutex_enter(&p->se_lock);
+	cbsap->csa_slotid = p->se_sltno;
+	cbsap->csa_sequenceid = p->se_seqid;
+	cbsap->csa_highest_slotid = svc_slot_maxslot(sp);
+	cbsap->csa_cachethis = FALSE;
+
 	/*
-	 * currently, the channel struct has a static array
-	 * of CLIENT structs and a matching array of sequenceid4.
-	 * For now, each clhdl[x] maps to seqid.  Each outstanding
-	 * callback req will consume a clhdl+seqid pair.
+	 * Section 2.10.5.3 (draft 23)
+	 *
+	 *		case description		refcnt
+	 *	----------------------------------	------
+	 * 1) rs state gets created (deleg granted) 	1
+	 *    slot is reused				0
+	 *
+	 * 2) rs state gets created (deleg granted)	1
+	 *    cb_seq, cb_recall				2
+	 *    <-- client replies to cb_recall		1
+	 *    eventually, slot is reused		0
+	 *
+	 * 3) rs state gets created (deleg granted)	1
+	 *    cb_seq, cb_recall				2
+	 *    eventually, slot is reused		1
+	 *    <-- client replies to cb_recall		0
+	 *
+	 * Cases 2 & 3 are covered here; case 1 covered as
+	 * part of a new request to op_sequence.
 	 */
-	bcopy(sp->sn_sessid, seq_argp->csa_sessionid, sizeof (sessionid4));
-	seq_argp->csa_slotid = 0;
-	seq_argp->csa_highest_slotid = 1;
-	seq_argp->csa_cachethis = FALSE;
+	if (dsp->rs.refcnt == 0) {
+		cbsap->csa_rcall_llen = 0;
+		cbsap->csa_rcall_lval = NULL;
+	} else {
+		rfs41_deleg_rs_hold(dsp);
+		rcl = 1;
+		rfs41_cb_seq_rcl_args(cbsap, dsp);
+	}
+	mutex_exit(&p->se_lock);
 
-	/* not yet */
-	seq_argp->csa_referring_call_lists.csa_referring_call_lists_len = 0;
-	seq_argp->csa_referring_call_lists.csa_referring_call_lists_val = NULL;
-
-	bcopy(&dsp->delegid.stateid, &rec_argp->stateid, sizeof (stateid4));
-	rec_argp->truncate = trunc;
-
+	/*
+	 * CB_RECALL
+	 */
+	bcopy(&dsp->delegid.stateid, &cbrap->stateid, sizeof (stateid4));
+	cbrap->truncate = trunc;
 	fhp = &dsp->finfo->filehandle;
-	rec_argp->fh.nfs_fh4_val = kmem_alloc(sizeof (char) *
+	cbrap->fh.nfs_fh4_val = kmem_alloc(sizeof (char) *
 	    fhp->nfs_fh4_len, KM_SLEEP);
-	nfs_fh4_copy(fhp, &rec_argp->fh);
-
-	/* Keep track of when we did this for observability */
-	dsp->time_recalled = gethrestime_sec();
+	nfs_fh4_copy(fhp, &cbrap->fh);
 
 	/*
 	 * Set up the timeout for the callback and make the actual call.
 	 * Timeout will be 80% of the lease period for this server.
 	 */
+	dsp->time_recalled = gethrestime_sec();		/* observability */
 	timeout.tv_sec = (rfs4_lease_time * 80) / 100;
 	timeout.tv_usec = 0;
 
-	if (sl = cb_sess_getslot(sp)) {
-		seq_argp->csa_sequenceid = sl->cb_seqid;
+retry:
+	ch = rfs41_cb_getch(sp);
+	(void) CLNT_CONTROL(ch, CLSET_XID, (char *)&zilch);
+	call_stat = clnt_call(ch, CB_COMPOUND,
+	    xdr_CB_COMPOUND4args_srv, (caddr_t)&cb4_args,
+	    xdr_CB_COMPOUND4res, (caddr_t)&cb4_res, timeout);
+	rfs41_cb_freech(sp, ch);
 
-		cbch = rfs41_cb_getch(sp);
-		(void) CLNT_CONTROL(cbch, CLSET_XID, (char *)&zilch);
+	/*
+	 * If the back channel is down, then mark session(s) appropriately
+	 * (SEQ4_STATUS_CB_PATH_DOWN). On NFS4ERR_DELAY, retry the callback
+	 * after a lease period; if that _still_ results in an error, revoke
+	 * the delegation and assert SEQ4_STATUS_RECALLABLE_STATE_REVOKED
+	 * section 10.4.5 (draft-23). As per Section 8.3 (d23), it's up to
+	 * the client to figure out 'which' stateid got revoked.
+	 */
+	if (call_stat != RPC_SUCCESS) {
+		if (!retried)
+			delay(SEC_TO_TICK(rfs4_lease_time));
 
-		call_stat = clnt_call(cbch, CB_COMPOUND,
-		    xdr_CB_COMPOUND4args_srv, (caddr_t)&cb4_args,
-		    xdr_CB_COMPOUND4res, (caddr_t)&cb4_res, timeout);
+		if (rfs41_file_still_delegated(dsp)) {
+			if (!retried) {
+				retried = 1;
+				goto retry;
+			}
 
-		sl->cb_seqid++;
-		rfs41_cb_freech(sp, cbch);
-		cb_sess_slotfree(sp, sl);
+			/*
+			 * We want to make sure that the delegation is
+			 * still valid lest we assert a SEQ4 flag that
+			 * will never be turned off.
+			 */
+			rfs41_revoke_deleg(dsp);
+		}
+		sc = (call_stat == RPC_CANTSEND || call_stat == RPC_CANTRECV);
+		rfs41_cb_path_down(sp, sc);
+		goto done;
+
+	} else if (cb4_res.status != NFS4_OK) {
+		switch (cb4_res.status) {
+		case NFS4ERR_BADHANDLE:
+		case NFS4ERR_BADXDR:
+		case NFS4ERR_OP_NOT_IN_SESSION:
+		case NFS4ERR_REQ_TOO_BIG:
+		case NFS4ERR_TOO_MANY_OPS:
+			/* What do we do when it's our own fault ? */
+			break;
+
+		/* XXX - rick: NFS4ERR_BAD_STATEID should also retry */
+		/* case NFS4ERR_BAD_STATEID: */
+		case NFS4ERR_DELAY:
+			if (!retried)
+				delay(SEC_TO_TICK(rfs4_lease_time));
+
+			if (!rfs41_file_still_delegated(dsp))
+				break;
+
+			if (!retried) {
+				retried = 1;
+				goto retry;
+			}
+			/* FALLTHROUGH */
+
+		case NFS4ERR_BAD_STATEID:	/* XXX see above */
+		default:
+			if (rfs41_file_still_delegated(dsp))
+				rfs41_revoke_deleg(dsp);
+			break;
+		}
 	}
-
-	if (call_stat != RPC_SUCCESS || cb4_res.status != NFS4_OK) {
-		rfs4_revoke_deleg(dsp);
-		NFS4_DEBUG(rfs4_deleg_debug, (CE_NOTE,
-		    "mds_do_cb_recall: rpcstat=%d cbstat=%d ",
-		    call_stat, cb4_res.status));
-	}
+	svc_slot_cb_seqid(&cb4_res, p);
+done:
+	if (rcl)
+		rfs41_deleg_rs_rele(dsp);
+	svc_slot_free(sp, p);
 
 	rfs4freeargres(&cb4_args, &cb4_res);
 	rfs41_session_rele(sp);
 }
-
 
 struct recall_arg {
 	rfs4_deleg_state_t *dsp;
@@ -2240,6 +2426,15 @@ static void
 rfs4_revoke_deleg(rfs4_deleg_state_t *dsp)
 {
 	rfs4_return_deleg(dsp, TRUE);
+}
+
+static void
+rfs41_revoke_deleg(rfs4_deleg_state_t *dsp)
+{
+	cmn_err(CE_NOTE, "rfs41_revoke_deleg: delegation revoked");
+	rfs41_seq4_hold(&dsp->client->seq4,
+	    SEQ4_STATUS_RECALLABLE_STATE_REVOKED);
+	rfs4_revoke_deleg(dsp);
 }
 
 static void

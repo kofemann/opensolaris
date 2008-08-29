@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/systm.h>
 #include <sys/kmem.h>
 #include <sys/cmn_err.h>
@@ -1351,6 +1349,7 @@ rfs4_client_create(nfs_server_instance_t *instp,
 	nfs_client_id4 *client = (nfs_client_id4 *)arg;
 	cid *cidp;
 	scid_confirm_verf *scvp;
+	int	i;
 
 	/* Get a clientid to give to the client */
 	cidp = (cid *)&cp->clientid;
@@ -1408,7 +1407,6 @@ rfs4_client_create(nfs_server_instance_t *instp,
 	cp->contrived.xi_sid = 1;
 	cp->contrived.cs_slot.seqid = 0;
 	cp->contrived.cs_slot.status = NFS4ERR_SEQ_MISORDERED;
-	/* XXX - For now, no need to account for overflow */
 
 	/*
 	 * Associate the client_t with the current server instance.
@@ -1419,6 +1417,28 @@ rfs4_client_create(nfs_server_instance_t *instp,
 	rfs4_servinst_assign(cp, instp);
 	rfs4_dbe_rele(cp->dbe);
 
+	/* only initialize bits relevant to client scope */
+	bzero(&cp->seq4, sizeof (bit_attr_t) * BITS_PER_WORD);
+	for (i = 1; i <= SEQ4_HIGH_BIT && i != 0; i <<= 1) {
+		uint32_t idx = log2(i);
+
+		switch (i) {
+		case SEQ4_STATUS_CB_PATH_DOWN:
+		case SEQ4_STATUS_EXPIRED_ALL_STATE_REVOKED:
+		case SEQ4_STATUS_EXPIRED_SOME_STATE_REVOKED:
+		case SEQ4_STATUS_ADMIN_STATE_REVOKED:
+		case SEQ4_STATUS_RECALLABLE_STATE_REVOKED:
+		case SEQ4_STATUS_LEASE_MOVED:
+		case SEQ4_STATUS_RESTART_RECLAIM_NEEDED:
+		case SEQ4_STATUS_DEVID_CHANGED:
+		case SEQ4_STATUS_DEVID_DELETED:
+			cp->seq4[idx].ba_bit = i;
+			break;
+		default:
+			/* already bzero'ed */
+			break;
+		}
+	}
 	return (TRUE);
 }
 
@@ -2588,6 +2608,10 @@ rfs4_deleg_state_create(nfs_server_instance_t *instp, rfs4_entry_t u_entry,
 	dsp->clientdeleglist.next = dsp->clientdeleglist.prev =
 	    &dsp->clientdeleglist;
 	dsp->clientdeleglist.dsp = dsp;
+
+	/* cb race-detection support */
+	dsp->rs.refcnt = dsp->rs.seqid = dsp->rs.slotno = 0;
+	bzero(&dsp->rs.sessid, sizeof (sessionid4));
 
 	/* Insert state on per open owner's list */
 	rfs4_dbe_lock(cp->dbe);

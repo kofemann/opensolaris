@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/systm.h>
 #include <sys/sdt.h>
 #include <rpc/types.h>
@@ -179,6 +177,85 @@ rfs41_slrc_prologue(COMPOUND4args_srv *cap, COMPOUND4res_srv **rpp)
 	return (SEQRES_BADSESSION);
 }
 
+/*
+ * rfs41_compute_seq4_flags calculates the SEQUENCE SEQ4_STATUS
+ * bit results after the compound has been processed. If any of
+ * the flags have a refcnt greater than zero, (with the noted
+ * exceptions of CB_PATH_DOWN and CB_PATH_DOWN_SESSION) the
+ * corresponding bit in sr_status_flag is set.
+ *
+ * Upon detection of this condition, the onus is on the client to
+ * perform TEST_STATEID's to find the offending deleg and layout
+ * stateid's and return them. If only a DELEG_RETURN is done (but
+ * assuming no layout is returned) the RECALLABLE_STATE_REVOKED
+ * bit continues to be asserted in subsequent SEQUENCE4 replies
+ * as described in the specification. Only after a LAYOUT_RETURN
+ * is done, will the RECALLABLE_STATE_REVOKED bit be released of
+ * the HOLD and hence subsequent SEQUENCE4 replies will now have
+ * the RECALLABLE_STATE_REVOKED bit turned off.
+ */
+static void
+rfs41_compute_seq4_flags(COMPOUND4res *rp, compound_node_t *cn)
+{
+	struct compound_state	*cs = cn->cn_state;
+	mds_session_t		*sp = cs->sp;
+	rfs4_client_t		*cp = sp->sn_clnt;
+	int			 i;
+	int			 idx, sn_idx, cp_idx;
+	uint32_t		 sflags = 0;
+	uint32_t		 cp_flag = SEQ4_STATUS_CB_PATH_DOWN;
+	uint32_t		 sn_flag = SEQ4_STATUS_CB_PATH_DOWN_SESSION;
+	nfs_resop4		*resop = &rp->array[0];	/* SEQUENCE */
+	SEQUENCE4res		*resp  = &resop->nfs_resop4_u.opsequence;
+	SEQUENCE4resok		*rok   = &resp->SEQUENCE4res_u.sr_resok4;
+
+	if (resp->sr_status != NFS4_OK)
+		return;
+
+	for (i = 1; i <= SEQ4_HIGH_BIT && i != 0; i <<= 1) {
+		idx = log2(i);
+
+		if (sp->sn_seq4[idx].ba_bit == sn_flag ||
+		    cp->seq4[idx].ba_bit == cp_flag) {
+			/*
+			 * refcnts for these two bits represent active
+			 * connections, so handle them separately.
+			 */
+			continue;
+		}
+
+		if (sp->sn_seq4[idx].ba_refcnt)
+			sflags |= sp->sn_seq4[idx].ba_bit;
+
+		if (cp->seq4[idx].ba_refcnt)
+			sflags |= cp->seq4[idx].ba_bit;
+	}
+
+	/*
+	 * Now, compute CB_PATH_DOWN and CB_PATH_DOWN_SESSION flags
+	 */
+	sn_idx = log2(sn_flag);
+	cp_idx = log2(cp_flag);
+
+	if (sp->sn_seq4[sn_idx].ba_refcnt == 0 &&
+	    cp->seq4[cp_idx].ba_refcnt == 0) {
+		/*
+		 * no CB path available at either scope (sess or
+		 * clid), so flag gets set based on session ctxt
+		 */
+		sflags |= sp->sn_seq4[sn_idx].ba_sonly ? sn_flag : cp_flag;
+	}
+
+	/*
+	 * Now all that remains is to update the SEQUENCE4res flags
+	 *
+	 * NOTE: sr_status_flag already contains info from SEQUENCE
+	 * operation results; just (logically) OR the new flags and
+	 * we're done.
+	 */
+	rok->sr_status_flags |= sflags;
+}
+
 int
 rfs41_slrc_epilogue(COMPOUND4args_srv *cap, COMPOUND4res_srv *resp,
     compound_node_t *cn)
@@ -186,11 +263,13 @@ rfs41_slrc_epilogue(COMPOUND4args_srv *cap, COMPOUND4res_srv *resp,
 	slot41_t	*slp;
 	int		 error = 0;
 
-	slp = (slot41_t *)cap->slp;
+	/* compute SEQ4 flags before caching response */
+	rfs41_compute_seq4_flags((COMPOUND4res *)resp, cn);
 
 	/*
 	 * Slot cache entry eviction and insertion
 	 */
+	slp = (slot41_t *)cap->slp;
 	switch (slp->state) {
 	case SLRC_INPROG_NEWREQ:
 		if (resp->status == NFS4_OK) {
