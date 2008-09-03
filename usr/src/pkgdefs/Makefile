@@ -123,7 +123,6 @@ i386_SUBDIRS= \
 	SUNWdrmr \
 	SUNWgrub \
 	SUNWgrubS \
-	SUNWhxge \
 	SUNWdcopy \
 	SUNWipw \
 	SUNWiwi \
@@ -149,7 +148,9 @@ i386_SUBDIRS= \
 	SUNWural \
 	SUNWvia823x \
 	SUNWwpi \
+	SUNWxdt \
 	SUNWxsvc \
+	SUNWxvmipa \
 	SUNWxvmpv
 
 i386_XMODS= \
@@ -237,6 +238,7 @@ COMMON_SUBDIRS= \
 	SUNWhea  \
 	SUNWhermon  \
 	SUNWhwdata \
+	SUNWhxge \
 	SUNWib \
 	SUNWibsdpu \
 	SUNWibsdp \

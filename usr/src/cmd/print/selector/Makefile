@@ -22,15 +22,15 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
-#
 
 include ../../Makefile.cmd
 
 SBINPROG =	print-service
 LPBINLINKS =	lp lpstat cancel enable disable
 LPRBINLINKS =	lpr lpq lprm lpc
-BINLINKS =	$(LPBINLINKS) $(LPRBINLINKS)
+DESKTOPLINKS =  desktop-print-management desktop-print-management-applet
+DESKTOPLINKS += desktop-print-management-prefs
+BINLINKS =	$(LPBINLINKS) $(LPRBINLINKS) $(DESKTOPLINKS)
 SBINLINKS =	accept reject lpmove lpadmin
 
 ROOTUSRSBINPROG =	$(SBINPROG:%=$(ROOTUSRSBIN)/%)

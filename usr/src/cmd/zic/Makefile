@@ -1,8 +1,6 @@
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
-#
-# Copyright (c) 1989-2001 by Sun Microsystems, Inc.
-# All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Use is subject to license terms.
 #
 
 NATIVE=native
@@ -25,7 +23,7 @@ NOBJS= $(OBJS:%=$(NATIVE)/%)
 OWNER= root
 GROUP= bin
 
-CLOBBERFILES= $(NOBJS) $(NPROG) $(NATIVE)/zic.c $(NATIVE)/tzfile.h
+CLOBBERFILES= $(NOBJS) $(KSHPROG) $(NPROG) $(NATIVE)/zic.c $(NATIVE)/tzfile.h
 
 include ../Makefile.cmd
 
@@ -69,8 +67,7 @@ $(NPROG): $(NATIVE) $(NOBJS)
 
 #
 # XXX
-# There should be a .ksh rule in default.mk.  Until there is, we
-# do it by hand.
+# There is a .ksh rule in Makefile.targ, but we need our custom POFILE rules.
 #
 $(KSHPROG):	$(KSHPROG).ksh
 	$(RM) $@

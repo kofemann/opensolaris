@@ -142,7 +142,6 @@ static	int	nat_flushtable __P((ipf_stack_t *));
 static	int	nat_clearlist __P((ipf_stack_t *));
 static	void	nat_addnat __P((struct ipnat *, ipf_stack_t *));
 static	void	nat_addrdr __P((struct ipnat *, ipf_stack_t *));
-static	void	nat_delete __P((struct nat *, int, ipf_stack_t *));
 static	int	fr_natgetent __P((caddr_t, ipf_stack_t *));
 static	int	fr_natgetsz __P((caddr_t, ipf_stack_t *));
 static	int	fr_natputent __P((caddr_t, int, ipf_stack_t *));
@@ -648,8 +647,6 @@ ipf_stack_t *ifs;
 			error = fr_inobj(data, &natd, IPFOBJ_IPNAT);
 		}
 
-	} else if (cmd == (ioctlcmd_t)SIOCIPFFL) { /* SIOCFLNAT & SIOCCNATL */
-		BCOPYIN(data, &arg, sizeof(arg));
 	}
 
 	if (error != 0)
@@ -709,26 +706,35 @@ ipf_stack_t *ifs;
 			error = EPERM;
 		else {
 			tmp = ipflog_clear(IPL_LOGNAT, ifs);
-			BCOPYOUT((char *)&tmp, (char *)data, sizeof(tmp));
+			error = BCOPYOUT((char *)&tmp, (char *)data,
+					sizeof(tmp));
+			if (error != 0)
+				error = EFAULT;
 		}
 		break;
 	}
 	case SIOCSETLG :
-		if (!(mode & FWRITE))
+		if (!(mode & FWRITE)) {
 			error = EPERM;
-		else {
-			BCOPYIN((char *)data,
-				       (char *)&ifs->ifs_nat_logging,
-				sizeof(ifs->ifs_nat_logging));
+		} else {
+			error = BCOPYIN((char *)data,
+					(char *)&ifs->ifs_nat_logging,
+					sizeof(ifs->ifs_nat_logging));
+			if (error != 0)
+				error = EFAULT;
 		}
 		break;
 	case SIOCGETLG :
-		BCOPYOUT((char *)&ifs->ifs_nat_logging, (char *)data,
-			sizeof(ifs->ifs_nat_logging));
+		error = BCOPYOUT((char *)&ifs->ifs_nat_logging, (char *)data,
+				sizeof(ifs->ifs_nat_logging));
+		if (error != 0)
+			error = EFAULT;
 		break;
 	case FIONREAD :
 		arg = ifs->ifs_iplused[IPL_LOGNAT];
-		BCOPYOUT(&arg, data, sizeof(arg));
+		error = BCOPYOUT(&arg, data, sizeof(arg));
+		if (error != 0)
+			error = EFAULT;
 		break;
 #endif
 	case SIOCADNAT :
@@ -828,20 +834,26 @@ ipf_stack_t *ifs;
 		if (getlock) {
 			WRITE_ENTER(&ifs->ifs_ipf_nat);
 		}
-		error = 0;
-		if (arg == 0)
-			ret = nat_flushtable(ifs);
-		else if (arg == 1)
-			ret = nat_clearlist(ifs);
-		else if (arg >= 2 && arg <= 4)
-			ret = nat_extraflush(arg - 2, ifs);
-		else
-			error = EINVAL;
+		error = BCOPYIN(data, &arg, sizeof(arg));
+		if (error != 0) {
+			error = EFAULT;
+		} else {
+			if (arg == 0)
+				ret = nat_flushtable(ifs);
+			else if (arg == 1)
+				ret = nat_clearlist(ifs);
+			else if (arg >= 2 && arg <= 4)
+				ret = nat_extraflush(arg - 2, ifs);
+			else
+				error = EINVAL;
+		}
 		if (getlock) {
 			RWLOCK_EXIT(&ifs->ifs_ipf_nat);
 		}
 		if (error == 0) {
-			BCOPYOUT(&ret, data, sizeof(ret));
+			error = BCOPYOUT(&ret, data, sizeof(ret));
+			if (error != 0)
+				error = EFAULT;
 		}
 		break;
 	case SIOCPROXY :
@@ -851,7 +863,7 @@ ipf_stack_t *ifs;
 		if (!(mode & FWRITE)) {
 			error = EPERM;
 		} else {
-			fr_lock(data, &ifs->ifs_fr_nat_lock);
+			error = fr_lock(data, &ifs->ifs_fr_nat_lock);
 		}
 		break;
 	case SIOCSTPUT :
@@ -886,8 +898,12 @@ ipf_stack_t *ifs;
 			error = EACCES;
 		break;
 	case SIOCIPFDELTOK :
-		(void) BCOPYIN((caddr_t)data, (caddr_t)&arg, sizeof(arg));
-		error = ipf_deltoken(arg, uid, ctx, ifs);
+		error = BCOPYIN((caddr_t)data, (caddr_t)&arg, sizeof(arg));
+		if (error != 0) {
+			error = EFAULT;
+		} else {
+			error = ipf_deltoken(arg, uid, ctx, ifs);
+		}
 		break;
 	default :
 		error = EINVAL;
@@ -1188,8 +1204,11 @@ ipf_stack_t *ifs;
 	ap_session_t *aps;
 	nat_t *nat, *n;
 	natget_t ng;
+	int err;
 
-	BCOPYIN(data, &ng, sizeof(ng));
+	err = BCOPYIN(data, &ng, sizeof(ng));
+	if (err != 0)
+		return EFAULT;
 
 	nat = ng.ng_ptr;
 	if (!nat) {
@@ -1199,8 +1218,12 @@ ipf_stack_t *ifs;
 		 * Empty list so the size returned is 0.  Simple.
 		 */
 		if (nat == NULL) {
-			BCOPYOUT(&ng, data, sizeof(ng));
-			return 0;
+			err = BCOPYOUT(&ng, data, sizeof(ng));
+			if (err != 0) {
+				return EFAULT;
+			} else {
+				return 0;
+			}
 		}
 	} else {
 		/*
@@ -1226,7 +1249,9 @@ ipf_stack_t *ifs;
 			ng.ng_sz += aps->aps_psiz;
 	}
 
-	BCOPYOUT(&ng, data, sizeof(ng));
+	err = BCOPYOUT(&ng, data, sizeof(ng));
+	if (err != 0)
+		return EFAULT;
 	return 0;
 }
 
@@ -1570,6 +1595,15 @@ ipf_stack_t *ifs;
 		ifs->ifs_nat_doflush = 1;
 
 	/*
+	 * If automatic flushing did not do its job, and the table
+	 * has filled up, don't try to create a new entry.
+	 */
+	if (ifs->ifs_nat_stats.ns_inuse >= ifs->ifs_ipf_nattable_max) {
+		ifs->ifs_nat_stats.ns_memfail++;
+		return ENOMEM;
+	}
+
+	/*
 	 * Initialise early because of code at junkput label.
 	 */
 	in = NULL;
@@ -1870,35 +1904,35 @@ junkput:
 /* Returns:     Nil                                                         */
 /* Parameters:  natd(I)    - pointer to NAT structure to delete             */
 /*              logtype(I) - type of LOG record to create before deleting   */
+/*		ifs - ipf stack instance				    */
 /* Write Lock:  ipf_nat                                                     */
 /*                                                                          */
 /* Delete a nat entry from the various lists and table.  If NAT logging is  */
 /* enabled then generate a NAT log record for this event.                   */
 /* ------------------------------------------------------------------------ */
-static void nat_delete(nat, logtype, ifs)
+void nat_delete(nat, logtype, ifs)
 struct nat *nat;
 int logtype;
 ipf_stack_t *ifs;
 {
 	struct ipnat *ipn;
+	int removed = 0;
 
 	if (logtype != 0 && ifs->ifs_nat_logging != 0)
 		nat_log(nat, logtype, ifs);
 
 	/*
-	 * Take it as a general indication that all the pointers are set if
-	 * nat_pnext is set.
+	 * Start by removing the entry from the hash table of nat entries
+	 * so it will not be "used" again.
+	 *
+	 * It will remain in the "list" of nat entries until all references
+	 * have been accounted for.
 	 */
-	if (nat->nat_pnext != NULL) {
+	if ((nat->nat_phnext[0] != NULL) && (nat->nat_phnext[1] != NULL)) {
+		removed = 1;
+
 		ifs->ifs_nat_stats.ns_bucketlen[0][nat->nat_hv[0]]--;
 		ifs->ifs_nat_stats.ns_bucketlen[1][nat->nat_hv[1]]--;
-
-		*nat->nat_pnext = nat->nat_next;
-		if (nat->nat_next != NULL) {
-			nat->nat_next->nat_pnext = nat->nat_pnext;
-			nat->nat_next = NULL;
-		}
-		nat->nat_pnext = NULL;
 
 		*nat->nat_phnext[0] = nat->nat_hnext[0];
 		if (nat->nat_hnext[0] != NULL) {
@@ -1918,31 +1952,67 @@ ipf_stack_t *ifs;
 			ifs->ifs_nat_stats.ns_wilds--;
 	}
 
+	/*
+	 * Next, remove it from the timeout queue it is in.
+	 */
+	fr_deletequeueentry(&nat->nat_tqe);
+
 	if (nat->nat_me != NULL) {
 		*nat->nat_me = NULL;
 		nat->nat_me = NULL;
 	}
 
-	fr_deletequeueentry(&nat->nat_tqe);
-
 	MUTEX_ENTER(&nat->nat_lock);
-	if (nat->nat_ref > 1) {
+ 	if (logtype == NL_DESTROY) {
+ 		/*
+ 		 * NL_DESTROY should only be passed when nat_ref >= 2.
+ 		 * This happens when a nat'd packet is blocked, we have
+		 * just created the nat table entry (reason why the ref
+		 * count is 2 or higher), but and we want to throw away
+		 * that NAT session as result of the blocked packet.
+ 		 */
+ 		if (nat->nat_ref > 2) {
+ 			nat->nat_ref -= 2;
+ 			MUTEX_EXIT(&nat->nat_lock);
+ 			if (removed)
+ 				ifs->ifs_nat_stats.ns_orphans++;
+ 			return;
+ 		}
+ 	} else if (nat->nat_ref > 1) {
 		nat->nat_ref--;
 		MUTEX_EXIT(&nat->nat_lock);
+ 		if (removed)
+ 			ifs->ifs_nat_stats.ns_orphans++;
 		return;
 	}
 	MUTEX_EXIT(&nat->nat_lock);
 
-	/*
-	 * At this point, nat_ref is 1, doing "--" would make it 0..
-	 */
 	nat->nat_ref = 0;
+
+	/*
+	 * If entry had already been removed,
+	 * it means we're cleaning up an orphan.
+	 */
+ 	if (!removed)
+ 		ifs->ifs_nat_stats.ns_orphans--;
 
 #ifdef	IPFILTER_SYNC
 	if (nat->nat_sync)
 		ipfsync_del(nat->nat_sync);
 #endif
 
+	/*
+	 * Now remove it from master list of nat table entries
+	 */
+	if (nat->nat_pnext != NULL) {
+		*nat->nat_pnext = nat->nat_next;
+		if (nat->nat_next != NULL) {
+			nat->nat_next->nat_pnext = nat->nat_pnext;
+			nat->nat_next = NULL;
+		}
+		nat->nat_pnext = NULL;
+	}
+ 
 	if (nat->nat_fr != NULL)
 		(void)fr_derefrule(&nat->nat_fr, ifs);
 
@@ -2528,6 +2598,10 @@ int direction;
 	if (NAT_TAB_WATER_LEVEL(ifs) > ifs->ifs_nat_flush_lvl_hi)
 		ifs->ifs_nat_doflush = 1;
 
+	/*
+	 * If automatic flushing did not do its job, and the table
+	 * has filled up, don't try to create a new entry.
+	 */
 	if (ifs->ifs_nat_stats.ns_inuse >= ifs->ifs_ipf_nattable_max) {
 		ifs->ifs_nat_stats.ns_memfail++;
 		return NULL;
@@ -2648,6 +2722,7 @@ int direction;
 
 	if (flags & SI_WILDP)
 		ifs->ifs_nat_stats.ns_wilds++;
+	fin->fin_flx |= FI_NEWNAT;
 	goto done;
 badnat:
 	ifs->ifs_nat_stats.ns_badnat++;
@@ -3866,7 +3941,9 @@ u_32_t *passp;
 	nat_t *nat;
 	ipf_stack_t *ifs = fin->fin_ifs;
 
-	if (ifs->ifs_nat_stats.ns_rules == 0 || ifs->ifs_fr_nat_lock != 0)
+	if (ifs->ifs_fr_nat_lock != 0)
+		return 0;
+	if (ifs->ifs_nat_stats.ns_rules == 0 && ifs->ifs_nat_instances == NULL)
 		return 0;
 
 	natfailed = 0;
@@ -3921,9 +3998,15 @@ u_32_t *passp;
 		u_32_t hv, msk, nmsk;
 
 		/*
-		 * If there is no current entry in the nat table for this IP#,
-		 * create one for it (if there is a matching rule).
+		 * There is no current entry in the nat table for this packet.
+		 *
+		 * If the packet is a fragment, but not the first fragment,
+		 * then don't do anything.  Otherwise, if there is a matching
+		 * nat rule, try to create a new nat entry.
 		 */
+		if ((fin->fin_off != 0) && (fin->fin_flx & FI_TCPUDP))
+			goto nonatfrag;
+
 		msk = 0xffffffff;
 		nmsk = ifs->ifs_nat_masks;
 maskloop:
@@ -3986,6 +4069,7 @@ maskloop:
 		}
 	}
 
+nonatfrag:
 	if (nat != NULL) {
 		rval = fr_natout(fin, nat, natadd, nflags);
 		if (rval == 1) {
@@ -4183,7 +4267,9 @@ u_32_t *passp;
 	u_32_t iph;
 	ipf_stack_t *ifs = fin->fin_ifs;
 
-	if (ifs->ifs_nat_stats.ns_rules == 0 || ifs->ifs_fr_nat_lock != 0)
+	if (ifs->ifs_fr_nat_lock != 0)
+		return 0;
+	if (ifs->ifs_nat_stats.ns_rules == 0 && ifs->ifs_nat_instances == NULL)
 		return 0;
 
 	tcp = NULL;
@@ -4239,12 +4325,18 @@ u_32_t *passp;
 	} else {
 		u_32_t hv, msk, rmsk;
 
+		/*
+		 * There is no current entry in the nat table for this packet.
+		 *
+		 * If the packet is a fragment, but not the first fragment,
+		 * then don't do anything.  Otherwise, if there is a matching
+		 * nat rule, try to create a new nat entry.
+		 */
+		if ((fin->fin_off != 0) && (fin->fin_flx & FI_TCPUDP))
+			goto nonatfrag;
+
 		rmsk = ifs->ifs_rdr_masks;
 		msk = 0xffffffff;
-		/*
-		 * If there is no current entry in the nat table for this IP#,
-		 * create one for it (if there is a matching rule).
-		 */
 maskloop:
 		iph = in.s_addr & htonl(msk);
 		hv = NAT_HASH_FN(iph, 0, ifs->ifs_ipf_rdrrules_sz);
@@ -4305,6 +4397,8 @@ maskloop:
 			}
 		}
 	}
+
+nonatfrag:
 	if (nat != NULL) {
 		rval = fr_natin(fin, nat, natadd, nflags);
 		if (rval == 1) {

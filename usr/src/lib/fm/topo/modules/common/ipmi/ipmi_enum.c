@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <assert.h>
 #include <fm/libtopo.h>
 #include <fm/topo_mod.h>
@@ -89,7 +87,7 @@ ipmi_present(topo_mod_t *mod, tnode_t *tn, topo_version_t version,
 	char *name;
 	ipmi_sdr_t *sdrp;
 
-	if ((ihp = topo_mod_ipmi(mod)) == NULL)
+	if ((ihp = topo_mod_ipmi_hold(mod)) == NULL)
 		return (topo_mod_seterrno(mod, ETOPO_METHOD_UNKNOWN));
 
 	ep = topo_node_getspecific(tn);
@@ -109,6 +107,7 @@ ipmi_present(topo_mod_t *mod, tnode_t *tn, topo_version_t version,
 				    "Failed to get present state of %s (%s)\n",
 				    name, ipmi_errmsg(ihp));
 				topo_mod_strfree(mod, name);
+				topo_mod_ipmi_rele(mod);
 				return (-1);
 			}
 
@@ -116,10 +115,15 @@ ipmi_present(topo_mod_t *mod, tnode_t *tn, topo_version_t version,
 		} else {
 			if (topo_prop_get_string(tn, TOPO_PGROUP_IPMI,
 			    TOPO_PROP_IPMI_ENTITY_REF, &name, &err) != 0) {
-				topo_mod_dprintf(mod,
-				    "Failed to get prop %s (%s)\n",
-				    TOPO_PROP_IPMI_ENTITY_REF, strerror(err));
-				return (-1);
+				/*
+				 * Not all nodes have an entity_ref attribute.
+				 * For these cases, return ENOTSUP so that we
+				 * fall back to the default hc presence
+				 * detection.
+				 */
+				topo_mod_ipmi_rele(mod);
+				return (topo_mod_seterrno(mod,
+				    ETOPO_METHOD_NOTSUP));
 			}
 
 			if ((ep = ipmi_entity_lookup_sdr(ihp, name)) == NULL) {
@@ -127,6 +131,7 @@ ipmi_present(topo_mod_t *mod, tnode_t *tn, topo_version_t version,
 				topo_mod_dprintf(mod,
 				    "Failed to lookup ipmi entity "
 				    "%s (%s)\n", name, ipmi_errmsg(ihp));
+				topo_mod_ipmi_rele(mod);
 				return (-1);
 			}
 
@@ -140,9 +145,12 @@ ipmi_present(topo_mod_t *mod, tnode_t *tn, topo_version_t version,
 			topo_mod_dprintf(mod,
 			    "ipmi_entity_present() failed: %s",
 			    ipmi_errmsg(ihp));
+			topo_mod_ipmi_rele(mod);
 			return (-1);
 		}
 	}
+
+	topo_mod_ipmi_rele(mod);
 
 	if (topo_mod_nvalloc(mod, &nvl, NV_UNIQUE_NAME) != 0)
 		return (topo_mod_seterrno(mod, EMOD_FMRI_NVL));
@@ -396,9 +404,6 @@ ipmi_enum(topo_mod_t *mod, tnode_t *rnode, const char *name,
 		return (0);
 	}
 
-	if ((ihp = topo_mod_ipmi(mod)) == NULL)
-		return (0);
-
 	if (strcmp(name, POWERMODULE) == 0) {
 		data.ed_entity = IPMI_ET_POWER_DOMAIN;
 	} else if (strcmp(name, PSU) == 0) {
@@ -413,6 +418,9 @@ ipmi_enum(topo_mod_t *mod, tnode_t *rnode, const char *name,
 		return (-1);
 	}
 
+	if ((ihp = topo_mod_ipmi_hold(mod)) == NULL)
+		return (0);
+
 	data.ed_mod = mod;
 	data.ed_pnode = rnode;
 	data.ed_name = name;
@@ -425,14 +433,17 @@ ipmi_enum(topo_mod_t *mod, tnode_t *rnode, const char *name,
 		 * be due to the SP being unavailable or an otherwise transient
 		 * event.
 		 */
-		if (ret < 0)
+		if (ret < 0) {
 			topo_mod_dprintf(mod,
 			    "failed to enumerate entities: %s",
 			    ipmi_errmsg(ihp));
-		else
+		} else {
+			topo_mod_ipmi_rele(mod);
 			return (-1);
+		}
 	}
 
+	topo_mod_ipmi_rele(mod);
 	return (0);
 }
 

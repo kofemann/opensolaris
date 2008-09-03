@@ -472,7 +472,8 @@ i386_SUBDIRS=		\
 	diskscan	\
 	OWconfig	\
 	rtc		\
-	ucodeadm
+	ucodeadm	\
+	xvm
 
 sparc_SUBDIRS=		\
 	cvcd		\
