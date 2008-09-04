@@ -230,12 +230,6 @@ pnfs_layout_construct(void *vlayout, void *foo, int bar)
 
 	mutex_init(&layout->plo_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&layout->plo_wait, NULL, CV_DEFAULT, NULL);
-	layout->plo_inusecnt = 0;
-	layout->plo_length = 0;
-	layout->plo_offset = 0;
-	layout->plo_flags = 0;
-	bzero(&layout->plo_stateid, sizeof (layout->plo_stateid));
-
 	return (0);
 }
 
@@ -1322,8 +1316,11 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 
 	layout = kmem_cache_alloc(pnfs_layout_cache, KM_SLEEP);
 	layout->plo_iomode = l4->lo_iomode;
+	bzero(&layout->plo_stateid, sizeof (layout->plo_stateid));
+	layout->plo_flags = 0;
 	layout->plo_offset = l4->lo_offset;
 	layout->plo_length = l4->lo_length;
+	layout->plo_inusecnt = 0;
 
 	if (res->LAYOUTGET4res_u.logr_resok4.logr_return_on_close)
 		layout->plo_flags |= PLO_ROC;
