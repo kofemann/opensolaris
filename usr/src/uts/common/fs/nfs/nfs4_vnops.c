@@ -4915,7 +4915,7 @@ redo:
 	}
 
 	mutex_enter(&rp->r_statelock);
-	pnfs_layout_return(vp, cr, LR_SYNC);
+	pnfs_layout_return(vp, cr, rp->r_lostateid, LR_SYNC);
 	mutex_exit(&rp->r_statelock);
 
 	recov_state.rs_flags = 0;
@@ -7419,7 +7419,7 @@ nfs4_remove(vnode_t *dvp, char *nm, cred_t *cr, caller_context_t *ct, int flags)
 	 * removal may cause the file handle to go stale.
 	 */
 	mutex_enter(&rp->r_statelock);
-	pnfs_layout_return(vp, cr, LR_SYNC);
+	pnfs_layout_return(vp, cr, rp->r_lostateid, LR_SYNC);
 	mutex_exit(&rp->r_statelock);
 	(void) nfs4delegreturn(rp, NFS4_DR_REOPEN);
 	recov_state.rs_flags = 0;
@@ -7980,7 +7980,7 @@ link_call:
 
 		/* Return the layout of the file being renamed over */
 		mutex_enter(&VTOR4(nvp)->r_statelock);
-		pnfs_layout_return(nvp, cr, LR_SYNC);
+		pnfs_layout_return(nvp, cr, rp->r_lostateid, LR_SYNC);
 		mutex_exit(&VTOR4(nvp)->r_statelock);
 
 		(void) nfs4delegreturn(VTOR4(nvp), NFS4_DR_PUSH|NFS4_DR_REOPEN);
@@ -8049,7 +8049,7 @@ link_call:
 	 */
 #ifdef	NOTYET
 	mutex_enter(&rp->r_statelock);
-	pnfs_layout_return(ovp, cr, LR_SYNC);
+	pnfs_layout_return(ovp, cr, rp->r_lostateid, LR_SYNC);
 	mutex_exit(&rp->r_statelock);
 #endif
 

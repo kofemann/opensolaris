@@ -1412,6 +1412,7 @@ pnfs_task_layoutreturn(void *v)
 	COMPOUND4res_clnt res;
 	nfs_argop4 argop[2];
 	LAYOUTRETURN4args *arg;
+	LAYOUTRETURN4res *lrres;
 	layoutreturn_file4 *lrf;
 	nfs4_error_t e = {0, NFS4_OK, RPC_SUCCESS};
 	int doqueue = 1, opx;
@@ -1468,6 +1469,53 @@ pnfs_task_layoutreturn(void *v)
 	    task->tlr_return_type == LAYOUTRETURN4_ALL)
 		goto done;
 
+	if (e.error == 0 && e.stat == NFS4_OK) {
+		lrres = &res.array[0].nfs_resop4_u.oplayoutreturn;
+		if (lrres->lorr_status == NFS4_OK) {
+			if (lrres->LAYOUTRETURN4res_u.lorr_stateid.
+			    lrs_present == FALSE) {
+
+				mutex_enter(&rp->r_statelock);
+				rp->r_lostateid = clnt_special0;
+				mutex_exit(&rp->r_statelock);
+
+				if (!CLNT_ISSPECIAL(&lrres->LAYOUTRETURN4res_u.
+				    lorr_stateid.layoutreturn_stateid_u.
+				    lrs_stateid)) {
+					cmn_err(CE_WARN, "Server sent bogus"
+					    "layout stateid in"
+					    "LAYOUTRETURN response, should"
+					    "be 0");
+				}
+			} else {
+				/*
+				 * We really should not see a layout
+				 * stateid returned here since the client
+				 * only ever tries to hold one layout
+				 * on a file at one time.  However
+				 * because we have released the
+				 * r_statelock, it is possible that
+				 * another layoutget could have occurred
+				 * after the pnfs_layout_rele() from
+				 * pnfs_layoutreturn(), but before we
+				 * have returned this layout, and thus
+				 * I can see that this would result in
+				 * this layoutreturn getting a new
+				 * layoutstateid.  Issue a warning for
+				 * now incase other things then look
+				 * strange, but this is in the process of
+				 * being fixed.
+				 */
+				cmn_err(CE_WARN, "LAYOUTRETURN Updating"
+				    "layout Stateid");
+				mutex_enter(&rp->r_statelock);
+				rp->r_lostateid = lrres->LAYOUTRETURN4res_u.
+				    lorr_stateid.layoutreturn_stateid_u
+				    .lrs_stateid;
+				mutex_exit(&rp->r_statelock);
+			}
+		}
+	}
 	np = find_nfs4_server(mi);
 	ASSERT(np != NULL);
 	mutex_exit(&np->s_lock);
@@ -1584,7 +1632,8 @@ recov_retry:
 		LAYOUTGET4res *resp = &res.array[1].nfs_resop4_u.oplayoutget;
 		mutex_enter(&rp->r_statelock);
 		if (rp->r_flags & R4LAYOUTVALID) {
-			pnfs_layout_return(task->tlg_vp, cr, LR_ASYNC);
+			pnfs_layout_return(task->tlg_vp, cr, rp->r_lostateid,
+			    LR_ASYNC);
 		}
 		layoutget_to_layout(resp, rp, mi);
 		mutex_exit(&rp->r_statelock);
@@ -1742,14 +1791,13 @@ pnfs_layoutget(vnode_t *vp, cred_t *cr, layoutiomode4 mode)
 }
 
 void
-pnfs_layout_return(vnode_t *vp, cred_t *cr, int aflag)
+pnfs_layout_return(vnode_t *vp, cred_t *cr, stateid4 losid, int aflag)
 {
 	rnode4_t *rp = VTOR4(vp);
 	mntinfo4_t *mi = VTOMI4(vp);
 	task_layoutreturn_t *task;
 	pnfs_layout_t *layout;
 	layoutiomode4 iomode;
-	stateid4 losid;
 
 	if (! (rp->r_flags & R4LAYOUTVALID))
 		return;
@@ -1767,7 +1815,7 @@ pnfs_layout_return(vnode_t *vp, cred_t *cr, int aflag)
 		return;
 
 	iomode = layout->plo_iomode;
-	losid = layout->plo_stateid;
+
 	rp->r_flags &= ~R4LAYOUTVALID;
 	pnfs_layout_rele(rp);
 

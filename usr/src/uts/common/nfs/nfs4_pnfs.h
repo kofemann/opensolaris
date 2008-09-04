@@ -96,7 +96,6 @@ enum stripetype4 {
 typedef struct pnfs_layout {
 	list_node_t		plo_list;
 	layoutiomode4		plo_iomode;
-	stateid4		plo_stateid;
 	int			plo_flags;
 	offset4			plo_offset;
 	length4			plo_length;

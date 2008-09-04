@@ -1696,7 +1696,7 @@ extern void	pnfs_layoutget(vnode_t *, cred_t *, layoutiomode4);
 extern void	pnfs_layout_set(struct mntinfo4 *, struct rnode4 *);
 #define	LR_ASYNC	0
 #define	LR_SYNC		1
-extern void	pnfs_layout_return(vnode_t *, cred_t *, int);
+extern void	pnfs_layout_return(vnode_t *, cred_t *, stateid4, int);
 extern void	pnfs_layout_rele(struct rnode4 *);
 
 extern void	layoutreturn_all(struct vfs *, cred_t *);

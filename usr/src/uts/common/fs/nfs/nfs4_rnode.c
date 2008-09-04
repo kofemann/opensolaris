@@ -28,7 +28,6 @@
  *	All Rights Reserved
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/param.h>
 #include <sys/types.h>
@@ -253,7 +252,7 @@ r4inactive(rnode4_t *rp, cred_t *cr)
 	rp->r_secattr = NULL;
 	xattr = rp->r_xattr_dir;
 	rp->r_xattr_dir = NULL;
-	pnfs_layout_return(vp, cr, LR_SYNC);
+	pnfs_layout_return(vp, cr, rp->r_lostateid, LR_SYNC);
 	mutex_exit(&rp->r_statelock);
 
 	/*
@@ -799,7 +798,7 @@ rp4_addfree(rnode4_t *rp, cred_t *cr)
 		 * Return the layout, if present
 		 */
 		mutex_enter(&rp->r_statelock);
-		pnfs_layout_return(vp, cr, LR_SYNC);
+		pnfs_layout_return(vp, cr, rp->r_lostateid, LR_SYNC);
 		mutex_exit(&rp->r_statelock);
 
 		r4inactive(rp, cr);
@@ -875,7 +874,7 @@ again:
 	mutex_enter(&rp->r_statelock);
 	if (rp->r_flags & R4LAYOUTVALID) {
 		rw_exit(&rp->r_hashq->r_lock);
-		pnfs_layout_return(vp, cr, LR_SYNC);
+		pnfs_layout_return(vp, cr, rp->r_lostateid, LR_SYNC);
 		mutex_exit(&rp->r_statelock);
 		goto again;
 	}
@@ -1187,7 +1186,8 @@ start_again:
 					VN_HOLD(vp);
 					rw_exit(&rtable4[index].r_lock);
 
-					pnfs_layout_return(vp, cr, LR_SYNC);
+					pnfs_layout_return(vp, cr,
+					    rp->r_lostateid, LR_SYNC);
 
 					/*
 					 * pnfs_layout_return() may choose
