@@ -753,7 +753,7 @@ layoutrecall_file(layoutrecall_file4 *lrf, nfs4_server_t *np)
 			if (lrf->lor_stateid.seqid !=
 			    rp->r_lostateid.seqid + 1) {
 				cmn_err(CE_WARN, "our layout stateids are"
-				    "out of sync!");
+				    "out of sync! rnode: %p", rp);
 			}
 			pnfs_layout_return(vp, kcred, lrf->lor_stateid,
 			    LR_ASYNC);

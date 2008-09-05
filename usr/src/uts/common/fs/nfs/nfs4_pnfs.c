@@ -1316,7 +1316,6 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 
 	layout = kmem_cache_alloc(pnfs_layout_cache, KM_SLEEP);
 	layout->plo_iomode = l4->lo_iomode;
-	bzero(&layout->plo_stateid, sizeof (layout->plo_stateid));
 	layout->plo_flags = 0;
 	layout->plo_offset = l4->lo_offset;
 	layout->plo_length = l4->lo_length;
@@ -1479,9 +1478,9 @@ pnfs_task_layoutreturn(void *v)
 				rp->r_lostateid = clnt_special0;
 				mutex_exit(&rp->r_statelock);
 
-				if (!CLNT_ISSPECIAL(&lrres->LAYOUTRETURN4res_u.
+				if (!stateid4_cmp(&lrres->LAYOUTRETURN4res_u.
 				    lorr_stateid.layoutreturn_stateid_u.
-				    lrs_stateid)) {
+				    lrs_stateid, &clnt_special0)) {
 					cmn_err(CE_WARN, "Server sent bogus"
 					    "layout stateid in"
 					    "LAYOUTRETURN response, should"
@@ -1489,7 +1488,7 @@ pnfs_task_layoutreturn(void *v)
 				}
 			} else {
 				/*
-				 * We really should not see a layout
+				 * XXXKLR We really should not see a layout
 				 * stateid returned here since the client
 				 * only ever tries to hold one layout
 				 * on a file at one time.  However
