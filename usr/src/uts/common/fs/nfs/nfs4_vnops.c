@@ -3667,15 +3667,20 @@ recov_retry:
 	return (e.error);
 }
 
+int nfs4_forceproxyio = 0;
+
 static int
 nfs4read(vnode_t *vp, caddr_t base, offset_t offset, int count,
 	size_t *residp, cred_t *cr, bool_t async, struct uio *uiop)
 {
-	int error;
+	int error = EAGAIN;
 
-	error = pnfs_read(vp, base, offset, count, residp, cr, async, uiop);
-	if (error == 0)
-		return (0);
+	if (nfs4_forceproxyio == 0) {
+		error = pnfs_read(vp, base, offset, count, residp, cr,
+		    async, uiop);
+		if (error == 0)
+			return (0);
+	}
 
 	/*
 	 * pnfs_read will return EAGAIN if R4LAYOUTVALID is not
