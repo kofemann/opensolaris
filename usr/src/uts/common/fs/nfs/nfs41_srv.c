@@ -8329,21 +8329,25 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 		/*
 		 * first, only open, deleg, lock
 		 * or layout stateids are permitted.
+		 * currently open, deleg and lock stateids are handed
+		 * out by v4 routines and are of v4 format.
+		 * check if it is a layout stateid and treat differently.
 		 */
-		switch (arg_stateid->v41_bits.type) {
-		case OPENID:
-		case LOCKID:
-		case DELEGID:
-		case LAYOUTID:
+		if (arg_stateid->v41_bits.type == LAYOUTID) {
+			/* XXX - jw - code needed here. */
+			nfsstat = NFS4_OK;
+		} else {
+			/*
+			 * not using a layout stateid, so we better not
+			 * have handed one out already for this file or
+			 * this client gets an error.
+			 * XXX - jw - routine to do this not yet written.
+			 */
 			nfsstat = mds_validate_logstateid(cs, arg_stateid);
 			if (nfsstat != NFS4_OK) {
 				*cs->statusp = resp->logr_status = nfsstat;
 				goto final;
 			}
-			break;
-		default:
-			*cs->statusp = resp->logr_status = NFS4ERR_BAD_STATEID;
-			goto final;
 		}
 	}
 

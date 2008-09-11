@@ -3238,7 +3238,21 @@ rfs4_get_all_state(struct compound_state *cs,
 nfsstat4
 mds_validate_logstateid(struct compound_state *cs, stateid_t *sid)
 {
-	return (NFS4_OK);
+	stateid4 *id;
+	nfsstat4 status;
+
+	id = (stateid4 *)sid;
+	switch (sid->v4_bits.type) {
+	case DELEGID:
+	case OPENID:
+	case LOCKID:
+		status = NFS4_OK;
+		break;
+	default:
+		status = NFS4ERR_BAD_STATEID;
+	}
+
+	return (status);
 }
 
 /*

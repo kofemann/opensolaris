@@ -154,7 +154,7 @@ mds_create_stateid(nfs_server_instance_t *instp,
 /* 	id.v41_bits.boottime = instp->start_time; */
 	id.v41_bits.boottime = mds_server.start_time;
 	id.v41_bits.state_ident = rfs4_dbe_getid(dbe);
-	id.v41_bits.chgseq = 0;
+	id.v41_bits.chgseq = 1;
 	id.v41_bits.type = id_type;
 	id.v41_bits.pid = 0;
 
