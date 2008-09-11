@@ -652,6 +652,8 @@ start:
 	rp->created_v4 = 0;
 	list_create(&rp->r_layout, sizeof (pnfs_layout_t),
 	    offsetof(pnfs_layout_t, plo_list));
+	rp->r_proxyio_count = 0;
+	rp->r_dsio_count = 0;
 	list_create(&rp->r_open_streams, sizeof (nfs4_open_stream_t),
 	    offsetof(nfs4_open_stream_t, os_node));
 	rp->r_lo_head.lo_prev_rnode = &rp->r_lo_head;

@@ -29,8 +29,6 @@
 #ifndef	_NFS_RNODE4_H
 #define	_NFS_RNODE4_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #ifdef	__cplusplus
 extern "C" {
 #endif
@@ -328,6 +326,8 @@ typedef struct rnode4 {
 	nfs4_stub_type_t	r_stub_type;
 					/* e.g. mirror-mount */
 	list_t 		r_layout;	/* pNFS layout(s) */
+	uint64_t	r_proxyio_count; /* Counter for proxy I/O */
+	uint64_t	r_dsio_count; 	/* Counter for DS I/O */
 	stateid4	r_lostateid;	/* layout stateid */
 	kcondvar_t	r_lowait;	/* Wait For Layout */
 	clock_t		r_last_layoutget; /* time of last layoutget attempt */

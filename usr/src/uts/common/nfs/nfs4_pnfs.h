@@ -40,10 +40,12 @@ extern "C" {
 #include <nfs/nfs4_clnt.h>
 #include <nfs/rnode4.h>
 #include <nfs/nfs4_kprot.h>
+#include <nfs/nfssys.h>
 #include <sys/systm.h>
 #include <sys/taskq.h>
 #include <sys/disp.h>
 #include <sys/time.h>
+#include <rpc/xdr.h>
 #include <inet/ip.h>
 #include <inet/ip6.h>
 #include <sys/cmn_err.h>
@@ -109,6 +111,8 @@ typedef struct pnfs_layout {
 	stripe_dev_t		**plo_stripe_dev;
 	kmutex_t		plo_lock;
 	uint32_t		plo_refcount;
+	int64_t			plo_creation_sec;
+	int64_t			plo_creation_musec;
 } pnfs_layout_t;
 
 /* Layout Flag Fields */
@@ -213,6 +217,48 @@ typedef struct {
 
 
 extern void	pnfs_layout_hold(struct rnode4 *, struct pnfs_layout *);
+
+/*
+ * Layout data structures that get XDR encoded/decoded into the buffer
+ * passed via the system call for getting layout information.
+ */
+typedef struct stripe_info {
+	uint32_t stripe_index;
+	struct {
+		uint_t multipath_list_len;
+		struct netaddr4 *multipath_list_val;
+	} multipath_list;
+} stripe_info_t;
+
+typedef struct layoutstats {
+	uint32_t plo_num_layouts;
+	uint32_t plo_stripe_count;
+	uint32_t plo_stripe_unit;
+	uint32_t plo_status;
+	layoutiomode4 iomode;
+	offset4 plo_offset;
+	length4 plo_length;
+	uint64_t proxy_iocount;
+	uint64_t ds_iocount;
+	int64_t plo_creation_sec;
+	int64_t plo_creation_musec;
+	struct {
+		uint_t plo_stripe_info_list_len;
+		stripe_info_t *plo_stripe_info_list_val;
+	} plo_stripe_info_list;
+} layoutstats_t;
+
+/*
+ * Error codes to report conditions to the userland. The fields must have the
+ * same value as the fields in the user-space file named nfsstat_layout.h.
+ */
+typedef enum nfsstat_layout_errcodes {
+	ENOLAYOUT = 	-1,
+	ENOTAFILE = 	-2,
+	ENOPNFSSERV = 	-3,
+	ESYSCALL = 	-4,
+	ENONFS = 	-5
+} nfsstat_lo_errcodes_t;
 
 #ifdef __cplusplus
 }

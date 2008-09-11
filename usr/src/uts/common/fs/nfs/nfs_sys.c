@@ -19,14 +19,12 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 1983,1984,1985,1986,1987,1988,1989  AT&T.
  * All rights reserved.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <rpc/types.h>
@@ -99,12 +97,15 @@ nfssys(enum nfssys_op opcode, void *arg)
 {
 	int error = 0;
 
-	if (!(opcode == NFS_REVAUTH || opcode == NFS4_SVC) &&
-	    secpolicy_nfs(CRED()) != 0)
+	if (!(opcode == NFS_REVAUTH ||
+	    opcode == NFS4_SVC ||
+	    opcode == NFSSTAT_LAYOUT) &&
+	    secpolicy_nfs(CRED()) != 0) {
 		return (set_errno(EPERM));
+	}
 
 	switch (opcode) {
-	case MDS_RECALL_LAYOUT: {
+		case MDS_RECALL_LAYOUT: {
 		struct mds_reclo_args rargs;
 		int plen = 0;
 		int buf[2] = {0, 0};
@@ -316,6 +317,24 @@ nfssys(enum nfssys_op opcode, void *arg)
 		error = nfs_getfh(STRUCT_BUF(nga), get_udatamodel(), CRED());
 		break;
 	}
+
+	case NFSSTAT_LAYOUT: {
+		STRUCT_DECL(pnfs_getflo_args, pla);
+
+		if (!INGLOBALZONE(curproc)) {
+			return (set_errno(EPERM));
+		}
+		STRUCT_INIT(pla, get_udatamodel());
+		if (copyin(arg, STRUCT_BUF(pla), STRUCT_SIZE(pla))) {
+			error = EFAULT;
+		} else {
+			error = pnfs_collect_layoutstats(
+			    STRUCT_BUF(pla), get_udatamodel(), CRED());
+		}
+		break;
+	}
+
+
 
 	case NFS_REVAUTH: { /* revoke the cached credentials for the uid */
 		STRUCT_DECL(nfs_revauth_args, nra);

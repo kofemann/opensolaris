@@ -31,13 +31,14 @@
  * nfsstat: Network File System statistics
  *
  */
-
+#include "nfsstat_layout.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdarg.h>
 #include <string.h>
 #include <errno.h>
+#include <netdb.h>
 #include <fcntl.h>
 #include <kvm.h>
 #include <kstat.h>
@@ -49,22 +50,29 @@
 #include <sys/mntent.h>
 #include <sys/mnttab.h>
 #include <sys/sysmacros.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/mkdev.h>
 #include <rpc/types.h>
 #include <rpc/xdr.h>
 #include <rpc/auth.h>
 #include <rpc/clnt.h>
+#include <rpc/rpc.h>
+#include <netdir.h>
 #include <nfs/nfs.h>
 #include <nfs/nfs_clnt.h>
 #include <nfs/nfs_sec.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <inttypes.h>
 #include <signal.h>
 #include <time.h>
-#include <sys/time.h>
 #include <strings.h>
 #include <ctype.h>
-#include <nfs/nfs4.h>
+#include <assert.h>
 
+#include <nfs/nfssys.h>
+extern int _nfssys(int, void *);
 
 static kstat_ctl_t *kc = NULL;		/* libkstat cookie */
 static kstat_t *rpc_clts_client_kstat, *rpc_clts_server_kstat;
@@ -87,6 +95,8 @@ static int getstats_rfsproc(int);
 static int getstats_rfsreq(int);
 static int getstats_aclproc(void);
 static int getstats_aclreq(void);
+static void print_layoutstats(char *, struct  pnfs_getflo_args *);
+static int getflostats_pnfs(char *);
 static void putstats(void);
 static void setup(void);
 static void cr_print(int);
@@ -102,7 +112,6 @@ static void kstat_sum(kstat_t *, kstat_t *, kstat_t *, kstat_t *);
 static void stats_timer(int);
 static void safe_zalloc(void **, uint_t, int);
 static int safe_strtoi(char const *, char *);
-
 
 static void kstat_copy(kstat_t *, kstat_t *, int);
 static void fail(int, char *, ...);
@@ -128,13 +137,13 @@ nfs_opnum4 ops_toskip_v41[NUM_OPS_TOSKIP] =  {
 };
 
 #define	MAX_COLUMNS	80
+#define	ALL_ONES	0xffffffffffffffffull
 #define	MAX_PATHS	50	/* max paths that can be taken by -m */
-
 /*
  * MI4_MIRRORMOUNT is canonically defined in nfs4_clnt.h, but we cannot
  * include that file here.
  */
-#define	MI4_MIRRORMOUNT 0x4000
+#define	MI4_MIRRORMOUNT	0x4000
 #define	NFS_V4		4
 
 static int req_width(kstat_t *, int);
@@ -166,8 +175,6 @@ static old_kstat_t old_rfsreqcnt_v41_kstat;
 static old_kstat_t old_aclproccnt_v2_kstat, old_aclproccnt_v3_kstat;
 static old_kstat_t old_aclreqcnt_v2_kstat, old_aclreqcnt_v3_kstat;
 
-
-
 int
 main(int argc, char *argv[])
 {
@@ -180,6 +187,8 @@ main(int argc, char *argv[])
 	int aflag = 0;		/* print acl statistics */
 	int vflag = 0;		/* version specified, 0 specifies all */
 	int zflag = 0;		/* zero stats after printing */
+	int lflag = 0;		/* layout stats */
+	char *fname;		/* filename for the layout */
 	char *split_line = "*******************************************"
 	    "*************************************";
 
@@ -187,8 +196,12 @@ main(int argc, char *argv[])
 	count = 0;
 	go_forever = 0;
 
-	while ((c = getopt(argc, argv, "cnrsmzav:")) != EOF) {
+	while ((c = getopt(argc, argv, "cnrsmzav:l:")) != EOF) {
 		switch (c) {
+		case 'l':
+			lflag++;
+			fname = optarg;
+			break;
 		case 'c':
 			cflag++;
 			break;
@@ -225,6 +238,9 @@ main(int argc, char *argv[])
 			usage();
 		}
 	}
+	if (lflag) {
+		return (getflostats_pnfs(fname));
+	}
 
 	if (((argc - optind) > 0) && !mflag) {
 
@@ -251,10 +267,11 @@ main(int argc, char *argv[])
 			go_forever = 1;
 		stats_timer(interval);
 	} else if (mflag) {
-
-		if (cflag || rflag || sflag || zflag || nflag || aflag || vflag)
-			fail(0,
-			    "The -m flag may not be used with any other flags");
+		if (lflag || cflag || rflag || sflag || zflag || nflag ||
+		    aflag || vflag) {
+			fail(0, "The -m flag may not be used"
+			    " with any other flags");
+		}
 
 		for (j = 0; (argc - optind > 0) && (j < (MAX_PATHS - 1)); j++) {
 			path[j] =  argv[optind];
@@ -324,6 +341,324 @@ main(int argc, char *argv[])
 	return (0);
 }
 
+
+
+static int getflostats_pnfs(char *fname) {
+
+	int buf_length = DEFAULT_LAYOUT_SIZE;
+	struct  pnfs_getflo_args plo_args;
+	layoutstats_t *stats;
+
+	if (fname == NULL) {
+		fail(0, "Filename must be provided");
+	}
+	plo_args.fname = fname;
+	plo_args.kernel_bufsize = malloc(sizeof (uint32_t));
+	if (plo_args.kernel_bufsize == NULL) {
+		fail(0, "Cannot allocate memory");
+	}
+
+retry:
+	plo_args.layoutstats = malloc(buf_length);
+	if (plo_args.layoutstats == NULL) {
+		fail(0, "Cannot allocate memory");
+	}
+	plo_args.user_bufsize = buf_length;
+
+	/*
+	 * Make a system call to collect layout statistics
+	 */
+	_nfssys(NFSSTAT_LAYOUT, &plo_args);
+
+	switch (errno) {
+
+	case 0:	/* SUCCESS! */
+		print_layoutstats(fname, &plo_args);
+		break;
+
+	case EOVERFLOW: /* Increase size of buffer and retry */
+		free(plo_args.layoutstats);
+		buf_length = *(plo_args.kernel_bufsize);
+		/* Reset errno or else we will be looping forever. */
+		errno = 0;
+		goto retry;
+
+	case ENOLAYOUT:
+		fprintf(stderr, "Layout unacquired\n");
+		break;
+
+	case ENOTAFILE:
+		fprintf(stderr, "Not a regular file\n");
+		break;
+
+	case ENOPNFSSERV:
+		fprintf(stderr, "Not a pNFS file\n");
+		break;
+
+	case ESYSCALL:
+		fprintf(stderr, "System call error\n");
+		break;
+
+	case ENONFS:
+		fprintf(stderr, "Not an NFS v4 file\n");
+		break;
+
+	default: /* Other things went wrong */
+		if (errno > 0) {
+			fprintf(stderr, strerror(errno));
+			fprintf(stderr, "\n");
+		} else {
+			fprintf(stderr, "Unknown error");
+		}
+
+	}
+
+	free(plo_args.layoutstats);
+	free(plo_args.kernel_bufsize);
+
+	return (errno);
+}
+
+/*
+ * Appends microseconds to the string returned by the ctime function.
+ */
+static
+void append_musec(int64_t timestamp_sec, int64_t timestamp_musec,
+    char *str_time)
+{
+	int unit, i, new_str_count;
+	int str_len;
+	char record[MAX_COLUMNS];
+	char str_musec[MAX_COLUMNS], *str_musec_begin, *str_musec_end;
+	/*
+	 * ctime library function takes pointer to a long.
+	 */
+	long timestamp_sec_long = timestamp_sec;
+	unit = 0;
+	new_str_count = 0;
+	sprintf(record, ctime(&timestamp_sec_long));
+	str_len = strlen(record);
+	for (i = 0; i <= str_len; i++) {
+		str_time[new_str_count] = record[i];
+		new_str_count++;
+		if (record[i] == ':') {
+			unit++;
+			continue;
+		}
+		if (unit == 2 && record[i + 1] == ' ') {
+			str_time[new_str_count] = ':';
+			str_musec_begin = lltostr(
+			    timestamp_musec, &str_musec[MAX_COLUMNS - 1]);
+			str_musec[MAX_COLUMNS - 1] = '\0';
+			strcpy(str_time + new_str_count + 1, str_musec_begin);
+			new_str_count = strlen(str_time);
+			unit++;
+		}
+	}
+}
+
+static void
+print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
+{
+	layoutstats_t *stats;
+	layoutstats_t *decoded_stats;
+	stripe_info_t *si_list_val;
+	layoutiomode4 iomode;
+	XDR xdr;
+	netaddr4 *na;
+	enum clnt_stat ds_status;
+	int port, kernel_bufsize;
+	uint32_t lo_status;
+	int cur_rec_size, i, j, error;
+	int mpl_len;
+	char record[4096], str_time[MAX_COLUMNS], *buf_pos;
+	char hostname[2048], ipaddress[1024], netid[1024];
+
+	/*
+	 * XDR decode the buffer that came from the kernel
+	 */
+	kernel_bufsize = *(plo_args->kernel_bufsize);
+	stats = (layoutstats_t *)(plo_args->layoutstats);
+	if (stats == NULL) {
+		fprintf(stderr, "Unable to gather statistics"
+		    " from the kernel\n");
+		return;
+	}
+	xdrmem_create(&xdr, (char *)stats, kernel_bufsize, XDR_DECODE);
+	decoded_stats = malloc(kernel_bufsize);
+	if (decoded_stats == NULL) {
+		fprintf(stderr, "Unable to allocate memory\n");
+		return;
+	}
+	if (! xdr_layoutstats_t(&xdr, decoded_stats)) {
+		free(decoded_stats);
+		fprintf(stderr, "Failure in decoding kernel data structures\n");
+		return;
+	}
+
+	/*
+	 * Print out the details embedded in the decoded structure.
+	 */
+	sprintf(record, "Number of layouts: %d",
+	    decoded_stats->plo_num_layouts);
+	printf("%-s\n", record);
+	sprintf(record, "Proxy I/O count: %" PRIu64,
+	    decoded_stats->proxy_iocount);
+	printf("%-s\n", record);
+	sprintf(record, "DS I/O count: %" PRIu64,
+	    decoded_stats->ds_iocount);
+	printf("%-s\n", record);
+	if (decoded_stats->plo_num_layouts == 0) {
+		free(decoded_stats);
+		return;
+	}
+	/* XXX: No multi-segment layout support */
+	sprintf(record, "Layout [%d]:", 0);
+	printf("%-s\n", record);
+
+	append_musec(decoded_stats->plo_creation_sec,
+	    decoded_stats->plo_creation_musec, str_time);
+	printf("\tLayout creation timestamp: %s", str_time);
+	iomode = decoded_stats->iomode;
+	lo_status = decoded_stats->plo_status;
+	if (lo_status & (PLO_UNAVAIL | PLO_GET | PLO_BAD)) {
+		sprintf(record, "status: UNAVAILABLE");
+	}
+	if (lo_status & (PLO_ROC | PLO_RETURN | PLO_RECALL |
+	    PLO_COM2MDS | R4LAYOUTVALID)) {
+		sprintf(record, "status: AVAILABLE");
+	}
+	if (lo_status & PLO_TRYLATER) {
+		sprintf(record, "status: TRYLATER");
+	}
+
+	cur_rec_size = strlen(record);
+	buf_pos = record;
+	record[cur_rec_size] = ',';
+	buf_pos += cur_rec_size + 1;
+	switch (iomode) {
+	case LAYOUTIOMODE4_READ:
+		sprintf(buf_pos, " iomode: LAYOUTIOMODE_READ");
+		break;
+	case LAYOUTIOMODE4_RW:
+		sprintf(buf_pos, " iomode: LAYOUTIOMODE_RW");
+		break;
+	case LAYOUTIOMODE4_ANY:
+		sprintf(buf_pos, " iomode: LAYOUTIOMODE_ANY");
+		break;
+	}
+
+	printf("\t%-s\n", record);
+	if (decoded_stats->plo_length == ALL_ONES) {
+		sprintf(record, "offset: %" PRIu64 ", length: EOF",
+		    decoded_stats->plo_offset);
+	} else {
+		sprintf(record, "offset: %" PRIu64 ", length: %" PRIu64,
+		    decoded_stats->plo_offset, decoded_stats->plo_length);
+	}
+	printf("\t%-s\n", record);
+	sprintf(record, "num stripes: %d, stripe unit: %d",
+	    decoded_stats->plo_stripe_count, decoded_stats->plo_stripe_unit);
+	printf("\t%-s\n", record);
+
+	/*
+	 * Print data server specific information for each stripe of the
+	 * layout.
+	 */
+	i = 0;
+	do {
+		if (decoded_stats->plo_stripe_count == 0) {
+			sprintf(record, "Data server information not"
+			    " available\n");
+			printf("\t%-s", record);
+			break;
+		}
+		sprintf(record, "\tStripe [%d]:", i);
+		printf("%-s\n", record);
+		si_list_val = decoded_stats->
+		    plo_stripe_info_list.plo_stripe_info_list_val;
+		if (si_list_val == NULL) {
+			sprintf(record, "Data server information not"
+			    " available");
+			printf("\t\t%-s\n", record);
+			break;
+		}
+		mpl_len = si_list_val[i].multipath_list.multipath_list_len;
+		if (si_list_val[i].multipath_list.multipath_list_len != 0) {
+			for (j = 0; j < mpl_len; j++) {
+				na = &(si_list_val[j].multipath_list.
+				    multipath_list_val[i]);
+				error = lookup_name_port(na, &port, hostname,
+				    ipaddress);
+				if (error == 0) {
+					sprintf(record, "%s:%s:%s:%d",
+					    na->na_r_netid, hostname,
+					    ipaddress, port);
+				}
+				if (error == EADDRDEC) {
+					sprintf(record, "Decoding of universal"
+					    " address failed\n");
+					printf("\t\t%-s", record);
+					sprintf(record, "%s:%s", na->na_r_netid,
+					    na->na_r_addr);
+				}
+				if (error == EADDRTRAN) {
+					sprintf(record, "IP address to hostname"
+					    " translation failed");
+					printf("\t\t%-s", record);
+					sprintf(record, "%s:%s:%s",
+					    na->na_r_netid, ipaddress, port);
+				}
+				printf("\t\t%-s", record);
+
+				/*
+				 * Do a NULL procedure ping to check the status
+				 * of the data server.
+				 */
+				error = null_procedure_ping(na->na_r_netid,
+				    na->na_r_addr, &ds_status);
+				if (error == 0) {
+					record[strlen(record)] = ' ';
+					if (ds_status == RPC_SUCCESS) {
+						sprintf(record, " OK");
+					} else {
+						sprintf(record, " FAILED (%s)",
+						    clnt_sperrno(ds_status));
+					}
+				} else {
+					sprintf(record, " CANNOT DETERMINE");
+					switch (error) {
+					case ETLI:
+						clnt_pcreateerror(
+						"\t\tnfsstat");
+						break;
+					case ENETCONF:
+						fprintf(stderr, "\t\tNetwork"
+						" address error\n");
+						break;
+					case ENETADDR:
+						netdir_perror("\t\tnfsstat");
+						break;
+					default:
+						fprintf(stderr,
+						    "Unknown error\n");
+					}
+				}
+				printf("%-s\n", record);
+			}
+		} else {
+			sprintf(record, "Data server information"
+			    " not available");
+			printf("\t\t%-s\n", record);
+			break;
+		}
+	i++;
+	} while (i < decoded_stats->plo_stripe_count);
+	/*
+	 * Free memory
+	 */
+	free(decoded_stats);
+}
 
 static int
 getstats_rpc(void)

@@ -25,6 +25,8 @@
 
 #include <nfs/nfs4_pnfs.h>
 #include <sys/cmn_err.h>
+#include <sys/sdt.h>
+#include <sys/time.h>
 
 static kmem_cache_t *file_io_read_cache;
 static kmem_cache_t *read_task_cache;
@@ -59,6 +61,10 @@ int nfs4_pnfs_stripe_unit = 16384;
 
 static int pnfs_getdeviceinfo(mntinfo4_t *, devnode_t *, cred_t *);
 static devnode_t *pnfs_create_device(mntinfo4_t *, deviceid4, avl_index_t);
+/*
+ * The function prototype for encoding/decoding the layout data structures.
+ */
+extern bool_t xdr_layoutstats_t(XDR *, layoutstats_t *);
 
 static int
 nfs4_devid_compare(const void *va, const void *vb)
@@ -694,15 +700,22 @@ pnfs_rele_device(mntinfo4_t *mi, devnode_t *dp)
 }
 
 static int
-pnfs_get_device(mntinfo4_t *mi, deviceid4 did, cred_t *cr, devnode_t **dpp)
+pnfs_get_device(mntinfo4_t *mi, deviceid4 did, cred_t *cr,
+    devnode_t **dpp, bool_t otwflag)
 {
 	devnode_t *dp = NULL;
 	devnode_t key;	/* Dummy, only used as key for avl_find() */
 	avl_index_t where;
 	int error;
 
+	/*
+	 * Explicitly setting it NULL here in case *dpp is not NULL when passed.
+	 */
+	*dpp = NULL;
+
 	DEV_ASSIGN(key.devid, did);
-	if ((dp = avl_find(&mi->mi_devid_tree, &key, &where)) == NULL) {
+	if (((dp = avl_find(&mi->mi_devid_tree, &key, &where)) == NULL) &&
+	    (otwflag == TRUE)) {
 		/*
 		 * The devid is not in the tree, go get the device info.
 		 * Create a placeholder devnode and stick it in the tree.
@@ -725,6 +738,11 @@ pnfs_get_device(mntinfo4_t *mi, deviceid4 did, cred_t *cr, devnode_t **dpp)
 			*dpp = dp;
 		return (error);
 	}
+
+	if ((dp->flags & DN_GDI_INFLIGHT) && (otwflag == FALSE)) {
+		return (-1);
+	}
+
 	dp->count++;
 
 	while (dp->flags & DN_GDI_INFLIGHT)
@@ -757,6 +775,7 @@ stripe_dev_prepare(
 	nfs4_server_t *np;
 	int error = 0;
 	deviceid4 did;
+	bool_t otwflag = TRUE;
 
 	/*
 	 * Check to see if the stripe dev is already initialized,
@@ -773,7 +792,7 @@ stripe_dev_prepare(
 	mutex_exit(&dev->lock);
 
 	mutex_enter(&mi->mi_pnfs_lock);
-	if ((error = pnfs_get_device(mi, did, cr, &dip)) != 0) {
+	if ((error = pnfs_get_device(mi, did, cr, &dip, otwflag)) != 0) {
 		mutex_exit(&mi->mi_pnfs_lock);
 		return (error);
 	}
@@ -1284,6 +1303,7 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 	nfsv4_1_file_layout4	*file_layout4;
 	XDR xdr;
 	int i;
+	timespec_t now;
 
 	if ((res == NULL) || (res->logr_status != NFS4_OK))
 		return;
@@ -1369,6 +1389,9 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 	 * Insert pnfs_layout_t into list, just add at head for now since we
 	 * are only dealing with single layouts.
 	 */
+	gethrestime(&now);
+	layout->plo_creation_sec = now.tv_sec;
+	layout->plo_creation_musec = now.tv_nsec / (NANOSEC / MICROSEC);
 	list_insert_head(&rp->r_layout, layout);
 }
 
@@ -1940,7 +1963,12 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 
 
 	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
+		/*
+		 * Now we will do proxy I/O
+		 */
+		VTOR4(vp)->r_proxyio_count++;
 		mutex_exit(&rp->r_statelock);
+		cmn_err(CE_NOTE, "Doing proxy io, incremented count on read");
 		return (EAGAIN);
 	}
 	pnfs_layout_hold(rp, layout);
@@ -1968,6 +1996,16 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 			return (error);
 		}
 	}
+
+	/*
+	 * Registering a data-server-io count for the file
+	 */
+	cmn_err(CE_NOTE, "Doing data server io,"
+	    " incrementing ds io count on read");
+	mutex_enter(&rp->r_statelock);
+	VTOR4(vp)->r_dsio_count++;
+	mutex_exit(&rp->r_statelock);
+
 	job = file_io_read_alloc();
 	job->fir_count = count;
 	nfs4_init_stateid_types(&sid_types);
@@ -2091,9 +2129,15 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		layout = list_head(&rp->r_layout);
 	}
 
-	/* iXX refactor needed with pnfs_read() above */
+	/* XXX refactor needed with pnfs_read() above */
 	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
+		/*
+		 * We will now resort to proxy I/O
+		 */
+		VTOR4(vp)->r_proxyio_count++;
 		mutex_exit(&rp->r_statelock);
+		cmn_err(CE_NOTE, "Doing proxy io,"
+		    " incremented proxy io count on write");
 		return (EAGAIN);
 	}
 
@@ -2110,6 +2154,15 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 			return (error);
 		}
 	}
+
+	/*
+	 * Registering a data-server-io count for the file
+	 */
+	cmn_err(CE_NOTE, "Doing data server io,"
+	" incrementing ds io count on write");
+	mutex_enter(&rp->r_statelock);
+	VTOR4(vp)->r_dsio_count++;
+	mutex_exit(&rp->r_statelock);
 
 	job = file_io_write_alloc();
 	nfs4_init_stateid_types(&sid_types);
@@ -2175,6 +2228,278 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 	    pnfs_task_write_free, job, 0);
 
 	return (error);
+}
+
+void nfsstat_layout_cleanup(pnfs_layout_t *flayout, vnode_t *vp,
+    layoutstats_t *lostats, int mi_lock, int lo_lock, devnode_t *dip)
+{
+	if (lo_lock == 1) {
+		mutex_exit(&(VTOR4(vp)->r_statelock));
+		kmem_free(
+		    (lostats->plo_stripe_info_list).plo_stripe_info_list_val,
+		    flayout->plo_stripe_count * sizeof (stripe_info_t));
+		lo_lock = 0;
+	}
+
+	if (mi_lock == 1) {
+		pnfs_rele_device(VTOMI4(vp), dip);
+		mutex_exit(&(VTOMI4(vp)->mi_pnfs_lock));
+		mi_lock = 0;
+	}
+
+	VN_RELE(vp);
+}
+
+/*
+ * Gather layout statistics, XDR encode them, and copy them to the user space.
+ */
+int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
+    model_t model, cred_t *cr)
+{
+	char *user_filename; /* Filename from the user space */
+	char *data_buffer; /* Hold the XDR encoded stream */
+	char *user_data_buffer; /* User space buffer */
+	uint_t xdr_len;
+	uint32_t *kernel_bufsize; /* Buffer size for the user space */
+	uint32_t user_bufsize;
+	uint32_t stp_ndx, mpl_index, num_servers;
+	int stripe_num, error;
+	int mi_lock = 0;
+	int lo_lock = 0;
+	bool_t otwflag;
+	vnode_t *vp;
+	rnode4_t *rp;
+	mntinfo4_t *mi;
+	XDR xdrarg;
+	layoutstats_t lostats;
+	pnfs_layout_t *flayout;
+	multipath_list4 *mpl_item;
+	devnode_t *dip = NULL;
+	stripe_info_t *si_node = NULL;
+	nfsstat_lo_errcodes_t ec;
+
+	/*
+	 * Get arguments.
+	 */
+	STRUCT_HANDLE(pnfs_getflo_args, plo_args);
+	STRUCT_SET_HANDLE(plo_args, model, args);
+	user_filename = STRUCT_FGETP(plo_args, fname);
+
+	/*
+	 * Obtain vnode and do basic sanity checks.
+	 */
+	ec = lookupname(user_filename, UIO_USERSPACE,
+	    FOLLOW, NULL, &vp);
+	if (ec) {
+		return (ec);
+	}
+	if (vp == NULL) {
+		cmn_err(CE_NOTE, "nfsstat: vnode pointer is NULL");
+		ec = ESYSCALL;
+		return (ec);
+	}
+
+	/*
+	 * Check whether the user supplied path is a regular file.
+	 */
+	if (vp->v_type != VREG) {
+		VN_RELE(vp);
+		ec = ENOTAFILE;
+		return (ec);
+	}
+
+	/*
+	 * Check for NFS
+	 */
+	mutex_enter(&vp->v_lock);
+	if (!vn_matchops(vp, nfs4_vnodeops)) {
+		mutex_exit(&vp->v_lock);
+		VN_RELE(vp);
+		ec = ENONFS;
+		return (ec);
+	}
+	mutex_exit(&vp->v_lock);
+
+	/*
+	 * Now we are sure that we are talking with an NFS v4 file.
+	 * Hence we can go ahead and use the v4 macros.
+	 */
+	rp = VTOR4(vp);
+	mi = VTOMI4(vp);
+	if (rp == NULL || mi == NULL) {
+		VN_RELE(vp);
+		cmn_err(CE_NOTE, "nfsstat: rnode or mountinfo is NULL");
+		ec = ESYSCALL;
+		return (ec);
+	}
+
+	/*
+	 * Make sure it is a pNFS mount and get a layout.
+	 */
+	if (!(mi->mi_flags & MI4_PNFS)) {
+		cmn_err(CE_NOTE, "nfsstat: NFS v4 file or dir but pNFS"
+		    " not supported for this mount point");
+		VN_RELE(vp);
+		ec = ENOPNFSSERV;
+		return (ec);
+	}
+
+	/*
+	 * Obtain the layout and proxy I/O and non-proxy I/O counts for
+	 * the file.
+	 */
+	mutex_enter(&rp->r_statelock);
+	lostats.proxy_iocount = rp->r_proxyio_count;
+	lostats.ds_iocount = rp->r_dsio_count;
+	flayout = list_head(&rp->r_layout);
+	if (((flayout == NULL) && (lostats.proxy_iocount == 0)) ||
+	    !(rp->r_flags & R4LAYOUTVALID)) {
+		mutex_exit(&rp->r_statelock);
+		VN_RELE(vp);
+		cmn_err(CE_NOTE, "nfsstat: File layout is NULL");
+		ec = ENOLAYOUT;
+		return (ec);
+	}
+	mutex_exit(&rp->r_statelock);
+
+	/*
+	 * Now pluck the fields off the layout.
+	 */
+	if (flayout !=	NULL) {
+		lostats.plo_stripe_info_list.plo_stripe_info_list_val =
+		    kmem_zalloc(flayout->plo_stripe_count *
+		    sizeof (stripe_info_t), KM_SLEEP);
+		mutex_enter(&rp->r_statelock);
+		lo_lock = 1;
+		/* XXX: No multi-segment layouts */
+		lostats.plo_num_layouts = 1;
+		lostats.plo_stripe_count = flayout->plo_stripe_count;
+		lostats.plo_status = flayout->plo_flags;
+		lostats.plo_stripe_unit = flayout->plo_stripe_unit;
+		lostats.iomode = flayout->plo_iomode;
+		lostats.plo_offset = flayout->plo_offset;
+		lostats.plo_length = flayout->plo_length;
+		lostats.plo_stripe_info_list.plo_stripe_info_list_len =
+		    flayout->plo_stripe_count;
+		lostats.plo_creation_sec = flayout->plo_creation_sec;
+		lostats.plo_creation_musec = flayout->plo_creation_musec;
+
+		for (stripe_num = 0; stripe_num < flayout->plo_stripe_count;
+		    stripe_num++) {
+			si_node = &lostats.plo_stripe_info_list.
+			    plo_stripe_info_list_val[stripe_num];
+			si_node->stripe_index = stripe_num;
+			mutex_enter(&mi->mi_pnfs_lock);
+			mi_lock = 1;
+			otwflag = FALSE;
+			error = pnfs_get_device(mi,
+			    flayout->plo_deviceid, cr, &dip, otwflag);
+			if (error != 0) {
+				mutex_exit(&mi->mi_pnfs_lock);
+				mi_lock = 0;
+				si_node->multipath_list.multipath_list_len = 0;
+				si_node->multipath_list.
+				    multipath_list_val = NULL;
+			} else {
+				stp_ndx = (stripe_num +
+				    flayout->plo_first_stripe_index) %
+				    dip->ds_addrs.stripe_indices_len;
+				mpl_index = dip->ds_addrs.
+				    stripe_indices[stp_ndx];
+				mpl_item = &dip->ds_addrs.mpl_val[mpl_index];
+				num_servers = mpl_item->multipath_list4_len;
+				si_node->multipath_list.
+				    multipath_list_len = num_servers;
+				si_node->multipath_list.multipath_list_val =
+				    mpl_item->multipath_list4_val;
+			}
+		}
+	} else {
+		lostats.plo_num_layouts = 0;
+		lostats.plo_stripe_info_list.plo_stripe_info_list_val = NULL;
+		lostats.plo_stripe_info_list.plo_stripe_info_list_len = 0;
+		lostats.plo_stripe_count = 0;
+	}
+
+	/*
+	 * Get the user buffer and fill it with XDR encoded stream.
+	 */
+	xdr_len = xdr_sizeof(xdr_layoutstats_t, &lostats);
+	data_buffer = kmem_zalloc(xdr_len, KM_SLEEP);
+	xdrmem_create(&xdrarg, data_buffer,  xdr_len, XDR_ENCODE);
+	if (! xdr_layoutstats_t(&xdrarg, &lostats)) {
+		nfsstat_layout_cleanup(flayout, vp, &lostats, mi_lock,
+		    lo_lock, dip);
+		kmem_free(data_buffer, xdr_len);
+		cmn_err(CE_WARN, "nfsstat: xdr_layoutstats_t failed"
+		    " in the kernel");
+		ec = ESYSCALL;
+		return (ec);
+	}
+
+	/*
+	 * The layout details been safely copied into another buffer,
+	 * release locks and free kmem allocated memory. DO NOT USE
+	 * xdr_free. It will free up kernel data structures, since we
+	 * are using those pointers in the layoutstats data structure.
+	 */
+	nfsstat_layout_cleanup(flayout, vp, &lostats, mi_lock,
+	    lo_lock, dip);
+
+	/*
+	 * Pass the xdr_len back to the userland in case it needs to
+	 * be made bigger as per the check below.
+	 */
+	kernel_bufsize = STRUCT_FGETP(plo_args, kernel_bufsize);
+	if (kernel_bufsize == NULL) {
+		kmem_free(data_buffer, xdr_len);
+		cmn_err(CE_WARN, "nfsstat: The user memory passed to the"
+		    " kernel is NULL");
+		ec = ESYSCALL;
+		return (ec);
+	}
+	if (copyout(&xdr_len, kernel_bufsize, sizeof (uint32_t))) {
+		kmem_free(data_buffer, xdr_len);
+		cmn_err(CE_WARN, "nfsstat: Copying to the user space failed");
+		ec = ESYSCALL;
+		return (ec);
+	}
+
+	/*
+	 * Get the user buffer size and check if it is large enough.
+	 */
+	user_bufsize = STRUCT_FGET(plo_args, user_bufsize);
+	if (xdr_len > user_bufsize) {
+		kmem_free(data_buffer, xdr_len);
+		cmn_err(CE_NOTE, "nfsstat: User buffer not big enough"
+		    " to hold the xdr encoded stream");
+		ec = EOVERFLOW;
+		return (ec);
+	}
+
+	/*
+	 * Copy the XDR encoded data to the user space buffer.
+	 */
+	user_data_buffer = STRUCT_FGETP(plo_args, layoutstats);
+	if (user_data_buffer == NULL) {
+		kmem_free(data_buffer, xdr_len);
+		cmn_err(CE_WARN, "nfsstat: The user memory passed to"
+		    " the kernel is NULL");
+		ec = ESYSCALL;
+		return (ec);
+	}
+	if (copyout(data_buffer, user_data_buffer, xdr_len) != 0) {
+		kmem_free(data_buffer, xdr_len);
+		cmn_err(CE_WARN, "nfsstat: Copying to the user space failed");
+		ec = ESYSCALL;
+		return (ec);
+	}
+
+	/*
+	 * Free memory for the XDR stream.
+	 */
+	kmem_free(data_buffer, xdr_len);
+	return (0);
 }
 
 #ifdef	USE_GETDEVICELIST

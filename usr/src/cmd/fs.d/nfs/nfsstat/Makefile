@@ -19,10 +19,9 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 # cmd/fs.d/nfs/nfsstat/Makefile
 
@@ -31,11 +30,11 @@ PROG=		nfsstat
 include		../../../Makefile.cmd
 
 CFLAGS +=	$(CCVERBOSE)
-COMMON=	nfs_sec.o
+COMMON=	nfs_sec.o nfsstat_layout.o
 OBJS=	nfsstat.o $(COMMON)
-SRCS=	nfsstat.c ../lib/nfs_sec.c
+SRCS=	nfsstat.c nfsstat_layout.c ../lib/nfs_sec.c
 
-LDLIBS += -lkstat -lnsl
+LDLIBS += -lkstat -lnsl 
 
 $(PROG):	$(OBJS)
 		$(LINK.c) -o $@ $(LDLIBS) $(OBJS)
@@ -50,6 +49,9 @@ all:		$(PROG)
 
 nfs_sec.o:	../lib/nfs_sec.c
 		$(COMPILE.c) ../lib/nfs_sec.c
+
+nfsstat_layout.o:nfsstat_layout.c
+		$(COMPILE.c) nfsstat_layout.c
 
 install:	all $(ROOTPROG)
 

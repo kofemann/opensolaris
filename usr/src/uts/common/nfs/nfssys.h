@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -29,7 +29,6 @@
 #ifndef	_NFS_NFSSYS_H
 #define	_NFS_NFSSYS_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #ifdef	__cplusplus
 extern "C" {
@@ -52,7 +51,7 @@ enum nfssys_op	{ OLD_NFS_SVC, OLD_ASYNC_DAEMON, EXPORTFS, OLD_NFS_GETFH,
     NFS4_SVC, RDMA_SVC_INIT, NFS4_CLR_STATE, NFS_IDMAP,
     NFS4_SVC_REQUEST_QUIESCE, NFS_GETFH, NFS4_DSS_SETPATHS,
     NFS4_DSS_SETPATHS_SIZE, NFS4_EPHEMERAL_MOUNT_TO, MOUNTD_ARGS,
-    MDS_ADD_LAYOUT, MDS_ADD_DEVICE, MDS_RECALL_LAYOUT};
+    MDS_ADD_LAYOUT, MDS_ADD_DEVICE, MDS_RECALL_LAYOUT, NFSSTAT_LAYOUT};
 
 struct nfs_svc_args {
 	int		fd;		/* Connection endpoint */
@@ -101,6 +100,32 @@ struct nfs_getfh_args32 {
 	caddr32_t	fhp;
 };
 #endif
+
+/*
+ * Data structures related to nfssys system call for getting layout
+ * information. nfsstat -l
+ */
+struct pnfs_getflo_args {
+	char		*fname;
+	uint32_t	user_bufsize;
+	char		*layoutstats;
+	uint32_t	*kernel_bufsize;
+};
+
+#ifdef _SYSCALL32
+struct pnfs_getflo_args32 {
+	caddr32_t	fname;
+	uint32_t	user_bufsize;
+	caddr32_t	layoutstats;
+	caddr32_t	kernel_bufsize;
+};
+#endif
+
+/*
+ * Default size of the buffer passed to the kernel.
+ */
+#define	DEFAULT_LAYOUT_SIZE	2048
+
 
 struct nfs_revauth_args {
 	int		authtype;
@@ -355,6 +380,8 @@ struct nfs4_svc_args32 {
 extern int	nfssys(enum nfssys_op opcode, void *arg);
 extern int	exportfs(struct exportfs_args *, model_t, cred_t *);
 extern int	nfs_getfh(struct nfs_getfh_args *, model_t, cred_t *);
+extern int 	pnfs_collect_layoutstats(
+    struct pnfs_getflo_args *, model_t, cred_t *);
 extern int	nfs_svc(struct nfs_svc_args *, model_t);
 extern int	lm_svc(struct lm_svc_args *uap);
 extern int	lm_shutdown(void);
