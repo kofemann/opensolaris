@@ -1966,9 +1966,12 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		/*
 		 * Now we will do proxy I/O
 		 */
+		if (VTOR4(vp)->r_proxyio_count == 0) {
+			cmn_err(CE_NOTE, "Doing proxy io,"
+			    " incrementing proxy io count on first read");
+		}
 		VTOR4(vp)->r_proxyio_count++;
 		mutex_exit(&rp->r_statelock);
-		cmn_err(CE_NOTE, "Doing proxy io, incremented count on read");
 		return (EAGAIN);
 	}
 	pnfs_layout_hold(rp, layout);
@@ -2000,9 +2003,11 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 	/*
 	 * Registering a data-server-io count for the file
 	 */
-	cmn_err(CE_NOTE, "Doing data server io,"
-	    " incrementing ds io count on read");
 	mutex_enter(&rp->r_statelock);
+	if (VTOR4(vp)->r_dsio_count == 0) {
+		cmn_err(CE_NOTE, "Doing data server io,"
+		    " incrementing ds io counts on first read");
+	}
 	VTOR4(vp)->r_dsio_count++;
 	mutex_exit(&rp->r_statelock);
 
@@ -2134,10 +2139,12 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		/*
 		 * We will now resort to proxy I/O
 		 */
+		if (VTOR4(vp)->r_proxyio_count == 0) {
+			cmn_err(CE_NOTE, "Doing proxy io,"
+			    " incrementing proxy io count on first write");
+		}
 		VTOR4(vp)->r_proxyio_count++;
 		mutex_exit(&rp->r_statelock);
-		cmn_err(CE_NOTE, "Doing proxy io,"
-		    " incremented proxy io count on write");
 		return (EAGAIN);
 	}
 
@@ -2158,9 +2165,11 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 	/*
 	 * Registering a data-server-io count for the file
 	 */
-	cmn_err(CE_NOTE, "Doing data server io,"
-	" incrementing ds io count on write");
 	mutex_enter(&rp->r_statelock);
+	if (VTOR4(vp)->r_dsio_count == 0) {
+		cmn_err(CE_NOTE, "Doing data server io,"
+		    " incrementing ds io counts on first write");
+	}
 	VTOR4(vp)->r_dsio_count++;
 	mutex_exit(&rp->r_statelock);
 

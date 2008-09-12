@@ -1754,6 +1754,7 @@ usage(void)
 	fprintf(stderr, "Usage: nfsstat [-cnrsza [-v version] "
 	    "[interval [count]]\n");
 	fprintf(stderr, "Usage: nfsstat -m [pathname..]\n");
+	fprintf(stderr, "Usage: nfsstat -l filename\n");
 	exit(1);
 }
 
