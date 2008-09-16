@@ -985,7 +985,7 @@ recov_retry:
 
 			/* GUARDED4 or UNCHECKED4 */
 			v_error = vattr_to_fattr4(in_va, NULL, attr, 0, OP_OPEN,
-			    &supp_attrs, MI4_ATTRVERS(mi), &nfs4_dfl_lohint);
+			    &supp_attrs, MI4_ATTRVERS(mi), NULL);
 			if (v_error) {
 				bzero(attr, sizeof (*attr));
 				nfs4args_copen_free(open_args);
