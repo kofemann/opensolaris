@@ -1312,6 +1312,14 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	sp = lorec->lor_sess;
 
 	/*
+	 * XXX - until we fix blasting _all_ sessions for one lorecall,
+	 *	make sure that the session in question at least has the
+	 *	back chan established.
+	 */
+	if (!SN_CB_CHAN_EST(sp))
+		return;
+
+	/*
 	 * set up the compound args
 	 */
 	numops = 2;	/* CB_SEQUENCE + CB_LAYOUTRECALL */
