@@ -635,8 +635,16 @@ retry:
 			goto retry;
 		}
 
-		if (np->s_ds_svp == NULL)
-			np->s_ds_svp = mi->mi_curr_serv;
+		/*
+		 * XXXrsb - This will likely go away when ds_info_t
+		 * is implemented.
+		 */
+		if (np->s_ds_svp == NULL) {
+			np->s_ds_svp = new_servinfo4(&knc, &nb, SV4_ISA_DS);
+			svp->sv_ds_n4sp = np;
+			np->s_refcnt++;	/* Lock is held, just bump the count */
+		}
+
 		mutex_exit(&np->s_lock);
 
 		*npp = np;
