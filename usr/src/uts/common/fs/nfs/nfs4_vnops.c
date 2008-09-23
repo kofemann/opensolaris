@@ -3422,15 +3422,17 @@ nfs4write(vnode_t *vp, caddr_t base, u_offset_t offset, int count, cred_t *cr,
 	stable_how4 *stab_comm)
 {
 	int error;
+	mntinfo4_t *mi = VTOMI4(vp);
 
-	error = pnfs_write(vp, base, offset, count, cr, stab_comm);
-	if (error == 0)
-		return (0);
+	if (mi->mi_flags & MI4_PNFS) {
+		error = pnfs_write(vp, base, offset, count, cr, stab_comm);
+		if (error != EAGAIN) {
+			return (error);
+		}
+	}
 
-	if (error != EAGAIN)
-		return (error);
-
-	return (nfs4write_normal(vp, base, offset, count, cr, stab_comm));
+	error = nfs4write_normal(vp, base, offset, count, cr, stab_comm);
+	return (error);
 }
 
 /*
@@ -3674,25 +3676,27 @@ nfs4read(vnode_t *vp, caddr_t base, offset_t offset, int count,
 	size_t *residp, cred_t *cr, bool_t async, struct uio *uiop)
 {
 	int error = EAGAIN;
+	mntinfo4_t *mi = VTOMI4(vp);
 
-	if (nfs4_forceproxyio == 0) {
-		error = pnfs_read(vp, base, offset, count, residp, cr,
-		    async, uiop);
-		if (error == 0)
-			return (0);
+	if (mi->mi_flags & MI4_PNFS) {
+		if (nfs4_forceproxyio == 0) {
+			error = pnfs_read(vp, base, offset, count, residp, cr,
+			    async, uiop);
+		}
+
+		/*
+		 * pnfs_read will return EAGAIN if R4LAYOUTVALID is not
+		 * set.  In this case, fall back to the mds.  This would
+		 * be the case if the mds had no layouts or if the mds
+		 * was a 4.1 only server (ie. not an mds at all).
+		 */
+		if (error != EAGAIN)
+			return (error);
 	}
 
-	/*
-	 * pnfs_read will return EAGAIN if R4LAYOUTVALID is not
-	 * set.  In this case, fall back to the mds.  This would
-	 * be the case if the mds had no layouts or if the mds
-	 * was a 4.1 only server (ie. not an mds at all).
-	 */
-	if (error != EAGAIN)
-		return (error);
-
-	return (nfs4read_normal(vp, base, offset, count,
-	    residp, cr, async, uiop));
+	error = nfs4read_normal(vp, base, offset, count,
+	    residp, cr, async, uiop);
+	return (error);
 }
 
 /* ARGSUSED */

@@ -709,7 +709,7 @@ pnfs_rele_device(mntinfo4_t *mi, devnode_t *dp)
 
 static int
 pnfs_get_device(mntinfo4_t *mi, deviceid4 did, cred_t *cr,
-    devnode_t **dpp, bool_t otwflag)
+    devnode_t **dpp, int otwflag)
 {
 	devnode_t *dp = NULL;
 	devnode_t key;	/* Dummy, only used as key for avl_find() */
@@ -722,8 +722,12 @@ pnfs_get_device(mntinfo4_t *mi, deviceid4 did, cred_t *cr,
 	*dpp = NULL;
 
 	DEV_ASSIGN(key.devid, did);
-	if (((dp = avl_find(&mi->mi_devid_tree, &key, &where)) == NULL) &&
-	    (otwflag == TRUE)) {
+	dp = avl_find(&mi->mi_devid_tree, &key, &where);
+
+	if (dp == NULL && (otwflag & PGD_NO_OTW)) {
+		return (ENODEV);
+	}
+	if (dp == NULL && (otwflag & PGD_OTW)) {
 		/*
 		 * The devid is not in the tree, go get the device info.
 		 * Create a placeholder devnode and stick it in the tree.
@@ -747,8 +751,8 @@ pnfs_get_device(mntinfo4_t *mi, deviceid4 did, cred_t *cr,
 		return (error);
 	}
 
-	if ((dp->flags & DN_GDI_INFLIGHT) && (otwflag == FALSE)) {
-		return (-1);
+	if ((dp->flags & DN_GDI_INFLIGHT) && (otwflag & PGD_NO_OTW)) {
+		return (EINPROGRESS);
 	}
 
 	dp->count++;
@@ -783,7 +787,6 @@ stripe_dev_prepare(
 	nfs4_server_t *np;
 	int error = 0;
 	deviceid4 did;
-	bool_t otwflag = TRUE;
 
 	/*
 	 * Check to see if the stripe dev is already initialized,
@@ -800,7 +803,7 @@ stripe_dev_prepare(
 	mutex_exit(&dev->lock);
 
 	mutex_enter(&mi->mi_pnfs_lock);
-	if ((error = pnfs_get_device(mi, did, cr, &dip, otwflag)) != 0) {
+	if ((error = pnfs_get_device(mi, did, cr, &dip, PGD_OTW)) != 0) {
 		mutex_exit(&mi->mi_pnfs_lock);
 		return (error);
 	}
@@ -962,6 +965,7 @@ pnfs_task_read(void *v)
 	int eof = 0;
 	length4 eof_offset;
 	int data_len = 0;
+	rnode4_t *rp;
 
 	mutex_enter(&job->fir_lock);
 	if ((job->fir_error) ||
@@ -1017,6 +1021,13 @@ pnfs_task_read(void *v)
 				eof_offset =
 				    task->rt_uio.uio_loffset + data_len;
 			}
+			/*
+			 * Registering a data-server-io count for the file
+			 */
+			rp = VTOR4(task->rt_vp);
+			mutex_enter(&rp->r_statelock);
+			rp->r_dsio_count++;
+			mutex_exit(&rp->r_statelock);
 		} else {
 			error = geterrno4(res.status);
 		}
@@ -1136,6 +1147,10 @@ pnfs_task_write(void *v)
 			    task->wt_voff + task->wt_count - 1);
 			gethrestime(&rp->r_attr.va_mtime);
 			rp->r_attr.va_ctime = rp->r_attr.va_mtime;
+			/*
+			 * Registering a data-server-io count for the file
+			 */
+			rp->r_dsio_count++;
 			mutex_exit(&rp->r_statelock);
 		} else {
 			error = geterrno4(res.status);
@@ -1960,8 +1975,7 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 
 	mutex_enter(&rp->r_statelock);
 	layout = list_head(&rp->r_layout);
-	if ((mi->mi_flags & MI4_PNFS) &&
-	    (!(rp->r_flags & (R4LAYOUTVALID|R4LAYOUTUNAVAIL)) ||
+	if ((!(rp->r_flags & (R4LAYOUTVALID|R4LAYOUTUNAVAIL)) ||
 	    layout == NULL)) {
 		mutex_exit(&rp->r_statelock);
 		pnfs_layoutget(vp, cr, LAYOUTIOMODE4_RW);
@@ -1974,10 +1988,6 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		/*
 		 * Now we will do proxy I/O
 		 */
-		if (VTOR4(vp)->r_proxyio_count == 0) {
-			cmn_err(CE_NOTE, "Doing proxy io,"
-			    " incrementing proxy io count on first read");
-		}
 		VTOR4(vp)->r_proxyio_count++;
 		mutex_exit(&rp->r_statelock);
 		return (EAGAIN);
@@ -2007,17 +2017,6 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 			return (error);
 		}
 	}
-
-	/*
-	 * Registering a data-server-io count for the file
-	 */
-	mutex_enter(&rp->r_statelock);
-	if (VTOR4(vp)->r_dsio_count == 0) {
-		cmn_err(CE_NOTE, "Doing data server io,"
-		    " incrementing ds io counts on first read");
-	}
-	VTOR4(vp)->r_dsio_count++;
-	mutex_exit(&rp->r_statelock);
 
 	job = file_io_read_alloc();
 	job->fir_count = count;
@@ -2133,8 +2132,7 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 
 	mutex_enter(&rp->r_statelock);
 	layout = list_head(&rp->r_layout);
-	if ((mi->mi_flags & MI4_PNFS) &&
-	    (layout == NULL || !(rp->r_flags &
+	if ((layout == NULL || !(rp->r_flags &
 	    (R4LAYOUTUNAVAIL|R4LAYOUTVALID)))) {
 		mutex_exit(&rp->r_statelock);
 		pnfs_layoutget(vp, cr, LAYOUTIOMODE4_RW);
@@ -2145,12 +2143,8 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 	/* XXX refactor needed with pnfs_read() above */
 	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
 		/*
-		 * We will now resort to proxy I/O
+		 * We will now resort to proxy I/O.
 		 */
-		if (VTOR4(vp)->r_proxyio_count == 0) {
-			cmn_err(CE_NOTE, "Doing proxy io,"
-			    " incrementing proxy io count on first write");
-		}
 		VTOR4(vp)->r_proxyio_count++;
 		mutex_exit(&rp->r_statelock);
 		return (EAGAIN);
@@ -2169,17 +2163,6 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 			return (error);
 		}
 	}
-
-	/*
-	 * Registering a data-server-io count for the file
-	 */
-	mutex_enter(&rp->r_statelock);
-	if (VTOR4(vp)->r_dsio_count == 0) {
-		cmn_err(CE_NOTE, "Doing data server io,"
-		    " incrementing ds io counts on first write");
-	}
-	VTOR4(vp)->r_dsio_count++;
-	mutex_exit(&rp->r_statelock);
 
 	job = file_io_write_alloc();
 	nfs4_init_stateid_types(&sid_types);
@@ -2283,7 +2266,6 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	int stripe_num, error;
 	int mi_lock = 0;
 	int lo_lock = 0;
-	bool_t otwflag;
 	vnode_t *vp;
 	rnode4_t *rp;
 	mntinfo4_t *mi;
@@ -2354,8 +2336,6 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	 * Make sure it is a pNFS mount and get a layout.
 	 */
 	if (!(mi->mi_flags & MI4_PNFS)) {
-		cmn_err(CE_NOTE, "nfsstat: NFS v4 file or dir but pNFS"
-		    " not supported for this mount point");
 		VN_RELE(vp);
 		ec = ENOPNFSSERV;
 		return (ec);
@@ -2401,23 +2381,21 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 		lostats.plo_creation_sec = flayout->plo_creation_sec;
 		lostats.plo_creation_musec = flayout->plo_creation_musec;
 
-		for (stripe_num = 0; stripe_num < flayout->plo_stripe_count;
-		    stripe_num++) {
-			si_node = &lostats.plo_stripe_info_list.
-			    plo_stripe_info_list_val[stripe_num];
-			si_node->stripe_index = stripe_num;
-			mutex_enter(&mi->mi_pnfs_lock);
-			mi_lock = 1;
-			otwflag = FALSE;
-			error = pnfs_get_device(mi,
-			    flayout->plo_deviceid, cr, &dip, otwflag);
-			if (error != 0) {
-				mutex_exit(&mi->mi_pnfs_lock);
-				mi_lock = 0;
-				si_node->multipath_list.multipath_list_len = 0;
-				si_node->multipath_list.
-				    multipath_list_val = NULL;
-			} else {
+		mutex_enter(&mi->mi_pnfs_lock);
+		mi_lock = 1;
+		error = pnfs_get_device(mi,
+		    flayout->plo_deviceid, cr, &dip, PGD_NO_OTW);
+		if (dip == NULL || error == EINPROGRESS || error == ENODEV) {
+			mutex_exit(&mi->mi_pnfs_lock);
+			mi_lock = 0;
+			si_node->multipath_list.multipath_list_len = 0;
+			si_node->multipath_list.multipath_list_val = NULL;
+		} else {
+			for (stripe_num = 0; stripe_num <
+			    flayout->plo_stripe_count; stripe_num++) {
+				si_node = &lostats.plo_stripe_info_list.
+				    plo_stripe_info_list_val[stripe_num];
+				si_node->stripe_index = stripe_num;
 				stp_ndx = (stripe_num +
 				    flayout->plo_first_stripe_index) %
 				    dip->ds_addrs.stripe_indices_len;

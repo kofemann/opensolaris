@@ -185,7 +185,7 @@ null_procedure_ping(char *netid, char *address, enum clnt_stat *ds_status)
  * Portions of the code borrowed from print_netaddr4 function in snoop_nfs4.c
  */
 int
-lookup_name_port(netaddr4 *na, int *port, char *hostname, char *ipaddress)
+lookup_name_port(netaddr4 *na, long  *port, char *hostname, char *ipaddress)
 {
 	struct hostent *host;
 	struct in_addr addr;
@@ -225,8 +225,7 @@ lookup_name_port(netaddr4 *na, int *port, char *hostname, char *ipaddress)
 
 	/* convert final two octets into port number */
 	errno = 0;
-	*port = strtol(penultimate, NULL, 0) << 8 +
-	    strtol(ultimate, NULL, 0);
+	*port = (strtol(penultimate, NULL, 0) << 8) + strtol(ultimate, NULL, 0);
 	if (errno != 0) {
 		error = EADDRDEC;
 		goto final;

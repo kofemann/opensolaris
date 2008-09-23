@@ -463,16 +463,19 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 	layoutstats_t *stats;
 	layoutstats_t *decoded_stats;
 	stripe_info_t *si_list_val;
+	netaddr4 *mpl_list_val;
 	layoutiomode4 iomode;
 	XDR xdr;
 	netaddr4 *na;
 	enum clnt_stat ds_status;
-	int port, kernel_bufsize;
+	long port;
+	uint32_t kernel_bufsize;
 	uint32_t lo_status;
-	int cur_rec_size, i, j, error;
+	int cur_rec_size, j, error;
 	int mpl_len;
 	char record[4096], str_time[MAX_COLUMNS], *buf_pos;
 	char hostname[2048], ipaddress[1024], netid[1024];
+	int i = 0;
 
 	/*
 	 * XDR decode the buffer that came from the kernel
@@ -565,33 +568,27 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 	 * Print data server specific information for each stripe of the
 	 * layout.
 	 */
-	i = 0;
+	si_list_val = decoded_stats->
+	    plo_stripe_info_list.plo_stripe_info_list_val;
+	if (decoded_stats->plo_stripe_count == 0 || si_list_val == NULL) {
+		sprintf(record, "Data server information not"
+		    " available");
+		printf("\t%-s\n", record);
+		free(decoded_stats);
+		return;
+	}
 	do {
-		if (decoded_stats->plo_stripe_count == 0) {
-			sprintf(record, "Data server information not"
-			    " available\n");
-			printf("\t%-s", record);
-			break;
-		}
 		sprintf(record, "\tStripe [%d]:", i);
 		printf("%-s\n", record);
-		si_list_val = decoded_stats->
-		    plo_stripe_info_list.plo_stripe_info_list_val;
-		if (si_list_val == NULL) {
-			sprintf(record, "Data server information not"
-			    " available");
-			printf("\t\t%-s\n", record);
-			break;
-		}
 		mpl_len = si_list_val[i].multipath_list.multipath_list_len;
-		if (si_list_val[i].multipath_list.multipath_list_len != 0) {
+		mpl_list_val = si_list_val[i].multipath_list.multipath_list_val;
+		if (mpl_len != 0 && mpl_list_val != NULL) {
 			for (j = 0; j < mpl_len; j++) {
-				na = &(si_list_val[j].multipath_list.
-				    multipath_list_val[i]);
+				na = &(mpl_list_val[j]);
 				error = lookup_name_port(na, &port, hostname,
 				    ipaddress);
 				if (error == 0) {
-					sprintf(record, "%s:%s:%s:%d",
+					sprintf(record, "%s:%s:%s:%ld",
 					    na->na_r_netid, hostname,
 					    ipaddress, port);
 				}

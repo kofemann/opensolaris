@@ -69,6 +69,12 @@ typedef struct {
 #define	DN_GDI_INFLIGHT	1
 #define	DN_GDI_FAILED	2
 
+/*
+ * GETDEVICE OTW and NO_OTW
+ */
+#define	PGD_OTW		0x01
+#define	PGD_NO_OTW	0x02
+
 /* per-rnode file layout */
 typedef struct {
 	uint32_t		refcount;

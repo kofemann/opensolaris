@@ -1530,9 +1530,18 @@ nfs4check_minorvers_mismatch(mntinfo4_t *mi, nfs4_error_t *ep)
 void
 nfs4_set_minorversion(mntinfo4_t *mi, int minorversion)
 {
+	struct nfs_stats *nfsstatsp;
+
 	mutex_enter(&mi->mi_lock);
 	mi->mi_minorversion = minorversion;
 	mi->mi_attrvers = minorversion;
+
+	nfsstatsp = zone_getspecific(nfsstat_zone_key, nfs_zone());
+	ASSERT(nfsstatsp != NULL);
+	mi->mi_reqs = nfsstatsp->
+	    nfs_stats_v4[mi->mi_minorversion].rfsreqcnt_ptr;
+	mi->mi_rfsnames = rfsnames_v4[mi->mi_minorversion];
+
 	mutex_exit(&mi->mi_lock);
 }
 
@@ -2144,9 +2153,6 @@ nfs4rootvp(vnode_t **rtvpp, vfs_t *vfsp, struct servinfo4 *svp_head,
 	 * negotiation.
 	 */
 	nfs4_set_minorversion(mi, nfs4_max_minor_version);
-	mi->mi_reqs = nfsstatsp->
-	    nfs_stats_v4[nfs4_max_minor_version].rfsreqcnt_ptr;
-	mi->mi_rfsnames = rfsnames_v4[nfs4_max_minor_version];
 
 	/*
 	 * Make a vfs struct for nfs.  We do this here instead of below
