@@ -640,7 +640,8 @@ retry:
 		 * is implemented.
 		 */
 		if (np->s_ds_svp == NULL) {
-			np->s_ds_svp = new_servinfo4(&knc, &nb, SV4_ISA_DS);
+			svp = new_servinfo4(&knc, &nb, SV4_ISA_DS);
+			np->s_ds_svp = svp;
 			svp->sv_ds_n4sp = np;
 			np->s_refcnt++;	/* Lock is held, just bump the count */
 		}
