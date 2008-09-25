@@ -32,9 +32,8 @@ extern "C" {
 
 #include <mms_sym.h>
 #include <mms_list.h>
+#include <mms_dm_msg.h>
 
-extern	mms_sym_t	*dm_msg_cat;
-extern	int		dm_msg_cat_num;
 extern	mms_list_t	dm_msg_hdr_list;
 
 #define	DM_MSG_DM	"dm"
@@ -61,10 +60,6 @@ typedef	struct	dm_msg {
 #define	DM_MSG_PREPEND(x)	TRACE((MMS_ERR, dm_msg_prepend x))
 #define	DM_ADM_ERR		"administrator", "error"
 #define	DM_MSG_SEND(x)		dm_send_message x
-
-extern	mms_sym_t	*dm_msg_cat;
-extern	int	dm_msg_cat_num;
-
 
 #ifdef	__cplusplus
 }

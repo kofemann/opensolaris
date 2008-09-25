@@ -164,7 +164,9 @@ struct dev_ops xdf_devops = {
 	xdf_detach,		/* devo_detach */
 	xdf_reset,		/* devo_reset */
 	&xdf_cbops,		/* devo_cb_ops */
-	(struct bus_ops *)NULL	/* devo_bus_ops */
+	(struct bus_ops *)NULL,	/* devo_bus_ops */
+	NULL,			/* devo_power */
+	ddi_quiesce_not_supported,	/* devo_quiesce */
 };
 
 static struct modldrv modldrv = {
@@ -999,7 +1001,7 @@ xdf_dump(dev_t dev, caddr_t addr, daddr_t blkno, int nblk)
 		return (ENXIO);
 
 	DPRINTF(IO_DBG, ("xdf: dump addr (0x%p) blk (%ld) nblks (%d)\n",
-	    addr, blkno, nblk));
+	    (void *)addr, blkno, nblk));
 
 	part = XDF_PART(minor);
 	if (!xdf_isopen(vdp, part))
@@ -1137,6 +1139,9 @@ xdf_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp,
 	case DKIOCGVTOC:
 	case DKIOCSVTOC:
 	case DKIOCPARTINFO:
+	case DKIOCGEXTVTOC:
+	case DKIOCSEXTVTOC:
+	case DKIOCEXTPARTINFO:
 	case DKIOCGMBOOT:
 	case DKIOCSMBOOT:
 	case DKIOCGETEFI:
@@ -1882,6 +1887,18 @@ xdf_post_connect(xdf_t *vdp)
 		return (DDI_FAILURE);
 	}
 
+#ifdef _ILP32
+	if (vdp->xdf_xdev_nblocks > DK_MAX_BLOCKS) {
+		cmn_err(CE_WARN, "xdf_post_connect: xdf@%s: "
+		    "backend disk device too large with %llu blocks for"
+		    " 32-bit kernel", ddi_get_name_addr(devi),
+		    vdp->xdf_xdev_nblocks);
+		xvdi_fatal_error(devi, rv, "reading backend info");
+		return (DDI_FAILURE);
+	}
+#endif
+
+
 	/*
 	 * Only update the physical geometry to reflect the new device
 	 * size if this is the first time we're connecting to the backend
@@ -2043,19 +2060,17 @@ xdf_oe_change(dev_info_t *dip, ddi_eventcookie_t id, void *arg, void *impl_data)
 			(void) xdf_start_disconnect(vdp);
 		break;
 	case XenbusStateClosing:
-		if (vdp->xdf_status == XD_READY) {
-			mutex_enter(&vdp->xdf_dev_lk);
-			if (xdf_isopen(vdp, -1)) {
-				cmn_err(CE_NOTE, "xdf@%s: hot-unplug failed, "
-				    "still in use", ddi_get_name_addr(dip));
-				mutex_exit(&vdp->xdf_dev_lk);
-				break;
-			} else {
+		mutex_enter(&vdp->xdf_dev_lk);
+		if (xdf_isopen(vdp, -1)) {
+			cmn_err(CE_NOTE, "xdf@%s: hot-unplug failed, "
+			    "still in use", ddi_get_name_addr(dip));
+		} else {
+			if ((vdp->xdf_status == XD_READY) ||
+			    (vdp->xdf_status == XD_INIT))
 				vdp->xdf_status = XD_CLOSING;
-			}
-			mutex_exit(&vdp->xdf_dev_lk);
+			(void) xdf_start_disconnect(vdp);
 		}
-		(void) xdf_start_disconnect(vdp);
+		mutex_exit(&vdp->xdf_dev_lk);
 		break;
 	case XenbusStateClosed:
 		/* first check if BE closed unexpectedly */

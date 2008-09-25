@@ -18,11 +18,8 @@
 #
 # CDDL HEADER END
 #
-#
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-#ident	"%Z%%M%	%I%	%E% SMI"
 #
 # This required package information file contains a list of package contents.
 # The 'pkgmk' command uses this file to identify the contents of a package
@@ -233,6 +230,7 @@ f none usr/lib/help/auths/locale/RoleHeader.html 444 root bin
 f none usr/lib/help/auths/locale/AuthRoleWrite.html 444 root bin
 f none usr/lib/help/auths/locale/SysDate.html 444 root bin
 f none usr/lib/help/auths/locale/SysHeader.html 444 root bin
+f none usr/lib/help/auths/locale/SysMaintenance.html 444 root bin
 f none usr/lib/help/auths/locale/SysShutdown.html 444 root bin
 f none usr/lib/help/auths/locale/AllSolAuthsHeader.html 444 root bin
 f none usr/lib/help/auths/locale/DhcpmgrHeader.html 444 root bin
@@ -282,6 +280,7 @@ f none usr/lib/help/auths/locale/SmfValueSMB.html 444 root bin
 f none usr/lib/help/auths/locale/AuthReadSMB.html 444 root bin
 f none usr/lib/help/auths/locale/SmfValueVscan.html 444 root bin
 f none usr/lib/help/auths/locale/SmfWpaStates.html 444 root bin
+f none usr/lib/help/auths/locale/NetworkAutoconf.html 444 root bin
 f none usr/lib/help/auths/locale/NetworkHeader.html 444 root bin
 f none usr/lib/help/auths/locale/WifiConfig.html 444 root bin
 f none usr/lib/help/auths/locale/WifiWep.html 444 root bin
@@ -320,6 +319,7 @@ f none usr/lib/help/auths/locale/SysPowerMgmtSuspendtoDisk.html 444 root bin
 f none usr/lib/help/auths/locale/SysPowerMgmtSuspendtoRAM.html 444 root bin
 f none usr/lib/help/auths/locale/SysPowerMgmtBrightness.html 444 root bin
 f none usr/lib/help/auths/locale/SysCpuPowerMgmt.html 444 root bin
+f none usr/lib/help/auths/locale/SmfManageZFSSnap.html 444 root bin
 #
 d none usr/lib/help/profiles 755 root bin
 d none usr/lib/help/profiles/locale 755 root bin
@@ -350,6 +350,7 @@ f none usr/lib/help/profiles/locale/RtMediaBkup.html 444 root bin
 f none usr/lib/help/profiles/locale/RtMediaRestore.html 444 root bin
 f none usr/lib/help/profiles/locale/RtNameServiceAdmin.html 444 root bin
 f none usr/lib/help/profiles/locale/RtNameServiceSecure.html 444 root bin
+f none usr/lib/help/profiles/locale/RtNetAutoconf.html 444 root bin
 f none usr/lib/help/profiles/locale/RtNetIPsec.html 444 root bin
 f none usr/lib/help/profiles/locale/RtNetMngmnt.html 444 root bin
 f none usr/lib/help/profiles/locale/RtNetSecure.html 444 root bin

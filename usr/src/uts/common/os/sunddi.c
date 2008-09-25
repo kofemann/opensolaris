@@ -6678,6 +6678,21 @@ ddi_pathname(dev_info_t *dip, char *path)
 	return (pathname_work(dip, path));
 }
 
+char *
+ddi_pathname_minor(struct ddi_minor_data *dmdp, char *path)
+{
+	if (dmdp->dip == NULL)
+		*path = '\0';
+	else {
+		(void) ddi_pathname(dmdp->dip, path);
+		if (dmdp->ddm_name) {
+			(void) strcat(path, ":");
+			(void) strcat(path, dmdp->ddm_name);
+		}
+	}
+	return (path);
+}
+
 static char *
 pathname_work_obp(dev_info_t *dip, char *path)
 {
@@ -8895,4 +8910,25 @@ ddi_parse(
 
 	*nump = num;
 	return (DDI_SUCCESS);
+}
+
+/*
+ * Default initialization function for drivers that don't need to quiesce.
+ */
+/* ARGSUSED */
+int
+ddi_quiesce_not_needed(dev_info_t *dip)
+{
+	return (DDI_SUCCESS);
+}
+
+/*
+ * Initialization function for drivers that should implement quiesce()
+ * but haven't yet.
+ */
+/* ARGSUSED */
+int
+ddi_quiesce_not_supported(dev_info_t *dip)
+{
+	return (DDI_FAILURE);
 }

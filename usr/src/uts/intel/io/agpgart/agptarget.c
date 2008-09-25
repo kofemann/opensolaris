@@ -24,7 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/systm.h>
 #include <sys/conf.h>
@@ -321,6 +320,9 @@ static int gms_965GM[7] = {GMS_MB(1), GMS_MB(4), GMS_MB(8), GMS_MB(16),
 	GMS_MB(32), GMS_MB(48), GMS_MB(64)};
 static int gms_X33[9] = {GMS_MB(1), GMS_MB(4), GMS_MB(8), GMS_MB(16),
 	GMS_MB(32), GMS_MB(48), GMS_MB(64), GMS_MB(128), GMS_MB(256)};
+static int gms_G4X[13] = {0, 0, 0, 0,
+	GMS_MB(32), GMS_MB(48), GMS_MB(64), GMS_MB(128), GMS_MB(256),
+	GMS_MB(96), GMS_MB(160), GMS_MB(224), GMS_MB(352)};
 
 static gms_mode_t gms_modes[] = {
 	{INTEL_BR_810, I810_CONF_SMRAM, I810_GMS_MASK,
@@ -364,7 +366,13 @@ static gms_mode_t gms_modes[] = {
 	{INTEL_BR_Q33, I8XX_CONF_GC, IX33_GC_MODE_MASK,
 		GMS_SIZE(gms_X33), gms_X33},
 	{INTEL_BR_GM45, I8XX_CONF_GC, I8XX_GC_MODE_MASK,
-		GMS_SIZE(gms_965GM), gms_965GM}
+		GMS_SIZE(gms_965GM), gms_965GM},
+	{INTEL_BR_EL, I8XX_CONF_GC, I8XX_GC_MODE_MASK,
+		GMS_SIZE(gms_G4X), gms_G4X},
+	{INTEL_BR_Q45, I8XX_CONF_GC, I8XX_GC_MODE_MASK,
+		GMS_SIZE(gms_G4X), gms_G4X},
+	{INTEL_BR_G45, I8XX_CONF_GC, I8XX_GC_MODE_MASK,
+		GMS_SIZE(gms_G4X), gms_G4X}
 };
 static int
 get_chip_gms(uint32_t devid)
@@ -860,6 +868,7 @@ static struct dev_ops agp_target_ops = {
 	&agp_target_cb_ops,	/* devo_cb_ops */
 	0,			/* devo_bus_ops */
 	0,			/* devo_power */
+	ddi_quiesce_not_supported,	/* devo_quiesce */
 };
 
 static  struct modldrv modldrv = {

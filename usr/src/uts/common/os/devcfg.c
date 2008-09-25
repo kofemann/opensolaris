@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/note.h>
 #include <sys/t_lock.h>
 #include <sys/cmn_err.h>
@@ -41,6 +39,7 @@
 #include <sys/contract/device_impl.h>
 #include <sys/dacf.h>
 #include <sys/promif.h>
+#include <sys/pci.h>
 #include <sys/cpuvar.h>
 #include <sys/pathname.h>
 #include <sys/taskq.h>
@@ -52,6 +51,7 @@
 #include <sys/fs/dv_node.h>
 #include <sys/reboot.h>
 #include <sys/sysmacros.h>
+#include <sys/systm.h>
 #include <sys/sunldi.h>
 #include <sys/sunldi_impl.h>
 
@@ -124,11 +124,12 @@ major_t clone_major;
 volatile ulong_t devtree_gen;		/* generation number */
 
 /* block all future dev_info state changes */
-static hrtime_t volatile devinfo_freeze = 0;
+hrtime_t volatile devinfo_freeze = 0;
 
 /* number of dev_info attaches/detaches currently in progress */
 static ulong_t devinfo_attach_detach = 0;
 
+extern int	sys_shutdown;
 extern kmutex_t global_vhci_lock;
 
 /* bitset of DS_SYSAVAIL & DS_RECONFIG - no races, no lock */
@@ -158,6 +159,8 @@ int driver_conf_allow_path_alias = 1;
 int identify_9e = 0;
 
 int mtc_off;					/* turn off mt config */
+
+int quiesce_debug = 0;
 
 static kmem_cache_t *ddi_node_cache;		/* devinfo node cache */
 static devinfo_log_header_t *devinfo_audit_log;	/* devinfo log */
@@ -198,7 +201,7 @@ static int ndi_devi_unbind_driver(dev_info_t *dip);
 
 static void i_ddi_check_retire(dev_info_t *dip);
 
-
+static void quiesce_one_device(dev_info_t *, void *);
 
 /*
  * dev_info cache and node management
@@ -3618,6 +3621,39 @@ child_path_to_driver(dev_info_t *parent, char *child_name, char *unit_address)
 }
 
 
+#define	PCI_EX_CLASS	"pciexclass"
+#define	PCI_EX		"pciex"
+#define	PCI_CLASS	"pciclass"
+#define	PCI		"pci"
+
+int
+ddi_is_pci_dip(dev_info_t *dip)
+{
+	char	*prop = NULL;
+
+	if (ddi_prop_lookup_string(DDI_DEV_T_ANY, dip, DDI_PROP_DONTPASS,
+	    "compatible", &prop) == DDI_PROP_SUCCESS) {
+		ASSERT(prop);
+		if (strncmp(prop, PCI_EX_CLASS, sizeof (PCI_EX_CLASS) - 1)
+		    == 0 ||
+		    strncmp(prop, PCI_EX, sizeof (PCI_EX)- 1)
+		    == 0 ||
+		    strncmp(prop, PCI_CLASS, sizeof (PCI_CLASS) - 1)
+		    == 0 ||
+		    strncmp(prop, PCI, sizeof (PCI) - 1)
+		    == 0) {
+			ddi_prop_free(prop);
+			return (1);
+		}
+	}
+
+	if (prop != NULL) {
+		ddi_prop_free(prop);
+	}
+
+	return (0);
+}
+
 /*
  * Given the pathname of a device, fill in the dev_info_t value and/or the
  * dev_t value and/or the spectype, depending on which parameters are non-NULL.
@@ -3651,9 +3687,9 @@ child_path_to_driver(dev_info_t *parent, char *child_name, char *unit_address)
  * the ioc, look for minor node dhcp. If not found, pass ":dhcp"
  * to ioc's bus_config entry point.
  */
-int
-resolve_pathname(char *pathname,
-	dev_info_t **dipp, dev_t *devtp, int *spectypep)
+static int
+parse_pathname(char *pathname,
+	dev_info_t **dipp, dev_t *devtp, int *spectypep, dev_info_t **pci_dipp)
 {
 	int			error;
 	dev_info_t		*parent, *child;
@@ -3665,6 +3701,9 @@ resolve_pathname(char *pathname,
 	int			spectype;
 	struct ddi_minor_data	*dmn;
 	int			circ;
+
+	if (pci_dipp)
+		*pci_dipp = NULL;
 
 	if (*pathname != '/')
 		return (EINVAL);
@@ -3708,6 +3747,10 @@ resolve_pathname(char *pathname,
 			pn_free(&pn);
 			kmem_free(component, MAXNAMELEN);
 			kmem_free(config_name, MAXNAMELEN);
+			if (pci_dipp && *pci_dipp) {
+				ndi_rele_devi(*pci_dipp);
+				*pci_dipp = NULL;
+			}
 			return (-1);
 		}
 
@@ -3715,6 +3758,15 @@ resolve_pathname(char *pathname,
 		ndi_rele_devi(parent);
 		parent = child;
 		pn_skipslash(&pn);
+		if (pci_dipp) {
+			if (ddi_is_pci_dip(child)) {
+				ndi_hold_devi(child);
+				if (*pci_dipp != NULL) {
+					ndi_rele_devi(*pci_dipp);
+				}
+				*pci_dipp = child;
+			}
+		}
 	}
 
 	/*
@@ -3732,6 +3784,10 @@ resolve_pathname(char *pathname,
 			kmem_free(config_name, MAXNAMELEN);
 			NDI_CONFIG_DEBUG((CE_NOTE,
 			    "%s: minor node not found\n", pathname));
+			if (pci_dipp && *pci_dipp) {
+				ndi_rele_devi(*pci_dipp);
+				*pci_dipp = NULL;
+			}
 			return (-1);
 		}
 		minorname = NULL;	/* look for default minor */
@@ -3790,7 +3846,7 @@ resolve_pathname(char *pathname,
 	 */
 	if (dipp != NULL)
 		*dipp = parent;
-	else {
+	else if (pci_dipp == NULL) {
 		/*
 		 * We should really keep the ref count to keep the node from
 		 * detaching but ddi_pathname_to_dev_t() specifies a NULL dipp,
@@ -3805,6 +3861,10 @@ resolve_pathname(char *pathname,
 		 * it, and all references, with a call that specifies a dipp.
 		 * In addition, the callers of this new interfaces would then
 		 * need to call ndi_rele_devi when the reference is complete.
+		 *
+		 * NOTE: If pci_dipp is non-NULL we are only interested
+		 * in the PCI parent which is returned held. No need to hold
+		 * the leaf dip.
 		 */
 		(void) ddi_prop_update_int(DDI_DEV_T_NONE, parent,
 		    DDI_NO_AUTODETACH, 1);
@@ -3812,6 +3872,19 @@ resolve_pathname(char *pathname,
 	}
 
 	return (0);
+}
+
+int
+resolve_pathname(char *pathname,
+	dev_info_t **dipp, dev_t *devtp, int *spectypep)
+{
+	return (parse_pathname(pathname, dipp, devtp, spectypep, NULL));
+}
+
+int
+ddi_find_pci_parent(char *pathname, dev_info_t **pci_dipp)
+{
+	return (parse_pathname(pathname, NULL, NULL, NULL, pci_dipp));
 }
 
 /*
@@ -3880,6 +3953,164 @@ i_ddi_prompath_to_devfspath(char *prompath, char *devfspath)
 }
 
 /*
+ * This function is intended to identify drivers that must quiesce for fast
+ * reboot to succeed.  It does not claim to have more knowledge about the device
+ * than its driver.  If a driver has implemented quiesce(), it will be invoked;
+ * if a so identified driver does not manage any device that needs to be
+ * quiesced, it must explicitly set its devo_quiesce dev_op to
+ * ddi_quiesce_not_needed.
+ */
+static int skip_pseudo = 1;	/* Skip pseudo devices */
+static int skip_non_hw = 1;	/* Skip devices with no hardware property */
+static int
+should_implement_quiesce(dev_info_t *dip)
+{
+	struct dev_info *devi = DEVI(dip);
+	dev_info_t *pdip;
+
+	/*
+	 * If dip is pseudo and skip_pseudo is set, driver doesn't have to
+	 * implement quiesce().
+	 */
+	if (skip_pseudo &&
+	    strncmp(ddi_binding_name(dip), "pseudo", sizeof ("pseudo")) == 0)
+		return (0);
+
+	/*
+	 * If parent dip is pseudo and skip_pseudo is set, driver doesn't have
+	 * to implement quiesce().
+	 */
+	if (skip_pseudo && (pdip = ddi_get_parent(dip)) != NULL &&
+	    strncmp(ddi_binding_name(pdip), "pseudo", sizeof ("pseudo")) == 0)
+		return (0);
+
+	/*
+	 * If not attached, driver doesn't have to implement quiesce().
+	 */
+	if (!i_ddi_devi_attached(dip))
+		return (0);
+
+	/*
+	 * If dip has no hardware property and skip_non_hw is set,
+	 * driver doesn't have to implement quiesce().
+	 */
+	if (skip_non_hw && devi->devi_hw_prop_ptr == NULL)
+		return (0);
+
+	return (1);
+}
+
+static int
+driver_has_quiesce(struct dev_ops *ops)
+{
+	if ((ops->devo_rev >= 4) && (ops->devo_quiesce != nodev) &&
+	    (ops->devo_quiesce != NULL) && (ops->devo_quiesce != nulldev) &&
+	    (ops->devo_quiesce != ddi_quiesce_not_supported))
+		return (1);
+	else
+		return (0);
+}
+
+/*
+ * Check to see if a driver has implemented the quiesce() DDI function.
+ */
+int
+check_driver_quiesce(dev_info_t *dip, void *arg)
+{
+	struct dev_ops *ops;
+
+	if (!should_implement_quiesce(dip))
+		return (DDI_WALK_CONTINUE);
+
+	if ((ops = ddi_get_driver(dip)) == NULL)
+		return (DDI_WALK_CONTINUE);
+
+	if (driver_has_quiesce(ops)) {
+		if ((quiesce_debug & 0x2) == 0x2) {
+			if (ops->devo_quiesce == ddi_quiesce_not_needed)
+				cmn_err(CE_CONT, "%s does not need to be "
+				    "quiesced", ddi_driver_name(dip));
+			else
+				cmn_err(CE_CONT, "%s has quiesce routine",
+				    ddi_driver_name(dip));
+		}
+	} else {
+		if (arg != NULL)
+			*((int *)arg) = -1;
+		cmn_err(CE_WARN, "%s has no quiesce()", ddi_driver_name(dip));
+	}
+
+	return (DDI_WALK_CONTINUE);
+}
+
+/*
+ * Quiesce device.
+ */
+static void
+quiesce_one_device(dev_info_t *dip, void *arg)
+{
+	struct dev_ops *ops;
+	int should_quiesce = 0;
+
+	/*
+	 * If the device is not attached it doesn't need to be quiesced.
+	 */
+	if (!i_ddi_devi_attached(dip))
+		return;
+
+	if ((ops = ddi_get_driver(dip)) == NULL)
+		return;
+
+	should_quiesce = should_implement_quiesce(dip);
+
+	/*
+	 * If there's an implementation of quiesce(), always call it even if
+	 * some of the drivers don't have quiesce() or quiesce() have failed
+	 * so we can do force fast reboot.  The implementation of quiesce()
+	 * should not negatively affect a regular reboot.
+	 */
+	if (driver_has_quiesce(ops)) {
+		int rc = DDI_SUCCESS;
+
+		if (ops->devo_quiesce == ddi_quiesce_not_needed)
+			return;
+
+		rc = devi_quiesce(dip);
+
+		/* quiesce() should never fail */
+		ASSERT(rc == DDI_SUCCESS);
+
+		if (rc != DDI_SUCCESS && should_quiesce) {
+
+			if (arg != NULL)
+				*((int *)arg) = -1;
+		}
+	} else if (should_quiesce && arg != NULL) {
+		*((int *)arg) = -1;
+	}
+}
+
+/*
+ * Traverse the dev info tree in a breadth-first manner so that we quiesce
+ * children first.  All subtrees under the parent of dip will be quiesced.
+ */
+void
+quiesce_devices(dev_info_t *dip, void *arg)
+{
+	/*
+	 * if we're reached here, the device tree better not be changing.
+	 * so either devinfo_freeze better be set or we better be panicing.
+	 */
+	ASSERT(devinfo_freeze || panicstr);
+
+	for (; dip != NULL; dip = ddi_get_next_sibling(dip)) {
+		quiesce_devices(ddi_get_child(dip), arg);
+
+		quiesce_one_device(dip, arg);
+	}
+}
+
+/*
  * Reset all the pure leaf drivers on the system at halt time
  */
 static int
@@ -3934,17 +4165,17 @@ reset_leaves(void)
 	(void) walk_devs(top_devinfo, reset_leaf_device, NULL, 0);
 }
 
+
 /*
- * devtree_freeze() must be called before reset_leaves() during a
- * normal system shutdown.  It attempts to ensure that there are no
- * outstanding attach or detach operations in progress when reset_leaves()
- * is invoked.  It must be called before the system becomes single-threaded
- * because device attach and detach are multi-threaded operations.  (note
- * that during system shutdown the system doesn't actually become
- * single-thread since other threads still exist, but the shutdown thread
- * will disable preemption for itself, raise it's pil, and stop all the
- * other cpus in the system there by effectively making the system
- * single-threaded.)
+ * devtree_freeze() must be called before quiesce_devices() and reset_leaves()
+ * during a normal system shutdown.  It attempts to ensure that there are no
+ * outstanding attach or detach operations in progress when quiesce_devices() or
+ * reset_leaves()is invoked.  It must be called before the system becomes
+ * single-threaded because device attach and detach are multi-threaded
+ * operations.  (note that during system shutdown the system doesn't actually
+ * become single-thread since other threads still exist, but the shutdown thread
+ * will disable preemption for itself, raise it's pil, and stop all the other
+ * cpus in the system there by effectively making the system single-threaded.)
  */
 void
 devtree_freeze(void)
@@ -7287,6 +7518,7 @@ void
 i_ddi_di_cache_free(struct di_cache *cache)
 {
 	int	error;
+	extern int sys_shutdown;
 
 	ASSERT(mutex_owned(&cache->cache_lock));
 
@@ -7306,7 +7538,8 @@ i_ddi_di_cache_free(struct di_cache *cache)
 			cmn_err(CE_NOTE, "i_ddi_di_cache_free: NULL cache");
 	}
 
-	if (!modrootloaded || rootvp == NULL || vn_is_readonly(rootvp)) {
+	if (!modrootloaded || rootvp == NULL ||
+	    vn_is_readonly(rootvp) || sys_shutdown) {
 		if (di_cache_debug) {
 			cmn_err(CE_WARN, "/ not mounted/RDONLY. Skip unlink");
 		}

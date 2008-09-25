@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * Fake rtls module. Prevents the real rtls driver from loading in
  * a xen HVM domain so that xnf may operate instead.
@@ -44,7 +42,9 @@ struct dev_ops pv_rtls_ops = {
 	NULL,
 	nodev,
 	NULL,
-	NULL
+	NULL,
+	NULL,
+	ddi_quiesce_not_needed,		/* quiesce */
 };
 
 /*
@@ -52,7 +52,7 @@ struct dev_ops pv_rtls_ops = {
  */
 static struct modldrv modldrv = {
 	&mod_driverops,
-	"xVM rtls stub %I%",
+	"xVM rtls stub",
 	&pv_rtls_ops
 };
 

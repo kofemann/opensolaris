@@ -26,8 +26,6 @@
 #ifndef	_SYS_HXGE_HXGE_H
 #define	_SYS_HXGE_HXGE_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #ifdef	__cplusplus
 extern "C" {
 #endif
@@ -238,6 +236,13 @@ typedef struct _hxge_ldgv_t {
 	p_hxge_ldv_t		ldvp_syserr;
 } hxge_ldgv_t, *p_hxge_ldgv_t;
 
+typedef struct _hxge_timeout {
+	timeout_id_t	id;
+	clock_t		ticks;
+	kmutex_t	lock;
+	uint32_t	link_status;
+} hxge_timeout;
+
 /*
  * Hydra Device instance state information.
  * Each instance is dynamically allocated on first attach.
@@ -305,7 +310,9 @@ struct _hxge_t {
 	hxge_rx_block_size_t	rx_bksize_code;
 
 	p_hxge_dma_pool_t	rx_buf_pool_p;
-	p_hxge_dma_pool_t	rx_cntl_pool_p;
+	p_hxge_dma_pool_t	rx_rbr_cntl_pool_p;
+	p_hxge_dma_pool_t	rx_rcr_cntl_pool_p;
+	p_hxge_dma_pool_t	rx_mbox_cntl_pool_p;
 
 	p_hxge_dma_pool_t	tx_buf_pool_p;
 	p_hxge_dma_pool_t	tx_cntl_pool_p;
@@ -352,6 +359,7 @@ struct _hxge_t {
 	hxge_mmac_t		hxge_mmac_info;
 
 	kmutex_t		pio_lock;
+	hxge_timeout		timeout;
 };
 
 /*
@@ -425,6 +433,7 @@ typedef struct _hxge_rdc_kstat {
 	kstat_named_t	rcrfull;
 	kstat_named_t	rbr_empty;
 	kstat_named_t	rbrfull;
+	kstat_named_t	rcr_invalids;	/* Account for invalid RCR entries. */
 
 	kstat_named_t	rcr_to;
 	kstat_named_t	rcr_thresh;

@@ -20,9 +20,7 @@
 #
 
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
-#
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # usr/src/cmd/cmd-inet/lib/nwamd/Makefile
@@ -32,7 +30,7 @@
 include		../../../../lib/Makefile.lib
 
 PROG=		nwamd
-OBJS=		events.o interface.o llp.o main.o \
+OBJS=		door.o events.o interface.o llp.o main.o \
 		state_machine.o util.o wireless.o
 SRCS=		$(OBJS:%.o=%.c)
 HEADERS=	defines.h functions.h structures.h variables.h
@@ -44,7 +42,8 @@ POFILES=	interface.po wireless.po
 
 ROOTCMDDIR=	$(ROOTFS_LIBDIR)/inet
 
-LDLIBS +=	-lsocket -lnsl -linetcfg -linetutil -lumem -lscf -ldladm -lgen
+LDLIBS +=	-lsocket -lnsl -linetcfg -linetutil -lumem -lscf -ldladm \
+		-lgen -ldoor -lsecdb -lbsm -lsysevent -lnvpair
 
 .KEEP_STATE:
 
@@ -61,7 +60,7 @@ install: $(ROOTCMD)
 check:  $(SRCS) $(HEADERS)
 	$(CSTYLE) -cpP $(SRCS) $(HEADERS)
 
-$(ROOTCMD): all
+$(ROOTCMD): $(PROG)
 
 clean:
 	$(RM) $(OBJS)

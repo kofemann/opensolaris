@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/types.h>
 #include <sys/file.h>
 #include <sys/errno.h>
@@ -370,18 +368,20 @@ static struct dev_ops privcmd_dv_ops = {
 	DEVO_REV,
 	0,
 	privcmd_getinfo,
-	nulldev,	/* identify */
-	nulldev,	/* probe */
+	nulldev,		/* identify */
+	nulldev,		/* probe */
 	privcmd_attach,
 	privcmd_detach,
-	nodev,		/* reset */
+	nodev,			/* reset */
 	&privcmd_cb_ops,
-	0		/* struct bus_ops */
+	0,			/* struct bus_ops */
+	NULL,			/* power */
+	ddi_quiesce_not_needed,		/* quiesce */
 };
 
 static struct modldrv modldrv = {
 	&mod_driverops,
-	"privcmd driver %I%",
+	"privcmd driver",
 	&privcmd_dv_ops
 };
 

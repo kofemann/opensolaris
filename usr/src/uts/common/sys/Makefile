@@ -171,6 +171,7 @@ CHKHDRS=			\
 	devctl.h		\
 	devcache.h		\
 	devcache_impl.h		\
+	devfm.h			\
 	devid_cache.h		\
 	devinfo_impl.h		\
 	devops.h		\
@@ -817,6 +818,7 @@ SCSIHDRS=		\
 	scsi.h		\
 	scsi_address.h	\
 	scsi_ctl.h	\
+	scsi_fm.h	\
 	scsi_params.h	\
 	scsi_pkt.h	\
 	scsi_resource.h	\
@@ -1051,6 +1053,7 @@ CHECKHDRS=						\
 	$(IBMGTHDRS:%.h=ib/mgt/%.check)			\
 	$(IBMFHDRS:%.h=ib/mgt/ibmf/%.check)		\
 	$(TAVORHDRS:%.h=ib/adapters/tavor/%.check)	\
+	$(HERMONHDRS:%.h=ib/adapters/hermon/%.check)	\
 	$(ISOHDRS:%.h=iso/%.check)			\
 	$(FMHDRS:%.h=fm/%.check)			\
 	$(FMFSHDRS:%.h=fm/fs/%.check)			\

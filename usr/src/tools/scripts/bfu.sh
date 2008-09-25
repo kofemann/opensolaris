@@ -213,6 +213,7 @@ global_zone_only_files="
 	etc/security/tsol/devalloc_defaults
 	etc/system
 	etc/zones/index
+	kernel/drv/aac.conf
 	kernel/drv/elxl.conf
 	kernel/drv/md.conf
 	kernel/drv/options.conf
@@ -729,6 +730,22 @@ upgrade_aggr_and_linkprop () {
 		done
 		mv $ORIG $ORIG.bak
 	fi
+}
+
+# Update aac.conf for set legacy-name-enable properly
+update_aac_conf()
+{
+	conffile=$rootprefix/kernel/drv/aac.conf
+	childconffile=$rootprefix/bfu.child/kernel/drv/aac.conf
+
+	# Already using autoenumeration mode, return
+	egrep -s "legacy-name-enable" $childconffile && \
+	    grep "legacy-name-enable" $childconffile | egrep -s "no" && return
+
+	# Else enable legacy mode
+	sed -e 's/legacy-name-enable="no"/legacy-name-enable="yes"/g' \
+	    < $conffile > /tmp/aac.conf.$$
+	mv -f /tmp/aac.conf.$$ $conffile
 }
 
 # update x86 version mpt.conf for property tape
@@ -5766,6 +5783,14 @@ mondo_loop() {
 	rm -f $usr/lib/fm/prtopo
 
 	#
+	# Remove fm driver
+	#
+	rm -f $root/kernel/drv/fm
+	rm -f $root/kernel/drv/fm.conf
+	rm -f $root/kernel/drv/amd64/fm
+	rm -f $root/kernel/drv/sparcv9/fm
+
+	#
 	# Remove old AMD cpu module, to be replaced by extended cpu.generic
 	# with AMD-specific support layered on top as a model-specific module.
 	# Also remove the corresponding mdb and kmdb support.  Backwards BFU
@@ -5774,6 +5799,14 @@ mondo_loop() {
 	rm -f $root/platform/i86pc/kernel/cpu/amd64/cpu.AuthenticAMD.15
 	rm -f $root/usr/platform/i86pc/lib/mdb/kvm/cpu.AuthenticAMD.15.so
 	rm -f $root/usr/platform/i86pc/lib/mdb/kvm/amd64/cpu.AuthenticAMD.15.so
+	rm -f $root/usr/platform/i86pc/lib/mdb/kvm/cpu.generic.so
+	rm -f $root/usr/platform/i86pc/lib/mdb/kvm/amd64/cpu.generic.so
+	rm -f $root/usr/platform/i86pc/lib/mdb/kvm/cpu_ms.AuthenticAMD.15.so
+	rm -f $root/usr/platform/i86pc/lib/mdb/kvm/amd64/cpu_ms.AuthenticAMD.15.so
+	rm -f $root/usr/lib/mdb/kvm/cpu.generic.so
+	rm -f $root/usr/lib/mdb/kvm/amd64/cpu.generic.so
+	rm -f $root/usr/lib/mdb/kvm/cpu_ms.AuthenticAMD.15.so
+	rm -f $root/usr/lib/mdb/kvm/amd64/cpu_ms.AuthenticAMD.15.so
 
 	# Remove cpu.generic from i86xpv platform
 	rm -f $root/platform/i86xpv/kernel/cpu/cpu.generic
@@ -7998,6 +8031,8 @@ mondo_loop() {
 	update_policy_conf
 
 	tx_check_bkbfu
+
+	update_aac_conf
 
 	if [ $target_isa = i386 ]; then
 	    update_mptconf_i386

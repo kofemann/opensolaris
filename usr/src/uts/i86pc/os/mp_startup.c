@@ -134,13 +134,9 @@ init_cpu_info(struct cpu *cp)
 	cp->cpu_idstr = kmem_alloc(strlen(buf) + 1, KM_SLEEP);
 	(void) strcpy(cp->cpu_idstr, buf);
 
-	cmn_err(CE_CONT, "?cpu%d: %s\n", cp->cpu_id, cp->cpu_idstr);
-
 	(void) cpuid_getbrandstr(cp, buf, sizeof (buf));
 	cp->cpu_brandstr = kmem_alloc(strlen(buf) + 1, KM_SLEEP);
 	(void) strcpy(cp->cpu_brandstr, buf);
-
-	cmn_err(CE_CONT, "?cpu%d: %s\n", cp->cpu_id, cp->cpu_brandstr);
 }
 
 /*
@@ -1341,6 +1337,9 @@ start_other_cpus(int cprboot)
 	 */
 	init_cpu_info(CPU);
 
+	cmn_err(CE_CONT, "?cpu%d: %s\n", CPU->cpu_id, CPU->cpu_idstr);
+	cmn_err(CE_CONT, "?cpu%d: %s\n", CPU->cpu_id, CPU->cpu_brandstr);
+
 	/*
 	 * Initialize our syscall handlers
 	 */
@@ -1396,7 +1395,7 @@ start_other_cpus(int cprboot)
 	}
 
 	/* Free the space allocated to hold the microcode file */
-	ucode_free();
+	ucode_cleanup();
 
 	affinity_clear();
 
@@ -1553,6 +1552,9 @@ mp_startup(void)
 
 	cp->cpu_flags |= CPU_RUNNING | CPU_READY | CPU_EXISTS;
 
+	cmn_err(CE_CONT, "?cpu%d: %s\n", cp->cpu_id, cp->cpu_idstr);
+	cmn_err(CE_CONT, "?cpu%d: %s\n", cp->cpu_id, cp->cpu_brandstr);
+
 	if (dtrace_cpu_init != NULL) {
 		(*dtrace_cpu_init)(cp->cpu_id);
 	}
@@ -1599,8 +1601,7 @@ mp_startup(void)
 		cmi_hdl_t hdl;
 
 		if ((hdl = cmi_init(CMI_HDL_NATIVE, cmi_ntv_hwchipid(CPU),
-		    cmi_ntv_hwcoreid(CPU), cmi_ntv_hwstrandid(CPU),
-		    cmi_ntv_hwmstrand(CPU))) != NULL) {
+		    cmi_ntv_hwcoreid(CPU), cmi_ntv_hwstrandid(CPU))) != NULL) {
 			if (x86_feature & X86_MCA)
 				cmi_mca_init(hdl);
 		}

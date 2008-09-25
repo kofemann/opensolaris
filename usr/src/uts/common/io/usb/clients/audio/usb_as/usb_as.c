@@ -68,6 +68,7 @@
 #include <sys/stropts.h>
 #include <sys/strsun.h>
 #include <sys/strsubr.h>
+#include <sys/strsun.h>
 
 #include <sys/audio.h>
 #include <sys/audiovar.h>
@@ -244,7 +245,8 @@ static struct dev_ops usb_as_dev_ops = {
 	nodev,			/* devo_reset */
 	&usb_as_cb_ops,		/* devi_cb_ops */
 	NULL,			/* devo_busb_as_ops */
-	usb_as_power		/* devo_power */
+	usb_as_power,		/* devo_power */
+	ddi_quiesce_not_supported,	/* devo_quiesce */
 };
 
 /* Linkage structure for loadable drivers */
@@ -2135,7 +2137,7 @@ usb_as_send_mctl_up(usb_as_state_t *uasp, mblk_t *data)
 			 * Use the original mp to send the message up
 			 * This should already have the right ioc_cmd in.
 			 */
-			iocp->ioc_count = data->b_wptr - data->b_rptr;
+			iocp->ioc_count = MBLKL(data);
 			mp->b_cont = data;
 		} else {
 			iocp->ioc_count = 0;

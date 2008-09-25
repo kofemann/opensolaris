@@ -214,6 +214,7 @@ COMMON_SUBDIRS = \
 	cmd/plockstat \
 	cmd/pools \
 	cmd/power \
+	cmd/powertop \
 	cmd/ppgsz \
 	cmd/praudit \
 	cmd/prctl \
@@ -254,6 +255,7 @@ COMMON_SUBDIRS = \
 	cmd/split \
 	cmd/ssh \
 	cmd/stat \
+	cmd/stmsboot \
 	cmd/streams/strcmd \
 	cmd/strings \
 	cmd/su \
@@ -360,6 +362,7 @@ COMMON_SUBDIRS = \
 	lib/libmtmalloc \
 	lib/libnsl \
 	lib/libnvpair \
+	lib/libnwam \
 	lib/libpam \
 	lib/libpctx \
 	lib/libpicl \
@@ -402,6 +405,7 @@ COMMON_SUBDIRS = \
 	lib/nametoaddr \
 	lib/ncad_addr \
 	lib/nsswitch \
+	lib/openssl/libcrypto \
 	lib/pam_modules \
 	lib/passwdutil \
 	lib/pkcs11 \

@@ -18,7 +18,6 @@
 #
 # CDDL HEADER END
 #
-#
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
@@ -154,6 +153,7 @@ f none usr/bin/infocmp 555 root bin
 f none usr/bin/iostat 555 root bin
 f none usr/bin/isainfo 555 root bin
 f none usr/bin/isalist 555 root bin
+f none usr/bin/itu 555 root bin
 l none usr/bin/jobs=../../usr/bin/alias
 f none usr/bin/join 555 root bin
 s none usr/bin/jsh=../../sbin/sh
@@ -186,6 +186,7 @@ l none usr/bin/mc68020=../../usr/bin/i286
 l none usr/bin/mc68030=../../usr/bin/i286
 l none usr/bin/mc68040=../../usr/bin/i286
 f none usr/bin/mesg 555 root bin
+f none usr/bin/mkbootmedia 555 root bin
 f none usr/bin/mkdir 555 root bin
 f none usr/bin/mkpwdict 555 root bin
 f none usr/bin/mktemp 555 root bin
@@ -214,6 +215,7 @@ l none usr/bin/pfksh=../../usr/bin/ksh
 s none usr/bin/pfsh=../../sbin/sh
 f none usr/bin/pg 555 root bin
 f none usr/bin/pgrep 555 root bin
+f none usr/bin/pkg2du 555 root bin
 l none usr/bin/pkill=../../usr/bin/pgrep
 f none usr/bin/pktool 555 root bin
 f none usr/bin/pr 555 root bin
@@ -291,6 +293,7 @@ l none usr/bin/ulimit=../../usr/bin/alias
 l none usr/bin/umask=../../usr/bin/alias
 l none usr/bin/unalias=../../usr/bin/alias
 s none usr/bin/uname=../../sbin/uname
+f none usr/bin/updatemedia 555 root bin
 l none usr/bin/uptime=../../usr/lib/isaexec
 l none usr/bin/vax=../../usr/bin/i286
 l none usr/bin/vedit=../../usr/bin/edit
@@ -470,6 +473,7 @@ f none usr/lib/help/auths/locale/C/JobsGrant.html 444 root bin
 f none usr/lib/help/auths/locale/C/LoginEnable.html 444 root bin
 f none usr/lib/help/auths/locale/C/LoginHeader.html 444 root bin
 f none usr/lib/help/auths/locale/C/LoginRemote.html 444 root bin
+f none usr/lib/help/auths/locale/C/NetworkAutoconf.html 444 root bin
 f none usr/lib/help/auths/locale/C/NetworkHeader.html 444 root bin
 f none usr/lib/help/auths/locale/C/PriAdmin.html 444 root bin
 f none usr/lib/help/auths/locale/C/ProfmgrHeader.html 444 root bin
@@ -518,6 +522,7 @@ f none usr/lib/help/auths/locale/C/AuthReadSMB.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfWpaStates.html 444 root bin
 f none usr/lib/help/auths/locale/C/SysDate.html 444 root bin
 f none usr/lib/help/auths/locale/C/SysHeader.html 444 root bin
+f none usr/lib/help/auths/locale/C/SysMaintenance.html 444 root bin
 f none usr/lib/help/auths/locale/C/SysShutdown.html 444 root bin
 f none usr/lib/help/auths/locale/C/WifiConfig.html 444 root bin
 f none usr/lib/help/auths/locale/C/WifiWep.html 444 root bin
@@ -533,6 +538,7 @@ f none usr/lib/help/auths/locale/C/SysPowerMgmtSuspendtoDisk.html 0444 root bin
 f none usr/lib/help/auths/locale/C/SysPowerMgmtSuspendtoRAM.html 0444 root bin
 f none usr/lib/help/auths/locale/C/SysPowerMgmtBrightness.html 0444 root bin
 f none usr/lib/help/auths/locale/C/SysCpuPowerMgmt.html 0444 root bin
+f none usr/lib/help/auths/locale/C/SmfManageZFSSnap.html 0444 root bin
 d none usr/lib/help/profiles 755 root bin
 d none usr/lib/help/profiles/locale 755 root bin
 d none usr/lib/help/profiles/locale/C 755 root bin
@@ -567,6 +573,7 @@ f none usr/lib/help/profiles/locale/C/RtMediaBkup.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtMediaRestore.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtNameServiceAdmin.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtNameServiceSecure.html 444 root bin
+f none usr/lib/help/profiles/locale/C/RtNetAutoconf.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtNetIPsec.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtNetMngmnt.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtNetSecure.html 444 root bin
@@ -803,6 +810,7 @@ s none usr/sbin/edquota=../lib/fs/ufs/edquota
 f none usr/sbin/eeprom 2555 root sys
 s none usr/sbin/fdisk=../../sbin/fdisk
 f none usr/sbin/ff 555 root bin
+s none usr/sbin/fiocompress=../../sbin/fiocompress
 f none usr/sbin/fmthard 555 root sys
 f none usr/sbin/format 555 root bin
 f none usr/sbin/fsck 555 root bin

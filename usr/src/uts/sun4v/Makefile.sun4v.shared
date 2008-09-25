@@ -23,8 +23,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
-#
 #	This makefile contains the common definitions for the sun4v unix
 #	and all sun4v implementation architecture dependent modules.
 #
@@ -47,7 +45,6 @@ LINKED_PLATFORMS += SUNW,Netra-T5220
 LINKED_PLATFORMS += SUNW,USBRDT-5240
 LINKED_PLATFORMS += SUNW,Netra-T5440
 LINKED_PLATFORMS += SUNW,Sun-Blade-T6340
-LINKED_PLATFORMS += SUNW,USBRDT-5440
 PROMIF		 = ieee1275
 PSMBASE		 = $(UTSBASE)/../psm
 
@@ -168,7 +165,7 @@ CTFMERGE_GUDIR	= sun4v
 #
 #	machine specific optimization, override default in Makefile.master
 #
-CC_XARCH	= -xarch=v9a
+CC_XARCH	= -m64 -xarch=sparcvis
 AS_XARCH	= -xarch=v9v
 COPTIMIZE	= -xO3
 CCMODE		= -Xa
@@ -198,7 +195,7 @@ AS_INC_PATH	+= -I$(DSF_DIR)/$(OBJS_DIR)
 
 LINT_KMODS	+= $(GENUNIX_KMODS)
 
-LINT_DEFS	= -Xarch=v9
+LINT_DEFS	= -m64
 
 #
 #	The following must be defined for all implementations:

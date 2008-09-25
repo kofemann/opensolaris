@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"@(#)libshare_smb.c	1.16	08/08/05 SMI"
-
 /*
  * SMB specific functions
  */
@@ -607,6 +605,7 @@ smb_disable_share(sa_share_t share, char *path)
 	boolean_t iszfs;
 	int err = SA_OK;
 	sa_handle_t handle;
+	boolean_t first = B_TRUE; /* work around sharetab issue */
 
 	if (path == NULL)
 		return (err);
@@ -623,7 +622,7 @@ smb_disable_share(sa_share_t share, char *path)
 		goto done;
 
 	for (resource = sa_get_share_resource(share, NULL);
-	    resource != NULL;
+	    resource != NULL || err != SA_OK;
 	    resource = sa_get_next_resource(resource)) {
 		rname = sa_get_resource_attr(resource, "name");
 		if (rname == NULL) {
@@ -646,6 +645,17 @@ smb_disable_share(sa_share_t share, char *path)
 			sa_sharetab_fill_zfs(share, &sh, "smb");
 			err = sa_share_zfs(share, (char *)path, &sh,
 			    rname, ZFS_UNSHARE_SMB);
+			/*
+			 * If we are no longer the first case, we
+			 * don't care about the sa_share_zfs err if it
+			 * is -1. This works around a problem in
+			 * sharefs and should be removed when sharefs
+			 * supports multiple entries per path.
+			 */
+			if (!first && err == -1)
+				err = SA_OK;
+			first = B_FALSE;
+
 			sa_emptyshare(&sh);
 		}
 		sa_free_attr_string(rname);
@@ -927,15 +937,15 @@ ip_address_csv_list_validator_empty_ok(int index, char *value)
  */
 /*ARGSUSED*/
 static int
-path_validator(int index, char *value)
+path_validator(int index, char *path)
 {
 	struct stat buffer;
 	int fd, status;
 
-	if (value == NULL)
+	if (path == NULL)
 		return (SA_BAD_VALUE);
 
-	fd = open(value, O_RDONLY);
+	fd = open(path, O_RDONLY);
 	if (fd < 0)
 		return (SA_BAD_VALUE);
 
@@ -1018,6 +1028,7 @@ smb_share_init(void)
 	if (sa_plugin_ops.sa_init != smb_share_init)
 		return (SA_SYSTEM_ERR);
 
+	smb_share_door_clnt_init();
 	return (smb_load_proto_properties());
 }
 
@@ -1031,7 +1042,7 @@ smb_share_fini(void)
 	xmlFreeNode(protoset);
 	protoset = NULL;
 
-	(void) smb_share_dclose();
+	smb_share_door_clnt_fini();
 }
 
 /*

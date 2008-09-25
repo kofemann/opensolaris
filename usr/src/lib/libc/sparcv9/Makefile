@@ -22,8 +22,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
-#
 
 LIBCBASE=.
 
@@ -554,6 +552,7 @@ PORTGEN=			\
 	strncasecmp.o		\
 	strpbrk.o		\
 	strrchr.o		\
+	strsep.o		\
 	strsignal.o		\
 	strspn.o		\
 	strstr.o		\
@@ -1131,7 +1130,7 @@ lint:
 
 $(LINTLIB):= SRCS=../port/llib-lc
 $(LINTLIB):= CPPFLAGS += -D_MSE_INT_H
-$(LINTLIB):= LINTFLAGS64=-nvx -Xarch=v9
+$(LINTLIB):= LINTFLAGS64=-nvx -m64
 
 # object files that depend on inline template
 $(TIL:%=pics/%): $(LIBCBASE)/threads/sparcv9.il

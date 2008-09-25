@@ -21,8 +21,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
-#
 # lib/libsecdb/help/auths/Makefile
 #
 
@@ -62,6 +60,7 @@ HTMLENTS = \
 	SysHeader.html \
 	SysShutdown.html \
 	AllSolAuthsHeader.html \
+	SysMaintenance.html \
 	DhcpmgrHeader.html \
 	DhcpmgrWrite.html \
 	BindStates.html \
@@ -109,6 +108,7 @@ HTMLENTS = \
 	SmfValueVscan.html \
 	SmfVscanStates.html \
 	SmfWpaStates.html \
+	NetworkAutoconf.html \
 	NetworkHeader.html \
 	WifiConfig.html \
 	WifiWep.html \
@@ -143,7 +143,8 @@ HTMLENTS = \
 	SysPowerMgmtSuspendtoDisk.html \
 	SysPowerMgmtSuspendtoRAM.html \
 	SysPowerMgmtBrightness.html \
-	SysCpuPowerMgmt.html
+	SysCpuPowerMgmt.html \
+	SmfManageZFSSnap.html
 
 HELPDIR=$(ROOT)/usr/lib/help
 AUTHDIR=$(HELPDIR)/auths

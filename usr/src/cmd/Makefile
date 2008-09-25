@@ -209,6 +209,7 @@ COMMON_SUBDIRS=		\
 	isainfo		\
 	isalist		\
 	iscsi		\
+	itutools	\
 	java		\
 	join		\
 	kbd		\
@@ -293,6 +294,7 @@ COMMON_SUBDIRS=		\
 	policykit	\
 	pools		\
 	power		\
+	powertop	\
 	ppgsz		\
 	pg		\
 	plockstat	\

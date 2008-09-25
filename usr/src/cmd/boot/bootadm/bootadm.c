@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * bootadm(1M) is a new utility for managing bootability of
  * Solaris *Newboot* environments. It has two primary tasks:
@@ -45,6 +43,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/mnttab.h>
+#include <sys/mntent.h>
 #include <sys/statvfs.h>
 #include <libnvpair.h>
 #include <ftw.h>
@@ -322,6 +321,8 @@ struct safefile {
 
 static struct safefile *safefiles = NULL;
 #define	NEED_UPDATE_FILE "/etc/svc/volatile/boot_archive_needs_update"
+
+static int sync_menu = 1;	/* whether we need to sync the BE menus */
 
 static void
 usage(void)
@@ -617,6 +618,19 @@ check_subcmd_and_options(
 			usage();
 			return (BAM_ERROR);
 		}
+	} else if (strcmp(subcmd, "update_all") == 0) {
+		/*
+		 * The only option we accept for the "update_all"
+		 * subcmd is "fastboot".
+		 */
+		if (bam_argc > 1 || (bam_argc == 1 &&
+		    strcmp(bam_argv[0], "fastboot") != 0)) {
+			bam_error(TRAILING_ARGS);
+			usage();
+			return (BAM_ERROR);
+		}
+		if (bam_argc == 1)
+			sync_menu = 0;
 	} else if (bam_argc || bam_argv) {
 		bam_error(TRAILING_ARGS);
 		usage();
@@ -2412,7 +2426,8 @@ update_all(char *root, char *opt)
 	while (getextmntent(fp, &mnt, sizeof (mnt)) == 0) {
 		if (mnt.mnt_special == NULL)
 			continue;
-		if (strncmp(mnt.mnt_special, "/dev/", strlen("/dev/")) != 0)
+		if ((strcmp(mnt.mnt_fstype, MNTTYPE_ZFS) != 0) &&
+		    (strncmp(mnt.mnt_special, "/dev/", strlen("/dev/")) != 0))
 			continue;
 		if (strcmp(mnt.mnt_mountp, "/") == 0)
 			continue;
@@ -2456,7 +2471,7 @@ out:
 	 * If user has updated menu in current BE, propagate the
 	 * updates to all BEs.
 	 */
-	if (synchronize_BE_menu() != BAM_SUCCESS)
+	if (sync_menu && synchronize_BE_menu() != BAM_SUCCESS)
 		ret = BAM_ERROR;
 
 	return (ret);
@@ -7859,8 +7874,9 @@ ucode_install(char *root)
 		struct stat fstatus, tstatus;
 		struct utimbuf u_times;
 
-		(void) snprintf(file, PATH_MAX, "%s/%s/%s-ucode.txt",
-		    bam_root, UCODE_INSTALL_PATH, ucode_vendors[i].filestr);
+		(void) snprintf(file, PATH_MAX, "%s/%s/%s-ucode.%s",
+		    bam_root, UCODE_INSTALL_PATH, ucode_vendors[i].filestr,
+		    ucode_vendors[i].extstr);
 
 		if (stat(file, &fstatus) != 0 || !(S_ISREG(fstatus.st_mode)))
 			continue;

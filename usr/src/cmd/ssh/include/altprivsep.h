@@ -25,8 +25,6 @@
 #ifndef	_ALTPRIVSEP_H
 #define	_ALTPRIVSEP_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -40,26 +38,21 @@ extern "C" {
 #define	APS_MSG_RECORD_LOGIN	2
 #define	APS_MSG_RECORD_LOGOUT	3
 #define	APS_MSG_START_REKEX	4
+#define	APS_MSG_AUTH_CONTEXT	5
 
-pid_t	altprivsep_start_monitor(Authctxt *authctxt);
-
-void	altprivsep_do_monitor(Authctxt *authctxt, pid_t child_pid);
+void	altprivsep_start_and_do_monitor(int use_engine, int inetd, int newsock,
+		int statup_pipe);
 int	altprivsep_get_pipe_fd(void);
-int	altprivsep_is_monitor(void);
-int	altprivsep_started(void);
 
 /* child-side handler of re-key packets */
 void	altprivsep_rekey(int type, u_int32_t seq, void *ctxt);
 
-/* monitor-side fatal_cleanup callbacks */
-void	altprivsep_shutdown_sock(void *arg);
-
 /* Calls _to_ monitor from unprivileged process */
 void	altprivsep_process_input(fd_set *rset);
-void	altprivsep_get_newkeys(enum kex_modes mode);
 void	altprivsep_record_login(pid_t pid, const char *ttyname);
 void	altprivsep_record_logout(pid_t pid);
 void	altprivsep_start_rekex(void);
+void	altprivsep_send_auth_context(Authctxt *authctxt);
 
 /* Functions for use in the monitor */
 void	aps_input_altpriv_msg(int type, u_int32_t seq, void *ctxt);

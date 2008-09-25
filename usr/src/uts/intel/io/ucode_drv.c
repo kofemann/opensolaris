@@ -20,11 +20,9 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/file.h>
@@ -140,6 +138,12 @@ ucode_open(dev_t *dev, int flag, int otyp, cred_t *cr)
 static int
 ucode_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *cr, int *rval)
 {
+	/*
+	 * Make sure that the ucode ops pointer has been set up.
+	 */
+	if (!ucode)
+		return (EIO);
+
 	switch (cmd) {
 	case UCODE_GET_VERSION: {
 		int size;
@@ -220,7 +224,7 @@ ucode_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *cr, int *rval)
 			return (EFAULT);
 		}
 
-		if ((rc = ucode_validate(ucodep, size)) != EM_OK) {
+		if ((rc = ucode->validate(ucodep, size)) != EM_OK) {
 			kmem_free(ucodep, size);
 			STRUCT_FSET(h, uw_errno, rc);
 			if (ddi_copyout(STRUCT_BUF(h), (void *)arg,
@@ -276,18 +280,20 @@ static struct dev_ops ucode_dv_ops = {
 	DEVO_REV,
 	0,
 	ucode_getinfo,
-	nulldev,	/* identify */
-	nulldev,	/* probe */
+	nulldev,		/* identify */
+	nulldev,		/* probe */
 	ucode_attach,
 	ucode_detach,
-	nodev,		/* reset */
+	nodev,			/* reset */
 	&ucode_cb_ops,
-	(struct bus_ops *)0
+	(struct bus_ops *)0,
+	NULL,			/* power */
+	ddi_quiesce_not_needed,		/* quiesce */
 };
 
 static struct modldrv modldrv = {
 	&mod_driverops,
-	"ucode driver v%I%",
+	"ucode driver",
 	&ucode_dv_ops
 };
 

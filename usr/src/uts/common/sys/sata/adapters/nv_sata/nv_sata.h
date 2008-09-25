@@ -27,15 +27,25 @@
 #ifndef _NV_SATA_H
 #define	_NV_SATA_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #ifdef	__cplusplus
 extern "C" {
 #endif
 
+
+/*
+ * SGPIO Support
+ * Enable SGPIO support only on x86/x64, because it is implemented using
+ * functions that are only available on x86/x64.
+ */
+
 #define	NV_MAX_PORTS(nvc) nvc->nvc_sata_hba_tran.sata_tran_hba_num_cports
 
 typedef struct nv_port nv_port_t;
+
+#ifdef SGPIO_SUPPORT
+typedef struct nv_sgp_cmn nv_sgp_cmn_t;
+#endif
 
 typedef struct nv_ctl {
 	/*
@@ -87,6 +97,14 @@ typedef struct nv_ctl {
 	void		(*nvc_set_intr)(nv_port_t *nvp, int flag);
 	int		nvc_state;	/* state flags of ctrl see below */
 	uint8_t		nvc_revid;	/* PCI revid of device */
+
+#ifdef SGPIO_SUPPORT
+	int		nvc_mcp55_flag;	/* is the controller MCP55 or CK804 */
+	uint8_t		nvc_ctlr_num;	/* controller number within the part */
+	uint32_t	nvc_sgp_csr;	/* SGPIO CSR i/o address */
+	volatile nv_sgp_cb_t *nvc_sgp_cbp; /* SGPIO Command Block */
+	nv_sgp_cmn_t	*nvc_sgp_cmn;	/* SGPIO shared data */
+#endif
 } nv_ctl_t;
 
 
@@ -160,6 +178,10 @@ struct nv_port {
 
 	uint16_t	*nvp_mcp55_int_status;
 	uint16_t	*nvp_mcp55_int_ctl;
+
+#ifdef SGPIO_SUPPORT
+	uint8_t		nvp_sgp_ioctl_mod; /* LEDs modified by ioctl */
+#endif
 };
 
 
@@ -181,6 +203,21 @@ typedef struct nv_slot {
 			    struct nv_slot *nv_slotp);
 	uint32_t	nvslot_flags;
 } nv_slot_t;
+
+
+#ifdef SGPIO_SUPPORT
+struct nv_sgp_cmn {
+	uint16_t	nvs_magic;	/* verification of valid structure */
+	uint8_t		nvs_in_use;	/* bit-field of active ctlrs */
+	uint8_t		nvs_connected;	/* port connected bit-field flag */
+	uint8_t		nvs_activity;	/* port usage bit-field flag */
+	int		nvs_taskq_delay; /* rest time for activity LED taskq */
+	kmutex_t	nvs_slock;	/* lock for shared data */
+	kmutex_t	nvs_tlock;	/* lock for taskq */
+	kcondvar_t	nvs_cv;		/* condition variable for taskq wait */
+	ddi_taskq_t	*nvs_taskq;	/* activity LED taskq */
+};
+#endif
 
 
 /*
@@ -586,6 +623,7 @@ typedef struct prde {
 #define	NV_INTR_DISABLE		0x1
 #define	NV_INTR_ENABLE		0x2
 #define	NV_INTR_CLEAR_ALL	0x4
+#define	NV_INTR_DISABLE_NON_BLOCKING		0x8
 
 /*
  * sizes of strings to allocate
@@ -637,6 +675,20 @@ typedef struct prde {
 #define	NV_COPY_ERROR    0x02	/* error, did not complete ok */
 #define	NV_COPY_SSREGS   0x04	/* SS port registers */
 
+#ifdef SGPIO_SUPPORT
+#define	SGPIO_MAGIC		0x39da	/* verifies good sgpio struct */
+#define	SGPIO_LOOP_WAIT_USECS	62500	/* 1/16 second (in usecs) */
+#define	SGPIO_TQ_NAME_LEN	32
+
+/*
+ * The drive number format is ccp (binary).
+ * cc is the controller number (0-based number)
+ * p is the port number (0 or 1)
+ */
+#define	SGP_DRV_TO_PORT(d)		((d) & 1)
+#define	SGP_DRV_TO_CTLR(d)		((d) >> 1)
+#define	SGP_CTLR_PORT_TO_DRV(c, p)	(((c) << 1) | ((p) & 1))
+#endif
 
 #ifdef	__cplusplus
 }

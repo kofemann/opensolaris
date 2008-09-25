@@ -7,8 +7,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"$
-
 #if defined(KERNEL) || defined(_KERNEL)
 # undef KERNEL
 # undef _KERNEL
@@ -2179,7 +2177,6 @@ maskloop:
 			MUTEX_ENTER(&nat->nat_lock);
 			nat->nat_ref++;
 			MUTEX_EXIT(&nat->nat_lock);
-			nat->nat_touched = ifs->ifs_fr_ticks;
 			fin->fin_nat = nat;
 		}
 	} else
@@ -2220,7 +2217,7 @@ u_32_t nflags;
 	ipf_stack_t *ifs = fin->fin_ifs;
 
 #if SOLARIS && defined(_KERNEL)
-	net_data_t net_data_p = ifs->ifs_ipf_ipv6;
+	net_handle_t net_data_p = ifs->ifs_ipf_ipv6;
 #endif
 
 	tcp = NULL;
@@ -2467,7 +2464,6 @@ maskloop:
 			MUTEX_ENTER(&nat->nat_lock);
 			nat->nat_ref++;
 			MUTEX_EXIT(&nat->nat_lock);
-			nat->nat_touched = ifs->ifs_fr_ticks;
 			fin->fin_nat = nat;
 			fin->fin_state = nat->nat_state;
 		}
@@ -2509,7 +2505,7 @@ u_32_t nflags;
 	ipf_stack_t *ifs = fin->fin_ifs;
 
 #if SOLARIS && defined(_KERNEL)
-	net_data_t net_data_p = ifs->ifs_ipf_ipv6;
+	net_handle_t net_data_p = ifs->ifs_ipf_ipv6;
 #endif
 
 	tcp = NULL;

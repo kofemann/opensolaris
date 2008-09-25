@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/param.h>
 #include <sys/sysmacros.h>
 #include <sys/vm.h>
@@ -435,7 +433,7 @@ netstack_zone_shutdown(zoneid_t zoneid, void *arg)
 	 * Call the shutdown function for all registered modules for this
 	 * netstack.
 	 */
-	apply_all_modules(ns, netstack_apply_shutdown);
+	apply_all_modules_reverse(ns, netstack_apply_shutdown);
 
 	/* Tell any waiting netstack_register/netstack_unregister to proceed */
 	mutex_enter(&ns->netstack_lock);
@@ -546,7 +544,7 @@ netstack_stack_inactive(netstack_t *ns)
 	 * leave nms_flags the way it is i.e. with NSS_DESTROY_COMPLETED set.
 	 * That is different than in the netstack_unregister() case.
 	 */
-	apply_all_modules(ns, netstack_apply_shutdown);
+	apply_all_modules_reverse(ns, netstack_apply_shutdown);
 	apply_all_modules_reverse(ns, netstack_apply_destroy);
 
 	/* Tell any waiting netstack_register/netstack_unregister to proceed */

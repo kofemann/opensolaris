@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * Simple beeper support for PC platform, using standard timer 2 beeper.
@@ -91,13 +89,14 @@ static struct dev_ops pit_beep_ops = {
 	nodev,			/* Reset */
 	&pit_beep_cb_ops,	/* Driver operations */
 	0,			/* Bus operations */
-	NULL			/* Power */
+	NULL,			/* Power */
+	ddi_quiesce_not_needed,		/* quiesce */
 };
 
 
 static struct modldrv modldrv = {
 	&mod_driverops, 		/* This one is a driver */
-	"Intel Pit_beep Driver %I%",    /* Name of the module. */
+	"Intel Pit_beep Driver",	/* Name of the module. */
 	&pit_beep_ops,			/* Driver ops */
 };
 

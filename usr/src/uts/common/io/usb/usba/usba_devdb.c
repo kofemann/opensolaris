@@ -26,6 +26,7 @@
 
 #define	USBA_FRAMEWORK
 #include <sys/ksynch.h>
+#include <sys/strsun.h>
 #include <sys/usb/usba/usba_impl.h>
 #include <sys/usb/usba/usba_devdb_impl.h>
 
@@ -356,7 +357,9 @@ usb_devdb_compare_pathnames(char *p1, char *p2)
 			 */
 			ustr = strrchr(p2, '/');
 			hstr = strrchr(p1, '/');
-			rval = strncmp(p1, p2, MAX(ustr - p2, hstr - p1));
+			rval = strncmp(p1, p2,
+			    MAX(_PTRDIFF(ustr, p2),
+			    _PTRDIFF(hstr, p1)));
 			if (rval < 0) {
 
 				return (-1);
@@ -414,7 +417,7 @@ usba_devdb_compare(const void *p1, const void *p2)
 
 	USB_DPRINTF_L4(DPRINT_MASK_DEVDB, usba_devdb_log_handle,
 	    "usba_devdb_compare: p1=0x%p u1=0x%p p2=0x%p u2=0x%p",
-	    p1, (void *)u1, p2, u2);
+	    p1, (void *)u1, p2, (void *)u2);
 
 	/* first match vendor id */
 	if (u1->idVendor < u2->idVendor) {

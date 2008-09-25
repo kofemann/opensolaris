@@ -26,26 +26,10 @@
 
 include ../Makefile.com
 
-DATAFILES += i.rbac r.rbac i.initd i.manifest r.manifest i.logadmconf
-LICENSEFILES += $(OSBL)
-CDDL=
+DATAFILES += i.manifest r.manifest i.logadmconf
 
-CHKINSTALLSRC=checkinstall.initd
-
-ETCSEC = $(ROOT)/etc/security
-
-FILES += $(ETCSEC)/mms_auth_attr
-FILES += $(ETCSEC)/mms_exec_attr
-FILES += $(ETCSEC)/mms_prof_attr
-
-all: $(FILES)
+all: $(FILES) depend
 
 install: all pkg
 
 include ../Makefile.targ
-
-$(ETCSEC):
-	$(INS.dir)
-
-$(ETCSEC)/%: $(ETCSEC) %
-	$(INS.file)

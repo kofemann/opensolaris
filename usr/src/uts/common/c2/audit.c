@@ -19,15 +19,13 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 /*
  * This file contains the audit hook support code for auditing.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/proc.h>
@@ -1859,8 +1857,13 @@ add_return_token(caddr_t *ad, unsigned int scid, int err, int rval)
 	unsigned int sy_flags;
 
 #ifdef _SYSCALL32_IMPL
-	if (lwp_getdatamodel(
-		ttolwp(curthread)) == DATAMODEL_NATIVE)
+	/*
+	 * Guard against t_lwp being NULL when this function is called
+	 * from a kernel queue instead of from a direct system call.
+	 * In that case, assume the running kernel data model.
+	 */
+	if ((curthread->t_lwp == NULL) || (lwp_getdatamodel(
+	    ttolwp(curthread)) == DATAMODEL_NATIVE))
 		sy_flags = sysent[scid].sy_flags & SE_RVAL_MASK;
 	else
 		sy_flags = sysent32[scid].sy_flags & SE_RVAL_MASK;
@@ -2387,12 +2390,15 @@ audit_pf_policy(int cmd, cred_t *cred, netstack_t *ns, char *tun,
 
 		nszone = zone_find_by_id(netstackid_to_zoneid(
 		    ns->netstack_stackid));
-		if (strncmp(cred->cr_zone->zone_name, nszone->zone_name,
-		    ZONENAME_MAX) != 0) {
-			token_t *ztoken;
+		if (nszone != NULL) {
+			if (strncmp(cred->cr_zone->zone_name, nszone->zone_name,
+			    ZONENAME_MAX) != 0) {
+				token_t *ztoken;
 
-			ztoken = au_to_zonename(0, nszone);
-			au_write((caddr_t *)&ad, ztoken);
+				ztoken = au_to_zonename(0, nszone);
+				au_write((caddr_t *)&ad, ztoken);
+			}
+			zone_rele(nszone);
 		}
 
 		if (tun != NULL) {

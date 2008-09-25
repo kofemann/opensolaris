@@ -288,6 +288,7 @@ spa_prop_validate(spa_t *spa, nvlist_t *props)
 
 		case ZPOOL_PROP_DELEGATION:
 		case ZPOOL_PROP_AUTOREPLACE:
+		case ZPOOL_PROP_LISTSNAPS:
 			error = nvpair_value_uint64(elem, &intval);
 			if (!error && intval > 1)
 				error = EINVAL;
@@ -1985,7 +1986,7 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	 * Create the pool config object.
 	 */
 	spa->spa_config_object = dmu_object_alloc(spa->spa_meta_objset,
-	    DMU_OT_PACKED_NVLIST, 1 << 14,
+	    DMU_OT_PACKED_NVLIST, SPA_CONFIG_BLOCKSIZE,
 	    DMU_OT_PACKED_NVLIST_SIZE, sizeof (uint64_t), tx);
 
 	if (zap_add(spa->spa_meta_objset,
@@ -2244,7 +2245,7 @@ spa_build_rootpool_config(nvlist_t *config)
  * Get the root pool information from the root disk, then import the root pool
  * during the system boot up time.
  */
-extern nvlist_t *vdev_disk_read_rootlabel(char *, char *);
+extern int vdev_disk_read_rootlabel(char *, char *, nvlist_t **);
 
 int
 spa_check_rootconf(char *devpath, char *devid, nvlist_t **bestconf,
@@ -2252,14 +2253,17 @@ spa_check_rootconf(char *devpath, char *devid, nvlist_t **bestconf,
 {
 	nvlist_t *config;
 	uint64_t txg;
+	int error;
 
-	if ((config = vdev_disk_read_rootlabel(devpath, devid)) == NULL)
-		return (-1);
+	if (error = vdev_disk_read_rootlabel(devpath, devid, &config))
+		return (error);
 
 	VERIFY(nvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_TXG, &txg) == 0);
 
 	if (bestconf != NULL)
 		*bestconf = config;
+	else
+		nvlist_free(config);
 	*besttxg = txg;
 	return (0);
 }
@@ -2293,13 +2297,13 @@ spa_get_rootconf(char *devpath, char *devid, nvlist_t **bestconf)
 	char *bootpath = NULL;
 	uint_t children, c;
 	char *tmp;
+	int error;
 
 	if (devpath && ((tmp = strchr(devpath, ' ')) != NULL))
 		*tmp = '\0';
-	if (spa_check_rootconf(devpath, devid, &conf, &txg) < 0) {
+	if (error = spa_check_rootconf(devpath, devid, &conf, &txg)) {
 		cmn_err(CE_NOTE, "error reading device label");
-		nvlist_free(conf);
-		return (EINVAL);
+		return (error);
 	}
 	if (txg == 0) {
 		cmn_err(CE_NOTE, "this device is detached");
@@ -2340,8 +2344,9 @@ spa_get_rootconf(char *devpath, char *devid, nvlist_t **bestconf)
 		if (nvlist_lookup_string(child[c], ZPOOL_CONFIG_DEVID,
 		    &cdevid) != 0)
 			return (EINVAL);
-		if ((spa_check_rootconf(cpath, cdevid, NULL,
-		    &tmptxg) == 0) && (tmptxg > txg)) {
+		if (error = spa_check_rootconf(cpath, cdevid, NULL, &tmptxg))
+			return (error);
+		if (tmptxg > txg) {
 			txg = tmptxg;
 			VERIFY(nvlist_lookup_string(child[c],
 			    ZPOOL_CONFIG_PATH, &bootpath) == 0);
@@ -3690,19 +3695,27 @@ static void
 spa_sync_nvlist(spa_t *spa, uint64_t obj, nvlist_t *nv, dmu_tx_t *tx)
 {
 	char *packed = NULL;
+	size_t bufsize;
 	size_t nvsize = 0;
 	dmu_buf_t *db;
 
 	VERIFY(nvlist_size(nv, &nvsize, NV_ENCODE_XDR) == 0);
 
-	packed = kmem_alloc(nvsize, KM_SLEEP);
+	/*
+	 * Write full (SPA_CONFIG_BLOCKSIZE) blocks of configuration
+	 * information.  This avoids the dbuf_will_dirty() path and
+	 * saves us a pre-read to get data we don't actually care about.
+	 */
+	bufsize = P2ROUNDUP(nvsize, SPA_CONFIG_BLOCKSIZE);
+	packed = kmem_alloc(bufsize, KM_SLEEP);
 
 	VERIFY(nvlist_pack(nv, &packed, &nvsize, NV_ENCODE_XDR,
 	    KM_SLEEP) == 0);
+	bzero(packed + nvsize, bufsize - nvsize);
 
-	dmu_write(spa->spa_meta_objset, obj, 0, nvsize, packed, tx);
+	dmu_write(spa->spa_meta_objset, obj, 0, bufsize, packed, tx);
 
-	kmem_free(packed, nvsize);
+	kmem_free(packed, bufsize);
 
 	VERIFY(0 == dmu_bonus_hold(spa->spa_meta_objset, obj, FTAG, &db));
 	dmu_buf_will_dirty(db, tx);

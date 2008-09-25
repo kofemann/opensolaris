@@ -18,12 +18,11 @@
  *
  * CDDL HEADER END
  */
+
 /*
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/scsi/scsi_types.h>
 #include <sys/modctl.h>
@@ -732,7 +731,7 @@ pv_rwcmd_copyin(struct dadkio_rwcmd *rwcmdp, caddr_t inaddr, int flag)
 
 			rwcmdp->cmd = cmd32.cmd;
 			rwcmdp->flags = cmd32.flags;
-			rwcmdp->blkaddr = (daddr_t)cmd32.blkaddr;
+			rwcmdp->blkaddr = (blkaddr_t)cmd32.blkaddr;
 			rwcmdp->buflen = cmd32.buflen;
 			rwcmdp->bufaddr = (caddr_t)(intptr_t)cmd32.bufaddr;
 			/*
@@ -1464,7 +1463,9 @@ struct dev_ops pv_cmdk_ops = {
 	pv_cmdkdetach,		/* detach */
 	nodev,			/* reset */
 	&pv_cmdk_cb_ops,	/* driver operations */
-	(struct bus_ops *)0	/* bus operations */
+	(struct bus_ops *)0,	/* bus operations */
+	NULL,			/* power */
+	ddi_quiesce_not_supported,	/* devo_quiesce */
 };
 
 /*

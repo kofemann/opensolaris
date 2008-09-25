@@ -229,7 +229,8 @@ static struct dev_ops hid_ops = {
 	nodev,			/* reset */
 	&hid_cb_ops,		/* driver operations */
 	NULL,			/* bus operations */
-	hid_power		/* power */
+	hid_power,		/* power */
+	ddi_quiesce_not_needed,		/* quiesce */
 };
 
 static struct modldrv hidmodldrv =	{
@@ -752,7 +753,6 @@ hid_detach(dev_info_t *dip, ddi_detach_cmd_t	cmd)
 
 	return (rval);
 }
-
 
 /*
  * hid_open :
@@ -1918,7 +1918,7 @@ hid_set_protocol(hid_state_t *hidp, int protocol)
 	setup.bmRequestType = USB_DEV_REQ_HOST_TO_DEV |
 	    USB_DEV_REQ_TYPE_CLASS | USB_DEV_REQ_RCPT_IF;
 	setup.bRequest = SET_PROTOCOL;
-	setup.wValue = protocol;
+	setup.wValue = (uint16_t)protocol;
 	setup.wIndex = hidp->hid_if_descr.bInterfaceNumber;
 	setup.wLength = 0;
 	setup.attrs = 0;
@@ -3194,12 +3194,10 @@ hid_polled_read(hid_polled_handle_t hid_polled_input, uchar_t **buffer)
 		return (0);
 	}
 
-	/*LINTED*/
 	_NOTE(NO_COMPETING_THREADS_NOW);
 
 	*buffer = hidp->hid_polled_raw_buf;
 
-	/*LINTED*/
 	_NOTE(COMPETING_THREADS_NOW);
 
 	/*

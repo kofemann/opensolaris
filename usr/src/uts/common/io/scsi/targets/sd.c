@@ -18,6 +18,7 @@
  *
  * CDDL HEADER END
  */
+
 /*
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
@@ -65,6 +66,7 @@
 #include <sys/sysevent/eventdefs.h>
 #include <sys/sysevent/dev.h>
 
+#include <sys/fm/protocol.h>
 
 /*
  * Loadable module info.
@@ -206,8 +208,17 @@ static	char *sd_config_list		= "sd-config-list";
 
 #define	sd_dtype_optical_bind		ssd_dtype_optical_bind
 
-#endif
+#define	sd_ssc_init			ssd_ssc_init
+#define	sd_ssc_send			ssd_ssc_send
+#define	sd_ssc_fini			ssd_ssc_fini
+#define	sd_ssc_assessment		ssd_ssc_assessment
+#define	sd_ssc_post			ssd_ssc_post
+#define	sd_ssc_print			ssd_ssc_print
+#define	sd_ssc_ereport_post		ssd_ssc_ereport_post
+#define	sd_ssc_set_info			ssd_ssc_set_info
+#define	sd_ssc_extract_info		ssd_ssc_extract_info
 
+#endif
 
 #ifdef	SDDEBUG
 int	sd_force_pm_supported		= 0;
@@ -1116,13 +1127,51 @@ static void sd_scsi_target_lun_fini(void);
 static int  sd_scsi_get_target_lun_count(dev_info_t *dip, int target);
 static void sd_scsi_update_lun_on_target(dev_info_t *dip, int target, int flag);
 
-static int	sd_spin_up_unit(struct sd_lun *un);
+static int	sd_spin_up_unit(sd_ssc_t *ssc);
+
+/*
+ * Using sd_ssc_init to establish sd_ssc_t struct
+ * Using sd_ssc_send to send uscsi internal command
+ * Using sd_ssc_fini to free sd_ssc_t struct
+ */
+static sd_ssc_t *sd_ssc_init(struct sd_lun *un);
+static int sd_ssc_send(sd_ssc_t *ssc, struct uscsi_cmd *incmd,
+    int flag, enum uio_seg dataspace, int path_flag);
+static void sd_ssc_fini(sd_ssc_t *ssc);
+
+/*
+ * Using sd_ssc_assessment to set correct type-of-assessment
+ * Using sd_ssc_post to post ereport & system log
+ *       sd_ssc_post will call sd_ssc_print to print system log
+ *       sd_ssc_post will call sd_ssd_ereport_post to post ereport
+ */
+static void sd_ssc_assessment(sd_ssc_t *ssc,
+    enum sd_type_assessment tp_assess);
+
+static void sd_ssc_post(sd_ssc_t *ssc, enum sd_driver_assessment sd_assess);
+static void sd_ssc_print(sd_ssc_t *ssc, int sd_severity);
+static void sd_ssc_ereport_post(sd_ssc_t *ssc,
+    enum sd_driver_assessment drv_assess);
+
+/*
+ * Using sd_ssc_set_info to mark an un-decodable-data error.
+ * Using sd_ssc_extract_info to transfer information from internal
+ *       data structures to sd_ssc_t.
+ */
+static void sd_ssc_set_info(sd_ssc_t *ssc, int ssc_flags,
+    const char *fmt, ...);
+static void sd_ssc_extract_info(sd_ssc_t *ssc, struct sd_lun *un,
+    struct scsi_pkt *pktp, struct buf *bp, struct sd_xbuf *xp);
+
+static int sd_send_scsi_cmd(dev_t dev, struct uscsi_cmd *incmd, int flag,
+    enum uio_seg dataspace, int path_flag);
+
 #ifdef _LP64
-static void	sd_enable_descr_sense(struct sd_lun *un);
+static void	sd_enable_descr_sense(sd_ssc_t *ssc);
 static void	sd_reenable_dsense_task(void *arg);
 #endif /* _LP64 */
 
-static void	sd_set_mmc_caps(struct sd_lun *un);
+static void	sd_set_mmc_caps(sd_ssc_t *ssc);
 
 static void sd_read_unit_properties(struct sd_lun *un);
 static int  sd_process_sdconf_file(struct sd_lun *un);
@@ -1139,15 +1188,15 @@ static int  sd_chk_vers1_data(struct sd_lun *un, int flags, int *prop_list,
 static void sd_set_vers1_properties(struct sd_lun *un, int flags,
     sd_tunables *prop_list);
 
-static void sd_register_devid(struct sd_lun *un, dev_info_t *devi,
+static void sd_register_devid(sd_ssc_t *ssc, dev_info_t *devi,
     int reservation_flag);
-static int  sd_get_devid(struct sd_lun *un);
-static ddi_devid_t sd_create_devid(struct sd_lun *un);
-static int  sd_write_deviceid(struct sd_lun *un);
+static int  sd_get_devid(sd_ssc_t *ssc);
+static ddi_devid_t sd_create_devid(sd_ssc_t *ssc);
+static int  sd_write_deviceid(sd_ssc_t *ssc);
 static int  sd_get_devid_page(struct sd_lun *un, uchar_t *wwn, int *len);
-static int  sd_check_vpd_page_support(struct sd_lun *un);
+static int  sd_check_vpd_page_support(sd_ssc_t *ssc);
 
-static void sd_setup_pm(struct sd_lun *un, dev_info_t *devi);
+static void sd_setup_pm(sd_ssc_t *ssc, dev_info_t *devi);
 static void sd_create_pm_components(dev_info_t *devi, struct sd_lun *un);
 
 static int  sd_ddi_suspend(dev_info_t *devi);
@@ -1187,9 +1236,9 @@ static void  sd_event_callback(dev_info_t *, ddi_eventcookie_t, void *, void *);
 #define	SD_CACHE_DISABLE	0
 #define	SD_CACHE_NOCHANGE	-1
 
-static int   sd_cache_control(struct sd_lun *un, int rcd_flag, int wce_flag);
-static int   sd_get_write_cache_enabled(struct sd_lun *un, int *is_enabled);
-static void  sd_get_nv_sup(struct sd_lun *un);
+static int   sd_cache_control(sd_ssc_t *ssc, int rcd_flag, int wce_flag);
+static int   sd_get_write_cache_enabled(sd_ssc_t *ssc, int *is_enabled);
+static void  sd_get_nv_sup(sd_ssc_t *ssc);
 static dev_t sd_make_device(dev_info_t *devi);
 
 static void  sd_update_block_info(struct sd_lun *un, uint32_t lbasize,
@@ -1200,7 +1249,7 @@ static void  sd_update_block_info(struct sd_lun *un, uint32_t lbasize,
  */
 static int  sdopen(dev_t *dev_p, int flag, int otyp, cred_t *cred_p);
 static int  sdclose(dev_t dev, int flag, int otyp, cred_t *cred_p);
-static int  sd_ready_and_valid(struct sd_lun *un);
+static int  sd_ready_and_valid(sd_ssc_t *ssc, int part);
 
 static void sdmin(struct buf *bp);
 static int sdread(dev_t dev, struct uio *uio, cred_t *cred_p);
@@ -1407,43 +1456,43 @@ static void sd_log_lun_expansion_event(struct sd_lun *un, int km_flag);
 static void sd_media_change_task(void *arg);
 
 static int sd_handle_mchange(struct sd_lun *un);
-static int sd_send_scsi_DOORLOCK(struct sd_lun *un, int flag, int path_flag);
-static int sd_send_scsi_READ_CAPACITY(struct sd_lun *un, uint64_t *capp,
+static int sd_send_scsi_DOORLOCK(sd_ssc_t *ssc, int flag, int path_flag);
+static int sd_send_scsi_READ_CAPACITY(sd_ssc_t *ssc, uint64_t *capp,
 	uint32_t *lbap, int path_flag);
-static int sd_send_scsi_READ_CAPACITY_16(struct sd_lun *un, uint64_t *capp,
+static int sd_send_scsi_READ_CAPACITY_16(sd_ssc_t *ssc, uint64_t *capp,
 	uint32_t *lbap, int path_flag);
-static int sd_send_scsi_START_STOP_UNIT(struct sd_lun *un, int flag,
+static int sd_send_scsi_START_STOP_UNIT(sd_ssc_t *ssc, int flag,
 	int path_flag);
-static int sd_send_scsi_INQUIRY(struct sd_lun *un, uchar_t *bufaddr,
+static int sd_send_scsi_INQUIRY(sd_ssc_t *ssc, uchar_t *bufaddr,
 	size_t buflen, uchar_t evpd, uchar_t page_code, size_t *residp);
-static int sd_send_scsi_TEST_UNIT_READY(struct sd_lun *un, int flag);
-static int sd_send_scsi_PERSISTENT_RESERVE_IN(struct sd_lun *un,
+static int sd_send_scsi_TEST_UNIT_READY(sd_ssc_t *ssc, int flag);
+static int sd_send_scsi_PERSISTENT_RESERVE_IN(sd_ssc_t *ssc,
 	uchar_t usr_cmd, uint16_t data_len, uchar_t *data_bufp);
-static int sd_send_scsi_PERSISTENT_RESERVE_OUT(struct sd_lun *un,
+static int sd_send_scsi_PERSISTENT_RESERVE_OUT(sd_ssc_t *ssc,
 	uchar_t usr_cmd, uchar_t *usr_bufp);
 static int sd_send_scsi_SYNCHRONIZE_CACHE(struct sd_lun *un,
 	struct dk_callback *dkc);
 static int sd_send_scsi_SYNCHRONIZE_CACHE_biodone(struct buf *bp);
-static int sd_send_scsi_GET_CONFIGURATION(struct sd_lun *un,
+static int sd_send_scsi_GET_CONFIGURATION(sd_ssc_t *ssc,
 	struct uscsi_cmd *ucmdbuf, uchar_t *rqbuf, uint_t rqbuflen,
 	uchar_t *bufaddr, uint_t buflen, int path_flag);
-static int sd_send_scsi_feature_GET_CONFIGURATION(struct sd_lun *un,
+static int sd_send_scsi_feature_GET_CONFIGURATION(sd_ssc_t *ssc,
 	struct uscsi_cmd *ucmdbuf, uchar_t *rqbuf, uint_t rqbuflen,
 	uchar_t *bufaddr, uint_t buflen, char feature, int path_flag);
-static int sd_send_scsi_MODE_SENSE(struct sd_lun *un, int cdbsize,
+static int sd_send_scsi_MODE_SENSE(sd_ssc_t *ssc, int cdbsize,
 	uchar_t *bufaddr, size_t buflen, uchar_t page_code, int path_flag);
-static int sd_send_scsi_MODE_SELECT(struct sd_lun *un, int cdbsize,
+static int sd_send_scsi_MODE_SELECT(sd_ssc_t *ssc, int cdbsize,
 	uchar_t *bufaddr, size_t buflen, uchar_t save_page, int path_flag);
-static int sd_send_scsi_RDWR(struct sd_lun *un, uchar_t cmd, void *bufaddr,
+static int sd_send_scsi_RDWR(sd_ssc_t *ssc, uchar_t cmd, void *bufaddr,
 	size_t buflen, daddr_t start_block, int path_flag);
-#define	sd_send_scsi_READ(un, bufaddr, buflen, start_block, path_flag)	\
-	sd_send_scsi_RDWR(un, SCMD_READ, bufaddr, buflen, start_block, \
+#define	sd_send_scsi_READ(ssc, bufaddr, buflen, start_block, path_flag)	\
+	sd_send_scsi_RDWR(ssc, SCMD_READ, bufaddr, buflen, start_block, \
 	path_flag)
-#define	sd_send_scsi_WRITE(un, bufaddr, buflen, start_block, path_flag)	\
-	sd_send_scsi_RDWR(un, SCMD_WRITE, bufaddr, buflen, start_block,\
+#define	sd_send_scsi_WRITE(ssc, bufaddr, buflen, start_block, path_flag)\
+	sd_send_scsi_RDWR(ssc, SCMD_WRITE, bufaddr, buflen, start_block,\
 	path_flag)
 
-static int sd_send_scsi_LOG_SENSE(struct sd_lun *un, uchar_t *bufaddr,
+static int sd_send_scsi_LOG_SENSE(sd_ssc_t *ssc, uchar_t *bufaddr,
 	uint16_t buflen, uchar_t page_code, uchar_t page_control,
 	uint16_t param_ptr, int path_flag);
 
@@ -1513,12 +1562,12 @@ static void sd_delayed_cv_broadcast(void *arg);
 static int sr_volume_ctrl(dev_t dev, caddr_t data, int flag);
 static int sr_read_sony_session_offset(dev_t dev, caddr_t data, int flag);
 
-static int sd_log_page_supported(struct sd_lun *un, int log_page);
+static int sd_log_page_supported(sd_ssc_t *ssc, int log_page);
 
 /*
  * Function Prototype for the non-512 support (DVDRAM, MO etc.) functions.
  */
-static void sd_check_for_writable_cd(struct sd_lun *un, int path_flag);
+static void sd_check_for_writable_cd(sd_ssc_t *ssc, int path_flag);
 static int sd_wm_cache_constructor(void *wm, void *un, int flags);
 static void sd_wm_cache_destructor(void *wm, void *un);
 static struct sd_w_map *sd_range_lock(struct sd_lun *un, daddr_t startb,
@@ -1636,7 +1685,8 @@ static struct dev_ops sd_ops = {
 	nodev,			/* reset */
 	&sd_cb_ops,		/* driver operations */
 	NULL,			/* bus operations */
-	sdpower			/* power */
+	sdpower,		/* power */
+	ddi_quiesce_not_needed,		/* quiesce */
 };
 
 
@@ -2924,7 +2974,8 @@ sd_scsi_update_lun_on_target(dev_info_t *dip, int target, int flag)
  * Description: Issues the following commands to spin-up the device:
  *		START STOP UNIT, and INQUIRY.
  *
- *   Arguments: un - driver soft state (unit) structure
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *
  * Return Code: 0 - success
  *		EIO - failure
@@ -2934,12 +2985,16 @@ sd_scsi_update_lun_on_target(dev_info_t *dip, int target, int flag)
  */
 
 static int
-sd_spin_up_unit(struct sd_lun *un)
+sd_spin_up_unit(sd_ssc_t *ssc)
 {
 	size_t	resid		= 0;
 	int	has_conflict	= FALSE;
 	uchar_t *bufaddr;
+	int 	status;
+	struct sd_lun	*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 
 	/*
@@ -2951,9 +3006,14 @@ sd_spin_up_unit(struct sd_lun *un)
 	 * we don't want to fail the attach because it may become
 	 * "active" later.
 	 */
-	if (sd_send_scsi_START_STOP_UNIT(un, SD_TARGET_START, SD_PATH_DIRECT)
-	    == EACCES)
-		has_conflict = TRUE;
+	status = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_START,
+	    SD_PATH_DIRECT);
+
+	if (status != 0) {
+		if (status == EACCES)
+			has_conflict = TRUE;
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	}
 
 	/*
 	 * Send another INQUIRY command to the target. This is necessary for
@@ -2964,8 +3024,11 @@ sd_spin_up_unit(struct sd_lun *un)
 	 * Reservation Conflict is present.
 	 */
 	bufaddr = kmem_zalloc(SUN_INQSIZE, KM_SLEEP);
-	if (sd_send_scsi_INQUIRY(un, bufaddr, SUN_INQSIZE, 0, 0, &resid) != 0) {
+
+	if (sd_send_scsi_INQUIRY(ssc, bufaddr, SUN_INQSIZE, 0, 0, &resid)
+	    != 0) {
 		kmem_free(bufaddr, SUN_INQSIZE);
+		sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
 		return (EIO);
 	}
 
@@ -3003,18 +3066,25 @@ sd_spin_up_unit(struct sd_lun *un)
  *		complete sense data for commands that fail with an LBA
  *		larger than 32 bits.
  *
- *   Arguments: un - driver soft state (unit) structure
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *
  *     Context: Kernel thread context only
  */
 
 static void
-sd_enable_descr_sense(struct sd_lun *un)
+sd_enable_descr_sense(sd_ssc_t *ssc)
 {
 	uchar_t			*header;
 	struct mode_control_scsi3 *ctrl_bufp;
 	size_t			buflen;
 	size_t			bd_len;
+	int			status;
+	struct sd_lun		*un;
+
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
+	ASSERT(un != NULL);
 
 	/*
 	 * Read MODE SENSE page 0xA, Control Mode Page
@@ -3022,8 +3092,11 @@ sd_enable_descr_sense(struct sd_lun *un)
 	buflen = MODE_HEADER_LENGTH + MODE_BLK_DESC_LENGTH +
 	    sizeof (struct mode_control_scsi3);
 	header = kmem_zalloc(buflen, KM_SLEEP);
-	if (sd_send_scsi_MODE_SENSE(un, CDB_GROUP0, header, buflen,
-	    MODEPAGE_CTRL_MODE, SD_PATH_DIRECT) != 0) {
+
+	status = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP0, header, buflen,
+	    MODEPAGE_CTRL_MODE, SD_PATH_DIRECT);
+
+	if (status != 0) {
 		SD_ERROR(SD_LOG_COMMON, un,
 		    "sd_enable_descr_sense: mode sense ctrl page failed\n");
 		goto eds_exit;
@@ -3063,17 +3136,24 @@ sd_enable_descr_sense(struct sd_lun *un)
 	 */
 	ctrl_bufp->d_sense = 1;
 
+	sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+
 	/*
 	 * Use MODE SELECT to commit the change to the D_SENSE bit
 	 */
-	if (sd_send_scsi_MODE_SELECT(un, CDB_GROUP0, header,
-	    buflen, SD_DONTSAVE_PAGE, SD_PATH_DIRECT) != 0) {
+	status = sd_send_scsi_MODE_SELECT(ssc, CDB_GROUP0, header,
+	    buflen, SD_DONTSAVE_PAGE, SD_PATH_DIRECT);
+
+	if (status != 0) {
 		SD_INFO(SD_LOG_COMMON, un,
 		    "sd_enable_descr_sense: mode select ctrl page failed\n");
-		goto eds_exit;
+	} else {
+		kmem_free(header, buflen);
+		return;
 	}
 
 eds_exit:
+	sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 	kmem_free(header, buflen);
 }
 
@@ -3088,9 +3168,13 @@ static void
 sd_reenable_dsense_task(void *arg)
 {
 	struct	sd_lun	*un = arg;
+	sd_ssc_t	*ssc;
 
 	ASSERT(un != NULL);
-	sd_enable_descr_sense(un);
+
+	ssc = sd_ssc_init(un);
+	sd_enable_descr_sense(ssc);
+	sd_ssc_fini(ssc);
 }
 #endif /* _LP64 */
 
@@ -3102,13 +3186,14 @@ sd_reenable_dsense_task(void *arg)
  *		capabilities mode page. Also checks if the device is a
  *		dvdram writable device.
  *
- *   Arguments: un - driver soft state (unit) structure
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *
  *     Context: Kernel thread context only
  */
 
 static void
-sd_set_mmc_caps(struct sd_lun *un)
+sd_set_mmc_caps(sd_ssc_t *ssc)
 {
 	struct mode_header_grp2		*sense_mhp;
 	uchar_t				*sense_page;
@@ -3119,7 +3204,10 @@ sd_set_mmc_caps(struct sd_lun *un)
 	int				rtn;
 	uchar_t				*out_data_rw, *out_data_hd;
 	uchar_t				*rqbuf_rw, *rqbuf_hd;
+	struct sd_lun			*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 
 	/*
@@ -3132,8 +3220,10 @@ sd_set_mmc_caps(struct sd_lun *un)
 	un->un_f_cfg_cdda = FALSE;
 
 	buf = kmem_zalloc(BUFLEN_MODE_CDROM_CAP, KM_SLEEP);
-	status = sd_send_scsi_MODE_SENSE(un, CDB_GROUP1, (uchar_t *)buf,
+	status = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP1, (uchar_t *)buf,
 	    BUFLEN_MODE_CDROM_CAP, MODEPAGE_CDROM_CAP, SD_PATH_DIRECT);
+
+	sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 
 	if (status != 0) {
 		/* command failed; just return */
@@ -3197,9 +3287,12 @@ sd_set_mmc_caps(struct sd_lun *un)
 	out_data_rw = kmem_zalloc(SD_CURRENT_FEATURE_LEN, KM_SLEEP);
 	rqbuf_rw = kmem_zalloc(SENSE_LENGTH, KM_SLEEP);
 
-	rtn = sd_send_scsi_feature_GET_CONFIGURATION(un, &com, rqbuf_rw,
+	rtn = sd_send_scsi_feature_GET_CONFIGURATION(ssc, &com, rqbuf_rw,
 	    SENSE_LENGTH, out_data_rw, SD_CURRENT_FEATURE_LEN,
 	    RANDOM_WRITABLE, SD_PATH_STANDARD);
+
+	sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+
 	if (rtn != 0) {
 		kmem_free(out_data_rw, SD_CURRENT_FEATURE_LEN);
 		kmem_free(rqbuf_rw, SENSE_LENGTH);
@@ -3209,9 +3302,12 @@ sd_set_mmc_caps(struct sd_lun *un)
 	out_data_hd = kmem_zalloc(SD_CURRENT_FEATURE_LEN, KM_SLEEP);
 	rqbuf_hd = kmem_zalloc(SENSE_LENGTH, KM_SLEEP);
 
-	rtn = sd_send_scsi_feature_GET_CONFIGURATION(un, &com, rqbuf_hd,
+	rtn = sd_send_scsi_feature_GET_CONFIGURATION(ssc, &com, rqbuf_hd,
 	    SENSE_LENGTH, out_data_hd, SD_CURRENT_FEATURE_LEN,
 	    HARDWARE_DEFECT_MANAGEMENT, SD_PATH_STANDARD);
+
+	sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+
 	if (rtn == 0) {
 		/*
 		 * We have good information, check for random writable
@@ -3247,7 +3343,7 @@ sd_set_mmc_caps(struct sd_lun *un)
  */
 
 static void
-sd_check_for_writable_cd(struct sd_lun *un, int path_flag)
+sd_check_for_writable_cd(sd_ssc_t *ssc, int path_flag)
 {
 	struct uscsi_cmd		com;
 	uchar_t				*out_data;
@@ -3260,7 +3356,10 @@ sd_check_for_writable_cd(struct sd_lun *un, int path_flag)
 	caddr_t				buf;
 	int				bd_len;
 	int				status;
+	struct sd_lun			*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(mutex_owned(SD_MUTEX(un)));
 
@@ -3274,8 +3373,11 @@ sd_check_for_writable_cd(struct sd_lun *un, int path_flag)
 	out_data = kmem_zalloc(SD_PROFILE_HEADER_LEN, KM_SLEEP);
 	rqbuf = kmem_zalloc(SENSE_LENGTH, KM_SLEEP);
 
-	rtn = sd_send_scsi_GET_CONFIGURATION(un, &com, rqbuf, SENSE_LENGTH,
+	rtn = sd_send_scsi_GET_CONFIGURATION(ssc, &com, rqbuf, SENSE_LENGTH,
 	    out_data, SD_PROFILE_HEADER_LEN, path_flag);
+
+	if (rtn != 0)
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 
 	mutex_enter(SD_MUTEX(un));
 	if (rtn == 0) {
@@ -3298,8 +3400,11 @@ sd_check_for_writable_cd(struct sd_lun *un, int path_flag)
 	 */
 	mutex_exit(SD_MUTEX(un));
 	buf = kmem_zalloc(BUFLEN_MODE_CDROM_CAP, KM_SLEEP);
-	status = sd_send_scsi_MODE_SENSE(un, CDB_GROUP1, (uchar_t *)buf,
+	status = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP1, (uchar_t *)buf,
 	    BUFLEN_MODE_CDROM_CAP, MODEPAGE_CDROM_CAP, path_flag);
+
+	sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+
 	mutex_enter(SD_MUTEX(un));
 	if (status != 0) {
 		/* command failed; just return */
@@ -3343,9 +3448,11 @@ sd_check_for_writable_cd(struct sd_lun *un, int path_flag)
 	out_data_rw = kmem_zalloc(SD_CURRENT_FEATURE_LEN, KM_SLEEP);
 	rqbuf_rw = kmem_zalloc(SENSE_LENGTH, KM_SLEEP);
 
-	rtn = sd_send_scsi_feature_GET_CONFIGURATION(un, &com, rqbuf_rw,
+	rtn = sd_send_scsi_feature_GET_CONFIGURATION(ssc, &com, rqbuf_rw,
 	    SENSE_LENGTH, out_data_rw, SD_CURRENT_FEATURE_LEN,
 	    RANDOM_WRITABLE, path_flag);
+
+	sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 	if (rtn != 0) {
 		kmem_free(out_data_rw, SD_CURRENT_FEATURE_LEN);
 		kmem_free(rqbuf_rw, SENSE_LENGTH);
@@ -3356,9 +3463,11 @@ sd_check_for_writable_cd(struct sd_lun *un, int path_flag)
 	out_data_hd = kmem_zalloc(SD_CURRENT_FEATURE_LEN, KM_SLEEP);
 	rqbuf_hd = kmem_zalloc(SENSE_LENGTH, KM_SLEEP);
 
-	rtn = sd_send_scsi_feature_GET_CONFIGURATION(un, &com, rqbuf_hd,
+	rtn = sd_send_scsi_feature_GET_CONFIGURATION(ssc, &com, rqbuf_hd,
 	    SENSE_LENGTH, out_data_hd, SD_CURRENT_FEATURE_LEN,
 	    HARDWARE_DEFECT_MANAGEMENT, path_flag);
+
+	sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 	mutex_enter(SD_MUTEX(un));
 	if (rtn == 0) {
 		/*
@@ -4527,6 +4636,8 @@ sd_get_physical_geometry(struct sd_lun *un, cmlb_geom_t *pgeom_p,
 	uchar_t	*p4bufp;
 	int	cdbsize;
 	int 	ret = EIO;
+	sd_ssc_t *ssc;
+	int	status;
 
 	ASSERT(un != NULL);
 
@@ -4554,9 +4665,10 @@ sd_get_physical_geometry(struct sd_lun *un, cmlb_geom_t *pgeom_p,
 	 * Retrieve MODE SENSE page 3 - Format Device Page
 	 */
 	p3bufp = kmem_zalloc(SD_MODE_SENSE_PAGE3_LENGTH, KM_SLEEP);
-	if (sd_send_scsi_MODE_SENSE(un, cdbsize, p3bufp,
-	    SD_MODE_SENSE_PAGE3_LENGTH, SD_MODE_SENSE_PAGE3_CODE, path_flag)
-	    != 0) {
+	ssc = sd_ssc_init(un);
+	status = sd_send_scsi_MODE_SENSE(ssc, cdbsize, p3bufp,
+	    SD_MODE_SENSE_PAGE3_LENGTH, SD_MODE_SENSE_PAGE3_CODE, path_flag);
+	if (status != 0) {
 		SD_ERROR(SD_LOG_COMMON, un,
 		    "sd_get_physical_geometry: mode sense page 3 failed\n");
 		goto page3_exit;
@@ -4581,6 +4693,10 @@ sd_get_physical_geometry(struct sd_lun *un, cmlb_geom_t *pgeom_p,
 	if (bd_len > MODE_BLK_DESC_LENGTH) {
 		SD_ERROR(SD_LOG_COMMON, un, "sd_get_physical_geometry: "
 		    "received unexpected bd_len of %d, page3\n", bd_len);
+		sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+		    "sd_get_physical_geometry: received unexpected "
+		    "bd_len of %d, page3", bd_len);
+		status = EIO;
 		goto page3_exit;
 	}
 
@@ -4591,6 +4707,10 @@ sd_get_physical_geometry(struct sd_lun *un, cmlb_geom_t *pgeom_p,
 		SD_ERROR(SD_LOG_COMMON, un, "sd_get_physical_geometry: "
 		    "mode sense pg3 code mismatch %d\n",
 		    page3p->mode_page.code);
+		sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+		    "sd_get_physical_geometry: mode sense pg3 code "
+		    "mismatch %d", page3p->mode_page.code);
+		status = EIO;
 		goto page3_exit;
 	}
 
@@ -4623,14 +4743,15 @@ sd_get_physical_geometry(struct sd_lun *un, cmlb_geom_t *pgeom_p,
 	    BE_16(page3p->track_skew),
 	    BE_16(page3p->cylinder_skew));
 
+	sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 
 	/*
 	 * Retrieve MODE SENSE page 4 - Rigid Disk Drive Geometry Page
 	 */
 	p4bufp = kmem_zalloc(SD_MODE_SENSE_PAGE4_LENGTH, KM_SLEEP);
-	if (sd_send_scsi_MODE_SENSE(un, cdbsize, p4bufp,
-	    SD_MODE_SENSE_PAGE4_LENGTH, SD_MODE_SENSE_PAGE4_CODE, path_flag)
-	    != 0) {
+	status = sd_send_scsi_MODE_SENSE(ssc, cdbsize, p4bufp,
+	    SD_MODE_SENSE_PAGE4_LENGTH, SD_MODE_SENSE_PAGE4_CODE, path_flag);
+	if (status != 0) {
 		SD_ERROR(SD_LOG_COMMON, un,
 		    "sd_get_physical_geometry: mode sense page 4 failed\n");
 		goto page4_exit;
@@ -4653,6 +4774,10 @@ sd_get_physical_geometry(struct sd_lun *un, cmlb_geom_t *pgeom_p,
 	if (bd_len > MODE_BLK_DESC_LENGTH) {
 		SD_ERROR(SD_LOG_COMMON, un, "sd_get_physical_geometry: "
 		    "received unexpected bd_len of %d, page4\n", bd_len);
+		sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+		    "sd_get_physical_geometry: received unexpected "
+		    "bd_len of %d, page4", bd_len);
+		status = EIO;
 		goto page4_exit;
 	}
 
@@ -4663,6 +4788,10 @@ sd_get_physical_geometry(struct sd_lun *un, cmlb_geom_t *pgeom_p,
 		SD_ERROR(SD_LOG_COMMON, un, "sd_get_physical_geometry: "
 		    "mode sense pg4 code mismatch %d\n",
 		    page4p->mode_page.code);
+		sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+		    "sd_get_physical_geometry: mode sense pg4 code "
+		    "mismatch %d", page4p->mode_page.code);
+		status = EIO;
 		goto page4_exit;
 	}
 
@@ -4732,12 +4861,40 @@ sd_get_physical_geometry(struct sd_lun *un, cmlb_geom_t *pgeom_p,
 	    "   lbasize: %d; capacity: %ld; intrlv: %d; rpm: %d\n",
 	    pgeom_p->g_secsize, pgeom_p->g_capacity,
 	    pgeom_p->g_intrlv, pgeom_p->g_rpm);
+	sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 
 page4_exit:
 	kmem_free(p4bufp, SD_MODE_SENSE_PAGE4_LENGTH);
+
 page3_exit:
 	kmem_free(p3bufp, SD_MODE_SENSE_PAGE3_LENGTH);
 
+	if (status != 0) {
+		if (status == EIO) {
+			/*
+			 * Some disks do not support mode sense(6), we
+			 * should ignore this kind of error(sense key is
+			 * 0x5 - illegal request).
+			 */
+			uint8_t *sensep;
+			int senlen;
+
+			sensep = (uint8_t *)ssc->ssc_uscsi_cmd->uscsi_rqbuf;
+			senlen = (int)(ssc->ssc_uscsi_cmd->uscsi_rqlen -
+			    ssc->ssc_uscsi_cmd->uscsi_rqresid);
+
+			if (senlen > 0 &&
+			    scsi_sense_key(sensep) == KEY_ILLEGAL_REQUEST) {
+				sd_ssc_assessment(ssc,
+				    SD_FMT_IGNORE_COMPROMISE);
+			} else {
+				sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+			}
+		} else {
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+		}
+	}
+	sd_ssc_fini(ssc);
 	return (ret);
 }
 
@@ -4849,7 +5006,7 @@ sd_update_block_info(struct sd_lun *un, uint32_t lbasize, uint64_t capacity)
  *     Context: Kernel Thread
  */
 static void
-sd_register_devid(struct sd_lun *un, dev_info_t *devi, int reservation_flag)
+sd_register_devid(sd_ssc_t *ssc, dev_info_t *devi, int reservation_flag)
 {
 	int		rval		= 0;
 	uchar_t		*inq80		= NULL;
@@ -4860,7 +5017,10 @@ sd_register_devid(struct sd_lun *un, dev_info_t *devi, int reservation_flag)
 	size_t		inq83_resid	= 0;
 	int		dlen, len;
 	char		*sn;
+	struct sd_lun	*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(mutex_owned(SD_MUTEX(un)));
 	ASSERT((SD_DEVINFO(un)) == devi);
@@ -4888,13 +5048,13 @@ sd_register_devid(struct sd_lun *un, dev_info_t *devi, int reservation_flag)
 		 * may result in invalid geometry, so check to make sure a
 		 * reservation conflict did not occur during attach.
 		 */
-		if ((sd_get_devid(un) == EINVAL) &&
+		if ((sd_get_devid(ssc) == EINVAL) &&
 		    (reservation_flag != SD_TARGET_IS_RESERVED)) {
 			/*
 			 * The devid is invalid AND there is no reservation
 			 * conflict.  Fabricate a new devid.
 			 */
-			(void) sd_create_devid(un);
+			(void) sd_create_devid(ssc);
 		}
 
 		/* Register the devid if it exists */
@@ -4916,16 +5076,18 @@ sd_register_devid(struct sd_lun *un, dev_info_t *devi, int reservation_flag)
 	 * vid/pid/serial # for Sun qualified disks, or use the ddi framework
 	 * to fabricate a devid for non-Sun qualified disks.
 	 */
-	if (sd_check_vpd_page_support(un) == 0) {
+	if (sd_check_vpd_page_support(ssc) == 0) {
 		/* collect page 80 data if available */
 		if (un->un_vpd_page_mask & SD_VPD_UNIT_SERIAL_PG) {
 
 			mutex_exit(SD_MUTEX(un));
 			inq80 = kmem_zalloc(inq80_len, KM_SLEEP);
-			rval = sd_send_scsi_INQUIRY(un, inq80, inq80_len,
+
+			rval = sd_send_scsi_INQUIRY(ssc, inq80, inq80_len,
 			    0x01, 0x80, &inq80_resid);
 
 			if (rval != 0) {
+				sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 				kmem_free(inq80, inq80_len);
 				inq80 = NULL;
 				inq80_len = 0;
@@ -4965,10 +5127,12 @@ sd_register_devid(struct sd_lun *un, dev_info_t *devi, int reservation_flag)
 		if (un->un_vpd_page_mask & SD_VPD_DEVID_WWN_PG) {
 			mutex_exit(SD_MUTEX(un));
 			inq83 = kmem_zalloc(inq83_len, KM_SLEEP);
-			rval = sd_send_scsi_INQUIRY(un, inq83, inq83_len,
+
+			rval = sd_send_scsi_INQUIRY(ssc, inq83, inq83_len,
 			    0x01, 0x83, &inq83_resid);
 
 			if (rval != 0) {
+				sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 				kmem_free(inq83, inq83_len);
 				inq83 = NULL;
 				inq83_len = 0;
@@ -5002,8 +5166,8 @@ sd_register_devid(struct sd_lun *un, dev_info_t *devi, int reservation_flag)
 		 * Create a fabricate devid only if there's no
 		 * fabricate devid existed.
 		 */
-		if (sd_get_devid(un) == EINVAL) {
-			(void) sd_create_devid(un);
+		if (sd_get_devid(ssc) == EINVAL) {
+			(void) sd_create_devid(ssc);
 		}
 		un->un_f_opt_fab_devid = TRUE;
 
@@ -5044,7 +5208,7 @@ sd_register_devid(struct sd_lun *un, dev_info_t *devi, int reservation_flag)
  */
 
 static int
-sd_get_devid(struct sd_lun *un)
+sd_get_devid(sd_ssc_t *ssc)
 {
 	struct dk_devid		*dkdevid;
 	ddi_devid_t		tmpid;
@@ -5055,7 +5219,10 @@ sd_get_devid(struct sd_lun *un)
 	int			chksum;
 	int			i;
 	size_t			buffer_size;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(mutex_owned(SD_MUTEX(un)));
 
@@ -5083,9 +5250,11 @@ sd_get_devid(struct sd_lun *un)
 	buffer_size = SD_REQBYTES2TGTBYTES(un, sizeof (struct dk_devid));
 	mutex_exit(SD_MUTEX(un));
 	dkdevid = kmem_alloc(buffer_size, KM_SLEEP);
-	status = sd_send_scsi_READ(un, dkdevid, buffer_size, blk,
+	status = sd_send_scsi_READ(ssc, dkdevid, buffer_size, blk,
 	    SD_PATH_DIRECT);
+
 	if (status != 0) {
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 		goto error;
 	}
 
@@ -5153,8 +5322,12 @@ error:
  */
 
 static ddi_devid_t
-sd_create_devid(struct sd_lun *un)
+sd_create_devid(sd_ssc_t *ssc)
 {
+	struct sd_lun	*un;
+
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 
 	/* Fabricate the devid */
@@ -5164,7 +5337,7 @@ sd_create_devid(struct sd_lun *un)
 	}
 
 	/* Write the devid to disk */
-	if (sd_write_deviceid(un) != 0) {
+	if (sd_write_deviceid(ssc) != 0) {
 		ddi_devid_free(un->un_devid);
 		un->un_devid = NULL;
 	}
@@ -5188,14 +5361,18 @@ sd_create_devid(struct sd_lun *un)
  */
 
 static int
-sd_write_deviceid(struct sd_lun *un)
+sd_write_deviceid(sd_ssc_t *ssc)
 {
 	struct dk_devid		*dkdevid;
 	diskaddr_t		blk;
 	uint_t			*ip, chksum;
 	int			status;
 	int			i;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
+	ASSERT(un != NULL);
 	ASSERT(mutex_owned(SD_MUTEX(un)));
 
 	mutex_exit(SD_MUTEX(un));
@@ -5231,8 +5408,10 @@ sd_write_deviceid(struct sd_lun *un)
 	DKD_FORMCHKSUM(chksum, dkdevid);
 
 	/* Write the reserved sector */
-	status = sd_send_scsi_WRITE(un, dkdevid, un->un_sys_blocksize, blk,
+	status = sd_send_scsi_WRITE(ssc, dkdevid, un->un_sys_blocksize, blk,
 	    SD_PATH_DIRECT);
+	if (status != 0)
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 
 	kmem_free(dkdevid, un->un_sys_blocksize);
 
@@ -5259,7 +5438,7 @@ sd_write_deviceid(struct sd_lun *un)
  */
 
 static int
-sd_check_vpd_page_support(struct sd_lun *un)
+sd_check_vpd_page_support(sd_ssc_t *ssc)
 {
 	uchar_t	*page_list	= NULL;
 	uchar_t	page_length	= 0xff;	/* Use max possible length */
@@ -5267,7 +5446,10 @@ sd_check_vpd_page_support(struct sd_lun *un)
 	uchar_t	page_code	= 0x00;	/* Supported VPD Pages */
 	int    	rval		= 0;
 	int	counter;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(mutex_owned(SD_MUTEX(un)));
 
@@ -5279,8 +5461,11 @@ sd_check_vpd_page_support(struct sd_lun *un)
 	 */
 	page_list =  kmem_zalloc(page_length, KM_SLEEP);
 
-	rval = sd_send_scsi_INQUIRY(un, page_list, page_length, evpd,
+	rval = sd_send_scsi_INQUIRY(ssc, page_list, page_length, evpd,
 	    page_code, NULL);
+
+	if (rval != 0)
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 
 	mutex_enter(SD_MUTEX(un));
 
@@ -5352,11 +5537,16 @@ sd_check_vpd_page_support(struct sd_lun *un)
  */
 
 static void
-sd_setup_pm(struct sd_lun *un, dev_info_t *devi)
+sd_setup_pm(sd_ssc_t *ssc, dev_info_t *devi)
 {
-	uint_t	log_page_size;
-	uchar_t	*log_page_data;
-	int	rval;
+	uint_t		log_page_size;
+	uchar_t		*log_page_data;
+	int		rval = 0;
+	struct sd_lun	*un;
+
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
+	ASSERT(un != NULL);
 
 	/*
 	 * Since we are called from attach, holding a mutex for
@@ -5388,8 +5578,11 @@ sd_setup_pm(struct sd_lun *un, dev_info_t *devi)
 		 * device has a motor.
 		 */
 		un->un_f_start_stop_supported = TRUE;
-		if (sd_send_scsi_START_STOP_UNIT(un, SD_TARGET_START,
-		    SD_PATH_DIRECT) != 0) {
+		rval = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_START,
+		    SD_PATH_DIRECT);
+
+		if (rval != 0) {
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 			un->un_f_start_stop_supported = FALSE;
 		}
 
@@ -5408,7 +5601,7 @@ sd_setup_pm(struct sd_lun *un, dev_info_t *devi)
 		return;
 	}
 
-	rval = sd_log_page_supported(un, START_STOP_CYCLE_PAGE);
+	rval = sd_log_page_supported(ssc, START_STOP_CYCLE_PAGE);
 
 #ifdef	SDDEBUG
 	if (sd_force_pm_supported) {
@@ -5439,7 +5632,7 @@ sd_setup_pm(struct sd_lun *un, dev_info_t *devi)
 		 * START_STOP_CYCLE_PAGE_VU_PAGE (0x31) in older disks. For
 		 * newer disks it is implemented as START_STOP_CYCLE_PAGE (0xE).
 		 */
-		if (sd_log_page_supported(un, START_STOP_CYCLE_VU_PAGE) == 1) {
+		if (sd_log_page_supported(ssc, START_STOP_CYCLE_VU_PAGE) == 1) {
 			/*
 			 * Page found, use this one.
 			 */
@@ -5466,9 +5659,14 @@ sd_setup_pm(struct sd_lun *un, dev_info_t *devi)
 		log_page_size = START_STOP_CYCLE_COUNTER_PAGE_SIZE;
 		log_page_data = kmem_zalloc(log_page_size, KM_SLEEP);
 
-		rval = sd_send_scsi_LOG_SENSE(un, log_page_data,
+		rval = sd_send_scsi_LOG_SENSE(ssc, log_page_data,
 		    log_page_size, un->un_start_stop_cycle_page,
 		    0x01, 0, SD_PATH_DIRECT);
+
+		if (rval != 0) {
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+		}
+
 #ifdef	SDDEBUG
 		if (sd_force_pm_supported) {
 			/* Force a successful result */
@@ -6061,6 +6259,7 @@ sdpower(dev_info_t *devi, int component, int level)
 	int		sval;
 	uchar_t		state_before_pm;
 	int		got_semaphore_here;
+	sd_ssc_t	*ssc;
 
 	instance = ddi_get_instance(devi);
 
@@ -6071,6 +6270,7 @@ sdpower(dev_info_t *devi, int component, int level)
 	}
 
 	dev = sd_make_device(SD_DEVINFO(un));
+	ssc = sd_ssc_init(un);
 
 	SD_TRACE(SD_LOG_IO_PM, un, "sdpower: entry, level = %d\n", level);
 
@@ -6108,7 +6308,8 @@ sdpower(dev_info_t *devi, int component, int level)
 		}
 		SD_TRACE(SD_LOG_IO_PM, un,
 		    "sdpower: exit, device has queued cmds.\n");
-		return (DDI_FAILURE);
+
+		goto sdpower_failed;
 	}
 
 	/*
@@ -6128,7 +6329,8 @@ sdpower(dev_info_t *devi, int component, int level)
 		}
 		SD_TRACE(SD_LOG_IO_PM, un,
 		    "sdpower: exit, device is off-line.\n");
-		return (DDI_FAILURE);
+
+		goto sdpower_failed;
 	}
 
 	/*
@@ -6159,8 +6361,16 @@ sdpower(dev_info_t *devi, int component, int level)
 		log_sense_page = un->un_start_stop_cycle_page;
 		mutex_exit(SD_MUTEX(un));
 
-		rval = sd_send_scsi_LOG_SENSE(un, log_page_data,
+		rval = sd_send_scsi_LOG_SENSE(ssc, log_page_data,
 		    log_page_size, log_sense_page, 0x01, 0, SD_PATH_DIRECT);
+
+		if (rval != 0) {
+			if (rval == EIO)
+				sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+			else
+				sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+		}
+
 #ifdef	SDDEBUG
 		if (sd_force_pm_supported) {
 			/* Force a successful result */
@@ -6170,6 +6380,7 @@ sdpower(dev_info_t *devi, int component, int level)
 		if (rval != 0) {
 			scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 			    "Log Sense Failed\n");
+
 			kmem_free(log_page_data, log_page_size);
 			/* Cannot support power management on those drives */
 
@@ -6187,7 +6398,8 @@ sdpower(dev_info_t *devi, int component, int level)
 			mutex_exit(SD_MUTEX(un));
 			SD_TRACE(SD_LOG_IO_PM, un,
 			    "sdpower: exit, Log Sense Failed.\n");
-			return (DDI_FAILURE);
+
+			goto sdpower_failed;
 		}
 
 		/*
@@ -6279,8 +6491,8 @@ sdpower(dev_info_t *devi, int component, int level)
 
 			SD_TRACE(SD_LOG_IO_PM, un, "sdpower: exit, "
 			    "trans check Failed, not ok to power cycle.\n");
-			return (DDI_FAILURE);
 
+			goto sdpower_failed;
 		case -1:
 			if (got_semaphore_here != 0) {
 				sema_v(&un->un_semoclose);
@@ -6296,7 +6508,8 @@ sdpower(dev_info_t *devi, int component, int level)
 			mutex_exit(SD_MUTEX(un));
 			SD_TRACE(SD_LOG_IO_PM, un,
 			    "sdpower: exit, trans check command Failed.\n");
-			return (DDI_FAILURE);
+
+			goto sdpower_failed;
 		}
 	}
 
@@ -6334,7 +6547,8 @@ sdpower(dev_info_t *devi, int component, int level)
 			mutex_exit(SD_MUTEX(un));
 			SD_TRACE(SD_LOG_IO_PM, un,
 			    "sdpower: exit, PM suspend Failed.\n");
-			return (DDI_FAILURE);
+
+			goto sdpower_failed;
 		}
 	}
 
@@ -6352,16 +6566,25 @@ sdpower(dev_info_t *devi, int component, int level)
 	 * a deadlock on un_pm_busy_cv will occur.
 	 */
 	if (level == SD_SPINDLE_ON) {
-		(void) sd_send_scsi_TEST_UNIT_READY(un,
+		sval = sd_send_scsi_TEST_UNIT_READY(ssc,
 		    SD_DONT_RETRY_TUR | SD_BYPASS_PM);
+		if (sval != 0)
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 	}
 
 	SD_TRACE(SD_LOG_IO_PM, un, "sdpower: sending \'%s\' unit\n",
 	    ((level == SD_SPINDLE_ON) ? "START" : "STOP"));
 
-	sval = sd_send_scsi_START_STOP_UNIT(un,
+	sval = sd_send_scsi_START_STOP_UNIT(ssc,
 	    ((level == SD_SPINDLE_ON) ? SD_TARGET_START : SD_TARGET_STOP),
 	    SD_PATH_DIRECT);
+	if (sval != 0) {
+		if (sval == EIO)
+			sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+		else
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	}
+
 	/* Command failed, check for media present. */
 	if ((sval == ENXIO) && un->un_f_has_removable_media) {
 		medium_present = FALSE;
@@ -6474,7 +6697,13 @@ sdpower(dev_info_t *devi, int component, int level)
 
 	SD_TRACE(SD_LOG_IO_PM, un, "sdpower: exit, status = 0x%x\n", rval);
 
+	sd_ssc_fini(ssc);
 	return (rval);
+
+sdpower_failed:
+
+	sd_ssc_fini(ssc);
+	return (DDI_FAILURE);
 }
 
 
@@ -6598,6 +6827,9 @@ sd_unit_attach(dev_info_t *devi)
 	dev_info_t	*pdip = ddi_get_parent(devi);
 	int		offbyone = 0;
 	int		geom_label_valid = 0;
+	sd_ssc_t	*ssc;
+	int		status;
+	struct sd_fm_internal	*sfip = NULL;
 #if defined(__sparc)
 	int		max_xfer_size;
 #endif
@@ -7254,6 +7486,20 @@ sd_unit_attach(dev_info_t *devi)
 		un->un_pkt_flags = 0;
 	}
 
+	/* Initialize sd_ssc_t for internal uscsi commands */
+	ssc = sd_ssc_init(un);
+	scsi_fm_init(devp);
+
+	/*
+	 * Allocate memory for SCSI FMA stuffs.
+	 */
+	un->un_fm_private =
+	    kmem_zalloc(sizeof (struct sd_fm_internal), KM_SLEEP);
+	sfip = (struct sd_fm_internal *)un->un_fm_private;
+	sfip->fm_ssc.ssc_uscsi_cmd = &sfip->fm_ucmd;
+	sfip->fm_ssc.ssc_uscsi_info = &sfip->fm_uinfo;
+	sfip->fm_ssc.ssc_un = un;
+
 	/*
 	 * At this point in the attach, we have enough info in the
 	 * soft state to be able to issue commands to the target.
@@ -7275,8 +7521,11 @@ sd_unit_attach(dev_info_t *devi)
 	 * Pass in flag SD_DONT_RETRY_TUR to prevent the long delays associated
 	 * with attempts at spinning up a device with no media.
 	 */
-	if (sd_send_scsi_TEST_UNIT_READY(un, SD_DONT_RETRY_TUR) == EACCES) {
-		reservation_flag = SD_TARGET_IS_RESERVED;
+	status = sd_send_scsi_TEST_UNIT_READY(ssc, SD_DONT_RETRY_TUR);
+	if (status != 0) {
+		if (status == EACCES)
+			reservation_flag = SD_TARGET_IS_RESERVED;
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 	}
 
 	/*
@@ -7287,7 +7536,8 @@ sd_unit_attach(dev_info_t *devi)
 	 * the attach despite the failure (see below).
 	 */
 	if (un->un_f_descr_format_supported) {
-		switch (sd_spin_up_unit(un)) {
+
+		switch (sd_spin_up_unit(ssc)) {
 		case 0:
 			/*
 			 * Spin-up was successful; now try to read the
@@ -7297,12 +7547,14 @@ sd_unit_attach(dev_info_t *devi)
 			SD_TRACE(SD_LOG_ATTACH_DETACH, un,
 			    "sd_unit_attach: un:0x%p spin-up successful\n", un);
 
-			switch (sd_send_scsi_READ_CAPACITY(un, &capacity,
-			    &lbasize, SD_PATH_DIRECT)) {
+			status = sd_send_scsi_READ_CAPACITY(ssc, &capacity,
+			    &lbasize, SD_PATH_DIRECT);
+
+			switch (status) {
 			case 0: {
 				if (capacity > DK_MAX_BLOCKS) {
 #ifdef _LP64
-					if (capacity + 1 >
+					if ((capacity + 1) >
 					    SD_GROUP1_MAX_ADDRESS) {
 						/*
 						 * Enable descriptor format
@@ -7310,7 +7562,7 @@ sd_unit_attach(dev_info_t *devi)
 						 * get 64 bit sense data
 						 * fields.
 						 */
-						sd_enable_descr_sense(un);
+						sd_enable_descr_sense(ssc);
 					}
 #else
 					/* 32-bit kernels can't handle this */
@@ -7372,6 +7624,8 @@ sd_unit_attach(dev_info_t *devi)
 				    sd_label, CE_WARN,
 				    "disk capacity is too large "
 				    "for current cdb length");
+				sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+
 				goto spinup_failed;
 			case EACCES:
 				/*
@@ -7384,6 +7638,7 @@ sd_unit_attach(dev_info_t *devi)
 				    "sd_send_scsi_READ_CAPACITY "
 				    "returned reservation conflict\n", un);
 				reservation_flag = SD_TARGET_IS_RESERVED;
+				sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 				break;
 			default:
 				/*
@@ -7391,6 +7646,12 @@ sd_unit_attach(dev_info_t *devi)
 				 * spin-up succeeded. Just continue with
 				 * the attach...
 				 */
+				if (status == EIO)
+					sd_ssc_assessment(ssc,
+					    SD_FMT_STATUS_CHECK);
+				else
+					sd_ssc_assessment(ssc,
+					    SD_FMT_IGNORE);
 				break;
 			}
 			break;
@@ -7411,13 +7672,14 @@ sd_unit_attach(dev_info_t *devi)
 			    "sd_unit_attach: un:0x%p spin-up failed.", un);
 			goto spinup_failed;
 		}
+
 	}
 
 	/*
 	 * Check to see if this is a MMC drive
 	 */
 	if (ISCD(un)) {
-		sd_set_mmc_caps(un);
+		sd_set_mmc_caps(ssc);
 	}
 
 
@@ -7440,7 +7702,7 @@ sd_unit_attach(dev_info_t *devi)
 	 */
 	mutex_init(&un->un_pm_mutex, NULL, MUTEX_DRIVER, NULL);
 	cv_init(&un->un_pm_busy_cv, NULL, CV_DRIVER, NULL);
-	sd_setup_pm(un, devi);
+	sd_setup_pm(ssc, devi);
 	if (un->un_f_pm_is_enabled == FALSE) {
 		/*
 		 * For performance, point to a jump table that does
@@ -7535,7 +7797,7 @@ sd_unit_attach(dev_info_t *devi)
 	 * Read and initialize the devid for the unit.
 	 */
 	if (un->un_f_devid_supported) {
-		sd_register_devid(un, devi, reservation_flag);
+		sd_register_devid(ssc, devi, reservation_flag);
 	}
 	mutex_exit(SD_MUTEX(un));
 
@@ -7561,7 +7823,7 @@ sd_unit_attach(dev_info_t *devi)
 		 * Disable both read cache and write cache.  This is
 		 * the historic behavior of the keywords in the config file.
 		 */
-		if (sd_cache_control(un, SD_CACHE_DISABLE, SD_CACHE_DISABLE) !=
+		if (sd_cache_control(ssc, SD_CACHE_DISABLE, SD_CACHE_DISABLE) !=
 		    0) {
 			SD_ERROR(SD_LOG_ATTACH_DETACH, un,
 			    "sd_unit_attach: un:0x%p Could not disable "
@@ -7574,7 +7836,7 @@ sd_unit_attach(dev_info_t *devi)
 	 * Check the value of the WCE bit now and
 	 * set un_f_write_cache_enabled accordingly.
 	 */
-	(void) sd_get_write_cache_enabled(un, &wc_enabled);
+	(void) sd_get_write_cache_enabled(ssc, &wc_enabled);
 	mutex_enter(SD_MUTEX(un));
 	un->un_f_write_cache_enabled = (wc_enabled != 0);
 	mutex_exit(SD_MUTEX(un));
@@ -7583,12 +7845,14 @@ sd_unit_attach(dev_info_t *devi)
 	 * Check the value of the NV_SUP bit and set
 	 * un_f_suppress_cache_flush accordingly.
 	 */
-	sd_get_nv_sup(un);
+	sd_get_nv_sup(ssc);
 
 	/*
 	 * Find out what type of reservation this disk supports.
 	 */
-	switch (sd_send_scsi_PERSISTENT_RESERVE_IN(un, SD_READ_KEYS, 0, NULL)) {
+	status = sd_send_scsi_PERSISTENT_RESERVE_IN(ssc, SD_READ_KEYS, 0, NULL);
+
+	switch (status) {
 	case 0:
 		/*
 		 * SCSI-3 reservations are supported.
@@ -7605,6 +7869,8 @@ sd_unit_attach(dev_info_t *devi)
 		SD_INFO(SD_LOG_ATTACH_DETACH, un,
 		    "sd_unit_attach: un:0x%p SCSI-2 reservations\n", un);
 		un->un_reservation_type = SD_SCSI2_RESERVATION;
+
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 		break;
 	default:
 		/*
@@ -7613,6 +7879,8 @@ sd_unit_attach(dev_info_t *devi)
 		SD_INFO(SD_LOG_ATTACH_DETACH, un,
 		    "sd_unit_attach: un:0x%p default SCSI3 reservations\n", un);
 		un->un_reservation_type = SD_SCSI3_RESERVATION;
+
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 		break;
 	}
 
@@ -7653,6 +7921,9 @@ sd_unit_attach(dev_info_t *devi)
 	SD_TRACE(SD_LOG_ATTACH_DETACH, un,
 	    "sd_unit_attach: un:0x%p exit success\n", un);
 
+	/* Uninitialize sd_ssc_t pointer */
+	sd_ssc_fini(ssc);
+
 	return (DDI_SUCCESS);
 
 	/*
@@ -7686,7 +7957,13 @@ cmlb_attach_failed:
 
 spinup_failed:
 
+	/* Uninitialize sd_ssc_t pointer */
+	sd_ssc_fini(ssc);
+
 	mutex_enter(SD_MUTEX(un));
+
+	/* Deallocate SCSI FMA memory spaces */
+	kmem_free(un->un_fm_private, sizeof (struct sd_fm_internal));
 
 	/* Cancel callback for SD_PATH_DIRECT_PRIORITY cmd. restart */
 	if (un->un_direct_priority_timeid != NULL) {
@@ -8148,6 +8425,13 @@ sd_unit_detach(dev_info_t *devi)
 	 * At this point there should be no competing threads anymore.
 	 */
 
+	scsi_fm_fini(devp);
+
+	/*
+	 * Deallocate memory for SCSI FMA.
+	 */
+	kmem_free(un->un_fm_private, sizeof (struct sd_fm_internal));
+
 	/* Unregister and free device id. */
 	ddi_devid_unregister(devi);
 	if (un->un_devid) {
@@ -8581,7 +8865,8 @@ sd_event_callback(dev_info_t *dip, ddi_eventcookie_t event, void *arg,
  *		enable) and RCD (read cache disable) bits of mode
  *		page 8 (MODEPAGE_CACHING).
  *
- *   Arguments: un - driver soft state (unit) structure
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *		rcd_flag - flag for controlling the read cache
  *		wce_flag - flag for controlling the write cache
  *
@@ -8593,7 +8878,7 @@ sd_event_callback(dev_info_t *dip, ddi_eventcookie_t event, void *arg,
  */
 
 static int
-sd_cache_control(struct sd_lun *un, int rcd_flag, int wce_flag)
+sd_cache_control(sd_ssc_t *ssc, int rcd_flag, int wce_flag)
 {
 	struct mode_caching	*mode_caching_page;
 	uchar_t			*header;
@@ -8602,14 +8887,20 @@ sd_cache_control(struct sd_lun *un, int rcd_flag, int wce_flag)
 	int			bd_len;
 	int			rval = 0;
 	struct mode_header_grp2	*mhp;
+	struct sd_lun		*un;
+	int			status;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 
 	/*
 	 * Do a test unit ready, otherwise a mode sense may not work if this
 	 * is the first command sent to the device after boot.
 	 */
-	(void) sd_send_scsi_TEST_UNIT_READY(un, 0);
+	status = sd_send_scsi_TEST_UNIT_READY(ssc, 0);
+	if (status != 0)
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 
 	if (un->un_f_cfg_is_atapi == TRUE) {
 		hdrlen = MODE_HEADER_LENGTH_GRP2;
@@ -8630,17 +8921,17 @@ sd_cache_control(struct sd_lun *un, int rcd_flag, int wce_flag)
 
 	/* Get the information from the device. */
 	if (un->un_f_cfg_is_atapi == TRUE) {
-		rval = sd_send_scsi_MODE_SENSE(un, CDB_GROUP1, header, buflen,
+		rval = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP1, header, buflen,
 		    MODEPAGE_CACHING, SD_PATH_DIRECT);
 	} else {
-		rval = sd_send_scsi_MODE_SENSE(un, CDB_GROUP0, header, buflen,
+		rval = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP0, header, buflen,
 		    MODEPAGE_CACHING, SD_PATH_DIRECT);
 	}
+
 	if (rval != 0) {
 		SD_ERROR(SD_LOG_IOCTL_RMMEDIA, un,
 		    "sd_cache_control: Mode Sense Failed\n");
-		kmem_free(header, buflen);
-		return (rval);
+		goto mode_sense_failed;
 	}
 
 	/*
@@ -8659,8 +8950,11 @@ sd_cache_control(struct sd_lun *un, int rcd_flag, int wce_flag)
 		scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 		    "sd_cache_control: Mode Sense returned invalid "
 		    "block descriptor length\n");
-		kmem_free(header, buflen);
-		return (EIO);
+		sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+		    "sd_cache_control: Mode Sense returned invalid "
+		    "block descriptor length");
+		rval = EIO;
+		goto mode_sense_failed;
 	}
 
 	mode_caching_page = (struct mode_caching *)(header + hdrlen + bd_len);
@@ -8668,8 +8962,11 @@ sd_cache_control(struct sd_lun *un, int rcd_flag, int wce_flag)
 		SD_ERROR(SD_LOG_COMMON, un, "sd_cache_control: Mode Sense"
 		    " caching page code mismatch %d\n",
 		    mode_caching_page->mode_page.code);
-		kmem_free(header, buflen);
-		return (EIO);
+		sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+		    "sd_cache_control: Mode Sense caching page code "
+		    "mismatch %d", mode_caching_page->mode_page.code);
+		rval = EIO;
+		goto mode_sense_failed;
 	}
 
 	/* Check the relevant bits on successful mode sense. */
@@ -8726,17 +9023,30 @@ sd_cache_control(struct sd_lun *un, int rcd_flag, int wce_flag)
 			((struct mode_header *)header)->bdesc_length = bd_len;
 		}
 
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+
 		/* Issue mode select to change the cache settings */
 		if (un->un_f_cfg_is_atapi == TRUE) {
-			rval = sd_send_scsi_MODE_SELECT(un, CDB_GROUP1, header,
+			rval = sd_send_scsi_MODE_SELECT(ssc, CDB_GROUP1, header,
 			    sbuflen, save_pg, SD_PATH_DIRECT);
 		} else {
-			rval = sd_send_scsi_MODE_SELECT(un, CDB_GROUP0, header,
+			rval = sd_send_scsi_MODE_SELECT(ssc, CDB_GROUP0, header,
 			    sbuflen, save_pg, SD_PATH_DIRECT);
 		}
+
 	}
 
+
+mode_sense_failed:
+
 	kmem_free(header, buflen);
+
+	if (rval != 0) {
+		if (rval == EIO)
+			sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+		else
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	}
 	return (rval);
 }
 
@@ -8748,7 +9058,8 @@ sd_cache_control(struct sd_lun *un, int rcd_flag, int wce_flag)
  *		write caching is enabled.  It examines the WCE (write cache
  *		enable) bits of mode page 8 (MODEPAGE_CACHING).
  *
- *   Arguments: un - driver soft state (unit) structure
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *		is_enabled - pointer to int where write cache enabled state
  *		is returned (non-zero -> write cache enabled)
  *
@@ -8772,7 +9083,7 @@ sd_cache_control(struct sd_lun *un, int rcd_flag, int wce_flag)
  */
 
 static int
-sd_get_write_cache_enabled(struct sd_lun *un, int *is_enabled)
+sd_get_write_cache_enabled(sd_ssc_t *ssc, int *is_enabled)
 {
 	struct mode_caching	*mode_caching_page;
 	uchar_t			*header;
@@ -8780,7 +9091,11 @@ sd_get_write_cache_enabled(struct sd_lun *un, int *is_enabled)
 	int			hdrlen;
 	int			bd_len;
 	int			rval = 0;
+	struct sd_lun		*un;
+	int			status;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(is_enabled != NULL);
 
@@ -8791,7 +9106,10 @@ sd_get_write_cache_enabled(struct sd_lun *un, int *is_enabled)
 	 * Do a test unit ready, otherwise a mode sense may not work if this
 	 * is the first command sent to the device after boot.
 	 */
-	(void) sd_send_scsi_TEST_UNIT_READY(un, 0);
+	status = sd_send_scsi_TEST_UNIT_READY(ssc, 0);
+
+	if (status != 0)
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 
 	if (un->un_f_cfg_is_atapi == TRUE) {
 		hdrlen = MODE_HEADER_LENGTH_GRP2;
@@ -8808,17 +9126,17 @@ sd_get_write_cache_enabled(struct sd_lun *un, int *is_enabled)
 
 	/* Get the information from the device. */
 	if (un->un_f_cfg_is_atapi == TRUE) {
-		rval = sd_send_scsi_MODE_SENSE(un, CDB_GROUP1, header, buflen,
+		rval = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP1, header, buflen,
 		    MODEPAGE_CACHING, SD_PATH_DIRECT);
 	} else {
-		rval = sd_send_scsi_MODE_SENSE(un, CDB_GROUP0, header, buflen,
+		rval = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP0, header, buflen,
 		    MODEPAGE_CACHING, SD_PATH_DIRECT);
 	}
+
 	if (rval != 0) {
 		SD_ERROR(SD_LOG_IOCTL_RMMEDIA, un,
 		    "sd_get_write_cache_enabled: Mode Sense Failed\n");
-		kmem_free(header, buflen);
-		return (rval);
+		goto mode_sense_failed;
 	}
 
 	/*
@@ -8838,8 +9156,12 @@ sd_get_write_cache_enabled(struct sd_lun *un, int *is_enabled)
 		scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 		    "sd_get_write_cache_enabled: Mode Sense returned invalid "
 		    "block descriptor length\n");
-		kmem_free(header, buflen);
-		return (EIO);
+		/* FMA should make upset complain here */
+		sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+		    "sd_get_write_cache_enabled: Mode Sense returned invalid "
+		    "block descriptor length %d", bd_len);
+		rval = EIO;
+		goto mode_sense_failed;
 	}
 
 	mode_caching_page = (struct mode_caching *)(header + hdrlen + bd_len);
@@ -8847,13 +9169,42 @@ sd_get_write_cache_enabled(struct sd_lun *un, int *is_enabled)
 		SD_ERROR(SD_LOG_COMMON, un, "sd_cache_control: Mode Sense"
 		    " caching page code mismatch %d\n",
 		    mode_caching_page->mode_page.code);
-		kmem_free(header, buflen);
-		return (EIO);
+		/* FMA could make upset complain here */
+		sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+		    "sd_cache_control: Mode Sense caching page code "
+		    "mismatch %d", mode_caching_page->mode_page.code);
+		rval = EIO;
+		goto mode_sense_failed;
 	}
 	*is_enabled = mode_caching_page->wce;
 
+mode_sense_failed:
+	if (rval == 0) {
+		sd_ssc_assessment(ssc, SD_FMT_STANDARD);
+	} else if (rval == EIO) {
+		/*
+		 * Some disks do not support mode sense(6), we
+		 * should ignore this kind of error(sense key is
+		 * 0x5 - illegal request).
+		 */
+		uint8_t *sensep;
+		int senlen;
+
+		sensep = (uint8_t *)ssc->ssc_uscsi_cmd->uscsi_rqbuf;
+		senlen = (int)(ssc->ssc_uscsi_cmd->uscsi_rqlen -
+		    ssc->ssc_uscsi_cmd->uscsi_rqresid);
+
+		if (senlen > 0 &&
+		    scsi_sense_key(sensep) == KEY_ILLEGAL_REQUEST) {
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE_COMPROMISE);
+		} else {
+			sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+		}
+	} else {
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	}
 	kmem_free(header, buflen);
-	return (0);
+	return (rval);
 }
 
 /*
@@ -8891,14 +9242,17 @@ sd_get_write_cache_enabled(struct sd_lun *un, int *is_enabled)
  */
 
 static void
-sd_get_nv_sup(struct sd_lun *un)
+sd_get_nv_sup(sd_ssc_t *ssc)
 {
 	int		rval		= 0;
 	uchar_t		*inq86		= NULL;
 	size_t		inq86_len	= MAX_INQUIRY_SIZE;
 	size_t		inq86_resid	= 0;
 	struct		dk_callback *dkc;
+	struct sd_lun	*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 
 	mutex_enter(SD_MUTEX(un));
@@ -8920,12 +9274,13 @@ sd_get_nv_sup(struct sd_lun *un)
 		return;
 	}
 
-	if (sd_check_vpd_page_support(un) == 0 &&
+	if (sd_check_vpd_page_support(ssc) == 0 &&
 	    un->un_vpd_page_mask & SD_VPD_EXTENDED_DATA_PG) {
 		mutex_exit(SD_MUTEX(un));
 		/* collect page 86 data if available */
 		inq86 = kmem_zalloc(inq86_len, KM_SLEEP);
-		rval = sd_send_scsi_INQUIRY(un, inq86, inq86_len,
+
+		rval = sd_send_scsi_INQUIRY(ssc, inq86, inq86_len,
 		    0x01, 0x86, &inq86_resid);
 
 		if (rval == 0 && (inq86_len - inq86_resid > 6)) {
@@ -8945,7 +9300,10 @@ sd_get_nv_sup(struct sd_lun *un)
 				un->un_f_sync_nv_supported = TRUE;
 			}
 			mutex_exit(SD_MUTEX(un));
+		} else if (rval != 0) {
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 		}
+
 		kmem_free(inq86, inq86_len);
 	} else {
 		mutex_exit(SD_MUTEX(un));
@@ -8967,7 +9325,9 @@ sd_get_nv_sup(struct sd_lun *un)
 		 * Send a TEST UNIT READY command to the device. This should
 		 * clear any outstanding UNIT ATTENTION that may be present.
 		 */
-		(void) sd_send_scsi_TEST_UNIT_READY(un, SD_DONT_RETRY_TUR);
+		rval = sd_send_scsi_TEST_UNIT_READY(ssc, SD_DONT_RETRY_TUR);
+		if (rval != 0)
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 
 		kmem_free(dkc, sizeof (struct dk_callback));
 	} else {
@@ -9405,8 +9765,12 @@ sdopen(dev_t *dev_p, int flag, int otyp, cred_t *cred_p)
 	 * Check if disk is ready and has a valid geometry later.
 	 */
 	if (!nodelay) {
+		sd_ssc_t	*ssc;
+
 		mutex_exit(SD_MUTEX(un));
-		rval = sd_ready_and_valid(un);
+		ssc = sd_ssc_init(un);
+		rval = sd_ready_and_valid(ssc, part);
+		sd_ssc_fini(ssc);
 		mutex_enter(SD_MUTEX(un));
 		/*
 		 * Fail if device is not ready or if the number of disk
@@ -9678,8 +10042,15 @@ sdclose(dev_t dev, int flag, int otyp, cred_t *cred_p)
 			if (un->un_f_doorlock_supported) {
 				mutex_exit(SD_MUTEX(un));
 				if (sd_pm_entry(un) == DDI_SUCCESS) {
-					rval = sd_send_scsi_DOORLOCK(un,
+					sd_ssc_t	*ssc;
+
+					ssc = sd_ssc_init(un);
+					rval = sd_send_scsi_DOORLOCK(ssc,
 					    SD_REMOVAL_ALLOW, SD_PATH_DIRECT);
+					if (rval != 0)
+						sd_ssc_assessment(ssc,
+						    SD_FMT_IGNORE);
+					sd_ssc_fini(ssc);
 
 					sd_pm_exit(un);
 					if (ISCD(un) && (rval != 0) &&
@@ -9748,7 +10119,7 @@ sdclose(dev_t dev, int flag, int otyp, cred_t *cred_p)
  *
  * Description: Test if device is ready and has a valid geometry.
  *
- *   Arguments: dev - device number
+ *   Arguments: ssc - sd_ssc_t will contain un
  *		un  - driver soft state (unit) structure
  *
  * Return Code: SD_READY_VALID		ready and valid label
@@ -9759,7 +10130,7 @@ sdclose(dev_t dev, int flag, int otyp, cred_t *cred_p)
  */
 
 static int
-sd_ready_and_valid(struct sd_lun *un)
+sd_ready_and_valid(sd_ssc_t *ssc, int part)
 {
 	struct sd_errstats	*stp;
 	uint64_t		capacity;
@@ -9767,7 +10138,11 @@ sd_ready_and_valid(struct sd_lun *un)
 	int			rval = SD_READY_VALID;
 	char			name_str[48];
 	int			is_valid;
+	struct sd_lun		*un;
+	int			status;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 
@@ -9778,9 +10153,15 @@ sd_ready_and_valid(struct sd_lun *un)
 	 */
 	if (un->un_f_has_removable_media) {
 		mutex_exit(SD_MUTEX(un));
-		if (sd_send_scsi_TEST_UNIT_READY(un, 0) != 0) {
+		status = sd_send_scsi_TEST_UNIT_READY(ssc, 0);
+
+		if (status != 0) {
 			rval = SD_NOT_READY_VALID;
 			mutex_enter(SD_MUTEX(un));
+
+			/* Ignore all failed status for removalbe media */
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+
 			goto done;
 		}
 
@@ -9792,12 +10173,17 @@ sd_ready_and_valid(struct sd_lun *un)
 
 			/* capacity has to be read every open. */
 			mutex_exit(SD_MUTEX(un));
-			if (sd_send_scsi_READ_CAPACITY(un, &capacity,
-			    &lbasize, SD_PATH_DIRECT) != 0) {
+			status = sd_send_scsi_READ_CAPACITY(ssc, &capacity,
+			    &lbasize, SD_PATH_DIRECT);
+
+			if (status != 0) {
+				sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+
 				cmlb_invalidate(un->un_cmlbhandle,
 				    (void *)SD_PATH_DIRECT);
 				mutex_enter(SD_MUTEX(un));
 				rval = SD_NOT_READY_VALID;
+
 				goto done;
 			} else {
 				mutex_enter(SD_MUTEX(un));
@@ -9809,7 +10195,7 @@ sd_ready_and_valid(struct sd_lun *un)
 		 * Check if the media in the device is writable or not.
 		 */
 		if (!is_valid && ISCD(un)) {
-			sd_check_for_writable_cd(un, SD_PATH_DIRECT);
+			sd_check_for_writable_cd(ssc, SD_PATH_DIRECT);
 		}
 
 	} else {
@@ -9818,7 +10204,12 @@ sd_ready_and_valid(struct sd_lun *un)
 		 * devices.
 		 */
 		mutex_exit(SD_MUTEX(un));
-		(void) sd_send_scsi_TEST_UNIT_READY(un, 0);
+
+		status = sd_send_scsi_TEST_UNIT_READY(ssc, 0);
+		if (status != 0) {
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+		}
+
 		mutex_enter(SD_MUTEX(un));
 	}
 
@@ -9841,8 +10232,8 @@ sd_ready_and_valid(struct sd_lun *un)
 			    sd_wm_cache_destructor, NULL,
 			    (void *)un, NULL, 0);
 			if (!(un->un_wm_cache)) {
-					rval = ENOMEM;
-					goto done;
+				rval = ENOMEM;
+				goto done;
 			}
 		}
 	}
@@ -9862,7 +10253,7 @@ sd_ready_and_valid(struct sd_lun *un)
 		int err;
 
 		mutex_exit(SD_MUTEX(un));
-		err = sd_send_scsi_TEST_UNIT_READY(un, 0);
+		err = sd_send_scsi_TEST_UNIT_READY(ssc, 0);
 		mutex_enter(SD_MUTEX(un));
 
 		if (err != 0) {
@@ -9874,10 +10265,12 @@ sd_ready_and_valid(struct sd_lun *un)
 				scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 				    "reservation conflict\n");
 				rval = SD_RESERVED_BY_OTHERS;
+				sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 			} else {
 				scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 				    "drive offline\n");
 				rval = SD_NOT_READY_VALID;
+				sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
 			}
 			goto done;
 		}
@@ -9885,10 +10278,12 @@ sd_ready_and_valid(struct sd_lun *un)
 
 	if (un->un_f_format_in_progress == FALSE) {
 		mutex_exit(SD_MUTEX(un));
-		if (cmlb_validate(un->un_cmlbhandle, 0,
-		    (void *)SD_PATH_DIRECT) != 0) {
+
+		if (cmlb_partinfo(un->un_cmlbhandle, part, NULL, NULL, NULL,
+		    NULL, (void *) SD_PATH_DIRECT) != 0) {
 			rval = SD_NOT_READY_VALID;
 			mutex_enter(SD_MUTEX(un));
+
 			goto done;
 		}
 		if (un->un_f_pkstats_enabled) {
@@ -9907,12 +10302,18 @@ sd_ready_and_valid(struct sd_lun *un)
 	 */
 	if (un->un_f_doorlock_supported) {
 		mutex_exit(SD_MUTEX(un));
-		if ((sd_send_scsi_DOORLOCK(un, SD_REMOVAL_PREVENT,
-		    SD_PATH_DIRECT) != 0) && ISCD(un)) {
+		status = sd_send_scsi_DOORLOCK(ssc, SD_REMOVAL_PREVENT,
+		    SD_PATH_DIRECT);
+
+		if ((status != 0) && ISCD(un)) {
 			rval = SD_NOT_READY_VALID;
 			mutex_enter(SD_MUTEX(un));
+
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+
 			goto done;
-		}
+		} else if (status != 0)
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 		mutex_enter(SD_MUTEX(un));
 	}
 
@@ -9994,13 +10395,15 @@ sdread(dev_t dev, struct uio *uio, cred_t *cred_p)
 {
 	struct sd_lun	*un = NULL;
 	int		secmask;
-	int		err;
+	int		err = 0;
+	sd_ssc_t	*ssc;
 
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL) {
 		return (ENXIO);
 	}
 
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
+
 
 	if (!SD_IS_VALID_LABEL(un) && !ISCD(un)) {
 		mutex_enter(SD_MUTEX(un));
@@ -10015,17 +10418,22 @@ sdread(dev_t dev, struct uio *uio, cred_t *cred_p)
 		}
 		un->un_ncmds_in_driver++;
 		mutex_exit(SD_MUTEX(un));
-		if ((sd_ready_and_valid(un)) != SD_READY_VALID) {
-			mutex_enter(SD_MUTEX(un));
-			un->un_ncmds_in_driver--;
-			ASSERT(un->un_ncmds_in_driver >= 0);
-			mutex_exit(SD_MUTEX(un));
-			return (EIO);
+
+		/* Initialize sd_ssc_t for internal uscsi commands */
+		ssc = sd_ssc_init(un);
+		if ((sd_ready_and_valid(ssc, SDPART(dev))) != SD_READY_VALID) {
+			err = EIO;
+		} else {
+			err = 0;
 		}
+		sd_ssc_fini(ssc);
+
 		mutex_enter(SD_MUTEX(un));
 		un->un_ncmds_in_driver--;
 		ASSERT(un->un_ncmds_in_driver >= 0);
 		mutex_exit(SD_MUTEX(un));
+		if (err != 0)
+			return (err);
 	}
 
 	/*
@@ -10046,6 +10454,7 @@ sdread(dev_t dev, struct uio *uio, cred_t *cred_p)
 	} else {
 		err = physio(sdstrategy, NULL, dev, B_READ, sdmin, uio);
 	}
+
 	return (err);
 }
 
@@ -10073,7 +10482,8 @@ sdwrite(dev_t dev, struct uio *uio, cred_t *cred_p)
 {
 	struct sd_lun	*un = NULL;
 	int		secmask;
-	int		err;
+	int		err = 0;
+	sd_ssc_t	*ssc;
 
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL) {
 		return (ENXIO);
@@ -10094,17 +10504,22 @@ sdwrite(dev_t dev, struct uio *uio, cred_t *cred_p)
 		}
 		un->un_ncmds_in_driver++;
 		mutex_exit(SD_MUTEX(un));
-		if ((sd_ready_and_valid(un)) != SD_READY_VALID) {
-			mutex_enter(SD_MUTEX(un));
-			un->un_ncmds_in_driver--;
-			ASSERT(un->un_ncmds_in_driver >= 0);
-			mutex_exit(SD_MUTEX(un));
-			return (EIO);
+
+		/* Initialize sd_ssc_t for internal uscsi commands */
+		ssc = sd_ssc_init(un);
+		if ((sd_ready_and_valid(ssc, SDPART(dev))) != SD_READY_VALID) {
+			err = EIO;
+		} else {
+			err = 0;
 		}
+		sd_ssc_fini(ssc);
+
 		mutex_enter(SD_MUTEX(un));
 		un->un_ncmds_in_driver--;
 		ASSERT(un->un_ncmds_in_driver >= 0);
 		mutex_exit(SD_MUTEX(un));
+		if (err != 0)
+			return (err);
 	}
 
 	/*
@@ -10125,6 +10540,7 @@ sdwrite(dev_t dev, struct uio *uio, cred_t *cred_p)
 	} else {
 		err = physio(sdstrategy, NULL, dev, B_WRITE, sdmin, uio);
 	}
+
 	return (err);
 }
 
@@ -10152,7 +10568,8 @@ sdaread(dev_t dev, struct aio_req *aio, cred_t *cred_p)
 	struct sd_lun	*un = NULL;
 	struct uio	*uio = aio->aio_uio;
 	int		secmask;
-	int		err;
+	int		err = 0;
+	sd_ssc_t	*ssc;
 
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL) {
 		return (ENXIO);
@@ -10173,17 +10590,22 @@ sdaread(dev_t dev, struct aio_req *aio, cred_t *cred_p)
 		}
 		un->un_ncmds_in_driver++;
 		mutex_exit(SD_MUTEX(un));
-		if ((sd_ready_and_valid(un)) != SD_READY_VALID) {
-			mutex_enter(SD_MUTEX(un));
-			un->un_ncmds_in_driver--;
-			ASSERT(un->un_ncmds_in_driver >= 0);
-			mutex_exit(SD_MUTEX(un));
-			return (EIO);
+
+		/* Initialize sd_ssc_t for internal uscsi commands */
+		ssc = sd_ssc_init(un);
+		if ((sd_ready_and_valid(ssc, SDPART(dev))) != SD_READY_VALID) {
+			err = EIO;
+		} else {
+			err = 0;
 		}
+		sd_ssc_fini(ssc);
+
 		mutex_enter(SD_MUTEX(un));
 		un->un_ncmds_in_driver--;
 		ASSERT(un->un_ncmds_in_driver >= 0);
 		mutex_exit(SD_MUTEX(un));
+		if (err != 0)
+			return (err);
 	}
 
 	/*
@@ -10204,6 +10626,7 @@ sdaread(dev_t dev, struct aio_req *aio, cred_t *cred_p)
 	} else {
 		err = aphysio(sdstrategy, anocancel, dev, B_READ, sdmin, aio);
 	}
+
 	return (err);
 }
 
@@ -10231,7 +10654,8 @@ sdawrite(dev_t dev, struct aio_req *aio, cred_t *cred_p)
 	struct sd_lun	*un = NULL;
 	struct uio	*uio = aio->aio_uio;
 	int		secmask;
-	int		err;
+	int		err = 0;
+	sd_ssc_t	*ssc;
 
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL) {
 		return (ENXIO);
@@ -10252,17 +10676,22 @@ sdawrite(dev_t dev, struct aio_req *aio, cred_t *cred_p)
 		}
 		un->un_ncmds_in_driver++;
 		mutex_exit(SD_MUTEX(un));
-		if ((sd_ready_and_valid(un)) != SD_READY_VALID) {
-			mutex_enter(SD_MUTEX(un));
-			un->un_ncmds_in_driver--;
-			ASSERT(un->un_ncmds_in_driver >= 0);
-			mutex_exit(SD_MUTEX(un));
-			return (EIO);
+
+		/* Initialize sd_ssc_t for internal uscsi commands */
+		ssc = sd_ssc_init(un);
+		if ((sd_ready_and_valid(ssc, SDPART(dev))) != SD_READY_VALID) {
+			err = EIO;
+		} else {
+			err = 0;
 		}
+		sd_ssc_fini(ssc);
+
 		mutex_enter(SD_MUTEX(un));
 		un->un_ncmds_in_driver--;
 		ASSERT(un->un_ncmds_in_driver >= 0);
 		mutex_exit(SD_MUTEX(un));
+		if (err != 0)
+			return (err);
 	}
 
 	/*
@@ -10283,6 +10712,7 @@ sdawrite(dev_t dev, struct aio_req *aio, cred_t *cred_p)
 	} else {
 		err = aphysio(sdstrategy, anocancel, dev, B_WRITE, sdmin, aio);
 	}
+
 	return (err);
 }
 
@@ -10675,6 +11105,7 @@ sd_xbuf_init(struct sd_lun *un, struct buf *bp, struct sd_xbuf *xp,
 	xp->xb_sense_status	= 0;
 	xp->xb_sense_state	= 0;
 	xp->xb_sense_resid	= 0;
+	xp->xb_ena		= 0;
 
 	bp->b_private	= xp;
 	bp->b_flags	&= ~(B_DONE | B_ERROR);
@@ -10817,37 +11248,234 @@ static int
 sd_send_scsi_cmd(dev_t dev, struct uscsi_cmd *incmd, int flag,
 	enum uio_seg dataspace, int path_flag)
 {
-	struct sd_uscsi_info	*uip;
-	struct uscsi_cmd	*uscmd;
 	struct sd_lun	*un;
-	int	format = 0;
-	int	rval;
+	sd_ssc_t	*ssc;
+	int		rval;
 
 	un = ddi_get_soft_state(sd_state, SDUNIT(dev));
 	if (un == NULL) {
 		return (ENXIO);
 	}
 
+	/*
+	 * Using sd_ssc_send to handle uscsi cmd
+	 */
+	ssc = sd_ssc_init(un);
+	rval = sd_ssc_send(ssc, incmd, flag, dataspace, path_flag);
+	sd_ssc_fini(ssc);
+
+	return (rval);
+}
+
+/*
+ *    Function: sd_ssc_init
+ *
+ * Description: Uscsi end-user call this function to initialize necessary
+ *              fields, such as uscsi_cmd and sd_uscsi_info struct.
+ *
+ *              The return value of sd_send_scsi_cmd will be treated as a
+ *              fault in various conditions. Even it is not Zero, some
+ *              callers may ignore the return value. That is to say, we can
+ *              not make an accurate assessment in sdintr, since if a
+ *              command is failed in sdintr it does not mean the caller of
+ *              sd_send_scsi_cmd will treat it as a real failure.
+ *
+ *              To avoid printing too many error logs for a failed uscsi
+ *              packet that the caller may not treat it as a failure, the
+ *              sd will keep silent for handling all uscsi commands.
+ *
+ *              During detach->attach and attach-open, for some types of
+ *              problems, the driver should be providing information about
+ *              the problem encountered. Device use USCSI_SILENT, which
+ *              suppresses all driver information. The result is that no
+ *              information about the problem is available. Being
+ *              completely silent during this time is inappropriate. The
+ *              driver needs a more selective filter than USCSI_SILENT, so
+ *              that information related to faults is provided.
+ *
+ *              To make the accurate accessment, the caller  of
+ *              sd_send_scsi_USCSI_CMD should take the ownership and
+ *              get necessary information to print error messages.
+ *
+ *              If we want to print necessary info of uscsi command, we need to
+ *              keep the uscsi_cmd and sd_uscsi_info till we can make the
+ *              assessment. We use sd_ssc_init to alloc necessary
+ *              structs for sending an uscsi command and we are also
+ *              responsible for free the memory by calling
+ *              sd_ssc_fini.
+ *
+ *              The calling secquences will look like:
+ *              sd_ssc_init->
+ *
+ *                  ...
+ *
+ *                  sd_send_scsi_USCSI_CMD->
+ *                      sd_ssc_send-> - - - sdintr
+ *                  ...
+ *
+ *                  if we think the return value should be treated as a
+ *                  failure, we make the accessment here and print out
+ *                  necessary by retrieving uscsi_cmd and sd_uscsi_info'
+ *
+ *                  ...
+ *
+ *              sd_ssc_fini
+ *
+ *
+ *   Arguments: un - pointer to driver soft state (unit) structure for this
+ *                   target.
+ *
+ * Return code: sd_ssc_t - pointer to allocated sd_ssc_t struct, it contains
+ *                         uscsi_cmd and sd_uscsi_info.
+ *                  NULL - if can not alloc memory for sd_ssc_t struct
+ *
+ *     Context: Kernel Thread.
+ */
+static sd_ssc_t *
+sd_ssc_init(struct sd_lun *un)
+{
+	sd_ssc_t		*ssc;
+	struct uscsi_cmd	*ucmdp;
+	struct sd_uscsi_info	*uip;
+
+	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
+
+	/*
+	 * Allocate sd_ssc_t structure
+	 */
+	ssc = kmem_zalloc(sizeof (sd_ssc_t), KM_SLEEP);
+
+	/*
+	 * Allocate uscsi_cmd by calling scsi_uscsi_alloc common routine
+	 */
+	ucmdp = scsi_uscsi_alloc();
+
+	/*
+	 * Allocate sd_uscsi_info structure
+	 */
+	uip = kmem_zalloc(sizeof (struct sd_uscsi_info), KM_SLEEP);
+
+	ssc->ssc_uscsi_cmd = ucmdp;
+	ssc->ssc_uscsi_info = uip;
+	ssc->ssc_un = un;
+
+	return (ssc);
+}
+
+/*
+ * Function: sd_ssc_fini
+ *
+ * Description: To free sd_ssc_t and it's hanging off
+ *
+ * Arguments: ssc - struct pointer of sd_ssc_t.
+ */
+static void
+sd_ssc_fini(sd_ssc_t *ssc)
+{
+	scsi_uscsi_free(ssc->ssc_uscsi_cmd);
+
+	if (ssc->ssc_uscsi_info != NULL) {
+		kmem_free(ssc->ssc_uscsi_info, sizeof (struct sd_uscsi_info));
+		ssc->ssc_uscsi_info = NULL;
+	}
+
+	kmem_free(ssc, sizeof (sd_ssc_t));
+	ssc = NULL;
+}
+
+/*
+ * Function: sd_ssc_send
+ *
+ * Description: Runs a USCSI command for user when called through sdioctl,
+ *              or for the driver.
+ *
+ *   Arguments: ssc - the struct of sd_ssc_t will bring uscsi_cmd and
+ *                    sd_uscsi_info in.
+ *		incmd - ptr to a valid uscsi_cmd struct
+ *		flag - bit flag, indicating open settings, 32/64 bit type
+ *		dataspace - UIO_USERSPACE or UIO_SYSSPACE
+ *		path_flag - SD_PATH_DIRECT to use the USCSI "direct" chain and
+ *			the normal command waitq, or SD_PATH_DIRECT_PRIORITY
+ *			to use the USCSI "direct" chain and bypass the normal
+ *			command waitq.
+ *
+ * Return Code: 0 -  successful completion of the given command
+ *		EIO - scsi_uscsi_handle_command() failed
+ *		ENXIO  - soft state not found for specified dev
+ *		EINVAL
+ *		EFAULT - copyin/copyout error
+ *		return code of scsi_uscsi_handle_command():
+ *			EIO
+ *			ENXIO
+ *			EACCES
+ *
+ *     Context: Kernel Thread;
+ *              Waits for command to complete. Can sleep.
+ */
+static int
+sd_ssc_send(sd_ssc_t *ssc, struct uscsi_cmd *incmd, int flag,
+	enum uio_seg dataspace, int path_flag)
+{
+	struct sd_uscsi_info	*uip;
+	struct uscsi_cmd	*uscmd;
+	struct sd_lun		*un;
+	dev_t			dev;
+
+	int	format = 0;
+	int	rval;
+
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
+	ASSERT(un != NULL);
+	uscmd = ssc->ssc_uscsi_cmd;
+	ASSERT(uscmd != NULL);
+	ASSERT(!mutex_owned(SD_MUTEX(un)));
+	if (ssc->ssc_flags & SSC_FLAGS_NEED_ASSESSMENT) {
+		/*
+		 * If enter here, it indicates that the previous uscsi
+		 * command has not been processed by sd_ssc_assessment.
+		 * This is violating our rules of FMA telemetry processing.
+		 * We should print out this message and the last undisposed
+		 * uscsi command.
+		 */
+		if (uscmd->uscsi_cdb != NULL) {
+			SD_INFO(SD_LOG_SDTEST, un,
+			    "sd_ssc_send is missing the alternative "
+			    "sd_ssc_assessment when running command 0x%x.\n",
+			    uscmd->uscsi_cdb[0]);
+		}
+		/*
+		 * Set the ssc_flags to SSC_FLAGS_UNKNOWN, which should be
+		 * the initial status.
+		 */
+		ssc->ssc_flags = SSC_FLAGS_UNKNOWN;
+	}
+
+	/*
+	 * We need to make sure sd_ssc_send will have sd_ssc_assessment
+	 * followed to avoid missing FMA telemetries.
+	 */
+	ssc->ssc_flags |= SSC_FLAGS_NEED_ASSESSMENT;
 
 #ifdef SDDEBUG
 	switch (dataspace) {
 	case UIO_USERSPACE:
 		SD_TRACE(SD_LOG_IO, un,
-		    "sd_send_scsi_cmd: entry: un:0x%p UIO_USERSPACE\n", un);
+		    "sd_ssc_send: entry: un:0x%p UIO_USERSPACE\n", un);
 		break;
 	case UIO_SYSSPACE:
 		SD_TRACE(SD_LOG_IO, un,
-		    "sd_send_scsi_cmd: entry: un:0x%p UIO_SYSSPACE\n", un);
+		    "sd_ssc_send: entry: un:0x%p UIO_SYSSPACE\n", un);
 		break;
 	default:
 		SD_TRACE(SD_LOG_IO, un,
-		    "sd_send_scsi_cmd: entry: un:0x%p UNEXPECTED SPACE\n", un);
+		    "sd_ssc_send: entry: un:0x%p UNEXPECTED SPACE\n", un);
 		break;
 	}
 #endif
 
-	rval = scsi_uscsi_alloc_and_copyin((intptr_t)incmd, flag,
+	rval = scsi_uscsi_copyin((intptr_t)incmd, flag,
 	    SD_ADDRESS(un), &uscmd);
 	if (rval != 0) {
 		SD_TRACE(SD_LOG_IO, un, "sd_sense_scsi_cmd: "
@@ -10871,7 +11499,7 @@ sd_send_scsi_cmd(dev_t dev, struct uscsi_cmd *incmd, int flag,
 	 * need to preserve the prior contents of b_private.
 	 * The sd_uscsi_info struct is also used by sd_uscsi_strategy()
 	 */
-	uip = kmem_zalloc(sizeof (struct sd_uscsi_info), KM_SLEEP);
+	uip = ssc->ssc_uscsi_info;
 	uip->ui_flags = path_flag;
 	uip->ui_cmdp = uscmd;
 
@@ -10884,15 +11512,22 @@ sd_send_scsi_cmd(dev_t dev, struct uscsi_cmd *incmd, int flag,
 	}
 	uscmd->uscsi_flags &= ~USCSI_NOINTR;
 
+	dev = SD_GET_DEV(un);
 	rval = scsi_uscsi_handle_cmd(dev, dataspace, uscmd,
 	    sd_uscsi_strategy, NULL, uip);
 
+	/*
+	 * mark ssc_flags right after handle_cmd to make sure
+	 * the uscsi has been sent
+	 */
+	ssc->ssc_flags |= SSC_FLAGS_CMD_ISSUED;
+
 #ifdef SDDEBUG
-	SD_INFO(SD_LOG_IO, un, "sd_send_scsi_cmd: "
+	SD_INFO(SD_LOG_IO, un, "sd_ssc_send: "
 	    "uscsi_status: 0x%02x  uscsi_resid:0x%x\n",
 	    uscmd->uscsi_status, uscmd->uscsi_resid);
 	if (uscmd->uscsi_bufaddr != NULL) {
-		SD_INFO(SD_LOG_IO, un, "sd_send_scsi_cmd: "
+		SD_INFO(SD_LOG_IO, un, "sd_ssc_send: "
 		    "uscmd->uscsi_bufaddr: 0x%p  uscmd->uscsi_buflen:%d\n",
 		    uscmd->uscsi_bufaddr, uscmd->uscsi_buflen);
 		if (dataspace == UIO_SYSSPACE) {
@@ -10909,12 +11544,271 @@ sd_send_scsi_cmd(dev_t dev, struct uscsi_cmd *incmd, int flag,
 		mutex_exit(SD_MUTEX(un));
 	}
 
-	(void) scsi_uscsi_copyout_and_free((intptr_t)incmd, uscmd);
-	kmem_free(uip, sizeof (struct sd_uscsi_info));
+	(void) scsi_uscsi_copyout((intptr_t)incmd, uscmd);
 
 	return (rval);
 }
 
+/*
+ *     Function: sd_ssc_print
+ *
+ * Description: Print information available to the console.
+ *
+ * Arguments: ssc - the struct of sd_ssc_t will bring uscsi_cmd and
+ *                    sd_uscsi_info in.
+ *            sd_severity - log level.
+ *     Context: Kernel thread or interrupt context.
+ */
+static void
+sd_ssc_print(sd_ssc_t *ssc, int sd_severity)
+{
+	struct uscsi_cmd	*ucmdp;
+	struct scsi_device	*devp;
+	dev_info_t 		*devinfo;
+	uchar_t			*sensep;
+	int			senlen;
+	union scsi_cdb		*cdbp;
+	uchar_t			com;
+	extern struct scsi_key_strings scsi_cmds[];
+
+	ASSERT(ssc != NULL);
+
+	ucmdp = ssc->ssc_uscsi_cmd;
+	devp = SD_SCSI_DEVP(ssc->ssc_un);
+	devinfo = SD_DEVINFO(ssc->ssc_un);
+	ASSERT(ucmdp != NULL);
+	ASSERT(devp != NULL);
+	ASSERT(devinfo != NULL);
+	sensep = (uint8_t *)ucmdp->uscsi_rqbuf;
+	senlen = ucmdp->uscsi_rqlen - ucmdp->uscsi_rqresid;
+	cdbp = (union scsi_cdb *)ucmdp->uscsi_cdb;
+
+	/* In certain case (like DOORLOCK), the cdb could be NULL. */
+	if (cdbp == NULL)
+		return;
+	/* We don't print log if no sense data available. */
+	if (senlen == 0)
+		sensep = NULL;
+	com = cdbp->scc_cmd;
+	scsi_generic_errmsg(devp, sd_label, sd_severity, 0, 0, com,
+	    scsi_cmds, sensep, ssc->ssc_un->un_additional_codes, NULL);
+}
+
+/*
+ *     Function: sd_ssc_assessment
+ *
+ * Description: We use this function to make an assessment at the point
+ *              where SD driver may encounter a potential error.
+ *
+ * Arguments: ssc - the struct of sd_ssc_t will bring uscsi_cmd and
+ *                    sd_uscsi_info in.
+ *            tp_assess - a hint of strategy for ereport posting.
+ *            Possible values of tp_assess include:
+ *                SD_FMT_IGNORE - we don't post any ereport because we're
+ *                sure that it is ok to ignore the underlying problems.
+ *                SD_FMT_IGNORE_COMPROMISE - we don't post any ereport for now
+ *                but it might be not correct to ignore the underlying hardware
+ *                error.
+ *                SD_FMT_STATUS_CHECK - we will post an ereport with the
+ *                payload driver-assessment of value "fail" or
+ *                "fatal"(depending on what information we have here). This
+ *                assessment value is usually set when SD driver think there
+ *                is a potential error occurred(Typically, when return value
+ *                of the SCSI command is EIO).
+ *                SD_FMT_STANDARD - we will post an ereport with the payload
+ *                driver-assessment of value "info". This assessment value is
+ *                set when the SCSI command returned successfully and with
+ *                sense data sent back.
+ *
+ *     Context: Kernel thread.
+ */
+static void
+sd_ssc_assessment(sd_ssc_t *ssc, enum sd_type_assessment tp_assess)
+{
+	int senlen = 0;
+	struct uscsi_cmd *ucmdp = NULL;
+	struct sd_lun *un;
+
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
+	ASSERT(un != NULL);
+	ucmdp = ssc->ssc_uscsi_cmd;
+	ASSERT(ucmdp != NULL);
+
+	if (ssc->ssc_flags & SSC_FLAGS_NEED_ASSESSMENT) {
+		ssc->ssc_flags &= ~SSC_FLAGS_NEED_ASSESSMENT;
+	} else {
+		/*
+		 * If enter here, it indicates that we have a wrong
+		 * calling sequence of sd_ssc_send and sd_ssc_assessment,
+		 * both of which should be called in a pair in case of
+		 * loss of FMA telemetries.
+		 */
+		if (ucmdp->uscsi_cdb != NULL) {
+			SD_INFO(SD_LOG_SDTEST, un,
+			    "sd_ssc_assessment is missing the "
+			    "alternative sd_ssc_send when running 0x%x, "
+			    "or there are superfluous sd_ssc_assessment for "
+			    "the same sd_ssc_send.\n",
+			    ucmdp->uscsi_cdb[0]);
+		}
+		/*
+		 * Set the ssc_flags to the initial value to avoid passing
+		 * down dirty flags to the following sd_ssc_send function.
+		 */
+		ssc->ssc_flags = SSC_FLAGS_UNKNOWN;
+		return;
+	}
+
+	/*
+	 * We don't handle a non-disk drive(CD-ROM, removable media).
+	 * Clear the ssc_flags before return in case we've set
+	 * SSC_FLAGS_INVALID_DATA which should be skipped for a non-disk
+	 * driver.
+	 */
+	if (ISCD(un) || un->un_f_has_removable_media) {
+		ssc->ssc_flags = SSC_FLAGS_UNKNOWN;
+		return;
+	}
+
+	/*
+	 * Only handle an issued command which is waiting for assessment.
+	 * A command which is not issued will not have
+	 * SSC_FLAGS_INVALID_DATA set, so it'ok we just return here.
+	 */
+	if (!(ssc->ssc_flags & SSC_FLAGS_CMD_ISSUED)) {
+		sd_ssc_print(ssc, SCSI_ERR_INFO);
+		return;
+	} else {
+		/*
+		 * For an issued command, we should clear this flag in
+		 * order to make the sd_ssc_t structure be used off
+		 * multiple uscsi commands.
+		 */
+		ssc->ssc_flags &= ~SSC_FLAGS_CMD_ISSUED;
+	}
+
+	/*
+	 * We will not deal with non-retryable(flag USCSI_DIAGNOSE set)
+	 * commands here. And we should clear the ssc_flags before return.
+	 */
+	if (ucmdp->uscsi_flags & USCSI_DIAGNOSE) {
+		ssc->ssc_flags = SSC_FLAGS_UNKNOWN;
+		return;
+	}
+
+	switch (tp_assess) {
+	case SD_FMT_IGNORE:
+	case SD_FMT_IGNORE_COMPROMISE:
+		break;
+	case SD_FMT_STATUS_CHECK:
+		/*
+		 * For a failed command(including the succeeded command
+		 * with invalid data sent back).
+		 */
+		sd_ssc_post(ssc, SD_FM_DRV_FATAL);
+		break;
+	case SD_FMT_STANDARD:
+		/*
+		 * Always for the succeeded commands probably with sense
+		 * data sent back.
+		 * Limitation:
+		 *	We can only handle a succeeded command with sense
+		 *	data sent back when auto-request-sense is enabled.
+		 */
+		senlen = ssc->ssc_uscsi_cmd->uscsi_rqlen -
+		    ssc->ssc_uscsi_cmd->uscsi_rqresid;
+		if ((ssc->ssc_uscsi_info->ui_pkt_state & STATE_ARQ_DONE) &&
+		    (un->un_f_arq_enabled == TRUE) &&
+		    senlen > 0 &&
+		    ssc->ssc_uscsi_cmd->uscsi_rqbuf != NULL) {
+			sd_ssc_post(ssc, SD_FM_DRV_NOTICE);
+		}
+		break;
+	default:
+		/*
+		 * Should not have other type of assessment.
+		 */
+		scsi_log(SD_DEVINFO(un), sd_label, CE_CONT,
+		    "sd_ssc_assessment got wrong "
+		    "sd_type_assessment %d.\n", tp_assess);
+		break;
+	}
+	/*
+	 * Clear up the ssc_flags before return.
+	 */
+	ssc->ssc_flags = SSC_FLAGS_UNKNOWN;
+}
+
+/*
+ *    Function: sd_ssc_post
+ *
+ * Description: 1. read the driver property to get fm-scsi-log flag.
+ *              2. print log if fm_log_capable is non-zero.
+ *              3. call sd_ssc_ereport_post to post ereport if possible.
+ *
+ *    Context: May be called from kernel thread or interrupt context.
+ */
+static void
+sd_ssc_post(sd_ssc_t *ssc, enum sd_driver_assessment sd_assess)
+{
+	struct sd_lun	*un;
+	int 		fm_scsi_log = 0;
+	int		sd_severity;
+
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
+	ASSERT(un != NULL);
+
+	fm_scsi_log = ddi_prop_get_int(DDI_DEV_T_ANY, SD_DEVINFO(un),
+	    DDI_PROP_DONTPASS | DDI_PROP_NOTPROM, "fm-scsi-log", 0);
+
+	if (fm_scsi_log != 0) {
+		switch (sd_assess) {
+		case SD_FM_DRV_FATAL:
+			sd_severity = SCSI_ERR_FATAL;
+			break;
+		case SD_FM_DRV_RECOVERY:
+			sd_severity = SCSI_ERR_RECOVERED;
+			break;
+		case SD_FM_DRV_RETRY:
+			sd_severity = SCSI_ERR_RETRYABLE;
+			break;
+		case SD_FM_DRV_NOTICE:
+			sd_severity = SCSI_ERR_INFO;
+			break;
+		default:
+			sd_severity = SCSI_ERR_UNKNOWN;
+		}
+		/* print log */
+		sd_ssc_print(ssc, sd_severity);
+	}
+
+	/* always post ereport */
+	sd_ssc_ereport_post(ssc, sd_assess);
+}
+
+/*
+ *    Function: sd_ssc_set_info
+ *
+ * Description: Mark ssc_flags and set ssc_info which would be the
+ *              payload of uderr ereport. This function will cause
+ *              sd_ssc_ereport_post to post uderr ereport only.
+ *
+ *    Context: Kernel thread or interrupt context
+ */
+static void
+sd_ssc_set_info(sd_ssc_t *ssc, int ssc_flags, const char *fmt, ...)
+{
+	va_list	ap;
+
+	ASSERT(ssc != NULL);
+
+	ssc->ssc_flags |= ssc_flags;
+	va_start(ap, fmt);
+	(void) vsnprintf(ssc->ssc_info, sizeof (ssc->ssc_info), fmt, ap);
+	va_end(ap);
+}
 
 /*
  *    Function: sd_buf_iodone
@@ -11049,7 +11943,6 @@ sd_mapblockaddr_iostart(int index, struct sd_lun *un, struct buf *bp)
 	diskaddr_t	partition_offset;
 	struct sd_xbuf *xp;
 
-
 	ASSERT(un != NULL);
 	ASSERT(bp != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
@@ -11066,27 +11959,40 @@ sd_mapblockaddr_iostart(int index, struct sd_lun *un, struct buf *bp)
 	 * removable-media devices, of if the device was opened in
 	 * NDELAY/NONBLOCK mode.
 	 */
-	if (!SD_IS_VALID_LABEL(un) &&
-	    (sd_ready_and_valid(un) != SD_READY_VALID)) {
-		/*
-		 * For removable devices it is possible to start an I/O
-		 * without a media by opening the device in nodelay mode.
-		 * Also for writable CDs there can be many scenarios where
-		 * there is no geometry yet but volume manager is trying to
-		 * issue a read() just because it can see TOC on the CD. So
-		 * do not print a message for removables.
-		 */
-		if (!un->un_f_has_removable_media) {
-			scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
-			    "i/o to invalid geometry\n");
-		}
-		bioerror(bp, EIO);
-		bp->b_resid = bp->b_bcount;
-		SD_BEGIN_IODONE(index, un, bp);
-		return;
-	}
-
 	partition = SDPART(bp->b_edev);
+
+	if (!SD_IS_VALID_LABEL(un)) {
+		sd_ssc_t *ssc;
+		/*
+		 * Initialize sd_ssc_t for internal uscsi commands
+		 * In case of potential porformance issue, we need
+		 * to alloc memory only if there is invalid label
+		 */
+		ssc = sd_ssc_init(un);
+
+		if (sd_ready_and_valid(ssc, partition) != SD_READY_VALID) {
+			/*
+			 * For removable devices it is possible to start an
+			 * I/O without a media by opening the device in nodelay
+			 * mode. Also for writable CDs there can be many
+			 * scenarios where there is no geometry yet but volume
+			 * manager is trying to issue a read() just because
+			 * it can see TOC on the CD. So do not print a message
+			 * for removables.
+			 */
+			if (!un->un_f_has_removable_media) {
+				scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
+				    "i/o to invalid geometry\n");
+			}
+			bioerror(bp, EIO);
+			bp->b_resid = bp->b_bcount;
+			SD_BEGIN_IODONE(index, un, bp);
+
+			sd_ssc_fini(ssc);
+			return;
+		}
+		sd_ssc_fini(ssc);
+	}
 
 	nblocks = 0;
 	(void) cmlb_partinfo(un->un_cmlbhandle, partition,
@@ -12628,6 +13534,7 @@ sd_destroypkt_for_uscsi(struct buf *bp)
 	struct sd_xbuf	*xp;
 	struct scsi_pkt	*pktp;
 	struct sd_lun	*un;
+	struct sd_uscsi_info *suip;
 
 	ASSERT(bp != NULL);
 	xp = SD_GET_XBUF(bp);
@@ -12672,6 +13579,15 @@ sd_destroypkt_for_uscsi(struct buf *bp)
 			    SENSE_LENGTH);
 		}
 	}
+	/*
+	 * The following assignments are for SCSI FMA.
+	 */
+	ASSERT(xp->xb_private != NULL);
+	suip = (struct sd_uscsi_info *)xp->xb_private;
+	suip->ui_pkt_reason = pktp->pkt_reason;
+	suip->ui_pkt_state = pktp->pkt_state;
+	suip->ui_pkt_statistics = pktp->pkt_statistics;
+	suip->ui_lba = (uint64_t)SD_GET_BLKNO(bp);
 
 	/* We are done with the scsi_pkt; free it now */
 	ASSERT(SD_GET_PKTP(bp) != NULL);
@@ -13129,6 +14045,7 @@ sd_start_cmds(struct sd_lun *un, struct buf *immed_bp)
 	void	(*saved_statp)(kstat_io_t *);
 #endif
 	int	rval;
+	struct sd_fm_internal *sfip = NULL;
 
 	ASSERT(un != NULL);
 	ASSERT(mutex_owned(SD_MUTEX(un)));
@@ -13656,6 +14573,22 @@ got_pkt:
 			sd_print_transport_rejected_message(un, xp, rval);
 
 			/*
+			 * This command will be terminated by SD driver due
+			 * to a fatal transport error. We should post
+			 * ereport.io.scsi.cmd.disk.tran with driver-assessment
+			 * of "fail" for any command to indicate this
+			 * situation.
+			 */
+			if (xp->xb_ena > 0) {
+				ASSERT(un->un_fm_private != NULL);
+				sfip = un->un_fm_private;
+				sfip->fm_ssc.ssc_flags |= SSC_FLAGS_TRAN_ABORT;
+				sd_ssc_extract_info(&sfip->fm_ssc, un,
+				    xp->xb_pktp, bp, xp);
+				sd_ssc_post(&sfip->fm_ssc, SD_FM_DRV_FATAL);
+			}
+
+			/*
 			 * We must use sd_return_failed_command_no_restart() to
 			 * avoid a recursive call back into sd_start_cmds().
 			 * However this also means that we must keep processing
@@ -13701,6 +14634,7 @@ sd_return_command(struct sd_lun *un, struct buf *bp)
 {
 	struct sd_xbuf *xp;
 	struct scsi_pkt *pktp;
+	struct sd_fm_internal *sfip;
 
 	ASSERT(bp != NULL);
 	ASSERT(un != NULL);
@@ -13710,6 +14644,8 @@ sd_return_command(struct sd_lun *un, struct buf *bp)
 	ASSERT(xp != NULL);
 
 	pktp = SD_GET_PKTP(bp);
+	sfip = (struct sd_fm_internal *)un->un_fm_private;
+	ASSERT(sfip != NULL);
 
 	SD_TRACE(SD_LOG_IO_CORE, un, "sd_return_command: entry\n");
 
@@ -13752,6 +14688,25 @@ sd_return_command(struct sd_lun *un, struct buf *bp)
 	 */
 	if (bp->b_error == 0) {
 		un->un_failfast_state = SD_FAILFAST_INACTIVE;
+		/*
+		 * If this is a successful command, but used to be retried,
+		 * we will take it as a recovered command and post an
+		 * ereport with driver-assessment of "recovered".
+		 */
+		if (xp->xb_ena > 0) {
+			sd_ssc_extract_info(&sfip->fm_ssc, un, pktp, bp, xp);
+			sd_ssc_post(&sfip->fm_ssc, SD_FM_DRV_RECOVERY);
+		}
+	} else {
+		/*
+		 * If this is a failed non-USCSI command we will post an
+		 * ereport with driver-assessment set accordingly("fail" or
+		 * "fatal").
+		 */
+		if (!(xp->xb_pkt_flags & SD_XB_USCSICMD)) {
+			sd_ssc_extract_info(&sfip->fm_ssc, un, pktp, bp, xp);
+			sd_ssc_post(&sfip->fm_ssc, SD_FM_DRV_FATAL);
+		}
 	}
 
 	/*
@@ -13955,6 +14910,7 @@ sd_retry_command(struct sd_lun *un, struct buf *bp, int retry_check_flag,
 {
 	struct sd_xbuf	*xp;
 	struct scsi_pkt	*pktp;
+	struct sd_fm_internal *sfip;
 
 	ASSERT(un != NULL);
 	ASSERT(mutex_owned(SD_MUTEX(un)));
@@ -13963,6 +14919,9 @@ sd_retry_command(struct sd_lun *un, struct buf *bp, int retry_check_flag,
 	ASSERT(xp != NULL);
 	pktp = SD_GET_PKTP(bp);
 	ASSERT(pktp != NULL);
+
+	sfip = (struct sd_fm_internal *)un->un_fm_private;
+	ASSERT(sfip != NULL);
 
 	SD_TRACE(SD_LOG_IO | SD_LOG_ERROR, un,
 	    "sd_retry_command: entry: bp:0x%p xp:0x%p\n", bp, xp);
@@ -14198,6 +15157,20 @@ sd_retry_command(struct sd_lun *un, struct buf *bp, int retry_check_flag,
 	}
 
 	xp->xb_pktp->pkt_flags |= FLAG_HEAD;
+
+	/*
+	 * If this is a non-USCSI command being retried
+	 * during execution last time, we should post an ereport with
+	 * driver-assessment of the value "retry".
+	 * For partial DMA, request sense and STATUS_QFULL, there are no
+	 * hardware errors, we bypass ereport posting.
+	 */
+	if (failure_code != 0) {
+		if (!(xp->xb_pkt_flags & SD_XB_USCSICMD)) {
+			sd_ssc_extract_info(&sfip->fm_ssc, un, pktp, bp, xp);
+			sd_ssc_post(&sfip->fm_ssc, SD_FM_DRV_RETRY);
+		}
+	}
 
 	/*
 	 * If we were given a zero timeout, we must attempt to retry the
@@ -14610,6 +15583,12 @@ sd_mark_rqs_busy(struct sd_lun *un, struct buf *bp)
 	 * the pkt_flags for the RQS packet.)
 	 */
 	((SD_GET_XBUF(bp))->xb_pktp)->pkt_flags |= FLAG_SENSING;
+
+	/* Request sense down same path */
+	if (scsi_pkt_allocated_correctly((SD_GET_XBUF(bp))->xb_pktp) &&
+	    ((SD_GET_XBUF(bp))->xb_pktp)->pkt_path_instance)
+		sense_xp->xb_pktp->pkt_path_instance =
+		    ((SD_GET_XBUF(bp))->xb_pktp)->pkt_path_instance;
 
 	sense_xp->xb_retry_count	= 0;
 	sense_xp->xb_victim_retry_count = 0;
@@ -15067,6 +16046,7 @@ sdintr(struct scsi_pkt *pktp)
 	struct sd_xbuf	*xp;
 	struct sd_lun	*un;
 	size_t		actual_len;
+	sd_ssc_t	*sscp;
 
 	ASSERT(pktp != NULL);
 	bp = (struct buf *)pktp->pkt_private;
@@ -15090,6 +16070,10 @@ sdintr(struct scsi_pkt *pktp)
 	    " xp:0x%p, un:0x%p\n", bp, xp, un);
 
 	mutex_enter(SD_MUTEX(un));
+
+	ASSERT(un->un_fm_private != NULL);
+	sscp = &((struct sd_fm_internal *)(un->un_fm_private))->fm_ssc;
+	ASSERT(sscp != NULL);
 
 	/* Reduce the count of the #commands currently in transport */
 	un->un_ncmds_in_transport--;
@@ -15380,16 +16364,28 @@ not_successful:
 		case STATUS_SCSI2:
 		case STATUS_INTERMEDIATE_MET:
 		case STATUS_ACA_ACTIVE:
-			scsi_log(SD_DEVINFO(un), sd_label, CE_CONT,
+			scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 			    "Unexpected SCSI status received: 0x%x\n",
 			    SD_GET_PKT_STATUS(pktp));
+			/*
+			 * Mark the ssc_flags when detected invalid status
+			 * code for non-USCSI command.
+			 */
+			if (!(xp->xb_pkt_flags & SD_XB_USCSICMD)) {
+				sd_ssc_set_info(sscp, SSC_FLAGS_INVALID_STATUS,
+				    "stat-code");
+			}
 			sd_return_failed_command(un, bp, EIO);
 			break;
 
 		default:
-			scsi_log(SD_DEVINFO(un), sd_label, CE_CONT,
+			scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 			    "Invalid SCSI status received: 0x%x\n",
 			    SD_GET_PKT_STATUS(pktp));
+			if (!(xp->xb_pkt_flags & SD_XB_USCSICMD)) {
+				sd_ssc_set_info(sscp, SSC_FLAGS_INVALID_STATUS,
+				    "stat-code");
+			}
 			sd_return_failed_command(un, bp, EIO);
 			break;
 
@@ -15434,6 +16430,13 @@ not_successful:
 	default:
 		SD_TRACE(SD_LOG_IO_CORE | SD_LOG_ERROR, un,
 		    "sdintr: default\n");
+		/*
+		 * Mark the ssc_flags for detecting invliad pkt_reason.
+		 */
+		if (!(xp->xb_pkt_flags & SD_XB_USCSICMD)) {
+			sd_ssc_set_info(sscp, SSC_FLAGS_INVALID_PKT_REASON,
+			    "pkt-reason");
+		}
 		sd_pkt_reason_default(un, bp, xp, pktp);
 		break;
 	}
@@ -15816,15 +16819,20 @@ sd_validate_sense_data(struct sd_lun *un, struct buf *bp, struct sd_xbuf *xp,
 	struct scsi_extended_sense *esp;
 	struct	scsi_pkt *pktp;
 	char	*msgp = NULL;
+	sd_ssc_t *sscp;
 
 	ASSERT(un != NULL);
 	ASSERT(mutex_owned(SD_MUTEX(un)));
 	ASSERT(bp != NULL);
 	ASSERT(bp != un->un_rqs_bp);
 	ASSERT(xp != NULL);
+	ASSERT(un->un_fm_private != NULL);
 
 	pktp = SD_GET_PKTP(bp);
 	ASSERT(pktp != NULL);
+
+	sscp = &((struct sd_fm_internal *)(un->un_fm_private))->fm_ssc;
+	ASSERT(sscp != NULL);
 
 	/*
 	 * Check the status of the RQS command (auto or manual).
@@ -15874,6 +16882,11 @@ sd_validate_sense_data(struct sd_lun *un, struct buf *bp, struct sd_xbuf *xp,
 
 	if (actual_len < SUN_MIN_SENSE_LENGTH) {
 		msgp = "Not enough sense information\n";
+		/* Mark the ssc_flags for detecting invalid sense data */
+		if (!(xp->xb_pkt_flags & SD_XB_USCSICMD)) {
+			sd_ssc_set_info(sscp, SSC_FLAGS_INVALID_SENSE,
+			    "sense-data");
+		}
 		goto sense_failed;
 	}
 
@@ -15899,6 +16912,13 @@ sd_validate_sense_data(struct sd_lun *un, struct buf *bp, struct sd_xbuf *xp,
 			scsi_log(SD_DEVINFO(un), sd_label, CE_WARN, buf);
 			mutex_exit(&sd_sense_mutex);
 		}
+
+		/* Mark the ssc_flags for detecting invalid sense data */
+		if (!(xp->xb_pkt_flags & SD_XB_USCSICMD)) {
+			sd_ssc_set_info(sscp, SSC_FLAGS_INVALID_SENSE,
+			    "sense-data");
+		}
+
 		/* Note: Legacy behavior, fail the command with no retry */
 		sd_return_failed_command(un, bp, EIO);
 		return (SD_SENSE_DATA_IS_INVALID);
@@ -15915,6 +16935,11 @@ sd_validate_sense_data(struct sd_lun *un, struct buf *bp, struct sd_xbuf *xp,
 	    (esp->es_code != CODE_FMT_DESCR_CURRENT) &&
 	    (esp->es_code != CODE_FMT_DESCR_DEFERRED) &&
 	    (esp->es_code != CODE_FMT_VENDOR_SPECIFIC)) {
+		/* Mark the ssc_flags for detecting invalid sense data */
+		if (!(xp->xb_pkt_flags & SD_XB_USCSICMD)) {
+			sd_ssc_set_info(sscp, SSC_FLAGS_INVALID_SENSE,
+			    "sense-data");
+		}
 		goto sense_failed;
 	}
 
@@ -15943,8 +16968,6 @@ sense_failed:
 
 	return (SD_SENSE_DATA_IS_INVALID);
 }
-
-
 
 /*
  *    Function: sd_decode_sense
@@ -16226,7 +17249,6 @@ sd_print_sense_msg(struct sd_lun *un, struct buf *bp, void *arg, int code)
 			return;
 		}
 	}
-
 	/*
 	 * Check for Sonoma Failover and keep a count of how many failed I/O's
 	 */
@@ -17783,6 +18805,7 @@ sd_target_change_task(void *arg)
 	uint64_t		capacity;
 	diskaddr_t		label_cap;
 	uint_t			lbasize;
+	sd_ssc_t		*ssc;
 
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
@@ -17792,17 +18815,20 @@ sd_target_change_task(void *arg)
 		return;
 	}
 
-	if (sd_send_scsi_READ_CAPACITY(un, &capacity,
+	ssc = sd_ssc_init(un);
+
+	if (sd_send_scsi_READ_CAPACITY(ssc, &capacity,
 	    &lbasize, SD_PATH_DIRECT) != 0) {
 		SD_ERROR(SD_LOG_ERROR, un,
 		    "sd_target_change_task: fail to read capacity\n");
-		return;
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+		goto task_exit;
 	}
 
 	mutex_enter(SD_MUTEX(un));
 	if (capacity <= un->un_blockcount) {
 		mutex_exit(SD_MUTEX(un));
-		return;
+		goto task_exit;
 	}
 
 	sd_update_block_info(un, lbasize, capacity);
@@ -17823,6 +18849,9 @@ sd_target_change_task(void *arg)
 			mutex_exit(SD_MUTEX(un));
 		}
 	}
+
+task_exit:
+	sd_ssc_fini(ssc);
 }
 
 /*
@@ -17978,14 +19007,17 @@ sd_handle_mchange(struct sd_lun *un)
 	uint64_t	capacity;
 	uint32_t	lbasize;
 	int		rval;
+	sd_ssc_t	*ssc;
 
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	ASSERT(un->un_f_monitor_media_state);
 
-	if ((rval = sd_send_scsi_READ_CAPACITY(un, &capacity, &lbasize,
-	    SD_PATH_DIRECT_PRIORITY)) != 0) {
-		return (rval);
-	}
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_READ_CAPACITY(ssc, &capacity, &lbasize,
+	    SD_PATH_DIRECT_PRIORITY);
+
+	if (rval != 0)
+		goto failed;
 
 	mutex_enter(SD_MUTEX(un));
 	sd_update_block_info(un, lbasize, capacity);
@@ -17998,12 +19030,12 @@ sd_handle_mchange(struct sd_lun *un)
 		    (uint64_t)un->un_tgt_blocksize);
 	}
 
-
 	/*
 	 * Check if the media in the device is writable or not
 	 */
-	if (ISCD(un))
-		sd_check_for_writable_cd(un, SD_PATH_DIRECT_PRIORITY);
+	if (ISCD(un)) {
+		sd_check_for_writable_cd(ssc, SD_PATH_DIRECT_PRIORITY);
+	}
 
 	/*
 	 * Note: Maybe let the strategy/partitioning chain worry about getting
@@ -18015,6 +19047,7 @@ sd_handle_mchange(struct sd_lun *un)
 
 	if (cmlb_validate(un->un_cmlbhandle, 0,
 	    (void *)SD_PATH_DIRECT_PRIORITY) != 0) {
+		sd_ssc_fini(ssc);
 		return (EIO);
 	} else {
 		if (un->un_f_pkstats_enabled) {
@@ -18025,12 +19058,16 @@ sd_handle_mchange(struct sd_lun *un)
 		}
 	}
 
-
 	/*
 	 * Try to lock the door
 	 */
-	return (sd_send_scsi_DOORLOCK(un, SD_REMOVAL_PREVENT,
-	    SD_PATH_DIRECT_PRIORITY));
+	rval = sd_send_scsi_DOORLOCK(ssc, SD_REMOVAL_PREVENT,
+	    SD_PATH_DIRECT_PRIORITY);
+failed:
+	if (rval != 0)
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	sd_ssc_fini(ssc);
+	return (rval);
 }
 
 
@@ -18039,8 +19076,8 @@ sd_handle_mchange(struct sd_lun *un)
  *
  * Description: Issue the scsi DOOR LOCK command
  *
- *   Arguments: un    - pointer to driver soft state (unit) structure for
- *			this target.
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *		flag  - SD_REMOVAL_ALLOW
  *			SD_REMOVAL_PREVENT
  *		path_flag - SD_PATH_DIRECT to use the USCSI "direct" chain and
@@ -18050,19 +19087,22 @@ sd_handle_mchange(struct sd_lun *un)
  *			command is issued as part of an error recovery action.
  *
  * Return Code: 0   - Success
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep.
  */
 
 static int
-sd_send_scsi_DOORLOCK(struct sd_lun *un, int flag, int path_flag)
+sd_send_scsi_DOORLOCK(sd_ssc_t *ssc, int flag, int path_flag)
 {
+	struct scsi_extended_sense	sense_buf;
 	union scsi_cdb		cdb;
 	struct uscsi_cmd	ucmd_buf;
-	struct scsi_extended_sense	sense_buf;
 	int			status;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 
@@ -18103,14 +19143,19 @@ sd_send_scsi_DOORLOCK(struct sd_lun *un, int flag, int path_flag)
 	ucmd_buf.uscsi_timeout	= 15;
 
 	SD_TRACE(SD_LOG_IO, un,
-	    "sd_send_scsi_DOORLOCK: returning sd_send_scsi_cmd()\n");
+	    "sd_send_scsi_DOORLOCK: returning sd_ssc_send\n");
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, path_flag);
+
+	if (status == 0)
+		sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 
 	if ((status == EIO) && (ucmd_buf.uscsi_status == STATUS_CHECK) &&
 	    (ucmd_buf.uscsi_rqstatus == STATUS_GOOD) &&
 	    (scsi_sense_key((uint8_t *)&sense_buf) == KEY_ILLEGAL_REQUEST)) {
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+
 		/* fake success and skip subsequent doorlock commands */
 		un->un_f_doorlock_supported = FALSE;
 		return (0);
@@ -18130,7 +19175,7 @@ sd_send_scsi_DOORLOCK(struct sd_lun *un, int flag, int path_flag)
  *		normal READ CAPACITY command and the results of a
  *		READ CAPACITY 16 will be used instead.
  *
- *   Arguments: un   - ptr to soft state struct for the target
+ *   Arguments: ssc   - ssc contains ptr to soft state struct for the target
  *		capp - ptr to unsigned 64-bit variable to receive the
  *			capacity value from the command.
  *		lbap - ptr to unsigned 32-bit varaible to receive the
@@ -18145,7 +19190,7 @@ sd_send_scsi_DOORLOCK(struct sd_lun *un, int flag, int path_flag)
  *		EIO - IO error
  *		EACCES - Reservation conflict detected
  *		EAGAIN - Device is becoming ready
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep.  Blocks until command completes.
  */
@@ -18153,7 +19198,7 @@ sd_send_scsi_DOORLOCK(struct sd_lun *un, int flag, int path_flag)
 #define	SD_CAPACITY_SIZE	sizeof (struct scsi_capacity)
 
 static int
-sd_send_scsi_READ_CAPACITY(struct sd_lun *un, uint64_t *capp, uint32_t *lbap,
+sd_send_scsi_READ_CAPACITY(sd_ssc_t *ssc, uint64_t *capp, uint32_t *lbap,
 	int path_flag)
 {
 	struct	scsi_extended_sense	sense_buf;
@@ -18163,7 +19208,11 @@ sd_send_scsi_READ_CAPACITY(struct sd_lun *un, uint64_t *capp, uint32_t *lbap,
 	uint64_t		capacity;
 	uint32_t		lbasize;
 	int			status;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	ASSERT(capp != NULL);
@@ -18196,13 +19245,16 @@ sd_send_scsi_READ_CAPACITY(struct sd_lun *un, uint64_t *capp, uint32_t *lbap,
 	ucmd_buf.uscsi_flags	= USCSI_RQENABLE | USCSI_READ | USCSI_SILENT;
 	ucmd_buf.uscsi_timeout	= 60;
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, path_flag);
 
 	switch (status) {
 	case 0:
 		/* Return failure if we did not get valid capacity data. */
 		if (ucmd_buf.uscsi_resid != 0) {
+			sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+			    "sd_send_scsi_READ_CAPACITY received "
+			    "invalid capacity data");
 			kmem_free(capacity_buf, SD_CAPACITY_SIZE);
 			return (EIO);
 		}
@@ -18236,7 +19288,8 @@ sd_send_scsi_READ_CAPACITY(struct sd_lun *un, uint64_t *capp, uint32_t *lbap,
 		 * Reissue the request using READ CAPACITY 16.
 		 */
 		if (capacity == 0xffffffff) {
-			status = sd_send_scsi_READ_CAPACITY_16(un, &capacity,
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+			status = sd_send_scsi_READ_CAPACITY_16(ssc, &capacity,
 			    &lbasize, path_flag);
 			if (status != 0) {
 				return (status);
@@ -18307,9 +19360,12 @@ sd_send_scsi_READ_CAPACITY(struct sd_lun *un, uint64_t *capp, uint32_t *lbap,
 	 * failure to the caller. (4203735)
 	 */
 	if ((capacity == 0) || (lbasize == 0)) {
+		sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+		    "sd_send_scsi_READ_CAPACITY received invalid value "
+		    "capacity %llu lbasize %d", capacity, lbasize);
 		return (EIO);
 	}
-
+	sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 	return (0);
 }
 
@@ -18324,7 +19380,7 @@ sd_send_scsi_READ_CAPACITY(struct sd_lun *un, uint64_t *capp, uint32_t *lbap,
  *		sd_send_scsi_READ_CAPACITY which will appy any device
  *		specific adjustments to capacity and lbasize.
  *
- *   Arguments: un   - ptr to soft state struct for the target
+ *   Arguments: ssc   - ssc contains ptr to soft state struct for the target
  *		capp - ptr to unsigned 64-bit variable to receive the
  *			capacity value from the command.
  *		lbap - ptr to unsigned 32-bit varaible to receive the
@@ -18340,7 +19396,7 @@ sd_send_scsi_READ_CAPACITY(struct sd_lun *un, uint64_t *capp, uint32_t *lbap,
  *		EIO - IO error
  *		EACCES - Reservation conflict detected
  *		EAGAIN - Device is becoming ready
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep.  Blocks until command completes.
  */
@@ -18348,7 +19404,7 @@ sd_send_scsi_READ_CAPACITY(struct sd_lun *un, uint64_t *capp, uint32_t *lbap,
 #define	SD_CAPACITY_16_SIZE	sizeof (struct scsi_capacity_16)
 
 static int
-sd_send_scsi_READ_CAPACITY_16(struct sd_lun *un, uint64_t *capp,
+sd_send_scsi_READ_CAPACITY_16(sd_ssc_t *ssc, uint64_t *capp,
 	uint32_t *lbap, int path_flag)
 {
 	struct	scsi_extended_sense	sense_buf;
@@ -18358,7 +19414,11 @@ sd_send_scsi_READ_CAPACITY_16(struct sd_lun *un, uint64_t *capp,
 	uint64_t		capacity;
 	uint32_t		lbasize;
 	int			status;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	ASSERT(capp != NULL);
@@ -18401,13 +19461,16 @@ sd_send_scsi_READ_CAPACITY_16(struct sd_lun *un, uint64_t *capp,
 	 */
 	FORMG4COUNT(&cdb, ucmd_buf.uscsi_buflen);
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, path_flag);
 
 	switch (status) {
 	case 0:
 		/* Return failure if we did not get valid capacity data. */
 		if (ucmd_buf.uscsi_resid > 20) {
+			sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+			    "sd_send_scsi_READ_CAPACITY_16 received "
+			    "invalid capacity data");
 			kmem_free(capacity16_buf, SD_CAPACITY_16_SIZE);
 			return (EIO);
 		}
@@ -18442,6 +19505,8 @@ sd_send_scsi_READ_CAPACITY_16(struct sd_lun *un, uint64_t *capp,
 		 * are not defined by any current T10 standards.
 		 */
 		if (capacity == 0xffffffffffffffff) {
+			sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+			    "disk is too large");
 			return (EIO);
 		}
 		break;	/* Success! */
@@ -18486,8 +19551,8 @@ sd_send_scsi_READ_CAPACITY_16(struct sd_lun *un, uint64_t *capp,
  *
  * Description: Issue a scsi START STOP UNIT command to the target.
  *
- *   Arguments: un    - pointer to driver soft state (unit) structure for
- *			this target.
+ *   Arguments: ssc    - ssc contatins pointer to driver soft state (unit)
+ *                       structure for this target.
  *		flag  - SD_TARGET_START
  *			SD_TARGET_STOP
  *			SD_TARGET_EJECT
@@ -18501,19 +19566,22 @@ sd_send_scsi_READ_CAPACITY_16(struct sd_lun *un, uint64_t *capp,
  *		EIO - IO error
  *		EACCES - Reservation conflict detected
  *		ENXIO  - Not Ready, medium not present
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep.
  */
 
 static int
-sd_send_scsi_START_STOP_UNIT(struct sd_lun *un, int flag, int path_flag)
+sd_send_scsi_START_STOP_UNIT(sd_ssc_t *ssc, int flag, int path_flag)
 {
 	struct	scsi_extended_sense	sense_buf;
 	union scsi_cdb		cdb;
 	struct uscsi_cmd	ucmd_buf;
 	int			status;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 
@@ -18556,11 +19624,12 @@ sd_send_scsi_START_STOP_UNIT(struct sd_lun *un, int flag, int path_flag)
 	ucmd_buf.uscsi_flags	= USCSI_RQENABLE | USCSI_SILENT;
 	ucmd_buf.uscsi_timeout	= 200;
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, path_flag);
 
 	switch (status) {
 	case 0:
+		sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 		break;	/* Success! */
 	case EIO:
 		switch (ucmd_buf.uscsi_status) {
@@ -18638,6 +19707,8 @@ static void
 sd_start_stop_unit_task(void *arg)
 {
 	struct sd_lun	*un = arg;
+	sd_ssc_t	*ssc;
+	int		rval;
 
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
@@ -18662,9 +19733,12 @@ sd_start_stop_unit_task(void *arg)
 	 * using SD_PATH_DIRECT_PRIORITY. It doesn't matter if the spin up
 	 * succeeds or not, we will start I/O after the attempt.
 	 */
-	(void) sd_send_scsi_START_STOP_UNIT(un, SD_TARGET_START,
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_START,
 	    SD_PATH_DIRECT_PRIORITY);
-
+	if (rval != 0)
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	sd_ssc_fini(ssc);
 	/*
 	 * The above call blocks until the START_STOP_UNIT command completes.
 	 * Now that it has completed, we must re-try the original IO that
@@ -18705,7 +19779,8 @@ sd_start_stop_unit_task(void *arg)
  *
  * Description: Issue the scsi INQUIRY command.
  *
- *   Arguments: un
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *		bufaddr
  *		buflen
  *		evpd
@@ -18713,19 +19788,22 @@ sd_start_stop_unit_task(void *arg)
  *		page_length
  *
  * Return Code: 0   - Success
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep. Does not return until command is completed.
  */
 
 static int
-sd_send_scsi_INQUIRY(struct sd_lun *un, uchar_t *bufaddr, size_t buflen,
+sd_send_scsi_INQUIRY(sd_ssc_t *ssc, uchar_t *bufaddr, size_t buflen,
 	uchar_t evpd, uchar_t page_code, size_t *residp)
 {
 	union scsi_cdb		cdb;
 	struct uscsi_cmd	ucmd_buf;
 	int			status;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	ASSERT(bufaddr != NULL);
@@ -18750,8 +19828,15 @@ sd_send_scsi_INQUIRY(struct sd_lun *un, uchar_t *bufaddr, size_t buflen,
 	ucmd_buf.uscsi_flags	= USCSI_READ | USCSI_SILENT;
 	ucmd_buf.uscsi_timeout	= 200;	/* Excessive legacy value */
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, SD_PATH_DIRECT);
+
+	/*
+	 * Only handle status == 0, the upper-level caller
+	 * will put different assessment based on the context.
+	 */
+	if (status == 0)
+		sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 
 	if ((status == 0) && (residp != NULL)) {
 		*residp = ucmd_buf.uscsi_resid;
@@ -18775,7 +19860,8 @@ sd_send_scsi_INQUIRY(struct sd_lun *un, uchar_t *bufaddr, size_t buflen,
  *		is for retries to bring a device ready, so use the flag
  *		with caution.
  *
- *   Arguments: un
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *		flag:   SD_CHECK_FOR_MEDIA: return ENXIO if no media present
  *			SD_DONT_RETRY_TUR: include uscsi flag USCSI_DIAGNOSE.
  *			0: dont check for media present, do retries on cmd.
@@ -18784,19 +19870,22 @@ sd_send_scsi_INQUIRY(struct sd_lun *un, uchar_t *bufaddr, size_t buflen,
  *		EIO - IO error
  *		EACCES - Reservation conflict detected
  *		ENXIO  - Not Ready, medium not present
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep. Does not return until command is completed.
  */
 
 static int
-sd_send_scsi_TEST_UNIT_READY(struct sd_lun *un, int flag)
+sd_send_scsi_TEST_UNIT_READY(sd_ssc_t *ssc, int flag)
 {
 	struct	scsi_extended_sense	sense_buf;
 	union scsi_cdb		cdb;
 	struct uscsi_cmd	ucmd_buf;
 	int			status;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 
@@ -18842,12 +19931,13 @@ sd_send_scsi_TEST_UNIT_READY(struct sd_lun *un, int flag)
 	}
 	ucmd_buf.uscsi_timeout	= 60;
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, ((flag & SD_BYPASS_PM) ? SD_PATH_DIRECT :
 	    SD_PATH_STANDARD));
 
 	switch (status) {
 	case 0:
+		sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 		break;	/* Success! */
 	case EIO:
 		switch (ucmd_buf.uscsi_status) {
@@ -18878,24 +19968,24 @@ sd_send_scsi_TEST_UNIT_READY(struct sd_lun *un, int flag)
 	return (status);
 }
 
-
 /*
  *    Function: sd_send_scsi_PERSISTENT_RESERVE_IN
  *
  * Description: Issue the scsi PERSISTENT RESERVE IN command.
  *
- *   Arguments: un
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *
  * Return Code: 0   - Success
  *		EACCES
  *		ENOTSUP
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep. Does not return until command is completed.
  */
 
 static int
-sd_send_scsi_PERSISTENT_RESERVE_IN(struct sd_lun *un, uchar_t  usr_cmd,
+sd_send_scsi_PERSISTENT_RESERVE_IN(sd_ssc_t *ssc, uchar_t  usr_cmd,
 	uint16_t data_len, uchar_t *data_bufp)
 {
 	struct scsi_extended_sense	sense_buf;
@@ -18903,7 +19993,10 @@ sd_send_scsi_PERSISTENT_RESERVE_IN(struct sd_lun *un, uchar_t  usr_cmd,
 	struct uscsi_cmd	ucmd_buf;
 	int			status;
 	int			no_caller_buf = FALSE;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	ASSERT((usr_cmd == SD_READ_KEYS) || (usr_cmd == SD_READ_RESV));
@@ -18935,11 +20028,13 @@ sd_send_scsi_PERSISTENT_RESERVE_IN(struct sd_lun *un, uchar_t  usr_cmd,
 	ucmd_buf.uscsi_flags	= USCSI_RQENABLE | USCSI_READ | USCSI_SILENT;
 	ucmd_buf.uscsi_timeout	= 60;
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, SD_PATH_STANDARD);
 
 	switch (status) {
 	case 0:
+		sd_ssc_assessment(ssc, SD_FMT_STANDARD);
+
 		break;	/* Success! */
 	case EIO:
 		switch (ucmd_buf.uscsi_status) {
@@ -18979,7 +20074,8 @@ sd_send_scsi_PERSISTENT_RESERVE_IN(struct sd_lun *un, uchar_t  usr_cmd,
  *		MHIOCGRP_INRESV) by sending the SCSI-3 PROUT commands to the
  *		device.
  *
- *   Arguments: un  -   Pointer to soft state struct for the target.
+ *   Arguments: ssc  -  ssc contains un - pointer to soft state struct
+ *                      for the target.
  *		usr_cmd SCSI-3 reservation facility command (one of
  *			SD_SCSI3_REGISTER, SD_SCSI3_RESERVE, SD_SCSI3_RELEASE,
  *			SD_SCSI3_PREEMPTANDABORT)
@@ -18990,13 +20086,13 @@ sd_send_scsi_PERSISTENT_RESERVE_IN(struct sd_lun *un, uchar_t  usr_cmd,
  * Return Code: 0   - Success
  *		EACCES
  *		ENOTSUP
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep. Does not return until command is completed.
  */
 
 static int
-sd_send_scsi_PERSISTENT_RESERVE_OUT(struct sd_lun *un, uchar_t usr_cmd,
+sd_send_scsi_PERSISTENT_RESERVE_OUT(sd_ssc_t *ssc, uchar_t usr_cmd,
 	uchar_t	*usr_bufp)
 {
 	struct scsi_extended_sense	sense_buf;
@@ -19005,7 +20101,10 @@ sd_send_scsi_PERSISTENT_RESERVE_OUT(struct sd_lun *un, uchar_t usr_cmd,
 	int			status;
 	uchar_t			data_len = sizeof (sd_prout_t);
 	sd_prout_t		*prp;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	ASSERT(data_len == 24);	/* required by scsi spec */
@@ -19080,11 +20179,12 @@ sd_send_scsi_PERSISTENT_RESERVE_OUT(struct sd_lun *un, uchar_t usr_cmd,
 		break;
 	}
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, SD_PATH_STANDARD);
 
 	switch (status) {
 	case 0:
+		sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 		break;	/* Success! */
 	case EIO:
 		switch (ucmd_buf.uscsi_status) {
@@ -19389,7 +20489,7 @@ done:
  * Description: Issues the get configuration command to the device.
  *		Called from sd_check_for_writable_cd & sd_get_media_info
  *		caller needs to ensure that buflen = SD_PROFILE_HEADER_LEN
- *   Arguments: un
+ *   Arguments: ssc
  *		ucmdbuf
  *		rqbuf
  *		rqbuflen
@@ -19398,20 +20498,23 @@ done:
  *		path_flag
  *
  * Return Code: 0   - Success
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep. Does not return until command is completed.
  *
  */
 
 static int
-sd_send_scsi_GET_CONFIGURATION(struct sd_lun *un, struct uscsi_cmd *ucmdbuf,
+sd_send_scsi_GET_CONFIGURATION(sd_ssc_t *ssc, struct uscsi_cmd *ucmdbuf,
 	uchar_t *rqbuf, uint_t rqbuflen, uchar_t *bufaddr, uint_t buflen,
 	int path_flag)
 {
 	char	cdb[CDB_GROUP1];
 	int	status;
+	struct sd_lun	*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	ASSERT(bufaddr != NULL);
@@ -19441,11 +20544,12 @@ sd_send_scsi_GET_CONFIGURATION(struct sd_lun *un, struct uscsi_cmd *ucmdbuf,
 	ucmdbuf->uscsi_rqlen = rqbuflen;
 	ucmdbuf->uscsi_flags = USCSI_RQENABLE|USCSI_SILENT|USCSI_READ;
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), ucmdbuf, FKIOCTL,
+	status = sd_ssc_send(ssc, ucmdbuf, FKIOCTL,
 	    UIO_SYSSPACE, path_flag);
 
 	switch (status) {
 	case 0:
+		sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 		break;  /* Success! */
 	case EIO:
 		switch (ucmdbuf->uscsi_status) {
@@ -19478,7 +20582,7 @@ sd_send_scsi_GET_CONFIGURATION(struct sd_lun *un, struct uscsi_cmd *ucmdbuf,
  * Description: Issues the get configuration command to the device to
  *              retrieve a specific feature. Called from
  *		sd_check_for_writable_cd & sd_set_mmc_caps.
- *   Arguments: un
+ *   Arguments: ssc
  *              ucmdbuf
  *              rqbuf
  *              rqbuflen
@@ -19487,19 +20591,22 @@ sd_send_scsi_GET_CONFIGURATION(struct sd_lun *un, struct uscsi_cmd *ucmdbuf,
  *		feature
  *
  * Return Code: 0   - Success
- *              errno return code from sd_send_scsi_cmd()
+ *              errno return code from sd_ssc_send()
  *
  *     Context: Can sleep. Does not return until command is completed.
  *
  */
 static int
-sd_send_scsi_feature_GET_CONFIGURATION(struct sd_lun *un,
+sd_send_scsi_feature_GET_CONFIGURATION(sd_ssc_t *ssc,
 	struct uscsi_cmd *ucmdbuf, uchar_t *rqbuf, uint_t rqbuflen,
 	uchar_t *bufaddr, uint_t buflen, char feature, int path_flag)
 {
 	char    cdb[CDB_GROUP1];
 	int	status;
+	struct sd_lun	*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	ASSERT(bufaddr != NULL);
@@ -19530,11 +20637,12 @@ sd_send_scsi_feature_GET_CONFIGURATION(struct sd_lun *un,
 	ucmdbuf->uscsi_rqlen = rqbuflen;
 	ucmdbuf->uscsi_flags = USCSI_RQENABLE|USCSI_SILENT|USCSI_READ;
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), ucmdbuf, FKIOCTL,
+	status = sd_ssc_send(ssc, ucmdbuf, FKIOCTL,
 	    UIO_SYSSPACE, path_flag);
 
 	switch (status) {
 	case 0:
+
 		break;  /* Success! */
 	case EIO:
 		switch (ucmdbuf->uscsi_status) {
@@ -19570,7 +20678,8 @@ sd_send_scsi_feature_GET_CONFIGURATION(struct sd_lun *un,
  *		Group1, and Group2 commands across all platforms. ATAPI devices
  *		use Group 1 Read/Write commands and Group 2 Mode Sense/Select
  *
- *   Arguments: un - pointer to the softstate struct for the target.
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *		cdbsize - size CDB to be used (CDB_GROUP0 (6 byte), or
  *			  CDB_GROUP[1|2] (10 byte).
  *		bufaddr - buffer for page data retrieved from the target.
@@ -19582,13 +20691,13 @@ sd_send_scsi_feature_GET_CONFIGURATION(struct sd_lun *un,
  *			command waitq.
  *
  * Return Code: 0   - Success
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep. Does not return until command is completed.
  */
 
 static int
-sd_send_scsi_MODE_SENSE(struct sd_lun *un, int cdbsize, uchar_t *bufaddr,
+sd_send_scsi_MODE_SENSE(sd_ssc_t *ssc, int cdbsize, uchar_t *bufaddr,
 	size_t buflen,  uchar_t page_code, int path_flag)
 {
 	struct	scsi_extended_sense	sense_buf;
@@ -19596,7 +20705,10 @@ sd_send_scsi_MODE_SENSE(struct sd_lun *un, int cdbsize, uchar_t *bufaddr,
 	struct uscsi_cmd	ucmd_buf;
 	int			status;
 	int			headlen;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	ASSERT(bufaddr != NULL);
@@ -19635,7 +20747,7 @@ sd_send_scsi_MODE_SENSE(struct sd_lun *un, int cdbsize, uchar_t *bufaddr,
 	ucmd_buf.uscsi_flags	= USCSI_RQENABLE | USCSI_READ | USCSI_SILENT;
 	ucmd_buf.uscsi_timeout	= 60;
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, path_flag);
 
 	switch (status) {
@@ -19647,8 +20759,11 @@ sd_send_scsi_MODE_SENSE(struct sd_lun *un, int cdbsize, uchar_t *bufaddr,
 		 * this case, make sure that mode page header is returned at
 		 * least.
 		 */
-		if (buflen - ucmd_buf.uscsi_resid <  headlen)
+		if (buflen - ucmd_buf.uscsi_resid <  headlen) {
 			status = EIO;
+			sd_ssc_set_info(ssc, SSC_FLAGS_INVALID_DATA,
+			    "mode page header is not returned");
+		}
 		break;	/* Success! */
 	case EIO:
 		switch (ucmd_buf.uscsi_status) {
@@ -19681,7 +20796,8 @@ sd_send_scsi_MODE_SENSE(struct sd_lun *un, int cdbsize, uchar_t *bufaddr,
  *		Group1, and Group2 commands across all platforms. ATAPI devices
  *		use Group 1 Read/Write commands and Group 2 Mode Sense/Select
  *
- *   Arguments: un - pointer to the softstate struct for the target.
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *		cdbsize - size CDB to be used (CDB_GROUP0 (6 byte), or
  *			  CDB_GROUP[1|2] (10 byte).
  *		bufaddr - buffer for page data retrieved from the target.
@@ -19693,20 +20809,23 @@ sd_send_scsi_MODE_SENSE(struct sd_lun *un, int cdbsize, uchar_t *bufaddr,
  *			command waitq.
  *
  * Return Code: 0   - Success
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep. Does not return until command is completed.
  */
 
 static int
-sd_send_scsi_MODE_SELECT(struct sd_lun *un, int cdbsize, uchar_t *bufaddr,
+sd_send_scsi_MODE_SELECT(sd_ssc_t *ssc, int cdbsize, uchar_t *bufaddr,
 	size_t buflen,  uchar_t save_page, int path_flag)
 {
 	struct	scsi_extended_sense	sense_buf;
 	union scsi_cdb		cdb;
 	struct uscsi_cmd	ucmd_buf;
 	int			status;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	ASSERT(bufaddr != NULL);
@@ -19747,11 +20866,12 @@ sd_send_scsi_MODE_SELECT(struct sd_lun *un, int cdbsize, uchar_t *bufaddr,
 	ucmd_buf.uscsi_flags	= USCSI_RQENABLE | USCSI_WRITE | USCSI_SILENT;
 	ucmd_buf.uscsi_timeout	= 60;
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, path_flag);
 
 	switch (status) {
 	case 0:
+		sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 		break;	/* Success! */
 	case EIO:
 		switch (ucmd_buf.uscsi_status) {
@@ -19781,7 +20901,8 @@ sd_send_scsi_MODE_SELECT(struct sd_lun *un, int cdbsize, uchar_t *bufaddr,
  *
  * Description: Issue a scsi READ or WRITE command with the given parameters.
  *
- *   Arguments: un:      Pointer to the sd_lun struct for the target.
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *		cmd:	 SCMD_READ or SCMD_WRITE
  *		bufaddr: Address of caller's buffer to receive the RDWR data
  *		buflen:  Length of caller's buffer receive the RDWR data.
@@ -19795,13 +20916,13 @@ sd_send_scsi_MODE_SELECT(struct sd_lun *un, int cdbsize, uchar_t *bufaddr,
  *			command waitq.
  *
  * Return Code: 0   - Success
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep. Does not return until command is completed.
  */
 
 static int
-sd_send_scsi_RDWR(struct sd_lun *un, uchar_t cmd, void *bufaddr,
+sd_send_scsi_RDWR(sd_ssc_t *ssc, uchar_t cmd, void *bufaddr,
 	size_t buflen, daddr_t start_block, int path_flag)
 {
 	struct	scsi_extended_sense	sense_buf;
@@ -19811,7 +20932,10 @@ sd_send_scsi_RDWR(struct sd_lun *un, uchar_t cmd, void *bufaddr,
 	int			status;
 	int			cdbsize;
 	uchar_t			flag;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	ASSERT(bufaddr != NULL);
@@ -19879,10 +21003,12 @@ sd_send_scsi_RDWR(struct sd_lun *un, uchar_t cmd, void *bufaddr,
 	ucmd_buf.uscsi_rqlen	= sizeof (struct scsi_extended_sense);
 	ucmd_buf.uscsi_flags	= flag | USCSI_RQENABLE | USCSI_SILENT;
 	ucmd_buf.uscsi_timeout	= 60;
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, path_flag);
+
 	switch (status) {
 	case 0:
+		sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 		break;	/* Success! */
 	case EIO:
 		switch (ucmd_buf.uscsi_status) {
@@ -19913,25 +21039,29 @@ sd_send_scsi_RDWR(struct sd_lun *un, uchar_t cmd, void *bufaddr,
  *
  * Description: Issue a scsi LOG_SENSE command with the given parameters.
  *
- *   Arguments: un:      Pointer to the sd_lun struct for the target.
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *
  * Return Code: 0   - Success
- *		errno return code from sd_send_scsi_cmd()
+ *		errno return code from sd_ssc_send()
  *
  *     Context: Can sleep. Does not return until command is completed.
  */
 
 static int
-sd_send_scsi_LOG_SENSE(struct sd_lun *un, uchar_t *bufaddr, uint16_t buflen,
+sd_send_scsi_LOG_SENSE(sd_ssc_t *ssc, uchar_t *bufaddr, uint16_t buflen,
 	uchar_t page_code, uchar_t page_control, uint16_t param_ptr,
 	int path_flag)
 
 {
-	struct	scsi_extended_sense	sense_buf;
+	struct scsi_extended_sense	sense_buf;
 	union scsi_cdb		cdb;
 	struct uscsi_cmd	ucmd_buf;
 	int			status;
+	struct sd_lun		*un;
 
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
 	ASSERT(un != NULL);
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 
@@ -19956,7 +21086,7 @@ sd_send_scsi_LOG_SENSE(struct sd_lun *un, uchar_t *bufaddr, uint16_t buflen,
 	ucmd_buf.uscsi_flags	= USCSI_RQENABLE | USCSI_READ | USCSI_SILENT;
 	ucmd_buf.uscsi_timeout	= 60;
 
-	status = sd_send_scsi_cmd(SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+	status = sd_ssc_send(ssc, &ucmd_buf, FKIOCTL,
 	    UIO_SYSSPACE, path_flag);
 
 	switch (status) {
@@ -20001,8 +21131,9 @@ sd_send_scsi_LOG_SENSE(struct sd_lun *un, uchar_t *bufaddr, uint16_t buflen,
 					    (char)(page_control << 6) |
 					    un->un_start_stop_cycle_page;
 					mutex_exit(SD_MUTEX(un));
-					status = sd_send_scsi_cmd(
-					    SD_GET_DEV(un), &ucmd_buf, FKIOCTL,
+					sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+					status = sd_ssc_send(
+					    ssc, &ucmd_buf, FKIOCTL,
 					    UIO_SYSSPACE, path_flag);
 
 					break;
@@ -20023,6 +21154,7 @@ sd_send_scsi_LOG_SENSE(struct sd_lun *un, uchar_t *bufaddr, uint16_t buflen,
 	}
 
 	if (status == 0) {
+		sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 		SD_DUMP_MEMORY(un, SD_LOG_IO, "sd_send_scsi_LOG_SENSE: data",
 		    (uchar_t *)bufaddr, buflen, SD_LOG_HEX);
 	}
@@ -20066,6 +21198,7 @@ sdioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cred_p, int *rval_p)
 	cred_t		*cr;
 	int		tmprval = EINVAL;
 	int 		is_valid;
+	sd_ssc_t	*ssc;
 
 	/*
 	 * All device accesses go thru sdstrategy where we check on suspend
@@ -20077,6 +21210,8 @@ sdioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cred_p, int *rval_p)
 
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 
+	/* Initialize sd_ssc_t for internal uscsi commands */
+	ssc = sd_ssc_init(un);
 
 	is_valid = SD_IS_VALID_LABEL(un);
 
@@ -20106,13 +21241,16 @@ sdioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cred_p, int *rval_p)
 		switch (cmd) {
 		case DKIOCGGEOM:	/* SD_PATH_DIRECT */
 		case DKIOCGVTOC:
+		case DKIOCGEXTVTOC:
 		case DKIOCGAPART:
 		case DKIOCPARTINFO:
+		case DKIOCEXTPARTINFO:
 		case DKIOCSGEOM:
 		case DKIOCSAPART:
 		case DKIOCGETEFI:
 		case DKIOCPARTITION:
 		case DKIOCSVTOC:
+		case DKIOCSEXTVTOC:
 		case DKIOCSETEFI:
 		case DKIOCGMBOOT:
 		case DKIOCSMBOOT:
@@ -20145,7 +21283,8 @@ sdioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cred_p, int *rval_p)
 				un->un_ncmds_in_driver--;
 				ASSERT(un->un_ncmds_in_driver >= 0);
 				mutex_exit(SD_MUTEX(un));
-				return (ENOTTY);
+				err = ENOTTY;
+				goto done_without_assess;
 			}
 			break;
 		case FDEJECT:
@@ -20155,18 +21294,20 @@ sdioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cred_p, int *rval_p)
 				un->un_ncmds_in_driver--;
 				ASSERT(un->un_ncmds_in_driver >= 0);
 				mutex_exit(SD_MUTEX(un));
-				return (ENOTTY);
+				err = ENOTTY;
+				goto done_without_assess;
 			}
 			break;
 		case DKIOCFLUSHWRITECACHE:
 			mutex_exit(SD_MUTEX(un));
-			err = sd_send_scsi_TEST_UNIT_READY(un, 0);
+			err = sd_send_scsi_TEST_UNIT_READY(ssc, 0);
 			if (err != 0) {
 				mutex_enter(SD_MUTEX(un));
 				un->un_ncmds_in_driver--;
 				ASSERT(un->un_ncmds_in_driver >= 0);
 				mutex_exit(SD_MUTEX(un));
-				return (EIO);
+				err = EIO;
+				goto done_quick_assess;
 			}
 			mutex_enter(SD_MUTEX(un));
 			/* FALLTHROUGH */
@@ -20192,7 +21333,7 @@ sdioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cred_p, int *rval_p)
 		}
 
 		mutex_exit(SD_MUTEX(un));
-		err = sd_ready_and_valid(un);
+		err = sd_ready_and_valid(ssc, SDPART(dev));
 		mutex_enter(SD_MUTEX(un));
 
 		if (err != SD_READY_VALID) {
@@ -20220,7 +21361,8 @@ sdioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cred_p, int *rval_p)
 				un->un_ncmds_in_driver--;
 				ASSERT(un->un_ncmds_in_driver >= 0);
 				mutex_exit(SD_MUTEX(un));
-				return (err);
+
+				goto done_without_assess;
 			}
 		}
 	}
@@ -20241,13 +21383,16 @@ skip_ready_valid:
 
 	case DKIOCGGEOM:
 	case DKIOCGVTOC:
+	case DKIOCGEXTVTOC:
 	case DKIOCGAPART:
 	case DKIOCPARTINFO:
+	case DKIOCEXTPARTINFO:
 	case DKIOCSGEOM:
 	case DKIOCSAPART:
 	case DKIOCGETEFI:
 	case DKIOCPARTITION:
 	case DKIOCSVTOC:
+	case DKIOCSEXTVTOC:
 	case DKIOCSETEFI:
 	case DKIOCGMBOOT:
 	case DKIOCSMBOOT:
@@ -20258,13 +21403,14 @@ skip_ready_valid:
 		/* TUR should spin up */
 
 		if (un->un_f_has_removable_media)
-			err = sd_send_scsi_TEST_UNIT_READY(un,
+			err = sd_send_scsi_TEST_UNIT_READY(ssc,
 			    SD_CHECK_FOR_MEDIA);
+
 		else
-			err = sd_send_scsi_TEST_UNIT_READY(un, 0);
+			err = sd_send_scsi_TEST_UNIT_READY(ssc, 0);
 
 		if (err != 0)
-			break;
+			goto done_with_assess;
 
 		err = cmlb_ioctl(un->un_cmlbhandle, dev,
 		    cmd, arg, flag, cred_p, rval_p, (void *)SD_PATH_DIRECT);
@@ -20291,7 +21437,7 @@ skip_ready_valid:
 			if (un->un_f_devid_supported &&
 			    (un->un_f_opt_fab_devid == TRUE)) {
 				if (un->un_devid == NULL) {
-					sd_register_devid(un, SD_DEVINFO(un),
+					sd_register_devid(ssc, SD_DEVINFO(un),
 					    SD_TARGET_IS_UNRESERVED);
 				} else {
 					/*
@@ -20301,7 +21447,7 @@ skip_ready_valid:
 					 * by writing it back out to
 					 * disk.
 					 */
-					if (sd_write_deviceid(un) != 0) {
+					if (sd_write_deviceid(ssc) != 0) {
 						ddi_devid_free(un->un_devid);
 						un->un_devid = NULL;
 					}
@@ -20314,15 +21460,15 @@ skip_ready_valid:
 
 	case DKIOCLOCK:
 		SD_TRACE(SD_LOG_IOCTL, un, "DKIOCLOCK\n");
-		err = sd_send_scsi_DOORLOCK(un, SD_REMOVAL_PREVENT,
+		err = sd_send_scsi_DOORLOCK(ssc, SD_REMOVAL_PREVENT,
 		    SD_PATH_STANDARD);
-		break;
+		goto done_with_assess;
 
 	case DKIOCUNLOCK:
 		SD_TRACE(SD_LOG_IOCTL, un, "DKIOCUNLOCK\n");
-		err = sd_send_scsi_DOORLOCK(un, SD_REMOVAL_ALLOW,
+		err = sd_send_scsi_DOORLOCK(ssc, SD_REMOVAL_ALLOW,
 		    SD_PATH_STANDARD);
-		break;
+		goto done_with_assess;
 
 	case DKIOCSTATE: {
 		enum dkio_state		state;
@@ -20390,17 +21536,18 @@ skip_ready_valid:
 	case MHIOCSTATUS:
 		SD_TRACE(SD_LOG_IOCTL, un, "MHIOCSTATUS\n");
 		if ((err = drv_priv(cred_p)) == 0) {
-			switch (sd_send_scsi_TEST_UNIT_READY(un, 0)) {
+			switch (sd_send_scsi_TEST_UNIT_READY(ssc, 0)) {
 			case 0:
 				err = 0;
 				break;
 			case EACCES:
 				*rval_p = 1;
 				err = 0;
+				sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 				break;
 			default:
 				err = EIO;
-				break;
+				goto done_with_assess;
 			}
 		}
 		break;
@@ -20459,8 +21606,10 @@ skip_ready_valid:
 				} else {
 					err =
 					    sd_send_scsi_PERSISTENT_RESERVE_OUT(
-					    un, SD_SCSI3_REGISTER,
+					    ssc, SD_SCSI3_REGISTER,
 					    (uchar_t *)&reg);
+					if (err != 0)
+						goto done_with_assess;
 				}
 			}
 		}
@@ -20479,8 +21628,10 @@ skip_ready_valid:
 				} else {
 					err =
 					    sd_send_scsi_PERSISTENT_RESERVE_OUT(
-					    un, SD_SCSI3_RESERVE,
+					    ssc, SD_SCSI3_RESERVE,
 					    (uchar_t *)&resv_desc);
+					if (err != 0)
+						goto done_with_assess;
 				}
 			}
 		}
@@ -20500,8 +21651,10 @@ skip_ready_valid:
 				} else {
 					err =
 					    sd_send_scsi_PERSISTENT_RESERVE_OUT(
-					    un, SD_SCSI3_PREEMPTANDABORT,
+					    ssc, SD_SCSI3_PREEMPTANDABORT,
 					    (uchar_t *)&preempt_abort);
+					if (err != 0)
+						goto done_with_assess;
 				}
 			}
 		}
@@ -20521,8 +21674,10 @@ skip_ready_valid:
 				} else {
 					err =
 					    sd_send_scsi_PERSISTENT_RESERVE_OUT(
-					    un, SD_SCSI3_REGISTERANDIGNOREKEY,
+					    ssc, SD_SCSI3_REGISTERANDIGNOREKEY,
 					    (uchar_t *)&r_and_i);
+					if (err != 0)
+						goto done_with_assess;
 				}
 			}
 		}
@@ -20535,14 +21690,21 @@ skip_ready_valid:
 			err = EPERM;
 		} else {
 			enum uio_seg	uioseg;
+
 			uioseg = (flag & FKIOCTL) ? UIO_SYSSPACE :
 			    UIO_USERSPACE;
 			if (un->un_f_format_in_progress == TRUE) {
 				err = EAGAIN;
 				break;
 			}
-			err = sd_send_scsi_cmd(dev, (struct uscsi_cmd *)arg,
+
+			err = sd_ssc_send(ssc,
+			    (struct uscsi_cmd *)arg,
 			    flag, uioseg, SD_PATH_STANDARD);
+			if (err != 0)
+				goto done_with_assess;
+			else
+				sd_ssc_assessment(ssc, SD_FMT_STANDARD);
 		}
 		break;
 
@@ -20604,8 +21766,9 @@ skip_ready_valid:
 		if (!ISCD(un)) {
 			err = ENOTTY;
 		} else {
-			err = sd_send_scsi_START_STOP_UNIT(un, SD_TARGET_STOP,
+			err = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_STOP,
 			    SD_PATH_STANDARD);
+			goto done_with_assess;
 		}
 		break;
 
@@ -20614,8 +21777,9 @@ skip_ready_valid:
 		if (!ISCD(un)) {
 			err = ENOTTY;
 		} else {
-			err = sd_send_scsi_START_STOP_UNIT(un, SD_TARGET_START,
+			err = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_START,
 			    SD_PATH_STANDARD);
+			goto done_with_assess;
 		}
 		break;
 
@@ -20624,8 +21788,9 @@ skip_ready_valid:
 		if (!ISCD(un)) {
 			err = ENOTTY;
 		} else {
-			err = sd_send_scsi_START_STOP_UNIT(un, SD_TARGET_CLOSE,
+			err = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_CLOSE,
 			    SD_PATH_STANDARD);
+			goto done_with_assess;
 		}
 		break;
 
@@ -20911,7 +22076,7 @@ skip_ready_valid:
 
 		int wce;
 
-		if ((err = sd_get_write_cache_enabled(un, &wce)) != 0) {
+		if ((err = sd_get_write_cache_enabled(ssc, &wce)) != 0) {
 			break;
 		}
 
@@ -20972,7 +22137,7 @@ skip_ready_valid:
 			 */
 			if (!un->un_f_suppress_cache_flush) {
 				mutex_exit(SD_MUTEX(un));
-				if ((err = sd_cache_control(un,
+				if ((err = sd_cache_control(ssc,
 				    SD_CACHE_NOCHANGE,
 				    SD_CACHE_DISABLE)) == 0 &&
 				    sync_supported) {
@@ -21004,7 +22169,7 @@ skip_ready_valid:
 			 */
 			if (!un->un_f_suppress_cache_flush) {
 				mutex_exit(SD_MUTEX(un));
-				err = sd_cache_control(un, SD_CACHE_NOCHANGE,
+				err = sd_cache_control(ssc, SD_CACHE_NOCHANGE,
 				    SD_CACHE_ENABLE);
 			} else {
 				mutex_exit(SD_MUTEX(un));
@@ -21031,6 +22196,25 @@ skip_ready_valid:
 	un->un_ncmds_in_driver--;
 	ASSERT(un->un_ncmds_in_driver >= 0);
 	mutex_exit(SD_MUTEX(un));
+
+
+done_without_assess:
+	sd_ssc_fini(ssc);
+
+	SD_TRACE(SD_LOG_IOCTL, un, "sdioctl: exit: %d\n", err);
+	return (err);
+
+done_with_assess:
+	mutex_enter(SD_MUTEX(un));
+	un->un_ncmds_in_driver--;
+	ASSERT(un->un_ncmds_in_driver >= 0);
+	mutex_exit(SD_MUTEX(un));
+
+done_quick_assess:
+	if (err != 0)
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	/* Uninitialize sd_ssc_t pointer */
+	sd_ssc_fini(ssc);
 
 	SD_TRACE(SD_LOG_IOCTL, un, "sdioctl: exit: %d\n", err);
 	return (err);
@@ -21151,7 +22335,7 @@ sd_get_media_info(dev_t dev, caddr_t arg, int flag)
 	uchar_t			*rqbuf;
 	int			rval = 0;
 	int			rtn;
-
+	sd_ssc_t		*ssc;
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL ||
 	    (un->un_state == SD_STATE_OFFLINE)) {
 		return (ENXIO);
@@ -21163,9 +22347,12 @@ sd_get_media_info(dev_t dev, caddr_t arg, int flag)
 	rqbuf = kmem_zalloc(SENSE_LENGTH, KM_SLEEP);
 
 	/* Issue a TUR to determine if the drive is ready with media present */
-	rval = sd_send_scsi_TEST_UNIT_READY(un, SD_CHECK_FOR_MEDIA);
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_TEST_UNIT_READY(ssc, SD_CHECK_FOR_MEDIA);
 	if (rval == ENXIO) {
 		goto done;
+	} else if (rval != 0) {
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 	}
 
 	/* Now get configuration data */
@@ -21174,11 +22361,17 @@ sd_get_media_info(dev_t dev, caddr_t arg, int flag)
 
 		/* Allow SCMD_GET_CONFIGURATION to MMC devices only */
 		if (un->un_f_mmc_cap == TRUE) {
-			rtn = sd_send_scsi_GET_CONFIGURATION(un, &com, rqbuf,
+			rtn = sd_send_scsi_GET_CONFIGURATION(ssc, &com, rqbuf,
 			    SENSE_LENGTH, out_data, SD_PROFILE_HEADER_LEN,
 			    SD_PATH_STANDARD);
 
 			if (rtn) {
+				/*
+				 * We ignore all failures for CD and need to
+				 * put the assessment before processing code
+				 * to avoid missing assessment for FMA.
+				 */
+				sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 				/*
 				 * Failed for other than an illegal request
 				 * or command not supported
@@ -21188,7 +22381,7 @@ sd_get_media_info(dev_t dev, caddr_t arg, int flag)
 					if ((rqbuf[2] != KEY_ILLEGAL_REQUEST) ||
 					    (rqbuf[12] != 0x20)) {
 						rval = EIO;
-						goto done;
+						goto no_assessment;
 					}
 				}
 			} else {
@@ -21232,8 +22425,9 @@ sd_get_media_info(dev_t dev, caddr_t arg, int flag)
 	}
 
 	/* Now read the capacity so we can provide the lbasize and capacity */
-	switch (sd_send_scsi_READ_CAPACITY(un, &capacity, &lbasize,
-	    SD_PATH_DIRECT)) {
+	rval = sd_send_scsi_READ_CAPACITY(ssc, &capacity, &lbasize,
+	    SD_PATH_DIRECT);
+	switch (rval) {
 	case 0:
 		break;
 	case EACCES:
@@ -21270,9 +22464,17 @@ sd_get_media_info(dev_t dev, caddr_t arg, int flag)
 	if (ddi_copyout(&media_info, arg, sizeof (struct dk_minfo), flag)) {
 		rval = EFAULT;
 		/* Put goto. Anybody might add some code below in future */
-		goto done;
+		goto no_assessment;
 	}
 done:
+	if (rval != 0) {
+		if (rval == EIO)
+			sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+		else
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	}
+no_assessment:
+	sd_ssc_fini(ssc);
 	kmem_free(out_data, SD_PROFILE_HEADER_LEN);
 	kmem_free(rqbuf, SENSE_LENGTH);
 	return (rval);
@@ -21309,12 +22511,15 @@ sd_check_media(dev_t dev, enum dkio_state state)
 	enum dkio_state		prev_state;
 	opaque_t		token = NULL;
 	int			rval = 0;
+	sd_ssc_t		*ssc;
 
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL) {
 		return (ENXIO);
 	}
 
 	SD_TRACE(SD_LOG_COMMON, un, "sd_check_media: entry\n");
+
+	ssc = sd_ssc_init(un);
 
 	mutex_enter(SD_MUTEX(un));
 
@@ -21420,11 +22625,15 @@ sd_check_media(dev_t dev, enum dkio_state state)
 		 */
 
 		if (sd_pm_entry(un) == DDI_SUCCESS) {
-			rval = sd_send_scsi_READ_CAPACITY(un,
-			    &capacity,
-			    &lbasize, SD_PATH_DIRECT);
+			rval = sd_send_scsi_READ_CAPACITY(ssc,
+			    &capacity, &lbasize, SD_PATH_DIRECT);
 			if (rval != 0) {
 				sd_pm_exit(un);
+				if (rval == EIO)
+					sd_ssc_assessment(ssc,
+					    SD_FMT_STATUS_CHECK);
+				else
+					sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 				mutex_enter(SD_MUTEX(un));
 				goto done;
 			}
@@ -21440,8 +22649,9 @@ sd_check_media(dev_t dev, enum dkio_state state)
 		/*
 		 *  Check if the media in the device is writable or not
 		 */
-		if (ISCD(un))
-			sd_check_for_writable_cd(un, SD_PATH_DIRECT);
+		if (ISCD(un)) {
+			sd_check_for_writable_cd(ssc, SD_PATH_DIRECT);
+		}
 
 		mutex_exit(SD_MUTEX(un));
 		cmlb_invalidate(un->un_cmlbhandle, (void *)SD_PATH_DIRECT);
@@ -21453,13 +22663,22 @@ sd_check_media(dev_t dev, enum dkio_state state)
 			    "set\n", un);
 		}
 
-		rval = sd_send_scsi_DOORLOCK(un, SD_REMOVAL_PREVENT,
+		rval = sd_send_scsi_DOORLOCK(ssc, SD_REMOVAL_PREVENT,
 		    SD_PATH_DIRECT);
+
 		sd_pm_exit(un);
+
+		if (rval != 0) {
+			if (rval == EIO)
+				sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+			else
+				sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+		}
 
 		mutex_enter(SD_MUTEX(un));
 	}
 done:
+	sd_ssc_fini(ssc);
 	un->un_f_watcht_stopped = FALSE;
 		/*
 		 * Use of this local token and the mutex ensures that we avoid
@@ -21585,6 +22804,16 @@ sd_media_watch_cb(caddr_t arg, struct scsi_watch_result *resultp)
 				}
 			} else if (skey == KEY_NOT_READY) {
 				/*
+				 * Sense data of 02/06/00 means that the
+				 * drive could not read the media (No
+				 * reference position found). In this case
+				 * to prevent a hang on the DKIOCSTATE IOCTL
+				 * we set the media state to DKIO_INSERTED.
+				 */
+				if (asc == 0x06 && ascq == 0x00)
+					state = DKIO_INSERTED;
+
+				/*
 				 * if 02/04/02  means that the host
 				 * should send start command. Explicitly
 				 * leave the media state as is
@@ -21687,11 +22916,13 @@ sd_dkio_get_temp(dev_t dev, caddr_t arg, int flag)
 	uchar_t			*temperature_page;
 	int			rval = 0;
 	int			path_flag = SD_PATH_STANDARD;
+	sd_ssc_t		*ssc;
 
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL) {
 		return (ENXIO);
 	}
 
+	ssc = sd_ssc_init(un);
 	dktemp = kmem_zalloc(sizeof (struct dk_temperature), KM_SLEEP);
 
 	/* copyin the disk temp argument to get the user flags */
@@ -21740,10 +22971,10 @@ sd_dkio_get_temp(dev_t dev, caddr_t arg, int flag)
 
 	temperature_page = kmem_zalloc(TEMPERATURE_PAGE_SIZE, KM_SLEEP);
 
-	if ((rval = sd_send_scsi_LOG_SENSE(un, temperature_page,
-	    TEMPERATURE_PAGE_SIZE, TEMPERATURE_PAGE, 1, 0, path_flag)) != 0) {
+	rval = sd_send_scsi_LOG_SENSE(ssc, temperature_page,
+	    TEMPERATURE_PAGE_SIZE, TEMPERATURE_PAGE, 1, 0, path_flag);
+	if (rval != 0)
 		goto done2;
-	}
 
 	/*
 	 * For the current temperature verify that the parameter length is 0x02
@@ -21775,15 +23006,24 @@ sd_dkio_get_temp(dev_t dev, caddr_t arg, int flag)
 	if (ddi_copyout(dktemp, (void *)arg, sizeof (struct dk_temperature),
 	    flag) != 0) {
 		rval = EFAULT;
+		goto done1;
 	}
 
 done2:
+	if (rval != 0) {
+		if (rval == EIO)
+			sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+		else
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	}
+done1:
 	if (path_flag == SD_PATH_DIRECT) {
 		sd_pm_exit(un);
 	}
 
 	kmem_free(temperature_page, TEMPERATURE_PAGE_SIZE);
 done:
+	sd_ssc_fini(ssc);
 	if (dktemp != NULL) {
 		kmem_free(dktemp, sizeof (struct dk_temperature));
 	}
@@ -21798,7 +23038,8 @@ done:
  * Description: This routine uses sd_send_scsi_LOG_SENSE to find the list of
  *		supported log pages.
  *
- *   Arguments: un -
+ *   Arguments: ssc   - ssc contains pointer to driver soft state (unit)
+ *                      structure for this target.
  *		log_page -
  *
  * Return Code: -1 - on error (log sense is optional and may not be supported).
@@ -21807,22 +23048,55 @@ done:
  */
 
 static int
-sd_log_page_supported(struct sd_lun *un, int log_page)
+sd_log_page_supported(sd_ssc_t *ssc, int log_page)
 {
 	uchar_t *log_page_data;
 	int	i;
 	int	match = 0;
 	int	log_size;
+	int	status = 0;
+	struct sd_lun	*un;
+
+	ASSERT(ssc != NULL);
+	un = ssc->ssc_un;
+	ASSERT(un != NULL);
 
 	log_page_data = kmem_zalloc(0xFF, KM_SLEEP);
 
-	if (sd_send_scsi_LOG_SENSE(un, log_page_data, 0xFF, 0, 0x01, 0,
-	    SD_PATH_DIRECT) != 0) {
+	status = sd_send_scsi_LOG_SENSE(ssc, log_page_data, 0xFF, 0, 0x01, 0,
+	    SD_PATH_DIRECT);
+
+	if (status != 0) {
+		if (status == EIO) {
+			/*
+			 * Some disks do not support log sense, we
+			 * should ignore this kind of error(sense key is
+			 * 0x5 - illegal request).
+			 */
+			uint8_t *sensep;
+			int senlen;
+
+			sensep = (uint8_t *)ssc->ssc_uscsi_cmd->uscsi_rqbuf;
+			senlen = (int)(ssc->ssc_uscsi_cmd->uscsi_rqlen -
+			    ssc->ssc_uscsi_cmd->uscsi_rqresid);
+
+			if (senlen > 0 &&
+			    scsi_sense_key(sensep) == KEY_ILLEGAL_REQUEST) {
+				sd_ssc_assessment(ssc,
+				    SD_FMT_IGNORE_COMPROMISE);
+			} else {
+				sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+			}
+		} else {
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+		}
+
 		SD_ERROR(SD_LOG_COMMON, un,
 		    "sd_log_page_supported: failed log page retrieval\n");
 		kmem_free(log_page_data, 0xFF);
 		return (-1);
 	}
+
 	log_size = log_page_data[3];
 
 	/*
@@ -22056,6 +23330,7 @@ sd_mhdioc_register_devid(dev_t dev)
 {
 	struct sd_lun	*un = NULL;
 	int		rval = 0;
+	sd_ssc_t	*ssc;
 
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL) {
 		return (ENXIO);
@@ -22077,12 +23352,13 @@ sd_mhdioc_register_devid(dev_t dev)
 
 	/* Check for reservation conflict */
 	mutex_exit(SD_MUTEX(un));
-	rval = sd_send_scsi_TEST_UNIT_READY(un, 0);
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_TEST_UNIT_READY(ssc, 0);
 	mutex_enter(SD_MUTEX(un));
 
 	switch (rval) {
 	case 0:
-		sd_register_devid(un, SD_DEVINFO(un), SD_TARGET_IS_UNRESERVED);
+		sd_register_devid(ssc, SD_DEVINFO(un), SD_TARGET_IS_UNRESERVED);
 		break;
 	case EACCES:
 		break;
@@ -22091,6 +23367,13 @@ sd_mhdioc_register_devid(dev_t dev)
 	}
 
 	mutex_exit(SD_MUTEX(un));
+	if (rval != 0) {
+		if (rval == EIO)
+			sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+		else
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	}
+	sd_ssc_fini(ssc);
 	return (rval);
 }
 
@@ -23996,13 +25279,16 @@ sd_persistent_reservation_in_read_keys(struct sd_lun *un,
 	mhioc_key_list_t	li;
 	uchar_t			*data_bufp;
 	int 			data_len;
-	int			rval;
+	int			rval = 0;
 	size_t			copysz;
+	sd_ssc_t		*ssc;
 
 	if ((ptr = (mhioc_inkeys_t *)usrp) == NULL) {
 		return (EINVAL);
 	}
 	bzero(&li, sizeof (mhioc_key_list_t));
+
+	ssc = sd_ssc_init(un);
 
 	/*
 	 * Get the listsize from user
@@ -24050,8 +25336,13 @@ sd_persistent_reservation_in_read_keys(struct sd_lun *un,
 	data_len += (sizeof (sd_prin_readkeys_t) - sizeof (caddr_t));
 	data_bufp = kmem_zalloc(data_len, KM_SLEEP);
 
-	if ((rval = sd_send_scsi_PERSISTENT_RESERVE_IN(un, SD_READ_KEYS,
-	    data_len, data_bufp)) != 0) {
+	rval = sd_send_scsi_PERSISTENT_RESERVE_IN(ssc, SD_READ_KEYS,
+	    data_len, data_bufp);
+	if (rval != 0) {
+		if (rval == EIO)
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE_COMPROMISE);
+		else
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 		goto done;
 	}
 	in = (sd_prin_readkeys_t *)data_bufp;
@@ -24107,6 +25398,7 @@ sd_persistent_reservation_in_read_keys(struct sd_lun *un,
 		rval = EFAULT;
 	}
 done:
+	sd_ssc_fini(ssc);
 	kmem_free(data_bufp, data_len);
 	return (rval);
 }
@@ -24148,16 +25440,19 @@ sd_persistent_reservation_in_read_resv(struct sd_lun *un,
 	sd_readresv_desc_t	*readresv_ptr;
 	mhioc_resv_desc_list_t	resvlist;
 	mhioc_resv_desc_t 	resvdesc;
-	uchar_t			*data_bufp;
+	uchar_t			*data_bufp = NULL;
 	int 			data_len;
-	int			rval;
+	int			rval = 0;
 	int			i;
 	size_t			copysz;
 	mhioc_resv_desc_t	*bufp;
+	sd_ssc_t		*ssc;
 
 	if ((ptr = usrp) == NULL) {
 		return (EINVAL);
 	}
+
+	ssc = sd_ssc_init(un);
 
 	/*
 	 * Get the listsize from user
@@ -24203,8 +25498,13 @@ sd_persistent_reservation_in_read_resv(struct sd_lun *un,
 	data_len += (sizeof (sd_prin_readresv_t) - sizeof (caddr_t));
 	data_bufp = kmem_zalloc(data_len, KM_SLEEP);
 
-	if ((rval = sd_send_scsi_PERSISTENT_RESERVE_IN(un, SD_READ_RESV,
-	    data_len, data_bufp)) != 0) {
+	rval = sd_send_scsi_PERSISTENT_RESERVE_IN(ssc, SD_READ_RESV,
+	    data_len, data_bufp);
+	if (rval != 0) {
+		if (rval == EIO)
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE_COMPROMISE);
+		else
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 		goto done;
 	}
 	in = (sd_prin_readresv_t *)data_bufp;
@@ -24273,7 +25573,11 @@ sd_persistent_reservation_in_read_resv(struct sd_lun *un,
 		}
 	}
 done:
-	kmem_free(data_bufp, data_len);
+	sd_ssc_fini(ssc);
+	/* only if data_bufp is allocated, we need to free it */
+	if (data_bufp) {
+		kmem_free(data_bufp, data_len);
+	}
 	return (rval);
 }
 
@@ -24314,6 +25618,7 @@ sr_change_blkmode(dev_t dev, int cmd, intptr_t data, int flag)
 	int				rval = EINVAL;
 	uchar_t				*sense = NULL;
 	uchar_t				*select = NULL;
+	sd_ssc_t			*ssc;
 
 	ASSERT((cmd == CDROMGBLKMODE) || (cmd == CDROMSBLKMODE));
 
@@ -24330,8 +25635,11 @@ sr_change_blkmode(dev_t dev, int cmd, intptr_t data, int flag)
 	 */
 	sense = kmem_zalloc(BUFLEN_CHG_BLK_MODE, KM_SLEEP);
 
-	if ((rval = sd_send_scsi_MODE_SENSE(un, CDB_GROUP0, sense,
-	    BUFLEN_CHG_BLK_MODE, MODEPAGE_ERR_RECOV, SD_PATH_STANDARD)) != 0) {
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP0, sense,
+	    BUFLEN_CHG_BLK_MODE, MODEPAGE_ERR_RECOV, SD_PATH_STANDARD);
+	sd_ssc_fini(ssc);
+	if (rval != 0) {
 		scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 		    "sr_change_blkmode: Mode Sense Failed\n");
 		kmem_free(sense, BUFLEN_CHG_BLK_MODE);
@@ -24406,9 +25714,12 @@ sr_change_blkmode(dev_t dev, int cmd, intptr_t data, int flag)
 		select_desc->blksize_lo  = (char)((data) & 0x000000ff);
 
 		/* Send the mode select for the requested block size */
-		if ((rval = sd_send_scsi_MODE_SELECT(un, CDB_GROUP0,
+		ssc = sd_ssc_init(un);
+		rval = sd_send_scsi_MODE_SELECT(ssc, CDB_GROUP0,
 		    select, BUFLEN_CHG_BLK_MODE, SD_DONTSAVE_PAGE,
-		    SD_PATH_STANDARD)) != 0) {
+		    SD_PATH_STANDARD);
+		sd_ssc_fini(ssc);
+		if (rval != 0) {
 			scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 			    "sr_change_blkmode: Mode Select Failed\n");
 			/*
@@ -24420,9 +25731,11 @@ sr_change_blkmode(dev_t dev, int cmd, intptr_t data, int flag)
 			select_desc->blksize_hi  = sense_desc->blksize_hi;
 			select_desc->blksize_mid = sense_desc->blksize_mid;
 			select_desc->blksize_lo  = sense_desc->blksize_lo;
-			(void) sd_send_scsi_MODE_SELECT(un, CDB_GROUP0,
+			ssc = sd_ssc_init(un);
+			(void) sd_send_scsi_MODE_SELECT(ssc, CDB_GROUP0,
 			    select, BUFLEN_CHG_BLK_MODE, SD_DONTSAVE_PAGE,
 			    SD_PATH_STANDARD);
+			sd_ssc_fini(ssc);
 		} else {
 			ASSERT(!mutex_owned(SD_MUTEX(un)));
 			mutex_enter(SD_MUTEX(un));
@@ -24492,6 +25805,7 @@ sr_change_speed(dev_t dev, int cmd, intptr_t data, int flag)
 	int				bd_len;
 	uchar_t				*sense = NULL;
 	uchar_t				*select = NULL;
+	sd_ssc_t			*ssc;
 
 	ASSERT((cmd == CDROMGDRVSPEED) || (cmd == CDROMSDRVSPEED));
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL) {
@@ -24504,9 +25818,12 @@ sr_change_speed(dev_t dev, int cmd, intptr_t data, int flag)
 	 */
 	sense = kmem_zalloc(BUFLEN_MODE_CDROM_SPEED, KM_SLEEP);
 
-	if ((rval = sd_send_scsi_MODE_SENSE(un, CDB_GROUP0, sense,
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP0, sense,
 	    BUFLEN_MODE_CDROM_SPEED, CDROM_MODE_SPEED,
-	    SD_PATH_STANDARD)) != 0) {
+	    SD_PATH_STANDARD);
+	sd_ssc_fini(ssc);
+	if (rval != 0) {
 		scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 		    "sr_change_speed: Mode Sense Failed\n");
 		kmem_free(sense, BUFLEN_MODE_CDROM_SPEED);
@@ -24580,9 +25897,12 @@ sr_change_speed(dev_t dev, int cmd, intptr_t data, int flag)
 		select_page->speed = (uchar_t)data;
 
 		/* Send the mode select for the requested block size */
-		if ((rval = sd_send_scsi_MODE_SELECT(un, CDB_GROUP0, select,
+		ssc = sd_ssc_init(un);
+		rval = sd_send_scsi_MODE_SELECT(ssc, CDB_GROUP0, select,
 		    MODEPAGE_CDROM_SPEED_LEN + MODE_HEADER_LENGTH,
-		    SD_DONTSAVE_PAGE, SD_PATH_STANDARD)) != 0) {
+		    SD_DONTSAVE_PAGE, SD_PATH_STANDARD);
+		sd_ssc_fini(ssc);
+		if (rval != 0) {
 			/*
 			 * The mode select failed for the requested drive speed,
 			 * so reset the data for the original drive speed and
@@ -24592,9 +25912,11 @@ sr_change_speed(dev_t dev, int cmd, intptr_t data, int flag)
 			scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 			    "sr_drive_speed: Mode Select Failed\n");
 			select_page->speed = sense_page->speed;
-			(void) sd_send_scsi_MODE_SELECT(un, CDB_GROUP0, select,
+			ssc = sd_ssc_init(un);
+			(void) sd_send_scsi_MODE_SELECT(ssc, CDB_GROUP0, select,
 			    MODEPAGE_CDROM_SPEED_LEN + MODE_HEADER_LENGTH,
 			    SD_DONTSAVE_PAGE, SD_PATH_STANDARD);
+			sd_ssc_fini(ssc);
 		}
 		break;
 	default:
@@ -24653,6 +25975,7 @@ sr_atapi_change_speed(dev_t dev, int cmd, intptr_t data, int flag)
 	int				current_speed = 0;
 	int				max_speed = 0;
 	int				rval;
+	sd_ssc_t			*ssc;
 
 	ASSERT((cmd == CDROMGDRVSPEED) || (cmd == CDROMSDRVSPEED));
 
@@ -24662,9 +25985,12 @@ sr_atapi_change_speed(dev_t dev, int cmd, intptr_t data, int flag)
 
 	sense = kmem_zalloc(BUFLEN_MODE_CDROM_CAP, KM_SLEEP);
 
-	if ((rval = sd_send_scsi_MODE_SENSE(un, CDB_GROUP1, sense,
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP1, sense,
 	    BUFLEN_MODE_CDROM_CAP, MODEPAGE_CDROM_CAP,
-	    SD_PATH_STANDARD)) != 0) {
+	    SD_PATH_STANDARD);
+	sd_ssc_fini(ssc);
+	if (rval != 0) {
 		scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 		    "sr_atapi_change_speed: Mode Sense Failed\n");
 		kmem_free(sense, BUFLEN_MODE_CDROM_CAP);
@@ -25489,6 +26815,8 @@ sr_read_mode1(dev_t dev, caddr_t data, int flag)
 	struct cdrom_read	mode1_struct;
 	struct cdrom_read	*mode1 = &mode1_struct;
 	int			rval;
+	sd_ssc_t		*ssc;
+
 #ifdef _MULTI_DATAMODEL
 	/* To support ILP32 applications in an LP64 world */
 	struct cdrom_read32	cdrom_read32;
@@ -25527,8 +26855,10 @@ sr_read_mode1(dev_t dev, caddr_t data, int flag)
 	}
 #endif /* _MULTI_DATAMODEL */
 
-	rval = sd_send_scsi_READ(un, mode1->cdread_bufaddr,
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_READ(ssc, mode1->cdread_bufaddr,
 	    mode1->cdread_buflen, mode1->cdread_lba, SD_PATH_STANDARD);
+	sd_ssc_fini(ssc);
 
 	SD_TRACE(SD_LOG_ATTACH_DETACH, un,
 	    "sd_read_mode1: exit: un:0x%p\n", un);
@@ -25829,6 +27159,7 @@ sr_sector_mode(dev_t dev, uint32_t blksize)
 	uchar_t		*sense;
 	uchar_t		*select;
 	int		rval;
+	sd_ssc_t	*ssc;
 
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL ||
 	    (un->un_state == SD_STATE_OFFLINE)) {
@@ -25838,8 +27169,11 @@ sr_sector_mode(dev_t dev, uint32_t blksize)
 	sense = kmem_zalloc(20, KM_SLEEP);
 
 	/* Note: This is a vendor specific mode page (0x81) */
-	if ((rval = sd_send_scsi_MODE_SENSE(un, CDB_GROUP0, sense, 20, 0x81,
-	    SD_PATH_STANDARD)) != 0) {
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP0, sense, 20, 0x81,
+	    SD_PATH_STANDARD);
+	sd_ssc_fini(ssc);
+	if (rval != 0) {
 		SD_ERROR(SD_LOG_IOCTL_RMMEDIA, un,
 		    "sr_sector_mode: Mode Sense failed\n");
 		kmem_free(sense, 20);
@@ -25857,8 +27191,11 @@ sr_sector_mode(dev_t dev, uint32_t blksize)
 		select[14] |= 0x01;
 	}
 
-	if ((rval = sd_send_scsi_MODE_SELECT(un, CDB_GROUP0, select, 20,
-	    SD_DONTSAVE_PAGE, SD_PATH_STANDARD)) != 0) {
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_MODE_SELECT(ssc, CDB_GROUP0, select, 20,
+	    SD_DONTSAVE_PAGE, SD_PATH_STANDARD);
+	sd_ssc_fini(ssc);
+	if (rval != 0) {
 		SD_ERROR(SD_LOG_IOCTL_RMMEDIA, un,
 		    "sr_sector_mode: Mode Select failed\n");
 	} else {
@@ -26211,6 +27548,7 @@ sr_eject(dev_t dev)
 {
 	struct sd_lun	*un;
 	int		rval;
+	sd_ssc_t	*ssc;
 
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL ||
 	    (un->un_state == SD_STATE_OFFLINE)) {
@@ -26234,16 +27572,22 @@ sr_eject(dev_t dev)
 	un->un_f_ejecting = TRUE;
 	mutex_exit(SD_MUTEX(un));
 
-	if ((rval = sd_send_scsi_DOORLOCK(un, SD_REMOVAL_ALLOW,
-	    SD_PATH_STANDARD)) != 0) {
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_DOORLOCK(ssc, SD_REMOVAL_ALLOW,
+	    SD_PATH_STANDARD);
+	sd_ssc_fini(ssc);
+
+	if (rval != 0) {
 		mutex_enter(SD_MUTEX(un));
 		un->un_f_ejecting = FALSE;
 		mutex_exit(SD_MUTEX(un));
 		return (rval);
 	}
 
-	rval = sd_send_scsi_START_STOP_UNIT(un, SD_TARGET_EJECT,
+	ssc = sd_ssc_init(un);
+	rval = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_EJECT,
 	    SD_PATH_STANDARD);
+	sd_ssc_fini(ssc);
 
 	if (rval == 0) {
 		mutex_enter(SD_MUTEX(un));
@@ -26302,7 +27646,7 @@ sr_ejected(struct sd_lun *un)
  *      this routine has been implemented to use 0x3f mode page(request
  *      for all pages) for all device types.
  *
- *   Arguments: dev		- the device 'dev_t'
+ *   Arguments: dev             - the device 'dev_t'
  *
  * Return Code: int indicating if the device is write protected (1) or not (0)
  *
@@ -26318,6 +27662,8 @@ sr_check_wp(dev_t dev)
 	uchar_t		*sense;
 	int		hdrlen;
 	int		rval = FALSE;
+	int		status;
+	sd_ssc_t	*ssc;
 
 	/*
 	 * Note: The return codes for this routine should be reworked to
@@ -26334,20 +27680,27 @@ sr_check_wp(dev_t dev)
 		 */
 		hdrlen = MODE_HEADER_LENGTH_GRP2;
 		sense = kmem_zalloc(hdrlen, KM_SLEEP);
-		if (sd_send_scsi_MODE_SENSE(un, CDB_GROUP1, sense, hdrlen,
-		    MODEPAGE_ALLPAGES, SD_PATH_STANDARD) != 0)
+		ssc = sd_ssc_init(un);
+		status = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP1, sense, hdrlen,
+		    MODEPAGE_ALLPAGES, SD_PATH_STANDARD);
+		sd_ssc_fini(ssc);
+		if (status != 0)
 			goto err_exit;
 		device_specific =
 		    ((struct mode_header_grp2 *)sense)->device_specific;
 	} else {
 		hdrlen = MODE_HEADER_LENGTH;
 		sense = kmem_zalloc(hdrlen, KM_SLEEP);
-		if (sd_send_scsi_MODE_SENSE(un, CDB_GROUP0, sense, hdrlen,
-		    MODEPAGE_ALLPAGES, SD_PATH_STANDARD) != 0)
+		ssc = sd_ssc_init(un);
+		status = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP0, sense, hdrlen,
+		    MODEPAGE_ALLPAGES, SD_PATH_STANDARD);
+		sd_ssc_fini(ssc);
+		if (status != 0)
 			goto err_exit;
 		device_specific =
 		    ((struct mode_header *)sense)->device_specific;
 	}
+
 
 	/*
 	 * Write protect mode sense failed; not all disks
@@ -26394,6 +27747,7 @@ sr_volume_ctrl(dev_t dev, caddr_t data, int flag)
 	int			sense_buflen;
 	int			select_buflen;
 	int			rval;
+	sd_ssc_t		*ssc;
 
 	if (data == NULL) {
 		return (EINVAL);
@@ -26418,9 +27772,13 @@ sr_volume_ctrl(dev_t dev, caddr_t data, int flag)
 		    MODEPAGE_AUDIO_CTRL_LEN;
 		sense  = kmem_zalloc(sense_buflen, KM_SLEEP);
 		select = kmem_zalloc(select_buflen, KM_SLEEP);
-		if ((rval = sd_send_scsi_MODE_SENSE(un, CDB_GROUP1, sense,
+		ssc = sd_ssc_init(un);
+		rval = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP1, sense,
 		    sense_buflen, MODEPAGE_AUDIO_CTRL,
-		    SD_PATH_STANDARD)) != 0) {
+		    SD_PATH_STANDARD);
+		sd_ssc_fini(ssc);
+
+		if (rval != 0) {
 			SD_ERROR(SD_LOG_IOCTL_RMMEDIA, un,
 			    "sr_volume_ctrl: Mode Sense Failed\n");
 			kmem_free(sense, sense_buflen);
@@ -26453,9 +27811,13 @@ sr_volume_ctrl(dev_t dev, caddr_t data, int flag)
 		select_buflen = MODE_HEADER_LENGTH + MODEPAGE_AUDIO_CTRL_LEN;
 		sense  = kmem_zalloc(sense_buflen, KM_SLEEP);
 		select = kmem_zalloc(select_buflen, KM_SLEEP);
-		if ((rval = sd_send_scsi_MODE_SENSE(un, CDB_GROUP0, sense,
+		ssc = sd_ssc_init(un);
+		rval = sd_send_scsi_MODE_SENSE(ssc, CDB_GROUP0, sense,
 		    sense_buflen, MODEPAGE_AUDIO_CTRL,
-		    SD_PATH_STANDARD)) != 0) {
+		    SD_PATH_STANDARD);
+		sd_ssc_fini(ssc);
+
+		if (rval != 0) {
 			scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
 			    "sr_volume_ctrl: Mode Sense Failed\n");
 			kmem_free(sense, sense_buflen);
@@ -26506,13 +27868,15 @@ sr_volume_ctrl(dev_t dev, caddr_t data, int flag)
 	select_page[14] = sense_page[14];
 	select_page[15] = sense_page[15];
 
+	ssc = sd_ssc_init(un);
 	if ((un->un_f_cfg_is_atapi == TRUE) || (un->un_f_mmc_cap == TRUE)) {
-		rval = sd_send_scsi_MODE_SELECT(un, CDB_GROUP1, select,
+		rval = sd_send_scsi_MODE_SELECT(ssc, CDB_GROUP1, select,
 		    select_buflen, SD_DONTSAVE_PAGE, SD_PATH_STANDARD);
 	} else {
-		rval = sd_send_scsi_MODE_SELECT(un, CDB_GROUP0, select,
+		rval = sd_send_scsi_MODE_SELECT(ssc, CDB_GROUP0, select,
 		    select_buflen, SD_DONTSAVE_PAGE, SD_PATH_STANDARD);
 	}
+	sd_ssc_fini(ssc);
 
 	kmem_free(sense, sense_buflen);
 	kmem_free(select, select_buflen);
@@ -27432,7 +28796,7 @@ static uint_t   sd_fault_injection_on = 0;
 static void
 sd_faultinjection_ioctl(int cmd, intptr_t arg,  struct sd_lun *un) {
 
-	uint_t i;
+	uint_t i = 0;
 	uint_t rval;
 
 	SD_TRACE(SD_LOG_IOERR, un, "sd_faultinjection_ioctl: entry\n");
@@ -27782,6 +29146,8 @@ sd_faultinjection(struct scsi_pkt *pktp)
 		return;
 	}
 
+	SD_INFO(SD_LOG_SDTEST, un,
+	    "sd_faultinjection: is working for copying\n");
 
 	/* take next set off fifo */
 	i = un->sd_fi_fifo_start % SD_FI_MAX_ERROR;
@@ -27797,18 +29163,19 @@ sd_faultinjection(struct scsi_pkt *pktp)
 	if (fi_pkt != NULL) {
 		SD_CONDSET(pktp, pkt, pkt_flags, "pkt_flags");
 		SD_CONDSET(*pktp, pkt, pkt_scbp, "pkt_scbp");
-		SD_CONDSET(*pktp, pkt, pkt_cdbp, "pkt_cdbp");
+		if (fi_pkt->pkt_cdbp != 0xff)
+			SD_CONDSET(*pktp, pkt, pkt_cdbp, "pkt_cdbp");
 		SD_CONDSET(pktp, pkt, pkt_state, "pkt_state");
 		SD_CONDSET(pktp, pkt, pkt_statistics, "pkt_statistics");
 		SD_CONDSET(pktp, pkt, pkt_reason, "pkt_reason");
 
 	}
-
 	/* set xb if it was on fifo */
 	if (fi_xb != NULL) {
 		SD_CONDSET(xb, xb, xb_blkno, "xb_blkno");
 		SD_CONDSET(xb, xb, xb_dma_resid, "xb_dma_resid");
-		SD_CONDSET(xb, xb, xb_retry_count, "xb_retry_count");
+		if (fi_xb->xb_retry_count != 0)
+			SD_CONDSET(xb, xb, xb_retry_count, "xb_retry_count");
 		SD_CONDSET(xb, xb, xb_victim_retry_count,
 		    "xb_victim_retry_count");
 		SD_CONDSET(xb, xb, xb_sense_status, "xb_sense_status");
@@ -27816,20 +29183,26 @@ sd_faultinjection(struct scsi_pkt *pktp)
 		SD_CONDSET(xb, xb, xb_sense_resid, "xb_sense_resid");
 
 		/* copy in block data from sense */
-		if (fi_xb->xb_sense_data[0] != -1) {
-			bcopy(fi_xb->xb_sense_data, xb->xb_sense_data,
-			    SENSE_LENGTH);
-		}
+		/*
+		 * if (fi_xb->xb_sense_data[0] != -1) {
+		 *	bcopy(fi_xb->xb_sense_data, xb->xb_sense_data,
+		 *	SENSE_LENGTH);
+		 * }
+		 */
+		bcopy(fi_xb->xb_sense_data, xb->xb_sense_data, SENSE_LENGTH);
 
 		/* copy in extended sense codes */
-		SD_CONDSET(((struct scsi_extended_sense *)xb), xb, es_code,
-		    "es_code");
-		SD_CONDSET(((struct scsi_extended_sense *)xb), xb, es_key,
-		    "es_key");
-		SD_CONDSET(((struct scsi_extended_sense *)xb), xb, es_add_code,
-		    "es_add_code");
-		SD_CONDSET(((struct scsi_extended_sense *)xb), xb,
-		    es_qual_code, "es_qual_code");
+		SD_CONDSET(((struct scsi_extended_sense *)xb->xb_sense_data),
+		    xb, es_code, "es_code");
+		SD_CONDSET(((struct scsi_extended_sense *)xb->xb_sense_data),
+		    xb, es_key, "es_key");
+		SD_CONDSET(((struct scsi_extended_sense *)xb->xb_sense_data),
+		    xb, es_add_code, "es_add_code");
+		SD_CONDSET(((struct scsi_extended_sense *)xb->xb_sense_data),
+		    xb, es_qual_code, "es_qual_code");
+		struct scsi_extended_sense *esp;
+		esp = (struct scsi_extended_sense *)xb->xb_sense_data;
+		esp->es_class = CLASS_EXTENDED_SENSE;
 	}
 
 	/* set un if it was on fifo */
@@ -27881,7 +29254,7 @@ sd_faultinjection(struct scsi_pkt *pktp)
 
 	mutex_exit(SD_MUTEX(un));
 
-	SD_TRACE(SD_LOG_SDTEST, un, "sd_faultinjection: exit\n");
+	SD_INFO(SD_LOG_SDTEST, un, "sd_faultinjection: exit\n");
 }
 
 #endif /* SD_FAULT_INJECTION */
@@ -28346,9 +29719,10 @@ sd_tg_rdwr(dev_info_t *devi, uchar_t cmd, void *bufaddr,
 	diskaddr_t first_byte, end_block;
 
 	size_t	buffer_size = reqlength;
-	int rval;
+	int rval = 0;
 	diskaddr_t	cap;
 	uint32_t	lbasize;
+	sd_ssc_t	*ssc;
 
 	un = ddi_get_soft_state(sd_state, ddi_get_instance(devi));
 	if (un == NULL)
@@ -28357,18 +29731,20 @@ sd_tg_rdwr(dev_info_t *devi, uchar_t cmd, void *bufaddr,
 	if (cmd != TG_READ && cmd != TG_WRITE)
 		return (EINVAL);
 
+	ssc = sd_ssc_init(un);
 	mutex_enter(SD_MUTEX(un));
 	if (un->un_f_tgt_blocksize_is_valid == FALSE) {
 		mutex_exit(SD_MUTEX(un));
-		rval = sd_send_scsi_READ_CAPACITY(un, (uint64_t *)&cap,
+		rval = sd_send_scsi_READ_CAPACITY(ssc, (uint64_t *)&cap,
 		    &lbasize, path_flag);
 		if (rval != 0)
-			return (rval);
+			goto done1;
 		mutex_enter(SD_MUTEX(un));
 		sd_update_block_info(un, lbasize, cap);
 		if ((un->un_f_tgt_blocksize_is_valid == FALSE)) {
 			mutex_exit(SD_MUTEX(un));
-			return (EIO);
+			rval = EIO;
+			goto done;
 		}
 	}
 
@@ -28414,29 +29790,37 @@ sd_tg_rdwr(dev_info_t *devi, uchar_t cmd, void *bufaddr,
 
 	mutex_exit(SD_MUTEX(un));
 	if (cmd == TG_READ) {
-		rval = sd_send_scsi_READ(un, (dkl != NULL)? dkl: bufaddr,
+		rval = sd_send_scsi_READ(ssc, (dkl != NULL)? dkl: bufaddr,
 		    buffer_size, real_addr, path_flag);
 		if (dkl != NULL)
 			bcopy(dkl + SD_TGTBYTEOFFSET(un, start_block,
 			    real_addr), bufaddr, reqlength);
 	} else {
 		if (dkl) {
-			rval = sd_send_scsi_READ(un, dkl, buffer_size,
+			rval = sd_send_scsi_READ(ssc, dkl, buffer_size,
 			    real_addr, path_flag);
 			if (rval) {
-				kmem_free(dkl, buffer_size);
-				return (rval);
+				goto done1;
 			}
 			bcopy(bufaddr, dkl + SD_TGTBYTEOFFSET(un, start_block,
 			    real_addr), reqlength);
 		}
-		rval = sd_send_scsi_WRITE(un, (dkl != NULL)? dkl: bufaddr,
+		rval = sd_send_scsi_WRITE(ssc, (dkl != NULL)? dkl: bufaddr,
 		    buffer_size, real_addr, path_flag);
 	}
 
+done1:
 	if (dkl != NULL)
 		kmem_free(dkl, buffer_size);
 
+	if (rval != 0) {
+		if (rval == EIO)
+			sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+		else
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	}
+done:
+	sd_ssc_fini(ssc);
 	return (rval);
 }
 
@@ -28468,11 +29852,22 @@ sd_tg_getinfo(dev_info_t *devi, int cmd, void *arg, void *tg_cookie)
 			lbasize = un->un_tgt_blocksize;
 			mutex_exit(SD_MUTEX(un));
 		} else {
+			sd_ssc_t	*ssc;
 			mutex_exit(SD_MUTEX(un));
-			ret = sd_send_scsi_READ_CAPACITY(un, (uint64_t *)&cap,
+			ssc = sd_ssc_init(un);
+			ret = sd_send_scsi_READ_CAPACITY(ssc, (uint64_t *)&cap,
 			    &lbasize, path_flag);
-			if (ret != 0)
+			if (ret != 0) {
+				if (ret == EIO)
+					sd_ssc_assessment(ssc,
+					    SD_FMT_STATUS_CHECK);
+				else
+					sd_ssc_assessment(ssc,
+					    SD_FMT_IGNORE);
+				sd_ssc_fini(ssc);
 				return (ret);
+			}
+			sd_ssc_fini(ssc);
 			mutex_enter(SD_MUTEX(un));
 			sd_update_block_info(un, lbasize, cap);
 			if ((un->un_f_blockcount_is_valid == FALSE) ||
@@ -28513,5 +29908,458 @@ sd_tg_getinfo(dev_info_t *devi, int cmd, void *arg, void *tg_cookie)
 		return (ENOTTY);
 
 	}
+}
 
+/*
+ *    Function: sd_ssc_ereport_post
+ *
+ * Description: Will be called when SD driver need to post an ereport.
+ *
+ *    Context: Kernel thread or interrupt context.
+ */
+static void
+sd_ssc_ereport_post(sd_ssc_t *ssc, enum sd_driver_assessment drv_assess)
+{
+	int uscsi_path_instance = 0;
+	uchar_t	uscsi_pkt_reason;
+	uint32_t uscsi_pkt_state;
+	uint32_t uscsi_pkt_statistics;
+	uint64_t uscsi_ena;
+	uchar_t op_code;
+	uint8_t *sensep;
+	union scsi_cdb *cdbp;
+	uint_t cdblen = 0;
+	uint_t senlen = 0;
+	struct sd_lun *un;
+	dev_info_t *dip;
+	char *devid;
+	int ssc_invalid_flags = SSC_FLAGS_INVALID_PKT_REASON |
+	    SSC_FLAGS_INVALID_STATUS |
+	    SSC_FLAGS_INVALID_SENSE |
+	    SSC_FLAGS_INVALID_DATA;
+	char assessment[16];
+
+	ASSERT(ssc != NULL);
+	ASSERT(ssc->ssc_uscsi_cmd != NULL);
+	ASSERT(ssc->ssc_uscsi_info != NULL);
+
+	un = ssc->ssc_un;
+	ASSERT(un != NULL);
+
+	dip = un->un_sd->sd_dev;
+
+	/*
+	 * Get the devid:
+	 *	devid will only be passed to non-transport error reports.
+	 */
+	devid = DEVI(dip)->devi_devid_str;
+
+	/*
+	 * If we are syncing or dumping, the command will not be executed
+	 * so we bypass this situation.
+	 */
+	if (ddi_in_panic() || (un->un_state == SD_STATE_SUSPENDED) ||
+	    (un->un_state == SD_STATE_DUMPING))
+		return;
+
+	uscsi_pkt_reason = ssc->ssc_uscsi_info->ui_pkt_reason;
+	uscsi_path_instance = ssc->ssc_uscsi_cmd->uscsi_path_instance;
+	uscsi_pkt_state = ssc->ssc_uscsi_info->ui_pkt_state;
+	uscsi_pkt_statistics = ssc->ssc_uscsi_info->ui_pkt_statistics;
+	uscsi_ena = ssc->ssc_uscsi_info->ui_ena;
+
+	sensep = (uint8_t *)ssc->ssc_uscsi_cmd->uscsi_rqbuf;
+	cdbp = (union scsi_cdb *)ssc->ssc_uscsi_cmd->uscsi_cdb;
+
+	/* In rare cases, EG:DOORLOCK, the cdb could be NULL */
+	if (cdbp == NULL) {
+		scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
+		    "sd_ssc_ereport_post meet empty cdb\n");
+		return;
+	}
+
+	op_code = cdbp->scc_cmd;
+
+	cdblen = (int)ssc->ssc_uscsi_cmd->uscsi_cdblen;
+	senlen = (int)(ssc->ssc_uscsi_cmd->uscsi_rqlen -
+	    ssc->ssc_uscsi_cmd->uscsi_rqresid);
+
+	if (senlen > 0)
+		ASSERT(sensep != NULL);
+
+	/*
+	 * Initialize drv_assess to corresponding values.
+	 * SD_FM_DRV_FATAL will be mapped to "fail" or "fatal" depending
+	 * on the sense-key returned back.
+	 */
+	switch (drv_assess) {
+		case SD_FM_DRV_RECOVERY:
+			(void) sprintf(assessment, "%s", "recovered");
+			break;
+		case SD_FM_DRV_RETRY:
+			(void) sprintf(assessment, "%s", "retry");
+			break;
+		case SD_FM_DRV_NOTICE:
+			(void) sprintf(assessment, "%s", "info");
+			break;
+		case SD_FM_DRV_FATAL:
+		default:
+			(void) sprintf(assessment, "%s", "unknown");
+	}
+	/*
+	 * If drv_assess == SD_FM_DRV_RECOVERY, this should be a recovered
+	 * command, we will post ereport.io.scsi.cmd.disk.recovered.
+	 * driver-assessment will always be "recovered" here.
+	 */
+	if (drv_assess == SD_FM_DRV_RECOVERY) {
+		scsi_fm_ereport_post(un->un_sd, uscsi_path_instance,
+		    "cmd.disk.recovered", uscsi_ena, devid, DDI_NOSLEEP,
+		    FM_VERSION, DATA_TYPE_UINT8, FM_EREPORT_VERS0,
+		    "driver-assessment", DATA_TYPE_STRING, assessment,
+		    "op-code", DATA_TYPE_UINT8, op_code,
+		    "cdb", DATA_TYPE_UINT8_ARRAY,
+		    cdblen, ssc->ssc_uscsi_cmd->uscsi_cdb,
+		    "pkt-reason", DATA_TYPE_UINT8, uscsi_pkt_reason,
+		    "pkt-state", DATA_TYPE_UINT32, uscsi_pkt_state,
+		    "pkt-stats", DATA_TYPE_UINT32, uscsi_pkt_statistics,
+		    NULL);
+		return;
+	}
+
+	/*
+	 * If there is un-expected/un-decodable data, we should post
+	 * ereport.io.scsi.cmd.disk.dev.uderr.
+	 * driver-assessment will be set based on parameter drv_assess.
+	 * SSC_FLAGS_INVALID_SENSE - invalid sense data sent back.
+	 * SSC_FLAGS_INVALID_PKT_REASON - invalid pkt-reason encountered.
+	 * SSC_FLAGS_INVALID_STATUS - invalid stat-code encountered.
+	 * SSC_FLAGS_INVALID_DATA - invalid data sent back.
+	 */
+	if (ssc->ssc_flags & ssc_invalid_flags) {
+		if (ssc->ssc_flags & SSC_FLAGS_INVALID_SENSE) {
+			scsi_fm_ereport_post(un->un_sd, uscsi_path_instance,
+			    "cmd.disk.dev.uderr", uscsi_ena, devid, DDI_NOSLEEP,
+			    FM_VERSION, DATA_TYPE_UINT8, FM_EREPORT_VERS0,
+			    "driver-assessment", DATA_TYPE_STRING,
+			    drv_assess == SD_FM_DRV_FATAL ?
+			    "fail" : assessment,
+			    "op-code", DATA_TYPE_UINT8, op_code,
+			    "cdb", DATA_TYPE_UINT8_ARRAY,
+			    cdblen, ssc->ssc_uscsi_cmd->uscsi_cdb,
+			    "pkt-reason", DATA_TYPE_UINT8, uscsi_pkt_reason,
+			    "pkt-state", DATA_TYPE_UINT32, uscsi_pkt_state,
+			    "pkt-stats", DATA_TYPE_UINT32,
+			    uscsi_pkt_statistics,
+			    "stat-code", DATA_TYPE_UINT8,
+			    ssc->ssc_uscsi_cmd->uscsi_status,
+			    "un-decode-info", DATA_TYPE_STRING,
+			    ssc->ssc_info,
+			    "un-decode-value", DATA_TYPE_UINT8_ARRAY,
+			    senlen, sensep,
+			    NULL);
+		} else {
+			/*
+			 * For other type of invalid data, the
+			 * un-decode-value field would be empty because the
+			 * un-decodable content could be seen from upper
+			 * level payload or inside un-decode-info.
+			 */
+			scsi_fm_ereport_post(un->un_sd, uscsi_path_instance,
+			    "cmd.disk.dev.uderr", uscsi_ena, devid, DDI_NOSLEEP,
+			    FM_VERSION, DATA_TYPE_UINT8, FM_EREPORT_VERS0,
+			    "driver-assessment", DATA_TYPE_STRING,
+			    drv_assess == SD_FM_DRV_FATAL ?
+			    "fail" : assessment,
+			    "op-code", DATA_TYPE_UINT8, op_code,
+			    "cdb", DATA_TYPE_UINT8_ARRAY,
+			    cdblen, ssc->ssc_uscsi_cmd->uscsi_cdb,
+			    "pkt-reason", DATA_TYPE_UINT8, uscsi_pkt_reason,
+			    "pkt-state", DATA_TYPE_UINT32, uscsi_pkt_state,
+			    "pkt-stats", DATA_TYPE_UINT32,
+			    uscsi_pkt_statistics,
+			    "stat-code", DATA_TYPE_UINT8,
+			    ssc->ssc_uscsi_cmd->uscsi_status,
+			    "un-decode-info", DATA_TYPE_STRING,
+			    ssc->ssc_info,
+			    "un-decode-value", DATA_TYPE_UINT8_ARRAY,
+			    0, NULL,
+			    NULL);
+		}
+		ssc->ssc_flags &= ~ssc_invalid_flags;
+		return;
+	}
+
+	if (uscsi_pkt_reason != CMD_CMPLT ||
+	    (ssc->ssc_flags & SSC_FLAGS_TRAN_ABORT)) {
+		/*
+		 * pkt-reason != CMD_CMPLT or SSC_FLAGS_TRAN_ABORT was
+		 * set inside sd_start_cmds due to errors(bad packet or
+		 * fatal transport error), we should take it as a
+		 * transport error, so we post ereport.io.scsi.cmd.disk.tran.
+		 * driver-assessment will be set based on drv_assess.
+		 * We will set devid to NULL because it is a transport
+		 * error.
+		 */
+		if (ssc->ssc_flags & SSC_FLAGS_TRAN_ABORT)
+			ssc->ssc_flags &= ~SSC_FLAGS_TRAN_ABORT;
+
+		scsi_fm_ereport_post(un->un_sd, uscsi_path_instance,
+		    "cmd.disk.tran", uscsi_ena, NULL, DDI_NOSLEEP, FM_VERSION,
+		    DATA_TYPE_UINT8, FM_EREPORT_VERS0,
+		    "driver-assessment", DATA_TYPE_STRING,
+		    drv_assess == SD_FM_DRV_FATAL ? "fail" : assessment,
+		    "op-code", DATA_TYPE_UINT8, op_code,
+		    "cdb", DATA_TYPE_UINT8_ARRAY,
+		    cdblen, ssc->ssc_uscsi_cmd->uscsi_cdb,
+		    "pkt-reason", DATA_TYPE_UINT8, uscsi_pkt_reason,
+		    "pkt-state", DATA_TYPE_UINT8, uscsi_pkt_state,
+		    "pkt-stats", DATA_TYPE_UINT32, uscsi_pkt_statistics,
+		    NULL);
+	} else {
+		/*
+		 * If we got here, we have a completed command, and we need
+		 * to further investigate the sense data to see what kind
+		 * of ereport we should post.
+		 * Post ereport.io.scsi.cmd.disk.dev.rqs.merr
+		 * if sense-key == 0x3.
+		 * Post ereport.io.scsi.cmd.disk.dev.rqs.derr otherwise.
+		 * driver-assessment will be set based on the parameter
+		 * drv_assess.
+		 */
+		if (senlen > 0) {
+			/*
+			 * Here we have sense data available.
+			 */
+			uint8_t sense_key;
+			sense_key = scsi_sense_key(sensep);
+			if (sense_key == 0x3) {
+				/*
+				 * sense-key == 0x3(medium error),
+				 * driver-assessment should be "fatal" if
+				 * drv_assess is SD_FM_DRV_FATAL.
+				 */
+				scsi_fm_ereport_post(un->un_sd,
+				    uscsi_path_instance,
+				    "cmd.disk.dev.rqs.merr",
+				    uscsi_ena, devid, DDI_NOSLEEP, FM_VERSION,
+				    DATA_TYPE_UINT8, FM_EREPORT_VERS0,
+				    "driver-assessment",
+				    DATA_TYPE_STRING,
+				    drv_assess == SD_FM_DRV_FATAL ?
+				    "fatal" : assessment,
+				    "op-code",
+				    DATA_TYPE_UINT8, op_code,
+				    "cdb",
+				    DATA_TYPE_UINT8_ARRAY, cdblen,
+				    ssc->ssc_uscsi_cmd->uscsi_cdb,
+				    "pkt-reason",
+				    DATA_TYPE_UINT8, uscsi_pkt_reason,
+				    "pkt-state",
+				    DATA_TYPE_UINT8, uscsi_pkt_state,
+				    "pkt-stats",
+				    DATA_TYPE_UINT32,
+				    uscsi_pkt_statistics,
+				    "stat-code",
+				    DATA_TYPE_UINT8,
+				    ssc->ssc_uscsi_cmd->uscsi_status,
+				    "key",
+				    DATA_TYPE_UINT8,
+				    scsi_sense_key(sensep),
+				    "asc",
+				    DATA_TYPE_UINT8,
+				    scsi_sense_asc(sensep),
+				    "ascq",
+				    DATA_TYPE_UINT8,
+				    scsi_sense_ascq(sensep),
+				    "sense-data",
+				    DATA_TYPE_UINT8_ARRAY,
+				    senlen, sensep,
+				    "lba",
+				    DATA_TYPE_UINT64,
+				    ssc->ssc_uscsi_info->ui_lba,
+				    NULL);
+				} else {
+					/*
+					 * if sense-key == 0x4(hardware
+					 * error), driver-assessment should
+					 * be "fatal" if drv_assess is
+					 * SD_FM_DRV_FATAL.
+					 */
+					scsi_fm_ereport_post(un->un_sd,
+					    uscsi_path_instance,
+					    "cmd.disk.dev.rqs.derr",
+					    uscsi_ena, devid, DDI_NOSLEEP,
+					    FM_VERSION,
+					    DATA_TYPE_UINT8, FM_EREPORT_VERS0,
+					    "driver-assessment",
+					    DATA_TYPE_STRING,
+					    drv_assess == SD_FM_DRV_FATAL ?
+					    (sense_key == 0x4 ?
+					    "fatal" : "fail") : assessment,
+					    "op-code",
+					    DATA_TYPE_UINT8, op_code,
+					    "cdb",
+					    DATA_TYPE_UINT8_ARRAY, cdblen,
+					    ssc->ssc_uscsi_cmd->uscsi_cdb,
+					    "pkt-reason",
+					    DATA_TYPE_UINT8, uscsi_pkt_reason,
+					    "pkt-state",
+					    DATA_TYPE_UINT8, uscsi_pkt_state,
+					    "pkt-stats",
+					    DATA_TYPE_UINT32,
+					    uscsi_pkt_statistics,
+					    "stat-code",
+					    DATA_TYPE_UINT8,
+					    ssc->ssc_uscsi_cmd->uscsi_status,
+					    "key",
+					    DATA_TYPE_UINT8,
+					    scsi_sense_key(sensep),
+					    "asc",
+					    DATA_TYPE_UINT8,
+					    scsi_sense_asc(sensep),
+					    "ascq",
+					    DATA_TYPE_UINT8,
+					    scsi_sense_ascq(sensep),
+					    "sense-data",
+					    DATA_TYPE_UINT8_ARRAY,
+					    senlen, sensep,
+					    NULL);
+				}
+		} else {
+			/*
+			 * For stat_code == STATUS_GOOD, this is not a
+			 * hardware error.
+			 */
+			if (ssc->ssc_uscsi_cmd->uscsi_status == STATUS_GOOD)
+				return;
+
+			/*
+			 * Post ereport.io.scsi.cmd.disk.dev.serr if we got the
+			 * stat-code but with sense data unavailable.
+			 * driver-assessment will be set based on parameter
+			 * drv_assess.
+			 */
+			scsi_fm_ereport_post(un->un_sd,
+			    uscsi_path_instance, "cmd.disk.dev.serr", uscsi_ena,
+			    devid, DDI_NOSLEEP, FM_VERSION, DATA_TYPE_UINT8,
+			    FM_EREPORT_VERS0,
+			    "driver-assessment", DATA_TYPE_STRING,
+			    drv_assess == SD_FM_DRV_FATAL ? "fail" : assessment,
+			    "op-code", DATA_TYPE_UINT8, op_code,
+			    "cdb",
+			    DATA_TYPE_UINT8_ARRAY,
+			    cdblen, ssc->ssc_uscsi_cmd->uscsi_cdb,
+			    "pkt-reason",
+			    DATA_TYPE_UINT8, uscsi_pkt_reason,
+			    "pkt-state",
+			    DATA_TYPE_UINT8, uscsi_pkt_state,
+			    "pkt-stats",
+			    DATA_TYPE_UINT32, uscsi_pkt_statistics,
+			    "stat-code",
+			    DATA_TYPE_UINT8,
+			    ssc->ssc_uscsi_cmd->uscsi_status,
+			    NULL);
+		}
+	}
+}
+
+/*
+ *     Function: sd_ssc_extract_info
+ *
+ * Description: Extract information available to help generate ereport.
+ *
+ *     Context: Kernel thread or interrupt context.
+ */
+static void
+sd_ssc_extract_info(sd_ssc_t *ssc, struct sd_lun *un, struct scsi_pkt *pktp,
+    struct buf *bp, struct sd_xbuf *xp)
+{
+	size_t senlen = 0;
+	union scsi_cdb *cdbp;
+	int path_instance;
+	/*
+	 * Need scsi_cdb_size array to determine the cdb length.
+	 */
+	extern uchar_t	scsi_cdb_size[];
+
+	ASSERT(un != NULL);
+	ASSERT(pktp != NULL);
+	ASSERT(bp != NULL);
+	ASSERT(xp != NULL);
+	ASSERT(ssc != NULL);
+	ASSERT(mutex_owned(SD_MUTEX(un)));
+
+	/*
+	 * Transfer the cdb buffer pointer here.
+	 */
+	cdbp = (union scsi_cdb *)pktp->pkt_cdbp;
+
+	ssc->ssc_uscsi_cmd->uscsi_cdblen = scsi_cdb_size[GETGROUP(cdbp)];
+	ssc->ssc_uscsi_cmd->uscsi_cdb = (caddr_t)cdbp;
+
+	/*
+	 * Transfer the sense data buffer pointer if sense data is available,
+	 * calculate the sense data length first.
+	 */
+	if ((xp->xb_sense_state & STATE_XARQ_DONE) ||
+	    (xp->xb_sense_state & STATE_ARQ_DONE)) {
+		/*
+		 * For arq case, we will enter here.
+		 */
+		if (xp->xb_sense_state & STATE_XARQ_DONE) {
+			senlen = MAX_SENSE_LENGTH - xp->xb_sense_resid;
+		} else {
+			senlen = SENSE_LENGTH;
+		}
+	} else {
+		/*
+		 * For non-arq case, we will enter this branch.
+		 */
+		if (SD_GET_PKT_STATUS(pktp) == STATUS_CHECK &&
+		    (xp->xb_sense_state & STATE_XFERRED_DATA)) {
+			senlen = SENSE_LENGTH - xp->xb_sense_resid;
+		}
+
+	}
+
+	ssc->ssc_uscsi_cmd->uscsi_rqlen = (senlen & 0xff);
+	ssc->ssc_uscsi_cmd->uscsi_rqresid = 0;
+	ssc->ssc_uscsi_cmd->uscsi_rqbuf = (caddr_t)xp->xb_sense_data;
+
+	ssc->ssc_uscsi_cmd->uscsi_status = ((*(pktp)->pkt_scbp) & STATUS_MASK);
+
+	/*
+	 * Only transfer path_instance when scsi_pkt was properly allocated.
+	 */
+	path_instance = pktp->pkt_path_instance;
+	if (scsi_pkt_allocated_correctly(pktp) && path_instance)
+		ssc->ssc_uscsi_cmd->uscsi_path_instance = path_instance;
+	else
+		ssc->ssc_uscsi_cmd->uscsi_path_instance = 0;
+
+	/*
+	 * Copy in the other fields we may need when posting ereport.
+	 */
+	ssc->ssc_uscsi_info->ui_pkt_reason = pktp->pkt_reason;
+	ssc->ssc_uscsi_info->ui_pkt_state = pktp->pkt_state;
+	ssc->ssc_uscsi_info->ui_pkt_statistics = pktp->pkt_statistics;
+	ssc->ssc_uscsi_info->ui_lba = (uint64_t)SD_GET_BLKNO(bp);
+
+	/*
+	 * For partially read/write command, we will not create ena
+	 * in case of a successful command be reconized as recovered.
+	 */
+	if ((pktp->pkt_reason == CMD_CMPLT) &&
+	    (ssc->ssc_uscsi_cmd->uscsi_status == STATUS_GOOD) &&
+	    (senlen == 0)) {
+		return;
+	}
+
+	/*
+	 * To associate ereports of a single command execution flow, we
+	 * need a shared ena for a specific command.
+	 */
+	if (xp->xb_ena == 0)
+		xp->xb_ena = fm_ena_generate(0, FM_ENA_FMT1);
+	ssc->ssc_uscsi_info->ui_ena = xp->xb_ena;
 }

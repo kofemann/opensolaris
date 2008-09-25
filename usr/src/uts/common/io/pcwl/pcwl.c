@@ -96,7 +96,7 @@ mac_callbacks_t pcwl_m_callbacks = {
 static char *pcwl_name_str = "pcwl";
 
 DDI_DEFINE_STREAM_OPS(pcwl_dev_ops, nulldev, pcwl_probe, pcwl_attach,
-    pcwl_detach, nodev, NULL, D_MP, NULL);
+    pcwl_detach, nodev, NULL, D_MP, NULL, ddi_quiesce_not_supported);
 
 extern struct mod_ops mod_driverops;
 static struct modldrv modldrv = {
@@ -434,6 +434,10 @@ pcwl_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	if (!(pcwl_p->pcwl_flag & PCWL_ATTACHED))
 		return (DDI_FAILURE);
 
+	ret = mac_disable(pcwl_p->pcwl_mh);
+	if (ret != 0)
+		return (DDI_FAILURE);
+
 	if (pcwl_p->pcwl_device_type == PCWL_DEVICE_PCI) {
 		mutex_enter(&pcwl_p->pcwl_glock);
 		(void) pcwl_set_cmd(pcwl_p, WL_CMD_DISABLE, 0);
@@ -456,9 +460,7 @@ pcwl_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	}
 	list_destroy(&pcwl_p->pcwl_scan_list);
 	mutex_exit(&pcwl_p->pcwl_scanlist_lock);
-	ret = mac_unregister(pcwl_p->pcwl_mh);
-	if (ret != 0)
-		return (DDI_FAILURE);
+	(void) mac_unregister(pcwl_p->pcwl_mh);
 
 	mutex_enter(&pcwl_p->pcwl_glock);
 	if (pcwl_p->pcwl_device_type == PCWL_DEVICE_PCI) {

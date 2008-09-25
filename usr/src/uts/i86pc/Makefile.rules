@@ -59,10 +59,6 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/i86pc/cpu/genuineintel/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
-$(OBJS_DIR)/%.o:		$(UTSBASE)/i86pc/io/intel_nb5000/%.c
-	$(COMPILE.c) -o $@ $<
-	$(CTFCONVERT_O)
-
 $(OBJS_DIR)/%.o:		$(UTSBASE)/i86pc/io/intel_nhm/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
@@ -80,10 +76,6 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/i86pc/io/cpudrv/%.c
 	$(CTFCONVERT_O)
 
 $(OBJS_DIR)/%.o:		$(UTSBASE)/i86pc/io/ioat/%.c
-	$(COMPILE.c) -o $@ $<
-	$(CTFCONVERT_O)
-
-$(OBJS_DIR)/%.o:		$(UTSBASE)/i86pc/io/mc/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
@@ -218,6 +210,25 @@ $(OBJS_DIR)/bios_call.o:    $(UTSBASE)/i86pc/ml/bios_call_src.s
 	@echo "  .long . - bios_image"		>> $(OBJS_DIR)/bios_call.s
 	$(COMPILE.s) -o $@ $(OBJS_DIR)/bios_call.s
 
+#
+# Stuff to build fb_swtch.o for the kernel.
+#
+MAPFILE_FBSWTCH	= $(UTSBASE)/i86pc/conf/Mapfile.fb_swtch
+$(OBJS_DIR)/fb_swtch.o:    $(UTSBASE)/i86pc/ml/fb_swtch_src.s
+	$(COMPILE.s) -o $(OBJS_DIR)/fb_swtch_src.o \
+		$(UTSBASE)/i86pc/ml/fb_swtch_src.s
+	$(LD) -dn -M $(MAPFILE_FBSWTCH)  \
+		-o $(OBJS_DIR)/fb_swtch_src $(OBJS_DIR)/fb_swtch_src.o
+	@echo "  .data"				> $(OBJS_DIR)/fb_swtch.s
+	@echo "  .globl fb_swtch_image"		>> $(OBJS_DIR)/fb_swtch.s
+	@echo "fb_swtch_image:"			>> $(OBJS_DIR)/fb_swtch.s
+	$(ELFEXTRACT) $(OBJS_DIR)/fb_swtch_src	>> $(OBJS_DIR)/fb_swtch.s
+	@echo "  .align 4"			>> $(OBJS_DIR)/fb_swtch.s
+	@echo "  .globl fb_swtch_size"		>> $(OBJS_DIR)/fb_swtch.s
+	@echo "fb_swtch_size:"			>> $(OBJS_DIR)/fb_swtch.s
+	@echo "  .long . - fb_swtch_image"	>> $(OBJS_DIR)/fb_swtch.s
+	$(COMPILE.s) -o $@ $(OBJS_DIR)/fb_swtch.s
+
 # ridiculous contortions ---
 ATOMIC_SUBDIR_32	= i386
 ATOMIC_SUBDIR_64	= amd64
@@ -225,10 +236,6 @@ ATOMIC_SUBDIR		= $(ATOMIC_SUBDIR_$(CLASS))
 
 $(OBJS_DIR)/%.o:		$(SRC)/common/atomic/$(ATOMIC_SUBDIR)/%.s
 	$(COMPILE.s) -o $@ $<
-
-$(OBJS_DIR)/%.o:		$(SRC)/common/mc/mc-amd/%.c
-	$(COMPILE.c) -o $@ $<
-	$(CTFCONVERT_O)
 
 #
 # dtrace stubs
@@ -261,9 +268,6 @@ $(LINTS_DIR)/%.ln:		$(UTSBASE)/i86pc/cpu/generic_cpu/%.c
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/i86pc/cpu/genuineintel/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
-$(LINTS_DIR)/%.ln:		$(UTSBASE)/i86pc/io/intel_nb5000/%.c
-	@($(LHEAD) $(LINT.c) $< $(LTAIL))
-
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/i86pc/io/intel_nhm/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
@@ -277,9 +281,6 @@ $(LINTS_DIR)/%.ln:		$(UTSBASE)/i86pc/io/cpudrv/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/i86pc/io/ioat/%.c
-	@($(LHEAD) $(LINT.c) $< $(LTAIL))
-
-$(LINTS_DIR)/%.ln:		$(UTSBASE)/i86pc/io/mc/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/i86pc/io/pci/%.c
@@ -336,9 +337,6 @@ $(LINTS_DIR)/%.ln:		$(SRC)/common/dis/i386/%.c
 $(LINTS_DIR)/%.ln:		$(SRC)/common/atomic/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
-$(LINTS_DIR)/%.ln:		$(SRC)/common/mc/mc-amd/%.c
-	@($(LHEAD) $(LINT.c) $< $(LTAIL))
-
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/i86pc/io/gfx_private/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
@@ -351,6 +349,13 @@ $(LINTS_DIR)/%.ln:		$(UTSBASE)/i86pc/io/xsvc/%.c
 $(LINTS_DIR)/bios_call.ln:	$(UTSBASE)/i86pc/ml/bios_call_src.s
 	@($(LHEAD) $(LINT.s) $(UTSBASE)/i86pc/ml/bios_call_src.s  $(LTAIL))
 	@mv $(LINTS_DIR)/bios_call_src.ln $(LINTS_DIR)/bios_call.ln
+
+#
+# So does fb_swtch
+#
+$(LINTS_DIR)/fb_swtch.ln:	$(UTSBASE)/i86pc/ml/fb_swtch_src.s
+	@($(LHEAD) $(LINT.s) $(UTSBASE)/i86pc/ml/fb_swtch_src.s  $(LTAIL))
+	@mv $(LINTS_DIR)/fb_swtch_src.ln $(LINTS_DIR)/fb_swtch.ln
 
 #
 # dboot always compiles in 32-bit mode, so force lint to be 32-bit mode too.

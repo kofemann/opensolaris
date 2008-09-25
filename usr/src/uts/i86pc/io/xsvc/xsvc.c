@@ -20,11 +20,9 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/errno.h>
 #include <sys/types.h>
@@ -95,12 +93,13 @@ static struct dev_ops xsvc_dev_ops = {
 	nodev,			/* devo_reset */
 	&xsvc_cb_ops,		/* devo_cb_ops */
 	NULL,			/* devo_bus_ops */
-	NULL			/* power */
+	NULL,			/* power */
+	ddi_quiesce_not_needed,		/* quiesce */
 };
 
 static struct modldrv xsvc_modldrv = {
 	&mod_driverops,		/* Type of module.  This one is a driver */
-	"xsvc driver v%I%",	/* Name of the module. */
+	"xsvc driver",		/* Name of the module. */
 	&xsvc_dev_ops,		/* driver ops */
 };
 

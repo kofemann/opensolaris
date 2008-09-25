@@ -24,7 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/conf.h>
@@ -721,7 +720,6 @@ ghd_timeout_disable(tmr_t *tmrp)
 
 	mutex_enter(&tglobal_mutex);
 	if (tmrp->t_refs-- <= 1) {
-		ASSERT(tmrp->t_ccc_listp == NULL);
 		(void) untimeout(tmrp->t_timeout_id);
 	}
 	mutex_exit(&tglobal_mutex);
@@ -762,7 +760,7 @@ ghd_timer_init(tmr_t *tmrp, long ticks)
 			continue;
 		state = ghd_time_inits[indx].state;
 		value = ghd_time_inits[indx].value;
-		ghd_timeout_table[state] = value;
+		ghd_timeout_table[state] = (cmdstate_t)value;
 	}
 }
 

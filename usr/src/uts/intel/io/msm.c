@@ -2,9 +2,8 @@
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
- * Common Development and Distribution License, Version 1.0 only
- * (the "License").  You may not use this file except in compliance
- * with the License.
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
  * or http://www.opensolaris.org/os/licensing.
@@ -20,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2004 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * Microsoft Bus Mouse Module - Streams
@@ -150,8 +147,9 @@ struct dev_ops	msm_ops = {
 	msmdetach,		/* detach */
 	nodev,			/* reset */
 	&msm_cb_ops,		/* driver operations */
-	(struct bus_ops *)0	/* bus operations */
-
+	(struct bus_ops *)0,	/* bus operations */
+	NULL,			/* power */
+	ddi_quiesce_not_supported,	/* devo_quiesce */
 };
 
 /*
@@ -160,7 +158,7 @@ struct dev_ops	msm_ops = {
 
 static struct modldrv modldrv = {
 	&mod_driverops, /* Type of module.  This one is a driver */
-	"Microsoft Mouse driver %I%",
+	"Microsoft Mouse driver",
 	&msm_ops,	/* driver ops */
 };
 
@@ -261,7 +259,8 @@ msmattach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			ddi_prop_remove_all(dip);
 #ifdef MSM_DEBUG
 			if (msm_debug)
-			    PRF("msmattach: ddi_create_minor_node failed\n");
+				PRF("msmattach:"
+				    " ddi_create_minor_node failed\n");
 #endif
 			return (DDI_FAILURE);
 		}
@@ -379,7 +378,7 @@ static int
 msminit(dev_info_t *dip)
 {
 	unsigned char   id1,
-			id2;
+	    id2;
 	int	ioaddr;
 	int	old_probe;
 
@@ -389,7 +388,7 @@ msminit(dev_info_t *dip)
 		PRF("msminit: call mouse_base = %x\n", mouse_base);
 #endif
 	old_probe = ddi_getprop(DDI_DEV_T_ANY, dip, 0,
-		"ignore-hardware-nodes", 0);
+	    "ignore-hardware-nodes", 0);
 
 	if (old_probe) {
 		int	len = sizeof (int);
@@ -460,7 +459,7 @@ msmopen(queue_t *q, dev_t *devp, int flag, int sflag,
 		printf("msmopen:entered\n");
 #endif
 	if (((unit = MSMUNIT(*devp)) >= MSM_MAXUNIT) ||
-		(dip = msmunits[unit]) == NULL)
+	    (dip = msmunits[unit]) == NULL)
 		return (DDI_FAILURE);
 
 	if (mousepresent == 0) {
@@ -606,8 +605,8 @@ static uint_t
 msmintr(caddr_t arg)
 {
 	char    status,
-		x,
-		y;
+	    x,
+	    y;
 
 	struct strmseinfo *qp = (struct strmseinfo *)arg;
 	mblk_t *bp;

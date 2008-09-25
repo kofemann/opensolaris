@@ -5710,6 +5710,18 @@ ip_stack_shutdown(netstackid_t stackid, void *arg)
 
 	/* Get rid of loopback interfaces and their IREs */
 	ip_loopback_cleanup(ipst);
+
+	/*
+	 * The destroy functions here will end up causing notify callbacks
+	 * in the hook framework and these need to be run before the shtudown
+	 * of the hook framework is begun - that happens from netstack after
+	 * IP shutdown has completed.  If we leave doing these actions until
+	 * ip_stack_fini then the notify callbacks for the net_*_unregister
+	 * are happening against a backdrop of shattered terain.
+	 */
+	ipv4_hook_destroy(ipst);
+	ipv6_hook_destroy(ipst);
+	ip_net_destroy(ipst);
 }
 
 /*
@@ -5724,10 +5736,6 @@ ip_stack_fini(netstackid_t stackid, void *arg)
 #ifdef NS_DEBUG
 	printf("ip_stack_fini(%p, stack %d)\n", (void *)ipst, stackid);
 #endif
-	ipv4_hook_destroy(ipst);
-	ipv6_hook_destroy(ipst);
-	ip_net_destroy(ipst);
-
 	rw_destroy(&ipst->ips_srcid_lock);
 
 	ip_kstat_fini(stackid, ipst->ips_ip_mibkp);
@@ -13750,7 +13758,7 @@ ip_check_and_align_header(queue_t *q, mblk_t *mp, ip_stack_t *ipst)
 			(void) mi_strlog(q, 1, SL_ERROR|SL_TRACE,
 			    "ip_check_and_align_header: %s forced us to "
 			    " pullup pkt, hdr len %ld, hdr addr %p",
-			    ill->ill_name, len, ipha);
+			    ill->ill_name, len, (void *)ipha);
 		}
 		if (!pullupmsg(mp, IP_SIMPLE_HDR_LENGTH)) {
 			/* clear b_prev - used by ip_mroute_decap */
@@ -17277,6 +17285,15 @@ ip_proto_input(queue_t *q, mblk_t *mp, ipha_t *ipha, ire_t *ire,
 
 		if (CLASSD(ipha->ipha_dst) && !IS_LOOPBACK(recv_ill)) {
 			ASSERT(ire->ire_type == IRE_BROADCAST);
+			/*
+			 * Inactive/Failed interfaces are not supposed to
+			 * respond to the multicast packets.
+			 */
+			if (ill_is_probeonly(ill)) {
+				freemsg(first_mp);
+				return;
+			}
+
 			/*
 			 * In the multicast case, applications may have joined
 			 * the group from different zones, so we need to deliver

@@ -32,7 +32,7 @@
  * This is the string displayed by modinfo, etc.
  * Make sure you keep the version ID up to date!
  */
-static char bge_ident[] = "Broadcom Gb Ethernet v0.68";
+static char bge_ident[] = "Broadcom Gb Ethernet v0.70";
 
 /*
  * Property names
@@ -910,6 +910,12 @@ bge_m_setprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 		mutex_exit(bgep->genlock);
 		return (ENOTSUP);
 	}
+	if ((DEVICE_5906_SERIES_CHIPSETS(bgep) &&
+	    (pr_num == MAC_PROP_EN_1000FDX_CAP) ||
+	    (pr_num == MAC_PROP_EN_1000HDX_CAP))) {
+		mutex_exit(bgep->genlock);
+		return (ENOTSUP);
+	}
 
 	switch (pr_num) {
 		case MAC_PROP_EN_1000FDX_CAP:
@@ -1126,26 +1132,42 @@ bge_m_getprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 			bcopy(&fl, pr_val, sizeof (fl));
 			break;
 		case MAC_PROP_ADV_1000FDX_CAP:
-			if (is_default)
-				*(uint8_t *)pr_val = 1;
+			if (is_default) {
+				if (DEVICE_5906_SERIES_CHIPSETS(bgep))
+					*(uint8_t *)pr_val = 0;
+				else
+					*(uint8_t *)pr_val = 1;
+			}
 			else
 				*(uint8_t *)pr_val = bgep->param_adv_1000fdx;
 			break;
 		case MAC_PROP_EN_1000FDX_CAP:
-			if (is_default)
-				*(uint8_t *)pr_val = 1;
+			if (is_default) {
+				if (DEVICE_5906_SERIES_CHIPSETS(bgep))
+					*(uint8_t *)pr_val = 0;
+				else
+					*(uint8_t *)pr_val = 1;
+			}
 			else
 				*(uint8_t *)pr_val = bgep->param_en_1000fdx;
 			break;
 		case MAC_PROP_ADV_1000HDX_CAP:
-			if (is_default)
-				*(uint8_t *)pr_val = 1;
+			if (is_default) {
+				if (DEVICE_5906_SERIES_CHIPSETS(bgep))
+					*(uint8_t *)pr_val = 0;
+				else
+					*(uint8_t *)pr_val = 1;
+			}
 			else
 				*(uint8_t *)pr_val = bgep->param_adv_1000hdx;
 			break;
 		case MAC_PROP_EN_1000HDX_CAP:
-			if (is_default)
-				*(uint8_t *)pr_val = 1;
+			if (is_default) {
+				if (DEVICE_5906_SERIES_CHIPSETS(bgep))
+					*(uint8_t *)pr_val = 0;
+				else
+					*(uint8_t *)pr_val = 1;
+			}
 			else
 				*(uint8_t *)pr_val = bgep->param_en_1000hdx;
 			break;
@@ -3407,6 +3429,8 @@ bge_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 	}
 #endif
 #endif
+
+	ddi_report_dev(devinfo);
 	return (DDI_SUCCESS);
 
 attach_fail:
@@ -3451,6 +3475,41 @@ bge_suspend(bge_t *bgep)
 
 	return (DDI_SUCCESS);
 }
+
+/*
+ * quiesce(9E) entry point.
+ *
+ * This function is called when the system is single-threaded at high
+ * PIL with preemption disabled. Therefore, this function must not be
+ * blocked.
+ *
+ * This function returns DDI_SUCCESS on success, or DDI_FAILURE on failure.
+ * DDI_FAILURE indicates an error condition and should almost never happen.
+ */
+#ifdef	__sparc
+#define	bge_quiesce	ddi_quiesce_not_supported
+#else
+static int
+bge_quiesce(dev_info_t *devinfo)
+{
+	bge_t *bgep = ddi_get_driver_private(devinfo);
+
+	if (bgep == NULL)
+		return (DDI_FAILURE);
+
+	if (bgep->intr_type == DDI_INTR_TYPE_FIXED) {
+		bge_reg_set32(bgep, PCI_CONF_BGE_MHCR,
+		    MHCR_MASK_PCI_INT_OUTPUT);
+	} else {
+		bge_reg_clr32(bgep, MSI_MODE_REG, MSI_MSI_ENABLE);
+	}
+
+	/* Stop the chip */
+	bge_chip_stop_nonblocking(bgep);
+
+	return (DDI_SUCCESS);
+}
+#endif
 
 /*
  * detach(9E) -- Detach a device from the system
@@ -3538,8 +3597,17 @@ bge_detach(dev_info_t *devinfo, ddi_detach_cmd_t cmd)
 #undef	BGE_DBG
 #define	BGE_DBG		BGE_DBG_INIT	/* debug flag for this code	*/
 
-DDI_DEFINE_STREAM_OPS(bge_dev_ops, nulldev, nulldev, bge_attach, bge_detach,
-    nodev, NULL, D_MP, NULL);
+DDI_DEFINE_STREAM_OPS(bge_dev_ops,
+	nulldev,	/* identify */
+	nulldev,	/* probe */
+	bge_attach,	/* attach */
+	bge_detach,	/* detach */
+	nodev,		/* reset */
+	NULL,		/* cb_ops */
+	D_MP,		/* bus_ops */
+	NULL,		/* power */
+	bge_quiesce	/* quiesce */
+);
 
 static struct modldrv bge_modldrv = {
 	&mod_driverops,		/* Type of module.  This one is a driver */

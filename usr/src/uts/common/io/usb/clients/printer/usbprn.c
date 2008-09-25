@@ -59,6 +59,7 @@
 #include <sys/errno.h>
 #include <sys/usb/clients/printer/usb_printer.h>
 #include <sys/usb/clients/printer/usbprn.h>
+#include <sys/strsun.h>
 
 /* Debugging support */
 uint_t	usbprn_errmask		= (uint_t)PRINT_MASK_ALL;
@@ -169,7 +170,8 @@ static struct dev_ops usbprn_ops = {
 	nodev,			/* reset */
 	&usbprn_cb_ops,		/* driver operations */
 	NULL,			/* bus operations */
-	usbprn_power		/* power */
+	usbprn_power,		/* power */
+	ddi_quiesce_not_supported,	/* devo_quiesce */
 };
 
 static struct modldrv usbprnmodldrv =	{
@@ -807,7 +809,7 @@ usbprn_get_device_id(usbprn_state_t *usbprnp)
 	}
 
 	ASSERT(data);
-	n = data->b_wptr - data->b_rptr;
+	n = MBLKL(data);
 
 	if (n < 2) {
 
@@ -846,12 +848,12 @@ usbprn_get_device_id(usbprn_state_t *usbprnp)
 			goto done;
 		}
 
-		ASSERT(len == (data->b_wptr - data->b_rptr));
+		ASSERT(len == MBLKL(data));
 	}
 
 	USB_DPRINTF_L3(PRINT_MASK_ATTA, usbprnp->usbprn_log_handle,
 	    "usbprn_get_device_id: returned data length=%ld",
-	    (long)(data->b_wptr - data->b_rptr));
+	    (long)(MBLKL(data)));
 
 	ptr = kmem_zalloc(len + 1, KM_SLEEP);
 
@@ -920,7 +922,7 @@ usbprn_get_port_status(usbprn_state_t  *usbprnp)
 		mutex_enter(&usbprnp->usbprn_mutex);
 
 		ASSERT(data);
-		ASSERT((data->b_wptr - data->b_rptr) == 1);
+		ASSERT(MBLKL(data) == 1);
 
 		usbprnp->usbprn_last_status = *data->b_rptr;
 
@@ -2285,11 +2287,11 @@ usbprn_send_async_bulk_data(usbprn_state_t *usbprnp)
 	max_xfer_count = usbprnp->usbprn_bp->b_bcount;
 	mp = usbprnp->usbprn_bulk_mp;
 	ASSERT(mp != NULL);
-	xfer_count = mp->b_wptr - mp->b_rptr;
+	xfer_count = MBLKL(mp);
 	mutex_exit(&usbprnp->usbprn_mutex);
 
 	req = usb_alloc_bulk_req(usbprnp->usbprn_dip, 0, USB_FLAGS_SLEEP);
-	req->bulk_len		= xfer_count;
+	req->bulk_len		= (uint_t)xfer_count;
 	req->bulk_data		= mp;
 	req->bulk_timeout	= timeout;
 	req->bulk_cb		= usbprn_bulk_xfer_cb;
@@ -2410,7 +2412,7 @@ usbprn_bulk_xfer_exc_cb(usb_pipe_handle_t pipe, usb_bulk_req_t *req)
 	bulk_out->ps_cr = completion_reason;
 
 	if (data) {
-		bytes_remaining = data->b_wptr - data->b_rptr;
+		bytes_remaining = MBLKL(data);
 	}
 
 	/*

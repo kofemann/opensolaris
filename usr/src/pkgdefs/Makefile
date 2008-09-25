@@ -110,6 +110,7 @@ i386_SUBDIRS= \
 	SUNWamd8111s \
 	SUNWahci \
 	SUNWamr \
+	SUNWarcmsr \
 	SUNWatheros \
 	SUNWatigfx \
 	SUNWaudiohd \
@@ -125,6 +126,7 @@ i386_SUBDIRS= \
 	SUNWgrubS \
 	SUNWdcopy \
 	SUNWipw \
+	SUNWiwh	\
 	SUNWiwi \
 	SUNWiwk \
 	SUNWkvm.i \
@@ -150,7 +152,8 @@ i386_SUBDIRS= \
 	SUNWwpi \
 	SUNWxdt \
 	SUNWxsvc \
-	SUNWxvmipa \
+	SUNWxvmipar \
+	SUNWxvmipau \
 	SUNWxvmpv
 
 i386_XMODS= \
@@ -296,6 +299,8 @@ COMMON_SUBDIRS= \
 	SUNWnisu  \
 	SUNWntpr  \
 	SUNWntpu  \
+	SUNWnwamintr \
+	SUNWnwamintu \
 	SUNWocf \
 	SUNWocfd \
 	SUNWocfh \
@@ -336,6 +341,7 @@ COMMON_SUBDIRS= \
 	SUNWpool \
 	SUNWpoold \
 	SUNWpoolr \
+	SUNWpowertop \
 	SUNWppm \
 	SUNWpppd \
 	SUNWpppdu \

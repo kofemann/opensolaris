@@ -770,6 +770,7 @@ f none usr/include/sys/des.h 644 root bin
 f none usr/include/sys/devctl.h 644 root bin
 f none usr/include/sys/devcache.h 644 root bin
 f none usr/include/sys/devcache_impl.h 644 root bin
+f none usr/include/sys/devfm.h 644 root bin
 f none usr/include/sys/devid_cache.h 644 root bin
 f none usr/include/sys/devinfo_impl.h 644 root bin
 f none usr/include/sys/devops.h 644 root bin
@@ -931,6 +932,8 @@ d none usr/include/sys/ib 755 root bin
 d none usr/include/sys/ib/adapters 755 root bin
 d none usr/include/sys/ib/adapters/tavor 755 root bin
 f none usr/include/sys/ib/adapters/tavor/tavor_ioctl.h 644 root bin
+d none usr/include/sys/ib/adapters/hermon 755 root bin
+f none usr/include/sys/ib/adapters/hermon/hermon_ioctl.h 644 root bin
 f none usr/include/sys/ib/ib_pkt_hdrs.h 644 root bin
 f none usr/include/sys/ib/ib_types.h 644 root bin
 d none usr/include/sys/ib/ibtl 755 root bin
@@ -1205,11 +1208,12 @@ f none usr/include/sys/scsi/impl/usmp.h 644 root bin
 f none usr/include/sys/scsi/scsi.h 644 root bin
 f none usr/include/sys/scsi/scsi_address.h 644 root bin
 f none usr/include/sys/scsi/scsi_ctl.h 644 root bin
-f none usr/include/sys/scsi/scsi_watch.h 644 root bin
+f none usr/include/sys/scsi/scsi_fm.h 644 root bin
 f none usr/include/sys/scsi/scsi_params.h 644 root bin
 f none usr/include/sys/scsi/scsi_pkt.h 644 root bin
 f none usr/include/sys/scsi/scsi_resource.h 644 root bin
 f none usr/include/sys/scsi/scsi_types.h 644 root bin
+f none usr/include/sys/scsi/scsi_watch.h 644 root bin
 d none usr/include/sys/scsi/targets 755 root bin
 f none usr/include/sys/scsi/targets/ses.h 644 root bin
 f none usr/include/sys/scsi/targets/sesio.h 644 root bin

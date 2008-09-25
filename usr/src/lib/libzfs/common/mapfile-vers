@@ -22,8 +22,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
-#
 
 SUNWprivate_1.1 {
     global:
@@ -48,6 +46,7 @@ SUNWprivate_1.1 {
 	zfs_free_allows;
 	zfs_get_handle;
 	zfs_get_name;
+	zfs_get_pool_handle;
 	zfs_get_user_props;
 	zfs_get_type;
 	zfs_iscsi_perm_check;
@@ -134,6 +133,7 @@ SUNWprivate_1.1 {
 	zpool_get_handle;
 	zpool_get_history;
 	zpool_get_name;
+	zpool_get_physpath;
 	zpool_get_prop;
 	zpool_get_prop_int;
 	zpool_get_state;

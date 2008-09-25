@@ -33,7 +33,6 @@
 extern uint32_t hxge_rbr_size;
 extern uint32_t hxge_rcr_size;
 extern uint32_t hxge_rbr_spare_size;
-
 extern uint32_t hxge_mblks_pending;
 
 /*
@@ -41,7 +40,6 @@ extern uint32_t hxge_mblks_pending;
  * ISR doing Rx Processing.
  */
 extern uint32_t hxge_max_rx_pkts;
-boolean_t hxge_jumbo_enable;
 
 /*
  * Tunables to manage the receive buffer blocks.
@@ -60,14 +58,16 @@ static hxge_status_t hxge_rxdma_hw_start_common(p_hxge_t hxgep);
 static hxge_status_t hxge_rxdma_hw_start(p_hxge_t hxgep);
 static void hxge_rxdma_hw_stop(p_hxge_t hxgep);
 static hxge_status_t hxge_map_rxdma_channel(p_hxge_t hxgep, uint16_t channel,
-	p_hxge_dma_common_t *dma_buf_p, p_rx_rbr_ring_t *rbr_p,
-	uint32_t num_chunks, p_hxge_dma_common_t *dma_cntl_p,
-	p_rx_rcr_ring_t *rcr_p, p_rx_mbox_t *rx_mbox_p);
+    p_hxge_dma_common_t *dma_buf_p, p_rx_rbr_ring_t *rbr_p,
+    uint32_t num_chunks, p_hxge_dma_common_t *dma_rbr_cntl_p,
+    p_hxge_dma_common_t *dma_rcr_cntl_p, p_hxge_dma_common_t *dma_mbox_cntl_p,
+    p_rx_rcr_ring_t *rcr_p, p_rx_mbox_t *rx_mbox_p);
 static void hxge_unmap_rxdma_channel(p_hxge_t hxgep, uint16_t channel,
 	p_rx_rbr_ring_t rbr_p, p_rx_rcr_ring_t rcr_p, p_rx_mbox_t rx_mbox_p);
 static hxge_status_t hxge_map_rxdma_channel_cfg_ring(p_hxge_t hxgep,
-	uint16_t dma_channel, p_hxge_dma_common_t *dma_cntl_p,
-	p_rx_rbr_ring_t *rbr_p, p_rx_rcr_ring_t *rcr_p, p_rx_mbox_t *rx_mbox_p);
+    uint16_t dma_channel, p_hxge_dma_common_t *dma_rbr_cntl_p,
+    p_hxge_dma_common_t *dma_rcr_cntl_p, p_hxge_dma_common_t *dma_mbox_cntl_p,
+    p_rx_rbr_ring_t *rbr_p, p_rx_rcr_ring_t *rcr_p, p_rx_mbox_t *rx_mbox_p);
 static void hxge_unmap_rxdma_channel_cfg_ring(p_hxge_t hxgep,
 	p_rx_rcr_ring_t rcr_p, p_rx_mbox_t rx_mbox_p);
 static hxge_status_t hxge_map_rxdma_channel_buf_ring(p_hxge_t hxgep,
@@ -1017,6 +1017,7 @@ hxge_post_page(p_hxge_t hxgep, p_rx_rbr_ring_t rx_rbr_p, p_rx_msg_t rx_msg_p)
 	/*
 	 * Get the rbr header pointer and its offset index.
 	 */
+	MUTEX_ENTER(&rx_rbr_p->post_lock);
 	rx_rbr_p->rbr_wr_index = ((rx_rbr_p->rbr_wr_index + 1) &
 	    rx_rbr_p->rbr_wrap_mask);
 	rx_rbr_p->rbr_desc_vp[rx_rbr_p->rbr_wr_index] = rx_msg_p->shifted_addr;
@@ -1055,6 +1056,7 @@ hxge_post_page(p_hxge_t hxgep, p_rx_rbr_ring_t rx_rbr_p, p_rx_msg_t rx_msg_p)
 		hpi_rxdma_rdc_rbr_kick(handle, rx_rbr_p->rdc, blocks_to_post);
 		rx_rbr_p->pages_to_post -= blocks_to_post;
 	}
+	MUTEX_EXIT(&rx_rbr_p->post_lock);
 
 	HXGE_DEBUG_MSG((hxgep, RX_CTL,
 	    "<== hxge_post_page (channel %d post_next_index %d)",
@@ -1076,8 +1078,6 @@ hxge_freeb(p_rx_msg_t rx_msg_p)
 	    "hxge_freeb:rx_msg_p = $%p (block pending %d)",
 	    rx_msg_p, hxge_mblks_pending));
 
-	MUTEX_ENTER(&ring->post_lock);
-
 	/*
 	 * First we need to get the free state, then
 	 * atomic decrement the reference count to prevent
@@ -1085,7 +1085,6 @@ hxge_freeb(p_rx_msg_t rx_msg_p)
 	 * is processing a loaned up buffer block.
 	 */
 	free_state = rx_msg_p->free;
-
 	ref_cnt = atomic_add_32_nv(&rx_msg_p->ref_cnt, -1);
 	if (!ref_cnt) {
 		atomic_dec_32(&hxge_mblks_pending);
@@ -1102,17 +1101,23 @@ hxge_freeb(p_rx_msg_t rx_msg_p)
 		}
 
 		KMEM_FREE(rx_msg_p, sizeof (rx_msg_t));
-		/* Decrement the receive buffer ring's reference count, too. */
-		atomic_dec_32(&ring->rbr_ref_cnt);
+		if (ring) {
+			/*
+			 * Decrement the receive buffer ring's reference
+			 * count, too.
+			 */
+			atomic_dec_32(&ring->rbr_ref_cnt);
 
-		/*
-		 * Free the receive buffer ring, iff
-		 * 1. all the receive buffers have been freed
-		 * 2. and we are in the proper state (that is,
-		 *    we are not UNMAPPING).
-		 */
-		if (ring->rbr_ref_cnt == 0 && ring->rbr_state == RBR_UNMAPPED) {
-			KMEM_FREE(ring, sizeof (*ring));
+			/*
+			 * Free the receive buffer ring, iff
+			 * 1. all the receive buffers have been freed
+			 * 2. and we are in the proper state (that is,
+			 *    we are not UNMAPPING).
+			 */
+			if (ring->rbr_ref_cnt == 0 &&
+			    ring->rbr_state == RBR_UNMAPPED) {
+				KMEM_FREE(ring, sizeof (*ring));
+			}
 		}
 		goto hxge_freeb_exit;
 	}
@@ -1120,7 +1125,7 @@ hxge_freeb(p_rx_msg_t rx_msg_p)
 	/*
 	 * Repost buffer.
 	 */
-	if (free_state && (ref_cnt == 1)) {
+	if ((ring != NULL) && free_state && (ref_cnt == 1)) {
 		HXGE_DEBUG_MSG((NULL, RX_CTL,
 		    "hxge_freeb: post page $%p:", rx_msg_p));
 		if (ring->rbr_state == RBR_POSTING)
@@ -1128,7 +1133,6 @@ hxge_freeb(p_rx_msg_t rx_msg_p)
 	}
 
 hxge_freeb_exit:
-	MUTEX_EXIT(&ring->post_lock);
 	HXGE_DEBUG_MSG((NULL, MEM2_CTL, "<== hxge_freeb"));
 }
 
@@ -1196,6 +1200,8 @@ hxge_intr_exit:
 	 */
 	cs.value &= RDC_STAT_WR1C;
 	cs.bits.mex = 1;
+	cs.bits.ptrread = 0;
+	cs.bits.pktread = 0;
 	RXDMA_REG_WRITE64(handle, RDC_STAT, channel, cs.value);
 
 	/*
@@ -1283,16 +1289,17 @@ hxge_rx_pkts(p_hxge_t hxgep, uint_t vindex, p_hxge_ldv_t ldvp,
 	p_rcr_entry_t		rcr_desc_rd_head_pp;
 	p_mblk_t		nmp, mp_cont, head_mp, *tail_mp;
 	uint16_t		qlen, nrcr_read, npkt_read;
-	uint32_t		qlen_hw;
+	uint32_t		qlen_hw, qlen_sw;
 	uint32_t		invalid_rcr_entry;
 	boolean_t		multi;
 	rdc_rcr_cfg_b_t		rcr_cfg_b;
-#if defined(_BIG_ENDIAN)
-	hpi_status_t		rs = HPI_SUCCESS;
-#else
 	p_rx_mbox_t		rx_mboxp;
 	p_rxdma_mailbox_t	mboxp;
-#endif
+	uint64_t		rcr_head_index, rcr_tail_index;
+	uint64_t		rcr_tail;
+	uint64_t		value;
+	rdc_rcr_tail_t		rcr_tail_reg;
+	p_hxge_rx_ring_stats_t	rdc_stats;
 
 	HXGE_DEBUG_MSG((hxgep, RX_INT_CTL, "==> hxge_rx_pkts:vindex %d "
 	    "channel %d", vindex, ldvp->channel));
@@ -1318,16 +1325,12 @@ hxge_rx_pkts(p_hxge_t hxgep, uint_t vindex, p_hxge_ldv_t ldvp,
 	    channel, rcr_p->rcr_desc_rd_head_p,
 	    rcr_p->rcr_desc_rd_head_pp, rcr_p->comp_rd_index));
 
-#if defined(_BIG_ENDIAN)
-	rs = hpi_rxdma_rdc_rcr_qlen_get(handle, channel, &qlen);
-	if (rs != HPI_SUCCESS) {
-		return (NULL);
-	}
-#else
 	rx_mboxp = hxgep->rx_mbox_areas_p->rxmbox_areas[channel];
 	mboxp = (p_rxdma_mailbox_t)rx_mboxp->rx_mbox.kaddrp;
-	qlen = mboxp->rcrstat_a.bits.qlen;
-#endif
+
+	(void) hpi_rxdma_rdc_rcr_qlen_get(handle, channel, &qlen);
+	RXDMA_REG_READ64(handle, RDC_RCR_TAIL, channel, &rcr_tail_reg.value);
+	rcr_tail = rcr_tail_reg.bits.tail;
 
 	if (!qlen) {
 		HXGE_DEBUG_MSG((hxgep, RX_INT_CTL,
@@ -1356,6 +1359,23 @@ hxge_rx_pkts(p_hxge_t hxgep, uint_t vindex, p_hxge_ldv_t ldvp,
 	nmp = mp_cont = NULL;
 	multi = B_FALSE;
 
+	rcr_head_index = rcr_p->rcr_desc_rd_head_p - rcr_p->rcr_desc_first_p;
+	rcr_tail_index = rcr_tail - rcr_p->rcr_tail_begin;
+
+	if (rcr_tail_index >= rcr_head_index) {
+		qlen_sw = rcr_tail_index - rcr_head_index;
+	} else {
+		/* rcr_tail has wrapped around */
+		qlen_sw = (rcr_p->comp_size - rcr_head_index) + rcr_tail_index;
+	}
+
+	if (qlen_hw > qlen_sw) {
+		HXGE_DEBUG_MSG((hxgep, RX_INT_CTL,
+		    "Channel %d, rcr_qlen from reg %d and from rcr_tail %d\n",
+		    channel, qlen_hw, qlen_sw));
+		qlen_hw = qlen_sw;
+	}
+
 	while (qlen_hw) {
 #ifdef HXGE_DEBUG
 		hxge_dump_rcr_entry(hxgep, rcr_desc_rd_head_p);
@@ -1368,6 +1388,8 @@ hxge_rx_pkts(p_hxge_t hxgep, uint_t vindex, p_hxge_ldv_t ldvp,
 		    rcr_p, rcr_desc_rd_head_p, &multi, &nmp, &mp_cont,
 		    &invalid_rcr_entry);
 		if (invalid_rcr_entry != 0) {
+			rdc_stats = rcr_p->rdc_stats;
+			rdc_stats->rcr_invalids++;
 			HXGE_DEBUG_MSG((hxgep, RX_INT_CTL,
 			    "Channel %d could only read 0x%x packets, "
 			    "but 0x%x pending\n", channel, npkt_read, qlen_hw));
@@ -1435,10 +1457,8 @@ hxge_rx_pkts(p_hxge_t hxgep, uint_t vindex, p_hxge_ldv_t ldvp,
 	rcr_p->comp_rd_index = comp_rd_index;
 	rcr_p->rcr_desc_rd_head_p = rcr_desc_rd_head_p;
 
-#if !defined(_BIG_ENDIAN)
 	/* Adjust the mailbox queue length for a hardware bug workaround */
 	mboxp->rcrstat_a.bits.qlen -= npkt_read;
-#endif
 
 	if ((hxgep->intr_timeout != rcr_p->intr_timeout) ||
 	    (hxgep->intr_threshold != rcr_p->intr_threshold)) {
@@ -1455,6 +1475,13 @@ hxge_rx_pkts(p_hxge_t hxgep, uint_t vindex, p_hxge_ldv_t ldvp,
 
 	cs.bits.pktread = npkt_read;
 	cs.bits.ptrread = nrcr_read;
+	value = cs.value;
+	cs.value &= 0xffffffffULL;
+	RXDMA_REG_WRITE64(handle, RDC_STAT, channel, cs.value);
+
+	cs.value = value & ~0xffffffffULL;
+	cs.bits.pktread = 0;
+	cs.bits.ptrread = 0;
 	RXDMA_REG_WRITE64(handle, RDC_STAT, channel, cs.value);
 
 	HXGE_DEBUG_MSG((hxgep, RX_INT_CTL,
@@ -1572,8 +1599,6 @@ hxge_receive_packet(p_hxge_t hxgep,
 
 	/* get the stats ptr */
 	rdc_stats = rcr_p->rdc_stats;
-	if (l2_len > (STD_FRAME_SIZE - ETHERFCSL))
-		rdc_stats->jumbo_pkts++;
 
 	if (!l2_len) {
 		HXGE_DEBUG_MSG((hxgep, RX_CTL,
@@ -1865,11 +1890,18 @@ hxge_receive_packet(p_hxge_t hxgep,
 	is_valid = (nmp != NULL);
 	if (first_entry) {
 		rdc_stats->ipackets++; /* count only 1st seg for jumbo */
+		if (l2_len > (STD_FRAME_SIZE - ETHERFCSL))
+			rdc_stats->jumbo_pkts++;
 		rdc_stats->ibytes += skip_len + l2_len < bsize ?
 		    l2_len : bsize;
 	} else {
-		rdc_stats->ibytes += l2_len - bytes_read < bsize ?
-		    l2_len - bytes_read : bsize;
+		/*
+		 * Add the current portion of the packet to the kstats.
+		 * The current portion of the packet is calculated by using
+		 * length of the packet and the previously received portion.
+		 */
+		rdc_stats->ibytes += l2_len - rcr_p->rcvd_pkt_bytes < bsize ?
+		    l2_len - rcr_p->rcvd_pkt_bytes : bsize;
 	}
 
 	rcr_p->rcvd_pkt_bytes = bytes_read;
@@ -1945,6 +1977,8 @@ hxge_rx_err_evnts(p_hxge_t hxgep, uint_t index, p_hxge_ldv_t ldvp,
 	channel = ldvp->channel;
 
 	/* Clear the interrupts */
+	cs.bits.pktread = 0;
+	cs.bits.ptrread = 0;
 	cs_val = cs.value & RDC_STAT_WR1C;
 	RXDMA_REG_WRITE64(handle, RDC_STAT, channel, cs_val);
 
@@ -2083,18 +2117,27 @@ hxge_map_rxdma(p_hxge_t hxgep)
 	p_rx_mbox_areas_t	rx_mbox_areas_p;
 	p_rx_mbox_t		*rx_mbox_p;
 	p_hxge_dma_pool_t	dma_buf_poolp;
-	p_hxge_dma_pool_t	dma_cntl_poolp;
 	p_hxge_dma_common_t	*dma_buf_p;
-	p_hxge_dma_common_t	*dma_cntl_p;
+	p_hxge_dma_pool_t	dma_rbr_cntl_poolp;
+	p_hxge_dma_common_t	*dma_rbr_cntl_p;
+	p_hxge_dma_pool_t	dma_rcr_cntl_poolp;
+	p_hxge_dma_common_t	*dma_rcr_cntl_p;
+	p_hxge_dma_pool_t	dma_mbox_cntl_poolp;
+	p_hxge_dma_common_t	*dma_mbox_cntl_p;
 	uint32_t		*num_chunks;
 	hxge_status_t		status = HXGE_OK;
 
 	HXGE_DEBUG_MSG((hxgep, MEM2_CTL, "==> hxge_map_rxdma"));
 
 	dma_buf_poolp = hxgep->rx_buf_pool_p;
-	dma_cntl_poolp = hxgep->rx_cntl_pool_p;
+	dma_rbr_cntl_poolp = hxgep->rx_rbr_cntl_pool_p;
+	dma_rcr_cntl_poolp = hxgep->rx_rcr_cntl_pool_p;
+	dma_mbox_cntl_poolp = hxgep->rx_mbox_cntl_pool_p;
 
-	if (!dma_buf_poolp->buf_allocated || !dma_cntl_poolp->buf_allocated) {
+	if (!dma_buf_poolp->buf_allocated ||
+	    !dma_rbr_cntl_poolp->buf_allocated ||
+	    !dma_rcr_cntl_poolp->buf_allocated ||
+	    !dma_mbox_cntl_poolp->buf_allocated) {
 		HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL,
 		    "<== hxge_map_rxdma: buf not allocated"));
 		return (HXGE_ERROR);
@@ -2109,7 +2152,10 @@ hxge_map_rxdma(p_hxge_t hxgep)
 
 	num_chunks = dma_buf_poolp->num_chunks;
 	dma_buf_p = dma_buf_poolp->dma_buf_pool_p;
-	dma_cntl_p = dma_cntl_poolp->dma_buf_pool_p;
+	dma_rbr_cntl_p = dma_rbr_cntl_poolp->dma_buf_pool_p;
+	dma_rcr_cntl_p = dma_rcr_cntl_poolp->dma_buf_pool_p;
+	dma_mbox_cntl_p = dma_mbox_cntl_poolp->dma_buf_pool_p;
+
 	rx_rbr_rings = (p_rx_rbr_rings_t)
 	    KMEM_ZALLOC(sizeof (rx_rbr_rings_t), KM_SLEEP);
 	rbr_rings = (p_rx_rbr_ring_t *)KMEM_ZALLOC(
@@ -2145,7 +2191,10 @@ hxge_map_rxdma(p_hxge_t hxgep)
 		status = hxge_map_rxdma_channel(hxgep, channel,
 		    (p_hxge_dma_common_t *)&dma_buf_p[i],
 		    (p_rx_rbr_ring_t *)&rbr_rings[i],
-		    num_chunks[i], (p_hxge_dma_common_t *)&dma_cntl_p[i],
+		    num_chunks[i],
+		    (p_hxge_dma_common_t *)&dma_rbr_cntl_p[i],
+		    (p_hxge_dma_common_t *)&dma_rcr_cntl_p[i],
+		    (p_hxge_dma_common_t *)&dma_mbox_cntl_p[i],
 		    (p_rx_rcr_ring_t *)&rcr_rings[i],
 		    (p_rx_mbox_t *)&rx_mbox_p[i]);
 		if (status != HXGE_OK) {
@@ -2204,15 +2253,22 @@ hxge_unmap_rxdma(p_hxge_t hxgep)
 	p_rx_mbox_areas_t	rx_mbox_areas_p;
 	p_rx_mbox_t		*rx_mbox_p;
 	p_hxge_dma_pool_t	dma_buf_poolp;
-	p_hxge_dma_pool_t	dma_cntl_poolp;
+	p_hxge_dma_pool_t	dma_rbr_cntl_poolp;
+	p_hxge_dma_pool_t	dma_rcr_cntl_poolp;
+	p_hxge_dma_pool_t	dma_mbox_cntl_poolp;
 	p_hxge_dma_common_t	*dma_buf_p;
 
 	HXGE_DEBUG_MSG((hxgep, MEM2_CTL, "==> hxge_unmap_rxdma"));
 
 	dma_buf_poolp = hxgep->rx_buf_pool_p;
-	dma_cntl_poolp = hxgep->rx_cntl_pool_p;
+	dma_rbr_cntl_poolp = hxgep->rx_rbr_cntl_pool_p;
+	dma_rcr_cntl_poolp = hxgep->rx_rcr_cntl_pool_p;
+	dma_mbox_cntl_poolp = hxgep->rx_mbox_cntl_pool_p;
 
-	if (!dma_buf_poolp->buf_allocated || !dma_cntl_poolp->buf_allocated) {
+	if (!dma_buf_poolp->buf_allocated ||
+	    !dma_rbr_cntl_poolp->buf_allocated ||
+	    !dma_rcr_cntl_poolp->buf_allocated ||
+	    !dma_mbox_cntl_poolp->buf_allocated) {
 		HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL,
 		    "<== hxge_unmap_rxdma: NULL buf pointers"));
 		return;
@@ -2222,7 +2278,7 @@ hxge_unmap_rxdma(p_hxge_t hxgep)
 	rx_rcr_rings = hxgep->rx_rcr_rings;
 	if (rx_rbr_rings == NULL || rx_rcr_rings == NULL) {
 		HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL,
-		    "<== hxge_unmap_rxdma: NULL ring pointers"));
+		    "<== hxge_unmap_rxdma: NULL pointers"));
 		return;
 	}
 
@@ -2266,7 +2322,8 @@ hxge_unmap_rxdma(p_hxge_t hxgep)
 hxge_status_t
 hxge_map_rxdma_channel(p_hxge_t hxgep, uint16_t channel,
     p_hxge_dma_common_t *dma_buf_p, p_rx_rbr_ring_t *rbr_p,
-    uint32_t num_chunks, p_hxge_dma_common_t *dma_cntl_p,
+    uint32_t num_chunks, p_hxge_dma_common_t *dma_rbr_cntl_p,
+    p_hxge_dma_common_t *dma_rcr_cntl_p, p_hxge_dma_common_t *dma_mbox_cntl_p,
     p_rx_rcr_ring_t *rcr_p, p_rx_mbox_t *rx_mbox_p)
 {
 	int status = HXGE_OK;
@@ -2293,7 +2350,8 @@ hxge_map_rxdma_channel(p_hxge_t hxgep, uint16_t channel,
 	 * Receive block ring, completion ring and mailbox.
 	 */
 	status = hxge_map_rxdma_channel_cfg_ring(hxgep, channel,
-	    dma_cntl_p, rbr_p, rcr_p, rx_mbox_p);
+	    dma_rbr_cntl_p, dma_rcr_cntl_p, dma_mbox_cntl_p,
+	    rbr_p, rcr_p, rx_mbox_p);
 	if (status != HXGE_OK) {
 		HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL,
 		    "==> hxge_map_rxdma_channel (channel %d): "
@@ -2349,7 +2407,8 @@ hxge_unmap_rxdma_channel(p_hxge_t hxgep, uint16_t channel,
 /*ARGSUSED*/
 static hxge_status_t
 hxge_map_rxdma_channel_cfg_ring(p_hxge_t hxgep, uint16_t dma_channel,
-    p_hxge_dma_common_t *dma_cntl_p, p_rx_rbr_ring_t *rbr_p,
+    p_hxge_dma_common_t *dma_rbr_cntl_p, p_hxge_dma_common_t *dma_rcr_cntl_p,
+    p_hxge_dma_common_t *dma_mbox_cntl_p, p_rx_rbr_ring_t *rbr_p,
     p_rx_rcr_ring_t *rcr_p, p_rx_mbox_t *rx_mbox_p)
 {
 	p_rx_rbr_ring_t 	rbrp;
@@ -2376,9 +2435,11 @@ hxge_map_rxdma_channel_cfg_ring(p_hxge_t hxgep, uint16_t dma_channel,
 	HXGE_DEBUG_MSG((hxgep, MEM2_CTL,
 	    "==> hxge_map_rxdma_channel_cfg_ring"));
 
-	cntl_dmap = *dma_cntl_p;
+	cntl_dmap = *dma_rbr_cntl_p;
 
-	/* Map in the receive block ring */
+	/*
+	 * Map in the receive block ring
+	 */
 	rbrp = *rbr_p;
 	dmap = (p_hxge_dma_common_t)&rbrp->rbr_desc;
 	hxge_setup_dma_common(dmap, cntl_dmap, rbrp->rbb_max, 4);
@@ -2524,6 +2585,8 @@ hxge_map_rxdma_channel_cfg_ring(p_hxge_t hxgep, uint16_t dma_channel,
 
 	rcrp->max_receive_pkts = hxge_max_rx_pkts;
 
+	cntl_dmap = *dma_rcr_cntl_p;
+
 	dmap = (p_hxge_dma_common_t)&rcrp->rcr_desc;
 	hxge_setup_dma_common(dmap, cntl_dmap, rcrp->comp_size,
 	    sizeof (rcr_entry_t));
@@ -2542,6 +2605,9 @@ hxge_map_rxdma_channel_cfg_ring(p_hxge_t hxgep, uint16_t dma_channel,
 	    (hxge_port_rcr_size - 1);
 	rcrp->rcr_desc_last_pp = rcrp->rcr_desc_rd_head_pp +
 	    (hxge_port_rcr_size - 1);
+
+	rcrp->rcr_tail_begin = DMA_COMMON_IOADDR(rcrp->rcr_desc);
+	rcrp->rcr_tail_begin = (rcrp->rcr_tail_begin & 0x7ffffULL) >> 3;
 
 	HXGE_DEBUG_MSG((hxgep, MEM2_CTL,
 	    "==> hxge_map_rxdma_channel_cfg_ring: channel %d "
@@ -2582,6 +2648,7 @@ hxge_map_rxdma_channel_cfg_ring(p_hxge_t hxgep, uint16_t dma_channel,
 	cfgb_p->bits.entout = 1;
 
 	/* Map in the mailbox */
+	cntl_dmap = *dma_mbox_cntl_p;
 	mboxp = (p_rx_mbox_t)KMEM_ZALLOC(sizeof (rx_mbox_t), KM_SLEEP);
 	dmap = (p_hxge_dma_common_t)&mboxp->rx_mbox;
 	hxge_setup_dma_common(dmap, cntl_dmap, 1, sizeof (rxdma_mailbox_t));
@@ -2713,7 +2780,7 @@ hxge_map_rxdma_channel_buf_ring(p_hxge_t hxgep, uint16_t channel,
 
 	rbrp->block_size = hxgep->rx_default_block_size;
 
-	if (!hxge_jumbo_enable && !hxgep->param_arr[param_accept_jumbo].value) {
+	if (!hxgep->param_arr[param_accept_jumbo].value) {
 		rbrp->pkt_buf_size2 = RBR_BUFSZ2_2K;
 		rbrp->pkt_buf_size2_bytes = RBR_BUFSZ2_2K_BYTES;
 		rbrp->hpi_pkt_buf_size2 = SIZE_2KB;
@@ -3452,6 +3519,9 @@ hxge_rxdma_fatal_err_recover(p_hxge_t hxgep, uint16_t channel)
 	    (hxge_port_rcr_size - 1);
 	rcrp->rcr_desc_last_pp = rcrp->rcr_desc_rd_head_pp +
 	    (hxge_port_rcr_size - 1);
+
+	rcrp->rcr_tail_begin = DMA_COMMON_IOADDR(rcrp->rcr_desc);
+	rcrp->rcr_tail_begin = (rcrp->rcr_tail_begin & 0x7ffffULL) >> 3;
 
 	dmap = (p_hxge_dma_common_t)&rcrp->rcr_desc;
 	bzero((caddr_t)dmap->kaddrp, dmap->alength);

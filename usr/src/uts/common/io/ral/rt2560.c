@@ -25,8 +25,6 @@
  * http://www.ralinktech.com/
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/types.h>
 #include <sys/byteorder.h>
 #include <sys/conf.h>
@@ -162,11 +160,11 @@ static int rt2560_reset(dev_info_t *, ddi_reset_cmd_t);
  * Module Loading Data & Entry Points
  */
 DDI_DEFINE_STREAM_OPS(ral_dev_ops, nulldev, nulldev, rt2560_attach,
-    rt2560_detach, rt2560_reset, NULL, D_MP, NULL);
+    rt2560_detach, rt2560_reset, NULL, D_MP, NULL, ddi_quiesce_not_supported);
 
 static struct modldrv ral_modldrv = {
 	&mod_driverops,		/* Type of module.  This one is a driver */
-	"Ralink RT2500 driver v%I%",	/* short description */
+	"Ralink RT2500 driver",	/* short description */
 	&ral_dev_ops		/* driver specific ops */
 };
 
@@ -2585,13 +2583,15 @@ rt2560_detach(dev_info_t *devinfo, ddi_detach_cmd_t cmd)
 	if (cmd != DDI_DETACH)
 		return (DDI_FAILURE);
 
+	if (mac_disable(sc->sc_ic.ic_mach) != 0)
+		return (DDI_FAILURE);
+
 	rt2560_stop(sc);
 
 	/*
 	 * Unregister from the MAC layer subsystem
 	 */
-	if (mac_unregister(sc->sc_ic.ic_mach) != 0)
-		return (DDI_FAILURE);
+	(void) mac_unregister(sc->sc_ic.ic_mach);
 
 	ddi_remove_intr(devinfo, 0, sc->sc_iblock);
 	ddi_remove_softintr(sc->sc_softint_id);

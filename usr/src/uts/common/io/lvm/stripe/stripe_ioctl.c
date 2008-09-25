@@ -18,12 +18,11 @@
  *
  * CDDL HEADER END
  */
+
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -72,8 +71,8 @@ stripe_replace(replace_params_t *params)
 	mddb_recid_t	recids[6];
 	ms_new_dev_t	nd;
 	ms_cd_info_t	cd;
-	int		ci,
-			cmpcnt;
+	int		ci;
+	int		cmpcnt;
 	void		*repl_data;
 	md_dev64_t	fake_devt;
 	void		(*repl_done)();
@@ -176,11 +175,11 @@ stripe_set(void *d, int mode)
 		return (mdmderror(mdep, MDE_UNIT_TOO_LARGE, mnum));
 #else
 		ms_recid = mddb_createrec((size_t)msp->size, typ1, 0,
-			MD_CRO_64BIT | MD_CRO_STRIPE | MD_CRO_FN, setno);
+		    MD_CRO_64BIT | MD_CRO_STRIPE | MD_CRO_FN, setno);
 #endif
 	} else {
 		ms_recid = mddb_createrec((size_t)msp->size, typ1, 0,
-			MD_CRO_32BIT | MD_CRO_STRIPE | MD_CRO_FN, setno);
+		    MD_CRO_32BIT | MD_CRO_STRIPE | MD_CRO_FN, setno);
 	}
 	if (ms_recid < 0)
 		return (mddbstatus2error(mdep, ms_recid, mnum, setno));
@@ -232,7 +231,9 @@ stripe_set(void *d, int mode)
 	un->c.un_revision |= MD_FN_META_DEV;
 
 	if (err = stripe_build_incore(p, 0)) {
+		md_nblocks_set(mnum, -1ULL);
 		MD_UNIT(mnum) = NULL;
+
 		mddb_deleterec_wrapper(recids[0]);
 		kmem_free(recids, num_recs * sizeof (mddb_recid_t));
 		return (err);
@@ -250,7 +251,9 @@ stripe_set(void *d, int mode)
 
 
 	if (err) {
+		md_nblocks_set(mnum, -1ULL);
 		MD_UNIT(mnum) = NULL;
+
 		mddb_deleterec_wrapper(recids[0]);
 		kmem_free(recids, num_recs * sizeof (mddb_recid_t));
 		return (mdhsperror(mdep, MDE_INVAL_HSP, un->un_hsp_id));
@@ -482,11 +485,11 @@ stripe_grow(void *d, int mode, IOLOCK *lockp)
 		goto out;
 #else
 		ms_recid = mddb_createrec((size_t)mgp->size, typ1, 0,
-				MD_CRO_64BIT | options, setno);
+		    MD_CRO_64BIT | options, setno);
 #endif
 	} else {
 		ms_recid = mddb_createrec((size_t)mgp->size, typ1, 0,
-				MD_CRO_32BIT | options, setno);
+		    MD_CRO_32BIT | options, setno);
 	}
 
 
@@ -554,6 +557,7 @@ stripe_grow(void *d, int mode, IOLOCK *lockp)
 	 * Restore the saved stuff.
 	 */
 	new_un->c.un_total_blocks = tb;
+	md_nblocks_set(mnum, new_un->c.un_total_blocks);
 	new_un->c.un_actual_tb = atb;
 	new_un->un_nrows = nr;
 	new_un->un_ocomp = oc;
@@ -574,7 +578,7 @@ stripe_grow(void *d, int mode, IOLOCK *lockp)
 		    (un->c.un_vtoc_id != 0)) {
 			old_vtoc = un->c.un_vtoc_id;
 			new_un->c.un_vtoc_id =
-				md_vtoc_to_efi_record(old_vtoc, setno);
+			    md_vtoc_to_efi_record(old_vtoc, setno);
 		}
 	}
 
@@ -622,11 +626,10 @@ stripe_grow(void *d, int mode, IOLOCK *lockp)
 				 * if it is then use the key for hotspare
 				 */
 				tmpdev = md_resolve_bydevid(mnum, tmpdev,
-					mdc->un_mirror.ms_hs_id ?
-					mdc->un_mirror.ms_hs_key :
-					mdc->un_key);
+				    mdc->un_mirror.ms_hs_id ?
+				    mdc->un_mirror.ms_hs_key : mdc->un_key);
 				(void) md_layered_open(mnum, &tmpdev,
-					MD_OFLG_NULL);
+				    MD_OFLG_NULL);
 				mdc->un_dev = tmpdev;
 				mdc->un_mirror.ms_flags |= MDM_S_ISOPEN;
 			}
@@ -640,6 +643,9 @@ stripe_grow(void *d, int mode, IOLOCK *lockp)
 
 	/* delete old unit struct */
 	mddb_deleterec_wrapper(un->c.un_record_id);
+
+	/* place new unit in in-core array */
+	md_nblocks_set(mnum, new_un->c.un_total_blocks);
 	MD_UNIT(mnum) = new_un;
 
 	/*
@@ -703,6 +709,26 @@ stripe_set_vtoc(
 }
 
 static int
+stripe_get_extvtoc(
+	ms_unit_t	*un,
+	struct extvtoc	*vtocp
+)
+{
+	md_get_extvtoc((md_unit_t *)un, vtocp);
+
+	return (0);
+}
+
+static int
+stripe_set_extvtoc(
+	ms_unit_t	*un,
+	struct extvtoc	*vtocp
+)
+{
+	return (md_set_extvtoc((md_unit_t *)un, vtocp));
+}
+
+static int
 stripe_get_cgapart(
 	ms_unit_t	*un,
 	struct dk_map	*dkmapp
@@ -763,7 +789,7 @@ stripe_getdevs(
 				}
 
 				if (ddi_copyout((caddr_t)&unit_dev, devsp,
-						sizeof (*devsp), mode) != 0)
+				    sizeof (*devsp), mode) != 0)
 					return (EFAULT);
 				++devsp;
 			}
@@ -1052,7 +1078,7 @@ md_stripe_ioctl(dev_t dev, int cmd, void *data, int mode, IOLOCK *lockp)
 		return (ENXIO);
 
 	/* is this a supported ioctl? */
-	err = md_check_ioctl_against_efi(cmd, un->c.un_flag);
+	err = md_check_ioctl_against_unit(cmd, un->c);
 	if (err != 0) {
 		return (err);
 	}
@@ -1167,6 +1193,42 @@ md_stripe_ioctl(dev_t dev, int cmd, void *data, int mode, IOLOCK *lockp)
 		return (err);
 	}
 
+
+	case DKIOCGEXTVTOC:
+	{
+		struct extvtoc	extvtoc;
+
+		if (! (mode & FREAD))
+			return (EACCES);
+
+		if ((err = stripe_get_extvtoc(un, &extvtoc)) != 0) {
+			return (err);
+		}
+
+		if (ddi_copyout(&extvtoc, data, sizeof (extvtoc), mode))
+			err = EFAULT;
+
+		return (err);
+	}
+
+	case DKIOCSEXTVTOC:
+	{
+		struct extvtoc	extvtoc;
+
+		if (! (mode & FWRITE))
+			return (EACCES);
+
+		if (ddi_copyin(data, &extvtoc, sizeof (extvtoc), mode)) {
+			err = EFAULT;
+		}
+
+		if (err == 0) {
+			err = stripe_set_extvtoc(un, &extvtoc);
+		}
+
+		return (err);
+	}
+
 	case DKIOCGAPART:
 	{
 		struct dk_map	dmp;
@@ -1177,7 +1239,7 @@ md_stripe_ioctl(dev_t dev, int cmd, void *data, int mode, IOLOCK *lockp)
 
 		if ((mode & DATAMODEL_MASK) == DATAMODEL_NATIVE) {
 			if (ddi_copyout((caddr_t)&dmp, data, sizeof (dmp),
-				mode) != 0)
+			    mode) != 0)
 				err = EFAULT;
 		}
 #ifdef _SYSCALL32
@@ -1188,7 +1250,7 @@ md_stripe_ioctl(dev_t dev, int cmd, void *data, int mode, IOLOCK *lockp)
 			dmp32.dkl_nblk = dmp.dkl_nblk;
 
 			if (ddi_copyout((caddr_t)&dmp32, data, sizeof (dmp32),
-				mode) != 0)
+			    mode) != 0)
 				err = EFAULT;
 		}
 #endif /* _SYSCALL32 */
@@ -1251,7 +1313,7 @@ stripe_may_renexch_self(
 
 	if (!un || !ui) {
 		(void) mdmderror(&rtxnp->mde, MDE_RENAME_CONFIG_ERROR,
-								from_min);
+		    from_min);
 		return (EINVAL);
 	}
 
@@ -1276,7 +1338,7 @@ stripe_may_renexch_self(
 
 		if (!related) {
 			(void) mdmderror(&rtxnp->mde,
-					MDE_RENAME_TARGET_UNRELATED, to_min);
+			    MDE_RENAME_TARGET_UNRELATED, to_min);
 			return (EINVAL);
 		}
 
@@ -1290,14 +1352,14 @@ stripe_may_renexch_self(
 
 		if (toplevel && md_unit_isopen(ui)) {
 			(void) mdmderror(&rtxnp->mde, MDE_RENAME_BUSY,
-						from_min);
+			    from_min);
 			return (EBUSY);
 		}
 		break;
 
 	default:
 		(void) mdmderror(&rtxnp->mde, MDE_RENAME_CONFIG_ERROR,
-					from_min);
+		    from_min);
 		return (EINVAL);
 	}
 
@@ -1328,7 +1390,7 @@ stripe_rename_check(
 	/* self does additional checks */
 	if (delta->old_role == MDRR_SELF) {
 		err = stripe_may_renexch_self((ms_unit_t *)delta->unp,
-						delta->uip, rtxnp);
+		    delta->uip, rtxnp);
 	}
 out:
 	return (err);

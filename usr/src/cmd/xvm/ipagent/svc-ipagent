@@ -31,7 +31,8 @@ case $1 in
 	#
 	# This service should only be enabled in a PV domU.
 	#
-	if is_dom0 || [ `uname -i` != "i86xpv" ]; then
+	is_dom0
+	if [ $? -eq 0 ] || [ `uname -i` != "i86xpv" ]; then
 		echo "This service will only run in a PV xVM domU."
 		svcadm disable -t svc:/system/xvm/ipagent:default
 		exit $SMF_EXIT_OK

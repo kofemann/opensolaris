@@ -23,8 +23,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
-#
 
 !include prototype_com
 
@@ -51,10 +49,13 @@ f none usr/lib/fm/fmd/schemes/sparcv9/mod.so 555 root bin
 f none usr/lib/fm/fmd/schemes/sparcv9/pkg.so 555 root bin
 f none usr/lib/fm/fmd/schemes/sparcv9/zfs.so 555 root bin
 d none usr/lib/fm/sparcv9 755 root bin
+f none usr/lib/fm/sparcv9/libfmd_agent.so.1 755 root bin
+s none usr/lib/fm/sparcv9/libfmd_agent.so=libfmd_agent.so.1
 f none usr/lib/fm/sparcv9/libdiagcode.so.1 755 root bin
 s none usr/lib/fm/sparcv9/libdiagcode.so=libdiagcode.so.1
 f none usr/lib/fm/sparcv9/libdiskstatus.so.1 755 root bin
 s none usr/lib/fm/sparcv9/libdiskstatus.so=libdiskstatus.so.1
+f none usr/lib/fm/sparcv9/llib-lfmd_agent.ln 644 root bin
 f none usr/lib/fm/sparcv9/llib-ldiagcode.ln 644 root bin
 f none usr/lib/fm/sparcv9/llib-ldiskstatus.ln 644 root bin
 f none usr/lib/fm/sparcv9/libfmd_adm.so.1 755 root bin
@@ -286,13 +287,3 @@ s none usr/platform/SUNW,Netra-T5440/lib/fm/fmd/plugins/etm.so=../../../../../su
 d none usr/platform/SUNW,Netra-T5440/lib/fm/topo 755 root bin
 d none usr/platform/SUNW,Netra-T5440/lib/fm/topo/maps 755 root bin
 f none usr/platform/SUNW,Netra-T5440/lib/fm/topo/maps/Netra-T5440-hc-topology.xml 444 root bin
-d none usr/platform/SUNW,USBRDT-5440 755 root sys
-d none usr/platform/SUNW,USBRDT-5440/lib 755 root bin
-d none usr/platform/SUNW,USBRDT-5440/lib/fm 755 root bin
-d none usr/platform/SUNW,USBRDT-5440/lib/fm/fmd 755 root bin
-d none usr/platform/SUNW,USBRDT-5440/lib/fm/fmd/plugins 755 root bin
-f none usr/platform/SUNW,USBRDT-5440/lib/fm/fmd/plugins/etm.conf 644 root bin
-s none usr/platform/SUNW,USBRDT-5440/lib/fm/fmd/plugins/etm.so=../../../../../sun4v/lib/fm/fmd/plugins/etm.so
-d none usr/platform/SUNW,USBRDT-5440/lib/fm/topo 755 root bin
-d none usr/platform/SUNW,USBRDT-5440/lib/fm/topo/maps 755 root bin
-f none usr/platform/SUNW,USBRDT-5440/lib/fm/topo/maps/USBRDT-5440-hc-topology.xml 444 root bin

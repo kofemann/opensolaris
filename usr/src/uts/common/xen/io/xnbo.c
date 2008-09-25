@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * Xen network backend - mac client edition.
  *
@@ -68,7 +66,7 @@ xnbo_to_mac(xnb_t *xnbp, mblk_t *mp)
 	ASSERT(mp != NULL);
 
 	if (!xnbop->o_running) {
-		xnbp->xnb_stat_rx_too_early++;
+		xnbp->xnb_stat_tx_too_early++;
 		goto fail;
 	}
 
@@ -487,7 +485,7 @@ xnbo_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	mutex_enter(&xnbp->xnb_rx_lock);
 
 	if (!xnbp->xnb_detachable || xnbp->xnb_connected ||
-	    (xnbp->xnb_rx_buf_count > 0)) {
+	    (xnbp->xnb_tx_buf_count > 0)) {
 		mutex_exit(&xnbp->xnb_rx_lock);
 		mutex_exit(&xnbp->xnb_tx_lock);
 
@@ -534,11 +532,12 @@ static struct dev_ops ops = {
 	nodev,			/* devo_reset */
 	&cb_ops,		/* devo_cb_ops */
 	(struct bus_ops *)0,	/* devo_bus_ops */
-	NULL			/* devo_power */
+	NULL,			/* devo_power */
+	ddi_quiesce_not_needed,		/* devo_quiesce */
 };
 
 static struct modldrv modldrv = {
-	&mod_driverops, "xnbo driver %I%", &ops,
+	&mod_driverops, "xnbo driver", &ops,
 };
 
 static struct modlinkage modlinkage = {

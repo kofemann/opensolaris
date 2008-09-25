@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <hxge_impl.h>
 #include <inet/common.h>
 #include <inet/mi.h>
@@ -68,15 +66,15 @@ extern uint64_t hpi_debug_level;
 	rlen -= plen; \
 }
 
-static int hxge_param_rx_intr_pkts(p_hxge_t hxgep, queue_t *,
+int hxge_param_rx_intr_pkts(p_hxge_t hxgep, queue_t *,
 	mblk_t *, char *, caddr_t);
-static int hxge_param_rx_intr_time(p_hxge_t hxgep, queue_t *,
+int hxge_param_rx_intr_time(p_hxge_t hxgep, queue_t *,
 	mblk_t *, char *, caddr_t);
 static int hxge_param_set_mac(p_hxge_t, queue_t *,
 	mblk_t *, char *, caddr_t);
 static int hxge_param_set_ether_usr(p_hxge_t hxgep, queue_t *, mblk_t *,
 	char *, caddr_t);
-static int hxge_param_set_ip_opt(p_hxge_t hxgep,
+int hxge_param_set_ip_opt(p_hxge_t hxgep,
 	queue_t *, mblk_t *, char *, caddr_t);
 static int hxge_param_pfc_hash_init(p_hxge_t hxgep,
 	queue_t *, mblk_t *, char *, caddr_t);
@@ -88,7 +86,7 @@ static int hxge_param_set_vlan_ids(p_hxge_t hxgep, queue_t *q,
 	mblk_t *mp, char *value, caddr_t cp);
 static int hxge_param_get_vlan_ids(p_hxge_t hxgep, queue_t *q,
 	p_mblk_t mp, caddr_t cp);
-static int hxge_param_get_ip_opt(p_hxge_t hxgep,
+int hxge_param_get_ip_opt(p_hxge_t hxgep,
 	queue_t *, mblk_t *, caddr_t);
 static int hxge_param_get_mac(p_hxge_t hxgep, queue_t *q, p_mblk_t mp,
 	caddr_t cp);
@@ -661,7 +659,7 @@ hxge_param_set_mac(p_hxge_t hxgep, queue_t *q, mblk_t *mp,
 }
 
 /* ARGSUSED */
-static int
+int
 hxge_param_rx_intr_pkts(p_hxge_t hxgep, queue_t *q,
 	mblk_t *mp, char *value, caddr_t cp)
 {
@@ -671,7 +669,10 @@ hxge_param_rx_intr_pkts(p_hxge_t hxgep, queue_t *q,
 
 	HXGE_DEBUG_MSG((hxgep, NDD_CTL, "==> hxge_param_rx_intr_pkts"));
 
-	cfg_value = (uint32_t)mi_strtol(value, &end, BASE_ANY);
+	if (strncasecmp(value, "0x", 2) == 0)
+		value += 2;
+
+	cfg_value = (uint32_t)mi_strtol(value, &end, BASE_HEX);
 
 	if ((cfg_value > HXGE_RDC_RCR_THRESHOLD_MAX) ||
 	    (cfg_value < HXGE_RDC_RCR_THRESHOLD_MIN)) {
@@ -689,7 +690,7 @@ hxge_param_rx_intr_pkts(p_hxge_t hxgep, queue_t *q,
 }
 
 /* ARGSUSED */
-static int
+int
 hxge_param_rx_intr_time(p_hxge_t hxgep, queue_t *q,
 	mblk_t *mp, char *value, caddr_t cp)
 {
@@ -699,7 +700,10 @@ hxge_param_rx_intr_time(p_hxge_t hxgep, queue_t *q,
 
 	HXGE_DEBUG_MSG((hxgep, NDD_CTL, "==> hxge_param_rx_intr_time"));
 
-	cfg_value = (uint32_t)mi_strtol(value, &end, BASE_ANY);
+	if (strncasecmp(value, "0x", 2) == 0)
+		value += 2;
+
+	cfg_value = (uint32_t)mi_strtol(value, &end, BASE_HEX);
 
 	if ((cfg_value > HXGE_RDC_RCR_TIMEOUT_MAX) ||
 	    (cfg_value < HXGE_RDC_RCR_TIMEOUT_MIN)) {
@@ -738,6 +742,9 @@ hxge_param_set_vlan_ids(p_hxge_t hxgep, queue_t *q, mblk_t *mp, char *value,
 	p_class_cfgp = (p_hxge_class_pt_cfg_t)&hxgep->class_config;
 	vlan_tbl = (hxge_mv_cfg_t *)&p_class_cfgp->vlan_tbl[0];
 	handle = hxgep->hpi_reg_handle;
+
+	if (strncasecmp(value, "0x", 2) == 0)
+		value += 2;
 
 	cfg_value = (uint32_t)mi_strtol(value, &end, BASE_HEX);
 
@@ -920,6 +927,9 @@ hxge_param_set_ether_usr(p_hxge_t hxgep, queue_t *q,
 
 	HXGE_DEBUG_MSG((hxgep, NDD_CTL, "==> hxge_param_set_ether_usr"));
 
+	if (strncasecmp(value, "0x", 2) == 0)
+		value += 2;
+
 	cfg_value = (uint32_t)mi_strtol(value, &end, BASE_HEX);
 	if (PARAM_OUTOF_RANGE(value, end, cfg_value, pa)) {
 		return (EINVAL);
@@ -950,7 +960,7 @@ hxge_class_name_2value(p_hxge_t hxgep, char *name)
 }
 
 /* ARGSUSED */
-static int
+int
 hxge_param_set_ip_opt(p_hxge_t hxgep, queue_t *q,
 	mblk_t *mp, char *value, caddr_t cp)
 {
@@ -961,6 +971,9 @@ hxge_param_set_ip_opt(p_hxge_t hxgep, queue_t *q,
 	uint32_t	cfg_it = B_FALSE;
 
 	HXGE_DEBUG_MSG((hxgep, NDD_CTL, "==> hxge_param_set_ip_opt"));
+
+	if (strncasecmp(value, "0x", 2) == 0)
+		value += 2;
 
 	cfg_value = (uint32_t)mi_strtol(value, &end, BASE_HEX);
 	if (PARAM_OUTOF_RANGE(value, end, cfg_value, pa)) {
@@ -986,7 +999,7 @@ hxge_param_set_ip_opt(p_hxge_t hxgep, queue_t *q,
 }
 
 /* ARGSUSED */
-static int
+int
 hxge_param_get_ip_opt(p_hxge_t hxgep, queue_t *q, mblk_t *mp, caddr_t cp)
 {
 	uint32_t	status, cfg_value;
@@ -1007,7 +1020,9 @@ hxge_param_get_ip_opt(p_hxge_t hxgep, queue_t *q, mblk_t *mp, caddr_t cp)
 	    "hxge_param_get_ip_opt_get %x ", cfg_value));
 	pa->value = cfg_value;
 
-	(void) mi_mpprintf(mp, "%x", cfg_value);
+	if (mp != NULL)
+		(void) mi_mpprintf(mp, "%x", cfg_value);
+
 	HXGE_DEBUG_MSG((hxgep, NDD_CTL, "<== hxge_param_get_ip_opt status "));
 	return (0);
 }
@@ -1023,6 +1038,9 @@ hxge_param_pfc_hash_init(p_hxge_t hxgep, queue_t *q, mblk_t *mp,
 	uint32_t	cfg_it = B_FALSE;
 
 	HXGE_DEBUG_MSG((hxgep, NDD_CTL, "==> hxge_param_pfc_hash_init"));
+
+	if (strncasecmp(value, "0x", 2) == 0)
+		value += 2;
 
 	cfg_value = (uint32_t)mi_strtol(value, &end, BASE_HEX);
 	if (PARAM_OUTOF_RANGE(value, end, cfg_value, pa)) {
@@ -1058,6 +1076,10 @@ hxge_param_set_hxge_debug_flag(p_hxge_t hxgep, queue_t *q,
 	uint32_t	cfg_it = B_FALSE;
 
 	HXGE_DEBUG_MSG((hxgep, NDD_CTL, "==> hxge_param_set_hxge_debug_flag"));
+
+	if (strncasecmp(value, "0x", 2) == 0)
+		value += 2;
+
 	cfg_value = mi_strtol(value, &end, BASE_HEX);
 
 	if (PARAM_OUTOF_RANGE(value, end, cfg_value, pa)) {
@@ -1110,6 +1132,10 @@ hxge_param_set_hpi_debug_flag(p_hxge_t hxgep, queue_t *q,
 	uint32_t	cfg_it = B_FALSE;
 
 	HXGE_DEBUG_MSG((hxgep, NDD_CTL, "==> hxge_param_set_hpi_debug_flag"));
+
+	if (strncasecmp(value, "0x", 2) == 0)
+		value += 2;
+
 	cfg_value = mi_strtol(value, &end, BASE_HEX);
 
 	if (PARAM_OUTOF_RANGE(value, end, cfg_value, pa)) {
@@ -1370,6 +1396,9 @@ hxge_nd_getset(p_hxge_t hxgep, queue_t *q, caddr_t param, p_mblk_t mp)
 		valp = nilp(char);
 	switch (iocp->ioc_cmd) {
 	case ND_GET:
+		if (*nde->nde_get_pfi == NULL)
+			return (B_FALSE);
+
 		/*
 		 * (temporary) hack: "*valp" is size of user buffer for
 		 * copyout. If result of action routine is too big, free excess

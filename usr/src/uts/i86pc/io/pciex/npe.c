@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  *	Host to PCI-Express local bus driver
  */
@@ -153,7 +151,9 @@ struct dev_ops npe_ops = {
 	npe_detach,		/* detach */
 	nulldev,		/* reset */
 	&npe_cb_ops,		/* driver operations */
-	&npe_bus_ops		/* bus operations */
+	&npe_bus_ops,		/* bus operations */
+	NULL,			/* power */
+	ddi_quiesce_not_needed,		/* quiesce */
 };
 
 /*
@@ -176,7 +176,7 @@ extern void	npe_intel_error_mask(ddi_acc_handle_t cfg_hdl);
  */
 static struct modldrv modldrv = {
 	&mod_driverops, /* Type of module */
-	"Host to PCIe nexus driver %I%",
+	"Host to PCIe nexus driver",
 	&npe_ops,	/* driver ops */
 };
 
@@ -330,7 +330,6 @@ npe_detach(dev_info_t *devi, ddi_detach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 }
-
 
 static int
 npe_bus_map(dev_info_t *dip, dev_info_t *rdip, ddi_map_req_t *mp,

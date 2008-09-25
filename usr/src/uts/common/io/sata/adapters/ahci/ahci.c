@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * AHCI (Advanced Host Controller Interface) SATA HBA Driver
  *
@@ -48,9 +46,16 @@
 #include <sys/note.h>
 #include <sys/scsi/scsi.h>
 #include <sys/pci.h>
+#include <sys/disp.h>
 #include <sys/sata/sata_hba.h>
 #include <sys/sata/adapters/ahci/ahcireg.h>
 #include <sys/sata/adapters/ahci/ahcivar.h>
+
+/*
+ * This is the string displayed by modinfo, etc.
+ * Make sure you keep the version ID up to date!
+ */
+static char ahci_ident[] = "ahci driver";
 
 /*
  * Function prototypes for driver entry points
@@ -58,6 +63,7 @@
 static	int ahci_attach(dev_info_t *, ddi_attach_cmd_t);
 static	int ahci_detach(dev_info_t *, ddi_detach_cmd_t);
 static	int ahci_getinfo(dev_info_t *, ddi_info_cmd_t, void *, void **);
+static	int ahci_quiesce(dev_info_t *);
 
 /*
  * Function prototypes for SATA Framework interfaces
@@ -266,7 +272,8 @@ static struct dev_ops ahcictl_dev_ops = {
 	nodev,			/* no reset */
 	(struct cb_ops *)0,	/* driver operations */
 	NULL,			/* bus operations */
-	NULL			/* power */
+	NULL,			/* power */
+	ahci_quiesce,		/* quiesce */
 };
 
 static sata_tran_hotplug_ops_t ahci_tran_hotplug_ops = {
@@ -279,7 +286,7 @@ extern struct mod_ops mod_driverops;
 
 static  struct modldrv modldrv = {
 	&mod_driverops,		/* driverops */
-	"ahci driver %I%",
+	ahci_ident,		/* short description */
 	&ahcictl_dev_ops,	/* driver ops */
 };
 
@@ -1331,6 +1338,21 @@ ahci_tran_start(dev_info_t *dip, sata_pkt_t *spkt)
 
 	if (spkt->satapkt_op_mode &
 	    (SATA_OPMODE_SYNCH | SATA_OPMODE_POLLING)) {
+		/*
+		 * If a SYNC command to be executed in interrupt context,
+		 * bounce it back to sata module.
+		 */
+		if (!(spkt->satapkt_op_mode & SATA_OPMODE_POLLING) &&
+		    servicing_interrupt()) {
+			spkt->satapkt_reason = SATA_PKT_BUSY;
+			AHCIDBG1(AHCIDBG_ERRS, ahci_ctlp,
+			    "ahci_tran_start returning BUSY while "
+			    "sending SYNC mode under interrupt context: "
+			    "port : %d", port);
+			mutex_exit(&ahci_portp->ahciport_mutex);
+			return (SATA_TRAN_BUSY);
+		}
+
 		/* We need to do the sync start now */
 		if (ahci_do_sync_start(ahci_ctlp, ahci_portp, port,
 		    spkt) == AHCI_FAILURE) {
@@ -3048,7 +3070,7 @@ ahci_config_space_init(ahci_ctl_t *ahci_ctlp)
  * commands in the command list, so we will first clear and then re-set
  * PxCMD.ST to clear PxCI. And before issuing the software reset,
  * the port must be idle and PxTFD.STS.BSY and PxTFD.STS.DRQ must be
- * cleared.
+ * cleared unless command list override (PxCMD.CLO) is supported.
  *
  * WARNING!!! ahciport_mutex should be acquired and PxCMD.FRE should be
  * set before the function is called.
@@ -3066,23 +3088,12 @@ ahci_software_reset(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
 	AHCIDBG1(AHCIDBG_ENTRY, ahci_ctlp,
 	    "Port %d device resetting", port);
 
-	/* First to clear PxCMD.ST */
-	port_cmd_status = ddi_get32(ahci_ctlp->ahcictl_ahci_acc_handle,
-	    (uint32_t *)AHCI_PORT_PxCMD(ahci_ctlp, port));
+	/* First clear PxCMD.ST */
+	(void) ahci_put_port_into_notrunning_state(ahci_ctlp,
+	    ahci_portp, port);
 
-	port_cmd_status &= ~AHCI_CMD_STATUS_ST;
-
-	ddi_put32(ahci_ctlp->ahcictl_ahci_acc_handle,
-	    (uint32_t *)AHCI_PORT_PxCMD(ahci_ctlp, port),
-	    port_cmd_status|AHCI_CMD_STATUS_ST);
-
-	/* And then to re-set PxCMD.ST */
-	port_cmd_status = ddi_get32(ahci_ctlp->ahcictl_ahci_acc_handle,
-	    (uint32_t *)AHCI_PORT_PxCMD(ahci_ctlp, port));
-
-	ddi_put32(ahci_ctlp->ahcictl_ahci_acc_handle,
-	    (uint32_t *)AHCI_PORT_PxCMD(ahci_ctlp, port),
-	    port_cmd_status|AHCI_CMD_STATUS_ST);
+	/* Then re-set PxCMD.ST */
+	(void) ahci_start_port(ahci_ctlp, ahci_portp, port);
 
 	/* Check PxTFD.STS.BSY and PxTFD.STS.DRQ */
 	port_task_file = ddi_get32(ahci_ctlp->ahcictl_ahci_acc_handle,
@@ -3090,6 +3101,8 @@ ahci_software_reset(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
 
 	if (port_task_file & AHCI_TFD_STS_BSY ||
 	    port_task_file & AHCI_TFD_STS_DRQ) {
+		port_cmd_status = ddi_get32(ahci_ctlp->ahcictl_ahci_acc_handle,
+		    (uint32_t *)AHCI_PORT_PxCMD(ahci_ctlp, port));
 		if (!(port_cmd_status & AHCI_CMD_STATUS_CLO)) {
 			AHCIDBG0(AHCIDBG_ERRS, ahci_ctlp,
 			    "PxTFD.STS.BSY or PxTFD.STS.DRQ is still set, "
@@ -3106,7 +3119,7 @@ ahci_software_reset(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
 		return (AHCI_FAILURE);
 	}
 
-	/* Now send the first R2H FIS with SRST set to 1 */
+	/* Now send the first H2D Register FIS with SRST set to 1 */
 	cmd_table = ahci_portp->ahciport_cmd_tables[slot];
 	bzero((void *)cmd_table, ahci_cmd_table_size);
 
@@ -3149,8 +3162,8 @@ ahci_software_reset(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
 		port_cmd_issue = ddi_get32(ahci_ctlp->ahcictl_ahci_acc_handle,
 		    (uint32_t *)AHCI_PORT_PxCI(ahci_ctlp, port));
 
+		/* We are effectively timing out after 1 sec. */
 		if (loop_count++ > AHCI_POLLRATE_PORT_SOFTRESET) {
-			/* We are effectively timing out after 0.1 sec. */
 			break;
 		}
 		/* Wait for 10 millisec */
@@ -3163,9 +3176,8 @@ ahci_software_reset(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
 	    loop_count, port_cmd_issue, slot);
 
 	CLEAR_BIT(ahci_portp->ahciport_pending_tags, slot);
-	ahci_portp->ahciport_slot_pkts[slot] = NULL;
 
-	/* Now send the second R2H FIS with SRST cleard to zero */
+	/* Now send the second H2D Register FIS with SRST cleard to zero */
 	cmd_table = ahci_portp->ahciport_cmd_tables[slot];
 	bzero((void *)cmd_table, ahci_cmd_table_size);
 
@@ -3205,8 +3217,8 @@ ahci_software_reset(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
 		port_cmd_issue = ddi_get32(ahci_ctlp->ahcictl_ahci_acc_handle,
 		    (uint32_t *)AHCI_PORT_PxCI(ahci_ctlp, port));
 
+		/* We are effectively timing out after 1 sec. */
 		if (loop_count++ > AHCI_POLLRATE_PORT_SOFTRESET) {
-			/* We are effectively timing out after 0.1 sec. */
 			break;
 		}
 		/* Wait for 10 millisec */
@@ -3219,7 +3231,6 @@ ahci_software_reset(ahci_ctl_t *ahci_ctlp, ahci_port_t *ahci_portp,
 	    loop_count, port_cmd_issue, slot);
 
 	CLEAR_BIT(ahci_portp->ahciport_pending_tags, slot);
-	ahci_portp->ahciport_slot_pkts[slot] = NULL;
 
 	return (AHCI_SUCCESS);
 }
@@ -5849,7 +5860,7 @@ ahci_put_port_into_notrunning_state(ahci_ctl_t *ahci_ctlp,
 		}
 
 		/* Wait for 10 millisec */
-		delay(AHCI_10MS_TICKS);
+		drv_usecwait(10000);
 	} while (port_cmd_status & AHCI_CMD_STATUS_CR);
 
 	ahci_portp->ahciport_flags &= ~AHCI_PORT_FLAG_STARTED;
@@ -7227,3 +7238,57 @@ ahci_log(ahci_ctl_t *ahci_ctlp, uint_t level, char *fmt, ...)
 	mutex_exit(&ahci_log_mutex);
 }
 #endif
+
+/*
+ * quiesce(9E) entry point.
+ *
+ * This function is called when the system is single-threaded at high
+ * PIL with preemption disabled. Therefore, this function must not be
+ * blocked.
+ *
+ * This function returns DDI_SUCCESS on success, or DDI_FAILURE on failure.
+ * DDI_FAILURE indicates an error condition and should almost never happen.
+ */
+static int
+ahci_quiesce(dev_info_t *dip)
+{
+	ahci_ctl_t *ahci_ctlp;
+	ahci_port_t *ahci_portp;
+	int instance, port;
+
+	instance = ddi_get_instance(dip);
+	ahci_ctlp = ddi_get_soft_state(ahci_statep, instance);
+
+	if (ahci_ctlp == NULL)
+		return (DDI_FAILURE);
+
+#if AHCI_DEBUG
+	ahci_debug_flags = 0;
+#endif
+
+	/* disable all the interrupts. */
+	ahci_disable_all_intrs(ahci_ctlp);
+
+	for (port = 0; port < ahci_ctlp->ahcictl_num_ports; port++) {
+		if (!AHCI_PORT_IMPLEMENTED(ahci_ctlp, port)) {
+			continue;
+		}
+
+		ahci_portp = ahci_ctlp->ahcictl_ports[port];
+
+		/*
+		 * Stop the port by clearing PxCMD.ST
+		 *
+		 * Here we must disable the port interrupt because
+		 * ahci_disable_all_intrs only clear GHC.IE, and IS
+		 * register will be still set if PxIE is enabled.
+		 * When ahci shares one IRQ with other drivers, the
+		 * intr handler may claim the intr mistakenly.
+		 */
+		ahci_disable_port_intrs(ahci_ctlp, port);
+		(void) ahci_put_port_into_notrunning_state(ahci_ctlp,
+		    ahci_portp, port);
+	}
+
+	return (DDI_SUCCESS);
+}

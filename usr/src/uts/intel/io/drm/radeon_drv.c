@@ -34,8 +34,6 @@
  *
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include "drmP.h"
 #include "drm.h"
 #include "radeon_drm.h"
@@ -84,14 +82,15 @@ static struct dev_ops radeon_dev_ops = {
 	radeon_attach,			/* devo_attach */
 	radeon_detach,			/* devo_detach */
 	nodev,				/* devo_reset */
-	&drm_cb_ops,		/* devo_cb_ops */
+	&drm_cb_ops,			/* devo_cb_ops */
 	NULL,				/* devo_bus_ops */
-	NULL				/* power */
+	NULL,				/* power */
+	ddi_quiesce_not_supported,	/* devo_quiesce */
 };
 
 static struct modldrv modldrv = {
 	&mod_driverops,			/* drv_modops */
-	"radeon DRM driver %I%",	/* drv_linkinfo */
+	"radeon DRM driver",		/* drv_linkinfo */
 	&radeon_dev_ops,			/* drv_dev_ops */
 };
 

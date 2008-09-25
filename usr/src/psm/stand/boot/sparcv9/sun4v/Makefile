@@ -22,8 +22,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
-#
 
 TOPDIR =	../../../../..
 
@@ -41,7 +39,6 @@ PLATLINKS	+= SUNW,T5140
 PLATLINKS	+= SUNW,USBRDT-5240
 PLATLINKS	+= SUNW,Netra-T5220
 PLATLINKS	+= SUNW,Netra-T5440
-PLATLINKS	+= SUNW,USBRDT-5440
 
 LINKED_DIRS	= $(PLATLINKS:%=$(USR_PLAT_DIR)/%)
 LINKED_LIB_DIRS	= $(PLATLINKS:%=$(USR_PLAT_DIR)/%/lib)
@@ -109,7 +106,7 @@ CFLAGS64	+= -xchip=ultra $(CCABS32)
 # XXX this totally sucks since it effectively turns off -errchk=longptr64,
 # which we really should be using.
 #
-LINTFLAGS64 = $(LINTFLAGS) -Xarch=v9
+LINTFLAGS64 = $(LINTFLAGS) -m64
 
 #
 # Cross-reference customization: include all boot-related source files.

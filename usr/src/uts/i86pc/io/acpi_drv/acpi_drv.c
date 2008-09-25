@@ -28,8 +28,6 @@
  * Driver for ACPI Battery, Lid, and LCD Monitoring and Control
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/conf.h>
 #include <sys/modctl.h>
 #include <sys/ddi.h>
@@ -415,7 +413,8 @@ static struct dev_ops acpi_drv_dev_ops = {
 	nodev,			/* reset */
 	&acpi_drv_cb_ops,
 	NULL,			/* no bus operations */
-	NULL			/* power */
+	NULL,			/* power */
+	ddi_quiesce_not_needed,		/* quiesce */
 };
 
 static struct modldrv modldrv1 = {
@@ -846,6 +845,10 @@ acpi_drv_lid_ioctl(int index, int cmd, intptr_t arg, int mode, cred_t *cr,
 {
 	int res = 0;
 
+	/*
+	 * lid.state 0 means lid is closed.
+	 * lid.state non-zero means lid is open.
+	 */
 	switch (cmd) {
 	case ACPI_DRV_IOC_LID_STATUS:
 		if (lid.state_ok == ACPI_DRV_NTF_UNKNOWN) {
@@ -858,7 +861,16 @@ acpi_drv_lid_ioctl(int index, int cmd, intptr_t arg, int mode, cred_t *cr,
 		}
 		if (copyout(&lid.state, (void *)arg, sizeof (lid.state))) {
 			res = EFAULT;
+		}
+		break;
+	case ACPI_DRV_IOC_LID_UPDATE:
+		res = acpi_drv_update_lid(&lid.dev);
+		if (res != ACPI_DRV_OK) {
+			res = ENXIO;
 			break;
+		}
+		if (copyout(&lid.state, (void *)arg, sizeof (lid.state))) {
+			res = EFAULT;
 		}
 		break;
 

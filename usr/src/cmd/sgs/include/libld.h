@@ -965,6 +965,8 @@ struct	ver_desc {
 struct	ver_index {
 	const char	*vi_name;	/* dependency version name */
 	Half		vi_flags;	/* communicates availability */
+	Half		vi_overndx;	/* Index asssigned to this version in */
+					/*	output object Verneed section */
 	Ver_desc	*vi_desc;	/* cross reference to descriptor */
 };
 
@@ -976,9 +978,9 @@ struct	ver_index {
 
 #define	FLG_VER_AVAIL	0x10		/* version is available for binding */
 #define	FLG_VER_REFER	0x20		/* version has been referenced */
-#define	FLG_VER_SELECT	0x40		/* version has been selected by user */
+#define	FLG_VER_SPECVER	0x40		/* via $SPECVERS in mapfile. */
+					/* 	Cannot be normalized away */
 #define	FLG_VER_CYCLIC	0x80		/* a member of cyclic dependency */
-
 
 /*
  * isalist(1) descriptor - used to break an isalist string into its component
@@ -1111,6 +1113,8 @@ typedef struct ar_desc {
 #define	ld_update_outfile	ld32_update_outfile
 
 #endif
+
+extern int		ld_getopt(Lm_list *, int, int, char **);
 
 extern int		ld32_main(int, char **, Half);
 extern int		ld64_main(int, char **, Half);

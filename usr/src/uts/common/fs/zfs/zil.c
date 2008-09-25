@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/zfs_context.h>
 #include <sys/spa.h>
 #include <sys/dmu.h>
@@ -182,17 +180,20 @@ zil_read_log_block(zilog_t *zilog, const blkptr_t *bp, arc_buf_t **abufpp)
 		zio_cksum_t cksum = bp->blk_cksum;
 
 		/*
+		 * Validate the checksummed log block.
+		 *
 		 * Sequence numbers should be... sequential.  The checksum
 		 * verifier for the next block should be bp's checksum plus 1.
+		 *
+		 * Also check the log chain linkage and size used.
 		 */
 		cksum.zc_word[ZIL_ZC_SEQ]++;
 
-		if (bcmp(&cksum, &ztp->zit_next_blk.blk_cksum, sizeof (cksum)))
-			error = ESTALE;
-		else if (BP_IS_HOLE(&ztp->zit_next_blk))
-			error = ENOENT;
-		else if (ztp->zit_nused > (blksz - sizeof (zil_trailer_t)))
-			error = EOVERFLOW;
+		if (bcmp(&cksum, &ztp->zit_next_blk.blk_cksum,
+		    sizeof (cksum)) || BP_IS_HOLE(&ztp->zit_next_blk) ||
+		    (ztp->zit_nused > (blksz - sizeof (zil_trailer_t)))) {
+			error = ECKSUM;
+		}
 
 		if (error) {
 			VERIFY(arc_buf_remove_ref(*abufpp, abufpp) == 1);
@@ -1332,20 +1333,20 @@ zil_free(zilog_t *zilog)
 /*
  * return true if the initial log block is not valid
  */
-static int
+static boolean_t
 zil_empty(zilog_t *zilog)
 {
 	const zil_header_t *zh = zilog->zl_header;
 	arc_buf_t *abuf = NULL;
 
 	if (BP_IS_HOLE(&zh->zh_log))
-		return (1);
+		return (B_TRUE);
 
 	if (zil_read_log_block(zilog, &zh->zh_log, &abuf) != 0)
-		return (1);
+		return (B_TRUE);
 
 	VERIFY(arc_buf_remove_ref(abuf, &abuf) == 1);
-	return (0);
+	return (B_FALSE);
 }
 
 /*
@@ -1452,6 +1453,7 @@ zil_resume(zilog_t *zilog)
 typedef struct zil_replay_arg {
 	objset_t	*zr_os;
 	zil_replay_func_t **zr_replay;
+	zil_replay_cleaner_t *zr_replay_cleaner;
 	void		*zr_arg;
 	uint64_t	*zr_txgp;
 	boolean_t	zr_byteswap;
@@ -1582,6 +1584,8 @@ zil_replay_log_record(zilog_t *zilog, lr_t *lr, void *zra, uint64_t claim_txg)
 		 * transaction.
 		 */
 		if (error != ERESTART && !sunk) {
+			if (zr->zr_replay_cleaner)
+				zr->zr_replay_cleaner(zr->zr_arg);
 			txg_wait_synced(spa_get_dsl(zilog->zl_spa), 0);
 			sunk = B_TRUE;
 			continue; /* retry */
@@ -1620,7 +1624,8 @@ zil_incr_blks(zilog_t *zilog, blkptr_t *bp, void *arg, uint64_t claim_txg)
  */
 void
 zil_replay(objset_t *os, void *arg, uint64_t *txgp,
-	zil_replay_func_t *replay_func[TX_MAX_TYPE])
+	zil_replay_func_t *replay_func[TX_MAX_TYPE],
+	zil_replay_cleaner_t *replay_cleaner)
 {
 	zilog_t *zilog = dmu_objset_zil(os);
 	const zil_header_t *zh = zilog->zl_header;
@@ -1633,6 +1638,7 @@ zil_replay(objset_t *os, void *arg, uint64_t *txgp,
 
 	zr.zr_os = os;
 	zr.zr_replay = replay_func;
+	zr.zr_replay_cleaner = replay_cleaner;
 	zr.zr_arg = arg;
 	zr.zr_txgp = txgp;
 	zr.zr_byteswap = BP_SHOULD_BYTESWAP(&zh->zh_log);

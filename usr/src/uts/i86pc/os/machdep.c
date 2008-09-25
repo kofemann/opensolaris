@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/types.h>
 #include <sys/t_lock.h>
 #include <sys/param.h>
@@ -117,10 +115,16 @@
 #include <sys/mem.h>
 #include <sys/dumphdr.h>
 #include <sys/compress.h>
+#include <sys/cpu_module.h>
 #if defined(__xpv)
 #include <sys/hypervisor.h>
 #include <sys/xpv_panic.h>
 #endif
+
+#include <sys/fastboot.h>
+#include <sys/machelf.h>
+#include <sys/kobj.h>
+#include <sys/multiboot.h>
 
 #ifdef	TRAPTRACE
 #include <sys/traptrace.h>
@@ -160,6 +164,10 @@ void debug_enter(char *);
 extern void pm_cfb_check_and_powerup(void);
 extern void pm_cfb_rele(void);
 
+extern fastboot_info_t newkernel;
+
+int quiesce_active = 0;
+
 /*
  * Machine dependent code to reboot.
  * "mdep" is interpreted as a character pointer; if non-null, it is a pointer
@@ -174,9 +182,22 @@ extern void pm_cfb_rele(void);
 void
 mdboot(int cmd, int fcn, char *mdep, boolean_t invoke_cb)
 {
+	processorid_t bootcpuid = 0;
+
+	if (fcn == AD_FASTREBOOT && !newkernel.fi_valid)
+		fcn = AD_BOOT;
+
 	if (!panicstr) {
 		kpreempt_disable();
-		affinity_set(CPU_CURRENT);
+		if (fcn == AD_FASTREBOOT) {
+			mutex_enter(&cpu_lock);
+			if (CPU_ACTIVE(cpu_get(bootcpuid))) {
+				affinity_set(bootcpuid);
+			}
+			mutex_exit(&cpu_lock);
+		} else {
+			affinity_set(CPU_CURRENT);
+		}
 	}
 
 	if (force_shutdown_method != AD_UNKNOWN)
@@ -229,7 +250,6 @@ mdboot(int cmd, int fcn, char *mdep, boolean_t invoke_cb)
 	if (panicstr && proc_init == NULL)
 		(void) HYPERVISOR_shutdown(SHUTDOWN_poweroff);
 #endif
-
 	/*
 	 * stop other cpus and raise our priority.  since there is only
 	 * one active cpu after this, and our priority will be too high
@@ -244,16 +264,38 @@ mdboot(int cmd, int fcn, char *mdep, boolean_t invoke_cb)
 	}
 
 	/*
-	 * try and reset leaf devices.  reset_leaves() should only
-	 * be called when there are no other threads that could be
-	 * accessing devices
+	 * Try to quiesce devices.
 	 */
-	reset_leaves();
+	if (!panicstr) {
+		int reset_status = 0;
+
+		quiesce_active = 1;
+
+		quiesce_devices(ddi_root_node(), &reset_status);
+		if (fcn == AD_FASTREBOOT && reset_status == -1 &&
+		    !force_fastreboot) {
+			prom_printf("Driver(s) not capable of fast reboot. "
+			    "Fall back to regular reboot.\n");
+			fastreboot_capable = 0;
+		}
+
+		quiesce_active = 0;
+	}
+
+	/*
+	 * try to reset devices.  reset_leaves() should only be called when
+	 * there are no other threads that could be accessing devices
+	 */
+	if (!panicstr && !fastreboot_capable) {
+		reset_leaves();
+	}
 
 	(void) spl8();
 	(*psm_shutdownf)(cmd, fcn);
 
-	if (fcn == AD_HALT || fcn == AD_POWEROFF)
+	if (fcn == AD_FASTREBOOT && !panicstr && fastreboot_capable)
+		fast_reboot();
+	else if (fcn == AD_HALT || fcn == AD_POWEROFF)
 		halt((char *)NULL);
 	else
 		prom_reboot("");
@@ -265,6 +307,21 @@ mdboot(int cmd, int fcn, char *mdep, boolean_t invoke_cb)
 void
 mdpreboot(int cmd, int fcn, char *mdep)
 {
+	if (fcn == AD_FASTREBOOT && !fastreboot_capable) {
+		fcn = AD_BOOT;
+#ifdef	__xpv
+		cmn_err(CE_WARN, "Fast reboot not supported on xVM");
+#else
+		cmn_err(CE_WARN, "Fast reboot not supported on this platform");
+#endif
+	}
+
+	if (fcn == AD_FASTREBOOT) {
+		load_kernel(mdep);
+		if (!newkernel.fi_valid)
+			fcn = AD_BOOT;
+	}
+
 	(*psm_preshutdownf)(cmd, fcn);
 }
 
@@ -827,6 +884,8 @@ panic_quiesce_hw(panic_data_t *pdp)
 {
 	psm_notifyf(PSM_PANIC_ENTER);
 
+	cmi_panic_callback();
+
 #ifdef	TRAPTRACE
 	/*
 	 * Turn off TRAPTRACE
@@ -1019,7 +1078,6 @@ get_cpu_mstate(cpu_t *cpu, hrtime_t *times)
 	}
 	scalehrtime(&times[CMS_SYSTEM]);
 }
-
 
 /*
  * This is a version of the rdmsr instruction that allows

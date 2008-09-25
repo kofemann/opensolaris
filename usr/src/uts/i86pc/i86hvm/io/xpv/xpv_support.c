@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/modctl.h>
 #include <sys/types.h>
 #include <sys/archsystm.h>
@@ -133,12 +131,13 @@ static struct dev_ops xpv_dv_ops = {
 	nodev,		/* reset */
 	&xpv_cb_ops,
 	NULL,		/* struct bus_ops */
-	NULL		/* power */
+	NULL,		/* power */
+	ddi_quiesce_not_supported,	/* devo_quiesce */
 };
 
 static struct modldrv modldrv = {
 	&mod_driverops,
-	"xpv driver %I%",
+	"xpv driver",
 	&xpv_dv_ops
 };
 

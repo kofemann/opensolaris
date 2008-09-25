@@ -320,6 +320,7 @@ extern int zpool_stage_history(libzfs_handle_t *, const char *);
 extern void zpool_obj_to_path(zpool_handle_t *, uint64_t, uint64_t, char *,
     size_t len);
 extern int zfs_ioctl(libzfs_handle_t *, int, struct zfs_cmd *);
+extern int zpool_get_physpath(zpool_handle_t *, char *);
 /*
  * Basic handle manipulations.  These functions do not create or destroy the
  * underlying datasets, only the references to them.
@@ -328,6 +329,7 @@ extern zfs_handle_t *zfs_open(libzfs_handle_t *, const char *, int);
 extern void zfs_close(zfs_handle_t *);
 extern zfs_type_t zfs_get_type(const zfs_handle_t *);
 extern const char *zfs_get_name(const zfs_handle_t *);
+extern zpool_handle_t *zfs_get_pool_handle(const zfs_handle_t *);
 
 /*
  * Property management functions.  Some functions are shared with the kernel,

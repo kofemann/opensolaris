@@ -469,8 +469,7 @@ RTS_OBJS +=	rtsddi.o
 
 IP_ICMP_OBJS =	icmp.o icmp_opt_data.o
 IP_RTS_OBJS =	rts.o rts_opt_data.o
-IP_TCP_OBJS =	tcp.o tcp_fusion.o tcp_kssl.o tcp_opt_data.o tcp_sack.o \
-		tcp_trace.o
+IP_TCP_OBJS =	tcp.o tcp_fusion.o tcp_kssl.o tcp_opt_data.o tcp_sack.o
 IP_UDP_OBJS =	udp.o udp_opt_data.o
 IP_SCTP_OBJS =	sctp_crc32.o sctp.o sctp_opt_data.o sctp_output.o \
 		sctp_init.o sctp_input.o sctp_cookie.o \
@@ -496,7 +495,7 @@ IP6_OBJS +=	ip6ddi.o
 
 HOOK_OBJS +=	hook.o
 
-NETI_OBJS +=	neti.o
+NETI_OBJS +=	neti_impl.o neti_mod.o neti_stack.o
 
 KEYSOCK_OBJS +=	keysockddi.o keysock.o keysock_opt_data.o
 
@@ -670,7 +669,7 @@ USBSPRL_OBJS += usbser_pl2303.o pl2303_dsd.o
 WC_OBJS += wscons.o
 
 SCSI_OBJS +=	scsi_capabilities.o scsi_confsubr.o scsi_control.o \
-		scsi_data.o scsi_hba.o scsi_reset_notify.o \
+		scsi_data.o scsi_fm.o scsi_hba.o scsi_reset_notify.o \
 		scsi_resource.o scsi_subr.o scsi_transport.o scsi_watch.o \
 		sas_transport.o
 
@@ -824,6 +823,8 @@ DRM_OBJS += drm_sunmod.o drm_kstat.o drm_agpsupport.o \
 	    drm_drawable.o drm_drv.o drm_fops.o drm_ioctl.o drm_irq.o \
 	    drm_lock.o drm_memory.o drm_msg.o drm_pci.o drm_scatter.o \
 	    ati_pcigart.o
+
+FM_OBJS += devfm.o devfm_machdep.o
 
 #
 #			exec modules
@@ -1509,6 +1510,8 @@ ATH_OBJS += ath_aux.o ath_main.o ath_osdep.o ath_rate.o
 IPW_OBJS += ipw2100_hw.o ipw2100.o
 
 IWI_OBJS += ipw2200_hw.o ipw2200.o
+
+IWH_OBJS += iwh.o
 
 IWK_OBJS += iwk2.o
 

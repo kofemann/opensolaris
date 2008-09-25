@@ -19,10 +19,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 
 LIBRARY = libldom.a
@@ -44,14 +42,14 @@ CFLAGS += $(CCVERBOSE) $(C_BIGPICFLAGS)
 CFLAGS64 += $(CCVERBOSE) $(C_BIGPICFLAGS)
 
 LDLIBS += $(MACH_LDLIBS)
-LDLIBS += -lnvpair -lscf -lmdesc -lc
+LDLIBS += -lfmd_agent -lnvpair -lscf -lmdesc -lc
 
 LINTFLAGS = -msux
-LINTFLAGS64 = -msux -Xarch=$(MACH64:sparcv9=v9)
+LINTFLAGS64 = -msux -m64
 
 $(LINTLIB) := SRCS = $(SRCDIR)/$(LINTSRC)
 $(LINTLIB) := LINTFLAGS = -nsvx -I$(ROOT)/usr/platform/sun4v/include
-$(LINTLIB) := LINTFLAGS64 = -nsvx -Xarch=$(MACH64:sparcv9=v9) \
+$(LINTLIB) := LINTFLAGS64 = -nsvx -m64 \
 	-I$(ROOT)/usr/platform/sun4v/include
 
 .KEEP_STATE:

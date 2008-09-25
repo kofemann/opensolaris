@@ -166,18 +166,6 @@ $(IF_DEBUG_OBJ)syscall.o	:=	DEBUG_DEFS	+= -DSYSCALLTRACE
 $(IF_DEBUG_OBJ)clock.o		:=	DEBUG_DEFS	+= -DKSLICE=1
 
 #
-# This rather strange collection of definitions ensures that lint sees
-# 'struct cpu' containing a fully declared embedded 'struct machcpu'
-#
-# There's something deeply dissatisfying about this.
-#
-LINTMACHFLAGS = -D_MACHDEP -I../../i86pc
-$(LINTS_DIR)/kcpc.ln	:=	LINTFLAGS += $(LINTMACHFLAGS)
-$(LINTS_DIR)/kdi.ln	:=	LINTFLAGS += $(LINTMACHFLAGS)
-$(LINTS_DIR)/msacct.ln	:=	LINTFLAGS += $(LINTMACHFLAGS)
-$(LINTS_DIR)/thread.ln	:=	LINTFLAGS += $(LINTMACHFLAGS)
-
-#
 #	Collect the preprocessor definitions to be associated with *all*
 #	files.
 #
@@ -214,6 +202,7 @@ DRV_KMODS	+= bge
 DRV_KMODS	+= bofi
 DRV_KMODS	+= bscbus
 DRV_KMODS	+= bscv
+DRV_KMODS	+= chxge
 DRV_KMODS	+= clone
 DRV_KMODS	+= cmdk
 DRV_KMODS	+= cn
@@ -233,12 +222,14 @@ DRV_KMODS	+= dump
 DRV_KMODS	+= ecpp
 DRV_KMODS	+= fd
 DRV_KMODS	+= fdc
+DRV_KMODS	+= fm
 DRV_KMODS	+= fssnap
 DRV_KMODS	+= hxge
 DRV_KMODS	+= i8042
 DRV_KMODS	+= i915
 DRV_KMODS	+= icmp
 DRV_KMODS	+= icmp6
+DRV_KMODS	+= intel_nb5000
 DRV_KMODS	+= ip
 DRV_KMODS	+= ip6
 DRV_KMODS	+= ipf
@@ -246,6 +237,7 @@ DRV_KMODS	+= ippctl
 DRV_KMODS	+= ipsecah
 DRV_KMODS	+= ipsecesp
 DRV_KMODS	+= ipw
+DRV_KMODS	+= iwh
 DRV_KMODS	+= iwi
 DRV_KMODS	+= iwk
 DRV_KMODS	+= iwscn
@@ -261,11 +253,13 @@ DRV_KMODS	+= log
 DRV_KMODS	+= logi
 DRV_KMODS	+= logindmux
 DRV_KMODS	+= mega_sas
+DRV_KMODS	+= mc-amd
 DRV_KMODS	+= mm
 DRV_KMODS	+= mouse8042
 DRV_KMODS_32	+= mscsi
 DRV_KMODS_32	+= msm
 DRV_KMODS	+= nca
+DRV_KMODS	+= nsmb
 DRV_KMODS	+= nv_sata
 DRV_KMODS	+= nxge
 DRV_KMODS	+= openeepr
@@ -330,8 +324,6 @@ DRV_KMODS	+= winlock
 DRV_KMODS	+= wpi
 DRV_KMODS	+= xge
 DRV_KMODS	+= zcons
-DRV_KMODS	+= chxge
-DRV_KMODS	+= nsmb
 
 #
 # Don't build some of these for OpenSolaris, since they will be
@@ -347,6 +339,7 @@ $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= glm
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= iprb
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= llc2
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= marvell88sx
+$(CLOSED_BUILD)CLOSED_DRV_KMODS		+= memtest
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= mpt
 $(CLOSED_BUILD)CLOSED_DRV_KMODS_32	+= ncrs
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= pcn
@@ -393,6 +386,7 @@ DRV_KMODS	+= emul64
 #
 DRV_KMODS	+= options
 DRV_KMODS	+= scsi_vhci
+DRV_KMODS	+= arcmsr
 
 #
 #	PCMCIA specific module(s)
@@ -473,7 +467,7 @@ SCHED_KMODS	+= IA RT TS RT_DPTBL TS_DPTBL FSS FX FX_DPTBL
 #
 #	File System Modules (/kernel/fs):
 #
-FS_KMODS	+= autofs cachefs ctfs dev devfs fdfs fifofs hsfs lofs
+FS_KMODS	+= autofs cachefs ctfs dcfs dev devfs fdfs fifofs hsfs lofs
 FS_KMODS	+= lx_afs lx_proc mntfs namefs nfs objfs zfs
 FS_KMODS	+= pcfs procfs sockfs specfs tmpfs udfs ufs sharefs
 FS_KMODS	+= smbfs
@@ -545,6 +539,7 @@ MISC_KMODS	+= ibdm
 MISC_KMODS	+= ibmf
 MISC_KMODS	+= ibtl
 MISC_KMODS	+= idmap
+MISC_KMODS	+= iommulib
 MISC_KMODS	+= ipc
 MISC_KMODS	+= kbtrans
 MISC_KMODS	+= kcf
@@ -639,6 +634,7 @@ $(CLOSED_BUILD)CLOSED_XMODS =		\
 	adpu320		\
 	bnx		\
 	daplt		\
+	hermon		\
 	lsimega		\
 	sdpib		\
 	spwr		\

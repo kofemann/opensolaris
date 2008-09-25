@@ -18,12 +18,11 @@
  *
  * CDDL HEADER END
  */
+
 /*
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/scsi/scsi.h>
 #include <sys/dktp/cm.h>
@@ -179,7 +178,8 @@ struct dev_ops cmdk_ops = {
 	nodev, 			/* reset */
 	&cmdk_cb_ops, 		/* driver operations */
 	(struct bus_ops *)0,	/* bus operations */
-	cmdkpower		/* power */
+	cmdkpower,		/* power */
+	ddi_quiesce_not_needed,	/* quiesce */
 };
 
 /*
@@ -191,7 +191,7 @@ extern struct mod_ops mod_driverops;
 
 static struct modldrv modldrv = {
 	&mod_driverops, 	/* Type of module. This one is a driver */
-	"Common Direct Access Disk %I%",
+	"Common Direct Access Disk",
 	&cmdk_ops, 				/* driver ops 		*/
 };
 
@@ -380,6 +380,18 @@ cmdkattach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	/* open the target disk	 */
 	if (dadk_open(DKTP_DATA, 0) != DDI_SUCCESS)
 		goto fail2;
+
+#ifdef _ILP32
+	{
+		struct  tgdk_geom phyg;
+		(void) dadk_getphygeom(DKTP_DATA, &phyg);
+		if ((phyg.g_cap - 1) > DK_MAX_BLOCKS) {
+			(void) dadk_close(DKTP_DATA);
+			goto fail2;
+		}
+	}
+#endif
+
 
 	/* mark as having opened target */
 	dkp->dk_flag |= CMDK_TGDK_OPEN;
@@ -766,7 +778,7 @@ rwcmd_copyin(struct dadkio_rwcmd *rwcmdp, caddr_t inaddr, int flag)
 
 			rwcmdp->cmd = cmd32.cmd;
 			rwcmdp->flags = cmd32.flags;
-			rwcmdp->blkaddr = (daddr_t)cmd32.blkaddr;
+			rwcmdp->blkaddr = (blkaddr_t)cmd32.blkaddr;
 			rwcmdp->buflen = cmd32.buflen;
 			rwcmdp->bufaddr = (caddr_t)(intptr_t)cmd32.bufaddr;
 			/*
@@ -973,6 +985,9 @@ cmdkioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *credp, int *rvalp)
 	case DKIOCGVTOC:
 	case DKIOCSVTOC:
 	case DKIOCPARTINFO:
+	case DKIOCGEXTVTOC:
+	case DKIOCSEXTVTOC:
+	case DKIOCEXTPARTINFO:
 	case DKIOCGMBOOT:
 	case DKIOCSMBOOT:
 	case DKIOCGETEFI:
@@ -1626,7 +1641,7 @@ cmdk_devid_modser(struct cmdk *dkp)
 
 	/* Initialize the device ID, trailing NULL not included */
 	rc = ddi_devid_init(dkp->dk_dip, DEVID_ATA_SERIAL, modlen + serlen,
-	    hwid, (ddi_devid_t *)&dkp->dk_devid);
+	    hwid, &dkp->dk_devid);
 	if (rc != DDI_SUCCESS) {
 		rc = DDI_FAILURE;
 		goto err;
@@ -1694,7 +1709,7 @@ cmdk_devid_read(struct cmdk *dkp)
 	uint_t		*ip;
 	int		chksum;
 	int		i, sz;
-	tgdk_iob_handle	handle;
+	tgdk_iob_handle	handle = NULL;
 	int		rc = DDI_FAILURE;
 
 	if (cmlb_get_devid_block(dkp->dk_cmlbhandle, &blk, 0))
@@ -1753,15 +1768,15 @@ cmdk_devid_fabricate(struct cmdk *dkp)
 	tgdk_iob_handle	handle = NULL;
 	uint_t		*ip, chksum;
 	int		i;
-	int		rc;
+	int		rc = DDI_FAILURE;
 
-	rc = ddi_devid_init(dkp->dk_dip, DEVID_FAB, 0, NULL, &devid);
-	if (rc != DDI_SUCCESS)
+	if (ddi_devid_init(dkp->dk_dip, DEVID_FAB, 0, NULL, &devid) !=
+	    DDI_SUCCESS)
 		goto err;
 
 	if (cmlb_get_devid_block(dkp->dk_cmlbhandle, &blk, 0)) {
 		/* no device id block address */
-		return (DDI_FAILURE);
+		goto err;
 	}
 
 	handle = dadk_iob_alloc(DKTP_DATA, blk, NBPSCTR, KM_SLEEP);

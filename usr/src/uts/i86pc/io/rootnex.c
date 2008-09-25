@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * x86 root nexus driver
  */
@@ -69,7 +67,10 @@
 #include <sys/hypervisor.h>
 #include <sys/bootconf.h>
 #include <vm/kboot_mmu.h>
+#else
+#include <sys/intel_iommu.h>
 #endif
+
 
 /*
  * enable/disable extra checking of function parameters. Useful for debugging
@@ -152,6 +153,9 @@ typedef maddr_t rootnex_addr_t;
 typedef paddr_t rootnex_addr_t;
 #endif
 
+#if !defined(__xpv)
+char _depends_on[] = "mach/pcplusmp misc/iommulib";
+#endif
 
 static struct cb_ops rootnex_cb_ops = {
 	nodev,		/* open */
@@ -206,6 +210,32 @@ static int rootnex_fm_init(dev_info_t *dip, dev_info_t *tdip, int tcap,
 static int rootnex_intr_ops(dev_info_t *pdip, dev_info_t *rdip,
     ddi_intr_op_t intr_op, ddi_intr_handle_impl_t *hdlp, void *result);
 
+static int rootnex_coredma_allochdl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_attr_t *attr, int (*waitfp)(caddr_t), caddr_t arg,
+    ddi_dma_handle_t *handlep);
+static int rootnex_coredma_freehdl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle);
+static int rootnex_coredma_bindhdl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle, struct ddi_dma_req *dmareq,
+    ddi_dma_cookie_t *cookiep, uint_t *ccountp);
+static int rootnex_coredma_unbindhdl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle);
+#if !defined(__xpv)
+static void rootnex_coredma_reset_cookies(dev_info_t *dip,
+    ddi_dma_handle_t handle);
+static int rootnex_coredma_get_cookies(dev_info_t *dip, ddi_dma_handle_t handle,
+    ddi_dma_cookie_t *cookiep, uint_t *ccountp);
+#endif
+static int rootnex_coredma_sync(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle, off_t off, size_t len, uint_t cache_flags);
+static int rootnex_coredma_win(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle, uint_t win, off_t *offp, size_t *lenp,
+    ddi_dma_cookie_t *cookiep, uint_t *ccountp);
+static int rootnex_coredma_map(dev_info_t *dip, dev_info_t *rdip,
+    struct ddi_dma_req *dmareq, ddi_dma_handle_t *handlep);
+static int rootnex_coredma_mctl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle, enum ddi_dma_ctlops request, off_t *offp,
+    size_t *lenp, caddr_t *objpp, uint_t cache_flags);
 
 static struct bus_ops rootnex_bus_ops = {
 	BUSO_REV,
@@ -252,12 +282,14 @@ static struct dev_ops rootnex_ops = {
 	rootnex_detach,
 	nulldev,
 	&rootnex_cb_ops,
-	&rootnex_bus_ops
+	&rootnex_bus_ops,
+	NULL,
+	ddi_quiesce_not_needed,		/* quiesce */
 };
 
 static struct modldrv rootnex_modldrv = {
 	&mod_driverops,
-	"i86pc root nexus %I%",
+	"i86pc root nexus",
 	&rootnex_ops
 };
 
@@ -267,6 +299,23 @@ static struct modlinkage rootnex_modlinkage = {
 	NULL
 };
 
+#if !defined(__xpv)
+static iommulib_nexops_t iommulib_nexops = {
+	IOMMU_NEXOPS_VERSION,
+	"Rootnex IOMMU ops Vers 1.1",
+	NULL,
+	rootnex_coredma_allochdl,
+	rootnex_coredma_freehdl,
+	rootnex_coredma_bindhdl,
+	rootnex_coredma_unbindhdl,
+	rootnex_coredma_reset_cookies,
+	rootnex_coredma_get_cookies,
+	rootnex_coredma_sync,
+	rootnex_coredma_win,
+	rootnex_coredma_map,
+	rootnex_coredma_mctl
+};
+#endif
 
 /*
  *  extern hacks
@@ -401,6 +450,7 @@ rootnex_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	rootnex_state->r_err_ibc = (ddi_iblock_cookie_t)ipltospl(15);
 	rootnex_state->r_reserved_msg_printed = B_FALSE;
 	rootnex_cnt = &rootnex_state->r_counters[0];
+	rootnex_state->r_intel_iommu_enabled = B_FALSE;
 
 	/*
 	 * Set minimum fm capability level for i86pc platforms and then
@@ -427,6 +477,27 @@ rootnex_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 	/* Initialize rootnex event handle */
 	i_ddi_rootnex_init_events(dip);
+
+#if !defined(__xpv)
+#if defined(__amd64)
+	/* probe intel iommu */
+	intel_iommu_probe_and_parse();
+
+	/* attach the iommu nodes */
+	if (intel_iommu_support) {
+		if (intel_iommu_attach_dmar_nodes() == DDI_SUCCESS) {
+			rootnex_state->r_intel_iommu_enabled = B_TRUE;
+		} else {
+			intel_iommu_release_dmar_info();
+		}
+	}
+#endif
+
+	e = iommulib_nexus_register(dip, &iommulib_nexops,
+	    &rootnex_state->r_iommulib_handle);
+
+	ASSERT(e == DDI_SUCCESS);
+#endif
 
 	return (DDI_SUCCESS);
 }
@@ -1523,14 +1594,11 @@ rootnex_get_ispec(dev_info_t *rdip, int inum)
  * ******************
  */
 
-/*
- * rootnex_dma_allochdl()
- *    called from ddi_dma_alloc_handle().
- */
 /*ARGSUSED*/
 static int
-rootnex_dma_allochdl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_attr_t *attr,
-    int (*waitfp)(caddr_t), caddr_t arg, ddi_dma_handle_t *handlep)
+rootnex_coredma_allochdl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_attr_t *attr, int (*waitfp)(caddr_t), caddr_t arg,
+    ddi_dma_handle_t *handlep)
 {
 	uint64_t maxsegmentsize_ll;
 	uint_t maxsegmentsize;
@@ -1667,12 +1735,42 @@ rootnex_dma_allochdl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_attr_t *attr,
 
 
 /*
- * rootnex_dma_freehdl()
- *    called from ddi_dma_free_handle().
+ * rootnex_dma_allochdl()
+ *    called from ddi_dma_alloc_handle().
  */
+static int
+rootnex_dma_allochdl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_attr_t *attr,
+    int (*waitfp)(caddr_t), caddr_t arg, ddi_dma_handle_t *handlep)
+{
+#if !defined(__xpv)
+	uint_t error = ENOTSUP;
+	int retval;
+
+	retval = iommulib_nex_open(rdip, &error);
+
+	if (retval != DDI_SUCCESS && error == ENOTSUP) {
+		/* No IOMMU */
+		return (rootnex_coredma_allochdl(dip, rdip, attr, waitfp, arg,
+		    handlep));
+	} else if (retval != DDI_SUCCESS) {
+		return (DDI_FAILURE);
+	}
+
+	ASSERT(IOMMU_USED(rdip));
+
+	/* has an IOMMU */
+	return (iommulib_nexdma_allochdl(dip, rdip, attr,
+	    waitfp, arg, handlep));
+#else
+	return (rootnex_coredma_allochdl(dip, rdip, attr, waitfp, arg,
+	    handlep));
+#endif
+}
+
 /*ARGSUSED*/
 static int
-rootnex_dma_freehdl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle)
+rootnex_coredma_freehdl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle)
 {
 	ddi_dma_impl_t *hp;
 	rootnex_dma_t *dma;
@@ -1697,15 +1795,27 @@ rootnex_dma_freehdl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle)
 	return (DDI_SUCCESS);
 }
 
-
 /*
- * rootnex_dma_bindhdl()
- *    called from ddi_dma_addr_bind_handle() and ddi_dma_buf_bind_handle().
+ * rootnex_dma_freehdl()
+ *    called from ddi_dma_free_handle().
  */
+static int
+rootnex_dma_freehdl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle)
+{
+#if !defined(__xpv)
+	if (IOMMU_USED(rdip)) {
+		return (iommulib_nexdma_freehdl(dip, rdip, handle));
+	}
+#endif
+	return (rootnex_coredma_freehdl(dip, rdip, handle));
+}
+
+
 /*ARGSUSED*/
 static int
-rootnex_dma_bindhdl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
-    struct ddi_dma_req *dmareq, ddi_dma_cookie_t *cookiep, uint_t *ccountp)
+rootnex_coredma_bindhdl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle, struct ddi_dma_req *dmareq,
+    ddi_dma_cookie_t *cookiep, uint_t *ccountp)
 {
 	rootnex_sglinfo_t *sinfo;
 	ddi_dma_attr_t *attr;
@@ -1759,6 +1869,36 @@ rootnex_dma_bindhdl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
 	/* save away the original bind info */
 	dma->dp_dma = dmareq->dmar_object;
 
+#if !defined(__xpv)
+	if (rootnex_state->r_intel_iommu_enabled) {
+		e = intel_iommu_map_sgl(handle, dmareq,
+		    rootnex_state->r_prealloc_cookies);
+
+		switch (e) {
+		case IOMMU_SGL_SUCCESS:
+			goto rootnex_sgl_end;
+
+		case IOMMU_SGL_DISABLE:
+			goto rootnex_sgl_start;
+
+		case IOMMU_SGL_NORESOURCES:
+			cmn_err(CE_WARN, "iommu map sgl failed for %s",
+			    ddi_node_name(dma->dp_dip));
+			rootnex_clean_dmahdl(hp);
+			return (DDI_DMA_NORESOURCES);
+
+		default:
+			cmn_err(CE_WARN,
+			    "undefined value returned from"
+			    " intel_iommu_map_sgl: %d",
+			    e);
+			rootnex_clean_dmahdl(hp);
+			return (DDI_DMA_NORESOURCES);
+		}
+	}
+#endif
+
+rootnex_sgl_start:
 	/*
 	 * Figure out a rough estimate of what maximum number of pages this
 	 * buffer could use (a high estimate of course).
@@ -1820,8 +1960,9 @@ rootnex_dma_bindhdl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
 	 */
 	rootnex_get_sgl(&dmareq->dmar_object, dma->dp_cookies,
 	    &dma->dp_sglinfo);
-	ASSERT(sinfo->si_sgl_size <= sinfo->si_max_pages);
 
+rootnex_sgl_end:
+	ASSERT(sinfo->si_sgl_size <= sinfo->si_max_pages);
 	/* if we don't need a copy buffer, we don't need to sync */
 	if (sinfo->si_copybuf_req == 0) {
 		hp->dmai_rflags |= DMP_NOSYNC;
@@ -1921,18 +2062,32 @@ rootnex_dma_bindhdl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
 
 
 /*
- * rootnex_dma_unbindhdl()
- *    called from ddi_dma_unbind_handle()
+ * rootnex_dma_bindhdl()
+ *    called from ddi_dma_addr_bind_handle() and ddi_dma_buf_bind_handle().
  */
+static int
+rootnex_dma_bindhdl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle, struct ddi_dma_req *dmareq,
+    ddi_dma_cookie_t *cookiep, uint_t *ccountp)
+{
+#if !defined(__xpv)
+	if (IOMMU_USED(rdip)) {
+		return (iommulib_nexdma_bindhdl(dip, rdip, handle, dmareq,
+		    cookiep, ccountp));
+	}
+#endif
+	return (rootnex_coredma_bindhdl(dip, rdip, handle, dmareq,
+	    cookiep, ccountp));
+}
+
 /*ARGSUSED*/
 static int
-rootnex_dma_unbindhdl(dev_info_t *dip, dev_info_t *rdip,
+rootnex_coredma_unbindhdl(dev_info_t *dip, dev_info_t *rdip,
     ddi_dma_handle_t handle)
 {
 	ddi_dma_impl_t *hp;
 	rootnex_dma_t *dma;
 	int e;
-
 
 	hp = (ddi_dma_impl_t *)handle;
 	dma = (rootnex_dma_t *)hp->dmai_private;
@@ -1971,6 +2126,15 @@ rootnex_dma_unbindhdl(dev_info_t *dip, dev_info_t *rdip,
 	rootnex_teardown_copybuf(dma);
 	rootnex_teardown_windows(dma);
 
+#if !defined(__xpv)
+	/*
+	 * If intel iommu enabled, clean up the page tables and free the dvma
+	 */
+	if (rootnex_state->r_intel_iommu_enabled) {
+		intel_iommu_unmap_sgl(handle);
+	}
+#endif
+
 	/*
 	 * If we had to allocate space to for the worse case sgl (it didn't
 	 * fit into our pre-allocate buffer), free that up now
@@ -1995,6 +2159,58 @@ rootnex_dma_unbindhdl(dev_info_t *dip, dev_info_t *rdip,
 	return (DDI_SUCCESS);
 }
 
+/*
+ * rootnex_dma_unbindhdl()
+ *    called from ddi_dma_unbind_handle()
+ */
+/*ARGSUSED*/
+static int
+rootnex_dma_unbindhdl(dev_info_t *dip, dev_info_t *rdip,
+    ddi_dma_handle_t handle)
+{
+#if !defined(__xpv)
+	if (IOMMU_USED(rdip)) {
+		return (iommulib_nexdma_unbindhdl(dip, rdip, handle));
+	}
+#endif
+	return (rootnex_coredma_unbindhdl(dip, rdip, handle));
+}
+
+#if !defined(__xpv)
+/*ARGSUSED*/
+static void
+rootnex_coredma_reset_cookies(dev_info_t *dip, ddi_dma_handle_t handle)
+{
+	ddi_dma_impl_t *hp = (ddi_dma_impl_t *)handle;
+	rootnex_dma_t *dma = (rootnex_dma_t *)hp->dmai_private;
+
+	hp->dmai_cookie = &dma->dp_cookies[0];
+	hp->dmai_cookie++;
+}
+
+/*ARGSUSED*/
+static int
+rootnex_coredma_get_cookies(dev_info_t *dip, ddi_dma_handle_t handle,
+    ddi_dma_cookie_t *cookiep, uint_t *ccountp)
+{
+	ddi_dma_impl_t *hp = (ddi_dma_impl_t *)handle;
+	rootnex_dma_t *dma = (rootnex_dma_t *)hp->dmai_private;
+
+
+	if (hp->dmai_rflags & DDI_DMA_PARTIAL) {
+		*ccountp = dma->dp_window[dma->dp_current_win].wd_cookie_cnt;
+	} else {
+		*ccountp = dma->dp_sglinfo.si_sgl_size;
+	}
+	*cookiep = dma->dp_cookies[0];
+
+	/* reset the cookies */
+	hp->dmai_cookie = &dma->dp_cookies[0];
+	hp->dmai_cookie++;
+
+	return (DDI_SUCCESS);
+}
+#endif
 
 /*
  * rootnex_verify_buffer()
@@ -3738,15 +3954,9 @@ rootnex_maxxfer_window_boundary(ddi_dma_impl_t *hp, rootnex_dma_t *dma,
 }
 
 
-/*
- * rootnex_dma_sync()
- *    called from ddi_dma_sync() if DMP_NOSYNC is not set in hp->dmai_rflags.
- *    We set DMP_NOSYNC if we're not using the copy buffer. If DMP_NOSYNC
- *    is set, ddi_dma_sync() returns immediately passing back success.
- */
 /*ARGSUSED*/
 static int
-rootnex_dma_sync(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
+rootnex_coredma_sync(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
     off_t off, size_t len, uint_t cache_flags)
 {
 	rootnex_sglinfo_t *sinfo;
@@ -3879,6 +4089,26 @@ rootnex_dma_sync(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
 	return (DDI_SUCCESS);
 }
 
+/*
+ * rootnex_dma_sync()
+ *    called from ddi_dma_sync() if DMP_NOSYNC is not set in hp->dmai_rflags.
+ *    We set DMP_NOSYNC if we're not using the copy buffer. If DMP_NOSYNC
+ *    is set, ddi_dma_sync() returns immediately passing back success.
+ */
+/*ARGSUSED*/
+static int
+rootnex_dma_sync(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
+    off_t off, size_t len, uint_t cache_flags)
+{
+#if !defined(__xpv)
+	if (IOMMU_USED(rdip)) {
+		return (iommulib_nexdma_sync(dip, rdip, handle, off, len,
+		    cache_flags));
+	}
+#endif
+	return (rootnex_coredma_sync(dip, rdip, handle, off, len,
+	    cache_flags));
+}
 
 /*
  * rootnex_valid_sync_parms()
@@ -3931,13 +4161,9 @@ rootnex_valid_sync_parms(ddi_dma_impl_t *hp, rootnex_window_t *win,
 }
 
 
-/*
- * rootnex_dma_win()
- *    called from ddi_dma_getwin()
- */
 /*ARGSUSED*/
 static int
-rootnex_dma_win(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
+rootnex_coredma_win(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
     uint_t win, off_t *offp, size_t *lenp, ddi_dma_cookie_t *cookiep,
     uint_t *ccountp)
 {
@@ -4151,7 +4377,26 @@ rootnex_dma_win(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
 	return (DDI_SUCCESS);
 }
 
+/*
+ * rootnex_dma_win()
+ *    called from ddi_dma_getwin()
+ */
+/*ARGSUSED*/
+static int
+rootnex_dma_win(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
+    uint_t win, off_t *offp, size_t *lenp, ddi_dma_cookie_t *cookiep,
+    uint_t *ccountp)
+{
+#if !defined(__xpv)
+	if (IOMMU_USED(rdip)) {
+		return (iommulib_nexdma_win(dip, rdip, handle, win, offp, lenp,
+		    cookiep, ccountp));
+	}
+#endif
 
+	return (rootnex_coredma_win(dip, rdip, handle, win, offp, lenp,
+	    cookiep, ccountp));
+}
 
 /*
  * ************************
@@ -4159,14 +4404,10 @@ rootnex_dma_win(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
  * ************************
  */
 
-/*
- * rootnex_dma_map()
- *    called from ddi_dma_setup()
- */
 /* ARGSUSED */
 static int
-rootnex_dma_map(dev_info_t *dip, dev_info_t *rdip, struct ddi_dma_req *dmareq,
-    ddi_dma_handle_t *handlep)
+rootnex_coredma_map(dev_info_t *dip, dev_info_t *rdip,
+    struct ddi_dma_req *dmareq, ddi_dma_handle_t *handlep)
 {
 #if defined(__amd64)
 	/*
@@ -4240,6 +4481,22 @@ rootnex_dma_map(dev_info_t *dip, dev_info_t *rdip, struct ddi_dma_req *dmareq,
 #endif /* defined(__amd64) */
 }
 
+/*
+ * rootnex_dma_map()
+ *    called from ddi_dma_setup()
+ */
+/* ARGSUSED */
+static int
+rootnex_dma_map(dev_info_t *dip, dev_info_t *rdip,
+    struct ddi_dma_req *dmareq, ddi_dma_handle_t *handlep)
+{
+#if !defined(__xpv)
+	if (IOMMU_USED(rdip)) {
+		return (iommulib_nexdma_map(dip, rdip, dmareq, handlep));
+	}
+#endif
+	return (rootnex_coredma_map(dip, rdip, dmareq, handlep));
+}
 
 /*
  * rootnex_dma_mctl()
@@ -4247,7 +4504,7 @@ rootnex_dma_map(dev_info_t *dip, dev_info_t *rdip, struct ddi_dma_req *dmareq,
  */
 /* ARGSUSED */
 static int
-rootnex_dma_mctl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
+rootnex_coredma_mctl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
     enum ddi_dma_ctlops request, off_t *offp, size_t *lenp, caddr_t *objpp,
     uint_t cache_flags)
 {
@@ -4432,6 +4689,26 @@ rootnex_dma_mctl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
 #endif /* defined(__amd64) */
 }
 
+/*
+ * rootnex_dma_mctl()
+ *
+ */
+/* ARGSUSED */
+static int
+rootnex_dma_mctl(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
+    enum ddi_dma_ctlops request, off_t *offp, size_t *lenp, caddr_t *objpp,
+    uint_t cache_flags)
+{
+#if !defined(__xpv)
+	if (IOMMU_USED(rdip)) {
+		return (iommulib_nexdma_mctl(dip, rdip, handle, request, offp,
+		    lenp, objpp, cache_flags));
+	}
+#endif
+
+	return (rootnex_coredma_mctl(dip, rdip, handle, request, offp,
+	    lenp, objpp, cache_flags));
+}
 
 /*
  * *********

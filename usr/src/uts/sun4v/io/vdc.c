@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * LDoms virtual disk client (vdc) device driver
  *
@@ -99,6 +97,8 @@
 #include <sys/vdsk_mailbox.h>
 #include <sys/vdc.h>
 
+#define	VD_OLDVTOC_LIMIT	0x7fffffff
+
 /*
  * function prototypes
  */
@@ -145,9 +145,11 @@ static int	vdc_init_descriptor_ring(vdc_t *vdc);
 static void	vdc_destroy_descriptor_ring(vdc_t *vdc);
 static int	vdc_setup_devid(vdc_t *vdc);
 static void	vdc_store_label_efi(vdc_t *, efi_gpt_t *, efi_gpe_t *);
-static void	vdc_store_label_vtoc(vdc_t *, struct dk_geom *, struct vtoc *);
+static void	vdc_store_label_vtoc(vdc_t *, struct dk_geom *,
+		    struct extvtoc *);
 static void	vdc_store_label_unk(vdc_t *vdc);
 static boolean_t vdc_is_opened(vdc_t *vdc);
+static void	vdc_update_size(vdc_t *vdc, size_t, size_t, size_t);
 
 /* handshake with vds */
 static int		vdc_init_ver_negotiation(vdc_t *vdc, vio_ver_t ver);
@@ -203,6 +205,10 @@ static int	vdc_set_wce_convert(vdc_t *vdc, void *from, void *to,
 static int	vdc_get_vtoc_convert(vdc_t *vdc, void *from, void *to,
 		    int mode, int dir);
 static int	vdc_set_vtoc_convert(vdc_t *vdc, void *from, void *to,
+		    int mode, int dir);
+static int	vdc_get_extvtoc_convert(vdc_t *vdc, void *from, void *to,
+		    int mode, int dir);
+static int	vdc_set_extvtoc_convert(vdc_t *vdc, void *from, void *to,
 		    int mode, int dir);
 static int	vdc_get_geom_convert(vdc_t *vdc, void *from, void *to,
 		    int mode, int dir);
@@ -305,7 +311,8 @@ static struct dev_ops vdc_ops = {
 	nodev,		/* devo_reset */
 	&vdc_cb_ops,	/* devo_cb_ops */
 	NULL,		/* devo_bus_ops */
-	nulldev		/* devo_power */
+	nulldev,	/* devo_power */
+	ddi_quiesce_not_needed,	/* devo_quiesce */
 };
 
 static struct modldrv modldrv = {
@@ -555,7 +562,7 @@ vdc_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		kmem_free(vdc->cinfo, sizeof (struct dk_cinfo));
 
 	if (vdc->vtoc)
-		kmem_free(vdc->vtoc, sizeof (struct vtoc));
+		kmem_free(vdc->vtoc, sizeof (struct extvtoc));
 
 	if (vdc->geom)
 		kmem_free(vdc->geom, sizeof (struct dk_geom));
@@ -669,6 +676,16 @@ vdc_do_attach(dev_info_t *dip)
 
 	(void) md_fini_handle(mdp);
 
+	/* Create the kstats for saving the I/O statistics used by iostat(1M) */
+	vdc_create_io_kstats(vdc);
+	vdc_create_err_kstats(vdc);
+
+	/* Initialize remaining structures before starting the msg thread */
+	vdc->vdisk_label = VD_DISK_LABEL_UNK;
+	vdc->vtoc = kmem_zalloc(sizeof (struct extvtoc), KM_SLEEP);
+	vdc->geom = kmem_zalloc(sizeof (struct dk_geom), KM_SLEEP);
+	vdc->minfo = kmem_zalloc(sizeof (struct dk_minfo), KM_SLEEP);
+
 	/* initialize the thread responsible for managing state with server */
 	vdc->msg_proc_thr = thread_create(NULL, 0, vdc_process_msg_thread,
 	    vdc, 0, &p0, TS_RUN, minclsyspri);
@@ -680,10 +697,6 @@ vdc_do_attach(dev_info_t *dip)
 
 	vdc->initialized |= VDC_THREAD;
 
-	/* Create the kstats for saving the I/O statistics used by iostat(1M) */
-	vdc_create_io_kstats(vdc);
-	vdc_create_err_kstats(vdc);
-
 	atomic_inc_32(&vdc_instance_count);
 
 	/*
@@ -692,10 +705,6 @@ vdc_do_attach(dev_info_t *dip)
 	 * the handshake do be done so that we know the type of the disk (slice
 	 * or full disk) and the appropriate device nodes can be created.
 	 */
-	vdc->vdisk_label = VD_DISK_LABEL_UNK;
-	vdc->vtoc = kmem_zalloc(sizeof (struct vtoc), KM_SLEEP);
-	vdc->geom = kmem_zalloc(sizeof (struct dk_geom), KM_SLEEP);
-	vdc->minfo = kmem_zalloc(sizeof (struct dk_minfo), KM_SLEEP);
 
 	mutex_enter(&vdc->lock);
 	(void) vdc_validate_geometry(vdc);
@@ -4820,20 +4829,9 @@ vdc_handle_attr_msg(vdc_t *vdc, vd_attr_msg_t *attr_msg)
 			    vdc->instance);
 			attr_msg->vdisk_size = 0;
 		}
-
-		/*
-		 * If the disk size is already set check that it hasn't changed.
-		 */
-		if ((vdc->vdisk_size != 0) && (attr_msg->vdisk_size != 0) &&
-		    (vdc->vdisk_size != attr_msg->vdisk_size)) {
-			DMSG(vdc, 0, "[%d] Different disk size from vds "
-			    "(old=0x%lx - new=0x%lx", vdc->instance,
-			    vdc->vdisk_size, attr_msg->vdisk_size)
-			status = EINVAL;
-			break;
-		}
-
-		vdc->vdisk_size = attr_msg->vdisk_size;
+		/* update disk, block and transfer sizes */
+		vdc_update_size(vdc, attr_msg->vdisk_size,
+		    attr_msg->vdisk_block_size, attr_msg->max_xfer_sz);
 		vdc->vdisk_type = attr_msg->vdisk_type;
 		vdc->operations = attr_msg->operations;
 		if (vio_ver_is_supported(vdc->ver, 1, 1))
@@ -4846,23 +4844,6 @@ vdc_handle_attr_msg(vdc_t *vdc, vd_attr_msg_t *attr_msg)
 		DMSG(vdc, 0, "[%d] vdisk_block_size: sent %lx acked %x\n",
 		    vdc->instance, vdc->block_size,
 		    attr_msg->vdisk_block_size);
-
-		/*
-		 * We don't know at compile time what the vDisk server will
-		 * think are good values but we apply a large (arbitrary)
-		 * upper bound to prevent memory exhaustion in vdc if it was
-		 * allocating a DRing based of huge values sent by the server.
-		 * We probably will never exceed this except if the message
-		 * was garbage.
-		 */
-		if ((attr_msg->max_xfer_sz * attr_msg->vdisk_block_size) <=
-		    (PAGESIZE * DEV_BSIZE)) {
-			vdc->max_xfer_sz = attr_msg->max_xfer_sz;
-			vdc->block_size = attr_msg->vdisk_block_size;
-		} else {
-			DMSG(vdc, 0, "[%d] vds block transfer size too big;"
-			    " using max supported by vdc", vdc->instance);
-		}
 
 		if ((attr_msg->xfer_mode != VIO_DRING_MODE_V1_0) ||
 		    (attr_msg->vdisk_size > INT64_MAX) ||
@@ -5174,7 +5155,7 @@ static int
 vdc_dkio_gapart(vdc_t *vdc, caddr_t arg, int flag)
 {
 	struct dk_geom *geom;
-	struct vtoc *vtoc;
+	struct extvtoc *vtoc;
 	union {
 		struct dk_map map[NDKMAP];
 		struct dk_map32 map32[NDKMAP];
@@ -5186,6 +5167,11 @@ vdc_dkio_gapart(vdc_t *vdc, caddr_t arg, int flag)
 	if ((rv = vdc_validate_geometry(vdc)) != 0) {
 		mutex_exit(&vdc->lock);
 		return (rv);
+	}
+
+	if (vdc->vdisk_size > VD_OLDVTOC_LIMIT) {
+		mutex_exit(&vdc->lock);
+		return (EOVERFLOW);
 	}
 
 	vtoc = vdc->vtoc;
@@ -6571,18 +6557,15 @@ vdc_ownership_update(vdc_t *vdc, int ownership_flags)
 
 /*
  * Get the size and the block size of a virtual disk from the vdisk server.
- * We need to use this operation when the vdisk_size attribute was not
- * available during the handshake with the vdisk server.
  */
 static int
-vdc_check_capacity(vdc_t *vdc)
+vdc_get_capacity(vdc_t *vdc, size_t *dsk_size, size_t *blk_size)
 {
 	int rv = 0;
 	size_t alloc_len;
 	vd_capacity_t *vd_cap;
 
-	if (vdc->vdisk_size != 0)
-		return (0);
+	ASSERT(MUTEX_NOT_HELD(&vdc->lock));
 
 	alloc_len = P2ROUNDUP(sizeof (vd_capacity_t), sizeof (uint64_t));
 
@@ -6591,17 +6574,36 @@ vdc_check_capacity(vdc_t *vdc)
 	rv = vdc_do_sync_op(vdc, VD_OP_GET_CAPACITY, (caddr_t)vd_cap, alloc_len,
 	    0, 0, CB_SYNC, (void *)(uint64_t)FKIOCTL, VIO_both_dir, B_TRUE);
 
-	if (rv == 0) {
-		if (vd_cap->vdisk_block_size != vdc->block_size ||
-		    vd_cap->vdisk_size == VD_SIZE_UNKNOWN ||
-		    vd_cap->vdisk_size == 0)
-			rv = EINVAL;
-		else
-			vdc->vdisk_size = vd_cap->vdisk_size;
-	}
+	*dsk_size = vd_cap->vdisk_size;
+	*blk_size = vd_cap->vdisk_block_size;
 
 	kmem_free(vd_cap, alloc_len);
 	return (rv);
+}
+
+/*
+ * Check the disk capacity. Disk size information is updated if size has
+ * changed.
+ *
+ * Return 0 if the disk capacity is available, or non-zero if it is not.
+ */
+static int
+vdc_check_capacity(vdc_t *vdc)
+{
+	size_t dsk_size, blk_size;
+	int rv;
+
+	if ((rv = vdc_get_capacity(vdc, &dsk_size, &blk_size)) != 0)
+		return (rv);
+
+	if (dsk_size == VD_SIZE_UNKNOWN || dsk_size == 0)
+		return (EINVAL);
+
+	mutex_enter(&vdc->lock);
+	vdc_update_size(vdc, dsk_size, blk_size, vdc->max_xfer_sz);
+	mutex_exit(&vdc->lock);
+
+	return (0);
 }
 
 /*
@@ -6631,6 +6633,10 @@ static vdc_dk_ioctl_t	dk_ioctl[] = {
 		vdc_get_vtoc_convert},
 	{VD_OP_SET_VTOC,	DKIOCSVTOC,		sizeof (vd_vtoc_t),
 		vdc_set_vtoc_convert},
+	{VD_OP_GET_VTOC,	DKIOCGEXTVTOC,		sizeof (vd_vtoc_t),
+		vdc_get_extvtoc_convert},
+	{VD_OP_SET_VTOC,	DKIOCSEXTVTOC,		sizeof (vd_vtoc_t),
+		vdc_set_extvtoc_convert},
 	{VD_OP_GET_DISKGEOM,	DKIOCGGEOM,		sizeof (vd_geom_t),
 		vdc_get_geom_convert},
 	{VD_OP_GET_DISKGEOM,	DKIOCG_PHYGEOM,		sizeof (vd_geom_t),
@@ -6951,8 +6957,7 @@ vd_process_ioctl(dev_t dev, int cmd, caddr_t arg, int mode, int *rvalp)
 	case DKIOCGMEDIAINFO:
 	{
 		ASSERT(vdc->vdisk_size != 0);
-		if (vdc->minfo->dki_capacity == 0)
-			vdc->minfo->dki_capacity = vdc->vdisk_size;
+		ASSERT(vdc->minfo->dki_capacity != 0);
 		rv = ddi_copyout(vdc->minfo, (void *)arg,
 		    sizeof (struct dk_minfo), mode);
 		if (rv != 0)
@@ -7173,12 +7178,10 @@ static int
 vdc_get_vtoc_convert(vdc_t *vdc, void *from, void *to, int mode, int dir)
 {
 	int		i;
-	void		*tmp_mem = NULL;
-	void		*tmp_memp;
-	struct vtoc	vt;
-	struct vtoc32	vt32;
-	int		copy_len = 0;
-	int		rv = 0;
+	struct vtoc	vtoc;
+	struct vtoc32	vtoc32;
+	struct extvtoc	evtoc;
+	int		rv;
 
 	if (dir != VD_COPYOUT)
 		return (0);	/* nothing to do */
@@ -7186,32 +7189,29 @@ vdc_get_vtoc_convert(vdc_t *vdc, void *from, void *to, int mode, int dir)
 	if ((from == NULL) || (to == NULL))
 		return (ENXIO);
 
-	if (ddi_model_convert_from(mode & FMODELS) == DDI_MODEL_ILP32)
-		copy_len = sizeof (struct vtoc32);
-	else
-		copy_len = sizeof (struct vtoc);
+	if (vdc->vdisk_size > VD_OLDVTOC_LIMIT)
+		return (EOVERFLOW);
 
-	tmp_mem = kmem_alloc(copy_len, KM_SLEEP);
-
-	VD_VTOC2VTOC((vd_vtoc_t *)from, &vt);
+	VD_VTOC2VTOC((vd_vtoc_t *)from, &evtoc);
 
 	/* fake the VTOC timestamp field */
 	for (i = 0; i < V_NUMPAR; i++) {
-		vt.timestamp[i] = vdc->vtoc->timestamp[i];
+		evtoc.timestamp[i] = vdc->vtoc->timestamp[i];
 	}
 
 	if (ddi_model_convert_from(mode & FMODELS) == DDI_MODEL_ILP32) {
 		/* LINTED E_ASSIGN_NARROW_CONV */
-		vtoctovtoc32(vt, vt32);
-		tmp_memp = &vt32;
+		extvtoctovtoc32(evtoc, vtoc32);
+		rv = ddi_copyout(&vtoc32, to, sizeof (vtoc32), mode);
+		if (rv != 0)
+			rv = EFAULT;
 	} else {
-		tmp_memp = &vt;
+		extvtoctovtoc(evtoc, vtoc);
+		rv = ddi_copyout(&vtoc, to, sizeof (vtoc), mode);
+		if (rv != 0)
+			rv = EFAULT;
 	}
-	rv = ddi_copyout(tmp_memp, to, copy_len, mode);
-	if (rv != 0)
-		rv = EFAULT;
 
-	kmem_free(tmp_mem, copy_len);
 	return (rv);
 }
 
@@ -7238,40 +7238,30 @@ vdc_get_vtoc_convert(vdc_t *vdc, void *from, void *to, int mode, int dir)
 static int
 vdc_set_vtoc_convert(vdc_t *vdc, void *from, void *to, int mode, int dir)
 {
-	_NOTE(ARGUNUSED(vdc))
-
-	void		*tmp_mem = NULL, *uvtoc;
-	struct vtoc	vt;
-	struct vtoc	*vtp = &vt;
-	vd_vtoc_t	vtvd;
-	int		copy_len = 0;
-	int		i, rv = 0;
+	void		*uvtoc;
+	struct vtoc	vtoc;
+	struct vtoc32	vtoc32;
+	struct extvtoc	evtoc;
+	int		i, rv;
 
 	if ((from == NULL) || (to == NULL))
 		return (ENXIO);
 
-	if (dir == VD_COPYIN)
-		uvtoc = from;
-	else
-		uvtoc = to;
+	if (vdc->vdisk_size > VD_OLDVTOC_LIMIT)
+		return (EOVERFLOW);
 
-	if (ddi_model_convert_from(mode & FMODELS) == DDI_MODEL_ILP32)
-		copy_len = sizeof (struct vtoc32);
-	else
-		copy_len = sizeof (struct vtoc);
-
-	tmp_mem = kmem_alloc(copy_len, KM_SLEEP);
-
-	rv = ddi_copyin(uvtoc, tmp_mem, copy_len, mode);
-	if (rv != 0) {
-		kmem_free(tmp_mem, copy_len);
-		return (EFAULT);
-	}
+	uvtoc = (dir == VD_COPYIN)? from : to;
 
 	if (ddi_model_convert_from(mode & FMODELS) == DDI_MODEL_ILP32) {
-		vtoc32tovtoc((*(struct vtoc32 *)tmp_mem), vt);
+		rv = ddi_copyin(uvtoc, &vtoc32, sizeof (vtoc32), mode);
+		if (rv != 0)
+			return (EFAULT);
+		vtoc32toextvtoc(vtoc32, evtoc);
 	} else {
-		vtp = tmp_mem;
+		rv = ddi_copyin(uvtoc, &vtoc, sizeof (vtoc), mode);
+		if (rv != 0)
+			return (EFAULT);
+		vtoctoextvtoc(vtoc, evtoc);
 	}
 
 	if (dir == VD_COPYOUT) {
@@ -7285,15 +7275,75 @@ vdc_set_vtoc_convert(vdc_t *vdc, void *from, void *to, int mode, int dir)
 		 * We also need to keep track of the timestamp fields.
 		 */
 		for (i = 0; i < V_NUMPAR; i++) {
-			vdc->vtoc->timestamp[i] = vtp->timestamp[i];
+			vdc->vtoc->timestamp[i] = evtoc.timestamp[i];
 		}
 
-		return (0);
+	} else {
+		VTOC2VD_VTOC(&evtoc, (vd_vtoc_t *)to);
 	}
 
-	VTOC2VD_VTOC(vtp, &vtvd);
-	bcopy(&vtvd, to, sizeof (vd_vtoc_t));
-	kmem_free(tmp_mem, copy_len);
+	return (0);
+}
+
+static int
+vdc_get_extvtoc_convert(vdc_t *vdc, void *from, void *to, int mode, int dir)
+{
+	int		i, rv;
+	struct extvtoc	evtoc;
+
+	if (dir != VD_COPYOUT)
+		return (0);	/* nothing to do */
+
+	if ((from == NULL) || (to == NULL))
+		return (ENXIO);
+
+	VD_VTOC2VTOC((vd_vtoc_t *)from, &evtoc);
+
+	/* fake the VTOC timestamp field */
+	for (i = 0; i < V_NUMPAR; i++) {
+		evtoc.timestamp[i] = vdc->vtoc->timestamp[i];
+	}
+
+	rv = ddi_copyout(&evtoc, to, sizeof (struct extvtoc), mode);
+	if (rv != 0)
+		rv = EFAULT;
+
+	return (rv);
+}
+
+static int
+vdc_set_extvtoc_convert(vdc_t *vdc, void *from, void *to, int mode, int dir)
+{
+	void		*uvtoc;
+	struct extvtoc	evtoc;
+	int		i, rv;
+
+	if ((from == NULL) || (to == NULL))
+		return (ENXIO);
+
+	uvtoc = (dir == VD_COPYIN)? from : to;
+
+	rv = ddi_copyin(uvtoc, &evtoc, sizeof (struct extvtoc), mode);
+	if (rv != 0)
+		return (EFAULT);
+
+	if (dir == VD_COPYOUT) {
+		/*
+		 * The disk label may have changed. Revalidate the disk
+		 * geometry. This will also update the device nodes.
+		 */
+		vdc_validate(vdc);
+
+		/*
+		 * We also need to keep track of the timestamp fields.
+		 */
+		for (i = 0; i < V_NUMPAR; i++) {
+			vdc->vtoc->timestamp[i] = evtoc.timestamp[i];
+		}
+
+	} else {
+		VTOC2VD_VTOC(&evtoc, (vd_vtoc_t *)to);
+	}
 
 	return (0);
 }
@@ -7586,6 +7636,49 @@ vdc_lbl2cksum(struct dk_label *label)
 	return (sum);
 }
 
+static void
+vdc_update_size(vdc_t *vdc, size_t dsk_size, size_t blk_size, size_t xfr_size)
+{
+	vd_err_stats_t  *stp;
+
+	ASSERT(MUTEX_HELD(&vdc->lock));
+	ASSERT(xfr_size != 0);
+
+	/*
+	 * If the disk size is unknown or sizes are unchanged then don't
+	 * update anything.
+	 */
+	if (dsk_size == VD_SIZE_UNKNOWN || dsk_size == 0 ||
+	    (blk_size == vdc->block_size && dsk_size == vdc->vdisk_size &&
+	    xfr_size == vdc->max_xfer_sz))
+		return;
+
+	/*
+	 * We don't know at compile time what the vDisk server will think
+	 * are good values but we apply a large (arbitrary) upper bound to
+	 * prevent memory exhaustion in vdc if it was allocating a DRing
+	 * based of huge values sent by the server. We probably will never
+	 * exceed this except if the message was garbage.
+	 */
+	if ((xfr_size * blk_size) > (PAGESIZE * DEV_BSIZE)) {
+		DMSG(vdc, 0, "[%d] vds block transfer size too big;"
+		    " using max supported by vdc", vdc->instance);
+		xfr_size = maxphys / DEV_BSIZE;
+		dsk_size = (dsk_size * blk_size) / DEV_BSIZE;
+		blk_size = DEV_BSIZE;
+	}
+
+	vdc->max_xfer_sz = xfr_size;
+	vdc->block_size = blk_size;
+	vdc->vdisk_size = dsk_size;
+
+	stp = (vd_err_stats_t *)vdc->err_stats->ks_data;
+	stp->vd_capacity.value.ui64 = dsk_size * blk_size;
+
+	vdc->minfo->dki_capacity = dsk_size;
+	vdc->minfo->dki_lbsize = (uint_t)blk_size;
+}
+
 /*
  * Function:
  *	vdc_validate_geometry
@@ -7613,7 +7706,7 @@ vdc_validate_geometry(vdc_t *vdc)
 	int	rv, rval;
 	struct dk_label label;
 	struct dk_geom geom;
-	struct vtoc vtoc;
+	struct extvtoc vtoc;
 	efi_gpt_t *gpt;
 	efi_gpe_t *gpe;
 	vd_efi_dev_t edev;
@@ -7623,13 +7716,17 @@ vdc_validate_geometry(vdc_t *vdc)
 	ASSERT(MUTEX_HELD(&vdc->lock));
 
 	mutex_exit(&vdc->lock);
-
+	/*
+	 * Check the disk capacity in case it has changed. If that fails then
+	 * we proceed and we will be using the disk size we currently have.
+	 */
+	(void) vdc_check_capacity(vdc);
 	dev = makedevice(ddi_driver_major(vdc->dip),
 	    VD_MAKE_DEV(vdc->instance, 0));
 
 	rv = vd_process_ioctl(dev, DKIOCGGEOM, (caddr_t)&geom, FKIOCTL, &rval);
 	if (rv == 0)
-		rv = vd_process_ioctl(dev, DKIOCGVTOC, (caddr_t)&vtoc,
+		rv = vd_process_ioctl(dev, DKIOCGEXTVTOC, (caddr_t)&vtoc,
 		    FKIOCTL, &rval);
 
 	if (rv == ENOTSUP) {
@@ -7641,11 +7738,9 @@ vdc_validate_geometry(vdc_t *vdc)
 		 * be able to read an EFI label.
 		 */
 		if (vdc->vdisk_size == 0) {
-			if ((rv = vdc_check_capacity(vdc)) != 0) {
-				mutex_enter(&vdc->lock);
-				vdc_store_label_unk(vdc);
-				return (rv);
-			}
+			mutex_enter(&vdc->lock);
+			vdc_store_label_unk(vdc);
+			return (EIO);
 		}
 
 		VD_EFI_DEV_SET(edev, vdc, vd_process_efi_ioctl);
@@ -7923,7 +8018,7 @@ vdc_store_label_efi(vdc_t *vdc, efi_gpt_t *gpt, efi_gpe_t *gpe)
 	ASSERT(MUTEX_HELD(&vdc->lock));
 
 	vdc->vdisk_label = VD_DISK_LABEL_EFI;
-	bzero(vdc->vtoc, sizeof (struct vtoc));
+	bzero(vdc->vtoc, sizeof (struct extvtoc));
 	bzero(vdc->geom, sizeof (struct dk_geom));
 	bzero(vdc->slice, sizeof (vd_slice_t) * V_NUMPAR);
 
@@ -7948,7 +8043,7 @@ vdc_store_label_efi(vdc_t *vdc, efi_gpt_t *gpt, efi_gpe_t *gpe)
 }
 
 static void
-vdc_store_label_vtoc(vdc_t *vdc, struct dk_geom *geom, struct vtoc *vtoc)
+vdc_store_label_vtoc(vdc_t *vdc, struct dk_geom *geom, struct extvtoc *vtoc)
 {
 	int i;
 
@@ -7956,7 +8051,7 @@ vdc_store_label_vtoc(vdc_t *vdc, struct dk_geom *geom, struct vtoc *vtoc)
 	ASSERT(vdc->block_size == vtoc->v_sectorsz);
 
 	vdc->vdisk_label = VD_DISK_LABEL_VTOC;
-	bcopy(vtoc, vdc->vtoc, sizeof (struct vtoc));
+	bcopy(vtoc, vdc->vtoc, sizeof (struct extvtoc));
 	bcopy(geom, vdc->geom, sizeof (struct dk_geom));
 	bzero(vdc->slice, sizeof (vd_slice_t) * V_NUMPAR);
 
@@ -7972,7 +8067,7 @@ vdc_store_label_unk(vdc_t *vdc)
 	ASSERT(MUTEX_HELD(&vdc->lock));
 
 	vdc->vdisk_label = VD_DISK_LABEL_UNK;
-	bzero(vdc->vtoc, sizeof (struct vtoc));
+	bzero(vdc->vtoc, sizeof (struct extvtoc));
 	bzero(vdc->geom, sizeof (struct dk_geom));
 	bzero(vdc->slice, sizeof (vd_slice_t) * V_NUMPAR);
 }

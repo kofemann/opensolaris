@@ -114,6 +114,7 @@
 #include <sys/debug_info.h>
 #include <sys/bootinfo.h>
 #include <sys/ddi_timer.h>
+#include <sys/multiboot.h>
 
 #ifdef __xpv
 
@@ -206,7 +207,7 @@ char *kobj_file_buf;
 int kobj_file_bufsize;	/* set in /etc/system */
 
 /* Global variables for MP support. Used in mp_startup */
-caddr_t	rm_platter_va;
+caddr_t	rm_platter_va = 0;
 uint32_t rm_platter_pa;
 
 int	auto_lpg_disable = 1;
@@ -239,6 +240,7 @@ struct boot_syscalls	*sysp;		/* passed in from boot */
 char bootblock_fstype[16];
 
 char kern_bootargs[OBP_MAXPATHLEN];
+char kern_bootfile[OBP_MAXPATHLEN];
 
 /*
  * ZFS zio segment.  This allows us to exclude large portions of ZFS data that
@@ -518,6 +520,12 @@ static page_t *bootpages;
  */
 static page_t *rd_pages;
 
+/*
+ * Lower 64K
+ */
+static page_t *lower_pages = NULL;
+static int lower_pages_count = 0;
+
 struct system_hardware system_hardware;
 
 /*
@@ -650,6 +658,7 @@ startup(void)
 #if !defined(__xpv)
 	extern void startup_bios_disk(void);
 	extern void startup_pci_bios(void);
+	extern int post_fastreboot;
 #endif
 	extern cpuset_t cpu_ready_set;
 
@@ -678,11 +687,16 @@ startup(void)
 	startup_kmem();
 	startup_vm();
 #if !defined(__xpv)
-	startup_pci_bios();
+	if (!post_fastreboot)
+		startup_pci_bios();
+#endif
+#if defined(__xpv)
+	startup_xen_mca();
 #endif
 	startup_modules();
 #if !defined(__xpv)
-	startup_bios_disk();
+	if (!post_fastreboot)
+		startup_bios_disk();
 #endif
 	startup_end();
 	progressbar_start();
@@ -1389,6 +1403,7 @@ startup_modules(void)
 {
 	unsigned int i;
 	extern void prom_setup(void);
+	cmi_hdl_t hdl;
 
 	PRM_POINT("startup_modules() starting...");
 
@@ -1474,22 +1489,40 @@ startup_modules(void)
 	 */
 	setup_ddi();
 
-#ifndef __xpv
-	{
-		/*
-		 * Set up the CPU module subsystem.  Modifies the device tree,
-		 * so it must be done after setup_ddi().
-		 */
+	/*
+	 * Set up the CPU module subsystem for the boot cpu in the native
+	 * case, and all physical cpu resource in the xpv dom0 case.
+	 * Modifies the device tree, so this must be done after
+	 * setup_ddi().
+	 */
+#ifdef __xpv
+	/*
+	 * If paravirtualized and on dom0 then we initialize all physical
+	 * cpu handles now;  if paravirtualized on a domU then do not
+	 * initialize.
+	 */
+	if (DOMAIN_IS_INITDOMAIN(xen_info)) {
+		xen_mc_lcpu_cookie_t cpi;
 
-		cmi_hdl_t hdl;
-
-		if ((hdl = cmi_init(CMI_HDL_NATIVE, cmi_ntv_hwchipid(CPU),
-		    cmi_ntv_hwcoreid(CPU), cmi_ntv_hwstrandid(CPU),
-		    cmi_ntv_hwmstrand(CPU))) != NULL) {
-			if (x86_feature & X86_MCA)
+		for (cpi = xen_physcpu_next(NULL); cpi != NULL;
+		    cpi = xen_physcpu_next(cpi)) {
+			if ((hdl = cmi_init(CMI_HDL_SOLARIS_xVM_MCA,
+			    xen_physcpu_chipid(cpi), xen_physcpu_coreid(cpi),
+			    xen_physcpu_strandid(cpi))) != NULL &&
+			    (x86_feature & X86_MCA))
 				cmi_mca_init(hdl);
 		}
 	}
+#else
+	/*
+	 * Initialize a handle for the boot cpu - others will initialize
+	 * as they startup.  Do not do this if we know we are in an HVM domU.
+	 */
+	if (!xpv_is_hvm &&
+	    (hdl = cmi_init(CMI_HDL_NATIVE, cmi_ntv_hwchipid(CPU),
+	    cmi_ntv_hwcoreid(CPU), cmi_ntv_hwstrandid(CPU))) != NULL &&
+	    (x86_feature & X86_MCA))
+			cmi_mca_init(hdl);
 #endif	/* __xpv */
 
 	/*
@@ -2085,7 +2118,8 @@ post_startup(void)
 		 * Startup the memory scrubber.
 		 * XXPV	This should be running somewhere ..
 		 */
-		memscrub_init();
+		if (!xpv_is_hvm)
+			memscrub_init();
 #endif
 	}
 
@@ -2122,12 +2156,10 @@ post_startup(void)
 }
 
 static int
-pp_in_ramdisk(page_t *pp)
+pp_in_range(page_t *pp, uint64_t low_addr, uint64_t high_addr)
 {
-	extern uint64_t ramdisk_start, ramdisk_end;
-
-	return ((pp->p_pagenum >= btop(ramdisk_start)) &&
-	    (pp->p_pagenum < btopr(ramdisk_end)));
+	return ((pp->p_pagenum >= btop(low_addr)) &&
+	    (pp->p_pagenum < btopr(high_addr)));
 }
 
 void
@@ -2137,6 +2169,9 @@ release_bootstrap(void)
 	page_t *pp;
 	extern void kobj_boot_unmountroot(void);
 	extern dev_t rootdev;
+#if !defined(__xpv)
+	pfn_t	pfn;
+#endif
 
 	/* unmount boot ramdisk and release kmem usage */
 	kobj_boot_unmountroot();
@@ -2145,7 +2180,9 @@ release_bootstrap(void)
 	 * We're finished using the boot loader so free its pages.
 	 */
 	PRM_POINT("Unmapping lower boot pages");
+
 	clear_boot_mappings(0, _userlimit);
+
 	postbootkernelbase = kernelbase;
 
 	/*
@@ -2163,9 +2200,22 @@ release_bootstrap(void)
 
 	PRM_POINT("Releasing boot pages");
 	while (bootpages) {
+		extern uint64_t ramdisk_start, ramdisk_end;
 		pp = bootpages;
 		bootpages = pp->p_next;
-		if (root_is_ramdisk && pp_in_ramdisk(pp)) {
+
+
+		/* Keep pages for the lower 64K */
+		if (pp_in_range(pp, 0, 0x40000)) {
+			pp->p_next = lower_pages;
+			lower_pages = pp;
+			lower_pages_count++;
+			continue;
+		}
+
+
+		if (root_is_ramdisk && pp_in_range(pp, ramdisk_start,
+		    ramdisk_end)) {
 			pp->p_next = rd_pages;
 			rd_pages = pp;
 			continue;
@@ -2180,29 +2230,31 @@ release_bootstrap(void)
 #if !defined(__xpv)
 /* XXPV -- note this following bunch of code needs to be revisited in Xen 3.0 */
 	/*
-	 * Find 1 page below 1 MB so that other processors can boot up.
+	 * Find 1 page below 1 MB so that other processors can boot up or
+	 * so that any processor can resume.
 	 * Make sure it has a kernel VA as well as a 1:1 mapping.
 	 * We should have just free'd one up.
 	 */
-	if (use_mp) {
-		pfn_t pfn;
 
-		for (pfn = 1; pfn < btop(1*1024*1024); pfn++) {
-			if (page_numtopp_alloc(pfn) == NULL)
-				continue;
-			rm_platter_va = i86devmap(pfn, 1,
-			    PROT_READ | PROT_WRITE | PROT_EXEC);
-			rm_platter_pa = ptob(pfn);
-			hat_devload(kas.a_hat,
-			    (caddr_t)(uintptr_t)rm_platter_pa, MMU_PAGESIZE,
-			    pfn, PROT_READ | PROT_WRITE | PROT_EXEC,
-			    HAT_LOAD_NOCONSIST);
-			break;
-		}
-		if (pfn == btop(1*1024*1024))
-			panic("No page available for starting "
-			    "other processors");
+	/*
+	 * 0x10 pages is 64K.  Leave the bottom 64K alone
+	 * for BIOS.
+	 */
+	for (pfn = 0x10; pfn < btop(1*1024*1024); pfn++) {
+		if (page_numtopp_alloc(pfn) == NULL)
+			continue;
+		rm_platter_va = i86devmap(pfn, 1,
+		    PROT_READ | PROT_WRITE | PROT_EXEC);
+		rm_platter_pa = ptob(pfn);
+		hat_devload(kas.a_hat,
+		    (caddr_t)(uintptr_t)rm_platter_pa, MMU_PAGESIZE,
+		    pfn, PROT_READ | PROT_WRITE | PROT_EXEC,
+		    HAT_LOAD_NOCONSIST);
+		break;
 	}
+	if (pfn == btop(1*1024*1024) && use_mp)
+		panic("No page below 1M available for starting "
+		    "other processors or for resuming from system-suspend");
 #endif	/* !__xpv */
 }
 

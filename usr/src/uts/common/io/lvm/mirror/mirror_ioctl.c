@@ -18,6 +18,7 @@
  *
  * CDDL HEADER END
  */
+
 /*
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
@@ -248,14 +249,18 @@ mirror_set(
 			continue;
 
 		/* mirror creation should fail here */
+		md_nblocks_set(mnum, -1ULL);
 		MD_UNIT(mnum) = NULL;
+
 		mddb_deleterec_wrapper(recid);
 		return (mdmderror(&msp->mde, MDE_IN_USE,
 		    md_getminor(sm->sm_dev)));
 	}
 
 	if (err = mirror_build_incore(un, 0)) {
+		md_nblocks_set(mnum, -1ULL);
 		MD_UNIT(mnum) = NULL;
+
 		mddb_deleterec_wrapper(recid);
 		return (err);
 	}
@@ -446,6 +451,26 @@ mirror_set_vtoc(
 )
 {
 	return (md_set_vtoc((md_unit_t *)un, vtocp));
+}
+
+static int
+mirror_get_extvtoc(
+	mm_unit_t	*un,
+	struct extvtoc	*vtocp
+)
+{
+	md_get_extvtoc((md_unit_t *)un, vtocp);
+
+	return (0);
+}
+
+static int
+mirror_set_extvtoc(
+	mm_unit_t	*un,
+	struct extvtoc	*vtocp
+)
+{
+	return (md_set_extvtoc((md_unit_t *)un, vtocp));
 }
 
 static int
@@ -1345,6 +1370,7 @@ mirror_grow_unit(
 	current_tb = (total_blocks/spc) * spc;
 
 	un->c.un_total_blocks = current_tb;
+	md_nblocks_set(mnum, un->c.un_total_blocks);
 	un->c.un_actual_tb = total_blocks;
 
 	/* Is the mirror growing from 32 bit device to 64 bit device? */
@@ -2964,7 +2990,7 @@ md_mirror_ioctl(
 	    ((un = MD_UNIT(mnum)) == NULL))
 		return (ENXIO);
 	/* is this a supported ioctl? */
-	err = md_check_ioctl_against_efi(cmd, un->c.un_flag);
+	err = md_check_ioctl_against_unit(cmd, un->c);
 	if (err != 0) {
 		return (err);
 	}
@@ -3074,6 +3100,40 @@ md_mirror_ioctl(
 
 		if (err == 0)
 			err = mirror_set_vtoc(un, &vtoc);
+
+		return (err);
+	}
+
+	case DKIOCGEXTVTOC:
+	{
+		struct extvtoc	extvtoc;
+
+		if (! (mode & FREAD))
+			return (EACCES);
+
+		if ((err = mirror_get_extvtoc(un, &extvtoc)) != 0) {
+			return (err);
+		}
+
+		if (ddi_copyout(&extvtoc, data, sizeof (extvtoc), mode))
+			err = EFAULT;
+
+		return (err);
+	}
+
+	case DKIOCSEXTVTOC:
+	{
+		struct extvtoc	extvtoc;
+
+		if (! (mode & FWRITE))
+			return (EACCES);
+
+		if (ddi_copyin(data, &extvtoc, sizeof (extvtoc), mode)) {
+			err = EFAULT;
+		}
+
+		if (err == 0)
+			err = mirror_set_extvtoc(un, &extvtoc);
 
 		return (err);
 	}

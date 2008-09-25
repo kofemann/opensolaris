@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * Xen virtual device driver interfaces
  */
@@ -122,6 +120,11 @@ static void xendev_offline_device(void *);
 static void i_xvdi_probe_path_cb(struct xenbus_watch *, const char **,
     unsigned int);
 static void i_xvdi_probe_path_handler(void *);
+
+typedef struct oestate_evt {
+	dev_info_t *dip;
+	XenbusState state;
+} i_oestate_evt_t;
 
 typedef struct xd_cfg {
 	xendev_devclass_t devclass;
@@ -1068,10 +1071,22 @@ xvdi_fatal_error(dev_info_t *dip, int errno, char *errstr)
 static void
 i_xvdi_oestate_handler(void *arg)
 {
-	dev_info_t *dip = arg;
+	i_oestate_evt_t *evt = (i_oestate_evt_t *)arg;
+	dev_info_t *dip = evt->dip;
 	struct xendev_ppd *pdp = ddi_get_parent_data(dip);
 	XenbusState oestate = pdp->xd_xsdev.otherend_state;
+	XenbusState curr_oestate = evt->state;
 	ddi_eventcookie_t evc;
+
+	/* evt is alloc'ed in i_xvdi_oestate_cb */
+	kmem_free(evt, sizeof (i_oestate_evt_t));
+
+	/*
+	 * If the oestate we're handling is not the latest one,
+	 * it does not make any sense to continue handling it.
+	 */
+	if (curr_oestate != oestate)
+		return;
 
 	mutex_enter(&pdp->xd_lk);
 
@@ -1461,8 +1476,10 @@ xvdi_switch_state(dev_info_t *dip, xenbus_transaction_t xbt,
 	ASSERT(pdp != NULL);
 
 	XVDI_DPRINTF(XVDI_DBG_STATE,
-	    "xvdi_switch_state: dip 0x%p moves to %d",
-	    (void *)dip, newState);
+	    "xvdi_switch_state: %s@%s's xenbus state moves to %d\n",
+	    ddi_binding_name(dip) == NULL ? "null" : ddi_binding_name(dip),
+	    ddi_get_name_addr(dip) == NULL ? "null" : ddi_get_name_addr(dip),
+	    newState);
 
 	rv = xenbus_switch_state(&pdp->xd_xsdev, xbt, newState);
 	if (rv > 0)
@@ -2032,18 +2049,32 @@ i_xvdi_oestate_cb(struct xenbus_device *dev, XenbusState oestate)
 {
 	dev_info_t *dip = (dev_info_t *)dev->data;
 	struct xendev_ppd *pdp = ddi_get_parent_data(dip);
+	i_oestate_evt_t *evt = NULL;
+
+	XVDI_DPRINTF(XVDI_DBG_STATE,
+	    "i_xvdi_oestate_cb: %s@%s sees oestate change to %d\n",
+	    ddi_binding_name(dip) == NULL ? "null" : ddi_binding_name(dip),
+	    ddi_get_name_addr(dip) == NULL ? "null" : ddi_get_name_addr(dip),
+	    oestate);
 
 	/*
-	 * Don't trigger two consecutive ndi_devi_offline on the same
-	 * dip.
+	 * Don't trigger two consecutive ndi_devi_offline
+	 * on the same dip.
 	 */
 	if ((oestate == XenbusStateClosed) &&
 	    (dev->otherend_state == XenbusStateClosed))
 		return;
 
 	dev->otherend_state = oestate;
+
+	/*
+	 * Try to deliver the oestate change event to the dip
+	 */
+	evt = kmem_alloc(sizeof (i_oestate_evt_t), KM_SLEEP);
+	evt->dip = dip;
+	evt->state = oestate;
 	(void) ddi_taskq_dispatch(pdp->xd_oe_taskq,
-	    i_xvdi_oestate_handler, (void *)dip, DDI_SLEEP);
+	    i_xvdi_oestate_handler, (void *)evt, DDI_SLEEP);
 }
 
 /*ARGSUSED*/
@@ -2053,6 +2084,21 @@ i_xvdi_hpstate_cb(struct xenbus_watch *w, const char **vec,
 {
 	dev_info_t *dip = (dev_info_t *)w->dev;
 	struct xendev_ppd *pdp = ddi_get_parent_data(dip);
+
+#ifdef DEBUG
+	char *hp_status = NULL;
+	unsigned int hpl = 0;
+
+	(void) xenbus_read(XBT_NULL, pdp->xd_hp_watch.node, "",
+	    (void *)&hp_status, &hpl);
+	XVDI_DPRINTF(XVDI_DBG_STATE,
+	    "i_xvdi_hpstate_cb: %s@%s sees hpstate change to %s\n",
+	    ddi_binding_name(dip) == NULL ?  "null" : ddi_binding_name(dip),
+	    ddi_get_name_addr(dip) == NULL ?  "null" : ddi_get_name_addr(dip),
+	    hp_status == NULL ? "null" : hp_status);
+	if (hp_status != NULL)
+		kmem_free(hp_status, hpl);
+#endif /* DEBUG */
 
 	(void) ddi_taskq_dispatch(pdp->xd_hp_taskq,
 	    i_xvdi_hpstate_handler, (void *)dip, DDI_SLEEP);
@@ -2106,7 +2152,7 @@ i_xvdi_probe_path_handler(void *arg)
 			goto done;
 		}
 	} else {
-		if (sscanf(p, "/%d/%d/", &dom, &vdev) != 2) {
+		if (sscanf(p, "/%hu/%d/", &dom, &vdev) != 2) {
 			XVDI_DPRINTF(XVDI_DBG_PROBE,
 			    "i_xvdi_probe_path_handler: "
 			    "cannot parse backend path %s",

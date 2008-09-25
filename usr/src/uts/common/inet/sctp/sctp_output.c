@@ -20,11 +20,9 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -37,11 +35,6 @@
 #include <sys/strsun.h>
 #include <sys/strsubr.h>
 #include <sys/socketvar.h>
-/* swilly code in sys/socketvar.h turns off DEBUG */
-#ifdef __lint
-#define	DEBUG
-#endif
-
 #include <inet/common.h>
 #include <inet/mi.h>
 #include <inet/ip.h>
@@ -232,9 +225,7 @@ sctp_sendmsg(sctp_t *sctp, mblk_t *mp, int flags)
 			mproto->b_cont = mp;
 		}
 		RUN_SCTP(sctp);
-		sctp_user_abort(sctp, mp, B_TRUE);
-		sctp_assoc_event(sctp, SCTP_COMM_LOST, 0, NULL);
-		sctp_clean_death(sctp, ECONNRESET);
+		sctp_user_abort(sctp, mp);
 		freemsg(mproto);
 		goto process_sendq;
 	}

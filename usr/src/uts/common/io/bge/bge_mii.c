@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include "bge_impl.h"
 
 /*
@@ -80,6 +78,28 @@ static const int8_t bge_copper_link_duplex[] = {
 	LINK_DUPLEX_FULL,		/* MII_AUX_STATUS_MODE_100_F	*/
 	LINK_DUPLEX_HALF,		/* MII_AUX_STATUS_MODE_1000_H	*/
 	LINK_DUPLEX_FULL		/* MII_AUX_STATUS_MODE_1000_F	*/
+};
+
+static const int16_t bge_copper_link_speed_5906[] = {
+	0,				/* MII_AUX_STATUS_MODE_NONE	*/
+	10,				/* MII_AUX_STATUS_MODE_10_H	*/
+	10,				/* MII_AUX_STATUS_MODE_10_F	*/
+	100,				/* MII_AUX_STATUS_MODE_100_H	*/
+	0,				/* MII_AUX_STATUS_MODE_100_4	*/
+	100,				/* MII_AUX_STATUS_MODE_100_F	*/
+	0,				/* MII_AUX_STATUS_MODE_1000_H	*/
+	0				/* MII_AUX_STATUS_MODE_1000_F	*/
+};
+
+static const int8_t bge_copper_link_duplex_5906[] = {
+	LINK_DUPLEX_UNKNOWN,		/* MII_AUX_STATUS_MODE_NONE	*/
+	LINK_DUPLEX_HALF,		/* MII_AUX_STATUS_MODE_10_H	*/
+	LINK_DUPLEX_FULL,		/* MII_AUX_STATUS_MODE_10_F	*/
+	LINK_DUPLEX_HALF,		/* MII_AUX_STATUS_MODE_100_H	*/
+	LINK_DUPLEX_UNKNOWN,		/* MII_AUX_STATUS_MODE_100_4	*/
+	LINK_DUPLEX_FULL,		/* MII_AUX_STATUS_MODE_100_F	*/
+	LINK_DUPLEX_UNKNOWN,		/* MII_AUX_STATUS_MODE_1000_H	*/
+	LINK_DUPLEX_UNKNOWN		/* MII_AUX_STATUS_MODE_1000_F	*/
 };
 
 #if	BGE_DEBUGGING
@@ -193,6 +213,14 @@ bge_phy_reset(bge_t *bgep)
 
 	ASSERT(mutex_owned(bgep->genlock));
 
+	if (DEVICE_5906_SERIES_CHIPSETS(bgep)) {
+		drv_usecwait(40);
+		/* put PHY into ready state */
+		bge_reg_clr32(bgep, MISC_CONFIG_REG, MISC_CONFIG_EPHY_IDDQ);
+		(void) bge_reg_get32(bgep, MISC_CONFIG_REG); /* flush */
+		drv_usecwait(40);
+	}
+
 	/*
 	 * Set the PHY RESET bit, then wait up to 5 ms for it to self-clear
 	 */
@@ -203,6 +231,10 @@ bge_phy_reset(bge_t *bgep)
 		if (BIC(control, MII_CONTROL_RESET))
 			return (B_TRUE);
 	}
+
+	/* Adjust output voltage (From bsd driver) */
+	if (DEVICE_5906_SERIES_CHIPSETS(bgep))
+		bge_mii_put16(bgep, 0x17, 0x12);
 
 	BGE_DEBUG(("bge_phy_reset: FAILED, control now 0x%x", control));
 
@@ -459,6 +491,10 @@ bge_phy_reset_and_check(bge_t *bgep)
 	extctrl = bge_mii_get16(bgep, 0x10);
 	bge_mii_put16(bgep, 0x10, extctrl & ~0x3000);
 
+	/* Adjust output voltage (From bsd driver) */
+	if (DEVICE_5906_SERIES_CHIPSETS(bgep))
+		bge_mii_put16(bgep, 0x17, 0x12);
+
 	if (!reset_success)
 		bge_fm_ereport(bgep, DDI_FM_DEVICE_NO_RESPONSE);
 	else if (phy_locked)
@@ -518,6 +554,7 @@ bge_restart_copper(bge_t *bgep, boolean_t powerdown)
 		reset_ok = bge_phy_reset_and_check(bgep);
 		break;
 
+	case MHCR_CHIP_ASIC_REV_5906:
 	case MHCR_CHIP_ASIC_REV_5700:
 	case MHCR_CHIP_ASIC_REV_5701:
 		/*
@@ -858,10 +895,16 @@ bge_check_copper(bge_t *bgep, boolean_t recheck)
 		 */
 		mode = aux & MII_AUX_STATUS_MODE_MASK;
 		mode >>= MII_AUX_STATUS_MODE_SHIFT;
-		linkup = bge_copper_link_speed[mode] > 0;
-		linkup &= bge_copper_link_duplex[mode] != LINK_DUPLEX_UNKNOWN;
-		linkup &= BIS(aux, MII_AUX_STATUS_LINKUP);
-		linkup &= BIS(mii_status, MII_STATUS_LINKUP);
+		if (DEVICE_5906_SERIES_CHIPSETS(bgep)) {
+			linkup = BIS(aux, MII_AUX_STATUS_LINKUP);
+			linkup &= BIS(mii_status, MII_STATUS_LINKUP);
+		} else {
+			linkup = bge_copper_link_speed[mode] > 0;
+			linkup &= bge_copper_link_duplex[mode] !=
+			    LINK_DUPLEX_UNKNOWN;
+			linkup &= BIS(aux, MII_AUX_STATUS_LINKUP);
+			linkup &= BIS(mii_status, MII_STATUS_LINKUP);
+		}
 
 		BGE_DEBUG(("bge_check_copper: MII status 0x%x aux 0x%x "
 		    "=> mode %d (%s)",
@@ -934,9 +977,24 @@ bge_check_copper(bge_t *bgep, boolean_t recheck)
 	if (!linkup)
 		mode = MII_AUX_STATUS_MODE_NONE;
 	bgep->param_link_up = linkup;
-	bgep->param_link_speed = bge_copper_link_speed[mode];
-	bgep->param_link_duplex = bge_copper_link_duplex[mode];
 	bgep->link_state = LINK_STATE_UNKNOWN;
+	if (DEVICE_5906_SERIES_CHIPSETS(bgep)) {
+		if (bgep->phy_aux_status & MII_AUX_STATUS_NEG_ENABLED_5906) {
+			bgep->param_link_speed =
+			    bge_copper_link_speed_5906[mode];
+			bgep->param_link_duplex =
+			    bge_copper_link_duplex_5906[mode];
+		} else {
+			bgep->param_link_speed = (bgep->phy_aux_status &
+			    MII_AUX_STATUS_SPEED_IND_5906) ?  100 : 10;
+			bgep->param_link_duplex = (bgep->phy_aux_status &
+			    MII_AUX_STATUS_DUPLEX_IND_5906) ? LINK_DUPLEX_FULL :
+			    LINK_DUPLEX_HALF;
+		}
+	} else {
+		bgep->param_link_speed = bge_copper_link_speed[mode];
+		bgep->param_link_duplex = bge_copper_link_duplex[mode];
+	}
 
 	BGE_DEBUG(("bge_check_copper: link now %s speed %d duplex %d",
 	    UPORDOWN(bgep->param_link_up),
@@ -978,9 +1036,15 @@ bge_restart_serdes(bge_t *bgep, boolean_t powerdown)
 	 * appropriately for the SerDes interface ...
 	 */
 	macmode = bge_reg_get32(bgep, ETHERNET_MAC_MODE_REG);
-	macmode &= ~ETHERNET_MODE_LINK_POLARITY;
-	macmode &= ~ETHERNET_MODE_PORTMODE_MASK;
-	macmode |= ETHERNET_MODE_PORTMODE_TBI;
+	if (DEVICE_5714_SERIES_CHIPSETS(bgep)) {
+		macmode |= ETHERNET_MODE_LINK_POLARITY;
+		macmode &= ~ETHERNET_MODE_PORTMODE_MASK;
+		macmode |= ETHERNET_MODE_PORTMODE_GMII;
+	} else {
+		macmode &= ~ETHERNET_MODE_LINK_POLARITY;
+		macmode &= ~ETHERNET_MODE_PORTMODE_MASK;
+		macmode |= ETHERNET_MODE_PORTMODE_TBI;
+	}
 	bge_reg_put32(bgep, ETHERNET_MAC_MODE_REG, macmode);
 
 	/*
@@ -1195,62 +1259,97 @@ bge_check_serdes(bge_t *bgep, boolean_t recheck)
 	uint32_t emac_status;
 	uint32_t lpadv;
 	boolean_t linkup;
+	boolean_t linkup_old = bgep->param_link_up;
 
 	for (;;) {
 		/*
-		 * Step 10: read & clear the main (Ethernet) MAC status
-		 * (the relevant bits of this are write-one-to-clear).
+		 * Step 10: BCM5714S, BCM5715S only
+		 * Don't call function bge_autoneg_serdes() as
+		 * RX_1000BASEX_AUTONEG_REG (0x0448) is not applicable
+		 * to BCM5705, BCM5788, BCM5721, BCM5751, BCM5752,
+		 * BCM5714, and BCM5715 devices.
 		 */
-		emac_status = bge_reg_get32(bgep, ETHERNET_MAC_STATUS_REG);
-		bge_reg_put32(bgep, ETHERNET_MAC_STATUS_REG, emac_status);
-
-		BGE_DEBUG(("bge_check_serdes: link %d/%s, "
-		    "MAC status 0x%x (was 0x%x)",
-		    bgep->link_state, UPORDOWN(bgep->param_link_up),
-		    emac_status, bgep->serdes_status));
-
-		/*
-		 * We will only consider the link UP if all the readings
-		 * are consistent and give meaningful results ...
-		 */
-		bgep->serdes_status = emac_status;
-		linkup = BIS(emac_status, ETHERNET_STATUS_SIGNAL_DETECT);
-		linkup &= BIS(emac_status, ETHERNET_STATUS_PCS_SYNCHED);
-
-		/*
-		 * Now some fiddling with the interpretation:
-		 *	if there's been an error at the PCS level, treat
-		 *	it as a link change (the h/w doesn't do this)
-		 *
-		 *	if there's been a change, but it's only a PCS sync
-		 *	change (not a config change), AND the link already
-		 *	was & is still UP, then ignore the change
-		 */
-		if (BIS(emac_status, ETHERNET_STATUS_PCS_ERROR))
-			emac_status |= ETHERNET_STATUS_LINK_CHANGED;
-		else if (BIC(emac_status, ETHERNET_STATUS_CFG_CHANGED))
-			if (bgep->param_link_up && linkup)
+		if (DEVICE_5714_SERIES_CHIPSETS(bgep)) {
+			emac_status =  bge_reg_get32(bgep, MI_STATUS_REG);
+			linkup = BIS(emac_status, MI_STATUS_LINK);
+			bgep->serdes_status = emac_status;
+			if ((linkup && linkup_old) ||
+			    (!linkup && !linkup_old)) {
 				emac_status &= ~ETHERNET_STATUS_LINK_CHANGED;
+				emac_status &= ~ETHERNET_STATUS_RECEIVING_CFG;
+				break;
+			}
+			emac_status |= ETHERNET_STATUS_LINK_CHANGED;
+			emac_status |= ETHERNET_STATUS_RECEIVING_CFG;
+			if (linkup)
+				linkup_old = B_TRUE;
+			else
+				linkup_old = B_FALSE;
+			recheck = B_TRUE;
+		} else {
+			/*
+			 * Step 10: others
+			 * read & clear the main (Ethernet) MAC status
+			 * (the relevant bits of this are write-one-to-clear).
+			 */
+			emac_status = bge_reg_get32(bgep,
+			    ETHERNET_MAC_STATUS_REG);
+			bge_reg_put32(bgep,
+			    ETHERNET_MAC_STATUS_REG, emac_status);
 
-		BGE_DEBUG(("bge_check_serdes: status 0x%x => 0x%x %s",
-		    bgep->serdes_status, emac_status, UPORDOWN(linkup)));
+			BGE_DEBUG(("bge_check_serdes: link %d/%s, "
+			    "MAC status 0x%x (was 0x%x)",
+			    bgep->link_state, UPORDOWN(bgep->param_link_up),
+			    emac_status, bgep->serdes_status));
 
-		/*
-		 * If we're receiving configs, run the autoneg protocol
-		 */
-		if (linkup && BIS(emac_status, ETHERNET_STATUS_RECEIVING_CFG))
-			bge_autoneg_serdes(bgep);
+			/*
+			 * We will only consider the link UP if all the readings
+			 * are consistent and give meaningful results ...
+			 */
+			bgep->serdes_status = emac_status;
+			linkup = BIS(emac_status,
+			    ETHERNET_STATUS_SIGNAL_DETECT);
+			linkup &= BIS(emac_status, ETHERNET_STATUS_PCS_SYNCHED);
 
-		/*
-		 * If the SerDes status hasn't changed, we're done ...
-		 */
-		if (BIC(emac_status, ETHERNET_STATUS_LINK_CHANGED))
-			break;
+			/*
+			 * Now some fiddling with the interpretation:
+			 *	if there's been an error at the PCS level, treat
+			 *	it as a link change (the h/w doesn't do this)
+			 *
+			 *	if there's been a change, but it's only a PCS
+			 *	sync change (not a config change), AND the link
+			 *	already was & is still UP, then ignore the
+			 *	change
+			 */
+			if (BIS(emac_status, ETHERNET_STATUS_PCS_ERROR))
+				emac_status |= ETHERNET_STATUS_LINK_CHANGED;
+			else if (BIC(emac_status, ETHERNET_STATUS_CFG_CHANGED))
+				if (bgep->param_link_up && linkup)
+					emac_status &=
+					    ~ETHERNET_STATUS_LINK_CHANGED;
 
-		/*
-		 * Go round again until we no longer see a change ...
-		 */
-		recheck = B_TRUE;
+			BGE_DEBUG(("bge_check_serdes: status 0x%x => 0x%x %s",
+			    bgep->serdes_status, emac_status,
+			    UPORDOWN(linkup)));
+
+			/*
+			 * If we're receiving configs, run the autoneg protocol
+			 */
+			if (linkup && BIS(emac_status,
+			    ETHERNET_STATUS_RECEIVING_CFG))
+				bge_autoneg_serdes(bgep);
+
+			/*
+			 * If the SerDes status hasn't changed, we're done ...
+			 */
+			if (BIC(emac_status, ETHERNET_STATUS_LINK_CHANGED))
+				break;
+
+			/*
+			 * Go round again until we no longer see a change ...
+			 */
+			recheck = B_TRUE;
+		}
 	}
 
 	/*

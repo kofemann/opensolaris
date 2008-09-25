@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <stdio.h>
 #include <libzfs.h>
 #include <string.h>
@@ -1141,14 +1139,14 @@ sa_zfs_update(sa_group_t group)
 					    strlen(optstring) > 0) {
 						(void) snprintf(command,
 						    ZFS_MAXPROPLEN * 2,
-						    "%s set sharenfs=%s %s",
-						    COMMAND,
+						    "%s set share%s=%s %s",
+						    COMMAND, proto,
 						    optstring, dataset);
 					} else {
 						(void) snprintf(command,
 						    ZFS_MAXPROPLEN * 2,
-						    "%s set sharenfs=on %s",
-						    COMMAND,
+						    "%s set share%s=on %s",
+						    COMMAND, proto,
 						    dataset);
 					}
 					pfile = popen(command, "r");
@@ -1278,6 +1276,17 @@ sa_share_zfs(sa_share_t share, char *path, share_t *sh,
 			(void) strlcpy(newpath, path, sizeof (newpath));
 			pathp = newpath;
 		}
+
+		/*
+		 * Make sure only one leading '/' This condition came
+		 * about when using HAStoragePlus which insisted on
+		 * putting an extra leading '/' in the ZFS path
+		 * name. The problem is fixed in other areas, but this
+		 * will catch any other ways that a double slash might
+		 * get introduced.
+		 */
+		while (*pathp == '/' && *(pathp + 1) == '/')
+			pathp++;
 
 		/*
 		 * chop off part of path, but if we are at root then

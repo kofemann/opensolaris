@@ -75,7 +75,7 @@
 #define	IPW2200_RXBUF_SIZE	(4096)
 
 static void  *ipw2200_ssp = NULL;
-static char ipw2200_ident[] = IPW2200_DRV_DESC " " IPW2200_DRV_REV;
+static char ipw2200_ident[] = IPW2200_DRV_DESC;
 
 /*
  * PIO access attributor for registers
@@ -663,6 +663,10 @@ ipw2200_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
+	err = mac_disable(sc->sc_ic.ic_mach);
+	if (err != DDI_SUCCESS)
+		return (err);
+
 	ipw2200_stop(sc);
 
 	/*
@@ -679,9 +683,7 @@ ipw2200_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	/*
 	 * Unregister from the MAC layer subsystem
 	 */
-	err = mac_unregister(sc->sc_ic.ic_mach);
-	if (err != DDI_SUCCESS)
-		return (err);
+	(void) mac_unregister(sc->sc_ic.ic_mach);
 
 	ddi_remove_intr(dip, IPW2200_PCI_INTR_NUM, sc->sc_iblk);
 
@@ -2943,7 +2945,7 @@ enable_interrupt:
  *  Module Loading Data & Entry Points
  */
 DDI_DEFINE_STREAM_OPS(ipw2200_devops, nulldev, nulldev, ipw2200_attach,
-    ipw2200_detach, ipw2200_reset, NULL, D_MP, NULL);
+    ipw2200_detach, ipw2200_reset, NULL, D_MP, NULL, ddi_quiesce_not_supported);
 
 static struct modldrv ipw2200_modldrv = {
 	&mod_driverops,

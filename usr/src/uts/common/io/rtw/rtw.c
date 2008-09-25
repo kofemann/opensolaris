@@ -34,10 +34,6 @@
  * OF SUCH DAMAGE.
  */
 
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
-
 #include <sys/param.h>
 #include <sys/types.h>
 #include <sys/signal.h>
@@ -181,7 +177,7 @@ static mac_callbacks_t rtw_m_callbacks = {
 };
 
 DDI_DEFINE_STREAM_OPS(rtw_dev_ops, nulldev, nulldev, rtw_attach, rtw_detach,
-    nodev, NULL, D_MP, NULL);
+    nodev, NULL, D_MP, NULL, ddi_quiesce_not_supported);
 
 static struct modldrv rtw_modldrv = {
 	&mod_driverops,		/* Type of module.  This one is a driver */
@@ -3404,6 +3400,9 @@ rtw_detach(dev_info_t *devinfo, ddi_detach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 	if (!(rsc->sc_flags & RTW_F_ATTACHED))
+		return (DDI_FAILURE);
+
+	if (mac_disable(rsc->sc_ic.ic_mach) != 0)
 		return (DDI_FAILURE);
 
 	/* free intterrupt resources */

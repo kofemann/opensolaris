@@ -199,6 +199,7 @@ static int nxge_hsvc_register(p_nxge_t);
 static int nxge_attach(dev_info_t *, ddi_attach_cmd_t);
 static int nxge_detach(dev_info_t *, ddi_detach_cmd_t);
 static void nxge_unattach(p_nxge_t);
+static int nxge_quiesce(dev_info_t *);
 
 #if NXGE_PROPERTY
 static void nxge_remove_hard_properties(p_nxge_t);
@@ -526,6 +527,7 @@ nxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	int		status = DDI_SUCCESS;
 	uint8_t		portn;
 	nxge_mmac_t	*mmac_info;
+	p_nxge_param_t	param_arr;
 
 	NXGE_DEBUG_MSG((nxgep, DDI_CTL, "==> nxge_attach"));
 
@@ -632,7 +634,7 @@ nxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 #if defined(sun4v)
 	/* This is required by nxge_hio_init(), which follows. */
 	if ((status = nxge_hsvc_register(nxgep)) != DDI_SUCCESS)
-		goto nxge_attach_fail;
+		goto nxge_attach_fail4;
 #endif
 
 	if ((status = nxge_hio_init(nxgep)) != NXGE_OK) {
@@ -727,6 +729,7 @@ nxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	if (isLDOMguest(nxgep)) {
 		uchar_t *prop_val;
 		uint_t prop_len;
+		uint32_t max_frame_size;
 
 		extern void nxge_get_logical_props(p_nxge_t);
 
@@ -756,6 +759,23 @@ nxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		ddi_prop_free(prop_val);
 		nxge_get_logical_props(nxgep);
 
+		/*
+		 * Enable Jumbo property based on the "max-frame-size"
+		 * property value.
+		 */
+		max_frame_size = ddi_prop_get_int(DDI_DEV_T_ANY,
+		    nxgep->dip, DDI_PROP_DONTPASS | DDI_PROP_NOTPROM,
+		    "max-frame-size", NXGE_MTU_DEFAULT_MAX);
+		if ((max_frame_size > NXGE_MTU_DEFAULT_MAX) &&
+		    (max_frame_size <= TX_JUMBO_MTU)) {
+			param_arr = nxgep->param_arr;
+
+			param_arr[param_accept_jumbo].value = 1;
+			nxgep->mac.is_jumbo = B_TRUE;
+			nxgep->mac.maxframesize = (uint16_t)max_frame_size;
+			nxgep->mac.default_mtu = nxgep->mac.maxframesize -
+			    NXGE_EHEADER_VLAN_CRC;
+		}
 	} else {
 		status = nxge_xcvr_find(nxgep);
 
@@ -1063,8 +1083,7 @@ nxge_unattach(p_nxge_t nxgep)
 
 #if defined(sun4v)
 int
-nxge_hsvc_register(
-	nxge_t *nxgep)
+nxge_hsvc_register(nxge_t *nxgep)
 {
 	nxge_status_t status;
 
@@ -5563,7 +5582,7 @@ done:
  */
 
 DDI_DEFINE_STREAM_OPS(nxge_dev_ops, nulldev, nulldev, nxge_attach, nxge_detach,
-    nodev, NULL, D_MP, NULL);
+    nodev, NULL, D_MP, NULL, nxge_quiesce);
 
 #define	NXGE_DESC_VER		"Sun NIU 10Gb Ethernet"
 
@@ -6560,10 +6579,14 @@ nxge_uninit_common_dev(p_nxge_t nxgep)
 			 * assigned to this instance of nxge in
 			 * nxge_use_cfg_dma_config().
 			 */
-			p_dma_cfgp = (p_nxge_dma_pt_cfg_t)&nxgep->pt_config;
-			p_cfgp = (p_nxge_hw_pt_cfg_t)&p_dma_cfgp->hw_config;
-			(void) nxge_fzc_rdc_tbl_unbind(nxgep,
-			    p_cfgp->def_mac_rxdma_grpid);
+			if (!isLDOMguest(nxgep)) {
+				p_dma_cfgp =
+				    (p_nxge_dma_pt_cfg_t)&nxgep->pt_config;
+				p_cfgp =
+				    (p_nxge_hw_pt_cfg_t)&p_dma_cfgp->hw_config;
+				(void) nxge_fzc_rdc_tbl_unbind(nxgep,
+				    p_cfgp->def_mac_rxdma_grpid);
+			}
 
 			if (hw_p->ndevs) {
 				hw_p->ndevs--;
@@ -6907,4 +6930,60 @@ nxge_set_pci_replay_timeout(p_nxge_t nxgep)
 	    PCI_REPLAY_TIMEOUT_CFG_OFFSET)));
 
 	NXGE_DEBUG_MSG((nxgep, DDI_CTL, "<== nxge_set_pci_replay_timeout"));
+}
+
+/*
+ * quiesce(9E) entry point.
+ *
+ * This function is called when the system is single-threaded at high
+ * PIL with preemption disabled. Therefore, this function must not be
+ * blocked.
+ *
+ * This function returns DDI_SUCCESS on success, or DDI_FAILURE on failure.
+ * DDI_FAILURE indicates an error condition and should almost never happen.
+ */
+static int
+nxge_quiesce(dev_info_t *dip)
+{
+	int instance = ddi_get_instance(dip);
+	p_nxge_t nxgep = (p_nxge_t)ddi_get_soft_state(nxge_list, instance);
+
+	if (nxgep == NULL)
+		return (DDI_FAILURE);
+
+	/* Turn off debugging */
+	nxge_debug_level = NO_DEBUG;
+	nxgep->nxge_debug_level = NO_DEBUG;
+	npi_debug_level = NO_DEBUG;
+
+	/*
+	 * Stop link monitor only when linkchkmod is interrupt based
+	 */
+	if (nxgep->mac.linkchkmode == LINKCHK_INTR) {
+		(void) nxge_link_monitor(nxgep, LINK_MONITOR_STOP);
+	}
+
+	(void) nxge_intr_hw_disable(nxgep);
+
+	/*
+	 * Reset the receive MAC side.
+	 */
+	(void) nxge_rx_mac_disable(nxgep);
+
+	/* Disable and soft reset the IPP */
+	if (!isLDOMguest(nxgep))
+		(void) nxge_ipp_disable(nxgep);
+
+	/*
+	 * Reset the transmit/receive DMA side.
+	 */
+	(void) nxge_txdma_hw_mode(nxgep, NXGE_DMA_STOP);
+	(void) nxge_rxdma_hw_mode(nxgep, NXGE_DMA_STOP);
+
+	/*
+	 * Reset the transmit MAC side.
+	 */
+	(void) nxge_tx_mac_disable(nxgep);
+
+	return (DDI_SUCCESS);
 }

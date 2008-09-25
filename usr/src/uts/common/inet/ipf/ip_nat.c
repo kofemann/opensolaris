@@ -4079,7 +4079,6 @@ nonatfrag:
 			nat->nat_pkts[1]++;
 			nat->nat_ref++;
 			MUTEX_EXIT(&nat->nat_lock);
-			nat->nat_touched = ifs->ifs_fr_ticks;
 			fin->fin_nat = nat;
 		}
 	} else
@@ -4129,7 +4128,7 @@ u_32_t nflags;
 	}
 
 #if SOLARIS && defined(_KERNEL)
-	net_data_t net_data_p = ifs->ifs_ipf_ipv4;
+	net_handle_t net_data_p = ifs->ifs_ipf_ipv4;
 #endif
 
 	tcp = NULL;
@@ -4408,7 +4407,6 @@ nonatfrag:
 			nat->nat_pkts[0]++;
 			nat->nat_ref++;
 			MUTEX_EXIT(&nat->nat_lock);
-			nat->nat_touched = ifs->ifs_fr_ticks;
 			fin->fin_nat = nat;
 			fin->fin_state = nat->nat_state;
 		}
@@ -4459,7 +4457,7 @@ u_32_t nflags;
 	}
 
 #if SOLARIS && defined(_KERNEL)
-	net_data_t net_data_p = ifs->ifs_ipf_ipv4;
+	net_handle_t net_data_p = ifs->ifs_ipf_ipv4;
 #endif
 
 	tcp = NULL;

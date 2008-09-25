@@ -68,7 +68,7 @@ int vhci_prout_not_ready_retry = 180;
 /*
  * Version Macros
  */
-#define	VHCI_NAME_VERSION	"SCSI VHCI Driver 1.79"
+#define	VHCI_NAME_VERSION	"SCSI VHCI Driver"
 char		vhci_version_name[] = VHCI_NAME_VERSION;
 
 int		vhci_first_time = 0;
@@ -276,6 +276,7 @@ static struct dev_ops vhci_ops = {
 	&vhci_cb_ops,		/* cb_ops */
 	NULL,			/* bus_ops */
 	NULL,			/* power */
+	ddi_quiesce_not_needed,	/* quiesce */
 };
 
 extern struct mod_ops mod_driverops;
@@ -1823,9 +1824,13 @@ vhci_scsi_init_pkt(struct scsi_address *ap, struct scsi_pkt *pkt,
 
 	if (pkt == NULL) {
 		if (cmdlen > VHCI_SCSI_CDB_SIZE) {
-			VHCI_DEBUG(1, (CE_NOTE, NULL,
-			    "!init pkt: cdb size not supported\n"));
-			return (NULL);
+			if ((cmdlen != VHCI_SCSI_OSD_CDB_SIZE) ||
+			    ((flags & VHCI_SCSI_OSD_PKT_FLAGS) !=
+			    VHCI_SCSI_OSD_PKT_FLAGS)) {
+				VHCI_DEBUG(1, (CE_NOTE, NULL,
+				    "!init pkt: cdb size not supported\n"));
+				return (NULL);
+			}
 		}
 
 		pktp = scsi_hba_pkt_alloc(vhci->vhci_dip,

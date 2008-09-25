@@ -127,12 +127,14 @@ usr/src/uts/common/io/ath/LICENSE
 usr/src/uts/common/io/chxge/com/THIRDPARTYLICENSE
 usr/src/uts/common/io/drm/THIRDPARTYLICENSE
 usr/src/uts/common/io/ib/clients/rds/THIRDPARTYLICENSE
-usr/src/uts/common/io/iwk/THIRDPARTYLICENSE
-usr/src/uts/common/io/iwk/fw-iw/LICENSE
 usr/src/uts/common/io/ipw/THIRDPARTYLICENSE
 usr/src/uts/common/io/ipw/fw-ipw2100/LICENSE
+usr/src/uts/common/io/iwh/THIRDPARTYLICENSE
+usr/src/uts/common/io/iwh/fw-iw/LICENSE
 usr/src/uts/common/io/iwi/THIRDPARTYLICENSE
 usr/src/uts/common/io/iwi/fw-ipw2200/LICENSE
+usr/src/uts/common/io/iwk/THIRDPARTYLICENSE
+usr/src/uts/common/io/iwk/fw-iw/LICENSE
 usr/src/uts/common/io/ixgbe/THIRDPARTYLICENSE
 usr/src/uts/common/io/mega_sas/THIRDPARTYLICENSE
 usr/src/uts/common/io/mxfe/THIRDPARTYLICENSE
@@ -153,6 +155,9 @@ usr/src/uts/intel/THIRDPARTYLICENSE
 usr/src/uts/intel/io/acpica/THIRDPARTYLICENSE
 usr/src/uts/intel/io/amd8111s/THIRDPARTYLICENSE.amd8111s
 usr/src/uts/intel/io/amr/THIRDPARTYLICENSE
+usr/src/uts/intel/pcbe/THIRDPARTYLICENSE
+usr/src/uts/sun4u/pcbe/THIRDPARTYLICENSE
+usr/src/uts/sun4v/pcbe/THIRDPARTYLICENSE
 usr/src/common/mpi/THIRDPARTYLICENSE
 usr/src/lib/libsmbfs/smb/THIRDPARTYLICENSE.apple
 usr/src/lib/libsmbfs/smb/THIRDPARTYLICENSE.boris_popov
