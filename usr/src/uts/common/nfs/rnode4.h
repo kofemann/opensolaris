@@ -199,6 +199,16 @@ typedef struct r4hashq {
  *	set r_modaddr and release r_statelock as long as the r_rwlock
  *	writer lock is held.
  *
+ * r_inmap informs nfs4_read()/write() that there is a call to nfs4_map()
+ * in progress. nfs4_read()/write() check r_inmap to decide whether
+ * to perform directio on the file or not. r_inmap is atomically
+ * incremented in nfs4_map() before the address space routines are
+ * called and atomically decremented just before nfs4_map() exits.
+ * r_inmap is not protected by any lock.
+ *
+ * r_mapcnt tells that the rnode has mapped pages. r_inmap can be 0
+ * while the rnode has mapped pages.
+ *
  * 64-bit offsets: the code formerly assumed that atomic reads of
  * r_size were safe and reliable; on 32-bit architectures, this is
  * not true since an intervening bus cycle from another processor
@@ -325,6 +335,7 @@ typedef struct rnode4 {
 					/* stub type was set		    */
 	nfs4_stub_type_t	r_stub_type;
 					/* e.g. mirror-mount */
+	uint_t		r_inmap;	/* to serialize read/write and mmap */
 	list_t 		r_layout;	/* pNFS layout(s) */
 	uint64_t	r_proxyio_count; /* Counter for proxy I/O */
 	uint64_t	r_dsio_count; 	/* Counter for DS I/O */
