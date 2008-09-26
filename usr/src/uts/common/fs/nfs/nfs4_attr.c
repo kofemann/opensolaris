@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.
- * All rights reserved.  Use is subject to license terms.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/time.h>
 #include <sys/systm.h>
@@ -270,11 +268,10 @@ nfs4_set_fattr4_attr(vattr_t *vap, vsecattr_t *vsap,
 }
 
 /*
- * XXX - This is a shorter version of vattr_to_fattr4 which only takes care
- * of setattr args - size, mode, uid/gid, times. Eventually we should generalize
- * by using nfs4_ntov_map and the same functions used by the server.
- * Here we just hardcoded the setattr attributes. Note that the order is
- * important - it should follow the order of the bits in the mask.
+ * vattr_to_fattr4 takes creates the fattr4 arg for the setattr, open, create,
+ * nverify, and verify ops.  Only a subset of writeable attributes are
+ * supported by the lower level attr converstion functions: size, mode,
+ * uid/gid, times, and layouthint.
  */
 int
 vattr_to_fattr4(vattr_t *vap, vsecattr_t *vsap, fattr4 *fattrp, int flags,
@@ -285,8 +282,6 @@ vattr_to_fattr4(vattr_t *vap, vsecattr_t *vsap, fattr4 *fattrp, int flags,
 	int attrcnt;
 	int uid_attr = -1;
 	int gid_attr = -1;
-	int acl_attr = -1;
-	int lohint_attr = -1;
 	XDR xdr;
 	ulong_t xdr_size;
 	char *xdr_attrs;
@@ -295,6 +290,7 @@ vattr_to_fattr4(vattr_t *vap, vsecattr_t *vsap, fattr4 *fattrp, int flags,
 	uint_t va_mask = vap->va_mask;
 	bool_t (*attrfunc)();
 	struct nfs4_ntov_map *nvmap;
+	attrmap4 todo_amap;
 
 	nvmap = NFS4_NTOV_MAP(avers);
 	fattrp->attrmask = NFS4_EMPTY_ATTRMAP(avers);
@@ -322,6 +318,7 @@ vattr_to_fattr4(vattr_t *vap, vsecattr_t *vsap, fattr4 *fattrp, int flags,
 		 * this routine knows how to handle all vmask bits
 		 */
 		nfs4_vmask_to_nmask(va_mask, &fattrp->attrmask, avers);
+
 		/*
 		 * nfs4_vmask_to_nmask will set change whenever AT_CTIME
 		 * or AT_MTIME is requested.  Client verify/nverify only
@@ -334,21 +331,39 @@ vattr_to_fattr4(vattr_t *vap, vsecattr_t *vsap, fattr4 *fattrp, int flags,
 		attrfunc = nfs4_ver_fattr4_attr;
 	}
 
-	/* Mask out any rec attrs unsupported by server */
+	/*
+	 * Mask out any rec attrs unsupported by server.
+	 */
 	ATTRMAP_MASK(fattrp->attrmask, *supp);
+	todo_amap = fattrp->attrmask;
 
 	attrcnt = 0;
 	xdr_size = 0;
 	for (i = 0; i < NFS4_NTOV_MAP_SIZE(avers); i++) {
 		/*
-		 * In the case of ACL and LAYOUT_HINT, the vbit will be 0
-		 * (zero).  Normally vbit==0 attrs are skipped, but make
-		 * an exception for ACL and LAYOUT_HINT.
+		 * Skip this nfs attr if not requested or not supported
+		 * by server
 		 */
-		if (!(nvmap[i].vbit & vap->va_mask) &&
-		    !(nvmap[i].nval == FATTR4_ACL && vsap) &&
-		    !(nvmap[i].nval == FATTR4_LAYOUT_HINT && floh))
+		if (!(ATTRMAP_TST(fattrp->attrmask, nvmap[i].fbit)))
 			continue;
+
+		/*
+		 * Skip if caller did not provide data for attr
+		 */
+		switch (nvmap[i].nval) {
+		case FATTR4_ACL:
+			if (vsap == NULL)
+				continue;
+			break;
+		case FATTR4_LAYOUT_HINT:
+			if (floh == NULL)
+				continue;
+			break;
+		default:
+			if (! (nvmap[i].vbit & vap->va_mask))
+				continue;
+			break;
+		}
 
 		if (attrfunc == nfs4_set_fattr4_attr) {
 
@@ -409,7 +424,6 @@ vattr_to_fattr4(vattr_t *vap, vsecattr_t *vsap, fattr4 *fattrp, int flags,
 			} else if (nvmap[i].nval == FATTR4_ACL) {
 				nfsace4 *tmpacl = (nfsace4 *)vsap->vsa_aclentp;
 
-				acl_attr = attrcnt;
 				/* fattr4_acl_len */
 				xdr_size += BYTES_PER_XDR_UNIT;
 				/* fattr4_acl_val */
@@ -437,12 +451,16 @@ vattr_to_fattr4(vattr_t *vap, vsecattr_t *vsap, fattr4 *fattrp, int flags,
 		 * Clear this bit from test mask so we stop
 		 * as soon as all requested attrs are done.
 		 */
-		va_mask &= ~nvmap[i].vbit;
-		if (va_mask == 0 &&
-		    ((vsap == NULL) || (acl_attr != -1)) &&
-		    ((floh == NULL) || (lohint_attr != -1)))
+		ATTRMAP_CLR(todo_amap, nvmap[i].fbit);
+		if (ATTRMAP_EMPTY(todo_amap))
 			break;
 	}
+
+	/*
+	 * Only bits for skipped attrs remain todo_amap.  Any bits
+	 * set in todo_amap must be cleared in fattrp->attrmask.
+	 */
+	ATTRMAP_CLR(fattrp->attrmask, todo_amap);
 
 	if (attrcnt == 0) {
 		goto done;
