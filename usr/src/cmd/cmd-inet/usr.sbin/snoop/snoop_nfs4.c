@@ -6087,32 +6087,8 @@ sumarg_layoutcommit(char *buf, size_t buflen, void *obj)
 	nfstime4 *time;
 	char *bp = buf;
 
-	snprintf(bp, buflen, "OFF=%llu", args->loca_offset);
-	bp += strlen(bp);
-	snprintf(bp, buflen - (bp - buf), " LEN=%llu",
-	    args->loca_length);
-	bp += strlen(bp);
-
-	snprintf(bp, buflen - (bp - buf), " %s",
+	snprintf(bp, buflen - (bp - buf), "%s",
 	    sum_stateid(&args->loca_stateid));
-	bp += strlen(bp);
-
-	if (args->loca_last_write_offset.no_newoffset) {
-		noff = &args->loca_last_write_offset;
-		snprintf(bp, buflen - (bp - buf), " LOFF=%llu",
-		    noff->newoffset4_u.no_offset);
-		bp += strlen(bp);
-	}
-
-	if (args->loca_time_modify.nt_timechanged) {
-		time = &args->loca_time_modify.newtime4_u.nt_time;
-		snprintf(bp, buflen - (bp - buf), " TM=%s",
-		    format_time(time->seconds, time->nseconds));
-		bp += strlen(bp);
-	}
-
-	snprintf(bp, buflen - (bp - buf), " %s",
-	    sum_lotype_name(args->loca_layoutupdate.lou_type));
 }
 
 static void
@@ -6195,19 +6171,7 @@ sumarg_layoutget(char *buf, size_t buflen, void *obj)
 	LAYOUTGET4args *args = (LAYOUTGET4args *)obj;
 	char *bp = buf;
 
-	snprintf(bp, buflen, "%s",
-	    sum_lotype_name(args->loga_layout_type));
-	bp += strlen(bp);
-	snprintf(bp, buflen - (bp - buf), " %s",
-	    sum_iomode_name(args->loga_iomode));
-	bp += strlen(bp);
-	snprintf(bp, buflen - (bp - buf), " OFF=%llu",
-	    args->loga_offset);
-	bp += strlen(bp);
-	snprintf(bp, buflen - (bp - buf), " LEN=%llu",
-	    args->loga_length);
-	bp += strlen(bp);
-	snprintf(bp, buflen - (bp - buf), " %s",
+	snprintf(bp, buflen - (bp - buf), "%s",
 	    sum_stateid(&args->loga_stateid));
 }
 
@@ -6276,39 +6240,16 @@ sumres_layoutget(char *buf, size_t buflen, void *obj)
 	LAYOUTGET4resok *resok;
 	layout4 *lo;
 	char *bp = buf;
-	int i;
 
 	strcpy(bp, status_name(res->logr_status));
 	if (res->logr_status == NFS4_OK) {
 		resok = &res->LAYOUTGET4res_u.logr_resok4;
 		bp += strlen(bp);
-		snprintf(bp, buflen - (bp - buf), " %s",
+		snprintf(bp, buflen - (bp - buf), "%s",
 		    sum_stateid(&resok->logr_stateid));
-		for (i = 0; i < resok->logr_layout.logr_layout_len; i++) {
-			bp += strlen(bp);
-			lo = &resok->logr_layout.logr_layout_val[i];
-			snprintf(bp, buflen - (bp - buf), " [%u]:OFF=%llu",
-			    i, lo->lo_offset);
-			bp += strlen(bp);
-			snprintf(bp, buflen - (bp - buf), " LEN=%llu",
-			    lo->lo_length);
-			bp += strlen(bp);
-			snprintf(bp, buflen - (bp - buf), " %s",
-			    sum_iomode_name(lo->lo_iomode));
-			bp += strlen(bp);
-			snprintf(bp, buflen - (bp - buf), " %s",
-			    sum_lotype_name(lo->lo_content.loc_type));
-			bp += strlen(bp);
-			if (lo->lo_content.loc_type == LAYOUT4_NFSV4_1_FILES)
-				sum_file_layout(bp, buflen - (bp - buf), lo);
-			else
-				snprintf(bp, buflen - (bp - buf), " %s",
-				    tohex(lo->lo_content.loc_body.loc_body_val,
-				    lo->lo_content.loc_body.loc_body_len));
-		}
 	} else if (res->logr_status == NFS4ERR_LAYOUTTRYLATER) {
 		bp += strlen(bp);
-		snprintf(bp, buflen - (bp - buf), " %s",
+		snprintf(bp, buflen - (bp - buf), "%s",
 		    res->LAYOUTGET4res_u.logr_will_signal_layout_avail ?
 		    "SIGNAL" : "NO_SIGNAL");
 	}
@@ -6392,22 +6333,12 @@ sumarg_layoutreturn(char *buf, size_t buflen, void *obj)
 	layoutreturn4 *lr = &args->lora_layoutreturn;
 	char *bp = buf;
 
-	snprintf(bp, buflen, "%s",
-	    sum_lotype_name(args->lora_layout_type));
-	bp += strlen(bp);
-	snprintf(bp, buflen - (bp - buf), " %s",
-	    sum_iomode_name(args->lora_iomode));
-	bp += strlen(bp);
-	snprintf(bp, buflen - (bp - buf), " %s",
-	    sum_lrtype_name(lr->lr_returntype));
-	if (lr->lr_returntype == LAYOUTRETURN4_FILE) {
-		bp += strlen(bp);
-		snprintf(bp, buflen - (bp - buf), " OFF=%llu",
-		    lr->layoutreturn4_u.lr_layout.lrf_offset);
-		bp += strlen(bp);
-		snprintf(bp, buflen - (bp - buf), " LEN=%llu",
-		    lr->layoutreturn4_u.lr_layout.lrf_length);
-	}
+	if (lr->lr_returntype == LAYOUTRETURN4_FILE)
+		snprintf(bp, buflen - (bp - buf), "%s",
+		    sum_stateid(&lr->layoutreturn4_u.lr_layout.lrf_stateid));
+	else
+		snprintf(bp, buflen - (bp - buf), "Returntype=%s",
+		    sum_lrtype_name(lr->lr_returntype));
 }
 
 static void
@@ -6429,6 +6360,7 @@ dtlarg_layoutreturn(void *obj)
 		    lr->layoutreturn4_u.lr_layout.lrf_offset);
 		sprintf(get_line(0, 0), "Layoutreturn Length = %llu",
 		    lr->layoutreturn4_u.lr_layout.lrf_length);
+		detail_stateid(&lr->layoutreturn4_u.lr_layout.lrf_stateid);
 	}
 }
 
@@ -6555,15 +6487,11 @@ sumarg_cb_layoutrecall(char *buf, size_t buflen, void *obj)
 	fsid4			*lor_fsid;
 	char *bp = buf;
 
-	snprintf(bp, buflen - (bp - buf), " %s",
-	    sum_lortype_name(args->clora_recall.lor_recalltype));
-	bp += strlen(bp);
-
 	switch (args->clora_recall.lor_recalltype) {
 	case LAYOUTRECALL4_FILE:
 		lor_file = &args->clora_recall.layoutrecall4_u.lor_layout;
 		snprintf(bp, buflen - (bp - buf), " %s",
-		    sum_fh4(&lor_file->lor_fh));
+		    sum_stateid(&lor_file->lor_stateid));
 		break;
 	case LAYOUTRECALL4_FSID:
 		lor_fsid = &args->clora_recall.layoutrecall4_u.lor_fsid;
@@ -6571,7 +6499,6 @@ sumarg_cb_layoutrecall(char *buf, size_t buflen, void *obj)
 		    lor_fsid->major, lor_fsid->minor);
 		break;
 	}
-	bp += strlen(bp);
 }
 
 static void
@@ -6602,6 +6529,7 @@ dtlarg_cb_layoutrecall(void *obj)
 		    lor_file->lor_offset);
 		sprintf(get_line(0, 0), "Length  = %llu",
 		    lor_file->lor_length);
+		detail_stateid(&lor_file->lor_stateid);
 		break;
 	case LAYOUTRECALL4_FSID:
 		lor_fsid = &args->clora_recall.layoutrecall4_u.lor_fsid;
