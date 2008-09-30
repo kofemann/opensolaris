@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/systm.h>
 #include <rpc/auth.h>
@@ -40,29 +38,165 @@
 #include <sys/cmn_err.h>
 
 
-extern u_longlong_t nfs4_srv_caller_id;
-
 /*
  * This file contains the code for the monitors which are placed on the vnodes
- * of files that are granted delegations by the nfsV4 server.  These monitors
+ * of files that are granted delegations by the NFSv4 server.  These monitors
  * will detect local access, as well as access from other servers
  * (NFS and CIFS), that conflict with the delegations and recall the
  * delegation from the client before letting the offending operation continue.
  *
  * If the caller does not want to block while waiting for the delegation to
  * be returned, then it should set CC_DONTBLOCK in the flags of caller context.
- * This does not work for vnevnents; remove and rename, they always block.
+ * This does not work for vnevnents; remove and rename.  They always block.
  */
+
+static int nsi_count = 2;
+/*
+ * this is the function to recall a read delegation.  it will check if the
+ * caller wishes to block or not while waiting for the delegation to be
+ * returned.  if the caller context flag has CC_DONTBLOCK set, then it will
+ * return an error instead of waiting for the delegation.
+ * this function needs to check for all server instance delegations.
+ */
+int
+recall_read_delegations(
+	vnode_t *vp,
+	rfs4_file_t *fp,
+	caller_context_t *ct)
+{
+	int i, cnt, j;
+	clock_t rc;
+	rfs4_file_t **fpa, *fap;
+	nfs_server_instance_t *instp;
+
+	/*
+	 * More than one instance could have given out read delegations to this
+	 * file, however, we know that whatever instance owns this 'fp' has
+	 * given out a delegation, so kick off the recall before checking for
+	 * more.
+	 */
+	rfs4_recall_deleg(fp, FALSE, NULL);
+
+	/*
+	 * is there more than one file structure for this vp?
+	 * get the vsd for each instance of the server, if it exists.
+	 */
+	fpa = kmem_alloc((sizeof (rfs4_file_t *) * nsi_count), KM_SLEEP);
+	fpa[0] = fp;
+	cnt = 1;
+	mutex_enter(&vp->v_lock);
+	for (instp = list_head(&nsi_head); instp != NULL;
+	    instp = list_next(&nsi_head, &instp->nsi_list)) {
+		fpa[cnt] = (rfs4_file_t *)vsd_get(vp, instp->vkey);
+		if (fpa[cnt] && (fpa[cnt] != fp))
+			cnt++;
+	}
+	mutex_exit(&vp->v_lock);
+
+	/*
+	 * 'cnt' now equals the number of instances that have a file struct
+	 * for this file.  Now check if it is a valid file and if it has
+	 * a delegation.  If so, send a recall.
+	 */
+	for (j = 1; j < cnt; j++) {
+		rfs4_dbe_lock(fpa[j]->dbe);
+		if (fpa[j]->dinfo->dtype == OPEN_DELEGATE_NONE ||
+		    rfs4_dbe_is_invalid(fpa[j]->dbe) ||
+		    (rfs4_dbe_refcnt(fpa[j]->dbe) == 0)) {
+			rfs4_dbe_unlock(fpa[j]->dbe);
+			fpa[j] = NULL;
+		} else {
+			rfs4_dbe_hold(fpa[j]->dbe);
+			rfs4_dbe_unlock(fpa[j]->dbe);
+			rfs4_recall_deleg(fpa[j], FALSE, NULL);
+		}
+	}
+
+	/* optimization */
+	delay(NFS4_DELEGATION_CONFLICT_DELAY);
+
+	/*
+	 * Check to see if the delegations have been returned already.
+	 * If so, then we are done, return success.
+	 */
+	for (j = 0; j < cnt; j++) {
+		fap = fpa[j];
+		if (fap != NULL) {
+			rfs4_dbe_lock(fap->dbe);
+			if (fap->dinfo->dtype != OPEN_DELEGATE_NONE)
+				break;
+			rfs4_dbe_unlock(fap->dbe);
+		}
+	}
+
+	if (j == cnt)
+		return (0);
+
+	/*
+	 * Not all delegations have been returned yet.  Check the caller
+	 * context to see if we should wait for their return, or just
+	 * return now with an error.
+	 */
+	if (ct && ct->cc_flags & CC_DONTBLOCK) {
+		rfs4_dbe_unlock(fap->dbe);
+		ct->cc_flags |= CC_WOULDBLOCK;
+		return (NFS4ERR_DELAY);
+	}
+
+	/* let the waiting begin (note: fap is still locked from above) */
+wait:
+	while (fap->dinfo->dtype != OPEN_DELEGATE_NONE) {
+		rc = rfs4_dbe_twait(fap->dbe,
+		    lbolt + SEC_TO_TICK(dbe_to_instp(fap->dbe)->lease_period));
+		if (rc == -1) { /* timed out */
+			rfs4_dbe_unlock(fap->dbe);
+			rfs4_recall_deleg(fap, FALSE, NULL);
+			rfs4_dbe_lock(fap->dbe);
+			/*
+			 * Send recalls to any other instance's clients who
+			 * haven't returned their delegation yet.
+			 */
+			for (i = j + 1; j < cnt; i++) {
+				if (fpa[i] == NULL)
+					continue;
+				rfs4_dbe_lock(fpa[i]->dbe);
+				if (fpa[i]->dinfo->dtype !=
+				    OPEN_DELEGATE_NONE) {
+					rfs4_dbe_unlock(fpa[i]->dbe);
+					rfs4_recall_deleg(fpa[i], FALSE, NULL);
+				} else {
+					rfs4_dbe_unlock(fpa[i]->dbe);
+					fpa[i] = NULL;	/* this one is done */
+				}
+			}
+		}
+	}
+	rfs4_dbe_unlock(fap->dbe);
+
+	/* have they all completed returning the delegations? */
+	for (i = j + 1; j < cnt; i++) {
+		if (fpa[i] == NULL)
+			continue;
+		rfs4_dbe_lock(fpa[i]->dbe);
+		if (fpa[i]->dinfo->dtype != OPEN_DELEGATE_NONE) {
+			fap = fpa[i];
+			j = i;
+			goto wait;
+		}
+		rfs4_dbe_unlock(fpa[i]->dbe);
+		fpa[i] = NULL;
+	}
+
+	return (0);
+}
 
 /*
- * This is the function to recall a delegation.  It will check if the caller
- * wishes to block or not while waiting for the delegation to be returned.
- * If the caller context flag has CC_DONTBLOCK set, then it will return
- * an error and set CC_WOULDBLOCK instead of waiting for the delegation.
+ * this is the function to recall a write delegation.  there can only be
+ * one write delegation handed out to a client.  there is no need to check
+ * the other server instances to see if they have delegated this file.
  */
-
 int
-recall_all_delegations(
+recall_write_delegation(
 	rfs4_file_t *fp,
 	bool_t trunc,
 	caller_context_t *ct)
@@ -70,26 +204,24 @@ recall_all_delegations(
 	clock_t rc;
 
 	rfs4_recall_deleg(fp, trunc, NULL);
-
-	/* optimization that may not stay */
 	delay(NFS4_DELEGATION_CONFLICT_DELAY);
 
-	/* if it has been returned, we're done. */
 	rfs4_dbe_lock(fp->dbe);
 	if (fp->dinfo->dtype == OPEN_DELEGATE_NONE) {
 		rfs4_dbe_unlock(fp->dbe);
 		return (0);
 	}
+	rfs4_dbe_unlock(fp->dbe);
 
-	if (ct != NULL && ct->cc_flags & CC_DONTBLOCK) {
-		rfs4_dbe_unlock(fp->dbe);
+	if (ct && ct->cc_flags & CC_DONTBLOCK) {
 		ct->cc_flags |= CC_WOULDBLOCK;
 		return (NFS4ERR_DELAY);
 	}
 
+	rfs4_dbe_lock(fp->dbe);
 	while (fp->dinfo->dtype != OPEN_DELEGATE_NONE) {
 		rc = rfs4_dbe_twait(fp->dbe,
-		    lbolt + SEC_TO_TICK(rfs4_lease_time));
+		    lbolt + SEC_TO_TICK(dbe_to_instp(fp->dbe)->lease_period));
 		if (rc == -1) { /* timed out */
 			rfs4_dbe_unlock(fp->dbe);
 			rfs4_recall_deleg(fp, trunc, NULL);
@@ -111,18 +243,15 @@ deleg_rd_open(
 {
 	int rc;
 	rfs4_file_t *fp;
+	vnode_t *vp = *(arg->fa_vnode.vpp);
 
 	/*
-	 * Now that the NFSv4 server calls VOP_OPEN, we need to check to
-	 * to make sure it is not us calling open (like for DELEG_CUR) or
-	 * we will end up panicing the system.
 	 * Since this monitor is for a read delegated file, we know that
 	 * only an open for write will cause a conflict.
 	 */
-	if ((ct == NULL || ct->cc_caller_id != nfs4_srv_caller_id) &&
-	    (mode & (FWRITE|FTRUNC))) {
+	if (mode & (FWRITE|FTRUNC)) {
 		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-		rc = recall_all_delegations(fp, FALSE, ct);
+		rc = recall_read_delegations(vp, fp, ct);
 		if (rc == NFS4ERR_DELAY)
 			return (EAGAIN);
 	}
@@ -140,17 +269,20 @@ deleg_wr_open(
 {
 	int rc;
 	rfs4_file_t *fp;
+	nfs_server_instance_t *instp;
+
+	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
+	instp = dbe_to_instp(fp->dbe);
 
 	/*
 	 * Now that the NFSv4 server calls VOP_OPEN, we need to check to
-	 * to make sure it is not us calling open (like for DELEG_CUR) or
+	 * to make sure it is not us calling open (open race) or
 	 * we will end up panicing the system.
 	 * Since this monitor is for a write delegated file, we know that
 	 * any open will cause a conflict.
 	 */
-	if (ct == NULL || ct->cc_caller_id != nfs4_srv_caller_id) {
-		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-		rc = recall_all_delegations(fp, FALSE, ct);
+	if (ct == NULL || ct->cc_caller_id != instp->caller_id) {
+		rc = recall_write_delegation(fp, FALSE, ct);
 		if (rc == NFS4ERR_DELAY)
 			return (EAGAIN);
 	}
@@ -159,9 +291,9 @@ deleg_wr_open(
 }
 
 /*
- * This is op is for write delegations only and should only be hit
- * by the owner of the delegation.  If not, then someone is
- * doing a read without doing an open first. Like from nfs2/3.
+ * this is op is for write delegations only and should only be hit
+ * by the owner of the delegation.  if not, then someone is
+ * doing a read without doing an open first. like from nfs2/3.
  */
 int
 deleg_wr_read(
@@ -173,11 +305,14 @@ deleg_wr_read(
 {
 	int rc;
 	rfs4_file_t *fp;
+	nfs_server_instance_t *instp;
 
-	/* Use caller context to compare caller to delegation owner */
-	if (ct == NULL || ct->cc_caller_id != nfs4_srv_caller_id) {
-		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-		rc = recall_all_delegations(fp, FALSE, ct);
+	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
+	instp = dbe_to_instp(fp->dbe);
+
+	/* use caller context to compare caller to delegation owner */
+	if (ct == NULL || ct->cc_caller_id != instp->caller_id) {
+		rc = recall_write_delegation(fp, FALSE, ct);
 		if (rc == NFS4ERR_DELAY)
 			return (EAGAIN);
 	}
@@ -198,9 +333,10 @@ deleg_rd_write(
 {
 	int rc;
 	rfs4_file_t *fp;
+	vnode_t *vp = arg->fa_vnode.vp;
 
 	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-	rc = recall_all_delegations(fp, FALSE, ct);
+	rc = recall_read_delegations(vp, fp, ct);
 	if (rc == NFS4ERR_DELAY)
 		return (EAGAIN);
 
@@ -208,8 +344,8 @@ deleg_rd_write(
 }
 
 /*
- * The owner of the delegation can write the file, but nobody else can.
- * Conflicts should be caught at open, but NFSv2&3 don't use OPEN.
+ * the owner of the delegation can write the file, but nobody else can.
+ * conflicts should be caught at open, but NFSv2&3 don't use OPEN.
  */
 int
 deleg_wr_write(
@@ -221,18 +357,21 @@ deleg_wr_write(
 {
 	int rc;
 	rfs4_file_t *fp;
+	nfs_server_instance_t *instp;
 
-	/* Use caller context to compare caller to delegation owner */
-	if (ct == NULL || ct->cc_caller_id != nfs4_srv_caller_id) {
-		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-		rc = recall_all_delegations(fp, FALSE, ct);
+	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
+	instp = dbe_to_instp(fp->dbe);
+
+	/* use caller context to compare caller to delegation owner */
+	if (ct == NULL || ct->cc_caller_id != instp->caller_id) {
+		rc = recall_write_delegation(fp, FALSE, ct);
 		if (rc == NFS4ERR_DELAY)
 			return (EAGAIN);
 	}
 	return (vnext_write(arg, uiop, ioflag, cr, ct));
 }
 
-/* Doing a setattr on a read delegated file is a conflict. */
+/* doing a setattr on a read delegated file is a conflict. */
 int
 deleg_rd_setattr(
 	femarg_t *arg,
@@ -242,21 +381,18 @@ deleg_rd_setattr(
 	caller_context_t *ct)
 {
 	int rc;
-	bool_t trunc = FALSE;
 	rfs4_file_t *fp;
-
-	if ((vap->va_mask & AT_SIZE) && (vap->va_size == 0))
-		trunc = TRUE;
+	vnode_t *vp = arg->fa_vnode.vp;
 
 	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-	rc = recall_all_delegations(fp, trunc, ct);
+	rc = recall_read_delegations(vp, fp, ct);
 	if (rc == NFS4ERR_DELAY)
 		return (EAGAIN);
 
 	return (vnext_setattr(arg, vap, flags, cr, ct));
 }
 
-/* Only the owner of the write delegation can do a setattr */
+/* only the owner of the write delegation can do a setattr */
 int
 deleg_wr_setattr(
 	femarg_t *arg,
@@ -268,16 +404,19 @@ deleg_wr_setattr(
 	int rc;
 	bool_t trunc = FALSE;
 	rfs4_file_t *fp;
+	nfs_server_instance_t *instp;
+
+	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
+	instp = dbe_to_instp(fp->dbe);
 
 	/*
 	 * Use caller context to compare caller to delegation owner
 	 */
-	if (ct == NULL || (ct->cc_caller_id != nfs4_srv_caller_id)) {
+	if (ct == NULL || (ct->cc_caller_id != instp->caller_id)) {
 		if ((vap->va_mask & AT_SIZE) && (vap->va_size == 0))
 			trunc = TRUE;
 
-		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-		rc = recall_all_delegations(fp, trunc, ct);
+		rc = recall_write_delegation(fp, trunc, ct);
 		if (rc == NFS4ERR_DELAY)
 			return (EAGAIN);
 	}
@@ -293,13 +432,14 @@ deleg_rd_rwlock(
 {
 	int rc;
 	rfs4_file_t *fp;
+	vnode_t *vp = arg->fa_vnode.vp;
 
 	/*
 	 * If this is a write lock, then we got us a conflict.
 	 */
 	if (write_lock) {
 		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-		rc = recall_all_delegations(fp, FALSE, ct);
+		rc = recall_read_delegations(vp, fp, ct);
 		if (rc == NFS4ERR_DELAY)
 			return (EAGAIN);
 	}
@@ -316,11 +456,14 @@ deleg_wr_rwlock(
 {
 	int rc;
 	rfs4_file_t *fp;
+	nfs_server_instance_t *instp;
 
-	/* Use caller context to compare caller to delegation owner */
-	if (ct == NULL || ct->cc_caller_id != nfs4_srv_caller_id) {
-		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-		rc = recall_all_delegations(fp, FALSE, ct);
+	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
+	instp = dbe_to_instp(fp->dbe);
+
+	/* use caller context to compare caller to delegation owner */
+	if (ct == NULL || ct->cc_caller_id != instp->caller_id) {
+		rc = recall_write_delegation(fp, FALSE, ct);
 		if (rc == NFS4ERR_DELAY)
 			return (EAGAIN);
 	}
@@ -340,9 +483,10 @@ deleg_rd_space(
 {
 	int rc;
 	rfs4_file_t *fp;
+	vnode_t *vp = arg->fa_vnode.vp;
 
 	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-	rc = recall_all_delegations(fp, FALSE, ct);
+	rc = recall_read_delegations(vp, fp, ct);
 	if (rc == NFS4ERR_DELAY)
 		return (EAGAIN);
 
@@ -361,11 +505,14 @@ deleg_wr_space(
 {
 	int rc;
 	rfs4_file_t *fp;
+	nfs_server_instance_t *instp;
 
-	/* Use caller context to compare caller to delegation owner */
-	if (ct == NULL || ct->cc_caller_id != nfs4_srv_caller_id) {
-		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-		rc = recall_all_delegations(fp, FALSE, ct);
+	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
+	instp = dbe_to_instp(fp->dbe);
+
+	/* use caller context to compare caller to delegation owner */
+	if (ct == NULL || ct->cc_caller_id != instp->caller_id) {
+		rc = recall_write_delegation(fp, FALSE, ct);
 		if (rc == NFS4ERR_DELAY)
 			return (EAGAIN);
 	}
@@ -383,11 +530,12 @@ deleg_rd_setsecattr(
 {
 	int rc;
 	rfs4_file_t *fp;
+	vnode_t *vp = arg->fa_vnode.vp;
 
 	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
 
-	/* Changing security attribute triggers recall */
-	rc = recall_all_delegations(fp, FALSE, ct);
+	/* changing security attribute triggers recall */
+	rc = recall_read_delegations(vp, fp, ct);
 	if (rc == NFS4ERR_DELAY)
 		return (EAGAIN);
 
@@ -407,14 +555,15 @@ deleg_wr_setsecattr(
 
 	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
 
-	/* Changing security attribute triggers recall */
-	rc = recall_all_delegations(fp, FALSE, ct);
+	/* changing security attribute triggers recall */
+	rc = recall_write_delegation(fp, FALSE, ct);
 	if (rc == NFS4ERR_DELAY)
 		return (EAGAIN);
 
 	return (vnext_setsecattr(arg, vsap, flag, cr, ct));
 }
 
+/* currently, vnevents must do synchronous recalls */
 int
 deleg_rd_vnevent(
 	femarg_t *arg,
@@ -423,32 +572,17 @@ deleg_rd_vnevent(
 	char *name,
 	caller_context_t *ct)
 {
-	clock_t rc;
 	rfs4_file_t *fp;
-	bool_t trunc = FALSE;
+	vnode_t *vp = arg->fa_vnode.vp;
 
 	switch (vnevent) {
 	case VE_REMOVE:
 	case VE_RENAME_DEST:
-		trunc = TRUE;
 		/*FALLTHROUGH*/
 
 	case VE_RENAME_SRC:
 		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-		rfs4_recall_deleg(fp, trunc, NULL);
-
-		rfs4_dbe_lock(fp->dbe);
-		while (fp->dinfo->dtype != OPEN_DELEGATE_NONE) {
-			rc = rfs4_dbe_twait(fp->dbe,
-			    lbolt + SEC_TO_TICK(rfs4_lease_time));
-			if (rc == -1) { /* timed out */
-				rfs4_dbe_unlock(fp->dbe);
-				rfs4_recall_deleg(fp, trunc, NULL);
-				rfs4_dbe_lock(fp->dbe);
-			}
-		}
-		rfs4_dbe_unlock(fp->dbe);
-
+		(void) recall_read_delegations(vp, fp, NULL);
 		break;
 
 	default:
@@ -481,7 +615,8 @@ deleg_wr_vnevent(
 		rfs4_dbe_lock(fp->dbe);
 		while (fp->dinfo->dtype != OPEN_DELEGATE_NONE) {
 			rc = rfs4_dbe_twait(fp->dbe,
-			    lbolt + SEC_TO_TICK(rfs4_lease_time));
+			    lbolt + SEC_TO_TICK(
+			    dbe_to_instp(fp->dbe)->lease_period));
 			if (rc == -1) { /* timed out */
 				rfs4_dbe_unlock(fp->dbe);
 				rfs4_recall_deleg(fp, trunc, NULL);

@@ -109,7 +109,13 @@ typedef struct {		/* opaque entry type for later use */
 	rfs4_dbe_t *dbe;
 } *rfs4_entry_t;
 
-extern rfs4_table_t *rfs4_client_tab;
+struct mds_layout_grant;
+
+typedef struct rfs41_grant_list {
+	struct rfs41_grant_list *next;
+	struct rfs41_grant_list *prev;
+	struct mds_layout_grant	*lgp;
+} rfs41_grant_list_t;
 
 
 /*
@@ -122,7 +128,6 @@ extern rfs4_table_t *rfs4_client_tab;
  */
 
 #define	RFS4_SS_DIRSIZE	64 * 1024
-#define	NFS4_SS_VERSION 1
 
 /* handy pathname structure */
 typedef struct ss_pn {
@@ -135,12 +140,11 @@ typedef struct ss_pn {
  * clients that have had valid state on the server in a prior instance.
  *
  */
-typedef struct rfs4_oldstate {
-	struct rfs4_oldstate 	*next;
-	struct rfs4_oldstate 	*prev;
-	rfs4_ss_pn_t		*ss_pn;
-	nfs_client_id4		cl_id4;
-} rfs4_oldstate_t;
+typedef struct {
+	list_node_t  	reclaim_list;
+	rfs4_ss_pn_t	*ss_pn;
+	nfs_client_id4	cl_id4;
+} rfs4_reclaim_t;
 
 /*
  *  The state id between NFS v4.0 and V4.1 are
@@ -214,6 +218,13 @@ typedef enum {
  * credentials needs to match those used at SETCLIENTID.
  */
 typedef void *cred_set_t;		/* For now XXX */
+
+typedef struct {
+	cred_t	*cp_cr;
+	int	 cp_aflavor;
+	int	 cp_secmod;
+	caddr_t	 cp_princ;
+} cred_princ_t;
 
 /*
  * "wait" struct for use in the open open and lock owner state
@@ -319,27 +330,6 @@ typedef struct {
 } rfs4_cbinfo_t;
 
 /*
- * A server instance. We can associate sets of clients - via a pointer in
- * rfs4_client_t - with a given server instance, allowing us to treat clients
- * in the set differently to clients in other sets.
- *
- * Currently used only for Sun Cluster HA-NFS support, to group clients
- * on NFS resource failover so each set of clients gets its own dedicated
- * grace period and distributed stable storage data.
- */
-typedef struct rfs4_servinst {
-	int			dss_npaths;
-	krwlock_t		rwlock;
-	krwlock_t		oldstate_lock;
-	time_t			start_time;
-	time_t			grace_period;
-	rfs4_oldstate_t		*oldstate;
-	struct rfs4_dss_path	**dss_paths;
-	struct rfs4_servinst	*next;
-	struct rfs4_servinst	*prev;
-} rfs4_servinst_t;
-
-/*
  * DSS: distributed stable storage
  */
 
@@ -347,7 +337,6 @@ typedef struct rfs4_dss_path {
 	struct rfs4_dss_path	*next; /* for insque/remque */
 	struct rfs4_dss_path	*prev; /* for insque/remque */
 	char			*path;
-	struct rfs4_servinst	*sip;
 	unsigned		index; /* offset in servinst's array */
 } rfs4_dss_path_t;
 
@@ -573,25 +562,23 @@ extern void rfs4_hold_deleg_policy(nfs_server_instance_t *);
 extern void rfs4_rele_deleg_policy(nfs_server_instance_t *);
 
 /* database, table, index creation entry points */
-extern rfs4_database_t *rfs4_database_create(uint32_t);
+extern rfs4_database_t *rfs4_database_create();
 extern void		rfs4_database_shutdown(rfs4_database_t *);
 extern void		rfs4_database_destroy(rfs4_database_t *);
 
 extern void		rfs4_database_destroy(rfs4_database_t *);
 
-extern rfs4_table_t	*rfs4_table_create(rfs4_database_t *,
-					nfs_server_instance_t *, char *,
-			time_t, uint32_t,
-			bool_t (*create)(nfs_server_instance_t *,
-					rfs4_entry_t, void *),
+extern rfs4_table_t	*rfs4_table_create(nfs_server_instance_t *,
+			    char *, time_t, uint32_t,
+			bool_t (*create)(rfs4_entry_t, void *),
 			void (*destroy)(rfs4_entry_t),
 			bool_t (*expiry)(rfs4_entry_t),
 			uint32_t, uint32_t, uint32_t, id_t);
 extern void		rfs4_table_destroy(rfs4_database_t *, rfs4_table_t *);
 extern rfs4_index_t	*rfs4_index_create(rfs4_table_t *, char *,
-				uint32_t (*hash)(void *),
-				bool_t (compare)(rfs4_entry_t, void *),
-				void *(*mkkey)(rfs4_entry_t), bool_t);
+			    uint32_t (*hash)(void *),
+			    bool_t (compare)(rfs4_entry_t, void *),
+			    void *(*mkkey)(rfs4_entry_t), bool_t);
 extern void		rfs4_index_destroy(rfs4_index_t *);
 
 /* Type used to direct rfs4_dbsearch() in what types of records to inspect */
@@ -621,7 +608,6 @@ extern bool_t		rfs4_dbe_islocked(rfs4_dbe_t *);
 #endif
 extern void		rfs4_dbe_walk(rfs4_table_t *,
 			void (*callout)(rfs4_entry_t, void *), void *);
-
 /*
  * The server maintains a set of state on a per client basis that
  * matches that of the protocol requirements.  A client's state is
@@ -734,7 +720,6 @@ extern void		rfs4_dbe_walk(rfs4_table_t *,
  * clientdeleglist - root of delegations list provided to this client
  * ss_pn - Pathname to the stable storage file.
  * cl_addr - Clients network address.
- * server_instance - pointer to the currently associated server instance
  * contrived -  NFSv4.1 create_session res
  * state_prot - NFSv4.1 state protection
  * clid_scope - NFSv4.1 scope of client id (DS, MDS or BOTH)
@@ -753,19 +738,20 @@ typedef struct rfs4_client {
 	unsigned		can_reclaim:1;
 	unsigned 		ss_remove:1;
 	unsigned		forced_expire:1;
+	unsigned		reclaim_completed:1;
 	uint_t			deleg_revoked;
 	struct rfs4_client	*cp_confirmed;
 	time_t			last_access;
 	rfs4_cbinfo_t		cbinfo;
-	cred_set_t		cr_set;
+	cred_princ_t		*cr_set;
 	sysid_t			sysidt;
 	rfs4_openowner_list_t	openownerlist;
 	rfs4_deleg_list_t	clientdeleglist;
 	rfs4_ss_pn_t		*ss_pn;
 	struct sockaddr_storage cl_addr;
-	rfs4_servinst_t		*server_instance;
 	rfs41_csr_t		contrived;
 	rfs41_sprot_t		state_prot;
+	struct rfs41_grant_list	clientgrantlist;
 	int			clid_scope;
 	bit_attr_t		seq4[BITS_PER_WORD];
 } rfs4_client_t;
@@ -800,7 +786,7 @@ typedef struct rfs4_openowner {
 	unsigned		postpone_confirm:1;
 	seqid4			open_seqid;
 	rfs4_state_wait_t	oo_sw;
-	cred_set_t		cr_set;
+	cred_princ_t		*cr_set;
 	rfs4_state_list_t	ownerstateids;
 	rfs4_openowner_list_t	openownerlist;
 	nfs_fh4			reply_fh;
@@ -969,13 +955,15 @@ typedef struct rfs4_dinfo {
  * 	As mentioned above, the file_rwlock is used for serialization
  * 	of file removal and more specifically reference to the held
  * 	vnode (e.g. vp).
+ * flp  - File layout pointer..
  */
+struct mds_layout;
+
 typedef struct rfs4_file {
 	rfs4_dbe_t	*dbe;
 	vnode_t		*vp;
 	nfs_fh4		filehandle;
-	rfs4_deleg_list_t nfs4_deleg_list;
-	rfs4_deleg_list_t mds_deleg_list;
+	rfs4_deleg_list_t delegationlist;
 	rfs4_dinfo_t	dinfo[1];
 	uint32_t	share_deny;
 	uint32_t	share_access;
@@ -984,6 +972,8 @@ typedef struct rfs4_file {
 	uint32_t	deny_read;
 	uint32_t	deny_write;
 	krwlock_t	file_rwlock;
+	struct rfs41_grant_list lo_grant_list;
+	struct mds_layout    *flp;
 } rfs4_file_t;
 
 /*
@@ -1049,13 +1039,6 @@ typedef struct mds_session {
 #define	SN_CB_CHAN_OK(x)	(((mds_session_t *)(x))->sn_bc.failed == 0)
 #define	CLID_REC_CONFIRMED(x)	(((rfs4_client_t *)(x))->need_confirm == FALSE)
 
-typedef struct {
-	cred_t	*cp_cr;
-	int	 cp_aflavor;
-	int	 cp_secmod;
-	caddr_t	 cp_princ;
-} cred_princ_t;
-
 struct mds_lorec {
 	mds_session_t		*lor_sess;
 	layoutrecall_type4	lor_type;
@@ -1065,23 +1048,19 @@ struct mds_lorec {
 typedef struct mds_lorec mds_lorec_t;
 
 
-extern void	rfs4_servinst_create(nfs_server_instance_t *,
-				int, int, char **);
-extern void	rfs4_servinst_destroy_all(nfs_server_instance_t *);
-extern void	rfs4_servinst_assign(rfs4_client_t *,
-			nfs_server_instance_t *);
-extern rfs4_servinst_t	*rfs4_servinst(rfs4_client_t *);
+extern void	rfs4_reclaim_list_init(nfs_server_instance_t *, int);
+extern void	rfs4_reclaim_list_destroy(nfs_server_instance_t *);
 extern int	rfs4_clnt_in_grace(rfs4_client_t *);
-extern int	rfs4_servinst_in_grace(rfs4_servinst_t *);
-extern int	rfs4_servinst_grace_new(rfs4_servinst_t *);
-extern void	rfs4_grace_start(rfs4_servinst_t *);
+extern int	rfs4_in_grace(nfs_server_instance_t *);
+extern int	rfs4_grace_new(nfs_server_instance_t *);
+extern void	rfs4_grace_start(nfs_server_instance_t *);
 extern void	rfs4_grace_start_new(nfs_server_instance_t *);
 extern void	rfs4_grace_reset_all(nfs_server_instance_t *);
-extern void	rfs4_ss_oldstate(rfs4_oldstate_t *, char *, char *);
+extern void	rfs4_ss_oldclients(rfs4_reclaim_t *, char *, char *);
 extern void	rfs4_dss_readstate(nfs_server_instance_t *, int, char **);
 
-extern void rfs4_disable_delegation(void);
-extern void rfs4_enable_delegation(void);
+extern void rfs4_disable_delegation(nfs_server_instance_t *);
+extern void rfs4_enable_delegation(nfs_server_instance_t *);
 
 /*
  * Request types for delegation. These correspond with
@@ -1101,30 +1080,36 @@ typedef enum {
  * Various interfaces to manipulate the state structures introduced
  * above
  */
-extern	void		rfs4_clean_state_exi(struct exportinfo *exi);
+extern	void		sstor_clean_state_exi(struct exportinfo *exi);
 extern	void		rfs4_free_reply(nfs_resop4 *);
 extern	void		rfs4_copy_reply(nfs_resop4 *, nfs_resop4 *);
 
 /* rfs4_client_t handling */
-extern	rfs4_client_t	*rfs4_findclient(nfs_client_id4 *,
+extern	rfs4_client_t	*findclient(nfs_server_instance_t *, nfs_client_id4 *,
 					bool_t *, rfs4_client_t *);
-extern	rfs4_client_t	*rfs4_findclient_by_id(clientid4, bool_t);
+extern	rfs4_client_t	*findclient_by_id(nfs_server_instance_t *, clientid4);
+extern	rfs4_client_t	*rfs4_findclient_by_id(nfs_server_instance_t *,
+    clientid4, bool_t);
 extern	void		rfs4_client_rele(rfs4_client_t *);
 extern	void		rfs4_client_close(rfs4_client_t *);
 extern	void		rfs4_client_state_remove(rfs4_client_t *);
 extern	void		rfs4_client_scv_next(rfs4_client_t *);
 extern	void		rfs4_update_lease(rfs4_client_t *);
 extern	bool_t		rfs4_lease_expired(rfs4_client_t *);
-extern	nfsstat4	rfs4_check_clientid(clientid4 *, int);
+extern	nfsstat4	rfs4_check_clientid(nfs_server_instance_t *,
+			    clientid4 *);
 extern	rfs4_client_t	*findclient(nfs_server_instance_t *, nfs_client_id4 *,
 			    bool_t *, rfs4_client_t *);
 extern	void		 rfs4_free_cred_princ(rfs4_client_t *);
 extern	char		*kstrdup(const char *);
 
 /* mds_session_t */
-extern	mds_session_t	*mds_findsession_by_id(sessionid4);
-extern	mds_session_t	*mds_findsession_by_clid(clientid4);
-extern	mds_session_t	*mds_createsession(session41_create_t *);
+extern	mds_session_t	*mds_findsession_by_id(nfs_server_instance_t *,
+	    sessionid4);
+extern	mds_session_t	*mds_findsession_by_clid(nfs_server_instance_t *,
+	    clientid4);
+extern	mds_session_t	*mds_createsession(nfs_server_instance_t *,
+			    session41_create_t *);
 extern	nfsstat4	 mds_destroysession(mds_session_t *);
 extern	sess_channel_t	*rfs41_create_session_channel(channel_dir_from_server4);
 extern	void		 rfs41_destroy_session_channel(sess_channel_t *);
@@ -1134,7 +1119,8 @@ extern	CLIENT	*rfs41_cb_getch(mds_session_t *);
 extern	void	rfs41_cb_freech(mds_session_t *, CLIENT *);
 
 /* rfs4_openowner_t handling */
-extern	rfs4_openowner_t *rfs4_findopenowner(open_owner4 *, bool_t *, seqid4);
+extern	rfs4_openowner_t *rfs4_findopenowner(nfs_server_instance_t *,
+    open_owner4 *, bool_t *, seqid4);
 extern	void		rfs4_update_open_sequence(rfs4_openowner_t *);
 extern	void		rfs4_update_open_resp(rfs4_openowner_t *,
 					nfs_resop4 *, nfs_fh4 *);
@@ -1142,8 +1128,9 @@ extern	void		rfs4_openowner_rele(rfs4_openowner_t *);
 extern	void		rfs4_free_opens(rfs4_openowner_t *, bool_t, bool_t);
 
 /* rfs4_lockowner_t handling */
-extern	rfs4_lockowner_t *rfs4_findlockowner(lock_owner4 *, bool_t *);
-extern	rfs4_lockowner_t *rfs4_findlockowner_by_pid(pid_t);
+extern	rfs4_lockowner_t *findlockowner(nfs_server_instance_t *, lock_owner4 *,
+			    bool_t *);
+extern	rfs4_lockowner_t *findlockowner_by_pid(nfs_server_instance_t *, pid_t);
 extern	void		rfs4_lockowner_rele(rfs4_lockowner_t *);
 
 /* rfs4_state_t handling */
@@ -1155,16 +1142,20 @@ extern	void		rfs4_release_share_lock_state(rfs4_state_t *,
 extern	void		rfs4_close_all_state(rfs4_file_t *);
 
 /* rfs4_lo_state_t handling */
-extern	rfs4_lo_state_t *rfs4_findlo_state_by_owner(rfs4_lockowner_t *,
+extern	rfs4_lo_state_t *findlo_state_by_owner(rfs4_lockowner_t *,
 						rfs4_state_t *, bool_t *);
+extern	rfs4_lo_state_t *rfs4_findlo_state_by_owner(nfs_server_instance_t *,
+	rfs4_lockowner_t *, rfs4_state_t *, bool_t *);
 extern	void		rfs4_lo_state_rele(rfs4_lo_state_t *, bool_t);
 extern	void		rfs4_update_lock_sequence(rfs4_lo_state_t *);
 extern	void		rfs4_update_lock_resp(rfs4_lo_state_t *,
 					nfs_resop4 *);
 
 /* rfs4_file_t handling */
-extern	rfs4_file_t	*rfs4_findfile(vnode_t *, nfs_fh4 *, bool_t *);
-extern	rfs4_file_t	*rfs4_findfile_withlock(vnode_t *, nfs_fh4 *,
+extern	rfs4_file_t	*rfs4_findfile(nfs_server_instance_t *,
+			    vnode_t *, nfs_fh4 *, bool_t *);
+extern	rfs4_file_t	*rfs4_findfile_withlock(nfs_server_instance_t *,
+						vnode_t *, nfs_fh4 *,
 						bool_t *);
 extern	void		rfs4_file_rele(rfs4_file_t *);
 extern	void		rfs4_file_rele_withunlock(rfs4_file_t *);
@@ -1174,6 +1165,10 @@ extern	int		rfs4_check_stateid_seqid(rfs4_state_t *, stateid4 *);
 extern	int		rfs4_check_lo_stateid_seqid(rfs4_lo_state_t *,
 					stateid4 *);
 extern	int		mds_check_stateid_seqid(rfs4_state_t *, stateid4 *);
+
+extern nfs_server_instance_t *dbe_to_instp(rfs4_dbe_t *);
+
+extern void nsi_walk(void (*)(nfs_server_instance_t *, void *), void *);
 
 /* return values for rfs4_check_stateid_seqid() */
 #define	NFS4_CHECK_STATEID_OKAY	1
@@ -1762,15 +1757,16 @@ extern stateid4 clnt_special1;
  */
 
 extern void	rfs4_compound(COMPOUND4args *, COMPOUND4res *,
-		    struct exportinfo *, struct svc_req *, cred_t *, int *);
+		    struct exportinfo *, struct svc_req *, int *);
 extern void	rfs4_compound_free(COMPOUND4res *);
 extern void	rfs4_compound_flagproc(COMPOUND4args *, int *);
 
 extern int	rfs4_srvrinit(void);
 extern void	rfs4_srvrfini(nfs_server_instance_t *);
-extern void	rfs4_state_init(void);
-extern void	mds_state_init(void);
-extern void	rfs4_state_fini(void);
+extern void	rfs4_sstor_init(nfs_server_instance_t *);
+extern void	mds_sstor_init(nfs_server_instance_t *);
+extern void	mds_compound_free(COMPOUND4res *);
+extern void	rfs4_state_fini(nfs_server_instance_t *);
 
 extern void   pnfs_layoutreturn_bulk(struct mntinfo4 *, cred_t *, int);
 struct nfs4_fsidlt;

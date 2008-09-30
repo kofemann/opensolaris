@@ -90,7 +90,7 @@ static clock_t rfs4_lock_delay = RFS4_LOCK_DELAY;
 
 int mds_strict_seqid = 0;
 
-static void ping_cb_null_thr(sessionid4);
+static void ping_cb_null_thr(mds_session_t *);
 
 /* End of Tunables */
 
@@ -158,7 +158,7 @@ static void ping_cb_null_thr(sessionid4);
 
 static sysid_t lockt_sysid;		/* dummy sysid for all LOCKT calls */
 
-extern u_longlong_t nfs4_srv_caller_id;
+void		rfs4_init_compound_state(struct compound_state *);
 
 static void	nullfree(nfs_resop4 *, compound_node_t *);
 static void	mds_op_inval(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
@@ -275,6 +275,9 @@ static void mds_op_layout_commit(nfs_argop4 *, nfs_resop4 *,
 static void mds_op_layout_return(nfs_argop4 *, nfs_resop4 *,
 		struct svc_req *, compound_node_t *);
 
+static void mds_op_reclaim_complete(nfs_argop4 *, nfs_resop4 *,
+    struct svc_req *, compound_node_t *);
+
 nfsstat4 check_open_access(uint32_t,
 			struct compound_state *, struct svc_req *);
 nfsstat4 rfs4_client_sysid(rfs4_client_t *, sysid_t *);
@@ -291,7 +294,7 @@ nfsstat4 rfs4_do_lock(rfs4_lo_state_t *, nfs_lock_type4, seqid4,
 		offset4, length4, cred_t *, nfs_resop4 *);
 
 rfs4_lo_state_t *mds_findlo_state_by_owner(rfs4_lockowner_t *,
-					rfs4_state_t *, bool_t *);
+	    rfs4_state_t *, bool_t *);
 
 bool_t in_flavor_list(int, int *, int);
 
@@ -306,24 +309,17 @@ nfsstat4 do_rfs4_op_getattr(attrmap4 *, fattr4 *, struct nfs4_svgetit_arg *);
 nfsstat4 do_rfs4_op_lookup(char *, uint_t, struct svc_req *,
 		struct compound_state *);
 
-rfs4_lockowner_t *mds_findlockowner_by_pid(pid_t);
+rfs4_lockowner_t *mds_findlockowner_by_pid(nfs_server_instance_t *, pid_t);
 
-rfs4_lockowner_t *mds_findlockowner(lock_owner4 *, bool_t *);
+mds_session_t *mds_findsession_by_id(nfs_server_instance_t *, sessionid4);
 
-rfs4_client_t *mds_findclient_by_id(clientid4);
-
-rfs4_client_t *mds_findclient(nfs_client_id4 *, bool_t *, rfs4_client_t *);
-
-mds_session_t *mds_findsession_by_id(sessionid4);
-
-rfs4_openowner_t *mds_findopenowner(open_owner4 *, bool_t *);
+rfs4_openowner_t *mds_findopenowner(nfs_server_instance_t *, open_owner4 *,
+    bool_t *);
 
 static void	mds_op_nverify(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
 			compound_node_t *);
 
-nfsstat4 mds_check_clientid(clientid4 *);
-
-mds_mpd_t *mds_find_mpd(uint32_t);
+extern mds_mpd_t *mds_find_mpd(nfs_server_instance_t *, uint32_t);
 
 nfsstat4
 create_vnode(vnode_t *, char *,  vattr_t *, createmode4, timespec32_t *,
@@ -333,6 +329,9 @@ create_vnode(vnode_t *, char *,  vattr_t *, createmode4, timespec32_t *,
 /* HACKERY */
 nfsstat4 rfs4_get_all_state(struct compound_state *, stateid4 *,
     rfs4_state_t **, rfs4_deleg_state_t **, rfs4_lo_state_t **);
+
+void rfs4_ss_clid(struct compound_state *, rfs4_client_t *, struct svc_req *);
+void rfs4_ss_chkclid(struct compound_state *, rfs4_client_t *);
 
 extern stateid4 special0;
 extern stateid4 special1;
@@ -348,6 +347,10 @@ rfs41_dispatch_persona(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
 
 static void
 rfs41_dispatch_persona_free(nfs_resop4 *, compound_node_t *);
+
+mds_layout_grant_t *rfs41_findlogrant(struct compound_state *,
+    rfs4_file_t *, rfs4_client_t *, bool_t *);
+void rfs41_lo_grant_rele(mds_layout_grant_t *);
 
 /* ARGSUSED */
 static void
@@ -468,7 +471,7 @@ static struct op_disp_tbl mds_disptab[] = {
 	{mds_op_notsup, nullfree,  DISP_OP_MDS, "TEST_STATEID"},
 	{mds_op_notsup, nullfree,  DISP_OP_MDS, "WANT_DELEG"},
 	{mds_op_notsup, nullfree,  DISP_OP_BOTH, "DESTROY_CLIENTID"},
-	{mds_op_notsup, nullfree,  DISP_OP_MDS, "RECLAIM_COMPLETE"}
+	{mds_op_reclaim_complete, nullfree,  DISP_OP_MDS, "RECLAIM_COMPLETE"}
 };
 
 static uint_t mds_disp_cnt = sizeof (mds_disptab) / sizeof (mds_disptab[0]);
@@ -624,8 +627,6 @@ rfs41_data_server_register(nfs41_fh_type_t flavor,
 	reg_ent->ref = 1;
 	mutex_exit(&reg_ent->lock);
 
-	/* XXXX: Temp "fix" till instance management completed */
-	mds_server.default_persona = flavor;
 	return (0);
 }
 
@@ -742,7 +743,7 @@ mds_validate_stateid(int mode, struct compound_state *cs, vnode_t *vp,
 	nfsstat4 stat = NFS4_OK;
 
 	if (ISSPECIAL(stateid)) {
-		fp = rfs4_findfile(vp, NULL, &create);
+		fp = rfs4_findfile(cs->instp, vp, NULL, &create);
 		if (fp == NULL)
 			return (NFS4_OK);
 		if (fp->dinfo->dtype == OPEN_DELEGATE_NONE) {
@@ -988,7 +989,8 @@ mds_setattr(attrmap4 *resp, fattr4 *fattrp, struct compound_state *cs,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	/*
 	 * If we got a request to set the ACL and the MODE, only
@@ -1159,7 +1161,6 @@ mds_setattr(attrmap4 *resp, fattr4 *fattrp, struct compound_state *cs,
 		 */
 		(void) rfs4_verify_attr(&sarg, resp, &ntov);
 	} else {
-
 		/*
 		 * Force modified metadata out to stable storage.
 		 */
@@ -1574,7 +1575,8 @@ mds_op_commit(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	va.va_mask = AT_UID;
 	error = VOP_GETATTR(vp, &va, 0, cr, &ct);
@@ -1674,7 +1676,8 @@ mds_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	/* Verify that type is correct */
 	switch (args->type) {
@@ -2187,7 +2190,8 @@ mds_op_link(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	/* Get "before" change value */
 	bdva.va_mask = AT_CTIME|AT_SEQ;
@@ -2326,7 +2330,8 @@ mds_do_lookup(char *nm, uint_t buflen, struct svc_req *req,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	error = VOP_LOOKUP(cs->vp, nm, &vp, NULL, 0, NULL, cs->cr,
 	    &ct, 0, NULL);
@@ -2676,7 +2681,8 @@ mds_op_openattr(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	if ((VOP_ACCESS(cs->vp, VREAD, 0, cs->cr, &ct) != 0) &&
 	    (VOP_ACCESS(cs->vp, VWRITE, 0, cs->cr, &ct) != 0) &&
@@ -2745,12 +2751,12 @@ final:
 }
 
 static int
-do_io(int direction, vnode_t *vp, struct uio *uio, int ioflag, cred_t *cred)
+do_io(int direction, vnode_t *vp, struct uio *uio, int ioflag, cred_t *cred,
+    caller_context_t *ct)
 {
 	int error;
 	int i;
 	clock_t delaytime;
-	caller_context_t ct;
 
 	delaytime = MSEC_TO_TICK_ROUNDUP(rfs4_lock_delay);
 
@@ -2760,19 +2766,15 @@ do_io(int direction, vnode_t *vp, struct uio *uio, int ioflag, cred_t *cred)
 	 */
 	uio->uio_fmode = FNONBLOCK;
 
-	ct.cc_sysid = 0;
-	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
-
 	for (i = 0; i < rfs4_maxlock_tries; i++) {
 		if (direction == FREAD) {
-			(void) VOP_RWLOCK(vp, V_WRITELOCK_FALSE, &ct);
-			error = VOP_READ(vp, uio, ioflag, cred, &ct);
-			VOP_RWUNLOCK(vp, V_WRITELOCK_FALSE, &ct);
+			(void) VOP_RWLOCK(vp, V_WRITELOCK_FALSE, ct);
+			error = VOP_READ(vp, uio, ioflag, cred, ct);
+			VOP_RWUNLOCK(vp, V_WRITELOCK_FALSE, ct);
 		} else {
-			(void) VOP_RWLOCK(vp, V_WRITELOCK_TRUE, &ct);
-			error = VOP_WRITE(vp, uio, ioflag, cred, &ct);
-			VOP_RWUNLOCK(vp, V_WRITELOCK_TRUE, &ct);
+			(void) VOP_RWLOCK(vp, V_WRITELOCK_TRUE, ct);
+			error = VOP_WRITE(vp, uio, ioflag, cred, ct);
+			VOP_RWUNLOCK(vp, V_WRITELOCK_TRUE, ct);
 		}
 
 		if (error != EAGAIN)
@@ -2824,7 +2826,8 @@ mds_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	/*
 	 * Enter the critical region before calling VOP_RWLOCK
@@ -2931,7 +2934,7 @@ mds_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	uio.uio_loffset = args->offset;
 	uio.uio_resid = args->count;
 
-	error = do_io(FREAD, vp, &uio, 0, cs->cr);
+	error = do_io(FREAD, vp, &uio, 0, cs->cr, &ct);
 
 	va.va_mask = AT_SIZE;
 	verror = VOP_GETATTR(vp, &va, 0, cs->cr, &ct);
@@ -3052,6 +3055,32 @@ final:
 	    PUTPUBFH4res *, resp);
 }
 
+/*
+ * XXX - issue with put*fh operations.
+ *
+ * let us assume that /export/home is shared via NFS and a NFS client
+ * wishes to mount /export/home/joe.
+ *
+ * If /export, home, or joe have restrictive search permissions, then
+ * the NFS Server should not return a filehandle to the client.
+ *
+ * This case is easy to enforce. However, the NFS Client does not know
+ * which security flavor should be used until the pathname has been
+ * fully resolved. In addition there is another complication for uid
+ * mapping. If the credential being used is root, the default behaviour
+ * will be to map it to the anonymous user. However the NFS Server can not
+ * map it until the pathname has been fully resolved.
+ *
+ * XXX: JEFF:  Proposed solution.
+ *
+ * Luckily, SECINFO uses a full pathname.  So what we will
+ * have to do in mds_op_lookup is check that flavor of
+ * the target object matches that of the request, and if root was the
+ * caller, check for the root= and anon= options, and if necessary,
+ * repeat the lookup using the right cred_t.
+ *
+ * But that's not done yet.
+ */
 /* ARGSUSED */
 static void
 mds_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
@@ -3282,7 +3311,8 @@ mds_op_readlink(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	va.va_mask = AT_MODE;
 	error = VOP_GETATTR(vp, &va, 0, cs->cr, &ct);
@@ -3338,31 +3368,57 @@ mds_op_readlink_free(nfs_resop4 *resop, compound_node_t *cn)
 	rfs4_op_readlink_free(resop);
 }
 
+/* ARGSUSED */
+static void
+mds_op_reclaim_complete(nfs_argop4 *argop, nfs_resop4 *resop,
+    struct svc_req *req, compound_node_t *cn)
+{
+	RECLAIM_COMPLETE4args *args = &argop->nfs_argop4_u.opreclaim_complete;
+	RECLAIM_COMPLETE4res *resp = &resop->nfs_resop4_u.opreclaim_complete;
+	struct compound_state *cs = cn->cn_state;
+	rfs4_client_t *cp;
+
+	cp = cs->cp;
+
+	if (cp->reclaim_completed) {
+		*cs->statusp = resp->rcr_status = NFS4ERR_COMPLETE_ALREADY;
+		return;
+	}
+
+	if (args->rca_one_fs) {
+		/* do what?  we don't track this */
+		*cs->statusp = resp->rcr_status = NFS4_OK;
+		return;
+	}
+
+	cp->reclaim_completed = 1;
+
+	/* did we have reclaimable state stored for this client? */
+	if (cp->can_reclaim)
+		atomic_add_32(&(cs->instp->reclaim_cnt), -1);
+
+	*cs->statusp = resp->rcr_status = NFS4_OK;
+}
 
 /*
  * short utility function to lookup a file and recall the delegation
  */
 static rfs4_file_t *
 mds_lookup_and_findfile(vnode_t *dvp, char *nm, vnode_t **vpp,
-	int *lkup_error, cred_t *cr)
+	int *lkup_error, struct compound_state *cs)
 {
 	vnode_t *vp;
 	rfs4_file_t *fp = NULL;
 	bool_t fcreate = FALSE;
 	int error;
-	caller_context_t ct;
 
 	if (vpp)
 		*vpp = NULL;
 
-	ct.cc_sysid = 0;
-	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
-
-	if ((error = VOP_LOOKUP(dvp, nm, &vp, NULL, 0, NULL, cr,
-	    &ct, 0, NULL)) == 0) {
+	if ((error = VOP_LOOKUP(dvp, nm, &vp, NULL, 0, NULL, cs->cr,
+	    NULL, 0, NULL)) == 0) {
 		if (vp->v_type == VREG)
-			fp = rfs4_findfile(vp, NULL, &fcreate);
+			fp = rfs4_findfile(cs->instp, vp, NULL, &fcreate);
 		if (vpp)
 			*vpp = vp;
 		else
@@ -3460,19 +3516,16 @@ mds_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 * it causes an update, cinfo.before will not match, which will
 	 * trigger a cache flush even if atomic is TRUE.
 	 */
-	if (fp = mds_lookup_and_findfile(dvp, nm, &vp, &error, cs->cr)) {
-		if (rfs4_check_delegated_byfp(cs->instp, FWRITE, fp, TRUE,
-		    TRUE, TRUE, NULL)) {
+	fp = mds_lookup_and_findfile(dvp, nm, &vp, &error, cs);
+	if (vp != NULL) {
+		if (rfs4_check_delegated(FWRITE, vp, TRUE, TRUE, TRUE, NULL)) {
 			VN_RELE(vp);
 			rfs4_file_rele(fp);
 			*cs->statusp = resp->status = NFS4ERR_DELAY;
 			kmem_free(nm, len);
 			goto final;
 		}
-	}
-
-	/* Didn't find anything to remove */
-	if (vp == NULL) {
+	} else {	/* Didn't find anything to remove */
 		*cs->statusp = resp->status = error;
 		kmem_free(nm, len);
 		goto final;
@@ -3519,7 +3572,8 @@ mds_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	/* Get dir "before" change value */
 	bdva.va_mask = AT_CTIME|AT_SEQ;
@@ -3784,15 +3838,14 @@ mds_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 * it causes an update, cinfo.before will not match, which will
 	 * trigger a cache flush even if atomic is TRUE.
 	 */
-	if (sfp = mds_lookup_and_findfile(odvp, onm, &srcvp, &error, cs->cr)) {
-		if (rfs4_check_delegated_byfp(cs->instp, FWRITE, sfp, TRUE,
-		    TRUE, TRUE, NULL)) {
+	sfp = mds_lookup_and_findfile(odvp, onm, &srcvp, &error, cs);
+	if (srcvp != NULL) {
+		if (rfs4_check_delegated(FWRITE, srcvp, TRUE, TRUE, TRUE,
+		    NULL)) {
 			*cs->statusp = resp->status = NFS4ERR_DELAY;
 			goto err_out;
 		}
-	}
-
-	if (srcvp == NULL) {
+	} else {
 		*cs->statusp = resp->status = puterrno4(error);
 		kmem_free(onm, olen);
 		kmem_free(nnm, nlen);
@@ -3802,9 +3855,10 @@ mds_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	sfp_rele_grant_hold = 1;
 
 	/* Does the destination exist and a file and have a delegation? */
-	if (fp = mds_lookup_and_findfile(ndvp, nnm, &targvp, NULL, cs->cr)) {
-		if (rfs4_check_delegated_byfp(cs->instp, FWRITE, fp, TRUE,
-		    TRUE, TRUE, NULL)) {
+	fp = mds_lookup_and_findfile(ndvp, nnm, &targvp, NULL, cs);
+	if (targvp != NULL) {
+		if (rfs4_check_delegated(FWRITE, targvp, TRUE, TRUE, TRUE,
+		    NULL)) {
 			*cs->statusp = resp->status = NFS4ERR_DELAY;
 			goto err_out;
 		}
@@ -3833,7 +3887,8 @@ mds_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	/* Get source "before" change value */
 	obdva.va_mask = AT_CTIME|AT_SEQ;
@@ -4161,7 +4216,8 @@ mds_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	/*
 	 * We have to enter the critical region before calling VOP_RWLOCK
@@ -4293,7 +4349,7 @@ mds_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 */
 	savecred = curthread->t_cred;
 	curthread->t_cred = cr;
-	error = do_io(FWRITE, vp, &uio, ioflag, cr);
+	error = do_io(FWRITE, vp, &uio, ioflag, cr, &ct);
 	curthread->t_cred = savecred;
 
 	if (iovp != iov)
@@ -4577,9 +4633,9 @@ mds_compound(compound_node_t *cn,
 	 * If this is the first compound we've seen, we need to start
 	 * the instances' grace period.
 	 */
-	if (mds_server.seen_first_compound == 0) {
+	if (cs->instp->seen_first_compound == 0) {
 		rfs4_grace_start_new(cs->instp);
-		mds_server.seen_first_compound = 1;
+		cs->instp->seen_first_compound = 1;
 	}
 
 	/*
@@ -4997,7 +5053,8 @@ mds_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
 			 * Check to see if we need to recall a delegation.
 			 */
 			rfs4_hold_deleg_policy(cs->instp);
-			if ((fp = rfs4_findfile(vp, NULL, &create)) != NULL) {
+			if ((fp = rfs4_findfile(cs->instp, vp, NULL, &create))
+			    != NULL) {
 				if (rfs4_check_delegated_byfp(cs->instp,
 				    FWRITE, fp, (reqsize == 0), FALSE, FALSE,
 				    &cs->cp->clientid)) {
@@ -5029,7 +5086,7 @@ mds_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
 			}
 			ct.cc_sysid = 0;
 			ct.cc_pid = 0;
-			ct.cc_caller_id = nfs4_srv_caller_id;
+			ct.cc_caller_id = cs->instp->caller_id;
 
 			cva.va_mask = AT_SIZE;
 			cva.va_size = reqsize;
@@ -5168,7 +5225,7 @@ static void
 mds_do_open(struct compound_state *cs, struct svc_req *req,
 		rfs4_openowner_t *oo, delegreq_t deleg,
 		uint32_t access, uint32_t deny,
-		OPEN4res *resp)
+		OPEN4res *resp, int deleg_cur)
 {
 	rfs4_state_t *state;
 	rfs4_file_t *file;
@@ -5187,18 +5244,16 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	int err;
 
 	/* get the file struct and hold a lock on it during initial open */
-	file = rfs4_findfile_withlock(cs->vp, &cs->fh, &fcreate);
+	file = rfs4_findfile_withlock(cs->instp, cs->vp, &cs->fh, &fcreate);
 	if (file == NULL) {
-		NFS4_DEBUG(rfs4_debug,
-		    (CE_NOTE, "rfs4_do_open: can't find file"));
+		DTRACE_PROBE(nfss__e__no_file);
 		resp->status = NFS4ERR_SERVERFAULT;
 		return;
 	}
 
 	state = rfs4_findstate_by_owner_file(cs, oo, file, &screate);
 	if (state == NULL) {
-		NFS4_DEBUG(rfs4_debug,
-		    (CE_NOTE, "rfs4_do_open: can't find state"));
+		DTRACE_PROBE(nfss__e__no_state);
 		resp->status = NFS4ERR_RESOURCE;
 		/* No need to keep any reference */
 		rfs4_file_rele_withunlock(file);
@@ -5303,11 +5358,16 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	 * if the file has been opened already, it will have the current
 	 * access mode in the state struct.  if it has no share access, then
 	 * this is a new open.
+	 *
+	 * However, if this is open with CLAIM_DELEGATE_CUR, then don't
+	 * call VOP_OPEN(), just do the open upgrade.
 	 */
-	if ((state->share_access & OPEN4_SHARE_ACCESS_BOTH) == 0) {
+	if (((state->share_access & OPEN4_SHARE_ACCESS_BOTH) == 0) &&
+	    !deleg_cur) {
 		ct.cc_sysid = sysid;
 		ct.cc_pid = shr.s_pid;
-		ct.cc_caller_id = nfs4_srv_caller_id;
+		ct.cc_caller_id = cs->instp->caller_id;
+		ct.cc_flags = CC_DONTBLOCK;
 		err = VOP_OPEN(&cs->vp, fflags, cs->cr, &ct);
 		if (err) {
 			rfs4_dbe_unlock(file->dbe);
@@ -5318,7 +5378,10 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 			if (screate == TRUE)
 				rfs4_state_close(state, FALSE, FALSE, cs->cr);
 			rfs4_state_rele(state);
-			resp->status = NFS4ERR_SERVERFAULT;
+			if (err == EAGAIN && (ct.cc_flags & CC_WOULDBLOCK))
+				resp->status = NFS4ERR_DELAY;
+			else
+				resp->status = NFS4ERR_SERVERFAULT;
 			return;
 		}
 	} else { /* open upgrade */
@@ -5497,7 +5560,7 @@ mds_do_opennull(struct compound_state *cs,
 		/* inhibit delegation grants during exclusive create */
 
 		if (args->mode == EXCLUSIVE4)
-			rfs4_disable_delegation();
+			rfs4_disable_delegation(cs->instp);
 
 		resp->status = mds_createfile(args, req, cs, cinfo, attrset);
 	}
@@ -5507,7 +5570,7 @@ mds_do_opennull(struct compound_state *cs,
 		/* cs->vp cs->fh now reference the desired file */
 
 		mds_do_open(cs, req, oo, do_41_deleg_hack(args->share_access),
-		    (args->share_access & 0xff), args->share_deny, resp);
+		    (args->share_access & 0xff), args->share_deny, resp, 0);
 
 		/*
 		 * If rfs4_createfile set attrset, we must
@@ -5521,7 +5584,7 @@ mds_do_opennull(struct compound_state *cs,
 		*cs->statusp = resp->status;
 
 	if (args->mode == EXCLUSIVE4)
-		rfs4_enable_delegation();
+		rfs4_enable_delegation(cs->instp);
 }
 
 /*ARGSUSED*/
@@ -5548,7 +5611,8 @@ mds_do_openprev(struct compound_state *cs, struct svc_req *req,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	va.va_mask = AT_MODE|AT_UID;
 	error = VOP_GETATTR(cs->vp, &va, 0, cs->cr, &ct);
@@ -5583,7 +5647,7 @@ mds_do_openprev(struct compound_state *cs, struct svc_req *req,
 
 	mds_do_open(cs, req, oo,
 	    NFS4_DELEG4TYPE2REQTYPE(args->open_claim4_u.delegate_type),
-	    (args->share_access && 0xff), args->share_deny, resp);
+	    (args->share_access && 0xff), args->share_deny, resp, 0);
 }
 
 static void
@@ -5638,7 +5702,7 @@ mds_do_opendelcur(struct compound_state *cs, struct svc_req *req,
 	rfs4_deleg_state_rele(dsp);
 	mds_do_open(cs, req, oo, DELEG_NONE,
 	    (args->share_access & 0xff),
-	    args->share_deny, resp);
+	    args->share_deny, resp, 1);
 }
 
 /*ARGSUSED*/
@@ -5673,18 +5737,16 @@ mds_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 	}
 
 	/* get the file struct and hold a lock on it during initial open */
-	file = rfs4_findfile_withlock(cs->vp, NULL, &create);
+	file = rfs4_findfile_withlock(cs->instp, cs->vp, NULL, &create);
 	if (file == NULL) {
-		NFS4_DEBUG(rfs4_debug,
-		    (CE_NOTE, "rfs4_do_opendelprev: can't find file"));
+		DTRACE_PROBE(nfss__e__no_file);
 		resp->status = NFS4ERR_SERVERFAULT;
 		return;
 	}
 
 	state = rfs4_findstate_by_owner_file(cs, oo, file, &create);
 	if (state == NULL) {
-		NFS4_DEBUG(rfs4_debug,
-		    (CE_NOTE, "rfs4_do_opendelprev: can't find state"));
+		DTRACE_PROBE(nfss__e__no_state);
 		resp->status = NFS4ERR_SERVERFAULT;
 		rfs4_file_rele_withunlock(file);
 		return;
@@ -5695,8 +5757,8 @@ mds_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 	if ((args->share_access & 0xff) != state->share_access ||
 	    args->share_deny != state->share_deny ||
 	    state->finfo->dinfo->dtype == OPEN_DELEGATE_NONE) {
-		NFS4_DEBUG(rfs4_debug,
-		    (CE_NOTE, "rfs4_do_opendelprev: state mixup"));
+		DTRACE_PROBE2(nfss__e__state_mixup, rfs4_state_t *, state,
+		    OPEN4args *, args);
 		rfs4_dbe_unlock(file->dbe);
 		rfs4_dbe_unlock(state->dbe);
 		rfs4_file_rele(file);
@@ -5709,6 +5771,7 @@ mds_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 
 	dsp = rfs4_finddeleg(cs, state, &dcreate);
 	if (dsp == NULL) {
+		DTRACE_PROBE(nfss__e__no_deleg);
 		rfs4_state_rele(state);
 		rfs4_file_rele(file);
 		resp->status = NFS4ERR_SERVERFAULT;
@@ -5780,7 +5843,7 @@ mds_op_open(nfs_argop4 *argop, nfs_resop4 *resop,
 
 retry:
 	create = TRUE;
-	oo = mds_findopenowner(owner, &create);
+	oo = mds_findopenowner(cs->instp, owner, &create);
 	if (oo == NULL) {
 		/* XXX: this seems a little fishy... */
 		*cs->statusp = resp->status = NFS4ERR_STALE_CLIENTID;
@@ -5862,6 +5925,7 @@ retry:
 	case CLAIM_DELEGATE_PREV:
 		mds_do_opendelprev(cs, req, args, oo, resp);
 		break;
+	/*  OTHER CLAIM TYPES !!! */
 	default:
 		resp->status = NFS4ERR_INVAL;
 		break;
@@ -6216,13 +6280,14 @@ final:
  * lock_denied: Fill in a LOCK4deneid structure given an flock64 structure.
  */
 static nfsstat4
-mds_lock_denied(LOCK4denied *dp, struct flock64 *flk)
+mds_lock_denied(nfs_server_instance_t *instp, LOCK4denied *dp,
+    struct flock64 *flk)
 {
 	rfs4_lockowner_t *lo;
 	rfs4_client_t *cp;
 	uint32_t len;
 
-	lo = mds_findlockowner_by_pid(flk->l_pid);
+	lo = findlockowner_by_pid(instp, flk->l_pid);
 	if (lo != NULL) {
 		cp = lo->client;
 		if (rfs4_lease_expired(cp)) {
@@ -6361,7 +6426,7 @@ mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 		 */
 		olo->lock_owner.clientid = cs->cp->clientid;
 
-		lo = mds_findlockowner(&olo->lock_owner, &lcreate);
+		lo = findlockowner(cs->instp, &olo->lock_owner, &lcreate);
 		if (lo == NULL) {
 			*cs->statusp = resp->status = NFS4ERR_RESOURCE;
 			goto end;
@@ -6701,7 +6766,8 @@ mds_op_lockt(nfs_argop4 *argop, nfs_resop4 *resop,
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
-	ct.cc_caller_id = nfs4_srv_caller_id;
+	ct.cc_caller_id = cs->instp->caller_id;
+	ct.cc_flags = CC_DONTBLOCK;
 
 	/*
 	 * NFS4 only allows locking on regular files, so
@@ -6738,7 +6804,7 @@ mds_op_lockt(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	/* Find or create a lockowner */
-	lo = mds_findlockowner(&args->owner, &create);
+	lo = findlockowner(cs->instp, &args->owner, &create);
 
 	if (lo) {
 		pid = lo->pid;
@@ -6775,7 +6841,7 @@ retry:
 		if (flk.l_type == F_UNLCK)
 			resp->status = NFS4_OK;
 		else {
-			if (mds_lock_denied(&resp->denied, &flk)
+			if (mds_lock_denied(cs->instp, &resp->denied, &flk)
 			    == NFS4ERR_EXPIRED)
 				goto retry;
 			resp->status = NFS4ERR_DENIED;
@@ -6928,15 +6994,18 @@ rfs4_dup_princ(rpc_gss_principal_t ppl)
 }
 
 void
-rfs4_set_cred_princ(rfs4_client_t *cp, struct compound_state *cs)
+rfs4_set_cred_princ(cred_princ_t **pp, struct compound_state *cs)
 {
-	cred_princ_t		*p;
-	caddr_t			 t;
+	cred_princ_t	*p;
+	caddr_t		 t;
 
-	ASSERT(cp != NULL);
-	if (cp->cr_set == NULL)
-		cp->cr_set = kmem_zalloc(sizeof (cred_princ_t), KM_SLEEP);
-	p = cp->cr_set;
+	ASSERT(pp != NULL);
+
+
+	if (*pp == NULL)
+		*pp = kmem_zalloc(sizeof (cred_princ_t), KM_SLEEP);
+
+	p = *pp;
 
 	p->cp_cr = crdup(cs->basecr);
 	p->cp_aflavor = cs->req->rq_cred.oa_flavor;
@@ -6964,17 +7033,15 @@ rfs4_set_cred_princ(rfs4_client_t *cp, struct compound_state *cs)
 
 /* returns 0 if no match; or 1 for a match */
 int
-rfs4_cmp_cred_princ(rfs4_client_t *cp, struct compound_state *cs)
+rfs4_cmp_cred_princ(cred_princ_t *p, struct compound_state *cs)
 {
-	cred_princ_t		*p;
 	int			 rc = 0;
 	rpc_gss_principal_t	 recp;		/* cached clnt princ */
 	rpc_gss_principal_t	 ibrp;		/* inbound req princ */
 
-	ASSERT(cp != NULL);
-	if (cp->cr_set == NULL)
+
+	if (p == NULL)
 		return (rc);	/* nothing to compare with */
-	p = cp->cr_set;
 
 	if (p->cp_aflavor != cs->req->rq_cred.oa_flavor)
 		return (rc);
@@ -7023,7 +7090,7 @@ client_record(nfs_client_id4 *cip, struct compound_state *cs)
 
 	/* 3. principal */
 	if (ncp != NULL)
-		rfs4_set_cred_princ(ncp, cs);
+		rfs4_set_cred_princ(&ncp->cr_set, cs);
 
 	/*
 	 * Both of the following items of the 5-tuple are built as
@@ -7113,7 +7180,7 @@ case1:			/* case 1 - utok */
 	old_verifier_arg = cp->nfs_client.verifier;
 	if (CLID_REC_CONFIRMED(cp)) {
 		if (!update) {
-			if (!rfs4_cmp_cred_princ(cp, cs)) {
+			if (!rfs4_cmp_cred_princ(cp->cr_set, cs)) {
 				/* case 3 */
 				if (rfs4_lease_expired(cp)) {
 					rfs4_client_close(cp);
@@ -7164,7 +7231,7 @@ case1:			/* case 1 - utok */
 			}
 
 		} else { /* UPDATE */
-			if (rfs4_cmp_cred_princ(cp, cs)) {
+			if (rfs4_cmp_cred_princ(cp->cr_set, cs)) {
 				if (old_verifier_arg == cip->verifier) {
 					/* case 6 - utok */
 					*cs->statusp = NFS4_OK;
@@ -7290,8 +7357,18 @@ out:
 	if (args->eia_client_impl_id.eia_client_impl_id_len != 0)
 		/* EMPTY */;
 
+	/* XXX - jw - best guess */
+	rfs4_ss_clid(cs, cp, req);
+
 	/* Server's implementation */
 	mds_get_server_impl_id(rok);
+
+	/*
+	 * XXX - jw - best guess
+	 * Check to see if client can perform reclaims
+	 */
+	rfs4_ss_chkclid(cs, cp);
+
 	rfs4_client_rele(cp);
 
 final:
@@ -7330,7 +7407,7 @@ mds_op_create_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Find the clientid
 	 */
-	cp = mds_findclient_by_id(args->csa_clientid);
+	cp = findclient_by_id(cs->instp, args->csa_clientid);
 	if (cp == NULL) {
 		*cs->statusp = resp->csr_status = NFS4ERR_STALE_CLIENTID;
 		goto final;
@@ -7387,7 +7464,7 @@ replay:
 	 * Clientid confirmation
 	 */
 	if (cp->need_confirm && cp->clientid == args->csa_clientid) {
-		if (rfs4_cmp_cred_princ(cp, cs)) {
+		if (rfs4_cmp_cred_princ(cp->cr_set, cs)) {
 			cp->need_confirm = FALSE;
 		} else {
 			*cs->statusp = resp->csr_status = NFS4ERR_CLID_INUSE;
@@ -7403,7 +7480,7 @@ replay:
 	sca.cs_xprt = req->rq_xprt;
 	sca.cs_client = cp;
 	sca.cs_aotw = *args;
-	sp = mds_createsession(&sca);
+	sp = mds_createsession(cs->instp, &sca);
 
 	if (sca.cs_error) {
 		*cs->statusp = resp->csr_status = sca.cs_error;
@@ -7458,9 +7535,12 @@ replay:
 	rfs4_update_lease(cp);
 
 	/*
-	 * Create session keeps a hold on the client struct. This
-	 * hold is released as part of the destroy session processing.
+	 * Don't hold the client struct or it will never be able to expire.
+	 * If the client goes away w/o sending a destroy session (reboot
+	 * or panic), the client struct must expire.
 	 */
+	rfs4_client_rele(cp);
+
 	rfs41_session_rele(sp);
 
 final:
@@ -7523,7 +7603,8 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Find session and check for clientid and lease expiration
 	 */
-	if ((destroy_sp = mds_findsession_by_id(args->dsa_sessionid)) == NULL) {
+	if ((destroy_sp =
+	    mds_findsession_by_id(cs->instp, args->dsa_sessionid)) == NULL) {
 		*cs->statusp = resp->dsr_status = NFS4ERR_BADSESSION;
 		goto final;
 	}
@@ -7543,7 +7624,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 		switch (cp->state_prot.sp_type) {
 		case SP4_MACH_CRED:
 			cmn_err(CE_NOTE, "op_destroy_session: SP4_MACH_CRED");
-			if (!rfs4_cmp_cred_princ(cp, cs)) {
+			if (!rfs4_cmp_cred_princ(cp->cr_set, cs)) {
 				*cs->statusp = resp->dsr_status = NFS4ERR_PERM;
 				goto final;
 			}
@@ -7586,18 +7667,12 @@ mds_op_backchannel_ctl(nfs_argop4 *argop, nfs_resop4 *resop,
  * that need it and refreshing any stale/dead connections.
  */
 static void
-ping_cb_null_thr(sessionid4 sessid)
+ping_cb_null_thr(mds_session_t *sp)
 {
 	CLIENT			*ch = NULL;
-	mds_session_t		*sp = NULL;
 	struct timeval		 tv;
 	enum clnt_stat		 cs;
 	int 			conn_num, attempts = 5;
-
-	if ((sp = mds_findsession_by_id(sessid)) == NULL) {
-		DTRACE_PROBE(nfss41__i_sessid_not_found);
-		thread_exit();
-	}
 
 	tv.tv_sec = 30;
 	tv.tv_usec = 0;
@@ -7695,7 +7770,6 @@ out:
 		CLNT_CONTROL(ch, CLSET_CB_TEST_CLEAR, (void *)NULL);
 		rfs41_cb_freech(sp, ch);
 	}
-	rfs41_session_rele(sp);
 
 	thread_exit();
 }
@@ -7757,7 +7831,7 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 		if (SN_CB_CHAN_OK(sp)) {
 			if (sp->sn_bc.pngcnt > 0 && !sp->sn_bc.pnginprog)
 				(void) thread_create(NULL, 0, ping_cb_null_thr,
-				    sp->sn_sessid, 0, &p0, TS_RUN, minclsyspri);
+				    sp, 0, &p0, TS_RUN, minclsyspri);
 		} else {
 			cbstat |= SEQ4_STATUS_CB_PATH_DOWN;
 		}
@@ -7925,7 +7999,8 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Find session and check for clientid and lease expiration
 	 */
-	if ((sp = mds_findsession_by_id(args->bctsa_sessid)) == NULL) {
+	if ((sp = mds_findsession_by_id(cs->instp, args->bctsa_sessid))
+	    == NULL) {
 		*cs->statusp = resp->bctsr_status = NFS4ERR_BADSESSION;
 		goto final;
 	}
@@ -7992,7 +8067,8 @@ extern void mds_mpd_list(rfs4_entry_t, void *);
 
 
 nfsstat4
-mds_getdevicelist(deviceid4 **dlpp, int *len)
+mds_getdevicelist(nfs_server_instance_t *instp,
+    deviceid4 **dlpp, int *len)
 {
 	mds_device_list_t mdl;
 	int sz;
@@ -8000,14 +8076,14 @@ mds_getdevicelist(deviceid4 **dlpp, int *len)
 	/*
 	 * no table updates till we're done with this...
 	 */
-	rw_enter(&mds_mpd_lock, RW_READER);
-	sz = mds_mpd_tab->count * sizeof (deviceid4);
+	rw_enter(&instp->mds_mpd_lock, RW_READER);
+	sz = instp->mds_mpd_tab->count * sizeof (deviceid4);
 
 	mdl.dl = kmem_alloc(sz, KM_SLEEP);
 	mdl.count = 0;
 
-	rfs4_dbe_walk(mds_mpd_tab, mds_mpd_list, &mdl);
-	rw_exit(&mds_mpd_lock);
+	rfs4_dbe_walk(instp->mds_mpd_tab, mds_mpd_list, &mdl);
+	rw_exit(&instp->mds_mpd_lock);
 
 	*len = mdl.count;
 	*dlpp = mdl.dl;
@@ -8037,7 +8113,7 @@ mds_op_get_devlist(nfs_argop4 *argop,
 	}
 
 	/* mds_getdevicelist will allocate space for devlist. */
-	nfsstat = mds_getdevicelist(&devlist, &len);
+	nfsstat = mds_getdevicelist(cs->instp, &devlist, &len);
 	*cs->statusp = resp->gdlr_status = nfsstat;
 
 	if (nfsstat == NFS4_OK) {
@@ -8087,7 +8163,7 @@ mds_op_get_devinfo(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *reqp,
 
 	bcopy(&argp->gdia_device_id, &devid, sizeof (devid));
 
-	mp = mds_find_mpd(devid.i.did);
+	mp = mds_find_mpd(cs->instp, devid.i.did);
 
 	if (mp == NULL)
 		goto final;
@@ -8115,16 +8191,9 @@ final:
 	    GETDEVICEINFO4res *, resp);
 }
 
-/* defaults to layout id 1 */
-/*ARGSUSED*/
-static int32_t
-mds_check_for_layout(vnode_t *vp)
-{
-	return (1);
-}
 
 /*
- * XXXX: Needs to pass in MDS_PPID
+ * XXXX: Needs to pass in MDS_SID
  */
 extern bool_t xdr_ds_fh_fmt(XDR *, mds_ds_fh *);
 static int
@@ -8155,65 +8224,129 @@ mds_alloc_ds_fh(struct compound_state *cs, nfs_fh4 *fhp)
 
 int mds_layout_is_dense = 1;
 
+void
+fake_spe(nfs_server_instance_t *instp, mds_layout_t **flp)
+{
+	extern int mds_max_lo_devs;
+	extern mds_layout_t *mds_gen_default_layout(nfs_server_instance_t *,
+	    int);
+
+	mds_layout_t *lp;
+	bool_t create = FALSE;
+	int key = 1;
+
+	if (flp == NULL)
+		return;
+
+	*flp = NULL;
+
+	rw_enter(&instp->mds_layout_lock, RW_READER);
+	lp = (mds_layout_t *)rfs4_dbsearch(instp->mds_layout_idx,
+	    (void *)(uintptr_t)key, &create, NULL, RFS4_DBS_VALID);
+	rw_exit(&instp->mds_layout_lock);
+
+	if (lp == NULL)
+		lp = mds_gen_default_layout(instp, mds_max_lo_devs);
+
+	if (lp != NULL)
+		*flp = lp;
+}
+
+/*
+ * get file layout XXX? should the rfs4_file_t be cached in
+ * compound state
+ */
 nfsstat4
-mds_get_layout_seg(struct compound_state *cs,
+mds_get_flo(struct compound_state *cs, mds_layout_t **flopp)
+{
+	extern int mds_get_odl(vnode_t *, struct mds_layout **);
+
+	rfs4_file_t *fp;
+	nfsstat4    stat;
+
+	ASSERT(cs->vp);
+	ASSERT(flopp);
+
+	mutex_enter(&cs->vp->v_lock);
+	fp = (rfs4_file_t *)vsd_get(cs->vp, cs->instp->vkey);
+	mutex_exit(&cs->vp->v_lock);
+
+	/* Odd.. no rfs4_file_t for the vnode.. */
+	if (fp == NULL)
+		return (NFS4ERR_LAYOUTUNAVAILABLE);
+
+	/* do we have a odl already ? */
+	if (fp->flp == NULL) {
+		/* Nope, read from disk */
+		if ((stat = mds_get_odl(cs->vp, &fp->flp)) != NFS4_OK) {
+			/*
+			 * XXXXX:
+			 * XXXXX: No ODL, so lets go query PE
+			 * XXXXX:
+			 */
+			fake_spe(cs->instp, &fp->flp);
+
+			if (fp->flp == NULL)
+				return (NFS4ERR_LAYOUTUNAVAILABLE);
+		}
+	}
+
+	/*
+	 * pass back the mds_layout
+	 */
+	*flopp = (mds_layout_t *)fp->flp;
+	return (NFS4_OK);
+}
+
+nfsstat4
+mds_fetch_layout(struct compound_state *cs,
     LAYOUTGET4args *argp, LAYOUTGET4res *resp)
 {
-	int32_t loid;
 	mds_layout_t *lp;
 	mds_mpd_t *dp;
 	layout4 *logrp;
-	nfsv4_1_file_layout4 nflo;
+	nfsv4_1_file_layout4 otw_flo;
 	nfs_fh4 *nfl_fh_list;
+	rfs4_file_t *fp;
+	mds_layout_grant_t *lgp;
 
 	int i, err, nfl_size;
+	bool_t create = TRUE;
 
 	XDR  xdr;
 	int  xdr_size = 0;
 	char *xdr_buffer;
 
-	loid = mds_check_for_layout(cs->vp);
 
-	if (loid == -1)
+	if (mds_get_flo(cs, &lp) != NFS4_OK)
 		return (NFS4ERR_LAYOUTUNAVAILABLE);
-
-	lp = mds_find_layout(loid);
-
-	if (lp == NULL)
-		return (NFS4ERR_LAYOUTUNAVAILABLE);
-
-	/* make sure we got what we asked for :) */
-	ASSERT(loid == lp->layout_id);
 
 	/* validate the device id */
-	dp = mds_find_mpd(lp->dev_id);
+	dp = mds_find_mpd(cs->instp, lp->dev_id);
 
-	bzero(&nflo, sizeof (nflo));
+	bzero(&otw_flo, sizeof (otw_flo));
 
 	if (dp == NULL) {
 		DTRACE_PROBE1(nfss41__e__bad_devid, uint32_t, lp->dev_id);
 		return (NFS4ERR_LAYOUTUNAVAILABLE);
 	}
 
-	mds_set_deviceid(lp->dev_id, &nflo.nfl_deviceid);
+	mds_set_deviceid(lp->dev_id, &otw_flo.nfl_deviceid);
 
 	/*
 	 * 	NFL4_UFLG_COMMIT_THRU_MDS is FALSE
 	 */
-	nflo.nfl_util = (lp->stripe_unit & NFL4_UFLG_STRIPE_UNIT_SIZE_MASK);
+	otw_flo.nfl_util = (lp->stripe_unit & NFL4_UFLG_STRIPE_UNIT_SIZE_MASK);
 
 	if (mds_layout_is_dense)
-		nflo.nfl_util |= NFL4_UFLG_DENSE;
+		otw_flo.nfl_util |= NFL4_UFLG_DENSE;
 
 	/*
 	 * Always start at the begining of the device array
 	 */
-	nflo.nfl_first_stripe_index = 0;
+	otw_flo.nfl_first_stripe_index = 0;
 
 	/*
-	 * XXX For now we use the same FH for mds and ds's
-	 * XXX but the actual format of the ds FH is per
-	 * XXX the product. Just not correct wrt the poolmapping
 	 */
 	nfl_size = lp->stripe_count * sizeof (nfs_fh4);
 
@@ -8239,10 +8372,10 @@ mds_get_layout_seg(struct compound_state *cs,
 
 	}
 
-	nflo.nfl_fh_list.nfl_fh_list_len = lp->stripe_count;
-	nflo.nfl_fh_list.nfl_fh_list_val = nfl_fh_list;
+	otw_flo.nfl_fh_list.nfl_fh_list_len = lp->stripe_count;
+	otw_flo.nfl_fh_list.nfl_fh_list_val = nfl_fh_list;
 
-	xdr_size = xdr_sizeof(xdr_nfsv4_1_file_layout4, &nflo);
+	xdr_size = xdr_sizeof(xdr_nfsv4_1_file_layout4, &otw_flo);
 	ASSERT(xdr_size);
 
 	/*
@@ -8262,16 +8395,41 @@ mds_get_layout_seg(struct compound_state *cs,
 	 */
 	xdrmem_create(&xdr, xdr_buffer, xdr_size, XDR_ENCODE);
 
-	if (xdr_nfsv4_1_file_layout4(&xdr, &nflo) == FALSE) {
+	if (xdr_nfsv4_1_file_layout4(&xdr, &otw_flo) == FALSE) {
 		kmem_free(xdr_buffer, xdr_size);
 		kmem_free(nfl_fh_list, nfl_size);
 		return (NFS4ERR_LAYOUTTRYLATER);
 	}
 
-	logrp = kmem_zalloc(sizeof (*logrp), KM_SLEEP);
+	/*
+	 * create the layout grant
+	 */
+	mutex_enter(&cs->vp->v_lock);
+	fp = (rfs4_file_t *)vsd_get(cs->vp, cs->instp->vkey);
+	mutex_exit(&cs->vp->v_lock);
+
+	lgp = rfs41_findlogrant(cs, fp, cs->cp, &create);
+	if (lgp == NULL) {
+		printf("rfs41_findlogrant() returned NULL; create=%d\n ",
+		    create);
+		kmem_free(xdr_buffer, xdr_size);
+		kmem_free(nfl_fh_list, nfl_size);
+		return (NFS4ERR_SERVERFAULT);
+	}
+
+	lgp->lop = lp;
+
+	/*
+	 * Build layout get reply
+	 */
+	logrp = kmem_zalloc(sizeof (layout4), KM_SLEEP);
 
 	resp->LAYOUTGET4res_u.logr_resok4.logr_layout.logr_layout_len = 1;
 	resp->LAYOUTGET4res_u.logr_resok4.logr_layout.logr_layout_val = logrp;
+	resp->LAYOUTGET4res_u.logr_resok4.logr_return_on_close = FALSE;
+	resp->LAYOUTGET4res_u.logr_will_signal_layout_avail = FALSE;
+	resp->LAYOUTGET4res_u.logr_resok4.logr_stateid =
+	    lgp->lo_stateid.stateid;
 
 	logrp->lo_offset = 0;
 	logrp->lo_length = -1;
@@ -8279,8 +8437,6 @@ mds_get_layout_seg(struct compound_state *cs,
 	logrp->lo_content.loc_type = lp->layout_type;
 	logrp->lo_content.loc_body.loc_body_len = xdr_size;
 	logrp->lo_content.loc_body.loc_body_val = xdr_buffer;
-
-	resp->LAYOUTGET4res_u.logr_resok4.logr_stateid = lp->lo_stateid.stateid;
 
 	kmem_free(nfl_fh_list, nfl_size);
 	return (NFS4_OK);
@@ -8290,16 +8446,39 @@ int mds_validate_loga_stateid = 1;
 
 extern nfsstat4 mds_validate_logstateid(struct compound_state *, stateid_t *);
 
+static mds_layout_grant_t *
+mds_get_lo_grant_by_cp(struct compound_state *cs)
+{
+	rfs4_file_t *fp;
+	rfs4_client_t *cp = cs->cp;
+	mds_layout_grant_t *lgp;
+	bool_t create = FALSE;
+
+	mutex_enter(&cs->vp->v_lock);
+	fp = (rfs4_file_t *)vsd_get(cs->vp, cs->instp->vkey);
+	mutex_exit(&cs->vp->v_lock);
+	if (fp == NULL)
+		return (NULL);
+
+	if (cp->clientgrantlist.next->lgp == NULL)
+		return (NULL);
+
+	lgp = rfs41_findlogrant(cs, fp, cp, &create);
+
+	return (lgp);
+}
+
 /*ARGSUSED*/
 static void
 mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
-		struct svc_req *reqp, compound_node_t *cn)
+    struct svc_req *reqp, compound_node_t *cn)
 {
 	LAYOUTGET4args *argp = &argop->nfs_argop4_u.oplayoutget;
 	LAYOUTGET4res *resp = &resop->nfs_resop4_u.oplayoutget;
 	nfsstat4 nfsstat = NFS4_OK;
 	stateid_t *arg_stateid;
 	struct compound_state *cs = cn->cn_state;
+	mds_layout_grant_t *lgp = NULL;
 
 	DTRACE_NFSV4_2(op__layoutget__start,
 	    struct compound_state *, cs,
@@ -8327,6 +8506,12 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 		arg_stateid = (stateid_t *)&(argp->loga_stateid);
 
 		/*
+		 * We may already have given this client a layout.  Better
+		 * get it, if it exists.
+		 */
+		lgp = mds_get_lo_grant_by_cp(cs);
+
+		/*
 		 * first, only open, deleg, lock
 		 * or layout stateids are permitted.
 		 * currently open, deleg and lock stateids are handed
@@ -8334,35 +8519,50 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 		 * check if it is a layout stateid and treat differently.
 		 */
 		if (arg_stateid->v41_bits.type == LAYOUTID) {
-			/* XXX - jw - code needed here. */
-			nfsstat = NFS4_OK;
+			/*
+			 * if they are using a layout stateid, then we must
+			 * have already handed it out and should have found
+			 * it above.
+			 */
+			if (lgp == NULL) {
+				nfsstat = NFS4ERR_BAD_STATEID;
+				goto final;
+			}
+			/*
+			 * XXX - jw - fine, we gave them a layout for this
+			 * file and now there asking for another one.  not
+			 * sure why, so give them an error for now.  once
+			 * we add ranges, then we can do something different.
+			 */
+			cmn_err(CE_NOTE,
+			    "asking for a second layout for a file");
+			nfsstat = NFS4ERR_BAD_STATEID;
+			rfs41_lo_grant_rele(lgp);
+			goto final;
 		} else {
 			/*
 			 * not using a layout stateid, so we better not
 			 * have handed one out already for this file or
 			 * this client gets an error.
-			 * XXX - jw - routine to do this not yet written.
 			 */
+			if (lgp != NULL) {
+				rfs41_lo_grant_rele(lgp);
+				nfsstat = NFS4ERR_BAD_STATEID;
+				goto final;
+			}
+
 			nfsstat = mds_validate_logstateid(cs, arg_stateid);
 			if (nfsstat != NFS4_OK) {
-				*cs->statusp = resp->logr_status = nfsstat;
 				goto final;
 			}
 		}
 	}
 
-	nfsstat = mds_get_layout_seg(cs, argp, resp);
-
-	if (nfsstat == NFS4_OK) {
-		resp->LAYOUTGET4res_u.logr_resok4.logr_return_on_close = TRUE;
-		/* add to the layout grant table */
-	}
-	else
-		resp->LAYOUTGET4res_u.logr_will_signal_layout_avail = FALSE;
-
-	*cs->statusp = resp->logr_status = nfsstat;
+	nfsstat = mds_fetch_layout(cs, argp, resp);
 
 final:
+	*cs->statusp = resp->logr_status = nfsstat;
+
 	DTRACE_NFSV4_2(op__layoutget__done,
 	    struct compound_state *, cs,
 	    LAYOUTGET4res *, resp);
@@ -8378,7 +8578,7 @@ mds_layoutget_free(nfs_resop4 *resop)
 /*ARGSUSED*/
 static void
 mds_op_layout_commit(nfs_argop4 *argop, nfs_resop4 *resop,
-		struct svc_req *reqp, compound_node_t *cn)
+    struct svc_req *reqp, compound_node_t *cn)
 {
 	struct compound_state *cs = cn->cn_state;
 	LAYOUTCOMMIT4args *argp = &argop->nfs_argop4_u.oplayoutcommit;
@@ -8412,7 +8612,8 @@ mds_op_layout_commit(nfs_argop4 *argop, nfs_resop4 *resop,
 
 		ct.cc_sysid = 0;
 		ct.cc_pid = 0;
-		ct.cc_caller_id = nfs4_srv_caller_id;
+		ct.cc_caller_id = cs->instp->caller_id;
+		ct.cc_flags = CC_DONTBLOCK;
 
 		va.va_mask = AT_SIZE;
 		error = VOP_GETATTR(vp, &va, 0, cr, &ct);

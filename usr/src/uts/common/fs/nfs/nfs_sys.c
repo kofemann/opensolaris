@@ -50,10 +50,12 @@
  * function that will traverse the rfs4_client_t table
  * and mark any matching IP Address as "forced_expire".
  *
- * It is the server init() function that plops the
+ * It is the server module load init() function that plops the
  * function pointer.
  */
 void (*rfs4_client_clrst)(struct nfs4clrst_args *) = NULL;
+
+/* Temp: used by mdsadm */
 void (*mds_addlo)(struct mds_addlo_args *) = NULL;
 int  (*mds_adddev)(char *) = NULL;
 int (*mds_recall_lo)(struct mds_reclo_args *, cred_t *) = NULL;
@@ -75,6 +77,7 @@ time_t rfs4_grace_period = RFS4_LEASETIME;
 
 /* DSS: distributed stable storage */
 size_t nfs4_dss_buflen = 0;
+
 /* This filled in by nfssrv:_init() */
 int (*nfs_srv_dss_func)(char *, size_t) = NULL;
 
@@ -95,6 +98,11 @@ nfs_export(void *arg)
 int
 nfssys(enum nfssys_op opcode, void *arg)
 {
+/* XXX - jw - need to create this routine. */
+#ifdef NotDoneYet
+	extern void rfs4_inst_init(struct nfs_state_init_args *);
+#endif
+
 	int error = 0;
 
 	if (!(opcode == NFS_REVAUTH ||
@@ -105,7 +113,68 @@ nfssys(enum nfssys_op opcode, void *arg)
 	}
 
 	switch (opcode) {
-		case MDS_RECALL_LAYOUT: {
+/* XXX - jw - need to finish this stuff */
+#ifdef NotDoneYet
+	case NFS_INIT_STATESTORE: {
+		struct nfs_state_init_args nsi_args;
+		STRUCT_DECL(nfs_state_init_args, ua);
+
+		if (mds_addlo == NULL) {
+			printf(":-P .. NFS server is not loaded\n");
+			break;
+		}
+
+		if (!INGLOBALZONE(curproc))
+			return (set_errno(EPERM));
+
+		STRUCT_INIT(ua, get_udatamodel());
+
+		nsi_args.inst_name = kmem_alloc(MAXNAMELEN, KM_SLEEP);
+
+		error = copyinstr(nsi_args.inst_name,
+		    STRUCT_FGETP(ua, inst_name), MAXNAMELEN, NULL);
+
+		if (error != 0) {
+			kmem_free(nsi_args.inst_name, MAXNAMELEN);
+			return (set_errno(EFAULT));
+		}
+		nsi_args.cap_flags = STRUCT_FGET(ua, cap_flags);
+
+		rfs4_inst_init(&nsi_args);
+
+		break;
+	}
+
+	case NFS_FINI_STATESTORE: {
+		struct nfs_state_init_args nsi_args;
+		STRUCT_DECL(nfs_state_init_args, ua);
+
+		if (mds_addlo == NULL) {
+			printf(":-P .. NFS server is not loaded\n");
+			break;
+		}
+
+		if (!INGLOBALZONE(curproc))
+			return (set_errno(EPERM));
+
+		STRUCT_INIT(ua, get_udatamodel());
+
+		nsi_args.inst_name = kmem_alloc(MAXNAMELEN, KM_SLEEP);
+
+		error = copyinstr(nsi_args.inst_name,
+		    STRUCT_FGETP(ua, inst_name), MAXNAMELEN, NULL);
+
+		if (error != 0) {
+			kmem_free(nsi_args.inst_name, MAXNAMELEN);
+			return (set_errno(EFAULT));
+		}
+		rfs4_inst_finit(&nsi_args);
+
+		break;
+	}
+#endif
+
+	case MDS_RECALL_LAYOUT: {
 		struct mds_reclo_args rargs;
 		int plen = 0;
 		int buf[2] = {0, 0};
@@ -276,6 +345,7 @@ nfssys(enum nfssys_op opcode, void *arg)
 			rsa.nfs_versmin = STRUCT_FGET(ursa, nfs_versmin);
 			rsa.nfs_versmax = STRUCT_FGET(ursa, nfs_versmax);
 			rsa.delegation = STRUCT_FGET(ursa, delegation);
+			rsa.dfd = STRUCT_FGET(ursa, dfd);
 		} else {
 			if (copyin(arg, &rsa, sizeof (rsa)))
 				return (set_errno(EFAULT));

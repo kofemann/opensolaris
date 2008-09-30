@@ -392,7 +392,8 @@ typedef enum nfs4_tag_type {
 	TAG_PNFS_GETDEVLIST,
 	TAG_SEQUENCE,
 	TAG_DESTROY_SESSION,
-	TAG_PNFS_GETDEVINFO
+	TAG_PNFS_GETDEVINFO,
+	TAG_RECLAIM_COMPLETE
 } nfs4_tag_type_t;
 
 #define	NFS4_TAG_INITIALIZER	{				\
@@ -535,7 +536,9 @@ typedef enum nfs4_tag_type {
 		{TAG_DESTROY_SESSION,		"destroy session", \
 			{0x64657374, 0x726f7920, 0x73657373}},	\
 		{TAG_PNFS_GETDEVINFO,		"getdeviceinf", \
-			{0x67657464, 0x65766963, 0x65696e66}}	\
+			{0x67657464, 0x65766963, 0x65696e66}},	\
+		{TAG_RECLAIM_COMPLETE,		"reclaim complete", \
+			{0x7265636c, 0x61696d20, 0x636f6d70}}	\
 	}
 
 /*

@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/systm.h>
 #include <sys/sdt.h>
 #include <rpc/types.h>
@@ -383,13 +381,7 @@ rfs4_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 	int			 dr_stat = NFS4_NOT_DUP;
 	rfs4_dupreq_t		*drp = NULL;
 	int			 rv;
-	cred_t			*cr = NULL;
 
-	/* NULL Proc now checked in rfs4_mvdemux() */
-
-	/*
-	 * minorversion should be "0" for NFSv4.0
-	 */
 	bzero(&res_buf, sizeof (res_buf));
 	rbp = &res_buf;
 	/* bzero took care of rbp->minorversion = 0 */
@@ -435,7 +427,7 @@ rfs4_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 		case NFS4_DUP_NEW:
 			curthread->t_flag |= T_DONTPEND;
 			/* NON-IDEMPOTENT proc call */
-			rfs4_compound(cap, (COMPOUND4res *)rbp, NULL, req, cr, &rv);
+			rfs4_compound(cap, (COMPOUND4res *)rbp, NULL, req, &rv);
 			curthread->t_flag &= ~T_DONTPEND;
 
 			if (rv)		/* short ckt sendreply on error */
@@ -468,7 +460,7 @@ rfs4_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 	} else {
 		curthread->t_flag |= T_DONTPEND;
 		/* IDEMPOTENT proc call */
-		rfs4_compound(cap, (COMPOUND4res *)rbp, NULL, req, cr, &rv);
+		rfs4_compound(cap, (COMPOUND4res *)rbp, NULL, req, &rv);
 		curthread->t_flag &= ~T_DONTPEND;
 
 		if (rv)		/* short ckt sendreply on error */

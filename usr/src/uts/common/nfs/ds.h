@@ -26,8 +26,6 @@
 #ifndef _DS_H
 #define	_DS_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <rpc/svc.h>
 
 #ifdef _KERNEL

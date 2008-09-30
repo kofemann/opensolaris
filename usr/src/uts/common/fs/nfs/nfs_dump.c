@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * Dump memory to NFS swap file after a panic.
  * We have no timeouts, context switches, etc.

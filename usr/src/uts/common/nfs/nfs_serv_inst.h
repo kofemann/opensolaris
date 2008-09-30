@@ -26,7 +26,7 @@
 #ifndef _NFS_SERV_INST_H
 #define	_NFS_SERV_INST_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+#include <sys/door.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -34,75 +34,190 @@ extern "C" {
 
 /*
  * rfs4_deleg_policy is used to signify the server's delegation
- * policy.  The default is to NEVER delegate files and the
- * administrator must configure the server to enable delegations.
- *
- * The disable/enable delegation functions are used to eliminate a
- * race with exclusive creates.
+ * policy.  The disable/enable delegation functions are used to
+ * eliminate a race with exclusive creates.
  */
 typedef enum {
 	SRV_NEVER_DELEGATE = 0,
 	SRV_NORMAL_DELEGATE = 1
 } srv_deleg_policy_t;
 
+/*
+ * list of all occurrences of NFS Server stateStore.
+ */
+extern  list_t    nsi_head;
+extern  krwlock_t nsi_lock;
+
 struct rfs4_state;
+struct rfs4_client;
 
-typedef struct {
-	char		inst_name[10];
-	time_t		start_time;
+/*
+ * max size of the server instance name
+ */
+#define	NFS_INST_NAMESZ 	15
 
+/*
+ * The server instance inst_flags flag bits::
+ */
+#define	NFS_INST_STORE_INIT	0x00000001
+#define	NFS_INST_SS_ENABLED	0x00000002
+#define	NFS_INST_TERMINUS	0x00000004
+
+/*
+ * The server instance capabilities
+ */
+#define	NFS_INST_v40		0x00010000
+#define	NFS_INST_v41		0x00020000
+#define	NFS_INST_DS		0x00040000
+
+/*
+ * NFS stateStore instances.
+ */
+typedef struct nfs_server_instance {
+	list_node_t 	nsi_list;
+	struct rfs4_database *state_store;
+	callb_id_t 	cpr_id;
+
+	char		inst_name[NFS_INST_NAMESZ];
+	int		default_persona;
+
+	/* inst_flags is protected via state_lock */
 	uint32_t	inst_flags;
 
-	int 		default_persona;
-
+	time_t		start_time;
+	int  		reap_time;
 	sysid_t		lockt_sysid;
-	kmutex_t	servinst_lock;
-	rfs4_servinst_t	*cur_servinst;
+	u_longlong_t	caller_id;	/* for caller context */
+	uint_t		vkey;		/* for VSD */
 
-	int		ss_enabled;
+	krwlock_t	reclaimlst_lock;
+	time_t		gstart_time;
+	time_t		grace_period;
+	time_t		lease_period;
+
+	list_t 		reclaim_head;
+	uint_t		reclaim_cnt;
+
+	door_handle_t	dh;
+
 	int		seen_first_compound;
-
 
 	verifier4	Write4verf;
 	verifier4	Readdir4verf;
 
-	krwlock_t    findclient_lock;
+	kmutex_t	state_lock;
+
+	time_t		file_cache_time;
+	krwlock_t    	findclient_lock;
+	rfs4_table_t 	*file_tab;
+	rfs4_index_t 	*file_idx;
+
+	time_t client_cache_time;
 	rfs4_table_t *client_tab;
 	rfs4_index_t *clientid_idx;
 	rfs4_index_t *nfsclnt_idx;
 
+	time_t openowner_cache_time;
 	rfs4_table_t *openowner_tab;
 	rfs4_index_t *openowner_idx;
 
-	kmutex_t	state_lock;
+	time_t state_cache_time;
 	rfs4_table_t *state_tab;
 	rfs4_index_t *state_idx;
 	rfs4_index_t *state_owner_file_idx;
 	rfs4_index_t *state_file_idx;
 
+	time_t lo_state_cache_time;
 	rfs4_table_t *lo_state_tab;
 	rfs4_index_t *lo_state_idx;
 	rfs4_index_t *lo_state_owner_idx;
 
+	time_t lockowner_cache_time;
 	rfs4_table_t *lockowner_tab;
 	rfs4_index_t *lockowner_idx;
 	rfs4_index_t *lockowner_pid_idx;
 
-
+	time_t deleg_state_cache_time;
 	rfs4_table_t *deleg_state_tab;
 	rfs4_index_t *deleg_idx;
 	rfs4_index_t *deleg_state_idx;
 
+	/* XXX: rbg, should move the inst_flags  */
+	int 		deleg_disabled;
+	kmutex_t	deleg_lock;
 	krwlock_t	deleg_policy_lock;
 	srv_deleg_policy_t deleg_policy;
+
 	int		deleg_wlp;
+
 	rfs4_cbstate_t (*deleg_cbcheck)(struct rfs4_state *);
+	void (*deleg_cbrecall)(struct rfs4_deleg_state *, bool_t);
+	void (*exi_clean_func)(struct nfs_server_instance *,
+	    struct exportinfo *);
+	void (*clnt_clear)(struct rfs4_client *);
+
+	krwlock_t    findsession_lock;
+	rfs4_table_t *mds_session_tab;
+	rfs4_index_t *mds_session_idx;
+	rfs4_index_t *mds_sess_clientid_idx;
+
+	rfs4_table_t *mds_pool_info_tab;
+	rfs4_index_t *mds_pool_info_idx;
+	krwlock_t    mds_pool_info_lock;
+
+	krwlock_t    mds_layout_lock;
+	rfs4_table_t *mds_layout_tab;
+	rfs4_index_t *mds_layout_idx;
+
+	struct mds_layout *mds_default_layout;
+
+	krwlock_t    mds_layout_grant_lock;
+	rfs4_table_t *mds_layout_grant_tab;
+	rfs4_index_t *mds_layout_grant_idx;
+	rfs4_index_t *mds_layout_grant_ID_idx;
+
+	krwlock_t    mds_mpd_lock;
+	rfs4_table_t *mds_mpd_tab;
+	rfs4_index_t *mds_mpd_idx;
+
+	krwlock_t    ds_addr_lock;
+	rfs4_table_t *ds_addr_tab;
+	rfs4_index_t *ds_addr_idx;
+	rfs4_index_t *ds_addr_ip_idx;
+	rfs4_index_t *ds_addr_uaddr_idx;
+
+	krwlock_t    ds_guid_info_lock;
+	rfs4_table_t *ds_guid_info_tab;
+	rfs4_index_t *ds_guid_info_inst_idx;
+	rfs4_index_t *ds_guid_info_idx;
+
+	krwlock_t    ds_owner_lock;
+	rfs4_table_t *ds_owner_tab;
+	rfs4_index_t *ds_owner_inst_idx;
+	rfs4_index_t *ds_owner_idx;
+
+	krwlock_t mds_mapzap_lock;
+	rfs4_table_t *mds_mapzap_tab;
+	rfs4_index_t *mds_mapzap_idx;
+
+	fem_t	*deleg_rdops;
+	fem_t	*deleg_wrops;
+
 	attrvers_t	attrvers;
+
 } nfs_server_instance_t;
 
-extern  nfs_server_instance_t nfs4_server;
-extern  nfs_server_instance_t mds_server;
-extern	kmutex_t	deleg_lock;
+#define	SSTOR_CT_INIT(p, val, ct)	\
+	if (p->val == 0)			\
+		p->val = rfs4_lease_time * ct;
+
+extern int nsi_create(char *, nfs_server_instance_t **);
+
+/* temp vvvvvvvv */
+extern nfs_server_instance_t *mds_server;
+extern nfs_server_instance_t *nfs4_server;
+/* temp ^^^^^^^^ */
+
 
 #ifdef	__cplusplus
 }

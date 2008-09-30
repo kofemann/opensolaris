@@ -29,7 +29,6 @@
 #ifndef	_NFS_NFSSYS_H
 #define	_NFS_NFSSYS_H
 
-
 #ifdef	__cplusplus
 extern "C" {
 #endif
@@ -51,7 +50,8 @@ enum nfssys_op	{ OLD_NFS_SVC, OLD_ASYNC_DAEMON, EXPORTFS, OLD_NFS_GETFH,
     NFS4_SVC, RDMA_SVC_INIT, NFS4_CLR_STATE, NFS_IDMAP,
     NFS4_SVC_REQUEST_QUIESCE, NFS_GETFH, NFS4_DSS_SETPATHS,
     NFS4_DSS_SETPATHS_SIZE, NFS4_EPHEMERAL_MOUNT_TO, MOUNTD_ARGS,
-    MDS_ADD_LAYOUT, MDS_ADD_DEVICE, MDS_RECALL_LAYOUT, NFSSTAT_LAYOUT};
+    MDS_ADD_LAYOUT, MDS_ADD_DEVICE, MDS_RECALL_LAYOUT,
+    NFS_INIT_STATESTORE, NFS_FINI_STATESTORE, NFSSTAT_LAYOUT };
 
 struct nfs_svc_args {
 	int		fd;		/* Connection endpoint */
@@ -60,6 +60,7 @@ struct nfs_svc_args {
 	int		versmin;	/* Min protocol version to offer */
 	int		versmax;	/* Max protocol version to offer */
 	int		delegation;	/* NFSv4 delegation on/off? */
+	int		dfd;		/* door file descriptor */
 };
 
 #ifdef _SYSCALL32
@@ -70,6 +71,7 @@ struct nfs_svc_args32 {
 	int32_t		versmin;	/* Min protocol version to offer */
 	int32_t		versmax;	/* Max protocol version to offer */
 	int32_t		delegation;	/* NFSv4 delegation on/off? */
+	int32_t		dfd;		/* door file descriptor */
 };
 #endif
 
@@ -207,6 +209,7 @@ struct rdma_svc_args {
 	int		nfs_versmin;	/* Min NFS version to offer */
 	int		nfs_versmax;	/* Max NFS version to offer */
 	int		delegation;	/* NFSv4 delegation on/off? */
+	int		dfd;		/* door file descriptor */
 };
 
 #ifdef _SYSCALL32
@@ -216,6 +219,7 @@ struct rdma_svc_args32 {
 	int32_t		nfs_versmin;	/* Min NFS version to offer */
 	int32_t		nfs_versmax;	/* Max NFS version to offer */
 	int32_t		delegation;	/* NFSv4 delegation on/off? */
+	int32_t		dfd;		/* door file descriptor */
 };
 #endif
 
@@ -274,6 +278,18 @@ struct mds_adddev_args32 {
 	caddr32_t dev_netid;
 	caddr32_t dev_addr;
 	caddr32_t ds_addr;
+};
+#endif
+
+struct nfs_state_init_args {
+	int	cap_flags;
+	char	*inst_name;
+};
+
+#ifdef _SYSCALL32
+struct nfs_state_init_args32 {
+	int32_t	  cap_flags;
+	caddr32_t inst_name;
 };
 #endif
 
@@ -373,11 +389,55 @@ struct nfs4_svc_args32 {
 /* default storage dir */
 #define	NFS4_DSS_VAR_DIR	"/var/nfs"
 
+#define	NFS4_SS_VERSION 1
+
+/* values for stable storage cmd */
+#define	NFS4_SS_READ		1
+#define	NFS4_SS_WRITE		2
+#define	NFS4_SS_DELETE_CLNT	3
+#define	NFS4_SS_DELETE_OLD	4
+
+/* errors for stable storage door usage */
+#define	NFS_DR_SUCCESS	0
+#define	NFS_DR_BADARG	-1
+#define	NFS_DR_BADCMD	-2
+#define	NFS_DR_BADDIR	-3
+#define	NFS_DR_OVERFLOW	-4
+#define	NFS_DR_NOMEM	-5
+#define	NFS_DR_OPFAIL	-6
+
+/* state to be written out to stable storage */
+struct ss_state_rec {
+	int ss_fvers;
+	uint64_t ss_veri;
+	uint_t ss_len;
+	char ss_val[1];
+};
+/* state returned from stable storage */
+struct ss_rd_state {
+	uint64_t ssr_veri;
+	uint_t ssr_len;
+	char ssr_val[1];
+};
+/* stable storage door arg struct */
+struct ss_arg {
+	int cmd;
+	int rsz;
+	char path[MAXPATHLEN];
+	struct ss_state_rec rec;
+};
+/* stable storage door result struct */
+struct ss_res {
+	int status;
+	int nsize;	/* num of recs, or size needed */
+	struct ss_rd_state rec[1];
+};
+
 #ifdef _KERNEL
 
 #include <sys/systm.h>		/* for rval_t typedef */
 
-extern int	nfssys(enum nfssys_op opcode, void *arg);
+extern int	nfssys(enum nfssys_op, void *);
 extern int	exportfs(struct exportfs_args *, model_t, cred_t *);
 extern int	nfs_getfh(struct nfs_getfh_args *, model_t, cred_t *);
 extern int 	pnfs_collect_layoutstats(
@@ -392,6 +452,7 @@ extern void	rfs4_clear_client_state(struct nfs4clrst_args *);
 extern void	nfs_idmap_args(struct nfsidmap_args *);
 extern void	nfs4_ephemeral_set_mount_to(uint_t);
 extern void	mountd_args(uint_t);
+extern void (*rfs4_client_clrst)(struct nfs4clrst_args *);
 #endif
 
 #ifdef	__cplusplus

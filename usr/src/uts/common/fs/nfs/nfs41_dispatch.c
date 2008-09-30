@@ -37,7 +37,6 @@
 #include <sys/cmn_err.h>
 #include <sys/modctl.h>
 
-extern mds_session_t *mds_findsession_by_id(sessionid4);
 extern void rfs41_compound_free(COMPOUND4res *, compound_node_t *);
 
 /*
@@ -108,7 +107,8 @@ rfs41_find_and_set_session(COMPOUND4args_srv *ap, struct compound_state *cs)
 
 	cs->sp = NULL;
 
-	if ((sp = mds_findsession_by_id(ap->sargs->sa_sessionid)) == NULL)
+	if ((sp = mds_findsession_by_id(cs->instp,
+	    ap->sargs->sa_sessionid)) == NULL)
 		return (NFS4ERR_BADSESSION);
 
 	slot = ap->sargs->sa_slotid;
@@ -375,7 +375,7 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap,
 	rbp->minorversion = NFS4_MINOR_v1;
 	cap = (COMPOUND4args_srv *)ap;
 
-	rfs4_cn_init(&cn, &mds_server, &rbp->status, persona);
+	rfs4_cn_init(&cn, mds_server, &rbp->status, persona);
 	cs = cn.cn_state;
 
 	/*

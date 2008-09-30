@@ -66,6 +66,7 @@
 #include <nfs/nfs4.h>
 #include <nfs/nfs41_filehandle.h>
 
+#include <nfs/nfssys.h>
 #include <sys/strsubr.h>
 #include <sys/strsun.h>
 
@@ -140,9 +141,6 @@ static int rdma_setup_read_data4(READ4args *, READ4res *);
  */
 #define	DIRENT64_TO_DIRCOUNT(dp) \
 	(3 * BYTES_PER_XDR_UNIT + DIRENT64_NAMELEN((dp)->d_reclen))
-
-u_longlong_t nfs4_srv_caller_id;
-uint_t nfs4_srv_vkey = 0;
 
 kmem_cache_t *rfs4_vop_cn_cache = NULL;
 
@@ -234,14 +232,9 @@ int 	rfs4_shrlock(rfs4_state_t *, int);
 int	rfs4_share(rfs4_state_t *);
 void rfs4_ss_clid(struct compound_state *, rfs4_client_t *, struct svc_req *);
 
-fem_t	*deleg_rdops;
-fem_t	*deleg_wrops;
 
-nfs_server_instance_t nfs4_server = { .inst_name = "nfs4_"};
-nfs_server_instance_t mds_server  = { .inst_name = "mds_",
-					.default_persona = FH41_TYPE_NFS};
-
-kmutex_t	deleg_lock;
+nfs_server_instance_t *nfs4_server = NULL;
+nfs_server_instance_t *mds_server = NULL;
 
 #include <nfs/nfs4_srv_attr.h>
 
@@ -402,89 +395,48 @@ extern size_t   strlcpy(char *dst, const char *src, size_t dstsize);
 #endif
 #define	nextdp(dp)	((struct dirent64 *)((char *)(dp) + (dp)->d_reclen))
 
-static const fs_operation_def_t nfs4_rd_deleg_tmpl[] = {
-	VOPNAME_OPEN,		{ .femop_open = deleg_rd_open },
-	VOPNAME_WRITE,		{ .femop_write = deleg_rd_write },
-	VOPNAME_SETATTR,	{ .femop_setattr = deleg_rd_setattr },
-	VOPNAME_RWLOCK,		{ .femop_rwlock = deleg_rd_rwlock },
-	VOPNAME_SPACE,		{ .femop_space = deleg_rd_space },
-	VOPNAME_SETSECATTR,	{ .femop_setsecattr = deleg_rd_setsecattr },
-	VOPNAME_VNEVENT,	{ .femop_vnevent = deleg_rd_vnevent },
-	NULL,			NULL
-};
-static const fs_operation_def_t nfs4_wr_deleg_tmpl[] = {
-	VOPNAME_OPEN,		{ .femop_open = deleg_wr_open },
-	VOPNAME_READ,		{ .femop_read = deleg_wr_read },
-	VOPNAME_WRITE,		{ .femop_write = deleg_wr_write },
-	VOPNAME_SETATTR,	{ .femop_setattr = deleg_wr_setattr },
-	VOPNAME_RWLOCK,		{ .femop_rwlock = deleg_wr_rwlock },
-	VOPNAME_SPACE,		{ .femop_space = deleg_wr_space },
-	VOPNAME_SETSECATTR,	{ .femop_setsecattr = deleg_wr_setsecattr },
-	VOPNAME_VNEVENT,	{ .femop_vnevent = deleg_wr_vnevent },
-	NULL,			NULL
-};
-
 void
-rfs4_srvr_inst_init(nfs_server_instance_t *instp)
+rfs4_srvr_inst_init(nfs_server_instance_t *instp,
+    rfs4_cbstate_t (*cbchk)(rfs4_state_t *))
 {
-	timespec32_t verf;
 
+	instp->deleg_cbcheck = cbchk;
+}
 
+/*
+ * Server Instance Destroy
+ */
+void
+rfs4_srvr_inst_fini(nfs_server_instance_t *instp)
+{
+	kmem_cache_destroy(rfs4_vop_cn_cache);
 
-	/* Used to manage create/destroy of server state */
-	mutex_init(&instp->state_lock, NULL, MUTEX_DEFAULT, NULL);
-
-	/* Used to manage access to server instance linked list */
-	mutex_init(&instp->servinst_lock, NULL, MUTEX_DEFAULT, NULL);
-
-	/* Used to manage access to rfs4_deleg_policy */
-	rw_init(&instp->deleg_policy_lock, NULL, RW_DEFAULT, NULL);
-
-	instp->seen_first_compound = 0;
-
-	/*
-	 * The following algorithm attempts to find a unique verifier
-	 * to be used as the write verifier returned from the server
-	 * to the client.  It is important that this verifier change
-	 * whenever the server reboots.  Of secondary importance, it
-	 * is important for the verifier to be unique between two
-	 * different servers.
-	 *
-	 * Thus, an attempt is made to use the system hostid and the
-	 * current time in seconds when the nfssrv kernel module is
-	 * loaded.  It is assumed that an NFS server will not be able
-	 * to boot and then to reboot in less than a second.  If the
-	 * hostid has not been set, then the current high resolution
-	 * time is used.  This will ensure different verifiers each
-	 * time the server reboots and minimize the chances that two
-	 * different servers will have the same verifier.
-	 * XXX - this is broken on LP64 kernels.
-	 */
-	verf.tv_sec = (time_t)nfs_atoi(hw_serial);
-	if (verf.tv_sec != 0) {
-		verf.tv_nsec = gethrestime_sec();
-	} else {
-		timespec_t tverf;
-
-		gethrestime(&tverf);
-		verf.tv_sec = (time_t)tverf.tv_sec;
-		verf.tv_nsec = tverf.tv_nsec;
+	if (instp->lockt_sysid != LM_NOSYSID) {
+		lm_free_sysidt(instp->lockt_sysid);
+		instp->lockt_sysid = LM_NOSYSID;
 	}
 
-	instp->Write4verf = *(uint64_t *)&verf;
+	mutex_destroy(&instp->deleg_lock);
+	mutex_destroy(&instp->state_lock);
+	rw_destroy(&instp->deleg_policy_lock);
+
+	fem_free(instp->deleg_rdops);
+	fem_free(instp->deleg_wrops);
+	kmem_free(instp, sizeof (*instp));
 }
 
 /*
  * mds_cbcheck: verify callback path to nfs41 client is up
  * called via nfs_serv_instance.deleg_cbcheck
  */
-static rfs4_cbstate_t
+rfs4_cbstate_t
 mds_cbcheck(rfs4_state_t *sp)
 {
 	mds_session_t *sessp;
 	rfs4_cbstate_t  cbs = CB_NONE;
 
-	if (! (sessp = mds_findsession_by_clid(sp->owner->client->clientid)))
+	if (! (sessp = mds_findsession_by_clid(dbe_to_instp(sp->dbe),
+	    sp->owner->client->clientid)))
 		return (CB_UNINIT);
 
 	if (SN_CB_CHAN_EST(sessp) && SN_CB_CHAN_OK(sessp))
@@ -498,71 +450,13 @@ mds_cbcheck(rfs4_state_t *sp)
  * rfs4_cbcheck: verify callback path to nfs40 client is up
  * called via nfs_serv_instance.deleg_cbcheck
  */
-static rfs4_cbstate_t
+rfs4_cbstate_t
 rfs4_cbcheck(rfs4_state_t *sp)
 {
 	return (sp->owner->client->cbinfo.cb_state);
 }
 
 
-int
-rfs4_srvrinit(void)
-{
-
-	int error;
-	extern void rfs41_persona_init();
-	extern void rfs4_ntov_init(void);
-
-	mutex_init(&deleg_lock, NULL, MUTEX_DEFAULT, NULL);
-
-	rfs4_srvr_inst_init(&nfs4_server);
-	rfs4_srvr_inst_init(&mds_server);
-	rfs4_ntov_init();
-
-	nfs4_server.deleg_cbcheck = rfs4_cbcheck;
-	nfs4_server.attrvers = 0;
-	mds_server.deleg_cbcheck = mds_cbcheck;
-	mds_server.attrvers = 1;
-
-	error = fem_create("deleg_rdops", nfs4_rd_deleg_tmpl, &deleg_rdops);
-	if (error != 0) {
-		rfs4_disable_delegation();
-	} else {
-		error = fem_create("deleg_wrops", nfs4_wr_deleg_tmpl,
-		    &deleg_wrops);
-		if (error != 0) {
-			rfs4_disable_delegation();
-			fem_free(deleg_rdops);
-		}
-	}
-
-	nfs4_srv_caller_id = fs_new_caller_id();
-
-	nfs4_server.lockt_sysid = lm_alloc_sysidt();
-	mds_server.lockt_sysid = lm_alloc_sysidt();
-
-	vsd_create(&nfs4_srv_vkey, NULL);
-
-	rfs41_persona_init();
-
-	return (0);
-}
-
-void
-rfs4_srvrfini(nfs_server_instance_t *instp)
-{
-	if (instp->lockt_sysid != LM_NOSYSID) {
-		lm_free_sysidt(instp->lockt_sysid);
-		instp->lockt_sysid = LM_NOSYSID;
-	}
-
-	mutex_destroy(&deleg_lock);
-	mutex_destroy(&instp->state_lock);
-	rw_destroy(&instp->deleg_policy_lock);
-
-	fem_free(deleg_rdops);
-	fem_free(deleg_wrops);
-}
 
 void
 rfs4_init_compound_state(struct compound_state *cs)
@@ -574,27 +468,27 @@ rfs4_init_compound_state(struct compound_state *cs)
 }
 
 void
-rfs4_grace_start(rfs4_servinst_t *sip)
+rfs4_grace_start(nfs_server_instance_t *sip)
 {
 	time_t now = gethrestime_sec();
 
-	rw_enter(&sip->rwlock, RW_WRITER);
-	sip->start_time = now;
+	rw_enter(&sip->reclaimlst_lock, RW_WRITER);
+	sip->gstart_time = now;
 	sip->grace_period = rfs4_grace_period;
-	rw_exit(&sip->rwlock);
+	rw_exit(&sip->reclaimlst_lock);
 }
 
 /*
  * returns true if the instance's grace period has never been started
  */
 int
-rfs4_servinst_grace_new(rfs4_servinst_t *sip)
+rfs4_grace_new(nfs_server_instance_t *sip)
 {
 	time_t start_time;
 
-	rw_enter(&sip->rwlock, RW_READER);
-	start_time = sip->start_time;
-	rw_exit(&sip->rwlock);
+	rw_enter(&sip->reclaimlst_lock, RW_READER);
+	start_time = sip->gstart_time;
+	rw_exit(&sip->reclaimlst_lock);
 
 	return (start_time == 0);
 }
@@ -604,13 +498,15 @@ rfs4_servinst_grace_new(rfs4_servinst_t *sip)
  * grace period.
  */
 int
-rfs4_servinst_in_grace(rfs4_servinst_t *sip)
+rfs4_in_grace(nfs_server_instance_t *sip)
 {
 	time_t grace_expiry;
 
-	rw_enter(&sip->rwlock, RW_READER);
-	grace_expiry = sip->start_time + sip->grace_period;
-	rw_exit(&sip->rwlock);
+	rw_enter(&sip->reclaimlst_lock, RW_READER);
+	grace_expiry = sip->gstart_time + sip->grace_period;
+	if (sip->reclaim_cnt == 0)
+		grace_expiry = 0;
+	rw_exit(&sip->reclaimlst_lock);
 
 	return (gethrestime_sec() < grace_expiry);
 }
@@ -620,7 +516,7 @@ rfs4_clnt_in_grace(rfs4_client_t *cp)
 {
 	ASSERT(rfs4_dbe_refcnt(cp->dbe) > 0);
 
-	return (rfs4_servinst_in_grace(cp->server_instance));
+	return (rfs4_in_grace(dbe_to_instp(cp->dbe)));
 }
 
 /*
@@ -629,13 +525,8 @@ rfs4_clnt_in_grace(rfs4_client_t *cp)
 void
 rfs4_grace_reset_all(nfs_server_instance_t *instp)
 {
-	rfs4_servinst_t *sip;
-
-	mutex_enter(&instp->servinst_lock);
-	for (sip = instp->cur_servinst; sip != NULL; sip = sip->prev)
-		if (rfs4_servinst_in_grace(sip))
-			rfs4_grace_start(sip);
-	mutex_exit(&instp->servinst_lock);
+	if (rfs4_in_grace(instp))
+		rfs4_grace_start(instp);
 }
 
 /*
@@ -644,17 +535,13 @@ rfs4_grace_reset_all(nfs_server_instance_t *instp)
 void
 rfs4_grace_start_new(nfs_server_instance_t *instp)
 {
-	rfs4_servinst_t *sip;
-
-	mutex_enter(&instp->servinst_lock);
-	for (sip = instp->cur_servinst; sip != NULL; sip = sip->prev)
-		if (rfs4_servinst_grace_new(sip))
-			rfs4_grace_start(sip);
-	mutex_exit(&instp->servinst_lock);
+	if (rfs4_grace_new(instp))
+		rfs4_grace_start(instp);
 }
 
+/* ARGSUSED */
 static rfs4_dss_path_t *
-rfs4_dss_newpath(rfs4_servinst_t *sip, char *path, unsigned index)
+rfs4_dss_newpath(nfs_server_instance_t *sip, char *path, unsigned index)
 {
 	size_t len;
 	rfs4_dss_path_t *dss_path;
@@ -671,7 +558,6 @@ rfs4_dss_newpath(rfs4_servinst_t *sip, char *path, unsigned index)
 	(void) strlcpy(dss_path->path, path, len);
 
 	/* associate with servinst */
-	dss_path->sip = sip;
 	dss_path->index = index;
 
 	/*
@@ -690,113 +576,6 @@ rfs4_dss_newpath(rfs4_servinst_t *sip, char *path, unsigned index)
 	}
 
 	return (dss_path);
-}
-
-/*
- * Create a new server instance, and make it the currently active instance.
- * Note that starting the grace period too early will reduce the clients'
- * recovery window.
- */
-void
-rfs4_servinst_create(nfs_server_instance_t *instp,
-		int start_grace, int dss_npaths, char **dss_paths)
-{
-	unsigned i;
-	rfs4_servinst_t *sip;
-	rfs4_oldstate_t *oldstate;
-
-	sip = kmem_alloc(sizeof (rfs4_servinst_t), KM_SLEEP);
-	rw_init(&sip->rwlock, NULL, RW_DEFAULT, NULL);
-
-	sip->start_time = (time_t)0;
-	sip->grace_period = (time_t)0;
-	sip->next = NULL;
-	sip->prev = NULL;
-
-	rw_init(&sip->oldstate_lock, NULL, RW_DEFAULT, NULL);
-	/*
-	 * This initial dummy entry is required to setup for insque/remque.
-	 * It must be skipped over whenever the list is traversed.
-	 */
-	oldstate = kmem_alloc(sizeof (rfs4_oldstate_t), KM_SLEEP);
-	/* insque/remque require initial list entry to be self-terminated */
-	oldstate->next = oldstate;
-	oldstate->prev = oldstate;
-	sip->oldstate = oldstate;
-
-
-	sip->dss_npaths = dss_npaths;
-	sip->dss_paths = kmem_alloc(dss_npaths *
-	    sizeof (rfs4_dss_path_t *), KM_SLEEP);
-
-	for (i = 0; i < dss_npaths; i++) {
-		sip->dss_paths[i] = rfs4_dss_newpath(sip, dss_paths[i], i);
-	}
-
-	mutex_enter(&instp->servinst_lock);
-	if (instp->cur_servinst != NULL) {
-		/* add to linked list */
-		sip->prev = instp->cur_servinst;
-		instp->cur_servinst->next = sip;
-	}
-	if (start_grace)
-		rfs4_grace_start(sip);
-	/* make the new instance "current" */
-	instp->cur_servinst = sip;
-
-	mutex_exit(&instp->servinst_lock);
-}
-
-/*
- * In future, we might add a rfs4_servinst_destroy(sip) but, for now, destroy
- * all instances directly.
- */
-void
-rfs4_servinst_destroy_all(nfs_server_instance_t *instp)
-{
-	rfs4_servinst_t *sip, *prev, *current;
-
-	mutex_enter(&instp->servinst_lock);
-	ASSERT(instp->cur_servinst != NULL);
-	current = instp->cur_servinst;
-	instp->cur_servinst = NULL;
-	for (sip = current; sip != NULL; sip = prev) {
-		prev = sip->prev;
-		rw_destroy(&sip->rwlock);
-		if (sip->oldstate)
-			kmem_free(sip->oldstate, sizeof (rfs4_oldstate_t));
-		if (sip->dss_paths)
-			kmem_free(sip->dss_paths,
-			    sip->dss_npaths * sizeof (rfs4_dss_path_t *));
-		kmem_free(sip, sizeof (rfs4_servinst_t));
-	}
-	mutex_exit(&instp->servinst_lock);
-}
-
-/*
- * Assign the current server instance to a client_t.
- * Should be called with cp->dbe held.
- */
-void
-rfs4_servinst_assign(rfs4_client_t *cp, nfs_server_instance_t *instp)
-{
-	ASSERT(rfs4_dbe_refcnt(cp->dbe) > 0);
-
-	/*
-	 * The lock ensures that if the current instance is in the process
-	 * of changing, we will see the new one.
-	 */
-	mutex_enter(&instp->servinst_lock);
-	cp->server_instance = instp->cur_servinst;
-	mutex_exit(&instp->servinst_lock);
-}
-
-rfs4_servinst_t *
-rfs4_servinst(rfs4_client_t *cp)
-{
-	ASSERT(rfs4_dbe_refcnt(cp->dbe) > 0);
-
-	return (cp->server_instance);
 }
 
 /* ARGSUSED */
@@ -1438,7 +1217,7 @@ rfs4_op_commit(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	}
 
 	*cs->statusp = resp->status = NFS4_OK;
-	resp->writeverf = nfs4_server.Write4verf;
+	resp->writeverf = cs->instp->Write4verf;
 out:
 	DTRACE_NFSV4_2(op__commit__done, struct compound_state *, cs,
 	    COMMIT4res *, resp);
@@ -3154,12 +2933,6 @@ rfs4_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		}
 	}
 
-	if ((stat = check_stateid(FREAD, cs, vp, &args->stateid, FALSE,
-	    deleg, TRUE, &ct)) != NFS4_OK) {
-		*cs->statusp = resp->status = stat;
-		goto out;
-	}
-
 	va.va_mask = AT_MODE|AT_SIZE|AT_UID;
 	verror = VOP_GETATTR(vp, &va, 0, cs->cr, &ct);
 
@@ -3733,16 +3506,16 @@ rfs4_op_release_lockowner(nfs_argop4 *argop, nfs_resop4 *resop,
 	    cs, RELEASE_LOCKOWNER4args *, ap);
 
 	/* Make sure there is a clientid around for this request */
-	cp = rfs4_findclient_by_id(ap->lock_owner.clientid, FALSE);
+	cp = findclient_by_id(cs->instp, ap->lock_owner.clientid);
 
 	if (cp == NULL) {
 		*cs->statusp = resp->status =
-		    rfs4_check_clientid(&ap->lock_owner.clientid, 0);
+		    rfs4_check_clientid(cs->instp, &ap->lock_owner.clientid);
 		goto out;
 	}
 	rfs4_client_rele(cp);
 
-	lo = rfs4_findlockowner(&ap->lock_owner, &create);
+	lo = findlockowner(cs->instp, &ap->lock_owner, &create);
 	if (lo == NULL) {
 		*cs->statusp = resp->status = NFS4_OK;
 		goto out;
@@ -3853,7 +3626,7 @@ out:
  */
 static rfs4_file_t *
 rfs4_lookup_and_findfile(vnode_t *dvp, char *nm, vnode_t **vpp,
-	int *lkup_error, cred_t *cr)
+	int *lkup_error, struct compound_state *cs)
 {
 	vnode_t *vp;
 	rfs4_file_t *fp = NULL;
@@ -3863,10 +3636,10 @@ rfs4_lookup_and_findfile(vnode_t *dvp, char *nm, vnode_t **vpp,
 	if (vpp)
 		*vpp = NULL;
 
-	if ((error = VOP_LOOKUP(dvp, nm, &vp, NULL, 0, NULL, cr, NULL, NULL,
-	    NULL)) == 0) {
+	if ((error = VOP_LOOKUP(dvp, nm, &vp, NULL, 0, NULL,
+	    cs->cr, NULL, NULL, NULL)) == 0) {
 		if (vp->v_type == VREG)
-			fp = rfs4_findfile(vp, NULL, &fcreate);
+			fp = rfs4_findfile(cs->instp, vp, NULL, &fcreate);
 		if (vpp)
 			*vpp = vp;
 		else
@@ -3962,19 +3735,17 @@ rfs4_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 * it causes an update, cinfo.before will not match, which will
 	 * trigger a cache flush even if atomic is TRUE.
 	 */
-	if (fp = rfs4_lookup_and_findfile(dvp, nm, &vp, &error, cs->cr)) {
-		if (rfs4_check_delegated_byfp(cs->instp, FWRITE, fp,
-		    TRUE, TRUE, TRUE, NULL)) {
+	fp = rfs4_lookup_and_findfile(dvp, nm, &vp, &error, cs);
+	if (vp != NULL) {
+		/* use the vp to check all instances for a delegation */
+		if (rfs4_check_delegated(FWRITE, vp, TRUE, TRUE, TRUE, NULL)) {
 			VN_RELE(vp);
 			rfs4_file_rele(fp);
 			*cs->statusp = resp->status = NFS4ERR_DELAY;
 			kmem_free(nm, len);
 			goto out;
 		}
-	}
-
-	/* Didn't find anything to remove */
-	if (vp == NULL) {
+	} else {	/* Didn't find anything to remove */
 		*cs->statusp = resp->status = error;
 		kmem_free(nm, len);
 		goto out;
@@ -4279,15 +4050,15 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 * it causes an update, cinfo.before will not match, which will
 	 * trigger a cache flush even if atomic is TRUE.
 	 */
-	if (sfp = rfs4_lookup_and_findfile(odvp, onm, &srcvp, &error, cs->cr)) {
-		if (rfs4_check_delegated_byfp(cs->instp, FWRITE, sfp, TRUE,
-		    TRUE, TRUE, NULL)) {
+	sfp = rfs4_lookup_and_findfile(odvp, onm, &srcvp, &error, cs);
+	if (srcvp != NULL) {
+		/* use the vp to check all instances for a delegation */
+		if (rfs4_check_delegated(FWRITE, srcvp, TRUE, TRUE, TRUE,
+		    NULL)) {
 			*cs->statusp = resp->status = NFS4ERR_DELAY;
 			goto err_out;
 		}
-	}
-
-	if (srcvp == NULL) {
+	} else {
 		*cs->statusp = resp->status = puterrno4(error);
 		kmem_free(onm, olen);
 		kmem_free(nnm, nlen);
@@ -4297,9 +4068,11 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	sfp_rele_grant_hold = 1;
 
 	/* Does the destination exist and a file and have a delegation? */
-	if (fp = rfs4_lookup_and_findfile(ndvp, nnm, &targvp, NULL, cs->cr)) {
-		if (rfs4_check_delegated_byfp(cs->instp, FWRITE, fp, TRUE,
-		    TRUE, TRUE, NULL)) {
+	fp = rfs4_lookup_and_findfile(ndvp, nnm, &targvp, NULL, cs);
+	if (targvp != NULL) {
+		/* use the vp to check all instances for a delegation */
+		if (rfs4_check_delegated(FWRITE, targvp, TRUE, TRUE, TRUE,
+		    NULL)) {
 			*cs->statusp = resp->status = NFS4ERR_DELAY;
 			goto err_out;
 		}
@@ -4513,9 +4286,10 @@ rfs4_op_renew(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	DTRACE_NFSV4_2(op__renew__start, struct compound_state *, cs,
 	    RENEW4args *, args);
 
-	if ((cp = rfs4_findclient_by_id(args->clientid, FALSE)) == NULL) {
+	if ((cp = rfs4_findclient_by_id(cs->instp, args->clientid,
+	    FALSE)) == NULL) {
 		*cs->statusp = resp->status =
-		    rfs4_check_clientid(&args->clientid, 0);
+		    rfs4_check_clientid(cs->instp, &args->clientid);
 		goto out;
 	}
 
@@ -4956,7 +4730,7 @@ do_rfs4_op_setattr(attrmap4 *resp, fattr4 *fattrp, struct compound_state *cs,
 	} else {
 		ct.cc_sysid = 0;
 		ct.cc_pid = 0;
-		ct.cc_caller_id = nfs4_srv_caller_id;
+		ct.cc_caller_id = cs->instp->caller_id;
 		ct.cc_flags = CC_DONTBLOCK;
 	}
 
@@ -5388,7 +5162,7 @@ rfs4_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		*cs->statusp = resp->status = NFS4_OK;
 		resp->count = 0;
 		resp->committed = args->stable;
-		resp->writeverf = nfs4_server.Write4verf;
+		resp->writeverf = cs->instp->Write4verf;
 		goto out;
 	}
 
@@ -5484,7 +5258,7 @@ rfs4_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	else
 		resp->committed = FILE_SYNC4;
 
-	resp->writeverf = nfs4_server.Write4verf;
+	resp->writeverf = cs->instp->Write4verf;
 
 out:
 	if (in_crit)
@@ -5499,16 +5273,17 @@ out:
 /* ARGSUSED */
 void
 rfs4_compound(COMPOUND4args *args, COMPOUND4res *resp, struct exportinfo *exi,
-	struct svc_req *req, cred_t *cr, int *rv)
+	struct svc_req *req, int *rv)
 {
 	uint_t i;
 	struct compound_state cs;
+	cred_t *cr;
 
 	if (rv != NULL)
 		*rv = 0;
 	rfs4_init_compound_state(&cs);
 
-	cs.instp = &nfs4_server;
+	cs.instp = nfs4_server;
 
 	/*
 	 * Form a reply tag by copying over the reqeuest tag.
@@ -5563,14 +5338,14 @@ rfs4_compound(COMPOUND4args *args, COMPOUND4res *resp, struct exportinfo *exi,
 	 * If this is the first compound we've seen, we need to start all
 	 * new instances' grace periods.
 	 */
-	if (nfs4_server.seen_first_compound == 0) {
-		rfs4_grace_start_new(&nfs4_server);
+	if (cs.instp->seen_first_compound == 0) {
+		rfs4_grace_start_new(cs.instp);
 		/*
 		 * This must be set after rfs4_grace_start_new(), otherwise
 		 * another thread could proceed past here before the former
 		 * is finished.
 		 */
-		nfs4_server.seen_first_compound = 1;
+		cs.instp->seen_first_compound = 1;
 	}
 
 	for (i = 0; i < args->array_len && cs.cont; i++) {
@@ -6302,26 +6077,18 @@ rfs4_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
 
 		if (trunc) {
 			int in_crit = 0;
-			rfs4_file_t *fp;
-			bool_t create = FALSE;
 
 			/*
 			 * We are writing over an existing file.
 			 * Check to see if we need to recall a delegation.
 			 */
 			rfs4_hold_deleg_policy(cs->instp);
-			if ((fp = rfs4_findfile(vp, NULL, &create)) != NULL) {
-				if (rfs4_check_delegated_byfp(cs->instp,
-				    FWRITE, fp, (reqsize == 0), FALSE, FALSE,
-				    &clientid)) {
-
-					rfs4_file_rele(fp);
+			if (rfs4_check_delegated(FWRITE, vp, (reqsize == 0),
+			    FALSE, FALSE, &clientid)) {
 					rfs4_rele_deleg_policy(cs->instp);
 					VN_RELE(vp);
 					*attrset = NFS4_EMPTY_ATTRMAP(avers);
 					return (NFS4ERR_DELAY);
-				}
-				rfs4_file_rele(fp);
 			}
 			rfs4_rele_deleg_policy(cs->instp);
 
@@ -6342,7 +6109,7 @@ rfs4_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
 			}
 			ct.cc_sysid = 0;
 			ct.cc_pid = 0;
-			ct.cc_caller_id = nfs4_srv_caller_id;
+			ct.cc_caller_id = cs->instp->caller_id;
 			ct.cc_flags = CC_DONTBLOCK;
 
 			cva.va_mask = AT_SIZE;
@@ -6416,7 +6183,7 @@ rfs4_do_open(struct compound_state *cs, struct svc_req *req,
 	int cmd;
 
 	/* get the file struct and hold a lock on it during initial open */
-	file = rfs4_findfile_withlock(cs->vp, &cs->fh, &fcreate);
+	file = rfs4_findfile_withlock(cs->instp, cs->vp, &cs->fh, &fcreate);
 	if (file == NULL) {
 		NFS4_DEBUG(rfs4_debug,
 		    (CE_NOTE, "rfs4_do_open: can't find file"));
@@ -6500,6 +6267,12 @@ rfs4_do_open(struct compound_state *cs, struct svc_req *req,
 	/*
 	 * Check to see if this file is delegated and if so, if a
 	 * recall needs to be done.
+	 * This only checke the delegations for this instance.  If another
+	 * instance has a delegation for this file, then the conflict
+	 * detection will be done in the monitor on OPEN.  We just need to
+	 * check if we have a delegation and if the calling client is the
+	 * owner.  The monitor doesn't have enough info to determine if the
+	 * caller is the owner of the delegation or not.
 	 */
 	if (rfs4_check_recall(state, access)) {
 		rfs4_dbe_unlock(file->dbe);
@@ -6540,7 +6313,7 @@ rfs4_do_open(struct compound_state *cs, struct svc_req *req,
 	    !deleg_cur) {
 		ct.cc_sysid = sysid;
 		ct.cc_pid = shr.s_pid;
-		ct.cc_caller_id = nfs4_srv_caller_id;
+		ct.cc_caller_id = cs->instp->caller_id;
 		ct.cc_flags = CC_DONTBLOCK;
 		err = VOP_OPEN(&cs->vp, fflags, cs->cr, &ct);
 		if (err) {
@@ -6552,7 +6325,6 @@ rfs4_do_open(struct compound_state *cs, struct svc_req *req,
 			if (screate == TRUE)
 				rfs4_state_close(state, FALSE, FALSE, cs->cr);
 			rfs4_state_rele(state);
-			/* check if a monitor detected a delegation conflict */
 			if (err == EAGAIN && (ct.cc_flags & CC_WOULDBLOCK))
 				resp->status = NFS4ERR_DELAY;
 			else
@@ -6630,7 +6402,7 @@ rfs4_do_opennull(struct compound_state *cs, struct svc_req *req,
 		/* inhibit delegation grants during exclusive create */
 
 		if (args->mode == EXCLUSIVE4)
-			rfs4_disable_delegation();
+			rfs4_disable_delegation(cs->instp);
 
 		resp->status = rfs4_createfile(args, req, cs, cinfo, attrset,
 		    oo->client->clientid);
@@ -6655,7 +6427,7 @@ rfs4_do_opennull(struct compound_state *cs, struct svc_req *req,
 		*cs->statusp = resp->status;
 
 	if (args->mode == EXCLUSIVE4)
-		rfs4_enable_delegation();
+		rfs4_enable_delegation(cs->instp);
 }
 
 /*ARGSUSED*/
@@ -6800,7 +6572,7 @@ rfs4_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 	}
 
 	/* get the file struct and hold a lock on it during initial open */
-	file = rfs4_findfile_withlock(cs->vp, NULL, &create);
+	file = rfs4_findfile_withlock(cs->instp, cs->vp, NULL, &create);
 	if (file == NULL) {
 		NFS4_DEBUG(rfs4_debug,
 		    (CE_NOTE, "rfs4_do_opendelprev: can't find file"));
@@ -6994,11 +6766,11 @@ rfs4_op_open(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * Need to check clientid and lease expiration first based on
 	 * error ordering and incrementing sequence id.
 	 */
-	cp = rfs4_findclient_by_id(owner->clientid, FALSE);
+	cp = rfs4_findclient_by_id(cs->instp, owner->clientid, FALSE);
 
 	if (cp == NULL) {
 		*cs->statusp = resp->status =
-		    rfs4_check_clientid(&owner->clientid, 0);
+		    rfs4_check_clientid(cs->instp, &owner->clientid);
 		goto end;
 	}
 
@@ -7017,7 +6789,7 @@ rfs4_op_open(nfs_argop4 *argop, nfs_resop4 *resop,
 	 */
 retry:
 	create = TRUE;
-	oo = rfs4_findopenowner(owner, &create, args->seqid);
+	oo = rfs4_findopenowner(cs->instp, owner, &create, args->seqid);
 	if (oo == NULL) {
 		*cs->statusp = resp->status = NFS4ERR_STALE_CLIENTID;
 		rfs4_client_rele(cp);
@@ -7630,7 +7402,7 @@ retry:
 	 * request to establish a new client identifier at the server
 	 */
 	create = TRUE;
-	cp = rfs4_findclient(&args->client, &create, NULL);
+	cp = findclient(cs->instp, &args->client, &create, NULL);
 
 	/* Should never happen */
 	ASSERT(cp != NULL);
@@ -7742,7 +7514,7 @@ retry:
 		 * this request.
 		 */
 		create = FALSE;
-		cp_unconfirmed = rfs4_findclient(&args->client, &create,
+		cp_unconfirmed = findclient(cs->instp, &args->client, &create,
 		    cp_confirmed);
 	}
 
@@ -7779,7 +7551,7 @@ retry:
 	 * unconfirmed one.
 	 */
 	create = TRUE;
-	newcp = rfs4_findclient(&args->client, &create, cp_confirmed);
+	newcp = findclient(cs->instp, &args->client, &create, cp_confirmed);
 
 	ASSERT(newcp != NULL);
 
@@ -7832,11 +7604,11 @@ rfs4_op_setclientid_confirm(nfs_argop4 *argop, nfs_resop4 *resop,
 
 	*cs->statusp = res->status = NFS4_OK;
 
-	cp = rfs4_findclient_by_id(args->clientid, TRUE);
+	cp = rfs4_findclient_by_id(cs->instp, args->clientid, TRUE);
 
 	if (cp == NULL) {
 		*cs->statusp = res->status =
-		    rfs4_check_clientid(&args->clientid, 1);
+		    rfs4_check_clientid(cs->instp, &args->clientid);
 		goto out;
 	}
 
@@ -7860,13 +7632,6 @@ rfs4_op_setclientid_confirm(nfs_argop4 *argop, nfs_resop4 *resop,
 		cptoclose->ss_remove = 1;
 		cp->cp_confirmed = NULL;
 	}
-
-	/*
-	 * Update the client's associated server instance, if it's changed
-	 * since the client was created.
-	 */
-	if (rfs4_servinst(cp) != cs->instp->cur_servinst)
-		rfs4_servinst_assign(cp, cs->instp);
 
 	/*
 	 * Record clientid in stable storage.
@@ -8140,13 +7905,13 @@ rfs4_release_share_lock_state(rfs4_state_t *sp, cred_t *cr,
  * lock_denied: Fill in a LOCK4deneid structure given an flock64 structure.
  */
 static nfsstat4
-lock_denied(LOCK4denied *dp, struct flock64 *flk)
+lock_denied(nfs_server_instance_t *instp, LOCK4denied *dp, struct flock64 *flk)
 {
 	rfs4_lockowner_t *lo;
 	rfs4_client_t *cp;
 	uint32_t len;
 
-	lo = rfs4_findlockowner_by_pid(flk->l_pid);
+	lo = findlockowner_by_pid(instp, flk->l_pid);
 	if (lo != NULL) {
 		cp = lo->client;
 		if (rfs4_lease_expired(cp)) {
@@ -8336,8 +8101,8 @@ retry:
 		ASSERT(resop->resop == OP_LOCK);
 		lres = &resop->nfs_resop4_u.oplock;
 		status = NFS4ERR_DENIED;
-		if (lock_denied(&lres->LOCK4res_u.denied, &flock)
-		    == NFS4ERR_EXPIRED)
+		if (lock_denied(dbe_to_instp(sp->dbe),
+		    &lres->LOCK4res_u.denied, &flock) == NFS4ERR_EXPIRED)
 			goto retry;
 		break;
 	case ENOLCK:
@@ -8464,7 +8229,7 @@ rfs4_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 			break;
 		}
 
-		lo = rfs4_findlockowner(&olo->lock_owner, &lcreate);
+		lo = findlockowner(cs->instp, &olo->lock_owner, &lcreate);
 		if (lo == NULL) {
 			NFS4_DEBUG(rfs4_debug,
 			    (CE_NOTE, "rfs4_op_lock: no lock owner"));
@@ -8472,7 +8237,7 @@ rfs4_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 			goto end;
 		}
 
-		lsp = rfs4_findlo_state_by_owner(lo, sp, &create);
+		lsp = rfs4_findlo_state_by_owner(cs->instp, lo, sp, &create);
 		if (lsp == NULL) {
 			rfs4_update_lease(sp->owner->client);
 			/*
@@ -8599,53 +8364,52 @@ rfs4_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 		 * the next one)
 		 */
 		case NFS4_CHECK_STATEID_OKAY:
-
-				/*
-				 * The sequence id is now checked.  Determine
-				 * if this is a replay or if it is in the
-				 * expected (next) sequence.  In the case of a
-				 * replay, there are two replay conditions
-				 * that may occur.  The first is the normal
-				 * condition where a LOCK is done with a
-				 * NFS4_OK response and the stateid is
-				 * updated.  That case is handled below when
-				 * the stateid is identified as a REPLAY.  The
-				 * second is the case where an error is
-				 * returned, like NFS4ERR_DENIED, and the
-				 * sequence number is updated but the stateid
-				 * is not updated.  This second case is dealt
-				 * with here.  So it may seem odd that the
-				 * stateid is okay but the sequence id is a
-				 * replay but it is okay.
-				 */
-				switch (rfs4_check_lock_seqid(
-				    args->locker.locker4_u.lock_owner.
-				    lock_seqid, lsp, resop)) {
-				case NFS4_CHKSEQ_REPLAY:
-					if (resp->status != NFS4_OK) {
-						/*
-						 * Here is our replay and need
-						 * to verify that the last
-						 * response was an error.
-						 */
-						*cs->statusp = resp->status;
-						goto end;
-					}
+			/*
+			 * The sequence id is now checked.  Determine
+			 * if this is a replay or if it is in the
+			 * expected (next) sequence.  In the case of a
+			 * replay, there are two replay conditions
+			 * that may occur.  The first is the normal
+			 * condition where a LOCK is done with a
+			 * NFS4_OK response and the stateid is
+			 * updated.  That case is handled below when
+			 * the stateid is identified as a REPLAY.  The
+			 * second is the case where an error is
+			 * returned, like NFS4ERR_DENIED, and the
+			 * sequence number is updated but the stateid
+			 * is not updated.  This second case is dealt
+			 * with here.  So it may seem odd that the
+			 * stateid is okay but the sequence id is a
+			 * replay but it is okay.
+			 */
+			switch (rfs4_check_lock_seqid(
+			    args->locker.locker4_u.lock_owner.lock_seqid,
+			    lsp, resop)) {
+			case NFS4_CHKSEQ_REPLAY:
+				if (resp->status != NFS4_OK) {
 					/*
-					 * This is done since the sequence id
-					 * looked like a replay but it didn't
-					 * pass our check so a BAD_SEQID is
-					 * returned as a result.
+					 * Here is our replay and need
+					 * to verify that the last
+					 * response was an error.
 					 */
-					/*FALLTHROUGH*/
-				case NFS4_CHKSEQ_BAD:
-					*cs->statusp = resp->status =
-					    NFS4ERR_BAD_SEQID;
+					*cs->statusp = resp->status;
 					goto end;
-				case NFS4_CHKSEQ_OKAY:
-					/* Everything looks okay move ahead */
-					break;
 				}
+				/*
+				 * This is done since the sequence id
+				 * looked like a replay but it didn't
+				 * pass our check so a BAD_SEQID is
+				 * returned as a result.
+				 */
+				/*FALLTHROUGH*/
+			case NFS4_CHKSEQ_BAD:
+				*cs->statusp = resp->status =
+				    NFS4ERR_BAD_SEQID;
+				goto end;
+			case NFS4_CHKSEQ_OKAY:
+				/* Everything looks okay move ahead */
+				break;
+			}
 			break;
 		case NFS4_CHECK_STATEID_OLD:
 			*cs->statusp = resp->status = NFS4ERR_OLD_STATEID;
@@ -8957,10 +8721,10 @@ rfs4_op_lockt(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * Check out the clientid to ensure the server knows about it
 	 * so that we correctly inform the client of a server reboot.
 	 */
-	if ((cp = rfs4_findclient_by_id(args->owner.clientid, FALSE))
-	    == NULL) {
+	if ((cp = rfs4_findclient_by_id(cs->instp, args->owner.clientid,
+	    FALSE)) == NULL) {
 		*cs->statusp = resp->status =
-		    rfs4_check_clientid(&args->owner.clientid, 0);
+		    rfs4_check_clientid(cs->instp, &args->owner.clientid);
 		goto out;
 	}
 	if (rfs4_lease_expired(cp)) {
@@ -9004,7 +8768,7 @@ rfs4_op_lockt(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	/* Find or create a lockowner */
-	lo = rfs4_findlockowner(&args->owner, &create);
+	lo = findlockowner(cs->instp, &args->owner, &create);
 
 	if (lo) {
 		pid = lo->pid;
@@ -9043,7 +8807,8 @@ retry:
 		if (flk.l_type == F_UNLCK)
 			resp->status = NFS4_OK;
 		else {
-			if (lock_denied(&resp->denied, &flk) == NFS4ERR_EXPIRED)
+			if (lock_denied(cs->instp, &resp->denied, &flk) ==
+			    NFS4ERR_EXPIRED)
 				goto retry;
 			resp->status = NFS4ERR_DENIED;
 		}

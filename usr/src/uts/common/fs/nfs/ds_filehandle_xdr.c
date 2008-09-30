@@ -35,20 +35,20 @@
 #include <sys/sdt.h>
 
 bool_t
-xdr_mds_ppid_content(XDR *xdrs, mds_ppid_content *objp)
+xdr_mds_sid_content(XDR *xdrs, mds_sid_content *objp)
 {
 	if (!xdr_uint64_t(xdrs, &objp->id))
 		return (FALSE);
-	if (!xdr_uint32_t(xdrs, &objp->aun))
+	if (!xdr_uint64_t(xdrs, &objp->aun))
 		return (FALSE);
 	return (TRUE);
 }
 
 bool_t
-xdr_mds_ppid(XDR *xdrs, mds_ppid *objp)
+xdr_mds_sid(XDR *xdrs, mds_sid *objp)
 {
-	if (!xdr_bytes(xdrs, (char **)&objp->mds_ppid_val,
-	    (uint_t *)&objp->mds_ppid_len, ~0))
+	if (!xdr_bytes(xdrs, (char **)&objp->mds_sid_val,
+	    (uint_t *)&objp->mds_sid_len, ~0))
 		return (FALSE);
 	return (TRUE);
 }
@@ -64,7 +64,7 @@ xdr_ds_fh_v1(XDR *xdrs, ds_fh_v1 *objp)
 		return (FALSE);
 	if (!xdr_uint64_t(xdrs, &objp->mds_id))
 		return (FALSE);
-	if (!xdr_mds_ppid(xdrs, &objp->mds_ppid))
+	if (!xdr_mds_sid(xdrs, &objp->mds_sid))
 		return (FALSE);
 	if (!xdr_uint64_t(xdrs, &objp->mds_dataset_id))
 		return (FALSE);

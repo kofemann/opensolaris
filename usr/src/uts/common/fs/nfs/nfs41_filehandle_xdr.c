@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/vfs.h>
 #include <rpc/types.h>
 #include <rpc/xdr.h>

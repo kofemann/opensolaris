@@ -901,8 +901,8 @@ NFSSRV_OBJS +=	nfs_server.o nfs_srv.o nfs3_srv.o nfs_acl_srv.o		\
 		nfs4_srv_ns.o	nfs4_db.o	nfs4_srv_deleg.o	\
 		nfs4_deleg_ops.o nfs4_srv_readdir.o nfs4_dispatch.o	\
 		nfs41_dispatch.o nfs41_srv.o	ds_srv.o		\
-    		nfs41_filehandle.o nfs41_srv_readdir.o nfs41_state.o	\
-		nnode.o
+		nfs41_filehandle.o nfs41_srv_readdir.o nfs41_state.o	\
+		nnode.o nfs_serv_inst.o
 
 
 SMBSRV_SHARED_OBJS += \

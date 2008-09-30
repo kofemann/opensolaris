@@ -47,7 +47,8 @@ rfs4_client_t *mds_findclient(nfs_client_id4 *, bool_t *, rfs4_client_t *);
 static void nullfree(void);
 static void ds_reportavail_free(DS_REPORTAVAILres *);
 
-void ds_map_fsid(DS_MAP_FSIDargs *, DS_MAP_FSIDres *, struct svc_req *);
+void ds_map_mds_dataset_id(DS_MAP_MDS_DATASET_IDargs *,
+    DS_MAP_MDS_DATASET_IDres *, struct svc_req *);
 void ds_checkstate(DS_CHECKSTATEargs *, DS_CHECKSTATEres *, struct svc_req *);
 void ds_renew(DS_RENEWargs *, DS_RENEWres *, struct svc_req *);
 void ds_reportavail(DS_REPORTAVAILargs *, DS_REPORTAVAILres *,
@@ -60,11 +61,7 @@ void ds_shutdown(DS_SHUTDOWNargs *, DS_SHUTDOWNres *, struct svc_req *);
 void nfs_ds_cp_dispatch(struct svc_req *, SVCXPRT *);
 
 
-mds_dsinfo_t *mds_dsinfo_alloc(DS_EXIBIargs *);
-
-extern krwlock_t    mds_dsinfo_lock;
-extern rfs4_index_t *mds_dsinfo_inst_idx;
-extern uint_t nfs4_srv_vkey;
+ds_owner_t *mds_dsinfo_alloc(DS_EXIBIargs *);
 
 /*
  * Dispatch structure for the control protocol
@@ -79,43 +76,44 @@ struct nfs_cp_disp {
 
 
 union nfs_ds_cp_sarg {
-	DS_EXIBIargs		ds_exchange;
-	DS_CHECKSTATEargs	ds_checkstate;
-	DS_RENEWargs		ds_renew;
-	DS_REPORTAVAILargs	ds_reportavail;
-	DS_MAP_FSIDargs		ds_map_fsid;
-	DS_SECINFOargs		ds_secinfo;
-	DS_FMATPTargs		ds_fmatpt;
-	DS_SHUTDOWNargs		ds_shutdown;
+	DS_EXIBIargs			ds_exchange;
+	DS_CHECKSTATEargs		ds_checkstate;
+	DS_RENEWargs			ds_renew;
+	DS_REPORTAVAILargs		ds_reportavail;
+	DS_MAP_MDS_DATASET_IDargs	ds_map_mds_dataset_id;
+	DS_SECINFOargs			ds_secinfo;
+	DS_FMATPTargs			ds_fmatpt;
+	DS_SHUTDOWNargs			ds_shutdown;
 };
 
 union nfs_ds_cp_sres {
-	DS_EXIBIres		ds_exchange;
-	DS_CHECKSTATEres	ds_checkstate;
-	DS_RENEWres		ds_renew;
-	DS_REPORTAVAILres	ds_reportavail;
-	DS_MAP_FSIDres		ds_map_fsid;
-	DS_SECINFOres		ds_secinfo;
-	DS_FMATPTres		ds_fmatpt;
-	DS_SHUTDOWNres		ds_shutdown;
+	DS_EXIBIres			ds_exchange;
+	DS_CHECKSTATEres		ds_checkstate;
+	DS_RENEWres			ds_renew;
+	DS_REPORTAVAILres		ds_reportavail;
+	DS_MAP_MDS_DATASET_IDres	ds_map_mds_dataset_id;
+	DS_SECINFOres			ds_secinfo;
+	DS_FMATPTres			ds_fmatpt;
+	DS_SHUTDOWNres			ds_shutdown;
 };
 
 
 struct nfs_cp_disp nfs_ds_cp_v1[] = {
 	{NULL, NULL, NULL, NULL, NULL}, /* RPC Null */
-	{ds_exchange, xdr_DS_EXIBIargs, xdr_DS_EXIBIres,
-	    nullfree, "DS_EXIBI"},
 	{ds_checkstate, xdr_DS_CHECKSTATEargs, xdr_DS_CHECKSTATEres,
 	    nullfree, "DS_CheckSstate"},
+	{ds_exchange, xdr_DS_EXIBIargs, xdr_DS_EXIBIres,
+	    nullfree, "DS_EXIBI"},
+	{ds_fmatpt, xdr_DS_FMATPTargs, xdr_DS_FMATPTres,
+	    nullfree, "DS_FmaTpt"},
+	{ds_map_mds_dataset_id, xdr_DS_MAP_MDS_DATASET_IDargs,
+	    xdr_DS_MAP_MDS_DATASET_IDres, nullfree, "DS_MapMdsDatasetId"},
+	{NULL, NULL, NULL, NULL, "DS_MapMdsSid"},
 	{ds_renew, xdr_DS_RENEWargs, xdr_DS_RENEWres, nullfree, "DS_Renew"},
 	{ds_reportavail, xdr_DS_REPORTAVAILargs, xdr_DS_REPORTAVAILres,
 	    ds_reportavail_free, "DS_ReportAvail"},
-	{ds_map_fsid, xdr_DS_MAP_FSIDargs, xdr_DS_MAP_FSIDres,
-	    nullfree, "DS_MapFsid"},
 	{ds_sec_info, xdr_DS_SECINFOargs, xdr_DS_SECINFOres,
 	    nullfree, "DS_SecInfo"},
-	{ds_fmatpt, xdr_DS_FMATPTargs, xdr_DS_FMATPTres,
-	    nullfree, "DS_FmaTpt"},
 	{ds_shutdown, xdr_DS_SHUTDOWNargs, xdr_DS_SHUTDOWNres,
 	    nullfree, "DS_ShutDown"}
 };
@@ -131,27 +129,28 @@ ds_reportavail_free(DS_REPORTAVAILres *resp)
 	int i, j;
 
 	if (resp->status == DS_OK) {
-		DS_REPORTAVAILres_ok *res_ok = &(resp->DS_REPORTAVAILres_u.r);
-		mds_ppid *ppid_array;
-		uint32_t ppid_array_len;
+		DS_REPORTAVAILresok *res_ok =
+		    &(resp->DS_REPORTAVAILres_u.res_ok);
+		mds_sid *sid_array;
+		uint32_t sid_array_len;
 
 		/* Free the contents of the guid_map array */
 		for (i = 0; i < res_ok->guid_map.guid_map_len; i++) {
-			ppid_array =
-			    res_ok->guid_map.guid_map_val[i].mds_ppid_array.
-			    mds_ppid_array_val;
-			ppid_array_len =
-			    res_ok->guid_map.guid_map_val[i].mds_ppid_array.
-			    mds_ppid_array_len;
+			sid_array =
+			    res_ok->guid_map.guid_map_val[i].mds_sid_array.
+			    mds_sid_array_val;
+			sid_array_len =
+			    res_ok->guid_map.guid_map_val[i].mds_sid_array.
+			    mds_sid_array_len;
 
 			/* Free the contents of the mds_ppid_array */
-			for (j = 0; j < ppid_array_len; j++) {
+			for (j = 0; j < sid_array_len; j++) {
 				/* Free the mds_ppid_content */
-				kmem_free(ppid_array[j].mds_ppid_val,
-				    ppid_array[j].mds_ppid_len);
+				kmem_free(sid_array[j].mds_sid_val,
+				    sid_array[j].mds_sid_len);
 
 				/* Free the mds_ppid */
-				kmem_free(&ppid_array[j], sizeof (mds_ppid));
+				kmem_free(&sid_array[j], sizeof (mds_sid));
 			}
 		}
 		/* Free the guid_map */
@@ -224,7 +223,7 @@ ds_fhtovp(mds_ds_fh *fhp, ds_status *statp)
 }
 
 rfs4_file_t *
-mds_findfile_by_dsfh(mds_ds_fh *fhp)
+mds_findfile_by_dsfh(nfs_server_instance_t *instp, mds_ds_fh *fhp)
 {
 	ds_status stat;
 	vnode_t *vp;
@@ -236,7 +235,7 @@ mds_findfile_by_dsfh(mds_ds_fh *fhp)
 		return (NULL);
 
 	mutex_enter(&vp->v_lock);
-	fp = (rfs4_file_t *)vsd_get(vp, nfs4_srv_vkey);
+	fp = (rfs4_file_t *)vsd_get(vp, instp->vkey);
 	mutex_exit(&vp->v_lock);
 
 	if (fp == NULL)
@@ -270,11 +269,12 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	nfsstat4 stat;
 
 	rfs4_init_compound_state(&cs);
-	cs.instp = &mds_server;
+	cs.instp = mds_server;
 
 	if (mds_cks_clientid) {
 		/* First validate the client id */
-		cp = mds_findclient((struct nfs_client_id4 *)&argp->co_owner,
+		cp = findclient(cs.instp,
+		    (struct nfs_client_id4 *)&argp->co_owner,
 		    &do_create, NULL);
 		if (cp == NULL) {
 			resp->status = DSERR_STALE_CLIENTID;
@@ -310,7 +310,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 * mds_findfile_by_dsfh() will map the data-server
 	 * filehandle, and find the corresponding rfs4_file_t
 	 */
-	fp = mds_findfile_by_dsfh(fhp);
+	fp = mds_findfile_by_dsfh(cs.instp, fhp);
 	if (fp == NULL) {
 		resp->status = DSERR_BAD_FH;
 		return;
@@ -336,6 +336,20 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 		return;
 	}
 
+	/*
+	 * If layout has not been written to stable storage,
+	 * then do so before issuing the reply.
+	 */
+	if (mds_put_layout(fp->flp, fp->vp)) {
+		rfs4_state_rele(sp);
+		rfs4_file_rele(fp);
+		/*
+		 * DSERR_RESOURCE? DSERR_NOSPC?
+		 */
+		resp->status = DSERR_SERVERFAULT;
+		return;
+	}
+
 	rfs4_state_rele(sp);
 	rfs4_file_rele(fp);
 
@@ -346,10 +360,6 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	bzero(resp, sizeof (*resp));
 
 	/* get layout information */
-
-	/* the files dataset id */
-
-	resp->DS_CHECKSTATEres_u.file_state.mds_fsid.major = 0xabba;
 
 	/* we're done! */
 	resp->status = DS_OK;
@@ -362,31 +372,31 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 
 /* ARGSUSED */
 void
-ds_map_fsid(DS_MAP_FSIDargs *argp, DS_MAP_FSIDres *resp,
-    struct svc_req *req)
+ds_map_mds_dataset_id(DS_MAP_MDS_DATASET_IDargs *argp,
+    DS_MAP_MDS_DATASET_IDres *resp, struct svc_req *req)
 {
 	/* we're done! */
-	resp->dmfr_status = DSERR_NOTSUPP;
+	resp->status = DSERR_NOTSUPP;
 }
 
-mds_dsinfo_t *
-mds_find_dsinfo_by_id(ds_id ds_id)
+ds_owner_t *
+mds_find_ds_owner_by_id(ds_id ds_id)
 {
-	mds_dsinfo_t *dip = NULL;
+	ds_owner_t *dop = NULL;
 	bool_t create = FALSE;
 
-	rw_enter(&mds_dsinfo_lock, RW_READER);
-	dip = (mds_dsinfo_t *)rfs4_dbsearch(mds_dsinfo_idx,
+	rw_enter(&mds_server->ds_owner_lock, RW_READER);
+	dop = (ds_owner_t *)rfs4_dbsearch(mds_server->ds_owner_idx,
 	    (void *)(uintptr_t)ds_id,
 	    &create, NULL, RFS4_DBS_VALID);
-	rw_exit(&mds_dsinfo_lock);
+	rw_exit(&mds_server->ds_owner_lock);
 
-	return (dip);
+	return (dop);
 }
 
 /* ARGSUSED */
 void
-mds_ds_rebooted(mds_dsinfo_t *dip)
+mds_ds_rebooted(ds_owner_t *dop)
 {
 	/*
 	 * clean up MDSs' DS state held or something!
@@ -398,7 +408,7 @@ mds_ds_rebooted(mds_dsinfo_t *dip)
 void
 ds_renew(DS_RENEWargs *argp, DS_RENEWres *resp, struct svc_req *rqstp)
 {
-	mds_dsinfo_t *dip;
+	ds_owner_t *dop;
 
 	/* do some basic sanity checks */
 	if (argp->ds_id == 0) {
@@ -406,24 +416,24 @@ ds_renew(DS_RENEWargs *argp, DS_RENEWres *resp, struct svc_req *rqstp)
 		return;
 	}
 
-	dip = mds_find_dsinfo_by_id(argp->ds_id);
+	dop = mds_find_ds_owner_by_id(argp->ds_id);
 
-	if (dip == NULL) {
+	if (dop == NULL) {
 		resp->status = DSERR_EXPIRED;
 		return;
 	}
 
-	rfs4_dbe_lock(dip->dbe);
-	dip->last_access = gethrestime_sec();
-	if (dip->verifier != argp->ds_boottime) {
-		dip->dsi_flags |= MDS_DSI_REBOOTED;
-		dip->verifier = argp->ds_boottime;
+	rfs4_dbe_lock(dop->dbe);
+	dop->last_access = gethrestime_sec();
+	if (dop->verifier != argp->ds_boottime) {
+		dop->dsi_flags |= MDS_DSI_REBOOTED;
+		dop->verifier = argp->ds_boottime;
 	}
-	rfs4_dbe_unlock(dip->dbe);
+	rfs4_dbe_unlock(dop->dbe);
 
 	/* if needed call mds_ds_rebooted() to do cleanup. */
 
-	resp->DS_RENEWres_u.mds_boottime = mds_server.Write4verf;
+	resp->DS_RENEWres_u.mds_boottime = mds_server->Write4verf;
 	resp->status = DS_OK;
 }
 
@@ -513,7 +523,7 @@ ds_get_remote_uaddr(struct svc_req *rp, char *buf, int with_port)
 
 /* ARGSUSED */
 int
-mds_rpt_avail_update(mds_dsinfo_t *dp,
+mds_rpt_avail_update(ds_owner_t *dp,
 		DS_REPORTAVAILargs *argp,
 		DS_REPORTAVAILres *resp)
 {
@@ -523,26 +533,24 @@ mds_rpt_avail_update(mds_dsinfo_t *dp,
 }
 
 /* ARGSUSED */
-mds_pool_info_t *
-mds_pinfo_add(mds_dsinfo_t *dip, struct ds_storinfo *si)
+ds_guid_info_t *
+ds_guid_info_add(ds_owner_t *dop, struct ds_storinfo *si)
 {
-	extern rfs4_index_t *mds_pool_info_idx;
-	extern krwlock_t mds_pool_info_lock;
-
 	pinfo_create_t pic_arg;
-	mds_pool_info_t *pip;
+	ds_guid_info_t *pip;
 
-	pic_arg.dip = dip;
+	pic_arg.dop = dop;
 	pic_arg.si = si;
 
-	rw_enter(&mds_pool_info_lock, RW_WRITER);
+	rw_enter(&mds_server->ds_guid_info_lock, RW_WRITER);
 
-	if ((pip = (mds_pool_info_t *)rfs4_dbcreate(mds_pool_info_idx,
+	if ((pip = (ds_guid_info_t *)rfs4_dbcreate(
+	    mds_server->ds_guid_info_idx,
 	    (void *)&pic_arg)) == NULL) {
-		rw_exit(&mds_pool_info_lock);
+		rw_exit(&mds_server->ds_guid_info_lock);
 		return (NULL);
 	}
-	rw_exit(&mds_pool_info_lock);
+	rw_exit(&mds_server->ds_guid_info_lock);
 	return (pip);
 }
 
@@ -585,49 +593,41 @@ uaddr_trunc_port(char *uaddr)
 	return (port_less);
 }
 
-mds_dsinfo_t *
-mds_find_ds_instance(DS_EXIBIargs *args)
+ds_owner_t *
+mds_find_ds_owner(DS_EXIBIargs *args, bool_t *create)
 {
-	mds_dsinfo_t *dip = NULL;
-	bool_t create = FALSE;
+	ds_owner_t *dop = NULL;
 
 	/*
-	 * using the data-server instance string find
-	 * an associcated device
+	 * using the data-server identity string find
+	 * an the ds_owner structure
 	 */
-
-	rw_enter(&mds_dsinfo_lock, RW_READER);
-	dip = (mds_dsinfo_t *)rfs4_dbsearch(mds_dsinfo_inst_idx,
+	rw_enter(&mds_server->ds_owner_lock, RW_READER);
+	dop = (ds_owner_t *)rfs4_dbsearch(mds_server->ds_owner_inst_idx,
 	    (void *)args->ds_ident.instance.instance_val,
-	    &create,
-	    NULL,
-	    RFS4_DBS_VALID);
-	rw_exit(&mds_dsinfo_lock);
+	    create, (void *)args, RFS4_DBS_VALID);
+	rw_exit(&mds_server->ds_owner_lock);
 
-	return (dip);
+	return (dop);
 }
-
 
 /*
  */
 ds_status
-mds_dev_addr_update(mds_dsinfo_t *dip, struct ds_addr *dap)
+mds_ds_addr_update(ds_owner_t *dop, struct ds_addr *dap)
 {
-	extern rfs4_index_t *mds_device_uaddr_idx;
 	struct mds_adddev_args darg;
 	bool_t create = FALSE;
-	mds_device_t *devp;
+	ds_addr_t *devp;
 	ds_status stat = DS_OK;
 
 	/* search for existing entry */
-	rw_enter(&mds_device_lock, RW_WRITER);
-	if ((devp = (mds_device_t *)rfs4_dbsearch(mds_device_uaddr_idx,
+	rw_enter(&mds_server->ds_addr_lock, RW_WRITER);
+	if ((devp = (ds_addr_t *)rfs4_dbsearch(mds_server->ds_addr_uaddr_idx,
 	    (void *)dap->addr.na_r_addr,
-	    &create,
-	    NULL,
-	    RFS4_DBS_VALID)) != NULL) {
+	    &create, NULL, RFS4_DBS_VALID)) != NULL) {
 		MDS_SET_DS_FLAGS(devp->dev_flags, dap->validuse);
-		rw_exit(&mds_device_lock);
+		rw_exit(&mds_server->ds_addr_lock);
 		return (stat);
 	}
 
@@ -637,27 +637,28 @@ mds_dev_addr_update(mds_dsinfo_t *dip, struct ds_addr *dap)
 	darg.dev_addr  = kstrdup(dap->addr.na_r_addr);
 
 	/* make it */
-	devp = (mds_device_t *)rfs4_dbcreate(mds_device_idx, (void *)&darg);
+	devp = (ds_addr_t *)rfs4_dbcreate(mds_server->ds_addr_idx,
+	    (void *)&darg);
 
 	if (devp) {
-		devp->dev_infop = dip;
+		devp->ds_owner = dop;
 		MDS_SET_DS_FLAGS(devp->dev_flags, dap->validuse);
-		list_insert_tail(&dip->dev_list, devp);
+		list_insert_tail(&dop->ds_addr_list, devp);
 	} else
 		stat = DSERR_INVAL;
 
-	rw_exit(&mds_device_lock);
+	rw_exit(&mds_server->ds_addr_lock);
 	return (stat);
 }
 
 ds_status
-mds_rpt_avail_add(mds_dsinfo_t *dip, DS_REPORTAVAILargs *argp,
-		DS_REPORTAVAILres  *resp)
+mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
+    DS_REPORTAVAILres  *resp)
 {
 	int i, count;
-	mds_pool_info_t *pip;
+	ds_guid_info_t *gip;
 	struct ds_guid_map *guid_map;
-	DS_REPORTAVAILres_ok *res_ok;
+	DS_REPORTAVAILresok *res_ok;
 	XDR xdr;
 	int xdr_size;
 	char *xdr_buffer;
@@ -666,10 +667,10 @@ mds_rpt_avail_add(mds_dsinfo_t *dip, DS_REPORTAVAILargs *argp,
 	 * First deal with the universal addresses
 	 */
 	for (i = 0; i < argp->ds_addrs.ds_addrs_len; i++)
-		(void) mds_dev_addr_update(dip,
+		(void) mds_ds_addr_update(dop,
 		    &argp->ds_addrs.ds_addrs_val[i]);
 
-	res_ok = &(resp->DS_REPORTAVAILres_u.r);
+	res_ok = &(resp->DS_REPORTAVAILres_u.res_ok);
 
 	/*
 	 * Set the attribute version so the data server knows which
@@ -692,49 +693,52 @@ mds_rpt_avail_add(mds_dsinfo_t *dip, DS_REPORTAVAILargs *argp,
 
 	count = 0;
 	for (i = 0; i < argp->ds_storinfo.ds_storinfo_len; i++) {
-		pip = mds_pinfo_add(dip, &argp->ds_storinfo.ds_storinfo_val[i]);
-		if (pip != NULL) {
-			mds_ppid *ppid;
-			mds_ppid_content ppid_content;
+		gip = ds_guid_info_add(dop,
+		    &argp->ds_storinfo.ds_storinfo_val[i]);
+		if (gip != NULL) {
+			mds_sid *sid;
+			mds_sid_content sid_content;
 
 			/* Data Server GUIDs */
 			/* Only supported type is ZFS */
-			ASSERT(pip->ds_stortype == ZFS);
-			guid_map[count].ds_guid.stor_type = pip->ds_stortype;
-			guid_map[count].ds_guid.ds_guid_u.zfsguid.
-			    zfsguid_len = pip->ds_guid_len;
-			guid_map[count].ds_guid.ds_guid_u.zfsguid.
-			    zfsguid_val = pip->ds_guid_val;
+			ASSERT(gip->ds_guid.stor_type == ZFS);
+			guid_map[count].ds_guid = gip->ds_guid;
 
-			/* MDS PPIDs */
-			ppid_content.id = pip->mds_gpoolid;
-			/* For now - making a unique value of '1' */
-			ppid_content.aun = 1;
-			xdr_size = xdr_sizeof(xdr_mds_ppid_content,
-			    &ppid_content);
+			ASSERT(gip->ds_guid.ds_guid_u.zfsguid.zfsguid_len
+			    == sizeof (mds_sid_content));
+
+			/*
+			 * MDS SIDs: these would come from the mds_mapzap,
+			 * but for now we just reuse the ds_guid
+			 */
+			bcopy(gip->ds_guid.ds_guid_u.zfsguid.zfsguid_val,
+			    &sid_content, sizeof (sid_content));
+
+			xdr_size = xdr_sizeof(xdr_mds_sid_content,
+			    &sid_content);
 			ASSERT(xdr_size);
 
 			xdr_buffer = kmem_alloc(xdr_size, KM_SLEEP);
 			xdrmem_create(&xdr, xdr_buffer, xdr_size, XDR_ENCODE);
 
-			if (xdr_mds_ppid_content(&xdr, &ppid_content) ==
+			if (xdr_mds_sid_content(&xdr, &sid_content) ==
 			    FALSE) {
 				kmem_free(xdr_buffer, xdr_size);
 				return (DSERR_XDR);
 			}
-			ppid = kmem_alloc(sizeof (mds_ppid), KM_SLEEP);
-			ppid->mds_ppid_len = xdr_size;
-			ppid->mds_ppid_val = xdr_buffer;
+			sid = kmem_alloc(sizeof (mds_sid), KM_SLEEP);
+			sid->mds_sid_len = xdr_size;
+			sid->mds_sid_val = xdr_buffer;
 
 			/*
-			 * There is only one MDS PPID associated with this
+			 * There is only one MDS SID associated with this
 			 * DS GUID
 			 */
-			guid_map[count].mds_ppid_array.mds_ppid_array_len = 1;
-			guid_map[count].mds_ppid_array.mds_ppid_array_val =
-			    ppid;
+			guid_map[count].mds_sid_array.mds_sid_array_len = 1;
+			guid_map[count].mds_sid_array.mds_sid_array_val =
+			    sid;
 			count++;
-			rfs4_dbe_rele(pip->dbe);
+			rfs4_dbe_rele(gip->dbe);
 		}
 	}
 
@@ -754,7 +758,7 @@ void
 ds_reportavail(DS_REPORTAVAILargs *argp, DS_REPORTAVAILres *resp,
 	struct svc_req *rqstp)
 {
-	mds_dsinfo_t *dip;
+	ds_owner_t *dop;
 	ds_status stat;
 
 	/*
@@ -765,9 +769,9 @@ ds_reportavail(DS_REPORTAVAILargs *argp, DS_REPORTAVAILres *resp,
 		return;
 	}
 
-	dip = mds_find_dsinfo_by_id(argp->ds_id);
+	dop = mds_find_ds_owner_by_id(argp->ds_id);
 
-	if (dip == NULL) {
+	if (dop == NULL) {
 		resp->status = DSERR_NOT_AUTH;
 		return;
 	}
@@ -775,28 +779,29 @@ ds_reportavail(DS_REPORTAVAILargs *argp, DS_REPORTAVAILres *resp,
 	/*
 	 * ToDo: Check the verifier (args->ds_verifier).
 	 */
-
-	if (list_head(&dip->dev_list) == NULL)
-		stat = mds_rpt_avail_add(dip, argp, resp);
+	if (list_head(&dop->ds_addr_list) == NULL)
+		stat = mds_rpt_avail_add(dop, argp, resp);
 	else
-		stat = mds_rpt_avail_update(dip, argp, resp);
+		stat = mds_rpt_avail_update(dop, argp, resp);
 
 	resp->status = stat;
 }
 
+/*
+ * XXX:
+ * XXX: Needs to have nfs_server_instance passed in to it..
+ * XXX:
+ */
 /* ARGSUSED */
 void
 ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 {
-	extern void mds_nuke_layout(uint32_t);
+	extern void mds_nuke_layout(nfs_server_instance_t *, uint32_t);
 
-	mds_dsauth_t *dap;
-	mds_dsinfo_t *dip;
-	mds_device_t *dp;
-	char  remote_uaddr[INET6_ADDRSTRLEN];
-	char  inst[MAXPATHLEN];
-	ds_status stat;
-	DS_EXIBIresok *dser = &(resp->DS_EXIBIres_u.dhr_res_ok);
+	ds_owner_t *dop;
+	ds_addr_t *dp;
+	bool_t do_create = TRUE;
+	DS_EXIBIresok *dser = &(resp->DS_EXIBIres_u.res_ok);
 
 	/*
 	 * Do some initial validation of the request.
@@ -807,51 +812,33 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 		return;
 	}
 
+	dop = mds_find_ds_owner(argp, &do_create);
+	ASSERT(dop);
 	/*
-	 * First search on the instance string
+	 * If the find found the ds_owner we need to do
+	 * some clean up
 	 */
-	dip = mds_find_ds_instance(argp);
-	if (dip == NULL) {
-		/*
-		 * Not known so get just the remote address.
-		 */
-		stat = ds_get_remote_uaddr(rqstp, remote_uaddr, 0);
-		if (stat != DS_OK) {
-			resp->status = stat;
-			return;
-		}
-
-		/*
-		 * Hunt down via ip_address, to find matching
-		 * device that points to this instance, or
-		 * create it.
-		 */
-		if ((dap = mds_find_dsauth_by_ip(argp, remote_uaddr)) == NULL) {
-			/* Still no luck ? -- Punt  */
-			resp->status = DSERR_NOT_AUTH;
-			return;
-		}
-		dip = dap->dev_infop;
-	} else {
+	if (do_create == FALSE) {
 		/*
 		 * XXXXXX Needs rework XXXXXXX
 		 *
-		 * pre-existing instance, for now just
+		 * pre-existing ds_owner, for now just
 		 * trash existing devices, assume data-server
 		 * reboot and remove default layout...
 		 */
 
 		/* brute force it */
-		rw_enter(&mds_device_lock, RW_WRITER);
-		while (dp = list_head(&dip->dev_list)) {
+		rw_enter(&mds_server->ds_addr_lock, RW_WRITER);
+		while (dp = list_head(&dop->ds_addr_list)) {
 			rfs4_dbe_invalidate(dp->dbe);
-			list_remove(&dip->dev_list, dp);
+			list_remove(&dop->ds_addr_list, dp);
 		}
-		rw_exit(&mds_device_lock);
+		rw_exit(&mds_server->ds_addr_lock);
+		/* what about the ds_guid_info list ?? */
 	}
 
 	/* Again, needs rework */
-	mds_nuke_layout(1);
+	mds_nuke_layout(mds_server, 1);
 
 	/*
 	 * XXXX: This would be a good place to notice the
@@ -863,14 +850,10 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 	 * XXXX: when we notice an update (as opposed to add)
 	 */
 	resp->status = DS_OK;
-	dser->ds_id = dip->ds_id;
-	dser->mds_ident.boot_verifier = mds_server.Write4verf;
+	dser->ds_id = dop->ds_id;
+	dser->mds_boot_verifier = mds_server->Write4verf;
 
-	/* Needs rework */
-	(void) sprintf(inst, "%s: %llx", uts_nodename(),
-	    (unsigned long long)mds_server.Write4verf);
-	dser->mds_ident.instance.instance_len = strlen(inst);
-	dser->mds_ident.instance.instance_val = kstrdup(inst);
+	dser->mds_lease_period = mds_server->lease_period;
 }
 
 
@@ -927,5 +910,6 @@ nfs_ds_cp_dispatch(struct svc_req *req, SVCXPRT *xprt)
 	if (!svc_sendreply(xprt, disp->encode_reply, (char *)&dres)) {
 		DTRACE_PROBE2(nfssrv__e__dscp__sendreply,
 		    rpcvers_t, req->rq_vers, rpcproc_t, which);
+		svcerr_systemerr(xprt);
 	}
 }

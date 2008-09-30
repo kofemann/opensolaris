@@ -26,8 +26,6 @@
 #ifndef _NFS41_FILEHANDLE_H
 #define	_NFS41_FILEHANDLE_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <nfs/nfs.h>
 #include <nfs/nfs41_fhtype.h>
 #include <nfs/nfs4.h>
@@ -82,7 +80,6 @@ extern int mknfs41_fh(nfs_fh4 *, vnode_t *, struct exportinfo *);
 extern bool_t xdr_encode_nfs41_fh(XDR *, nfs_fh4 *);
 extern bool_t xdr_decode_nfs41_fh(XDR *, nfs_fh4 *);
 extern bool_t xdr_nfs41_fh_fmt(XDR *, nfs41_fh_fmt_t *);
-
 
 #endif
 

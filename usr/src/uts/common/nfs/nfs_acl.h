@@ -19,15 +19,12 @@
  * CDDL HEADER END
  */
 /*
- *	Copyright 2006 Sun Microsystems, Inc.
- *	All rights reserved.
- *	Use is subject to license terms.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Use is subject to license terms.
  */
 
 #ifndef _NFS_NFS_ACL_H
 #define	_NFS_NFS_ACL_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #ifdef	__cplusplus
 extern "C" {

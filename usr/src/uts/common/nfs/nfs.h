@@ -2323,7 +2323,8 @@ extern void		nfs4_clnt_fini(void);
 /*
  * Does NFS4 server have a vnode delegated?  TRUE if so, FALSE if not.
  */
-extern bool_t rfs4_check_delegated(int mode, vnode_t *, bool_t trunc);
+extern bool_t rfs4_check_delegated(int mode, vnode_t *, bool_t trunc,
+    bool_t do_delay, bool_t is_rm, void *);
 /*
  * VOP_GETATTR call. If a NFS4 delegation is present on the supplied vnode
  * call back to the delegated client to get attributes for AT_MTIME and

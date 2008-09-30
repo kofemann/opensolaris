@@ -19,15 +19,12 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef _AUTH_H
 #define	_AUTH_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 
 /*
  * nfsauth_prot.x (The NFSAUTH Protocol)

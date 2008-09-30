@@ -220,6 +220,11 @@ rfs_setattr(struct nfssaargs *args, struct nfsattrstat *ns,
 	 * Also the client should not be allowed to change the
 	 * size of the file if there is a conflicting non-blocking
 	 * mandatory lock in the region of change.
+	 *
+	 * Also(2), check to see if the v4 side of the server has
+	 * delegated this file.  If so, then we set T_WOULDBLOCK
+	 * so that the dispatch function dosn't send a reply, forcing
+	 * the client to retrasmit its request.
 	 */
 	if (vp->v_type == VREG && va.va_mask & AT_SIZE) {
 		if (nbl_need_check(vp)) {
@@ -1716,7 +1721,8 @@ rfs_create(struct nfscreatargs *args, struct nfsdiropres *dr,
 		    NULL, NULL, NULL);
 
 		if (!lookuperr &&
-		    rfs4_check_delegated(FWRITE, tvp, va.va_size == 0)) {
+		    rfs4_check_delegated(FWRITE, tvp, va.va_size == 0,
+		    TRUE, FALSE, NULL)) {
 			VN_RELE(tvp);
 			curthread->t_flag |= T_WOULDBLOCK;
 			goto out;
@@ -1781,7 +1787,8 @@ rfs_create(struct nfscreatargs *args, struct nfsdiropres *dr,
 			else
 				trunc = FALSE;
 
-			if (rfs4_check_delegated(FWRITE, vp, trunc)) {
+			if (rfs4_check_delegated(FWRITE, vp, trunc,
+			    TRUE, FALSE, NULL)) {
 				VN_RELE(vp);
 				curthread->t_flag |= T_WOULDBLOCK;
 				goto out;
@@ -1887,7 +1894,7 @@ rfs_remove(struct nfsdiropargs *da, enum nfsstat *status,
 	 * the delegation.
 	 */
 
-	if (rfs4_check_delegated(FWRITE, targvp, TRUE)) {
+	if (rfs4_check_delegated(FWRITE, targvp, TRUE, TRUE, TRUE, NULL)) {
 		VN_RELE(vp);
 		VN_RELE(targvp);
 		curthread->t_flag |= T_WOULDBLOCK;
@@ -2010,7 +2017,7 @@ rfs_rename(struct nfsrnmargs *args, enum nfsstat *status,
 
 	/* Check for delegations on the source file */
 
-	if (rfs4_check_delegated(FWRITE, srcvp, FALSE)) {
+	if (rfs4_check_delegated(FWRITE, srcvp, FALSE, TRUE, FALSE, NULL)) {
 		VN_RELE(tovp);
 		VN_RELE(fromvp);
 		VN_RELE(srcvp);
@@ -2022,7 +2029,8 @@ rfs_rename(struct nfsrnmargs *args, enum nfsstat *status,
 
 	if (VOP_LOOKUP(tovp, args->rna_to.da_name, &targvp, NULL, 0, NULL, cr,
 	    NULL, NULL, NULL) == 0) {
-		if (rfs4_check_delegated(FWRITE, targvp, TRUE)) {
+		if (rfs4_check_delegated(FWRITE, targvp, TRUE, TRUE, TRUE,
+		    NULL)) {
 			VN_RELE(tovp);
 			VN_RELE(fromvp);
 			VN_RELE(srcvp);

@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * The following naming convention is used in function names.
@@ -812,15 +810,14 @@ vs_aent_to_ace4(vsecattr_t *aclentacl, vsecattr_t *vs_ace4,
 
 	if (aclentacl->vsa_aclcnt > 0) {
 		error = ln_aent_to_ace4(aclentacl->vsa_aclentp,
-			aclentacl->vsa_aclcnt, &acebuf, &acecnt,
-			    isdir, isserver);
+		    aclentacl->vsa_aclcnt, &acebuf, &acecnt, isdir, isserver);
 		if (error != 0)
 			goto out;
 	}
 	if (aclentacl->vsa_dfaclcnt > 0) {
 		error = ln_aent_to_ace4(aclentacl->vsa_dfaclentp,
-			aclentacl->vsa_dfaclcnt, &dfacebuf, &dfacecnt,
-			    isdir, isserver);
+		    aclentacl->vsa_dfaclcnt, &dfacebuf, &dfacecnt,
+		    isdir, isserver);
 		if (error != 0)
 			goto out;
 	}
@@ -1232,14 +1229,14 @@ ace4_list_to_aent(ace4_list_t *list, aclent_t **aclentp, int *aclcnt,
 	if ((list->seen & (USER_OBJ | GROUP_OBJ | OTHER_OBJ)) !=
 	    (USER_OBJ | GROUP_OBJ | OTHER_OBJ)) {
 		NFS4_DEBUG(nfs4_acl_debug, (CE_NOTE,
-			"ace4_list_to_aent: required aclent_t entites "
-			"missing"));
+		    "ace4_list_to_aent: required aclent_t entites "
+		    "missing"));
 		error = ENOTSUP;
 		goto out;
 	}
 	if ((! list->hasmask) && (list->numusers + list->numgroups > 0)) {
 		NFS4_DEBUG(nfs4_acl_debug, (CE_NOTE,
-			"ace4_list_to_aent: CLASS_OBJ (mask) missing"));
+		    "ace4_list_to_aent: CLASS_OBJ (mask) missing"));
 		error = ENOTSUP;
 		goto out;
 	}

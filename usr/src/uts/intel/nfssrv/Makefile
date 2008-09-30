@@ -24,7 +24,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
 #
 #	This makefile drives the production of the nfs server-specific
 #	kernel module.
@@ -40,9 +39,14 @@ UTSBASE	= ../..
 #	Define the module and object file sets.
 #
 MODULE		= nfssrv
-OBJECTS		= $(NFSSRV_OBJS:%=$(OBJS_DIR)/%)
+OBJECTS		= $(NFSSRV_OBJS:%=$(OBJS_DIR)/%) $(OBJS_DIR)/mds_odl_xdr.o
 LINTS		= $(NFSSRV_OBJS:%.o=$(LINTS_DIR)/%.ln)
 ROOTMODULE	= $(ROOT_MISC_DIR)/$(MODULE)
+
+PROTOCOL_DIR	= $(UTSBASE)/../head/rpcsvc
+NFSHDR		= $(UTSBASE)/common/nfs
+DERIVED_HDRS	= $(NFSHDR)/mds_odl.h 
+DERIVED_FILES	= mds_odl_xdr.c $(DERIVED_HDRS)
 
 #
 #	Include common rules.
@@ -83,8 +87,10 @@ def:		$(DEF_DEPS)
 all:		$(ALL_DEPS)
 
 clean:		$(CLEAN_DEPS)
+	$(RM)	$(DERIVED_FILES)
 
 clobber:	$(CLOBBER_DEPS)
+	$(RM)	$(DERIVED_FILES)
 
 lint:		$(LINT_DEPS)
 
@@ -93,6 +99,17 @@ modlintlib:	$(MODLINTLIB_DEPS)
 clean.lint:	$(CLEAN_LINT_DEPS)
 
 install:	$(INSTALL_DEPS)
+
+$(NFSHDR)/mds_odl.h: $(PROTOCOL_DIR)/mds_odl.x
+	cd $(NFSHDR); $(MAKE) $(@F)
+
+mds_odl_xdr.c: $(PROTOCOL_DIR)/mds_odl.x
+	$(RPCGEN) -i 0 -C -c $(PROTOCOL_DIR)/mds_odl.x | \
+		$(EGREP) -v '^#include.+/mds_odl\.h"' > $@
+
+$(OBJS_DIR)/mds_odl_xdr.o: mds_odl_xdr.c $(NFSHDR)/mds_odl.h
+	$(COMPILE.c) -o $@ mds_odl_xdr.c
+	$(CTFCONVERT_O)
 
 #
 #	Include common targets.

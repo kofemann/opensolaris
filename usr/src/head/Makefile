@@ -22,8 +22,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI" 
-#
 # head/Makefile
 #
 # include global definitions
@@ -263,6 +261,7 @@ RPCSVC_GEN_HDRS = \
 	nfs_prot.h	\
 	nfs4_prot.h	\
 	nfs41_prot.h	\
+	mds_odl.h	\
 	nis.h		\
 	nis_cache.h	\
 	nis_callback.h	\

@@ -26,8 +26,6 @@
 #ifndef	_SYS_DSERV_IMPL_H
 #define	_SYS_DSERV_IMPL_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/dserv.h>
 
 #include <sys/vfs.h>
@@ -58,14 +56,14 @@ typedef struct dserv_guid {
 } dserv_guid_t;
 
 /*
- * This data structure is used to store the mapping of a MDS Pseudo Pool ID
+ * This data structure is used to store the mapping of a MDS Storage ID
  * to a real data server guid (zpool id + id of root pNFS object set).
  */
-typedef struct mds_ppid_map {
-	mds_ppid	mpm_mds_zpoolid;
-	dserv_guid_t	mpm_ds_guid;
-	list_node_t	mpm_mds_ppid_map_node;
-} mds_ppid_map_t;
+typedef struct mds_sid_map {
+	mds_sid		msm_mds_storid;
+	dserv_guid_t	msm_ds_guid;
+	list_node_t	msm_mds_sid_map_node;
+} mds_sid_map_t;
 
 /*
  * This data structure stores the list of open root object sets that a
@@ -164,7 +162,7 @@ typedef struct {
 	char 		*dmi_mds_addr;
 	char		*dmi_mds_netid;
 	list_t		dmi_datasets;
-	list_t		dmi_mdsppids;
+	list_t		dmi_mds_sids;
 	list_t		dmi_uaddrs;
 	list_t		dmi_handles;
 	boolean_t	dmi_teardown_in_progress;
@@ -173,7 +171,7 @@ typedef struct {
 #define	DSERV_MDS_INSTANCE_NET_VALID 0x01
 
 /*
- * The File State cache for the data server is organized in the following way
+ * The File State cache for the data server is organized in the following way.
  * For each file object on the data server (as specified by the DMU object id)
  * there can be multiple opens.  Each open stateid is tracked in the
  * open_state AVL tree.

@@ -19,15 +19,13 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 
 #ifndef _NFS4_CLNT_IMPL_H
 #define	_NFS4_CLNT_IMPL_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <nfs/nfs4_kprot.h>
 #include <nfs/nfs4.h>

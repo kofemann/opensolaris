@@ -29,8 +29,6 @@
 #ifndef	_NFS_EXPORT_H
 #define	_NFS_EXPORT_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <nfs/nfs_sec.h>
 #include <nfs/auth.h>
 #include <sys/vnode.h>

@@ -26,8 +26,6 @@
 #ifndef _NFS41_FHTYPE_H
 #define	_NFS41_FHTYPE_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #ifdef	__cplusplus
 extern "C" {
 #endif
@@ -35,7 +33,8 @@ extern "C" {
 #ifdef _KERNEL
 
 typedef enum {
-	FH41_TYPE_NFS = 1,
+	FH41_TYPE_LEGACY,
+	FH41_TYPE_NFS,
 	FH41_TYPE_DMU_DS,
 	FH41_TYPE_MAX
 } nfs41_fh_type_t;

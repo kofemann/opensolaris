@@ -25,8 +25,6 @@
 #ifndef _NFS4_SRV_READDIR_H
 #define	_NFS4_SRV_READDIR_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #ifdef __cplusplus
 extern "C" {
 #endif

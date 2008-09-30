@@ -25,8 +25,6 @@
 #ifndef	_NFS_RFS41_DS_H
 #define	_NFS_RFS41_DS_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <nfs/nfs41_fhtype.h>
 
 #ifdef	__cplusplus

@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/dserv_impl.h>
 
 #include <sys/list.h>
@@ -79,6 +77,12 @@ static void ds_setattr(DS_SETATTRargs *, DS_SETATTRres *,
     struct svc_req *);
 static void ds_read(DS_READargs *, DS_READres *,
     struct svc_req *);
+static void ds_obj_move(DS_OBJ_MOVEargs *, DS_OBJ_MOVEres *,
+    struct svc_req *);
+static void ds_obj_move_abort(DS_OBJ_MOVE_ABORTargs *, DS_OBJ_MOVE_ABORTres *,
+    struct svc_req *);
+static void ds_obj_move_status(DS_OBJ_MOVE_STATUSargs *,
+    DS_OBJ_MOVE_STATUSres *, struct svc_req *);
 static void ds_remove(DS_REMOVEargs *, DS_REMOVEres *,
     struct svc_req *);
 static void ds_write(DS_WRITEargs *, DS_WRITEres *,
@@ -166,22 +170,30 @@ struct nfs_cp_disp nfs_mds_cp_v1[] = {
 	    cp_nullfree, "DS_COMMIT"},
 	{ds_getattr, xdr_DS_GETATTRargs, xdr_DS_GETATTRres,
 	    cp_nullfree, "DS_GETATTR"},
-	{ds_setattr, xdr_DS_SETATTRargs, xdr_DS_SETATTRres,
-	    cp_nullfree, "DS_SETATTR"},
-	{ds_read, xdr_DS_READargs, xdr_DS_READres,
-	    cp_nullfree, "DS_READ"},
-	{ds_write, xdr_DS_WRITEargs, xdr_DS_WRITEres,
-	    cp_nullfree, "DS_WRITE"},
 	{ds_invalidate, xdr_DS_INVALIDATEargs, xdr_DS_INVALIDATEres,
 	    cp_nullfree, "DS_INVALIDATE"},
 	{ds_list, xdr_DS_LISTargs, xdr_DS_LISTres,
 	    cp_nullfree, "DS_LIST"},
+	{ds_obj_move, xdr_DS_OBJ_MOVEargs, xdr_DS_OBJ_MOVEres,
+	    cp_nullfree, "DS_OBJ_MOVE"},
+	{ds_obj_move_abort, xdr_DS_OBJ_MOVE_ABORTargs, xdr_DS_OBJ_MOVE_ABORTres,
+	    cp_nullfree, "DS_OBJ_MOVE_ABORT"},
+	{ds_obj_move_status, xdr_DS_OBJ_MOVE_STATUSargs,
+	    xdr_DS_OBJ_MOVE_STATUSres, cp_nullfree, "DS_OBJ_MOVE_STATUS"},
+	{ds_pnfsstat, xdr_DS_PNFSSTATargs, xdr_DS_PNFSSTATres,
+	    cp_nullfree, "DS_PNFSSTAT"},
+	{ds_read, xdr_DS_READargs, xdr_DS_READres,
+	    cp_nullfree, "DS_READ"},
+	{ds_remove, xdr_DS_REMOVEargs, xdr_DS_REMOVEres,
+	    cp_nullfree, "DS_REMOVE"},
+	{ds_setattr, xdr_DS_SETATTRargs, xdr_DS_SETATTRres,
+	    cp_nullfree, "DS_SETATTR"},
 	{ds_stat, xdr_DS_STATargs, xdr_DS_STATres,
 	    cp_nullfree, "DS_STAT"},
 	{ds_snap, xdr_DS_SNAPargs, xdr_DS_SNAPres,
 	    cp_nullfree, "DS_SNAP"},
-	{ds_pnfsstat, xdr_DS_PNFSSTATargs, xdr_DS_PNFSSTATres,
-	    cp_nullfree, "DS_PNFSSTAT"}
+	{ds_write, xdr_DS_WRITEargs, xdr_DS_WRITEres,
+	    cp_nullfree, "DS_WRITE"},
 };
 
 static uint_t nfs_mds_cp_cnt =
@@ -428,10 +440,9 @@ dserv_get_objset(ds_fh_v1 *ds_fh, objset_t **osp)
 	char *fsidmajor;
 	char *fsidminor;
 #if 0
-	dserv_guid_t ds_guid;
-	mds_ppid_map_t *tmp_ppid;
+	mds_sid_map_t *tmp_sid;
 	int found_root_objset = 0;
-	int found_mdsppid = 0;
+	int found_mds_sid = 0;
 #endif
 
 	inst = dserv_mds_get_my_instance();
@@ -461,24 +472,24 @@ dserv_get_objset(ds_fh_v1 *ds_fh, objset_t **osp)
 #if 0
 	found_root_objset = 1;
 	/*
-	 * Use the MDS PPID (from the file handle) to find the real data
+	 * Use the MDS SID (from the file handle) to find the real data
 	 * server guid (zpool guid + id of the root pNFS object set).
-	 * Note: Need to change to treating the MDS PPID as opaque.
+	 * Note: Need to change to treating the MDS SID as opaque.
 	 */
-	for (tmp_ppid = list_head(&inst->dmi_mdsppids); tmp_ppid != NULL;
-	    tmp_ppid = list_next(&inst->dmi_mdsppids)) {
+	for (tmp_sid = list_head(&inst->dmi_mds_sids); tmp_sid != NULL;
+	    tmp_sid = list_next(&inst->dmi_mds_sids)) {
 		if (ds_fh->mds_ds_fh_u.fh_v1.mds_zpoolid.id ==
-		    tmp_ppid->mpm_mds_zpoolid.id &&
+		    tmp_sid->mpm_mds_zpoolid.id &&
 		    ds_fh->mds_ds_fh_u.fh_v1.mds_zpoolid.aun ==
-		    tmp_ppid->mpm_mds_zpoolid.aun) {
-			found_mdsppid = 1;
-			ds_guid = tmp_ppid->mpm_ds_guid;
+		    tmp_sid->mpm_mds_zpoolid.aun) {
+			found_mds_sid = 1;
+			ds_guid = tmp_sid->mpm_ds_guid;
 			break;
 		}
 	}
 
 	/*
-	 * If we have no record of the given MDS PPID it may mean that
+	 * If we have no record of the given MDS SID it may mean that
 	 * we haven't been able to do the REPORTAVAIL for this particular
 	 * resource.  Therefore, just tell the client to try again later.
 	 */
@@ -813,6 +824,32 @@ ds_remove(DS_REMOVEargs *argp, DS_REMOVEres *resp, struct svc_req *req)
 
 /* ARGSUSED */
 void
+ds_obj_move(DS_OBJ_MOVEargs *argp, DS_OBJ_MOVEres *resp, struct svc_req *req)
+{
+	resp->status = DSERR_NOTSUPP;
+}
+
+
+/* ARGSUSED */
+void
+ds_obj_move_abort(DS_OBJ_MOVE_ABORTargs *argp, DS_OBJ_MOVE_ABORTres *resp,
+    struct svc_req *req)
+{
+	resp->status = DSERR_NOTSUPP;
+}
+
+
+/* ARGSUSED */
+void
+ds_obj_move_status(DS_OBJ_MOVE_STATUSargs *argp, DS_OBJ_MOVE_STATUSres *resp,
+    struct svc_req *req)
+{
+	resp->status = DSERR_NOTSUPP;
+}
+
+
+/* ARGSUSED */
+void
 ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
@@ -846,7 +883,7 @@ ds_stat(DS_STATargs *argp, DS_STATres * resp, struct svc_req *req)
 void
 ds_snap(DS_SNAPargs *argp, DS_SNAPres *resp, struct svc_req *req)
 {
-	resp->dssr_status = DSERR_NOTSUPP;
+	resp->status = DSERR_NOTSUPP;
 }
 
 
@@ -854,7 +891,7 @@ ds_snap(DS_SNAPargs *argp, DS_SNAPres *resp, struct svc_req *req)
 void
 ds_pnfsstat(DS_PNFSSTATargs *argp, DS_PNFSSTATres *resp, struct svc_req *req)
 {
-	resp->dpsr_status = DSERR_NOTSUPP;
+	resp->status = DSERR_NOTSUPP;
 }
 
 /* ARGSUSED */

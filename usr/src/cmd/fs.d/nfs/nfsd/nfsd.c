@@ -39,8 +39,6 @@
 /* LINTLIBRARY */
 /* PROTOLIB1 */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /* NFS server */
 
 #include <nfs/libnfs.h>
@@ -77,6 +75,8 @@
 #include <rpcsvc/daemon_utils.h>
 #include <rpcsvc/nfs4_prot.h>
 #include <libnvpair.h>
+#include <door.h>
+#include <dirent.h>
 #include <libintl.h>
 #include "nfs_tbind.h"
 #include "thrpool.h"
@@ -86,6 +86,8 @@
 /* DSS: distributed stable storage */
 #define	DSS_VERSMIN	4
 
+#define	MAX_DR_BUF_SZ	(1024 * 1024)
+
 static	int	nfssvc(int, struct netbuf, struct netconfig *);
 static	int	nfssvcpool(int maxservers);
 static	int	dss_init(uint_t npaths, char **pathnames);
@@ -93,6 +95,11 @@ static	void	dss_mkleafdirs(uint_t npaths, char **pathnames);
 static	void	dss_mkleafdir(char *dir, char *leaf, char *path);
 static	void	usage(void);
 int		qstrcmp(const void *s1, const void *s2);
+static	void 	clean_buf(void);
+static	void	free_buf(char *);
+static	void	*realloc_buf(char *, size_t);
+static	void	*alloc_buf(size_t);
+static	int	create_door(void);
 
 extern	int	_nfssys(int, void *);
 
@@ -132,6 +139,8 @@ int	nfs_server_vers_max = NFS_VERSMAX_DEFAULT;
  */
 int	nfs_server_delegation = NFS_SERVER_DELEGATION_DEFAULT;
 
+static thread_key_t	nfsd_tsd_key;
+
 int
 main(int ac, char *av[])
 {
@@ -142,6 +151,7 @@ main(int ac, char *av[])
 	int maxservers = 1;	/* zero allows inifinte number of threads */
 	int pid;
 	int i;
+	int doorfd = -1;
 	char *provider = (char *)NULL;
 	char *df_provider = (char *)NULL;
 	struct protob *protobp0, *protobp;
@@ -182,7 +192,7 @@ main(int ac, char *av[])
 
 	/*
 	 * Read in the values from config file first before we check
-	 * command line options so the options override the file.
+	 * commandline options so the options override the file.
 	 */
 
 	max_conns_allowed = libnfs_prop_num(libhandle,
@@ -329,6 +339,7 @@ main(int ac, char *av[])
 			exit(1);
 		}
 	}
+	(void) thr_keycreate(&nfsd_tsd_key, NULL);
 
 	/*
 	 * Block all signals till we spawn other
@@ -365,6 +376,7 @@ main(int ac, char *av[])
 		exit(1);
 	}
 
+	doorfd = create_door();
 	/*
 	 * RDMA start and stop thread.
 	 * Per pool RDMA listener creation and
@@ -373,7 +385,7 @@ main(int ac, char *av[])
 	 * start rdma services and block in the kernel.
 	 */
 	if (svcrdma(NFS_SVCPOOL_ID, nfs_server_vers_min, nfs_server_vers_max,
-	    nfs_server_delegation)) {
+	    nfs_server_delegation, doorfd)) {
 		fprintf(stderr, "Can't set up RDMA creator thread : %s",
 		    strerror(errno));
 	}
@@ -508,6 +520,10 @@ nfssvc(int fd, struct netbuf addrmask, struct netconfig *nconf)
 	nsa.fd = fd;
 	nsa.netid = nconf->nc_netid;
 	nsa.addrmask = addrmask;
+#ifdef NOT_YET
+	/* XXX - jw: this isn't where nfssrv is started. */
+	nsa.dfd = create_door();
+#endif
 	if (strncasecmp(nconf->nc_proto, NC_UDP, strlen(NC_UDP)) == 0) {
 		nsa.versmax = (nfs_server_vers_max > NFS_V3) ?
 		    NFS_V3 : nfs_server_vers_max;
@@ -816,4 +832,526 @@ qstrcmp(const void *p1, const void *p2)
 	char *s2 = *((char **)p2);
 
 	return (strcmp(s1, s2));
+}
+
+/* struct used for stable storage */
+struct ss_info {
+	int filever;
+	uint64_t verifier;
+	uint_t id_len;
+};
+#define	INFO_SZ	sizeof (struct ss_info)
+
+/*
+ * Create a file to hold the stable storage information for a client.
+ * The id_val is variable length so the size of the write is calculated.
+ * If the create or the write fails, there isn't much we can do.
+ */
+int
+ss_write_client(char *path, struct ss_state_rec *statep)
+{
+	int fd, size, ret = 0, wbytes;
+
+	if ((fd = open(path, O_WRONLY|O_CREAT, 0600)) == -1) {
+		syslog(LOG_ERR, "open/create failed for %s", path);
+		return (-1);
+	}
+
+	size = sizeof (struct ss_state_rec) + statep->ss_len;
+	if ((wbytes = write(fd, (void *)statep, size)) != size) {
+		syslog(LOG_ERR, "write failed for %s: write(%d) returned %d errno=%d ss_len=%d\n", path, size, wbytes, errno, statep->ss_len);
+		ret = -1;
+	}
+
+	close(fd);
+
+	/* if the write failed, don't keep the file around */
+	if (ret == -1)
+		remove(path);
+
+	return (ret);
+}
+
+/*
+ * This is the function that handles the door upcall command for writing out
+ * stable storage for a client.  It creates the path name from the passed
+ * in root of the path + "v4_state" + <instance/filename>.  Upon completion,
+ * the status of the operation is returned via "door_return():
+ */
+void
+ss_write_state(struct ss_arg *argp, char *dir)
+{
+	struct ss_state_rec *recp;
+	struct ss_res res;
+	char path[MAXPATHLEN];
+	int error;
+
+	(void) snprintf(path, MAXPATHLEN, "%s/%s/%s", dir,
+	    NFS4_DSS_STATE_LEAF, argp->path);
+
+	recp = &argp->rec;
+
+	error = ss_write_client(path, recp);
+
+	if (error)
+		res.status = NFS_DR_OPFAIL;
+	else
+		res.status = NFS_DR_SUCCESS;
+
+	res.nsize = 0;
+	(void) door_return((char *)&res, sizeof (struct ss_res), NULL, 0);
+}
+
+/*
+ * Open a file and read in the stable storage info for a client.
+ * Returns number of bytes used when successful.  Otherwise, returns
+ * -2 for running out of buffer space and -1 for all other failures.
+ */
+int
+read_client_state(char *path, char *statep, int remain)
+{
+	int fd, size, len = 0;
+	int ret, killit;
+	struct ss_info cl_info;
+	struct ss_rd_state *sp = (struct ss_rd_state *)statep;
+	struct ss_state_rec *recp;
+
+	/*
+	 * opening a directory for rdwr will fail, hence skipping entries
+	 * that are not files, like '.' and '..'  Also, all the files
+	 * that we created are 0600, if we can't open it now as rdwr,
+	 * then we didn't create it.
+	 */
+	if ((fd = open(path, O_RDWR)) == -1)
+		return (-1);
+
+	ret = (read(fd, (void *)&cl_info, INFO_SZ) != INFO_SZ);
+
+	len = cl_info.id_len;
+	killit = (cl_info.filever != NFS4_SS_VERSION || len < 1);
+	if (ret || killit) {
+		close(fd);
+		(void) remove(path);
+		syslog(LOG_ERR,
+		    "Failed to retrieve stable storage for %s, file removed.",
+		    path);
+		return (-1);
+	}
+
+	/*
+	 * Check if there are enough bytes left in the return buffer to put
+	 * this client's info in.  If not return an error to indicate this.
+	 */
+	if (remain < (INFO_SZ + len)) {
+		close(fd);
+		return (-2); /* need to realloc */
+	}
+
+	size = sizeof (struct ss_state_rec) + len;
+	recp = (struct ss_state_rec *)malloc(size);
+
+	lseek(fd, 0, SEEK_SET);
+	if (read(fd, (void *)recp, size) == size) {
+		memcpy(sp->ssr_val, recp->ss_val, len);
+		sp->ssr_veri = cl_info.verifier;
+		sp->ssr_len = len;
+		ret = len + sizeof (uint64_t) + sizeof (uint_t);
+	} else {
+		ret = -1;
+	}
+
+	free(recp);
+	close(fd);
+
+	/* failed to read the info, get rid of the file */
+	if (ret == -1)
+		(void) remove(path);
+
+	return (ret);
+}
+
+/*
+ * Loop through all the files in a directory, which contains all the client's
+ * stable storage for a given server instance.  When this is called with
+ * both a path and an oldpath, the files are moved from one directory to
+ * the other (ie from .../v4_state/... to .../v4_oldstate/...).
+ * The routine returns the number of client state files that were read in, or
+ * -1 if it ran out of room in the return buffer.
+ * It will also update the number of bytes "used" as well as the "sz" of the
+ * return buffer (if it is realloc'd).
+ */
+int
+ss_read_clients(char *path, char *oldpath, char **resp, size_t *sz, int *used)
+{
+	DIR *dirp;
+	int cnt = 0;
+	struct dirent *dentp;
+	char *p, *op;
+	int plen, oplen, fd, done = 0;
+	int ret, remain, rec_len;
+	struct ss_res *resultp;
+	char *statep;
+
+	dirp = opendir(path);
+	if (dirp == NULL) {
+		if (errno == ENOENT) {
+			if (mkdir(path, NFS4_DSS_DIR_MODE) == -1)
+				syslog(LOG_ERR, "mkdir of %s failed", path);
+		} else {
+			syslog(LOG_ERR, "failed to open directory %s", path);
+		}
+		*used = 0;
+		return (0);
+	}
+
+	plen = strlen(path);
+	p = &path[plen];
+	if (oldpath) {
+		oplen = strlen(oldpath);
+		op = &oldpath[oplen];
+	}
+
+	resultp = (struct ss_res *)*resp;
+	statep = (char *)&resultp->rec;
+	statep += *used;
+	remain = *sz - *used;
+	while (!done) {
+		dentp = readdir(dirp);
+		if (dentp == NULL) {
+			done = 1;
+			continue;
+		}
+		strlcpy(p, dentp->d_name, MAXPATHLEN - plen);
+again:
+		if ((ret = read_client_state(path, statep, remain)) < 0) {
+			if (ret == -2) { /* out of buf space */
+				char *ptr;
+				/*
+				 * If the size is already as big as the max
+				 * buffer that doors will provide, then it
+				 * can't be made bigger.  Return an error
+				 * and let the caller try again with a
+				 * bigger buffer.
+				 */
+				if (*sz >= MAX_DR_BUF_SZ) {
+					*used = *sz * 2;
+					return (-1);
+				}
+
+				ptr = *resp;
+				*sz = MAX_DR_BUF_SZ;
+				*resp = realloc_buf(ptr, *sz);
+				if (*resp == NULL) {
+					free(ptr);
+					*used = MAX_DR_BUF_SZ;
+					return (-1);
+				}
+				/*
+				 * set all the pointers back to where we
+				 * left off in filling this buffer.
+				 */
+				resultp = (struct ss_res *)*resp;
+				statep = (char *)&resultp->rec;
+				statep += *used;
+				remain = *sz - *used;
+				goto again;
+			} else {	/* bad file */
+				continue;
+			}
+		}
+
+		/*
+		 * round up the size of the record to be sure that we don't
+		 * have any alignment problems when we move the pointers
+		 * and cast it to the structure (both here and in kernel).
+		 */
+		rec_len = P2ROUNDUP(ret, 8);
+		*used += rec_len;
+		statep += rec_len;
+		remain -= rec_len;
+		cnt++; /* increment the number of clients */
+
+		if (oldpath) {
+			strlcpy(op, dentp->d_name, MAXPATHLEN - oplen);
+			(void) rename(path, oldpath);
+		}
+	}
+	*p = '\0';	/* put path back to the way it was */
+	return (cnt);
+}
+
+void
+ss_read_state(char *inst, char *dir, int rsize)
+{
+	char *path, *oldpath;
+	char *resbuf;
+	struct ss_res res;
+	size_t sz;
+	int used = 0;
+	int cnt = 0;
+	int ocnt;
+
+	sz = rsize;	/* size of kernel return buffer */
+	resbuf = (char *)alloc_buf(sz);
+	if (resbuf == NULL) {
+		syslog(LOG_ERR, "resbuf malloc failed. No stable storage");
+		res.status = NFS_DR_NOMEM;
+		res.nsize = 0;
+		resbuf = (char *)&res;
+		sz = sizeof (struct ss_res);
+		goto dr_ret0;
+	}
+	path = (char *)malloc(MAXPATHLEN);
+	if (path == NULL) {
+		syslog(LOG_ERR, "path malloc failed. No stable storage");
+		free_buf(resbuf);
+		res.status = NFS_DR_NOMEM;
+		res.nsize = 0;
+		resbuf = (char *)&res;
+		sz = sizeof (struct ss_res);
+		goto dr_ret0;
+	}
+	oldpath = (char *)malloc(MAXPATHLEN);
+	if (oldpath == NULL) {
+		syslog(LOG_ERR, "oldpath malloc failed. No stable storage");
+		free_buf(resbuf);
+		res.status = NFS_DR_NOMEM;
+		res.nsize = 0;
+		resbuf = (char *)&res;
+		sz = sizeof (struct ss_res);
+		goto dr_ret1;
+	}
+	(void) snprintf(path, MAXPATHLEN, "%s/%s/%s/", dir,
+	    NFS4_DSS_STATE_LEAF, inst);
+	(void) snprintf(oldpath, MAXPATHLEN, "%s/%s/%s/", dir,
+	    NFS4_DSS_OLDSTATE_LEAF, inst);
+
+	ocnt = ss_read_clients(oldpath, NULL, &resbuf, &sz, &used);
+	if (ocnt != -1)
+		cnt = ss_read_clients(path, oldpath, &resbuf, &sz, &used);
+
+	if (ocnt == -1 || cnt == -1) {
+		if (resbuf)
+			free_buf(resbuf);
+		sz = sizeof (struct ss_res);
+		res.status = NFS_DR_OVERFLOW;
+		res.nsize = used;
+		resbuf = (char *)&res;
+	} else {
+		cnt += ocnt;
+		((struct ss_res *)resbuf)->status = NFS_DR_SUCCESS;
+		((struct ss_res *)resbuf)->nsize = cnt;
+		if (used == 0)
+			sz = sizeof (struct ss_res);
+		else
+			sz = used + (sizeof (int) * 2);
+	}
+	free(oldpath);
+dr_ret1:
+	free(path);
+dr_ret0:
+	(void) door_return(resbuf, sz, NULL, 0);
+}
+
+void
+ss_delete_state(char *path, char *dir)
+{
+	struct ss_res res;
+	char expired[MAXPATHLEN];
+
+	/*
+	 * path contains instance/file
+	 */
+	(void) snprintf(expired, MAXPATHLEN, "%s/%s/%s", dir,
+	    NFS4_DSS_STATE_LEAF, path);
+
+	(void) remove(expired);
+
+	res.status = NFS_DR_SUCCESS;
+	res.nsize = 0;
+	(void) door_return((char *)&res, sizeof (struct ss_res), NULL, 0);
+}
+
+void
+ss_delete_old(char *inst, char *dir)
+{
+	struct ss_res res;
+	char path[MAXPATHLEN];
+	DIR *dirp;
+	struct dirent *dentp;
+	char *p;
+	int plen, done = 0;
+	int len;
+
+	(void) snprintf(path, MAXPATHLEN, "%s/%s/%s/", dir,
+	    NFS4_DSS_OLDSTATE_LEAF, inst);
+
+	dirp = opendir(path);
+	if (dirp == NULL) {
+		syslog(LOG_ERR, "ss_delete_old(): opendir of %s failed", path);
+		res.status = NFS_DR_BADDIR;
+		goto out;
+	}
+
+	plen = strlen(path);
+	p = &path[plen];
+
+	while (!done) {
+		dentp = readdir(dirp);
+		if (dentp == NULL) {
+			done = 1;
+			continue;
+		}
+
+		/*
+		 * skip dot and dotdot.  No client name will be one or two
+		 * characters long and start with a dot.
+		 */
+		len = strlen(dentp->d_name);
+		if (len < 3 && dentp->d_name[0] == '.')
+			continue;
+
+		strlcpy(p, dentp->d_name, MAXPATHLEN - plen);
+		(void) remove(path);
+	}
+
+	res.status = NFS_DR_SUCCESS;
+out:
+	res.nsize = 0;
+	(void) door_return((char *)&res, sizeof (struct ss_res), NULL, 0);
+}
+
+void
+ss_door_func(void *c, char *argp, size_t sz, door_desc_t *dp, uint_t cnt)
+{
+	struct ss_arg *ss_argp;
+	struct ss_res res;
+
+	/* validate the arg */
+	if (sz < sizeof (struct ss_arg)) {
+		syslog(LOG_ERR, "Bad arg passed to ss_door_func()");
+		res.status = NFS_DR_BADARG;
+		res.nsize = 0;
+		(void) door_return((char *)&res, sizeof (struct ss_res),
+		    NULL, 0);
+	}
+
+	ss_argp = (struct ss_arg *)argp;
+	switch (ss_argp->cmd) {
+	case NFS4_SS_READ:
+		ss_read_state(ss_argp->path, NFS4_DSS_VAR_DIR, ss_argp->rsz);
+	case NFS4_SS_WRITE:
+		clean_buf();
+		ss_write_state(ss_argp, NFS4_DSS_VAR_DIR);
+	case NFS4_SS_DELETE_CLNT:
+		clean_buf();
+		ss_delete_state(ss_argp->path, NFS4_DSS_VAR_DIR);
+	case NFS4_SS_DELETE_OLD:
+		clean_buf();
+		ss_delete_old(ss_argp->path, NFS4_DSS_VAR_DIR);
+	default:
+		syslog(LOG_ERR, "Bad command passed to ss_door_func()");
+		break;
+	}
+
+	res.status = NFS_DR_BADCMD;
+	res.nsize = 0;
+	(void) door_return((char *)&res, sizeof (struct ss_res), NULL, 0);
+}
+
+static int
+create_door(void)
+{
+	int dfd = -1;
+
+	if ((dfd = door_create(ss_door_func, NULL,
+	    DOOR_REFUSE_DESC | DOOR_NO_CANCEL)) == -1)
+		syslog(LOG_ERR, "Unable to create door, no stable storage\n");
+
+	return (dfd);
+}
+
+struct nfsd_ss_tsd {
+	int nfsd_len;
+	char *nfsd_buf;
+};
+typedef struct nfsd_ss_tsd nfsd_ss_tsd_t;
+
+static void *
+alloc_buf(size_t size)
+{
+	nfsd_ss_tsd_t *tsd = NULL;
+
+	(void) thr_getspecific(nfsd_tsd_key, (void **)&tsd);
+	if (tsd == NULL) {
+		tsd = (nfsd_ss_tsd_t *)malloc(sizeof (nfsd_ss_tsd_t));
+		if (tsd == NULL) {
+			return (NULL);
+		}
+		tsd->nfsd_buf = malloc(size);
+		if (tsd->nfsd_buf != NULL)
+			tsd->nfsd_len = size;
+		else
+			tsd->nfsd_len = 0;
+		(void) thr_setspecific(nfsd_tsd_key, (void *)tsd);
+	} else {
+		if (tsd->nfsd_buf && (tsd->nfsd_len != size)) {
+			free(tsd->nfsd_buf);
+			tsd->nfsd_buf = malloc(size);
+			if (tsd->nfsd_buf != NULL)
+				tsd->nfsd_len = size;
+			else {
+				tsd->nfsd_len = 0;
+			}
+		}
+	}
+	return (tsd->nfsd_buf);
+}
+
+static void *
+realloc_buf(char *bp, size_t size)
+{
+	nfsd_ss_tsd_t *tsd = NULL;
+
+	(void) thr_getspecific(nfsd_tsd_key, (void **)&tsd);
+	if (tsd == NULL)	/* something went horribly wrong */
+		return (NULL);
+
+	tsd->nfsd_buf = realloc(bp, size);
+	if (tsd->nfsd_buf != NULL)
+		tsd->nfsd_len = size;
+	else
+		tsd->nfsd_len = 0;
+
+	return (tsd->nfsd_buf);
+}
+
+
+static void
+free_buf(char *buf)
+{
+	nfsd_ss_tsd_t *tsd = NULL;
+
+	(void) thr_getspecific(nfsd_tsd_key, (void **)&tsd);
+
+	free(buf);
+	free(tsd);
+
+	(void) thr_setspecific(nfsd_tsd_key, (void *)NULL);
+}
+
+static void
+clean_buf(void)
+{
+	nfsd_ss_tsd_t *tsd = NULL;
+
+	(void) thr_getspecific(nfsd_tsd_key, (void **)&tsd);
+	if (tsd == NULL)
+		return;
+
+	if (tsd->nfsd_buf)
+		free(tsd->nfsd_buf);
+
+	free(tsd);
+	(void) thr_setspecific(nfsd_tsd_key, (void *)NULL);
 }

@@ -38,51 +38,20 @@
 #include <sys/disp.h>
 
 extern u_longlong_t nfs4_srv_caller_id;
-extern rfs4_database_t *rfs4_server_state;
 
+#include <nfs/nfs_sstor_impl.h>
 #include <nfs/mds_state.h>
 #include <nfs/nfs41_sessions.h>
 
 #include <nfs/rfs41_ds.h>
 #include <nfs/nfs41_filehandle.h>
 
-extern uint_t nfs4_srv_vkey;
-
 static void mds_do_lorecall(mds_lorec_t *);
 static void mds_sess_lorecall_callout(rfs4_entry_t, void *);
 static int  mds_lorecall_cmd(struct mds_reclo_args *, cred_t *);
 
-static krwlock_t    mds_findsession_lock;
-rfs4_table_t *mds_session_tab;
-static rfs4_index_t *mds_session_idx;
-static rfs4_index_t *mds_sess_clientid_idx;
+extern void mds_do_cb_recall(struct rfs4_deleg_state *, bool_t);
 
-krwlock_t    mds_layout_lock;
-static rfs4_table_t *mds_layout_tab;
-static rfs4_index_t *mds_layout_idx;
-
-static rfs4_table_t *mds_layout_grant_tab;
-static rfs4_index_t *mds_layout_grant_idx;
-static rfs4_index_t *mds_layoutGrant_client_idx;
-
-krwlock_t    mds_mpd_lock;
-rfs4_table_t *mds_mpd_tab;
-rfs4_index_t *mds_mpd_idx;
-
-krwlock_t    mds_device_lock;
-rfs4_table_t *mds_device_tab;
-rfs4_index_t *mds_device_idx;
-rfs4_index_t *mds_device_ip_idx;
-rfs4_index_t *mds_device_uaddr_idx;
-
-krwlock_t    mds_dsinfo_lock;
-rfs4_table_t *mds_dsinfo_tab;
-rfs4_index_t *mds_dsinfo_inst_idx;
-rfs4_index_t *mds_dsinfo_idx;
-
-krwlock_t mds_dsauth_lock;
-rfs4_table_t *mds_dsauth_tab;
-rfs4_index_t *mds_dsauth_idx;
 
 /*
  * XXX - slrc_slot_size will more than likely have to be
@@ -105,13 +74,11 @@ slotid4 slrc_slot_size = MAXSLOTS;
 /* Sessions */
 static void mds_session_destroy(rfs4_entry_t);
 static bool_t mds_session_expiry(rfs4_entry_t);
-static bool_t mds_session_create(nfs_server_instance_t *, rfs4_entry_t, void *);
+static bool_t mds_session_create(rfs4_entry_t, void *);
 static uint32_t sessid_hash(void *);
 static bool_t sessid_compare(rfs4_entry_t, void *);
 static void *sessid_mkkey(rfs4_entry_t);
 
-extern void (*mds_addlo)(struct mds_addlo_args *);
-extern int (*mds_adddev)(char *);
 extern int (*mds_recall_lo)(struct mds_reclo_args *, cred_t *);
 
 extern char *kstrdup(const char *);
@@ -124,7 +91,10 @@ extern rfs4_client_t *findclient_by_id(nfs_server_instance_t *, clientid4);
 extern rfs4_openowner_t *findopenowner(nfs_server_instance_t *, open_owner4 *,
     bool_t *, seqid4);
 
-extern void init_state_tables(nfs_server_instance_t *);
+extern void v4prot_sstor_init(nfs_server_instance_t *);
+
+extern void rfs4_ss_retrieve_state(nfs_server_instance_t *);
+extern int nfs_doorfd;
 
 #ifdef DEBUG
 #define	MDS_TABSIZE 17
@@ -132,10 +102,30 @@ extern void init_state_tables(nfs_server_instance_t *);
 #define	MDS_TABSIZE 2047
 #endif
 
-
 #define	MDS_MAXTABSZ 1024*1024
 
 extern uint32_t clientid_hash(void *);
+
+/*
+ * Returns the instances capabilities flag word
+ * the form of:
+ *
+ *  EXCHGID4_FLAG_USE_NON_PNFS
+ *  EXCHGID4_FLAG_USE_PNFS_MDS
+ *  EXCHGID4_FLAG_USE_PNFS_DS
+ *
+ */
+uint32_t
+mds_get_capabilities(nfs_server_instance_t *instp)
+{
+	uint32_t my_abilities = 0;
+
+	if (instp)
+		my_abilities =
+		    instp->inst_flags & EXCHGID4_FLAG_MASK_PNFS;
+	return (my_abilities);
+}
+
 
 /*ARGSUSED*/
 static bool_t
@@ -146,13 +136,11 @@ mds_do_not_expire(rfs4_entry_t u_entry)
 
 /*ARGSUSED*/
 static stateid_t
-mds_create_stateid(nfs_server_instance_t *instp,
-	rfs4_dbe_t *dbe, stateid_type_t id_type)
+mds_create_stateid(rfs4_dbe_t *dbe, stateid_type_t id_type)
 {
 	stateid_t id;
 
-/* 	id.v41_bits.boottime = instp->start_time; */
-	id.v41_bits.boottime = mds_server.start_time;
+	id.v41_bits.boottime = dbe_to_instp(dbe)->start_time;
 	id.v41_bits.state_ident = rfs4_dbe_getid(dbe);
 	id.v41_bits.chgseq = 1;
 	id.v41_bits.type = id_type;
@@ -161,56 +149,20 @@ mds_create_stateid(nfs_server_instance_t *instp,
 	return (id);
 }
 
-rfs4_client_t *
-mds_findclient(nfs_client_id4 *client, bool_t *create,	rfs4_client_t *oldcp)
-{
-	return (findclient(&mds_server, client, create, oldcp));
-}
-
-rfs4_client_t *
-mds_findclient_by_id(clientid4 clientid)
-{
-	return (findclient_by_id(&mds_server, clientid));
-}
 
 rfs4_openowner_t *
-mds_findopenowner(open_owner4 *openowner, bool_t *create)
+mds_findopenowner(nfs_server_instance_t *instp, open_owner4 *openowner,
+    bool_t *create)
 {
 	rfs4_openowner_t *op;
 	rfs4_openowner_t arg;
 
 	arg.owner = *openowner;
 	arg.open_seqid = 0;
-	op = (rfs4_openowner_t *)rfs4_dbsearch(mds_server.openowner_idx,
+	op = (rfs4_openowner_t *)rfs4_dbsearch(instp->openowner_idx,
 	    openowner, create, &arg, RFS4_DBS_VALID);
 	return (op);
 }
-
-
-rfs4_lockowner_t *
-mds_findlockowner(lock_owner4 *lockowner, bool_t *create)
-{
-	rfs4_lockowner_t *lo;
-
-	lo = (rfs4_lockowner_t *)rfs4_dbsearch(mds_server.lockowner_idx,
-	    lockowner, create, lockowner, RFS4_DBS_VALID);
-
-	return (lo);
-}
-
-rfs4_lockowner_t *
-mds_findlockowner_by_pid(pid_t pid)
-{
-	rfs4_lockowner_t *lo;
-	bool_t create = FALSE;
-
-	lo = (rfs4_lockowner_t *)rfs4_dbsearch(mds_server.lockowner_pid_idx,
-	    (void *)(uintptr_t)pid, &create, NULL, RFS4_DBS_VALID);
-
-	return (lo);
-}
-
-
 
 rfs4_lo_state_t *
 mds_findlo_state_by_owner(rfs4_lockowner_t *lo,
@@ -218,11 +170,14 @@ mds_findlo_state_by_owner(rfs4_lockowner_t *lo,
 {
 	rfs4_lo_state_t *lsp;
 	rfs4_lo_state_t arg;
+	nfs_server_instance_t *instp;
 
 	arg.locker = lo;
 	arg.state = sp;
 
-	lsp = (rfs4_lo_state_t *)rfs4_dbsearch(mds_server.lo_state_owner_idx,
+	instp = dbe_to_instp(lo->dbe);
+
+	lsp = (rfs4_lo_state_t *)rfs4_dbsearch(instp->lo_state_owner_idx,
 	    &arg, create, &arg, RFS4_DBS_VALID);
 
 	return (lsp);
@@ -236,22 +191,6 @@ typedef union {
 	} impl_id;
 	clientid4 id4;
 } cid;
-
-nfsstat4
-mds_check_clientid(clientid4 *cp)
-{
-	cid *cidp = (cid *) cp;
-
-	/*
-	 * If the server start time matches the time provided
-	 * by the client (via the clientid) then return EXPIRED.
-	 */
-	if (cidp->impl_id.start_time == mds_server.start_time)
-		return (NFS4ERR_EXPIRED);
-
-	return (NFS4ERR_STALE_CLIENTID);
-}
-
 
 int
 mds_check_stateid_seqid(rfs4_state_t *sp, stateid4 *stateid)
@@ -378,6 +317,7 @@ mds_file_walk_callout(rfs4_entry_t u_entry, void *e)
 	struct exportinfo *exi = (struct exportinfo *)e;
 	nfs41_fh_fmt_t   *fhp;
 	vnode_t *vp;
+	nfs_server_instance_t *instp;
 
 	fhp = (nfs41_fh_fmt_t *)fp->filehandle.nfs_fh4_val;
 
@@ -385,21 +325,24 @@ mds_file_walk_callout(rfs4_entry_t u_entry, void *e)
 		return;
 
 	if ((vp = fp->vp) != NULL) {
+
+		instp = dbe_to_instp(fp->dbe);
+		ASSERT(instp);
 		/*
 		 * don't leak monitors and remove the reference
 		 * put on the vnode when the delegation was granted.
 		 */
 		if (fp->dinfo->dtype == OPEN_DELEGATE_READ) {
-			(void) fem_uninstall(vp, deleg_rdops,
+			(void) fem_uninstall(vp, instp->deleg_rdops,
 			    (void *)fp);
 			vn_open_downgrade(vp, FREAD);
 		} else if (fp->dinfo->dtype == OPEN_DELEGATE_WRITE) {
-			(void) fem_uninstall(vp, deleg_wrops,
+			(void) fem_uninstall(vp, instp->deleg_wrops,
 			    (void *)fp);
 			vn_open_downgrade(vp, FREAD|FWRITE);
 		}
 		mutex_enter(&vp->v_lock);
-		(void) vsd_set(vp, nfs4_srv_vkey, NULL);
+		(void) vsd_set(vp, instp->vkey, NULL);
 		mutex_exit(&vp->v_lock);
 		VN_RELE(vp);
 		fp->vp = NULL;
@@ -459,30 +402,30 @@ rfs41_session_rele(mds_session_t *sp)
 }
 
 mds_session_t *
-mds_findsession_by_id(sessionid4 sessid)
+mds_findsession_by_id(nfs_server_instance_t *instp, sessionid4 sessid)
 {
 	mds_session_t	*sp;
-	rfs4_index_t	*idx = mds_session_idx;
+	rfs4_index_t	*idx = instp->mds_session_idx;
 	bool_t		 create = FALSE;
 
-	rw_enter(&mds_findsession_lock, RW_READER);
+	rw_enter(&instp->findsession_lock, RW_READER);
 	sp = (mds_session_t *)rfs4_dbsearch(idx, sessid, &create, NULL,
 	    RFS4_DBS_VALID);
-	rw_exit(&mds_findsession_lock);
+	rw_exit(&instp->findsession_lock);
 
 	return (sp);
 }
 
 mds_session_t *
-mds_findsession_by_clid(clientid4 clid)
+mds_findsession_by_clid(nfs_server_instance_t *instp, clientid4 clid)
 {
 	mds_session_t	*sp;
 	bool_t		 create = FALSE;
 
-	rw_enter(&mds_findsession_lock, RW_READER);
-	sp = (mds_session_t *)rfs4_dbsearch(mds_sess_clientid_idx, &clid,
+	rw_enter(&instp->findsession_lock, RW_READER);
+	sp = (mds_session_t *)rfs4_dbsearch(instp->mds_sess_clientid_idx, &clid,
 	    &create, NULL, RFS4_DBS_VALID);
-	rw_exit(&mds_findsession_lock);
+	rw_exit(&instp->findsession_lock);
 
 	return (sp);
 }
@@ -497,19 +440,17 @@ mds_findsession_by_clid(clientid4 clid)
  * secondary (clientid) index for the newly created session.
  */
 mds_session_t	*
-mds_createsession(session41_create_t *ap)
+mds_createsession(nfs_server_instance_t *instp, session41_create_t *ap)
 {
 	mds_session_t	*sp = NULL;
-	rfs4_index_t	*idx = mds_session_idx;
+	rfs4_index_t	*idx = instp->mds_session_idx;
 
-	rw_enter(&mds_findsession_lock, RW_WRITER);
+	rw_enter(&instp->findsession_lock, RW_WRITER);
 	if ((sp = (mds_session_t *)rfs4_dbcreate(idx, (void *)ap)) == NULL) {
 		DTRACE_PROBE1(mds__srv__createsession__fail,
 		    session41_create_t *, ap);
-		rw_exit(&mds_findsession_lock);
-		return (NULL);
 	}
-	rw_exit(&mds_findsession_lock);
+	rw_exit(&instp->findsession_lock);
 	return (sp);
 }
 
@@ -567,9 +508,11 @@ mds_destroysession(mds_session_t *sp)
 	 *	 bound to the clientid (Section 18.37.3 of draft-17).
 	 *	 For now, keep destroying the clid until DESTROY_CLIENTID
 	 *	 is explicitly done (see Section 18.50.4 of draft-17).
+	 * The client struct will expire and the session no longer keeps
+	 * a hold on the client struct, so an explicit call to client close
+	 * is not needed.
 	 */
 	if (cbs == NFS4_OK) {
-		rfs4_client_close(sp->sn_clnt);		/* XXX */
 		rfs41_session_rele(sp);
 	}
 	return (cbs);
@@ -691,7 +634,7 @@ rfs41_destroy_session_channel(sess_channel_t *cp)
  */
 /* ARGSUSED */
 static bool_t
-mds_session_create(nfs_server_instance_t *instp, rfs4_entry_t u_entry,
+mds_session_create(rfs4_entry_t u_entry,
 		void *arg)
 {
 	mds_session_t		*sp = (mds_session_t *)u_entry;
@@ -704,10 +647,13 @@ mds_session_create(nfs_server_instance_t *instp, rfs4_entry_t u_entry,
 	rpcprog_t		 prog;
 	channel_dir_from_server4 dir;
 	sess_bcsd_t		*bsdp;
+	nfs_server_instance_t *instp;
 
 	ASSERT(sp != NULL);
 	if (sp == NULL)
 		return (FALSE);
+
+	instp = dbe_to_instp(sp->dbe);
 
 	/*
 	 * Back pointer to rfs4_client_t and sessionid
@@ -721,7 +667,7 @@ mds_session_create(nfs_server_instance_t *instp, rfs4_entry_t u_entry,
 	sidp = (sid *)&sp->sn_sessid;
 	sidp->impl_id.pad0 = 0x00000000;
 	sidp->impl_id.pad1 = 0xFFFFFFFF;
-	sidp->impl_id.start_time = mds_server.start_time;
+	sidp->impl_id.start_time = instp->start_time;
 	sidp->impl_id.s_id = (uint32_t)rfs4_dbe_getid(sp->dbe);
 
 	/*
@@ -932,6 +878,29 @@ mds_session_expiry(rfs4_entry_t u_entry)
 	return (FALSE);
 }
 
+void
+mds_kill_session_callout(rfs4_entry_t u_entry, void *arg)
+{
+	rfs4_client_t *cp = (rfs4_client_t *)arg;
+	mds_session_t *sp = (mds_session_t *)u_entry;
+
+	if (sp->sn_clnt == cp && !(rfs4_dbe_is_invalid(sp->dbe)))
+		mds_session_destroy(u_entry);
+}
+
+void
+mds_clean_up_sessions(rfs4_client_t *cp)
+{
+	nfs_server_instance_t *instp;
+
+	instp = dbe_to_instp(cp->dbe);
+
+	if (instp->mds_session_tab != NULL)
+		rfs4_dbe_walk(instp->mds_session_tab,
+		    mds_kill_session_callout, cp);
+}
+
+
 /*
  * -----------------------------------------------
  * MDS: Layout tables.
@@ -963,7 +932,7 @@ mds_layout_mkkey(rfs4_entry_t entry)
 struct mds_gather_args {
 	struct mds_addlo_args lo_arg;
 	uint32_t	dev_id;
-	mds_device_t 	*dev_ptr[100];
+	ds_addr_t 	*dev_ptr[100];
 	int 		max_devs_needed;
 	int 		dex;
 };
@@ -973,25 +942,30 @@ typedef struct {
 	nfsv4_1_file_layout_ds_addr4 *ds_addr4;
 } mds_addmpd_t;
 
-/* this of course should trigger a recall of the mpd. */
+/*
+ * XXX:
+ *
+ * this of course should trigger a recall of the
+ * associated layouts for the mpd.
+ */
 void
-mds_nuke_mpd(uint32_t mpd_id)
+mds_nuke_mpd(nfs_server_instance_t *instp, uint32_t mpd_id)
 {
 	bool_t create = FALSE;
 	rfs4_entry_t e;
 
-	rw_enter(&mds_mpd_lock, RW_WRITER);
-	if ((e = rfs4_dbsearch(mds_mpd_idx, (void *)(uintptr_t)mpd_id,
+	rw_enter(&instp->mds_mpd_lock, RW_WRITER);
+	if ((e = rfs4_dbsearch(instp->mds_mpd_idx, (void *)(uintptr_t)mpd_id,
 	    &create, NULL, RFS4_DBS_VALID)) != NULL) {
 		rfs4_dbe_invalidate(e->dbe);
 	}
-	rw_exit(&mds_mpd_lock);
+	rw_exit(&instp->mds_mpd_lock);
 }
 
 void
 mds_gather_devs(rfs4_entry_t entry, void *arg)
 {
-	mds_device_t	*dp = (mds_device_t *)entry;
+	ds_addr_t	*dp = (ds_addr_t *)entry;
 	struct mds_gather_args *gap = (struct mds_gather_args *)arg;
 
 	if (rfs4_dbe_skip_or_invalid(dp->dbe))
@@ -1007,7 +981,7 @@ mds_gather_devs(rfs4_entry_t entry, void *arg)
 /*
  */
 mds_mpd_t *
-mds_gen_mpd(struct mds_gather_args *args)
+mds_gen_mpd(nfs_server_instance_t *instp, struct mds_gather_args *args)
 {
 	nfsv4_1_file_layout_ds_addr4 ds_dev;
 
@@ -1044,11 +1018,11 @@ mds_gen_mpd(struct mds_gather_args *args)
 	ds_dev.nflda_multipath_ds_list.nflda_multipath_ds_list_len = len;
 
 	/*
-	 * Now populate the netaddrs using the stashed mds_device
+	 * Now populate the netaddrs using the stashed ds_addr
 	 * pointers
 	 */
 	for (ii = 0; ii < len; ii++) {
-		mds_device_t *dp;
+		ds_addr_t *dp;
 
 		mplp[ii].multipath_list4_len = 1;
 		dp = args->dev_ptr[ii];
@@ -1059,13 +1033,9 @@ mds_gen_mpd(struct mds_gather_args *args)
 	 * Add the multipath_list4, this will encode and cache
 	 * the result.
 	 */
-	rw_enter(&mds_mpd_lock, RW_WRITER);
-	mp = (mds_mpd_t *)rfs4_dbcreate(mds_mpd_idx, (void *)&map);
-	rw_exit(&mds_mpd_lock);
-
-	/*
-	 * place the generated device id into the layout
-	 */
+	rw_enter(&instp->mds_mpd_lock, RW_WRITER);
+	mp = (mds_mpd_t *)rfs4_dbcreate(instp->mds_mpd_idx, (void *)&map);
+	rw_exit(&instp->mds_mpd_lock);
 
 	/* now clean up after yourself dear boy */
 	kmem_free(mplp, len * sizeof (multipath_list4));
@@ -1077,7 +1047,7 @@ int mds_default_stripe = 32;
 int mds_max_lo_devs = 20;
 
 mds_layout_t *
-mds_gen_default_layout(int max_devs_needed)
+mds_gen_default_layout(nfs_server_instance_t *instp, int max_devs_needed)
 {
 	struct mds_gather_args args;
 	mds_layout_t *lop;
@@ -1087,9 +1057,9 @@ mds_gen_default_layout(int max_devs_needed)
 	args.max_devs_needed = MIN(max_devs_needed,
 	    MIN(mds_max_lo_devs, 99));
 
-	rw_enter(&mds_device_lock, RW_READER);
-	rfs4_dbe_walk(mds_device_tab, mds_gather_devs, &args);
-	rw_exit(&mds_device_lock);
+	rw_enter(&instp->ds_addr_lock, RW_READER);
+	rfs4_dbe_walk(instp->ds_addr_tab, mds_gather_devs, &args);
+	rw_exit(&instp->ds_addr_lock);
 
 	/*
 	 * if we didn't find any devices then we do no service
@@ -1100,85 +1070,58 @@ mds_gen_default_layout(int max_devs_needed)
 	args.lo_arg.loid = 1;
 	args.lo_arg.lo_stripe_unit = mds_default_stripe * 1024;
 
-	rw_enter(&mds_layout_lock, RW_WRITER);
-	lop = (mds_layout_t *)rfs4_dbcreate(mds_layout_idx,
+	rw_enter(&instp->mds_layout_lock, RW_WRITER);
+	lop = (mds_layout_t *)rfs4_dbcreate(instp->mds_layout_idx,
 	    (void *)&args);
-	rw_exit(&mds_layout_lock);
+	rw_exit(&instp->mds_layout_lock);
 
 	return (lop);
 }
 
 void
-mds_nuke_layout(uint32_t layout_id)
+mds_nuke_layout(nfs_server_instance_t *instp, uint32_t layout_id)
 {
 	bool_t create = FALSE;
 	rfs4_entry_t e;
 
-	rw_enter(&mds_layout_lock, RW_WRITER);
-	if ((e = rfs4_dbsearch(mds_layout_idx, (void *)(uintptr_t)layout_id,
-	    &create, NULL, RFS4_DBS_VALID)) != NULL) {
+	rw_enter(&instp->mds_layout_lock, RW_WRITER);
+	if ((e = rfs4_dbsearch(instp->mds_layout_idx,
+	    (void *)(uintptr_t)layout_id,
+	    &create,
+	    NULL,
+	    RFS4_DBS_VALID)) != NULL) {
 		rfs4_dbe_invalidate(e->dbe);
 	}
-	rw_exit(&mds_layout_lock);
-}
-
-mds_layout_t *
-mds_find_layout(int key)
-{
-	mds_layout_t	*lp;
-	bool_t		 create = FALSE;
-
-	rw_enter(&mds_layout_lock, RW_READER);
-	lp = (mds_layout_t *)rfs4_dbsearch(mds_layout_idx,
-	    (void *)(uintptr_t)key, &create, NULL, RFS4_DBS_VALID);
-	rw_exit(&mds_layout_lock);
-
-	/*
-	 * Here we are looking to see if the layout id is one, and
-	 * if the search didn't find it then we are going to
-	 * fabricate a default using all available devices
-	 * and a stripe unit size of mds_default_stripe(k)
-	 */
-	if (key == 1 && lp == NULL) {
-		lp = mds_gen_default_layout(mds_max_lo_devs);
-	}
-	return (lp);
+	rw_exit(&instp->mds_layout_lock);
 }
 
 /*ARGSUSED*/
 static bool_t
-mds_layout_create(nfs_server_instance_t *instp,
-		rfs4_entry_t u_entry, void *arg)
+mds_layout_create(rfs4_entry_t u_entry, void *arg)
 {
 	mds_layout_t *lp = (mds_layout_t *)u_entry;
 	mds_mpd_t *mp;
-	mds_device_t *dp;
+	ds_addr_t *dp;
 	struct mds_gather_args *gap = (struct mds_gather_args *)arg;
 	struct mds_addlo_args *alop = &gap->lo_arg;
+
+	nfs_server_instance_t *instp;
 	int i;
 
-	/*
-	 * If this create comes from user-land then alop->loid is
-	 * zero and the id is allocated from the id_space, else
-	 * this must be a special layout (like the default)
-	 * and we will allow caller to specify. However, we do sanity
-	 * check the value...
-	 */
-	if (alop->loid && alop->loid > 99)
-		alop->loid = 0;
 
 	if (alop->loid == 0)
 		lp->layout_id = rfs4_dbe_getid(lp->dbe);
 	else
 		lp->layout_id = alop->loid;
 
+	instp = dbe_to_instp(lp->dbe);
+
 	lp->layout_type = LAYOUT4_NFSV4_1_FILES;
 	lp->stripe_unit = alop->lo_stripe_unit;
-	lp->lo_stateid = mds_create_stateid(instp, lp->dbe, LAYOUTID);
 
 	for (i = 0; alop->lo_devs[i] && i < 100; i++) {
 		lp->devs[i] = alop->lo_devs[i];
-		dp = mds_find_device(alop->lo_devs[i]);
+		dp = mds_find_ds_addr(instp, alop->lo_devs[i]);
 		/* lets hope this doesn't occur */
 		if (dp == NULL)
 			return (FALSE);
@@ -1188,7 +1131,7 @@ mds_layout_create(nfs_server_instance_t *instp,
 	lp->stripe_count = i;
 
 	/* Need to generate a device for this layout */
-	mp = mds_gen_mpd(gap);
+	mp = mds_gen_mpd(instp, gap);
 
 	/* save the dev_id save the world */
 	lp->dev_id = mp->mpd_id;
@@ -1208,10 +1151,12 @@ mds_add_layout(struct mds_addlo_args *lop)
 	bool_t create = FALSE;
 	rfs4_entry_t e;
 
-	rw_enter(&mds_layout_lock, RW_WRITER);
+	rw_enter(&mds_server->mds_layout_lock, RW_WRITER);
 
-	if ((e = rfs4_dbsearch(mds_layout_idx,
-	    (void *)(uintptr_t)lop->loid, &create, NULL,
+	if ((e = rfs4_dbsearch(mds_server->mds_layout_idx,
+	    (void *)(uintptr_t)lop->loid,
+	    &create,
+	    NULL,
 	    RFS4_DBS_VALID)) != NULL) {
 		/*
 		 * Must have already existed, so invalidate
@@ -1220,11 +1165,11 @@ mds_add_layout(struct mds_addlo_args *lop)
 		rfs4_dbe_invalidate(e->dbe);
 	}
 
-	if (rfs4_dbcreate(mds_layout_idx, (void *)lop) == NULL) {
+	if (rfs4_dbcreate(mds_server->mds_layout_idx, (void *)lop) == NULL) {
 		printf("mds_add_layout: failed\n");
 		(void) set_errno(EFAULT);
 	}
-	rw_exit(&mds_layout_lock);
+	rw_exit(&mds_server->mds_layout_lock);
 	return;
 
 }
@@ -1240,13 +1185,18 @@ mds_add_layout(struct mds_addlo_args *lop)
 static uint32_t
 mds_layout_grant_hash(void *key)
 {
-	return (ADDRHASH(key));
+	mds_layout_grant_t *lgp = (mds_layout_grant_t *)key;
+
+	return (ADDRHASH(lgp->cp) ^ ADDRHASH(lgp->fp));
 }
 
 static bool_t
-mds_layout_grant_compare(rfs4_entry_t entry, void *key)
+mds_layout_grant_compare(rfs4_entry_t u_entry, void *key)
 {
-	return (key == (void *)entry);
+	mds_layout_grant_t *lgp = (mds_layout_grant_t *)u_entry;
+	mds_layout_grant_t *klgp = (mds_layout_grant_t *)key;
+
+	return (lgp->cp == klgp->cp && lgp->fp == klgp->fp);
 }
 
 static void *
@@ -1256,28 +1206,76 @@ mds_layout_grant_mkkey(rfs4_entry_t entry)
 }
 
 static uint32_t
-mds_layout_grant_clnt_hash(void *key)
+mds_layout_grant_id_hash(void *key)
 {
-	return (ADDRHASH(key));
+	stateid_t *id = (stateid_t *)key;
+
+	return (id->v41_bits.state_ident);
 }
 
 static bool_t
-mds_layout_grant_clnt_compare(rfs4_entry_t entry, void *key)
+mds_layout_grant_id_compare(rfs4_entry_t entry, void *key)
 {
-	return (key == (void *)entry);
+	mds_layout_grant_t *lgp = (mds_layout_grant_t *)entry;
+	stateid_t *id = (stateid_t *)key;
+	bool_t rc;
+
+	if (id->v41_bits.type != LAYOUTID)
+		return (FALSE);
+
+	rc = (lgp->lo_stateid.v41_bits.boottime == id->v41_bits.boottime &&
+	    lgp->lo_stateid.v41_bits.state_ident == id->v41_bits.state_ident);
+
+	return (rc);
 }
 
 static void *
-mds_layout_grant_clnt_mkkey(rfs4_entry_t entry)
+mds_layout_grant_id_mkkey(rfs4_entry_t entry)
 {
-	return (entry);
+	mds_layout_grant_t *lgp = (mds_layout_grant_t *)entry;
+
+	return (&lgp->lo_stateid);
 }
+
+struct mds_grant_args {
+	mds_layout_t *lop;
+};
+
 
 /*ARGSUSED*/
 static bool_t
-mds_layout_grant_create(nfs_server_instance_t *instp,
-			rfs4_entry_t u_entry, void *arg)
+mds_layout_grant_create(rfs4_entry_t u_entry, void *arg)
 {
+	mds_layout_grant_t *lgp = (mds_layout_grant_t *)u_entry;
+	rfs4_file_t *fp = ((mds_layout_grant_t *)arg)->fp;
+	rfs4_client_t *cp = ((mds_layout_grant_t *)arg)->cp;
+
+	rfs4_dbe_hold(fp->dbe);
+	rfs4_dbe_hold(cp->dbe);
+
+	lgp->lo_stateid = mds_create_stateid(lgp->dbe, LAYOUTID);
+	lgp->fp = fp;
+	lgp->cp = cp;
+
+	/* Init layout grant lists for remque/insque */
+	lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
+	    &lgp->lo_grant_list;
+	lgp->lo_grant_list.lgp = lgp;
+
+	lgp->clientgrantlist.next = lgp->clientgrantlist.prev =
+	    &lgp->clientgrantlist;
+	lgp->clientgrantlist.lgp = lgp;
+
+	/* Insert the grant on the client's list */
+	rfs4_dbe_lock(cp->dbe);
+	insque(&lgp->clientgrantlist, cp->clientgrantlist.prev);
+	rfs4_dbe_unlock(cp->dbe);
+
+	/* Insert the grant on the file's list */
+	rfs4_dbe_lock(fp->dbe);
+	insque(&lgp->lo_grant_list, fp->lo_grant_list.prev);
+	rfs4_dbe_unlock(fp->dbe);
+
 	return (TRUE);
 }
 
@@ -1287,6 +1285,27 @@ mds_layout_grant_destroy(rfs4_entry_t foo)
 {
 }
 
+mds_layout_grant_t *
+rfs41_findlogrant(struct compound_state *cs, rfs4_file_t *fp,
+    rfs4_client_t *cp, bool_t *create)
+{
+	mds_layout_grant_t lg, *lgp;
+
+	lg.cp = cp;
+	lg.fp = fp;
+
+	lgp = (mds_layout_grant_t *)rfs4_dbsearch(
+	    cs->instp->mds_layout_grant_idx, &lg, create, &lg, RFS4_DBS_VALID);
+
+	return (lgp);
+}
+
+void
+rfs41_lo_grant_rele(mds_layout_grant_t *lpg)
+{
+	rfs4_dbe_rele(lpg->dbe);
+}
+
 static void
 mds_do_lorecall(mds_lorec_t *lorec)
 {
@@ -1294,16 +1313,16 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	CB_COMPOUND4res		 cb4_res;
 	CB_SEQUENCE4args	*cbsap;
 	CB_LAYOUTRECALL4args	*cblrap;
-	layoutrecall_file4	*lorf;
-	enum clnt_stat		 call_stat = RPC_FAILED;
 	nfs_cb_argop4		*argops;
-	mds_session_t		*sp;
-	slot_ent_t		*p;
+	struct timeval		 timeout;
+	enum clnt_stat		 call_stat = RPC_FAILED;
+	int			 zilch = 0;
+	layoutrecall_file4	*lorf;
 	CLIENT			*ch;
 	int			 numops;
 	int			 argsz;
-	int			 zilch = 0;
-	struct timeval		 timeout;
+	mds_session_t		*sp;
+	slot_ent_t		*p;
 
 	DTRACE_PROBE1(nfssrv__i__sess_lorecall_fh, mds_lorec_t *, lorec);
 
@@ -1393,7 +1412,8 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	 * Set up the timeout for the callback and make the actual call.
 	 * Timeout will be 80% of the lease period.
 	 */
-	timeout.tv_sec = (rfs4_lease_time * 80) / 100;
+	timeout.tv_sec =
+	    (dbe_to_instp(lorec->lor_sess->dbe)->lease_period * 80) / 100;
 	timeout.tv_usec = 0;
 
 	ch = rfs41_cb_getch(sp);
@@ -1441,10 +1461,24 @@ mds_sess_lorecall_callout(rfs4_entry_t u_entry, void *arg)
 	    TS_RUN, minclsyspri);
 }
 
+void
+inst_lorecall(nfs_server_instance_t *instp, void *args)
+{
+	if (instp->mds_session_tab != NULL)
+		rfs4_dbe_walk(instp->mds_session_tab,
+		    mds_sess_lorecall_callout, args);
+}
+
 /*
- * recall the layout for a given pathname
- * construct FH first (same thing we do for nfs_sys(GETFH)
- * args have already been copied into kernel adspace
+ * Recall a layout:
+ *
+ *   Either all layouts
+ *
+ *   ... or
+ *
+ *   For a given pathname construct FH first (same thing we do
+ *   for nfs_sys(GETFH)) args have already been copied into kernel
+ *   adspace
  */
 static int
 mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
@@ -1470,8 +1504,7 @@ mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 	lorec.lor_type = args->lo_type;
 
 	if (lorec.lor_type == LAYOUTRECALL4_ALL) {
-		rfs4_dbe_walk(mds_session_tab, mds_sess_lorecall_callout,
-		    &lorec);
+		nsi_walk(inst_lorecall, &lorec);
 		return (0);
 	}
 	error = lookupname(args->lo_fname, UIO_SYSSPACE, FOLLOW, &dvp, &vp);
@@ -1561,8 +1594,7 @@ mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 	 * layout with the set of clients granted the layout.
 	 */
 	if (!error)
-		rfs4_dbe_walk(mds_session_tab, mds_sess_lorecall_callout,
-		    &lorec);
+		nsi_walk(inst_lorecall, &lorec);
 errout:
 	VN_RELE(vp);
 	if (dvp != NULL)
@@ -1572,50 +1604,50 @@ errout:
 
 /*
  * -----------------------------------------------
- * MDS: Device tables.
+ * MDS: DS_ADDR tables.
  * -----------------------------------------------
  *
  */
 
 static uint32_t
-mds_device_hash(void *key)
+ds_addr_hash(void *key)
 {
 	return ((uint32_t)(uintptr_t)key);
 }
 
 static bool_t
-mds_device_compare(rfs4_entry_t entry, void *key)
+ds_addr_compare(rfs4_entry_t entry, void *key)
 {
-	mds_device_t *dp = (mds_device_t *)entry;
+	ds_addr_t *dp = (ds_addr_t *)entry;
 
 	return (rfs4_dbe_getid(dp->dbe) == (int)(uintptr_t)key);
 }
 
 static void *
-mds_device_mkkey(rfs4_entry_t entry)
+ds_addr_mkkey(rfs4_entry_t entry)
 {
-	mds_device_t *dp = (mds_device_t *)entry;
+	ds_addr_t *dp = (ds_addr_t *)entry;
 
 	return ((void *)(uintptr_t)rfs4_dbe_getid(dp->dbe));
 }
 
 /*ARGSUSED*/
 static bool_t
-mds_device_create(nfs_server_instance_t *instp, rfs4_entry_t u_entry, void *arg)
+ds_addr_create(rfs4_entry_t u_entry, void *arg)
 {
-	mds_device_t *dp = (mds_device_t *)u_entry;
+	ds_addr_t *dp = (ds_addr_t *)u_entry;
 	struct mds_adddev_args *u_dp = (struct mds_adddev_args *)arg;
 
 	dp->dev_addr.na_r_netid = u_dp->dev_netid;
 	dp->dev_addr.na_r_addr = u_dp->dev_addr;
-	dp->dev_infop = NULL;
+	dp->ds_owner = NULL;
 	return (TRUE);
 }
 
 
 /*ARGSUSED*/
 static void
-mds_device_destroy(rfs4_entry_t foo)
+ds_addr_destroy(rfs4_entry_t foo)
 {
 }
 
@@ -1634,7 +1666,6 @@ mds_mpd_compare(rfs4_entry_t entry, void *key)
 {
 	mds_mpd_t *dp = (mds_mpd_t *)entry;
 
-	/* return (rfs4_dbe_getid(dp->dbe) == (int)(uintptr_t)key); */
 	return (dp->mpd_id == (uint32_t)(uintptr_t)key);
 }
 
@@ -1643,7 +1674,6 @@ mds_mpd_mkkey(rfs4_entry_t entry)
 {
 	mds_mpd_t *dp = (mds_mpd_t *)entry;
 
-	/* return ((void *)(uintptr_t)rfs4_dbe_getid(dp->dbe)); */
 	return ((void*)(uintptr_t)dp->mpd_id);
 }
 
@@ -1678,7 +1708,7 @@ mds_mpd_encode(nfsv4_1_file_layout_ds_addr4 *ds_dev, uint_t *len, char **val)
 
 /*ARGSUSED*/
 static bool_t
-mds_mpd_create(nfs_server_instance_t *instp, rfs4_entry_t u_entry, void *arg)
+mds_mpd_create(rfs4_entry_t u_entry, void *arg)
 {
 	mds_mpd_t *dp = (mds_mpd_t *)u_entry;
 	mds_addmpd_t *maap = (mds_addmpd_t *)arg;
@@ -1702,12 +1732,12 @@ mds_mpd_destroy(rfs4_entry_t foo)
  * still using a uint_32 internally.
  */
 mds_mpd_t *
-mds_find_mpd(uint32_t id)
+mds_find_mpd(nfs_server_instance_t *instp, uint32_t id)
 {
 	mds_mpd_t *dp;
 	bool_t create = FALSE;
 
-	dp = (mds_mpd_t *)rfs4_dbsearch(mds_mpd_idx,
+	dp = (mds_mpd_t *)rfs4_dbsearch(instp->mds_mpd_idx,
 	    (void *)(uintptr_t)id, &create, NULL, RFS4_DBS_VALID);
 	return (dp);
 }
@@ -1726,7 +1756,7 @@ mds_set_deviceid(uint32_t did, deviceid4 *otw_id)
 }
 
 /*
- * Used by the walker to populate out deviceid list.
+ * Used by the walker to populate the deviceid list.
  */
 void
 mds_mpd_list(rfs4_entry_t entry, void *arg)
@@ -1753,95 +1783,29 @@ mds_mpd_list(rfs4_entry_t entry, void *arg)
 	mdl->count++;
 }
 
-mds_device_t *
-mds_find_device_by_uaddr(char *ptr)
+ds_addr_t *
+mds_find_ds_addr_by_uaddr(nfs_server_instance_t *instp, char *ptr)
 {
-	mds_device_t *dp;
+	ds_addr_t *dp;
 	bool_t create = FALSE;
 
-	dp = (mds_device_t *)rfs4_dbsearch(mds_device_uaddr_idx,
+	dp = (ds_addr_t *)rfs4_dbsearch(instp->ds_addr_uaddr_idx,
 	    (void *)ptr, &create, NULL, RFS4_DBS_VALID);
 	return (dp);
 }
 
 
-mds_device_t *
-mds_find_device(uint32_t id)
+ds_addr_t *
+mds_find_ds_addr(nfs_server_instance_t *instp, uint32_t id)
 {
-	mds_device_t *dp;
+	ds_addr_t *dp;
 	bool_t create = FALSE;
 
-	dp = (mds_device_t *)rfs4_dbsearch(mds_device_idx,
+	dp = (ds_addr_t *)rfs4_dbsearch(instp->ds_addr_idx,
 	    (void *)(uintptr_t)id, &create, NULL, RFS4_DBS_VALID);
 	return (dp);
 }
 
-/*ARGSUSED*/
-static bool_t
-mds_dsauth_create(nfs_server_instance_t *instp, rfs4_entry_t u_entry, void *arg)
-{
-	mds_dsauth_t *dp = (mds_dsauth_t *)u_entry;
-	char *ds_addr = (char *)arg;
-
-	dp->ds_addr = ds_addr;
-	dp->dev_infop = NULL;
-	return (TRUE);
-}
-
-
-/*ARGSUSED*/
-static void
-mds_dsauth_destroy(rfs4_entry_t foo)
-{
-}
-
-/*
- * This is use by mdsadm.
- */
-int
-mds_add_dsauth(char *devp)
-{
-	int rc = 0;
-	bool_t create = FALSE;
-	mds_dsauth_t *dap;
-
-	rw_enter(&mds_dsauth_lock, RW_WRITER);
-
-	if (rfs4_dbsearch(mds_dsauth_idx,
-	    (void *)(uintptr_t)devp, &create, NULL,
-	    RFS4_DBS_VALID) != NULL) {
-		(void) set_errno(EEXIST);
-		rw_exit(&mds_dsauth_lock);
-		return (EEXIST);
-	}
-
-	if ((dap = (mds_dsauth_t *)
-	    rfs4_dbcreate(mds_dsauth_idx, (void *)devp)) == NULL) {
-		printf("mds_add_device: failed\n");
-		(void) set_errno(EFAULT);
-		rc = EFAULT;
-	}
-	rw_exit(&mds_dsauth_lock);
-
-	rfs4_dbe_rele(dap->dbe);
-
-	return (rc);
-}
-
-static void
-mds_add_loopback()
-{
-	char *ds_addr;
-	mds_dsauth_t *dap;
-
-	ds_addr   = kstrdup("127.0.0.1");
-
-	rw_enter(&mds_dsauth_lock, RW_WRITER);
-	dap = (mds_dsauth_t *)rfs4_dbcreate(mds_dsauth_idx, (void *)ds_addr);
-	rw_exit(&mds_dsauth_lock);
-	if (dap)
-		rfs4_dbe_rele(dap->dbe);
-}
 
 /*
  */
@@ -1860,35 +1824,19 @@ mds_str_hash(void *key)
 	return (hash);
 }
 
-static int
-mds_dsauth_ip_compare(rfs4_entry_t entry, void *key)
-{
-	mds_dsauth_t *dp = (mds_dsauth_t *)entry;
-	char *addr_key = (char *)key;
-
-	return (strcmp(addr_key, dp->ds_addr) == 0);
-}
 
 static void *
-mds_dsauth_ip_mkkey(rfs4_entry_t entry)
+ds_addr_uaddr_mkkey(rfs4_entry_t entry)
 {
-	mds_dsauth_t *dp = (mds_dsauth_t *)entry;
-
-	return (dp->ds_addr);
-}
-
-static void *
-mds_device_uaddr_mkkey(rfs4_entry_t entry)
-{
-	mds_device_t *dp = (mds_device_t *)entry;
+	ds_addr_t *dp = (ds_addr_t *)entry;
 
 	return (dp->dev_addr.na_r_addr);
 }
 
 static int
-mds_device_uaddr_compare(rfs4_entry_t entry, void *key)
+ds_addr_uaddr_compare(rfs4_entry_t entry, void *key)
 {
-	mds_device_t *dp = (mds_device_t *)entry;
+	ds_addr_t *dp = (ds_addr_t *)entry;
 	char *addr_key = (char *)key;
 
 	return (strcmp(addr_key, dp->dev_addr.na_r_addr) == 0);
@@ -1896,243 +1844,171 @@ mds_device_uaddr_compare(rfs4_entry_t entry, void *key)
 
 
 /*
- * Data-server information (DSinfo)  tables and indexes.
+ * Data-server information (ds_owner)  tables and indexes.
  */
 static uint32_t
-mds_dsinfo_hash(void *key)
+ds_owner_hash(void *key)
 {
 	return ((uint32_t)(uintptr_t)key);
 }
 
 static bool_t
-mds_dsinfo_compare(rfs4_entry_t entry, void *key)
+ds_owner_compare(rfs4_entry_t entry, void *key)
 {
-	mds_dsinfo_t *dip = (mds_dsinfo_t *)entry;
+	ds_owner_t *dop = (ds_owner_t *)entry;
 
-	return (dip->ds_id == (int)(uintptr_t)key);
+	return (dop->ds_id == (int)(uintptr_t)key);
 
 }
 
 static void *
-mds_dsinfo_mkkey(rfs4_entry_t entry)
+ds_owner_mkkey(rfs4_entry_t entry)
 {
-	mds_dsinfo_t *dip = (mds_dsinfo_t *)entry;
+	ds_owner_t *dop = (ds_owner_t *)entry;
 
-	return ((void *)(uintptr_t)dip->ds_id);
+	return ((void *)(uintptr_t)dop->ds_id);
 }
 
 static bool_t
-mds_dsinfo_inst_compare(rfs4_entry_t entry, void *key)
+ds_owner_inst_compare(rfs4_entry_t entry, void *key)
 {
-	mds_dsinfo_t *dip = (mds_dsinfo_t *)entry;
+	ds_owner_t *dop = (ds_owner_t *)entry;
 
-	return (strcmp(dip->inst_name, key) == 0);
+	return (strcmp(dop->identity, key) == 0);
 
 }
 
 static void *
-mds_dsinfo_inst_mkkey(rfs4_entry_t entry)
+ds_owner_inst_mkkey(rfs4_entry_t entry)
 {
-	mds_dsinfo_t *dip = (mds_dsinfo_t *)entry;
-	return (dip->inst_name);
+	ds_owner_t *dop = (ds_owner_t *)entry;
+	return (dop->identity);
 }
 
 
 /*ARGSUSED*/
 static bool_t
-mds_dsinfo_create(nfs_server_instance_t *instp,
-		rfs4_entry_t u_entry, void *arg)
+ds_owner_create(rfs4_entry_t u_entry, void *arg)
 {
-	mds_dsinfo_t *dip = (mds_dsinfo_t *)u_entry;
+	ds_owner_t *dop = (ds_owner_t *)u_entry;
 	DS_EXIBIargs *drap = (DS_EXIBIargs *)arg;
 
-	dip->ds_id = rfs4_dbe_getid(dip->dbe);
-	dip->verifier = drap->ds_ident.boot_verifier;
-	dip->inst_name = kstrdup(drap->ds_ident.instance.instance_val);
-	list_create(&dip->dev_list, sizeof (mds_device_t),
-	    offsetof(mds_device_t, dev_list_next));
+	dop->ds_id = rfs4_dbe_getid(dop->dbe);
+	dop->verifier = drap->ds_ident.boot_verifier;
+	dop->identity = kstrdup(drap->ds_ident.instance.instance_val);
+	list_create(&dop->ds_addr_list, sizeof (ds_addr_t),
+	    offsetof(ds_addr_t, ds_addr_next));
+	list_create(&dop->ds_guid_list, sizeof (ds_guid_info_t),
+	    offsetof(ds_guid_info_t, ds_guid_next));
 	return (TRUE);
 }
 
-mds_dsinfo_t *
-mds_dsinfo_alloc(DS_EXIBIargs *drap)
+ds_owner_t *
+ds_owner_alloc(DS_EXIBIargs *drap)
 {
-	mds_dsinfo_t *dip;
+	ds_owner_t *dop;
 
-	rw_enter(&mds_dsinfo_lock, RW_WRITER);
+	rw_enter(&mds_server->ds_owner_lock, RW_WRITER);
 	/* Add the "new" entry */
-	dip = (mds_dsinfo_t *)rfs4_dbcreate(mds_dsinfo_inst_idx, (void *)drap);
-	rw_exit(&mds_dsinfo_lock);
-	return (dip);
-}
-
-
-mds_dsauth_t *
-mds_find_dsauth_by_ip(DS_EXIBIargs *argp, char *ipaddr)
-{
-	uint32_t i;
-	rfs4_bucket *bp;
-	rfs4_link *l;
-	rfs4_dbe_t *matched_ip = NULL;
-	mds_dsauth_t *dap;
-	mds_dsinfo_t *dip;
-
-	/*
-	 * figure out the idx bucket based on ip_address
-	 */
-	i = HASH(mds_dsauth_idx, ipaddr);
-
-	bp = &mds_dsauth_idx->buckets[i];
-
-	rw_enter(bp->lock, RW_READER);
-
-	/*
-	 * Now search the bucket for a matching ip address
-	 */
-	for (l = bp->head; l; l = l->next) {
-
-		if (l->entry->refcnt > 0 &&
-		    (l->entry->skipsearch == FALSE) &&
-		    (*mds_dsauth_idx->compare)(l->entry->data, ipaddr)) {
-
-			/*
-			 * we have a match, maybe
-			 */
-			mutex_enter(l->entry->lock);
-
-			/*
-			 * recheck the refcnt
-			 * after acquiring the lock
-			 */
-			if (l->entry->refcnt == 0) {
-				mutex_exit(l->entry->lock);
-				/* not a match the board goes back.. */
-				continue;
-			}
-
-			if (matched_ip == NULL) {
-				matched_ip = l->entry;
-				rfs4_dbe_hold(matched_ip);
-			}
-
-			dap = (mds_dsauth_t *)l->entry->data;
-
-			/*
-			 * if this mds_device_t has no instance
-			 * then it was populated via mdsadm, so
-			 * we can use this..
-			 */
-			if ((dip = dap->dev_infop) == NULL) {
-				/*
-				 * Need to create new info entry.
-				 */
-				dip = mds_dsinfo_alloc(argp);
-				if (dip == NULL) {
-					rfs4_dbe_unlock(dap->dbe);
-					if (matched_ip)
-						rfs4_dbe_rele(matched_ip);
-					DTRACE_PROBE(
-					    nfssrv__e__dsinfo_alloc_fail);
-					return (NULL);
-				}
-				dap->dev_infop = dip;
-				rfs4_dbe_hold(dap->dbe);
-				rfs4_dbe_unlock(dap->dbe);
-				if (matched_ip)
-					rfs4_dbe_rele(matched_ip);
-				rw_exit(bp->lock);
-				return (dap);
-			}
-
-			/* is this the instance you seek ? */
-			if (mds_dsinfo_inst_compare((rfs4_entry_t)dip,
-			    argp->ds_ident.instance.instance_val)
-			    == FALSE) {
-				/* double drat, no.. keep looking */
-				rfs4_dbe_unlock(dap->dbe);
-				dap = NULL;
-				continue;
-			}
-
-			/*
-			 * Got exact match, place a hold on it
-			 */
-			rfs4_dbe_hold(dap->dbe);
-			rfs4_dbe_unlock(dap->dbe);
-			if (matched_ip)
-				rfs4_dbe_rele(matched_ip);
-			rw_exit(bp->lock);
-			return (dap);
-		}
-	}
-
-	rw_exit(bp->lock);
-
-	if (matched_ip == NULL)
-		return (NULL);
-
-	/*
-	 * This means that we found a matching ip address
-	 * (so ostensibly this a known entity to us) but it
-	 * is used by another data-server instance. So we need
-	 * to create a new mds_dsinfo_t and await the
-	 * DS_REPORTAVAIL to populate it.
-	 */
-	rw_enter(&mds_dsauth_lock, RW_WRITER);
-	dap = (mds_dsauth_t *)rfs4_dbcreate(mds_dsauth_idx, (void *)ipaddr);
-	if (dap)
-		rfs4_dbe_lock(dap->dbe);
-	rw_exit(&mds_dsauth_lock);
-
-	if (dap == NULL) {
-		DTRACE_PROBE(nfssrv__e__dsinfo_alloc_fail1);
-		return (NULL);
-	}
-
-	dip = mds_dsinfo_alloc(argp);
-	if (dip == NULL) {
-		rfs4_dbe_invalidate(dap->dbe);
-		rfs4_dbe_unlock(dap->dbe);
-		DTRACE_PROBE(nfssrv__e__dsinfo_alloc_fail1);
-		return (NULL);
-	}
-
-	dap->ds_addr = kstrdup(((mds_dsauth_t *)matched_ip->data)->ds_addr);
-	dap->dev_infop = dip;
-	rfs4_dbe_unlock(dap->dbe);
-	rfs4_dbe_rele(matched_ip);
-	return (dap);
+	dop = (ds_owner_t *)rfs4_dbcreate(mds_server->ds_owner_inst_idx,
+	    (void *)drap);
+	rw_exit(&mds_server->ds_owner_lock);
+	return (dop);
 }
 
 /*
  * When we get a DS_REPOTAVAIL control-protocol message,
  * this will populste the following MDS tables.
  *
- * mds_device:
- *  ds_addrs will be used to populate the mds_device
+ * ds_addr:
+ *  ds_addrs will be used to populate the ds_addr
  *  table. it also has an indication on the usage of
  *  the address, either control-protocol use or
  *  NFS Client facing interface (or both)
  *
- * mds_pool_info:
- *  poolinfo will be used to populate this table.
- *  The entries id in the table will be used as
- *  the mapped poolid for the data-server. It is
- *  this id that will be use to contraut the
- *  filehandle in the layout.
+ * ds_guid_info:
  *
  */
-
 /*
- * mds_poolid: is the entry id for the table...
  */
-
-rfs4_table_t *mds_pool_info_tab;
-rfs4_index_t *mds_pool_info_idx;
-krwlock_t mds_pool_info_lock;
+rfs4_table_t *ds_guid_info_tab;
+rfs4_index_t *ds_guid_info_idx;
+krwlock_t ds_guid_info_lock;
 
 void
-mds_free_poolattr(mds_pool_info_t *dst)
+ds_guid_free(ds_guid_t *gp)
+{
+	if (gp == NULL)
+		return;
+
+	/*
+	 * Yes, overkill for one stor_type, but ready
+	 * to go for more!
+	 */
+	switch (gp->stor_type) {
+	case ZFS:
+		kmem_free(gp->ds_guid_u.zfsguid.zfsguid_val,
+		    gp->ds_guid_u.zfsguid.zfsguid_len);
+		break;
+	}
+}
+
+/*
+ * Duplicate the src guid to dst.
+ *
+ * return 0 on success or 1 for failure.
+ */
+int
+ds_guid_dup(ds_guid_t *src, ds_guid_t *dst)
+{
+	dst = src;
+
+	switch (dst->stor_type) {
+	case ZFS:
+		dst->ds_guid_u.zfsguid.zfsguid_val
+		    = kmem_alloc(dst->ds_guid_u.zfsguid.zfsguid_len, KM_SLEEP);
+		bcopy(src->ds_guid_u.zfsguid.zfsguid_val,
+		    dst->ds_guid_u.zfsguid.zfsguid_val,
+		    dst->ds_guid_u.zfsguid.zfsguid_len);
+		break;
+	default:
+		/* if it's unknown zero out the dst */
+		bzero(dst, sizeof (ds_guid_t));
+		return (1);
+
+	}
+	return (0);
+}
+
+/*
+ * compare ds_guids return 0 for not the same or
+ * 1 if they are equal..
+ */
+int
+ds_guid_compare(ds_guid_t *gp1, ds_guid_t *gp2)
+{
+	if (gp1->stor_type != gp2->stor_type)
+		return (0);
+
+	switch (gp1->stor_type) {
+	case ZFS:
+		if (gp1->ds_guid_u.zfsguid.zfsguid_len !=
+		    gp2->ds_guid_u.zfsguid.zfsguid_len)
+			return (0);
+		if (bcmp(gp1->ds_guid_u.zfsguid.zfsguid_val,
+		    gp2->ds_guid_u.zfsguid.zfsguid_val,
+		    gp2->ds_guid_u.zfsguid.zfsguid_len) != 0)
+			return (0);
+		break;
+
+	default:
+		return (0);
+	}
+	return (1);
+}
+
+void
+mds_free_zfsattr(ds_guid_info_t *dst)
 {
 	int i;
 
@@ -2148,7 +2024,7 @@ mds_free_poolattr(mds_pool_info_t *dst)
 }
 
 void
-mds_dup_zfsattr(ds_zfsattr *src, mds_pool_info_t *dst)
+mds_dup_zfsattr(ds_zfsattr *src, ds_guid_info_t *dst)
 {
 	int i;
 	int len;
@@ -2175,137 +2051,262 @@ mds_dup_zfsattr(ds_zfsattr *src, mds_pool_info_t *dst)
 }
 
 /*
- * XXX need an index that is
- * XXX ds_poolid and ds_id to find for ds_ra.
  */
 /*ARGSUSED*/
 static bool_t
-mds_pinfo_create(nfs_server_instance_t *instp,
-		rfs4_entry_t e, void *arg)
+ds_guid_info_create(rfs4_entry_t e, void *arg)
 {
 	pinfo_create_t *p = (pinfo_create_t *)arg;
-	mds_pool_info_t *pip = (mds_pool_info_t *)e;
+	ds_guid_info_t *pip = (ds_guid_info_t *)e;
 
-	pip->mds_poolid = rfs4_dbe_getid(e->dbe);
-	pip->ds_dinfop  = p->dip;
+	pip->ds_ownerp  = p->dop;
 
 	/* Only supported type is ZFS */
 	ASSERT(p->si->type == ZFS);
-	pip->ds_stortype = p->si->type;
 
-	pip->ds_guid_len = p->si->ds_storinfo_u.zfs_info.guid_map.
-	    ds_guid.ds_guid_u.zfsguid.zfsguid_len;
-	pip->ds_guid_val = p->si->ds_storinfo_u.zfs_info.guid_map.
-	    ds_guid.ds_guid_u.zfsguid.zfsguid_val;
+	pip->ds_guid = p->si->ds_storinfo_u.zfs_info.guid_map.ds_guid;
 
 	pip->ds_attr_len = p->si->ds_storinfo_u.zfs_info.attrs.attrs_len;
 	pip->ds_attr_val = kmem_alloc(
 	    sizeof (ds_zfsattr) * pip->ds_attr_len, KM_SLEEP);
 	mds_dup_zfsattr(p->si->ds_storinfo_u.zfs_info.attrs.attrs_val, pip);
 
-	pip->mds_gpoolid = (p->dip->ds_id << 32) | pip->mds_poolid;
 	return (TRUE);
 }
 
 static void *
-mds_pinfo_mkkey(rfs4_entry_t e)
+ds_guid_info_mkkey(rfs4_entry_t e)
 {
-	mds_pool_info_t *pip = (mds_pool_info_t *)e;
+	ds_guid_info_t *gip = (ds_guid_info_t *)e;
 
-	return ((void *)(uintptr_t)pip->mds_gpoolid);
+	return ((void *)(uintptr_t)&gip->ds_guid);
 }
 
 static bool_t
-mds_pinfo_compare(rfs4_entry_t e, void *key)
+ds_guid_info_compare(rfs4_entry_t e, void *key)
 {
-	mds_pool_info_t *pip = (mds_pool_info_t *)e;
+	ds_guid_info_t *gip = (ds_guid_info_t *)e;
+	ds_guid_t *guid = (ds_guid_t *)key;
 
-	return (pip->mds_gpoolid == (uint64_t)(uintptr_t)key);
+	return (ds_guid_compare(&gip->ds_guid, guid));
 }
 
 static uint32_t
-mds_pinfo_hash(void *key)
+ds_guid_info_hash(void *key)
 {
 	return ((uint32_t)(uintptr_t)key);
 }
 /*ARGSUSED*/
 static void
-mds_pinfo_destroy(rfs4_entry_t foo)
+ds_guid_info_destroy(rfs4_entry_t e)
 {
+	ds_guid_info_t *gip = (ds_guid_info_t *)e;
+	ds_guid_free(&gip->ds_guid);
+	mds_free_zfsattr(gip);
 }
 
 /*ARGSUSED*/
 static void
-mds_dsinfo_destroy(rfs4_entry_t foo)
+ds_owner_destroy(rfs4_entry_t foo)
+{
+}
+/*
+ * XXX this should be populated during startup. we
+ * XXX should get the data from stable store. For now
+ * XXX we are just going to keep the map that the DS
+ * XXX provides us..
+ */
+/*ARGSUSED*/
+static bool_t
+mds_mapzap_create(nfs_server_instance_t *instp,
+		rfs4_entry_t e, void *arg)
+{
+	mds_mapzap_t *mzp = (mds_mapzap_t *)e;
+
+	mzp->ds_map = *(ds_guid_map_t *)arg;
+	/* write to disk */
+	return (TRUE);
+}
+
+static void *
+mds_mapzap_mkkey(rfs4_entry_t e)
+{
+	mds_mapzap_t *mzp = (mds_mapzap_t *)e;
+
+	return ((void *)(uintptr_t)&mzp->ds_map.ds_guid);
+}
+
+
+static bool_t
+mds_mapzap_compare(rfs4_entry_t e, void *key)
+{
+	mds_mapzap_t *mzp = (mds_mapzap_t *)e;
+	ds_guid_t   *gp = (ds_guid_t *)key;
+
+	return ((bool_t)ds_guid_compare(&mzp->ds_map.ds_guid, gp));
+
+}
+
+static uint32_t
+mds_mapzap_hash(void *key)
+{
+	return ((uint32_t)(uintptr_t)key);
+}
+
+/*ARGSUSED*/
+static void
+mds_mapzap_destroy(rfs4_entry_t foo)
 {
 }
 
+/*
+ * Used to initialize the NFSv4.1 server's state.
+ * All of the tables are created and timers are set.
+ */
+
+int
+sstor_init(nfs_server_instance_t *instp, int def_persona, int def_reap)
+{
+	/*
+	 * If the server state store has already been initialized,
+	 * skip it
+	 */
+	mutex_enter(&instp->state_lock);
+	if (instp->state_store != NULL) {
+		mutex_exit(&instp->state_lock);
+		return (0);
+	}
+
+	/*
+	 * Set the boot time.  If the server has been restarted quickly
+	 * and has had the opportunity to service clients, then the start_time
+	 * needs to be bumped regardless.  A small window but it exists...
+	 */
+	if (instp->start_time != gethrestime_sec())
+		instp->start_time = gethrestime_sec();
+	else
+		instp->start_time++;
+
+	/*
+	 * If a table does not have a specific reap time,
+	 * this value is used.
+	 */
+	instp->reap_time = def_reap * rfs4_lease_time;
+	instp->default_persona = def_persona;
+
+	instp->state_store = rfs4_database_create();
+	instp->state_store->instp = instp;
+
+	/* reset the "first NFSv4 request" status */
+	instp->seen_first_compound = 0;
+	instp->exi_clean_func = NULL;
+
+	return (1);
+}
+
+/*
+ * Create/init just the session stateStore tables.
+ * used for data-server
+ */
+void
+ds_sstor_init(nfs_server_instance_t *instp)
+{
+	/*
+	 * Client table.
+	 */
+	rw_init(&instp->findclient_lock, NULL, RW_DEFAULT, NULL);
+
+	instp->client_tab = rfs4_table_create(
+	    instp, "Client", instp->client_cache_time, 2,
+	    rfs4_client_create, rfs4_client_destroy, rfs4_client_expiry,
+	    sizeof (rfs4_client_t), TABSIZE, MAXTABSZ/8, 100);
+
+	instp->nfsclnt_idx = rfs4_index_create(instp->client_tab,
+	    "nfs_client_id4", nfsclnt_hash, nfsclnt_compare, nfsclnt_mkkey,
+	    TRUE);
+
+	instp->clientid_idx = rfs4_index_create(instp->client_tab,
+	    "client_id", clientid_hash, clientid_compare, clientid_mkkey,
+	    FALSE);
+
+	/*
+	 * Session table.
+	 */
+	rw_init(&instp->findsession_lock, NULL, RW_DEFAULT, NULL);
+
+	instp->mds_session_tab = rfs4_table_create(instp,
+	    "Session", instp->reap_time, 2, mds_session_create,
+	    mds_session_destroy, mds_do_not_expire, sizeof (mds_session_t),
+	    MDS_TABSIZE, MDS_MAXTABSZ/8, 100);
+
+	instp->mds_session_idx = rfs4_index_create(instp->mds_session_tab,
+	    "session_idx", sessid_hash, sessid_compare, sessid_mkkey, TRUE);
+
+	instp->mds_sess_clientid_idx = rfs4_index_create(instp->mds_session_tab,
+	    "sess_clnt_idx", clientid_hash, sess_clid_compare, sess_clid_mkkey,
+	    FALSE);
+}
 
 /*
  * Used to initialize the NFSv4.1 server's state.
  * All of the tables are created and timers are set.
  */
 void
-mds_state_init()
+mds_sstor_init(nfs_server_instance_t *instp)
 {
-	char *dss_path = NFS4_DSS_VAR_DIR;
-	int  reap_time = 5*60;
-
-	mutex_enter(&mds_server.state_lock);
-
-	rw_init(&mds_server.findclient_lock, NULL, RW_DEFAULT, NULL);
-	rw_init(&mds_findsession_lock, NULL, RW_DEFAULT, NULL);
-	rw_init(&mds_mpd_lock, NULL, RW_DEFAULT, NULL);
-	rw_init(&mds_device_lock, NULL, RW_DEFAULT, NULL);
-	rw_init(&mds_layout_lock, NULL, RW_DEFAULT, NULL);
-	rw_init(&mds_pool_info_lock, NULL, RW_DEFAULT, NULL);
-	rw_init(&mds_dsauth_lock, NULL, RW_DEFAULT, NULL);
+	extern rfs4_cbstate_t mds_cbcheck(rfs4_state_t *);
+	int  need_sstor_init;
 
 	/*
-	 * Set the boot time.  If the server
-	 * has been restarted quickly and has had the opportunity to
-	 * service clients, then the start_time needs to be bumped
-	 * regardless.  A small window but it exists...
+	 * Create the state store and set the
+	 * start-up time.
 	 */
-	if (mds_server.start_time != gethrestime_sec())
-		mds_server.start_time = gethrestime_sec();
-	else
-		mds_server.start_time++;
+	need_sstor_init = sstor_init(instp, FH41_TYPE_NFS, 60);
 
-	mds_server.default_persona = FH41_TYPE_NFS;
+	if (need_sstor_init == 0)
+		return;
 
-	/* reset the "first NFSv4 request" status */
-	mds_server.seen_first_compound = 0;
+	instp->deleg_cbrecall = mds_do_cb_recall;
+	instp->deleg_cbcheck  = mds_cbcheck;
 
 	/*
 	 * Now create the common tables and indexes
 	 */
-	init_state_tables(&mds_server);
+	v4prot_sstor_init(instp);
+
+	rw_init(&instp->mds_mpd_lock, NULL, RW_DEFAULT, NULL);
+	rw_init(&instp->ds_addr_lock, NULL, RW_DEFAULT, NULL);
+	rw_init(&instp->ds_guid_info_lock, NULL, RW_DEFAULT, NULL);
 
 	/*
 	 * Session table.
 	 */
-	mds_session_tab = rfs4_table_create(rfs4_server_state, NULL,
-	    "Session", reap_time,
-	    2, mds_session_create, mds_session_destroy, mds_do_not_expire,
-	    sizeof (mds_session_t), MDS_TABSIZE, MDS_MAXTABSZ/8, 100);
+	rw_init(&instp->findsession_lock, NULL, RW_DEFAULT, NULL);
 
-	mds_session_idx = rfs4_index_create(mds_session_tab,
+	instp->mds_session_tab = rfs4_table_create(instp,
+	    "Session", instp->reap_time, 2, mds_session_create,
+	    mds_session_destroy, mds_do_not_expire, sizeof (mds_session_t),
+	    MDS_TABSIZE, MDS_MAXTABSZ/8, 100);
+
+	instp->mds_session_idx = rfs4_index_create(instp->mds_session_tab,
 	    "session_idx", sessid_hash, sessid_compare, sessid_mkkey, TRUE);
 
-	mds_sess_clientid_idx = rfs4_index_create(mds_session_tab,
+	instp->mds_sess_clientid_idx = rfs4_index_create(instp->mds_session_tab,
 	    "sess_clnt_idx", clientid_hash, sess_clid_compare, sess_clid_mkkey,
 	    FALSE);
 
 	/*
 	 * pNFS layout table.
 	 */
-	mds_layout_tab = rfs4_table_create(rfs4_server_state, NULL,
-	    "Layout", reap_time, 2, mds_layout_create, mds_layout_destroy,
+	rw_init(&instp->mds_layout_lock, NULL, RW_DEFAULT, NULL);
+
+	instp->mds_layout_tab = rfs4_table_create(instp,
+	    "Layout", instp->reap_time, 2, mds_layout_create,
+	    mds_layout_destroy,
 	    mds_do_not_expire, sizeof (mds_layout_t), MDS_TABSIZE,
 	    MDS_MAXTABSZ, 100);
 
-	mds_layout_idx = rfs4_index_create(mds_layout_tab,
+	instp->mds_layout_idx = rfs4_index_create(instp->mds_layout_tab,
 	    "layout-idx", mds_layout_hash, mds_layout_compare, mds_layout_mkkey,
 	    TRUE);
 
@@ -2313,101 +2314,440 @@ mds_state_init()
 	 * Create the layout_grant table.
 	 *
 	 * This table tracks the layout segments that have been granted
-	 * to clients. It is indexed by the layout id and also by client.
+	 * to clients. It is indexed by the layout state_id and also by client.
 	 */
-	mds_layout_grant_tab = rfs4_table_create(rfs4_server_state, NULL,
-	    "Layout_grant", reap_time, 2, mds_layout_grant_create,
+	instp->mds_layout_grant_tab = rfs4_table_create(instp,
+	    "Layout_grant", instp->reap_time, 2, mds_layout_grant_create,
 	    mds_layout_grant_destroy, mds_do_not_expire,
 	    sizeof (mds_layout_grant_t), MDS_TABSIZE, MDS_MAXTABSZ, 100);
 
-	mds_layout_grant_idx = rfs4_index_create(mds_layout_grant_tab,
+	instp->mds_layout_grant_idx =
+	    rfs4_index_create(instp->mds_layout_grant_tab,
 	    "layout-grant-idx", mds_layout_grant_hash, mds_layout_grant_compare,
-	    mds_layout_grant_mkkey, FALSE);
+	    mds_layout_grant_mkkey, TRUE);
 
-	mds_layoutGrant_client_idx = rfs4_index_create(mds_layout_grant_tab,
-	    "layout-grant-clnt-idx", mds_layout_grant_clnt_hash,
-	    mds_layout_grant_clnt_compare, mds_layout_grant_clnt_mkkey, TRUE);
+	instp->mds_layout_grant_ID_idx =
+	    rfs4_index_create(instp->mds_layout_grant_tab,
+	    "layout-grant-ID-idx", mds_layout_grant_id_hash,
+	    mds_layout_grant_id_compare, mds_layout_grant_id_mkkey, FALSE);
 
 	/*
-	 * Device table.
+	 * Data server addresses.
 	 */
-	mds_device_tab = rfs4_table_create(rfs4_server_state,
-	    NULL, "Device", reap_time, 3, mds_device_create,
-	    mds_device_destroy, mds_do_not_expire, sizeof (mds_device_t),
+	instp->ds_addr_tab = rfs4_table_create(instp,
+	    "DSaddr", instp->reap_time, 3, ds_addr_create,
+	    ds_addr_destroy, mds_do_not_expire, sizeof (ds_addr_t),
 	    MDS_TABSIZE, MDS_MAXTABSZ, 200);
 
-	mds_device_idx = rfs4_index_create(mds_device_tab,
-	    "device-idx", mds_device_hash, mds_device_compare,
-	    mds_device_mkkey, TRUE);
+	instp->ds_addr_idx = rfs4_index_create(instp->ds_addr_tab,
+	    "dsaddr-idx", ds_addr_hash, ds_addr_compare,
+	    ds_addr_mkkey, TRUE);
 
-	mds_device_uaddr_idx = rfs4_index_create(mds_device_tab,
-	    "device-uaddr-idx", mds_str_hash, mds_device_uaddr_compare,
-	    mds_device_uaddr_mkkey, FALSE);
+	instp->ds_addr_uaddr_idx = rfs4_index_create(instp->ds_addr_tab,
+	    "dsaddr-uaddr-idx", mds_str_hash, ds_addr_uaddr_compare,
+	    ds_addr_uaddr_mkkey, FALSE);
 
 	/*
 	 * Multipath Device table.
 	 */
-	mds_mpd_tab = rfs4_table_create(rfs4_server_state, NULL,
-	    "mpd", reap_time, 3, mds_mpd_create, mds_mpd_destroy,
+	instp->mds_mpd_tab = rfs4_table_create(instp,
+	    "mpd", instp->reap_time, 3, mds_mpd_create, mds_mpd_destroy,
 	    mds_do_not_expire, sizeof (mds_mpd_t), MDS_TABSIZE,
 	    MDS_MAXTABSZ, 200);
 
-	mds_mpd_idx = rfs4_index_create(mds_mpd_tab,
+	instp->mds_mpd_idx = rfs4_index_create(instp->mds_mpd_tab,
 	    "mpd-idx", mds_mpd_hash, mds_mpd_compare, mds_mpd_mkkey, TRUE);
-
 
 	/*
 	 * data-server information tables.
-	 *
-	 * simple list of expected DS_EXIBI's from ip
-	 * addresses. Populated automatically with loopback
-	 * and via mdsadm command.
 	 */
-	mds_dsauth_tab = rfs4_table_create(rfs4_server_state, NULL,
-	    "DSauth", reap_time, 2, mds_dsauth_create, mds_dsauth_destroy,
-	    mds_do_not_expire, sizeof (mds_dsauth_t), MDS_TABSIZE,
+	instp->ds_owner_tab = rfs4_table_create(instp,
+	    "DS_owner", instp->reap_time, 2, ds_owner_create,
+	    ds_owner_destroy, mds_do_not_expire,
+	    sizeof (ds_owner_t),  MDS_TABSIZE,
 	    MDS_MAXTABSZ, 100);
 
-	mds_dsauth_idx = rfs4_index_create(mds_dsauth_tab,
-	    "DSauth-ip-idx", mds_str_hash, mds_dsauth_ip_compare,
-	    mds_dsauth_ip_mkkey, TRUE);
+	instp->ds_owner_inst_idx = rfs4_index_create(instp->ds_owner_tab,
+	    "DS_owner-inst-idx", mds_str_hash, ds_owner_inst_compare,
+	    ds_owner_inst_mkkey, TRUE);
+
+	instp->ds_owner_idx = rfs4_index_create(instp->ds_owner_tab,
+	    "DS_owner-idx", ds_owner_hash, ds_owner_compare,
+	    ds_owner_mkkey, FALSE);
 
 	/*
-	 * Per instance information.
+	 * data-server guid information table.
 	 */
-	mds_dsinfo_tab = rfs4_table_create(rfs4_server_state, NULL,
-	    "DSinfo", reap_time, 2, mds_dsinfo_create, mds_dsinfo_destroy,
-	    mds_do_not_expire, sizeof (mds_dsinfo_t), MDS_TABSIZE,
+	instp->ds_guid_info_tab = rfs4_table_create(instp,
+	    "DS_guid", instp->reap_time, 2, ds_guid_info_create,
+	    ds_guid_info_destroy,
+	    mds_do_not_expire, sizeof (ds_guid_info_t), MDS_TABSIZE,
 	    MDS_MAXTABSZ, 100);
 
-	mds_dsinfo_inst_idx = rfs4_index_create(mds_dsinfo_tab,
-	    "DSinfo-inst-idx", mds_str_hash, mds_dsinfo_inst_compare,
-	    mds_dsinfo_inst_mkkey, TRUE);
-
-	mds_dsinfo_idx = rfs4_index_create(mds_dsinfo_tab,
-	    "DSinfo-idx", mds_dsinfo_hash, mds_dsinfo_compare,
-	    mds_dsinfo_mkkey, FALSE);
-
-
-	/*
-	 * data-server pool information table.
-	 */
-	mds_pool_info_tab = rfs4_table_create(rfs4_server_state, NULL,
-	    "POOLinfo", reap_time, 2, mds_pinfo_create, mds_pinfo_destroy,
-	    mds_do_not_expire, sizeof (mds_pool_info_t), MDS_TABSIZE,
-	    MDS_MAXTABSZ, 100);
-
-	mds_pool_info_idx = rfs4_index_create(mds_pool_info_tab,
-	    "POOLinfo-idx", mds_pinfo_hash, mds_pinfo_compare, mds_pinfo_mkkey,
+	instp->ds_guid_info_idx = rfs4_index_create(instp->ds_guid_info_tab,
+	    "DS_guid-idx", ds_guid_info_hash, ds_guid_info_compare,
+	    ds_guid_info_mkkey,
 	    TRUE);
 
-	mds_addlo = mds_add_layout;
-	mds_adddev = mds_add_dsauth;
+	instp->attrvers = 1;
+
+	/*
+	 * Mark it as fully initialized
+	 */
+	instp->inst_flags |= NFS_INST_STORE_INIT | NFS_INST_v41;
+
+	mutex_exit(&instp->state_lock);
+}
+
+/*
+ * Module load initialization
+ */
+void
+mds_srvrinit(void)
+{
 	mds_recall_lo = mds_lorecall_cmd;
+}
 
-	rfs4_servinst_create(&mds_server, 1, 1, &dss_path);
+static char *
+mds_read_odl(char *path, int *size)
+{
+	struct uio uio;
+	struct iovec iov;
 
-	mds_add_loopback();
+	char *odlp;
+	vnode_t *vp;
+	vattr_t va;
+	int sz, err, bad_file;
 
-	mutex_exit(&mds_server.state_lock);
+	*size = 0;
+	if (path == NULL)
+		return (NULL);
+
+	/*
+	 * open the layout file.
+	 */
+	if ((err = vn_open(path, UIO_SYSSPACE, FREAD, 0, &vp, 0, 0)) != 0) {
+		return (NULL);
+	}
+
+	if (vp->v_type != VREG) {
+		(void) VOP_CLOSE(vp, FREAD, 1, (offset_t)0, CRED(), NULL);
+		VN_RELE(vp);
+		return (NULL);
+	}
+
+	(void) VOP_RWLOCK(vp, V_WRITELOCK_FALSE, NULL);
+	/*
+	 * get the file size.
+	 */
+	va.va_mask = AT_SIZE;
+	err = VOP_GETATTR(vp, &va, 0, CRED(), NULL);
+
+	sz = va.va_size;
+	bad_file = (sz == 0 || sz < sizeof (odl_t));
+
+	if (err || bad_file) {
+		VOP_RWUNLOCK(vp, V_WRITELOCK_FALSE, NULL);
+		(void) VOP_CLOSE(vp, FREAD, 1, (offset_t)0, CRED(), NULL);
+		VN_RELE(vp);
+		return (NULL);
+	}
+
+	odlp = kmem_alloc(sz, KM_SLEEP);
+
+	/*
+	 * build iovec to read in the file.
+	 */
+	iov.iov_base = (caddr_t)odlp;
+	iov.iov_len = sz;
+
+	uio.uio_iov = &iov;
+	uio.uio_iovcnt = 1;
+	uio.uio_segflg = UIO_SYSSPACE;
+	uio.uio_loffset = 0;
+	uio.uio_resid = iov.iov_len;
+
+	if (err = VOP_READ(vp, &uio, FREAD, CRED(), NULL)) {
+		VOP_RWUNLOCK(vp, V_WRITELOCK_FALSE, NULL);
+		(void) VOP_CLOSE(vp, FREAD, 1, (offset_t)0, CRED(), NULL);
+		VN_RELE(vp);
+		kmem_free(odlp, sz);
+		return (NULL);
+	}
+
+	VOP_RWUNLOCK(vp, V_WRITELOCK_FALSE, NULL);
+	(void) VOP_CLOSE(vp, FREAD, 1, (offset_t)0, CRED(), NULL);
+	VN_RELE(vp);
+	*size = sz;
+	return (odlp);
+}
+
+/*
+ * blah
+ */
+static int
+mds_write_odl(char *path, char *odlp, int size)
+{
+	int ioflag, err;
+	struct uio uio;
+	struct iovec iov;
+	vnode_t *vp;
+
+	if (path == NULL)
+		return (-1);
+
+	if (vn_open(path, UIO_SYSSPACE, FCREAT|FWRITE|FTRUNC, 0600, &vp,
+	    CRCREAT, 0)) {
+		return (-1);
+	}
+
+	iov.iov_base = (caddr_t)odlp;
+	iov.iov_len = size;
+
+	uio.uio_iov = &iov;
+	uio.uio_iovcnt = 1;
+	uio.uio_loffset = 0;
+	uio.uio_segflg = UIO_SYSSPACE;
+	uio.uio_llimit = (rlim64_t)MAXOFFSET_T;
+	uio.uio_resid = size;
+
+	ioflag = uio.uio_fmode = (FWRITE|FSYNC);
+	uio.uio_extflg = UIO_COPY_DEFAULT;
+
+	(void) VOP_RWLOCK(vp, V_WRITELOCK_TRUE, NULL);
+	err = VOP_WRITE(vp, &uio, ioflag, CRED(), NULL);
+	VOP_RWUNLOCK(vp, V_WRITELOCK_TRUE, NULL);
+
+	(void) VOP_CLOSE(vp, FWRITE, 1, (offset_t)0, CRED(), NULL);
+	VN_RELE(vp);
+
+	return (err);
+}
+
+static void
+mds_remove_odl(char *path)
+{
+	(void) vn_remove(path, UIO_SYSSPACE, RMFILE);
+}
+
+#define	ODL_DIR	"/var/nfs/v4_state/layouts"
+
+int
+mds_mkdir(char *parent, char *dirnm)
+{
+	int err;
+	vnode_t *dvp, *vp;
+	struct vattr vap;
+	cred_t *cr = CRED();
+
+/*
+ *	if (err = lookupname(parent, UIO_SYSSPACE, NO_FOLLOW, NULLVPP, &dvp))
+ */
+	if ((err = vn_open(parent, UIO_SYSSPACE, FREAD, 0, &dvp, 0, 0)))
+		return (1);
+
+	vap.va_mask = AT_UID|AT_GID|AT_TYPE|AT_MODE;
+	vap.va_uid = crgetuid(cr);
+	vap.va_gid = crgetgid(cr);
+	vap.va_type = VDIR;
+	vap.va_mode = 0755;
+	err = VOP_MKDIR(dvp, dirnm, &vap, &vp, cr, NULL, 0, NULL);
+
+	(void) VOP_CLOSE(dvp, FREAD, 1, (offset_t)0, CRED(), NULL);
+	VN_RELE(dvp);
+
+	if (err)
+		return (1);
+
+	VN_RELE(vp);
+
+	return (0);
+}
+
+/*
+ * Pathname will be /var/nfs/v4_state/layouts/<fsid>/<fid>
+ */
+char *
+mds_create_name(vnode_t *vp, int *len)
+{
+	static int parent_created = 0;
+	int plen, err;
+	fid_t fid;
+	statvfs64_t svfs;
+	vnode_t *dvp = NULL;
+	uint64_t name = 0;
+	char *pname;
+	char dir[65];
+
+	*len = 0;
+	if (!parent_created) {
+		if (vn_open(ODL_DIR, UIO_SYSSPACE, FREAD, 0, &dvp, 0, 0)) {
+			err = mds_mkdir("/var/nfs/v4_state", "layouts");
+			if (err)
+				return (NULL);
+		} else {
+			(void) VOP_CLOSE(dvp, FREAD, 1, (offset_t)0,
+			    CRED(), NULL);
+			VN_RELE(dvp);
+		}
+		parent_created = 1;
+	}
+
+	/*
+	 * fsid = vp->v_vfsp->vfs_fsid;
+	 * zfs changes vfs_fsid on reboot, so we can't use it.
+	 */
+	err = VFS_STATVFS(vp->v_vfsp, &svfs);
+	if (err) {
+		return (NULL);
+	}
+
+	(void) snprintf(dir, 65, "%llx", (long long)svfs.f_fsid);
+
+	plen = MAXPATHLEN;
+	pname = kmem_alloc(plen, KM_SLEEP);
+	(void) snprintf(pname, plen, "%s/%s", ODL_DIR, dir);
+
+	/* does this dir already exist */
+	if (vn_open(pname, UIO_SYSSPACE, FREAD, 0, &dvp, 0, 0)) {
+		err = mds_mkdir(ODL_DIR, dir);
+		if (err)
+			return (NULL);
+	} else {
+		(void) VOP_CLOSE(dvp, FREAD, 1, (offset_t)0, CRED(), NULL);
+		VN_RELE(dvp);
+	}
+
+	bzero(&fid, sizeof (fid));
+	fid.fid_len = MAXFIDSZ;
+	err = VOP_FID(vp, &fid, NULL);
+	if (err || fid.fid_len == 0) {
+		return (NULL);
+	}
+
+	bcopy(fid.fid_data, &name, fid.fid_len);
+
+	(void) snprintf(pname, plen, "%s/%s/%llx", ODL_DIR, dir,
+	    (long long)name);
+
+	*len = plen;
+	return (pname);
+}
+
+/* xdr encode a mds_layout to the on-disk layout */
+static char *
+xdr_convert_layout(mds_layout_t *lop, int *size)
+{
+	int xdr_size;
+	char *xdr_buf;
+	XDR xdr;
+
+	xdr_size = xdr_sizeof(xdr_odl, lop->odl);
+	xdr_buf = kmem_zalloc(xdr_size, KM_SLEEP);
+
+	xdrmem_create(&xdr, xdr_buf, xdr_size, XDR_ENCODE);
+
+	if (xdr_odl(&xdr, lop->odl) == FALSE) {
+		*size = 0;
+		kmem_free(xdr_buf, xdr_size);
+		return (NULL);
+	}
+
+	*size = xdr_size;
+	return (xdr_buf);
+}
+
+/* xdr decode an on-disk layout to a mds_layout */
+/*ARGSUSED*/
+static odl *
+xdr_convert_odl(char *odlp, int size)
+{
+	int sz;
+	char *unxdr_buf;
+	XDR xdr;
+
+	sz = sizeof (odl);
+	unxdr_buf = kmem_zalloc(sz, KM_SLEEP);
+
+	xdrmem_create(&xdr, unxdr_buf, sz, XDR_DECODE);
+
+	if (xdr_odl(&xdr, (odl *)odlp) == FALSE) {
+		kmem_free(unxdr_buf, sz);
+		return (NULL);
+	}
+
+	return ((odl *)unxdr_buf);
+}
+
+int
+mds_put_layout(mds_layout_t *lop, vnode_t *vp)
+{
+	char *odlp;
+	char *name;
+	int len, size, err;
+
+	name = mds_create_name(vp, &len);
+	if (name == NULL) {
+		return (-1);
+	}
+
+	/* mythical xdr encode routine */
+	odlp = xdr_convert_layout(lop, &size);
+	if (odlp == NULL)
+		return (-1);
+
+	err = mds_write_odl(name, odlp, size);
+
+	kmem_free(name, len);
+	kmem_free(odlp, size);
+
+	return (err);
+}
+
+int
+mds_get_odl(vnode_t *vp, mds_layout_t **lopp)
+{
+	char *odlp;
+	int len, size;
+	char *name;
+	mds_layout_t *lop;
+
+	ASSERT(lopp != NULL);
+
+	name = mds_create_name(vp, &len);
+	if (name == NULL)
+		return (NFS4ERR_LAYOUTTRYLATER);
+
+	odlp = mds_read_odl(name, &size);
+	if (odlp == NULL)
+		return (NFS4ERR_LAYOUTTRYLATER);
+
+	lop = *lopp;
+
+	/* the magic xdr decode routine */
+	lop->odl = xdr_convert_odl(odlp, size);
+
+	kmem_free(name, len);
+	kmem_free(odlp, size);
+
+	if (lop->odl == NULL)
+		return (NFS4ERR_LAYOUTTRYLATER);
+
+	return (NFS4_OK);
+}
+
+void
+mds_delete_layout(vnode_t *vp)
+{
+	int len;
+	char *name;
+
+	name = mds_create_name(vp, &len);
+	if (name == NULL) {
+		return;
+	}
+
+	mds_remove_odl(name);
+
+	kmem_free(name, len);
 }

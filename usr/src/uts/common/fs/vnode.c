@@ -37,8 +37,6 @@
  */
 
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/t_lock.h>
@@ -4148,7 +4146,7 @@ vsd_create(uint_t *keyp, void (*destructor)(void *))
 	 */
 	if (i == vsd_nkeys) {
 		if ((nkeys = (vsd_nkeys << 1)) == 0)
-			nkeys = 1;
+			nkeys = 2;
 		vsd_destructor =
 		    (void (**)(void *))vsd_realloc((void *)vsd_destructor,
 		    (size_t)(vsd_nkeys * sizeof (void (*)(void *))),

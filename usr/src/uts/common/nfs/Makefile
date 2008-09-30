@@ -22,7 +22,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 # 
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 # uts/common/nfs/Makefile
 #
@@ -39,11 +38,12 @@ HDRS=	export.h	lm.h						\
 	nfsid_map.h	auth.h		nfs4_ext_defs.h	nfs41_kprot.h	\
 	nfs_serv_inst.h nfs4_pnfs.h	ds.h		nfs41_sessions.h \
 	nfs4_clnt_impl.h rfs41_ds.h nfs41_fhtype.h nfs41_filehandle.h \
-	ds_filehandle.h nfs4_attrmap.h nfs4_srv_readdir.h nfs4_srv_attr.h
+	ds_filehandle.h nfs4_attrmap.h nfs4_srv_readdir.h nfs4_srv_attr.h \
+	mds_state.h
 
 
 PROTOCOL_DIR = $(SRC)/head/rpcsvc
-DERIVED_FILES = ds_prot.h ds_nfs_xdr.h
+DERIVED_FILES = ds_prot.h ds_nfs_xdr.h mds_odl.h
 
 CLEANFILES += $(DERIVED_FILES)
 
@@ -81,6 +81,9 @@ clean clobber:
 
 ds_prot.h: $(PROTOCOL_DIR)/ds_prot.x
 	$(RPCGEN) -C -h $(PROTOCOL_DIR)/ds_prot.x >$@ 
+
+mds_odl.h: $(PROTOCOL_DIR)/mds_odl.x
+	$(RPCGEN) -C -h $(PROTOCOL_DIR)/mds_odl.x >$@ 
 
 ds_nfs_xdr.h: $(PROTOCOL_DIR)/ds_nfs_com.x
 	$(RPCGEN) -C -h $(PROTOCOL_DIR)/ds_nfs_com.x | \

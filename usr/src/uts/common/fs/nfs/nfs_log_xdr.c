@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -498,7 +496,7 @@ xdr_nfslog_createhow3(XDR *xdrs, createhow3 *objp)
 	case UNCHECKED:
 	case GUARDED:
 		if (!xdr_set_size3(xdrs,
-			&objp->createhow3_u.obj_attributes.size))
+		    &objp->createhow3_u.obj_attributes.size))
 			return (FALSE);
 		break;
 	case EXCLUSIVE:

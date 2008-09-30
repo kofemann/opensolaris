@@ -26,8 +26,6 @@
 #ifndef _DS_FILEHANDLE_H
 #define	_DS_FILEHANDLE_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #ifdef	__cplusplus
 extern "C" {
 #endif
@@ -48,23 +46,23 @@ struct mds_fid {
 };
 typedef struct mds_fid mds_fid;
 
-struct mds_ppid_content {
+struct mds_sid_content {
 	uint64_t id;
-	uint32_t aun;
+	uint64_t aun;
 };
-typedef struct mds_ppid_content mds_ppid_content;
+typedef struct mds_sid_content mds_sid_content;
 
-struct mds_ppid {
-	uint_t mds_ppid_len;
-	char *mds_ppid_val;
+struct mds_sid {
+	uint_t mds_sid_len;
+	char *mds_sid_val;
 };
-typedef struct mds_ppid mds_ppid;
+typedef struct mds_sid mds_sid;
 
 struct ds_fh_v1 {
 	uint32_t flags;
 	uint32_t gen;
 	uint64_t mds_id;
-	mds_ppid mds_ppid;
+	mds_sid mds_sid;
 	uint64_t mds_dataset_id;
 	fsid4	fsid;
 	struct mds_fid mds_fid;
@@ -82,8 +80,8 @@ struct mds_ds_fh {
 typedef struct mds_ds_fh mds_ds_fh;
 
 extern bool_t xdr_ds_fh_fmt(XDR *, mds_ds_fh *);
-extern bool_t xdr_mds_ppid_content(XDR *, mds_ppid_content *);
-extern bool_t xdr_mds_ppid(XDR *, mds_ppid *);
+extern bool_t xdr_mds_sid_content(XDR *, mds_sid_content *);
+extern bool_t xdr_mds_sid(XDR *, mds_sid *);
 extern bool_t xdr_ds_fh_v1(XDR *, ds_fh_v1 *);
 extern bool_t xdr_encode_ds_fh(mds_ds_fh *, nfs_fh4 *);
 extern bool_t xdr_decode_ds_fh(XDR *, nfs_fh4 *);

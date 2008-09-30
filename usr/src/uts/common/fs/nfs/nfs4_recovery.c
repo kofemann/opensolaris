@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * NFS Version 4 state recovery code.
  */
@@ -179,6 +177,7 @@ static void start_recovery(recov_info_t *, mntinfo4_t *, vnode_t *, vnode_t *,
 static void start_recovery_action(nfs4_recov_t, bool_t, mntinfo4_t *, vnode_t *,
 	vnode_t *);
 static int wait_for_recovery(mntinfo4_t *, nfs4_op_hint_t);
+static int nfs4_reclaim_complete(mntinfo4_t *, nfs4_server_t *);
 
 /*
  * Return non-zero if the given errno, status, and rpc status codes
@@ -1288,6 +1287,7 @@ nfs4_wait_for_delay(vnode_t *vp, nfs4_recov_state_t *rsp)
  * The recovery thread.
  */
 
+#define	NFS41_SERVER(np)	(np->s_minorversion == 1)
 static void
 nfs4_recov_thread(recov_info_t *recovp)
 {
@@ -1612,6 +1612,22 @@ nfs4_recov_thread(recov_info_t *recovp)
 		} else
 			mutex_exit(&mi->mi_lock);
 		nfs_rw_exit(&mi->mi_recovlock);
+
+		if (done && sp != NULL) {
+			/*
+			 * At this point, recovery has completed.  If this was
+			 * recovery from a server reboot, then send a reclaim
+			 * complete (where appropriate for the version).
+			 */
+			mutex_enter(&mi->mi_lock);
+			if (mi->mi_recovflags & MI4R_SRV_REBOOT &&
+			    NFS41_SERVER(sp)) {
+				mutex_exit(&mi->mi_lock);
+				done = nfs4_reclaim_complete(mi, sp);
+			}
+			else
+				mutex_exit(&mi->mi_lock);
+		}
 
 		/*
 		 * If the filesystem has been forcibly unmounted, there is
@@ -3843,4 +3859,63 @@ recov_bad_seqid(recov_info_t *recovp)
 	mutex_enter(&mi->mi_lock);
 	mi->mi_recovflags &= ~MI4R_BAD_SEQID;
 	mutex_exit(&mi->mi_lock);
+}
+
+static void
+nfs4reclaim_complete_otw(mntinfo4_t *mi, nfs4_error_t *ep)
+{
+	COMPOUND4args_clnt args;
+	COMPOUND4res_clnt res;
+	nfs_argop4 argops[2];
+	int numops;
+	int doqueue = 1;
+
+	bzero(&args, sizeof (args));
+	bzero(&res, sizeof (res));
+
+	args.ctag = TAG_RECLAIM_COMPLETE;
+
+	numops = 2;		/* SEQUENCE, RECLAIM_COMPLETE */
+
+	args.array = argops;
+	args.array_len = numops;
+	args.minor_vers = mi->mi_minorversion;
+
+	argops[0].argop = OP_SEQUENCE;
+
+	argops[1].argop = OP_RECLAIM_COMPLETE;
+	argops[1].nfs_argop4_u.opreclaim_complete.rca_one_fs = FALSE;
+
+	rfs4call(mi, NULL, &args, &res, kcred, &doqueue, 0, ep);
+
+	if (ep->error)
+		return;
+
+	(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+}
+
+static int
+nfs4_reclaim_complete(mntinfo4_t *mi, nfs4_server_t *sp)
+{
+	int recov = 0;
+	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
+
+	(void) nfs_rw_enter_sig(&sp->s_recovlock, RW_READER, 0);
+	(void) nfs_rw_enter_sig(&mi->mi_recovlock, RW_WRITER, 0);
+
+	nfs4reclaim_complete_otw(mi, &e);
+
+	if (recov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp)) {
+		(void) nfs4_start_recovery(&e, mi, NULL, NULL, NULL,
+		    NULL, OP_RECLAIM_COMPLETE, NULL);
+	}
+
+	nfs_rw_exit(&mi->mi_recovlock);
+	nfs_rw_exit(&sp->s_recovlock);
+
+	/* if recovery is needed, return "false" because we are not done. */
+	if (recov)
+		return (0);
+	else
+		return (1);
 }

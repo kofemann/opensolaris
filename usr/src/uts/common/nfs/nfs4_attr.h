@@ -26,8 +26,6 @@
 #ifndef _NFS4_ATTR_H
 #define	_NFS4_ATTR_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #ifdef _KERNEL
 #ifdef	__cplusplus
 extern "C" {

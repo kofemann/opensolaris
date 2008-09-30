@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/systm.h>
 #include <sys/cmn_err.h>
 #include <sys/kmem.h>
@@ -41,6 +39,9 @@ static void rfs4_dbe_reap(rfs4_table_t *, time_t, uint32_t);
 static void rfs4_dbe_destroy(rfs4_dbe_t *);
 static rfs4_dbe_t *rfs4_dbe_create(rfs4_table_t *, rfs4_entry_t);
 static void rfs4_start_reaper(rfs4_table_t *);
+
+krwlock_t nsi_lock;
+
 
 id_t
 rfs4_dbe_getid(rfs4_dbe_t *e)
@@ -189,14 +190,13 @@ rfs4_dbe_kmem_destructor(void *obj, void *private)
 }
 
 rfs4_database_t *
-rfs4_database_create(uint32_t flags)
+rfs4_database_create()
 {
 	rfs4_database_t *db;
 
 	db = kmem_alloc(sizeof (rfs4_database_t), KM_SLEEP);
 	mutex_init(db->lock, NULL, MUTEX_DEFAULT, NULL);
 	db->tables = NULL;
-	db->debug_flags = flags;
 	db->shutdown_count = 0;
 	cv_init(&db->shutdown_wait, NULL, CV_DEFAULT, NULL);
 	return (db);
@@ -251,14 +251,13 @@ rfs4_database_destroy(rfs4_database_t *db)
 }
 
 rfs4_table_t *
-rfs4_table_create(rfs4_database_t *dbp,
-    nfs_server_instance_t *instp, char *tabname, time_t max_cache_time,
-    uint32_t idxcnt,
-    bool_t (*create)(nfs_server_instance_t *, rfs4_entry_t, void *),
-    void (*destroy)(rfs4_entry_t),
-    bool_t (*expiry)(rfs4_entry_t),
-    uint32_t size, uint32_t hashsize, uint32_t maxentries, id_t start)
+rfs4_table_create(nfs_server_instance_t *instp,
+    char *tabname, time_t max_cache_time, uint32_t idxcnt,
+    bool_t (*create)(rfs4_entry_t, void *), void (*destroy)(rfs4_entry_t),
+    bool_t (*expiry)(rfs4_entry_t), uint32_t size,
+    uint32_t hashsize, uint32_t maxentries, id_t start)
 {
+	rfs4_database_t *dbp;
 	rfs4_table_t *table;
 
 	int len;
@@ -267,13 +266,15 @@ rfs4_table_create(rfs4_database_t *dbp,
 	char *id_name;
 
 	table = kmem_alloc(sizeof (rfs4_table_t), KM_SLEEP);
-	table->dbp = dbp;
+	table->instp = instp;
+	dbp = instp->state_store;
+
 	rw_init(table->t_lock, NULL, RW_DEFAULT, NULL);
 	mutex_init(table->lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&table->reaper_cv_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&table->reaper_wait, NULL, CV_DEFAULT, NULL);
 
-	table->instp = instp;
+	ASSERT(instp);
 
 	if (instp != NULL)
 		tbl_inst_name = instp->inst_name;
@@ -321,8 +322,6 @@ rfs4_table_create(rfs4_database_t *dbp,
 	    NULL, table, NULL, 0);
 
 	kmem_free(cache_name, len+13);
-
-	table->debug = dbp->debug_flags;
 
 	mutex_enter(dbp->lock);
 	table->tnext = dbp->tables;
@@ -510,7 +509,7 @@ rfs4_dbe_create(rfs4_table_t *table, rfs4_entry_t data)
 	bzero(entry->data, table->usize);
 	entry->data->dbe = entry;
 
-	if (!(*table->create)(table->instp, entry->data, data)) {
+	if (!(*table->create)(entry->data, data)) {
 		kmem_cache_free(table->mem_cache, entry);
 		return (NULL);
 	}
@@ -648,15 +647,21 @@ retry:
 	return (entry->data);
 }
 
-/*ARGSUSED*/
 boolean_t
 rfs4_cpr_callb(void *arg, int code)
 {
-	rfs4_table_t *tbl = rfs4_client_tab;
+	nfs_server_instance_t *instp;
+	rfs4_table_t *tbl;
 	rfs4_bucket *buckets, *bp;
 	rfs4_link *l;
 	rfs4_client_t *cl;
 	int i;
+
+	if (arg == NULL)
+		return (B_TRUE);
+
+	instp = (nfs_server_instance_t *)arg;
+	tbl = instp->client_tab;
 
 	/*
 	 * We get called for Suspend and Resume events.
@@ -831,10 +836,10 @@ reaper_thread(caddr_t *arg)
 	CALLB_CPR_EXIT(&table->reaper_cpr_info);
 
 	/* Notify the database shutdown processing that the table is shutdown */
-	mutex_enter(table->dbp->lock);
-	table->dbp->shutdown_count--;
-	cv_signal(&table->dbp->shutdown_wait);
-	mutex_exit(table->dbp->lock);
+	mutex_enter(table->instp->state_store->lock);
+	table->instp->state_store->shutdown_count--;
+	cv_signal(&table->instp->state_store->shutdown_wait);
+	mutex_exit(table->instp->state_store->lock);
 }
 
 static void
@@ -898,4 +903,13 @@ rfs4_dbcreate(rfs4_index_t *idx, void *ap)
 		ENQUEUE_IDX(bp, l);
 	}
 	return (entry->data);
+}
+
+/*
+ * Return the instance pointer from the rfs4_dbe_t
+ */
+nfs_server_instance_t *
+dbe_to_instp(rfs4_dbe_t *dbp)
+{
+	return (dbp->table->instp);
 }

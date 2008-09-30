@@ -23,52 +23,47 @@
  * Use is subject to license terms.
  */
 
-#ifndef _NNODE_IMPL_H
-#define	_NNODE_IMPL_H
+%#pragma ident	"@(#)mds_odl.x	1.1	08/06/18 SMI"
 
-#include <nfs/nnode.h>
 
-#include <sys/vnode.h>
-#include <sys/avl.h>
-#include <sys/list.h>
+%#include <nfs/nfs4.h>
+%#include <nfs/mds_odl.h> 
 
-#ifdef	__cplusplus
-extern "C" {
-#endif
+const MAX_MDS_SID = 16;
 
-struct nnode {
-	void *nn_fh_value;
-	uint32_t nn_fh_len;
-	pid_t nn_instance_id;
-
-	kmutex_t nn_lock;
-	uint32_t nn_flags;
-	uint32_t nn_refcount;
-	kcondvar_t nn_refcount_cv;
-
-	avl_node_t nn_avl;
-
-	void *nn_data_ops_data;
-	nnode_data_ops_t *nn_data_ops;
-
-	void *nn_metadata_ops_data;
-	nnode_metadata_ops_t *nn_metadata_ops;
-
-	void *nn_state_ops_data;
-	nnode_state_ops_t *nn_state_ops;
+struct odl_sid {
+       uint64_t		id;
+       uint64_t		aun;
 };
 
-typedef struct {
-	avl_tree_t nb_tree;
-	krwlock_t nb_lock;
-} nnode_bucket_t;
+struct odl_t {
+	uint32_t	start_idx;
+	uint32_t	unit_size;
+	uint64_t        offset;
+	uint64_t        length;
+	odl_sid         sid<MAX_MDS_SID>;       
+};
 
-#define	NNODE_HASH_SIZE		251
-#define	NNODE_MIN_FH_LEN	8
-#define	NNODE_MAX_FH_LEN	256
+enum odl_layout_type {
+	PNFS = 0,
+	LUSTRE = 1
+};
 
-#ifdef	__cplusplus
-}
-#endif
+enum odl_pnfs_lo_vers {
+     VERS_1 = 1
+};
 
-#endif /* _NNODE_IMPL_H */
+union odl_lo switch (odl_pnfs_lo_vers odl_vers) {
+case VERS_1:
+	odl_t odl_content<>;
+default:
+	void;
+};
+
+union odl switch (odl_layout_type odl_type) {
+case PNFS:
+	odl_lo	odl_pnfs;
+default:
+	void;
+};
+

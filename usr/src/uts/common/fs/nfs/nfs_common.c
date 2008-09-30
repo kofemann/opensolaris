@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -27,8 +27,6 @@
  *	Copyright (c) 1983, 1984, 1985, 1986, 1987, 1988, 1989 AT&T
  *		All rights reserved.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/errno.h>
 #include <sys/param.h>
@@ -410,10 +408,10 @@ nfsdyn_mountroot(vfs_t *vfsp, whymountroot_t why)
 	vfsflags = 0;
 
 	if (error = mount_root(*name ? name : "root", root_path, NFS_V4,
-				&args, &vfsflags)) {
+	    &args, &vfsflags)) {
 		if (error != EPROTONOSUPPORT) {
 			nfs_cmn_err(error, CE_WARN,
-				"Unable to mount NFS root filesystem: %m");
+			    "Unable to mount NFS root filesystem: %m");
 			sv_free(svp);
 			pn_free(&pn);
 			vfs_setops(vfsp, nfsdyn_vfsops);
@@ -432,7 +430,7 @@ nfsdyn_mountroot(vfs_t *vfsp, whymountroot_t why)
 		vfsflags = 0;
 
 		if (error = mount_root(*name ? name : "root", root_path,
-						NFS_V3, &args, &vfsflags)) {
+		    NFS_V3, &args, &vfsflags)) {
 			if (error != EPROTONOSUPPORT) {
 				nfs_cmn_err(error, CE_WARN,
 				    "Unable to mount NFS root filesystem: %m");
@@ -455,8 +453,7 @@ nfsdyn_mountroot(vfs_t *vfsp, whymountroot_t why)
 			vfs_setops(vfsp, nfs_vfsops);
 
 			if (error = mount_root(*name ? name : "root",
-					root_path, NFS_VERSION, &args,
-					&vfsflags)) {
+			    root_path, NFS_VERSION, &args, &vfsflags)) {
 				nfs_cmn_err(error, CE_WARN,
 				    "Unable to mount NFS root filesystem: %m");
 				sv_free(svp);

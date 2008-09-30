@@ -19,12 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 
 /*
  * This is the loadable module wrapper.
@@ -164,28 +161,28 @@ nfs4_setopts(vnode_t *vp, model_t model, struct nfs_args *buf)
 			mi->mi_acregmin = SEC2HR(ACMINMAX);
 		else
 			mi->mi_acregmin = SEC2HR(MIN(STRUCT_FGET(args,
-							acregmin), ACMINMAX));
+			    acregmin), ACMINMAX));
 	}
 	if (flags & NFSMNT_ACREGMAX) {
 		if (STRUCT_FGET(args, acregmax) < 0)
 			mi->mi_acregmax = SEC2HR(ACMAXMAX);
 		else
 			mi->mi_acregmax = SEC2HR(MIN(STRUCT_FGET(args,
-							acregmax), ACMAXMAX));
+			    acregmax), ACMAXMAX));
 	}
 	if (flags & NFSMNT_ACDIRMIN) {
 		if (STRUCT_FGET(args, acdirmin) < 0)
 			mi->mi_acdirmin = SEC2HR(ACMINMAX);
 		else
 			mi->mi_acdirmin = SEC2HR(MIN(STRUCT_FGET(args,
-							acdirmin), ACMINMAX));
+			    acdirmin), ACMINMAX));
 	}
 	if (flags & NFSMNT_ACDIRMAX) {
 		if (STRUCT_FGET(args, acdirmax) < 0)
 			mi->mi_acdirmax = SEC2HR(ACMAXMAX);
 		else
 			mi->mi_acdirmax = SEC2HR(MIN(STRUCT_FGET(args,
-							acdirmax), ACMAXMAX));
+			    acdirmax), ACMAXMAX));
 	}
 
 	return (0);

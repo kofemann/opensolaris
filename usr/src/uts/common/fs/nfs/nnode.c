@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <nfs/nnode_impl.h>
 
 #include <nfs/nfs41_filehandle.h>

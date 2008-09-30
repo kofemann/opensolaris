@@ -404,6 +404,7 @@ f none usr/include/nfs/lm_impl.h 644 root bin
 f none usr/include/nfs/lm_nlm.h 644 root bin
 f none usr/include/nfs/lm_server.h 644 root bin
 f none usr/include/nfs/mapid.h 644 root bin
+f none usr/include/nfs/mds_odl.h 644 root bin
 f none usr/include/nfs/mount.h 644 root bin
 f none usr/include/nfs/nfs.h 644 root bin
 f none usr/include/nfs/nfs4.h 644 root bin
@@ -420,6 +421,7 @@ f none usr/include/nfs/nfs41_kprot.h 644 root bin
 f none usr/include/nfs/nfs41_sessions.h 644 root bin
 f none usr/include/nfs/nfs41_fhtype.h 644 root bin
 f none usr/include/nfs/nfs41_filehandle.h 644 root bin
+f none usr/include/nfs/mds_state.h 644 root bin
 f none usr/include/nfs/ds_filehandle.h 644 root bin
 f none usr/include/nfs/ds.h 644 root bin
 f none usr/include/nfs/ds_prot.h 644 root bin
@@ -540,6 +542,8 @@ f none usr/include/rpcsvc/bootparam_prot.h 644 root bin
 f none usr/include/rpcsvc/bootparam_prot.x 644 root bin
 f none usr/include/rpcsvc/dbm.h 644 root bin
 f none usr/include/rpcsvc/key_prot.x 644 root bin
+f none usr/include/rpcsvc/mds_odl.h 644 root bin
+f none usr/include/rpcsvc/mds_odl.x 644 root bin
 f none usr/include/rpcsvc/mount.h 644 root bin
 f none usr/include/rpcsvc/mount.x 644 root bin
 f none usr/include/rpcsvc/nfs_acl.h 644 root bin

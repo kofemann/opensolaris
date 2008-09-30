@@ -23,19 +23,21 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #ifndef _MDS_STATE_H
 #define	_MDS_STATE_H
 
 #include <sys/id_space.h>
 #include <nfs/nfs4_db_impl.h>
 #include <nfs/ds_prot.h>
+#include <nfs/mds_odl.h>
+
+typedef ds_guid_map ds_guid_map_t;
+typedef ds_guid ds_guid_t;
 
 #define	MDS_MAX_LAYOUT_DEVS 16
 
 /*
- * A means to plop the internal uint23_t device
+ * A means to plop the internal uint32_t device
  * id into an OTW 128 bit device id
  */
 typedef union {
@@ -51,17 +53,22 @@ typedef union {
 extern void mds_set_deviceid(uint32_t, deviceid4 *);
 
 /*
+ * mds_layout has the information for the layout that has been
+ * allocated by the SPE. It is represented by the structure
+ * "struct odl" or on-disk-layout the odl will be plopped
+ * onto stable storage, once we know that a data-server
+ * has requested verification for an IO operation.
+ * --
  * stripe_unit gets plopped into a nfl_util4 in the returned
  * layout information;
- *
+ * --
  * lo_flags carries if we want dense or sparse data at the
  * data-servers and also if we wish the  NFS Client to commit
  * through the MDS or Data-servers.
  */
-typedef struct {
+typedef struct mds_layout {
 	rfs4_dbe_t	*dbe;
 	int		layout_id;
-	stateid_t	lo_stateid;
 	layouttype4 	layout_type;
 	length4		stripe_unit;
 	int		stripe_count;
@@ -69,24 +76,42 @@ typedef struct {
 	uint32_t	dev_index;
 	uint32_t	devs[100];
 	uint32_t	lo_flags;
+	rfs4_file_t	*fp;
+	odl		*odl;
 } mds_layout_t;
 
-typedef struct {
+typedef struct mds_layout_grant {
 	rfs4_dbe_t	*dbe;
-	uint32_t 	id;   /* table unique */
-	clientid4	clnt;
-	int		lo_id;
+	stateid_t	lo_stateid;
+	mds_layout_t    *lop;
+	rfs4_client_t   *cp;
+	rfs4_file_t	*fp;
+	rfs41_grant_list_t clientgrantlist;
+	rfs41_grant_list_t lo_grant_list;
+	/* XXX layout byte range */
 } mds_layout_grant_t;
 
 typedef struct {
 	rfs4_dbe_t	*dbe;
-	ds_id		ds_id;
-	ds_verifier4	verifier;
-	uint32_t	dsi_flags;
 	time_t		last_access;
-	char		*inst_name;
-	list_t		dev_list;
-} mds_dsinfo_t;
+	char		*identity;
+	ds_id		ds_id;
+	ds_verifier	verifier;
+	uint32_t	dsi_flags;
+	list_t		ds_addr_list;
+	list_t		ds_guid_list;
+} ds_owner_t;
+
+
+/*
+ * Mapping of MDS_SID(s) (the MDS storage identifier) to
+ * ds_guid; Saved on disk, held in memory for replies to
+ * DS_REPORTAVAIL and DS_MAP_MDSSID.
+ */
+typedef struct {
+	rfs4_dbe_t	*dbe;
+	ds_guid_map_t	ds_map;
+} mds_mapzap_t;
 
 #define	MDS_DSI_REBOOTED	1
 
@@ -102,21 +127,21 @@ typedef struct {
 	dst = (dst & ~MDS_DEV_DS_MASK) | (MDS_DEV_DS_MASK & flg);
 
 /*
- * mds_device:
+ * ds_addr:
  *
- * This list is then updated with universal addresses
- * via the control-protocol message DS_REPORTAVAIL.
+ * This list is updated via the control-protocol
+ * message DS_REPORTAVAIL.
  *
- * We scan this list to automatically build the default
+ * FOR NOW: We scan this list to automatically build the default
  * layout and the multipath device struct (mds_mpd)
  */
-typedef struct mds_device {
+typedef struct {
 	rfs4_dbe_t	*dbe;
 	netaddr4	dev_addr;
 	uint_t		dev_flags;
-	mds_dsinfo_t   *dev_infop;
-	list_node_t	dev_list_next;
-} mds_device_t;
+	ds_owner_t	*ds_owner;
+	list_node_t	ds_addr_next;
+} ds_addr_t;
 
 /*
  * mds_mpd:
@@ -140,71 +165,38 @@ typedef struct mds_device_list {
 } mds_device_list_t;
 
 /*
- * mds_auth:
- *
- * This list is populated via the mdsadm command, so that we can
- * validate and associate a data-server instance via the DS_EXIBI
- * protocol message.
- */
-typedef struct mds_dsauth {
-	rfs4_dbe_t	*dbe;
-	char		*ds_addr;
-	mds_dsinfo_t    *dev_infop;
-} mds_dsauth_t;
-
-/*
  * Tracks the state 'handed out' to the data-server.
  */
 typedef struct {
 	rfs4_dbe_t	*dbe;
-	mds_dsinfo_t   *dev_infop;
+	ds_owner_t   	*ds_ownerp;
 } mds_ds_state_t;
 
 /*
- * Tracks the mds_poolid to data-server guid, and
+ * Tracks the mds_sid to data-server guid, and
  * associated attributes.
  */
 typedef struct {
 	rfs4_dbe_t 	*dbe;
-	uint32_t 	mds_poolid;
-	uint64_t	mds_gpoolid; /* this is ds_id + mds_poolid */
-	mds_dsinfo_t 	*ds_dinfop;
-	storage_type	ds_stortype; /* Storage type (i.e. ZFS) */
-	uint_t		ds_guid_len;
-	char 		*ds_guid_val; /* Opaque data server guid */
+	ds_owner_t 	*ds_ownerp;
+	list_node_t	ds_guid_next;
+	ds_guid_t	ds_guid;
 	uint_t    	ds_attr_len;
 	ds_zfsattr 	*ds_attr_val; /* XXX Should this be more general? */
-} mds_pool_info_t;
+} ds_guid_info_t;
 
 /*
- * A small structure passed in the the poolinfo create
+ * A small structure passed in the ds_storinfo create
  * entry.
  */
 typedef struct {
 	struct ds_storinfo *si;
-	mds_dsinfo_t *dip;
+	ds_owner_t *dop;
 } pinfo_create_t;
 
 
-extern krwlock_t mds_layout_lock;
-
-extern krwlock_t mds_device_lock;
-extern rfs4_table_t *mds_device_tab;
-extern rfs4_index_t *mds_device_idx;
-
-extern krwlock_t mds_mpd_lock;
-extern rfs4_table_t *mds_mpd_tab;
-extern rfs4_index_t *mds_mpd_idx;
-
-extern rfs4_table_t *mds_dsinfo_tab;
-extern rfs4_index_t *mds_dsinfo_idx;
-extern rfs4_index_t *mds_dsinfo_ip_idx;
-
-extern rfs4_table_t *mds_dsauth_tab;
-extern rfs4_index_t *mds_dsauth_idx;
-
 extern void mds_xdr_devicelist(rfs4_entry_t, void *);
-extern mds_dsauth_t *mds_find_dsauth_by_ip(DS_EXIBIargs *, char *);
-extern mds_device_t *mds_find_device(uint32_t);
-extern mds_layout_t *mds_find_layout(int);
+extern ds_addr_t *mds_find_ds_addr(nfs_server_instance_t *, uint32_t);
+
+extern int mds_put_layout(mds_layout_t *, vnode_t *);
 #endif /* _MDS_STATE_H */

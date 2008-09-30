@@ -1588,7 +1588,8 @@ rfs3_create(CREATE3args *args, CREATE3res *resp, struct exportinfo *exi,
 
 				trunc = va.va_size == 0;
 				if (!error &&
-				    rfs4_check_delegated(FWRITE, tvp, trunc)) {
+				    rfs4_check_delegated(FWRITE, tvp, trunc,
+				    TRUE, FALSE, NULL)) {
 					resp->status = NFS3ERR_JUKEBOX;
 					goto out1;
 				}
@@ -1705,7 +1706,8 @@ tryagain:
 		 * conflicting v3 open has occurred.
 		 */
 
-		if (rfs4_check_delegated(FWRITE, vp, FALSE)) {
+		if (rfs4_check_delegated(FWRITE, vp, FALSE, TRUE, FALSE,
+		    NULL)) {
 			VN_RELE(vp);
 			resp->status = NFS3ERR_JUKEBOX;
 			goto out1;
@@ -1734,7 +1736,8 @@ tryagain:
 		else
 			trunc = FALSE;
 
-		if (rfs4_check_delegated(FWRITE, vp, trunc)) {
+		if (rfs4_check_delegated(FWRITE, vp, trunc, TRUE, FALSE,
+		    NULL)) {
 			VN_RELE(vp);
 			resp->status = NFS3ERR_JUKEBOX;
 			goto out1;
@@ -2476,7 +2479,7 @@ rfs3_remove(REMOVE3args *args, REMOVE3res *resp, struct exportinfo *exi,
 	if (error != 0)
 		goto err;
 
-	if (rfs4_check_delegated(FWRITE, targvp, TRUE)) {
+	if (rfs4_check_delegated(FWRITE, targvp, TRUE, TRUE, TRUE, NULL)) {
 		resp->status = NFS3ERR_JUKEBOX;
 		goto err1;
 	}
@@ -2806,7 +2809,7 @@ rfs3_rename(RENAME3args *args, RENAME3res *resp, struct exportinfo *exi,
 	 * delegation, since future opens should fail or would
 	 * refer to a new file.
 	 */
-	if (rfs4_check_delegated(FWRITE, srcvp, FALSE)) {
+	if (rfs4_check_delegated(FWRITE, srcvp, FALSE, TRUE, FALSE, NULL)) {
 		resp->status = NFS3ERR_JUKEBOX;
 		goto err1;
 	}
@@ -2817,7 +2820,8 @@ rfs3_rename(RENAME3args *args, RENAME3res *resp, struct exportinfo *exi,
 	if (VOP_LOOKUP(tvp, args->to.name, &targvp, NULL, 0, NULL, cr,
 	    NULL, NULL, NULL) == 0) {
 
-		if (rfs4_check_delegated(FWRITE, targvp, TRUE)) {
+		if (rfs4_check_delegated(FWRITE, targvp, TRUE, TRUE, TRUE,
+		    NULL)) {
 			VN_RELE(targvp);
 			resp->status = NFS3ERR_JUKEBOX;
 			goto err1;

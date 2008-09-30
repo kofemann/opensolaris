@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/dserv_impl.h>
 
 #include <sys/sdt.h>
@@ -188,9 +186,6 @@ dserv_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 			return (EFAULT);
 
 		error =	dserv_svc(&svcargs);
-		if (error)
-			printf("dserv_svc returned: %d\n", error);
-
 		break;
 	}
 
@@ -201,9 +196,10 @@ dserv_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 		    sizeof (dserv_setmds_args_t), flag);
 		if (error)
 			return (EFAULT);
-		if (dserv_debug)
-			printf("me see MDS of %s/%s",
-			    smargs.dsm_mds_uaddr, smargs.dsm_mds_netid);
+
+		DTRACE_PROBE2(dserv__i__ioc_setmds,
+		    char *, smargs.dsm_mds_uaddr, char *, smargs.dsm_mds_netid);
+
 		error = dserv_mds_setmds(smargs.dsm_mds_netid,
 		    smargs.dsm_mds_uaddr);
 		if (error != 0)
@@ -220,9 +216,9 @@ dserv_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 		if (error)
 			return (EFAULT);
 
-		if (dserv_debug)
-			printf("kernel gets uaddr of %s on proto %s",
-			    spargs.dsa_uaddr, spargs.dsa_proto);
+		DTRACE_PROBE2(dserv__i__ioc_setport, char *, spargs.dsa_uaddr,
+		    char *, spargs.dsa_proto);
+
 		error = dserv_mds_addport(spargs.dsa_uaddr, spargs.dsa_proto,
 		    spargs.dsa_name);
 		break;

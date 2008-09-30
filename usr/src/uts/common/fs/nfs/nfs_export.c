@@ -29,8 +29,6 @@
  */
 
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/time.h>
@@ -1711,7 +1709,7 @@ unexport(fsid_t *fsid, fid_t *fid, vnode_t *vp)
 	 * the v4 server may be holding file locks or vnodes under
 	 * this export.
 	 */
-	rfs4_clean_state_exi(exi);
+	sstor_clean_state_exi(exi);
 
 	/*
 	 * Notify the lock manager that the filesystem is being

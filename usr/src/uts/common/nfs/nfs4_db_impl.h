@@ -26,8 +26,6 @@
 #ifndef	_NFS4_DB_IMPL_H
 #define	_NFS4_DB_IMPL_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * This is a private header file.  Applications should not directly include
  * this file.
@@ -85,7 +83,7 @@ struct rfs4_index {
 
 struct rfs4_table {
 	rfs4_table_t *tnext;			/* next table in db */
-	struct rfs4_database *dbp;		/* db that holds this table */
+	nfs_server_instance_t *instp;
 	krwlock_t t_lock[1];			/* lock table for resize */
 	kmutex_t lock[1];			/* mutex for count and cached */
 	char *name;				/* Table name */
@@ -100,26 +98,26 @@ struct rfs4_table {
 	uint32_t maxcnt;			/* max # of indices */
 	uint32_t ccnt;				/* # of creatable entries */
 	rfs4_index_t *indices;			/* list of indices */
-	/* entry constructor */
-	bool_t (*create)(nfs_server_instance_t *, rfs4_entry_t, void *data);
+	/* Given entry and data construct entry */
+	bool_t (*create)(rfs4_entry_t, void *data);
 	void (*destroy)(rfs4_entry_t);		/* Destroy entry */
 	bool_t (*expiry)(rfs4_entry_t);		/* Has this entry expired */
 	kmem_cache_t *mem_cache;		/* Cache for table entries */
-	uint32_t debug;			/* table Flags */
+	uint32_t debug;				/* Debug Flags */
 	/* set of vars used for managing the reaper thread */
 	unsigned	reaper_shutdown:1;	/* table shutting down? */
 	kcondvar_t reaper_wait;			/* reaper thread waits here */
 	kmutex_t	reaper_cv_lock;		/* lock used for cpr wait */
 	callb_cpr_t	reaper_cpr_info;	/* cpr the reaper thread */
-	nfs_server_instance_t *instp;
+
 };
 
 struct rfs4_database {
 	kmutex_t lock[1];
-	uint32_t debug_flags;			/* Table debug flags to set */
 	uint32_t shutdown_count;		/* count to manage shutdown */
 	kcondvar_t shutdown_wait;		/* where the shutdown waits */
 	rfs4_table_t *tables;			/* list of tables in db */
+	nfs_server_instance_t *instp;		/* just for handy debug */
 };
 
 #define	RFS4_RECLAIM_PERCENT 10

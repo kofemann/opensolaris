@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/list.h>
 #include <sys/utsname.h>
 #include <sys/avl.h>
@@ -46,7 +44,7 @@
 
 static avl_tree_t dserv_mds_instance_avl;
 static krwlock_t dserv_mds_instance_tree_lock;
-static kmem_cache_t *mds_ppid_map_cache = NULL;
+static kmem_cache_t *mds_sid_map_cache = NULL;
 static kmem_cache_t *dserv_mds_instance_cache = NULL;
 static kmem_cache_t *dserv_open_root_objset_cache = NULL;
 static kmem_cache_t *dserv_uaddr_cache = NULL;
@@ -76,9 +74,9 @@ dserv_mds_instance_construct(void *vdmi, void *foo, int bar)
 	list_create(&dmi->dmi_datasets,
 	    sizeof (open_root_objset_t),
 	    offsetof(open_root_objset_t, oro_open_root_objset_node));
-	list_create(&dmi->dmi_mdsppids,
-	    sizeof (mds_ppid_map_t),
-	    offsetof(mds_ppid_map_t, mpm_mds_ppid_map_node));
+	list_create(&dmi->dmi_mds_sids,
+	    sizeof (mds_sid_map_t),
+	    offsetof(mds_sid_map_t, msm_mds_sid_map_node));
 	list_create(&dmi->dmi_uaddrs,
 	    sizeof (dserv_uaddr_t),
 	    offsetof(dserv_uaddr_t, du_list));
@@ -97,7 +95,7 @@ dserv_mds_instance_destroy(void *vdmi, void *foo)
 
 	list_destroy(&dmi->dmi_handles);
 	list_destroy(&dmi->dmi_datasets);
-	list_destroy(&dmi->dmi_mdsppids);
+	list_destroy(&dmi->dmi_mds_sids);
 	list_destroy(&dmi->dmi_uaddrs);
 	mutex_destroy(&dmi->dmi_zap_lock);
 	mutex_destroy(&dmi->dmi_content_lock);
@@ -341,9 +339,9 @@ dserv_mds_setup()
 	    sizeof (open_fsid_objset_t), 0,
 	    NULL, NULL, NULL,
 	    NULL, NULL, 0);
-	mds_ppid_map_cache =
-	    kmem_cache_create("mds_ppid_map_cache",
-	    sizeof (mds_ppid_map_t), 0,
+	mds_sid_map_cache =
+	    kmem_cache_create("mds_sid_map_cache",
+	    sizeof (mds_sid_map_t), 0,
 	    NULL, NULL, NULL,
 	    NULL, NULL, 0);
 	dserv_uaddr_cache = kmem_cache_create("dserv_uaddr_cache",
@@ -424,14 +422,14 @@ dserv_mds_instance_teardown()
 		}
 	}
 
-	if (!list_is_empty(&inst->dmi_mdsppids)) {
-		mds_ppid_map_t *tmp_ppid;
+	if (!list_is_empty(&inst->dmi_mds_sids)) {
+		mds_sid_map_t *tmp_sid;
 
-		for (tmp_ppid = list_head(&inst->dmi_mdsppids);
-		    tmp_ppid != NULL;
-		    tmp_ppid = list_head(&inst->dmi_mdsppids)) {
-			list_remove(&inst->dmi_mdsppids, tmp_ppid);
-			kmem_cache_free(mds_ppid_map_cache, tmp_ppid);
+		for (tmp_sid = list_head(&inst->dmi_mds_sids);
+		    tmp_sid != NULL;
+		    tmp_sid = list_head(&inst->dmi_mds_sids)) {
+			list_remove(&inst->dmi_mds_sids, tmp_sid);
+			kmem_cache_free(mds_sid_map_cache, tmp_sid);
 		}
 	}
 
@@ -482,7 +480,7 @@ dserv_mds_teardown()
 	kmem_cache_destroy(dserv_mds_instance_cache);
 	kmem_cache_destroy(dserv_open_root_objset_cache);
 	kmem_cache_destroy(dserv_open_fsid_objset_cache);
-	kmem_cache_destroy(mds_ppid_map_cache);
+	kmem_cache_destroy(mds_sid_map_cache);
 	kmem_cache_destroy(dserv_uaddr_cache);
 	kmem_cache_destroy(dserv_mds_handle_cache);
 	rw_destroy(&dserv_mds_instance_tree_lock);
@@ -638,12 +636,12 @@ out:
 }
 
 /*
- * populate_mdsppid_cache - Reads the on-disk MDS PPID information and
+ * populate_mds_sid_cache - Reads the on-disk MDS SID information and
  * populates the in-core representation of this.
  *
  * osp - The object set pointer of a root pNFS dataset.
- *       ObjectID 1 in this dataset is where the MDS PPID information resides.
- *	 The data is in the format of an xdr encoded array of MDSPPIDs.
+ *       ObjectID 1 in this dataset is where the MDS SID information resides.
+ *	 The data is in the format of an xdr encoded array of MDS SIDSs.
  *
  * inst - The caller's instance information.
  *
@@ -654,7 +652,7 @@ out:
  */
 /*ARGSUSED*/
 int
-populate_mdsppid_cache(objset_t *osp, dserv_mds_instance_t *inst)
+populate_mds_sid_cache(objset_t *osp, dserv_mds_instance_t *inst)
 {
 	uint64_t size;
 	dmu_object_info_t dmu_obj_info;
@@ -682,7 +680,7 @@ populate_mdsppid_cache(objset_t *osp, dserv_mds_instance_t *inst)
 	}
 	/* Parse the data */
 
-	/* Add entry to mdsppid list */
+	/* Add entry to mds sid list */
 	return (error);
 }
 
@@ -716,13 +714,13 @@ dserv_mds_addobjset(const char *objsetname)
 			    MAXPATHLEN) == 0) {
 #if 0
 				/*
-				 * Populate in-core MDS PPID Map from
+				 * Populate in-core MDS SID Map from
 				 * on-disk info.  Note, this error does not
 				 * have to be returned to the caller.
 				 * If we fail to populate the cache, just
 				 * do it at a later time...
 				 */
-				error = populate_mdsppid_cache(tmp->oro_osp,
+				error = populate_mds_sid_cache(tmp->oro_osp,
 				    inst);
 #endif
 				goto out;
@@ -745,9 +743,9 @@ dserv_mds_addobjset(const char *objsetname)
 	list_insert_tail(&inst->dmi_datasets, new_objset);
 #if 0
 	/*
-	 * Populate in-core MDS PPID map from on-disk info.
+	 * Populate in-core MDS SID map from on-disk info.
 	 */
-	error = populate_mdsppid_cache(osp, inst);
+	error = populate_mds_sid_cache(osp, inst);
 	if (error)
 		goto out;
 #endif
@@ -793,7 +791,7 @@ dserv_mds_addport(const char *uaddr, const char *proto, const char *aname)
 	    (caddr_t)&res, xdr_DS_EXIBIres);
 
 	if (error == 0 && res.status == DS_OK)
-		inst->dmi_ds_id = res.DS_EXIBIres_u.dhr_res_ok.ds_id;
+		inst->dmi_ds_id = res.DS_EXIBIres_u.res_ok.ds_id;
 
 out:
 	dserv_instance_exit(inst);
@@ -946,7 +944,7 @@ dserv_mds_reportavail()
 		    guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_val = xdr_buffer;
 
 		/*
-		 * ToDo: This should include the list of MDS_PPIDs
+		 * ToDo: This should include the list of MDS SIDs
 		 * that the data-server knows about. In case
 		 * the MDS has lost it's way and needs a friend
 		 * to help it out.
@@ -962,8 +960,8 @@ dserv_mds_reportavail()
 	    (caddr_t)&res, xdr_DS_REPORTAVAILres);
 
 	/*
-	 * ToDo: Store MDS_PPIDs that we get back in the on-disk storage
-	 * and in the in-memory MDS_PPID map.
+	 * ToDo: Store MDS SIDs that we get back in the on-disk storage
+	 * and in the in-memory MDS SID map.
 	 */
 
 	/* Free arguments and results */

@@ -26,8 +26,6 @@
 #ifndef _NNODE_H
 #define	_NNODE_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <nfs/nfs4_kprot.h>
 
 #include <sys/types.h>
