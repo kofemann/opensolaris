@@ -1927,25 +1927,6 @@ ds_owner_alloc(DS_EXIBIargs *drap)
 	return (dop);
 }
 
-/*
- * When we get a DS_REPOTAVAIL control-protocol message,
- * this will populste the following MDS tables.
- *
- * ds_addr:
- *  ds_addrs will be used to populate the ds_addr
- *  table. it also has an indication on the usage of
- *  the address, either control-protocol use or
- *  NFS Client facing interface (or both)
- *
- * ds_guid_info:
- *
- */
-/*
- */
-rfs4_table_t *ds_guid_info_tab;
-rfs4_index_t *ds_guid_info_idx;
-krwlock_t ds_guid_info_lock;
-
 void
 ds_guid_free(ds_guid_t *gp)
 {

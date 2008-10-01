@@ -26,6 +26,10 @@
 #ifndef _MDS_STATE_H
 #define	_MDS_STATE_H
 
+#ifdef	__cplusplus
+extern "C" {
+#endif
+
 #include <sys/id_space.h>
 #include <nfs/nfs4_db_impl.h>
 #include <nfs/ds_prot.h>
@@ -202,4 +206,9 @@ extern ds_addr_t *mds_find_ds_addr(nfs_server_instance_t *, uint32_t);
 extern ds_addr_t *mds_find_ds_addr_by_uaddr(nfs_server_instance_t *, char *);
 extern int uaddr2sockaddr(int, char *, void *, in_port_t *);
 extern int mds_put_layout(mds_layout_t *, vnode_t *);
+
+#ifdef	__cplusplus
+}
+#endif
+
 #endif /* _MDS_STATE_H */

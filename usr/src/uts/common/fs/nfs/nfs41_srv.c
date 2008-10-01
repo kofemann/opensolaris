@@ -8278,7 +8278,8 @@ mds_get_flo(struct compound_state *cs, mds_layout_t **flopp)
 	/* do we have a odl already ? */
 	if (fp->flp == NULL) {
 		/* Nope, read from disk */
-		if ((stat = mds_get_odl(cs->vp, &fp->flp)) != NFS4_OK) {
+		stat = mds_get_odl(cs->vp, &fp->flp);
+		if (stat != NFS4_OK) {
 			/*
 			 * XXXXX:
 			 * XXXXX: No ODL, so lets go query PE

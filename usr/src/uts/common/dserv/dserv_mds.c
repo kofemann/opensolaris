@@ -866,6 +866,9 @@ dserv_mds_reportavail()
 	int error = 0;
 	int i, acount, pcount;
 
+	int acount_done = 0;
+	int pcount_done = 0;
+
 	error = dserv_instance_enter(RW_READER, B_FALSE, &inst);
 	if (error)
 		return (error);
@@ -903,6 +906,8 @@ dserv_mds_reportavail()
 		ua = list_next(&inst->dmi_uaddrs, ua);
 	}
 
+	acount_done = acount;
+
 	args.ds_attrvers = DS_ATTR_v1;
 
 	args.ds_storinfo.ds_storinfo_len = pcount;
@@ -924,6 +929,8 @@ dserv_mds_reportavail()
 
 		zfsguid.zpool_guid = root->oro_ds_guid.dg_zpool_guid;
 		zfsguid.dataset_guid = root->oro_ds_guid.dg_objset_guid;
+
+		pcount_done++;
 
 		xdr_size = xdr_sizeof(xdr_ds_zfsguid, &zfsguid);
 		ASSERT(xdr_size);
@@ -964,24 +971,31 @@ dserv_mds_reportavail()
 	 * and in the in-memory MDS SID map.
 	 */
 
+out:
 	/* Free arguments and results */
-	for (i = 0; i < pcount; i++) {
-		kmem_free(args.ds_storinfo.ds_storinfo_val[i].ds_storinfo_u.
-		    zfs_info.guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_val,
-		    args.ds_storinfo.ds_storinfo_val[i].ds_storinfo_u.zfs_info.
-		    guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_len);
+	for (i = 0; i < pcount_done; i++) {
+		if (args.ds_storinfo.ds_storinfo_val[i].ds_storinfo_u.zfs_info.
+		    guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_len) {
+			kmem_free(args.ds_storinfo.ds_storinfo_val[i].
+			    ds_storinfo_u.zfs_info.guid_map.ds_guid.ds_guid_u.
+			    zfsguid.zfsguid_val,
+			    args.ds_storinfo.ds_storinfo_val[i].ds_storinfo_u.
+			    zfs_info.guid_map.ds_guid.ds_guid_u.
+			    zfsguid.zfsguid_len);
+		}
 	}
-	for (i = 0; i < acount; i++) {
+
+	for (i = 0; i < acount_done; i++) {
 		dserv_strfree(args.ds_addrs.ds_addrs_val[i].addr.na_r_netid);
 		dserv_strfree(args.ds_addrs.ds_addrs_val[i].addr.na_r_addr);
 	}
+
 	kmem_free(args.ds_addrs.ds_addrs_val,
 	    args.ds_addrs.ds_addrs_len * sizeof (struct ds_addr));
 
 	if (!error)
 		xdr_free(xdr_DS_REPORTAVAILres, (caddr_t)&res);
 
-out:
 	dserv_instance_exit(inst);
 	return (error);
 }
