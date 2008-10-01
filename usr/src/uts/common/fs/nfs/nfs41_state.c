@@ -1641,6 +1641,8 @@ ds_addr_create(rfs4_entry_t u_entry, void *arg)
 	dp->dev_addr.na_r_netid = u_dp->dev_netid;
 	dp->dev_addr.na_r_addr = u_dp->dev_addr;
 	dp->ds_owner = NULL;
+	dp->dev_knc = NULL;
+	dp->dev_nb = NULL;
 	return (TRUE);
 }
 
@@ -1649,6 +1651,15 @@ ds_addr_create(rfs4_entry_t u_entry, void *arg)
 static void
 ds_addr_destroy(rfs4_entry_t foo)
 {
+	ds_addr_t *dp = (ds_addr_t *)foo;
+
+	if (dp->dev_knc != NULL)
+		kmem_free(dp->dev_knc, sizeof (struct knetconfig));
+	if (dp->dev_nb != NULL) {
+		if (dp->dev_nb->buf)
+			kmem_free(dp->dev_nb->buf, dp->dev_nb->maxlen);
+		kmem_free(dp->dev_nb, sizeof (struct netbuf));
+	}
 }
 
 

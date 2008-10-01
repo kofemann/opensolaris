@@ -651,6 +651,128 @@ mds_ds_addr_update(ds_owner_t *dop, struct ds_addr *dap)
 	return (stat);
 }
 
+/*
+ * mds_ds_initnet builds a knetconfig structure for the
+ * netid, address and port.
+ */
+int
+mds_ds_initnet(ds_addr_t *dp)
+{
+	struct sockaddr_in *addr4;
+	struct sockaddr_in6 *addr6;
+	char *devname;
+	vnode_t *vp;
+	int error;
+	int af;
+	int newknc = 0, newnb = 0;
+
+	if (dp->dev_knc == NULL) {
+		newknc = 1;
+		dp->dev_knc = kmem_zalloc(sizeof (struct knetconfig), KM_SLEEP);
+	}
+
+	dp->dev_knc->knc_semantics = NC_TPI_COTS;
+	if (strcmp(dp->dev_addr.na_r_netid, "tcp") == 0) {
+		dp->dev_knc->knc_protofmly = "inet";
+		dp->dev_knc->knc_proto = "tcp";
+		devname = "/dev/tcp";
+		af = AF_INET;
+	} else if (strcmp(dp->dev_addr.na_r_netid, "tcp6") == 0) {
+		dp->dev_knc->knc_protofmly = "inet6";
+		dp->dev_knc->knc_proto = "tcp"; /* why not tcp6? */
+		devname = "/dev/tcp6";
+		af = AF_INET6;
+	} else {
+		error = EINVAL;
+		goto out;
+	}
+
+	error = lookupname(devname, UIO_SYSSPACE, FOLLOW, NULLVPP, &vp);
+	if (error)
+		goto out;
+	if (vp->v_type != VCHR) {
+		VN_RELE(vp);
+		error = EINVAL;
+		goto out;
+	}
+	dp->dev_knc->knc_rdev = vp->v_rdev;
+	VN_RELE(vp);
+
+	if (dp->dev_nb == NULL) {
+		newnb = 1;
+		dp->dev_nb = kmem_zalloc(sizeof (struct netbuf), KM_SLEEP);
+	} else if (dp->dev_nb->buf)
+		kmem_free(dp->dev_nb->buf, dp->dev_nb->maxlen);
+
+	if (af == AF_INET) {
+		dp->dev_nb->maxlen = dp->dev_nb->len =
+		    sizeof (struct sockaddr_in);
+		dp->dev_nb->buf = kmem_zalloc(dp->dev_nb->maxlen, KM_SLEEP);
+		addr4 = (struct sockaddr_in *)dp->dev_nb->buf;
+		addr4->sin_family = af;
+		error = uaddr2sockaddr(af, dp->dev_addr.na_r_addr,
+		    &addr4->sin_addr, &addr4->sin_port);
+	} else { /* AF_INET6 */
+		dp->dev_nb->maxlen = dp->dev_nb->len =
+		    sizeof (struct sockaddr_in6);
+		dp->dev_nb->buf = kmem_zalloc(dp->dev_nb->maxlen, KM_SLEEP);
+		addr6 = (struct sockaddr_in6 *)dp->dev_nb->buf;
+		addr6->sin6_family = af;
+		error = uaddr2sockaddr(af, dp->dev_addr.na_r_addr,
+		    &addr6->sin6_addr, &addr6->sin6_port);
+	}
+
+out:
+	if (error) {
+		if (newknc && dp->dev_knc) {
+			kmem_free(dp->dev_knc, sizeof (struct knetconfig));
+			dp->dev_knc = NULL;
+		}
+		if (newnb && dp->dev_nb) {
+			if (dp->dev_nb->buf)
+				kmem_free(dp->dev_nb->buf, dp->dev_nb->maxlen);
+			kmem_free(dp->dev_nb, sizeof (struct netbuf));
+			dp->dev_nb = NULL;
+		}
+	}
+	return (error);
+}
+
+int
+mds_ds_call(ds_addr_t *dp, rpcproc_t proc,
+    xdrproc_t xdrarg, void * argp,
+    xdrproc_t xdrres, void * resp)
+{
+	enum clnt_stat status;
+	struct timeval wait;
+	int error = 0;
+	CLIENT *client;
+
+	wait.tv_sec = 5;
+	wait.tv_usec = 0;
+
+	error = clnt_tli_kcreate(dp->dev_knc, dp->dev_nb,
+	    PNFSCTLMDS, PNFSCTLMDS_V1, 0, 0, CRED(), &client);
+	if (error)
+		goto out;
+
+	status = CLNT_CALL(client, proc,
+	    xdrarg, argp,
+	    xdrres, resp,
+	    wait);
+
+	if (status != RPC_SUCCESS) {
+		cmn_err(CE_WARN, "CLNT_CALL() mds protocol to ds failed: %d",
+		    status);
+		error = EIO;
+	}
+
+	CLNT_DESTROY(client);
+
+out:
+	return (error);
+}
+
 ds_status
 mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
     DS_REPORTAVAILres  *resp)
@@ -662,13 +784,27 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 	XDR xdr;
 	int xdr_size;
 	char *xdr_buffer;
+	ds_addr_t *dp;
+	ds_addr *addrp;
+	nfs_server_instance_t *instp;
+	int err;
 
 	/*
 	 * First deal with the universal addresses
 	 */
-	for (i = 0; i < argp->ds_addrs.ds_addrs_len; i++)
-		(void) mds_ds_addr_update(dop,
-		    &argp->ds_addrs.ds_addrs_val[i]);
+	for (i = 0; i < argp->ds_addrs.ds_addrs_len; i++) {
+		addrp = &argp->ds_addrs.ds_addrs_val[i];
+		(void) mds_ds_addr_update(dop, addrp);
+		instp = dbe_to_instp(dop->dbe);
+		dp = mds_find_ds_addr_by_uaddr(instp, addrp->addr.na_r_addr);
+		if (dp == NULL)
+			continue;
+		err = mds_ds_initnet(dp);
+		if (err)
+			continue;
+		err = mds_ds_call(dp, DSPROC_NULL,
+		    xdr_void, NULL, xdr_void, NULL);
+	}
 
 	res_ok = &(resp->DS_REPORTAVAILres_u.res_ok);
 

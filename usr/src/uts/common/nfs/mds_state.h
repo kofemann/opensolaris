@@ -136,11 +136,13 @@ typedef struct {
  * layout and the multipath device struct (mds_mpd)
  */
 typedef struct {
-	rfs4_dbe_t	*dbe;
-	netaddr4	dev_addr;
-	uint_t		dev_flags;
-	ds_owner_t	*ds_owner;
-	list_node_t	ds_addr_next;
+	rfs4_dbe_t		*dbe;
+	netaddr4		dev_addr;
+	struct knetconfig	*dev_knc;
+	struct netbuf		*dev_nb;
+	uint_t			dev_flags;
+	ds_owner_t		*ds_owner;
+	list_node_t		ds_addr_next;
 } ds_addr_t;
 
 /*
@@ -197,6 +199,7 @@ typedef struct {
 
 extern void mds_xdr_devicelist(rfs4_entry_t, void *);
 extern ds_addr_t *mds_find_ds_addr(nfs_server_instance_t *, uint32_t);
-
+extern ds_addr_t *mds_find_ds_addr_by_uaddr(nfs_server_instance_t *, char *);
+extern int uaddr2sockaddr(int, char *, void *, in_port_t *);
 extern int mds_put_layout(mds_layout_t *, vnode_t *);
 #endif /* _MDS_STATE_H */

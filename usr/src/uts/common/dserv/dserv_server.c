@@ -900,14 +900,14 @@ dserv_dispatch(struct svc_req *req, SVCXPRT *xprt)
 {
 	rpcproc_t the_proc;
 	union nfs_mds_cp_sarg darg;
-	/* union nfs_mds_cp_sres dres; */
+	union nfs_mds_cp_sres dres;
 	struct nfs_cp_disp *disp;
 
 	/*
 	 * validate version and procedure
 	 */
 	if (req->rq_vers != PNFSCTLMDS_V1) {
-		svcerr_progvers(req->rq_xprt, PNFSCTLMDS_V1, PNFSCTLMDS_V1);
+		svcerr_progvers(xprt, PNFSCTLMDS_V1, PNFSCTLMDS_V1);
 		DTRACE_PROBE2(dserv__e__mdscp__badvers, rpcvers_t, req->rq_vers,
 		    rpcvers_t, PNFSCTLMDS_V1);
 		return;
@@ -915,7 +915,7 @@ dserv_dispatch(struct svc_req *req, SVCXPRT *xprt)
 
 	the_proc = req->rq_proc;
 	if (the_proc < 0 || the_proc >= NFS_MDS_CP_ILLEGAL_PROC) {
-		svcerr_noproc(req->rq_xprt);
+		svcerr_noproc(xprt);
 		DTRACE_PROBE1(dserv__e__mdscp__badproc, rpcproc_t, the_proc);
 		return;
 	}
@@ -944,8 +944,38 @@ dserv_dispatch(struct svc_req *req, SVCXPRT *xprt)
 
 	DTRACE_PROBE1(dserv__i__dserv_dispatch, int, the_proc);
 
-	/* Since this is just the foundation, we return Je ne proc pas. */
-	svcerr_noproc(req->rq_xprt);
+	/*
+	 * dispatch the call
+	 * XXX - idempotency / dup checking
+	 * XXX - getfh to check export
+	 * XXX - T_DONTPEND/T_WOULDBLOCK
+	 * XXX - auth_tooweak check
+	 * XXX - counters of any kind
+	 */
+	bzero(&dres, sizeof (union nfs_mds_cp_sres));
+	(*disp->proc)(darg, dres, req);
+
+	/*
+	 * send the reply
+	 */
+	if (!svc_sendreply(xprt, disp->encode_reply, (char *)&dres)) {
+		DTRACE_PROBE(dserv__e__svc_sendreply);
+		svcerr_systemerr(xprt);
+	}
+
+	/*
+	 * free results
+	 */
+	if (disp->resfree)
+		(*disp->resfree)(dres);
+
+	/*
+	 * free args
+	 */
+	if (!SVC_FREEARGS(xprt, disp->decode_args, (char *)&darg)) {
+		DTRACE_PROBE(dserv__e__svc_freeargs);
+	}
+
 }
 
 /* ARGSUSED */

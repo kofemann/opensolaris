@@ -71,7 +71,7 @@ static rfs4_deleg_state_t *rfs4_deleg_state(struct compound_state *,
  * Convert a universal address to an transport specific
  * address using inet_pton.
  */
-static int
+int
 uaddr2sockaddr(int af, char *ua, void *ap, in_port_t *pp)
 {
 	int dots = 0, i, j, len, k;
