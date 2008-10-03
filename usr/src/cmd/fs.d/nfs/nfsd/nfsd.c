@@ -836,9 +836,9 @@ qstrcmp(const void *p1, const void *p2)
 
 /* struct used for stable storage */
 struct ss_info {
-	int filever;
+	uint64_t filever;
 	uint64_t verifier;
-	uint_t id_len;
+	uint64_t id_len;
 };
 #define	INFO_SZ	sizeof (struct ss_info)
 
@@ -857,9 +857,11 @@ ss_write_client(char *path, struct ss_state_rec *statep)
 		return (-1);
 	}
 
-	size = sizeof (struct ss_state_rec) + statep->ss_len;
+	size = sizeof (struct ss_state_rec) + (int)statep->ss_len;
 	if ((wbytes = write(fd, (void *)statep, size)) != size) {
-		syslog(LOG_ERR, "write failed for %s: write(%d) returned %d errno=%d ss_len=%d\n", path, size, wbytes, errno, statep->ss_len);
+		syslog(LOG_ERR,
+		    "write failed for %s: write(%d) returned %d errno=%d\n",
+		    path, size, wbytes, errno);
 		ret = -1;
 	}
 
@@ -927,7 +929,7 @@ read_client_state(char *path, char *statep, int remain)
 
 	ret = (read(fd, (void *)&cl_info, INFO_SZ) != INFO_SZ);
 
-	len = cl_info.id_len;
+	len = (int)cl_info.id_len;
 	killit = (cl_info.filever != NFS4_SS_VERSION || len < 1);
 	if (ret || killit) {
 		close(fd);
@@ -955,7 +957,7 @@ read_client_state(char *path, char *statep, int remain)
 		memcpy(sp->ssr_val, recp->ss_val, len);
 		sp->ssr_veri = cl_info.verifier;
 		sp->ssr_len = len;
-		ret = len + sizeof (uint64_t) + sizeof (uint_t);
+		ret = len + sizeof (uint64_t) + sizeof (uint64_t);
 	} else {
 		ret = -1;
 	}

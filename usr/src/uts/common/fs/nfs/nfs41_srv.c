@@ -8262,7 +8262,6 @@ mds_get_flo(struct compound_state *cs, mds_layout_t **flopp)
 	extern int mds_get_odl(vnode_t *, struct mds_layout **);
 
 	rfs4_file_t *fp;
-	nfsstat4    stat;
 
 	ASSERT(cs->vp);
 	ASSERT(flopp);
@@ -8278,8 +8277,7 @@ mds_get_flo(struct compound_state *cs, mds_layout_t **flopp)
 	/* do we have a odl already ? */
 	if (fp->flp == NULL) {
 		/* Nope, read from disk */
-		stat = mds_get_odl(cs->vp, &fp->flp);
-		if (stat != NFS4_OK) {
+		if (mds_get_odl(cs->vp, &fp->flp) != NFS4_OK) {
 			/*
 			 * XXXXX:
 			 * XXXXX: No ODL, so lets go query PE

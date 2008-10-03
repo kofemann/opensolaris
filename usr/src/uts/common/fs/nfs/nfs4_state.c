@@ -371,13 +371,13 @@ rfs4_ss_build_reclaim_list(nfs_server_instance_t *instp, char *resbuf)
 	for (c = resp->nsize; c > 0; c--) {
 		oldp = kmem_alloc(sizeof (rfs4_reclaim_t), KM_SLEEP);
 		oldp->ss_pn = NULL;
-		len = clp->ssr_len;
+		len = (int)clp->ssr_len;
 		oldp->cl_id4.id_val = kmem_alloc(len, KM_SLEEP);
 		oldp->cl_id4.verifier = clp->ssr_veri;
 		oldp->cl_id4.id_len = len;
 		bcopy(clp->ssr_val, oldp->cl_id4.id_val, len);
 		list_insert_head(&instp->reclaim_head, oldp);
-		len += (sizeof (uint64_t) + sizeof (uint_t));
+		len += (sizeof (uint64_t) + sizeof (uint64_t));
 		len = P2ROUNDUP(len, 8);
 		clp = (struct ss_rd_state *)((char *)clp + len);
 	}

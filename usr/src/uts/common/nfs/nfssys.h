@@ -408,15 +408,15 @@ struct nfs4_svc_args32 {
 
 /* state to be written out to stable storage */
 struct ss_state_rec {
-	int ss_fvers;
+	uint64_t ss_fvers;
 	uint64_t ss_veri;
-	uint_t ss_len;
+	uint64_t ss_len;
 	char ss_val[1];
 };
 /* state returned from stable storage */
 struct ss_rd_state {
 	uint64_t ssr_veri;
-	uint_t ssr_len;
+	uint64_t ssr_len;
 	char ssr_val[1];
 };
 /* stable storage door arg struct */
