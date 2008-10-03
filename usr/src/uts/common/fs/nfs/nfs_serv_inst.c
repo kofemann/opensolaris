@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"@(#)nfs_serv_inst.c	1.1	08/04/30 SMI"
-
 #include <sys/systm.h>
 #include <nfs/nfs4.h>
 #include <nfs/nfs_serv_inst.h>
