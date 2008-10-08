@@ -19,17 +19,16 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
 
 .KEEP_STATE:
 
 include ../../Makefile.cmd
 
 CONFIGS = fileio.prof filemacro.prof filemicro.prof generic.func \
-seqread.prof randomread.prof
+seqread.prof randomread.prof multi_fileserver.prof
 ROOTUSRBENCHDIR = $(ROOT)/usr/benchmarks
 ROOTUSRBENCHFBCONFIGDIR = $(ROOTUSRBENCHDIR)/filebench/config
 FBCONFIGS = $(CONFIGS:%=$(ROOTUSRBENCHFBCONFIGDIR)/%)

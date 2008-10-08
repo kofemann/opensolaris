@@ -181,4 +181,6 @@ evtchn:* 0666 root sys
 privcmd:* 0666 root sys
 xenbus:* 0666 root sys
 fm:* 0644 root sys
+amd_iommu:* 0644 root sys
+xpvtap:* 0666 root sys
 dserv:* 0666 root sys

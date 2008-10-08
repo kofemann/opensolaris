@@ -2,9 +2,8 @@
 # CDDL HEADER START
 #
 # The contents of this file are subject to the terms of the
-# Common Development and Distribution License, Version 1.0 only
-# (the "License").  You may not use this file except in compliance
-# with the License.
+# Common Development and Distribution License (the "License").
+# You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
 # or http://www.opensolaris.org/os/licensing.
@@ -19,17 +18,17 @@
 #
 # CDDL HEADER END
 #
+
 #
-# uts/intel/sysinit/Makefile
-#
-# Copyright 2005 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+
 #
-#	This makefile drives the production of the sysinit kernel module.
+#	This makefile drives the production of the xpvtap
+#	driver module.
 #
-#	intel architecture dependent
+#	i86xpv architecture dependent
 #
 
 #
@@ -40,22 +39,15 @@ UTSBASE	= ../..
 #
 #	Define the module and object file sets.
 #
-MODULE		= sysinit
-OBJECTS		= $(SYSINIT_OBJS:%=$(OBJS_DIR)/%)
-LINTS		= $(SYSINIT_OBJS:%.o=$(LINTS_DIR)/%.ln)
-ROOTMODULE	= $(ROOT_MISC_DIR)/$(MODULE)
+MODULE		= xpvtap
+OBJECTS		= $(XPVTAP_OBJS:%=$(OBJS_DIR)/%)
+LINTS		= $(XPVTAP_OBJS:%.o=$(LINTS_DIR)/%.ln)
+ROOTMODULE	= $(ROOT_PSM_DRV_DIR)/$(MODULE)
 
 #
 #	Include common rules.
 #
-include $(UTSBASE)/intel/Makefile.intel
-
-#
-#	Avoid signing the sysinit modules
-#	    They will be modified during installation,
-#	    rendering any signature invalid.
-#
-ELFSIGN_OBJECT	= true
+include $(UTSBASE)/i86xpv/Makefile.i86xpv
 
 #
 #	Define targets
@@ -64,11 +56,18 @@ ALL_TARGET	= $(BINARY)
 LINT_TARGET	= $(MODULE).lint
 INSTALL_TARGET	= $(BINARY) $(ROOTMODULE)
 
+LDFLAGS		+= 
+
 #
-#	Overrides.
+# use Solaris specific code in xen public header files
 #
-MAPFILE		= mapfile-order
-LDFLAGS		+= -M $(MAPFILE)
+CFLAGS		+= -D_SOLARIS
+LINTFLAGS	+= -D_SOLARIS
+
+LINTTAGS	+= -erroff=E_PTRDIFF_OVERFLOW
+LINTTAGS	+= -erroff=E_ASSIGN_NARROW_CONV
+LINTTAGS	+= -erroff=E_BAD_PTR_CAST_ALIGN
+LINTTAGS	+= -erroff=E_CONSTANT_CONDITION
 
 #
 #	Default build targets.
@@ -94,4 +93,4 @@ install:	$(INSTALL_DEPS)
 #
 #	Include common targets.
 #
-include $(UTSBASE)/intel/Makefile.targ
+include $(UTSBASE)/i86xpv/Makefile.targ

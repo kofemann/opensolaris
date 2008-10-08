@@ -38,6 +38,8 @@ SUBDIRS = \
 	libSTK_9840 \
 	libSTK_T9840B \
 	libSTK_T9840C \
+	libSTK_T9940A \
+	libSTK_T9940B \
 	libdefault
 
 .KEEP_STATE:

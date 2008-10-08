@@ -20,10 +20,9 @@
 #
 
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 
 PATH=/usr/bin:/usr/sbin:${PATH}
@@ -49,6 +48,7 @@ not_installed()
 #
 not_installed cnex  || rem_drv -b "${BASEDIR}" cnex  || EXIT=1
 not_installed drctl || rem_drv -b "${BASEDIR}" drctl || EXIT=1
+not_installed vlds  || rem_drv -b "${BASEDIR}" vlds  || EXIT=1
 not_installed vcc   || rem_drv -b "${BASEDIR}" vcc   || EXIT=1
 not_installed vdc   || rem_drv -b "${BASEDIR}" vdc   || EXIT=1
 not_installed vds   || rem_drv -b "${BASEDIR}" vds   || EXIT=1

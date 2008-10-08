@@ -151,6 +151,7 @@ VDC_OBJS	= vdc.o
 VDS_OBJS	= vds.o
 DS_PRI_OBJS	= ds_pri.o
 DS_SNMP_OBJS	= ds_snmp.o
+VLDS_OBJS	= vlds.o
 
 #
 #			Misc modules
@@ -159,7 +160,7 @@ BOOTDEV_OBJS	+= bootdev.o
 DR_CPU_OBJS	+= dr_cpu.o
 DR_IO_OBJS	+= dr_io.o
 DRCTL_OBJS	= drctl.o drctl_impl.o dr_util.o
-DS_OBJS		= ds.o
+DS_OBJS		= ds_common.o ds_drv.o
 FAULT_ISO_OBJS	= fault_iso.o
 OBPSYM_OBJS	+= obpsym.o obpsym_1275.o
 PLATSVC_OBJS	= platsvc.o mdeg.o
@@ -174,6 +175,7 @@ SN1_BRAND_OBJS		= sn1_brand.o sn1_brand_asm.o
 #
 NI_PCBE_OBJS	= niagara_pcbe.o
 N2_PCBE_OBJS	= niagara2_pcbe.o
+RK_PCBE_OBJS	= rock_pcbe.o
 
 #
 #			cpu modules
@@ -184,6 +186,7 @@ NIAGARACPU_OBJS = niagara.o niagara_copy.o common_asm.o niagara_perfctr.o
 NIAGARACPU_OBJS += niagara_asm.o atomic.o
 NIAGARA2CPU_OBJS = niagara2.o niagara_copy.o common_asm.o niagara_perfctr.o
 NIAGARA2CPU_OBJS += niagara2_asm.o atomic.o
+ROCKCPU_OBJS = rock.o rock_copy.o common_asm.o rock_atomic.o rock_asm.o 
 
 #
 #			platform module
