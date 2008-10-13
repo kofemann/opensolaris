@@ -614,20 +614,21 @@ mds_find_ds_owner(DS_EXIBIargs *args, bool_t *create)
 /*
  */
 ds_status
-mds_ds_addr_update(ds_owner_t *dop, struct ds_addr *dap)
+mds_ds_addrlist_update(ds_owner_t *dop, struct ds_addr *dap)
 {
 	struct mds_adddev_args darg;
 	bool_t create = FALSE;
-	ds_addr_t *devp;
+	ds_addrlist_t *devp;
 	ds_status stat = DS_OK;
 
 	/* search for existing entry */
-	rw_enter(&mds_server->ds_addr_lock, RW_WRITER);
-	if ((devp = (ds_addr_t *)rfs4_dbsearch(mds_server->ds_addr_uaddr_idx,
+	rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
+	if ((devp = (ds_addrlist_t *)rfs4_dbsearch(
+	    mds_server->ds_addrlist_uaddr_idx,
 	    (void *)dap->addr.na_r_addr,
 	    &create, NULL, RFS4_DBS_VALID)) != NULL) {
 		MDS_SET_DS_FLAGS(devp->dev_flags, dap->validuse);
-		rw_exit(&mds_server->ds_addr_lock);
+		rw_exit(&mds_server->ds_addrlist_lock);
 		return (stat);
 	}
 
@@ -637,17 +638,17 @@ mds_ds_addr_update(ds_owner_t *dop, struct ds_addr *dap)
 	darg.dev_addr  = kstrdup(dap->addr.na_r_addr);
 
 	/* make it */
-	devp = (ds_addr_t *)rfs4_dbcreate(mds_server->ds_addr_idx,
+	devp = (ds_addrlist_t *)rfs4_dbcreate(mds_server->ds_addrlist_idx,
 	    (void *)&darg);
 
 	if (devp) {
 		devp->ds_owner = dop;
 		MDS_SET_DS_FLAGS(devp->dev_flags, dap->validuse);
-		list_insert_tail(&dop->ds_addr_list, devp);
+		list_insert_tail(&dop->ds_addrlist_list, devp);
 	} else
 		stat = DSERR_INVAL;
 
-	rw_exit(&mds_server->ds_addr_lock);
+	rw_exit(&mds_server->ds_addrlist_lock);
 	return (stat);
 }
 
@@ -656,7 +657,7 @@ mds_ds_addr_update(ds_owner_t *dop, struct ds_addr *dap)
  * netid, address and port.
  */
 int
-mds_ds_initnet(ds_addr_t *dp)
+mds_ds_initnet(ds_addrlist_t *dp)
 {
 	struct sockaddr_in *addr4;
 	struct sockaddr_in6 *addr6;
@@ -739,7 +740,7 @@ out:
 }
 
 int
-mds_ds_call(ds_addr_t *dp, rpcproc_t proc,
+mds_ds_call(ds_addrlist_t *dp, rpcproc_t proc,
     xdrproc_t xdrarg, void * argp,
     xdrproc_t xdrres, void * resp)
 {
@@ -784,7 +785,7 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 	XDR xdr;
 	int xdr_size;
 	char *xdr_buffer;
-	ds_addr_t *dp;
+	ds_addrlist_t *dp;
 	ds_addr *addrp;
 	nfs_server_instance_t *instp;
 	int err;
@@ -794,9 +795,10 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 	 */
 	for (i = 0; i < argp->ds_addrs.ds_addrs_len; i++) {
 		addrp = &argp->ds_addrs.ds_addrs_val[i];
-		(void) mds_ds_addr_update(dop, addrp);
+		(void) mds_ds_addrlist_update(dop, addrp);
 		instp = dbe_to_instp(dop->dbe);
-		dp = mds_find_ds_addr_by_uaddr(instp, addrp->addr.na_r_addr);
+		dp = mds_find_ds_addrlist_by_uaddr(instp,
+		    addrp->addr.na_r_addr);
 		if (dp == NULL)
 			continue;
 		err = mds_ds_initnet(dp);
@@ -915,7 +917,7 @@ ds_reportavail(DS_REPORTAVAILargs *argp, DS_REPORTAVAILres *resp,
 	/*
 	 * ToDo: Check the verifier (args->ds_verifier).
 	 */
-	if (list_head(&dop->ds_addr_list) == NULL)
+	if (list_head(&dop->ds_addrlist_list) == NULL)
 		stat = mds_rpt_avail_add(dop, argp, resp);
 	else
 		stat = mds_rpt_avail_update(dop, argp, resp);
@@ -935,7 +937,7 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 	extern void mds_nuke_layout(nfs_server_instance_t *, uint32_t);
 
 	ds_owner_t *dop;
-	ds_addr_t *dp;
+	ds_addrlist_t *dp;
 	bool_t do_create = TRUE;
 	DS_EXIBIresok *dser = &(resp->DS_EXIBIres_u.res_ok);
 
@@ -964,12 +966,12 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 		 */
 
 		/* brute force it */
-		rw_enter(&mds_server->ds_addr_lock, RW_WRITER);
-		while (dp = list_head(&dop->ds_addr_list)) {
+		rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
+		while (dp = list_head(&dop->ds_addrlist_list)) {
 			rfs4_dbe_invalidate(dp->dbe);
-			list_remove(&dop->ds_addr_list, dp);
+			list_remove(&dop->ds_addrlist_list, dp);
 		}
-		rw_exit(&mds_server->ds_addr_lock);
+		rw_exit(&mds_server->ds_addrlist_lock);
 		/* what about the ds_guid_info list ?? */
 	}
 

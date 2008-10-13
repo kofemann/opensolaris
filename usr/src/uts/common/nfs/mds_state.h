@@ -102,10 +102,9 @@ typedef struct {
 	ds_id		ds_id;
 	ds_verifier	verifier;
 	uint32_t	dsi_flags;
-	list_t		ds_addr_list;
+	list_t		ds_addrlist_list;
 	list_t		ds_guid_list;
 } ds_owner_t;
-
 
 /*
  * Mapping of MDS_SID(s) (the MDS storage identifier) to
@@ -131,7 +130,7 @@ typedef struct {
 	dst = (dst & ~MDS_DEV_DS_MASK) | (MDS_DEV_DS_MASK & flg);
 
 /*
- * ds_addr:
+ * ds_addrlist:
  *
  * This list is updated via the control-protocol
  * message DS_REPORTAVAIL.
@@ -146,8 +145,8 @@ typedef struct {
 	struct netbuf		*dev_nb;
 	uint_t			dev_flags;
 	ds_owner_t		*ds_owner;
-	list_node_t		ds_addr_next;
-} ds_addr_t;
+	list_node_t		ds_addrlist_next;
+} ds_addrlist_t;
 
 /*
  * mds_mpd:
@@ -202,8 +201,9 @@ typedef struct {
 
 
 extern void mds_xdr_devicelist(rfs4_entry_t, void *);
-extern ds_addr_t *mds_find_ds_addr(nfs_server_instance_t *, uint32_t);
-extern ds_addr_t *mds_find_ds_addr_by_uaddr(nfs_server_instance_t *, char *);
+extern ds_addrlist_t *mds_find_ds_addrlist(nfs_server_instance_t *, uint32_t);
+extern ds_addrlist_t *mds_find_ds_addrlist_by_uaddr(nfs_server_instance_t *,
+	char *);
 extern int uaddr2sockaddr(int, char *, void *, in_port_t *);
 extern int mds_put_layout(mds_layout_t *, vnode_t *);
 

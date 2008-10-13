@@ -180,11 +180,11 @@ typedef struct nfs_server_instance {
 	rfs4_table_t *mds_mpd_tab;
 	rfs4_index_t *mds_mpd_idx;
 
-	krwlock_t    ds_addr_lock;
-	rfs4_table_t *ds_addr_tab;
-	rfs4_index_t *ds_addr_idx;
-	rfs4_index_t *ds_addr_ip_idx;
-	rfs4_index_t *ds_addr_uaddr_idx;
+	krwlock_t    ds_addrlist_lock;
+	rfs4_table_t *ds_addrlist_tab;
+	rfs4_index_t *ds_addrlist_idx;
+	rfs4_index_t *ds_addrlist_ip_idx;
+	rfs4_index_t *ds_addrlist_uaddr_idx;
 
 	krwlock_t    ds_guid_info_lock;
 	rfs4_table_t *ds_guid_info_tab;

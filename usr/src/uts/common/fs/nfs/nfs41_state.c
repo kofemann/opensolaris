@@ -932,7 +932,7 @@ mds_layout_mkkey(rfs4_entry_t entry)
 struct mds_gather_args {
 	struct mds_addlo_args lo_arg;
 	uint32_t	dev_id;
-	ds_addr_t 	*dev_ptr[100];
+	ds_addrlist_t 	*dev_ptr[100];
 	int 		max_devs_needed;
 	int 		dex;
 };
@@ -965,7 +965,7 @@ mds_nuke_mpd(nfs_server_instance_t *instp, uint32_t mpd_id)
 void
 mds_gather_devs(rfs4_entry_t entry, void *arg)
 {
-	ds_addr_t	*dp = (ds_addr_t *)entry;
+	ds_addrlist_t	*dp = (ds_addrlist_t *)entry;
 	struct mds_gather_args *gap = (struct mds_gather_args *)arg;
 
 	if (rfs4_dbe_skip_or_invalid(dp->dbe))
@@ -1022,7 +1022,7 @@ mds_gen_mpd(nfs_server_instance_t *instp, struct mds_gather_args *args)
 	 * pointers
 	 */
 	for (ii = 0; ii < len; ii++) {
-		ds_addr_t *dp;
+		ds_addrlist_t *dp;
 
 		mplp[ii].multipath_list4_len = 1;
 		dp = args->dev_ptr[ii];
@@ -1057,9 +1057,9 @@ mds_gen_default_layout(nfs_server_instance_t *instp, int max_devs_needed)
 	args.max_devs_needed = MIN(max_devs_needed,
 	    MIN(mds_max_lo_devs, 99));
 
-	rw_enter(&instp->ds_addr_lock, RW_READER);
-	rfs4_dbe_walk(instp->ds_addr_tab, mds_gather_devs, &args);
-	rw_exit(&instp->ds_addr_lock);
+	rw_enter(&instp->ds_addrlist_lock, RW_READER);
+	rfs4_dbe_walk(instp->ds_addrlist_tab, mds_gather_devs, &args);
+	rw_exit(&instp->ds_addrlist_lock);
 
 	/*
 	 * if we didn't find any devices then we do no service
@@ -1101,7 +1101,7 @@ mds_layout_create(rfs4_entry_t u_entry, void *arg)
 {
 	mds_layout_t *lp = (mds_layout_t *)u_entry;
 	mds_mpd_t *mp;
-	ds_addr_t *dp;
+	ds_addrlist_t *dp;
 	struct mds_gather_args *gap = (struct mds_gather_args *)arg;
 	struct mds_addlo_args *alop = &gap->lo_arg;
 
@@ -1121,7 +1121,7 @@ mds_layout_create(rfs4_entry_t u_entry, void *arg)
 
 	for (i = 0; alop->lo_devs[i] && i < 100; i++) {
 		lp->devs[i] = alop->lo_devs[i];
-		dp = mds_find_ds_addr(instp, alop->lo_devs[i]);
+		dp = mds_find_ds_addrlist(instp, alop->lo_devs[i]);
 		/* lets hope this doesn't occur */
 		if (dp == NULL)
 			return (FALSE);
@@ -1610,32 +1610,32 @@ errout:
  */
 
 static uint32_t
-ds_addr_hash(void *key)
+ds_addrlist_hash(void *key)
 {
 	return ((uint32_t)(uintptr_t)key);
 }
 
 static bool_t
-ds_addr_compare(rfs4_entry_t entry, void *key)
+ds_addrlist_compare(rfs4_entry_t entry, void *key)
 {
-	ds_addr_t *dp = (ds_addr_t *)entry;
+	ds_addrlist_t *dp = (ds_addrlist_t *)entry;
 
 	return (rfs4_dbe_getid(dp->dbe) == (int)(uintptr_t)key);
 }
 
 static void *
-ds_addr_mkkey(rfs4_entry_t entry)
+ds_addrlist_mkkey(rfs4_entry_t entry)
 {
-	ds_addr_t *dp = (ds_addr_t *)entry;
+	ds_addrlist_t *dp = (ds_addrlist_t *)entry;
 
 	return ((void *)(uintptr_t)rfs4_dbe_getid(dp->dbe));
 }
 
 /*ARGSUSED*/
 static bool_t
-ds_addr_create(rfs4_entry_t u_entry, void *arg)
+ds_addrlist_create(rfs4_entry_t u_entry, void *arg)
 {
-	ds_addr_t *dp = (ds_addr_t *)u_entry;
+	ds_addrlist_t *dp = (ds_addrlist_t *)u_entry;
 	struct mds_adddev_args *u_dp = (struct mds_adddev_args *)arg;
 
 	dp->dev_addr.na_r_netid = u_dp->dev_netid;
@@ -1649,9 +1649,9 @@ ds_addr_create(rfs4_entry_t u_entry, void *arg)
 
 /*ARGSUSED*/
 static void
-ds_addr_destroy(rfs4_entry_t foo)
+ds_addrlist_destroy(rfs4_entry_t foo)
 {
-	ds_addr_t *dp = (ds_addr_t *)foo;
+	ds_addrlist_t *dp = (ds_addrlist_t *)foo;
 
 	if (dp->dev_knc != NULL)
 		kmem_free(dp->dev_knc, sizeof (struct knetconfig));
@@ -1794,25 +1794,25 @@ mds_mpd_list(rfs4_entry_t entry, void *arg)
 	mdl->count++;
 }
 
-ds_addr_t *
-mds_find_ds_addr_by_uaddr(nfs_server_instance_t *instp, char *ptr)
+ds_addrlist_t *
+mds_find_ds_addrlist_by_uaddr(nfs_server_instance_t *instp, char *ptr)
 {
-	ds_addr_t *dp;
+	ds_addrlist_t *dp;
 	bool_t create = FALSE;
 
-	dp = (ds_addr_t *)rfs4_dbsearch(instp->ds_addr_uaddr_idx,
+	dp = (ds_addrlist_t *)rfs4_dbsearch(instp->ds_addrlist_uaddr_idx,
 	    (void *)ptr, &create, NULL, RFS4_DBS_VALID);
 	return (dp);
 }
 
 
-ds_addr_t *
-mds_find_ds_addr(nfs_server_instance_t *instp, uint32_t id)
+ds_addrlist_t *
+mds_find_ds_addrlist(nfs_server_instance_t *instp, uint32_t id)
 {
-	ds_addr_t *dp;
+	ds_addrlist_t *dp;
 	bool_t create = FALSE;
 
-	dp = (ds_addr_t *)rfs4_dbsearch(instp->ds_addr_idx,
+	dp = (ds_addrlist_t *)rfs4_dbsearch(instp->ds_addrlist_idx,
 	    (void *)(uintptr_t)id, &create, NULL, RFS4_DBS_VALID);
 	return (dp);
 }
@@ -1837,17 +1837,17 @@ mds_str_hash(void *key)
 
 
 static void *
-ds_addr_uaddr_mkkey(rfs4_entry_t entry)
+ds_addrlist_uaddr_mkkey(rfs4_entry_t entry)
 {
-	ds_addr_t *dp = (ds_addr_t *)entry;
+	ds_addrlist_t *dp = (ds_addrlist_t *)entry;
 
 	return (dp->dev_addr.na_r_addr);
 }
 
 static int
-ds_addr_uaddr_compare(rfs4_entry_t entry, void *key)
+ds_addrlist_uaddr_compare(rfs4_entry_t entry, void *key)
 {
-	ds_addr_t *dp = (ds_addr_t *)entry;
+	ds_addrlist_t *dp = (ds_addrlist_t *)entry;
 	char *addr_key = (char *)key;
 
 	return (strcmp(addr_key, dp->dev_addr.na_r_addr) == 0);
@@ -1907,8 +1907,8 @@ ds_owner_create(rfs4_entry_t u_entry, void *arg)
 	dop->ds_id = rfs4_dbe_getid(dop->dbe);
 	dop->verifier = drap->ds_ident.boot_verifier;
 	dop->identity = kstrdup(drap->ds_ident.instance.instance_val);
-	list_create(&dop->ds_addr_list, sizeof (ds_addr_t),
-	    offsetof(ds_addr_t, ds_addr_next));
+	list_create(&dop->ds_addrlist_list, sizeof (ds_addrlist_t),
+	    offsetof(ds_addrlist_t, ds_addrlist_next));
 	list_create(&dop->ds_guid_list, sizeof (ds_guid_info_t),
 	    offsetof(ds_guid_info_t, ds_guid_next));
 	return (TRUE);
@@ -2267,7 +2267,7 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	v4prot_sstor_init(instp);
 
 	rw_init(&instp->mds_mpd_lock, NULL, RW_DEFAULT, NULL);
-	rw_init(&instp->ds_addr_lock, NULL, RW_DEFAULT, NULL);
+	rw_init(&instp->ds_addrlist_lock, NULL, RW_DEFAULT, NULL);
 	rw_init(&instp->ds_guid_info_lock, NULL, RW_DEFAULT, NULL);
 
 	/*
@@ -2326,18 +2326,18 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	/*
 	 * Data server addresses.
 	 */
-	instp->ds_addr_tab = rfs4_table_create(instp,
-	    "DSaddr", instp->reap_time, 3, ds_addr_create,
-	    ds_addr_destroy, mds_do_not_expire, sizeof (ds_addr_t),
+	instp->ds_addrlist_tab = rfs4_table_create(instp,
+	    "DSaddrlist", instp->reap_time, 3, ds_addrlist_create,
+	    ds_addrlist_destroy, mds_do_not_expire, sizeof (ds_addrlist_t),
 	    MDS_TABSIZE, MDS_MAXTABSZ, 200);
 
-	instp->ds_addr_idx = rfs4_index_create(instp->ds_addr_tab,
-	    "dsaddr-idx", ds_addr_hash, ds_addr_compare,
-	    ds_addr_mkkey, TRUE);
+	instp->ds_addrlist_idx = rfs4_index_create(instp->ds_addrlist_tab,
+	    "dsaddrlist-idx", ds_addrlist_hash, ds_addrlist_compare,
+	    ds_addrlist_mkkey, TRUE);
 
-	instp->ds_addr_uaddr_idx = rfs4_index_create(instp->ds_addr_tab,
-	    "dsaddr-uaddr-idx", mds_str_hash, ds_addr_uaddr_compare,
-	    ds_addr_uaddr_mkkey, FALSE);
+	instp->ds_addrlist_uaddr_idx = rfs4_index_create(instp->ds_addrlist_tab,
+	    "dsaddrlist-uaddr-idx", mds_str_hash, ds_addrlist_uaddr_compare,
+	    ds_addrlist_uaddr_mkkey, FALSE);
 
 	/*
 	 * Multipath Device table.
