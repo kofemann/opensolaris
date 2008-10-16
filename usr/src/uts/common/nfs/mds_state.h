@@ -95,6 +95,18 @@ typedef struct mds_layout_grant {
 	/* XXX layout byte range */
 } mds_layout_grant_t;
 
+typedef struct mds_ever_grant {
+	rfs4_dbe_t	*dbe;
+	rfs4_client_t   *cp;
+	union {
+		fsid_t	fsid;
+		int64_t	key;
+	} eg_un;
+} mds_ever_grant_t;
+
+#define	eg_fsid	eg_un.fsid
+#define	eg_key	eg_un.key
+
 typedef struct {
 	rfs4_dbe_t	*dbe;
 	time_t		last_access;

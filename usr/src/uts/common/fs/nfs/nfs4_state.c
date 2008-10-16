@@ -974,6 +974,7 @@ void
 rfs4_client_destroy(rfs4_entry_t u_entry)
 {
 	extern void mds_clean_up_sessions(rfs4_client_t *);
+	extern void mds_clean_up_grants(rfs4_client_t *);
 	rfs4_client_t *cp = (rfs4_client_t *)u_entry;
 	nfs_server_instance_t *instp;
 
@@ -998,8 +999,10 @@ rfs4_client_destroy(rfs4_entry_t u_entry)
 	}
 
 	/* if this is a 4.1 client, clean up it's sessions */
-	if (instp->inst_flags & NFS_INST_v41)
+	if (instp->inst_flags & NFS_INST_v41) {
 		mds_clean_up_sessions(cp);
+		mds_clean_up_grants(cp);
+	}
 
 	/* Free the client supplied client id */
 	kmem_free(cp->nfs_client.id_val, cp->nfs_client.id_len);

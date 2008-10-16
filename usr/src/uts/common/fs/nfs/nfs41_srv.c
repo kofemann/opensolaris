@@ -351,6 +351,8 @@ rfs41_dispatch_persona_free(nfs_resop4 *, compound_node_t *);
 mds_layout_grant_t *rfs41_findlogrant(struct compound_state *,
     rfs4_file_t *, rfs4_client_t *, bool_t *);
 void rfs41_lo_grant_rele(mds_layout_grant_t *);
+mds_ever_grant_t *rfs41_findevergrant(rfs4_client_t *, vnode_t *, bool_t *);
+void rfs41_ever_grant_rele(mds_ever_grant_t *);
 
 /* ARGSUSED */
 static void
@@ -8308,6 +8310,7 @@ mds_fetch_layout(struct compound_state *cs,
 	nfs_fh4 *nfl_fh_list;
 	rfs4_file_t *fp;
 	mds_layout_grant_t *lgp;
+	mds_ever_grant_t *egp;
 
 	int i, err, nfl_size;
 	bool_t create = TRUE;
@@ -8417,6 +8420,14 @@ mds_fetch_layout(struct compound_state *cs,
 	}
 
 	lgp->lop = lp;
+
+	/*
+	 * create the layout grant
+	 */
+	create = TRUE;
+	egp = rfs41_findevergrant(cs->cp, cs->vp, &create);
+	if (create == FALSE)
+		rfs41_ever_grant_rele(egp);
 
 	/*
 	 * Build layout get reply

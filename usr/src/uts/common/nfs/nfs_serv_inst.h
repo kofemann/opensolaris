@@ -176,6 +176,11 @@ typedef struct nfs_server_instance {
 	rfs4_index_t *mds_layout_grant_idx;
 	rfs4_index_t *mds_layout_grant_ID_idx;
 
+	krwlock_t    mds_ever_grant_lock;
+	rfs4_table_t *mds_ever_grant_tab;
+	rfs4_index_t *mds_ever_grant_idx;
+	rfs4_index_t *mds_ever_grant_fsid_idx;
+
 	krwlock_t    mds_mpd_lock;
 	rfs4_table_t *mds_mpd_tab;
 	rfs4_index_t *mds_mpd_idx;

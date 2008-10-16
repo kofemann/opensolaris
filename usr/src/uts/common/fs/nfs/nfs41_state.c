@@ -1237,11 +1237,6 @@ mds_layout_grant_id_mkkey(rfs4_entry_t entry)
 	return (&lgp->lo_stateid);
 }
 
-struct mds_grant_args {
-	mds_layout_t *lop;
-};
-
-
 /*ARGSUSED*/
 static bool_t
 mds_layout_grant_create(rfs4_entry_t u_entry, void *arg)
@@ -1251,7 +1246,6 @@ mds_layout_grant_create(rfs4_entry_t u_entry, void *arg)
 	rfs4_client_t *cp = ((mds_layout_grant_t *)arg)->cp;
 
 	rfs4_dbe_hold(fp->dbe);
-	rfs4_dbe_hold(cp->dbe);
 
 	lgp->lo_stateid = mds_create_stateid(lgp->dbe, LAYOUTID);
 	lgp->fp = fp;
@@ -1301,9 +1295,138 @@ rfs41_findlogrant(struct compound_state *cs, rfs4_file_t *fp,
 }
 
 void
-rfs41_lo_grant_rele(mds_layout_grant_t *lpg)
+rfs41_lo_grant_rele(mds_layout_grant_t *lgp)
 {
-	rfs4_dbe_rele(lpg->dbe);
+	rfs4_dbe_rele(lgp->dbe);
+}
+
+/*
+ * -----------------------------------------------
+ * MDS: Ever Grant tables.
+ * -----------------------------------------------
+ *
+ */
+static uint32_t
+mds_ever_grant_hash(void *key)
+{
+	mds_ever_grant_t *egp = (mds_ever_grant_t *)key;
+
+	return (ADDRHASH(egp->cp) ^ ADDRHASH(egp->eg_key));
+}
+
+static bool_t
+mds_ever_grant_compare(rfs4_entry_t u_entry, void *key)
+{
+	mds_ever_grant_t *egp = (mds_ever_grant_t *)u_entry;
+	mds_ever_grant_t *kegp = (mds_ever_grant_t *)key;
+
+	return (egp->cp == kegp->cp &&
+	    egp->eg_fsid.val[0] == kegp->eg_fsid.val[0] &&
+	    egp->eg_fsid.val[1] == kegp->eg_fsid.val[1]);
+}
+
+static void *
+mds_ever_grant_mkkey(rfs4_entry_t entry)
+{
+	return (entry);
+}
+
+static uint32_t
+mds_ever_grant_fsid_hash(void *key)
+{
+	return ((uint32_t)(uintptr_t)key);
+}
+
+static bool_t
+mds_ever_grant_fsid_compare(rfs4_entry_t entry, void *key)
+{
+	mds_ever_grant_t *egp = (mds_ever_grant_t *)entry;
+	int64_t g_key = (int64_t)(uintptr_t)key;
+
+	return (egp->eg_key == g_key);
+}
+
+static void *
+mds_ever_grant_fsid_mkkey(rfs4_entry_t entry)
+{
+	mds_ever_grant_t *egp = (mds_ever_grant_t *)entry;
+
+	return ((void*)(uintptr_t)egp->eg_key);
+}
+
+/*ARGSUSED*/
+static bool_t
+mds_ever_grant_create(rfs4_entry_t u_entry, void *arg)
+{
+	mds_ever_grant_t *egp = (mds_ever_grant_t *)u_entry;
+	rfs4_client_t *cp = ((mds_ever_grant_t *)arg)->cp;
+
+	egp->cp = cp;
+	egp->eg_fsid = ((mds_ever_grant_t *)arg)->eg_fsid;
+
+	return (TRUE);
+}
+
+/*ARGSUSED*/
+static void
+mds_ever_grant_destroy(rfs4_entry_t foo)
+{
+}
+
+mds_ever_grant_t *
+rfs41_findevergrant(rfs4_client_t *cp, vnode_t *vp, bool_t *create)
+{
+	nfs_server_instance_t *instp;
+	mds_ever_grant_t eg, *egp;
+
+	instp = dbe_to_instp(cp->dbe);
+	eg.cp = cp;
+	eg.eg_fsid = vp->v_vfsp->vfs_fsid;
+
+	egp = (mds_ever_grant_t *)rfs4_dbsearch(
+	    instp->mds_ever_grant_idx, &eg, create, &eg, RFS4_DBS_VALID);
+
+	return (egp);
+}
+
+void
+rfs41_ever_grant_rele(mds_ever_grant_t *egp)
+{
+	rfs4_dbe_rele(egp->dbe);
+}
+
+void
+mds_clean_up_grants(rfs4_client_t *cp)
+{
+	mds_layout_grant_t *lgp;
+	mds_ever_grant_t *egp;
+	vnode_t *vp;
+	bool_t create = FALSE;
+
+	while (cp->clientgrantlist.next->lgp != NULL) {
+		lgp = cp->clientgrantlist.next->lgp;
+		remque(&lgp->clientgrantlist);
+		lgp->clientgrantlist.next = lgp->clientgrantlist.prev =
+		    &lgp->clientgrantlist;
+		lgp->cp = NULL;
+
+		vp = lgp->fp->vp;
+		remque(&lgp->lo_grant_list);
+		lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
+		    &lgp->lo_grant_list;
+
+		if (vp != NULL) {
+			egp = rfs41_findevergrant(cp, vp, &create);
+			if (egp != NULL) {
+				rfs4_dbe_invalidate(egp->dbe);
+				rfs4_dbe_rele(egp->dbe);
+			}
+		}
+
+		rfs4_file_rele(lgp->fp);
+		lgp->fp = NULL;
+		rfs4_dbe_invalidate(lgp->dbe);
+	}
 }
 
 static void
@@ -2322,6 +2445,27 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	    rfs4_index_create(instp->mds_layout_grant_tab,
 	    "layout-grant-ID-idx", mds_layout_grant_id_hash,
 	    mds_layout_grant_id_compare, mds_layout_grant_id_mkkey, FALSE);
+
+	/*
+	 * Create the ever_grant table.
+	 *
+	 * This table tracks layouts that have been granted to clients that
+	 * belong to an FSID. It is indexed by the FSID and also by client.
+	 */
+	instp->mds_ever_grant_tab = rfs4_table_create(instp,
+	    "Ever_grant", instp->reap_time, 2, mds_ever_grant_create,
+	    mds_ever_grant_destroy, mds_do_not_expire,
+	    sizeof (mds_ever_grant_t), MDS_TABSIZE, MDS_MAXTABSZ, 100);
+
+	instp->mds_ever_grant_idx =
+	    rfs4_index_create(instp->mds_ever_grant_tab,
+	    "ever-grant-idx", mds_ever_grant_hash, mds_ever_grant_compare,
+	    mds_ever_grant_mkkey, TRUE);
+
+	instp->mds_ever_grant_fsid_idx =
+	    rfs4_index_create(instp->mds_ever_grant_tab,
+	    "ever-grant-fsid-idx", mds_ever_grant_fsid_hash,
+	    mds_ever_grant_fsid_compare, mds_ever_grant_fsid_mkkey, FALSE);
 
 	/*
 	 * Data server addresses.
