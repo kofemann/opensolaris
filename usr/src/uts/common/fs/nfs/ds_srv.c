@@ -801,11 +801,7 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 		    addrp->addr.na_r_addr);
 		if (dp == NULL)
 			continue;
-		err = mds_ds_initnet(dp);
-		if (err)
-			continue;
-		err = mds_ds_call(dp, DSPROC_NULL,
-		    xdr_void, NULL, xdr_void, NULL);
+		(void) mds_ds_initnet(dp);
 	}
 
 	res_ok = &(resp->DS_REPORTAVAILres_u.res_ok);
