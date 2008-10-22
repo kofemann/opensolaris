@@ -488,7 +488,6 @@ typedef struct rfs41_csr {	/* contrived create_session result */
  *   the occasional update.
  *
  * cn_lock:	cn_lock
- * bsd_lock:	cn_lock -> bsd_lock
  * bsd_rwlock:	cn_lock -> bsd_rwlock
  */
 typedef enum {
@@ -509,7 +508,6 @@ typedef enum {
 typedef struct {				/* Back Chan Specific Data */
 	stok_t			 *bsd_stok;	/* opaque token for slot tab */
 	nfsstat4		  bsd_stat;
-	kmutex_t		  bsd_lock;	/* XXX can we use rwlock ? */
 	krwlock_t		  bsd_rwlock;	/* protect slot tab info */
 	uint64_t		  bsd_idx;	/* Index of next spare CLNT */
 	uint64_t		  bsd_cur;	/* Most recent added CLNT */
@@ -1112,7 +1110,9 @@ extern	mds_session_t	*mds_createsession(nfs_server_instance_t *,
 			    session41_create_t *);
 extern	nfsstat4	 mds_destroysession(mds_session_t *);
 extern	sess_channel_t	*rfs41_create_session_channel(channel_dir_from_server4);
-extern	void		 rfs41_destroy_session_channel(sess_channel_t *);
+extern	void		 rfs41_destroy_session_channel(mds_session_t *,
+			    channel_dir_from_server4);
+
 extern	void		 rfs41_session_rele(mds_session_t *);
 extern	void	rfs41_cb_chflush(mds_session_t *);
 extern	CLIENT	*rfs41_cb_getch(mds_session_t *);

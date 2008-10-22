@@ -467,7 +467,6 @@ mds_session_inval(mds_session_t	*sp)
 
 	ASSERT(sp != NULL);
 	ASSERT(rfs4_dbe_islocked(sp->dbe));
-	rfs4_dbe_invalidate(sp->dbe);
 
 	if (SN_CB_CHAN_EST(sp)) {
 		sess_channel_t	*bcp = sp->sn_back;
@@ -477,15 +476,20 @@ mds_session_inval(mds_session_t	*sp)
 		if ((bsdp = CTOBSD(bcp)) == NULL)
 			cmn_err(CE_PANIC, "mds_session_inval: BCSD Not Set");
 
-		mutex_enter(&bsdp->bsd_lock);
+		rw_enter(&bsdp->bsd_rwlock, RW_READER);
 		status = bsdp->bsd_stat = slot_cb_status(bsdp->bsd_stok);
-		mutex_exit(&bsdp->bsd_lock);
+		rw_exit(&bsdp->bsd_rwlock);
 
 		rw_exit(&bcp->cn_lock);
 	} else {
 		cmn_err(CE_NOTE, "No back chan established");
 		status = NFS4_OK;
 	}
+
+	/* only invalidate sess if no bc traffic */
+	if (status == NFS4_OK)
+		rfs4_dbe_invalidate(sp->dbe);
+
 	return (status);
 }
 
@@ -504,17 +508,13 @@ mds_destroysession(mds_session_t *sp)
 	rfs4_dbe_unlock(sp->dbe);
 
 	/*
-	 * XXX - Destruction of a session should not affect any state
-	 *	 bound to the clientid (Section 18.37.3 of draft-17).
-	 *	 For now, keep destroying the clid until DESTROY_CLIENTID
-	 *	 is explicitly done (see Section 18.50.4 of draft-17).
 	 * The client struct will expire and the session no longer keeps
 	 * a hold on the client struct, so an explicit call to client close
 	 * is not needed.
 	 */
-	if (cbs == NFS4_OK) {
+	if (cbs == NFS4_OK)
 		rfs41_session_rele(sp);
-	}
+
 	return (cbs);
 }
 
@@ -595,7 +595,6 @@ rfs41_create_session_channel(channel_dir_from_server4 dir)
 	case CDFS4_BACK:
 		/* BackChan Specific Data */
 		bp = (sess_bcsd_t *)kmem_zalloc(sizeof (sess_bcsd_t), KM_SLEEP);
-		mutex_init(&bp->bsd_lock, NULL, MUTEX_DEFAULT, NULL);
 		rw_init(&bp->bsd_rwlock, NULL, RW_DEFAULT, NULL);
 		cp->cn_csd = (sess_bcsd_t *)bp;
 		break;
@@ -604,27 +603,49 @@ rfs41_create_session_channel(channel_dir_from_server4 dir)
 }
 
 void
-rfs41_destroy_session_channel(sess_channel_t *cp)
+rfs41_destroy_session_channel(mds_session_t *sp, channel_dir_from_server4 dir)
 {
+	sess_channel_t	*cp;
 	sess_bcsd_t	*bp;
 
-	if (cp == NULL)
+	if (sp == NULL)
+		return;
+	if (dir == CDFS4_FORE && sp->sn_fore == NULL)
+		return;
+	if (dir == CDFS4_BACK && sp->sn_back == NULL)
 		return;
 
-	switch (cp->cn_dir) {
-	case CDFS4_FORE:
-		break;
+	if (sp->sn_bdrpc) {
+		ASSERT(sp->sn_fore == sp->sn_back);
+		sp->sn_fore = NULL;
+		goto back;
+	}
 
-	case CDFS4_BOTH:
-	case CDFS4_BACK:
+	if (dir == CDFS4_FORE || dir == CDFS4_BOTH) {
+fore:
+		if (sp->sn_fore == NULL)
+			return;
+		cp = sp->sn_fore;
+
+		rw_destroy(&cp->cn_lock);
+		kmem_free(cp, sizeof (sess_channel_t));
+		sp->sn_fore = NULL;
+	}
+
+	if (dir == CDFS4_BACK || dir == CDFS4_BOTH) {
+back:
+		if (sp->sn_back == NULL)
+			return;
+		cp = sp->sn_back;
+
 		bp = (sess_bcsd_t *)cp->cn_csd;
 		rw_destroy(&bp->bsd_rwlock);
-		mutex_destroy(&bp->bsd_lock);
 		kmem_free(bp, sizeof (sess_bcsd_t));
-		break;
+
+		rw_destroy(&cp->cn_lock);
+		kmem_free(cp, sizeof (sess_channel_t));
+		sp->sn_back = NULL;
 	}
-	rw_destroy(&cp->cn_lock);
-	kmem_free(cp, sizeof (sess_channel_t));
 }
 
 /*
@@ -854,17 +875,17 @@ mds_session_destroy(rfs4_entry_t u_entry)
 	 */
 
 	/*
-	 * Remove the fore and back channels; we still
-	 * need to drop all associated connections. (XXX)
+	 * Remove the fore and back channels.
 	 */
-	rfs41_destroy_session_channel(sp->sn_fore);
-	if (!sp->sn_bdrpc)
-		rfs41_destroy_session_channel(sp->sn_back);
+	rfs41_destroy_session_channel(sp, CDFS4_BOTH);
 
 	/*
 	 * Nuke slot replay cache for this session
 	 */
-	kmem_free(sp->sn_slrc, sizeof (rfs41_slrc_t));
+	if (sp->sn_slrc) {
+		kmem_free(sp->sn_slrc, sizeof (rfs41_slrc_t));
+		sp->sn_slrc = NULL;
+	}
 }
 
 static bool_t
@@ -885,7 +906,11 @@ mds_kill_session_callout(rfs4_entry_t u_entry, void *arg)
 	mds_session_t *sp = (mds_session_t *)u_entry;
 
 	if (sp->sn_clnt == cp && !(rfs4_dbe_is_invalid(sp->dbe)))
-		mds_session_destroy(u_entry);
+		/*
+		 * client is going away; so no need to check for
+		 * CB channel traffic before destroying a session.
+		 */
+		rfs4_dbe_invalidate(sp->dbe);
 }
 
 void

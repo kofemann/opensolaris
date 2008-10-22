@@ -690,7 +690,7 @@ rfs41_cb_getch(mds_session_t *sp)
 	rw_enter(&bcp->cn_lock, RW_READER);
 	bsdp = CTOBSD(bcp);
 
-	mutex_enter(&bsdp->bsd_lock);
+	rw_enter(&bsdp->bsd_rwlock, RW_WRITER);
 	if (bsdp->bsd_ch_free) {
 		bsdp->bsd_ch_free--;
 		cbch = bsdp->bsd_clnt[bsdp->bsd_ch_free];
@@ -699,7 +699,7 @@ rfs41_cb_getch(mds_session_t *sp)
 		CLNT_CONTROL(cbch, CLSET_TAG, (void *)sp->sn_sessid);
 	}
 
-	mutex_exit(&bsdp->bsd_lock);
+	rw_exit(&bsdp->bsd_rwlock);
 	rw_exit(&bcp->cn_lock);
 	return (cbch);
 }
@@ -717,15 +717,15 @@ rfs41_cb_freech(mds_session_t *sp, CLIENT *ch)
 	rw_enter(&bcp->cn_lock, RW_READER);
 	bsdp = CTOBSD(bcp);
 
-	mutex_enter(&bsdp->bsd_lock);
+	rw_enter(&bsdp->bsd_rwlock, RW_WRITER);
 	if (bsdp->bsd_ch_free < RFS4_CBCH_MAX) {
 		bsdp->bsd_clnt[bsdp->bsd_ch_free++] = ch;
-		mutex_exit(&bsdp->bsd_lock);
+		rw_exit(&bsdp->bsd_rwlock);
 		rw_exit(&bcp->cn_lock);
 		return;
 	}
 
-	mutex_exit(&bsdp->bsd_lock);
+	rw_exit(&bsdp->bsd_rwlock);
 	rw_exit(&bcp->cn_lock);
 
 	/*
@@ -755,7 +755,7 @@ rfs41_cb_chflush(mds_session_t *sp)
 	rw_enter(&bcp->cn_lock, RW_READER);
 	bsdp = CTOBSD(bcp);
 
-	mutex_enter(&bsdp->bsd_lock);
+	rw_enter(&bsdp->bsd_rwlock, RW_WRITER);
 
 	while (bsdp->bsd_ch_free) {
 		bsdp->bsd_ch_free--;
@@ -768,7 +768,7 @@ rfs41_cb_chflush(mds_session_t *sp)
 		}
 	}
 
-	mutex_exit(&bsdp->bsd_lock);
+	rw_exit(&bsdp->bsd_rwlock);
 }
 
 /*
@@ -1008,10 +1008,8 @@ svc_slot_cb_seqid(CB_COMPOUND4res *resp, slot_ent_t *p)
 
 	ASSERT(resp->array->resop == OP_CB_SEQUENCE);
 	rp = &resp->array->nfs_cb_resop4_u.opcbsequence;
-	if (rp->csr_status == NFS4_OK) {
+	if (rp->csr_status == NFS4_OK)
 		atomic_add_32(&p->se_seqid, 1);
-		cmn_err(CE_NOTE, "svc_slot_cb_seqid: %d", p->se_seqid);
-	}
 }
 
 /*
