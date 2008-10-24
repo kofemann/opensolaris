@@ -2484,6 +2484,7 @@ nfs4_unmount(vfs_t *vfsp, int flag, cred_t *cr)
 	int			removed;
 
 	bool_t			must_unlock;
+	bool_t			must_rele;
 
 	nfs4_ephemeral_tree_t	*eph_tree;
 
@@ -2539,7 +2540,7 @@ nfs4_unmount(vfs_t *vfsp, int flag, cred_t *cr)
 	 * again when needed.
 	 */
 	if (nfs4_ephemeral_umount(mi, flag, cr,
-	    &must_unlock, &eph_tree)) {
+	    &must_unlock, &must_rele, &eph_tree)) {
 		ASSERT(must_unlock == FALSE);
 		mutex_enter(&mi->mi_async_lock);
 		mi->mi_max_threads = omax;
@@ -2553,7 +2554,8 @@ nfs4_unmount(vfs_t *vfsp, int flag, cred_t *cr)
 	 * then the file system is busy and can't be unmounted.
 	 */
 	if (check_rtable4(vfsp)) {
-		nfs4_ephemeral_umount_unlock(&must_unlock, &eph_tree);
+		nfs4_ephemeral_umount_unlock(&must_unlock, &must_rele,
+		    &eph_tree);
 
 		mutex_enter(&mi->mi_async_lock);
 		mi->mi_max_threads = omax;
@@ -2566,7 +2568,8 @@ nfs4_unmount(vfs_t *vfsp, int flag, cred_t *cr)
 	 * The unmount can't fail from now on, so record any
 	 * ephemeral changes.
 	 */
-	nfs4_ephemeral_umount_activate(mi, &must_unlock, &eph_tree);
+	nfs4_ephemeral_umount_activate(mi, &must_unlock,
+	    &must_rele, &eph_tree);
 
 	/*
 	 * There are no active files that could require over-the-wire
@@ -4272,6 +4275,7 @@ nfs4_free_mount(vfs_t *vfsp, int flag, cred_t *cr)
 	int			removed;
 
 	bool_t			must_unlock;
+	bool_t			must_rele;
 	nfs4_ephemeral_tree_t	*eph_tree;
 
 	/*
@@ -4345,9 +4349,9 @@ nfs4_free_mount(vfs_t *vfsp, int flag, cred_t *cr)
 	 * directory tree, we are okay.
 	 */
 	if (!nfs4_ephemeral_umount(mi, flag, cr,
-	    &must_unlock, &eph_tree))
+	    &must_unlock, &must_rele, &eph_tree))
 		nfs4_ephemeral_umount_activate(mi, &must_unlock,
-		    &eph_tree);
+		    &must_rele, &eph_tree);
 
 	/*
 	 * The original purge of the dnlc via 'dounmount'

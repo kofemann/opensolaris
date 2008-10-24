@@ -317,6 +317,7 @@ typedef struct {
 #define	RT_FL2_BRANDED	0x00000800	/* process is branded */
 #define	RT_FL2_NOPLM	0x00001000	/* process has no primary link map */
 #define	RT_FL2_SETUID	0x00002000	/* ld.so.1 is setuid root */
+#define	RT_FL2_ADDR32	0x00004000	/* 32-bit address space requirement */
 
 /*
  * Information flags for env_info.
@@ -375,6 +376,7 @@ typedef struct {
 #define	PN_FLG_UNIQUE	0x00002000	/* ensure path is unique */
 #define	PN_FLG_USED	0x00004000	/* indicate that path is used */
 #define	PN_FLG_DUPLICAT	0x00008000	/* path is a duplicate */
+#define	PN_FLG_FULLPATH	0x00010000	/* ensure path is a full path */
 
 #define	PN_FLG_MASK	0x000ff000	/* mask for p_orig incorporation */
 
@@ -529,6 +531,7 @@ extern Rt_map		*_caller(caddr_t, int);
 extern caddr_t		caller(void);
 extern void		*calloc(size_t, size_t);
 extern void		cap_assign(Cap *, Rt_map *);
+extern int		cap_check(Rej_desc *, Ehdr *);
 extern const char	*_conv_reloc_type(uint_t rel);
 extern uintptr_t	dbg_setup(const char *, Dbg_desc *);
 extern const char	*demangle(const char *);
@@ -578,12 +581,12 @@ extern int		hdl_add(Grp_hdl *, Rt_map *, uint_t);
 extern Grp_hdl		*hdl_create(Lm_list *, Rt_map *, Rt_map *, uint_t,
 			    uint_t, uint_t);
 extern int		hdl_initialize(Grp_hdl *, Rt_map *, int, int);
-extern int		hwcap_check(Rej_desc *, Ehdr *);
 extern Pnode 		*hwcap_filtees(Pnode **, Aliste, Lm_cntl *, Dyninfo *,
 			    Rt_map *, const char *, int, uint_t, int *);
 extern void		is_dep_ready(Rt_map *, Rt_map *, int);
 extern void		is_dep_init(Rt_map *, Rt_map *);
 extern int		is_move_data(caddr_t);
+extern int		is_path_secure(char *, Rt_map *, uint_t, uint_t);
 extern int		is_rtld_setuid();
 extern int		is_sym_interposer(Rt_map *, Sym *);
 extern void		ldso_plt_init(Rt_map *);

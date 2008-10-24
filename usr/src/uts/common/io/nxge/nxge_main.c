@@ -210,6 +210,7 @@ static void nxge_remove_hard_properties(p_nxge_t);
  */
 extern int nxge_m_mmac_add(void *arg, mac_multi_addr_t *maddr);
 extern int nxge_m_mmac_remove(void *arg, mac_addr_slot_t slot);
+extern void nxge_grp_cleanup(p_nxge_t nxge);
 
 static nxge_status_t nxge_setup_system_dma_pages(p_nxge_t);
 
@@ -824,6 +825,12 @@ nxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	if (isLDOMguest(nxgep)) {
 		/* Find our VR & channel sets. */
 		status = nxge_hio_vr_add(nxgep);
+		if (status != NXGE_OK) {
+			NXGE_DEBUG_MSG((nxgep, DDI_CTL,
+			    "nxge_hio_vr_add failed"));
+			(void) hsvc_unregister(&nxgep->niu_hsvc);
+			nxgep->niu_hsvc_available = B_FALSE;
+		}
 		goto nxge_attach_exit;
 	}
 #endif
@@ -839,6 +846,7 @@ nxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		NXGE_DEBUG_MSG((nxgep, DDI_CTL, "add_intr failed"));
 		goto nxge_attach_fail;
 	}
+
 	status = nxge_add_soft_intrs(nxgep);
 	if (status != DDI_SUCCESS) {
 		NXGE_DEBUG_MSG((nxgep, NXGE_ERR_CTL,
@@ -3359,13 +3367,14 @@ nxge_dma_mem_alloc(p_nxge_t nxgep, dma_method_t method,
 				    "> 1 cookie"
 				    "(staus 0x%x ncookies %d.)", ddi_status,
 				    dma_p->ncookies));
+				(void) ddi_dma_unbind_handle(dma_p->dma_handle);
 				if (dma_p->acc_handle) {
 					ddi_dma_mem_free(&dma_p->acc_handle);
 					dma_p->acc_handle = NULL;
 				}
-				(void) ddi_dma_unbind_handle(dma_p->dma_handle);
 				ddi_dma_free_handle(&dma_p->dma_handle);
 				dma_p->dma_handle = NULL;
+				dma_p->acc_handle = NULL;
 				return (NXGE_ERROR);
 			}
 			break;
@@ -3405,11 +3414,11 @@ nxge_dma_mem_alloc(p_nxge_t nxgep, dma_method_t method,
 				    "(kmem_alloc) > 1 cookie"
 				    "(staus 0x%x ncookies %d.)", ddi_status,
 				    dma_p->ncookies));
-				KMEM_FREE(kaddrp, length);
-				dma_p->acc_handle = NULL;
 				(void) ddi_dma_unbind_handle(dma_p->dma_handle);
+				KMEM_FREE(kaddrp, length);
 				ddi_dma_free_handle(&dma_p->dma_handle);
 				dma_p->dma_handle = NULL;
+				dma_p->acc_handle = NULL;
 				dma_p->kaddrp = NULL;
 				return (NXGE_ERROR);
 			}
@@ -6490,6 +6499,11 @@ nxge_init_common_dev(p_nxge_t nxgep)
 	}
 
 	if (hw_p == NULL) {
+
+		char **prop_val;
+		uint_t prop_len;
+		int i;
+
 		NXGE_DEBUG_MSG((nxgep, MOD_CTL,
 		    "==> nxge_init_common_device:func # %d "
 		    "parent dip $%p (new)",
@@ -6517,12 +6531,34 @@ nxge_init_common_dev(p_nxge_t nxgep)
 
 		nxge_hw_list = hw_p;
 
+		if (ddi_prop_lookup_string_array(DDI_DEV_T_ANY, nxgep->dip, 0,
+		    "compatible", &prop_val, &prop_len) == DDI_PROP_SUCCESS) {
+			for (i = 0; i < prop_len; i++) {
+				if ((strcmp((caddr_t)prop_val[i],
+				    NXGE_ROCK_COMPATIBLE) == 0)) {
+					hw_p->platform_type = P_NEPTUNE_ROCK;
+					NXGE_DEBUG_MSG((nxgep, MOD_CTL,
+					    "ROCK hw_p->platform_type %d",
+					    hw_p->platform_type));
+					break;
+				}
+				NXGE_DEBUG_MSG((nxgep, MOD_CTL,
+				    "nxge_init_common_dev: read compatible"
+				    " property[%d] val[%s]",
+				    i, (caddr_t)prop_val[i]));
+			}
+		}
+
+		ddi_prop_free(prop_val);
+
 		(void) nxge_scan_ports_phy(nxgep, nxge_hw_list);
 	}
 
 	MUTEX_EXIT(&nxge_common_lock);
 
 	nxgep->platform_type = hw_p->platform_type;
+	NXGE_DEBUG_MSG((nxgep, MOD_CTL, "nxgep->platform_type %d",
+	    nxgep->platform_type));
 	if (nxgep->niu_type != N2_NIU) {
 		nxgep->niu_type = hw_p->niu_type;
 	}
@@ -6581,6 +6617,9 @@ nxge_uninit_common_dev(p_nxge_t nxgep)
 				    (p_nxge_hw_pt_cfg_t)&p_dma_cfgp->hw_config;
 				(void) nxge_fzc_rdc_tbl_unbind(nxgep,
 				    p_cfgp->def_mac_rxdma_grpid);
+
+				/* Cleanup any outstanding groups.  */
+				nxge_grp_cleanup(nxgep);
 			}
 
 			if (hw_p->ndevs) {
@@ -6676,6 +6715,7 @@ nxge_get_nports(p_nxge_t nxgep)
 		case P_NEPTUNE_ATLAS_4PORT:
 		case P_NEPTUNE_MARAMBA_P0:
 		case P_NEPTUNE_MARAMBA_P1:
+		case P_NEPTUNE_ROCK:
 		case P_NEPTUNE_ALONSO:
 			nports = 4;
 			break;

@@ -3184,8 +3184,11 @@ spa_vdev_detach(spa_t *spa, uint64_t guid, int replace_done)
 		while ((spa = spa_next(spa)) != NULL) {
 			if (spa->spa_state != POOL_STATE_ACTIVE)
 				continue;
-
+			spa_open_ref(spa, FTAG);
+			mutex_exit(&spa_namespace_lock);
 			(void) spa_vdev_remove(spa, unspare_guid, B_TRUE);
+			mutex_enter(&spa_namespace_lock);
+			spa_close(spa, FTAG);
 		}
 		mutex_exit(&spa_namespace_lock);
 	}
@@ -4056,11 +4059,7 @@ spa_sync(spa_t *spa, uint64_t txg)
 		spa->spa_config_syncing = NULL;
 	}
 
-	spa->spa_traverse_wanted = B_TRUE;
-	rw_enter(&spa->spa_traverse_lock, RW_WRITER);
-	spa->spa_traverse_wanted = B_FALSE;
 	spa->spa_ubsync = spa->spa_uberblock;
-	rw_exit(&spa->spa_traverse_lock);
 
 	/*
 	 * Clean up the ZIL records for the synced txg.

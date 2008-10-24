@@ -20,14 +20,12 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef _CPUBOARD_TOPO_H
 #define	_CPUBOARD_TOPO_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <fm/topo_hc.h>
 #include <fm/topo_mod.h>
@@ -55,7 +53,8 @@ typedef struct {
 } cpuboard_contents_t;
 
 /* Shared device tree root node */
-int cpuboard_hb_enum(topo_mod_t *mp, di_node_t dnode, tnode_t *cpubn, int brd);
+int cpuboard_hb_enum(topo_mod_t *mp, di_node_t dnode, char *rcpath,
+    tnode_t *cpubn, int brd);
 
 /* Until future PRI changes, make connection between cpuboard id and RC */
 #define	CPUBOARD0_RC	"/pci@400"

@@ -38,7 +38,7 @@ Device Management:::Control Access to Removable Media:auths=solaris.device.*;hel
 Printer Management:::Manage printers, daemons, spooling:auths=solaris.print.*,solaris.label.print,solaris.smf.manage.discovery.printers.*,solaris.smf.value.discovery.printers.*;help=RtPrntAdmin.html
 Cron Management:::Manage at and cron jobs:auths=solaris.jobs.*,solaris.smf.manage.cron;help=RtCronMngmnt.html
 Log Management:::Manage log files:help=RtLogMngmnt.html
-Basic Solaris User:::Automatically assigned rights:auths=solaris.profmgr.read,solaris.jobs.user,solaris.mail.mailq,solaris.device.mount.removable;profiles=All;help=RtDefault.html
+Basic Solaris User:::Automatically assigned rights:auths=solaris.profmgr.read,solaris.mail.mailq,solaris.device.mount.removable;profiles=All;help=RtDefault.html
 Device Security:::Manage devices and Volume Manager:auths=solaris.device.*,solaris.smf.manage.vt;help=RtDeviceSecurity.html
 DHCP Management:::Manage the DHCP service:auths=solaris.dhcpmgr.*;help=RtDHCPMngmnt.html
 Extended Accounting Flow Management:::Manage the Flow Extended Accounting service:auths=solaris.smf.manage.extended-accounting.flow,solaris.smf.value.extended-accounting.flow;profiles=acctadm;help=RtExActtFlow.html
@@ -84,6 +84,8 @@ Kerberos Server Management:::Maintain and Administer Kerberos Servers:profiles=K
 DAT Administration:::Manage the DAT configuration:help=RtDatAdmin.html
 SMB Management:::Manage the SMB service:auths=solaris.smf.manage.smb,solaris.smf.value.smb,solaris.smf.read.smb;help=RtSMBMngmnt.html
 SMBFS Management:::Manage the SMB client:auths=solaris.smf.manage.smbfs,solaris.smf.value,solaris.smf.modify.application;help=RtSMBFSMngmnt.html
+STMF Administration:::Configure STMF service:auths=solaris.smf.modify.application
+STMF Management:::Start/Stop STMF service:auths=solaris.smf.manage.stmf
 ZFS File System Management:::Create and Manage ZFS File Systems:help=RtZFSFileSysMngmnt.html
 ZFS Storage Management:::Create and Manage ZFS Storage Pools:help=RtZFSStorageMngmnt.html
 Zone Management:::Zones Virtual Application Environment Administration:help=RtZoneMngmnt.html
@@ -108,3 +110,4 @@ Suspend To RAM:::For authorized users to Suspend to RAM:auths=solaris.system.pow
 Brightness:::For authorized users to Control LCD Brightness:auths=solaris.system.power.brightness;help=RtSysPowerMgmtBrightness.html
 CPU Power Management:::For authorized users to manage CPU Power:auths=solaris.system.power.cpu;help=RtCPUPowerManagement.html
 acctadm:::Do not assign to users. Commands required for Extended Accounting Management profiles:help=RtAcctadm.help
+ISNS Server Management:::Manage ISNS server:auths=solaris.smf.manage.isns,solaris.smf.value.isns,solaris.isnsmgr.write:help=RtISNSMngmnt.html
