@@ -2365,6 +2365,7 @@ do_rfs4_op_lookup(char *nm, uint_t buflen, struct svc_req *req,
 	fid_t fid;
 	int attrdir, dotdot, walk;
 	bool_t is_newvp = FALSE;
+	nnode_t *nn;
 
 	if (cs->vp->v_flag & V_XATTRDIR) {
 		attrdir = 1;
@@ -2422,6 +2423,8 @@ do_rfs4_op_lookup(char *nm, uint_t buflen, struct svc_req *req,
 	    NULL, NULL, NULL);
 	if (error)
 		return (puterrno4(error));
+	if (nnode_from_vnode(&nn, vp) == 0)
+		nnode_rele(&nn);
 
 	/*
 	 * If the vnode is in a pseudo filesystem, check whether it is visible.
@@ -2869,25 +2872,23 @@ rfs4_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 {
 	READ4args *args = &argop->nfs_argop4_u.opread;
 	READ4res *resp = &resop->nfs_resop4_u.opread;
-	int error;
-	int verror;
-	vnode_t *vp;
-	struct vattr va;
+	nnode_error_t error;
+	nnode_t *nn;
 	struct iovec iov;
 	struct uio uio;
-	u_offset_t offset;
 	bool_t *deleg = &cs->deleg;
 	nfsstat4 stat;
-	int in_crit = 0;
+	uint32_t nnioflags = 0;
 	mblk_t *mp;
 	int alloc_err = 0;
 	caller_context_t ct;
+	uint_t maxsize;
 
 	DTRACE_NFSV4_2(op__read__start, struct compound_state *, cs,
 	    READ4args, args);
 
-	vp = cs->vp;
-	if (vp == NULL) {
+	nn = cs->nn;
+	if (nn == NULL) {
 		*cs->statusp = resp->status = NFS4ERR_NOFILEHANDLE;
 		goto out;
 	}
@@ -2896,58 +2897,23 @@ rfs4_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		goto out;
 	}
 
-	if ((stat = check_stateid(FREAD, cs, vp, &args->stateid, FALSE,
+	/* caller context gets set as side-effect */
+	if ((stat = nnop_check_stateid(nn, cs, FREAD, &args->stateid, FALSE,
 	    deleg, TRUE, &ct)) != NFS4_OK) {
 		*cs->statusp = resp->status = stat;
 		goto out;
 	}
 
-	/*
-	 * Enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with write requests.
-	 */
-	if (nbl_need_check(vp)) {
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		if (nbl_conflict(vp, NBL_READ, args->offset, args->count, 0,
-		    &ct)) {
-			*cs->statusp = resp->status = NFS4ERR_LOCKED;
-			goto out;
-		}
-	}
-
-	va.va_mask = AT_MODE|AT_SIZE|AT_UID;
-	verror = VOP_GETATTR(vp, &va, 0, cs->cr, &ct);
-
-	/*
-	 * If we can't get the attributes, then we can't do the
-	 * right access checking.  So, we'll fail the request.
-	 */
-	if (verror) {
-		*cs->statusp = resp->status = puterrno4(verror);
+	error = nnop_io_prep(nn, &nnioflags, cs->cr, &ct, args->offset,
+	    args->count, NULL);
+	if (error == NNODE_ERROR_NOTIMPL)
+		error = 0; /* some implementations may not need prep */
+	if (error != 0) {
+		*cs->statusp = resp->status = nnode_stat4(error, 0);
 		goto out;
 	}
 
-	if (vp->v_type != VREG) {
-		*cs->statusp = resp->status =
-		    ((vp->v_type == VDIR) ? NFS4ERR_ISDIR : NFS4ERR_INVAL);
-		goto out;
-	}
-
-	if (crgetuid(cs->cr) != va.va_uid &&
-	    (error = VOP_ACCESS(vp, VREAD, 0, cs->cr, &ct)) &&
-	    (error = VOP_ACCESS(vp, VEXEC, 0, cs->cr, &ct))) {
-		*cs->statusp = resp->status = puterrno4(error);
-		goto out;
-	}
-
-	if (MANDLOCK(vp, va.va_mode)) { /* XXX - V4 supports mand locking */
-		*cs->statusp = resp->status = NFS4ERR_ACCESS;
-		goto out;
-	}
-
-	offset = args->offset;
-	if (offset >= va.va_size) {
+	if (nnioflags & NNODE_IO_FLAG_PAST_EOF) {
 		*cs->statusp = resp->status = NFS4_OK;
 		resp->eof = TRUE;
 		resp->data_len = 0;
@@ -2956,7 +2922,6 @@ rfs4_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		/* RDMA */
 		resp->wlist = args->wlist;
 		resp->wlist_len = resp->data_len;
-		*cs->statusp = resp->status = NFS4_OK;
 		goto out;
 	}
 
@@ -2976,8 +2941,8 @@ rfs4_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 * Do not allocate memory more than maximum allowed
 	 * transfer size
 	 */
-	if (args->count > rfs4_tsize(req))
-		args->count = rfs4_tsize(req);
+	maxsize = rfs4_tsize(req);
+	args->count = MIN(maxsize, args->count);
 
 	/*
 	 * If returning data via RDMA Write, then grab the chunk list. If we
@@ -3016,15 +2981,12 @@ rfs4_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	uio.uio_extflg = UIO_COPY_CACHED;
 	uio.uio_loffset = args->offset;
 	uio.uio_resid = args->count;
+	uio.uio_fmode = FNONBLOCK;
 
-	error = do_io(FREAD, vp, &uio, 0, cs->cr, &ct);
-
-	va.va_mask = AT_SIZE;
-	verror = VOP_GETATTR(vp, &va, 0, cs->cr, &ct);
-
+	error = nnop_read(nn, &nnioflags, cs->cr, &ct, &uio, 0);
 	if (error) {
 		freeb(mp);
-		*cs->statusp = resp->status = puterrno4(error);
+		*cs->statusp = resp->status = nnode_stat4(error, 0);
 		goto out;
 	}
 
@@ -3039,10 +3001,7 @@ rfs4_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	}
 	resp->mblk = mp;
 
-	if (!verror && offset + resp->data_len == va.va_size)
-		resp->eof = TRUE;
-	else
-		resp->eof = FALSE;
+	resp->eof = (nnioflags & NNODE_IO_FLAG_EOF) ? TRUE : FALSE;
 
 	if (args->wlist) {
 		if (!rdma_setup_read_data4(args, resp)) {
@@ -3053,8 +3012,7 @@ rfs4_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	}
 
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
+	nnop_io_release(nn, nnioflags, &ct);
 
 	DTRACE_NFSV4_2(op__read__done, struct compound_state *, cs,
 	    READ4res *, resp);
@@ -3201,6 +3159,7 @@ rfs4_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	PUTFH4args *args = &argop->nfs_argop4_u.opputfh;
 	PUTFH4res *resp = &resop->nfs_resop4_u.opputfh;
 	nfs_fh4_fmt_t *fh_fmtp;
+	int error;
 
 	DTRACE_NFSV4_2(op__putfh__start, struct compound_state *, cs,
 	    PUTFH4args *, args);
@@ -3209,16 +3168,12 @@ rfs4_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		VN_RELE(cs->vp);
 		cs->vp = NULL;
 	}
+	if (cs->nn)
+		nnode_rele(&cs->nn);
 
 	if (cs->cr) {
 		crfree(cs->cr);
 		cs->cr = NULL;
-	}
-
-
-	if (args->object.nfs_fh4_len < NFS_FH4_LEN) {
-		*cs->statusp = resp->status = NFS4ERR_BADHANDLE;
-		goto out;
 	}
 
 	fh_fmtp = (nfs_fh4_fmt_t *)args->object.nfs_fh4_val;
@@ -3234,10 +3189,12 @@ rfs4_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	ASSERT(cs->cr != NULL);
 
-	if (! (cs->vp = nfs4_fhtovp(&args->object, cs->exi, &resp->status))) {
-		*cs->statusp = resp->status;
+	error = nnode_from_fh_v4(&cs->nn, &args->object);
+	if (error != 0) {
+		*cs->statusp = resp->status = nnode_stat4(error, 0);
 		goto out;
 	}
+	cs->vp = nnop_io_getvp(cs->nn);
 
 	if ((resp->status = call_checkauth4(cs, req)) != NFS4_OK) {
 		VN_RELE(cs->vp);
@@ -5057,9 +5014,10 @@ rfs4_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 {
 	WRITE4args *args = &argop->nfs_argop4_u.opwrite;
 	WRITE4res *resp = &resop->nfs_resop4_u.opwrite;
+	nnode_io_flags_t nnioflags = NNODE_IO_FLAG_WRITE;
 	int error;
+	nnode_t *nn;
 	vnode_t *vp;
-	struct vattr bva;
 	u_offset_t rlimit;
 	struct uio uio;
 	struct iovec iov[NFS_MAX_IOVECS];
@@ -5069,14 +5027,13 @@ rfs4_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	cred_t *savecred, *cr;
 	bool_t *deleg = &cs->deleg;
 	nfsstat4 stat;
-	int in_crit = 0;
 	caller_context_t ct;
 
 	DTRACE_NFSV4_2(op__write__start, struct compound_state *, cs,
 	    WRITE4args *, args);
 
-	vp = cs->vp;
-	if (vp == NULL) {
+	nn = cs->nn;
+	if (nn == NULL) {
 		*cs->statusp = resp->status = NFS4ERR_NOFILEHANDLE;
 		goto out;
 	}
@@ -5086,60 +5043,26 @@ rfs4_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	}
 
 	cr = cs->cr;
+	vp = nnop_io_getvp(nn);
+	if (rdonly4(cs->exi, vp, req)) {
+		*cs->statusp = resp->status = NFS4ERR_ROFS;
+		goto out;
+	}
+	VN_RELE(vp);
 
-	if ((stat = check_stateid(FWRITE, cs, vp, &args->stateid, FALSE,
+	/* caller context gets set as side-effect */
+	if ((stat = nnop_check_stateid(nn, cs, FWRITE, &args->stateid, FALSE,
 	    deleg, TRUE, &ct)) != NFS4_OK) {
 		*cs->statusp = resp->status = stat;
 		goto out;
 	}
 
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		if (nbl_conflict(vp, NBL_WRITE,
-		    args->offset, args->data_len, 0, &ct)) {
-			*cs->statusp = resp->status = NFS4ERR_LOCKED;
-			goto out;
-		}
-	}
-
-	bva.va_mask = AT_MODE | AT_UID;
-	error = VOP_GETATTR(vp, &bva, 0, cr, &ct);
-
-	/*
-	 * If we can't get the attributes, then we can't do the
-	 * right access checking.  So, we'll fail the request.
-	 */
-	if (error) {
-		*cs->statusp = resp->status = puterrno4(error);
-		goto out;
-	}
-
-	if (rdonly4(cs->exi, cs->vp, req)) {
-		*cs->statusp = resp->status = NFS4ERR_ROFS;
-		goto out;
-	}
-
-	if (vp->v_type != VREG) {
-		*cs->statusp = resp->status =
-		    ((vp->v_type == VDIR) ? NFS4ERR_ISDIR : NFS4ERR_INVAL);
-		goto out;
-	}
-
-	if (crgetuid(cr) != bva.va_uid &&
-	    (error = VOP_ACCESS(vp, VWRITE, 0, cr, &ct))) {
-		*cs->statusp = resp->status = puterrno4(error);
-		goto out;
-	}
-
-	if (MANDLOCK(vp, bva.va_mode)) {
-		*cs->statusp = resp->status = NFS4ERR_ACCESS;
-		goto out;
-	}
+	error = nnop_io_prep(nn, &nnioflags, cr, &ct, args->offset,
+	    args->data_len, NULL);
+	if (error == NNODE_ERROR_NOTIMPL)
+		error = 0; /* some implementations may not need prep */
+	if (error != 0)
+		goto err;
 
 	if (args->data_len == 0) {
 		*cs->statusp = resp->status = NFS4_OK;
@@ -5222,14 +5145,15 @@ rfs4_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 */
 	savecred = curthread->t_cred;
 	curthread->t_cred = cr;
-	error = do_io(FWRITE, vp, &uio, ioflag, cr, &ct);
+	error = nnop_write(nn, &nnioflags, &uio, ioflag, cr, &ct, NULL);
 	curthread->t_cred = savecred;
 
 	if (iovp != iov)
 		kmem_free(iovp, sizeof (*iovp) * iovcnt);
 
+err:
 	if (error) {
-		*cs->statusp = resp->status = puterrno4(error);
+		*cs->statusp = resp->status = nnode_stat4(error, 0);
 		goto out;
 	}
 
@@ -5244,8 +5168,7 @@ rfs4_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	resp->writeverf = cs->instp->Write4verf;
 
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
+	nnop_io_release(nn, nnioflags, &ct);
 
 	DTRACE_NFSV4_2(op__write__done, struct compound_state *, cs,
 	    WRITE4res *, resp);
@@ -5259,7 +5182,7 @@ rfs4_compound(COMPOUND4args *args, COMPOUND4res *resp, struct exportinfo *exi,
 	struct svc_req *req, int *rv)
 {
 	uint_t i;
-	struct compound_state cs;
+	compound_state_t cs;
 	cred_t *cr;
 
 	if (rv != NULL)
@@ -5389,6 +5312,8 @@ bail:
 	DTRACE_NFSV4_2(compound__done, struct compound_state *, &cs,
 	    COMPOUND4res *, resp);
 
+	if (cs.nn)
+		nnode_rele(&cs.nn);
 	if (cs.vp)
 		VN_RELE(cs.vp);
 	if (cs.saved_vp)

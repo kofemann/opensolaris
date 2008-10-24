@@ -54,6 +54,7 @@
 
 #include <nfs/nfs.h>
 #include <nfs/export.h>
+#include <nfs/nnode.h>
 
 #include <sys/strsubr.h>
 
@@ -81,7 +82,6 @@ static int	sattr3_to_vattr(sattr3 *, struct vattr *);
 static int	vattr_to_fattr3(struct vattr *, fattr3 *);
 static int	vattr_to_wcc_attr(struct vattr *, wcc_attr *);
 static void	vattr_to_pre_op_attr(struct vattr *, pre_op_attr *);
-static void	vattr_to_wcc_data(struct vattr *, struct vattr *, wcc_data *);
 static int	rdma_setup_read_data3(READ3args *, READ3resok *);
 
 u_longlong_t nfs3_srv_caller_id;
@@ -378,6 +378,7 @@ rfs3_lookup(LOOKUP3args *args, LOOKUP3res *resp, struct exportinfo *exi,
 	int error;
 	vnode_t *vp;
 	vnode_t *dvp;
+	nnode_t *nn, *nnres;
 	struct vattr *vap;
 	struct vattr va;
 	struct vattr *dvap;
@@ -436,6 +437,8 @@ rfs3_lookup(LOOKUP3args *args, LOOKUP3res *resp, struct exportinfo *exi,
 		resp->status = NFS3ERR_NOENT;
 		goto out1;
 	}
+	if (nnode_from_fh_v3(&nn, fhp, exi) == 0)
+		nnode_rele(&nn);
 
 	/*
 	 * If the public filehandle is used then allow
@@ -483,6 +486,10 @@ rfs3_lookup(LOOKUP3args *args, LOOKUP3res *resp, struct exportinfo *exi,
 	} else {
 		error = VOP_LOOKUP(dvp, args->what.name, &vp,
 		    NULL, 0, NULL, cr, NULL, NULL, NULL);
+		if (error == 0) {
+			if (nnode_from_vnode(&nnres, vp) == 0)
+				nnode_rele(&nnres);
+		}
 	}
 
 	if (is_system_labeled() && error == 0) {
@@ -915,44 +922,33 @@ void
 rfs3_read(READ3args *args, READ3res *resp, struct exportinfo *exi,
 	struct svc_req *req, cred_t *cr)
 {
+	bslabel_t *clabel = NULL;
 	int error;
 	vnode_t *vp;
-	struct vattr *vap;
-	struct vattr va;
 	struct iovec iov;
 	struct uio uio;
-	u_offset_t offset;
 	mblk_t *mp;
 	int alloc_err = 0;
-	int in_crit = 0;
-	int need_rwunlock = 0;
 	caller_context_t ct;
+	uint32_t prepflags = 0;
+	nnode_t *nn = NULL;
 
-	vap = NULL;
-
-	vp = nfs3_fhtovp(&args->file, exi);
+	error = nnode_from_fh_v3(&nn, &args->file, exi);
+	/* XXX vp is still needed for DTrace provider */
+	vp = nnop_io_getvp(nn);
 
 	DTRACE_NFSV3_4(op__read__start, struct svc_req *, req,
 	    cred_t *, cr, vnode_t *, vp, READ3args *, args);
 
-	if (vp == NULL) {
-		error = ESTALE;
+	if (error != 0)
 		goto out;
-	}
 
 	if (is_system_labeled()) {
-		bslabel_t *clabel = req->rq_label;
+		clabel = req->rq_label;
 
 		ASSERT(clabel != NULL);
 		DTRACE_PROBE2(tx__rfs3__log__info__opread__clabel, char *,
 		    "got client label from request(1)", struct svc_req *, req);
-
-		if (!blequal(&l_admin_low->tsl_label, clabel)) {
-			if (!do_rfs_label_check(clabel, vp, DOMINANCE_CHECK)) {
-				resp->status = NFS3ERR_ACCES;
-				goto out1;
-			}
-		}
 	}
 
 	ct.cc_sysid = 0;
@@ -960,75 +956,22 @@ rfs3_read(READ3args *args, READ3res *resp, struct exportinfo *exi,
 	ct.cc_caller_id = nfs3_srv_caller_id;
 	ct.cc_flags = CC_DONTBLOCK;
 
-	/*
-	 * Enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with write requests.
-	 */
-	if (nbl_need_check(vp)) {
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		if (nbl_conflict(vp, NBL_READ, args->offset, args->count, 0,
-		    NULL)) {
-			error = EACCES;
-			goto out;
-		}
-	}
-
-	error = VOP_RWLOCK(vp, V_WRITELOCK_FALSE, &ct);
-
+	error = nnop_io_prep(nn, &prepflags, cr, &ct, args->offset,
+	    args->count, clabel);
 	/* check if a monitor detected a delegation conflict */
 	if (error == EAGAIN && (ct.cc_flags & CC_WOULDBLOCK)) {
 		resp->status = NFS3ERR_JUKEBOX;
 		goto out1;
 	}
-
-	need_rwunlock = 1;
-
-	va.va_mask = AT_ALL;
-	error = VOP_GETATTR(vp, &va, 0, cr, &ct);
-
-	/*
-	 * If we can't get the attributes, then we can't do the
-	 * right access checking.  So, we'll fail the request.
-	 */
-	if (error)
+	if (error == NNODE_ERROR_NOTIMPL)
+		error = 0; /* some implementations may not need prep */
+	if (error != 0)
 		goto out;
 
-#ifdef DEBUG
-	if (rfs3_do_post_op_attr)
-		vap = &va;
-#else
-	vap = &va;
-#endif
-
-	if (vp->v_type != VREG) {
-		resp->status = NFS3ERR_INVAL;
-		goto out1;
-	}
-
-	if (crgetuid(cr) != va.va_uid) {
-		error = VOP_ACCESS(vp, VREAD, 0, cr, &ct);
-		if (error) {
-			if (curthread->t_flag & T_WOULDBLOCK)
-				goto out;
-			error = VOP_ACCESS(vp, VEXEC, 0, cr, &ct);
-			if (error)
-				goto out;
-		}
-	}
-
-	if (MANDLOCK(vp, va.va_mode)) {
-		resp->status = NFS3ERR_ACCES;
-		goto out1;
-	}
-
-	offset = args->offset;
-	if (offset >= va.va_size) {
-		VOP_RWUNLOCK(vp, V_WRITELOCK_FALSE, &ct);
-		if (in_crit)
-			nbl_end_crit(vp);
+	if (prepflags & NNODE_IO_FLAG_PAST_EOF) {
+		nnop_io_release(nn, prepflags, &ct);
 		resp->status = NFS3_OK;
-		vattr_to_post_op_attr(vap, &resp->resok.file_attributes);
+		nnop_post_op_attr(nn, &resp->resok.file_attributes);
 		resp->resok.count = 0;
 		resp->resok.eof = TRUE;
 		resp->resok.data.data_len = 0;
@@ -1041,11 +984,9 @@ rfs3_read(READ3args *args, READ3res *resp, struct exportinfo *exi,
 	}
 
 	if (args->count == 0) {
-		VOP_RWUNLOCK(vp, V_WRITELOCK_FALSE, &ct);
-		if (in_crit)
-			nbl_end_crit(vp);
+		nnop_io_release(nn, prepflags, &ct);
 		resp->status = NFS3_OK;
-		vattr_to_post_op_attr(vap, &resp->resok.file_attributes);
+		nnop_post_op_attr(nn, &resp->resok.file_attributes);
 		resp->resok.count = 0;
 		resp->resok.eof = FALSE;
 		resp->resok.data.data_len = 0;
@@ -1096,8 +1037,7 @@ rfs3_read(READ3args *args, READ3res *resp, struct exportinfo *exi,
 	uio.uio_loffset = args->offset;
 	uio.uio_resid = args->count;
 
-	error = VOP_READ(vp, &uio, 0, cr, &ct);
-
+	error = nnop_read(nn, &prepflags, cr, &ct, &uio, 0);
 	if (error) {
 		freeb(mp);
 		/* check if a monitor detected a delegation conflict */
@@ -1108,33 +1048,12 @@ rfs3_read(READ3args *args, READ3res *resp, struct exportinfo *exi,
 		goto out;
 	}
 
-	va.va_mask = AT_ALL;
-	error = VOP_GETATTR(vp, &va, 0, cr, &ct);
-
-#ifdef DEBUG
-	if (rfs3_do_post_op_attr) {
-		if (error)
-			vap = NULL;
-		else
-			vap = &va;
-	} else
-		vap = NULL;
-#else
-	if (error)
-		vap = NULL;
-	else
-		vap = &va;
-#endif
-
-	VOP_RWUNLOCK(vp, V_WRITELOCK_FALSE, &ct);
-
-	if (in_crit)
-		nbl_end_crit(vp);
+	nnop_io_release(nn, prepflags, &ct);
 
 	resp->status = NFS3_OK;
-	vattr_to_post_op_attr(vap, &resp->resok.file_attributes);
+	nnop_post_op_attr(nn, &resp->resok.file_attributes);
 	resp->resok.count = args->count - uio.uio_resid;
-	if (!error && offset + resp->resok.count == va.va_size)
+	if (prepflags & NNODE_IO_FLAG_EOF)
 		resp->resok.eof = TRUE;
 	else
 		resp->resok.eof = FALSE;
@@ -1157,6 +1076,7 @@ done:
 	    cred_t *, cr, vnode_t *, vp, READ3res *, resp);
 
 	VN_RELE(vp);
+	nnode_rele(&nn);
 
 	return;
 
@@ -1165,19 +1085,18 @@ out:
 		curthread->t_flag &= ~T_WOULDBLOCK;
 		resp->status = NFS3ERR_JUKEBOX;
 	} else
-		resp->status = puterrno3(error);
+		resp->status = nnode_stat3(error);
 out1:
 	DTRACE_NFSV3_4(op__read__done, struct svc_req *, req,
 	    cred_t *, cr, vnode_t *, vp, READ3res *, resp);
 
-	if (vp != NULL) {
-		if (need_rwunlock)
-			VOP_RWUNLOCK(vp, V_WRITELOCK_FALSE, &ct);
-		if (in_crit)
-			nbl_end_crit(vp);
-		VN_RELE(vp);
+	if (nn != NULL) {
+		nnop_io_release(nn, prepflags, &ct);
+		nnop_post_op_attr(nn, &resp->resfail.file_attributes);
+		nnode_rele(&nn);
 	}
-	vattr_to_post_op_attr(vap, &resp->resfail.file_attributes);
+	if (vp)
+		VN_RELE(vp);
 }
 
 void
@@ -1209,11 +1128,8 @@ rfs3_write(WRITE3args *args, WRITE3res *resp, struct exportinfo *exi,
 	struct svc_req *req, cred_t *cr)
 {
 	int error;
+	nnode_t *nn;
 	vnode_t *vp;
-	struct vattr *bvap = NULL;
-	struct vattr bva;
-	struct vattr *avap = NULL;
-	struct vattr ava;
 	u_offset_t rlimit;
 	struct uio uio;
 	struct iovec iov[NFS_MAX_IOVECS];
@@ -1222,33 +1138,27 @@ rfs3_write(WRITE3args *args, WRITE3res *resp, struct exportinfo *exi,
 	int iovcnt;
 	int ioflag;
 	cred_t *savecred;
-	int in_crit = 0;
-	int rwlock_ret = -1;
 	caller_context_t ct;
+	bslabel_t *clabel = NULL;
+	uint32_t prepflags = NNODE_IO_FLAG_WRITE;
 
-	vp = nfs3_fhtovp(&args->file, exi);
+	error = nnode_from_fh_v3(&nn, &args->file, exi);
+	vp = nnop_io_getvp(nn);
 
 	DTRACE_NFSV3_4(op__write__start, struct svc_req *, req,
 	    cred_t *, cr, vnode_t *, vp, WRITE3args *, args);
 
-	if (vp == NULL) {
-		error = ESTALE;
+	if (error != 0) {
+		nn = NULL;
 		goto err;
 	}
 
 	if (is_system_labeled()) {
-		bslabel_t *clabel = req->rq_label;
+		clabel = req->rq_label;
 
 		ASSERT(clabel != NULL);
 		DTRACE_PROBE2(tx__rfs3__log__info__opwrite__clabel, char *,
 		    "got client label from request(1)", struct svc_req *, req);
-
-		if (!blequal(&l_admin_low->tsl_label, clabel)) {
-			if (!do_rfs_label_check(clabel, vp, EQUALITY_CHECK)) {
-				resp->status = NFS3ERR_ACCES;
-				goto err1;
-			}
-		}
 	}
 
 	ct.cc_sysid = 0;
@@ -1256,46 +1166,12 @@ rfs3_write(WRITE3args *args, WRITE3res *resp, struct exportinfo *exi,
 	ct.cc_caller_id = nfs3_srv_caller_id;
 	ct.cc_flags = CC_DONTBLOCK;
 
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		if (nbl_conflict(vp, NBL_WRITE, args->offset, args->count, 0,
-		    NULL)) {
-			error = EACCES;
-			goto err;
-		}
-	}
-
-	rwlock_ret = VOP_RWLOCK(vp, V_WRITELOCK_TRUE, &ct);
-
-	/* check if a monitor detected a delegation conflict */
-	if (rwlock_ret == EAGAIN && (ct.cc_flags & CC_WOULDBLOCK)) {
-		resp->status = NFS3ERR_JUKEBOX;
-		rwlock_ret = -1;
-		goto err1;
-	}
-
-
-	bva.va_mask = AT_ALL;
-	error = VOP_GETATTR(vp, &bva, 0, cr, &ct);
-
-	/*
-	 * If we can't get the attributes, then we can't do the
-	 * right access checking.  So, we'll fail the request.
-	 */
-	if (error)
+	error = nnop_io_prep(nn, &prepflags, cr, &ct, args->offset,
+	    args->count, clabel);
+	if (error == NNODE_ERROR_NOTIMPL)
+		error = 0; /* some implementations may not need prep */
+	if (error != 0)
 		goto err;
-
-	bvap = &bva;
-#ifdef DEBUG
-	if (!rfs3_do_pre_op_attr)
-		bvap = NULL;
-#endif
-	avap = bvap;
 
 	if (args->count != args->data.data_len) {
 		resp->status = NFS3ERR_INVAL;
@@ -1307,23 +1183,9 @@ rfs3_write(WRITE3args *args, WRITE3res *resp, struct exportinfo *exi,
 		goto err1;
 	}
 
-	if (vp->v_type != VREG) {
-		resp->status = NFS3ERR_INVAL;
-		goto err1;
-	}
-
-	if (crgetuid(cr) != bva.va_uid &&
-	    (error = VOP_ACCESS(vp, VWRITE, 0, cr, &ct)))
-		goto err;
-
-	if (MANDLOCK(vp, bva.va_mode)) {
-		resp->status = NFS3ERR_ACCES;
-		goto err1;
-	}
-
 	if (args->count == 0) {
 		resp->status = NFS3_OK;
-		vattr_to_wcc_data(bvap, avap, &resp->resok.file_wcc);
+		nnop_wcc_data_err(nn, &resp->resok.file_wcc);
 		resp->resok.count = 0;
 		resp->resok.committed = args->stable;
 		resp->resok.verf = write3verf;
@@ -1391,70 +1253,44 @@ rfs3_write(WRITE3args *args, WRITE3res *resp, struct exportinfo *exi,
 	 */
 	savecred = curthread->t_cred;
 	curthread->t_cred = cr;
-	error = VOP_WRITE(vp, &uio, ioflag, cr, &ct);
+	error = nnop_write(nn, &prepflags, &uio, ioflag, cr, &ct,
+	    &resp->resok.file_wcc);
 	curthread->t_cred = savecred;
 
 	if (iovp != iov)
 		kmem_free(iovp, sizeof (*iovp) * iovcnt);
 
-	/* check if a monitor detected a delegation conflict */
-	if (error == EAGAIN && (ct.cc_flags & CC_WOULDBLOCK)) {
-		resp->status = NFS3ERR_JUKEBOX;
-		goto err1;
-	}
-
-	ava.va_mask = AT_ALL;
-	avap = VOP_GETATTR(vp, &ava, 0, cr, &ct) ? NULL : &ava;
-
-#ifdef DEBUG
-	if (!rfs3_do_post_op_attr)
-		avap = NULL;
-#endif
-
-	if (error)
+	if (error != 0)
 		goto err;
 
-	/*
-	 * If we were unable to get the V_WRITELOCK_TRUE, then we
-	 * may not have accurate after attrs, so check if
-	 * we have both attributes, they have a non-zero va_seq, and
-	 * va_seq has changed by exactly one,
-	 * if not, turn off the before attr.
-	 */
-	if (rwlock_ret != V_WRITELOCK_TRUE) {
-		if (bvap == NULL || avap == NULL ||
-		    bvap->va_seq == 0 || avap->va_seq == 0 ||
-		    avap->va_seq != (bvap->va_seq + 1)) {
-			bvap = NULL;
-		}
-	}
-
 	resp->status = NFS3_OK;
-	vattr_to_wcc_data(bvap, avap, &resp->resok.file_wcc);
 	resp->resok.count = args->count - uio.uio_resid;
 	resp->resok.committed = args->stable;
 	resp->resok.verf = write3verf;
 	goto out;
 
 err:
+	/* check if a monitor detected a delegation conflict */
+	if (error == EAGAIN && (ct.cc_flags & CC_WOULDBLOCK)) {
+		resp->status = NFS3ERR_JUKEBOX;
+		goto err1;
+	}
 	if (curthread->t_flag & T_WOULDBLOCK) {
 		curthread->t_flag &= ~T_WOULDBLOCK;
 		resp->status = NFS3ERR_JUKEBOX;
 	} else
-		resp->status = puterrno3(error);
+		resp->status = nnode_stat3(error);
 err1:
-	vattr_to_wcc_data(bvap, avap, &resp->resfail.file_wcc);
+	nnop_wcc_data_err(nn, &resp->resfail.file_wcc);
 out:
 	DTRACE_NFSV3_4(op__write__done, struct svc_req *, req,
 	    cred_t *, cr, vnode_t *, vp, WRITE3res *, resp);
 
-	if (vp != NULL) {
-		if (rwlock_ret != -1)
-			VOP_RWUNLOCK(vp, V_WRITELOCK_TRUE, &ct);
-		if (in_crit)
-			nbl_end_crit(vp);
+	nnop_io_release(nn, prepflags, &ct);
+	if (vp != NULL)
 		VN_RELE(vp);
-	}
+	if (nn != NULL)
+		nnode_rele(&nn);
 }
 
 void *
@@ -4319,7 +4155,7 @@ vattr_to_post_op_attr(struct vattr *vap, post_op_attr *poap)
 		poap->attributes = FALSE;
 }
 
-static void
+void
 vattr_to_wcc_data(struct vattr *bvap, struct vattr *avap, wcc_data *wccp)
 {
 

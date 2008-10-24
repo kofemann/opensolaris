@@ -75,7 +75,8 @@ typedef struct {
 #define	FH41_NAMEDATTR	1
 #define	FH41_ATTRDIR	2
 
-extern vnode_t *nfs41_fhtovp(nfs_fh4 *, struct compound_state *);
+extern vnode_t *nfs41_fhtovp(nfs_fh4 *, compound_state_t *);
+extern vnode_t *nfs41_fhtovp_exi(nfs_fh4 *, struct exportinfo *, nfsstat4 *);
 extern int mknfs41_fh(nfs_fh4 *, vnode_t *, struct exportinfo *);
 extern bool_t xdr_encode_nfs41_fh(XDR *, nfs_fh4 *);
 extern bool_t xdr_decode_nfs41_fh(XDR *, nfs_fh4 *);

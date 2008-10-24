@@ -94,9 +94,8 @@ encode_nfs41_fh(uint32_t **ptrp, uint32_t *ptr_redzone,
 /* ARGSUSED */
 void
 mds_op_readdir(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *req, compound_node_t *cn)
+    struct svc_req *req, compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
 	READDIR4args *args = &argop->nfs_argop4_u.opreaddir;
 	READDIR4res *resp = &resop->nfs_resop4_u.opreaddir;
 	struct exportinfo *newexi = NULL;

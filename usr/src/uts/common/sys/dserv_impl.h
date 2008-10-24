@@ -116,11 +116,20 @@ typedef struct dserv_nnode_data_phys {
 /*
  * nnode private data
  */
+
+typedef struct {
+	mds_sid_content *dnk_sid;
+	mds_fid *dnk_fid;
+
+	mds_fid dnk_real_fid;
+} dserv_nnode_key_t;
+
 typedef struct dserv_nnode_data {
 	krwlock_t	dnd_rwlock;
 	uint32_t	dnd_flags;
 
-	ds_fh_v1	*dnd_fh;
+	mds_sid		*dnd_sid;
+	mds_fid		*dnd_fid;
 	objset_t	*dnd_objset;
 	uint64_t	dnd_object;		/* dmu object id */
 	uint32_t	dnd_blksize;		/* object block size */

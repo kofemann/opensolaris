@@ -432,7 +432,9 @@ f none usr/include/nfs/nfs_log.h 644 root bin
 f none usr/include/nfs/nfs_sec.h 644 root bin
 f none usr/include/nfs/nfsid_map.h 644 root bin
 f none usr/include/nfs/nfssys.h 644 root bin
-f none usr/include/nfs/rfs41_ds.h 644 root bin
+f none usr/include/nfs/nnode.h 644 root bin
+f none usr/include/nfs/nnode_impl.h 644 root bin
+f none usr/include/nfs/nnode_vn.h 644 root bin
 f none usr/include/nfs/rnode.h 644 root bin
 f none usr/include/nfs/rnode4.h 644 root bin
 f none usr/include/nl_types.h 644 root bin

@@ -37,7 +37,7 @@
 #include <sys/cmn_err.h>
 #include <sys/modctl.h>
 
-extern void rfs41_compound_free(COMPOUND4res *, compound_node_t *);
+static kmem_cache_t *rfs41_compound_state_cache = NULL;
 
 /*
  * Needs some clean up
@@ -195,9 +195,8 @@ rfs41_slrc_prologue(COMPOUND4args_srv *cap, COMPOUND4res_srv **rpp)
  * the RECALLABLE_STATE_REVOKED bit turned off.
  */
 static void
-rfs41_compute_seq4_flags(COMPOUND4res *rp, compound_node_t *cn)
+rfs41_compute_seq4_flags(COMPOUND4res *rp, compound_state_t *cs)
 {
-	struct compound_state	*cs = cn->cn_state;
 	mds_session_t		*sp = cs->sp;
 	rfs4_client_t		*cp = sp->sn_clnt;
 	int			 i;
@@ -258,13 +257,13 @@ rfs41_compute_seq4_flags(COMPOUND4res *rp, compound_node_t *cn)
 
 int
 rfs41_slrc_epilogue(COMPOUND4args_srv *cap, COMPOUND4res_srv *resp,
-    compound_node_t *cn)
+    compound_state_t *cs)
 {
 	slot41_t	*slp;
 	int		 error = 0;
 
 	/* compute SEQ4 flags before caching response */
-	rfs41_compute_seq4_flags((COMPOUND4res *)resp, cn);
+	rfs41_compute_seq4_flags((COMPOUND4res *)resp, cs);
 
 	/*
 	 * Slot cache entry eviction and insertion
@@ -279,7 +278,7 @@ rfs41_slrc_epilogue(COMPOUND4args_srv *cap, COMPOUND4res_srv *resp,
 				    COMPOUND4res *, &slp->res,
 				    nfs_resop4 *, slp->res.array);
 				rfs41_compound_free((COMPOUND4res *)&slp->res,
-				    cn);
+				    cs);
 			}
 			slp->status = NFS4_OK;
 			slp->res = *resp;
@@ -310,73 +309,66 @@ rfs41_slrc_epilogue(COMPOUND4args_srv *cap, COMPOUND4res_srv *resp,
 	return (error);
 }
 
-
-extern int rfs41_persona_set(nfs41_fh_type_t, struct compound_state *);
-
-void
-rfs4_cn_init(compound_node_t *cn,
-    nfs_server_instance_t *instp, nfsstat4 *statusp, nfs41_fh_type_t persona)
+/*ARGSUSED*/
+static int
+rfs41_compound_state_construct(void *vcs, void *foo, int bar)
 {
-	struct compound_state *cs;
-
-	cs = kmem_zalloc(sizeof (*cs), KM_SLEEP);
-	cn->cn_state = cs;
-	cn->cn_state_impl = 0;
-
-	rfs4_init_compound_state(cs);
-	cs->instp = instp;
-	cs->statusp = statusp;
-
-	(void) rfs41_persona_set(persona, cs);
-
-	ASSERT(cs->persona_funcs);
-
-	if (cs->persona_funcs->cs_construct != NULL)
-		(*cs->persona_funcs->cs_construct)(cn, statusp, &cs->cont);
+	return (0);
 }
 
-void
-rfs4_cn_release(compound_node_t *cn)
+/*ARGSUSED*/
+static void
+rfs41_compound_state_destroy(void *vcs, void *foo)
 {
-	struct compound_state *cs = cn->cn_state;
+}
 
-	if (cs->persona_funcs->cs_destruct != NULL)
-		(*cs->persona_funcs->cs_destruct)(cn);
+/* module init */
+void
+rfs41_dispatch_init(void)
+{
+	rfs41_compound_state_cache = kmem_cache_create(
+	    "rfs41_compound_state_cache", sizeof (compound_state_t), 0,
+	    rfs41_compound_state_construct, rfs41_compound_state_destroy, NULL,
+	    NULL, NULL, 0);
+}
 
-	if (cs->vp)
-		VN_RELE(cs->vp);
-	if (cs->saved_vp)
-		VN_RELE(cs->saved_vp);
-	if (cs->saved_fh.nfs_fh4_val)
-		kmem_free(cs->saved_fh.nfs_fh4_val, NFS4_FHSIZE);
-	if (cs->basecr)
-		crfree(cs->basecr);
-	if (cs->cr)
-		crfree(cs->cr);
+static compound_state_t *
+rfs41_compound_state_alloc(void)
+{
+	compound_state_t *cs;
 
-	kmem_free(cs, sizeof (*cs));
+	cs = kmem_cache_alloc(rfs41_compound_state_cache, KM_SLEEP);
+	bzero(cs, sizeof (*cs));
+	cs->instp = mds_server;
+	cs->cont = TRUE;
+	cs->fh.nfs_fh4_val = cs->fhbuf;
+
+	return (cs);
+}
+
+static void
+rfs41_compound_state_free(compound_state_t *cs)
+{
+	kmem_cache_free(rfs41_compound_state_cache, cs);
 }
 
 /* ARGSUSED */
 int
-rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap,
-    nfs41_fh_type_t persona)
+rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 {
-	compound_node_t		 cn;
-	struct compound_state	*cs;
+	compound_state_t	*cs;
 	COMPOUND4res_srv	 res_buf;
 	COMPOUND4res_srv	*rbp;
 	COMPOUND4args_srv	*cap;
 	int			 error = 0;
 	int			 rv;
 
+	cs = rfs41_compound_state_alloc();
 	bzero(&res_buf, sizeof (COMPOUND4res_srv));
 	rbp = &res_buf;
 	rbp->minorversion = NFS4_MINOR_v1;
 	cap = (COMPOUND4args_srv *)ap;
-
-	rfs4_cn_init(&cn, mds_server, &rbp->status, persona);
-	cs = cn.cn_state;
+	cs->statusp = &rbp->status;
 
 	/*
 	 * Validate the first operation in the compound,
@@ -415,7 +407,7 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap,
 
 	/* Regular processing */
 	curthread->t_flag |= T_DONTPEND;
-	mds_compound(&cn, (COMPOUND4args *)cap, (COMPOUND4res *)rbp,
+	mds_compound(cs, (COMPOUND4args *)cap, (COMPOUND4res *)rbp,
 	    NULL, req, &rv);
 	curthread->t_flag &= ~T_DONTPEND;
 
@@ -426,12 +418,13 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap,
 
 	if (curthread->t_flag & T_WOULDBLOCK) {
 		curthread->t_flag &= ~T_WOULDBLOCK;
+		rfs41_compound_state_free(cs);
 		return (1);		/* XXX - this may have to change */
 	}
 
 slrc:
 	if (cs->sp)		/* only cache SEQUENCE'd compounds */
-		(void) rfs41_slrc_epilogue(cap, rbp, &cn);
+		(void) rfs41_slrc_epilogue(cap, rbp, cs);
 
 reply:
 	/*
@@ -454,8 +447,8 @@ out:
 	 * request for the slot.
 	 */
 	if (rbp->status)
-		rfs41_compound_free((COMPOUND4res *)rbp, &cn);
+		rfs41_compound_free((COMPOUND4res *)rbp, cs);
 
-	rfs4_cn_release(&cn);
+	rfs41_compound_state_free(cs);
 	return (error);
 }

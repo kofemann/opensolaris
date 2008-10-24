@@ -113,7 +113,6 @@ int
 rfs4_srvrinit(void)
 {
 	extern void nsi_cache_init();
-	extern void rfs41_persona_init();
 	extern void mds_srvrinit();
 	extern void (*rfs4_client_clrst)(struct nfs4clrst_args *);
 	extern void rfs4_ntov_init(void);
@@ -125,8 +124,6 @@ rfs4_srvrinit(void)
 
 	/* create the nfs_server_instance keme cache */
 	nsi_cache_init();
-
-	rfs41_persona_init();
 
 	rfs4_client_clrst = rfs4_clear_client_state;
 
@@ -3781,7 +3778,7 @@ rfs4_sstor_init(nfs_server_instance_t *instp)
 	 * Create the state store and set the
 	 * start-up time.
 	 */
-	need_sstor_init = sstor_init(instp, FH41_TYPE_LEGACY, 60);
+	need_sstor_init = sstor_init(instp, 60);
 
 	if (need_sstor_init == 0)
 		return;

@@ -80,8 +80,8 @@
 #include <nfs/lm.h>
 #include <nfs/nfs_dispatch.h>
 #include <nfs/nfs4_drc.h>
-#include <nfs/ds.h>
 #include <nfs/nnode.h>
+#include <nfs/ds.h>
 
 #include <sys/modctl.h>
 #include <sys/cladm.h>
@@ -264,8 +264,7 @@ static	kcondvar_t nfs_server_state_cv;
  */
 nvlist_t *rfs4_dss_paths, *rfs4_dss_oldpaths;
 
-int	rfs4_minor_version_dispatch(struct svc_req *, SVCXPRT *, char *,
-    nfs41_fh_type_t);
+int	rfs4_minor_version_dispatch(struct svc_req *, SVCXPRT *, char *);
 bool_t rfs4_minorvers_mismatch(struct svc_req *, SVCXPRT *, void *);
 
 /*
@@ -1584,8 +1583,7 @@ common_dispatch(struct svc_req *req, SVCXPRT *xprt, rpcvers_t min_vers,
 	 * If Version 4 figure out specific dispatch function.
 	 */
 	if (req->rq_vers == 4) {
-		error += rfs4_minor_version_dispatch(req, xprt, args,
-		    FH41_TYPE_NFS);
+		error += rfs4_minor_version_dispatch(req, xprt, args);
 		goto done;
 	}
 
@@ -2490,6 +2488,7 @@ nfs_srvinit(void)
 	}
 	rfs_srvrinit();
 	rfs3_srvrinit();
+	rfs41_srvrinit();
 	nfsauth_init();
 
 	/* Init the stuff to control start/stop */
@@ -2512,6 +2511,7 @@ nfs_srvinit(void)
 void
 nfs_srvfini(void)
 {
+	(void) nnode_mod_fini();
 	nfsauth_fini();
 	rfs3_srvrfini();
 	rfs_srvrfini();

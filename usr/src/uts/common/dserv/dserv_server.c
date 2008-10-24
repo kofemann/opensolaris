@@ -40,34 +40,21 @@
 #include <sys/txg.h>
 #include <rpc/xdr.h>
 #include <nfs/ds.h>
-#include <nfs/rfs41_ds.h>
+#include <sys/crc32.h>
+#include <sys/sysmacros.h>
 
-void dserv_cn_init(compound_node_t *, nfsstat4 *, bool_t *);
-void dserv_cn_release(compound_node_t *);
+uint32_t max_blksize = SPA_MAXBLOCKSIZE;
 
-static nnop_error_t dserv_nnop_read(void *, void *, uint64_t, uint32_t);
-static nnop_error_t dserv_nnop_write(void *, void *, uint64_t, uint32_t);
-static nnop_error_t dserv_nnop_commit(void *, uint64_t, uint32_t);
+static nnode_error_t dserv_nnode_from_fh_ds(nnode_t **, nfs_fh4 *);
+static void dserv_nnode_key_free(void *);
+static dserv_nnode_data_t *dserv_nnode_data_alloc(void);
 
-static void dserv_dmu_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *req, compound_node_t *cn);
-
-static void dserv_nnode_op_putfh(nfs_argop4 *, nfs_resop4 *,
-    struct svc_req *, compound_node_t *);
-static void dserv_nnode_op_read(nfs_argop4 *, nfs_resop4 *,
-    struct svc_req *, compound_node_t *);
-static void dserv_dmu_op_read_free(nfs_resop4 *, compound_node_t *);
-static void dserv_nnode_op_write(nfs_argop4 *, nfs_resop4 *,
-    struct svc_req *, compound_node_t *);
-static void dserv_nnode_op_commit(nfs_argop4 *, nfs_resop4 *,
-    struct svc_req *, compound_node_t *);
-static void dserv_dmu_op_commit(nfs_argop4 *, nfs_resop4 *,
-    struct svc_req *, compound_node_t *);
-static void dserv_dmu_op_secinfo_noname(nfs_argop4 *, nfs_resop4 *,
-    struct svc_req *, compound_node_t *);
-
+static nnode_error_t dserv_nnode_data_getobject(dserv_nnode_data_t *, int);
 static void dserv_dispatch(struct svc_req *, SVCXPRT *);
 static void dmov_dispatch(struct svc_req *, SVCXPRT *);
+
+static int dserv_get_objset(ds_fh_v1 *, objset_t **);
+static void dserv_grow_blocksize(dserv_nnode_data_t *, uint32_t, dmu_tx_t *);
 
 static void ds_commit(DS_COMMITargs *,  DS_COMMITres *,
     struct svc_req *);
@@ -98,19 +85,19 @@ static void ds_snap(DS_SNAPargs *, DS_SNAPres *,
 static void ds_pnfsstat(DS_PNFSSTATargs *, DS_PNFSSTATres *,
     struct svc_req *);
 static void cp_nullfree(void);
-static void nullfree(nfs_resop4 *, compound_node_t *);
 
 void dispatch_dserv_nfsv41(struct svc_req *, SVCXPRT *);
 
+static int dserv_nnode_io_prep(void *, nnode_io_flags_t *, cred_t *,
+    caller_context_t *, offset_t, size_t, bslabel_t *);
+static int dserv_nnode_read(void *, nnode_io_flags_t *, cred_t *,
+    caller_context_t *, uio_t *, int);
+static int dserv_nnode_write(void *, nnode_io_flags_t *, uio_t *, int,
+    cred_t *, caller_context_t *, wcc_data *);
 static void dserv_nnode_data_free(void *);
 
+static kmem_cache_t *dserv_nnode_key_cache;
 static kmem_cache_t *dserv_nnode_data_cache;
-static nnode_data_ops_t dserv_nnode_data_ops = {
-	.ndo_read = dserv_nnop_read,
-	.ndo_write = dserv_nnop_write,
-	.ndo_commit = dserv_nnop_commit,
-	.ndo_free = dserv_nnode_data_free
-};
 
 time_t dserv_start_time;
 
@@ -201,55 +188,14 @@ static uint_t nfs_mds_cp_cnt =
 
 #define	NFS_MDS_CP_ILLEGAL_PROC (nfs_mds_cp_cnt)
 
+static nnode_data_ops_t dserv_nnode_data_ops = {
+	.ndo_read = dserv_nnode_read,
+	.ndo_write = dserv_nnode_write,
+	.ndo_io_prep = dserv_nnode_io_prep,
+	.ndo_free = dserv_nnode_data_free
+};
+
 int dserv_debug = 0;
-
-struct op_disp_tbl op_putfh = {
-	dserv_nnode_op_putfh,
-	nullfree,
-	DISP_OP_DS,
-	"DS_PUTFH"
-};
-
-struct op_disp_tbl op_read = {
-	dserv_nnode_op_read,
-	dserv_dmu_op_read_free,
-	DISP_OP_DS,
-	"DS_READ"
-};
-
-struct op_disp_tbl op_write = {
-	dserv_nnode_op_write,
-	nullfree,
-	DISP_OP_DS,
-	"DS_WRITE"
-};
-
-struct op_disp_tbl op_commit = {
-	dserv_nnode_op_commit,
-	nullfree,
-	DISP_OP_DS,
-	"DS_COMMIT"
-};
-
-struct op_disp_tbl op_secinfo_noname = {
-	dserv_dmu_op_secinfo_noname,
-	nullfree,
-	DISP_OP_DS,
-	"DS_SECINFO_NONAME"
-};
-
-rfs41_persona_funcs_t dmu_ds_func = {
-	.cs_construct = dserv_cn_init,
-	.cs_destruct = dserv_cn_release,
-	.ds_op_putfh = &op_putfh,
-	.ds_op_read = &op_read,
-	.ds_op_write = &op_write,
-	.ds_op_commit = &op_commit,
-	.ds_op_secinfo_noname = &op_secinfo_noname
-};
-
-extern int rfs4_minor_version_dispatch(struct svc_req *, SVCXPRT *, char *,
-    nfs41_fh_type_t);
 
 static void
 send_nfs4err(nfsstat4 stat, SVCXPRT *xprt)
@@ -312,8 +258,7 @@ dispatch_dserv_nfsv41(struct svc_req *req, SVCXPRT *xprt)
 			send_nfs4err(NFS4ERR_IO, xprt);
 		}
 
-		(void) rfs4_minor_version_dispatch(req, xprt, (char *)&args,
-		    FH41_TYPE_DMU_DS);
+		(void) rfs41_dispatch(req, xprt, (char *)&args);
 		dserv_instance_exit(inst);
 	}
 
@@ -321,6 +266,101 @@ dispatch_dserv_nfsv41(struct svc_req *req, SVCXPRT *xprt)
 		DTRACE_PROBE(dserv__e__svc_freeargs);
 }
 
+static uint32_t
+dserv_nnode_hash(dserv_nnode_key_t *key)
+{
+	uint32_t rc;
+
+	CRC32(rc, key->dnk_fid->mds_fid_val, key->dnk_fid->mds_fid_len,
+	    -1U, crc32_table);
+
+	return (rc);
+}
+
+static int
+dserv_nnode_compare(const void *va, const void *vb)
+{
+	const dserv_nnode_key_t *a = va;
+	const dserv_nnode_key_t *b = vb;
+	int rc;
+
+	NFS_AVL_COMPARE(a->dnk_fid->mds_fid_len, b->dnk_fid->mds_fid_len);
+	rc = memcmp(a->dnk_fid->mds_fid_val, b->dnk_fid->mds_fid_val,
+	    a->dnk_fid->mds_fid_len);
+	NFS_AVL_RETURN(rc);
+
+	return (0);
+}
+
+static nnode_error_t
+dserv_nnode_build(nnode_seed_t *seed, void *vfh)
+{
+	mds_ds_fh *fh = vfh;
+	dserv_nnode_key_t *key = NULL;
+	nnode_error_t rc = 0;
+	dserv_nnode_data_t *data = NULL;
+	objset_t *osp;
+
+	rc = dserv_get_objset(&fh->fh.v1, &osp);
+	if (rc != 0)
+		goto out;
+
+	/* XXX do some sid stuff */
+
+	key = kmem_cache_alloc(dserv_nnode_key_cache, KM_SLEEP);
+	key->dnk_real_fid.mds_fid_len = fh->fh.v1.mds_fid.mds_fid_len;
+	bcopy(fh->fh.v1.mds_fid.mds_fid_val, key->dnk_real_fid.mds_fid_val,
+	    key->dnk_real_fid.mds_fid_len);
+
+	data = dserv_nnode_data_alloc();
+	data->dnd_fid = key->dnk_fid;
+	data->dnd_objset = osp;
+	data->dnd_flags = DSERV_NNODE_FLAG_OBJSET;
+
+	seed->ns_key = key;
+	seed->ns_key_compare = dserv_nnode_compare;
+	seed->ns_key_free = dserv_nnode_key_free;
+	seed->ns_data_ops = &dserv_nnode_data_ops;
+	seed->ns_data = data;
+
+out:
+	if (rc != 0) {
+		if (key != NULL)
+			dserv_nnode_key_free(key);
+		if (data != NULL)
+			dserv_nnode_data_free(data);
+	}
+
+	return (rc);
+}
+
+static nnode_error_t
+dserv_nnode_from_fh_ds(nnode_t **npp, nfs_fh4 *fh)
+{
+	mds_ds_fh *fmt = (mds_ds_fh *)fh->nfs_fh4_val;
+	dserv_nnode_key_t dskey;
+	nnode_key_t key;
+	uint32_t hash;
+
+	if (fh->nfs_fh4_len < sizeof (*fmt))
+		return (ESTALE); /* XXX badhandle */
+	if (fmt->vers < 1)
+		return (ESTALE); /* XXX badhandle */
+	if (fmt->fh.v1.mds_fid.mds_fid_len < 8) /* XXX stupid */
+		return (ESTALE);
+	if (fmt->fh.v1.mds_fid.mds_fid_len > DS_MAXFIDSZ)
+		return (ESTALE);
+	/* XXX cannot do sid until mds_sid is sane */
+	dskey.dnk_sid = NULL;
+	dskey.dnk_fid = &fmt->fh.v1.mds_fid;
+
+	hash = dserv_nnode_hash(&dskey);
+
+	key.nk_keydata = &dskey;
+	key.nk_compare = dserv_nnode_compare;
+
+	return (nnode_find_or_create(npp, &key, hash, fmt, dserv_nnode_build));
+}
 
 static char *
 dserv_tohex(const void *bytes, int len)
@@ -341,17 +381,9 @@ dserv_tohex(const void *bytes, int len)
 	return (rc);
 }
 
-/*ARGSUSED*/
-static void
-nullfree(nfs_resop4 *resop, compound_node_t *cn)
-{
-
-}
-
 static void
 cp_nullfree(void)
 {
-
 }
 
 /*
@@ -585,30 +617,115 @@ dserv_get_objset(ds_fh_v1 *ds_fh, objset_t **osp)
 	return (0);
 }
 
-void
-dserv_cn_init(compound_node_t *cn, nfsstat4 *statusp, bool_t *contp)
+/*ARGSUSED*/
+static int
+dserv_nnode_io_prep(void *vdata, nnode_io_flags_t *nnflags, cred_t *cr,
+    caller_context_t *ct, offset_t off, size_t len, bslabel_t *clabel)
 {
-	dserv_compound_state_t *cs;
+	dserv_nnode_data_t *data = vdata;
+	nnode_error_t err = 0;
 
-	cs = kmem_zalloc(sizeof (*cs), KM_SLEEP);
+	rw_enter(&data->dnd_rwlock, RW_READER);
+	if (! (data->dnd_flags & DSERV_NNODE_FLAG_OBJECT)) {
+		int create;
 
-	cn->cn_state_impl = cs;
-	cs->dcs_statusp = statusp;
-	cs->dcs_continue = contp;
+		create = (*nnflags & NNODE_IO_FLAG_WRITE) ? B_TRUE : B_FALSE;
+		err = dserv_nnode_data_getobject(data, create);
+		if ((err == ENOENT) && (! (*nnflags & NNODE_IO_FLAG_WRITE))) {
+			*nnflags |= NNODE_IO_FLAG_PAST_EOF;
+			err = 0;
+			goto out;
+		}
+		if (err)
+			goto out;
+	}
+
+	if (off > data->dnd_phys->dp_size)
+		*nnflags |= NNODE_IO_FLAG_PAST_EOF;
+out:
+	rw_exit(&data->dnd_rwlock);
+
+	return (err);
 }
 
-void
-dserv_cn_release(compound_node_t *cn)
+/*ARGSUSED*/
+static int
+dserv_nnode_read(void *vdata, nnode_io_flags_t *nnflags, cred_t *cr,
+    caller_context_t *ct, uio_t *uiop, int ioflag)
 {
-	dserv_compound_state_t *cs = cn->cn_state_impl;
+	dserv_nnode_data_t *data = vdata;
+	nnode_error_t err;
 
-	if (cs == NULL)
-		return;
+	rw_enter(&data->dnd_rwlock, RW_READER);
+	ASSERT(data->dnd_flags & DSERV_NNODE_FLAG_OBJECT);
+	err = dmu_read_uio(data->dnd_objset, data->dnd_object, uiop,
+	    uiop->uio_resid);
 
-	if (cs->dcs_nnode != NULL)
-		nnode_rele(&cs->dcs_nnode);
+out:
+	rw_exit(&data->dnd_rwlock);
+	return (err);
+}
 
-	kmem_free(cs, sizeof (*cs));
+/*ARGSUSED*/
+static int
+dserv_nnode_write(void *vdata, nnode_io_flags_t *nnflags, uio_t *uiop,
+    int ioflags, cred_t *cr, caller_context_t *ct, wcc_data *wcc)
+{
+	dserv_nnode_data_t *data = vdata;
+	offset_t end = uiop->uio_loffset + uiop->uio_resid;
+	uint64_t new_blksize = 0;
+	uint64_t new_size = 0;
+	krw_t rw = RW_READER;
+	nnode_error_t err;
+	dmu_tx_t *tx;
+
+
+	ASSERT(wcc == NULL); /* No NFSv3 access */
+
+again:
+	rw_enter(&data->dnd_rwlock, rw);
+	if (end > data->dnd_phys->dp_size) {
+		if ((rw == RW_READER) &&
+		    (! rw_tryupgrade(&data->dnd_rwlock))) {
+			rw = RW_WRITER;
+			rw_exit(&data->dnd_rwlock);
+			goto again;
+		}
+
+		if (end > data->dnd_blksize) {
+			new_size = end;
+			if (data->dnd_blksize < max_blksize)
+				new_blksize = MIN(end, max_blksize);
+			else if (!ISP2(data->dnd_blksize))
+				new_blksize = MIN(end, SPA_MAXBLOCKSIZE);
+		}
+	}
+
+	tx = dmu_tx_create(data->dnd_objset);
+	dmu_tx_hold_write(tx, data->dnd_object, uiop->uio_loffset,
+	    uiop->uio_resid);
+	err = dmu_tx_assign(tx, TXG_WAIT);
+	if (err) {
+		dmu_tx_abort(tx);
+		err = EIO;
+		goto out;
+	}
+	if (new_blksize)
+		dserv_grow_blocksize(data, new_blksize, tx);
+	if (new_size) {
+		dmu_buf_will_dirty(data->dnd_dbuf, tx);
+		data->dnd_phys->dp_size = new_size;
+	}
+
+	dmu_write_uio(data->dnd_objset, data->dnd_object, uiop,
+	    uiop->uio_resid, tx);
+	dmu_tx_commit(tx);
+	err = 0;
+
+out:
+	rw_exit(&data->dnd_rwlock);
+
+	return (err);
 }
 
 /*ARGSUSED*/
@@ -639,7 +756,7 @@ dserv_nnode_data_alloc(void)
 	dnd = kmem_cache_alloc(dserv_nnode_data_cache, KM_SLEEP);
 
 	dnd->dnd_flags = 0;
-	dnd->dnd_fh = NULL;
+	dnd->dnd_fid = NULL;
 	dnd->dnd_objset = NULL;
 	dnd->dnd_dbuf = NULL;
 	dnd->dnd_phys = NULL;
@@ -660,60 +777,54 @@ dserv_nnode_data_free(void *vdnd)
 		dmu_buf_rele(db, NULL);
 	}
 	dnd->dnd_flags = 0;
-	dnd->dnd_fh = NULL;
+	dnd->dnd_fid = NULL;
 	dnd->dnd_objset = NULL;
 	dnd->dnd_dbuf = NULL;
 	dnd->dnd_phys = NULL;
 	kmem_cache_free(dserv_nnode_data_cache, dnd);
 }
 
-static nnode_from_fh_res_t
-dserv_nnode_from_fh(nnode_seed_t *seed)
+/*ARGSUSED*/
+static int
+dserv_nnode_key_construct(void *vdnk, void *foo, int bar)
 {
-	dserv_nnode_data_t *dnd;
-	mds_ds_fh *fh;
+	dserv_nnode_key_t *key = vdnk;
 
-	if ((seed->ns_fh_len > sizeof (mds_ds_fh)) ||
-	    (seed->ns_fh_len < sizeof (mds_ds_fh) - DS_MAXFIDSZ))
-		return (NNODE_FROM_FH_UNKNOWN);
-	fh = seed->ns_fh_value;
-	if ((fh->type != FH41_TYPE_DMU_DS) || (fh->vers != DS_FH_v1))
-		return (NNODE_FROM_FH_UNKNOWN);
+	key->dnk_fid = &key->dnk_real_fid;
 
-	dnd = dserv_nnode_data_alloc();
-	dnd->dnd_fh = &fh->fh.v1;
+	return (0);
+}
 
-	seed->ns_data_ops = &dserv_nnode_data_ops;
-	seed->ns_data = dnd;
-
-	return (NNODE_FROM_FH_OKAY);
+static void
+dserv_nnode_key_free(void *dnk)
+{
+	kmem_cache_free(dserv_nnode_key_cache, dnk);
 }
 
 void
 dserv_server_setup()
 {
-	int err;
-
 	dserv_start_time = gethrestime_sec();
 
+	dserv_nnode_key_cache = kmem_cache_create("dserv_nnode_key_cache",
+	    sizeof (dserv_nnode_key_t), 0,
+	    dserv_nnode_key_construct, NULL, NULL,
+	    NULL, NULL, 0);
 	dserv_nnode_data_cache = kmem_cache_create("dserv_nnode_data_cache",
 	    sizeof (dserv_nnode_data_t), 0,
 	    dserv_nnode_data_construct, dserv_nnode_data_destroy, NULL,
 	    NULL, NULL, 0);
-	nnode_build_dserv = dserv_nnode_from_fh;
 
-	err = rfs41_data_server_register(FH41_TYPE_DMU_DS, &dmu_ds_func);
-	/* XXXX: a little more plumbing work needed here :) */
-	if (err)
-		DTRACE_PROBE1(dserv__e__dserv_server_setup, int, err);
+	nnode_from_fh_ds = dserv_nnode_from_fh_ds;
 }
 
 void
 dserv_server_teardown()
 {
-	nnode_build_dserv = NULL;
+	nnode_from_fh_ds = NULL;
+
 	kmem_cache_destroy(dserv_nnode_data_cache);
-	(void) rfs41_data_server_unregister(FH41_TYPE_DMU_DS);
+	kmem_cache_destroy(dserv_nnode_key_cache);
 }
 
 char *
@@ -1004,7 +1115,7 @@ nnode_evict_error(dmu_buf_t *dbuf, void *user_ptr)
  * number of distinct file objects stored on the data server).  This violates
  * the rules for using the Micro ZAP.
  */
-static int
+static nnode_error_t
 get_object_state(dserv_nnode_data_t *dnd, char *hex_fh)
 {
 	int error = 0;
@@ -1026,7 +1137,7 @@ get_object_state(dserv_nnode_data_t *dnd, char *hex_fh)
 		return (error);
 	if ((doi.doi_bonus_type != DMU_OT_NNODE) ||
 	    (doi.doi_bonus_size != sizeof (dserv_nnode_data_phys_t)))
-		return (ENOENT);
+		return (ENOTTY);
 	dnd->dnd_blksize = doi.doi_data_block_size;
 
 	error = dmu_bonus_hold(dnd->dnd_objset, dnd->dnd_object, NULL, &db);
@@ -1038,7 +1149,6 @@ get_object_state(dserv_nnode_data_t *dnd, char *hex_fh)
 	    nnode_evict_error));
 
 	return (0);
-
 }
 
 static int
@@ -1173,107 +1283,16 @@ dserv_grow_blocksize(dserv_nnode_data_t *dnd, uint32_t size, dmu_tx_t *tx)
 	dmu_object_size_from_db(dnd->dnd_dbuf, &dnd->dnd_blksize, &dummy);
 }
 
-/* ARGSUSED */
-static void
-dserv_nnode_op_commit(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *req, compound_node_t *cn)
-{
-	COMMIT4args *argp = &argop->nfs_argop4_u.opcommit;
-	COMMIT4res *resp = &resop->nfs_resop4_u.opcommit;
-	dserv_compound_state_t *cs = cn->cn_state_impl;
-	nnop_error_t err;
-	nnode_t *nn;
-
-	resop->resop = argop->argop;
-
-	nn = cs->dcs_nnode;
-	if (nn == NULL) {
-		resp->status = *cs->dcs_statusp = NFS4ERR_NOFILEHANDLE;
-		*cs->dcs_continue = FALSE;
-		return;
-	}
-
-	err = nnop_commit(nn, argp->offset, argp->count);
-	if (err) {
-		*cs->dcs_statusp = resp->status = NFS4ERR_IO;
-		*cs->dcs_continue = FALSE;
-	} else {
-		*cs->dcs_statusp = resp->status = NFS4_OK;
-		*cs->dcs_continue = TRUE;
-	}
-}
-
-/* ARGSUSED */
-static void
-dserv_dmu_op_commit(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *req, compound_node_t *cn)
-{
-	COMMIT4res *resp = &resop->nfs_resop4_u.opcommit;
-	dserv_compound_state_t *cs = cn->cn_state_impl;
-
-	resop->resop = argop->argop;
-
-	if (cs->dcs_nnode == NULL) {
-		resp->status = *cs->dcs_statusp = NFS4ERR_NOFILEHANDLE;
-		*cs->dcs_continue = FALSE;
-		return;
-	}
-
-	*cs->dcs_statusp = resp->status = NFS4_OK;
-}
-
-/* ARGSUSED */
-static void
-dserv_nnode_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *req, compound_node_t *cn)
-{
-	PUTFH4args *argp = &argop->nfs_argop4_u.opputfh;
-	PUTFH4res *resp = &resop->nfs_resop4_u.opputfh;
-	dserv_compound_state_t *cs = cn->cn_state_impl;
-	nnode_from_fh_res_t res;
-	nnode_t *nn;
-
-	resop->resop = argop->argop;
-
-	res = nnode_from_fh(&nn, argp->object.nfs_fh4_val,
-	    argp->object.nfs_fh4_len, NNODE_FROM_FH_DS);
-	switch (res) {
-	case NNODE_FROM_FH_OKAY:
-		break;
-	case NNODE_FROM_FH_STALE:
-		*cs->dcs_statusp = resp->status = NFS4ERR_STALE;
-		*cs->dcs_continue = FALSE;
-		return;
-	case NNODE_FROM_FH_UNKNOWN:
-	case NNODE_FROM_FH_BADFH:
-		*cs->dcs_statusp = resp->status = NFS4ERR_BADHANDLE;
-		*cs->dcs_continue = FALSE;
-		return;
-	case NNODE_FROM_FH_BADCONTEXT:
-	default:
-		DTRACE_PROBE1(dserv__putfh__problem, nnode_from_fh_res_t, res);
-		*cs->dcs_statusp = resp->status = NFS4ERR_BADHANDLE;
-		*cs->dcs_continue = FALSE;
-		return;
-	}
-
-	cs->dcs_nnode = nn;
-
-	*cs->dcs_statusp = resp->status = NFS4_OK;
-	*cs->dcs_continue = TRUE;
-}
-
-static nnop_error_t
+static nnode_error_t
 dserv_nnode_data_getobject(dserv_nnode_data_t *dnd, int create)
 {
+	nnode_error_t rc = 0;
 	char *hexfid;
-	nnop_error_t rc = NNOP_OKAY;
-	int error;
 
 	ASSERT(RW_READ_HELD(&dnd->dnd_rwlock));
 
 	if (dnd->dnd_flags & DSERV_NNODE_FLAG_OBJECT)
-		return (NNOP_OKAY);
+		return (0);
 
 	if (!rw_tryupgrade(&dnd->dnd_rwlock)) {
 		rw_exit(&dnd->dnd_rwlock);
@@ -1282,298 +1301,24 @@ dserv_nnode_data_getobject(dserv_nnode_data_t *dnd, int create)
 			goto out;
 	}
 
-	if (! (dnd->dnd_flags & DSERV_NNODE_FLAG_OBJSET)) {
-		error = dserv_get_objset(dnd->dnd_fh, &dnd->dnd_objset);
-		if (error) {
-			DTRACE_PROBE1(dserv__e__dserv_getobject_get_objset,
-			    int, error);
-			rc = NNOP_ERR_IO;
-			goto out;
-		}
-		dnd->dnd_flags |= DSERV_NNODE_FLAG_OBJSET;
+	ASSERT(dnd->dnd_flags & DSERV_NNODE_FLAG_OBJSET);
+
+	hexfid = dserv_tohex(dnd->dnd_fid->mds_fid_val,
+	    dnd->dnd_fid->mds_fid_len);
+	if (create)
+		rc = get_create_object_state(dnd, hexfid);
+	else
+		rc = get_object_state(dnd, hexfid);
+	dserv_strfree(hexfid);
+	if (rc != 0) {
+		DTRACE_PROBE1(dserv__e__dserv_getobject_get_object_state,
+		    nnode_error_t, rc);
+		goto out;
 	}
 
-	hexfid = dserv_tohex(dnd->dnd_fh->mds_fid.mds_fid_val,
-	    dnd->dnd_fh->mds_fid.mds_fid_len);
-	if (create)
-		error = get_create_object_state(dnd, hexfid);
-	else
-		error = get_object_state(dnd, hexfid);
-	dserv_strfree(hexfid);
-	if (error && ((error != ENOENT) || create)) {
-		DTRACE_PROBE1(dserv__e__dserv_getobject_get_object_state, int,
-		    error);
-		rc = NNOP_ERR_IO;
-		goto out;
-	}
-	if (error == ENOENT) {
-		rc = NNOP_OKAY_EOF;
-		goto out;
-	}
 	dnd->dnd_flags |= DSERV_NNODE_FLAG_OBJECT;
 
 out:
 	rw_downgrade(&dnd->dnd_rwlock);
 	return (rc);
-}
-
-uint32_t max_blksize = SPA_MAXBLOCKSIZE;
-
-/* ARGSUSED */
-static nnop_error_t
-dserv_nnop_commit(void *vdnd, uint64_t off, uint32_t len)
-{
-	/*
-	 * We're not using the zil right now, so this is a no-op.
-	 */
-#if 0
-	dserv_nnode_data_t *dnd = vdnd;
-#endif
-
-	return (NNOP_OKAY);
-}
-
-static nnop_error_t
-dserv_nnop_write(void *vdnd, void *buffy, uint64_t offset, uint32_t len)
-{
-	dserv_nnode_data_t *dnd = vdnd;
-	nnop_error_t err;
-	dmu_tx_t *tx;
-	uint64_t end_size;
-	uint64_t new_size = 0;
-	uint32_t new_blksize = 0;
-	int error;
-
-	rw_enter(&dnd->dnd_rwlock, RW_READER);
-	err = dserv_nnode_data_getobject(dnd, B_TRUE);
-	if (err)
-		goto out;
-	ASSERT(dnd->dnd_flags & DSERV_NNODE_FLAG_OBJECT);
-
-	end_size = offset + len;
-	if (end_size > dnd->dnd_phys->dp_size) {
-		if (!rw_tryupgrade(&dnd->dnd_rwlock)) {
-			rw_exit(&dnd->dnd_rwlock);
-			rw_enter(&dnd->dnd_rwlock, RW_WRITER);
-		}
-		if (end_size > dnd->dnd_phys->dp_size) {
-			new_size = end_size;
-			if (end_size > dnd->dnd_blksize) {
-				if (dnd->dnd_blksize < max_blksize)
-					new_blksize = MIN(end_size,
-					    max_blksize);
-				else if (!ISP2(dnd->dnd_blksize)) {
-					new_blksize = MIN(end_size,
-					    SPA_MAXBLOCKSIZE);
-				}
-			}
-		}
-	}
-
-	tx = dmu_tx_create(dnd->dnd_objset);
-	DTRACE_PROBE2(dserv__i__dmu_tx_hold_write, uint64_t, offset,
-	    uint32_t, len);
-	dmu_tx_hold_write(tx, dnd->dnd_object, offset, len);
-	error = dmu_tx_assign(tx, TXG_WAIT);
-	if (error) {
-		DTRACE_PROBE1(dserv__e__dmu_tx_assign, int, error);
-		dmu_tx_abort(tx);
-		err = NNOP_ERR_IO;
-		goto out;
-	}
-
-	if (new_blksize) {
-		dserv_grow_blocksize(dnd, new_blksize, tx);
-	}
-
-	if (new_size) {
-		dmu_buf_will_dirty(dnd->dnd_dbuf, tx);
-		dnd->dnd_phys->dp_size = new_size;
-	}
-
-	dmu_write(dnd->dnd_objset, dnd->dnd_object, offset, len, buffy, tx);
-	dmu_tx_commit(tx);
-	err = NNOP_OKAY;
-out:
-	rw_exit(&dnd->dnd_rwlock);
-
-	return (err);
-}
-
-static nnop_error_t
-dserv_nnop_read(void *vdnd, void *buffy, uint64_t offset, uint32_t len)
-{
-	dserv_nnode_data_t *dnd = vdnd;
-	nnop_error_t err;
-	int error;
-
-	rw_enter(&dnd->dnd_rwlock, RW_READER);
-	err = dserv_nnode_data_getobject(dnd, B_FALSE);
-	if (err)
-		goto out;
-	ASSERT(dnd->dnd_flags & DSERV_NNODE_FLAG_OBJECT);
-
-	error = dmu_read(dnd->dnd_objset, dnd->dnd_object, offset, len, buffy);
-	if (error) {
-		DTRACE_PROBE1(dserv__e__dmu_read, int, error);
-		err = NNOP_ERR_IO;
-		goto out;
-	}
-
-	err = NNOP_OKAY;
-out:
-	rw_exit(&dnd->dnd_rwlock);
-
-	return (err);
-}
-
-/* ARGSUSED */
-static void
-dserv_nnode_op_write(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *req, compound_node_t *cn)
-{
-	WRITE4args *argp = &argop->nfs_argop4_u.opwrite;
-	WRITE4res *resp = &resop->nfs_resop4_u.opwrite;
-	dserv_compound_state_t *cs = cn->cn_state_impl;
-	nnop_error_t err;
-	nnode_t *nn;
-
-	resop->resop = argop->argop;
-
-	nn = cs->dcs_nnode;
-	if (nn == NULL) {
-		resp->status = *cs->dcs_statusp = NFS4ERR_NOFILEHANDLE;
-		*cs->dcs_continue = FALSE;
-		return;
-	}
-
-	if (argp->data_len == 0) {
-		*cs->dcs_statusp = resp->status = NFS4_OK;
-		resp->count = 0;
-		resp->committed = argp->stable;
-		resp->writeverf = 1; /* how to set this??? */
-		return;
-	}
-	if (argp->mblk != NULL) {
-		uint_t resid = argp->data_len;
-		uint_t edge = resid % BYTES_PER_XDR_UNIT;
-		uint_t round = 0;
-		uint_t thislen;
-		mblk_t *m = argp->mblk;
-		uint64_t offset = argp->offset;
-		if (edge)
-			round = BYTES_PER_XDR_UNIT - edge;
-
-		while (m != NULL) {
-			thislen = m->b_wptr - m->b_rptr;
-			if (thislen > resid) {
-				if (thislen != resid + round) {
-					DTRACE_PROBE1(
-					    dserv__i__write_bytes_over,
-					    uint64_t, (thislen - resid));
-					if (m->b_cont)
-						DTRACE_PROBE(
-						    dserv__i__more_to_come)
-					err = NNOP_ERR_IO;
-					resid = 0;
-					break;
-				}
-				thislen = resid;
-			}
-			err = nnop_write(nn, m->b_rptr, offset, thislen);
-			if (err)
-				break;
-			offset += thislen;
-			resid -= thislen;
-			m = m->b_cont;
-		}
-		if (resid > 0) {
-			DTRACE_PROBE1(dserv__e__write_short, uint_t, resid);
-			err = NNOP_ERR_IO;
-		}
-	} else {
-		err = nnop_write(nn, argp->data_val, argp->offset,
-		    argp->data_len);
-	}
-
-	if (err) {
-		*cs->dcs_statusp = resp->status = NFS4ERR_IO;
-		*cs->dcs_continue = FALSE;
-	} else {
-		resp->count = argp->data_len;
-		resp->committed = FILE_SYNC4; /* How should we set this? */
-		/* Set this below like the the nfs server does. */
-		resp->writeverf = 1;
-		*cs->dcs_statusp = resp->status = NFS4_OK;
-	}
-}
-
-/*ARGSUSED*/
-static void
-dserv_nnode_op_read(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *req, compound_node_t *cn)
-{
-	READ4args *argp = &argop->nfs_argop4_u.opread;
-	READ4res *resp = &resop->nfs_resop4_u.opread;
-	dserv_compound_state_t *cs = cn->cn_state_impl;
-	char *buffy = NULL;
-	nnode_t *nn;
-	nnop_error_t nstatus;
-	uint32_t len;
-
-	resop->resop = argop->argop;
-
-	nn = cs->dcs_nnode;
-	if (nn == NULL) {
-		resp->status = *cs->dcs_statusp = NFS4ERR_NOFILEHANDLE;
-		*cs->dcs_continue = FALSE;
-		return;
-	}
-
-	len = MIN(DSERV_MAXREAD, argp->count);
-	buffy = kmem_zalloc(len, KM_SLEEP);
-
-	nstatus = nnop_read(nn, buffy, argp->offset, len);
-	switch (nstatus) {
-	case NNOP_OKAY_EOF:
-		resp->eof = TRUE;
-		/*FALLTHROUGH*/
-	case NNOP_OKAY:
-		resp->data_len = len;
-		resp->data_val = buffy;
-		*cs->dcs_statusp = resp->status = NFS4_OK;
-		break;
-	default:
-		kmem_free(buffy, len);
-		*cs->dcs_statusp = resp->status = NFS4ERR_IO;
-		*cs->dcs_continue = B_FALSE;
-		break;
-	}
-}
-
-/*ARGSUSED*/
-static void
-dserv_dmu_op_read_free(nfs_resop4 *resop, compound_node_t *cn)
-{
-	READ4res *resp = &resop->nfs_resop4_u.opread;
-
-	if (resp->data_val != NULL && resp->data_len != 0) {
-		kmem_free(resp->data_val, resp->data_len);
-		resp->data_len = 0;
-		resp->data_val = NULL;
-	}
-}
-
-/* ARGSUSED */
-static void dserv_dmu_op_secinfo_noname(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *req, compound_node_t *cn)
-{
-#if 0
-	SECINFO_NO_NAME4args *argp = &argop->nfs_argop4_u.opsecinfo_no_name;
-#endif
-	SECINFO_NO_NAME4res *resp = &resop->nfs_resop4_u.opsecinfo_no_name;
-	dserv_compound_state_t *cs = cn->cn_state_impl;
-
-	*cs->dcs_statusp = resp->status = NFS4ERR_NOTSUPP;
-	*cs->dcs_continue = FALSE;
 }

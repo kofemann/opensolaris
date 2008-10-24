@@ -22,7 +22,6 @@
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 # 
-#
 # uts/common/nfs/Makefile
 #
 # include global definitions
@@ -37,9 +36,9 @@ HDRS=	export.h	lm.h						\
 	nfs4_kprot.h	nfs4_db_impl.h	nfs4_idmap_impl.h		\
 	nfsid_map.h	auth.h		nfs4_ext_defs.h	nfs41_kprot.h	\
 	nfs_serv_inst.h nfs4_pnfs.h	ds.h		nfs41_sessions.h \
-	nfs4_clnt_impl.h rfs41_ds.h nfs41_fhtype.h nfs41_filehandle.h \
+	nfs4_clnt_impl.h nfs41_fhtype.h nfs41_filehandle.h \
 	ds_filehandle.h nfs4_attrmap.h nfs4_srv_readdir.h nfs4_srv_attr.h \
-	mds_state.h
+	mds_state.h	nnode.h		nnode_impl.h	nnode_vn.h
 
 
 PROTOCOL_DIR = $(SRC)/head/rpcsvc

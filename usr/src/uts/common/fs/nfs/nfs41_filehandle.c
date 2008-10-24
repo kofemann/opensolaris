@@ -83,14 +83,8 @@ mknfs41_fh(nfs_fh4 *otw_fh, vnode_t *vp, struct exportinfo *exi)
  * This function understands FH_TYPE_NFS version 1 filehandles.
  */
 vnode_t *
-nfs41_fhtovp(nfs_fh4 *otw_fh, struct compound_state *cs)
+nfs41_fhtovp(nfs_fh4 *otw_fh, compound_state_t *cs)
 {
-	int error;
-	fid_t fidp;
-	nfs41_fh_fmt_t *fhp;
-	vfs_t *vfsp;
-	vnode_t *vp;
-
 	/*
 	 * If the compound state does not hold the export info, the
 	 * filehandle must be stale (or we were called too soon).
@@ -106,11 +100,23 @@ nfs41_fhtovp(nfs_fh4 *otw_fh, struct compound_state *cs)
 		return (NULL);
 	}
 
-	vfsp = cs->exi->exi_vp->v_vfsp;
+	return (nfs41_fhtovp_exi(otw_fh, cs->exi, cs->statusp));
+}
+
+vnode_t *
+nfs41_fhtovp_exi(nfs_fh4 *otw_fh, exportinfo_t *exi, nfsstat4 *statusp)
+{
+	int error;
+	fid_t fidp;
+	nfs41_fh_fmt_t *fhp;
+	vfs_t *vfsp;
+	vnode_t *vp;
+
+	vfsp = exi->exi_vp->v_vfsp;
 
 	ASSERT(vfsp != NULL);
 	if (vfsp == NULL) {
-		*cs->statusp = NFS4ERR_STALE;
+		*statusp = NFS4ERR_STALE;
 		return (NULL);
 	}
 
@@ -128,11 +134,11 @@ nfs41_fhtovp(nfs_fh4 *otw_fh, struct compound_state *cs)
 	 * an nfs v2/v3/v4 node in an nfsv4 pseudo filesystem.
 	 * Check it out.
 	 */
-	if (error && PSEUDO(cs->exi))
-		error = nfs4_vget_pseudo(cs->exi, &vp, &fidp);
+	if (error && PSEUDO(exi))
+		error = nfs4_vget_pseudo(exi, &vp, &fidp);
 
 	if (error || vp == NULL) {
-		*cs->statusp = NFS4ERR_STALE;
+		*statusp = NFS4ERR_STALE;
 		return (NULL);
 	}
 
@@ -143,7 +149,7 @@ nfs41_fhtovp(nfs_fh4 *otw_fh, struct compound_state *cs)
 	if (vp->v_type == VNON && vp->v_flag & V_XATTRDIR)
 		vp->v_type = VDIR;
 
-	*cs->statusp = NFS4_OK;
+	*statusp = NFS4_OK;
 
 	return (vp);
 

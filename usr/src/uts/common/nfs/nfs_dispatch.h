@@ -78,12 +78,11 @@ typedef struct rpc_disptable {
 
 void	rpc_null(caddr_t *, caddr_t *);
 
-struct compound_node;
+struct compound_state;
 struct exportinfo;
 
-int rfs41_dispatch(struct svc_req *, SVCXPRT *, char *,
-    nfs41_fh_type_t);
-extern void mds_compound(struct compound_node *,
+int rfs41_dispatch(struct svc_req *, SVCXPRT *, char *);
+extern void mds_compound(struct compound_state *,
     COMPOUND4args *, COMPOUND4res *,
     struct exportinfo *, struct svc_req *, int *);
 

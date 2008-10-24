@@ -35,7 +35,6 @@ extern "C" {
 enum ds_fh_version {
 	DS_FH_v1 = 1
 };
-
 typedef enum ds_fh_version ds_fh_version;
 
 #define	DS_MAXFIDSZ 64

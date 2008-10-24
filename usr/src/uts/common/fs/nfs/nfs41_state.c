@@ -43,7 +43,6 @@ extern u_longlong_t nfs4_srv_caller_id;
 #include <nfs/mds_state.h>
 #include <nfs/nfs41_sessions.h>
 
-#include <nfs/rfs41_ds.h>
 #include <nfs/nfs41_filehandle.h>
 
 static void mds_do_lorecall(mds_lorec_t *);
@@ -2305,7 +2304,7 @@ mds_mapzap_destroy(rfs4_entry_t foo)
  */
 
 int
-sstor_init(nfs_server_instance_t *instp, int def_persona, int def_reap)
+sstor_init(nfs_server_instance_t *instp, int def_reap)
 {
 	/*
 	 * If the server state store has already been initialized,
@@ -2332,7 +2331,6 @@ sstor_init(nfs_server_instance_t *instp, int def_persona, int def_reap)
 	 * this value is used.
 	 */
 	instp->reap_time = def_reap * rfs4_lease_time;
-	instp->default_persona = def_persona;
 
 	instp->state_store = rfs4_database_create();
 	instp->state_store->instp = instp;
@@ -2401,7 +2399,7 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	 * Create the state store and set the
 	 * start-up time.
 	 */
-	need_sstor_init = sstor_init(instp, FH41_TYPE_NFS, 60);
+	need_sstor_init = sstor_init(instp, 60);
 
 	if (need_sstor_init == 0)
 		return;
@@ -2567,6 +2565,12 @@ void
 mds_srvrinit(void)
 {
 	mds_recall_lo = mds_lorecall_cmd;
+}
+
+void
+rfs41_srvrinit(void)
+{
+	rfs41_dispatch_init();
 }
 
 static char *

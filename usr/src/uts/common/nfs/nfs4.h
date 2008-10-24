@@ -31,9 +31,11 @@
 #include <sys/fem.h>
 #include <rpc/rpc.h>
 #include <nfs/nfs.h>
+#include <nfs/nnode.h>
 
 #ifdef _KERNEL
 #include <nfs/nfs4_kprot.h>
+#include <nfs/nnode.h>
 #include <sys/nvpair.h>
 #else
 #include <rpcsvc/nfs4_prot.h>
@@ -116,7 +118,6 @@ typedef struct rfs41_grant_list {
 	struct rfs41_grant_list *prev;
 	struct mds_layout_grant	*lgp;
 } rfs41_grant_list_t;
-
 
 /*
  * Minimal server stable storage.
@@ -1377,25 +1378,9 @@ typedef struct nfs_fh4_fmt nfs_fh4_fmt_t;
 #define	CS_ACCESS_LIMITED	0x4
 
 /*
- * Operation Dispatch Table flags.
- */
-#define	DISP_OP_BAD	0
-#define	DISP_OP_MDS	1
-#define	DISP_OP_DS	2
-#define	DISP_OP_BOTH	3
-
-typedef struct compound_node {
-	void *cn_state;
-	void *cn_state_impl;
-} compound_node_t;
-
-
-#include <nfs/rfs41_ds.h>
-
-/*
  * compound state in nfsv4 server
  */
-struct compound_state {
+typedef struct compound_state {
 	struct exportinfo *exi;
 	struct exportinfo *saved_exi;	/* export struct for saved_vp */
 	cred_t 		*basecr;	/* UNIX cred:  only RPC request */
@@ -1407,6 +1392,7 @@ struct compound_state {
 	uint_t 		access;		/* access perm on vp per request */
 	bool_t 		deleg;		/* TRUE if current fh has */
 					/* write delegated */
+	nnode_t		*nn;
 	vnode_t 	*vp;		/* modified by PUTFH, and by ops that */
 					/* input to GETFH */
 	bool_t 		mandlock;	/* Is mandatory locking in effect */
@@ -1426,14 +1412,12 @@ struct compound_state {
 	int		sequenced;
 	mds_session_t	*sp;
 	rfs4_client_t   *cp;
-	int		persona;
-	rfs41_persona_funcs_t *persona_funcs;
 	int		op_ndx;
 	int 		op_len;
 	nfs_server_instance_t *instp;
-};
+} compound_state_t;
 
-
+void rfs41_compound_free(COMPOUND4res *, compound_state_t *);
 extern	void		rfs4_init_compound_state(struct compound_state *);
 extern	rfs4_state_t	*rfs4_findstate_by_owner_file(
     struct compound_state *cs, rfs4_openowner_t *,
@@ -1458,6 +1442,24 @@ extern	rfs4_deleg_state_t *rfs4_finddelegstate(struct compound_state *,
     stateid_t *);
 extern	rfs4_deleg_state_t *rfs4_grant_delegation(struct compound_state *,
     delegreq_t, rfs4_state_t *, int *);
+
+/*
+ * Operation Dispatch Table flags.
+ */
+typedef enum {
+	DISP_OP_BAD,
+	DISP_OP_MDS,
+	DISP_OP_DS,
+	DISP_OP_BOTH
+} op_disp_valid_t;
+
+typedef struct {
+	void    (*dis_op)(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
+	    compound_state_t *);
+	void    (*dis_resfree)(nfs_resop4 *, compound_state_t *);
+	op_disp_valid_t	op_flag;
+	char    *op_name;
+} op_disp_tbl_t;
 
 /*
  * Conversion commands for nfsv4 server attr checking
@@ -1728,6 +1730,9 @@ extern bool_t	xdr_inline_encode_nfs_fh4(uint32_t **, uint32_t *,
 extern void		 rfs41_deleg_rs_hold(rfs4_deleg_state_t *);
 extern void		 rfs41_deleg_rs_rele(rfs4_deleg_state_t *);
 extern void		 rfs41_set_client_sessions(rfs4_client_t *, uint32_t);
+
+void rfs41_srvrinit(void);
+void rfs41_dispatch_init(void);
 
 /* NFSv4.1: slot support */
 extern void		*sltab_create(uint_t);
