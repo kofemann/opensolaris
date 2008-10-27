@@ -52,9 +52,7 @@ extern "C" {
 #include	<sys/stropts.h>
 #include	<sys/stream.h>
 #include	<sys/strlog.h>
-#ifndef	COSIM
 #include	<sys/strsubr.h>
-#endif
 #include	<sys/cmn_err.h>
 #include	<sys/vtrace.h>
 #include	<sys/kmem.h>
@@ -80,17 +78,12 @@ extern "C" {
 #include 	<sys/nxge/nxge_mac.h>
 #include	<sys/nxge/nxge_mii.h>
 #include	<sys/nxge/nxge_fm.h>
-#if !defined(IODIAG)
 #include	<sys/netlb.h>
-#endif
 
 #include	<sys/ddi_intr.h>
-
-#if	defined(_KERNEL)
 #include 	<sys/mac.h>
 #include	<sys/mac_impl.h>
 #include	<sys/mac_ether.h>
-#endif
 
 #if	defined(sun4v)
 #include	<sys/hypervisor_api.h>
@@ -454,6 +447,7 @@ typedef enum {
 	P_NEPTUNE_MARAMBA_P0,
 	P_NEPTUNE_MARAMBA_P1,
 	P_NEPTUNE_ALONSO,
+	P_NEPTUNE_ROCK,
 	P_NEPTUNE_NIU
 } platform_type_t;
 
@@ -463,7 +457,8 @@ typedef enum {
 	    ((nxgep->platform_type) == P_NEPTUNE_MARAMBA_P0) || \
 	    ((nxgep->platform_type) == P_NEPTUNE_MARAMBA_P1) || \
 	    ((nxgep->platform_type) == P_NEPTUNE_GENERIC) || \
-	    ((nxgep->platform_type) == P_NEPTUNE_ALONSO))
+	    ((nxgep->platform_type) == P_NEPTUNE_ALONSO) || \
+	    ((nxgep->platform_type) == P_NEPTUNE_ROCK))
 
 #define	NXGE_IS_XAUI_PLATFORM(nxgep) \
 	(((nxgep->platform_type) == P_NEPTUNE_NIU) || \
@@ -512,15 +507,10 @@ typedef enum {
 #define	BUF_ALLOCATED		0x00000001
 #define	BUF_ALLOCATED_WAIT_FREE	0x00000002
 
-#if defined(_KERNEL) || defined(COSIM)
-
 typedef struct ether_addr ether_addr_st, *p_ether_addr_t;
 typedef struct ether_header ether_header_t, *p_ether_header_t;
 typedef queue_t *p_queue_t;
-
-#if !defined(IODIAG)
 typedef mblk_t *p_mblk_t;
-#endif
 
 /*
  * Generic phy table to support different phy types.
@@ -650,7 +640,6 @@ struct _nxge_ldv_t {
 	nxge_ldv_intr_t		ldv_intr_handler;
 	p_nxge_t		nxgep;
 };
-#endif
 
 typedef struct _nxge_logical_page_t {
 	uint16_t		dma;
@@ -701,8 +690,6 @@ typedef struct _pci_cfg_t {
 	uint8_t	min_gnt;
 	uint8_t max_lat;
 } pci_cfg_t, *p_pci_cfg_t;
-
-#if defined(_KERNEL) || defined(COSIM)
 
 typedef struct _dev_regs_t {
 	nxge_os_acc_handle_t	nxge_pciregh;	/* PCI config DDI IO handle */
@@ -777,9 +764,9 @@ typedef struct _nxge_mmac_stats_t {
 #define	NXGE_RFEM_MODEL_STR		"SUNW,pcie-rfem"
 #define	NXGE_ARTM_BM_STR		"375-3544-01"
 #define	NXGE_ARTM_MODEL_STR		"SUNW,pcie-artm"
+/* ROCK OBP creates a compatible property for ROCK */
+#define	NXGE_ROCK_COMPATIBLE		"SUNW,rock-pciex108e,abcd"
 #define	NXGE_EROM_LEN			1048576
-
-#endif
 
 #include 	<sys/nxge/nxge_common_impl.h>
 #include 	<sys/nxge/nxge_common.h>
