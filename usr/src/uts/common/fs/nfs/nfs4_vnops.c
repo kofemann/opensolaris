@@ -161,7 +161,6 @@ static int	nfs4_sync_putapage(vnode_t *, page_t *, u_offset_t, size_t,
 			int, cred_t *);
 static int	nfs4_sync_pageio(vnode_t *, page_t *, u_offset_t, size_t,
 			int, cred_t *);
-static int	nfs4_commit(vnode_t *, offset4, count4, cred_t *);
 static void	nfs4_get_commit(vnode_t *);
 static void	nfs4_get_commit_range(vnode_t *, u_offset_t, size_t);
 static int	nfs4_putpage_commit(vnode_t *, offset_t, size_t, cred_t *);
@@ -299,13 +298,6 @@ int	nfs4_shrlock(vnode_t *, int, struct shrlock *, int, cred_t *,
 #define	NFS4_WRITE_WAIT		1
 
 #define	NFS4_BASE_WAIT_TIME 1	/* 1 second */
-
-/*
- * Error flags used to pass information about certain special errors
- * which need to be handled specially.
- */
-#define	NFS_EOF			-98
-#define	NFS_VERF_MISMATCH	-97
 
 /*
  * Flags used to differentiate between which operation drove the
@@ -3093,26 +3085,32 @@ nfs4_rdwrlbn(vnode_t *vp, page_t *pp, u_offset_t off, size_t len,
 	bp->b_offset = (offset_t)off;
 	bp_mapin(bp);
 
+	/* see if ok to do commit later */
 	if ((flags & (B_WRITE|B_ASYNC)) == (B_WRITE|B_ASYNC) &&
-	    freemem > desfree)
+	    freemem > desfree) {
 		stab_comm = UNSTABLE4;
-	else
+		fsdata = C_DELAYCOMMIT4;
+	} else {
 		stab_comm = FILE_SYNC4;
+		fsdata = C_NOCOMMIT4;
+	}
 
-	error = nfs4_bio(bp, &stab_comm, cr, FALSE);
-
-	bp_mapout(bp);
-	pageio_done(bp);
-
-	if (stab_comm == UNSTABLE4)
-		fsdata = C_DELAYCOMMIT;
-	else
-		fsdata = C_NOCOMMIT;
-
+	/* mark pages for commit as intended */
 	savepp = pp;
 	do {
 		pp->p_fsdata = fsdata;
 	} while ((pp = pp->p_next) != savepp);
+
+	error = nfs4_bio(bp, &stab_comm, cr, FALSE);
+	bp_mapout(bp);
+	pageio_done(bp);
+
+	/* do not need to commit if error or servers synced data */
+	if ((fsdata == C_DELAYCOMMIT4) && (error || (stab_comm != UNSTABLE4))) {
+		do {
+			pp->p_fsdata = C_NOCOMMIT4;
+		} while ((pp = pp->p_next) != savepp);
+	}
 
 	return (error);
 }
@@ -3397,6 +3395,14 @@ recov_retry:
 			if (rp->r_writeverf != wres->writeverf) {
 				nfs4_set_mod(vp);
 				rp->r_writeverf = wres->writeverf;
+				atomic_inc_64(&rp->r_writeverfcnt);
+				/*
+				 * If sending data UNSTABLE,
+				 * then quit since pages just
+				 * got marked dirty and will be rewritten.
+				 */
+				if (stable == UNSTABLE4)
+					count = 0;
 			}
 		} else {
 			rp->r_writeverf = wres->writeverf;
@@ -10101,7 +10107,7 @@ again:
 
 			savepp = pp;
 			do {
-				pp->p_fsdata = C_NOCOMMIT;
+				pp->p_fsdata = C_NOCOMMIT4;
 			} while ((pp = pp->p_next) != savepp);
 
 			if (error == NFS_EOF) {
@@ -10252,7 +10258,7 @@ nfs4_readahead(vnode_t *vp, u_offset_t blkoff, caddr_t addr, struct seg *seg,
 
 	savepp = pp;
 	do {
-		pp->p_fsdata = C_NOCOMMIT;
+		pp->p_fsdata = C_NOCOMMIT4;
 	} while ((pp = pp->p_next) != savepp);
 
 	pvn_read_done(pp, error ? B_READ | B_ERROR : B_READ);
@@ -11615,8 +11621,8 @@ nfs4_dispose(vnode_t *vp, page_t *pp, int fl, int dn, cred_t *cr,
 	 * that the p_fsdata byte is clear and then either free or
 	 * destroy the page as appropriate.
 	 */
-	if (pp->p_fsdata == C_NOCOMMIT || (rp->r_flags & R4STALE)) {
-		pp->p_fsdata = C_NOCOMMIT;
+	if (pp->p_fsdata == C_NOCOMMIT4 || (rp->r_flags & R4STALE)) {
+		pp->p_fsdata = C_NOCOMMIT4;
 		if (fl == B_FREE)
 			page_free(pp, dn);
 		else
@@ -11633,7 +11639,7 @@ nfs4_dispose(vnode_t *vp, page_t *pp, int fl, int dn, cred_t *cr,
 	mutex_enter(&rp->r_statelock);
 	if ((rp->r_flags & R4TRUNCATE) && pp->p_offset >= rp->r_truncaddr) {
 		mutex_exit(&rp->r_statelock);
-		pp->p_fsdata = C_NOCOMMIT;
+		pp->p_fsdata = C_NOCOMMIT4;
 		if (fl == B_FREE)
 			page_free(pp, dn);
 		else
@@ -11659,8 +11665,8 @@ nfs4_dispose(vnode_t *vp, page_t *pp, int fl, int dn, cred_t *cr,
 			mutex_exit(&rp->r_statelock);
 			return;
 		}
-		if (pp->p_fsdata == C_DELAYCOMMIT) {
-			pp->p_fsdata = C_COMMIT;
+		if (pp->p_fsdata == C_DELAYCOMMIT4) {
+			pp->p_fsdata = C_COMMIT4;
 			page_unlock(pp);
 			mutex_exit(&rp->r_statelock);
 			return;
@@ -11735,7 +11741,7 @@ nfs4_dispose(vnode_t *vp, page_t *pp, int fl, int dn, cred_t *cr,
 	/*
 	 * Actually generate the COMMIT op over the wire operation.
 	 */
-	error = nfs4_commit(vp, (offset4)offset, (count4)len, cr);
+	error = nfs4_commit(vp, plist, (offset4)offset, (count4)len, cr);
 
 	/*
 	 * If we got an error during the commit, just unlock all
@@ -11746,6 +11752,10 @@ nfs4_dispose(vnode_t *vp, page_t *pp, int fl, int dn, cred_t *cr,
 		while (plist != NULL) {
 			pptr = plist;
 			page_sub(&plist, pptr);
+			if (pptr->p_fsdata & C_ERROR4)
+				pptr->p_fsdata &= ~C_ERROR4;
+			else
+				pptr->p_fsdata = C_NOCOMMIT4;
 			page_unlock(pptr);
 		}
 		return;
@@ -11761,7 +11771,7 @@ nfs4_dispose(vnode_t *vp, page_t *pp, int fl, int dn, cred_t *cr,
 	while (plist != pp) {
 		pptr = plist;
 		page_sub(&plist, pptr);
-		pptr->p_fsdata = C_NOCOMMIT;
+		pptr->p_fsdata = C_NOCOMMIT4;
 		page_unlock(pptr);
 	}
 
@@ -11774,7 +11784,7 @@ nfs4_dispose(vnode_t *vp, page_t *pp, int fl, int dn, cred_t *cr,
 	 * be rewritten so unlock the page and return.
 	 */
 	if (hat_ismod(pp)) {
-		pp->p_fsdata = C_NOCOMMIT;
+		pp->p_fsdata = C_NOCOMMIT4;
 		page_unlock(pp);
 		return;
 	}
@@ -11783,7 +11793,7 @@ nfs4_dispose(vnode_t *vp, page_t *pp, int fl, int dn, cred_t *cr,
 	 * Now, as appropriate, either free or destroy the page
 	 * that we were called with.
 	 */
-	pp->p_fsdata = C_NOCOMMIT;
+	pp->p_fsdata = C_NOCOMMIT4;
 	if (fl == B_FREE)
 		page_free(pp, dn);
 	else
@@ -11791,12 +11801,32 @@ nfs4_dispose(vnode_t *vp, page_t *pp, int fl, int dn, cred_t *cr,
 }
 
 /*
+ * Commit wrapper for v4 and pnfs.
+ */
+int
+nfs4_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
+    cred_t *cr)
+{
+	int error;
+	mntinfo4_t *mi = VTOMI4(vp);
+
+	if (mi->mi_flags & MI4_PNFS) {
+		error = pnfs_commit(vp, plist, offset, count, cr);
+		if (error != EAGAIN)
+			return (error);
+	}
+	error = nfs4_commit_normal(vp, plist, offset, count, cr);
+	return (error);
+}
+
+/*
  * Commit requires that the current fh be the file written to.
  * The compound op structure is:
  *      PUTFH(file), COMMIT
  */
-static int
-nfs4_commit(vnode_t *vp, offset4 offset, count4 count, cred_t *cr)
+int
+nfs4_commit_normal(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
+    cred_t *cr)
 {
 	COMPOUND4args_clnt args;
 	COMPOUND4res_clnt res;
@@ -11842,7 +11872,7 @@ recov_retry:
 		crfree(cred_otw);
 		if (osp != NULL)
 			open_stream_rele(osp, rp);
-		return (e.error);
+		goto out;
 	}
 
 	/* putfh directory */
@@ -11866,7 +11896,7 @@ recov_retry:
 			goto get_commit_cred;
 		if (osp != NULL)
 			open_stream_rele(osp, rp);
-		return (e.error);
+		goto out;
 	}
 
 	if (needrecov) {
@@ -11885,7 +11915,7 @@ recov_retry:
 			crfree(cred_otw);
 			if (osp != NULL)
 				open_stream_rele(osp, rp);
-			return (e.error);
+			goto out;
 		}
 		/* fall through for res.status case */
 	}
@@ -11920,11 +11950,14 @@ recov_retry:
 			mutex_exit(&rp->r_statelock);
 		}
 	} else {
-		ASSERT(rp->r_flags & R4HAVEVERF);
 		resop = &res.array[1];	/* commit res */
 		cm_res = &resop->nfs_resop4_u.opcommit;
 		mutex_enter(&rp->r_statelock);
 
+		if (!(rp->r_flags & R4HAVEVERF)) {
+			rp->r_writeverf = cm_res->writeverf;
+			rp->r_flags |= R4HAVEVERF;
+		}
 		if (cm_res->writeverf == rp->r_writeverf) {
 			mutex_exit(&rp->r_statelock);
 			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
@@ -11933,10 +11966,12 @@ recov_retry:
 			crfree(cred_otw);
 			if (osp != NULL)
 				open_stream_rele(osp, rp);
-			return (0);
+			e.error = 0;
+			goto out;
 		}
 		nfs4_set_mod(vp);
 		rp->r_writeverf = cm_res->writeverf;
+		atomic_inc_64(&rp->r_writeverfcnt);
 		mutex_exit(&rp->r_statelock);
 		e.error = NFS_VERF_MISMATCH;
 	}
@@ -11947,6 +11982,9 @@ recov_retry:
 	if (osp != NULL)
 		open_stream_rele(osp, rp);
 
+out:
+	if (e.error)
+		nfs4_set_pageerror(plist);
 	return (e.error);
 }
 
@@ -11983,12 +12021,24 @@ nfs4_set_mod(vnode_t *vp)
 	}
 
 	do {
-		if (pp->p_fsdata != C_NOCOMMIT) {
+		if (pp->p_fsdata != C_NOCOMMIT4) {
 			hat_setmod(pp);
-			pp->p_fsdata = C_NOCOMMIT;
+			pp->p_fsdata = C_NOCOMMIT4;
 		}
 	} while ((pp = pp->p_vpnext) != vp->v_pages);
 	mutex_exit(vphm);
+}
+
+void
+nfs4_set_pageerror(page_t *pp)
+{
+	page_t *savepp;
+
+	savepp = pp;
+	do {
+		if (pp->p_fsdata != C_NOCOMMIT4)
+			pp->p_fsdata |= C_ERROR4;
+	} while ((pp = pp->p_next) != savepp);
 }
 
 /*
@@ -12044,7 +12094,7 @@ nfs4_get_commit(vnode_t *vp)
 		 * and see if this page does not need to be committed
 		 * or is modified if so then we'll just skip it.
 		 */
-		if (pp->p_fsdata == C_NOCOMMIT || hat_ismod(pp))
+		if (pp->p_fsdata == C_NOCOMMIT4 || hat_ismod(pp))
 			continue;
 
 		/*
@@ -12059,7 +12109,7 @@ nfs4_get_commit(vnode_t *vp)
 		/*
 		 * Lets check again now that we have the page lock.
 		 */
-		if (pp->p_fsdata == C_NOCOMMIT || hat_ismod(pp)) {
+		if (pp->p_fsdata == C_NOCOMMIT4 || hat_ismod(pp)) {
 			page_unlock(pp);
 			continue;
 		}
@@ -12139,7 +12189,7 @@ nfs4_get_commit_range(vnode_t *vp, u_offset_t soff, size_t len)
 		 * If this page does not need to be committed or is
 		 * modified, then just skip it.
 		 */
-		if (pp->p_fsdata == C_NOCOMMIT || hat_ismod(pp)) {
+		if (pp->p_fsdata == C_NOCOMMIT4 || hat_ismod(pp)) {
 			page_unlock(pp);
 			continue;
 		}
@@ -12169,7 +12219,7 @@ static int
 nfs4_putpage_commit(vnode_t *vp, offset_t poff, size_t plen, cred_t *cr)
 {
 	int error;
-	verifier4 write_verf;
+	uint64_t writeverfcnt;
 	rnode4_t *rp = VTOR4(vp);
 
 	ASSERT(nfs_zone() == VTOMI4(vp)->mi_zone);
@@ -12188,17 +12238,18 @@ nfs4_putpage_commit(vnode_t *vp, offset_t poff, size_t plen, cred_t *cr)
 
 top:
 	/*
+	 * Grab current value of r_writeverfcnt for comparision
+	 * later.
+	 */
+	writeverfcnt = atomic_add_64_nv(&rp->r_writeverfcnt, 0);
+
+	/*
 	 * Do a flush based on the poff and plen arguments.  This
-	 * will synchronously write out any modified pages in the
+	 * will asynchronously write out any modified pages in the
 	 * range specified by (poff, plen). This starts all of the
 	 * i/o operations which will be waited for in the next
 	 * call to nfs4_putpage
 	 */
-
-	mutex_enter(&rp->r_statelock);
-	write_verf = rp->r_writeverf;
-	mutex_exit(&rp->r_statelock);
-
 	error = nfs4_putpage(vp, poff, plen, B_ASYNC, cr, NULL);
 	if (error == EAGAIN)
 		error = 0;
@@ -12215,12 +12266,13 @@ top:
 	if (error)
 		return (error);
 
-	mutex_enter(&rp->r_statelock);
-	if (rp->r_writeverf != write_verf) {
-		mutex_exit(&rp->r_statelock);
+	/*
+	 * Test if r_writeverfcnt changed which indicates
+	 * dirty pages that need to be rewritten.
+	 * nb: r_writeverfcnt is only incremented.
+	 */
+	if (writeverfcnt != atomic_add_64_nv(&rp->r_writeverfcnt, 0))
 		goto top;
-	}
-	mutex_exit(&rp->r_statelock);
 
 	/*
 	 * Now commit any pages which might need to be committed.
@@ -12328,29 +12380,23 @@ nfs4_sync_commit(vnode_t *vp, page_t *plist, offset3 offset, count3 count,
 
 	ASSERT(nfs_zone() == VTOMI4(vp)->mi_zone);
 
-	error = nfs4_commit(vp, (offset4)offset, (count3)count, cr);
+	/* send the otw commit operation */
+	error = nfs4_commit(vp, plist, (offset4)offset, (count4)count, cr);
 
 	/*
-	 * If we got an error, then just unlock all of the pages
-	 * on the list.
-	 */
-	if (error) {
-		while (plist != NULL) {
-			pp = plist;
-			page_sub(&plist, pp);
-			page_unlock(pp);
-		}
-		return (error);
-	}
-	/*
-	 * We've tried as hard as we can to commit the data to stable
-	 * storage on the server.  We just unlock the pages and clear
-	 * the commit required state.  They will get freed later.
+	 * Unlock the pages.
+	 * In the normal case (no errors) reset p_fsdata to C_NOCOMMIT4
+	 * which means a commit is not necessary.
+	 * If C_ERROR4 is set, just clear the bit which will leave
+	 * the page in the commit required state.
 	 */
 	while (plist != NULL) {
 		pp = plist;
 		page_sub(&plist, pp);
-		pp->p_fsdata = C_NOCOMMIT;
+		if (pp->p_fsdata & C_ERROR4)
+			pp->p_fsdata &= ~C_ERROR4;
+		else
+			pp->p_fsdata = C_NOCOMMIT4;
 		page_unlock(pp);
 	}
 

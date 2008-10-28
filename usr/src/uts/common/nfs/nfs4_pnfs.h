@@ -77,14 +77,14 @@ typedef struct {
 
 /* per-rnode file layout */
 typedef struct {
-	uint32_t		refcount;
+	uint32_t		std_refcount;
 
-	nfs4_sharedfh_t		*fh;
-	deviceid4		sd_devid;
+	nfs4_sharedfh_t		*std_fh;
+	deviceid4		std_devid;
 
-	kmutex_t		lock;
-	verifier4		writeverf;
-	uint32_t		flags;
+	kmutex_t		std_lock;
+	verifier4		std_writeverf;
+	uint32_t		std_flags;
 	/*
 	 * std_svp and std_n4sp need to be set/cleared together
 	 */
@@ -97,8 +97,6 @@ enum stripetype4 {
 	STRIPE4_SPARSE = 0,
 	STRIPE4_DENSE = 1
 };
-
-
 
 /* per-rnode generic layout */
 typedef struct pnfs_layout {
@@ -175,10 +173,10 @@ typedef struct {
 	int32_t		fiw_remaining;
 	int		fiw_error;
 	stable_how4	fiw_stable_how;
+	stable_how4	fiw_stable_result;
 	stateid4	fiw_stateid;
 	vnode_t		*fiw_vp;
 } file_io_write_t;
-#define	FIW_VERIFIER_CHANGED (0x01)
 
 /* units of write i/o work (part of a batch) */
 typedef struct {
@@ -187,12 +185,39 @@ typedef struct {
 	cred_t *wt_cred;
 	vnode_t *wt_vp;
 	nfs4_error_t *wt_ep;
+	pnfs_layout_t *wt_layout;
 	caddr_t wt_base;
 	offset4 wt_offset;
 	offset4 wt_voff;
 	count4 wt_count;
+	uint32_t wt_sui;
 	nfs4_error_t wt_err;
 } write_task_t;
+
+typedef struct {
+	kmutex_t	fic_lock;
+	kcondvar_t	fic_cv;
+	int32_t		fic_remaining;
+	int		fic_error;
+	vnode_t		*fic_vp;
+	page_t		*fic_plist;
+} file_io_commit_t;
+
+typedef struct {
+	file_io_commit_t *cm_job;
+	stripe_dev_t *cm_dev;
+	cred_t *cm_cred;
+	vnode_t *cm_vp;
+	pnfs_layout_t *cm_layout;
+	offset4 cm_offset;
+	count4 cm_count;
+	uint32_t cm_sui;
+} commit_task_t;
+
+typedef struct {
+	offset4 ce_offset;
+	length4 ce_length;
+} commit_extent_t;
 
 typedef struct {
 	mntinfo4_t	*tgd_mi;

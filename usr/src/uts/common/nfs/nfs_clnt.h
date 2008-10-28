@@ -548,6 +548,13 @@ struct nfs_owner {
 #define	NFS_OWNER_MAGIC	0x1D81E
 
 /*
+ * Error flags used to pass information about certain special errors
+ * which need to be handled specially.
+ */
+#define	NFS_EOF			(-98)
+#define	NFS_VERF_MISMATCH	(-97)
+
+/*
  * Support for extended attributes
  */
 #define	XATTR_DIR_NAME	"/@/"		/* used for DNLC entries */
