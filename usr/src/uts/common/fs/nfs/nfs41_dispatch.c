@@ -333,13 +333,13 @@ rfs41_dispatch_init(void)
 }
 
 static compound_state_t *
-rfs41_compound_state_alloc(void)
+rfs41_compound_state_alloc(nfs_server_instance_t *instp)
 {
 	compound_state_t *cs;
 
 	cs = kmem_cache_alloc(rfs41_compound_state_cache, KM_SLEEP);
 	bzero(cs, sizeof (*cs));
-	cs->instp = mds_server;
+	cs->instp = instp;
 	cs->cont = TRUE;
 	cs->fh.nfs_fh4_val = cs->fhbuf;
 
@@ -363,7 +363,7 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 	int			 error = 0;
 	int			 rv;
 
-	cs = rfs41_compound_state_alloc();
+	cs = rfs41_compound_state_alloc(mds_server);
 	bzero(&res_buf, sizeof (COMPOUND4res_srv));
 	rbp = &res_buf;
 	rbp->minorversion = NFS4_MINOR_v1;
