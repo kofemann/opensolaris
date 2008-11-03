@@ -100,8 +100,8 @@ typedef struct nnode_bucket_sweep_task {
 #define	NNODE_NUM_WORKERS	(8)
 #define	NNODE_NUM_TASKALLOC	(8)
 #define	NNODE_TASKQ_FLAGS	TASKQ_DYNAMIC
-#define	NNODE_GC_INTERVAL	(30LL * 1000000000LL)
-#define	NNODE_GC_TOO_OLD	(45LL * 1000000000LL)
+#define	NNODE_GC_INTERVAL	(30LL * NANOSEC)
+#define	NNODE_GC_TOO_OLD	(45LL * NANOSEC)
 
 #ifdef	__cplusplus
 }

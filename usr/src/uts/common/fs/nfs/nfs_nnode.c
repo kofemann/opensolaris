@@ -435,9 +435,17 @@ nnode_compare(const void *va, const void *vb)
 	const nnode_t *b = (nnode_t *)vb;
 	pid_t rc;
 
+	/*
+	 * NFS_AVL_RETURN() does nothing if rc is zero.
+	 * If rc is not zero, it causes this function to return 1 or -1.
+	 */
 	rc = a->nn_instance_id - b->nn_instance_id;
 	NFS_AVL_RETURN(rc);
 
+	/*
+	 * NFS_AVL_COMPARE() does nothing if the two arguments are equal.
+	 * If they are not, it causes this function to return 1 or -1.
+	 */
 	NFS_AVL_COMPARE((uintptr_t)a->nn_key_compare,
 	    (uintptr_t)b->nn_key_compare);
 

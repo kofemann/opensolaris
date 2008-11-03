@@ -178,7 +178,8 @@ enum nfsftype {
  *     ... more comparisons between a and b may follow ...
  * Only pass an ordinary scalar as an argument.  That is, don't pass in
  * expressions with side effects, and/or function calls, as this macro
- * evaluates rc twice.
+ * evaluates rc twice.  It only returns if rc is not zero; if rc is
+ * zero, the function continues.
  */
 #define	NFS_AVL_RETURN(rc) \
 	if (rc > 0) \
@@ -206,6 +207,9 @@ enum nfsftype {
  *
  * An advantage of NFS_AVL_COMPARE() is that it's okay to pass unsigned
  * values as arguments, e.g. it's good for comparing pointers.
+ *
+ * This only returns if a and b are not equal.  If a and b are equal,
+ * the function continues.
  */
 #define	NFS_AVL_COMPARE(a, b) \
 	if (a > b) \

@@ -35,7 +35,6 @@
 
 #ifdef _KERNEL
 #include <nfs/nfs4_kprot.h>
-#include <nfs/nnode.h>
 #include <sys/nvpair.h>
 #else
 #include <rpcsvc/nfs4_prot.h>
