@@ -2089,7 +2089,7 @@ noasync:
 		while (plist != NULL) {
 			pp = plist;
 			page_sub(&plist, pp);
-			pp->p_fsdata = C_COMMIT;
+			pp->p_fsdata = C_COMMIT4;
 			page_unlock(pp);
 		}
 		return;

@@ -132,13 +132,6 @@ static void	nfs3_async_commit(vnode_t *, page_t *, offset3, count3,
 			cred_t *);
 static void	nfs3_delmap_callback(struct as *, void *, uint_t);
 
-/*
- * Error flags used to pass information about certain special errors
- * which need to be handled specially.
- */
-#define	NFS_EOF			-98
-#define	NFS_VERF_MISMATCH	-97
-
 /* ALIGN64 aligns the given buffer and adjust buffer size to 64 bit */
 #define	ALIGN64(x, ptr, sz)						\
 	x = ((uintptr_t)(ptr)) & (sizeof (uint64_t) - 1);		\

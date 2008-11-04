@@ -1700,6 +1700,7 @@ extern int	pnfs_read(vnode_t *, caddr_t, offset_t, int, size_t *,
     cred_t *, bool_t, struct uio *);
 extern int	pnfs_write(vnode_t *, caddr_t, u_offset_t, int,
     cred_t *, stable_how4 *);
+extern int	pnfs_commit(vnode_t *, page_t *, offset4, count4, cred_t *);
 extern stateid4 pnfs_get_losid(struct rnode4 *);
 extern void	pnfs_trash_devtree(struct mntinfo4 *);
 

@@ -387,6 +387,7 @@ typedef enum nfs4_tag_type {
 	TAG_BIND_CONN_TO_SESSION,
 	TAG_PNFS_READ,
 	TAG_PNFS_WRITE,
+	TAG_PNFS_COMMIT,
 	TAG_PNFS_LAYOUTGET,
 	TAG_PNFS_LAYOUTRETURN,
 	TAG_PNFS_GETDEVLIST,
@@ -525,6 +526,8 @@ typedef enum nfs4_tag_type {
 			{0x706e6673, 0x20726561, 0x64202020}},	\
 		{TAG_PNFS_WRITE,		"pnfs write",	\
 			{0x706e6673, 0x20777269, 0x74652020}},	\
+		{TAG_PNFS_COMMIT,		"pnfs commit",	\
+			{0x706e6673, 0x20636f6d, 0x6d697420}},	\
 		{TAG_PNFS_LAYOUTGET,		"layoutget",	\
 			{0x6c61796f, 0x75746765, 0x74202020}},	\
 		{TAG_PNFS_LAYOUTRETURN,		"layoutreturn",	\
@@ -1579,6 +1582,7 @@ typedef struct nfs4_ephemeral_tree {
 
 extern int	layoutcmp(const void *, const void *);
 extern void	nfs4_set_mod(vnode_t *);
+extern void	nfs4_set_pageerror(page_t *);
 extern void	nfs4_async_manager(struct vfs *);
 extern void	nfs4_async_manager_stop(struct vfs *);
 extern void	nfs4_async_stop(struct vfs *);
@@ -1673,6 +1677,9 @@ extern int	nfs4_consistent_type(vnode_t *);
 extern void	nfs4_init_dot_entries(void);
 extern void	nfs4_destroy_dot_entries(void);
 extern struct nfs4_callback_globals	*nfs4_get_callback_globals(void);
+extern int	nfs4_commit(vnode_t *, page_t *, offset4, count4, cred_t *);
+extern int	nfs4_commit_normal(vnode_t *, page_t *, offset4, count4,
+    cred_t *);
 
 extern struct nfs4_server nfs4_server_lst;
 

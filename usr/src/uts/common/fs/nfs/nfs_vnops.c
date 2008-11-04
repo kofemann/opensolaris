@@ -105,12 +105,6 @@ static int	nfs_sync_pageio(vnode_t *, page_t *, u_offset_t, size_t,
 static void	nfs_delmap_callback(struct as *, void *, uint_t);
 
 /*
- * Error flags used to pass information about certain special errors
- * which need to be handled specially.
- */
-#define	NFS_EOF			-98
-
-/*
  * These are the vnode ops routines which implement the vnode interface to
  * the networked file system.  These routines just take their parameters,
  * make them look networkish by putting the right info into interface structs,
