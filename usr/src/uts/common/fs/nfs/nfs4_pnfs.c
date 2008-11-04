@@ -23,6 +23,7 @@
  * Use is subject to license terms.
  */
 
+#include <nfs/nfs_clnt.h>
 #include <nfs/nfs4_pnfs.h>
 #include <sys/cmn_err.h>
 #include <sys/sdt.h>
@@ -34,7 +35,9 @@ static kmem_cache_t *stripe_dev_cache;
 static kmem_cache_t *pnfs_read_compound_cache;
 static kmem_cache_t *pnfs_layout_cache;
 static kmem_cache_t *file_io_write_cache;
+static kmem_cache_t *file_io_commit_cache;
 static kmem_cache_t *write_task_cache;
+static kmem_cache_t *commit_task_cache;
 static kmem_cache_t *task_get_devicelist_cache;
 static kmem_cache_t *task_layoutget_cache;
 static kmem_cache_t *task_layoutreturn_cache;
@@ -83,8 +86,8 @@ stripe_dev_alloc()
 	stripe_dev_t *rc;
 
 	rc = kmem_cache_alloc(stripe_dev_cache, KM_SLEEP);
-	rc->refcount = 1;
-	rc->flags = 0;
+	rc->std_refcount = 1;
+	rc->std_flags = 0;
 
 	rc->std_n4sp = NULL;
 	rc->std_svp = NULL;
@@ -95,9 +98,9 @@ stripe_dev_alloc()
 static void
 stripe_dev_hold(stripe_dev_t *stripe)
 {
-	mutex_enter(&stripe->lock);
-	stripe->refcount++;
-	mutex_exit(&stripe->lock);
+	mutex_enter(&stripe->std_lock);
+	stripe->std_refcount++;
+	mutex_exit(&stripe->std_lock);
 }
 
 static void
@@ -107,13 +110,13 @@ stripe_dev_rele(stripe_dev_t **handle)
 
 	*handle = NULL;
 
-	mutex_enter(&stripe->lock);
-	stripe->refcount--;
-	if (stripe->refcount > 0) {
-		mutex_exit(&stripe->lock);
+	mutex_enter(&stripe->std_lock);
+	stripe->std_refcount--;
+	if (stripe->std_refcount > 0) {
+		mutex_exit(&stripe->std_lock);
 		return;
 	}
-	mutex_exit(&stripe->lock);
+	mutex_exit(&stripe->std_lock);
 
 	if (stripe->std_n4sp) {
 		/*
@@ -123,7 +126,7 @@ stripe_dev_rele(stripe_dev_t **handle)
 		nfs4_server_rele(stripe->std_n4sp);
 	}
 
-	sfh4_rele(&stripe->fh);
+	sfh4_rele(&stripe->std_fh);
 	kmem_cache_free(stripe_dev_cache, stripe);
 }
 
@@ -214,7 +217,7 @@ stripe_dev_construct(void *vstripe, void *foo, int bar)
 {
 	stripe_dev_t *stripe = vstripe;
 
-	mutex_init(&stripe->lock, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&stripe->std_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	return (0);
 }
@@ -225,7 +228,7 @@ stripe_dev_destroy(void *vstripe, void *foo)
 {
 	stripe_dev_t *stripe = vstripe;
 
-	mutex_destroy(&stripe->lock);
+	mutex_destroy(&stripe->std_lock);
 }
 
 /*ARGSUSED*/
@@ -360,6 +363,48 @@ write_task_free(write_task_t *w)
 	kmem_cache_free(write_task_cache, w);
 }
 
+static file_io_commit_t *
+file_io_commit_alloc()
+{
+	file_io_commit_t *rc;
+
+	rc = kmem_cache_alloc(file_io_commit_cache, KM_SLEEP);
+	rc->fic_remaining = 0;
+	rc->fic_error = 0;
+
+	return (rc);
+}
+
+/*ARGSUSED*/
+static int
+file_io_commit_construct(void *vcommit, void *foo, int bar)
+{
+	file_io_commit_t *commit = vcommit;
+
+	mutex_init(&commit->fic_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&commit->fic_cv, NULL, CV_DEFAULT, NULL);
+
+	return (0);
+}
+
+/*ARGSUSED*/
+static void
+file_io_commit_destroy(void *vcommit, void *foo)
+{
+	file_io_commit_t *commit = vcommit;
+
+	mutex_destroy(&commit->fic_lock);
+	cv_destroy(&commit->fic_cv);
+}
+
+static void
+commit_task_free(commit_task_t *p)
+{
+	stripe_dev_rele(&p->cm_dev);
+	crfree(p->cm_cred);
+	kmem_cache_free(commit_task_cache, p);
+}
+
 static void
 task_get_devicelist_free(task_get_devicelist_t *task)
 {
@@ -427,6 +472,14 @@ nfs4_pnfs_init()
 	    sizeof (write_task_t), 0,
 	    NULL, NULL, NULL,
 	    NULL, NULL, 0);
+	file_io_commit_cache = kmem_cache_create("file_io_commit_cache",
+	    sizeof (file_io_commit_t), 0,
+	    file_io_commit_construct, file_io_commit_destroy, NULL,
+	    NULL, NULL, 0);
+	commit_task_cache = kmem_cache_create("commit_task_cache",
+	    sizeof (commit_task_t), 0,
+	    NULL, NULL, NULL,
+	    NULL, NULL, 0);
 	stripe_dev_cache = kmem_cache_create("stripe_dev_cache",
 	    sizeof (stripe_dev_t), 0,
 	    stripe_dev_construct, stripe_dev_destroy, NULL,
@@ -492,6 +545,8 @@ nfs4_pnfs_fini()
 	kmem_cache_destroy(read_task_cache);
 	kmem_cache_destroy(file_io_write_cache);
 	kmem_cache_destroy(write_task_cache);
+	kmem_cache_destroy(file_io_commit_cache);
+	kmem_cache_destroy(commit_task_cache);
 	kmem_cache_destroy(stripe_dev_cache);
 	kmem_cache_destroy(pnfs_read_compound_cache);
 	kmem_cache_destroy(pnfs_layout_cache);
@@ -512,6 +567,120 @@ pnfs_use_layout(rnode4_t *rp)
 	 * check layout segments, not just all-or-nothing
 	 */
 	return (1);
+}
+
+/*
+ * Find pages that touch the stripe in the layout
+ * that have been written but not committed
+ * and mark them modified so they will be written again.
+ */
+static void
+pnfs_set_mod(vnode_t *vp, pnfs_layout_t *layout, uint32_t sui)
+{
+	page_t *pp;
+	kmutex_t *vphm;
+	rnode4_t *rp;
+	offset4 ps, pe, ls, le;
+	uint32_t is, ie;
+	int match;
+
+	rp = VTOR4(vp);
+	if (IS_SHADOW(vp, rp))
+		vp = RTOV4(rp);
+
+	vphm = page_vnode_mutex(vp);
+	mutex_enter(vphm);
+
+	if ((pp = vp->v_pages) == NULL) {
+		mutex_exit(vphm);
+		return;
+	}
+
+	ls = layout->plo_offset;
+	le = ls + layout->plo_length - 1;
+
+	do {
+		if (pp->p_fsdata == C_NOCOMMIT4)
+			continue;
+
+		ps = pp->p_offset;
+		pe = ps + PAGESIZE - 1;
+
+		/* skip this page if no overlap with the layout */
+		if (!(((ls <= ps) && (ps <= le)) || ((ls <= pe) && (pe <= le))))
+			continue;
+
+		match = 0;
+
+		/* convert byte offsets to stripe unit offsets */
+		ps /= layout->plo_stripe_unit;
+		pe /= layout->plo_stripe_unit;
+
+		/*
+		 * If the page spans a full stripe or more,
+		 * then the page needs to be rewritten.
+		 */
+		if ((pe - ps + 1) >= layout->plo_stripe_count) {
+			match = 1;
+		} else {
+			/*
+			 * If a portion of the page overlaps the stripe unit
+			 * index (sui) that failed, then the page needs
+			 * to be rewritten.
+			 */
+			is = ps % layout->plo_stripe_count;
+			ie = pe % layout->plo_stripe_count;
+			match = (is <= ie) ?
+			    (is <= sui && sui <= ie) : (sui <= ie || is <= sui);
+		}
+		if (match) {
+			hat_setmod(pp);
+			pp->p_fsdata = C_NOCOMMIT4;
+		}
+
+	} while ((pp = pp->p_vpnext) != vp->v_pages);
+	mutex_exit(vphm);
+}
+
+static void
+pnfs_set_pageerror(page_t *pp, pnfs_layout_t *layout, uint32_t sui)
+{
+	page_t *savepp;
+	offset4 ps, pe, ls, le;
+	uint32_t is, ie;
+	int match;
+
+	ls = layout->plo_offset;
+	le = ls + layout->plo_length - 1;
+
+	savepp = pp;
+	do {
+		if (pp->p_fsdata == C_NOCOMMIT4)
+			continue;
+
+		ps = pp->p_offset;
+		pe = ps + PAGESIZE - 1;
+
+		if (!(((ls <= ps) && (ps <= le)) || ((ls <= pe) && (pe <= le))))
+			continue;
+
+		match = 0;
+
+		ps /= layout->plo_stripe_unit;
+		pe /= layout->plo_stripe_unit;
+		if ((pe - ps + 1) >= layout->plo_stripe_count) {
+			match = 1;
+		} else {
+			is = ps % layout->plo_stripe_count;
+			ie = pe % layout->plo_stripe_count;
+			match = (is <= ie) ?
+			    (is <= sui && sui <= ie) : (sui <= ie || is <= sui);
+		}
+		if (match) {
+			pp->p_fsdata |= C_ERROR4;
+		}
+
+	} while ((pp = pp->p_next) != savepp);
 }
 
 /*
@@ -793,15 +962,15 @@ stripe_dev_prepare(
 	 * Check to see if the stripe dev is already initialized,
 	 * if so, just return
 	 */
-	mutex_enter(&dev->lock);
+	mutex_enter(&dev->std_lock);
 	if (dev->std_n4sp != NULL) {
 		ASSERT(dev->std_svp != NULL);
-		mutex_exit(&dev->lock);
+		mutex_exit(&dev->std_lock);
 		return (0);
 	}
 
-	DEV_ASSIGN(did, dev->sd_devid);
-	mutex_exit(&dev->lock);
+	DEV_ASSIGN(did, dev->std_devid);
+	mutex_exit(&dev->std_lock);
 
 	mutex_enter(&mi->mi_pnfs_lock);
 	if ((error = pnfs_get_device(mi, did, cr, &dip, PGD_OTW)) != 0) {
@@ -876,7 +1045,7 @@ stripe_dev_prepare(
 	dip = NULL;
 	mutex_exit(&mi->mi_pnfs_lock);
 
-	mutex_enter(&dev->lock);
+	mutex_enter(&dev->std_lock);
 	/* std_n4sp & std_svp must be done as a set */
 	if (dev->std_n4sp == NULL) {
 		dev->std_n4sp = np;
@@ -887,7 +1056,7 @@ stripe_dev_prepare(
 
 	ASSERT(dev->std_svp != NULL);
 	ASSERT(dev->std_n4sp != NULL);
-	mutex_exit(&dev->lock);
+	mutex_exit(&dev->std_lock);
 	return (error);
 }
 
@@ -985,7 +1154,7 @@ pnfs_task_read(void *v)
 	readargs = kmem_cache_alloc(pnfs_read_compound_cache, KM_SLEEP);
 	readargs->args.minor_vers = VTOMI4(task->rt_vp)->mi_minorversion;
 	readargs->read->stateid = job->fir_stateid;
-	*(readargs->fh) = task->rt_dev->fh;
+	*(readargs->fh) = task->rt_dev->std_fh;
 	readargs->read->offset = task->rt_offset;
 	readargs->read->count = task->rt_count;
 	readargs->read->res_data_val_alt = NULL;
@@ -1077,20 +1246,14 @@ pnfs_task_write(void *v)
 	COMPOUND4args_clnt args;
 	COMPOUND4res_clnt res;
 	nfs_argop4 argop[3];
-	int error;
+	int error = 0;
 	WRITE4res *wres;
 	rnode4_t *rp;
+	stable_how4 stable = FILE_SYNC4;
+	int free_res = 0;
 
-	mutex_enter(&job->fiw_lock);
-	if (job->fiw_error) {
-		job->fiw_remaining--;
-		if (job->fiw_remaining == 0)
-			cv_broadcast(&job->fiw_cv);
-		mutex_exit(&job->fiw_lock);
-		write_task_free(task);
-		return;
-	}
-	mutex_exit(&job->fiw_lock);
+	if (job->fiw_error)
+		goto out;
 
 	args.ctag = TAG_PNFS_WRITE;
 	args.minor_vers = VTOMI4(task->wt_vp)->mi_minorversion;
@@ -1101,10 +1264,10 @@ pnfs_task_write(void *v)
 	/* the args for OP_SEQUENCE are filled out later */
 
 	argop[1].argop = OP_CPUTFH;
-	argop[1].nfs_argop4_u.opcputfh.sfh = dev->fh;
+	argop[1].nfs_argop4_u.opcputfh.sfh = dev->std_fh;
 
 	argop[2].argop = OP_WRITE;
-	argop[2].nfs_argop4_u.opwrite.stable = FILE_SYNC4; /* XXX */
+	argop[2].nfs_argop4_u.opwrite.stable = job->fiw_stable_how;
 	argop[2].nfs_argop4_u.opwrite.stateid = job->fiw_stateid;
 	argop[2].nfs_argop4_u.opwrite.mblk = NULL;
 
@@ -1122,46 +1285,76 @@ pnfs_task_write(void *v)
 	 */
 
 	error = task->wt_err.error;
-	if (error == 0) {
-		wres = &res.array[2].nfs_resop4_u.opwrite;
-		if ((res.status == NFS4_OK) && (wres->status == NFS4_OK)) {
-			mutex_enter(&dev->lock);
-			if ((dev->flags & STRIPE_DEV_HAVE_VERIFIER) &&
-			    (wres->writeverf != dev->writeverf))
-				nfs4_set_mod(job->fiw_vp);
-			dev->flags |= STRIPE_DEV_HAVE_VERIFIER;
-			dev->writeverf = wres->writeverf;
-			mutex_exit(&dev->lock);
+	if (error)
+		goto out;
+	ASSERT(task->wt_err.rpc_status == 0);
+	free_res = 1;
 
-			rp = VTOR4(job->fiw_vp);
-			mutex_enter(&rp->r_statelock);
-			PURGE_ATTRCACHE4_LOCKED(rp);
-			rp->r_flags |= R4WRITEMODIFIED | R4LASTBYTE;
-			/*
-			 * offset+len gives us the size.  However, if we are
-			 * using dense stripes, offset won't be right.  Use the
-			 * virtual offset (voff), which is the same as offset
-			 * for sparse stripes.  Subtract one to convert
-			 * to the offset of the last byte written.
-			 */
-			rp->r_last_write_offset = MAX(rp->r_last_write_offset,
-			    task->wt_voff + task->wt_count - 1);
-			gethrestime(&rp->r_attr.va_mtime);
-			rp->r_attr.va_ctime = rp->r_attr.va_mtime;
-			/*
-			 * Registering a data-server-io count for the file
-			 */
-			rp->r_dsio_count++;
-			mutex_exit(&rp->r_statelock);
-		} else {
-			error = geterrno4(res.status);
-		}
-
-		ASSERT(task->wt_err.rpc_status == 0);
-		xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+	if (res.status != NFS4_OK) {
+		error = geterrno4(res.status);
+		goto out;
+	}
+	wres = &res.array[2].nfs_resop4_u.opwrite;
+	if (wres->status != NFS4_OK) {
+		error = geterrno4(wres->status);
+		goto out;
 	}
 
+	if (wres->committed == UNSTABLE4) {
+		stable = UNSTABLE4;
+		if (job->fiw_stable_how == DATA_SYNC4 ||
+		    job->fiw_stable_how == FILE_SYNC4) {
+			zcmn_err(getzoneid(), CE_WARN,
+			    "pnfs_task_write: server %s did not commit "
+			    "to stable storage",
+			    dev->std_svp->sv_hostname);
+			error = EIO;
+			goto out;
+		}
+	}
+
+	rp = VTOR4(job->fiw_vp);
+
+	mutex_enter(&dev->std_lock);
+	if (dev->std_flags & STRIPE_DEV_HAVE_VERIFIER) {
+		if (wres->writeverf != dev->std_writeverf) {
+			pnfs_set_mod(job->fiw_vp, task->wt_layout,
+			    task->wt_sui);
+			dev->std_writeverf = wres->writeverf;
+			atomic_inc_64(&rp->r_writeverfcnt);
+		}
+	} else {
+		dev->std_writeverf = wres->writeverf;
+		dev->std_flags |= STRIPE_DEV_HAVE_VERIFIER;
+	}
+	mutex_exit(&dev->std_lock);
+
+	mutex_enter(&rp->r_statelock);
+	PURGE_ATTRCACHE4_LOCKED(rp);
+	rp->r_flags |= R4WRITEMODIFIED | R4LASTBYTE;
+	/*
+	 * offset+len gives us the size.  However, if we are
+	 * using dense stripes, offset won't be right.  Use the
+	 * virtual offset (voff), which is the same as offset
+	 * for sparse stripes.  Subtract one to convert
+	 * to the offset of the last byte written.
+	 */
+	rp->r_last_write_offset = MAX(rp->r_last_write_offset,
+	    task->wt_voff + task->wt_count - 1);
+	gethrestime(&rp->r_attr.va_mtime);
+	rp->r_attr.va_ctime = rp->r_attr.va_mtime;
+	/*
+	 * Registering a data-server-io count for the file
+	 */
+	rp->r_dsio_count++;
+	mutex_exit(&rp->r_statelock);
+
+out:
+	if (free_res)
+		xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 	mutex_enter(&job->fiw_lock);
+	if (stable == UNSTABLE4)
+		job->fiw_stable_result = stable;
 	if (error && job->fiw_error == 0)
 		job->fiw_error = error;
 	job->fiw_remaining--;
@@ -1182,6 +1375,133 @@ pnfs_task_write_free(void *v)
 	mutex_exit(&job->fiw_lock);
 
 	kmem_cache_free(file_io_write_cache, job);
+}
+
+static void
+pnfs_task_commit(void *v)
+{
+	commit_task_t *task = v;
+	file_io_commit_t *job = task->cm_job;
+	stripe_dev_t *dev = task->cm_dev;
+	COMPOUND4args_clnt args;
+	COMPOUND4res_clnt res;
+	nfs_argop4 argop[2];
+	nfs_resop4 *resop;
+	int error = 0;
+	COMMIT4res *cm_res;
+	rnode4_t *rp;
+	int free_res = 0;
+	nfs4_error_t cm_err;
+
+	if (job->fic_error)
+		goto out;
+
+	args.ctag = TAG_PNFS_COMMIT;
+	args.minor_vers = VTOMI4(task->cm_vp)->mi_minorversion;
+	args.array_len = 2;
+	args.array = argop;
+
+	argop[0].argop = OP_CPUTFH;
+	argop[0].nfs_argop4_u.opcputfh.sfh = dev->std_fh;
+
+	argop[1].argop = OP_COMMIT;
+	argop[1].nfs_argop4_u.opcommit.offset = task->cm_offset;
+	argop[1].nfs_argop4_u.opcommit.count = task->cm_count;
+
+	pnfs_call(task->cm_vp, dev->std_svp, OP_COMMIT, &args, &res,
+	    &cm_err, task->cm_cred);
+
+	error = cm_err.error;
+	if (error)
+		goto out;
+	ASSERT(cm_err.rpc_status == 0);
+	free_res = 1;
+
+	if (res.status != NFS4_OK) {
+		error = geterrno4(res.status);
+		goto out;
+	}
+	resop = &res.array[1];
+	cm_res = &resop->nfs_resop4_u.opcommit;
+	if (cm_res->status != NFS4_OK) {
+		error = geterrno4(cm_res->status);
+		goto out;
+	}
+
+	rp = VTOR4(job->fic_vp);
+
+	mutex_enter(&dev->std_lock);
+	ASSERT(dev->std_flags & STRIPE_DEV_HAVE_VERIFIER);
+	if (cm_res->writeverf != dev->std_writeverf) {
+		pnfs_set_mod(job->fic_vp, task->cm_layout, task->cm_sui);
+		dev->std_writeverf = cm_res->writeverf;
+		atomic_inc_64(&rp->r_writeverfcnt);
+		error = NFS_VERF_MISMATCH;
+	}
+	mutex_exit(&dev->std_lock);
+
+out:
+	if (free_res)
+		xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+	mutex_enter(&job->fic_lock);
+	if (error && (error != NFS_VERF_MISMATCH))
+		pnfs_set_pageerror(job->fic_plist, task->cm_layout,
+		    task->cm_sui);
+	if (error &&
+	    ((job->fic_error == 0) || (job->fic_error == NFS_VERF_MISMATCH)))
+		job->fic_error = error;
+	job->fic_remaining--;
+	if ((job->fic_remaining == 0) || (error != 0))
+		cv_broadcast(&job->fic_cv);
+	mutex_exit(&job->fic_lock);
+	commit_task_free(task);
+}
+
+static void
+pnfs_task_commit_free(void *v)
+{
+	file_io_commit_t *job = v;
+
+	mutex_enter(&job->fic_lock);
+	while (job->fic_remaining > 0)
+		cv_wait(&job->fic_cv, &job->fic_lock);
+	mutex_exit(&job->fic_lock);
+
+	kmem_cache_free(file_io_commit_cache, job);
+}
+
+int
+pnfs_commit_mds(vnode_t *vp, page_t *plist, pnfs_layout_t *layout,
+    commit_extent_t *exts, offset4 offset, count4 count, cred_t *cr)
+{
+	int error, i;
+	commit_extent_t *ext;
+	stripe_dev_t *dev;
+	rnode4_t *rp;
+	verifier4 writeverf;
+
+	rp = VTOR4(vp);
+
+	error = nfs4_commit_normal(vp, plist, offset, count, cr);
+	if (error == 0) {
+		mutex_enter(&rp->r_statelock);
+		ASSERT(rp->r_flags & R4HAVEVERF);
+		writeverf = rp->r_writeverf;
+		mutex_exit(&rp->r_statelock);
+
+		for (i = 0; i < layout->plo_stripe_count; i++) {
+			ext = &exts[i];
+			if (ext->ce_length == 0)
+				continue;
+			dev = layout->plo_stripe_dev[i];
+			if (writeverf != dev->std_writeverf) {
+				error = NFS_VERF_MISMATCH;
+				nfs4_set_mod(vp);
+				break;
+			}
+		}
+	}
+	return (error);
 }
 
 static int
@@ -1400,9 +1720,9 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 
 		sd = stripe_dev_alloc();
 		layout->plo_stripe_dev[i] = sd;
-		sd->fh = sfh4_get(
+		sd->std_fh = sfh4_get(
 		    &file_layout4->nfl_fh_list.nfl_fh_list_val[i], mi);
-		DEV_ASSIGN(sd->sd_devid, file_layout4->nfl_deviceid);
+		DEV_ASSIGN(sd->std_devid, file_layout4->nfl_deviceid);
 	}
 	/* XXX free memory and stuff */
 	layout->plo_refcount = 1;
@@ -2117,7 +2437,7 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 
 int
 pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
-    cred_t *cr, stable_how4 *stab)
+    cred_t *cr, stable_how4 *stab_comm)
 {
 	int i, error = 0;
 	file_io_write_t *job;
@@ -2170,6 +2490,8 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 	job->fiw_stateid = nfs4_get_w_stateid(cr, rp, curproc->p_pidp->pid_id,
 	    mi, OP_WRITE, &sid_types, NFS4_WSID_PNFS);
 	job->fiw_vp = vp;
+	job->fiw_stable_how = *stab_comm;
+	job->fiw_stable_result = FILE_SYNC4;
 	while (count > 0) {
 		stripenum = off / layout->plo_stripe_unit;
 		stripeoff = off % layout->plo_stripe_unit;
@@ -2181,6 +2503,7 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		VN_HOLD(vp);	/* VN_RELE() in pnfs_call() */
 		task->wt_vp = vp;
 		task->wt_cred = cr;
+		task->wt_layout = layout;
 		crhold(task->wt_cred);
 		nfs4_error_zinit(&task->wt_err);
 		task->wt_offset = off;
@@ -2189,9 +2512,8 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 			task->wt_offset = (off / stripewidth)
 			    * layout->plo_stripe_unit
 			    + stripeoff;
-		task->wt_dev =
-		    layout->plo_stripe_dev[stripenum %
-		    layout->plo_stripe_count];
+		task->wt_sui = stripenum % layout->plo_stripe_count;
+		task->wt_dev = layout->plo_stripe_dev[task->wt_sui];
 		stripe_dev_hold(task->wt_dev);
 
 		task->wt_base = base;
@@ -2217,13 +2539,12 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 	}
 
 	error = job->fiw_error;
+	*stab_comm = job->fiw_stable_result;
 	mutex_exit(&job->fiw_lock);
 
 	mutex_enter(&rp->r_statelock);
 	pnfs_layout_rele(rp);
 	mutex_exit(&rp->r_statelock);
-
-	*stab = FILE_SYNC4; /* XXX */
 
 	(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
 	    pnfs_task_write_free, job, 0);
@@ -2610,3 +2931,162 @@ pnfs_getdevicelist(mntinfo4_t *mi, cred_t *cr)
 #endif
 }
 #endif	/* USE_GETDEVICELIST */
+
+/*
+ * Commit data that was previously written.
+ * Only data from the pages in plist need to be committed.
+ * The paramaters offset and count are the minimum
+ * offset and count that contain the set of pages in plist.
+ */
+int
+pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
+    cred_t *cr)
+{
+	int i, error = 0;
+	file_io_commit_t *job;
+	commit_task_t *task;
+	rnode4_t *rp = VTOR4(vp);
+	pnfs_layout_t *layout;
+	length4 stripewidth;
+	mntinfo4_t *mi = VTOMI4(vp);
+	int remaining = 0;
+	nfs4_stateid_types_t sid_types;
+	int nosig;
+	page_t *pp;
+	offset4 off, ps, pe;
+	commit_extent_t *exts, *ext;
+	int exts_size;
+	uint32_t sui;
+
+	mutex_enter(&rp->r_statelock);
+	layout = list_head(&rp->r_layout);
+	if ((layout == NULL || !(rp->r_flags &
+	    (R4LAYOUTUNAVAIL|R4LAYOUTVALID)))) {
+		mutex_exit(&rp->r_statelock);
+		pnfs_layoutget(vp, cr, LAYOUTIOMODE4_RW);
+		mutex_enter(&rp->r_statelock);
+		layout = list_head(&rp->r_layout);
+	}
+
+	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
+		mutex_exit(&rp->r_statelock);
+		return (EAGAIN);
+	}
+
+	pnfs_layout_hold(rp, layout);
+	mutex_exit(&rp->r_statelock);
+
+	for (i = 0; i < layout->plo_stripe_count; i++) {
+		error = stripe_dev_prepare(mi, layout->plo_stripe_dev[i],
+		    layout->plo_first_stripe_index, i, cr);
+		if (error) {
+			nfs4_set_pageerror(plist);
+			mutex_enter(&rp->r_statelock);
+			pnfs_layout_rele(rp);
+			mutex_exit(&rp->r_statelock);
+			return (error);
+		}
+	}
+
+	/*
+	 * Allocate an array of extents (offset, length).
+	 * One extent for each stripe device.
+	 */
+	exts_size = sizeof (commit_extent_t) * layout->plo_stripe_count;
+	exts = kmem_zalloc(exts_size, KM_SLEEP);
+
+	/*
+	 * Walk the list of pages and update the extents array.
+	 * When finished, the extents array will contain the
+	 * offset and length that needs to be committed for each device.
+	 */
+	pp = plist;
+	do {
+		ps = pp->p_offset;
+		pe = ps + PAGESIZE - 1;
+
+		/*
+		 * Step through the page by stripe unit width
+		 * and update the appropriate extent for the offset.
+		 */
+		do {
+			sui = (ps / layout->plo_stripe_unit) %
+			    layout->plo_stripe_count;
+			ext = &exts[sui];
+			if (ext->ce_length == 0) {
+				ext->ce_offset = pp->p_offset;
+				ext->ce_length = PAGESIZE;
+			} else if (pp->p_offset < ext->ce_offset) {
+				ext->ce_length = ext->ce_offset -
+				    pp->p_offset + ext->ce_length;
+				ext->ce_offset = pp->p_offset;
+			} else if ((ext->ce_offset + ext->ce_length) <=
+			    pp->p_offset) {
+				ext->ce_length = pp->p_offset -
+				    ext->ce_offset + PAGESIZE;
+			}
+			ps += layout->plo_stripe_unit;
+		} while (ps < pe);
+	} while ((pp = pp->p_next) != plist);
+
+	if (layout->plo_flags & PLO_COMMIT_MDS) {
+		error = pnfs_commit_mds(vp, plist, layout, exts,
+		    offset, count, cr);
+	} else {
+		job = file_io_commit_alloc();
+		nfs4_init_stateid_types(&sid_types);
+		job->fic_vp = vp;
+		job->fic_plist = plist;
+		stripewidth = layout->plo_stripe_unit *
+		    layout->plo_stripe_count;
+		for (i = 0; i < layout->plo_stripe_count; i++) {
+			ext = &exts[i];
+			/* skip data servers that do not need commit */
+			if (ext->ce_length == 0)
+				continue;
+			task = kmem_cache_alloc(commit_task_cache, KM_SLEEP);
+			task->cm_job = job;
+			VN_HOLD(vp);
+			task->cm_vp = vp;
+			task->cm_cred = cr;
+			crhold(task->cm_cred);
+			task->cm_layout = layout;
+			off = ext->ce_offset;
+			if (layout->plo_stripe_type == STRIPE4_DENSE)
+				task->cm_offset = (off / stripewidth)
+				    * layout->plo_stripe_unit
+				    + (off % layout->plo_stripe_unit);
+			else
+				task->cm_offset = off;
+			task->cm_sui = i;
+			task->cm_dev = layout->plo_stripe_dev[i];
+			stripe_dev_hold(task->cm_dev);
+			task->cm_count = ext->ce_length;
+			++remaining;
+
+			(void) taskq_dispatch(mi->mi_pnfs_io_taskq,
+			    pnfs_task_commit, task, 0);
+		}
+
+		mutex_enter(&job->fic_lock);
+		job->fic_remaining += remaining;
+		while (job->fic_remaining > 0) {
+			nosig = cv_wait_sig(&job->fic_cv, &job->fic_lock);
+			if ((nosig == 0) && (job->fic_error == 0))
+				job->fic_error = EINTR;
+		}
+		error = job->fic_error;
+		mutex_exit(&job->fic_lock);
+	}
+
+	mutex_enter(&rp->r_statelock);
+	pnfs_layout_rele(rp);
+	mutex_exit(&rp->r_statelock);
+
+	kmem_free(exts, exts_size);
+
+	(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
+	    pnfs_task_commit_free, job, 0);
+
+	return (error);
+}

@@ -72,6 +72,18 @@ typedef struct acache4 {
 } acache4_t;
 
 /*
+ * The various values for the commit states.  These are stored in
+ * the p_fsdata byte in the page struct.
+ * Unlike in the nfsv3 client, these values are bit fields.
+ */
+#define	C_NOCOMMIT4	0x0	/* no commit is required */
+#define	C_COMMIT4	0x1	/* a commit is required */
+#define	C_DELAY4	0x2	/* a commit can be delayed */
+#define	C_ERROR4	0x4	/* an error occurred during a commit */
+
+#define	C_DELAYCOMMIT4	(C_COMMIT4 | C_DELAY4)
+
+/*
  * Note on the different buffer sizes in rddir4_cache:
  * There seems to be some discrepancy between the intended and actual
  * use of entlen and buflen, which does not correspond to the comment below.
@@ -267,6 +279,7 @@ typedef struct rnode4 {
 	rddir4_cache	*r_direof;	/* pointer to the EOF entry */
 	symlink_cache	r_symlink;	/* cached readlink response */
 	verifier4	r_writeverf;	/* file data write verifier */
+	uint64_t	r_writeverfcnt;	/* write verifier transition */
 	u_offset_t	r_modaddr;	/* address for page in writerp */
 	commit_t	r_commit;	/* commit information */
 	u_offset_t	r_truncaddr;	/* base for truncate operation */
