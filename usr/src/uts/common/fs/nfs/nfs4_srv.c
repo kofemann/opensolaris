@@ -5045,6 +5045,7 @@ rfs4_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	cr = cs->cr;
 	vp = nnop_io_getvp(nn);
 	if (rdonly4(cs->exi, vp, req)) {
+		VN_RELE(vp);
 		*cs->statusp = resp->status = NFS4ERR_ROFS;
 		goto out;
 	}

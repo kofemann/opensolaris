@@ -635,6 +635,13 @@ nnode_vn_state_free(void *vstate)
 	kmem_cache_free(nnode_vn_state_cache, state);
 }
 
+/*
+ * Initialize the nnode_seed_t.  Each of the data structures
+ * nnode_vn_data_t, nnode_vn_md_t, and nnode_vn_state_t are
+ * allocated, and each has one reference to a vnode.  Thus,
+ * the corresponding free functions need a VN_RELE() for the
+ * held vnode.
+ */
 static nnode_error_t
 nnode_build_v3(nnode_seed_t *seed, void *vv3seed)
 {
@@ -679,6 +686,13 @@ out:
 	return (rc);
 }
 
+/*
+ * Initialize the nnode_seed_t.  Each of the data structures
+ * nnode_vn_data_t, nnode_vn_md_t, and nnode_vn_state_t are
+ * allocated, and each has one reference to a vnode.  Thus,
+ * the corresponding free functions need a VN_RELE() for the
+ * held vnode.
+ */
 static nnode_error_t
 nnode_build_vp(nnode_seed_t *seed, void *vvpseed)
 {
@@ -716,6 +730,13 @@ nnode_build_vp(nnode_seed_t *seed, void *vvpseed)
 	return (0);
 }
 
+/*
+ * Initialize the nnode_seed_t.  Each of the data structures
+ * nnode_vn_data_t, nnode_vn_md_t, and nnode_vn_state_t are
+ * allocated, and each has one reference to a vnode.  Thus,
+ * the corresponding free functions need a VN_RELE() for the
+ * held vnode.
+ */
 static nnode_error_t
 nnode_build_v41(nnode_seed_t *seed, void *vfh)
 {
@@ -774,6 +795,13 @@ out:
 	return (rc);
 }
 
+/*
+ * Initialize the nnode_seed_t.  Each of the data structures
+ * nnode_vn_data_t, nnode_vn_md_t, and nnode_vn_state_t are
+ * allocated, and each has one reference to a vnode.  Thus,
+ * the corresponding free functions need a VN_RELE() for the
+ * held vnode.
+ */
 static nnode_error_t
 nnode_build_v4(nnode_seed_t *seed, void *vfh)
 {

@@ -2663,7 +2663,8 @@ mds_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	error = nnop_read(nn, &nnioflags, cs->cr, &ct, &uio, 0);
 	if (error) {
-		freeb(mp);
+		if (mp != NULL)
+			freeb(mp);
 		*cs->statusp = resp->status = nnode_stat4(error, 1);
 		goto out;
 	}

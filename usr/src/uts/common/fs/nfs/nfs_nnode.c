@@ -281,10 +281,7 @@ nnode_bucket_sweep_task(void *vtask)
 	rw_enter(&bucket->nb_lock, RW_WRITER);
 
 	/*
-	 * Traverse the avl tree and free all nnodes meeting
-	 * the following criteria:
-	 * 1. nn_instance_id equal to inst_id
-	 * nn_refcount equal to zero
+	 * Traverse the avl tree, calling nbst_proc on each node.
 	 */
 	np = avl_first(&bucket->nb_tree);
 	while (np != NULL) {
@@ -598,6 +595,7 @@ again:
 		 */
 		mutex_enter(&found->nn_lock);
 		found->nn_refcount++;
+		ASSERT(found->nn_refcount != 0);
 		found->nn_last_access = gethrtime();
 		*npp = found;
 		mutex_exit(&found->nn_lock);
@@ -642,6 +640,7 @@ nnode_rele(nnode_t **npp)
 
 	/* use the atomics? */
 	mutex_enter(&np->nn_lock);
+	ASSERT(np->nn_refcount != 0);
 	np->nn_refcount--;
 	np->nn_last_access = gethrtime();
 	if (np->nn_refcount == 0)
