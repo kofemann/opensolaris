@@ -144,10 +144,17 @@ SUBDIRS += \
 	libsendfile	\
 	nametoaddr	\
 	ncad_addr	\
+	hbaapi		\
+	sun_fc		\
 	gss_mechs/mech_krb5	.WAIT	\
 	libkrb5	.WAIT	\
 	krb5	.WAIT	\
-	libsmbfs
+	libsmbfs	\
+	libstmf		\
+	libnsctl	\
+	libunistat	\
+	libdscfg	\
+	librdc
 $(CLOSED_BUILD)SUBDIRS += \
 	$(CLOSED)/lib/smartcard
 SUBDIRS += \
@@ -162,6 +169,7 @@ SUBDIRS += \
 	libdevid	\
 	libdhcpsvc	\
 	libc_db		\
+	libndmp		\
 	libsec		\
 	libtnfprobe	\
 	libtnf		\
@@ -171,8 +179,7 @@ SUBDIRS += \
 	libdhcputil	\
 	libipsecutil
 $(CLOSED_BUILD)SUBDIRS += \
-	$(CLOSED)/lib/libike \
-	$(CLOSED)/lib/libndmp
+	$(CLOSED)/lib/libike
 SUBDIRS += \
 	nsswitch	\
 	print		\
@@ -243,6 +250,9 @@ SUBDIRS += \
 	smbsrv		\
 	scsi		\
 	mms		\
+	libima		\
+	libsun_ima	\
+	mpapi		\
 	$($(MACH)_SUBDIRS)
 
 sparc_SUBDIRS= .WAIT	\
@@ -364,6 +374,7 @@ HDRSUBDIRS=		\
 	libdhcputil	\
 	libdisasm	\
 	libdns_sd	\
+	libdscfg	\
 	libdtrace	\
 	libdtrace_jni	\
 	libelfsign	\
@@ -385,7 +396,9 @@ HDRSUBDIRS=		\
 	libmail		\
 	libmd		\
 	libmtmalloc	\
+	libndmp		\
 	libnvpair	\
+	libnsctl	\
 	libnsl		\
 	libnwam		\
 	libpam		\
@@ -398,6 +411,7 @@ HDRSUBDIRS=		\
 	libproc		\
 	libraidcfg	\
 	librcm		\
+	librdc		\
 	libscf		\
 	libsip		\
 	libcommputil	\
@@ -411,6 +425,7 @@ HDRSUBDIRS=		\
 	libslp		\
 	libsmedia	\
 	libsqlite	\
+	libstmf		\
 	libsysevent	\
 	libtecla	\
 	libtnf		\
@@ -420,6 +435,7 @@ HDRSUBDIRS=		\
 	libtsol		\
 	libvolmgt	\
 	libumem		\
+	libunistat	\
 	libuutil	\
 	libwrap		\
 	libxcurses2	\
@@ -444,18 +460,22 @@ HDRSUBDIRS=		\
 	libdserv	\
 	libnfs		\
 	scsi		\
+	hbaapi		\
+	libima		\
+	libsun_ima	\
+	mpapi		\
 	$($(MACH)_HDRSUBDIRS)
 
 $(CLOSED_BUILD)HDRSUBDIRS += \
 	$(CLOSED)/lib/libc_i18n	\
 	$(CLOSED)/lib/libike	\
-	$(CLOSED)/lib/libndmp	\
 	$(CLOSED)/lib/smartcard
 
 sparc_HDRSUBDIRS=	\
 	libds		\
 	libdscp		\
-	libpri
+	libpri		\
+	storage
 
 all :=		TARGET= all
 check :=	TARGET= check
@@ -521,6 +541,7 @@ libdhcputil:	libnsl libgen libinetutil libdlpi
 libdladm:	libdevinfo libinetutil libsocket
 libdll: 	libast
 libdlpi:	libinetutil libdladm
+libdscfg:	libnsctl libunistat libsocket libnsl
 libdtrace:	libproc libgen libctf
 libdtrace_jni:	libuutil libdtrace
 libefi:		libuuid
@@ -532,6 +553,7 @@ libkmf:		libcryptoutil pkcs11 openssl
 libnsl:		libmd5 libscf
 libmapid:	libresolv
 libnwam:	libdoor
+librdc:		libsocket libnsl libnsctl libunistat libdscfg
 libuuid:	libdlpi
 libinetutil:	libsocket
 libsecdb:	libnsl
@@ -578,6 +600,7 @@ smbsrv:		libsocket libnsl libmd libxnet libpthread librt \
 		libshare libidmap pkcs11 libsqlite
 libvscan:	libscf
 scsi:		libnvpair
+mpapi:		libpthread libdevinfo libsysevent libnvpair
 
 #
 # The reason this rule checks for the existence of the

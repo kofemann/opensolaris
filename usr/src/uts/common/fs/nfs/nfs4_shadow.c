@@ -90,6 +90,7 @@ sv_activate(vnode_t **vpp, vnode_t *dvp, nfs4_fname_t **namepp, int newnode)
 	svnode_t *svp;
 	vnode_t *resvp;
 	rnode4_t *rp = VTOR4(*vpp);
+	svp = VTOSV(*vpp);
 
 	ASSERT(namepp != NULL);
 	ASSERT(*namepp != NULL);
@@ -111,19 +112,48 @@ sv_activate(vnode_t **vpp, vnode_t *dvp, nfs4_fname_t **namepp, int newnode)
 		/*
 		 * Initialize the shadow vnode.
 		 */
-		svp = vtosv(*vpp);
 		svp->sv_forw = svp->sv_back = svp;
 		ASSERT(svp->sv_dfh == NULL);
 		svp->sv_dfh = VTOR4(dvp)->r_fh;
 		sfh4_hold(svp->sv_dfh);
 		ASSERT(svp->sv_name == NULL);
 		svp->sv_name = *namepp;
-		*namepp = NULL;
 	} else if ((*vpp)->v_type == VREG && !((*vpp)->v_flag & VROOT)) {
 		resvp = sv_find(*vpp, dvp, namepp);
 		ASSERT(resvp->v_type == VREG);
 		VN_RELE(*vpp);
 		*vpp = resvp;
+	} else if ((*vpp)->v_type == VDIR) {
+		/*
+		 * Directories only have a single shadow vnode which
+		 * is the master shadow vnode. This is because directories
+		 * can't have hard links. If sv_activate() is
+		 * called for an existing rnode (newnode isn't set)
+		 * but with a new name the fname needs to be updated
+		 * and the old one released.
+		 *
+		 * fname mismatches can occur due to server side renames,
+		 * here is a chance to update the fname in case there is
+		 * a mismatch. Since this is not a newnode we hold r_svlock
+		 * to protect sv_name.
+		 */
+		mutex_enter(&rp->r_svlock);
+		nfs4_fname_t *svpname = svp->sv_name;
+		if (svpname != *namepp) {
+			/*
+			 * Call fn_rele() to release the hold for the
+			 * previous shadow vnode reference. Don't
+			 * release the hold on the fname pointed to by
+			 * namepp as we have new reference to it from
+			 * this shadow vnode.
+			 */
+			svp->sv_name = *namepp;
+			mutex_exit(&rp->r_svlock);
+			fn_rele(&svpname);
+		} else {
+			mutex_exit(&rp->r_svlock);
+			fn_rele(namepp);
+		}
 	} else {
 		fn_rele(namepp);
 	}
@@ -145,7 +175,7 @@ sv_find(vnode_t *mvp, vnode_t *dvp, nfs4_fname_t **namepp)
 	vnode_t *vp;
 	rnode4_t *rp = VTOR4(mvp);
 	svnode_t *svp;
-	svnode_t *master_svp = vtosv(mvp);
+	svnode_t *master_svp = VTOSV(mvp);
 	rnode4_t *drp = VTOR4(dvp);
 	nfs4_fname_t *nm;
 
@@ -213,7 +243,6 @@ sv_find(vnode_t *mvp, vnode_t *dvp, nfs4_fname_t **namepp)
 	vp->v_type = mvp->v_type;
 	vp->v_pages = (page_t *)-1;	/* No pages, please */
 	vn_exists(vp);
-	/* XXX - Need to VFS_HOLD() ? */
 
 	/* Initialize the shadow vnode */
 

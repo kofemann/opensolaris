@@ -2100,9 +2100,19 @@ spa_import_common(const char *pool, nvlist_t *config, nvlist_t *props,
 	 * If a pool with this name exists, return failure.
 	 */
 	mutex_enter(&spa_namespace_lock);
-	if (spa_lookup(pool) != NULL) {
-		mutex_exit(&spa_namespace_lock);
-		return (EEXIST);
+	if ((spa = spa_lookup(pool)) != NULL) {
+		if (isroot) {
+			/*
+			 * Remove the existing root pool from the
+			 * namespace so that we can replace it with
+			 * the correct config we just read in.
+			 */
+			ASSERT(spa->spa_state == POOL_STATE_UNINITIALIZED);
+			spa_remove(spa);
+		} else {
+			mutex_exit(&spa_namespace_lock);
+			return (EEXIST);
+		}
 	}
 
 	/*
@@ -2421,8 +2431,7 @@ spa_import_rootpool(char *devpath, char *devid)
 	 * pool open, not import.
 	 */
 	error = spa_import_common(pname, conf, NULL, B_TRUE, B_TRUE);
-	if (error == EEXIST)
-		error = 0;
+	ASSERT(error != EEXIST);
 
 	nvlist_free(conf);
 	return (error);
@@ -4059,11 +4068,7 @@ spa_sync(spa_t *spa, uint64_t txg)
 		spa->spa_config_syncing = NULL;
 	}
 
-	spa->spa_traverse_wanted = B_TRUE;
-	rw_enter(&spa->spa_traverse_lock, RW_WRITER);
-	spa->spa_traverse_wanted = B_FALSE;
 	spa->spa_ubsync = spa->spa_uberblock;
-	rw_exit(&spa->spa_traverse_lock);
 
 	/*
 	 * Clean up the ZIL records for the synced txg.

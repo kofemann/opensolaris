@@ -5496,10 +5496,6 @@ ip_modclose(ill_t *ill)
 	if (ill->ill_credp != NULL)
 		crfree(ill->ill_credp);
 
-	mutex_enter(&ill->ill_lock);
-	ill_nic_info_dispatch(ill);
-	mutex_exit(&ill->ill_lock);
-
 	/*
 	 * Now we are done with the module close pieces that
 	 * need the netstack_t.
@@ -5736,16 +5732,11 @@ ip_stack_shutdown(netstackid_t stackid, void *arg)
 	ip_loopback_cleanup(ipst);
 
 	/*
-	 * The destroy functions here will end up causing notify callbacks
-	 * in the hook framework and these need to be run before the shtudown
-	 * of the hook framework is begun - that happens from netstack after
-	 * IP shutdown has completed.  If we leave doing these actions until
-	 * ip_stack_fini then the notify callbacks for the net_*_unregister
-	 * are happening against a backdrop of shattered terain.
+	 * The *_hook_shutdown()s start the process of notifying any
+	 * consumers that things are going away.... nothing is destroyed.
 	 */
-	ipv4_hook_destroy(ipst);
-	ipv6_hook_destroy(ipst);
-	ip_net_destroy(ipst);
+	ipv4_hook_shutdown(ipst);
+	ipv6_hook_shutdown(ipst);
 }
 
 /*
@@ -5756,6 +5747,15 @@ ip_stack_fini(netstackid_t stackid, void *arg)
 {
 	ip_stack_t *ipst = (ip_stack_t *)arg;
 	int ret;
+
+	/*
+	 * At this point, all of the notifications that the events and
+	 * protocols are going away have been run, meaning that we can
+	 * now set about starting to clean things up.
+	 */
+	ipv4_hook_destroy(ipst);
+	ipv6_hook_destroy(ipst);
+	ip_net_destroy(ipst);
 
 #ifdef NS_DEBUG
 	printf("ip_stack_fini(%p, stack %d)\n", (void *)ipst, stackid);
@@ -17594,7 +17594,6 @@ ip_proto_input(queue_t *q, mblk_t *mp, ipha_t *ipha, ire_t *ire,
 	case IPPROTO_AH:
 	case IPPROTO_ESP: {
 		ipsec_stack_t *ipss = ipst->ips_netstack->netstack_ipsec;
-		ipsa_t *assoc;
 
 		/*
 		 * Fast path for AH/ESP. If this is the first time
@@ -17678,7 +17677,6 @@ ip_proto_input(queue_t *q, mblk_t *mp, ipha_t *ipha, ire_t *ire,
 			}
 			ipsec_rc = ii->ipsec_in_esp_sa->ipsa_input_func(
 			    first_mp, esph);
-			assoc = ii->ipsec_in_esp_sa;
 		} else {
 			ah_t *ah = ipsec_inbound_ah_sa(first_mp, ns);
 			if (ah == NULL)
@@ -17687,35 +17685,10 @@ ip_proto_input(queue_t *q, mblk_t *mp, ipha_t *ipha, ire_t *ire,
 			ASSERT(ii->ipsec_in_ah_sa->ipsa_input_func != NULL);
 			ipsec_rc = ii->ipsec_in_ah_sa->ipsa_input_func(
 			    first_mp, ah);
-			assoc = ii->ipsec_in_ah_sa;
 		}
 
 		switch (ipsec_rc) {
 		case IPSEC_STATUS_SUCCESS:
-			/*
-			 * The packet is successfully processed but
-			 * received on an SA which is in IDLE state.
-			 * We queue the packet for subsequent
-			 * processing after the SA moves to MATURE
-			 * state.
-			 */
-			if ((assoc != NULL) &&
-			    (assoc->ipsa_state == IPSA_STATE_IDLE)) {
-				ASSERT(cl_inet_idlesa != NULL);
-				in6_addr_t	srcaddr, dstaddr;
-				uint8_t		protocol;
-				protocol = (assoc->ipsa_type == SADB_SATYPE_AH)
-				    ? IPPROTO_AH : IPPROTO_ESP;
-				IPSA_COPY_ADDR(&srcaddr, assoc->ipsa_srcaddr,
-				    assoc->ipsa_addrfam);
-				IPSA_COPY_ADDR(&dstaddr, assoc->ipsa_dstaddr,
-				    assoc->ipsa_addrfam);
-				cl_inet_idlesa(protocol, assoc->ipsa_spi,
-				    assoc->ipsa_addrfam, srcaddr,
-				    dstaddr);
-				sadb_buf_pkt(assoc, first_mp, ns);
-				return;
-			}
 			break;
 		case IPSEC_STATUS_FAILED:
 			BUMP_MIB(ill->ill_ip_mib, ipIfStatsInDiscards);
@@ -27932,47 +27905,49 @@ nak:
 		}
 
 		/*
-		 * update any incomplete nce_t found. we lookup the ctable
+		 * Update any incomplete nce_t found. We search the ctable
 		 * and find the nce from the ire->ire_nce because we need
 		 * to pass the ire to ip_xmit_v4 later, and can find both
-		 * ire and nce in one lookup from the ctable.
+		 * ire and nce in one lookup.
 		 */
 		fake_ire = (ire_t *)mp->b_rptr;
-		/*
-		 * By the time we come back here from ARP
-		 * the logical outgoing interface  of the incomplete ire
-		 * we added in ire_forward could have disappeared,
-		 * causing the incomplete ire to also have
-		 * dissapeared. So we need to retreive the
-		 * proper ipif for the ire  before looking
-		 * in ctable;  do the ctablelookup based on ire_ipif_seqid
-		 */
-		ill = q->q_ptr;
 
-		/* Get the outgoing ipif */
-		mutex_enter(&ill->ill_lock);
-		if (ill->ill_state_flags & ILL_CONDEMNED) {
-			mutex_exit(&ill->ill_lock);
+		/*
+		 * By the time we come back here from ARP the incomplete ire
+		 * created in ire_forward() could have been removed. We use
+		 * the parameters stored in the fake_ire to specify the real
+		 * ire as explicitly as possible. This avoids problems when
+		 * IPMP groups are configured as an ipif can 'float'
+		 * across several ill queues. We can be confident that the
+		 * the inability to find an ire is because it no longer exists.
+		 */
+		ill = ill_lookup_on_ifindex(fake_ire->ire_ipif_ifindex, B_FALSE,
+		    NULL, NULL, NULL, NULL, ipst);
+		if (ill == NULL) {
+			ip1dbg(("ill for incomplete ire vanished\n"));
 			freemsg(mp); /* fake ire */
 			freeb(mp1);  /* dl_unitdata response */
 			return;
 		}
-		ipif = ipif_lookup_seqid(ill, fake_ire->ire_ipif_seqid);
 
+		/* Get the outgoing ipif */
+		mutex_enter(&ill->ill_lock);
+		ipif = ipif_lookup_seqid(ill, fake_ire->ire_ipif_seqid);
 		if (ipif == NULL) {
 			mutex_exit(&ill->ill_lock);
+			ill_refrele(ill);
 			ip1dbg(("logical intrf to incomplete ire vanished\n"));
-			freemsg(mp);
-			freeb(mp1);
+			freemsg(mp); /* fake_ire */
+			freeb(mp1);  /* dl_unitdata response */
 			return;
 		}
+
 		ipif_refhold_locked(ipif);
 		mutex_exit(&ill->ill_lock);
-		ire = ire_ctable_lookup(fake_ire->ire_addr,
-		    fake_ire->ire_gateway_addr, IRE_CACHE,
-		    ipif, fake_ire->ire_zoneid, NULL,
-		    (MATCH_IRE_GW|MATCH_IRE_IPIF|MATCH_IRE_ZONEONLY|
-		    MATCH_IRE_TYPE), ipst);
+		ill_refrele(ill);
+		ire = ire_arpresolve_lookup(fake_ire->ire_addr,
+		    fake_ire->ire_gateway_addr, ipif, fake_ire->ire_zoneid,
+		    ipst, ((ill_t *)q->q_ptr)->ill_wq);
 		ipif_refrele(ipif);
 		if (ire == NULL) {
 			/*
@@ -27980,7 +27955,7 @@ nak:
 			 * for this lookup; if it has no ire's pointing at it
 			 * cleanup.
 			 */
-			if ((nce = ndp_lookup_v4(ill,
+			if ((nce = ndp_lookup_v4(q->q_ptr,
 			    (fake_ire->ire_gateway_addr != INADDR_ANY ?
 			    &fake_ire->ire_gateway_addr : &fake_ire->ire_addr),
 			    B_FALSE)) != NULL) {
