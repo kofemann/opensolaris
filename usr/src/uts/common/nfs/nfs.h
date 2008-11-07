@@ -92,6 +92,7 @@ extern rpcvers_t nfs_versmax;
 #define	NFS_MAXDATA	8192
 #define	NFS_MAXNAMLEN	255
 #define	NFS_MAXPATHLEN	1024
+#define	NFS_MAX_IOVECS	12
 
 /*
  * Rpc retransmission parameters
@@ -168,6 +169,53 @@ enum nfsftype {
 	NFLNK,		/* symbolic link */
 	NFSOC		/* socket */
 };
+
+/*
+ * NFS_AVL_RETURN is used in comparison functions for AVL trees.  The usual
+ * pattern is:
+ *     rc = a->something - b->something;
+ *     NFS_AVL_RETURN(rc);
+ *     ... more comparisons between a and b may follow ...
+ * Only pass an ordinary scalar as an argument.  That is, don't pass in
+ * expressions with side effects, and/or function calls, as this macro
+ * evaluates rc twice.  It only returns if rc is not zero; if rc is
+ * zero, the function continues.
+ */
+#define	NFS_AVL_RETURN(rc) \
+	if (rc > 0) \
+		return (1); \
+	if (rc < 0) \
+		return (-1);
+
+/*
+ * NFS_AVL_RETURN optimized for 32-bit (signed or unsigned) values.
+ * Same caveat as NFS_AVL_RETURN(): don't pass in expressions with
+ * side effects, and/or function calls.  Just pass in signed 32-bit
+ * values.
+ */
+#define	NFS_AVL_RETURN_32(rc) \
+	rc = ((int32_t)rc >> 31) | (-((uint32_t)rc >> 31)); \
+	if (rc) \
+		return (rc);
+
+/*
+ * NFS_AVL_COMPARE is useful when there are no harmful side-effects from
+ * evaluating its arguments multiple times.  In other words, don't use
+ * function calls or expressions with side-effects (pre/post increment
+ * operators) as arguments for this.  (Yes, the author of this macro
+ * used to write Lisp.)
+ *
+ * An advantage of NFS_AVL_COMPARE() is that it's okay to pass unsigned
+ * values as arguments, e.g. it's good for comparing pointers.
+ *
+ * This only returns if a and b are not equal.  If a and b are equal,
+ * the function continues.
+ */
+#define	NFS_AVL_COMPARE(a, b) \
+	if (a > b) \
+		return (1); \
+	if (a < b) \
+		return (-1);
 
 /*
  * Macros for converting device numbers to and from the format
@@ -1011,14 +1059,6 @@ extern zone_key_t nfsstat_zone_key;
  */
 extern void *nfsstat_zone_init(zoneid_t);
 extern void nfsstat_zone_fini(zoneid_t, void *);
-
-/* macro to ease AVL trees */
-
-#define	NFS_AVL_RETURN(rc) \
-	if (rc < 0) \
-		return (-1); \
-	if (rc > 0) \
-		return (1);
 
 #endif	/* _KERNEL */
 
@@ -2291,6 +2331,7 @@ extern void	nfs3fini(void);
 extern int	nfs3_vfsinit(void);
 extern void	nfs3_vfsfini(void);
 extern void	vattr_to_post_op_attr(struct vattr *, post_op_attr *);
+extern void	vattr_to_wcc_data(struct vattr *, struct vattr *, wcc_data *);
 extern void	mblk_to_iov(mblk_t *, int, struct iovec *);
 extern int	rfs_publicfh_mclookup(char *, vnode_t *, cred_t *,
 			vnode_t **, struct exportinfo **, struct sec_ol *);

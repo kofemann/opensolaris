@@ -64,7 +64,7 @@ extern "C" {
 #define	DELEG_STATE_CACHE_TIME 1
 #endif
 
-int sstor_init(nfs_server_instance_t *, int, int);
+int sstor_init(nfs_server_instance_t *, int);
 
 bool_t rfs4_client_create(rfs4_entry_t, void *);
 void   rfs4_client_destroy(rfs4_entry_t);

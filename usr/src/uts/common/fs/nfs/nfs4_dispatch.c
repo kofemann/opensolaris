@@ -558,8 +558,7 @@ rfs4_minorvers_mismatch(struct svc_req *req, SVCXPRT *xprt, void *args)
  * state store instances framework is under construction.
  */
 int
-rfs4_minor_version_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap,
-    nfs41_fh_type_t persona)
+rfs4_minor_version_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 {
 	COMPOUND4args	*cmp;
 	int		 error = 0;
@@ -569,7 +568,7 @@ rfs4_minor_version_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap,
 
 	switch (cmp->minorversion) {
 	case 1:
-		error = rfs41_dispatch(req, xprt, ap, persona);
+		error = rfs41_dispatch(req, xprt, ap);
 		break;
 
 	case 0:

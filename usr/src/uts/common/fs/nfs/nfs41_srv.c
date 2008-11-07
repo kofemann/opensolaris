@@ -80,7 +80,6 @@
 #include <nfs/nfs4_srv_attr.h>
 #include <nfs/mds_state.h>
 
-#include <nfs/rfs41_ds.h>
 #include <nfs/nfs41_filehandle.h>
 
 #define	RFS4_MAXLOCK_TRIES 4	/* Try to get the lock this many times */
@@ -160,123 +159,123 @@ static sysid_t lockt_sysid;		/* dummy sysid for all LOCKT calls */
 
 void		rfs4_init_compound_state(struct compound_state *);
 
-static void	nullfree(nfs_resop4 *, compound_node_t *);
+static void	nullfree(nfs_resop4 *, compound_state_t *);
 static void	mds_op_inval(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_notsup(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_access(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_close(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_commit(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_create(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_create_free(nfs_resop4 *resop);
 static void	mds_op_delegreturn(nfs_argop4 *, nfs_resop4 *,
-				struct svc_req *, compound_node_t *);
+				struct svc_req *, compound_state_t *);
 static void	mds_op_getattr(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
-static void	mds_op_getattr_free(nfs_resop4 *, compound_node_t *);
+			compound_state_t *);
+static void	mds_op_getattr_free(nfs_resop4 *, compound_state_t *);
 static void	mds_op_getfh(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
-static void	mds_op_getfh_free(nfs_resop4 *, compound_node_t *);
+			compound_state_t *);
+static void	mds_op_getfh_free(nfs_resop4 *, compound_state_t *);
 static void	mds_op_link(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_lock(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
-static void	mds_lock_denied_free(nfs_resop4 *, compound_node_t *);
+			compound_state_t *);
+static void	mds_lock_denied_free(nfs_resop4 *, compound_state_t *);
 static void	mds_op_locku(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_lockt(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_lookup(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_lookupp(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_openattr(nfs_argop4 *argop, nfs_resop4 *resop,
-				struct svc_req *req, compound_node_t *);
+				struct svc_req *req, compound_state_t *);
 static void	mds_op_nverify(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_open(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_open_downgrade(nfs_argop4 *, nfs_resop4 *,
-			struct svc_req *, compound_node_t *);
+			struct svc_req *, compound_state_t *);
 static void	mds_op_putfh(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_putpubfh(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_putrootfh(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_read(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
-static void	mds_op_read_free(nfs_resop4 *, compound_node_t *);
+			compound_state_t *);
+static void	mds_op_read_free(nfs_resop4 *, compound_state_t *);
 void		mds_op_readdir(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
-static void	mds_op_readdir_free(nfs_resop4 *, compound_node_t *);
+			compound_state_t *);
+static void	mds_op_readdir_free(nfs_resop4 *, compound_state_t *);
 static void	mds_op_readlink(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
-static void	mds_op_readlink_free(nfs_resop4 *, compound_node_t *);
+			compound_state_t *);
+static void	mds_op_readlink_free(nfs_resop4 *, compound_state_t *);
 static void	mds_op_release_lockowner(nfs_argop4 *, nfs_resop4 *,
-			struct svc_req *, compound_node_t *);
+			struct svc_req *, compound_state_t *);
 static void	mds_op_remove(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_rename(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_renew(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_restorefh(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_savefh(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_setattr(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_verify(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_write(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_exchange_id(nfs_argop4 *, nfs_resop4 *,
-			struct svc_req *, compound_node_t *);
+			struct svc_req *, compound_state_t *);
 static void	mds_op_secinfo(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 static void	mds_op_secinfonn(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 nfsstat4	do_rfs4_op_secinfo(struct compound_state *, char *, int,
     SECINFO4res *);
 
-static void	mds_op_secinfo_free(nfs_resop4 *, compound_node_t *);
+static void	mds_op_secinfo_free(nfs_resop4 *, compound_state_t *);
 
 static void	mds_op_backchannel_ctl(nfs_argop4 *, nfs_resop4 *,
-			struct svc_req *, compound_node_t *);
+			struct svc_req *, compound_state_t *);
 static void	mds_op_bind_conn_to_session(nfs_argop4 *, nfs_resop4 *,
-			struct svc_req *, compound_node_t *);
+			struct svc_req *, compound_state_t *);
 static void	mds_op_create_clientid(nfs_argop4 *, nfs_resop4 *,
-			struct svc_req *, compound_node_t *);
+			struct svc_req *, compound_state_t *);
 static void	mds_op_create_session(nfs_argop4 *, nfs_resop4 *,
-			struct svc_req *, compound_node_t *);
+			struct svc_req *, compound_state_t *);
 static void	mds_op_destroy_session(nfs_argop4 *, nfs_resop4 *,
-			struct svc_req *, compound_node_t *);
+			struct svc_req *, compound_state_t *);
 static void	mds_op_sequence(nfs_argop4 *, nfs_resop4 *,
-			struct svc_req *, compound_node_t *);
+			struct svc_req *, compound_state_t *);
 
 static void mds_op_get_devlist(nfs_argop4 *, nfs_resop4 *,
-		struct svc_req *, compound_node_t *);
+		struct svc_req *, compound_state_t *);
 
 static void mds_op_get_devinfo(nfs_argop4 *, nfs_resop4 *,
-		struct svc_req *, compound_node_t *);
+		struct svc_req *, compound_state_t *);
 
 static void mds_op_layout_get(nfs_argop4 *, nfs_resop4 *,
-		struct svc_req *, compound_node_t *);
+		struct svc_req *, compound_state_t *);
 
 static void mds_op_layout_commit(nfs_argop4 *, nfs_resop4 *,
-		struct svc_req *, compound_node_t *);
+		struct svc_req *, compound_state_t *);
 
 static void mds_op_layout_return(nfs_argop4 *, nfs_resop4 *,
-		struct svc_req *, compound_node_t *);
+		struct svc_req *, compound_state_t *);
 
 static void mds_op_reclaim_complete(nfs_argop4 *, nfs_resop4 *,
-    struct svc_req *, compound_node_t *);
+    struct svc_req *, compound_state_t *);
 
 nfsstat4 check_open_access(uint32_t,
 			struct compound_state *, struct svc_req *);
@@ -285,7 +284,7 @@ int	vop_shrlock(vnode_t *, int, struct shrlock *, int);
 int 	rfs4_shrlock(rfs4_state_t *, int);
 int	rfs4_share(rfs4_state_t *);
 
-static void	mds_free_reply(nfs_resop4 *, compound_node_t *);
+static void	mds_free_reply(nfs_resop4 *, compound_state_t *);
 
 vnode_t *do_rfs4_op_mknod(CREATE4args *, CREATE4res *, struct svc_req *,
 			struct compound_state *, vattr_t *, char *);
@@ -317,7 +316,7 @@ rfs4_openowner_t *mds_findopenowner(nfs_server_instance_t *, open_owner4 *,
     bool_t *);
 
 static void	mds_op_nverify(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-			compound_node_t *);
+			compound_state_t *);
 
 extern mds_mpd_t *mds_find_mpd(nfs_server_instance_t *, uint32_t);
 
@@ -339,14 +338,7 @@ extern stateid4 special1;
 #define	ISSPECIAL(id)  (stateid4_cmp(id, &special0) || \
 			stateid4_cmp(id, &special1))
 
-void rfs4_cn_release(compound_node_t *);
-
-static void
-rfs41_dispatch_persona(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
-    compound_node_t *);
-
-static void
-rfs41_dispatch_persona_free(nfs_resop4 *, compound_node_t *);
+void rfs4_cn_release(compound_state_t *);
 
 mds_layout_grant_t *rfs41_findlogrant(struct compound_state *,
     rfs4_file_t *, rfs4_client_t *, bool_t *);
@@ -357,10 +349,8 @@ void rfs41_ever_grant_rele(mds_ever_grant_t *);
 /* ARGSUSED */
 static void
 mds_op_notsup(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
-
 	DTRACE_NFSV4_1(op__notsup__start,
 	    strcut compound_state *, cs);
 
@@ -372,10 +362,8 @@ mds_op_notsup(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 /* ARGSUSED */
 static void
 mds_op_illegal(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
-
 	DTRACE_NFSV4_1(op__illegal__start,
 	    struct compound_state *, cs);
 
@@ -389,10 +377,8 @@ mds_op_illegal(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 /* ARGSUSED */
 static void
 mds_op_inval(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
-
 	DTRACE_NFSV4_1(op__inval__start,
 	    struct compound_state *, cs);
 
@@ -404,18 +390,17 @@ mds_op_inval(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 /*ARGSUSED*/
 static void
-nullfree(nfs_resop4 *resop, compound_node_t *cn)
+nullfree(nfs_resop4 *resop, compound_state_t *cs)
 {
 }
 
-static struct op_disp_tbl mds_disptab[] = {
+static op_disp_tbl_t mds_disptab[] = {
 	{mds_op_illegal, nullfree, DISP_OP_BAD, "BAD Op 0"},
 	{mds_op_illegal, nullfree, DISP_OP_BAD, "BAD Op 1"},
 	{mds_op_illegal, nullfree, DISP_OP_BAD, "BAD Op 2"},
 	{mds_op_access, nullfree, DISP_OP_MDS, "ACCESS"},
 	{mds_op_close, nullfree, DISP_OP_MDS, "CLOSE"},
-	{rfs41_dispatch_persona, rfs41_dispatch_persona_free,
-	    DISP_OP_BOTH, "COMMIT"},
+	{mds_op_commit, nullfree, DISP_OP_BOTH, "COMMIT"},
 	{mds_op_create, nullfree, DISP_OP_MDS, "CREATE"},
 	{mds_op_inval, nullfree, DISP_OP_BAD, "BAD Op 7"},
 	{mds_op_delegreturn, nullfree, DISP_OP_MDS, "DELEGRETURN"},
@@ -432,12 +417,10 @@ static struct op_disp_tbl mds_disptab[] = {
 	{mds_op_openattr, nullfree,  DISP_OP_MDS, "OPENATTR"},
 	{mds_op_notsup, nullfree,  DISP_OP_BAD, "BAD Op 20"},
 	{mds_op_open_downgrade, nullfree,  DISP_OP_MDS, "OPEN_DOWNGRADE"},
-	{rfs41_dispatch_persona, rfs41_dispatch_persona_free,
-	    DISP_OP_BOTH, "PUTFH"},
+	{mds_op_putfh, nullfree, DISP_OP_BOTH, "PUTFH"},
 	{mds_op_putpubfh, nullfree,  DISP_OP_MDS, "PUTPUBFH"},
 	{mds_op_putrootfh, nullfree,  DISP_OP_MDS, "PUTROOTFH"},
-	{rfs41_dispatch_persona, rfs41_dispatch_persona_free,
-	    DISP_OP_BOTH, "READ"},
+	{mds_op_read, mds_op_read_free, DISP_OP_BOTH, "READ"},
 	{mds_op_readdir, mds_op_readdir_free,  DISP_OP_MDS, "READDIR"},
 	{mds_op_readlink, mds_op_readlink_free,  DISP_OP_MDS, "READLINK"},
 	{mds_op_remove, nullfree,  DISP_OP_MDS, "REMOVE"},
@@ -450,8 +433,7 @@ static struct op_disp_tbl mds_disptab[] = {
 	{mds_op_notsup, nullfree,  DISP_OP_BAD, "BAD Op 35"},
 	{mds_op_notsup, nullfree,  DISP_OP_BAD, "BAD Op 36"},
 	{mds_op_verify, nullfree,  DISP_OP_MDS, "VERIFY"},
-	{rfs41_dispatch_persona, rfs41_dispatch_persona_free,
-	    DISP_OP_BOTH, "WRITE"},
+	{mds_op_write, nullfree, DISP_OP_BOTH, "WRITE"},
 	{mds_op_notsup, nullfree,  DISP_OP_BAD, "BAD Op 39"},
 	{mds_op_backchannel_ctl, nullfree,  DISP_OP_BOTH, "BACKCHANNEL_CTL"},
 	{mds_op_bind_conn_to_session, nullfree,
@@ -466,7 +448,7 @@ static struct op_disp_tbl mds_disptab[] = {
 	{mds_op_layout_commit, nullfree,  DISP_OP_MDS, "LAYOUT_COMMIT"},
 	{mds_op_layout_get, nullfree,  DISP_OP_MDS, "LAYOUT_GET"},
 	{mds_op_layout_return, nullfree,  DISP_OP_MDS, "LAYOUT_RETURN"},
-	{rfs41_dispatch_persona, rfs41_dispatch_persona_free,
+	{mds_op_secinfonn, nullfree,
 	    DISP_OP_BOTH, "SECINFO_NONAME"},
 	{mds_op_sequence, nullfree,  DISP_OP_BOTH, "SEQUENCE"},
 	{mds_op_notsup, nullfree,  DISP_OP_BOTH, "SET_SSV"},
@@ -487,211 +469,9 @@ extern size_t strlcpy(char *dst, const char *src, size_t dstsize);
 #endif
 #define	nextdp(dp)	((struct dirent64 *)((char *)(dp) + (dp)->d_reclen))
 
-/*
- * The following is the "default" NFS persona
- */
-struct op_disp_tbl nfs_putfh = {
-	mds_op_putfh,
-	nullfree,
-	DISP_OP_BOTH,
-	"PUTFH"
-};
-
-struct op_disp_tbl nfs_read = {
-	mds_op_read,
-	mds_op_read_free,
-	DISP_OP_BOTH,
-	"READ"
-};
-
-struct op_disp_tbl nfs_write = {
-	mds_op_write,
-	nullfree,
-	DISP_OP_BOTH,
-	"WRITE"
-};
-
-struct op_disp_tbl nfs_commit = {
-	mds_op_commit,
-	nullfree,
-	DISP_OP_BOTH,
-	"COMMIT"
-};
-
-struct op_disp_tbl nfs_secinfonn = {
-	mds_op_secinfonn,
-	nullfree,
-	DISP_OP_BOTH,
-	"SECINFO_NONAME"
-};
-
-/*
- * we don't provide a specific compound state constructor/destructor
- * since this is the 'default' persona and is handled via
- * rfs41_cn_init();
- */
-rfs41_persona_funcs_t nfs41_persona = {
-	.cs_construct = NULL,
-	.cs_destruct = NULL,
-	.ds_op_putfh = &nfs_putfh,
-	.ds_op_read = &nfs_read,
-	.ds_op_write = &nfs_write,
-	.ds_op_commit = &nfs_commit,
-	.ds_op_secinfo_noname = &nfs_secinfonn
-};
-
-typedef struct {
-	kmutex_t lock;
-	uint32_t ref;
-	int unreg_pending;
-	kcondvar_t unreg_cv;
-	rfs41_persona_funcs_t *func_ptrs;
-} rfs41_ds_tbl_t;
-
-rfs41_ds_tbl_t rfs41_ds_reg_tbl[FH41_TYPE_MAX];
-
-void
-rfs41_persona_init()
-{
-	int i;
-	rfs41_ds_tbl_t *ent;
-
-	for (i = 0; i < FH41_TYPE_MAX; i++) {
-		ent = &rfs41_ds_reg_tbl[i];
-		bzero(ent, sizeof (*ent));
-		mutex_init(&ent->lock, NULL, MUTEX_DEFAULT, NULL);
-		cv_init(&ent->unreg_cv, NULL, CV_DEFAULT, NULL);
-	}
-
-	rfs41_ds_reg_tbl[FH41_TYPE_NFS].ref = 1;
-	rfs41_ds_reg_tbl[FH41_TYPE_NFS].func_ptrs = &nfs41_persona;
-}
-
-/*
- * Slap a hold on the persona.
- *
- * We only place a hold if the ref count
- * is greater than 1, meaning if there
- * are registered functions..
- */
-void
-rfs41_persona_hold(rfs41_ds_tbl_t *reg_ent)
-{
-	mutex_enter(&reg_ent->lock);
-	if (reg_ent->ref > 1)
-		reg_ent->ref++;
-	mutex_exit(&reg_ent->lock);
-}
-
-/*
- * Drop the hold on the persona.
- */
-void
-rfs41_persona_rele(rfs41_ds_tbl_t *reg_ent)
-{
-	mutex_enter(&reg_ent->lock);
-
-	reg_ent->ref--;
-
-	if (reg_ent->ref == 0) {
-		/*
-		 * if this is the last rele wake up
-		 * data-server so it can escape..
-		 */
-		if (reg_ent->unreg_pending)
-			cv_signal(&reg_ent->unreg_cv);
-	}
-
-	mutex_exit(&reg_ent->lock);
-}
-
-int
-rfs41_data_server_register(nfs41_fh_type_t flavor,
-    rfs41_persona_funcs_t *dtp)
-{
-	rfs41_ds_tbl_t *reg_ent;
-
-	if (flavor >= FH41_TYPE_MAX)
-		return (EINVAL);
-
-	reg_ent = &rfs41_ds_reg_tbl[flavor];
-
-	mutex_enter(&reg_ent->lock);
-	if (reg_ent->func_ptrs != NULL) {
-		/*
-		 * stompping over someone else
-		 * not supported.
-		 */
-		mutex_exit(&reg_ent->lock);
-		return (EBUSY);
-	}
-	reg_ent->func_ptrs = dtp;
-	reg_ent->ref = 1;
-	mutex_exit(&reg_ent->lock);
-
-	return (0);
-}
-
-int
-rfs41_data_server_unregister(nfs41_fh_type_t flavor)
-{
-	rfs41_ds_tbl_t *reg_ent;
-
-	if (flavor >= FH41_TYPE_MAX)
-		return (EINVAL);
-
-	reg_ent = &rfs41_ds_reg_tbl[flavor];
-
-	mutex_enter(&reg_ent->lock);
-	reg_ent->ref--;
-	while (reg_ent->ref > 1) {
-		reg_ent->unreg_pending = 1;
-		cv_wait(&reg_ent->unreg_cv, &reg_ent->lock);
-	}
-
-	reg_ent->func_ptrs = NULL;
-	reg_ent->unreg_pending = 0;
-	mutex_exit(&reg_ent->lock);
-
-	return (0);
-}
-
-/*
- * Switch/set the compound state persona, place a hold on the
- * persona rfs41_ds_tbl.
- */
-int
-rfs41_persona_set(nfs41_fh_type_t flavor, struct compound_state *cs)
-{
-	rfs41_ds_tbl_t *reg_ent;
-
-	if (flavor >= FH41_TYPE_MAX || flavor < FH41_TYPE_NFS)
-		return (NFS4ERR_BADHANDLE);
-
-	if (cs->persona < FH41_TYPE_MAX && cs->persona > 0)
-		rfs41_persona_rele(&rfs41_ds_reg_tbl[cs->persona]);
-
-	reg_ent = &rfs41_ds_reg_tbl[flavor];
-
-	rfs41_persona_hold(reg_ent);
-
-	/*
-	 * It is possible that while waiting for the mutex to place the
-	 * hold, the data-server unregistered. If so the function pointers
-	 * will be NULL. In this case return BADFILEHANDLE.
-	 */
-	if (reg_ent->func_ptrs == NULL)
-		return (NFS4ERR_BADHANDLE);
-
-	cs->persona_funcs = reg_ent->func_ptrs;
-	cs->persona = flavor;
-
-	return (0);
-}
-
 /*ARGSUSED*/
 static void
-mds_op_readdir_free(nfs_resop4 *resop, compound_node_t *cn)
+mds_op_readdir_free(nfs_resop4 *resop, compound_state_t *cs)
 {
 	/* Common function used for NFSv4.0 and NFSv4.1 */
 	rfs4_op_readdir_free(resop);
@@ -699,7 +479,7 @@ mds_op_readdir_free(nfs_resop4 *resop, compound_node_t *cn)
 
 /*ARGSUSED*/
 static void
-mds_op_secinfo_free(nfs_resop4 *resop, compound_node_t *cn)
+mds_op_secinfo_free(nfs_resop4 *resop, compound_state_t *cs)
 {
 	/* Common function used for NFSv4.0 and NFSv4.1 */
 	rfs4_op_secinfo_free(resop);
@@ -1196,9 +976,8 @@ done:
 /* ARGSUSED */
 void
 mds_op_secinfonn(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-    compound_node_t *cn)
+    compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
 	SECINFO_NO_NAME4res *respnn;
 	int dotdot;
 
@@ -1231,9 +1010,8 @@ final:
 /* ARGSUSED */
 void
 mds_op_secinfo(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-    compound_node_t *cn)
+    compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
 	SECINFO4res *resp;
 	utf8string *utfnm;
 	uint_t len, dotdot;
@@ -1306,9 +1084,8 @@ final:
 /* ARGSUSED */
 void
 mds_op_verify(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-    compound_node_t *cn)
+    compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
 	VERIFY4args  *args = &argop->nfs_argop4_u.opverify;
 	VERIFY4res *resp = &resop->nfs_resop4_u.opverify;
 	int error;
@@ -1361,9 +1138,8 @@ final:
 /* ARGSUSED */
 void
 mds_op_nverify(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-    compound_node_t *cn)
+    compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
 	NVERIFY4args  *args = &argop->nfs_argop4_u.opnverify;
 	NVERIFY4res *resp = &resop->nfs_resop4_u.opnverify;
 	int error;
@@ -1416,9 +1192,8 @@ final:
 /* ARGSUSED */
 void
 mds_op_access(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-    compound_node_t *cn)
+    compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
 	ACCESS4args *args = &argop->nfs_argop4_u.opaccess;
 	ACCESS4res *resp = &resop->nfs_resop4_u.opaccess;
 	int error;
@@ -1547,9 +1322,8 @@ final:
 /* ARGSUSED */
 static void
 mds_op_commit(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
 	COMMIT4args *args = &argop->nfs_argop4_u.opcommit;
 	COMMIT4res *resp = &resop->nfs_resop4_u.opcommit;
 	int error;
@@ -1562,7 +1336,16 @@ mds_op_commit(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	    COMMIT4args *, args);
 
 	if (vp == NULL) {
-		*cs->statusp = resp->status = NFS4ERR_NOFILEHANDLE;
+		/*
+		 * XXX kludge: fake the commit if we are a data server
+		 * This will be replaced once we have nnop_commit().
+		 */
+		if (cs->nn != NULL) {
+			*cs->statusp = resp->status = NFS4_OK;
+			resp->writeverf = cs->instp->Write4verf;
+		} else {
+			*cs->statusp = resp->status = NFS4ERR_NOFILEHANDLE;
+		}
 		goto final;
 	}
 	if (cs->access == CS_ACCESS_DENIED) {
@@ -1638,13 +1421,12 @@ final:
 /* ARGSUSED */
 static void
 mds_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	CREATE4args *args = &argop->nfs_argop4_u.opcreate;
 	CREATE4res *resp = &resop->nfs_resop4_u.opcreate;
 	int error;
 	struct vattr bva, iva, iva2, ava, *vap;
-	struct compound_state *cs = cn->cn_state;
 	cred_t *cr = cs->cr;
 	vnode_t *dvp = cs->vp;
 	vnode_t *vp = NULL;
@@ -1978,13 +1760,12 @@ final:
 /*ARGSUSED*/
 static void
 mds_op_delegreturn(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	DELEGRETURN4args *args = &argop->nfs_argop4_u.opdelegreturn;
 	DELEGRETURN4res *resp = &resop->nfs_resop4_u.opdelegreturn;
 	rfs4_deleg_state_t *dsp;
 	nfsstat4 status;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__delegreturn__start, struct compound_state *, cs,
 	    DELEGRETURN4args *, args);
@@ -2014,14 +1795,13 @@ final:
 /* ARGSUSED */
 static void
 mds_op_getattr(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	GETATTR4args *args = &argop->nfs_argop4_u.opgetattr;
 	GETATTR4res *resp = &resop->nfs_resop4_u.opgetattr;
 	struct nfs4_svgetit_arg sarg;
 	struct statvfs64 sb;
 	nfsstat4 status;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__getattr__start, struct compound_state *, cs,
 	    GETATTR4args *, args);
@@ -2055,7 +1835,7 @@ final:
 
 /*ARGSUSED*/
 void
-mds_op_getattr_free(nfs_resop4 *resop, compound_node_t *cn)
+mds_op_getattr_free(nfs_resop4 *resop, compound_state_t *cs)
 {
 	/* Common function for NFSv4.0 and NFSv4.1 */
 	rfs4_op_getattr_free(resop);
@@ -2064,10 +1844,9 @@ mds_op_getattr_free(nfs_resop4 *resop, compound_node_t *cn)
 /* ARGSUSED */
 static void
 mds_op_getfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	GETFH4res *resp = &resop->nfs_resop4_u.opgetfh;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_1(op__getfh__start,
 	    struct compound_state *, cs);
@@ -2093,7 +1872,7 @@ final:
 
 /*ARGSUSED*/
 static void
-mds_op_getfh_free(nfs_resop4 *resop, compound_node_t *cn)
+mds_op_getfh_free(nfs_resop4 *resop, compound_state_t *cs)
 {
 	/* Common function for NFSv4.0 and NFSv4.1 */
 	rfs4_op_getfh_free(resop);
@@ -2106,7 +1885,7 @@ mds_op_getfh_free(nfs_resop4 *resop, compound_node_t *cn)
 /* ARGSUSED */
 static void
 mds_op_link(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	LINK4args *args = &argop->nfs_argop4_u.oplink;
 	LINK4res *resp = &resop->nfs_resop4_u.oplink;
@@ -2117,7 +1896,6 @@ mds_op_link(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	char *nm;
 	uint_t  len;
 	caller_context_t ct;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__link__start, struct compound_state *, cs,
 	    LINK4args *, args);
@@ -2550,13 +2328,12 @@ err_out:
 /* ARGSUSED */
 static void
 mds_op_lookup(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	LOOKUP4args *args = &argop->nfs_argop4_u.oplookup;
 	LOOKUP4res *resp = &resop->nfs_resop4_u.oplookup;
 	char *nm;
 	uint_t len;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__lookup__start, struct compound_state *, cs,
 	    LOOKUP4args *, args);
@@ -2605,10 +2382,9 @@ final:
 /* ARGSUSED */
 static void
 mds_op_lookupp(nfs_argop4 *args, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	LOOKUPP4res *resp = &resop->nfs_resop4_u.oplookupp;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_1(op__lookupp__start, struct compound_state *, cs);
 
@@ -2641,7 +2417,7 @@ final:
 /*ARGSUSED2*/
 static void
 mds_op_openattr(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	OPENATTR4args	*args = &argop->nfs_argop4_u.opopenattr;
 	OPENATTR4res	*resp = &resop->nfs_resop4_u.opopenattr;
@@ -2649,7 +2425,6 @@ mds_op_openattr(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	int		lookup_flags = LOOKUP_XATTR, error;
 	int		exp_ro = 0;
 	caller_context_t ct;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__openattr__start, struct compound_state *, cs,
 	    OPENATTR4args *, args);
@@ -2794,30 +2569,26 @@ do_io(int direction, vnode_t *vp, struct uio *uio, int ioflag, cred_t *cred,
 /* ARGSUSED */
 static void
 mds_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
 	READ4args *args = &argop->nfs_argop4_u.opread;
 	READ4res *resp = &resop->nfs_resop4_u.opread;
 	int error;
-	int verror;
-	vnode_t *vp;
-	struct vattr va;
+	nnode_t *nn = NULL;
 	struct iovec iov;
 	struct uio uio;
-	u_offset_t offset;
 	bool_t *deleg = &cs->deleg;
 	nfsstat4 stat;
-	int in_crit = 0;
 	mblk_t *mp;
 	int alloc_err = 0;
 	caller_context_t ct;
+	uint32_t nnioflags = 0;
 
 	DTRACE_NFSV4_2(op__read__start, struct compound_state *, cs,
 	    READ4args, args);
 
-	vp = cs->vp;
-	if (vp == NULL) {
+	nn = cs->nn;
+	if (nn == NULL) {
 		*cs->statusp = resp->status = NFS4ERR_NOFILEHANDLE;
 		goto final;
 	}
@@ -2826,63 +2597,20 @@ mds_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		goto final;
 	}
 
-	ct.cc_sysid = 0;
-	ct.cc_pid = 0;
-	ct.cc_caller_id = cs->instp->caller_id;
-	ct.cc_flags = CC_DONTBLOCK;
-
-	/*
-	 * Enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with write requests.
-	 */
-	if (nbl_need_check(vp)) {
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		if (nbl_conflict(vp, NBL_READ, args->offset, args->count,
-		    0, &ct)) {
-			*cs->statusp = resp->status = NFS4ERR_LOCKED;
-			goto out;
-		}
-	}
-
-	if ((stat = check_stateid(FREAD, cs, vp, &args->stateid,
+	if ((stat = nnop_check_stateid(nn, cs, FREAD, &args->stateid,
 	    FALSE, deleg, TRUE, &ct)) != NFS4_OK) {
 		*cs->statusp = resp->status = stat;
+		goto final;
+	}
+
+	error = nnop_io_prep(nn, &nnioflags, cs->cr, &ct, args->offset,
+	    args->count, NULL);
+	if (error != 0) {
+		*cs->statusp = resp->status = nnode_stat4(error, 1);
 		goto out;
 	}
 
-	va.va_mask = AT_MODE|AT_SIZE|AT_UID;
-	verror = VOP_GETATTR(vp, &va, 0, cs->cr, &ct);
-
-	/*
-	 * If we can't get the attributes, then we can't do the
-	 * right access checking.  So, we'll fail the request.
-	 */
-	if (verror) {
-		*cs->statusp = resp->status = puterrno4(verror);
-		goto out;
-	}
-
-	if (vp->v_type != VREG) {
-		*cs->statusp = resp->status =
-		    ((vp->v_type == VDIR) ? NFS4ERR_ISDIR : NFS4ERR_INVAL);
-		goto out;
-	}
-
-	if (crgetuid(cs->cr) != va.va_uid &&
-	    (error = VOP_ACCESS(vp, VREAD, 0, cs->cr, &ct)) &&
-	    (error = VOP_ACCESS(vp, VEXEC, 0, cs->cr, &ct))) {
-		*cs->statusp = resp->status = puterrno4(error);
-		goto out;
-	}
-
-	if (MANDLOCK(vp, va.va_mode)) { /* XXX - V4 supports mand locking */
-		*cs->statusp = resp->status = NFS4ERR_ACCESS;
-		goto out;
-	}
-
-	offset = args->offset;
-	if (offset >= va.va_size) {
+	if (nnioflags & NNODE_IO_FLAG_PAST_EOF) {
 		*cs->statusp = resp->status = NFS4_OK;
 		resp->eof = TRUE;
 		resp->data_len = 0;
@@ -2908,27 +2636,33 @@ mds_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	if (args->count > rfs4_tsize(req))
 		args->count = rfs4_tsize(req);
 
-	/*
-	 * mp will contain the data to be sent out in the read reply.
-	 * It will be freed after the reply has been sent.
-	 * Let's roundup the data to a BYTES_PER_XDR_UNIT multiple,
-	 * so that the call to xdrmblk_putmblk() never fails.
-	 * If the first alloc of the requested size fails, then
-	 * decrease the size to something more reasonable and wait
-	 * for the allocation to occur.
-	 */
-	mp = allocb(RNDUP(args->count), BPRI_MED);
-	if (mp == NULL) {
-		if (args->count > MAXBSIZE)
-			args->count = MAXBSIZE;
-		mp = allocb_wait(RNDUP(args->count), BPRI_MED,
-		    STR_NOSIG, &alloc_err);
-	}
-	ASSERT(mp != NULL);
-	ASSERT(alloc_err == 0);
+	if (args->wlist) {
+		mp = NULL;
+		(void) rdma_get_wchunk(req, &iov, args->wlist);
+	} else {
+		/*
+		 * mp will contain the data to be sent out in the read reply.
+		 * It will be freed after the reply has been sent.
+		 * Let's roundup the data to a BYTES_PER_XDR_UNIT multiple,
+		 * so that the call to xdrmblk_putmblk() never fails.
+		 * If the first alloc of the requested size fails, then
+		 * decrease the size to something more reasonable and wait
+		 * for the allocation to occur.
+		 */
+		mp = allocb(RNDUP(args->count), BPRI_MED);
+		if (mp == NULL) {
+			if (args->count > MAXBSIZE)
+				args->count = MAXBSIZE;
+			mp = allocb_wait(RNDUP(args->count), BPRI_MED,
+			    STR_NOSIG, &alloc_err);
+		}
+		ASSERT(mp != NULL);
+		ASSERT(alloc_err == 0);
 
-	iov.iov_base = (caddr_t)mp->b_datap->db_base;
-	iov.iov_len = args->count;
+		iov.iov_base = (caddr_t)mp->b_datap->db_base;
+		iov.iov_len = args->count;
+	}
+
 	uio.uio_iov = &iov;
 	uio.uio_iovcnt = 1;
 	uio.uio_segflg = UIO_SYSSPACE;
@@ -2936,14 +2670,11 @@ mds_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	uio.uio_loffset = args->offset;
 	uio.uio_resid = args->count;
 
-	error = do_io(FREAD, vp, &uio, 0, cs->cr, &ct);
-
-	va.va_mask = AT_SIZE;
-	verror = VOP_GETATTR(vp, &va, 0, cs->cr, &ct);
-
+	error = nnop_read(nn, &nnioflags, cs->cr, &ct, &uio, 0);
 	if (error) {
-		freeb(mp);
-		*cs->statusp = resp->status = puterrno4(error);
+		if (mp != NULL)
+			freeb(mp);
+		*cs->statusp = resp->status = nnode_stat4(error, 1);
 		goto out;
 	}
 
@@ -2954,14 +2685,10 @@ mds_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	resp->data_val = (char *)mp->b_datap->db_base;
 	resp->mblk = mp;
 
-	if (!verror && offset + resp->data_len == va.va_size)
-		resp->eof = TRUE;
-	else
-		resp->eof = FALSE;
+	resp->eof = (nnioflags & NNODE_IO_FLAG_EOF) ? TRUE : FALSE;
 
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
+	nnop_io_release(nn, nnioflags, &ct);
 
 final:
 	DTRACE_NFSV4_2(op__read__done, struct compound_state *, cs,
@@ -2970,7 +2697,7 @@ final:
 
 /*ARGSUSED*/
 static void
-mds_op_read_free(nfs_resop4 *resop, compound_node_t *cn)
+mds_op_read_free(nfs_resop4 *resop, compound_state_t *cs)
 {
 	/* Common function for NFSv4.0 and NFSv4.1 */
 	rfs4_op_read_free(resop);
@@ -2979,13 +2706,12 @@ mds_op_read_free(nfs_resop4 *resop, compound_node_t *cn)
 /* ARGSUSED */
 static void
 mds_op_putpubfh(nfs_argop4 *args, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	PUTPUBFH4res *resp = &resop->nfs_resop4_u.opputpubfh;
 	int error;
 	vnode_t *vp;
 	struct exportinfo *exi, *sav_exi;
-	struct compound_state *cs = cn->cn_state;
 	nfs41_fh_fmt_t *fhp;
 	fid_t exp_fid;
 
@@ -3086,20 +2812,22 @@ final:
 /* ARGSUSED */
 static void
 mds_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	PUTFH4args *args = &argop->nfs_argop4_u.opputfh;
 	PUTFH4res *resp = &resop->nfs_resop4_u.opputfh;
-	nfs41_fh_fmt_t *fhp;
+	nfs41_fh_fmt_t *fhp = NULL;
 	fid_t  exp_fid;
-	struct compound_state *cs = cn->cn_state;
+	int error;
 
 	DTRACE_NFSV4_2(op__putfh__start, struct compound_state *, cs,
 	    PUTFH4args *, args);
 
 	/*
-	 * release the old vnode pointer and cred.
+	 * release the old nnode, vnode and cred.
 	 */
+	if (cs->nn)
+		nnode_rele(&cs->nn);
 	if (cs->vp) {
 		VN_RELE(cs->vp);
 		cs->vp = NULL;
@@ -3112,43 +2840,42 @@ mds_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 
 	/*
-	 * Sanity check the otw filehandle
+	 * Check exportinfo only if it's a nfs41_fh_fmt_t filehandle.
+	 * If the filehandle is otherwise incorrect,
+	 * nnode_from_fh_v41() will return an error.
 	 */
-	if (args->object.nfs_fh4_len != sizeof (*fhp)) {
-		*cs->statusp = resp->status = NFS4ERR_BADHANDLE;
-		DTRACE_PROBE(nfss41__e__fhlen);
-		goto final;
-	}
-
-	fhp = (nfs41_fh_fmt_t *)args->object.nfs_fh4_val;
-	exp_fid.fid_len = fhp->fh.v1.export_fid.len;
-
-	bcopy(fhp->fh.v1.export_fid.val, exp_fid.fid_data, exp_fid.fid_len);
-
-	cs->exi = checkexport4(&fhp->fh.v1.export_fsid, &exp_fid, NULL);
-
-	if (cs->exi == NULL) {
-		*cs->statusp = resp->status = NFS4ERR_STALE;
-		DTRACE_PROBE(nfss41__e__chkexp);
-		goto final;
+	if (args->object.nfs_fh4_len == sizeof (*fhp)) {
+		fhp = (nfs41_fh_fmt_t *)args->object.nfs_fh4_val;
+		exp_fid.fid_len = fhp->fh.v1.export_fid.len;
+		bcopy(fhp->fh.v1.export_fid.val, exp_fid.fid_data,
+		    exp_fid.fid_len);
+		cs->exi = checkexport4(&fhp->fh.v1.export_fsid, &exp_fid, NULL);
+		if (cs->exi == NULL) {
+			*cs->statusp = resp->status = NFS4ERR_STALE;
+			DTRACE_PROBE(nfss41__e__chkexp);
+			goto final;
+		}
 	}
 
 	cs->cr = crdup(cs->basecr);
 
 	ASSERT(cs->cr != NULL);
 
-	if (! (cs->vp = nfs41_fhtovp(&args->object, cs))) {
-		resp->status = *cs->statusp;
-		DTRACE_PROBE(nfss41__e__fhtovp);
+	error = nnode_from_fh_v41(&cs->nn, &args->object);
+	if (error != 0) {
+		resp->status = *cs->statusp = nnode_stat4(error, 1);
 		goto final;
 	}
+	cs->vp = nnop_io_getvp(cs->nn);
 
-	if ((resp->status = call_checkauth4(cs, req)) != NFS4_OK) {
-		VN_RELE(cs->vp);
-		*cs->statusp = resp->status;
-		cs->vp = NULL;
-		DTRACE_PROBE(nfss41__e__fail_auth);
-		goto final;
+	if (fhp != NULL) {
+		if ((resp->status = call_checkauth4(cs, req)) != NFS4_OK) {
+			VN_RELE(cs->vp);
+			*cs->statusp = resp->status;
+			cs->vp = NULL;
+			DTRACE_PROBE(nfss41__e__fail_auth);
+			goto final;
+		}
 	}
 
 	nfs_fh4_copy(&args->object, &cs->fh);
@@ -3163,14 +2890,13 @@ final:
 /* ARGSUSED */
 static void
 mds_op_putrootfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 
 {
 	PUTROOTFH4res *resp = &resop->nfs_resop4_u.opputrootfh;
 	int error;
 	fid_t fid;
 	struct exportinfo *exi, *sav_exi;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_1(op__putrootfh__start, struct compound_state *, cs);
 
@@ -3275,7 +3001,7 @@ valid_nfs4_entry(struct exportinfo *exi, struct dirent64 *dp,
 /* ARGSUSED */
 static void
 mds_op_readlink(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	READLINK4res *resp = &resop->nfs_resop4_u.opreadlink;
 	int error;
@@ -3285,7 +3011,6 @@ mds_op_readlink(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	struct uio uio;
 	char *data;
 	caller_context_t ct;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_1(op__readlink__start, struct compound_state *, cs);
 
@@ -3364,7 +3089,7 @@ final:
 
 /*ARGSUSED*/
 static void
-mds_op_readlink_free(nfs_resop4 *resop, compound_node_t *cn)
+mds_op_readlink_free(nfs_resop4 *resop, compound_state_t *cs)
 {
 	/* Common function used for NFSv4.0 and NFSv4.1 */
 	rfs4_op_readlink_free(resop);
@@ -3373,11 +3098,10 @@ mds_op_readlink_free(nfs_resop4 *resop, compound_node_t *cn)
 /* ARGSUSED */
 static void
 mds_op_reclaim_complete(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *req, compound_node_t *cn)
+    struct svc_req *req, compound_state_t *cs)
 {
 	RECLAIM_COMPLETE4args *args = &argop->nfs_argop4_u.opreclaim_complete;
 	RECLAIM_COMPLETE4res *resp = &resop->nfs_resop4_u.opreclaim_complete;
-	struct compound_state *cs = cn->cn_state;
 	rfs4_client_t *cp;
 
 	cp = cs->cp;
@@ -3441,7 +3165,7 @@ mds_lookup_and_findfile(vnode_t *dvp, char *nm, vnode_t **vpp,
 /* ARGSUSED */
 static void
 mds_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	REMOVE4args *args = &argop->nfs_argop4_u.opremove;
 	REMOVE4res *resp = &resop->nfs_resop4_u.opremove;
@@ -3454,7 +3178,6 @@ mds_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	int in_crit = 0;
 	bslabel_t *clabel;
 	caller_context_t ct;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__remove__start, struct compound_state *, cs,
 	    REMOVE4args *, args);
@@ -3706,7 +3429,7 @@ final:
 /* ARGSUSED */
 static void
 mds_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	RENAME4args *args = &argop->nfs_argop4_u.oprename;
 	RENAME4res *resp = &resop->nfs_resop4_u.oprename;
@@ -3723,7 +3446,6 @@ mds_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	int fp_rele_grant_hold, sfp_rele_grant_hold;
 	bslabel_t *clabel;
 	caller_context_t ct;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__rename__start, struct compound_state *, cs,
 	    RENAME4args *, args);
@@ -4055,10 +3777,9 @@ final:
 /* ARGSUSED */
 static void
 mds_op_restorefh(nfs_argop4 *args, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	RESTOREFH4res *resp = &resop->nfs_resop4_u.oprestorefh;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_1(op__restorefh__start, struct compound_state *, cs);
 
@@ -4085,10 +3806,9 @@ final:
 /* ARGSUSED */
 static void
 mds_op_savefh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	SAVEFH4res *resp = &resop->nfs_resop4_u.opsavefh;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_1(op__savefh__start, struct compound_state *, cs);
 
@@ -4121,12 +3841,11 @@ final:
 /* ARGSUSED */
 static void
 mds_op_setattr(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	SETATTR4args *args = &argop->nfs_argop4_u.opsetattr;
 	SETATTR4res *resp = &resop->nfs_resop4_u.opsetattr;
 	bslabel_t *clabel;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__setattr__start, struct compound_state *, cs,
 	    SETATTR4args *, args);
@@ -4181,31 +3900,29 @@ final:
 /* ARGSUSED */
 static void
 mds_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
 	WRITE4args  *args = &argop->nfs_argop4_u.opwrite;
 	WRITE4res *resp = &resop->nfs_resop4_u.opwrite;
+	nnode_io_flags_t nnioflags = NNODE_IO_FLAG_WRITE;
 	int error;
-	vnode_t *vp;
-	struct vattr bva;
+	nnode_t *nn;
 	u_offset_t rlimit;
 	struct uio uio;
 	struct iovec iov[NFS_MAX_IOVECS];
-	struct iovec *iovp;
+	struct iovec *iovp = iov;
 	int iovcnt;
 	int ioflag;
 	cred_t *savecred, *cr;
 	bool_t *deleg = &cs->deleg;
 	nfsstat4 stat;
-	int in_crit = 0;
 	caller_context_t ct;
 
 	DTRACE_NFSV4_2(op__write__start, struct compound_state *, cs,
 	    WRITE4args *, args);
 
-	vp = cs->vp;
-	if (vp == NULL) {
+	nn = cs->nn;
+	if (nn == NULL) {
 		*cs->statusp = resp->status = NFS4ERR_NOFILEHANDLE;
 		goto final;
 	}
@@ -4215,65 +3932,21 @@ mds_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	}
 
 	cr = cs->cr;
-
-	ct.cc_sysid = 0;
-	ct.cc_pid = 0;
-	ct.cc_caller_id = cs->instp->caller_id;
-	ct.cc_flags = CC_DONTBLOCK;
-
-	/*
-	 * We have to enter the critical region before calling VOP_RWLOCK
-	 * to avoid a deadlock with ufs.
-	 */
-	if (nbl_need_check(vp)) {
-		nbl_start_crit(vp, RW_READER);
-		in_crit = 1;
-		if (nbl_conflict(vp, NBL_WRITE,
-		    args->offset, args->data_len, 0, &ct)) {
-			*cs->statusp = resp->status = NFS4ERR_LOCKED;
-			goto out;
-		}
+	if ((cs->vp != NULL) && (rdonly4(cs->exi, cs->vp, req))) {
+		*cs->statusp = resp->status = NFS4ERR_ROFS;
+		goto final;
 	}
 
-	if ((stat = check_stateid(FWRITE, cs, vp, &args->stateid, FALSE,
+	if ((stat = nnop_check_stateid(nn, cs, FWRITE, &args->stateid, FALSE,
 	    deleg, TRUE, &ct)) != NFS4_OK) {
 		*cs->statusp = resp->status = stat;
 		goto out;
 	}
 
-	bva.va_mask = AT_MODE | AT_UID;
-	error = VOP_GETATTR(vp, &bva, 0, cr, &ct);
-
-	/*
-	 * If we can't get the attributes, then we can't do the
-	 * right access checking.  So, we'll fail the request.
-	 */
-	if (error) {
-		*cs->statusp = resp->status = puterrno4(error);
-		goto out;
-	}
-
-	if (rdonly4(cs->exi, cs->vp, req)) {
-		*cs->statusp = resp->status = NFS4ERR_ROFS;
-		goto out;
-	}
-
-	if (vp->v_type != VREG) {
-		*cs->statusp = resp->status =
-		    ((vp->v_type == VDIR) ? NFS4ERR_ISDIR : NFS4ERR_INVAL);
-		goto out;
-	}
-
-	if (crgetuid(cr) != bva.va_uid &&
-	    (error = VOP_ACCESS(vp, VWRITE, 0, cr, &ct))) {
-		*cs->statusp = resp->status = puterrno4(error);
-		goto out;
-	}
-
-	if (MANDLOCK(vp, bva.va_mode)) {
-		*cs->statusp = resp->status = NFS4ERR_ACCESS;
-		goto out;
-	}
+	error = nnop_io_prep(nn, &nnioflags, cr, &ct, args->offset,
+	    args->data_len, NULL);
+	if (error != 0)
+		goto err;
 
 	if (args->data_len == 0) {
 		*cs->statusp = resp->status = NFS4_OK;
@@ -4351,14 +4024,15 @@ mds_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 */
 	savecred = curthread->t_cred;
 	curthread->t_cred = cr;
-	error = do_io(FWRITE, vp, &uio, ioflag, cr, &ct);
+	error = nnop_write(nn, &nnioflags, &uio, ioflag, cr, &ct, NULL);
 	curthread->t_cred = savecred;
 
 	if (iovp != iov)
 		kmem_free(iovp, sizeof (*iovp) * iovcnt);
 
+err:
 	if (error) {
-		*cs->statusp = resp->status = puterrno4(error);
+		*cs->statusp = resp->status = nnode_stat4(error, 1);
 		goto out;
 	}
 
@@ -4373,8 +4047,7 @@ mds_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	resp->writeverf = cs->instp->Write4verf;
 
 out:
-	if (in_crit)
-		nbl_end_crit(vp);
+	nnop_io_release(nn, nnioflags, &ct);
 
 final:
 	DTRACE_NFSV4_2(op__write__done, struct compound_state *, cs,
@@ -4382,123 +4055,12 @@ final:
 }
 
 static void
-rfs41_dispatch_persona(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *req, compound_node_t *cn)
-{
-	uint_t op = (uint_t)argop->argop;
-	struct compound_state *cs = cn->cn_state;
-	rfs41_persona_funcs_t *pfp = cs->persona_funcs;
-
-
-	ASSERT(pfp);
-
-	switch (op) {
-
-	case OP_COMMIT:
-		(*pfp->ds_op_commit->dis_op)(argop, resop, req, cn);
-		break;
-
-	case OP_PUTFH: {
-		PUTFH4args *args = &argop->nfs_argop4_u.opputfh;
-		PUTFH4res *resp = &resop->nfs_resop4_u.opputfh;
-		nfs41_fh_type_t *fh_type;
-		int err;
-
-		/*
-		 * based on the filehandle type, see if we need to
-		 * switch persona
-		 */
-		fh_type = (nfs41_fh_type_t *)args->object.nfs_fh4_val;
-
-		if (*fh_type != cs->persona) {
-			if (*fh_type == 0 || *fh_type >= FH41_TYPE_MAX) {
-				*cs->statusp = resp->status = NFS4ERR_BADHANDLE;
-				DTRACE_PROBE1(nfss41__e__bad_fh_type,
-				    nfs41_fh_type_t, *fh_type);
-				return;
-			}
-			err = rfs41_persona_set(*fh_type, cs);
-			if (err) {
-				*cs->statusp = resp->status = err;
-				DTRACE_PROBE(nfss41__e__bad_persona);
-				return;
-			}
-			pfp = cs->persona_funcs;
-		}
-
-		(*pfp->ds_op_putfh->dis_op)(argop, resop, req, cn);
-		break;
-	}
-
-	case OP_READ:
-		(*pfp->ds_op_read->dis_op)(argop, resop, req, cn);
-		break;
-
-	case OP_WRITE:
-		(*pfp->ds_op_write->dis_op)(argop, resop, req, cn);
-		break;
-
-	case OP_SECINFO_NO_NAME:
-		(*pfp->ds_op_secinfo_noname->dis_op)(argop, resop, req, cn);
-		break;
-
-	default:
-		/*
-		 * Force an assert, something is rotten here.
-		 */
-		VERIFY(op != op);
-		break;
-	}
-}
-
-static void
-rfs41_dispatch_persona_free(nfs_resop4 *resop, compound_node_t *cn)
-{
-	uint_t op = (uint_t)resop->resop;
-	struct compound_state *cs = cn->cn_state;
-	rfs41_persona_funcs_t *pfp = cs->persona_funcs;
-
-	ASSERT(pfp);
-
-	switch (op) {
-
-	case OP_COMMIT:
-		(*pfp->ds_op_commit->dis_resfree)(resop, cn);
-		break;
-
-	case OP_PUTFH:
-		(*pfp->ds_op_putfh->dis_resfree)(resop, cn);
-		break;
-
-	case OP_READ:
-		(*pfp->ds_op_read->dis_resfree)(resop, cn);
-		break;
-
-	case OP_WRITE:
-		(*pfp->ds_op_write->dis_resfree)(resop, cn);
-		break;
-
-	case OP_SECINFO_NO_NAME:
-		(*pfp->ds_op_secinfo_noname->dis_resfree)(resop, cn);
-		break;
-
-	default:
-		/*
-		 * Force an assert, something is rotten here.
-		 */
-		VERIFY(op != op);
-		break;
-	}
-}
-
-static void
-rfs41_op_dispatch(compound_node_t *cn,
+rfs41_op_dispatch(compound_state_t *cs,
     COMPOUND4args *args, COMPOUND4res *resp, struct svc_req *req)
 {
 	nfs_argop4		*argop;
 	nfs_resop4		*resop;
 	uint_t			 op;
-	struct compound_state	*cs = cn->cn_state;
 
 	argop = &args->array[cs->op_ndx];
 	resop = &resp->array[cs->op_ndx];
@@ -4517,7 +4079,7 @@ rfs41_op_dispatch(compound_node_t *cn,
 		 */
 		rfsproccnt_v4_ptr[OP_ILLEGAL_IDX].value.ui64++;
 
-		mds_op_illegal(argop, resop, req, cn);
+		mds_op_illegal(argop, resop, req, cs);
 		DTRACE_PROBE(nfss41__e__operation_tilt);
 		goto bail;
 	}
@@ -4527,12 +4089,12 @@ rfs41_op_dispatch(compound_node_t *cn,
 	 * the compound processing right now!
 	 */
 	if (mds_disptab[op].op_flag == DISP_OP_BAD) {
-		mds_op_illegal(argop, resop, req, cn);
+		mds_op_illegal(argop, resop, req, cs);
 		DTRACE_PROBE1(nfss41__e__disp_op_inval, int, op);
 		goto bail;
 	}
 
-	(*mds_disptab[op].dis_op)(argop, resop, req, cn);
+	(*mds_disptab[op].dis_op)(argop, resop, req, cs);
 
 bail:
 	if (*cs->statusp != NFS4_OK)
@@ -4571,11 +4133,10 @@ rfs41_err_resp(COMPOUND4args *args, COMPOUND4res *resp, nfsstat4 err)
 
 /* ARGSUSED */
 void
-mds_compound(compound_node_t *cn,
+mds_compound(compound_state_t *cs,
     COMPOUND4args *args, COMPOUND4res *resp, struct exportinfo *exi,
     struct svc_req *req, int *rv)
 {
-	struct compound_state *cs = cn->cn_state;
 	cred_t *cr;
 	size_t	reslen;
 
@@ -4683,7 +4244,7 @@ mds_compound(compound_node_t *cn,
 	 */
 	for (cs->op_ndx = 0;
 	    cs->op_ndx < cs->op_len && cs->cont == TRUE; cs->op_ndx++)
-		rfs41_op_dispatch(cn, args, resp, req);
+		rfs41_op_dispatch(cs, args, resp, req);
 
 out:
 	rw_exit(&exported_lock);
@@ -4709,7 +4270,7 @@ out:
  * XXX calls occur, but at least prevent the panic for now.
  */
 void
-rfs41_compound_free(COMPOUND4res *resp, compound_node_t *cn)
+rfs41_compound_free(COMPOUND4res *resp, compound_state_t *cs)
 {
 	uint_t i;
 
@@ -4724,7 +4285,7 @@ rfs41_compound_free(COMPOUND4res *resp, compound_node_t *cn)
 		resop = &resp->array[i];
 		op = (uint_t)resop->resop;
 		if (op < OP_ILLEGAL_IDX) {
-			(*mds_disptab[op].dis_resfree)(resop, cn);
+			(*mds_disptab[op].dis_resfree)(resop, cs);
 		}
 	}
 
@@ -5818,7 +5379,7 @@ mds_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 
 static void
 mds_op_open(nfs_argop4 *argop, nfs_resop4 *resop,
-	    struct svc_req *req, compound_node_t *cn)
+	    struct svc_req *req, compound_state_t *cs)
 {
 	OPEN4args		*args = &argop->nfs_argop4_u.opopen;
 	OPEN4res		*resp = &resop->nfs_resop4_u.opopen;
@@ -5829,7 +5390,6 @@ mds_op_open(nfs_argop4 *argop, nfs_resop4 *resop,
 	bool_t			create;
 	int			can_reclaim;
 	int			share_access;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__open__start, struct compound_state *, cs,
 	    OPEN4args *, args);
@@ -5961,7 +5521,7 @@ final:
 
 /*ARGSUSED*/
 static void
-mds_free_reply(nfs_resop4 *resop, compound_node_t *cn)
+mds_free_reply(nfs_resop4 *resop, compound_state_t *cs)
 {
 	/* Common function for NFSv4.0 and NFSv4.1 */
 	rfs4_free_reply(resop);
@@ -5970,7 +5530,7 @@ mds_free_reply(nfs_resop4 *resop, compound_node_t *cn)
 /*ARGSUSED*/
 void
 mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
-		    struct svc_req *req, compound_node_t *cn)
+		    struct svc_req *req, compound_state_t *cs)
 {
 	OPEN_DOWNGRADE4args *args = &argop->nfs_argop4_u.opopen_downgrade;
 	OPEN_DOWNGRADE4res *resp = &resop->nfs_resop4_u.opopen_downgrade;
@@ -5981,7 +5541,6 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	rfs4_file_t *fp;
 	int fflags = 0;
 	int rc;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__open__downgrade__start, struct compound_state *, cs,
 	    OPEN_DOWNGRADE4args *, args);
@@ -6188,7 +5747,7 @@ final:
 /*ARGSUSED*/
 void
 mds_op_close(nfs_argop4 *argop, nfs_resop4 *resop,
-	    struct svc_req *req, compound_node_t *cn)
+	    struct svc_req *req, compound_state_t *cs)
 {
 	/* XXX Currently not using req arg */
 	CLOSE4args *args = &argop->nfs_argop4_u.opclose;
@@ -6196,7 +5755,6 @@ mds_op_close(nfs_argop4 *argop, nfs_resop4 *resop,
 	rfs4_state_t *sp;
 	nfsstat4 status;
 	int rc;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__close__start, struct compound_state *, cs,
 	    CLOSE4args *, args);
@@ -6335,7 +5893,7 @@ finish:
 /*ARGSUSED*/
 void
 mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
-	    struct svc_req *req, compound_node_t *cn)
+	    struct svc_req *req, compound_state_t *cs)
 {
 	/* XXX Currently not using req arg */
 	LOCK4args *args = &argop->nfs_argop4_u.oplock;
@@ -6350,7 +5908,6 @@ mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 	bool_t create = TRUE;
 	bool_t lcreate = TRUE;
 	int rc;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__lock__start, struct compound_state *, cs,
 	    LOCK4args *, args);
@@ -6621,7 +6178,7 @@ final:
 /* free function for LOCK/LOCKT */
 /*ARGSUSED*/
 static void
-mds_lock_denied_free(nfs_resop4 *resop, compound_node_t *cn)
+mds_lock_denied_free(nfs_resop4 *resop, compound_state_t *cs)
 {
 	/* Common function for NFSv4.0 and NFSv4.1 */
 	lock_denied_free(resop);
@@ -6630,7 +6187,7 @@ mds_lock_denied_free(nfs_resop4 *resop, compound_node_t *cn)
 /*ARGSUSED*/
 void
 mds_op_locku(nfs_argop4 *argop, nfs_resop4 *resop,
-	    struct svc_req *req, compound_node_t *cn)
+	    struct svc_req *req, compound_state_t *cs)
 {
 	/* XXX Currently not using req arg */
 	LOCKU4args *args = &argop->nfs_argop4_u.oplocku;
@@ -6638,7 +6195,6 @@ mds_op_locku(nfs_argop4 *argop, nfs_resop4 *resop,
 	nfsstat4 status;
 	stateid4 *stateid = &args->lock_stateid;
 	rfs4_lo_state_t *lsp;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__locku__start, struct compound_state *, cs,
 	    LOCKU4args *, args);
@@ -6740,7 +6296,7 @@ final:
 /*ARGSUSED*/
 void
 mds_op_lockt(nfs_argop4 *argop, nfs_resop4 *resop,
-	    struct svc_req *req, compound_node_t *cn)
+	    struct svc_req *req, compound_state_t *cs)
 {
 	LOCKT4args *args = &argop->nfs_argop4_u.oplockt;
 	LOCKT4res *resp = &resop->nfs_resop4_u.oplockt;
@@ -6754,7 +6310,6 @@ mds_op_lockt(nfs_argop4 *argop, nfs_resop4 *resop,
 	sysid_t sysid;
 	pid_t pid;
 	caller_context_t ct;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__lockt__start, struct compound_state *, cs,
 	    LOCKT4args *, args);
@@ -7127,7 +6682,7 @@ nfs_clid4_cmp(nfs_client_id4 *s1, nfs_client_id4 *s2)
 /*ARGSUSED*/
 void
 mds_op_exchange_id(nfs_argop4 *argop, nfs_resop4 *resop,
-			struct svc_req *req, compound_node_t *cn)
+    struct svc_req *req, compound_state_t *cs)
 {
 	EXCHANGE_ID4args	*args = &argop->nfs_argop4_u.opexchange_id;
 	EXCHANGE_ID4res		*resp = &resop->nfs_resop4_u.opexchange_id;
@@ -7138,14 +6693,13 @@ mds_op_exchange_id(nfs_argop4 *argop, nfs_resop4 *resop,
 	client_owner4		*cop;
 	nfs_client_id4		*cip;
 	verifier4		 old_verifier_arg;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__exchange__id__start,
 	    struct compound_state *, cs,
 	    EXCHANGE_ID4args *, args);
 
 	/*
-	 * EXCHANGE_ID's maybe preceded by SEQUENCE
+	 * EXCHANGE_ID's may be preceded by SEQUENCE
 	 * Check that eia_flags only has "valid" spec bits
 	 * and that no 'eir_flag' ONLY bits are specified.
 	 */
@@ -7346,10 +6900,6 @@ out:
 			rok->eir_flags |= EXCHGID4_FLAG_USE_PNFS_DS;
 	}
 
-	/* For the moment just set this if the scope is DS Only */
-	if (cs->persona == FH41_TYPE_DMU_DS)
-		cp->clid_scope = 1;
-
 	/* force no state protection for now */
 	rok->eir_state_protect.spr_how = SP4_NONE;
 
@@ -7382,7 +6932,7 @@ final:
 /*ARGSUSED*/
 void
 mds_op_create_session(nfs_argop4 *argop, nfs_resop4 *resop,
-			struct svc_req *req, compound_node_t *cn)
+			struct svc_req *req, compound_state_t *cs)
 {
 	CREATE_SESSION4args	*args = &argop->nfs_argop4_u.opcreate_session;
 	CREATE_SESSION4res	*resp = &resop->nfs_resop4_u.opcreate_session;
@@ -7393,7 +6943,6 @@ mds_op_create_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	session41_create_t	 sca;
 	sequenceid4		 stseq;
 	sequenceid4		 agseq;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__create__session__start,
 	    struct compound_state *, cs,
@@ -7554,13 +7103,12 @@ final:
 /*ARGSUSED*/
 void
 mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
-			struct svc_req *req, compound_node_t *cn)
+			struct svc_req *req, compound_state_t *cs)
 {
 	DESTROY_SESSION4args	*args = &argop->nfs_argop4_u.opdestroy_session;
 	DESTROY_SESSION4res	*resp = &resop->nfs_resop4_u.opdestroy_session;
 	mds_session_t		*destroy_sp;
 	rfs4_client_t		*cp;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__destroy__session__start,
 	    struct compound_state *, cs,
@@ -7660,7 +7208,7 @@ final:
 /*ARGSUSED*/
 void
 mds_op_backchannel_ctl(nfs_argop4 *argop, nfs_resop4 *resop,
-			struct svc_req *req, compound_node_t *cn)
+			struct svc_req *req, compound_state_t *cs)
 {
 }
 
@@ -7784,9 +7332,8 @@ out:
 /*ARGSUSED*/
 void
 mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
-		struct svc_req *req, compound_node_t *cn)
+		struct svc_req *req, compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
 	SEQUENCE4args		*args = &argop->nfs_argop4_u.opsequence;
 	SEQUENCE4res		*resp = &resop->nfs_resop4_u.opsequence;
 	SEQUENCE4resok		*rok  = &resp->SEQUENCE4res_u.sr_resok4;
@@ -7983,7 +7530,7 @@ rfs41_bc_setup(mds_session_t *sp)
 /*ARGSUSED*/
 void
 mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
-			struct svc_req *req, compound_node_t *cn)
+			struct svc_req *req, compound_state_t *cs)
 {
 	BIND_CONN_TO_SESSION4args	*args = &argop->a_bc2s;
 	BIND_CONN_TO_SESSION4res	*resp = &resop->r_bc2s;
@@ -7992,7 +7539,6 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	SVCMASTERXPRT			*mxprt;
 	rpcprog_t			 prog;
 	SVCCB_ARGS			cbargs;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__bind__conn__to__session__start,
 	    struct compound_state *, cs,
@@ -8098,13 +7644,12 @@ static void
 mds_op_get_devlist(nfs_argop4 *argop,
 	nfs_resop4 *resop,
 	struct svc_req *reqp,
-	compound_node_t *cn)
+	compound_state_t *cs)
 {
 	GETDEVICELIST4res *resp = &resop->nfs_resop4_u.opgetdevicelist;
 	deviceid4 *devlist = NULL;
 	nfsstat4 nfsstat = NFS4_OK;
 	int len = 0;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_1(op__getdevicelist__start,
 	    struct compound_state *, cs);
@@ -8144,14 +7689,13 @@ mds_op_get_devlist_free(nfs_resop4 *resop)
 /*ARGSUSED*/
 static void
 mds_op_get_devinfo(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *reqp,
-    compound_node_t *cn)
+    compound_state_t *cs)
 {
 	ba_devid_t devid;
 	mds_mpd_t *mp;
 
 	GETDEVICEINFO4args *argp = &argop->nfs_argop4_u.opgetdeviceinfo;
 	GETDEVICEINFO4res *resp = &resop->nfs_resop4_u.opgetdeviceinfo;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_2(op__getdeviceinfo__start,
 	    struct compound_state *, cs,
@@ -8481,13 +8025,12 @@ mds_get_lo_grant_by_cp(struct compound_state *cs)
 /*ARGSUSED*/
 static void
 mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *reqp, compound_node_t *cn)
+    struct svc_req *reqp, compound_state_t *cs)
 {
 	LAYOUTGET4args *argp = &argop->nfs_argop4_u.oplayoutget;
 	LAYOUTGET4res *resp = &resop->nfs_resop4_u.oplayoutget;
 	nfsstat4 nfsstat = NFS4_OK;
 	stateid_t *arg_stateid;
-	struct compound_state *cs = cn->cn_state;
 	mds_layout_grant_t *lgp = NULL;
 
 	DTRACE_NFSV4_2(op__layoutget__start,
@@ -8588,9 +8131,8 @@ mds_layoutget_free(nfs_resop4 *resop)
 /*ARGSUSED*/
 static void
 mds_op_layout_commit(nfs_argop4 *argop, nfs_resop4 *resop,
-    struct svc_req *reqp, compound_node_t *cn)
+    struct svc_req *reqp, compound_state_t *cs)
 {
-	struct compound_state *cs = cn->cn_state;
 	LAYOUTCOMMIT4args *argp = &argop->nfs_argop4_u.oplayoutcommit;
 	LAYOUTCOMMIT4res *resp = &resop->nfs_resop4_u.oplayoutcommit;
 	nfsstat4 nfsstat = NFS4_OK;
@@ -8680,11 +8222,10 @@ final:
 /*ARGSUSED*/
 static void
 mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
-		struct svc_req *reqp, compound_node_t *cn)
+    struct svc_req *reqp, compound_state_t *cs)
 {
 	LAYOUTRETURN4res *resp = &resop->nfs_resop4_u.oplayoutreturn;
 	nfsstat4 nfsstat = NFS4_OK;
-	struct compound_state *cs = cn->cn_state;
 
 	DTRACE_NFSV4_1(op__layoutreturn__start,
 	    struct compound_state *, cs);

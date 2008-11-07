@@ -28,7 +28,6 @@
  *		All rights reserved.
  */
 
-
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/time.h>
@@ -1710,6 +1709,10 @@ unexport(fsid_t *fsid, fid_t *fid, vnode_t *vp)
 	 * this export.
 	 */
 	sstor_clean_state_exi(exi);
+	/*
+	 * Free all nnodes associated with this export.
+	 */
+	nnode_free_export(exi);
 
 	/*
 	 * Notify the lock manager that the filesystem is being

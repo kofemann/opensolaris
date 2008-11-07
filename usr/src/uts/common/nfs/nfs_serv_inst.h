@@ -79,7 +79,6 @@ typedef struct nfs_server_instance {
 	callb_id_t 	cpr_id;
 
 	char		inst_name[NFS_INST_NAMESZ];
-	int		default_persona;
 
 	/* inst_flags is protected via state_lock */
 	uint32_t	inst_flags;

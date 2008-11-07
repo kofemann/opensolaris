@@ -29,22 +29,32 @@
 #include <nfs/nnode.h>
 
 #include <sys/vnode.h>
+#include <sys/vfs.h>
 #include <sys/avl.h>
 #include <sys/list.h>
+#include <nfs/nfs4.h>
+#include <nfs/export.h>
 
 #ifdef	__cplusplus
 extern "C" {
 #endif
 
+/*
+ * The nnode.
+ */
+
 struct nnode {
-	void *nn_fh_value;
-	uint32_t nn_fh_len;
+	void *nn_key;
+	int (*nn_key_compare)(const void *, const void *);
+	void (*nn_key_free)(void *);
+
 	pid_t nn_instance_id;
 
 	kmutex_t nn_lock;
 	uint32_t nn_flags;
-	uint32_t nn_refcount;
+	int nn_refcount;
 	kcondvar_t nn_refcount_cv;
+	hrtime_t nn_last_access;
 
 	avl_node_t nn_avl;
 
@@ -63,9 +73,35 @@ typedef struct {
 	krwlock_t nb_lock;
 } nnode_bucket_t;
 
-#define	NNODE_HASH_SIZE		251
-#define	NNODE_MIN_FH_LEN	8
-#define	NNODE_MAX_FH_LEN	256
+typedef enum {
+	NNODE_SWEEP_SYNC = 0,
+	NNODE_SWEEP_ASYNC
+} nnode_sweep_how_t;
+
+struct nnode_bucket_sweep_task;
+
+typedef void (*nnode_bucket_sweep_node_t)(struct nnode_bucket_sweep_task *,
+    nnode_t *);
+
+typedef struct nnode_bucket_sweep_task {
+	uint32_t nbst_flags;
+	nnode_bucket_sweep_node_t nbst_proc;
+
+	nnode_bucket_t *nbst_bucket;
+
+	pid_t nbst_inst_id;
+	hrtime_t nbst_maxage;
+	exportinfo_t *nbst_export;
+} nnode_bucket_sweep_task_t;
+#define	NNODE_BUCKET_SWEEP_TASK_SYNC	0x01
+#define	NNODE_BUCKET_SWEEP_TASK_FREEME	0x02
+
+#define	NNODE_HASH_SIZE		(251)
+#define	NNODE_NUM_WORKERS	(8)
+#define	NNODE_NUM_TASKALLOC	(8)
+#define	NNODE_TASKQ_FLAGS	TASKQ_DYNAMIC
+#define	NNODE_GC_INTERVAL	(30LL * NANOSEC)
+#define	NNODE_GC_TOO_OLD	(45LL * NANOSEC)
 
 #ifdef	__cplusplus
 }
