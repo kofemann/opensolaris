@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/kmem.h>
@@ -334,6 +332,7 @@ pf_dispatch(dev_info_t *pdip, pf_impl_t *impl, boolean_t full_scan)
 			break;
 		case PCIE_PCIECAP_DEV_TYPE_UP:
 		case PCIE_PCIECAP_DEV_TYPE_DOWN:
+		case PCIE_PCIECAP_DEV_TYPE_ROOT:
 		{
 			pf_data_t *pfd_p = PCIE_BUS2PFD(bus_p);
 			pf_pci_err_regs_t *err_p = PCI_ERR_REG(pfd_p);
@@ -354,7 +353,6 @@ pf_dispatch(dev_info_t *pdip, pf_impl_t *impl, boolean_t full_scan)
 			if (PCIE_IS_BDG(bus_p))
 				scan_flag |= pf_dispatch(dip, impl, B_TRUE);
 			break;
-		case PCIE_PCIECAP_DEV_TYPE_ROOT:
 		default:
 			ASSERT(B_FALSE);
 		}
@@ -1205,7 +1203,7 @@ pf_analyse_error(ddi_fm_error_t *derr, pf_impl_t *impl)
 			break;
 		case PCIE_PCIECAP_DEV_TYPE_RC_PSEUDO:
 			/* no adjust_for_aer for pseudo RC */
-			(void) pf_analyse_error_tbl(derr, impl, pfd_p,
+			sts_flags |= pf_analyse_error_tbl(derr, impl, pfd_p,
 			    pcie_rp_tbl, PCIE_ADV_REG(pfd_p)->pcie_ue_status);
 			break;
 		case PCIE_PCIECAP_DEV_TYPE_UP:
@@ -2183,8 +2181,7 @@ pf_hdl_compare(dev_info_t *dip, ddi_fm_error_t *derr, uint32_t flag,
 	int		status;
 
 	mutex_enter(&fcp->fc_lock);
-	for (fep = fcp->fc_active->fce_next; fep != NULL;
-	    fep = fep->fce_next) {
+	for (fep = fcp->fc_head; fep != NULL; fep = fep->fce_next) {
 		ddi_fmcompare_t compare_func;
 
 		/*

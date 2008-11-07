@@ -33,9 +33,9 @@ extern "C" {
 #include <hxge_rdc_hw.h>
 #include <hpi_rxdma.h>
 
-#define	RXDMA_CK_DIV_DEFAULT		7500 	/* 25 usec */
+#define	RXDMA_CK_DIV_DEFAULT		8 	/* 27 nsec */
 #define	RXDMA_RCR_PTHRES_DEFAULT	0x20
-#define	RXDMA_RCR_TO_DEFAULT		0x8
+#define	RXDMA_RCR_TO_DEFAULT		0x1
 #define	RXDMA_HDR_SIZE_DEFAULT		2
 #define	RXDMA_HDR_SIZE_FULL		6	/* entire header of 6B */
 
@@ -429,10 +429,6 @@ typedef struct _rx_rbr_ring_t {
 	 */
 	uint32_t		rbr_ref_cnt;
 	rbr_state_t		rbr_state;	/* POSTING, etc */
-
-	int			pages_to_post;
-	int			pages_to_post_threshold;
-	int			pages_to_skip;
 } rx_rbr_ring_t, *p_rx_rbr_ring_t;
 
 /* Receive Mailbox */

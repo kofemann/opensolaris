@@ -269,6 +269,9 @@ COMMON_SUBDIRS=		\
 	mt		\
 	mv		\
 	mvdir		\
+	ndmpadm		\
+	ndmpd		\
+	ndmpstat	\
 	netadm		\
 	netfiles	\
 	newform		\
@@ -465,9 +468,6 @@ $(CLOSED_BUILD)COMMON_SUBDIRS += \
 	$(CLOSED)/cmd/localedef	\
 	$(CLOSED)/cmd/more_xpg4	\
 	$(CLOSED)/cmd/mtst	\
-	$(CLOSED)/cmd/ndmpadm	\
-	$(CLOSED)/cmd/ndmpd	\
-	$(CLOSED)/cmd/ndmpstat	\
 	$(CLOSED)/cmd/od	\
 	$(CLOSED)/cmd/patch	\
 	$(CLOSED)/cmd/pax	\
@@ -633,6 +633,8 @@ MSGSUBDIRS=		\
 	mpathadm	\
 	msgfmt		\
 	mv		\
+	ndmpadm		\
+	ndmpstat	\
 	newgrp		\
 	newtask		\
 	nice		\
@@ -746,8 +748,6 @@ $(CLOSED_BUILD)MSGSUBDIRS += \
 	$(CLOSED)/cmd/llc2	\
 	$(CLOSED)/cmd/localedef	\
 	$(CLOSED)/cmd/more_xpg4	\
-	$(CLOSED)/cmd/ndmpadm   \
-	$(CLOSED)/cmd/ndmpstat  \
 	$(CLOSED)/cmd/od	\
 	$(CLOSED)/cmd/patch	\
 	$(CLOSED)/cmd/pax	\
@@ -916,16 +916,26 @@ _dc :=		TARGET = _dc
 SUBDIRS = $(COMMON_SUBDIRS) $($(MACH)_SUBDIRS)
 
 .PARALLEL:	$(BWOSDIRS) $(SUBDIRS) $(MSGSUBDIRS) $(BSMSUBDIRS) \
-		$(MANIFEST_SUBDIRS) $(DTEST_SUBDIRS)
+		$(DTEST_SUBDIRS)
 
 all install clean clobber lint: $(FIRST_SUBDIRS) .WAIT $(SUBDIRS) $(BSMSUBDIRS)
+
+# Manifests cannot be checked in parallel, because we are using the global
+# repository that is in $(SRC)/cmd/svc/seed/global.db.  This is a
+# repository that is built from the manifests in this workspace, whereas
+# the build machine's repository may be out of sync with these manifests.
+# Because we are using a private repository, svccfg-native must start up a
+# private copy of configd-native.  We cannot have multiple copies of
+# configd-native trying to access global.db simultaneously.
+
+.NO_PARALLEL:	$(MANIFEST_TOPDIRS) $(MANIFEST_SUBDIRS)
 
 check: svccfg_check .WAIT $(MANIFEST_TOPDIRS) $(MANIFEST_SUBDIRS) \
 	$(DTEST_SUBDIRS)
 
 svccfg_check:
 	@$(ECHO) "building requirements for svccfg check ..."; \
-	(cd $(SRC)/cmd/svc/svccfg && pwd && $(MAKE) $(MFLAGS) native)
+	(cd $(SRC)/cmd/svc/seed && pwd && $(MAKE) $(MFLAGS) global.db)
 
 $(DTEST_SUBDIRS): FRC
 	@cd $@; pwd; $(MAKE) $(TARGET)

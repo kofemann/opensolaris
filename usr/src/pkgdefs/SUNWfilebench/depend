@@ -20,10 +20,8 @@
 #
 
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 # This package information file defines software dependencies associated
 # with the pkg.  You can define three types of pkg dependencies with this file:
@@ -49,3 +47,5 @@ P SUNWcsr	Core Solaris, (Root)
 P SUNWcsu	Core Solaris, (Usr)
 P SUNWcsl	Core Solaris Libraries
 P SUNWperl584core	Perl 5.8.4 (core)
+P SUNWlibmsr	
+P SUNWtecla	Tecla command-line editing library

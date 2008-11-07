@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/ksh -p
 #
 # CDDL HEADER START
 #
@@ -20,10 +20,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 # sn1 boot script.
 #
@@ -35,20 +33,12 @@ PATH=/sbin:/usr/bin:/usr/sbin; export PATH
 ZONEROOT=$1
 
 if [ `uname -p` = "i386" ]; then
-        ARCH64=amd64
+	ARCH64=amd64
 elif [ `uname -p` = "sparc" ]; then
-        ARCH64=sparcv9
+	ARCH64=sparcv9
 else
-        echo "Unsupported architecture: " `uname -p`
-        exit 2
-fi
-
-crle -u -c ${ZONEROOT}/root/var/ld/ld.config \
-	-e LD_PRELOAD=/usr/lib/sn1_brand.so.1
-
-if [ `isainfo -b` -eq 64 ]; then
-	crle -64 -u -c ${ZONEROOT}/root/var/ld/64/ld.config \
-       	    -e LD_PRELOAD=/usr/lib/$ARCH64/sn1_brand.so.1
+	echo "Unsupported architecture: " `uname -p` >&2
+	exit 2
 fi
 
 exit 0

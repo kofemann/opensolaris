@@ -2280,7 +2280,7 @@ nfs4_resend_open_otw(vnode_t **vpp, nfs4_lost_rqst_t *resend_rqstp,
 		sfh = sfh4_get(&gf_res->object, VTOMI4(dvp));
 		*vpp = makenfs4node(sfh, garp, dvp->v_vfsp, t, cr, dvp,
 		    fn_get(VTOSV(dvp)->sv_name,
-		    open_args->open_claim4_u.cfile));
+		    open_args->open_claim4_u.cfile, sfh));
 		sfh4_rele(&sfh);
 		NFS4_DEBUG(nfs4_lost_rqst_debug, (CE_NOTE,
 		    "nfs4_resend_open_otw: made vp %p for file %s",

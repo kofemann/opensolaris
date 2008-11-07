@@ -169,6 +169,7 @@ SUBDIRS += \
 	libdevid	\
 	libdhcpsvc	\
 	libc_db		\
+	libndmp		\
 	libsec		\
 	libtnfprobe	\
 	libtnf		\
@@ -178,8 +179,7 @@ SUBDIRS += \
 	libdhcputil	\
 	libipsecutil
 $(CLOSED_BUILD)SUBDIRS += \
-	$(CLOSED)/lib/libike \
-	$(CLOSED)/lib/libndmp
+	$(CLOSED)/lib/libike
 SUBDIRS += \
 	nsswitch	\
 	print		\
@@ -396,6 +396,7 @@ HDRSUBDIRS=		\
 	libmail		\
 	libmd		\
 	libmtmalloc	\
+	libndmp		\
 	libnvpair	\
 	libnsctl	\
 	libnsl		\
@@ -468,7 +469,6 @@ HDRSUBDIRS=		\
 $(CLOSED_BUILD)HDRSUBDIRS += \
 	$(CLOSED)/lib/libc_i18n	\
 	$(CLOSED)/lib/libike	\
-	$(CLOSED)/lib/libndmp	\
 	$(CLOSED)/lib/smartcard
 
 sparc_HDRSUBDIRS=	\
