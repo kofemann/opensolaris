@@ -1453,6 +1453,21 @@ mds_clean_up_grants(rfs4_client_t *cp)
 	}
 }
 
+/*
+ * Conforms to Section 12.5.5.2.1.4 of draft-25
+ */
+void
+rfs41_lo_seqid(stateid_t *sp)
+{
+	if (sp == NULL)
+		return;
+
+	if ((sp->v41_bits.chgseq + 1) & (uint32_t)~0)
+		atomic_inc_32(&sp->v41_bits.chgseq);
+	else
+		(void) atomic_swap_32(&sp->v41_bits.chgseq, 1);
+}
+
 static void
 mds_do_lorecall(mds_lorec_t *lorec)
 {

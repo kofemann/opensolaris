@@ -319,6 +319,7 @@ static void	mds_op_nverify(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
 			compound_state_t *);
 
 extern mds_mpd_t *mds_find_mpd(nfs_server_instance_t *, uint32_t);
+extern void rfs41_lo_seqid(stateid_t *);
 
 nfsstat4
 create_vnode(vnode_t *, char *,  vattr_t *, createmode4, timespec32_t *,
@@ -8219,20 +8220,192 @@ final:
 	    LAYOUTCOMMIT4res *, resp);
 }
 
+int
+layout_match(stateid_t lo_stateid, stateid4 lrf_id, nfsstat4 *status)
+{
+	stateid_t *id = (stateid_t *)&lrf_id;
+
+	if (id->v41_bits.type != LAYOUTID) {
+		*status = NFS4ERR_BAD_STATEID;
+		return (0);
+	}
+
+	if (lo_stateid.v41_bits.boottime == id->v41_bits.boottime &&
+	    lo_stateid.v41_bits.state_ident == id->v41_bits.state_ident) {
+		*status = NFS4_OK;
+		return (1);
+	} else {
+		*status = NFS4ERR_BAD_STATEID;
+		return (0);
+	}
+}
+
+nfsstat4
+mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
+    LAYOUTRETURN4res *resp)
+{
+	rfs4_file_t *fp;
+	mds_layout_grant_t *lgp;
+	nfsstat4 status;
+	bool_t create = FALSE;
+
+	mutex_enter(&cs->vp->v_lock);
+	fp = (rfs4_file_t *)vsd_get(cs->vp, cs->instp->vkey);
+	mutex_exit(&cs->vp->v_lock);
+
+	lgp = rfs41_findlogrant(cs, fp, cs->cp, &create);
+	if (lgp == NULL) {
+		cmn_err(CE_WARN, "lo_return(): findlogrant returned NULL");
+		return (NFS4ERR_SERVERFAULT);
+	}
+
+	if (!layout_match(lgp->lo_stateid, lorf->lrf_stateid, &status))
+		return (status);
+
+#ifdef NOT_DONE
+	/* XXX - could (should?) be async operation */
+	mds_invalidate_ds_state(lgp->lo_stateid, cs->cp, LAYOUT);
+#endif
+
+	/*
+	 * Refer to Section 18.44.3 of draft-25 for the right
+	 * lrs_present mojo and corresponding stateid setting.
+	 */
+	rfs41_lo_seqid(&lgp->lo_stateid);
+	resp->LAYOUTRETURN4res_u.lorr_stateid.layoutreturn_stateid_u.lrs_stateid
+	    = lgp->lo_stateid.stateid;
+#ifdef RICKS_CHANGES
+	mutex_enter(&lgp->lo_lock);
+	if (lgp->lo_status == LO_RECALL_INPROG) {
+		lgp->lor_seqid = 0;  /* reset */
+		lgp->lo_status = LO_RECALLED;
+	} else {
+		lgp->lo_status = LO_RETURNED;
+	}
+	mutex_exit(&lgp->lo_lock);
+#endif
+
+	/* remove the layout grant from both lists */
+	remque(&lgp->clientgrantlist);
+	lgp->clientgrantlist.next = lgp->clientgrantlist.prev =
+	    &lgp->clientgrantlist;
+	remque(&lgp->lo_grant_list);
+	lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
+	    &lgp->lo_grant_list;
+	lgp->cp = NULL;
+	lgp->fp = NULL;
+	rfs4_dbe_invalidate(lgp->dbe);
+	rfs41_lo_grant_rele(lgp);
+
+	return (NFS4_OK);
+}
+
 /*ARGSUSED*/
 static void
 mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
     struct svc_req *reqp, compound_state_t *cs)
 {
+	LAYOUTRETURN4args *args = &argop->nfs_argop4_u.oplayoutreturn;
 	LAYOUTRETURN4res *resp = &resop->nfs_resop4_u.oplayoutreturn;
 	nfsstat4 nfsstat = NFS4_OK;
+	rfs4_client_t *cp = cs->cp;
+	layoutreturn_file4 *lorf;
+	bool_t lora_reclaim = args->lora_reclaim;
+	int ingrace;
 
 	DTRACE_NFSV4_1(op__layoutreturn__start,
 	    struct compound_state *, cs);
 
+	if (args->lora_layout_type != LAYOUT4_NFSV4_1_FILES) {
+		nfsstat = NFS4ERR_INVAL;
+		goto final;
+	}
+
+	/*
+	 * XXX what if it is a bulk recall for FSID, but this client is
+	 * doing a return of type FILE for a file on a different FSID?
+	 */
+	if (cp->bulk_recall &&
+	    cp->bulk_recall != args->lora_layoutreturn.lr_returntype) {
+		nfsstat = NFS4ERR_RECALLCONFLICT;
+		goto final;
+	}
+
+	switch (args->lora_layoutreturn.lr_returntype) {
+	case LAYOUTRETURN4_FILE:
+		ingrace = rfs4_clnt_in_grace(cp);
+		if (lora_reclaim && !ingrace) {
+			nfsstat = NFS4ERR_NO_GRACE;
+			goto final;
+		} else if (ingrace && lora_reclaim) {
+			nfsstat = NFS4ERR_GRACE;
+			goto final;
+		}
+		lorf = &args->lora_layoutreturn.layoutreturn4_u.lr_layout;
+		nfsstat = mds_return_layout_file(lorf, cs, resp);
+		break;
+	case LAYOUTRETURN4_FSID:
+		if (lora_reclaim) {
+			nfsstat = NFS4ERR_INVAL;
+			goto final;
+		}
+#ifdef NOT_DONE
+		mds_return_layout_fsid(cs);
+#endif
+		cp->bulk_recall = 0;
+		break;
+	case LAYOUTRETURN4_ALL:
+		if (lora_reclaim) {
+			nfsstat = NFS4ERR_INVAL;
+			goto final;
+		}
+#ifdef NOT_DONE
+		mds_return_layout_all(cp);
+#endif
+		cp->bulk_recall = 0;
+		break;
+	default:
+		nfsstat = NFS4ERR_INVAL;
+	}
+
+final:
 	*cs->statusp = resp->lorr_status = nfsstat;
 
 	DTRACE_NFSV4_2(op__layoutreturn__done,
 	    struct compound_state *, cs,
 	    LAYOUTRETURN4res *, resp);
 }
+
+#ifdef JUST_HERE_TO_REMIND_ME
+mds_return_layout_fsid(struct compound_state *cs)
+{
+	rfs4_client_t *cp = cs->cp;
+
+	/* we need the fsid for this recall */
+	fsid = get_fsid_from_fh(cs->fh);
+
+	/*
+	 * hg nits doesn't like any of this so i'm making it a comment block
+	 * loop through the DS's
+	 * 	mds_invalidate_ds_state(fsid, cp, LAYOUT_FSID)
+	 * }
+	 *
+	 * clean up state
+	 * 1) ever_grant
+	 * 2) layout_grants
+	 */
+}
+
+mds_return_layout_all(rfs4_client_t *cp)
+{
+	/*
+	 * loop throug the DS's
+	 * 	mds_invalidate_ds_state(NULL, cp, LAYOUT_ALL)
+	 * }
+	 *
+	 * clean up state
+	 * 1) ever_grant
+	 * 2) layout_grants
+	 */
+}
+#endif

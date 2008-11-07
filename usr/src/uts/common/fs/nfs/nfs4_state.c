@@ -1066,6 +1066,7 @@ rfs4_client_create(rfs4_entry_t u_entry, void *arg)
 	    &cp->clientgrantlist;
 	cp->clientgrantlist.lgp = NULL;
 
+	cp->bulk_recall = 0;
 
 	/* set up the callback control structure */
 	cp->cbinfo.cb_state = CB_UNINIT;

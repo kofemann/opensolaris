@@ -750,6 +750,7 @@ typedef struct rfs4_client {
 	rfs41_csr_t		contrived;
 	rfs41_sprot_t		state_prot;
 	struct rfs41_grant_list	clientgrantlist;
+	int			bulk_recall;
 	int			clid_scope;
 	bit_attr_t		seq4[BITS_PER_WORD];
 } rfs4_client_t;
