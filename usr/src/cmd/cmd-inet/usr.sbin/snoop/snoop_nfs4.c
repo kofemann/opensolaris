@@ -45,9 +45,15 @@
 #include <sys/stat.h>
 #include <sys/param.h>
 #include <rpcsvc/nfs_prot.h>
+
 /* use the same nfs4_prot.h as the xdr code */
 /* #include "rpcsvc/nfs4_prot.h" */
 #include "nfs4_prot.h"
+
+/*
+ * Things common to nfs4 and ctl.
+ */
+#include "nfs4_cmn.h"
 
 /*
  * XXX With NFS v2 and v3, we only need to xdr the pieces that we care
@@ -86,13 +92,10 @@ typedef struct {
 	char map[MAX_ATTRIBUTES];
 } unpkd_attrmap_t;
 
-
-
 static void sumarg_cb_getattr(char *buf, size_t buflen, void *obj);
 static void dtlarg_cb_getattr(void *obj);
 static void sumarg_cb_recall(char *buf, size_t buflen, void *obj);
 static void dtlarg_cb_recall(void *obj);
-
 
 static void sumarg_access(char *buf, size_t buflen, void *obj);
 static void dtlarg_access(void *obj);
@@ -208,7 +211,6 @@ static void sumres_write(char *buf, size_t buflen, void *obj);
 static void dtlres_write(void *obj);
 static void sum_nfsstat4(char *buf, size_t buflen, void *obj);
 static void dtl_nfsstat4(void *obj);
-static uint32_t adler16(void *, int);
 static void nfs4_xdr_skip(int nbytes);
 static char *sum_lock_type_name(enum nfs_lock_type4 type);
 
@@ -318,7 +320,6 @@ static void dtlarg_reclaim_complete(void *obj);
 static void sumres_reclaim_complete(char *buf, size_t buflen, void *obj);
 static void dtlres_reclaim_complete(void *obj);
 
-static char *detail_lotype_name(layouttype4);
 static void detail_threshold_hint_bitmap(uint32_t);
 
 int nfs4_pkt_start;
@@ -876,9 +877,6 @@ static void sum_access4(char *buf, size_t buflen, uint32_t bits);
 static void detail_access4(char *, uint32_t);
 static void sum_claim(char *buf, size_t buflen, open_claim4 *claim);
 static void detail_claim(open_claim4 *claim);
-static char *sum_clientid(clientid4 client);
-static void detail_clientid(clientid4 client);
-static char *_sum_stateid(stateid4 *, char *prefix);
 static void sum_delegation(char *buf, size_t buflen, open_delegation4 *delp);
 static void detail_delegation(open_delegation4 *delp);
 static void detail_lock_owner(lock_owner4 *owner);
@@ -888,7 +886,6 @@ static char *get_deleg_typestr(open_delegation_type4 dt);
 static void detail_openflag(openflag4 *flagp);
 static void sum_name(char *buf, size_t buflen, open_claim4 *claim);
 static void detail_rpcsec_gss(rpcsec_gss_info *);
-static void detail_secinfo4(secinfo4 *infop);
 static char *sum_space_limit(nfs_space_limit4 *limitp);
 static void detail_space_limit(nfs_space_limit4 *limitp);
 static char *detail_type_name(nfs_ftype4);
@@ -896,8 +893,6 @@ static char *createhow4_name(createhow4 *crtp);
 
 
 static void showxdr_utf8string(char *);
-static char *utf8localize(utf8string *);
-static void utf8free(void);
 static void sum_pathname4(char *, size_t, pathname4 *);
 static void detail_pathname4(pathname4 *pathp);
 static void sum_compname4(char *buf, size_t buflen, component4 *comp);
@@ -907,28 +902,6 @@ static void detail_fattr4(fattr4 *attrp);
 static void detail_attr_bitmap(char *, bitmap4 *, unpkd_attrmap_t *);
 static void sum_attr_bitmap(char *buf, size_t buflen, bitmap4 *mapp);
 static void detail_fattr4_change(char *msg, fattr4_change chg);
-static char *sum_fh4(nfs_fh4 *fhp);
-static void detail_fh4(nfs_fh4 *fh);
-
-#define	fh4_hash(fh) adler16((fh)->nfs_fh4_val, (fh)->nfs_fh4_len)
-#define	stateid_hash(st) adler16((st)->other, sizeof ((st)->other))
-#define	owner_hash(own) adler16((own)->owner_val, (own)->owner_len)
-#define	sessionid_hash(sid) adler16(sid, 16)
-#define	deviceid_hash(did) adler16(did, 16)
-#define	cowner_hash(oid) adler16((oid)->co_ownerid_val, (oid)->co_ownerid_len)
-
-#define	sum_deleg_stateid(st)	_sum_stateid((st), "DST=")
-#define	sum_open_stateid(st)	_sum_stateid((st), "OST=")
-#define	sum_lock_stateid(st)	_sum_stateid((st), "LST=")
-#define	sum_stateid(st)		_sum_stateid((st), "ST=")
-
-#define	detail_deleg_stateid(st)	_detail_stateid((st), "Delegation ")
-#define	detail_open_stateid(st)		_detail_stateid((st), "Open ")
-#define	detail_lock_stateid(st)		_detail_stateid((st), "Lock ")
-#define	detail_stateid(st)		_detail_stateid((st), "")
-
-#define	SPECIAL_STATEID0	"SPC0"
-#define	SPECIAL_STATEID1	"SPC1"
 
 #define	DONT_CHANGE		0
 #define	SET_TO_SERVER_TIME	1
@@ -1610,8 +1583,8 @@ special_stateid(stateid4 *stateid)
 	return (-1);
 }
 
-static char *
-_sum_stateid(stateid4 *stateid, char *prefix)
+char *
+cmn_sum_stateid(stateid4 *stateid, char *prefix)
 {
 	static char buf[32];
 	int spec;
@@ -1625,8 +1598,8 @@ _sum_stateid(stateid4 *stateid, char *prefix)
 	return (buf);
 }
 
-static void
-_detail_stateid(stateid4 *stateid, char *prefix)
+void
+cmn_detail_stateid(stateid4 *stateid, char *prefix)
 {
 	int spec;
 	char seqstr[32] = {0};
@@ -1659,7 +1632,6 @@ _detail_stateid(stateid4 *stateid, char *prefix)
 	sprintf(get_line(0, 0), "    %sState ID Sequence ID = %s",
 	    prefix, seqstr);
 }
-
 
 static char *
 sum_lock_denied(LOCK4denied *denied)
@@ -1905,7 +1877,7 @@ dtlarg_cb_getattr(void *obj)
 {
 	CB_GETATTR4args *args = (CB_GETATTR4args *)obj;
 
-	detail_fh4(&args->fh);
+	detail_fh4(&args->fh, "");
 	detail_attr_bitmap("", &args->attr_request, NULL);
 }
 
@@ -1924,7 +1896,7 @@ dtlarg_cb_recall(void *obj)
 {
 	CB_RECALL4args *args = (CB_RECALL4args *)obj;
 
-	detail_fh4(&args->fh);
+	detail_fh4(&args->fh, "");
 	detail_stateid(&args->stateid);
 	sprintf(get_line(0, 0), "Truncate = %s",
 	    args->truncate ? "True" : "False");
@@ -2052,7 +2024,7 @@ dtlarg_putfh(void *obj)
 {
 	PUTFH4args *args = (PUTFH4args *)obj;
 
-	detail_fh4(&args->object);
+	detail_fh4(&args->object, "");
 }
 
 static void
@@ -2443,7 +2415,7 @@ dtlarg_write(void *obj)
 	detail_stateid(&args->stateid);
 }
 
-static char *
+char *
 sum_fh4(nfs_fh4 *fh)
 {
 	static char buf[20];
@@ -2453,14 +2425,14 @@ sum_fh4(nfs_fh4 *fh)
 	return (buf);
 }
 
-static void
-detail_fh4(nfs_fh4 *fh)
+void
+detail_fh4(nfs_fh4 *fh, char *label)
 {
 	int i;
 	uchar_t *cp;
 	char *bufp;
 
-	sprintf(get_line(0, 0), "File handle = [%04X]", fh4_hash(fh));
+	sprintf(get_line(0, 0), "%sFile handle = [%04X]", label, fh4_hash(fh));
 	bufp = get_line(0, 0);
 	sprintf(bufp, "(%d) ", fh->nfs_fh4_len);
 	bufp += strlen(bufp);
@@ -2999,7 +2971,7 @@ dtlres_getfh(void *obj)
 
 	dtl_nfsstat4(obj);
 	if (res->status == NFS4_OK) {
-		detail_fh4(&res->GETFH4res_u.resok4.object);
+		detail_fh4(&res->GETFH4res_u.resok4.object, "");
 	}
 }
 
@@ -3797,7 +3769,7 @@ detail_claim(open_claim4 *claim)
 /*
  * Return a summary string for the given clientid4.
  */
-static char *
+char *
 sum_clientid(clientid4 client)
 {
 	static char buf[50];
@@ -3810,7 +3782,7 @@ sum_clientid(clientid4 client)
 /*
  * Print a detail string for the given clientid4.
  */
-static void
+void
 detail_clientid(clientid4 client)
 {
 	sprintf(get_line(0, 0), "Client ID = %llx", client);
@@ -3981,7 +3953,7 @@ detail_pathname4(pathname4 *pathp)
  * at mem.
  */
 
-static void
+void
 detail_rpcsec_gss(rpcsec_gss_info *info)
 {
 	sprintf(get_line(0, 0), "OID = %s",
@@ -3995,7 +3967,7 @@ detail_rpcsec_gss(rpcsec_gss_info *info)
  * Print detail information about the given secinfo4.
  */
 
-static void
+void
 detail_secinfo4(secinfo4 *infop)
 {
 	sprintf(get_line(0, 0), "Flavor = %d (%s)",
@@ -5500,7 +5472,7 @@ sumarg_test_stateid(char *buf, size_t buflen, void *obj)
 		stateid = &args->ts_stateids.ts_stateids_val[i];
 		sprintf(prefix, "ST[%u]=", i);
 		snprintf(bp, buflen - (bp - buf), "%s ",
-		    _sum_stateid(stateid, prefix));
+		    cmn_sum_stateid(stateid, prefix));
 		bp += strlen(bp);
 	}
 }
@@ -5516,7 +5488,7 @@ dtlarg_test_stateid(void *obj)
 	for (i = 0; i < args->ts_stateids.ts_stateids_len; i++) {
 		stateid = &args->ts_stateids.ts_stateids_val[i];
 		sprintf(prefix, "[%u] : ", i);
-		_detail_stateid(stateid, prefix);
+		cmn_detail_stateid(stateid, prefix);
 	}
 }
 
@@ -5588,7 +5560,7 @@ sumarg_free_stateid(char *buf, size_t buflen, void *obj)
 {
 	FREE_STATEID4args *args = (FREE_STATEID4args *)obj;
 
-	snprintf(buf, buflen, "%s", _sum_stateid(&args->fsa_stateid, "ST="));
+	snprintf(buf, buflen, "%s", cmn_sum_stateid(&args->fsa_stateid, "ST="));
 }
 
 static void
@@ -5596,7 +5568,7 @@ dtlarg_free_stateid(void *obj)
 {
 	FREE_STATEID4args *args = (FREE_STATEID4args *)obj;
 
-	_detail_stateid(&args->fsa_stateid, "");
+	cmn_detail_stateid(&args->fsa_stateid, "");
 }
 
 static void
@@ -5657,7 +5629,7 @@ sum_lotype_name(layouttype4 type)
 	}
 }
 
-static char *
+char *
 detail_lotype_name(layouttype4 type)
 {
 	static char buf[64];
@@ -5683,7 +5655,7 @@ sum_iomode_name(layoutiomode4 mode)
 	}
 }
 
-static char *
+char *
 detail_iomode_name(layoutiomode4 mode)
 {
 	static char buf[64];
@@ -6255,7 +6227,7 @@ sumres_layoutget(char *buf, size_t buflen, void *obj)
 	}
 }
 
-static void
+void
 detail_file_layout(layout4 *lo)
 {
 	nfsv4_1_file_layout4 fl;
@@ -6524,7 +6496,7 @@ dtlarg_cb_layoutrecall(void *obj)
 	case LAYOUTRECALL4_FILE:
 		lor_file = &args->clora_recall.layoutrecall4_u.lor_layout;
 		sprintf(get_line(0, 0), "Layout associated with FILE");
-		detail_fh4(&lor_file->lor_fh);
+		detail_fh4(&lor_file->lor_fh, "");
 		sprintf(get_line(0, 0), "Offset  = %llu",
 		    lor_file->lor_offset);
 		sprintf(get_line(0, 0), "Length  = %llu",
@@ -7039,7 +7011,7 @@ prt_filehandle(XDR *xdr)
 
 	if (!xdr_nfs_fh4(xdr, &val))
 		longjmp(xdr_err, 1);
-	detail_fh4(&val);
+	detail_fh4(&val, "");
 	xdr_free(xdr_nfs_fh4, (char *)&val);
 }
 
@@ -7760,7 +7732,7 @@ static char *utf_buf[MAX_UTF8_STRINGS];
 static size_t utf_buflen[MAX_UTF8_STRINGS];
 static uint_t cur_utf_buf = 0;
 
-static char *
+char *
 utf8localize(utf8string *utf8str)
 {
 	size_t newsize, oldsize, len;
@@ -7806,7 +7778,7 @@ utf8localize(utf8string *utf8str)
 	return (result);
 }
 
-static void
+void
 utf8free()
 {
 	cur_utf_buf = 0;
@@ -7888,7 +7860,7 @@ utf8free()
 #define	DO8(buf, i)  DO4(buf, i); DO4(buf, i+4);
 #define	DO16(buf)   DO8(buf, 0); DO8(buf, 8);
 
-static uint32_t
+uint32_t
 adler16(void *p, int len)
 {
 	uint32_t s1 = 1;

@@ -30,8 +30,6 @@
 extern "C" {
 #endif
 
-#ifdef _KERNEL
-
 typedef enum {
 	FH41_TYPE_LEGACY,
 	FH41_TYPE_NFS,
@@ -40,8 +38,6 @@ typedef enum {
 } nfs41_fh_type_t;
 
 extern bool_t xdr_nfs41_fh_type_t(XDR *, nfs41_fh_type_t *);
-
-#endif
 
 #ifdef	__cplusplus
 }

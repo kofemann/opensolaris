@@ -42,7 +42,7 @@ void ds_dispatch(struct svc_req *, SVCXPRT *xprt);
 
 /*
  * Protos for nfs4[1] XDR funcs which don't already
- * exist in nfs4[1]_xdr.c are extracted from the the
+ * exist in nfs4[1]_xdr.c are extracted from the
  * header generated from rpcsvc/ds_nfs_com.x.  ds_nfs_com.h
  * isn't kept/used for building because it would redefine
  * several NFS4[1] types.  It is only generated to provide
@@ -61,7 +61,7 @@ void ds_dispatch(struct svc_req *, SVCXPRT *xprt);
  *
  * Since ds_prot.x no longer contains duplicate definitions
  * of the NFS4[1] types it needs, rpcgen will not create
- * the all of the dedicated xdr encode/decode funcs for the
+ * all of the dedicated xdr encode/decode funcs for the
  * control pcol.  So, ds_nfs_com.x was created to hold definitions
  * for NFS4[1] types which do not have dedicated XDR encode/decode
  * funcs in nfs4[1]_xdr.c.  All NFS4[1] types referenced within

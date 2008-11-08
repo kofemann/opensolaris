@@ -869,6 +869,9 @@ dserv_mds_reportavail()
 	int acount_done = 0;
 	int pcount_done = 0;
 
+	memset(&args, '\0', sizeof (args));
+	memset(&res, '\0', sizeof (res));
+
 	error = dserv_instance_enter(RW_READER, B_FALSE, &inst);
 	if (error)
 		return (error);

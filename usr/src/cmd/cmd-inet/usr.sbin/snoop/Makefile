@@ -18,13 +18,9 @@
 #
 # CDDL HEADER END
 
-
-#
 #
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 
 PROG=	snoop
@@ -40,10 +36,17 @@ OBJS=	nfs4_xdr.o snoop.o snoop_aarp.o snoop_adsp.o snoop_aecho.o \
 	snoop_pppoe.o snoop_rip.o snoop_rip6.o snoop_rpc.o snoop_rpcprint.o \
 	snoop_rpcsec.o snoop_rport.o snoop_rquota.o snoop_rstat.o snoop_rtmp.o \
 	snoop_sctp.o snoop_slp.o snoop_smb.o snoop_socks.o snoop_solarnet.o \
-	snoop_tcp.o snoop_tftp.o snoop_udp.o snoop_zip.o
+	snoop_tcp.o snoop_tftp.o snoop_udp.o snoop_zip.o snoop_ctl.o \
+	ds_xdr.o ds_filehandle_xdr.o
 
 SRCS=	$(OBJS:.o=.c)
-HDRS=	snoop.h snoop_mip.h at.h snoop_ospf.h snoop_ospf6.h nfs4_prot.h
+HDRS=	snoop.h snoop_mip.h at.h snoop_ospf.h snoop_ospf6.h nfs4_prot.h \
+	ds_prot.h ds_nfs_com.h nfs4_cmn.h
+
+PROTOCOL_DIR	= $(SRC)/head/rpcsvc
+NFS_DIR		= $(SRC)/uts/common/fs/nfs
+DERIVED_HDRS	= ds_prot.h ds_nfs_com.h
+DERIVED_FILES	= ds_xdr.c ds_filehandle_xdr.c ds_nfs_com.c $(DERIVED_HDRS)
 
 include	../../../Makefile.cmd
 
@@ -65,7 +68,27 @@ install:	all $(ROOTUSRSBINPROG)
 
 clean:
 	$(RM) $(OBJS)
+	$(RM) $(DERIVED_FILES)
 
 lint:	lint_SRCS
+
+ds_filehandle_xdr.c: $(NFS_DIR)/ds_filehandle_xdr.c
+	$(CP) $(NFS_DIR)/ds_filehandle_xdr.c ds_filehandle_xdr.c
+
+ds_filehandle_xdr.o: ds_filehandle_xdr.c
+	$(COMPILE.c) -DUSE_FOR_SNOOP -o $@ ds_filehandle_xdr.c
+
+ds_xdr.c: $(PROTOCOL_DIR)/ds_prot.x ds_prot.h
+	$(RPCGEN) -C -DUSE_FOR_SNOOP -c $(PROTOCOL_DIR)/ds_prot.x | \
+		$(EGREP) -v '^#include.+/ds_prot\.h"' > $@
+
+ds_xdr.o: ds_xdr.c $(DERIVED_HDRS)
+	$(COMPILE.c) -DUSE_FOR_SNOOP -DTOMPER -o $@ ds_xdr.c
+
+ds_prot.h: $(PROTOCOL_DIR)/ds_prot.x ds_nfs_com.h
+	$(RPCGEN) -C -DUSE_FOR_SNOOP -h $(PROTOCOL_DIR)/ds_prot.x >$@ 
+
+ds_nfs_com.h: $(PROTOCOL_DIR)/ds_nfs_com.x
+	$(RPCGEN) -C -DUSE_FOR_SNOOP -h $(PROTOCOL_DIR)/ds_nfs_com.x >$@ 
 
 include	../../../Makefile.targ

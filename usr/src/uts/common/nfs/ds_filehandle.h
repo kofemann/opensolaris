@@ -30,8 +30,6 @@
 extern "C" {
 #endif
 
-#ifdef _KERNEL
-
 enum ds_fh_version {
 	DS_FH_v1 = 1
 };
@@ -84,7 +82,6 @@ extern bool_t xdr_mds_sid(XDR *, mds_sid *);
 extern bool_t xdr_ds_fh_v1(XDR *, ds_fh_v1 *);
 extern bool_t xdr_encode_ds_fh(mds_ds_fh *, nfs_fh4 *);
 extern bool_t xdr_decode_ds_fh(XDR *, nfs_fh4 *);
-#endif
 
 #ifdef	__cplusplus
 }

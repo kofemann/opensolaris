@@ -23,8 +23,13 @@
  * Use is subject to license terms.
  */
 
+#if defined(USE_FOR_SNOOP)
+%#include "ds_nfs_com.h"
+%#include "ds_prot.h"
+#else
 #if defined(RPC_XDR) || defined(RPC_SVC) || defined(RPC_CLNT)
 %#include <nfs/ds.h>
+#endif
 #endif
 
 %#include <nfs/nfs41_fhtype.h>
@@ -74,6 +79,11 @@ enum ds_status {
       	DSERR_ILLEGAL
 };
 
+/*
+ * XXX: Note that the supported bits have yet to be defined
+ * and the size field would of course correspond to the
+ * file size.
+ */
 struct ds_attr {
 	int		ds_attrmask;
 	uint64_t	ds_size;
@@ -351,8 +361,8 @@ const DSERV    = 0x00000002;
  *    to the protocols that are valid for that interface.
  */
 struct ds_addr {
-	struct netaddr4     addr;
-	ds_addruse          validuse;
+	netaddr4	addr;
+	ds_addruse	validuse;
 };
 
 /*
@@ -483,8 +493,8 @@ default:
  *
  */
 struct DS_SECINFOargs {
-      	nfs_fh4 	object;
-      	netaddr4        cl_addr;
+      	nfs_fh4	object;
+      	netaddr4	cl_addr;
 };
 
 /* RPCSEC_GSS has a value of '6' - See RFC 2203 */
@@ -505,7 +515,7 @@ default:
 };
 
 /*
- * DS-SHUTDOWN -
+ * DS_SHUTDOWN -
  *
  * A notification to the MDS that this Data Server has/is in
  * the process of a graceful shutdown.
@@ -580,7 +590,6 @@ struct ds_fileseg {
  */
 struct DS_COMMITargs {
       	nfs_fh4		fh;
-      	count4		count;
       	ds_fileseg	cmv<>;
 };
 
@@ -715,7 +724,7 @@ struct DS_LISTresok {
       	uint64_t	cookie;
 };
 
-union DS_LISTres switch (ds_status dlr_status) {
+union DS_LISTres switch (ds_status status) {
 case DS_OK:
 	DS_LISTresok	res_ok;
 default:
@@ -729,11 +738,11 @@ struct DS_OBJ_MOVEargs {
       	uint64_t taskid;
       	nfs_fh4 source;
       	nfs_fh4 target;
-      	struct netaddr4 targetserver;
+      	netaddr4 targetserver;
 };
 
 struct DS_OBJ_MOVEres {
-      	uint32_t status;
+      	ds_status status;
 };
 
 struct DS_OBJ_MOVE_STATUSargs {
@@ -757,7 +766,7 @@ struct DS_OBJ_MOVE_ABORTargs {
 };
 
 struct DS_OBJ_MOVE_ABORTres {
-      	uint32_t status;
+      	ds_status status;
 };
 
 /*

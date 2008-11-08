@@ -27,9 +27,14 @@
 #include <sys/vfs.h>
 #include <rpc/types.h>
 #include <rpc/xdr.h>
+#ifdef USE_FOR_SNOOP
+#include "ds_nfs_com.h"
+#include "ds_prot.h"
+#else
 #include <nfs/nfs4.h>
 #include <nfs/nfs4_kprot.h>
 #include <nfs/ds_prot.h>
+#endif
 #include <nfs/ds_filehandle.h>
 
 #include <sys/sdt.h>
@@ -93,7 +98,9 @@ xdr_ds_fh(XDR *xdrs, mds_ds_fh *objp)
 			return (FALSE);
 		break;
 	default:
+#ifdef _KERNEL
 		DTRACE_PROBE(xdr__e__unsuported_fh_vers);
+#endif
 		return (FALSE);
 	}
 	return (TRUE);
@@ -111,7 +118,9 @@ xdr_ds_fh_fmt(XDR *xdrs, mds_ds_fh *objp)
 			return (FALSE);
 		break;
 	default:
+#ifdef _KERNEL
 		DTRACE_PROBE(xdr__e__unsuported_fh_type);
+#endif
 		return (FALSE);
 	}
 	return (TRUE);
@@ -132,7 +141,7 @@ xdr_encode_ds_fh(mds_ds_fh *fhp, nfs_fh4 *objp)
 	if (otw_len == 0)
 		return (FALSE);
 
-	objp->nfs_fh4_val = xdr_ptr = kmem_zalloc(otw_len, KM_SLEEP);
+	objp->nfs_fh4_val = xdr_ptr = (char *)mem_alloc(otw_len);
 	objp->nfs_fh4_len = otw_len;
 	xdrmem_create(&xdr, xdr_ptr, otw_len, XDR_ENCODE);
 

@@ -20,14 +20,12 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_SNOOP_H
 #define	_SNOOP_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"	/* SunOS	*/
 
 #include <rpc/types.h>
 #include <sys/pfmod.h>
@@ -217,6 +215,9 @@ extern void interpret_nisp_cb(int, int, int, int, int, char *, int);
 extern void interpret_nisplus(int, int, int, int, int, char *, int);
 extern void interpret_nlm(int, int, int, int, int, char *, int);
 extern void interpret_pmap(int, int, int, int, int, char *, int);
+extern void interpret_pnfsctlmds(int, int, int, int, int, char *, int);
+extern void interpret_pnfsctlds(int, int, int, int, int, char *, int);
+extern void interpret_pnfsctlmv(int, int, int, int, int, char *, int);
 extern int interpret_reserved(int, int, in_port_t, in_port_t, char *, int);
 extern void interpret_rquota(int, int, int, int, int, char *, int);
 extern void interpret_rstat(int, int, int, int, int, char *, int);

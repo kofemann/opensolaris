@@ -980,7 +980,7 @@ ds_invalidate(DS_INVALIDATEargs *argp, DS_INVALIDATEres *resp,
 void
 ds_list(DS_LISTargs *argp, DS_LISTres *resp, struct svc_req *req)
 {
-	resp->dlr_status = DSERR_NOTSUPP;
+	resp->status = DSERR_NOTSUPP;
 }
 
 /* ARGSUSED */

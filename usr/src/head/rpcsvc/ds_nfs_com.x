@@ -23,14 +23,21 @@
  * Use is subject to license terms.
  */
 
+#if defined(USE_FOR_SNOOP)
+%#include "ds_nfs_com.h"
+#else
+#if defined(RPC_XDR) || defined(RPC_SVC) || defined(RPC_CLNT)
 %#include <nfs/ds.h>
+#endif
+#endif
 
 /*
  *  Dot-x file for common parts of NFS41 pcol and data
  *  server control protocol.
  */
 
-#ifdef ALLOW_THIS
+#ifdef USE_FOR_SNOOP
+
 struct netaddr4 {
 	string na_r_netid<>;	/* network id */
 	string na_r_addr<>;	/* universal address */
@@ -95,7 +102,20 @@ enum stable_how4 {
 	FILE_SYNC4	= 2
 };
 
-#ifdef DO_THIS
+#ifdef USE_FOR_SNOOP
+
+const NFS4_OPAQUE_LIMIT = 1024;
+const NFS4_VERIFIER_SIZE = 8; 
+typedef opaque verifier4[NFS4_VERIFIER_SIZE];
+
+/*
+ * NFSv4.1 Client Owner (aka long hand client ID)
+ */
+struct client_owner4 {
+	verifier4       co_verifier;
+	opaque          co_ownerid<NFS4_OPAQUE_LIMIT>;
+};
+
 /*
  * data structures new to NFSv4.1
  */
