@@ -60,7 +60,7 @@ LDFLAGS += $(MAPFILE.NGB:%=-M%)
 
 all:	$(PROG)
 
-$(PROG): $(OBJS) $(MAPFILE.NGB)
+$(PROG): $(DERIVED_HDRS) $(OBJS) $(MAPFILE.NGB)
 	$(LINK.c) -o $@ $(OBJS) $(LDLIBS)
 	$(POST_PROCESS)
 
@@ -71,6 +71,9 @@ clean:
 	$(RM) $(DERIVED_FILES)
 
 lint:	lint_SRCS
+
+snoop_ctl.o: snoop_ctl.c $(DERIVED_HDRS)
+	$(COMPILE.c) -o $@ snoop_ctl.c
 
 ds_filehandle_xdr.c: $(NFS_DIR)/ds_filehandle_xdr.c
 	$(CP) $(NFS_DIR)/ds_filehandle_xdr.c ds_filehandle_xdr.c
@@ -83,7 +86,7 @@ ds_xdr.c: $(PROTOCOL_DIR)/ds_prot.x ds_prot.h
 		$(EGREP) -v '^#include.+/ds_prot\.h"' > $@
 
 ds_xdr.o: ds_xdr.c $(DERIVED_HDRS)
-	$(COMPILE.c) -DUSE_FOR_SNOOP -DTOMPER -o $@ ds_xdr.c
+	$(COMPILE.c) -DUSE_FOR_SNOOP -o $@ ds_xdr.c
 
 ds_prot.h: $(PROTOCOL_DIR)/ds_prot.x ds_nfs_com.h
 	$(RPCGEN) -C -DUSE_FOR_SNOOP -h $(PROTOCOL_DIR)/ds_prot.x >$@ 
