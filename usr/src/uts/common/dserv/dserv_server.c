@@ -37,6 +37,7 @@
 #include <sys/cmn_err.h>
 #include <sys/dmu.h>
 #include <sys/zap.h>
+#include <sys/zio.h>
 #include <sys/txg.h>
 #include <rpc/xdr.h>
 #include <nfs/ds.h>
@@ -648,6 +649,8 @@ out:
 	return (err);
 }
 
+offset_t dserv_read_chunk_size = 1024 * 1024; /* Tunable */
+
 /*ARGSUSED*/
 static int
 dserv_nnode_read(void *vdata, nnode_io_flags_t *nnflags, cred_t *cr,
@@ -655,11 +658,24 @@ dserv_nnode_read(void *vdata, nnode_io_flags_t *nnflags, cred_t *cr,
 {
 	dserv_nnode_data_t *data = vdata;
 	nnode_error_t err;
+	ssize_t n, nbytes;
 
 	rw_enter(&data->dnd_rwlock, RW_READER);
+	ASSERT(uiop->uio_loffset < data->dnd_phys->dp_size);
 	ASSERT(data->dnd_flags & DSERV_NNODE_FLAG_OBJECT);
-	err = dmu_read_uio(data->dnd_objset, data->dnd_object, uiop,
-	    uiop->uio_resid);
+	n = MIN(uiop->uio_resid, data->dnd_phys->dp_size - uiop->uio_loffset);
+	while (n > 0) {
+		nbytes = MIN(n, dserv_read_chunk_size -
+		    P2PHASE(uiop->uio_loffset, dserv_read_chunk_size));
+		err = dmu_read_uio(data->dnd_objset, data->dnd_object, uiop,
+		    nbytes);
+		if (err != 0) {
+			if (err == ECKSUM)
+				err = EIO;
+			goto out;
+		}
+		n -= nbytes;
+	}
 
 out:
 	rw_exit(&data->dnd_rwlock);
@@ -692,8 +708,8 @@ again:
 			goto again;
 		}
 
+		new_size = end;
 		if (end > data->dnd_blksize) {
-			new_size = end;
 			if (data->dnd_blksize < max_blksize)
 				new_blksize = MIN(end, max_blksize);
 			else if (!ISP2(data->dnd_blksize))
