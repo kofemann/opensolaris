@@ -40,6 +40,7 @@
 #include <nfs/ds.h>
 #include <sys/cmn_err.h>
 #include <sys/utsname.h>
+#include <sys/systeminfo.h>
 
 
 rfs4_client_t *mds_findclient(nfs_client_id4 *, bool_t *, rfs4_client_t *);
@@ -788,7 +789,6 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 	ds_addrlist_t *dp;
 	ds_addr *addrp;
 	nfs_server_instance_t *instp;
-	int err;
 
 	/*
 	 * First deal with the universal addresses
@@ -937,6 +937,8 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 	bool_t do_create = TRUE;
 	DS_EXIBIresok *dser = &(resp->DS_EXIBIres_u.res_ok);
 
+	unsigned long hostid = 0;
+
 	/*
 	 * Do some initial validation of the request.
 	 */
@@ -985,6 +987,10 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 	 */
 	resp->status = DS_OK;
 	dser->ds_id = dop->ds_id;
+
+	(void) ddi_strtoul(hw_serial, NULL, 10, &hostid);
+	dser->mds_id = (uint64_t)hostid;
+
 	dser->mds_boot_verifier = mds_server->Write4verf;
 
 	dser->mds_lease_period = mds_server->lease_period;

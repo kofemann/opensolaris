@@ -7749,10 +7749,14 @@ mds_alloc_ds_fh(struct compound_state *cs, nfs_fh4 *fhp)
 	nfs41_fh_fmt_t *mds_fh = (nfs41_fh_fmt_t *)cs->fh.nfs_fh4_val;
 	mds_ds_fh dsfh;
 
+	unsigned long hostid = 0;
+	(void) ddi_strtoul(hw_serial, NULL, 10, &hostid);
+
 	bzero(&dsfh, sizeof (mds_ds_fh));
 
 	dsfh.vers = DS_FH_v1;
 	dsfh.type = FH41_TYPE_DMU_DS;
+	dsfh.fh.v1.mds_id = (uint64_t)hostid;
 
 	dsfh.fh.v1.fsid.major    = cs->exi->exi_fsid.val[0];
 	dsfh.fh.v1.fsid.minor    = cs->exi->exi_fsid.val[1];
