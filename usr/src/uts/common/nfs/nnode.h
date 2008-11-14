@@ -23,6 +23,93 @@
  * Use is subject to license terms.
  */
 
+/*
+ * nnodes: vnode-like entities suited to NFS tasks
+ *
+ * Previous NFS server implementations have used vnodes exclusively for
+ * performing client operations against a server file system. With pNFS
+ * (Parallel NFS), it is required to have drastically different
+ * implementations behind the NFS protocol operations. nnodes provide the
+ * needed abstraction.
+ *
+ * Like vnodes, nnodes encapsulate a file or file-like object, and provide
+ * a set of operations that can be performed on the object. Unlike vnodes,
+ * the operations available on nnodes are made especially for implementing
+ * an NFS server. The operations fall into three categories: data,
+ * metadata, and state. Metadata operations include operations on the name
+ * space, and state operations include such things as opening or locking a
+ * file.
+ *
+ * The implementations hidden behind nnodes include the traditional vnode
+ * API, the DMU API provided by ZFS, and proxy i/o performed by one node
+ * of a pNFS server community against another. Of course, other future
+ * implementations will also likely be provided.
+ *
+ * The usual scenario for an NFS implementation is to look up an
+ * exportinfo with a filehandle, then to look up an nnode from the
+ * exportinfo and the filehandle. The nnode is held via a reference count.
+ * The nnode is used to perform what is needed to satisfy the client
+ * request. When the request is complete, the nnode is released via
+ * nnode_rele().
+ *
+ * NB: nnodes are currently kept in a global cache, but eventually there
+ * will be one nnode cache per exportinfo structure.
+ *
+ * An nnode with a reference count of zero is subject to garbage
+ * collection. The time that an nnode was last accessed is kept in the
+ * nnode. When its last access is sufficiently far in the past, the
+ * garbage collector will free the nnode with nnode_free().  When a system
+ * is under memory pressure, the nnode may be freed more aggressively.
+ * Other implementations of garbage collection are possible, e.g. a
+ * generational garbage collector could be implemented at some future
+ * time.
+ *
+ * The following API is project private.
+ *
+ * nnode lifecycle:
+ *
+ * nnode_from_fh_v3()
+ * nnode_from_fh_v4()
+ * nnode_from_fh_v41()
+ * nnode_from_fh_ds(): These functions all return a held nnode based
+ * upon the filehandle they are given.
+ *
+ * nnode_rele(): release the reference on the given nnode.
+ *
+ * nnode operations:
+ *
+ * data:
+ *
+ * All operations in this section nnode_error_t, which is a superset of a
+ * standard errno.  A caller may use nnode_stat4() or nnode_stat3() to
+ * convert it to an nfsstat4 or nfsstat3.
+ *
+ * nnop_io_prep(): prepare to do i/o.  Ensure that the caller has
+ * permission to do the i/o.  Check if an operation is happening past the
+ * current end-of-file.  Enforce mandatory locking, etc.
+ *
+ * nnop_read(): read
+ *
+ * nnop_write(): write
+ *
+ * nnop_io_release(): called after read or write.  It undoes any locks or
+ * state changes that may have occured in nnode_io_prep().
+ *
+ * nnop_post_op_attr(): called by NFSv3 to return the post-op attribute.
+ *
+ * nnop_wcc_data_err(): called by NFSv3 to set the wcc_data in the return
+ * code.
+ *
+ * nnop_io_getvp(): return the backing vnode, if any.  This operation will
+ * be removed at a later time.
+ *
+ * metadata:
+ *
+ * state:
+ *
+ * nnop_check_stateid(): check the validity of a given stateid.
+ */
+
 #ifndef _NNODE_H
 #define	_NNODE_H
 
