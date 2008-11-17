@@ -884,7 +884,7 @@ rfs4args_cb_getattr_free(nfs_cb_argop4 *argop)
 		kmem_free(argp->fh.nfs_fh4_val, argp->fh.nfs_fh4_len);
 }
 
-static void
+void
 rfs4freeargres(CB_COMPOUND4args *args, CB_COMPOUND4res *resp)
 {
 	int i, arglen;
@@ -908,6 +908,9 @@ rfs4freeargres(CB_COMPOUND4args *args, CB_COMPOUND4res *resp)
 
 		case OP_CB_GETATTR:
 			rfs4args_cb_getattr_free(argop);
+			break;
+
+		case OP_CB_LAYOUTRECALL:
 			break;
 
 		default:

@@ -1383,6 +1383,7 @@ typedef struct nfs_resop4 nfs_resop4;
 #define	csa_rcall_lval	csa_referring_call_lists.csa_referring_call_lists_val
 #define	rcl_len		rcl_referring_calls.rcl_referring_calls_len
 #define	rcl_val		rcl_referring_calls.rcl_referring_calls_val
+#define	lorr_stid_u	LAYOUTRETURN4res_u.lorr_stateid.layoutreturn_stateid_u
 
 struct COMPOUND4args_srv {
 	utf8string	tag;

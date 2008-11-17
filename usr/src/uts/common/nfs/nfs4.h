@@ -1040,9 +1040,12 @@ typedef struct mds_session {
 
 struct mds_lorec {
 	mds_session_t		*lor_sess;
-	layoutrecall_type4	lor_type;
-	fsid4			lor_fsid;
-	nfs4_fhandle_t		lor_fh;
+	layoutrecall_type4	 lor_type;
+	fsid4			 lor_fsid;
+	nfs4_fhandle_t		 lor_fh;
+	stateid4		 lor_stid;
+	vnode_t			*lor_vp;
+	struct mds_layout_grant	*lor_lgp;
 };
 typedef struct mds_lorec mds_lorec_t;
 
@@ -1731,6 +1734,8 @@ extern bool_t	xdr_inline_encode_nfs_fh4(uint32_t **, uint32_t *,
 extern void		 rfs41_deleg_rs_hold(rfs4_deleg_state_t *);
 extern void		 rfs41_deleg_rs_rele(rfs4_deleg_state_t *);
 extern void		 rfs41_set_client_sessions(rfs4_client_t *, uint32_t);
+extern void		 rfs41_cb_path_down(mds_session_t *, uint32_t);
+
 
 void rfs41_srvrinit(void);
 void rfs41_dispatch_init(void);
@@ -1779,6 +1784,10 @@ struct nfs4_fsidlt;
 struct nfs4_server;
 extern void   pnfs_layout_discard(struct rnode4 *, struct nfs4_fsidlt *,
     struct nfs4_server *);
+
+extern void	 rfs41_lo_seqid(stateid_t *);
+extern void	 rfs4freeargres(CB_COMPOUND4args *, CB_COMPOUND4res *);
+extern char	*nfs41_strerror(nfsstat4);
 
 #endif
 #ifdef	__cplusplus

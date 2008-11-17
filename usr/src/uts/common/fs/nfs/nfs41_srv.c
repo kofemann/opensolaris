@@ -7108,7 +7108,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 {
 	DESTROY_SESSION4args	*args = &argop->nfs_argop4_u.opdestroy_session;
 	DESTROY_SESSION4res	*resp = &resop->nfs_resop4_u.opdestroy_session;
-	mds_session_t		*destroy_sp;
+	mds_session_t		*sp;
 	rfs4_client_t		*cp;
 
 	DTRACE_NFSV4_2(op__destroy__session__start,
@@ -7154,7 +7154,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Find session and check for clientid and lease expiration
 	 */
-	if ((destroy_sp =
+	if ((sp =
 	    mds_findsession_by_id(cs->instp, args->dsa_sessionid)) == NULL) {
 		*cs->statusp = resp->dsr_status = NFS4ERR_BADSESSION;
 		goto final;
@@ -7171,7 +7171,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * cred that was used to create the session matches and is in
 	 * concordance w/the state protection type used.
 	 */
-	if ((cp = destroy_sp->sn_clnt) != NULL) {
+	if ((cp = sp->sn_clnt) != NULL) {
 		switch (cp->state_prot.sp_type) {
 		case SP4_MACH_CRED:
 			cmn_err(CE_NOTE, "op_destroy_session: SP4_MACH_CRED");
@@ -7198,7 +7198,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	/* session rele taken care of in mds_destroysession */
-	*cs->statusp = resp->dsr_status = mds_destroysession(destroy_sp);
+	*cs->statusp = resp->dsr_status = mds_destroysession(sp);
 
 final:
 	DTRACE_NFSV4_2(op__destroy__session__done,
@@ -7987,6 +7987,7 @@ mds_fetch_layout(struct compound_state *cs,
 	resp->LAYOUTGET4res_u.logr_resok4.logr_layout.logr_layout_val = logrp;
 	resp->LAYOUTGET4res_u.logr_resok4.logr_return_on_close = FALSE;
 	resp->LAYOUTGET4res_u.logr_will_signal_layout_avail = FALSE;
+	rfs41_lo_seqid(&lgp->lo_stateid);
 	resp->LAYOUTGET4res_u.logr_resok4.logr_stateid =
 	    lgp->lo_stateid.stateid;
 
@@ -8027,16 +8028,27 @@ mds_get_lo_grant_by_cp(struct compound_state *cs)
 	return (lgp);
 }
 
+/*
+ * XXX - Eventually, we will support multi-range layouts. range_overlap
+ *	 would be set to true if a new LAYOUTGET for a range (or part of
+ *	 a range) that was already recalled, is obtained. For now, the
+ *	 server does not handle multi-range layouts, but this is needed
+ *	 for eventual CB_LAYOUT_RECALL race detection. Refer to section
+ *	 12.5.5.2.1.3 of draft-25 for further details.
+ */
+uint32_t	range_overlap = 0;
+
 /*ARGSUSED*/
 static void
 mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
     struct svc_req *reqp, compound_state_t *cs)
 {
-	LAYOUTGET4args *argp = &argop->nfs_argop4_u.oplayoutget;
-	LAYOUTGET4res *resp = &resop->nfs_resop4_u.oplayoutget;
-	nfsstat4 nfsstat = NFS4_OK;
-	stateid_t *arg_stateid;
-	mds_layout_grant_t *lgp = NULL;
+	LAYOUTGET4args		*argp = &argop->nfs_argop4_u.oplayoutget;
+	LAYOUTGET4res		*resp = &resop->nfs_resop4_u.oplayoutget;
+	nfsstat4		 nfsstat = NFS4_OK;
+	stateid_t		*arg_stateid;
+	mds_layout_grant_t	*lgp = NULL;
+	sequenceid4		 log_seqid;
 
 	DTRACE_NFSV4_2(op__layoutget__start,
 	    struct compound_state *, cs,
@@ -8062,6 +8074,7 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 	 */
 	if (mds_validate_loga_stateid) {
 		arg_stateid = (stateid_t *)&(argp->loga_stateid);
+		log_seqid = arg_stateid->v41_bits.chgseq;
 
 		/*
 		 * We may already have given this client a layout.  Better
@@ -8086,17 +8099,47 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 				nfsstat = NFS4ERR_BAD_STATEID;
 				goto final;
 			}
+
 			/*
-			 * XXX - jw - fine, we gave them a layout for this
-			 * file and now there asking for another one.  not
-			 * sure why, so give them an error for now.  once
-			 * we add ranges, then we can do something different.
+			 * Layout race detection
 			 */
-			cmn_err(CE_NOTE,
-			    "asking for a second layout for a file");
-			nfsstat = NFS4ERR_BAD_STATEID;
+			if (lgp->lo_status & LO_RECALL_INPROG) {
+				ASSERT(lgp->lor_seqid != 0);
+				if (log_seqid == (lgp->lor_seqid - 2)) {
+
+					/* case 1 - pending recall in prog */
+					nfsstat = NFS4ERR_RECALLCONFLICT;
+					rfs41_lo_grant_rele(lgp);
+					goto final;
+
+				} else if (log_seqid >= lgp->lor_seqid &&
+				    !lgp->lor_reply) {
+
+					/*
+					 * case 2 - server has NOT received
+					 * the cb_lorecall reply yet.
+					 */
+					if (range_overlap) {
+						nfsstat =
+						    NFS4ERR_RECALLCONFLICT;
+						rfs41_lo_grant_rele(lgp);
+						goto final;
+					}
+
+				} else if (log_seqid == lgp->lor_seqid &&
+				    lgp->lor_reply) {
+
+					/*
+					 * case 3 - server HAS received
+					 * reply to cb_lorecall
+					 */
+					nfsstat = NFS4ERR_RETURNCONFLICT;
+					rfs41_lo_grant_rele(lgp);
+					goto final;
+				}
+			}
 			rfs41_lo_grant_rele(lgp);
-			goto final;
+
 		} else {
 			/*
 			 * not using a layout stateid, so we better not
@@ -8276,9 +8319,8 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 	 * lrs_present mojo and corresponding stateid setting.
 	 */
 	rfs41_lo_seqid(&lgp->lo_stateid);
-	resp->LAYOUTRETURN4res_u.lorr_stateid.layoutreturn_stateid_u.lrs_stateid
-	    = lgp->lo_stateid.stateid;
-#ifdef RICKS_CHANGES
+	resp->lorr_stid_u.lrs_stateid = lgp->lo_stateid.stateid;
+
 	mutex_enter(&lgp->lo_lock);
 	if (lgp->lo_status == LO_RECALL_INPROG) {
 		lgp->lor_seqid = 0;  /* reset */
@@ -8287,7 +8329,6 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 		lgp->lo_status = LO_RETURNED;
 	}
 	mutex_exit(&lgp->lo_lock);
-#endif
 
 	/* remove the layout grant from both lists */
 	remque(&lgp->clientgrantlist);
@@ -8309,19 +8350,30 @@ static void
 mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
     struct svc_req *reqp, compound_state_t *cs)
 {
-	LAYOUTRETURN4args *args = &argop->nfs_argop4_u.oplayoutreturn;
-	LAYOUTRETURN4res *resp = &resop->nfs_resop4_u.oplayoutreturn;
-	nfsstat4 nfsstat = NFS4_OK;
-	rfs4_client_t *cp = cs->cp;
-	layoutreturn_file4 *lorf;
-	bool_t lora_reclaim = args->lora_reclaim;
-	int ingrace;
+	LAYOUTRETURN4args	*args = &argop->nfs_argop4_u.oplayoutreturn;
+	LAYOUTRETURN4res	*resp = &resop->nfs_resop4_u.oplayoutreturn;
+	nfsstat4		 nfsstat = NFS4_OK;
+	rfs4_client_t		*cp = cs->cp;
+	layoutreturn_file4	*lorf;
+	bool_t			 lora_reclaim = args->lora_reclaim;
+	int			 ingrace;
 
-	DTRACE_NFSV4_1(op__layoutreturn__start,
-	    struct compound_state *, cs);
+	DTRACE_NFSV4_1(op__layoutreturn__start, struct compound_state *, cs);
 
-	if (args->lora_layout_type != LAYOUT4_NFSV4_1_FILES) {
-		nfsstat = NFS4ERR_INVAL;
+	/*
+	 * Layout type
+	 */
+	switch (args->lora_layout_type) {
+	case LAYOUT4_NFSV4_1_FILES:
+		break;
+
+	case LAYOUT4_OSD2_OBJECTS:
+	case LAYOUT4_BLOCK_VOLUME:
+		nfsstat = NFS4ERR_NOTSUPP;
+		goto final;
+
+	default:
+		nfsstat = NFS4ERR_UNKNOWN_LAYOUTTYPE;
 		goto final;
 	}
 
@@ -8348,6 +8400,7 @@ mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
 		lorf = &args->lora_layoutreturn.layoutreturn4_u.lr_layout;
 		nfsstat = mds_return_layout_file(lorf, cs, resp);
 		break;
+
 	case LAYOUTRETURN4_FSID:
 		if (lora_reclaim) {
 			nfsstat = NFS4ERR_INVAL;
@@ -8355,9 +8408,12 @@ mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
 		}
 #ifdef NOT_DONE
 		mds_return_layout_fsid(cs);
+#else
+		cmn_err(CE_NOTE, "loreturn: LAYOUTRETURN4_FSID");
 #endif
 		cp->bulk_recall = 0;
 		break;
+
 	case LAYOUTRETURN4_ALL:
 		if (lora_reclaim) {
 			nfsstat = NFS4ERR_INVAL;
@@ -8365,9 +8421,12 @@ mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
 		}
 #ifdef NOT_DONE
 		mds_return_layout_all(cp);
+#else
+		cmn_err(CE_NOTE, "loreturn: LAYOUTRETURN4_ALL");
 #endif
 		cp->bulk_recall = 0;
 		break;
+
 	default:
 		nfsstat = NFS4ERR_INVAL;
 	}

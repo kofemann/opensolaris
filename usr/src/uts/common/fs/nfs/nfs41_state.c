@@ -46,7 +46,6 @@ extern u_longlong_t nfs4_srv_caller_id;
 #include <nfs/nfs41_filehandle.h>
 
 static void mds_do_lorecall(mds_lorec_t *);
-static void mds_sess_lorecall_callout(rfs4_entry_t, void *);
 static int  mds_lorecall_cmd(struct mds_reclo_args *, cred_t *);
 
 extern void mds_do_cb_recall(struct rfs4_deleg_state *, bool_t);
@@ -1271,9 +1270,12 @@ mds_layout_grant_create(rfs4_entry_t u_entry, void *arg)
 
 	rfs4_dbe_hold(fp->dbe);
 
+	lgp->lo_status = LO_GRANTED;
 	lgp->lo_stateid = mds_create_stateid(lgp->dbe, LAYOUTID);
 	lgp->fp = fp;
 	lgp->cp = cp;
+	lgp->lor_seqid = lgp->lor_reply = 0;
+	mutex_init(&lgp->lo_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	/* Init layout grant lists for remque/insque */
 	lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
@@ -1299,8 +1301,10 @@ mds_layout_grant_create(rfs4_entry_t u_entry, void *arg)
 
 /*ARGSUSED*/
 static void
-mds_layout_grant_destroy(rfs4_entry_t foo)
+mds_layout_grant_destroy(rfs4_entry_t entry)
 {
+	mds_layout_grant_t *lgp = (mds_layout_grant_t *)entry;
+	mutex_destroy(&lgp->lo_lock);
 }
 
 mds_layout_grant_t *
@@ -1316,6 +1320,12 @@ rfs41_findlogrant(struct compound_state *cs, rfs4_file_t *fp,
 	    cs->instp->mds_layout_grant_idx, &lg, create, &lg, RFS4_DBS_VALID);
 
 	return (lgp);
+}
+
+void
+rfs41_lo_grant_hold(mds_layout_grant_t *lgp)
+{
+	rfs4_dbe_hold(lgp->dbe);
 }
 
 void
@@ -1468,6 +1478,32 @@ rfs41_lo_seqid(stateid_t *sp)
 		(void) atomic_swap_32(&sp->v41_bits.chgseq, 1);
 }
 
+bool_t
+rfs41_lo_still_granted(mds_layout_grant_t *lgp)
+{
+	rfs41_grant_list_t	*glp;
+	bool_t			 found = FALSE;
+
+	rfs4_dbe_lock(lgp->dbe);
+	glp = lgp->fp->lo_grant_list.next;
+	for (; glp && glp->lgp; glp = glp->next) {
+		if (found = mds_layout_grant_compare((rfs4_entry_t)lgp,
+		    (void *)glp->lgp))
+			break;
+	}
+	rfs4_dbe_unlock(lgp->dbe);
+	return (found);
+}
+
+static void
+rfs41_revoke_layout(mds_layout_grant_t *lgp)
+{
+	cmn_err(CE_NOTE, "rfs41_revoke_layout: layout revoked");
+	rfs41_seq4_hold(&lgp->cp->seq4, SEQ4_STATUS_RECALLABLE_STATE_REVOKED);
+
+	/* XXX - rest of this function TBD */
+}
+
 static void
 mds_do_lorecall(mds_lorec_t *lorec)
 {
@@ -1485,20 +1521,38 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	int			 argsz;
 	mds_session_t		*sp;
 	slot_ent_t		*p;
+	mds_layout_grant_t	*lgp;
+	uint32_t		 sc = 0;
+	int			 retried = 0;
 
 	DTRACE_PROBE1(nfssrv__i__sess_lorecall_fh, mds_lorec_t *, lorec);
-
-	if (lorec->lor_sess == NULL)
+	if ((sp = lorec->lor_sess) == NULL) {
+		kmem_free(lorec, sizeof (mds_lorec_t));
 		return;
-	sp = lorec->lor_sess;
+
+	} else if (!SN_CB_CHAN_EST(sp)) {
+		kmem_free(lorec, sizeof (mds_lorec_t));
+		rfs41_session_rele(sp);
+		return;
+	}
 
 	/*
-	 * XXX - until we fix blasting _all_ sessions for one lorecall,
-	 *	make sure that the session in question at least has the
-	 *	back chan established.
+	 * Per-type pre-processing
 	 */
-	if (!SN_CB_CHAN_EST(sp))
-		return;
+	switch (lorec->lor_type) {
+	case LAYOUTRECALL4_FILE:
+		if (lorec->lor_lgp == NULL)
+			return;
+		lgp = lorec->lor_lgp;
+		break;
+
+	case LAYOUTRECALL4_FSID:
+		break;
+
+	case LAYOUTRECALL4_ALL:
+	default:
+		break;
+	}
 
 	/*
 	 * set up the compound args
@@ -1559,6 +1613,8 @@ mds_do_lorecall(mds_lorec_t *lorec)
 		lorf->lor_length = ONES_64;
 		lorf->lor_fh.nfs_fh4_len = lorec->lor_fh.fh_len;
 		lorf->lor_fh.nfs_fh4_val = (char *)&lorec->lor_fh.fh_buf;
+		bcopy(&lorec->lor_stid, &lorf->lor_stateid, sizeof (stateid4));
+		(void) atomic_swap_32(&lgp->lor_reply, 0);
 		break;
 
 	case LAYOUTRECALL4_FSID:
@@ -1574,10 +1630,9 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	 * Set up the timeout for the callback and make the actual call.
 	 * Timeout will be 80% of the lease period.
 	 */
-	timeout.tv_sec =
-	    (dbe_to_instp(lorec->lor_sess->dbe)->lease_period * 80) / 100;
+	timeout.tv_sec = (dbe_to_instp(sp->dbe)->lease_period * 80) / 100;
 	timeout.tv_usec = 0;
-
+retry:
 	ch = rfs41_cb_getch(sp);
 	(void) CLNT_CONTROL(ch, CLSET_XID, (char *)&zilch);
 	call_stat = clnt_call(ch, CB_COMPOUND,
@@ -1586,49 +1641,216 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	rfs41_cb_freech(sp, ch);
 
 	if (call_stat != RPC_SUCCESS) {
-		/*
-		 * XXX same checks as cb_recall;
-		 * a) do we want to retry ?
-		 * b) how can we tell layout still "delegated"
-		 * c) how much time do we wait before cb_path_down ?
-		 *    lease period ?
-		 */
-		cmn_err(CE_NOTE, "r41_lo_recall: RPC call failed");
-		goto done;
+		switch (lorec->lor_type) {
+		case LAYOUTRECALL4_FILE:
+			if (!retried)
+				delay(SEC_TO_TICK(rfs4_lease_time));
 
-	} else if (cb4_res.status != NFS4_OK) {
+			if (rfs41_lo_still_granted(lgp)) {
+				if (!retried) {
+					retried = 1;
+					goto retry;
+				}
+
+				/*
+				 * We want to make sure that the layout is
+				 * still granted lest we assert a SEQ4 flag
+				 * that will never be turned off.
+				 */
+				rfs41_revoke_layout(lgp);
+			}
+			sc = (call_stat == RPC_CANTSEND ||
+			    call_stat == RPC_CANTRECV);
+			rfs41_cb_path_down(sp, sc);
+			goto done;
+
+		case LAYOUTRECALL4_FSID:
+		case LAYOUTRECALL4_ALL:
+			/*
+			 * XXX - how do we determine if layouts still
+			 *	 outstanding for fsid/all cases ?
+			 */
+		default:
+			break;
+		}
+
+	} else {	/* RPC_SUCCESS */
+
 		/*
-		 * XXX check protocol errors. This may be where we
-		 *	detect the LAYOUTRECALL / LAYOUTRETURN race
+		 * Per-type results processing
 		 */
-		cmn_err(CE_NOTE, "r41_lo_recall: status != NFS4_OK");
+		switch (lorec->lor_type) {
+		case LAYOUTRECALL4_FILE:
+			(void) atomic_swap_32(&lgp->lor_reply, 1);
+			break;
+
+		case LAYOUTRECALL4_FSID:
+		case LAYOUTRECALL4_ALL:
+		default:
+			break;
+		}
+	}
+
+	if (cb4_res.status != NFS4_OK) {
+		nfsstat4	s = cb4_res.status;
+
+		switch (s) {
+		case NFS4ERR_BADHANDLE:
+		case NFS4ERR_BADIOMODE:
+		case NFS4ERR_BADXDR:
+		case NFS4ERR_INVAL:
+		case NFS4ERR_NOMATCHING_LAYOUT:
+		case NFS4ERR_NOTSUPP:
+		case NFS4ERR_OP_NOT_IN_SESSION:
+		case NFS4ERR_REP_TOO_BIG:
+		case NFS4ERR_REP_TOO_BIG_TO_CACHE:
+		case NFS4ERR_REQ_TOO_BIG:
+		case NFS4ERR_TOO_MANY_OPS:
+		case NFS4ERR_UNKNOWN_LAYOUTTYPE:
+		case NFS4ERR_WRONG_TYPE:
+			/* What do we do when it's our own fault ? */
+			cmn_err(CE_NOTE, "cb_lo_recall: %s", nfs41_strerror(s));
+			break;
+
+		case NFS4ERR_DELAY:
+			switch (lorec->lor_type) {
+			case LAYOUTRECALL4_FILE:
+				{
+				bool_t	granted = FALSE;
+
+				if (!retried)
+					delay(SEC_TO_TICK(rfs4_lease_time));
+
+				granted = rfs41_lo_still_granted(lgp);
+				if (!granted)
+					break;
+
+				if (!retried) {
+					retried = 1;
+					goto retry;
+				}
+
+				if (granted)
+					rfs41_revoke_layout(lgp);
+				break;
+				}
+
+			case LAYOUTRECALL4_FSID:
+			case LAYOUTRECALL4_ALL:
+			default:
+				break;
+			}
+			break;
+
+		case NFS4ERR_BAD_STATEID:	/* XXX - retry BAD_STATEID ? */
+		default:
+			if (lorec->lor_type == LAYOUTRECALL4_FILE)
+				if (rfs41_lo_still_granted(lgp))
+					rfs41_revoke_layout(lgp);
+			break;
+		}
 
 	}
 	svc_slot_cb_seqid(&cb4_res, p);
 done:
 	kmem_free(lorec, sizeof (mds_lorec_t));
+	rfs4freeargres(&cb4_args, &cb4_res);
+
 	svc_slot_free(sp, p);
+	rfs41_session_rele(sp);
+
+	/*
+	 * Per-type post-processing
+	 */
+	switch (lorec->lor_type) {
+	case LAYOUTRECALL4_FILE:
+		rfs41_lo_grant_rele(lgp);
+		break;
+
+	case LAYOUTRECALL4_FSID:
+	case LAYOUTRECALL4_ALL:
+	default:
+		break;
+	}
 }
 
+/*
+ * Bulk Layout Recall (ALL)
+ */
 static void
-mds_sess_lorecall_callout(rfs4_entry_t u_entry, void *arg)
+all_lor(rfs4_entry_t entry, void *args)
+{
+	mds_session_t	*sp = (mds_session_t *)entry;
+	mds_lorec_t	*lrp = (mds_lorec_t *)args;
+	mds_lorec_t	*lorec;
+
+	if (sp == NULL || lrp == NULL)
+		return;
+
+	ASSERT(rfs4_dbe_islocked(sp->dbe));
+	lorec = kmem_zalloc(sizeof (mds_lorec_t), KM_SLEEP);
+	bcopy(args, lorec, sizeof (mds_lorec_t));
+
+	rfs4_dbe_hold(sp->dbe);
+	lorec->lor_sess = sp;
+
+	(void) thread_create(NULL, 0, mds_do_lorecall, lorec, 0, &p0, TS_RUN,
+	    minclsyspri);
+}
+
+/*
+ * Layout Recall by FSID
+ */
+static void
+fsid_lor(rfs4_entry_t entry, void *args)
+{
+	mds_lorec_t		*lrp = (mds_lorec_t *)args;
+	mds_ever_grant_t	*egp = (mds_ever_grant_t *)entry;
+	mds_ever_grant_t	 eg;
+	vnode_t			*vp = NULL;
+
+	if (egp == NULL || lrp == NULL)
+		return;
+
+	ASSERT(rfs4_dbe_islocked(egp->dbe));
+	if ((vp = (vnode_t *)lrp->lor_vp) == NULL)
+		return;
+
+	eg.eg_fsid = vp->v_vfsp->vfs_fsid;
+	if (mds_ever_grant_fsid_compare(entry, (void *)(uintptr_t)eg.eg_key)) {
+		mds_lorec_t	*lorec;
+		mds_session_t	*sp;
+
+		lorec = kmem_zalloc(sizeof (mds_lorec_t), KM_SLEEP);
+		bcopy(args, lorec, sizeof (mds_lorec_t));
+
+		ASSERT(egp->cp != NULL);
+		sp = mds_findsession_by_clid(mds_server, egp->cp->clientid);
+		if (sp == NULL) {
+			kmem_free(lorec, sizeof (mds_lorec_t));
+			return;
+		}
+		lorec->lor_sess = sp;	/* hold courtesy of findsession */
+
+		(void) thread_create(NULL, 0, mds_do_lorecall, lorec, 0, &p0,
+		    TS_RUN, minclsyspri);
+	}
+}
+
+/*
+ * Layout Recall by File
+ */
+static void
+file_lor(rfs4_entry_t entry, void *arg)
 {
 	mds_lorec_t *lorec;
 
 	lorec = kmem_alloc(sizeof (mds_lorec_t), KM_SLEEP);
 	bcopy(arg, lorec, sizeof (mds_lorec_t));
-	lorec->lor_sess = (mds_session_t *)u_entry;
+	lorec->lor_sess = (mds_session_t *)entry;
 
-	(void) thread_create(NULL, 0, mds_do_lorecall, lorec, 0, &p0,
-	    TS_RUN, minclsyspri);
-}
-
-void
-inst_lorecall(nfs_server_instance_t *instp, void *args)
-{
-	if (instp->mds_session_tab != NULL)
-		rfs4_dbe_walk(instp->mds_session_tab,
-		    mds_sess_lorecall_callout, args);
+	(void) thread_create(NULL, 0, mds_do_lorecall, lorec, 0, &p0, TS_RUN,
+	    minclsyspri);
 }
 
 /*
@@ -1645,56 +1867,57 @@ inst_lorecall(nfs_server_instance_t *instp, void *args)
 static int
 mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 {
-	int error;
-	nfs_fh4 fh4;
-	struct exportinfo *exi;
-	mds_lorec_t lorec;
-	vnode_t *vp = NULL, *dvp = NULL;
+	int			 error;
+	nfs_fh4			 fh4;
+	struct exportinfo	*exi;
+	mds_lorec_t		 lorec;
+	vnode_t			*vp = NULL;
+	vnode_t			*dvp = NULL;
+	rfs4_file_t		*fp = NULL;
+	rfs4_client_t		*cp = NULL;
+	rfs41_grant_list_t	*glp = NULL;
+	mds_session_t		*sp = NULL;
 
-	/*
-	 * XXX - This code works for only one clientid. The code
-	 *	blasts layout recalls to all sessions in the dbe
-	 *	database. We either need to keep an outstanding
-	 *	layout list per clientid or have some way to find
-	 *	per-FSID and per-CLIENT layouts efficiently.
-	 */
-	if ((args->lo_type != LAYOUTRECALL4_FILE) &&
-	    (args->lo_type != LAYOUTRECALL4_FSID) &&
-	    (args->lo_type != LAYOUTRECALL4_ALL)) {
+	lorec.lor_type = args->lo_type;
+	switch (args->lo_type) {
+	case LAYOUTRECALL4_ALL:
+		if (mds_server->mds_session_tab == NULL)
+			return (ECANCELED);
+
+		rfs4_dbe_walk(mds_server->mds_session_tab, all_lor, &lorec);
+		return (0);
+
+	case LAYOUTRECALL4_FILE:
+	case LAYOUTRECALL4_FSID:
+		break;
+
+	default:
 		return (EINVAL);
 	}
-	lorec.lor_type = args->lo_type;
 
-	if (lorec.lor_type == LAYOUTRECALL4_ALL) {
-		nsi_walk(inst_lorecall, &lorec);
-		return (0);
-	}
-	error = lookupname(args->lo_fname, UIO_SYSSPACE, FOLLOW, &dvp, &vp);
-	if (!error && vp == NULL) {
-		/*
-		 * Last component of fname not found
-		 */
-		if (dvp != NULL)
-			VN_RELE(dvp);
-		error = ENOENT;
-	}
-	if (error)
+	if (error = lookupname(args->lo_fname, UIO_SYSSPACE, FOLLOW, &dvp, &vp))
 		return (error);
 
+	if (vp == NULL) {
+		if (dvp != NULL)
+			VN_RELE(dvp);
+		return (ENOENT);
+	}
+
 	/*
-	 * 'vp' may be an AUTOFS node, so we perform a
-	 * VOP_ACCESS() to trigger the mount of the
-	 * intended filesystem, so we can share the intended
-	 * filesystem instead of the AUTOFS filesystem.
+	 * 'vp' may be an AUTOFS node, so we perform a VOP_ACCESS()
+	 * to trigger the mount of the intended filesystem, so we
+	 * can share the intended filesystem instead of the AUTOFS
+	 * filesystem.
 	 */
 	(void) VOP_ACCESS(vp, 0, 0, cr, NULL);
 
 	/*
-	 * We're interested in the top most filesystem.
-	 * This is specially important when uap->dname is a trigger
-	 * AUTOFS node, since we're really interested in sharing the
+	 * We're interested in the top most filesystem. This is
+	 * specially important when uap->dname is a trigger AUTOFS
+	 * node, since we're really interested in sharing the
 	 * filesystem AUTOFS mounted as result of the VOP_ACCESS()
-	 * call not the AUTOFS node itself.
+	 * call, not the AUTOFS node itself.
 	 */
 	if (vn_mountedvfs(vp) != NULL) {
 		if (error = traverse(&vp))
@@ -1702,8 +1925,9 @@ mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 	}
 
 	/*
-	 * The last arg for nfs_vptoexi says to create a v4 FH (instead of v3).
-	 * This will need to be changed to select the new MDS FH format.
+	 * The last arg for nfs_vptoexi says to create a v4 FH
+	 * (instead of v3). This will need to be changed to
+	 * select the new MDS FH format.
 	 */
 	rw_enter(&exported_lock, RW_READER);
 	exi = nfs_vptoexi(dvp, vp, cr, NULL, &error, TRUE);
@@ -1715,48 +1939,106 @@ mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 	if (exi == NULL)
 		goto errout;
 
-
 	fh4.nfs_fh4_val = lorec.lor_fh.fh_buf;
 	error = mknfs41_fh(&fh4, vp, exi);
 	lorec.lor_fh.fh_len = fh4.nfs_fh4_len;
 	lorec.lor_sess = NULL;
 
-	/*
-	 * set fsid just like rfs4_fattr4_fsid()
-	 */
-	if (exi->exi_volatile_dev) {
-		int *pmaj = (int *)&lorec.lor_fsid.major;
-
-		pmaj[0] = exi->exi_fsid.val[0];
-		pmaj[1] = exi->exi_fsid.val[1];
-		lorec.lor_fsid.minor = 0;
-	} else {
-		vattr_t va;
-
-		va.va_mask = AT_FSID | AT_TYPE;
-		error = rfs4_vop_getattr(vp, &va, 0, cr);
-
-		if (error == 0 && va.va_type != VREG)
-			error = EINVAL;
-		if (error)
+	switch (lorec.lor_type) {
+	case LAYOUTRECALL4_FILE:
+		mutex_enter(&vp->v_lock);
+		fp = (rfs4_file_t *)vsd_get(vp, mds_server->vkey);
+		mutex_exit(&vp->v_lock);
+		if (fp == NULL) {
+			error = EIO;
 			goto errout;
+		}
 
-		lorec.lor_fsid.major = getmajor(va.va_fsid);
-		lorec.lor_fsid.minor = getminor(va.va_fsid);
+		/*
+		 * There may be a cleaner way to run the per-file lists,
+		 * but this works for now. This sends a cb_lo_recall to
+		 * the clients that have an active layout for the file,
+		 * only. Stop the blasting !
+		 */
+		glp = fp->lo_grant_list.next;
+		for (; glp && glp->lgp; glp = glp->next) {
+
+			if ((cp = glp->lgp->cp) == NULL)
+				continue;	/* internal inconsistency ? */
+
+			rfs41_lo_grant_hold(glp->lgp);
+			sp = mds_findsession_by_clid(mds_server, cp->clientid);
+			if (sp != NULL) {
+				/*
+				 * Recall in progress !
+				 *
+				 * As per spec rules, bump up the seqid (of
+				 * the stateid) and make sure we store it in
+				 * the layout grant info; this will eventually
+				 * be used for layout race detection.
+				 */
+				rfs4_dbe_lock(glp->lgp->dbe);
+
+				glp->lgp->lo_status = LO_RECALL_INPROG;
+				rfs41_lo_seqid(&glp->lgp->lo_stateid);
+
+				mutex_enter(&glp->lgp->lo_lock);
+				glp->lgp->lor_seqid =
+				    glp->lgp->lo_stateid.v41_bits.chgseq;
+				mutex_exit(&glp->lgp->lo_lock);
+
+				bcopy(&glp->lgp->lo_stateid.stateid,
+				    &lorec.lor_stid, sizeof (stateid4));
+				lorec.lor_lgp = glp->lgp;
+				rfs41_lo_grant_hold(glp->lgp);
+
+				rfs4_dbe_unlock(glp->lgp->dbe);
+				file_lor((rfs4_entry_t)sp, (void *)&lorec);
+			}
+			rfs41_lo_grant_rele(glp->lgp);
+		}
+		break;
+
+	case LAYOUTRECALL4_FSID:
+		/*
+		 * set fsid just like rfs4_fattr4_fsid()
+		 */
+		if (exi->exi_volatile_dev) {
+			int *pmaj = (int *)&lorec.lor_fsid.major;
+
+			pmaj[0] = exi->exi_fsid.val[0];
+			pmaj[1] = exi->exi_fsid.val[1];
+			lorec.lor_fsid.minor = 0;
+		} else {
+			vattr_t va;
+
+			va.va_mask = AT_FSID | AT_TYPE;
+			error = rfs4_vop_getattr(vp, &va, 0, cr);
+
+			if (error == 0 && va.va_type != VREG)
+				error = EINVAL;
+			if (error)
+				goto errout;
+
+			lorec.lor_fsid.major = getmajor(va.va_fsid);
+			lorec.lor_fsid.minor = getminor(va.va_fsid);
+		}
+
+		if (mds_server->mds_ever_grant_tab == NULL) {
+			error = ECANCELED;
+			goto errout;
+		}
+
+		lorec.lor_vp = vp;
+		VN_HOLD(vp);
+		rfs4_dbe_walk(mds_server->mds_ever_grant_tab, fsid_lor, &lorec);
+		VN_RELE(vp);
+		break;
+
+	default:
+		break;
 	}
 
-	/*
-	 * JFB (just for bakeoff): simply push layout recall
-	 * to the back chan of every session.  The "real" code
-	 * will first find the rfs4_file_t using the FH created
-	 * above, and the file struct will refer to the layout.
-	 * Either the layout struct will contain a list of
-	 * rfs4_client_t structs granted the layout or another
-	 * table/index will be created exist to associate a
-	 * layout with the set of clients granted the layout.
-	 */
-	if (!error)
-		nsi_walk(inst_lorecall, &lorec);
 errout:
 	VN_RELE(vp);
 	if (dvp != NULL)

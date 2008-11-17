@@ -84,9 +84,20 @@ typedef struct mds_layout {
 	odl		*odl;
 } mds_layout_t;
 
+#define	LO_GRANTED		0x00000001
+#define	LO_RECALL_INPROG	0x00000002
+#define	LO_RECALLED		0x00000004
+#define	LO_RETURNED		0x00000008
+
 typedef struct mds_layout_grant {
 	rfs4_dbe_t	*dbe;
 	stateid_t	lo_stateid;
+	uint32_t	lo_status;
+	kmutex_t	lo_lock;
+	struct {
+		uint32_t	lr_seqid;
+		uint32_t	lr_reply;
+	}		 lo_rec;
 	mds_layout_t    *lop;
 	rfs4_client_t   *cp;
 	rfs4_file_t	*fp;
@@ -94,6 +105,9 @@ typedef struct mds_layout_grant {
 	rfs41_grant_list_t lo_grant_list;
 	/* XXX layout byte range */
 } mds_layout_grant_t;
+
+#define	lor_seqid	lo_rec.lr_seqid
+#define	lor_reply	lo_rec.lr_reply
 
 typedef struct mds_ever_grant {
 	rfs4_dbe_t	*dbe;
