@@ -62,6 +62,7 @@
 
 #include <nfs/nfs.h>
 #include <nfs/export.h>
+#include <nfs/nfs_cmd.h>
 #include <nfs/lm.h>
 #include <nfs/nfs4.h>
 #include <nfs/nfs41_filehandle.h>
@@ -903,6 +904,8 @@ rfs4_op_secinfo(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	utf8string *utfnm;
 	uint_t len, dotdot;
 	char *nm;
+	struct sockaddr *ca;
+	char *name = NULL;
 
 	DTRACE_NFSV4_2(op__secinfo__start, struct compound_state *, cs,
 	    SECINFO4args *, args);
@@ -975,9 +978,23 @@ rfs4_op_secinfo(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		kmem_free(nm, len);
 		goto out;
 	}
+	/* If necessary, convert to UTF-8 for illbehaved clients */
 
-	*cs->statusp = resp->status = do_rfs4_op_secinfo(cs, nm, dotdot, resp);
+	ca = (struct sockaddr *)svc_getrpccaller(req->rq_xprt)->buf;
+	name = nfscmd_convname(ca, cs->exi, nm, NFSCMD_CONV_INBOUND,
+	    MAXPATHLEN  + 1);
 
+	if (name == NULL) {
+		*cs->statusp = resp->status = NFS4ERR_INVAL;
+		kmem_free(nm, len);
+		goto out;
+	}
+
+
+	*cs->statusp = resp->status = do_rfs4_op_secinfo(cs, name, dotdot, resp);
+
+	if (name != nm)
+		kmem_free(name, MAXPATHLEN + 1);
 	kmem_free(nm, len);
 
 out:
@@ -1309,6 +1326,9 @@ rfs4_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	struct nfs4_ntov_table ntov;
 	struct statvfs64 sb;
 	nfsstat4 status;
+	struct sockaddr *ca;
+	char *name = NULL;
+	char *lname = NULL;
 	attrvers_t avers;
 
 	DTRACE_NFSV4_2(op__create__start, struct compound_state *, cs,
@@ -1374,6 +1394,17 @@ rfs4_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	if (len > MAXNAMELEN) {
 		*cs->statusp = resp->status = NFS4ERR_NAMETOOLONG;
+		kmem_free(nm, len);
+		goto out;
+	}
+
+	/* If necessary, convert to UTF-8 for poorly behaved clients */
+	ca = (struct sockaddr *)svc_getrpccaller(req->rq_xprt)->buf;
+	name = nfscmd_convname(ca, cs->exi, nm, NFSCMD_CONV_INBOUND,
+	    MAXPATHLEN  + 1);
+
+	if (name == NULL) {
+		*cs->statusp = resp->status = NFS4ERR_INVAL;
 		kmem_free(nm, len);
 		goto out;
 	}
@@ -1456,6 +1487,8 @@ rfs4_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 		if (lnm == NULL) {
 			*cs->statusp = resp->status = NFS4ERR_INVAL;
+			if (name != nm)
+				kmem_free(name, MAXPATHLEN + 1);
 			kmem_free(nm, len);
 			nfs4_ntov_table_free(&ntov, &sarg);
 			resp->attrset = NFS4_EMPTY_ATTRMAP(avers);
@@ -1464,6 +1497,8 @@ rfs4_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 		if (llen > MAXPATHLEN) {
 			*cs->statusp = resp->status = NFS4ERR_NAMETOOLONG;
+			if (name != nm)
+				kmem_free(name, MAXPATHLEN + 1);
 			kmem_free(nm, len);
 			kmem_free(lnm, llen);
 			nfs4_ntov_table_free(&ntov, &sarg);
@@ -1471,7 +1506,23 @@ rfs4_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 			goto out;
 		}
 
+		lname = nfscmd_convname(ca, cs->exi, lnm,
+		    NFSCMD_CONV_INBOUND, MAXPATHLEN  + 1);
+
+		if (lname == NULL) {
+			*cs->statusp = resp->status = NFS4ERR_SERVERFAULT;
+			if (name != nm)
+				kmem_free(name, MAXPATHLEN + 1);
+			kmem_free(nm, len);
+			kmem_free(lnm, llen);
+			nfs4_ntov_table_free(&ntov, &sarg);
+			resp->attrset = 0;
+			goto out;
+		}
+
 		error = VOP_SYMLINK(dvp, nm, vap, lnm, cr, NULL, 0);
+		if (lname != lnm)
+			kmem_free(lname, MAXPATHLEN + 1);
 		if (lnm != NULL)
 			kmem_free(lnm, llen);
 		if (error)
@@ -1514,6 +1565,8 @@ rfs4_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		vp = do_rfs4_op_mknod(args, resp, req, cs, vap, nm);
 
 		if (vp == NULL) {
+			if (name != nm)
+				kmem_free(name, MAXPATHLEN + 1);
 			kmem_free(nm, len);
 			nfs4_ntov_table_free(&ntov, &sarg);
 			resp->attrset = NFS4_EMPTY_ATTRMAP(avers);
@@ -1530,6 +1583,8 @@ rfs4_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 		break;
 	}
+	if (name != nm)
+		kmem_free(name, MAXPATHLEN + 1);
 	kmem_free(nm, len);
 
 	if (error) {
@@ -2214,6 +2269,8 @@ rfs4_op_link(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	struct vattr bdva, idva, adva;
 	char *nm;
 	uint_t  len;
+	struct sockaddr *ca;
+	char *name = NULL;
 
 	DTRACE_NFSV4_2(op__link__start, struct compound_state *, cs,
 	    LINK4args *, args);
@@ -2295,10 +2352,22 @@ rfs4_op_link(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		goto out;
 	}
 
+	ca = (struct sockaddr *)svc_getrpccaller(req->rq_xprt)->buf;
+	name = nfscmd_convname(ca, cs->exi, nm, NFSCMD_CONV_INBOUND,
+	    MAXPATHLEN  + 1);
+
+	if (name == NULL) {
+		*cs->statusp = resp->status = NFS4ERR_INVAL;
+		kmem_free(nm, len);
+		goto out;
+	}
+
 	NFS4_SET_FATTR4_CHANGE(resp->cinfo.before, bdva.va_ctime)
 
-	error = VOP_LINK(dvp, vp, nm, cs->cr, NULL, 0);
+	error = VOP_LINK(dvp, vp, name, cs->cr, NULL, 0);
 
+	if (nm != name)
+		kmem_free(name, MAXPATHLEN + 1);
 	kmem_free(nm, len);
 
 	/*
@@ -2644,6 +2713,8 @@ rfs4_op_lookup(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	LOOKUP4res *resp = &resop->nfs_resop4_u.oplookup;
 	char *nm;
 	uint_t len;
+	struct sockaddr *ca;
+	char *name = NULL;
 
 	DTRACE_NFSV4_2(op__lookup__start, struct compound_state *, cs,
 	    LOOKUP4args *, args);
@@ -2680,8 +2751,22 @@ rfs4_op_lookup(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		goto out;
 	}
 
-	*cs->statusp = resp->status = do_rfs4_op_lookup(nm, len, req, cs);
+	/* If necessary, convert to UTF-8 for illbehaved clients */
 
+	ca = (struct sockaddr *)svc_getrpccaller(req->rq_xprt)->buf;
+	name = nfscmd_convname(ca, cs->exi, nm, NFSCMD_CONV_INBOUND,
+	    MAXPATHLEN  + 1);
+
+	if (name == NULL) {
+		*cs->statusp = resp->status = NFS4ERR_INVAL;
+		kmem_free(nm, len);
+		goto out;
+	}
+
+	*cs->statusp = resp->status = do_rfs4_op_lookup(name, len, req, cs);
+
+	if (name != nm)
+		kmem_free(name, MAXPATHLEN + 1);
 	kmem_free(nm, len);
 
 out:
@@ -3334,6 +3419,8 @@ rfs4_op_readlink(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	struct vattr va;
 	struct uio uio;
 	char *data;
+	struct sockaddr *ca;
+	char *name = NULL;
 
 	DTRACE_NFSV4_1(op__readlink__start, struct compound_state *, cs);
 
@@ -3392,11 +3479,25 @@ rfs4_op_readlink(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	*(data + MAXPATHLEN - uio.uio_resid) = '\0';
 
+	ca = (struct sockaddr *)svc_getrpccaller(req->rq_xprt)->buf;
+	name = nfscmd_convname(ca, cs->exi, data, NFSCMD_CONV_OUTBOUND,
+	    MAXPATHLEN  + 1);
+
+	if (name == NULL) {
+		/*
+		 * Even though the conversion failed, we return
+		 * something. We just don't translate it.
+		 */
+		name = data;
+	}
+
 	/*
 	 * treat link name as data
 	 */
-	(void) str_to_utf8(data, &resp->link);
+	(void) str_to_utf8(name, &resp->link);
 
+	if (name != data)
+		kmem_free(name, MAXPATHLEN + 1);
 	kmem_free((caddr_t)data, (uint_t)MAXPATHLEN + 1);
 	*cs->statusp = resp->status = NFS4_OK;
 
@@ -3613,6 +3714,8 @@ rfs4_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	rfs4_file_t *fp;
 	int in_crit = 0;
 	bslabel_t *clabel;
+	struct sockaddr *ca;
+	char *name = NULL;
 
 	DTRACE_NFSV4_2(op__remove__start, struct compound_state *, cs,
 	    REMOVE4args *, args);
@@ -3669,6 +3772,18 @@ rfs4_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		goto out;
 	}
 
+	/* If necessary, convert to UTF-8 for illbehaved clients */
+
+	ca = (struct sockaddr *)svc_getrpccaller(req->rq_xprt)->buf;
+	name = nfscmd_convname(ca, cs->exi, nm, NFSCMD_CONV_INBOUND,
+	    MAXPATHLEN  + 1);
+
+	if (name == NULL) {
+		*cs->statusp = resp->status = NFS4ERR_INVAL;
+		kmem_free(nm, len);
+		goto out;
+	}
+
 	/*
 	 * Lookup the file to determine type and while we are see if
 	 * there is a file struct around and check for delegation.
@@ -3676,18 +3791,22 @@ rfs4_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 * it causes an update, cinfo.before will not match, which will
 	 * trigger a cache flush even if atomic is TRUE.
 	 */
-	fp = rfs4_lookup_and_findfile(dvp, nm, &vp, &error, cs);
+	if (fp = rfs4_lookup_and_findfile(dvp, name, &vp, &error, cs->cr)) {
 	if (vp != NULL) {
 		/* use the vp to check all instances for a delegation */
 		if (rfs4_check_delegated(FWRITE, vp, TRUE, TRUE, TRUE, NULL)) {
 			VN_RELE(vp);
 			rfs4_file_rele(fp);
 			*cs->statusp = resp->status = NFS4ERR_DELAY;
+			if (nm != name)
+				kmem_free(name, MAXPATHLEN + 1);
 			kmem_free(nm, len);
 			goto out;
 		}
 	} else {	/* Didn't find anything to remove */
 		*cs->statusp = resp->status = error;
+		if (nm != name)
+			kmem_free(name, MAXPATHLEN + 1);
 		kmem_free(nm, len);
 		goto out;
 	}
@@ -3697,6 +3816,8 @@ rfs4_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		in_crit = 1;
 		if (nbl_conflict(vp, NBL_REMOVE, 0, 0, 0, NULL)) {
 			*cs->statusp = resp->status = NFS4ERR_FILE_OPEN;
+			if (nm != name)
+				kmem_free(name, MAXPATHLEN + 1);
 			kmem_free(nm, len);
 			nbl_end_crit(vp);
 			VN_RELE(vp);
@@ -3718,6 +3839,8 @@ rfs4_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		if (!blequal(&l_admin_low->tsl_label, clabel)) {
 			if (!do_rfs_label_check(clabel, vp, EQUALITY_CHECK)) {
 				*cs->statusp = resp->status = NFS4ERR_ACCESS;
+				if (name != nm)
+					kmem_free(name, MAXPATHLEN + 1);
 				kmem_free(nm, len);
 				if (in_crit)
 					nbl_end_crit(vp);
@@ -3736,6 +3859,8 @@ rfs4_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	error = VOP_GETATTR(dvp, &bdva, 0, cs->cr, NULL);
 	if (error) {
 		*cs->statusp = resp->status = puterrno4(error);
+		if (nm != name)
+			kmem_free(name, MAXPATHLEN + 1);
 		kmem_free(nm, len);
 		goto out;
 	}
@@ -3761,7 +3886,7 @@ rfs4_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 				error = ENOTEMPTY;
 		}
 	} else {
-		if ((error = VOP_REMOVE(dvp, nm, cs->cr, NULL, 0)) == 0 &&
+		if ((error = VOP_REMOVE(dvp, name, cs->cr, NULL, 0)) == 0 &&
 		    fp != NULL) {
 			struct vattr va;
 			vnode_t *tvp;
@@ -3800,6 +3925,8 @@ rfs4_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		rfs4_clear_dont_grant(cs->instp, fp);
 		rfs4_file_rele(fp);
 	}
+	if (nm != name)
+		kmem_free(name, MAXPATHLEN + 1);
 	kmem_free(nm, len);
 
 	if (error) {
@@ -3875,6 +4002,9 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	int in_crit_src, in_crit_targ;
 	int fp_rele_grant_hold, sfp_rele_grant_hold;
 	bslabel_t *clabel;
+	struct sockaddr *ca;
+	char *converted_onm = NULL;
+	char *converted_nnm = NULL;
 
 	DTRACE_NFSV4_2(op__rename__start, struct compound_state *, cs,
 	    RENAME4args *, args);
@@ -3946,13 +4076,38 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		*cs->statusp = resp->status = NFS4ERR_INVAL;
 		goto out;
 	}
+	ca = (struct sockaddr *)svc_getrpccaller(req->rq_xprt)->buf;
+	nlen = MAXPATHLEN + 1;
+	converted_onm = nfscmd_convname(ca, cs->exi, onm, NFSCMD_CONV_INBOUND,
+	    nlen);
 
-	nnm = utf8_to_fn(&args->newname, &nlen, NULL);
-	if (nnm == NULL) {
+	if (converted_onm == NULL) {
 		*cs->statusp = resp->status = NFS4ERR_INVAL;
 		kmem_free(onm, olen);
 		goto out;
 	}
+
+	nnm = utf8_to_fn(&args->newname, &nlen, NULL);
+	if (nnm == NULL) {
+		*cs->statusp = resp->status = NFS4ERR_INVAL;
+		if (onm != converted_onm)
+			kmem_free(converted_onm, MAXPATHLEN + 1);
+		kmem_free(onm, olen);
+		goto out;
+	}
+	converted_nnm = nfscmd_convname(ca, cs->exi, nnm, NFSCMD_CONV_INBOUND,
+	    MAXPATHLEN  + 1);
+
+	if (converted_nnm == NULL) {
+		*cs->statusp = resp->status = NFS4ERR_INVAL;
+		kmem_free(nnm, nlen);
+		nnm = NULL;
+		if (onm != converted_onm)
+			kmem_free(converted_onm, MAXPATHLEN + 1);
+		kmem_free(onm, olen);
+		goto out;
+	}
+
 
 	if (olen > MAXNAMELEN || nlen > MAXNAMELEN) {
 		*cs->statusp = resp->status = NFS4ERR_NAMETOOLONG;
@@ -3964,7 +4119,11 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	if (rdonly4(cs->exi, cs->vp, req)) {
 		*cs->statusp = resp->status = NFS4ERR_ROFS;
+		if (onm != converted_onm)
+			kmem_free(converted_onm, MAXPATHLEN + 1);
 		kmem_free(onm, olen);
+		if (nnm != converted_nnm)
+			kmem_free(converted_nnm, MAXPATHLEN + 1);
 		kmem_free(nnm, nlen);
 		goto out;
 	}
@@ -3980,7 +4139,7 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 			if (!do_rfs_label_check(clabel, ndvp,
 			    EQUALITY_CHECK)) {
 				*cs->statusp = resp->status = NFS4ERR_ACCESS;
-				goto out;
+				goto err_out;
 			}
 		}
 	}
@@ -3991,7 +4150,8 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 * it causes an update, cinfo.before will not match, which will
 	 * trigger a cache flush even if atomic is TRUE.
 	 */
-	sfp = rfs4_lookup_and_findfile(odvp, onm, &srcvp, &error, cs);
+	if (sfp = rfs4_lookup_and_findfile(odvp, converted_onm, &srcvp,
+	    &error, cs)) {
 	if (srcvp != NULL) {
 		/* use the vp to check all instances for a delegation */
 		if (rfs4_check_delegated(FWRITE, srcvp, TRUE, TRUE, TRUE,
@@ -4001,7 +4161,11 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		}
 	} else {
 		*cs->statusp = resp->status = puterrno4(error);
+		if (onm != converted_onm)
+			kmem_free(converted_onm, MAXPATHLEN + 1);
 		kmem_free(onm, olen);
+		if (nnm != converted_nnm)
+			kmem_free(converted_onm, MAXPATHLEN + 1);
 		kmem_free(nnm, nlen);
 		goto out;
 	}
@@ -4009,7 +4173,8 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	sfp_rele_grant_hold = 1;
 
 	/* Does the destination exist and a file and have a delegation? */
-	fp = rfs4_lookup_and_findfile(ndvp, nnm, &targvp, NULL, cs);
+	if (fp = rfs4_lookup_and_findfile(ndvp, converted_nnm, &targvp,
+	    NULL, cs)) {
 	if (targvp != NULL) {
 		/* use the vp to check all instances for a delegation */
 		if (rfs4_check_delegated(FWRITE, targvp, TRUE, TRUE, TRUE,
@@ -4055,8 +4220,8 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	NFS4_SET_FATTR4_CHANGE(resp->source_cinfo.before, obdva.va_ctime)
 	NFS4_SET_FATTR4_CHANGE(resp->target_cinfo.before, nbdva.va_ctime)
 
-	if ((error = VOP_RENAME(odvp, onm, ndvp, nnm, cs->cr, NULL, 0)) == 0 &&
-	    fp != NULL) {
+	if ((error = VOP_RENAME(odvp, converted_onm, ndvp, converted_nnm,
+	    cs->cr, NULL, 0)) == 0 && fp != NULL) {
 		struct vattr va;
 		vnode_t *tvp;
 
@@ -4101,7 +4266,11 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		rfs4_file_rele(fp);
 	}
 
+	if (converted_onm != onm)
+		kmem_free(converted_onm, MAXPATHLEN + 1);
 	kmem_free(onm, olen);
+	if (converted_nnm != nnm)
+		kmem_free(converted_nnm, MAXPATHLEN + 1);
 	kmem_free(nnm, nlen);
 
 	/*
@@ -4195,8 +4364,14 @@ out:
 	return;
 
 err_out:
-	kmem_free(onm, olen);
-	kmem_free(nnm, nlen);
+	if (onm != converted_onm)
+		kmem_free(converted_onm, MAXPATHLEN + 1);
+	if (onm != NULL)
+		kmem_free(onm, olen);
+	if (nnm != converted_nnm)
+		kmem_free(converted_nnm, MAXPATHLEN + 1);
+	if (nnm != NULL)
+		kmem_free(nnm, nlen);
 
 	if (in_crit_src) nbl_end_crit(srcvp);
 	if (in_crit_targ) nbl_end_crit(targvp);
@@ -5727,6 +5902,8 @@ rfs4_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
 	caller_context_t ct;
 	component4 *component;
 	bslabel_t *clabel;
+	struct sockaddr *ca;
+	char *name = NULL;
 	attrvers_t avers;
 
 	avers = RFS4_ATTRVERS(cs);
@@ -5860,8 +6037,21 @@ rfs4_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
 		break;
 	}
 
-	status = create_vnode(dvp, nm, vap, args->mode, mtime,
+	/* If necessary, convert to UTF-8 for illbehaved clients */
+
+	ca = (struct sockaddr *)svc_getrpccaller(req->rq_xprt)->buf;
+	name = nfscmd_convname(ca, cs->exi, nm, NFSCMD_CONV_INBOUND,
+	    MAXPATHLEN  + 1);
+
+	if (name == NULL) {
+		kmem_free(nm, buflen);
+		return (NFS4ERR_SERVERFAULT);
+	}
+
+	status = create_vnode(dvp, name, vap, args->mode, mtime,
 	    cs->cr, &vp, &created);
+	if (nm != name)
+		kmem_free(name, MAXPATHLEN + 1);
 	kmem_free(nm, buflen);
 
 	if (status != NFS4_OK) {
@@ -8025,7 +8215,6 @@ retry:
 		status = NFS4ERR_NOTSUPP;
 		break;
 	default:
-		cmn_err(CE_WARN, "rfs4_do_lock: unexpected errno (%d)", error);
 		status = NFS4ERR_SERVERFAULT;
 		break;
 	}

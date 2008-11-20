@@ -113,6 +113,7 @@ SUBDIRS += \
 	libinetcfg	\
 	libinetutil	\
 	libipmp		\
+	libiscsit	\
 	libiscsitgt	\
 	libkmf		\
 	libkstat	\
@@ -242,6 +243,7 @@ SUBDIRS += \
 	libshare	\
 	libsqlite	\
 	libidmap	\
+	libadutils	\
 	libdserv	\
 	libnfs		\
 	libipmi		\
@@ -390,6 +392,7 @@ HDRSUBDIRS=		\
 	libipmi		\
 	libipmp		\
 	libipp		\
+	libiscsit	\
 	libiscsitgt	\
 	libkstat	\
 	libkvm		\
@@ -529,6 +532,8 @@ gss_mechs/mech_krb5:	libgss libnsl libsocket libresolv pkcs11
 libadt_jni:	libbsm
 $(CLOSED_BUILD)libc:		$(CLOSED)/lib/libc_i18n
 libast: 	libsocket
+libadutils: 	libldap5 libidmap
+nsswitch:	libadutils
 libbsm:		libtsol
 libcmd: 	libast libsocket libnsl
 libcmdutils:	libavl
@@ -549,6 +554,7 @@ libfstyp:	libnvpair
 libelfsign:	libcryptoutil libkmf
 libidmap:	libnsl
 libinetcfg:	libnsl libsocket libdlpi
+libiscsit:	libc libnvpair libstmf libuuid libnsl
 libkmf:		libcryptoutil pkcs11 openssl
 libnsl:		libmd5 libscf
 libmapid:	libresolv

@@ -214,7 +214,9 @@ COMMON_SUBDIRS=		\
 	itutools	\
 	iscsiadm	\
 	iscsid		\
+	iscsitsvc	\
 	isns		\
+	itadm		\
 	java		\
 	join		\
 	kbd		\
@@ -606,6 +608,7 @@ MSGSUBDIRS=		\
 	iscsiadm	\
 	iscsid		\
 	isns		\
+	itadm		\
 	join		\
 	kbd		\
 	krb5		\

@@ -247,34 +247,31 @@ typedef struct tcp_s {
 
 		tcp_bind_pending : 1,	/* Client is waiting for bind ack */
 		tcp_unbind_pending : 1, /* Client sent T_UNBIND_REQ */
-		tcp_deferred_clean_death : 1,
-					/* defer tcp endpoint cleanup etc. */
 		tcp_ka_enabled: 1,	/* Connection KeepAlive Timer needed */
-
 		tcp_zero_win_probe: 1,	/* Zero win probing is in progress */
+
 		tcp_loopback: 1,	/* src and dst are the same machine */
 		tcp_localnet: 1,	/* src and dst are on the same subnet */
 		tcp_syn_defense: 1,	/* For defense against SYN attack */
 #define	tcp_dontdrop	tcp_syn_defense
-
 		tcp_set_timer : 1,
-		tcp_active_open: 1,	/* This is a active open */
-		tcp_timeout : 1,	/* qbufcall failed, qtimeout pending */
-		tcp_rexmit : 1,		/* TCP is retransmitting */
 
+		tcp_active_open: 1,	/* This is a active open */
+		tcp_rexmit : 1,		/* TCP is retransmitting */
 		tcp_snd_sack_ok : 1,	/* Can use SACK for this connection */
 		tcp_empty_flag : 1,	/* Empty flag for future use */
+
 		tcp_recvdstaddr : 1,	/* return T_EXTCONN_IND with dst addr */
 		tcp_hwcksum : 1,	/* The NIC is capable of hwcksum */
-
 		tcp_ip_forward_progress : 1,
 		tcp_anon_priv_bind : 1,
+
 		tcp_ecn_ok : 1,		/* Can use ECN for this connection */
 		tcp_ecn_echo_on : 1,	/* Need to do ECN echo */
-
 		tcp_ecn_cwr_sent : 1,	/* ECN_CWR has been sent */
 		tcp_cwr : 1,		/* Cwnd has reduced recently */
-		tcp_pad_to_bit31 : 2;
+
+		tcp_pad_to_bit31 : 4;
 	/* Following manipulated by TCP under squeue protection */
 	uint32_t
 		tcp_mdt : 1,		/* Lower layer is capable of MDT */
@@ -295,7 +292,8 @@ typedef struct tcp_s {
 		tcp_cork : 1,		/* tcp_cork option */
 		tcp_tconnind_started : 1, /* conn_ind message is being sent */
 		tcp_lso :1,		/* Lower layer is capable of LSO */
-		tcp_pad_to_bit_31 : 17;
+		tcp_refuse :1,		/* Connection needs refusing */
+		tcp_pad_to_bit_31 : 16;
 
 	uint32_t	tcp_if_mtu;	/* Outgoing interface MTU. */
 
@@ -396,6 +394,10 @@ typedef struct tcp_s {
 	int	tcp_ip_hdr_len;		/* Byte len of our current IPvx hdr */
 	tcph_t	*tcp_tcph;		/* tcp header within combined hdr */
 	int32_t	tcp_tcp_hdr_len;	/* tcp header len within combined */
+	/* Saved peer headers in the case of re-fusion */
+	ipha_t	tcp_saved_ipha;
+	ip6_t	tcp_saved_ip6h;
+	tcph_t	tcp_saved_tcph;
 
 	uint32_t tcp_sum;		/* checksum to compensate for source */
 					/* routed packets. Host byte order */
@@ -404,7 +406,7 @@ typedef struct tcp_s {
 
 	kmutex_t	*tcp_acceptor_lockp;	/* Ptr to tf_lock */
 
-	timeout_id_t	tcp_ordrelid;		/* qbufcall/qtimeout id */
+	mblk_t		*tcp_ordrel_mp;		/* T_ordrel_ind mblk */
 	t_uscalar_t	tcp_acceptor_id;	/* ACCEPTOR_id */
 
 	int		tcp_ipsec_overhead;
@@ -602,6 +604,11 @@ typedef struct tcp_s {
 	 * to a pending user-land uio buffer.
 	 */
 	sodirect_t	*tcp_sodirect;
+
+	/* mblk_t used to enter TCP's squeue from the service routine. */
+	mblk_t		*tcp_rsrv_mp;
+	/* Mutex for accessing tcp_rsrv_mp */
+	kmutex_t	tcp_rsrv_mp_lock;
 
 #ifdef DEBUG
 	pc_t			tcmp_stk[15];

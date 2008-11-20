@@ -77,6 +77,7 @@
 #include <nfs/nfs_clnt.h>
 #include <nfs/nfs_acl.h>
 #include <nfs/nfs_log.h>
+#include <nfs/nfs_cmd.h>
 #include <nfs/lm.h>
 #include <nfs/nfs_dispatch.h>
 #include <nfs/nfs4_drc.h>
@@ -1690,6 +1691,14 @@ common_dispatch(struct svc_req *req, SVCXPRT *xprt, rpcvers_t min_vers,
 				}
 				goto done;
 			}
+
+			/* check to see if we might need charmap */
+			if (exi->exi_export.ex_flags & EX_CHARMAP) {
+				struct sockaddr *ca;
+				ca =  (struct sockaddr *)
+				    svc_getrpccaller(req->rq_xprt)->buf;
+				(void) nfscmd_charmap(exi, ca);
+			}
 		}
 	} else
 		cr = NULL;
@@ -2137,6 +2146,28 @@ checkauth(struct exportinfo *exi, struct svc_req *req, cred_t *cr, int anon_ok,
 			anon_res = crsetugid(cr, exi->exi_export.ex_anon,
 			    exi->exi_export.ex_anon);
 			(void) crsetgroups(cr, 0, NULL);
+		} else if (!stat || crgetuid(cr) == 0 &&
+		    access & NFSAUTH_ROOT) {
+			/*
+			 * It is root, so apply rootid to get real UID
+			 * Find the secinfo structure.  We should be able
+			 * to find it by the time we reach here.
+			 * nfsauth_access() has done the checking.
+			 */
+			secp = NULL;
+			for (i = 0; i < exi->exi_export.ex_seccnt; i++) {
+				struct secinfo *sptr;
+				sptr = &exi->exi_export.ex_secinfo[i];
+				if (sptr->s_secinfo.sc_nfsnum == nfsflavor) {
+					secp = sptr;
+					break;
+				}
+			}
+			if (secp != NULL) {
+				(void) crsetugid(cr, secp->s_rootid,
+				    secp->s_rootid);
+				(void) crsetgroups(cr, 0, NULL);
+			}
 		}
 		break;
 
@@ -2179,10 +2210,11 @@ checkauth(struct exportinfo *exi, struct svc_req *req, cred_t *cr, int anon_ok,
 		 */
 		if (principal && sec_svc_inrootlist(rpcflavor, principal,
 		    secp->s_rootcnt, secp->s_rootnames)) {
-			if (crgetuid(cr) == 0)
+			if (crgetuid(cr) == 0 && secp->s_rootid == 0)
 				return (1);
 
-			(void) crsetugid(cr, 0, 0);
+
+			(void) crsetugid(cr, secp->s_rootid, secp->s_rootid);
 
 			/*
 			 * NOTE: If and when kernel-land privilege tracing is
@@ -2308,6 +2340,27 @@ checkauth4(struct compound_state *cs, struct svc_req *req)
 			anon_res = crsetugid(cr, exi->exi_export.ex_anon,
 			    exi->exi_export.ex_anon);
 			(void) crsetgroups(cr, 0, NULL);
+		} else if (crgetuid(cr) == 0 && access & NFSAUTH_ROOT) {
+			/*
+			 * It is root, so apply rootid to get real UID
+			 * Find the secinfo structure.  We should be able
+			 * to find it by the time we reach here.
+			 * nfsauth_access() has done the checking.
+			 */
+			secp = NULL;
+			for (i = 0; i < exi->exi_export.ex_seccnt; i++) {
+				struct secinfo *sptr;
+				sptr = &exi->exi_export.ex_secinfo[i];
+				if (sptr->s_secinfo.sc_nfsnum == nfsflavor) {
+					secp = &exi->exi_export.ex_secinfo[i];
+					break;
+				}
+			}
+			if (secp != NULL) {
+				(void) crsetugid(cr, secp->s_rootid,
+				    secp->s_rootid);
+				(void) crsetgroups(cr, 0, NULL);
+			}
 		}
 		break;
 
@@ -2345,14 +2398,14 @@ checkauth4(struct compound_state *cs, struct svc_req *req)
 		/*
 		 * Map root principals listed in the share's root= list to root,
 		 * and map any others principals that were mapped to root by RPC
-		 * to anon.
+		 * to anon. If not going to anon, set to rootid (root_mapping).
 		 */
 		if (principal && sec_svc_inrootlist(rpcflavor, principal,
 		    secp->s_rootcnt, secp->s_rootnames)) {
-			if (crgetuid(cr) == 0)
+			if (crgetuid(cr) == 0 && secp->s_rootid == 0)
 				return (1);
 
-			(void) crsetugid(cr, 0, 0);
+			(void) crsetugid(cr, secp->s_rootid, secp->s_rootid);
 
 			/*
 			 * NOTE: If and when kernel-land privilege tracing is
@@ -2669,8 +2722,9 @@ rfs_publicfh_mclookup(char *p, vnode_t *dvp, cred_t *cr, vnode_t **vpp,
 				VN_HOLD(realvp);
 				VN_RELE(*vpp);
 				*vpp = realvp;
-			} else
+			} else {
 				break;
+			}
 		/* LINTED */
 		} while (TRUE);
 

@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * Utility SCSI configuration routines
  */
@@ -359,30 +357,28 @@ scsi_slave(struct scsi_device *devp, int (*callback)())
 	}
 }
 
-
 /*
  * Undo scsi_slave - older interface, but still supported
+ *
+ * NOTE: The 'sd_inq' inquiry data is now freed by scsi_hba/scsi_vhci code
+ * as part of free of scsi_device(9S).
  */
+/*ARGSUSED*/
 void
 scsi_unslave(struct scsi_device *devp)
 {
-	if (devp->sd_inq) {
-		kmem_free((caddr_t)devp->sd_inq, SUN_INQSIZE);
-		devp->sd_inq = (struct scsi_inquiry *)NULL;
-	}
 }
-
 
 /*
  * Undo scsi_probe
+ *
+ * NOTE: The 'sd_inq' inquiry data is now freed by scsi_hba/scsi_vhci code
+ * as part of free of scsi_device(9S).
  */
+/*ARGSUSED*/
 void
 scsi_unprobe(struct scsi_device *devp)
 {
-	if (devp->sd_inq) {
-		kmem_free((caddr_t)devp->sd_inq, SUN_INQSIZE);
-		devp->sd_inq = (struct scsi_inquiry *)NULL;
-	}
 }
 
 /*
@@ -703,6 +699,7 @@ done:
 	    ((SUN_INQSIZE - inq_pkt->pkt_resid) < SUN_MIN_INQLEN)) {
 		rval = SCSIPROBE_NONCCS;
 	} else {
+		ASSERT(inq_pkt->pkt_resid >= 0);
 		bcopy((caddr_t)inq_bp->b_un.b_addr,
 		    (caddr_t)devp->sd_inq, (SUN_INQSIZE - inq_pkt->pkt_resid));
 		rval = SCSIPROBE_EXISTS;

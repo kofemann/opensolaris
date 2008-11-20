@@ -93,6 +93,7 @@ f none kernel/drv/intel_nb5000 755 root sys
 f none kernel/drv/intel_nb5000.conf 644 root sys
 f none kernel/drv/ip 755 root sys
 f none kernel/drv/ip6 755 root sys
+f none kernel/drv/ipnet 755 root sys
 f none kernel/drv/ippctl 755 root sys
 f none kernel/drv/ipsecah 755 root sys
 f none kernel/drv/ipsecesp 755 root sys
@@ -110,6 +111,7 @@ f none kernel/drv/mm 755 root sys
 f none kernel/drv/mpt 755 root sys
 e mptconf kernel/drv/mpt.conf 644 root sys
 f none kernel/drv/mouse8042 755 root sys
+f none kernel/drv/nulldriver 755 root sys
 f none kernel/drv/openeepr 755 root sys
 f none kernel/drv/options 755 root sys
 f none kernel/drv/pci_pci 755 root sys
@@ -309,6 +311,7 @@ f none kernel/drv/amd64/icmp6 755 root sys
 f none kernel/drv/amd64/intel_nb5000 755 root sys
 f none kernel/drv/amd64/ip 755 root sys
 f none kernel/drv/amd64/ip6 755 root sys
+f none kernel/drv/amd64/ipnet 755 root sys
 f none kernel/drv/amd64/ippctl 755 root sys
 f none kernel/drv/amd64/ipsecah 755 root sys
 f none kernel/drv/amd64/ipsecesp 755 root sys
@@ -324,6 +327,7 @@ f none kernel/drv/amd64/mc-amd 755 root sys
 f none kernel/drv/amd64/mm 755 root sys
 f none kernel/drv/amd64/mpt 755 root sys
 f none kernel/drv/amd64/mouse8042 755 root sys
+f none kernel/drv/amd64/nulldriver 755 root sys
 f none kernel/drv/amd64/openeepr 755 root sys
 f none kernel/drv/amd64/options 755 root sys
 f none kernel/drv/amd64/pci_pci 755 root sys

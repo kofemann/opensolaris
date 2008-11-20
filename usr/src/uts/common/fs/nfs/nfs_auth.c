@@ -175,9 +175,8 @@ nfsauth4_access(struct exportinfo *exi, vnode_t *vp, struct svc_req *req)
 		 * Allow ro permission with LIMITED view if there is a
 		 * sub-dir exported under vp.
 		 */
-		if (has_visible(exi, vp)) {
+		if (has_visible(exi, vp))
 			return (NFSAUTH_LIMITED);
-		}
 	}
 
 	return (access);
@@ -518,7 +517,7 @@ nfsauth4_secinfo_access(struct exportinfo *exi, struct svc_req *req,
 	/*
 	 * Optimize if there are no lists
 	 */
-	if ((perm & M_ROOT) == 0) {
+	if ((perm & (M_ROOT|M_NONE)) == 0) {
 		perm &= ~M_4SEC_EXPORTED;
 		if (perm == M_RO)
 			return (NFSAUTH_RO);
@@ -599,7 +598,7 @@ nfsauth_access(struct exportinfo *exi, struct svc_req *req)
 	 * Optimize if there are no lists
 	 */
 	perm = sp[i].s_flags;
-	if ((perm & M_ROOT) == 0) {
+	if ((perm & (M_ROOT|M_NONE)) == 0) {
 		perm &= ~M_4SEC_EXPORTED;
 		if (perm == M_RO)
 			return (mapaccess | NFSAUTH_RO);
@@ -608,6 +607,8 @@ nfsauth_access(struct exportinfo *exi, struct svc_req *req)
 	}
 
 	access = nfsauth_cache_get(exi, req, flavor);
+	if (access & NFSAUTH_DENIED)
+		access = NFSAUTH_DENIED;
 
 	return (access | mapaccess);
 }

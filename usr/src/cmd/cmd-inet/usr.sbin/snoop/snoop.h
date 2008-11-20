@@ -284,12 +284,15 @@ extern const char *arp_htype(int);
  * cannot be expressed in kernel space.
  */
 typedef struct interface {
-	uint_t	mac_type;
-	uint_t	mtu_size;
-	uint_t  network_type_offset;
-	uint_t	(*header_len)(char *);
-	uint_t 	(*interpreter)(int, char *, int, int);
-	uint_t	try_kernel_filter;
+	uint_t		mac_type;
+	uint_t		mtu_size;
+	uint_t  	network_type_offset;
+	size_t		network_type_len;
+	uint_t		network_type_ip;
+	uint_t		network_type_ipv6;
+	uint_t		(*header_len)(char *);
+	uint_t 		(*interpreter)(int, char *, int, int);
+	boolean_t	try_kernel_filter;
 } interface_t;
 
 extern interface_t INTERFACES[], *interface;
@@ -307,6 +310,7 @@ extern char *prot_title;
 extern unsigned int encap_levels, total_encap_levels;
 
 extern int quitting;
+extern boolean_t Iflg, Pflg, rflg;
 
 /*
  * Global error recovery routine: used to reset snoop variables after

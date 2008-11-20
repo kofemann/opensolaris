@@ -87,6 +87,7 @@ f none kernel/drv/sparcv9/i8042 755 root sys
 f none kernel/drv/sparcv9/icmp 755 root sys
 f none kernel/drv/sparcv9/icmp6 755 root sys
 f none kernel/drv/sparcv9/ip 755 root sys
+f none kernel/drv/sparcv9/ipnet 755 root sys
 f none kernel/drv/sparcv9/ip6 755 root sys
 f none kernel/drv/sparcv9/ippctl 755 root sys
 f none kernel/drv/sparcv9/ipsecah 755 root sys
@@ -102,6 +103,7 @@ f none kernel/drv/sparcv9/lofi 755 root sys
 f none kernel/drv/sparcv9/log 755 root sys
 f none kernel/drv/sparcv9/mm 755 root sys
 f none kernel/drv/sparcv9/mouse8042 755 root sys
+f none kernel/drv/sparcv9/nulldriver 755 root sys
 f none kernel/drv/sparcv9/openeepr 755 root sys
 f none kernel/drv/sparcv9/options 755 root sys
 f none kernel/drv/sparcv9/pci_pci 755 root sys

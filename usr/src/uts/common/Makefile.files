@@ -499,6 +499,8 @@ NETI_OBJS +=	neti_impl.o neti_mod.o neti_stack.o
 
 KEYSOCK_OBJS +=	keysockddi.o keysock.o keysock_opt_data.o
 
+IPNET_OBJS += ipnet.o
+
 SPDSOCK_OBJS += spdsockddi.o spdsock.o spdsock_opt_data.o
 
 IPSECESP_OBJS += ipsecespddi.o ipsecesp.o
@@ -794,7 +796,7 @@ NSKERN_OBJS +=	nsc_ddi.o \
 		nsc_proc.o \
 		nsc_raw.o \
 		nsc_thread.o \
-		nskernd.o 
+		nskernd.o
 
 SV_OBJS +=	sv.o
 
@@ -814,6 +816,14 @@ EMLXS_OBJS +=	emlxs_clock.o emlxs_solaris.o emlxs_dfc.o emlxs_dhchap.o \
 FCT_OBJS += discovery.o fct.o
 
 QLT_OBJS += 2400.o 2500.o qlt.o qlt_dma.o
+
+ISCSIT_SHARED_OBJS += \
+		iscsit_common.o
+
+ISCSIT_OBJS +=	$(ISCSIT_SHARED_OBJS) \
+		iscsit.o iscsit_tgt.o iscsit_sess.o iscsit_login.o \
+		iscsit_text.o iscsit_isns.o iscsit_radiusauth.o \
+		iscsit_radiuspacket.o iscsit_auth.o iscsit_authclient.o
 
 STMF_OBJS += lun_map.o stmf.o
 
@@ -965,7 +975,8 @@ DEVFS_OBJS +=	devfs_subr.o	devfs_vfsops.o	devfs_vnops.o
 
 DEV_OBJS  +=	sdev_subr.o	sdev_vfsops.o	sdev_vnops.o	\
 		sdev_ptsops.o	sdev_comm.o	sdev_profile.o	\
-		sdev_ncache.o	sdev_netops.o	sdev_vtops.o
+		sdev_ncache.o	sdev_netops.o	sdev_vtops.o	\
+		sdev_ipnetops.o
 
 CTFS_OBJS +=	ctfs_all.o ctfs_cdir.o ctfs_ctl.o ctfs_event.o \
 		ctfs_latest.o ctfs_root.o ctfs_sym.o ctfs_tdir.o ctfs_tmpl.o
@@ -997,8 +1008,9 @@ NFS_OBJS +=	nfs_client.o	nfs_common.o	nfs_dump.o \
 		nfs4_acache.o	nfs4_common.o	nfs4_client_state.o \
 		nfs4_callback.o	nfs4_recovery.o nfs4_client_secinfo.o \
 		nfs4_client_debug.o	nfs_stats.o layoutstats_xdr.o	\
-		nfs4_acl.o	nfs4_stub_vnops.o	nfs4_pnfs.o \
-		nfs41_filehandle_xdr.o ds_filehandle_xdr.o nfs41_slrc.o
+		nfs4_acl.o	nfs4_stub_vnops.o	nfs_cmd.o \
+		nfs41_filehandle_xdr.o ds_filehandle_xdr.o nfs41_slrc.o \
+		nfs4_pnfs.o
 
 NFSSRV_OBJS +=	nfs_server.o nfs_srv.o nfs3_srv.o nfs_acl_srv.o		\
     		nfs_auth.o nfs_auth_xdr.o				\
@@ -1367,7 +1379,7 @@ KCF_OBJS +=	kcf.o kcf_callprov.o kcf_cbufcall.o kcf_cipher.o kcf_crypto.o \
 		kcf_keys.o kcf_mac.o kcf_mech_tabs.o kcf_miscapi.o \
 		kcf_object.o kcf_policy.o kcf_prov_lib.o kcf_prov_tabs.o \
 		kcf_sched.o kcf_session.o kcf_sign.o kcf_spi.o kcf_verify.o \
-		kcf_random.o modes.o ecb.o cbc.o ctr.o ccm.o
+		kcf_random.o modes.o ecb.o cbc.o ctr.o ccm.o gcm.o fips_random.o
 
 CRYPTOADM_OBJS += cryptoadm.o
 
@@ -1627,6 +1639,8 @@ WPI_OBJS += wpi.o
 
 RAL_OBJS += rt2560.o ral_rate.o
 
+RUM_OBJS += rum.o
+
 URAL_OBJS += ural.o
 
 RTW_OBJS += rtw.o smc93cx6.o rtwphy.o rtwphyio.o
@@ -1638,6 +1652,11 @@ SFE_OBJS += sfe.o sfe_util.o
 DDA_OBJS += dda.o
 
 DMD_OBJS += dmd.o
+
+IDM_SHARED_OBJS += base64.o
+
+IDM_OBJS +=	$(IDM_SHARED_OBJS) \
+		idm.o idm_impl.o idm_text.o idm_conn_sm.o idm_so.o
 
 #
 #	Build up defines and paths.
@@ -1794,3 +1813,6 @@ ISCSI_INITIATOR_OBJS =	chap.o iscsi_io.o iscsi_thread.o	\
 #
 NTXN_OBJS =	unm_nic_init.o unm_gem.o unm_nic_hw.o unm_ndd.o	\
 			unm_nic_main.o unm_nic_isr.o unm_nic_ctx.o niu.o
+#	nulldriver module
+#
+NULLDRIVER_OBJS =	nulldriver.o

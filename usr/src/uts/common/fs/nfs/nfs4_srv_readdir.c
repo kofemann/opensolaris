@@ -47,6 +47,8 @@
 #include <nfs/nfs.h>
 #include <nfs/export.h>
 #include <nfs/nfs4.h>
+#include <nfs/nfs_cmd.h>
+
 #include <nfs/nfs4_attrmap.h>
 #include <nfs/nfs4_srv_readdir.h>
 #include <nfs/nfs4_srv_attr.h>
@@ -367,6 +369,8 @@ rfs4_op_readdir(nfs_argop4 *argop, nfs_resop4 *resop,
 	int lu_set, lg_set;
 	utf8string owner, group;
 	int owner_error, group_error;
+	struct sockaddr *ca;
+	char *name = NULL;
 	attrvers_t avers;
 
 	DTRACE_NFSV4_2(op__readdir__start, struct compound_state *, cs,
@@ -568,6 +572,8 @@ rfs4_op_readdir(nfs_argop4 *argop, nfs_resop4 *resop,
 
 	rddir_next_offset = (offset_t)args->cookie;
 
+	ca = (struct sockaddr *)svc_getrpccaller(req->rq_xprt)->buf;
+
 readagain:
 
 	no_space = FALSE;
@@ -654,35 +660,38 @@ readagain:
 		 * encoded later in the "attributes" section.
 		 */
 		ae = ar;
-		if (! ATTRMAP_EMPTY(ar)) {
+		if (ATTRMAP_EMPTY(ar))
+			goto reencode_attrs;
 			error = nfs4_readdir_getvp(dvp, dp->d_name,
 			    &vp, &newexi, req, cs, expseudo);
-			if (error == ENOENT) {
-				rddir_next_offset = dp->d_off;
-				continue;
-			}
 
-			rddirattr_error = error;
+		error = nfs4_readdir_getvp(dvp, dp->d_name,
+		    &vp, &newexi, req, cs, expseudo);
+		if (error == ENOENT) {
+			rddir_next_offset = dp->d_off;
+			continue;
+		}
 
-			/*
-			 * The vp obtained from above may be from a
-			 * different filesystem mount and the vfs-like
-			 * attributes should be obtained from that
-			 * different vfs; only do this if appropriate.
-			 */
-			if (vp &&
-			    (vfs_different = (dvp->v_vfsp != vp->v_vfsp))) {
-				if (ATTRMAP_TST(ar,
-				    RFS4_FS_SPACE_ATTRMAP(avers))) {
-					if (error =
-					    rfs4_get_sb_encode(dvp->v_vfsp,
-					    &sbe)) {
-						/* Remove attrs from encode */
-						ATTRMAP_CLR(ae,
-						    RFS4_FS_SPACE_ATTRMAP(
-						    avers));
-						rddirattr_error = error;
-					}
+		rddirattr_error = error;
+
+		/*
+		 * The vp obtained from above may be from a
+		 * different filesystem mount and the vfs-like
+		 * attributes should be obtained from that
+		 * different vfs; only do this if appropriate.
+		 */
+		if (vp &
+		    (vfs_different = (dvp->v_vfsp != vp->v_vfsp))) {	
+			if (ATTRMAP_TST(ar,
+			    RFS4_FS_SPACE_ATTRMAP(avers))) {
+				if (error =
+				    rfs4_get_sb_encode(dvp->v_vfsp,
+				    &sbe)) {
+					/* Remove attrs from encode */
+					ATTRMAP_CLR(ae,
+					    RFS4_FS_SPACE_ATTRMAP(
+					    avers));
+					rddirattr_error = error;
 				}
 				if (ATTR_ISSET(ar, MAXFILESIZE) ||
 				    ATTR_ISSET(ar, MAXLINK) ||
@@ -705,8 +714,15 @@ reencode_attrs:
 		/* encode the COOKIE for the entry */
 		IXDR_PUT_U_HYPER(ptr, dp->d_off);
 
+		name = nfscmd_convname(ca, cs->exi, dp->d_name,
+		    NFSCMD_CONV_OUTBOUND, MAXPATHLEN + 1);
+
+		if (name == NULL) {
+			rddir_next_offset = dp->d_off;
+			continue;
+		}
 		/* Calculate the dirent name length */
-		namelen = strlen(dp->d_name);
+		namelen = strlen(name);
 
 		rndup = RNDUP(namelen) / BYTES_PER_XDR_UNIT;
 
@@ -721,9 +737,12 @@ reencode_attrs:
 		/* encode the RNDUP FILL first */
 		ptr[rndup - 1] = 0;
 		/* encode the NAME of the entry */
-		bcopy(dp->d_name, (char *)ptr, namelen);
+		bcopy(name, (char *)ptr, namelen);
 		/* now bump the ptr after... */
 		ptr += rndup;
+
+		if (name != dp->d_name)
+			kmem_free(name, MAXPATHLEN + 1);
 
 		/*
 		 * Keep checking on the dircount to see if we have
@@ -1316,7 +1335,9 @@ reencode_attrs:
 		}
 
 		/* "go back" and encode the attributes' length */
-		attr_length = (char *)ptr - (char *)attr_offset_ptr -
+		attr_length =
+		    (char *)ptr -
+		    (char *)attr_offset_ptr -
 		    BYTES_PER_XDR_UNIT;
 		IXDR_PUT_U_INT32(attr_offset_ptr, attr_length);
 

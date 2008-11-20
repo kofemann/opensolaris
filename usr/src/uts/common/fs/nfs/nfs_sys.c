@@ -63,6 +63,8 @@ int (*mds_recall_lo)(struct mds_reclo_args *, cred_t *) = NULL;
 /* This filled in by nfssrv:_init() */
 void (*nfs_srv_quiesce_func)(void) = NULL;
 
+extern void nfscmd_args(uint_t);
+
 /*
  * These will be reset by klmmod:lm_svc(), when lockd starts NLM service,
  * based on values read by lockd from /etc/default/nfs. Since nfssrv depends on
@@ -569,6 +571,21 @@ nfssys(enum nfssys_op opcode, void *arg)
 		if (copyin(arg, &did, sizeof (did)))
 			return (set_errno(EFAULT));
 		mountd_args(did);
+		error = 0;
+		break;
+	}
+
+	case NFSCMD_ARGS: {
+		uint_t	did;
+
+		/*
+		 * For now, only passing down the door fd; if we
+		 * ever need to pass down more info, we can use
+		 * a (properly aligned) struct.
+		 */
+		if (copyin(arg, &did, sizeof (did)))
+			return (set_errno(EFAULT));
+		nfscmd_args(did);
 		error = 0;
 		break;
 	}

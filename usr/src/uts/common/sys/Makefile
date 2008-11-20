@@ -719,6 +719,22 @@ IBMGTHDRS=		\
 IBDHDRS=		\
 	ibd.h
 
+IDMHDRS=		\
+	idm.h		\
+	idm_impl.h	\
+	idm_so.h	\
+	idm_text.h	\
+	idm_transport.h \
+	idm_conn_sm.h
+
+ISCSITHDRS=		\
+	radius_packet.h		\
+	radius_protocol.h	\
+	chap.h			\
+	isns_protocol.h		\
+	iscsi_if.h		\
+	iscsit_common.h
+
 ISOHDRS=			\
 	signal_iso.h
 
@@ -1089,6 +1105,9 @@ CHECKHDRS=						\
 	$(IBMFHDRS:%.h=ib/mgt/ibmf/%.check)		\
 	$(TAVORHDRS:%.h=ib/adapters/tavor/%.check)	\
 	$(HERMONHDRS:%.h=ib/adapters/hermon/%.check)	\
+	$(IDMHDRS:%.h=idm/%.check)			\
+	$(ISCSIHDRS:%.h=iscsi/%.check)			\
+	$(ISCSITHDRS:%.h=iscsit/%.check)			\
 	$(ISOHDRS:%.h=iso/%.check)			\
 	$(FMHDRS:%.h=fm/%.check)			\
 	$(FMFSHDRS:%.h=fm/fs/%.check)			\
@@ -1131,6 +1150,9 @@ CHECKHDRS=						\
 	$(ROOTCRYPTOHDRS)	\
 	$(ROOTDCAMHDRS)		\
 	$(ROOTISOHDRS)		\
+	$(ROOTIDMHDRS)		\
+	$(ROOTISCSIHDRS)	\
+	$(ROOTISCSITHDRS)	\
 	$(ROOTFC4HDRS)		\
 	$(ROOTFCHDRS)		\
 	$(ROOTFCIMPLHDRS)	\
@@ -1185,6 +1207,9 @@ install_h:			\
 	$(ROOTCRYPTOHDRS)	\
 	$(ROOTDCAMHDRS)		\
 	$(ROOTISOHDRS)		\
+	$(ROOTIDMHDRS)		\
+	$(ROOTISCSIHDRS)	\
+	$(ROOTISCSITHDRS)	\
 	$(ROOTFC4HDRS)		\
 	$(ROOTFCHDRS)		\
 	$(ROOTFCIMPLHDRS)	\

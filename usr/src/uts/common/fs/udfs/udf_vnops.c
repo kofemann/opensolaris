@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <sys/types.h>
 #include <sys/t_lock.h>
 #include <sys/param.h>
@@ -272,7 +270,7 @@ udf_close(
 		struct ud_inode *ip = VTOI(vp);
 		if (ip->i_delaylen) {
 			(void) ud_putpages(vp, ip->i_delayoff, ip->i_delaylen,
-					B_ASYNC | B_FREE, cr);
+			    B_ASYNC | B_FREE, cr);
 			ip->i_delaylen = 0;
 		}
 	}
@@ -305,7 +303,7 @@ udf_read(
 		 * udf_getattr ends up being called by chklock
 		 */
 		error = chklock(vp, FREAD, uiop->uio_loffset,
-			uiop->uio_resid, uiop->uio_fmode, ct);
+		    uiop->uio_resid, uiop->uio_fmode, ct);
 		if (error) {
 			goto end;
 		}
@@ -354,7 +352,7 @@ udf_write(
 		 * ud_getattr ends up being called by chklock
 		 */
 		error = chklock(vp, FWRITE, uiop->uio_loffset,
-			uiop->uio_resid, uiop->uio_fmode, ct);
+		    uiop->uio_resid, uiop->uio_fmode, ct);
 		if (error) {
 			goto end;
 		}
@@ -519,7 +517,7 @@ udf_setattr(
 	ovap.va_uid = ip->i_uid;
 	ovap.va_mode = UD2VA_PERM(ip->i_perm) | ip->i_char;
 	error = secpolicy_vnode_setattr(cr, vp, vap, &ovap, flags,
-					    ud_iaccess_vmode, ip);
+	    ud_iaccess_vmode, ip);
 	if (error)
 		goto update_inode;
 
@@ -674,9 +672,9 @@ udf_lookup(
 		ip = xip;
 		*vpp = ITOV(ip);
 		if ((ip->i_type != VDIR) &&
-			(ip->i_char & ISVTX) &&
-			((ip->i_perm & IEXEC) == 0) &&
-			udfs_stickyhack) {
+		    (ip->i_char & ISVTX) &&
+		    ((ip->i_perm & IEXEC) == 0) &&
+		    udfs_stickyhack) {
 			mutex_enter(&(*vpp)->v_lock);
 			(*vpp)->v_flag |= VISSWAP;
 			mutex_exit(&(*vpp)->v_lock);
@@ -688,7 +686,7 @@ udf_lookup(
 		if (IS_DEVVP(*vpp)) {
 			struct vnode *newvp;
 			newvp = specvp(*vpp, (*vpp)->v_rdev,
-					(*vpp)->v_type, cr);
+			    (*vpp)->v_type, cr);
 			VN_RELE(*vpp);
 			if (newvp == NULL) {
 				error = ENOSYS;
@@ -734,8 +732,8 @@ udf_create(
 		xip = NULL;
 		rw_enter(&ip->i_rwlock, RW_WRITER);
 		error = ud_direnter(ip, name, DE_CREATE,
-			(struct ud_inode *)0, (struct ud_inode *)0,
-			vap, &xip, cr, ct);
+		    (struct ud_inode *)0, (struct ud_inode *)0,
+		    vap, &xip, cr, ct);
 		rw_exit(&ip->i_rwlock);
 		ITIMES(ip);
 		ip = xip;
@@ -760,7 +758,7 @@ udf_create(
 				error = EISDIR;
 			} else if (mode) {
 				error = ud_iaccess(ip,
-					UD_UPERM2DPERM(mode), cr);
+				    UD_UPERM2DPERM(mode), cr);
 			} else {
 				error = 0;
 			}
@@ -770,7 +768,7 @@ udf_create(
 			VN_RELE(ITOV(ip));
 			goto out;
 		} else if ((ip->i_type == VREG) &&
-			(vap->va_mask & AT_SIZE) && vap->va_size == 0) {
+		    (vap->va_mask & AT_SIZE) && vap->va_size == 0) {
 			/*
 			 * Truncate regular files, if requested by caller.
 			 * Grab i_rwlock to make sure no one else is
@@ -840,7 +838,7 @@ udf_remove(
 
 	rw_enter(&ip->i_rwlock, RW_WRITER);
 	error = ud_dirremove(ip, nm,
-		(struct ud_inode *)0, (struct vnode *)0, DR_REMOVE, cr, ct);
+	    (struct ud_inode *)0, (struct vnode *)0, DR_REMOVE, cr, ct);
 	rw_exit(&ip->i_rwlock);
 	ITIMES(ip);
 
@@ -883,7 +881,7 @@ udf_link(
 
 	rw_enter(&tdp->i_rwlock, RW_WRITER);
 	error = ud_direnter(tdp, tnm, DE_LINK, (struct ud_inode *)0,
-		sip, (struct vattr *)0, (struct ud_inode **)0, cr, ct);
+	    sip, (struct vattr *)0, (struct ud_inode **)0, cr, ct);
 	rw_exit(&tdp->i_rwlock);
 	ITIMES(sip);
 	ITIMES(tdp);
@@ -962,8 +960,8 @@ udf_rename(
 	 * Check for renaming '.' or '..' or alias of '.'
 	 */
 	if ((strcmp(snm, ".") == 0) ||
-			(strcmp(snm, "..") == 0) ||
-			(sdp == sip)) {
+	    (strcmp(snm, "..") == 0) ||
+	    (sdp == sip)) {
 		error = EINVAL;
 		rw_exit(&sip->i_contents);
 		rw_exit(&sdp->i_contents);
@@ -1038,7 +1036,7 @@ udf_mkdir(
 	ip = VTOI(dvp);
 	rw_enter(&ip->i_rwlock, RW_WRITER);
 	error = ud_direnter(ip, dirname, DE_MKDIR,
-		(struct ud_inode *)0, (struct ud_inode *)0, vap, &xip, cr, ct);
+	    (struct ud_inode *)0, (struct ud_inode *)0, vap, &xip, cr, ct);
 	rw_exit(&ip->i_rwlock);
 	ITIMES(ip);
 	if (error == 0) {
@@ -1070,7 +1068,7 @@ udf_rmdir(
 
 	rw_enter(&ip->i_rwlock, RW_WRITER);
 	error = ud_dirremove(ip, nm, (struct ud_inode *)0, cdir, DR_RMDIR,
-		cr, ct);
+	    cr, ct);
 	rw_exit(&ip->i_rwlock);
 	ITIMES(ip);
 
@@ -1114,7 +1112,7 @@ udf_readdir(
 
 	dirsiz = ip->i_size;
 	if ((uiop->uio_offset >= dirsiz) ||
-			(ip->i_nlink <= 0)) {
+	    (ip->i_nlink <= 0)) {
 		if (eofp) {
 			*eofp = 1;
 		}
@@ -1151,7 +1149,7 @@ udf_readdir(
 
 	while (offset < dirsiz) {
 		error = ud_get_next_fid(ip, &fbp,
-				offset, &fid, &name, buf);
+		    offset, &fid, &name, buf);
 		if (error != 0) {
 			break;
 		}
@@ -1173,10 +1171,10 @@ udf_readdir(
 				bzero(&nd->d_name[2],
 				    DIRENT64_NAMELEN(len) - 2);
 				nd = (struct dirent64 *)
-					((char *)nd + nd->d_reclen);
+				    ((char *)nd + nd->d_reclen);
 			} else {
 				if ((error = ud_uncompress(fid->fid_idlen,
-						&length, name, dname)) != 0) {
+				    &length, name, dname)) != 0) {
 					break;
 				}
 				if (length == 0) {
@@ -1195,13 +1193,13 @@ udf_readdir(
 				bzero(&nd->d_name[length],
 				    DIRENT64_NAMELEN(len) - length);
 				nd->d_ino = ud_xlate_to_daddr(udf_vfsp,
-					SWAP_16(fid->fid_icb.lad_ext_prn),
-					SWAP_32(fid->fid_icb.lad_ext_loc), 1,
-					&dummy);
+				    SWAP_16(fid->fid_icb.lad_ext_prn),
+				    SWAP_32(fid->fid_icb.lad_ext_loc), 1,
+				    &dummy);
 				nd->d_reclen = (uint16_t)len;
 				nd->d_off = offset + FID_LEN(fid);
 				nd = (struct dirent64 *)
-					((char *)nd + nd->d_reclen);
+				    ((char *)nd + nd->d_reclen);
 			}
 			outcount++;
 		}
@@ -1257,7 +1255,7 @@ udf_symlink(
 
 	rw_enter(&dip->i_rwlock, RW_WRITER);
 	error = ud_direnter(dip, linkname, DE_CREATE,
-		(struct ud_inode *)0, (struct ud_inode *)0, vap, &ip, cr, ct);
+	    (struct ud_inode *)0, (struct ud_inode *)0, vap, &ip, cr, ct);
 	rw_exit(&dip->i_rwlock);
 	if (error == 0) {
 		dname = kmem_zalloc(1024, KM_SLEEP);
@@ -1294,7 +1292,7 @@ udf_symlink(
 				pc->pc_type = 4;
 				pc = (struct path_comp *)(((char *)pc) + 4);
 			} else if (((target - sp) == 2) &&
-				(*sp == '.') && ((*(sp + 1)) == '.')) {
+			    (*sp == '.') && ((*(sp + 1)) == '.')) {
 				/*
 				 * DotDot entry.
 				 */
@@ -1308,7 +1306,7 @@ udf_symlink(
 				 */
 				outlen = 1024;	/* set to size of dname */
 				if (error = ud_compress(target - sp, &outlen,
-					(uint8_t *)sp, (uint8_t *)dname)) {
+				    (uint8_t *)sp, (uint8_t *)dname)) {
 					break;
 				}
 				pc->pc_type = 5;
@@ -1317,7 +1315,7 @@ udf_symlink(
 				dname[outlen] = '\0';
 				(void) strcpy((char *)pc->pc_id, dname);
 				pc = (struct path_comp *)
-					(((char *)pc) + 4 + outlen);
+				    (((char *)pc) + 4 + outlen);
 			}
 			while (*target == '/') {
 				target++;
@@ -1334,15 +1332,15 @@ udf_symlink(
 				ioflag |= FDSYNC;
 			}
 			error = ud_rdwri(UIO_WRITE, ioflag, ip,
-				uname, ((int8_t *)pc) - uname,
-				(offset_t)0, UIO_SYSSPACE, (int32_t *)0, cr);
+			    uname, ((int8_t *)pc) - uname,
+			    (offset_t)0, UIO_SYSSPACE, (int32_t *)0, cr);
 		}
 		if (error) {
 			ud_idrop(ip);
 			rw_exit(&ip->i_contents);
 			rw_enter(&dip->i_rwlock, RW_WRITER);
 			(void) ud_dirremove(dip, linkname, (struct ud_inode *)0,
-				(struct vnode *)0, DR_REMOVE, cr, ct);
+			    (struct vnode *)0, DR_REMOVE, cr, ct);
 			rw_exit(&dip->i_rwlock);
 			goto update_inode;
 		}
@@ -1428,7 +1426,7 @@ udf_readlink(
 				break;
 			case 5 :
 				if ((error = ud_uncompress(pc->pc_len, &id_len,
-					pc->pc_id, (uint8_t *)dname)) != 0) {
+				    pc->pc_id, (uint8_t *)dname)) != 0) {
 					break;
 				}
 				dname[id_len] = '\0';
@@ -1597,7 +1595,7 @@ udf_frlock(
 	 * meaningless to have held tlock in the first place.
 	 */
 	if ((ip->i_mapcnt > 0) &&
-		(MANDLOCK(vp, ip->i_char))) {
+	    (MANDLOCK(vp, ip->i_char))) {
 		return (EAGAIN);
 	}
 
@@ -1731,7 +1729,7 @@ retrylock:
 		 */
 		offset = uoff;
 		while ((offset < uoff + len) &&
-			(offset < ip->i_size)) {
+		    (offset < ip->i_size)) {
 			/*
 			 * the variable "bnp" is to simplify the expression for
 			 * the compiler; * just passing in &bn to bmap_write
@@ -1784,7 +1782,7 @@ retrylock:
 	 */
 	eoff = (uoff + len);
 	for (pgoff = uoff, pgaddr = addr, pl = plarr;
-			pgoff < eoff; /* empty */) {
+	    pgoff < eoff; /* empty */) {
 		page_t	*pp;
 		u_offset_t	nextrio;
 		se_t	se;
@@ -1829,7 +1827,7 @@ retrylock:
 			 * We have to create the page, or read it from disk.
 			 */
 			if (error = ud_getpage_miss(vp, pgoff, len,
-				seg, pgaddr, pl, plsz, rw, seqmode)) {
+			    seg, pgaddr, pl, plsz, rw, seqmode)) {
 				goto error_out;
 			}
 
@@ -1851,7 +1849,7 @@ retrylock:
 	if (plarr && !(has_holes && (rw == S_WRITE || rw == S_CREATE))) {
 
 		ASSERT((protp == NULL) ||
-			!(has_holes && (*protp & PROT_WRITE)));
+		    !(has_holes && (*protp & PROT_WRITE)));
 
 		eoff = pgoff + plsz;
 		while (pgoff < eoff) {
@@ -2026,7 +2024,7 @@ udf_map(
 	}
 
 	if ((off < (offset_t)0) ||
-		((off + len) < (offset_t)0)) {
+	    ((off + len) < (offset_t)0)) {
 		error = EINVAL;
 		goto end;
 	}
@@ -2215,7 +2213,7 @@ udf_pageio(
 		bp = NULL;
 		contig = 0;
 		if (error = ud_bmap_read(ip, (u_offset_t)(io_off + done_len),
-					&bn, &contig)) {
+		    &bn, &contig)) {
 			break;
 		}
 
@@ -2260,7 +2258,7 @@ udf_pageio(
 			(void) bdev_strategy(bp);
 		} else {
 			error = ud_multi_strat(ip, cpp, bp,
-				(u_offset_t)(io_off + done_len));
+			    (u_offset_t)(io_off + done_len));
 			if (error != 0) {
 				pageio_done(bp);
 				break;
@@ -2396,14 +2394,14 @@ ud_getpage_miss(struct vnode *vp, u_offset_t off,
 	 */
 	if (rw == S_CREATE) {
 		if ((pp = page_create_va(vp, off,
-				PAGESIZE, PG_WAIT, seg, addr)) == NULL) {
+		    PAGESIZE, PG_WAIT, seg, addr)) == NULL) {
 			cmn_err(CE_WARN, "ud_getpage_miss: page_create");
 			return (EINVAL);
 		}
 		io_len = PAGESIZE;
 	} else {
 		pp = pvn_read_kluster(vp, off, seg, addr, &io_off,
-				&io_len, off, PAGESIZE, 0);
+		    &io_len, off, PAGESIZE, 0);
 
 		/*
 		 * Some other thread has entered the page.
@@ -2468,7 +2466,7 @@ ud_getpage_ra(struct vnode *vp,
 	}
 
 	pp = pvn_read_kluster(vp, io_off, seg, addr2,
-		&io_off, &io_len, io_off, PAGESIZE, 1);
+	    &io_off, &io_len, io_off, PAGESIZE, 1);
 
 	/*
 	 * Some other thread has entered the page.
@@ -2505,9 +2503,9 @@ ud_page_fill(struct ud_inode *ip, page_t *pp, u_offset_t off,
 		 * portions
 		 */
 		bp = ud_bread(ip->i_dev,
-		ip->i_icb_lbano << ip->i_udf->udf_l2d_shift, lbsize);
+		    ip->i_icb_lbano << ip->i_udf->udf_l2d_shift, lbsize);
 		if ((bp->b_error == 0) &&
-			(bp->b_resid == 0)) {
+		    (bp->b_resid == 0)) {
 
 			caddr = bp->b_un.b_addr + ip->i_data_off;
 
@@ -2515,7 +2513,7 @@ ud_page_fill(struct ud_inode *ip, page_t *pp, u_offset_t off,
 			 * mapin to kvm
 			 */
 			kaddr = (caddr_t)ppmapin(pp,
-				PROT_READ | PROT_WRITE, (caddr_t)-1);
+			    PROT_READ | PROT_WRITE, (caddr_t)-1);
 			(void) kcopy(caddr, kaddr, ip->i_size);
 
 			/*
@@ -2548,7 +2546,7 @@ ud_page_fill(struct ud_inode *ip, page_t *pp, u_offset_t off,
 			 * the page
 			 */
 			if (((off + contig) == isize) ||
-				(contig == PAGESIZE)) {
+			    (contig == PAGESIZE)) {
 				pagezero(pp->p_prev, 0, PAGESIZE);
 				goto out;
 			}
@@ -2676,7 +2674,7 @@ ud_putpages(struct vnode *vp, offset_t off,
 		 * Search the entire vp list for pages >= off.
 		 */
 		err = pvn_vplist_dirty(vp, (u_offset_t)off, ud_putapage,
-					flags, cr);
+		    flags, cr);
 	} else {
 		/*
 		 * Loop over all offsets in the range looking for
@@ -2697,11 +2695,11 @@ ud_putpages(struct vnode *vp, offset_t off,
 			 */
 			if ((flags & B_INVAL) || ((flags & B_ASYNC) == 0)) {
 				pp = page_lookup(vp, io_off,
-					(flags & (B_INVAL | B_FREE)) ?
-					    SE_EXCL : SE_SHARED);
+				    (flags & (B_INVAL | B_FREE)) ?
+				    SE_EXCL : SE_SHARED);
 			} else {
 				pp = page_lookup_nowait(vp, io_off,
-					(flags & B_FREE) ? SE_EXCL : SE_SHARED);
+				    (flags & B_FREE) ? SE_EXCL : SE_SHARED);
 			}
 
 			if (pp == NULL || pvn_getdirty(pp, flags) == 0) {
@@ -2709,7 +2707,7 @@ ud_putpages(struct vnode *vp, offset_t off,
 			} else {
 
 				err = ud_putapage(vp, pp,
-					&io_off, &io_len, flags, cr);
+				    &io_off, &io_len, flags, cr);
 				if (err != 0) {
 					break;
 				}
@@ -2798,14 +2796,14 @@ ud_putapage(struct vnode *vp,
 		ASSERT(ip->i_size <= ip->i_max_emb);
 
 		pp = pvn_write_kluster(vp, pp, &io_off,
-			&io_len, off, PAGESIZE, flags);
+		    &io_len, off, PAGESIZE, flags);
 		if (io_len == 0) {
 			io_len = PAGESIZE;
 		}
 
 		bp = ud_bread(ip->i_dev,
-			ip->i_icb_lbano << udf_vfsp->udf_l2d_shift,
-			udf_vfsp->udf_lbsize);
+		    ip->i_icb_lbano << udf_vfsp->udf_l2d_shift,
+		    udf_vfsp->udf_lbsize);
 		fe = (struct file_entry *)bp->b_un.b_addr;
 		if ((bp->b_flags & B_ERROR) ||
 		    (ud_verify_tag_and_desc(&fe->fe_tag, UD_FILE_ENTRY,
@@ -2822,19 +2820,19 @@ ud_putapage(struct vnode *vp,
 			return (error);
 		}
 		if ((bp->b_error == 0) &&
-			(bp->b_resid == 0)) {
+		    (bp->b_resid == 0)) {
 
 			caddr = bp->b_un.b_addr + ip->i_data_off;
 			kaddr = (caddr_t)ppmapin(pp,
-				PROT_READ | PROT_WRITE, (caddr_t)-1);
+			    PROT_READ | PROT_WRITE, (caddr_t)-1);
 			(void) kcopy(kaddr, caddr, ip->i_size);
 			ppmapout(kaddr);
 		}
 		crc_len = ((uint32_t)&((struct file_entry *)0)->fe_spec) +
-				SWAP_32(fe->fe_len_ear);
+		    SWAP_32(fe->fe_len_ear);
 		crc_len += ip->i_size;
 		ud_make_tag(ip->i_udf, &fe->fe_tag,
-			UD_FILE_ENTRY, ip->i_icb_block, crc_len);
+		    UD_FILE_ENTRY, ip->i_icb_block, crc_len);
 
 		bwrite(bp);
 
@@ -2871,7 +2869,7 @@ ud_putapage(struct vnode *vp,
 		}
 
 		pp = pvn_write_kluster(vp, pp, &io_off,
-			&io_len, off, contig, flags);
+		    &io_len, off, contig, flags);
 		if (io_len == 0) {
 			io_len = PAGESIZE;
 		}
@@ -2978,8 +2976,8 @@ ud_rdip(struct ud_inode *ip, struct uio *uio, int32_t ioflag, cred_t *cr)
 
 	ASSERT(RW_LOCK_HELD(&ip->i_contents));
 	if ((ip->i_type != VREG) &&
-		(ip->i_type != VDIR) &&
-		(ip->i_type != VLNK)) {
+	    (ip->i_type != VDIR) &&
+	    (ip->i_type != VLNK)) {
 		return (EIO);
 	}
 
@@ -2988,7 +2986,7 @@ ud_rdip(struct ud_inode *ip, struct uio *uio, int32_t ioflag, cred_t *cr)
 	}
 
 	if ((uio->uio_loffset < (offset_t)0) ||
-		((uio->uio_loffset + uio->uio_resid) < 0)) {
+	    ((uio->uio_loffset + uio->uio_resid) < 0)) {
 		return (EINVAL);
 	}
 	if (uio->uio_resid == 0) {
@@ -3021,8 +3019,8 @@ ud_rdip(struct ud_inode *ip, struct uio *uio, int32_t ioflag, cred_t *cr)
 			n = (int)diff;
 		}
 		dofree = ud_freebehind &&
-			ip->i_nextr == (off & PAGEMASK) &&
-				off > ud_smallfile;
+		    ip->i_nextr == (off & PAGEMASK) &&
+		    off > ud_smallfile;
 
 #ifndef	__lock_lint
 		if (rwtype == RW_READER) {
@@ -3031,7 +3029,7 @@ ud_rdip(struct ud_inode *ip, struct uio *uio, int32_t ioflag, cred_t *cr)
 #endif
 
 		base = segmap_getmapflt(segkmap, vp, (off + mapon),
-					(uint32_t)n, 1, S_READ);
+		    (uint32_t)n, 1, S_READ);
 		error = uiomove(base + mapon, (long)n, UIO_READ, uio);
 
 		flags = 0;
@@ -3041,7 +3039,7 @@ ud_rdip(struct ud_inode *ip, struct uio *uio, int32_t ioflag, cred_t *cr)
 			 * won't need this buffer again soon.
 			 */
 			if (n + on == MAXBSIZE && ud_freebehind && dofree &&
-				freemem < lotsfree + pages_before_pager) {
+			    freemem < lotsfree + pages_before_pager) {
 				flags = SM_FREE | SM_DONTNEED |SM_ASYNC;
 			}
 			/*
@@ -3076,7 +3074,8 @@ out:
 	 */
 	if (ioflag & FRSYNC) {
 		if ((ioflag & FSYNC) ||
-		((ioflag & FDSYNC) && (ip->i_flag & (IATTCHG|IBDWRITE)))) {
+		    ((ioflag & FDSYNC) &&
+		    (ip->i_flag & (IATTCHG|IBDWRITE)))) {
 		rw_exit(&ip->i_contents);
 		rw_enter(&ip->i_contents, RW_WRITER);
 		ud_iupdat(ip, 1);
@@ -3111,8 +3110,8 @@ ud_wrip(struct ud_inode *ip, struct uio *uio, int ioflag, struct cred *cr)
 
 	ASSERT(RW_WRITE_HELD(&ip->i_contents));
 	if ((ip->i_type != VREG) &&
-		(ip->i_type != VDIR) &&
-		(ip->i_type != VLNK)) {
+	    (ip->i_type != VDIR) &&
+	    (ip->i_type != VLNK)) {
 		return (EIO);
 	}
 
@@ -3135,7 +3134,7 @@ ud_wrip(struct ud_inode *ip, struct uio *uio, int ioflag, struct cred *cr)
 		return (EFBIG);
 	}
 	if ((uio->uio_loffset < (offset_t)0) ||
-		((uio->uio_loffset + uio->uio_resid) < 0)) {
+	    ((uio->uio_loffset + uio->uio_resid) < 0)) {
 		return (EINVAL);
 	}
 	if (uio->uio_resid == 0) {
@@ -3176,7 +3175,7 @@ ud_wrip(struct ud_inode *ip, struct uio *uio, int ioflag, struct cred *cr)
 			 * is done here before we up the file size.
 			 */
 			error = ud_bmap_write(ip, uoff,
-					(int)(on + n), mapon == 0, cr);
+			    (int)(on + n), mapon == 0, cr);
 			if (error) {
 				break;
 			}
@@ -3198,7 +3197,7 @@ ud_wrip(struct ud_inode *ip, struct uio *uio, int ioflag, struct cred *cr)
 			 * needed blocks are allocated first.
 			 */
 			error = ud_bmap_write(ip, uoff,
-					(int)(on + n), 1, cr);
+			    (int)(on + n), 1, cr);
 			if (error) {
 				break;
 			}
@@ -3209,8 +3208,17 @@ ud_wrip(struct ud_inode *ip, struct uio *uio, int ioflag, struct cred *cr)
 
 		rw_exit(&ip->i_contents);
 
+		/*
+		 * Touch the page and fault it in if it is not in
+		 * core before segmap_getmapflt can lock it. This
+		 * is to avoid the deadlock if the buffer is mapped
+		 * to the same file through mmap which we want to
+		 * write to.
+		 */
+		uio_prefaultpages((long)n, uio);
+
 		base = segmap_getmapflt(segkmap, vp, (off + mapon),
-				(uint32_t)n, !pagecreate, S_WRITE);
+		    (uint32_t)n, !pagecreate, S_WRITE);
 
 		/*
 		 * segmap_pagecreate() returns 1 if it calls
@@ -3219,14 +3227,14 @@ ud_wrip(struct ud_inode *ip, struct uio *uio, int ioflag, struct cred *cr)
 		newpage = 0;
 		if (pagecreate) {
 			newpage = segmap_pagecreate(segkmap, base,
-					(size_t)n, 0);
+			    (size_t)n, 0);
 		}
 
 		premove_resid = uio->uio_resid;
 		error = uiomove(base + mapon, (long)n, UIO_WRITE, uio);
 
 		if (pagecreate &&
-			uio->uio_loffset < roundup(off + mapon + n, PAGESIZE)) {
+		    uio->uio_loffset < roundup(off + mapon + n, PAGESIZE)) {
 			/*
 			 * We created pages w/o initializing them completely,
 			 * thus we need to zero the part that wasn't set up.
@@ -3277,13 +3285,13 @@ ud_wrip(struct ud_inode *ip, struct uio *uio, int ioflag, struct cred *cr)
 				 */
 				if (IS_SWAPVP(vp)) {
 					flags = SM_WRITE | SM_FREE |
-							SM_DONTNEED;
+					    SM_DONTNEED;
 					iupdat_flag = 0;
 				} else {
 					flags = SM_WRITE;
 				}
 			} else if (((mapon + n) == MAXBSIZE) ||
-					IS_SWAPVP(vp)) {
+			    IS_SWAPVP(vp)) {
 				/*
 				 * Have written a whole block.
 				 * Start an asynchronous write and
@@ -3312,7 +3320,7 @@ ud_wrip(struct ud_inode *ip, struct uio *uio, int ioflag, struct cred *cr)
 			 */
 			if (error) {
 				if ((ioflag & (FSYNC | FDSYNC)) ||
-					ip->i_type == VDIR) {
+				    ip->i_type == VDIR) {
 					uio->uio_resid = premove_resid;
 				} else {
 					error = 0;
@@ -3346,7 +3354,7 @@ ud_wrip(struct ud_inode *ip, struct uio *uio, int ioflag, struct cred *cr)
 				ip->i_flag |= IATTCHG;
 			}
 			if ((ip->i_perm & (IEXEC | (IEXEC >> 5) |
-				(IEXEC >> 10))) != 0 &&
+			    (IEXEC >> 10))) != 0 &&
 			    (ip->i_char & (ISUID | ISGID)) != 0 &&
 			    secpolicy_vnode_setid_retain(cr,
 			    (ip->i_char & ISUID) != 0 && ip->i_uid == 0) != 0) {
@@ -3382,7 +3390,7 @@ out:
 		 * we have eliminated nosync
 		 */
 		if ((ip->i_flag & (IATTCHG|IBDWRITE)) ||
-			((ioflag & FSYNC) && iupdat_flag)) {
+		    ((ioflag & FSYNC) && iupdat_flag)) {
 			ud_iupdat(ip, 1);
 		}
 	}
@@ -3420,7 +3428,7 @@ ud_multi_strat(struct ud_inode *ip,
 	for (io_off = 0; io_off < bp->b_bcount; io_off += contig) {
 		contig = 0;
 		if (error = ud_bmap_read(ip, (u_offset_t)(start + io_off),
-					&bn, &contig)) {
+		    &bn, &contig)) {
 			goto end;
 		}
 		if (contig == 0) {
@@ -3452,7 +3460,7 @@ ud_multi_strat(struct ud_inode *ip,
 		 * required number of buffers
 		 */
 		alloc_sz = sizeof (mio_master_t) +
-			(sizeof (mio_slave_t) * io_count);
+		    (sizeof (mio_slave_t) * io_count);
 		mm = (mio_master_t *)kmem_zalloc(alloc_sz, KM_SLEEP);
 		if (mm == NULL) {
 			error = ENOMEM;
@@ -3478,8 +3486,8 @@ ud_multi_strat(struct ud_inode *ip,
 		for (io_off = 0; io_off < bp->b_bcount; io_off += contig) {
 			contig = 0;
 			if (error = ud_bmap_read(ip,
-					(u_offset_t)(start + io_off),
-					&bn, &contig)) {
+			    (u_offset_t)(start + io_off),
+			    &bn, &contig)) {
 				goto end;
 			}
 			ASSERT(contig);
@@ -3494,8 +3502,8 @@ ud_multi_strat(struct ud_inode *ip,
 				ms->ms_ptr = mm;
 				bioinit(&ms->ms_buf);
 				rbp = bioclone(bp, io_off, (size_t)contig,
-					bp->b_edev, bn, ud_slave_done,
-					&ms->ms_buf, KM_NOSLEEP);
+				    bp->b_edev, bn, ud_slave_done,
+				    &ms->ms_buf, KM_NOSLEEP);
 				ASSERT(rbp == &ms->ms_buf);
 				mm->mm_resid += contig;
 				io_count++;

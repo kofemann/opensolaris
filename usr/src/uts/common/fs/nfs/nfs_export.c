@@ -61,6 +61,7 @@
 #include <nfs/nfs_acl.h>
 #include <nfs/nfs_log.h>
 #include <nfs/lm.h>
+#include <sys/sunddi.h>
 
 #define	EXPTABLESIZE 16
 
@@ -1325,6 +1326,7 @@ exi_scan_end:
 
 			sp2[i].s_flags = STRUCT_FGET(usi, s_flags);
 			sp2[i].s_window = STRUCT_FGET(usi, s_window);
+			sp2[i].s_rootid = STRUCT_FGET(usi, s_rootid);
 			sp2[i].s_rootcnt = STRUCT_FGET(usi, s_rootcnt);
 			sp2[i].s_rootnames = STRUCT_FGETP(usi, s_rootnames);
 		}
@@ -2597,6 +2599,7 @@ void
 exportfree(struct exportinfo *exi)
 {
 	struct exportdata *ex;
+	struct charset_cache *cache;
 
 	ex = &exi->exi_export;
 
@@ -2610,6 +2613,19 @@ exportfree(struct exportinfo *exi)
 
 	kmem_free(ex->ex_path, ex->ex_pathlen + 1);
 	nfsauth_cache_free(exi);
+
+	/*
+	 * if there is a character set mapping cached, clean it up.
+	 */
+	for (cache = exi->exi_charset; cache != NULL;
+	    cache = exi->exi_charset) {
+		if (cache->inbound != (kiconv_t)-1)
+			(void) kiconv_close(cache->inbound);
+		if (cache->outbound != (kiconv_t)-1)
+			(void) kiconv_close(cache->outbound);
+		exi->exi_charset = cache->next;
+		kmem_free(cache, sizeof (struct charset_cache));
+	}
 
 	if (exi->exi_logbuffer != NULL)
 		nfslog_disable(exi);
