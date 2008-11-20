@@ -3791,7 +3791,7 @@ rfs4_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 * it causes an update, cinfo.before will not match, which will
 	 * trigger a cache flush even if atomic is TRUE.
 	 */
-	if (fp = rfs4_lookup_and_findfile(dvp, name, &vp, &error, cs->cr)) {
+	fp = rfs4_lookup_and_findfile(dvp, name, &vp, &error, cs);
 	if (vp != NULL) {
 		/* use the vp to check all instances for a delegation */
 		if (rfs4_check_delegated(FWRITE, vp, TRUE, TRUE, TRUE, NULL)) {
@@ -4150,8 +4150,8 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	 * it causes an update, cinfo.before will not match, which will
 	 * trigger a cache flush even if atomic is TRUE.
 	 */
-	if (sfp = rfs4_lookup_and_findfile(odvp, converted_onm, &srcvp,
-	    &error, cs)) {
+	sfp = rfs4_lookup_and_findfile(odvp, converted_onm, &srcvp,
+	    &error, cs);
 	if (srcvp != NULL) {
 		/* use the vp to check all instances for a delegation */
 		if (rfs4_check_delegated(FWRITE, srcvp, TRUE, TRUE, TRUE,
@@ -4173,8 +4173,8 @@ rfs4_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	sfp_rele_grant_hold = 1;
 
 	/* Does the destination exist and a file and have a delegation? */
-	if (fp = rfs4_lookup_and_findfile(ndvp, converted_nnm, &targvp,
-	    NULL, cs)) {
+	fp = rfs4_lookup_and_findfile(ndvp, converted_nnm, &targvp,
+	    NULL, cs);
 	if (targvp != NULL) {
 		/* use the vp to check all instances for a delegation */
 		if (rfs4_check_delegated(FWRITE, targvp, TRUE, TRUE, TRUE,
