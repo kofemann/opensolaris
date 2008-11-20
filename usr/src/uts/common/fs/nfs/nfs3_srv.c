@@ -2803,11 +2803,9 @@ rfs3_rename(RENAME3args *args, RENAME3res *resp, struct exportinfo *exi,
 	}
 
 	/*
-	 * Check for renaming over a delegated file. Check rfs4_deleg_policy
-	 * first to avoid VOP_LOOKUP if possible.
+	 * Check for renaming over a delegated file.
 	 */
-	if (rfs4_deleg_policy != SRV_NEVER_DELEGATE &&
-	    VOP_LOOKUP(tvp, toname, &targvp, NULL, 0, NULL, cr,
+	if (VOP_LOOKUP(tvp, toname, &targvp, NULL, 0, NULL, cr,
 	    NULL, NULL, NULL) == 0) {
 
 		if (rfs4_check_delegated(FWRITE, targvp, TRUE, TRUE, TRUE,
