@@ -1516,7 +1516,7 @@ rfs4_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 			kmem_free(nm, len);
 			kmem_free(lnm, llen);
 			nfs4_ntov_table_free(&ntov, &sarg);
-			resp->attrset = 0;
+			resp->attrset = NFS4_EMPTY_ATTRMAP(avers);
 			goto out;
 		}
 
