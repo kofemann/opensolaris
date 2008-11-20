@@ -680,7 +680,7 @@ readagain:
 		 * attributes should be obtained from that
 		 * different vfs; only do this if appropriate.
 		 */
-		if (vp &
+		if (vp &&
 		    (vfs_different = (dvp->v_vfsp != vp->v_vfsp))) {	
 			if (ATTRMAP_TST(ar,
 			    RFS4_FS_SPACE_ATTRMAP(avers))) {
