@@ -662,8 +662,6 @@ readagain:
 		ae = ar;
 		if (ATTRMAP_EMPTY(ar))
 			goto reencode_attrs;
-			error = nfs4_readdir_getvp(dvp, dp->d_name,
-			    &vp, &newexi, req, cs, expseudo);
 
 		error = nfs4_readdir_getvp(dvp, dp->d_name,
 		    &vp, &newexi, req, cs, expseudo);
@@ -1106,26 +1104,20 @@ reencode_attrs:
 						lu_set = TRUE;
 						lastuid = va.va_uid;
 					}
-				} else {
-					if (va.va_uid != lastuid) {
-						if (owner.utf8string_len != 0) {
-							kmem_free(
-							    owner.
-							    utf8string_val,
-							    owner.
-							    utf8string_len);
-							owner.utf8string_len =
-							    0;
-							owner.utf8string_val =
-							    NULL;
-						}
-						owner_error = nfs_idmap_uid_str(
-						    va.va_uid, &owner, TRUE);
-						if (!owner_error) {
-							lastuid = va.va_uid;
-						} else {
-							lu_set = FALSE;
-						}
+				} else if (va.va_uid != lastuid) {
+					if (owner.utf8string_len != 0) {
+						kmem_free(
+						    owner.utf8string_val,
+						    owner.utf8string_len);
+						owner.utf8string_len = 0;
+						owner.utf8string_val = NULL;
+					}
+					owner_error = nfs_idmap_uid_str(
+					    va.va_uid, &owner, TRUE);
+					if (!owner_error) {
+						lastuid = va.va_uid;
+					} else {
+						lu_set = FALSE;
 					}
 				}
 				if (!owner_error) {
@@ -1169,27 +1161,21 @@ reencode_attrs:
 						lg_set = TRUE;
 						lastgid = va.va_gid;
 					}
-				} else {
-					if (va.va_gid != lastgid) {
-						if (group.utf8string_len != 0) {
-							kmem_free(
-							    group.
-							    utf8string_val,
-							    group.
-							    utf8string_len);
-							group.utf8string_len =
-							    0;
-							group.utf8string_val =
-							    NULL;
-						}
-						group_error =
-						    nfs_idmap_gid_str(va.va_gid,
-						    &group, TRUE);
-						if (!group_error)
-							lastgid = va.va_gid;
-						else
-							lg_set = FALSE;
+				} else if (va.va_gid != lastgid) {
+					if (group.utf8string_len != 0) {
+						kmem_free(
+						    group.utf8string_val,
+						    group.utf8string_len);
+						group.utf8string_len = 0;
+						group.utf8string_val = NULL;
 					}
+					group_error =
+					    nfs_idmap_gid_str(va.va_gid,
+					    &group, TRUE);
+					if (!group_error)
+						lastgid = va.va_gid;
+					else
+						lg_set = FALSE;
 				}
 				if (!group_error) {
 					if ((ptr +
