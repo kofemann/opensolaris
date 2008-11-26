@@ -225,7 +225,6 @@ typedef struct {
 	ds_owner_t *dop;
 } pinfo_create_t;
 
-
 extern void mds_xdr_devicelist(rfs4_entry_t, void *);
 extern ds_addrlist_t *mds_find_ds_addrlist(nfs_server_instance_t *, uint32_t);
 extern ds_addrlist_t *mds_find_ds_addrlist_by_uaddr(nfs_server_instance_t *,

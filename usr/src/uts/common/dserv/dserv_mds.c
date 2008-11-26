@@ -864,10 +864,15 @@ dserv_mds_reportavail()
 	int xdr_size = 0;
 	char *xdr_buffer;
 	int error = 0;
-	int i, acount, pcount;
+	int i, j;
+	int acount, pcount;
 
 	int acount_done = 0;
 	int pcount_done = 0;
+
+	ds_zfsinfo	*dz;
+
+	char	path_buf[MAXPATHLEN];
 
 	memset(&args, '\0', sizeof (args));
 	memset(&res, '\0', sizeof (res));
@@ -921,18 +926,37 @@ dserv_mds_reportavail()
 	for (i = 0; i < pcount; i++) {
 		args.ds_storinfo.ds_storinfo_val[i].type = ZFS;
 
+		dz = &args.ds_storinfo.ds_storinfo_val[i].
+		    ds_storinfo_u.zfs_info;
+
 		/* Storage attributes */
 		/*
-		 * ToDo: We are not sending over storage attributes yet.
+		 * ToDo: We are sending over just some of
+		 * the storage attributes now.
 		 */
+		dz->attrs.attrs_len = 1;
+		dz->attrs.attrs_val =
+		    kmem_zalloc(dz->attrs.attrs_len * sizeof (ds_zfsattr),
+		    KM_SLEEP);
+
+		(void) sprintf(path_buf, "%s:%s", uts_nodename(),
+		    root->oro_objsetname);
+
+		(void) str_to_utf8("datset",
+		    &dz->attrs.attrs_val[0].attrname);
+		(void) str_to_utf8(path_buf,
+		    (utf8string *)&dz->attrs.attrs_val[0].attrvalue);
 
 		/* GUID Map */
-		args.ds_storinfo.ds_storinfo_val[i].ds_storinfo_u.zfs_info.
-		    guid_map.ds_guid.stor_type = ZFS;
+		dz->guid_map.ds_guid.stor_type = ZFS;
 
 		zfsguid.zpool_guid = root->oro_ds_guid.dg_zpool_guid;
 		zfsguid.dataset_guid = root->oro_ds_guid.dg_objset_guid;
 
+		/*
+		 * We do this here because of a possible
+		 * early termination of the loop.
+		 */
 		pcount_done++;
 
 		xdr_size = xdr_sizeof(xdr_ds_zfsguid, &zfsguid);
@@ -948,10 +972,8 @@ dserv_mds_reportavail()
 			goto out;
 		}
 
-		args.ds_storinfo.ds_storinfo_val[i].ds_storinfo_u.zfs_info.
-		    guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_len = xdr_size;
-		args.ds_storinfo.ds_storinfo_val[i].ds_storinfo_u.zfs_info.
-		    guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_val = xdr_buffer;
+		dz->guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_len = xdr_size;
+		dz->guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_val = xdr_buffer;
 
 		/*
 		 * ToDo: This should include the list of MDS SIDs
@@ -977,14 +999,27 @@ dserv_mds_reportavail()
 out:
 	/* Free arguments and results */
 	for (i = 0; i < pcount_done; i++) {
-		if (args.ds_storinfo.ds_storinfo_val[i].ds_storinfo_u.zfs_info.
-		    guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_len) {
-			kmem_free(args.ds_storinfo.ds_storinfo_val[i].
-			    ds_storinfo_u.zfs_info.guid_map.ds_guid.ds_guid_u.
+		dz = &args.ds_storinfo.ds_storinfo_val[i].
+		    ds_storinfo_u.zfs_info;
+		if (dz->guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_len) {
+			kmem_free(dz->guid_map.ds_guid.ds_guid_u.
 			    zfsguid.zfsguid_val,
-			    args.ds_storinfo.ds_storinfo_val[i].ds_storinfo_u.
-			    zfs_info.guid_map.ds_guid.ds_guid_u.
-			    zfsguid.zfsguid_len);
+		    	    dz->guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_len);
+		}
+
+		for (j = 0; j < dz->attrs.attrs_len; j++) {
+			UTF8STRING_FREE(dz->attrs.attrs_val[j].attrname);
+			if (dz->attrs.attrs_val[j].attrvalue.attrvalue_val) {
+				kmem_free(dz->attrs.attrs_val[j].attrvalue.
+				    attrvalue_val,
+				    dz->attrs.attrs_val[j].attrvalue.
+				    attrvalue_len);
+			}
+		}
+
+		if (dz->attrs.attrs_len) {
+			kmem_free(dz->attrs.attrs_val,
+			    dz->attrs.attrs_len * sizeof (ds_zfsattr));
 		}
 	}
 

@@ -2330,7 +2330,6 @@ ds_owner_inst_compare(rfs4_entry_t entry, void *key)
 	ds_owner_t *dop = (ds_owner_t *)entry;
 
 	return (strcmp(dop->identity, key) == 0);
-
 }
 
 static void *
@@ -2339,7 +2338,6 @@ ds_owner_inst_mkkey(rfs4_entry_t entry)
 	ds_owner_t *dop = (ds_owner_t *)entry;
 	return (dop->identity);
 }
-
 
 /*ARGSUSED*/
 static bool_t
@@ -2452,7 +2450,6 @@ mds_free_zfsattr(ds_guid_info_t *dst)
 		return;
 
 	for (i = 0; i < dst->ds_attr_len; i++) {
-
 		UTF8STRING_FREE(dst->ds_attr_val[i].attrname);
 		kmem_free(dst->ds_attr_val[i].attrvalue.attrvalue_val,
 		    dst->ds_attr_val[i].attrvalue.attrvalue_len);
@@ -2466,22 +2463,22 @@ mds_dup_zfsattr(ds_zfsattr *src, ds_guid_info_t *dst)
 	int len;
 
 	for (i = 0; i < dst->ds_attr_len; i++) {
+		len = dst->ds_attr_val[i].attrname.utf8string_len =
+		    src[i].attrname.utf8string_len;
 
 		dst->ds_attr_val[i].attrname.utf8string_val =
-		    kmem_alloc(dst->ds_attr_val[i].attrname.utf8string_len,
-		    KM_SLEEP);
+		    kmem_alloc(len, KM_SLEEP);
 
-		bcopy(src->attrname.utf8string_val,
-		    dst->ds_attr_val[i].attrname.utf8string_val,
-		    dst->ds_attr_val[i].attrname.utf8string_len);
+		bcopy(src[i].attrname.utf8string_val,
+		    dst->ds_attr_val[i].attrname.utf8string_val, len);
 
 		len = dst->ds_attr_val[i].attrvalue.attrvalue_len =
-		    src->attrvalue.attrvalue_len;
+		    src[i].attrvalue.attrvalue_len;
 
 		dst->ds_attr_val[i].attrvalue.attrvalue_val
 		    = kmem_alloc(len, KM_SLEEP);
 
-		bcopy(src->attrvalue.attrvalue_val,
+		bcopy(src[i].attrvalue.attrvalue_val,
 		    dst->ds_attr_val[i].attrvalue.attrvalue_val, len);
 	}
 }
@@ -2505,6 +2502,7 @@ ds_guid_info_create(rfs4_entry_t e, void *arg)
 	pip->ds_attr_len = p->si->ds_storinfo_u.zfs_info.attrs.attrs_len;
 	pip->ds_attr_val = kmem_alloc(
 	    sizeof (ds_zfsattr) * pip->ds_attr_len, KM_SLEEP);
+
 	mds_dup_zfsattr(p->si->ds_storinfo_u.zfs_info.attrs.attrs_val, pip);
 
 	return (TRUE);
@@ -2532,6 +2530,7 @@ ds_guid_info_hash(void *key)
 {
 	return ((uint32_t)(uintptr_t)key);
 }
+
 /*ARGSUSED*/
 static void
 ds_guid_info_destroy(rfs4_entry_t e)

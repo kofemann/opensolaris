@@ -1348,9 +1348,15 @@ typedef struct nfs_fh4_fmt nfs_fh4_fmt_t;
  * A few definitions of repeatedly used constructs for nfsv4
  */
 #define	UTF8STRING_FREE(str)					\
-	kmem_free((str).utf8string_val,	(str).utf8string_len);	\
-	(str).utf8string_val = NULL;				\
+	if ((str).utf8string_val != NULL) {			\
+		kmem_free((str).utf8string_val,			\
+		    (str).utf8string_len);			\
+		(str).utf8string_val = NULL;			\
+	}							\
 	(str).utf8string_len = 0;
+
+#define UTF8STRING_NULL(str)					\
+	(str).utf8string_val == NULL
 
 /*
  * NFS4_VOLATILE_FH yields non-zero if the filesystem uses non-persistent

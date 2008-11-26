@@ -331,6 +331,8 @@ default:
  * |          |   displays the pool
  * |          |  configuration.
  * +----------+------------+-----------------------------------------
+ * | dataset  | utf8string | hostname:root_pool/root_data_set
+ * +----------+------------+-----------------------------------------
  */
 struct ds_zfsattr {
       	utf8string  attrname;
