@@ -45,23 +45,18 @@ static void *
 svcstart(void *arg)
 {
 	int id = (int)arg;
-	int err;
-
-	while ((err = _nfssys(SVCPOOL_RUN, &id)) != 0) {
-		/*
-		 * Interrupted by a signal while in the kernel.
-		 * this process is still alive, try again.
-		 */
-		if (err == EINTR)
-			continue;
-		else
-			break;
-	}
 
 	/*
-	 * If we weren't interrupted by a signal, but did
-	 * return from the kernel, this thread's work is done,
-	 * and it should exit.
+	 * Create a kernel worker thread to service
+	 * new incoming requests on a pool.
+	 */
+	_nfssys(SVCPOOL_RUN, &id);
+
+	/*
+	 * Returned from the kernel, this thread's work is done,
+	 * and it should exit. For new incoming requests,
+	 * svcblock() will spawn another worker thread by
+	 * calling svcstart() again.
 	 */
 	thr_exit(NULL);
 	return (NULL);
@@ -70,11 +65,10 @@ svcstart(void *arg)
 static void *
 svc_rdma_creator(void *arg)
 {
-	int error = 0;
 	struct rdma_svc_args *rsap = (struct rdma_svc_args *)arg;
 
-	if (error = _nfssys(RDMA_SVC_INIT, rsap)) {
-		if (error != ENODEV) {
+	if (_nfssys(RDMA_SVC_INIT, rsap) < 0) {
+		if (errno != ENODEV) {
 			(void) syslog(LOG_INFO, "RDMA transport startup "
 			    "failed with %m");
 		}
@@ -98,21 +92,21 @@ svcblock(void *arg)
 	/* CONSTCOND */
 	while (1) {
 		thread_t tid;
-		int err;
 
 		/*
 		 * Call into the kernel, and hang out there
 		 * until a thread needs to be created.
 		 */
-		if (err = _nfssys(SVCPOOL_WAIT, &id)) {
-			if (err == ECANCELED || err == EBUSY)
+		if (_nfssys(SVCPOOL_WAIT, &id) < 0) {
+			if (errno == ECANCELED || errno == EINTR ||
+			    errno == EBUSY)
 				/*
-				 * If we get back ECANCELED, the service
-				 * pool is exiting, and we may as well
-				 * clean up this thread. If EBUSY is
-				 * returned, there's already a thread
-				 * looping on this pool, so we should
-				 * give up.
+				 * If we get back ECANCELED or EINTR,
+				 * the service pool is exiting, and we
+				 * may as well clean up this thread. If
+				 * EBUSY is returned, there's already a
+				 * thread looping on this pool, so we
+				 * should give up.
 				 */
 				break;
 			else

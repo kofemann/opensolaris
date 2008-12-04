@@ -251,6 +251,7 @@ static int	wpi_reset(wpi_sc_t *);
 static void	wpi_hw_config(wpi_sc_t *);
 static int	wpi_init(wpi_sc_t *);
 static void	wpi_stop(wpi_sc_t *);
+static int	wpi_quiesce(dev_info_t *dip);
 static void	wpi_amrr_init(wpi_amrr_t *);
 static void	wpi_amrr_timeout(wpi_sc_t *);
 static void	wpi_amrr_ratectl(void *, ieee80211_node_t *);
@@ -273,7 +274,7 @@ static int	wpi_m_setprop(void *arg, const char *pr_name,
     mac_prop_id_t wldp_pr_num, uint_t wldp_length, const void *wldp_buf);
 static int	wpi_m_getprop(void *arg, const char *pr_name,
     mac_prop_id_t wldp_pr_num, uint_t pr_flags, uint_t wldp_lenth,
-    void *wldp_buf);
+    void *wldp_buf, uint_t *);
 static void	wpi_destroy_locks(wpi_sc_t *sc);
 static int	wpi_send(ieee80211com_t *ic, mblk_t *mp, uint8_t type);
 static void	wpi_thread(wpi_sc_t *sc);
@@ -304,7 +305,7 @@ extern pri_t minclsyspri;
  * Module Loading Data & Entry Points
  */
 DDI_DEFINE_STREAM_OPS(wpi_devops, nulldev, nulldev, wpi_attach,
-    wpi_detach, nodev, NULL, D_MP, NULL, ddi_quiesce_not_supported);
+    wpi_detach, nodev, NULL, D_MP, NULL, wpi_quiesce);
 
 static struct modldrv wpi_modldrv = {
 	&mod_driverops,
@@ -1121,9 +1122,11 @@ wpi_reset_tx_ring(wpi_sc_t *sc, wpi_tx_ring_t *ring)
 #endif
 	wpi_mem_unlock(sc);
 
-	for (i = 0; i < ring->count; i++) {
-		data = &ring->data[i];
-		WPI_DMA_SYNC(data->dma_data, DDI_DMA_SYNC_FORDEV);
+	if (!(sc->sc_flags & WPI_F_QUIESCED)) {
+		for (i = 0; i < ring->count; i++) {
+			data = &ring->data[i];
+			WPI_DMA_SYNC(data->dma_data, DDI_DMA_SYNC_FORDEV);
+		}
 	}
 
 	ring->queued = 0;
@@ -2301,15 +2304,16 @@ wpi_m_ioctl(void* arg, queue_t *wq, mblk_t *mp)
 /*
  * Callback functions for get/set properties
  */
+/* ARGSUSED */
 static int
 wpi_m_getprop(void *arg, const char *pr_name, mac_prop_id_t wldp_pr_name,
-    uint_t pr_flags, uint_t wldp_length, void *wldp_buf)
+    uint_t pr_flags, uint_t wldp_length, void *wldp_buf, uint_t *perm)
 {
 	int		err = 0;
 	wpi_sc_t	*sc = (wpi_sc_t *)arg;
 
 	err = ieee80211_getprop(&sc->sc_ic, pr_name, wldp_pr_name,
-	    pr_flags, wldp_length, wldp_buf);
+	    pr_flags, wldp_length, wldp_buf, perm);
 
 	return (err);
 }
@@ -3317,14 +3321,51 @@ fail1:
 	return (err);
 }
 
+/*
+ * quiesce(9E) entry point.
+ * This function is called when the system is single-threaded at high
+ * PIL with preemption disabled. Therefore, this function must not be
+ * blocked.
+ * This function returns DDI_SUCCESS on success, or DDI_FAILURE on failure.
+ * DDI_FAILURE indicates an error condition and should almost never happen.
+ */
+static int
+wpi_quiesce(dev_info_t *dip)
+{
+	wpi_sc_t *sc;
+
+	sc = ddi_get_soft_state(wpi_soft_state_p, ddi_get_instance(dip));
+	if (sc == NULL)
+		return (DDI_FAILURE);
+
+#ifdef DEBUG
+	/* by pass any messages, if it's quiesce */
+	wpi_dbg_flags = 0;
+#endif
+
+	/*
+	 * No more blocking is allowed while we are in the
+	 * quiesce(9E) entry point.
+	 */
+	sc->sc_flags |= WPI_F_QUIESCED;
+
+	/*
+	 * Disable and mask all interrupts.
+	 */
+	wpi_stop(sc);
+	return (DDI_SUCCESS);
+}
+
 static void
 wpi_stop(wpi_sc_t *sc)
 {
 	uint32_t tmp;
 	int ac;
 
+	/* no mutex operation, if it's quiesced */
+	if (!(sc->sc_flags & WPI_F_QUIESCED))
+		mutex_enter(&sc->sc_glock);
 
-	mutex_enter(&sc->sc_glock);
 	/* disable interrupts */
 	WPI_WRITE(sc, WPI_MASK, 0);
 	WPI_WRITE(sc, WPI_INTR, WPI_INTR_MASK);
@@ -3360,7 +3401,9 @@ wpi_stop(wpi_sc_t *sc)
 	tmp = WPI_READ(sc, WPI_RESET);
 	WPI_WRITE(sc, WPI_RESET, tmp | WPI_SW_RESET);
 
-	mutex_exit(&sc->sc_glock);
+	/* no mutex operation, if it's quiesced */
+	if (!(sc->sc_flags & WPI_F_QUIESCED))
+		mutex_exit(&sc->sc_glock);
 }
 
 /*

@@ -87,8 +87,8 @@ static void
 usage(void)
 {
 	(void) fprintf(stderr,
-	    "Usage: %s [-udibcsv] [-U cachefile_path] "
-	    "[-S user:cksumalg] "
+	    "Usage: %s [-udibcsvL] [-U cachefile_path] [-t txg]\n"
+	    "\t   [-S user:cksumalg] "
 	    "dataset [object...]\n"
 	    "       %s -C [pool]\n"
 	    "       %s -l dev\n"
@@ -108,6 +108,8 @@ usage(void)
 	    "dump blkptr signatures\n");
 	(void) fprintf(stderr, "	-v verbose (applies to all others)\n");
 	(void) fprintf(stderr, "        -l dump label contents\n");
+	(void) fprintf(stderr, "        -L disable leak tracking (do not "
+	    "load spacemaps)\n");
 	(void) fprintf(stderr, "	-U cachefile_path -- use alternate "
 	    "cachefile\n");
 	(void) fprintf(stderr, "        -R read and display block from a "
@@ -115,6 +117,8 @@ usage(void)
 	(void) fprintf(stderr, "        -e Pool is exported/destroyed/"
 	    "has altroot\n");
 	(void) fprintf(stderr, "	-p <Path to vdev dir> (use with -e)\n");
+	(void) fprintf(stderr, "	-t <txg> highest txg to use when "
+	    "searching for uberblocks\n");
 	(void) fprintf(stderr, "Specify an option more than once (e.g. -bb) "
 	    "to make only that option verbose\n");
 	(void) fprintf(stderr, "Default is to dump everything non-verbosely\n");
@@ -1481,8 +1485,9 @@ zdb_count_block(spa_t *spa, zdb_cb_t *zcb, blkptr_t *bp, dmu_object_type_t type)
 		}
 	}
 
-	VERIFY(zio_wait(zio_claim(NULL, spa, spa_first_txg(spa), bp,
-	    NULL, NULL, ZIO_FLAG_MUSTSUCCEED)) == 0);
+	if (!dump_opt['L'])
+		VERIFY(zio_wait(zio_claim(NULL, spa, spa_first_txg(spa), bp,
+		    NULL, NULL, ZIO_FLAG_MUSTSUCCEED)) == 0);
 }
 
 static int
@@ -1557,9 +1562,11 @@ dump_block_stats(spa_t *spa)
 	int c, e;
 
 	if (!dump_opt['S']) {
-		(void) printf("\nTraversing all blocks to %sverify"
-		    " nothing leaked ...\n",
-		    dump_opt['c'] ? "verify checksums and " : "");
+		(void) printf("\nTraversing all blocks %s%s%s%s...\n",
+		    (dump_opt['c'] || !dump_opt['L']) ? "to verify " : "",
+		    dump_opt['c'] ? "checksums " : "",
+		    (dump_opt['c'] && !dump_opt['L']) ? "and verify " : "",
+		    !dump_opt['L'] ? "nothing leaked " : "");
 	}
 
 	/*
@@ -1570,7 +1577,8 @@ dump_block_stats(spa_t *spa)
 	 * it's not part of any space map) is a double allocation,
 	 * reference to a freed block, or an unclaimed log block.
 	 */
-	zdb_leak_init(spa);
+	if (!dump_opt['L'])
+		zdb_leak_init(spa);
 
 	/*
 	 * If there's a deferred-free bplist, process that first.
@@ -1612,7 +1620,8 @@ dump_block_stats(spa_t *spa)
 	/*
 	 * Report any leaked segments.
 	 */
-	zdb_leak_fini(spa);
+	if (!dump_opt['L'])
+		zdb_leak_fini(spa);
 
 	/*
 	 * If we're interested in printing out the blkptr signatures,
@@ -1638,14 +1647,16 @@ dump_block_stats(spa_t *spa)
 	tzb = &zcb.zcb_type[ZB_TOTAL][DMU_OT_TOTAL];
 
 	if (tzb->zb_asize == alloc + logalloc) {
-		(void) printf("\n\tNo leaks (block sum matches space"
-		    " maps exactly)\n");
+		if (!dump_opt['L'])
+			(void) printf("\n\tNo leaks (block sum matches space"
+			    " maps exactly)\n");
 	} else {
 		(void) printf("block traversal size %llu != alloc %llu "
-		    "(leaked %lld)\n",
+		    "(%s %lld)\n",
 		    (u_longlong_t)tzb->zb_asize,
 		    (u_longlong_t)alloc + logalloc,
-		    (u_longlong_t)(alloc + logalloc - tzb->zb_asize));
+		    (dump_opt['L']) ? "unreachable" : "leaked",
+		    (longlong_t)(alloc + logalloc - tzb->zb_asize));
 		leaks = 1;
 	}
 
@@ -2235,7 +2246,7 @@ main(int argc, char **argv)
 
 	dprintf_setup(&argc, argv);
 
-	while ((c = getopt(argc, argv, "udibcsvCS:U:lRep:")) != -1) {
+	while ((c = getopt(argc, argv, "udibcsvCLS:U:lRep:t:")) != -1) {
 		switch (c) {
 		case 'u':
 		case 'd':
@@ -2248,6 +2259,9 @@ main(int argc, char **argv)
 		case 'R':
 			dump_opt[c]++;
 			dump_all = 0;
+			break;
+		case 'L':
+			dump_opt[c]++;
 			break;
 		case 'v':
 			verbose++;
@@ -2278,6 +2292,14 @@ main(int argc, char **argv)
 				zdb_sig_cksumalg = ZIO_CHECKSUM_FLETCHER_2;
 			else
 				usage();
+			break;
+		case 't':
+			ub_max_txg = strtoull(optarg, NULL, 0);
+			if (ub_max_txg < TXG_INITIAL) {
+				(void) fprintf(stderr, "incorrect txg "
+				    "specified: %s\n", optarg);
+				usage();
+			}
 			break;
 		default:
 			usage();

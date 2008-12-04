@@ -1403,3 +1403,8 @@ Bugid   Risk Synopsis
 6765299 ld --version-script option not compatible with GNU ld (D)
 6748160 problem with -zrescan (D)
 	PSARC/2008/651 New ld archive rescan options
+6763342 sloppy relocations need to get sloppier
+6736890 PT_SUNWBSS should be disabled (D)
+	PSARC/2008/715 PT_SUNWBSS removal
+6772661 ldd/lddstub/ld.so.1 dump core in current nightly while processing
+	libsoftcrypto_hwcap.so.1

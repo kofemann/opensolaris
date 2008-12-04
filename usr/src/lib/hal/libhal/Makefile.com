@@ -19,10 +19,9 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 # usr/src/lib/hal/libhal/Makefile.com
 #
@@ -46,12 +45,16 @@ CPPFLAGS +=	$(HAL_CONFIG_CPPFLAGS)
 CPPFLAGS +=	-DGETTEXT_PACKAGE=\"$(HAL_GETTEXT_PACKAGE)\" -DENABLE_NLS
 
 ROOTMAJLINK =	$(ROOTLIBDIR)/$(LIBRARY:.a=.so)$(VERS_MAJ)
+ROOTMAJLINK64 =	$(ROOTLIBDIR64)/$(LIBRARY:.a=.so)$(VERS_MAJ)
 
 .KEEP_STATE:
 
 all:		$(LIBS)
 
 $(ROOTMAJLINK):
+	-$(RM) $@; $(SYMLINK) $(DYNLIB) $@
+
+$(ROOTMAJLINK64):
 	-$(RM) $@; $(SYMLINK) $(DYNLIB) $@
 
 include $(SRC)/lib/Makefile.targ

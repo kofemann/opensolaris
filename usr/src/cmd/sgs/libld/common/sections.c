@@ -1419,6 +1419,18 @@ make_symtab(Ofl_desc *ofl)
 	Word		symcnt;
 
 	/*
+	 * We increment the number of sections in the output object
+	 * (ofl->ofl_shdrcnt) as we add them. However, if -z ignore
+	 * processing is in effect, the number of sections later removed
+	 * is not reflected in that count. Updating the count as we
+	 * remove these sections is a relatively expensive operation.
+	 * Hence, if -z ignore is in use, we recompute the number of
+	 * sections in a single final pass.
+	 */
+	if (ofl->ofl_flags1 & FLG_OF1_IGNPRC)
+		ld_recalc_shdrcnt(ofl);
+
+	/*
 	 * Create the section headers. Note that we supply an ent_cnt
 	 * of 0. We won't know the count until the section has been placed.
 	 */
@@ -2037,53 +2049,17 @@ make_sym_sec(Ofl_desc *ofl, const char *sectname, Word stype, int ident)
 }
 
 /*
- * Build a .sunwbss section for allocation of tentative definitions.
- */
-uintptr_t
-ld_make_sunwbss(Ofl_desc *ofl, size_t size, Xword align)
-{
-	Shdr		*shdr;
-	Elf_Data	*data;
-	Is_desc		*isec;
-
-	/*
-	 * Allocate header structs. We will set the name ourselves below,
-	 * and there is no entcnt for a BSS. So, the shname and entcnt
-	 * arguments are 0.
-	 */
-	if (new_section(ofl, SHT_NOBITS, MSG_ORIG(MSG_SCN_SUNWBSS), 0,
-	    &isec, &shdr, &data) == S_ERROR)
-		return (S_ERROR);
-
-	data->d_size = size;
-	data->d_align = align;
-
-	shdr->sh_size = (Xword)size;
-	shdr->sh_addralign = align;
-
-	/*
-	 * Retain this .sunwbss input section as this will be where global
-	 * symbol references are added.
-	 */
-	ofl->ofl_issunwbss = isec;
-	if (ld_place_section(ofl, isec, 0, 0) == (Os_desc *)S_ERROR)
-		return (S_ERROR);
-
-	return (1);
-}
-
-/*
  * This routine is called when -z nopartial is in effect.
  */
 uintptr_t
-ld_make_sunwdata(Ofl_desc *ofl, size_t size, Xword align)
+ld_make_parexpn_data(Ofl_desc *ofl, size_t size, Xword align)
 {
 	Shdr		*shdr;
 	Elf_Data	*data;
 	Is_desc		*isec;
 	Os_desc		*osp;
 
-	if (new_section(ofl, SHT_PROGBITS, MSG_ORIG(MSG_SCN_SUNWDATA1), 0,
+	if (new_section(ofl, SHT_PROGBITS, MSG_ORIG(MSG_SCN_DATA), 0,
 	    &isec, &shdr, &data) == S_ERROR)
 		return (S_ERROR);
 
@@ -2099,11 +2075,11 @@ ld_make_sunwdata(Ofl_desc *ofl, size_t size, Xword align)
 		return (S_ERROR);
 
 	/*
-	 * Retain this .sunwdata1 input section as this will
-	 * be where global
-	 * symbol references are added.
+	 * Retain handle to this .data input section. Variables using move
+	 * sections (partial initialization) will be redirected here when
+	 * such global references are added and '-z nopartial' is in effect.
 	 */
-	ofl->ofl_issunwdata1 = isec;
+	ofl->ofl_isparexpn = isec;
 	osp = ld_place_section(ofl, isec, ld_targ.t_id.id_data, 0);
 	if (osp == (Os_desc *)S_ERROR)
 		return (S_ERROR);

@@ -433,11 +433,13 @@ typedef struct _hxge_rdc_kstat {
 
 	kstat_named_t	rcrfull;
 	kstat_named_t	rbr_empty;
+	kstat_named_t	rbr_empty_fail;
 	kstat_named_t	rbrfull;
 	kstat_named_t	rcr_invalids;	/* Account for invalid RCR entries. */
 
 	kstat_named_t	rcr_to;
 	kstat_named_t	rcr_thresh;
+	kstat_named_t	pkt_drop;
 } hxge_rdc_kstat_t, *p_hxge_rdc_kstat_t;
 
 typedef struct _hxge_rdc_sys_kstat {

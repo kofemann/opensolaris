@@ -26,7 +26,6 @@
 /*	Copyright (c) 1988 AT&T	*/
 /*	  All Rights Reserved  	*/
 
-
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/sysmacros.h>
@@ -70,12 +69,14 @@
 #include <sys/class.h>
 #include <sys/stack.h>
 #include <sys/brand.h>
+#include <sys/mmapobj.h>
 
 #include <vm/as.h>
 #include <vm/seg_kmem.h>
 #include <sys/dc_ki.h>
 
 #include <c2/audit.h>
+#include <sys/bootprops.h>
 
 /* well known processes */
 proc_t *proc_sched;		/* memory scheduler */
@@ -361,6 +362,7 @@ main(void)
 	extern id_t	syscid, defaultcid;
 	extern int	swaploaded;
 	extern int	netboot;
+	extern ib_boot_prop_t *iscsiboot_prop;
 	extern void	vm_init(void);
 	extern void	cbe_init_pre(void);
 	extern void	cbe_init(void);
@@ -429,7 +431,10 @@ main(void)
 	 */
 	for (initptr = &init_tbl[0]; *initptr; initptr++)
 		(**initptr)();
-
+	/*
+	 * Load iSCSI boot properties
+	 */
+	ld_ib_prop();
 	/*
 	 * initialize vm related stuff.
 	 */
@@ -474,7 +479,7 @@ main(void)
 	 * Plumb the protocol modules and drivers only if we are not
 	 * networked booted, in this case we already did it in rootconf().
 	 */
-	if (netboot == 0)
+	if (netboot == 0 && iscsiboot_prop == NULL)
 		(void) strplumb();
 
 	gethrestime(&PTOU(curproc)->u_start);
@@ -548,6 +553,14 @@ main(void)
 	 * Finish lgrp initialization after all CPUS are brought online.
 	 */
 	lgrp_main_mp_init();
+
+	/*
+	 * Initialize lib_va arenas.  Needs to be done after start_other_cpus
+	 * so that USERLIMIT32 represents the final value after any
+	 * workarounds have been applied. Also need to be done before we
+	 * create any processes so that all libs can be cached.
+	 */
+	lib_va_init();
 
 	/*
 	 * After mp_init(), number of cpus are known (this is

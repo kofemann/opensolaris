@@ -703,8 +703,6 @@
 @ MSG_SCN_STAB		".stab"
 @ MSG_SCN_STABEXCL	".stab.exclstr"
 @ MSG_SCN_STRTAB	".strtab"
-@ MSG_SCN_SUNWBSS	".SUNW_bss"
-@ MSG_SCN_SUNWDATA1	".SUNW_data1"
 @ MSG_SCN_SUNWMOVE	".SUNW_move"
 @ MSG_SCN_SUNWRELOC	".SUNW_reloc"
 @ MSG_SCN_SUNWSYMINFO	".SUNW_syminfo"
@@ -728,6 +726,7 @@
 @ MSG_SCN_DTORS		".dtors"
 @ MSG_SCN_EHFRAME	".eh_frame"
 @ MSG_SCN_EHFRAME_HDR	".eh_frame_hdr"
+@ MSG_SCN_GCC_X_TBL	".gcc_except_table"
 @ MSG_SCN_JCR		".jcr"
 
 # Entry criteria strings (segment names)
@@ -745,7 +744,6 @@
 @ MSG_ENT_TLS		"tls"
 @ MSG_ENT_UNWIND	"unwind"
 
-@ MSG_ENT_SUNWBSS	"SUNW_bss"
 @ MSG_ENT_SUNWCAP	"SUNW_cap"
 
 # Symbol names

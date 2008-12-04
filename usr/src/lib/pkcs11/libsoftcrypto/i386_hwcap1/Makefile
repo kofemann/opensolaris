@@ -1,3 +1,4 @@
+#
 # CDDL HEADER START
 #
 # The contents of this file are subject to the terms of the
@@ -17,9 +18,41 @@
 #
 # CDDL HEADER END
 #
-# 
+#
 # Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# path           blocks  inodes
-etc/		 1	 1
+# lib/pkcs11/libsoftcrypto/i386_hwcap1/Makefile
+#
+LIBRARY=	libsoftcrypto_hwcap1.a
+VERS= .1
+
+MODULE= libsoftcrypto_hwcap1.so.1
+
+BIGNUM_PSM_OBJS= bignum_i386.o bignum_i386_asm.o
+BIGNUM_PSM_SRC=	$(BIGNUM_DIR)/i386/bignum_i386_asm.s \
+		$(BIGNUM_DIR)/i386/bignum_i386.c
+
+include ../Makefile.com
+
+BIGNUM_FLAGS += -DMMX_MANAGE -DHWCAP -DPSR_MUL
+LINTFLAGS += $(BIGNUM_FLAGS)
+LDLIBS  += -lc
+
+$(ROOTHWCAPDIR)/% := FILEMODE= 755
+
+install:  all $(ROOTHWCAPDIR)/$(MODULE)
+
+pics/bignum_i386.o:	$(BIGNUM_DIR)/i386/bignum_i386.c
+	$(COMPILE.c) $(BIGNUM_FLAGS) -o $@ $(BIGNUM_DIR)/i386/bignum_i386.c
+	$(POST_PROCESS_O)
+
+pics/bignum_i386_asm.o:	$(BIGNUM_DIR)/i386/bignum_i386_asm.s
+	$(COMPILE.s) -o $@ $(BIGNUM_DIR)/i386/bignum_i386_asm.s
+	$(POST_PROCESS_O)
+
+$(ROOTHWCAPDIR): $(ROOTLIBDIR)
+	$(INS.dir)
+
+$(ROOTHWCAPDIR)/%: $(ROOTHWCAPDIR) %
+	$(INS.file)

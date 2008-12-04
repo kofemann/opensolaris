@@ -55,6 +55,7 @@
 #include <sys/bootinfo.h>
 #include <sys/intel_iommu.h>
 #include <sys/atomic.h>
+#include <sys/iommulib.h>
 
 /*
  * internal variables
@@ -1885,8 +1886,8 @@ iommu_alloc_domain(dev_info_t *dip, dmar_domain_state_t **domain)
 	/*
 	 * check if the domain has already allocated
 	 */
-	if (private->idp_domain) {
-		*domain = private->idp_domain;
+	if (private->idp_intel_domain) {
+		*domain = INTEL_IOMMU_PRIVATE(private->idp_intel_domain);
 		return (DDI_SUCCESS);
 	}
 
@@ -1910,8 +1911,8 @@ iommu_alloc_domain(dev_info_t *dip, dmar_domain_state_t **domain)
 	 */
 	if (bdip != NULL) {
 		b_private = DEVI(bdip)->devi_iommu_private;
-		if (b_private->idp_domain) {
-			new = b_private->idp_domain;
+		if (b_private->idp_intel_domain) {
+			new = INTEL_IOMMU_PRIVATE(b_private->idp_intel_domain);
 			goto get_domain_finish;
 		} else {
 			need_to_set_parent = 1;
@@ -1939,11 +1940,11 @@ get_domain_finish:
 	/*
 	 * add the device to the domain's device list
 	 */
-	private->idp_domain = new;
+	private->idp_intel_domain = (void *)new;
 	ndi_devi_exit(ddi_get_parent(dip), count);
 
 	if (need_to_set_parent) {
-		b_private->idp_domain = new;
+		b_private->idp_intel_domain = (void *)new;
 		ndi_devi_exit(ddi_get_parent(bdip), pcount);
 		setup_possible_contexts(new, bdip);
 	} else if (bdip == NULL) {
@@ -2012,8 +2013,8 @@ iommu_get_domain(dev_info_t *dip, dmar_domain_state_t **domain)
 	/*
 	 * check if the domain has already allocated
 	 */
-	if (private->idp_domain) {
-		*domain = private->idp_domain;
+	if (private->idp_intel_domain) {
+		*domain = INTEL_IOMMU_PRIVATE(private->idp_intel_domain);
 		return (DDI_SUCCESS);
 	}
 
@@ -2291,11 +2292,11 @@ drhd_only_for_gfx(intel_iommu_state_t *iommu)
 }
 
 /*
- * build_gfx_identity_map()
- *   build identity map for the gfx device
+ * build_dev_identity_map()
+ *   build identity map for a device
  */
 static void
-build_gfx_identity_map(dev_info_t *dip)
+build_dev_identity_map(dev_info_t *dip)
 {
 	struct memlist *mp;
 	dmar_domain_state_t *domain;
@@ -2306,8 +2307,6 @@ build_gfx_identity_map(dev_info_t *dip)
 		    ddi_node_name(dip));
 		return;
 	}
-
-	gfx_devinfo = dip;
 
 	ASSERT(bootops != NULL);
 	ASSERT(!modrootloaded);
@@ -2347,10 +2346,20 @@ build_isa_gfx_identity_walk(dev_info_t *dip, void *arg)
 		return (DDI_WALK_CONTINUE);
 
 	/* fix the gfx and fd */
-	if (private->idp_is_display)
-		build_gfx_identity_map(dip);
-	else if (private->idp_is_lpc)
+	if (private->idp_is_display) {
+		gfx_devinfo = dip;
+		build_dev_identity_map(dip);
+	} else if (private->idp_is_lpc) {
 		lpc_devinfo = dip;
+	}
+
+	/* workaround for pci8086,10bc pci8086,11bc */
+	if ((strcmp(ddi_node_name(dip), "pci8086,10bc") == 0) ||
+	    (strcmp(ddi_node_name(dip), "pci8086,11bc") == 0)) {
+		cmn_err(CE_CONT, "?Workaround for PRO/1000 PT Quad"
+		    " Port LP Server Adapter applied\n");
+		build_dev_identity_map(dip);
+	}
 
 	return (DDI_WALK_CONTINUE);
 }

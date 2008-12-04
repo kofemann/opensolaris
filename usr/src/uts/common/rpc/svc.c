@@ -36,8 +36,6 @@
  * under license from the Regents of the University of California.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * Server-side remote procedure call interface.
  *
@@ -2095,7 +2093,7 @@ svc_poll(SVCPOOL *pool, SVCMASTERXPRT *xprt, SVCXPRT *clone_xprt)
 		/*
 		 * If we received a signal while waiting for a
 		 * request, inform svc_run(), so that we can return
-		 * to user level and restart the call.
+		 * to user level and exit.
 		 */
 		if (timeleft == 0)
 			return (SVC_EINTR);
@@ -2130,7 +2128,6 @@ svc_run(SVCPOOL *pool)
 {
 	SVCMASTERXPRT *xprt = NULL;	/* master transport handle  */
 	SVCXPRT *clone_xprt;	/* clone for this thread    */
-	struct svc_globals *svc;
 	proc_t *p = ttoproc(curthread);
 
 	/* Allocate a clone transport handle for this thread */
@@ -2153,19 +2150,7 @@ svc_run(SVCPOOL *pool)
 		 */
 		if (p->p_flag & (SEXITING | SKILLED)) {
 			svc_thread_exit(pool, clone_xprt);
-
-			/*
-			 * Thread has been interrupted and therefore
-			 * the service daemon is leaving as well so
-			 * let's go ahead and remove the service
-			 * pool at this time.
-			 */
-			svc = zone_getspecific(svc_zone_key, curproc->p_zone);
-			mutex_enter(&svc->svc_plock);
-			svc_pool_unregister(svc, pool);
-			mutex_exit(&svc->svc_plock);
-
-			return (0);
+			return (EINTR);
 		}
 
 		/* Find a transport with a pending request */
@@ -2198,22 +2183,10 @@ svc_run(SVCPOOL *pool)
 
 		/*
 		 * Interrupted by a signal while waiting for a
-		 * request. Return to userspace and restart.
+		 * request. Return to userspace and exit.
 		 */
 		if (next == SVC_EINTR) {
 			svc_thread_exit(pool, clone_xprt);
-
-			/*
-			 * Thread has been interrupted and therefore
-			 * the service daemon is leaving as well so
-			 * let's go ahead and remove the service
-			 * pool at this time.
-			 */
-			svc = zone_getspecific(svc_zone_key, curproc->p_zone);
-			mutex_enter(&svc->svc_plock);
-			svc_pool_unregister(svc, pool);
-			mutex_exit(&svc->svc_plock);
-
 			return (EINTR);
 		}
 

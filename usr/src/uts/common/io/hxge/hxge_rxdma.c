@@ -27,6 +27,12 @@
 #include <hxge_rxdma.h>
 
 /*
+ * Number of blocks to accumulate before re-enabling DMA
+ * when we get RBR empty.
+ */
+#define	HXGE_RBR_EMPTY_THRESHOLD	64
+
+/*
  * Globals: tunable parameters (/etc/system or adb)
  *
  */
@@ -52,6 +58,9 @@ extern hxge_rxbuf_threshold_t hxge_rx_threshold_hi;
 extern hxge_rxbuf_type_t hxge_rx_buf_size_type;
 extern hxge_rxbuf_threshold_t hxge_rx_threshold_lo;
 
+/*
+ * Static local functions.
+ */
 static hxge_status_t hxge_map_rxdma(p_hxge_t hxgep);
 static void hxge_unmap_rxdma(p_hxge_t hxgep);
 static hxge_status_t hxge_rxdma_hw_start_common(p_hxge_t hxgep);
@@ -76,7 +85,8 @@ static hxge_status_t hxge_map_rxdma_channel_buf_ring(p_hxge_t hxgep,
 static void hxge_unmap_rxdma_channel_buf_ring(p_hxge_t hxgep,
 	p_rx_rbr_ring_t rbr_p);
 static hxge_status_t hxge_rxdma_start_channel(p_hxge_t hxgep, uint16_t channel,
-	p_rx_rbr_ring_t rbr_p, p_rx_rcr_ring_t rcr_p, p_rx_mbox_t mbox_p);
+	p_rx_rbr_ring_t rbr_p, p_rx_rcr_ring_t rcr_p, p_rx_mbox_t mbox_p,
+	int n_init_kick);
 static hxge_status_t hxge_rxdma_stop_channel(p_hxge_t hxgep, uint16_t channel);
 static mblk_t *hxge_rx_pkts(p_hxge_t hxgep, uint_t vindex, p_hxge_ldv_t ldvp,
 	p_rx_rcr_ring_t	*rcr_p, rdc_stat_t cs);
@@ -167,7 +177,8 @@ hxge_init_rxdma_channel_cntl_stat(p_hxge_t hxgep, uint16_t channel,
 
 hxge_status_t
 hxge_enable_rxdma_channel(p_hxge_t hxgep, uint16_t channel,
-    p_rx_rbr_ring_t rbr_p, p_rx_rcr_ring_t rcr_p, p_rx_mbox_t mbox_p)
+    p_rx_rbr_ring_t rbr_p, p_rx_rcr_ring_t rcr_p, p_rx_mbox_t mbox_p,
+    int n_init_kick)
 {
 	hpi_handle_t		handle;
 	rdc_desc_cfg_t 		rdc_desc;
@@ -254,7 +265,7 @@ hxge_enable_rxdma_channel(p_hxge_t hxgep, uint16_t channel,
 	}
 
 	/* Kick the DMA engine */
-	hpi_rxdma_rdc_rbr_kick(handle, channel, rbr_p->rbb_max);
+	hpi_rxdma_rdc_rbr_kick(handle, channel, n_init_kick);
 
 	/* Clear the rbr empty bit */
 	(void) hpi_rxdma_channel_rbr_empty_clear(handle, channel);
@@ -989,6 +1000,10 @@ void hxge_post_page(p_hxge_t hxgep, p_rx_rbr_ring_t rx_rbr_p,
 void
 hxge_post_page(p_hxge_t hxgep, p_rx_rbr_ring_t rx_rbr_p, p_rx_msg_t rx_msg_p)
 {
+	hpi_status_t	hpi_status;
+	hxge_status_t	status;
+	int		i;
+
 	HXGE_DEBUG_MSG((hxgep, RX_CTL, "==> hxge_post_page"));
 
 	/* Reuse this buffer */
@@ -1005,13 +1020,76 @@ hxge_post_page(p_hxge_t hxgep, p_rx_rbr_ring_t rx_rbr_p, p_rx_msg_t rx_msg_p)
 	/*
 	 * Get the rbr header pointer and its offset index.
 	 */
-	MUTEX_ENTER(&rx_rbr_p->post_lock);
 	rx_rbr_p->rbr_wr_index = ((rx_rbr_p->rbr_wr_index + 1) &
 	    rx_rbr_p->rbr_wrap_mask);
 	rx_rbr_p->rbr_desc_vp[rx_rbr_p->rbr_wr_index] = rx_msg_p->shifted_addr;
-	MUTEX_EXIT(&rx_rbr_p->post_lock);
 
-	hpi_rxdma_rdc_rbr_kick(HXGE_DEV_HPI_HANDLE(hxgep), rx_rbr_p->rdc, 1);
+	/*
+	 * Accumulate some buffers in the ring before re-enabling the
+	 * DMA channel, if rbr empty was signaled.
+	 */
+	if (!rx_rbr_p->rbr_is_empty) {
+		hpi_rxdma_rdc_rbr_kick(HXGE_DEV_HPI_HANDLE(hxgep),
+		    rx_rbr_p->rdc, 1);
+	} else {
+		rx_rbr_p->accumulate++;
+		if (rx_rbr_p->accumulate >= HXGE_RBR_EMPTY_THRESHOLD) {
+			rx_rbr_p->rbr_is_empty = B_FALSE;
+			rx_rbr_p->accumulate = 0;
+
+			/*
+			 * Complete the processing for the RBR Empty by:
+			 *	0) kicking back HXGE_RBR_EMPTY_THRESHOLD
+			 *	   packets.
+			 *	1) Disable the RX vmac.
+			 *	2) Re-enable the affected DMA channel.
+			 *	3) Re-enable the RX vmac.
+			 */
+			hpi_rxdma_rdc_rbr_kick(HXGE_DEV_HPI_HANDLE(hxgep),
+			    rx_rbr_p->rdc, HXGE_RBR_EMPTY_THRESHOLD);
+
+			/*
+			 * Disable the RX VMAC, but setting the framelength
+			 * to 0, since there is a hardware bug when disabling
+			 * the vmac.
+			 */
+			MUTEX_ENTER(hxgep->genlock);
+			(void) hpi_vmac_rx_set_framesize(
+			    HXGE_DEV_HPI_HANDLE(hxgep), (uint16_t)0);
+
+			hpi_status = hpi_rxdma_cfg_rdc_enable(
+			    HXGE_DEV_HPI_HANDLE(hxgep), rx_rbr_p->rdc);
+			if (hpi_status != HPI_SUCCESS) {
+				p_hxge_rx_ring_stats_t	rdc_stats;
+
+				rdc_stats =
+				    &hxgep->statsp->rdc_stats[rx_rbr_p->rdc];
+				rdc_stats->rbr_empty_fail++;
+
+				status = hxge_rxdma_fatal_err_recover(hxgep,
+				    rx_rbr_p->rdc);
+				if (status != HXGE_OK) {
+					HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL,
+					    "hxge(%d): channel(%d) is empty.",
+					    hxgep->instance, rx_rbr_p->rdc));
+				}
+			}
+
+			for (i = 0; i < 1024; i++) {
+				uint64_t value;
+				RXDMA_REG_READ64(HXGE_DEV_HPI_HANDLE(hxgep),
+				    RDC_STAT, i & 3, &value);
+			}
+
+			/*
+			 * Re-enable the RX VMAC.
+			 */
+			(void) hpi_vmac_rx_set_framesize(
+			    HXGE_DEV_HPI_HANDLE(hxgep),
+			    (uint16_t)hxgep->vmac.maxframesize);
+			MUTEX_EXIT(hxgep->genlock);
+		}
+	}
 
 	HXGE_DEBUG_MSG((hxgep, RX_CTL,
 	    "<== hxge_post_page (channel %d post_next_index %d)",
@@ -1032,6 +1110,17 @@ hxge_freeb(p_rx_msg_t rx_msg_p)
 	HXGE_DEBUG_MSG((NULL, MEM2_CTL,
 	    "hxge_freeb:rx_msg_p = $%p (block pending %d)",
 	    rx_msg_p, hxge_mblks_pending));
+
+	if (ring == NULL)
+		return;
+
+	/*
+	 * This is to prevent posting activities while we are recovering
+	 * from fatal errors. This should not be a performance drag since
+	 * ref_cnt != 0 most times.
+	 */
+	if (ring->rbr_state == RBR_POSTING)
+		MUTEX_ENTER(&ring->post_lock);
 
 	/*
 	 * First we need to get the free state, then
@@ -1056,38 +1145,39 @@ hxge_freeb(p_rx_msg_t rx_msg_p)
 		}
 
 		KMEM_FREE(rx_msg_p, sizeof (rx_msg_t));
-		if (ring) {
-			/*
-			 * Decrement the receive buffer ring's reference
-			 * count, too.
-			 */
-			atomic_dec_32(&ring->rbr_ref_cnt);
+		/*
+		 * Decrement the receive buffer ring's reference
+		 * count, too.
+		 */
+		atomic_dec_32(&ring->rbr_ref_cnt);
 
-			/*
-			 * Free the receive buffer ring, iff
-			 * 1. all the receive buffers have been freed
-			 * 2. and we are in the proper state (that is,
-			 *    we are not UNMAPPING).
-			 */
-			if (ring->rbr_ref_cnt == 0 &&
-			    ring->rbr_state == RBR_UNMAPPED) {
-				KMEM_FREE(ring, sizeof (*ring));
-			}
+		/*
+		 * Free the receive buffer ring, iff
+		 * 1. all the receive buffers have been freed
+		 * 2. and we are in the proper state (that is,
+		 *    we are not UNMAPPING).
+		 */
+		if (ring->rbr_ref_cnt == 0 &&
+		    ring->rbr_state == RBR_UNMAPPED) {
+			KMEM_FREE(ring, sizeof (*ring));
+			/* post_lock has been destroyed already */
+			return;
 		}
-		goto hxge_freeb_exit;
 	}
 
 	/*
 	 * Repost buffer.
 	 */
-	if ((ring != NULL) && free_state && (ref_cnt == 1)) {
+	if (free_state && (ref_cnt == 1)) {
 		HXGE_DEBUG_MSG((NULL, RX_CTL,
 		    "hxge_freeb: post page $%p:", rx_msg_p));
 		if (ring->rbr_state == RBR_POSTING)
 			hxge_post_page(rx_msg_p->hxgep, ring, rx_msg_p);
 	}
 
-hxge_freeb_exit:
+	if (ring->rbr_state == RBR_POSTING)
+		MUTEX_EXIT(&ring->post_lock);
+
 	HXGE_DEBUG_MSG((NULL, MEM2_CTL, "<== hxge_freeb"));
 }
 
@@ -1456,6 +1546,7 @@ hxge_rx_pkts(p_hxge_t hxgep, uint_t vindex, p_hxge_ldv_t ldvp,
 }
 
 #define	RCR_ENTRY_PATTERN	0x5a5a6b6b7c7c8d8dULL
+#define	NO_PORT_BIT		0x20
 
 /*ARGSUSED*/
 void
@@ -1469,7 +1560,6 @@ hxge_receive_packet(p_hxge_t hxgep,
 	uint8_t			channel;
 
 	boolean_t first_entry = B_TRUE;
-	boolean_t is_tcp_udp = B_FALSE;
 	boolean_t buffer_free = B_FALSE;
 	boolean_t error_send_up = B_FALSE;
 	uint8_t error_type;
@@ -1491,8 +1581,7 @@ hxge_receive_packet(p_hxge_t hxgep,
 	boolean_t is_valid = B_FALSE;
 	p_hxge_rx_ring_stats_t rdc_stats;
 	uint32_t bytes_read;
-
-	uint64_t pkt_type;
+	uint8_t header = 0;
 
 	channel = rcr_p->rdc;
 
@@ -1512,7 +1601,6 @@ hxge_receive_packet(p_hxge_t hxgep,
 	*((uint64_t *)rcr_desc_rd_head_p) = RCR_ENTRY_PATTERN;
 
 	multi = (rcr_entry & RCR_MULTI_MASK);
-	pkt_type = (rcr_entry & RCR_PKT_TYPE_MASK);
 
 	error_type = ((rcr_entry & RCR_ERROR_MASK) >> RCR_ERROR_SHIFT);
 	l2_len = ((rcr_entry & RCR_L2_LEN_MASK) >> RCR_L2_LEN_SHIFT);
@@ -1536,16 +1624,15 @@ hxge_receive_packet(p_hxge_t hxgep,
 	HXGE_DEBUG_MSG((hxgep, RX2_CTL,
 	    "==> hxge_receive_packet: entryp $%p entry 0x%0llx "
 	    "pkt_buf_addr_pp $%p l2_len %d multi %d "
-	    "error_type 0x%x pkt_type 0x%x  "
-	    "pktbufsz_type %d ",
+	    "error_type 0x%x pktbufsz_type %d ",
 	    rcr_desc_rd_head_p, rcr_entry, pkt_buf_addr_pp, l2_len,
-	    multi, error_type, pkt_type, pktbufsz_type));
+	    multi, error_type, pktbufsz_type));
 
 	HXGE_DEBUG_MSG((hxgep, RX2_CTL,
 	    "==> hxge_receive_packet: entryp $%p entry 0x%0llx "
 	    "pkt_buf_addr_pp $%p l2_len %d multi %d "
-	    "error_type 0x%x pkt_type 0x%x ", rcr_desc_rd_head_p,
-	    rcr_entry, pkt_buf_addr_pp, l2_len, multi, error_type, pkt_type));
+	    "error_type 0x%x ", rcr_desc_rd_head_p,
+	    rcr_entry, pkt_buf_addr_pp, l2_len, multi, error_type));
 
 	HXGE_DEBUG_MSG((hxgep, RX2_CTL,
 	    "==> (rbr) hxge_receive_packet: entry 0x%0llx "
@@ -1681,16 +1768,8 @@ hxge_receive_packet(p_hxge_t hxgep,
 	if (rx_msg_p->cur_usage_cnt == 0) {
 		if (rx_rbr_p->rbr_use_bcopy) {
 			atomic_inc_32(&rx_rbr_p->rbr_consumed);
-			if (rx_rbr_p->rbr_consumed <
+			if (rx_rbr_p->rbr_consumed >
 			    rx_rbr_p->rbr_threshold_hi) {
-				if (rx_rbr_p->rbr_threshold_lo == 0 ||
-				    ((rx_rbr_p->rbr_consumed >=
-				    rx_rbr_p->rbr_threshold_lo) &&
-				    (rx_rbr_p->rbr_bufsize_type >=
-				    pktbufsz_type))) {
-					rx_msg_p->rx_use_bcopy = B_TRUE;
-				}
-			} else {
 				rx_msg_p->rx_use_bcopy = B_TRUE;
 			}
 		}
@@ -1721,6 +1800,19 @@ hxge_receive_packet(p_hxge_t hxgep,
 		if (rx_msg_p->cur_usage_cnt == rx_msg_p->max_usage_cnt) {
 			buffer_free = B_TRUE;
 		}
+	}
+
+	if (rx_msg_p->rx_use_bcopy) {
+		rdc_stats->pkt_drop++;
+		atomic_inc_32(&rx_msg_p->ref_cnt);
+		if (buffer_free == B_TRUE) {
+			rx_msg_p->free = B_TRUE;
+		}
+
+		MUTEX_EXIT(&rx_rbr_p->lock);
+		MUTEX_EXIT(&rcr_p->lock);
+		hxge_freeb(rx_msg_p);
+		return;
 	}
 
 	HXGE_DEBUG_MSG((hxgep, RX_CTL,
@@ -1768,6 +1860,11 @@ hxge_receive_packet(p_hxge_t hxgep,
 
 	bytes_read = rcr_p->rcvd_pkt_bytes;
 	skip_len = sw_offset_bytes + hdr_size;
+
+	if (first_entry) {
+		header = rx_msg_p->buffer[buf_offset];
+	}
+
 	if (!rx_msg_p->rx_use_bcopy) {
 		/*
 		 * For loaned up buffers, the driver reference count
@@ -1885,22 +1982,14 @@ hxge_receive_packet(p_hxge_t hxgep,
 	 * Update stats and hardware checksuming.
 	 */
 	if (is_valid && !multi) {
-		is_tcp_udp = ((pkt_type == RCR_PKT_IS_TCP ||
-		    pkt_type == RCR_PKT_IS_UDP) ? B_TRUE : B_FALSE);
-
-		HXGE_DEBUG_MSG((hxgep, RX_CTL, "==> hxge_receive_packet: "
-		    "is_valid 0x%x multi %d pkt %d d error %d",
-		    is_valid, multi, is_tcp_udp, error_type));
-
-		if (is_tcp_udp && !error_type) {
+		if (!(header & NO_PORT_BIT) && !error_type) {
 			(void) hcksum_assoc(nmp, NULL, NULL, 0, 0, 0, 0,
 			    HCK_FULLCKSUM_OK | HCK_FULLCKSUM, 0);
 
 			HXGE_DEBUG_MSG((hxgep, RX_CTL,
 			    "==> hxge_receive_packet: Full tcp/udp cksum "
-			    "is_valid 0x%x multi %d pkt %d "
-			    "error %d",
-			    is_valid, multi, is_tcp_udp, error_type));
+			    "is_valid 0x%x multi %d error %d",
+			    is_valid, multi, error_type));
 		}
 	}
 
@@ -1912,6 +2001,31 @@ hxge_receive_packet(p_hxge_t hxgep,
 	HXGE_DEBUG_MSG((hxgep, RX_CTL, "<== hxge_receive_packet: "
 	    "multi %d nmp 0x%016llx *mp 0x%016llx *mp_cont 0x%016llx",
 	    *multi_p, nmp, *mp, *mp_cont));
+}
+
+static void
+hxge_rx_rbr_empty_recover(p_hxge_t hxgep, uint8_t channel)
+{
+	hpi_handle_t	handle;
+	p_rx_rcr_ring_t	rcrp;
+	p_rx_rbr_ring_t	rbrp;
+
+	rcrp = hxgep->rx_rcr_rings->rcr_rings[channel];
+	rbrp = rcrp->rx_rbr_p;
+	handle = HXGE_DEV_HPI_HANDLE(hxgep);
+
+	/*
+	 * Wait for the channel to be quiet
+	 */
+	(void) hpi_rxdma_cfg_rdc_wait_for_qst(handle, channel);
+
+	/*
+	 * Post page will accumulate some buffers before re-enabling
+	 * the DMA channel.
+	 */
+	MUTEX_ENTER(&rbrp->post_lock);
+	rbrp->rbr_is_empty = B_TRUE;
+	MUTEX_EXIT(&rbrp->post_lock);
 }
 
 /*ARGSUSED*/
@@ -2024,21 +2138,7 @@ hxge_rx_err_evnts(p_hxge_t hxgep, uint_t index, p_hxge_ldv_t ldvp,
 
 	if (cs.bits.rbr_empty) {
 		rdc_stats->rbr_empty++;
-		if (rdc_stats->rbr_empty == 1) {
-			HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL,
-			    "==> hxge_rx_err_evnts(channel %d): "
-			    "rbr empty error", channel));
-		}
-
-		/*
-		 * Wait for channel to be quiet.
-		 */
-		(void) hpi_rxdma_cfg_rdc_wait_for_qst(handle, channel);
-
-		/*
-		 * Re-enable the DMA.
-		 */
-		(void) hpi_rxdma_cfg_rdc_enable(handle, channel);
+		hxge_rx_rbr_empty_recover(hxgep, channel);
 	}
 
 	if (cs.bits.rbr_full) {
@@ -2850,7 +2950,7 @@ hxge_map_rxdma_channel_buf_ring_fail1:
 	for (; index >= 0; index--) {
 		rx_msg_p = rx_msg_ring[index];
 		if (rx_msg_p != NULL) {
-			hxge_freeb(rx_msg_p);
+			freeb(rx_msg_p->rx_mblk_p);
 			rx_msg_ring[index] = NULL;
 		}
 	}
@@ -2914,7 +3014,7 @@ hxge_unmap_rxdma_channel_buf_ring(p_hxge_t hxgep,
 		    " hxge_unmap_rxdma_channel_buf_ring: "
 		    "rx_msg_p $%p", rx_msg_p));
 		if (rx_msg_p != NULL) {
-			hxge_freeb(rx_msg_p);
+			freeb(rx_msg_p->rx_mblk_p);
 			rx_msg_ring[i] = NULL;
 		}
 	}
@@ -3053,7 +3153,7 @@ hxge_rxdma_hw_start(p_hxge_t hxgep)
 		status = hxge_rxdma_start_channel(hxgep, channel,
 		    (p_rx_rbr_ring_t)rbr_rings[i],
 		    (p_rx_rcr_ring_t)rcr_rings[i],
-		    (p_rx_mbox_t)rx_mbox_p[i]);
+		    (p_rx_mbox_t)rx_mbox_p[i], rbr_rings[i]->rbb_max);
 		if (status != HXGE_OK) {
 			goto hxge_rxdma_hw_start_fail1;
 		}
@@ -3127,7 +3227,8 @@ hxge_rxdma_hw_stop(p_hxge_t hxgep)
 
 static hxge_status_t
 hxge_rxdma_start_channel(p_hxge_t hxgep, uint16_t channel,
-    p_rx_rbr_ring_t rbr_p, p_rx_rcr_ring_t rcr_p, p_rx_mbox_t mbox_p)
+    p_rx_rbr_ring_t rbr_p, p_rx_rcr_ring_t rcr_p, p_rx_mbox_t mbox_p,
+    int n_init_kick)
 {
 	hpi_handle_t		handle;
 	hpi_status_t		rs = HPI_SUCCESS;
@@ -3197,7 +3298,7 @@ hxge_rxdma_start_channel(p_hxge_t hxgep, uint16_t channel,
 	 * channels and enable each DMA channel.
 	 */
 	status = hxge_enable_rxdma_channel(hxgep,
-	    channel, rbr_p, rcr_p, mbox_p);
+	    channel, rbr_p, rcr_p, mbox_p, n_init_kick);
 	if (status != HXGE_OK) {
 		HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL,
 		    " hxge_rxdma_start_channel: "
@@ -3398,6 +3499,7 @@ hxge_rxdma_fatal_err_recover(p_hxge_t hxgep, uint16_t channel)
 	int			i;
 	uint32_t		hxge_port_rcr_size;
 	uint64_t		tmp;
+	int			n_init_kick = 0;
 
 	HXGE_DEBUG_MSG((hxgep, RX_CTL, "==> hxge_rxdma_fatal_err_recover"));
 	HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL,
@@ -3478,19 +3580,24 @@ hxge_rxdma_fatal_err_recover(p_hxge_t hxgep, uint16_t channel)
 	HXGE_DEBUG_MSG((hxgep, RX_CTL, "rbr entries = %d\n",
 	    rbrp->rbr_max_size));
 
+	/* Count the number of buffers owned by the hardware at this moment */
 	for (i = 0; i < rbrp->rbr_max_size; i++) {
-		/* Reset all the buffers */
 		rx_msg_p = rbrp->rx_msg_ring[i];
-		rx_msg_p->ref_cnt = 1;
-		rx_msg_p->free = B_TRUE;
-		rx_msg_p->cur_usage_cnt = 0;
-		rx_msg_p->max_usage_cnt = 0;
-		rx_msg_p->pkt_buf_size = 0;
+		if (rx_msg_p->ref_cnt == 1) {
+			n_init_kick++;
+		}
 	}
 
 	HXGE_DEBUG_MSG((hxgep, RX_CTL, "RxDMA channel re-start..."));
 
-	status = hxge_rxdma_start_channel(hxgep, channel, rbrp, rcrp, mboxp);
+	/*
+	 * This is error recover! Some buffers are owned by the hardware and
+	 * the rest are owned by the apps. We should only kick in those
+	 * owned by the hardware initially. The apps will post theirs
+	 * eventually.
+	 */
+	status = hxge_rxdma_start_channel(hxgep, channel, rbrp, rcrp, mboxp,
+	    n_init_kick);
 	if (status != HXGE_OK) {
 		goto fail;
 	}
