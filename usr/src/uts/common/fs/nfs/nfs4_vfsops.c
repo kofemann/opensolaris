@@ -3600,6 +3600,7 @@ new_nfs4_server(struct servinfo4 *svp, cred_t *cr)
 	mutex_init(&np->s_lt_lock, NULL, MUTEX_DEFAULT, NULL);
 	avl_create(&np->s_fsidlt, fsidcmp, sizeof (nfs4_fsidlt_t),
 	    offsetof(nfs4_fsidlt_t, lt_node));
+	nfs4_pnfs_init_n4s(np);
 	np->s_refcnt = 1;
 
 	/*
@@ -3886,6 +3887,27 @@ find_nfs4_server(mntinfo4_t *mi)
 }
 
 /*
+ * This is a special version of find_nfs4_server, which takes
+ * the mi_recovlock, activates the current nfs4_server_t for
+ * that mi, and drops the lock.  This function must be used
+ * with care, since after dropping mi_recovlock, the mi will
+ * may no longer refer to this structure.  Callers of this
+ * service must be aware of this and can never assume that
+ * the value returned remains the current target of the mi.
+ */
+nfs4_server_t *
+find_nfs4_server_nolock(mntinfo4_t *mi)
+{
+	nfs4_server_t *np;
+
+	(void) nfs_rw_enter_sig(&mi->mi_recovlock, RW_READER, 0);
+	np = find_nfs4_server(mi);
+	nfs_rw_exit(&mi->mi_recovlock);
+	/* either np is NULL OR n4sp->s_lock is held */
+	return (np);
+}
+
+/*
  * Same as above, but takes an "all" parameter which can be
  * set to 1 if the caller wishes to find nfs4_server_t's which
  * have been marked for termination by the exit of the renew
@@ -3987,11 +4009,18 @@ nfs4_server_hold(nfs4_server_t *sp)
 /*
  * Release the reference to sp and destroy it if that's the last one.
  */
-
 void
 nfs4_server_rele(nfs4_server_t *sp)
 {
 	mutex_enter(&sp->s_lock);
+	nfs4_server_rele_lockt(sp);
+	/* s_lock has been released */
+}
+
+void
+nfs4_server_rele_lockt(nfs4_server_t *sp)
+{
+	ASSERT(MUTEX_HELD(&sp->s_lock));
 	ASSERT(sp->s_refcnt > 0);
 	sp->s_refcnt--;
 	if (sp->s_refcnt > 0) {
@@ -4195,6 +4224,7 @@ destroy_nfs4_server(nfs4_server_t *sp)
 		kmem_free(ltp, sizeof (*ltp));
 	}
 	avl_destroy(&sp->s_fsidlt);
+	pnfs_trash_devtree(sp);
 
 	/* destroy the nfs4_server */
 	nfs4callback_destroy(sp);

@@ -52,18 +52,18 @@ extern "C" {
 
 typedef struct {
 	/* key */
-	deviceid4	devid;
-	avl_node_t	avl;
-	uint32_t	count;
-	int		flags;
-	kcondvar_t	cv[1];
+	deviceid4	dn_devid;
+	avl_node_t	dn_avl;
+	uint32_t	dn_count;
+	int		dn_flags;
+	kcondvar_t	dn_cv[1];
 
 	/* data servers, indexed indentically to ds_addrs */
 
-	nfs4_server_t	**server_list;
+	nfs4_server_t	**dn_server_list;
 
 	/* xdr decoded information about the data servers */
-	nfsv4_1_file_layout_ds_addr4 ds_addrs;
+	nfsv4_1_file_layout_ds_addr4 dn_ds_addrs;
 } devnode_t;
 
 #define	DN_GDI_INFLIGHT	1

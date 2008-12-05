@@ -47,6 +47,7 @@ extern u_longlong_t nfs4_srv_caller_id;
 
 static void mds_do_lorecall(mds_lorec_t *);
 static int  mds_lorecall_cmd(struct mds_reclo_args *, cred_t *);
+static int  mds_notify_device_cmd(struct mds_notifydev_args *, cred_t *);
 
 extern void mds_do_cb_recall(struct rfs4_deleg_state *, bool_t);
 
@@ -77,7 +78,10 @@ static uint32_t sessid_hash(void *);
 static bool_t sessid_compare(rfs4_entry_t, void *);
 static void *sessid_mkkey(rfs4_entry_t);
 
+/* function pointers for mdsadm */
+
 extern int (*mds_recall_lo)(struct mds_reclo_args *, cred_t *);
+extern int (*mds_notify_device)(struct mds_notifydev_args *, cred_t *);
 
 extern char *kstrdup(const char *);
 
@@ -1853,6 +1857,7 @@ file_lor(rfs4_entry_t entry, void *arg)
 	    minclsyspri);
 }
 
+
 /*
  * Recall a layout:
  *
@@ -2044,6 +2049,218 @@ errout:
 	if (dvp != NULL)
 		VN_RELE(dvp);
 	return (error);
+}
+
+/* support for device notifications via mdsadm */
+
+typedef struct mds_notify_device {
+	mds_session_t			*nd_sess;
+	struct mds_notifydev_args	 nd_args;
+
+} mds_notify_device_t;
+
+static void
+mds_do_notify_device(mds_notify_device_t *ndp)
+{
+	CB_COMPOUND4args	 cb4_args;
+	CB_COMPOUND4res		 cb4_res;
+	CB_SEQUENCE4args	*cbsap;
+	CB_NOTIFY_DEVICEID4args *cbndap;
+	nfs_cb_argop4		*argops;
+	struct timeval		 timeout;
+	enum clnt_stat		 call_stat = RPC_FAILED;
+	int			 zilch = 0;
+	CLIENT			*ch;
+	int			 numops;
+	int			 argsz;
+	mds_session_t		*sp;
+	slot_ent_t		*p;
+	notify4			 no;
+	char			*xdr_buf = NULL;
+	int			 xdr_size;
+	XDR			 xdr;
+
+	DTRACE_PROBE1(nfssrv__i__sess_notify_device, mds_notify_device_t *,
+	    ndp);
+
+	if (ndp->nd_sess == NULL)
+		return;
+	sp = ndp->nd_sess;
+
+	/*
+	 * XXX - until we fix blasting _all_ sessions for one notification,
+	 *	make sure that the session in question at least has the
+	 *	back chan established.
+	 */
+	if (!SN_CB_CHAN_EST(sp))
+		return;
+
+	/*
+	 * set up the compound args
+	 */
+	numops = 2;	/* CB_SEQUENCE + CB_NOTIFY_DEVICE */
+	argsz = numops * sizeof (nfs_cb_argop4);
+	argops = kmem_zalloc(argsz, KM_SLEEP);
+
+	argops[0].argop = OP_CB_SEQUENCE;
+	cbsap = &argops[0].nfs_cb_argop4_u.opcbsequence;
+
+	argops[1].argop = OP_CB_NOTIFY_DEVICEID;
+	cbndap = &argops[1].nfs_cb_argop4_u.opcbnotify_deviceid;
+
+	(void) str_to_utf8("cb_notify_device", &cb4_args.tag);
+	cb4_args.minorversion = CB4_MINOR_v1;
+
+	cb4_args.callback_ident = sp->sn_bc.progno;
+	cb4_args.array_len = numops;
+	cb4_args.array = argops;
+
+	cb4_res.tag.utf8string_val = NULL;
+	cb4_res.array = NULL;
+
+	/*
+	 * CB_SEQUENCE
+	 */
+	bcopy(sp->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
+	p = svc_slot_alloc(sp);
+	mutex_enter(&p->se_lock);
+	cbsap->csa_slotid = p->se_sltno;
+	cbsap->csa_sequenceid = p->se_seqid;
+	cbsap->csa_highest_slotid = svc_slot_maxslot(sp);
+	cbsap->csa_cachethis = FALSE;
+
+	/* no referring calling list for device notifications */
+	cbsap->csa_rcall_llen = 0;
+	cbsap->csa_rcall_lval = NULL;
+	mutex_exit(&p->se_lock);
+
+	/*
+	 * CB_NOTIFY_DEVICEID (well, d'uh)
+	 */
+	cbndap->cnda_changes.cnda_changes_len = 1;
+	cbndap->cnda_changes.cnda_changes_val = &no;
+	if (ndp->nd_args.notify_how == NOTIFY_DEVICEID4_DELETE) {
+		notify_deviceid_delete4 nodd;
+
+		no.notify_mask = NOTIFY_DEVICEID4_DELETE_MASK;
+		nodd.ndd_layouttype = LAYOUT4_NFSV4_1_FILES;
+		memset(&nodd.ndd_deviceid, 0, sizeof (deviceid4));
+		bcopy(&ndp->nd_args.dev_id, &nodd.ndd_deviceid,
+		    sizeof (ndp->nd_args.dev_id));
+
+		/* encode the notification blob */
+
+		xdr_size = xdr_sizeof(xdr_notify_deviceid_delete4, &nodd);
+		ASSERT(xdr_size);
+		xdr_buf = kmem_alloc(xdr_size, KM_SLEEP);
+		xdrmem_create(&xdr, xdr_buf, xdr_size, XDR_ENCODE);
+
+		if (xdr_notify_deviceid_delete4(&xdr, &nodd) == FALSE)
+			goto done;
+
+		/*
+		 * Once the blob is encoded, we no longer need
+		 * nodd, which goes out of scope here.
+		 */
+
+	} else {
+		notify_deviceid_change4 nodc;
+
+		no.notify_mask = NOTIFY_DEVICEID4_CHANGE_MASK;
+		nodc.ndc_layouttype = LAYOUT4_NFSV4_1_FILES;
+		memset(&nodc.ndc_deviceid, 0, sizeof (deviceid4));
+		bcopy(&ndp->nd_args.dev_id, &nodc.ndc_deviceid,
+		    sizeof (ndp->nd_args.dev_id));
+
+		xdr_size = xdr_sizeof(xdr_notify_deviceid_change4, &nodc);
+		ASSERT(xdr_size);
+		xdr_buf = kmem_alloc(xdr_size, KM_SLEEP);
+		xdrmem_create(&xdr, xdr_buf, xdr_size, XDR_ENCODE);
+
+		if (xdr_notify_deviceid_change4(&xdr, &nodc) == FALSE) {
+			kmem_free(xdr_buf, xdr_size);
+			xdr_size = 0;
+			xdr_buf = NULL;
+		}
+	}
+
+	no.notify_vals.notifylist4_len = xdr_size;
+	no.notify_vals.notifylist4_val = xdr_buf;
+
+	/*
+	 * Set up the timeout for the callback and make the actual call.
+	 * Timeout will be 80% of the lease period.
+	 */
+	timeout.tv_sec =
+	    (dbe_to_instp(sp->dbe)->lease_period * 80) / 100;
+	timeout.tv_usec = 0;
+
+	ch = rfs41_cb_getch(sp);
+	(void) CLNT_CONTROL(ch, CLSET_XID, (char *)&zilch);
+	call_stat = clnt_call(ch, CB_COMPOUND,
+	    xdr_CB_COMPOUND4args_srv, (caddr_t)&cb4_args,
+	    xdr_CB_COMPOUND4res, (caddr_t)&cb4_res, timeout);
+	rfs41_cb_freech(sp, ch);
+
+	/*
+	 * Errors from the client are harmless for now, since this
+	 * is invoked by an administrative action for testing purposes.
+	 * In the future, if this were part of the normal server action,
+	 * these errors would need to be handled.
+	 */
+	if (call_stat != RPC_SUCCESS) {
+		cmn_err(CE_NOTE, "mds_do_notify_device: RPC call failed %d",
+		    call_stat);
+		goto done;
+
+	} else if (cb4_res.status != NFS4_OK) {
+		cmn_err(CE_NOTE, "mds_do_notify_device: compound failed %d",
+		    cb4_res.status);
+
+	}
+	svc_slot_cb_seqid(&cb4_res, p);
+	xdr_free(xdr_CB_COMPOUND4res, (caddr_t)&cb4_res);
+done:
+	kmem_free(cb4_args.tag.utf8string_val, cb4_args.tag.utf8string_len);
+	kmem_free(argops, argsz);
+	kmem_free(ndp, sizeof (*ndp));
+	if (xdr_buf)
+		kmem_free(xdr_buf, xdr_size);
+	svc_slot_free(sp, p);
+}
+
+static void
+mds_sess_notify_device_callout(rfs4_entry_t u_entry, void *arg)
+{
+	mds_notify_device_t *ndp;
+
+	ndp = kmem_alloc(sizeof (*ndp), KM_SLEEP);
+	bcopy(arg, &ndp->nd_args, sizeof (ndp->nd_args));
+	ndp->nd_sess = (mds_session_t *)u_entry;
+
+	(void) thread_create(NULL, 0, mds_do_notify_device, ndp, 0, &p0,
+	    TS_RUN, minclsyspri);
+}
+
+void
+inst_notify_device(nfs_server_instance_t *instp, void *args)
+{
+	if (instp->mds_session_tab != NULL)
+		rfs4_dbe_walk(instp->mds_session_tab,
+		    mds_sess_notify_device_callout, args);
+}
+
+/*ARGSUSED*/
+static int
+mds_notify_device_cmd(struct mds_notifydev_args *args, cred_t *cr)
+{
+
+	/*
+	 * Walk the list of server instances, asking each
+	 * to notify the specified device.
+	 */
+	nsi_walk(inst_notify_device, args);
+	return (0);
 }
 
 /*
@@ -2861,6 +3078,7 @@ void
 mds_srvrinit(void)
 {
 	mds_recall_lo = mds_lorecall_cmd;
+	mds_notify_device = mds_notify_device_cmd;
 }
 
 void

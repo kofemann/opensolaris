@@ -57,8 +57,8 @@ void (*rfs4_client_clrst)(struct nfs4clrst_args *) = NULL;
 
 /* Temp: used by mdsadm */
 void (*mds_addlo)(struct mds_addlo_args *) = NULL;
-int  (*mds_adddev)(char *) = NULL;
 int (*mds_recall_lo)(struct mds_reclo_args *, cred_t *) = NULL;
+int (*mds_notify_device)(struct mds_notifydev_args *, cred_t *) = NULL;
 
 /* This filled in by nfssrv:_init() */
 void (*nfs_srv_quiesce_func)(void) = NULL;
@@ -206,63 +206,13 @@ nfssys(enum nfssys_op opcode, void *arg)
 		break;
 	}
 
-	case MDS_ADD_LAYOUT: {
-		struct mds_addlo_args lo_arg;
-		STRUCT_DECL(mds_addlo_args, ua);
-		int i;
+	case MDS_NOTIFY_DEVICE: {
+		struct mds_notifydev_args dargs;
 
-		/*
-		 * If the mds_server is not loaded then no point in
-		 * doing anything  :-)
-		 */
-		if (mds_addlo == NULL) {
-			break;
-		}
-
-		if (!INGLOBALZONE(curproc))
-			return (set_errno(EPERM));
-
-		STRUCT_INIT(ua, get_udatamodel());
-
-		if (copyin(arg, STRUCT_BUF(ua), STRUCT_SIZE(ua)))
+		if (copyin(arg, (char *)&dargs, sizeof (dargs)))
 			return (set_errno(EFAULT));
 
-		lo_arg.loid = STRUCT_FGET(ua, loid);
-		lo_arg.lo_stripe_unit = STRUCT_FGET(ua, lo_stripe_unit);
-
-		for (i = 0; i < 20; i++)
-			lo_arg.lo_devs[i] = STRUCT_FGET(ua, lo_devs[i]);
-
-		mds_addlo(&lo_arg);
-		break;
-	}
-
-	case MDS_ADD_DEVICE: {
-		char *adev;
-		int rc;
-
-		/*
-		 * If the mds_server is not loaded then no point in
-		 * doing anything  :-)
-		 */
-		if (mds_adddev == NULL) {
-			printf("NFS Server not loaded\n");
-			break;
-		}
-
-		if (!INGLOBALZONE(curproc))
-			return (set_errno(EPERM));
-
-		adev = kmem_alloc(MAXNAMELEN, KM_SLEEP);
-
-		rc = copyinstr(arg, adev, MAXNAMELEN, NULL);
-
-		if (rc != 0) {
-			kmem_free(adev, MAXNAMELEN);
-			return (set_errno(EFAULT));
-		}
-
-		error = mds_adddev(adev);
+		error = mds_notify_device(&dargs, CRED());
 		break;
 	}
 

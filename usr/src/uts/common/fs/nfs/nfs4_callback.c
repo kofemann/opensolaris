@@ -819,6 +819,84 @@ cb_layoutrecall(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
 		    nfs4_server_t *, sp, nfsstat, resp->clorr_status);
 }
 
+static nfsstat4
+cb_notify_device(nfs4_server_t *sp, notify4 *no)
+{
+	nfsstat4 stat = NFS4_OK;
+	XDR x;
+	notify_deviceid_change4 ndc;
+	notify_deviceid_delete4 ndd;
+
+	/* check for missing or extra bits */
+	if ((no->notify_mask &
+	    ~(NOTIFY_DEVICEID4_CHANGE_MASK|NOTIFY_DEVICEID4_DELETE_MASK)) ||
+	    (no->notify_mask == 0))
+		DTRACE_PROBE1(nfsc__i__bad_mask, bitmap4 *, no->notify_mask);
+
+	xdrmem_create(&x, no->notify_vals.notifylist4_val,
+	    no->notify_vals.notifylist4_len, XDR_DECODE);
+	/*
+	 * The order of checking is significant.  Oddly, both bits
+	 * could be set.
+	 */
+	if (no->notify_mask & NOTIFY_DEVICEID4_CHANGE_MASK) {
+
+		if (!xdr_notify_deviceid_change4(&x, &ndc))
+			stat = NFS4ERR_BADXDR;
+		else {
+			stat = pnfs_change_device(sp, &ndc);
+			xdr_free(xdr_notify_deviceid_change4, (caddr_t)&ndc);
+		}
+	}
+	if (stat == NFS4_OK &&
+	    (no->notify_mask & NOTIFY_DEVICEID4_DELETE_MASK)) {
+
+		if (!xdr_notify_deviceid_delete4(&x, &ndd))
+			stat = NFS4ERR_BADXDR;
+		else {
+			stat = pnfs_delete_device(sp, &ndd);
+			xdr_free(xdr_notify_deviceid_change4, (caddr_t)&ndd);
+		}
+	}
+
+	return (stat);
+}
+
+static void
+cb_notify_deviceid(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop,
+    struct svc_req *req, struct compound_state *cs,
+    struct nfs4_callback_globals *ncg)
+{
+	CB_NOTIFY_DEVICEID4args *args =
+	    &argop->nfs_cb_argop4_u.opcbnotify_deviceid;
+	CB_NOTIFY_DEVICEID4res *resp =
+	    &resop->nfs_cb_resop4_u.opcbnotify_deviceid;
+	struct nfs4_server *sp;
+	int i;
+	nfsstat4 stat;
+
+	mutex_enter(&ncg->nfs4_cb_lock);
+	sp = ncg->nfs4prog2server[req->rq_prog - NFS4_CALLBACK];
+	mutex_exit(&ncg->nfs4_cb_lock);
+
+	if (nfs4_server_vlock(sp, 0) == FALSE) {
+		DTRACE_PROBE1(nfsc__i__bad_prog, int, req->rq_prog);
+		*cs->statusp = resp->cndr_status = NFS4ERR_INVAL;
+		return;
+	}
+	mutex_exit(&sp->s_lock);
+
+	stat = NFS4_OK;
+	for (i = 0; i < args->cnda_changes.cnda_changes_len; i++)
+		if ((stat = cb_notify_device(sp,
+		    &args->cnda_changes.cnda_changes_val[i])) != NFS4_OK)
+			break;
+
+	*cs->statusp = resp->cndr_status = stat;
+	nfs4_server_rele(sp);
+}
+
+
 static void
 cb_recall(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
 	struct compound_state *cs, struct nfs4_callback_globals *ncg)
@@ -1099,6 +1177,20 @@ cb_compound(CB_COMPOUND4args *args, CB_COMPOUND4res *resp, struct svc_req *req,
 				break;
 			}
 			cb_layoutrecall(argop, resop, req, &cs, ncg);
+			break;
+
+		case OP_CB_NOTIFY_DEVICEID:
+			if (mvers_0) {
+				op = OP_CB_ILLEGAL;
+				cb_illegal(argop, resop, req, &cs, ncg);
+				break;
+			}
+			if (!sequenced) {
+				*cs.statusp = resp->status =
+				    NFS4ERR_SEQUENCE_POS;
+				break;
+			}
+			cb_notify_deviceid(argop, resop, req, &cs, ncg);
 			break;
 
 		case OP_CB_ILLEGAL:

@@ -1647,6 +1647,13 @@ enum notify_deviceid_type4 {
 };
 typedef enum notify_deviceid_type4 notify_deviceid_type4;
 
+/*
+ * Handy masks for the bitmap4 used for device notification.
+ * Note that bit possition 0 is unused.
+ */
+#define	NOTIFY_DEVICEID4_CHANGE_MASK (1uLL << ((NOTIFY_DEVICEID4_CHANGE)+32))
+#define	NOTIFY_DEVICEID4_DELETE_MASK (1uLL << ((NOTIFY_DEVICEID4_DELETE)+32))
+
 struct notify_deviceid_delete4 {
 	layouttype4 ndd_layouttype;
 	deviceid4 ndd_deviceid;

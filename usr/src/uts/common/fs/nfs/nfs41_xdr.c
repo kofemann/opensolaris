@@ -1800,6 +1800,25 @@ xdr_GET_DIR_DELEGATION4res(XDR *xdrs, GET_DIR_DELEGATION4res *objp)
 	return (TRUE);
 }
 
+/*
+ * Special xdr function to encode single word bitmaps for
+ * notification bitmaps which only need a single word.
+ */
+bool_t
+xdr_bitmap4_notify(XDR *xdrs, bitmap4 *objp)
+{
+	int32_t len = 1;
+
+	ASSERT(xdrs->x_op == XDR_ENCODE);
+	if (!XDR_PUTINT32(xdrs, &len))
+		return (FALSE);
+#if defined(_BIG_ENDIAN)
+	return (XDR_PUTINT32(xdrs, (int32_t *)objp));
+#elif defined(_LITTLE_ENDIAN)
+	return (XDR_PUTINT32(xdrs, (int32_t *)objp+1));
+#endif
+}
+
 bool_t
 xdr_GETDEVICEINFO4args(XDR *xdrs, GETDEVICEINFO4args *objp)
 {
@@ -1810,8 +1829,12 @@ xdr_GETDEVICEINFO4args(XDR *xdrs, GETDEVICEINFO4args *objp)
 		return (FALSE);
 	if (!xdr_count4(xdrs, &objp->gdia_maxcount))
 		return (FALSE);
-	if (!xdr_bitmap4(xdrs, &objp->gdia_notify_types))
-		return (FALSE);
+	if (xdrs->x_op == XDR_ENCODE) {
+		if (!xdr_bitmap4_notify(xdrs, &objp->gdia_notify_types))
+			return (FALSE);
+	} else
+		if (!xdr_bitmap4(xdrs, &objp->gdia_notify_types))
+			return (FALSE);
 	return (TRUE);
 }
 
@@ -1821,8 +1844,12 @@ xdr_GETDEVICEINFO4resok(XDR *xdrs, GETDEVICEINFO4resok *objp)
 
 	if (!xdr_device_addr4(xdrs, &objp->gdir_device_addr))
 		return (FALSE);
-	if (!xdr_bitmap4(xdrs, &objp->gdir_notification))
-		return (FALSE);
+	if (xdrs->x_op == XDR_ENCODE) {
+		if (!xdr_bitmap4_notify(xdrs, &objp->gdir_notification))
+			return (FALSE);
+	} else
+		if (!xdr_bitmap4(xdrs, &objp->gdir_notification))
+			return (FALSE);
 	return (TRUE);
 }
 
@@ -2788,9 +2815,12 @@ xdr_notifylist4(XDR *xdrs, notifylist4 *objp)
 bool_t
 xdr_notify4(XDR *xdrs, notify4 *objp)
 {
-
-	if (!xdr_bitmap4(xdrs, &objp->notify_mask))
-		return (FALSE);
+	if (xdrs->x_op == XDR_ENCODE) {
+		if (!xdr_bitmap4_notify(xdrs, &objp->notify_mask))
+			return (FALSE);
+	} else
+		if (!xdr_bitmap4(xdrs, &objp->notify_mask))
+			return (FALSE);
 	if (!xdr_notifylist4(xdrs, &objp->notify_vals))
 		return (FALSE);
 	return (TRUE);

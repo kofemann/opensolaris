@@ -7723,6 +7723,18 @@ mds_op_get_devinfo(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *reqp,
 		goto final;
 	}
 
+	/*
+	 * If the client requests notifications, then say we're
+	 * willing to send them.
+	 */
+	resp->GETDEVICEINFO4res_u.gdir_resok4.gdir_notification = 0;
+	if (argp->gdia_notify_types & NOTIFY_DEVICEID4_CHANGE_MASK)
+		resp->GETDEVICEINFO4res_u.gdir_resok4.gdir_notification |=
+		    NOTIFY_DEVICEID4_CHANGE_MASK;
+	if (argp->gdia_notify_types & NOTIFY_DEVICEID4_DELETE_MASK)
+		resp->GETDEVICEINFO4res_u.gdir_resok4.gdir_notification |=
+		    NOTIFY_DEVICEID4_DELETE_MASK;
+
 	resp->GETDEVICEINFO4res_u.gdir_resok4.gdir_device_addr.\
 	    da_layout_type = LAYOUT4_NFSV4_1_FILES;
 	resp->GETDEVICEINFO4res_u.gdir_resok4.gdir_device_addr.\

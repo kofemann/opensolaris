@@ -50,8 +50,7 @@ enum nfssys_op	{ OLD_NFS_SVC, OLD_ASYNC_DAEMON, EXPORTFS, OLD_NFS_GETFH,
     NFS4_SVC, RDMA_SVC_INIT, NFS4_CLR_STATE, NFS_IDMAP,
     NFS4_SVC_REQUEST_QUIESCE, NFS_GETFH, NFS4_DSS_SETPATHS,
     NFS4_DSS_SETPATHS_SIZE, NFS4_EPHEMERAL_MOUNT_TO, MOUNTD_ARGS,
-    NFSCMD_ARGS,
-    MDS_ADD_LAYOUT, MDS_ADD_DEVICE, MDS_RECALL_LAYOUT,
+    NFSCMD_ARGS, MDS_RECALL_LAYOUT, MDS_NOTIFY_DEVICE,
     NFS_INIT_STATESTORE, NFS_FINI_STATESTORE, NFSSTAT_LAYOUT };
 
 struct nfs_svc_args {
@@ -252,35 +251,30 @@ struct mds_reclo_args32 {
 };
 #endif
 
+/*
+ * These structure are still used by the MDS as part of its layout
+ * and device construction, but are never passed through nfssys.
+ */
 struct mds_addlo_args {
 	int loid;
 	int lo_stripe_unit;
 	int lo_devs[100];
 };
 
-#ifdef _SYSCALL32
-struct mds_addlo_args32 {
-	int32_t	loid;
-	int32_t lo_stripe_unit;
-	int32_t lo_devs[100];
-};
-#endif
-
 struct mds_adddev_args {
 	int	dev_id;
 	char	*dev_netid;
 	char	*dev_addr;
-	char    *ds_addr;
+	char	*ds_addr;
 };
 
-#ifdef _SYSCALL32
-struct mds_adddev_args32 {
-	int32_t	dev_id;
-	caddr32_t dev_netid;
-	caddr32_t dev_addr;
-	caddr32_t ds_addr;
+struct mds_notifydev_args {
+	int	dev_id;
+	int	notify_how;
+	int	immediate;
 };
-#endif
+
+/* SYSCALL32 version not needed, ABI invariant */
 
 struct nfs_state_init_args {
 	int	cap_flags;

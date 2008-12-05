@@ -1712,7 +1712,6 @@ extern int	pnfs_write(vnode_t *, caddr_t, u_offset_t, int,
     cred_t *, stable_how4 *);
 extern int	pnfs_commit(vnode_t *, page_t *, offset4, count4, cred_t *);
 extern stateid4 pnfs_get_losid(struct rnode4 *);
-extern void	pnfs_trash_devtree(struct mntinfo4 *);
 
 extern int	stateid4_cmp(stateid4 *, stateid4 *);
 
@@ -1790,6 +1789,14 @@ struct nfs4_fsidlt;
 struct nfs4_server;
 extern void   pnfs_layout_discard(struct rnode4 *, struct nfs4_fsidlt *,
     struct nfs4_server *);
+extern void	pnfs_trash_devtree(struct nfs4_server *);
+
+struct notify_deviceid_change4;
+struct notify_deviceid_delete4;
+extern nfsstat4	pnfs_change_device(struct nfs4_server *,
+    struct notify_deviceid_change4 *);
+extern nfsstat4	pnfs_delete_device(struct nfs4_server *,
+    struct notify_deviceid_delete4 *);
 
 extern void	 rfs41_lo_seqid(stateid_t *);
 extern void	 rfs4freeargres(CB_COMPOUND4args *, CB_COMPOUND4res *);

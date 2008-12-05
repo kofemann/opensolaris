@@ -251,6 +251,8 @@ static void sumarg_cb_notify_lock(char *buf, size_t buflen, void *obj);
 static void dtlarg_cb_notify_lock(void *obj);
 static void sumres_cb_notify_lock(char *buf, size_t buflen, void *obj);
 static void dtlres_cb_notify_lock(void *obj);
+static void sumarg_cb_notify_deviceid(char *buf, size_t buflen, void *obj);
+static void dtlarg_cb_notify_deviceid(void *obj);
 
 /* nfs4.1 operations */
 static void sumarg_backchannel_ctl(char *buf, size_t buflen, void *obj);
@@ -391,6 +393,9 @@ static op_info_t cb_opcode_info[] = {
 	{"CB_NOTIFY_LOCK",
 	    sumarg_cb_notify_lock,	sumres_cb_notify_lock,
 	    dtlarg_cb_notify_lock,	dtlres_cb_notify_lock},
+	{"CB_NOTIFY_DEVICEID",
+	    sumarg_cb_notify_deviceid,	sum_nfsstat4,
+	    dtlarg_cb_notify_deviceid,	dtl_nfsstat4},
 };
 static uint_t cb_num_opcodes = sizeof (cb_opcode_info) / sizeof (op_info_t *);
 
@@ -5894,11 +5899,17 @@ static void
 dtlarg_getdeviceinfo(void *obj)
 {
 	GETDEVICEINFO4args *args = (GETDEVICEINFO4args *)obj;
+	bitmap4 *bp;
+	int i;
 
 	detail_deviceid(args->gdia_device_id);
 	sprintf(get_line(0, 0), "Layout Type = %s",
 	    detail_lotype_name(args->gdia_layout_type));
 	sprintf(get_line(0, 0), "Max count = %u", args->gdia_maxcount);
+	bp = &args->gdia_notify_types;
+	sprintf(get_line(0, 0), "bitmap4_len = %u", bp->bitmap4_len);
+	for (i = 0; i < bp->bitmap4_len; i++)
+		sprintf(get_line(0, 0), "value: 0x%x", bp->bitmap4_val[i]);
 }
 
 static void
@@ -7880,4 +7891,68 @@ adler16(void *p, int len)
 	}
 
 	return ((uint32_t)(s2 ^ s1) & 0xFFFFU);
+}
+
+static void
+sumarg_cb_notify_deviceid(char *buf, size_t buflen, void *obj)
+{
+}
+
+static void
+dtlarg_cb_notify_deviceid(void *obj)
+{
+	CB_NOTIFY_DEVICEID4args *args = (CB_NOTIFY_DEVICEID4args *)obj;
+	int i, j, found = 0;
+	notify4 *no;
+	bitmap4 *bp;
+	XDR x;
+	notify_deviceid_change4 ndc;
+	notify_deviceid_delete4 ndd;
+	char *loname;
+
+	sprintf(get_line(0, 0),
+	    "changes: %d", args->cnda_changes.cnda_changes_len);
+
+	for (i = 0; i < args->cnda_changes.cnda_changes_len; i++) {
+		no = &args->cnda_changes.cnda_changes_val[i];
+		bp = &no->notify_mask;
+		if (bp->bitmap4_len > 0) {
+
+			xdrmem_create(&x, no->notify_vals.notifylist4_val,
+			    no->notify_vals.notifylist4_len, XDR_DECODE);
+
+			if (bp->bitmap4_val[0] & (1<<NOTIFY_DEVICEID4_CHANGE)) {
+				found = 1;
+				sprintf(get_line(0, 0), "CHANGE");
+				if (xdr_notify_deviceid_change4(&x, &ndc)) {
+					sprintf(get_line(0, 0),
+					    detail_lotype_name(
+					    ndc.ndc_layouttype));
+					detail_deviceid(ndc.ndc_deviceid);
+					sprintf(get_line(0, 0), "immediate: %d",
+					    ndc.ndc_immediate);
+				} else
+					longjmp(xdr_err, 1);
+			}
+			if (bp->bitmap4_val[0] & (1<<NOTIFY_DEVICEID4_DELETE)) {
+				found = 1;
+				sprintf(get_line(0, 0), "DELETE");
+				if (xdr_notify_deviceid_delete4(&x, &ndd)) {
+					sprintf(get_line(0, 0),
+					    detail_lotype_name(
+					    ndd.ndd_layouttype));
+					detail_deviceid(ndd.ndd_deviceid);
+				} else
+					longjmp(xdr_err, 1);
+			}
+		}
+		if (!found) {
+			sprintf(get_line(0, 0), "bitmap4_len = %u",
+			    bp->bitmap4_len);
+			for (j = 0; j < bp->bitmap4_len; j++)
+				sprintf(get_line(0, 0),
+				    "value: 0x%x", bp->bitmap4_val[j]);
+		}
+	}
+
 }

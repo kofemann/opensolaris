@@ -1084,7 +1084,6 @@ typedef struct mntinfo4 {
 	 * pNFS support
 	 */
 	kmutex_t	mi_pnfs_lock;
-	avl_tree_t	mi_devid_tree;
 	taskq_t		*mi_pnfs_io_taskq;
 	taskq_t		*mi_pnfs_other_taskq;
 	clock_t		mi_last_getdevicelist;
@@ -1397,6 +1396,7 @@ typedef struct nfs4_server {
 	servinfo4_t		*s_ds_svp; /* for dataservers, the servinfo4 */
 	kmutex_t		s_lt_lock; /* layout tree lock */
 	avl_tree_t		s_fsidlt; /* fsid layout tree */
+	avl_tree_t		s_devid_tree;	/* Device ID tree */
 } nfs4_server_t;
 
 /* nfs4_server flags */
@@ -2056,6 +2056,7 @@ extern void		nfs4_renew_lease_thread(nfs4_server_t *);
 extern void		nfs4_sequence_heartbeat_thread(nfs4_server_t *);
 extern void		nfs4_cbconn_thread(nfs4_server_t *);
 extern nfs4_server_t	*find_nfs4_server(mntinfo4_t *);
+extern nfs4_server_t	*find_nfs4_server_nolock(mntinfo4_t *);
 extern nfs4_server_t	*find_nfs4_server_all(mntinfo4_t *, int all);
 extern nfs4_server_t	*find_nfs4_server_by_addr(struct netbuf *,
 				struct knetconfig *);
@@ -2116,6 +2117,7 @@ extern nfs4_server_t *nfs4_move_mi(mntinfo4_t *, servinfo4_t *, servinfo4_t *);
 extern bool_t	nfs4_fs_active(nfs4_server_t *);
 extern void	nfs4_server_hold(nfs4_server_t *);
 extern void	nfs4_server_rele(nfs4_server_t *);
+extern void	nfs4_server_rele_lockt(nfs4_server_t *);
 extern bool_t	inlease(nfs4_server_t *);
 extern bool_t	nfs4_has_pages(vnode_t *);
 extern void	nfs4_log_badowner(mntinfo4_t *, nfs_opnum4);
@@ -2259,6 +2261,7 @@ extern void	nfs4sequence_setup(nfs4_session_t *, COMPOUND4args_clnt *,
 extern void	nfs4sequence_fin(nfs4_session_t *, COMPOUND4res_clnt *,
 			nfs4_slot_t *, nfs4_error_t *);
 extern void	nfs4session_init(void);
+extern void	nfs4_pnfs_init_n4s(struct nfs4_server *);
 
 extern void	nfs4_queue_event(nfs4_event_type_t, mntinfo4_t *, char *,
 		    uint_t, vnode_t *, vnode_t *, nfsstat4, char *, pid_t,

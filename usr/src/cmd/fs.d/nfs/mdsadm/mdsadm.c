@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <stdio.h>
 #include <strings.h>
 #include <sys/types.h>
@@ -64,19 +62,15 @@ char *prog;
  */
 typedef enum {
 	OP_INVAL = -1,
-	OP_ADD = 0,
-	OP_DEL,
-	OP_LIST,
 	OP_RECALL,
+	OP_NOTIFY,
 	MAX_OP
 
 } oper_t;
 
 char *op[] = {
-	"add",
-	"del",
-	"list",
 	"recall",
+	"notify",
 	NULL
 };
 
@@ -86,19 +80,20 @@ char *op[] = {
  */
 typedef enum {
 	OT_INVAL = -1,
-	OT_DEV = 0,
 	OT_LAYOUT,
-	OT_AUTH,
+	OT_NOTIFY_CHANGE,
+	OT_NOTIFY_DELETE,
 	MAX_OT
 } obj_type_t;
 
 char *type[] = {
-	"dev",
 	"layout",
-	"auth",
+	"change",
+	"delete",
 	NULL
 };
 
+enum notify_how { NOTIFY_CHANGE = 1, NOTIFY_DELETE };
 
 typedef struct {
 	int  required;
@@ -106,28 +101,29 @@ typedef struct {
 	void *attr_val;
 } attr_t;
 
-static char *usage_auth_add =
-" To add data-server IP Address Auth record:\n\t"
-"use -a ip=<address>\n";
-
-
-static char *usage_dev_add =
-" To add device info:\n\t"
-"use -a id=<device_id> -a net=<network> -a ip<address> -a port=<port_number\n";
-
-static char *usage_lo_add =
-" To add layout info:\n\t"
-"use -a loid=<layout_id> -a dev=<devid1,devid2..> -a unit=<stripe_unit> \n";
-
-static char *usage_lo_recall =
+static char usage_lo_recall[] =
 " To recall a layout: \n\t"
-"use -a recall=[all | fsid | file] -a file=<path_to_file>\n";
+"mdsadm -o recall -t layout -a [file=<filename> | fsid=<filename> | all]\n";
 
+static char usage_notify[] =
+" To do a device notification: \n\t"
+"mdsadm -o notify -t [change | delete] -a DID#\n";
+
+struct {
+	char *msg;
+} usage_messages [] = {
+	{ usage_lo_recall },
+	{ usage_notify }
+};
 
 void
 usage(char *msg)
 {
-	fprintf(stderr, "Error!: \n%s\n", msg);
+	int i;
+
+	fprintf(stderr, "%s\n", msg);
+	for (i = 0; i < sizeof (usage_messages)/sizeof (char *); i++)
+		fprintf(stderr, usage_messages[i].msg);
 	exit(1);
 }
 
@@ -136,7 +132,7 @@ validate_operation(char *argp)
 {
 	int i;
 
-	for (i = OP_ADD; op[i] != NULL; i++)
+	for (i = OP_INVAL+1; op[i] != NULL; i++)
 		if (strcmp(argp, op[i]) == 0)
 			return (i);
 	return (OP_INVAL);
@@ -147,7 +143,7 @@ validate_type(char *argp)
 {
 	int i;
 
-	for (i = OT_DEV; i < MAX_OT; i++)
+	for (i = OT_INVAL+1; i < MAX_OT; i++)
 		if (strcmp(argp, type[i]) == 0)
 			return (i);
 
@@ -200,168 +196,6 @@ get_uaddrstr(char *dev, char *ip, unsigned short port)
 	}
 	(void) sprintf(tmp, "%s.%d.%d", ip, port >> 8, port & 255);
 	return (strdup(tmp));
-}
-
-int
-dev_add(int attr_count, char *attrs[])
-{
-	char    *uaddr;
-	int	valid_count = 0, i, rc, nax = -1;
-	uint32_t id;
-
-	struct mds_adddev_args arg;
-
-	attr_t need_attr[] = {
-		{1, "id",  NULL},
-		{1, "net", NULL},
-		{1, "ip",  NULL},
-		{1, "port", NULL},
-		NULL
-	};
-
-	if (attr_count != 4) {
-		printf("dev_add: need more attributes\n");
-		usage(usage_dev_add);
-	}
-
-
-	for (i = 0; i < attr_count; i++) {
-		valid_count += validate_attribute(need_attr, attrs[i], &nax);
-	}
-
-	if (valid_count != 4) {
-		printf("dev_add: need more VALID attributes\n");
-		usage(usage_dev_add);
-	}
-
-	arg.dev_id = atoi(need_attr[0].attr_val);
-
-	if (arg.dev_id < 2 || arg.dev_id > 199) {
-		printf("device id must be between 2 and 199.");
-		usage(usage_dev_add);
-	}
-
-	uaddr = get_uaddrstr(need_attr[1].attr_val,
-	    need_attr[2].attr_val,
-	    atoi(need_attr[3].attr_val));
-
-	if (uaddr == NULL)
-		usage(usage_dev_add);
-
-	arg.dev_netid = need_attr[1].attr_val;
-	arg.dev_addr  = uaddr;
-	arg.ds_addr   = need_attr[2].attr_val;
-
-	printf("adding:\n\tid - %d\n\tnetid - %s\n\taddr - %s\n",
-	    arg.dev_id, arg.dev_netid, arg.dev_addr);
-
-	rc = _nfssys(MDS_ADD_DEVICE, &arg);
-
-	if (rc != 0)
-		perror("nfssys:");
-
-	return (0);
-}
-
-
-int
-dev(oper_t op, int count, char *attrs[])
-{
-	int rc;
-
-	switch (op) {
-	case OP_LIST:
-		break;
-	case OP_ADD:
-		printf(" adding devices via this command is deprecated\n");
-		break;
-	case OP_DEL:
-		break;
-	default:
-		usage("Bad operation for devices\n");
-		break;
-	}
-
-	return (rc);
-}
-
-int
-get_layout_devs(char *argp, int devid[])
-{
-	int rc, id, i = 0;
-	char *ap, *dev;
-
-	ap = strdup(argp);
-	dev = strtok(ap, ",");
-	while (dev != NULL) {
-		i++;
-		if (i > 20)
-			return (20);
-		id = atoi(dev);
-		devid[ i-1 ] = atoi(dev);
-		dev = strtok(NULL, ",");
-	}
-	return (i);
-}
-
-int
-layout_add(int attr_count, char *attrs[])
-{
-	struct mds_addlo_args arg;
-
-	char    *uaddr;
-	int	valid_count = 0, i, nax = -1;
-	int	rc, dev_count, devs[20];
-
-	attr_t need_attr[] = {
-		{1, "dev",  NULL},
-		{1, "loid", NULL},
-		{1, "unit",  NULL},
-		NULL
-	};
-
-	bzero(&devs, sizeof (devs));
-	bzero(&arg, sizeof (arg));
-
-	if (attr_count != 3) {
-		puts("layout_add: need more attributes\n");
-		usage(usage_lo_add);
-	}
-
-
-	for (i = 0; i < attr_count; i++) {
-		valid_count += validate_attribute(need_attr, attrs[i], &nax);
-	}
-
-	if (valid_count != 3) {
-		puts("layout_add: need more VALID attributes\n");
-		usage(usage_lo_add);
-	}
-
-	arg.loid = atoi(need_attr[1].attr_val);
-	arg.lo_stripe_unit = atoi(need_attr[2].attr_val);
-
-	/* get the number of devices */
-	dev_count = get_layout_devs(need_attr[0].attr_val, arg.lo_devs);
-	if (dev_count == 0) {
-		puts("layout_add: need to specify device "
-		    "list via -a dev=<devid1,devid2>\n");
-		usage(usage_lo_add);
-	}
-
-	printf("Adding Layout:\n");
-	printf("\tid: %d\n", arg.loid);
-	printf("\tunit: %d\n", arg.lo_stripe_unit);
-	for (i = 0; i < 20; i++)
-		printf("\t\tdev[%d] = %d\n",
-		    i, arg.lo_devs[i]);
-
-	rc = _nfssys(MDS_ADD_LAYOUT, &arg);
-
-	if (rc != 0)
-		perror("nfssys:");
-
-	return (0);
 }
 
 /*
@@ -447,9 +281,6 @@ layout(oper_t op, int count, char *attrs[])
 	int rc = 0;
 
 	switch (op) {
-	case OP_ADD:
-		rc = layout_add(count, attrs);
-		break;
 	case OP_RECALL:
 		rc = layout_recall(count, attrs);
 		break;
@@ -461,61 +292,30 @@ layout(oper_t op, int count, char *attrs[])
 	return (rc);
 }
 
-int
-auth_add(int attr_count, char *attrs[])
-{
-	char    *uaddr;
-	int	valid_count = 0, i, rc, nax = -1;
-	uint32_t id;
+/* mdsadm -o notify -t {delete|change} -a DID# */
 
-	attr_t need_attr[] = {
-		{1, "ip",  NULL},
-		NULL
-	};
+int
+notify(oper_t op, obj_type_t ty, int attr_count, char *attrs[])
+{
+	int	rc;
+	struct mds_notifydev_args node;
 
 	if (attr_count != 1) {
-		printf("auth_add: invalid attribute count.. \n");
-		usage(usage_auth_add);
+		puts("notify: invalid number of attributes\n");
+		usage(usage_notify);
 	}
 
+	node.dev_id = strtol(attrs[0], 0, 0);
+	node.notify_how = (ty == OT_NOTIFY_CHANGE) ?
+	    NOTIFY_CHANGE : NOTIFY_DELETE;
+	node.immediate = 0;	/* hmmm */
 
-	valid_count += validate_attribute(need_attr, attrs[0], &nax);
-
-	if (valid_count != 1) {
-		printf("auth_add: need more VALID attributes\n");
-		usage(usage_auth_add);
-	}
-
-	printf("adding: IP Addr - %s\n", need_attr[0].attr_val);
-
-	rc = _nfssys(MDS_ADD_DEVICE, need_attr[0].attr_val);
+	rc = _nfssys(MDS_NOTIFY_DEVICE, &node);
 
 	if (rc != 0)
 		perror("nfssys:");
 
 	return (0);
-}
-
-
-int
-auth(oper_t op, int count, char *attrs[])
-{
-	int rc;
-
-	switch (op) {
-	case OP_LIST:
-		break;
-	case OP_ADD:
-		rc = auth_add(count, attrs);
-		break;
-	case OP_DEL:
-		break;
-	default:
-		usage("Bad operation for devices\n");
-		break;
-	}
-
-	return (rc);
 }
 
 int
@@ -554,32 +354,29 @@ main(int argc, char **argv)
 			break;
 
 		default:
-			fprintf(stderr, "CLI: error\n");
+			usage("Usage error");
 			exit(-1);
 		}
 	}
 
 	if (op == OP_INVAL) {
-		usage("Specify a valid operation, ie: mdsadm "
-		    "-o add -t dev ...");
+		usage("Usage error");
+		exit(-1);
 	}
 
 	switch (obj_type) {
 
-	case OT_DEV:
-		dev(op, attr_count, attr_args);
-		break;
-
-	case OT_AUTH:
-		auth(op, attr_count, attr_args);
-		break;
-
 	case OT_LAYOUT:
 		layout(op, attr_count, attr_args);
 		break;
+
+	case OT_NOTIFY_CHANGE:
+	case OT_NOTIFY_DELETE:
+		notify(op, obj_type, attr_count, attr_args);
+		break;
+
 	default:
-		usage("Specify a valid type, ie: -t dev or -t "
-		    "layout or -t auth ...");
+		usage("Usage error");
 		break;
 	}
 

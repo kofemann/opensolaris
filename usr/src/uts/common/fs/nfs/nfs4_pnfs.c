@@ -63,7 +63,7 @@ int nfs4_pnfs_stripe_unit = 16384;
 #define	DEV_ASSIGN(x, y)	bcopy((y), (x), sizeof (deviceid4))
 
 static int pnfs_getdeviceinfo(mntinfo4_t *, devnode_t *, cred_t *);
-static devnode_t *pnfs_create_device(mntinfo4_t *, deviceid4, avl_index_t);
+static devnode_t *pnfs_create_device(nfs4_server_t *, deviceid4, avl_index_t);
 /*
  * The function prototype for encoding/decoding the layout data structures.
  */
@@ -76,7 +76,7 @@ nfs4_devid_compare(const void *va, const void *vb)
 	const devnode_t *b = vb;
 	int m;
 
-	m = memcmp(a->devid, b->devid, sizeof (deviceid4));
+	m = memcmp(a->dn_devid, b->dn_devid, sizeof (deviceid4));
 	return (m == 0 ? 0 : m < 0 ? -1 : 1);
 }
 
@@ -441,9 +441,6 @@ task_layoutreturn_free(task_layoutreturn_t *task)
 void
 nfs4_pnfs_init_mi(mntinfo4_t *mi)
 {
-	mutex_init(&mi->mi_pnfs_lock, NULL, MUTEX_DEFAULT, NULL);
-	avl_create(&mi->mi_devid_tree, nfs4_devid_compare,
-	    sizeof (devnode_t), offsetof(devnode_t, avl));
 	mi->mi_pnfs_io_taskq = taskq_create("pnfs_io_taskq",
 	    nfs4_pnfs_io_nthreads,
 	    minclsyspri, 1, nfs4_pnfs_io_maxalloc, TASKQ_PERZONE);
@@ -451,6 +448,13 @@ nfs4_pnfs_init_mi(mntinfo4_t *mi)
 	    nfs4_pnfs_other_nthreads,
 	    minclsyspri, 1, nfs4_pnfs_other_maxalloc,
 	    TASKQ_PERZONE);
+}
+
+void
+nfs4_pnfs_init_n4s(nfs4_server_t *n4sp)
+{
+	avl_create(&n4sp->s_devid_tree, nfs4_devid_compare,
+	    sizeof (devnode_t), offsetof(devnode_t, dn_avl));
 }
 
 void
@@ -507,34 +511,35 @@ nfs4_pnfs_init()
 }
 
 void
-pnfs_trash_devtree(mntinfo4_t *mi)
+pnfs_trash_devtree(nfs4_server_t *n4sp)
 {
 	devnode_t *dp;
 	void *cookie = NULL;
 	int i, ns;
 
-	mutex_enter(&mi->mi_pnfs_lock);
-	while ((dp = avl_destroy_nodes(&mi->mi_devid_tree, &cookie)) != NULL) {
-		if (dp->count > 0)
+	/* The server structure is being decommissioned, no locking needed. */
+
+	while ((dp = avl_destroy_nodes(&n4sp->s_devid_tree, &cookie)) != NULL) {
+		if (dp->dn_count > 0)
 			cmn_err(CE_WARN, "devnode count > 0");
 		else {
-			ns = dp->ds_addrs.mpl_len;
+			ns = dp->dn_ds_addrs.mpl_len;
 			xdr_free(xdr_nfsv4_1_file_layout_ds_addr4,
-			    (char *)&dp->ds_addrs);
+			    (char *)&dp->dn_ds_addrs);
 			for (i = 0; i < ns; i++)
-				if (dp->server_list[i])
-					nfs4_server_rele(dp->server_list[i]);
+				if (dp->dn_server_list[i])
+					nfs4_server_rele(dp->dn_server_list[i]);
+			kmem_free(dp->dn_server_list, ns *
+			    sizeof (nfs4_server_t *));
 			kmem_free(dp, sizeof (devnode_t));
 		}
 	}
-	avl_destroy(&mi->mi_devid_tree);
-	mutex_exit(&mi->mi_pnfs_lock);
+	avl_destroy(&n4sp->s_devid_tree);
 }
 
 void
 nfs4_pnfs_fini_mi(mntinfo4_t *mi)
 {
-	pnfs_trash_devtree(mi);
 	mutex_destroy(&mi->mi_pnfs_lock);
 }
 
@@ -763,7 +768,7 @@ netaddr2netbuf(netaddr4 *nap, struct netbuf *nbp, struct knetconfig *kncp)
  */
 static int
 find_nfs4_server_by_netaddr4(
-	netaddr4 *nap,		/* netaddr4 from the mi_devid_tree */
+	netaddr4 *nap,		/* netaddr4 from the devid_tree */
 	mntinfo4_t *mi,		/* mntinfo4 from MDS */
 	nfs4_server_t **npp)	/* returned nfs4_server */
 {
@@ -861,24 +866,24 @@ retry:
 }
 
 static void
-pnfs_rele_device(mntinfo4_t *mi, devnode_t *dp)
+pnfs_rele_device(nfs4_server_t *np, devnode_t *dp)
 {
-	ASSERT(MUTEX_HELD(&mi->mi_pnfs_lock));
-	ASSERT(dp->count > 0);
-	dp->count--;
+	ASSERT(MUTEX_HELD(&np->s_lock));
+	ASSERT(dp->dn_count > 0);
+	dp->dn_count--;
 	/*
 	 * No point in caching a failed getdeviceinfo.  Throw away
 	 * the devnode.  The devnode cannot have a server list or
 	 * xdr data since getdeviceinfo failed.
 	 */
-	if (dp->flags & DN_GDI_FAILED && dp->count == 0) {
-		avl_remove(&mi->mi_devid_tree, dp);
+	if (dp->dn_flags & DN_GDI_FAILED && dp->dn_count == 0) {
+		avl_remove(&np->s_devid_tree, dp);
 		kmem_free(dp, sizeof (*dp));
 	}
 }
 
 static int
-pnfs_get_device(mntinfo4_t *mi, deviceid4 did, cred_t *cr,
+pnfs_get_device(mntinfo4_t *mi, nfs4_server_t *np, deviceid4 did, cred_t *cr,
     devnode_t **dpp, int otwflag)
 {
 	devnode_t *dp = NULL;
@@ -891,8 +896,8 @@ pnfs_get_device(mntinfo4_t *mi, deviceid4 did, cred_t *cr,
 	 */
 	*dpp = NULL;
 
-	DEV_ASSIGN(key.devid, did);
-	dp = avl_find(&mi->mi_devid_tree, &key, &where);
+	DEV_ASSIGN(key.dn_devid, did);
+	dp = avl_find(&np->s_devid_tree, &key, &where);
 
 	if (dp == NULL && (otwflag & PGD_NO_OTW)) {
 		return (ENODEV);
@@ -902,36 +907,36 @@ pnfs_get_device(mntinfo4_t *mi, deviceid4 did, cred_t *cr,
 		 * The devid is not in the tree, go get the device info.
 		 * Create a placeholder devnode and stick it in the tree.
 		 */
-		dp = pnfs_create_device(mi, did, where);
-		dp->flags |= DN_GDI_INFLIGHT;
-		mutex_exit(&mi->mi_pnfs_lock);
+		dp = pnfs_create_device(np, did, where);
+		dp->dn_flags |= DN_GDI_INFLIGHT;
+		mutex_exit(&np->s_lock);
 
 		error = pnfs_getdeviceinfo(mi, dp, cr);
 
-		mutex_enter(&mi->mi_pnfs_lock);
-		dp->flags &= ~DN_GDI_INFLIGHT;
-		if (dp->count > 1)
-			cv_broadcast(dp->cv);
+		mutex_enter(&np->s_lock);
+		dp->dn_flags &= ~DN_GDI_INFLIGHT;
+		if (dp->dn_count > 1)
+			cv_broadcast(dp->dn_cv);
 		if (error) {
-			dp->flags |= DN_GDI_FAILED;
-			pnfs_rele_device(mi, dp);
+			dp->dn_flags |= DN_GDI_FAILED;
+			pnfs_rele_device(np, dp);
 		}
 		else
 			*dpp = dp;
 		return (error);
 	}
 
-	if ((dp->flags & DN_GDI_INFLIGHT) && (otwflag & PGD_NO_OTW)) {
+	if ((dp->dn_flags & DN_GDI_INFLIGHT) && (otwflag & PGD_NO_OTW)) {
 		return (EINPROGRESS);
 	}
 
-	dp->count++;
+	dp->dn_count++;
 
-	while (dp->flags & DN_GDI_INFLIGHT)
-		cv_wait(dp->cv, &mi->mi_pnfs_lock);
+	while (dp->dn_flags & DN_GDI_INFLIGHT)
+		cv_wait(dp->dn_cv, &np->s_lock);
 
-	if (dp->flags & DN_GDI_FAILED) {
-		pnfs_rele_device(mi, dp);
+	if (dp->dn_flags & DN_GDI_FAILED) {
+		pnfs_rele_device(np, dp);
 		error = EIO;
 	} else {
 		error = 0;
@@ -940,6 +945,102 @@ pnfs_get_device(mntinfo4_t *mi, deviceid4 did, cred_t *cr,
 	return (error);
 }
 
+/*
+ * pnfs_change_device - handle a device change notification.  This
+ * function is invoked by a thread running the NFSv4.1 callback program.
+ * The goal is to find the device node associated with the device ID
+ * passed by the server and delete it.  This will cause the code using
+ * the device to notice its disappearance, and re-issue GETDEVICEINFO
+ * (to be implemented).
+ */
+nfsstat4
+pnfs_change_device(nfs4_server_t *np, notify_deviceid_change4 *ndc)
+{
+	devnode_t *dp;
+	nfsstat4 stat;
+
+	if (ndc->ndc_layouttype != LAYOUT4_NFSV4_1_FILES)
+		return (NFS4ERR_UNKNOWN_LAYOUTTYPE);
+
+	/*
+	 * Passing NULL for mi is ok, since it's only needed when the
+	 * call goes OTW, which we never want here.  Besides, we don't
+	 * really have an mi to pass.  Same for cr.
+	 */
+	mutex_enter(&np->s_lock);
+	if (pnfs_get_device(NULL, np, ndc->ndc_deviceid, NULL, &dp,
+	    PGD_NO_OTW) != 0) {
+		/*
+		 * The device ID isn't found.  The client may have already
+		 * reaped it.  Return OK.
+		 */
+		DTRACE_PROBE(nfsc__i__no_device);
+		stat = NFS4_OK;
+	} else {
+
+		if (dp->dn_count > 0) {
+			/*
+			 * XXX - this is interim code.
+			 *
+			 * This is the interesting case, where the device
+			 * is busy.  We should mark the devnode as destroyed
+			 * and let the refs wither away.  That also implies
+			 * that stripe_dev_t must point to the device node
+			 * (and hold a reference), so that as new operations
+			 * using its data are done, the callers notice its
+			 * demise and back off, ultimately issuing a new
+			 * getdeviceinfo to fetch the new stuffs
+			 */
+			DTRACE_PROBE(nfsc__i__busy_device);
+			stat = NFS4_OK;
+		} else {
+			/*
+			 * The device has changed, just remove it, we'll
+			 * refetch it again later, if needed
+			 */
+			DTRACE_PROBE(nfsc__i__device_culled);
+			avl_remove(&np->s_devid_tree, dp);
+			stat = NFS4_OK;
+		}
+	}
+	mutex_exit(&np->s_lock);
+	return (stat);
+}
+
+/*
+ * pnfs_delete_device - handle a device delete notification.  This
+ * function is invoked by a thread running the NFSv4.1 callback program.
+ * The goal is to find the device node associated with the device ID
+ * passed by the server and delete it.
+ */
+nfsstat4
+pnfs_delete_device(nfs4_server_t *np, notify_deviceid_delete4 *ndd)
+{
+	devnode_t *dp = NULL;
+	nfsstat4 stat;
+
+	if (ndd->ndd_layouttype != LAYOUT4_NFSV4_1_FILES)
+		return (NFS4ERR_UNKNOWN_LAYOUTTYPE);
+
+	mutex_enter(&np->s_lock);
+	if (pnfs_get_device(NULL, np, ndd->ndd_deviceid, NULL, &dp,
+	    PGD_NO_OTW) != 0) {
+		DTRACE_PROBE(nfsc__i__no_device);
+		stat = NFS4_OK;
+	} else {
+
+		if (dp->dn_count > 0) {
+			DTRACE_PROBE(nfsc__i__busy_device);
+			stat = NFS4_OK;
+		} else {
+			DTRACE_PROBE(nfsc__i__device_culled);
+			avl_remove(&np->s_devid_tree, dp);
+			stat = NFS4_OK;
+		}
+	}
+	mutex_exit(&np->s_lock);
+	return (stat);
+}
 
 static int
 stripe_dev_prepare(
@@ -954,7 +1055,7 @@ stripe_dev_prepare(
 	int mpl_index;
 	multipath_list4 *mpl_item;
 	netaddr4 *nap;
-	nfs4_server_t *np;
+	nfs4_server_t *dsp, *mdsp;
 	int error = 0;
 	deviceid4 did;
 
@@ -972,9 +1073,11 @@ stripe_dev_prepare(
 	DEV_ASSIGN(did, dev->std_devid);
 	mutex_exit(&dev->std_lock);
 
-	mutex_enter(&mi->mi_pnfs_lock);
-	if ((error = pnfs_get_device(mi, did, cr, &dip, PGD_OTW)) != 0) {
-		mutex_exit(&mi->mi_pnfs_lock);
+	mdsp = find_nfs4_server_nolock(mi);
+	if (mdsp == NULL)
+		return (ENODEV);
+	if ((error = pnfs_get_device(mi, mdsp, did, cr, &dip, PGD_OTW))) {
+		nfs4_server_rele_lockt(mdsp);
 		return (error);
 	}
 	ASSERT(dip != NULL);
@@ -983,75 +1086,82 @@ stripe_dev_prepare(
 	 * Range check stripe_num and first_stripe_index against
 	 * the length of the indices array.
 	 */
-	if (stripe_num >= dip->ds_addrs.stripe_indices_len ||
-	    first_stripe_index >= dip->ds_addrs.stripe_indices_len) {
-		pnfs_rele_device(mi, dip);
-		mutex_exit(&mi->mi_pnfs_lock);
+	if (stripe_num >= dip->dn_ds_addrs.stripe_indices_len ||
+	    first_stripe_index >= dip->dn_ds_addrs.stripe_indices_len) {
+		pnfs_rele_device(mdsp, dip);
+		nfs4_server_rele_lockt(mdsp);
 		cmn_err(CE_WARN, "stripe_dev_prepare: stripe_num or "
 		    "first_stripe_index out of range: %d, %d, %d",
 		    stripe_num, first_stripe_index,
-		    dip->ds_addrs.stripe_indices_len);
+		    dip->dn_ds_addrs.stripe_indices_len);
 		return (EIO);
 	}
 	ndx = (stripe_num+first_stripe_index) %
-	    dip->ds_addrs.stripe_indices_len;
-	mpl_index = dip->ds_addrs.stripe_indices[ndx];
+	    dip->dn_ds_addrs.stripe_indices_len;
+	mpl_index = dip->dn_ds_addrs.stripe_indices[ndx];
 	/*
 	 * Range check the index from the indices
 	 */
-	if (mpl_index >= dip->ds_addrs.mpl_len) {
-		pnfs_rele_device(mi, dip);
-		mutex_exit(&mi->mi_pnfs_lock);
+	if (mpl_index >= dip->dn_ds_addrs.mpl_len) {
+		pnfs_rele_device(mdsp, dip);
+		nfs4_server_rele_lockt(mdsp);
 		cmn_err(CE_WARN, "strip_dev_prepare: mpl_index out "
-		    "of range: %d, %d", mpl_index, dip->ds_addrs.mpl_len);
+		    "of range: %d, %d", mpl_index, dip->dn_ds_addrs.mpl_len);
 		return (EIO);
 	}
-	mpl_item = &dip->ds_addrs.mpl_val[mpl_index];
+	mpl_item = &dip->dn_ds_addrs.mpl_val[mpl_index];
 	/* XXX - always choose multipath item 0 */
 	nap = &mpl_item->multipath_list4_val[0];
 
-	if ((np = dip->server_list[mpl_index]) == NULL) {
+	if ((dsp = dip->dn_server_list[mpl_index]) == NULL) {
 		/*
 		 * Drop these locks since find_nfs4_server_by_netaddr4()
 		 * may go OTW to do EXID/CR_SESS.
 		 */
-		mutex_exit(&mi->mi_pnfs_lock);
-		error = find_nfs4_server_by_netaddr4(nap, mi, &np);
-		mutex_enter(&mi->mi_pnfs_lock);
+		mutex_exit(&mdsp->s_lock);
+		error = find_nfs4_server_by_netaddr4(nap, mi, &dsp);
+		mutex_enter(&mdsp->s_lock);
 
 		if (error) {
-			pnfs_rele_device(mi, dip);
-			mutex_exit(&mi->mi_pnfs_lock);
+			pnfs_rele_device(mdsp, dip);
+			nfs4_server_rele_lockt(mdsp);
 			return (error);
 		}
 
-		ASSERT(np->s_ds_svp != NULL);	/* 1 of 2 */
-
+		ASSERT(dsp->s_ds_svp != NULL);	/* 1 of 2 */
 
 		/* Initialize the server list, if needed */
 
-		if (dip->server_list[mpl_index] == NULL) {
-			dip->server_list[mpl_index] = np;
+		if (dip->dn_server_list[mpl_index] == NULL) {
+			dip->dn_server_list[mpl_index] = dsp;
 		} else {
 			/*
 			 * Someone else got here first.  Drop the hold
 			 * and use whatever is in the tree (below)
+			 *
+			 * Be careful here, dsp might point to the same
+			 * server as mdsp (ie. the data server is on
+			 * the same addr/port as the mds).
 			 */
-			nfs4_server_rele(np);
-			np = dip->server_list[mpl_index];
+			if (dsp != mdsp)
+				nfs4_server_rele(dsp);
+			else
+				dsp->s_refcnt--;
+
+			dsp = dip->dn_server_list[mpl_index];
 		}
 	}
-	pnfs_rele_device(mi, dip);
+	pnfs_rele_device(mdsp, dip);
 	dip = NULL;
-	mutex_exit(&mi->mi_pnfs_lock);
+	nfs4_server_rele_lockt(mdsp);
 
 	mutex_enter(&dev->std_lock);
 	/* std_n4sp & std_svp must be done as a set */
 	if (dev->std_n4sp == NULL) {
-		dev->std_n4sp = np;
-		nfs4_server_hold(np);
-		dev->std_svp = np->s_ds_svp;
-		ASSERT(np->s_ds_svp != NULL);	/* 2 of 2 */
+		dev->std_n4sp = dsp;
+		nfs4_server_hold(dsp);
+		dev->std_svp = dsp->s_ds_svp;
+		ASSERT(dsp->s_ds_svp != NULL);	/* 2 of 2 */
 	}
 
 	ASSERT(dev->std_svp != NULL);
@@ -1514,13 +1624,13 @@ pnfs_populate_device(devnode_t *dp, device_addr4 *da)
 	xdrmem_create(&xdr, da->da_addr_body.da_addr_body_val,
 	    da->da_addr_body.da_addr_body_len, XDR_DECODE);
 
-	if (!xdr_nfsv4_1_file_layout_ds_addr4(&xdr, &dp->ds_addrs)) {
+	if (!xdr_nfsv4_1_file_layout_ds_addr4(&xdr, &dp->dn_ds_addrs)) {
 		cmn_err(CE_WARN, "pnfs_populate_device: XDR_DECODE failed\n");
 		return (EAGAIN);
 	}
 
 	/* Allocate the server array, it will be initialized later */
-	dp->server_list = kmem_zalloc(dp->ds_addrs.mpl_len *
+	dp->dn_server_list = kmem_zalloc(dp->dn_ds_addrs.mpl_len *
 	    sizeof (nfs4_server_t *), KM_SLEEP);
 
 	return (0);
@@ -1528,17 +1638,17 @@ pnfs_populate_device(devnode_t *dp, device_addr4 *da)
 
 /*ARGSUSED*/
 static devnode_t *
-pnfs_create_device(mntinfo4_t *mi, deviceid4 devid, avl_index_t where)
+pnfs_create_device(nfs4_server_t *n4sp, deviceid4 devid, avl_index_t where)
 {
 	devnode_t *new;
 
 	new = kmem_zalloc(sizeof (devnode_t), KM_SLEEP);
-	DEV_ASSIGN(new->devid, devid);
-	new->count = 1;
-	cv_init(new->cv, NULL, CV_DEFAULT, NULL);
+	DEV_ASSIGN(new->dn_devid, devid);
+	new->dn_count = 1;
+	cv_init(new->dn_cv, NULL, CV_DEFAULT, NULL);
 
 	/* insert the new devid into the tree */
-	avl_insert(&mi->mi_devid_tree, new, where);
+	avl_insert(&n4sp->s_devid_tree, new, where);
 	return (new);
 }
 
@@ -1547,6 +1657,9 @@ pnfs_create_device(mntinfo4_t *mi, deviceid4 devid, avl_index_t where)
 
 /* set this to 1 to preface GETDEVICEINFO with PUTFH */
 int pnfs_gdi_hack = 0;
+int pnfs_enable_dino = 1;
+bitmap4 pnfs_devno_mask =
+	NOTIFY_DEVICEID4_DELETE_MASK|NOTIFY_DEVICEID4_CHANGE_MASK;
 
 static int
 pnfs_getdeviceinfo(mntinfo4_t *mi, devnode_t *dip, cred_t *cr)
@@ -1582,10 +1695,13 @@ retry:
 	}
 	argop[gdi_ndx].argop = OP_GETDEVICEINFO;
 	gdi_args = &argop[gdi_ndx].nfs_argop4_u.opgetdeviceinfo;
-	DEV_ASSIGN(gdi_args->gdia_device_id, dip->devid);
+	DEV_ASSIGN(gdi_args->gdia_device_id, dip->dn_devid);
 	gdi_args->gdia_layout_type = LAYOUT4_NFSV4_1_FILES;
 	gdi_args->gdia_maxcount = 16384; /* XXX make abstraction */
-	gdi_args->gdia_notify_types = 0;
+	if (pnfs_enable_dino)
+		gdi_args->gdia_notify_types = pnfs_devno_mask;
+	else
+		gdi_args->gdia_notify_types = 0;
 
 	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
 
@@ -2552,26 +2668,6 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 	return (error);
 }
 
-void nfsstat_layout_cleanup(pnfs_layout_t *flayout, vnode_t *vp,
-    layoutstats_t *lostats, int mi_lock, int lo_lock, devnode_t *dip)
-{
-	if (lo_lock == 1) {
-		mutex_exit(&(VTOR4(vp)->r_statelock));
-		kmem_free(
-		    (lostats->plo_stripe_info_list).plo_stripe_info_list_val,
-		    flayout->plo_stripe_count * sizeof (stripe_info_t));
-		lo_lock = 0;
-	}
-
-	if (mi_lock == 1) {
-		pnfs_rele_device(VTOMI4(vp), dip);
-		mutex_exit(&(VTOMI4(vp)->mi_pnfs_lock));
-		mi_lock = 0;
-	}
-
-	VN_RELE(vp);
-}
-
 /*
  * Gather layout statistics, XDR encode them, and copy them to the user space.
  */
@@ -2586,8 +2682,6 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	uint32_t user_bufsize;
 	uint32_t stp_ndx, mpl_index, num_servers;
 	int stripe_num, error;
-	int mi_lock = 0;
-	int lo_lock = 0;
 	vnode_t *vp;
 	rnode4_t *rp;
 	mntinfo4_t *mi;
@@ -2598,6 +2692,10 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	devnode_t *dip = NULL;
 	stripe_info_t *si_node = NULL;
 	nfsstat_lo_errcodes_t ec;
+	nfs4_server_t *np;
+	deviceid4 deviceid;
+	uint_t plo_first_stripe_index;
+	bool_t encode_failed;
 
 	/*
 	 * Get arguments.
@@ -2679,17 +2777,16 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 		ec = ENOLAYOUT;
 		return (ec);
 	}
-	mutex_exit(&rp->r_statelock);
+
+	lostats.plo_num_layouts = 0;
+	lostats.plo_stripe_info_list.plo_stripe_info_list_val = NULL;
+	lostats.plo_stripe_info_list.plo_stripe_info_list_len = 0;
+	lostats.plo_stripe_count = 0;
 
 	/*
 	 * Now pluck the fields off the layout.
 	 */
-	if (flayout !=	NULL) {
-		lostats.plo_stripe_info_list.plo_stripe_info_list_val =
-		    kmem_zalloc(flayout->plo_stripe_count *
-		    sizeof (stripe_info_t), KM_SLEEP);
-		mutex_enter(&rp->r_statelock);
-		lo_lock = 1;
+	if (flayout != NULL) {
 		/* XXX: No multi-segment layouts */
 		lostats.plo_num_layouts = 1;
 		lostats.plo_stripe_count = flayout->plo_stripe_count;
@@ -2702,28 +2799,43 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 		    flayout->plo_stripe_count;
 		lostats.plo_creation_sec = flayout->plo_creation_sec;
 		lostats.plo_creation_musec = flayout->plo_creation_musec;
+		DEV_ASSIGN(deviceid, flayout->plo_deviceid);
+		plo_first_stripe_index = flayout->plo_first_stripe_index;
+		flayout = NULL;
+		mutex_exit(&rp->r_statelock);
 
-		mutex_enter(&mi->mi_pnfs_lock);
-		mi_lock = 1;
-		error = pnfs_get_device(mi,
-		    flayout->plo_deviceid, cr, &dip, PGD_NO_OTW);
+		dip = NULL;
+		np = find_nfs4_server_nolock(mi);
+		if (np) {
+			error = pnfs_get_device(mi, np, deviceid, cr, &dip,
+			    PGD_NO_OTW);
+			mutex_exit(&np->s_lock);
+		}
+
 		if (dip == NULL || error == EINPROGRESS || error == ENODEV) {
-			mutex_exit(&mi->mi_pnfs_lock);
-			mi_lock = 0;
 			si_node->multipath_list.multipath_list_len = 0;
 			si_node->multipath_list.multipath_list_val = NULL;
 		} else {
+
+			lostats.plo_stripe_info_list.plo_stripe_info_list_val =
+			    kmem_zalloc(lostats.plo_stripe_count *
+			    sizeof (stripe_info_t), KM_SLEEP);
+
+			/*
+			 * The reference count on *dip is sufficient for
+			 * accessing these fields.
+			 */
 			for (stripe_num = 0; stripe_num <
-			    flayout->plo_stripe_count; stripe_num++) {
+			    lostats.plo_stripe_count; stripe_num++) {
 				si_node = &lostats.plo_stripe_info_list.
 				    plo_stripe_info_list_val[stripe_num];
 				si_node->stripe_index = stripe_num;
 				stp_ndx = (stripe_num +
-				    flayout->plo_first_stripe_index) %
-				    dip->ds_addrs.stripe_indices_len;
-				mpl_index = dip->ds_addrs.
+				    plo_first_stripe_index) %
+				    dip->dn_ds_addrs.stripe_indices_len;
+				mpl_index = dip->dn_ds_addrs.
 				    stripe_indices[stp_ndx];
-				mpl_item = &dip->ds_addrs.mpl_val[mpl_index];
+				mpl_item = &dip->dn_ds_addrs.mpl_val[mpl_index];
 				num_servers = mpl_item->multipath_list4_len;
 				si_node->multipath_list.
 				    multipath_list_len = num_servers;
@@ -2731,12 +2843,8 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 				    mpl_item->multipath_list4_val;
 			}
 		}
-	} else {
-		lostats.plo_num_layouts = 0;
-		lostats.plo_stripe_info_list.plo_stripe_info_list_val = NULL;
-		lostats.plo_stripe_info_list.plo_stripe_info_list_len = 0;
-		lostats.plo_stripe_count = 0;
-	}
+	} else
+		mutex_exit(&rp->r_statelock);
 
 	/*
 	 * Get the user buffer and fill it with XDR encoded stream.
@@ -2744,15 +2852,8 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	xdr_len = xdr_sizeof(xdr_layoutstats_t, &lostats);
 	data_buffer = kmem_zalloc(xdr_len, KM_SLEEP);
 	xdrmem_create(&xdrarg, data_buffer,  xdr_len, XDR_ENCODE);
-	if (! xdr_layoutstats_t(&xdrarg, &lostats)) {
-		nfsstat_layout_cleanup(flayout, vp, &lostats, mi_lock,
-		    lo_lock, dip);
-		kmem_free(data_buffer, xdr_len);
-		cmn_err(CE_WARN, "nfsstat: xdr_layoutstats_t failed"
-		    " in the kernel");
-		ec = ESYSCALL;
-		return (ec);
-	}
+
+	encode_failed = !xdr_layoutstats_t(&xdrarg, &lostats);
 
 	/*
 	 * The layout details been safely copied into another buffer,
@@ -2760,8 +2861,28 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	 * xdr_free. It will free up kernel data structures, since we
 	 * are using those pointers in the layoutstats data structure.
 	 */
-	nfsstat_layout_cleanup(flayout, vp, &lostats, mi_lock,
-	    lo_lock, dip);
+	if (np) {
+		mutex_enter(&np->s_lock);
+		if (dip) {
+			pnfs_rele_device(np, dip);
+			dip = NULL;
+		}
+		nfs4_server_rele_lockt(np);
+		np = NULL;
+	}
+	VN_RELE(vp);
+
+	if (lostats.plo_stripe_info_list.plo_stripe_info_list_val)
+		kmem_free(lostats.plo_stripe_info_list.plo_stripe_info_list_val,
+		    lostats.plo_stripe_count * sizeof (stripe_info_t));
+
+	if (encode_failed) {
+		kmem_free(data_buffer, xdr_len);
+		cmn_err(CE_WARN, "nfsstat: xdr_layoutstats_t failed"
+		    " in the kernel");
+		ec = ESYSCALL;
+		return (ec);
+	}
 
 	/*
 	 * Pass the xdr_len back to the userland in case it needs to

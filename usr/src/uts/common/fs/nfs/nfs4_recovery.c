@@ -2753,7 +2753,7 @@ recov_openfiles(recov_info_t *recovp, nfs4_server_t *sp)
 
 	ASSERT(sp != NULL);
 
-	pnfs_trash_devtree(mi);
+	pnfs_trash_devtree(sp);
 
 	/*
 	 * This check is to allow a 10ms pause before we reopen files
