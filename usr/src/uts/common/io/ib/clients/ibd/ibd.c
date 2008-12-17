@@ -37,6 +37,7 @@
 #include <sys/strsun.h>
 #include <sys/strsubr.h>
 #include <sys/dlpi.h>
+#include <sys/mac_provider.h>
 
 #include <sys/pattr.h>		/* for HCK_PARTIALCKSUM */
 #include <sys/sysmacros.h>	/* for offsetof */
@@ -309,7 +310,6 @@ static mac_callbacks_t ib_m_callbacks = {
 	ibd_m_multicst,
 	ibd_m_unicst,
 	ibd_m_tx,
-	NULL,
 	NULL,
 	ibd_m_getcapab
 };
@@ -2978,7 +2978,6 @@ ibd_leave_group(ibd_state_t *state, ib_gid_t mgid, uint8_t jstate)
 			ASSERT(mce->mc_jstate == IB_MC_JSTATE_SEND_ONLY_NON);
 		} else {
 			ASSERT(jstate == IB_MC_JSTATE_FULL);
-			ASSERT(mce->mc_jstate == IB_MC_JSTATE_FULL);
 
 			/*
 			 * If join group failed, mce will be NULL here.
@@ -2987,6 +2986,7 @@ ibd_leave_group(ibd_state_t *state, ib_gid_t mgid, uint8_t jstate)
 			 */
 			if (mce == NULL)
 				return;
+			ASSERT(mce->mc_jstate == IB_MC_JSTATE_FULL);
 			mce->mc_fullreap = B_TRUE;
 		}
 
@@ -4102,13 +4102,6 @@ ibd_m_getcapab(void *arg, mac_capab_t cap, void *cap_data)
 			return (B_FALSE);
 		break;
 	}
-	case MAC_CAPAB_POLL:
-		/*
-		 * Fallthrough to default, as we don't support GLDv3
-		 * polling.  When blanking is implemented, we will need to
-		 * change this to return B_TRUE in addition to registering
-		 * an mc_resources callback.
-		 */
 	default:
 		return (B_FALSE);
 	}

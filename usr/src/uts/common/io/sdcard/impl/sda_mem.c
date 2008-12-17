@@ -29,6 +29,7 @@
 
 #include <sys/types.h>
 #include <sys/types.h>
+#include <sys/note.h>
 #include <sys/conf.h>
 #include <sys/scsi/adapters/blk2scsa.h>
 #include <sys/ddi.h>
@@ -38,6 +39,7 @@
 
 static int sda_mem_attach(dev_info_t *, ddi_attach_cmd_t);
 static int sda_mem_detach(dev_info_t *, ddi_detach_cmd_t);
+static int sda_mem_quiesce(dev_info_t *);
 static b2s_err_t sda_mem_b2s_errno(sda_err_t);
 static boolean_t sda_mem_b2s_request(void *, b2s_request_t *);
 static boolean_t sda_mem_b2s_rw(sda_slot_t *, b2s_request_t *);
@@ -94,6 +96,7 @@ sda_mem_init(struct modlinkage *modlp)
 	devo = ((struct modldrv *)(modlp->ml_linkage[0]))->drv_dev_ops;
 	devo->devo_attach = sda_mem_attach;
 	devo->devo_detach = sda_mem_detach;
+	devo->devo_quiesce = sda_mem_quiesce;
 
 	devo->devo_cb_ops = &sda_mem_ops;
 
@@ -455,6 +458,14 @@ sda_mem_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	default:
 		return (DDI_FAILURE);
 	}
+}
+
+int
+sda_mem_quiesce(dev_info_t *dip)
+{
+	_NOTE(ARGUNUSED(dip));
+	/* no work to do */
+	return (DDI_SUCCESS);
 }
 
 uint32_t

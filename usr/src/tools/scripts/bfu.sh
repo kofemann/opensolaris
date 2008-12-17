@@ -666,7 +666,7 @@ inetd_conf_svm_hack() {
 }
 
 upgrade_aggr_and_linkprop () {
-	# Since aggregation.conf and linkprop.conf are upgraded by
+	# Since aggregation.conf and linkprop.conf are upgraded by 
 	# SUNWcnetr's postinstall script, put the relevant portions of the
 	# postinstall script here, modified to rename the old files instead
 	# of removing them.
@@ -754,6 +754,30 @@ upgrade_aggr_and_linkprop () {
 		done
 		mv $ORIG $ORIG.bak
 	fi
+}
+
+upgrade_vlan () {
+	# Convert hostname.*** and zonecfg vlan configurations
+	UPGRADE_SCRIPT=/var/svc/profile/upgrade_datalink
+
+	for ifname in $host_ifs $zone_ifs
+	do
+		phys=`echo $ifname | sed "s/[0-9]*$//"`
+		devnum=`echo $ifname | sed "s/$phys//g"`
+		if [ "$phys$devnum" != $ifname -o \
+		    -n "`echo $devnum | tr -d '[0-9]'`" ]; then
+			echo "skipping invalid interface $ifname"
+			continue
+		fi
+
+		vid=`expr $devnum / 1000`
+		inst=`expr $devnum % 1000`
+
+		if [ "$vid" != "0" ]; then
+			echo dladm create-vlan -l $phys$inst -v $vid $ifname \
+			    >> $rootprefix$UPGRADE_SCRIPT
+		fi
+	done
 }
 
 # Update aac.conf for set legacy-name-enable properly
@@ -1171,6 +1195,24 @@ migrate_acctadm_conf()
 		if [ $ACCTADM_TASK_ENABLE = "yes" -o \
 		    $ACCTADM_TASK_FILE != "none" -o \
 		    $ACCTADM_TASK_TRACKED != "none" ]; then
+			svcadm enable $fmri
+		fi
+
+		fmri="svc:/system/extended-accounting:net"
+		svccfg -s $fmri setprop config/file = \
+		    ${ACCTADM_NET_FILE:="none"}
+		svccfg -s $fmri setprop config/tracked = \
+		    ${ACCTADM_NET_TRACKED:="none"}
+		svccfg -s $fmri setprop config/untracked = \
+		    ${ACCTADM_NET_UNTRACKED:="extended"}
+		if [ ${ACCTADM_NET_ENABLE:="no"} = "yes" ]; then
+			svccfg -s $fmri setprop config/enabled = "true"
+		else
+			svccfg -s $fmri setprop config/enabled = "false"
+		fi
+		if [ $ACCTADM_NET_ENABLE = "yes" -o \
+		    $ACCTADM_NET_FILE != "none" -o \
+		    $ACCTADM_NET_TRACKED != "none" ]; then
 			svcadm enable $fmri
 		fi
 
@@ -3277,56 +3319,6 @@ remove_initd_links()
 }
 
 #
-# Remove the old 5.005_03 version of perl.
-#
-remove_perl_500503()
-{
-	# Packages to remove.
-	typeset -r perl_pkgs='SUNWopl5m SUNWopl5p SUNWopl5u'
-	typeset pkg
-
-	#
-	# First, attempt to remove the packages cleanly if possible.
-	#
-	printf 'Removing perl 5.005_03 packages'
-	for pkg in $perl_pkgs
-	do
-		if pkginfo $pkgroot -q $pkg; then
-			printf ' %s' $pkg
-			pkgrm $pkgroot -n $pkg >/dev/null 2>&1
-		fi
-	done
-	printf '\n'
-
-	#
-	# In case that didn't work, do it manually.
-	#
-	printf 'Removing perl 5.005_03 from %s/var/sadm/install/contents' \
-	    $rootprefix
-	for pkg in $PKGS
-	do
-		printf ' %s' $pkg
-		if [ -d $rootprefix/var/sadm/pkg/$pkg ]; then
-			rm -rf $rootprefix/var/sadm/pkg/$pkg
-			grep -vw $pkg $rootprefix/var/sadm/install/contents > \
-			    /tmp/contents.$$
-			cp /tmp/contents.$$ /var/sadm/install/contents.$$
-			rm /tmp/contents.$$
-		fi
-	done
-	printf '\n'
-
-	#
-	# Remove any remaining 5.005_03 files,
-	#
-	printf 'Removing perl 5.005_03 from %s/perl5\n' $usr
-
-	# Directories.
-	rm -rf $usr/perl5/5.00503
-	rm -rf $usr/perl5/site_perl/5.005
-}
-
-#
 # Remove Wildcat (aka Sun Fire Link)
 #
 remove_eof_wildcat()
@@ -3485,114 +3477,58 @@ remove_eof_bind8()
 }
 
 #
-# Remove the 5.8.3 version of perl.
+# Remove the 5.6.1 version of perl.
 #
-remove_perl_583()
+remove_perl_561()
 {
-	#
-	# Copy perl 5.8.3 into the new 5.8.4 locations.  This will preserve
-	# any add-on modules that might have been installed, and any 5.8.3
-	# core files that get copied over will be replaced by the new 5.8.4
-	# versions when the cpio archives are subsequently extracted.
-	#
-	printf 'Preserving user-installed perl modules...\n'
-	mkdir -p $usr/perl5/5.8.4
-	cp -rp $usr/perl5/5.8.3/* \
-	    $usr/perl5/5.8.4
-	mkdir -p $usr/perl5/site_perl/5.8.4
-	cp -rp $usr/perl5/site_perl/5.8.3/* \
-	    $usr/perl5/site_perl/5.8.4
-	mkdir -p $usr/perl5/vendor_perl/5.8.4
-	cp -rp $usr/perl5/vendor_perl/5.8.3/* \
-	    $usr/perl5/vendor_perl/5.8.4
 
-	#
-	# Update the #! lines in any scripts in /usr/perl5/5.8.4/bin to refer
-	# to 5.8.4 instead of 5.8.3.  Take care to edit only scripts.
-	#
-	typeset bindir="$usr/perl5/5.8.4/bin"
-	typeset script
-	for script in $(ls $bindir); do
-		script="$bindir/$script"
-		if [[ $script = "$usr/perl5/5.8.4/bin/perl5.8.3" ]]; then
-			rm -f $script
-		elif file $script | \
-		    egrep -s 'executable .*perl .*script'; then
-			sed -e \
-			    's!/usr/perl5/5.8.3/bin/perl!/usr/perl5/5.8.4/bin/perl!g' \
-			    < $script > $script.tmp
-			mv -f $script.tmp $script
-		fi
-	done
+        #
+        # Packages to remove.
+        #
+        typeset -r perl_pkgs='SUNWpl5m SUNWpl5p SUNWpl5u SUNWpl5v'
 
-	#
-	# Packages to remove.
-	#
-	typeset -r perl_pkgs='SUNWperl583man SUNWperl583usr SUNWperl583root'
+        #
+        # First, attempt to remove the packages cleanly if possible.
+        #
+        typeset pkg
+        printf 'Removing perl 5.6.1 packages'
+        for pkg in $perl_pkgs
+        do
+                if pkginfo $pkgroot -q $pkg; then
+                        printf ' %s' $pkg
+                        pkgrm $pkgroot -n $pkg >/dev/null 2>&1
+                fi
+        done
+        printf '\n'
 
-	#
-	# First, attempt to remove the packages cleanly if possible.
-	#
-	typeset pkg
-	printf 'Removing perl 5.8.3 packages'
-	for pkg in $perl_pkgs
-	do
-		if pkginfo $pkgroot -q $pkg; then
-			printf ' %s' $pkg
-			pkgrm $pkgroot -n $pkg >/dev/null 2>&1
-		fi
-	done
-	printf '\n'
+        #
+        # In case that didn't work, do it manually.
+        #
+        printf 'Removing perl 5.6.1 from %s/var/sadm/install/contents' \
+            $rootprefix
+        for pkg in $PKGS
+        do
+                printf ' %s' $pkg
+                if [ -d $rootprefix/var/sadm/pkg/$pkg ]; then
+                        rm -rf $rootprefix/var/sadm/pkg/$pkg
+                        grep -vw $pkg $rootprefix/var/sadm/install/contents > \
+                            /tmp/contents.$$
+                        cp /tmp/contents.$$ /var/sadm/install/contents.$$
+                        rm /tmp/contents.$$
+                fi
+        done
+        printf '\n'
 
-	#
-	# In case that didn't work, do it manually.
-	#
-	printf 'Removing perl 5.8.3 from %s/var/sadm/install/contents' \
-	    $rootprefix
-	for pkg in $PKGS
-	do
-		printf ' %s' $pkg
-		if [ -d $rootprefix/var/sadm/pkg/$pkg ]; then
-			rm -rf $rootprefix/var/sadm/pkg/$pkg
-			grep -vw $pkg $rootprefix/var/sadm/install/contents > \
-			    /tmp/contents.$$
-			cp /tmp/contents.$$ /var/sadm/install/contents.$$
-			rm /tmp/contents.$$
-		fi
-	done
-	printf '\n'
+        #
+        # Remove any remaining 5.6.1 files,
+        #
+        printf 'Removing perl 5.6.1 from %s/perl5\n' $usr
 
-	#
-	# Remove any remaining 5.8.3 files,
-	# and fix up the symlinks if necessary.
-	#
-	printf 'Removing perl 5.8.3 from %s/perl5\n' $usr
-
-	# Directories.
-	rm -rf $usr/perl5/5.8.3
-	rm -rf $usr/perl5/site_perl/5.8.3
-	rm -rf $usr/perl5/vendor_perl/5.8.3
-
-	# bin symlink.
-	rm -f $usr/perl5/bin
-	ln -s ./5.8.4/bin $usr/perl5/bin
-
-	# pod symlink.
-	rm -f $usr/perl5/pod
-	ln -s ./5.8.4/lib/pod $usr/perl5/pod
-
-	#
-	# man symlink.  In earlier S10 builds the man symlink mistakenly points
-	# to the 5.6.1 manpages, instead of 5.8.3.  Fix to point to 5.8.4.
-	#
-	rm -f $usr/perl5/man
-	ln -s ./5.8.4/man $usr/perl5/man
-
-	# Symlink /bin/perl to 5.8.4.
-	rm -f $usr/bin/perl
-	ln -s ../perl5/5.8.4/bin/perl $usr/bin/perl
+        # Directories.
+        rm -rf $usr/perl5/5.6.1
+        rm -rf $usr/perl5/site_perl/5.6.1
+        rm -rf $usr/perl5/vendor_perl/5.6.1
 }
-
 #
 # Remove FNS/XFN packages
 #
@@ -4761,6 +4697,28 @@ then
 		}' > $bfu_zone_list
 	fi
 
+	#
+	# save vlans associated with zones to be upgraded 
+	# to the new dladm based format
+	#
+	flowadm_status="old"
+	if [[ ! -f $root/sbin/flowadm ]] && \
+	    archive_file_exists generic.sbin "sbin/flowadm"; then
+		flowadm_status="new"
+		host_ifs=`ls -1 $rootprefix/etc | egrep -e \
+	  	  '^hostname.|^hostname6.|^dhcp.'|  cut -d . -f2 | sort -u` 
+		zones=`zoneadm list -c | grep -v global`
+		for zone in $zones
+		do
+			zonecfg -z $zone info ip-type | grep exclusive \
+			    >/dev/null
+			if [ $? -eq 0 ]; then
+				zif=`zonecfg -z $zone info net | \
+				    grep physical | nawk '{print $2}'`
+				zone_ifs="$zone_ifs $zif"
+			fi
+		done
+	fi
 	#
 	# Stop sendmail so that mail doesn't bounce during the interval
 	# where /etc/mail/aliases is (effectively) empty.
@@ -6265,20 +6223,10 @@ mondo_loop() {
 	rm -f $usr/include/sys/cg8var.h
 
 	#
-	# Remove perl 5.005_03.  If this is a backwards bfu,
-	# it will be extracted again by cpio.
+	# Remove perl 5.6.1
 	#
-	if [[ -d $usr/perl5/5.00503 ]]; then
-		remove_perl_500503
-	fi
-
-	#
-	# Remove perl 5.8.3, but only if the generic.usr archive contains 5.8.4.
-	# If this is a backwards bfu, 5.8.3 will be extracted again by cpio.
-	#
-	if [[ -d $usr/perl5/5.8.3 ]] && $ZCAT $cpiodir/generic.usr$ZFIX | \
-	    cpio -it 2>/dev/null |  egrep -s '^usr/perl5/5.8.4/'; then
-		remove_perl_583
+	if [[ -d $usr/perl5/5.6.1 ]]; then
+		remove_perl_561
 	fi
 
 	#
@@ -7326,6 +7274,28 @@ mondo_loop() {
 	rm -f $root/kernel/strmod/amd64/pfil
 	rm -f $root/usr/sbin/pfild
 
+	# Remove nsmb and smbfs modules from old locations
+	# Also remove new locations of kmdb stuff for BFU
+	# from newer to older build ("backward BFU").
+	# These will be reinstalled from the archive.
+	# old locations:
+	rm -f $root/kernel/kmdb/nsmb
+	rm -f $root/kernel/kmdb/smbfs
+	rm -f $root/kernel/kmdb/amd64/nsmb
+	rm -f $root/kernel/kmdb/amd64/smbfs
+	rm -f $root/kernel/kmdb/sparcv9/nsmb
+	rm -f $root/kernel/kmdb/sparcv9/smbfs
+	rm -f $usr/kernel/sys/smbfs
+	rm -f $usr/kernel/sys/amd64/smbfs
+	rm -f $usr/kernel/sys/sparcv9/smbfs
+	# new locations:
+	rm -f $usr/kernel/kmdb/nsmb
+	rm -f $usr/kernel/kmdb/smbfs
+	rm -f $usr/kernel/kmdb/amd64/nsmb
+	rm -f $usr/kernel/kmdb/amd64/smbfs
+	rm -f $usr/kernel/kmdb/sparcv9/nsmb
+	rm -f $usr/kernel/kmdb/sparcv9/smbfs
+
 	# Remove obsolete atomic_prim.h file.
 	rm -f $usr/include/v9/sys/atomic_prim.h
 
@@ -7593,6 +7563,7 @@ mondo_loop() {
 	#
 	rm -f $root/usr/lib/rcm/modules/SUNW_vlan_rcm.so
 	rm -f $root/usr/lib/rcm/modules/SUNW_aggr_rcm.so
+	rm -f $root/usr/lib/rcm/modules/SUNW_vnic_rcm.so
 	rm -f $root/kernel/drv/softmac
 	rm -f $root/kernel/drv/sparcv9/softmac
 	rm -f $root/kernel/drv/amd64/softmac
@@ -8075,6 +8046,11 @@ mondo_loop() {
 				chgrp sys $aggr_old
 				rm -rf $rootprefix/etc/dladm
 			fi
+		fi
+
+		# upgrade hostname and zones based vlans to dladm 
+		if [[ $flowadm_status == "new" ]]; then
+			upgrade_vlan
 		fi
 
 		# The global zone needs to have its /dev/dld symlink created

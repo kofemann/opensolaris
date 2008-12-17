@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * Create a topology node for a top level PRI node, one that is a child
  * of the 'components' node.
@@ -58,6 +56,6 @@ pi_enum_top(topo_mod_t *mod, md_t *mdp, mde_cookie_t mde_node,
 	 * libtopo method does not fail.
 	 */
 	result = pi_enum_generic_impl(mod, mdp, mde_node, inst, t_parent,
-	    NULL, hc_name, _ENUM_NAME, t_node);
+	    NULL, hc_name, _ENUM_NAME, t_node, 0);
 	return (result);
 }

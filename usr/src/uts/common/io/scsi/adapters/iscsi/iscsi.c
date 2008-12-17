@@ -787,7 +787,8 @@ iscsi_tran_init_pkt(struct scsi_address *ap, struct scsi_pkt *pkt,
 	 * streams buffers. Make sure that the buffer is mapped in
 	 * so that the copy won't panic the system.
 	 */
-	if (bp && bp_mapin_common(bp, (callback == NULL_FUNC) ?
+	if (bp && (bp->b_bcount != 0) &&
+	    bp_mapin_common(bp, (callback == NULL_FUNC) ?
 	    VM_NOSLEEP : VM_SLEEP) == NULL) {
 		return (NULL);
 	}
@@ -816,8 +817,11 @@ iscsi_tran_init_pkt(struct scsi_address *ap, struct scsi_pkt *pkt,
 		icmdp->cmd_un.scsi.cmdlen	= cmdlen;
 		icmdp->cmd_un.scsi.statuslen	= statuslen;
 		icmdp->cmd_crc_error_seen	= B_FALSE;
-		icmdp->cmd_internal		= B_FALSE;
-		icmdp->cmd_free			= B_FALSE;
+		icmdp->cmd_misc_flags		= 0;
+		if (flags & PKT_XARQ) {
+			icmdp->cmd_misc_flags |= ISCSI_CMD_MISCFLAG_XARQ;
+		}
+
 		mutex_init(&icmdp->cmd_mutex, NULL, MUTEX_DRIVER, NULL);
 		cv_init(&icmdp->cmd_completion, NULL, CV_DRIVER, NULL);
 
@@ -1416,6 +1420,7 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 	char			init_port_name[MAX_NAME_PROP_SIZE];
 	iscsi_sockaddr_t	addr_dsc;
 	iscsi_boot_property_t	*bootProp;
+	boolean_t		discovered = B_TRUE;
 
 	instance = getminor(dev);
 	ihp = (iscsi_hba_t *)ddi_get_soft_state(iscsi_state, instance);
@@ -2972,7 +2977,7 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 		if (persistent_disc_meth_set(method) == B_FALSE) {
 			rtn = EIO;
 		} else {
-			(void) iscsid_enable_discovery(ihp, method, B_TRUE);
+			(void) iscsid_enable_discovery(ihp, method, B_FALSE);
 			iscsid_poke_discovery(ihp, method);
 			(void) iscsid_login_tgt(ihp, NULL, method, NULL);
 		}
@@ -3496,6 +3501,7 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 			name =
 			    iscsi_targetparam_get_name(auth->a_oid);
 			rtn = 0;
+			discovered = B_FALSE;
 		}
 
 		if (name == NULL) {
@@ -3508,6 +3514,18 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 		if (persistent_auth_clear((char *)name) == B_FALSE) {
 			rtn = EIO;
 		}
+
+		/*
+		 * ISCSI_TARGET_PARAM_CLEAR, ISCSI_CHAP_CLEAR and
+		 * ISCSI_AUTH_CLEAR ioctl are called sequentially to remove
+		 * target parameters. Here, the target that is not discovered
+		 * by initiator should be removed from the iscsi_targets list
+		 * residing in the memory.
+		 */
+		if (discovered == B_FALSE) {
+			(void) iscsi_targetparam_remove_target(auth->a_oid);
+		}
+
 		kmem_free(auth, sizeof (*auth));
 		break;
 

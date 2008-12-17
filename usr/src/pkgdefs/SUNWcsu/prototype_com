@@ -483,6 +483,7 @@ f none usr/lib/help/auths/locale/C/SmfCronStates.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfExAcctFlowStates.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfExAcctProcessStates.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfExAcctTaskStates.html 444 root bin
+f none usr/lib/help/auths/locale/C/SmfExAcctNetStates.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfHeader.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfManageHeader.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfMDNSStates.html 444 root bin
@@ -507,6 +508,7 @@ f none usr/lib/help/auths/locale/C/SmfValueCoreadm.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfValueExAcctFlow.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfValueExAcctProcess.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfValueExAcctTask.html 444 root bin
+f none usr/lib/help/auths/locale/C/SmfValueExAcctNet.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfVtStates.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfValueHeader.html 444 root bin
 f none usr/lib/help/auths/locale/C/SmfValueInetd.html 444 root bin
@@ -565,6 +567,7 @@ f none usr/lib/help/profiles/locale/C/RtCryptoMngmnt.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtExAcctFlow.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtExAcctProcess.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtExAcctTask.html 444 root bin
+f none usr/lib/help/profiles/locale/C/RtExAcctNet.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtDHCPMngmnt.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtDatAdmin.html 444 root bin
 f none usr/lib/help/profiles/locale/C/RtDefault.html 444 root bin
@@ -684,6 +687,7 @@ f none usr/lib/rcm/modules/SUNW_ip_rcm.so 555 root bin
 f none usr/lib/rcm/modules/SUNW_mpxio_rcm.so 555 root bin
 f none usr/lib/rcm/modules/SUNW_network_rcm.so 555 root bin
 f none usr/lib/rcm/modules/SUNW_vlan_rcm.so 555 root bin
+f none usr/lib/rcm/modules/SUNW_vnic_rcm.so 555 root bin
 f none usr/lib/rcm/modules/SUNW_aggr_rcm.so 555 root bin
 f none usr/lib/rcm/modules/SUNW_swap_rcm.so 555 root bin
 f none usr/lib/rcm/rcm_daemon 555 root bin
@@ -829,6 +833,7 @@ s none usr/sbin/edquota=../lib/fs/ufs/edquota
 f none usr/sbin/eeprom 2555 root sys
 s none usr/sbin/fdisk=../../sbin/fdisk
 f none usr/sbin/ff 555 root bin
+s none usr/sbin/flowadm=../../sbin/flowadm
 s none usr/sbin/fiocompress=../../sbin/fiocompress
 f none usr/sbin/fmthard 555 root sys
 f none usr/sbin/format 555 root bin

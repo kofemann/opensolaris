@@ -3584,10 +3584,12 @@ modifyNode(cmdOptions_t *options, int *funcRet)
 	int		ret;
 	iSCSINameCheckStatusType nameCheckStatus;
 	IMA_OID sharedNodeOid;
-	int i;
-	int lowerCase;
+	int 		i;
+	int 		lowerCase;
 	IMA_BOOL	iscsiBoot = IMA_FALSE;
 	IMA_BOOL	mpxioEnabled = IMA_FALSE;
+	char		*mb_name = NULL;
+	int		prefixlen = 0;
 
 	assert(funcRet != NULL);
 
@@ -3638,10 +3640,35 @@ modifyNode(cmdOptions_t *options, int *funcRet)
 					return (1);
 				}
 
-				for (i = 0; nodeName[i] != 0; i++) {
-					lowerCase = tolower(nodeName[i]);
-					nodeName[i] = lowerCase;
+				prefixlen = strlen(ISCSI_IQN_NAME_PREFIX);
+				mb_name = (char *)calloc(1, prefixlen + 1);
+				if (mb_name == NULL) {
+					return (1);
 				}
+
+				if (wcstombs(mb_name, nodeName,
+				    prefixlen) == (size_t)-1) {
+					(void) fprintf(stderr, "%s: %s\n",
+					    cmdName,
+					    gettext("conversion error"));
+					(void) IMA_FreeMemory(mb_name);
+					return (1);
+				}
+				if (strncmp(mb_name, ISCSI_IQN_NAME_PREFIX,
+				    prefixlen) == 0) {
+					/*
+					 * For iqn format, we should map
+					 * the upper-case characters to
+					 * their lower-case equivalents.
+					 */
+					for (i = 0; nodeName[i] != 0; i++) {
+						lowerCase =
+						    tolower(nodeName[i]);
+						nodeName[i] = lowerCase;
+					}
+				}
+				(void) IMA_FreeMemory(mb_name);
+
 				/* Perform string profile checks */
 				nameCheckStatus =
 				    iSCSINameStringProfileCheck(nodeName);
@@ -4587,6 +4614,7 @@ removeTargetParam(int operandLen, char *operand[], int *funcRet)
 						    " with MPxIO disabled,"
 						    " not allowed to remove"
 						    " boot sess param"));
+						ret = 1;
 						continue;
 					}
 

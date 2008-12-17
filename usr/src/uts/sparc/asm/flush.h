@@ -20,14 +20,12 @@
  */
 
 /*
- * Copyright 2005 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef _ASM_FLUSH_H
 #define	_ASM_FLUSH_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 
@@ -44,8 +42,8 @@ doflush(void *addr)
 	__asm__ __volatile__(
 	    "andn	%0, 3, %0\n\t"
 	    "flush	%0\n\t"
-	: "=r" (addr)
-	: "0" (addr));
+	    : "=r" (addr)
+	    : "0" (addr));
 #else
 #error	"port me"
 #endif

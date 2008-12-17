@@ -162,6 +162,7 @@ COMMON_SUBDIRS=		\
 	file		\
 	filebench	\
 	find		\
+	flowadm		\
 	fm		\
 	fmli		\
 	fmt		\
@@ -584,6 +585,7 @@ MSGSUBDIRS=		\
 	file		\
 	filesync	\
 	find		\
+	flowadm		\
 	fm		\
 	fold		\
 	fs.d		\

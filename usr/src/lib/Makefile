@@ -272,11 +272,14 @@ sparc_SUBDIRS= .WAIT	\
 	libpcp		\
 	libtsalarm
 
+i386_SUBDIRS= libfdisk
+
 FM_sparc_DEPLIBS= libpri
 
 fm:			\
 	libexacct	\
 	libipmi		\
+	libzfs		\
 	scsi		\
 	$(FM_$(MACH)_DEPLIBS)
 
@@ -350,6 +353,8 @@ MSGSUBDIRS += \
 sparc_MSGSUBDIRS=	\
 	libprtdiag	\
 	libprtdiag_psr
+
+i386_MSGSUBDIRS= libfdisk
 
 HDRSUBDIRS=		\
 	auditd_plugins	\
@@ -480,6 +485,8 @@ sparc_HDRSUBDIRS=	\
 	libpri		\
 	storage
 
+i386_HDRSUBDIRS= libfdisk
+
 all :=		TARGET= all
 check :=	TARGET= check
 clean :=	TARGET= clean
@@ -543,7 +550,7 @@ libdevinfo:	libnvpair libsec
 libdhcpagent:	libsocket libdhcputil libuuid libdlpi
 libdhcpsvc:	libinetutil
 libdhcputil:	libnsl libgen libinetutil libdlpi
-libdladm:	libdevinfo libinetutil libsocket
+libdladm:	libdevinfo libinetutil libsocket libnsl libexacct libscf
 libdll: 	libast
 libdlpi:	libinetutil libdladm
 libdscfg:	libnsctl libunistat libsocket libnsl

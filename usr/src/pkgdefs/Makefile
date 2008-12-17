@@ -377,9 +377,6 @@ COMMON_SUBDIRS= \
 	SUNWpiclh \
 	SUNWpiclu \
 	SUNWpiclr \
-	SUNWpl5p \
-	SUNWpl5u \
-	SUNWpl5v \
 	SUNWpool \
 	SUNWpoold \
 	SUNWpoolr \
