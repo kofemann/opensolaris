@@ -347,6 +347,8 @@ void rfs41_lo_grant_rele(mds_layout_grant_t *);
 mds_ever_grant_t *rfs41_findevergrant(rfs4_client_t *, vnode_t *, bool_t *);
 void rfs41_ever_grant_rele(mds_ever_grant_t *);
 
+static uint32_t compute_use_pnfs_flags(uint32_t);
+
 /* ARGSUSED */
 static void
 mds_op_notsup(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
@@ -6678,6 +6680,57 @@ nfs_clid4_cmp(nfs_client_id4 *s1, nfs_client_id4 *s2)
 	return (TRUE);
 }
 
+/*
+ * Compute the "use bits", i.e. the flags specifying the permissible
+ * regular, MDS, and data server ops for the returned clientid.
+ *
+ * The minorversion1 specification allows a server implementor two
+ * alternatives: allow PNFS_MDS and PNFS_DS on the same clientid, or
+ * force the client to create separate clientids to distinguish
+ * MDS versus DS operations.
+ *
+ * Our design distinguishes operations based upon filehandle, and thus
+ * there is no reason to force the client to create separate clientids.
+ * Thus, we give the client as much as possible, while keeping the result
+ * within the allowed combinations as specified in the specification.
+ *
+ * Our constraints are: use a subset of the client's request, unless
+ * the client requested nothing, in which case we may return any
+ * legal combination; and, the combination of NON_PNFS and PNFS_MDS
+ * may not both be set in the results.  These constraints are reflected
+ * in the ASSERT()s at the end.
+ */
+
+static uint32_t
+compute_use_pnfs_flags(uint32_t request)
+{
+	uint32_t rc;
+
+	/* Start with the client's initial request */
+	rc = request & EXCHGID4_FLAG_MASK_PNFS;
+
+	/* If the client requested nothing, return the most permissive. */
+	if (rc == 0) {
+		rc = (EXCHGID4_FLAG_USE_PNFS_MDS | EXCHGID4_FLAG_USE_PNFS_DS);
+		goto done;
+	}
+
+	/* Don't permit the illegal combination of MDS and NON_PNFS */
+	if ((rc &
+	    (EXCHGID4_FLAG_USE_NON_PNFS | EXCHGID4_FLAG_USE_PNFS_MDS)) ==
+	    (EXCHGID4_FLAG_USE_NON_PNFS | EXCHGID4_FLAG_USE_PNFS_MDS))
+		rc &= ~EXCHGID4_FLAG_USE_NON_PNFS;
+
+done:
+	ASSERT(((request & EXCHGID4_FLAG_MASK_PNFS) == 0) ||
+	    ((rc & ~(request & EXCHGID4_FLAG_MASK_PNFS)) == 0));
+	ASSERT((rc & (EXCHGID4_FLAG_USE_NON_PNFS | EXCHGID4_FLAG_USE_PNFS_MDS))
+	    != (EXCHGID4_FLAG_USE_NON_PNFS | EXCHGID4_FLAG_USE_PNFS_MDS));
+	ASSERT(rc != 0);
+
+	return (rc);
+}
+
 /* XXX - NOTE: EXCHANGE_ID conforms to draft-19 behavior */
 
 /*ARGSUSED*/
@@ -6827,13 +6880,7 @@ case1:			/* case 1 - utok */
 	}
 
 out:
-	/*
-	 * Default eir_flags to something sensible. The final result
-	 * will be the calculated combination of the eia_flags and
-	 * server capabilities (to be added later as part of the
-	 * instance framework).
-	 */
-	rok->eir_flags = EXCHGID4_FLAG_USE_PNFS_MDS;
+	rok->eir_flags = 0;
 	if (resp->eir_status == NFS4_OK && CLID_REC_CONFIRMED(cp))
 		rok->eir_flags |= EXCHGID4_FLAG_CONFIRMED_R;
 
@@ -6880,26 +6927,9 @@ out:
 	bzero(&rok->eir_server_scope, sizeof (uint_t) + sizeof (char *));
 
 	/*
-	 * XXXX: We will need to query the instances capabilities to
-	 * see how we should reply to this.
+	 * Add the appropriate "use_pnfs" flags.
 	 */
-
-	/*
-	 * Refer to draft-19 Section 13.1: Acceptable EXID results
-	 */
-
-	if (args->eia_flags & EXCHGID4_FLAG_USE_PNFS_MDS) {
-
-		if (args->eia_flags & EXCHGID4_FLAG_USE_PNFS_DS)
-			rok->eir_flags |= EXCHGID4_FLAG_USE_PNFS_DS;
-
-	} else if (args->eia_flags & EXCHGID4_FLAG_USE_NON_PNFS) {
-		rok->eir_flags &= ~EXCHGID4_FLAG_USE_PNFS_MDS;
-		rok->eir_flags |= EXCHGID4_FLAG_USE_NON_PNFS;
-
-		if (args->eia_flags & EXCHGID4_FLAG_USE_PNFS_DS)
-			rok->eir_flags |= EXCHGID4_FLAG_USE_PNFS_DS;
-	}
+	rok->eir_flags |= compute_use_pnfs_flags(args->eia_flags);
 
 	/* force no state protection for now */
 	rok->eir_state_protect.spr_how = SP4_NONE;
