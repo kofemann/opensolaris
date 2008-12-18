@@ -1355,7 +1355,7 @@ typedef struct nfs_fh4_fmt nfs_fh4_fmt_t;
 	}							\
 	(str).utf8string_len = 0;
 
-#define UTF8STRING_NULL(str)					\
+#define	UTF8STRING_NULL(str)					\
 	(str).utf8string_val == NULL
 
 /*
