@@ -1587,7 +1587,7 @@ nfs4getfh_otw(struct mntinfo4 *mi, servinfo4_t *svp, vtype_t *vtp,
 	nfs_rw_exit(&svp->sv_lock);
 
 	do {
-		nfs4_set_clientid(mi, cr, recovery, ep);
+		nfs4_set_clientid(mi, NULL, cr, recovery, ep);
 
 		if (ep->error == 0)
 			break;
@@ -3061,18 +3061,29 @@ nfs4_setup_pnfs_mi(nfs4_server_t *np, mntinfo4_t *mi, servinfo4_t *svp)
  * minor versions.
  */
 void
-nfs4_set_clientid(mntinfo4_t *mi, cred_t *cr,
+nfs4_set_clientid(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 		    bool_t recovery, nfs4_error_t *n4ep)
 {
 	struct nfs4_server	*np;
-	struct servinfo4	*svp = mi->mi_curr_serv;
 	nfs4_recov_state_t	 recov_state;
 	int			 num_retries = 0;
 	bool_t			 retry;
+	bool_t			 is_dataserver;
 	cred_t			*lcr = NULL;
 	int			 retry_inuse = 1;	/* only retry once on */
 							/* NFS4ERR_CLID_INUSE */
 	time_t			 lease_time = 0;
+
+	/*
+	 * If svp is non-NULL, then we're setting the clientID on a pNFS
+	 * data server.  Otherwise, it's an MDS or non-pNFS server.
+	 */
+	if (svp == NULL) {
+		svp = mi->mi_curr_serv;
+		is_dataserver = FALSE;
+	} else {
+		is_dataserver = TRUE;
+	}
 
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
@@ -3087,6 +3098,8 @@ recov_retry:
 	mutex_enter(&nfs4_server_lst_lock);
 	np = servinfo4_to_nfs4_server(svp); /* This locks np if it is found */
 	mutex_exit(&nfs4_server_lst_lock);
+
+	/* XXXrsb - Would we ever have np == NULL for the DS case? */
 	if (!np) {
 		struct nfs4_server *tnp;
 		np = new_nfs4_server(svp, cr);
@@ -3119,11 +3132,23 @@ recov_retry:
 	 */
 	if (np->s_flags & N4S_CLIENTID_SET &&
 	    !(np->seqhb_flags & NFS4_SEQHB_EXIT)) {
-		/* add mi to np's mntinfo4_list */
-		nfs4_add_mi_to_server(np, mi);
+		/*
+		 * XXXrsb - We need to be careful of the MDS/DS combo in
+		 * this block.  That is, if a server is both an MDS and
+		 * DS, we need to do the right thing.  (We should probably
+		 * check the "use bits" on the nfs4_server_t, once we can
+		 * trust them.)
+		 */
+		if (is_dataserver == FALSE) {
+			/* add mi to np's mntinfo4_list */
+			nfs4_add_mi_to_server(np, mi);
+		}
 		if (!recovery) {
 			nfs4_set_minorversion(mi, np->s_minorversion);
-			nfs4_setup_pnfs_mi(np, mi, svp);
+			/* See XXXrsb above */
+			if (is_dataserver == FALSE)
+				nfs4_setup_pnfs_mi(np, mi, svp);
+
 			nfs_rw_exit(&mi->mi_recovlock);
 		}
 		mutex_exit(&np->s_lock);
@@ -3132,14 +3157,18 @@ recov_retry:
 	}
 	mutex_exit(&np->s_lock);
 
-
 	/*
 	 * Drop the mi_recovlock since nfs4_start_op will
 	 * acquire it again for us.
+	 *
+	 * XXXrsb - This gets called from the recovery framework (via
+	 * recov_clientid()) and from nfs4getfh_otw().  In the latter
+	 * case, this is done from an MDS/non-pNFS server and *not*
+	 * a data server.  Given that, we can use the "classic" start_op
+	 * and end_op interfaces.
 	 */
 	if (!recovery) {
 		nfs_rw_exit(&mi->mi_recovlock);
-
 		n4ep->error = nfs4_start_op(mi, NULL, NULL, &recov_state);
 		if (n4ep->error) {
 			nfs4_server_rele(np);
@@ -3153,6 +3182,7 @@ recov_retry:
 		if (!cv_wait_sig(&np->s_clientid_pend, &np->s_lock)) {
 			mutex_exit(&np->s_lock);
 			nfs4_server_rele(np);
+			/* XXXrsb - See comment above about start_op/end_op */
 			if (!recovery)
 				nfs4_end_op(mi, NULL, NULL, &recov_state,
 				    recovery);
@@ -3165,10 +3195,12 @@ recov_retry:
 	    !(np->seqhb_flags & NFS4_SEQHB_EXIT)) {
 		/* XXX copied/pasted from above */
 		/* add mi to np's mntinfo4_list */
-		nfs4_add_mi_to_server(np, mi);
+		if (is_dataserver == FALSE)
+			nfs4_add_mi_to_server(np, mi);
 		if (!recovery) {
 			nfs4_set_minorversion(mi, np->s_minorversion);
-			nfs4_setup_pnfs_mi(np, mi, svp);
+			if (is_dataserver == FALSE)
+				nfs4_setup_pnfs_mi(np, mi, svp);
 		}
 		mutex_exit(&np->s_lock);
 		nfs4_server_rele(np);
@@ -3266,7 +3298,7 @@ recov_retry:
 			np->s_flags |= N4S_INSERTED;
 		}
 
-		if (!recovery)
+		if (is_dataserver == FALSE && !recovery)
 			nfs4_setup_pnfs_mi(np, mi, svp);
 
 		/*
@@ -4081,14 +4113,18 @@ nfs4_cleanup_oldsession(nfs4_server_t *np)
 		 * destroyed the session. Nothing more to do.
 		 */
 		mutex_exit(&np->s_lock);
-	} else {
+	} else if (np->s_flags & N4S_SESSION_CREATED) {
 		/*
 		 * No sequence heartbeat thread means this
 		 * session is to a data server. Just destroy the
 		 * the session.
 		 */
+		np->seqhb_flags = 0;
 		mutex_exit(&np->s_lock);
 		nfs4destroy_session(np, NULL);
+	} else {
+		np->seqhb_flags = 0;
+		mutex_exit(&np->s_lock);
 	}
 }
 

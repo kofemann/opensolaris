@@ -1023,6 +1023,14 @@ nfs_clget4(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr, CLIENT **newcl,
 	 * by contacting the server. If the connection is timed out or reset,
 	 * e.g. server reboot, we will try again.
 	 */
+
+	/*
+	 * XXXrecovery:  We've already captured the nfs4_server_t in
+	 * start_op but we don't (yet) push it down through rfs4call()
+	 * and friends.  We need to do that, especially in the case of
+	 * an operation directed to the data server, so that we can
+	 * determine if this thread may be in recovery (non-pNFS, MDS, or DS).
+	 */
 	is_recov = (curthread == mi->mi_recovthread);
 	firstcall = 1;
 
@@ -1338,6 +1346,14 @@ nfs4_rfscall(mntinfo4_t *mi, servinfo4_t *svp,
 	 * For zone shutdown, behave as above to encourage quick
 	 * process exit, but also fail quickly when servers have
 	 * timed out before and reduce the timeouts.
+	 */
+
+	/*
+	 * XXXrecovery:  We've already captured the nfs4_server_t in
+	 * start_op but we don't (yet) push it down through rfs4call()
+	 * and friends.  We need to do that, especially in the case of
+	 * an operation directed to the data server, so that we can
+	 * determine if this thread may be in recovery (non-pNFS, MDS, or DS).
 	 */
 	is_recov = (curthread == mi->mi_recovthread);
 	firstcall = 1;
@@ -2169,7 +2185,7 @@ again:
 	case NFS4ERR_DELAY:
 		badfhcount = 0;
 		nfs4_set_delay_wait(vp);
-		ep->error = nfs4_wait_for_delay(vp, &recov);
+		ep->error = nfs4_wait_for_delay(vp, &recov, 0);
 		if (ep->error != 0)
 			goto done;
 		goto again;
@@ -3704,11 +3720,10 @@ nfs4_error_set(nfs4_error_t *ep, enum clnt_stat rpc_status, enum nfsstat4 stat)
  * Returns 0 on success
  */
 int
-nfs4_tag_ctl(nfs4_server_t *np, mntinfo4_t *mi, sessionid4 oldsid, int cmd,
-	cred_t *cr)
+nfs4_tag_ctl(nfs4_server_t *np, mntinfo4_t *mi, servinfo4_t *svp,
+    sessionid4 oldsid, int cmd, cred_t *cr)
 {
 	int error;
-	servinfo4_t *svp;
 	CLIENT *client;
 	struct chtab *ch;
 	struct nfs4_clnt *nfscl;
@@ -3716,16 +3731,17 @@ nfs4_tag_ctl(nfs4_server_t *np, mntinfo4_t *mi, sessionid4 oldsid, int cmd,
 	nfscl = zone_getspecific(nfs4clnt_zone_key, nfs_zone());
 	ASSERT(nfscl != NULL);
 
-	/*
-	 * We just pick the current servinfo ptr. Even if
-	 * this changes midstream, we should be alright, since
-	 * we are not really going OTW. Just used to get a
-	 * client handle.
-	 */
-
-	mutex_enter(&mi->mi_lock);
-	svp = mi->mi_curr_serv;
-	mutex_exit(&mi->mi_lock);
+	if (svp == NULL) {
+		/*
+		 * We just pick the current servinfo ptr. Even if
+		 * this changes midstream, we should be alright, since
+		 * we are not really going OTW. Just used to get a
+		 * client handle.
+		 */
+		mutex_enter(&mi->mi_lock);
+		svp = mi->mi_curr_serv;
+		mutex_exit(&mi->mi_lock);
+	}
 
 	error = nfs_clget4(mi, svp, cr, &client, &ch, nfscl);
 

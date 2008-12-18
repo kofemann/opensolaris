@@ -1995,7 +1995,7 @@ top:
 		NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 		oop = NULL;
-		ep->error = nfs4_wait_for_grace(mi, &recov);
+		ep->error = nfs4_wait_for_grace(mi, &recov, 0);
 		if (ep->error != 0)
 			goto bailout;
 		goto top;
@@ -2006,7 +2006,7 @@ top:
 		NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 		oop = NULL;
-		ep->error = nfs4_wait_for_delay(vp, &recov);
+		ep->error = nfs4_wait_for_delay(vp, &recov, 0);
 		nfs4_mi_kstat_inc_delay(mi);
 		if (ep->error != 0)
 			goto bailout;
@@ -3220,7 +3220,12 @@ nfs4write_normal(vnode_t *vp, caddr_t base, u_offset_t offset,
 	recov_state.rs_num_retry_despite_err = 0;
 	nfs4_init_stateid_types(&sid_types);
 
-	/* Is curthread the recovery thread? */
+	/*
+	 * Is curthread the recovery thread?
+	 * Note that calls to this routine are only made for
+	 * non-pNFS or proxy I/O calls.  (They are not directed
+	 * to a pNFS data server.)
+	 */
 	mutex_enter(&mi->mi_lock);
 	recov = (mi->mi_recovthread == curthread);
 	mutex_exit(&mi->mi_lock);

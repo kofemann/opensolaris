@@ -27,8 +27,6 @@
  * nfs_tbind.c, common part for nfsd and lockd.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #define	PORTMAP
 
 #include <tiuser.h>
@@ -263,21 +261,33 @@ nfslib_bindit(struct netconfig *nconf, struct netbuf **addr,
 
 	addrlist = (struct nd_addrlist *)NULL;
 
-	/* nfs4_callback service does not used a fieed port number */
-	if ((strcmp(hs->h_serv, "nfs4_callback") == 0) ||
-	    (strcmp(hs->h_serv, "dserv") == 0)) {
+	/* nfs4_callback service does not used a fixed port number */
+	if (strcmp(hs->h_serv, "nfs4_callback") == 0) {
 		tb.addr.maxlen = 0;
 		tb.addr.len = 0;
 		tb.addr.buf = 0;
 		use_any = TRUE;
 		gzone = (getzoneid() == GLOBAL_ZONEID);
 	} else if (netdir_getbyname(nconf, hs, &addrlist) != 0) {
-
-		syslog(LOG_ERR,
-		"Cannot get address for transport %s host %s service %s",
-		    nconf->nc_netid, hs->h_host, hs->h_serv);
-		(void) t_close(fd);
-		return (-1);
+		/*
+		 * XXX - This goes away once dservd and nfsd are merged
+		 * if this service doesn't map to an address, then
+		 * use an ephemeral address
+		 */
+		if (strcmp(hs->h_serv, "dserv") == 0) {
+			tb.addr.maxlen = 0;
+			tb.addr.len = 0;
+			tb.addr.buf = 0;
+			use_any = TRUE;
+			gzone = (getzoneid() == GLOBAL_ZONEID);
+		} else {
+			syslog(LOG_ERR,
+			    "Cannot get address for transport %s"
+			    " host %s service %s",
+			    nconf->nc_netid, hs->h_host, hs->h_serv);
+			(void) t_close(fd);
+			return (-1);
+		}
 	}
 
 	if (strcmp(nconf->nc_proto, "tcp") == 0) {

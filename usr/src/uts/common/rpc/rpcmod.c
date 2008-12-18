@@ -1114,6 +1114,18 @@ uint_t	mir_krpc_cell_null;
 
 uint32_t	cb_live = 0;
 
+/*
+ * XXXsessions
+ * This global is used to control which path we take in mir_set_cbinfo
+ * when we detect the race between nfs41_callback_thread() and
+ * nfs4_sequence_heartbeat_thread().
+ * If it's non-zero, we simply print a message.
+ * If it's zero, we bump cb_live and wait for the condition to clear.
+ * Unfortunately, we tend to hang during data server recovery.
+ * The sessions team is working on a fix for this.
+ */
+int	mir_set_cbinfo_hack = 1;
+
 void
 mir_set_cbinfo(queue_t *wq, void *info)
 {
@@ -1121,24 +1133,32 @@ mir_set_cbinfo(queue_t *wq, void *info)
 	struct	__svccb *scb = mir->mir_cb;
 
 	if (scb != NULL) {
-		/*
-		 * XXX - Race condition between nfs41_callback_thread()
-		 *	 and nfs4_sequence_heartbeat_thread() is causing
-		 *	 us to hit ASSERT, since heartbeat thread reaches
-		 *	 this code before r_flags is marked as SVCCB_DEAD.
-		 *
-		 *	 Need to revisit this; NFS layer shouldn't be
-		 *	 cv_wait()'ing the RPC layer.
-		 */
-		mutex_enter(&scb->r_lock);
-		while (!(scb->r_flags & SVCCB_DEAD)) {
-			cb_live++;
-			cv_wait(&scb->r_cbwait, &scb->r_lock);
+		if (mir_set_cbinfo_hack) {
+			/*
+			 * This is a hack to prevent the hang we get
+			 * w/DS Recovery
+			 */
+			cmn_err(CE_WARN, "mir_set_cbinfo: scb != NULL");
+		} else {
+			/*
+			 * XXX
+			 * Race condition between nfs41_callback_thread()
+			 * and nfs4_sequence_heartbeat_thread() is causing
+			 * us to hit ASSERT, since heartbeat thread reaches
+			 * this code before r_flags is marked as SVCCB_DEAD.
+			 *
+			 * Need to revisit this; NFS layer shouldn't be
+			 * cv_wait()'ing the RPC layer.
+			 */
+			mutex_enter(&scb->r_lock);
+			while (!(scb->r_flags & SVCCB_DEAD)) {
+				cb_live++;
+				cv_wait(&scb->r_cbwait, &scb->r_lock);
+			}
+			mutex_exit(&scb->r_lock);
+			kmem_free(scb, sizeof (*scb));
+			mir->mir_cb = NULL;
 		}
-		mutex_exit(&scb->r_lock);
-
-		kmem_free(scb, sizeof (*scb));
-		mir->mir_cb = NULL;
 	}
 	mir->mir_cb = (void *)info;
 }

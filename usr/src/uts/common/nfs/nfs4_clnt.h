@@ -1389,6 +1389,7 @@ typedef struct nfs4_server {
 	list_t			s_deleg_list;
 	rpcprog_t		s_program;
 	nfs_rwlock_t		s_recovlock;
+	kthread_t		*s_recovthread; /* active recov thrd or NULL */
 	kcondvar_t		wait_cb_null; /* used to wait for CB_NULL */
 	zoneid_t		zoneid;	/* zone using this nfs4_server_t */
 	struct nfs4_callback_globals *zone_globals;	/* globals */
@@ -1412,8 +1413,10 @@ typedef struct nfs4_server {
 #define	N4S_EXID_FAILED		0x200	/* Exchange ID failed */
 #define	N4S_USE_NON_PNFS	0x400	/* server is a non pNFS 4.1 server */
 #define	N4S_NEED_BC2S		0x800	/* need bind_conn_to_session */
+#define	N4S_RECOV_ACTIV		0x1000	/* Recovery is active for this server */
 
 #define	N4S_CB_PAUSE_TIME	10000	/* Amount of time to pause (10ms) */
+
 struct lease_time_arg {
 	time_t	lease_time;
 };
@@ -2181,8 +2184,8 @@ extern void 	nfs4create_session(mntinfo4_t *, servinfo4_t *, cred_t *,
 			nfs4_server_t *, nfs4_error_t *);
 extern int	nfs4bind_conn_to_session(nfs4_server_t *, servinfo4_t *,
 			struct mntinfo4 *, cred_t *, channel_dir_from_client4);
-extern int	nfs4_tag_ctl(nfs4_server_t *, mntinfo4_t *, sessionid4,
-		    int, cred_t *);
+extern int	nfs4_tag_ctl(nfs4_server_t *, mntinfo4_t *, servinfo4_t *,
+			sessionid4, int, cred_t *);
 extern void	nfs4_reopen(vnode_t *, nfs4_open_stream_t *, nfs4_error_t *,
 			open_claim_type4, bool_t, bool_t);
 extern void	nfs4_remap_root(struct mntinfo4 *, nfs4_error_t *, int);
@@ -2236,8 +2239,8 @@ extern void	nfs4_send_siglost(pid_t, mntinfo4_t *mi, vnode_t *vp, bool_t,
 extern time_t	nfs4err_delay_time;
 extern void	nfs4_set_grace_wait(mntinfo4_t *);
 extern void	nfs4_set_delay_wait(vnode_t *);
-extern int	nfs4_wait_for_grace(mntinfo4_t *, nfs4_recov_state_t *);
-extern int	nfs4_wait_for_delay(vnode_t *, nfs4_recov_state_t *);
+extern int	nfs4_wait_for_grace(mntinfo4_t *, nfs4_recov_state_t *, int);
+extern int	nfs4_wait_for_delay(vnode_t *, nfs4_recov_state_t *, int);
 extern nfs4_bseqid_entry_t *nfs4_create_bseqid_entry(nfs4_open_owner_t *,
 		    nfs4_lock_owner_t *, vnode_t *, pid_t, nfs4_tag_type_t,
 		    seqid4);
@@ -2391,6 +2394,68 @@ struct nfs4_clnt {
 	 */
 	struct clstat4 nfscl_stat[NFS4_MINORVERSMAX + 1];
 };
+
+/*
+ * New recovery interfaces & structures
+ */
+
+/* @(#)nfs4_call_t.c 1.1 08/06/25 */
+
+typedef struct {
+	nfs4_recov_state_t nc_recov_state;
+
+	mntinfo4_t	*nc_mi;
+	vnode_t		*nc_vp1;
+	vnode_t		*nc_vp2;
+
+	/* needed by nfs4_start_fop */
+	nfs4_op_hint_t	ophint;
+	int		start_recov;
+
+	/* needed by nfs4_needs_recovery */
+	int		stateful;
+	nfs4_error_t	e;
+
+	/* needed by start_recovery */
+	nfs_opnum4	opnum;
+	stateid4	*nc_sidp;
+	nfs4_lost_rqst_t *nc_lost_rqst;
+	nfs4_bseqid_entry_t *nc_bseqid_rqst;
+
+	/* needed by rfs4call */
+
+	int		nc_doqueue[1];
+	int		rfs4call_flags;	/* typically 0 */
+	cred_t		*cr;
+
+	/* new pnfs stuffs */
+
+	servinfo4_t	*ds_servinfo;	/* NULL if call targets MDS */
+	nfs4_server_t	*ds_nfs4_srv;	/* NULL if call targets MDS */
+	kmutex_t	nc_lock[1];
+	uint_t		nc_count;
+	int		nc_needs_recovery;
+	int		nc_wait_for_recovery;
+	uint32_t	nc_startop_flags;	/* nfs4_start_op(..., flags) */
+} nfs4_call_t;
+
+extern nfs4_call_t *nfs4_call_init(void);
+extern void nfs4_call_rele(nfs4_call_t *);
+extern void nfs4_call_hold(nfs4_call_t *);
+
+/*
+ * Flags for client-side recovery interfaces.
+ * Passed in as flags to nfs4_start_op() and stored in the nfs4_call_t.
+ */
+#define	RCV_DONTBLOCK	0x00000001	/* Don't block, return EAGAIN */
+
+/* interim */
+extern int nfs4_start_op_impl(nfs4_call_t *, uint32_t);
+extern void nfs4_end_op_impl(nfs4_call_t *);
+extern int nfs4_needs_recovery_impl(nfs4_call_t *);
+extern int nfs4_start_recovery_impl(nfs4_call_t *);
+extern void rfs4call_impl(nfs4_call_t *, COMPOUND4args_clnt *,
+    COMPOUND4res_clnt *);
 
 #ifdef	__cplusplus
 }

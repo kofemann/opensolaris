@@ -26,7 +26,6 @@
 /* Copyright (c) 1983, 1984, 1985, 1986, 1987, 1988, 1989 AT&T */
 /* All Rights Reserved */
 
-
 #include <sys/disp.h>
 #include <nfs/nfs4_clnt.h>
 #include <nfs/nfs4_clnt_impl.h>
@@ -2648,7 +2647,7 @@ nfs4exchange_id_otw(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 	 * to the nfs4_server_t.
 	 */
 	if (ep->error || ep->stat == NFS4ERR_MINOR_VERS_MISMATCH) {
-		(void) nfs4_tag_ctl(np, mi, NULL, NFS4_TAG_DESTROY, cr);
+		(void) nfs4_tag_ctl(np, mi, svp, NULL, NFS4_TAG_DESTROY, cr);
 		return;
 	}
 
@@ -2696,6 +2695,8 @@ nfs4exchange_id_otw(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 
 	if (resp->eir_flags & EXCHGID4_FLAG_USE_PNFS_DS)
 		np->s_flags |= N4S_USE_PNFS_DS;
+
+	np->s_minorversion = mi->mi_minorversion;
 
 	/*
 	 * XXX - The following response fields are ignored for now.
@@ -2852,8 +2853,8 @@ nfs4create_session(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 	 * it before doing a bc2s.
 	 */
 	if (nfs41_birpc && !np->ssx.bi_rpc)
-		(void) nfs4_tag_ctl(np, mi, NULL, NFS4_CBSERVER_CLEANUP, cr);
-
+		(void) nfs4_tag_ctl(np, mi, svp, NULL,
+		    NFS4_CBSERVER_CLEANUP, cr);
 
 	/*
 	 * Copy the current sessid to swap tags in RPC.
@@ -2910,7 +2911,7 @@ nfs4create_session(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 	/*
 	 * Before we make any otw calls, swap rpc tags
 	 */
-	(void) nfs4_tag_ctl(np, mi, tmp_sessid, NFS4_TAG_SWAP, cr);
+	(void) nfs4_tag_ctl(np, mi, svp, tmp_sessid, NFS4_TAG_SWAP, cr);
 
 	/*
 	 * In case of non-bidirectional rpc, send a bc2s.

@@ -51,6 +51,17 @@ extern "C" {
 #include <sys/cmn_err.h>
 
 typedef struct {
+	/*
+	 * This structure mimics the mi_servers and mi_curr_serv
+	 * in the mntinfo4_t.  ds_servers is the list of servinfo4s
+	 * which refer to the same data server entity, typically, a
+	 * multi-homed data server.
+	 */
+	servinfo4_t 	*ds_servers;
+	servinfo4_t 	*ds_curr_serv;
+} ds_info_t;
+
+typedef struct {
 	/* key */
 	deviceid4	dn_devid;
 	avl_node_t	dn_avl;
@@ -59,7 +70,6 @@ typedef struct {
 	kcondvar_t	dn_cv[1];
 
 	/* data servers, indexed indentically to ds_addrs */
-
 	nfs4_server_t	**dn_server_list;
 
 	/* xdr decoded information about the data servers */
@@ -85,10 +95,6 @@ typedef struct {
 	kmutex_t		std_lock;
 	verifier4		std_writeverf;
 	uint32_t		std_flags;
-	/*
-	 * std_svp and std_n4sp need to be set/cleared together
-	 */
-	nfs4_server_t		*std_n4sp;
 	servinfo4_t		*std_svp;
 } stripe_dev_t;
 #define	STRIPE_DEV_HAVE_VERIFIER	(0x01)
@@ -141,21 +147,22 @@ typedef struct {
 	offset4		fir_eof_offset;
 	int		fir_count;
 	stateid4	fir_stateid;
+	list_t		fir_task_list;
 } file_io_read_t;
 
 /* units of read i/o work (part of a batch) */
 typedef struct {
 	file_io_read_t *rt_job;
 	stripe_dev_t *rt_dev;
+	nfs4_call_t *rt_call;
 	cred_t *rt_cred;
-	vnode_t *rt_vp;
 	offset4 rt_offset;
 	count4 rt_count;
 	char *rt_base;
 	int rt_have_uio;
 	uint32_t rt_free_uio;
 	uio_t rt_uio;
-	nfs4_error_t rt_err;
+	list_node_t rt_next;
 } read_task_t;
 
 typedef struct {
@@ -176,14 +183,15 @@ typedef struct {
 	stable_how4	fiw_stable_result;
 	stateid4	fiw_stateid;
 	vnode_t		*fiw_vp;
+	list_t		fiw_task_list;
 } file_io_write_t;
 
 /* units of write i/o work (part of a batch) */
 typedef struct {
 	file_io_write_t *wt_job;
 	stripe_dev_t *wt_dev;
+	nfs4_call_t *wt_call;
 	cred_t *wt_cred;
-	vnode_t *wt_vp;
 	nfs4_error_t *wt_ep;
 	pnfs_layout_t *wt_layout;
 	caddr_t wt_base;
@@ -191,7 +199,7 @@ typedef struct {
 	offset4 wt_voff;
 	count4 wt_count;
 	uint32_t wt_sui;
-	nfs4_error_t wt_err;
+	list_node_t wt_next;
 } write_task_t;
 
 typedef struct {
@@ -206,8 +214,8 @@ typedef struct {
 typedef struct {
 	file_io_commit_t *cm_job;
 	stripe_dev_t *cm_dev;
+	nfs4_call_t *cm_call;
 	cred_t *cm_cred;
-	vnode_t *cm_vp;
 	pnfs_layout_t *cm_layout;
 	offset4 cm_offset;
 	count4 cm_count;

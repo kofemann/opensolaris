@@ -114,7 +114,8 @@ nfs4_minorvers_ops_t **nfs4protosw;
 #endif
 
 void nfs4_protosw_init(nfs4_minorvers_ops_t **);
-void nfs4_set_clientid(mntinfo4_t *, cred_t *, bool_t, nfs4_error_t *);
+void nfs4_set_clientid(mntinfo4_t *, servinfo4_t *, cred_t *, bool_t,
+		nfs4_error_t *);
 
 #ifdef	__cplusplus
 }
