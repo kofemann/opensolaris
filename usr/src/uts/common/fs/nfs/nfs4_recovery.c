@@ -1431,7 +1431,6 @@ nfs4_end_op_impl(nfs4_call_t *cp)
 	/* web XXX end */
 	nfs4_server_t *sp = rsp->rs_sp;
 	rnode4_t *rp = NULL;
-	uint32_t startop_flags = cp->nc_startop_flags;
 
 #ifdef	lint
 	/*
@@ -1816,7 +1815,8 @@ nfs4_recov_thread(recov_info_t *recovp)
 
 	do {
 		NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
-		    "WEB entering main recovery loop, recovp: %p", recovp));
+		    "WEB entering main recovery loop, recovp: %p",
+		    (void *)recovp));
 		recov_sess = 0;
 		mutex_enter(&mi->mi_lock);
 		if (FS_OR_ZONE_GONE4(mi->mi_vfsp)) {
@@ -2580,7 +2580,7 @@ recov_session(recov_info_t *recovp, nfs4_server_t *np)
 	int needbc2s = 0;
 
 	NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
-	    "WEB recov_session: np %p, DS? %d", np, is_dataserver));
+	    "WEB recov_session: np %p, DS? %d", (void *)np, is_dataserver));
 
 	ASSERT(np != NULL);
 

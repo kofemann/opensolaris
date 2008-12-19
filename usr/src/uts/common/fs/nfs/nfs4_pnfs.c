@@ -1066,7 +1066,6 @@ stripe_dev_prepare(
 	nfs4_server_t *dsp, *mdsp;
 	int error = 0;
 	deviceid4 did;
-	servinfo4_t *svp;
 
 	/*
 	 * Check to see if the stripe dev is already initialized,
@@ -2592,7 +2591,7 @@ more:
 			cmn_err(CE_WARN,
 			    "Unexpected error in read task redrive: %d\n",
 			    cp->e.error);
-			job->fir_error == cp->e.error;
+			job->fir_error = cp->e.error;
 		}
 
 		if (job->fir_error) {
@@ -2850,7 +2849,7 @@ more:
 			cmn_err(CE_WARN,
 			    "Unexpected error in write task redrive: %d\n",
 			    cp->e.error);
-			job->fiw_error == cp->e.error;
+			job->fiw_error = cp->e.error;
 		}
 
 		if (job->fiw_error) {
