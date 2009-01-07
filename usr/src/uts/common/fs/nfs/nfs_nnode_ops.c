@@ -25,6 +25,11 @@
 
 #include <nfs/nnode_impl.h>
 
+/*
+ * Convert an errno-like value returned from an nnode op into an nfsstat4,
+ * for a given minorversion.
+ */
+
 nfsstat4
 nnode_stat4(int what, uint32_t minorversion)
 {
@@ -46,8 +51,12 @@ nnode_stat4(int what, uint32_t minorversion)
 
 	if (minorversion == 0)
 		return (NFS4ERR_IO);
-	return (NFS4ERR_IO); /* XXX when minorversion 1 comes, SERVERFAULT */
+	return (NFS4ERR_SERVERFAULT);
 }
+
+/*
+ * Convert an errno-like value returned from an nnode op into an nfsstat3.
+ */
 
 nfsstat3
 nnode_stat3(int what)
@@ -72,7 +81,9 @@ nnode_stat3(int what)
 }
 
 /*
+ * Known implementations:
  * nnode_vn_io_prep
+ * dserv_nnode_io_prep
  */
 
 nnode_error_t
@@ -88,7 +99,9 @@ nnop_io_prep(nnode_t *nn, nnode_io_flags_t *flags, cred_t *cr,
 }
 
 /*
+ * Known implementations:
  * nnode_vn_read
+ * dserv_nnode_read
  */
 
 nnode_error_t
@@ -104,7 +117,9 @@ nnop_read(nnode_t *nn, nnode_io_flags_t *flags, cred_t *cr,
 }
 
 /*
+ * Known implementations:
  * nnode_vn_write
+ * dserv_nnode_write
  */
 
 nnode_error_t
@@ -120,6 +135,7 @@ nnop_write(nnode_t *nn, nnode_io_flags_t *flags, uio_t *uiop, int ioflags,
 }
 
 /*
+ * Known implementations:
  * nnode_vn_io_release
  */
 
@@ -134,6 +150,7 @@ nnop_io_release(nnode_t *nn, nnode_io_flags_t flags, caller_context_t *ct)
 }
 
 /*
+ * Known implementations:
  * nnode_vn_post_op_attr
  */
 
@@ -148,6 +165,7 @@ nnop_post_op_attr(nnode_t *nn, post_op_attr *poa)
 }
 
 /*
+ * Known implementations:
  * nnode_vn_wcc_data_err
  */
 
@@ -162,6 +180,7 @@ nnop_wcc_data_err(nnode_t *nn, wcc_data *wcc)
 }
 
 /*
+ * Known implementations:
  * nnode_vn_io_getvp
  */
 
@@ -176,6 +195,7 @@ nnop_io_getvp(nnode_t *nn)
 }
 
 /*
+ * Known implementations:
  * nnode_vn_md_getvp
  */
 
@@ -190,6 +210,7 @@ nnop_md_getvp(nnode_t *nn)
 }
 
 /*
+ * Known implementations:
  * nnode_vn_st_checkstate
  */
 
