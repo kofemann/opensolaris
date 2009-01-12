@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -144,7 +144,7 @@ mds_create_stateid(rfs4_dbe_t *dbe, stateid_type_t id_type)
 
 	id.v41_bits.boottime = dbe_to_instp(dbe)->start_time;
 	id.v41_bits.state_ident = rfs4_dbe_getid(dbe);
-	id.v41_bits.chgseq = 1;
+	id.v41_bits.chgseq = 0;
 	id.v41_bits.type = id_type;
 	id.v41_bits.pid = 0;
 
@@ -1289,16 +1289,6 @@ mds_layout_grant_create(rfs4_entry_t u_entry, void *arg)
 	lgp->clientgrantlist.next = lgp->clientgrantlist.prev =
 	    &lgp->clientgrantlist;
 	lgp->clientgrantlist.lgp = lgp;
-
-	/* Insert the grant on the client's list */
-	rfs4_dbe_lock(cp->dbe);
-	insque(&lgp->clientgrantlist, cp->clientgrantlist.prev);
-	rfs4_dbe_unlock(cp->dbe);
-
-	/* Insert the grant on the file's list */
-	rfs4_dbe_lock(fp->dbe);
-	insque(&lgp->lo_grant_list, fp->lo_grant_list.prev);
-	rfs4_dbe_unlock(fp->dbe);
 
 	return (TRUE);
 }

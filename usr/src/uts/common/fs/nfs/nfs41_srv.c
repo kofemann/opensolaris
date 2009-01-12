@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -332,6 +332,8 @@ nfsstat4 rfs4_get_all_state(struct compound_state *, stateid4 *,
 
 void rfs4_ss_clid(struct compound_state *, rfs4_client_t *, struct svc_req *);
 void rfs4_ss_chkclid(struct compound_state *, rfs4_client_t *);
+
+int layout_match(stateid_t, stateid4, nfsstat4 *);
 
 extern stateid4 special0;
 extern stateid4 special1;
@@ -8009,6 +8011,17 @@ mds_fetch_layout(struct compound_state *cs,
 		kmem_free(nfl_fh_list, nfl_size);
 		return (NFS4ERR_SERVERFAULT);
 	}
+	if (create == TRUE) {
+		/* Insert the grant on the client's list */
+		rfs4_dbe_lock(cs->cp->dbe);
+		insque(&lgp->clientgrantlist, cs->cp->clientgrantlist.prev);
+		rfs4_dbe_unlock(cs->cp->dbe);
+
+		/* Insert the grant on the file's list */
+		rfs4_dbe_lock(fp->dbe);
+		insque(&lgp->lo_grant_list, fp->lo_grant_list.prev);
+		rfs4_dbe_unlock(fp->dbe);
+	}
 
 	lgp->lop = lp;
 
@@ -8043,8 +8056,6 @@ mds_fetch_layout(struct compound_state *cs,
 	kmem_free(nfl_fh_list, nfl_size);
 	return (NFS4_OK);
 }
-
-int mds_validate_loga_stateid = 1;
 
 extern nfsstat4 mds_validate_logstateid(struct compound_state *, stateid_t *);
 
@@ -8111,93 +8122,94 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 		goto final;
 	}
 
+	if (argp->loga_length < argp->loga_minlength) {
+		*cs->statusp = resp->logr_status = NFS4ERR_INVAL;
+		goto final;
+	}
+
 	/*
 	 * Validate the provided stateid
 	 */
-	if (mds_validate_loga_stateid) {
-		arg_stateid = (stateid_t *)&(argp->loga_stateid);
-		log_seqid = arg_stateid->v41_bits.chgseq;
+	arg_stateid = (stateid_t *)&(argp->loga_stateid);
+	log_seqid = arg_stateid->v41_bits.chgseq;
+
+	/*
+	 * We may already have given this client a layout.  Better
+	 * get it, if it exists.
+	 */
+	lgp = mds_get_lo_grant_by_cp(cs);
+
+	/*
+	 * first, only open, deleg, lock
+	 * or layout stateids are permitted.
+	 * currently open, deleg and lock stateids are handed
+	 * out by v4 routines and are of v4 format.
+	 * check if it is a layout stateid and treat differently.
+	 */
+	if (arg_stateid->v41_bits.type == LAYOUTID) {
+		/*
+		 * if they are using a layout stateid, then we must
+		 * have already handed it out and should have found
+		 * it above.
+		 */
+		if (lgp == NULL) {
+			nfsstat = NFS4ERR_BAD_STATEID;
+			goto final;
+		}
 
 		/*
-		 * We may already have given this client a layout.  Better
-		 * get it, if it exists.
+		 * Layout race detection
 		 */
-		lgp = mds_get_lo_grant_by_cp(cs);
+		if (lgp->lo_status & LO_RECALL_INPROG) {
+			ASSERT(lgp->lor_seqid != 0);
+			if (log_seqid == (lgp->lor_seqid - 2)) {
 
-		/*
-		 * first, only open, deleg, lock
-		 * or layout stateids are permitted.
-		 * currently open, deleg and lock stateids are handed
-		 * out by v4 routines and are of v4 format.
-		 * check if it is a layout stateid and treat differently.
-		 */
-		if (arg_stateid->v41_bits.type == LAYOUTID) {
-			/*
-			 * if they are using a layout stateid, then we must
-			 * have already handed it out and should have found
-			 * it above.
-			 */
-			if (lgp == NULL) {
-				nfsstat = NFS4ERR_BAD_STATEID;
+				/* case 1 - pending recall in prog */
+				nfsstat = NFS4ERR_RECALLCONFLICT;
+				rfs41_lo_grant_rele(lgp);
 				goto final;
-			}
 
-			/*
-			 * Layout race detection
-			 */
-			if (lgp->lo_status & LO_RECALL_INPROG) {
-				ASSERT(lgp->lor_seqid != 0);
-				if (log_seqid == (lgp->lor_seqid - 2)) {
+			} else if (log_seqid >= lgp->lor_seqid &&
+			    !lgp->lor_reply) {
 
-					/* case 1 - pending recall in prog */
+				/*
+				 * case 2 - server has NOT received
+				 * the cb_lorecall reply yet.
+				 */
+				if (range_overlap) {
 					nfsstat = NFS4ERR_RECALLCONFLICT;
 					rfs41_lo_grant_rele(lgp);
 					goto final;
-
-				} else if (log_seqid >= lgp->lor_seqid &&
-				    !lgp->lor_reply) {
-
-					/*
-					 * case 2 - server has NOT received
-					 * the cb_lorecall reply yet.
-					 */
-					if (range_overlap) {
-						nfsstat =
-						    NFS4ERR_RECALLCONFLICT;
-						rfs41_lo_grant_rele(lgp);
-						goto final;
-					}
-
-				} else if (log_seqid == lgp->lor_seqid &&
-				    lgp->lor_reply) {
-
-					/*
-					 * case 3 - server HAS received
-					 * reply to cb_lorecall
-					 */
-					nfsstat = NFS4ERR_RETURNCONFLICT;
-					rfs41_lo_grant_rele(lgp);
-					goto final;
 				}
-			}
-			rfs41_lo_grant_rele(lgp);
 
-		} else {
-			/*
-			 * not using a layout stateid, so we better not
-			 * have handed one out already for this file or
-			 * this client gets an error.
-			 */
-			if (lgp != NULL) {
+			} else if (log_seqid == lgp->lor_seqid &&
+			    lgp->lor_reply) {
+
+				/*
+				 * case 3 - server HAS received
+				 * reply to cb_lorecall
+				 */
+				nfsstat = NFS4ERR_RETURNCONFLICT;
 				rfs41_lo_grant_rele(lgp);
-				nfsstat = NFS4ERR_BAD_STATEID;
 				goto final;
 			}
+		}
+		rfs41_lo_grant_rele(lgp);
+	} else {
+		/*
+		 * not using a layout stateid, so we better not
+		 * have handed one out already for this file or
+		 * this client gets an error.
+		 */
+		if (lgp != NULL) {
+			rfs41_lo_grant_rele(lgp);
+			nfsstat = NFS4ERR_BAD_STATEID;
+			goto final;
+		}
 
-			nfsstat = mds_validate_logstateid(cs, arg_stateid);
-			if (nfsstat != NFS4_OK) {
-				goto final;
-			}
+		nfsstat = mds_validate_logstateid(cs, arg_stateid);
+		if (nfsstat != NFS4_OK) {
+			goto final;
 		}
 	}
 
@@ -8228,6 +8240,8 @@ mds_op_layout_commit(nfs_argop4 *argop, nfs_resop4 *resop,
 	nfsstat4 nfsstat = NFS4_OK;
 	vnode_t *vp = cs->vp;
 	cred_t *cr = cs->cr;
+	rfs4_client_t *cp = cs->cp;
+	mds_layout_grant_t *lgp;
 	offset4 newsize;
 	caller_context_t ct;
 	vattr_t va;
@@ -8243,6 +8257,35 @@ mds_op_layout_commit(nfs_argop4 *argop, nfs_resop4 *resop,
 	if (cs->vp == NULL) {
 		*cs->statusp = resp->locr_status = NFS4ERR_NOFILEHANDLE;
 		goto final;
+	}
+
+	if (rfs4_clnt_in_grace(cp) && !argp->loca_reclaim) {
+		*cs->statusp = resp->locr_status = NFS4ERR_GRACE;
+		goto final;
+	}
+
+	if (argp->loca_reclaim) {
+		if (!rfs4_clnt_in_grace(cp) || !cp->can_reclaim) {
+			*cs->statusp = resp->locr_status = NFS4ERR_NO_GRACE;
+			goto final;
+		}
+	} else {
+		/*
+		 * validate loca_stateid
+		 */
+		if ((lgp = mds_get_lo_grant_by_cp(cs)) == NULL) {
+			*cs->statusp = resp->locr_status = NFS4ERR_BADLAYOUT;
+			goto final;
+		}
+
+		if (layout_match(lgp->lo_stateid, argp->loca_stateid,
+		    &nfsstat) == 0) {
+			rfs41_lo_grant_rele(lgp);
+			*cs->statusp = resp->locr_status = NFS4ERR_BADLAYOUT;
+			goto final;
+		}
+
+		rfs41_lo_grant_rele(lgp);
 	}
 
 	resp->LAYOUTCOMMIT4res_u.locr_resok4.locr_newsize.\
@@ -8372,16 +8415,38 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 	}
 	mutex_exit(&lgp->lo_lock);
 
-	/* remove the layout grant from both lists */
-	remque(&lgp->clientgrantlist);
-	lgp->clientgrantlist.next = lgp->clientgrantlist.prev =
-	    &lgp->clientgrantlist;
-	remque(&lgp->lo_grant_list);
-	lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
-	    &lgp->lo_grant_list;
-	lgp->cp = NULL;
-	lgp->fp = NULL;
-	rfs4_dbe_invalidate(lgp->dbe);
+	/*
+	 * XXX - jw - temp code until range support
+	 * check if the entire layout is being returned
+	 */
+	if (lorf->lrf_offset == 0 && lorf->lrf_length == -1) {
+		/* remove the layout grant from both lists */
+		rfs4_dbe_lock(lgp->cp->dbe);
+
+		remque(&lgp->clientgrantlist);
+		lgp->clientgrantlist.next = lgp->clientgrantlist.prev =
+		    &lgp->clientgrantlist;
+
+		rfs4_dbe_unlock(lgp->cp->dbe);
+
+		lgp->cp = NULL;
+
+		rfs4_dbe_lock(lgp->fp->dbe);
+
+		remque(&lgp->lo_grant_list);
+		lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
+		    &lgp->lo_grant_list;
+
+		rfs4_dbe_unlock(lgp->fp->dbe);
+
+		rfs4_file_rele(lgp->fp);
+		lgp->fp = NULL;
+
+		rfs4_dbe_invalidate(lgp->dbe);
+	} else {
+		/* XXX - just in case our client does this */
+		cmn_err(CE_WARN, "SURPRISE, partial layout return");
+	}
 	rfs41_lo_grant_rele(lgp);
 
 	return (NFS4_OK);
@@ -8452,6 +8517,7 @@ mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
 		mds_return_layout_fsid(cs);
 #else
 		cmn_err(CE_NOTE, "loreturn: LAYOUTRETURN4_FSID");
+		nfsstat = NFS4ERR_NOTSUPP;
 #endif
 		cp->bulk_recall = 0;
 		break;
@@ -8465,6 +8531,7 @@ mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
 		mds_return_layout_all(cp);
 #else
 		cmn_err(CE_NOTE, "loreturn: LAYOUTRETURN4_ALL");
+		nfsstat = NFS4ERR_NOTSUPP;
 #endif
 		cp->bulk_recall = 0;
 		break;
