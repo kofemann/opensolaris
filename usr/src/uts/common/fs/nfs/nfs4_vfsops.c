@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -4217,14 +4217,14 @@ nfs4destroy_session(nfs4_server_t *np, CLIENT *seqhandle)
 	mutex_exit(&cbi->cb_cbconn_lock);
 
 	/*
-	 * Tell callback handling thread to exit.
-	 * Wait till it exits and then free the cbinfo.
+	 * Tell the RPC callback thread to cleanup
 	 */
-
-	mutex_enter(&cbi->cb_rpc->r_lock);
-	cbi->cb_flags |= NFS41_CB_THREAD_EXIT;
-	cv_broadcast(&cbi->cb_rpc->r_cbwait);
-	mutex_exit(&cbi->cb_rpc->r_lock);
+	if (seqhandle != NULL &&
+	    (!CLNT_CONTROL(seqhandle, CLSET_CBSERVER_CLEANUP,
+	    (char *)(np->ssx.sessionid)))) {
+			zcmn_err(getzoneid(),
+			    CE_WARN, "Failed destroy rpc cbserver");
+	}
 
 	mutex_enter(&cbi->cb_reflock);
 	while (cbi->cb_refcnt != 1) {

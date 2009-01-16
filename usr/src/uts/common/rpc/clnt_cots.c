@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -415,7 +415,7 @@ typedef struct cku_private_s {
 	int			cku_useresvport; /* Use reserved port */
 	struct rpc_cots_client	*cku_stats;	/* stats for zone */
 	struct cm_xprt		*cku_entry;	/* Callback Connection Info */
-	SVCCB			*cku_cb;	/* For Callback Info */
+	CBSERVER_ARGS		*cku_cb;	/* For Callback Info */
 	tagid			cku_tag;
 } cku_private_t;
 
@@ -779,7 +779,7 @@ clnt_cots_kcontrol(CLIENT *h, int cmd, char *arg)
 
 	case CLSET_CBSERVER_SETUP:
 		p->cku_flags |= CKU_BC_SETUP;
-		p->cku_cb = *(SVCCB **)arg;
+		p->cku_cb = (CBSERVER_ARGS *)arg;
 		return (TRUE);
 
 	case CLSET_CBSERVER_CLEANUP:
@@ -2253,7 +2253,7 @@ connmgr_get(
 	dev_t		device = p->cku_device;
 	bool_t		nosignal = p->cku_client.cl_nosignal;
 	int		useresvport = p->cku_useresvport;
-	SVCCB		*svccb = p->cku_cb;
+	CBSERVER_ARGS	*cbsrv_args = p->cku_cb;
 
 	/*
 	 * Server side callback connections
@@ -2392,8 +2392,8 @@ use_new_conn:
 
 			if (p->cku_flags & CKU_BC_SETUP) {
 				extern void mir_set_cbinfo(queue_t *, void *);
-				svccb->r_q = lru_entry->x_wq;
-				mir_set_cbinfo(lru_entry->x_wq, (void *)svccb);
+				mir_set_cbinfo(lru_entry->x_wq,
+				    (void *)cbsrv_args);
 			}
 
 			CONN_HOLD(lru_entry);
@@ -2448,8 +2448,8 @@ use_new_conn:
 
 			if (p->cku_flags & CKU_BC_SETUP) {
 				extern void mir_set_cbinfo(queue_t *, void *);
-				svccb->r_q = cm_entry->x_wq;
-				mir_set_cbinfo(cm_entry->x_wq, (void *)svccb);
+				mir_set_cbinfo(cm_entry->x_wq,
+				    (void *)cbsrv_args);
 			}
 
 			/*
@@ -2751,8 +2751,7 @@ use_new_conn:
 
 	if (p->cku_flags & CKU_BC_SETUP) {
 		extern void mir_set_cbinfo(queue_t *, void *);
-		svccb->r_q = wq;
-		mir_set_cbinfo(wq, (void *)svccb);
+		mir_set_cbinfo(wq, (void *)cbsrv_args);
 	}
 
 	return (cm_entry);

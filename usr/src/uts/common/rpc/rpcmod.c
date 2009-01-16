@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 /* Copyright (c) 1990 Mentat Inc. */
@@ -1114,68 +1114,178 @@ uint_t	mir_krpc_cell_null;
 
 uint32_t	cb_live = 0;
 
-/*
- * XXXsessions
- * This global is used to control which path we take in mir_set_cbinfo
- * when we detect the race between nfs41_callback_thread() and
- * nfs4_sequence_heartbeat_thread().
- * If it's non-zero, we simply print a message.
- * If it's zero, we bump cb_live and wait for the condition to clear.
- * Unfortunately, we tend to hang during data server recovery.
- * The sessions team is working on a fix for this.
- */
-int	mir_set_cbinfo_hack = 1;
+static void
+mir_callback_thread(SVCCB *svc_cb)
+{
+	callb_cpr_t	cprinfo;
+	kmutex_t	cpr_lock;
+	SVCXPRT		*clone_xprt;
+	mblk_t		*mp;
+	struct rpc_msg	msg;
+	struct svc_req	r;
+	char		*cred_area;
+	int		rqcred_size = 400; 	/* RQCRED_SIZE */
+	SVC_DISPATCH	*svc_nfs41_co = svc_cb->r_dispatch;
+
+	mutex_init(&cpr_lock, NULL, MUTEX_DEFAULT, NULL);
+	CALLB_CPR_INIT(&cprinfo, &cpr_lock, callb_generic_cpr,
+	    "mir_callback_thread");
+
+	mutex_enter(&svc_cb->r_lock);
+
+	while (!(svc_cb->r_flags & SVCCB_NFS41_CB_THREAD_EXIT)) {
+		mutex_enter(&cpr_lock);
+		CALLB_CPR_SAFE_BEGIN(&cprinfo);
+		mutex_exit(&cpr_lock);
+
+		cv_wait(&svc_cb->r_cbwait, &svc_cb->r_lock);
+
+		mutex_enter(&cpr_lock);
+		CALLB_CPR_SAFE_END(&cprinfo, &cpr_lock);
+		mutex_exit(&cpr_lock);
+
+		if (svc_cb->r_flags & SVCCB_NFS41_CB_THREAD_EXIT)
+			break;
+
+		mp = svc_cb->r_mp;
+		svc_cb->r_mp = NULL;
+		clone_xprt = svc_clone_init();
+
+		svc_init_clone_xprt(clone_xprt, svc_cb->r_q);
+		clone_xprt->xp_master = NULL;
+		clone_xprt->xp_msg_size = 2048; /* COTS_MAX_ALLOCSIZE */
+		cred_area = kmem_zalloc(2 * MAX_AUTH_BYTES + rqcred_size,
+		    KM_SLEEP);
+		msg.rm_call.cb_cred.oa_base = cred_area;
+		msg.rm_call.cb_verf.oa_base = &(cred_area[MAX_AUTH_BYTES]);
+		r.rq_clntcred = &(cred_area[2 * MAX_AUTH_BYTES]);
+
+		/*
+		 * underlying transport recv routine may modify mblk data
+		 * and make it difficult to extract label afterwards. So
+		 * get the label from the raw mblk data now.
+		 */
+		if (is_system_labeled()) {
+			mblk_t *lmp;
+
+			r.rq_label = kmem_alloc(sizeof (bslabel_t), KM_NOSLEEP);
+			if (r.rq_label == NULL) {
+				freemsg(mp);
+				continue;
+			}
+			if (DB_CRED(mp) != NULL)
+				lmp = mp;
+			else {
+				ASSERT(mp->b_cont != NULL);
+				lmp = mp->b_cont;
+				ASSERT(DB_CRED(lmp) != NULL);
+			}
+			bcopy(label2bslabel(crgetlabel(DB_CRED(lmp))),
+			    r.rq_label, sizeof (bslabel_t));
+		} else {
+			r.rq_label = NULL;
+		}
+
+		/*
+		 * Now receive the message.
+		 */
+		if (SVC_RECV(clone_xprt, mp, &msg)) {
+			void (*dispatchroutine) (struct svc_req *, SVCXPRT *);
+			bool_t no_dispatch;
+			enum auth_stat why;
+
+			/*
+			 * Find the registered program and call its
+			 * dispatch routine.
+			 */
+			r.rq_xprt = clone_xprt;
+			r.rq_prog = msg.rm_call.cb_prog;
+			r.rq_vers = msg.rm_call.cb_vers;
+			r.rq_proc = msg.rm_call.cb_proc;
+			r.rq_cred = msg.rm_call.cb_cred;
+
+			if ((why = sec_svc_msg(&r, &msg, &no_dispatch)) !=
+			    AUTH_OK) {
+				svcerr_auth(clone_xprt, why);
+				(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
+			} else if (no_dispatch) {
+				(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
+			} else {
+				dispatchroutine = svc_nfs41_co;
+				(*dispatchroutine) (&r, clone_xprt);
+				(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
+			}
+			if (r.rq_cred.oa_flavor == RPCSEC_GSS)
+				rpc_gss_cleanup(clone_xprt);
+		}
+		if (r.rq_label != NULL)
+			kmem_free(r.rq_label, sizeof (bslabel_t));
+	}
+
+	mutex_exit(&svc_cb->r_lock);
+	cv_signal(&svc_cb->r_cbexit);
+
+	mutex_enter(&cpr_lock);
+	CALLB_CPR_EXIT(&cprinfo);
+
+	zthread_exit();
+}
 
 void
 mir_set_cbinfo(queue_t *wq, void *info)
 {
+
+	CBSERVER_ARGS	*cbsrv_args = (CBSERVER_ARGS *)info;
 	mir_t	*mir = (mir_t *)wq->q_ptr;
-	struct	__svccb *scb = mir->mir_cb;
+	SVCCB *scb = mir->mir_cb;
 
 	if (scb != NULL) {
-		if (mir_set_cbinfo_hack) {
-			/*
-			 * This is a hack to prevent the hang we get
-			 * w/DS Recovery
-			 */
-			cmn_err(CE_WARN, "mir_set_cbinfo: scb != NULL");
-		} else {
-			/*
-			 * XXX
-			 * Race condition between nfs41_callback_thread()
-			 * and nfs4_sequence_heartbeat_thread() is causing
-			 * us to hit ASSERT, since heartbeat thread reaches
-			 * this code before r_flags is marked as SVCCB_DEAD.
-			 *
-			 * Need to revisit this; NFS layer shouldn't be
-			 * cv_wait()'ing the RPC layer.
-			 */
-			mutex_enter(&scb->r_lock);
-			while (!(scb->r_flags & SVCCB_DEAD)) {
-				cb_live++;
-				cv_wait(&scb->r_cbwait, &scb->r_lock);
-			}
-			mutex_exit(&scb->r_lock);
-			kmem_free(scb, sizeof (*scb));
-			mir->mir_cb = NULL;
-		}
+		/* shouldn't this be an ASSERT? */
+		cmn_err(CE_WARN, "mir_set_cbinfo: scb != NULL");
+		kmem_free(scb, sizeof (SVCCB));
+		mir->mir_cb = NULL;
 	}
-	mir->mir_cb = (void *)info;
+
+	scb = kmem_zalloc(sizeof (SVCCB), KM_SLEEP);
+	mutex_init(&scb->r_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&scb->r_cbwait, NULL, CV_DEFAULT, NULL);
+	cv_init(&scb->r_cbexit, NULL, CV_DEFAULT, NULL);
+	scb->r_prog = cbsrv_args->prog;
+	scb->r_dispatch = cbsrv_args->callback;
+	scb->r_q = wq;
+	mir->mir_cb = scb;
+
+	scb->r_thread =
+	    zthread_create(NULL, 0, mir_callback_thread, scb, 0, minclsyspri);
+	ASSERT(scb->r_thread != NULL);
 }
 
 void
 mir_clear_cbinfo(queue_t *wq)
 {
 	mir_t	*mir = (mir_t *)wq->q_ptr;
-	struct __svccb	*scb = mir->mir_cb;
+	SVCCB	*scb;
 
-	if (scb == NULL)
+	mutex_enter(&mir->mir_mutex);
+	scb = mir->mir_cb;
+	if (scb == NULL) {
+		mutex_exit(&mir->mir_mutex);
 		return;
-
-	if (scb->r_flags & SVCCB_DEAD) {
-		kmem_free(scb, sizeof (*scb));
 	}
+
 	mir->mir_cb = NULL;
+	mutex_exit(&mir->mir_mutex);
+
+	mutex_enter(&scb->r_lock);
+	scb->r_flags |= SVCCB_NFS41_CB_THREAD_EXIT;
+	cv_signal(&scb->r_cbwait);
+
+	cv_wait(&scb->r_cbexit, &scb->r_lock);
+	mutex_exit(&scb->r_lock);
+	mutex_destroy(&scb->r_lock);
+	cv_destroy(&scb->r_cbwait);
+	cv_destroy(&scb->r_cbexit);
+	kmem_free(scb, sizeof (SVCCB));
 }
 
 void
@@ -1810,8 +1920,8 @@ mir_rput(queue_t *q, mblk_t *mp)
 				if (clnt_dispatch_notify(head_mp,
 				    mir->mir_zoneid, xid)) {
 					/*
-					 * Mark this stream as active.  This marker
-					 * is used in mir_timer().
+					 * Mark this stream as active.
+					 * This marker is used in mir_timer().
 					 */
 					mir->mir_clntreq = 1;
 					mir->mir_use_timestamp = lbolt;
@@ -1820,22 +1930,27 @@ mir_rput(queue_t *q, mblk_t *mp)
 				break;
 
 			case CALL:
+				/* client is now a callback server */
 			default:
 			{
 				SVCCB	*svccb;
 				ASSERT(dir == CALL);
 
 				svccb = (SVCCB *)mir->mir_cb;
-				if (svccb->r_flags & SVCCB_DEAD) {
-					zcmn_err(getzoneid(), CE_NOTE,
-					    "Callback On Dead Session"
-					    "%p %p", (void *)mir,
-					    (void *)svccb);
+				if (svccb != NULL) {
+					mutex_enter(&svccb->r_lock);
+					if (!(svccb->r_flags &
+					    SVCCB_NFS41_CB_THREAD_EXIT)) {
+						svccb->r_mp = head_mp;
+						cv_signal(&svccb->r_cbwait);
+					} else {
+						freemsg(head_mp);
+					}
+					mutex_exit(&svccb->r_lock);
 				} else {
-					svccb->r_mp = head_mp;
-					cv_signal(&svccb->r_cbwait);
-					break;
+					freemsg(head_mp);
 				}
+				break;
 			}
 
 			}
@@ -1866,7 +1981,7 @@ mir_rput(queue_t *q, mblk_t *mp)
 				 * passing the message to KRPC.
 				 */
 				if (!mir->mir_hold_inbound) {
-				    if (mir->mir_krpc_cell) {
+					if (mir->mir_krpc_cell) {
 					/*
 					 * If the reference count is 0
 					 * (not including this request),
@@ -1880,7 +1995,7 @@ mir_rput(queue_t *q, mblk_t *mp)
 					    (int32_t)msgdsize(mp), mp))
 						return;
 					svc_queuereq(q, head_mp); /* to KRPC */
-				    } else {
+					} else {
 					/*
 					 * Count # of times this happens.
 					 * Should be never, but experience
@@ -1888,7 +2003,7 @@ mir_rput(queue_t *q, mblk_t *mp)
 					 */
 					mir_krpc_cell_null++;
 					freemsg(head_mp);
-				    }
+					}
 
 				} else {
 					/*

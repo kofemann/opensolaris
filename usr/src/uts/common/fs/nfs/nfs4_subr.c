@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1291,9 +1291,13 @@ nfs4_rfscall(mntinfo4_t *mi, servinfo4_t *svp,
 				cbi = np->zone_globals->nfs4prog2cbinfo
 				    [np->s_program-NFS4_CALLBACK];
 				if (cbi != NULL) {
-					ctlret = CLNT_CONTROL(
-					    client, CLSET_CBSERVER_SETUP,
-					    (char *)&cbi->cb_rpc);
+					CBSERVER_ARGS  cbargs;
+					cbargs.callback = cbi->cb_dispatch;
+					cbargs.prog = cbi->cb_prog;
+					ctlret =
+					    CLNT_CONTROL(client,
+					    CLSET_CBSERVER_SETUP,
+					    (char *)&cbargs);
 					if (ctlret == 0) {
 						zcmn_err(getzoneid(), CE_WARN,
 						    "Failed to set client"

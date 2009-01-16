@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1952,28 +1952,17 @@ struct nfs4_callback_stats {
 
 struct nfs41_cb_info {
 	rpcprog_t		cb_prog;
-	rpcvers_t		cb_versmin;
-	rpcvers_t		cb_versmax;
-	SVCCB			*cb_rpc;
-	SVC_DISPATCH		*cb_callback;
+	SVC_DISPATCH		*cb_dispatch;
 	CLIENT			*cb_client;
 	struct nfs4_clnt	*cb_nfscl;
 	int			cb_state;
-	kthread_t		*cb_thread;	/*  server calls */
 	kmutex_t		cb_cbconn_lock;
 	kcondvar_t		cb_cbconn_wait;	/* cbconn heartbeat */
 	int			cb_cbconn_exit;
-	int			cb_flags;
 	int			cb_refcnt;
 	kmutex_t		cb_reflock;
 	kcondvar_t		cb_destroy_wait;
 } nfs41_cb_info_t;
-
-/*
- * cb_flags
- */
-
-#define	NFS41_CB_THREAD_EXIT	0x01	/* signal to cbserver thread exit */
 
 struct nfs4_callback_globals {
 	kmutex_t nfs4_cb_lock;

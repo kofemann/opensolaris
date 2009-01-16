@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 /* Copyright (c) 1983, 1984, 1985, 1986, 1987, 1988, 1989 AT&T */
@@ -440,16 +440,18 @@ struct __svcmasterxprt {
 	caddr_t		xp_p2;		/* private: for use by svc ops  */
 };
 
-#define	SVCCB_DEAD	1	/* This callback is dead, don't accept on it */
+#define	SVCCB_NFS41_CB_THREAD_EXIT	0x01
 
 typedef struct __svccb {
 	queue_t		*r_q;
 	mblk_t		*r_mp;
 	kmutex_t	r_lock;
-	kmutex_t	r_mlock;
 	kcondvar_t	r_cbwait;
+	kcondvar_t	r_cbexit;
 	int		r_flags;
 	rpcprog_t	r_prog;
+	kthread_t	*r_thread;
+	SVC_DISPATCH    *r_dispatch;
 } SVCCB;
 
 typedef struct __svccb_args {
@@ -460,6 +462,10 @@ typedef struct __svccb_args {
 	void *tag;
 } SVCCB_ARGS;
 
+typedef struct __cbserver_args {
+	SVC_DISPATCH	*callback;
+	rpcprog_t	prog;
+} CBSERVER_ARGS;
 
 /*
  * Service thread `clone' transport handle (SVCXPRT)

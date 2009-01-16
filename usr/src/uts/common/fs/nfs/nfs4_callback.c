@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1398,12 +1398,8 @@ nfs41_cbinfo_rele(struct nfs41_cb_info *cbi)
 		mutex_exit(&cbi->cb_reflock);
 		return;
 	}
-	ASSERT(cbi->cb_flags & NFS41_CB_THREAD_EXIT);
 	ASSERT(cbi->cb_cbconn_exit);
 	mutex_exit(&cbi->cb_reflock);
-
-	cbi->cb_rpc->r_flags |= SVCCB_DEAD;
-	cv_signal(&cbi->cb_rpc->r_cbwait);	/* XXX - See mir_set_cbinfo */
 
 	if (cbi->cb_client) {
 		if (!(CLNT_CONTROL(cbi->cb_client,
@@ -1453,137 +1449,6 @@ nfs4_setport(char *netid, char *uaddr, char *protofmly, char *proto,
 		list_insert_head(&ncg->nfs4_cb_ports, p);
 	}
 }
-
-static void
-nfs41_callback_thread(struct nfs41_cb_info *cbi)
-{
-	callb_cpr_t	cprinfo;
-	kmutex_t	cpr_lock;
-	SVCXPRT		*clone_xprt;
-	mblk_t		*mp;
-	struct rpc_msg	msg;
-	struct svc_req	r;
-	char		*cred_area;
-	int		rqcred_size = 400; 	/* RQCRED_SIZE */
-	SVCCB		*cb = cbi->cb_rpc;
-
-	mutex_init(&cpr_lock, NULL, MUTEX_DEFAULT, NULL);
-	CALLB_CPR_INIT(&cprinfo, &cpr_lock, callb_generic_cpr,
-	    "nfs41_cb");
-
-	mutex_enter(&cbi->cb_rpc->r_lock);
-	while (!(cbi->cb_flags & NFS41_CB_THREAD_EXIT)) {
-		mutex_enter(&cpr_lock);
-		CALLB_CPR_SAFE_BEGIN(&cprinfo);
-		mutex_exit(&cpr_lock);
-
-		cv_wait(&cbi->cb_rpc->r_cbwait, &cbi->cb_rpc->r_lock);
-
-		mutex_enter(&cpr_lock);
-		CALLB_CPR_SAFE_END(&cprinfo, &cpr_lock);
-		mutex_exit(&cpr_lock);
-
-		if (cbi->cb_flags & NFS41_CB_THREAD_EXIT)
-			break;
-
-		mutex_exit(&cbi->cb_rpc->r_lock);
-
-		mutex_enter(&cb->r_mlock);
-		mp = cb->r_mp;
-		cb->r_mp = NULL;
-		mutex_exit(&cb->r_mlock);
-
-		clone_xprt = svc_clone_init();
-
-		svc_init_clone_xprt(clone_xprt, cb->r_q);
-		clone_xprt->xp_master = NULL;
-		clone_xprt->xp_msg_size = 2048; /* COTS_MAX_ALLOCSIZE */
-		cred_area = kmem_zalloc(2 * MAX_AUTH_BYTES + rqcred_size,
-		    KM_SLEEP);
-		msg.rm_call.cb_cred.oa_base = cred_area;
-		msg.rm_call.cb_verf.oa_base = &(cred_area[MAX_AUTH_BYTES]);
-		r.rq_clntcred = &(cred_area[2 * MAX_AUTH_BYTES]);
-
-		/*
-		 * underlying transport recv routine may modify mblk data
-		 * and make it difficult to extract label afterwards. So
-		 * get the label from the raw mblk data now.
-		 */
-		if (is_system_labeled()) {
-			mblk_t *lmp;
-
-			r.rq_label = kmem_alloc(sizeof (bslabel_t), KM_SLEEP);
-			if (DB_CRED(mp) != NULL)
-				lmp = mp;
-		else {
-			ASSERT(mp->b_cont != NULL);
-			lmp = mp->b_cont;
-			ASSERT(DB_CRED(lmp) != NULL);
-		}
-		bcopy(label2bslabel(crgetlabel(DB_CRED(lmp))), r.rq_label,
-		    sizeof (bslabel_t));
-		} else {
-			r.rq_label = NULL;
-		}
-
-		/*
-		 * Now receive the message.
-		 */
-		if (SVC_RECV(clone_xprt, mp, &msg)) {
-			void (*dispatchroutine) (struct svc_req *, SVCXPRT *);
-			bool_t no_dispatch;
-			enum auth_stat why;
-
-			/*
-			 * Find the registered program and call its
-			 * dispatch routine.
-			 */
-			r.rq_xprt = clone_xprt;
-			r.rq_prog = msg.rm_call.cb_prog;
-			r.rq_vers = msg.rm_call.cb_vers;
-			r.rq_proc = msg.rm_call.cb_proc;
-			r.rq_cred = msg.rm_call.cb_cred;
-
-			if ((why = sec_svc_msg(&r, &msg, &no_dispatch)) !=
-			    AUTH_OK) {
-				svcerr_auth(clone_xprt, why);
-				(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
-			} else if (no_dispatch) {
-				(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
-			} else {
-				if (r.rq_vers >= cbi->cb_versmin &&
-				    r.rq_vers <= cbi->cb_versmax) {
-					dispatchroutine = cbi->cb_callback;
-					(*dispatchroutine) (&r, clone_xprt);
-				} else {
-					svcerr_progvers(clone_xprt,
-					    cbi->cb_versmin,
-					    cbi->cb_versmax);
-				}
-			(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
-			}
-			if (r.rq_cred.oa_flavor == RPCSEC_GSS)
-				rpc_gss_cleanup(clone_xprt);
-		}
-		if (r.rq_label != NULL)
-			kmem_free(r.rq_label, sizeof (bslabel_t));
-		mutex_enter(&cbi->cb_rpc->r_lock);
-	}
-	cbi->cb_thread = NULL;
-	mutex_exit(&cbi->cb_rpc->r_lock);
-	mutex_enter(&cpr_lock);
-	CALLB_CPR_EXIT(&cprinfo);
-
-	nfs41_cbinfo_rele(cbi);
-
-	/*
-	 * Signal destroy_session that we are done.
-	 */
-	cv_signal(&cbi->cb_destroy_wait);
-
-	zthread_exit();
-}
-
 
 /*
  * nfs4_cb_args - This function is used to construct the callback
@@ -1694,9 +1559,7 @@ nfs41_cb_args(nfs4_server_t *np, struct knetconfig *knc,
 		cbi = ncg->nfs4prog2cbinfo[pgm-NFS4_CALLBACK];
 
 	cbi->cb_prog = pgm;
-	cbi->cb_versmin = NFS_CB;
-	cbi->cb_versmax = NFS_CB;
-	cbi->cb_callback = cb_dispatch;
+	cbi->cb_dispatch = cb_dispatch;
 
 	cv_init(&cbi->cb_destroy_wait, NULL, CV_DEFAULT, NULL);
 	mutex_init(&cbi->cb_reflock, NULL, MUTEX_DEFAULT, NULL);
@@ -1705,10 +1568,11 @@ nfs41_cb_args(nfs4_server_t *np, struct knetconfig *knc,
 	mutex_init(&cbi->cb_cbconn_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	/*
-	 * set cb_refcnt to 2, 1 to account for it being in the
-	 * nfs4prog2cbinfo table, and another for the nfs41_callback_thread.
+	 * set cb_refcnt to 1, to account for it being in the
+	 * nfs4prog2cbinfo table
 	 */
-	cbi->cb_refcnt = 2;
+	cbi->cb_refcnt = 1;
+
 	ncg->nfs4prog2cbinfo[pgm-NFS4_CALLBACK] = cbi;
 	ncg->nfs4prog2server[pgm-NFS4_CALLBACK] = np;
 	np->s_program = pgm;
@@ -1719,18 +1583,6 @@ nfs41_cb_args(nfs4_server_t *np, struct knetconfig *knc,
 	args->csa_sec_parms.csa_sec_parms_val = (callback_sec_parms4 *)
 	    kmem_zalloc(sizeof (callback_sec_parms4), KM_SLEEP);
 	args->csa_sec_parms.csa_sec_parms_val->cb_secflavor = AUTH_NONE;
-	cbi->cb_rpc = kmem_zalloc(sizeof (SVCCB), KM_SLEEP);
-	mutex_init(&cbi->cb_rpc->r_lock, NULL, MUTEX_DEFAULT, NULL);
-	mutex_init(&cbi->cb_rpc->r_mlock, NULL, MUTEX_DEFAULT, NULL);
-	cv_init(&cbi->cb_rpc->r_cbwait, NULL, CV_DEFAULT, NULL);
-	cbi->cb_rpc->r_prog = pgm;
-	if (!cbi->cb_thread) {
-		cbi->cb_thread = zthread_create(NULL, 0,
-		    nfs41_callback_thread,
-		    cbi, 0, minclsyspri);
-		ASSERT(cbi->cb_thread != NULL);
-	}
-
 }
 
 static int
