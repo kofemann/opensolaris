@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -225,6 +225,7 @@ typedef struct {
 	ds_owner_t *dop;
 } pinfo_create_t;
 
+extern int mds_get_odl(vnode_t *, mds_layout_t **);
 extern void mds_xdr_devicelist(rfs4_entry_t, void *);
 extern ds_addrlist_t *mds_find_ds_addrlist(nfs_server_instance_t *, uint32_t);
 extern ds_addrlist_t *mds_find_ds_addrlist_by_uaddr(nfs_server_instance_t *,

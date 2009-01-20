@@ -20,7 +20,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # This Makefile defines all file modules for the directory uts/common
@@ -1003,31 +1003,76 @@ LOFS_OBJS +=	lofs_subr.o	lofs_vfsops.o	lofs_vnops.o
 
 NAMEFS_OBJS +=	namevfs.o	namevno.o
 
-NFS_OBJS +=	nfs_client.o	nfs_common.o	nfs_dump.o \
-		nfs_subr.o	nfs_vfsops.o	nfs_vnops.o \
-		nfs_xdr.o	nfs_sys.o	nfs_strerror.o \
-		nfs3_vfsops.o	nfs3_vnops.o	nfs3_xdr.o \
-		nfs_acl_vnops.o	nfs_acl_xdr.o	nfs4_vfsops.o \
-		nfs4_vnops.o	nfs4_xdr.o 	nfs41_xdr.o \
-		nfs4_idmap.o	nfs4_shadow.o	nfs4_subr.o \
-		nfs4_attr.o	nfs4_rnode.o	nfs4_client.o \
-		nfs4_acache.o	nfs4_common.o	nfs4_client_state.o \
-		nfs4_callback.o	nfs4_recovery.o nfs4_client_secinfo.o \
-		nfs4_client_debug.o	nfs_stats.o layoutstats_xdr.o	\
-		nfs4_acl.o	nfs4_stub_vnops.o	nfs_cmd.o \
-		nfs41_filehandle_xdr.o ds_filehandle_xdr.o nfs41_slrc.o \
-		nfs4_pnfs.o
+NFS_OBJS +=	nfs_client.o		\
+		nfs_cmd.o		\
+		nfs_common.o		\
+		nfs_dump.o 		\
+		nfs_subr.o		\
+		nfs_vfsops.o		\
+		nfs_vnops.o		\
+		nfs_xdr.o		\
+		nfs_sys.o		\
+		nfs_strerror.o		\
+		nfs3_vfsops.o		\
+		nfs3_vnops.o		\
+		nfs3_xdr.o		\
+		nfs_acl_vnops.o		\
+		nfs_acl_xdr.o		\
+		nfs4_vfsops.o		\
+		nfs4_vnops.o		\
+		nfs4_xdr.o		\
+		nfs41_xdr.o		\
+		nfs4_idmap.o		\
+		nfs4_shadow.o		\
+		nfs4_subr.o		\
+		nfs4_attr.o		\
+		nfs4_rnode.o		\
+		nfs4_client.o		\
+		nfs4_acache.o		\
+		nfs4_common.o		\
+		nfs4_client_state.o	\
+		nfs4_callback.o		\
+		nfs4_recovery.o		\
+		nfs4_client_secinfo.o	\
+		nfs4_client_debug.o	\
+		nfs_stats.o		\
+		layoutstats_xdr.o	\
+		nfs4_acl.o		\
+		nfs4_stub_vnops.o	\
+		nfs4_pnfs.o		\
+		nfs41_filehandle_xdr.o	\
+		ds_filehandle_xdr.o	\
+		nfs41_slrc.o
 
-NFSSRV_OBJS +=	nfs_server.o nfs_srv.o nfs3_srv.o nfs_acl_srv.o		\
-    		nfs_auth.o nfs_auth_xdr.o				\
-		nfs_export.o	nfs_log.o	nfs_log_xdr.o		\
-		nfs4_srv.o	nfs4_state.o	nfs4_srv_attr.o		\
-		nfs4_srv_ns.o	nfs4_db.o	nfs4_srv_deleg.o	\
-		nfs4_deleg_ops.o nfs4_srv_readdir.o nfs4_dispatch.o	\
-		nfs_nnode.o	nfs_nnode_ops.o	nfs_nnode_vn.o		\
-		nfs41_dispatch.o nfs41_srv.o	ds_srv.o		\
-		nfs41_filehandle.o nfs41_srv_readdir.o nfs41_state.o	\
-		nfs_serv_inst.o
+NFSSRV_OBJS +=	nfs_server.o		\
+		nfs_srv.o		\
+		nfs3_srv.o		\
+		nfs_acl_srv.o		\
+    		nfs_auth.o		\
+		nfs_auth_xdr.o		\
+		nfs_nnode.o		\
+		nfs_nnode_ops.o		\
+		nfs_nnode_vn.o		\
+		nfs_export.o		\
+		nfs_log.o		\
+		nfs_log_xdr.o		\
+		nfs4_srv.o		\
+		nfs4_state.o		\
+		nfs4_srv_attr.o		\
+		nfs4_srv_ns.o		\
+		nfs4_db.o		\
+		nfs4_srv_deleg.o	\
+		nfs4_deleg_ops.o	\
+		nfs4_srv_readdir.o	\
+		nfs4_dispatch.o		\
+		nfs41_dispatch.o	\
+		nfs41_srv.o		\
+		nfs41_filehandle.o	\
+		nfs41_srv_readdir.o	\
+		nfs41_state.o		\
+		nfs_serv_inst.o		\
+		ds_srv.o		\
+		ctl_mds_clnt.o
 
 SMBSRV_SHARED_OBJS += \
 		smb_match.o \

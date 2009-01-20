@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -46,22 +46,33 @@
 
 uint32_t max_blksize = SPA_MAXBLOCKSIZE;
 
-static nnode_error_t dserv_nnode_from_fh_ds(nnode_t **, nfs_fh4 *);
+static nnode_error_t dserv_nnode_from_fh_ds(nnode_t **, mds_ds_fh *);
 static void dserv_nnode_key_free(void *);
 static dserv_nnode_data_t *dserv_nnode_data_alloc(void);
 
 static nnode_error_t dserv_nnode_data_getobject(dserv_nnode_data_t *, int);
+static nnode_error_t dserv_nnode_data_getobjset(dserv_nnode_data_t *, int);
 static void dserv_dispatch(struct svc_req *, SVCXPRT *);
 static void dmov_dispatch(struct svc_req *, SVCXPRT *);
 
-static int dserv_get_objset(ds_fh_v1 *, objset_t **);
 static void dserv_grow_blocksize(dserv_nnode_data_t *, uint32_t, dmu_tx_t *);
 
 static void ds_commit(DS_COMMITargs *,  DS_COMMITres *,
     struct svc_req *);
 static void ds_getattr(DS_GETATTRargs *, DS_GETATTRres *,
     struct svc_req *);
-static void ds_setattr(DS_SETATTRargs *, DS_SETATTRres *,
+static void ds_invalidate(DS_INVALIDATEargs *, DS_INVALIDATEres *,
+    struct svc_req *);
+static void ds_list(DS_LISTargs *, DS_LISTres *,
+    struct svc_req *);
+static void ds_obj_move(DS_OBJ_MOVEargs *, DS_OBJ_MOVEres *,
+    struct svc_req *);
+static void ds_obj_move_abort(DS_OBJ_MOVE_ABORTargs *, DS_OBJ_MOVE_ABORTres *,
+    struct svc_req *);
+static void ds_obj_move_status(DS_OBJ_MOVE_STATUSargs *,
+    DS_OBJ_MOVE_STATUSres *,
+    struct svc_req *);
+static void ds_pnfsstat(DS_PNFSSTATargs *, DS_PNFSSTATres *,
     struct svc_req *);
 static void ds_read(DS_READargs *, DS_READres *,
     struct svc_req *);
@@ -71,19 +82,15 @@ static void ds_obj_move_abort(DS_OBJ_MOVE_ABORTargs *, DS_OBJ_MOVE_ABORTres *,
     struct svc_req *);
 static void ds_obj_move_status(DS_OBJ_MOVE_STATUSargs *,
     DS_OBJ_MOVE_STATUSres *, struct svc_req *);
-static void ds_remove(DS_REMOVEargs *, DS_REMOVEres *,
+static void ctl_mds_srv_remove(CTL_MDS_REMOVEargs *, CTL_MDS_REMOVEres *,
     struct svc_req *);
-static void ds_write(DS_WRITEargs *, DS_WRITEres *,
-    struct svc_req *);
-static void ds_invalidate(DS_INVALIDATEargs *, DS_INVALIDATEres *,
-    struct svc_req *);
-static void ds_list(DS_LISTargs *, DS_LISTres *,
+static void ds_setattr(DS_SETATTRargs *, DS_SETATTRres *,
     struct svc_req *);
 static void ds_stat(DS_STATargs *, DS_STATres *,
     struct svc_req *);
 static void ds_snap(DS_SNAPargs *, DS_SNAPres *,
     struct svc_req *);
-static void ds_pnfsstat(DS_PNFSSTATargs *, DS_PNFSSTATres *,
+static void ds_write(DS_WRITEargs *, DS_WRITEres *,
     struct svc_req *);
 static void cp_nullfree(void);
 
@@ -95,6 +102,7 @@ static int dserv_nnode_read(void *, nnode_io_flags_t *, cred_t *,
     caller_context_t *, uio_t *, int);
 static int dserv_nnode_write(void *, nnode_io_flags_t *, uio_t *, int,
     cred_t *, caller_context_t *, wcc_data *);
+static int dserv_nnode_remove_obj(void *);
 static void dserv_nnode_data_free(void *);
 
 static kmem_cache_t *dserv_nnode_key_cache;
@@ -103,7 +111,7 @@ static kmem_cache_t *dserv_nnode_data_cache;
 time_t dserv_start_time;
 
 static SVC_CALLOUT dserv_sc[] = {
-	{ PNFSCTLMDS, PNFSCTLMDS_V1, PNFSCTLMDS_V1, dserv_dispatch },
+	{ PNFS_CTL_MDS, PNFS_CTL_MDS_V1, PNFS_CTL_MDS_V1, dserv_dispatch },
 	{ PNFSCTLMV, PNFSCTLMV_V1, PNFSCTLMV_V1, dmov_dispatch },
 	/* The following is need to dispatch non-2049 NFS traffic */
 	{ NFS_PROGRAM, 4, 4, dispatch_dserv_nfsv41 }
@@ -114,9 +122,10 @@ static SVC_CALLOUT_TABLE dserv_sct = {
 };
 
 /*
- * Dispatch structure for the control protocol
+ * Dispatch structure for the PNFS_CTL_MDS RPC program (MDS to DS control
+ * protocol)
  */
-struct nfs_cp_disp {
+struct ctl_mds_srv_disp {
 	void	(*proc)();
 	xdrproc_t decode_args;
 	xdrproc_t encode_reply;
@@ -124,12 +133,12 @@ struct nfs_cp_disp {
 	char    *name;
 };
 
-union nfs_mds_cp_sarg {
+union ctl_mds_srv_arg {
 	DS_COMMITargs 		ds_commit;
 	DS_GETATTRargs 		ds_getattr;
 	DS_SETATTRargs 		ds_setattr;
 	DS_READargs 		ds_read;
-	DS_REMOVEargs 		ds_remove;
+	CTL_MDS_REMOVEargs 	ctl_mds_remove_args;
 	DS_WRITEargs 		ds_write;
 	DS_INVALIDATEargs 	ds_invalidate;
 	DS_LISTargs 		ds_list;
@@ -138,12 +147,12 @@ union nfs_mds_cp_sarg {
 	DS_PNFSSTATargs 	ds_pnfsstat;
 };
 
-union nfs_mds_cp_sres {
+union ctl_mds_srv_res {
 	DS_COMMITres 		ds_commit;
 	DS_GETATTRres 		ds_getattr;
 	DS_SETATTRres 		ds_setattr;
 	DS_READres 		ds_read;
-	DS_REMOVEres 		ds_remove;
+	CTL_MDS_REMOVEres 	ctl_mds_remove_res;
 	DS_WRITEres 		ds_write;
 	DS_INVALIDATEres 	ds_invalidate;
 	DS_LISTres 		ds_list;
@@ -152,7 +161,7 @@ union nfs_mds_cp_sres {
 	DS_PNFSSTATres 		ds_pnfsstat;
 };
 
-struct nfs_cp_disp nfs_mds_cp_v1[] = {
+struct ctl_mds_srv_disp ctl_mds_srv_v1[] = {
 	{ NULL, NULL, NULL, NULL, NULL },
 	{ds_commit, xdr_DS_COMMITargs, xdr_DS_COMMITres,
 	    cp_nullfree, "DS_COMMIT"},
@@ -172,7 +181,7 @@ struct nfs_cp_disp nfs_mds_cp_v1[] = {
 	    cp_nullfree, "DS_PNFSSTAT"},
 	{ds_read, xdr_DS_READargs, xdr_DS_READres,
 	    cp_nullfree, "DS_READ"},
-	{ds_remove, xdr_DS_REMOVEargs, xdr_DS_REMOVEres,
+	{ctl_mds_srv_remove, xdr_CTL_MDS_REMOVEargs, xdr_CTL_MDS_REMOVEres,
 	    cp_nullfree, "DS_REMOVE"},
 	{ds_setattr, xdr_DS_SETATTRargs, xdr_DS_SETATTRres,
 	    cp_nullfree, "DS_SETATTR"},
@@ -181,18 +190,19 @@ struct nfs_cp_disp nfs_mds_cp_v1[] = {
 	{ds_snap, xdr_DS_SNAPargs, xdr_DS_SNAPres,
 	    cp_nullfree, "DS_SNAP"},
 	{ds_write, xdr_DS_WRITEargs, xdr_DS_WRITEres,
-	    cp_nullfree, "DS_WRITE"},
+	    cp_nullfree, "DS_WRITE"}
 };
 
-static uint_t nfs_mds_cp_cnt =
-    sizeof (nfs_mds_cp_v1) / sizeof (struct nfs_cp_disp);
+static uint_t ctl_mds_srv_cnt =
+    sizeof (ctl_mds_srv_v1) / sizeof (struct ctl_mds_srv_disp);
 
-#define	NFS_MDS_CP_ILLEGAL_PROC (nfs_mds_cp_cnt)
+#define	CTL_MDS_ILLEGAL_PROC (ctl_mds_srv_cnt)
 
 static nnode_data_ops_t dserv_nnode_data_ops = {
 	.ndo_read = dserv_nnode_read,
 	.ndo_write = dserv_nnode_write,
 	.ndo_io_prep = dserv_nnode_io_prep,
+	.ndo_remove_obj = dserv_nnode_remove_obj,
 	.ndo_free = dserv_nnode_data_free
 };
 
@@ -272,7 +282,7 @@ dserv_nnode_hash(dserv_nnode_key_t *key)
 {
 	uint32_t rc;
 
-	CRC32(rc, key->dnk_fid->mds_fid_val, key->dnk_fid->mds_fid_len,
+	CRC32(rc, key->dnk_fid->val, key->dnk_fid->len,
 	    -1U, crc32_table);
 
 	return (rc);
@@ -285,82 +295,12 @@ dserv_nnode_compare(const void *va, const void *vb)
 	const dserv_nnode_key_t *b = vb;
 	int rc;
 
-	NFS_AVL_COMPARE(a->dnk_fid->mds_fid_len, b->dnk_fid->mds_fid_len);
-	rc = memcmp(a->dnk_fid->mds_fid_val, b->dnk_fid->mds_fid_val,
-	    a->dnk_fid->mds_fid_len);
+	NFS_AVL_COMPARE(a->dnk_fid->len, b->dnk_fid->len);
+	rc = memcmp(a->dnk_fid->val, b->dnk_fid->val,
+	    a->dnk_fid->len);
 	NFS_AVL_RETURN(rc);
 
 	return (0);
-}
-
-static nnode_error_t
-dserv_nnode_build(nnode_seed_t *seed, void *vfh)
-{
-	mds_ds_fh *fh = vfh;
-	dserv_nnode_key_t *key = NULL;
-	nnode_error_t rc = 0;
-	dserv_nnode_data_t *data = NULL;
-	objset_t *osp;
-
-	rc = dserv_get_objset(&fh->fh.v1, &osp);
-	if (rc != 0)
-		goto out;
-
-	/* XXX do some sid stuff */
-
-	key = kmem_cache_alloc(dserv_nnode_key_cache, KM_SLEEP);
-	key->dnk_real_fid.mds_fid_len = fh->fh.v1.mds_fid.mds_fid_len;
-	bcopy(fh->fh.v1.mds_fid.mds_fid_val, key->dnk_real_fid.mds_fid_val,
-	    key->dnk_real_fid.mds_fid_len);
-
-	data = dserv_nnode_data_alloc();
-	data->dnd_fid = key->dnk_fid;
-	data->dnd_objset = osp;
-	data->dnd_flags = DSERV_NNODE_FLAG_OBJSET;
-
-	seed->ns_key = key;
-	seed->ns_key_compare = dserv_nnode_compare;
-	seed->ns_key_free = dserv_nnode_key_free;
-	seed->ns_data_ops = &dserv_nnode_data_ops;
-	seed->ns_data = data;
-
-out:
-	if (rc != 0) {
-		if (key != NULL)
-			dserv_nnode_key_free(key);
-		if (data != NULL)
-			dserv_nnode_data_free(data);
-	}
-
-	return (rc);
-}
-
-static nnode_error_t
-dserv_nnode_from_fh_ds(nnode_t **npp, nfs_fh4 *fh)
-{
-	mds_ds_fh *fmt = (mds_ds_fh *)fh->nfs_fh4_val;
-	dserv_nnode_key_t dskey;
-	nnode_key_t key;
-	uint32_t hash;
-
-	if (fh->nfs_fh4_len < sizeof (*fmt))
-		return (ESTALE); /* XXX badhandle */
-	if (fmt->vers < 1)
-		return (ESTALE); /* XXX badhandle */
-	if (fmt->fh.v1.mds_fid.mds_fid_len < 8) /* XXX stupid */
-		return (ESTALE);
-	if (fmt->fh.v1.mds_fid.mds_fid_len > DS_MAXFIDSZ)
-		return (ESTALE);
-	/* XXX cannot do sid until mds_sid is sane */
-	dskey.dnk_sid = NULL;
-	dskey.dnk_fid = &fmt->fh.v1.mds_fid;
-
-	hash = dserv_nnode_hash(&dskey);
-
-	key.nk_keydata = &dskey;
-	key.nk_compare = dserv_nnode_compare;
-
-	return (nnode_find_or_create(npp, &key, hash, fmt, dserv_nnode_build));
 }
 
 static char *
@@ -382,46 +322,169 @@ dserv_tohex(const void *bytes, int len)
 	return (rc);
 }
 
+/*
+ * Frees a data server file handle
+ */
+static void
+free_ds_fh(mds_ds_fh *fhp)
+{
+	kmem_free(fhp->fh.v1.mds_sid.val, fhp->fh.v1.mds_sid.len);
+
+	kmem_free(fhp, sizeof (*fhp));
+}
+
+/*
+ * Allocates memory for dest_fh and copies source_fh into it.  Caller is
+ * responsible for freeing memory allocated (using copy_ds_fh()).
+ *
+ * Function will return 0 on success and non-zero on failure.
+ */
+static nnode_error_t
+copy_ds_fh(mds_ds_fh *source_fh, mds_ds_fh **dest_fh)
+{
+	nnode_error_t error = 0;
+
+	*dest_fh = kmem_zalloc(sizeof (mds_ds_fh), KM_SLEEP);
+
+	/* Shallow copy what we can */
+	bcopy(source_fh, *dest_fh, sizeof (mds_ds_fh));
+
+	/* Deep copy the pointers */
+	switch (source_fh->vers) {
+	case (DS_FH_v1):
+		(*dest_fh)->fh.v1.mds_sid.len = source_fh->fh.v1.mds_sid.len;
+		(*dest_fh)->fh.v1.mds_sid.val =
+		    kmem_alloc(source_fh->fh.v1.mds_sid.len, KM_SLEEP);
+		bcopy(source_fh->fh.v1.mds_sid.val,
+		    (*dest_fh)->fh.v1.mds_sid.val,
+		    source_fh->fh.v1.mds_sid.len);
+
+		(*dest_fh)->fh.v1.mds_dataset_id.len =
+		    source_fh->fh.v1.mds_dataset_id.len;
+		bcopy(&source_fh->fh.v1.mds_dataset_id.val,
+		    (*dest_fh)->fh.v1.mds_dataset_id.val,
+		    source_fh->fh.v1.mds_dataset_id.len);
+
+		goto out;
+	default:
+		error = EINVAL;
+		goto out;
+	}
+
+out:
+	return (error);
+}
+
+
+static nnode_error_t
+dserv_nnode_build(nnode_seed_t *seed, void *vfh)
+{
+	mds_ds_fh *fh = vfh;
+	dserv_nnode_key_t *key = NULL;
+	nnode_error_t rc = 0;
+	dserv_nnode_data_t *data = NULL;
+
+	key = kmem_cache_alloc(dserv_nnode_key_cache, KM_SLEEP);
+	key->dnk_real_fid.len = fh->fh.v1.mds_fid.len;
+	bcopy(fh->fh.v1.mds_fid.val, key->dnk_real_fid.val,
+	    key->dnk_real_fid.len);
+
+	data = dserv_nnode_data_alloc();
+	data->dnd_fid = key->dnk_fid;
+	rc = copy_ds_fh(fh, &data->dnd_fh);
+	if (rc)
+		goto out;
+
+	seed->ns_key = key;
+	seed->ns_key_compare = dserv_nnode_compare;
+	seed->ns_key_free = dserv_nnode_key_free;
+	seed->ns_data_ops = &dserv_nnode_data_ops;
+	seed->ns_data = data;
+
+out:
+	if (rc != 0) {
+		if (key != NULL)
+			dserv_nnode_key_free(key);
+		if (data != NULL)
+			dserv_nnode_data_free(data);
+	}
+
+	return (rc);
+}
+
+static nnode_error_t
+dserv_nnode_from_fh_ds(nnode_t **npp, mds_ds_fh *fhp)
+{
+	dserv_nnode_key_t dskey;
+	nnode_key_t key;
+	uint32_t hash;
+
+	if (fhp->vers < 1)
+		return (ESTALE); /* XXX badhandle */
+	if (fhp->fh.v1.mds_fid.len < 8) /* XXX stupid */
+		return (ESTALE);
+	if (fhp->fh.v1.mds_fid.len > DS_MAXFIDSZ)
+		return (ESTALE);
+	/* XXX cannot do sid until mds_sid is sane */
+	dskey.dnk_sid = NULL;
+	dskey.dnk_fid = &fhp->fh.v1.mds_fid;
+
+	hash = dserv_nnode_hash(&dskey);
+
+	key.nk_keydata = &dskey;
+	key.nk_compare = dserv_nnode_compare;
+
+	return (nnode_find_or_create(npp, &key, hash, fhp, dserv_nnode_build));
+}
+
 static void
 cp_nullfree(void)
 {
 }
 
 /*
- * Finds or creates an FSID object set with the given name.
+ * Finds an MDS-FS object set with the given name.  If the object set does not
+ * exist, this function DOES NOT create it.
  */
 static int
-get_create_fsid_objset(char *fsid_objset_name, objset_t **osp)
+get_mdsfs_objset(char *mdsfs_objset_name, objset_t **osp)
+{
+	int error = 0;
+
+	DTRACE_PROBE1(dserv__i__get_mdsfs_objset, char *,
+	    mdsfs_objset_name);
+
+	error = dmu_objset_open(mdsfs_objset_name, DMU_OST_PNFS,
+	    DS_MODE_OWNER, osp);
+	return (error);
+}
+
+/*
+ * Finds or creates an MDS-FS object set with the given name.
+ */
+static int
+get_create_mdsfs_objset(char *mdsfs_objset_name, objset_t **osp)
 {
 	dmu_tx_t *tx;
 	int error = 0;
 
-	DTRACE_PROBE1(dserv__i__get_create_fsid_objset, char *,
-	    fsid_objset_name);
-
-	error = dmu_objset_open(fsid_objset_name, DMU_OST_PNFS,
-	    DS_MODE_OWNER, osp);
-
+	error = get_mdsfs_objset(mdsfs_objset_name, osp);
 	if (error) {
-		DTRACE_PROBE1(dserv__e__fsid_dmu_objset_open, int, error);
 		if (error == ENOENT) {
 			/* The object set needs to be created */
-			error = dmu_objset_create(fsid_objset_name,
+			error = dmu_objset_create(mdsfs_objset_name,
 			    DMU_OST_PNFS, NULL, 0, NULL, NULL);
 
-			if (error) {
-				DTRACE_PROBE1(dserv__e__fsid_dmu_objset_create,
-				    int, error);
+			if (error)
 				return (error);
-			}
 
 			/* Open the object set */
-			error = dmu_objset_open(fsid_objset_name,
+			error = dmu_objset_open(mdsfs_objset_name,
 			    DMU_OST_PNFS, DS_MODE_OWNER, osp);
 
 			if (error) {
 				DTRACE_PROBE2(
-				    dserv__e__fsid_dmu_objset_open_after_create,
+				    dserv__e__dmu_objset_open_after_create,
 				    int, error, objset_t *, *osp);
 				return (error);
 			}
@@ -432,7 +495,7 @@ get_create_fsid_objset(char *fsid_objset_name, objset_t **osp)
 			error = dmu_tx_assign(tx, TXG_WAIT);
 
 			if (error) {
-				DTRACE_PROBE1(dserv__e__fsid_dmu_tx_assign,
+				DTRACE_PROBE1(dserv__e__dmu_tx_assign,
 				    int, error);
 				dmu_tx_abort(tx);
 				return (error);
@@ -443,7 +506,7 @@ get_create_fsid_objset(char *fsid_objset_name, objset_t **osp)
 			    DMU_OT_NONE, 0, tx);
 
 			if (error) {
-				DTRACE_PROBE1(dserv__e__fsid_zap_create_claim,
+				DTRACE_PROBE1(dserv__e___zap_create_claim,
 				    int, error);
 				dmu_tx_abort(tx);
 				return (error);
@@ -457,66 +520,54 @@ get_create_fsid_objset(char *fsid_objset_name, objset_t **osp)
 }
 
 /*
- * Maps the elements of the file handle (MDS PPID, MDS DATASET ID) to the
- * object set holding the data.
+ * Search the data server's open root object set data structures to see if
+ * we have the root object set, which pertains to the MDS SID, open.
+ *
+ * Returns the open root object set in root_objset, if found.
+ * Returns ENOENT if the root object set can't be found.
  */
-/* ARGSUSED */
+/*ARGSUSED*/
 static int
-dserv_get_objset(ds_fh_v1 *ds_fh, objset_t **osp)
+find_open_root_objset(dserv_mds_instance_t *inst, mds_sid mds_sid,
+    open_root_objset_t **root_objset)
 {
-	dserv_mds_instance_t *inst;
-	open_root_objset_t *tmp_root;
-	open_fsid_objset_t *tmp_fsid;
-	open_fsid_objset_t *new_fsid;
-	char fsid_objset_name[MAXPATHLEN];
-	int error = 0;
-	char *fsidmajor;
-	char *fsidminor;
 #if 0
-	mds_sid_map_t *tmp_sid;
 	int found_root_objset = 0;
+	mds_sid_map_t *tmp_sid;
 	int found_mds_sid = 0;
+	dserv_guid_t ds_guid;
 #endif
-
-	inst = dserv_mds_get_my_instance();
-
-	DTRACE_PROBE4(dserv__i__dserv_get_objset_printfh,
-	    uint64_t, ds_fh->mds_id,
-	    uint64_t, ds_fh->mds_dataset_id,
-	    uint64_t, ds_fh->fsid.major,
-	    uint64_t, ds_fh->fsid.minor);
-
-	mutex_enter(&inst->dmi_content_lock);
-	if (list_is_empty(&inst->dmi_datasets)) {
-		mutex_exit(&inst->dmi_content_lock);
-		DTRACE_PROBE(dserv__i__dataset_list_is_empty);
-		return (EIO);
-	}
+	ASSERT(MUTEX_HELD(&inst->dmi_content_lock));
 
 	/*
-	 * We will be using the MDS SID to find the root pNFS object set,
-	 * but for now we are just taking the first object set in our list.
-	 * This introduces the stipulation that we can only have ONE root
-	 * pNFS dataset on the data server for now.  This will be changed
-	 * in the future.
+	 * If this list is empty it means that the data server is not
+	 * sharing any datasets (i.e. no root datasets have sharepnfs=on)
 	 */
-	tmp_root = list_head(&inst->dmi_datasets);
+	if (list_is_empty(&inst->dmi_datasets)) {
+		DTRACE_PROBE(dserv__i__root_dataset_list_is_empty);
+		return (ENOENT);
+	}
 
+	*root_objset = list_head(&inst->dmi_datasets);
+	return (0);
 #if 0
-	found_root_objset = 1;
+/*
+ * This portion of the code will be put in when:
+ * 1. the data server populates its MDS SID to DS_GUID map
+ * (in memory (mds_sid_map_t) and on disk).
+ * 2. the MDS is embedding the appropriate MDS SIDs in its file handle.
+ */
 	/*
 	 * Use the MDS SID (from the file handle) to find the real data
 	 * server guid (zpool guid + id of the root pNFS object set).
-	 * Note: Need to change to treating the MDS SID as opaque.
 	 */
 	for (tmp_sid = list_head(&inst->dmi_mds_sids); tmp_sid != NULL;
-	    tmp_sid = list_next(&inst->dmi_mds_sids)) {
-		if (ds_fh->mds_ds_fh_u.fh_v1.mds_zpoolid.id ==
-		    tmp_sid->mpm_mds_zpoolid.id &&
-		    ds_fh->mds_ds_fh_u.fh_v1.mds_zpoolid.aun ==
-		    tmp_sid->mpm_mds_zpoolid.aun) {
+	    tmp_sid = list_next(&inst->dmi_mds_sids, tmp_sid)) {
+		if ((mds_sid.len == tmp_sid->msm_mds_storid.len) &&
+		    (memcmp(mds_sid.val, tmp_sid->msm_mds_storid.val,
+		    tmp_sid->msm_mds_storid.len) == 0)) {
 			found_mds_sid = 1;
-			ds_guid = tmp_sid->mpm_ds_guid;
+			ds_guid = tmp_sid->msm_ds_guid;
 			break;
 		}
 	}
@@ -525,20 +576,20 @@ dserv_get_objset(ds_fh_v1 *ds_fh, objset_t **osp)
 	 * If we have no record of the given MDS SID it may mean that
 	 * we haven't been able to do the REPORTAVAIL for this particular
 	 * resource.  Therefore, just tell the client to try again later.
+	 * In the future, we will attempt to ask the MDS for this information
+	 * via DS_MAP_MDSSID.
 	 */
-	if (found_mdsppid != 1) {
-		mutex_exit(&inst->dmi_content_lock);
+	if (found_mds_sid != 1)
 		return (EAGAIN);
-	}
 
 	/*
 	 * Find the root pNFS object set.
 	 */
 	for (tmp_root = list_head(&inst->dmi_datasets); tmp_root != NULL;
 	    tmp_root = list_next(&inst->dmi_datasets, tmp_root)) {
-		if (ds_guid->dg_zpool_guid ==
+		if (ds_guid.dg_zpool_guid ==
 		    tmp_root->oro_ds_guid.dg_zpool_guid &&
-		    ds_guid->dg_objset_guid ==
+		    ds_guid.dg_objset_guid ==
 		    tmp_root->oro_ds_guid.dg_objset_guid) {
 			/*
 			 * This is our root pNFS object set!
@@ -548,43 +599,122 @@ dserv_get_objset(ds_fh_v1 *ds_fh, objset_t **osp)
 		}
 	}
 
-	if (found_root_objset != 1) {
-		mutex_exit(&inst->dmi_content_lock);
-		return (EIO);
-	}
+	if (found_root_objset != 1)
+		return (ENOENT);
+
+	return (0);
 #endif
+}
+
+/*
+ * Search the data server's open object set data structures to see if
+ * we already hold an object set pointer pertaining to the given
+ * MDS DATASET ID.  The object set pertaining to the MDS DATASET ID is
+ * referred to as the "MDS-FS" object set.
+ *
+ * Return ENOENT if the object set is not open.
+ */
+/* ARGSUSED */
+static int
+find_open_mdsfs_objset(dserv_mds_instance_t *inst, mds_dataset_id dataset_id,
+    open_root_objset_t *root_objset, objset_t **mdsfs_osp)
+{
+	open_mdsfs_objset_t *tmp_mdsfs;
+
+	ASSERT(MUTEX_HELD(&inst->dmi_content_lock));
 
 	/*
-	 * Look for a dataset named after the fsid in the file handle.
+	 * Look for a dataset named after the MDS DATASET ID in the file handle.
 	 * This will be the object set that the data object will reside in.
-	 * If this object set does not exist, we will create it here.
 	 */
-	for (tmp_fsid = list_head(&tmp_root->oro_open_fsid_objsets);
-	    tmp_fsid != NULL;
-	    tmp_fsid = list_next(&tmp_root->oro_open_fsid_objsets, tmp_fsid)) {
-		if (ds_fh->fsid.major ==
-		    tmp_fsid->ofo_fsid.major &&
-		    ds_fh->fsid.minor ==
-		    tmp_fsid->ofo_fsid.minor) {
-			mutex_exit(&inst->dmi_content_lock);
-			DTRACE_PROBE(dserv__i__fsid_objset_found);
-			*osp = tmp_fsid->ofo_osp;
+	for (tmp_mdsfs = list_head(&root_objset->oro_open_mdsfs_objsets);
+	    tmp_mdsfs != NULL;
+	    tmp_mdsfs = list_next(&root_objset->oro_open_mdsfs_objsets,
+	    tmp_mdsfs)) {
+		if ((dataset_id.len == tmp_mdsfs->omo_dataset_id.len) &&
+		    (memcmp(dataset_id.val, tmp_mdsfs->omo_dataset_id.val,
+		    tmp_mdsfs->omo_dataset_id.len) == 0)) {
+			DTRACE_PROBE(dserv__i__mdsfs_objset_found);
+			*mdsfs_osp = tmp_mdsfs->omo_osp;
 			return (0);
 		}
 	}
 
-	DTRACE_PROBE(dserv__i__fsid_objset_not_found);
+	/*
+	 * Falling through to here means we have not found the open MDS-FS
+	 * object set.
+	 */
+	DTRACE_PROBE(dserv__i__mdsfs_objset_not_found);
+	return (ENOENT);
+}
+
+/*
+ * Retrieves the MDS-FS object set pointer that is associated with the given
+ * MDS SID and MDS DATASET ID.  If the object set does not exist and create
+ * is set, this function will create the MDS-FS object set.
+ *
+ * This function will return 0 on success.  It will return ENOENT if the object
+ * set does not exist and create is not set. In the case of an unrecoverable
+ * error (i.e. dmu_* functions return error), those errors will be passed
+ * through to the caller of this function.
+ */
+static nnode_error_t
+dserv_nnode_data_getobjset(dserv_nnode_data_t *dnd, int create)
+{
+	dserv_mds_instance_t *inst;
+	open_root_objset_t *root_objset;
+	mds_sid sid = dnd->dnd_fh->fh.v1.mds_sid;
+	mds_dataset_id dataset_id = dnd->dnd_fh->fh.v1.mds_dataset_id;
+	char mdsfs_objset_name[MAXPATHLEN];
+	char *mdsfs = NULL;
+	nnode_error_t error = 0;
+
+	ASSERT(RW_READ_HELD(&dnd->dnd_rwlock));
+
+	if (dnd->dnd_flags & DSERV_NNODE_FLAG_OBJSET)
+		return (0);
+
+	if (!rw_tryupgrade(&dnd->dnd_rwlock)) {
+		rw_exit(&dnd->dnd_rwlock);
+		rw_enter(&dnd->dnd_rwlock, RW_WRITER);
+		if (dnd->dnd_flags & DSERV_NNODE_FLAG_OBJSET) {
+			rw_downgrade(&dnd->dnd_rwlock);
+			return (0);
+		}
+	}
+
+	inst = dserv_mds_get_my_instance();
+	if (inst == NULL) {
+		rw_downgrade(&dnd->dnd_rwlock);
+		DTRACE_PROBE(dserv__e__dserv_mds_get_my_instance);
+		return (ESRCH);
+	}
+
+	mutex_enter(&inst->dmi_content_lock);
+	error = find_open_root_objset(inst, sid, &root_objset);
+	if (error) {
+		error = (error == ENOENT) ? EIO : error;
+		goto out;
+	}
+
+	error = find_open_mdsfs_objset(inst, dataset_id, root_objset,
+	    &(dnd->dnd_objset));
+	if (error == 0 || error != ENOENT) {
+		if (error == 0)
+			dnd->dnd_flags |= DSERV_NNODE_FLAG_OBJSET;
+		goto out;
+	}
 
 	/*
-	 * We didn't find the fsid object set and it means either:
-	 * 1. The object set exists, but has not yet been opened.
-	 *	or
-	 * 2. The object set does not exist and needs to be created.
+	 * error == ENOENT
+	 *
+	 * We didn't find the MDS-FS object set and it may just mean the
+	 * object set exists, but has not yet been opened.
 	 */
 
 	/*
-	 * The format of the fsid object set name is:
-	 * <zpool-name>/<rootpnfs-objset-name>/<fsidmajor.fsidminor>
+	 * The format of the MDS-FS object set name is:
+	 * <zpool-name>/<rootpnfs-objset-name>/<mds_dataset_id>
 	 *
 	 * The name of the root pNFS dataset is stored by the data server
 	 * in the open_root_objset_t.
@@ -592,30 +722,43 @@ dserv_get_objset(ds_fh_v1 *ds_fh, objset_t **osp)
 	 * pNFS dataset gets renamed.  If we continue to store the dataset
 	 * name we will have to handle the case where a dataset gets renamed.
 	 */
-	fsidmajor = dserv_tohex(&ds_fh->fsid.major, 8);
-	fsidminor = dserv_tohex(&ds_fh->fsid.minor, 8);
-	(void) snprintf(fsid_objset_name, MAXPATHLEN, "%s%s%s%s%s",
-	    tmp_root->oro_objsetname, "/", fsidmajor, ".", fsidminor);
+	mdsfs = dserv_tohex(dataset_id.val, dataset_id.len);
+	(void) snprintf(mdsfs_objset_name, MAXPATHLEN, "%s%s%s",
+	    root_objset->oro_objsetname, "/", mdsfs);
 
-	error = get_create_fsid_objset(fsid_objset_name, osp);
-	if (error) {
-		mutex_exit(&inst->dmi_content_lock);
-		DTRACE_PROBE1(dserv__e__get_create_fsid_objset, int, error);
-		return (error);
+	if (create) {
+		open_mdsfs_objset_t *new_mdsfs;
+
+		error = get_create_mdsfs_objset(mdsfs_objset_name,
+		    &dnd->dnd_objset);
+		if (error)
+			goto out;
+
+		/* Place entry in the the MDS-FS objset linked list */
+		new_mdsfs = kmem_cache_alloc(dserv_open_mdsfs_objset_cache,
+		    KM_SLEEP);
+		bcopy(dataset_id.val, new_mdsfs->omo_dataset_id.val,
+		    dataset_id.len);
+		new_mdsfs->omo_dataset_id.len = dataset_id.len;
+		new_mdsfs->omo_osp = dnd->dnd_objset;
+
+		list_insert_tail(&root_objset->oro_open_mdsfs_objsets,
+		    new_mdsfs);
+	} else {
+		error = get_mdsfs_objset(mdsfs_objset_name, &dnd->dnd_objset);
+		if (error)
+			goto out;
 	}
 
-	/* Place entry in the the fsid objset linked list */
-	new_fsid = kmem_cache_alloc(dserv_open_fsid_objset_cache, KM_SLEEP);
-	new_fsid->ofo_fsid.major = ds_fh->fsid.major;
-	new_fsid->ofo_fsid.minor = ds_fh->fsid.minor;
-	new_fsid->ofo_osp = *osp;
+	dnd->dnd_flags |= DSERV_NNODE_FLAG_OBJSET;
 
-	list_insert_tail(&tmp_root->oro_open_fsid_objsets, new_fsid);
-
+out:
 	mutex_exit(&inst->dmi_content_lock);
-	kmem_free(fsidmajor, strlen(fsidmajor) + 1);
-	kmem_free(fsidminor, strlen(fsidminor) + 1);
-	return (0);
+	rw_downgrade(&dnd->dnd_rwlock);
+	if (mdsfs != NULL)
+		dserv_strfree(mdsfs);
+
+	return (error);
 }
 
 /*ARGSUSED*/
@@ -625,18 +768,21 @@ dserv_nnode_io_prep(void *vdata, nnode_io_flags_t *nnflags, cred_t *cr,
 {
 	dserv_nnode_data_t *data = vdata;
 	nnode_error_t err = 0;
+	int create;
+
+	create = (*nnflags & NNODE_IO_FLAG_WRITE) ? B_TRUE : B_FALSE;
 
 	rw_enter(&data->dnd_rwlock, RW_READER);
-	if (! (data->dnd_flags & DSERV_NNODE_FLAG_OBJECT)) {
-		int create;
-
-		create = (*nnflags & NNODE_IO_FLAG_WRITE) ? B_TRUE : B_FALSE;
-		err = dserv_nnode_data_getobject(data, create);
-		if ((err == ENOENT) && (! (*nnflags & NNODE_IO_FLAG_WRITE))) {
-			*nnflags |= NNODE_IO_FLAG_PAST_EOF;
-			err = 0;
+	if (! data->dnd_flags & DSERV_NNODE_FLAG_OBJSET) {
+		/* Get the Object Set */
+		err = dserv_nnode_data_getobjset(data, create);
+		if (err)
 			goto out;
-		}
+	}
+
+	if (! (data->dnd_flags & DSERV_NNODE_FLAG_OBJECT)) {
+		/* Get the Object */
+		err = dserv_nnode_data_getobject(data, create);
 		if (err)
 			goto out;
 	}
@@ -646,6 +792,10 @@ dserv_nnode_io_prep(void *vdata, nnode_io_flags_t *nnflags, cred_t *cr,
 out:
 	rw_exit(&data->dnd_rwlock);
 
+	if ((err == ENOENT) && (! (*nnflags & NNODE_IO_FLAG_WRITE))) {
+		*nnflags |= NNODE_IO_FLAG_PAST_EOF;
+		err = 0;
+	}
 	return (err);
 }
 
@@ -772,6 +922,7 @@ dserv_nnode_data_alloc(void)
 	dnd = kmem_cache_alloc(dserv_nnode_data_cache, KM_SLEEP);
 
 	dnd->dnd_flags = 0;
+	dnd->dnd_fh = NULL;
 	dnd->dnd_fid = NULL;
 	dnd->dnd_objset = NULL;
 	dnd->dnd_dbuf = NULL;
@@ -792,7 +943,12 @@ dserv_nnode_data_free(void *vdnd)
 		VERIFY(dnd == dmu_buf_update_user(db, dnd, NULL, NULL, NULL));
 		dmu_buf_rele(db, NULL);
 	}
+
+	if (dnd->dnd_fh != NULL)
+		free_ds_fh(dnd->dnd_fh);
+
 	dnd->dnd_flags = 0;
+	dnd->dnd_fh = NULL;
 	dnd->dnd_fid = NULL;
 	dnd->dnd_objset = NULL;
 	dnd->dnd_dbuf = NULL;
@@ -925,10 +1081,47 @@ ds_getattr(DS_GETATTRargs *argp, DS_GETATTRres *resp, struct svc_req *req)
 	resp->status = DSERR_NOTSUPP;
 }
 
+/* ARGSUSED */
+void
+ds_invalidate(DS_INVALIDATEargs *argp, DS_INVALIDATEres *resp,
+    struct svc_req *req)
+{
+	resp->status = DSERR_NOTSUPP;
+}
 
 /* ARGSUSED */
 void
-ds_setattr(DS_SETATTRargs *argp, DS_SETATTRres *resp, struct svc_req *req)
+ds_list(DS_LISTargs *argp, DS_LISTres *resp, struct svc_req *req)
+{
+	resp->status = DSERR_NOTSUPP;
+}
+
+/* ARGSUSED */
+void
+ds_obj_move(DS_OBJ_MOVEargs *argp, DS_OBJ_MOVEres *resp, struct svc_req *req)
+{
+	resp->status = DSERR_NOTSUPP;
+}
+
+/* ARGSUSED */
+void
+ds_obj_move_abort(DS_OBJ_MOVE_ABORTargs *argp, DS_OBJ_MOVE_ABORTres *resp,
+    struct svc_req *req)
+{
+	resp->status = DSERR_NOTSUPP;
+}
+
+/* ARGSUSED */
+void
+ds_obj_move_status(DS_OBJ_MOVE_STATUSargs *argp, DS_OBJ_MOVE_STATUSres *resp,
+    struct svc_req *req)
+{
+	resp->status = DSERR_NOTSUPP;
+}
+
+/* ARGSUSED */
+void
+ds_pnfsstat(DS_PNFSSTATargs *argp, DS_PNFSSTATres *resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
 }
@@ -940,61 +1133,150 @@ ds_read(DS_READargs *argp, DS_READres *resp, struct svc_req *req)
 	resp->status = DSERR_NOTSUPP;
 }
 
-
 /* ARGSUSED */
 void
-ds_remove(DS_REMOVEargs *argp, DS_REMOVEres *resp, struct svc_req *req)
-{
-	resp->status = DSERR_NOTSUPP;
-}
-
-
-/* ARGSUSED */
-void
-ds_obj_move(DS_OBJ_MOVEargs *argp, DS_OBJ_MOVEres *resp, struct svc_req *req)
-{
-	resp->status = DSERR_NOTSUPP;
-}
-
-
-/* ARGSUSED */
-void
-ds_obj_move_abort(DS_OBJ_MOVE_ABORTargs *argp, DS_OBJ_MOVE_ABORTres *resp,
+ctl_mds_srv_remove(CTL_MDS_REMOVEargs *argp, CTL_MDS_REMOVEres *resp,
     struct svc_req *req)
 {
-	resp->status = DSERR_NOTSUPP;
+	nnode_t *nn = NULL;
+	nnode_io_flags_t nnioflags = NNODE_IO_REMOVE_OBJ;
+
+	if (argp->type == CTL_MDS_RM_OBJ) {
+		nnode_error_t nerr;
+		int error = 0;
+		int i;
+
+		/*
+		 * A CTL_MDS_REMOVE of type CTL_MDS_RM_OBJ allows the
+		 * removal of one to many objects.
+		 */
+		for (i = 0; i < argp->CTL_MDS_REMOVEargs_u.obj.obj_len; i++) {
+			mds_ds_fh *ds_fh;
+			nfs_fh4 *otw_fh =  &(argp->CTL_MDS_REMOVEargs_u.
+			    obj.obj_val[i]);
+
+			ds_fh = get_mds_ds_fh(otw_fh);
+			if ((ds_fh == NULL)) {
+				resp->status = DSERR_BADHANDLE;
+				goto out;
+			}
+
+			nn = NULL;
+			nerr = nnode_from_fh_ds(&nn, ds_fh);
+
+			switch (nerr) {
+			case 0: /* Success */
+				break;
+			case ESTALE:
+				resp->status = DSERR_STALE;
+				goto out;
+			default:
+				DTRACE_PROBE1(dserv__removefh__problem,
+				    nnode_error_t, nerr);
+				resp->status = DSERR_BADHANDLE;
+				goto out;
+			}
+
+			/* Mark the object for removal. */
+			/*
+			 * If there is an error while removing the object,
+			 * this flag will allow us to retry the removal
+			 * of the object from the nnode garbage collection
+			 * framework.
+			 */
+			error = nnode_set_flag(nn,
+			    NNODE_OBJ_REMOVE_IN_PROGRESS);
+			ASSERT(error);
+
+			/*
+			 * Prepare for removal of the object.  This includes
+			 * retrieveing the object set and the DMU object id
+			 * that the object lives in.
+			 */
+			nerr = nnop_io_prep(nn, &nnioflags, NULL, NULL, 0, 0,
+			    NULL);
+			if (nerr) {
+				resp->status = DSERR_IO;
+				goto out;
+			}
+
+			/*
+			 * If the removal of the object fails, we just return
+			 * the error to the MDS and the MDS is responsible for
+			 * retrying the message.
+			 */
+			nerr = nnop_remove_obj(nn);
+			switch (nerr) {
+			case 0:
+				/* Mark the object as removed! */
+				error = nnode_clear_flag(nn,
+				    NNODE_OBJ_REMOVE_IN_PROGRESS);
+				ASSERT(error);
+
+				error = nnode_set_flag(nn, NNODE_OBJ_REMOVED);
+				ASSERT(error);
+				break;
+			default:
+				resp->status = DSERR_IO;
+				goto out;
+			}
+		}
+
+		/*
+		 * If we are here, we have gotten through all objects and
+		 * are ready to return success!
+		 */
+		resp->status = DS_OK;
+	} else if (argp->type == CTL_MDS_RM_MDS_DATASET_ID) {
+		resp->status = DSERR_NOTSUPP;
+	} else {
+		resp->status = DSERR_NOTSUPP;
+	}
+
+out:
+	/*
+	 * Remove the reference on the nnode.
+	 * The nnode will be garbage collected later.
+	 */
+	if (nn != NULL)
+		nnode_rele(&nn);
 }
 
-
-/* ARGSUSED */
-void
-ds_obj_move_status(DS_OBJ_MOVE_STATUSargs *argp, DS_OBJ_MOVE_STATUSres *resp,
-    struct svc_req *req)
+static int
+dserv_nnode_remove_obj(void *vdnd)
 {
-	resp->status = DSERR_NOTSUPP;
-}
+	dserv_nnode_data_t *dnd = vdnd;
+	char		*hex_fid;
+	dmu_tx_t	*tx;
+	int		error;
 
+	hex_fid = dserv_tohex(dnd->dnd_fid->val, dnd->dnd_fid->len);
+
+	tx = dmu_tx_create(dnd->dnd_objset);
+	dmu_tx_hold_zap(tx, DMU_PNFS_FID_TO_OBJID_OBJECT, FALSE, NULL);
+	error = dmu_tx_assign(tx, TXG_WAIT);
+	if (error) {
+		dmu_tx_abort(tx);
+		kmem_free(hex_fid, strlen(hex_fid) + 1);
+		return (error);
+	}
+
+	error = zap_remove(dnd->dnd_objset, DMU_PNFS_FID_TO_OBJID_OBJECT,
+	    hex_fid, tx);
+
+	/* Free hex_id then check for error */
+	dserv_strfree(hex_fid);
+
+	dmu_tx_commit(tx);
+	if (!error)
+		error = dmu_free_object(dnd->dnd_objset, dnd->dnd_object);
+
+	return (error);
+}
 
 /* ARGSUSED */
 void
-ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
-{
-	resp->status = DSERR_NOTSUPP;
-}
-
-
-/* ARGSUSED */
-void
-ds_invalidate(DS_INVALIDATEargs *argp, DS_INVALIDATEres *resp,
-	    struct svc_req *req)
-{
-	resp->status = DSERR_NOTSUPP;
-}
-
-
-/* ARGSUSED */
-void
-ds_list(DS_LISTargs *argp, DS_LISTres *resp, struct svc_req *req)
+ds_setattr(DS_SETATTRargs *argp, DS_SETATTRres *resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
 }
@@ -1013,10 +1295,9 @@ ds_snap(DS_SNAPargs *argp, DS_SNAPres *resp, struct svc_req *req)
 	resp->status = DSERR_NOTSUPP;
 }
 
-
 /* ARGSUSED */
 void
-ds_pnfsstat(DS_PNFSSTATargs *argp, DS_PNFSSTATres *resp, struct svc_req *req)
+ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
 }
@@ -1026,22 +1307,22 @@ static void
 dserv_dispatch(struct svc_req *req, SVCXPRT *xprt)
 {
 	rpcproc_t the_proc;
-	union nfs_mds_cp_sarg darg;
-	union nfs_mds_cp_sres dres;
-	struct nfs_cp_disp *disp;
+	union ctl_mds_srv_arg darg;
+	union ctl_mds_srv_res dres;
+	struct ctl_mds_srv_disp *disp;
 
 	/*
 	 * validate version and procedure
 	 */
-	if (req->rq_vers != PNFSCTLMDS_V1) {
-		svcerr_progvers(xprt, PNFSCTLMDS_V1, PNFSCTLMDS_V1);
+	if (req->rq_vers != PNFS_CTL_MDS_V1) {
+		svcerr_progvers(xprt, PNFS_CTL_MDS_V1, PNFS_CTL_MDS_V1);
 		DTRACE_PROBE2(dserv__e__mdscp__badvers, rpcvers_t, req->rq_vers,
-		    rpcvers_t, PNFSCTLMDS_V1);
+		    rpcvers_t, PNFS_CTL_MDS_V1);
 		return;
 	}
 
 	the_proc = req->rq_proc;
-	if (the_proc < 0 || the_proc >= NFS_MDS_CP_ILLEGAL_PROC) {
+	if (the_proc < 0 || the_proc >= CTL_MDS_ILLEGAL_PROC) {
 		svcerr_noproc(xprt);
 		DTRACE_PROBE1(dserv__e__mdscp__badproc, rpcproc_t, the_proc);
 		return;
@@ -1056,15 +1337,15 @@ dserv_dispatch(struct svc_req *req, SVCXPRT *xprt)
 		return;
 	}
 
-	disp = &nfs_mds_cp_v1[the_proc];
+	disp = &ctl_mds_srv_v1[the_proc];
 
 	/*
 	 * decode args
 	 */
-	bzero(&darg, sizeof (union nfs_mds_cp_sarg));
+	bzero(&darg, sizeof (union ctl_mds_srv_arg));
 	if (!SVC_GETARGS(xprt, disp->decode_args, (char *)&darg)) {
 		svcerr_decode(xprt);
-		DTRACE_PROBE2(dserv__e__mdscp__decode, rpcvers_t, req->rq_vers,
+		DTRACE_PROBE2(dserv__e__ctl_mds_decode, rpcvers_t, req->rq_vers,
 		    rpcproc_t, the_proc);
 		return;
 	}
@@ -1079,8 +1360,8 @@ dserv_dispatch(struct svc_req *req, SVCXPRT *xprt)
 	 * XXX - auth_tooweak check
 	 * XXX - counters of any kind
 	 */
-	bzero(&dres, sizeof (union nfs_mds_cp_sres));
-	(*disp->proc)(darg, dres, req);
+	bzero(&dres, sizeof (union ctl_mds_srv_res));
+	(*disp->proc)(&darg, &dres, req);
 
 	/*
 	 * send the reply
@@ -1167,11 +1448,11 @@ get_object_state(dserv_nnode_data_t *dnd, char *hex_fh)
 	return (0);
 }
 
-static int
+static nnode_error_t
 get_create_object_state(dserv_nnode_data_t *dnd, char *hex_fh)
 {
 	dserv_mds_instance_t *inst;
-	int error = 0;
+	nnode_error_t error = 0;
 	dmu_tx_t *tx;
 	dmu_buf_t *db;
 
@@ -1187,12 +1468,6 @@ get_create_object_state(dserv_nnode_data_t *dnd, char *hex_fh)
 		DTRACE_PROBE1(dserv__e__get_object_state, int, error);
 
 		if (error == ENOENT) {
-		/*
-		 * ToDo: 1.) need to make sure that the offsets being
-		 * written does not extend into a range that is not to be
-		 * covered by this file (i.e. make sure the data belongs in
-		 * this stripe).
-		 */
 			tx = dmu_tx_create(dnd->dnd_objset);
 			dmu_tx_hold_bonus(tx, DMU_NEW_OBJECT);
 			dmu_tx_hold_zap(tx, DMU_PNFS_FID_TO_OBJID_OBJECT, TRUE,
@@ -1241,7 +1516,6 @@ get_create_object_state(dserv_nnode_data_t *dnd, char *hex_fh)
 				 * cannot be called after dmu_tx_assign()
 				 * has successfully completed.
 				 */
-				/* XXX any cleanup needed? */
 				dmu_tx_commit(tx);
 				dmu_buf_rele(db, NULL);
 				return (error);
@@ -1268,7 +1542,6 @@ get_create_object_state(dserv_nnode_data_t *dnd, char *hex_fh)
 	}
 
 	mutex_exit(&inst->dmi_zap_lock);
-
 	return (0);
 }
 
@@ -1319,8 +1592,7 @@ dserv_nnode_data_getobject(dserv_nnode_data_t *dnd, int create)
 
 	ASSERT(dnd->dnd_flags & DSERV_NNODE_FLAG_OBJSET);
 
-	hexfid = dserv_tohex(dnd->dnd_fid->mds_fid_val,
-	    dnd->dnd_fid->mds_fid_len);
+	hexfid = dserv_tohex(dnd->dnd_fid->val, dnd->dnd_fid->len);
 	if (create)
 		rc = get_create_object_state(dnd, hexfid);
 	else
@@ -1333,7 +1605,6 @@ dserv_nnode_data_getobject(dserv_nnode_data_t *dnd, int create)
 	}
 
 	dnd->dnd_flags |= DSERV_NNODE_FLAG_OBJECT;
-
 out:
 	rw_downgrade(&dnd->dnd_rwlock);
 	return (rc);

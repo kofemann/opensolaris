@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -202,9 +202,6 @@ dserv_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cr, int *rvalp)
 
 		error = dserv_mds_setmds(smargs.dsm_mds_netid,
 		    smargs.dsm_mds_uaddr);
-		if (error != 0)
-			return (error);
-		/* XXX */
 		break;
 	}
 

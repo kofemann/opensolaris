@@ -19,39 +19,41 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef _NFS41_FILEHANDLE_H
 #define	_NFS41_FILEHANDLE_H
 
+#ifdef USE_FOR_SNOOP
+#define	NFS_FH4MAXDATA 26
+#include <sys/vfs.h>
+#else
 #include <nfs/nfs.h>
 #include <nfs/nfs41_fhtype.h>
 #include <nfs/nfs4.h>
+#endif
 
 #ifdef	__cplusplus
 extern "C" {
 #endif
-
-#ifdef _KERNEL
 
 typedef enum {
 	NFS41_FH_v1 = 1
 } nfs41_fh_vers_t;
 
 typedef struct {
+	uint_t len;
+	char val[NFS_FH4MAXDATA];
+} nfs41_fid_t;
+
+typedef struct {
 	uint32_t flags;
 	uint32_t gen;
 	fsid_t	export_fsid;
-	struct {
-		uint_t len;
-		char val[NFS_FH4MAXDATA];
-	} export_fid;
-	struct {
-		uint_t len;
-		char val[NFS_FH4MAXDATA];
-	} obj_fid;
+	nfs41_fid_t export_fid;
+	nfs41_fid_t obj_fid;
 } nfs41_fh_v1_t;
 
 typedef struct {
@@ -75,14 +77,15 @@ typedef struct {
 #define	FH41_NAMEDATTR	1
 #define	FH41_ATTRDIR	2
 
+#ifndef USE_FOR_SNOOP
 extern vnode_t *nfs41_fhtovp(nfs_fh4 *, compound_state_t *);
 extern vnode_t *nfs41_fhtovp_exi(nfs_fh4 *, struct exportinfo *, nfsstat4 *);
 extern int mknfs41_fh(nfs_fh4 *, vnode_t *, struct exportinfo *);
+#endif
+
 extern bool_t xdr_encode_nfs41_fh(XDR *, nfs_fh4 *);
 extern bool_t xdr_decode_nfs41_fh(XDR *, nfs_fh4 *);
 extern bool_t xdr_nfs41_fh_fmt(XDR *, nfs41_fh_fmt_t *);
-
-#endif
 
 #ifdef	__cplusplus
 }

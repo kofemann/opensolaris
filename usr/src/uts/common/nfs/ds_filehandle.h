@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -30,18 +30,14 @@
 extern "C" {
 #endif
 
+#include <nfs/nfs41_filehandle.h>
+
 enum ds_fh_version {
 	DS_FH_v1 = 1
 };
 typedef enum ds_fh_version ds_fh_version;
 
 #define	DS_MAXFIDSZ 64
-
-struct mds_fid {
-	uint_t mds_fid_len;
-	char mds_fid_val[DS_MAXFIDSZ];
-};
-typedef struct mds_fid mds_fid;
 
 struct mds_sid_content {
 	uint64_t id;
@@ -50,19 +46,24 @@ struct mds_sid_content {
 typedef struct mds_sid_content mds_sid_content;
 
 struct mds_sid {
-	uint_t mds_sid_len;
-	char *mds_sid_val;
+	uint_t len;
+	char *val;
 };
 typedef struct mds_sid mds_sid;
+
+struct mds_dataset_id {
+	uint_t len;
+	char val[NFS_FH4MAXDATA];
+};
+typedef struct mds_dataset_id mds_dataset_id;
 
 struct ds_fh_v1 {
 	uint32_t flags;
 	uint32_t gen;
 	uint64_t mds_id;
 	mds_sid mds_sid;
-	uint64_t mds_dataset_id;
-	fsid4	fsid;
-	struct mds_fid mds_fid;
+	mds_dataset_id mds_dataset_id;
+	nfs41_fid_t mds_fid;
 };
 typedef struct ds_fh_v1 ds_fh_v1;
 
@@ -76,9 +77,12 @@ struct mds_ds_fh {
 };
 typedef struct mds_ds_fh mds_ds_fh;
 
+extern mds_ds_fh *get_mds_ds_fh(nfs_fh4 *);
+extern int mds_alloc_ds_fh(fsid_t, nfs41_fid_t, nfs_fh4 *);
 extern bool_t xdr_ds_fh_fmt(XDR *, mds_ds_fh *);
 extern bool_t xdr_mds_sid_content(XDR *, mds_sid_content *);
 extern bool_t xdr_mds_sid(XDR *, mds_sid *);
+extern bool_t xdr_mds_dataset_id(XDR *, mds_dataset_id *);
 extern bool_t xdr_ds_fh_v1(XDR *, ds_fh_v1 *);
 extern bool_t xdr_encode_ds_fh(mds_ds_fh *, nfs_fh4 *);
 extern bool_t xdr_decode_ds_fh(XDR *, nfs_fh4 *);

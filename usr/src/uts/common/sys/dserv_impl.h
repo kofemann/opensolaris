@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -43,8 +43,10 @@ extern "C" {
 #endif
 
 #define	DSERV_MAXREAD	(1 * 1024 * 1024)
+#define	DS_TO_MDS_CTRL_PROTO_RETRIES	5
+#define	CTLDS_TIMEO 60 /* seconds */
 
-kmem_cache_t *dserv_open_fsid_objset_cache;
+kmem_cache_t *dserv_open_mdsfs_objset_cache;
 
 /*
  * This data structure creates a unique identifer for a dataset for the
@@ -80,7 +82,7 @@ typedef struct mds_sid_map {
  *	response to DS_REPORTAVAIL.  This is the value that will be
  *	encoded in the file handle used between the client and data servers.
  *
- * oro_open_fsid_objsets - The open child, fsid object sets for this root
+ * oro_open_mdsfs_objsets - The open child, fsid object sets for this root
  *	pNFS object set.
  *
  * oro_open_objset_node - the linked list node
@@ -89,15 +91,18 @@ typedef struct open_root_objset {
 	char		oro_objsetname[MAXPATHLEN];
 	objset_t	*oro_osp;
 	dserv_guid_t	oro_ds_guid;
-	list_t		oro_open_fsid_objsets;
+	list_t		oro_open_mdsfs_objsets;
 	list_node_t	oro_open_root_objset_node;
 } open_root_objset_t;
 
-typedef struct open_fsid_objset {
-	fsid4		ofo_fsid;
-	objset_t	*ofo_osp;
-	list_node_t	ofo_open_fsid_objset_node;
-} open_fsid_objset_t;
+typedef uint32_t fsid_objset_flags;
+
+typedef struct open_mdsfs_objset {
+	mds_dataset_id		omo_dataset_id;
+	objset_t		*omo_osp;
+	fsid_objset_flags	omo_flags;
+	list_node_t		omo_open_mdsfs_objset_node;
+} open_mdsfs_objset_t;
 
 typedef struct dserv_uaddr {
 	char		*du_addr;
@@ -119,17 +124,17 @@ typedef struct dserv_nnode_data_phys {
 
 typedef struct {
 	mds_sid_content *dnk_sid;
-	mds_fid *dnk_fid;
+	nfs41_fid_t *dnk_fid;
 
-	mds_fid dnk_real_fid;
+	nfs41_fid_t dnk_real_fid;
 } dserv_nnode_key_t;
 
 typedef struct dserv_nnode_data {
 	krwlock_t	dnd_rwlock;
 	uint32_t	dnd_flags;
 
-	mds_sid		*dnd_sid;
-	mds_fid		*dnd_fid;
+	mds_ds_fh	*dnd_fh;
+	nfs41_fid_t	*dnd_fid;
 	objset_t	*dnd_objset;
 	uint64_t	dnd_object;		/* dmu object id */
 	uint32_t	dnd_blksize;		/* object block size */
@@ -160,9 +165,6 @@ typedef struct {
 	uint64_t	dmi_verifier;
 	char		*dmi_name;
 	avl_node_t	dmi_avl;
-
-	kmutex_t	dmi_zap_lock; /* used only to protect the ZAPs */
-
 	krwlock_t	dmi_inst_lock;
 	kmutex_t	dmi_content_lock;
 	uint32_t	dmi_flags;
@@ -175,37 +177,10 @@ typedef struct {
 	list_t		dmi_uaddrs;
 	list_t		dmi_handles;
 	boolean_t	dmi_teardown_in_progress;
+	kmutex_t	dmi_zap_lock;
 } dserv_mds_instance_t;
 
 #define	DSERV_MDS_INSTANCE_NET_VALID 0x01
-
-/*
- * The File State cache for the data server is organized in the following way.
- * For each file object on the data server (as specified by the DMU object id)
- * there can be multiple opens.  Each open stateid is tracked in the
- * open_state AVL tree.
- */
-/*
- * XXX - The following structure definitions are not yet finished and are just
- * here as placeholders...
- */
-/*
- * typedef struct file_state {
- *	avl_tree_t		open_state;
- *	fsid_t			fsid;
- *	uint64_t		objectid;
- *	nfsv4_file_layouttype4	*file_layout;
- *	uint64_t		size;
- *	avl_node_t		avl_node;
- * } file_state_t;
- *
- * typedef struct open_info {
- *	stateid4	stateid;
- *	avl_node_t	avl_node;
- * } open_info_t;
- *
- * avl_tree_t file_state_cache;
- */
 
 /*
  * Useful macros

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -133,6 +133,7 @@ void nnode_mod_init(void);
 /* forward declarations */
 
 struct compound_state;
+struct mds_ds_fh;
 
 /* nnodes and their operations */
 
@@ -168,6 +169,7 @@ typedef uint32_t nnode_io_flags_t;
 #define	NNODE_IO_FLAG_RWLOCK	0x04
 #define	NNODE_IO_FLAG_EOF	0x08
 #define	NNODE_IO_FLAG_PAST_EOF	0x10
+#define	NNODE_IO_REMOVE_OBJ	0x20
 
 nnode_error_t nnop_io_prep(nnode_t *, nnode_io_flags_t *, cred_t *,
     caller_context_t *, offset_t, size_t, bslabel_t *);
@@ -175,6 +177,7 @@ nnode_error_t nnop_read(nnode_t *, nnode_io_flags_t *, cred_t *,
     caller_context_t *, uio_t *, int);
 nnode_error_t nnop_write(nnode_t *, nnode_io_flags_t *, uio_t *, int, cred_t *,
     caller_context_t *, wcc_data *);
+nnode_error_t nnop_remove_obj(nnode_t *);
 void nnop_io_release(nnode_t *, nnode_io_flags_t, caller_context_t *);
 void nnop_post_op_attr(nnode_t *, post_op_attr *);
 void nnop_wcc_data_err(nnode_t *, wcc_data *);
@@ -194,6 +197,7 @@ typedef struct {
 	    caller_context_t *, uio_t *, int);
 	int (*ndo_write)(void *, nnode_io_flags_t *, uio_t *, int, cred_t *,
 	    caller_context_t *, wcc_data *);
+	int (*ndo_remove_obj)(void *);
 	void (*ndo_io_release)(void *, nnode_io_flags_t, caller_context_t *);
 	void (*ndo_post_op_attr)(void *, post_op_attr *);
 	void (*ndo_wcc_data_err)(void *, wcc_data *);
@@ -236,7 +240,7 @@ typedef struct {
 
 struct exportinfo;
 
-extern nnode_error_t (*nnode_from_fh_ds)(nnode_t **, nfs_fh4 *);
+extern nnode_error_t (*nnode_from_fh_ds)(nnode_t **, struct mds_ds_fh *);
 nnode_error_t nnode_from_fh_v41(nnode_t **, nfs_fh4 *);
 nnode_error_t nnode_from_fh_v4(nnode_t **, nfs_fh4 *);
 nnode_error_t nnode_from_fh_v3(nnode_t **, nfs_fh3 *, struct exportinfo *);
@@ -248,6 +252,19 @@ void nnode_mod_init(void);
 int nnode_mod_fini(void);
 void nnode_vn_init(void);
 void nnode_vn_fini(void);
+
+/* nnode flag setting functions */
+
+int nnode_set_flag(nnode_t *, uint32_t);
+int nnode_clear_flag(nnode_t *, uint32_t);
+
+/* nnode flags */
+#define	NNODE_OBJ_REMOVE_IN_PROGRESS	0x01
+#define	NNODE_OBJ_REMOVED		0x02
+
+#define	NNODE_VALID_FLAG_BITS (\
+    NNODE_OBJ_REMOVE_IN_PROGRESS | \
+    NNODE_OBJ_REMOVED)
 
 /* nnode teardown function */
 int nnode_teardown_by_instance();

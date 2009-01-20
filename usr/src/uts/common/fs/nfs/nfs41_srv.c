@@ -79,8 +79,10 @@
 #include <nfs/nfs4_attrmap.h>
 #include <nfs/nfs4_srv_attr.h>
 #include <nfs/mds_state.h>
+#include <nfs/mds_odl.h>
 
 #include <nfs/nfs41_filehandle.h>
+#include <nfs/ctl_mds_clnt.h>
 
 #define	RFS4_MAXLOCK_TRIES 4	/* Try to get the lock this many times */
 static int rfs4_maxlock_tries = RFS4_MAXLOCK_TRIES;
@@ -2845,12 +2847,12 @@ mds_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 
 	/*
-	 * Check exportinfo only if it's a nfs41_fh_fmt_t filehandle.
+	 * Check exportinfo only if it's a FH41_TYPE_NFS filehandle.
 	 * If the filehandle is otherwise incorrect,
 	 * nnode_from_fh_v41() will return an error.
 	 */
-	if (args->object.nfs_fh4_len == sizeof (*fhp)) {
-		fhp = (nfs41_fh_fmt_t *)args->object.nfs_fh4_val;
+	fhp = (nfs41_fh_fmt_t *)args->object.nfs_fh4_val;
+	if (fhp->type == FH41_TYPE_NFS) {
 		exp_fid.fid_len = fhp->fh.v1.export_fid.len;
 		bcopy(fhp->fh.v1.export_fid.val, exp_fid.fid_data,
 		    exp_fid.fid_len);
@@ -2873,7 +2875,7 @@ mds_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	}
 	cs->vp = nnop_io_getvp(cs->nn);
 
-	if (fhp != NULL) {
+	if (fhp->type == FH41_TYPE_NFS) {
 		if ((resp->status = call_checkauth4(cs, req)) != NFS4_OK) {
 			VN_RELE(cs->vp);
 			*cs->statusp = resp->status;
@@ -3162,6 +3164,56 @@ mds_lookup_and_findfile(vnode_t *dvp, char *nm, vnode_t **vpp,
 	return (fp);
 }
 
+static int
+do_ctl_mds_remove(vnode_t *vp, rfs4_file_t *fp, compound_state_t *cs)
+{
+	fid_t fid;
+	nfs41_fid_t nfs41_fid;
+	int error = 0;
+
+	/*
+	 * Use the file layout to determine which data servers to
+	 * send DS_REMOVEs to.  If the layout is not cached in the
+	 * rfs4_file_t either this means that we do not have a layout
+	 * or it needs to be read in from disk.  Right now, we do not
+	 * attempt to read the layout in from disk, but future phases
+	 * of REMOVE handling will take * this into consideration.
+	 *
+	 * Known Problems with this implementation of REMOVE:
+	 * 1. Not attempting to read a layout * from disk could mean
+	 * that if an on-disk layout did exist, storage on the data
+	 * servers will not be freed.  Although, the implementation
+	 * doesn't currently persistenly store layouts so we'll never
+	 * run into this situation.
+	 *
+	 * 2. The server populates the layout stored in the rfs4_file_t
+	 * when it receives a LAYOUTGET.  If the file has been written
+	 * (perhaps in a past server instance), but no clients have
+	 * issued new LAYOUTGETs, we will not have a cached layout and
+	 * we will not free space on the data servers.
+	 *
+	 * 3. If any of the DS_REMOVE calls to the data servers fail
+	 * the errors are ignored and will not be retried.  This may
+	 * cause leaked space on the the data server.
+	 */
+	if (fp->flp != NULL) {
+		error = vop_fid_pseudo(vp, &fid);
+		if (error) {
+			DTRACE_PROBE(nfss__e__vop_fid_pseudo_failed);
+			return (error);
+		} else {
+			nfs41_fid.len = fid.fid_len;
+			bcopy(fid.fid_data, nfs41_fid.val, nfs41_fid.len);
+		}
+
+		error = ctl_mds_clnt_remove_file(cs->instp, cs->exi->exi_fsid,
+		    nfs41_fid, fp->flp);
+	} else
+		DTRACE_PROBE(nfss__i__layout_is_null_cannot_remove);
+
+	return (error);
+}
+
 /*
  * remove: args: CURRENT_FH: directory; name.
  *	res: status. If success - CURRENT_FH unchanged, return change_info
@@ -3354,11 +3406,18 @@ mds_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 				va.va_mask = AT_NLINK;
 				if (!VOP_GETATTR(tvp, &va, 0, cs->cr,
 				    &ct) && va.va_nlink == 0) {
-					/* Remove state on file remove */
 					if (in_crit) {
 						nbl_end_crit(vp);
 						in_crit = 0;
 					}
+
+					/*
+					 * Remove objects on data servers.
+					 * Ignore errors for now..
+					 */
+					(void) do_ctl_mds_remove(tvp, fp, cs);
+
+					/* Remove state on file remove */
 					rfs4_close_all_state(fp);
 				}
 				VN_RELE(tvp);
@@ -7787,13 +7846,12 @@ final:
  * XXXX: Needs to pass in MDS_SID
  */
 extern bool_t xdr_ds_fh_fmt(XDR *, mds_ds_fh *);
-static int
-mds_alloc_ds_fh(struct compound_state *cs, nfs_fh4 *fhp)
+int
+mds_alloc_ds_fh(fsid_t fsid, nfs41_fid_t fid, nfs_fh4 *fhp)
 {
-	nfs41_fh_fmt_t *mds_fh = (nfs41_fh_fmt_t *)cs->fh.nfs_fh4_val;
 	mds_ds_fh dsfh;
-
 	unsigned long hostid = 0;
+
 	(void) ddi_strtoul(hw_serial, NULL, 10, &hostid);
 
 	bzero(&dsfh, sizeof (mds_ds_fh));
@@ -7802,14 +7860,24 @@ mds_alloc_ds_fh(struct compound_state *cs, nfs_fh4 *fhp)
 	dsfh.type = FH41_TYPE_DMU_DS;
 	dsfh.fh.v1.mds_id = (uint64_t)hostid;
 
-	dsfh.fh.v1.fsid.major    = cs->exi->exi_fsid.val[0];
-	dsfh.fh.v1.fsid.minor    = cs->exi->exi_fsid.val[1];
+	/*
+	 * XXX - Still need the MDS SID portion of the
+	 * file handle to be filled in.
+	 */
+	/*
+	 * Use the FSID for the MDS Dataset ID for now.  In the future
+	 * the MDS Dataset ID will be made up of information from the
+	 * ZFS dataset (i.e. dataset guid) on the MDS.  Regardless,
+	 * the mds_dataset_id portion of the file handle is opaque so
+	 * we can put what we want there (as long as it identifies the
+	 * MDS file system).
+	 */
+	dsfh.fh.v1.mds_dataset_id.len = sizeof (fsid);
+	bcopy(&fsid, dsfh.fh.v1.mds_dataset_id.val,
+	    dsfh.fh.v1.mds_dataset_id.len);
 
-	dsfh.fh.v1.mds_fid.mds_fid_len = mds_fh->fh.v1.obj_fid.len;
-	bcopy(mds_fh->fh.v1.obj_fid.val,
-	    dsfh.fh.v1.mds_fid.mds_fid_val,
-	    dsfh.fh.v1.mds_fid.mds_fid_len);
-
+	dsfh.fh.v1.mds_fid.len = fid.len;
+	bcopy(fid.val, dsfh.fh.v1.mds_fid.val, fid.len);
 
 	if (!xdr_encode_ds_fh(&dsfh, fhp))
 		return (EINVAL);
@@ -7854,8 +7922,6 @@ fake_spe(nfs_server_instance_t *instp, mds_layout_t **flp)
 nfsstat4
 mds_get_flo(struct compound_state *cs, mds_layout_t **flopp)
 {
-	extern int mds_get_odl(vnode_t *, struct mds_layout **);
-
 	rfs4_file_t *fp;
 
 	ASSERT(cs->vp);
@@ -7956,10 +8022,14 @@ mds_fetch_layout(struct compound_state *cs,
 	 * product.
 	 */
 	for (i = 0; i < lp->stripe_count; i++) {
+		nfs41_fid_t fid =
+		    ((nfs41_fh_fmt_t *)cs->fh.nfs_fh4_val)->fh.v1.obj_fid;
+
 		/*
 		 * Build DS Filehandles.
 		 */
-		err = mds_alloc_ds_fh(cs, &(nfl_fh_list[i]));
+		err = mds_alloc_ds_fh(cs->exi->exi_fsid, fid,
+		    &(nfl_fh_list[i]));
 		if (err) {
 			kmem_free(nfl_fh_list, nfl_size);
 			return (NFS4ERR_LAYOUTUNAVAILABLE);

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -46,7 +46,6 @@ const NFS_FH4MAXDATA		= 26;
  * Control Protocol identifier
  */
 typedef uint64_t	ds_id;
-typedef uint64_t	mds_dataset_id;
 typedef uint64_t	ds_verifier;
 
 enum ds_status {
@@ -54,15 +53,16 @@ enum ds_status {
       	DSERR_ACCESS,
 	DSERR_ATTR_NOTSUPP,
       	DSERR_BAD_COOKIE,
-      	DSERR_BAD_FH,
+      	DSERR_BADHANDLE,
 	DSERR_BAD_MDSSID,
       	DSERR_BAD_STATEID,
       	DSERR_EXPIRED,
       	DSERR_FHEXPIRED,
       	DSERR_GRACE,
       	DSERR_INVAL,
+	DSERR_IO,
 	DSERR_NOENT,
-      	DSERR_NOT_AUTH,
+	DSERR_NOT_AUTH,
       	DSERR_NOSPC,
       	DSERR_NOTSUPP,
       	DSERR_OLD_STATEID,
@@ -645,42 +645,65 @@ default:
  *   represents the type (and by virtue scope) of state invalidation
  *   that should occur at the DS.
  *
- *
+ * Examples of when the different invalidate types will be used are as follows:
+ * 	DS_INVALIDATE_ALL - Used on nfs/server service offlined on the MDS
+ *	DS_INVALIDATE_CLIENTID - Used on client lease (with the MDS) expiration
+ *	DS_INVALIDATE_LAYOUT_BY_CLIENT - Used on LAYOUTRETURN when
+ *	  invalidating all layouts held by a client
+ *	DS_INVALIDATE_LAYOUT_BY_FH - Used on REMOVE issued from client to MDS
+ *	DS_INVALIDATE_LAYOUT_BY_STATEID - Used on LAYOUTRETURN when
+ *	  invalidating a specific layout held by a client
+ *	DS_INVALIDATE_MDS_DATASET_ID - Used on unshare of MDS FS
+ *	DS_INVALIDATE_STATEID - Used on CLOSE, UNLOCK, DELEGRETURN issued from
+ *	  client to MDS
  */
 enum ds_invalidate_type {
       	DS_INVALIDATE_ALL,
-      	DS_INVALIDATE_LAYOUT,
-      	DS_INVALIDATE_MDS_DATASET_ID,
       	DS_INVALIDATE_CLIENTID,
+	DS_INVALIDATE_LAYOUT_BY_CLIENT,
+      	DS_INVALIDATE_LAYOUT_BY_FH,
+      	DS_INVALIDATE_LAYOUT_BY_STATEID,
+      	DS_INVALIDATE_MDS_DATASET_ID,
       	DS_INVALIDATE_STATEID
 };
 
-struct ds_inval_stateid {
-      	stateid4 stateid;
+struct ds_inval_layout_by_clid {
+      	clientid4 mds_clid;
       	nfs_fh4 fh;
 };
 
-struct ds_inval_layout {
-      	clientid4 mds_clid;
+struct ds_inval_layout_by_lo_stateid {
+	stateid4 layout_stateid; /* MUST be layout stateid */
+	nfs_fh4 fh;
+};
+
+struct ds_inval_stateid {
+      	stateid4 stateid; /* MUST be open, lock or delegation stateid */
       	nfs_fh4 fh;
 };
 
 union DS_INVALIDATEargs switch (ds_invalidate_type obj) {
 
-case DS_INVALIDATE_LAYOUT:
-      	ds_inval_layout layout;
+case DS_INVALIDATE_ALL:
+      	void;
+
+case DS_INVALIDATE_CLIENTID:
+      	clientid4  clid;
+
+case DS_INVALIDATE_LAYOUT_BY_CLIENT:
+      	ds_inval_layout_by_clid layout;
+
+case DS_INVALIDATE_LAYOUT_BY_FH:
+	nfs_fh4 fh;
+
+case DS_INVALIDATE_LAYOUT_BY_STATEID:
+	ds_inval_layout_by_lo_stateid lo_stateid;
 
 case DS_INVALIDATE_MDS_DATASET_ID:
       	mds_dataset_id	dataset_id;
 
 case DS_INVALIDATE_STATEID:
       	ds_inval_stateid stateid;
-
-case DS_INVALIDATE_CLIENTID:
-      	clientid4  clid;
-
-case DS_INVALIDATE_ALL:
-      	void;
 };
 
 struct DS_INVALIDATEres {
@@ -835,27 +858,32 @@ default:
       	void;
 };
 
-/*
- * DS_REMOVE:
- *
- * Remove object(s) or entire fsid at the data-server
- *
- */
-enum ds_rm_type {
-      	DS_RM_OBJ,
-      	DS_RM_MDS_DATASET_ID
+%/*
+% * CTL_MDS_REMOVE:
+% *
+% * Sent from MDS to DS to remove object(s) or entire fsid at the data-server
+% *
+% */
+enum ctl_mds_rm_type {
+      	CTL_MDS_RM_OBJ,
+      	CTL_MDS_RM_MDS_DATASET_ID
 };
 
-union DS_REMOVEargs switch (ds_rm_type type) {
-case DS_RM_OBJ:
+struct ctl_mds_remove_mds_dataset_id {
+	mds_sid		mds_sid;
+	mds_dataset_id  dataset_id<>;
+};
+
+union CTL_MDS_REMOVEargs switch (ctl_mds_rm_type type) {
+case CTL_MDS_RM_OBJ:
       	nfs_fh4		obj<>;
-case DS_RM_MDS_DATASET_ID:
-      	mds_dataset_id  dataset_id<>;
+case CTL_MDS_RM_MDS_DATASET_ID:
+	ctl_mds_remove_mds_dataset_id	dataset_info;
 default:
       	void;
 };
 
-struct DS_REMOVEres {
+struct CTL_MDS_REMOVEres {
       	ds_status	status;
 };
 
@@ -949,8 +977,12 @@ default:
       	void;
 };
 
-program PNFSCTLMDS {
-	version PNFSCTLMDS_V1 {
+%/*
+% * The PNFS_CTL_MDS RPC program defines the control protocol messages that
+% * are sent from the MDS to the DS.
+% */
+program PNFS_CTL_MDS {
+	version PNFS_CTL_MDS_V1 {
 
 		void
 		    DSPROC_NULL(void) = 0;
@@ -982,8 +1014,8 @@ program PNFSCTLMDS {
 		DS_READres
 		    DS_READ(DS_READargs) = 9;
 
-		DS_REMOVEres
-		    DS_REMOVE(DS_REMOVEargs) = 10;
+		CTL_MDS_REMOVEres
+		    CTL_MDS_REMOVE(CTL_MDS_REMOVEargs) = 10;
 
 		DS_SETATTRres
 		    DS_SETATTR(DS_SETATTRargs) = 11;

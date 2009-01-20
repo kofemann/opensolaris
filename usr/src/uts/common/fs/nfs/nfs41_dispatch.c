@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -349,6 +349,10 @@ rfs41_compound_state_alloc(nfs_server_instance_t *instp)
 static void
 rfs41_compound_state_free(compound_state_t *cs)
 {
+	if (cs->nn != NULL)
+		nnode_rele(&cs->nn);
+	if (cs->vp != NULL)
+		VN_RELE(cs->vp);
 	kmem_cache_free(rfs41_compound_state_cache, cs);
 }
 

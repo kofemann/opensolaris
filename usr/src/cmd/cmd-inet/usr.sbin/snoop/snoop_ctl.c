@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -179,7 +179,7 @@ static op_info_t pnfsctlmds_ops[] = {
 	    mds_pnfsstat_args, mds_pnfsstat_res},
 	{"MDS_READ", "Read a range of bytes from a DS",
 	    mds_read_args, mds_read_res},
-	{"MDS_REMOVE", "Remove object(s) or entire fsid at the DS",
+	{"CTL_MDS_REMOVE", "Remove object(s) or entire fsid at the DS",
 	    mds_remove_args, mds_remove_res},
 	{"MDS_SETATTR", "Set/Store attributes for the specified"
 	    " object at the DS",
@@ -397,7 +397,7 @@ detail_mds_sid(mds_sid *ms, int index, char *indent)
 
 	sprintf(get_line(0, 0), "%s    mds_sid%s", indent, buf);
 	sprintf(get_line(0, 0), "%s        %s", indent,
-	    tohex(ms->mds_sid_val, ms->mds_sid_len));
+	    tohex(ms->val, ms->len));
 }
 
 static bool_t
@@ -437,8 +437,8 @@ detail_ds_guid_map(uint_t len, ds_guid_map *dg, char *legend, char *indent)
 		xdr_free(xdr_ds_zfsguid, (char *)&zfsguid);
 
 		for (j = 0; j < dg[i].mds_sid_array.mds_sid_array_len; j++) {
-			detail_mds_sid(&dg[i].mds_sid_array.mds_sid_array_val[j],
-			    j, indent);
+			detail_mds_sid(&dg[i].mds_sid_array.
+			    mds_sid_array_val[j], j, indent);
 		}
 	}
 
@@ -1393,31 +1393,31 @@ mds_read_res(char *line, bool_t summary)
 static void
 mds_remove_args(char *line, bool_t summary)
 {
-	DS_REMOVEargs	args;
+	CTL_MDS_REMOVEargs	args;
 
 	memset(&args, '\0', sizeof (args));
-	if (!xdr_DS_REMOVEargs(&xdrm, &args))
+	if (!xdr_CTL_MDS_REMOVEargs(&xdrm, &args))
 		longjmp(xdr_err, 1);
 
 	if (summary) {
 	} else {
 	}
 
-	xdr_free(xdr_DS_REMOVEargs, (char *)&args);
+	xdr_free(xdr_CTL_MDS_REMOVEargs, (char *)&args);
 }
 
 static void
 mds_remove_res(char *line, bool_t summary)
 {
-	DS_REMOVEres	res;
+	CTL_MDS_REMOVEres	res;
 
 	memset(&res, '\0', sizeof (res));
-	if (!xdr_DS_REMOVEres(&xdrm, &res))
+	if (!xdr_CTL_MDS_REMOVEres(&xdrm, &res))
 		longjmp(xdr_err, 1);
 
 	if (res.status != DS_OK) {
 		print_status(line, res.status);
-		xdr_free(xdr_DS_REMOVEres, (char *)&res);
+		xdr_free(xdr_CTL_MDS_REMOVEres, (char *)&res);
 		return;
 	}
 
@@ -1425,7 +1425,7 @@ mds_remove_res(char *line, bool_t summary)
 	} else {
 	}
 
-	xdr_free(xdr_DS_REMOVEres, (char *)&res);
+	xdr_free(xdr_CTL_MDS_REMOVEres, (char *)&res);
 }
 
 static void

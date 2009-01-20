@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -52,8 +52,20 @@ xdr_mds_sid_content(XDR *xdrs, mds_sid_content *objp)
 bool_t
 xdr_mds_sid(XDR *xdrs, mds_sid *objp)
 {
-	if (!xdr_bytes(xdrs, (char **)&objp->mds_sid_val,
-	    (uint_t *)&objp->mds_sid_len, ~0))
+	if (!xdr_bytes(xdrs, (char **)&objp->val,
+	    (uint_t *)&objp->len, ~0))
+		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_mds_dataset_id(XDR *xdrs, mds_dataset_id *objp)
+{
+	char *ptr;
+
+	ptr = &objp->val[0];
+	if (!xdr_bytes(xdrs, &ptr,
+	    (uint_t *)&objp->len, NFS_FH4MAXDATA))
 		return (FALSE);
 	return (TRUE);
 }
@@ -71,16 +83,11 @@ xdr_ds_fh_v1(XDR *xdrs, ds_fh_v1 *objp)
 		return (FALSE);
 	if (!xdr_mds_sid(xdrs, &objp->mds_sid))
 		return (FALSE);
-	if (!xdr_uint64_t(xdrs, &objp->mds_dataset_id))
-		return (FALSE);
-	if (!xdr_uint64_t(xdrs, &objp->fsid.major))
-		return (FALSE);
-	if (!xdr_uint64_t(xdrs, &objp->fsid.minor))
+	if (!xdr_mds_dataset_id(xdrs, &objp->mds_dataset_id))
 		return (FALSE);
 
-	ptr = &objp->mds_fid.mds_fid_val[0];
-	if (!xdr_bytes(xdrs, &ptr,
-	    (uint_t *)&objp->mds_fid.mds_fid_len, DS_MAXFIDSZ))
+	ptr = &objp->mds_fid.val[0];
+	if (!xdr_bytes(xdrs, &ptr, (uint_t *)&objp->mds_fid.len, DS_MAXFIDSZ))
 		return (FALSE);
 
 	return (TRUE);
@@ -119,7 +126,7 @@ xdr_ds_fh_fmt(XDR *xdrs, mds_ds_fh *objp)
 		break;
 	default:
 #ifdef _KERNEL
-		DTRACE_PROBE(xdr__e__unsuported_fh_type);
+		DTRACE_PROBE(xdr__e__unsupported_fh_type);
 #endif
 		return (FALSE);
 	}

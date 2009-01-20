@@ -180,6 +180,19 @@ nnop_wcc_data_err(nnode_t *nn, wcc_data *wcc)
 }
 
 /*
+ * nnop_remove_obj
+ */
+nnode_error_t
+nnop_remove_obj(nnode_t *np)
+{
+	if ((np->nn_data_ops == NULL) ||
+	    (np->nn_data_ops->ndo_remove_obj == NULL))
+		return (NNODE_ERROR_NOTIMPL);
+
+	return (*(np)->nn_data_ops->ndo_remove_obj)(np->nn_data_ops_data);
+}
+
+/*
  * Known implementations:
  * nnode_vn_io_getvp
  */

@@ -19,7 +19,7 @@
 # CDDL HEADER END
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
@@ -73,7 +73,7 @@ clean:
 lint:	lint_SRCS
 
 snoop_ctl.o: snoop_ctl.c $(DERIVED_HDRS)
-	$(COMPILE.c) -o $@ snoop_ctl.c
+	$(COMPILE.c) -DUSE_FOR_SNOOP -o $@ snoop_ctl.c
 
 ds_filehandle_xdr.c: $(NFS_DIR)/ds_filehandle_xdr.c
 	$(CP) $(NFS_DIR)/ds_filehandle_xdr.c ds_filehandle_xdr.c

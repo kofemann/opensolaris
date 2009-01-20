@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -41,7 +41,6 @@
 #include <sys/cmn_err.h>
 #include <sys/utsname.h>
 #include <sys/systeminfo.h>
-
 
 rfs4_client_t *mds_findclient(nfs_client_id4 *, bool_t *, rfs4_client_t *);
 
@@ -144,13 +143,13 @@ ds_reportavail_free(DS_REPORTAVAILres *resp)
 			    res_ok->guid_map.guid_map_val[i].mds_sid_array.
 			    mds_sid_array_len;
 
-			/* Free the contents of the mds_ppid_array */
+			/* Free the contents of the mds_sid_array */
 			for (j = 0; j < sid_array_len; j++) {
-				/* Free the mds_ppid_content */
-				kmem_free(sid_array[j].mds_sid_val,
-				    sid_array[j].mds_sid_len);
+				/* Free the mds_sid_content */
+				kmem_free(sid_array[j].val,
+				    sid_array[j].len);
 
-				/* Free the mds_ppid */
+				/* Free the mds_sid */
 				kmem_free(&sid_array[j], sizeof (mds_sid));
 			}
 		}
@@ -165,7 +164,7 @@ nullfree(void)
 {
 }
 
-static mds_ds_fh *
+mds_ds_fh *
 get_mds_ds_fh(nfs_fh4 *otw_fh)
 {
 	XDR x;
@@ -189,24 +188,24 @@ ds_fhtovp(mds_ds_fh *fhp, ds_status *statp)
 	vnode_t *vp = NULL;
 	int error;
 	fsid_t fs_id;
+	fsid4 *otw_fsidp = (fsid4 *)fhp->fh.v1.mds_dataset_id.val;
 	fid_t fidp;
 	vfs_t *vfsp;
 
-
-	fs_id.val[0] = fhp->fh.v1.fsid.major;
-	fs_id.val[1] = fhp->fh.v1.fsid.minor;
+	fs_id.val[0] = otw_fsidp->major;
+	fs_id.val[1] = otw_fsidp->minor;
 
 	vfsp = getvfs(&fs_id);
 	if (vfsp == NULL) {
-		*statp = DSERR_BAD_FH;
+		*statp = DSERR_BADHANDLE;
 		return (NULL);
 	}
 
 	bzero(&fs_id, sizeof (fs_id));
 
-	fidp.fid_len = fhp->fh.v1.mds_fid.mds_fid_len;
+	fidp.fid_len = fhp->fh.v1.mds_fid.len;
 
-	bcopy(fhp->fh.v1.mds_fid.mds_fid_val,
+	bcopy(fhp->fh.v1.mds_fid.val,
 	    fidp.fid_data, fidp.fid_len);
 
 	error = VFS_VGET(vfsp, &vp, &fidp);
@@ -215,7 +214,7 @@ ds_fhtovp(mds_ds_fh *fhp, ds_status *statp)
 	VFS_RELE(vfsp);
 
 	if (error != 0) {
-		*statp = DSERR_BAD_FH;
+		*statp = DSERR_BADHANDLE;
 		return (NULL);
 	}
 
@@ -293,7 +292,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 */
 	if ((fhp = get_mds_ds_fh(&argp->fh)) == NULL) {
 		/* decode error */
-		resp->status = DSERR_BAD_FH;
+		resp->status = DSERR_BADHANDLE;
 		return;
 	}
 
@@ -303,7 +302,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 */
 	if (fhp->type != FH41_TYPE_DMU_DS ||
 	    fhp->vers != DS_FH_v1) {
-		resp->status = DSERR_BAD_FH;
+		resp->status = DSERR_BADHANDLE;
 		return;
 	}
 
@@ -313,7 +312,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 */
 	fp = mds_findfile_by_dsfh(cs.instp, fhp);
 	if (fp == NULL) {
-		resp->status = DSERR_BAD_FH;
+		resp->status = DSERR_BADHANDLE;
 		return;
 	}
 
@@ -740,41 +739,6 @@ out:
 	return (error);
 }
 
-int
-mds_ds_call(ds_addrlist_t *dp, rpcproc_t proc,
-    xdrproc_t xdrarg, void * argp,
-    xdrproc_t xdrres, void * resp)
-{
-	enum clnt_stat status;
-	struct timeval wait;
-	int error = 0;
-	CLIENT *client;
-
-	wait.tv_sec = 5;
-	wait.tv_usec = 0;
-
-	error = clnt_tli_kcreate(dp->dev_knc, dp->dev_nb,
-	    PNFSCTLMDS, PNFSCTLMDS_V1, 0, 0, CRED(), &client);
-	if (error)
-		goto out;
-
-	status = CLNT_CALL(client, proc,
-	    xdrarg, argp,
-	    xdrres, resp,
-	    wait);
-
-	if (status != RPC_SUCCESS) {
-		cmn_err(CE_WARN, "CLNT_CALL() mds protocol to ds failed: %d",
-		    status);
-		error = EIO;
-	}
-
-	CLNT_DESTROY(client);
-
-out:
-	return (error);
-}
-
 ds_status
 mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
     DS_REPORTAVAILres  *resp)
@@ -861,8 +825,8 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 				return (DSERR_XDR);
 			}
 			sid = kmem_alloc(sizeof (mds_sid), KM_SLEEP);
-			sid->mds_sid_len = xdr_size;
-			sid->mds_sid_val = xdr_buffer;
+			sid->len = xdr_size;
+			sid->val = xdr_buffer;
 
 			/*
 			 * There is only one MDS SID associated with this
@@ -982,7 +946,7 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 	 * XXXX: trash/invalidate/recall associated
 	 * XXXX: state.. of course the device information
 	 * XXXX: may have not changed (but ds_verifier would have)
-	 * XXXX: Hmmm..perhaphs the correct place is in ds_reportavail
+	 * XXXX: Hmmm..perhaps the correct place is in ds_reportavail
 	 * XXXX: when we notice an update (as opposed to add)
 	 */
 	resp->status = DS_OK;

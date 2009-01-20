@@ -20,7 +20,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # This required package information file contains a list of package contents.
@@ -427,6 +427,7 @@ f none usr/include/nfs/ds_filehandle.h 644 root bin
 f none usr/include/nfs/ds.h 644 root bin
 f none usr/include/nfs/ds_prot.h 644 root bin
 f none usr/include/nfs/ds_nfs_xdr.h 644 root bin
+f none usr/include/nfs/ctl_mds_clnt.h 644 root bin
 f none usr/include/nfs/nfs_acl.h 644 root bin
 f none usr/include/nfs/nfs_clnt.h 644 root bin
 f none usr/include/nfs/nfs_cmd.h 644 root bin

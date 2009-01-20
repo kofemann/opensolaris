@@ -19,12 +19,13 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #include <sys/list.h>
-#include <sys/utsname.h>
+#include <sys/systeminfo.h>
+#include <sys/sunddi.h>
 #include <sys/avl.h>
 #include <nfs/nfs.h>
 #include <nfs/nfs4.h>
@@ -33,7 +34,7 @@
 #include <sys/dserv.h>
 #include <sys/dserv_impl.h>
 #include <sys/systm.h>
-#include <sys/cmn_err.h>
+#include <sys/sdt.h>
 #include <nfs/ds.h>
 #include <sys/dmu.h>
 #include <sys/spa.h>
@@ -126,13 +127,41 @@ dserv_mds_get_my_instance()
 	return (dserv_mds_get_instance(myproc->p_pid));
 }
 
+static int
+dserv_atoi(char *cp)
+{
+	int n;
+
+	n = 0;
+	while (*cp != '\0') {
+		n = n * 10 + (*cp - '0');
+		cp++;
+	}
+
+	return (n);
+}
+
 static void
 dserv_mds_instance_init(dserv_mds_instance_t *inst)
 {
+	timespec32_t verf;
+
 	inst->dmi_ds_id = 0;
 	inst->dmi_mds_addr = NULL;
 	inst->dmi_mds_netid = NULL;
-	inst->dmi_verifier = (uintptr_t)curthread;
+
+	verf.tv_sec = dserv_atoi(hw_serial);
+	if (verf.tv_sec != 0) {
+		verf.tv_nsec = gethrestime_sec();
+	} else {
+		timespec_t tverf;
+
+		gethrestime(&tverf);
+		verf.tv_sec = (time_t)tverf.tv_sec;
+		verf.tv_nsec = tverf.tv_nsec;
+	}
+
+	inst->dmi_verifier = *(uint64_t *)&verf;
 	inst->dmi_teardown_in_progress = B_FALSE;
 }
 
@@ -272,26 +301,62 @@ dserv_mds_call(dserv_mds_instance_t *inst, rpcproc_t proc,
 	enum clnt_stat status;
 	struct timeval wait;
 	CLIENT *client;
-	int error = 0;
+	int again, error = 0, num_tries = 0;
 
 	error = dserv_mds_client_get(inst, &client);
 	if (error != 0)
 		return (error);
 
-	wait.tv_sec = 3;
-	wait.tv_usec = 0;
+	do {
+		again = 0;
+		wait.tv_sec = CTLDS_TIMEO;
+		wait.tv_usec = 0;
 
-	status = CLNT_CALL(client, proc,
-	    xdrarg, argp,
-	    xdrres, resp,
-	    wait);
+		status = CLNT_CALL(client, proc,
+		    xdrarg, argp,
+		    xdrres, resp,
+		    wait);
+
+		/*
+		 * Check the easy cases: The call succeeded or failed
+		 * miserably and we can't recover
+		 */
+		if (status == RPC_SUCCESS)
+			goto out;
+
+		if (IS_UNRECOVERABLE_RPC(status)) {
+			error = EIO;
+			goto out;
+		}
+
+		/*
+		 * Since the error is recoverable, retry the request.  If we
+		 * are above our threshold of retries to send, set the error
+		 * appropriately and return.
+		 */
+		if (num_tries < DS_TO_MDS_CTRL_PROTO_RETRIES) {
+			num_tries++;
+			again = 1;
+		} else {
+			switch (status) {
+			case RPC_TIMEDOUT:
+				error = ETIMEDOUT;
+				break;
+			case RPC_INTR:
+				error = EINTR;
+				break;
+			default:
+				error = EIO;
+				break;
+			}
+		}
+	} while (again);
+
+	if (status != RPC_SUCCESS)
+		DTRACE_PROBE1(dserv__e__ctlds_clnt_call_failed, int, status);
+
+out:
 	dserv_mds_client_return(inst, client);
-	if (status != RPC_SUCCESS) {
-		cmn_err(CE_WARN, "CLNT_CALL() ds protocol to mds failed: %d",
-		    status);
-		error = EIO;
-	}
-
 	return (error);
 }
 
@@ -301,9 +366,9 @@ dserv_open_root_objset_construct(void *voro, void *foo, int bar)
 {
 	open_root_objset_t *oro = voro;
 
-	list_create(&oro->oro_open_fsid_objsets,
-	    sizeof (open_fsid_objset_t),
-	    offsetof(open_fsid_objset_t, ofo_open_fsid_objset_node));
+	list_create(&oro->oro_open_mdsfs_objsets,
+	    sizeof (open_mdsfs_objset_t),
+	    offsetof(open_mdsfs_objset_t, omo_open_mdsfs_objset_node));
 
 	return (0);
 }
@@ -314,7 +379,7 @@ dserv_open_root_objset_destroy(void *voro, void *foo)
 {
 	open_root_objset_t *oro = voro;
 
-	list_destroy(&oro->oro_open_fsid_objsets);
+	list_destroy(&oro->oro_open_mdsfs_objsets);
 }
 
 void
@@ -334,9 +399,9 @@ dserv_mds_setup()
 	    dserv_open_root_objset_construct, dserv_open_root_objset_destroy,
 	    NULL,
 	    NULL, NULL, 0);
-	dserv_open_fsid_objset_cache =
-	    kmem_cache_create("dserv_open_fsid_objset_cache",
-	    sizeof (open_fsid_objset_t), 0,
+	dserv_open_mdsfs_objset_cache =
+	    kmem_cache_create("dserv_open_mdsfs_objset_cache",
+	    sizeof (open_mdsfs_objset_t), 0,
 	    NULL, NULL, NULL,
 	    NULL, NULL, 0);
 	mds_sid_map_cache =
@@ -391,28 +456,28 @@ dserv_mds_instance_teardown()
 	 */
 	if (!list_is_empty(&inst->dmi_datasets)) {
 		open_root_objset_t *tmp;
-		open_fsid_objset_t *tmp_fsid;
+		open_mdsfs_objset_t *tmp_mdsfs;
 
 		/*
 		 * Traverse the list of open object sets and close them.
 		 * While doing that, remove each entry from the list
 		 * and free memory allocated to it.  Outer loop frees
-		 * root object sets.  Inner loop frees per-FSID
+		 * root object sets.  Inner loop frees per-MDS_FS
 		 * object sets.
 		 */
 		for (tmp = list_head(&inst->dmi_datasets); tmp != NULL;
 		    tmp = list_head(&inst->dmi_datasets)) {
 
-			for (tmp_fsid =
-			    list_head(&tmp->oro_open_fsid_objsets);
-			    tmp_fsid != NULL; tmp_fsid =
-			    list_head(&tmp->oro_open_fsid_objsets)) {
-				dmu_objset_close(tmp_fsid->ofo_osp);
-				list_remove(&tmp->oro_open_fsid_objsets,
-				    tmp_fsid);
+			for (tmp_mdsfs =
+			    list_head(&tmp->oro_open_mdsfs_objsets);
+			    tmp_mdsfs != NULL; tmp_mdsfs =
+			    list_head(&tmp->oro_open_mdsfs_objsets)) {
+				dmu_objset_close(tmp_mdsfs->omo_osp);
+				list_remove(&tmp->oro_open_mdsfs_objsets,
+				    tmp_mdsfs);
 				kmem_cache_free(
-				    dserv_open_fsid_objset_cache,
-				    tmp_fsid);
+				    dserv_open_mdsfs_objset_cache,
+				    tmp_mdsfs);
 			}
 
 			dmu_objset_close(tmp->oro_osp);
@@ -479,7 +544,7 @@ dserv_mds_teardown()
 	 */
 	kmem_cache_destroy(dserv_mds_instance_cache);
 	kmem_cache_destroy(dserv_open_root_objset_cache);
-	kmem_cache_destroy(dserv_open_fsid_objset_cache);
+	kmem_cache_destroy(dserv_open_mdsfs_objset_cache);
 	kmem_cache_destroy(mds_sid_map_cache);
 	kmem_cache_destroy(dserv_uaddr_cache);
 	kmem_cache_destroy(dserv_mds_handle_cache);
@@ -636,19 +701,23 @@ out:
 }
 
 /*
+ * XXX Please Note: This function is not yet finished.  If you are confused
+ * by this function... Don't worry it will be come more clear.
+ *
  * populate_mds_sid_cache - Reads the on-disk MDS SID information and
  * populates the in-core representation of this.
  *
  * osp - The object set pointer of a root pNFS dataset.
- *       ObjectID 1 in this dataset is where the MDS SID information resides.
- *	 The data is in the format of an xdr encoded array of MDS SIDSs.
+ *       DMU_PNFS_METADATA_OBJECT represents the DMU Object ID of the
+ *	 object where the MDS SID information resides.
+ *	 The data is in the format of an xdr encoded array of MDS SIDs,
+ *	 but that fact will be hidden from this layer by an abstract
+ *	 interface (XXX yet to be implemented).
  *
  * inst - The caller's instance information.
  *
  * Other info:
  * Upon calling this function the inst->dmi_content_lock lock is held.
- *
- * Please note: This function is not yet finished.
  */
 /*ARGSUSED*/
 int
@@ -662,7 +731,7 @@ populate_mds_sid_cache(objset_t *osp, dserv_mds_instance_t *inst)
 	/*
 	 * Determine the size of the object so we know how much to read.
 	 */
-	error = dmu_object_info(osp, 1, &dmu_obj_info);
+	error = dmu_object_info(osp, DMU_PNFS_METADATA_OBJECT, &dmu_obj_info);
 	if (error)
 		return (error);
 
@@ -673,14 +742,14 @@ populate_mds_sid_cache(objset_t *osp, dserv_mds_instance_t *inst)
 	size = dmu_obj_info.doi_physical_blks * 512;
 	buf = kmem_zalloc(size, KM_SLEEP);
 
-	error = dmu_read(osp, 1, 0, size, buf);
+	error = dmu_read(osp, DMU_PNFS_METADATA_OBJECT, 0, size, buf);
 	if (error) {
 		kmem_free(buf, size);
 		return (error);
 	}
-	/* Parse the data */
+	/* To Do: Parse the data */
 
-	/* Add entry to mds sid list */
+	/* To Do: Add entry to mds sid list */
 	return (error);
 }
 
@@ -777,7 +846,7 @@ dserv_mds_addport(const char *uaddr, const char *proto, const char *aname)
 	list_insert_tail(&inst->dmi_uaddrs, keep);
 	mutex_exit(&inst->dmi_content_lock);
 
-	(void) sprintf(in, "%s: %s:", uts_nodename(), aname);
+	(void) sprintf(in, "%s: %s:", hw_serial, aname);
 
 	inst->dmi_name = dserv_strdup(in);
 	bzero(&res, sizeof (res));
@@ -1004,7 +1073,7 @@ out:
 		if (dz->guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_len) {
 			kmem_free(dz->guid_map.ds_guid.ds_guid_u.
 			    zfsguid.zfsguid_val,
-		    	    dz->guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_len);
+			    dz->guid_map.ds_guid.ds_guid_u.zfsguid.zfsguid_len);
 		}
 
 		for (j = 0; j < dz->attrs.attrs_len; j++) {

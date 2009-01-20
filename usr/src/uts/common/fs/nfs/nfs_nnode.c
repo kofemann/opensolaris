@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -562,6 +562,41 @@ nnode_get_my_instance(void)
 	return (myproc->p_pid);
 }
 
+/*
+ * Function to set nnode flag.
+ * Returns 0 upon failure, 1 on success
+ */
+int
+nnode_set_flag(nnode_t *np, uint32_t flag)
+{
+	if (!(flag & NNODE_VALID_FLAG_BITS))
+		return (0);
+
+	mutex_enter(&np->nn_lock);
+	np->nn_flags |= flag;
+	mutex_exit(&np->nn_lock);
+
+	return (1);
+}
+
+/*
+ * Function to clear nnode flag.
+ * Returns 0 upon failure, 1 on success
+ */
+int
+nnode_clear_flag(nnode_t *np, uint32_t flag)
+{
+	if ((!flag & NNODE_VALID_FLAG_BITS))
+		return (0);
+
+	mutex_enter(&np->nn_lock);
+	np->nn_flags &= ~flag;
+	mutex_exit(&np->nn_lock);
+
+	return (1);
+}
+
+
 int
 nnode_find_or_create(nnode_t **npp, nnode_key_t *nkey, uint32_t hash,
     void *data, nnode_init_function_t nnbuild)
@@ -621,7 +656,6 @@ again:
 	 * create the nnode, as well as modify the AVL tree by
 	 * inserting the nnode.
 	 */
-
 	rc = nnode_build(npp, data, nnbuild);
 	if (rc == 0)
 		avl_insert(&bucket->nb_tree, *npp, where);
@@ -641,6 +675,23 @@ nnode_rele(nnode_t **npp)
 	/* use the atomics? */
 	mutex_enter(&np->nn_lock);
 	ASSERT(np->nn_refcount != 0);
+
+	/*
+	 * There should not be any other thread accessing
+	 * the nnode if the object has been removed.  If
+	 * the refcount on the nnode != 1 and NNODE_OBJ_REMOVED
+	 * is set, this is an error condition.  The object
+	 * should only be removed by the metadata server when
+	 * the last close is done.  We are only firing a DTrace
+	 * probe if this condition is met because it is possible
+	 * for a misbehaving client to access the data server
+	 * after a file has been closed.  We do not want a
+	 * a misbehaving client to crater the server.
+	 */
+	if ((np->nn_flags & NNODE_OBJ_REMOVED) && np->nn_refcount != 1)
+		DTRACE_PROBE1(nfssrv__e__unexpected_refcount, int,
+		    np->nn_refcount);
+
 	np->nn_refcount--;
 	np->nn_last_access = gethrtime();
 	if (np->nn_refcount == 0)

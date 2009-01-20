@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -442,7 +442,7 @@ nnode_from_fh_v41_nfs(nnode_t **npp, nfs_fh4 *fh4)
 	    nnode_build_v41));
 }
 
-nnode_error_t (*nnode_from_fh_ds)(nnode_t **, nfs_fh4 *) = NULL;
+nnode_error_t (*nnode_from_fh_ds)(nnode_t **, mds_ds_fh *) = NULL;
 
 nnode_error_t
 nnode_from_fh_v41(nnode_t **npp, nfs_fh4 *fh4)
@@ -459,7 +459,7 @@ nnode_from_fh_v41(nnode_t **npp, nfs_fh4 *fh4)
 	case FH41_TYPE_DMU_DS:
 		if (nnode_from_fh_ds == NULL)
 			return (ESTALE); /* XXX something else */
-		return (nnode_from_fh_ds(npp, fh4));
+		return (nnode_from_fh_ds(npp, (mds_ds_fh *)fh4->nfs_fh4_val));
 	default:
 		return (ESTALE); /* XXX badfh */
 	}
