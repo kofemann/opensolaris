@@ -408,6 +408,8 @@ f none usr/include/nfs/mapid.h 644 root bin
 f none usr/include/nfs/mds_odl.h 644 root bin
 f none usr/include/nfs/mount.h 644 root bin
 f none usr/include/nfs/nfs.h 644 root bin
+f none usr/include/nfs/range.h 644 root bin
+f none usr/include/nfs/range_impl.h 644 root bin
 f none usr/include/nfs/nfs4.h 644 root bin
 f none usr/include/nfs/nfs4_attr.h 644 root bin
 f none usr/include/nfs/nfs4_attrmap.h 644 root bin

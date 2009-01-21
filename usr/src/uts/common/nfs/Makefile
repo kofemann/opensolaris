@@ -64,6 +64,8 @@ HDRS=	export.h		\
 	mds_state.h		\
 	ds.h			\
 	ctl_mds_clnt.h		\
+	range.h			\
+	range_impl.h		\
 	nnode.h			\
 	nnode_impl.h		\
 	nnode_vn.h

@@ -1012,6 +1012,7 @@ NFS_OBJS +=	nfs_client.o		\
 		nfs_vnops.o		\
 		nfs_xdr.o		\
 		nfs_sys.o		\
+		nfs_range.o		\
 		nfs_strerror.o		\
 		nfs3_vfsops.o		\
 		nfs3_vnops.o		\
