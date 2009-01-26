@@ -38,9 +38,20 @@
 extern "C" {
 #endif
 
+#define	NFS_RANGE_MAX	(0xffffffffffffffff)
+
 struct nfs_range {
-	int nr_foo;
+	nfs_range_query_t nr_status;
+	krwlock_t nr_lock;
+	avl_tree_t nr_tree;
 };
+
+typedef struct {
+	uint64_t ns_off;
+	uint64_t ns_len;
+	uint64_t ns_end;
+	avl_node_t ns_avl;
+} nfs_subrange_t;
 
 #ifdef	__cplusplus
 }

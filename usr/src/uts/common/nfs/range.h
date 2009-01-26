@@ -69,10 +69,14 @@ extern "C" {
  * nfs_range_clear() - clear a sub-range of bytes
  *
  * nfs_range_set(range, offset, length, flags) sets the subrange,
- * specified by offset and length.
+ * specified by offset and length.  Returns the status of the entire
+ * range as NFS_RANGE_ALL, NFS_RANGE_SOME, or NFS_RANGE_NONE, depending
+ * on whether the entire range is now entirely set, partially set, or
+ * entirely clear.
  *
  * nfs_range_clear(range, offset, length, flags) clears the subrange,
- * specified by offset and length.
+ * specified by offset and length.  Returns the status of the entire
+ * range, the same as nfs_range_set().
  *
  * The "flags" field is reserved for future use.
  *
@@ -83,12 +87,16 @@ extern "C" {
  *
  * nfs_range_set(range, 0, 65536);
  *
+ * Since only the first 64k is set, NFS_RANGE_SOME is returned.
+ *
  * Clear the 2nd 4k chunk of the range, splitting the sub-range that was
  * set above
  *
  * nfs_range_clear(range, 4096, 4096);
  *
  * At this point, [0, 4095] is set, and [8192, 65535] is set.
+ * nfs_range_clear() returned NFS_RANGE_SOME, again because there were
+ * some offsets in the entire range set, but not all.
  *
  * Querying ranges
  * ---------------
@@ -104,6 +112,8 @@ extern "C" {
  * nfs_range_is_set(range, offsetp, lengthp, flags) determines if a sub-range
  * is set.  It returns NFS_RANGE_NONE, NFS_RANGE_SOME, or NFS_RANGE_ALL,
  * depending on whether none, some, or all of the requested sub-range is set.
+ * In the case that the initial offset is not set, NFS_RANGE_NONE will
+ * be returned.
  *
  * The desired offset and length are passed by reference.  The values
  * indicated by offsetp and lengthp are modified, so that they fit
@@ -112,7 +122,8 @@ extern "C" {
  *
  * nfs_range_is_clear(range, offsetp, lengthp, flags) is just like
  * nfs_range_is_set(), except that the query or wait applies to the
- * sub-range being clear.
+ * sub-range being clear.  In the case that the initial offset is
+ * not clear, NFS_RANGE_NONE will be returned.
  *
  * NFS_RANGE_NONE is guaranteed to be zero, so it may be used as a
  * generalized boolean.
@@ -155,14 +166,14 @@ void nfs_range_destroy(nfs_range_t *);
 
 typedef void *nfs_shared_range_t;
 
-void nfs_range_set(nfs_range_t *, uint64_t, uint64_t);
-void nfs_range_clear(nfs_range_t *, uint64_t, uint64_t);
-
 typedef enum {
 	NFS_RANGE_NONE = 0,
 	NFS_RANGE_SOME,
 	NFS_RANGE_ALL
 } nfs_range_query_t;
+
+nfs_range_query_t nfs_range_set(nfs_range_t *, uint64_t, uint64_t);
+nfs_range_query_t nfs_range_clear(nfs_range_t *, uint64_t, uint64_t);
 
 nfs_range_query_t nfs_range_is_set(nfs_range_t *, uint64_t *, uint64_t *,
     uint32_t);

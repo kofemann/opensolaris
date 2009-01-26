@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -72,6 +72,7 @@
 #include <nfs/nfs_clnt.h>
 #include <nfs/rnode.h>
 #include <nfs/nfs_acl.h>
+#include <nfs/range.h>
 
 #include <sys/tsol/label.h>
 
@@ -3441,6 +3442,11 @@ nfs_subrinit(void)
 	kstat_t *nfs_debug_kstat;
 
 	/*
+	 * initialize the nfs_range utility
+	 */
+	nfs_range_init();
+
+	/*
 	 * Create a kstat to maintain debug statistics across all zones
 	 */
 	ndata = sizeof (clstat_debug) / sizeof (kstat_named_t);
@@ -3578,6 +3584,11 @@ nfs_subrfini(void)
 	mutex_destroy(&newnum_lock);
 	mutex_destroy(&nfs_minor_lock);
 	(void) zone_key_delete(nfsclnt_zone_key);
+
+	/*
+	 * tear down nfs_range utility
+	 */
+	nfs_range_fini();
 }
 
 enum nfsstat
