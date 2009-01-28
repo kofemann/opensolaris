@@ -122,10 +122,10 @@ ctl_mds_clnt_remove_file(nfs_server_instance_t *instp, fsid_t fsid,
 		/* For now, ignore the error and results from REMOVE */
 	}
 
-	kmem_free(args.CTL_MDS_REMOVEargs_u.obj.obj_val, sizeof (nfs_fh4));
 	/* Allocated from mds_alloc_ds_fh */
 	kmem_free(args.CTL_MDS_REMOVEargs_u.obj.obj_val[0].nfs_fh4_val,
 	    args.CTL_MDS_REMOVEargs_u.obj.obj_val[0].nfs_fh4_len);
-	return (0);
+	kmem_free(args.CTL_MDS_REMOVEargs_u.obj.obj_val, sizeof (nfs_fh4));
 
+	return (0);
 }

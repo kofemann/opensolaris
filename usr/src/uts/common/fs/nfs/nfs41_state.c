@@ -1290,6 +1290,8 @@ mds_layout_grant_create(rfs4_entry_t u_entry, void *arg)
 	    &lgp->clientgrantlist;
 	lgp->clientgrantlist.lgp = lgp;
 
+	lgp->lo_range = nfs_range_create();
+
 	return (TRUE);
 }
 
@@ -1298,7 +1300,11 @@ static void
 mds_layout_grant_destroy(rfs4_entry_t entry)
 {
 	mds_layout_grant_t *lgp = (mds_layout_grant_t *)entry;
+
 	mutex_destroy(&lgp->lo_lock);
+
+	nfs_range_destroy(lgp->lo_range);
+	lgp->lo_range = NULL;
 }
 
 mds_layout_grant_t *

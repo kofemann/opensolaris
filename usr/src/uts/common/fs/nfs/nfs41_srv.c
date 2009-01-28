@@ -8096,7 +8096,17 @@ mds_fetch_layout(struct compound_state *cs,
 	lgp->lop = lp;
 
 	/*
-	 * create the layout grant
+	 * We may have just created the layout grant, or it could have
+	 * already existed.  The client could be asking for "more" of the
+	 * file.  However, it doesn't matter since we always hand out the
+	 * entire file, we can remove any range fragments that might
+	 * be on this grant and just have one range in the list that
+	 * covers the whole file.
+	 */
+	(void) nfs_range_set(lgp->lo_range, 0, -1);
+
+	/*
+	 * create the ever grant structure
 	 */
 	create = TRUE;
 	egp = rfs41_findevergrant(cs->cp, cs->vp, &create);
@@ -8450,6 +8460,7 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 	mds_layout_grant_t *lgp;
 	nfsstat4 status;
 	bool_t create = FALSE;
+	nfs_range_query_t remain;
 
 	mutex_enter(&cs->vp->v_lock);
 	fp = (rfs4_file_t *)vsd_get(cs->vp, cs->instp->vkey);
@@ -8464,11 +8475,6 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 	if (!layout_match(lgp->lo_stateid, lorf->lrf_stateid, &status))
 		return (status);
 
-#ifdef NOT_DONE
-	/* XXX - could (should?) be async operation */
-	mds_invalidate_ds_state(lgp->lo_stateid, cs->cp, LAYOUT);
-#endif
-
 	/*
 	 * Refer to Section 18.44.3 of draft-25 for the right
 	 * lrs_present mojo and corresponding stateid setting.
@@ -8476,20 +8482,27 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 	rfs41_lo_seqid(&lgp->lo_stateid);
 	resp->lorr_stid_u.lrs_stateid = lgp->lo_stateid.stateid;
 
-	mutex_enter(&lgp->lo_lock);
-	if (lgp->lo_status == LO_RECALL_INPROG) {
-		lgp->lor_seqid = 0;  /* reset */
-		lgp->lo_status = LO_RECALLED;
-	} else {
-		lgp->lo_status = LO_RETURNED;
-	}
-	mutex_exit(&lgp->lo_lock);
+	remain = nfs_range_clear(lgp->lo_range, lorf->lrf_offset,
+	    lorf->lrf_length);
 
-	/*
-	 * XXX - jw - temp code until range support
-	 * check if the entire layout is being returned
-	 */
-	if (lorf->lrf_offset == 0 && lorf->lrf_length == -1) {
+#ifdef NOT_DONE
+	/* XXX - could (should?) be async operation */
+	/* need to add range to this */
+	mds_invalidate_ds_state(lgp->lo_stateid, cs->cp, LAYOUT);
+#endif
+
+	/* if entire layout has been returned, clean up */
+	if (remain == NFS_RANGE_NONE) {
+
+		mutex_enter(&lgp->lo_lock);
+		if (lgp->lo_status == LO_RECALL_INPROG) {
+			lgp->lor_seqid = 0;  /* reset */
+			lgp->lo_status = LO_RECALLED;
+		} else {
+			lgp->lo_status = LO_RETURNED;
+		}
+		mutex_exit(&lgp->lo_lock);
+
 		/* remove the layout grant from both lists */
 		rfs4_dbe_lock(lgp->cp->dbe);
 
@@ -8513,10 +8526,30 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 		lgp->fp = NULL;
 
 		rfs4_dbe_invalidate(lgp->dbe);
+
+#ifdef RECALL_ENGINE
+		if (&fp->lo_grant_list == fp->lo_grant_list.next) {
+			fp->layout->flag = LAYOUT_RETURNED;
+			rfs4_dbe_cv_broadcast(fp->dbe);
+		}
+#endif
+
 	} else {
-		/* XXX - just in case our client does this */
+
+		/*
+		 * XXX - just in case our client does this
+		 * remove this when the control protocol work is complete
+		 * and we are telling the DS about partial returns.
+		 */
 		cmn_err(CE_WARN, "SURPRISE, partial layout return");
+
+#ifdef RECALL_ENGINE
+		/*
+		 * Was a recall in progress?  Reset timers due to progress?
+		 */
+#endif
 	}
+
 	rfs41_lo_grant_rele(lgp);
 
 	return (NFS4_OK);

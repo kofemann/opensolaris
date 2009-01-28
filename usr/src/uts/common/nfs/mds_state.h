@@ -34,6 +34,7 @@ extern "C" {
 #include <nfs/nfs4_db_impl.h>
 #include <nfs/ds_prot.h>
 #include <nfs/mds_odl.h>
+#include <nfs/range.h>
 
 typedef ds_guid_map ds_guid_map_t;
 typedef ds_guid ds_guid_t;
@@ -103,7 +104,7 @@ typedef struct mds_layout_grant {
 	rfs4_file_t	*fp;
 	rfs41_grant_list_t clientgrantlist;
 	rfs41_grant_list_t lo_grant_list;
-	/* XXX layout byte range */
+	nfs_range_t	*lo_range;
 } mds_layout_grant_t;
 
 #define	lor_seqid	lo_rec.lr_seqid
