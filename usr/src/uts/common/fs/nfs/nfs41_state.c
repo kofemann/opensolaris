@@ -766,8 +766,6 @@ mds_session_create(rfs4_entry_t u_entry,
 	 * since we're barely creating the session.
 	 */
 	if (sp->sn_bdrpc) {
-		ocp->cn_attrs = ap->cs_aotw.csa_back_chan_attrs;
-
 		/*
 		 * bcsd got built as part of the channel's construction.
 		 */
