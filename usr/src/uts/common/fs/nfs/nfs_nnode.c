@@ -51,12 +51,12 @@ extern pri_t minclsyspri;
 
 /* globals */
 
-static uint32_t nnode_hash_size = NNODE_HASH_SIZE;
-static int nnode_num_workers = NNODE_NUM_WORKERS;
-static int nnode_num_taskalloc = NNODE_NUM_TASKALLOC;
-static uint_t nnode_taskq_flags = NNODE_TASKQ_FLAGS;
-static hrtime_t nnode_gc_interval = NNODE_GC_INTERVAL;
-static hrtime_t nnode_gc_too_old = NNODE_GC_TOO_OLD;
+uint32_t nnode_hash_size = NNODE_HASH_SIZE;
+int nnode_max_workers = NNODE_MAX_WORKERS;
+int nnode_min_taskalloc = NNODE_MIN_TASKALLOC;
+int nnode_max_taskalloc = NNODE_MAX_TASKALLOC;
+hrtime_t nnode_gc_interval = NNODE_GC_INTERVAL;
+hrtime_t nnode_gc_too_old = NNODE_GC_TOO_OLD;
 static nnode_bucket_t **nnode_hash;
 
 static kmem_cache_t *nnode_kmem_cache;
@@ -65,6 +65,9 @@ static kmem_cache_t *nnode_bucket_sweep_task_cache;
 static taskq_t *nnode_taskq;
 static cyclic_id_t nnode_gc_cyclic;
 
+static nnode_bucket_sweep_task_t nnode_gc_task = {
+	.nbst_flags = 0,
+};
 static cyc_handler_t nnode_gc_handler = {
 	nnode_periodic_gc,
 	NULL,
@@ -142,9 +145,11 @@ nnode_sweep(nnode_bucket_sweep_task_t *task)
 			nnode_bucket_sweep_task(task);
 			continue;
 		}
-		atask = nnode_bucket_sweep_task_alloc(task, KM_SLEEP);
-		(void) taskq_dispatch(nnode_taskq, nnode_bucket_sweep_task,
-		    atask, TQ_SLEEP);
+		atask = nnode_bucket_sweep_task_alloc(task, KM_NOSLEEP);
+		if (atask != NULL)
+			(void) taskq_dispatch(nnode_taskq,
+			    nnode_bucket_sweep_task, atask,
+			    TQ_NOSLEEP);
 	}
 }
 
@@ -294,19 +299,24 @@ nnode_bucket_sweep_task(void *vtask)
 		nnode_bucket_sweep_task_free(task);
 }
 
+static void
+nnode_sweep_call(void *vtask)
+{
+	nnode_bucket_sweep_task_t *task = vtask;
+
+	nnode_sweep(task);
+}
+
 /*ARGSUSED*/
 static void
-nnode_periodic_gc(void *foo)
+nnode_periodic_gc(void *vtask)
 {
-	nnode_bucket_sweep_task_t task;
+	nnode_bucket_sweep_task_t *task = vtask;
 
-	ASSERT(foo == NULL);
+	task->nbst_maxage = gethrtime() - nnode_gc_too_old;
 
-	task.nbst_flags = 0;
-	task.nbst_proc = nnode_bucket_proc_maxage;
-	task.nbst_maxage = gethrtime() - nnode_gc_too_old;
-
-	nnode_sweep(&task);
+	(void) taskq_dispatch(nnode_taskq, nnode_sweep_call, task,
+	    TQ_NOSLEEP | TQ_NOQUEUE);
 }
 
 /*ARGSUSED*/
@@ -355,10 +365,13 @@ nnode_mod_init(void)
 	for (int i = 0; i < nnode_hash_size; i++)
 		nnode_hash[i] = nnode_bucket_alloc();
 
-	nnode_taskq = taskq_create("nnode_taskq", nnode_num_workers,
-	    minclsyspri, 1, nnode_num_taskalloc, nnode_taskq_flags);
+	nnode_taskq = taskq_create("nnode_taskq", nnode_max_workers,
+	    minclsyspri, nnode_min_taskalloc, nnode_max_taskalloc,
+	    TASKQ_DYNAMIC);
 
 	nnode_gc_time.cyt_interval = nnode_gc_interval;
+	nnode_gc_handler.cyh_arg = &nnode_gc_task;
+	nnode_gc_task.nbst_proc = nnode_bucket_proc_maxage;
 	mutex_enter(&cpu_lock);
 	nnode_gc_cyclic = cyclic_add(&nnode_gc_handler, &nnode_gc_time);
 	mutex_exit(&cpu_lock);

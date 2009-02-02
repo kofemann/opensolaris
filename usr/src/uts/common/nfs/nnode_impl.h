@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -97,9 +97,9 @@ typedef struct nnode_bucket_sweep_task {
 #define	NNODE_BUCKET_SWEEP_TASK_FREEME	0x02
 
 #define	NNODE_HASH_SIZE		(251)
-#define	NNODE_NUM_WORKERS	(8)
-#define	NNODE_NUM_TASKALLOC	(8)
-#define	NNODE_TASKQ_FLAGS	TASKQ_DYNAMIC
+#define	NNODE_MAX_WORKERS	(4)
+#define	NNODE_MIN_TASKALLOC	(8)
+#define	NNODE_MAX_TASKALLOC	(NNODE_HASH_SIZE + NNODE_MIN_TASKALLOC)
 #define	NNODE_GC_INTERVAL	(30LL * NANOSEC)
 #define	NNODE_GC_TOO_OLD	(45LL * NANOSEC)
 
