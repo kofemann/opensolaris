@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1183,10 +1183,10 @@ stripe_dev_prepare(
 static void
 pnfs_call(nfs4_call_t *cp, COMPOUND4args_clnt *argsp, COMPOUND4res_clnt	*resp)
 {
-	ASSERT(cp->ds_servinfo != NULL);
+	ASSERT(cp->nc_ds_servinfo != NULL);
 
-	cp->e.error = nfs4_start_op_impl(cp, RCV_DONTBLOCK);
-	if (cp->e.error)
+	cp->nc_e.error = nfs4_start_op_impl(cp, RCV_DONTBLOCK);
+	if (cp->nc_e.error)
 		return;
 
 	resp->argsp = argsp;
@@ -1256,7 +1256,7 @@ pnfs_task_read(void *v)
 	readargs->read->res_maxsize = task->rt_count;
 
 	pnfs_call(cp, &readargs->args, &res);
-	error = cp->e.error;
+	error = cp->nc_e.error;
 
 	if (error == EAGAIN || cp->nc_needs_recovery) {
 		/*
@@ -1303,7 +1303,7 @@ pnfs_task_read(void *v)
 			error = geterrno4(res.status);
 		}
 
-		ASSERT(cp->e.rpc_status == 0);
+		ASSERT(cp->nc_e.rpc_status == 0);
 		xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 	}
 
@@ -1388,7 +1388,7 @@ pnfs_task_write(void *v)
 	argop[2].nfs_argop4_u.opwrite.data_val = task->wt_base;
 
 	pnfs_call(cp, &args, &res);
-	error = cp->e.error;
+	error = cp->nc_e.error;
 
 	if (error == EAGAIN || cp->nc_needs_recovery) {
 		/*
@@ -1408,7 +1408,7 @@ pnfs_task_write(void *v)
 
 	if (error)
 		goto out;
-	ASSERT(cp->e.rpc_status == 0);
+	ASSERT(cp->nc_e.rpc_status == 0);
 	free_res = 1;
 
 	if (res.status != NFS4_OK) {
@@ -1534,10 +1534,10 @@ pnfs_task_commit(void *v)
 
 	/* XXXcommit - Needs to check if recovery is needed */
 
-	error = task->cm_call->e.error;
+	error = task->cm_call->nc_e.error;
 	if (error)
 		goto out;
-	ASSERT(task->cm_call->e.rpc_status == 0);
+	ASSERT(task->cm_call->nc_e.rpc_status == 0);
 	free_res = 1;
 
 	if (res.status != NFS4_OK) {
@@ -2413,7 +2413,7 @@ pnfs_start_read(read_task_t *task)
 	 * the target DS are in recovery, or need recovery, then
 	 * start_op will block.
 	 */
-	if (cp->e.error = nfs4_start_op_impl(cp, 0)) {
+	if ((cp->nc_e.error = nfs4_start_op_impl(cp, 0)) != 0) {
 		cmn_err(CE_WARN, "pnfs_start_read: start_op failed");
 		return;
 	}
@@ -2441,6 +2441,7 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 	int orig_count = count;
 	uio_t *uio_sav = NULL;
 	caddr_t xbase;
+	int nosig;
 	int more_work, too_much;
 
 	mutex_enter(&rp->r_statelock);
@@ -2534,10 +2535,10 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		task->rt_call = nfs4_call_init();
 		task->rt_call->nc_mi = mi;
 		task->rt_call->nc_vp1 = vp;
-		task->rt_call->ds_servinfo = task->rt_dev->std_svp;
-		task->rt_call->cr = cr;
-		task->rt_call->opnum = OP_READ;
-		task->rt_call->ophint = OH_READ;
+		task->rt_call->nc_ds_servinfo = task->rt_dev->std_svp;
+		task->rt_call->nc_cr = cr;
+		task->rt_call->nc_opnum = OP_READ;
+		task->rt_call->nc_ophint = OH_READ;
 
 		off += task->rt_count;
 		if (base)
@@ -2567,10 +2568,11 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 	mutex_enter(&job->fir_lock);
 	job->fir_remaining += remaining;
 more:
-	while (job->fir_remaining > 0)
-		if ((! cv_wait_sig(&job->fir_cv, &job->fir_lock)) &&
-		    (job->fir_error == 0))
+	while (job->fir_remaining > 0) {
+		nosig = cv_wait_sig(&job->fir_cv, &job->fir_lock);
+		if ((nosig == 0) && (job->fir_error == 0))
 			job->fir_error = EINTR;
+	}
 
 	/* Check for jobs which need to be redriven (recovery or EAGAIN) */
 	more_work = 0;
@@ -2580,18 +2582,19 @@ more:
 
 		ASSERT(MUTEX_HELD(&job->fir_lock));
 		next = list_next(&job->fir_task_list, task);
+
 		/*
 		 * If this task has a non-recoverable error (which
 		 * will cancel the entire job) and we haven't
 		 * already set a fatal error for the job, then
 		 * use the task's error to set the job's error.
 		 */
-		if (cp->e.error && cp->e.error != EAGAIN &&
+		if (cp->nc_e.error && cp->nc_e.error != EAGAIN &&
 		    cp->nc_needs_recovery == 0 && job->fir_error == 0) {
 			cmn_err(CE_WARN,
 			    "Unexpected error in read task redrive: %d\n",
-			    cp->e.error);
-			job->fir_error = cp->e.error;
+			    cp->nc_e.error);
+			job->fir_error = cp->nc_e.error;
 		}
 
 		if (job->fir_error) {
@@ -2612,7 +2615,7 @@ more:
 		 * If there are no job cancelling errors and we
 		 * have reason to redrive the task, then do it.
 		 */
-		if (cp->nc_needs_recovery || cp->e.error == EAGAIN) {
+		if (cp->nc_needs_recovery || cp->nc_e.error == EAGAIN) {
 			/*
 			 * The task failed, but the error
 			 * indicates that either recovery is needed
@@ -2627,18 +2630,18 @@ more:
 			 * removed.
 			 */
 			cp->nc_needs_recovery = 0;
-			nfs4_error_zinit(&cp->e);	/* Clear error */
+			nfs4_error_zinit(&cp->nc_e);	/* Clear error */
 			mutex_exit(&job->fir_lock);
 			pnfs_start_read(task);
 			mutex_enter(&job->fir_lock);
-			if (cp->e.error == 0)
+			if (cp->nc_e.error == 0)
 				job->fir_remaining++;
 			more_work = 1;
 		} else {
 			cmn_err(CE_WARN,
 			    "Read redrive: unexpected state "
 			    "(error %d, needs_recovery %d, job error %d)\n",
-			    cp->e.error,
+			    cp->nc_e.error,
 			    cp->nc_needs_recovery,
 			    job->fir_error);
 		}
@@ -2646,17 +2649,25 @@ more:
 
 	if (more_work) {
 		/*
-		 * XXX - Primarily for debugging, keep it 'til the end
+		 * XXXrsb This is a temporary measure to make sure we
+		 * don't spin wildly out of control.  This will be fixed
+		 * with the "synchronization" changes.
+		 *
 		 * Try to avoid sending the same task over and over.
+		 * Once we hit the limit, then set the job's error to
+		 * EIO and go through the redrive loop one more time
+		 * to clean up the remaining tasks.
 		 */
 		if (too_much++ > 10) {
 			cmn_err(CE_WARN,
-			    "Insufficient progress on read task redrive");
+			    "Insufficient progress on read task redrive,"
+			    " setting job error to EIO");
 			job->fir_error = EIO;
 		} else {
 			cmn_err(CE_NOTE, "Redriving read tasks");
-			goto more;
 		}
+
+		goto more;
 	}
 
 	error = job->fir_error;
@@ -2698,7 +2709,7 @@ pnfs_start_write(write_task_t *task)
 	 * the target DS are in recovery, or need recovery, then
 	 * start_op will block.
 	 */
-	if (cp->e.error = nfs4_start_op_impl(cp, 0)) {
+	if ((cp->nc_e.error = nfs4_start_op_impl(cp, 0)) != 0) {
 		cmn_err(CE_WARN, "pnfs_start_write: start_op failed");
 		return;
 	}
@@ -2795,10 +2806,10 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		task->wt_call = nfs4_call_init();
 		task->wt_call->nc_mi = mi;
 		task->wt_call->nc_vp1 = vp;
-		task->wt_call->ds_servinfo = task->wt_dev->std_svp;
-		task->wt_call->cr = cr;
-		task->wt_call->opnum = OP_WRITE;
-		task->wt_call->ophint = OH_WRITE;
+		task->wt_call->nc_ds_servinfo = task->wt_dev->std_svp;
+		task->wt_call->nc_cr = cr;
+		task->wt_call->nc_opnum = OP_WRITE;
+		task->wt_call->nc_ophint = OH_WRITE;
 
 		off += task->wt_count;
 		base += task->wt_count;
@@ -2830,7 +2841,7 @@ more:
 			job->fiw_error = EINTR;
 	}
 
-	/* Check for tasks which failed and need recovery */
+	/* Check for jobs which need to be redriven (recovery or EAGAIN) */
 	more_work = 0;
 	for (task = list_head(&job->fiw_task_list);
 	    task != NULL; task = next) {
@@ -2838,18 +2849,19 @@ more:
 
 		ASSERT(MUTEX_HELD(&job->fiw_lock));
 		next = list_next(&job->fiw_task_list, task);
+
 		/*
 		 * If this task has a non-recoverable error (which
 		 * will cancel the entire job) and we haven't
 		 * already set a fatal error for the job, then
 		 * use the task's error to set the job's error.
 		 */
-		if (cp->e.error && cp->e.error != EAGAIN &&
+		if (cp->nc_e.error && cp->nc_e.error != EAGAIN &&
 		    cp->nc_needs_recovery == 0 && job->fiw_error == 0) {
 			cmn_err(CE_WARN,
 			    "Unexpected error in write task redrive: %d\n",
-			    cp->e.error);
-			job->fiw_error = cp->e.error;
+			    cp->nc_e.error);
+			job->fiw_error = cp->nc_e.error;
 		}
 
 		if (job->fiw_error) {
@@ -2870,7 +2882,7 @@ more:
 		 * If there are no job cancelling errors and we
 		 * have reason to redrive the task, then do it.
 		 */
-		if (cp->nc_needs_recovery || cp->e.error == EAGAIN) {
+		if (cp->nc_needs_recovery || cp->nc_e.error == EAGAIN) {
 			/*
 			 * The task failed, but the error
 			 * indicates that either recovery is needed
@@ -2885,18 +2897,18 @@ more:
 			 * removed.
 			 */
 			cp->nc_needs_recovery = 0;
-			nfs4_error_zinit(&cp->e);	/* Clear error */
+			nfs4_error_zinit(&cp->nc_e);	/* Clear error */
 			mutex_exit(&job->fiw_lock);
 			pnfs_start_write(task);
 			mutex_enter(&job->fiw_lock);
-			if (cp->e.error == 0)
+			if (cp->nc_e.error == 0)
 				job->fiw_remaining++;
 			more_work = 1;
 		} else {
 			cmn_err(CE_WARN,
 			    "Write redrive: unexpected state "
 			    "(error %d, needs_recovery %d, job error %d)\n",
-			    cp->e.error,
+			    cp->nc_e.error,
 			    cp->nc_needs_recovery,
 			    job->fiw_error);
 		}
@@ -2904,17 +2916,30 @@ more:
 
 	if (more_work) {
 		/*
-		 * XXX - Primarily for debugging, keep it 'til the end
+		 * XXXrsb This is a temporary measure to make sure we
+		 * don't spin wildly out of control.  This will be fixed
+		 * with the "synchronization" changes.
+		 *
 		 * Try to avoid sending the same task over and over.
+		 * Once we hit the limit, then set the job's error to
+		 * EIO and go through the redrive loop one more time
+		 * to clean up the remaining tasks.
+		 *
+		 * BTW, if we wanted to keep this throttle, then we
+		 * probably want to pick a more dynamic value.  Maybe:
+		 *	N x number-of-original-tasks-for-this-job
 		 */
 		if (too_much++ > 10) {
 			cmn_err(CE_WARN,
-			    "Insufficient progress on write task redrive");
+			    "Insufficient progress on write task redrive,"
+			    " setting job error to EIO");
 			job->fiw_error = EIO;
 		} else {
-			cmn_err(CE_NOTE, "Redriving write tasks");
-			goto more;
+			cmn_err(CE_NOTE, "Redriving write tasks (%d)",
+			    too_much);
 		}
+
+		goto more;
 	}
 
 	error = job->fiw_error;
@@ -3211,7 +3236,7 @@ nfs4_call_init(void)
 	nfs4_call_t *cp;
 
 	cp = kmem_zalloc(sizeof (*cp), KM_SLEEP);
-	nfs4_error_zinit(&cp->e);	/* Paranoia! */
+	nfs4_error_zinit(&cp->nc_e);	/* Paranoia! */
 	mutex_init(cp->nc_lock, NULL, MUTEX_DEFAULT, NULL);
 	cp->nc_doqueue[0] = 1;
 	cp->nc_count = 1;
@@ -3494,10 +3519,10 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 			task->cm_call = nfs4_call_init();
 			task->cm_call->nc_mi = mi;
 			task->cm_call->nc_vp1 = vp;
-			task->cm_call->ds_servinfo = task->cm_dev->std_svp;
-			task->cm_call->cr = cr;
-			task->cm_call->opnum = OP_COMMIT;
-			task->cm_call->ophint = OH_COMMIT;
+			task->cm_call->nc_ds_servinfo = task->cm_dev->std_svp;
+			task->cm_call->nc_cr = cr;
+			task->cm_call->nc_opnum = OP_COMMIT;
+			task->cm_call->nc_ophint = OH_COMMIT;
 	/*
 	 * XXXcommit - Add the task to the job list here.
 	 * Convert task dispatching to pnfs_commit_start()

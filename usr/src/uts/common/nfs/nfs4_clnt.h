@@ -2387,9 +2387,6 @@ struct nfs4_clnt {
 /*
  * New recovery interfaces & structures
  */
-
-/* @(#)nfs4_call_t.c 1.1 08/06/25 */
-
 typedef struct {
 	nfs4_recov_state_t nc_recov_state;
 
@@ -2398,34 +2395,31 @@ typedef struct {
 	vnode_t		*nc_vp2;
 
 	/* needed by nfs4_start_fop */
-	nfs4_op_hint_t	ophint;
-	int		start_recov;
+	nfs4_op_hint_t	nc_ophint;
+	int		nc_start_recov;
 
 	/* needed by nfs4_needs_recovery */
-	int		stateful;
-	nfs4_error_t	e;
+	int		nc_stateful;
+	nfs4_error_t	nc_e;
 
 	/* needed by start_recovery */
-	nfs_opnum4	opnum;
+	nfs_opnum4	nc_opnum;
 	stateid4	*nc_sidp;
 	nfs4_lost_rqst_t *nc_lost_rqst;
 	nfs4_bseqid_entry_t *nc_bseqid_rqst;
 
 	/* needed by rfs4call */
-
 	int		nc_doqueue[1];
-	int		rfs4call_flags;	/* typically 0 */
-	cred_t		*cr;
+	int		nc_rfs4call_flags;	/* typically 0 */
+	cred_t		*nc_cr;
 
 	/* new pnfs stuffs */
-
-	servinfo4_t	*ds_servinfo;	/* NULL if call targets MDS */
-	nfs4_server_t	*ds_nfs4_srv;	/* NULL if call targets MDS */
+	servinfo4_t	*nc_ds_servinfo;	/* NULL if call targets MDS */
+	nfs4_server_t	*nc_ds_nfs4_srv;	/* NULL if call targets MDS */
 	kmutex_t	nc_lock[1];
 	uint_t		nc_count;
 	int		nc_needs_recovery;
 	int		nc_wait_for_recovery;
-	uint32_t	nc_startop_flags;	/* nfs4_start_op(..., flags) */
 } nfs4_call_t;
 
 extern nfs4_call_t *nfs4_call_init(void);
@@ -2434,7 +2428,7 @@ extern void nfs4_call_hold(nfs4_call_t *);
 
 /*
  * Flags for client-side recovery interfaces.
- * Passed in as flags to nfs4_start_op() and stored in the nfs4_call_t.
+ * Passed in as flags to nfs4_start_op()
  */
 #define	RCV_DONTBLOCK	0x00000001	/* Don't block, return EAGAIN */
 

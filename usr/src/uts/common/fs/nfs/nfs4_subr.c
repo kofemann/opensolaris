@@ -1917,6 +1917,19 @@ rfs4call(mntinfo4_t *mi, servinfo4_t *svp, COMPOUND4args_clnt *argsp,
 }
 
 /*
+ * This is simply scaffolding for pNFS until rfs4call() is modified
+ * to use nfs4_call_t.
+ */
+void
+rfs4call_impl(nfs4_call_t *cp, COMPOUND4args_clnt *args, COMPOUND4res_clnt *res)
+{
+	/* NB: nc_ds_servinfo will be NULL for MDS ops */
+	rfs4call(cp->nc_mi, cp->nc_ds_servinfo, args, res, cp->nc_cr,
+	    cp->nc_doqueue, cp->nc_rfs4call_flags, &cp->nc_e);
+}
+
+
+/*
  * nfs4rename_update - updates stored state after a rename.  Currently this
  * is the path of the object and anything under it, and the filehandle of
  * the renamed object.

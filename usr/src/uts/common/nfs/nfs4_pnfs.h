@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -192,7 +192,6 @@ typedef struct {
 	stripe_dev_t *wt_dev;
 	nfs4_call_t *wt_call;
 	cred_t *wt_cred;
-	nfs4_error_t *wt_ep;
 	pnfs_layout_t *wt_layout;
 	caddr_t wt_base;
 	offset4 wt_offset;

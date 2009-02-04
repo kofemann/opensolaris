@@ -4113,7 +4113,7 @@ nfs4_cleanup_oldsession(nfs4_server_t *np)
 		 * destroyed the session. Nothing more to do.
 		 */
 		mutex_exit(&np->s_lock);
-	} else if (np->s_flags & N4S_SESSION_CREATED) {
+	} else {
 		/*
 		 * No sequence heartbeat thread means this
 		 * session is to a data server. Just destroy the
@@ -4122,9 +4122,6 @@ nfs4_cleanup_oldsession(nfs4_server_t *np)
 		np->seqhb_flags = 0;
 		mutex_exit(&np->s_lock);
 		nfs4destroy_session(np, NULL);
-	} else {
-		np->seqhb_flags = 0;
-		mutex_exit(&np->s_lock);
 	}
 }
 
@@ -4203,6 +4200,12 @@ nfs4destroy_session(nfs4_server_t *np, CLIENT *seqhandle)
 	if (seqhandle != NULL)
 		nfs4destroy_session_otw(&np->ssx, seqhandle);
 
+	/*
+	 * XXXrsb bandage: Will be removed with DS heartbeat changes
+	 * we really shouldn't be here if s_program == 0
+	 */
+	if (np->s_program == 0)
+		return;
 
 	mutex_enter(&np->s_lock);
 	cbi = ncg->nfs4prog2cbinfo[np->s_program - NFS4_CALLBACK];

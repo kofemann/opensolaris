@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -88,7 +88,7 @@ typedef struct {
 	nfs4_bseqid_entry_t *rc_bseqid_rqst;
 } recov_info_t;
 
-#define	rc_orig_errors	rc_callp->e
+#define	rc_orig_errors	rc_callp->nc_e
 
 /*
  * XXXrecovery:  We probably need a better way to do this.  We
@@ -100,8 +100,8 @@ typedef struct {
  * means we are doing a secondary recovery for the MDS (or
  * non-PNFS server).
  */
-#define	MDS_RECOVERY(cp)	((cp) == NULL || (cp)->ds_servinfo == NULL)
-#define	DS_RECOVERY(cp)		((cp) != NULL && (cp)->ds_servinfo != NULL)
+#define	MDS_RECOVERY(cp)	((cp) == NULL || (cp)->nc_ds_servinfo == NULL)
+#define	DS_RECOVERY(cp)		((cp) != NULL && (cp)->nc_ds_servinfo != NULL)
 
 /*
  * This is specific to an 4.1 server (because of sessions)
@@ -235,8 +235,8 @@ nfs4_needs_recovery(nfs4_error_t *ep, bool_t stateful, vfs_t *vfsp)
 	int error;
 
 	cp = nfs4_call_init();
-	cp->e = *ep;
-	cp->stateful = (int)stateful;
+	cp->nc_e = *ep;
+	cp->nc_stateful = (int)stateful;
 	cp->nc_mi = VFTOMI4(vfsp);
 
 	error = nfs4_needs_recovery_impl(cp);
@@ -254,8 +254,8 @@ int
 nfs4_needs_recovery_impl(nfs4_call_t *cp)
 {
 	/* web XXX */
-	nfs4_error_t *ep = &cp->e;
-	bool_t stateful = (bool_t)cp->stateful;
+	nfs4_error_t *ep = &cp->nc_e;
+	bool_t stateful = (bool_t)cp->nc_stateful;
 	vfs_t *vfsp = cp->nc_mi->mi_vfsp;
 	/* web XXX end */
 	int recov = 0;
@@ -287,60 +287,82 @@ nfs4_needs_recovery_impl(nfs4_call_t *cp)
 	if (ep->error != 0)
 		return (0);
 
-
-	/* stat values are listed alphabetically */
 	/*
-	 * There are two lists here: the errors for which we have code, and
-	 * the errors for which we plan to have code before FCS.  For the
-	 * second list, print a warning message but don't attempt recovery.
+	 * Separate data server errors from MDS/non-pNFS server errors
+	 * since the same error may have different actions, depending
+	 * on the server type
 	 */
-	switch (ep->stat) {
-	case NFS4ERR_BADHANDLE:
-	case NFS4ERR_BAD_SEQID:
-	case NFS4ERR_BAD_STATEID:
-	case NFS4ERR_DELAY:
-	case NFS4ERR_EXPIRED:
-	case NFS4ERR_FHEXPIRED:
-	case NFS4ERR_GRACE:
-	case NFS4ERR_OLD_STATEID:
-	case NFS4ERR_RESOURCE:
-	case NFS4ERR_STALE_CLIENTID:
-	case NFS4ERR_STALE_STATEID:
-	case NFS4ERR_WRONGSEC:
-	case NFS4ERR_STALE:
-
-	/*
-	 * Session related errors
-	 */
-
-	case NFS4ERR_BADSESSION:
-	case NFS4ERR_BADSLOT:
-	case NFS4ERR_BAD_HIGH_SLOT:
-	case NFS4ERR_CONN_NOT_BOUND_TO_SESSION:
-	case NFS4ERR_SEQ_MISORDERED:
-	case NFS4ERR_SEQ_FALSE_RETRY:
-		recov = 1;
-		break;
+	if (DS_RECOVERY(cp)) {
+		/*
+		 * XXXrsb - For now, we only handle data server recovery
+		 * for STALE_CLIENTID and BADSESSION errors.
+		 */
+		switch (ep->stat) {
+		case NFS4ERR_STALE_CLIENTID:
+		case NFS4ERR_BADSESSION:
+			recov = 1;
+			break;
 #ifdef DEBUG
-	case NFS4ERR_LEASE_MOVED:
-	case NFS4ERR_MOVED:
-		zcmn_err(VFTOMI4(vfsp)->mi_zone->zone_id,
-		    CE_WARN, "!Can't yet recover from NFS status %d",
-		    ep->stat);
-		break;
+		case NFS4_OK:
+			break;
+		default:
+			zcmn_err(VFTOMI4(vfsp)->mi_zone->zone_id,
+			    CE_WARN,
+			    "!Unexpected error from dataserver: NFS status %d",
+			    ep->stat);
+			break;
 #endif
+		}
+	} else {
+		/* stat values are listed alphabetically */
+
+		/*
+		 * There are two lists here: the errors for which we have
+		 * code, and the errors for which we plan to have code before
+		 * FCS.  For the second list, print a warning message but
+		 * don't attempt recovery.
+		 */
+		switch (ep->stat) {
+		case NFS4ERR_BADHANDLE:
+		case NFS4ERR_BAD_SEQID:
+		case NFS4ERR_BAD_STATEID:
+		case NFS4ERR_DELAY:
+		case NFS4ERR_EXPIRED:
+		case NFS4ERR_FHEXPIRED:
+		case NFS4ERR_GRACE:
+		case NFS4ERR_OLD_STATEID:
+		case NFS4ERR_RESOURCE:
+		case NFS4ERR_STALE_CLIENTID:
+		case NFS4ERR_STALE_STATEID:
+		case NFS4ERR_WRONGSEC:
+		case NFS4ERR_STALE:
+
+		/*
+		 * Session related errors
+		 */
+
+		case NFS4ERR_BADSESSION:
+		case NFS4ERR_BADSLOT:
+		case NFS4ERR_BAD_HIGH_SLOT:
+		case NFS4ERR_CONN_NOT_BOUND_TO_SESSION:
+		case NFS4ERR_SEQ_MISORDERED:
+		case NFS4ERR_SEQ_FALSE_RETRY:
+			recov = 1;
+			break;
+#ifdef DEBUG
+		case NFS4ERR_LEASE_MOVED:
+		case NFS4ERR_MOVED:
+			zcmn_err(VFTOMI4(vfsp)->mi_zone->zone_id,
+			    CE_WARN, "!Can't yet recover from NFS status %d",
+			    ep->stat);
+			break;
+#endif
+		}
 	}
 
 	return (recov);
 }
 
-void
-rfs4call_impl(nfs4_call_t *cp, COMPOUND4args_clnt *args, COMPOUND4res_clnt *res)
-{
-	/* NB: ds_servinfo will be NULL for MDS ops */
-	rfs4call(cp->nc_mi, cp->ds_servinfo, args, res, cp->cr, cp->nc_doqueue,
-	    cp->rfs4call_flags, &cp->e);
-}
 
 /*
  * General routine to determine if the caller is the recovery thread.
@@ -454,7 +476,7 @@ bool_t
 nfs4_start_recovery_impl(nfs4_call_t *cp)
 {
 	mntinfo4_t *mi = cp->nc_mi;
-	nfs4_error_t *ep = &cp->e;
+	nfs4_error_t *ep = &cp->nc_e;
 
 	recov_info_t *recovp;
 	nfs4_server_t *sp;
@@ -503,9 +525,9 @@ nfs4_start_recovery_impl(nfs4_call_t *cp)
 
 	recovp = new_recov_info(cp);
 
-	if (cp->ds_servinfo) {
+	if (cp->nc_ds_servinfo) {
 		/* XXX start_recovery will hold a ref on sp for the duration */
-		sp = cp->ds_nfs4_srv;
+		sp = cp->nc_ds_nfs4_srv;
 		mutex_enter(&sp->s_lock);
 		sp->s_refcnt++;
 	} else
@@ -543,17 +565,17 @@ nfs4_start_recovery(nfs4_error_t *ep, mntinfo4_t *mi, vnode_t *vp1,
 	bool_t	abort;
 
 	cp = nfs4_call_init();
-	cp->e = *ep;
+	cp->nc_e = *ep;
 	cp->nc_mi = mi;
 	cp->nc_vp1 = vp1;
 	cp->nc_vp2 = vp2;
 	cp->nc_sidp = sid;
 	cp->nc_lost_rqst = lost_rqstp;
-	cp->opnum = op;
+	cp->nc_opnum = op;
 	cp->nc_bseqid_rqst = bsep;
 
 	abort = nfs4_start_recovery_impl(cp);
-	*ep = cp->e;
+	*ep = cp->nc_e;
 
 	return (abort);
 }
@@ -1042,14 +1064,14 @@ nfs4_start_fop(mntinfo4_t *mi, vnode_t *vp1, vnode_t *vp2, nfs4_op_hint_t op,
 	cp->nc_mi = mi;
 	cp->nc_vp1 = vp1;
 	cp->nc_vp2 = vp2;
-	cp->ophint = op;
+	cp->nc_ophint = op;
 	cp->nc_recov_state = *rsp;
-	cp->ds_servinfo = NULL;
+	cp->nc_ds_servinfo = NULL;
 
 	error = nfs4_start_op_impl(cp, 0);
 	*rsp = cp->nc_recov_state;
 	if (startrecovp)
-		*startrecovp = cp->start_recov;
+		*startrecovp = cp->nc_start_recov;
 	nfs4_call_rele(cp);
 	return (error);
 }
@@ -1061,9 +1083,9 @@ nfs4_start_op_impl(nfs4_call_t *cp, uint32_t flags)
 	mntinfo4_t *mi = cp->nc_mi;
 	vnode_t *vp1 = cp->nc_vp1;
 	vnode_t *vp2 =  cp->nc_vp2;
-	nfs4_op_hint_t op = cp->ophint;
+	nfs4_op_hint_t op = cp->nc_ophint;
 	nfs4_recov_state_t *rsp = &cp->nc_recov_state;
-	bool_t *startrecovp = (bool_t *)&cp->start_recov;
+	bool_t *startrecovp = (bool_t *)&cp->nc_start_recov;
 	/* end */
 
 	int error = 0, rerr_cnt;
@@ -1086,12 +1108,6 @@ nfs4_start_op_impl(nfs4_call_t *cp, uint32_t flags)
 	}
 	(void) tsd_set(nfs4_tsd_key, caller());
 #endif
-	/*
-	 * Save the flags in the call structure so that we don't have
-	 * to duplicate those flags in every other interface and risk
-	 * getting it wrong.
-	 */
-	cp->nc_startop_flags = flags;
 
 	rsp->rs_sp = NULL;
 	rsp->rs_flags &= ~NFS4_RS_RENAME_HELD;
@@ -1112,11 +1128,19 @@ nfs4_start_op_impl(nfs4_call_t *cp, uint32_t flags)
 
 	/*
 	 * Wait for a delegation recall to complete.
-	 * XXXrsb - This is going away
+	 *
+	 * XXXrsb - The "wait for recall" code is going away.
+	 * This should only be done if we might be recovering
+	 * an  mntinfo4_t.  In pNFS, this would happen on an I/O
+	 * operation only in the pnfs_read()/pnfs_write()
+	 * (enqueuing thread's) start_op but not in pnfs_call()
+	 * (a.k.a., I/O thread).
 	 */
-	error = wait_for_recall(vp1, vp2, op, rsp);
-	if (error)
-		goto err;
+	if (MDS_RECOVERY(cp)) {
+		error = wait_for_recall(vp1, vp2, op, rsp);
+		if (error)
+			goto err;
+	}
 
 	/*
 	 * Assuming that (flags & RCV_DONTBLOCK) == 0 ...
@@ -1136,8 +1160,8 @@ nfs4_start_op_impl(nfs4_call_t *cp, uint32_t flags)
 		error = wait_for_ds_recovery(cp, (flags & RCV_DONTBLOCK));
 		if (error)
 			goto err;
-		ASSERT(cp->ds_nfs4_srv); /* Set in wait_for_ds_recovery() */
-		dsp = cp->ds_nfs4_srv;
+		ASSERT(cp->nc_ds_nfs4_srv); /* Set in wait_for_ds_recovery() */
+		dsp = cp->nc_ds_nfs4_srv;
 		mutex_enter(&dsp->s_lock);
 		dsp->s_otw_call_count++;
 		mutex_exit(&dsp->s_lock);
@@ -1146,7 +1170,7 @@ nfs4_start_op_impl(nfs4_call_t *cp, uint32_t flags)
 		 * NOTE: We don't set rs_sp in this case since it's
 		 * used only for nfs4_is_otw_open_necessary(), nfs4open_otw(),
 		 * and nfs4close_one().  When these calls are in effect
-		 * we don't have cp->ds_servinfo set.
+		 * we don't have cp->nc_ds_servinfo set.
 		 *
 		 * Also, if we can't get the s_recovlock, then we set
 		 * dsp to NULL before going to 'err'.  That way, we
@@ -1356,19 +1380,16 @@ err:
 		rsp->rs_sp = NULL;
 	}
 
-	if (cp->ds_servinfo && cp->ds_nfs4_srv) {
+	if (cp->nc_ds_servinfo && cp->nc_ds_nfs4_srv) {
 		if (dsp)
 			nfs_rw_exit(&dsp->s_recovlock);
-		nfs4_server_rele(cp->ds_nfs4_srv);
-		cp->ds_nfs4_srv = NULL;
+		nfs4_server_rele(cp->nc_ds_nfs4_srv);
+		cp->nc_ds_nfs4_srv = NULL;
 	}
 
 	/*
-	 * This should only be done if we might be recovering
-	 * an  mntinfo4_t.  In pNFS, this would happen on an I/O
-	 * operation only in the in the pnfs_read()/pnfs_write()
-	 * (enqueuing thread's) start_op but not in pnfs_call()
-	 * (a.k.a., I/O thread).
+	 * This should only be done if we might be recovering a
+	 * mntinfo4_t.  See comment above near wait_for_recall().
 	 */
 	if (MDS_RECOVERY(cp))
 		nfs4_end_op_recall(vp1, vp2, rsp);
@@ -1410,10 +1431,10 @@ nfs4_end_fop(mntinfo4_t *mi, vnode_t *vp1, vnode_t *vp2, nfs4_op_hint_t op,
 	cp->nc_mi = mi;
 	cp->nc_vp1 = vp1;
 	cp->nc_vp2 = vp2;
-	cp->ophint = op;
+	cp->nc_ophint = op;
 	cp->nc_recov_state = *rsp;
 	cp->nc_needs_recovery = (int)needs_recov;
-	cp->ds_servinfo = NULL;
+	cp->nc_ds_servinfo = NULL;
 	nfs4_end_op_impl(cp);
 	nfs4_call_rele(cp);
 }
@@ -1425,7 +1446,7 @@ nfs4_end_op_impl(nfs4_call_t *cp)
 	mntinfo4_t *mi = cp->nc_mi;
 	vnode_t *vp1 = cp->nc_vp1;
 	vnode_t *vp2 = cp->nc_vp2;
-	nfs4_op_hint_t op = cp->ophint;
+	nfs4_op_hint_t op = cp->nc_ophint;
 	nfs4_recov_state_t *rsp = &cp->nc_recov_state;
 	bool_t needs_recov = (bool_t)cp->nc_needs_recovery;
 	/* web XXX end */
@@ -1445,23 +1466,30 @@ nfs4_end_op_impl(nfs4_call_t *cp)
 	(void) tsd_set(nfs4_tsd_key, NULL);
 #endif
 
-	if (cp->ds_nfs4_srv) {
-		nfs4_server_t *dsp = cp->ds_nfs4_srv;
+	if (DS_RECOVERY(cp)) {
+		mutex_enter(cp->nc_lock);
+		if (cp->nc_ds_nfs4_srv) {
+			nfs4_server_t *dsp = cp->nc_ds_nfs4_srv;
 
-		nfs_rw_exit(&dsp->s_recovlock);
-		mutex_enter(&dsp->s_lock);
-		dsp->s_otw_call_count--;
-		cv_broadcast(&dsp->s_cv_otw_count);
-		mutex_exit(&dsp->s_lock);
-		nfs4_server_rele(dsp);
-		cp->ds_nfs4_srv = NULL;
+			cp->nc_ds_nfs4_srv = NULL;
+			mutex_exit(cp->nc_lock);
+			nfs_rw_exit(&dsp->s_recovlock);
+			mutex_enter(&dsp->s_lock);
+			dsp->s_otw_call_count--;
+			cv_broadcast(&dsp->s_cv_otw_count);
+			mutex_exit(&dsp->s_lock);
+			nfs4_server_rele(dsp);
+		} else
+			mutex_exit(cp->nc_lock);
+
+		return;
 	}
 
-	nfs4_end_op_recall(vp1, vp2, rsp);
+	/*
+	 * N.B., the remainder is MDS/non-pNFS processing
+	 */
 
-	/* If we're not recovering a mntinfo4_t, then bail now */
-	if (!MDS_RECOVERY(cp))
-		return;
+	nfs4_end_op_recall(vp1, vp2, rsp);
 
 	if (rsp->rs_flags & NFS4_RS_RENAME_HELD)
 		nfs_rw_exit(&mi->mi_rename_lock);
@@ -1479,20 +1507,19 @@ nfs4_end_op_impl(nfs4_call_t *cp)
 		rsp->rs_flags &= ~(NFS4_RS_GRACE_MSG|NFS4_RS_DELAY_MSG);
 	}
 
+	nfs_rw_exit(&mi->mi_recovlock);
+
 	/*
 	 * If the corresponding nfs4_start_op() found a sp,
 	 * then there must still be a sp.
 	 */
 	if (sp != NULL) {
-		nfs_rw_exit(&mi->mi_recovlock);
 		nfs_rw_exit(&sp->s_recovlock);
 		mutex_enter(&sp->s_lock);
 		sp->s_otw_call_count--;
 		cv_broadcast(&sp->s_cv_otw_count);
 		mutex_exit(&sp->s_lock);
 		nfs4_server_rele(sp);
-	} else {
-		nfs_rw_exit(&mi->mi_recovlock);
 	}
 }
 
@@ -1589,8 +1616,8 @@ wait_for_ds_recovery(nfs4_call_t *cp, int noblock)
 	nfs4_server_t *np;
 
 	mutex_enter(&nfs4_server_lst_lock);
-	np = find_nfs4_server_by_addr(&cp->ds_servinfo->sv_addr,
-	    cp->ds_servinfo->sv_knconf);
+	np = find_nfs4_server_by_addr(&cp->nc_ds_servinfo->sv_addr,
+	    cp->nc_ds_servinfo->sv_knconf);
 	if (np == NULL) {
 		mutex_exit(&nfs4_server_lst_lock);
 		/* what to do here? */
@@ -1626,7 +1653,7 @@ wait_for_ds_recovery(nfs4_call_t *cp, int noblock)
 	}
 	mutex_exit(&np->s_lock);
 	/* the nfs4_call_t takes our reference, to be released by end_op */
-	cp->ds_nfs4_srv = np;
+	cp->nc_ds_nfs4_srv = np;
 	return (0);
 }
 
@@ -1766,17 +1793,17 @@ nfs4_recov_thread(recov_info_t *recovp)
 	CALLB_CPR_INIT(&cpr_info, &cpr_lock, callb_generic_cpr, "nfsv4Recov");
 
 	if (is_dataserver) {
-		if ((sp = cp->ds_nfs4_srv) == NULL) {
+		if ((sp = cp->nc_ds_nfs4_srv) == NULL) {
 			mutex_enter(&nfs4_server_lst_lock);
 			/* This locks sp if it is found */
-			sp = servinfo4_to_nfs4_server(cp->ds_servinfo);
+			sp = servinfo4_to_nfs4_server(cp->nc_ds_servinfo);
 			mutex_exit(&nfs4_server_lst_lock);
 			mutex_exit(&sp->s_lock);
 
 			/* Now that we have it, what do we do with it? */
 			mutex_enter(cp->nc_lock);
-			if (cp->ds_nfs4_srv == NULL) {
-				cp->ds_nfs4_srv = sp;
+			if (cp->nc_ds_nfs4_srv == NULL) {
+				cp->nc_ds_nfs4_srv = sp;
 				mutex_exit(cp->nc_lock);
 			} else {
 				/* Damn, someone snuck in */
@@ -2478,7 +2505,7 @@ recov_clientid(recov_info_t *recovp, nfs4_server_t *sp)
 		 * If we're trying to recovery a pNFS data server, then
 		 * recovp->rc_callp->ds_servinfo will be non-NULL.
 		 */
-		nfs4_set_clientid(mi, cp->ds_servinfo, kcred, TRUE, &n4e);
+		nfs4_set_clientid(mi, cp->nc_ds_servinfo, kcred, TRUE, &n4e);
 		error = n4e.error;
 
 		if (error != 0 && is_dataserver == FALSE) {
@@ -2633,7 +2660,7 @@ recov_badsession(recov_info_t *recovp, nfs4_server_t *np)
 	nfs4_cleanup_oldsession(np);
 
 	if (is_dataserver)
-		svp = cp->ds_servinfo;
+		svp = cp->nc_ds_servinfo;
 	else
 		svp =  mi->mi_curr_serv;
 
@@ -2690,7 +2717,7 @@ recov_bc2session(recov_info_t *recovp, nfs4_server_t *np)
 		dir = CDFC4_FORE_OR_BOTH;
 
 	if (is_dataserver)
-		svp = cp->ds_servinfo;
+		svp = cp->nc_ds_servinfo;
 	else /* MDS or non-pNFS */
 		svp = mi->mi_curr_serv;	/* XXXrsb - Could also be NULL */
 
@@ -3979,15 +4006,15 @@ errs_to_action(recov_info_t *recovp, nfs4_server_t *sp, int unmounted)
 	mntinfo4_t	*mi = get_recov_mi(recovp);
 	stateid4	*sidp = cp->nc_sidp;
 	nfs4_lost_rqst_t *lost_rqstp = cp->nc_lost_rqst;
-	nfs_opnum4	op = cp->opnum;
+	nfs_opnum4	op = cp->nc_opnum;
 	nfs4_bseqid_entry_t *bsep = cp->nc_bseqid_rqst;
 
 	nfs4_recov_t action = NR_UNUSED;
 	bool_t reboot = FALSE;
 	int try_f;
 
-	int error = cp->e.error;
-	nfsstat4 stat = cp->e.stat;
+	int error = cp->nc_e.error;
+	nfsstat4 stat = cp->nc_e.stat;
 	int mi_recovery = MDS_RECOVERY(cp);	/* Attempting to recover mi? */
 
 	/*
