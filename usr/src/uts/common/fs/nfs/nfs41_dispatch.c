@@ -332,7 +332,7 @@ rfs41_dispatch_init(void)
 	    NULL, NULL, 0);
 }
 
-static compound_state_t *
+compound_state_t *
 rfs41_compound_state_alloc(nfs_server_instance_t *instp)
 {
 	compound_state_t *cs;
@@ -346,13 +346,26 @@ rfs41_compound_state_alloc(nfs_server_instance_t *instp)
 	return (cs);
 }
 
-static void
+void
 rfs41_compound_state_free(compound_state_t *cs)
 {
-	if (cs->nn != NULL)
+	if (cs->nn != NULL) {
 		nnode_rele(&cs->nn);
-	if (cs->vp != NULL)
+	}
+	if (cs->vp) {
 		VN_RELE(cs->vp);
+		cs->vp = NULL;
+	}
+	if (cs->cr) {
+		crfree(cs->cr);
+		cs->cr = NULL;
+	}
+	if (cs->saved_fh.nfs_fh4_val) {
+		kmem_free(cs->saved_fh.nfs_fh4_val, NFS4_FHSIZE);
+	}
+	if (cs->basecr) {
+		crfree(cs->basecr);
+	}
 	kmem_cache_free(rfs41_compound_state_cache, cs);
 }
 

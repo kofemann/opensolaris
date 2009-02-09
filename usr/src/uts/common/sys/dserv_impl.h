@@ -144,6 +144,10 @@ typedef struct dserv_nnode_data {
 #define	DSERV_NNODE_FLAG_OBJSET		0x01
 #define	DSERV_NNODE_FLAG_OBJECT		0x02
 
+typedef struct dserv_nnode_state {
+	mds_ds_fh *fh;
+} dserv_nnode_state_t;
+
 /*
  * Server structures
  */
@@ -204,7 +208,8 @@ int dserv_mds_setmds(char *, char *);
 int dserv_mds_addobjset(const char *);
 int dserv_mds_addport(const char *, const char *, const char *);
 int dserv_mds_reportavail(void);
-int dserv_mds_checkstate(nfs_fh4 *, stateid4 *, struct svc_req *);
+nfsstat4 dserv_mds_checkstate(void *, compound_state_t *, int mode,
+    stateid4 *, bool_t, bool_t *, bool_t, caller_context_t *, clientid4 *);
 dserv_mds_instance_t *dserv_mds_get_my_instance(void);
 int dserv_instance_enter(krw_t, boolean_t, dserv_mds_instance_t **);
 void dserv_instance_exit(dserv_mds_instance_t *);

@@ -146,12 +146,15 @@ default:
  *
  *   co_owner:
  *
- *   client owner (MUST be same as MDS client owner)
+ *   client owner (MUST be same as MDS client owner as per NFSv4.1)
+ *
+ *   mode: READ or WRITE, needed for checking access mode.
  */
 struct DS_CHECKSTATEargs {
       	stateid4	stateid;
       	nfs_fh4		fh;
-	client_owner4	co_owner;
+	client_owner4	co_owner;	
+	int mode;
 };
 
 /*

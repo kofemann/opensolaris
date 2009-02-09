@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -625,7 +625,7 @@ retry:
 
 	/*
 	 * Add one ref for entry into table's hash - only one
-	 * reference added evn though there may be multiple indices
+	 * reference added even though there may be multiple indices
 	 */
 	rfs4_dbe_hold(entry);
 	ENQUEUE(bp->head, &entry->indices[idx->tblidx]);

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1428,6 +1428,9 @@ typedef struct compound_state {
 
 void rfs41_compound_free(COMPOUND4res *, compound_state_t *);
 extern	void		rfs4_init_compound_state(struct compound_state *);
+extern	compound_state_t *
+    rfs41_compound_state_alloc(nfs_server_instance_t *);
+extern	void rfs41_compound_state_free(compound_state_t *);
 extern	rfs4_state_t	*rfs4_findstate_by_owner_file(
     struct compound_state *cs, rfs4_openowner_t *,
     rfs4_file_t *, bool_t *);
@@ -1437,7 +1440,7 @@ extern	nfsstat4	rfs4_get_state(struct compound_state *, stateid4 *,
 
 extern	nfsstat4	check_stateid(int, struct compound_state *,
     vnode_t *, stateid4 *, bool_t, bool_t *,
-    bool_t, caller_context_t *);
+    bool_t, caller_context_t *, clientid4 *);
 
 extern	nfsstat4 rfs4_get_deleg_state(struct compound_state *, stateid4 *,
     rfs4_deleg_state_t **);

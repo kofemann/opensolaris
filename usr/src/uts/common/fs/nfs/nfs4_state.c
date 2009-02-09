@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -2884,7 +2884,8 @@ rfs4_get_all_state(struct compound_state *cs,
 	id = (stateid_t *)sid;
 	switch (id->v4_bits.type) {
 	case OPENID:
-		status = rfs4_get_state_lockit(cs, sid, &sp, FALSE, FALSE);
+		status = rfs4_get_state_lockit(cs, sid,
+		    &sp, RFS4_DBS_VALID, FALSE);
 		break;
 	case DELEGID:
 		status = rfs4_get_deleg_state(cs, sid, &dsp);
@@ -2948,7 +2949,8 @@ mds_validate_logstateid(struct compound_state *cs, stateid_t *sid)
 		rfs4_deleg_state_rele(dsp);
 		break;
 	case OPENID:
-		status = rfs4_get_state_lockit(cs, id, &sp, FALSE, FALSE);
+		status = rfs4_get_state_lockit(cs, id,
+		    &sp, RFS4_DBS_VALID, FALSE);
 		if (status != NFS4_OK)
 			return (status);
 
@@ -3091,7 +3093,7 @@ out:
 nfsstat4
 check_stateid(int mode, struct compound_state *cs, vnode_t *vp,
     stateid4 *stateid, bool_t trunc, bool_t *deleg, bool_t do_access,
-    caller_context_t *ct)
+    caller_context_t *ct, clientid4 *cid)
 {
 	rfs4_file_t *fp;
 	bool_t create = FALSE;
@@ -3136,6 +3138,9 @@ check_stateid(int mode, struct compound_state *cs, vnode_t *vp,
 	 * lsp. First we check lsp, then 'fall' through to sp.
 	 */
 	if (lsp != NULL) {
+		if (cid) {
+			*cid = lsp->locker->client->clientid;
+		}
 		/* Is associated server instance in its grace period? */
 		if (rfs4_clnt_in_grace(lsp->locker->client)) {
 			if (ct != NULL) {
@@ -3182,6 +3187,11 @@ check_stateid(int mode, struct compound_state *cs, vnode_t *vp,
 		 * ie. Skip if we got here via the LOCKID.
 		 */
 		if (id->v4_bits.type == OPENID) {
+			if (cid) {
+				rfs4_dbe_lock(sp->owner->client->dbe);
+				*cid = sp->owner->client->clientid;
+				rfs4_dbe_unlock(sp->owner->client->dbe);
+			}
 			/* Is associated server instance in its grace period? */
 			if (rfs4_clnt_in_grace(sp->owner->client)) {
 				rfs4_state_rele_nounlock(sp);
@@ -3254,6 +3264,11 @@ check_stateid(int mode, struct compound_state *cs, vnode_t *vp,
 	}
 
 	if (dsp != NULL) {
+		if (cid) {
+			rfs4_dbe_lock(dsp->client->dbe);
+			*cid = dsp->client->clientid;
+			rfs4_dbe_unlock(dsp->client->dbe);
+		}
 		/* Is associated server instance in its grace period? */
 		if (rfs4_clnt_in_grace(dsp->client)) {
 			rfs4_deleg_state_rele(dsp);

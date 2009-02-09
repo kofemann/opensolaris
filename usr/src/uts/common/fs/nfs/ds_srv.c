@@ -60,6 +60,8 @@ void ds_shutdown(DS_SHUTDOWNargs *, DS_SHUTDOWNres *, struct svc_req *);
 
 void nfs_ds_cp_dispatch(struct svc_req *, SVCXPRT *);
 
+static enum ds_status get_ds_status(nfsstat4);
+static void get_access_mode(compound_state_t *, DS_CHECKSTATEres *);
 
 ds_owner_t *mds_dsinfo_alloc(DS_EXIBIargs *);
 
@@ -187,21 +189,15 @@ ds_fhtovp(mds_ds_fh *fhp, ds_status *statp)
 {
 	vnode_t *vp = NULL;
 	int error;
-	fsid_t fs_id;
-	fsid4 *otw_fsidp = (fsid4 *)fhp->fh.v1.mds_dataset_id.val;
+	fsid_t *fs_id = (fsid_t *)fhp->fh.v1.mds_dataset_id.val;
 	fid_t fidp;
 	vfs_t *vfsp;
 
-	fs_id.val[0] = otw_fsidp->major;
-	fs_id.val[1] = otw_fsidp->minor;
-
-	vfsp = getvfs(&fs_id);
+	vfsp = getvfs(fs_id);
 	if (vfsp == NULL) {
 		*statp = DSERR_BADHANDLE;
 		return (NULL);
 	}
-
-	bzero(&fs_id, sizeof (fs_id));
 
 	fidp.fid_len = fhp->fh.v1.mds_fid.len;
 
@@ -253,89 +249,159 @@ mds_findfile_by_dsfh(nfs_server_instance_t *instp, mds_ds_fh *fhp)
 	return (fp);
 }
 
-int mds_cks_clientid = 0;
+/*
+ * Convert the NFS error into a control protocol error to be returned with
+ * control protocol response. Converse of get_nfs_status on the data server
+ */
+static enum ds_status
+get_ds_status(nfsstat4 stat)
+{
+	ds_status status;
+	switch (stat) {
+			case NFS4ERR_INVAL:
+				status = DSERR_INVAL;
+				break;
+			case NFS4ERR_EXPIRED:
+				status = DSERR_EXPIRED;
+				break;
+			case NFS4ERR_STALE_STATEID:
+				status = DSERR_STALE_STATEID;
+				break;
+			case NFS4ERR_OPENMODE:
+				status = DSERR_ACCESS;
+				break;
+			case NFS4ERR_BAD_STATEID:
+				status = DSERR_BAD_STATEID;
+				break;
+			case NFS4ERR_OLD_STATEID:
+				status = DSERR_OLD_STATEID;
+				break;
+			case NFS4ERR_GRACE:
+				status = DSERR_GRACE;
+				break;
+			default:
+				status = DSERR_RESOURCE;
+				break;
+		}
+	return (status);
+}
+
+/*
+ * Get access mode from rfs4_file_t.
+ */
+static void
+get_access_mode(compound_state_t *cs, DS_CHECKSTATEres *resp)
+{
+
+	rfs4_file_t *fp;
+	bool_t create = FALSE;
+
+	fp = rfs4_findfile(cs->instp, cs->vp, NULL, &create);
+	if (fp == NULL) {
+		resp->status = DSERR_BADHANDLE;
+		return;
+	}
+	rfs4_dbe_lock(fp->dbe);
+	resp->DS_CHECKSTATEres_u.file_state.open_mode = fp->share_access;
+	rfs4_dbe_unlock(fp->dbe);
+	rfs4_file_rele(fp);
+}
 
 /* ARGSUSED */
 void
 ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 		struct svc_req *req)
 {
-	struct compound_state cs;
-	rfs4_client_t *cp = NULL;
-	rfs4_file_t *fp;
-	rfs4_state_t *sp;
-	bool_t do_create = FALSE;
-	mds_ds_fh *fhp;
+	compound_state_t *cs;
+	mds_ds_fh *dfhp = NULL;
 	nfsstat4 stat;
+	nnode_error_t error;
+	bool_t deleg;
+	nnode_t *np;
+	clientid4 clientid;
+	vnode_t *vp;
 
-	rfs4_init_compound_state(&cs);
-	cs.instp = mds_server;
-
-	if (mds_cks_clientid) {
-		/* First validate the client id */
-		cp = findclient(cs.instp,
-		    (struct nfs_client_id4 *)&argp->co_owner,
-		    &do_create, NULL);
-		if (cp == NULL) {
-			resp->status = DSERR_STALE_CLIENTID;
-			return;
-		}
-		resp->DS_CHECKSTATEres_u.file_state.mds_clid = cp->clientid;
-		rfs4_client_rele(cp);
-	}
+	bzero(resp, sizeof (*resp));
 
 	/*
-	 * now the filehandle;
-	 *
-	 * First unwrap the OTW present.
-	 *
+	 * Decode the OTW DS file handle.
 	 */
-	if ((fhp = get_mds_ds_fh(&argp->fh)) == NULL) {
-		/* decode error */
+	if ((dfhp = get_mds_ds_fh(&argp->fh)) == NULL) {
 		resp->status = DSERR_BADHANDLE;
 		return;
 	}
 
 	/*
-	 * validate we think that we know what this
-	 * could be..
+	 * Sanity check. Ensure that we are dealing with a DS file handle.
 	 */
-	if (fhp->type != FH41_TYPE_DMU_DS ||
-	    fhp->vers != DS_FH_v1) {
+	if (dfhp->type != FH41_TYPE_DMU_DS ||
+	    dfhp->vers != DS_FH_v1) {
 		resp->status = DSERR_BADHANDLE;
 		return;
 	}
 
 	/*
-	 * mds_findfile_by_dsfh() will map the data-server
-	 * filehandle, and find the corresponding rfs4_file_t
+	 * Convert the ds file handle to a vnode. vnode is required by
+	 * check_stateid.
 	 */
-	fp = mds_findfile_by_dsfh(cs.instp, fhp);
-	if (fp == NULL) {
+	vp = ds_fhtovp(dfhp, &resp->status);
+
+	/*
+	 * We steal the reference from VFS_VGET in ds_fhtovp, so do not need to
+	 * do VN_HOLD explicity. VN_RELE happens when the compound_state_t gets
+	 * back to the kmem_cache via rfs41_compound_state_free.
+	 */
+	if (vp == NULL) {
 		resp->status = DSERR_BADHANDLE;
 		return;
 	}
 
 	/*
-	 * Now get the associated state
+	 * We need to invoke the check_stateid through the nnode interface.
+	 * Currently we do not have a method for deriving an nnode from a DS
+	 * filehandle. Hence, we are using vnodes.
 	 */
-	stat = rfs4_get_state(&cs, &argp->stateid, &sp, RFS4_DBS_VALID);
-	if (stat != NFS4_OK) {
-		/* mouldy old dough */
-		resp->status = DSERR_STALE_STATEID;
+	error = nnode_from_vnode(&np, vp);
+	if (error != 0) {
+		resp->status = DSERR_BADHANDLE;
 		return;
 	}
 
 	/*
-	 * Validate the stateid is referring to the correct file
+	 * Allocate a compound struct, needed by the function
+	 * that gets called via the nnode interface.
 	 */
-	if (fp->vp != sp->finfo->vp) {
-		rfs4_state_rele(sp);
-		rfs4_file_rele(fp);
-		resp->status = DSERR_BAD_STATEID;
+	cs = rfs41_compound_state_alloc(mds_server);
+
+	/*
+	 * Do a checkstate via nnode interface.
+	 * XXX: The nnop_check_stateid function will call nso_checkstate which
+	 * is mapped to the v4.0 check_stateid. This works for now because the
+	 * way the stateids are being generated. However, when the stateids get
+	 * generated with proper v4.1 bits, then either a different function
+	 * needs to be called, or the check_stateid has to be enhanced to deal
+	 * with v4.1 bits as well.
+	 */
+	deleg = FALSE;
+	if ((stat = nnop_check_stateid(np, cs, argp->mode, &argp->stateid,
+	    FALSE, &deleg, TRUE, NULL, &clientid)) != NFS4_OK) {
+		resp->status = get_ds_status(stat);
+		rfs41_compound_state_free(cs);
 		return;
 	}
 
+	/*
+	 * Copy the clientid that is returned from the check_stateid in the
+	 * response.
+	 */
+	resp->DS_CHECKSTATEres_u.file_state.mds_clid = clientid;
+
+	/*
+	 * Obtain file access mode, which is returned as part of the response.
+	 */
+	get_access_mode(cs, resp);
+
+#ifdef PERSISTENT_LAYOUT_ENABLED
 	/*
 	 * If layout has not been written to stable storage,
 	 * then do so before issuing the reply.
@@ -349,19 +415,15 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 		resp->status = DSERR_SERVERFAULT;
 		return;
 	}
-
-	rfs4_state_rele(sp);
-	rfs4_file_rele(fp);
-
+#endif
 	/*
-	 * Everything looked good so now build the reply back the
-	 * the data-server.
+	 * XXX: Todo List
+	 * Validate security flavor.
+	 * Authenticate.
+	 * Return layout information.
 	 */
-	bzero(resp, sizeof (*resp));
 
-	/* get layout information */
-
-	/* we're done! */
+	rfs41_compound_state_free(cs);
 	resp->status = DS_OK;
 }
 

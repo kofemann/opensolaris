@@ -186,7 +186,7 @@ vnode_t *nnop_io_getvp(nnode_t *);
 vnode_t *nnop_md_getvp(nnode_t *);
 
 nfsstat4 nnop_check_stateid(nnode_t *, struct compound_state *, int, stateid4 *,
-    bool_t, bool_t *, bool_t, caller_context_t *);
+    bool_t, bool_t *, bool_t, caller_context_t *, clientid4 *);
 
 /* creating implementations of nnodes */
 
@@ -212,7 +212,8 @@ typedef struct {
 
 typedef struct {
 	nfsstat4 (*nso_checkstate)(void *, struct compound_state *, int,
-	    stateid4 *, bool_t, bool_t *, bool_t, caller_context_t *);
+	    stateid4 *, bool_t, bool_t *, bool_t,
+	    caller_context_t *, clientid4 *);
 	void	(*nso_free)(void *);
 } nnode_state_ops_t;
 

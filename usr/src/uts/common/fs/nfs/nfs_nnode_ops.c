@@ -230,12 +230,12 @@ nnop_md_getvp(nnode_t *nn)
 nfsstat4
 nnop_check_stateid(nnode_t *nn, compound_state_t *cs, int mode,
     stateid4 *stateid, bool_t trunc, bool_t *deleg, bool_t do_access,
-    caller_context_t *ct)
+    caller_context_t *ct, clientid4 *clientid)
 {
 	if ((nn->nn_state_ops == NULL) ||
 	    (nn->nn_state_ops->nso_checkstate == NULL))
 		return (NFS4_OK);
 
 	return (nn->nn_state_ops->nso_checkstate)(nn->nn_state_ops_data,
-	    cs, mode, stateid, trunc, deleg, do_access, ct);
+	    cs, mode, stateid, trunc, deleg, do_access, ct, clientid);
 }

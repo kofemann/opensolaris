@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -991,7 +991,8 @@ rfs4_op_secinfo(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	}
 
 
-	*cs->statusp = resp->status = do_rfs4_op_secinfo(cs, name, dotdot, resp);
+	*cs->statusp = resp->status =
+	    do_rfs4_op_secinfo(cs, name, dotdot, resp);
 
 	if (name != nm)
 		kmem_free(name, MAXPATHLEN + 1);
@@ -2984,7 +2985,7 @@ rfs4_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	/* caller context gets set as side-effect */
 	if ((stat = nnop_check_stateid(nn, cs, FREAD, &args->stateid, FALSE,
-	    deleg, TRUE, &ct)) != NFS4_OK) {
+	    deleg, TRUE, &ct, NULL)) != NFS4_OK) {
 		*cs->statusp = resp->status = stat;
 		goto out;
 	}
@@ -4840,7 +4841,7 @@ do_rfs4_op_setattr(attrmap4 *resp, fattr4 *fattrp, struct compound_state *cs,
 	if (sarg.vap->va_mask & AT_SIZE) {
 		trunc = (sarg.vap->va_size == 0);
 		status = check_stateid(FWRITE, cs, cs->vp, stateid,
-		    trunc, &cs->deleg, sarg.vap->va_mask & AT_SIZE, &ct);
+		    trunc, &cs->deleg, sarg.vap->va_mask & AT_SIZE, &ct, NULL);
 		if (status != NFS4_OK)
 			goto done;
 	} else {
@@ -5229,7 +5230,7 @@ rfs4_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 
 	/* caller context gets set as side-effect */
 	if ((stat = nnop_check_stateid(nn, cs, FWRITE, &args->stateid, FALSE,
-	    deleg, TRUE, &ct)) != NFS4_OK) {
+	    deleg, TRUE, &ct, NULL)) != NFS4_OK) {
 		*cs->statusp = resp->status = stat;
 		goto out;
 	}

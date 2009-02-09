@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -157,8 +157,10 @@ xdr_decode_nfs41_fh(XDR *xdrs, nfs_fh4 *objp)
 
 		nfhp = kmem_zalloc(sizeof (nfs41_fh_fmt_t), KM_SLEEP);
 		nfhp->type = FH41_TYPE_NFS;
-		if (!xdrnfs41_fh(xdrs, nfhp))
+		if (!xdrnfs41_fh(xdrs, nfhp)) {
+			kmem_free(nfhp, sizeof (nfs41_fh_fmt_t));
 			return (FALSE);
+		}
 
 		objp->nfs_fh4_val = (char *)nfhp;
 		objp->nfs_fh4_len = sizeof (nfs41_fh_fmt_t);
@@ -171,8 +173,10 @@ xdr_decode_nfs41_fh(XDR *xdrs, nfs_fh4 *objp)
 		dfhp = kmem_zalloc(sizeof (struct mds_ds_fh), KM_SLEEP);
 		dfhp->type = FH41_TYPE_DMU_DS;
 
-		if (!xdr_ds_fh(xdrs, dfhp))
+		if (!xdr_ds_fh(xdrs, dfhp)) {
+			kmem_free(dfhp, sizeof (mds_ds_fh));
 			return (FALSE);
+		}
 
 		objp->nfs_fh4_val = (char *)dfhp;
 		objp->nfs_fh4_len = sizeof (struct mds_ds_fh);

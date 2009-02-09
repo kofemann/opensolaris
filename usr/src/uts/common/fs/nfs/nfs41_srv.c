@@ -2605,7 +2605,7 @@ mds_op_read(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	}
 
 	if ((stat = nnop_check_stateid(nn, cs, FREAD, &args->stateid,
-	    FALSE, deleg, TRUE, &ct)) != NFS4_OK) {
+	    FALSE, deleg, TRUE, &ct, NULL)) != NFS4_OK) {
 		*cs->statusp = resp->status = stat;
 		goto final;
 	}
@@ -3990,6 +3990,11 @@ mds_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		*cs->statusp = resp->status = NFS4ERR_NOFILEHANDLE;
 		goto final;
 	}
+	/*
+	 * cs->access is set in call_checkauth4 called in putfh code.  The
+	 * current putfh code will not invoke these security functions on the
+	 * DS codepath since it goes by the filehandle, not by nnodes per se.
+	 */
 	if (cs->access == CS_ACCESS_DENIED) {
 		*cs->statusp = resp->status = NFS4ERR_ACCESS;
 		goto final;
@@ -4002,7 +4007,7 @@ mds_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	}
 
 	if ((stat = nnop_check_stateid(nn, cs, FWRITE, &args->stateid, FALSE,
-	    deleg, TRUE, &ct)) != NFS4_OK) {
+	    deleg, TRUE, &ct, NULL)) != NFS4_OK) {
 		*cs->statusp = resp->status = stat;
 		goto out;
 	}

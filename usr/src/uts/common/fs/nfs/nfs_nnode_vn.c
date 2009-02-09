@@ -70,7 +70,7 @@ static vnode_t *nnode_vn_io_getvp(void *);
 static vnode_t *nnode_vn_md_getvp(void *);
 
 static nfsstat4 nnode_vn_st_checkstate(void *, compound_state_t *, int,
-    stateid4 *, bool_t, bool_t *, bool_t, caller_context_t *);
+    stateid4 *, bool_t, bool_t *, bool_t, caller_context_t *, clientid4 *);
 
 static nnode_data_ops_t nnode_vn_data_ops = {
 	.ndo_io_prep = nnode_vn_io_prep,
@@ -360,12 +360,12 @@ nnode_vn_md_getvp(void *vmd)
 static nfsstat4
 nnode_vn_st_checkstate(void *vstate, compound_state_t *cs, int mode,
     stateid4 *stateid, bool_t trunc, bool_t *deleg, bool_t do_access,
-    caller_context_t *ct)
+    caller_context_t *ct, clientid4 *clientid)
 {
 	nnode_vn_state_t *state = vstate;
 
 	return (check_stateid(mode, cs, state->nvs_vp, stateid, trunc,
-	    deleg, do_access, ct));
+	    deleg, do_access, ct, clientid));
 }
 
 /* creating and destroying vnode-based nnodes */

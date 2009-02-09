@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -123,8 +123,8 @@ create_client_handle(address, nconf, prog, vers, client)
 	CLIENT **client;
 {
 
-	static struct netbuf *nbuf;
-	static int fd = RPC_ANYFD;
+	struct netbuf *nbuf;
+	int fd = RPC_ANYFD;
 	struct t_info tinfo;
 
 	if (fd == RPC_ANYFD) {

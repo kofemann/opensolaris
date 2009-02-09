@@ -49,6 +49,7 @@ uint32_t max_blksize = SPA_MAXBLOCKSIZE;
 static nnode_error_t dserv_nnode_from_fh_ds(nnode_t **, mds_ds_fh *);
 static void dserv_nnode_key_free(void *);
 static dserv_nnode_data_t *dserv_nnode_data_alloc(void);
+static dserv_nnode_state_t *dserv_nnode_state_alloc(void);
 
 static nnode_error_t dserv_nnode_data_getobject(dserv_nnode_data_t *, int);
 static nnode_error_t dserv_nnode_data_getobjset(dserv_nnode_data_t *, int);
@@ -104,9 +105,11 @@ static int dserv_nnode_write(void *, nnode_io_flags_t *, uio_t *, int,
     cred_t *, caller_context_t *, wcc_data *);
 static int dserv_nnode_remove_obj(void *);
 static void dserv_nnode_data_free(void *);
+static void dserv_nnode_state_free(void *);
 
 static kmem_cache_t *dserv_nnode_key_cache;
 static kmem_cache_t *dserv_nnode_data_cache;
+static kmem_cache_t *dserv_nnode_state_cache;
 
 time_t dserv_start_time;
 
@@ -204,6 +207,12 @@ static nnode_data_ops_t dserv_nnode_data_ops = {
 	.ndo_io_prep = dserv_nnode_io_prep,
 	.ndo_remove_obj = dserv_nnode_remove_obj,
 	.ndo_free = dserv_nnode_data_free
+};
+
+
+static nnode_state_ops_t dserv_nnode_state_ops = {
+	.nso_checkstate = dserv_mds_checkstate,
+	.nso_free = dserv_nnode_state_free
 };
 
 int dserv_debug = 0;
@@ -383,6 +392,7 @@ dserv_nnode_build(nnode_seed_t *seed, void *vfh)
 	dserv_nnode_key_t *key = NULL;
 	nnode_error_t rc = 0;
 	dserv_nnode_data_t *data = NULL;
+	dserv_nnode_state_t *state = NULL;
 
 	key = kmem_cache_alloc(dserv_nnode_key_cache, KM_SLEEP);
 	key->dnk_real_fid.len = fh->fh.v1.mds_fid.len;
@@ -401,12 +411,22 @@ dserv_nnode_build(nnode_seed_t *seed, void *vfh)
 	seed->ns_data_ops = &dserv_nnode_data_ops;
 	seed->ns_data = data;
 
+	state = dserv_nnode_state_alloc();
+	rc = copy_ds_fh(fh, &state->fh);
+	if (rc)
+		goto out;
+
+	seed->ns_state_ops = &dserv_nnode_state_ops;
+	seed->ns_state = state;
+
 out:
 	if (rc != 0) {
 		if (key != NULL)
 			dserv_nnode_key_free(key);
 		if (data != NULL)
 			dserv_nnode_data_free(data);
+		if (state != NULL)
+			dserv_nnode_state_free(state);
 	}
 
 	return (rc);
@@ -956,6 +976,25 @@ dserv_nnode_data_free(void *vdnd)
 	kmem_cache_free(dserv_nnode_data_cache, dnd);
 }
 
+static dserv_nnode_state_t *
+dserv_nnode_state_alloc(void)
+{
+	dserv_nnode_state_t *dns;
+	dns = kmem_cache_alloc(dserv_nnode_state_cache, KM_SLEEP);
+	dns->fh = kmem_zalloc(sizeof (mds_ds_fh), KM_SLEEP);
+	return (dns);
+}
+
+static void
+dserv_nnode_state_free(void *dstate)
+{
+	dserv_nnode_state_t *dns = dstate;
+	if (dns->fh != NULL) {
+		free_ds_fh(dns->fh);
+	}
+	kmem_cache_free(dserv_nnode_state_cache, dns);
+}
+
 /*ARGSUSED*/
 static int
 dserv_nnode_key_construct(void *vdnk, void *foo, int bar)
@@ -986,6 +1025,21 @@ dserv_server_setup()
 	    sizeof (dserv_nnode_data_t), 0,
 	    dserv_nnode_data_construct, dserv_nnode_data_destroy, NULL,
 	    NULL, NULL, 0);
+	/*
+	 * XXX: No constructor function needed for now. At this point, the only
+	 * element of dserv_nnode_state_t is the DS filehandle, which gets
+	 * initialized when the nnode is first created, and never modified
+	 * after that. Thus, there is no need for any locking constructs for
+	 * now. As we add more elements in dserv_nnode_state_t, we will add the
+	 * locking.
+	 *
+	 * The elements of dserv_nnode_state_t will interact with the general
+	 * state caching infrastructure, and hence the locking design will be
+	 * done along with the design of state caching infrastructure.
+	 */
+	dserv_nnode_state_cache = kmem_cache_create("dserv_nnode_state_cache",
+	    sizeof (dserv_nnode_state_t), 0, NULL, NULL, NULL, NULL,
+	    NULL, 0);
 
 	nnode_from_fh_ds = dserv_nnode_from_fh_ds;
 }
@@ -997,6 +1051,7 @@ dserv_server_teardown()
 
 	kmem_cache_destroy(dserv_nnode_data_cache);
 	kmem_cache_destroy(dserv_nnode_key_cache);
+	kmem_cache_destroy(dserv_nnode_state_cache);
 }
 
 char *

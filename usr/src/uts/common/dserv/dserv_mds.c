@@ -51,6 +51,10 @@ static kmem_cache_t *dserv_open_root_objset_cache = NULL;
 static kmem_cache_t *dserv_uaddr_cache = NULL;
 static kmem_cache_t *dserv_mds_handle_cache = NULL;
 
+static enum nfsstat4 get_nfs_status(ds_status);
+static nfsstat4 cp_ds_mds_checkstateid(mds_ds_fh *,
+    compound_state_t *, stateid4 *, int);
+
 static int
 dserv_mds_instance_compare(const void *va, const void *vb)
 {
@@ -867,57 +871,137 @@ out:
 	return (error);
 }
 
-/*ARGSUSED*/
-int
-dserv_mds_checkstate(nfs_fh4 *fh, stateid4 *state, struct svc_req *req)
+/*
+ * Ensure that we catch all the control protocol errors from the MDS and report
+ * them to the client in the form of NFSv4.1 error.
+ */
+static enum nfsstat4
+get_nfs_status(ds_status status)
+{
+	enum nfsstat4 nfs_status;
+	switch (status) {
+		case DS_OK:
+			nfs_status = NFS4_OK;
+			break;
+		case DSERR_BADHANDLE:
+			nfs_status = NFS4ERR_NOFILEHANDLE;
+			break;
+		case DSERR_STALE_STATEID:
+			nfs_status = NFS4ERR_STALE;
+			break;
+		case DSERR_BAD_STATEID:
+			nfs_status = NFS4ERR_BAD_STATEID;
+			break;
+		case DSERR_STALE_CLIENTID:
+			nfs_status = NFS4ERR_STALE;
+			break;
+		default:
+			nfs_status = NFS4ERR_SERVERFAULT;
+	}
+	return (nfs_status);
+}
+
+/*
+ * Control Protocol (DS to MDS) checkstateid
+ */
+static nfsstat4
+cp_ds_mds_checkstateid(mds_ds_fh *fh, struct compound_state *cs,
+    stateid4 *stateid, int mode)
 {
 	dserv_mds_instance_t *inst;
 	DS_CHECKSTATEargs args;
 	DS_CHECKSTATEres res;
 	int error;
+	client_owner4 *co4;
+	nfsstat4 status;
+
+	/*
+	 * The derivation of client_owner4 below assumes that the
+	 * nfs_client_id4 and client_owner4 are comparable. The language in the
+	 * SPEC suggests that it is indeed the case at the server. See Section
+	 * 2.4.1 of NFS v4.1 proposed standard (Jan 29, 2009).
+	 *
+	 * The derivation is based on the sessions pointer, which is already
+	 * cached in the compound_state_t. The hold and release on the database
+	 * entry for the sessions pointer happens in the context of
+	 * rfs41_dispatch, so we do not need to worry about that here.
+	 */
+	co4 = (client_owner4*)&cs->sp->sn_clnt->nfs_client;
 
 	error = dserv_instance_enter(RW_READER, B_FALSE, &inst);
-	if (error)
-		return (error);
+	if (error) {
+		status = NFS4ERR_SERVERFAULT;
+		return (status);
+	}
 
-	/* XXX check some sort of cache or something */
-
-	/* oopsie, a cache miss.  Gotta go OTW. */
+	/*
+	 * XXX: check some sort of cache or something. The design for the
+	 * caching infrastructure is still pending (Jan 29, 2009). Check the
+	 * I/Os offset against the cached layout. Think through both dense and
+	 * sparse cases. How do you detect the writes past a layout in the
+	 * dense case?
+	 */
 
 	bzero(&args, sizeof (args));
 	bzero(&res, sizeof (res));
 
-
-	if (xdr_encode_ds_fh((mds_ds_fh *)fh->nfs_fh4_val, &args.fh)) {
-		error = EINVAL;
+	/*
+	 * Do some sanity checks and pack the arguments.
+	 */
+	if (fh == NULL || co4 == NULL) {
+		status = NFS4ERR_SERVERFAULT;
 		goto out;
 	}
-
-	/*
-	 * XXX need sessions API to get client owner
-	 */
-	/* args.client = 37; */
-
-	bcopy(state, &args.stateid, sizeof (args.stateid));
+	if (!xdr_encode_ds_fh(fh, &args.fh)) {
+		status = NFS4ERR_SERVERFAULT;
+		goto out;
+	}
+	bcopy(stateid, &args.stateid, sizeof (args.stateid));
+	bcopy(co4, &args.co_owner, sizeof (args.co_owner));
+	args.mode = mode;
 
 	error = dserv_mds_call(inst, DS_CHECKSTATE,
 	    (caddr_t)&args, xdr_DS_CHECKSTATEargs,
 	    (caddr_t)&res, xdr_DS_CHECKSTATEres);
 
-	if (error)
-		cmn_err(CE_WARN, "checkstate rpc failed: %d", error);
-	else
-		DTRACE_PROBE1(dserv__i__checkstate_status, int, res.status);
-
 	/*
-	 * Free arguments and results
+	 * XXX:Process the response.  Store the layout, client id, open mode,
+	 * access rights for the state caching infrastructure.
 	 */
-	if (!error)
-		(void) xdr_free(xdr_DS_CHECKSTATEres, (caddr_t)&res);
+	if (!error) {
+		DTRACE_PROBE1(dserv__i__checkstate_status, int, res.status);
+		status = get_nfs_status(res.status);
+		xdr_free(xdr_DS_CHECKSTATEres, (caddr_t)&res);
+	} else {
+		status = NFS4ERR_SERVERFAULT;
+		DTRACE_PROBE1(dserv__i__checkstate_status,
+		    int, NFS4ERR_SERVERFAULT);
+	}
 
 out:
 	dserv_instance_exit(inst);
-	return (error);
+	return (status);
+}
+
+/*
+ * DS_CHECKSTATE entry point. Accesses via nnop_checkstate interface for nnode,
+ * which in turn calls nso_checkstate, which is mapped to dserv_mds_checkstate.
+ * Most of the fields are not required for a control protocol checkstate, but
+ * we nevertheless have them here because they exist in the nnode interface for
+ * checkstate.
+ */
+/*ARGSUSED*/
+nfsstat4
+dserv_mds_checkstate(void *dnstate, compound_state_t *cs, int mode,
+    stateid4 *stateid, bool_t trunc, bool_t *deleg, bool_t do_access,
+    caller_context_t *ct, clientid4 *clientid)
+{
+	enum nfsstat4 status;
+
+	dserv_nnode_state_t *dns = dnstate;
+	status = cp_ds_mds_checkstateid(dns->fh, cs, stateid, mode);
+
+	return (status);
 }
 
 int
