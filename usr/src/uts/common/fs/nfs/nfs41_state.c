@@ -3366,8 +3366,10 @@ mds_put_layout(mds_layout_t *lop, vnode_t *vp)
 
 	/* mythical xdr encode routine */
 	odlp = xdr_convert_layout(lop, &size);
-	if (odlp == NULL)
+	if (odlp == NULL) {
+		kmem_free(name, len);
 		return (-1);
+	}
 
 	err = mds_write_odl(name, odlp, size);
 
@@ -3392,8 +3394,10 @@ mds_get_odl(vnode_t *vp, mds_layout_t **lopp)
 		return (NFS4ERR_LAYOUTTRYLATER);
 
 	odlp = mds_read_odl(name, &size);
-	if (odlp == NULL)
+	if (odlp == NULL) {
+		kmem_free(name, len);
 		return (NFS4ERR_LAYOUTTRYLATER);
+	}
 
 	lop = *lopp;
 

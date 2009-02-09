@@ -7963,6 +7963,7 @@ mds_get_flo(struct compound_state *cs, mds_layout_t **flopp)
 	return (NFS4_OK);
 }
 
+/*ARGSUSED*/
 nfsstat4
 mds_fetch_layout(struct compound_state *cs,
     LAYOUTGET4args *argp, LAYOUTGET4res *resp)
@@ -8133,7 +8134,7 @@ mds_fetch_layout(struct compound_state *cs,
 
 	logrp->lo_offset = 0;
 	logrp->lo_length = -1;
-	logrp->lo_iomode = argp->loga_iomode;
+	logrp->lo_iomode = LAYOUTIOMODE4_RW;
 	logrp->lo_content.loc_type = lp->layout_type;
 	logrp->lo_content.loc_body.loc_body_len = xdr_size;
 	logrp->lo_content.loc_body.loc_body_val = xdr_buffer;
