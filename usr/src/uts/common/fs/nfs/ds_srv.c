@@ -372,6 +372,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 * that gets called via the nnode interface.
 	 */
 	cs = rfs41_compound_state_alloc(mds_server);
+	cs->vp = vp;
 
 	/*
 	 * Do a checkstate via nnode interface.
