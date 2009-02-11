@@ -480,6 +480,7 @@ nnode_from_vnode(nnode_t **npp, vnode_t *vp)
 
 	vfs = vp->v_vfsp;
 	fsid = vfs->vfs_fsid;
+	fid.fid_len = sizeof (fid.fid_data);
 	error = VOP_FID(vp, &fid, NULL);
 	if (error != 0)
 		return (ESTALE);
