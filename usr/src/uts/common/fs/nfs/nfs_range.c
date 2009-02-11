@@ -442,6 +442,7 @@ done:
  * specifies a subrange that is entirely set.
  */
 
+/*ARGSUSED*/
 nfs_range_query_t
 nfs_range_is_set(nfs_range_t *range, uint64_t *offp, uint64_t *lenp,
     uint32_t flags)
@@ -483,6 +484,7 @@ nfs_range_is_set(nfs_range_t *range, uint64_t *offp, uint64_t *lenp,
  * entire length will be clear.
  */
 
+/*ARGSUSED*/
 nfs_range_query_t
 nfs_range_is_clear(nfs_range_t *range, uint64_t *offp, uint64_t *lenp,
     uint32_t flags)
@@ -595,22 +597,6 @@ nfs_range_destruct(void *vrange, void *foo)
 
 	rw_destroy(&range->nr_lock);
 	avl_destroy(&range->nr_tree);
-}
-
-/*ARGSUSED*/
-static int
-nfs_subrange_construct(void *vsub, void *foo, int bar)
-{
-	nfs_subrange_t *sub = vsub;
-
-	return (0);
-}
-
-/*ARGSUSED*/
-static void
-nfs_subrange_destruct(void *vsub, void *foo)
-{
-	nfs_subrange_t *sub = vsub;
 }
 
 #ifdef NFS_RANGE_TEST
@@ -739,18 +725,19 @@ nfs_range_test(void)
 void
 nfs_range_init(void)
 {
+	nfs_subrange_cache = kmem_cache_create("nfs_subrange_cache",
+	    sizeof (nfs_subrange_t), 0,
+	    NULL, NULL, NULL,
+	    NULL, NULL, 0);
 	nfs_range_cache = kmem_cache_create("nfs_range_cache",
 	    sizeof (nfs_range_t), 0,
 	    nfs_range_construct, nfs_range_destruct, NULL,
-	    NULL, NULL, 0);
-	nfs_subrange_cache = kmem_cache_create("nfs_subrange_cache",
-	    sizeof (nfs_subrange_t), 0,
-	    nfs_subrange_construct, nfs_subrange_destruct, NULL,
 	    NULL, NULL, 0);
 }
 
 void
 nfs_range_fini(void)
 {
+	kmem_cache_destroy(nfs_subrange_cache);
 	kmem_cache_destroy(nfs_range_cache);
 }
