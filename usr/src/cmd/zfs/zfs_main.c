@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1773,7 +1773,7 @@ zfs_do_list(int argc, char **argv)
 	boolean_t scripted = B_FALSE;
 	static char default_fields[] =
 	    "name,used,available,referenced,mountpoint";
-	int types = ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME;
+	int types = ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME | ZFS_TYPE_PNFS;
 	boolean_t types_specified = B_FALSE;
 	char *fields = NULL;
 	list_cbdata_t cb = { 0 };
@@ -1816,7 +1816,8 @@ zfs_do_list(int argc, char **argv)
 			flags &= ~ZFS_ITER_PROP_LISTSNAPS;
 			while (*optarg != '\0') {
 				static char *type_subopts[] = { "filesystem",
-				    "volume", "snapshot", "pnfsdata", "all", NULL };
+				    "volume", "snapshot", "pnfsdata", "all",
+				    NULL };
 
 				switch (getsubopt(&optarg, type_subopts,
 				    &value)) {
@@ -1830,10 +1831,10 @@ zfs_do_list(int argc, char **argv)
 					types |= ZFS_TYPE_SNAPSHOT;
 					break;
 				case 3:
-					types = ZFS_TYPE_DATASET;
+					types |= ZFS_TYPE_PNFS;
 					break;
 				case 4:
-					types |= ZFS_TYPE_PNFS;
+					types = ZFS_TYPE_DATASET;
 					break;
 				default:
 					(void) fprintf(stderr,
