@@ -254,6 +254,8 @@ pnfs_read_compound_construct(void *vc, void *foo, int bar)
 	r->args.array_len = 3;
 
 	r->argop[0].argop = OP_SEQUENCE;
+	/* read responses need never be cached */
+	r->argop[0].nfs_argop4_u.opsequence.sa_cachethis = 0;
 	r->argop[1].argop = OP_CPUTFH;
 	r->argop[2].argop = OP_READ;
 	return (0);
@@ -3393,7 +3395,7 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
     cred_t *cr)
 {
 	int i, error = 0;
-	file_io_commit_t *job;
+	file_io_commit_t *job = NULL;
 	commit_task_t *task;
 	rnode4_t *rp = VTOR4(vp);
 	pnfs_layout_t *layout;
@@ -3555,8 +3557,9 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 
 	kmem_free(exts, exts_size);
 
-	(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
-	    pnfs_task_commit_free, job, 0);
+	if (job)
+		(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
+		    pnfs_task_commit_free, job, 0);
 
 	return (error);
 }
