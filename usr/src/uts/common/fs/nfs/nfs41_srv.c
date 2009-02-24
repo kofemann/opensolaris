@@ -8478,8 +8478,10 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 		return (NFS4ERR_SERVERFAULT);
 	}
 
-	if (!layout_match(lgp->lo_stateid, lorf->lrf_stateid, &status))
+	if (!layout_match(lgp->lo_stateid, lorf->lrf_stateid, &status)) {
+		rfs41_lo_grant_rele(lgp);
 		return (status);
+	}
 
 	/*
 	 * Refer to Section 18.44.3 of draft-25 for the right
@@ -8532,6 +8534,7 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 		lgp->fp = NULL;
 
 		rfs4_dbe_invalidate(lgp->dbe);
+		rfs41_lo_grant_rele(lgp);
 
 #ifdef RECALL_ENGINE
 		if (&fp->lo_grant_list == fp->lo_grant_list.next) {

@@ -1428,12 +1428,23 @@ rfs41_ever_grant_rele(mds_ever_grant_t *egp)
 }
 
 void
+mds_kill_eg_callout(rfs4_entry_t u_entry, void *arg)
+{
+	mds_ever_grant_t *egp = (mds_ever_grant_t *)u_entry;
+	rfs4_client_t *cp = (rfs4_client_t *)arg;
+
+	if (egp->cp == cp) {
+		egp->cp = NULL;
+		rfs4_dbe_invalidate(egp->dbe);
+		rfs4_dbe_rele_nolock(egp->dbe);
+	}
+}
+
+void
 mds_clean_up_grants(rfs4_client_t *cp)
 {
 	mds_layout_grant_t *lgp;
-	mds_ever_grant_t *egp;
-	vnode_t *vp;
-	bool_t create = FALSE;
+	nfs_server_instance_t *instp;
 
 	while (cp->clientgrantlist.next->lgp != NULL) {
 		lgp = cp->clientgrantlist.next->lgp;
@@ -1442,23 +1453,20 @@ mds_clean_up_grants(rfs4_client_t *cp)
 		    &lgp->clientgrantlist;
 		lgp->cp = NULL;
 
-		vp = lgp->fp->vp;
+		rfs4_dbe_lock(lgp->fp->dbe);
 		remque(&lgp->lo_grant_list);
+		rfs4_dbe_unlock(lgp->fp->dbe);
+
 		lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
 		    &lgp->lo_grant_list;
-
-		if (vp != NULL) {
-			egp = rfs41_findevergrant(cp, vp, &create);
-			if (egp != NULL) {
-				rfs4_dbe_invalidate(egp->dbe);
-				rfs4_dbe_rele(egp->dbe);
-			}
-		}
 
 		rfs4_file_rele(lgp->fp);
 		lgp->fp = NULL;
 		rfs4_dbe_invalidate(lgp->dbe);
 	}
+
+	instp = dbe_to_instp(cp->dbe);
+	rfs4_dbe_walk(instp->mds_ever_grant_tab, mds_kill_eg_callout, cp);
 }
 
 /*
@@ -1479,16 +1487,22 @@ rfs41_lo_seqid(stateid_t *sp)
 bool_t
 rfs41_lo_still_granted(mds_layout_grant_t *lgp)
 {
-	rfs41_grant_list_t	*glp;
-	bool_t			 found = FALSE;
+	bool_t			 found = TRUE;
 
+	/*
+	 * We currently have the layout grant, but is it still valid?
+	 * If it has been returned, then the status will be updated as
+	 * returned or recalled.  However, it is possible that the client
+	 * has gone away while we are still holding this.  When the client
+	 * is cleaned up, the pointer to the client and the file will be
+	 * set to NULL and it will have been removed from all lists, waiting
+	 * to be released and reaped.  In this case, the status may not
+	 * have been updated.
+	 */
 	rfs4_dbe_lock(lgp->dbe);
-	glp = lgp->fp->lo_grant_list.next;
-	for (; glp && glp->lgp; glp = glp->next) {
-		if (found = mds_layout_grant_compare((rfs4_entry_t)lgp,
-		    (void *)glp->lgp))
-			break;
-	}
+	if (lgp->lo_status == LO_RETURNED || lgp->lo_status == LO_RECALLED ||
+	    lgp->cp == NULL)
+		found = FALSE;
 	rfs4_dbe_unlock(lgp->dbe);
 	return (found);
 }

@@ -336,6 +336,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 */
 	if (dfhp->type != FH41_TYPE_DMU_DS ||
 	    dfhp->vers != DS_FH_v1) {
+		kmem_free(dfhp, sizeof (mds_ds_fh));
 		resp->status = DSERR_BADHANDLE;
 		return;
 	}
@@ -345,6 +346,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 * check_stateid.
 	 */
 	vp = ds_fhtovp(dfhp, &resp->status);
+	kmem_free(dfhp, sizeof (mds_ds_fh));
 
 	/*
 	 * We steal the reference from VFS_VGET in ds_fhtovp, so do not need to
@@ -363,6 +365,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 */
 	error = nnode_from_vnode(&np, vp);
 	if (error != 0) {
+		VN_RELE(vp);
 		resp->status = DSERR_BADHANDLE;
 		return;
 	}
