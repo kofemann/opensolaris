@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -2320,6 +2320,30 @@ rfs4_return_deleg(rfs4_deleg_state_t *dsp, bool_t revoked)
 	/* Remove state from recall list */
 
 	instp = dbe_to_instp(fp->dbe);
+	if (instp->inst_flags & NFS_INST_v41) {
+		mds_session_t	*sp;
+		slotid4		 slot;
+		slot41_t	*slp;
+		extern void rfs41_rs_erase(void *);
+
+		if (dsp->rs.refcnt > 0) {
+			/*
+			 * refcnt > 0, so this means we still have an active
+			 * hold on deleg_state. If (for some reason) we don't
+			 * find the sp, the worse that'll happen is that we'll
+			 * leak some state (ie. won't be able to clean up the
+			 * hold). But nothing to get too excited about.
+			 */
+			slot = dsp->rs.slotno;
+			sp = mds_findsession_by_id(instp, dsp->rs.sessid);
+			if (sp != NULL) {
+				slp = &sp->sn_slrc->sc_slot[slot];
+				if (slp->p == dsp)
+					rfs41_rs_erase(dsp);
+				rfs41_session_rele(sp);
+			}
+		}
+	}
 
 	remque(&dsp->delegationlist);
 	dsp->delegationlist.next = dsp->delegationlist.prev =

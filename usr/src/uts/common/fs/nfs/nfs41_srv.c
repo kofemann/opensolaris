@@ -4839,8 +4839,10 @@ rfs41_rs_erase(void *p)
 #endif	/* DEBUG_VERBOSE */
 
 	ASSERT(dsp != NULL);
-	rfs41_deleg_rs_rele(dsp);
-	rfs4_deleg_state_rele(dsp);
+	if (dsp->rs.refcnt > 0) {
+		rfs41_deleg_rs_rele(dsp);
+		rfs4_deleg_state_rele(dsp);
+	}
 }
 
 #ifdef	DEBUG

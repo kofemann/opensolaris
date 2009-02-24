@@ -1459,12 +1459,12 @@ mds_clean_up_grants(rfs4_client_t *cp)
 
 		lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
 		    &lgp->lo_grant_list;
-
 		rfs4_file_rele(lgp->fp);
+
 		lgp->fp = NULL;
 		rfs4_dbe_invalidate(lgp->dbe);
+		rfs41_lo_grant_rele(lgp);
 	}
-
 	instp = dbe_to_instp(cp->dbe);
 	rfs4_dbe_walk(instp->mds_ever_grant_tab, mds_kill_eg_callout, cp);
 }
@@ -1487,7 +1487,7 @@ rfs41_lo_seqid(stateid_t *sp)
 bool_t
 rfs41_lo_still_granted(mds_layout_grant_t *lgp)
 {
-	bool_t			 found = TRUE;
+	bool_t	found = TRUE;
 
 	/*
 	 * We currently have the layout grant, but is it still valid?
@@ -1504,6 +1504,7 @@ rfs41_lo_still_granted(mds_layout_grant_t *lgp)
 	    lgp->cp == NULL)
 		found = FALSE;
 	rfs4_dbe_unlock(lgp->dbe);
+
 	return (found);
 }
 
@@ -1821,7 +1822,7 @@ fsid_lor(rfs4_entry_t entry, void *args)
 	mds_ever_grant_t	 eg;
 	vnode_t			*vp = NULL;
 
-	if (egp == NULL || lrp == NULL)
+	if (egp == NULL || lrp == NULL || rfs4_dbe_is_invalid(egp->dbe))
 		return;
 
 	ASSERT(rfs4_dbe_islocked(egp->dbe));
@@ -2944,7 +2945,7 @@ mds_sstor_init(nfs_server_instance_t *instp)
 
 	instp->mds_session_tab = rfs4_table_create(instp,
 	    "Session", instp->reap_time, 2, mds_session_create,
-	    mds_session_destroy, mds_do_not_expire, sizeof (mds_session_t),
+	    mds_session_destroy, NULL, sizeof (mds_session_t),
 	    MDS_TABSIZE, MDS_MAXTABSZ/8, 100);
 
 	instp->mds_session_idx = rfs4_index_create(instp->mds_session_tab,
