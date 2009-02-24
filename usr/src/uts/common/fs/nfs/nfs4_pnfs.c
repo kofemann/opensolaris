@@ -1675,6 +1675,7 @@ int pnfs_gdi_hack = 0;
 int pnfs_enable_dino = 1;
 bitmap4 pnfs_devno_mask =
 	NOTIFY_DEVICEID4_DELETE_MASK|NOTIFY_DEVICEID4_CHANGE_MASK;
+int pnfs_gdia_maxcount = 65536;
 
 static int
 pnfs_getdeviceinfo(mntinfo4_t *mi, devnode_t *dip, cred_t *cr)
@@ -1712,7 +1713,7 @@ retry:
 	gdi_args = &argop[gdi_ndx].nfs_argop4_u.opgetdeviceinfo;
 	DEV_ASSIGN(gdi_args->gdia_device_id, dip->dn_devid);
 	gdi_args->gdia_layout_type = LAYOUT4_NFSV4_1_FILES;
-	gdi_args->gdia_maxcount = 16384; /* XXX make abstraction */
+	gdi_args->gdia_maxcount = pnfs_gdia_maxcount;
 	if (pnfs_enable_dino)
 		gdi_args->gdia_notify_types = pnfs_devno_mask;
 	else
@@ -2058,6 +2059,8 @@ out:
 	task_layoutreturn_free(task);
 }
 
+int pnfs_no_layoutget;
+
 static void
 pnfs_task_layoutget(void *v)
 {
@@ -2078,6 +2081,9 @@ pnfs_task_layoutget(void *v)
 	cred_t *cr = task->tlg_cred;
 	nfs4_recov_state_t recov_state;
 	nfs4_stateid_types_t sid_types;
+
+	if (pnfs_no_layoutget)
+		goto out;
 
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
