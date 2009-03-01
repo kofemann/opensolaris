@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -449,6 +449,7 @@ hxge_intr_hw_disable(p_hxge_t hxgep)
 	HXGE_DEBUG_MSG((hxgep, INT_CTL, "<== hxge_intr_hw_disable"));
 }
 
+/*ARGSUSED*/
 void
 hxge_rx_hw_blank(void *arg, time_t ticks, uint_t count)
 {
@@ -461,7 +462,6 @@ hxge_rx_hw_blank(void *arg, time_t ticks, uint_t count)
 	 * processing by the receive packet interrupt routines.
 	 */
 	hxgep->intr_timeout = (uint16_t)ticks;
-	hxgep->intr_threshold = (uint16_t)count;
 
 	HXGE_DEBUG_MSG((hxgep, INT_CTL, "<== hxge_rx_hw_blank"));
 }
@@ -498,16 +498,6 @@ hxge_hw_ioctl(p_hxge_t hxgep, queue_t *wq, mblk_t *mp, struct iocblk *iocp)
 	default:
 		miocnak(wq, mp, 0, EINVAL);
 		return;
-
-	case HXGE_GET64:
-		hxge_get64(hxgep, mp->b_cont);
-		miocack(wq, mp, sizeof (uint32_t), 0);
-		break;
-
-	case HXGE_PUT64:
-		hxge_put64(hxgep, mp->b_cont);
-		miocack(wq, mp, 0, 0);
-		break;
 
 	case HXGE_PUT_TCAM:
 		hxge_put_tcam(hxgep, mp->b_cont);

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -3989,7 +3989,7 @@ ipsec_in_to_out(mblk_t *ipsec_mp, ipha_t *ipha, ip6_t *ip6h)
 	ipsec_out_t  *io;
 	boolean_t v4;
 	mblk_t *mp;
-	boolean_t secure, attach_if;
+	boolean_t secure;
 	uint_t ifindex;
 	ipsec_selector_t sel;
 	ipsec_action_t *reflect_action = NULL;
@@ -4012,7 +4012,6 @@ ipsec_in_to_out(mblk_t *ipsec_mp, ipha_t *ipha, ip6_t *ip6h)
 	} else if (!ii->ipsec_in_loopback)
 		reflect_action = ipsec_in_to_out_action(ii);
 	secure = ii->ipsec_in_secure;
-	attach_if = ii->ipsec_in_attach_if;
 	ifindex = ii->ipsec_in_ill_index;
 	zoneid = ii->ipsec_in_zoneid;
 	ASSERT(zoneid != ALL_ZONES);
@@ -4057,7 +4056,6 @@ ipsec_in_to_out(mblk_t *ipsec_mp, ipha_t *ipha, ip6_t *ip6h)
 	io->ipsec_out_proc_begin = B_FALSE;
 	io->ipsec_out_secure = secure;
 	io->ipsec_out_v4 = v4;
-	io->ipsec_out_attach_if = attach_if;
 	io->ipsec_out_ill_index = ifindex;
 	io->ipsec_out_zoneid = zoneid;
 	io->ipsec_out_ns = ns;		/* No netstack_hold */
@@ -4457,6 +4455,7 @@ ipsec_in_alloc(boolean_t isv4, netstack_t *ns)
 	ii->ipsec_in_v4 = isv4;
 	ii->ipsec_in_secure = B_TRUE;
 	ii->ipsec_in_ns = ns;		/* No netstack_hold */
+	ii->ipsec_in_stackid = ns->netstack_stackid;
 
 	ii->ipsec_in_frtn.free_func = ipsec_in_free;
 	ii->ipsec_in_frtn.free_arg = (char *)ii;
@@ -4549,7 +4548,6 @@ ipsec_out_to_in(mblk_t *ipsec_mp)
 	ii->ipsec_in_secure = B_TRUE;
 	ii->ipsec_in_v4 = v4;
 	ii->ipsec_in_icmp_loopback = icmp_loopback;
-	ii->ipsec_in_attach_if = B_FALSE;
 }
 
 /*
@@ -4654,7 +4652,7 @@ ip_wput_attach_policy(mblk_t *ipsec_mp, ipha_t *ipha, ip6_t *ip6h, ire_t *ire,
 			sel.ips_local_addr_v6 = ip6h->ip6_src;
 		}
 
-		sel.ips_remote_addr_v6 = ip_get_dst_v6(ip6h, &is_fragment);
+		sel.ips_remote_addr_v6 = ip_get_dst_v6(ip6h, mp, &is_fragment);
 		if (is_fragment) {
 			/*
 			 * It's a packet fragment for a packet that
@@ -5466,7 +5464,6 @@ ipsec_tun_outbound(mblk_t *mp, tun_t *atp, ipha_t *inner_ipv4,
 	ipsec_policy_head_t *polhead;
 	ipsec_selector_t sel;
 	mblk_t *ipsec_mp, *ipsec_mp_head, *nmp;
-	mblk_t *spare_mp = NULL;
 	ipsec_out_t *io;
 	boolean_t is_fragment;
 	ipsec_policy_t *pol;
@@ -5488,23 +5485,54 @@ ipsec_tun_outbound(mblk_t *mp, tun_t *atp, ipha_t *inner_ipv4,
 		sel.ips_local_addr_v4 = inner_ipv4->ipha_src;
 		sel.ips_remote_addr_v4 = inner_ipv4->ipha_dst;
 		sel.ips_protocol = (uint8_t)inner_ipv4->ipha_protocol;
-		is_fragment =
-		    IS_V4_FRAGMENT(inner_ipv4->ipha_fragment_offset_and_flags);
 	} else {
 		ASSERT(inner_ipv6 != NULL);
 		sel.ips_isv4 = B_FALSE;
 		sel.ips_local_addr_v6 = inner_ipv6->ip6_src;
-		/* Use ip_get_dst_v6() just for the fragment bit. */
-		sel.ips_remote_addr_v6 = ip_get_dst_v6(inner_ipv6,
-		    &is_fragment);
 		/*
-		 * Reset, because we don't care about routing-header dests
-		 * in the forwarding/tunnel path.
+		 * We don't care about routing-header dests in the
+		 * forwarding/tunnel path, so just grab ip6_dst.
 		 */
 		sel.ips_remote_addr_v6 = inner_ipv6->ip6_dst;
 	}
 
 	if (itp->itp_flags & ITPF_P_PER_PORT_SECURITY) {
+		/*
+		 * Caller can prepend the outer header, which means
+		 * inner_ipv[46] may be stuck in the middle.  Pullup the whole
+		 * mess now if need-be, for easier processing later.  Don't
+		 * forget to rewire the outer header too.
+		 */
+		if (mp->b_cont != NULL) {
+			nmp = msgpullup(mp, -1);
+			if (nmp == NULL) {
+				ip_drop_packet(mp, B_FALSE, NULL, NULL,
+				    DROPPER(ipss, ipds_spd_nomem),
+				    &ipss->ipsec_spd_dropper);
+				return (NULL);
+			}
+			freemsg(mp);
+			mp = nmp;
+			if (outer_ipv4 != NULL)
+				outer_ipv4 = (ipha_t *)mp->b_rptr;
+			else
+				outer_ipv6 = (ip6_t *)mp->b_rptr;
+			if (inner_ipv4 != NULL) {
+				inner_ipv4 =
+				    (ipha_t *)(mp->b_rptr + outer_hdr_len);
+			} else {
+				inner_ipv6 =
+				    (ip6_t *)(mp->b_rptr + outer_hdr_len);
+			}
+		}
+		if (inner_ipv4 != NULL) {
+			is_fragment = IS_V4_FRAGMENT(
+			    inner_ipv4->ipha_fragment_offset_and_flags);
+		} else {
+			sel.ips_remote_addr_v6 = ip_get_dst_v6(inner_ipv6, mp,
+			    &is_fragment);
+		}
+
 		if (is_fragment) {
 			ipha_t *oiph;
 			ipha_t *iph = NULL;
@@ -5521,6 +5549,7 @@ ipsec_tun_outbound(mblk_t *mp, tun_t *atp, ipha_t *inner_ipv4,
 			    outer_hdr_len, ipss);
 			if (mp == NULL)
 				return (NULL);
+			ASSERT(mp->b_cont == NULL);
 
 			/*
 			 * If we get here, we have a full
@@ -5534,15 +5563,15 @@ ipsec_tun_outbound(mblk_t *mp, tun_t *atp, ipha_t *inner_ipv4,
 				iph = (ipha_t *)(mp->b_rptr + hdr_len);
 			} else {
 				ASSERT(IPH_HDR_VERSION(oiph) == IPV6_VERSION);
-				if ((spare_mp = msgpullup(mp, -1)) == NULL) {
+				ip6h = (ip6_t *)mp->b_rptr;
+				if (!ip_hdr_length_nexthdr_v6(mp, ip6h,
+				    &ip6_hdr_length, &v6_proto_p)) {
 					ip_drop_packet_chain(mp, B_FALSE,
-					    NULL, NULL,
-					    DROPPER(ipss, ipds_spd_nomem),
+					    NULL, NULL, DROPPER(ipss,
+					    ipds_spd_malformed_packet),
 					    &ipss->ipsec_spd_dropper);
+					return (NULL);
 				}
-				ip6h = (ip6_t *)spare_mp->b_rptr;
-				(void) ip_hdr_length_nexthdr_v6(spare_mp, ip6h,
-				    &ip6_hdr_length, &v6_proto_p);
 				hdr_len = ip6_hdr_length;
 			}
 			outer_hdr_len = hdr_len;
@@ -5558,20 +5587,18 @@ ipsec_tun_outbound(mblk_t *mp, tun_t *atp, ipha_t *inner_ipv4,
 				sel.ips_protocol =
 				    (uint8_t)inner_ipv4->ipha_protocol;
 			} else {
-				if ((spare_mp == NULL) &&
-				    ((spare_mp = msgpullup(mp, -1)) == NULL)) {
-					ip_drop_packet_chain(mp, B_FALSE,
-					    NULL, NULL,
-					    DROPPER(ipss, ipds_spd_nomem),
-					    &ipss->ipsec_spd_dropper);
-				}
-				inner_ipv6 = (ip6_t *)(spare_mp->b_rptr +
+				inner_ipv6 = (ip6_t *)(mp->b_rptr +
 				    hdr_len);
 				sel.ips_local_addr_v6 = inner_ipv6->ip6_src;
 				sel.ips_remote_addr_v6 = inner_ipv6->ip6_dst;
-				(void) ip_hdr_length_nexthdr_v6(spare_mp,
-				    inner_ipv6, &ip6_hdr_length,
-				    &v6_proto_p);
+				if (!ip_hdr_length_nexthdr_v6(mp,
+				    inner_ipv6, &ip6_hdr_length, &v6_proto_p)) {
+					ip_drop_packet_chain(mp, B_FALSE,
+					    NULL, NULL, DROPPER(ipss,
+					    ipds_spd_malformed_frag),
+					    &ipss->ipsec_spd_dropper);
+					return (NULL);
+				}
 				v6_proto = *v6_proto_p;
 				sel.ips_protocol = v6_proto;
 #ifdef FRAGCACHE_DEBUG
@@ -5583,22 +5610,10 @@ ipsec_tun_outbound(mblk_t *mp, tun_t *atp, ipha_t *inner_ipv4,
 		}
 
 		/* Get ports... */
-		if (spare_mp != NULL) {
-			if (!ipsec_init_outbound_ports(&sel, spare_mp,
-			    inner_ipv4, inner_ipv6, outer_hdr_len, ipss)) {
-				/*
-				 * callee did ip_drop_packet_chain() on
-				 * spare_mp
-				 */
-				ipsec_freemsg_chain(mp);
-				return (NULL);
-			}
-		} else {
-			if (!ipsec_init_outbound_ports(&sel, mp,
-			    inner_ipv4, inner_ipv6, outer_hdr_len, ipss)) {
-				/* callee did ip_drop_packet_chain() on mp. */
-				return (NULL);
-			}
+		if (!ipsec_init_outbound_ports(&sel, mp,
+		    inner_ipv4, inner_ipv6, outer_hdr_len, ipss)) {
+			/* callee did ip_drop_packet_chain() on mp. */
+			return (NULL);
 		}
 #ifdef FRAGCACHE_DEBUG
 		if (inner_ipv4 != NULL)
@@ -5616,8 +5631,7 @@ ipsec_tun_outbound(mblk_t *mp, tun_t *atp, ipha_t *inner_ipv4,
 			    sel.ips_protocol, ntohs(sel.ips_local_port),
 			    ntohs(sel.ips_remote_port));
 #endif
-		/* Success so far - done with spare_mp */
-		ipsec_freemsg_chain(spare_mp);
+		/* Success so far! */
 	}
 	rw_enter(&polhead->iph_lock, RW_READER);
 	pol = ipsec_find_policy_head(NULL, polhead, IPSEC_TYPE_OUTBOUND,
@@ -6449,31 +6463,45 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 	ip6_frag_t *fraghdr;
 	ipsec_fragcache_entry_t *fep;
 	int i;
-	mblk_t *nmp, *prevmp, *spare_mp = NULL;
+	mblk_t *nmp, *prevmp;
 	int firstbyte, lastbyte;
 	int offset;
 	int last;
 	boolean_t inbound = (ipsec_mp != NULL);
 	mblk_t *first_mp = inbound ? ipsec_mp : mp;
 
-	mutex_enter(&frag->itpf_lock);
+	ASSERT(first_mp == mp || first_mp->b_cont == mp);
 
-	oiph  = (ipha_t *)mp->b_rptr;
-	iph  = (ipha_t *)(mp->b_rptr + outer_hdr_len);
-	if (IPH_HDR_VERSION(iph) == IPV4_VERSION) {
-		is_v4 = B_TRUE;
-	} else {
-		ASSERT(IPH_HDR_VERSION(iph) == IPV6_VERSION);
-		if ((spare_mp = msgpullup(mp, -1)) == NULL) {
-			mutex_exit(&frag->itpf_lock);
+	/*
+	 * You're on the slow path, so insure that every packet in the
+	 * cache is a single-mblk one.
+	 */
+	if (mp->b_cont != NULL) {
+		nmp = msgpullup(mp, -1);
+		if (nmp == NULL) {
 			ip_drop_packet(first_mp, inbound, NULL, NULL,
 			    DROPPER(ipss, ipds_spd_nomem),
 			    &ipss->ipsec_spd_dropper);
 			return (NULL);
 		}
-		ip6h = (ip6_t *)(spare_mp->b_rptr + outer_hdr_len);
+		freemsg(mp);
+		if (ipsec_mp != NULL)
+			ipsec_mp->b_cont = nmp;
+		mp = nmp;
+	}
 
-		if (!ip_hdr_length_nexthdr_v6(spare_mp, ip6h, &ip6_hdr_length,
+	mutex_enter(&frag->itpf_lock);
+
+	oiph  = (ipha_t *)mp->b_rptr;
+	iph  = (ipha_t *)(mp->b_rptr + outer_hdr_len);
+
+	if (IPH_HDR_VERSION(iph) == IPV4_VERSION) {
+		is_v4 = B_TRUE;
+	} else {
+		ASSERT(IPH_HDR_VERSION(iph) == IPV6_VERSION);
+		ip6h = (ip6_t *)(mp->b_rptr + outer_hdr_len);
+
+		if (!ip_hdr_length_nexthdr_v6(mp, ip6h, &ip6_hdr_length,
 		    &v6_proto_p)) {
 			/*
 			 * Find upper layer protocol.
@@ -6483,7 +6511,6 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 			ip_drop_packet(first_mp, inbound, NULL, NULL,
 			    DROPPER(ipss, ipds_spd_malformed_packet),
 			    &ipss->ipsec_spd_dropper);
-			freemsg(spare_mp);
 			return (NULL);
 		} else {
 			v6_proto = *v6_proto_p;
@@ -6491,7 +6518,7 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 
 
 		bzero(&ipp, sizeof (ipp));
-		(void) ip_find_hdr_v6(spare_mp, ip6h, &ipp, NULL);
+		(void) ip_find_hdr_v6(mp, ip6h, &ipp, NULL);
 		if (!(ipp.ipp_fields & IPPF_FRAGHDR)) {
 			/*
 			 * We think this is a fragment, but didn't find
@@ -6501,7 +6528,6 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 			ip_drop_packet(first_mp, inbound, NULL, NULL,
 			    DROPPER(ipss, ipds_spd_malformed_frag),
 			    &ipss->ipsec_spd_dropper);
-			freemsg(spare_mp);
 			return (NULL);
 		}
 		fraghdr = ipp.ipp_fraghdr;
@@ -6566,9 +6592,9 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 		last = (fraghdr->ip6f_offlg & IP6F_MORE_FRAG) == 0;
 #ifdef FRAGCACHE_DEBUG
 		cmn_err(CE_WARN, "V6 fragcache: firstbyte = %d, lastbyte = %d, "
-		    "last = %d, id = %d, fraghdr = %p, spare_mp = %p\n",
+		    "last = %d, id = %d, fraghdr = %p, mp = %p\n",
 		    firstbyte, lastbyte, last, fraghdr->ip6f_ident,
-		    fraghdr, spare_mp);
+		    fraghdr, mp);
 #endif
 	}
 
@@ -6580,7 +6606,6 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 		ip_drop_packet(first_mp, inbound, NULL, NULL,
 		    DROPPER(ipss, ipds_spd_malformed_frag),
 		    &ipss->ipsec_spd_dropper);
-		freemsg(spare_mp);
 		return (NULL);
 	}
 
@@ -6594,7 +6619,6 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 				ip_drop_packet(first_mp, inbound, NULL, NULL,
 				    DROPPER(ipss, ipds_spd_nomem),
 				    &ipss->ipsec_spd_dropper);
-				freemsg(spare_mp);
 				return (NULL);
 			}
 		}
@@ -6633,7 +6657,6 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 			frag->itpf_expire_hint = fep->itpfe_exp;
 
 	}
-	freemsg(spare_mp);
 
 	/* Insert it in the frag list */
 	/* List is in order by starting offset of fragments */
@@ -6649,7 +6672,6 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 		uint8_t *nv6_proto_p;
 		int nfirstbyte, nlastbyte;
 		char *data, *ndata;
-		mblk_t *nspare_mp = NULL;
 		mblk_t *ndata_mp = (inbound ? nmp->b_cont : nmp);
 		int hdr_len;
 
@@ -6668,15 +6690,9 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 			niph = (ipha_t *)(ndata_mp->b_rptr + hdr_len);
 		} else {
 			ASSERT(IPH_HDR_VERSION(oniph) == IPV6_VERSION);
-			if ((nspare_mp = msgpullup(ndata_mp, -1)) == NULL) {
-				mutex_exit(&frag->itpf_lock);
-				ip_drop_packet_chain(nmp, inbound, NULL, NULL,
-				    DROPPER(ipss, ipds_spd_nomem),
-				    &ipss->ipsec_spd_dropper);
-				return (NULL);
-			}
-			nip6h = (ip6_t *)nspare_mp->b_rptr;
-			(void) ip_hdr_length_nexthdr_v6(nspare_mp, nip6h,
+			ASSERT(ndata_mp->b_cont == NULL);
+			nip6h = (ip6_t *)ndata_mp->b_rptr;
+			(void) ip_hdr_length_nexthdr_v6(ndata_mp, nip6h,
 			    &nip6_hdr_length, &v6_proto_p);
 			hdr_len = ((outer_hdr_len != 0) ? nip6_hdr_length : 0);
 		}
@@ -6695,33 +6711,25 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 			nlastbyte = nfirstbyte + ntohs(niph->ipha_length) -
 			    IPH_HDR_LENGTH(niph);
 		} else {
-			if ((nspare_mp == NULL) &&
-			    ((nspare_mp = msgpullup(ndata_mp, -1)) == NULL)) {
-				mutex_exit(&frag->itpf_lock);
-				ip_drop_packet_chain(nmp, inbound, NULL, NULL,
-				    DROPPER(ipss, ipds_spd_nomem),
-				    &ipss->ipsec_spd_dropper);
-				return (NULL);
-			}
-			nip6h = (ip6_t *)(nspare_mp->b_rptr + hdr_len);
-			if (!ip_hdr_length_nexthdr_v6(nspare_mp, nip6h,
+			ASSERT(ndata_mp->b_cont == NULL);
+			nip6h = (ip6_t *)(ndata_mp->b_rptr + hdr_len);
+			if (!ip_hdr_length_nexthdr_v6(ndata_mp, nip6h,
 			    &nip6_hdr_length, &nv6_proto_p)) {
 				mutex_exit(&frag->itpf_lock);
 				ip_drop_packet_chain(nmp, inbound, NULL, NULL,
 				    DROPPER(ipss, ipds_spd_malformed_frag),
 				    &ipss->ipsec_spd_dropper);
-				ipsec_freemsg_chain(nspare_mp);
+				ipsec_freemsg_chain(ndata_mp);
 				return (NULL);
 			}
 			bzero(&nipp, sizeof (nipp));
-			(void) ip_find_hdr_v6(nspare_mp, nip6h, &nipp, NULL);
+			(void) ip_find_hdr_v6(ndata_mp, nip6h, &nipp, NULL);
 			nfraghdr = nipp.ipp_fraghdr;
 			nfirstbyte = ntohs(nfraghdr->ip6f_offlg &
 			    IP6F_OFF_MASK);
 			nlastbyte  = nfirstbyte + ntohs(nip6h->ip6_plen) +
 			    sizeof (ip6_t) - nip6_hdr_length;
 		}
-		ipsec_freemsg_chain(nspare_mp);
 
 		/* Check for overlapping fragments */
 		if (firstbyte >= nfirstbyte && firstbyte < nlastbyte) {
@@ -6869,22 +6877,15 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 		ip6h = NULL;
 		iph = NULL;
 
-		spare_mp = NULL;
 		if (IPH_HDR_VERSION(oiph) == IPV4_VERSION) {
 			hdr_len = ((outer_hdr_len != 0) ?
 			    IPH_HDR_LENGTH(oiph) : 0);
 			iph = (ipha_t *)(data_mp->b_rptr + hdr_len);
 		} else {
 			ASSERT(IPH_HDR_VERSION(oiph) == IPV6_VERSION);
-			if ((spare_mp = msgpullup(data_mp, -1)) == NULL) {
-				mutex_exit(&frag->itpf_lock);
-				ip_drop_packet_chain(mp, inbound, NULL, NULL,
-				    DROPPER(ipss, ipds_spd_nomem),
-				    &ipss->ipsec_spd_dropper);
-				return (NULL);
-			}
-			ip6h = (ip6_t *)spare_mp->b_rptr;
-			(void) ip_hdr_length_nexthdr_v6(spare_mp, ip6h,
+			ASSERT(data_mp->b_cont == NULL);
+			ip6h = (ip6_t *)data_mp->b_rptr;
+			(void) ip_hdr_length_nexthdr_v6(data_mp, ip6h,
 			    &ip6_hdr_length, &v6_proto_p);
 			hdr_len = ((outer_hdr_len != 0) ? ip6_hdr_length : 0);
 		}
@@ -6899,27 +6900,19 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 			lastbyte = firstbyte + ntohs(iph->ipha_length) -
 			    IPH_HDR_LENGTH(iph);
 		} else {
-			if ((spare_mp == NULL) &&
-			    ((spare_mp = msgpullup(data_mp, -1)) == NULL)) {
-				mutex_exit(&frag->itpf_lock);
-				ip_drop_packet_chain(mp, inbound, NULL, NULL,
-				    DROPPER(ipss, ipds_spd_nomem),
-				    &ipss->ipsec_spd_dropper);
-				return (NULL);
-			}
-			ip6h = (ip6_t *)(spare_mp->b_rptr + hdr_len);
-			if (!ip_hdr_length_nexthdr_v6(spare_mp, ip6h,
+			ASSERT(data_mp->b_cont == NULL);
+			ip6h = (ip6_t *)(data_mp->b_rptr + hdr_len);
+			if (!ip_hdr_length_nexthdr_v6(data_mp, ip6h,
 			    &ip6_hdr_length, &v6_proto_p)) {
 				mutex_exit(&frag->itpf_lock);
 				ip_drop_packet_chain(mp, inbound, NULL, NULL,
 				    DROPPER(ipss, ipds_spd_malformed_frag),
 				    &ipss->ipsec_spd_dropper);
-				ipsec_freemsg_chain(spare_mp);
 				return (NULL);
 			}
 			v6_proto = *v6_proto_p;
 			bzero(&ipp, sizeof (ipp));
-			(void) ip_find_hdr_v6(spare_mp, ip6h, &ipp, NULL);
+			(void) ip_find_hdr_v6(data_mp, ip6h, &ipp, NULL);
 			fraghdr = ipp.ipp_fraghdr;
 			firstbyte = ntohs(fraghdr->ip6f_offlg &
 			    IP6F_OFF_MASK);
@@ -6944,7 +6937,6 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 			    "missing fragment: firstbyte = %d, offset = %d, "
 			    "mp = %p\n", firstbyte, offset, mp);
 #endif
-			ipsec_freemsg_chain(spare_mp);
 			return (NULL);
 		}
 
@@ -6969,21 +6961,18 @@ ipsec_fragcache_add(ipsec_fragcache_t *frag, mblk_t *ipsec_mp, mblk_t *mp,
 				ip_drop_packet_chain(mp, inbound, NULL, NULL,
 				    DROPPER(ipss, ipds_spd_evil_frag),
 				    &ipss->ipsec_spd_dropper);
-				ipsec_freemsg_chain(spare_mp);
 				return (NULL);
 			}
 #ifdef FRAGCACHE_DEBUG
 			cmn_err(CE_WARN, "Fragcache returning mp = %p, "
 			    "mp->b_next = %p", mp, mp->b_next);
 #endif
-			ipsec_freemsg_chain(spare_mp);
 			/*
 			 * For inbound case, mp has ipsec_in b_next'd chain
 			 * For outbound case, it is just data mp chain
 			 */
 			return (mp);
 		}
-		ipsec_freemsg_chain(spare_mp);
 
 		/*
 		 * Update new ending offset if this

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -44,24 +44,6 @@
 #include "idmap_cache.h"
 
 /*LINTLIBRARY*/
-
-/*
- * The following structure determines where the log messages from idmapdlog()
- * go to. It can be stderr (idmap, idmapd -d) and/or syslog (idmapd).
- *
- * logstate.max_pri is integer cutoff necessary to silence low-priority
- * messages to stderr. Syslog has its own means so there a boolean
- * logstate.write_syslog is enough.
- *
- * logstate.degraded is a mode used by idmapd in its degraded state.
- */
-
-static struct {
-	bool_t write_syslog;
-	int max_pri; /* Max priority written to stderr */
-	bool_t degraded;
-} logstate = {FALSE, LOG_DEBUG, FALSE};
-
 
 static struct timeval TIMEOUT = { 25, 0 };
 
@@ -224,7 +206,7 @@ idmap_fini(idmap_handle_t *handle)
 }
 
 
-idmap_stat
+static idmap_stat
 idmap_get_prop(idmap_handle_t *handle, idmap_prop_type pr, idmap_prop_res *res)
 {
 	CLIENT			*clnt;
@@ -243,23 +225,8 @@ idmap_get_prop(idmap_handle_t *handle, idmap_prop_type pr, idmap_prop_res *res)
 	}
 
 	return (res->retcode); /* This might not be IDMAP_SUCCESS! */
-
-#if 0
-	(void) memset(&res, 0, sizeof (res));
-	pr = PROP_DOMAIN_CONTROLLER;
-
-	clntstat = clnt_call(clnt, IDMAP_GET_PROP,
-	    (xdrproc_t)xdr_idmap_prop_type, (caddr_t)&pr,
-	    (xdrproc_t)xdr_idmap_prop_res, (caddr_t)&res, TIMEOUT);
-
-	if (clntstat != RPC_SUCCESS) {
-		fprintf(stderr, "clntstat != RPC_SUCCESS\n");
-		rc = _idmap_rpc2stat(clnt);
-		goto cleanup;
-	}
-#endif
-
 }
+
 
 idmap_stat
 idmap_get_prop_ds(idmap_handle_t *handle, idmap_prop_type pr,
@@ -2066,7 +2033,7 @@ static stat_table_t stattable[] = {
 	{IDMAP_ERR_BAD_UTF8,
 		gettext("Invalid or illegal UTF-8 sequence found in "
 		"a given Windows entity name or domain name"), EINVAL},
-	{IDMAP_ERR_NONEGENERATED,
+	{IDMAP_ERR_NONE_GENERATED,
 		gettext("Mapping not found and none created (see -c option)"),
 		EINVAL},
 	{IDMAP_ERR_PROP_UNKNOWN,
@@ -2080,6 +2047,9 @@ static stat_table_t stattable[] = {
 		gettext("Native LDAP operation failed"), EINVAL},
 	{IDMAP_ERR_NS_LDAP_BAD_WINNAME,
 		gettext("Improper winname form found in Native LDAP"), EINVAL},
+	{IDMAP_ERR_NO_ACTIVEDIRECTORY,
+		gettext("No AD servers"),
+		EINVAL},
 	{-1, NULL, 0}
 };
 #undef	gettext
@@ -2167,12 +2137,13 @@ idmap_string2stat(const char *str)
 	return_cmp(W2U_NAMERULE_CONFLICT);
 	return_cmp(U2W_NAMERULE_CONFLICT);
 	return_cmp(BAD_UTF8);
-	return_cmp(NONEGENERATED);
+	return_cmp(NONE_GENERATED);
 	return_cmp(PROP_UNKNOWN);
 	return_cmp(NS_LDAP_CFG);
 	return_cmp(NS_LDAP_PARTIAL);
 	return_cmp(NS_LDAP_OP_FAILED);
 	return_cmp(NS_LDAP_BAD_WINNAME);
+	return_cmp(NO_ACTIVEDIRECTORY);
 #undef return_cmp
 
 	return (IDMAP_ERR_OTHER);
@@ -2576,46 +2547,4 @@ idmap_stat
 idmap_getwinnamebygid(gid_t gid, int flag, char **name, char **domain)
 {
 	return (idmap_getwinnamebypid(gid, 0, flag, name, domain));
-}
-
-
-/* printflike */
-void
-idmapdlog(int pri, const char *format, ...) {
-	va_list args;
-
-	va_start(args, format);
-	if (pri <= logstate.max_pri) {
-		(void) vfprintf(stderr, format, args);
-		(void) fprintf(stderr, "\n");
-	}
-
-	/*
-	 * We don't want to fill up the logs with useless messages when
-	 * we're degraded, but we still want to log.
-	 */
-	if (logstate.degraded)
-		pri = LOG_DEBUG;
-
-	if (logstate.write_syslog)
-		(void) vsyslog(pri, format, args);
-	va_end(args);
-}
-
-void
-idmap_log_stderr(int pri)
-{
-	logstate.max_pri = pri;
-}
-
-void
-idmap_log_syslog(bool_t what)
-{
-	logstate.write_syslog = what;
-}
-
-void
-idmap_log_degraded(bool_t what)
-{
-	logstate.degraded = what;
 }

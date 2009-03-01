@@ -6,7 +6,7 @@
  * @(#)ip_fil.h	1.35 6/5/96
  * $Id: ip_fil.h,v 2.170.2.22 2005/07/16 05:55:35 darrenr Exp $
  *
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -294,13 +294,13 @@ typedef	struct	fr_ip	{
 /*
  * For use in fi_flx
  */
-#define	FI_MULTICAST	0x0001
-#define	FI_BROADCAST	0x0002
+#define	FI_TCPUDP	0x0001	/* TCP/UCP implied comparison*/
+#define	FI_OPTIONS	0x0002
 #define	FI_FRAG		0x0004
 #define	FI_SHORT	0x0008
 #define	FI_NATED	0x0010
-#define	FI_TCPUDP	0x0020	/* TCP/UCP implied comparison*/
-#define	FI_OPTIONS	0x0040
+#define	FI_MULTICAST	0x0020
+#define	FI_BROADCAST	0x0040
 #define	FI_MBCAST	0x0080
 #define	FI_STATE	0x0100
 #define	FI_BADNAT	0x0200
@@ -377,8 +377,7 @@ typedef	struct	fr_info	{
 	u_short	fin_off;
 	int	fin_depth;		/* Group nesting depth */
 	int	fin_error;		/* Error code to return */
-	void	*fin_nat;
-	void	*fin_state;
+	u_int	fin_pktnum;
 	void	*fin_nattag;
 	union {
 		ip_t	*fip_ip;

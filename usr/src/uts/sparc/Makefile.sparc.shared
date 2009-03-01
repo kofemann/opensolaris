@@ -20,7 +20,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #	This makefile contains the common definitions for all sparc
@@ -204,7 +204,7 @@ ALL_DEFS	 = $(MACHINE_DEFS) $(DEBUG_DEFS) $(OPTION_DEFS)
 DRV_KMODS	+= aggr arp bl bofi clone cn conskbd consms cpuid
 DRV_KMODS	+= crypto cryptoadm devinfo dump
 DRV_KMODS	+= dserv
-DRV_KMODS	+= dtrace fasttrap fbt lockstat profile sdt systrace
+DRV_KMODS	+= dtrace fasttrap fbt lockstat profile sdt systrace dcpc
 DRV_KMODS	+= fssnap icmp icmp6 ip ip6 ipnet ipsecah
 DRV_KMODS	+= ipsecesp iwscn keysock kmdb kstat ksyms llc1
 DRV_KMODS	+= lofi
@@ -217,7 +217,8 @@ DRV_KMODS	+= ippctl sctp sctp6
 DRV_KMODS	+= dld
 DRV_KMODS	+= ipf
 DRV_KMODS	+= rpcib
-DRV_KMODS	+= vni vnic
+DRV_KMODS	+= dlpistub
+DRV_KMODS	+= vnic
 DRV_KMODS	+= xge
 DRV_KMODS	+= rds
 DRV_KMODS	+= chxge
@@ -337,7 +338,7 @@ MISC_KMODS      += md_sp
 #
 #	Exec Class Modules (/kernel/exec):
 #
-EXEC_KMODS	+= aoutexec elfexec intpexec javaexec
+EXEC_KMODS	+= aoutexec elfexec intpexec shbinexec javaexec
 
 #
 #	Scheduling Class Modules (/kernel/sched):
@@ -386,6 +387,7 @@ MISC_KMODS	+= s1394
 MISC_KMODS	+= hpcsvc pcihp pciehpc pcishpc
 MISC_KMODS	+= rsmops
 MISC_KMODS	+= kcf
+MISC_KMODS	+= ksocket
 MISC_KMODS	+= ibcm
 MISC_KMODS	+= ibdm
 MISC_KMODS	+= ibmf
@@ -403,6 +405,7 @@ MISC_KMODS	+= scsi_vhci_f_sym scsi_vhci_f_tpgs scsi_vhci_f_asym_sun
 MISC_KMODS	+= scsi_vhci_f_sym_hds
 MISC_KMODS	+= scsi_vhci_f_tape scsi_vhci_f_tpgs_tape
 MISC_KMODS	+= fctl
+MISC_KMODS	+= emlxs_fw
 MISC_KMODS	+= qlc_fw_2200 qlc_fw_2300 qlc_fw_2400 qlc_fw_2500 qlc_fw_6322
 MISC_KMODS	+= blk2scsa
 MISC_KMODS	+= sda
@@ -485,6 +488,12 @@ MAC_KMODS	+= mac_ib
 # 'Devname' Modules (kernel/devname)
 #
 DEVNAME_KMODS	+= sdev_nsconfig_mod
+
+#
+# socketmod (kernel/socketmod)
+#
+SOCKET_KMODS	+= socksctp
+SOCKET_KMODS	+= socksdp
 
 #
 #	kiconv modules (/kernel/kiconv):

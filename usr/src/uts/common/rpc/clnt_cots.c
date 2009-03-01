@@ -421,13 +421,13 @@ typedef struct cku_private_s {
 
 static struct cm_xprt *connmgr_wrapconnect(struct cm_xprt *,
 	const struct timeval *, struct netbuf *, int, struct netbuf *,
-	struct rpc_err *, bool_t, bool_t);
+	struct rpc_err *, bool_t, bool_t, cred_t *);
 
 static bool_t	connmgr_connect(struct cm_xprt *, queue_t *, struct netbuf *,
 				int, calllist_t *, int *, bool_t reconnect,
-				const struct timeval *, bool_t);
+				const struct timeval *, bool_t, cred_t *);
 
-static bool_t	connmgr_setopt(queue_t *, int, int, calllist_t *);
+static bool_t	connmgr_setopt(queue_t *, int, int, calllist_t *, cred_t *cr);
 static void	connmgr_sndrel(struct cm_xprt *);
 static void	connmgr_snddis(struct cm_xprt *);
 static void	connmgr_close(struct cm_xprt *);
@@ -2346,7 +2346,7 @@ use_new_conn:
 					 */
 					return (connmgr_wrapconnect(cm_entry,
 					    waitp, destaddr, addrfmly, srcaddr,
-					    rpcerr, TRUE, nosignal));
+					    rpcerr, TRUE, nosignal, cr));
 				}
 				i++;
 				if (cm_entry->x_time - prev_time <= 0 ||
@@ -2411,10 +2411,17 @@ use_new_conn:
 		 * Walk the list looking for a connection with a source address
 		 * that matches the retry address.
 		 */
+start_retry_loop:
 		cmp = &cm_hd;
 		while ((cm_entry = *cmp) != NULL) {
 
 			ASSERT(cm_entry != cm_entry->x_next);
+
+			/*
+			 * determine if this connection matches the passed
+			 * in retry address.  If it does not match, advance
+			 * to the next element on the list.
+			 */
 			cm_srcaddr = &cm_entry->x_src;
 
 			if (zoneid != cm_entry->x_zoneid ||
@@ -2423,6 +2430,44 @@ use_new_conn:
 			    !RPC_SAME_TAG(p, cm_entry)) {
 				cmp = &cm_entry->x_next;
 				continue;
+			}
+			/*
+			 * Garbage collect conections that are marked
+			 * for needs disconnect.
+			 */
+			if (cm_entry->x_needdis) {
+				CONN_HOLD(cm_entry);
+				connmgr_dis_and_wait(cm_entry);
+				connmgr_release(cm_entry);
+				/*
+				 * connmgr_lock could have been
+				 * dropped for the disconnect
+				 * processing so start over.
+				 */
+				goto start_retry_loop;
+			}
+			/*
+			 * Garbage collect the dead connections that have
+			 * no threads working on them.
+			 */
+			if ((cm_entry->x_state_flags & (X_DEAD|X_THREAD)) ==
+			    X_DEAD) {
+				mutex_enter(&cm_entry->x_lock);
+				if (cm_entry->x_ref != 0) {
+					/*
+					 * Currently in use.
+					 * Cleanup later.
+					 */
+					cmp = &cm_entry->x_next;
+					mutex_exit(&cm_entry->x_lock);
+					continue;
+				}
+				mutex_exit(&cm_entry->x_lock);
+				*cmp = cm_entry->x_next;
+				mutex_exit(&connmgr_lock);
+				connmgr_close(cm_entry);
+				mutex_enter(&connmgr_lock);
+				goto start_retry_loop;
 			}
 
 			/*
@@ -2464,7 +2509,7 @@ use_new_conn:
 			if (cm_entry->x_connected == FALSE) {
 				return (connmgr_wrapconnect(cm_entry,
 				    waitp, destaddr, addrfmly, NULL,
-				    rpcerr, TRUE, nosignal));
+				    rpcerr, TRUE, nosignal, cr));
 			} else {
 				CONN_HOLD(cm_entry);
 
@@ -2683,7 +2728,7 @@ use_new_conn:
 		 * This is a bound end-point so don't close it's stream.
 		 */
 		connected = connmgr_connect(cm_entry, wq, destaddr, addrfmly,
-		    &call, &tidu_size, FALSE, waitp, nosignal);
+		    &call, &tidu_size, FALSE, waitp, nosignal, cr);
 		*rpcerr = call.call_err;
 		cv_destroy(&call.call_cv);
 
@@ -2778,7 +2823,8 @@ connmgr_wrapconnect(
 	struct netbuf	*srcaddr,
 	struct rpc_err	*rpcerr,
 	bool_t		reconnect,
-	bool_t		nosignal)
+	bool_t		nosignal,
+	cred_t		*cr)
 {
 	ASSERT(MUTEX_HELD(&connmgr_lock));
 	/*
@@ -2825,7 +2871,7 @@ connmgr_wrapconnect(
 
 		connected = connmgr_connect(cm_entry, cm_entry->x_wq,
 		    destaddr, addrfmly, &call, &cm_entry->x_tidu_size,
-		    reconnect, waitp, nosignal);
+		    reconnect, waitp, nosignal, cr);
 
 		*rpcerr = call.call_err;
 		cv_destroy(&call.call_cv);
@@ -3064,7 +3110,8 @@ connmgr_connect(
 	int 			*tidu_ptr,
 	bool_t 			reconnect,
 	const struct timeval 	*waitp,
-	bool_t 			nosignal)
+	bool_t 			nosignal,
+	cred_t			*cr)
 {
 	mblk_t *mp;
 	struct T_conn_req *tcr;
@@ -3076,7 +3123,11 @@ connmgr_connect(
 	if (reconnect)
 		(void) putctl1(wq, M_FLUSH, FLUSHRW);
 
-	mp = allocb(sizeof (*tcr) + addr->len, BPRI_LO);
+	/*
+	 * Note: if the receiver uses SCM_UCRED/getpeerucred the pid will
+	 * appear as -1.
+	 */
+	mp = allocb_cred(sizeof (*tcr) + addr->len, cr, NOPID);
 	if (mp == NULL) {
 		/*
 		 * This is unfortunate, but we need to look up the stats for
@@ -3205,7 +3256,7 @@ connmgr_connect(
 	 * lots of retries and terrible performance.
 	 */
 	if (addrfmly == AF_INET || addrfmly == AF_INET6) {
-		(void) connmgr_setopt(wq, IPPROTO_TCP, TCP_NODELAY, e);
+		(void) connmgr_setopt(wq, IPPROTO_TCP, TCP_NODELAY, e, cr);
 		if (e->call_status == RPC_XPRTFAILED)
 			return (FALSE);
 	}
@@ -3253,7 +3304,7 @@ connmgr_connect(
  * Called by connmgr_connect to set an option on the new stream.
  */
 static bool_t
-connmgr_setopt(queue_t *wq, int level, int name, calllist_t *e)
+connmgr_setopt(queue_t *wq, int level, int name, calllist_t *e, cred_t *cr)
 {
 	mblk_t *mp;
 	struct opthdr *opt;
@@ -3261,8 +3312,8 @@ connmgr_setopt(queue_t *wq, int level, int name, calllist_t *e)
 	struct timeval waitp;
 	int error;
 
-	mp = allocb(sizeof (struct T_optmgmt_req) + sizeof (struct opthdr) +
-	    sizeof (int), BPRI_LO);
+	mp = allocb_cred(sizeof (struct T_optmgmt_req) +
+	    sizeof (struct opthdr) + sizeof (int), cr, NOPID);
 	if (mp == NULL) {
 		RPCLOG0(1, "connmgr_setopt: cannot alloc mp for option "
 		    "request\n");

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -194,6 +194,69 @@ hextobin(const char *hexbuf, size_t hexlen,
 }
 
 /*
+ * Trim leading and trailing characters in the set defined by class
+ * from a buffer containing a null-terminated string.
+ * For example, if the input buffer contained "ABtext23" and class
+ * contains "ABC123", the buffer will contain "text" on return.
+ *
+ * This function modifies the contents of buf in place and returns
+ * a pointer to buf.
+ */
+char *
+strtrim(char *buf, const char *class)
+{
+	char *p = buf;
+	char *q = buf;
+
+	if (buf == NULL)
+		return (NULL);
+
+	p += strspn(p, class);
+
+	if (p != buf) {
+		while ((*q = *p++) != '\0')
+			++q;
+	}
+
+	while (q != buf) {
+		--q;
+		if (strspn(q, class) == 0)
+			return (buf);
+		*q = '\0';
+	}
+
+	return (buf);
+}
+
+/*
+ * Strip the characters in the set defined by class from a buffer
+ * containing a null-terminated string.
+ * For example, if the input buffer contained "XYA 1textZ string3"
+ * and class contains "123XYZ", the buffer will contain "A text string"
+ * on return.
+ *
+ * This function modifies the contents of buf in place and returns
+ * a pointer to buf.
+ */
+char *
+strstrip(char *buf, const char *class)
+{
+	char *p = buf;
+	char *q = buf;
+
+	if (buf == NULL)
+		return (NULL);
+
+	while (*p) {
+		p += strspn(p, class);
+		*q++ = *p++;
+	}
+
+	*q = '\0';
+	return (buf);
+}
+
+/*
  * trim_whitespace
  *
  * Trim leading and trailing whitespace chars (as defined by isspace)
@@ -299,13 +362,17 @@ rand_hash(
  * not distinguished syntactically.  We check for hosts first because
  * it's cheaper (just M*N strcmp()s), then try netgroups.
  *
+ * Currently this function always returns B_TRUE for ipv6 until
+ * the underlying functions support ipv6
+ *
  * Function returns:
  *	-1 for "all"
  *	0 not found
  *	1 found
+ *
  */
 int
-smb_chk_hostaccess(ipaddr_t ipaddr, char *access_list)
+smb_chk_hostaccess(smb_inaddr_t *ipaddr, char *access_list)
 {
 	int nentries;
 	char *gr;
@@ -321,7 +388,10 @@ smb_chk_hostaccess(ipaddr_t ipaddr, char *access_list)
 	struct netbuf buf;
 	struct netconfig *config;
 
-	inaddr.s_addr = (uint32_t)ipaddr;
+	if (ipaddr->a_family == AF_INET6)
+		return (B_TRUE);
+
+	inaddr.s_addr = ipaddr->a_ipv4;
 
 	/*
 	 * If no access list - then it's "all"
@@ -331,8 +401,6 @@ smb_chk_hostaccess(ipaddr_t ipaddr, char *access_list)
 		return (-1);
 
 	nentries = 0;
-
-	/* For now, only IPv4 */
 
 	sa.sin_family = AF_INET;
 	sa.sin_port = 0;

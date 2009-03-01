@@ -2065,6 +2065,8 @@ cpuid_pass4(cpu_t *cpu)
 				hwcap_flags |= AV_386_SSE4_1;
 			if (*ecx & CPUID_INTC_ECX_SSE4_2)
 				hwcap_flags |= AV_386_SSE4_2;
+			if (*ecx & CPUID_INTC_ECX_MOVBE)
+				hwcap_flags |= AV_386_MOVBE;
 		}
 		if (*ecx & CPUID_INTC_ECX_POPCNT)
 			hwcap_flags |= AV_386_POPCNT;
@@ -3844,5 +3846,27 @@ patch_tsc_read(int flag)
 		break;
 	}
 }
+
+#if defined(__amd64) && !defined(__xpv)
+/*
+ * Patch in versions of bcopy for high performance Intel Nhm processors
+ * and later...
+ */
+void
+patch_memops(uint_t vendor)
+{
+	size_t cnt, i;
+	caddr_t to, from;
+
+	if ((vendor == X86_VENDOR_Intel) && ((x86_feature & X86_SSE4_2) != 0)) {
+		cnt = &bcopy_patch_end - &bcopy_patch_start;
+		to = &bcopy_ck_size;
+		from = &bcopy_patch_start;
+		for (i = 0; i < cnt; i++) {
+			*to++ = *from++;
+		}
+	}
+}
+#endif  /* __amd64 && !__xpv */
 
 #endif	/* !__xpv */

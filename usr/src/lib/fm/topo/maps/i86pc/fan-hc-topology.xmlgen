@@ -20,7 +20,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
@@ -116,18 +116,21 @@ my @platforms = (
 		label => "FANBD%d",
 		fru => "self"
 	    }, {
-		fac_enum => 1,
-		provider => "fac_prov_ipmi",
 		label => "FANBD%d FM%d",
 		count => 3,
 		fru => "self",
+		provider => "fac_prov_ipmi",
 		entity_present => "fb%d.fm%d.prsnt",
-		entity_ref => "fb%d.fm%d.prsnt",
-		entity_ref_nparams => 2,
 		fm_service_indctr=> "fb%d.fm%d.led",
+		entity_ref_nparams => 2
 	    }, {
+		fac_enum => 1,
 		count => 2,
-		fru => "parent"
+		fru => "parent",
+		provider => "fac_prov_ipmi",
+		entity_ref => "fb%d.fm%d.f%d.speed",
+		entity_present => "fb%d.fm%d.prsnt",
+		entity_ref_nparams => 3
 	    }
 
 	]
@@ -141,7 +144,7 @@ my @platforms = (
     # but no other indicators.
     #
     {
-	set => "Sun-Fire-X4600-M2",
+	set => "Sun-Fire-X4600|Sun-Fire-X4600-M2",
 	topology => [
 	    {
 	        fac_enum => 1,
@@ -154,17 +157,118 @@ my @platforms = (
 		fm_service_indctr => "ft%d.fm0.led"
 	    }	
 	]
+    },
+
+    #
+    # Fan Module/Fan topology for Durado 1U.
+    #
+    # There are two fan boards, which are FRU's.  The first fanboard has 4
+    # fanmodules (which are also FRU's).  The second fan board has 3 fan
+    # modules.  Each fanmodule contains two fans.
+    #
+    {
+	set => "Sun-Fire-X4140",
+	topology => [
+	    {
+		count => 2,
+		label => "FANBD%d",
+		fru => "self",
+	    }, {
+		fac_enum => 1,
+		provider => "fac_prov_ipmi",
+		label => "FANBD%d FM%d",
+		count => 4,
+		fru => "self",
+		fm_service_indctr=> "fb%d.fm%d.led",
+		entity_ref_nparams => 2
+	    }, {
+		fac_enum => 1,
+		provider => "fac_prov_ipmi",
+		count => 2,
+		fru => "parent",
+		entity_ref => "fb%d.fm%d.f%d.speed",
+		entity_ref_nparams => 3
+	    }
+
+	]
+    },
+    #
+    # Fan Module/Fan topology for Duradi 1U.
+    #
+    # There are two fan boards, which are FRU's.  The first fanboard has 4
+    # fanmodules (which are also FRU's).  The second fan board has 3 fan
+    # modules.  Each fanmodule contains two fans.
+    #
+    {
+	set => "SUN-FIRE-X4150",
+	topology => [
+	    {
+		count => 2,
+		label => "FANBD%d",
+		fru => "self",
+		entity_present => "FB%d/PRSRNT"
+	    }, {
+		label => "FANBD%d FM%d",
+		count => 4,
+		fru => "self",
+		provider => "fac_prov_ipmi",
+		entity_ref => "FB%d/FM%d/PRSNT",
+		fm_service_indctr=> "",
+		entity_ref_nparams => 2
+	    }, {
+		fac_enum => 1,
+		count => 2,
+		fru => "parent",
+		provider => "fac_prov_ipmi",
+		entity_ref => "FB%d/FM%d/F%d/TACH",
+		entity_ref_nparams => 3
+	    }
+
+	]
+    },
+    #
+    # Fan Module/Fan topology for Duradi 2U.
+    #
+    # There are two fan boards, which are FRU's.  Both fanboards have 3
+    # fanmodules (which are also FRU's). Each fanmodule contains two fans.
+    #
+    {
+	set => "SUN-FIRE-X4250",
+	topology => [
+	    {
+		count => 2,
+		label => "FANBD%d",
+		fru => "self",
+		entity_present => "FB%d/PRSRNT"
+	    }, {
+		label => "FANBD%d FM%d",
+		count => 3,
+		fru => "self",
+		provider => "fac_prov_ipmi",
+		entity_ref => "FB%d/FM%d/PRSNT",
+		fm_service_indctr=> "",
+		entity_ref_nparams => 2
+	    }, {
+		fac_enum => 1,
+		count => 2,
+		fru => "parent",
+		provider => "fac_prov_ipmi",
+		entity_ref => "FB%d/FM%d/F%d/TACH",
+		entity_ref_nparams => 3
+	    }
+
+	]
     }
 );
 
 #
 # Process an entry in the topology list.  We are passed the indentation level,
-# the current topology array, and any pushed indices.  This is called
-# recursively.
+# the current topology array, the set list, and any pushed indices.  This is
+# called recursively.
 #
 sub process_topology
 {
-	my ($indent, $toporef, @indices) = @_;
+	my ($indent, $toporef, $set, @indices) = @_;
 	my @topo = @$toporef;
 	my $level = shift @topo;
 	my $type = $#topo == -1 ? "fan" : "fanmodule";
@@ -174,6 +278,14 @@ sub process_topology
 	$indent += 2;
 
 	for (my $i = 0; $i < $level->{count}; $i++) {
+		#
+		# Special case code for the 1U version of Durado and Duradi,
+		# both of which have an assymetric fan topology
+		#
+		last if ((($set eq "SUN-FIRE-X4150") || ($set eq "Sun-Fire-X4140"))
+		    && ($type eq "fanmodule") && ($#indices == 0)
+		    && ($indices[0] == 1) && ($i == 3));
+
 		push @indices, $i;
 
 		printf("%*s<node instance='%d'>\n", $indent, "", $i);
@@ -184,7 +296,7 @@ sub process_topology
 		if ($level->{fac_enum}) {
 			printf("%*s<fac-enum provider='",
 			    $indent, "");
-			printf($level->{provider}, @indices);
+			printf($level->{provider});
 			printf("' />\n");
 		}
 
@@ -196,7 +308,7 @@ sub process_topology
 			    "name-stability='Private' data-stability='Private' >\n",
 			    $indent+4, "");
 			printf("%*s<propval name='type' type='uint32' ".
-			    "value='1' />\n", $indent+6, "");
+			    "value='0' />\n", $indent+6, "");
 			printf("%*s<propmethod name='ipmi_entity' version='0' ".
 			    "propname='entity_ref' proptype='string' >\n",
 			    $indent+6, "");
@@ -272,15 +384,24 @@ sub process_topology
 		#
 		# Entity references (if any)
 		#
-		if ($level->{entity_ref} || $level->{entity_present}) {
-			my $name = $level->{entity_ref} ? "entity_ref" :
-			    "entity_present";
-			my $val = $level->{$name};
+		if ($level->{entity_ref}) {
+			my $val = $level->{entity_ref};
 			printf("%*s<propgroup name='ipmi' version='1' " .
 			    "name-stability='Private' " .
 			    "data-stability='Private' >\n", $indent, "");
-			printf("%*s<propval name='%s' " .
-			    "type='string' value='", $indent + 2, "", $name);
+			printf("%*s<propval name='entity_ref' " .
+			    "type='string' value='", $indent + 2, "");
+			printf($val, @indices);
+			printf("' />\n");
+			printf("%*s</propgroup>\n", $indent, "");
+		}
+		if ($level->{entity_present}) {
+			my $val = $level->{entity_present};
+			printf("%*s<propgroup name='ipmi' version='1' " .
+			    "name-stability='Private' " .
+			    "data-stability='Private' >\n", $indent, "");
+			printf("%*s<propval name='entity_present' " .
+			    "type='string' value='", $indent + 2, "");
 			printf($val, @indices);
 			printf("' />\n");
 			printf("%*s</propgroup>\n", $indent, "");
@@ -298,7 +419,7 @@ sub process_topology
 		if ($#topo != -1) {
 			printf("%*s<dependents grouping='children'>\n",
 			    $indent, "");
-			process_topology($indent + 2, \@topo, @indices);
+			process_topology($indent + 2, \@topo, $set, @indices);
 			printf("%*s</dependents>\n", $indent, "");
 		}
 
@@ -323,7 +444,7 @@ sub process_platform
 	printf("%*s<set type='product' setlist='%s'>\n", $indent, "",
 	    $desc->{set});
 
-	process_topology($indent + 2, $desc->{topology});
+	process_topology($indent + 2, $desc->{topology}, $desc->{set});
 
 	printf("%*s</set>\n", $indent, "");
 }

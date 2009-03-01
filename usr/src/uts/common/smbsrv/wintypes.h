@@ -19,14 +19,14 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef _SMBSRV_WINTYPES_H
 #define	_SMBSRV_WINTYPES_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
+#include <sys/types.h>
 
 /*
  * Standard win32 types and definitions.
@@ -39,14 +39,13 @@ extern "C" {
 #ifndef UNSIGNED_TYPES_DEFINED
 #define	UNSIGNED_TYPES_DEFINED
 
-typedef	unsigned char BYTE;
-typedef	unsigned short WORD;
-typedef	unsigned int DWORD;
-/* XXX PGD Shouldn't this be "char *"? */
-typedef	unsigned char *LPTSTR;
-typedef	unsigned char *LPBYTE;
-typedef	unsigned short *LPWORD;
-typedef	unsigned int *LPDWORD;
+typedef	uint8_t BYTE;
+typedef	uint16_t WORD;
+typedef	uint32_t DWORD;
+typedef	uint8_t *LPTSTR;
+typedef	uint8_t *LPBYTE;
+typedef	uint16_t *LPWORD;
+typedef	uint32_t *LPDWORD;
 
 #endif /* UNSIGNED_TYPES_DEFINED */
 
@@ -54,6 +53,21 @@ typedef	unsigned int *LPDWORD;
 #ifndef ANY_SIZE_ARRAY
 #define	ANY_SIZE_ARRAY  1
 #endif /* ANY_SIZE_ARRAY */
+
+/*
+ * Opaque context handle.
+ */
+#ifndef CONTEXT_HANDLE
+#define	CONTEXT_HANDLE(NAME)	\
+	struct NAME {		\
+		DWORD data1;    \
+		DWORD data2;    \
+		WORD  data3[2]; \
+		BYTE  data4[8];	\
+	};			\
+	typedef struct NAME
+#endif /* CONTEXT_HANDLE */
+
 
 #ifdef __cplusplus
 }

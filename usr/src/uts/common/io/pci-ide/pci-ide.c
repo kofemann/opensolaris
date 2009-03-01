@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -39,6 +39,7 @@
 #include <sys/modctl.h>
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
+#include <sys/sunndi.h>
 #include <sys/mach_intr.h>
 #include <sys/kmem.h>
 #include <sys/pci.h>
@@ -379,6 +380,13 @@ pciide_ddi_ctlops(dev_info_t *dip, dev_info_t *rdip, ddi_ctl_enum_t ctlop,
 		*(off_t *)result = tmp;
 
 		return (rc);
+
+	case DDI_CTLOPS_ATTACH:
+	case DDI_CTLOPS_DETACH:
+		/*
+		 * Don't pass child ide ATTACH/DETACH to parent
+		 */
+		return (DDI_SUCCESS);
 
 	default:
 		return (ddi_ctlops(dip, rdip, ctlop, arg, result));
@@ -792,7 +800,7 @@ pciide_compat_setup(dev_info_t *mydip, dev_info_t *cdip, int dev)
 		 */
 		if ((dev == 0 && !(class_code & PCI_IDE_IF_NATIVE_PRI)) ||
 		    (dev == 1 && !(class_code & PCI_IDE_IF_NATIVE_SEC))) {
-			rc = ddi_prop_update_int(DDI_DEV_T_NONE, cdip,
+			rc = ndi_prop_update_int(DDI_DEV_T_NONE, cdip,
 			    "compatibility-mode", 1);
 			if (rc != DDI_PROP_SUCCESS)
 				cmn_err(CE_WARN,

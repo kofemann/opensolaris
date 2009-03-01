@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -288,6 +288,13 @@ sctp_sendmsg(sctp_t *sctp, mblk_t *mp, int flags)
 	}
 	sctp->sctp_unsent += msg_len;
 	BUMP_LOCAL(sctp->sctp_msgcount);
+	/*
+	 * Notify sockfs if the tx queue is full.
+	 */
+	if (SCTP_TXQ_LEN(sctp) >= sctp->sctp_xmit_hiwater) {
+		sctp->sctp_txq_full = 1;
+		sctp->sctp_ulp_xmitted(sctp->sctp_ulpd, B_TRUE);
+	}
 	if (sctp->sctp_state == SCTPS_ESTABLISHED)
 		sctp_output(sctp, UINT_MAX);
 process_sendq:
@@ -366,10 +373,8 @@ nextmsg:
 			 * Update ULP the amount of queued data, which is
 			 * sent-unack'ed + unsent.
 			 */
-			if (!SCTP_IS_DETACHED(sctp)) {
-				sctp->sctp_ulp_xmitted(sctp->sctp_ulpd,
-				    sctp->sctp_unacked + sctp->sctp_unsent);
-			}
+			if (!SCTP_IS_DETACHED(sctp))
+				SCTP_TXQ_UPDATE(sctp);
 			sctp_sendfail_event(sctp, mdblk, 0, B_FALSE);
 			goto try_next;
 		}
@@ -584,7 +589,7 @@ sctp_add_proto_hdr(sctp_t *sctp, sctp_faddr_t *fp, mblk_t *mp, int sacklen,
 		 * or things like snoop is running.
 		 */
 		nmp = allocb_cred(sctps->sctps_wroff_xtra + hdrlen + sacklen,
-		    CONN_CRED(sctp->sctp_connp));
+		    CONN_CRED(sctp->sctp_connp), sctp->sctp_cpid);
 		if (nmp == NULL) {
 			if (error !=  NULL)
 				*error = ENOMEM;
@@ -596,7 +601,7 @@ sctp_add_proto_hdr(sctp_t *sctp, sctp_faddr_t *fp, mblk_t *mp, int sacklen,
 		mp = nmp;
 	} else {
 		mp->b_rptr -= (hdrlen + sacklen);
-		mblk_setcred(mp, CONN_CRED(sctp->sctp_connp));
+		mblk_setcred(mp, CONN_CRED(sctp->sctp_connp), sctp->sctp_cpid);
 	}
 	bcopy(hdr, mp->b_rptr, hdrlen);
 	if (sacklen) {
@@ -875,10 +880,8 @@ chunkified:
 		 * Update ULP the amount of queued data, which is
 		 * sent-unack'ed + unsent.
 		 */
-		if (!SCTP_IS_DETACHED(sctp)) {
-			sctp->sctp_ulp_xmitted(sctp->sctp_ulpd,
-			    sctp->sctp_unacked + sctp->sctp_unsent);
-		}
+		if (!SCTP_IS_DETACHED(sctp))
+			SCTP_TXQ_UPDATE(sctp);
 		sctp_sendfail_event(sctp, meta, 0, B_TRUE);
 next_msg:
 		meta = tmp_meta;
@@ -1378,7 +1381,8 @@ sctp_make_ftsn_chunk(sctp_t *sctp, sctp_faddr_t *fp, sctp_ftsn_set_t *sets,
 		xtralen = sctp->sctp_hdr_len + sctps->sctps_wroff_xtra;
 	else
 		xtralen = sctp->sctp_hdr6_len + sctps->sctps_wroff_xtra;
-	ftsn_mp = allocb_cred(xtralen + seglen, CONN_CRED(sctp->sctp_connp));
+	ftsn_mp = allocb_cred(xtralen + seglen, CONN_CRED(sctp->sctp_connp),
+	    sctp->sctp_cpid);
 	if (ftsn_mp == NULL)
 		return (NULL);
 	ftsn_mp->b_rptr += xtralen;
@@ -1541,10 +1545,8 @@ ftsn_done:
 		 * Update ULP the amount of queued data, which is
 		 * sent-unack'ed + unsent.
 		 */
-		if (!SCTP_IS_DETACHED(sctp)) {
-			sctp->sctp_ulp_xmitted(sctp->sctp_ulpd,
-			    sctp->sctp_unacked + sctp->sctp_unsent);
-		}
+		if (!SCTP_IS_DETACHED(sctp))
+			SCTP_TXQ_UPDATE(sctp);
 	}
 }
 

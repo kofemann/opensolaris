@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -508,7 +508,7 @@ thumper_locate_mode(topo_mod_t *mod, tnode_t *node, topo_version_t vers,
 			return (topo_mod_seterrno(mod, EMOD_NVL_INVAL));
 		}
 		if (mode_in == TOPO_LED_STATE_ON)
-			ledmode = IPMI_SUNOEM_LED_MODE_FAST;
+			ledmode = IPMI_SUNOEM_LED_MODE_SLOW;
 		else
 			ledmode = (uint8_t)mode_in;
 		if (ipmi_sunoem_led_set(hdl, gdl, ledmode) < 0) {
@@ -533,7 +533,8 @@ thumper_locate_mode(topo_mod_t *mod, tnode_t *node, topo_version_t vers,
 	topo_mod_strfree(mod, entity_ref);
 	topo_mod_ipmi_rele(mod);
 
-	if (ledmode == IPMI_SUNOEM_LED_MODE_FAST)
+	if (ledmode == IPMI_SUNOEM_LED_MODE_SLOW ||
+	    ledmode == IPMI_SUNOEM_LED_MODE_FAST)
 		ledmode = TOPO_LED_STATE_ON;
 	else
 		ledmode = TOPO_LED_STATE_OFF;
@@ -704,16 +705,25 @@ thumper_indicator_mode(topo_mod_t *mod, tnode_t *node, topo_version_t vers,
 static int
 make_sensor_node(topo_mod_t *mod, tnode_t *pnode, struct sensor_data *sd)
 {
-	int err, ret;
+	int err, ret, i;
 	tnode_t *fnode;
-	char *ftype = "sensor";
+	char *ftype = "sensor", facname[MAX_ID_LEN];
 	topo_pgroup_info_t pgi;
 	nvlist_t *arg_nvl = NULL;
 
-	if ((fnode = topo_node_facbind(mod, pnode, sd->sd_entity_ref,
-	    ftype)) == NULL) {
+	/*
+	 * Some platforms have '/' characters in the IPMI entity name, but '/'
+	 * has a special meaning for FMRI's so we change them to '.' before
+	 * binding the node into the topology.
+	 */
+	(void) strcpy(facname, sd->sd_entity_ref);
+	for (i = 0; facname[i]; i++)
+		if (facname[i] == '/')
+			facname[i] = '.';
+
+	if ((fnode = topo_node_facbind(mod, pnode, facname, ftype)) == NULL) {
 		topo_mod_dprintf(mod, "Failed to bind facility node: %s\n",
-		    sd->sd_entity_ref);
+		    facname);
 		/* topo errno set */
 		return (-1);
 	}

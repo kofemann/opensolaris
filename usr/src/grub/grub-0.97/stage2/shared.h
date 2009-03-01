@@ -580,6 +580,9 @@ typedef enum
   ERR_FILESYSTEM_NOT_FOUND,
   ERR_NO_BOOTPATH,
   ERR_NEWER_VERSION,
+  ERR_NOTXPM,
+  ERR_TOOMANYCOLORS,
+  ERR_CORRUPTXPM,
 
   MAX_ERR_NUM
 } grub_error_t;
@@ -593,6 +596,8 @@ extern int saved_entryno;
 extern unsigned char force_lba;
 extern char version_string[];
 extern char config_file[];
+extern unsigned char md5hash[];
+extern char pkg_version[];
 extern unsigned long linux_text_len;
 extern char *linux_data_tmp_addr;
 extern char *linux_data_real_addr;

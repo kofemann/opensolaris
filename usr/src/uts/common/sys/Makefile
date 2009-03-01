@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
@@ -331,6 +331,7 @@ CHKHDRS=			\
 	kmem_impl.h		\
 	kobj.h			\
 	kobj_impl.h		\
+	ksocket.h		\
 	kstat.h			\
 	kstr.h			\
 	ksyms.h			\
@@ -505,6 +506,7 @@ CHKHDRS=			\
 	sobject.h		\
 	socket.h		\
 	socket_impl.h		\
+	socket_proto.h		\
 	socketvar.h		\
 	sockio.h		\
 	sodirect.h		\
@@ -907,8 +909,7 @@ SCSICADHDRS=
 
 SCSIISCSIHDRS=		\
 	iscsi_door.h	\
-	iscsi_if.h	\
-	iscsi_protocol.h
+	iscsi_if.h
 
 SCSIVHCIHDRS=		\
 	scsi_vhci.h	\

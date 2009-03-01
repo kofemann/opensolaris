@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -107,6 +107,9 @@ static void	apic_timer_reprogram(hrtime_t time);
 static void	apic_timer_enable(void);
 static void	apic_timer_disable(void);
 static void	apic_post_cyclic_setup(void *arg);
+static void	apic_intrr_init(int apic_mode);
+static void	apic_record_ioapic_rdt(apic_irq_t *irq_ptr, ioapic_rdt_t *irdt);
+static void	apic_record_msi(apic_irq_t *irq_ptr, msi_regs_t *mregs);
 
 static int	apic_oneshot = 0;
 int	apic_oneshot_enable = 1; /* to allow disabling one-shot capability */
@@ -360,6 +363,19 @@ static	struct {
 int		apic_kmdb_on_nmi = 0;		/* 0 - no, 1 - yes enter kmdb */
 uint32_t	apic_divide_reg_init = 0;	/* 0 - divide by 2 */
 
+/* default apic ops without interrupt remapping */
+static apic_intrr_ops_t apic_nointrr_ops = {
+	(int (*)(int))return_instr,
+	(void (*)(void))return_instr,
+	(void (*)(apic_irq_t *))return_instr,
+	(void (*)(apic_irq_t *, void *))return_instr,
+	(void (*)(apic_irq_t *))return_instr,
+	apic_record_ioapic_rdt,
+	apic_record_msi,
+};
+
+apic_intrr_ops_t *apic_vt_ops = &apic_nointrr_ops;
+
 /*
  *	This is the loadable module wrapper
  */
@@ -420,6 +436,12 @@ apic_init()
 		apic_cr8pri[i] = apic_ipltopri[i] >> APIC_IPL_SHIFT;
 	CPU->cpu_pri_data = apic_cr8pri;
 #endif	/* __amd64 */
+
+	/*
+	 * initialize interrupt remapping before apic
+	 * hardware initialization
+	 */
+	apic_intrr_init(apic_mode);
 }
 
 /*
@@ -612,7 +634,8 @@ apic_init_intr()
 	if (apic_cpus[cpun].aci_local_ver < APIC_INTEGRATED_VERS) {
 		nlvt = 3;
 	} else {
-		nlvt = ((apicadr[APIC_VERS_REG] >> 16) & 0xFF) + 1;
+		nlvt = ((apic_reg_ops->apic_read(APIC_VERS_REG) >> 16) &
+		    0xFF) + 1;
 	}
 
 	if (nlvt >= 5) {
@@ -1671,8 +1694,8 @@ apic_shutdown(int cmd, int fcn)
 		(void) AcpiDisable();
 
 	if (fcn == AD_FASTREBOOT) {
-		apicadr[APIC_INT_CMD1] = AV_ASSERT | AV_RESET |
-		    AV_SH_ALL_EXCSELF;
+		apic_reg_ops->apic_write(APIC_INT_CMD1,
+		    AV_ASSERT | AV_RESET | AV_SH_ALL_EXCSELF);
 	}
 
 	/* remainder of function is for shutdown+poweroff case only */
@@ -2219,7 +2242,7 @@ apic_alloc_msi_vectors(dev_info_t *dip, int inum, int count, int pri,
 		return (0);
 	}
 
-	major = (dip != NULL) ? ddi_name_to_major(ddi_get_name(dip)) : 0;
+	major = (dip != NULL) ? ddi_driver_major(dip) : 0;
 	for (i = 0; i < rcount; i++) {
 		if ((irqno = apic_allocate_irq(apic_first_avail_irq)) ==
 		    (uchar_t)-1) {
@@ -2300,7 +2323,7 @@ apic_alloc_msix_vectors(dev_info_t *dip, int inum, int count, int pri,
 		goto out;
 	}
 
-	major = (dip != NULL) ? ddi_name_to_major(ddi_get_name(dip)) : 0;
+	major = (dip != NULL) ? ddi_driver_major(dip) : 0;
 	for (i = 0; i < rcount; i++) {
 		uchar_t	vector, irqno;
 		apic_irq_t	*irqptr;
@@ -2522,4 +2545,35 @@ x2apic_update_psm()
 
 	apic_mode = LOCAL_X2APIC;
 	apic_change_ops();
+}
+
+static void
+apic_intrr_init(int apic_mode)
+{
+	if (psm_vt_ops != NULL) {
+		if (((apic_intrr_ops_t *)psm_vt_ops)->apic_intrr_init(apic_mode)
+		    == DDI_SUCCESS) {
+			apic_vt_ops = psm_vt_ops;
+			apic_vt_ops->apic_intrr_enable();
+		}
+	}
+}
+
+/*ARGSUSED*/
+static void
+apic_record_ioapic_rdt(apic_irq_t *irq_ptr, ioapic_rdt_t *irdt)
+{
+	irdt->ir_hi <<= APIC_ID_BIT_OFFSET;
+}
+
+/*ARGSUSED*/
+static void
+apic_record_msi(apic_irq_t *irq_ptr, msi_regs_t *mregs)
+{
+	mregs->mr_addr = MSI_ADDR_HDR |
+	    (MSI_ADDR_RH_FIXED << MSI_ADDR_RH_SHIFT) |
+	    (MSI_ADDR_DM_PHYSICAL << MSI_ADDR_DM_SHIFT) |
+	    (mregs->mr_addr << MSI_ADDR_DEST_SHIFT);
+	mregs->mr_data = (MSI_DATA_TM_EDGE << MSI_DATA_TM_SHIFT) |
+	    mregs->mr_data;
 }

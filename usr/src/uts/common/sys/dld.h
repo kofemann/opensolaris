@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -245,24 +245,24 @@ typedef struct dld_ioc_addflow {
 	datalink_id_t		af_linkid;
 	flow_desc_t		af_flow_desc;
 	mac_resource_props_t	af_resource_props;
-	char			af_name[MAXNAMELEN];
+	char			af_name[MAXFLOWNAMELEN];
 } dld_ioc_addflow_t;
 
 #define	DLDIOC_REMOVEFLOW	DLDIOC(0x17)
 typedef struct dld_ioc_removeflow {
-	char			rf_name[MAXNAMELEN];
+	char			rf_name[MAXFLOWNAMELEN];
 } dld_ioc_removeflow_t;
 
 #define	DLDIOC_MODIFYFLOW	DLDIOC(0x18)
 typedef struct dld_ioc_modifyflow {
-	char			mf_name[MAXNAMELEN];
+	char			mf_name[MAXFLOWNAMELEN];
 	mac_resource_props_t	mf_resource_props;
 } dld_ioc_modifyflow_t;
 
 #define	DLDIOC_WALKFLOW		DLDIOC(0x19)
 typedef struct dld_ioc_walkflow {
 	datalink_id_t		wf_linkid;
-	char			wf_name[MAXNAMELEN];
+	char			wf_name[MAXFLOWNAMELEN];
 	uint32_t		wf_nflows;
 	uint_t			wf_len;
 } dld_ioc_walkflow_t;
@@ -271,7 +271,7 @@ typedef struct dld_flowinfo {
 	datalink_id_t		fi_linkid;
 	flow_desc_t		fi_flow_desc;
 	mac_resource_props_t	fi_resource_props;
-	char			fi_flowname[MAXNAMELEN];
+	char			fi_flowname[MAXFLOWNAMELEN];
 	uint32_t		fi_pad;
 } dld_flowinfo_t;
 
@@ -372,6 +372,10 @@ typedef struct dld_capab_direct_s {
 	/* flow control notification callback */
 	uintptr_t	di_tx_cb_df; /* callback registration/de-registration */
 	void		*di_tx_cb_dh;
+
+	/* flow control "can I put on a ring" callback */
+	uintptr_t	di_tx_fctl_df; /* canput-like callback */
+	void		*di_tx_fctl_dh;
 } dld_capab_direct_t;
 
 /*

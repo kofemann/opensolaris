@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -480,7 +480,6 @@ zfs_realloc(libzfs_handle_t *hdl, void *ptr, size_t oldsize, size_t newsize)
 
 	if ((ret = realloc(ptr, newsize)) == NULL) {
 		(void) no_memory(hdl);
-		free(ptr);
 		return (NULL);
 	}
 
@@ -576,6 +575,7 @@ libzfs_init(void)
 
 	zfs_prop_init();
 	zpool_prop_init();
+	libzfs_mnttab_init(hdl);
 
 	return (hdl);
 }
@@ -593,6 +593,7 @@ libzfs_fini(libzfs_handle_t *hdl)
 		(void) free(hdl->libzfs_log_str);
 	zpool_free_handles(hdl);
 	namespace_clear(hdl);
+	libzfs_mnttab_fini(hdl);
 	free(hdl);
 }
 
@@ -1018,9 +1019,9 @@ zfs_nicestrtonum(libzfs_handle_t *hdl, const char *value, uint64_t *num)
 		return (-1);
 	}
 
-	/* Rely on stroll() to process the numeric portion.  */
+	/* Rely on stroull() to process the numeric portion.  */
 	errno = 0;
-	*num = strtoll(value, &end, 10);
+	*num = strtoull(value, &end, 10);
 
 	/*
 	 * Check for ERANGE, which indicates that the value is too large to fit

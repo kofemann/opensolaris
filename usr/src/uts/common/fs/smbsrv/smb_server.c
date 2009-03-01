@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -233,7 +233,7 @@ static void smb_server_kstat_fini(smb_server_t *);
 static int smb_server_kstat_update_info(kstat_t *, int);
 static void smb_server_timers(smb_thread_t *, void *);
 static int smb_server_listen(smb_server_t *, smb_listener_daemon_t *,
-    in_port_t, int);
+    in_port_t, int, int);
 static int smb_server_lookup(smb_server_t **);
 static void smb_server_release(smb_server_t *);
 static int smb_server_ulist_geti(smb_session_list_t *, int,
@@ -563,7 +563,7 @@ smb_server_start(struct smb_io_start *io_start)
 		    sv->sv_cfg.skc_maxworkers, INT_MAX,
 		    TASKQ_DYNAMIC|TASKQ_PREPOPULATE);
 
-		sv->sv_session = smb_session_create(NULL, 0, sv);
+		sv->sv_session = smb_session_create(NULL, 0, sv, 0);
 
 		if (sv->sv_thread_pool == NULL || sv->sv_session == NULL) {
 			rc = ENOMEM;
@@ -666,8 +666,11 @@ smb_server_nbt_listen(int error)
 	}
 	mutex_exit(&sv->sv_mutex);
 
+	/*
+	 * netbios must be ipv4
+	 */
 	rc = smb_server_listen(sv, &sv->sv_nbt_daemon, SSN_SRVC_TCP_PORT,
-	    error);
+	    AF_INET, error);
 
 	if (rc) {
 		mutex_enter(&sv->sv_mutex);
@@ -711,9 +714,12 @@ smb_server_tcp_listen(int error)
 	}
 	mutex_exit(&sv->sv_mutex);
 
-	rc = smb_server_listen(sv, &sv->sv_tcp_daemon, SMB_SRVC_TCP_PORT,
-	    error);
-
+	if (sv->sv_cfg.skc_ipv6_enable)
+		rc = smb_server_listen(sv, &sv->sv_tcp_daemon,
+		    SMB_SRVC_TCP_PORT, AF_INET6, error);
+	else
+		rc = smb_server_listen(sv, &sv->sv_tcp_daemon,
+		    SMB_SRVC_TCP_PORT, AF_INET, error);
 	if (rc) {
 		mutex_enter(&sv->sv_mutex);
 		sv->sv_tcp_daemon.ld_kth = NULL;
@@ -1239,10 +1245,11 @@ smb_server_listen(
     smb_server_t		*sv,
     smb_listener_daemon_t	*ld,
     in_port_t			port,
+    int				family,
     int				pthread_create_error)
 {
 	int			rc;
-	struct sonode		*s_so;
+	ksocket_t		s_so;
 	uint32_t		on = 1;
 	smb_session_t		*session;
 
@@ -1256,21 +1263,33 @@ smb_server_listen(
 
 	if (ld->ld_so == NULL) {
 		/* First time listener */
-		ld->ld_sin.sin_family = AF_INET;
-		ld->ld_sin.sin_port = htons(port);
-		ld->ld_sin.sin_addr.s_addr = htonl(INADDR_ANY);
-		ld->ld_so = smb_socreate(AF_INET, SOCK_STREAM, 0);
-
+		if (family == AF_INET) {
+			ld->ld_sin.sin_family = (uint32_t)family;
+			ld->ld_sin.sin_port = htons(port);
+			ld->ld_sin.sin_addr.s_addr = htonl(INADDR_ANY);
+		} else {
+			ld->ld_sin6.sin6_family = (uint32_t)family;
+			ld->ld_sin6.sin6_port = htons(port);
+			(void) memset(&ld->ld_sin6.sin6_addr.s6_addr, 0,
+			    sizeof (ld->ld_sin6.sin6_addr.s6_addr));
+		}
+		ld->ld_so = smb_socreate(family, SOCK_STREAM, 0);
 		if (ld->ld_so) {
 
-			(void) sosetsockopt(ld->ld_so, SOL_SOCKET,
-			    SO_REUSEADDR, (const void *)&on, sizeof (on));
-
-			rc = sobind(ld->ld_so, (struct sockaddr *)&ld->ld_sin,
-			    sizeof (ld->ld_sin), 0, 0);
-
+			(void) ksocket_setsockopt(ld->ld_so, SOL_SOCKET,
+			    SO_REUSEADDR, (const void *)&on, sizeof (on),
+			    CRED());
+			if (family == AF_INET) {
+				rc = ksocket_bind(ld->ld_so,
+				    (struct sockaddr *)&ld->ld_sin,
+				    sizeof (ld->ld_sin), CRED());
+			} else {
+				rc = ksocket_bind(ld->ld_so,
+				    (struct sockaddr *)&ld->ld_sin6,
+				    sizeof (ld->ld_sin6), CRED());
+			}
 			if (rc == 0) {
-				rc =  solisten(ld->ld_so, 20);
+				rc =  ksocket_listen(ld->ld_so, 20, CRED());
 				if (rc < 0) {
 					cmn_err(CE_WARN,
 					    "Port %d: listen failed", port);
@@ -1297,23 +1316,26 @@ smb_server_listen(
 	DTRACE_PROBE1(so__wait__accept, struct sonode *, ld->ld_so);
 
 	for (;;) {
-		rc = soaccept(ld->ld_so, 0, &s_so);
+		rc = ksocket_accept(ld->ld_so, NULL, NULL, &s_so, CRED());
 		if (rc == 0) {
 			uint32_t	txbuf_size = 128*1024;
 			uint32_t	on = 1;
 
 			DTRACE_PROBE1(so__accept, struct sonode *, s_so);
 
-			(void) sosetsockopt(s_so, IPPROTO_TCP, TCP_NODELAY,
-			    (const void *)&on, sizeof (on));
-			(void) sosetsockopt(s_so, SOL_SOCKET, SO_KEEPALIVE,
-			    (const void *)&on, sizeof (on));
-			(void) sosetsockopt(s_so, SOL_SOCKET, SO_SNDBUF,
-			    (const void *)&txbuf_size, sizeof (txbuf_size));
+			(void) ksocket_setsockopt(s_so, IPPROTO_TCP,
+			    TCP_NODELAY, (const void *)&on, sizeof (on),
+			    CRED());
+			(void) ksocket_setsockopt(s_so, SOL_SOCKET,
+			    SO_KEEPALIVE, (const void *)&on, sizeof (on),
+			    CRED());
+			(void) ksocket_setsockopt(s_so, SOL_SOCKET, SO_SNDBUF,
+			    (const void *)&txbuf_size, sizeof (txbuf_size),
+			    CRED());
 			/*
 			 * Create a session for this connection.
 			 */
-			session = smb_session_create(s_so, port, sv);
+			session = smb_session_create(s_so, port, sv, family);
 			if (session) {
 				smb_session_list_append(&ld->ld_session_list,
 				    session);

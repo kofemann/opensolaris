@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -46,8 +46,11 @@ extern "C" {
 #include <sys/stat.h>
 #include <sys/vnode.h>
 #include <sys/cred.h>
+#include <netinet/in.h>
+#include <sys/ksocket.h>
 #include <sys/fem.h>
 #include <sys/door.h>
+#include <sys/extdirent.h>
 #include <smbsrv/smb.h>
 #include <smbsrv/smbinfo.h>
 #include <smbsrv/mbuf.h>
@@ -55,7 +58,6 @@ extern "C" {
 #include <smbsrv/smb_xdr.h>
 #include <smbsrv/netbios.h>
 #include <smbsrv/smb_vops.h>
-#include <smbsrv/mlsvc.h>
 
 struct smb_request;
 struct smb_server;
@@ -74,9 +76,15 @@ int smb_noop(void *, size_t, int);
  */
 #define	SMB_MAX_SEARCH		10
 
+#define	SMB_SEARCH_ATTRIBUTES    \
+	(FILE_ATTRIBUTE_HIDDEN | \
+	FILE_ATTRIBUTE_SYSTEM |  \
+	FILE_ATTRIBUTE_DIRECTORY)
+
 #define	SMB_SEARCH_HIDDEN(sattr) ((sattr) & FILE_ATTRIBUTE_HIDDEN)
 #define	SMB_SEARCH_SYSTEM(sattr) ((sattr) & FILE_ATTRIBUTE_SYSTEM)
 #define	SMB_SEARCH_DIRECTORY(sattr) ((sattr) & FILE_ATTRIBUTE_DIRECTORY)
+#define	SMB_SEARCH_ALL(sattr) ((sattr) & SMB_SEARCH_ATTRIBUTES)
 
 
 extern uint32_t smb_audit_flags;
@@ -400,7 +408,7 @@ int MBC_SHADOW_CHAIN(struct mbuf_chain *SUBMBC, struct mbuf_chain *MBC,
 typedef struct smb_oplock {
 	struct smb_ofile	*op_ofile;
 	uint32_t		op_flags;
-	uint32_t		op_ipaddr;
+	smb_inaddr_t		op_ipaddr;
 	uint64_t		op_kid;
 } smb_oplock_t;
 
@@ -676,15 +684,15 @@ typedef struct smb_session {
 	uint64_t		opentime;
 	uint16_t		vcnumber;
 	uint16_t		s_local_port;
-	uint32_t		ipaddr;
-	uint32_t		local_ipaddr;
+	smb_inaddr_t		ipaddr;
+	smb_inaddr_t		local_ipaddr;
 	char 			workstation[SMB_PI_MAX_HOST];
 	int			dialect;
 	int			native_os;
 	uint32_t		capabilities;
 	struct smb_sign		signing;
 
-	struct sonode		*sock;
+	ksocket_t		sock;
 
 	smb_slist_t		s_req_list;
 	smb_llist_t		s_xa_list;
@@ -800,7 +808,7 @@ typedef struct smb_tree {
 	smb_idpool_t		t_fid_pool;
 
 	smb_llist_t		t_odir_list;
-	smb_idpool_t		t_sid_pool;
+	smb_idpool_t		t_odid_pool;
 
 	uint32_t		t_refcnt;
 	uint32_t		t_flags;
@@ -812,18 +820,24 @@ typedef struct smb_tree {
 	char			t_typename[SMB_TYPENAMELEN];
 	char			t_volume[SMB_VOLNAMELEN];
 	acl_type_t		t_acltype;
+	uint32_t		t_access;
 } smb_tree_t;
 
 #define	SMB_TREE_VFS(tree)	((tree)->t_snode->vp->v_vfsp)
 #define	SMB_TREE_FSID(tree)	((tree)->t_snode->vp->v_vfsp->vfs_fsid)
 
-#define	SMB_TREE_IS_READONLY(sr)                                        \
-	(((sr) && (sr)->tid_tree) ?                                     \
-	smb_tree_has_feature((sr)->tid_tree, SMB_TREE_READONLY) : 0)
+#define	SMB_TREE_IS_READONLY(sr)					\
+	((sr) != NULL && (sr)->tid_tree != NULL &&			\
+	!((sr)->tid_tree->t_access & ACE_ALL_WRITE_PERMS))
 
 #define	SMB_TREE_IS_CASEINSENSITIVE(sr)                                 \
 	(((sr) && (sr)->tid_tree) ?                                     \
 	smb_tree_has_feature((sr)->tid_tree, SMB_TREE_CASEINSENSITIVE) : 0)
+
+#define	SMB_TREE_HAS_ACCESS(sr, acemask)				\
+	((sr) == NULL ? ACE_ALL_PERMS : (				\
+	(((sr) && (sr)->tid_tree) ?					\
+	(((sr)->tid_tree->t_access) & (acemask)) : 0)))
 
 /*
  * SMB_TREE_CONTAINS_NODE is used to check that a node is in the same
@@ -954,12 +968,8 @@ typedef struct smb_ofile {
 	pid_t			f_pid;
 } smb_ofile_t;
 
-/* odir flags bits */
-#define	SMB_DIR_FLAG_OPEN	0x0001
-#define	SMB_DIR_FLAG_CLOSE	0x0002
-#define	SMB_DIR_CLOSED(dir) ((dir)->d_flags & SMB_DIR_FLAG_CLOSE)
-
-#define	SMB_ODIR_MAGIC 	0x4F444952	/* 'ODIR' */
+#define	SMB_ODIR_MAGIC 		0x4F444952	/* 'ODIR' */
+#define	SMB_ODIR_BUFSIZE	(8 * 1024)
 
 typedef enum {
 	SMB_ODIR_STATE_OPEN = 0,
@@ -968,35 +978,78 @@ typedef enum {
 	SMB_ODIR_STATE_SENTINEL
 } smb_odir_state_t;
 
+typedef enum {
+	SMB_ODIR_RESUME_IDX,
+	SMB_ODIR_RESUME_COOKIE,
+	SMB_ODIR_RESUME_FNAME
+} smb_odir_resume_type_t;
+
+typedef struct smb_odir_resume {
+	smb_odir_resume_type_t	or_type;
+	int			or_idx;
+	uint32_t		or_cookie;
+	char			*or_fname;
+} smb_odir_resume_t;
+
 typedef struct smb_odir {
 	uint32_t		d_magic;
 	kmutex_t		d_mutex;
 	list_node_t		d_lnd;
 	smb_odir_state_t	d_state;
-
 	smb_session_t		*d_session;
 	smb_user_t		*d_user;
 	smb_tree_t		*d_tree;
-
-	uint32_t		d_refcnt;
-	uint32_t		d_cookie;
-	uint32_t		d_cookies[SMB_MAX_SEARCH];
-	uint16_t		d_sid;
+	smb_node_t		*d_dnode;
+	uint16_t		d_odid;
 	uint16_t		d_opened_by_pid;
 	uint16_t		d_sattr;
-	char			d_pattern[MAXNAMELEN];
-	struct smb_node		*d_dir_snode;
-	unsigned int 		d_wildcards;
-} smb_odir_t;
+	uint32_t		d_refcnt;
 
-typedef struct smb_odir_context {
-	uint32_t	dc_cookie;
-	uint16_t	dc_dattr;
-	char		dc_name[MAXNAMELEN]; /* Real 'Xxxx.yyy.xx' */
-	char		dc_name83[SMB_SHORTNAMELEN]; /* w/ dot 'XXXX    .XX ' */
-	char		dc_shortname[SMB_SHORTNAMELEN]; /* w/ dot 'XXXX.XX' */
-	smb_attr_t	dc_attr;
-} smb_odir_context_t;
+	boolean_t		d_wildcards;
+	boolean_t		d_ignore_case;
+	boolean_t		d_xat;
+	boolean_t		d_eof;
+	boolean_t		d_is_edp;
+	int			d_bufsize;
+	uint64_t		d_offset;
+	union {
+		char		*u_bufptr;
+		edirent_t	*u_edp;
+		dirent64_t	*u_dp;
+	} d_u;
+	uint32_t		d_cookies[SMB_MAX_SEARCH];
+	char			d_pattern[MAXNAMELEN];
+	char			d_buf[SMB_ODIR_BUFSIZE];
+} smb_odir_t;
+#define	d_bufptr	d_u.u_bufptr
+#define	d_edp		d_u.u_edp
+#define	d_dp		d_u.u_dp
+
+typedef struct smb_odirent {
+	char		od_name[MAXNAMELEN];	/* on disk name */
+	ino64_t		od_ino;
+	uint32_t	od_eflags;
+} smb_odirent_t;
+
+typedef struct smb_fileinfo {
+	char		fi_name[MAXNAMELEN];
+	char		fi_name83[SMB_SHORTNAMELEN];
+	char		fi_shortname[SMB_SHORTNAMELEN];
+	uint32_t	fi_cookie;
+	uint32_t	fi_dosattr;	/* DOS attributes */
+	uint64_t	fi_nodeid;	/* file system node id */
+	uint64_t	fi_size;	/* file size in bytes */
+	uint64_t	fi_alloc_size;	/* allocation size in bytes */
+	timestruc_t	fi_atime;	/* last access */
+	timestruc_t	fi_mtime;	/* last modification */
+	timestruc_t	fi_ctime;	/* last status change */
+	timestruc_t	fi_crtime;	/* file creation */
+} smb_fileinfo_t;
+
+typedef struct smb_streaminfo {
+	uint64_t	si_size;
+	char		si_name[MAXPATHLEN];
+} smb_streaminfo_t;
 
 #define	SMB_LOCK_MAGIC 	0x4C4F434B	/* 'LOCK' */
 
@@ -1294,14 +1347,12 @@ typedef struct smb_request {
 	struct mbuf_chain	smb_data;
 
 	uint16_t		smb_fid;	/* not in hdr, but common */
-	uint16_t		smb_sid;	/* not in hdr, but common */
 
 	unsigned char		andx_com;
 	uint16_t		andx_off;
 
 	struct smb_tree		*tid_tree;
 	struct smb_ofile	*fid_ofile;
-	struct smb_odir		*sid_odir;
 	smb_user_t		*uid_user;
 
 	union {
@@ -1311,6 +1362,7 @@ typedef struct smb_request {
 		int		pwdlen;
 		char		*password;
 		uint16_t	flags;
+		uint16_t	optional_support;
 	    } tcon;
 
 	    struct open_param {
@@ -1453,8 +1505,9 @@ typedef struct {
 typedef struct {
 	kthread_t		*ld_kth;
 	kt_did_t		ld_ktdid;
-	struct sonode		*ld_so;
+	ksocket_t		ld_so;
 	struct sockaddr_in	ld_sin;
+	struct sockaddr_in6	ld_sin6;
 	smb_session_list_t	ld_session_list;
 } smb_listener_daemon_t;
 

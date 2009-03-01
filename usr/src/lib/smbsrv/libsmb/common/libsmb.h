@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -34,8 +34,8 @@ extern "C" {
 #include <sys/list.h>
 #include <arpa/inet.h>
 #include <net/if.h>
+#include <inet/tcp.h>
 #include <netdb.h>
-
 #include <stdlib.h>
 #include <libscf.h>
 #include <libshare.h>
@@ -61,6 +61,8 @@ extern "C" {
 #define	SMB_VARRUN_DIR "/var/run/smb"
 #define	SMB_CCACHE_FILE "ccache"
 #define	SMB_CCACHE_PATH SMB_VARRUN_DIR "/" SMB_CCACHE_FILE
+
+
 
 /* Max value length of all SMB properties */
 #define	MAX_VALUE_BUFLEN	512
@@ -104,6 +106,9 @@ typedef enum {
 	SMB_CI_DOMAIN_SID,
 	SMB_CI_DOMAIN_MEMB,
 	SMB_CI_DOMAIN_NAME,
+	SMB_CI_DOMAIN_FQDN,
+	SMB_CI_DOMAIN_FOREST,
+	SMB_CI_DOMAIN_GUID,
 	SMB_CI_DOMAIN_SRV,
 
 	SMB_CI_WINS_SRV1,
@@ -111,7 +116,6 @@ typedef enum {
 	SMB_CI_WINS_EXCL,
 
 	SMB_CI_SRVSVC_SHRSET_ENABLE,
-	SMB_CI_MLRPC_KALIVE,
 
 	SMB_CI_MAX_WORKERS,
 	SMB_CI_MAX_CONNECTIONS,
@@ -137,6 +141,7 @@ typedef enum {
 	SMB_CI_KPASSWD_DOMAIN,
 	SMB_CI_KPASSWD_SEQNUM,
 	SMB_CI_NETLOGON_SEQNUM,
+	SMB_CI_IPV6_ENABLE,
 	SMB_CI_MAX
 } smb_cfg_id_t;
 
@@ -158,6 +163,7 @@ extern int smb_smf_get_opaque_property(smb_scfhandle_t *, char *,
     void *, size_t);
 extern int smb_smf_create_service_pgroup(smb_scfhandle_t *, char *);
 extern int smb_smf_restart_service(void);
+extern int smb_smf_maintenance_mode(void);
 
 /* Configuration management functions  */
 extern int smb_config_get(smb_cfg_id_t, char *, int);
@@ -179,6 +185,7 @@ extern int smb_config_get_secmode(void);
 extern int smb_config_set_secmode(int);
 extern int smb_config_set_idmap_domain(char *);
 extern int smb_config_refresh_idmap(void);
+extern int smb_config_getip(smb_cfg_id_t, smb_inaddr_t *);
 
 extern void smb_load_kconfig(smb_kmod_cfg_t *kcfg);
 extern uint32_t smb_crc_gen(uint8_t *, size_t);
@@ -207,31 +214,15 @@ extern bool_t xdr_smb_dr_joininfo_t(XDR *, smb_joininfo_t *);
 #define	SMB_DOMAIN_NODOMAIN_SID		-2
 
 extern int nt_domain_init(char *, uint32_t);
+extern void nt_domain_save(void);
+extern void nt_domain_show(void);
+extern void nt_domain_unlink(void);
 
-/* Following set of functions, manipulate WINS server configuration */
-extern int smb_wins_allow_list(char *config_list, char *allow_list);
-extern int smb_wins_exclude_list(char *config_list, char *exclude_list);
-extern boolean_t smb_wins_is_excluded(in_addr_t ipaddr,
-    ipaddr_t *exclude_list, int nexclude);
-extern void smb_wins_build_list(char *buf, uint32_t iplist[], int max_naddr);
-extern int smb_wins_iplist(char *list, uint32_t iplist[], int max_naddr);
-
-/*
- * Information on a particular domain: the domain name, the
- * name of a controller (PDC or BDC) and it's ip address.
- */
-typedef struct smb_ntdomain {
-	char domain[SMB_PI_MAX_DOMAIN];
-	char server[SMB_PI_MAX_DOMAIN];
-	uint32_t ipaddr;
-} smb_ntdomain_t;
-
-/* SMB domain information management functions */
-extern smb_ntdomain_t *smb_getdomaininfo(uint32_t);
-extern void smb_setdomaininfo(char *, char *, uint32_t);
-extern void smb_logdomaininfo(smb_ntdomain_t *);
-extern uint32_t smb_get_dcinfo(smb_ntdomain_t *);
-extern bool_t xdr_smb_dr_domain_t(XDR *, smb_ntdomain_t *);
+extern void smb_config_getdomaininfo(char *domain, char *fqdn, char *forest,
+    char *guid);
+extern void smb_config_setdomaininfo(char *domain, char *fqdn, char *forest,
+    char *guid);
+extern uint32_t smb_get_dcinfo(char *, uint32_t, smb_inaddr_t *);
 
 /*
  * buffer context structure. This is used to keep track of the buffer
@@ -261,27 +252,30 @@ extern int smb_idmap_restart(void);
 extern void hexdump(unsigned char *, int);
 extern size_t bintohex(const char *, size_t, char *, size_t);
 extern size_t hextobin(const char *, size_t, char *, size_t);
-extern char *trim_whitespace(char *buf);
+extern char *strstrip(char *, const char *);
+extern char *strtrim(char *, const char *);
+extern char *trim_whitespace(char *);
 extern void randomize(char *, unsigned);
 extern void rand_hash(unsigned char *, size_t, unsigned char *, size_t);
 
-extern int smb_resolve_netbiosname(char *, char *, size_t);
-extern int smb_resolve_fqdn(char *, char *, size_t);
 extern int smb_getdomainname(char *, size_t);
 extern int smb_getfqdomainname(char *, size_t);
 extern int smb_gethostname(char *, size_t, int);
 extern int smb_getfqhostname(char *, size_t);
 extern int smb_getnetbiosname(char *, size_t);
+extern struct hostent *smb_gethostbyname(const char *, int *);
+extern struct hostent *smb_gethostbyaddr(const char *, int, int, int *);
+extern boolean_t smb_ishostname(const char *);
 
 #define	SMB_SAMACCT_MAXLEN	(NETBIOS_NAME_SZ + 1)
 extern int smb_getsamaccount(char *, size_t);
 
 extern smb_sid_t *smb_getdomainsid(void);
 
-extern int smb_get_nameservers(struct in_addr *, int);
+extern int smb_get_nameservers(smb_inaddr_t *, int);
 extern void smb_tonetbiosname(char *, char *, char);
 
-extern int smb_chk_hostaccess(ipaddr_t, char *);
+extern int smb_chk_hostaccess(smb_inaddr_t *, char *);
 
 void smb_trace(const char *s);
 void smb_tracef(const char *fmt, ...);
@@ -407,10 +401,11 @@ typedef struct smb_auth_info {
 #define	SMB_PWF_DISABLE	0x04	/* Account is disabled */
 
 typedef struct smb_passwd {
-	uid_t pw_uid;
-	uint32_t pw_flags;
-	unsigned char pw_lmhash[SMBAUTH_HASH_SZ];
-	unsigned char pw_nthash[SMBAUTH_HASH_SZ];
+	uid_t		pw_uid;
+	uint32_t	pw_flags;
+	char		pw_name[SMB_USERNAME_MAXLEN];
+	uint8_t		pw_lmhash[SMBAUTH_HASH_SZ];
+	uint8_t		pw_nthash[SMBAUTH_HASH_SZ];
 } smb_passwd_t;
 
 /*
@@ -449,10 +444,10 @@ typedef struct smb_luser {
 
 extern void smb_pwd_init(boolean_t);
 extern void smb_pwd_fini(void);
-extern smb_passwd_t *smb_pwd_getpasswd(const char *, smb_passwd_t *);
+extern smb_passwd_t *smb_pwd_getpwnam(const char *, smb_passwd_t *);
+extern smb_passwd_t *smb_pwd_getpwuid(uid_t, smb_passwd_t *);
 extern int smb_pwd_setpasswd(const char *, const char *);
 extern int smb_pwd_setcntl(const char *, int);
-extern int smb_pwd_num(void);
 
 extern int smb_pwd_iteropen(smb_pwditer_t *);
 extern smb_luser_t *smb_pwd_iterate(smb_pwditer_t *);
@@ -643,8 +638,6 @@ int smb_lgrp_add_member(char *, smb_sid_t *, uint16_t);
 int smb_lgrp_del_member(char *, smb_sid_t *, uint16_t);
 int smb_lgrp_getbyname(char *, smb_group_t *);
 int smb_lgrp_getbyrid(uint32_t, smb_gdomain_t, smb_group_t *);
-int smb_lgrp_numbydomain(smb_gdomain_t, int *);
-int smb_lgrp_numbymember(smb_sid_t *, int *);
 void smb_lgrp_free(smb_group_t *);
 boolean_t smb_lgrp_is_member(smb_group_t *, smb_sid_t *);
 char *smb_lgrp_strerror(int);
@@ -708,7 +701,7 @@ typedef struct {
 	char		nic_nbname[NETBIOS_NAME_SZ];
 	char		nic_cmnt[SMB_PI_MAX_COMMENT];
 	char		nic_ifname[LIFNAMSIZ];
-	uint32_t	nic_ip;
+	smb_inaddr_t	nic_ip;
 	uint32_t	nic_mask;
 	uint32_t	nic_bcast;
 	uint32_t	nic_smbflags;
@@ -729,11 +722,72 @@ int smb_nic_addhost(const char *, const char *, int, const char **);
 int smb_nic_delhost(const char *);
 int smb_nic_getfirst(smb_niciter_t *);
 int smb_nic_getnext(smb_niciter_t *);
-boolean_t smb_nic_exists(uint32_t, boolean_t);
+boolean_t smb_nic_exists(smb_inaddr_t *, boolean_t);
 
 /* NIC Monitoring functions */
 int smb_nicmon_start(const char *);
 void smb_nicmon_stop(void);
+
+/*
+ * Well-known account structure
+ *
+ * A security identifier (SID) is a unique value of variable length that
+ * is used to identify a security principal or security group in
+ * Windows. Well-known SIDs are a group of SIDs that identify generic
+ * users or generic groups. Their values remain constant across all
+ * operating systems.
+ *
+ * This structure is defined to store these SIDs and other related
+ * information about them (e.g. account and domain names) in a
+ * predefined table.
+ */
+typedef struct smb_wka {
+	uint8_t		wka_domidx;
+	char		*wka_sid;
+	char		*wka_name;
+	uint16_t	wka_type;
+	uint16_t	wka_flags;
+	char		*wka_desc;
+	smb_sid_t	*wka_binsid;
+} smb_wka_t;
+
+/*
+ * Defined values for smb_wka.wka_flags
+ *
+ * SMB_WKAFLG_LGRP_ENABLE		Can be added as local group
+ */
+#define	SMB_WKAFLG_LGRP_ENABLE	0x1
+
+/*
+ * Well-known account interfaces
+ */
+int smb_wka_init(void);
+void smb_wka_fini(void);
+smb_wka_t *smb_wka_lookup_name(char *);
+smb_wka_t *smb_wka_lookup_sid(smb_sid_t *);
+smb_sid_t *smb_wka_get_sid(char *);
+char *smb_wka_get_domain(int);
+uint32_t smb_wka_token_groups(boolean_t, smb_ids_t *);
+
+/*
+ * In memory account representation
+ */
+typedef struct smb_account {
+	char		*a_name;
+	char		*a_domain;
+	uint16_t	a_type;
+	smb_sid_t	*a_sid;
+	smb_sid_t	*a_domsid;
+	uint32_t	a_rid;
+} smb_account_t;
+
+uint32_t smb_sam_lookup_name(char *, char *, uint16_t, smb_account_t *);
+uint32_t smb_sam_lookup_sid(smb_sid_t *, smb_account_t *);
+int smb_sam_usr_cnt(void);
+uint32_t smb_sam_usr_groups(smb_sid_t *, smb_ids_t *);
+int smb_sam_grp_cnt(nt_domain_type_t);
+void smb_account_free(smb_account_t *);
+boolean_t smb_account_validate(smb_account_t *);
 
 #ifdef	__cplusplus
 }

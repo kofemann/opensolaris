@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -35,9 +35,11 @@
 #include <libintl.h>
 #include <strings.h>
 #include <sqlite/sqlite.h>
+#include <syslog.h>
 #include <inttypes.h>
 #include "idmap_prot.h"
 #include "adutils.h"
+#include "idmap_priv.h"
 #include "idmap_config.h"
 #include "libadutils.h"
 
@@ -79,7 +81,8 @@ typedef struct idmapd_state {
 	gid_t		limit_gid;
 	int		new_eph_db;	/* was the ephem ID db [re-]created? */
 	bool_t		eph_map_unres_sids;
-	adutils_ad_t	*ad;
+	int		num_ads;
+	adutils_ad_t	**ads;
 } idmapd_state_t;
 extern idmapd_state_t	_idmapdstate;
 
@@ -178,6 +181,9 @@ typedef struct msg_table {
 #define	_IDMAP_F_EXP_EPH_UID		0x00000010
 /* Same as above. Used for sid2gid request */
 #define	_IDMAP_F_EXP_EPH_GID		0x00000020
+/* This request is not valid for the current forest */
+#define	_IDMAP_F_LOOKUP_OTHER_AD	0x00000040
+
 
 /*
  * Check if we are done. If so, subsequent passes can be skipped
@@ -273,6 +279,11 @@ extern idmap_retcode	lookup_name2sid(sqlite *, const char *, const char *,
 				idmap_mapping *, int);
 extern idmap_retcode	lookup_wksids_name2sid(const char *, char **, char **,
 				idmap_rid_t *, int *);
+
+
+extern void 	idmap_log_stderr(int);
+extern void	idmap_log_syslog(boolean_t);
+extern void	idmap_log_degraded(boolean_t);
 
 #ifdef __cplusplus
 }

@@ -19,10 +19,23 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
+
+#
+# MAPFILE HEADER START
+#
+# WARNING:  STOP NOW.  DO NOT MODIFY THIS FILE.
+# Object versioning must comply with the rules detailed in
+#
+#	usr/src/lib/README.mapfiles
+#
+# You should not be making modifications here until you've read the most current
+# copy of that file. If you need help, contact a gatekeeper for guidance.
+#
+# MAPFILE HEADER END
+#
 
 SUNWprivate_1.1 {
     global:
@@ -38,12 +51,16 @@ SUNWprivate_1.1 {
 	ipmi_entity_present_sdr;
 	ipmi_errmsg;
 	ipmi_errno;
+	ipmi_event_platform_message;
 	ipmi_firmware_version;
 	ipmi_fru_parse_board;
 	ipmi_fru_parse_product;
 	ipmi_fru_read;
+	ipmi_get_channel_info;
 	ipmi_get_deviceid;
 	ipmi_get_sensor_reading;
+	ipmi_lan_get_config;
+	ipmi_lan_set_config;
 	ipmi_open;
 	ipmi_sdr_changed;
 	ipmi_sdr_conv_reading;

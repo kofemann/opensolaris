@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -83,6 +83,7 @@ typedef struct show_usage_state_s {
 	boolean_t	us_parseable;
 	boolean_t	us_printheader;
 	boolean_t	us_first;
+	boolean_t	us_showall;
 	print_state_t	us_print;
 } show_usage_state_t;
 
@@ -105,6 +106,22 @@ static char *flowadm_print_field(print_field_t *, void *);
 
 #define	MAX_FIELD_LEN	32
 
+typedef struct show_flow_state {
+	boolean_t		fs_firstonly;
+	boolean_t		fs_donefirst;
+	pktsum_t		fs_prevstats;
+	uint32_t		fs_flags;
+	dladm_status_t		fs_status;
+	print_state_t		fs_print;
+	const char		*fs_flow;
+	const char		*fs_link;
+	boolean_t		fs_parseable;
+	boolean_t		fs_printheader;
+	boolean_t		fs_persist;
+	boolean_t		fs_stats;
+	uint64_t		fs_mask;
+} show_flow_state_t;
+
 typedef void cmdfunc_t(int, char **);
 
 static cmdfunc_t do_add_flow, do_remove_flow, do_init_flow, do_show_flow;
@@ -112,18 +129,19 @@ static cmdfunc_t do_show_flowprop, do_set_flowprop, do_reset_flowprop;
 static cmdfunc_t do_show_usage;
 
 static int	show_flow(dladm_flow_attr_t *, void *);
-static int	show_flows_onelink(datalink_id_t, void *);
+static int	show_flows_onelink(dladm_handle_t, datalink_id_t, void *);
 
-static void	flow_stats(const char *, datalink_id_t,  uint_t);
+static void	flow_stats(const char *, datalink_id_t,  uint_t, char *,
+		    show_flow_state_t *);
 static void	get_flow_stats(const char *, pktsum_t *);
 static int	show_flow_stats(dladm_flow_attr_t *, void *);
-static int	show_link_flow_stats(datalink_id_t, void *);
+static int	show_link_flow_stats(dladm_handle_t, datalink_id_t, void *);
 
 static int	remove_flow(dladm_flow_attr_t *, void *);
 
 static int	show_flowprop(dladm_flow_attr_t *, void *);
 static void	show_flowprop_one_flow(void *, const char *);
-static int	show_flowprop_onelink(datalink_id_t, void *);
+static int	show_flowprop_onelink(dladm_handle_t, datalink_id_t, void *);
 
 static void	die(const char *, ...);
 static void	die_optdup(int);
@@ -168,26 +186,6 @@ static const struct option prop_longopts[] = {
 };
 
 /*
- * structures for 'flowadm show-flow'
- */
-
-typedef struct show_flow_state {
-	boolean_t		fs_firstonly;
-	boolean_t		fs_donefirst;
-	pktsum_t		fs_prevstats;
-	uint32_t		fs_flags;
-	dladm_status_t		fs_status;
-	print_state_t		fs_print;
-	const char		*fs_flow;
-	const char		*fs_link;
-	boolean_t		fs_parseable;
-	boolean_t		fs_printheader;
-	boolean_t		fs_persist;
-	boolean_t		fs_stats;
-	uint64_t		fs_mask;
-} show_flow_state_t;
-
-/*
  * structures for 'flowadm remove-flow'
  */
 
@@ -197,22 +195,13 @@ typedef struct remove_flow_state {
 	dladm_status_t	fs_status;
 } remove_flow_state_t;
 
-typedef struct flow_args_s {
-	const char		*fa_link;
-	int			fa_attrno;	/* -1 indicates flow itself */
-	uint64_t		fa_mask;
-	dladm_flow_attr_t	*fa_finfop;
-	dladm_status_t		*fa_status;
-	boolean_t		fa_parseable;
-} flow_args_t;
-
 #define	PROTO_MAXSTR_LEN	7
 #define	PORT_MAXSTR_LEN		6
 #define	DSFIELD_MAXSTR_LEN	10
 
 typedef struct flow_fields_buf_s
 {
-	char flow_name[MAXNAMELEN];
+	char flow_name[MAXFLOWNAMELEN];
 	char flow_link[MAXLINKNAMELEN];
 	char flow_ipaddr[INET6_ADDRSTRLEN+4];
 	char flow_proto[PROTO_MAXSTR_LEN];
@@ -226,13 +215,13 @@ static print_field_t flow_fields[] = {
     offsetof(flow_fields_buf_t, flow_name),	CMD_TYPE_ANY},
 {  "link",	"LINK",		11,
     offsetof(flow_fields_buf_t, flow_link),	CMD_TYPE_ANY},
-{  "ipaddr",	"IP ADDR",	30,
+{  "ipaddr",	"IPADDR",	30,
     offsetof(flow_fields_buf_t, flow_ipaddr),	CMD_TYPE_ANY},
-{  "transport",	"PROTO",	6,
+{  "proto",	"PROTO",	6,
     offsetof(flow_fields_buf_t, flow_proto),	CMD_TYPE_ANY},
 {  "port",	 "PORT",	7,
     offsetof(flow_fields_buf_t, flow_port),	CMD_TYPE_ANY},
-{  "dsfield",	"DSFLD",	9,
+{  "dsfld",	"DSFLD",	9,
     offsetof(flow_fields_buf_t, flow_dsfield),	CMD_TYPE_ANY}}
 ;
 
@@ -288,9 +277,40 @@ typedef struct flowprop_args_s {
 	char			*fs_propname;
 	char			*fs_flowname;
 } flowprop_args_t;
+/*
+ * structures for 'flowadm show-flow -s' (print statistics)
+ */
+typedef enum {
+	FLOW_S_FLOW,
+	FLOW_S_IPKTS,
+	FLOW_S_RBYTES,
+	FLOW_S_IERRORS,
+	FLOW_S_OPKTS,
+	FLOW_S_OBYTES,
+	FLOW_S_OERRORS
+} flow_s_field_index_t;
+
+static print_field_t flow_s_fields[] = {
+/* name,	header,		field width,	index,		cmdtype	*/
+{ "flow",	"FLOW",			15,	FLOW_S_FLOW,	CMD_TYPE_ANY},
+{ "ipackets",	"IPACKETS",		10,	FLOW_S_IPKTS,	CMD_TYPE_ANY},
+{ "rbytes",	"RBYTES",		8,	FLOW_S_RBYTES,	CMD_TYPE_ANY},
+{ "ierrors",	"IERRORS",		10,	FLOW_S_IERRORS,	CMD_TYPE_ANY},
+{ "opackets",	"OPACKETS",		12,	FLOW_S_OPKTS,	CMD_TYPE_ANY},
+{ "obytes",	"OBYTES",		12,	FLOW_S_OBYTES,	CMD_TYPE_ANY},
+{ "oerrors",	"OERRORS",		8,	FLOW_S_OERRORS,	CMD_TYPE_ANY}}
+;
+#define	FLOW_S_MAX_FIELDS \
+	(sizeof (flow_s_fields) / sizeof (print_field_t))
+
+typedef struct flow_args_s {
+	char		*flow_s_flow;
+	pktsum_t	*flow_s_psum;
+} flow_args_t;
+static char *print_flow_stats(print_field_t *, void *);
 
 /*
- * structures for 'flow show-usage'
+ * structures for 'flowadm show-usage'
  */
 
 typedef struct  usage_fields_buf_s {
@@ -367,6 +387,12 @@ static char *progname;
 boolean_t		t_arg = B_FALSE; /* changes are persistent */
 char			*altroot = NULL;
 
+/*
+ * Handle to libdladm.  Opened in main() before the sub-command
+ * specific function is called.
+ */
+static dladm_handle_t handle = NULL;
+
 static const char *attr_table[] =
 	{"local_ip", "remote_ip", "transport", "local_port", "dsfield"};
 
@@ -377,18 +403,23 @@ usage(void)
 {
 	(void) fprintf(stderr, gettext("usage: flowadm <subcommand>"
 	    " <args>...\n"
-	    "\tadd-flow [-t] [-R <root-dir>] -l <link>\n"
-	    "\t\t-a attr=value[,...] [-p prop=value,...]\n"
-	    "\t\tflow-name\n"
-	    "\tremove-flow [-t] [-R <root-dir>] {-l <link> | flow-name}\n"
-	    "\tset-flowprop [-t] [-R <root-dir>] \n"
-	    "\t\t-p prop=value[,...] flowname\n"
-	    "\treset-flowprop [-t] [-R <root-dir>] \n"
-	    "\t\t[-p prop,...] flowname\n"
-	    "\tshow-flowprop [-cP] [-l <link>] [-p prop,...] [flow-name]\n"
-	    "\tshow-flow [-p] [-s [-i <interval>]] [-l <link>] [flow-name]\n"
-	    "\tshow-usage [-d|-p -F <format>] [-s <DD/MM/YYYY,HH:MM:SS>]\n"
-	    "\t\t[-e <DD/MM/YYYY,HH:MM:SS>]] -f <logfile> [<name>]\n"));
+	    "    add-flow       [-t] -l <link> -a <attr>=<value>[,...]\n"
+	    "\t\t   [-p <prop>=<value>,...] <flow>\n"
+	    "    remove-flow    [-t] {-l <link> | <flow>}\n"
+	    "    show-flow      [-p] [-s [-i <interval>]] [-l <link>] "
+	    "[<flow>]\n\n"
+	    "    set-flowprop   [-t] -p <prop>=<value>[,...] <flow>\n"
+	    "    reset-flowprop [-t] [-p <prop>,...] <flow>\n"
+	    "    show-flowprop  [-cP] [-l <link>] [-p <prop>,...] "
+	    "[<flow>]\n\n"
+	    "    show-usage     [-a] [-d | -F <format>] "
+	    "[-s <DD/MM/YYYY,HH:MM:SS>]\n"
+	    "\t\t   [-e <DD/MM/YYYY,HH:MM:SS>] -f <logfile> [<flow>]\n"));
+
+	/* close dladm handle if it was opened */
+	if (handle != NULL)
+		dladm_close(handle);
+
 	exit(1);
 }
 
@@ -397,6 +428,7 @@ main(int argc, char *argv[])
 {
 	int	i, arglen, cmdlen;
 	cmd_t	*cmdp;
+	dladm_status_t status;
 
 	(void) setlocale(LC_ALL, "");
 #if !defined(TEXT_DOMAIN)
@@ -415,8 +447,16 @@ main(int argc, char *argv[])
 		cmdlen = strlen(cmdp->c_name);
 		if ((arglen == cmdlen) && (strncmp(argv[1], cmdp->c_name,
 		    cmdlen) == 0)) {
+			/* Open the libdladm handle */
+			if ((status = dladm_open(&handle)) != DLADM_STATUS_OK) {
+				die_dlerr(status,
+				    "could not open /dev/dld");
+			}
+
 			cmdp->c_fn(argc - 1, &argv[1]);
-			exit(0);
+
+			dladm_close(handle);
+			exit(EXIT_SUCCESS);
 		}
 	}
 
@@ -447,7 +487,7 @@ do_init_flow(int argc, char *argv[])
 {
 	dladm_status_t status;
 
-	status = dladm_flow_init();
+	status = dladm_flow_init(handle);
 	if (status != DLADM_STATUS_OK)
 		die_dlerr(status, "flows initialization failed");
 }
@@ -456,9 +496,20 @@ do_init_flow(int argc, char *argv[])
 static int
 show_usage_date(dladm_usage_t *usage, void *arg)
 {
+	show_usage_state_t	*state = (show_usage_state_t *)arg;
+	time_t			stime;
+	char			timebuf[20];
+	dladm_flow_attr_t	attr;
+	dladm_status_t		status;
 
-	time_t	stime;
-	char	timebuf[20];
+	/*
+	 * Only show usage information for existing flows unless '-a'
+	 * is specified.
+	 */
+	if (!state->us_showall && ((status = dladm_flow_info(handle,
+	    usage->du_name, &attr)) != DLADM_STATUS_OK)) {
+		return (status);
+	}
 
 	stime = usage->du_stime;
 	(void) strftime(timebuf, sizeof (timebuf), "%m/%d/%Y",
@@ -476,6 +527,17 @@ show_usage_time(dladm_usage_t *usage, void *arg)
 	usage_l_fields_buf_t 	ubuf;
 	time_t			time;
 	double			bw;
+	dladm_flow_attr_t	attr;
+	dladm_status_t		status;
+
+	/*
+	 * Only show usage information for existing flows unless '-a'
+	 * is specified.
+	 */
+	if (!state->us_showall && ((status = dladm_flow_info(handle,
+	    usage->du_name, &attr)) != DLADM_STATUS_OK)) {
+		return (status);
+	}
 
 	if (state->us_plot) {
 		if (!state->us_printheader) {
@@ -543,6 +605,17 @@ show_usage_res(dladm_usage_t *usage, void *arg)
 	show_usage_state_t	*state = (show_usage_state_t *)arg;
 	char			buf[DLADM_STRSIZE];
 	usage_fields_buf_t	ubuf;
+	dladm_flow_attr_t	attr;
+	dladm_status_t		status;
+
+	/*
+	 * Only show usage information for existing flows unless '-a'
+	 * is specified.
+	 */
+	if (!state->us_showall && ((status = dladm_flow_info(handle,
+	    usage->du_name, &attr)) != DLADM_STATUS_OK)) {
+		return (status);
+	}
 
 	bzero(&ubuf, sizeof (ubuf));
 
@@ -588,7 +661,6 @@ do_show_usage(int argc, char *argv[])
 	int			opt;
 	dladm_status_t		status;
 	boolean_t		d_arg = B_FALSE;
-	boolean_t		p_arg = B_FALSE;
 	char			*stime = NULL;
 	char			*etime = NULL;
 	char			*resource = NULL;
@@ -610,13 +682,13 @@ do_show_usage(int argc, char *argv[])
 	state.us_plot = B_FALSE;
 	state.us_first = B_TRUE;
 
-	while ((opt = getopt(argc, argv, "dps:e:o:f:F:")) != -1) {
+	while ((opt = getopt(argc, argv, "das:e:o:f:F:")) != -1) {
 		switch (opt) {
 		case 'd':
 			d_arg = B_TRUE;
 			break;
-		case 'p':
-			state.us_plot = p_arg = B_TRUE;
+		case 'a':
+			state.us_showall = B_TRUE;
 			break;
 		case 'f':
 			file = optarg;
@@ -632,7 +704,7 @@ do_show_usage(int argc, char *argv[])
 			fields_str = optarg;
 			break;
 		case 'F':
-			F_arg = B_TRUE;
+			state.us_plot = F_arg = B_TRUE;
 			formatspec_str = optarg;
 			break;
 		default:
@@ -644,6 +716,13 @@ do_show_usage(int argc, char *argv[])
 		die("show-usage requires a file");
 
 	if (optind == (argc-1)) {
+		dladm_flow_attr_t	attr;
+
+		if (!state.us_showall &&
+		    dladm_flow_info(handle, resource, &attr) !=
+		    DLADM_STATUS_OK) {
+			die("invalid flow: '%s'", resource);
+		}
 		resource = argv[optind];
 	}
 
@@ -666,11 +745,8 @@ do_show_usage(int argc, char *argv[])
 	state.us_print.ps_fields = fields;
 	state.us_print.ps_nfields = nfields;
 
-	if (p_arg && d_arg)
-		die("plot and date options are incompatible");
-
-	if (p_arg && !F_arg)
-		die("specify format speicifier: -F <format>");
+	if (F_arg && d_arg)
+		die("incompatible -d and -F options");
 
 	if (F_arg && valid_formatspec(formatspec_str) == B_FALSE)
 		die("Format specifier %s not supported", formatspec_str);
@@ -680,7 +756,7 @@ do_show_usage(int argc, char *argv[])
 		status = dladm_usage_dates(show_usage_date,
 		    DLADM_LOGTYPE_FLOW, file, resource, &state);
 	} else if (resource == NULL && stime == NULL && etime == NULL &&
-	    !p_arg) {
+	    !F_arg) {
 		/* Print summary */
 		status = dladm_usage_summary(show_usage_res,
 		    DLADM_LOGTYPE_FLOW, file, &state);
@@ -701,7 +777,7 @@ do_show_usage(int argc, char *argv[])
 static void
 do_add_flow(int argc, char *argv[])
 {
-	char			devname[MAXNAMELEN];
+	char			devname[MAXLINKNAMELEN];
 	char			*name = NULL;
 	uint_t			index;
 	datalink_id_t		linkid;
@@ -723,10 +799,10 @@ do_add_flow(int argc, char *argv[])
 			break;
 		case 'l':
 			if (strlcpy(devname, optarg,
-			    MAXNAMELEN) >= MAXNAMELEN) {
+			    MAXLINKNAMELEN) >= MAXLINKNAMELEN) {
 				die("link name too long");
 			}
-			if (dladm_name2info(devname, &linkid, NULL,
+			if (dladm_name2info(handle, devname, &linkid, NULL,
 			    NULL, NULL) != DLADM_STATUS_OK)
 				die("invalid link '%s'", devname);
 			l_arg = B_TRUE;
@@ -756,12 +832,12 @@ do_add_flow(int argc, char *argv[])
 		die("flow name is required");
 	} else {
 		/* get flow name; required last argument */
-		if (strlen(argv[index]) >= MAXFLOWNAME)
+		if (strlen(argv[index]) >= MAXFLOWNAMELEN)
 			die("flow name too long");
 		name = argv[index];
 	}
 
-	status = dladm_flow_add(linkid, attrlist, proplist, name,
+	status = dladm_flow_add(handle, linkid, attrlist, proplist, name,
 	    t_arg, altroot);
 	if (status != DLADM_STATUS_OK)
 		die_dlerr(status, "add flow failed");
@@ -775,7 +851,7 @@ do_remove_flow(int argc, char *argv[])
 {
 	char			option;
 	char			*flowname = NULL;
-	char			linkname[MAXNAMELEN];
+	char			linkname[MAXLINKNAMELEN];
 	datalink_id_t		linkid = DATALINK_ALL_LINKID;
 	boolean_t		l_arg = B_FALSE;
 	remove_flow_state_t	state;
@@ -798,7 +874,7 @@ do_remove_flow(int argc, char *argv[])
 			    MAXLINKNAMELEN) >= MAXLINKNAMELEN) {
 				die("link name too long");
 			}
-			if (dladm_name2info(linkname, &linkid, NULL,
+			if (dladm_name2info(handle, linkname, &linkid, NULL,
 			    NULL, NULL) != DLADM_STATUS_OK) {
 				die("invalid link '%s'", linkname);
 			}
@@ -815,11 +891,11 @@ do_remove_flow(int argc, char *argv[])
 		if (optind != (argc-1)) {
 			usage();
 		} else {
-			if (strlen(argv[optind]) >= MAXFLOWNAME)
+			if (strlen(argv[optind]) >= MAXFLOWNAMELEN)
 				die("flow name too long");
 			flowname = argv[optind];
 		}
-		status = dladm_flow_remove(flowname, t_arg, altroot);
+		status = dladm_flow_remove(handle, flowname, t_arg, altroot);
 	} else {
 		/* if link is specified then flow name should not be there */
 		if (optind == argc-1)
@@ -828,7 +904,8 @@ do_remove_flow(int argc, char *argv[])
 		state.fs_tempop = t_arg;
 		state.fs_altroot = altroot;
 		state.fs_status = DLADM_STATUS_OK;
-		status = dladm_walk_flow(remove_flow, linkid, &state, B_FALSE);
+		status = dladm_walk_flow(remove_flow, handle, linkid, &state,
+		    B_FALSE);
 		/*
 		 * check if dladm_walk_flow terminated early and see if the
 		 * walker function as any status for us
@@ -849,7 +926,7 @@ remove_flow(dladm_flow_attr_t *attr, void *arg)
 {
 	remove_flow_state_t	*state = (remove_flow_state_t *)arg;
 
-	state->fs_status = dladm_flow_remove(attr->fa_flowname,
+	state->fs_status = dladm_flow_remove(handle, attr->fa_flowname,
 	    state->fs_tempop, state->fs_altroot);
 
 	if (state->fs_status == DLADM_STATUS_OK)
@@ -875,8 +952,8 @@ print_flow(show_flow_state_t *state, dladm_flow_attr_t *attr,
 	char		link[MAXLINKNAMELEN];
 	dladm_status_t	status;
 
-	if ((status = dladm_datalink_id2info(attr->fa_linkid, NULL, NULL,
-	    NULL, link, sizeof (link))) != DLADM_STATUS_OK) {
+	if ((status = dladm_datalink_id2info(handle, attr->fa_linkid, NULL,
+	    NULL, NULL, link, sizeof (link))) != DLADM_STATUS_OK) {
 		return (status);
 	}
 
@@ -933,12 +1010,11 @@ static void
 show_one_flow(void *arg, const char *name)
 {
 	dladm_flow_attr_t	attr;
-	dladm_status_t		status;
 
-	if (dladm_flow_info(name, &attr) != DLADM_STATUS_OK)
+	if (dladm_flow_info(handle, name, &attr) != DLADM_STATUS_OK)
 		die("invalid flow: '%s'", name);
 	else
-		show_flow(&attr, arg);
+		(void) show_flow(&attr, arg);
 }
 
 /*
@@ -947,11 +1023,11 @@ show_one_flow(void *arg, const char *name)
  * all flows on all links.
  */
 static int
-show_flows_onelink(datalink_id_t linkid, void *arg)
+show_flows_onelink(dladm_handle_t dh, datalink_id_t linkid, void *arg)
 {
 	show_flow_state_t *state = arg;
 
-	(void) dladm_walk_flow(show_flow, linkid, arg, state->fs_persist);
+	(void) dladm_walk_flow(show_flow, dh, linkid, arg, state->fs_persist);
 
 	return (DLADM_WALK_CONTINUE);
 }
@@ -977,13 +1053,56 @@ get_flow_stats(const char *flowname, pktsum_t *stats)
 	(void) kstat_close(kcp);
 }
 
+
+static char *
+print_flow_stats(print_field_t *pf, void *arg)
+{
+	flow_args_t	*fargs = arg;
+	pktsum_t	*diff_stats = fargs->flow_s_psum;
+	static char	buf[DLADM_STRSIZE];
+
+	switch (pf->pf_index) {
+	case FLOW_S_FLOW:
+		(void) snprintf(buf, sizeof (buf), "%s", fargs->flow_s_flow);
+		break;
+	case FLOW_S_IPKTS:
+		(void) snprintf(buf, sizeof (buf), "%llu",
+		    diff_stats->ipackets);
+		break;
+	case FLOW_S_RBYTES:
+		(void) snprintf(buf, sizeof (buf), "%llu",
+		    diff_stats->rbytes);
+		break;
+	case FLOW_S_IERRORS:
+		(void) snprintf(buf, sizeof (buf), "%u",
+		    diff_stats->ierrors);
+		break;
+	case FLOW_S_OPKTS:
+		(void) snprintf(buf, sizeof (buf), "%llu",
+		    diff_stats->opackets);
+		break;
+	case FLOW_S_OBYTES:
+		(void) snprintf(buf, sizeof (buf), "%llu",
+		    diff_stats->obytes);
+		break;
+	case FLOW_S_OERRORS:
+		(void) snprintf(buf, sizeof (buf), "%u",
+		    diff_stats->oerrors);
+		break;
+	default:
+		die("invalid input");
+		break;
+	}
+	return (buf);
+}
 /* ARGSUSED */
 static int
 show_flow_stats(dladm_flow_attr_t *attr, void *arg)
 {
-	show_flow_state_t *state = (show_flow_state_t *)arg;
-	const char *name = attr->fa_flowname;
-	pktsum_t stats, diff_stats;
+	show_flow_state_t	*state = (show_flow_state_t *)arg;
+	char			*name = attr->fa_flowname;
+	pktsum_t		stats, diff_stats;
+	flow_args_t		fargs;
 
 	if (state->fs_firstonly) {
 		if (state->fs_donefirst)
@@ -996,13 +1115,10 @@ show_flow_stats(dladm_flow_attr_t *attr, void *arg)
 	get_flow_stats(name, &stats);
 	dladm_stats_diff(&diff_stats, &stats, &state->fs_prevstats);
 
-	(void) printf("%-12s", name);
-	(void) printf("%-10llu", diff_stats.ipackets);
-	(void) printf("%-12llu", diff_stats.rbytes);
-	(void) printf("%-8llu", diff_stats.ierrors);
-	(void) printf("%-10llu", diff_stats.opackets);
-	(void) printf("%-12llu", diff_stats.obytes);
-	(void) printf("%-8llu\n", diff_stats.oerrors);
+	fargs.flow_s_flow = name;
+	fargs.flow_s_psum = &diff_stats;
+	flowadm_print_output(&state->fs_print, state->fs_parseable,
+	    print_flow_stats, &fargs);
 
 	state->fs_prevstats = stats;
 
@@ -1015,9 +1131,9 @@ show_flow_stats(dladm_flow_attr_t *attr, void *arg)
  * all flows on all links.
  */
 static int
-show_link_flow_stats(datalink_id_t linkid, void * arg)
+show_link_flow_stats(dladm_handle_t dh, datalink_id_t linkid, void * arg)
 {
-	if (dladm_walk_flow(show_flow_stats, linkid, arg, B_FALSE)
+	if (dladm_walk_flow(show_flow_stats, dh, linkid, arg, B_FALSE)
 	    == DLADM_STATUS_OK)
 		return (DLADM_WALK_CONTINUE);
 	else
@@ -1026,45 +1142,53 @@ show_link_flow_stats(datalink_id_t linkid, void * arg)
 
 /* ARGSUSED */
 static void
-flow_stats(const char *flow, datalink_id_t linkid,  uint_t interval)
+flow_stats(const char *flow, datalink_id_t linkid,  uint_t interval,
+    char *fields_str, show_flow_state_t *state)
 {
-	show_flow_state_t	state;
 	dladm_flow_attr_t	attr;
+	print_field_t		**fields;
+	uint_t			nfields;
 
-	if (flow != NULL && dladm_flow_info(flow, &attr) != DLADM_STATUS_OK)
+	fields = parse_output_fields(fields_str, flow_s_fields,
+	    FLOW_S_MAX_FIELDS, CMD_TYPE_ANY, &nfields);
+	if (fields == NULL) {
+		die("invalid field(s) specified");
+		return;
+	}
+
+	state->fs_print.ps_fields = fields;
+	state->fs_print.ps_nfields = nfields;
+
+	if (flow != NULL &&
+	    dladm_flow_info(handle, flow, &attr) != DLADM_STATUS_OK)
 		die("invalid flow %s", flow);
-
-	bzero(&state, sizeof (state));
 
 	/*
 	 * If an interval is specified, continuously show the stats
 	 * for only the first flow.
 	 */
-	state.fs_firstonly = (interval != 0);
+	state->fs_firstonly = (interval != 0);
 
+	if (!state->fs_parseable)
+		print_header(&state->fs_print);
 	for (;;) {
-		if (!state.fs_donefirst)
-			(void) printf("%-12s%-10s%-12s%-8s%-10s%-12s%-8s\n",
-			    "FLOW", "IPACKETS", "RBYTES", "IERRORS",
-			    "OPACKETS", "OBYTES", "OERRORS");
-
-		state.fs_donefirst = B_FALSE;
+		state->fs_donefirst = B_FALSE;
 
 		/* Show stats for named flow */
 		if (flow != NULL)  {
-			state.fs_flow = flow;
-			(void) show_flow_stats(&attr, &state);
+			state->fs_flow = flow;
+			(void) show_flow_stats(&attr, state);
 
 		/* Show all stats on a link */
 		} else if (linkid != DATALINK_INVALID_LINKID) {
-			(void) dladm_walk_flow(show_flow_stats, linkid, &state,
-			    B_FALSE);
+			(void) dladm_walk_flow(show_flow_stats, handle, linkid,
+			    state, B_FALSE);
 
 		/* Show all stats by datalink */
 		} else {
 			(void) dladm_walk_datalink_id(show_link_flow_stats,
-			    &state, DATALINK_CLASS_ALL, DATALINK_ANY_MEDIATYPE,
-			    DLADM_OPT_ACTIVE);
+			    handle, state, DATALINK_CLASS_ALL,
+			    DATALINK_ANY_MEDIATYPE, DLADM_OPT_ACTIVE);
 		}
 
 		if (interval == 0)
@@ -1077,8 +1201,8 @@ flow_stats(const char *flow, datalink_id_t linkid,  uint_t interval)
 static void
 do_show_flow(int argc, char *argv[])
 {
-	char			flowname[MAXFLOWNAME];
-	char			linkname[MAXNAMELEN];
+	char			flowname[MAXFLOWNAMELEN];
+	char			linkname[MAXLINKNAMELEN];
 	datalink_id_t		linkid = DATALINK_ALL_LINKID;
 	int			option;
 	boolean_t		s_arg = B_FALSE;
@@ -1093,8 +1217,9 @@ do_show_flow(int argc, char *argv[])
 	print_field_t		**fields;
 	uint_t			nfields;
 	char			*all_fields =
-	    "flow,link,ipaddr,transport,port,dsfield";
-	dladm_status_t		status;
+	    "flow,link,ipaddr,proto,port,dsfld";
+	char			*allstat_fields =
+	    "flow,ipackets,rbytes,ierrors,opackets,obytes,oerrors";
 
 	bzero(&state, sizeof (state));
 
@@ -1143,7 +1268,7 @@ do_show_flow(int argc, char *argv[])
 			if (strlcpy(linkname, optarg, MAXLINKNAMELEN)
 			    >= MAXLINKNAMELEN)
 				die("link name too long\n");
-			if (dladm_name2info(linkname, &linkid, NULL,
+			if (dladm_name2info(handle, linkname, &linkid, NULL,
 			    NULL, NULL) != DLADM_STATUS_OK)
 				die("invalid link '%s'", linkname);
 			l_arg = B_TRUE;
@@ -1153,6 +1278,7 @@ do_show_flow(int argc, char *argv[])
 			break;
 		}
 	}
+
 	if (i_arg && !(s_arg || S_arg))
 		die("the -i option can be used only with -s or -S");
 
@@ -1161,24 +1287,29 @@ do_show_flow(int argc, char *argv[])
 
 	/* get flow name (optional last argument */
 	if (optind == (argc-1)) {
-		if (strlcpy(flowname, argv[optind], MAXFLOWNAME)
-		    >= MAXFLOWNAME)
+		if (strlcpy(flowname, argv[optind], MAXFLOWNAMELEN)
+		    >= MAXFLOWNAMELEN)
 			die("flow name too long");
 		state.fs_flow = flowname;
 	}
 
-	if (s_arg) {
-		flow_stats(state.fs_flow, linkid, interval);
-		return;
-	}
-
 	if (S_arg) {
-		dladm_continuous(linkid, state.fs_flow, interval, FLOW_REPORT);
+		dladm_continuous(handle, linkid, state.fs_flow, interval,
+		    FLOW_REPORT);
 		return;
 	}
 
-	if (!o_arg || (o_arg && strcasecmp(fields_str, "all") == 0))
-		fields_str = all_fields;
+	if (!o_arg || (o_arg && strcasecmp(fields_str, "all") == 0)) {
+		if (s_arg)
+			fields_str = allstat_fields;
+		else
+			fields_str = all_fields;
+	}
+
+	if (s_arg) {
+		flow_stats(state.fs_flow, linkid, interval, fields_str, &state);
+		return;
+	}
 
 	fields = parse_output_fields(fields_str, flow_fields, FLOW_MAX_FIELDS,
 	    CMD_TYPE_ANY, &nfields);
@@ -1197,12 +1328,12 @@ do_show_flow(int argc, char *argv[])
 
 	/* Show attributes of flows on one link */
 	} else if (l_arg) {
-		(void) show_flows_onelink(linkid, &state);
+		(void) show_flows_onelink(handle, linkid, &state);
 
 	/* Show attributes of all flows on all links */
 	} else {
-		(void) dladm_walk_datalink_id(show_flows_onelink, &state,
-		    DATALINK_CLASS_ALL, DATALINK_ANY_MEDIATYPE,
+		(void) dladm_walk_datalink_id(show_flows_onelink, handle,
+		    &state, DATALINK_CLASS_ALL, DATALINK_ANY_MEDIATYPE,
 		    DLADM_OPT_ACTIVE);
 	}
 }
@@ -1214,7 +1345,7 @@ set_flowprop_persist(const char *flow, const char *prop_name, char **prop_val,
 	dladm_status_t	status;
 	char		*errprop;
 
-	status = dladm_set_flowprop(flow, prop_name, prop_val, val_cnt,
+	status = dladm_set_flowprop(handle, flow, prop_name, prop_val, val_cnt,
 	    DLADM_OPT_PERSIST, &errprop);
 
 	if (status != DLADM_STATUS_OK) {
@@ -1261,7 +1392,7 @@ set_flowprop(int argc, char **argv, boolean_t reset)
 	}
 
 	if (optind == (argc - 1)) {
-		if (strlen(argv[optind]) >= MAXFLOWNAME)
+		if (strlen(argv[optind]) >= MAXFLOWNAMELEN)
 			die("flow name too long");
 		flow = argv[optind];
 	} else if (optind != argc) {
@@ -1276,7 +1407,7 @@ set_flowprop(int argc, char **argv, boolean_t reset)
 		if (!reset)
 			die("flow property must be specified");
 
-		status = dladm_set_flowprop(flow, NULL, NULL, 0,
+		status = dladm_set_flowprop(handle, flow, NULL, NULL, 0,
 		    DLADM_OPT_ACTIVE, &errprop);
 		if (status != DLADM_STATUS_OK) {
 			warn_dlerr(status, "cannot reset flow property '%s' "
@@ -1311,7 +1442,7 @@ set_flowprop(int argc, char **argv, boolean_t reset)
 				continue;
 			}
 		}
-		s = dladm_set_flowprop(flow, aip->ai_name, val, count,
+		s = dladm_set_flowprop(handle, flow, aip->ai_name, val, count,
 		    DLADM_OPT_ACTIVE, NULL);
 		if (s == DLADM_STATUS_OK) {
 			if (!temp) {
@@ -1346,8 +1477,9 @@ set_flowprop(int argc, char **argv, boolean_t reset)
 				    DLADM_MAX_PROP_VALCNT +
 				    j * DLADM_PROP_VAL_MAX;
 			}
-			s = dladm_get_flowprop(flow, DLADM_PROP_VAL_MODIFIABLE,
-			    aip->ai_name, propvals, &valcnt);
+			s = dladm_get_flowprop(handle, flow,
+			    DLADM_PROP_VAL_MODIFIABLE, aip->ai_name, propvals,
+			    &valcnt);
 
 			ptr = errmsg;
 			lim = ptr + DLADM_STRSIZE;
@@ -1381,8 +1513,10 @@ set_flowprop(int argc, char **argv, boolean_t reset)
 	}
 done:
 	dladm_free_props(proplist);
-	if (status != DLADM_STATUS_OK)
-		exit(1);
+	if (status != DLADM_STATUS_OK) {
+		dladm_close(handle);
+		exit(EXIT_FAILURE);
+	}
 }
 
 static void
@@ -1442,6 +1576,11 @@ die(const char *format, ...)
 	va_end(alist);
 
 	(void) putchar('\n');
+
+	/* close dladm handle if it was opened */
+	if (handle != NULL)
+		dladm_close(handle);
+
 	exit(EXIT_FAILURE);
 }
 
@@ -1480,6 +1619,10 @@ die_dlerr(dladm_status_t err, const char *format, ...)
 	va_end(alist);
 	(void) fprintf(stderr, ": %s\n", dladm_status2str(err, errmsg));
 
+	/* close dladm handle if it was opened */
+	if (handle != NULL)
+		dladm_close(handle);
+
 	exit(EXIT_FAILURE);
 }
 
@@ -1496,7 +1639,7 @@ print_flowprop(const char *flowname, show_flowprop_state_t *statep,
 	uint_t		valcnt = DLADM_MAX_PROP_VALCNT;
 	dladm_status_t	status;
 
-	status = dladm_get_flowprop(flowname, type, propname, propvals,
+	status = dladm_get_flowprop(handle, flowname, type, propname, propvals,
 	    &valcnt);
 	if (status != DLADM_STATUS_OK) {
 		if (status == DLADM_STATUS_TEMPONLY) {
@@ -1642,15 +1785,15 @@ show_flowprop(dladm_flow_attr_t *attr, void *arg)
  * usable to dladm_walk_datalink_id()
  */
 static int
-show_flowprop_onelink(datalink_id_t linkid, void *arg)
+show_flowprop_onelink(dladm_handle_t dh, datalink_id_t linkid, void *arg)
 {
 	char	name[MAXLINKNAMELEN];
 
-	if (dladm_datalink_id2info(linkid, NULL, NULL, NULL,
-	    name, sizeof (name)) != DLADM_STATUS_OK)
+	if (dladm_datalink_id2info(dh, linkid, NULL, NULL, NULL, name,
+	    sizeof (name)) != DLADM_STATUS_OK)
 		return (DLADM_WALK_TERMINATE);
 
-	(void) dladm_walk_flow(show_flowprop, linkid, arg, B_FALSE);
+	(void) dladm_walk_flow(show_flowprop, dh, linkid, arg, B_FALSE);
 
 	return (DLADM_WALK_CONTINUE);
 }
@@ -1659,6 +1802,7 @@ static void
 do_show_flowprop(int argc, char **argv)
 {
 	int			option;
+	boolean_t		o_arg = B_FALSE;
 	dladm_arg_list_t	*proplist = NULL;
 	show_flowprop_state_t	state;
 	char			*fields_str = NULL;
@@ -1693,11 +1837,12 @@ do_show_flowprop(int argc, char **argv)
 			state.fs_persist = B_TRUE;
 			break;
 		case 'l':
-			if (dladm_name2info(optarg, &state.fs_linkid,
+			if (dladm_name2info(handle, optarg, &state.fs_linkid,
 			    NULL, NULL, NULL) != DLADM_STATUS_OK)
 				die("invalid link '%s'", optarg);
 			break;
 		case 'o':
+			o_arg = B_TRUE;
 			if (strcasecmp(optarg, "all") == 0)
 				fields_str = all_fields;
 			else
@@ -1709,8 +1854,14 @@ do_show_flowprop(int argc, char **argv)
 		}
 	}
 
+	if (state.fs_parseable && !o_arg)
+		die("-p requires -o");
+
+	if (state.fs_parseable && strcasecmp(fields_str, "all") == 0)
+		die("\"-o all\" is invalid with -p");
+
 	if (optind == (argc - 1)) {
-		if (strlen(argv[optind]) >= MAXFLOWNAME)
+		if (strlen(argv[optind]) >= MAXFLOWNAMELEN)
 			die("flow name too long");
 		state.fs_flow = argv[optind];
 	} else if (optind != argc) {
@@ -1737,12 +1888,12 @@ do_show_flowprop(int argc, char **argv)
 
 	/* Show properties for all flows on one link */
 	} else if (state.fs_linkid != DATALINK_INVALID_LINKID) {
-		(void) show_flowprop_onelink(state.fs_linkid, &state);
+		(void) show_flowprop_onelink(handle, state.fs_linkid, &state);
 
 	/* Show properties for all flows on all links */
 	} else {
-		(void) dladm_walk_datalink_id(show_flowprop_onelink, &state,
-		    DATALINK_CLASS_ALL, DATALINK_ANY_MEDIATYPE,
+		(void) dladm_walk_datalink_id(show_flowprop_onelink, handle,
+		    &state, DATALINK_CLASS_ALL, DATALINK_ANY_MEDIATYPE,
 		    DLADM_OPT_ACTIVE);
 	}
 
@@ -1763,7 +1914,8 @@ show_flowprop_one_flow(void *arg, const char *flow)
 	/*
 	 * Do not print flow props for invalid flows.
 	 */
-	if ((status = dladm_flow_info(flow, &attr)) != DLADM_STATUS_OK) {
+	if ((status = dladm_flow_info(handle, flow, &attr)) !=
+	    DLADM_STATUS_OK) {
 		die("invalid flow: '%s'", flow);
 	}
 
@@ -1935,19 +2087,38 @@ print_field(print_state_t *statep, print_field_t *pfp, const char *value,
     boolean_t parseable)
 {
 	uint_t	width = pfp->pf_width;
-	uint_t	valwidth = strlen(value);
+	uint_t	valwidth;
 	uint_t	compress;
 
+	/*
+	 * Parsable fields are separated by ':'. If such a field contains
+	 * a ':' or '\', this character is prefixed by a '\'.
+	 */
 	if (parseable) {
-		(void) printf("%s=\"%s\"", pfp->pf_header, value);
+		char	c;
+
+		if (statep->ps_nfields == 1) {
+			(void) printf("%s", value);
+			return;
+		}
+		while ((c = *value++) != '\0') {
+			if (c == ':' || c == '\\')
+				(void) putchar('\\');
+			(void) putchar(c);
+		}
+		if (!statep->ps_lastfield)
+			(void) putchar(':');
+		return;
 	} else {
 		if (value[0] == '\0')
 			value = STR_UNDEF_VAL;
 		if (statep->ps_lastfield) {
 			(void) printf("%s", value);
+			statep->ps_overflow = 0;
 			return;
 		}
 
+		valwidth = strlen(value);
 		if (valwidth > width) {
 			statep->ps_overflow += valwidth - width;
 		} else if (valwidth < width && statep->ps_overflow > 0) {

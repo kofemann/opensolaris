@@ -21,7 +21,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # Based on the nightly script from the integration folks,
@@ -1182,6 +1182,7 @@ SO_FLAG=n
 XMOD_OPT=
 #
 build_ok=y
+tools_build_ok=y
 
 is_source_build() {
 	[ "$SE_FLAG" = "y" -o "$SD_FLAG" = "y" -o \
@@ -1628,6 +1629,7 @@ TMPDIR="/tmp/nightly.tmpdir.$$"
 export TMPDIR
 rm -rf ${TMPDIR}
 mkdir -p $TMPDIR || exit 1
+chmod 777 $TMPDIR
 
 #
 # Keep elfsign's use of pkcs11_softtoken from looking in the user home
@@ -1707,8 +1709,12 @@ logshuffle() {
 	if [ "$build_ok" = "y" ]; then
 		mv $ATLOG/proto_list_${MACH} $LLOG
 
+		if [ -f $ATLOG/proto_list_tools_${MACH} ]; then
+			mv $ATLOG/proto_list_tools_${MACH} $LLOG
+	        fi
+
 		if [ -f $TMPDIR/wsdiff.results ]; then
-		    mv $TMPDIR/wsdiff.results $LLOG
+		    	mv $TMPDIR/wsdiff.results $LLOG
 		fi
 
 		if [ -f $TMPDIR/wsdiff-nd.results ]; then
@@ -2192,6 +2198,9 @@ type bringover_mercurial > /dev/null 2>&1 || bringover_mercurial() {
 	# If the repository doesn't exist yet, then we want to populate it.
 	if [[ ! -d $CODEMGR_WS/.hg ]]; then
 		staffer hg init $CODEMGR_WS
+		staffer echo "[paths]" > $CODEMGR_WS/.hg/hgrc
+		staffer echo "default=$BRINGOVER_WS" >> $CODEMGR_WS/.hg/hgrc
+		touch $TMPDIR/new_repository
 	fi
 
 	#
@@ -2207,6 +2216,9 @@ type bringover_mercurial > /dev/null 2>&1 || bringover_mercurial() {
 	    ! -d $CODEMGR_WS/usr/closed/.hg ]]; then
 		staffer mkdir -p $CODEMGR_WS/usr/closed
 		staffer hg init $CODEMGR_WS/usr/closed
+		staffer echo "[paths]" > $CODEMGR_WS/usr/closed/.hg/hgrc
+		staffer echo "default=$CLOSED_BRINGOVER_WS" >> $CODEMGR_WS/usr/closed/.hg/hgrc
+		touch $TMPDIR/new_closed
 		export CLOSED_IS_PRESENT=yes
 	fi
 
@@ -2254,7 +2266,25 @@ type bringover_mercurial > /dev/null 2>&1 || bringover_mercurial() {
 	# 5. Dump the output, and any message from step 3 or 4.
 	#
 
-	staffer hg --cwd $CODEMGR_WS pull -u $BRINGOVER_WS \
+	typeset HG_SOURCE=$BRINGOVER_WS
+	if [ ! -f $TMPDIR/new_repository ]; then
+		HG_SOURCE=$TMPDIR/open_bundle.hg
+		staffer hg --cwd $CODEMGR_WS incoming --bundle $HG_SOURCE \
+		    -v $BRINGOVER_WS > $TMPDIR/incoming_open.out
+
+		#
+		# If there are no incoming changesets, then incoming will
+		# fail, and there will be no bundle file.  Reset the source,
+		# to allow the remaining logic to complete with no false
+		# negatives.  (Unlike incoming, pull will return success
+		# for the no-change case.)
+		#
+		if (( $? != 0 )); then
+			HG_SOURCE=$BRINGOVER_WS
+		fi
+	fi
+
+	staffer hg --cwd $CODEMGR_WS pull -u $HG_SOURCE \
 	    > $TMPDIR/pull_open.out 2>&1
 	if (( $? != 0 )); then
 		printf "%s: pull failed as follows:\n\n" "$CODEMGR_WS"
@@ -2298,8 +2328,27 @@ type bringover_mercurial > /dev/null 2>&1 || bringover_mercurial() {
 	    -d $CODEMGR_WS/usr/closed/.hg && \
 	    -n $CLOSED_BRINGOVER_WS ]]; then
 
+		HG_SOURCE=$CLOSED_BRINGOVER_WS
+		if [ ! -f $TMPDIR/new_closed ]; then
+			HG_SOURCE=$TMPDIR/closed_bundle.hg
+			staffer hg --cwd $CODEMGR_WS/usr/closed incoming \
+			    --bundle $HG_SOURCE -v $CLOSED_BRINGOVER_WS \
+			    > $TMPDIR/incoming_closed.out
+
+			#
+			# If there are no incoming changesets, then incoming will
+			# fail, and there will be no bundle file.  Reset the source,
+			# to allow the remaining logic to complete with no false
+			# negatives.  (Unlike incoming, pull will return success
+			# for the no-change case.)
+			#
+			if (( $? != 0 )); then
+				HG_SOURCE=$CLOSED_BRINGOVER_WS
+			fi
+		fi
+
 		staffer hg --cwd $CODEMGR_WS/usr/closed pull -u \
-			$CLOSED_BRINGOVER_WS > $TMPDIR/pull_closed.out 2>&1
+			$HG_SOURCE > $TMPDIR/pull_closed.out 2>&1
 		if (( $? != 0 )); then
 			printf "closed pull failed as follows:\n\n"
 			cat $TMPDIR/pull_closed.out
@@ -2331,6 +2380,30 @@ type bringover_mercurial > /dev/null 2>&1 || bringover_mercurial() {
 		if grep "^merging" $TMPDIR/pull_closed.out > /dev/null 2>&1; then
 			printf "$mergepassmsg"
 		fi
+	fi
+
+	#
+	# Per-changeset output is neither useful nor manageable for a
+	# newly-created repository.
+	#
+	if [ -f $TMPDIR/new_repository ]; then
+		return
+	fi
+
+	printf "\nadded the following changesets to open repository:\n"
+	cat $TMPDIR/incoming_open.out
+
+	#
+	# The closed repository could have been newly created, even though
+	# the open one previously existed...
+	#
+	if [ -f $TMPDIR/new_closed ]; then
+		return
+	fi
+
+	if [ -f $TMPDIR/incoming_closed.out ]; then
+		printf "\nadded the following changesets to closed repository:\n"
+		cat $TMPDIR/incoming_closed.out
 	fi
 }
 
@@ -2539,8 +2612,41 @@ if [[ "$t_FLAG" = "y" || "$O_FLAG" = y ]]; then
 	set_non_debug_build_flags
 
 	build_tools ${TOOLS_PROTO}
+	if [[ $? = 0 ]]; then
+		tools_build_ok=n
+	fi
 
-	if [[ $? -ne 0 && "$t_FLAG" = y ]]; then
+	if [[ $tools_build_ok = y ]]; then
+		echo "\n==== Creating protolist tools file at `date` ====" \
+			>> $LOGFILE
+		protolist $TOOLS_PROTO > $ATLOG/proto_list_tools_${MACH}
+		echo "==== protolist tools file created at `date` ====\n" \
+			>> $LOGFILE
+
+		if [ "$N_FLAG" != "y" ]; then
+			echo "\n==== Impact on tools packages ====\n" \
+				>> $mail_msg_file
+
+			# Use the current tools exception list.
+			exc=etc/exception_list_$MACH
+			if [ -f $SRC/tools/$exc ]; then
+				TOOLS_ELIST="-e $SRC/tools/$exc"
+			fi
+			# Compare the build's proto list with current package
+			# definitions to audit the quality of package
+			# definitions and makefile install targets.
+			$PROTOCMPTERSE \
+			    "Files missing from the proto area:" \
+			    "Files missing from packages:" \
+			    "Inconsistencies between pkgdefs and proto area:" \
+			    ${TOOLS_ELIST} \
+			    -d $SRC/tools \
+			    $ATLOG/proto_list_tools_${MACH} \
+			    >> $mail_msg_file
+		fi
+	fi
+
+	if [[ $tools_build_ok = y && "$t_FLAG" = y ]]; then
 		use_tools $TOOLS_PROTO
 		export ONBLD_TOOLS=${ONBLD_TOOLS:=${TOOLS_PROTO}/opt/onbld}
 	fi
@@ -2928,7 +3034,6 @@ if [ "$r_FLAG" = "y" -a "$build_ok" = "y" ]; then
 	echo "\n==== Check ELF runtime attributes ====\n" | \
 	    tee -a $LOGFILE >> $mail_msg_file
 
-	LDDUSAGE="^ldd: does not support -e"
 	LDDWRONG="wrong class"
 	CRLERROR="^crle:"
 	CRLECONF="^crle: configuration file:"
@@ -2938,7 +3043,7 @@ if [ "$r_FLAG" = "y" -a "$build_ok" = "y" ]; then
 
 	rm -f $RUNTIMEREF
 	if [ -f $RUNTIMEOUT ]; then
-		egrep -v "$LDDUSAGE|$LDDWRONG|$CRLERROR|$CRLECONF" \
+		egrep -v "$LDDWRONG|$CRLERROR|$CRLECONF" \
 			$RUNTIMEOUT > $RUNTIMEREF
 	fi
 
@@ -2949,20 +3054,13 @@ if [ "$r_FLAG" = "y" -a "$build_ok" = "y" ]; then
 	else
 		rtime_sflag="-s"
 	fi
-	check_rtime -d $checkroot -i -m -o $rtime_sflag $checkroot 2>&1 | \
+	check_rtime -d $checkroot -i -m -v -o $rtime_sflag $checkroot 2>&1 | \
 	    egrep -v ": unreferenced object=$checkroot/.*/lib(w|intl|thread|pthread).so" | \
 	    egrep -v ": unused object=$checkroot/.*/lib(w|intl|thread|pthread).so" | \
 	    sort > $RUNTIMEOUT
 
 	# Determine any processing errors that will affect the final output
 	# and display these first.
-	grep -l "$LDDUSAGE" $RUNTIMEOUT > /dev/null
-	if (( $? == 0 )) ; then
-	    echo "WARNING: ldd(1) does not support -e.  The version of ldd(1)" | \
-		tee -a $LOGFILE >> $mail_msg_file
-	    echo "on your system is old - 4390308 (s81_30) is required.\n" | \
-		tee -a $LOGFILE >> $mail_msg_file
-	fi
 	grep -l "$LDDWRONG" $RUNTIMEOUT > /dev/null
 	if (( $? == 0 )) ; then
 	    echo "WARNING: wrong class message detected.  ldd(1) was unable" | \
@@ -2990,21 +3088,24 @@ if [ "$r_FLAG" = "y" -a "$build_ok" = "y" ]; then
 	egrep '<dependency no longer necessary>' $RUNTIMEOUT | \
 	    tee -a $LOGFILE >> $mail_msg_file
 
-	# NEEDED= and RPATH= are informational; report anything else that we
+	# NEEDED= and RPATH= are generated by the -i option
+	# VERDEF= and VERSION= are generated by the -v option.
+	# These lines are informational; report anything else that we
 	# haven't already.
-	egrep -v "NEEDED=|RPATH=|$LDDUSAGE|$LDDWRONG|$CRLERROR|$CRLECONF" \
-	    $RUNTIMEOUT | tee -a $LOGFILE >> $mail_msg_file
+	egrep -v "NEEDED=|RPATH=|VERDEF=|VERSION=" $RUNTIMEOUT \
+		| egrep -v "$LDDWRONG|$CRLERROR|$CRLECONF" \
+		| tee -a $LOGFILE >> $mail_msg_file
 
 	# probably should compare against a 'known ok runpaths' list
 	if [ ! -f $RUNTIMEREF ]; then
-		egrep -v "$LDDUSAGE|$LDDWRONG|$CRLERROR|$CRLECONF" \
+		egrep -v "$LDDWRONG|$CRLERROR|$CRLECONF" \
 			$RUNTIMEOUT >  $RUNTIMEREF
 	fi
 
 	echo "\n==== Diff ELF runtime attributes (since last build) ====\n" \
 	    >> $mail_msg_file
 
-	egrep -v "$LDDUSAGE|$LDDWRONG|$CRLERROR|$CRLECONF" $RUNTIMEOUT | \
+	egrep -v "$LDDWRONG|$CRLERROR|$CRLECONF" $RUNTIMEOUT | \
 	    diff $RUNTIMEREF - >> $mail_msg_file
 fi
 

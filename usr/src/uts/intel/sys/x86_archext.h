@@ -106,11 +106,12 @@ extern "C" {
 #define	CPUID_INTC_ECX_DCA	0x00040000	/* direct cache access */
 #define	CPUID_INTC_ECX_SSE4_1	0x00080000	/* SSE4.1 insns */
 #define	CPUID_INTC_ECX_SSE4_2	0x00100000	/* SSE4.2 insns */
+#define	CPUID_INTC_ECX_MOVBE	0x00400000	/* MOVBE insn */
 #define	CPUID_INTC_ECX_POPCNT	0x00800000	/* POPCNT insn */
 
 #define	FMT_CPUID_INTC_ECX					\
 	"\20"							\
-	"\30popcnt\25sse4.2\24sse4.1\23dca"			\
+	"\30popcnt\27movbe\25sse4.2\24sse4.1\23dca"		\
 	"\20\17etprd\16cx16\13cid\12ssse3\11tm2"		\
 	"\10est\7smx\6vmx\5dscpl\4mon\1sse3"
 
@@ -477,6 +478,8 @@ extern "C" {
 	_X86_CHIPREV_MKREV(X86_VENDOR_AMD, 0x10, 0x0001)
 #define	X86_CHIPREV_AMD_10_REV_B \
 	_X86_CHIPREV_MKREV(X86_VENDOR_AMD, 0x10, 0x0002)
+#define	X86_CHIPREV_AMD_10_REV_C \
+	_X86_CHIPREV_MKREV(X86_VENDOR_AMD, 0x10, 0x0004)
 
 /*
  * Various socket/package types, extended as the need to distinguish
@@ -620,6 +623,12 @@ extern	char _no_rdtsc_start;
 extern	char _no_rdtsc_end;
 extern	char _tsc_lfence_start;
 extern	char _tsc_lfence_end;
+#endif
+
+#if !defined(__xpv)
+extern	char bcopy_patch_start;
+extern	char bcopy_patch_end;
+extern	char bcopy_ck_size;
 #endif
 
 extern uint_t workaround_errata(struct cpu *);

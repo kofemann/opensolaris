@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -28,8 +28,6 @@
  *	Copyright (c) 1988 AT&T
  *	All Rights Reserved
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * SPARC machine dependent and a.out format file class dependent functions.
@@ -45,6 +43,7 @@
 #include	"_a.out.h"
 #include	"_rtld.h"
 #include	"_audit.h"
+#include	"_inline.h"
 #include	"msg.h"
 
 extern void	iflush_range(caddr_t, size_t);
@@ -86,8 +85,8 @@ aout_bndr(caddr_t pc)
 	 */
 	entry = enter(0);
 
-	for (lmp = lml_main.lm_head; lmp; lmp = (Rt_map *)NEXT(lmp)) {
-		if (FCT(lmp) == &aout_fct) {
+	for (lmp = lml_main.lm_head; lmp; lmp = NEXT_RT_MAP(lmp)) {
+		if (THIS_IS_AOUT(lmp)) {
 			if (pc > (caddr_t)(LM2LP(lmp)->lp_plt) &&
 			    pc < (caddr_t)((int)LM2LP(lmp)->lp_plt +
 			    AOUTDYN(lmp)->v2->ld_plt_sz))  {
@@ -157,12 +156,6 @@ aout_bndr(caddr_t pc)
 		load_completion(llmp);
 
 	/*
-	 * If the object we've bound to is in the process of being initialized
-	 * by another thread, determine whether we should block.
-	 */
-	is_dep_ready(nlmp, lmp, DBG_WAIT_SYMBOL);
-
-	/*
 	 * Make sure the object to which we've bound has had it's .init fired.
 	 * Cleanup before return to user code.
 	 */
@@ -205,19 +198,18 @@ static const uchar_t pc_rel_type[] = {
 };
 
 int
-aout_reloc(Rt_map * lmp, uint_t plt, int *in_nfavl)
+aout_reloc(Rt_map *lmp, uint_t plt, int *in_nfavl, APlist **textrel)
 {
 	int		k;		/* loop temporary */
 	int		nr;		/* number of relocations */
 	char		*name;		/* symbol being searched for */
-	long		*et;		/* cached _etext of object */
 	long		value;		/* relocation temporary */
 	long		*ra;		/* cached relocation address */
 	struct relocation_info *rp;	/* current relocation */
 	struct nlist	*sp;		/* symbol table of "symbol" */
 	Rt_map *	_lmp;		/* lm which holds symbol definition */
 	Sym *		sym;		/* symbol definition */
-	int		textrel = 0, ret = 1;
+	int		ret = 1;
 	APlist		*bound = NULL;
 	Lm_list		*lml = LIST(lmp);
 
@@ -232,7 +224,6 @@ aout_reloc(Rt_map * lmp, uint_t plt, int *in_nfavl)
 		return (1);
 
 	rp = LM2LP(lmp)->lp_rp;
-	et = (long *)ETEXT(lmp);
 	nr = GETRELSZ(AOUTDYN(lmp)) / sizeof (struct relocation_info);
 
 	/*
@@ -246,19 +237,22 @@ aout_reloc(Rt_map * lmp, uint_t plt, int *in_nfavl)
 	 * Loop through relocations.
 	 */
 	for (k = 0; k < nr; k++, rp++) {
+		mmapobj_result_t	*mpp;
+
 		/* LINTED */
 		ra = (long *)&((char *)ADDR(lmp))[rp->r_address];
 
 		/*
-		 * Check to see if we're relocating in the text segment
-		 * and turn off the write protect if necessary.
+		 * Make sure the segment is writable.
 		 */
-		if ((ra < et) && (textrel == 0)) {
-			if (aout_set_prot(lmp, PROT_WRITE) == 0) {
+		if (((mpp = find_segment((caddr_t)ra, lmp)) != NULL) &&
+		    ((mpp->mr_prot & PROT_WRITE) == 0)) {
+			if ((set_prot(lmp, mpp, 1) == 0) ||
+			    (aplist_append(textrel, mpp,
+			    AL_CNT_TEXTREL) == NULL)) {
 				ret = 0;
 				break;
 			}
-			textrel = 1;
 		}
 
 		/*
@@ -280,8 +274,8 @@ aout_reloc(Rt_map * lmp, uint_t plt, int *in_nfavl)
 			 * Locate symbol.  Initialize the symbol lookup data
 			 * structure.
 			 */
-			SLOOKUP_INIT(sl, name, lmp, 0, ld_entry_cnt, 0, 0, 0, 0,
-			    LKUP_STDRELOC);
+			SLOOKUP_INIT(sl, name, lmp, 0, ld_entry_cnt,
+			    0, 0, 0, 0, LKUP_STDRELOC);
 
 			if ((sym = aout_lookup_sym(&sl, &_lmp,
 			    &binfo, in_nfavl)) == 0) {
@@ -438,5 +432,5 @@ aout_reloc(Rt_map * lmp, uint_t plt, int *in_nfavl)
 		}
 	}
 
-	return (relocate_finish(lmp, bound, textrel, ret));
+	return (relocate_finish(lmp, bound, ret));
 }

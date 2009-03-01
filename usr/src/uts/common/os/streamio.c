@@ -23,7 +23,7 @@
 
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -77,6 +77,7 @@
 #include <sys/policy.h>
 #include <sys/dld.h>
 #include <sys/zone.h>
+#include <sys/sodirect.h>
 
 /*
  * This define helps improve the readability of streams code while
@@ -1110,50 +1111,7 @@ strget(struct stdata *stp, queue_t *q, struct uio *uiop, int first,
 	}
 
 	bp = getq_noenab(q, rbytes);
-	if (bp != NULL && (bp->b_datap->db_flags & DBLK_UIOA)) {
-		/*
-		 * A uioa flaged mblk_t chain, already uio processed,
-		 * add it to the sodirect uioa pending free list.
-		 *
-		 * Note, a b_cont chain headed by a DBLK_UIOA enable
-		 * mblk_t must have all mblk_t(s) DBLK_UIOA enabled.
-		 */
-		mblk_t	*bpt = sodp->sod_uioaft;
-
-		ASSERT(sodp != NULL);
-		ASSERT(msgdsize(bp) == sodp->sod_uioa.uioa_mbytes);
-
-		/*
-		 * Add first mblk_t of "bp" chain to current sodirect uioa
-		 * free list tail mblk_t, if any, else empty list so new head.
-		 */
-		if (bpt == NULL)
-			sodp->sod_uioafh = bp;
-		else
-			bpt->b_cont = bp;
-
-		/*
-		 * Walk mblk_t "bp" chain to find tail and adjust rptr of
-		 * each to reflect that uioamove() has consumed all data.
-		 */
-		bpt = bp;
-		for (;;) {
-			bpt->b_rptr = bpt->b_wptr;
-			if (bpt->b_cont == NULL)
-				break;
-			bpt = bpt->b_cont;
-
-			ASSERT(bpt->b_datap->db_flags & DBLK_UIOA);
-		}
-		/* New sodirect uioa free list tail */
-		sodp->sod_uioaft = bpt;
-
-		/* Only 1 strget() with data returned per uioa_t */
-		if (sodp->sod_uioa.uioa_state & UIOA_ENABLED) {
-			sodp->sod_uioa.uioa_state &= UIOA_CLR;
-			sodp->sod_uioa.uioa_state |= UIOA_FINI;
-		}
-	}
+	sod_uioa_mblk_done(sodp, bp);
 
 	return (bp);
 }
@@ -1458,10 +1416,8 @@ ismdata:
 				 * sd_lock is held so the content of the
 				 * read queue can not change.
 				 */
-				ASSERT(bp != NULL &&
-				    bp->b_datap->db_type == M_SIG);
-				strsignal_nolock(stp, *bp->b_rptr,
-				    (int32_t)bp->b_band);
+				ASSERT(bp != NULL && DB_TYPE(bp) == M_SIG);
+				strsignal_nolock(stp, *bp->b_rptr, bp->b_band);
 				mutex_exit(&stp->sd_lock);
 				freemsg(bp);
 				if (STREAM_NEEDSERVICE(stp))
@@ -1987,8 +1943,7 @@ log_dupioc(queue_t *rq, mblk_t *bp)
 	claimstr(wq);
 	qp = wq->q_next;
 	do {
-		if ((dname = qp->q_qinfo->qi_minfo->mi_idname) == NULL)
-			dname = "?";
+		dname = Q2NAME(qp);
 		islast = !SAMESTR(qp) || qp->q_next == NULL;
 		if (modnames == NULL) {
 			/*
@@ -2611,7 +2566,7 @@ strwriteable(struct stdata *stp, boolean_t eiohup, boolean_t sigpipeok)
 /*
  * Copyin and send data down a stream.
  * The caller will allocate and copyin any control part that precedes the
- * message and pass than in as mctl.
+ * message and pass that in as mctl.
  *
  * Caller should *not* hold sd_lock.
  * When EWOULDBLOCK is returned the caller has to redo the canputnext
@@ -2636,7 +2591,6 @@ strput(struct stdata *stp, mblk_t *mctl, struct uio *uiop, ssize_t *iosize,
 	queue_t *wqp = stp->sd_wrq;
 	int error = 0;
 	ssize_t count = *iosize;
-	cred_t *cr;
 
 	ASSERT(MUTEX_NOT_HELD(&stp->sd_lock));
 
@@ -2679,14 +2633,6 @@ strput(struct stdata *stp, mblk_t *mctl, struct uio *uiop, ssize_t *iosize,
 			else if (mp != NULL)
 				linkb(mctl, mp);
 			mp = mctl;
-			/*
-			 * Note that for interrupt thread, the CRED() is
-			 * NULL. Don't bother with the pid either.
-			 */
-			if ((cr = CRED()) != NULL) {
-				mblk_setcred(mp, cr);
-				DB_CPID(mp) = curproc->p_pid;
-			}
 		} else if (mp == NULL)
 			return (0);
 
@@ -2725,14 +2671,6 @@ strput(struct stdata *stp, mblk_t *mctl, struct uio *uiop, ssize_t *iosize,
 		else if (mp != NULL)
 			linkb(mctl, mp);
 		mp = mctl;
-		/*
-		 * Note that for interrupt thread, the CRED() is
-		 * NULL.  Don't bother with the pid either.
-		 */
-		if ((cr = CRED()) != NULL) {
-			mblk_setcred(mp, cr);
-			DB_CPID(mp) = curproc->p_pid;
-		}
 	} else if (mp == NULL) {
 		return (0);
 	}
@@ -3847,11 +3785,11 @@ strioctl(struct vnode *vp, int cmd, intptr_t arg, int flag, int copyflag,
 		/* Look downstream to see if module is there. */
 		claimstr(stp->sd_wrq);
 		for (q = stp->sd_wrq->q_next; q; q = q->q_next) {
-			if (q->q_flag&QREADR) {
+			if (q->q_flag & QREADR) {
 				q = NULL;
 				break;
 			}
-			if (strcmp(mname, q->q_qinfo->qi_minfo->mi_idname) == 0)
+			if (strcmp(mname, Q2NAME(q)) == 0)
 				break;
 		}
 		releasestr(stp->sd_wrq);
@@ -4125,12 +4063,6 @@ strioctl(struct vnode *vp, int cmd, intptr_t arg, int flag, int copyflag,
 		 * about the implications of these ioctls before extending
 		 * their support.  And we do not think these features are
 		 * valuable for pipes.
-		 *
-		 * Neither do we support O/C hot stream.  Note that only
-		 * the upper streams of TCP/IP stack are O/C hot streams.
-		 * The lower IP stream is not.
-		 * When there is a O/C cold barrier, we only allow inserts
-		 * above the barrier.
 		 */
 		STRUCT_DECL(strmodconf, strmodinsert);
 		char mod_name[FMNAMESZ + 1];
@@ -4297,12 +4229,6 @@ strioctl(struct vnode *vp, int cmd, intptr_t arg, int flag, int copyflag,
 		 * their support.  And we do not think these features are
 		 * valuable for pipes.
 		 *
-		 * Neither do we support O/C hot stream.  Note that only
-		 * the upper streams of TCP/IP stack are O/C hot streams.
-		 * The lower IP stream is not.
-		 * When there is a O/C cold barrier we do not allow removal
-		 * below the barrier.
-		 *
 		 * Also note that _I_REMOVE cannot be used to remove a
 		 * driver or the stream head.
 		 */
@@ -4347,9 +4273,8 @@ strioctl(struct vnode *vp, int cmd, intptr_t arg, int flag, int copyflag,
 		for (q = stp->sd_wrq->q_next; SAMESTR(q) && pos > 0;
 		    q = q->q_next, pos--)
 			;
-		if (pos > 0 || ! SAMESTR(q) ||
-		    strncmp(q->q_qinfo->qi_minfo->mi_idname, mod_name,
-		    strlen(q->q_qinfo->qi_minfo->mi_idname)) != 0) {
+		if (pos > 0 || !SAMESTR(q) ||
+		    strcmp(Q2NAME(q), mod_name) != 0) {
 			mutex_enter(&stp->sd_lock);
 			strendplumb(stp);
 			mutex_exit(&stp->sd_lock);
@@ -4455,10 +4380,10 @@ strioctl(struct vnode *vp, int cmd, intptr_t arg, int flag, int copyflag,
 		 * Get name of first module downstream.
 		 * If no module, return an error.
 		 */
-	{
 		claimstr(wrq);
-		if (_SAMESTR(wrq) && wrq->q_next->q_next) {
-			char *name = wrq->q_next->q_qinfo->qi_minfo->mi_idname;
+		if (_SAMESTR(wrq) && wrq->q_next->q_next != NULL) {
+			char *name = Q2NAME(wrq->q_next);
+
 			error = strcopyout(name, (void *)arg, strlen(name) + 1,
 			    copyflag);
 			releasestr(wrq);
@@ -4466,15 +4391,13 @@ strioctl(struct vnode *vp, int cmd, intptr_t arg, int flag, int copyflag,
 		}
 		releasestr(wrq);
 		return (EINVAL);
-	}
 
 	case I_LINK:
 	case I_PLINK:
 		/*
 		 * Link a multiplexor.
 		 */
-		error = mlink(vp, cmd, (int)arg, crp, rvalp, 0);
-		return (error);
+		return (mlink(vp, cmd, (int)arg, crp, rvalp, 0));
 
 	case _I_PLINK_LH:
 		/*
@@ -5562,57 +5485,44 @@ strioctl(struct vnode *vp, int cmd, intptr_t arg, int flag, int copyflag,
 
 	{
 		queue_t *q;
-		int num_modules, space_allocated;
+		char *qname;
+		int i, nmods;
+		struct str_mlist *mlist;
 		STRUCT_DECL(str_list, strlist);
-		struct str_mlist *mlist_ptr;
 
 		if (arg == NULL) { /* Return number of modules plus driver */
-			q = stp->sd_wrq;
-			if (stp->sd_vnode->v_type == VFIFO) {
+			if (stp->sd_vnode->v_type == VFIFO)
 				*rvalp = stp->sd_pushcnt;
-			} else {
+			else
 				*rvalp = stp->sd_pushcnt + 1;
-			}
-		} else {
-			STRUCT_INIT(strlist, flag);
-
-			error = strcopyin((void *)arg, STRUCT_BUF(strlist),
-			    STRUCT_SIZE(strlist), copyflag);
-			if (error)
-				return (error);
-
-			space_allocated = STRUCT_FGET(strlist, sl_nmods);
-			if ((space_allocated) <= 0)
-				return (EINVAL);
-			claimstr(stp->sd_wrq);
-			q = stp->sd_wrq;
-			num_modules = 0;
-			while (_SAMESTR(q) && (space_allocated != 0)) {
-				char *name =
-				    q->q_next->q_qinfo->qi_minfo->mi_idname;
-
-				mlist_ptr = STRUCT_FGETP(strlist, sl_modlist);
-
-				error = strcopyout(name, mlist_ptr,
-				    strlen(name) + 1, copyflag);
-
-				if (error) {
-					releasestr(stp->sd_wrq);
-					return (error);
-				}
-				q = q->q_next;
-				space_allocated--;
-				num_modules++;
-				mlist_ptr =
-				    (struct str_mlist *)((uintptr_t)mlist_ptr +
-				    sizeof (struct str_mlist));
-				STRUCT_FSETP(strlist, sl_modlist, mlist_ptr);
-			}
-			releasestr(stp->sd_wrq);
-			error = strcopyout(&num_modules, (void *)arg,
-			    sizeof (int), copyflag);
+			return (0);
 		}
-		return (error);
+
+		STRUCT_INIT(strlist, flag);
+
+		error = strcopyin((void *)arg, STRUCT_BUF(strlist),
+		    STRUCT_SIZE(strlist), copyflag);
+		if (error != 0)
+			return (error);
+
+		mlist = STRUCT_FGETP(strlist, sl_modlist);
+		nmods = STRUCT_FGET(strlist, sl_nmods);
+		if (nmods <= 0)
+			return (EINVAL);
+
+		claimstr(stp->sd_wrq);
+		q = stp->sd_wrq;
+		for (i = 0; i < nmods && _SAMESTR(q); i++, q = q->q_next) {
+			qname = Q2NAME(q->q_next);
+			error = strcopyout(qname, &mlist[i], strlen(qname) + 1,
+			    copyflag);
+			if (error != 0) {
+				releasestr(stp->sd_wrq);
+				return (error);
+			}
+		}
+		releasestr(stp->sd_wrq);
+		return (strcopyout(&i, (void *)arg, sizeof (int), copyflag));
 	}
 
 	case I_CKBAND:
@@ -6034,7 +5944,7 @@ strdoioctl(
 		return (EINVAL);
 
 	if ((bp = allocb_cred_wait(sizeof (union ioctypes), sigflag, &error,
-	    crp)) == NULL)
+	    crp, curproc->p_pid)) == NULL)
 			return (error);
 
 	bzero(bp->b_wptr, sizeof (union ioctypes));
@@ -6047,7 +5957,6 @@ strdoioctl(
 	crhold(crp);
 	iocbp->ioc_cr = crp;
 	DB_TYPE(bp) = M_IOCTL;
-	DB_CPID(bp) = curproc->p_pid;
 	bp->b_wptr += sizeof (struct iocblk);
 
 	if (flag & STR_NOERROR)
@@ -6393,8 +6302,7 @@ waitioc:
 		bp->b_wptr = bp->b_rptr + sizeof (struct copyresp);
 		bp->b_datap->db_type = M_IOCDATA;
 
-		mblk_setcred(bp, crp);
-		DB_CPID(bp) = curproc->p_pid;
+		mblk_setcred(bp, crp, curproc->p_pid);
 		resp = (struct copyresp *)bp->b_rptr;
 		resp->cp_rval = (caddr_t)(uintptr_t)error;
 		resp->cp_flag = (fflags & FMODELS);
@@ -6438,8 +6346,7 @@ waitioc:
 		bp->b_wptr = bp->b_rptr + sizeof (struct copyresp);
 		bp->b_datap->db_type = M_IOCDATA;
 
-		mblk_setcred(bp, crp);
-		DB_CPID(bp) = curproc->p_pid;
+		mblk_setcred(bp, crp, curproc->p_pid);
 		resp = (struct copyresp *)bp->b_rptr;
 		resp->cp_rval = (caddr_t)(uintptr_t)error;
 		resp->cp_flag = (fflags & FMODELS);
@@ -6494,7 +6401,8 @@ strdocmd(struct stdata *stp, struct strcmd *scp, cred_t *crp)
 	if (scp->sc_timeout > 0)
 		timeout = scp->sc_timeout * MILLISEC;
 
-	if ((mp = allocb_cred(sizeof (struct cmdblk), crp)) == NULL)
+	if ((mp = allocb_cred(sizeof (struct cmdblk), crp,
+	    curproc->p_pid)) == NULL)
 		return (ENOMEM);
 
 	crhold(crp);
@@ -6513,7 +6421,8 @@ strdocmd(struct stdata *stp, struct strcmd *scp, cred_t *crp)
 	 * Copy in the payload.
 	 */
 	if (cmdp->cb_len > 0) {
-		mp->b_cont = allocb_cred(sizeof (scp->sc_buf), crp);
+		mp->b_cont = allocb_cred(sizeof (scp->sc_buf), crp,
+		    curproc->p_pid);
 		if (mp->b_cont == NULL) {
 			error = ENOMEM;
 			goto out;
@@ -6747,17 +6656,17 @@ strgetmsg(
 			ASSERT(MUTEX_HELD(&stp->sd_lock));
 			if (bp != NULL) {
 				ASSERT(!(bp->b_datap->db_flags & DBLK_UIOA));
-				if (bp->b_datap->db_type == M_SIG) {
+				if (DB_TYPE(bp) == M_SIG) {
 					strsignal_nolock(stp, *bp->b_rptr,
-					    (int32_t)bp->b_band);
+					    bp->b_band);
+					freemsg(bp);
 					continue;
 				} else {
 					break;
 				}
 			}
-			if (error != 0) {
+			if (error != 0)
 				goto getmout;
-			}
 
 		/*
 		 * We can't depend on the value of STRPRI here because
@@ -6766,24 +6675,22 @@ strgetmsg(
 		 * determine if a high priority messages is waiting
 		 */
 		} else if ((*flagsp & MSG_HIPRI) && q_first != NULL &&
-		    q_first->b_datap->db_type >= QPCTL &&
+		    DB_TYPE(q_first) >= QPCTL &&
 		    (bp = getq_noenab(q, 0)) != NULL) {
 			/* Asked for HIPRI and got one */
-			ASSERT(bp->b_datap->db_type >= QPCTL);
+			ASSERT(DB_TYPE(bp) >= QPCTL);
 			break;
 		} else if ((*flagsp & MSG_BAND) && q_first != NULL &&
-		    ((q_first->b_band >= *prip) ||
-		    q_first->b_datap->db_type >= QPCTL) &&
+		    ((q_first->b_band >= *prip) || DB_TYPE(q_first) >= QPCTL) &&
 		    (bp = getq_noenab(q, 0)) != NULL) {
 			/*
 			 * Asked for at least band "prip" and got either at
 			 * least that band or a hipri message.
 			 */
-			ASSERT(bp->b_band >= *prip ||
-			    bp->b_datap->db_type >= QPCTL);
-			if (bp->b_datap->db_type == M_SIG) {
-				strsignal_nolock(stp, *bp->b_rptr,
-				    (int32_t)bp->b_band);
+			ASSERT(bp->b_band >= *prip || DB_TYPE(bp) >= QPCTL);
+			if (DB_TYPE(bp) == M_SIG) {
+				strsignal_nolock(stp, *bp->b_rptr, bp->b_band);
+				freemsg(bp);
 				continue;
 			} else {
 				break;
@@ -7100,7 +7007,7 @@ getmout:
 		bp = getq(q);
 		ASSERT(bp != NULL && bp->b_datap->db_type == M_SIG);
 
-		strsignal_nolock(stp, *bp->b_rptr, (int32_t)bp->b_band);
+		strsignal_nolock(stp, *bp->b_rptr, bp->b_band);
 		mutex_exit(&stp->sd_lock);
 		freemsg(bp);
 		if (STREAM_NEEDSERVICE(stp))
@@ -7289,9 +7196,10 @@ retry:
 			bp = strget(stp, q, uiop, first, &error);
 			ASSERT(MUTEX_HELD(&stp->sd_lock));
 			if (bp != NULL) {
-				if (bp->b_datap->db_type == M_SIG) {
+				if (DB_TYPE(bp) == M_SIG) {
 					strsignal_nolock(stp, *bp->b_rptr,
-					    (int32_t)bp->b_band);
+					    bp->b_band);
+					freemsg(bp);
 					continue;
 				} else {
 					break;
@@ -7307,23 +7215,21 @@ retry:
 		 * determine if a high priority messages is waiting
 		 */
 		} else if ((flags & MSG_HIPRI) && q_first != NULL &&
-		    q_first->b_datap->db_type >= QPCTL &&
+		    DB_TYPE(q_first) >= QPCTL &&
 		    (bp = getq_noenab(q, 0)) != NULL) {
-			ASSERT(bp->b_datap->db_type >= QPCTL);
+			ASSERT(DB_TYPE(bp) >= QPCTL);
 			break;
 		} else if ((flags & MSG_BAND) && q_first != NULL &&
-		    ((q_first->b_band >= *prip) ||
-		    q_first->b_datap->db_type >= QPCTL) &&
+		    ((q_first->b_band >= *prip) || DB_TYPE(q_first) >= QPCTL) &&
 		    (bp = getq_noenab(q, 0)) != NULL) {
 			/*
 			 * Asked for at least band "prip" and got either at
 			 * least that band or a hipri message.
 			 */
-			ASSERT(bp->b_band >= *prip ||
-			    bp->b_datap->db_type >= QPCTL);
-			if (bp->b_datap->db_type == M_SIG) {
-				strsignal_nolock(stp, *bp->b_rptr,
-				    (int32_t)bp->b_band);
+			ASSERT(bp->b_band >= *prip || DB_TYPE(bp) >= QPCTL);
+			if (DB_TYPE(bp) == M_SIG) {
+				strsignal_nolock(stp, *bp->b_rptr, bp->b_band);
+				freemsg(bp);
 				continue;
 			} else {
 				break;
@@ -7776,7 +7682,7 @@ getmout:
 		bp = getq(q);
 		ASSERT(bp != NULL && bp->b_datap->db_type == M_SIG);
 
-		strsignal_nolock(stp, *bp->b_rptr, (int32_t)bp->b_band);
+		strsignal_nolock(stp, *bp->b_rptr, bp->b_band);
 		mutex_exit(&stp->sd_lock);
 		freemsg(bp);
 		if (STREAM_NEEDSERVICE(stp))

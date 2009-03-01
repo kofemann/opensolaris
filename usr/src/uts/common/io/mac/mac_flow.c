@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -194,7 +194,7 @@ mac_flow_create(flow_desc_t *fd, mac_resource_props_t *mrp, char *name,
 		flent->fe_cb_fn = (flow_fn_t)mac_pkt_drop;
 		flent->fe_index = -1;
 	}
-	(void) strlcpy(flent->fe_flow_name, name, MAXFLOWNAME);
+	(void) strlcpy(flent->fe_flow_name, name, MAXFLOWNAMELEN);
 
 	/* This is an initial flow, will be configured later */
 	if (fd == NULL) {
@@ -479,8 +479,8 @@ mac_flow_lookup(flow_tab_t *ft, mblk_t *mp, uint_t flags, flow_entry_t **flentp)
 	int		i, err;
 
 	s.fs_flags = flags;
-	s.fs_mp = mp;
 retry:
+	s.fs_mp = mp;
 
 	/*
 	 * Walk the list of predeclared accept functions.
@@ -489,6 +489,8 @@ retry:
 	 */
 	for (i = 0; i < FLOW_MAX_ACCEPT && ops->fo_accept[i] != NULL; i++) {
 		if ((err = (ops->fo_accept[i])(ft, &s)) != 0) {
+			mblk_t	*last;
+
 			/*
 			 * ENOBUFS indicates that the mp could be too short
 			 * and may need a pullup.
@@ -497,11 +499,13 @@ retry:
 				return (err);
 
 			/*
-			 * Don't modify the mblk if there are references to it.
-			 * Also, there is no point pulling up if b_cont is NULL.
+			 * The pullup is done on the last processed mblk, not
+			 * the starting one. pullup is not done if the mblk
+			 * has references or if b_cont is NULL.
 			 */
-			if (DB_REF(mp) > 1 || mp->b_cont == NULL ||
-			    pullupmsg(mp, -1) == 0)
+			last = s.fs_mp;
+			if (DB_REF(last) > 1 || last->b_cont == NULL ||
+			    pullupmsg(last, -1) == 0)
 				return (EINVAL);
 
 			retried = B_TRUE;
@@ -867,13 +871,13 @@ mac_flow_set_name(flow_entry_t *flent, const char *name)
 		 *  The flow hasn't yet been inserted into the table,
 		 * so only the caller knows about this flow
 		 */
-		(void) strlcpy(flent->fe_flow_name, name, MAXFLOWNAME);
+		(void) strlcpy(flent->fe_flow_name, name, MAXFLOWNAMELEN);
 	} else {
 		ASSERT(MAC_PERIM_HELD((mac_handle_t)ft->ft_mip));
 	}
 
 	mutex_enter(&flent->fe_lock);
-	(void) strlcpy(flent->fe_flow_name, name, MAXFLOWNAME);
+	(void) strlcpy(flent->fe_flow_name, name, MAXFLOWNAMELEN);
 	mutex_exit(&flent->fe_lock);
 }
 
@@ -1209,10 +1213,11 @@ mac_link_flow_add(datalink_id_t linkid, char *flow_name,
 
 	/*
 	 * Add the subflow to the subflow table. Also instantiate the flow
-	 * in the mac if there is an active DLS user. The dl_mah is set when
-	 * dls_active_set() is called, typically during interface plumb.
+	 * in the mac if there is an active user (we check if the MAC client's
+	 * datapath has been setup).
 	 */
-	err = mac_flow_add_subflow(dlp->dl_mch, flent, dlp->dl_mah != NULL);
+	err = mac_flow_add_subflow(dlp->dl_mch, flent,
+	    MCIP_DATAPATH_SETUP((mac_client_impl_t *)dlp->dl_mch));
 	if (err != 0)
 		goto bail;
 
@@ -1436,7 +1441,8 @@ typedef struct {
 static void
 mac_link_flowinfo_copy(mac_flowinfo_t *finfop, flow_entry_t *flent)
 {
-	(void) strlcpy(finfop->fi_flow_name, flent->fe_flow_name, MAXNAMELEN);
+	(void) strlcpy(finfop->fi_flow_name, flent->fe_flow_name,
+	    MAXFLOWNAMELEN);
 	finfop->fi_link_id = flent->fe_link_id;
 	finfop->fi_flow_desc = flent->fe_flow_desc;
 	finfop->fi_resource_props = flent->fe_resource_props;
@@ -1512,6 +1518,17 @@ mac_link_flow_info(char *flow_name, mac_flowinfo_t *finfo)
 	((((uint32_t)(a)[3] + (a)[4] + (a)[5]) ^ (v)) % (s))
 
 #define	PKT_TOO_SMALL(s, end) ((s)->fs_mp->b_wptr < (end))
+
+#define	CHECK_AND_ADJUST_START_PTR(s, start) {		\
+	if ((s)->fs_mp->b_wptr == (start)) {		\
+		mblk_t	*next = (s)->fs_mp->b_cont;	\
+		if (next == NULL)			\
+			return (EINVAL);		\
+							\
+		(s)->fs_mp = next;			\
+		(start) = next->b_rptr;			\
+	}						\
+}
 
 /* ARGSUSED */
 static boolean_t
@@ -1829,7 +1846,14 @@ flow_ip_accept(flow_tab_t *ft, flow_state_t *s)
 	uint16_t	sap = l2info->l2_sap;
 	uchar_t		*l3_start;
 
-	l3info->l3_start = l3_start = l2info->l2_start + l2info->l2_hdrsize;
+	l3_start = l2info->l2_start + l2info->l2_hdrsize;
+
+	/*
+	 * Adjust start pointer if we're at the end of an mblk.
+	 */
+	CHECK_AND_ADJUST_START_PTR(s, l3_start);
+
+	l3info->l3_start = l3_start;
 	if (!OK_32PTR(l3_start))
 		return (EINVAL);
 
@@ -2192,7 +2216,14 @@ flow_transport_accept(flow_tab_t *ft, flow_state_t *s)
 	uint8_t		proto = l3info->l3_protocol;
 	uchar_t		*l4_start;
 
-	l4info->l4_start = l4_start = l3info->l3_start + l3info->l3_hdrsize;
+	l4_start = l3info->l3_start + l3info->l3_hdrsize;
+
+	/*
+	 * Adjust start pointer if we're at the end of an mblk.
+	 */
+	CHECK_AND_ADJUST_START_PTR(s, l4_start);
+
+	l4info->l4_start = l4_start;
 	if (!OK_32PTR(l4_start))
 		return (EINVAL);
 

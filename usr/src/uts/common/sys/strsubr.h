@@ -23,7 +23,7 @@
 
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -808,6 +808,14 @@ typedef struct str_stack str_stack_t;
 #define	SQ(rq)		((syncq_t *)((rq) + 2))
 
 /*
+ * Get the module/driver name for a queue.  Since some queues don't have
+ * q_info structures (e.g., see log_makeq()), fall back to "?".
+ */
+#define	Q2NAME(q) \
+	(((q)->q_qinfo != NULL && (q)->q_qinfo->qi_minfo->mi_idname != NULL) ? \
+	(q)->q_qinfo->qi_minfo->mi_idname : "?")
+
+/*
  * Locking macros
  */
 #define	QLOCK(q)	(&(q)->q_lock)
@@ -1126,7 +1134,6 @@ extern void strclean(struct vnode *);
 extern void str_cn_clean();	/* XXX hook for consoles signal cleanup */
 extern int strwrite(struct vnode *, struct uio *, cred_t *);
 extern int strwrite_common(struct vnode *, struct uio *, cred_t *, int);
-extern int kstrwritemp(struct vnode *, mblk_t *, ushort_t);
 extern int strread(struct vnode *, struct uio *, cred_t *);
 extern int strioctl(struct vnode *, int, intptr_t, int, int, cred_t *, int *);
 extern int strrput(queue_t *, mblk_t *);
@@ -1151,6 +1158,7 @@ extern int strcopyout(void *, void *, size_t, int);
 extern void strsignal(struct stdata *, int, int32_t);
 extern clock_t str_cv_wait(kcondvar_t *, kmutex_t *, clock_t, int);
 extern void disable_svc(queue_t *);
+extern void enable_svc(queue_t *);
 extern void remove_runlist(queue_t *);
 extern void wait_svc(queue_t *);
 extern void backenable(queue_t *, uchar_t);
@@ -1207,11 +1215,15 @@ extern void strmate(vnode_t *, vnode_t *);
 extern queue_t *strvp2wq(vnode_t *);
 extern vnode_t *strq2vp(queue_t *);
 extern mblk_t *allocb_wait(size_t, uint_t, uint_t, int *);
-extern mblk_t *allocb_cred(size_t, cred_t *);
-extern mblk_t *allocb_cred_wait(size_t, uint_t, int *, cred_t *);
+extern mblk_t *allocb_cred(size_t, cred_t *, pid_t);
+extern mblk_t *allocb_cred_wait(size_t, uint_t, int *, cred_t *, pid_t);
 extern mblk_t *allocb_tmpl(size_t, const mblk_t *);
 extern mblk_t *allocb_tryhard(size_t);
-extern void mblk_setcred(mblk_t *, cred_t *);
+extern void mblk_copycred(mblk_t *, const mblk_t *);
+extern void mblk_setcred(mblk_t *, cred_t *, pid_t);
+extern cred_t *msg_getcred(const mblk_t *, pid_t *);
+extern struct ts_label_s *msg_getlabel(const mblk_t *);
+extern cred_t *msg_extractcred(mblk_t *, pid_t *);
 extern void strpollwakeup(vnode_t *, short);
 extern int putnextctl_wait(queue_t *, int);
 
@@ -1228,7 +1240,7 @@ extern void strsetrputhooks(vnode_t *, uint_t, msgfunc_t, msgfunc_t);
 extern void strsetwputhooks(vnode_t *, uint_t, clock_t);
 extern void strsetrwputdatahooks(vnode_t *, msgfunc_t, msgfunc_t);
 extern int strwaitmark(vnode_t *);
-extern void strsignal_nolock(stdata_t *, int, int32_t);
+extern void strsignal_nolock(stdata_t *, int, uchar_t);
 
 struct multidata_s;
 struct pdesc_s;

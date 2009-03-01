@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -360,6 +360,22 @@ nxge_err_inject(p_nxge_t, queue_t *, mblk_t *);
 #define	NXGE_MSIX_REQUEST_10G	8
 #define	NXGE_MSIX_REQUEST_1G	2
 static int nxge_create_msi_property(p_nxge_t);
+/*
+ * For applications that care about the
+ * latency, it was requested by PAE and the
+ * customers that the driver has tunables that
+ * allow the user to tune it to a higher number
+ * interrupts to spread the interrupts among
+ * multiple channels. The DDI framework limits
+ * the maximum number of MSI-X resources to allocate
+ * to 8 (ddi_msix_alloc_limit). If more than 8
+ * is set, ddi_msix_alloc_limit must be set accordingly.
+ * The default number of MSI interrupts are set to
+ * 8 for 10G and 2 for 1G link.
+ */
+#define	NXGE_MSIX_MAX_ALLOWED	32
+uint32_t nxge_msix_10g_intrs = NXGE_MSIX_REQUEST_10G;
+uint32_t nxge_msix_1g_intrs = NXGE_MSIX_REQUEST_1G;
 
 /*
  * These global variables control the message
@@ -1741,11 +1757,7 @@ nxge_uninit(p_nxge_t nxgep)
 void
 nxge_get64(p_nxge_t nxgep, p_mblk_t mp)
 {
-#if defined(__i386)
-	size_t		reg;
-#else
 	uint64_t	reg;
-#endif
 	uint64_t	regdata;
 	int		i, retry;
 
@@ -1762,19 +1774,11 @@ nxge_get64(p_nxge_t nxgep, p_mblk_t mp)
 void
 nxge_put64(p_nxge_t nxgep, p_mblk_t mp)
 {
-#if defined(__i386)
-	size_t		reg;
-#else
 	uint64_t	reg;
-#endif
 	uint64_t	buf[2];
 
 	bcopy((char *)mp->b_rptr, (char *)&buf[0], 2 * sizeof (uint64_t));
-#if defined(__i386)
-	reg = (size_t)buf[0];
-#else
 	reg = buf[0];
-#endif
 
 	NXGE_NPI_PIO_WRITE64(nxgep->npi_handle, reg, buf[1]);
 }
@@ -2547,8 +2551,8 @@ nxge_alloc_rx_buf_dma(p_nxge_t nxgep, uint16_t dma_channel,
 	i = 0;
 	size_index = 0;
 	array_size =  sizeof (alloc_sizes)/sizeof (size_t);
-	while ((alloc_sizes[size_index] < alloc_size) &&
-	    (size_index < array_size))
+	while ((size_index < array_size) &&
+	    (alloc_sizes[size_index] < alloc_size))
 		size_index++;
 	if (size_index >= array_size) {
 		size_index = array_size - 1;
@@ -3043,8 +3047,8 @@ nxge_alloc_tx_buf_dma(p_nxge_t nxgep, uint16_t dma_channel,
 	i = 0;
 	size_index = 0;
 	array_size =  sizeof (alloc_sizes) /  sizeof (size_t);
-	while ((alloc_sizes[size_index] < alloc_size) &&
-	    (size_index < array_size))
+	while ((size_index < array_size) &&
+	    (alloc_sizes[size_index] < alloc_size))
 		size_index++;
 	if (size_index >= array_size) {
 		size_index = array_size - 1;
@@ -6716,12 +6720,30 @@ nxge_create_msi_property(p_nxge_t nxgep)
 		    DDI_PROP_CANSLEEP, "#msix-request", NULL, 0);
 		/*
 		 * The maximum MSI-X requested will be 8.
-		 * If the # of CPUs is less than 8, we will reqeust
-		 * # MSI-X based on the # of CPUs.
+		 * If the # of CPUs is less than 8, we will request
+		 * # MSI-X based on the # of CPUs (default).
 		 */
-		if (ncpus >= NXGE_MSIX_REQUEST_10G) {
+		NXGE_DEBUG_MSG((nxgep, MOD_CTL,
+		    "==>nxge_create_msi_property (10G): nxge_msix_10g_intrs %d",
+		    nxge_msix_10g_intrs));
+		if ((nxge_msix_10g_intrs == 0) ||
+		    (nxge_msix_10g_intrs > NXGE_MSIX_MAX_ALLOWED)) {
 			nmsi = NXGE_MSIX_REQUEST_10G;
+			NXGE_DEBUG_MSG((nxgep, MOD_CTL,
+			    "==>nxge_create_msi_property (10G): reset to 8"));
 		} else {
+			nmsi = nxge_msix_10g_intrs;
+		}
+
+		/*
+		 * If # of interrupts requested is 8 (default),
+		 * the checking of the number of cpus will be
+		 * be maintained.
+		 */
+		if ((nmsi == NXGE_MSIX_REQUEST_10G) &&
+		    (ncpus < nmsi)) {
+			NXGE_DEBUG_MSG((nxgep, MOD_CTL,
+			    "==>nxge_create_msi_property (10G): reset to 8"));
 			nmsi = ncpus;
 		}
 		NXGE_DEBUG_MSG((nxgep, MOD_CTL,
@@ -6731,7 +6753,19 @@ nxge_create_msi_property(p_nxge_t nxgep)
 		break;
 
 	default:
-		nmsi = NXGE_MSIX_REQUEST_1G;
+		(void) ddi_prop_create(DDI_DEV_T_NONE, nxgep->dip,
+		    DDI_PROP_CANSLEEP, "#msix-request", NULL, 0);
+		NXGE_DEBUG_MSG((nxgep, MOD_CTL,
+		    "==>nxge_create_msi_property (1G): nxge_msix_1g_intrs %d",
+		    nxge_msix_1g_intrs));
+		if ((nxge_msix_1g_intrs == 0) ||
+		    (nxge_msix_1g_intrs > NXGE_MSIX_MAX_ALLOWED)) {
+			nmsi = NXGE_MSIX_REQUEST_1G;
+			NXGE_DEBUG_MSG((nxgep, MOD_CTL,
+			    "==>nxge_create_msi_property (1G): reset to 2"));
+		} else {
+			nmsi = nxge_msix_1g_intrs;
+		}
 		NXGE_DEBUG_MSG((nxgep, MOD_CTL,
 		    "==>nxge_create_msi_property(1G): exists 0x%x (nmsi %d)",
 		    ddi_prop_exists(DDI_DEV_T_NONE, nxgep->dip,

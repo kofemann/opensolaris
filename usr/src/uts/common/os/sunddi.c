@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -82,6 +82,7 @@
 #include <sys/ctype.h>
 #include <net/if.h>
 #include <sys/rctl.h>
+#include <sys/zone.h>
 
 extern	pri_t	minclsyspri;
 
@@ -1487,7 +1488,8 @@ i_ddi_search_global_prop(dev_t dev, char *name, uint_t flags)
 		if (!DDI_STRSAME(propp->prop_name, name))
 			continue;
 
-		if ((!(flags & LDI_DEV_T_ANY)) && (propp->prop_dev != dev))
+		if ((!(flags & DDI_PROP_ROOTNEX_GLOBAL)) &&
+		    (!(flags & LDI_DEV_T_ANY)) && (propp->prop_dev != dev))
 			continue;
 
 		if (((propp->prop_flags & flags) & DDI_PROP_TYPE_MASK) == 0)
@@ -3949,9 +3951,9 @@ ddi_prop_lookup_common(dev_t match_dev, dev_info_t *dip,
 	 */
 	bzero(&ph, sizeof (prop_handle_t));
 
-	if (flags & DDI_UNBND_DLPI2) {
+	if ((flags & DDI_UNBND_DLPI2) || (flags & DDI_PROP_ROOTNEX_GLOBAL)) {
 		/*
-		 * For unbound dlpi style-2 devices, index into
+		 * For rootnex and unbound dlpi style-2 devices, index into
 		 * the devnames' array and search the global
 		 * property list.
 		 */
@@ -4050,7 +4052,7 @@ ddi_prop_get_int(dev_t match_dev, dev_info_t *dip, uint_t flags,
 	int	rval;
 
 	if (flags & ~(DDI_PROP_DONTPASS | DDI_PROP_NOTPROM |
-	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2)) {
+	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2 | DDI_PROP_ROOTNEX_GLOBAL)) {
 #ifdef DEBUG
 		if (dip != NULL) {
 			cmn_err(CE_WARN, "ddi_prop_get_int: invalid flag"
@@ -4089,7 +4091,7 @@ ddi_prop_get_int64(dev_t match_dev, dev_info_t *dip, uint_t flags,
 	int	rval;
 
 	if (flags & ~(DDI_PROP_DONTPASS | DDI_PROP_NOTPROM |
-	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2)) {
+	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2 | DDI_PROP_ROOTNEX_GLOBAL)) {
 #ifdef DEBUG
 		if (dip != NULL) {
 			cmn_err(CE_WARN, "ddi_prop_get_int64: invalid flag"
@@ -4120,7 +4122,7 @@ ddi_prop_lookup_int_array(dev_t match_dev, dev_info_t *dip, uint_t flags,
     char *name, int **data, uint_t *nelements)
 {
 	if (flags & ~(DDI_PROP_DONTPASS | DDI_PROP_NOTPROM |
-	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2)) {
+	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2 | DDI_PROP_ROOTNEX_GLOBAL)) {
 #ifdef DEBUG
 		if (dip != NULL) {
 			cmn_err(CE_WARN, "ddi_prop_lookup_int_array: "
@@ -4146,7 +4148,7 @@ ddi_prop_lookup_int64_array(dev_t match_dev, dev_info_t *dip, uint_t flags,
     char *name, int64_t **data, uint_t *nelements)
 {
 	if (flags & ~(DDI_PROP_DONTPASS | DDI_PROP_NOTPROM |
-	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2)) {
+	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2 | DDI_PROP_ROOTNEX_GLOBAL)) {
 #ifdef DEBUG
 		if (dip != NULL) {
 			cmn_err(CE_WARN, "ddi_prop_lookup_int64_array: "
@@ -4257,7 +4259,7 @@ ddi_prop_lookup_string(dev_t match_dev, dev_info_t *dip, uint_t flags,
 	uint_t x;
 
 	if (flags & ~(DDI_PROP_DONTPASS | DDI_PROP_NOTPROM |
-	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2)) {
+	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2 | DDI_PROP_ROOTNEX_GLOBAL)) {
 #ifdef DEBUG
 		if (dip != NULL) {
 			cmn_err(CE_WARN, "%s: invalid flag 0x%x "
@@ -4283,7 +4285,7 @@ ddi_prop_lookup_string_array(dev_t match_dev, dev_info_t *dip, uint_t flags,
     char *name, char ***data, uint_t *nelements)
 {
 	if (flags & ~(DDI_PROP_DONTPASS | DDI_PROP_NOTPROM |
-	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2)) {
+	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2 | DDI_PROP_ROOTNEX_GLOBAL)) {
 #ifdef DEBUG
 		if (dip != NULL) {
 			cmn_err(CE_WARN, "ddi_prop_lookup_string_array: "
@@ -4354,7 +4356,7 @@ ddi_prop_lookup_byte_array(dev_t match_dev, dev_info_t *dip, uint_t flags,
     char *name, uchar_t **data, uint_t *nelements)
 {
 	if (flags & ~(DDI_PROP_DONTPASS | DDI_PROP_NOTPROM |
-	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2)) {
+	    LDI_DEV_T_ANY | DDI_UNBND_DLPI2 | DDI_PROP_ROOTNEX_GLOBAL)) {
 #ifdef DEBUG
 		if (dip != NULL) {
 			cmn_err(CE_WARN, "ddi_prop_lookup_byte_array: "
@@ -4918,7 +4920,16 @@ ddi_binding_name(dev_info_t *dip)
 
 /*
  * ddi_driver_major: Return the major number of the driver that
- *		the supplied devinfo is bound to (-1 if none)
+ *	the supplied devinfo is bound to.  If not yet bound,
+ *	DDI_MAJOR_T_NONE.
+ *
+ * When used by the driver bound to 'devi', this
+ * function will reliably return the driver major number.
+ * Other ways of determining the driver major number, such as
+ *	major = ddi_name_to_major(ddi_get_name(devi));
+ *	major = ddi_name_to_major(ddi_binding_name(devi));
+ * can return a different result as the driver/alias binding
+ * can change dynamically, and thus should be avoided.
  */
 major_t
 ddi_driver_major(dev_info_t *devi)
@@ -6570,7 +6581,21 @@ ddi_get_parent_data(dev_info_t *dip)
 }
 
 /*
- * ddi_name_to_major: Returns the major number of a module given its name.
+ * ddi_name_to_major: returns the major number of a named module,
+ * derived from the current driver alias binding.
+ *
+ * Caveat: drivers should avoid the use of this function, in particular
+ * together with ddi_get_name/ddi_binding name, as per
+ *	major = ddi_name_to_major(ddi_get_name(devi));
+ * ddi_name_to_major() relies on the state of the device/alias binding,
+ * which can and does change dynamically as aliases are administered
+ * over time.  An attached device instance cannot rely on the major
+ * number returned by ddi_name_to_major() to match its own major number.
+ *
+ * For driver use, ddi_driver_major() reliably returns the major number
+ * for the module to which the device was bound at attach time over
+ * the life of the instance.
+ *	major = ddi_driver_major(dev_info_t *)
  */
 major_t
 ddi_name_to_major(char *name)
@@ -7590,7 +7615,6 @@ i_ddi_minorname_to_devtspectype(dev_info_t *dip, char *minor_name,
 	return (DDI_FAILURE);
 }
 
-extern char	hw_serial[];
 static kmutex_t devid_gen_mutex;
 static short	devid_gen_number;
 
@@ -7834,8 +7858,7 @@ ddi_devid_init(
 	/* Fill in id field */
 	if (devid_type == DEVID_FAB) {
 		char		*cp;
-		int		hostid;
-		char		*hostid_cp = &hw_serial[0];
+		uint32_t	hostid;
 		struct timeval32 timestamp32;
 		int		i;
 		int		*ip;
@@ -7849,7 +7872,7 @@ ddi_devid_init(
 		cp = i_devid->did_id;
 
 		/* Fill in host id (big-endian byte ordering) */
-		hostid = stoi(&hostid_cp);
+		hostid = zone_get_hostid(NULL);
 		*cp++ = hibyte(hiword(hostid));
 		*cp++ = lobyte(hiword(hostid));
 		*cp++ = hibyte(loword(hostid));
@@ -8938,4 +8961,79 @@ int
 ddi_quiesce_not_supported(dev_info_t *dip)
 {
 	return (DDI_FAILURE);
+}
+
+/*
+ * Generic DDI callback interfaces.
+ */
+
+int
+ddi_cb_register(dev_info_t *dip, ddi_cb_flags_t flags, ddi_cb_func_t cbfunc,
+    void *arg1, void *arg2, ddi_cb_handle_t *ret_hdlp)
+{
+	ddi_cb_t	*cbp;
+
+	ASSERT(dip != NULL);
+	ASSERT(DDI_CB_FLAG_VALID(flags));
+	ASSERT(cbfunc != NULL);
+	ASSERT(ret_hdlp != NULL);
+
+	/* Sanity check the context */
+	ASSERT(!servicing_interrupt());
+	if (servicing_interrupt())
+		return (DDI_FAILURE);
+
+	/* Validate parameters */
+	if ((dip == NULL) || !DDI_CB_FLAG_VALID(flags) ||
+	    (cbfunc == NULL) || (ret_hdlp == NULL))
+		return (DDI_EINVAL);
+
+	/* Check for previous registration */
+	if (DEVI(dip)->devi_cb_p != NULL)
+		return (DDI_EALREADY);
+
+	/* Allocate and initialize callback */
+	cbp = kmem_zalloc(sizeof (ddi_cb_t), KM_SLEEP);
+	cbp->cb_dip = dip;
+	cbp->cb_func = cbfunc;
+	cbp->cb_arg1 = arg1;
+	cbp->cb_arg2 = arg2;
+	cbp->cb_flags = flags;
+	DEVI(dip)->devi_cb_p = cbp;
+
+	/* If adding an IRM callback, notify IRM */
+	if (flags & DDI_CB_FLAG_INTR)
+		i_ddi_irm_set_cb(dip, B_TRUE);
+
+	*ret_hdlp = (ddi_cb_handle_t)&(DEVI(dip)->devi_cb_p);
+	return (DDI_SUCCESS);
+}
+
+int
+ddi_cb_unregister(ddi_cb_handle_t hdl)
+{
+	ddi_cb_t	*cbp;
+	dev_info_t	*dip;
+
+	ASSERT(hdl != NULL);
+
+	/* Sanity check the context */
+	ASSERT(!servicing_interrupt());
+	if (servicing_interrupt())
+		return (DDI_FAILURE);
+
+	/* Validate parameters */
+	if ((hdl == NULL) || ((cbp = *(ddi_cb_t **)hdl) == NULL) ||
+	    ((dip = cbp->cb_dip) == NULL))
+		return (DDI_EINVAL);
+
+	/* If removing an IRM callback, notify IRM */
+	if (cbp->cb_flags & DDI_CB_FLAG_INTR)
+		i_ddi_irm_set_cb(dip, B_FALSE);
+
+	/* Destroy the callback */
+	kmem_free(cbp, sizeof (ddi_cb_t));
+	DEVI(dip)->devi_cb_p = NULL;
+
+	return (DDI_SUCCESS);
 }

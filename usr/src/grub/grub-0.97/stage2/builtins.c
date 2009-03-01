@@ -1070,7 +1070,7 @@ static int splashimage_func(char *arg, int flags) {
 	    break;
 	}
     }
-    
+
     graphics_set_splash(splashimage);
 
     if (flags == BUILTIN_CMDLINE && graphics_inited) {
@@ -1084,8 +1084,11 @@ static int splashimage_func(char *arg, int flags) {
 	graphics_cls();
     }
 
-    /* FIXME: should we be explicitly switching the terminal as a 
-     * side effect here? */
+    /* 
+     * This call does not explicitly initialize graphics mode, but rather
+     * simply sets the terminal type unless we're in command line mode and
+     * call this function while in terminal mode.
+     */
     terminal_func("graphics", flags);
 
     reset_term = 0;
@@ -2128,6 +2131,31 @@ static struct builtin builtin_impsprobe =
   " configuration table and boot the various CPUs which are found into"
   " a tight loop."
 };
+
+/* extended info */
+static int
+info_func (char *arg, int flags)
+{
+  int  i;
+
+  grub_printf("Extended version information : %s\n", pkg_version);
+  grub_printf("stage2 (MD5) signature : ");
+
+  for (i = 0; i < 0x10; i++)
+    grub_printf("%x", md5hash[i]);
+
+  grub_printf("\n");
+}
+
+static struct builtin builtin_info =
+{
+  "info",
+  info_func,
+  BUILTIN_CMDLINE | BUILTIN_HELP_LIST | BUILTIN_SCRIPT,
+  "info",
+  "Read Grub extended version and stage2 MD5 hash"
+};
+
 
 
 /* initrd */
@@ -5240,7 +5268,7 @@ terminal_func (char *arg, int flags)
  end:
   current_term = term_table + default_term;
   current_term->flags = term_flags;
-  
+
   if (lines)
     max_lines = lines;
   else
@@ -5840,6 +5868,7 @@ struct builtin *builtin_table[] =
   &builtin_ifconfig,
 #endif /* SUPPORT_NETBOOT */
   &builtin_impsprobe,
+  &builtin_info,
   &builtin_initrd,
   &builtin_install,
   &builtin_ioprobe,

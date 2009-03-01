@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
@@ -28,6 +28,7 @@ VERS= .1
 
 OBJS_SHARED = 			\
 	smb_common_door_decode.o 	\
+	smb_inet.o		\
 	smb_match.o 		\
 	smb_msgbuf.o		\
 	smb_native.o		\
@@ -62,9 +63,9 @@ OBJS_COMMON = 			\
 	smb_nicmon.o		\
 	smb_pwdutil.o		\
 	smb_privilege.o		\
+	smb_sam.o		\
 	smb_scfutil.o		\
 	smb_util.o		\
-	smb_wins.o		\
 	smb_wksids.o
 
 OBJECTS=	$(OBJS_COMMON) $(OBJS_SHARED)
@@ -75,7 +76,8 @@ include ../../Makefile.lib
 INCS += -I$(SRC)/common/smbsrv
 
 LDLIBS +=	$(MACH_LDLIBS)
-LDLIBS +=	-lscf -lmd -lnsl -lpkcs11 -lc -lsocket -lresolv -lidmap -lavl
+LDLIBS +=	-lscf -lmd -lnsl -lpkcs11 -lsocket -lresolv
+LDLIBS +=	-lidmap -lavl -lc
 CPPFLAGS +=	$(INCS) -D_REENTRANT
 
 SRCS=   $(OBJS_COMMON:%.o=$(SRCDIR)/%.c)	\

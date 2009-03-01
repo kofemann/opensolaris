@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -151,20 +151,20 @@ mac_soft_ring_create(int id, clock_t wait, void *flent, uint16_t type,
     mac_resource_handle_t x_arg2)
 {
 	mac_soft_ring_t 	*ringp;
-	char 			name[64];
+	char 			name[S_RING_NAMELEN];
 
 	bzero(name, 64);
 	ringp = kmem_cache_alloc(mac_soft_ring_cache, KM_SLEEP);
 
 	if (type & ST_RING_TCP) {
 		(void) snprintf(name, sizeof (name),
-		    "mac_tcp_soft_ring_%d_%p", id, mac_srs);
+		    "mac_tcp_soft_ring_%d_%p", id, (void *)mac_srs);
 	} else if (type & ST_RING_UDP) {
 		(void) snprintf(name, sizeof (name),
-		    "mac_udp_soft_ring_%d_%p", id, mac_srs);
+		    "mac_udp_soft_ring_%d_%p", id, (void *)mac_srs);
 	} else {
 		(void) snprintf(name, sizeof (name),
-		    "mac_oth_soft_ring_%d_%p", id, mac_srs);
+		    "mac_oth_soft_ring_%d_%p", id, (void *)mac_srs);
 	}
 
 	bzero(ringp, sizeof (mac_soft_ring_t));
@@ -207,6 +207,8 @@ mac_soft_ring_create(int id, clock_t wait, void *flent, uint16_t type,
 		ringp->s_ring_rx_func = rx_func;
 		ringp->s_ring_rx_arg1 = x_arg1;
 		ringp->s_ring_rx_arg2 = x_arg2;
+		if (mac_srs->srs_state & SRS_SOFTRING_QUEUE)
+			ringp->s_ring_type |= ST_RING_WORKER_ONLY;
 	}
 	if (cpuid != -1)
 		(void) mac_soft_ring_bind(ringp, cpuid);

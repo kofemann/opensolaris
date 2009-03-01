@@ -20,11 +20,9 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 
 #include <stdio.h>
 #include <strings.h>
@@ -52,7 +50,8 @@ tls_getmodid()
 	ulong_t	ndx, cnt;
 
 	if (tmid.tmi_bits == 0) {
-		if ((tmid.tmi_bits = calloc(TLSBLOCKCNT, sizeof (uint_t))) == 0)
+		if ((tmid.tmi_bits =
+		    calloc(TLSBLOCKCNT, sizeof (uint_t))) == NULL)
 			return ((ulong_t)-1);
 		tmid.tmi_bits[0] = 1;
 		tmid.tmi_lowfree = 1;
@@ -85,7 +84,7 @@ tls_getmodid()
 	 */
 	if ((tmid.tmi_bits = realloc(tmid.tmi_bits,
 	    ((tmid.tmi_cnt * sizeof (uint_t)) +
-	    (TLSBLOCKCNT * sizeof (uint_t))))) == 0)
+	    (TLSBLOCKCNT * sizeof (uint_t))))) == NULL)
 		return ((ulong_t)-1);
 
 	/*
@@ -277,7 +276,7 @@ tls_statmod(Lm_list *lml, Rt_map *lmp)
 	 * the backup TLS reservation.
 	 */
 	if ((tlsmodlist = calloc((sizeof (TLS_modinfo *) * (tlsmodcnt + 1)) +
-	    (sizeof (TLS_modinfo) * tlsmodcnt), 1)) == 0)
+	    (sizeof (TLS_modinfo) * tlsmodcnt), 1)) == NULL)
 		return (0);
 
 	lml->lm_tls = 0;
@@ -306,8 +305,8 @@ tls_statmod(Lm_list *lml, Rt_map *lmp)
 	 * Account for the initial dtv ptr in the TLSSIZE calculation.
 	 */
 	tlsmodndx = 0;
-	for (lmp = lml->lm_head; lmp; lmp = (Rt_map *)NEXT(lmp)) {
-		if ((FCT(lmp) != &elf_fct) ||
+	for (lmp = lml->lm_head; lmp; lmp = NEXT_RT_MAP(lmp)) {
+		if (THIS_IS_NOT_ELF(lmp) ||
 		    (PTTLS(lmp) == 0) || (PTTLS(lmp)->p_memsz == 0))
 			continue;
 

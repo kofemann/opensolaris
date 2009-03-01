@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -34,8 +34,9 @@
 
 #include <sys/types.h>
 #include <smbsrv/wintypes.h>
-#include <smbsrv/mlsvc.h>
 #include <smbsrv/netbios.h>
+#include <smbsrv/smb_xdr.h>
+#include <smbsrv/smbinfo.h>
 
 #ifndef _KERNEL
 #include <syslog.h>
@@ -94,6 +95,10 @@ typedef struct netr_session_key {
 #define	NETR_FLG_VALID		0x00000001
 #define	NETR_FLG_INIT		0x00000002
 
+/*
+ * 32-byte machine account password (null-terminated)
+ */
+#define	NETR_MACHINE_ACCT_PASSWD_MAX	32 + 1
 
 typedef struct netr_info {
 	DWORD flags;
@@ -104,28 +109,18 @@ typedef struct netr_info {
 	netr_cred_t client_credential;
 	netr_cred_t server_credential;
 	netr_session_key_t session_key;
-	BYTE password[MLSVC_MACHINE_ACCT_PASSWD_MAX];
+	BYTE password[NETR_MACHINE_ACCT_PASSWD_MAX];
 	time_t timestamp;
 } netr_info_t;
-
-/*
- * netr_client_t flags
- *
- * NETR_CFLG_ANON               Anonymous connection
- * NETR_CFLG_LOCAL              Local user
- * NETR_CFLG_DOMAIN		Domain user
- */
-#define	NETR_CFLG_ANON  	0x01
-#define	NETR_CFLG_LOCAL 	0x02
-#define	NETR_CFLG_DOMAIN	0x04
-
 
 typedef struct netr_client {
 	uint16_t logon_level;
 	char *username;
 	char *domain;
+	char *real_username;
+	char *real_domain;
 	char *workstation;
-	uint32_t ipaddr;
+	smb_inaddr_t ipaddr;
 	struct {
 		uint32_t challenge_key_len;
 		uint8_t *challenge_key_val;
@@ -141,9 +136,8 @@ typedef struct netr_client {
 	uint32_t logon_id;
 	int native_os;
 	int native_lm;
-	uint32_t local_ipaddr;
+	smb_inaddr_t local_ipaddr;
 	uint16_t local_port;
-	uint32_t flags;
 } netr_client_t;
 
 

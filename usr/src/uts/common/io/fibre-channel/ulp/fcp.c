@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  * Fibre Channel SCSI ULP Mapping driver
@@ -465,7 +465,7 @@ static void fcp_finish_init(struct fcp_port *pptr);
 static void fcp_create_luns(struct fcp_tgt *ptgt, int link_cnt,
     int tgt_cnt, int cause);
 static int fcp_trigger_lun(struct fcp_lun *plun, child_info_t *cip,
-    int online, int link_cnt, int tgt_cnt, int flags);
+    int old_mpxio, int online, int link_cnt, int tgt_cnt, int flags);
 static int fcp_offline_target(struct fcp_port *pptr, struct fcp_tgt *ptgt,
     int link_cnt, int tgt_cnt, int nowait, int flags);
 static void fcp_offline_target_now(struct fcp_port *pptr,
@@ -716,7 +716,7 @@ extern dev_info_t	*scsi_vhci_dip;
 	(es)->es_add_code == 0x25 &&		\
 	(es)->es_qual_code == 0x0)
 
-#define	FCP_VERSION		"1.186"
+#define	FCP_VERSION		"1.187"
 #define	FCP_NAME_VERSION	"SunFC FCP v" FCP_VERSION
 
 #define	FCP_NUM_ELEMENTS(array)			\
@@ -8007,8 +8007,8 @@ fcp_create_luns(struct fcp_tgt *ptgt, int link_cnt, int tgt_cnt, int cause)
  * function to online/offline devices
  */
 static int
-fcp_trigger_lun(struct fcp_lun *plun, child_info_t *cip, int online,
-    int lcount, int tcount, int flags)
+fcp_trigger_lun(struct fcp_lun *plun, child_info_t *cip, int old_mpxio,
+    int online, int lcount, int tcount, int flags)
 {
 	int			rval = NDI_FAILURE;
 	int			circ;
@@ -8017,6 +8017,17 @@ fcp_trigger_lun(struct fcp_lun *plun, child_info_t *cip, int online,
 	int			is_mpxio = pptr->port_mpxio;
 	dev_info_t		*cdip, *pdip;
 	char			*devname;
+
+	if ((old_mpxio != 0) && (plun->lun_mpxio != old_mpxio)) {
+		/*
+		 * When this event gets serviced, lun_cip and lun_mpxio
+		 * has changed, so it should be invalidated now.
+		 */
+		FCP_TRACE(fcp_logq, pptr->port_instbuf, fcp_trace,
+		    FCP_BUF_LEVEL_2, 0, "fcp_trigger_lun: lun_mpxio changed: "
+		    "plun: %p, cip: %p, what:%d", plun, cip, online);
+		return (rval);
+	}
 
 	FCP_TRACE(fcp_logq, pptr->port_instbuf,
 	    fcp_trace, FCP_BUF_LEVEL_2, 0,
@@ -9715,7 +9726,6 @@ fcp_handle_port_attach(opaque_t ulph, fc_ulp_port_info_t *pinfo,
 	/* link in the transport structure then fill it in */
 	pptr->port_tran = tran;
 	tran->tran_hba_private		= pptr;
-	tran->tran_tgt_private		= NULL;
 	tran->tran_tgt_init		= fcp_scsi_tgt_init;
 	tran->tran_tgt_probe		= NULL;
 	tran->tran_tgt_free		= fcp_scsi_tgt_free;
@@ -9777,7 +9787,7 @@ fcp_handle_port_attach(opaque_t ulph, fc_ulp_port_info_t *pinfo,
 	event_bind++;	/* Checked in fail case */
 
 	if (scsi_hba_attach_setup(pptr->port_dip, &pptr->port_data_dma_attr,
-	    tran, SCSI_HBA_TRAN_CLONE | SCSI_HBA_TRAN_SCB)
+	    tran, SCSI_HBA_ADDR_COMPLEX | SCSI_HBA_TRAN_SCB)
 	    != DDI_SUCCESS) {
 		fcp_log(CE_WARN, pptr->port_dip,
 		    "!fcp%d: scsi_hba_attach_setup failed", instance);
@@ -10723,7 +10733,7 @@ fcp_phys_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 
 	mutex_enter(&ptgt->tgt_mutex);
 	plun->lun_tgt_count++;
-	hba_tran->tran_tgt_private = plun;
+	scsi_device_hba_private_set(sd, plun);
 	plun->lun_state |= FCP_SCSI_LUN_TGT_INIT;
 	plun->lun_tran = hba_tran;
 	mutex_exit(&ptgt->tgt_mutex);
@@ -10754,7 +10764,7 @@ fcp_virt_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 	    " (tgt_dip %p)", ddi_get_name(tgt_dip),
 	    ddi_get_instance(tgt_dip), hba_dip, tgt_dip);
 
-	cip = (child_info_t *)sd->sd_private;
+	cip = (child_info_t *)sd->sd_pathinfo;
 	if (cip == NULL) {
 		FCP_DTRACE(fcp_logq, pptr->port_instbuf,
 		    fcp_trace, FCP_BUF_LEVEL_8, 0,
@@ -10818,7 +10828,7 @@ fcp_virt_tgt_init(dev_info_t *hba_dip, dev_info_t *tgt_dip,
 
 	mutex_enter(&ptgt->tgt_mutex);
 	plun->lun_tgt_count++;
-	hba_tran->tran_tgt_private = plun;
+	scsi_device_hba_private_set(sd, plun);
 	plun->lun_state |= FCP_SCSI_LUN_TGT_INIT;
 	plun->lun_tran = hba_tran;
 	mutex_exit(&ptgt->tgt_mutex);
@@ -10864,7 +10874,7 @@ static void
 fcp_scsi_tgt_free(dev_info_t *hba_dip, dev_info_t *tgt_dip,
     scsi_hba_tran_t *hba_tran, struct scsi_device *sd)
 {
-	struct fcp_lun	*plun = hba_tran->tran_tgt_private;
+	struct fcp_lun	*plun = scsi_device_hba_private_get(sd);
 	struct fcp_tgt	*ptgt;
 
 	FCP_DTRACE(fcp_logq, LUN_PORT->port_instbuf,
@@ -12216,8 +12226,8 @@ fcp_hp_task(void *arg)
 	mutex_exit(&plun->lun_mutex);
 	mutex_exit(&pptr->port_mutex);
 
-	result = fcp_trigger_lun(plun, elem->cip, elem->what,
-	    elem->link_cnt, elem->tgt_cnt, elem->flags);
+	result = fcp_trigger_lun(plun, elem->cip, elem->old_lun_mpxio,
+	    elem->what, elem->link_cnt, elem->tgt_cnt, elem->flags);
 	fcp_process_elem(elem, result);
 }
 
@@ -14011,9 +14021,7 @@ fcp_prepare_pkt(struct fcp_port *pptr, struct fcp_pkt *cmd,
 static void
 fcp_post_callback(struct fcp_pkt *cmd)
 {
-	if (cmd->cmd_pkt->pkt_comp) {
-		(*cmd->cmd_pkt->pkt_comp) (cmd->cmd_pkt);
-	}
+	scsi_hba_pkt_comp(cmd->cmd_pkt);
 }
 
 
@@ -14209,6 +14217,7 @@ fcp_pass_to_hp(struct fcp_port *pptr, struct fcp_lun *plun,
 	elem->port = pptr;
 	elem->lun = plun;
 	elem->cip = cip;
+	elem->old_lun_mpxio = plun->lun_mpxio;
 	elem->what = what;
 	elem->flags = flags;
 	elem->link_cnt = link_cnt;

@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -6820,9 +6820,7 @@ sd_unit_attach(dev_info_t *devi)
 	sd_ssc_t	*ssc;
 	int		status;
 	struct sd_fm_internal	*sfip = NULL;
-#if defined(__sparc)
 	int		max_xfer_size;
-#endif
 
 	/*
 	 * Retrieve the target driver's private data area. This was set
@@ -7459,13 +7457,22 @@ sd_unit_attach(dev_info_t *devi)
 	 * In the future the SPARC pci nexus driver may solve
 	 * the problem instead of this fix.
 	 */
-#if defined(__sparc)
 	max_xfer_size = scsi_ifgetcap(SD_ADDRESS(un), "dma-max", 1);
 	if ((max_xfer_size > 0) && (max_xfer_size < un->un_max_xfer_size)) {
+		/* We need DMA partial even on sparc to ensure sddump() works */
 		un->un_max_xfer_size = max_xfer_size;
-		un->un_partial_dma_supported = 1;
+		if (un->un_partial_dma_supported == 0)
+			un->un_partial_dma_supported = 1;
 	}
-#endif
+	if (ddi_prop_get_int(DDI_DEV_T_ANY, SD_DEVINFO(un),
+	    DDI_PROP_DONTPASS, "buf_break", 0) == 1) {
+		if (ddi_xbuf_attr_setup_brk(un->un_xbuf_attr,
+		    un->un_max_xfer_size) == 1) {
+			un->un_buf_breakup_supported = 1;
+			SD_INFO(SD_LOG_ATTACH_DETACH, un, "sd_unit_attach: "
+			    "un:0x%p Buf breakup enabled\n", un);
+		}
+	}
 
 	/*
 	 * Set PKT_DMA_PARTIAL flag.
@@ -9357,7 +9364,7 @@ sd_get_nv_sup(sd_ssc_t *ssc)
 static dev_t
 sd_make_device(dev_info_t *devi)
 {
-	return (makedevice(ddi_name_to_major(ddi_get_name(devi)),
+	return (makedevice(ddi_driver_major(devi),
 	    ddi_get_instance(devi) << SDUNIT_SHIFT));
 }
 
@@ -10283,6 +10290,8 @@ sd_ready_and_valid(sd_ssc_t *ssc, int part)
 	if (un->un_f_format_in_progress == FALSE) {
 		mutex_exit(SD_MUTEX(un));
 
+		(void) cmlb_validate(un->un_cmlbhandle, 0,
+		    (void *)SD_PATH_DIRECT);
 		if (cmlb_partinfo(un->un_cmlbhandle, part, NULL, NULL, NULL,
 		    NULL, (void *) SD_PATH_DIRECT) != 0) {
 			rval = SD_NOT_READY_VALID;
@@ -10369,6 +10378,15 @@ sdmin(struct buf *bp)
 
 	un = ddi_get_soft_state(sd_state, instance);
 	ASSERT(un != NULL);
+
+	/*
+	 * We depend on DMA partial or buf breakup to restrict
+	 * IO size if any of them enabled.
+	 */
+	if (un->un_partial_dma_supported ||
+	    un->un_buf_breakup_supported) {
+		return;
+	}
 
 	if (bp->b_bcount > un->un_max_xfer_size) {
 		bp->b_bcount = un->un_max_xfer_size;
@@ -11872,25 +11890,28 @@ sd_buf_iodone(int index, struct sd_lun *un, struct buf *bp)
 	xp = SD_GET_XBUF(bp);
 	ASSERT(xp != NULL);
 
-	mutex_enter(SD_MUTEX(un));
+	/* xbuf is gone after this */
+	if (ddi_xbuf_done(bp, un->un_xbuf_attr)) {
+		mutex_enter(SD_MUTEX(un));
 
-	/*
-	 * Grab time when the cmd completed.
-	 * This is used for determining if the system has been
-	 * idle long enough to make it idle to the PM framework.
-	 * This is for lowering the overhead, and therefore improving
-	 * performance per I/O operation.
-	 */
-	un->un_pm_idle_time = ddi_get_time();
+		/*
+		 * Grab time when the cmd completed.
+		 * This is used for determining if the system has been
+		 * idle long enough to make it idle to the PM framework.
+		 * This is for lowering the overhead, and therefore improving
+		 * performance per I/O operation.
+		 */
+		un->un_pm_idle_time = ddi_get_time();
 
-	un->un_ncmds_in_driver--;
-	ASSERT(un->un_ncmds_in_driver >= 0);
-	SD_INFO(SD_LOG_IO, un, "sd_buf_iodone: un_ncmds_in_driver = %ld\n",
-	    un->un_ncmds_in_driver);
+		un->un_ncmds_in_driver--;
+		ASSERT(un->un_ncmds_in_driver >= 0);
+		SD_INFO(SD_LOG_IO, un,
+		    "sd_buf_iodone: un_ncmds_in_driver = %ld\n",
+		    un->un_ncmds_in_driver);
 
-	mutex_exit(SD_MUTEX(un));
+		mutex_exit(SD_MUTEX(un));
+	}
 
-	ddi_xbuf_done(bp, un->un_xbuf_attr);	/* xbuf is gone after this */
 	biodone(bp);				/* bp is gone after this */
 
 	SD_TRACE(SD_LOG_IO_CORE, un, "sd_buf_iodone: exit.\n");
@@ -21306,9 +21327,6 @@ sdioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cred_p, int *rval_p)
 		case DKIOCSMBOOT:
 		case DKIOCG_PHYGEOM:
 		case DKIOCG_VIRTGEOM:
-#if defined(__i386) || defined(__amd64)
-		case DKIOCSETEXTPART:
-#endif
 			/* let cmlb handle it */
 			goto skip_ready_valid;
 
@@ -21451,9 +21469,6 @@ skip_ready_valid:
 	case DKIOCSMBOOT:
 	case DKIOCG_PHYGEOM:
 	case DKIOCG_VIRTGEOM:
-#if defined(__i386) || defined(__amd64)
-	case DKIOCSETEXTPART:
-#endif
 		SD_TRACE(SD_LOG_IOCTL, un, "DKIOC %d\n", cmd);
 
 		/* TUR should spin up */
@@ -22569,10 +22584,17 @@ sd_check_media(dev_t dev, enum dkio_state state)
 	opaque_t		token = NULL;
 	int			rval = 0;
 	sd_ssc_t		*ssc;
+	dev_t			sub_dev;
 
 	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL) {
 		return (ENXIO);
 	}
+
+	/*
+	 * sub_dev is used when submitting request to scsi watch.
+	 * All submissions are unified to use same device number.
+	 */
+	sub_dev = sd_make_device(SD_DEVINFO(un));
 
 	SD_TRACE(SD_LOG_COMMON, un, "sd_check_media: entry\n");
 
@@ -22607,7 +22629,7 @@ sd_check_media(dev_t dev, enum dkio_state state)
 
 		token = scsi_watch_request_submit(SD_SCSI_DEVP(un),
 		    sd_check_media_time, SENSE_LENGTH, sd_media_watch_cb,
-		    (caddr_t)dev);
+		    (caddr_t)sub_dev);
 
 		sd_pm_exit(un);
 
@@ -22737,17 +22759,22 @@ sd_check_media(dev_t dev, enum dkio_state state)
 done:
 	sd_ssc_fini(ssc);
 	un->un_f_watcht_stopped = FALSE;
+	if (token != NULL && un->un_swr_token != NULL) {
 		/*
 		 * Use of this local token and the mutex ensures that we avoid
 		 * some race conditions associated with terminating the
 		 * scsi watch.
 		 */
-	if (token) {
-		un->un_swr_token = (opaque_t)NULL;
+		token = un->un_swr_token;
 		mutex_exit(SD_MUTEX(un));
 		(void) scsi_watch_request_terminate(token,
 		    SCSI_WATCH_TERMINATE_WAIT);
-		mutex_enter(SD_MUTEX(un));
+		if (scsi_watch_get_ref_count(token) == 0) {
+			mutex_enter(SD_MUTEX(un));
+			un->un_swr_token = (opaque_t)NULL;
+		} else {
+			mutex_enter(SD_MUTEX(un));
+		}
 	}
 
 	/*

@@ -21,13 +21,10 @@
 /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
 /*	  All Rights Reserved  	*/
 
-
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/param.h>
@@ -184,7 +181,6 @@ static void rwnext_exit(queue_t *qp);
 int dblk_kmem_flags = 0;
 int mblk_kmem_flags = 0;
 
-
 static int
 dblk_constructor(void *buf, void *cdrarg, int kmflags)
 {
@@ -245,13 +241,13 @@ static int
 bcache_dblk_constructor(void *buf, void *cdrarg, int kmflags)
 {
 	dblk_t *dbp = buf;
-	bcache_t *bcp = (bcache_t *)cdrarg;
+	bcache_t *bcp = cdrarg;
 
 	if ((dbp->db_mblk = kmem_cache_alloc(mblk_cache, kmflags)) == NULL)
 		return (-1);
 
-	if ((dbp->db_base = (unsigned char *)kmem_cache_alloc(bcp->buffer_cache,
-	    kmflags)) == NULL) {
+	dbp->db_base = kmem_cache_alloc(bcp->buffer_cache, kmflags);
+	if (dbp->db_base == NULL) {
 		kmem_cache_free(mblk_cache, dbp->db_mblk);
 		return (-1);
 	}
@@ -277,9 +273,7 @@ dblk_destructor(void *buf, void *cdrarg)
 	ssize_t msg_size = (ssize_t)cdrarg;
 
 	ASSERT(dbp->db_mblk->b_datap == dbp);
-
 	ASSERT(msg_size != 0);
-
 	ASSERT(dbp->db_struioflag == 0);
 	ASSERT(dbp->db_struioun.cksum.flags == 0);
 
@@ -294,16 +288,64 @@ static void
 bcache_dblk_destructor(void *buf, void *cdrarg)
 {
 	dblk_t *dbp = buf;
-	bcache_t *bcp = (bcache_t *)cdrarg;
+	bcache_t *bcp = cdrarg;
 
 	kmem_cache_free(bcp->buffer_cache, dbp->db_base);
 
 	ASSERT(dbp->db_mblk->b_datap == dbp);
-
 	ASSERT(dbp->db_struioflag == 0);
 	ASSERT(dbp->db_struioun.cksum.flags == 0);
 
 	kmem_cache_free(mblk_cache, dbp->db_mblk);
+}
+
+/* ARGSUSED */
+static int
+ftblk_constructor(void *buf, void *cdrarg, int kmflags)
+{
+	ftblk_t *fbp = buf;
+	int i;
+
+	bzero(fbp, sizeof (ftblk_t));
+	if (str_ftstack != 0) {
+		for (i = 0; i < FTBLK_EVNTS; i++)
+			fbp->ev[i].stk = kmem_alloc(sizeof (ftstk_t), kmflags);
+	}
+
+	return (0);
+}
+
+/* ARGSUSED */
+static void
+ftblk_destructor(void *buf, void *cdrarg)
+{
+	ftblk_t *fbp = buf;
+	int i;
+
+	if (str_ftstack != 0) {
+		for (i = 0; i < FTBLK_EVNTS; i++) {
+			if (fbp->ev[i].stk != NULL) {
+				kmem_free(fbp->ev[i].stk, sizeof (ftstk_t));
+				fbp->ev[i].stk = NULL;
+			}
+		}
+	}
+}
+
+static int
+fthdr_constructor(void *buf, void *cdrarg, int kmflags)
+{
+	fthdr_t *fhp = buf;
+
+	return (ftblk_constructor(&fhp->first, cdrarg, kmflags));
+}
+
+static void
+fthdr_destructor(void *buf, void *cdrarg)
+{
+	fthdr_t *fhp = buf;
+
+	ftblk_destructor(&fhp->first, cdrarg);
 }
 
 void
@@ -317,9 +359,8 @@ streams_msg_init(void)
 	size_t tot_size;
 	int offset;
 
-	mblk_cache = kmem_cache_create("streams_mblk",
-	    sizeof (mblk_t), 32, NULL, NULL, NULL, NULL, NULL,
-	    mblk_kmem_flags);
+	mblk_cache = kmem_cache_create("streams_mblk", sizeof (mblk_t), 32,
+	    NULL, NULL, NULL, NULL, NULL, mblk_kmem_flags);
 
 	for (sizep = dblk_sizes; (size = *sizep) != 0; sizep++) {
 
@@ -345,10 +386,9 @@ streams_msg_init(void)
 		}
 
 		(void) sprintf(name, "streams_dblk_%ld", size);
-		cp = kmem_cache_create(name, tot_size,
-		    DBLK_CACHE_ALIGN, dblk_constructor,
-		    dblk_destructor, NULL,
-		    (void *)(size), NULL, dblk_kmem_flags);
+		cp = kmem_cache_create(name, tot_size, DBLK_CACHE_ALIGN,
+		    dblk_constructor, dblk_destructor, NULL, (void *)(size),
+		    NULL, dblk_kmem_flags);
 
 		while (lastsize <= size) {
 			dblk_cache[(lastsize - 1) >> DBLK_SIZE_SHIFT] = cp;
@@ -356,14 +396,13 @@ streams_msg_init(void)
 		}
 	}
 
-	dblk_esb_cache = kmem_cache_create("streams_dblk_esb",
-	    sizeof (dblk_t), DBLK_CACHE_ALIGN,
-	    dblk_esb_constructor, dblk_destructor, NULL,
-	    (void *) sizeof (dblk_t), NULL, dblk_kmem_flags);
-	fthdr_cache = kmem_cache_create("streams_fthdr",
-	    sizeof (fthdr_t), 32, NULL, NULL, NULL, NULL, NULL, 0);
-	ftblk_cache = kmem_cache_create("streams_ftblk",
-	    sizeof (ftblk_t), 32, NULL, NULL, NULL, NULL, NULL, 0);
+	dblk_esb_cache = kmem_cache_create("streams_dblk_esb", sizeof (dblk_t),
+	    DBLK_CACHE_ALIGN, dblk_esb_constructor, dblk_destructor, NULL,
+	    (void *)sizeof (dblk_t), NULL, dblk_kmem_flags);
+	fthdr_cache = kmem_cache_create("streams_fthdr", sizeof (fthdr_t), 32,
+	    fthdr_constructor, fthdr_destructor, NULL, NULL, NULL, 0);
+	ftblk_cache = kmem_cache_create("streams_ftblk", sizeof (ftblk_t), 32,
+	    ftblk_constructor, ftblk_destructor, NULL, NULL, NULL, 0);
 
 	/* Initialize Multidata caches */
 	mmd_init();
@@ -408,41 +447,180 @@ out:
 	return (mp);
 }
 
+/*
+ * Allocate an mblk taking db_credp and db_cpid from the template.
+ * Allow the cred to be NULL.
+ */
 mblk_t *
 allocb_tmpl(size_t size, const mblk_t *tmpl)
 {
 	mblk_t *mp = allocb(size, 0);
 
 	if (mp != NULL) {
-		cred_t *cr = DB_CRED(tmpl);
+		dblk_t *src = tmpl->b_datap;
+		dblk_t *dst = mp->b_datap;
+		cred_t *cr = src->db_credp;
+
 		if (cr != NULL)
-			crhold(mp->b_datap->db_credp = cr);
-		DB_CPID(mp) = DB_CPID(tmpl);
-		DB_TYPE(mp) = DB_TYPE(tmpl);
+			crhold(dst->db_credp = cr);
+		dst->db_cpid = src->db_cpid;
+		dst->db_type = src->db_type;
 	}
 	return (mp);
 }
 
 mblk_t *
-allocb_cred(size_t size, cred_t *cr)
+allocb_cred(size_t size, cred_t *cr, pid_t cpid)
 {
 	mblk_t *mp = allocb(size, 0);
 
-	if (mp != NULL && cr != NULL)
-		crhold(mp->b_datap->db_credp = cr);
+	ASSERT(cr != NULL);
+	if (mp != NULL) {
+		dblk_t *dbp = mp->b_datap;
 
+		crhold(dbp->db_credp = cr);
+		dbp->db_cpid = cpid;
+	}
 	return (mp);
 }
 
 mblk_t *
-allocb_cred_wait(size_t size, uint_t flags, int *error, cred_t *cr)
+allocb_cred_wait(size_t size, uint_t flags, int *error, cred_t *cr, pid_t cpid)
 {
 	mblk_t *mp = allocb_wait(size, 0, flags, error);
 
-	if (mp != NULL && cr != NULL)
-		crhold(mp->b_datap->db_credp = cr);
+	ASSERT(cr != NULL);
+	if (mp != NULL) {
+		dblk_t *dbp = mp->b_datap;
+
+		crhold(dbp->db_credp = cr);
+		dbp->db_cpid = cpid;
+	}
 
 	return (mp);
+}
+
+/*
+ * Extract the db_cred (and optionally db_cpid) from a message.
+ * We find the first mblk which has a non-NULL db_cred and use that.
+ * If none found we return NULL.
+ * Does NOT get a hold on the cred.
+ */
+cred_t *
+msg_getcred(const mblk_t *mp, pid_t *cpidp)
+{
+	cred_t *cr = NULL;
+	cred_t *cr2;
+
+	while (mp != NULL) {
+		dblk_t *dbp = mp->b_datap;
+
+		cr = dbp->db_credp;
+		if (cr == NULL) {
+			mp = mp->b_cont;
+			continue;
+		}
+		if (cpidp != NULL)
+			*cpidp = dbp->db_cpid;
+
+#ifdef DEBUG
+		/*
+		 * Normally there should at most one db_credp in a message.
+		 * But if there are multiple (as in the case of some M_IOC*
+		 * and some internal messages in TCP/IP bind logic) then
+		 * they must be identical in the normal case.
+		 * However, a socket can be shared between different uids
+		 * in which case data queued in TCP would be from different
+		 * creds. Thus we can only assert for the zoneid being the
+		 * same. Due to Multi-level Level Ports for TX, some
+		 * cred_t can have a NULL cr_zone, and we skip the comparison
+		 * in that case.
+		 */
+		cr2 = msg_getcred(mp->b_cont, NULL);
+		if (cr2 != NULL) {
+			DTRACE_PROBE2(msg__getcred,
+			    cred_t *, cr, cred_t *, cr2);
+			ASSERT(crgetzoneid(cr) == crgetzoneid(cr2) ||
+			    crgetzone(cr) == NULL ||
+			    crgetzone(cr2) == NULL);
+		}
+#endif
+		return (cr);
+	}
+	if (cpidp != NULL)
+		*cpidp = NOPID;
+	return (NULL);
+}
+
+/*
+ * Variant of msg_getcred which, when a cred is found
+ * 1. Returns with a hold on the cred
+ * 2. Clears the first cred in the mblk.
+ * This is more efficient to use than a msg_getcred() + crhold() when
+ * the message is freed after the cred has been extracted.
+ *
+ * The caller is responsible for ensuring that there is no other reference
+ * on the message since db_credp can not be cleared when there are other
+ * references.
+ */
+cred_t *
+msg_extractcred(mblk_t *mp, pid_t *cpidp)
+{
+	cred_t *cr = NULL;
+	cred_t *cr2;
+
+	while (mp != NULL) {
+		dblk_t *dbp = mp->b_datap;
+
+		cr = dbp->db_credp;
+		if (cr == NULL) {
+			mp = mp->b_cont;
+			continue;
+		}
+		ASSERT(dbp->db_ref == 1);
+		dbp->db_credp = NULL;
+		if (cpidp != NULL)
+			*cpidp = dbp->db_cpid;
+#ifdef DEBUG
+		/*
+		 * Normally there should at most one db_credp in a message.
+		 * But if there are multiple (as in the case of some M_IOC*
+		 * and some internal messages in TCP/IP bind logic) then
+		 * they must be identical in the normal case.
+		 * However, a socket can be shared between different uids
+		 * in which case data queued in TCP would be from different
+		 * creds. Thus we can only assert for the zoneid being the
+		 * same. Due to Multi-level Level Ports for TX, some
+		 * cred_t can have a NULL cr_zone, and we skip the comparison
+		 * in that case.
+		 */
+		cr2 = msg_getcred(mp->b_cont, NULL);
+		if (cr2 != NULL) {
+			DTRACE_PROBE2(msg__extractcred,
+			    cred_t *, cr, cred_t *, cr2);
+			ASSERT(crgetzoneid(cr) == crgetzoneid(cr2) ||
+			    crgetzone(cr) == NULL ||
+			    crgetzone(cr2) == NULL);
+		}
+#endif
+		return (cr);
+	}
+	return (NULL);
+}
+/*
+ * Get the label for a message. Uses the first mblk in the message
+ * which has a non-NULL db_credp.
+ * Returns NULL if there is no credp.
+ */
+extern struct ts_label_s *
+msg_getlabel(const mblk_t *mp)
+{
+	cred_t *cr = msg_getcred(mp, NULL);
+
+	if (cr == NULL)
+		return (NULL);
+
+	return (crgetlabel(cr));
 }
 
 void
@@ -839,10 +1017,8 @@ bcache_create(char *name, size_t size, uint_t align)
 
 	ASSERT((align & (align - 1)) == 0);
 
-	if ((bcp = (bcache_t *)kmem_alloc(sizeof (bcache_t), KM_NOSLEEP)) ==
-	    NULL) {
+	if ((bcp = kmem_alloc(sizeof (bcache_t), KM_NOSLEEP)) == NULL)
 		return (NULL);
-	}
 
 	bcp->size = size;
 	bcp->align = align;
@@ -1532,7 +1708,6 @@ adjmsg(mblk_t *mp, ssize_t len)
 	if (xmsgsize(mp) < len)
 		return (0);
 
-
 	if (fromhead) {
 		first = 1;
 		while (len) {
@@ -1564,7 +1739,6 @@ adjmsg(mblk_t *mp, ssize_t len)
 			/*
 			 * Find the last message of same type
 			 */
-
 			while (bp && bp->b_datap->db_type == type) {
 				ASSERT(bp->b_wptr >= bp->b_rptr);
 				prev_bp = save_bp;
@@ -4002,10 +4176,11 @@ create_putlocks(queue_t *q, int stream)
  * STREAMS Flow Trace - record STREAMS Flow Trace events as an mblk flows
  * through a stream.
  *
- * Data currently record per event is a hrtime stamp, queue address, event
- * type, and a per type datum.  Much of the STREAMS framework is instrumented
- * for automatic flow tracing (when enabled).  Events can be defined and used
- * by STREAMS modules and drivers.
+ * Data currently record per-event is a timestamp, module/driver name,
+ * downstream module/driver name, optional callstack, event type and a per
+ * type datum.  Much of the STREAMS framework is instrumented for automatic
+ * flow tracing (when enabled).  Events can be defined and used by STREAMS
+ * modules and drivers.
  *
  * Global objects:
  *
@@ -4019,6 +4194,7 @@ create_putlocks(queue_t *q, int stream)
  */
 
 int str_ftnever = 1;	/* Don't do STREAMS flow tracing */
+int str_ftstack = 0;	/* Don't record event call stacks */
 
 void
 str_ftevent(fthdr_t *hp, void *p, ushort_t evnt, ushort_t data)
@@ -4045,8 +4221,8 @@ str_ftevent(fthdr_t *hp, void *p, ushort_t evnt, ushort_t data)
 			 * got here first, so free the block and start
 			 * again.
 			 */
-			if (!(nbp = kmem_cache_alloc(ftblk_cache,
-			    KM_NOSLEEP))) {
+			nbp = kmem_cache_alloc(ftblk_cache, KM_NOSLEEP);
+			if (nbp == NULL) {
 				/* no mem, so punt */
 				str_ftnever++;
 				/* free up all flow data? */
@@ -4092,22 +4268,28 @@ str_ftevent(fthdr_t *hp, void *p, ushort_t evnt, ushort_t data)
 	if (evnt & FTEV_QMASK) {
 		queue_t *qp = p;
 
-		/*
-		 * It is possible that the module info is broke
-		 * (as is logsubr.c at this comment writing).
-		 * Instead of panicing or doing other unmentionables,
-		 * we shall put a dummy name as the mid, and continue.
-		 */
-		if (qp->q_qinfo == NULL)
-			ep->mid = "NONAME";
-		else
-			ep->mid = qp->q_qinfo->qi_minfo->mi_idname;
-
 		if (!(qp->q_flag & QREADR))
 			evnt |= FTEV_ISWR;
+
+		ep->mid = Q2NAME(qp);
+
+		/*
+		 * We only record the next queue name for FTEV_PUTNEXT since
+		 * that's the only time we *really* need it, and the putnext()
+		 * code ensures that qp->q_next won't vanish.  (We could use
+		 * claimstr()/releasestr() but at a performance cost.)
+		 */
+		if ((evnt & FTEV_MASK) == FTEV_PUTNEXT && qp->q_next != NULL)
+			ep->midnext = Q2NAME(qp->q_next);
+		else
+			ep->midnext = NULL;
 	} else {
-		ep->mid = (char *)p;
+		ep->mid = p;
+		ep->midnext = NULL;
 	}
+
+	if (ep->stk != NULL)
+		ep->stk->fs_depth = getpcstack(ep->stk->fs_stk, FTSTK_DEPTH);
 
 	ep->ts = gethrtime();
 	ep->evnt = evnt;

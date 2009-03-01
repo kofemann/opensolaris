@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -95,6 +95,9 @@ dsl_pool_scrub_setup_sync(void *arg1, void *arg2, cred_t *cr, dmu_tx_t *tx)
 			    ESC_ZFS_RESILVER_START);
 			dp->dp_scrub_max_txg = MIN(dp->dp_scrub_max_txg,
 			    tx->tx_txg);
+		} else {
+			spa_event_notify(dp->dp_spa, NULL,
+			    ESC_ZFS_SCRUB_START);
 		}
 
 		/* zero out the scrub stats in all vdev_stat_t's */
@@ -212,8 +215,9 @@ dsl_pool_scrub_cancel_sync(void *arg1, void *arg2, cred_t *cr, dmu_tx_t *tx)
 	 */
 	vdev_dtl_reassess(dp->dp_spa->spa_root_vdev, tx->tx_txg,
 	    *completep ? dp->dp_scrub_max_txg : 0, B_TRUE);
-	if (dp->dp_scrub_min_txg && *completep)
-		spa_event_notify(dp->dp_spa, NULL, ESC_ZFS_RESILVER_FINISH);
+	if (*completep)
+		spa_event_notify(dp->dp_spa, NULL, dp->dp_scrub_min_txg ?
+		    ESC_ZFS_RESILVER_FINISH : ESC_ZFS_SCRUB_FINISH);
 	spa_errlog_rotate(dp->dp_spa);
 
 	/*
@@ -344,6 +348,12 @@ traverse_zil_block(zilog_t *zilog, blkptr_t *bp, void *arg, uint64_t claim_txg)
 	if (bp->blk_birth <= dp->dp_scrub_min_txg)
 		return;
 
+	/*
+	 * One block ("stumpy") can be allocated a long time ago; we
+	 * want to visit that one because it has been allocated
+	 * (on-disk) even if it hasn't been claimed (even though for
+	 * plain scrub there's nothing to do to it).
+	 */
 	if (claim_txg == 0 && bp->blk_birth >= spa_first_txg(dp->dp_spa))
 		return;
 
@@ -369,6 +379,11 @@ traverse_zil_record(zilog_t *zilog, lr_t *lrc, void *arg, uint64_t claim_txg)
 		if (bp->blk_birth <= dp->dp_scrub_min_txg)
 			return;
 
+		/*
+		 * birth can be < claim_txg if this record's txg is
+		 * already txg sync'ed (but this log block contains
+		 * other records that are not synced)
+		 */
 		if (claim_txg == 0 || bp->blk_birth < claim_txg)
 			return;
 

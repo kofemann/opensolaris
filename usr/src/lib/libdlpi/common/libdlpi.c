@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -96,6 +96,7 @@ dlpi_walk(dlpi_walkfunc_t *fn, void *arg, uint_t flags)
 	struct i_dlpi_walklink_arg warg;
 	struct dirent *d;
 	DIR *dp;
+	dladm_handle_t handle;
 
 	warg.fn = fn;
 	warg.arg = arg;
@@ -114,8 +115,18 @@ dlpi_walk(dlpi_walkfunc_t *fn, void *arg, uint_t flags)
 
 		(void) closedir(dp);
 	} else {
-		(void) dladm_walk(i_dlpi_walk_link, &warg, DATALINK_CLASS_ALL,
-		    DATALINK_ANY_MEDIATYPE, DLADM_OPT_ACTIVE);
+		/*
+		 * Rather than have libdlpi take the libdladm handle,
+		 * open the handle here.
+		 */
+		if (dladm_open(&handle) != DLADM_STATUS_OK)
+			return;
+
+		(void) dladm_walk(i_dlpi_walk_link, handle, &warg,
+		    DATALINK_CLASS_ALL, DATALINK_ANY_MEDIATYPE,
+		    DLADM_OPT_ACTIVE);
+
+		dladm_close(handle);
 	}
 }
 
@@ -1062,6 +1073,7 @@ i_dlpi_open(const char *provider, int *fd, uint_t flags, boolean_t style1)
 		char		device[DLPI_LINKNAME_MAX];
 		datalink_id_t	linkid;
 		uint_t		ppa;
+		dladm_handle_t	handle;
 
 		/*
 		 * This is not a valid style-1 name. It could be "ip" module
@@ -1095,14 +1107,22 @@ i_dlpi_open(const char *provider, int *fd, uint_t flags, boolean_t style1)
 		(void) snprintf(device, DLPI_LINKNAME_MAX, "%s%d", driver,
 		    ppa >= 1000 ? ppa % 1000 : ppa);
 
-		if (dladm_dev2linkid(device, &linkid) == DLADM_STATUS_OK) {
+		/* open libdladm handle rather than taking it as input */
+		if (dladm_open(&handle) != DLADM_STATUS_OK)
+			goto fallback;
+
+		if (dladm_dev2linkid(handle, device, &linkid) ==
+		    DLADM_STATUS_OK) {
 			dladm_phys_attr_t dpa;
 
-			if ((dladm_phys_info(linkid, &dpa, DLADM_OPT_ACTIVE)) ==
-			    DLADM_STATUS_OK && !dpa.dp_novanity) {
+			if ((dladm_phys_info(handle, linkid, &dpa,
+			    DLADM_OPT_ACTIVE)) == DLADM_STATUS_OK &&
+			    !dpa.dp_novanity) {
+				dladm_close(handle);
 				return (DLPI_ENOTSTYLE2);
 			}
 		}
+		dladm_close(handle);
 	}
 
 fallback:
@@ -1380,7 +1400,7 @@ i_dlpi_strgetmsg(dlpi_impl_t *dip, int msec, dlpi_msg_t *dlreplyp,
     void *databuf, size_t *datalenp, size_t *totdatalenp)
 {
 	int			retval;
-	int			flags = 0;
+	int			flags;
 	int			fd = dip->dli_fd;
 	struct strbuf		ctl, data;
 	struct pollfd		pfd;
@@ -1391,8 +1411,13 @@ i_dlpi_strgetmsg(dlpi_impl_t *dip, int msec, dlpi_msg_t *dlreplyp,
 	dl_notify_ind_t		*dlnotif;
 	boolean_t		infinite = (msec < 0);	/* infinite timeout */
 
-	if ((dlreplyp == NULL && databuf == NULL) ||
-	    (databuf == NULL && datalenp != NULL) ||
+	/*
+	 * dlreplyp and databuf can be NULL at the same time, to force a check
+	 * for pending events on the DLPI link instance; dlpi_enabnotify(3DLPI).
+	 * this will be true more so for DLPI_RAW mode with notifications
+	 * enabled.
+	 */
+	if ((databuf == NULL && datalenp != NULL) ||
 	    (databuf != NULL && datalenp == NULL))
 		return (DLPI_EINVAL);
 
@@ -1412,16 +1437,17 @@ i_dlpi_strgetmsg(dlpi_impl_t *dip, int msec, dlpi_msg_t *dlreplyp,
 			start = gethrtime() / (NANOSEC / MILLISEC);
 
 		switch (poll(&pfd, 1, msec)) {
-			default:
-				if (pfd.revents & POLLHUP)
-					return (DL_SYSERR);
-				break;
-			case 0:
-				return (DLPI_ETIMEDOUT);
-			case -1:
+		default:
+			if (pfd.revents & POLLHUP)
 				return (DL_SYSERR);
+			break;
+		case 0:
+			return (DLPI_ETIMEDOUT);
+		case -1:
+			return (DL_SYSERR);
 		}
 
+		flags = 0;
 		if ((retval = getmsg(fd, &ctl, &data, &flags)) < 0)
 			return (DL_SYSERR);
 
@@ -1478,13 +1504,14 @@ i_dlpi_strgetmsg(dlpi_impl_t *dip, int msec, dlpi_msg_t *dlreplyp,
 		 * requested message.
 		 */
 		if (dip->dli_notifylistp != NULL &&
-		    dlreplyp->dlm_msg->dl_primitive == DL_NOTIFY_IND) {
-			if (ctl.len < DL_NOTIFY_IND_SIZE)
-				continue;
-			dlnotif = &(dlreplyp->dlm_msg->notify_ind);
-
-			(void) i_dlpi_notifyind_process(dip, dlnotif);
-			continue;
+		    ctl.len >= (int)(sizeof (t_uscalar_t)) &&
+		    *(t_uscalar_t *)(void *)ctl.buf == DL_NOTIFY_IND) {
+			/* process properly-formed DL_NOTIFY_IND messages */
+			if (ctl.len >= DL_NOTIFY_IND_SIZE) {
+				dlnotif = (dl_notify_ind_t *)(void *)ctl.buf;
+				(void) i_dlpi_notifyind_process(dip, dlnotif);
+			}
+			goto update_timer;
 		}
 
 		/*
@@ -1521,7 +1548,7 @@ i_dlpi_strgetmsg(dlpi_impl_t *dip, int msec, dlpi_msg_t *dlreplyp,
 					break;
 			}
 		}
-
+update_timer:
 		if (!infinite) {
 			current = gethrtime() / (NANOSEC / MILLISEC);
 			msec -= (current - start);

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -33,6 +33,7 @@
 #include <sys/cmn_err.h>
 #include <sys/cred.h>
 #include <sys/vmsystm.h>
+#include <sys/machsystm.h>
 #include <sys/debug.h>
 #include <vm/as.h>
 #include <vm/seg.h>
@@ -125,6 +126,7 @@ struct mobj_stats {
 	uint_t	mobjs_map_elf_no_holes;
 	uint_t	mobjs_unmap_hole;
 	uint_t	mobjs_nomem_header;
+	uint_t	mobjs_inval_header;
 	uint_t	mobjs_overlap_header;
 	uint_t	mobjs_np2_align;
 	uint_t	mobjs_np2_align_overflow;
@@ -173,8 +175,9 @@ struct mobj_stats {
 	uint_t	mobjs_lib_va_find_delete;
 	uint_t	mobjs_lib_va_add_delay_delete;
 	uint_t	mobjs_lib_va_add_delete;
+	uint_t	mobjs_lib_va_create_failure;
+	uint_t	mobjs_min_align;
 #if defined(__sparc)
-	uint_t	mobjs_vac_align;
 	uint_t	mobjs_aout_uzero_fault;
 	uint_t	mobjs_aout_64bit_try;
 	uint_t	mobjs_aout_noexec;
@@ -250,6 +253,9 @@ static kmutex_t lib_va_hash_mutex[LIB_VA_SIZE >> LIB_VA_MUTEX_SHIFT];
 	(LIB_VA_MATCH_ID(arg1, arg2) && LIB_VA_MATCH_TIME(arg1, arg2))
 
 /*
+ * lib_va will be used for optimized allocation of address ranges for
+ * libraries, such that subsequent mappings of the same library will attempt
+ * to use the same VA as previous mappings of that library.
  * In order to map libraries at the same VA in many processes, we need to carve
  * out our own address space for them which is unique across many processes.
  * We use different arenas for 32 bit and 64 bit libraries.
@@ -262,71 +268,13 @@ static vmem_t *lib_va_32_arena;
 static vmem_t *lib_va_64_arena;
 uint_t lib_threshold = 20;	/* modifiable via /etc/system */
 
+static kmutex_t lib_va_init_mutex;	/* no need to initialize */
+
 /*
  * Number of 32 bit and 64 bit libraries in lib_va hash.
  */
 static uint_t libs_mapped_32 = 0;
 static uint_t libs_mapped_64 = 0;
-
-/*
- * Initialize the VA span of the lib_va arenas to about half of the VA space
- * of a user process.  These VAs will be used for optimized allocation of
- * libraries, such that subsequent mappings of the same library will attempt
- * to use the same VA as previous mappings of that library.
- */
-void
-lib_va_init(void)
-{
-	size_t start;
-	size_t end;
-	size_t len;
-	/*
-	 * On 32 bit sparc, the user stack and /lib/ld.so.1 will both live
-	 * above the end address that we choose.  On 32bit x86 only
-	 * /lib/ld.so.1 will live above the end address that we choose
-	 * because the user stack is at the bottom of the address space.
-	 *
-	 * We estimate the size of ld.so.1 to be 512K which leaves significant
-	 * room for growth without needing to change this value. Thus it is
-	 * safe for libraries to be mapped up to that address.
-	 *
-	 * If the length of ld.so.1 were to grow beyond 512K then
-	 * a library who has a reserved address in that range would always
-	 * fail to get that address and would have to call map_addr
-	 * to get an unused address range.  On DEBUG kernels, we will check
-	 * on the first use of lib_va that our address does not overlap
-	 * ld.so.1, and if it does, then we'll print a cmn_err message.
-	 */
-#if defined(__sparc)
-	end = _userlimit32 - DFLSSIZ - (512 * 1024);
-#elif defined(__i386) || defined(__amd64)
-	end = _userlimit32 - (512 * 1024);
-#else
-#error	"no recognized machine type is defined"
-#endif
-	len = end >> 1;
-	len = P2ROUNDUP(len, PAGESIZE);
-	start = end - len;
-	lib_va_32_arena = vmem_create("lib_va_32", (void *)start, len,
-	    PAGESIZE, NULL, NULL, NULL, 0, VM_NOSLEEP | VMC_IDENTIFIER);
-
-#if defined(_LP64)
-	/*
-	 * The user stack and /lib/ld.so.1 will both live above the end address
-	 * that we choose.  We estimate the size of a mapped ld.so.1 to be 2M
-	 * which leaves significant room for growth without needing to change
-	 * this value. Thus it is safe for libraries to be mapped up to
-	 * that address.  The same considerations for the size of ld.so.1 that
-	 * were mentioned above also apply here.
-	 */
-	end = _userlimit - DFLSSIZ - (2 * 1024 * 1024);
-	len = end >> 1;
-	len = P2ROUNDUP(len, PAGESIZE);
-	start = end - len;
-	lib_va_64_arena = vmem_create("lib_va_64", (void *)start, len,
-	    PAGESIZE, NULL, NULL, NULL, 0, VM_NOSLEEP | VMC_IDENTIFIER);
-#endif
-}
 
 /*
  * Free up the resources associated with lvp as well as lvp itself.
@@ -697,9 +645,12 @@ mmapobj_lookup_start_addr(struct lib_va *lvp)
 
 	/*
 	 * If we don't have an expected base address, or the one that we want
-	 * to use is not available, go get an acceptable address range.
+	 * to use is not available or acceptable, go get an acceptable
+	 * address range.
 	 */
-	if (base == NULL || as_gap(as, len, &base, &len, 0, NULL)) {
+	if (base == NULL || as_gap(as, len, &base, &len, 0, NULL) ||
+	    valid_usr_range(base, len, PROT_ALL, as, as->a_userlimit) !=
+	    RANGE_OKAY) {
 
 		if (lvp->lv_flags & LV_ELF64) {
 			ma_flags = 0;
@@ -757,6 +708,9 @@ mmapobj_alloc_start_addr(struct lib_va **lvpp, size_t len, int use_lib_va,
 	uint_t ma_flags = _MAP_LOW32;
 	caddr_t base = NULL;
 	vmem_t *model_vmem;
+	size_t lib_va_start;
+	size_t lib_va_end;
+	size_t lib_va_len;
 
 	ASSERT(lvpp != NULL);
 
@@ -775,33 +729,90 @@ mmapobj_alloc_start_addr(struct lib_va **lvpp, size_t len, int use_lib_va,
 		ma_flags |= MAP_ALIGN;
 	}
 	if (use_lib_va) {
+		/*
+		 * The first time through, we need to setup the lib_va arenas.
+		 * We call map_addr to find a suitable range of memory to map
+		 * the given library, and we will set the highest address
+		 * in our vmem arena to the end of this adddress range.
+		 * We allow up to half of the address space to be used
+		 * for lib_va addresses but we do not prevent any allocations
+		 * in this range from other allocation paths.
+		 */
+		if (lib_va_64_arena == NULL && model == DATAMODEL_LP64) {
+			mutex_enter(&lib_va_init_mutex);
+			if (lib_va_64_arena == NULL) {
+				base = (caddr_t)align;
+				as_rangelock(as);
+				map_addr(&base, len, 0, 1, ma_flags);
+				as_rangeunlock(as);
+				if (base == NULL) {
+					mutex_exit(&lib_va_init_mutex);
+					MOBJ_STAT_ADD(lib_va_create_failure);
+					goto nolibva;
+				}
+				lib_va_end = (size_t)base + len;
+				lib_va_len = lib_va_end >> 1;
+				lib_va_len = P2ROUNDUP(lib_va_len, PAGESIZE);
+				lib_va_start = lib_va_end - lib_va_len;
+
+				/*
+			 	 * Need to make sure we avoid the address hole.
+				 * We know lib_va_end is valid but we need to
+				 * make sure lib_va_start is as well.
+				 */
+				if ((lib_va_end > (size_t)hole_end) &&
+				    (lib_va_start < (size_t)hole_end)) {
+					lib_va_start = P2ROUNDUP(
+					   (size_t)hole_end, PAGESIZE);
+					lib_va_len = lib_va_end - lib_va_start;
+				}
+				lib_va_64_arena = vmem_create("lib_va_64",
+				    (void *)lib_va_start, lib_va_len, PAGESIZE,
+				    NULL, NULL, NULL, 0,
+				    VM_NOSLEEP | VMC_IDENTIFIER);
+				if (lib_va_64_arena == NULL) {
+					mutex_exit(&lib_va_init_mutex);
+					goto nolibva;
+				}
+			}
+			model_vmem = lib_va_64_arena;
+			mutex_exit(&lib_va_init_mutex);
+		} else if (lib_va_32_arena == NULL &&
+		    model == DATAMODEL_ILP32) {
+			mutex_enter(&lib_va_init_mutex);
+			if (lib_va_32_arena == NULL) {
+				base = (caddr_t)align;
+				as_rangelock(as);
+				map_addr(&base, len, 0, 1, ma_flags);
+				as_rangeunlock(as);
+				if (base == NULL) {
+					mutex_exit(&lib_va_init_mutex);
+					MOBJ_STAT_ADD(lib_va_create_failure);
+					goto nolibva;
+				}
+				lib_va_end = (size_t)base + len;
+				lib_va_len = lib_va_end >> 1;
+				lib_va_len = P2ROUNDUP(lib_va_len, PAGESIZE);
+				lib_va_start = lib_va_end - lib_va_len;
+				lib_va_32_arena = vmem_create("lib_va_32",
+				    (void *)lib_va_start, lib_va_len, PAGESIZE,
+				    NULL, NULL, NULL, 0,
+				    VM_NOSLEEP | VMC_IDENTIFIER);
+				if (lib_va_32_arena == NULL) {
+					mutex_exit(&lib_va_init_mutex);
+					goto nolibva;
+				}
+			}
+			model_vmem = lib_va_32_arena;
+			mutex_exit(&lib_va_init_mutex);
+		}
+
 		if (model == DATAMODEL_LP64 || libs_mapped_32 < lib_threshold) {
 			base = vmem_xalloc(model_vmem, len, align, 0, 0, NULL,
 			    NULL, VM_NOSLEEP | VM_ENDALLOC);
 			MOBJ_STAT_ADD(alloc_vmem);
 		}
-#ifdef DEBUG
-		/*
-		 * Check to see if we've run into ld.so.1.
-		 * If this is the first library we've mapped and we can not
-		 * use our reserved address space, then it's likely that
-		 * ld.so.1 is occupying some of this space and the
-		 * model_vmem arena bounds need to be changed.  If we've run
-		 * into something else besides ld.so.1 we'll see this message
-		 * on the first use of mmapobj and should ignore the message.
-		 */
-		if (base != NULL && libs_mapped_32 == 0 &&
-		    model == DATAMODEL_ILP32 &&
-		    as_gap(as, len, &base, &len, 0, NULL)) {
-			cmn_err(CE_NOTE,
-			    "lib_va_32_arena may not be optimized");
-		} else if (base != NULL && libs_mapped_64 == 0 &&
-		    model == DATAMODEL_LP64 &&
-		    as_gap(as, len, &base, &len, 0, NULL)) {
-			cmn_err(CE_NOTE,
-			    "lib_va_64_arena may not be optimized");
-		}
-#endif
+
 		/*
 		 * Even if the address fails to fit in our address space,
 		 * or we can't use a reserved address,
@@ -823,13 +834,17 @@ mmapobj_alloc_start_addr(struct lib_va **lvpp, size_t len, int use_lib_va,
 		}
 	}
 
+nolibva:
 	as_rangelock(as);
 
 	/*
 	 * If we don't have an expected base address, or the one that we want
-	 * to use is not available, go get an acceptable address range.
+	 * to use is not available or acceptable, go get an acceptable
+	 * address range.
 	 */
-	if (base == NULL || as_gap(as, len, &base, &len, 0, NULL)) {
+	if (base == NULL || as_gap(as, len, &base, &len, 0, NULL) ||
+	    valid_usr_range(base, len, PROT_ALL, as, as->a_userlimit) !=
+	    RANGE_OKAY) {
 		MOBJ_STAT_ADD(get_addr);
 		base = (caddr_t)align;
 		map_addr(&base, len, 0, 1, ma_flags);
@@ -1250,6 +1265,7 @@ calc_loadable(Ehdr *ehdrp, caddr_t phdrbase, int nphdrs, size_t *len,
 	int i;
 	int hsize;
 	model_t model;
+	ushort_t e_type = ehdrp->e_type;	/* same offset 32 and 64 bit */
 	uint_t p_type;
 	offset_t p_offset;
 	size_t p_memsz;
@@ -1259,9 +1275,16 @@ calc_loadable(Ehdr *ehdrp, caddr_t phdrbase, int nphdrs, size_t *len,
 	caddr_t start_addr = NULL;
 	caddr_t p_end = NULL;
 	size_t max_align = 0;
+	size_t min_align = PAGESIZE;	/* needed for vmem_xalloc */
 	STRUCT_HANDLE(myphdr, mph);
 #if defined(__sparc)
 	extern int vac_size;
+
+	/*
+	 * Want to prevent aliasing by making the start address at least be
+	 * aligned to vac_size.
+	 */
+	min_align = MAX(PAGESIZE, vac_size);
 #endif
 
 	model = get_udatamodel();
@@ -1303,6 +1326,18 @@ calc_loadable(Ehdr *ehdrp, caddr_t phdrbase, int nphdrs, size_t *len,
 				continue;
 			}
 			if (num_segs++ == 0) {
+				/*
+				 * The p_vaddr of the first PT_LOAD segment
+				 * must either be NULL or within the first
+				 * page in order to be interpreted.
+				 * Otherwise, its an invalid file.
+				 */
+				if (e_type == ET_DYN &&
+				    ((caddr_t)((uintptr_t)vaddr &
+				    (uintptr_t)PAGEMASK) != NULL)) {
+					MOBJ_STAT_ADD(inval_header);
+					return (ENOTSUP);
+				}
 				start_addr = vaddr;
 				/*
 				 * For the first segment, we need to map from
@@ -1329,16 +1364,10 @@ calc_loadable(Ehdr *ehdrp, caddr_t phdrbase, int nphdrs, size_t *len,
 			p_align = STRUCT_FGET(mph, x.p_align);
 			if (p_align > 1 && p_align > max_align) {
 				max_align = p_align;
-#if defined(__sparc)
-				/*
-				 * Want to prevent aliasing by making the start
-				 * address be aligned to vac_size.
-				 */
-				if (max_align < vac_size) {
-					max_align = vac_size;
-					MOBJ_STAT_ADD(vac_align);
+				if (max_align < min_align) {
+					max_align = min_align;
+					MOBJ_STAT_ADD(min_align);
 				}
-#endif
 			}
 		}
 		STRUCT_SET_HANDLE(mph, model,
@@ -1361,6 +1390,8 @@ calc_loadable(Ehdr *ehdrp, caddr_t phdrbase, int nphdrs, size_t *len,
 	} else {
 		*align = max_align;
 	}
+
+	ASSERT(*align >= PAGESIZE || *align == 0);
 
 	*loadable = num_segs;
 	*len = p_end - start_addr;
@@ -1734,7 +1765,7 @@ process_phdr(Ehdr *ehdrp, caddr_t phdrbase, int nphdrs, mmapobj_result_t *mrp,
 			if (hdr_seen == 0 && p_filesz != 0) {
 				mrp[current].mr_flags = MR_HDR_ELF;
 				/*
-				 * We modify mr_addr and mr_offset because we
+				 * We modify mr_offset because we
 				 * need to map the ELF header as well, and if
 				 * we didn't then the header could be left out
 				 * of the mapping that we will create later.

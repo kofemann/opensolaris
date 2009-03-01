@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -841,7 +841,9 @@ sa_init(int init_service)
 			 */
 			if (sa_zfs_init(handle) == B_FALSE) {
 				free(handle);
+				(void) mutex_lock(&sa_global_lock);
 				(void) proto_plugin_fini();
+				(void) mutex_unlock(&sa_global_lock);
 				return (NULL);
 			}
 			/*
@@ -3838,11 +3840,12 @@ sa_remove_resource(sa_resource_t resource)
 	} else {
 		ret = sa_zfs_update((sa_share_t)group);
 	}
+
 	return (ret);
 }
 
 /*
- * proto_resource_rename(handle, group, resource, newname)
+ * proto_rename_resource(handle, group, resource, newname)
  *
  * Helper function for sa_rename_resource that notifies the protocol
  * of a resource name change prior to a config repository update.

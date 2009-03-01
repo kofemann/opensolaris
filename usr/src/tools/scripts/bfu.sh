@@ -21,7 +21,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # Upgrade a machine from a cpio archive area in about 5 minutes.
@@ -176,10 +176,10 @@ global_zone_only_files="
 	boot/solaris/devicedb/master
 	boot/solaris/filelist.ramdisk
 	etc/aggregation.conf
-	etc/dladm/*
 	etc/bootrc
 	etc/crypto/kcf.conf
 	etc/devlink.tab
+	etc/dladm/*
 	etc/driver_aliases
 	etc/driver_classes
 	etc/lvm/devpath
@@ -205,23 +205,28 @@ global_zone_only_files="
 	etc/ppp/pap-secrets
 	etc/security/device_policy
 	etc/security/extra_privs
+	etc/security/tsol/devalloc_defaults
+	etc/security/tsol/label_encodings
+	etc/security/tsol/relabel
 	etc/security/tsol/tnrhdb
 	etc/security/tsol/tnrhtp
 	etc/security/tsol/tnzonecfg
-	etc/security/tsol/label_encodings
-	etc/security/tsol/relabel
-	etc/security/tsol/devalloc_defaults
 	etc/system
 	etc/zones/index
 	kernel/drv/aac.conf
 	kernel/drv/elxl.conf
+	kernel/drv/emlxs.conf
+	kernel/drv/fp.conf
+	kernel/drv/iscsi.conf
 	kernel/drv/md.conf
+	kernel/drv/mpt.conf
 	kernel/drv/options.conf
+	kernel/drv/qlc.conf
 	kernel/drv/ra.conf
 	kernel/drv/scsa2usb.conf
 	kernel/drv/scsi_vhci.conf
 	kernel/drv/sd.conf
-	kernel/drv/mpt.conf
+	kernel/drv/ssd.conf
 	platform/*/kernel/drv/*ppm.conf
 	platform/i86pc/kernel/drv/aha.conf
 	platform/i86pc/kernel/drv/asy.conf
@@ -2289,14 +2294,6 @@ EOF
 		smf_enable network/rpc/bootparams
 	fi
 
-	# To handle the transition from pre-smf ipfilter to smf-aware ipfilter,
-	# check if ipfilter had been enabled with at least one rule, and if so
-	# enable the smf instance.
-	if grep '^[ \t]*[^# \t]' $rootprefix/etc/ipf/ipf.conf >/dev/null 2>&1 &&
-	    [[ $zone = global ]]; then
-		smf_enable network/ipfilter
-	fi
-
 	touch $rootprefix/var/svc/profile/.upgrade_prophist
 
 	cat >> $rootprefix/var/svc/profile/upgrade <<EOF
@@ -2859,6 +2856,7 @@ bfucmd="
 	/usr/bin/head
 	/usr/bin/id
 	/usr/bin/ksh
+	/usr/bin/ksh93
 	/usr/bin/line
 	/usr/bin/ln
 	/usr/bin/ls
@@ -2877,12 +2875,10 @@ bfucmd="
 	/usr/bin/rmdir
 	/usr/bin/sed
 	/usr/bin/sh
-	/usr/bin/sleep
 	/usr/bin/sort
 	/usr/bin/strings
 	/usr/bin/stty
 	/usr/bin/su
-	/usr/bin/sum
 	/usr/bin/tail
 	/usr/bin/tee
 	/usr/bin/touch
@@ -2929,19 +2925,26 @@ bfucmd="
 bfuscr="
 	${ACR-${GATE}/public/bin/acr}
 "
-#
-# basename and dirname may be ELF executables, not shell scripts;
-# make sure they go into the right list.
-#
-if `file /usr/bin/basename | grep ELF >/dev/null`
-then	bfucmd="$bfucmd /usr/bin/basename"
-else	bfuscr="$bfuscr /usr/bin/basename"
-fi
 
-if `file /usr/bin/dirname | grep ELF >/dev/null`
-then	bfucmd="$bfucmd /usr/bin/dirname"
-else	bfuscr="$bfuscr /usr/bin/dirname"
-fi
+#
+# Tools which may be either scripts or ELF binaries,
+# so we need to check them before adding to either $bfucmd or $bfuscr.
+# This does not handle compiled shell scripts yet.
+#
+bfuchameleons="
+        /usr/bin/basename
+        /usr/bin/dirname
+        /usr/bin/sleep
+        /usr/bin/sum
+"
+
+for chameleon in ${bfuchameleons} ; do
+        if [[ "$(file "${chameleon}")" == *ELF* ]] ; then
+                bfucmd="${bfucmd} ${chameleon}"
+        else
+                bfuscr="${bfuscr} ${chameleon}"
+        fi
+done
 
 rm -rf /tmp/bfubin
 mkdir /tmp/bfubin
@@ -4705,8 +4708,31 @@ then
 	if [[ ! -f $root/sbin/flowadm ]] && \
 	    archive_file_exists generic.sbin "sbin/flowadm"; then
 		flowadm_status="new"
-		host_ifs=`ls -1 $rootprefix/etc | egrep -e \
-	  	  '^hostname.|^hostname6.|^dhcp.'|  cut -d . -f2 | sort -u` 
+
+		for iftype in hostname hostname6 dhcp
+		do
+			interface_names="`echo /etc/$iftype.*[0-9] 2>/dev/null`"
+			if [ "$interface_names" != "/etc/iftype.*[0-9]" ]; then
+				ORIGIFS="$IFS"
+				IFS="$IFS."
+				set -- $interface_names
+				IFS="$ORIGIFS"
+				while [ $# -ge 2 ]; do
+					shift
+					if [ $# -gt 1 -a \
+					    "$2" != "/etc/$iftype" ]; then
+						while [ $# -gt 1 -a \
+						    "$1" != "/etc/$iftype" ]; do
+							shift
+						done
+					else
+						host_ifs="$host_ifs $1"
+						shift
+					fi
+				done
+			fi
+		done
+
 		zones=`zoneadm list -c | grep -v global`
 		for zone in $zones
 		do
@@ -8055,9 +8081,13 @@ mondo_loop() {
 
 		# The global zone needs to have its /dev/dld symlink created
 		# during install so that processes can access it early in boot
-		# before devfsadm is run.
+		# before devfsadm is run.  Likewise for /dev/ipmpstub.
 		if [ ! -L $rootprefix/dev/dld ]; then
 			ln -s ../devices/pseudo/dld@0:ctl $rootprefix/dev/dld
+		fi
+		if [ ! -L $rootprefix/dev/ipmpstub ]; then
+			ln -s ../devices/pseudo/dlpistub@0:ipmpstub \
+			    $rootprefix/dev/ipmpstub
 		fi
 	fi
 

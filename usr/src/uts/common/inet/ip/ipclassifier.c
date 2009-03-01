@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -261,8 +261,8 @@
 
 #include <inet/ip.h>
 #include <inet/ip6.h>
-#include <inet/tcp.h>
 #include <inet/ip_ndp.h>
+#include <inet/ip_impl.h>
 #include <inet/udp_impl.h>
 #include <inet/sctp_ip.h>
 #include <inet/sctp/sctp_impl.h>
@@ -272,9 +272,11 @@
 #include <sys/cpuvar.h>
 
 #include <inet/ipclassifier.h>
+#include <inet/tcp.h>
 #include <inet/ipsec_impl.h>
 
 #include <sys/tsol/tnet.h>
+#include <sys/sockio.h>
 
 #ifdef DEBUG
 #define	IPCL_DEBUG
@@ -325,6 +327,7 @@ typedef union itc_s {
 
 struct kmem_cache  *tcp_conn_cache;
 struct kmem_cache  *ip_conn_cache;
+struct kmem_cache  *ip_helper_stream_cache;
 extern struct kmem_cache  *sctp_conn_cache;
 extern struct kmem_cache  *tcp_sack_info_cache;
 extern struct kmem_cache  *tcp_iphc_cache;
@@ -349,6 +352,20 @@ static void	rawip_conn_destructor(void *, void *);
 
 static int	rts_conn_constructor(void *, void *, int);
 static void	rts_conn_destructor(void *, void *);
+
+static int	ip_helper_stream_constructor(void *, void *, int);
+static void	ip_helper_stream_destructor(void *, void *);
+
+boolean_t	ip_use_helper_cache = B_TRUE;
+
+/*
+ * Hook functions to enable cluster networking
+ * On non-clustered systems these vectors must always be NULL.
+ */
+extern void	(*cl_inet_listen)(netstackid_t, uint8_t, sa_family_t,
+		    uint8_t *, in_port_t, void *);
+extern void	(*cl_inet_unlisten)(netstackid_t, uint8_t, sa_family_t,
+		    uint8_t *, in_port_t, void *);
 
 #ifdef	IPCL_DEBUG
 #define	INET_NTOA_BUFSIZE	18
@@ -394,6 +411,15 @@ ipcl_g_init(void)
 	    sizeof (itc_t) + sizeof (rts_t), CACHE_ALIGN_SIZE,
 	    rts_conn_constructor, rts_conn_destructor,
 	    NULL, NULL, NULL, 0);
+
+	if (ip_use_helper_cache) {
+		ip_helper_stream_cache = kmem_cache_create
+		    ("ip_helper_stream_cache", sizeof (ip_helper_stream_info_t),
+		    CACHE_ALIGN_SIZE, ip_helper_stream_constructor,
+		    ip_helper_stream_destructor, NULL, NULL, NULL, 0);
+	} else {
+		ip_helper_stream_cache = NULL;
+	}
 }
 
 /*
@@ -646,10 +672,10 @@ ipcl_conn_destroy(conn_t *connp)
 
 	DTRACE_PROBE1(conn__destroy, conn_t *, connp);
 
-	if (connp->conn_peercred != NULL &&
-	    connp->conn_peercred != connp->conn_cred)
+	if (connp->conn_peercred != NULL) {
 		crfree(connp->conn_peercred);
-	connp->conn_peercred = NULL;
+		connp->conn_peercred = NULL;
+	}
 
 	if (connp->conn_cred != NULL) {
 		crfree(connp->conn_cred);
@@ -749,6 +775,7 @@ ipcl_conn_destroy(conn_t *connp)
 		connp->conn_netstack = NULL;
 		netstack_rele(ns);
 	}
+
 	ipcl_conn_cleanup(connp);
 
 	/* leave conn_priv aka conn_udp, conn_icmp, etc in place. */
@@ -756,6 +783,7 @@ ipcl_conn_destroy(conn_t *connp)
 		connp->conn_flags = IPCL_UDPCONN;
 		kmem_cache_free(udp_conn_cache, connp);
 	} else if (connp->conn_flags & IPCL_RAWIPCONN) {
+
 		connp->conn_flags = IPCL_RAWIPCONN;
 		connp->conn_ulp = IPPROTO_ICMP;
 		kmem_cache_free(rawip_conn_cache, connp);
@@ -791,8 +819,8 @@ ipcl_conn_unlisten(conn_t *connp)
 			addr_family = AF_INET;
 			laddrp = (uint8_t *)&connp->conn_bound_source;
 		}
-		(*cl_inet_unlisten)(IPPROTO_TCP, addr_family, laddrp,
-		    connp->conn_lport);
+		(*cl_inet_unlisten)(connp->conn_netstack->netstack_stackid,
+		    IPPROTO_TCP, addr_family, laddrp, connp->conn_lport, NULL);
 	}
 	connp->conn_flags &= ~IPCL_CL_LISTENER;
 }
@@ -1171,8 +1199,10 @@ ipcl_bind_insert(conn_t *connp, uint8_t protocol, ipaddr_t src, uint16_t lport)
 		if (cl_inet_listen != NULL) {
 			ASSERT(!connp->conn_pkt_isv6);
 			connp->conn_flags |= IPCL_CL_LISTENER;
-			(*cl_inet_listen)(IPPROTO_TCP, AF_INET,
-			    (uint8_t *)&connp->conn_bound_source, lport);
+			(*cl_inet_listen)(
+			    connp->conn_netstack->netstack_stackid,
+			    IPPROTO_TCP, AF_INET,
+			    (uint8_t *)&connp->conn_bound_source, lport, NULL);
 		}
 		break;
 
@@ -1252,8 +1282,9 @@ ipcl_bind_insert_v6(conn_t *connp, uint8_t protocol, const in6_addr_t *src,
 				laddrp = (uint8_t *)&connp->conn_bound_source;
 			}
 			connp->conn_flags |= IPCL_CL_LISTENER;
-			(*cl_inet_listen)(IPPROTO_TCP, addr_family, laddrp,
-			    lport);
+			(*cl_inet_listen)(
+			    connp->conn_netstack->netstack_stackid,
+			    IPPROTO_TCP, addr_family, laddrp, lport, NULL);
 		}
 		break;
 
@@ -1298,15 +1329,26 @@ ipcl_conn_insert(conn_t *connp, uint8_t protocol, ipaddr_t src,
 			 */
 			IPCL_CONN_INIT(connp, protocol, src, rem, ports);
 		}
+
+		/*
+		 * For tcp, we check whether the connection tuple already
+		 * exists before allowing the connection to proceed.  We
+		 * also allow indexing on the zoneid. This is to allow
+		 * multiple shared stack zones to have the same tcp
+		 * connection tuple. In practice this only happens for
+		 * INADDR_LOOPBACK as it's the only local address which
+		 * doesn't have to be unique.
+		 */
 		connfp = &ipst->ips_ipcl_conn_fanout[
 		    IPCL_CONN_HASH(connp->conn_rem,
 		    connp->conn_ports, ipst)];
 		mutex_enter(&connfp->connf_lock);
 		for (tconnp = connfp->connf_head; tconnp != NULL;
 		    tconnp = tconnp->conn_next) {
-			if (IPCL_CONN_MATCH(tconnp, connp->conn_ulp,
+			if ((IPCL_CONN_MATCH(tconnp, connp->conn_ulp,
 			    connp->conn_rem, connp->conn_src,
-			    connp->conn_ports)) {
+			    connp->conn_ports)) &&
+			    (IPCL_ZONE_MATCH(tconnp, connp->conn_zoneid))) {
 
 				/* Already have a conn. bail out */
 				mutex_exit(&connfp->connf_lock);
@@ -1391,6 +1433,16 @@ ipcl_conn_insert_v6(conn_t *connp, uint8_t protocol, const in6_addr_t *src,
 		if (!(connp->conn_flags & IPCL_EAGER)) {
 			IPCL_CONN_INIT_V6(connp, protocol, *src, *rem, ports);
 		}
+
+		/*
+		 * For tcp, we check whether the connection tuple already
+		 * exists before allowing the connection to proceed.  We
+		 * also allow indexing on the zoneid. This is to allow
+		 * multiple shared stack zones to have the same tcp
+		 * connection tuple. In practice this only happens for
+		 * ipv6_loopback as it's the only local address which
+		 * doesn't have to be unique.
+		 */
 		connfp = &ipst->ips_ipcl_conn_fanout[
 		    IPCL_CONN_HASH_V6(connp->conn_remv6, connp->conn_ports,
 		    ipst)];
@@ -1401,7 +1453,8 @@ ipcl_conn_insert_v6(conn_t *connp, uint8_t protocol, const in6_addr_t *src,
 			    connp->conn_remv6, connp->conn_srcv6,
 			    connp->conn_ports) &&
 			    (tconnp->conn_tcp->tcp_bound_if == 0 ||
-			    tconnp->conn_tcp->tcp_bound_if == ifindex)) {
+			    tconnp->conn_tcp->tcp_bound_if == ifindex) &&
+			    (IPCL_ZONE_MATCH(tconnp, connp->conn_zoneid))) {
 				/* Already have a conn. bail out */
 				mutex_exit(&connfp->connf_lock);
 				return (EADDRINUSE);
@@ -1490,9 +1543,11 @@ ipcl_classify_v4(mblk_t *mp, uint8_t protocol, uint_t hdr_len, zoneid_t zoneid,
 		mutex_enter(&connfp->connf_lock);
 		for (connp = connfp->connf_head; connp != NULL;
 		    connp = connp->conn_next) {
-			if (IPCL_CONN_MATCH(connp, protocol,
-			    ipha->ipha_src, ipha->ipha_dst, ports))
+			if ((IPCL_CONN_MATCH(connp, protocol,
+			    ipha->ipha_src, ipha->ipha_dst, ports)) &&
+			    (IPCL_ZONE_MATCH(connp, zoneid))) {
 				break;
+			}
 		}
 
 		if (connp != NULL) {
@@ -1513,9 +1568,12 @@ ipcl_classify_v4(mblk_t *mp, uint8_t protocol, uint_t hdr_len, zoneid_t zoneid,
 		lport = up[1];
 		unlabeled = B_FALSE;
 		/* Cred cannot be null on IPv4 */
-		if (is_system_labeled())
-			unlabeled = (crgetlabel(DB_CRED(mp))->tsl_flags &
+		if (is_system_labeled()) {
+			cred_t *cr = msg_getcred(mp, NULL);
+			ASSERT(cr != NULL);
+			unlabeled = (crgetlabel(cr)->tsl_flags &
 			    TSLF_UNLABELED) != 0;
+		}
 		shared_addr = (zoneid == ALL_ZONES);
 		if (shared_addr) {
 			/*
@@ -1585,9 +1643,12 @@ ipcl_classify_v4(mblk_t *mp, uint8_t protocol, uint_t hdr_len, zoneid_t zoneid,
 		lport = up[1];
 		unlabeled = B_FALSE;
 		/* Cred cannot be null on IPv4 */
-		if (is_system_labeled())
-			unlabeled = (crgetlabel(DB_CRED(mp))->tsl_flags &
+		if (is_system_labeled()) {
+			cred_t *cr = msg_getcred(mp, NULL);
+			ASSERT(cr != NULL);
+			unlabeled = (crgetlabel(cr)->tsl_flags &
 			    TSLF_UNLABELED) != 0;
+		}
 		shared_addr = (zoneid == ALL_ZONES);
 		if (shared_addr) {
 			/*
@@ -1680,9 +1741,11 @@ ipcl_classify_v6(mblk_t *mp, uint8_t protocol, uint_t hdr_len, zoneid_t zoneid,
 		mutex_enter(&connfp->connf_lock);
 		for (connp = connfp->connf_head; connp != NULL;
 		    connp = connp->conn_next) {
-			if (IPCL_CONN_MATCH_V6(connp, protocol,
-			    ip6h->ip6_src, ip6h->ip6_dst, ports))
+			if ((IPCL_CONN_MATCH_V6(connp, protocol,
+			    ip6h->ip6_src, ip6h->ip6_dst, ports)) &&
+			    (IPCL_ZONE_MATCH(connp, zoneid))) {
 				break;
+			}
 		}
 
 		if (connp != NULL) {
@@ -1704,7 +1767,7 @@ ipcl_classify_v6(mblk_t *mp, uint8_t protocol, uint_t hdr_len, zoneid_t zoneid,
 		unlabeled = B_FALSE;
 		/* Cred can be null on IPv6 */
 		if (is_system_labeled()) {
-			cred_t *cr = DB_CRED(mp);
+			cred_t *cr = msg_getcred(mp, NULL);
 
 			unlabeled = (cr != NULL &&
 			    crgetlabel(cr)->tsl_flags & TSLF_UNLABELED) != 0;
@@ -1777,7 +1840,7 @@ ipcl_classify_v6(mblk_t *mp, uint8_t protocol, uint_t hdr_len, zoneid_t zoneid,
 		unlabeled = B_FALSE;
 		/* Cred can be null on IPv6 */
 		if (is_system_labeled()) {
-			cred_t *cr = DB_CRED(mp);
+			cred_t *cr = msg_getcred(mp, NULL);
 
 			unlabeled = (cr != NULL &&
 			    crgetlabel(cr)->tsl_flags & TSLF_UNLABELED) != 0;
@@ -1894,7 +1957,7 @@ ipcl_classify_raw(mblk_t *mp, uint8_t protocol, zoneid_t zoneid,
 	unlabeled = B_FALSE;
 	/* Cred can be null on IPv6 */
 	if (is_system_labeled()) {
-		cred_t *cr = DB_CRED(mp);
+		cred_t *cr = msg_getcred(mp, NULL);
 
 		unlabeled = (cr != NULL &&
 		    crgetlabel(cr)->tsl_flags & TSLF_UNLABELED) != 0;
@@ -2025,6 +2088,7 @@ tcp_conn_constructor(void *buf, void *cdrarg, int kmflags)
 
 	mutex_init(&connp->conn_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&connp->conn_cv, NULL, CV_DEFAULT, NULL);
+	cv_init(&connp->conn_sq_cv, NULL, CV_DEFAULT, NULL);
 	tcp->tcp_timercache = tcp_timermp_alloc(KM_NOSLEEP);
 	connp->conn_tcp = tcp;
 	connp->conn_flags = IPCL_TCPCONN;
@@ -2047,6 +2111,7 @@ tcp_conn_destructor(void *buf, void *cdrarg)
 	tcp_timermp_free(tcp);
 	mutex_destroy(&connp->conn_lock);
 	cv_destroy(&connp->conn_cv);
+	cv_destroy(&connp->conn_sq_cv);
 }
 
 /* ARGSUSED */
@@ -2181,15 +2246,63 @@ rts_conn_destructor(void *buf, void *cdrarg)
 	cv_destroy(&connp->conn_cv);
 }
 
+/* ARGSUSED */
+int
+ip_helper_stream_constructor(void *buf, void *cdrarg, int kmflags)
+{
+	int error;
+	netstack_t	*ns;
+	int		ret;
+	tcp_stack_t	*tcps;
+	ip_helper_stream_info_t	*ip_helper_str;
+	ip_stack_t	*ipst;
+
+	ns = netstack_find_by_cred(kcred);
+	ASSERT(ns != NULL);
+	tcps = ns->netstack_tcp;
+	ipst = ns->netstack_ip;
+	ASSERT(tcps != NULL);
+	ip_helper_str = (ip_helper_stream_info_t *)buf;
+
+	do {
+		error = ldi_open_by_name(DEV_IP, IP_HELPER_STR, kcred,
+		    &ip_helper_str->iphs_handle, ipst->ips_ldi_ident);
+	} while (error == EINTR);
+
+	if (error == 0) {
+		do {
+			error = ldi_ioctl(
+			    ip_helper_str->iphs_handle, SIOCSQPTR,
+			    (intptr_t)buf, FKIOCTL, kcred, &ret);
+		} while (error == EINTR);
+
+		if (error != 0) {
+			(void) ldi_close(
+			    ip_helper_str->iphs_handle, 0, kcred);
+		}
+	}
+
+	netstack_rele(ipst->ips_netstack);
+
+	return (error);
+}
+
+/* ARGSUSED */
+static void
+ip_helper_stream_destructor(void *buf, void *cdrarg)
+{
+	ip_helper_stream_info_t *ip_helper_str = (ip_helper_stream_info_t *)buf;
+
+	ip_helper_str->iphs_rq->q_ptr =
+	    ip_helper_str->iphs_wq->q_ptr =
+	    ip_helper_str->iphs_minfo;
+	(void) ldi_close(ip_helper_str->iphs_handle, 0, kcred);
+}
+
+
 /*
  * Called as part of ipcl_conn_destroy to assert and clear any pointers
  * in the conn_t.
- *
- * Below we list all the pointers in the conn_t as a documentation aid.
- * The ones that we can not ASSERT to be NULL are #ifdef'ed out.
- * If you add any pointers to the conn_t please add an ASSERT here
- * and #ifdef it out if it can't be actually asserted to be NULL.
- * In any case, we bzero most of the conn_t at the end of the function.
  */
 void
 ipcl_conn_cleanup(conn_t *connp)
@@ -2197,7 +2310,6 @@ ipcl_conn_cleanup(conn_t *connp)
 	ASSERT(connp->conn_ire_cache == NULL);
 	ASSERT(connp->conn_latch == NULL);
 #ifdef notdef
-	/* These are not cleared */
 	ASSERT(connp->conn_rq == NULL);
 	ASSERT(connp->conn_wq == NULL);
 #endif
@@ -2216,11 +2328,8 @@ ipcl_conn_cleanup(conn_t *connp)
 	 * We should replace these pointers with ifindex/ipaddr_t to
 	 * make the code less complex.
 	 */
-	ASSERT(connp->conn_xmit_if_ill == NULL);
-	ASSERT(connp->conn_nofailover_ill == NULL);
 	ASSERT(connp->conn_outgoing_ill == NULL);
 	ASSERT(connp->conn_incoming_ill == NULL);
-	ASSERT(connp->conn_outgoing_pill == NULL);
 	ASSERT(connp->conn_multicast_ipif == NULL);
 	ASSERT(connp->conn_multicast_ill == NULL);
 #endif
@@ -2236,11 +2345,11 @@ ipcl_conn_cleanup(conn_t *connp)
 	ASSERT(connp->conn_peercred == NULL);
 	ASSERT(connp->conn_netstack == NULL);
 
+	ASSERT(connp->conn_helper_info == NULL);
 	/* Clear out the conn_t fields that are not preserved */
 	bzero(&connp->conn_start_clr,
 	    sizeof (conn_t) -
 	    ((uchar_t *)&connp->conn_start_clr - (uchar_t *)connp));
-
 }
 
 /*

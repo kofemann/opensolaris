@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #
@@ -38,8 +38,6 @@ SRCDIR =	../common
 
 SRCS =	$(OBJECTS:%.o=$(SRCDIR)/%.c)
 
-ROOTLIBDIR = 	$(ROOTMMSLIBDIR)
-
 LDLIBS +=	 -lc -luuid
 LDLIBS +=	-L$(SRC)/lib/mms/mms/$(MACH) -lmms
 
@@ -49,7 +47,7 @@ CCFLAGS +=	$(C_BIGPICFLAGS)
 CPPFLAGS +=	-DMMS_OPENSSL
 CPPFLAGS +=	-I$(SRCDIR) -I$(SRC)/common/mms/mms
 CPPFLAGS +=	-I$(SRC)/lib/mms/mms/common
-CPPFLAGS +=	-I/usr/include/pgsql/server
+CPPFLAGS +=	-I/usr/postgres/8.3/include/server
 
 C99MODE = $(C99_ENABLE)
 
@@ -61,3 +59,5 @@ lint: $(LINTLIB) lintcheck
 
 include $(SRC)/lib/Makefile.targ
 include ../Makefile.rootdirs
+
+install: all $(ROOTLIBDIR) $(ROOTLIBS) $(ROOTLINKS)

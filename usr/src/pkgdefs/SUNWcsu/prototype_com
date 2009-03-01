@@ -18,7 +18,7 @@
 #
 # CDDL HEADER END
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # This required package information file contains a list of package contents.
@@ -232,6 +232,7 @@ f none usr/bin/pwd 555 root bin
 l none usr/bin/read=../../usr/bin/alias
 l none usr/bin/red=../../usr/bin/ed
 f none usr/bin/renice 555 root bin
+l none usr/bin/rev=../../usr/bin/alias
 l none usr/bin/rksh=../../usr/bin/ksh
 l none usr/bin/rksh93=../../usr/lib/isaexec
 f none usr/bin/rm 555 root bin
@@ -248,7 +249,8 @@ f none usr/bin/setpgrp 555 root sys
 f none usr/bin/settime 555 root bin
 l none usr/bin/setuname=../../usr/lib/isaexec
 s none usr/bin/sh=../../sbin/sh
-f none usr/bin/sleep 555 root bin
+f none usr/bin/shcomp 555 root bin
+l none usr/bin/sleep=../../usr/bin/alias
 l none usr/bin/sparc=../../usr/bin/i286
 f none usr/bin/strchg 555 root root
 s none usr/bin/strclean=../sbin/strclean
@@ -256,6 +258,7 @@ f none usr/bin/strconf 555 root root
 s none usr/bin/strerr=../sbin/strerr
 f none usr/bin/stty 555 root bin
 f none usr/bin/su 4555 root sys
+l none usr/bin/sum=../../usr/bin/alias
 l none usr/bin/sun2=../../usr/bin/i286
 l none usr/bin/sun3=../../usr/bin/i286
 l none usr/bin/sun3x=../../usr/bin/i286
@@ -647,7 +650,7 @@ d none usr/lib/inet/dhcp 755 root bin
 d none usr/lib/inet/dhcp/nsu 755 root bin
 d none usr/lib/inet/dhcp/svc 755 root bin
 f none usr/lib/inet/in.iked 555 root bin
-f none usr/lib/inet/in.mpathd 555 root bin
+s none usr/lib/inet/in.mpathd=../../../lib/inet/in.mpathd
 f none usr/lib/inet/inetd 555 root bin
 f none usr/lib/intrd 555 root bin
 f none usr/lib/isaexec 555 root bin
@@ -863,6 +866,7 @@ s none usr/sbin/init=../../sbin/init
 f none usr/sbin/install 555 root bin
 f none usr/sbin/installboot 555 root sys
 f none usr/sbin/ipaddrsel 555 root bin
+s none usr/sbin/ipmpstat=../../sbin/ipmpstat
 f none usr/sbin/ipsecalgs 555 root bin
 f none usr/sbin/ipsecconf 555 root bin
 f none usr/sbin/ipseckey 555 root bin

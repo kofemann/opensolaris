@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  * iSCSI Software Initiator
@@ -31,7 +31,7 @@
 #include "iscsi.h"		/* main header */
 #include <sys/scsi/adapters/iscsi_if.h>		/* ioctl interfaces */
 /* protocol structs and defines */
-#include <sys/scsi/adapters/iscsi_protocol.h>
+#include <sys/iscsi_protocol.h>
 #include "persistent.h"
 #include <sys/scsi/adapters/iscsi_door.h>
 #include "iscsi_targetparam.h"
@@ -237,12 +237,16 @@ iscsi_ioctl_conn_props_get(iscsi_hba_t *ihp, iscsi_conn_props_t *cp)
 	iscsi_sess_t		*isp;
 	iscsi_conn_t		*icp;
 	boolean_t		rtn;
+	struct sockaddr_in6	t_addr;
+	socklen_t		t_addrlen;
 
 	/* Let's check the version. */
 	if (cp->cp_vers != ISCSI_INTERFACE_VERSION) {
 		return (B_FALSE);
 	}
 
+	bzero(&t_addr, sizeof (struct sockaddr_in6));
+	t_addrlen = sizeof (struct sockaddr_in6);
 	/* Let's find the session. */
 	rw_enter(&ihp->hba_sess_list_rwlock, RW_READER);
 	if (iscsi_sess_get(cp->cp_sess_oid, ihp, &isp) != 0) {
@@ -263,18 +267,15 @@ iscsi_ioctl_conn_props_get(iscsi_hba_t *ihp, iscsi_conn_props_t *cp)
 		ASSERT(icp->conn_sig == ISCSI_SIG_CONN);
 
 		if (icp->conn_oid == cp->cp_oid) {
-
-			if (icp->conn_socket->so_laddr.soa_len <=
-			    sizeof (cp->cp_local)) {
-				bcopy(icp->conn_socket->so_laddr.soa_sa,
-				    &cp->cp_local,
-				    icp->conn_socket->so_laddr.soa_len);
+			iscsi_net->getsockname(icp->conn_socket,
+			    (struct sockaddr *)&t_addr, &t_addrlen);
+			if (t_addrlen <= sizeof (cp->cp_local)) {
+				bcopy(&t_addr, &cp->cp_local, t_addrlen);
 			}
-			if (icp->conn_socket->so_faddr.soa_len <=
-			    sizeof (cp->cp_peer)) {
-				bcopy(icp->conn_socket->so_faddr.soa_sa,
-				    &cp->cp_peer,
-				    icp->conn_socket->so_faddr.soa_len);
+			ksocket_getpeername((ksocket_t)(icp->conn_socket),
+			    (struct sockaddr *)&t_addr, &t_addrlen, CRED());
+			if (t_addrlen <= sizeof (cp->cp_peer)) {
+				bcopy(&t_addr, &cp->cp_peer, t_addrlen);
 			}
 
 			if (icp->conn_state == ISCSI_CONN_STATE_LOGGED_IN) {
@@ -847,8 +848,10 @@ iscsi_set_params(iscsi_param_set_t *ils, iscsi_hba_t *ihp, boolean_t persist)
 		} else {
 			/* session */
 			name = iscsi_targetparam_get_name(ils->s_oid);
+			if (name == NULL)
+				rtn = EFAULT;
 
-			if (persist) {
+			if (persist && (rtn == 0)) {
 				boolean_t		rval;
 				persistent_param_t	*pp;
 
@@ -925,7 +928,7 @@ mutex_exit(&isp->sess_state_mutex);
 		 * sessions that don't already have the parameter
 		 * overriden
 		 */
-		if (ils->s_oid == ihp->hba_oid) {
+		if ((ils->s_oid == ihp->hba_oid) && (rtn == 0)) {
 			ilg = (iscsi_param_get_t *)
 			    kmem_alloc(sizeof (*ilg), KM_SLEEP);
 

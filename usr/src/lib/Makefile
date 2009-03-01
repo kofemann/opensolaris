@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #
@@ -84,6 +84,7 @@ SUBDIRS += \
 	libdll			\
 	libcmd			\
 	libshell		\
+	libsum			\
 	librt			\
 	libadm			\
 	libctf			\
@@ -272,8 +273,6 @@ sparc_SUBDIRS= .WAIT	\
 	libpcp		\
 	libtsalarm
 
-i386_SUBDIRS= libfdisk
-
 FM_sparc_DEPLIBS= libpri
 
 fm:			\
@@ -332,6 +331,7 @@ MSGSUBDIRS=		\
 	libslp		\
 	libsmbfs	\
 	libsmedia	\
+	libsum		\
 	libtsol		\
 	libuutil	\
 	libvscan	\
@@ -353,8 +353,6 @@ MSGSUBDIRS += \
 sparc_MSGSUBDIRS=	\
 	libprtdiag	\
 	libprtdiag_psr
-
-i386_MSGSUBDIRS= libfdisk
 
 HDRSUBDIRS=		\
 	auditd_plugins	\
@@ -434,6 +432,7 @@ HDRSUBDIRS=		\
 	libsmedia	\
 	libsqlite	\
 	libstmf		\
+	libsum		\
 	libsysevent	\
 	libtecla	\
 	libtnf		\
@@ -472,6 +471,7 @@ HDRSUBDIRS=		\
 	libima		\
 	libsun_ima	\
 	mpapi		\
+	mms		\
 	$($(MACH)_HDRSUBDIRS)
 
 $(CLOSED_BUILD)HDRSUBDIRS += \
@@ -484,8 +484,6 @@ sparc_HDRSUBDIRS=	\
 	libdscp		\
 	libpri		\
 	storage
-
-i386_HDRSUBDIRS= libfdisk
 
 all :=		TARGET= all
 check :=	TARGET= check
@@ -539,10 +537,10 @@ gss_mechs/mech_krb5:	libgss libnsl libsocket libresolv pkcs11
 libadt_jni:	libbsm
 $(CLOSED_BUILD)libc:		$(CLOSED)/lib/libc_i18n
 libast: 	libsocket
-libadutils: 	libldap5 libidmap
-nsswitch:	libadutils
+libadutils: 	libldap5 libresolv libsocket libnsl
+nsswitch:	libadutils libidmap
 libbsm:		libtsol
-libcmd: 	libast libsocket libnsl
+libcmd: 	libsum libast libsocket libnsl
 libcmdutils:	libavl
 libcontract:	libnvpair
 libdevid:	libdevinfo
@@ -559,7 +557,7 @@ libdtrace_jni:	libuutil libdtrace
 libefi:		libuuid
 libfstyp:	libnvpair
 libelfsign:	libcryptoutil libkmf
-libidmap:	libnsl
+libidmap:	libadutils libldap5 libavl libsldap
 libinetcfg:	libnsl libsocket libdlpi
 libiscsit:	libc libnvpair libstmf libuuid libnsl
 libkmf:		libcryptoutil pkcs11 openssl
@@ -577,6 +575,7 @@ libshell:	libast libcmd libdll libsocket libsecdb
 libsip:		libmd5
 libsmbfs:	libsocket libnsl libkrb5
 libsocket:	libnsl
+libsum: 	libast
 libldap5:	libsasl libsocket libnsl libmd
 libsldap:	libldap5 libtsol libnsl libc libscf libresolv
 libpool:	libnvpair libexacct

@@ -20,12 +20,26 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #
 
-SUNW_1.1 {
+#
+# MAPFILE HEADER START
+#
+# WARNING:  STOP NOW.  DO NOT MODIFY THIS FILE.
+# Object versioning must comply with the rules detailed in
+#
+#	usr/src/lib/README.mapfiles
+#
+# You should not be making modifications here until you've read the most current
+# copy of that file. If you need help, contact a gatekeeper for guidance.
+#
+# MAPFILE HEADER END
+#
+
+SUNWprivate_1.1 {
 	global:
 		pg_finfo_pg_get_uuid;
 		pg_finfo_pg_host_ident;
@@ -35,6 +49,7 @@ SUNW_1.1 {
 		pg_detoast_datum = extern;
 		MemoryContextAlloc = extern;
 		CurrentMemoryContext = extern;
+		Pg_magic_func = extern;
 	local:
 		*;
 };

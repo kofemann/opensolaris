@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -108,6 +108,8 @@ cpu_t		*clock_cpu_list;	/* used by clock to walk CPUs */
 cpu_t		*cpu_active;		/* list of active CPUs */
 static cpuset_t	cpu_available;		/* set of available CPUs */
 cpuset_t	cpu_seqid_inuse;	/* which cpu_seqids are in use */
+
+cpu_t		**cpu_seq;		/* ptrs to CPUs, indexed by seq_id */
 
 /*
  * max_ncpus keeps the max cpus the system can have. Initially
@@ -1229,6 +1231,7 @@ cpu_offline(cpu_t *cp, int flags)
 	cpu_t	*ncp;
 	int	intr_enable;
 	int	cyclic_off = 0;
+	int	callout_off = 0;
 	int	loop_count;
 	int	no_quiesce = 0;
 	int	(*bound_func)(struct cpu *, int);
@@ -1352,6 +1355,11 @@ again:	for (loop_count = 0; (*bound_func)(cp, 0); loop_count++) {
 		 * processor.
 		 */
 		delay(hz/100);
+	}
+
+	if (error == 0 && callout_off == 0) {
+		callout_cpu_offline(cp);
+		callout_off = 1;
 	}
 
 	if (error == 0 && cyclic_off == 0) {
@@ -1533,6 +1541,13 @@ out:
 		cyclic_online(cp);
 
 	/*
+	 * If we failed, but managed to offline callouts on this CPU,
+	 * bring it back online.
+	 */
+	if (error && callout_off)
+		callout_cpu_online(cp);
+
+	/*
 	 * If we failed, tell the PG subsystem that the CPU is back
 	 */
 	pg_cpupart_in(cp, pp);
@@ -1643,6 +1658,20 @@ cpu_poweroff(cpu_t *cp)
 }
 
 /*
+ * Initialize the Sequential CPU id lookup table
+ */
+void
+cpu_seq_tbl_init()
+{
+	cpu_t	**tbl;
+
+	tbl = kmem_zalloc(sizeof (struct cpu *) * max_ncpus, KM_SLEEP);
+	tbl[0] = CPU;
+
+	cpu_seq = tbl;
+}
+
+/*
  * Initialize the CPU lists for the first CPU.
  */
 void
@@ -1659,8 +1688,15 @@ cpu_list_init(cpu_t *cp)
 
 	cp->cpu_seqid = 0;
 	CPUSET_ADD(cpu_seqid_inuse, 0);
+
+	/*
+	 * Bootstrap cpu_seq using cpu_list
+	 * The cpu_seq[] table will be dynamically allocated
+	 * when kmem later becomes available (but before going MP)
+	 */
+	cpu_seq = &cpu_list;
+
 	cp->cpu_cache_offset = KMEM_CACHE_SIZE(cp->cpu_seqid);
-	cp_default.cp_mach = &cp_default_mach;
 	cp_default.cp_cpulist = cp;
 	cp_default.cp_ncpus = 1;
 	cp->cpu_next_part = cp;
@@ -1719,6 +1755,7 @@ cpu_add_unit(cpu_t *cp)
 	cp->cpu_cache_offset = KMEM_CACHE_SIZE(cp->cpu_seqid);
 	cpu[cp->cpu_id] = cp;
 	CPUSET_ADD(cpu_available, cp->cpu_id);
+	cpu_seq[cp->cpu_seqid] = cp;
 
 	/*
 	 * allocate a pause thread for this CPU.
@@ -1777,6 +1814,8 @@ cpu_del_unit(int cpuid)
 	cpu_pause_free(cp);
 	CPUSET_DEL(cpu_available, cp->cpu_id);
 	cpu[cp->cpu_id] = NULL;
+	cpu_seq[cp->cpu_seqid] = NULL;
+
 	/*
 	 * The clock thread and mutex_vector_enter cannot hold the
 	 * cpu_lock while traversing the cpu list, therefore we pause

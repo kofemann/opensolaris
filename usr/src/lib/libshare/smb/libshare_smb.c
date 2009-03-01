@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -50,6 +50,9 @@
 #include <smbsrv/smb_share.h>
 #include <smbsrv/smbinfo.h>
 #include <smbsrv/libsmb.h>
+#include <libdlpi.h>
+
+#define	SMB_CSC_BUFSZ		64
 
 /* internal functions */
 static int smb_share_init(void);
@@ -73,7 +76,6 @@ static int range_check_validator_zero_ok(int, char *);
 static int string_length_check_validator(int, char *);
 static int true_false_validator(int, char *);
 static int ip_address_validator_empty_ok(int, char *);
-static int ip_address_csv_list_validator_empty_ok(int, char *);
 static int path_validator(int, char *);
 
 static int smb_enable_resource(sa_resource_t);
@@ -82,7 +84,20 @@ static uint64_t smb_share_features(void);
 static int smb_list_transient(sa_handle_t);
 
 static int smb_build_shareinfo(sa_share_t, sa_resource_t, smb_share_t *);
+static void smb_csc_option(const char *, smb_share_t *);
+static char *smb_csc_name(const smb_share_t *);
 static sa_group_t smb_get_defaultgrp(sa_handle_t);
+static int interface_validator(int, char *);
+
+static struct {
+	char *value;
+	uint32_t flag;
+} cscopt[] = {
+	{ "disabled",	SMB_SHRF_CSC_DISABLED },
+	{ "manual",	SMB_SHRF_CSC_MANUAL },
+	{ "auto",	SMB_SHRF_CSC_AUTO },
+	{ "vdo",	SMB_SHRF_CSC_VDO }
+};
 
 /* size of basic format allocation */
 #define	OPT_CHUNK	1024
@@ -97,6 +112,11 @@ static sa_group_t smb_get_defaultgrp(sa_handle_t);
  */
 #define	PROTO_OPT_WINS1			6
 #define	PROTO_OPT_WINS_EXCLUDE		8
+
+typedef struct smb_hostifs_walker {
+	const char	*hiw_ifname;
+	boolean_t	hiw_matchfound;
+} smb_hostifs_walker_t;
 
 
 /*
@@ -134,19 +154,14 @@ struct sa_plugin_ops sa_plugin_ops = {
 	NULL	/* delete_proto_section */
 };
 
-/*
- * option definitions.  Make sure to keep the #define for the option
- * index just before the entry it is the index for. Changing the order
- * can cause breakage.
- */
-
 struct option_defs optdefs[] = {
-	{SMB_SHROPT_AD_CONTAINER, OPT_TYPE_STRING},
-	{SMB_SHROPT_NAME, OPT_TYPE_NAME},
-	{SHOPT_RO, OPT_TYPE_ACCLIST},
-	{SHOPT_RW, OPT_TYPE_ACCLIST},
-	{SHOPT_NONE, OPT_TYPE_ACCLIST},
-	{NULL, NULL},
+	{ SHOPT_AD_CONTAINER,	OPT_TYPE_STRING },
+	{ SHOPT_NAME,		OPT_TYPE_NAME },
+	{ SHOPT_RO,		OPT_TYPE_ACCLIST },
+	{ SHOPT_RW,		OPT_TYPE_ACCLIST },
+	{ SHOPT_NONE,		OPT_TYPE_ACCLIST },
+	{ SHOPT_CSC,		OPT_TYPE_CSC },
+	{ NULL, NULL }
 };
 
 /*
@@ -241,6 +256,22 @@ validresource(const char *name)
 			return (B_FALSE);
 
 	return (B_TRUE);
+}
+
+/*
+ * Check that the client-side caching (CSC) option value is valid.
+ */
+static boolean_t
+validcsc(const char *value)
+{
+	int i;
+
+	for (i = 0; i < (sizeof (cscopt) / sizeof (cscopt[0])); ++i) {
+		if (strcasecmp(value, cscopt[i].value) == 0)
+			return (B_TRUE);
+	}
+
+	return (B_FALSE);
 }
 
 /*
@@ -438,9 +469,8 @@ smb_enable_share(sa_share_t share)
 			share_t sh;
 
 			sa_sharetab_fill_zfs(share, &sh, "smb");
-			err = sa_share_zfs(share, (char *)path, &sh,
+			err = sa_share_zfs(share, resource, (char *)path, &sh,
 			    &si, ZFS_SHARE_SMB);
-
 			sa_emptyshare(&sh);
 		}
 	}
@@ -660,7 +690,7 @@ smb_disable_share(sa_share_t share, char *path)
 			share_t sh;
 
 			sa_sharetab_fill_zfs(share, &sh, "smb");
-			err = sa_share_zfs(share, (char *)path, &sh,
+			err = sa_share_zfs(share, resource, (char *)path, &sh,
 			    rname, ZFS_UNSHARE_SMB);
 			/*
 			 * If we are no longer the first case, we
@@ -754,6 +784,10 @@ smb_validate_property(sa_handle_t handle, sa_property_t property,
 		case OPT_TYPE_STRING:
 			/* whatever is here should be ok */
 			break;
+		case OPT_TYPE_CSC:
+			if (validcsc(value) == B_FALSE)
+				ret = SA_BAD_VALUE;
+			break;
 		case OPT_TYPE_ACCLIST: {
 			sa_property_t oprop;
 			char *ovalue;
@@ -834,7 +868,7 @@ struct smb_proto_option_defs {
 	{ SMB_CI_WINS_SRV2, 0, MAX_VALUE_BUFLEN,
 	    ip_address_validator_empty_ok, SMB_REFRESH_REFRESH },
 	{ SMB_CI_WINS_EXCL, 0, MAX_VALUE_BUFLEN,
-	    ip_address_csv_list_validator_empty_ok, SMB_REFRESH_REFRESH },
+	    interface_validator, SMB_REFRESH_REFRESH },
 	{ SMB_CI_SIGNING_ENABLE, 0, 0, true_false_validator,
 	    SMB_REFRESH_REFRESH },
 	{ SMB_CI_SIGNING_REQD, 0, 0, true_false_validator,
@@ -847,6 +881,8 @@ struct smb_proto_option_defs {
 	    string_length_check_validator, SMB_REFRESH_REFRESH },
 	{ SMB_CI_DYNDNS_ENABLE, 0, 0, true_false_validator, 0 },
 	{ SMB_CI_AUTOHOME_MAP, 0, MAX_VALUE_BUFLEN, path_validator, 0 },
+	{ SMB_CI_IPV6_ENABLE, 0, 0, true_false_validator,
+	    SMB_REFRESH_REFRESH },
 };
 
 #define	SMB_OPT_NUM \
@@ -948,42 +984,76 @@ ip_address_validator_empty_ok(int index, char *value)
 }
 
 /*
- * Check IP address list
+ * Call back function for dlpi_walk.
+ * Returns TRUE if interface name exists on the host.
+ */
+static boolean_t
+smb_get_interface(const char *ifname, void *arg)
+{
+	smb_hostifs_walker_t *iterp = arg;
+
+	iterp->hiw_matchfound = (strcmp(ifname, iterp->hiw_ifname) == 0);
+
+	return (iterp->hiw_matchfound);
+}
+
+/*
+ * Checks to see if the input interface exists on the host.
+ * Returns B_TRUE if the match is found, B_FALSE otherwise.
+ */
+static boolean_t
+smb_validate_interface(const char *ifname)
+{
+	smb_hostifs_walker_t	iter;
+
+	if ((ifname == NULL) || (*ifname == '\0'))
+		return (B_FALSE);
+
+	iter.hiw_ifname = ifname;
+	iter.hiw_matchfound = B_FALSE;
+	dlpi_walk(smb_get_interface, &iter, 0);
+
+	return (iter.hiw_matchfound);
+}
+
+/*
+ * Check valid interfaces. Interface names value can be NULL or empty.
+ * Returns SA_BAD_VALUE if interface cannot be found on the host.
  */
 /*ARGSUSED*/
 static int
-ip_address_csv_list_validator_empty_ok(int index, char *value)
+interface_validator(int index, char *value)
 {
-	char sbytes[16];
-	char *ip, *tmp, *ctx;
+	char buf[16];
+	int ret = SA_OK;
+	char *ifname, *tmp, *p;
 
 	if (value == NULL || *value == '\0')
-		return (SA_OK);
+		return (ret);
 
 	if (strlen(value) > MAX_VALUE_BUFLEN)
 		return (SA_BAD_VALUE);
 
-	if ((tmp = strdup(value)) == NULL)
+	if ((p = strdup(value)) == NULL)
 		return (SA_NO_MEMORY);
 
-	ip = strtok_r(tmp, ",", &ctx);
-	while (ip) {
-		if (strlen(ip) == 0) {
-			free(tmp);
-			return (SA_BAD_VALUE);
+	tmp = p;
+	while ((ifname = strsep(&tmp, ",")) != NULL) {
+		if (*ifname == '\0') {
+			ret = SA_BAD_VALUE;
+			break;
 		}
-		if (*ip != 0) {
-			if (inet_pton(AF_INET, ip,
-			    (void *)sbytes) != 1) {
-				free(tmp);
-				return (SA_BAD_VALUE);
+
+		if (!smb_validate_interface(ifname)) {
+			if (inet_pton(AF_INET, ifname, (void *)buf) == 0) {
+				ret = SA_BAD_VALUE;
+				break;
 			}
 		}
-		ip = strtok_r(0, ",", &ctx);
 	}
 
-	free(tmp);
-	return (SA_OK);
+	free(p);
+	return (ret);
 }
 
 /*
@@ -1405,6 +1475,7 @@ smb_add_transient(sa_handle_t handle, smb_share_t *si)
 	sa_share_t share;
 	sa_group_t group;
 	sa_resource_t resource;
+	char *cscopt;
 
 	if (si == NULL)
 		return (SA_INVALID_NAME);
@@ -1434,10 +1505,13 @@ smb_add_transient(sa_handle_t handle, smb_share_t *si)
 			return (SA_NO_SUCH_RESOURCE);
 	}
 
-	/* set resource attributes now */
-	(void) sa_set_resource_attr(resource, "description", si->shr_cmnt);
-	(void) sa_set_resource_attr(resource, SMB_SHROPT_AD_CONTAINER,
-	    si->shr_container);
+	if (si->shr_cmnt[0] != '\0')
+		(void) sa_set_resource_description(resource, si->shr_cmnt);
+	if (si->shr_container[0] != '\0')
+		(void) sa_set_resource_attr(resource, SHOPT_AD_CONTAINER,
+		    si->shr_container);
+	if ((cscopt = smb_csc_name(si)) != NULL)
+		(void) sa_set_resource_attr(resource, SHOPT_CSC, cscopt);
 
 	return (SA_OK);
 }
@@ -1479,31 +1553,24 @@ smb_list_transient(sa_handle_t handle)
 static char *
 fix_resource_name(sa_share_t share, char *name, char *prefix)
 {
-	char *dataset = NULL;
-	char *newname = NULL;
-	size_t psize;
-	size_t nsize;
+	char buf[SA_MAX_RESOURCE_NAME + 1];
+	char *dataset;
+	size_t bufsz = SA_MAX_RESOURCE_NAME + 1;
+	size_t prelen;
 
 	dataset = sa_get_share_attr(share, "dataset");
+	if (dataset == NULL)
+		return (strdup(name));
 
-	if (dataset != NULL && strcmp(dataset, prefix) != 0) {
-		psize = strlen(prefix);
-		if (strncmp(dataset, prefix, psize) == 0) {
-			/* need string plus ',' and NULL */
-			nsize = (strlen(dataset) - psize) + strlen(name) + 2;
-			newname = calloc(nsize, 1);
-			if (newname != NULL) {
-				(void) snprintf(newname, nsize, "%s%s", name,
-				    dataset + psize);
-				sa_fix_resource_name(newname);
-			}
-			sa_free_attr_string(dataset);
-			return (newname);
-		}
-	}
-	if (dataset != NULL)
-		sa_free_attr_string(dataset);
-	return (strdup(name));
+	(void) strlcpy(buf, name, bufsz);
+	prelen = strlen(prefix);
+
+	if (strncmp(dataset, prefix, prelen) == 0)
+		(void) strlcat(buf, dataset + prelen, bufsz);
+
+	sa_free_attr_string(dataset);
+	sa_fix_resource_name(buf);
+	return (strdup(buf));
 }
 
 /*
@@ -1915,11 +1982,19 @@ smb_build_shareinfo(sa_share_t share, sa_resource_t resource, smb_share_t *si)
 	if (opts == NULL)
 		return (SA_OK);
 
-	prop = sa_get_property(opts, SMB_SHROPT_AD_CONTAINER);
+	prop = sa_get_property(opts, SHOPT_AD_CONTAINER);
 	if (prop != NULL) {
 		if ((val = sa_get_property_attr(prop, "value")) != NULL) {
 			(void) strlcpy(si->shr_container, val,
 			    sizeof (si->shr_container));
+			free(val);
+		}
+	}
+
+	prop = sa_get_property(opts, SHOPT_CSC);
+	if (prop != NULL) {
+		if ((val = sa_get_property_attr(prop, "value")) != NULL) {
+			smb_csc_option(val, si);
 			free(val);
 		}
 	}
@@ -1956,6 +2031,70 @@ smb_build_shareinfo(sa_share_t share, sa_resource_t resource, smb_share_t *si)
 
 	sa_free_derived_optionset(opts);
 	return (SA_OK);
+}
+
+/*
+ * Map a client-side caching (CSC) option to the appropriate share
+ * flag.  Only one option is allowed; an error will be logged if
+ * multiple options have been specified.  We don't need to do anything
+ * about multiple values here because the SRVSVC will not recognize
+ * a value containing multiple flags and will return the default value.
+ *
+ * If the option value is not recognized, it will be ignored: invalid
+ * values will typically be caught and rejected by sharemgr.
+ */
+static void
+smb_csc_option(const char *value, smb_share_t *si)
+{
+	char buf[SMB_CSC_BUFSZ];
+	int i;
+
+	for (i = 0; i < (sizeof (cscopt) / sizeof (cscopt[0])); ++i) {
+		if (strcasecmp(value, cscopt[i].value) == 0) {
+			si->shr_flags |= cscopt[i].flag;
+			break;
+		}
+	}
+
+	switch (si->shr_flags & SMB_SHRF_CSC_MASK) {
+	case 0:
+	case SMB_SHRF_CSC_DISABLED:
+	case SMB_SHRF_CSC_MANUAL:
+	case SMB_SHRF_CSC_AUTO:
+	case SMB_SHRF_CSC_VDO:
+		break;
+
+	default:
+		buf[0] = '\0';
+
+		for (i = 0; i < (sizeof (cscopt) / sizeof (cscopt[0])); ++i) {
+			if (si->shr_flags & cscopt[i].flag) {
+				(void) strlcat(buf, " ", SMB_CSC_BUFSZ);
+				(void) strlcat(buf, cscopt[i].value,
+				    SMB_CSC_BUFSZ);
+			}
+		}
+
+		syslog(LOG_ERR, "csc option conflict:%s", buf);
+		break;
+	}
+}
+
+/*
+ * Return the option name for the first CSC flag (there should be only
+ * one) encountered in the share flags.
+ */
+static char *
+smb_csc_name(const smb_share_t *si)
+{
+	int i;
+
+	for (i = 0; i < (sizeof (cscopt) / sizeof (cscopt[0])); ++i) {
+		if (si->shr_flags & cscopt[i].flag)
+			return (cscopt[i].value);
+	}
+
+	return (NULL);
 }
 
 /*

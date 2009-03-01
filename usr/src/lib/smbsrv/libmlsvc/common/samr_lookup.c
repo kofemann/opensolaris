@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -35,12 +35,11 @@
 #include <unistd.h>
 
 #include <smbsrv/libsmb.h>
-
+#include <smbsrv/libmlsvc.h>
 #include <smbsrv/ntstatus.h>
 #include <smbsrv/smb_sid.h>
-#include <smbsrv/samlib.h>
-#include <smbsrv/mlrpc.h>
-#include <smbsrv/mlsvc.h>
+#include <samlib.h>
+#include <smbsrv/libmlrpc.h>
 
 static int samr_setup_user_info(WORD, struct samr_QueryUserInfo *,
     union samr_user_info *);
@@ -52,29 +51,20 @@ static int samr_set_user_password(smb_auth_info_t *, BYTE *);
  * samr_lookup_domain
  *
  * Lookup up the domain SID for the specified domain name. The handle
- * should be one returned from samr_connect. The results will be
- * returned in user_info - which should have been allocated by the
- * caller. On success sid_name_use will be set to SidTypeDomain.
- *
- * Returns 0 on success, otherwise returns -ve error code.
+ * should be one returned from samr_connect. The allocated memory for
+ * the returned SID must be freed by caller.
  */
-int
-samr_lookup_domain(mlsvc_handle_t *samr_handle, char *domain_name,
-    smb_userinfo_t *user_info)
+smb_sid_t *
+samr_lookup_domain(mlsvc_handle_t *samr_handle, char *domain_name)
 {
 	struct samr_LookupDomain arg;
-	struct mlsvc_rpc_context *context;
-	mlrpc_heapref_t heap;
+	smb_sid_t *domsid = NULL;
 	int opnum;
-	int rc;
 	size_t length;
 
-	if (mlsvc_is_null_handle(samr_handle) ||
-	    domain_name == NULL || user_info == NULL) {
-		return (-1);
-	}
+	if (ndr_is_null_handle(samr_handle) || domain_name == NULL)
+		return (NULL);
 
-	context = samr_handle->context;
 	opnum = SAMR_OPNUM_LookupDomain;
 	bzero(&arg, sizeof (struct samr_LookupDomain));
 
@@ -82,23 +72,18 @@ samr_lookup_domain(mlsvc_handle_t *samr_handle, char *domain_name,
 	    sizeof (samr_handle_t));
 
 	length = mts_wcequiv_strlen(domain_name);
-	if (context->server_os == NATIVE_OS_WIN2000)
+	if (ndr_rpc_server_os(samr_handle) == NATIVE_OS_WIN2000)
 		length += sizeof (mts_wchar_t);
 
 	arg.domain_name.length = length;
 	arg.domain_name.allosize = length;
 	arg.domain_name.str = (unsigned char *)domain_name;
 
-	(void) mlsvc_rpc_init(&heap);
-	rc = mlsvc_rpc_call(context, opnum, &arg, &heap);
-	if (rc == 0) {
-		user_info->sid_name_use = SidTypeDomain;
-		user_info->domain_sid = smb_sid_dup((smb_sid_t *)arg.sid);
-		user_info->domain_name = MEM_STRDUP("mlrpc", domain_name);
-	}
+	if (ndr_rpc_call(samr_handle, opnum, &arg) == 0)
+		domsid = smb_sid_dup((smb_sid_t *)arg.sid);
 
-	mlsvc_rpc_free(context, &heap);
-	return (rc);
+	ndr_rpc_release(samr_handle);
+	return (domsid);
 }
 
 /*
@@ -112,15 +97,12 @@ DWORD
 samr_enum_local_domains(mlsvc_handle_t *samr_handle)
 {
 	struct samr_EnumLocalDomain arg;
-	struct mlsvc_rpc_context *context;
-	mlrpc_heapref_t heap;
 	int opnum;
 	DWORD status;
 
-	if (mlsvc_is_null_handle(samr_handle))
+	if (ndr_is_null_handle(samr_handle))
 		return (NT_STATUS_INVALID_PARAMETER);
 
-	context = samr_handle->context;
 	opnum = SAMR_OPNUM_EnumLocalDomains;
 	bzero(&arg, sizeof (struct samr_EnumLocalDomain));
 
@@ -129,8 +111,7 @@ samr_enum_local_domains(mlsvc_handle_t *samr_handle)
 	arg.enum_context = 0;
 	arg.max_length = 0x00002000;	/* Value used by NT */
 
-	(void) mlsvc_rpc_init(&heap);
-	if (mlsvc_rpc_call(context, opnum, &arg, &heap) != 0) {
+	if (ndr_rpc_call(samr_handle, opnum, &arg) != 0) {
 		status = NT_STATUS_INVALID_PARAMETER;
 	} else {
 		status = NT_SC_VALUE(arg.status);
@@ -139,38 +120,37 @@ samr_enum_local_domains(mlsvc_handle_t *samr_handle)
 		 * Handle none-mapped status quietly.
 		 */
 		if (status != NT_STATUS_NONE_MAPPED)
-			mlsvc_rpc_report_status(opnum, arg.status);
+			ndr_rpc_status(samr_handle, opnum, arg.status);
 	}
 
+	ndr_rpc_release(samr_handle);
 	return (status);
 }
 
 /*
  * samr_lookup_domain_names
  *
- * Lookup up a name
- * returned in user_info - which should have been allocated by the
- * caller. On success sid_name_use will be set to SidTypeDomain.
+ * Lookup up the given name in the domain specified by domain_handle.
+ * Upon a successful lookup the information is returned in the account
+ * arg and caller must free allocated memories by calling smb_account_free().
  *
- * Returns 0 on success. Otherwise returns an NT status code.
+ * Returns NT status codes.
  */
-DWORD
+uint32_t
 samr_lookup_domain_names(mlsvc_handle_t *domain_handle, char *name,
-    smb_userinfo_t *user_info)
+    smb_account_t *account)
 {
 	struct samr_LookupNames arg;
-	struct mlsvc_rpc_context *context;
-	mlrpc_heapref_t heap;
 	int opnum;
-	DWORD status;
+	uint32_t status;
 	size_t length;
 
-	if (mlsvc_is_null_handle(domain_handle) ||
-	    name == NULL || user_info == NULL) {
+	if (ndr_is_null_handle(domain_handle) ||
+	    name == NULL || account == NULL) {
 		return (NT_STATUS_INVALID_PARAMETER);
 	}
 
-	context = domain_handle->context;
+	bzero(account, sizeof (smb_account_t));
 	opnum = SAMR_OPNUM_LookupNames;
 	bzero(&arg, sizeof (struct samr_LookupNames));
 
@@ -182,32 +162,30 @@ samr_lookup_domain_names(mlsvc_handle_t *domain_handle, char *name,
 	arg.total = 1;
 
 	length = mts_wcequiv_strlen(name);
-	if (context->server_os == NATIVE_OS_WIN2000)
+	if (ndr_rpc_server_os(domain_handle) == NATIVE_OS_WIN2000)
 		length += sizeof (mts_wchar_t);
 
 	arg.name.length = length;
 	arg.name.allosize = length;
 	arg.name.str = (unsigned char *)name;
 
-	(void) mlsvc_rpc_init(&heap);
-	if (mlsvc_rpc_call(context, opnum, &arg, &heap) != 0) {
+	if (ndr_rpc_call(domain_handle, opnum, &arg) != 0) {
 		status = NT_STATUS_INVALID_PARAMETER;
-	} else if (arg.status != 0) {
+	} else if (arg.status != NT_STATUS_SUCCESS) {
 		status = NT_SC_VALUE(arg.status);
 
 		/*
 		 * Handle none-mapped status quietly.
 		 */
 		if (status != NT_STATUS_NONE_MAPPED)
-			mlsvc_rpc_report_status(opnum, arg.status);
+			ndr_rpc_status(domain_handle, opnum, arg.status);
 	} else {
-		user_info->name = MEM_STRDUP("mlrpc", name);
-		user_info->sid_name_use = arg.rid_types.rid_type[0];
-		user_info->rid = arg.rids.rid[0];
-		status = 0;
+		account->a_type = arg.rid_types.rid_type[0];
+		account->a_rid = arg.rids.rid[0];
+		status = NT_STATUS_SUCCESS;
 	}
 
-	mlsvc_rpc_free(context, &heap);
+	ndr_rpc_release(domain_handle);
 	return (status);
 }
 
@@ -224,15 +202,12 @@ samr_query_user_info(mlsvc_handle_t *user_handle, WORD switch_value,
     union samr_user_info *user_info)
 {
 	struct samr_QueryUserInfo arg;
-	struct mlsvc_rpc_context *context;
-	mlrpc_heapref_t heap;
 	int opnum;
 	int rc;
 
-	if (mlsvc_is_null_handle(user_handle) || user_info == 0)
+	if (ndr_is_null_handle(user_handle) || user_info == 0)
 		return (-1);
 
-	context = user_handle->context;
 	opnum = SAMR_OPNUM_QueryUserInfo;
 	bzero(&arg, sizeof (struct samr_QueryUserInfo));
 
@@ -240,20 +215,19 @@ samr_query_user_info(mlsvc_handle_t *user_handle, WORD switch_value,
 	    sizeof (samr_handle_t));
 	arg.switch_value = switch_value;
 
-	(void) mlsvc_rpc_init(&heap);
-	rc = mlsvc_rpc_call(context, opnum, &arg, &heap);
-	if (rc == 0) {
-		if (arg.status != 0)
-			rc = -1;
-		else
-			rc = samr_setup_user_info(switch_value, &arg,
-			    user_info);
+	if (ndr_rpc_call(user_handle, opnum, &arg) != 0) {
+		ndr_rpc_release(user_handle);
+		return (-1);
 	}
 
-	mlsvc_rpc_free(context, &heap);
+	if (arg.status != 0)
+		rc = -1;
+	else
+		rc = samr_setup_user_info(switch_value, &arg, user_info);
+
+	ndr_rpc_release(user_handle);
 	return (rc);
 }
-
 
 /*
  * samr_setup_user_info
@@ -264,7 +238,8 @@ samr_query_user_info(mlsvc_handle_t *user_handle, WORD switch_value,
  *
  * Returns 0 on success, otherwise returns -1.
  */
-static int samr_setup_user_info(WORD switch_value,
+static int
+samr_setup_user_info(WORD switch_value,
     struct samr_QueryUserInfo *arg, union samr_user_info *user_info)
 {
 	struct samr_QueryUserInfo1 *info1;
@@ -328,50 +303,44 @@ static int samr_setup_user_info(WORD switch_value,
  * Returns 0 on success, otherwise returns -1.
  */
 int
-samr_query_user_groups(mlsvc_handle_t *user_handle, smb_userinfo_t *user_info)
+samr_query_user_groups(mlsvc_handle_t *user_handle, int *n_groups,
+    struct samr_UserGroups **groups)
 {
 	struct samr_QueryUserGroups arg;
-	struct mlsvc_rpc_context *context;
-	mlrpc_heapref_t heap;
 	int opnum;
 	int rc;
 	int nbytes;
 
-	if (mlsvc_is_null_handle(user_handle) || user_info == NULL)
+	if (ndr_is_null_handle(user_handle))
 		return (-1);
 
-	context = user_handle->context;
 	opnum = SAMR_OPNUM_QueryUserGroups;
 	bzero(&arg, sizeof (struct samr_QueryUserGroups));
 
 	(void) memcpy(&arg.user_handle, &user_handle->handle,
 	    sizeof (samr_handle_t));
 
-	(void) mlsvc_rpc_init(&heap);
-
-	rc = mlsvc_rpc_call(context, opnum, &arg, &heap);
+	rc = ndr_rpc_call(user_handle, opnum, &arg);
 	if (rc == 0) {
 		if (arg.info == 0) {
 			rc = -1;
 		} else {
 			nbytes = arg.info->n_entry *
 			    sizeof (struct samr_UserGroups);
-			user_info->groups = malloc(nbytes);
 
-			if (user_info->groups == NULL) {
-				user_info->n_groups = 0;
+			if ((*groups = malloc(nbytes)) == NULL) {
+				*n_groups = 0;
 				rc = -1;
 			} else {
-				user_info->n_groups = arg.info->n_entry;
-				(void) memcpy(user_info->groups,
-				    arg.info->groups, nbytes);
+				*n_groups = arg.info->n_entry;
+				bcopy(arg.info->groups, *groups, nbytes);
 			}
 		}
 	}
-	mlsvc_rpc_free(context, &heap);
+
+	ndr_rpc_release(user_handle);
 	return (rc);
 }
-
 
 /*
  * samr_get_user_pwinfo
@@ -387,34 +356,29 @@ DWORD
 samr_get_user_pwinfo(mlsvc_handle_t *user_handle)
 {
 	struct samr_GetUserPwInfo arg;
-	struct mlsvc_rpc_context *context;
-	mlrpc_heapref_t heap;
 	int opnum;
 	DWORD status;
 
-	if (mlsvc_is_null_handle(user_handle))
+	if (ndr_is_null_handle(user_handle))
 		return (NT_STATUS_INVALID_PARAMETER);
 
-	context = user_handle->context;
 	opnum = SAMR_OPNUM_GetUserPwInfo;
 	bzero(&arg, sizeof (struct samr_GetUserPwInfo));
 	(void) memcpy(&arg.user_handle, &user_handle->handle,
 	    sizeof (samr_handle_t));
 
-	(void) mlsvc_rpc_init(&heap);
-	if (mlsvc_rpc_call(context, opnum, &arg, &heap) != 0) {
+	if (ndr_rpc_call(user_handle, opnum, &arg) != 0) {
 		status = NT_STATUS_INVALID_PARAMETER;
 	} else if (arg.status != 0) {
-		mlsvc_rpc_report_status(opnum, arg.status);
+		ndr_rpc_status(user_handle, opnum, arg.status);
 		status = NT_SC_VALUE(arg.status);
 	} else {
 		status = 0;
 	}
 
-	mlsvc_rpc_free(context, &heap);
+	ndr_rpc_release(user_handle);
 	return (status);
 }
-
 
 /*
  * samr_set_user_info
@@ -428,17 +392,12 @@ DWORD
 samr_set_user_info(mlsvc_handle_t *user_handle, smb_auth_info_t *auth)
 {
 	struct samr_SetUserInfo arg;
-	struct mlsvc_rpc_context *context;
-	mlrpc_heapref_t heap;
 	int opnum;
 	DWORD status = 0;
 
-	if (mlsvc_is_null_handle(user_handle))
+	if (ndr_is_null_handle(user_handle))
 		return (NT_STATUS_INVALID_PARAMETER);
 
-	(void) mlsvc_rpc_init(&heap);
-
-	context = user_handle->context;
 	opnum = SAMR_OPNUM_SetUserInfo;
 	bzero(&arg, sizeof (struct samr_SetUserInfo));
 	(void) memcpy(&arg.user_handle, &user_handle->handle,
@@ -453,14 +412,14 @@ samr_set_user_info(mlsvc_handle_t *user_handle, smb_auth_info_t *auth)
 	if (samr_set_user_password(auth, arg.info.ru.info23.password) < 0)
 		status = NT_STATUS_INTERNAL_ERROR;
 
-	if (mlsvc_rpc_call(context, opnum, &arg, &heap) != 0) {
+	if (ndr_rpc_call(user_handle, opnum, &arg) != 0) {
 		status = NT_STATUS_INVALID_PARAMETER;
 	} else if (arg.status != 0) {
-		mlsvc_rpc_report_status(opnum, arg.status);
+		ndr_rpc_status(user_handle, opnum, arg.status);
 		status = NT_SC_VALUE(arg.status);
 	}
 
-	mlsvc_rpc_free(context, &heap);
+	ndr_rpc_release(user_handle);
 	return (status);
 }
 

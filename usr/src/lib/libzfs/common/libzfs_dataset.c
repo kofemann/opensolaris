@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -630,11 +630,15 @@ libzfs_mnttab_cache_compare(const void *arg1, const void *arg2)
 void
 libzfs_mnttab_init(libzfs_handle_t *hdl)
 {
-	struct mnttab entry;
-
 	assert(avl_numnodes(&hdl->libzfs_mnttab_cache) == 0);
 	avl_create(&hdl->libzfs_mnttab_cache, libzfs_mnttab_cache_compare,
 	    sizeof (mnttab_node_t), offsetof(mnttab_node_t, mtn_node));
+}
+
+void
+libzfs_mnttab_update(libzfs_handle_t *hdl)
+{
+	struct mnttab entry;
 
 	rewind(hdl->libzfs_mnttab);
 	while (getmntent(hdl->libzfs_mnttab, &entry) == 0) {
@@ -667,6 +671,12 @@ libzfs_mnttab_fini(libzfs_handle_t *hdl)
 	avl_destroy(&hdl->libzfs_mnttab_cache);
 }
 
+void
+libzfs_mnttab_cache(libzfs_handle_t *hdl, boolean_t enable)
+{
+	hdl->libzfs_mnttab_enable = enable;
+}
+
 int
 libzfs_mnttab_find(libzfs_handle_t *hdl, const char *fsname,
     struct mnttab *entry)
@@ -674,8 +684,22 @@ libzfs_mnttab_find(libzfs_handle_t *hdl, const char *fsname,
 	mnttab_node_t find;
 	mnttab_node_t *mtn;
 
+	if (!hdl->libzfs_mnttab_enable) {
+		struct mnttab srch = { 0 };
+
+		if (avl_numnodes(&hdl->libzfs_mnttab_cache))
+			libzfs_mnttab_fini(hdl);
+		rewind(hdl->libzfs_mnttab);
+		srch.mnt_special = (char *)fsname;
+		srch.mnt_fstype = MNTTYPE_ZFS;
+		if (getmntany(hdl->libzfs_mnttab, entry, &srch) == 0)
+			return (0);
+		else
+			return (ENOENT);
+	}
+
 	if (avl_numnodes(&hdl->libzfs_mnttab_cache) == 0)
-		libzfs_mnttab_init(hdl);
+		libzfs_mnttab_update(hdl);
 
 	find.mtn_mt.mnt_special = (char *)fsname;
 	mtn = avl_find(&hdl->libzfs_mnttab_cache, &find, NULL);
@@ -2013,6 +2037,7 @@ zfs_prop_set(zfs_handle_t *zhp, const char *propname, const char *propval)
 		goto error;
 
 	ret = zfs_ioctl(hdl, ZFS_IOC_SET_PROP, &zc);
+
 	if (ret != 0) {
 		switch (errno) {
 
@@ -2223,6 +2248,8 @@ getprop_uint64(zfs_handle_t *zhp, zfs_prop_t prop, char **source)
 		verify(nvlist_lookup_uint64(nv, ZPROP_VALUE, &value) == 0);
 		(void) nvlist_lookup_string(nv, ZPROP_SOURCE, source);
 	} else {
+		verify(!zhp->zfs_props_table ||
+		    zhp->zfs_props_table[prop] == B_TRUE);
 		value = zfs_prop_default_numeric(prop);
 		*source = "";
 	}
@@ -2242,6 +2269,8 @@ getprop_string(zfs_handle_t *zhp, zfs_prop_t prop, char **source)
 		verify(nvlist_lookup_string(nv, ZPROP_VALUE, &value) == 0);
 		(void) nvlist_lookup_string(nv, ZPROP_SOURCE, source);
 	} else {
+		verify(!zhp->zfs_props_table ||
+		    zhp->zfs_props_table[prop] == B_TRUE);
 		if ((value = (char *)zfs_prop_default_string(prop)) == NULL)
 			value = "";
 		*source = "";
@@ -4480,18 +4509,126 @@ zfs_iscsi_perm_check(libzfs_handle_t *hdl, char *dataset, ucred_t *cred)
 
 int
 zfs_deleg_share_nfs(libzfs_handle_t *hdl, char *dataset, char *path,
-    void *export, void *sharetab, int sharemax, zfs_share_op_t operation)
+    char *resource, void *export, void *sharetab,
+    int sharemax, zfs_share_op_t operation)
 {
 	zfs_cmd_t zc = { 0 };
 	int error;
 
 	(void) strlcpy(zc.zc_name, dataset, sizeof (zc.zc_name));
 	(void) strlcpy(zc.zc_value, path, sizeof (zc.zc_value));
+	if (resource)
+		(void) strlcpy(zc.zc_string, resource, sizeof (zc.zc_string));
 	zc.zc_share.z_sharedata = (uint64_t)(uintptr_t)sharetab;
 	zc.zc_share.z_exportdata = (uint64_t)(uintptr_t)export;
 	zc.zc_share.z_sharetype = operation;
 	zc.zc_share.z_sharemax = sharemax;
-
 	error = ioctl(hdl->libzfs_fd, ZFS_IOC_SHARE, &zc);
 	return (error);
+}
+
+void
+zfs_prune_proplist(zfs_handle_t *zhp, uint8_t *props)
+{
+	nvpair_t *curr;
+
+	/*
+	 * Keep a reference to the props-table against which we prune the
+	 * properties.
+	 */
+	zhp->zfs_props_table = props;
+
+	curr = nvlist_next_nvpair(zhp->zfs_props, NULL);
+
+	while (curr) {
+		zfs_prop_t zfs_prop = zfs_name_to_prop(nvpair_name(curr));
+		nvpair_t *next = nvlist_next_nvpair(zhp->zfs_props, curr);
+
+		if (props[zfs_prop] == B_FALSE)
+			(void) nvlist_remove(zhp->zfs_props,
+			    nvpair_name(curr), nvpair_type(curr));
+		curr = next;
+	}
+}
+
+static int
+zfs_smb_acl_mgmt(libzfs_handle_t *hdl, char *dataset, char *path,
+    zfs_smb_acl_op_t cmd, char *resource1, char *resource2)
+{
+	zfs_cmd_t zc = { 0 };
+	nvlist_t *nvlist = NULL;
+	int error;
+
+	(void) strlcpy(zc.zc_name, dataset, sizeof (zc.zc_name));
+	(void) strlcpy(zc.zc_value, path, sizeof (zc.zc_value));
+	zc.zc_cookie = (uint64_t)cmd;
+
+	if (cmd == ZFS_SMB_ACL_RENAME) {
+		if (nvlist_alloc(&nvlist, NV_UNIQUE_NAME, 0) != 0) {
+			(void) no_memory(hdl);
+			return (NULL);
+		}
+	}
+
+	switch (cmd) {
+	case ZFS_SMB_ACL_ADD:
+	case ZFS_SMB_ACL_REMOVE:
+		(void) strlcpy(zc.zc_string, resource1, sizeof (zc.zc_string));
+		break;
+	case ZFS_SMB_ACL_RENAME:
+		if (nvlist_add_string(nvlist, ZFS_SMB_ACL_SRC,
+		    resource1) != 0) {
+				(void) no_memory(hdl);
+				return (-1);
+		}
+		if (nvlist_add_string(nvlist, ZFS_SMB_ACL_TARGET,
+		    resource2) != 0) {
+				(void) no_memory(hdl);
+				return (-1);
+		}
+		if (zcmd_write_src_nvlist(hdl, &zc, nvlist) != 0) {
+			nvlist_free(nvlist);
+			return (-1);
+		}
+		break;
+	case ZFS_SMB_ACL_PURGE:
+		break;
+	default:
+		return (-1);
+	}
+	error = ioctl(hdl->libzfs_fd, ZFS_IOC_SMB_ACL, &zc);
+	if (nvlist)
+		nvlist_free(nvlist);
+	return (error);
+}
+
+int
+zfs_smb_acl_add(libzfs_handle_t *hdl, char *dataset,
+    char *path, char *resource)
+{
+	return (zfs_smb_acl_mgmt(hdl, dataset, path, ZFS_SMB_ACL_ADD,
+	    resource, NULL));
+}
+
+int
+zfs_smb_acl_remove(libzfs_handle_t *hdl, char *dataset,
+    char *path, char *resource)
+{
+	return (zfs_smb_acl_mgmt(hdl, dataset, path, ZFS_SMB_ACL_REMOVE,
+	    resource, NULL));
+}
+
+int
+zfs_smb_acl_purge(libzfs_handle_t *hdl, char *dataset, char *path)
+{
+	return (zfs_smb_acl_mgmt(hdl, dataset, path, ZFS_SMB_ACL_PURGE,
+	    NULL, NULL));
+}
+
+int
+zfs_smb_acl_rename(libzfs_handle_t *hdl, char *dataset, char *path,
+    char *oldname, char *newname)
+{
+	return (zfs_smb_acl_mgmt(hdl, dataset, path, ZFS_SMB_ACL_RENAME,
+	    oldname, newname));
 }

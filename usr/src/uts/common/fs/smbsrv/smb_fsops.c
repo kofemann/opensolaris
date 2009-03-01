@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -197,12 +197,16 @@ smb_fsop_create_with_sd(
 			vsap = NULL;
 		}
 
+		/* The tree ACEs may prevent a create */
+		rc = EACCES;
 		if (is_dir) {
-			rc = smb_vop_mkdir(dir_snode->vp, name, attr, &vp,
-			    flags, cr, vsap);
+			if (SMB_TREE_HAS_ACCESS(sr, ACE_ADD_SUBDIRECTORY) != 0)
+				rc = smb_vop_mkdir(dir_snode->vp, name, attr,
+				    &vp, flags, cr, vsap);
 		} else {
-			rc = smb_vop_create(dir_snode->vp, name, attr, &vp,
-			    flags, cr, vsap);
+			if (SMB_TREE_HAS_ACCESS(sr, ACE_ADD_FILE) != 0)
+				rc = smb_vop_create(dir_snode->vp, name, attr,
+				    &vp, flags, cr, vsap);
 		}
 
 		if (vsap != NULL)
@@ -236,10 +240,10 @@ smb_fsop_create_with_sd(
 			*ret_snode = smb_node_lookup(sr, &sr->arg.open, cr, vp,
 			    name, dir_snode, NULL, ret_attr);
 
-			if (*ret_snode == NULL) {
-				VN_RELE(vp);
+			if (*ret_snode == NULL)
 				rc = ENOMEM;
-			}
+
+			VN_RELE(vp);
 		}
 	} else {
 		/*
@@ -271,9 +275,10 @@ smb_fsop_create_with_sd(
 				rc = smb_fsop_sdwrite(sr, kcred, *ret_snode,
 				    fs_sd, 1);
 		} else {
-			VN_RELE(vp);
 			rc = ENOMEM;
 		}
+
+		VN_RELE(vp);
 	}
 
 	if (rc != 0) {
@@ -299,7 +304,6 @@ smb_fsop_create_with_sd(
  * *ret_snode is returned with a reference upon success.  No reference is
  * taken if an error is returned.
  */
-
 int
 smb_fsop_create(
     smb_request_t	*sr,
@@ -354,6 +358,11 @@ smb_fsop_create(
 	sname = kmem_alloc(MAXNAMELEN, KM_SLEEP);
 
 	is_stream = smb_stream_parse_name(name, fname, sname);
+	if (is_stream == -1) {
+		kmem_free(fname, MAXNAMELEN);
+		kmem_free(sname, MAXNAMELEN);
+		return (EINVAL);
+	}
 
 	if (is_stream)
 		namep = fname;
@@ -442,10 +451,10 @@ smb_fsop_create(
 		    vp, sname, ret_attr);
 
 		smb_node_release(fnode);
+		VN_RELE(xattrdirvp);
+		VN_RELE(vp);
 
 		if (*ret_snode == NULL) {
-			VN_RELE(xattrdirvp);
-			VN_RELE(vp);
 			kmem_free(fname, MAXNAMELEN);
 			kmem_free(sname, MAXNAMELEN);
 			return (ENOMEM);
@@ -493,10 +502,10 @@ smb_fsop_create(
 				*ret_snode = smb_node_lookup(sr, op, cr, vp,
 				    name, dir_snode, NULL, ret_attr);
 
-				if (*ret_snode == NULL) {
-					VN_RELE(vp);
+				if (*ret_snode == NULL)
 					rc = ENOMEM;
-				}
+
+				VN_RELE(vp);
 			}
 
 		}
@@ -623,10 +632,10 @@ smb_fsop_mkdir(
 			*ret_snode = smb_node_lookup(sr, op, cr, vp, name,
 			    dir_snode, NULL, ret_attr);
 
-			if (*ret_snode == NULL) {
-				VN_RELE(vp);
+			if (*ret_snode == NULL)
 				rc = ENOMEM;
-			}
+
+			VN_RELE(vp);
 		}
 	}
 
@@ -672,7 +681,8 @@ smb_fsop_remove(
 	ASSERT(dir_snode);
 	ASSERT(dir_snode->n_magic == SMB_NODE_MAGIC);
 
-	if (SMB_TREE_CONTAINS_NODE(sr, dir_snode) == 0)
+	if (SMB_TREE_CONTAINS_NODE(sr, dir_snode) == 0 ||
+	    SMB_TREE_HAS_ACCESS(sr, ACE_DELETE) == 0)
 		return (EACCES);
 
 	if (SMB_TREE_IS_READONLY(sr))
@@ -698,7 +708,13 @@ smb_fsop_remove(
 	if (dir_snode->flags & NODE_XATTR_DIR) {
 		rc = smb_vop_stream_remove(dir_snode->dir_snode->vp,
 		    name, flags, cr);
-	} else if (smb_stream_parse_name(name, fname, sname)) {
+	} else if ((rc = smb_stream_parse_name(name, fname, sname)) != 0) {
+		if (rc == -1) {
+			kmem_free(fname, MAXNAMELEN);
+			kmem_free(sname, MAXNAMELEN);
+			return (EINVAL);
+		}
+
 		/*
 		 * It is assumed that "name" corresponds to the path
 		 * passed in by the client, and no need of suppressing
@@ -774,15 +790,16 @@ smb_fsop_remove(
  * This function removes a file's streams without removing the
  * file itself.
  *
- * It is assumed that snode is not a link.
+ * It is assumed that fnode is not a link.
  */
 int
 smb_fsop_remove_streams(smb_request_t *sr, cred_t *cr, smb_node_t *fnode)
 {
-	struct fs_stream_info stream_info;
-	uint32_t cookie = 0;
-	int flags = 0;
-	int rc;
+	int rc, flags = 0;
+	uint16_t odid;
+	smb_odir_t *od;
+	smb_odirent_t *odirent;
+	boolean_t eos;
 
 	ASSERT(sr);
 	ASSERT(cr);
@@ -799,16 +816,24 @@ smb_fsop_remove_streams(smb_request_t *sr, cred_t *cr, smb_node_t *fnode)
 	if (SMB_TREE_IS_CASEINSENSITIVE(sr))
 		flags = SMB_IGNORE_CASE;
 
+	/* TBD - error codes */
+	if ((odid = smb_odir_openat(sr, fnode)) == 0)
+		return (ENOENT);
+	if ((od = smb_tree_lookup_odir(sr->tid_tree, odid)) == NULL)
+		return (ENOENT);
+
+	odirent = kmem_alloc(sizeof (smb_odirent_t), KM_SLEEP);
 	for (;;) {
-		rc = smb_vop_stream_readdir(fnode->vp, &cookie, &stream_info,
-		    NULL, NULL, flags, cr);
-
-		if ((rc != 0) || (cookie == SMB_EOF))
+		rc = smb_odir_read(sr, od, odirent, &eos);
+		if ((rc != 0) || (eos))
 			break;
-
-		(void) smb_vop_stream_remove(fnode->vp, stream_info.name, flags,
-		    cr);
+		(void) smb_vop_remove(od->d_dnode->vp, odirent->od_name,
+		    flags, cr);
 	}
+	kmem_free(odirent, sizeof (smb_odirent_t));
+
+	smb_odir_release(od);
+	smb_odir_close(od);
 	return (rc);
 }
 
@@ -846,7 +871,8 @@ smb_fsop_rmdir(
 	ASSERT(dir_snode);
 	ASSERT(dir_snode->n_magic == SMB_NODE_MAGIC);
 
-	if (SMB_TREE_CONTAINS_NODE(sr, dir_snode) == 0)
+	if (SMB_TREE_CONTAINS_NODE(sr, dir_snode) == 0 ||
+	    SMB_TREE_HAS_ACCESS(sr, ACE_DELETE_CHILD) == 0)
 		return (EACCES);
 
 	if (SMB_TREE_IS_READONLY(sr))
@@ -923,7 +949,8 @@ smb_fsop_getattr(smb_request_t *sr, cred_t *cr, smb_node_t *snode,
 	ASSERT(snode->n_magic == SMB_NODE_MAGIC);
 	ASSERT(snode->n_state != SMB_NODE_STATE_DESTROYING);
 
-	if (SMB_TREE_CONTAINS_NODE(sr, snode) == 0)
+	if (SMB_TREE_CONTAINS_NODE(sr, snode) == 0 ||
+	    SMB_TREE_HAS_ACCESS(sr, ACE_READ_ATTRIBUTES) == 0)
 		return (EACCES);
 
 	if (sr->fid_ofile) {
@@ -960,188 +987,6 @@ smb_fsop_getattr(smb_request_t *sr, cred_t *cr, smb_node_t *snode,
 }
 
 /*
- * smb_fsop_readdir
- *
- * All SMB functions should use this smb_fsop_readdir wrapper to ensure that
- * the smb_vop_readdir is performed with the appropriate credentials.
- * Please document any direct call to smb_vop_readdir to explain the reason
- * for avoiding this wrapper.
- *
- * It is assumed that a reference exists on snode coming into this routine.
- */
-int
-smb_fsop_readdir(
-    smb_request_t *sr,
-    cred_t *cr,
-    smb_node_t *dir_snode,
-    uint32_t *cookie,
-    char *name,
-    int *namelen,
-    ino64_t *fileid,
-    struct fs_stream_info *stream_info,
-    smb_node_t **ret_snode,
-    smb_attr_t *ret_attr)
-{
-	smb_node_t	*ret_snodep;
-	smb_node_t	*fnode;
-	smb_attr_t	tmp_attr;
-	vnode_t		*xattrdirvp;
-	vnode_t		*fvp;
-	vnode_t		*vp = NULL;
-	char		*od_name;
-	int		rc;
-	int		flags = 0;
-
-	ASSERT(cr);
-	ASSERT(dir_snode);
-	ASSERT(dir_snode->n_magic == SMB_NODE_MAGIC);
-	ASSERT(dir_snode->n_state != SMB_NODE_STATE_DESTROYING);
-
-	if (SMB_TREE_CONTAINS_NODE(sr, dir_snode) == 0)
-		return (EACCES);
-
-	if (*cookie == SMB_EOF) {
-		*namelen = 0;
-		return (0);
-	}
-
-	if (SMB_TREE_IS_CASEINSENSITIVE(sr))
-		flags = SMB_IGNORE_CASE;
-
-	od_name = kmem_alloc(MAXNAMELEN, KM_SLEEP);
-
-	if (stream_info) {
-		rc = smb_vop_lookup(dir_snode->vp, name, &fvp, od_name,
-		    SMB_FOLLOW_LINKS, sr->tid_tree->t_snode->vp, cr);
-
-		if (rc != 0) {
-			kmem_free(od_name, MAXNAMELEN);
-			return (rc);
-		}
-
-		fnode = smb_node_lookup(sr, NULL, cr, fvp, od_name, dir_snode,
-		    NULL, ret_attr);
-
-		kmem_free(od_name, MAXNAMELEN);
-
-		if (fnode == NULL) {
-			VN_RELE(fvp);
-			return (ENOMEM);
-		}
-
-		/*
-		 * XXX
-		 * Need to find out what permission(s) NTFS requires for getting
-		 * a file's streams list.
-		 *
-		 * Might have to use kcred.
-		 */
-		rc = smb_vop_stream_readdir(fvp, cookie, stream_info, &vp,
-		    &xattrdirvp, flags, cr);
-
-		if ((rc != 0) || (*cookie == SMB_EOF)) {
-			smb_node_release(fnode);
-			return (rc);
-		}
-
-		ret_snodep = smb_stream_node_lookup(sr, cr, fnode, xattrdirvp,
-		    vp, stream_info->name, &tmp_attr);
-
-		smb_node_release(fnode);
-
-		if (ret_snodep == NULL) {
-			VN_RELE(xattrdirvp);
-			VN_RELE(vp);
-			return (ENOMEM);
-		}
-
-		stream_info->size = tmp_attr.sa_vattr.va_size;
-
-		if (ret_attr)
-			*ret_attr = tmp_attr;
-
-		if (ret_snode)
-			*ret_snode = ret_snodep;
-		else
-			smb_node_release(ret_snodep);
-
-	} else {
-		rc = smb_vop_readdir(dir_snode->vp, cookie, name, namelen,
-		    fileid, &vp, od_name, flags, cr);
-
-		if (rc != 0) {
-			kmem_free(od_name, MAXNAMELEN);
-			return (rc);
-		}
-
-		if (*namelen) {
-			ASSERT(vp);
-			if (ret_attr || ret_snode) {
-				ret_snodep = smb_node_lookup(sr, NULL, cr, vp,
-				    od_name, dir_snode, NULL, &tmp_attr);
-
-				if (ret_snodep == NULL) {
-					kmem_free(od_name, MAXNAMELEN);
-					VN_RELE(vp);
-					return (ENOMEM);
-				}
-
-				if (ret_attr)
-					*ret_attr = tmp_attr;
-
-				if (ret_snode)
-					*ret_snode = ret_snodep;
-				else
-					smb_node_release(ret_snodep);
-			}
-		}
-
-		kmem_free(od_name, MAXNAMELEN);
-	}
-
-	return (rc);
-}
-
-/*
- * smb_fsop_getdents
- *
- * All SMB functions should use this smb_vop_getdents wrapper to ensure that
- * the smb_vop_getdents is performed with the appropriate credentials.
- * Please document any direct call to smb_vop_getdents to explain the reason
- * for avoiding this wrapper.
- *
- * It is assumed that a reference exists on snode coming into this routine.
- */
-/*ARGSUSED*/
-int
-smb_fsop_getdents(
-    struct smb_request *sr,
-    cred_t *cr,
-    smb_node_t *dir_snode,
-    uint32_t *cookie,
-    uint64_t *verifierp,
-    int32_t	*maxcnt,
-    char *args,
-    char *pattern)
-{
-	int flags = 0;
-
-	ASSERT(cr);
-	ASSERT(dir_snode);
-	ASSERT(dir_snode->n_magic == SMB_NODE_MAGIC);
-	ASSERT(dir_snode->n_state != SMB_NODE_STATE_DESTROYING);
-
-	if (SMB_TREE_CONTAINS_NODE(sr, dir_snode) == 0)
-		return (EACCES);
-
-	if (SMB_TREE_IS_CASEINSENSITIVE(sr))
-		flags = SMB_IGNORE_CASE;
-
-	return (smb_vop_getdents(dir_snode, cookie, 0, maxcnt, args, pattern,
-	    flags, sr, cr));
-}
-
-/*
  * smb_fsop_rename
  *
  * All SMB functions should use this smb_vop_rename wrapper to ensure that
@@ -1166,6 +1011,7 @@ smb_fsop_rename(
 	vnode_t *from_vp;
 	int flags = 0;
 	int rc;
+	boolean_t isdir;
 
 	ASSERT(cr);
 	ASSERT(from_dir_snode);
@@ -1210,6 +1056,15 @@ smb_fsop_rename(
 	if (rc != 0)
 		return (rc);
 
+	isdir = from_vp->v_type == VDIR;
+
+	if ((isdir && SMB_TREE_HAS_ACCESS(sr,
+	    ACE_DELETE_CHILD | ACE_ADD_SUBDIRECTORY) !=
+	    (ACE_DELETE_CHILD | ACE_ADD_SUBDIRECTORY)) ||
+	    (!isdir && SMB_TREE_HAS_ACCESS(sr, ACE_DELETE | ACE_ADD_FILE) !=
+	    (ACE_DELETE | ACE_ADD_FILE)))
+		return (EACCES);
+
 	rc = smb_vop_rename(from_dir_snode->vp, from_name, to_dir_snode->vp,
 	    to_name, flags, cr);
 
@@ -1218,17 +1073,14 @@ smb_fsop_rename(
 		    from_dir_snode, NULL, &tmp_attr);
 
 		if (from_snode == NULL) {
-			VN_RELE(from_vp);
-			return (ENOMEM);
+			rc = ENOMEM;
+		} else {
+			(void) smb_node_rename(from_dir_snode, from_snode,
+			    to_dir_snode, to_name);
+			smb_node_release(from_snode);
 		}
-
-		(void) smb_node_rename(from_dir_snode, from_snode, to_dir_snode,
-		    to_name);
-
-		smb_node_release(from_snode);
-	} else {
-		VN_RELE(from_vp);
 	}
+	VN_RELE(from_vp);
 
 	/* XXX: unlock */
 
@@ -1272,6 +1124,10 @@ smb_fsop_setattr(
 
 	if (SMB_TREE_IS_READONLY(sr))
 		return (EROFS);
+
+	if (SMB_TREE_HAS_ACCESS(sr,
+	    ACE_WRITE_ATTRIBUTES | ACE_WRITE_NAMED_ATTRS) == 0)
+		return (EACCES);
 
 	if (sr && (set_attr->sa_mask & SMB_AT_SIZE)) {
 		if (sr->fid_ofile) {
@@ -1367,6 +1223,9 @@ smb_fsop_read(
 	ASSERT(sr);
 	ASSERT(sr->fid_ofile);
 
+	if (SMB_TREE_HAS_ACCESS(sr, ACE_READ_DATA) == 0)
+		return (EACCES);
+
 	rc = smb_ofile_access(sr->fid_ofile, cr, FILE_READ_DATA);
 	if (rc != NT_STATUS_SUCCESS) {
 		rc = smb_ofile_access(sr->fid_ofile, cr, FILE_EXECUTE);
@@ -1458,7 +1317,8 @@ smb_fsop_write(
 	if (SMB_TREE_IS_READONLY(sr))
 		return (EROFS);
 
-	if (SMB_OFILE_IS_READONLY(sr->fid_ofile))
+	if (SMB_OFILE_IS_READONLY(sr->fid_ofile) ||
+	    SMB_TREE_HAS_ACCESS(sr, ACE_WRITE_DATA | ACE_APPEND_DATA) == 0)
 		return (EACCES);
 
 	rc = smb_ofile_access(sr->fid_ofile, cr, FILE_WRITE_DATA);
@@ -1622,6 +1482,14 @@ smb_fsop_access(smb_request_t *sr, cred_t *cr, smb_node_t *snode,
 	    (snode->attr.sa_vattr.va_type == VLNK))
 		acl_check = B_FALSE;
 
+	/*
+	 * Use the most restrictive parts of both faccess and the
+	 * share access.  An AND of the two value masks gives us that
+	 * since we've already converted to a mask of what we "can"
+	 * do.
+	 */
+	faccess &= sr->tid_tree->t_access;
+
 	if (acl_check) {
 		dir_vp = (snode->dir_snode) ? snode->dir_snode->vp : NULL;
 		error = smb_vop_access(snode->vp, faccess, V_ACE_MASK, dir_vp,
@@ -1690,7 +1558,13 @@ smb_fsop_lookup_name(
 	fname = kmem_alloc(MAXNAMELEN, KM_SLEEP);
 	sname = kmem_alloc(MAXNAMELEN, KM_SLEEP);
 
-	if (smb_stream_parse_name(name, fname, sname)) {
+	if ((rc = smb_stream_parse_name(name, fname, sname)) != 0) {
+		if (rc == -1) {
+			kmem_free(fname, MAXNAMELEN);
+			kmem_free(sname, MAXNAMELEN);
+			return (EINVAL);
+		}
+
 		/*
 		 * Look up the unnamed stream (i.e. fname).
 		 * Unmangle processing will be done on fname
@@ -1732,10 +1606,10 @@ smb_fsop_lookup_name(
 
 		kmem_free(od_name, MAXNAMELEN);
 		smb_node_release(fnode);
+		VN_RELE(xattrdirvp);
+		VN_RELE(vp);
 
 		if (*ret_snode == NULL) {
-			VN_RELE(xattrdirvp);
-			VN_RELE(vp);
 			kmem_free(fname, MAXNAMELEN);
 			kmem_free(sname, MAXNAMELEN);
 			return (ENOMEM);
@@ -1777,7 +1651,7 @@ smb_fsop_lookup_name(
  * taken if an error is returned.
  *
  * Note: The returned ret_snode may be in a child mount.  This is ok for
- * readdir and getdents.
+ * readdir.
  *
  * ret_shortname and ret_name83 must each point to buffers of at least
  * SMB_SHORTNAMELEN bytes.
@@ -1910,11 +1784,10 @@ smb_fsop_lookup(
 			*ret_snode = smb_node_lookup(sr, NULL, cr, vp,
 			    lnk_target_node->od_name, lnk_dnode, NULL,
 			    ret_attr);
+			VN_RELE(vp);
 
-			if (*ret_snode == NULL) {
-				VN_RELE(vp);
+			if (*ret_snode == NULL)
 				rc = ENOMEM;
-			}
 			smb_node_release(lnk_target_node);
 		}
 
@@ -1931,78 +1804,13 @@ smb_fsop_lookup(
 
 		*ret_snode = smb_node_lookup(sr, NULL, cr, vp, od_name,
 		    dir_snode, NULL, ret_attr);
+		VN_RELE(vp);
 
-		if (*ret_snode == NULL) {
-			VN_RELE(vp);
+		if (*ret_snode == NULL)
 			rc = ENOMEM;
-		}
 	}
 
 	kmem_free(od_name, MAXNAMELEN);
-	return (rc);
-}
-
-/*
- * smb_fsop_stream_readdir()
- *
- * ret_snode and ret_attr are optional parameters (i.e. NULL may be passed in)
- *
- * This routine will return only NTFS streams.  If an NTFS stream is not
- * found at the offset specified, the directory will be read until an NTFS
- * stream is found or until EOF.
- *
- * Note: Sanity checks done in caller
- * (smb_fsop_readdir(), smb_fsop_remove_streams())
- */
-
-int
-smb_fsop_stream_readdir(smb_request_t *sr, cred_t *cr, smb_node_t *fnode,
-    uint32_t *cookiep, struct fs_stream_info *stream_info,
-    smb_node_t **ret_snode, smb_attr_t *ret_attr)
-{
-	smb_node_t *ret_snodep = NULL;
-	smb_attr_t tmp_attr;
-	vnode_t *xattrdirvp;
-	vnode_t *vp;
-	int rc = 0;
-	int flags = 0;
-
-	/*
-	 * XXX NTFS permission requirements if any?
-	 */
-	ASSERT(cr);
-	ASSERT(fnode);
-	ASSERT(fnode->n_magic == SMB_NODE_MAGIC);
-	ASSERT(fnode->n_state != SMB_NODE_STATE_DESTROYING);
-
-	if (SMB_TREE_IS_CASEINSENSITIVE(sr))
-		flags = SMB_IGNORE_CASE;
-
-	rc = smb_vop_stream_readdir(fnode->vp, cookiep, stream_info, &vp,
-	    &xattrdirvp, flags, cr);
-
-	if ((rc != 0) || *cookiep == SMB_EOF)
-		return (rc);
-
-	ret_snodep = smb_stream_node_lookup(sr, cr, fnode, xattrdirvp, vp,
-	    stream_info->name, &tmp_attr);
-
-	if (ret_snodep == NULL) {
-		VN_RELE(xattrdirvp);
-		VN_RELE(vp);
-		return (ENOMEM);
-	}
-
-	stream_info->size = tmp_attr.sa_vattr.va_size;
-
-	if (ret_attr)
-		*ret_attr = tmp_attr;
-
-	if (ret_snode)
-		*ret_snode = ret_snodep;
-	else
-		smb_node_release(ret_snodep);
-
 	return (rc);
 }
 
@@ -2047,6 +1855,9 @@ smb_fsop_aclread(smb_request_t *sr, cred_t *cr, smb_node_t *snode,
 	smb_node_t *unnamed_node;
 
 	ASSERT(cr);
+
+	if (SMB_TREE_HAS_ACCESS(sr, ACE_READ_ACL) == 0)
+		return (EACCES);
 
 	if (sr->fid_ofile) {
 		if (fs_sd->sd_secinfo & SMB_DACL_SECINFO)
@@ -2115,6 +1926,9 @@ smb_fsop_aclwrite(smb_request_t *sr, cred_t *cr, smb_node_t *snode,
 	ASSERT(sr->tid_tree);
 	if (SMB_TREE_IS_READONLY(sr))
 		return (EROFS);
+
+	if (SMB_TREE_HAS_ACCESS(sr, ACE_WRITE_ACL) == 0)
+		return (EACCES);
 
 	if (sr->fid_ofile) {
 		if (fs_sd->sd_secinfo & SMB_DACL_SECINFO)
@@ -2547,6 +2361,7 @@ smb_fsop_eaccess(smb_request_t *sr, cred_t *cr, smb_node_t *snode,
 	 * FS doesn't understand 32-bit mask
 	 */
 	smb_vop_eaccess(snode->vp, &access, 0, NULL, cr);
+	access &= sr->tid_tree->t_access;
 
 	*eaccess = READ_CONTROL | FILE_READ_EA | FILE_READ_ATTRIBUTES;
 

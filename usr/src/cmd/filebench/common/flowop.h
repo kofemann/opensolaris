@@ -19,15 +19,12 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_FB_FLOWOP_H
 #define	_FB_FLOWOP_H
-
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include "config.h"
 
@@ -47,6 +44,7 @@
 #include "vars.h"
 #include "fileset.h"
 #include "filebench.h"
+#include "fsplug.h"
 
 #ifdef	__cplusplus
 extern "C" {
@@ -88,6 +86,7 @@ typedef struct flowop {
 	avd_t		fo_blocking;	/* Attr */
 	avd_t		fo_directio;	/* Attr */
 	avd_t		fo_rotatefd;	/* Attr */
+	avd_t		fo_fileindex;	/* Attr */
 	flowstat_t	fo_stats;	/* Flow statistics */
 	pthread_cond_t	fo_cv;		/* Block/wakeup cv */
 	pthread_mutex_t	fo_lock;	/* Mutex around flowop */
@@ -137,17 +136,31 @@ typedef struct flowop {
 #define	FLOW_TYPE_COMPOSITE	4  /* Op is a composite flowop */
 #define	FLOW_TYPE_OTHER		5  /* Op is a something else */
 
+typedef struct flowop_proto {
+	int	fl_type;
+	int	fl_attrs;
+	char	*fl_name;
+	int	(*fl_init)();
+	int	(*fl_func)();
+	void	(*fl_destruct)();
+} flowop_proto_t;
+
 extern flowstat_t controlstats;
 extern pthread_mutex_t controlstats_lock;
 
 void flowop_init(void);
+void flowop_plugin_flowinit(void);
 flowop_t *flowop_define(threadflow_t *, char *name, flowop_t *inherit,
     flowop_t **flowoplist_hdp, int instance, int type);
 flowop_t *flowop_find(char *name);
 flowop_t *flowop_find_one(char *name, int instance);
 flowop_t *flowop_find_from_list(char *name, flowop_t *list);
+int flowop_init_generic(flowop_t *flowop);
+void flowop_destruct_generic(flowop_t *flowop);
+void flowop_flow_init(flowop_proto_t *list, int nops);
 void flowoplib_usage(void);
-void flowoplib_init(void);
+int flowoplib_iosetup(threadflow_t *threadflow, flowop_t *flowop,
+    fbint_t *wssp, caddr_t *iobufp, fb_fdesc_t **filedescp, fbint_t iosize);
 void flowop_delete_all(flowop_t **threadlist);
 void flowop_endop(threadflow_t *threadflow, flowop_t *flowop, int64_t bytes);
 void flowop_beginop(threadflow_t *threadflow, flowop_t *flowop);

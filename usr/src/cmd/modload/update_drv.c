@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <stdio.h>
 #include <locale.h>
@@ -93,10 +91,12 @@ main(int argc, char *argv[])
 	int	i_flag = 0;		/* -i option */
 	int	l_flag = 0;		/* -l option */
 	int	m_flag = 0;		/* -m option */
+	int	n_flag = 0;		/* -n option */
 	char	*perms = NULL;
-	char	*aliases = 0;
+	char	*aliases = NULL;
 	char	*basedir = NULL;
 	char	*policy = NULL;
+	char	*aliases2 = NULL;
 	char	*priv = NULL;
 	char	*driver_name;
 	int	found;
@@ -115,7 +115,7 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
-	while ((opt = getopt(argc, argv, "m:i:b:p:adlfuvP:")) != EOF) {
+	while ((opt = getopt(argc, argv, "m:ni:b:p:adlfuvP:")) != EOF) {
 		switch (opt) {
 		case 'a':
 			a_flag++;
@@ -145,6 +145,10 @@ main(int argc, char *argv[])
 		case 'm':
 			m_flag++;
 			perms = optarg;
+			break;
+		case 'n':
+			n_flag++;
+			update_conf = 0;
 			break;
 		case 'p':
 			policy = optarg;
@@ -213,7 +217,9 @@ main(int argc, char *argv[])
 	if ((check_name_to_major(R_OK)) == ERROR)
 		err_exit();
 
-	if (priv != NULL && check_priv_entry(priv, a_flag) != 0)
+	if ((n_flag == 0) &&
+	    (basedir == NULL || (strcmp(basedir, "/") == 0)) &&
+	    (priv != NULL) && check_priv_entry(priv, a_flag) != 0)
 		err_exit();
 
 	if (policy != NULL && (policy = check_plcy_entry(policy, driver_name,
@@ -234,7 +240,6 @@ main(int argc, char *argv[])
 			if ((error = check_perm_opts(perms)) == ERROR) {
 				if (force_flag == 0) { /* no force flag */
 					exit_unlock();
-
 					return (error);
 				}
 			}
@@ -247,7 +252,6 @@ main(int argc, char *argv[])
 			    (error = update_minor_entry(driver_name, perms))) {
 				if (force_flag == 0) { /* no force flag */
 					exit_unlock();
-
 					return (error);
 				}
 			}
@@ -256,7 +260,8 @@ main(int argc, char *argv[])
 			/*
 			 * Notify running system of minor perm change
 			 */
-			if (basedir == NULL || (strcmp(basedir, "/") == 0)) {
+			if ((n_flag == 0) &&
+			    (basedir == NULL || (strcmp(basedir, "/") == 0))) {
 				rval = devfs_add_minor_perm(driver_name,
 				    log_minorperm_error);
 				if (rval) {
@@ -298,45 +303,62 @@ main(int argc, char *argv[])
 
 			major_num = (major_t)found;
 
-			/* check if the alias is unique */
-			if ((error = aliases_unique(aliases)) == ERROR) {
+			/*
+			 * To ease the nuisance of using update_drv
+			 * in packaging scripts, do not require that
+			 * existing driver aliases be trimmed from
+			 * the command line.  If an invocation asks
+			 * to add an alias and it's already there,
+			 * drive on.  We implement this by removing
+			 * duplicates now and add the remainder.
+			 */
+			error = trim_duplicate_aliases(driver_name,
+			    aliases, &aliases2);
+			if (error == ERROR) {
 				exit_unlock();
-
 				return (error);
 			}
+
+			/*
+			 * if the list of aliases to be added is
+			 * now empty, we're done.
+			 */
+			if (aliases2 == NULL)
+				goto done;
 
 			/*
 			 * unless force_flag is specified check that
 			 * path-oriented aliases we are adding exist
 			 */
-			if ((force_flag == 0) &&
-			    ((error = aliases_paths_exist(aliases)) == ERROR)) {
+			if ((force_flag == 0) && ((error =
+			    aliases_paths_exist(aliases2)) == ERROR)) {
 				exit_unlock();
-
 				return (error);
 			}
 
 			/* update the file */
 			if ((error = update_driver_aliases(driver_name,
-			    aliases)) == ERROR) {
+			    aliases2)) == ERROR) {
 				exit_unlock();
 				return (error);
 			}
 
-			/* paranoia - if we crash whilst configuring */
-			sync();
 
 			/* optionally update the running system - not -b */
 			if (update_conf) {
+				/* paranoia - if we crash whilst configuring */
+				sync();
 				cleanup_flag |= CLEAN_DRV_ALIAS;
 				if (config_driver(driver_name, major_num,
-				    aliases, NULL, cleanup_flag,
+				    aliases2, NULL, cleanup_flag,
 				    verbose_flag) == ERROR) {
 					err_exit();
 				}
 			}
 
 		}
+
+done:
 		if (update_conf && (i_flag || policy != NULL)) {
 			/* load the driver */
 			load_driver(driver_name, verbose_flag);
@@ -365,7 +387,8 @@ main(int argc, char *argv[])
 			 * We don't have any ability to do this singly
 			 * at this point.
 			 */
-			if (basedir == NULL || (strcmp(basedir, "/") == 0)) {
+			if ((n_flag == 0) &&
+			    (basedir == NULL || (strcmp(basedir, "/") == 0))) {
 				rval = devfs_rm_minor_perm(driver_name,
 				    log_minorperm_error);
 				if (rval) {
@@ -384,7 +407,8 @@ main(int argc, char *argv[])
 			/*
 			 * Notify running system of new minor perm state
 			 */
-			if (basedir == NULL || (strcmp(basedir, "/") == 0)) {
+			if ((n_flag == 0) &&
+			    (basedir == NULL || (strcmp(basedir, "/") == 0))) {
 				rval = devfs_add_minor_perm(driver_name,
 				    log_minorperm_error);
 				if (rval) {
@@ -396,12 +420,63 @@ main(int argc, char *argv[])
 		}
 
 		if (i_flag) {
-			if ((error = delete_entry(driver_aliases,
-			    driver_name, ":", aliases)) != NOERR) {
+			found = get_major_no(driver_name, name_to_major);
+			if (found == ERROR) {
+				(void) fprintf(stderr, gettext(ERR_MAX_MAJOR),
+				    name_to_major);
+				err_exit();
+			}
+
+			if (found == UNIQUE) {
+				(void) fprintf(stderr,
+				    gettext(ERR_NOT_INSTALLED), driver_name);
+				err_exit();
+			}
+
+			major_num = (major_t)found;
+
+			/*
+			 * verify that the aliases to be deleted exist
+			 * before removal.  With -f, failing to
+			 * remove an alias is not an error so we
+			 * can continue on to update the kernel.
+			 */
+			error = NOERR;
+			rval = aliases_exist(driver_name, aliases);
+			if (rval == ERROR && (force_flag == 0)) {
+				(void) fprintf(stderr,
+				    gettext(ERR_ALIAS_NOT_BOUND),
+				    driver_name);
+				if (err != NOERR)
+					err = rval;
+			}
+			if (rval == NOERR)
+				error = delete_entry(driver_aliases,
+				    driver_name, ":", aliases);
+			if (error != NOERR && (force_flag == 0)) {
 				(void) fprintf(stderr, gettext(ERR_NO_ENTRY),
 				    driver_name, driver_aliases);
 				if (err != NOERR)
 					err = error;
+			}
+
+			/*
+			 * optionally update the running system - not -b.
+			 * Unless -f is specified, error if one or more
+			 * devices remain bound to the alias.
+			 */
+			if (err == NOERR && update_conf) {
+				/* paranoia - if we crash whilst configuring */
+				sync();
+				error = unconfig_driver(driver_name, major_num,
+				    aliases, verbose_flag, force_flag);
+				if (error == ERROR && force_flag == 0) {
+					(void) fprintf(stderr,
+					    gettext(ERR_DEV_IN_USE),
+					    driver_name);
+					if (err != NOERR)
+						err = error;
+				}
 			}
 		}
 
@@ -474,7 +549,6 @@ main(int argc, char *argv[])
 		}
 		load_driver(driver_name, verbose_flag);
 	}
-
 
 	exit_unlock();
 

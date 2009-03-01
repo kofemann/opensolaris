@@ -19,12 +19,11 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
+#include <errno.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -45,6 +44,14 @@
 
 #include <smbns_browser.h>
 #include <smbns_netbios.h>
+
+/*
+ * ntdomain_info
+ * Temporary. It should be removed once NBTD is integrated.
+ */
+smb_ntdomain_t ntdomain_info;
+mutex_t ntdomain_mtx;
+cond_t ntdomain_cv;
 
 #define	SMB_SERVER_SIGNATURE		0xaa550415
 
@@ -74,6 +81,9 @@ static int smb_browser_init(void);
 static void smb_browser_infoinit(void);
 static void smb_browser_infoterm(void);
 static void smb_browser_infofree(void);
+
+
+
 
 void
 smb_browser_reconfig(void)
@@ -651,7 +661,7 @@ smb_browser_addr_of_subnet(struct name_entry *name, smb_hostinfo_t *hinfo,
 	if (hinfo->hi_nic.nic_smbflags & SMB_NICF_ALIAS)
 		return (-1);
 
-	ipaddr = hinfo->hi_nic.nic_ip;
+	ipaddr = hinfo->hi_nic.nic_ip.a_ipv4;
 	mask = hinfo->hi_nic.nic_mask;
 
 	*result = *name;
@@ -859,7 +869,8 @@ smb_browser_process_AnnouncementRequest(struct datagram *datagram,
 	(void) rw_rdlock(&smb_binfo.bi_hlist_rwl);
 	hinfo = list_head(&smb_binfo.bi_hlist);
 	while (hinfo) {
-		if ((hinfo->hi_nic.nic_ip & hinfo->hi_nic.nic_mask) ==
+		if ((hinfo->hi_nic.nic_ip.a_ipv4 &
+		    hinfo->hi_nic.nic_mask) ==
 		    (datagram->src.addr_list.sin.sin_addr.s_addr &
 		    hinfo->hi_nic.nic_mask)) {
 			h_found = B_TRUE;
@@ -1062,8 +1073,9 @@ smb_browser_config(void)
 	hinfo = list_head(&smb_binfo.bi_hlist);
 	while (hinfo) {
 		smb_init_name_struct((unsigned char *)resource_domain, 0x00, 0,
-		    hinfo->hi_nic.nic_ip, htons(DGM_SRVC_UDP_PORT),
-		    NAME_ATTR_GROUP, NAME_ATTR_LOCAL, &name);
+		    hinfo->hi_nic.nic_ip.a_ipv4,
+		    htons(DGM_SRVC_UDP_PORT), NAME_ATTR_GROUP,
+		    NAME_ATTR_LOCAL, &name);
 		(void) smb_name_add_name(&name);
 
 		hinfo = list_next(&smb_binfo.bi_hlist, hinfo);
@@ -1124,7 +1136,8 @@ smb_browser_init(void)
 		type |= SV_DOMAIN_MEMBER;
 
 	do {
-		if (ni.ni_nic.nic_smbflags & SMB_NICF_NBEXCL)
+		if ((ni.ni_nic.nic_smbflags & SMB_NICF_NBEXCL) ||
+		    (ni.ni_nic.nic_smbflags & SMB_NICF_ALIAS))
 			continue;
 
 		hinfo = malloc(sizeof (smb_hostinfo_t));
@@ -1146,11 +1159,11 @@ smb_browser_init(void)
 		(void) strlcpy(hinfo->hi_nbname, hinfo->hi_nic.nic_host,
 		    NETBIOS_NAME_SZ);
 		(void) utf8_strupr(hinfo->hi_nbname);
-
 		/* 0x20: file server service  */
 		smb_init_name_struct((unsigned char *)hinfo->hi_nbname,
-		    0x20, 0, hinfo->hi_nic.nic_ip, htons(DGM_SRVC_UDP_PORT),
-		    NAME_ATTR_UNIQUE, NAME_ATTR_LOCAL, &hinfo->hi_netname);
+		    0x20, 0, hinfo->hi_nic.nic_ip.a_ipv4,
+		    htons(DGM_SRVC_UDP_PORT), NAME_ATTR_UNIQUE, NAME_ATTR_LOCAL,
+		    &hinfo->hi_netname);
 
 		list_insert_tail(&smb_binfo.bi_hlist, hinfo);
 		smb_binfo.bi_hcnt++;
@@ -1312,12 +1325,17 @@ restart:
  *
  * Sends SAMLOGON/NETLOGON request for all host/ips, except
  * aliases, to find a domain controller.
+ *
+ * The dc argument will be set if a DC is found.
  */
-void
-smb_browser_netlogon(char *domain)
+boolean_t
+smb_browser_netlogon(char *domain, char *dc, uint32_t dc_len)
 {
 	smb_hostinfo_t *hinfo;
 	int protocol;
+	boolean_t found = B_FALSE;
+	timestruc_t to;
+	int err;
 
 	if (smb_config_getbool(SMB_CI_DOMAIN_MEMB))
 		protocol = NETLOGON_PROTO_SAMLOGON;
@@ -1333,6 +1351,24 @@ smb_browser_netlogon(char *domain)
 		hinfo = list_next(&smb_binfo.bi_hlist, hinfo);
 	}
 	(void) rw_unlock(&smb_binfo.bi_hlist_rwl);
+
+	bzero(dc, dc_len);
+	to.tv_sec = 30;
+	to.tv_nsec = 0;
+	(void) mutex_lock(&ntdomain_mtx);
+	while (ntdomain_info.n_ipaddr == 0) {
+		err = cond_reltimedwait(&ntdomain_cv, &ntdomain_mtx, &to);
+		if (err == ETIME)
+			break;
+	}
+
+	if (ntdomain_info.n_ipaddr != 0) {
+		(void) strlcpy(dc, ntdomain_info.n_name, dc_len);
+		found = B_TRUE;
+	}
+	(void) mutex_unlock(&ntdomain_mtx);
+
+	return (found);
 }
 
 /*
@@ -1344,6 +1380,10 @@ smb_browser_netlogon(char *domain)
 static void
 smb_browser_infoinit(void)
 {
+	(void) mutex_lock(&ntdomain_mtx);
+	bzero(&ntdomain_info, sizeof (ntdomain_info));
+	(void) mutex_unlock(&ntdomain_mtx);
+
 	(void) rw_wrlock(&smb_binfo.bi_hlist_rwl);
 	list_create(&smb_binfo.bi_hlist, sizeof (smb_hostinfo_t),
 	    offsetof(smb_hostinfo_t, hi_lnd));

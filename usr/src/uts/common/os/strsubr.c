@@ -23,7 +23,7 @@
 
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -286,7 +286,6 @@ static void outer_insert(syncq_t *, syncq_t *);
 static void outer_remove(syncq_t *, syncq_t *);
 static void write_now(syncq_t *);
 static void clr_qfull(queue_t *);
-static void enable_svc(queue_t *);
 static void runbufcalls(void);
 static void sqenable(syncq_t *);
 static void sqfill_events(syncq_t *, queue_t *, mblk_t *, void (*)());
@@ -1465,8 +1464,8 @@ putiocd(mblk_t *bp, char *arg, int flag, cred_t *cr)
 	 */
 	ASSERT(count >= 0);
 
-	if ((tmp = allocb_cred_wait(count, (flag & STR_NOSIG), &error, cr)) ==
-	    NULL) {
+	if ((tmp = allocb_cred_wait(count, (flag & STR_NOSIG), &error, cr,
+	    curproc->p_pid)) == NULL) {
 		return (error);
 	}
 	error = strcopyin(arg, tmp->b_wptr, count, flag & (U_TO_K|K_TO_K));
@@ -2794,6 +2793,10 @@ strmakectl(
 	mblk_t *bp = NULL;
 	unsigned char msgtype;
 	int error = 0;
+	cred_t *cr = CRED();
+
+	/* We do not support interrupt threads using the stream head to send */
+	ASSERT(cr != NULL);
 
 	*mpp = NULL;
 	/*
@@ -2822,7 +2825,8 @@ strmakectl(
 		 * Range checking has already been done; simply try
 		 * to allocate a message block for the ctl part.
 		 */
-		while (!(bp = allocb(allocsz, BPRI_MED))) {
+		while ((bp = allocb_cred(allocsz, cr,
+		    curproc->p_pid)) == NULL) {
 			if (fflag & (FNDELAY|FNONBLOCK))
 				return (EAGAIN);
 			if (error = strwaitbuf(allocsz, BPRI_MED))
@@ -2865,11 +2869,15 @@ strmakedata(
 	int error = 0;
 	ssize_t maxblk;
 	ssize_t count = *iosize;
-	cred_t *cr = CRED();
+	cred_t *cr;
 
 	*mpp = NULL;
 	if (count < 0)
 		return (0);
+
+	/* We do not support interrupt threads using the stream head to send */
+	cr = CRED();
+	ASSERT(cr != NULL);
 
 	maxblk = stp->sd_maxblk;
 	if (maxblk == INFPSZ)
@@ -2886,7 +2894,8 @@ strmakedata(
 
 		size = MIN(count, maxblk);
 
-		while ((bp = allocb_cred(size + extra, cr)) == NULL) {
+		while ((bp = allocb_cred(size + extra, cr,
+		    curproc->p_pid)) == NULL) {
 			error = EAGAIN;
 			if ((uiop->uio_fmode & (FNDELAY|FNONBLOCK)) ||
 			    (error = strwaitbuf(size + extra, BPRI_MED)) != 0) {
@@ -3028,15 +3037,6 @@ strwaitq(stdata_t *stp, int flag, ssize_t count, int fmode, clock_t timout,
 		return (0);
 	}
 
-	if (fmode & (FNDELAY|FNONBLOCK)) {
-		if (!(flag & NOINTR))
-			error = EAGAIN;
-		else
-			error = 0;
-		*done = 1;
-		return (error);
-	}
-
 	if (stp->sd_flag & errs) {
 		/*
 		 * Check for errors before going to sleep since the
@@ -3084,6 +3084,15 @@ strwaitq(stdata_t *stp, int flag, ssize_t count, int fmode, clock_t timout,
 			*done = 0;
 			return (0);
 		}
+	}
+
+	if (fmode & (FNDELAY|FNONBLOCK)) {
+		if (!(flag & NOINTR))
+			error = EAGAIN;
+		else
+			error = 0;
+		*done = 1;
+		return (error);
 	}
 
 	stp->sd_flag |= slpflg;
@@ -4131,19 +4140,17 @@ strcopyout(void *from, void *to, size_t len, int copyflag)
  * it returns.
  */
 void
-strsignal_nolock(stdata_t *stp, int sig, int32_t band)
+strsignal_nolock(stdata_t *stp, int sig, uchar_t band)
 {
 	ASSERT(MUTEX_HELD(&stp->sd_lock));
 	switch (sig) {
 	case SIGPOLL:
 		if (stp->sd_sigflags & S_MSG)
-			strsendsig(stp->sd_siglist, S_MSG, (uchar_t)band, 0);
+			strsendsig(stp->sd_siglist, S_MSG, band, 0);
 		break;
-
 	default:
-		if (stp->sd_pgidp) {
+		if (stp->sd_pgidp)
 			pgsignal(stp->sd_pgidp, sig);
-		}
 		break;
 	}
 }
@@ -8386,19 +8393,51 @@ stream_willservice(stdata_t *stp)
 
 /*
  * Replace the cred currently in the mblk with a different one.
+ * Also update db_cpid.
  */
 void
-mblk_setcred(mblk_t *mp, cred_t *cr)
+mblk_setcred(mblk_t *mp, cred_t *cr, pid_t cpid)
 {
-	cred_t *ocr = DB_CRED(mp);
+	dblk_t *dbp = mp->b_datap;
+	cred_t *ocr = dbp->db_credp;
 
 	ASSERT(cr != NULL);
 
 	if (cr != ocr) {
-		crhold(mp->b_datap->db_credp = cr);
+		crhold(dbp->db_credp = cr);
 		if (ocr != NULL)
 			crfree(ocr);
 	}
+	/* Don't overwrite with NOPID */
+	if (cpid != NOPID)
+		dbp->db_cpid = cpid;
+}
+
+/*
+ * If the src message has a cred, then replace the cred currently in the mblk
+ * with it.
+ * Also update db_cpid.
+ */
+void
+mblk_copycred(mblk_t *mp, const mblk_t *src)
+{
+	dblk_t *dbp = mp->b_datap;
+	cred_t *cr, *ocr;
+	pid_t cpid;
+
+	cr = msg_getcred(src, &cpid);
+	if (cr == NULL)
+		return;
+
+	ocr = dbp->db_credp;
+	if (cr != ocr) {
+		crhold(dbp->db_credp = cr);
+		if (ocr != NULL)
+			crfree(ocr);
+	}
+	/* Don't overwrite with NOPID */
+	if (cpid != NOPID)
+		dbp->db_cpid = cpid;
 }
 
 int

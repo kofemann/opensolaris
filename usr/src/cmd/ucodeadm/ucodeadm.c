@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -237,10 +237,31 @@ ucode_gen_files_amd(uint8_t *buf, int size, char *path)
 {
 	/* LINTED: pointer alignment */
 	uint32_t *ptr = (uint32_t *)buf;
-	int plen = strlen(path);
+	char common_path[PATH_MAX];
 	int fd, count, counter;
 	ucode_header_amd_t *uh;
 	int last_cpu_rev = 0;
+
+
+	/* write container file */
+	(void) snprintf(common_path, PATH_MAX, "%s/%s", path, "container");
+
+	dprintf("path = %s\n", common_path);
+	fd = open(common_path, O_WRONLY | O_CREAT | O_TRUNC,
+	    S_IRUSR | S_IRGRP | S_IROTH);
+
+	if (fd == -1) {
+		ucode_perror(common_path, EM_SYS);
+		return (EM_SYS);
+	}
+
+	if (write(fd, buf, size) != size) {
+		(void) close(fd);
+		ucode_perror(common_path, EM_SYS);
+		return (EM_SYS);
+	}
+
+	(void) close(fd);
 
 	/* skip over magic number & equivalence table header */
 	ptr += 2; size -= 8;
@@ -248,21 +269,22 @@ ucode_gen_files_amd(uint8_t *buf, int size, char *path)
 	count = *ptr++; size -= 4;
 
 	/* equivalence table uses special name */
-	(void) strlcat(path, "/equivalence-table", PATH_MAX);
+	(void) snprintf(common_path, PATH_MAX, "%s/%s", path,
+	    "equivalence-table");
 
 	for (;;) {
-		dprintf("path = %s\n", path);
-		fd = open(path, O_WRONLY | O_CREAT | O_TRUNC,
+		dprintf("path = %s\n", common_path);
+		fd = open(common_path, O_WRONLY | O_CREAT | O_TRUNC,
 		    S_IRUSR | S_IRGRP | S_IROTH);
 
 		if (fd == -1) {
-			ucode_perror(path, EM_SYS);
+			ucode_perror(common_path, EM_SYS);
 			return (EM_SYS);
 		}
 
 		if (write(fd, ptr, count) != count) {
 			(void) close(fd);
-			ucode_perror(path, EM_SYS);
+			ucode_perror(common_path, EM_SYS);
 			return (EM_SYS);
 		}
 
@@ -283,8 +305,7 @@ ucode_gen_files_amd(uint8_t *buf, int size, char *path)
 			counter = 0;
 		}
 
-		path[plen] = '\0';
-		(void) snprintf(path + plen, PATH_MAX - plen, "/%04X-%02X",
+		(void) snprintf(common_path, PATH_MAX, "%s/%04X-%02X", path,
 		    uh->uh_cpu_rev, counter++);
 	}
 }

@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -200,13 +200,12 @@ nge_tx_recycle(nge_t *ngep, boolean_t is_intr)
 		ssbdp = &srp->sw_sbds[slot];
 		hw_sbd_p = DMA_VPTR(ssbdp->desc);
 
-		stflg = ngep->desc_attr.txd_check(hw_sbd_p, &len);
-
-		if (ssbdp->flags == HOST_OWN || (TXD_OWN & stflg) != 0)
+		if (ssbdp->flags == HOST_OWN)
 			break;
-
+		stflg = ngep->desc_attr.txd_check(hw_sbd_p, &len);
+		if ((stflg & TXD_OWN) != 0)
+			break;
 		DMA_ZERO(ssbdp->desc);
-
 		if (ssbdp->mp != NULL)	{
 			ssbdp->mp->b_next = mp;
 			mp = ssbdp->mp;
@@ -245,11 +244,11 @@ nge_tx_recycle(nge_t *ngep, boolean_t is_intr)
 
 	for (dme = dmah.head; dme != NULL; dme = dme->next)
 		(void) ddi_dma_unbind_handle(dme->hndl);
-
-	mutex_enter(&srp->dmah_lock);
-	nge_tx_dmah_push(&dmah, &srp->dmah_free);
-	mutex_exit(&srp->dmah_lock);
-
+	if (dmah.head != NULL) {
+		mutex_enter(&srp->dmah_lock);
+		nge_tx_dmah_push(&dmah, &srp->dmah_free);
+		mutex_exit(&srp->dmah_lock);
+	}
 	freemsgchain(mp);
 
 	/*
@@ -602,8 +601,8 @@ nge_send(nge_t *ngep, mblk_t *mp)
 		freemsg(mp);
 		return (B_TRUE);
 	}
-
 	if ((mblen > ngep->param_txbcopy_threshold) &&
+	    (frags <= NGE_MAP_FRAGS) &&
 	    (srp->tx_free > frags * NGE_MAX_COOKIES)) {
 		status = nge_send_mapped(ngep, mp, frags);
 		if (status == SEND_MAP_FAIL)

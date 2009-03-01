@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1129,6 +1129,35 @@ parse_fastboot_args(char *bootargs_buf, int *is_dryrun, const char *bename,
 	return (rc);
 }
 
+#define	MAXARGS		5
+
+static void
+do_archives_update(int do_fast_reboot)
+{
+	int	r, i = 0;
+	pid_t	pid;
+	char	*cmd_argv[MAXARGS];
+
+
+	cmd_argv[i++] = "/sbin/bootadm";
+	cmd_argv[i++] = "-ea";
+	cmd_argv[i++] = "update_all";
+	if (do_fast_reboot)
+		cmd_argv[i++] = "fastboot";
+	cmd_argv[i] = NULL;
+
+	r = posix_spawn(&pid, cmd_argv[0], NULL, NULL, cmd_argv, NULL);
+
+	/* if posix_spawn fails we emit a warning and continue */
+
+	if (r != 0)
+		(void) fprintf(stderr, gettext("%s: WARNING, unable to start "
+		    "boot archive update\n"), cmdname);
+	else
+		while (waitpid(pid, NULL, 0) == -1 && errno == EINTR)
+			;
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -1366,27 +1395,10 @@ main(int argc, char *argv[])
 		need_check_zones = halt_zones();
 	}
 
-	/* sync boot archive in the global zone */
-	if (zoneid == GLOBAL_ZONEID && !nosync) {
-		char *fast_argv[] = {"/sbin/bootadm", "-a", "update_all",
-		    "fastboot", NULL};
-		char *b_argv[] = {"/sbin/bootadm", "-a", "update_all", NULL};
+	/* if we're dumping, do the archive update here and don't defer it */
 
-		if (fast_reboot)
-			r = posix_spawn(NULL, fast_argv[0], NULL, NULL,
-			    fast_argv, NULL);
-		else
-			r = posix_spawn(NULL, b_argv[0], NULL, NULL, b_argv,
-			    NULL);
-
-	/* if posix_spawn fails we emit a warning and continue rebooting */
-
-		if (r != 0)
-			(void) fprintf(stderr, gettext("%s: WARNING, unable to"
-			    "start boot archive update\n"), cmdname);
-		else
-			(void) wait(NULL);
-	}
+	if (cmd == A_DUMP && zoneid == GLOBAL_ZONEID && !nosync)
+		do_archives_update(fast_reboot);
 
 	/*
 	 * If we're not forcing a crash dump, mark the system as quiescing for
@@ -1441,8 +1453,18 @@ main(int argc, char *argv[])
 	 * handle a SIGTERM and clean up properly.
 	 */
 	if (cmd != A_DUMP) {
+		int	start, end, delta;
+
 		(void) kill(-1, SIGTERM);
-		(void) sleep(5);
+		start = time(NULL);
+
+		if (zoneid == GLOBAL_ZONEID && !nosync)
+			do_archives_update(fast_reboot);
+
+		end = time(NULL);
+		delta = end - start;
+		if (delta < 5)
+			(void) sleep(5 - delta);
 	}
 
 	(void) signal(SIGINT, SIG_IGN);

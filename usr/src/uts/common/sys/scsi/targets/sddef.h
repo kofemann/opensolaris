@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -93,17 +93,9 @@ extern "C" {
 
 #elif defined(_SUNOS_VTOC_16)
 
-/*
- * XXX - NSDMAP has multiple definitions, one more in cmlb_impl.h
- * If they are coalesced into one, this definition will follow suit.
- * FDISK partitions - 4 primary and MAX_EXT_PARTS number of Extended
- * Partitions.
- */
-#define	FDISK_PARTS		(FD_NUMPART + MAX_EXT_PARTS)
-
 #define	SDUNIT_SHIFT	6
 #define	SDPART_MASK	63
-#define	NSDMAP		(NDKMAP + FDISK_PARTS + 1)
+#define	NSDMAP		(NDKMAP + FD_NUMPART + 1)
 
 #else
 #error "No VTOC format defined."
@@ -285,6 +277,7 @@ struct sd_lun {
 	uchar_t	un_reservation_type;	/* SCSI-3 or SCSI-2 */
 	uint_t	un_max_xfer_size;	/* Maximum DMA transfer size */
 	int	un_partial_dma_supported;
+	int	un_buf_breakup_supported;
 
 	int	un_mincdb;		/* Smallest CDB to use */
 	int	un_maxcdb;		/* Largest CDB to use */
@@ -637,6 +630,7 @@ _NOTE(SCHEME_PROTECTS_DATA("stable data",
 	sd_lun::un_reserve_release_time
 	sd_lun::un_max_xfer_size
 	sd_lun::un_partial_dma_supported
+	sd_lun::un_buf_breakup_supported
 	sd_lun::un_f_is_fibre
 	sd_lun::un_node_type
 	sd_lun::un_buf_chain_type

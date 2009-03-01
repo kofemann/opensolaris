@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -41,6 +41,7 @@
 #include <sys/types.h>
 #include <libscf.h>
 #include <assert.h>
+#include <uuid/uuid.h>
 #include <smbsrv/libsmb.h>
 
 typedef struct smb_cfg_param {
@@ -82,6 +83,9 @@ static smb_cfg_param_t smb_cfg_table[] =
 	{SMB_CI_DOMAIN_SID, "domain_sid", SCF_TYPE_ASTRING, 0},
 	{SMB_CI_DOMAIN_MEMB, "domain_member", SCF_TYPE_BOOLEAN, 0},
 	{SMB_CI_DOMAIN_NAME, "domain_name", SCF_TYPE_ASTRING, 0},
+	{SMB_CI_DOMAIN_FQDN, "fqdn", SCF_TYPE_ASTRING, 0},
+	{SMB_CI_DOMAIN_FOREST, "forest", SCF_TYPE_ASTRING, 0},
+	{SMB_CI_DOMAIN_GUID, "domain_guid", SCF_TYPE_ASTRING, 0},
 	{SMB_CI_DOMAIN_SRV, "pdc", SCF_TYPE_ASTRING, 0},
 
 	/* WINS configuration */
@@ -92,8 +96,6 @@ static smb_cfg_param_t smb_cfg_table[] =
 	/* RPC services configuration */
 	{SMB_CI_SRVSVC_SHRSET_ENABLE, "srvsvc_sharesetinfo_enable",
 	    SCF_TYPE_BOOLEAN, 0},
-	{SMB_CI_MLRPC_KALIVE, "mlrpc_keep_alive_interval",
-	    SCF_TYPE_INTEGER, 0},
 
 	/* Kmod specific configuration */
 	{SMB_CI_MAX_WORKERS, "max_workers", SCF_TYPE_INTEGER, 0},
@@ -128,7 +130,8 @@ static smb_cfg_param_t smb_cfg_table[] =
 	{SMB_CI_KPASSWD_SEQNUM, "kpasswd_seqnum", SCF_TYPE_INTEGER,
 	    0},
 	{SMB_CI_NETLOGON_SEQNUM, "netlogon_seqnum", SCF_TYPE_INTEGER,
-	    0}
+	    0},
+	{SMB_CI_IPV6_ENABLE, "ipv6_enable", SCF_TYPE_BOOLEAN, 0}
 
 	/* SMB_CI_MAX */
 };
@@ -386,6 +389,24 @@ smb_config_getstr(smb_cfg_id_t id, char *cbuf, int bufsz)
 
 error:
 	smb_smf_scf_fini(handle);
+	return (rc);
+}
+
+int
+smb_config_getip(smb_cfg_id_t sc_id, smb_inaddr_t *ipaddr)
+{
+	int rc;
+	char ipstr[INET6_ADDRSTRLEN];
+
+	rc = smb_config_getstr(sc_id, ipstr, sizeof (ipstr));
+	if (rc == SMBD_SMF_OK) {
+		rc = inet_pton(AF_INET, ipstr, ipaddr);
+		if (rc == 0) {
+			rc = inet_pton(AF_INET6, ipstr, ipaddr);
+			if (rc == 0)
+				bzero(ipaddr, sizeof (smb_inaddr_t));
+		}
+	}
 	return (rc);
 }
 
@@ -755,4 +776,23 @@ smb_config_getent(smb_cfg_id_t id)
 
 	assert(0);
 	return (NULL);
+}
+
+void
+smb_config_getdomaininfo(char *domain, char *fqdn, char *forest, char *guid)
+{
+	(void) smb_config_getstr(SMB_CI_DOMAIN_NAME, domain, NETBIOS_NAME_SZ);
+	(void) smb_config_getstr(SMB_CI_DOMAIN_FQDN, fqdn, MAXHOSTNAMELEN);
+	(void) smb_config_getstr(SMB_CI_DOMAIN_FOREST, forest, MAXHOSTNAMELEN);
+	(void) smb_config_getstr(SMB_CI_DOMAIN_GUID, guid,
+	    UUID_PRINTABLE_STRING_LENGTH);
+}
+
+void
+smb_config_setdomaininfo(char *domain, char *fqdn, char *forest, char *guid)
+{
+	(void) smb_config_setstr(SMB_CI_DOMAIN_NAME, domain);
+	(void) smb_config_setstr(SMB_CI_DOMAIN_FQDN, fqdn);
+	(void) smb_config_setstr(SMB_CI_DOMAIN_FOREST, forest);
+	(void) smb_config_setstr(SMB_CI_DOMAIN_GUID, guid);
 }

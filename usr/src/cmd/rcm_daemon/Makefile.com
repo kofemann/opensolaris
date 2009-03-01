@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
@@ -63,6 +63,8 @@ sparc_MOD_SRC = $(COMMON)/ttymux_rcm.c
 COMMON_PERL_SCRIPT_SRC =
 
 sparc_PERL_SCRIPT_SRC = SUNW,vdevices.pl
+
+COMMON_SHELL_SCRIPT_SRC = SUNW,ibsdpu.sh
 
 COMMON_MOD_OBJ = \
 	filesys_rcm.o \
@@ -124,7 +126,7 @@ SUNW_network_rcm.so := LDLIBS_MODULES += -L$(ROOT)/lib -ldladm
 SUNW_vlan_rcm.so := LDLIBS_MODULES += -L$(ROOT)/lib -ldladm
 SUNW_vnic_rcm.so := LDLIBS_MODULES += -L$(ROOT)/lib -ldladm
 SUNW_aggr_rcm.so := LDLIBS_MODULES += -L$(ROOT)/lib -ldladm
-SUNW_ip_rcm.so := LDLIBS_MODULES += -L$(ROOT)/lib -linetutil -ldladm
+SUNW_ip_rcm.so := LDLIBS_MODULES += -L$(ROOT)/lib -linetutil -ldladm -lipmp
 SUNW_ip_anon_rcm.so := LDLIBS_MODULES += -L$(ROOT)/lib -linetutil
 
 LDLIBS += -lgen -lelf -lrcm -lnvpair -ldevinfo -lnsl -lsocket
@@ -135,7 +137,8 @@ POFILES = $(SRCS:.c=.po)
 POFILE = prcm_daemon.po
 
 PERL_SCRIPTS = $(COMMON_PERL_SRC) $($(MACH)_PERL_SCRIPT_SRC)
-RCM_SCRIPTS = $(PERL_SCRIPTS)
+SHELL_SCRIPTS = $(COMMON_SHELL_SCRIPT_SRC)
+RCM_SCRIPTS = $(PERL_SCRIPTS) $(SHELL_SCRIPTS)
 
 # install specifics
 

@@ -23,7 +23,7 @@
  *	Copyright (c) 1988 AT&T
  *	  All Rights Reserved
  *
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -391,7 +391,7 @@ process_cap(Ifl_desc *ifl, Is_desc *cisp, Ofl_desc *ofl)
 	Cap	*cdata;
 	Word	ndx, cnum;
 
-	DBG_CALL(Dbg_cap_sec_title(ofl));
+	DBG_CALL(Dbg_cap_sec_title(ofl->ofl_lml, ifl->ifl_name));
 
 	/*
 	 * The capabilities are supposed to be terminated with a CA_SUNW_NULL
@@ -1368,7 +1368,8 @@ rel_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 			    isc->is_name, risc->is_name);
 			return (0);
 		}
-		if (list_appendc(&osp->os_relisdescs, isc) == 0)
+		if (aplist_append(&osp->os_relisdescs, isc,
+		    AL_CNT_OS_RELISDESCS) == NULL)
 			return (S_ERROR);
 	}
 	return (1);
@@ -1993,7 +1994,7 @@ ld_process_ifl(const char *name, const char *soname, int fd, Elf *elf,
 	 * been processed (rather than simply comparing filenames, the device
 	 * information provides a quicker comparison and detects linked files).
 	 */
-	if (!(flags & FLG_IF_EXTRACT))
+	if (fd && ((flags & FLG_IF_EXTRACT) == 0))
 		(void) fstat(fd, &status);
 	else {
 		status.st_dev = 0;
@@ -2292,6 +2293,26 @@ ld_process_open(const char *opath, const char *ofile, int *fd, Ofl_desc *ofl,
 		return (NULL);
 
 	return (ld_process_ifl(npath, nfile, *fd, elf, flags, ofl, rej));
+}
+
+/*
+ * Having successfully mapped a file, set up the necessary elf structures to
+ * process it further.  This routine is patterned after ld_process_open() and
+ * is only called by ld.so.1(1) to process a relocatable object.
+ */
+Ifl_desc *
+ld_process_mem(const char *path, const char *file, char *addr, size_t size,
+    Ofl_desc *ofl, Rej_desc *rej)
+{
+	Elf	*elf;
+
+	if ((elf = elf_memory(addr, size)) == NULL) {
+		eprintf(ofl->ofl_lml, ERR_ELF, MSG_INTL(MSG_ELF_MEMORY), path);
+		ofl->ofl_flags |= FLG_OF_FATAL;
+		return (0);
+	}
+
+	return (ld_process_ifl(path, file, 0, elf, 0, ofl, rej));
 }
 
 /*

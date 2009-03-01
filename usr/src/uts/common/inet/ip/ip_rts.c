@@ -1,5 +1,5 @@
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -38,8 +38,6 @@
  *	@(#)rtsock.c	8.6 (Berkeley) 2/11/95
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * This file contains routines that processes routing socket requests.
  */
@@ -48,6 +46,7 @@
 #include <sys/stream.h>
 #include <sys/stropts.h>
 #include <sys/ddi.h>
+#include <sys/strsubr.h>
 #include <sys/cmn_err.h>
 #include <sys/debug.h>
 #include <sys/policy.h>
@@ -95,59 +94,68 @@ static void	rts_setmetrics(ire_t *ire, uint_t which, rt_metrics_t *metrics);
 static void	ip_rts_request_retry(ipsq_t *, queue_t *q, mblk_t *mp, void *);
 
 /*
- * Send the ack to all the routing queues.  In case of the originating queue,
- * send it only if the loopback is set.
+ * Send `mp' to all eligible routing queues.  A queue is ineligible if:
  *
- * Messages are sent upstream only on routing sockets that did not specify an
- * address family when they were created or when the address family matches the
- * one specified by the caller.
- *
+ *  1. SO_USELOOPBACK is off and it is not the originating queue.
+ *  2. RTAW_UNDER_IPMP is on and RTSQ_UNDER_IPMP is clear in `flags'.
+ *  3. RTAW_UNDER_IPMP is off and RTSQ_NORMAL is clear in `flags'.
+ *  4. It is not the same address family as `af', and `af' isn't AF_UNSPEC.
  */
 void
-rts_queue_input(mblk_t *mp, queue_t *q, sa_family_t af, ip_stack_t *ipst)
+rts_queue_input(mblk_t *mp, conn_t *o_connp, sa_family_t af, uint_t flags,
+    ip_stack_t *ipst)
 {
 	mblk_t	*mp1;
-	int	checkqfull;
 	conn_t 	*connp, *next_connp;
+
+	/*
+	 * Since we don't have an ill_t here, RTSQ_DEFAULT must already be
+	 * resolved to one or more of RTSQ_NORMAL|RTSQ_UNDER_IPMP by now.
+	 */
+	ASSERT(!(flags & RTSQ_DEFAULT));
 
 	mutex_enter(&ipst->ips_rts_clients->connf_lock);
 	connp = ipst->ips_rts_clients->connf_head;
 
-	while (connp != NULL) {
+	for (; connp != NULL; connp = next_connp) {
+		next_connp = connp->conn_next;
+
 		/*
 		 * If there was a family specified when this routing socket was
 		 * created and it doesn't match the family of the message to
 		 * copy, then continue.
 		 */
 		if ((connp->conn_proto != AF_UNSPEC) &&
-		    (connp->conn_proto != af)) {
-			connp = connp->conn_next;
+		    (connp->conn_proto != af))
 			continue;
+
+		/*
+		 * Queue the message only if the conn_t and flags match.
+		 */
+		if (connp->conn_rtaware & RTAW_UNDER_IPMP) {
+			if (!(flags & RTSQ_UNDER_IPMP))
+				continue;
+		} else {
+			if (!(flags & RTSQ_NORMAL))
+				continue;
 		}
+
 		/*
 		 * For the originating queue, we only copy the message upstream
 		 * if loopback is set.  For others reading on the routing
 		 * socket, we check if there is room upstream for a copy of the
 		 * message.
 		 */
-		if ((q != NULL) && (CONNP_TO_RQ(connp) == RD(q))) {
-			if (connp->conn_loopback == 0) {
-				connp = connp->conn_next;
-				continue;
-			}
-			/*
-			 * Just because it is the same queue doesn't mean it
-			 * will promptly read its acks. Have to avoid using
-			 * all of kernel memory.
-			 */
-			checkqfull = B_TRUE;
-		} else {
-			checkqfull = B_TRUE;
+		if ((o_connp == connp) && connp->conn_loopback == 0) {
+			connp = connp->conn_next;
+			continue;
 		}
 		CONN_INC_REF(connp);
 		mutex_exit(&ipst->ips_rts_clients->connf_lock);
 		/* Pass to rts_input */
-		if (!checkqfull || canputnext(CONNP_TO_RQ(connp))) {
+		if ((IPCL_IS_NONSTR(connp) && !PROTO_FLOW_CNTRLD(connp))||
+		    (!IPCL_IS_NONSTR(connp) &&
+		    canputnext(CONNP_TO_RQ(connp)))) {
 			mp1 = dupmsg(mp);
 			if (mp1 == NULL)
 				mp1 = copymsg(mp);
@@ -156,10 +164,9 @@ rts_queue_input(mblk_t *mp, queue_t *q, sa_family_t af, ip_stack_t *ipst)
 		}
 
 		mutex_enter(&ipst->ips_rts_clients->connf_lock);
-		/* Follow the next pointer before releasing the conn. */
+		/* reload next_connp since conn_next may have changed */
 		next_connp = connp->conn_next;
 		CONN_DEC_REF(connp);
-		connp = next_connp;
 	}
 	mutex_exit(&ipst->ips_rts_clients->connf_lock);
 	freemsg(mp);
@@ -220,14 +227,14 @@ ip_rts_rtmsg(int type, ire_t *ire, int error, ip_stack_t *ipst)
 		rtm->rtm_errno = error;
 	else
 		rtm->rtm_flags |= RTF_DONE;
-	rts_queue_input(mp, NULL, af, ipst);
+	rts_queue_input(mp, NULL, af, RTSQ_ALL, ipst);
 }
 
 /* ARGSUSED */
 static void
 ip_rts_request_retry(ipsq_t *dummy_sq, queue_t *q, mblk_t *mp, void *dummy)
 {
-	(void) ip_rts_request(q, mp, DB_CRED(mp));
+	(void) ip_rts_request(q, mp, msg_getcred(mp, NULL));
 }
 
 /*
@@ -273,7 +280,7 @@ ip_rts_unregister(conn_t *connp)
  * conn close occurs in conn_ioctl_cleanup.
  */
 int
-ip_rts_request(queue_t *q, mblk_t *mp, cred_t *ioc_cr)
+ip_rts_request_common(queue_t *q, mblk_t *mp, conn_t *connp, cred_t *ioc_cr)
 {
 	rt_msghdr_t	*rtm = NULL;
 	in6_addr_t	dst_addr_v6;
@@ -298,7 +305,6 @@ ip_rts_request(queue_t *q, mblk_t *mp, cred_t *ioc_cr)
 	ipif_t		*ipif = NULL;
 	ipif_t		*tmp_ipif = NULL;
 	IOCP		iocp = (IOCP)mp->b_rptr;
-	conn_t		*connp;
 	boolean_t	gcgrp_xtraref = B_FALSE;
 	tsol_gcgrp_addr_t ga;
 	tsol_rtsecattr_t rtsecattr;
@@ -311,8 +317,6 @@ ip_rts_request(queue_t *q, mblk_t *mp, cred_t *ioc_cr)
 
 	ip1dbg(("ip_rts_request: mp is %x\n", DB_TYPE(mp)));
 
-	ASSERT(CONN_Q(q));
-	connp = Q_TO_CONN(q);
 	zoneid = connp->conn_zoneid;
 	ipst = connp->conn_netstack->netstack_ip;
 
@@ -444,7 +448,7 @@ ip_rts_request(queue_t *q, mblk_t *mp, cred_t *ioc_cr)
 
 	if (index != 0) {
 		ill_t   *ill;
-
+lookup:
 		/*
 		 * IPC must be refheld somewhere in ip_wput_nondata or
 		 * ip_wput_ioctl etc... and cleaned up if ioctl is killed.
@@ -459,16 +463,33 @@ ip_rts_request(queue_t *q, mblk_t *mp, cred_t *ioc_cr)
 			goto done;
 		}
 
+		/*
+		 * Since all interfaces in an IPMP group must be equivalent,
+		 * we prevent changes to a specific underlying interface's
+		 * routing configuration.  However, for backward compatibility,
+		 * we intepret a request to add a route on an underlying
+		 * interface as a request to add a route on its IPMP interface.
+		 */
+		if (IS_UNDER_IPMP(ill)) {
+			switch (rtm->rtm_type) {
+			case RTM_CHANGE:
+			case RTM_DELETE:
+				ill_refrele(ill);
+				error = EINVAL;
+				goto done;
+			case RTM_ADD:
+				index = ipmp_ill_get_ipmp_ifindex(ill);
+				ill_refrele(ill);
+				if (index == 0) {
+					error = EINVAL;
+					goto done;
+				}
+				goto lookup;
+			}
+		}
+
 		ipif = ipif_get_next_ipif(NULL, ill);
 		ill_refrele(ill);
-		/*
-		 * If this is replacement ipif, prevent a route from
-		 * being added.
-		 */
-		if (ipif != NULL && ipif->ipif_replace_zero) {
-			error = ENETDOWN;
-			goto done;
-		}
 		match_flags |= MATCH_IRE_ILL;
 	}
 
@@ -564,7 +585,7 @@ ip_rts_request(queue_t *q, mblk_t *mp, cred_t *ioc_cr)
 
 			error = ip_rt_add(dst_addr, net_mask, gw_addr, src_addr,
 			    rtm->rtm_flags, ipif, &ire, B_FALSE,
-			    CONNP_TO_WQ(connp), ioc_mp, ip_rts_request_retry,
+			    WR(q), ioc_mp, ip_rts_request_retry,
 			    rtsap, ipst);
 			if (ipif != NULL)
 				ASSERT(!MUTEX_HELD(&ipif->ipif_ill->ill_lock));
@@ -602,7 +623,7 @@ ip_rts_request(queue_t *q, mblk_t *mp, cred_t *ioc_cr)
 
 				error = ip_rt_add_v6(&dst_addr_v6, &net_mask_v6,
 				    &gw_addr_v6, &src_addr_v6, rtm->rtm_flags,
-				    ipif, &ire, CONNP_TO_WQ(connp), ioc_mp,
+				    ipif, &ire, WR(q), ioc_mp,
 				    ip_rts_request_retry, rtsap, ipst);
 				break;
 			}
@@ -616,7 +637,7 @@ ip_rts_request(queue_t *q, mblk_t *mp, cred_t *ioc_cr)
 			}
 			error = ip_rt_add_v6(&dst_addr_v6, &net_mask_v6,
 			    &gw_addr_v6, NULL, rtm->rtm_flags,
-			    ipif, &ire, CONNP_TO_WQ(connp), ioc_mp,
+			    ipif, &ire, WR(q), ioc_mp,
 			    ip_rts_request_retry, rtsap, ipst);
 			if (ipif != NULL)
 				ASSERT(!MUTEX_HELD(&ipif->ipif_ill->ill_lock));
@@ -646,14 +667,12 @@ ip_rts_request(queue_t *q, mblk_t *mp, cred_t *ioc_cr)
 		case AF_INET:
 			error = ip_rt_delete(dst_addr, net_mask, gw_addr,
 			    found_addrs, rtm->rtm_flags, ipif, B_FALSE,
-			    CONNP_TO_WQ(connp), ioc_mp, ip_rts_request_retry,
-			    ipst);
+			    WR(q), ioc_mp, ip_rts_request_retry, ipst);
 			break;
 		case AF_INET6:
 			error = ip_rt_delete_v6(&dst_addr_v6, &net_mask_v6,
 			    &gw_addr_v6, found_addrs, rtm->rtm_flags, ipif,
-			    CONNP_TO_WQ(connp), ioc_mp, ip_rts_request_retry,
-			    ipst);
+			    WR(q), ioc_mp, ip_rts_request_retry, ipst);
 			break;
 		}
 		break;
@@ -867,7 +886,7 @@ ip_rts_request(queue_t *q, mblk_t *mp, cred_t *ioc_cr)
 						 */
 						tmp_ipif = ipif_lookup_addr(
 						    src_addr, NULL, ALL_ZONES,
-						    CONNP_TO_WQ(connp), ioc_mp,
+						    WR(q), ioc_mp,
 						    ip_rts_request_retry,
 						    &error, ipst);
 						if (tmp_ipif == NULL) {
@@ -1053,17 +1072,25 @@ done:
 			/* OK ACK already set up by caller except this */
 			ip2dbg(("ip_rts_request: OK ACK\n"));
 		}
-		rts_queue_input(mp, q, af, ipst);
+		rts_queue_input(mp, connp, af, RTSQ_ALL, ipst);
 	}
+
 	iocp->ioc_error = error;
 	ioc_mp->b_datap->db_type = M_IOCACK;
 	if (iocp->ioc_error != 0)
 		iocp->ioc_count = 0;
 	(connp->conn_recv)(connp, ioc_mp, NULL);
+
 	/* conn was refheld in ip_wput_ioctl. */
 	CONN_OPER_PENDING_DONE(connp);
 
 	return (error);
+}
+
+int
+ip_rts_request(queue_t *q, mblk_t *mp, cred_t *ioc_cr)
+{
+	return (ip_rts_request_common(q, mp, Q_TO_CONN(q), ioc_cr));
 }
 
 /*
@@ -1732,7 +1759,7 @@ ip_rts_change(int type, ipaddr_t dst_addr, ipaddr_t gw_addr, ipaddr_t net_mask,
 	rtm->rtm_errno = error;
 	rtm->rtm_flags |= RTF_DONE;
 	rtm->rtm_addrs = rtm_addrs;
-	rts_queue_input(mp, NULL, AF_INET, ipst);
+	rts_queue_input(mp, NULL, AF_INET, RTSQ_ALL, ipst);
 }
 
 /*
@@ -1741,7 +1768,13 @@ ip_rts_change(int type, ipaddr_t dst_addr, ipaddr_t gw_addr, ipaddr_t net_mask,
  * Message type generated RTM_IFINFO.
  */
 void
-ip_rts_ifmsg(const ipif_t *ipif)
+ip_rts_ifmsg(const ipif_t *ipif, uint_t flags)
+{
+	ip_rts_xifmsg(ipif, 0, 0, flags);
+}
+
+void
+ip_rts_xifmsg(const ipif_t *ipif, uint64_t set, uint64_t clear, uint_t flags)
 {
 	if_msghdr_t	*ifm;
 	mblk_t		*mp;
@@ -1749,12 +1782,12 @@ ip_rts_ifmsg(const ipif_t *ipif)
 	ip_stack_t	*ipst = ipif->ipif_ill->ill_ipst;
 
 	/*
-	 * This message should be generated only
-	 * when the physical device is changing
-	 * state.
+	 * This message should be generated only when the physical interface
+	 * is changing state.
 	 */
 	if (ipif->ipif_id != 0)
 		return;
+
 	if (ipif->ipif_isv6) {
 		af = AF_INET6;
 		mp = rts_alloc_msg(RTM_IFINFO, RTA_IFP, af, 0);
@@ -1773,11 +1806,22 @@ ip_rts_ifmsg(const ipif_t *ipif)
 	}
 	ifm = (if_msghdr_t *)mp->b_rptr;
 	ifm->ifm_index = ipif->ipif_ill->ill_phyint->phyint_ifindex;
-	ifm->ifm_flags = ipif->ipif_flags | ipif->ipif_ill->ill_flags |
-	    ipif->ipif_ill->ill_phyint->phyint_flags;
+	ifm->ifm_flags = (ipif->ipif_flags | ipif->ipif_ill->ill_flags |
+	    ipif->ipif_ill->ill_phyint->phyint_flags | set) & ~clear;
 	rts_getifdata(&ifm->ifm_data, ipif);
 	ifm->ifm_addrs = RTA_IFP;
-	rts_queue_input(mp, NULL, af, ipst);
+
+	if (flags & RTSQ_DEFAULT) {
+		flags = RTSQ_ALL;
+		/*
+		 * If this message is for an underlying interface, prevent
+		 * "normal" (IPMP-unaware) routing sockets from seeing it.
+		 */
+		if (IS_UNDER_IPMP(ipif->ipif_ill))
+			flags &= ~RTSQ_NORMAL;
+	}
+
+	rts_queue_input(mp, NULL, af, flags, ipst);
 }
 
 /*
@@ -1786,7 +1830,7 @@ ip_rts_ifmsg(const ipif_t *ipif)
  * The structure of the code is based on the 4.4BSD-Lite2 <net/rtsock.c>.
  */
 void
-ip_rts_newaddrmsg(int cmd, int error, const ipif_t *ipif)
+ip_rts_newaddrmsg(int cmd, int error, const ipif_t *ipif, uint_t flags)
 {
 	int		pass;
 	int		ncmd;
@@ -1801,6 +1845,17 @@ ip_rts_newaddrmsg(int cmd, int error, const ipif_t *ipif)
 		af = AF_INET6;
 	else
 		af = AF_INET;
+
+	if (flags & RTSQ_DEFAULT) {
+		flags = RTSQ_ALL;
+		/*
+		 * If this message is for an underlying interface, prevent
+		 * "normal" (IPMP-unaware) routing sockets from seeing it.
+		 */
+		if (IS_UNDER_IPMP(ipif->ipif_ill))
+			flags &= ~RTSQ_NORMAL;
+	}
+
 	/*
 	 * If the request is DELETE, send RTM_DELETE and RTM_DELADDR.
 	 * if the request is ADD, send RTM_NEWADDR and RTM_ADD.
@@ -1835,7 +1890,7 @@ ip_rts_newaddrmsg(int cmd, int error, const ipif_t *ipif)
 			ifam->ifam_metric = ipif->ipif_metric;
 			ifam->ifam_flags = ((cmd == RTM_ADD) ? RTF_UP : 0);
 			ifam->ifam_addrs = rtm_addrs;
-			rts_queue_input(mp, NULL, af, ipst);
+			rts_queue_input(mp, NULL, af, flags, ipst);
 		}
 		if ((cmd == RTM_ADD && pass == 2) ||
 		    (cmd == RTM_DELETE && pass == 1)) {
@@ -1865,7 +1920,7 @@ ip_rts_newaddrmsg(int cmd, int error, const ipif_t *ipif)
 			if (error == 0)
 				rtm->rtm_flags |= RTF_DONE;
 			rtm->rtm_addrs = rtm_addrs;
-			rts_queue_input(mp, NULL, af, ipst);
+			rts_queue_input(mp, NULL, af, flags, ipst);
 		}
 	}
 }

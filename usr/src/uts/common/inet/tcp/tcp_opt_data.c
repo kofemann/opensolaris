@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/stream.h>
@@ -43,8 +41,8 @@
 
 
 extern int	tcp_opt_default(queue_t *q, int level, int name, uchar_t *ptr);
-extern int	tcp_opt_get(queue_t *q, int level, int name, uchar_t *ptr);
-extern int	tcp_opt_set(queue_t *q, uint_t optset_context, int level,
+extern int	tcp_tpi_opt_get(queue_t *q, int level, int name, uchar_t *ptr);
+extern int	tcp_tpi_opt_set(queue_t *q, uint_t optset_context, int level,
     int name, uint_t inlen, uchar_t *invalp, uint_t *outlenp, uchar_t *outvalp,
     void *thisdg_attrs, cred_t *cr, mblk_t *mblk);
 
@@ -71,6 +69,10 @@ opdes_t	tcp_opt_arr[] = {
 { SO_TYPE,	SOL_SOCKET, OA_R, OA_R, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
 { SO_SNDBUF,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
 { SO_RCVBUF,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
+{ SO_SNDTIMEO,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
+	sizeof (struct timeval), 0 },
+{ SO_RCVTIMEO,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
+	sizeof (struct timeval), 0 },
 { SO_DGRAM_ERRIND, SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0
 	},
 { SO_SND_COPYAVOID, SOL_SOCKET, OA_RW, OA_RW, OP_NP, 0, sizeof (int), 0 },
@@ -125,10 +127,10 @@ opdes_t	tcp_opt_arr[] = {
 
 { IP_OPTIONS,	IPPROTO_IP, OA_RW, OA_RW, OP_NP,
 	(OP_PASSNEXT|OP_VARLEN|OP_NODEFAULT),
-	40, -1 /* not initialized */ },
+	IP_MAX_OPT_LENGTH + IP_ADDR_LEN, -1 /* not initialized */ },
 { T_IP_OPTIONS,	IPPROTO_IP, OA_RW, OA_RW, OP_NP,
 	(OP_PASSNEXT|OP_VARLEN|OP_NODEFAULT),
-	40, -1 /* not initialized */ },
+	IP_MAX_OPT_LENGTH + IP_ADDR_LEN, -1 /* not initialized */ },
 
 { IP_TOS,	IPPROTO_IP, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
 { T_IP_TOS,	IPPROTO_IP, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
@@ -152,9 +154,6 @@ opdes_t	tcp_opt_arr[] = {
 
 { IP_NEXTHOP, IPPROTO_IP, OA_R, OA_RW, OP_CONFIG, OP_PASSNEXT,
 	sizeof (in_addr_t),	-1 /* not initialized  */ },
-
-{ IPV6_BOUND_PIF, IPPROTO_IPV6, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
-	sizeof (int),	0 /* no ifindex */ },
 
 { IPV6_UNSPEC_SRC, IPPROTO_IPV6, OA_R, OA_RW, OP_RAW, OP_PASSNEXT,
 	sizeof (int), 0 },
@@ -244,8 +243,8 @@ uint_t tcp_max_optsize; /* initialized when TCP driver is loaded */
 
 optdb_obj_t tcp_opt_obj = {
 	tcp_opt_default,	/* TCP default value function pointer */
-	tcp_opt_get,		/* TCP get function pointer */
-	tcp_opt_set,		/* TCP set function pointer */
+	tcp_tpi_opt_get,	/* TCP get function pointer */
+	tcp_tpi_opt_set,	/* TCP set function pointer */
 	B_TRUE,			/* TCP is tpi provider */
 	TCP_OPT_ARR_CNT,	/* TCP option database count of entries */
 	tcp_opt_arr,		/* TCP option database */

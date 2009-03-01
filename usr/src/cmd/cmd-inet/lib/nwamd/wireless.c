@@ -198,8 +198,8 @@ add_wireless_if(const char *ifname)
 
 	if ((wip = calloc(1, sizeof (*wip))) != NULL) {
 		(void) strlcpy(wip->wi_name, ifname, sizeof (wip->wi_name));
-		(void) dladm_name2info(ifname, &wip->wi_linkid, NULL, NULL,
-		    NULL);
+		(void) dladm_name2info(dld_handle, ifname, &wip->wi_linkid,
+		    NULL, NULL, NULL);
 		if (pthread_mutex_lock(&wifi_mutex) == 0) {
 			insque(&wip->wi_links, wi_list.q_back);
 			wi_link_count++;
@@ -409,7 +409,7 @@ check_wlan(const wireless_if_t *wip, const char *exp_essid,
 	char cur_bssid[DLADM_STRSIZE];
 	char errmsg[DLADM_STRSIZE];
 
-	status = dladm_wlan_get_linkattr(wip->wi_linkid, &attr);
+	status = dladm_wlan_get_linkattr(dld_handle, wip->wi_linkid, &attr);
 	if (status != DLADM_STATUS_OK) {
 		dprintf("check_wlan: dladm_wlan_get_linkattr() for %s "
 		    "failed: %s", wip->wi_name,
@@ -444,7 +444,7 @@ unexpected:
 	if (sendevent) {
 		/* If not, then shut the interface down normally */
 		(void) np_queue_add_event(EV_TAKEDOWN, wip->wi_name);
-		(void) dladm_wlan_disconnect(wip->wi_linkid);
+		(void) dladm_wlan_disconnect(dld_handle, wip->wi_linkid);
 	}
 	return (B_FALSE);
 }
@@ -464,7 +464,8 @@ update_connected_wlan(wireless_if_t *wip, struct wireless_lan *exp_wlan)
 	char bssid[DLADM_STRSIZE];
 	boolean_t connected, wasconn;
 
-	if (dladm_wlan_get_linkattr(wip->wi_linkid, &attr) != DLADM_STATUS_OK)
+	if (dladm_wlan_get_linkattr(dld_handle, wip->wi_linkid, &attr) !=
+	    DLADM_STATUS_OK)
 		attr.la_status = DLADM_WLAN_LINK_DISCONNECTED;
 	if (attr.la_status == DLADM_WLAN_LINK_CONNECTED) {
 		(void) dladm_wlan_essid2str(&attr.la_wlan_attr.wa_essid, essid);
@@ -491,7 +492,8 @@ update_connected_wlan(wireless_if_t *wip, struct wireless_lan *exp_wlan)
 			dprintf("update: wrong AP on %s; expected %s %s",
 			    exp_wlan->wl_if_name, exp_wlan->essid,
 			    exp_wlan->bssid);
-			(void) dladm_wlan_disconnect(wip->wi_linkid);
+			(void) dladm_wlan_disconnect(dld_handle,
+			    wip->wi_linkid);
 			connected = B_FALSE;
 		}
 		/* If we're not in the expected state, then report disconnect */
@@ -500,7 +502,8 @@ update_connected_wlan(wireless_if_t *wip, struct wireless_lan *exp_wlan)
 			if (connected) {
 				dprintf("update: unexpected connection to %s "
 				    "%s; clearing", essid, bssid);
-				(void) dladm_wlan_disconnect(wip->wi_linkid);
+				(void) dladm_wlan_disconnect(dld_handle,
+				    wip->wi_linkid);
 			} else {
 				dprintf("update: not connected to %s %s as "
 				    "expected", exp_wlan->essid,
@@ -668,7 +671,8 @@ scan_wireless_nets(const char *ifname)
 		wlans[i].scanned = B_FALSE;
 	new_ap_found = B_FALSE;
 	dprintf("starting scan on %s", ifname);
-	status = dladm_wlan_scan(linkid, (char *)ifname, get_scan_results);
+	status = dladm_wlan_scan(dld_handle, linkid, (char *)ifname,
+	    get_scan_results);
 	if (status == DLADM_STATUS_OK) {
 		dropped = clear_unscanned_entries(ifname);
 	} else {
@@ -705,8 +709,8 @@ scan_end:
 			 * make sure it's really down.
 			 */
 			while (retries++ < 4) {
-				if (dladm_wlan_get_linkattr(wip->wi_linkid,
-				    &attr) != DLADM_STATUS_OK)
+				if (dladm_wlan_get_linkattr(dld_handle,
+				    wip->wi_linkid, &attr) != DLADM_STATUS_OK)
 					attr.la_status =
 					    DLADM_WLAN_LINK_DISCONNECTED;
 				else if (attr.la_status ==
@@ -740,7 +744,7 @@ scan_end:
 					 */
 					if (!connected || !wlan->connected)
 						(void) dladm_wlan_disconnect(
-						    linkid);
+						    dld_handle, linkid);
 					break;
 				}
 			}
@@ -957,9 +961,10 @@ wireless_verify(const char *ifname)
 	/*
 	 * If these calls fail, it means that the wireless link is down.
 	 */
-	if (dladm_name2info(ifname, &linkid, NULL, NULL, NULL) !=
+	if (dladm_name2info(dld_handle, ifname, &linkid, NULL, NULL, NULL) !=
 	    DLADM_STATUS_OK ||
-	    dladm_wlan_get_linkattr(linkid, &attr) != DLADM_STATUS_OK) {
+	    dladm_wlan_get_linkattr(dld_handle, linkid, &attr) !=
+	    DLADM_STATUS_OK) {
 		attr.la_status = DLADM_WLAN_LINK_DISCONNECTED;
 	}
 
@@ -1002,7 +1007,7 @@ wireless_verify(const char *ifname)
 		}
 		if (is_failure) {
 			dprintf("wireless check indicates disconnect");
-			(void) dladm_wlan_disconnect(linkid);
+			(void) dladm_wlan_disconnect(dld_handle, linkid);
 			(void) np_queue_add_event(EV_LINKDISC, ifname);
 		}
 	}
@@ -1067,10 +1072,10 @@ periodic_wireless_scan(void *arg)
 			 * If these things fail, it means that our wireless
 			 * link isn't viable.  Proceed in that way.
 			 */
-			if (dladm_name2info(ifname, &linkid, NULL, NULL,
-			    NULL) != DLADM_STATUS_OK ||
-			    dladm_wlan_get_linkattr(linkid, &attr) !=
-			    DLADM_STATUS_OK) {
+			if (dladm_name2info(dld_handle, ifname, &linkid, NULL,
+			    NULL, NULL) != DLADM_STATUS_OK ||
+			    dladm_wlan_get_linkattr(dld_handle, linkid,
+			    &attr) != DLADM_STATUS_OK) {
 				attr.la_status = DLADM_WLAN_LINK_DISCONNECTED;
 				attr.la_wlan_attr.wa_strength = 0;
 			}
@@ -1138,7 +1143,7 @@ periodic_wireless_scan(void *arg)
 			 * says we're disconnected, then tell it to disconnect
 			 * for sure.
 			 */
-			(void) dladm_wlan_disconnect(linkid);
+			(void) dladm_wlan_disconnect(dld_handle, linkid);
 
 			/*
 			 * Tell the state machine that we've lost this link so
@@ -1232,10 +1237,10 @@ key_string_to_secobj_value(char *buf, uint8_t *obj_val, uint_t *obj_lenp,
 }
 
 /*
- * Print the key format into the appropriate field, then convert any ":"
+ * Print the key name format into the appropriate field, then convert any ":"
  * characters to ".", as ":[1-4]" is the slot indicator, which otherwise
- * would trip us up.  The third parameter is expected to be of size
- * DLADM_SECOBJ_NAME_MAX.
+ * would trip us up.  Invalid characters for secobj names are ignored.
+ * The fourth parameter is expected to be of size DLADM_SECOBJ_NAME_MAX.
  *
  * (Note that much of the system uses DLADM_WLAN_MAX_KEYNAME_LEN, which is 64
  * rather than 32, but that dladm_get_secobj will fail if a length greater than
@@ -1244,16 +1249,37 @@ key_string_to_secobj_value(char *buf, uint8_t *obj_val, uint_t *obj_lenp,
 static void
 set_key_name(const char *essid, const char *bssid, char *name, size_t nsz)
 {
-	int i, rtn, len;
+	int i, j;
+	char secobj_name[DLADM_WLAN_MAX_KEYNAME_LEN];
 
-	if (bssid[0] == '\0')
-		rtn = snprintf(name, nsz, "nwam-%s", essid);
-	else
-		rtn = snprintf(name, nsz, "nwam-%s-%s", essid, bssid);
-	len = (rtn < nsz) ? rtn : nsz - 1;
-	for (i = 0; i < len; i++)
-		if (name[i] == ':')
-			name[i] = '.';
+	/* create a concatenated string with essid and bssid */
+	if (bssid[0] == '\0') {
+		(void) snprintf(secobj_name, sizeof (secobj_name), "nwam-%s",
+		    essid);
+	} else {
+		(void) snprintf(secobj_name, sizeof (secobj_name), "nwam-%s-%s",
+		    essid, bssid);
+	}
+
+	/* copy only valid chars to the return string, terminating with \0 */
+	i = 0; /* index into secobj_name */
+	j = 0; /* index into name */
+	while (secobj_name[i] != '\0') {
+		if (j == nsz - 1)
+			break;
+
+		if (secobj_name[i] == ':') {
+			name[j] = '.';
+			j++;
+		} else if (isalnum(secobj_name[i]) ||
+		    secobj_name[i] == '.' || secobj_name[i] == '-' ||
+		    secobj_name[i] == '_') {
+			name[j] = secobj_name[i];
+			j++;
+		}
+		i++;
+	}
+	name[j] = '\0';
 }
 
 static int
@@ -1282,7 +1308,7 @@ store_key(struct wireless_lan *wlan)
 	}
 
 	/* we've validated the new key, so remove the old one */
-	status = dladm_unset_secobj(obj_name,
+	status = dladm_unset_secobj(dld_handle, obj_name,
 	    DLADM_OPT_ACTIVE | DLADM_OPT_PERSIST);
 	if (status != DLADM_STATUS_OK && status != DLADM_STATUS_NOTFOUND) {
 		syslog(LOG_ERR, "store_key: could not remove old secure object "
@@ -1295,7 +1321,7 @@ store_key(struct wireless_lan *wlan)
 	if (wlan->raw_key[0] == '\0')
 		return (0);
 
-	status = dladm_set_secobj(obj_name, class,
+	status = dladm_set_secobj(dld_handle, obj_name, class,
 	    obj_val, obj_len,
 	    DLADM_OPT_CREATE | DLADM_OPT_PERSIST | DLADM_OPT_ACTIVE);
 	if (status != DLADM_STATUS_OK) {
@@ -1353,14 +1379,14 @@ retrieve_key(const char *essid, const char *bssid, dladm_secobj_class_t req)
 	cooked_key->wk_idx = 1;
 
 	/* Try the kernel first, then fall back to persistent storage. */
-	status = dladm_get_secobj(cooked_key->wk_name, &class,
+	status = dladm_get_secobj(dld_handle, cooked_key->wk_name, &class,
 	    cooked_key->wk_val, &cooked_key->wk_len,
 	    DLADM_OPT_ACTIVE);
 	if (status != DLADM_STATUS_OK) {
 		dprintf("retrieve_key: dladm_get_secobj(TEMP) failed: %s",
 		    dladm_status2str(status, errmsg));
-		status = dladm_get_secobj(cooked_key->wk_name, &class,
-		    cooked_key->wk_val, &cooked_key->wk_len,
+		status = dladm_get_secobj(dld_handle, cooked_key->wk_name,
+		    &class, cooked_key->wk_val, &cooked_key->wk_len,
 		    DLADM_OPT_PERSIST);
 	}
 
@@ -1615,8 +1641,8 @@ extract_known_aps(FILE *fp, libnwam_known_ap_t *kap, char *sbuf, size_t *totstr)
 			sbuf += strlen(sbuf) + 1;
 			set_key_name(tok[ESSID], tok[BSSID], key, sizeof (key));
 			keylen = sizeof (keyval);
-			if (dladm_get_secobj(key, &class, keyval, &keylen,
-			    DLADM_OPT_ACTIVE) == DLADM_STATUS_OK)
+			if (dladm_get_secobj(dld_handle, key, &class, keyval,
+			    &keylen, DLADM_OPT_ACTIVE) == DLADM_STATUS_OK)
 				kap->ka_haskey = B_TRUE;
 			else
 				kap->ka_haskey = B_FALSE;
@@ -1735,8 +1761,8 @@ delete_known_ap(const char *essid, const char *bssid)
 				if (wip != NULL) {
 					wip->wi_wireless_done = B_FALSE;
 					wip->wi_need_key = B_FALSE;
-					(void) dladm_wlan_disconnect(wip->
-					    wi_linkid);
+					(void) dladm_wlan_disconnect(dld_handle,
+					    wip->wi_linkid);
 				}
 				(void) np_queue_add_event(EV_RESELECT,
 				    wlan->wl_if_name);
@@ -1821,8 +1847,8 @@ connect_chosen_lan(struct wireless_lan *reqlan, wireless_if_t *wip)
 	 * try a second time with just the ESSID.
 	 */
 
-	status = dladm_wlan_connect(wip->wi_linkid, &attr, timeout, key,
-	    keycount, flags);
+	status = dladm_wlan_connect(dld_handle, wip->wi_linkid, &attr, timeout,
+	    key, keycount, flags);
 	dprintf("connect_chosen_lan: dladm_wlan_connect returned %s",
 	    dladm_status2str(status, errmsg));
 	/*
@@ -1835,8 +1861,8 @@ connect_chosen_lan(struct wireless_lan *reqlan, wireless_if_t *wip)
 		    reqlan->essid, reqlan->bssid, reqlan->essid);
 		attr.wa_valid &= ~DLADM_WLAN_ATTR_BSSID;
 		flags = 0;
-		status = dladm_wlan_connect(wip->wi_linkid, &attr, timeout,
-		    key, keycount, flags);
+		status = dladm_wlan_connect(dld_handle, wip->wi_linkid, &attr,
+		    timeout, key, keycount, flags);
 	}
 #endif /* CR6772510_FIXED */
 	if (status == DLADM_STATUS_OK) {
@@ -1933,7 +1959,8 @@ connect_thread(void *arg)
 		 * the actual BSSID we connect to is arbitrary.  Nothing we can
 		 * do about that; just get the new value and live with it.
 		 */
-		status = dladm_wlan_get_linkattr(wip->wi_linkid, &attr);
+		status = dladm_wlan_get_linkattr(dld_handle, wip->wi_linkid,
+		    &attr);
 		if (status != DLADM_STATUS_OK) {
 			dprintf("failed to get linkattr on %s after connecting "
 			    "to %s: %s", wlan->wl_if_name, wlan->essid,
@@ -1992,7 +2019,7 @@ failure:
 	if (wip != NULL) {
 		wip->wi_need_key = B_FALSE;
 		wip->wi_wireless_done = B_FALSE;
-		(void) dladm_wlan_disconnect(wip->wi_linkid);
+		(void) dladm_wlan_disconnect(dld_handle, wip->wi_linkid);
 	}
 	if (wlan != NULL)
 		wlan->rescan = B_TRUE;
@@ -2146,7 +2173,7 @@ wlan_autoconf(const wireless_if_t *wip)
 	 * to cycle through WLANs detected in priority order, attempting
 	 * to connect.
 	 */
-	status = dladm_wlan_connect(wip->wi_linkid, NULL,
+	status = dladm_wlan_connect(dld_handle, wip->wi_linkid, NULL,
 	    DLADM_WLAN_CONNECT_TIMEOUT_DEFAULT, NULL, 0, 0);
 	if (status != DLADM_STATUS_OK) {
 		char errmsg[DLADM_STRSIZE];
@@ -2256,7 +2283,7 @@ handle_wireless_lan(const char *ifname)
 			} else if (cur_wlan->attrs.wa_strength >
 			    most_recent->attrs.wa_strength) {
 				if (most_recent->connected) {
-					(void) dladm_wlan_disconnect(
+					(void) dladm_wlan_disconnect(dld_handle,
 					    wip->wi_linkid);
 					most_recent->connected = B_FALSE;
 					report_wlan_disconnect(most_recent);
@@ -2330,7 +2357,8 @@ disconnect_wlan(const char *ifname)
 		if ((wip = find_wireless_if(ifname)) != NULL) {
 			wip->wi_wireless_done = B_FALSE;
 			wip->wi_need_key = B_FALSE;
-			(void) dladm_wlan_disconnect(wip->wi_linkid);
+			(void) dladm_wlan_disconnect(dld_handle,
+			    wip->wi_linkid);
 		}
 		for (wlan = wlans; wlan < wlans + wireless_lan_used; wlan++) {
 			if (strcmp(ifname, wlan->wl_if_name) == 0 &&

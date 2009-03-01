@@ -20,7 +20,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # uts/common/Makefile.rules
@@ -181,6 +181,10 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/common/exec/elf/%.c
 	$(CTFCONVERT_O)
 
 $(OBJS_DIR)/%.o:		$(UTSBASE)/common/exec/intp/%.c
+	$(COMPILE.c) -o $@ $<
+	$(CTFCONVERT_O)
+
+$(OBJS_DIR)/%.o:		$(UTSBASE)/common/exec/shbin/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
@@ -447,7 +451,7 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/common/inet/ip/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
-$(OBJS_DIR)/%.o:                $(UTSBASE)/common/inet/ipnet/%.c
+$(OBJS_DIR)/%.o:		$(UTSBASE)/common/inet/ipnet/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
@@ -472,11 +476,6 @@ $(OBJS_DIR)/%.o:		$(COMMONBASE)/net/patricia/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
-IPFFLAG2=-I $(UTSBASE)/common/inet/ipf
-$(OBJS_DIR)/%.o:		$(UTSBASE)/common/inet/pfil/%.c
-	$(COMPILE.c) $(IPFFLAG2) -o $@ $<
-	$(CTFCONVERT_O)
-
 $(OBJS_DIR)/%.o:		$(UTSBASE)/common/inet/udp/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
@@ -485,7 +484,11 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/common/inet/nca/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
-$(OBJS_DIR)/%.o:		$(UTSBASE)/common/inet/vni/%.c
+$(OBJS_DIR)/%.o:		$(UTSBASE)/common/inet/sockmods/%.c
+	$(COMPILE.c) -o $@ $<
+	$(CTFCONVERT_O)
+
+$(OBJS_DIR)/%.o:		$(UTSBASE)/common/inet/dlpistub/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
@@ -682,6 +685,10 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/common/io/kb8042/%.c
 	$(CTFCONVERT_O)
 
 $(OBJS_DIR)/%.o:		$(UTSBASE)/common/io/kbtrans/%.c
+	$(COMPILE.c) -o $@ $<
+	$(CTFCONVERT_O)
+
+$(OBJS_DIR)/%.o:		$(UTSBASE)/common/io/ksocket/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
@@ -1030,6 +1037,10 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/common/io/vnic/%.c
 	$(CTFCONVERT_O)
 
 $(OBJS_DIR)/%.o:                $(UTSBASE)/common/io/wpi/%.c
+	$(COMPILE.c) -o $@ $<
+	$(CTFCONVERT_O)
+
+$(OBJS_DIR)/%.o:                $(UTSBASE)/common/io/zyd/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
@@ -1411,6 +1422,9 @@ $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/exec/elf/%.c
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/exec/intp/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
+$(LINTS_DIR)/%.ln:		$(UTSBASE)/common/exec/shbin/%.c
+	@($(LHEAD) $(LINT.c) $< $(LTAIL))
+
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/exec/java/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
@@ -1579,20 +1593,20 @@ $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/idmap/%.c
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
+$(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/sockmods/%.c
+	@($(LHEAD) $(LINT.c) $< $(LTAIL))
+
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/arp/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/ip/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
-$(LINTS_DIR)/%.ln: 	     	$(UTSBASE)/common/inet/ipnet/%.c
+$(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/ipnet/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/ipf/%.c
 	@($(LHEAD) $(LINT.c) $(IPFFLAGS) $< $(LTAIL))
-
-$(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/pfil/%.c
-	@($(LHEAD) $(LINT.c) $(IPFFLAG2) $< $(LTAIL))
 
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/kssl/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
@@ -1612,9 +1626,8 @@ $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/tcp/%.c
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/nca/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
-$(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/vni/%.c
+$(LINTS_DIR)/%.ln:		$(UTSBASE)/common/inet/dlpistub/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
-
 
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/io/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
@@ -1761,6 +1774,9 @@ $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/io/kb8042/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/io/kbtrans/%.c
+	@($(LHEAD) $(LINT.c) $< $(LTAIL))
+
+$(LINTS_DIR)/%.ln:		$(UTSBASE)/common/io/ksocket/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/io/aggr/%.c
@@ -2019,6 +2035,9 @@ $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/io/vnic/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
 $(LINTS_DIR)/%.ln:              $(UTSBASE)/common/io/wpi/%.c
+	@($(LHEAD) $(LINT.c) $< $(LTAIL))
+
+$(LINTS_DIR)/%.ln:              $(UTSBASE)/common/io/zyd/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/common/io/chxge/com/%.c

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -90,6 +90,7 @@ setup_ddi(void)
 	log_event_init();
 	fm_init();
 	ndi_fm_init();
+	irm_init();
 
 	(void) i_ddi_load_drvconf(DDI_MAJOR_T_NONE);
 
@@ -106,9 +107,13 @@ void
 setup_ddi_poststartup(void)
 {
 	extern void i_ddi_start_flush_daemon(void);
+	extern void i_ddi_irm_poststartup(void);
 	extern void i_ddi_intr_redist_all_cpus(void);
 
 	i_ddi_start_flush_daemon();
+
+	/* Startup Interrupt Resource Management (IRM) */
+	i_ddi_irm_poststartup();
 
 	/*
 	 * For platforms that support INTR_WEIGHTED_DIST, we perform a
@@ -426,6 +431,8 @@ i_ddi_init_root()
 	DEVI(top_devinfo)->devi_ops = ndi_hold_driver(top_devinfo);
 	ASSERT(DEV_OPS_HELD(DEVI(top_devinfo)->devi_ops));
 	DEVI(top_devinfo)->devi_instance = e_ddi_assign_instance(top_devinfo);
+
+	(void) i_ddi_load_drvconf(DEVI(top_devinfo)->devi_major);
 
 	mutex_enter(&(DEVI(top_devinfo)->devi_lock));
 	DEVI_SET_ATTACHING(top_devinfo);

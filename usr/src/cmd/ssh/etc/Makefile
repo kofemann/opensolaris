@@ -18,10 +18,8 @@
 #
 # CDDL HEADER END
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 
 MANIFEST = ssh.xml
@@ -30,8 +28,9 @@ SVCMETHOD = sshd
 include ../../Makefile.cmd
 include ../Makefile.ssh-common
 
+SSHASKPASS=	$(ROOTLIBSSH)/ssh-askpass
 ETCSSHDIR=	$(ROOTETC)/ssh
-DIRS=		$(ETCSSHDIR)
+DIRS=		$(ETCSSHDIR) $(ROOTLIBSSH)
 
 FILES= sshd_config ssh_config moduli
 
@@ -49,11 +48,15 @@ $(ETCSSHDIR)/% : %
 $(DIRS):
 	$(INS.dir)
 
+$(ROOTLIBSSH)/%: %
+	$(INS.file)
+
 $(POFILE):
 
 all lint clean clobber _msg:
 
-install: all $(DIRS) $(ETCSSHFILES) $(ROOTMANIFEST) $(ROOTSVCMETHOD)
+install: all $(DIRS) $(ETCSSHFILES) $(ROOTMANIFEST) $(ROOTSVCMETHOD) \
+	$(SSHASKPASS)
 
 check: $(CHKMANIFEST)
 

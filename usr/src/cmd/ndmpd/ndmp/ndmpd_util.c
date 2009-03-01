@@ -1,5 +1,5 @@
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -49,7 +49,6 @@
 #include <unistd.h>
 #include <strings.h>
 #include <time.h>
-#include <libgen.h>
 #include "ndmpd.h"
 #include <bitmap.h>
 #include <sys/queue.h>
@@ -1348,9 +1347,8 @@ ndmp_execute_cdb(ndmpd_session_t *session, char *adapter_name, int sid, int lun,
 	(void) memset((void *)&reply, 0, sizeof (reply));
 	(void) memset((void *)rq_buf, 0, sizeof (rq_buf));
 
-	cmd.uscsi_flags = USCSI_RQENABLE;
 	if (request->flags == NDMP_SCSI_DATA_IN) {
-		cmd.uscsi_flags |= USCSI_READ;
+		cmd.uscsi_flags = USCSI_READ | USCSI_RQENABLE;
 		if ((cmd.uscsi_bufaddr =
 		    ndmp_malloc(request->datain_len)) == 0) {
 			reply.error = NDMP_NO_MEM_ERR;
@@ -1365,10 +1363,11 @@ ndmp_execute_cdb(ndmpd_session_t *session, char *adapter_name, int sid, int lun,
 		cmd.uscsi_rqlen = sizeof (rq_buf);
 		cmd.uscsi_rqbuf = rq_buf;
 	} else if (request->flags == NDMP_SCSI_DATA_OUT) {
-		cmd.uscsi_flags = USCSI_RQENABLE | USCSI_WRITE;
+		cmd.uscsi_flags = USCSI_WRITE;
 		cmd.uscsi_bufaddr = request->dataout.dataout_val;
 		cmd.uscsi_buflen = request->dataout.dataout_len;
 	} else {
+		cmd.uscsi_flags = USCSI_RQENABLE;
 		cmd.uscsi_bufaddr = 0;
 		cmd.uscsi_buflen = 0;
 		cmd.uscsi_rqlen = sizeof (rq_buf);
@@ -1412,7 +1411,7 @@ ndmp_execute_cdb(ndmpd_session_t *session, char *adapter_name, int sid, int lun,
 	if (ioctl(fd, USCSICMD, &cmd) < 0) {
 		NDMP_LOG(LOG_ERR, "Failed to send command to device: %m");
 		NDMP_LOG(LOG_DEBUG, "ioctl(USCSICMD) error: %m");
-		if (cmd.uscsi_status == 0)
+		if (cmd.uscsi_status != 0)
 			reply.error = NDMP_IO_ERR;
 	}
 
@@ -1612,7 +1611,6 @@ ndmp_open_list_add(ndmp_connection_t *conn, char *dev, int sid, int lun, int fd)
 		else
 			olp->ol_fd = -1;
 		(void) mutex_lock(&ol_mutex);
-		/* LINTED: E_CONSTANT_CONDITION */
 		LIST_INSERT_HEAD(olhp, olp, ol_q);
 		(void) mutex_unlock(&ol_mutex);
 	}
@@ -1652,7 +1650,6 @@ ndmp_open_list_del(char *dev, int sid, int lun)
 	if (--olp->ol_nref <= 0) {
 		NDMP_LOG(LOG_DEBUG,
 		    "Removed dev: %s, sid: %d, lun: %d", dev, sid, lun);
-		/* LINTED: E_CONSTANT_CONDITION */
 		LIST_REMOVE(olp, ol_q);
 		free(olp->ol_devnm);
 		free(olp);
@@ -1690,7 +1687,6 @@ ndmp_open_list_release(ndmp_connection_t *conn)
 			NDMP_LOG(LOG_DEBUG,
 			    "Removed dev: %s, sid: %d, lun: %d",
 			    olp->ol_devnm, olp->ol_sid, olp->ol_lun);
-			/* LINTED: E_CONSTANT_CONDITION */
 			LIST_REMOVE(olp, ol_q);
 			if (olp->ol_fd > 0)
 				(void) close(olp->ol_fd);
@@ -2552,7 +2548,7 @@ is_tape_unit_ready(char *adptnm, int dev_id)
 	int fd = 0;
 
 	try = TUR_MAX_TRY;
-	if (dev_id == 0)
+	if (dev_id <= 0)
 		fd = open(adptnm, O_RDONLY | O_NDELAY);
 	else
 		fd = dev_id;
@@ -2560,7 +2556,7 @@ is_tape_unit_ready(char *adptnm, int dev_id)
 		if (scsi_test_unit_ready(fd) >= 0) {
 			NDMP_LOG(LOG_DEBUG, "Unit is ready");
 
-			if (dev_id == 0)
+			if (dev_id <= 0)
 				(void) close(fd);
 
 			return (TRUE);
@@ -2571,7 +2567,7 @@ is_tape_unit_ready(char *adptnm, int dev_id)
 
 	} while (--try > 0);
 
-	if (dev_id == 0)
+	if (dev_id <= 0)
 		(void) close(fd);
 
 	NDMP_LOG(LOG_DEBUG, "Unit didn't get ready");
@@ -2629,8 +2625,6 @@ scsi_test_unit_ready(int dev_id)
 void
 ndmp_load_params(void)
 {
-	struct stat64 st;
-
 	ndmp_dump_path_node = ndmpd_get_prop_yorn(NDMP_DUMP_PATHNODE_ENV) ?
 	    TRUE : FALSE;
 	ndmp_tar_path_node = ndmpd_get_prop_yorn(NDMP_TAR_PATHNODE_ENV) ?
@@ -2648,16 +2642,6 @@ ndmp_load_params(void)
 
 	/* Get the value from ndmp SMF property. */
 	ndmp_dar_support = ndmpd_get_prop_yorn(NDMP_DAR_SUPPORT);
-
-	ndmp_log_path = ndmpd_get_prop(NDMP_DEBUG_PATH);
-	if ((ndmp_log_path == NULL) || (*ndmp_log_path == NULL))
-		ndmp_log_path = "/var/ndmp";
-
-	if (lstat64(ndmp_log_path, &st) < 0) {
-		if (mkdirp(ndmp_log_path, 0755) < 0)
-			NDMP_LOG(LOG_ERR, "Could not create log path %s: %m.",
-			    ndmp_log_path);
-	}
 
 	if ((ndmp_ver = atoi(ndmpd_get_prop(NDMP_VERSION_ENV))) == 0)
 		ndmp_ver = NDMPVER;

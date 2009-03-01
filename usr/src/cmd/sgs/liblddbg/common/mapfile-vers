@@ -20,25 +20,28 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-
 #
 # Generic interface definition for usr/src/cmd/sgs/liblddbg.
 #
-# For information regarding the establishment of versioned definitions see:
-#	The Linker and Libraries Manual (version 2.5 or greater)
-# This is part of the Developers Guide in the Answerbook.  Specifically refer
-# to Chapter 2 under section "Defining Additional Symbols" through section
-# "Reducing Symbol Scope", and Chapter 5 "Versioning".
+
 #
-# For specific OSNET rules for the modification (evolution) of these version
-# definitions see:
-#	Policy for Shared Library Version Names and Interface Definitions
+# MAPFILE HEADER START
+#
+# WARNING:  STOP NOW.  DO NOT MODIFY THIS FILE.
+# Object versioning must comply with the rules detailed in
+#
+#	usr/src/lib/README.mapfiles
+#
+# You should not be making modifications here until you've read the most current
+# copy of that file. If you need help, contact a gatekeeper for guidance.
+#
+# MAPFILE HEADER END
+#
 
-
-SUNWprivate_4.67 {
+SUNWprivate_4.69 {
 	global:
 		dbg_desc = NODIRECT;	# interposed - ld.so.1(1)
 		dbg_print = NODIRECT;	# interposed - ld(1) and ld.so.1(1)
@@ -138,6 +141,8 @@ SUNWprivate_4.67 {
 		Dbg64_file_lazyload;
 		Dbg32_file_ldso;
 		Dbg64_file_ldso;
+		Dbg32_file_mmapobj;
+		Dbg64_file_mmapobj;
 		Dbg32_file_mode_promote;
 		Dbg64_file_mode_promote;
 		Dbg32_file_modified;
@@ -214,6 +219,8 @@ SUNWprivate_4.67 {
 		Dbg64_move_adjexpandreloc;
 		Dbg32_move_adjmovereloc;
 		Dbg64_move_adjmovereloc;
+		Dbg32_move_bad;
+		Dbg64_move_bad;
 		Dbg32_move_data;
 		Dbg64_move_data;
 		Dbg32_move_entry1;
@@ -316,6 +323,8 @@ SUNWprivate_4.67 {
 		Dbg64_support_load;
 		Dbg32_support_req;
 		Dbg64_support_req;
+		Dbg32_support_vnone;
+		Dbg64_support_vnone;
 
 		Dbg32_syminfo_entry;
 		Dbg64_syminfo_entry;
@@ -384,8 +393,6 @@ SUNWprivate_4.67 {
 		Dbg_tls_static_block;
 		Dbg_tls_static_resv;
 
-		Dbg32_util_broadcast;
-		Dbg64_util_broadcast;
 		Dbg32_util_call_array;
 		Dbg64_util_call_array;
 		Dbg32_util_call_fini;
@@ -416,8 +423,6 @@ SUNWprivate_4.67 {
 		Dbg64_util_scc_title;
 		Dbg32_util_str;
 		Dbg64_util_str;
-		Dbg32_util_wait;
-		Dbg64_util_wait;
 
 		Dbg32_unused_file;
 		Dbg64_unused_file;

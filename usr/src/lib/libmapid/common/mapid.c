@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -69,6 +69,7 @@
 #define	__LIBMAPID_IMPL
 #include <nfs/mapid.h>
 #pragma	init(_lib_init)
+#pragma	fini(_lib_fini)
 
 /*
  * DEBUG Only
@@ -589,7 +590,13 @@ resolv_query_thread(void *arg)
 		(void) sleep(nap_time);
 
 		resolv_txt_reset();
-		(void) resolv_init();
+		if (resolv_init() < 0) {
+			/*
+			 * Failed to initialize resolver. Do not
+			 * query DNS server.
+			 */
+			goto thr_reset;
+		}
 		switch (resolv_search()) {
 		case NETDB_SUCCESS:
 			resolv_decode();
@@ -761,7 +768,17 @@ get_dns_txt_domain(cb_t *argp)
 	}
 	(void) rw_unlock(&s_dns_impl_lock);
 
-	(void) resolv_init();
+	if (resolv_init() < 0) {
+		/*
+		 * Failed to initialize resolver. Do not
+		 * query DNS server.
+		 */
+		(void) rw_wrlock(&s_dns_data_lock);
+		dns_txt_cached = 0;
+		(void) rw_unlock(&s_dns_data_lock);
+		resolv_txt_reset();
+		return;
+	}
 	switch (resolv_search()) {
 	case NETDB_SUCCESS:
 		/*
@@ -930,6 +947,7 @@ get_nfs_domain(void)
 {
 	char		*ndomain;
 	timestruc_t	 ntime;
+	void	*defp;
 
 	/*
 	 * If we can't get stats for the config file, then
@@ -946,16 +964,15 @@ get_nfs_domain(void)
 
 	/*
 	 * Get NFSMAPID_DOMAIN value from /etc/default/nfs for now.
-	 * Note: defread() returns a ptr to TSD.
+	 * Note: defread_r() returns a ptr to libc internal malloc.
 	 */
-	if (defopen(NFSADMIN) == 0) {
+	if ((defp = defopen_r(NFSADMIN)) != NULL) {
 		char	*dp = NULL;
 #ifdef	DEBUG
 		char	*whoami = "get_nfs_domain";
 		char	 orig[NS_MAXCDNAME] = {0};
 #endif
-		ndomain = (char *)defread("NFSMAPID_DOMAIN=");
-		(void) defopen(NULL);
+		ndomain = defread_r("NFSMAPID_DOMAIN=", defp);
 #ifdef	DEBUG
 		if (ndomain)
 			(void) strncpy(orig, ndomain, NS_MAXCDNAME);
@@ -972,9 +989,11 @@ get_nfs_domain(void)
 				(void) strncpy(nfs_domain, dp, NS_MAXCDNAME);
 				nfs_domain[NS_MAXCDNAME] = '\0';
 				nfs_mtime = ntime;
+				defclose_r(defp);
 				return;
 			}
 		}
+		defclose_r(defp);
 #ifdef	DEBUG
 		if (orig[0] != '\0') {
 			syslog(LOG_ERR, gettext("%s: Invalid domain name \"%s\""
@@ -1192,9 +1211,15 @@ mapid_derive_domain(void)
 void
 _lib_init(void)
 {
-	(void) resolv_init();
+	(void) resolv_init(); /* May fail! */
 	(void) rwlock_init(&mapid_domain_lock, USYNC_THREAD, NULL);
 	(void) thr_keycreate(&s_thr_key, NULL);
 	lib_init_done++;
+	resolv_destroy();
+}
+
+void
+_lib_fini(void)
+{
 	resolv_destroy();
 }

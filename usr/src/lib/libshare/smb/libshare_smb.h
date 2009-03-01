@@ -50,6 +50,7 @@ extern "C" {
 #define	OPT_TYPE_PROTOCOL	5
 #define	OPT_TYPE_NAME		6
 #define	OPT_TYPE_ACCLIST	7
+#define	OPT_TYPE_CSC		8
 
 struct option_defs {
 	char *tag;

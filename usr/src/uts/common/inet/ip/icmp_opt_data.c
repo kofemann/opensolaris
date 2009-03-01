@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/stream.h>
@@ -52,8 +50,8 @@
 
 
 extern int icmp_opt_default(queue_t *, int, int, uchar_t *);
-extern int icmp_opt_get(queue_t *, int, int, uchar_t *);
-extern int icmp_opt_set(queue_t *, uint_t, int, int, uint_t, uchar_t *,
+extern int icmp_tpi_opt_get(queue_t *, int, int, uchar_t *);
+extern int icmp_tpi_opt_set(queue_t *, uint_t, int, int, uint_t, uchar_t *,
     uint_t *, uchar_t *, void *, cred_t *, mblk_t *);
 
 /*
@@ -83,6 +81,10 @@ opdes_t	icmp_opt_arr[] = {
 { SO_TYPE,	SOL_SOCKET, OA_R, OA_R, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
 { SO_SNDBUF,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
 { SO_RCVBUF,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
+{ SO_SNDTIMEO,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
+	sizeof (struct timeval), 0 },
+{ SO_RCVTIMEO,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
+	sizeof (struct timeval), 0 },
 { SO_DGRAM_ERRIND, SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int),
 	0 },
 { SO_TIMESTAMP, SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0
@@ -96,10 +98,10 @@ opdes_t	icmp_opt_arr[] = {
 
 { IP_OPTIONS,	IPPROTO_IP, OA_RW, OA_RW, OP_NP,
 	(OP_PASSNEXT|OP_VARLEN|OP_NODEFAULT),
-	40, -1 /* not initialized */ },
+	IP_MAX_OPT_LENGTH + IP_ADDR_LEN, -1 /* not initialized */ },
 { T_IP_OPTIONS,	IPPROTO_IP, OA_RW, OA_RW, OP_NP,
 	(OP_PASSNEXT|OP_VARLEN|OP_NODEFAULT),
-	40, -1 /* not initialized */ },
+	IP_MAX_OPT_LENGTH + IP_ADDR_LEN, -1 /* not initialized */ },
 
 { IP_HDRINCL,	IPPROTO_IP, OA_R,  OA_RW, OP_RAW, OP_PASSNEXT,
 	sizeof (int), 0 },
@@ -139,9 +141,6 @@ opdes_t	icmp_opt_arr[] = {
 
 { IP_BOUND_IF, IPPROTO_IP, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
 	sizeof (int),	0 /* no ifindex */ },
-
-{ IP_DONTFAILOVER_IF, IPPROTO_IP, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
-	sizeof (struct in_addr), 0 /* not initialized */ },
 
 { IP_UNSPEC_SRC, IPPROTO_IP, OA_R, OA_RW, OP_RAW, OP_PASSNEXT,
 	sizeof (int), 0 },
@@ -222,12 +221,6 @@ opdes_t	icmp_opt_arr[] = {
 	sizeof (int), -1 /* not initialized */ },
 
 { IPV6_BOUND_IF, IPPROTO_IPV6, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
-	sizeof (int),	0 /* no ifindex */ },
-
-{ IPV6_BOUND_PIF, IPPROTO_IPV6, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
-	sizeof (int),	0 /* no ifindex */ },
-
-{ IPV6_DONTFAILOVER_IF, IPPROTO_IPV6, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
 	sizeof (int),	0 /* no ifindex */ },
 
 { IPV6_UNSPEC_SRC, IPPROTO_IPV6, OA_R, OA_RW, OP_RAW, OP_PASSNEXT,
@@ -347,8 +340,8 @@ uint_t	icmp_max_optsize; /* initialized when ICMP driver is loaded */
 
 optdb_obj_t icmp_opt_obj = {
 	icmp_opt_default,	/* ICMP default value function pointer */
-	icmp_opt_get,		/* ICMP get function pointer */
-	icmp_opt_set,		/* ICMP set function pointer */
+	icmp_tpi_opt_get,		/* ICMP get function pointer */
+	icmp_tpi_opt_set,		/* ICMP set function pointer */
 	B_TRUE,			/* ICMP is tpi provider */
 	ICMP_OPT_ARR_CNT,	/* ICMP option database count of entries */
 	icmp_opt_arr,		/* ICMP option database */

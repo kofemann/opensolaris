@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -3165,7 +3165,7 @@ vd_dskimg_validate_efi(vd_t *vd)
 
 	for (i = 0; i < nparts && i < VD_MAXPART; i++) {
 
-		if (gpe[i].efi_gpe_StartingLBA == 0 ||
+		if (gpe[i].efi_gpe_StartingLBA == 0 &&
 		    gpe[i].efi_gpe_EndingLBA == 0) {
 			continue;
 		}
@@ -6530,9 +6530,13 @@ vd_setup_vd(vd_t *vd)
 		ddi_release_devi(dip);
 		VN_RELE(vnp);
 
-		if (vd_identify_dev(vd, &drv_type) != 0) {
-			PRN("%s identification failed", path);
-			status = EIO;
+		if ((status = vd_identify_dev(vd, &drv_type)) != 0) {
+			if (status != ENODEV && status != ENXIO &&
+			    status != ENOENT && status != EROFS) {
+				PRN("%s identification failed with status %d",
+				    path, status);
+				status = EIO;
+			}
 			break;
 		}
 

@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -213,9 +213,10 @@ ipnet_if_init(void)
 	netstack_next_init(&nh);
 	while ((ns = netstack_next(&nh)) != NULL) {
 		ips = ns->netstack_ipnet;
-		if ((ret = ipnet_populate_if(ips->ips_ndv4, ips, B_FALSE)) != 0)
-			break;
-		if ((ret = ipnet_populate_if(ips->ips_ndv6, ips, B_TRUE)) != 0)
+		if ((ret = ipnet_populate_if(ips->ips_ndv4, ips, B_FALSE)) == 0)
+			ret = ipnet_populate_if(ips->ips_ndv6, ips, B_TRUE);
+		netstack_rele(ns);
+		if (ret != 0)
 			break;
 	}
 	netstack_next_fini(&nh);
@@ -228,16 +229,19 @@ ipnet_if_init(void)
 int
 _init(void)
 {
-	int	ret;
+	int ret;
+	boolean_t netstack_registered = B_FALSE;
 
 	if ((ipnet_major = ddi_name_to_major("ipnet")) == (major_t)-1)
 		return (ENODEV);
 	ipnet_minor_space = id_space_create("ipnet_minor_space",
 	    IPNET_MINOR_MIN, MAXMIN32);
-	netstack_register(NS_IPNET, ipnet_stack_init, NULL, ipnet_stack_fini);
+
 	/*
 	 * We call ddi_taskq_create() with nthread == 1 to ensure in-order
-	 * delivery of packets to clients.
+	 * delivery of packets to clients.  Note that we need to create the
+	 * taskqs before calling netstack_register() since ipnet_stack_init()
+	 * registers callbacks that use 'em.
 	 */
 	ipnet_taskq = ddi_taskq_create(NULL, "ipnet", 1, TASKQ_DEFAULTPRI, 0);
 	ipnet_nicevent_taskq = ddi_taskq_create(NULL, "ipnet_nic_event_queue",
@@ -246,6 +250,10 @@ _init(void)
 		ret = ENOMEM;
 		goto done;
 	}
+
+	netstack_register(NS_IPNET, ipnet_stack_init, NULL, ipnet_stack_fini);
+	netstack_registered = B_TRUE;
+
 	if ((ret = ipnet_if_init()) == 0)
 		ret = mod_install(&modlinkage);
 done:
@@ -254,7 +262,8 @@ done:
 			ddi_taskq_destroy(ipnet_taskq);
 		if (ipnet_nicevent_taskq != NULL)
 			ddi_taskq_destroy(ipnet_nicevent_taskq);
-		netstack_unregister(NS_IPNET);
+		if (netstack_registered)
+			netstack_unregister(NS_IPNET);
 		id_space_destroy(ipnet_minor_space);
 	}
 	return (ret);
@@ -267,9 +276,10 @@ _fini(void)
 
 	if ((err = mod_remove(&modlinkage)) != 0)
 		return (err);
+
+	netstack_unregister(NS_IPNET);
 	ddi_taskq_destroy(ipnet_nicevent_taskq);
 	ddi_taskq_destroy(ipnet_taskq);
-	netstack_unregister(NS_IPNET);
 	id_space_destroy(ipnet_minor_space);
 	return (0);
 }
@@ -284,29 +294,38 @@ static void
 ipnet_register_netihook(ipnet_stack_t *ips)
 {
 	int		ret;
-	netstackid_t	stackid = ips->ips_netstack->netstack_stackid;
+	zoneid_t	zoneid;
+	netid_t		netid;
 
 	HOOK_INIT(ips->ips_nicevents, ipnet_nicevent_cb, "ipnet_nicevents",
 	    ips);
 
 	/*
-	 * The ipnet device depends on ip and is registered in the netstack
-	 * framework after ip so the call to net_lookup_impl() cannot fail.
+	 * It is possible for an exclusive stack to be in the process of
+	 * shutting down here, and the netid and protocol lookups could fail
+	 * in that case.
 	 */
-	ips->ips_ndv4 = net_protocol_lookup(stackid, NHF_INET);
-	ips->ips_ndv6 = net_protocol_lookup(stackid, NHF_INET6);
+	zoneid = netstackid_to_zoneid(ips->ips_netstack->netstack_stackid);
+	if ((netid = net_zoneidtonetid(zoneid)) == -1)
+		return;
 
-	ret = net_hook_register(ips->ips_ndv4, NH_NIC_EVENTS,
-	    ips->ips_nicevents);
-	if (ret != 0) {
-		cmn_err(CE_WARN, "ipnet_register_netihook: net_register_hook() "
-		    "failed for v4 stack instance %d: %d", stackid, ret);
+	if ((ips->ips_ndv4 = net_protocol_lookup(netid, NHF_INET)) != NULL) {
+		if ((ret = net_hook_register(ips->ips_ndv4, NH_NIC_EVENTS,
+		    ips->ips_nicevents)) != 0) {
+			VERIFY(net_protocol_release(ips->ips_ndv4) == 0);
+			ips->ips_ndv4 = NULL;
+			cmn_err(CE_WARN, "unable to register IPv4 netinfo hooks"
+			    " in zone %d: %d", zoneid, ret);
+		}
 	}
-	ret = net_hook_register(ips->ips_ndv6, NH_NIC_EVENTS,
-	    ips->ips_nicevents);
-	if (ret != 0) {
-		cmn_err(CE_WARN, "ipnet_register_netihook: net_register_hook() "
-		    "failed for v6 stack instance %d: %d", stackid, ret);
+	if ((ips->ips_ndv6 = net_protocol_lookup(netid, NHF_INET6)) != NULL) {
+		if ((ret = net_hook_register(ips->ips_ndv6, NH_NIC_EVENTS,
+		    ips->ips_nicevents)) != 0) {
+			VERIFY(net_protocol_release(ips->ips_ndv6) == 0);
+			ips->ips_ndv6 = NULL;
+			cmn_err(CE_WARN, "unable to register IPv6 netinfo hooks"
+			    " in zone %d: %d", zoneid, ret);
+		}
 	}
 }
 
@@ -326,6 +345,18 @@ ipnet_populate_if(net_handle_t nd, ipnet_stack_t *ips, boolean_t isv6)
 	boolean_t		new_if = B_FALSE;
 	uint64_t		ifflags;
 	int			ret = 0;
+
+	/*
+	 * If ipnet_register_netihook() was unable to initialize this
+	 * stack's net_handle_t, then we cannot populate any interface
+	 * information.  This usually happens when we attempted to
+	 * grab a net_handle_t as a stack was shutting down.  We don't
+	 * want to fail the entire _init() operation because of a
+	 * stack shutdown (other stacks will continue to work just
+	 * fine), so we silently return success here.
+	 */
+	if (nd == NULL)
+		return (0);
 
 	/*
 	 * Make sure we're not processing NIC events during the
@@ -965,11 +996,19 @@ static boolean_t
 ipnet_accept(ipnet_t *ipnet, ipobs_hook_data_t *ihd, ipnet_addrp_t *src,
     ipnet_addrp_t *dst)
 {
+	boolean_t		obsif;
 	uint64_t		ifindex = ipnet->ipnet_if->if_index;
 	ipnet_addrtype_t	srctype, dsttype;
 
 	srctype = ipnet_get_addrtype(ipnet, src);
 	dsttype = ipnet_get_addrtype(ipnet, dst);
+
+	/*
+	 * If the packet's ifindex matches ours, or the packet's group ifindex
+	 * matches ours, it's on the interface we're observing.  (Thus,
+	 * observing on the group ifindex matches all ifindexes in the group.)
+	 */
+	obsif = (ihd->ihd_ifindex == ifindex || ihd->ihd_grifindex == ifindex);
 
 	/*
 	 * Do not allow an ipnet stream to see packets that are not from or to
@@ -1003,7 +1042,7 @@ ipnet_accept(ipnet_t *ipnet, ipobs_hook_data_t *ihd, ipnet_addrp_t *src,
 	 * have our source address (this allows us to see packets we send).
 	 */
 	if (ipnet->ipnet_flags & IPNET_PROMISC_PHYS) {
-		if (ihd->ihd_ifindex == ifindex || srctype == IPNETADDR_MYADDR)
+		if (srctype == IPNETADDR_MYADDR || obsif)
 			return (B_TRUE);
 	}
 
@@ -1011,7 +1050,7 @@ ipnet_accept(ipnet_t *ipnet, ipobs_hook_data_t *ihd, ipnet_addrp_t *src,
 	 * We accept multicast and broadcast packets transmitted or received
 	 * on the interface we're observing.
 	 */
-	if (dsttype == IPNETADDR_MBCAST && ihd->ihd_ifindex == ifindex)
+	if (dsttype == IPNETADDR_MBCAST && obsif)
 		return (B_TRUE);
 
 	return (B_FALSE);

@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -209,6 +209,10 @@ extern "C" {
 		((dp->ad_flags & AD_ATAPI) && \
 		    ((dp->ad_id.ai_config >> 8) & DTYPE_MASK) == \
 		    DTYPE_RODIRECT)
+
+/* Test whether the device support write cache */
+#define	IS_WRITE_CACHE_SUPPORTED(x) \
+	((((x).ai_cmdset82) & 0x20) >> 5)
 
 /*  macros from old common hba code */
 
@@ -684,6 +688,7 @@ int	ata_wait3(ddi_acc_handle_t io_hdl, caddr_t ioaddr, uchar_t onbits1,
 int	ata_test_lba_support(struct ata_id *aidp);
 void	ata_nsecwait(clock_t count);
 int	ata_set_dma_mode(ata_ctl_t *ata_ctlp, ata_drv_t *ata_drvp);
+void	ata_reset_dma_mode(ata_drv_t *ata_drvp);
 void	atapi_reset_dma_mode(ata_drv_t *ata_drvp);
 
 

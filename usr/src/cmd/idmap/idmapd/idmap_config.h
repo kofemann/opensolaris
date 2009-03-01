@@ -19,14 +19,13 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef _IDMAP_CONFIG_H
 #define	_IDMAP_CONFIG_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include "idmap.h"
 #include "addisc.h"
@@ -53,6 +52,15 @@ typedef struct idmap_cfg_handles {
 /*
  * This structure stores AD and AD-related configuration
  */
+typedef struct idmap_trustedforest {
+	char		*forest_name;
+	idmap_ad_disc_ds_t
+			*global_catalog;	/* global catalog hosts */
+	ad_disc_domainsinforest_t
+			*domains_in_forest;
+} idmap_trustedforest_t;
+
+
 typedef struct idmap_pg_config {
 	uint64_t	list_size_limit;
 	/*
@@ -65,16 +73,29 @@ typedef struct idmap_pg_config {
 	 * track its procedence separately.  The dflt_dom_set_in_smf
 	 * field does just that.
 	 */
-	bool_t		dflt_dom_set_in_smf;
-	char		*default_domain;	/* default domain name */
-	char		*domain_name;		/* AD domain name */
 	char		*machine_sid;		/* machine sid */
-	idmap_ad_disc_ds_t	*domain_controller;
-						/* domain controller hosts */
+	char		*default_domain;	/* default domain name */
+	boolean_t	dflt_dom_set_in_smf;
+	char		*domain_name;		/* AD domain name */
+	boolean_t		domain_name_auto_disc;
+	idmap_ad_disc_ds_t
+			*domain_controller;	/* domain controller hosts */
+	boolean_t	domain_controller_auto_disc;
 	char		*forest_name;		/* forest name */
+	boolean_t	forest_name_auto_disc;
 	char		*site_name;		/* site name */
-	idmap_ad_disc_ds_t	*global_catalog;
-						/* global catalog hosts */
+	boolean_t	site_name_auto_disc;
+	idmap_ad_disc_ds_t
+			*global_catalog;	/* global catalog hosts */
+	boolean_t	global_catalog_auto_disc;
+	ad_disc_domainsinforest_t
+			*domains_in_forest;
+	ad_disc_trusteddomains_t
+			*trusted_domains;	/* Trusted Domains */
+	int		num_trusted_forests;
+	idmap_trustedforest_t
+			*trusted_forests;	/* Array of trusted forests */
+
 	/*
 	 * Following properties are associated with directory-based
 	 * name-mappings.
@@ -82,8 +103,8 @@ typedef struct idmap_pg_config {
 	char		*ad_unixuser_attr;
 	char		*ad_unixgroup_attr;
 	char		*nldap_winname_attr;
-	bool_t		ds_name_mapping_enabled;
-	bool_t		eph_map_unres_sids;
+	boolean_t	ds_name_mapping_enabled;
+	boolean_t	eph_map_unres_sids;
 } idmap_pg_config_t;
 
 typedef struct idmap_cfg {

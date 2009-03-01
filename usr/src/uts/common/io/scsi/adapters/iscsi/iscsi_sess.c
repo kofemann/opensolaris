@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  * iSCSI session interfaces
@@ -330,11 +330,14 @@ iscsi_sess_get(uint32_t oid, iscsi_hba_t *ihp, iscsi_sess_t **ispp)
  * iscsi_sess_online - initiate online of sessions connections
  */
 void
-iscsi_sess_online(iscsi_sess_t *isp)
+iscsi_sess_online(void *arg)
 {
+	iscsi_sess_t	*isp;
 	iscsi_hba_t	*ihp;
 	iscsi_conn_t	*icp;
 	int		idx;
+
+	isp = (iscsi_sess_t *)arg;
 
 	ASSERT(isp != NULL);
 	ihp = isp->sess_hba;
@@ -1146,18 +1149,27 @@ iscsi_sess_state_logged_in(iscsi_sess_t *isp, iscsi_sess_event_t event)
 				    "!iscsi session(%u) %s offline\n",
 				    isp->sess_oid, isp->sess_name);
 			}
+			/*
+			 * An enumeration may also in progress
+			 * in the same session. Release the
+			 * sess_state_mutex to avoid deadlock
+			 *
+			 * During the process of offlining the LUNs
+			 * our ic thread might be calling back into
+			 * the driver via a target driver failure
+			 * path to do a reset or something
+			 * we need to release the sess_state_mutex
+			 * while we are killing these threads so
+			 * they don't get deadlocked.
+			 */
+			mutex_exit(&isp->sess_state_mutex);
 			iscsi_sess_offline_luns(isp);
+			iscsi_thread_destroy(isp->sess_ic_thread);
+		} else {
+			mutex_exit(&isp->sess_state_mutex);
+			iscsi_thread_destroy(isp->sess_ic_thread);
 		}
 
-		/*
-		 * During the process of offlining the LUNs our ic
-		 * thread might be calling back into the driver via
-		 * a target driver failure path to do a reset or something
-		 * we need to release the sess_state_mutex while we
-		 * are killing these threads to they don't get deadlocked.
-		 */
-		mutex_exit(&isp->sess_state_mutex);
-		iscsi_thread_destroy(isp->sess_ic_thread);
 		mutex_enter(&isp->sess_state_mutex);
 		break;
 
@@ -1319,18 +1331,27 @@ iscsi_sess_state_in_flush(iscsi_sess_t *isp, iscsi_sess_event_t event)
 				    "!iscsi session(%u) %s offline\n",
 				    isp->sess_oid, isp->sess_name);
 			}
+			/*
+			 * An enumeration may also in progress
+			 * in the same session. Release the
+			 * sess_state_mutex to avoid deadlock
+			 *
+			 * During the process of offlining the LUNs
+			 * our ic thread might be calling back into
+			 * the driver via a target driver failure
+			 * path to do a reset or something
+			 * we need to release the sess_state_mutex
+			 * while we are killing these threads so
+			 * they don't get deadlocked.
+			 */
+			mutex_exit(&isp->sess_state_mutex);
 			iscsi_sess_offline_luns(isp);
+			iscsi_thread_destroy(isp->sess_ic_thread);
+		} else {
+			mutex_exit(&isp->sess_state_mutex);
+			iscsi_thread_destroy(isp->sess_ic_thread);
 		}
 
-		/*
-		 * During the process of offlining the LUNs our ic
-		 * thread might be calling back into the driver via
-		 * a target driver failure path to do a reset or something
-		 * we need to release the sess_state_mutex while we
-		 * are killing these threads to they don't get deadlocked.
-		 */
-		mutex_exit(&isp->sess_state_mutex);
-		iscsi_thread_destroy(isp->sess_ic_thread);
 		mutex_enter(&isp->sess_state_mutex);
 		break;
 
@@ -1729,7 +1750,7 @@ iscsi_sess_reportluns(iscsi_sess_t *isp)
 	 *	    having to figure out this information later
 	 */
 	lun_start = 0;
-	rw_enter(&isp->sess_lun_list_rwlock, RW_READER);
+	rw_enter(&isp->sess_lun_list_rwlock, RW_WRITER);
 	for (ilp = isp->sess_lun_list; ilp; ilp = ilp->lun_next) {
 		for (lun_count = lun_start;
 		    lun_count < lun_total; lun_count++) {
@@ -1758,11 +1779,13 @@ iscsi_sess_reportluns(iscsi_sess_t *isp)
 				/*
 				 * the lun we are looking for is found
 				 *
-				 * if the state of the lun is currently OFFLINE,
-				 * turn it back online
+				 * if the state of the lun is currently OFFLINE
+				 * or with INVALID, try to turn it back online
 				 */
-				if (ilp->lun_state ==
-				    ISCSI_LUN_STATE_OFFLINE) {
+				if ((ilp->lun_state &
+				    ISCSI_LUN_STATE_OFFLINE) ||
+				    (ilp->lun_state &
+				    ISCSI_LUN_STATE_INVALID)) {
 					DTRACE_PROBE2(
 					    sess_reportluns_lun_is_not_online,
 					    int, ilp->lun_num, int,
@@ -1791,8 +1814,10 @@ iscsi_sess_reportluns(iscsi_sess_t *isp)
 			 * make sure the lun is in the ONLINE state
 			 */
 				saved_replun_ptr[lun_count].lun_found = B_TRUE;
-					if (ilp->lun_state ==
-					    ISCSI_LUN_STATE_OFFLINE) {
+					if ((ilp->lun_state &
+					    ISCSI_LUN_STATE_OFFLINE) ||
+					    (ilp->lun_state &
+					    ISCSI_LUN_STATE_INVALID)) {
 #define	SRLINON sess_reportluns_lun_is_not_online
 						DTRACE_PROBE2(
 						    SRLINON,
@@ -1817,9 +1842,7 @@ iscsi_sess_reportluns(iscsi_sess_t *isp)
 			DTRACE_PROBE2(sess_reportluns_lun_no_longer_exists,
 			    int, ilp->lun_num, int, ilp->lun_state);
 
-			if (ilp->lun_state == ISCSI_LUN_STATE_ONLINE) {
-				(void) iscsi_lun_offline(ihp, ilp, B_FALSE);
-			}
+			(void) iscsi_lun_destroy(ihp, ilp);
 		}
 	}
 	rw_exit(&isp->sess_lun_list_rwlock);

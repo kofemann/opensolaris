@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -69,22 +69,29 @@ gldv3_warning(char *module)
 	char		buf[DLADM_PROP_VAL_MAX], *cp;
 	uint_t		cnt = 1;
 	char		*link;
+	dladm_handle_t	handle;
 
 	link = strrchr(module, '/');
 	if (link == NULL)
 		return;
-	status = dladm_name2info(++link, &linkid, NULL, NULL, NULL);
-	if (status != DLADM_STATUS_OK)
+
+	if (dladm_open(&handle) != DLADM_STATUS_OK)
 		return;
-	cp = buf;
-	status = dladm_get_linkprop(linkid, DLADM_PROP_VAL_CURRENT, "flowctrl",
-	    &cp, &cnt);
-	if (status != DLADM_STATUS_OK)
-		return;
-	(void) fprintf(stderr, gettext(
-	    "WARNING: The ndd commands for datalink administration "
-	    "are obsolete and may be removed in a future release of "
-	    "Solaris. Use dladm(1M) to manage datalink tunables.\n"));
+
+	status = dladm_name2info(handle, ++link, &linkid, NULL, NULL, NULL);
+	if (status == DLADM_STATUS_OK) {
+		cp = buf;
+		status = dladm_get_linkprop(handle, linkid,
+		    DLADM_PROP_VAL_CURRENT, "flowctrl", &cp, &cnt);
+		if (status == DLADM_STATUS_OK) {
+			(void) fprintf(stderr, gettext(
+			    "WARNING: The ndd commands for datalink "
+			    "administration are obsolete and may be "
+			    "removed in a future release of Solaris. "
+			    "Use dladm(1M) to manage datalink tunables.\n"));
+		}
+	}
+	dladm_close(handle);
 }
 
 /* ARGSUSED */
@@ -114,6 +121,7 @@ main(int argc, char **argv)
 			fatal(usage_str);
 	}
 	gldv3_warning(cp);
+
 	if ((fd = open(cp, O_RDWR)) == -1)
 		fatal("open of %s failed: %s", cp, errmsg(errno));
 
@@ -287,7 +295,7 @@ printe(boolean_t print_errno, char *fmt, ...)
 
 
 static int
-open_device(void)
+open_device()
 {
 	char	name[80];
 	int	fd, len;

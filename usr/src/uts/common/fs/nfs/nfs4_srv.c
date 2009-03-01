@@ -54,6 +54,7 @@
 #include <sys/fem.h>
 #include <sys/sdt.h>
 #include <sys/ddi.h>
+#include <sys/zone.h>
 
 #include <rpc/types.h>
 #include <rpc/auth.h>
@@ -471,10 +472,8 @@ rfs4_init_compound_state(struct compound_state *cs)
 void
 rfs4_grace_start(nfs_server_instance_t *sip)
 {
-	time_t now = gethrestime_sec();
-
-	rw_enter(&sip->reclaimlst_lock, RW_WRITER);
-	sip->gstart_time = now;
+	rw_enter(&sip->rwlock, RW_WRITER);
+	sip->start_time = (time_t)TICK_TO_SEC(lbolt);
 	sip->grace_period = rfs4_grace_period;
 	rw_exit(&sip->reclaimlst_lock);
 }
@@ -509,7 +508,7 @@ rfs4_in_grace(nfs_server_instance_t *sip)
 		grace_expiry = 0;
 	rw_exit(&sip->reclaimlst_lock);
 
-	return (gethrestime_sec() < grace_expiry);
+	return (((time_t)TICK_TO_SEC(lbolt)) < grace_expiry);
 }
 
 int

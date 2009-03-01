@@ -19,10 +19,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-# ident	"@(#)Makefile	1.6	08/08/07 SMI"
 
 include ../../../Makefile.master
 
@@ -44,13 +42,9 @@ HDRS=	alloc.h			\
 	lm.h			\
 	lmdfs.h			\
 	lmerr.h			\
-	lsalib.h		\
 	mac_cifs.h		\
 	mailslot.h		\
 	mbuf.h			\
-	mlrpc.h			\
-	mlsvc.h			\
-	mlsvc_util.h		\
 	msgbuf.h		\
 	ndr.h			\
 	netbios.h		\
@@ -63,7 +57,6 @@ HDRS=	alloc.h			\
 	smb_sid.h		\
 	ntstatus.h		\
 	oem.h			\
-	samlib.h		\
 	smb.h			\
 	smb_common_door.h	\
 	smb_door_svc.h		\
@@ -71,6 +64,7 @@ HDRS=	alloc.h			\
 	smb_i18n.h		\
 	smb_idmap.h		\
 	smb_incl.h		\
+	smb_inet.h		\
 	smb_ioctl.h		\
 	smb_kproto.h		\
 	smb_kstat.h		\
@@ -82,7 +76,6 @@ HDRS=	alloc.h			\
 	smb_xdr.h		\
 	smbfmt.h		\
 	smbinfo.h		\
-	smbtrans.h		\
 	string.h		\
 	svrapi.h		\
 	winioctl.h		\
@@ -93,6 +86,7 @@ NDLHDRS= dssetup.ndl		\
 	eventlog.ndl		\
 	llsrpc.ndl		\
 	lsarpc.ndl		\
+	msgsvc.ndl		\
 	ndrtypes.ndl		\
 	netdfs.ndl		\
 	netlogon.ndl		\

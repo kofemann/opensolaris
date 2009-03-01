@@ -20,7 +20,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
@@ -45,7 +45,8 @@ i386_SUBDIRS = i86pc \
 		SUNW,Sun-Fire-X4200-Server \
 		SUNW,Sun-Fire-X4200-M2 \
 		SUNW,Sun-Fire-X4500 \
-		SUNW,Sun-Fire-X4540
+		SUNW,Sun-Fire-X4540 \
+		SUNW,Sun-Fire-X4600-M2
 
 SUBDIRS = $($(MACH)_SUBDIRS)
 

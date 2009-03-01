@@ -275,7 +275,6 @@ COMMON_SUBDIRS = \
 	cmd/strings \
 	cmd/su \
 	cmd/sulogin \
-	cmd/sum \
 	cmd/svc \
 	cmd/swap \
 	cmd/sync \
@@ -469,8 +468,7 @@ i386_SUBDIRS= \
 	cmd/rtc \
 	cmd/ucodeadm \
 	lib/brand/lx \
-	lib/cfgadm_plugins/sata \
-	lib/libfdisk
+	lib/cfgadm_plugins/sata
 
 sparc_SUBDIRS= \
 	cmd/datadm \

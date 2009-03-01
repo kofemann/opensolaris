@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -271,7 +271,8 @@ struct mac_group_s {
 	 * the tx rings of this client are now mapped in the		\
 	 * guest domain and not accessible from this domain.		\
 	 */								\
-	if (mcip->mci_share_bound || (ring == NULL))			\
+	if ((mcip->mci_state_flags & MCIS_SHARE_BOUND) != 0 ||		\
+	    (ring == NULL))						\
 		mp = MAC_RING_TX_DEFAULT(mip, mp);			\
 	else								\
 		mp = mac_ring_tx(ring, mp);				\
@@ -423,6 +424,7 @@ struct mac_impl_s {
 	/* list of MAC clients which opened this MAC */
 	struct mac_client_impl_s *mi_clients_list;	/* mi_rw_lock */
 	uint_t			mi_nclients;		/* mi_rw_lock */
+	struct mac_client_impl_s *mi_single_active_client; /* mi_rw_lock */
 
 	uint32_t		mi_margin;		/* mi_rw_lock */
 	uint_t			mi_sdu_min;		/* mi_rw_lock */
@@ -608,8 +610,10 @@ extern int mac_link_flow_init(mac_client_handle_t, flow_entry_t *);
 extern void mac_link_flow_clean(mac_client_handle_t, flow_entry_t *);
 
 /*
- * Called from mac_provider.c
+ * Fanout update routines called when the link speed of the NIC changes
+ * or when a MAC client's share is unbound.
  */
+extern void mac_fanout_recompute_client(mac_client_impl_t *);
 extern void mac_fanout_recompute(mac_impl_t *);
 
 /*
@@ -674,7 +678,7 @@ extern int mac_start_group(mac_group_t *);
 extern void mac_stop_group(mac_group_t *);
 extern int mac_start_ring(mac_ring_t *);
 extern void mac_stop_ring(mac_ring_t *);
-extern int mac_add_macaddr(mac_impl_t *, mac_group_t *, uint8_t *);
+extern int mac_add_macaddr(mac_impl_t *, mac_group_t *, uint8_t *, boolean_t);
 extern int mac_remove_macaddr(mac_address_t *);
 
 extern void mac_set_rx_group_state(mac_group_t *, mac_group_state_t);

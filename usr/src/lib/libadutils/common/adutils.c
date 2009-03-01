@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -35,6 +35,7 @@
 #include <errno.h>
 #include <assert.h>
 #include <limits.h>
+#include <syslog.h>
 #include <sys/u8_textprep.h>
 #include <sys/varargs.h>
 #include "libadutils.h"
@@ -66,13 +67,16 @@ static binary_attrs_t binattrs[] = {
 	{NULL, NULL}
 };
 
+
+adutils_logger logger = syslog;
+
+
 void
-adutils_set_log(int pri, bool_t syslog, bool_t degraded)
+adutils_set_logger(adutils_logger funct)
 {
-	idmap_log_stderr(pri);
-	idmap_log_syslog(syslog);
-	idmap_log_degraded(degraded);
+	logger = funct;
 }
+
 
 /*
  * Turn "foo.bar.com" into "dc=foo,dc=bar,dc=com"
@@ -81,9 +85,11 @@ static
 char *
 adutils_dns2dn(const char *dns)
 {
-	int	nameparts;
-	return (ldap_dns_to_dn((char *)dns, &nameparts));
+	int num_parts;
+
+	return (ldap_dns_to_dn((char *)dns, &num_parts));
 }
+
 
 /*
  * Turn "dc=foo,dc=bar,dc=com" into "foo.bar.com"; ignores any other
@@ -92,122 +98,15 @@ adutils_dns2dn(const char *dns)
 char *
 adutils_dn2dns(const char *dn)
 {
-	char **rdns = NULL;
-	char **attrs = NULL;
-	char **labels = NULL;
-	char *dns = NULL;
-	char **rdn, **attr, **label;
-	int maxlabels = 5;
-	int nlabels = 0;
-	int dnslen;
-
-	/*
-	 * There is no reverse of ldap_dns_to_dn() in our libldap, so we
-	 * have to do the hard work here for now.
-	 */
-
-	/*
-	 * This code is much too liberal: it looks for "dc" attributes
-	 * in all RDNs of the DN.  In theory this could cause problems
-	 * if people were to use "dc" in nodes other than the root of
-	 * the tree, but in practice noone, least of all Active
-	 * Directory, does that.
-	 *
-	 * On the other hand, this code is much too conservative: it
-	 * does not make assumptions about ldap_explode_dn(), and _that_
-	 * is the true for looking at every attr of every RDN.
-	 *
-	 * Since we only ever look at dc and those must be DNS labels,
-	 * at least until we get around to supporting IDN here we
-	 * shouldn't see escaped labels from AD nor from libldap, though
-	 * the spec (RFC2253) does allow libldap to escape things that
-	 * don't need escaping -- if that should ever happen then
-	 * libldap will need a spanking, and we can take care of that.
-	 */
-
-	/* Explode a DN into RDNs */
-	if ((rdns = ldap_explode_dn(dn, 0)) == NULL)
-		return (NULL);
-
-	labels = calloc(maxlabels + 1, sizeof (char *));
-	label = labels;
-
-	for (rdn = rdns; *rdn != NULL; rdn++) {
-		if (attrs != NULL)
-			ldap_value_free(attrs);
-
-		/* Explode each RDN, look for DC attr, save val as DNS label */
-		if ((attrs = ldap_explode_rdn(rdn[0], 0)) == NULL)
-			goto done;
-
-		for (attr = attrs; *attr != NULL; attr++) {
-			if (strncasecmp(*attr, "dc=", 3) != 0)
-				continue;
-
-			/* Found a DNS label */
-			labels[nlabels++] = strdup((*attr) + 3);
-
-			if (nlabels == maxlabels) {
-				char **tmp;
-				tmp = realloc(labels,
-				    sizeof (char *) * (maxlabels + 1));
-
-				if (tmp == NULL)
-					goto done;
-
-				labels = tmp;
-				labels[nlabels] = NULL;
-			}
-
-			/* There should be just one DC= attr per-RDN */
-			break;
-		}
-	}
-
-	/*
-	 * Got all the labels, now join with '.'
-	 *
-	 * We need room for nlabels - 1 periods ('.'), one nul
-	 * terminator, and the strlen() of each label.
-	 */
-	dnslen = nlabels;
-	for (label = labels; *label != NULL; label++)
-		dnslen += strlen(*label);
-
-	if ((dns = malloc(dnslen)) == NULL)
-		goto done;
-
-	*dns = '\0';
-
-	for (label = labels; *label != NULL; label++) {
-		(void) strlcat(dns, *label, dnslen);
-		/*
-		 * NOTE: the last '.' won't be appended -- there's no room
-		 * for it!
-		 */
-		(void) strlcat(dns, ".", dnslen);
-	}
-
-done:
-	if (labels != NULL) {
-		for (label = labels; *label != NULL; label++)
-			free(*label);
-		free(labels);
-	}
-	if (attrs != NULL)
-		ldap_value_free(attrs);
-	if (rdns != NULL)
-		ldap_value_free(rdns);
-
-	return (dns);
+	return (DN_to_DNS(dn));
 }
+
 
 /*
  * Convert a binary SID in a BerValue to a adutils_sid_t
  */
-static
 int
-getsid(BerValue *bval, adutils_sid_t *sidp)
+adutils_getsid(BerValue *bval, adutils_sid_t *sidp)
 {
 	int		i, j;
 	uchar_t		*v;
@@ -255,9 +154,8 @@ getsid(BerValue *bval, adutils_sid_t *sidp)
 /*
  * Convert a adutils_sid_t to S-1-...
  */
-static
 char *
-sid2txt(adutils_sid_t *sidp)
+adutils_sid2txt(adutils_sid_t *sidp)
 {
 	int	rlen, i, len;
 	char	*str, *cp;
@@ -459,7 +357,7 @@ convert_bval2sid(BerValue *bval, uint32_t *rid)
 {
 	adutils_sid_t	sid;
 
-	if (getsid(bval, &sid) < 0)
+	if (adutils_getsid(bval, &sid) < 0)
 		return (NULL);
 
 	/*
@@ -469,7 +367,7 @@ convert_bval2sid(BerValue *bval, uint32_t *rid)
 	 */
 	if (rid != NULL && sid.authority == 5 && sid.sub_authority_count == 5)
 		*rid = sid.sub_authorities[--sid.sub_authority_count];
-	return (sid2txt(&sid));
+	return (adutils_sid2txt(&sid));
 }
 
 
@@ -514,7 +412,6 @@ adutils_bv_name2str(BerValue *bval)
 }
 
 /*ARGSUSED*/
-static
 int
 saslcallback(LDAP *ld, unsigned flags, void *defaults, void *prompts)
 {
@@ -632,6 +529,8 @@ adutils_ad_free(adutils_ad_t **ad)
 	(void) pthread_mutex_unlock(&(*ad)->lock);
 	(void) pthread_mutex_destroy(&(*ad)->lock);
 
+	if ((*ad)->known_domains)
+		free((*ad)->known_domains);
 	free((*ad)->dflt_w2k_dom);
 	free(*ad);
 
@@ -666,7 +565,7 @@ open_conn(adutils_host_t *adh, int timeoutsecs)
 	/* Open and bind an LDAP connection */
 	adh->ld = ldap_init(adh->host, adh->port);
 	if (adh->ld == NULL) {
-		idmapdlog(LOG_INFO, "ldap_init() to server "
+		logger(LOG_INFO, "ldap_init() to server "
 		    "%s port %d failed. (%s)", adh->host,
 		    adh->port, strerror(errno));
 		goto out;
@@ -685,12 +584,12 @@ open_conn(adutils_host_t *adh, int timeoutsecs)
 	if (rc != LDAP_SUCCESS) {
 		(void) ldap_unbind(adh->ld);
 		adh->ld = NULL;
-		idmapdlog(LOG_INFO, "ldap_sasl_interactive_bind_s() to server "
+		logger(LOG_INFO, "ldap_sasl_interactive_bind_s() to server "
 		    "%s port %d failed. (%s)", adh->host, adh->port,
 		    ldap_err2string(rc));
 	}
 
-	idmapdlog(LOG_DEBUG, "Using global catalog server %s:%d",
+	logger(LOG_DEBUG, "Using global catalog server %s:%d",
 	    adh->host, adh->port);
 
 out:
@@ -761,7 +660,8 @@ retry:
 	 * around the wrong number of times.
 	 */
 	for (;;) {
-		if (adh != NULL && adh->ld != NULL && !adh->dead)
+		if (adh != NULL && adh->owner == ad && adh->ld != NULL &&
+		    !adh->dead)
 			break;
 		if (adh == NULL || (adh = adh->next) == NULL)
 			adh = host_head;
@@ -783,7 +683,7 @@ retry:
 		goto retry;
 
 out:
-	idmapdlog(LOG_NOTICE, "Couldn't open an LDAP connection to any global "
+	logger(LOG_NOTICE, "Couldn't open an LDAP connection to any global "
 	    "catalog server!");
 	return (NULL);
 }
@@ -919,6 +819,88 @@ delete_ds(adutils_ad_t *ad, const char *host, int port)
 	}
 
 }
+/*
+ * Add known domain name and domain SID to AD configuration.
+ */
+
+adutils_rc
+adutils_add_domain(adutils_ad_t *ad, const char *domain, const char *sid)
+{
+	struct known_domain *new;
+	int num = ad->num_known_domains;
+
+	ad->num_known_domains++;
+	new = realloc(ad->known_domains,
+	    sizeof (struct known_domain) * ad->num_known_domains);
+	if (new != NULL) {
+		ad->known_domains = new;
+		(void) strlcpy(ad->known_domains[num].name, domain,
+		    sizeof (ad->known_domains[num].name));
+		(void) strlcpy(ad->known_domains[num].sid, sid,
+		    sizeof (ad->known_domains[num].sid));
+		return (ADUTILS_SUCCESS);
+	} else {
+		if (ad->known_domains != NULL) {
+			free(ad->known_domains);
+			ad->known_domains = NULL;
+		}
+		ad->num_known_domains = 0;
+		return (ADUTILS_ERR_MEMORY);
+	}
+}
+
+
+/*
+ * Check that this AD supports this domain.
+ * If there are no known domains assume that the
+ * domain is supported by this AD.
+ *
+ * Returns 1 if this domain is supported by this AD
+ * else returns 0;
+ */
+
+int
+adutils_lookup_check_domain(adutils_query_state_t *qs, const char *domain)
+{
+	adutils_ad_t *ad = qs->qadh->owner;
+	int i, err;
+
+	for (i = 0; i < ad->num_known_domains; i++) {
+		if (u8_strcmp(domain, ad->known_domains[i].name, 0,
+		    U8_STRCMP_CI_LOWER, U8_UNICODE_LATEST, &err) == 0 &&
+		    err == 0)
+			return (1);
+	}
+
+	return ((i == 0) ? 1 : 0);
+}
+
+
+/*
+ * Check that this AD supports the SID prefix.
+ * The SID prefix should match the domain SID.
+ * If there are no known domains assume that the
+ * SID prefix is supported by this AD.
+ *
+ * Returns 1 if this sid prefix is supported by this AD
+ * else returns 0;
+ */
+
+int
+adutils_lookup_check_sid_prefix(adutils_query_state_t *qs, const char *sid)
+{
+	adutils_ad_t *ad = qs->qadh->owner;
+	int i;
+
+
+	for (i = 0; i < ad->num_known_domains; i++) {
+		if (strcmp(sid, ad->known_domains[i].sid) == 0)
+			return (1);
+	}
+
+	return ((i == 0) ? 1 : 0);
+}
+
 
 adutils_rc
 adutils_lookup_batch_start(adutils_ad_t *ad, int nqueries,
@@ -964,9 +946,9 @@ adutils_lookup_batch_start(adutils_ad_t *ad, int nqueries,
 
 	new_state->ref_cnt = 1;
 	new_state->qadh = adh;
-	new_state->qcount = nqueries;
+	new_state->qsize = nqueries;
 	new_state->qadh_gen = adh->generation;
-	new_state->qlastsent = 0;
+	new_state->qcount = 0;
 	new_state->ldap_res_search_cb = ldap_res_search_cb;
 	new_state->ldap_res_search_argp = ldap_res_search_argp;
 	(void) pthread_cond_init(&new_state->cv, NULL);
@@ -1332,7 +1314,7 @@ get_adobject_batch(adutils_host_t *adh, struct timeval *timeout)
 	if (adh->dead) {
 		num = adh->num_requests;
 		(void) pthread_mutex_unlock(&adh->lock);
-		idmapdlog(LOG_DEBUG,
+		logger(LOG_DEBUG,
 		    "AD ldap_result error - %d queued requests", num);
 		return (-1);
 	}
@@ -1370,7 +1352,7 @@ get_adobject_batch(adutils_host_t *adh, struct timeval *timeout)
 		} else {
 			num = adh->num_requests;
 			(void) pthread_mutex_unlock(&adh->lock);
-			idmapdlog(LOG_DEBUG,
+			logger(LOG_DEBUG,
 			    "AD cannot find message ID (%d) "
 			    "- %d queued requests",
 			    msgid, num);
@@ -1401,7 +1383,7 @@ get_adobject_batch(adutils_host_t *adh, struct timeval *timeout)
 				rc = add_entry(adh, que, res);
 				(void) pthread_mutex_unlock(&adh->lock);
 				if (rc < 0) {
-					idmapdlog(LOG_DEBUG,
+					logger(LOG_DEBUG,
 					    "Failed to queue entry by "
 					    "message ID (%d) "
 					    "- %d queued requests",
@@ -1412,7 +1394,7 @@ get_adobject_batch(adutils_host_t *adh, struct timeval *timeout)
 		} else {
 			num = adh->num_requests;
 			(void) pthread_mutex_unlock(&adh->lock);
-			idmapdlog(LOG_DEBUG,
+			logger(LOG_DEBUG,
 			    "AD cannot find message ID (%d) "
 			    "- %d queued requests",
 			    msgid, num);
@@ -1588,8 +1570,10 @@ adutils_lookup_batch_add(adutils_query_state_t *state,
 	struct timeval	tv;
 	adutils_q_t	*q;
 
-	qid = atomic_inc_32_nv(&state->qlastsent) - 1;
+	qid = atomic_inc_32_nv(&state->qcount) - 1;
 	q = &(state->queries[qid]);
+
+	assert(qid < state->qsize);
 
 	/*
 	 * Remember the expected domain so we can check the results
@@ -1646,7 +1630,7 @@ adutils_lookup_batch_add(adutils_query_state_t *state,
 
 	if (dead) {
 		if (lrc != LDAP_SUCCESS)
-			idmapdlog(LOG_DEBUG,
+			logger(LOG_DEBUG,
 			    "AD ldap_search_ext error (%s) "
 			    "- %d queued requests",
 			    ldap_err2string(lrc), num);

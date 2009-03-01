@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -211,11 +211,16 @@ typedef struct cpu {
 	uint64_t	cpu_curr_clock;		/* current clock freq in Hz */
 	char		*cpu_supp_freqs;	/* supported freqs in Hz */
 
+	uintptr_t	cpu_cpcprofile_pc;	/* kernel PC in cpc interrupt */
+	uintptr_t	cpu_cpcprofile_upc;	/* user PC in cpc interrupt */
+
 	/*
 	 * Interrupt load factor used by dispatcher & softcall
 	 */
 	hrtime_t	cpu_intrlast;   /* total interrupt time (nsec) */
 	int		cpu_intrload;   /* interrupt load factor (0-99%) */
+
+	uint_t		cpu_rotor;	/* for cheap pseudo-random numbers */
 
 	/*
 	 * New members must be added /before/ this member, as the CTF tools
@@ -238,12 +243,13 @@ typedef struct cpu {
  * is up to the platform to assure that this is performed properly.  Note that
  * the structure is sized to avoid false sharing.
  */
-#define	CPUC_SIZE		(sizeof (uint16_t) + sizeof (uintptr_t) + \
-				sizeof (kmutex_t))
+#define	CPUC_SIZE		(sizeof (uint16_t) + sizeof (uint8_t) + \
+				sizeof (uintptr_t) + sizeof (kmutex_t))
 #define	CPUC_PADSIZE		CPU_CACHE_COHERENCE_SIZE - CPUC_SIZE
 
 typedef struct cpu_core {
 	uint16_t	cpuc_dtrace_flags;	/* DTrace flags */
+	uint8_t		cpuc_dcpc_intr_state;	/* DCPC provider intr state */
 	uint8_t		cpuc_pad[CPUC_PADSIZE];	/* padding */
 	uintptr_t	cpuc_dtrace_illval;	/* DTrace illegal value */
 	kmutex_t	cpuc_pid_lock;		/* DTrace pid provider lock */
@@ -260,6 +266,14 @@ extern cpu_core_t cpu_core[];
  * getpil() should be used instead to check for PIL levels.
  */
 #define	CPU_ON_INTR(cpup) ((cpup)->cpu_intr_actv >> (LOCK_LEVEL + 1))
+
+/*
+ * CPU_PSEUDO_RANDOM() returns a per CPU value that changes each time one
+ * looks at it. It's meant as a cheap mechanism to be incorporated in routines
+ * wanting to avoid biasing, but where true randomness isn't needed (just
+ * something that changes).
+ */
+#define	CPU_PSEUDO_RANDOM() (CPU->cpu_rotor++)
 
 #if defined(_KERNEL) || defined(_KMEMUSER)
 
@@ -516,6 +530,7 @@ extern cpuset_t cpu_seqid_inuse;
 #if defined(_KERNEL) || defined(_KMEMUSER)
 
 extern struct cpu	*cpu[];		/* indexed by CPU number */
+extern struct cpu	**cpu_seq;	/* indexed by sequential CPU id */
 extern cpu_t		*cpu_list;	/* list of CPUs */
 extern cpu_t		*cpu_active;	/* list of active CPUs */
 extern int		ncpus;		/* number of CPUs present */
@@ -704,7 +719,8 @@ typedef enum {
 	CPU_ON,
 	CPU_OFF,
 	CPU_CPUPART_IN,
-	CPU_CPUPART_OUT
+	CPU_CPUPART_OUT,
+	CPU_SETUP
 } cpu_setup_t;
 
 typedef int cpu_setup_func_t(cpu_setup_t, int, void *);

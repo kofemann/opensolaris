@@ -19,17 +19,28 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
+#
+
+#
+# MAPFILE HEADER START
+#
+# WARNING:  STOP NOW.  DO NOT MODIFY THIS FILE.
+# Object versioning must comply with the rules detailed in
+#
+#	usr/src/lib/README.mapfiles
+#
+# You should not be making modifications here until you've read the most current
+# copy of that file. If you need help, contact a gatekeeper for guidance.
+#
+# MAPFILE HEADER END
 #
 
 SUNWprivate {
     global:
 	dssetup_clear_domain_info;
-	lsa_enum_trusted_domains;
-	lsa_query_account_domain_info;
-	lsa_query_primary_domain_info;
 	mlsvc_get_door_fd;
 	mlsvc_get_num_users;
 	mlsvc_get_user_list;
@@ -42,6 +53,8 @@ SUNWprivate {
 	mlsvc_set_share;
 	smb_autohome_add;
 	smb_autohome_remove;
+	smb_domain_getinfo;
+	smb_locate_dc;
 	smb_logon;
 	smb_shr_add;
 	smb_shr_chkname;
@@ -51,6 +64,7 @@ SUNWprivate {
 	smb_shr_iterate;
 	smb_shr_iterinit;
 	smb_shr_list;
+	smb_shr_load;
 	smb_shr_modify;
 	smb_shr_remove;
 	smb_shr_rename;

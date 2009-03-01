@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -62,6 +62,7 @@
 #include <sys/sdt.h>
 #include <sys/list.h>
 #include <sys/stat.h>
+#include <sys/zone.h>
 
 #include <rpc/types.h>
 #include <rpc/auth.h>
@@ -941,7 +942,7 @@ recov_retry:
 		open_args->mode = createmode;
 		if (createmode == EXCLUSIVE4) {
 			if (did_excl_setup == FALSE) {
-				verf.seconds = nfs_atoi(hw_serial);
+				verf.seconds = zone_get_hostid(NULL);
 				if (verf.seconds != 0)
 					verf.nseconds = newnum();
 				else {
@@ -6260,7 +6261,7 @@ nfs4lookup_setup(char *nm, lookup4_param_t *lookupargp, int needgetfh)
 			break;
 
 		/* ".." is counted as 1 component */
-		if (*nm == '.' && *(nm + 1) == '.')
+		if (*nm == '.' && *(nm + 1) != '/')
 			break;
 	}
 

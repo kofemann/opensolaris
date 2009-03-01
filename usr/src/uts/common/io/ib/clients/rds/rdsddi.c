@@ -19,10 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
 
 #include <sys/types.h>
 #include <sys/conf.h>
@@ -43,6 +42,7 @@
 #include <inet/common.h>
 #include <inet/ip.h>
 #include <inet/mi.h>
+#include <inet/proto_set.h>
 #include <sys/ib/clients/rds/rds.h>
 #include <sys/policy.h>
 #include <inet/ipclassifier.h>
@@ -226,8 +226,8 @@ rds_open(queue_t *q, dev_t *devp, int flag, int sflag, cred_t *credp)
 	WR(q)->q_lowat = rds_xmit_lowat;
 
 	/* Set the Stream head watermarks */
-	(void) mi_set_sth_hiwat(q, rds_recv_hiwat);
-	(void) mi_set_sth_lowat(q, rds_recv_lowat);
+	(void) proto_set_rx_hiwat(q, NULL, rds_recv_hiwat);
+	(void) proto_set_rx_lowat(q, NULL, rds_recv_lowat);
 
 	return (0);
 }
@@ -337,7 +337,7 @@ rds_deliver_new_msg(mblk_t *mp, ipaddr_t local_addr, ipaddr_t rem_addr,
 		if (rds->rds_port_quota > current_port_quota) {
 			/* this may result in stalling the port */
 			rds->rds_port_quota = current_port_quota;
-			(void) mi_set_sth_hiwat(rds->rds_ulpd,
+			(void) proto_set_rx_hiwat(rds->rds_ulpd, NULL,
 			    rds->rds_port_quota * UserBufferSize);
 			RDS_INCR_PORT_QUOTA_ADJUSTED();
 		}
@@ -599,7 +599,8 @@ rds_bind(queue_t *q, mblk_t *mp)
 	RDS_INCR_NPORT();
 	rds->rds_port_quota = RDS_CURRENT_PORT_QUOTA();
 	RDS_SET_PORT_QUOTA(rds->rds_port_quota);
-	(void) mi_set_sth_hiwat(RD(q), rds->rds_port_quota * UserBufferSize);
+	(void) proto_set_rx_hiwat(RD(q), NULL,
+	    rds->rds_port_quota * UserBufferSize);
 
 	qreply(q, mp);
 }
@@ -607,12 +608,10 @@ rds_bind(queue_t *q, mblk_t *mp)
 static void
 rds_wput_other(queue_t *q, mblk_t *mp)
 {
-	rds_t *rds = (rds_t *)q->q_ptr;
 	uchar_t *rptr = mp->b_rptr;
 	struct datab *db;
 	cred_t *cr;
 
-	cr = DB_CREDDEF(mp, rds->rds_cred);
 	db = mp->b_datap;
 	switch (db->db_type) {
 	case M_DATA:
@@ -639,11 +638,28 @@ rds_wput_other(queue_t *q, mblk_t *mp)
 			rds_bind(q, mp);
 			return;
 		case T_SVR4_OPTMGMT_REQ:
-			(void) svr4_optcom_req(q, mp, cr, &rds_opt_obj,
-			    B_FALSE);
-			return;
 		case T_OPTMGMT_REQ:
-			(void) tpi_optcom_req(q, mp, cr, &rds_opt_obj, B_FALSE);
+			/*
+			 * All Solaris components should pass a db_credp
+			 * for this TPI message, hence we ASSERT.
+			 * But in case there is some other M_PROTO that looks
+			 * like a TPI message sent by some other kernel
+			 * component, we check and return an error.
+			 */
+			cr = msg_getcred(mp, NULL);
+			ASSERT(cr != NULL);
+			if (cr == NULL) {
+				rds_err_ack(q, mp, TSYSERR, EINVAL);
+				return;
+			}
+			if (((union T_primitives *)(uintptr_t)rptr)->type ==
+			    T_SVR4_OPTMGMT_REQ) {
+				(void) svr4_optcom_req(q, mp, cr, &rds_opt_obj,
+				    B_FALSE);
+			} else {
+				(void) tpi_optcom_req(q, mp, cr, &rds_opt_obj,
+				    B_FALSE);
+			}
 			return;
 		case T_CONN_REQ:
 			/*
@@ -859,7 +875,7 @@ rds_rsrv(queue_t *q)
 	current_port_quota = RDS_GET_PORT_QUOTA();
 	if (rds->rds_port_quota != current_port_quota) {
 		rds->rds_port_quota = current_port_quota;
-		(void) mi_set_sth_hiwat(q,
+		(void) proto_set_rx_hiwat(q, NULL,
 		    rds->rds_port_quota * UserBufferSize);
 	}
 

@@ -19,8 +19,22 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
+#
+
+#
+# MAPFILE HEADER START
+#
+# WARNING:  STOP NOW.  DO NOT MODIFY THIS FILE.
+# Object versioning must comply with the rules detailed in
+#
+#	usr/src/lib/README.mapfiles
+#
+# You should not be making modifications here until you've read the most current
+# copy of that file. If you need help, contact a gatekeeper for guidance.
+#
+# MAPFILE HEADER END
 #
 
 #
@@ -63,6 +77,7 @@ SUNW_1.23 {		# SunOS 5.11 (Solaris 11)
 	aio_waitn;
 	aio_write;
 	aiowrite;
+	asprintf;
 	assfail;
 	backtrace;
 	backtrace_symbols;
@@ -166,6 +181,7 @@ SUNW_1.23 {		# SunOS 5.11 (Solaris 11)
 	uconv_u32tou8;
 	uconv_u8tou16;
 	uconv_u8tou32;
+	vasprintf;
 	vforkx;
 	verr;
 	verrx;
@@ -1427,9 +1443,13 @@ SUNWprivate_1.1 {
 	_D_cplx_div_ix;
 	_D_cplx_div_rx;
 	_D_cplx_mul;
+	defclose_r;
 	defcntl;
+	defcntl_r;
 	defopen;
+	defopen_r;
 	defread;
+	defread_r;
 	_delete;
 	_dgettext;
 	_doprnt;

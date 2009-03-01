@@ -20,11 +20,9 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * Zones
@@ -1727,6 +1725,7 @@ zone_zsd_init(void)
 	zone0.zone_name = GLOBAL_ZONENAME;
 	zone0.zone_nodename = utsname.nodename;
 	zone0.zone_domain = srpc_domain;
+	zone0.zone_hostid = HW_INVALID_HOSTID;
 	zone0.zone_ref = 1;
 	zone0.zone_id = GLOBAL_ZONEID;
 	zone0.zone_status = ZONE_IS_RUNNING;
@@ -2908,6 +2907,27 @@ zone_set_name(zone_t *zone, const char *uname)
 }
 
 /*
+ * Gets the 32-bit hostid of the specified zone as an unsigned int.  If 'zonep'
+ * is NULL or it points to a zone with no hostid emulation, then the machine's
+ * hostid (i.e., the global zone's hostid) is returned.  This function returns
+ * zero if neither the zone nor the host machine (global zone) have hostids.  It
+ * returns HW_INVALID_HOSTID if the function attempts to return the machine's
+ * hostid and the machine's hostid is invalid.
+ */
+uint32_t
+zone_get_hostid(zone_t *zonep)
+{
+	unsigned long machine_hostid;
+
+	if (zonep == NULL || zonep->zone_hostid == HW_INVALID_HOSTID) {
+		if (ddi_strtoul(hw_serial, NULL, 10, &machine_hostid) != 0)
+			return (HW_INVALID_HOSTID);
+		return ((uint32_t)machine_hostid);
+	}
+	return (zonep->zone_hostid);
+}
+
+/*
  * Similar to thread_create(), but makes sure the thread is in the appropriate
  * zone's zsched process (curproc->p_zone->zone_zsched) before returning.
  * Thread returned in TS_RUN state.
@@ -3132,8 +3152,13 @@ zone_start_init(void)
 	 */
 	p->p_zone->zone_boot_err = start_init_common();
 
+	/*
+	 * We will prevent booting zones from becoming running zones if the
+	 * global zone is shutting down.
+	 */
 	mutex_enter(&zone_status_lock);
-	if (z->zone_boot_err != 0) {
+	if (z->zone_boot_err != 0 || zone_status_get(global_zone) >=
+	    ZONE_IS_SHUTTING_DOWN) {
 		/*
 		 * Make sure we are still in the booting state-- we could have
 		 * raced and already be shutting down, or even further along.
@@ -3539,6 +3564,13 @@ zone_is_nested(const char *rootpath)
 
 	ASSERT(MUTEX_HELD(&zonehash_lock));
 
+	/*
+	 * zone_set_root() appended '/' and '\0' at the end of rootpath
+	 */
+	if ((rootpathlen <= 3) && (rootpath[0] == '/') &&
+	    (rootpath[1] == '/') && (rootpath[2] == '\0'))
+		return (B_TRUE);
+
 	for (zone = list_head(&zone_active); zone != NULL;
 	    zone = list_next(&zone_active, zone)) {
 		if (zone == global_zone)
@@ -3805,6 +3837,7 @@ zone_create(const char *zone_name, const char *zone_root,
 
 	zone->zone_domain = kmem_alloc(_SYS_NMLN, KM_SLEEP);
 	zone->zone_domain[0] = '\0';
+	zone->zone_hostid = HW_INVALID_HOSTID;
 	zone->zone_shares = 1;
 	zone->zone_shmmax = 0;
 	zone->zone_ipc.ipcq_shmmni = 0;
@@ -4727,6 +4760,17 @@ zone_getattr(zoneid_t zoneid, int attr, void *buf, size_t bufsize)
 
 		mutex_exit(&class_lock);
 		break;
+	case ZONE_ATTR_HOSTID:
+		if (zone->zone_hostid != HW_INVALID_HOSTID &&
+		    bufsize == sizeof (zone->zone_hostid)) {
+			size = sizeof (zone->zone_hostid);
+			if (buf != NULL && copyout(&zone->zone_hostid, buf,
+			    bufsize) != 0)
+				error = EFAULT;
+		} else {
+			error = EINVAL;
+		}
+		break;
 	default:
 		if ((attr >= ZONE_ATTR_BRAND_ATTRS) && ZONE_IS_BRANDED(zone)) {
 			size = bufsize;
@@ -4795,6 +4839,16 @@ zone_setattr(zoneid_t zoneid, int attr, void *buf, size_t bufsize)
 		break;
 	case ZONE_ATTR_SCHED_CLASS:
 		err = zone_set_sched_class(zone, (const char *)buf);
+		break;
+	case ZONE_ATTR_HOSTID:
+		if (bufsize == sizeof (zone->zone_hostid)) {
+			if (copyin(buf, &zone->zone_hostid, bufsize) == 0)
+				err = 0;
+			else
+				err = EFAULT;
+		} else {
+			err = EINVAL;
+		}
 		break;
 	default:
 		if ((attr >= ZONE_ATTR_BRAND_ATTRS) && ZONE_IS_BRANDED(zone))
@@ -5783,16 +5837,39 @@ zone_kadmin(int cmd, int fcn, const char *mdep, cred_t *credp)
 /*
  * Entry point so kadmin(A_SHUTDOWN, ...) can set the global zone's
  * status to ZONE_IS_SHUTTING_DOWN.
+ *
+ * This function also shuts down all running zones to ensure that they won't
+ * fork new processes.
  */
 void
 zone_shutdown_global(void)
 {
-	ASSERT(curproc->p_zone == global_zone);
+	zone_t *current_zonep;
 
+	ASSERT(INGLOBALZONE(curproc));
+	mutex_enter(&zonehash_lock);
 	mutex_enter(&zone_status_lock);
+
+	/* Modify the global zone's status first. */
 	ASSERT(zone_status_get(global_zone) == ZONE_IS_RUNNING);
 	zone_status_set(global_zone, ZONE_IS_SHUTTING_DOWN);
+
+	/*
+	 * Now change the states of all running zones to ZONE_IS_SHUTTING_DOWN.
+	 * We don't mark all zones with ZONE_IS_SHUTTING_DOWN because doing so
+	 * could cause assertions to fail (e.g., assertions about a zone's
+	 * state during initialization, readying, or booting) or produce races.
+	 * We'll let threads continue to initialize and ready new zones: they'll
+	 * fail to boot the new zones when they see that the global zone is
+	 * shutting down.
+	 */
+	for (current_zonep = list_head(&zone_active); current_zonep != NULL;
+	    current_zonep = list_next(&zone_active, current_zonep)) {
+		if (zone_status_get(current_zonep) == ZONE_IS_RUNNING)
+			zone_status_set(current_zonep, ZONE_IS_SHUTTING_DOWN);
+	}
 	mutex_exit(&zone_status_lock);
+	mutex_exit(&zonehash_lock);
 }
 
 /*

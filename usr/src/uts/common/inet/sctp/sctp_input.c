@@ -20,11 +20,9 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -1192,6 +1190,7 @@ sctp_data_chunk(sctp_t *sctp, sctp_chunk_hdr_t *ch, mblk_t *mp, mblk_t **dups,
 	boolean_t tpfinished = B_TRUE;
 	int32_t new_rwnd;
 	sctp_stack_t	*sctps = sctp->sctp_sctps;
+	int	error;
 
 	/* The following are used multiple times, so we inline them */
 #define	SCTP_ACK_IT(sctp, tsn)						\
@@ -1292,8 +1291,8 @@ sctp_data_chunk(sctp_t *sctp, sctp_chunk_hdr_t *ch, mblk_t *mp, mblk_t **dups,
 	oftsn = sctp->sctp_ftsn;
 
 	if (isfrag) {
-		int error = 0;
 
+		error = 0;
 		/* fragmented data chunk */
 		dmp->b_rptr = (uchar_t *)dc;
 		if (ubit) {
@@ -1408,13 +1407,18 @@ sctp_data_chunk(sctp_t *sctp, sctp_chunk_hdr_t *ch, mblk_t *mp, mblk_t **dups,
 	sctp->sctp_rxqueued -= dlen;
 
 	if (can_deliver) {
+
 		dmp->b_rptr = (uchar_t *)(dc + 1);
 		if (sctp_input_add_ancillary(sctp, &dmp, dc, fp, ipp) == 0) {
 			dprint(1, ("sctp_data_chunk: delivering %lu bytes\n",
 			    msgdsize(dmp)));
 			sctp->sctp_rwnd -= dlen;
+			/*
+			 * Override b_flag for SCTP sockfs internal use
+			 */
+			dmp->b_flag = tpfinished ? 0 : SCTP_PARTIAL_DATA;
 			new_rwnd = sctp->sctp_ulp_recv(sctp->sctp_ulpd, dmp,
-			    tpfinished ? 0 : SCTP_PARTIAL_DATA);
+			    msgdsize(dmp), 0, &error, NULL);
 			if (new_rwnd > sctp->sctp_rwnd) {
 				sctp->sctp_rwnd = new_rwnd;
 			}
@@ -1492,8 +1496,13 @@ sctp_data_chunk(sctp_t *sctp, sctp_chunk_hdr_t *ch, mblk_t *mp, mblk_t **dups,
 				dprint(1, ("sctp_data_chunk: delivering %lu "
 				    "bytes\n", msgdsize(dmp)));
 				sctp->sctp_rwnd -= dlen;
+				/*
+				 * Override b_flag for SCTP sockfs internal use
+				 */
+				dmp->b_flag = tpfinished ?
+				    0 : SCTP_PARTIAL_DATA;
 				new_rwnd = sctp->sctp_ulp_recv(sctp->sctp_ulpd,
-				    dmp, tpfinished ? 0 : SCTP_PARTIAL_DATA);
+				    dmp, msgdsize(dmp), 0, &error, NULL);
 				if (new_rwnd > sctp->sctp_rwnd) {
 					sctp->sctp_rwnd = new_rwnd;
 				}
@@ -1806,10 +1815,8 @@ sctp_check_abandoned_msg(sctp_t *sctp, mblk_t *meta)
 		 * Update ULP the amount of queued data, which is
 		 * sent-unack'ed + unsent.
 		 */
-		if (!SCTP_IS_DETACHED(sctp)) {
-			sctp->sctp_ulp_xmitted(sctp->sctp_ulpd,
-			    sctp->sctp_unacked + sctp->sctp_unsent);
-		}
+		if (!SCTP_IS_DETACHED(sctp))
+			SCTP_TXQ_UPDATE(sctp);
 		return (0);
 	}
 	return (-1);
@@ -1922,10 +1929,8 @@ cum_ack_done:
 		 * Update ULP the amount of queued data, which is
 		 * sent-unack'ed + unsent.
 		 */
-		if (!SCTP_IS_DETACHED(sctp)) {
-			sctp->sctp_ulp_xmitted(sctp->sctp_ulpd,
-			    sctp->sctp_unacked + sctp->sctp_unsent);
-		}
+		if (!SCTP_IS_DETACHED(sctp))
+			SCTP_TXQ_UPDATE(sctp);
 
 		/* Time to send a shutdown? */
 		if (sctp->sctp_state == SCTPS_SHUTDOWN_PENDING) {
@@ -2141,6 +2146,7 @@ sctp_process_forward_tsn(sctp_t *sctp, sctp_chunk_hdr_t *ch, sctp_faddr_t *fp,
 			}
 			if (can_deliver) {
 				int32_t	nrwnd;
+				int error;
 
 				dmp->b_rptr = (uchar_t *)(dc + 1);
 				dmp->b_next = NULL;
@@ -2149,8 +2155,15 @@ sctp_process_forward_tsn(sctp_t *sctp, sctp_chunk_hdr_t *ch, sctp_faddr_t *fp,
 				    &dmp, dc, fp, ipp) == 0) {
 					sctp->sctp_rxqueued -= dlen;
 					sctp->sctp_rwnd -= dlen;
+					/*
+					 * Override b_flag for SCTP sockfs
+					 * internal use
+					 */
+
+					dmp->b_flag = 0;
 					nrwnd = sctp->sctp_ulp_recv(
-					    sctp->sctp_ulpd, dmp, 0);
+					    sctp->sctp_ulpd, dmp, msgdsize(dmp),
+					    0, &error, NULL);
 					if (nrwnd > sctp->sctp_rwnd)
 						sctp->sctp_rwnd = nrwnd;
 				} else {
@@ -3509,6 +3522,8 @@ sctp_input_data(sctp_t *sctp, mblk_t *mp, mblk_t *ipsec_mp)
 	sctp_stack_t		*sctps = sctp->sctp_sctps;
 	ip_stack_t		*ipst = sctps->sctps_netstack->netstack_ip;
 	boolean_t		hb_already = B_FALSE;
+	cred_t			*cr;
+	pid_t			cpid;
 
 	if (DB_TYPE(mp) != M_DATA) {
 		ASSERT(DB_TYPE(mp) == M_CTL);
@@ -3866,7 +3881,8 @@ sctp_input_data(sctp_t *sctp, mblk_t *mp, mblk_t *ipsec_mp)
 				if (mlen > ntohs(ch->sch_len)) {
 					eager->sctp_cookie_mp = dupb(mp);
 					mblk_setcred(eager->sctp_cookie_mp,
-					    CONN_CRED(eager->sctp_connp));
+					    CONN_CRED(eager->sctp_connp),
+					    eager->sctp_cpid);
 					/*
 					 * If no mem, just let
 					 * the peer retransmit.
@@ -3937,6 +3953,8 @@ sctp_input_data(sctp_t *sctp, mblk_t *mp, mblk_t *ipsec_mp)
 				sctp_send_initack(sctp, sctph, ch, mp);
 				break;
 			case CHUNK_COOKIE:
+				cr = msg_getcred(mp, &cpid);
+
 				if (sctp_process_cookie(sctp, ch, mp, &iack,
 				    sctph, &recv_adaptation, NULL) == -1) {
 					BUMP_MIB(&sctps->sctps_mib,
@@ -3947,8 +3965,9 @@ sctp_input_data(sctp_t *sctp, mblk_t *mp, mblk_t *ipsec_mp)
 				sctp_stop_faddr_timers(sctp);
 				if (!SCTP_IS_DETACHED(sctp)) {
 					sctp->sctp_ulp_connected(
-					    sctp->sctp_ulpd);
+					    sctp->sctp_ulpd, 0, cr, cpid);
 					sctp_set_ulp_prop(sctp);
+
 				}
 				sctp->sctp_state = SCTPS_ESTABLISHED;
 				sctp->sctp_assoc_start_time = (uint32_t)lbolt;
@@ -3981,9 +4000,11 @@ sctp_input_data(sctp_t *sctp, mblk_t *mp, mblk_t *ipsec_mp)
 		case SCTPS_COOKIE_ECHOED:
 			switch (ch->sch_id) {
 			case CHUNK_COOKIE_ACK:
+				cr = msg_getcred(mp, &cpid);
+
 				if (!SCTP_IS_DETACHED(sctp)) {
 					sctp->sctp_ulp_connected(
-					    sctp->sctp_ulpd);
+					    sctp->sctp_ulpd, 0, cr, cpid);
 					sctp_set_ulp_prop(sctp);
 				}
 				if (sctp->sctp_unacked == 0)
@@ -4010,6 +4031,8 @@ sctp_input_data(sctp_t *sctp, mblk_t *mp, mblk_t *ipsec_mp)
 				sctp_process_abort(sctp, ch, ECONNREFUSED);
 				goto done;
 			case CHUNK_COOKIE:
+				cr = msg_getcred(mp, &cpid);
+
 				if (sctp_process_cookie(sctp, ch, mp, &iack,
 				    sctph, &recv_adaptation, NULL) == -1) {
 					BUMP_MIB(&sctps->sctps_mib,
@@ -4020,8 +4043,9 @@ sctp_input_data(sctp_t *sctp, mblk_t *mp, mblk_t *ipsec_mp)
 
 				if (!SCTP_IS_DETACHED(sctp)) {
 					sctp->sctp_ulp_connected(
-					    sctp->sctp_ulpd);
+					    sctp->sctp_ulpd, 0, cr, cpid);
 					sctp_set_ulp_prop(sctp);
+
 				}
 				if (sctp->sctp_unacked == 0)
 					sctp_stop_faddr_timers(sctp);

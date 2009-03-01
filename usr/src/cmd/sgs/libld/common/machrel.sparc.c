@@ -23,7 +23,7 @@
  *	Copyright (c) 1988 AT&T
  *	  All Rights Reserved
  *
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1082,10 +1082,11 @@ ld_do_activerelocs(Ofl_desc *ofl)
 				 */
 				if ((sdp->sd_isc->is_flags & FLG_IS_RELUPD) &&
 				    (sym = ld_am_I_partial(arsp,
-				    arsp->rel_roffset))) {
+				    arsp->rel_raddend))) {
 					/*
-					 * If the symbol is moved,
-					 * adjust the value
+					 * The symbol was moved, so adjust
+					 * the value relative to the new
+					 * section.
 					 */
 					value = _elf_getxoff(
 					    sym->sd_isc->is_indata);
@@ -1093,6 +1094,21 @@ ld_do_activerelocs(Ofl_desc *ofl)
 					    SHF_ALLOC)
 						value += sym->sd_isc->
 						    is_osdesc->os_shdr->sh_addr;
+
+					/*
+					 * The original raddend covers the
+					 * displacement from the section start
+					 * to the desired address. The value
+					 * computed above gets us from the
+					 * section start to the start of the
+					 * symbol range. Adjust the old raddend
+					 * to remove the offset from section
+					 * start to symbol start, leaving the
+					 * displacement within the range of
+					 * the symbol.
+					 */
+					arsp->rel_raddend -=
+					    sym->sd_osym->st_value;
 				} else {
 					value = _elf_getxoff(
 					    sdp->sd_isc->is_indata);
@@ -2194,6 +2210,7 @@ ld_targ_init_sparc(void)
 
 			M_SEGM_ALIGN,		/* m_segm_align */
 			M_SEGM_ORIGIN,		/* m_segm_origin */
+			M_SEGM_AORIGIN,		/* m_segm_aorigin */
 			M_DATASEG_PERM,		/* m_dataseg_perm */
 			M_WORD_ALIGN,		/* m_word_align */
 						/* m_def_interp */

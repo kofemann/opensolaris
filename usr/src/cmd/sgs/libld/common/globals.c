@@ -23,10 +23,9 @@
  *	Copyright (c) 1988 AT&T
  *	  All Rights Reserved
  *
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * Global variables
@@ -59,11 +58,6 @@ char		def64_Plibpath[] = "/lib/64:/usr/lib/64";
 char		def32_Plibpath[] = "/usr/ccs/lib:/lib:/usr/lib";
 
 /*
- * For backward compatibility provide a /dev/zero file descriptor.
- */
-int		dz_fd = -1;
-
-/*
  * Rejected file error messages (indexed to match FLG_RJC_ values).
  */
 const Msg
@@ -88,7 +82,7 @@ reject[] = {
  * (indexed by STT_ values).
  */
 const int
-ldynsym_symtype[STT_NUM] = {
+ldynsym_symtype[] = {
 		0,			/* STT_NOTYPE (not counting 1st slot) */
 		0,			/* STT_OBJECT */
 		1,			/* STT_FUNC */
@@ -96,6 +90,15 @@ ldynsym_symtype[STT_NUM] = {
 		1,			/* STT_FILE */
 		0,			/* STT_COMMON */
 		0,			/* STT_TLS */
+		0,			/* 7 */
+		0,			/* 8 */
+		0,			/* 9 */
+		0,			/* 10 */
+		0,			/* 11 */
+		0,			/* 12 */
+		0,			/* STT_SPARC_REGISTER */
+		0,			/* 14 */
+		0,			/* 15 */
 };
 #if STT_NUM != (STT_TLS + 1)
 #error "STT_NUM has grown. Update ldynsym_symtype[]."
@@ -106,7 +109,7 @@ ldynsym_symtype[STT_NUM] = {
  * (indexed by STT_ values).
  */
 const int
-dynsymsort_symtype[STT_NUM] = {
+dynsymsort_symtype[] = {
 		0,			/* STT_NOTYPE */
 		1,			/* STT_OBJECT */
 		1,			/* STT_FUNC */
@@ -114,6 +117,15 @@ dynsymsort_symtype[STT_NUM] = {
 		0,			/* STT_FILE */
 		1,			/* STT_COMMON */
 		0,			/* STT_TLS */
+		0,			/* 7 */
+		0,			/* 8 */
+		0,			/* 9 */
+		0,			/* 10 */
+		0,			/* 11 */
+		0,			/* 12 */
+		0,			/* STT_SPARC_REGISTER */
+		0,			/* 14 */
+		0,			/* 15 */
 };
 #if STT_NUM != (STT_TLS + 1)
 #error "STT_NUM has grown. Update dynsymsort_symtype[]."

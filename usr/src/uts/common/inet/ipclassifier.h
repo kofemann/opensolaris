@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -37,6 +37,9 @@ extern "C" {
 #include <inet/ip6.h>
 #include <netinet/in.h>		/* for IPPROTO_* constants */
 #include <sys/sdt.h>
+#include <sys/socket_proto.h>
+#include <sys/sunddi.h>
+#include <sys/sunldi.h>
 
 typedef void (*edesc_spf)(void *, mblk_t *, void *, int);
 typedef void (*edesc_rpf)(void *, mblk_t *, void *);
@@ -80,6 +83,8 @@ typedef void (*edesc_rpf)(void *, mblk_t *, void *);
 #define	IPCL_RTSCONN		0x00000020	/* From rts_conn_cache */
 #define	IPCL_ISV6		0x00000040	/* AF_INET6 */
 #define	IPCL_IPTUN		0x00000080	/* Has "tun" plumbed above it */
+#define	IPCL_NONSTR		0x00001000	/* A non-STREAMS socket */
+#define	IPCL_IN_SQUEUE		0x10000000	/* Waiting squeue to finish */
 
 /* Conn Masks */
 #define	IPCL_TCP		(IPCL_TCP4|IPCL_TCP6)
@@ -130,11 +135,12 @@ typedef void (*edesc_rpf)(void *, mblk_t *, void *);
 #define	IPCL_IS_RTS(connp)						\
 	((connp)->conn_flags & IPCL_RTSCONN)
 
-/* FIXME: Isn't it sufficient to check IPCL_IPTUN? */
 #define	IPCL_IS_IPTUN(connp)						\
 	(((connp)->conn_ulp == IPPROTO_ENCAP ||				\
 	(connp)->conn_ulp == IPPROTO_IPV6) &&				\
 	((connp)->conn_flags & IPCL_IPTUN))
+
+#define	IPCL_IS_NONSTR(connp)	((connp)->conn_flags & IPCL_NONSTR)
 
 typedef struct connf_s connf_t;
 
@@ -144,6 +150,21 @@ typedef struct
 #define	CONN_STACK_DEPTH	15
 	pc_t	ctb_stack[CONN_STACK_DEPTH];
 } conn_trace_t;
+
+typedef struct ip_helper_minor_info_s {
+	dev_t	ip_minfo_dev;		/* Device */
+	vmem_t	*ip_minfo_arena;	/* Arena */
+} ip_helper_minfo_t;
+
+/*
+ * ip helper stream info
+ */
+typedef struct ip_helper_stream_info_s {
+	ldi_handle_t		iphs_handle;
+	queue_t 		*iphs_rq;
+	queue_t 		*iphs_wq;
+	ip_helper_minfo_t	*iphs_minfo;
+} ip_helper_stream_info_t;
 
 /*
  * The initial fields in the conn_t are setup by the kmem_cache constructor,
@@ -224,10 +245,10 @@ struct conn_s {
 
 	unsigned int
 		conn_lso_ok : 1;		/* LSO is usable */
+	boolean_t conn_direct_blocked;		/* conn is flow-controlled */
 
 	squeue_t	*conn_initial_sqp;	/* Squeue at open time */
 	squeue_t	*conn_final_sqp;	/* Squeue after connect */
-	ill_t		*conn_nofailover_ill;	/* Failover ill */
 	ill_t		*conn_dhcpinit_ill;	/* IP_DHCPINIT_IF */
 	ipsec_latch_t	*conn_latch;		/* latched state */
 	ill_t		*conn_outgoing_ill;	/* IP{,V6}_BOUND_IF */
@@ -236,6 +257,7 @@ struct conn_s {
 	queue_t		*conn_wq;		/* Write queue */
 	dev_t		conn_dev;		/* Minor number */
 	vmem_t		*conn_minor_arena;	/* Minor arena */
+	ip_helper_stream_info_t *conn_helper_info;
 
 	cred_t		*conn_cred;		/* Credentials */
 	connf_t		*conn_g_fanout;		/* Global Hash bucket head */
@@ -272,7 +294,6 @@ struct conn_s {
 
 	uint_t		conn_proto;		/* SO_PROTOTYPE state */
 	ill_t		*conn_incoming_ill;	/* IP{,V6}_BOUND_IF */
-	ill_t		*conn_outgoing_pill;	/* IP{,V6}_BOUND_PIF */
 	ill_t		*conn_oper_pending_ill; /* pending shared ioctl */
 
 	ilg_t	*conn_ilg;		/* Group memberships */
@@ -284,9 +305,6 @@ struct conn_s {
 
 	struct ipif_s	*conn_multicast_ipif;	/* IP_MULTICAST_IF */
 	ill_t		*conn_multicast_ill;	/* IPV6_MULTICAST_IF */
-	int		conn_orig_bound_ifindex; /* BOUND_IF before MOVE */
-	int		conn_orig_multicast_ifindex;
-						/* IPv6 MC IF before MOVE */
 	struct	conn_s	*conn_drain_next;	/* Next conn in drain list */
 	struct	conn_s	*conn_drain_prev;	/* Prev conn in drain list */
 	idl_t		*conn_idl;		/* Ptr to the drain list head */
@@ -298,7 +316,12 @@ struct conn_s {
 	in6_addr_t	conn_nexthop_v6;	/* nexthop IP address */
 	uchar_t		conn_broadcast_ttl; 	/* IP_BROADCAST_TTL */
 #define	conn_nexthop_v4	V4_PART_OF_V6(conn_nexthop_v6)
-	cred_t		*conn_peercred;		/* Peer credentials, if any */
+	cred_t		*conn_peercred;		/* Peer TX label, if any */
+	int		conn_rtaware; 		/* RT_AWARE sockopt value */
+	kcondvar_t	conn_sq_cv;		/* For non-STREAMS socket IO */
+	kthread_t	*conn_sq_caller;	/* Caller of squeue sync ops */
+	sock_upcalls_t	*conn_upcalls;		/* Upcalls to sockfs */
+	sock_upper_handle_t conn_upper_handle;	/* Upper handle: sonode * */
 
 	unsigned int
 		conn_ulp_labeled : 1,		/* ULP label is synced */
@@ -308,6 +331,8 @@ struct conn_s {
 		conn_anon_port : 1,		/* user bound anonymously */
 		conn_mac_exempt : 1,		/* unlabeled with loose MAC */
 		conn_spare : 26;
+
+	boolean_t	conn_flow_cntrld;
 	netstack_t	*conn_netstack;	/* Corresponds to a netstack_hold */
 #ifdef CONN_DEBUG
 #define	CONN_TRACE_MAX	10
@@ -316,10 +341,17 @@ struct conn_s {
 #endif
 };
 
+/*
+ * These two macros are used by TX. First priority is SCM_UCRED having
+ * set the label in the mblk. Second priority is the peers label (aka
+ * conn_peercred). Last priority is the open credentials.
+ * BEST_CRED takes all three into account in the above order.
+ * CONN_CRED is for connection-oriented cases when we don't need to look
+ * at the mblk.
+ */
 #define	CONN_CRED(connp) ((connp)->conn_peercred == NULL ? \
 	(connp)->conn_cred : (connp)->conn_peercred)
-#define	BEST_CRED(mp, connp) ((DB_CRED(mp) != NULL &&	\
-	crgetlabel(DB_CRED(mp)) != NULL) ? DB_CRED(mp) : CONN_CRED(connp))
+#define	BEST_CRED(mp, connp) ip_best_cred(mp, connp)
 
 /*
  * connf_t - connection fanout data.
@@ -582,6 +614,14 @@ conn_t *ipcl_conn_tcp_lookup_reversed_ipv4(conn_t *, ipha_t *, tcph_t *,
 	    ip_stack_t *);
 conn_t *ipcl_conn_tcp_lookup_reversed_ipv6(conn_t *, ip6_t *, tcph_t *,
 	    ip_stack_t *);
+
+extern int ip_create_helper_stream(conn_t *connp, ldi_ident_t li);
+extern void ip_free_helper_stream(conn_t *connp);
+
+extern int ip_get_options(conn_t *, int, int, void *, t_uscalar_t *, cred_t *);
+extern int ip_set_options(conn_t *, int, int, const void *, t_uscalar_t,
+    cred_t *);
+
 #ifdef	__cplusplus
 }
 #endif

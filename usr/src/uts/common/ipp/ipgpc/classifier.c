@@ -20,15 +20,14 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/kmem.h>
 #include <sys/systm.h>
 #include <sys/socket.h>
+#include <sys/strsubr.h>
 #include <sys/strsun.h>
 #include <netinet/in.h>
 #include <ipp/ipgpc/classifier.h>
@@ -78,7 +77,6 @@ common_classify(ipgpc_packet_t *packet, ht_match_t *fid_table,
     uint16_t *slctrs_srchd)
 {
 	int match_status;
-	int if_grpnm_hv;
 
 	/* Find on packet direction */
 	match_status =
@@ -93,19 +91,6 @@ common_classify(ipgpc_packet_t *packet, ht_match_t *fid_table,
 	    ipgpc_findfilters(IPGPC_TABLE_IF, packet->if_index, fid_table);
 	if (CHECK_MATCH_STATUS(match_status, slctrs_srchd,
 	    ipgpc_table_list[IF_IDX].info.mask) != NORMAL_MATCH) {
-		return (match_status);
-	}
-
-	/* Find on IF_GRPNM of packet */
-	if (packet->if_groupname_len > 0) {
-		if_grpnm_hv = name_hash(packet->if_groupname, TABLE_SIZE);
-	} else {
-		if_grpnm_hv = IPGPC_WILDCARD;
-	}
-	match_status =
-	    ipgpc_findfilters(IPGPC_TABLE_IF_GRPNM, if_grpnm_hv, fid_table);
-	if (CHECK_MATCH_STATUS(match_status, slctrs_srchd,
-	    ipgpc_table_list[IF_GRPNM_IDX].info.mask) != NORMAL_MATCH) {
 		return (match_status);
 	}
 
@@ -149,9 +134,8 @@ common_classify(ipgpc_packet_t *packet, ht_match_t *fid_table,
 
 	/* Find on IP Source Port field */
 	if (packet->sport > 0) {
-		match_status =
-		    ipgpc_findfilters(IPGPC_TRIE_SPORTID, packet->sport,
-			fid_table);
+		match_status = ipgpc_findfilters(IPGPC_TRIE_SPORTID,
+		    packet->sport, fid_table);
 		if (CHECK_MATCH_STATUS(match_status, slctrs_srchd,
 		    ipgpc_trie_list[IPGPC_TRIE_SPORTID].info.mask)
 		    != NORMAL_MATCH) {
@@ -164,9 +148,8 @@ common_classify(ipgpc_packet_t *packet, ht_match_t *fid_table,
 
 	/* Find on IP Destination Port field */
 	if (packet->dport > 0) {
-		match_status =
-		    ipgpc_findfilters(IPGPC_TRIE_DPORTID, packet->dport,
-			fid_table);
+		match_status = ipgpc_findfilters(IPGPC_TRIE_DPORTID,
+		    packet->dport, fid_table);
 		if (CHECK_MATCH_STATUS(match_status, slctrs_srchd,
 		    ipgpc_trie_list[IPGPC_TRIE_DPORTID].info.mask)
 		    != NORMAL_MATCH) {
@@ -261,12 +244,11 @@ ipgpc_classify(int af, ipgpc_packet_t *packet)
 
 	match_status = 0;
 	slctrs_srchd = ALL_MATCH_MASK;
-
 	bzero(fid_table, sizeof (ht_match_t) * HASH_SIZE);
 
 	/* first search all address family independent selectors */
-	if ((rc = common_classify(packet, fid_table, &slctrs_srchd)) !=
-		NORMAL_MATCH) {
+	rc = common_classify(packet, fid_table, &slctrs_srchd);
+	if (rc != NORMAL_MATCH) {
 		/* free all dynamic allocated memory */
 		FREE_FID_TABLE(fid_table, p, q, i);
 		if (rc == NO_MATCHES) {
@@ -453,7 +435,7 @@ bestmatch(ht_match_t *fid_table, uint16_t bestmask)
 			 */
 			real_prio =
 			    ((uint64_t)ipgpc_fid_list[key].filter.priority
-				<< 32) |
+			    << 32) |
 			    (uint64_t)~ipgpc_fid_list[key].filter.precedence;
 
 			/* check to see if this is the new bestmatch */
@@ -607,10 +589,8 @@ find_ids(ipgpc_packet_t *packet, mblk_t *mp)
 {
 	cred_t *cr;
 
-	while (DB_CRED(mp) == NULL && mp->b_cont != NULL)
-		mp = mp->b_cont;
-
-	if ((cr = DB_CRED(mp)) != NULL) {
+	cr = msg_getcred(mp, NULL);
+	if (cr != NULL) {
 		packet->uid = crgetuid(cr);
 		packet->projid = crgetprojid(cr);
 	} else {
@@ -689,35 +669,32 @@ parse_packet6(ipgpc_packet_t *packet, mblk_t *mp)
 void
 print_packet(int af, ipgpc_packet_t *pkt)
 {
+	char saddrbuf[INET6_ADDRSTRLEN];
+	char daddrbuf[INET6_ADDRSTRLEN];
+
 	if (af == AF_INET) {
-		char saddrbuf[INET_ADDRSTRLEN];
-		char daddrbuf[INET_ADDRSTRLEN];
+		(void) inet_ntop(af, &V4_PART_OF_V6(pkt->saddr), saddrbuf,
+		    sizeof (saddrbuf));
+		(void) inet_ntop(af, &V4_PART_OF_V6(pkt->daddr), daddrbuf,
+		    sizeof (daddrbuf));
+
 		ipgpc4dbg(("print_packet: saddr = %s, daddr = %s, sport = %u" \
 		    ", dport = %u, proto = %u, dsfield = %x, uid = %d," \
-		    " if_index = %d, if_groupname = %s, projid = %d, " \
-		    "direction = %d",
-		    inet_ntop(af, &V4_PART_OF_V6(pkt->saddr), saddrbuf,
-			sizeof (saddrbuf)),
-		    inet_ntop(af, &V4_PART_OF_V6(pkt->daddr), daddrbuf,
-			sizeof (daddrbuf)),
-		    ntohs(pkt->sport), ntohs(pkt->dport), pkt->proto,
+		    " if_index = %d, projid = %d, direction = %d", saddrbuf,
+		    daddrbuf, ntohs(pkt->sport), ntohs(pkt->dport), pkt->proto,
 		    pkt->dsfield, pkt->uid, pkt->if_index,
-		    (pkt->if_groupname != NULL) ? pkt->if_groupname : "NULL",
 		    pkt->projid, pkt->direction));
 	} else if (af == AF_INET6) {
-		char saddrbuf[INET6_ADDRSTRLEN];
-		char daddrbuf[INET6_ADDRSTRLEN];
+		(void) inet_ntop(af, pkt->saddr.s6_addr32, saddrbuf,
+		    sizeof (saddrbuf));
+		(void) inet_ntop(af, pkt->daddr.s6_addr32, daddrbuf,
+		    sizeof (daddrbuf));
+
 		ipgpc4dbg(("print_packet: saddr = %s, daddr = %s, sport = %u" \
 		    ", dport = %u, proto = %u, dsfield = %x, uid = %d," \
-		    " if_index = %d, if_groupname = %s, projid = %d, " \
-		    "direction = %d",
-		    inet_ntop(af, pkt->saddr.s6_addr32, saddrbuf,
-			sizeof (saddrbuf)),
-		    inet_ntop(af, pkt->daddr.s6_addr32, daddrbuf,
-			sizeof (daddrbuf)),
-		    ntohs(pkt->sport), ntohs(pkt->dport), pkt->proto,
+		    " if_index = %d, projid = %d, direction = %d", saddrbuf,
+		    daddrbuf, ntohs(pkt->sport), ntohs(pkt->dport), pkt->proto,
 		    pkt->dsfield, pkt->uid, pkt->if_index,
-		    (pkt->if_groupname != NULL) ? pkt->if_groupname : "NULL",
 		    pkt->projid, pkt->direction));
 	}
 }

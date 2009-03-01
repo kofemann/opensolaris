@@ -20,7 +20,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
@@ -216,6 +216,7 @@ DRV_KMODS	+= cryptoadm
 DRV_KMODS	+= dda
 DRV_KMODS	+= devinfo
 DRV_KMODS	+= dld
+DRV_KMODS	+= dlpistub
 DRV_KMODS	+= dmd
 DRV_KMODS_32	+= dnet
 DRV_KMODS	+= dserv
@@ -232,6 +233,7 @@ DRV_KMODS	+= i915
 DRV_KMODS	+= icmp
 DRV_KMODS	+= icmp6
 DRV_KMODS	+= intel_nb5000
+DRV_KMODS	+= intel_nhm
 DRV_KMODS	+= ip
 DRV_KMODS	+= ip6
 DRV_KMODS	+= ipf
@@ -321,7 +323,6 @@ DRV_KMODS	+= udp6
 DRV_KMODS	+= ucode
 DRV_KMODS	+= ural
 DRV_KMODS	+= vgatext
-DRV_KMODS	+= vni
 DRV_KMODS	+= vnic
 DRV_KMODS	+= vscan
 DRV_KMODS	+= wc
@@ -329,6 +330,7 @@ DRV_KMODS	+= winlock
 DRV_KMODS	+= wpi
 DRV_KMODS	+= xge
 DRV_KMODS	+= zcons
+DRV_KMODS	+= zyd
 DRV_KMODS	+= stmf
 DRV_KMODS	+= stmf_sbd
 DRV_KMODS	+= fct
@@ -357,6 +359,7 @@ $(CLOSED_BUILD)CLOSED_DRV_KMODS_32	+= ncrs
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= pcn
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= rtls
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= atiatom
+$(CLOSED_BUILD)CLOSED_DRV_KMODS		+= acpi_toshiba
 
 #
 # Common code drivers
@@ -385,6 +388,7 @@ DRV_KMODS	+= profile
 DRV_KMODS	+= sdt
 DRV_KMODS	+= systrace
 DRV_KMODS	+= fasttrap
+DRV_KMODS	+= dcpc
 
 #
 #	I/O framework test drivers
@@ -476,7 +480,7 @@ STRMOD_KMODS	+= ldlinux
 #
 #	Exec Class Modules (/kernel/exec):
 #
-EXEC_KMODS	+= elfexec intpexec javaexec
+EXEC_KMODS	+= elfexec intpexec shbinexec javaexec
 
 #
 #	Scheduling Class Modules (/kernel/sched):
@@ -566,6 +570,7 @@ MISC_KMODS	+= kcf
 MISC_KMODS	+= kgssapi
 MISC_KMODS	+= kmech_dummy
 MISC_KMODS	+= kmech_krb5
+MISC_KMODS	+= ksocket
 MISC_KMODS	+= mac
 MISC_KMODS	+= mixer
 MISC_KMODS	+= net80211
@@ -596,6 +601,7 @@ MISC_KMODS	+= scsi_vhci_f_asym_sun
 MISC_KMODS	+= scsi_vhci_f_tape
 MISC_KMODS	+= scsi_vhci_f_tpgs_tape
 MISC_KMODS	+= fctl
+MISC_KMODS	+= emlxs_fw
 MISC_KMODS	+= qlc_fw_2200 qlc_fw_2300 qlc_fw_2400 qlc_fw_2500 qlc_fw_6322
 
 $(CLOSED_BUILD)CLOSED_MISC_KMODS	+= amsrc1
@@ -684,6 +690,12 @@ MAC_KMODS	+= mac_ib
 # 'Devname' Modules (kernel/devname)
 #
 DEVNAME_KMODS	+= sdev_nsconfig_mod
+
+#
+# socketmod (kernel/socketmod)
+#
+SOCKET_KMODS	+= socksctp
+SOCKET_KMODS    += socksdp
 
 #
 #	kiconv modules (/kernel/kiconv):

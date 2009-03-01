@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -640,7 +640,7 @@ ld_do_activerelocs(Ofl_desc *ofl)
 			}
 
 			/*
-			 * We deteremine what the 'got reference'
+			 * We determine what the 'got reference'
 			 * model (if required) is at this point.  This
 			 * needs to be done before tls_fixup() since
 			 * it may 'transition' our instructions.
@@ -690,23 +690,33 @@ ld_do_activerelocs(Ofl_desc *ofl)
 				/*
 				 * The value for a symbol pointing to a SECTION
 				 * is based off of that sections position.
-				 *
-				 * The second argument of the ld_am_I_partial()
-				 * is the value stored at the target address
-				 * relocation is going to be applied.
 				 */
 				if ((sdp->sd_isc->is_flags & FLG_IS_RELUPD) &&
 				    /* LINTED */
-				    (sym = ld_am_I_partial(arsp, *(Xword *)
-				    ((uchar_t *)
-				    arsp->rel_isdesc->is_indata->d_buf +
-				    arsp->rel_roffset)))) {
+				    (sym = ld_am_I_partial(arsp,
+				    arsp->rel_raddend))) {
 					/*
-					 * If the symbol is moved,
-					 * adjust the value
+					 * The symbol was moved, so adjust
+					 * the value relative to the new
+					 * section.
 					 */
 					value = sym->sd_sym->st_value;
 					moved = 1;
+
+					/*
+					 * The original raddend covers the
+					 * displacement from the section start
+					 * to the desired address. The value
+					 * computed above gets us from the
+					 * section start to the start of the
+					 * symbol range. Adjust the old raddend
+					 * to remove the offset from section
+					 * start to symbol start, leaving the
+					 * displacement within the range of
+					 * the symbol.
+					 */
+					arsp->rel_raddend -=
+					    sym->sd_osym->st_value;
 				} else {
 					value = _elf_getxoff(
 					    sdp->sd_isc->is_indata);
@@ -1553,6 +1563,7 @@ ld_targ_init_x86(void)
 
 			M_SEGM_ALIGN,		/* m_segm_align */
 			M_SEGM_ORIGIN,		/* m_segm_origin */
+			M_SEGM_AORIGIN,		/* m_segm_aorigin */
 			M_DATASEG_PERM,		/* m_dataseg_perm */
 			M_WORD_ALIGN,		/* m_word_align */
 			MSG_ORIG(MSG_PTH_RTLD_AMD64), /* m_def_interp */

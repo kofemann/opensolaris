@@ -95,6 +95,7 @@ usr/src/lib/libresolv/THIRDPARTYLICENSE
 usr/src/lib/libresolv2/THIRDPARTYLICENSE
 usr/src/lib/libsasl/THIRDPARTYLICENSE
 usr/src/lib/libshell/THIRDPARTYLICENSE
+usr/src/lib/libsum/THIRDPARTYLICENSE
 usr/src/lib/libtecla/THIRDPARTYLICENSE
 usr/src/lib/libwrap/THIRDPARTYLICENSE
 usr/src/lib/mpapi/libmpapi/THIRDPARTYLICENSE
@@ -151,6 +152,7 @@ usr/src/uts/common/io/sfe/THIRDPARTYLICENSE
 usr/src/uts/common/io/ural/THIRDPARTYLICENSE
 usr/src/uts/common/io/wpi/THIRDPARTYLICENSE
 usr/src/uts/common/io/wpi/fw-wpi/LICENSE
+usr/src/uts/common/io/zyd/THIRDPARTYLICENSE
 usr/src/uts/common/sys/THIRDPARTYLICENSE.agpgart
 usr/src/uts/common/sys/THIRDPARTYLICENSE.icu
 usr/src/uts/common/sys/THIRDPARTYLICENSE.unicode

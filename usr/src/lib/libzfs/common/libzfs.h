@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -178,6 +178,7 @@ extern const char *libzfs_error_action(libzfs_handle_t *);
 extern const char *libzfs_error_description(libzfs_handle_t *);
 extern void libzfs_mnttab_init(libzfs_handle_t *);
 extern void libzfs_mnttab_fini(libzfs_handle_t *);
+extern void libzfs_mnttab_cache(libzfs_handle_t *, boolean_t);
 extern int libzfs_mnttab_find(libzfs_handle_t *, const char *,
     struct mnttab *);
 extern void libzfs_mnttab_add(libzfs_handle_t *, const char *,
@@ -264,9 +265,15 @@ typedef enum {
 	ZPOOL_STATUS_HOSTID_MISMATCH,	/* last accessed by another system */
 	ZPOOL_STATUS_IO_FAILURE_WAIT,	/* failed I/O, failmode 'wait' */
 	ZPOOL_STATUS_IO_FAILURE_CONTINUE, /* failed I/O, failmode 'continue' */
+	ZPOOL_STATUS_BAD_LOG,		/* cannot read log chain(s) */
+
+	/*
+	 * These faults have no corresponding message ID.  At the time we are
+	 * checking the status, the original reason for the FMA fault (I/O or
+	 * checksum errors) has been lost.
+	 */
 	ZPOOL_STATUS_FAULTED_DEV_R,	/* faulted device with replicas */
 	ZPOOL_STATUS_FAULTED_DEV_NR,	/* faulted device with no replicas */
-	ZPOOL_STATUS_BAD_LOG,		/* cannot read log chain(s) */
 
 	/*
 	 * The following are not faults per se, but still an error possibly
@@ -378,6 +385,7 @@ typedef struct zprop_list {
 } zprop_list_t;
 
 extern int zfs_expand_proplist(zfs_handle_t *, zprop_list_t **);
+extern void zfs_prune_proplist(zfs_handle_t *, uint8_t *);
 
 #define	ZFS_MOUNTPOINT_NONE	"none"
 #define	ZFS_MOUNTPOINT_LEGACY	"legacy"
@@ -467,6 +475,9 @@ typedef struct recvflags {
 
 	/* byteswap flag is used internally; callers need not specify */
 	int byteswap : 1;
+
+	/* do not mount file systems as they are extracted (private) */
+	int nomount : 1;
 } recvflags_t;
 
 extern int zfs_receive(libzfs_handle_t *, const char *, recvflags_t,
@@ -528,7 +539,7 @@ extern boolean_t zfs_is_shared_iscsi(zfs_handle_t *);
 extern int zfs_share_iscsi(zfs_handle_t *);
 extern int zfs_unshare_iscsi(zfs_handle_t *);
 extern int zfs_iscsi_perm_check(libzfs_handle_t *, char *, ucred_t *);
-extern int zfs_deleg_share_nfs(libzfs_handle_t *, char *, char *,
+extern int zfs_deleg_share_nfs(libzfs_handle_t *, char *, char *, char *,
     void *, void *, int, zfs_share_op_t);
 
 /*
@@ -565,6 +576,15 @@ extern int zpool_remove_zvol_links(zpool_handle_t *);
 
 /* is this zvol valid for use as a dump device? */
 extern int zvol_check_dump_config(char *);
+
+/*
+ * Management interfaces for SMB ACL files
+ */
+
+int zfs_smb_acl_add(libzfs_handle_t *, char *, char *, char *);
+int zfs_smb_acl_remove(libzfs_handle_t *, char *, char *, char *);
+int zfs_smb_acl_purge(libzfs_handle_t *, char *, char *);
+int zfs_smb_acl_rename(libzfs_handle_t *, char *, char *, char *, char *);
 
 /*
  * Enable and disable datasets within a pool by mounting/unmounting and

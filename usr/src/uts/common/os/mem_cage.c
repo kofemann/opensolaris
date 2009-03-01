@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/param.h>
@@ -588,8 +586,15 @@ kcage_glist_alloc(void)
 
 	if ((new = kcage_glist_freelist) != NULL) {
 		kcage_glist_freelist = new->next;
-	} else {
+	} else if (kernel_cage_enable) {
 		new = vmem_alloc(kcage_arena, sizeof (*new), VM_NOSLEEP);
+	} else {
+		/*
+		 * On DR supported platforms we allow memory add
+		 * even when kernel cage is disabled. "kcage_arena" is
+		 * created only when kernel cage is enabled.
+		 */
+		new = kmem_zalloc(sizeof (*new), KM_NOSLEEP);
 	}
 
 	if (new != NULL)
@@ -1662,7 +1667,8 @@ kcage_invalidate_page(page_t *pp, pgcnt_t *nfreedp)
 		return (EAGAIN);
 	}
 
-	page_destroy(pp, 0);
+	/* LINTED: constant in conditional context */
+	VN_DISPOSE(pp, B_INVAL, 0, kcred);
 	KCAGE_STAT_INCR_SCAN(kip_destroy);
 	*nfreedp = 1;
 	return (0);
@@ -1835,7 +1841,7 @@ again:
 				continue;
 			}
 
-			/* On pass 2, page_destroy if mod bit is not set */
+			/* On pass 2, VN_DISPOSE if mod bit is not set */
 			if (pass <= 2) {
 				if (pp->p_szc != 0 || (prm & P_MOD) ||
 				    pp->p_lckcnt || pp->p_cowcnt) {
@@ -1860,7 +1866,9 @@ again:
 					}
 
 					KCAGE_STAT_INCR_SCAN(kt_destroy);
-					page_destroy(pp, 0);
+					/* constant in conditional context */
+					/* LINTED */
+					VN_DISPOSE(pp, B_INVAL, 0, kcred);
 					did_something = 1;
 				}
 				continue;

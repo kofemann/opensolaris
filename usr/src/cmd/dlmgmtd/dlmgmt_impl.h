@@ -24,8 +24,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
  * Functions to maintain a table of datalink configuration information.
  */
@@ -50,6 +48,7 @@ typedef struct dlmgmt_linkattr_s {
 	void				*lp_val;
 	dladm_datatype_t		lp_type;
 	uint_t				lp_sz;
+	boolean_t			lp_linkprop;
 } dlmgmt_linkattr_t;
 
 /*
@@ -83,6 +82,7 @@ typedef struct dlmgmt_dlconf_s {
 
 extern boolean_t	debug;
 extern const char	*progname;
+extern dladm_handle_t	dld_handle;
 
 extern avl_tree_t	dlmgmt_name_avl;
 extern avl_tree_t	dlmgmt_id_avl;
@@ -95,6 +95,8 @@ int		linkattr_set(dlmgmt_linkattr_t **, const char *, void *,
 		    size_t, dladm_datatype_t);
 int		linkattr_get(dlmgmt_linkattr_t **, const char *, void **,
 		    size_t *, dladm_datatype_t *);
+int		linkprop_getnext(dlmgmt_linkattr_t **, const char *,
+		    char **, void **, size_t *, dladm_datatype_t *);
 
 void		link_destroy(dlmgmt_link_t *);
 dlmgmt_link_t	*link_by_id(datalink_id_t);

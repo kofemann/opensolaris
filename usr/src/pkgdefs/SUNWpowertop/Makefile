@@ -25,13 +25,11 @@
 
 include ../Makefile.com
 
-DATAFILES += depend
-
 LICENSEFILES = $(GPLV2)
 
 .KEEP_STATE:
 
-all: $(FILES)
+all: $(FILES) depend
 install: all pkg
 
 include ../Makefile.targ

@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * PX nexus interrupt handling:
@@ -457,139 +455,6 @@ px_get_my_childs_dip(dev_info_t *dip, dev_info_t *rdip)
 	return (cdip);
 }
 
-/* Default class to pil value mapping */
-px_class_val_t px_default_pil [] = {
-	{0x000000, 0xff0000, 0x1},	/* Class code for pre-2.0 devices */
-	{0x010000, 0xff0000, 0x4},	/* Mass Storage Controller */
-	{0x020000, 0xff0000, 0x6},	/* Network Controller */
-	{0x030000, 0xff0000, 0x9},	/* Display Controller */
-	{0x040000, 0xff0000, 0x8},	/* Multimedia Controller */
-	{0x050000, 0xff0000, 0x9},	/* Memory Controller */
-	{0x060000, 0xff0000, 0x9},	/* Bridge Controller */
-	{0x0c0000, 0xffff00, 0x9},	/* Serial Bus, FireWire (IEEE 1394) */
-	{0x0c0100, 0xffff00, 0x4},	/* Serial Bus, ACCESS.bus */
-	{0x0c0200, 0xffff00, 0x4},	/* Serial Bus, SSA */
-	{0x0c0300, 0xffff00, 0x9},	/* Serial Bus Universal Serial Bus */
-	{0x0c0400, 0xffff00, 0x6},	/* Serial Bus, Fibre Channel */
-	{0x0c0600, 0xffff00, 0x6}	/* Serial Bus, Infiniband */
-};
-
-/*
- * Default class to intr_weight value mapping (% of CPU).  A driver.conf
- * entry on or above the pci node like
- *
- *	pci-class-intr-weights= 0x020000, 0xff0000, 30;
- *
- * can be used to augment or override entries in the default table below.
- *
- * NB: The values below give NICs preference on redistribution, and provide
- * NICs some isolation from other interrupt sources. We need better interfaces
- * that allow the NIC driver to identify a specific NIC instance as high
- * bandwidth, and thus deserving of separation from other low bandwidth
- * NICs additional isolation from other interrupt sources.
- *
- * NB: We treat Infiniband like a NIC.
- */
-px_class_val_t px_default_intr_weight [] = {
-	{0x020000, 0xff0000, 35},	/* Network Controller */
-	{0x010000, 0xff0000, 10},	/* Mass Storage Controller */
-	{0x0c0400, 0xffff00, 10},	/* Serial Bus, Fibre Channel */
-	{0x0c0600, 0xffff00, 50}	/* Serial Bus, Infiniband */
-};
-
-static uint32_t
-px_match_class_val(uint32_t key, px_class_val_t *rec_p, int nrec,
-    uint32_t default_val)
-{
-	int	i;
-
-	for (i = 0; i < nrec; rec_p++, i++) {
-		if ((rec_p->class_code & rec_p->class_mask) ==
-		    (key & rec_p->class_mask))
-			return (rec_p->class_val);
-	}
-
-	return (default_val);
-}
-
-/*
- * px_class_to_val
- *
- * Return the configuration value, based on class code and sub class code,
- * from the specified property based or default px_class_val_t table.
- */
-uint32_t
-px_class_to_val(dev_info_t *rdip, char *property_name, px_class_val_t *rec_p,
-    int nrec, uint32_t default_val)
-{
-	int property_len;
-	uint32_t class_code;
-	px_class_val_t *conf;
-	uint32_t val = default_val;
-
-	/*
-	 * Use the "class-code" property to get the base and sub class
-	 * codes for the requesting device.
-	 */
-	class_code = (uint32_t)ddi_prop_get_int(DDI_DEV_T_ANY, rdip,
-	    DDI_PROP_DONTPASS, "class-code", -1);
-
-	if (class_code == -1)
-		return (val);
-
-	/* look up the val from the default table */
-	val = px_match_class_val(class_code, rec_p, nrec, val);
-
-	/* see if there is a more specific property specified value */
-	if (ddi_getlongprop(DDI_DEV_T_ANY, rdip, DDI_PROP_NOTPROM,
-	    property_name, (caddr_t)&conf, &property_len))
-		return (val);
-
-	if ((property_len % sizeof (px_class_val_t)) == 0)
-		val = px_match_class_val(class_code, conf,
-		    property_len / sizeof (px_class_val_t), val);
-	kmem_free(conf, property_len);
-	return (val);
-}
-
-/* px_class_to_pil: return the pil for a given device. */
-uint32_t
-px_class_to_pil(dev_info_t *rdip)
-{
-	uint32_t pil;
-
-	/* Default pil is 1 */
-	pil = px_class_to_val(rdip,
-	    "pci-class-priorities", px_default_pil,
-	    sizeof (px_default_pil) / sizeof (px_class_val_t), 1);
-
-	/* Range check the result */
-	if (pil >= 0xf)
-		pil = 1;
-
-	return (pil);
-}
-
-/* px_class_to_intr_weight: return the intr_weight for a given device. */
-static int32_t
-px_class_to_intr_weight(dev_info_t *rdip)
-{
-	int32_t intr_weight;
-
-	/* default weight is 0% */
-	intr_weight = px_class_to_val(rdip,
-	    "pci-class-intr-weights", px_default_intr_weight,
-	    sizeof (px_default_intr_weight) / sizeof (px_class_val_t), 0);
-
-	/* range check the result */
-	if (intr_weight < 0)
-		intr_weight = 0;
-	if (intr_weight > 1000)
-		intr_weight = 1000;
-
-	return (intr_weight);
-}
-
 /* ARGSUSED */
 int
 px_intx_ops(dev_info_t *dip, dev_info_t *rdip, ddi_intr_op_t intr_op,
@@ -616,7 +481,7 @@ px_intx_ops(dev_info_t *dip, dev_info_t *rdip, ddi_intr_op_t intr_op,
 		break;
 	case DDI_INTROP_GETPRI:
 		*(int *)result = hdlp->ih_pri ?
-		    hdlp->ih_pri : px_class_to_pil(rdip);
+		    hdlp->ih_pri : pci_class_to_pil(rdip);
 		break;
 	case DDI_INTROP_SETPRI:
 		break;
@@ -697,8 +562,9 @@ px_msix_ops(dev_info_t *dip, dev_info_t *rdip, ddi_intr_op_t intr_op,
 		 * We need to restrict this allocation in future
 		 * based on Resource Management policies.
 		 */
-		if ((ret = px_msi_alloc(px_p, rdip, hdlp->ih_inum,
-		    hdlp->ih_scratch1, (uintptr_t)hdlp->ih_scratch2, &msi_num,
+		if ((ret = px_msi_alloc(px_p, rdip, hdlp->ih_type,
+		    hdlp->ih_inum, hdlp->ih_scratch1,
+		    (uintptr_t)hdlp->ih_scratch2,
 		    (int *)result)) != DDI_SUCCESS) {
 			DBG(DBG_INTROPS, dip, "px_msix_ops: allocation "
 			    "failed, rdip 0x%p type 0x%d inum 0x%x "
@@ -729,7 +595,6 @@ px_msix_ops(dev_info_t *dip, dev_info_t *rdip, ddi_intr_op_t intr_op,
 
 		break;
 	case DDI_INTROP_FREE:
-		(void) pci_msi_disable_mode(rdip, hdlp->ih_type, NULL);
 		(void) pci_msi_unconfigure(rdip, hdlp->ih_type, hdlp->ih_inum);
 
 		if (hdlp->ih_type == DDI_INTR_TYPE_MSI)
@@ -749,7 +614,7 @@ msi_free:
 		break;
 	case DDI_INTROP_GETPRI:
 		*(int *)result = hdlp->ih_pri ?
-		    hdlp->ih_pri : px_class_to_pil(rdip);
+		    hdlp->ih_pri : pci_class_to_pil(rdip);
 		break;
 	case DDI_INTROP_SETPRI:
 		break;
@@ -847,6 +712,10 @@ msi_free:
 	case DDI_INTROP_DISABLE:
 		msi_num = hdlp->ih_vector;
 
+		if ((ret = pci_msi_disable_mode(rdip, hdlp->ih_type,
+		    hdlp->ih_cap & DDI_INTR_FLAG_BLOCK)) != DDI_SUCCESS)
+			return (ret);
+
 		if ((ret = pci_msi_set_mask(rdip, hdlp->ih_type,
 		    hdlp->ih_inum)) != DDI_SUCCESS)
 			return (ret);
@@ -936,6 +805,14 @@ msi_free:
 	case DDI_INTROP_NAVAIL:
 		/* XXX - a new interface may be needed */
 		ret = pci_msi_get_nintrs(rdip, hdlp->ih_type, (int *)result);
+		break;
+	case DDI_INTROP_GETPOOL:
+		if (msi_state_p->msi_pool_p == NULL) {
+			*(ddi_irm_pool_t **)result = NULL;
+			return (DDI_ENOTSUP);
+		}
+		*(ddi_irm_pool_t **)result = msi_state_p->msi_pool_p;
+		ret = DDI_SUCCESS;
 		break;
 	default:
 		ret = DDI_ENOTSUP;
@@ -1117,7 +994,7 @@ px_add_intx_intr(dev_info_t *dip, dev_info_t *rdip,
 	}
 
 	if (hdlp->ih_pri == 0)
-		hdlp->ih_pri = px_class_to_pil(rdip);
+		hdlp->ih_pri = pci_class_to_pil(rdip);
 
 	ipil_p = px_ib_new_ino_pil(ib_p, ino, hdlp->ih_pri, ih_p);
 	ino_p = ipil_p->ipil_ino_p;
@@ -1156,7 +1033,7 @@ px_add_intx_intr(dev_info_t *dip, dev_info_t *rdip,
 
 ino_done:
 	/* Add weight to the cpu that we are already targeting */
-	weight = px_class_to_intr_weight(rdip);
+	weight = pci_class_to_intr_weight(rdip);
 	intr_dist_cpuid_add_device_weight(ino_p->ino_cpuid, rdip, weight);
 
 	ih_p->ih_ipil_p = ipil_p;
@@ -1305,7 +1182,7 @@ px_add_msiq_intr(dev_info_t *dip, dev_info_t *rdip,
 	}
 
 	if (hdlp->ih_pri == 0)
-		hdlp->ih_pri = px_class_to_pil(rdip);
+		hdlp->ih_pri = pci_class_to_pil(rdip);
 
 	ipil_p = px_ib_new_ino_pil(ib_p, ino, hdlp->ih_pri, ih_p);
 	ino_p = ipil_p->ipil_ino_p;
@@ -1351,7 +1228,7 @@ px_add_msiq_intr(dev_info_t *dip, dev_info_t *rdip,
 
 ino_done:
 	/* Add weight to the cpu that we are already targeting */
-	weight = px_class_to_intr_weight(rdip);
+	weight = pci_class_to_intr_weight(rdip);
 	intr_dist_cpuid_add_device_weight(ino_p->ino_cpuid, rdip, weight);
 
 	ih_p->ih_ipil_p = ipil_p;

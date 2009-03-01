@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -43,6 +43,7 @@ extern "C" {
 #include <sys/thread.h>
 #include <sys/obpdefs.h>
 #include <sys/systm.h>
+#include <sys/hwconf.h>
 
 struct devnames {
 	char		*dn_name;	/* Name of this driver */
@@ -109,6 +110,7 @@ struct devnames {
 #define	DDI_DBG_RTR_TRACE	0x4000	/* Trace Retire messages */
 #define	LDI_EV_DEBUG		0x8000  /* LDI events debug messages */
 #define	LDI_EV_TRACE		0x10000 /* LDI events trace messages */
+#define	DDI_INTR_IRM		0x20000 /* interrupt resource management */
 
 extern int ddidebug;
 
@@ -128,6 +130,7 @@ extern int ddidebug;
 #define	RIO_TRACE(args)		if (ddidebug & DDI_DBG_RTR_TRACE) cmn_err args
 #define	LDI_EVDBG(args)		if (ddidebug & LDI_EV_DEBUG) cmn_err args
 #define	LDI_EVTRC(args)		if (ddidebug & LDI_EV_TRACE) cmn_err args
+#define	DDI_INTR_IRMDBG(args)	if (ddidebug & DDI_INTR_IRM) cmn_err args
 #else
 #define	NDI_CONFIG_DEBUG(args)
 #define	BMDPRINTF(args)
@@ -144,6 +147,7 @@ extern int ddidebug;
 #define	RIO_TRACE(args)		if (ddidebug & DDI_DBG_RTR_TRACE) cmn_err args
 #define	LDI_EVDBG(args)		if (ddidebug & LDI_EV_DEBUG) cmn_err args
 #define	LDI_EVTRC(args)		if (ddidebug & LDI_EV_TRACE) cmn_err args
+#define	DDI_INTR_IRMDBG(args)
 #endif
 
 
@@ -231,9 +235,9 @@ extern krwlock_t devinfo_tree_lock;		/* obsolete */
 extern void impl_rem_dev_props(dev_info_t *);
 extern void add_class(char *, char *);
 
-struct bind;
 extern int make_mbind(char *, int, char *, struct bind **);
 extern void delete_mbind(char *, struct bind **);
+extern void purge_mbind(int, struct bind **);
 
 extern void configure(void);
 #if defined(__sparc)

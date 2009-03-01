@@ -1773,7 +1773,7 @@ zfs_do_list(int argc, char **argv)
 	boolean_t scripted = B_FALSE;
 	static char default_fields[] =
 	    "name,used,available,referenced,mountpoint";
-	int types = ZFS_TYPE_FILESYSTEM | ZFS_TYPE_VOLUME | ZFS_TYPE_PNFS;
+	int types = ZFS_TYPE_DATASET;
 	boolean_t types_specified = B_FALSE;
 	char *fields = NULL;
 	list_cbdata_t cb = { 0 };
@@ -2469,13 +2469,16 @@ zfs_do_receive(int argc, char **argv)
 
 	bzero(&flags, sizeof (recvflags_t));
 	/* check options */
-	while ((c = getopt(argc, argv, ":dnvF")) != -1) {
+	while ((c = getopt(argc, argv, ":dnuvF")) != -1) {
 		switch (c) {
 		case 'd':
 			flags.isprefix = B_TRUE;
 			break;
 		case 'n':
 			flags.dryrun = B_TRUE;
+			break;
+		case 'u':
+			flags.nomount = B_TRUE;
 			break;
 		case 'v':
 			flags.verbose = B_TRUE;
@@ -4223,6 +4226,7 @@ main(int argc, char **argv)
 		/*
 		 * Run the appropriate command.
 		 */
+		libzfs_mnttab_cache(g_zfs, B_TRUE);
 		if (find_command_idx(cmdname, &i) == 0) {
 			current_command = &command_table[i];
 			ret = command_table[i].func(argc - 1, argv + 1);
@@ -4235,6 +4239,7 @@ main(int argc, char **argv)
 			    "command '%s'\n"), cmdname);
 			usage(B_FALSE);
 		}
+		libzfs_mnttab_cache(g_zfs, B_FALSE);
 	}
 
 	(void) fclose(mnttab_file);

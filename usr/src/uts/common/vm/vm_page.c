@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -3447,6 +3447,7 @@ page_hashin(page_t *pp, vnode_t *vp, u_offset_t offset, kmutex_t *hold)
 	int		rc;
 
 	ASSERT(MUTEX_NOT_HELD(page_vnode_mutex(vp)));
+	ASSERT(pp->p_fsdata == 0 || panicstr);
 
 	TRACE_3(TR_FAC_VM, TR_PAGE_HASHIN,
 	    "page_hashin:pp %p vp %p offset %llx",
@@ -3515,6 +3516,7 @@ page_do_hashout(page_t *pp)
 	PP_CLRSWAP(pp);
 	pp->p_vnode = NULL;
 	pp->p_offset = (u_offset_t)-1;
+	pp->p_fsdata = 0;
 }
 
 /*
@@ -4375,7 +4377,7 @@ top:
 		/*
 		 * skip pages that are already locked or can't be "exclusively"
 		 * locked or are already free.  After we lock the page, check
-		 * the free and age bits again to be sure it's not destroied
+		 * the free and age bits again to be sure it's not destroyed
 		 * yet.
 		 * To achieve max. parallelization, we use page_trylock instead
 		 * of page_lock so that we don't get block on individual pages
@@ -4438,7 +4440,8 @@ top:
 			    kcred, NULL);
 			VN_RELE(vp);
 		} else {
-			page_destroy(pp, 0);
+			/*LINTED: constant in conditional context*/
+			VN_DISPOSE(pp, B_INVAL, 0, kcred);
 		}
 	} while ((pp = page_next(pp)) != page0);
 	if (nbusypages && retry++ < MAXRETRIES) {
@@ -4571,6 +4574,9 @@ page_relocate_hash(page_t *pp_new, page_t *pp_old)
 
 	page_do_relocate_hash(pp_new, pp_old);
 
+	/* The following comment preserved from page_flip(). */
+	pp_new->p_fsdata = pp_old->p_fsdata;
+	pp_old->p_fsdata = 0;
 	mutex_exit(vphm);
 	mutex_exit(phm);
 
@@ -4584,9 +4590,6 @@ page_relocate_hash(page_t *pp_new, page_t *pp_old)
 	pp_new->p_cowcnt = pp_old->p_cowcnt;
 	pp_old->p_lckcnt = pp_old->p_cowcnt = 0;
 
-	/* The following comment preserved from page_flip(). */
-	/* XXX - Do we need to protect fsdata? */
-	pp_new->p_fsdata = pp_old->p_fsdata;
 }
 
 /*
@@ -7104,11 +7107,12 @@ page_retire_mdboot()
 			bp = page_capture_hash[i].lists[j].next;
 			while (bp != &page_capture_hash[i].lists[j]) {
 				pp = bp->pp;
-				if (!PP_ISKAS(pp) && PP_TOXIC(pp)) {
-					pp->p_selock = -1;  /* pacify ASSERTs */
-					PP_CLRFREE(pp);
-					pagescrub(pp, 0, PAGESIZE);
-					pp->p_selock = 0;
+				if (PP_TOXIC(pp)) {
+					if (page_trylock(pp, SE_EXCL)) {
+						PP_CLRFREE(pp);
+						pagescrub(pp, 0, PAGESIZE);
+						page_unlock(pp);
+					}
 				}
 				bp = bp->next;
 			}

@@ -19,12 +19,13 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 /*
- * Performance Counter Back-End for Intel Family 6 Models 15 and 23
+ * Performance Counter Back-End for Intel processors supporting Architectural
+ * Performance Monitoring.
  */
 
 #include <sys/cpuvar.h>
@@ -160,7 +161,7 @@ pcbe_ops_t core_pcbe_ops = {
 	core_pcbe_free			/* pcbe_free */
 };
 
-struct nametable_fam6mod15_23 {
+struct nametable_core_uarch {
 	const char	*name;
 	uint64_t	restricted_bits;
 	uint8_t		event_num;
@@ -176,9 +177,9 @@ struct nametable_fam6mod15_23 {
 
 /*
  * The events listed in the following table can be counted on all
- * general-purpose counters on processors that are of Family 6 Models 15 or 23
+ * general-purpose counters on processors that are of Penryn and Merom Family
  */
-static const struct nametable_fam6mod15_23 cmn_gpc_events_f6m15_23[] = {
+static const struct nametable_core_uarch cmn_gpc_events_core_uarch[] = {
 	/* Alphabetical order of event name */
 
 	{ "baclears",			0x0,	0xe6 },
@@ -336,7 +337,7 @@ static const struct nametable_fam6mod15_23 cmn_gpc_events_f6m15_23[] = {
  * check in configure_gpc() to find whether an event hard-coded as a number by
  * the user has any privilege requirements
  */
-static const struct nametable_fam6mod15_23 pic0_events[] = {
+static const struct nametable_core_uarch pic0_events[] = {
 	/* Alphabetical order of event name */
 
 	{ "cycles_div_busy",		0x0,	0x14 },
@@ -348,7 +349,7 @@ static const struct nametable_fam6mod15_23 pic0_events[] = {
 	{ "",				0x0,	NT_END }
 };
 
-static const struct nametable_fam6mod15_23 pic1_events[] = {
+static const struct nametable_core_uarch pic1_events[] = {
 	/* Alphabetical order of event name */
 
 	{ "delayed_bypass",	0x0,	0x19 },
@@ -376,7 +377,7 @@ char *ffc_names_htt[] = {
 
 char **ffc_names = NULL;
 
-static char	**gpc_names;
+static char	**gpc_names = NULL;
 static uint32_t	versionid;
 static uint64_t	num_gpc;
 static uint64_t	width_gpc;
@@ -742,11 +743,126 @@ static uint64_t known_ffc_num;
 { 0xCC, 0x02, C0|C1|C2|C3, "fp_mmx_trans.to_mmx" },			\
 { 0xC3, 0x04, C0|C1|C2|C3, "machine_clears.smc" }
 
-
-#define	EVENTS_FAM6_MOD37						\
-{ 0xB0, 0x08, C0|C1|C2|C3, "offcore_requests.any.read" },		\
-{ 0xB0, 0x01, C0|C1|C2|C3, "offcore_requests.demand.read_data" },	\
-{ 0xB0, 0x04, C0|C1|C2|C3, "offcore_requests.demand.rfo" }
+#define	EVENTS_FAM6_MOD28						\
+	{ 0x2,  0x81, C0|C1, "store_forwards.good" },                   \
+	{ 0x6,  0x0,  C0|C1, "segment_reg_loads.any" },                 \
+	{ 0x7,  0x1,  C0|C1, "prefetch.prefetcht0" },                   \
+	{ 0x7,  0x6,  C0|C1, "prefetch.sw_l2" },                        \
+	{ 0x7,  0x8,  C0|C1, "prefetch.prefetchnta" },                  \
+	{ 0x8,  0x7,  C0|C1, "data_tlb_misses.dtlb_miss" },             \
+	{ 0x8,  0x5,  C0|C1, "data_tlb_misses.dtlb_miss_ld" },          \
+	{ 0x8,  0x9,  C0|C1, "data_tlb_misses.l0_dtlb_miss_ld" },	\
+	{ 0x8,  0x6,  C0|C1, "data_tlb_misses.dtlb_miss_st" },          \
+	{ 0xC,  0x3,  C0|C1, "page_walks.cycles" },                     \
+	{ 0x10, 0x1,  C0|C1, "x87_comp_ops_exe.any.s" },                \
+	{ 0x10, 0x81, C0|C1, "x87_comp_ops_exe.any.ar" },               \
+	{ 0x11, 0x1,  C0|C1, "fp_assist" },                             \
+	{ 0x11, 0x81, C0|C1, "fp_assist.ar" },                          \
+	{ 0x12, 0x1,  C0|C1, "mul.s" },                                 \
+	{ 0x12, 0x81, C0|C1, "mul.ar" },                                \
+	{ 0x13, 0x1,  C0|C1, "div.s" },                                 \
+	{ 0x13, 0x81, C0|C1, "div.ar" },                                \
+	{ 0x14, 0x1,  C0|C1, "cycles_div_busy" },                       \
+	{ 0x21, 0x0,  C0|C1, "l2_ads" },                      		\
+	{ 0x22, 0x0,  C0|C1, "l2_dbus_busy" },                		\
+	{ 0x24, 0x0,  C0|C1, "l2_lines_in" },   			\
+	{ 0x25, 0x0,  C0|C1, "l2_m_lines_in" },               		\
+	{ 0x26, 0x0,  C0|C1, "l2_lines_out" },  			\
+	{ 0x27, 0x0,  C0|C1, "l2_m_lines_out" },			\
+	{ 0x28, 0x0,  C0|C1, "l2_ifetch" },  				\
+	{ 0x29, 0x0,  C0|C1, "l2_ld" },					\
+	{ 0x2A, 0x0,  C0|C1, "l2_st" },      				\
+	{ 0x2B, 0x0,  C0|C1, "l2_lock" },    				\
+	{ 0x2E, 0x0,  C0|C1, "l2_rqsts" },             			\
+	{ 0x2E, 0x41, C0|C1, "l2_rqsts.self.demand.i_state" },		\
+	{ 0x2E, 0x4F, C0|C1, "l2_rqsts.self.demand.mesi" },		\
+	{ 0x30, 0x0,  C0|C1, "l2_reject_bus_q" },			\
+	{ 0x32, 0x0,  C0|C1, "l2_no_req" },                   		\
+	{ 0x3A, 0x0,  C0|C1, "eist_trans" },                            \
+	{ 0x3B, 0xC0, C0|C1, "thermal_trip" },                          \
+	{ 0x3C, 0x0,  C0|C1, "cpu_clk_unhalted.core_p" },               \
+	{ 0x3C, 0x1,  C0|C1, "cpu_clk_unhalted.bus" },                  \
+	{ 0x3C, 0x2,  C0|C1, "cpu_clk_unhalted.no_other" },             \
+	{ 0x40, 0x21, C0|C1, "l1d_cache.ld" },                          \
+	{ 0x40, 0x22, C0|C1, "l1d_cache.st" },                          \
+	{ 0x60, 0x0,  C0|C1, "bus_request_outstanding" },		\
+	{ 0x61, 0x0,  C0|C1, "bus_bnr_drv" },                		\
+	{ 0x62, 0x0,  C0|C1, "bus_drdy_clocks" },            		\
+	{ 0x63, 0x0,  C0|C1, "bus_lock_clocks" },  			\
+	{ 0x64, 0x0,  C0|C1, "bus_data_rcv" },                		\
+	{ 0x65, 0x0,  C0|C1, "bus_trans_brd" },    			\
+	{ 0x66, 0x0,  C0|C1, "bus_trans_rfo" },    			\
+	{ 0x67, 0x0,  C0|C1, "bus_trans_wb" },     			\
+	{ 0x68, 0x0,  C0|C1, "bus_trans_ifetch" }, 			\
+	{ 0x69, 0x0,  C0|C1, "bus_trans_inval" },  			\
+	{ 0x6A, 0x0,  C0|C1, "bus_trans_pwr" },				\
+	{ 0x6B, 0x0,  C0|C1, "bus_trans_p" },      			\
+	{ 0x6C, 0x0,  C0|C1, "bus_trans_io" },     			\
+	{ 0x6D, 0x0,  C0|C1, "bus_trans_def" },    			\
+	{ 0x6E, 0x0,  C0|C1, "bus_trans_burst" },  			\
+	{ 0x6F, 0x0,  C0|C1, "bus_trans_mem" },    			\
+	{ 0x70, 0x0,  C0|C1, "bus_trans_any" },    			\
+	{ 0x77, 0x0,  C0|C1, "ext_snoop" },     			\
+	{ 0x7A, 0x0,  C0|C1, "bus_hit_drv" },                		\
+	{ 0x7B, 0x0,  C0|C1, "bus_hitm_drv" },               		\
+	{ 0x7D, 0x0,  C0|C1, "busq_empty" },                  		\
+	{ 0x7E, 0x0,  C0|C1, "snoop_stall_drv" },  			\
+	{ 0x7F, 0x0,  C0|C1, "bus_io_wait" },				\
+	{ 0x80, 0x3,  C0|C1, "icache.accesses" },                       \
+	{ 0x80, 0x2,  C0|C1, "icache.misses" },                         \
+	{ 0x82, 0x4,  C0|C1, "itlb.flush" },                            \
+	{ 0x82, 0x2,  C0|C1, "itlb.misses" },                           \
+	{ 0xAA, 0x2,  C0|C1, "macro_insts.cisc_decoded" },              \
+	{ 0xAA, 0x3,  C0|C1, "macro_insts.all_decoded" },               \
+	{ 0xB0, 0x0,  C0|C1, "simd_uops_exec.s" },                      \
+	{ 0xB0, 0x80, C0|C1, "simd_uops_exec.ar" },                     \
+	{ 0xB1, 0x0,  C0|C1, "simd_sat_uop_exec.s" },                   \
+	{ 0xB1, 0x80, C0|C1, "simd_sat_uop_exec.ar" },                  \
+	{ 0xB3, 0x1,  C0|C1, "simd_uop_type_exec.mul.s" },              \
+	{ 0xB3, 0x81, C0|C1, "simd_uop_type_exec.mul.ar" },             \
+	{ 0xB3, 0x02, C0|C1, "simd_uop_type_exec.shift.s" },            \
+	{ 0xB3, 0x82, C0|C1, "simd_uop_type_exec.shift.ar" },           \
+	{ 0xB3, 0x04, C0|C1, "simd_uop_type_exec.pack.s" },             \
+	{ 0xB3, 0x84, C0|C1, "simd_uop_type_exec.pack.ar" },            \
+	{ 0xB3, 0x08, C0|C1, "simd_uop_type_exec.unpack.s" },           \
+	{ 0xB3, 0x88, C0|C1, "simd_uop_type_exec.unpack.ar" },          \
+	{ 0xB3, 0x10, C0|C1, "simd_uop_type_exec.logical.s" },          \
+	{ 0xB3, 0x90, C0|C1, "simd_uop_type_exec.logical.ar" },         \
+	{ 0xB3, 0x20, C0|C1, "simd_uop_type_exec.arithmetic.s" },       \
+	{ 0xB3, 0xA0, C0|C1, "simd_uop_type_exec.arithmetic.ar" },      \
+	{ 0xC2, 0x10, C0|C1, "uops_retired.any" },                      \
+	{ 0xC3, 0x1,  C0|C1, "machine_clears.smc" },                    \
+	{ 0xC4, 0x0,  C0|C1, "br_inst_retired.any" },                   \
+	{ 0xC4, 0x1,  C0|C1, "br_inst_retired.pred_not_taken" },        \
+	{ 0xC4, 0x2,  C0|C1, "br_inst_retired.mispred_not_taken" },     \
+	{ 0xC4, 0x4,  C0|C1, "br_inst_retired.pred_taken" },            \
+	{ 0xC4, 0x8,  C0|C1, "br_inst_retired.mispred_taken" },         \
+	{ 0xC4, 0xA,  C0|C1, "br_inst_retired.mispred" },               \
+	{ 0xC4, 0xC,  C0|C1, "br_inst_retired.taken" },                 \
+	{ 0xC4, 0xF,  C0|C1, "br_inst_retired.any1" },                  \
+	{ 0xC6, 0x1,  C0|C1, "cycles_int_masked.cycles_int_masked" },   \
+	{ 0xC6, 0x2,  C0|C1,						\
+		"cycles_int_masked.cycles_int_pending_and_masked" },	\
+	{ 0xC7, 0x1,  C0|C1, "simd_inst_retired.packed_single" },       \
+	{ 0xC7, 0x2,  C0|C1, "simd_inst_retired.scalar_single" },      	\
+	{ 0xC7, 0x4,  C0|C1, "simd_inst_retired.packed_double" },       \
+	{ 0xC7, 0x8,  C0|C1, "simd_inst_retired.scalar_double" },       \
+	{ 0xC7, 0x10, C0|C1, "simd_inst_retired.vector" },              \
+	{ 0xC7, 0x1F, C0|C1, "simd_inst_retired.any" },                 \
+	{ 0xC8, 0x00, C0|C1, "hw_int_rcv" },                            \
+	{ 0xCA, 0x1,  C0|C1, "simd_comp_inst_retired.packed_single" },  \
+	{ 0xCA, 0x2,  C0|C1, "simd_comp_inst_retired.scalar_single" }, 	\
+	{ 0xCA, 0x4,  C0|C1, "simd_comp_inst_retired.packed_double" },  \
+	{ 0xCA, 0x8,  C0|C1, "simd_comp_inst_retired.scalar_double" },  \
+	{ 0xCB, 0x1,  C0|C1, "mem_load_retired.l2_hit" },               \
+	{ 0xCB, 0x2,  C0|C1, "mem_load_retired.l2_miss" },              \
+	{ 0xCB, 0x4,  C0|C1, "mem_load_retired.dtlb_miss" },           	\
+	{ 0xCD, 0x0,  C0|C1, "simd_assist" },                           \
+	{ 0xCE, 0x0,  C0|C1, "simd_instr_retired" },                    \
+	{ 0xCF, 0x0,  C0|C1, "simd_sat_instr_retired" },                \
+	{ 0xE0, 0x1,  C0|C1, "br_inst_decoded" },                       \
+	{ 0xE4, 0x1,  C0|C1, "bogus_br" },                             	\
+	{ 0xE6, 0x1,  C0|C1, "baclears.any" }
 
 static const struct events_table_t *events_table = NULL;
 
@@ -755,21 +871,20 @@ const struct events_table_t events_fam6_mod26[] = {
 	{ NT_END, 0, 0, "" }
 };
 
-const struct events_table_t events_fam6_mod37[] = {
-	EVENTS_FAM6_MOD26,
-	EVENTS_FAM6_MOD37,
+const struct events_table_t events_fam6_mod28[] = {
+	EVENTS_FAM6_MOD28,
 	{ NT_END, 0, 0, "" }
 };
 
 /*
  * Initialize string containing list of supported general-purpose counter
- * events for processors of Family 6 Models 15 and 23
+ * events for processors of Penryn and Merom Family
  */
 static void
-pcbe_init_fam6_model15_23()
+pcbe_init_core_uarch()
 {
-	const struct nametable_fam6mod15_23	*n;
-	const struct nametable_fam6mod15_23	*picspecific_events;
+	const struct nametable_core_uarch	*n;
+	const struct nametable_core_uarch	*picspecific_events;
 	size_t			common_size;
 	size_t			size;
 	uint64_t		i;
@@ -778,7 +893,7 @@ pcbe_init_fam6_model15_23()
 
 	/* Calculate space needed to save all the common event names */
 	common_size = 0;
-	for (n = cmn_gpc_events_f6m15_23; n->event_num != NT_END; n++) {
+	for (n = cmn_gpc_events_core_uarch; n->event_num != NT_END; n++) {
 		common_size += strlen(n->name) + 1;
 	}
 
@@ -815,7 +930,7 @@ pcbe_init_fam6_model15_23()
 				(void) strcat(gpc_names[i], ",");
 			}
 		}
-		for (n = cmn_gpc_events_f6m15_23; n->event_num != NT_END;
+		for (n = cmn_gpc_events_core_uarch; n->event_num != NT_END;
 		    n++) {
 			(void) strcat(gpc_names[i], n->name);
 			(void) strcat(gpc_names[i], ",");
@@ -856,6 +971,8 @@ core_pcbe_init(void)
 	versionid = cp.cp_eax & 0xFF;
 
 	/*
+	 * Fixed-Function Counters (FFC)
+	 *
 	 * All Family 6 Model 15 and Model 23 processors have fixed-function
 	 * counters.  These counters were made Architectural with
 	 * Family 6 Model 15 Stepping 9.
@@ -925,7 +1042,11 @@ core_pcbe_init(void)
 	}
 
 	mask_ffc = BITMASK_XBITS(width_ffc);
+	control_ffc = BITMASK_XBITS(num_ffc);
 
+	/*
+	 * General Purpose Counters (GPC)
+	 */
 	num_gpc = (cp.cp_eax >> 8) & 0xFF;
 	width_gpc = (cp.cp_eax >> 16) & 0xFF;
 
@@ -934,23 +1055,23 @@ core_pcbe_init(void)
 
 	mask_gpc = BITMASK_XBITS(width_gpc);
 
-	total_pmc = num_gpc + num_ffc;
-
 	control_gpc = BITMASK_XBITS(num_gpc);
-	control_ffc = BITMASK_XBITS(num_ffc);
 
 	control_mask = (control_ffc << 32) | control_gpc;
 
+	total_pmc = num_gpc + num_ffc;
 	if (total_pmc > 64) {
 		/* Too wide for the overflow bitmap */
 		return (-1);
 	}
 
+	/* GPC events for Family 6 Models 15 & 23 only */
 	if ((cpuid_getfamily(CPU) == 6) &&
-	    ((cpuid_getmodel(CPU) == 15) || (cpuid_getmodel(CPU) == 23))) {
+	    ((cpuid_getmodel(CPU) == 15) || (cpuid_getmodel(CPU) == 23) ||
+	    (cpuid_getmodel(CPU) == 29))) {
 		(void) snprintf(core_impl_name, IMPL_NAME_LEN,
 		    "Core Microarchitecture");
-		pcbe_init_fam6_model15_23();
+		pcbe_init_core_uarch();
 		return (0);
 	}
 
@@ -958,6 +1079,9 @@ core_pcbe_init(void)
 	    "Intel Arch PerfMon v%d on Family %d Model %d",
 	    versionid, cpuid_getfamily(CPU), cpuid_getmodel(CPU));
 
+	/*
+	 * Architectural events
+	 */
 	arch_events_vector_length = (cp.cp_eax >> 24) & 0xFF;
 
 	ASSERT(known_arch_events == arch_events_vector_length);
@@ -975,9 +1099,9 @@ core_pcbe_init(void)
 	arch_events_vector = cp.cp_ebx &
 	    BITMASK_XBITS(arch_events_vector_length);
 
-	/* General-purpose Counters (GPC) */
-	gpc_names = NULL;
-
+	/*
+	 * Process architectural and non-architectural events using GPC
+	 */
 	if (num_gpc > 0) {
 
 		gpc_names = kmem_alloc(num_gpc * sizeof (char *), KM_SLEEP);
@@ -991,15 +1115,19 @@ core_pcbe_init(void)
 			}
 		}
 
+		/* Non-architectural events list */
 		if (cpuid_getmodel(CPU) == 26) {
 			events_table = events_fam6_mod26;
-		} else if (cpuid_getmodel(CPU) == 37) {
-			events_table = events_fam6_mod37;
+		} else if (cpuid_getmodel(CPU) == 28) {
+			events_table = events_fam6_mod28;
 		}
 
 		for (i = 0; i < num_gpc; i++) {
 
-			/* Determine length of supported event names */
+			/*
+			 * Determine length of all supported event names
+			 * (architectural + non-architectural)
+			 */
 			size = arch_events_string_length;
 			for (j = 0; events_table != NULL &&
 			    events_table[j].eventselect != NT_END;
@@ -1017,7 +1145,10 @@ core_pcbe_init(void)
 				continue;
 			}
 
-			/* Create the list */
+			/*
+			 * Create the list of all supported events
+			 * (architectural + non-architectural)
+			 */
 			for (j = 0; j < known_arch_events; j++) {
 				if (((1U << j) & arch_events_vector) == 0) {
 					(void) strcat(gpc_names[i],
@@ -1035,9 +1166,8 @@ core_pcbe_init(void)
 					(void) strcat(gpc_names[i], ",");
 				}
 			}
-			/*
-			 * Remove trailing comma.
-			 */
+
+			/* Remove trailing comma */
 			gpc_names[i][size - 1] = '\0';
 		}
 	}
@@ -1083,14 +1213,13 @@ static char *core_pcbe_list_attrs(void)
 	}
 }
 
-static const struct nametable_fam6mod15_23 *
-find_gpcevent_f6m15_23(char *name,
-    const struct nametable_fam6mod15_23 *nametable)
+static const struct nametable_core_uarch *
+find_gpcevent_core_uarch(char *name,
+    const struct nametable_core_uarch *nametable)
 {
-	const struct nametable_fam6mod15_23 *n;
-	int compare_result;
+	const struct nametable_core_uarch *n;
+	int compare_result = -1;
 
-	compare_result = -1;
 	for (n = nametable; n->event_num != NT_END; n++) {
 		compare_result = strcmp(name, n->name);
 		if (compare_result <= 0) {
@@ -1110,6 +1239,7 @@ find_gpcevent(char *name)
 {
 	int i;
 
+	/* Search architectural events */
 	for (i = 0; i < known_arch_events; i++) {
 		if (strcmp(name, arch_events_table[i].name) == 0) {
 			if (((1U << i) & arch_events_vector) == 0) {
@@ -1118,13 +1248,12 @@ find_gpcevent(char *name)
 		}
 	}
 
-	if (events_table == NULL) {
-		return (NULL);
-	}
-
-	for (i = 0; events_table[i].eventselect != NT_END; i++) {
-		if (strcmp(name, events_table[i].name) == 0) {
-			return (&events_table[i]);
+	/* Search non-architectural events */
+	if (events_table != NULL) {
+		for (i = 0; events_table[i].eventselect != NT_END; i++) {
+			if (strcmp(name, events_table[i].name) == 0) {
+				return (&events_table[i]);
+			}
 		}
 	}
 
@@ -1148,12 +1277,14 @@ core_pcbe_event_coverage(char *event)
 			    BITMASK_XBITS(num_gpc));
 		}
 	} else {
-		if (find_gpcevent_f6m15_23(event, cmn_gpc_events_f6m15_23) !=
-		    NULL) {
+		if (find_gpcevent_core_uarch(event, cmn_gpc_events_core_uarch)
+		    != NULL) {
 			bitmap |= BITMASK_XBITS(num_gpc);
-		} else if (find_gpcevent_f6m15_23(event, pic0_events) != NULL) {
+		} else if (find_gpcevent_core_uarch(event, pic0_events) !=
+		    NULL) {
 			bitmap |= 1ULL;
-		} else if (find_gpcevent_f6m15_23(event, pic1_events) != NULL) {
+		} else if (find_gpcevent_core_uarch(event, pic1_events) !=
+		    NULL) {
 			bitmap |= 1ULL << 1;
 		}
 	}
@@ -1197,7 +1328,7 @@ core_pcbe_overflow_bitmap(void)
 
 static int
 check_cpc_securitypolicy(core_pcbe_config_t *conf,
-    const struct nametable_fam6mod15_23 *n)
+    const struct nametable_core_uarch *n)
 {
 	if (conf->core_ctl & n->restricted_bits) {
 		if (secpolicy_cpc_cpu(crgetcred()) != 0) {
@@ -1212,14 +1343,13 @@ configure_gpc(uint_t picnum, char *event, uint64_t preset, uint32_t flags,
     uint_t nattrs, kcpc_attr_t *attrs, void **data)
 {
 	core_pcbe_config_t	conf;
-	const struct nametable_fam6mod15_23	*n;
-	const struct nametable_fam6mod15_23	*m;
-	const struct nametable_fam6mod15_23	*picspecific_events;
-	struct nametable_fam6mod15_23	nt_raw = { "", 0x0, 0x0 };
+	const struct nametable_core_uarch	*n;
+	const struct nametable_core_uarch	*m;
+	const struct nametable_core_uarch	*picspecific_events;
+	struct nametable_core_uarch	nt_raw = { "", 0x0, 0x0 };
 	uint_t			i;
 	long			event_num;
 	const struct events_table_t *eventcode;
-	int			umask_known;
 
 	if (((preset & BITS_EXTENDED_FROM_31) != 0) &&
 	    ((preset & BITS_EXTENDED_FROM_31) !=
@@ -1242,18 +1372,15 @@ configure_gpc(uint_t picnum, char *event, uint64_t preset, uint32_t flags,
 			conf.core_ctl = eventcode->eventselect;
 			conf.core_ctl |= eventcode->unitmask <<
 			    CORE_UMASK_SHIFT;
-			umask_known = 1;
 		} else {
 			/* Event specified as raw event code */
 			if (ddi_strtol(event, NULL, 0, &event_num) != 0) {
 				return (CPC_INVALID_EVENT);
 			}
 			conf.core_ctl = event_num & 0xFF;
-			umask_known = 0;
 		}
 	} else {
-		umask_known = 0;
-		n = find_gpcevent_f6m15_23(event, cmn_gpc_events_f6m15_23);
+		n = find_gpcevent_core_uarch(event, cmn_gpc_events_core_uarch);
 		if (n == NULL) {
 			switch (picnum) {
 				case 0:
@@ -1267,7 +1394,7 @@ configure_gpc(uint_t picnum, char *event, uint64_t preset, uint32_t flags,
 					break;
 			}
 			if (picspecific_events != NULL) {
-				n = find_gpcevent_f6m15_23(event,
+				n = find_gpcevent_core_uarch(event,
 				    picspecific_events);
 			}
 		}
@@ -1288,9 +1415,9 @@ configure_gpc(uint_t picnum, char *event, uint64_t preset, uint32_t flags,
 			 * specified has an privilege requirements.  Currently
 			 * none of the pic-specific counters have any privilege
 			 * requirements.  Hence only the table
-			 * cmn_gpc_events_f6m15_23 is searched.
+			 * cmn_gpc_events_core_uarch is searched.
 			 */
-			for (m = cmn_gpc_events_f6m15_23;
+			for (m = cmn_gpc_events_core_uarch;
 			    m->event_num != NT_END;
 			    m++) {
 				if (event_num == m->event_num) {
@@ -1317,13 +1444,14 @@ configure_gpc(uint_t picnum, char *event, uint64_t preset, uint32_t flags,
 
 	for (i = 0; i < nattrs; i++) {
 		if (strncmp(attrs[i].ka_name, "umask", 6) == 0) {
-			if (umask_known == 1) {
-				return (CPC_ATTRIBUTE_OUT_OF_RANGE);
-			}
 			if ((attrs[i].ka_val | CORE_UMASK_MASK) !=
 			    CORE_UMASK_MASK) {
 				return (CPC_ATTRIBUTE_OUT_OF_RANGE);
 			}
+			/* Clear out the default umask */
+			conf.core_ctl &= ~ (CORE_UMASK_MASK <<
+			    CORE_UMASK_SHIFT);
+			/* Use the user provided umask */
 			conf.core_ctl |= attrs[i].ka_val <<
 			    CORE_UMASK_SHIFT;
 		} else  if (strncmp(attrs[i].ka_name, "edge", 6) == 0) {

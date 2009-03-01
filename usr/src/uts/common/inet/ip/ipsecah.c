@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -151,7 +151,8 @@ static boolean_t ah_register_out(uint32_t, uint32_t, uint_t, ipsecah_stack_t *);
 static void	*ipsecah_stack_init(netstackid_t stackid, netstack_t *ns);
 static void	ipsecah_stack_fini(netstackid_t stackid, void *arg);
 
-extern void (*cl_inet_getspi)(uint8_t, uint8_t *, size_t);
+extern void (*cl_inet_getspi)(netstackid_t, uint8_t, uint8_t *, size_t,
+    void *);
 
 /* Setable in /etc/system */
 uint32_t ah_hash_size = IPSEC_DEFAULT_HASH_SIZE;
@@ -826,22 +827,32 @@ inbound_task(void *arg)
 	mblk_t *mp = (mblk_t *)arg;
 	ipsec_in_t *ii = (ipsec_in_t *)mp->b_rptr;
 	int ipsec_rc;
-	netstack_t	*ns = ii->ipsec_in_ns;
-	ipsecah_stack_t	*ahstack = ns->netstack_ipsecah;
+	netstack_t *ns;
+	ipsecah_stack_t	*ahstack;
+
+	ns = netstack_find_by_stackid(ii->ipsec_in_stackid);
+	if (ns == NULL || ns != ii->ipsec_in_ns) {
+		/* Just freemsg(). */
+		if (ns != NULL)
+			netstack_rele(ns);
+		freemsg(mp);
+		return;
+	}
+
+	ahstack = ns->netstack_ipsecah;
 
 	ah2dbg(ahstack, ("in AH inbound_task"));
 
 	ASSERT(ahstack != NULL);
 	ah = ipsec_inbound_ah_sa(mp, ns);
-	if (ah == NULL)
-		return;
-	ASSERT(ii->ipsec_in_ah_sa != NULL);
-	ipsec_rc = ii->ipsec_in_ah_sa->ipsa_input_func(mp, ah);
-	if (ipsec_rc != IPSEC_STATUS_SUCCESS)
-		return;
-	ip_fanout_proto_again(mp, NULL, NULL, NULL);
+	if (ah != NULL) {
+		ASSERT(ii->ipsec_in_ah_sa != NULL);
+		ipsec_rc = ii->ipsec_in_ah_sa->ipsa_input_func(mp, ah);
+		if (ipsec_rc == IPSEC_STATUS_SUCCESS)
+			ip_fanout_proto_again(mp, NULL, NULL, NULL);
+	}
+	netstack_rele(ns);
 }
-
 
 /*
  * Now that weak-key passed, actually ADD the security association, and
@@ -1034,10 +1045,8 @@ ah_add_sa_finish(mblk_t *mp, sadb_msg_t *samsg, keysock_in_t *ksi,
 	 * ah_inbound_* and ah_outbound_*() calls?
 	 */
 
-
 	if (rc == 0 && lpkt != NULL)
-		rc = !taskq_dispatch(ah_taskq, inbound_task,
-		    (void *) lpkt, TQ_NOSLEEP);
+		rc = !taskq_dispatch(ah_taskq, inbound_task, lpkt, TQ_NOSLEEP);
 
 	if (rc != 0) {
 		ip_drop_packet(lpkt, B_TRUE, NULL, NULL,
@@ -1231,9 +1240,8 @@ ah_update_sa(mblk_t *mp, keysock_in_t *ksi, int *diagnostic,
 		return (rcode);
 	}
 
-	HANDLE_BUF_PKT(ah_taskq,
-	    ahstack->ipsecah_netstack->netstack_ipsec, ahstack->ah_dropper,
-	    buf_pkt);
+	HANDLE_BUF_PKT(ah_taskq, ahstack->ipsecah_netstack->netstack_ipsec,
+	    ahstack->ah_dropper, buf_pkt);
 
 	return (rcode);
 }
@@ -1959,8 +1967,8 @@ ah_getspi(mblk_t *mp, keysock_in_t *ksi, ipsecah_stack_t *ahstack)
 	 * Randomly generate a proposed SPI value.
 	 */
 	if (cl_inet_getspi != NULL) {
-		cl_inet_getspi(IPPROTO_AH, (uint8_t *)&newspi,
-		    sizeof (uint32_t));
+		cl_inet_getspi(ahstack->ipsecah_netstack->netstack_stackid,
+		    IPPROTO_AH, (uint8_t *)&newspi, sizeof (uint32_t), NULL);
 	} else {
 		(void) random_get_pseudo_bytes((uint8_t *)&newspi,
 		    sizeof (uint32_t));
@@ -2899,11 +2907,11 @@ ah_submit_req_inbound(mblk_t *ipsec_mp, size_t skip_len, uint32_t ah_offset,
 	ASSERT(ii->ipsec_in_type == IPSEC_IN);
 
 	/*
-	 * In case kEF queues and calls back, keep netstackid_t for
-	 * verification that the IP instance is still around in
-	 * ah_kcf_callback().
+	 * In case kEF queues and calls back, make sure we have the
+	 * netstackid_t for verification that the IP instance is still around
+	 * in esp_kcf_callback().
 	 */
-	ii->ipsec_in_stackid = ns->netstack_stackid;
+	ASSERT(ii->ipsec_in_stackid == ns->netstack_stackid);
 
 	/* init arguments for the crypto framework */
 	AH_INIT_CRYPTO_DATA(&ii->ipsec_in_crypto_data, AH_MSGSIZE(phdr_mp),
@@ -3052,8 +3060,7 @@ ah_process_ip_options_v6(mblk_t *mp, ipsa_t *assoc, int *length_to_skip,
 			return (NULL);
 	}
 
-	if ((phdr_mp = allocb_cred(hdr_size + ah_data_sz,
-	    DB_CRED(mp))) == NULL) {
+	if ((phdr_mp = allocb_tmpl(hdr_size + ah_data_sz, mp)) == NULL) {
 		return (NULL);
 	}
 
@@ -3184,7 +3191,7 @@ ah_process_ip_options_v4(mblk_t *mp, ipsa_t *assoc, int *length_to_skip,
 		size += option_length;
 	}
 
-	if ((phdr_mp = allocb_cred(size, DB_CRED(mp))) == NULL) {
+	if ((phdr_mp = allocb_tmpl(size, mp)) == NULL) {
 		return (NULL);
 	}
 
@@ -4227,6 +4234,11 @@ ah_auth_in_done(mblk_t *ipsec_in)
 		while (--dest >= mp->b_rptr)
 			*dest = *(dest - newpos);
 	}
+	/*
+	 * The db_credp should be in mp (if needed) and never in phdr_mp
+	 */
+	ASSERT(msg_getcred(phdr_mp, NULL) == NULL);
+
 	freeb(phdr_mp);
 	ipsec_in->b_cont = mp;
 	if (assoc->ipsa_state == IPSA_STATE_IDLE) {

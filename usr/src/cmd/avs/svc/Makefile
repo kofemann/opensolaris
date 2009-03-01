@@ -18,7 +18,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
@@ -27,11 +27,7 @@ include ../../Makefile.cmd
 XML = nws_scm.xml nws_sv.xml nws_ii.xml nws_rdc.xml nws_rdcsyncd.xml
 SHFILES = $(XML)
 
-all	:=	TARGET= all
-install	:=	TARGET= install
-clean	:=	TARGET= clean
-clobber	:=	TARGET= clobber
-lint	:=	TARGET= lint
+ROOTSVCSYSFILES = $(XML:%=$(ROOTSVCSYSTEM)/%)
 
 .KEEP_STATE:
 
@@ -41,21 +37,20 @@ all:	$(SHFILES)
 
 lint:
 
-install: all $(ROOTLIBSHFILES)
+install: all $(ROOTSVCSYSFILES)
 
 clean:
 	$(RM) *.xml
 
 $(SHFILES): $(XML:%=manifest/%)
-	rm -f  $(@F)
-	cp  $(@F:%=manifest/%) .
+	$(RM) $(@F)
+	$(CP) $(@F:%=manifest/%) .
 
 OWNER = root
 GROUP = sys
 FILEMODE = 0444
 
-$(ROOTLIBSHFILES): $(SHFILES)
-	$(INS.file)  $(@F)
-FRC:
+$(ROOTSVCSYSFILES): $(SHFILES)
+
 
 include ../../Makefile.targ

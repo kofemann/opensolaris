@@ -18,7 +18,7 @@
  *
  * CDDL HEADER END
  *
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -76,6 +76,10 @@ mm_db_init(mm_db_t *db)
 	mms_trace(MMS_DEVP, "inspecting database");
 
 try_again:
+	if (mm_is_exiting()) {
+		mms_trace(MMS_ERR, "MM Exiting");
+		exit(SMF_EXIT_OK);
+	}
 	if (try >= retrys) {
 		mms_trace(MMS_ERR, "unable to initialize, retries exceed");
 		mms_trace(MMS_INFO,
@@ -288,6 +292,12 @@ mm_db_resend(mm_db_t *db, char *sql_cmd) {
 	    timeout);
 
 	while (mm_db_reconnect(db) == MM_DB_ERROR) {
+
+		if (mm_is_exiting()) {
+			mms_trace(MMS_INFO, "MM Exiting");
+			exit(SMF_EXIT_OK);
+		}
+
 		num_retry ++;
 		if (num_retry > max_retry) {
 			mms_trace(MMS_ERR,
@@ -296,7 +306,7 @@ mm_db_resend(mm_db_t *db, char *sql_cmd) {
 			    "to many times %d, MM exiting",
 			    db->mm_db_fd,
 			    max_retry);
-			exit(1);
+			exit(SMF_EXIT_ERR_FATAL);
 		}
 		mms_trace(MMS_ERR,
 		    "mm_db_resend: "
@@ -552,10 +562,8 @@ mm_db_reconnect(mm_db_t *db)
 	/* Re-read password for db */
 	db_cfg->mm_db_passwd = mms_net_cfg_read_pass_file(MMS_NET_CFG_DB_FILE);
 
-	if (db->mm_db_conn != NULL) {
-		PQreset(db->mm_db_conn);
-		db->mm_db_conn = NULL;
-	} else if (mm_db_connect(db) != MM_DB_OK) {
+	mm_db_disconnect(db);
+	if (mm_db_connect(db) != MM_DB_OK) {
 		mms_trace(MMS_DEVP, "reconnect init failed");
 		return (MM_DB_ERROR);
 	}
@@ -570,7 +578,8 @@ mm_db_reconnect(mm_db_t *db)
 boolean_t
 mm_db_connected(mm_db_t *db)
 {
-	if (db->mm_db_conn != NULL &&
+	if (db != NULL &&
+	    db->mm_db_conn != NULL &&
 	    PQstatus(db->mm_db_conn) == CONNECTION_OK) {
 		return (B_TRUE);
 	}

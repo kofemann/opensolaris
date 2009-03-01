@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -76,9 +76,9 @@ typedef struct dl_ipnetinfo {
 #define	DL_INFO_ACK		0x03	/* Information Ack */
 #define	DL_ATTACH_REQ		0x0b	/* Attach a PPA */
 #define	DL_DETACH_REQ		0x0c	/* Detach a PPA */
-#define	DL_BIND_REQ		0x01	/* Bind dlsap address */
-#define	DL_BIND_ACK		0x04	/* Dlsap address bound */
-#define	DL_UNBIND_REQ		0x02	/* Unbind dlsap address */
+#define	DL_BIND_REQ		0x01	/* Bind DLSAP address */
+#define	DL_BIND_ACK		0x04	/* DLSAP address bound */
+#define	DL_UNBIND_REQ		0x02	/* Unbind DLSAP address */
 #define	DL_OK_ACK		0x06	/* Success acknowledgment */
 #define	DL_ERROR_ACK		0x05	/* Error acknowledgment */
 #define	DL_SUBS_BIND_REQ	0x1b	/* Bind Subsequent DLSAP address */
@@ -184,7 +184,7 @@ typedef struct dl_ipnetinfo {
 #define	DL_UNBOUND		0x00	/* PPA attached */
 #define	DL_BIND_PENDING		0x01	/* Waiting ack of DL_BIND_REQ */
 #define	DL_UNBIND_PENDING	0x02	/* Waiting ack of DL_UNBIND_REQ */
-#define	DL_IDLE			0x03	/* dlsap bound, awaiting use */
+#define	DL_IDLE			0x03	/* DLSAP bound, awaiting use */
 #define	DL_UDQOS_PENDING	0x07	/* Waiting ack of DL_UDQOS_REQ */
 #define	DL_OUTCON_PENDING	0x08	/* awaiting DL_CONN_CON */
 #define	DL_INCON_PENDING	0x09	/* awaiting DL_CONN_RES */
@@ -232,7 +232,7 @@ typedef struct dl_ipnetinfo {
 #define	DL_NOXIDAUTO	0x17    /* Automatic handling of XID not supported */
 #define	DL_NOTESTAUTO	0x18	/* Automatic handling of TEST not supported */
 #define	DL_XIDAUTO	0x19	/* Automatic handling of XID response */
-#define	DL_TESTAUTO	0x1a	/* AUtomatic handling of TEST response */
+#define	DL_TESTAUTO	0x1a	/* Automatic handling of TEST response */
 #define	DL_PENDING	0x1b	/* pending outstanding connect indications */
 
 /*
@@ -266,13 +266,16 @@ typedef struct dl_ipnetinfo {
 #define	DL_OTHER	0x09	/* Any other medium not listed above */
 /*
  * Private media types.  These must be above the value 0x80000000 as
- * stated in the DLPI specification.
+ * stated in the DLPI specification.  NOTE: The SUNW_ prefix is used
+ * to denote synthetic DLPI types that are internal to the stack.
  */
 #define	DL_IPV4		0x80000001ul	/* IPv4 Tunnel Link */
 #define	DL_IPV6		0x80000002ul	/* IPv6 Tunnel Link */
 #define	SUNW_DL_VNI	0x80000003ul	/* Virtual network interface */
 #define	DL_WIFI		0x80000004ul	/* IEEE 802.11 */
 #define	DL_IPNET	0x80000005ul	/* ipnet(7D) link */
+#define	SUNW_DL_IPMP	0x80000006ul	/* IPMP stub interface */
+
 /*
  * DLPI provider service supported.
  * These must be allowed to be bitwise-OR for dl_service_mode in
@@ -378,7 +381,7 @@ typedef struct dl_ipnetinfo {
  * DLPI promiscuous mode definitions
  */
 #define	DL_PROMISC_PHYS		0x01	/* promiscuous mode at phys level */
-#define	DL_PROMISC_SAP		0x02	/* promiscous mode at sap level */
+#define	DL_PROMISC_SAP		0x02	/* promiscuous mode at sap level */
 #define	DL_PROMISC_MULTI	0x03	/* promiscuous mode for multicast */
 
 /*
@@ -788,14 +791,14 @@ typedef struct {
 	t_uscalar_t	dl_mac_type;		/* type of medium supported */
 	t_uscalar_t	dl_reserved;		/* value set to zero */
 	t_uscalar_t	dl_current_state;	/* state of DLPI interface */
-	t_scalar_t	dl_sap_length;		/* length of dlsap SAP part */
+	t_scalar_t	dl_sap_length;		/* length of DLSAP SAP part */
 	t_uscalar_t	dl_service_mode;	/* CO, CL or ACL */
 	t_uscalar_t	dl_qos_length;		/* length of qos values */
 	t_uscalar_t	dl_qos_offset;		/* offset from start of block */
 	t_uscalar_t	dl_qos_range_length;	/* available range of qos */
 	t_uscalar_t	dl_qos_range_offset;	/* offset from start of block */
 	t_uscalar_t	dl_provider_style;	/* style1 or style2 */
-	t_uscalar_t	dl_addr_offset;		/* offset of the dlsap addr */
+	t_uscalar_t	dl_addr_offset;		/* offset of the DLSAP addr */
 	t_uscalar_t	dl_version;		/* version number */
 	t_uscalar_t	dl_brdcst_addr_length;	/* length of broadcast addr */
 	t_uscalar_t	dl_brdcst_addr_offset;	/* offset from start of block */
@@ -822,7 +825,7 @@ typedef struct {
  */
 typedef struct {
 	t_uscalar_t	dl_primitive;	/* set to DL_BIND_REQ */
-	t_uscalar_t	dl_sap;		/* info to identify dlsap addr */
+	t_uscalar_t	dl_sap;		/* info to identify DLSAP addr */
 	t_uscalar_t	dl_max_conind;	/* max # of outstanding con_ind */
 	uint16_t	dl_service_mode;	/* CO, CL or ACL */
 	uint16_t	dl_conn_mgmt;	/* if non-zero, is con-mgmt stream */
@@ -1117,7 +1120,7 @@ typedef struct {
  */
 typedef struct {
 	t_uscalar_t	dl_primitive;		/* DL_CONNECT_REQ */
-	t_uscalar_t	dl_dest_addr_length;	/* len. of dlsap addr */
+	t_uscalar_t	dl_dest_addr_length;	/* len. of DLSAP addr */
 	t_uscalar_t	dl_dest_addr_offset;	/* offset */
 	t_uscalar_t	dl_qos_length;		/* len. of QOS parm val */
 	t_uscalar_t	dl_qos_offset;		/* offset */
@@ -1295,9 +1298,9 @@ typedef struct {
 typedef struct {
 	t_uscalar_t	dl_primitive;		/* DL_TEST_IND */
 	t_uscalar_t	dl_flag;		/* poll/final */
-	t_uscalar_t	dl_dest_addr_length;	/* dlsap length of dest. user */
+	t_uscalar_t	dl_dest_addr_length;	/* DLSAP length of dest. user */
 	t_uscalar_t	dl_dest_addr_offset;	/* offset from start of block */
-	t_uscalar_t	dl_src_addr_length;	/* dlsap length of source */
+	t_uscalar_t	dl_src_addr_length;	/* DLSAP length of source */
 	t_uscalar_t	dl_src_addr_offset;	/* offset from start of block */
 } dl_test_ind_t;
 
@@ -1317,9 +1320,9 @@ typedef struct {
 typedef struct {
 	t_uscalar_t	dl_primitive;		/* DL_TEST_CON */
 	t_uscalar_t	dl_flag;		/* poll/final */
-	t_uscalar_t	dl_dest_addr_length;	/* dlsap length of dest. user */
+	t_uscalar_t	dl_dest_addr_length;	/* DLSAP length of dest. user */
 	t_uscalar_t	dl_dest_addr_offset;	/* offset from start of block */
-	t_uscalar_t	dl_src_addr_length;	/* dlsap length of source */
+	t_uscalar_t	dl_src_addr_length;	/* DLSAP length of source */
 	t_uscalar_t	dl_src_addr_offset;	/* offset from start of block */
 } dl_test_con_t;
 
@@ -1329,7 +1332,7 @@ typedef struct {
 typedef struct {
 	t_uscalar_t	dl_primitive;		/* DL_XID_REQ */
 	t_uscalar_t	dl_flag;		/* poll/final */
-	t_uscalar_t	dl_dest_addr_length;	/* dlsap length of dest. user */
+	t_uscalar_t	dl_dest_addr_length;	/* DLSAP length of dest. user */
 	t_uscalar_t	dl_dest_addr_offset;	/* offset from start of block */
 } dl_xid_req_t;
 
@@ -1339,9 +1342,9 @@ typedef struct {
 typedef struct {
 	t_uscalar_t	dl_primitive;		/* DL_XID_IND */
 	t_uscalar_t	dl_flag;		/* poll/final */
-	t_uscalar_t	dl_dest_addr_length;	/* dlsap length of dest. user */
+	t_uscalar_t	dl_dest_addr_length;	/* DLSAP length of dest. user */
 	t_uscalar_t	dl_dest_addr_offset;	/* offset from start of block */
-	t_uscalar_t	dl_src_addr_length;	/* dlsap length of source */
+	t_uscalar_t	dl_src_addr_length;	/* DLSAP length of source */
 	t_uscalar_t	dl_src_addr_offset;	/* offset from start of block */
 } dl_xid_ind_t;
 
@@ -1361,9 +1364,9 @@ typedef struct {
 typedef struct {
 	t_uscalar_t	dl_primitive;		/* DL_XID_CON */
 	t_uscalar_t	dl_flag;		/* poll/final */
-	t_uscalar_t	dl_dest_addr_length;	/* dlsap length of dest. user */
+	t_uscalar_t	dl_dest_addr_length;	/* DLSAP length of dest. user */
 	t_uscalar_t	dl_dest_addr_offset;	/* offset from start of block */
-	t_uscalar_t	dl_src_addr_length;	/* dlsap length of source */
+	t_uscalar_t	dl_src_addr_length;	/* DLSAP length of source */
 	t_uscalar_t	dl_src_addr_offset;	/* offset from start of block */
 } dl_xid_con_t;
 
@@ -1599,20 +1602,23 @@ union DL_primitives {
 
 #ifdef	_KERNEL
 /*
- * The following are unstable, internal DLPI utility routines.
+ * DDI DLPI routines; see the appropriate manpage for details.
  */
-extern void	dlbindack(queue_t *, mblk_t *, t_scalar_t, void *, t_uscalar_t,
-		    t_uscalar_t, t_uscalar_t);
+extern void	dlbindack(queue_t *, mblk_t *, t_scalar_t, const void *,
+    t_uscalar_t, t_uscalar_t, t_uscalar_t);
 extern void	dlokack(queue_t *, mblk_t *, t_uscalar_t);
 extern void	dlerrorack(queue_t *, mblk_t *, t_uscalar_t, t_uscalar_t,
-		    t_uscalar_t);
-extern void	dluderrorind(queue_t *, mblk_t *, void *, t_uscalar_t,
-		    t_uscalar_t, t_uscalar_t);
-extern void	dlphysaddrack(queue_t *, mblk_t *, void *, t_uscalar_t);
+    t_uscalar_t);
+extern void	dluderrorind(queue_t *, mblk_t *, const void *, t_uscalar_t,
+    t_uscalar_t, t_uscalar_t);
+extern void	dlphysaddrack(queue_t *, mblk_t *, const void *, t_uscalar_t);
+
+/*
+ * All routines that follow are unstable and subject to change.
+ */
 extern void	dlcapabsetqid(dl_mid_t *, const queue_t *);
 extern boolean_t dlcapabcheckqid(const dl_mid_t *, const queue_t *);
 extern void	dlnotifyack(queue_t *, mblk_t *, uint32_t);
-
 /*
  * The ldi_handle_t typedef is in <sys/sunldi.h>, which in turn requires
  * <sys/sunddi.h>, which pulls in <sys/cmn_err.h>, which declares kernel

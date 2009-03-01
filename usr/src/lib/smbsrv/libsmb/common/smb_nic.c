@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -80,6 +80,7 @@
 #define	NULL_MSGCHK(msg)	((msg) ? (msg) : "NULL")
 
 #define	SMB_NIC_MAXIFS		256
+#define	SMB_NIC_MAXEXCLLIST_LEN	512
 
 typedef struct smb_hostifs {
 	list_node_t if_lnd;
@@ -123,7 +124,12 @@ static int smb_nic_dbaddhost(const char *, const char *, char *);
 static int smb_nic_dbdelhost(const char *);
 static int smb_nic_dbsetinfo(sqlite *);
 
-static int smb_nic_getinfo(char *, smb_nic_t *);
+static int smb_nic_getinfo(char *, smb_nic_t *, int);
+static boolean_t smb_nic_nbt_exclude(const smb_nic_t *, const char **, int);
+static int smb_nic_nbt_get_exclude_list(char *, char **, int);
+
+static void smb_close_sockets(int, int);
+static boolean_t smb_duplicate_nic(smb_hostifs_t *iflist, struct lifreq *lifrp);
 
 /* This is the list we will monitor */
 static smb_niclist_t smb_niclist;
@@ -262,18 +268,11 @@ smb_nic_getnext(smb_niciter_t *ni)
 	return (rc);
 }
 
-/*
- * smb_nic_exists
- *
- * Check to see if there's a NIC with the given IP address
- * in the list. Subnet mask will be applied when comparing the
- * IPs if the use_mask arg is true.
- */
 boolean_t
-smb_nic_exists(uint32_t ipaddr, boolean_t use_mask)
+smb_nic_exists(smb_inaddr_t *ipaddr, boolean_t use_mask)
 {
 	smb_nic_t *cfg;
-	uint32_t mask = 0xFFFFFFFF;
+	uint32_t mask = 0;
 	int i;
 
 	(void) rw_rdlock(&smb_niclist.nl_rwl);
@@ -282,15 +281,12 @@ smb_nic_exists(uint32_t ipaddr, boolean_t use_mask)
 		cfg = &smb_niclist.nl_nics[i];
 		if (use_mask)
 			mask = cfg->nic_mask;
-
-		if ((ipaddr & mask) == (cfg->nic_ip & mask)) {
+		if (smb_inet_equal(ipaddr, &cfg->nic_ip, mask)) {
 			(void) rw_unlock(&smb_niclist.nl_rwl);
 			return (B_TRUE);
 		}
 	}
-
 	(void) rw_unlock(&smb_niclist.nl_rwl);
-
 	return (B_FALSE);
 }
 
@@ -391,9 +387,9 @@ smb_nic_list_create(void)
 	smb_hostifs_t *iflist;
 	smb_nic_t *nc;
 	char *ifname;
-	char excludestr[MAX_EXCLUDE_LIST_LEN];
-	ipaddr_t exclude[SMB_PI_MAX_NETWORKS];
-	int nexclude;
+	char excludestr[SMB_NIC_MAXEXCLLIST_LEN];
+	char *exclude[SMB_PI_MAX_NETWORKS];
+	int nexclude = 0;
 	int i;
 
 	if (smb_nic_hlist_create(&hlist) < 0)
@@ -409,9 +405,12 @@ smb_nic_list_create(void)
 		return (-1);
 	}
 
-	(void) smb_config_getstr(SMB_CI_WINS_EXCL, excludestr,
-	    sizeof (excludestr));
-	nexclude = smb_wins_iplist(excludestr, exclude, SMB_PI_MAX_NETWORKS);
+	*excludestr = '\0';
+	(void) smb_config_getstr(SMB_CI_WINS_EXCL,
+	    excludestr, sizeof (excludestr));
+
+	nexclude = smb_nic_nbt_get_exclude_list(excludestr,
+	    exclude, SMB_PI_MAX_NETWORKS);
 
 	nc = smb_niclist.nl_nics;
 	iflist = list_head(&hlist.h_list);
@@ -419,8 +418,12 @@ smb_nic_list_create(void)
 	do {
 		for (i = 0; i < iflist->if_num; i++) {
 			ifname = iflist->if_names[i];
-			if (smb_nic_getinfo(ifname, nc) < 0)
-				continue;
+			if (smb_nic_getinfo(ifname, nc, AF_INET) < 0) {
+				if (smb_nic_getinfo(ifname, nc,
+				    AF_INET6) < 0) {
+					continue;
+				}
+			}
 
 			(void) strlcpy(nc->nic_host, iflist->if_host,
 			    sizeof (nc->nic_host));
@@ -432,8 +435,8 @@ smb_nic_list_create(void)
 			if (strchr(ifname, ':'))
 				nc->nic_smbflags |= SMB_NICF_ALIAS;
 
-			if (smb_wins_is_excluded(nc->nic_ip,
-			    (ipaddr_t *)exclude, nexclude))
+			if (smb_nic_nbt_exclude(nc,
+			    (const char **)exclude, nexclude))
 				nc->nic_smbflags |= SMB_NICF_NBEXCL;
 
 			smb_niclist.nl_cnt++;
@@ -454,19 +457,16 @@ smb_nic_list_destroy(void)
 	smb_niclist.nl_cnt = 0;
 }
 
-/*
- * smb_nic_getinfo
- *
- * Get IP info and more for the given interface
- */
 static int
-smb_nic_getinfo(char *interface, smb_nic_t *nc)
+smb_nic_getinfo(char *interface, smb_nic_t *nc, int family)
 {
 	struct lifreq lifrr;
-	struct sockaddr_in *sa;
 	int s;
+	boolean_t isv6;
+	struct sockaddr_in6 *sin6;
+	struct sockaddr_in *sin;
 
-	if ((s = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP)) < 0) {
+	if ((s = socket(family, SOCK_DGRAM, IPPROTO_IP)) < 0) {
 		return (-1);
 	}
 
@@ -475,28 +475,36 @@ smb_nic_getinfo(char *interface, smb_nic_t *nc)
 		(void) close(s);
 		return (-1);
 	}
-	sa = (struct sockaddr_in *)&lifrr.lifr_addr;
-	nc->nic_ip = (uint32_t)sa->sin_addr.s_addr;
-
-	if (nc->nic_ip == 0) {
+	isv6 = (lifrr.lifr_addr.ss_family == AF_INET6);
+	if (isv6) {
+		sin6 = (struct sockaddr_in6 *)(&lifrr.lifr_addr);
+		nc->nic_ip.a_ipv6 = sin6->sin6_addr;
+		nc->nic_ip.a_family = AF_INET6;
+	} else {
+		sin = (struct sockaddr_in *)(&lifrr.lifr_addr);
+		nc->nic_ip.a_ipv4 = (in_addr_t)(sin->sin_addr.s_addr);
+		nc->nic_ip.a_family = AF_INET;
+	}
+	if (smb_inet_iszero(&nc->nic_ip)) {
 		(void) close(s);
 		return (-1);
 	}
+	/* there is no broadcast or netmask for v6 */
+	if (!isv6) {
+		if (ioctl(s, SIOCGLIFBRDADDR, &lifrr) < 0) {
+			(void) close(s);
+			return (-1);
+		}
+		sin = (struct sockaddr_in *)&lifrr.lifr_broadaddr;
+		nc->nic_bcast = (uint32_t)sin->sin_addr.s_addr;
 
-	if (ioctl(s, SIOCGLIFBRDADDR, &lifrr) < 0) {
-		(void) close(s);
-		return (-1);
+		if (ioctl(s, SIOCGLIFNETMASK, &lifrr) < 0) {
+			(void) close(s);
+			return (-1);
+		}
+		sin = (struct sockaddr_in *)&lifrr.lifr_addr;
+		nc->nic_mask = (uint32_t)sin->sin_addr.s_addr;
 	}
-	sa = (struct sockaddr_in *)&lifrr.lifr_broadaddr;
-	nc->nic_bcast = (uint32_t)sa->sin_addr.s_addr;
-
-	if (ioctl(s, SIOCGLIFNETMASK, &lifrr) < 0) {
-		(void) close(s);
-		return (-1);
-	}
-	sa = (struct sockaddr_in *)&lifrr.lifr_addr;
-	nc->nic_mask = (uint32_t)sa->sin_addr.s_addr;
-
 	if (ioctl(s, SIOCGLIFFLAGS, &lifrr) < 0) {
 		(void) close(s);
 		return (-1);
@@ -558,6 +566,15 @@ smb_nic_hlist_destroy(smb_hosts_t *hlist)
 	list_destroy(&hlist->h_list);
 }
 
+static void
+smb_close_sockets(int s4, int s6)
+{
+	if (s4)
+		(void) close(s4);
+	if (s6)
+		(void) close(s6);
+}
+
 /*
  * smb_nic_hlist_sysget
  *
@@ -568,13 +585,14 @@ static int
 smb_nic_hlist_sysget(smb_hosts_t *hlist)
 {
 	smb_hostifs_t *iflist;
-	struct ifconf ifc;
-	struct ifreq ifr;
-	struct ifreq *ifrp;
+	struct lifconf lifc;
+	struct lifreq lifrl;
+	struct lifreq *lifrp;
 	char *ifname;
 	int ifnum;
 	int i;
-	int s;
+	int s4, s6;
+	struct lifnum lifn;
 
 	iflist = malloc(sizeof (smb_hostifs_t));
 	if (iflist == NULL)
@@ -590,75 +608,100 @@ smb_nic_hlist_sysget(smb_hosts_t *hlist)
 	(void) smb_config_getstr(SMB_CI_SYS_CMNT, iflist->if_cmnt,
 	    sizeof (iflist->if_cmnt));
 
-	if ((s = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+	if ((s4 = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
 		free(iflist);
 		return (-1);
 	}
+	s6 = socket(AF_INET6, SOCK_DGRAM, 0);
 
-	if (ioctl(s, SIOCGIFNUM, (char *)&ifnum) < 0) {
-		(void) close(s);
+	lifn.lifn_family = AF_UNSPEC;
+	lifn.lifn_flags = 0;
+	if (ioctl(s4, SIOCGLIFNUM, (char *)&lifn) < 0) {
+		smb_close_sockets(s4, s6);
 		free(iflist);
+		syslog(LOG_ERR, "hlist_sysget: SIOCGLIFNUM errno=%d", errno);
 		return (-1);
 	}
 
-	ifc.ifc_len = ifnum * sizeof (struct ifreq);
-	ifc.ifc_buf = malloc(ifc.ifc_len);
-	if (ifc.ifc_buf == NULL) {
-		(void) close(s);
+	lifc.lifc_len = lifn.lifn_count * sizeof (struct lifreq);
+	lifc.lifc_buf = malloc(lifc.lifc_len);
+	if (lifc.lifc_buf == NULL) {
+		smb_close_sockets(s4, s6);
 		free(iflist);
 		return (-1);
 	}
-	bzero(ifc.ifc_buf, ifc.ifc_len);
+	bzero(lifc.lifc_buf, lifc.lifc_len);
+	lifc.lifc_family = AF_UNSPEC;
+	lifc.lifc_flags = 0;
 
-	if (ioctl(s, SIOCGIFCONF, (char *)&ifc) < 0) {
-		(void) close(s);
+	if (ioctl(s4, SIOCGLIFCONF, (char *)&lifc) < 0) {
+		smb_close_sockets(s4, s6);
 		free(iflist);
-		free(ifc.ifc_buf);
+		free(lifc.lifc_buf);
 		return (-1);
 	}
 
-	ifrp = ifc.ifc_req;
-	ifnum = ifc.ifc_len / sizeof (struct ifreq);
+	lifrp = lifc.lifc_req;
+	ifnum = lifc.lifc_len / sizeof (struct lifreq);
+	hlist->h_num = 0;
+	for (i = 0; i < ifnum; i++, lifrp++) {
 
-	for (i = 0; i < ifnum; i++, ifrp++) {
+		if ((iflist->if_num > 0) && smb_duplicate_nic(iflist, lifrp))
+			continue;
 		/*
 		 * Get the flags so that we can skip the loopback interface
 		 */
-		(void) memset(&ifr, 0, sizeof (ifr));
-		(void) strlcpy(ifr.ifr_name, ifrp->ifr_name,
-		    sizeof (ifr.ifr_name));
+		(void) memset(&lifrl, 0, sizeof (lifrl));
+		(void) strlcpy(lifrl.lifr_name, lifrp->lifr_name,
+		    sizeof (lifrl.lifr_name));
 
-		if (ioctl(s, SIOCGIFFLAGS, (caddr_t)&ifr) < 0) {
-			(void) close(s);
-			free(ifc.ifc_buf);
-			smb_nic_iflist_destroy(iflist);
-			return (-1);
+		if (ioctl(s4, SIOCGLIFFLAGS, (caddr_t)&lifrl) < 0) {
+			if ((s6 < 0) ||
+			    (ioctl(s6, SIOCGLIFFLAGS, (caddr_t)&lifrl) < 0)) {
+				smb_close_sockets(s4, s6);
+				free(lifc.lifc_buf);
+				smb_nic_iflist_destroy(iflist);
+				return (-1);
+			}
+		}
+		if (lifrl.lifr_flags & IFF_LOOPBACK) {
+			continue;
 		}
 
-		if (ifr.ifr_flags & IFF_LOOPBACK)
+		if ((lifrl.lifr_flags & IFF_UP) == 0) {
 			continue;
-
-		if ((ifr.ifr_flags & IFF_UP) == 0)
-			continue;
-
-		ifname = strdup(ifrp->ifr_name);
+		}
+		ifname = strdup(lifrp->lifr_name);
 		if (ifname == NULL) {
-			(void) close(s);
-			free(ifc.ifc_buf);
+			smb_close_sockets(s4, s6);
+			free(lifc.lifc_buf);
 			smb_nic_iflist_destroy(iflist);
 			return (-1);
 		}
 		iflist->if_names[iflist->if_num++] = ifname;
 	}
-
-	(void) close(s);
-	free(ifc.ifc_buf);
-
-	hlist->h_num = 1;
 	hlist->h_ifnum = iflist->if_num;
+	hlist->h_num = 1;
+	smb_close_sockets(s4, s6);
+	free(lifc.lifc_buf);
 	list_insert_tail(&hlist->h_list, iflist);
 
 	return (0);
+}
+
+static boolean_t
+smb_duplicate_nic(smb_hostifs_t *iflist, struct lifreq *lifrp)
+{
+	int j;
+	/*
+	 * throw out duplicate names
+	 */
+	for (j = 0; j < iflist->if_num; j++) {
+		if (strcmp(iflist->if_names[j],
+		    lifrp->lifr_name) == 0)
+			return (B_TRUE);
+	}
+	return (B_FALSE);
 }
 
 static int
@@ -1072,4 +1115,67 @@ smb_nic_dbsetinfo(sqlite *db)
 	}
 
 	return (rc);
+}
+
+/*
+ * smb_nic_nbt_get_exclude_list
+ *
+ * Construct an array containing list of i/f names on which NetBIOS traffic is
+ * to be disabled, from a string containing a list of comma separated i/f names.
+ *
+ * Returns the number of i/f on which NetBIOS traffic is to be disabled.
+ */
+static int
+smb_nic_nbt_get_exclude_list(char *excludestr, char **iflist, int max_nifs)
+{
+	int n = 0;
+	char *entry;
+
+	bzero(iflist, SMB_PI_MAX_NETWORKS * sizeof (char *));
+
+	(void) trim_whitespace(excludestr);
+	(void) strcanon(excludestr, ",");
+
+	if (*excludestr == '\0')
+		return (0);
+
+	while (((iflist[n] = strsep(&excludestr, ",")) != NULL) &&
+	    (n < max_nifs)) {
+		entry = iflist[n];
+		if (*entry == '\0')
+			continue;
+		n++;
+	}
+
+	return (n);
+}
+
+/*
+ * smb_nic_nbt_exclude
+ *
+ * Check to see if the given interface name should send NetBIOS traffic or not.
+ *
+ * Returns TRUE if NetBIOS traffic is disabled on an interface name.
+ * Returns FALSE otherwise.
+ */
+static boolean_t
+smb_nic_nbt_exclude(const smb_nic_t *nc, const char **exclude_list,
+    int nexclude)
+{
+	char buf[INET6_ADDRSTRLEN];
+	const char *ifname = nc->nic_ifname;
+	int i;
+
+	if (inet_ntop(AF_INET, &nc->nic_ip, buf, INET6_ADDRSTRLEN) == NULL)
+		buf[0] = '\0';
+
+	for (i = 0; i < nexclude; i++) {
+		if (strcmp(ifname, exclude_list[i]) == 0)
+			return (B_TRUE);
+
+		if ((buf[0] != '\0') && (strcmp(buf, exclude_list[i]) == 0))
+			return (B_TRUE);
+	}
+
+	return (B_FALSE);
 }

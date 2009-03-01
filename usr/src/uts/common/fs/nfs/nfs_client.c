@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  *  	Copyright (c) 1983,1984,1985,1986,1987,1988,1989  AT&T.
@@ -1231,7 +1231,7 @@ nfs_async_manager(vfs_t *vfsp)
 	 * part of the zone/mount going away.
 	 *
 	 * We want to be able to create at least one thread to handle
-	 * asyncrhonous inactive calls.
+	 * asynchronous inactive calls.
 	 */
 	max_threads = MAX(mi->mi_max_threads, 1);
 	mutex_enter(&mi->mi_lock);
@@ -1254,9 +1254,6 @@ nfs_async_manager(vfs_t *vfsp)
 	while (!(mi->mi_flags & MI_ASYNC_MGR_STOP) ||
 	    mi->mi_async_req_count > 0) {
 		mutex_exit(&mi->mi_lock);
-		CALLB_CPR_SAFE_BEGIN(&cprinfo);
-		cv_wait(&mi->mi_async_reqs_cv, &mi->mi_async_lock);
-		CALLB_CPR_SAFE_END(&cprinfo, &mi->mi_async_lock);
 		while (mi->mi_async_req_count > 0) {
 			/*
 			 * Paranoia: If the mount started out having
@@ -1289,6 +1286,9 @@ nfs_async_manager(vfs_t *vfsp)
 			ASSERT(mi->mi_async_req_count != 0);
 			mi->mi_async_req_count--;
 		}
+		CALLB_CPR_SAFE_BEGIN(&cprinfo);
+		cv_wait(&mi->mi_async_reqs_cv, &mi->mi_async_lock);
+		CALLB_CPR_SAFE_END(&cprinfo, &mi->mi_async_lock);
 		mutex_enter(&mi->mi_lock);
 	}
 	mutex_exit(&mi->mi_lock);
@@ -2081,12 +2081,12 @@ nfs_async_start(struct vfs *vfsp)
 			    args->a_nfs_addr, args->a_nfs_seg, args->a_cred);
 		} else if (args->a_io == NFS_PUTAPAGE) {
 			(void) (*args->a_nfs_putapage)(args->a_vp,
-			    args->a_nfs_pp, args->a_nfs_off,
-			    args->a_nfs_len, args->a_nfs_flags, args->a_cred);
+			    args->a_nfs_pp, args->a_nfs_off, args->a_nfs_len,
+			    args->a_nfs_flags, args->a_cred);
 		} else if (args->a_io == NFS_PAGEIO) {
-			(void) (*args->a_nfs_pageio)(args->a_vp,
-			    args->a_nfs_pp, args->a_nfs_off,
-			    args->a_nfs_len, args->a_nfs_flags, args->a_cred);
+			(void) (*args->a_nfs_pageio)(args->a_vp, args->a_nfs_pp,
+			    args->a_nfs_off, args->a_nfs_len, args->a_nfs_flags,
+			    args->a_cred);
 		} else if (args->a_io == NFS_READDIR) {
 			(void) ((*args->a_nfs_readdir)(args->a_vp,
 			    args->a_nfs_rdc, args->a_cred));
@@ -2216,7 +2216,8 @@ writerp(rnode_t *rp, caddr_t base, int tcount, struct uio *uio, int pgcreated)
 		 * segkpm this means we already have at least one page
 		 * created and mapped at base.
 		 */
-		pagecreate = pgcreated || ((offset & PAGEOFFSET) == 0 &&
+		pagecreate = pgcreated ||
+		    ((offset & PAGEOFFSET) == 0 &&
 		    (n == PAGESIZE || ((offset + n) >= rp->r_size)));
 
 		mutex_exit(&rp->r_statelock);

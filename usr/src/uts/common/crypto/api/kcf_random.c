@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -27,7 +27,8 @@
  * This file implements the interfaces that the /dev/random
  * driver uses for read(2), write(2) and poll(2) on /dev/random or
  * /dev/urandom. It also implements the kernel API - random_add_entropy(),
- * random_get_pseudo_bytes() and random_get_bytes().
+ * random_add_pseudo_entropy(), random_get_pseudo_bytes()
+ * and random_get_bytes().
  *
  * We periodically collect random bits from providers which are registered
  * with the Kernel Cryptographic Framework (kCF) as capable of random
@@ -580,16 +581,16 @@ kcf_rnd_get_bytes(uint8_t *ptr, size_t len, boolean_t noblock,
 typedef struct rndmag_s
 {
 	kmutex_t	rm_lock;
-	uint8_t 	*rm_buffer;	/* Start of buffer */
+	uint8_t		*rm_buffer;	/* Start of buffer */
 	uint8_t		*rm_eptr;	/* End of buffer */
 	uint8_t		*rm_rptr;	/* Current read pointer */
 	uint32_t	rm_oblocks;	/* time to rekey? */
 	uint32_t	rm_ofuzz;	/* Rekey backoff state */
 	uint32_t	rm_olimit;	/* Hard rekey limit */
 	rnd_stats_t	rm_stats;	/* Per-CPU Statistics */
-	uint32_t	rm_key[SHA1WORDS];	/* FIPS XKEY */
-	uint32_t	rm_seed[SHA1WORDS];	/* seed for rekey */
-	uint32_t	rm_previous[SHA1WORDS]; /* previous random bytes */
+	uint32_t	rm_key[HASHSIZE/BYTES_IN_WORD];	/* FIPS XKEY */
+	uint32_t	rm_seed[HASHSIZE/BYTES_IN_WORD]; /* seed for rekey */
+	uint32_t	rm_previous[HASHSIZE/BYTES_IN_WORD]; /* prev random */
 } rndmag_t;
 
 typedef struct rndmag_pad_s
@@ -614,8 +615,8 @@ rnd_generate_pseudo_bytes(rndmag_pad_t *rmp, uint8_t *ptr, size_t len)
 	size_t bytes = len;
 	int nblock, size;
 	uint32_t oblocks;
-	uint32_t tempout[SHA1WORDS];
-	uint32_t seed[SHA1WORDS];
+	uint32_t tempout[HASHSIZE/BYTES_IN_WORD];
+	uint32_t seed[HASHSIZE/BYTES_IN_WORD];
 	int i;
 	hrtime_t timestamp;
 	uint8_t *src, *dst;
@@ -693,11 +694,11 @@ punt:
 		 * generated block. Test shall fail if any two compared
 		 * n-bit blocks are equal.
 		 */
-		for (i = 0; i < size/BYTES_IN_WORD; i++) {
+		for (i = 0; i < HASHSIZE/BYTES_IN_WORD; i++) {
 			if (tempout[i] != rmp->rm_mag.rm_previous[i])
 				break;
 		}
-		if (i == size/BYTES_IN_WORD)
+		if (i == HASHSIZE/BYTES_IN_WORD)
 			cmn_err(CE_WARN, "kcf_random: The value of 160-bit "
 			    "block random bytes are same as the previous "
 			    "one.\n");

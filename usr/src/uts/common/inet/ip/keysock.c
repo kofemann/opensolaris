@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -59,7 +59,7 @@
 #include <inet/common.h>
 #include <netinet/ip6.h>
 #include <inet/ip.h>
-#include <inet/mi.h>
+#include <inet/proto_set.h>
 #include <inet/nd.h>
 #include <inet/optcom.h>
 #include <inet/ipsec_info.h>
@@ -707,7 +707,8 @@ keysock_open(queue_t *q, dev_t *devp, int flag, int sflag, cred_t *credp)
 		mutex_exit(&keystack->keystack_list_lock);
 
 		qprocson(q);
-		(void) mi_set_sth_hiwat(q, keystack->keystack_recv_hiwat);
+		(void) proto_set_rx_hiwat(q, NULL,
+		    keystack->keystack_recv_hiwat);
 		/*
 		 * Wait outside the keysock module perimeter for IPsec
 		 * plumbing to be completed.  If it fails, keysock_close()
@@ -853,7 +854,7 @@ keysock_opt_set(queue_t *q, uint_t mgmt_flags, int level,
     int name, uint_t inlen, uchar_t *invalp, uint_t *outlenp,
     uchar_t *outvalp, void *thisdg_attrs, cred_t *cr, mblk_t *mblk)
 {
-	int *i1 = (int *)invalp;
+	int *i1 = (int *)invalp, errno = 0;
 	keysock_t *ks = (keysock_t *)q->q_ptr;
 	keysock_stack_t	*keystack = ks->keysock_keystack;
 
@@ -868,20 +869,26 @@ keysock_opt_set(queue_t *q, uint_t mgmt_flags, int level,
 			break;
 		case SO_SNDBUF:
 			if (*i1 > keystack->keystack_max_buf)
-				return (ENOBUFS);
-			q->q_hiwat = *i1;
+				errno = ENOBUFS;
+			else q->q_hiwat = *i1;
 			break;
 		case SO_RCVBUF:
-			if (*i1 > keystack->keystack_max_buf)
-				return (ENOBUFS);
-			RD(q)->q_hiwat = *i1;
-			(void) mi_set_sth_hiwat(RD(q), *i1);
+			if (*i1 > keystack->keystack_max_buf) {
+				errno = ENOBUFS;
+			} else {
+				RD(q)->q_hiwat = *i1;
+				(void) proto_set_rx_hiwat(RD(q), NULL, *i1);
+			}
 			break;
+		default:
+			errno = EINVAL;
 		}
 		mutex_exit(&ks->keysock_lock);
 		break;
+	default:
+		errno = EINVAL;
 	}
-	return (0);
+	return (errno);
 }
 
 /*
@@ -905,10 +912,6 @@ keysock_wput_other(queue_t *q, mblk_t *mp)
 			freemsg(mp);
 			return;
 		}
-		cr = zone_get_kcred(netstackid_to_zoneid(
-		    keystack->keystack_netstack->netstack_stackid));
-		ASSERT(cr != NULL);
-
 		switch (((union T_primitives *)mp->b_rptr)->type) {
 		case T_CAPABILITY_REQ:
 			keysock_capability_req(q, mp);
@@ -917,12 +920,28 @@ keysock_wput_other(queue_t *q, mblk_t *mp)
 			keysock_info_req(q, mp);
 			break;
 		case T_SVR4_OPTMGMT_REQ:
-			(void) svr4_optcom_req(q, mp, DB_CREDDEF(mp, cr),
-			    &keysock_opt_obj, B_FALSE);
-			break;
 		case T_OPTMGMT_REQ:
-			(void) tpi_optcom_req(q, mp, DB_CREDDEF(mp, cr),
-			    &keysock_opt_obj, B_FALSE);
+			/*
+			 * All Solaris components should pass a db_credp
+			 * for this TPI message, hence we ASSERT.
+			 * But in case there is some other M_PROTO that looks
+			 * like a TPI message sent by some other kernel
+			 * component, we check and return an error.
+			 */
+			cr = msg_getcred(mp, NULL);
+			ASSERT(cr != NULL);
+			if (cr == NULL) {
+				keysock_err_ack(q, mp, TSYSERR, EINVAL);
+				return;
+			}
+			if (((union T_primitives *)mp->b_rptr)->type ==
+			    T_SVR4_OPTMGMT_REQ) {
+				(void) svr4_optcom_req(q, mp, cr,
+				    &keysock_opt_obj, B_FALSE);
+			} else {
+				(void) tpi_optcom_req(q, mp, cr,
+				    &keysock_opt_obj, B_FALSE);
+			}
 			break;
 		case T_DATA_REQ:
 		case T_EXDATA_REQ:
@@ -936,7 +955,6 @@ keysock_wput_other(queue_t *q, mblk_t *mp)
 			keysock_err_ack(q, mp, TNOTSUPPORT, 0);
 			break;
 		}
-		crfree(cr);
 		return;
 	case M_IOCTL:
 		iocp = (struct iocblk *)mp->b_rptr;

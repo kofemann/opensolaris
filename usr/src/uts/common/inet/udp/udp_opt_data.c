@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/stream.h>
@@ -67,6 +65,10 @@ opdes_t	udp_opt_arr[] = {
 { SO_TYPE,	SOL_SOCKET, OA_R, OA_R, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
 { SO_SNDBUF,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
 { SO_RCVBUF,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
+{ SO_SNDTIMEO,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
+	sizeof (struct timeval), 0 },
+{ SO_RCVTIMEO,	SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
+	sizeof (struct timeval), 0 },
 { SO_DGRAM_ERRIND, SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int),
 	0 },
 { SO_RECVUCRED, SOL_SOCKET, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0
@@ -85,9 +87,11 @@ opdes_t	udp_opt_arr[] = {
 { SO_PROTOTYPE,	SOL_SOCKET, OA_R, OA_R, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
 
 { IP_OPTIONS,	IPPROTO_IP, OA_RW, OA_RW, OP_NP,
-	(OP_PASSNEXT|OP_VARLEN|OP_NODEFAULT), 40, -1 /* not initialized */ },
+	(OP_PASSNEXT|OP_VARLEN|OP_NODEFAULT),
+	IP_MAX_OPT_LENGTH + IP_ADDR_LEN, -1 /* not initialized */ },
 { T_IP_OPTIONS,	IPPROTO_IP, OA_RW, OA_RW, OP_NP,
-	(OP_PASSNEXT|OP_VARLEN|OP_NODEFAULT), 40, -1 /* not initialized */ },
+	(OP_PASSNEXT|OP_VARLEN|OP_NODEFAULT),
+	IP_MAX_OPT_LENGTH + IP_ADDR_LEN, -1 /* not initialized */ },
 
 { IP_TOS,	IPPROTO_IP, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
 { T_IP_TOS,	IPPROTO_IP, OA_RW, OA_RW, OP_NP, OP_PASSNEXT, sizeof (int), 0 },
@@ -131,9 +135,6 @@ opdes_t	udp_opt_arr[] = {
 
 { IP_BOUND_IF, IPPROTO_IP, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
 	sizeof (int),	0 /* no ifindex */ },
-
-{ IP_DONTFAILOVER_IF, IPPROTO_IP, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
-	sizeof (struct in_addr),	0 /* not initialized */ },
 
 { IP_DHCPINIT_IF, IPPROTO_IP, OA_R, OA_RW, OP_CONFIG, OP_PASSNEXT,
 	sizeof (int), 0 },
@@ -189,12 +190,6 @@ opdes_t	udp_opt_arr[] = {
 	sizeof (int), -1 /* not initialized */ },
 
 { IPV6_BOUND_IF, IPPROTO_IPV6, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
-	sizeof (int),	0 /* no ifindex */ },
-
-{ IPV6_BOUND_PIF, IPPROTO_IPV6, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
-	sizeof (int),	0 /* no ifindex */ },
-
-{ IPV6_DONTFAILOVER_IF, IPPROTO_IPV6, OA_RW, OA_RW, OP_NP, OP_PASSNEXT,
 	sizeof (int),	0 /* no ifindex */ },
 
 { IPV6_UNSPEC_SRC, IPPROTO_IPV6, OA_R, OA_RW, OP_RAW, OP_PASSNEXT,
@@ -318,8 +313,8 @@ uint_t udp_max_optsize; /* initialized when UDP driver is loaded */
 
 optdb_obj_t udp_opt_obj = {
 	udp_opt_default,	/* UDP default value function pointer */
-	udp_opt_get,		/* UDP get function pointer */
-	udp_opt_set,		/* UDP set function pointer */
+	udp_tpi_opt_get,	/* UDP get function pointer */
+	udp_tpi_opt_set,	/* UDP set function pointer */
 	B_TRUE,			/* UDP is tpi provider */
 	UDP_OPT_ARR_CNT,	/* UDP option database count of entries */
 	udp_opt_arr,		/* UDP option database */

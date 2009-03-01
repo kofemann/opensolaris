@@ -861,7 +861,7 @@ extern int	svc_rdma_kcreate(char *, SVC_CALLOUT_TABLE *, int,
 			rdma_xprt_group_t *);
 extern void	svc_rdma_kstop(SVCMASTERXPRT *);
 extern void	svc_rdma_kdestroy(SVCMASTERXPRT *);
-extern void	rdma_stop(rdma_xprt_group_t);
+extern void	rdma_stop(rdma_xprt_group_t *);
 
 /*
  * GSS cleanup method.

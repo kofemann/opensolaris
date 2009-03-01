@@ -23,7 +23,7 @@
  *	Copyright (c) 1988 AT&T
  *	  All Rights Reserved
  *
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -188,7 +188,7 @@ update_osym(Ofl_desc *ofl)
 #endif
 	Addr		bssaddr, etext = 0, edata = 0, end = 0, start = 0;
 	Addr		tlsbssaddr = 0;
-	Addr 		parexpnaddr;
+	Addr 		parexpnbase, parexpnaddr;
 	int		start_set = 0;
 	Sym		_sym = {0}, *sym, *symtab = 0;
 	Sym		*dynsym = 0, *ldynsym = 0;
@@ -616,7 +616,7 @@ update_osym(Ofl_desc *ofl)
 	 */
 	if (ofl->ofl_isparexpn) {
 		osp = ofl->ofl_isparexpn->is_osdesc;
-		parexpnaddr = (Addr)(osp->os_shdr->sh_addr +
+		parexpnbase = parexpnaddr = (Addr)(osp->os_shdr->sh_addr +
 		    ofl->ofl_isparexpn->is_indata->d_off);
 		/* LINTED */
 		parexpnndx = elf_ndxscn(osp->os_scn);
@@ -791,17 +791,12 @@ update_osym(Ofl_desc *ofl)
 			 */
 			if (ofl->ofl_isparexpn &&
 			    (sdp->sd_flags & FLG_SY_PAREXPN) && !update_done) {
-				static	Addr	laddr = 0;
-
 				sym->st_shndx = parexpnndx;
 				sdp->sd_isc = ofl->ofl_isparexpn;
-				if (flags & FLG_OF_RELOBJ) {
-					sym->st_value = parexpnaddr;
-				} else {
-					sym->st_value = laddr;
-					laddr += sym->st_size;
-				}
+				sym->st_value = parexpnaddr;
 				parexpnaddr += sym->st_size;
+				if ((flags & FLG_OF_RELOBJ) == 0)
+					sym->st_value -= parexpnbase;
 			}
 
 			/*
@@ -2921,16 +2916,13 @@ expand_move(Ofl_desc *ofl, Sym_desc *sdp, Move *u1)
 	unsigned char	*taddr, *taddr0;
 	Sxword		offset;
 	int		i;
-	Addr		base1;
 	unsigned int	stride;
 
 	osp = ofl->ofl_isparexpn->is_osdesc;
-	base1 = (Addr)(osp->os_shdr->sh_addr +
-	    ofl->ofl_isparexpn->is_indata->d_off);
 	taddr0 = taddr = osp->os_outdata->d_buf;
 	mv = u1;
 
-	offset = sdp->sd_sym->st_value - base1;
+	offset = sdp->sd_sym->st_value - osp->os_shdr->sh_addr;
 	taddr += offset;
 	taddr = taddr + mv->m_poffset;
 	for (i = 0; i < mv->m_repeat; i++) {
@@ -3260,7 +3252,7 @@ translate_link(Ofl_desc *ofl, Os_desc *osp, Word link, const char *msg)
 uintptr_t
 ld_update_outfile(Ofl_desc *ofl)
 {
-	Addr		size, etext, vaddr = ofl->ofl_segorigin;
+	Addr		size, etext, vaddr;
 	Listnode	*lnp1, *lnp2;
 	Sg_desc		*sgp, *dtracesgp = 0, *capsgp = 0;
 	Os_desc		*osp;
@@ -3275,6 +3267,24 @@ ld_update_outfile(Ofl_desc *ofl)
 	Boolean		nobits;
 	Off		offset;
 	Aliste		idx;
+
+	/*
+	 * Initialize the starting address for the first segment.  Executables
+	 * have different starting addresses depending upon the target ABI,
+	 * where as shared objects have a starting address of 0.  If this is
+	 * a 64-bit executable that is being constructed to run in a restricted
+	 * address space, use an alternative origin that will provide more free
+	 * address space for the the eventual process.
+	 */
+	if (ofl->ofl_flags & FLG_OF_EXEC) {
+#if	defined(_ELF64)
+		if (ofl->ofl_sfcap_1 & SF1_SUNW_ADDR32)
+			vaddr = ld_targ.t_m.m_segm_aorigin;
+		else
+#endif
+			vaddr = ld_targ.t_m.m_segm_origin;
+	} else
+		vaddr = 0;
 
 	/*
 	 * Loop through the segment descriptors and pick out what we need.
@@ -3830,6 +3840,29 @@ ld_update_outfile(Ofl_desc *ofl)
 			if (update_osyminfo(ofl) == S_ERROR)
 				return (S_ERROR);
 	}
+
+	/*
+	 * Sanity test: First and last data byte of a string table
+	 * must be NULL.
+	 */
+	assert((ofl->ofl_osshstrtab == NULL) ||
+	    (*((char *)ofl->ofl_osshstrtab->os_outdata->d_buf) == '\0'));
+	assert((ofl->ofl_osshstrtab == NULL) ||
+	    (*(((char *)ofl->ofl_osshstrtab->os_outdata->d_buf) +
+	    ofl->ofl_osshstrtab->os_outdata->d_size - 1) == '\0'));
+
+	assert((ofl->ofl_osstrtab == NULL) ||
+	    (*((char *)ofl->ofl_osstrtab->os_outdata->d_buf) == '\0'));
+	assert((ofl->ofl_osstrtab == NULL) ||
+	    (*(((char *)ofl->ofl_osstrtab->os_outdata->d_buf) +
+	    ofl->ofl_osstrtab->os_outdata->d_size - 1) == '\0'));
+
+	assert((ofl->ofl_osdynstr == NULL) ||
+	    (*((char *)ofl->ofl_osdynstr->os_outdata->d_buf) == '\0'));
+	assert((ofl->ofl_osdynstr == NULL) ||
+	    (*(((char *)ofl->ofl_osdynstr->os_outdata->d_buf) +
+	    ofl->ofl_osdynstr->os_outdata->d_size - DYNSTR_EXTRA_PAD - 1) ==
+	    '\0'));
 
 	/*
 	 * Emit Strtab diagnostics.

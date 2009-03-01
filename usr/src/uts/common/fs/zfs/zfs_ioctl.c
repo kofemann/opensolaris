@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -91,7 +91,7 @@ typedef struct zfs_ioc_vec {
 	boolean_t		zvec_his_log;
 } zfs_ioc_vec_t;
 
-static void clear_props(char *dataset, nvlist_t *props);
+static void clear_props(char *dataset, nvlist_t *props, nvlist_t *newprops);
 static int zfs_fill_zplprops_root(uint64_t, nvlist_t *, nvlist_t *,
     boolean_t *);
 int zfs_set_prop_nvlist(const char *, nvlist_t *);
@@ -390,6 +390,30 @@ zfs_secpolicy_send(zfs_cmd_t *zc, cred_t *cr)
 	    ZFS_DELEG_PERM_SEND, cr));
 }
 
+static int
+zfs_secpolicy_deleg_share(zfs_cmd_t *zc, cred_t *cr)
+{
+	vnode_t *vp;
+	int error;
+
+	if ((error = lookupname(zc->zc_value, UIO_SYSSPACE,
+	    NO_FOLLOW, NULL, &vp)) != 0)
+		return (error);
+
+	/* Now make sure mntpnt and dataset are ZFS */
+
+	if (vp->v_vfsp->vfs_fstype != zfsfstype ||
+	    (strcmp((char *)refstr_value(vp->v_vfsp->vfs_resource),
+	    zc->zc_name) != 0)) {
+		VN_RELE(vp);
+		return (EPERM);
+	}
+
+	VN_RELE(vp);
+	return (dsl_deleg_access(zc->zc_name,
+	    ZFS_DELEG_PERM_SHARE, cr));
+}
+
 int
 zfs_secpolicy_share(zfs_cmd_t *zc, cred_t *cr)
 {
@@ -399,25 +423,20 @@ zfs_secpolicy_share(zfs_cmd_t *zc, cred_t *cr)
 	if (secpolicy_nfs(cr) == 0) {
 		return (0);
 	} else {
-		vnode_t *vp;
-		int error;
+		return (zfs_secpolicy_deleg_share(zc, cr));
+	}
+}
 
-		if ((error = lookupname(zc->zc_value, UIO_SYSSPACE,
-		    NO_FOLLOW, NULL, &vp)) != 0)
-			return (error);
+int
+zfs_secpolicy_smb_acl(zfs_cmd_t *zc, cred_t *cr)
+{
+	if (!INGLOBALZONE(curproc))
+		return (EPERM);
 
-		/* Now make sure mntpnt and dataset are ZFS */
-
-		if (vp->v_vfsp->vfs_fstype != zfsfstype ||
-		    (strcmp((char *)refstr_value(vp->v_vfsp->vfs_resource),
-		    zc->zc_name) != 0)) {
-			VN_RELE(vp);
-			return (EPERM);
-		}
-
-		VN_RELE(vp);
-		return (dsl_deleg_access(zc->zc_name,
-		    ZFS_DELEG_PERM_SHARE, cr));
+	if (secpolicy_smb(cr) == 0) {
+		return (0);
+	} else {
+		return (zfs_secpolicy_deleg_share(zc, cr));
 	}
 }
 
@@ -1323,6 +1342,18 @@ zfs_ioc_dataset_list_next(zfs_cmd_t *zc)
 		(void) strlcat(zc->zc_name, "/", sizeof (zc->zc_name));
 	p = zc->zc_name + strlen(zc->zc_name);
 
+	/*
+	 * Pre-fetch the datasets.  dmu_objset_prefetch() always returns 0
+	 * but is not declared void because its called by dmu_objset_find().
+	 */
+	if (zc->zc_cookie == 0) {
+		uint64_t cookie = 0;
+		int len = sizeof (zc->zc_name) - (p - zc->zc_name);
+
+		while (dmu_dir_list_next(os, len, p, NULL, &cookie) == 0)
+			(void) dmu_objset_prefetch(p, NULL);
+	}
+
 	do {
 		error = dmu_dir_list_next(os,
 		    sizeof (zc->zc_name) - (p - zc->zc_name), p,
@@ -1366,6 +1397,9 @@ zfs_ioc_snapshot_list_next(zfs_cmd_t *zc)
 	if (error)
 		return (error == ENOENT ? ESRCH : error);
 
+	if (zc->zc_cookie == 0)
+		(void) dmu_objset_find(zc->zc_name, dmu_objset_prefetch,
+		    NULL, DS_FIND_SNAPSHOTS);
 	/*
 	 * A dataset name of maximum length cannot have any snapshots,
 	 * so exit immediately.
@@ -1394,9 +1428,10 @@ int
 zfs_set_prop_nvlist(const char *name, nvlist_t *nvl)
 {
 	nvpair_t *elem;
-	int error;
+	int error = 0;
 	uint64_t intval;
 	char *strval;
+	nvlist_t *genericnvl;
 
 	/*
 	 * First validate permission to set all of the properties
@@ -1476,6 +1511,7 @@ zfs_set_prop_nvlist(const char *name, nvlist_t *nvl)
 		}
 	}
 
+	VERIFY(nvlist_alloc(&genericnvl, NV_UNIQUE_NAME, KM_SLEEP) == 0);
 	elem = NULL;
 	while ((elem = nvlist_next_nvpair(nvl, elem)) != NULL) {
 		const char *propname = nvpair_name(elem);
@@ -1488,65 +1524,62 @@ zfs_set_prop_nvlist(const char *name, nvlist_t *nvl)
 			if (error == 0)
 				continue;
 			else
-				return (error);
+				goto out;
 		}
 
 		switch (prop) {
 		case ZFS_PROP_QUOTA:
 			if ((error = nvpair_value_uint64(elem, &intval)) != 0 ||
 			    (error = dsl_dir_set_quota(name, intval)) != 0)
-				return (error);
+				goto out;
 			break;
 
 		case ZFS_PROP_REFQUOTA:
 			if ((error = nvpair_value_uint64(elem, &intval)) != 0 ||
 			    (error = dsl_dataset_set_quota(name, intval)) != 0)
-				return (error);
+				goto out;
 			break;
 
 		case ZFS_PROP_RESERVATION:
 			if ((error = nvpair_value_uint64(elem, &intval)) != 0 ||
 			    (error = dsl_dir_set_reservation(name,
 			    intval)) != 0)
-				return (error);
+				goto out;
 			break;
 
 		case ZFS_PROP_REFRESERVATION:
 			if ((error = nvpair_value_uint64(elem, &intval)) != 0 ||
 			    (error = dsl_dataset_set_reservation(name,
 			    intval)) != 0)
-				return (error);
+				goto out;
 			break;
 
 		case ZFS_PROP_VOLSIZE:
 			if ((error = nvpair_value_uint64(elem, &intval)) != 0 ||
 			    (error = zvol_set_volsize(name,
 			    ddi_driver_major(zfs_dip), intval)) != 0)
-				return (error);
+				goto out;
 			break;
 
 		case ZFS_PROP_VOLBLOCKSIZE:
 			if ((error = nvpair_value_uint64(elem, &intval)) != 0 ||
 			    (error = zvol_set_volblocksize(name, intval)) != 0)
-				return (error);
+				goto out;
 			break;
 
 		case ZFS_PROP_VERSION:
 			if ((error = nvpair_value_uint64(elem, &intval)) != 0 ||
 			    (error = zfs_set_version(name, intval)) != 0)
-				return (error);
+				goto out;
 			break;
 
 		default:
 			if (nvpair_type(elem) == DATA_TYPE_STRING) {
 				if (zfs_prop_get_type(prop) !=
-				    PROP_TYPE_STRING)
-					return (EINVAL);
-				VERIFY(nvpair_value_string(elem, &strval) == 0);
-				if ((error = dsl_prop_set(name,
-				    nvpair_name(elem), 1, strlen(strval) + 1,
-				    strval)) != 0)
-					return (error);
+				    PROP_TYPE_STRING) {
+					error = EINVAL;
+					goto out;
+				}
 			} else if (nvpair_type(elem) == DATA_TYPE_UINT64) {
 				const char *unused;
 
@@ -1556,35 +1589,41 @@ zfs_set_prop_nvlist(const char *name, nvlist_t *nvl)
 				case PROP_TYPE_NUMBER:
 					break;
 				case PROP_TYPE_STRING:
-					return (EINVAL);
+					error = EINVAL;
+					goto out;
 				case PROP_TYPE_INDEX:
 					if (zfs_prop_index_to_string(prop,
-					    intval, &unused) != 0)
-						return (EINVAL);
+					    intval, &unused) != 0) {
+						error = EINVAL;
+						goto out;
+					}
 					break;
 				default:
 					cmn_err(CE_PANIC,
 					    "unknown property type");
 					break;
 				}
-
-				if ((error = dsl_prop_set(name, propname,
-				    8, 1, &intval)) != 0)
-					return (error);
 			} else {
-				return (EINVAL);
+				error = EINVAL;
+				goto out;
 			}
-			break;
+			if ((error = nvlist_add_nvpair(genericnvl, elem)) != 0)
+				goto out;
 		}
 	}
 
-	return (0);
+	if (nvlist_next_nvpair(genericnvl, NULL) != NULL) {
+		error = dsl_props_set(name, genericnvl);
+	}
+out:
+	nvlist_free(genericnvl);
+	return (error);
 }
 
 /*
  * inputs:
  * zc_name		name of filesystem
- * zc_value		name of property to inherit
+ * zc_value		name of property to set
  * zc_nvlist_src{_size}	nvlist of properties to apply
  * zc_cookie		clear existing local props?
  *
@@ -1607,7 +1646,7 @@ zfs_ioc_set_prop(zfs_cmd_t *zc)
 		if (dmu_objset_open(zc->zc_name, DMU_OST_ANY,
 		    DS_MODE_USER | DS_MODE_READONLY, &os) == 0) {
 			if (dsl_prop_get_all(os, &origprops, TRUE) == 0) {
-				clear_props(zc->zc_name, origprops);
+				clear_props(zc->zc_name, origprops, nvl);
 				nvlist_free(origprops);
 			}
 			dmu_objset_close(os);
@@ -1641,10 +1680,29 @@ zfs_ioc_pool_set_props(zfs_cmd_t *zc)
 	nvlist_t *props;
 	spa_t *spa;
 	int error;
+	nvpair_t *elem;
 
 	if ((error = get_nvlist(zc->zc_nvlist_src, zc->zc_nvlist_src_size,
 	    &props)))
 		return (error);
+
+	/*
+	 * If the only property is the configfile, then just do a spa_lookup()
+	 * to handle the faulted case.
+	 */
+	elem = nvlist_next_nvpair(props, NULL);
+	if (elem != NULL && strcmp(nvpair_name(elem),
+	    zpool_prop_to_name(ZPOOL_PROP_CACHEFILE)) == 0 &&
+	    nvlist_next_nvpair(props, elem) == NULL) {
+		mutex_enter(&spa_namespace_lock);
+		if ((spa = spa_lookup(zc->zc_name)) != NULL) {
+			spa_configfile_set(spa, props, B_FALSE);
+			spa_config_sync(spa, B_FALSE, B_TRUE);
+		}
+		mutex_exit(&spa_namespace_lock);
+		if (spa != NULL)
+			return (0);
+	}
 
 	if ((error = spa_open(zc->zc_name, &spa, FTAG)) != 0) {
 		nvlist_free(props);
@@ -1666,20 +1724,27 @@ zfs_ioc_pool_get_props(zfs_cmd_t *zc)
 	int error;
 	nvlist_t *nvp = NULL;
 
-	if ((error = spa_open(zc->zc_name, &spa, FTAG)) != 0)
-		return (error);
-
-	error = spa_prop_get(spa, &nvp);
+	if ((error = spa_open(zc->zc_name, &spa, FTAG)) != 0) {
+		/*
+		 * If the pool is faulted, there may be properties we can still
+		 * get (such as altroot and cachefile), so attempt to get them
+		 * anyway.
+		 */
+		mutex_enter(&spa_namespace_lock);
+		if ((spa = spa_lookup(zc->zc_name)) != NULL)
+			error = spa_prop_get(spa, &nvp);
+		mutex_exit(&spa_namespace_lock);
+	} else {
+		error = spa_prop_get(spa, &nvp);
+		spa_close(spa, FTAG);
+	}
 
 	if (error == 0 && zc->zc_nvlist_dst != NULL)
 		error = put_nvlist(zc, nvp);
 	else
 		error = EFAULT;
 
-	spa_close(spa, FTAG);
-
-	if (nvp)
-		nvlist_free(nvp);
+	nvlist_free(nvp);
 	return (error);
 }
 
@@ -2395,7 +2460,7 @@ zfs_ioc_rename(zfs_cmd_t *zc)
 }
 
 static void
-clear_props(char *dataset, nvlist_t *props)
+clear_props(char *dataset, nvlist_t *props, nvlist_t *newprops)
 {
 	zfs_cmd_t *zc;
 	nvpair_t *prop;
@@ -2406,6 +2471,9 @@ clear_props(char *dataset, nvlist_t *props)
 	(void) strcpy(zc->zc_name, dataset);
 	for (prop = nvlist_next_nvpair(props, NULL); prop;
 	    prop = nvlist_next_nvpair(props, prop)) {
+		if (newprops != NULL &&
+		    nvlist_exists(newprops, nvpair_name(prop)))
+			continue;
 		(void) strcpy(zc->zc_value, nvpair_name(prop));
 		if (zfs_secpolicy_inherit(zc, CRED()) == 0)
 			(void) zfs_ioc_inherit_prop(zc);
@@ -2513,7 +2581,7 @@ zfs_ioc_recv(zfs_cmd_t *zc)
 	 * so that the properties are applied to the new data.
 	 */
 	if (props) {
-		clear_props(tofs, origprops);
+		clear_props(tofs, origprops, props);
 		/*
 		 * XXX - Note, this is all-or-nothing; should be best-effort.
 		 */
@@ -2552,7 +2620,7 @@ zfs_ioc_recv(zfs_cmd_t *zc)
 	 * On error, restore the original props.
 	 */
 	if (error && props) {
-		clear_props(tofs, props);
+		clear_props(tofs, props, NULL);
 		(void) zfs_set_prop_nvlist(tofs, origprops);
 	}
 out:
@@ -2873,7 +2941,7 @@ zfs_ioc_share(zfs_cmd_t *zc)
 		if (error = zsmbexport_fs((void *)
 		    (uintptr_t)zc->zc_share.z_exportdata,
 		    zc->zc_share.z_sharetype == ZFS_SHARE_SMB ?
-		    B_TRUE : B_FALSE)) {
+		    B_TRUE: B_FALSE)) {
 			return (error);
 		}
 		break;
@@ -2892,6 +2960,129 @@ zfs_ioc_share(zfs_cmd_t *zc)
 
 	return (error);
 
+}
+
+ace_t full_access[] = {
+	{(uid_t)-1, ACE_ALL_PERMS, ACE_EVERYONE, 0}
+};
+
+/*
+ * Remove all ACL files in shares dir
+ */
+static int
+zfs_smb_acl_purge(znode_t *dzp)
+{
+	zap_cursor_t	zc;
+	zap_attribute_t	zap;
+	zfsvfs_t *zfsvfs = dzp->z_zfsvfs;
+	int error;
+
+	for (zap_cursor_init(&zc, zfsvfs->z_os, dzp->z_id);
+	    (error = zap_cursor_retrieve(&zc, &zap)) == 0;
+	    zap_cursor_advance(&zc)) {
+		if ((error = VOP_REMOVE(ZTOV(dzp), zap.za_name, kcred,
+		    NULL, 0)) != 0)
+			break;
+	}
+	zap_cursor_fini(&zc);
+	return (error);
+}
+
+static int
+zfs_ioc_smb_acl(zfs_cmd_t *zc)
+{
+	vnode_t *vp;
+	znode_t *dzp;
+	vnode_t *resourcevp = NULL;
+	znode_t *sharedir;
+	zfsvfs_t *zfsvfs;
+	nvlist_t *nvlist;
+	char *src, *target;
+	vattr_t vattr;
+	vsecattr_t vsec;
+	int error = 0;
+
+	if ((error = lookupname(zc->zc_value, UIO_SYSSPACE,
+	    NO_FOLLOW, NULL, &vp)) != 0)
+		return (error);
+
+	/* Now make sure mntpnt and dataset are ZFS */
+
+	if (vp->v_vfsp->vfs_fstype != zfsfstype ||
+	    (strcmp((char *)refstr_value(vp->v_vfsp->vfs_resource),
+	    zc->zc_name) != 0)) {
+		VN_RELE(vp);
+		return (EINVAL);
+	}
+
+	dzp = VTOZ(vp);
+	zfsvfs = dzp->z_zfsvfs;
+
+	ZFS_ENTER(zfsvfs);
+
+	if ((error = zfs_zget(zfsvfs, zfsvfs->z_shares_dir, &sharedir)) != 0) {
+		ZFS_EXIT(zfsvfs);
+		return (error);
+	}
+
+	switch (zc->zc_cookie) {
+	case ZFS_SMB_ACL_ADD:
+		vattr.va_mask = AT_MODE|AT_UID|AT_GID|AT_TYPE;
+		vattr.va_type = VREG;
+		vattr.va_mode = S_IFREG|0777;
+		vattr.va_uid = 0;
+		vattr.va_gid = 0;
+
+		vsec.vsa_mask = VSA_ACE;
+		vsec.vsa_aclentp = &full_access;
+		vsec.vsa_aclentsz = sizeof (full_access);
+		vsec.vsa_aclcnt = 1;
+
+		error = VOP_CREATE(ZTOV(sharedir), zc->zc_string,
+		    &vattr, EXCL, 0, &resourcevp, kcred, 0, NULL, &vsec);
+		if (resourcevp)
+			VN_RELE(resourcevp);
+		break;
+
+	case ZFS_SMB_ACL_REMOVE:
+		error = VOP_REMOVE(ZTOV(sharedir), zc->zc_string, kcred,
+		    NULL, 0);
+		break;
+
+	case ZFS_SMB_ACL_RENAME:
+		if ((error = get_nvlist(zc->zc_nvlist_src,
+		    zc->zc_nvlist_src_size, &nvlist)) != 0) {
+			VN_RELE(vp);
+			ZFS_EXIT(zfsvfs);
+			return (error);
+		}
+		if (nvlist_lookup_string(nvlist, ZFS_SMB_ACL_SRC, &src) ||
+		    nvlist_lookup_string(nvlist, ZFS_SMB_ACL_TARGET,
+		    &target)) {
+			VN_RELE(vp);
+			ZFS_EXIT(zfsvfs);
+			return (error);
+		}
+		error = VOP_RENAME(ZTOV(sharedir), src, ZTOV(sharedir), target,
+		    kcred, NULL, 0);
+		nvlist_free(nvlist);
+		break;
+
+	case ZFS_SMB_ACL_PURGE:
+		error = zfs_smb_acl_purge(sharedir);
+		break;
+
+	default:
+		error = EINVAL;
+		break;
+	}
+
+	VN_RELE(vp);
+	VN_RELE(ZTOV(sharedir));
+
+	ZFS_EXIT(zfsvfs);
+
+	return (error);
 }
 
 /*
@@ -2950,6 +3141,7 @@ static zfs_ioc_vec_t zfs_ioc_vec[] = {
 	    DATASET_NAME, B_FALSE },
 	{ zfs_ioc_share, zfs_secpolicy_share, DATASET_NAME, B_FALSE },
 	{ zfs_ioc_inherit_prop, zfs_secpolicy_inherit, DATASET_NAME, B_TRUE },
+	{ zfs_ioc_smb_acl, zfs_secpolicy_smb_acl, DATASET_NAME, B_FALSE }
 };
 
 static int

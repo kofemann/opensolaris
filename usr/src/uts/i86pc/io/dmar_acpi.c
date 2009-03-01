@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Portions Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Portions Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -44,6 +44,8 @@
 #include <sys/bootconf.h>
 #include <sys/int_fmtio.h>
 #include <sys/dmar_acpi.h>
+#include <sys/smbios.h>
+#include <sys/iommulib.h>
 
 /*
  * the following pci manipulate function pinter
@@ -58,10 +60,21 @@ int intel_dmar_acpi_debug = 0;
 #define	dcmn_err	if (intel_dmar_acpi_debug) cmn_err
 
 /*
+ * define for printing blacklist ID
+ */
+int intel_iommu_blacklist_id;
+
+/*
  * global varables
  */
 boolean_t intel_iommu_support;
 intel_dmar_info_t *dmar_info;
+
+/*
+ * global varables to save source id and drhd info for ioapic
+ * to support interrupt remapping
+ */
+list_t	ioapic_drhd_infos;
 
 /*
  * internal varables
@@ -340,6 +353,7 @@ parse_dmar_drhd(dmar_acpi_unit_head_t *head)
 	dmar_acpi_dev_scope_t *scope;
 	list_t *lp;
 	pci_dev_scope_t *devs;
+	ioapic_drhd_info_t	*ioapic_dinfo;
 
 	drhd = (dmar_acpi_drhd_t *)head;
 	ASSERT(head->uh_type == DMAR_UNIT_TYPE_DRHD);
@@ -371,6 +385,19 @@ parse_dmar_drhd(dmar_acpi_unit_head_t *head)
 		    != PARSE_DMAR_SUCCESS) {
 			return (PARSE_DMAR_FAIL);
 		}
+		/* get ioapic source id for interrupt remapping */
+		if (devs->pds_type == DEV_SCOPE_IOAPIC) {
+			ioapic_dinfo = kmem_zalloc
+			    (sizeof (ioapic_drhd_info_t), KM_SLEEP);
+
+			ioapic_dinfo->ioapic_id = scope->ds_enumid;
+			ioapic_dinfo->sid =
+			    (devs->pds_bus << 8) |
+			    (devs->pds_dev << 3) |
+			    (devs->pds_func);
+			ioapic_dinfo->drhd = dinfo;
+			list_insert_tail(&ioapic_drhd_infos, ioapic_dinfo);
+		}
 
 		list_insert_tail(&dinfo->di_dev_list, devs);
 		scope = (dmar_acpi_dev_scope_t *)((unsigned long)scope +
@@ -380,6 +407,100 @@ parse_dmar_drhd(dmar_acpi_unit_head_t *head)
 	lp = &dmar_info->dmari_drhd[dinfo->di_segment];
 	list_insert_tail(lp, dinfo);
 	return (PARSE_DMAR_SUCCESS);
+}
+
+#define	OEMID_OFF	10
+#define	OEMID_LEN	6
+#define	OEM_TBLID_OFF	16
+#define	OEM_TBLID_LEN	8
+#define	OEMREV_OFF	24
+#define	OEMREV_LEN	4
+
+static int
+dmar_blacklisted(caddr_t dmart)
+{
+	char oemid[OEMID_LEN + 1] = {0};
+	char oem_tblid[OEM_TBLID_LEN + 1] = {0};
+	char oemrev[OEMREV_LEN + 1] = {0};
+	const char *mfgr = "?";
+	const char *product = "?";
+	const char *version = "?";
+	smbios_info_t smbios_info;
+	smbios_system_t smbios_sys;
+	id_t id;
+	char **blacklist;
+	int i;
+	uint_t n;
+
+	(void) strncpy(oemid, dmart + OEMID_OFF, OEMID_LEN);
+	(void) strncpy(oem_tblid, dmart + OEM_TBLID_OFF, OEM_TBLID_LEN);
+	(void) strncpy(oemrev, dmart + OEMREV_OFF, OEMREV_LEN);
+
+	iommulib_smbios = smbios_open(NULL, SMB_VERSION, ksmbios_flags,
+	    NULL);
+	if (iommulib_smbios &&
+	    (id = smbios_info_system(iommulib_smbios, &smbios_sys))
+	    != SMB_ERR &&
+	    smbios_info_common(iommulib_smbios, id, &smbios_info)
+	    != SMB_ERR) {
+		mfgr = smbios_info.smbi_manufacturer;
+		product = smbios_info.smbi_product;
+		version = smbios_info.smbi_version;
+	}
+
+	if (intel_iommu_blacklist_id) {
+		cmn_err(CE_NOTE, "SMBIOS ID:");
+		cmn_err(CE_NOTE, "Manufacturer = <%s>", mfgr);
+		cmn_err(CE_NOTE, "Product = <%s>", product);
+		cmn_err(CE_NOTE, "Version = <%s>", version);
+		cmn_err(CE_NOTE, "DMAR ID:");
+		cmn_err(CE_NOTE, "oemid = <%s>", oemid);
+		cmn_err(CE_NOTE, "oemtblid = <%s>", oem_tblid);
+		cmn_err(CE_NOTE, "oemrev = <%s>", oemrev);
+	}
+
+	/*
+	 * Fake up a dev_t since searching global prop list needs it
+	 */
+	if (ddi_prop_lookup_string_array(
+	    makedevice(ddi_name_to_major("rootnex"), 0), ddi_root_node(),
+	    DDI_PROP_DONTPASS | DDI_PROP_ROOTNEX_GLOBAL,
+	    "intel-iommu-blacklist", &blacklist, &n) != DDI_PROP_SUCCESS) {
+		/* No blacklist */
+		return (0);
+	}
+
+	if (n < 4 || n % 4 != 0) {
+		cmn_err(CE_WARN,
+		    "invalid Intel IOMMU blacklist: not a multiple of four");
+		ddi_prop_free(blacklist);
+		return (0);
+	}
+
+	for (i = 0; i < n; i += 4) {
+		if (strcmp(blacklist[i], "SMBIOS") == 0 &&
+		    strcmp(blacklist[i+1], mfgr) == 0 &&
+		    (blacklist[i+2][0] == '\0' ||
+		    strcmp(blacklist[i+2], product) == 0) &&
+		    (blacklist[i+3][0] == '\0' ||
+		    strcmp(blacklist[i+3], version) == 0)) {
+			ddi_prop_free(blacklist);
+			return (1);
+		}
+		if (strcmp(blacklist[i], "DMAR") == 0 &&
+		    strcmp(blacklist[i+1], oemid) == 0 &&
+		    (blacklist[i+2][0] == '\0' ||
+		    strcmp(blacklist[i+2], oem_tblid) == 0) &&
+		    (blacklist[i+3][0] == '\0' ||
+		    strcmp(blacklist[i+3], oemrev) == 0)) {
+			ddi_prop_free(blacklist);
+			return (1);
+		}
+	}
+
+	ddi_prop_free(blacklist);
+
+	return (0);
 }
 
 /*
@@ -403,6 +524,11 @@ parse_dmar(void)
 		dcmn_err(CE_CONT, "wrong DMAR signature: %c%c%c%c",
 		    dmar_head->dh_sig[0], dmar_head->dh_sig[1],
 		    dmar_head->dh_sig[2], dmar_head->dh_sig[3]);
+		return (PARSE_DMAR_FAIL);
+	}
+
+	if (dmar_blacklisted(dmart)) {
+		cmn_err(CE_NOTE, "Intel IOMMU is blacklisted on this platform");
 		return (PARSE_DMAR_FAIL);
 	}
 
@@ -480,6 +606,7 @@ detect_dmar(void)
 {
 	int len;
 	char *intel_iommu;
+	char *enable;
 
 	/*
 	 * if "intel-iommu = no" boot property is set,
@@ -494,6 +621,23 @@ detect_dmar(void)
 			return (B_FALSE);
 		}
 		kmem_free(intel_iommu, len);
+	}
+
+	/*
+	 * Check rootnex.conf for enable/disable IOMMU
+	 * Fake up a dev_t since searching global prop list needs it
+	 */
+	if (ddi_prop_lookup_string(
+	    makedevice(ddi_name_to_major("rootnex"), 0), ddi_root_node(),
+	    DDI_PROP_DONTPASS | DDI_PROP_ROOTNEX_GLOBAL,
+	    "intel-iommu", &enable) == DDI_PROP_SUCCESS) {
+		if (strcmp(enable, "false") == 0 || strcmp(enable, "no") == 0) {
+			dcmn_err(CE_CONT,
+			    "\"intel-iommu=no\" set in rootnex.conf\n");
+			ddi_prop_free(enable);
+			return (B_FALSE);
+		}
+		ddi_prop_free(enable);
 	}
 
 	/*
@@ -620,6 +764,23 @@ intel_iommu_probe_and_parse(void)
 		kmem_free(opt, len);
 	}
 
+	/*
+	 * retrieve the print-iommu-blacklist-id boot option
+	 */
+	if ((len = do_bsys_getproplen(NULL, "print-iommu-blacklist-id")) > 0) {
+		opt = kmem_alloc(len, KM_SLEEP);
+		(void) do_bsys_getprop(NULL, "print-iommu-blacklist-id", opt);
+		if (strcmp(opt, "yes") == 0 ||
+		    strcmp(opt, "true") == 0) {
+			intel_iommu_blacklist_id = 1;
+		} else if (strcmp(opt, "no") == 0 ||
+		    strcmp(opt, "false") == 0) {
+			intel_iommu_blacklist_id = 0;
+		}
+		kmem_free(opt, len);
+	}
+
+
 	dcmn_err(CE_CONT, "intel iommu detect start\n");
 
 	if (detect_dmar() == B_FALSE) {
@@ -639,6 +800,10 @@ intel_iommu_probe_and_parse(void)
 		list_create(&(dmar_info->dmari_rmrr[i]), sizeof (rmrr_info_t),
 		    offsetof(rmrr_info_t, node));
 	}
+
+	/* create ioapic - drhd map info for interrupt remapping */
+	list_create(&ioapic_drhd_infos, sizeof (ioapic_drhd_info_t),
+	    offsetof(ioapic_drhd_info_t, node));
 
 	/*
 	 * parse dmar acpi table

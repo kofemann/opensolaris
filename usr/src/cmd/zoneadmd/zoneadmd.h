@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -30,6 +30,8 @@
 #ifdef	__cplusplus
 extern "C" {
 #endif
+
+#include <libdladm.h>
 
 /*
  * Multi-threaded programs should avoid MT-unsafe library calls (i.e., any-
@@ -87,6 +89,7 @@ extern char boot_args[BOOTARGS_MAX];
 extern char bad_boot_arg[BOOTARGS_MAX];
 extern boolean_t zone_isnative;
 extern boolean_t zone_iscluster;
+extern dladm_handle_t dld_handle;
 
 extern void zerror(zlog_t *, boolean_t, const char *, ...);
 extern char *localize_msg(char *locale, const char *msg);
@@ -140,9 +143,6 @@ extern void resolve_lofs(zlog_t *zlogp, char *path, size_t pathlen);
 /*
  * Console subsystem routines.
  */
-extern int init_console_slave(zlog_t *);
-extern void destroy_console_slave(void);
-extern void reset_slave_terminal(zlog_t *);
 extern int init_console(zlog_t *);
 extern void serve_console(zlog_t *);
 

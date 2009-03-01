@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -37,7 +37,7 @@
 #if defined(_BIG_ENDIAN)
 uint32_t hxge_msi_enable = 2;
 #else
-uint32_t hxge_msi_enable = 1;
+uint32_t hxge_msi_enable = 2;
 #endif
 
 /*
@@ -67,25 +67,15 @@ uint32_t hxge_no_tx_lb = 0;
 uint32_t hxge_tx_lb_policy = HXGE_TX_LB_TCPUDP;
 
 /*
- * Add tunable to reduce the amount of time spent in the
- * ISR doing Rx Processing.
- */
-#if defined(__sparc)
-uint32_t hxge_max_rx_pkts = 512;
-#else
-uint32_t hxge_max_rx_pkts = 1024;
-#endif
-
-/*
  * Tunables to manage the receive buffer blocks.
  *
  * hxge_rx_threshold_hi: copy all buffers.
  * hxge_rx_bcopy_size_type: receive buffer block size type.
  * hxge_rx_threshold_lo: copy only up to tunable block size type.
  */
-hxge_rxbuf_threshold_t hxge_rx_threshold_hi = HXGE_RX_COPY_7;
+hxge_rxbuf_threshold_t hxge_rx_threshold_hi = HXGE_RX_COPY_NONE;
 hxge_rxbuf_type_t hxge_rx_buf_size_type = RCR_PKTBUFSZ_0;
-hxge_rxbuf_threshold_t hxge_rx_threshold_lo = HXGE_RX_COPY_3;
+hxge_rxbuf_threshold_t hxge_rx_threshold_lo = HXGE_RX_COPY_NONE;
 
 rtrace_t hpi_rtracebuf;
 
@@ -105,9 +95,7 @@ static hxge_status_t hxge_map_regs(p_hxge_t hxgep);
 static void hxge_unmap_regs(p_hxge_t hxgep);
 
 hxge_status_t hxge_add_intrs(p_hxge_t hxgep);
-static hxge_status_t hxge_add_soft_intrs(p_hxge_t hxgep);
 static void hxge_remove_intrs(p_hxge_t hxgep);
-static void hxge_remove_soft_intrs(p_hxge_t hxgep);
 static hxge_status_t hxge_add_intrs_adv(p_hxge_t hxgep);
 static hxge_status_t hxge_add_intrs_adv_type(p_hxge_t, uint32_t);
 static hxge_status_t hxge_add_intrs_adv_type_fix(p_hxge_t, uint32_t);
@@ -147,7 +135,6 @@ static void hxge_uninit_common_dev(p_hxge_t);
  */
 static int hxge_m_start(void *);
 static void hxge_m_stop(void *);
-static int hxge_m_unicst(void *, const uint8_t *);
 static int hxge_m_multicst(void *, boolean_t, const uint8_t *);
 static int hxge_m_promisc(void *, boolean_t);
 static void hxge_m_ioctl(void *, queue_t *, mblk_t *);
@@ -168,8 +155,8 @@ static int hxge_get_priv_prop(p_hxge_t hxgep, const char *pr_name,
 static void hxge_link_poll(void *arg);
 static void hxge_link_update(p_hxge_t hxge, link_state_t state);
 static void hxge_msix_init(p_hxge_t hxgep);
-void hxge_check_msix_parity_err(p_hxge_t hxgep);
-static uint8_t gen_32bit_parity(uint32_t data, boolean_t odd_parity);
+static void hxge_store_msix_table(p_hxge_t hxgep);
+static void hxge_check_1entry_msix_table(p_hxge_t hxgep, int msix_index);
 
 mac_priv_prop_t hxge_priv_props[] = {
 	{"_rxdma_intr_time", MAC_PROP_PERM_RW},
@@ -193,7 +180,6 @@ mac_priv_prop_t hxge_priv_props[] = {
 #define	HXGE_M_CALLBACK_FLAGS	\
 	(MC_IOCTL | MC_GETCAPAB | MC_SETPROP | MC_GETPROP)
 
-extern mblk_t *hxge_m_tx(void *arg, mblk_t *mp);
 extern hxge_status_t hxge_pfc_set_default_mac_addr(p_hxge_t hxgep);
 
 static mac_callbacks_t hxge_m_callbacks = {
@@ -203,8 +189,8 @@ static mac_callbacks_t hxge_m_callbacks = {
 	hxge_m_stop,
 	hxge_m_promisc,
 	hxge_m_multicst,
-	hxge_m_unicst,
-	hxge_m_tx,
+	NULL,
+	NULL,
 	hxge_m_ioctl,
 	hxge_m_getcapab,
 	NULL,
@@ -212,6 +198,10 @@ static mac_callbacks_t hxge_m_callbacks = {
 	hxge_m_setprop,
 	hxge_m_getprop
 };
+
+/* PSARC/2007/453 MSI-X interrupt limit override. */
+#define	HXGE_MSIX_REQUEST_10G	8
+static int hxge_create_msi_property(p_hxge_t);
 
 /* Enable debug messages as necessary. */
 uint64_t hxge_debug_level = 0;
@@ -397,6 +387,7 @@ hxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	p_hxge_t	hxgep = NULL;
 	int		instance;
 	int		status = DDI_SUCCESS;
+	int		i;
 
 	HXGE_DEBUG_MSG((hxgep, DDI_CTL, "==> hxge_attach"));
 
@@ -471,6 +462,16 @@ hxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	hxgep->hxge_debug_level = hxge_debug_level;
 	hpi_debug_level = hxge_debug_level;
 
+	/*
+	 * Initialize MMAC struture.
+	 */
+	(void) hxge_pfc_num_macs_get(hxgep, &hxgep->mmac.total);
+	hxgep->mmac.available = hxgep->mmac.total;
+	for (i = 0; i < hxgep->mmac.total; i++) {
+		hxgep->mmac.addrs[i].set = B_FALSE;
+		hxgep->mmac.addrs[i].primary = B_FALSE;
+	}
+
 	hxge_fm_init(hxgep, &hxge_dev_reg_acc_attr, &hxge_dev_desc_dma_acc_attr,
 	    &hxge_rx_dma_attr);
 
@@ -479,9 +480,6 @@ hxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL, "hxge_map_regs failed"));
 		goto hxge_attach_fail3;
 	}
-
-	/* Scrub the MSI-X memory */
-	hxge_msix_init(hxgep);
 
 	status = hxge_init_common_dev(hxgep);
 	if (status != HXGE_OK) {
@@ -508,6 +506,9 @@ hxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		HXGE_DEBUG_MSG((hxgep, DDI_CTL, "set mutex failed"));
 		goto hxge_attach_fail;
 	}
+
+	/* Scrub the MSI-X memory */
+	hxge_msix_init(hxgep);
 
 	status = hxge_get_config_properties(hxgep);
 	if (status != HXGE_OK) {
@@ -542,16 +543,13 @@ hxge_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		goto hxge_attach_fail;
 	}
 
-	status = hxge_add_soft_intrs(hxgep);
-	if (status != DDI_SUCCESS) {
-		HXGE_DEBUG_MSG((hxgep, HXGE_ERR_CTL, "add_soft_intr failed"));
-		goto hxge_attach_fail;
-	}
-
 	/*
 	 * Enable interrupts.
 	 */
 	hxge_intrs_enable(hxgep);
+
+	/* Keep copy of MSIx table written */
+	hxge_store_msix_table(hxgep);
 
 	if ((status = hxge_mac_register(hxgep)) != HXGE_OK) {
 		HXGE_DEBUG_MSG((hxgep, DDI_CTL,
@@ -694,9 +692,6 @@ hxge_unattach(p_hxge_t hxgep)
 
 	/* Stop any further interrupts. */
 	hxge_remove_intrs(hxgep);
-
-	/* Remove soft interrups */
-	hxge_remove_soft_intrs(hxgep);
 
 	/* Stop the device and free resources. */
 	hxge_destroy_dev(hxgep);
@@ -1020,6 +1015,9 @@ hxge_init(p_hxge_t hxgep)
 
 	hxge_intrs_enable(hxgep);
 
+	/* Keep copy of MSIx table written */
+	hxge_store_msix_table(hxgep);
+
 	/*
 	 * Enable hardware interrupts.
 	 */
@@ -1107,47 +1105,6 @@ hxge_uninit(p_hxge_t hxgep)
 	hxgep->drv_state &= ~STATE_HW_INITIALIZED;
 
 	HXGE_DEBUG_MSG((hxgep, DDI_CTL, "<== hxge_uninit"));
-}
-
-void
-hxge_get64(p_hxge_t hxgep, p_mblk_t mp)
-{
-#if defined(__i386)
-	size_t		reg;
-#else
-	uint64_t	reg;
-#endif
-	uint64_t	regdata;
-	int		i, retry;
-
-	bcopy((char *)mp->b_rptr, (char *)&reg, sizeof (uint64_t));
-	regdata = 0;
-	retry = 1;
-
-	for (i = 0; i < retry; i++) {
-		HXGE_REG_RD64(hxgep->hpi_handle, reg, &regdata);
-	}
-	bcopy((char *)&regdata, (char *)mp->b_rptr, sizeof (uint64_t));
-}
-
-void
-hxge_put64(p_hxge_t hxgep, p_mblk_t mp)
-{
-#if defined(__i386)
-	size_t		reg;
-#else
-	uint64_t	reg;
-#endif
-	uint64_t	buf[2];
-
-	bcopy((char *)mp->b_rptr, (char *)&buf[0], 2 * sizeof (uint64_t));
-#if defined(__i386)
-	reg = (size_t)buf[0];
-#else
-	reg = buf[0];
-#endif
-
-	HXGE_HPI_PIO_WRITE64(hxgep->hpi_handle, reg, buf[1]);
 }
 
 /*ARGSUSED*/
@@ -1279,6 +1236,9 @@ hxge_resume(p_hxge_t hxgep)
 	(void) hxge_tx_vmac_enable(hxgep);
 
 	hxge_intrs_enable(hxgep);
+
+	/* Keep copy of MSIx table written */
+	hxge_store_msix_table(hxgep);
 
 	hxgep->suspended = 0;
 
@@ -2524,29 +2484,6 @@ hxge_m_stop(void *arg)
 }
 
 static int
-hxge_m_unicst(void *arg, const uint8_t *macaddr)
-{
-	p_hxge_t		hxgep = (p_hxge_t)arg;
-	struct ether_addr	addrp;
-	hxge_status_t		status;
-
-	HXGE_DEBUG_MSG((hxgep, MAC_CTL, "==> hxge_m_unicst"));
-
-	bcopy(macaddr, (uint8_t *)&addrp, ETHERADDRL);
-
-	status = hxge_set_mac_addr(hxgep, &addrp);
-	if (status != HXGE_OK) {
-		HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL,
-		    "<== hxge_m_unicst: set unitcast failed"));
-		return (EINVAL);
-	}
-
-	HXGE_DEBUG_MSG((hxgep, MAC_CTL, "<== hxge_m_unicst"));
-
-	return (0);
-}
-
-static int
 hxge_m_multicst(void *arg, boolean_t add, const uint8_t *mca)
 {
 	p_hxge_t		hxgep = (p_hxge_t)arg;
@@ -2631,8 +2568,6 @@ hxge_m_ioctl(void *arg, queue_t *wq, mblk_t *mp)
 	case ND_SET:
 		break;
 
-	case HXGE_GET64:
-	case HXGE_PUT64:
 	case HXGE_GET_TX_RING_SZ:
 	case HXGE_GET_TX_DESC:
 	case HXGE_TX_SIDE_RESET:
@@ -2674,8 +2609,6 @@ hxge_m_ioctl(void *arg, queue_t *wq, mblk_t *mp)
 
 	case HXGE_PUT_TCAM:
 	case HXGE_GET_TCAM:
-	case HXGE_GET64:
-	case HXGE_PUT64:
 	case HXGE_GET_TX_RING_SZ:
 	case HXGE_GET_TX_DESC:
 	case HXGE_TX_SIDE_RESET:
@@ -2692,15 +2625,414 @@ hxge_m_ioctl(void *arg, queue_t *wq, mblk_t *mp)
 }
 
 /*ARGSUSED*/
+static int
+hxge_tx_ring_start(mac_ring_driver_t rdriver, uint64_t mr_gen_num)
+{
+	p_hxge_ring_handle_t	rhp = (p_hxge_ring_handle_t)rdriver;
+	p_hxge_t		hxgep;
+	p_tx_ring_t		ring;
+
+	ASSERT(rhp != NULL);
+	ASSERT((rhp->index >= 0) && (rhp->index < HXGE_MAX_TDCS));
+
+	hxgep = rhp->hxgep;
+
+	/*
+	 * Get the ring pointer.
+	 */
+	ring = hxgep->tx_rings->rings[rhp->index];
+
+	/*
+	 * Fill in the handle for the transmit.
+	 */
+	MUTEX_ENTER(&ring->lock);
+	ring->ring_handle = rhp->ring_handle;
+	MUTEX_EXIT(&ring->lock);
+
+	return (0);
+}
+
+static void
+hxge_tx_ring_stop(mac_ring_driver_t rdriver)
+{
+	p_hxge_ring_handle_t    rhp = (p_hxge_ring_handle_t)rdriver;
+	p_hxge_t		hxgep;
+	p_tx_ring_t		ring;
+
+	ASSERT(rhp != NULL);
+	ASSERT((rhp->index >= 0) && (rhp->index < HXGE_MAX_TDCS));
+
+	hxgep = rhp->hxgep;
+	ring = hxgep->tx_rings->rings[rhp->index];
+
+	MUTEX_ENTER(&ring->lock);
+	ring->ring_handle = (mac_ring_handle_t)NULL;
+	MUTEX_EXIT(&ring->lock);
+}
+
+static int
+hxge_rx_ring_start(mac_ring_driver_t rdriver, uint64_t mr_gen_num)
+{
+	p_hxge_ring_handle_t	rhp = (p_hxge_ring_handle_t)rdriver;
+	p_hxge_t		hxgep;
+	p_rx_rcr_ring_t		ring;
+	int			i;
+
+	ASSERT(rhp != NULL);
+	ASSERT((rhp->index >= 0) && (rhp->index < HXGE_MAX_TDCS));
+
+	hxgep = rhp->hxgep;
+
+	/*
+	 * Get pointer to ring.
+	 */
+	ring = hxgep->rx_rcr_rings->rcr_rings[rhp->index];
+
+	MUTEX_ENTER(&ring->lock);
+
+	if (rhp->started) {
+		MUTEX_EXIT(&ring->lock);
+		return (0);
+	}
+
+	/*
+	 * Set the ldvp and ldgp pointers to enable/disable
+	 * polling.
+	 */
+	for (i = 0; i < hxgep->ldgvp->maxldvs; i++) {
+		if ((hxgep->ldgvp->ldvp[i].is_rxdma == 1) &&
+		    (hxgep->ldgvp->ldvp[i].channel == rhp->index)) {
+			ring->ldvp = &hxgep->ldgvp->ldvp[i];
+			ring->ldgp = hxgep->ldgvp->ldvp[i].ldgp;
+			break;
+		}
+	}
+
+	rhp->started = B_TRUE;
+	ring->rcr_mac_handle = rhp->ring_handle;
+	ring->rcr_gen_num = mr_gen_num;
+	MUTEX_EXIT(&ring->lock);
+
+	return (0);
+}
+
+static void
+hxge_rx_ring_stop(mac_ring_driver_t rdriver)
+{
+	p_hxge_ring_handle_t	rhp = (p_hxge_ring_handle_t)rdriver;
+	p_hxge_t		hxgep;
+	p_rx_rcr_ring_t		ring;
+
+	ASSERT(rhp != NULL);
+	ASSERT((rhp->index >= 0) && (rhp->index < HXGE_MAX_TDCS));
+
+	hxgep = rhp->hxgep;
+	ring =  hxgep->rx_rcr_rings->rcr_rings[rhp->index];
+
+	MUTEX_ENTER(&ring->lock);
+	rhp->started = B_TRUE;
+	ring->rcr_mac_handle = NULL;
+	ring->ldvp = NULL;
+	ring->ldgp = NULL;
+	MUTEX_EXIT(&ring->lock);
+}
+
+static int
+hxge_rx_group_start(mac_group_driver_t gdriver)
+{
+	hxge_ring_group_t	*group = (hxge_ring_group_t *)gdriver;
+
+	ASSERT(group->hxgep != NULL);
+	ASSERT(group->hxgep->hxge_mac_state == HXGE_MAC_STARTED);
+
+	MUTEX_ENTER(group->hxgep->genlock);
+	group->started = B_TRUE;
+	MUTEX_EXIT(group->hxgep->genlock);
+
+	return (0);
+}
+
+static void
+hxge_rx_group_stop(mac_group_driver_t gdriver)
+{
+	hxge_ring_group_t	*group = (hxge_ring_group_t *)gdriver;
+
+	ASSERT(group->hxgep != NULL);
+	ASSERT(group->hxgep->hxge_mac_state == HXGE_MAC_STARTED);
+	ASSERT(group->started == B_TRUE);
+
+	MUTEX_ENTER(group->hxgep->genlock);
+	group->started = B_FALSE;
+	MUTEX_EXIT(group->hxgep->genlock);
+}
+
+static int
+hxge_mmac_get_slot(p_hxge_t hxgep, int *slot)
+{
+	int	i;
+
+	/*
+	 * Find an open slot.
+	 */
+	for (i = 0; i < hxgep->mmac.total; i++) {
+		if (!hxgep->mmac.addrs[i].set) {
+			*slot = i;
+			return (0);
+		}
+	}
+
+	return (ENXIO);
+}
+
+static int
+hxge_mmac_set_addr(p_hxge_t hxgep, int slot, const uint8_t *addr)
+{
+	struct ether_addr	eaddr;
+	hxge_status_t		status = HXGE_OK;
+
+	bcopy(addr, (uint8_t *)&eaddr, ETHERADDRL);
+
+	/*
+	 * Set new interface local address and re-init device.
+	 * This is destructive to any other streams attached
+	 * to this device.
+	 */
+	RW_ENTER_WRITER(&hxgep->filter_lock);
+	status = hxge_pfc_set_mac_address(hxgep, slot, &eaddr);
+	RW_EXIT(&hxgep->filter_lock);
+	if (status != HXGE_OK)
+		return (status);
+
+	hxgep->mmac.addrs[slot].set = B_TRUE;
+	bcopy(addr, hxgep->mmac.addrs[slot].addr, ETHERADDRL);
+	hxgep->mmac.available--;
+	if (slot == HXGE_MAC_DEFAULT_ADDR_SLOT)
+		hxgep->mmac.addrs[slot].primary = B_TRUE;
+
+	return (0);
+}
+
+static int
+hxge_mmac_find_addr(p_hxge_t hxgep, const uint8_t *addr, int *slot)
+{
+	int	i, result;
+
+	for (i = 0; i < hxgep->mmac.total; i++) {
+		if (hxgep->mmac.addrs[i].set) {
+			result = memcmp(hxgep->mmac.addrs[i].addr,
+			    addr, ETHERADDRL);
+			if (result == 0) {
+				*slot = i;
+				return (0);
+			}
+		}
+	}
+
+	return (EINVAL);
+}
+
+static int
+hxge_mmac_unset_addr(p_hxge_t hxgep, int slot)
+{
+	hxge_status_t	status;
+	int		i;
+
+	status = hxge_pfc_clear_mac_address(hxgep, slot);
+	if (status != HXGE_OK)
+		return (status);
+
+	for (i = 0; i < ETHERADDRL; i++)
+		hxgep->mmac.addrs[slot].addr[i] = 0;
+
+	hxgep->mmac.addrs[slot].set = B_FALSE;
+	if (slot == HXGE_MAC_DEFAULT_ADDR_SLOT)
+		hxgep->mmac.addrs[slot].primary = B_FALSE;
+	hxgep->mmac.available++;
+
+	return (0);
+}
+
+static int
+hxge_rx_group_add_mac(void *arg, const uint8_t *mac_addr)
+{
+	hxge_ring_group_t	*group = arg;
+	p_hxge_t		hxgep = group->hxgep;
+	int			slot = 0;
+
+	ASSERT(group->type == MAC_RING_TYPE_RX);
+
+	MUTEX_ENTER(hxgep->genlock);
+
+	/*
+	 * Find a slot for the address.
+	 */
+	if (hxge_mmac_get_slot(hxgep, &slot) != 0) {
+		MUTEX_EXIT(hxgep->genlock);
+		return (ENOSPC);
+	}
+
+	/*
+	 * Program the MAC address.
+	 */
+	if (hxge_mmac_set_addr(hxgep, slot, mac_addr) != 0) {
+		MUTEX_EXIT(hxgep->genlock);
+		return (ENOSPC);
+	}
+
+	MUTEX_EXIT(hxgep->genlock);
+	return (0);
+}
+
+static int
+hxge_rx_group_rem_mac(void *arg, const uint8_t *mac_addr)
+{
+	hxge_ring_group_t	*group = arg;
+	p_hxge_t		hxgep = group->hxgep;
+	int			rv, slot;
+
+	ASSERT(group->type == MAC_RING_TYPE_RX);
+
+	MUTEX_ENTER(hxgep->genlock);
+
+	if ((rv = hxge_mmac_find_addr(hxgep, mac_addr, &slot)) != 0) {
+		MUTEX_EXIT(hxgep->genlock);
+		return (rv);
+	}
+
+	if ((rv = hxge_mmac_unset_addr(hxgep, slot)) != 0) {
+		MUTEX_EXIT(hxgep->genlock);
+		return (rv);
+	}
+
+	MUTEX_EXIT(hxgep->genlock);
+	return (0);
+}
+
+static void
+hxge_group_get(void *arg, mac_ring_type_t type, int groupid,
+    mac_group_info_t *infop, mac_group_handle_t gh)
+{
+	p_hxge_t		hxgep = arg;
+	hxge_ring_group_t	*group;
+
+	ASSERT(type == MAC_RING_TYPE_RX);
+
+	switch (type) {
+	case MAC_RING_TYPE_RX:
+		group = &hxgep->rx_groups[groupid];
+		group->hxgep = hxgep;
+		group->ghandle = gh;
+		group->index = groupid;
+		group->type = type;
+
+		infop->mgi_driver = (mac_group_driver_t)group;
+		infop->mgi_start = hxge_rx_group_start;
+		infop->mgi_stop = hxge_rx_group_stop;
+		infop->mgi_addmac = hxge_rx_group_add_mac;
+		infop->mgi_remmac = hxge_rx_group_rem_mac;
+		infop->mgi_count = HXGE_MAX_RDCS;
+		break;
+
+	case MAC_RING_TYPE_TX:
+	default:
+		break;
+	}
+}
+
+/*
+ * Callback function for the GLDv3 layer to register all rings.
+ */
+/*ARGSUSED*/
+static void
+hxge_fill_ring(void *arg, mac_ring_type_t type, const int rg_index,
+    const int index, mac_ring_info_t *infop, mac_ring_handle_t rh)
+{
+	p_hxge_t	hxgep = arg;
+
+	switch (type) {
+	case MAC_RING_TYPE_TX: {
+		p_hxge_ring_handle_t	rhp;
+
+		ASSERT((index >= 0) && (index < HXGE_MAX_TDCS));
+		rhp = &hxgep->tx_ring_handles[index];
+		rhp->hxgep = hxgep;
+		rhp->index = index;
+		rhp->ring_handle = rh;
+		infop->mri_driver = (mac_ring_driver_t)rhp;
+		infop->mri_start = hxge_tx_ring_start;
+		infop->mri_stop = hxge_tx_ring_stop;
+		infop->mri_tx = hxge_tx_ring_send;
+		break;
+	}
+	case MAC_RING_TYPE_RX: {
+		p_hxge_ring_handle_t    rhp;
+		mac_intr_t		hxge_mac_intr;
+
+		ASSERT((index >= 0) && (index < HXGE_MAX_RDCS));
+		rhp = &hxgep->rx_ring_handles[index];
+		rhp->hxgep = hxgep;
+		rhp->index = index;
+		rhp->ring_handle = rh;
+
+		/*
+		 * Entrypoint to enable interrupt (disable poll) and
+		 * disable interrupt (enable poll).
+		 */
+		hxge_mac_intr.mi_handle = (mac_intr_handle_t)rhp;
+		hxge_mac_intr.mi_enable =
+		    (mac_intr_enable_t)hxge_disable_poll;
+		hxge_mac_intr.mi_disable =
+		    (mac_intr_disable_t)hxge_enable_poll;
+		infop->mri_driver = (mac_ring_driver_t)rhp;
+		infop->mri_start = hxge_rx_ring_start;
+		infop->mri_stop = hxge_rx_ring_stop;
+		infop->mri_intr = hxge_mac_intr;
+		infop->mri_poll = hxge_rx_poll;
+		break;
+	}
+	default:
+		break;
+	}
+}
+
+/*ARGSUSED*/
 boolean_t
 hxge_m_getcapab(void *arg, mac_capab_t cap, void *cap_data)
 {
-	uint32_t		*txflags = cap_data;
+	p_hxge_t	hxgep = arg;
 
 	switch (cap) {
-	case MAC_CAPAB_HCKSUM:
+	case MAC_CAPAB_HCKSUM: {
+		uint32_t	*txflags = cap_data;
+
 		*txflags = HCKSUM_INET_PARTIAL;
 		break;
+	}
+
+	case MAC_CAPAB_RINGS: {
+		mac_capab_rings_t	*cap_rings = cap_data;
+
+		MUTEX_ENTER(hxgep->genlock);
+		if (cap_rings->mr_type == MAC_RING_TYPE_RX) {
+			cap_rings->mr_group_type = MAC_GROUP_TYPE_STATIC;
+			cap_rings->mr_rnum = HXGE_MAX_RDCS;
+			cap_rings->mr_rget = hxge_fill_ring;
+			cap_rings->mr_gnum = HXGE_MAX_RX_GROUPS;
+			cap_rings->mr_gget = hxge_group_get;
+			cap_rings->mr_gaddring = NULL;
+			cap_rings->mr_gremring = NULL;
+		} else {
+			cap_rings->mr_group_type = MAC_GROUP_TYPE_STATIC;
+			cap_rings->mr_rnum = HXGE_MAX_TDCS;
+			cap_rings->mr_rget = hxge_fill_ring;
+			cap_rings->mr_gnum = 0;
+			cap_rings->mr_gget = NULL;
+			cap_rings->mr_gaddring = NULL;
+			cap_rings->mr_gremring = NULL;
+		}
+		MUTEX_EXIT(hxgep->genlock);
+		break;
+	}
 
 	default:
 		return (B_FALSE);
@@ -2750,7 +3082,7 @@ hxge_m_setprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 	HXGE_DEBUG_MSG((hxgep, DLADM_CTL, "==> hxge_m_setprop"));
 
 	statsp = hxgep->statsp;
-	mutex_enter(hxgep->genlock);
+	MUTEX_ENTER(hxgep->genlock);
 	if (statsp->port_stats.lb_mode != hxge_lb_normal &&
 	    hxge_param_locked(pr_num)) {
 		/*
@@ -2759,7 +3091,7 @@ hxge_m_setprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 		 */
 		HXGE_DEBUG_MSG((hxgep, DLADM_CTL,
 		    "==> hxge_m_setprop: loopback mode: read only"));
-		mutex_exit(hxgep->genlock);
+		MUTEX_EXIT(hxgep->genlock);
 		return (EBUSY);
 	}
 
@@ -2850,7 +3182,7 @@ hxge_m_setprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 			break;
 	}
 
-	mutex_exit(hxgep->genlock);
+	MUTEX_EXIT(hxgep->genlock);
 
 	HXGE_DEBUG_MSG((hxgep, DLADM_CTL,
 	    "<== hxge_m_setprop (return %d)", err));
@@ -3364,30 +3696,6 @@ hxge_add_intrs(p_hxge_t hxgep)
 
 /*ARGSUSED*/
 static hxge_status_t
-hxge_add_soft_intrs(p_hxge_t hxgep)
-{
-	int		ddi_status = DDI_SUCCESS;
-	hxge_status_t	status = HXGE_OK;
-
-	HXGE_DEBUG_MSG((hxgep, DDI_CTL, "==> hxge_add_soft_intrs"));
-
-	hxgep->resched_id = NULL;
-	hxgep->resched_running = B_FALSE;
-	ddi_status = ddi_add_softintr(hxgep->dip, DDI_SOFTINT_LOW,
-	    &hxgep->resched_id, NULL, NULL, hxge_reschedule, (caddr_t)hxgep);
-	if (ddi_status != DDI_SUCCESS) {
-		HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL, "<== hxge_add_soft_intrs: "
-		    "ddi_add_softintrs failed: status 0x%08x", ddi_status));
-		return (HXGE_ERROR | HXGE_DDI_FAILED);
-	}
-
-	HXGE_DEBUG_MSG((hxgep, DDI_CTL, "<== hxge_ddi_add_soft_intrs"));
-
-	return (status);
-}
-
-/*ARGSUSED*/
-static hxge_status_t
 hxge_add_intrs_adv(p_hxge_t hxgep)
 {
 	int		intr_type;
@@ -3433,7 +3741,7 @@ hxge_add_intrs_adv_type(p_hxge_t hxgep, uint32_t int_type)
 	void		*arg1, *arg2;
 	int		behavior;
 	int		nintrs, navail;
-	int		nactual, nrequired;
+	int		nactual, nrequired, nrequest;
 	int		inum = 0;
 	int		loop = 0;
 	int		x, y;
@@ -3463,6 +3771,18 @@ hxge_add_intrs_adv_type(p_hxge_t hxgep, uint32_t int_type)
 	HXGE_DEBUG_MSG((hxgep, INT_CTL,
 	    "ddi_intr_get_navail() returned: intr type %d nintrs %d, navail %d",
 	    int_type, nintrs, navail));
+
+	/* PSARC/2007/453 MSI-X interrupt limit override */
+	if (int_type == DDI_INTR_TYPE_MSIX) {
+		nrequest = hxge_create_msi_property(hxgep);
+		if (nrequest < navail) {
+			navail = nrequest;
+			HXGE_DEBUG_MSG((hxgep, INT_CTL,
+			    "hxge_add_intrs_adv_type: nintrs %d "
+			    "navail %d (nrequest %d)",
+			    nintrs, navail, nrequest));
+		}
+	}
 
 	if (int_type == DDI_INTR_TYPE_MSI && !ISP2(navail)) {
 		/* MSI must be power of 2 */
@@ -3792,22 +4112,6 @@ hxge_remove_intrs(p_hxge_t hxgep)
 }
 
 /*ARGSUSED*/
-static void
-hxge_remove_soft_intrs(p_hxge_t hxgep)
-{
-	HXGE_DEBUG_MSG((hxgep, INT_CTL, "==> hxge_remove_soft_intrs"));
-
-	if (hxgep->resched_id) {
-		ddi_remove_softintr(hxgep->resched_id);
-		HXGE_DEBUG_MSG((hxgep, INT_CTL,
-		    "==> hxge_remove_soft_intrs: removed"));
-		hxgep->resched_id = NULL;
-	}
-
-	HXGE_DEBUG_MSG((hxgep, INT_CTL, "<== hxge_remove_soft_intrs"));
-}
-
-/*ARGSUSED*/
 void
 hxge_intrs_enable(p_hxge_t hxgep)
 {
@@ -3898,6 +4202,13 @@ hxge_mac_register(p_hxge_t hxgep)
 	macp->m_driver = hxgep;
 	macp->m_dip = hxgep->dip;
 	macp->m_src_addr = hxgep->ouraddr.ether_addr_octet;
+	macp->m_callbacks = &hxge_m_callbacks;
+	macp->m_min_sdu = 0;
+	macp->m_max_sdu = hxgep->vmac.maxframesize - MTU_TO_FRAME_SIZE;
+	macp->m_margin = VLAN_TAGSZ;
+	macp->m_priv_props = hxge_priv_props;
+	macp->m_priv_prop_count = HXGE_MAX_PRIV_PROPS;
+	macp->m_v12n = MAC_VIRT_LEVEL1;
 
 	HXGE_DEBUG_MSG((hxgep, DDI_CTL,
 	    "hxge_mac_register: ether addr is %x:%x:%x:%x:%x:%x",
@@ -3907,13 +4218,6 @@ hxge_mac_register(p_hxge_t hxgep)
 	    macp->m_src_addr[3],
 	    macp->m_src_addr[4],
 	    macp->m_src_addr[5]));
-
-	macp->m_callbacks = &hxge_m_callbacks;
-	macp->m_min_sdu = 0;
-	macp->m_max_sdu = hxgep->vmac.maxframesize - MTU_TO_FRAME_SIZE;
-	macp->m_margin = VLAN_TAGSZ;
-	macp->m_priv_props = hxge_priv_props;
-	macp->m_priv_prop_count = HXGE_MAX_PRIV_PROPS;
 
 	status = mac_register(macp, &hxgep->mach);
 	mac_free(macp);
@@ -4085,6 +4389,14 @@ hxge_link_poll(void *arg)
 		}
 	}
 
+	if (hxgep->msix_count++ >= HXGE_MSIX_PARITY_CHECK_COUNT) {
+		hxgep->msix_count = 0;
+		hxgep->msix_index++;
+		if (hxgep->msix_index >= HXGE_MSIX_ENTRIES)
+			hxgep->msix_index = 0;
+		hxge_check_1entry_msix_table(hxgep, hxgep->msix_index);
+	}
+
 	/* Restart the link status timer to check the link status */
 	MUTEX_ENTER(&to->lock);
 	to->id = timeout(hxge_link_poll, arg, to->ticks);
@@ -4111,187 +4423,118 @@ hxge_link_update(p_hxge_t hxgep, link_state_t state)
 static void
 hxge_msix_init(p_hxge_t hxgep)
 {
-	indacc_mem1_ctrl_t	indacc_mem1_ctrl;
-	indacc_mem1_data0_t	data0;
-	indacc_mem1_data1_t	data1;
-	indacc_mem1_data2_t	data2;
-	indacc_mem1_prty_t	prty;
-	int			count;
+	uint32_t 		data0;
+	uint32_t 		data1;
+	uint32_t 		data2;
 	int			i;
+	uint32_t		msix_entry0;
+	uint32_t		msix_entry1;
+	uint32_t		msix_entry2;
+	uint32_t		msix_entry3;
 
+	/* Change to use MSIx bar instead of indirect access */
 	for (i = 0; i < HXGE_MSIX_ENTRIES; i++) {
-		indacc_mem1_ctrl.value = 0;
-		HXGE_REG_RD32(hxgep->hpi_handle, INDACC_MEM1_CTRL,
-		    &indacc_mem1_ctrl.value);
+		data0 = 0xffffffff - i;
+		data1 = 0xffffffff - i - 1;
+		data2 = 0xffffffff - i - 2;
 
-		data0.value = 0xffffffff - i;
-		HXGE_REG_WR32(hxgep->hpi_handle, INDACC_MEM1_DATA0,
-		    data0.value);
-		data1.value = 0xffffffff - i - 1;
-		HXGE_REG_WR32(hxgep->hpi_handle, INDACC_MEM1_DATA1,
-		    data1.value);
-		data2.value = 0xffffffff - i - 2;
-		HXGE_REG_WR32(hxgep->hpi_handle, INDACC_MEM1_DATA2,
-		    data2.value);
-
-		indacc_mem1_ctrl.value = 0;
-		indacc_mem1_ctrl.bits.mem1_addr = i;
-		indacc_mem1_ctrl.bits.mem1_sel = 2;
-		indacc_mem1_ctrl.bits.mem1_prty_wen = 0;
-		indacc_mem1_ctrl.bits.mem1_command = 0;
-		indacc_mem1_ctrl.bits.mem1_diagen = 1;
-		HXGE_REG_WR32(hxgep->hpi_handle, INDACC_MEM1_CTRL,
-		    indacc_mem1_ctrl.value);
-
-		/* check that operation completed */
-		HXGE_REG_RD32(hxgep->hpi_handle, INDACC_MEM1_CTRL,
-		    &indacc_mem1_ctrl.value);
-
-		count = 0;
-		while (indacc_mem1_ctrl.bits.mem1_access_status != 1 &&
-		    count++ < HXGE_MSIX_WAIT_COUNT) {
-			HXGE_DELAY(1);
-			indacc_mem1_ctrl.value = 0;
-			HXGE_REG_RD32(hxgep->hpi_handle, INDACC_MEM1_CTRL,
-			    &indacc_mem1_ctrl.value);
-		}
+		HXGE_REG_WR32(hxgep->hpi_msi_handle, i * 16, data0);
+		HXGE_REG_WR32(hxgep->hpi_msi_handle, i * 16 + 4, data1);
+		HXGE_REG_WR32(hxgep->hpi_msi_handle, i * 16 + 8, data2);
 	}
 
+	/* Initialize ram data out buffer. */
 	for (i = 0; i < HXGE_MSIX_ENTRIES; i++) {
-		indacc_mem1_ctrl.value = 0;
-		indacc_mem1_ctrl.bits.mem1_addr = i;
-		indacc_mem1_ctrl.bits.mem1_sel = 2;
-		indacc_mem1_ctrl.bits.mem1_prty_wen = 0;
-		indacc_mem1_ctrl.bits.mem1_command = 1;
-		indacc_mem1_ctrl.bits.mem1_diagen = 1;
-
-		/* issue read command */
-		HXGE_REG_WR32(hxgep->hpi_handle, INDACC_MEM1_CTRL,
-		    indacc_mem1_ctrl.value);
-
-		/* wait for read operation to complete */
-		count = 0;
-		HXGE_REG_RD32(hxgep->hpi_handle, INDACC_MEM1_CTRL,
-		    &indacc_mem1_ctrl.value);
-		while (indacc_mem1_ctrl.bits.mem1_access_status != 1 &&
-		    count++ < HXGE_MSIX_WAIT_COUNT) {
-			HXGE_DELAY(1);
-			HXGE_REG_RD32(hxgep->hpi_handle, INDACC_MEM1_CTRL,
-			    &indacc_mem1_ctrl.value);
-		}
-
-
-
-		data0.value = data1.value = data2.value = prty.value = 0;
-		HXGE_REG_RD32(hxgep->hpi_handle, INDACC_MEM1_DATA0,
-		    &data0.value);
-		HXGE_REG_RD32(hxgep->hpi_handle, INDACC_MEM1_DATA1,
-		    &data1.value);
-		HXGE_REG_RD32(hxgep->hpi_handle, INDACC_MEM1_DATA2,
-		    &data2.value);
-		HXGE_REG_RD32(hxgep->hpi_handle, INDACC_MEM1_PRTY,
-		    &prty.value);
+		HXGE_REG_RD32(hxgep->hpi_msi_handle, i * 16, &msix_entry0);
+		HXGE_REG_RD32(hxgep->hpi_msi_handle, i * 16 + 4, &msix_entry1);
+		HXGE_REG_RD32(hxgep->hpi_msi_handle, i * 16 + 8, &msix_entry2);
+		HXGE_REG_RD32(hxgep->hpi_msi_handle, i * 16 + 12, &msix_entry3);
 	}
-
-	/* Turn off diagnostic mode */
-	indacc_mem1_ctrl.value = 0;
-	indacc_mem1_ctrl.bits.mem1_addr = 0;
-	indacc_mem1_ctrl.bits.mem1_sel = 0;
-	indacc_mem1_ctrl.bits.mem1_prty_wen = 0;
-	indacc_mem1_ctrl.bits.mem1_command = 0;
-	indacc_mem1_ctrl.bits.mem1_diagen = 0;
-	HXGE_REG_WR32(hxgep->hpi_handle, INDACC_MEM1_CTRL,
-	    indacc_mem1_ctrl.value);
 }
 
-void
-hxge_check_msix_parity_err(p_hxge_t hxgep)
+static void
+hxge_store_msix_table(p_hxge_t hxgep)
 {
-	indacc_mem1_ctrl_t	indacc_mem1_ctrl;
-	indacc_mem1_data0_t	data0;
-	indacc_mem1_data1_t	data1;
-	indacc_mem1_data2_t	data2;
-	indacc_mem1_prty_t	prty;
-	uint32_t		parity = 0;
-	int			count;
 	int			i;
+	uint32_t		msix_entry0;
+	uint32_t		msix_entry1;
+	uint32_t		msix_entry2;
 
-	hpi_handle_t		handle;
+	for (i = 0; i < HXGE_MSIX_ENTRIES; i++) {
+		HXGE_REG_RD32(hxgep->hpi_msi_handle, i * 16, &msix_entry0);
+		HXGE_REG_RD32(hxgep->hpi_msi_handle, i * 16 + 4,
+		    &msix_entry1);
+		HXGE_REG_RD32(hxgep->hpi_msi_handle, i * 16 + 8,
+		    &msix_entry2);
+
+		hxgep->msix_table[i][0] = msix_entry0;
+		hxgep->msix_table[i][1] = msix_entry1;
+		hxgep->msix_table[i][2] = msix_entry2;
+	}
+}
+
+static void
+hxge_check_1entry_msix_table(p_hxge_t hxgep, int i)
+{
+	uint32_t		msix_entry0;
+	uint32_t		msix_entry1;
+	uint32_t		msix_entry2;
 	p_hxge_peu_sys_stats_t	statsp;
 
-	handle = hxgep->hpi_handle;
 	statsp = (p_hxge_peu_sys_stats_t)&hxgep->statsp->peu_sys_stats;
 
-	for (i = 0; i < HXGE_MSIX_ENTRIES; i++) {
-		indacc_mem1_ctrl.value = 0;
-		indacc_mem1_ctrl.bits.mem1_addr = i;
-		indacc_mem1_ctrl.bits.mem1_sel = 2;
-		indacc_mem1_ctrl.bits.mem1_prty_wen = 0;
-		indacc_mem1_ctrl.bits.mem1_command = 1;
-		indacc_mem1_ctrl.bits.mem1_diagen = 1;
+	HXGE_REG_RD32(hxgep->hpi_msi_handle, i * 16, &msix_entry0);
+	HXGE_REG_RD32(hxgep->hpi_msi_handle, i * 16 + 4, &msix_entry1);
+	HXGE_REG_RD32(hxgep->hpi_msi_handle, i * 16 + 8, &msix_entry2);
 
-		/* issue read command */
-		HXGE_REG_WR32(handle, INDACC_MEM1_CTRL, indacc_mem1_ctrl.value);
+	hxgep->msix_table_check[i][0] = msix_entry0;
+	hxgep->msix_table_check[i][1] = msix_entry1;
+	hxgep->msix_table_check[i][2] = msix_entry2;
 
-		/* wait for read operation to complete */
-		count = 0;
-		HXGE_REG_RD32(handle, INDACC_MEM1_CTRL,
-		    &indacc_mem1_ctrl.value);
-		while (indacc_mem1_ctrl.bits.mem1_access_status != 1 &&
-		    count++ < HXGE_MSIX_WAIT_COUNT) {
-			HXGE_DELAY(1);
-			HXGE_REG_RD32(handle, INDACC_MEM1_CTRL,
-			    &indacc_mem1_ctrl.value);
-		}
-
-		data0.value = data1.value = data2.value = prty.value = 0;
-		HXGE_REG_RD32(handle, INDACC_MEM1_DATA0, &data0.value);
-		HXGE_REG_RD32(handle, INDACC_MEM1_DATA1, &data1.value);
-		HXGE_REG_RD32(handle, INDACC_MEM1_DATA2, &data2.value);
-		HXGE_REG_RD32(handle, INDACC_MEM1_PRTY, &prty.value);
-
-		parity = gen_32bit_parity(data0.value, B_FALSE) |
-		    (gen_32bit_parity(data1.value, B_FALSE) << 4) |
-		    (gen_32bit_parity(data2.value, B_FALSE) << 8);
-
-		if (parity != prty.bits.mem1_parity) {
-			statsp->eic_msix_parerr++;
-			if (statsp->eic_msix_parerr == 1) {
-				HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL,
-				    "==> hxge_check_msix_parity_err: "
-				    "eic_msix_parerr"));
-				HXGE_FM_REPORT_ERROR(hxgep, NULL,
-				    HXGE_FM_EREPORT_PEU_ERR);
-			}
+	if ((hxgep->msix_table[i][0] != hxgep->msix_table_check[i][0]) ||
+	    (hxgep->msix_table[i][1] != hxgep->msix_table_check[i][1]) ||
+	    (hxgep->msix_table[i][2] != hxgep->msix_table_check[i][2])) {
+		statsp->eic_msix_parerr++;
+		if (statsp->eic_msix_parerr == 1) {
+			HXGE_ERROR_MSG((hxgep, HXGE_ERR_CTL,
+			    "==> hxge_check_1entry_msix_table: "
+			    "eic_msix_parerr at index: %d", i));
+			HXGE_FM_REPORT_ERROR(hxgep, NULL,
+			    HXGE_FM_EREPORT_PEU_ERR);
 		}
 	}
-
-	/* Turn off diagnostic mode */
-	indacc_mem1_ctrl.value = 0;
-	indacc_mem1_ctrl.bits.mem1_addr = 0;
-	indacc_mem1_ctrl.bits.mem1_sel = 0;
-	indacc_mem1_ctrl.bits.mem1_prty_wen = 0;
-	indacc_mem1_ctrl.bits.mem1_command = 0;
-	indacc_mem1_ctrl.bits.mem1_diagen = 0;
-	HXGE_REG_WR32(handle, INDACC_MEM1_CTRL, indacc_mem1_ctrl.value);
 }
 
-static uint8_t
-gen_32bit_parity(uint32_t data, boolean_t odd_parity)
+/*
+ * The following function is to support
+ * PSARC/2007/453 MSI-X interrupt limit override.
+ */
+static int
+hxge_create_msi_property(p_hxge_t hxgep)
 {
-	uint8_t		parity = 0;
-	uint8_t		data_byte = 0;
-	uint8_t		parity_bit = 0;
-	uint32_t	i = 0, j = 0;
+	int	nmsi;
+	extern	int ncpus;
 
-	for (i = 0; i < 4; i++) {
-		data_byte = (data >> (i * 8)) & 0xffULL;
-		parity_bit = odd_parity ? 1 : 0;
-		for (j = 0; j < 8; j++) {
-			parity_bit ^= (data_byte >> j) & 0x1ULL;
-		}
-		parity |= (parity_bit << i);
+	HXGE_DEBUG_MSG((hxgep, MOD_CTL, "==>hxge_create_msi_property"));
+
+	(void) ddi_prop_create(DDI_DEV_T_NONE, hxgep->dip,
+	    DDI_PROP_CANSLEEP, "#msix-request", NULL, 0);
+	/*
+	 * The maximum MSI-X requested will be 8.
+	 * If the # of CPUs is less than 8, we will reqeust
+	 * # MSI-X based on the # of CPUs.
+	 */
+	if (ncpus >= HXGE_MSIX_REQUEST_10G) {
+		nmsi = HXGE_MSIX_REQUEST_10G;
+	} else {
+		nmsi = ncpus;
 	}
 
-	return (parity);
+	HXGE_DEBUG_MSG((hxgep, MOD_CTL,
+	    "==>hxge_create_msi_property(10G): exists 0x%x (nmsi %d)",
+	    ddi_prop_exists(DDI_DEV_T_NONE, hxgep->dip,
+	    DDI_PROP_CANSLEEP, "#msix-request"), nmsi));
+
+	HXGE_DEBUG_MSG((hxgep, MOD_CTL, "<==hxge_create_msi_property"));
+	return (nmsi);
 }

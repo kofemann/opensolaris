@@ -20,7 +20,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # This required package information file contains a list of package contents.
@@ -68,6 +68,7 @@ f none kernel/drv/aggr 755 root sys
 f none kernel/drv/arp 755 root sys
 f none kernel/drv/acpi_drv 755 root sys
 f none kernel/drv/acpi_drv.conf 644 root sys
+f none kernel/drv/acpi_toshiba 755 root sys
 f none kernel/drv/amd_iommu 755 root sys
 f none kernel/drv/bl 755 root sys
 f none kernel/drv/bmc 755 root sys
@@ -86,11 +87,14 @@ f none kernel/drv/crypto 755 root sys
 f none kernel/drv/cryptoadm 755 root sys
 f none kernel/drv/devinfo 755 root sys
 f none kernel/drv/dld 755 root sys
+f none kernel/drv/dlpistub 755 root sys
 f none kernel/drv/i8042 755 root sys
 f none kernel/drv/icmp 755 root sys
 f none kernel/drv/icmp6 755 root sys
 f none kernel/drv/intel_nb5000 755 root sys
 f none kernel/drv/intel_nb5000.conf 644 root sys
+f none kernel/drv/intel_nhm 755 root sys
+f none kernel/drv/intel_nhm.conf 644 root sys
 f none kernel/drv/ip 755 root sys
 f none kernel/drv/ip6 755 root sys
 f none kernel/drv/ipnet 755 root sys
@@ -150,7 +154,6 @@ f none kernel/drv/ucode.conf 644 root sys
 f none kernel/drv/udp 755 root sys
 f none kernel/drv/udp6 755 root sys
 f none kernel/drv/vgatext 755 root sys
-f none kernel/drv/vni 755 root sys
 f none kernel/drv/vnic 755 root sys
 f none kernel/drv/wc 755 root sys
 f none kernel/exec/elfexec 755 root sys
@@ -212,6 +215,7 @@ f none kernel/misc/ipc 755 root sys
 f none kernel/misc/kbtrans 755 root sys
 f none kernel/misc/kcf 755 root sys
 f none kernel/misc/kmdbmod 755 root sys
+f none kernel/misc/ksocket 755 root sys
 f none kernel/misc/mac 755 root sys
 l none kernel/misc/md5=../../kernel/crypto/md5
 f none kernel/misc/net80211 755 root sys
@@ -290,6 +294,7 @@ d none kernel/drv/amd64 755 root sys
 f none kernel/drv/amd64/aggr 755 root sys
 f none kernel/drv/amd64/arp 755 root sys
 f none kernel/drv/amd64/acpi_drv 755 root sys
+f none kernel/drv/amd64/acpi_toshiba 755 root sys
 f none kernel/drv/amd64/amd_iommu 755 root sys
 f none kernel/drv/amd64/bl 755 root sys
 f none kernel/drv/amd64/bmc 755 root sys
@@ -305,10 +310,12 @@ f none kernel/drv/amd64/crypto 755 root sys
 f none kernel/drv/amd64/cryptoadm 755 root sys
 f none kernel/drv/amd64/devinfo 755 root sys
 f none kernel/drv/amd64/dld 755 root sys
+f none kernel/drv/amd64/dlpistub 755 root sys
 f none kernel/drv/amd64/i8042 755 root sys
 f none kernel/drv/amd64/icmp 755 root sys
 f none kernel/drv/amd64/icmp6 755 root sys
 f none kernel/drv/amd64/intel_nb5000 755 root sys
+f none kernel/drv/amd64/intel_nhm 755 root sys
 f none kernel/drv/amd64/ip 755 root sys
 f none kernel/drv/amd64/ip6 755 root sys
 f none kernel/drv/amd64/ipnet 755 root sys
@@ -362,7 +369,6 @@ f none kernel/drv/amd64/ucode 755 root sys
 f none kernel/drv/amd64/udp 755 root sys
 f none kernel/drv/amd64/udp6 755 root sys
 f none kernel/drv/amd64/vgatext 755 root sys
-f none kernel/drv/amd64/vni 755 root sys
 f none kernel/drv/amd64/vnic 755 root sys
 f none kernel/drv/amd64/wc 755 root sys
 d none kernel/exec/amd64 755 root sys
@@ -427,6 +433,7 @@ f none kernel/misc/amd64/ipc 755 root sys
 f none kernel/misc/amd64/kbtrans 755 root sys
 f none kernel/misc/amd64/kcf 755 root sys
 f none kernel/misc/amd64/kmdbmod 755 root sys
+f none kernel/misc/amd64/ksocket 755 root sys
 f none kernel/misc/amd64/mac 755 root sys
 l none kernel/misc/amd64/md5=../../../kernel/crypto/amd64/md5
 f none kernel/misc/amd64/net80211 755 root sys
@@ -497,3 +504,14 @@ f none kernel/kiconv/amd64/kiconv_ja 755 root sys
 f none kernel/kiconv/amd64/kiconv_ko 755 root sys
 f none kernel/kiconv/amd64/kiconv_sc 755 root sys
 f none kernel/kiconv/amd64/kiconv_tc 755 root sys
+l none kernel/socketmod/icmp=../../kernel/drv/icmp
+l none kernel/socketmod/rts=../../kernel/drv/rts
+l none kernel/socketmod/tcp=../../kernel/drv/tcp
+l none kernel/socketmod/udp=../../kernel/drv/udp
+f none kernel/socketmod/socksctp 755 root sys
+d none kernel/socketmod/amd64 755 root sys
+l none kernel/socketmod/amd64/icmp=../../../kernel/drv/amd64/icmp
+l none kernel/socketmod/amd64/rts=../../../kernel/drv/amd64/rts
+l none kernel/socketmod/amd64/tcp=../../../kernel/drv/amd64/tcp
+l none kernel/socketmod/amd64/udp=../../../kernel/drv/amd64/udp
+f none kernel/socketmod/amd64/socksctp 755 root sys

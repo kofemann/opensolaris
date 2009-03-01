@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  *	Copyright (c) 1983,1984,1985,1986,1987,1988,1989  AT&T.
@@ -388,8 +388,8 @@ nfs_copyin(char *data, int datalen, struct nfs_args *nargs, nfs_fhandle *fh)
 	 * Get server's hostname
 	 */
 	if (flags & NFSMNT_HOSTNAME) {
-		error = copyinstr(STRUCT_FGETP(args, hostname),
-		    netname, sizeof (netname), &hlen);
+		error = copyinstr(STRUCT_FGETP(args, hostname), netname,
+		    sizeof (netname), &hlen);
 		if (error)
 			goto errout;
 		nargs->hostname = kmem_zalloc(hlen, KM_SLEEP);
@@ -460,8 +460,8 @@ nfs_copyin(char *data, int datalen, struct nfs_args *nargs, nfs_fhandle *fh)
 			    nfs_ext_u.nfs_extA.secdata) != NULL) {
 				error = sec_clnt_loadinfo(
 				    (struct sec_data *)STRUCT_FGETP(args,
-				    nfs_ext_u.nfs_extA.secdata),
-				    &secdata, get_udatamodel());
+				    nfs_ext_u.nfs_extA.secdata), &secdata,
+				    get_udatamodel());
 			}
 			nargs->nfs_ext_u.nfs_extA.secdata = secdata;
 		}
@@ -994,12 +994,16 @@ proceed:
 	}
 
 errout:
-	if (error) {
-		if (rtvp != NULL) {
+	if (rtvp != NULL) {
+		if (error) {
 			rp = VTOR(rtvp);
 			if (rp->r_flags & RHASHED)
 				rp_rmhash(rp);
 		}
+		VN_RELE(rtvp);
+	}
+
+	if (error) {
 		sv_free(svp_head);
 		if (mi != NULL) {
 			nfs_async_stop(vfsp);
@@ -1020,9 +1024,6 @@ errout:
 		nfs_free_args(args, fhandle);
 		kmem_free(args, sizeof (*args));
 	}
-
-	if (rtvp != NULL)
-		VN_RELE(rtvp);
 
 	if (mntzone != NULL)
 		zone_rele(mntzone);
@@ -1082,8 +1083,8 @@ pathconf_get(struct mntinfo *mi, struct nfs_args *args)
 		pathconf_rele(mi);
 		mi->mi_pathconf = NULL;
 	}
-	if (args->flags & NFSMNT_POSIX && args->pathconf != NULL) {
 
+	if (args->flags & NFSMNT_POSIX && args->pathconf != NULL) {
 		if (_PC_ISSET(_PC_ERROR, pc->pc_mask))
 			return (EINVAL);
 
@@ -1284,10 +1285,9 @@ nfsrootvp(vnode_t **rtvpp, vfs_t *vfsp, struct servinfo *svp,
 		douprintf = 1;
 		mi->mi_curr_serv = svp;
 
-		error = rfs2call(mi, RFS_STATFS,
-		    xdr_fhandle, (caddr_t)svp->sv_fhandle.fh_buf,
-		    xdr_statfs, (caddr_t)&fs, tcr, &douprintf,
-		    &fs.fs_status, 0, NULL);
+		error = rfs2call(mi, RFS_STATFS, xdr_fhandle,
+		    (caddr_t)svp->sv_fhandle.fh_buf, xdr_statfs, (caddr_t)&fs,
+		    tcr, &douprintf, &fs.fs_status, 0, NULL);
 		if (error)
 			goto bad;
 		mi->mi_stsize = MIN(mi->mi_stsize, fs.fs_tsize);
@@ -1506,10 +1506,9 @@ nfs_statvfs(vfs_t *vfsp, struct statvfs64 *sbp)
 	fi.lookupproc = nfslookup;
 	fi.xattrdirproc = acl_getxattrdir2;
 
-	error = rfs2call(mi, RFS_STATFS,
-	    xdr_fhandle, (caddr_t)VTOFH(vp),
-	    xdr_statfs, (caddr_t)&fs, CRED(), &douprintf,
-	    &fs.fs_status, 0, &fi);
+	error = rfs2call(mi, RFS_STATFS, xdr_fhandle, (caddr_t)VTOFH(vp),
+	    xdr_statfs, (caddr_t)&fs, CRED(), &douprintf, &fs.fs_status, 0,
+	    &fi);
 
 	if (!error) {
 		error = geterrno(fs.fs_status);

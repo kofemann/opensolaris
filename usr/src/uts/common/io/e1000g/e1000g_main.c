@@ -6,7 +6,7 @@
  *
  * CDDL LICENSE SUMMARY
  *
- * Copyright(c) 1999 - 2008 Intel Corporation. All rights reserved.
+ * Copyright(c) 1999 - 2009 Intel Corporation. All rights reserved.
  *
  * The contents of this file are subject to the terms of Version
  * 1.0 of the Common Development and Distribution License (the "License").
@@ -19,7 +19,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -46,7 +46,7 @@
 
 static char ident[] = "Intel PRO/1000 Ethernet";
 static char e1000g_string[] = "Intel(R) PRO/1000 Network Connection";
-static char e1000g_version[] = "Driver Ver. 5.2.14";
+static char e1000g_version[] = "Driver Ver. 5.3.4";
 
 /*
  * Proto types for DDI entry points
@@ -92,6 +92,7 @@ static boolean_t e1000g_rx_drain(struct e1000g *);
 static boolean_t e1000g_tx_drain(struct e1000g *);
 static void e1000g_init_unicst(struct e1000g *);
 static int e1000g_unicst_set(struct e1000g *, const uint8_t *, int);
+static int e1000g_alloc_rx_data(struct e1000g *);
 
 /*
  * Local routines
@@ -143,7 +144,6 @@ static boolean_t e1000g_link_up(struct e1000g *);
 static boolean_t e1000g_find_mac_address(struct e1000g *);
 #endif
 static void e1000g_get_phy_state(struct e1000g *);
-static void e1000g_free_priv_devi_node(struct e1000g *, boolean_t);
 static int e1000g_fm_error_cb(dev_info_t *dip, ddi_fm_error_t *err,
     const void *impl_data);
 static void e1000g_fm_init(struct e1000g *Adapter);
@@ -272,16 +272,11 @@ boolean_t e1000g_force_detach = B_TRUE;
 private_devi_list_t *e1000g_private_devi_list = NULL;
 
 /*
- * The rwlock is defined to protect the whole processing of rx recycling
- * and the rx packets release in detach processing to make them mutually
- * exclusive.
- * The rx recycling processes different rx packets in different threads,
- * so it will be protected with RW_READER and it won't block any other rx
- * recycling threads.
- * While the detach processing will be protected with RW_WRITER to make
- * it mutually exclusive with the rx recycling.
+ * The mutex e1000g_rx_detach_lock is defined to protect the processing of
+ * the private dev_info list, and to serialize the processing of rx buffer
+ * freeing and rx buffer recycling.
  */
-krwlock_t e1000g_rx_detach_lock;
+kmutex_t e1000g_rx_detach_lock;
 /*
  * The rwlock e1000g_dma_type_lock is defined to protect the global flag
  * e1000g_dma_type. For SPARC, the initial value of the flag is "USE_DVMA".
@@ -320,7 +315,7 @@ _init(void)
 	if (status != DDI_SUCCESS)
 		mac_fini_ops(&ws_ops);
 	else {
-		rw_init(&e1000g_rx_detach_lock, NULL, RW_DRIVER, NULL);
+		mutex_init(&e1000g_rx_detach_lock, NULL, MUTEX_DRIVER, NULL);
 		rw_init(&e1000g_dma_type_lock, NULL, RW_DRIVER, NULL);
 		mutex_init(&e1000g_nvm_lock, NULL, MUTEX_DRIVER, NULL);
 	}
@@ -336,12 +331,8 @@ _fini(void)
 {
 	int status;
 
-	rw_enter(&e1000g_rx_detach_lock, RW_READER);
-	if (e1000g_mblks_pending != 0) {
-		rw_exit(&e1000g_rx_detach_lock);
+	if (e1000g_mblks_pending != 0)
 		return (EBUSY);
-	}
-	rw_exit(&e1000g_rx_detach_lock);
 
 	status = mod_remove(&modlinkage);
 	if (status == DDI_SUCCESS) {
@@ -350,7 +341,7 @@ _fini(void)
 		if (e1000g_force_detach) {
 			private_devi_list_t *devi_node;
 
-			rw_enter(&e1000g_rx_detach_lock, RW_WRITER);
+			mutex_enter(&e1000g_rx_detach_lock);
 			while (e1000g_private_devi_list != NULL) {
 				devi_node = e1000g_private_devi_list;
 				e1000g_private_devi_list =
@@ -361,10 +352,10 @@ _fini(void)
 				kmem_free(devi_node,
 				    sizeof (private_devi_list_t));
 			}
-			rw_exit(&e1000g_rx_detach_lock);
+			mutex_exit(&e1000g_rx_detach_lock);
 		}
 
-		rw_destroy(&e1000g_rx_detach_lock);
+		mutex_destroy(&e1000g_rx_detach_lock);
 		rw_destroy(&e1000g_dma_type_lock);
 		mutex_destroy(&e1000g_nvm_lock);
 	}
@@ -519,10 +510,13 @@ e1000g_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 	/*
 	 * Initialize chip hardware and software structures
 	 */
+	rw_enter(&Adapter->chip_lock, RW_WRITER);
 	if (e1000g_init(Adapter) != DDI_SUCCESS) {
+		rw_exit(&Adapter->chip_lock);
 		e1000g_log(Adapter, CE_WARN, "Adapter initialization failed");
 		goto attach_fail;
 	}
+	rw_exit(&Adapter->chip_lock);
 	Adapter->attach_progress |= ATTACH_PROGRESS_INIT;
 
 	/*
@@ -560,15 +554,28 @@ e1000g_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 		devi_node =
 		    kmem_zalloc(sizeof (private_devi_list_t), KM_SLEEP);
 
-		rw_enter(&e1000g_rx_detach_lock, RW_WRITER);
+		mutex_enter(&e1000g_rx_detach_lock);
 		devi_node->priv_dip = Adapter->priv_dip;
 		devi_node->flag = E1000G_PRIV_DEVI_ATTACH;
-		devi_node->next = e1000g_private_devi_list;
-		e1000g_private_devi_list = devi_node;
-		rw_exit(&e1000g_rx_detach_lock);
+		devi_node->pending_rx_count = 0;
+
+		Adapter->priv_devi_node = devi_node;
+
+		if (e1000g_private_devi_list == NULL) {
+			devi_node->prev = NULL;
+			devi_node->next = NULL;
+			e1000g_private_devi_list = devi_node;
+		} else {
+			devi_node->prev = NULL;
+			devi_node->next = e1000g_private_devi_list;
+			e1000g_private_devi_list->prev = devi_node;
+			e1000g_private_devi_list = devi_node;
+		}
+		mutex_exit(&e1000g_rx_detach_lock);
 	}
 
 	cmn_err(CE_CONT, "!%s, %s\n", e1000g_string, e1000g_version);
+	Adapter->e1000g_state = E1000G_INITIALIZED;
 
 	return (DDI_SUCCESS);
 
@@ -838,9 +845,10 @@ e1000g_set_bufsize(struct e1000g *Adapter)
 
 	Adapter->min_frame_size = ETHERMIN + ETHERFCSL;
 
-	if ((mac->type == e1000_82545) ||
+	if (Adapter->mem_workaround_82546 &&
+	    ((mac->type == e1000_82545) ||
 	    (mac->type == e1000_82546) ||
-	    (mac->type == e1000_82546_rev_3)) {
+	    (mac->type == e1000_82546_rev_3))) {
 		Adapter->rx_buffer_size = E1000_RX_BUFFER_SIZE_2K;
 	} else {
 		rx_size = Adapter->max_frame_size + E1000G_IPALIGNPRESERVEROOM;
@@ -882,10 +890,6 @@ e1000g_set_bufsize(struct e1000g *Adapter)
 	 */
 	if (mac->type < e1000_82543)
 		Adapter->rx_buf_align = RECEIVE_BUFFER_ALIGN_SIZE;
-	else if ((mac->type == e1000_82545) ||
-	    (mac->type == e1000_82546) ||
-	    (mac->type == e1000_82546_rev_3))
-		Adapter->rx_buf_align = RECEIVE_BUFFER_ALIGN_SIZE_82546;
 	else
 		Adapter->rx_buf_align = 1;
 }
@@ -936,17 +940,10 @@ e1000g_detach(dev_info_t *devinfo, ddi_detach_cmd_t cmd)
 	}
 	Adapter->attach_progress &= ~ATTACH_PROGRESS_MAC;
 
-	ASSERT(Adapter->chip_state == E1000G_STOP);
+	ASSERT(!(Adapter->e1000g_state & E1000G_STARTED));
 
-	/*
-	 * If e1000g_force_detach is enabled, driver detach is safe.
-	 * We will let e1000g_free_priv_devi_node routine determine
-	 * whether we need to free the priv_dip entry for current
-	 * driver instance.
-	 */
-	if (e1000g_force_detach) {
-		e1000g_free_priv_devi_node(Adapter, rx_drain);
-	}
+	if (!e1000g_force_detach && !rx_drain)
+		return (DDI_FAILURE);
 
 	e1000g_unattach(devinfo, Adapter);
 
@@ -955,67 +952,30 @@ e1000g_detach(dev_info_t *devinfo, ddi_detach_cmd_t cmd)
 
 /*
  * e1000g_free_priv_devi_node - free a priv_dip entry for driver instance
- *
- * If free_flag is true, that indicates the upper layer is not holding
- * the rx buffers, we could free the priv_dip entry safely.
- *
- * Otherwise, we have to keep this entry even after driver detached,
- * and we also need to mark this entry with E1000G_PRIV_DEVI_DETACH flag,
- * so that driver could free it while all of rx buffers are returned
- * by upper layer later.
  */
-static void
-e1000g_free_priv_devi_node(struct e1000g *Adapter, boolean_t free_flag)
+void
+e1000g_free_priv_devi_node(private_devi_list_t *devi_node)
 {
-	private_devi_list_t *devi_node, *devi_del;
-
-	rw_enter(&e1000g_rx_detach_lock, RW_WRITER);
 	ASSERT(e1000g_private_devi_list != NULL);
-	ASSERT(Adapter->priv_dip != NULL);
+	ASSERT(devi_node != NULL);
 
-	devi_node = e1000g_private_devi_list;
-	if (devi_node->priv_dip == Adapter->priv_dip) {
-		if (free_flag) {
-			e1000g_private_devi_list =
-			    devi_node->next;
-			kmem_free(devi_node->priv_dip,
-			    sizeof (struct dev_info));
-			kmem_free(devi_node,
-			    sizeof (private_devi_list_t));
-		} else {
-			ASSERT(e1000g_mblks_pending != 0);
-			devi_node->flag =
-			    E1000G_PRIV_DEVI_DETACH;
-		}
-		rw_exit(&e1000g_rx_detach_lock);
-		return;
-	}
+	if (devi_node->prev != NULL)
+		devi_node->prev->next = devi_node->next;
+	if (devi_node->next != NULL)
+		devi_node->next->prev = devi_node->prev;
+	if (devi_node == e1000g_private_devi_list)
+		e1000g_private_devi_list = devi_node->next;
 
-	devi_node = e1000g_private_devi_list;
-	while (devi_node->next != NULL) {
-		if (devi_node->next->priv_dip == Adapter->priv_dip) {
-			if (free_flag) {
-				devi_del = devi_node->next;
-				devi_node->next = devi_del->next;
-				kmem_free(devi_del->priv_dip,
-				    sizeof (struct dev_info));
-				kmem_free(devi_del,
-				    sizeof (private_devi_list_t));
-			} else {
-				ASSERT(e1000g_mblks_pending != 0);
-				devi_node->next->flag =
-				    E1000G_PRIV_DEVI_DETACH;
-			}
-			break;
-		}
-		devi_node = devi_node->next;
-	}
-	rw_exit(&e1000g_rx_detach_lock);
+	kmem_free(devi_node->priv_dip,
+	    sizeof (struct dev_info));
+	kmem_free(devi_node,
+	    sizeof (private_devi_list_t));
 }
 
 static void
 e1000g_unattach(dev_info_t *devinfo, struct e1000g *Adapter)
 {
+	private_devi_list_t *devi_node;
 	int result;
 
 	if (Adapter->attach_progress & ATTACH_PROGRESS_ENABLE_INTR) {
@@ -1071,7 +1031,16 @@ e1000g_unattach(dev_info_t *devinfo, struct e1000g *Adapter)
 		e1000g_fm_fini(Adapter);
 	}
 
-	e1000_remove_device(&Adapter->shared);
+	mutex_enter(&e1000g_rx_detach_lock);
+	if (e1000g_force_detach) {
+		devi_node = Adapter->priv_devi_node;
+		devi_node->flag |= E1000G_PRIV_DEVI_DETACH;
+
+		if (devi_node->pending_rx_count == 0) {
+			e1000g_free_priv_devi_node(devi_node);
+		}
+	}
+	mutex_exit(&e1000g_rx_detach_lock);
 
 	kmem_free((caddr_t)Adapter, sizeof (struct e1000g));
 
@@ -1108,10 +1077,6 @@ e1000g_init_locks(struct e1000g *Adapter)
 
 	mutex_init(&rx_ring->rx_lock, NULL,
 	    MUTEX_DRIVER, DDI_INTR_PRI(Adapter->intr_pri));
-	mutex_init(&rx_ring->freelist_lock, NULL,
-	    MUTEX_DRIVER, DDI_INTR_PRI(Adapter->intr_pri));
-	mutex_init(&rx_ring->recycle_lock, NULL,
-	    MUTEX_DRIVER, DDI_INTR_PRI(Adapter->intr_pri));
 }
 
 static void
@@ -1127,8 +1092,6 @@ e1000g_destroy_locks(struct e1000g *Adapter)
 
 	rx_ring = Adapter->rx_ring;
 	mutex_destroy(&rx_ring->rx_lock);
-	mutex_destroy(&rx_ring->freelist_lock);
-	mutex_destroy(&rx_ring->recycle_lock);
 
 	mutex_destroy(&Adapter->link_lock);
 	mutex_destroy(&Adapter->watchdog_lock);
@@ -1142,10 +1105,33 @@ e1000g_resume(dev_info_t *devinfo)
 
 	Adapter = (struct e1000g *)ddi_get_driver_private(devinfo);
 	if (Adapter == NULL)
-		return (DDI_FAILURE);
+		e1000g_log(Adapter, CE_PANIC,
+		    "Instance pointer is null\n");
 
-	if (e1000g_start(Adapter, B_TRUE))
-		return (DDI_FAILURE);
+	if (Adapter->dip != devinfo)
+		e1000g_log(Adapter, CE_PANIC,
+		    "Devinfo is not the same as saved devinfo\n");
+
+	rw_enter(&Adapter->chip_lock, RW_WRITER);
+
+	if (Adapter->e1000g_state & E1000G_STARTED) {
+		if (e1000g_start(Adapter, B_FALSE) != DDI_SUCCESS) {
+			rw_exit(&Adapter->chip_lock);
+			/*
+			 * We note the failure, but return success, as the
+			 * system is still usable without this controller.
+			 */
+			e1000g_log(Adapter, CE_WARN,
+			    "e1000g_resume: failed to restart controller\n");
+			return (DDI_SUCCESS);
+		}
+		/* Enable and start the watchdog timer */
+		enable_watchdog_timer(Adapter);
+	}
+
+	Adapter->e1000g_state &= ~E1000G_SUSPENDED;
+
+	rw_exit(&Adapter->chip_lock);
 
 	return (DDI_SUCCESS);
 }
@@ -1159,7 +1145,24 @@ e1000g_suspend(dev_info_t *devinfo)
 	if (Adapter == NULL)
 		return (DDI_FAILURE);
 
-	e1000g_stop(Adapter, B_TRUE);
+	rw_enter(&Adapter->chip_lock, RW_WRITER);
+
+	Adapter->e1000g_state |= E1000G_SUSPENDED;
+
+	/* if the port isn't plumbed, we can simply return */
+	if (!(Adapter->e1000g_state & E1000G_STARTED)) {
+		rw_exit(&Adapter->chip_lock);
+		return (DDI_SUCCESS);
+	}
+
+	e1000g_stop(Adapter, B_FALSE);
+
+	rw_exit(&Adapter->chip_lock);
+
+	/* Disable and stop all the timers */
+	disable_watchdog_timer(Adapter);
+	stop_link_timer(Adapter);
+	stop_82547_timer(Adapter->tx_ring);
 
 	return (DDI_SUCCESS);
 }
@@ -1174,8 +1177,6 @@ e1000g_init(struct e1000g *Adapter)
 	int result;
 
 	hw = &Adapter->shared;
-
-	rw_enter(&Adapter->chip_lock, RW_WRITER);
 
 	/*
 	 * reset to put the hardware in a known state
@@ -1302,8 +1303,8 @@ e1000g_init(struct e1000g *Adapter)
 	 * Rx FIFO size minus one full frame.
 	 */
 	high_water = min(((pba << 10) * 9 / 10),
-	    ((hw->mac.type == e1000_82573 || hw->mac.type == e1000_ich9lan ||
-	    hw->mac.type == e1000_ich10lan) ?
+	    ((hw->mac.type == e1000_82573 || hw->mac.type == e1000_82574 ||
+	    hw->mac.type == e1000_ich9lan || hw->mac.type == e1000_ich10lan) ?
 	    ((pba << 10) - (E1000_ERT_2048 << 3)) :
 	    ((pba << 10) - Adapter->max_frame_size)));
 
@@ -1357,7 +1358,11 @@ e1000g_init(struct e1000g *Adapter)
 	 * Restore LED settings to the default from EEPROM
 	 * to meet the standard for Sun platforms.
 	 */
-	(void) e1000_cleanup_led(hw);
+	if ((hw->mac.type != e1000_82541) &&
+	    (hw->mac.type != e1000_82541_rev_2) &&
+	    (hw->mac.type != e1000_82547) &&
+	    (hw->mac.type != e1000_82547_rev_2))
+		(void) e1000_cleanup_led(hw);
 
 	/* Disable Smart Power Down */
 	phy_spd_state(hw, B_FALSE);
@@ -1425,14 +1430,66 @@ e1000g_init(struct e1000g *Adapter)
 
 	Adapter->poll_mode = e1000g_poll_mode;
 
-	rw_exit(&Adapter->chip_lock);
-
 	return (DDI_SUCCESS);
 
 init_fail:
-	rw_exit(&Adapter->chip_lock);
 	ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_LOST);
 	return (DDI_FAILURE);
+}
+
+static int
+e1000g_alloc_rx_data(struct e1000g *Adapter)
+{
+	e1000g_rx_ring_t *rx_ring;
+	e1000g_rx_data_t *rx_data;
+
+	rx_ring = Adapter->rx_ring;
+
+	rx_data = kmem_zalloc(sizeof (e1000g_rx_data_t), KM_NOSLEEP);
+
+	if (rx_data == NULL)
+		return (DDI_FAILURE);
+
+	rx_data->priv_devi_node = Adapter->priv_devi_node;
+	rx_data->rx_ring = rx_ring;
+
+	mutex_init(&rx_data->freelist_lock, NULL,
+	    MUTEX_DRIVER, DDI_INTR_PRI(Adapter->intr_pri));
+	mutex_init(&rx_data->recycle_lock, NULL,
+	    MUTEX_DRIVER, DDI_INTR_PRI(Adapter->intr_pri));
+
+	rx_ring->rx_data = rx_data;
+
+	return (DDI_SUCCESS);
+}
+
+void
+e1000g_free_rx_pending_buffers(e1000g_rx_data_t *rx_data)
+{
+	rx_sw_packet_t *packet, *next_packet;
+
+	if (rx_data == NULL)
+		return;
+
+	packet = rx_data->packet_area;
+	while (packet != NULL) {
+		next_packet = packet->next;
+		e1000g_free_rx_sw_packet(packet, B_TRUE);
+		packet = next_packet;
+	}
+	rx_data->packet_area = NULL;
+}
+
+void
+e1000g_free_rx_data(e1000g_rx_data_t *rx_data)
+{
+	if (rx_data == NULL)
+		return;
+
+	mutex_destroy(&rx_data->freelist_lock);
+	mutex_destroy(&rx_data->recycle_lock);
+
+	kmem_free(rx_data, sizeof (e1000g_rx_data_t));
 }
 
 /*
@@ -1476,6 +1533,14 @@ e1000g_m_ioctl(void *arg, queue_t *q, mblk_t *mp)
 		miocnak(q, mp, 0, EINVAL);
 		return;
 	}
+
+	rw_enter(&e1000gp->chip_lock, RW_READER);
+	if (e1000gp->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&e1000gp->chip_lock);
+		miocnak(q, mp, 0, EINVAL);
+		return;
+	}
+	rw_exit(&e1000gp->chip_lock);
 
 	switch (iocp->ioc_cmd) {
 
@@ -1572,73 +1637,21 @@ static mblk_t *e1000g_poll_ring(void *arg, int bytes_to_pickup)
 	e1000g_rx_ring_t	*rx_ring = (e1000g_rx_ring_t *)arg;
 	mblk_t			*mp = NULL;
 	mblk_t			*tail;
-	uint_t			sz = 0;
 	struct e1000g 		*adapter;
 
 	adapter = rx_ring->adapter;
 
-	mutex_enter(&rx_ring->rx_lock);
-	ASSERT(rx_ring->poll_flag);
+	rw_enter(&adapter->chip_lock, RW_READER);
 
-	/*
-	 * Get any packets that have arrived. Works only if we
-	 * actually disable the physical adapter/rx_ring interrupt.
-	 * (e1000g_poll_mode == 1). In case e1000g_poll_mode == 0,
-	 * packets will have already been added to the poll list
-	 * by the interrupt (see e1000g_intr_work()).
-	 */
-	if (adapter->poll_mode) {
-		mp = e1000g_receive(rx_ring, &tail, &sz);
-		if (mp != NULL) {
-			if (rx_ring->poll_list_head == NULL)
-				rx_ring->poll_list_head = mp;
-			else
-				rx_ring->poll_list_tail->b_next = mp;
-			rx_ring->poll_list_tail = tail;
-			rx_ring->poll_list_sz += sz;
-		}
-	}
-
-	mp = rx_ring->poll_list_head;
-	if (mp == NULL) {
-		mutex_exit(&rx_ring->rx_lock);
+	if (adapter->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&adapter->chip_lock);
 		return (NULL);
 	}
 
-	/* Check if we can sendup the entire chain */
-	if (bytes_to_pickup >= rx_ring->poll_list_sz) {
-		mp = rx_ring->poll_list_head;
-		rx_ring->poll_list_head = NULL;
-		rx_ring->poll_list_tail = NULL;
-		rx_ring->poll_list_sz = 0;
-		mutex_exit(&rx_ring->rx_lock);
-		return (mp);
-	}
-
-	/*
-	 * We need to find out how much chain we can send up. We
-	 * are guaranteed that atleast one packet will go up since
-	 * we already checked that.
-	 */
-	tail = mp;
-	sz = 0;
-	while (mp != NULL) {
-		sz += MBLKL(mp);
-		if (sz > bytes_to_pickup) {
-			sz -= MBLKL(mp);
-			break;
-		}
-		tail = mp;
-		mp = mp->b_next;
-	}
-
-	mp = rx_ring->poll_list_head;
-	rx_ring->poll_list_head = tail->b_next;
-	if (rx_ring->poll_list_head == NULL)
-		rx_ring->poll_list_tail = NULL;
-	rx_ring->poll_list_sz -= sz;
-	tail->b_next = NULL;
+	mutex_enter(&rx_ring->rx_lock);
+	mp = e1000g_receive(rx_ring, &tail, bytes_to_pickup);
 	mutex_exit(&rx_ring->rx_lock);
+	rw_exit(&adapter->chip_lock);
 	return (mp);
 }
 
@@ -1647,18 +1660,44 @@ e1000g_m_start(void *arg)
 {
 	struct e1000g *Adapter = (struct e1000g *)arg;
 
-	return (e1000g_start(Adapter, B_TRUE));
+	rw_enter(&Adapter->chip_lock, RW_WRITER);
+
+	if (Adapter->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&Adapter->chip_lock);
+		return (ECANCELED);
+	}
+
+	if (e1000g_start(Adapter, B_TRUE) != DDI_SUCCESS) {
+		rw_exit(&Adapter->chip_lock);
+		return (ENOTACTIVE);
+	}
+
+	Adapter->e1000g_state |= E1000G_STARTED;
+
+	rw_exit(&Adapter->chip_lock);
+
+	/* Enable and start the watchdog timer */
+	enable_watchdog_timer(Adapter);
+
+	return (0);
 }
 
 static int
 e1000g_start(struct e1000g *Adapter, boolean_t global)
 {
+	e1000g_rx_data_t *rx_data;
+
 	if (global) {
+		if (e1000g_alloc_rx_data(Adapter) != DDI_SUCCESS) {
+			e1000g_log(Adapter, CE_WARN, "Allocate rx data failed");
+			goto start_fail;
+		}
+
 		/* Allocate dma resources for descriptors and buffers */
 		if (e1000g_alloc_dma_resources(Adapter) != DDI_SUCCESS) {
 			e1000g_log(Adapter, CE_WARN,
 			    "Alloc DMA resources failed");
-			return (ENOTACTIVE);
+			goto start_fail;
 		}
 		Adapter->rx_buffer_setup = B_FALSE;
 	}
@@ -1667,13 +1706,9 @@ e1000g_start(struct e1000g *Adapter, boolean_t global)
 		if (e1000g_init(Adapter) != DDI_SUCCESS) {
 			e1000g_log(Adapter, CE_WARN,
 			    "Adapter initialization failed");
-			if (global)
-				e1000g_release_dma_resources(Adapter);
-			return (ENOTACTIVE);
+			goto start_fail;
 		}
 	}
-
-	rw_enter(&Adapter->chip_lock, RW_WRITER);
 
 	/* Setup and initialize the transmit structures */
 	e1000g_tx_setup(Adapter);
@@ -1688,21 +1723,29 @@ e1000g_start(struct e1000g *Adapter, boolean_t global)
 
 	e1000g_mask_interrupt(Adapter);
 
-	if (e1000g_check_acc_handle(Adapter->osdep.reg_handle) != DDI_FM_OK) {
-		rw_exit(&Adapter->chip_lock);
-		ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_LOST);
-		return (ENOTACTIVE);
-	}
-
-	Adapter->chip_state = E1000G_START;
 	Adapter->attach_progress |= ATTACH_PROGRESS_INIT;
 
-	rw_exit(&Adapter->chip_lock);
+	if (e1000g_check_acc_handle(Adapter->osdep.reg_handle) != DDI_FM_OK) {
+		ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_LOST);
+		goto start_fail;
+	}
 
-	/* Enable and start the watchdog timer */
-	enable_watchdog_timer(Adapter);
+	return (DDI_SUCCESS);
 
-	return (0);
+start_fail:
+	rx_data = Adapter->rx_ring->rx_data;
+
+	if (global) {
+		e1000g_release_dma_resources(Adapter);
+		e1000g_free_rx_pending_buffers(rx_data);
+		e1000g_free_rx_data(rx_data);
+	}
+
+	mutex_enter(&e1000g_nvm_lock);
+	(void) e1000_reset_hw(&Adapter->shared);
+	mutex_exit(&e1000g_nvm_lock);
+
+	return (DDI_FAILURE);
 }
 
 static void
@@ -1710,32 +1753,36 @@ e1000g_m_stop(void *arg)
 {
 	struct e1000g *Adapter = (struct e1000g *)arg;
 
-	e1000g_stop(Adapter, B_TRUE);
-}
-
-static void
-e1000g_stop(struct e1000g *Adapter, boolean_t global)
-{
-	int result;
-
-	/* Set stop flags */
-	rw_enter(&Adapter->chip_lock, RW_WRITER);
-
-	Adapter->chip_state = E1000G_STOP;
-	Adapter->attach_progress &= ~ATTACH_PROGRESS_INIT;
-
-	rw_exit(&Adapter->chip_lock);
-
 	/* Drain tx sessions */
 	(void) e1000g_tx_drain(Adapter);
+
+	rw_enter(&Adapter->chip_lock, RW_WRITER);
+
+	if (Adapter->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&Adapter->chip_lock);
+		return;
+	}
+	Adapter->e1000g_state &= ~E1000G_STARTED;
+	e1000g_stop(Adapter, B_TRUE);
+
+	rw_exit(&Adapter->chip_lock);
 
 	/* Disable and stop all the timers */
 	disable_watchdog_timer(Adapter);
 	stop_link_timer(Adapter);
 	stop_82547_timer(Adapter->tx_ring);
+}
+
+static void
+e1000g_stop(struct e1000g *Adapter, boolean_t global)
+{
+	private_devi_list_t *devi_node;
+	e1000g_rx_data_t *rx_data;
+	int result;
+
+	Adapter->attach_progress &= ~ATTACH_PROGRESS_INIT;
 
 	/* Stop the chip and release pending resources */
-	rw_enter(&Adapter->chip_lock, RW_WRITER);
 
 	/* Tell firmware driver is no longer in control */
 	e1000g_release_driver_control(&Adapter->shared);
@@ -1760,22 +1807,40 @@ e1000g_stop(struct e1000g *Adapter, boolean_t global)
 	/* Clean the pending rx jumbo packet fragment */
 	e1000g_rx_clean(Adapter);
 
-	rw_exit(&Adapter->chip_lock);
-
-	if (global)
+	if (global) {
 		e1000g_release_dma_resources(Adapter);
+
+		mutex_enter(&e1000g_rx_detach_lock);
+		rx_data = Adapter->rx_ring->rx_data;
+		rx_data->flag |= E1000G_RX_STOPPED;
+
+		if (rx_data->pending_count == 0) {
+			e1000g_free_rx_pending_buffers(rx_data);
+			e1000g_free_rx_data(rx_data);
+		} else {
+			devi_node = rx_data->priv_devi_node;
+			if (devi_node != NULL)
+				atomic_inc_32(&devi_node->pending_rx_count);
+			else
+				atomic_inc_32(&Adapter->pending_rx_count);
+		}
+		mutex_exit(&e1000g_rx_detach_lock);
+	}
 }
 
 static void
 e1000g_rx_clean(struct e1000g *Adapter)
 {
-	e1000g_rx_ring_t *rx_ring = Adapter->rx_ring;
+	e1000g_rx_data_t *rx_data = Adapter->rx_ring->rx_data;
 
-	if (rx_ring->rx_mblk != NULL) {
-		freemsg(rx_ring->rx_mblk);
-		rx_ring->rx_mblk = NULL;
-		rx_ring->rx_mblk_tail = NULL;
-		rx_ring->rx_mblk_len = 0;
+	if (rx_data == NULL)
+		return;
+
+	if (rx_data->rx_mblk != NULL) {
+		freemsg(rx_data->rx_mblk);
+		rx_data->rx_mblk = NULL;
+		rx_data->rx_mblk_tail = NULL;
+		rx_data->rx_mblk_len = 0;
 	}
 }
 
@@ -1864,31 +1929,20 @@ e1000g_tx_drain(struct e1000g *Adapter)
 static boolean_t
 e1000g_rx_drain(struct e1000g *Adapter)
 {
-	e1000g_rx_ring_t *rx_ring;
-	p_rx_sw_packet_t packet;
+	int i;
 	boolean_t done;
 
-	rx_ring = Adapter->rx_ring;
-	done = B_TRUE;
+	/*
+	 * Allow up to RX_DRAIN_TIME for pending received packets to complete.
+	 */
+	for (i = 0; i < RX_DRAIN_TIME; i++) {
+		done = (Adapter->pending_rx_count == 0);
 
-	rw_enter(&e1000g_rx_detach_lock, RW_WRITER);
+		if (done)
+			break;
 
-	while (rx_ring->pending_list != NULL) {
-		packet = rx_ring->pending_list;
-		rx_ring->pending_list =
-		    rx_ring->pending_list->next;
-
-		if (packet->flag == E1000G_RX_SW_STOP) {
-			packet->flag = E1000G_RX_SW_DETACH;
-			done = B_FALSE;
-		} else {
-			ASSERT(packet->flag == E1000G_RX_SW_FREE);
-			ASSERT(packet->mp == NULL);
-			e1000g_free_rx_sw_packet(packet);
-		}
+		msec_delay(1);
 	}
-
-	rw_exit(&e1000g_rx_detach_lock);
 
 	return (done);
 }
@@ -1896,12 +1950,25 @@ e1000g_rx_drain(struct e1000g *Adapter)
 static boolean_t
 e1000g_reset_adapter(struct e1000g *Adapter)
 {
+	/* Disable and stop all the timers */
+	disable_watchdog_timer(Adapter);
+	stop_link_timer(Adapter);
+	stop_82547_timer(Adapter->tx_ring);
+
+	rw_enter(&Adapter->chip_lock, RW_WRITER);
+
 	e1000g_stop(Adapter, B_FALSE);
 
-	if (e1000g_start(Adapter, B_FALSE)) {
+	if (e1000g_start(Adapter, B_FALSE) != DDI_SUCCESS) {
+		rw_exit(&Adapter->chip_lock);
 		e1000g_log(Adapter, CE_WARN, "Reset failed");
-		return (B_FALSE);
+			return (B_FALSE);
 	}
+
+	rw_exit(&Adapter->chip_lock);
+
+	/* Enable and start the watchdog timer */
+	enable_watchdog_timer(Adapter);
 
 	return (B_TRUE);
 }
@@ -1909,14 +1976,27 @@ e1000g_reset_adapter(struct e1000g *Adapter)
 boolean_t
 e1000g_global_reset(struct e1000g *Adapter)
 {
+	/* Disable and stop all the timers */
+	disable_watchdog_timer(Adapter);
+	stop_link_timer(Adapter);
+	stop_82547_timer(Adapter->tx_ring);
+
+	rw_enter(&Adapter->chip_lock, RW_WRITER);
+
 	e1000g_stop(Adapter, B_TRUE);
 
 	Adapter->init_count = 0;
 
-	if (e1000g_start(Adapter, B_TRUE)) {
+	if (e1000g_start(Adapter, B_TRUE) != DDI_SUCCESS) {
+		rw_exit(&Adapter->chip_lock);
 		e1000g_log(Adapter, CE_WARN, "Reset failed");
 		return (B_FALSE);
 	}
+
+	rw_exit(&Adapter->chip_lock);
+
+	/* Enable and start the watchdog timer */
+	enable_watchdog_timer(Adapter);
 
 	return (B_TRUE);
 }
@@ -2010,90 +2090,42 @@ e1000g_intr_work(struct e1000g *Adapter, uint32_t icr)
 	Adapter->tx_pkt_cnt = 0;
 
 	rw_enter(&Adapter->chip_lock, RW_READER);
+
+	if (Adapter->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&Adapter->chip_lock);
+		return;
+	}
 	/*
-	 * Here we need to check the "chip_state" flag within the chip_lock to
+	 * Here we need to check the "e1000g_state" flag within the chip_lock to
 	 * ensure the receive routine will not execute when the adapter is
 	 * being reset.
 	 */
-	if (Adapter->chip_state != E1000G_START) {
+	if (!(Adapter->e1000g_state & E1000G_STARTED)) {
 		rw_exit(&Adapter->chip_lock);
 		return;
 	}
 
 	if (icr & E1000_ICR_RXT0) {
-		mblk_t			*mp;
-		uint_t			sz = 0;
-		mblk_t			*tmp, *tail = NULL;
+		mblk_t			*mp = NULL;
+		mblk_t			*tail = NULL;
 		e1000g_rx_ring_t	*rx_ring;
 
 		rx_ring = Adapter->rx_ring;
 		mutex_enter(&rx_ring->rx_lock);
-
 		/*
-		 * If the real interrupt for the Rx ring was
-		 * not disabled (e1000g_poll_mode == 0), then
-		 * we still pick up the packets and queue them
-		 * on Rx ring if we were in polling mode. this
-		 * enables the polling thread to pick up packets
-		 * really fast in polling mode and helps improve
-		 * latency.
+		 * Sometimes with legacy interrupts, it possible that
+		 * there is a single interrupt for Rx/Tx. In which
+		 * case, if poll flag is set, we shouldn't really
+		 * be doing Rx processing.
 		 */
-		mp = e1000g_receive(rx_ring, &tail, &sz);
+		if (!rx_ring->poll_flag)
+			mp = e1000g_receive(rx_ring, &tail,
+			    E1000G_CHAIN_NO_LIMIT);
+		mutex_exit(&rx_ring->rx_lock);
 		rw_exit(&Adapter->chip_lock);
-
-		if (mp != NULL) {
-			ASSERT(tail != NULL);
-			if (!rx_ring->poll_flag) {
-				/*
-				 * If not polling, see if something was
-				 * already queued. Take care not to
-				 * reorder packets.
-				 */
-				if (rx_ring->poll_list_head == NULL) {
-					mutex_exit(&rx_ring->rx_lock);
-					mac_rx_ring(Adapter->mh, rx_ring->mrh,
-					    mp, rx_ring->ring_gen_num);
-				} else {
-					tmp = rx_ring->poll_list_head;
-					rx_ring->poll_list_head = NULL;
-					rx_ring->poll_list_tail->b_next = mp;
-					rx_ring->poll_list_tail = NULL;
-					rx_ring->poll_list_sz = 0;
-					mutex_exit(&rx_ring->rx_lock);
-					mac_rx_ring(Adapter->mh, rx_ring->mrh,
-					    tmp, rx_ring->ring_gen_num);
-				}
-			} else {
-				/*
-				 * We are in a polling mode. Put the
-				 * processed packets on the poll list.
-				 */
-				if (rx_ring->poll_list_head == NULL)
-					rx_ring->poll_list_head = mp;
-				else
-					rx_ring->poll_list_tail->b_next = mp;
-				rx_ring->poll_list_tail = tail;
-				rx_ring->poll_list_sz += sz;
-				mutex_exit(&rx_ring->rx_lock);
-			}
-		} else if (!rx_ring->poll_flag &&
-		    rx_ring->poll_list_head != NULL) {
-			/*
-			 * Nothing new has arrived (then why
-			 * was the interrupt raised??). Check
-			 * if something queued from the last
-			 * time.
-			 */
-			tmp = rx_ring->poll_list_head;
-			rx_ring->poll_list_head = NULL;
-			rx_ring->poll_list_tail = NULL;
-			rx_ring->poll_list_sz = 0;
-			mutex_exit(&rx_ring->rx_lock);
+		if (mp != NULL)
 			mac_rx_ring(Adapter->mh, rx_ring->mrh,
-			    tmp, rx_ring->ring_gen_num);
-		} else {
-			mutex_exit(&rx_ring->rx_lock);
-		}
+			    mp, rx_ring->ring_gen_num);
 	} else
 		rw_exit(&Adapter->chip_lock);
 
@@ -2177,8 +2209,11 @@ e1000g_intr_work(struct e1000g *Adapter, uint32_t icr)
 				    "ESB2 receiver disabled");
 				Adapter->esb2_workaround = B_TRUE;
 			}
-
-			mac_link_update(Adapter->mh, Adapter->link_state);
+			if (!Adapter->reset_flag)
+				mac_link_update(Adapter->mh,
+				    Adapter->link_state);
+			if (Adapter->link_state == LINK_STATE_UP)
+				Adapter->reset_flag = B_FALSE;
 		}
 
 		start_watchdog_timer(Adapter);
@@ -2233,8 +2268,6 @@ e1000g_unicst_set(struct e1000g *Adapter, const uint8_t *mac_addr,
 	struct e1000_hw *hw;
 
 	hw = &Adapter->shared;
-
-	rw_enter(&Adapter->chip_lock, RW_WRITER);
 
 	/*
 	 * The first revision of Wiseman silicon (rev 2.0) has an errata
@@ -2298,7 +2331,6 @@ e1000g_unicst_set(struct e1000g *Adapter, const uint8_t *mac_addr,
 		e1000g_rx_setup(Adapter);
 	}
 
-	rw_exit(&Adapter->chip_lock);
 	if (e1000g_check_acc_handle(Adapter->osdep.reg_handle) != DDI_FM_OK) {
 		ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_DEGRADED);
 		return (EIO);
@@ -2312,8 +2344,6 @@ multicst_add(struct e1000g *Adapter, const uint8_t *multiaddr)
 {
 	struct e1000_hw *hw = &Adapter->shared;
 	int res = 0;
-
-	rw_enter(&Adapter->chip_lock, RW_WRITER);
 
 	if ((multiaddr[0] & 01) == 0) {
 		res = EINVAL;
@@ -2342,13 +2372,12 @@ multicst_add(struct e1000g *Adapter, const uint8_t *multiaddr)
 
 	e1000g_mask_interrupt(Adapter);
 
-done:
-	rw_exit(&Adapter->chip_lock);
 	if (e1000g_check_acc_handle(Adapter->osdep.reg_handle) != DDI_FM_OK) {
 		ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_DEGRADED);
 		res = EIO;
 	}
 
+done:
 	return (res);
 }
 
@@ -2357,8 +2386,6 @@ multicst_remove(struct e1000g *Adapter, const uint8_t *multiaddr)
 {
 	struct e1000_hw *hw = &Adapter->shared;
 	unsigned i;
-
-	rw_enter(&Adapter->chip_lock, RW_WRITER);
 
 	for (i = 0; i < Adapter->mcast_count; i++) {
 		if (bcmp(multiaddr, &Adapter->mcast_table[i],
@@ -2385,8 +2412,6 @@ multicst_remove(struct e1000g *Adapter, const uint8_t *multiaddr)
 
 	e1000g_mask_interrupt(Adapter);
 
-done:
-	rw_exit(&Adapter->chip_lock);
 	if (e1000g_check_acc_handle(Adapter->osdep.reg_handle) != DDI_FM_OK) {
 		ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_DEGRADED);
 		return (EIO);
@@ -2500,9 +2525,22 @@ int
 e1000g_m_multicst(void *arg, boolean_t add, const uint8_t *addr)
 {
 	struct e1000g *Adapter = (struct e1000g *)arg;
+	int result;
 
-	return ((add) ? multicst_add(Adapter, addr)
-	    : multicst_remove(Adapter, addr));
+	rw_enter(&Adapter->chip_lock, RW_WRITER);
+
+	if (Adapter->e1000g_state & E1000G_SUSPENDED) {
+		result = ECANCELED;
+		goto done;
+	}
+
+	result = (add) ? multicst_add(Adapter, addr)
+	    : multicst_remove(Adapter, addr);
+
+done:
+	rw_exit(&Adapter->chip_lock);
+	return (result);
+
 }
 
 int
@@ -2512,6 +2550,11 @@ e1000g_m_promisc(void *arg, boolean_t on)
 	uint32_t rctl;
 
 	rw_enter(&Adapter->chip_lock, RW_WRITER);
+
+	if (Adapter->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&Adapter->chip_lock);
+		return (ECANCELED);
+	}
 
 	rctl = E1000_READ_REG(&Adapter->shared, E1000_RCTL);
 
@@ -2593,24 +2636,29 @@ e1000g_rx_ring_intr_enable(mac_intr_handle_t intrh)
 	struct e1000g 		*adapter = rx_ring->adapter;
 	struct e1000_hw 	*hw = &adapter->shared;
 	uint32_t		intr_mask;
-	boolean_t		poll_mode;
+
+	rw_enter(&adapter->chip_lock, RW_READER);
+
+	if (adapter->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&adapter->chip_lock);
+		return (0);
+	}
 
 	mutex_enter(&rx_ring->rx_lock);
 	rx_ring->poll_flag = 0;
-	poll_mode = adapter->poll_mode;
 	mutex_exit(&rx_ring->rx_lock);
 
-	if (poll_mode) {
-		/* Rx interrupt enabling for MSI and legacy */
-		intr_mask = E1000_READ_REG(hw, E1000_IMS);
-		intr_mask |= E1000_IMS_RXT0;
-		E1000_WRITE_REG(hw, E1000_IMS, intr_mask);
-		E1000_WRITE_FLUSH(hw);
+	/* Rx interrupt enabling for MSI and legacy */
+	intr_mask = E1000_READ_REG(hw, E1000_IMS);
+	intr_mask |= E1000_IMS_RXT0;
+	E1000_WRITE_REG(hw, E1000_IMS, intr_mask);
+	E1000_WRITE_FLUSH(hw);
 
-		/* Trigger a Rx interrupt to check Rx ring */
-		E1000_WRITE_REG(hw, E1000_ICS, E1000_IMS_RXT0);
-		E1000_WRITE_FLUSH(hw);
-	}
+	/* Trigger a Rx interrupt to check Rx ring */
+	E1000_WRITE_REG(hw, E1000_ICS, E1000_IMS_RXT0);
+	E1000_WRITE_FLUSH(hw);
+
+	rw_exit(&adapter->chip_lock);
 	return (0);
 }
 
@@ -2620,23 +2668,22 @@ e1000g_rx_ring_intr_disable(mac_intr_handle_t intrh)
 	e1000g_rx_ring_t	*rx_ring = (e1000g_rx_ring_t *)intrh;
 	struct e1000g 		*adapter = rx_ring->adapter;
 	struct e1000_hw 	*hw = &adapter->shared;
-	boolean_t		poll_mode;
 
-	/*
-	 * Once the adapter can support per Rx ring interrupt,
-	 * we should disable the real interrupt instead of just setting
-	 * the flag.
-	 */
+	rw_enter(&adapter->chip_lock, RW_READER);
+
+	if (adapter->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&adapter->chip_lock);
+		return (0);
+	}
 	mutex_enter(&rx_ring->rx_lock);
 	rx_ring->poll_flag = 1;
-	poll_mode = adapter->poll_mode;
 	mutex_exit(&rx_ring->rx_lock);
 
-	if (poll_mode) {
-		/* Rx interrupt disabling for MSI and legacy */
-		E1000_WRITE_REG(hw, E1000_IMC, E1000_IMS_RXT0);
-		E1000_WRITE_FLUSH(hw);
-	}
+	/* Rx interrupt disabling for MSI and legacy */
+	E1000_WRITE_REG(hw, E1000_IMC, E1000_IMS_RXT0);
+	E1000_WRITE_FLUSH(hw);
+
+	rw_exit(&adapter->chip_lock);
 	return (0);
 }
 
@@ -2648,15 +2695,11 @@ e1000g_unicst_find(struct e1000g *Adapter, const uint8_t *mac_addr)
 {
 	int slot;
 
-	ASSERT(mutex_owned(&Adapter->gen_lock));
-
 	for (slot = 0; slot < Adapter->unicst_total; slot++) {
-		if (Adapter->unicst_addr[slot].mac.set == 1) {
-			if (bcmp(Adapter->unicst_addr[slot].mac.addr,
-			    mac_addr, ETHERADDRL) == 0)
+		if ((Adapter->unicst_addr[slot].mac.set == 1) &&
+		    (bcmp(Adapter->unicst_addr[slot].mac.addr,
+		    mac_addr, ETHERADDRL) == 0))
 				return (slot);
-		} else
-			continue;
 	}
 
 	return (-1);
@@ -2672,19 +2715,24 @@ static int
 e1000g_addmac(void *arg, const uint8_t *mac_addr)
 {
 	struct e1000g *Adapter = (struct e1000g *)arg;
-	int slot;
+	int slot, err;
 
-	mutex_enter(&Adapter->gen_lock);
+	rw_enter(&Adapter->chip_lock, RW_WRITER);
+
+	if (Adapter->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&Adapter->chip_lock);
+		return (ECANCELED);
+	}
 
 	if (e1000g_unicst_find(Adapter, mac_addr) != -1) {
 		/* The same address is already in slot */
-		mutex_exit(&Adapter->gen_lock);
+		rw_exit(&Adapter->chip_lock);
 		return (0);
 	}
 
 	if (Adapter->unicst_avail == 0) {
 		/* no slots available */
-		mutex_exit(&Adapter->gen_lock);
+		rw_exit(&Adapter->chip_lock);
 		return (ENOSPC);
 	}
 
@@ -2695,37 +2743,44 @@ e1000g_addmac(void *arg, const uint8_t *mac_addr)
 	}
 	ASSERT(slot < Adapter->unicst_total);
 
-	e1000g_unicst_set(Adapter, mac_addr, slot);
-	Adapter->unicst_avail--;
+	err = e1000g_unicst_set(Adapter, mac_addr, slot);
+	if (err == 0)
+		Adapter->unicst_avail--;
 
-	mutex_exit(&Adapter->gen_lock);
+	rw_exit(&Adapter->chip_lock);
 
-	return (0);
+	return (err);
 }
 
 static int
 e1000g_remmac(void *arg, const uint8_t *mac_addr)
 {
 	struct e1000g *Adapter = (struct e1000g *)arg;
-	int slot;
+	int slot, err;
 
-	mutex_enter(&Adapter->gen_lock);
+	rw_enter(&Adapter->chip_lock, RW_WRITER);
+
+	if (Adapter->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&Adapter->chip_lock);
+		return (ECANCELED);
+	}
 
 	slot = e1000g_unicst_find(Adapter, mac_addr);
 	if (slot == -1) {
-		mutex_exit(&Adapter->gen_lock);
+		rw_exit(&Adapter->chip_lock);
 		return (EINVAL);
 	}
 
 	ASSERT(Adapter->unicst_addr[slot].mac.set);
 
 	/* Clear this slot */
-	e1000g_unicst_set(Adapter, NULL, slot);
-	Adapter->unicst_avail++;
+	err = e1000g_unicst_set(Adapter, NULL, slot);
+	if (err == 0)
+		Adapter->unicst_avail++;
 
-	mutex_exit(&Adapter->gen_lock);
+	rw_exit(&Adapter->chip_lock);
 
-	return (0);
+	return (err);
 }
 
 static int
@@ -2889,6 +2944,12 @@ e1000g_m_setprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 	uint64_t tmp = 0;
 
 	rw_enter(&Adapter->chip_lock, RW_WRITER);
+
+	if (Adapter->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&Adapter->chip_lock);
+		return (ECANCELED);
+	}
+
 	if (Adapter->loopback_mode != E1000G_LB_NONE &&
 	    e1000g_param_locked(pr_num)) {
 		/*
@@ -2932,16 +2993,16 @@ e1000g_m_setprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 				err = EINVAL;
 				break;
 			case LINK_FLOWCTRL_NONE:
-				fc->type = e1000_fc_none;
+				fc->requested_mode = e1000_fc_none;
 				break;
 			case LINK_FLOWCTRL_RX:
-				fc->type = e1000_fc_rx_pause;
+				fc->requested_mode = e1000_fc_rx_pause;
 				break;
 			case LINK_FLOWCTRL_TX:
-				fc->type = e1000_fc_tx_pause;
+				fc->requested_mode = e1000_fc_tx_pause;
 				break;
 			case LINK_FLOWCTRL_BI:
-				fc->type = e1000_fc_full;
+				fc->requested_mode = e1000_fc_full;
 				break;
 			}
 reset:
@@ -2991,7 +3052,7 @@ reset:
 				err = EINVAL;
 				break;
 			}
-			if (Adapter->chip_state != E1000G_STOP) {
+			if (Adapter->e1000g_state & E1000G_STARTED) {
 				err = EBUSY;
 				break;
 			}
@@ -3058,7 +3119,7 @@ e1000g_m_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			break;
 		case MAC_PROP_FLOWCTRL:
 			if (pr_valsize >= sizeof (link_flowctrl_t)) {
-				switch (fc->type) {
+				switch (fc->current_mode) {
 					case e1000_fc_none:
 						flowctrl = LINK_FLOWCTRL_NONE;
 						break;
@@ -3476,12 +3537,12 @@ e1000g_get_conf(struct e1000g *Adapter)
 	 * FlowControl
 	 */
 	hw->fc.send_xon = B_TRUE;
-	hw->fc.type =
+	hw->fc.requested_mode =
 	    e1000g_get_prop(Adapter, "FlowControl",
 	    e1000_fc_none, 4, DEFAULT_FLOW_CONTROL);
 	/* 4 is the setting that says "let the eeprom decide" */
-	if (hw->fc.type == 4)
-		hw->fc.type = e1000_fc_default;
+	if (hw->fc.requested_mode == 4)
+		hw->fc.requested_mode = e1000_fc_default;
 
 	/*
 	 * Max Num Receive Packets on Interrupt
@@ -3605,6 +3666,15 @@ e1000g_get_conf(struct e1000g *Adapter)
 		Adapter->lso_premature_issue = B_FALSE;
 		Adapter->lso_enable = B_FALSE;
 	}
+
+	/*
+	 * If mem_workaround_82546 is enabled, the rx buffer allocated by
+	 * e1000_82545, e1000_82546 and e1000_82546_rev_3
+	 * will not cross 64k boundary.
+	 */
+	Adapter->mem_workaround_82546 =
+	    e1000g_get_prop(Adapter, "mem_workaround_82546",
+	    0, 1, DEFAULT_MEM_WORKAROUND_82546);
 }
 
 /*
@@ -3695,6 +3765,11 @@ e1000g_link_check(struct e1000g *Adapter)
 			Adapter->link_state = LINK_STATE_UP;
 			link_changed = B_TRUE;
 
+			if (Adapter->link_speed == SPEED_1000)
+				Adapter->stall_threshold = TX_STALL_TIME_2S;
+			else
+				Adapter->stall_threshold = TX_STALL_TIME_8S;
+
 			Adapter->tx_link_down_timeout = 0;
 
 			if ((hw->mac.type == e1000_82571) ||
@@ -3731,7 +3806,7 @@ e1000g_link_check(struct e1000g *Adapter)
 			e1000g_smartspeed(Adapter);
 		}
 
-		if (Adapter->chip_state == E1000G_START) {
+		if (Adapter->e1000g_state & E1000G_STARTED) {
 			if (Adapter->tx_link_down_timeout <
 			    MAX_TX_LINK_DOWN_TIMEOUT) {
 				Adapter->tx_link_down_timeout++;
@@ -3824,16 +3899,20 @@ e1000g_timer_tx_resched(struct e1000g *Adapter)
 {
 	e1000g_tx_ring_t *tx_ring = Adapter->tx_ring;
 
+	rw_enter(&Adapter->chip_lock, RW_READER);
+
 	if (tx_ring->resched_needed &&
 	    ((ddi_get_lbolt() - tx_ring->resched_timestamp) >
 	    drv_usectohz(1000000)) &&
-	    (Adapter->chip_state == E1000G_START) &&
+	    (Adapter->e1000g_state & E1000G_STARTED) &&
 	    (tx_ring->tbd_avail >= DEFAULT_TX_NO_RESOURCE)) {
 		tx_ring->resched_needed = B_FALSE;
 		mac_tx_update(Adapter->mh);
 		E1000G_STAT(tx_ring->stat_reschedule);
 		E1000G_STAT(tx_ring->stat_timer_reschedule);
 	}
+
+	rw_exit(&Adapter->chip_lock);
 }
 
 static void
@@ -3846,7 +3925,11 @@ e1000g_local_timer(void *ws)
 
 	hw = &Adapter->shared;
 
-	if (Adapter->chip_state == E1000G_ERROR) {
+	if (Adapter->e1000g_state & E1000G_ERROR) {
+		rw_enter(&Adapter->chip_lock, RW_WRITER);
+		Adapter->e1000g_state &= ~E1000G_ERROR;
+		rw_exit(&Adapter->chip_lock);
+
 		Adapter->reset_count++;
 		if (e1000g_global_reset(Adapter)) {
 			ddi_fm_service_impact(Adapter->dip,
@@ -3862,14 +3945,13 @@ e1000g_local_timer(void *ws)
 		E1000G_DEBUGLOG_0(Adapter, E1000G_INFO_LEVEL,
 		    "Tx stall detected. Activate automatic recovery.\n");
 		e1000g_fm_ereport(Adapter, DDI_FM_DEVICE_STALL);
+		ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_LOST);
 		Adapter->reset_count++;
 		if (e1000g_reset_adapter(Adapter)) {
 			ddi_fm_service_impact(Adapter->dip,
 			    DDI_SERVICE_RESTORED);
 			e1000g_timer_tx_resched(Adapter);
-		} else
-			ddi_fm_service_impact(Adapter->dip,
-			    DDI_SERVICE_LOST);
+		}
 		return;
 	}
 
@@ -3879,9 +3961,12 @@ e1000g_local_timer(void *ws)
 		link_changed = e1000g_link_check(Adapter);
 	rw_exit(&Adapter->chip_lock);
 
-	if (link_changed)
-		mac_link_update(Adapter->mh, Adapter->link_state);
-
+	if (link_changed) {
+		if (!Adapter->reset_flag)
+			mac_link_update(Adapter->mh, Adapter->link_state);
+		if (Adapter->link_state == LINK_STATE_UP)
+			Adapter->reset_flag = B_FALSE;
+	}
 	/*
 	 * Workaround for esb2. Data stuck in fifo on a link
 	 * down event. Reset the adapter to recover it.
@@ -3889,6 +3974,7 @@ e1000g_local_timer(void *ws)
 	if (Adapter->esb2_workaround) {
 		Adapter->esb2_workaround = B_FALSE;
 		(void) e1000g_reset_adapter(Adapter);
+		return;
 	}
 
 	/*
@@ -4398,18 +4484,15 @@ e1000g_stall_check(struct e1000g *Adapter)
 	if (Adapter->link_state != LINK_STATE_UP)
 		return (B_FALSE);
 
-	if (tx_ring->recycle_fail > 0)
-		tx_ring->stall_watchdog++;
-	else
-		tx_ring->stall_watchdog = 0;
+	(void) e1000g_recycle(tx_ring);
 
-	if (tx_ring->stall_watchdog < E1000G_STALL_WATCHDOG_COUNT)
-		return (B_FALSE);
+	if (Adapter->stall_flag) {
+		Adapter->stall_flag = B_FALSE;
+		Adapter->reset_flag = B_TRUE;
+		return (B_TRUE);
+	}
 
-	tx_ring->stall_watchdog = 0;
-	tx_ring->recycle_fail = 0;
-
-	return (B_TRUE);
+	return (B_FALSE);
 }
 
 #ifdef E1000G_DEBUG
@@ -4771,7 +4854,10 @@ e1000g_check_loopback_support(struct e1000_hw *hw)
 	case e1000_82571:
 	case e1000_82572:
 	case e1000_82573:
+	case e1000_82574:
 	case e1000_80003es2lan:
+	case e1000_ich9lan:
+	case e1000_ich10lan:
 		return (B_TRUE);
 	}
 	return (B_FALSE);
@@ -4868,6 +4954,7 @@ e1000g_set_internal_loopback(struct e1000g *Adapter)
 	uint32_t ctrl;
 	uint32_t status;
 	uint16_t phy_ctrl;
+	uint16_t phy_reg;
 	uint32_t txcw;
 
 	hw = &Adapter->shared;
@@ -4914,6 +5001,38 @@ e1000g_set_internal_loopback(struct e1000g *Adapter)
 		break;
 	}
 
+	/*
+	 * The following registers should be set for e1000_phy_bm phy type.
+	 * e1000_82574, e1000_ich10lan and some e1000_ich9lan use this phy.
+	 * For others, we do not need to set these registers.
+	 */
+	if (hw->phy.type == e1000_phy_bm) {
+		/* Set Default MAC Interface speed to 1GB */
+		(void) e1000_read_phy_reg(hw, PHY_REG(2, 21), &phy_reg);
+		phy_reg &= ~0x0007;
+		phy_reg |= 0x006;
+		(void) e1000_write_phy_reg(hw, PHY_REG(2, 21), phy_reg);
+		/* Assert SW reset for above settings to take effect */
+		(void) e1000_phy_commit(hw);
+		msec_delay(1);
+		/* Force Full Duplex */
+		(void) e1000_read_phy_reg(hw, PHY_REG(769, 16), &phy_reg);
+		(void) e1000_write_phy_reg(hw, PHY_REG(769, 16),
+		    phy_reg | 0x000C);
+		/* Set Link Up (in force link) */
+		(void) e1000_read_phy_reg(hw, PHY_REG(776, 16), &phy_reg);
+		(void) e1000_write_phy_reg(hw, PHY_REG(776, 16),
+		    phy_reg | 0x0040);
+		/* Force Link */
+		(void) e1000_read_phy_reg(hw, PHY_REG(769, 16), &phy_reg);
+		(void) e1000_write_phy_reg(hw, PHY_REG(769, 16),
+		    phy_reg | 0x0040);
+		/* Set Early Link Enable */
+		(void) e1000_read_phy_reg(hw, PHY_REG(769, 20), &phy_reg);
+		(void) e1000_write_phy_reg(hw, PHY_REG(769, 20),
+		    phy_reg | 0x0400);
+	}
+
 	/* Set loopback */
 	(void) e1000_write_phy_reg(hw, PHY_CONTROL, phy_ctrl | MII_CR_LOOPBACK);
 
@@ -4952,7 +5071,6 @@ e1000g_set_internal_loopback(struct e1000g *Adapter)
 			if ((status & E1000_STATUS_FD) == 0)
 				ctrl |= E1000_CTRL_ILOS | E1000_CTRL_SLU;
 		}
-		E1000_WRITE_REG(hw, E1000_CTRL, ctrl);
 		break;
 
 	case e1000_82571:
@@ -4963,14 +5081,6 @@ e1000g_set_internal_loopback(struct e1000g *Adapter)
 		 * using SerDes analog loopback.
 		 */
 		if (hw->phy.media_type != e1000_media_type_copper) {
-			status = E1000_READ_REG(hw, E1000_STATUS);
-			/* Set ILOS on fiber nic if half duplex is detected */
-			if (((status & E1000_STATUS_LU) == 0) ||
-			    ((status & E1000_STATUS_FD) == 0) ||
-			    (hw->phy.media_type ==
-			    e1000_media_type_internal_serdes))
-				ctrl |= E1000_CTRL_ILOS | E1000_CTRL_SLU;
-
 			/* Disable autoneg by setting bit 31 of TXCW to zero */
 			txcw = E1000_READ_REG(hw, E1000_TXCW);
 			txcw &= ~((uint32_t)1 << 31);
@@ -4983,14 +5093,29 @@ e1000g_set_internal_loopback(struct e1000g *Adapter)
 			E1000_WRITE_REG(hw, E1000_SCTL, 0x0410);
 			msec_delay(10);
 		}
-		E1000_WRITE_REG(hw, E1000_CTRL, ctrl);
+
+		status = E1000_READ_REG(hw, E1000_STATUS);
+		/* Set ILOS on fiber nic if half duplex is detected */
+		if ((hw->phy.media_type == e1000_media_type_fiber) &&
+		    ((status & E1000_STATUS_FD) == 0 ||
+		    (status & E1000_STATUS_LU) == 0))
+			ctrl |= E1000_CTRL_ILOS | E1000_CTRL_SLU;
+		else if (hw->phy.media_type == e1000_media_type_internal_serdes)
+			ctrl |= E1000_CTRL_SLU;
 		break;
 
 	case e1000_82573:
 		ctrl |= E1000_CTRL_ILOS;
-		E1000_WRITE_REG(hw, E1000_CTRL, ctrl);
+		break;
+	case e1000_ich9lan:
+	case e1000_ich10lan:
+		ctrl |= E1000_CTRL_SLU;
 		break;
 	}
+	if (hw->phy.type == e1000_phy_bm)
+		ctrl |= E1000_CTRL_SLU | E1000_CTRL_ILOS;
+
+	E1000_WRITE_REG(hw, E1000_CTRL, ctrl);
 }
 
 static void
@@ -5086,7 +5211,10 @@ e1000g_set_external_loopback_1000(struct e1000g *Adapter)
 			break;
 		}
 		break;
+	case e1000_82574:
 	case e1000_80003es2lan:
+	case e1000_ich9lan:
+	case e1000_ich10lan:
 		(void) e1000_read_phy_reg(hw, GG82563_REG(6, 16), &phydata);
 		(void) e1000_write_phy_reg(hw, GG82563_REG(6, 16),
 		    phydata | (1 << 5));

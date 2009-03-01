@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -71,6 +71,7 @@
 #include <sys/sockio.h>
 #include <sys/stropts.h>
 #include <sys/conf.h>
+#include <sys/systeminfo.h>
 
 #include <libdlpi.h>
 #include <libdllink.h>
@@ -2397,6 +2398,7 @@ configure_one_interface(zlog_t *zlogp, zoneid_t zone_id,
 		 */
 		char buffer[INET6_ADDRSTRLEN];
 		void  *addr;
+		const char *nomatch = "no matching subnet found in netmasks(4)";
 
 		if (af == AF_INET)
 			addr = &((struct sockaddr_in *)
@@ -2405,14 +2407,23 @@ configure_one_interface(zlog_t *zlogp, zoneid_t zone_id,
 			addr = &((struct sockaddr_in6 *)
 			    (&lifr.lifr_addr))->sin6_addr;
 
-		/* Find out what netmask interface is going to be using */
+		/*
+		 * Find out what netmask the interface is going to be using.
+		 * If we just brought up an IPMP data address on an underlying
+		 * interface above, the address will have already migrated, so
+		 * the SIOCGLIFNETMASK won't be able to find it (but we need
+		 * to bring the address up to get the actual netmask).  Just
+		 * omit printing the actual netmask in this corner-case.
+		 */
 		if (ioctl(s, SIOCGLIFNETMASK, (caddr_t)&lifr) < 0 ||
-		    inet_ntop(af, addr, buffer, sizeof (buffer)) == NULL)
-			goto bad;
-		zerror(zlogp, B_FALSE,
-		    "WARNING: %s: no matching subnet found in netmasks(4) for "
-		    "%s; using default of %s.",
-		    lifr.lifr_name, addrstr4, buffer);
+		    inet_ntop(af, addr, buffer, sizeof (buffer)) == NULL) {
+			zerror(zlogp, B_FALSE, "WARNING: %s; using default.",
+			    nomatch);
+		} else {
+			zerror(zlogp, B_FALSE,
+			    "WARNING: %s: %s: %s; using default of %s.",
+			    lifr.lifr_name, nomatch, addrstr4, buffer);
+		}
 	}
 
 	/*
@@ -2526,7 +2537,7 @@ add_datalink(zlog_t *zlogp, char *zone_name, char *dlname)
 	}
 
 	/* Set zoneid of this link. */
-	if (dladm_setzid(dlname, zone_name) != DLADM_STATUS_OK) {
+	if (dladm_setzid(dld_handle, dlname, zone_name) != DLADM_STATUS_OK) {
 		zerror(zlogp, B_TRUE, "WARNING: unable to add network "
 		    "interface '%s'.", dlname);
 		return (-1);
@@ -2538,7 +2549,7 @@ add_datalink(zlog_t *zlogp, char *zone_name, char *dlname)
 static int
 remove_datalink(zlog_t *zlogp, char *dlname)
 {
-	if (dladm_setzid(dlname, GLOBAL_ZONENAME)
+	if (dladm_setzid(dld_handle, dlname, GLOBAL_ZONENAME)
 	    != DLADM_STATUS_OK) {
 		zerror(zlogp, B_TRUE, "unable to release network "
 		    "interface '%s'", dlname);
@@ -3956,6 +3967,69 @@ setup_zone_rm(zlog_t *zlogp, char *zone_name, zoneid_t zoneid)
 	return (Z_OK);
 }
 
+/*
+ * Sets the hostid of the new zone based on its configured value.  The zone's
+ * zone_t structure must already exist in kernel memory.  'zlogp' refers to the
+ * log used to report errors and warnings and must be non-NULL.  'zone_namep'
+ * is the name of the new zone and must be non-NULL.  'zoneid' is the numeric
+ * ID of the new zone.
+ *
+ * This function returns zero on success and a nonzero error code on failure.
+ */
+static int
+setup_zone_hostid(zlog_t *zlogp, char *zone_namep, zoneid_t zoneid)
+{
+	int res;
+	zone_dochandle_t handle;
+	char hostidp[HW_HOSTID_LEN];
+	unsigned int hostid;
+
+	if ((handle = zonecfg_init_handle()) == NULL) {
+		zerror(zlogp, B_TRUE, "getting zone configuration handle");
+		return (Z_BAD_HANDLE);
+	}
+	if ((res = zonecfg_get_snapshot_handle(zone_namep, handle)) != Z_OK) {
+		zerror(zlogp, B_FALSE, "invalid configuration");
+		zonecfg_fini_handle(handle);
+		return (res);
+	}
+
+	if ((res = zonecfg_get_hostid(handle, hostidp, sizeof (hostidp))) ==
+	    Z_OK) {
+		if (zonecfg_valid_hostid(hostidp) != Z_OK) {
+			zerror(zlogp, B_FALSE,
+			    "zone hostid is not valid: %s", hostidp);
+			zonecfg_fini_handle(handle);
+			return (Z_HOSTID_FUBAR);
+		}
+		hostid = (unsigned int)strtoul(hostidp, NULL, 16);
+		if (zone_setattr(zoneid, ZONE_ATTR_HOSTID, &hostid,
+		    sizeof (hostid)) != 0) {
+			zerror(zlogp, B_TRUE,
+			    "zone hostid is not valid: %s", hostidp);
+			zonecfg_fini_handle(handle);
+			return (Z_SYSTEM);
+		}
+	} else if (res != Z_BAD_PROPERTY) {
+		/*
+		 * Z_BAD_PROPERTY is an acceptable error value (from
+		 * zonecfg_get_hostid()) because it indicates that the zone
+		 * doesn't have a hostid.
+		 */
+		if (res == Z_TOO_BIG)
+			zerror(zlogp, B_FALSE, "hostid string in zone "
+			    "configuration is too large.");
+		else
+			zerror(zlogp, B_TRUE, "fetching zone hostid from "
+			    "configuration");
+		zonecfg_fini_handle(handle);
+		return (res);
+	}
+
+	zonecfg_fini_handle(handle);
+	return (Z_OK);
+}
+
 zoneid_t
 vplat_create(zlog_t *zlogp, zone_mnt_t mount_cmd)
 {
@@ -4142,12 +4216,15 @@ vplat_create(zlog_t *zlogp, zone_mnt_t mount_cmd)
 		struct brand_attr attr;
 		char modname[MAXPATHLEN];
 
+		if (setup_zone_hostid(zlogp, zone_name, zoneid) != Z_OK)
+			goto error;
+
 		if ((zone_get_brand(zone_name, attr.ba_brandname,
 		    MAXNAMELEN) != Z_OK) ||
 		    (bh = brand_open(attr.ba_brandname)) == NULL) {
 			zerror(zlogp, B_FALSE,
 			    "unable to determine brand name");
-			return (-1);
+			goto error;
 		}
 
 		/*
@@ -4158,7 +4235,7 @@ vplat_create(zlog_t *zlogp, zone_mnt_t mount_cmd)
 			brand_close(bh);
 			zerror(zlogp, B_FALSE,
 			    "unable to determine brand kernel module");
-			return (-1);
+			goto error;
 		}
 		brand_close(bh);
 
@@ -4172,10 +4249,8 @@ vplat_create(zlog_t *zlogp, zone_mnt_t mount_cmd)
 			}
 		}
 
-		if (setup_zone_rm(zlogp, zone_name, zoneid) != Z_OK) {
-			(void) zone_shutdown(zoneid);
+		if (setup_zone_rm(zlogp, zone_name, zoneid) != Z_OK)
 			goto error;
-		}
 
 		set_mlps(zlogp, zoneid, zcent);
 	}
@@ -4184,8 +4259,10 @@ vplat_create(zlog_t *zlogp, zone_mnt_t mount_cmd)
 	zoneid = -1;
 
 error:
-	if (zoneid != -1)
+	if (zoneid != -1) {
+		(void) zone_shutdown(zoneid);
 		(void) zone_destroy(zoneid);
+	}
 	if (rctlbuf != NULL)
 		free(rctlbuf);
 	priv_freeset(privs);
@@ -4520,10 +4597,6 @@ vplat_teardown(zlog_t *zlogp, boolean_t unmount_cmd, boolean_t rebooting)
 		zerror(zlogp, B_TRUE, "unable to abort TCP connections");
 		goto error;
 	}
-
-	/* destroy zconsole before umount /dev */
-	if (!unmount_cmd)
-		destroy_console_slave();
 
 	if (unmount_filesystems(zlogp, zoneid, unmount_cmd) != 0) {
 		zerror(zlogp, B_FALSE,

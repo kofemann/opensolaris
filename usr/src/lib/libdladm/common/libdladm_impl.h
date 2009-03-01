@@ -36,11 +36,26 @@ extern "C" {
 #define	MAXLINELEN		1024
 #define	BUFLEN(lim, ptr)	(((lim) > (ptr)) ? ((lim) - (ptr)) : 0)
 
+/*
+ * The handle contains file descriptors to DLD_CONTROL_DEV and
+ * DLMGMT_DOOR.  Rather than opening the file descriptor each time
+ * it is required, the handle is opened by consumers of libdladm
+ * (e.g., dladm) and then passed to libdladm.
+ */
+struct dladm_handle {
+	int dld_fd;	/* file descriptor to DLD_CONTROL_DEV */
+	int door_fd;	/* file descriptor to DLMGMT_DOOR */
+};
+
+/* DLMGMT_DOOR can only be accessed by libdladm and dlmgmtd */
+extern dladm_status_t	dladm_door_fd(dladm_handle_t, int *);
+
 extern dladm_status_t	dladm_errno2status(int);
-extern dladm_status_t   i_dladm_rw_db(const char *, mode_t,
-			    dladm_status_t (*)(void *, FILE *, FILE *),
-			    void *, boolean_t);
-extern dladm_status_t	i_dladm_get_state(datalink_id_t, link_state_t *);
+extern dladm_status_t   i_dladm_rw_db(dladm_handle_t, const char *, mode_t,
+			    dladm_status_t (*)(dladm_handle_t, void *, FILE *,
+			    FILE *), void *, boolean_t);
+extern dladm_status_t	i_dladm_get_state(dladm_handle_t, datalink_id_t,
+			    link_state_t *);
 
 extern const char	*dladm_pri2str(mac_priority_level_t, char *);
 extern dladm_status_t	dladm_str2pri(char *, mac_priority_level_t *);
@@ -84,6 +99,16 @@ extern void		dladm_free_args(dladm_arg_list_t *);
 #define	FMACADDR	"macaddr"	/* string */
 
 /*
+ * List of all the above attributes.
+ */
+#define	DLADM_ATTR_NAMES	FVLANID, FLINKOVER, \
+				FKEY, FNPORTS, FPORTS, FPOLICY, \
+				FFIXMACADDR, FFORCE, FLACPMODE, FLACPTIMER, \
+				FMADDRTYPE, FMADDRLEN, FMADDRSLOT, \
+				FMADDRPREFIXLEN, FHWRINGS, \
+				FMACADDR
+
+/*
  * Data structures used for implementing temporary properties
  */
 
@@ -94,8 +119,8 @@ typedef struct val_desc {
 
 #define	VALCNT(vals)	(sizeof ((vals)) / sizeof (val_desc_t))
 
-extern dladm_status_t	dladm_link_proplist_extract(dladm_arg_list_t *,
-			    mac_resource_props_t *);
+extern dladm_status_t	dladm_link_proplist_extract(dladm_handle_t,
+			    dladm_arg_list_t *, mac_resource_props_t *);
 
 extern dladm_status_t	dladm_flow_proplist_extract(dladm_arg_list_t *,
 			    mac_resource_props_t *);

@@ -19,17 +19,15 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef _SMB_SID_H
 #define	_SMB_SID_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 /*
- * NT Security Identifier (SID) interface definition.
+ * Security Identifier (SID) interface definition.
  */
 #include <smbsrv/wintypes.h>
 
@@ -218,24 +216,29 @@ typedef struct smb_sid {
 } smb_sid_t;
 
 /*
- * Well-known account structure
+ * Only group attributes are defined. No user attributes defined.
  */
-typedef struct smb_wka {
-	uint16_t	wka_type;
-	uint8_t		wka_domidx;
-	char		*wka_sid;
-	char		*wka_name;
-	uint16_t	wka_flags;
-	char		*wka_desc;
-	smb_sid_t	*wka_binsid;
-} smb_wka_t;
+#define	SE_GROUP_MANDATORY		0x00000001
+#define	SE_GROUP_ENABLED_BY_DEFAULT	0x00000002
+#define	SE_GROUP_ENABLED		0x00000004
+#define	SE_GROUP_OWNER			0x00000008
+#define	SE_GROUP_USE_FOR_DENY_ONLY	0x00000010
+#define	SE_GROUP_LOGON_ID		0xC0000000
 
 /*
- * Defined values for smb_wka.wka_flags
- *
- * SMB_WKAFLG_LGRP_ENABLE		Can be added as local group
+ * smb_id_t consists of both the Windows security identifier
+ * and its corresponding POSIX/ephemeral ID.
  */
-#define	SMB_WKAFLG_LGRP_ENABLE	0x1
+typedef struct smb_id {
+	uint32_t	i_attrs;
+	smb_sid_t	*i_sid;
+	uid_t		i_id;
+} smb_id_t;
+
+typedef struct smb_ids {
+	uint32_t	i_cnt;
+	smb_id_t	*i_ids;
+} smb_ids_t;
 
 /*
  * The maximum size of a SID in string format
@@ -247,7 +250,7 @@ int smb_sid_len(smb_sid_t *);
 smb_sid_t *smb_sid_dup(smb_sid_t *);
 smb_sid_t *smb_sid_splice(smb_sid_t *, uint32_t);
 int smb_sid_getrid(smb_sid_t *, uint32_t *);
-int smb_sid_split(smb_sid_t *, uint32_t *);
+smb_sid_t *smb_sid_split(smb_sid_t *, uint32_t *);
 boolean_t smb_sid_cmp(smb_sid_t *, smb_sid_t *);
 boolean_t smb_sid_islocal(smb_sid_t *);
 boolean_t smb_sid_indomain(smb_sid_t *, smb_sid_t *);
@@ -257,18 +260,7 @@ void smb_sid_tostr(smb_sid_t *, char *);
 smb_sid_t *smb_sid_fromstr(char *);
 char *smb_sid_type2str(uint16_t);
 
-
-/*
- * Well-known account interfaces
- */
-int smb_wka_init(void);
-void smb_wka_fini(void);
-smb_wka_t *smb_wka_lookup(char *);
-char *smb_wka_lookup_sid(smb_sid_t *, uint16_t *);
-smb_sid_t *smb_wka_lookup_name(char *, uint16_t *);
-char *smb_wka_lookup_domain(char *);
-boolean_t smb_wka_is_wellknown(char *);
-
+void smb_ids_free(smb_ids_t *);
 
 #ifdef __cplusplus
 }

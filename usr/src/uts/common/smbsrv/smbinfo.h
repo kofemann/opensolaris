@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -28,6 +28,8 @@
 
 #include <sys/types.h>
 #include <smbsrv/netbios.h>
+#include <netinet/in.h>
+#include <smbsrv/smb_inet.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -101,23 +103,8 @@ extern "C" {
 #define	SMB_PI_MAX_NATIVE_OS	32
 #define	SMB_PI_MAX_LANMAN	32
 
-
-#define	SMB_PI_UNKNOWN_DOMAIN		0
-#define	SMB_PI_RESOURCE_DOMAIN		1
-
-/*
- * K.L. The keep alive time out use to default to 900
- * seconds. It is not long enough for some applications
- * i.e. MS Access. We currently use 5400 seconds.
- */
 #define	SMB_PI_KEEP_ALIVE_MIN		(90 * 60)
 #define	SMB_LM_COMPATIBILITY_DEFAULT_LEV 3
-
-/*
- * This is max networks multiply by canonical address for IPv4
- * This needs a fix for IPv4
- */
-#define	MAX_EXCLUDE_LIST_LEN	(SMB_PI_MAX_NETWORKS * INET_ADDRSTRLEN)
 
 typedef struct smb_kmod_cfg {
 	uint32_t skc_maxworkers;
@@ -129,6 +116,7 @@ typedef struct smb_kmod_cfg {
 	int32_t skc_oplock_enable;
 	int32_t skc_sync_enable;
 	int32_t skc_secmode;
+	int32_t skc_ipv6_enable;
 	char skc_nbdomain[NETBIOS_NAME_SZ];
 	char skc_fqdn[SMB_PI_MAX_DOMAIN];
 	char skc_hostname[SMB_PI_MAX_HOST];

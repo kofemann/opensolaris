@@ -23,7 +23,7 @@
  *	Copyright (c) 1988 AT&T
  *	  All Rights Reserved
  *
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -100,7 +100,6 @@ typedef enum {
 	REF_NUM				/* the number of symbol references */
 } Symref;
 
-
 /*
  * GOT reference models
  */
@@ -128,6 +127,15 @@ typedef struct {
 	Gotndx		gt_gndx;
 } Gottable;
 
+/*
+ * The link-editor caches the results of sloppy relocation processing
+ * in a variable of this type. Symbols come for processing in sorted
+ * order, so a 1 element cache suffices to eliminate duplicate lookups.
+ */
+typedef struct sreloc_cache {
+	Sym_desc	*sr_osdp;	/* Original symbol */
+	Sym_desc	*sr_rsdp;	/* Replacement symbol */
+} Sreloc_cache;
 
 /*
  * Output file processing structure
@@ -193,7 +201,6 @@ struct ofl_desc {
 	Sym_desc	*ofl_dtracesym;	/* ld -zdtrace= */
 	ofl_flag_t	ofl_flags;	/* various state bits, args etc. */
 	ofl_flag_t	ofl_flags1;	/*	more flags */
-	Xword		ofl_segorigin;	/* segment origin (start) */
 	void		*ofl_entry;	/* entry point (-e and Sym_desc *) */
 	char		*ofl_filtees;	/* shared objects we are a filter for */
 	const char	*ofl_soname;	/* (-h option) output file name for */
@@ -282,6 +289,8 @@ struct ofl_desc {
 	Xword		ofl_sfcap_1;	/* software capabilities */
 	Lm_list		*ofl_lml;	/* runtime link-map list */
 	Gottable	*ofl_gottable;	/* debugging got information */
+	Sreloc_cache	ofl_sr_cache;	/* Cache last result from */
+					/*	sloppy_comdat_reloc() */
 };
 
 #define	FLG_OF_DYNAMIC	0x00000001	/* generate dynamic output module */
@@ -562,6 +571,8 @@ struct is_desc {			/* input section descriptor */
 					/*	input section */
 	Elf_Data	*is_indata;	/* input sections raw data */
 	Is_desc		*is_symshndx;	/* related SHT_SYM_SHNDX section */
+	Is_desc		*is_comdatkeep;	/* If COMDAT section is discarded, */
+					/* 	this is section that was kept */
 	Word		is_scnndx;	/* original section index in file */
 	Word		is_txtndx;	/* Index for section.  Used to decide */
 					/*	where to insert section when */
@@ -593,15 +604,15 @@ struct os_desc {			/* Output section descriptor */
 	Elf_Scn		*os_scn;	/* the elf section descriptor */
 	Shdr		*os_shdr;	/* the elf section header */
 	Os_desc		*os_relosdesc;	/* the output relocation section */
-	List		os_relisdescs;	/* reloc input section descriptors */
+	APlist		*os_relisdescs;	/* reloc input section descriptors */
 					/*	for this output section */
 	List		os_isdescs;	/* list of input sections in output */
 	APlist		*os_mstrisdescs; /* FLG_IS_INSTRMRG input sections */
 	Sort_desc	*os_sort;	/* used for sorting sections */
 	Sg_desc		*os_sgdesc;	/* segment os_desc is placed on */
 	Elf_Data	*os_outdata;	/* output sections raw data */
-	APlist		*os_comdats;	/* list of COMDAT sections present */
-					/*	in current output section */
+	avl_tree_t	*os_comdats;	/* AVL tree of COMDAT input sections */
+					/*	associated to output section */
 	Word		os_scnsymndx;	/* index in output symtab of section */
 					/*	symbol for this section */
 	Word		os_txtndx;	/* Index for section.  Used to decide */
@@ -642,7 +653,6 @@ struct sg_desc {			/* output segment descriptor */
 	Xword		sg_addralign;	/* LCM of sh_addralign */
 	Elf_Scn		*sg_fscn;	/* the SCN of the first section. */
 };
-
 
 #define	FLG_SG_VADDR	0x0001		/* vaddr segment attribute set */
 #define	FLG_SG_PADDR	0x0002		/* paddr segment attribute set */
@@ -763,7 +773,6 @@ struct sym_aux {
 	Half		sa_overndx;	/* output file versioning index */
 	Half		sa_dverndx;	/* dependency versioning index */
 };
-
 
 /*
  * Nodes used to track symbols in the global AVL symbol dictionary.
@@ -1028,7 +1037,7 @@ struct group_desc {
  * Indexes into the ld_support_funcs[] table.
  */
 typedef enum {
-	LDS_VERSION = 0,
+	LDS_VERSION = 0,	/* Must be first and have value 0 */
 	LDS_INPUT_DONE,
 	LDS_START,
 	LDS_ATEXIT,
@@ -1093,7 +1102,7 @@ typedef struct ar_desc {
 #define	ld_make_sections	ld64_make_sections
 #define	ld_main			ld64_main
 #define	ld_ofl_cleanup		ld64_ofl_cleanup
-#define	ld_process_open		ld64_process_open
+#define	ld_process_mem		ld64_process_mem
 #define	ld_reloc_init		ld64_reloc_init
 #define	ld_reloc_process	ld64_reloc_process
 #define	ld_sym_validate		ld64_sym_validate
@@ -1108,7 +1117,7 @@ typedef struct ar_desc {
 #define	ld_make_sections	ld32_make_sections
 #define	ld_main			ld32_main
 #define	ld_ofl_cleanup		ld32_ofl_cleanup
-#define	ld_process_open		ld32_process_open
+#define	ld_process_mem		ld32_process_mem
 #define	ld_reloc_init		ld32_reloc_init
 #define	ld_reloc_process	ld32_reloc_process
 #define	ld_sym_validate		ld32_sym_validate
@@ -1127,8 +1136,8 @@ extern uintptr_t	ld_init_strings(Ofl_desc *);
 extern int		ld_init_target(Lm_list *, Half mach);
 extern uintptr_t	ld_make_sections(Ofl_desc *);
 extern void		ld_ofl_cleanup(Ofl_desc *);
-extern Ifl_desc		*ld_process_open(const char *, const char *, int *,
-			    Ofl_desc *, Word, Rej_desc *);
+extern Ifl_desc		*ld_process_mem(const char *, const char *, char *,
+			    size_t, Ofl_desc *, Rej_desc *);
 extern uintptr_t	ld_reloc_init(Ofl_desc *);
 extern uintptr_t	ld_reloc_process(Ofl_desc *);
 extern uintptr_t	ld_sym_validate(Ofl_desc *);

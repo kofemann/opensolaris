@@ -102,7 +102,7 @@ kmdb 171
 sctp 172
 sctp6 173
 scsi_vhci 174
-vni 175
+dlpistub 175
 cpuid 176
 bmc 177
 dld 178
@@ -130,6 +130,7 @@ domcaps 200
 balloon 201
 acpippm 202
 srn 203
+dcpc 204
 smbsrv 210
 did 239
 lx_ptm 240

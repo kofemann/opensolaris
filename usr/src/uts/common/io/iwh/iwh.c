@@ -1,5 +1,5 @@
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -325,6 +325,11 @@ static int	iwh_m_multicst(void *, boolean_t, const uint8_t *);
 static int	iwh_m_promisc(void *, boolean_t);
 static mblk_t	*iwh_m_tx(void *, mblk_t *);
 static void	iwh_m_ioctl(void *, queue_t *, mblk_t *);
+static int	iwh_m_setprop(void *arg, const char *pr_name,
+    mac_prop_id_t wldp_pr_num, uint_t wldp_length, const void *wldp_buf);
+static int	iwh_m_getprop(void *arg, const char *pr_name,
+    mac_prop_id_t wldp_pr_num, uint_t pr_flags, uint_t wldp_length,
+    void *wldp_buf, uint_t *perm);
 
 /*
  * Supported rates for 802.11b/g modes (in 500Kbps unit).
@@ -406,7 +411,7 @@ _info(struct modinfo *mip)
  * Mac Call Back entries
  */
 mac_callbacks_t	iwh_m_callbacks = {
-	MC_IOCTL,
+	MC_IOCTL | MC_SETPROP | MC_GETPROP,
 	iwh_m_stat,
 	iwh_m_start,
 	iwh_m_stop,
@@ -414,7 +419,12 @@ mac_callbacks_t	iwh_m_callbacks = {
 	iwh_m_multicst,
 	iwh_m_unicst,
 	iwh_m_tx,
-	iwh_m_ioctl
+	iwh_m_ioctl,
+	NULL,
+	NULL,
+	NULL,
+	iwh_m_setprop,
+	iwh_m_getprop
 };
 
 #ifdef DEBUG
@@ -425,7 +435,7 @@ iwh_dbg(uint32_t flags, const char *fmt, ...)
 
 	if (flags & iwh_dbg_flags) {
 		va_start(ap, fmt);
-		vcmn_err(CE_WARN, fmt, ap);
+		vcmn_err(CE_NOTE, fmt, ap);
 		va_end(ap);
 	}
 }
@@ -454,13 +464,18 @@ iwh_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		sc = ddi_get_soft_state(iwh_soft_state_p,
 		    ddi_get_instance(dip));
 		ASSERT(sc != NULL);
+
 		mutex_enter(&sc->sc_glock);
 		sc->sc_flags &= ~IWH_F_SUSPEND;
 		mutex_exit(&sc->sc_glock);
-		if (sc->sc_flags & IWH_F_RUNNING) {
+
+		if (sc->sc_flags & IWH_F_RUNNING)
 			(void) iwh_init(sc);
-			ieee80211_new_state(&sc->sc_ic, IEEE80211_S_INIT, -1);
-		}
+
+		mutex_enter(&sc->sc_glock);
+		sc->sc_flags |= IWH_F_LAZY_RESUME;
+		mutex_exit(&sc->sc_glock);
+
 		IWH_DBG((IWH_DEBUG_RESUME, "iwh: resume\n"));
 		return (DDI_SUCCESS);
 	default:
@@ -881,12 +896,14 @@ iwh_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	case DDI_DETACH:
 		break;
 	case DDI_SUSPEND:
-		if (sc->sc_flags & IWH_F_RUNNING) {
-			iwh_stop(sc);
-		}
 		mutex_enter(&sc->sc_glock);
 		sc->sc_flags |= IWH_F_SUSPEND;
 		mutex_exit(&sc->sc_glock);
+
+		if (sc->sc_flags & IWH_F_RUNNING) {
+			iwh_stop(sc);
+		}
+
 		IWH_DBG((IWH_DEBUG_RESUME, "iwh: suspend\n"));
 		return (DDI_SUCCESS);
 	default:
@@ -3129,7 +3146,6 @@ iwh_m_ioctl(void* arg, queue_t *wq, mblk_t *mp)
 	ieee80211com_t	*ic = &sc->sc_ic;
 	int		err;
 
-
 	err = ieee80211_ioctl(ic, wq, mp);
 	if (ENETRESET == err) {
 		/*
@@ -3152,6 +3168,47 @@ iwh_m_ioctl(void* arg, queue_t *wq, mblk_t *mp)
 }
 
 /*
+ * Call back functions for get/set proporty
+ */
+static int
+iwh_m_getprop(void *arg, const char *pr_name, mac_prop_id_t wldp_pr_num,
+    uint_t pr_flags, uint_t wldp_length, void *wldp_buf, uint_t *perm)
+{
+	iwh_sc_t		*sc = (iwh_sc_t *)arg;
+	int			err = 0;
+
+	err = ieee80211_getprop(&sc->sc_ic, pr_name, wldp_pr_num,
+	    pr_flags, wldp_length, wldp_buf, perm);
+
+	return (err);
+}
+
+static int
+iwh_m_setprop(void *arg, const char *pr_name, mac_prop_id_t wldp_pr_num,
+    uint_t wldp_length, const void *wldp_buf)
+{
+	iwh_sc_t		*sc = (iwh_sc_t *)arg;
+	ieee80211com_t		*ic = &sc->sc_ic;
+	int			err;
+
+	err = ieee80211_setprop(ic, pr_name, wldp_pr_num, wldp_length,
+	    wldp_buf);
+
+	if (err == ENETRESET) {
+		if (ic->ic_des_esslen) {
+			if (sc->sc_flags & IWH_F_RUNNING) {
+				iwh_m_stop(sc);
+				(void) iwh_m_start(sc);
+				(void) ieee80211_new_state(ic,
+				    IEEE80211_S_SCAN, -1);
+			}
+		}
+		err = 0;
+	}
+	return (err);
+}
+
+/*
  * invoked by GLD supply statistics NIC and driver
  */
 static int
@@ -3159,16 +3216,16 @@ iwh_m_stat(void *arg, uint_t stat, uint64_t *val)
 {
 	iwh_sc_t	*sc  = (iwh_sc_t *)arg;
 	ieee80211com_t	*ic = &sc->sc_ic;
-	ieee80211_node_t *in = ic->ic_bss;
-	struct ieee80211_rateset *rs = &in->in_rates;
+	ieee80211_node_t *in;
 
 	mutex_enter(&sc->sc_glock);
 
 	switch (stat) {
 	case MAC_STAT_IFSPEED:
+		in = ic->ic_bss;
 		*val = ((IEEE80211_FIXED_RATE_NONE == ic->ic_fixed_rate) ?
-		    (rs->ir_rates[in->in_txrate] & IEEE80211_RATE_VAL) :
-		    ic->ic_fixed_rate) /2 * 1000000;
+		    IEEE80211_RATE(in->in_txrate) :
+		    ic->ic_fixed_rate) / 2 * 1000000;
 		break;
 
 	case MAC_STAT_NOXMTBUF:
@@ -3417,6 +3474,22 @@ iwh_thread(iwh_sc_t *sc)
 			mutex_enter(&sc->sc_mt_lock);
 		}
 
+		if (ic->ic_mach && (sc->sc_flags & IWH_F_LAZY_RESUME)) {
+			IWH_DBG((IWH_DEBUG_RESUME,
+			    "iwh_thread(): "
+			    "lazy resume\n"));
+			sc->sc_flags &= ~IWH_F_LAZY_RESUME;
+			mutex_exit(&sc->sc_mt_lock);
+			/*
+			 * NB: under WPA mode, this call hangs (door problem?)
+			 * when called in iwh_attach() and iwh_detach() while
+			 * system is in the procedure of CPR. To be safe, let
+			 * the thread do this.
+			 */
+			ieee80211_new_state(&sc->sc_ic, IEEE80211_S_INIT, -1);
+			mutex_enter(&sc->sc_mt_lock);
+		}
+
 		if (ic->ic_mach &&
 		    (sc->sc_flags & IWH_F_SCANNING) && sc->sc_scan_pending) {
 			IWH_DBG((IWH_DEBUG_SCAN,
@@ -3426,7 +3499,8 @@ iwh_thread(iwh_sc_t *sc)
 			sc->sc_scan_pending--;
 			mutex_exit(&sc->sc_mt_lock);
 			delay(drv_usectohz(200000));
-			ieee80211_next_scan(ic);
+			if (sc->sc_flags & IWH_F_SCANNING)
+				ieee80211_next_scan(ic);
 			mutex_enter(&sc->sc_mt_lock);
 		}
 

@@ -18,7 +18,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
@@ -32,25 +32,29 @@ OWNER = root
 GROUP = sys
 FILEMODE = 0744
 
-ROOTINIT_DPROGS = $(SHFILES:%=$(ROOTINIT_D)/%)
+ROOTINIT_DPROG1 = $(ROOTINIT_D)/sv
+ROOTINIT_DPROG2 = $(ROOTINIT_D)/sv.cluster
 
 .KEEP_STATE:
 
 all:	$(SHFILES)
 
-
-install: $(ROOTINIT_DPROGS) $(CLUSTERSBIN) $(CLUSTERLIBSTOPDIR) \
-	 $(CLUSTERLIBSTARTDIR)
+install: all $(ROOTINIT_DPROG1) $(ROOTINIT_DPROG2) $(CLUSTERSBINDIR) \
+	 $(CLUSTERLIBSTOPDIR) $(CLUSTERLIBSTARTDIR) $(ROOTLIBSVCMETHOD)
 	-$(RM) $(CLUSTERLIBDSCFGSTOPDIR)/10sv
 	-$(RM) $(CLUSTERLIBDSCFGSTARTDIR)/15sv
+	-$(RM) $(CLUSTERSBINDIR)/sv
+	-$(RM) $(ROOTLIBSVCMETHOD)/svc-sv
 	-$(SYMLINK) ../../../sbin/sv $(CLUSTERLIBDSCFGSTOPDIR)/10sv
 	-$(SYMLINK) ../../../sbin/sv $(CLUSTERLIBDSCFGSTARTDIR)/15sv
+	$(LN) $(ROOTINIT_D)/sv $(ROOTLIBSVCMETHOD)/svc-sv
+	$(CP) $(ROOTINIT_D)/sv.cluster $(CLUSTERSBINDIR)/sv
 
-$(ROOTINIT_D)/%:	%
-	$(INS.file)
+$(ROOTINIT_DPROG1): sv
+	$(INS.file) sv
 
-$(CLUSTERSBIN):
-	$(INS.dir)
+$(ROOTINIT_DPROG2): sv.cluster
+	$(INS.file) sv.cluster
 
 $(CLUSTERLIBSTOPDIR):
 	$(INS.dir)
@@ -64,4 +68,4 @@ clean:
 	$(RM) $(SHFILES)
 
 clobber: clean
-	$(RM) $(ROOTINIT_DPROGS)
+	$(RM) $(ROOTINIT_DPROG1) $(ROOTINIT_DPROG2)

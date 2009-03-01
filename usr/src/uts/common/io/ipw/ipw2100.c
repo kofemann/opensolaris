@@ -1,5 +1,5 @@
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -137,6 +137,12 @@ static int	ipw2100_m_multicst(void *arg, boolean_t add, const uint8_t *m);
 static int	ipw2100_m_promisc(void *arg, boolean_t on);
 static mblk_t  *ipw2100_m_tx(void *arg, mblk_t *mp);
 static void	ipw2100_m_ioctl(void *arg, queue_t *wq, mblk_t *mp);
+static int	ipw2100_m_setprop(void *arg, const char *pr_name,
+    mac_prop_id_t wldp_pr_num, uint_t wldp_length, const void *wldp_buf);
+static int	ipw2100_m_getprop(void *arg, const char *pr_name,
+    mac_prop_id_t wldp_pr_num, uint_t pr_flags, uint_t wldp_length,
+    void *wldp_buf, uint_t *perm);
+
 
 /*
  * Interrupt and Data transferring operations
@@ -166,10 +172,16 @@ static int	ipw_wificfg_disassoc(struct ipw2100_softc *sc,
     wldp_t *outfp);
 
 /*
+ * Suspend / Resume operations
+ */
+static int	ipw2100_cpr_suspend(struct ipw2100_softc *sc);
+static int	ipw2100_cpr_resume(struct ipw2100_softc *sc);
+
+/*
  * Mac Call Back entries
  */
 mac_callbacks_t	ipw2100_m_callbacks = {
-	MC_IOCTL,
+	MC_IOCTL | MC_SETPROP | MC_GETPROP,
 	ipw2100_m_stat,
 	ipw2100_m_start,
 	ipw2100_m_stop,
@@ -177,7 +189,12 @@ mac_callbacks_t	ipw2100_m_callbacks = {
 	ipw2100_m_multicst,
 	ipw2100_m_unicst,
 	ipw2100_m_tx,
-	ipw2100_m_ioctl
+	ipw2100_m_ioctl,
+	NULL,
+	NULL,
+	NULL,
+	ipw2100_m_setprop,
+	ipw2100_m_getprop
 };
 
 
@@ -200,6 +217,7 @@ uint32_t ipw2100_debug = 0;
  *	| IPW2100_DBG_STATISTIC
  *	| IPW2100_DBG_RING
  *	| IPW2100_DBG_WIFI
+ *	| IPW2100_DBG_BRUSSELS
  */
 
 /*
@@ -242,7 +260,17 @@ ipw2100_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	wifi_data_t		wd = { 0 };
 	mac_register_t		*macp;
 
-	if (cmd != DDI_ATTACH) {
+	switch (cmd) {
+	case DDI_ATTACH:
+		break;
+	case DDI_RESUME:
+		sc = ddi_get_soft_state(ipw2100_ssp, ddi_get_instance(dip));
+		if (sc == NULL) {
+			err = DDI_FAILURE;
+			goto fail1;
+		}
+		return (ipw2100_cpr_resume(sc));
+	default:
 		err = DDI_FAILURE;
 		goto fail1;
 	}
@@ -496,8 +524,14 @@ ipw2100_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 
 	ASSERT(sc != NULL);
 
-	if (cmd != DDI_DETACH)
+	switch (cmd) {
+	case DDI_DETACH:
+		break;
+	case DDI_SUSPEND:
+		return (ipw2100_cpr_suspend(sc));
+	default:
 		return (DDI_FAILURE);
+	}
 
 	/*
 	 * Destroy the mf_thread
@@ -511,7 +545,7 @@ ipw2100_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	mutex_exit(&sc->sc_mflock);
 
 	/*
-	 * Unregiste from the MAC layer subsystem
+	 * Unregister from the MAC layer subsystem
 	 */
 	err = mac_unregister(sc->sc_ic.ic_mach);
 	if (err != DDI_SUCCESS)
@@ -542,6 +576,103 @@ ipw2100_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	ddi_regs_map_free(&sc->sc_ioh);
 	ddi_remove_minor_node(dip, NULL);
 	ddi_soft_state_free(ipw2100_ssp, ddi_get_instance(dip));
+
+	return (DDI_SUCCESS);
+}
+
+int
+ipw2100_cpr_suspend(struct ipw2100_softc *sc)
+{
+	IPW2100_DBG(IPW2100_DBG_INIT, (sc->sc_dip, CE_CONT,
+	    "ipw2100_cpr_suspend(): enter\n"));
+
+	/*
+	 * Destroy the mf_thread
+	 */
+	mutex_enter(&sc->sc_mflock);
+	sc->sc_mfthread_switch = 0;
+	while (sc->sc_mf_thread != NULL) {
+		if (cv_wait_sig(&sc->sc_mfthread_cv, &sc->sc_mflock) == 0)
+			break;
+	}
+	mutex_exit(&sc->sc_mflock);
+
+	/*
+	 * stop the hardware; this mask all interrupts
+	 */
+	ipw2100_stop(sc);
+	sc->sc_flags &= ~IPW2100_FLAG_RUNNING;
+	sc->sc_suspended = 1;
+
+	(void) ipw2100_free_firmware(sc);
+	ipw2100_ring_free(sc);
+
+	return (DDI_SUCCESS);
+}
+
+int
+ipw2100_cpr_resume(struct ipw2100_softc *sc)
+{
+	struct ieee80211com	*ic = &sc->sc_ic;
+	dev_info_t		*dip = sc->sc_dip;
+	int			err;
+
+	IPW2100_DBG(IPW2100_DBG_INIT, (sc->sc_dip, CE_CONT,
+	    "ipw2100_cpr_resume(): enter\n"));
+
+	/*
+	 * Reset the chip
+	 */
+	err = ipw2100_chip_reset(sc);
+	if (err != DDI_SUCCESS) {
+		IPW2100_WARN((dip, CE_WARN,
+		    "ipw2100_attach(): reset failed\n"));
+		return (DDI_FAILURE);
+	}
+
+	/*
+	 * Get the hw conf, including MAC address, then init all rings.
+	 */
+	/* ipw2100_hwconf_get(sc); */
+	err = ipw2100_ring_init(sc);
+	if (err != DDI_SUCCESS) {
+		IPW2100_WARN((dip, CE_WARN,
+		    "ipw2100_attach(): "
+		    "unable to allocate and initialize rings\n"));
+		return (DDI_FAILURE);
+	}
+
+	/*
+	 * Cache firmware, always return true
+	 */
+	(void) ipw2100_cache_firmware(sc);
+
+	/*
+	 * Notify link is down now
+	 */
+	mac_link_update(ic->ic_mach, LINK_STATE_DOWN);
+
+	/*
+	 * create the mf thread to handle the link status,
+	 * recovery fatal error, etc.
+	 */
+	sc->sc_mfthread_switch = 1;
+	if (sc->sc_mf_thread == NULL)
+		sc->sc_mf_thread = thread_create((caddr_t)NULL, 0,
+		    ipw2100_thread, sc, 0, &p0, TS_RUN, minclsyspri);
+
+	/*
+	 * enable all interrupts
+	 */
+	sc->sc_suspended = 0;
+	ipw2100_csr_put32(sc, IPW2100_CSR_INTR_MASK, IPW2100_INTR_MASK_ALL);
+
+	/*
+	 * initialize ipw2100 hardware
+	 */
+	(void) ipw2100_init(sc);
+
+	sc->sc_flags |= IPW2100_FLAG_RUNNING;
 
 	return (DDI_SUCCESS);
 }
@@ -965,6 +1096,9 @@ ipw2100_init(struct ipw2100_softc *sc)
 {
 	int	err;
 
+	IPW2100_DBG(IPW2100_DBG_INIT, (sc->sc_dip, CE_CONT,
+	    "ipw2100_init(): enter\n"));
+
 	/*
 	 * no firmware is available, return fail directly
 	 */
@@ -986,6 +1120,8 @@ ipw2100_init(struct ipw2100_softc *sc)
 	/*
 	 * load microcode
 	 */
+	IPW2100_DBG(IPW2100_DBG_INIT, (sc->sc_dip, CE_CONT,
+	    "ipw2100_init(): loading microcode\n"));
 	err = ipw2100_load_uc(sc);
 	if (err != DDI_SUCCESS) {
 		IPW2100_WARN((sc->sc_dip, CE_WARN,
@@ -1000,6 +1136,8 @@ ipw2100_init(struct ipw2100_softc *sc)
 	/*
 	 * load firmware
 	 */
+	IPW2100_DBG(IPW2100_DBG_INIT, (sc->sc_dip, CE_CONT,
+	    "ipw2100_init(): loading firmware\n"));
 	err = ipw2100_load_fw(sc);
 	if (err != DDI_SUCCESS) {
 		IPW2100_WARN((sc->sc_dip, CE_WARN,
@@ -2326,6 +2464,77 @@ ipw2100_getset(struct ipw2100_softc *sc, mblk_t *m, uint32_t cmd,
 	return (ret);
 }
 
+/*
+ * Call back functions for get/set proporty
+ */
+static int
+ipw2100_m_getprop(void *arg, const char *pr_name, mac_prop_id_t wldp_pr_num,
+    uint_t pr_flags, uint_t wldp_length, void *wldp_buf, uint_t *perm)
+{
+	struct ipw2100_softc	*sc = (struct ipw2100_softc *)arg;
+	struct ieee80211com	*ic = &sc->sc_ic;
+	int 			err = 0;
+
+	switch (wldp_pr_num) {
+	/* mac_prop_id */
+	case MAC_PROP_WL_DESIRED_RATES:
+		IPW2100_DBG(IPW2100_DBG_BRUSSELS, (sc->sc_dip, CE_CONT,
+		    "ipw2100_m_getprop(): Not Support DESIRED_RATES\n"));
+		err = ENOTSUP;
+		break;
+	case MAC_PROP_WL_RADIO:
+		*(wl_linkstatus_t *)wldp_buf = ipw2100_get_radio(sc);
+		break;
+	default:
+		/* go through net80211 */
+		err = ieee80211_getprop(ic, pr_name, wldp_pr_num, pr_flags,
+		    wldp_length, wldp_buf, perm);
+		break;
+	}
+
+	return (err);
+}
+
+static int
+ipw2100_m_setprop(void *arg, const char *pr_name, mac_prop_id_t wldp_pr_num,
+    uint_t wldp_length, const void *wldp_buf)
+{
+	struct ipw2100_softc	*sc = (struct ipw2100_softc *)arg;
+	struct ieee80211com	*ic = &sc->sc_ic;
+	int			err;
+
+	switch (wldp_pr_num) {
+	/* mac_prop_id */
+	case MAC_PROP_WL_DESIRED_RATES:
+		IPW2100_DBG(IPW2100_DBG_BRUSSELS, (sc->sc_dip, CE_CONT,
+		    "ipw2100_m_setprop(): Not Support DESIRED_RATES\n"));
+		err = ENOTSUP;
+		break;
+	case MAC_PROP_WL_RADIO:
+		IPW2100_DBG(IPW2100_DBG_BRUSSELS, (sc->sc_dip, CE_CONT,
+		    "ipw2100_m_setprop(): Not Support RADIO\n"));
+		err = ENOTSUP;
+		break;
+	default:
+		/* go through net80211 */
+		err = ieee80211_setprop(ic, pr_name, wldp_pr_num, wldp_length,
+		    wldp_buf);
+		break;
+	}
+
+	if (err == ENETRESET) {
+		if (sc->sc_flags & IPW2100_FLAG_RUNNING) {
+			(void) ipw2100_m_start(sc);
+			(void) ieee80211_new_state(ic,
+			    IEEE80211_S_SCAN, -1);
+		}
+
+		err = 0;
+	}
+
+	return (err);
+}
+
 static int
 ipw_wificfg_radio(struct ipw2100_softc *sc, uint32_t cmd, wldp_t *outfp)
 {
@@ -2453,6 +2662,9 @@ ipw2100_intr(caddr_t arg)
 #if DEBUG
 	struct ipw2100_bd *rxbd;
 #endif
+
+	if (sc->sc_suspended)
+		return (DDI_INTR_UNCLAIMED);
 
 	ireg = ipw2100_csr_get32(sc, IPW2100_CSR_INTR);
 

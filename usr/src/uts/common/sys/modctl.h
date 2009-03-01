@@ -19,14 +19,12 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_SYS_MODCTL_H
 #define	_SYS_MODCTL_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * loadable module support.
@@ -73,6 +71,7 @@ extern struct mod_ops mod_miscops;
 extern struct mod_ops mod_schedops;
 extern struct mod_ops mod_strmodops;
 extern struct mod_ops mod_syscallops;
+extern struct mod_ops mod_sockmodops;
 #ifdef _SYSCALL32_IMPL
 extern struct mod_ops mod_syscallops32;
 #endif
@@ -191,6 +190,13 @@ struct modldev {
 	struct devname_ops	*dev_ops;
 };
 
+/* For socket Modules. */
+struct modlsockmod {
+	struct mod_ops		*sockmod_modops;
+	char			*sockmod_linkinfo;
+	struct smod_reg_s	*sockmod_reg_info;
+};
+
 /* For kiconv modules */
 struct modlkiconv {
 	struct mod_ops		*kiconv_modops;
@@ -270,6 +276,7 @@ struct modlinkage {
 #define	MODUNRETIRE		41
 #define	MODISRETIRED		42
 #define	MODDEVEMPTYDIR		43
+#define	MODREMDRVALIAS		44
 
 /*
  * sub cmds for MODEVENTS
@@ -309,6 +316,7 @@ struct modconfig {
 	char drvname[MAXMODCONFNAME];
 	char drvclass[MAXMODCONFNAME];
 	int major;
+	int flags;
 	int num_aliases;
 	struct aliases *ap;
 };
@@ -325,11 +333,15 @@ struct modconfig32 {
 	char drvname[MAXMODCONFNAME];
 	char drvclass[MAXMODCONFNAME];
 	int32_t major;
+	int32_t flags;
 	int32_t num_aliases;
 	caddr32_t ap;
 };
 
 #endif /* _SYSCALL32 */
+
+/* flags for modconfig */
+#define	MOD_UNBIND_OVERRIDE	0x01		/* fail unbind if in use */
 
 /*
  * Max module path length
@@ -586,7 +598,6 @@ extern void	mod_rele_dev_by_devi(dev_info_t *);
 extern int make_devname(char *, major_t);
 extern int gmatch(const char *, const char *);
 
-struct bind;
 extern void make_aliases(struct bind **);
 extern int read_binding_file(char *, struct bind **,
     int (*line_parser)(char *, int, char *, struct bind **));
@@ -655,6 +666,7 @@ extern int modctl(int, ...);
 #define	MODDEBUG_ERRMSG		0x40000000	/* print detailed error msgs */
 #define	MODDEBUG_LOADMSG2	0x20000000	/* print 2nd level msgs */
 #define	MODDEBUG_RETIRE		0x10000000	/* print retire msgs */
+#define	MODDEBUG_BINDING	0x00040000	/* driver/alias binding */
 #define	MODDEBUG_FINI_EBUSY	0x00020000	/* pretend fini returns EBUSY */
 #define	MODDEBUG_NOAUL_IPP	0x00010000	/* no Autounloading ipp mods */
 #define	MODDEBUG_NOAUL_DACF	0x00008000	/* no Autounloading dacf mods */

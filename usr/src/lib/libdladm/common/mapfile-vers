@@ -19,12 +19,30 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
+#
+
+#
+# MAPFILE HEADER START
+#
+# WARNING:  STOP NOW.  DO NOT MODIFY THIS FILE.
+# Object versioning must comply with the rules detailed in
+#
+#	usr/src/lib/README.mapfiles
+#
+# You should not be making modifications here until you've read the most current
+# copy of that file. If you need help, contact a gatekeeper for guidance.
+#
+# MAPFILE HEADER END
 #
 
 SUNWprivate_1.1 {
     global:
+	dladm_open;
+	dladm_close;
+	dladm_dld_fd;
+	dladm_door_fd;
 	dladm_info;
 	dladm_walk;
 	dladm_setzid;
@@ -38,6 +56,8 @@ SUNWprivate_1.1 {
 	dladm_get_linkprop;
 	dladm_set_linkprop;
 	dladm_walk_linkprop;
+	dladm_attr_is_linkprop;
+	dladm_valid_secobj_name;
 	dladm_init_secobj;
 	dladm_get_secobj;
 	dladm_set_secobj;

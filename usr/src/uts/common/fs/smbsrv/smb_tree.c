@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"@(#)smb_tree.c	1.5	08/08/07 SMI"
 
 /*
  * General Structures Layout
@@ -173,17 +171,17 @@
 #include <sys/varargs.h>
 #include <smbsrv/smb_incl.h>
 #include <smbsrv/lmerr.h>
-#include <smbsrv/mlsvc.h>
 #include <smbsrv/smb_fsops.h>
 #include <smbsrv/smb_door_svc.h>
 #include <smbsrv/smb_share.h>
+#include <sys/pathname.h>
 
 int smb_tcon_mute = 0;
 
 static smb_tree_t *smb_tree_connect_disk(smb_request_t *, const char *);
 static smb_tree_t *smb_tree_connect_ipc(smb_request_t *, const char *);
 static smb_tree_t *smb_tree_alloc(smb_user_t *, const char *, const char *,
-    int32_t, smb_node_t *);
+    int32_t, smb_node_t *, uint32_t);
 static void smb_tree_dealloc(smb_tree_t *);
 static boolean_t smb_tree_is_connected(smb_tree_t *);
 static boolean_t smb_tree_is_disconnected(smb_tree_t *);
@@ -193,6 +191,8 @@ static int smb_tree_getattr(smb_node_t *, smb_tree_t *);
 static void smb_tree_get_volname(vfs_t *, smb_tree_t *);
 static void smb_tree_get_flags(vfs_t *, smb_tree_t *);
 static void smb_tree_log(smb_request_t *, const char *, const char *, ...);
+static void smb_tree_close_odirs(smb_tree_t *, uint16_t);
+static smb_odir_t *smb_tree_get_odir(smb_tree_t *, smb_odir_t *);
 
 /*
  * Extract the share name and share type and connect as appropriate.
@@ -266,7 +266,7 @@ smb_tree_disconnect(
 		/*
 		 * The directories opened under this tree are closed.
 		 */
-		smb_odir_close_all(tree);
+		smb_tree_close_odirs(tree, 0);
 		mutex_enter(&tree->t_mutex);
 		tree->t_state = SMB_TREE_STATE_DISCONNECTED;
 	}
@@ -332,7 +332,7 @@ smb_tree_close_pid(
 	ASSERT(tree->t_magic == SMB_TREE_MAGIC);
 
 	smb_ofile_close_all_by_pid(tree, pid);
-	smb_odir_close_all_by_pid(tree, pid);
+	smb_tree_close_odirs(tree, pid);
 }
 
 /*
@@ -347,11 +347,73 @@ smb_tree_has_feature(smb_tree_t *tree, uint32_t flags)
 	return ((tree->t_flags & flags) == flags);
 }
 
+
 /* *************************** Static Functions ***************************** */
+#define	SHARES_DIR	".zfs/shares/"
+static void
+smb_tree_acl_access(cred_t *cred, const char *sharename, vnode_t *pathvp,
+		    uint32_t *access)
+{
+	int rc;
+	vfs_t *vfsp;
+	vnode_t *root = NULL;
+	vnode_t *sharevp = NULL;
+	char *sharepath;
+	struct pathname pnp;
+	size_t size;
+
+	*access = ACE_ALL_PERMS; /* default to full "UNIX" access */
+
+	/*
+	 * Using the vnode of the share path, we then find the root
+	 * directory of the mounted file system. We will then look to
+	 * see if there is a .zfs/shares directory and if there is,
+	 * get the access information from the ACL/ACES values and
+	 * check against the cred.
+	 */
+	vfsp = pathvp->v_vfsp;
+	if (vfsp != NULL)
+		rc = VFS_ROOT(vfsp, &root);
+	else
+		rc = ENOENT;
+
+	if (rc != 0)
+		return;
+
+
+	/*
+	 * Find the share object, if there is one. Need to construct
+	 * the path to the .zfs/shares/<sharename> object and look it
+	 * up.  root is called held but will be released by
+	 * lookuppnvp().
+	 */
+
+	size = sizeof (SHARES_DIR) + strlen(sharename) + 1;
+	sharepath = kmem_alloc(size, KM_SLEEP);
+	(void) sprintf(sharepath, "%s%s", SHARES_DIR, sharename);
+
+	pn_alloc(&pnp);
+	(void) pn_set(&pnp, sharepath);
+	rc = lookuppnvp(&pnp, NULL, NO_FOLLOW, NULL,
+	    &sharevp, rootdir, root, kcred);
+	pn_free(&pnp);
+
+	kmem_free(sharepath, size);
+
+	/*
+	 * Now get the effective access value based on cred and ACL
+	 * values.
+	 */
+
+	if (rc == 0)
+		smb_vop_eaccess(sharevp, (int *)access, V_ACE_MASK, NULL, cred);
+
+}
 
 /*
  * Connect a share for use with files and directories.
  */
+
 static smb_tree_t *
 smb_tree_connect_disk(smb_request_t *sr, const char *sharename)
 {
@@ -365,7 +427,8 @@ smb_tree_connect_disk(smb_request_t *sr, const char *sharename)
 	cred_t			*u_cred;
 	int			rc;
 	uint32_t		access = 0; /* read/write is assumed */
-	uint32_t		hostaccess;
+	uint32_t		hostaccess = ACE_ALL_PERMS;
+	uint32_t		aclaccess;
 
 	ASSERT(user);
 	u_cred = user->u_cred;
@@ -380,7 +443,7 @@ smb_tree_connect_disk(smb_request_t *sr, const char *sharename)
 	si = kmem_zalloc(sizeof (smb_share_t), KM_SLEEP);
 
 	if (smb_kshare_getinfo(sr->sr_server->sv_lmshrd, (char *)sharename, si,
-	    sr->session->ipaddr) != NERR_Success) {
+	    &sr->session->ipaddr) != NERR_Success) {
 		smb_tree_log(sr, sharename, "share not found");
 		smbsr_error(sr, 0, ERRSRV, ERRinvnetname);
 		kmem_free(si, sizeof (smb_share_t));
@@ -402,11 +465,34 @@ smb_tree_connect_disk(smb_request_t *sr, const char *sharename)
 		}
 	}
 
-	hostaccess = si->shr_access_value & SMB_SHRF_ACC_ALL;
+	/*
+	 * Set up the OptionalSupport for this share.
+	 */
+	sr->arg.tcon.optional_support = SMB_SUPPORT_SEARCH_BITS;
 
-	if (hostaccess == SMB_SHRF_ACC_RO) {
-		access = SMB_TREE_READONLY;
-	} else if (hostaccess == SMB_SHRF_ACC_NONE) {
+	switch (si->shr_flags & SMB_SHRF_CSC_MASK) {
+	case SMB_SHRF_CSC_DISABLED:
+		sr->arg.tcon.optional_support |= SMB_CSC_CACHE_NONE;
+		break;
+	case SMB_SHRF_CSC_AUTO:
+		sr->arg.tcon.optional_support |= SMB_CSC_CACHE_AUTO_REINT;
+		break;
+	case SMB_SHRF_CSC_VDO:
+		sr->arg.tcon.optional_support |= SMB_CSC_CACHE_VDO;
+		break;
+	case SMB_SHRF_CSC_MANUAL:
+	default:
+		/*
+		 * Default to SMB_CSC_CACHE_MANUAL_REINT.
+		 */
+		break;
+	}
+
+	access = si->shr_access_value & SMB_SHRF_ACC_ALL;
+
+	if (access == SMB_SHRF_ACC_RO) {
+		hostaccess &= ~ACE_ALL_WRITE_PERMS;
+	} else if (access == SMB_SHRF_ACC_NONE) {
 		kmem_free(si, sizeof (smb_share_t));
 		smb_tree_log(sr, sharename, "access denied: host access");
 		smbsr_error(sr, NT_STATUS_ACCESS_DENIED, ERRSRV, ERRaccess);
@@ -436,13 +522,38 @@ smb_tree_connect_disk(smb_request_t *sr, const char *sharename)
 		return (NULL);
 	}
 
+	/*
+	 * Find share level ACL if it exists in the designated
+	 * location. Needs to be done after finding a valid path but
+	 * before the tree is allocated.
+	 */
+	smb_tree_acl_access(u_cred, sharename, snode->vp, &aclaccess);
+	/* if an error, then no share file -- default to no ACL */
+	if (rc == 0) {
+		/*
+		 * There need to be some permissions in order to have
+		 * any access.
+		 */
+		if ((aclaccess & ACE_ALL_PERMS) == 0) {
+			smb_tree_log(sr, sharename, "access denied: share ACL");
+			smbsr_error(sr, 0, ERRSRV, ERRaccess);
+			kmem_free(si, sizeof (smb_share_t));
+			smb_node_release(snode);
+			return (NULL);
+		}
+	}
+
+	/*
+	 * Set tree ACL access to the minimum ACL permissions based on
+	 * hostaccess (those allowed by host based access) and
+	 * aclaccess (those from the ACL object for the share). This
+	 * is done during the alloc.
+	 */
 	tree = smb_tree_alloc(user, sharename, si->shr_path, STYPE_DISKTREE,
-	    snode);
+	    snode, hostaccess & aclaccess);
 
 	if (tree == NULL)
 		smbsr_error(sr, NT_STATUS_ACCESS_DENIED, ERRSRV, ERRaccess);
-	else
-		tree->t_flags |= access;
 
 	smb_node_release(snode);
 	kmem_free(si, sizeof (smb_share_t));
@@ -467,7 +578,9 @@ smb_tree_connect_ipc(smb_request_t *sr, const char *name)
 		return (NULL);
 	}
 
-	tree = smb_tree_alloc(user, name, name, STYPE_IPC, NULL);
+	sr->arg.tcon.optional_support = SMB_SUPPORT_SEARCH_BITS;
+
+	tree = smb_tree_alloc(user, name, name, STYPE_IPC, NULL, ACE_ALL_PERMS);
 	if (tree == NULL) {
 		smb_tree_log(sr, name, "access denied");
 		smbsr_error(sr, NT_STATUS_ACCESS_DENIED, ERRSRV, ERRaccess);
@@ -485,7 +598,8 @@ smb_tree_alloc(
     const char		*sharename,
     const char		*resource,
     int32_t		stype,
-    smb_node_t		*snode)
+    smb_node_t		*snode,
+    uint32_t access)
 {
 	smb_tree_t	*tree;
 	uint16_t	tid;
@@ -510,7 +624,7 @@ smb_tree_alloc(
 		return (NULL);
 	}
 
-	if (smb_idpool_constructor(&tree->t_sid_pool)) {
+	if (smb_idpool_constructor(&tree->t_odid_pool)) {
 		smb_idpool_destructor(&tree->t_fid_pool);
 		smb_idpool_free(&user->u_tid_pool, tid);
 		kmem_cache_free(user->u_server->si_cache_tree, tree);
@@ -537,6 +651,11 @@ smb_tree_alloc(
 	tree->t_res_type = stype;
 	tree->t_state = SMB_TREE_STATE_CONNECTED;
 	tree->t_magic = SMB_TREE_MAGIC;
+	tree->t_access = access;
+
+	/* if FS is readonly, enforce that here */
+	if (tree->t_flags & SMB_TREE_READONLY)
+		tree->t_access &= ~ACE_ALL_WRITE_PERMS;
 
 	if (STYPE_ISDSK(stype)) {
 		smb_node_ref(snode);
@@ -594,7 +713,7 @@ smb_tree_dealloc(smb_tree_t *tree)
 	smb_llist_destructor(&tree->t_ofile_list);
 	smb_llist_destructor(&tree->t_odir_list);
 	smb_idpool_destructor(&tree->t_fid_pool);
-	smb_idpool_destructor(&tree->t_sid_pool);
+	smb_idpool_destructor(&tree->t_odid_pool);
 	kmem_cache_free(tree->t_server->si_cache_tree, tree);
 }
 
@@ -843,4 +962,106 @@ smb_tree_log(smb_request_t *sr, const char *sharename, const char *fmt, ...)
 
 	cmn_err(CE_NOTE, "smbd[%s\\%s]: %s %s",
 	    user->u_domain, user->u_name, sharename, buf);
+}
+
+/*
+ * smb_tree_lookup_odir
+ *
+ * Find the specified odir in the tree's list of odirs, and
+ * attempt to obtain a hold on the odir.
+ *
+ * Returns NULL if odir not found or a hold cannot be obtained.
+ */
+smb_odir_t *
+smb_tree_lookup_odir(smb_tree_t *tree, uint16_t odid)
+{
+	smb_odir_t	*od;
+	smb_llist_t	*od_list;
+
+	ASSERT(tree);
+	ASSERT(tree->t_magic == SMB_TREE_MAGIC);
+
+	od_list = &tree->t_odir_list;
+	smb_llist_enter(od_list, RW_READER);
+
+	od = smb_llist_head(od_list);
+	while (od) {
+		if (od->d_odid == odid) {
+			if (!smb_odir_hold(od))
+				od = NULL;
+			break;
+		}
+		od = smb_llist_next(od_list, od);
+	}
+
+	smb_llist_exit(od_list);
+	return (od);
+}
+
+/*
+ * smb_tree_get_odir
+ *
+ * Find the next open odir in the tree's list of odirs, and obtain
+ * a hold on it. (A hold can only be obtained on an open odir.)
+ * If the specified odir is NULL the search starts at the beginning
+ * of the tree's odir list, otherwise the search starts after the
+ * specified odir.
+ */
+static smb_odir_t *
+smb_tree_get_odir(smb_tree_t *tree, smb_odir_t *od)
+{
+	smb_llist_t *od_list;
+
+	ASSERT(tree);
+	ASSERT(tree->t_magic == SMB_TREE_MAGIC);
+
+	od_list = &tree->t_odir_list;
+	smb_llist_enter(od_list, RW_READER);
+
+	if (od) {
+		ASSERT(od->d_magic == SMB_ODIR_MAGIC);
+		od = smb_llist_next(od_list, od);
+	} else {
+		od = smb_llist_head(od_list);
+	}
+
+	while (od) {
+		ASSERT(od->d_magic == SMB_ODIR_MAGIC);
+
+		if (smb_odir_hold(od))
+			break;
+		od = smb_llist_next(od_list, od);
+	}
+
+	smb_llist_exit(od_list);
+	return (od);
+}
+
+/*
+ * smb_tree_close_odirs
+ *
+ * Close all open odirs in the tree's list which were opened by
+ * the process identified by pid.
+ * If pid is zero, close all open odirs in the tree's list.
+ */
+static void
+smb_tree_close_odirs(smb_tree_t *tree, uint16_t pid)
+{
+	smb_odir_t *od, *next_od;
+
+	ASSERT(tree);
+	ASSERT(tree->t_magic == SMB_TREE_MAGIC);
+
+	od = smb_tree_get_odir(tree, NULL);
+	while (od) {
+		ASSERT(od->d_magic == SMB_ODIR_MAGIC);
+		ASSERT(od->d_tree == tree);
+
+		next_od = smb_tree_get_odir(tree, od);
+		if ((pid == 0) || (od->d_opened_by_pid == pid))
+				smb_odir_close(od);
+		smb_odir_release(od);
+
+		od = next_od;
+	}
 }

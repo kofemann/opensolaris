@@ -19,13 +19,14 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #include <sys/types.h>
 #include <sys/stream.h>
 #include <sys/stropts.h>
+#include <sys/strsubr.h>
 #include <sys/errno.h>
 #include <sys/ddi.h>
 #include <sys/debug.h>
@@ -85,9 +86,12 @@ static void lifetime_fuzz(ipsa_t *);
 static void age_pair_peer_list(templist_t *, sadb_t *, boolean_t);
 static void ipsa_set_replay(ipsa_t *ipsa, uint32_t offset);
 
-extern void (*cl_inet_getspi)(uint8_t protocol, uint8_t *ptr, size_t len);
-extern int (*cl_inet_checkspi)(uint8_t protocol, uint32_t spi);
-extern void (*cl_inet_deletespi)(uint8_t protocol, uint32_t spi);
+extern void (*cl_inet_getspi)(netstackid_t stack_id, uint8_t protocol,
+    uint8_t *ptr, size_t len, void *args);
+extern int (*cl_inet_checkspi)(netstackid_t stack_id, uint8_t protocol,
+    uint32_t spi, void *args);
+extern void (*cl_inet_deletespi)(netstackid_t stack_id, uint8_t protocol,
+    uint32_t spi, void *args);
 
 /*
  * ipsacq_maxpackets is defined here to make it tunable
@@ -335,7 +339,8 @@ sadb_delete_cluster(ipsa_t *assoc)
 	    (assoc->ipsa_state == IPSA_STATE_MATURE))) {
 		protocol = (assoc->ipsa_type == SADB_SATYPE_AH) ?
 		    IPPROTO_AH : IPPROTO_ESP;
-		cl_inet_deletespi(protocol, assoc->ipsa_spi);
+		cl_inet_deletespi(assoc->ipsa_netstack->netstack_stackid,
+		    protocol, assoc->ipsa_spi, NULL);
 	}
 }
 
@@ -1026,24 +1031,25 @@ sadb_destroyer(isaf_t **tablep, uint_t numentries, boolean_t forever,
 	int i;
 	isaf_t *table = *tablep;
 	uint8_t protocol;
+	ipsa_t *sa;
+	netstackid_t sid;
 
 	if (table == NULL)
 		return;
 
 	for (i = 0; i < numentries; i++) {
 		mutex_enter(&table[i].isaf_lock);
-		while (table[i].isaf_ipsa != NULL) {
+		while ((sa = table[i].isaf_ipsa) != NULL) {
 			if (inbound && cl_inet_deletespi &&
-			    (table[i].isaf_ipsa->ipsa_state !=
-			    IPSA_STATE_ACTIVE_ELSEWHERE) &&
-			    (table[i].isaf_ipsa->ipsa_state !=
-			    IPSA_STATE_IDLE)) {
-				protocol = (table[i].isaf_ipsa->ipsa_type ==
-				    SADB_SATYPE_AH) ? IPPROTO_AH : IPPROTO_ESP;
-				cl_inet_deletespi(protocol,
-				    table[i].isaf_ipsa->ipsa_spi);
+			    (sa->ipsa_state != IPSA_STATE_ACTIVE_ELSEWHERE) &&
+			    (sa->ipsa_state != IPSA_STATE_IDLE)) {
+				protocol = (sa->ipsa_type == SADB_SATYPE_AH) ?
+				    IPPROTO_AH : IPPROTO_ESP;
+				sid = sa->ipsa_netstack->netstack_stackid;
+				cl_inet_deletespi(sid, protocol, sa->ipsa_spi,
+				    NULL);
 			}
-			sadb_unlinkassoc(table[i].isaf_ipsa);
+			sadb_unlinkassoc(sa);
 		}
 		table[i].isaf_gen++;
 		mutex_exit(&table[i].isaf_lock);
@@ -3255,7 +3261,8 @@ sadb_common_add(queue_t *ip_q, queue_t *pfkey_q, mblk_t *mp, sadb_msg_t *samsg,
 	if (!isupdate && (clone == B_TRUE || is_inbound == B_TRUE) &&
 	    cl_inet_checkspi &&
 	    (assoc->sadb_sa_state != SADB_X_SASTATE_ACTIVE_ELSEWHERE)) {
-		rcode = cl_inet_checkspi(protocol, assoc->sadb_sa_spi);
+		rcode = cl_inet_checkspi(ns->netstack_stackid, protocol,
+		    assoc->sadb_sa_spi, NULL);
 		if (rcode == -1) {
 			return (EEXIST);
 		}
@@ -5869,7 +5876,8 @@ sadb_getspi(keysock_in_t *ksi, uint32_t master_spi, int *diagnostic,
 	if (master_spi < min || master_spi > max) {
 		/* Return a random value in the range. */
 		if (cl_inet_getspi) {
-			cl_inet_getspi(protocol, (uint8_t *)&add, sizeof (add));
+			cl_inet_getspi(ns->netstack_stackid, protocol,
+			    (uint8_t *)&add, sizeof (add), NULL);
 		} else {
 			(void) random_get_pseudo_bytes((uint8_t *)&add,
 			    sizeof (add));
@@ -6168,7 +6176,7 @@ sadb_t_bind_req(queue_t *q, int proto)
 	struct T_bind_req *tbr;
 	mblk_t *mp;
 
-	mp = allocb(sizeof (struct T_bind_req) + 1, BPRI_HI);
+	mp = allocb_cred(sizeof (struct T_bind_req) + 1, kcred, NOPID);
 	if (mp == NULL) {
 		/* cmn_err(CE_WARN, */
 		/* "sadb_t_bind_req(%d): couldn't allocate mblk\n", proto); */
@@ -6854,6 +6862,14 @@ sadb_set_lpkt(ipsa_t *ipsa, mblk_t *npkt, netstack_t *ns)
 	ipsec_stack_t	*ipss = ns->netstack_ipsec;
 	boolean_t is_larval;
 
+	/*
+	 * Check the packet's netstack id in case we go asynch with a
+	 * taskq_dispatch.
+	 */
+	ASSERT(((ipsec_in_t *)npkt->b_rptr)->ipsec_in_type == IPSEC_IN);
+	ASSERT(((ipsec_in_t *)npkt->b_rptr)->ipsec_in_stackid ==
+	    ns->netstack_stackid);
+
 	mutex_enter(&ipsa->ipsa_lock);
 	is_larval = (ipsa->ipsa_state == IPSA_STATE_LARVAL);
 	if (is_larval) {
@@ -6896,8 +6912,8 @@ void
 sadb_buf_pkt(ipsa_t *ipsa, mblk_t *bpkt, netstack_t *ns)
 {
 	ipsec_stack_t   *ipss = ns->netstack_ipsec;
-	extern void (*cl_inet_idlesa)(uint8_t, uint32_t, sa_family_t,
-	    in6_addr_t, in6_addr_t);
+	extern void (*cl_inet_idlesa)(netstackid_t, uint8_t, uint32_t,
+	    sa_family_t, in6_addr_t, in6_addr_t, void *);
 	in6_addr_t *srcaddr = (in6_addr_t *)(&ipsa->ipsa_srcaddr);
 	in6_addr_t *dstaddr = (in6_addr_t *)(&ipsa->ipsa_dstaddr);
 
@@ -6910,9 +6926,17 @@ sadb_buf_pkt(ipsa_t *ipsa, mblk_t *bpkt, netstack_t *ns)
 		return;
 	}
 
-	cl_inet_idlesa((ipsa->ipsa_type == SADB_SATYPE_AH) ?
-	    IPPROTO_AH : IPPROTO_ESP, ipsa->ipsa_spi, ipsa->ipsa_addrfam,
-	    *srcaddr, *dstaddr);
+	cl_inet_idlesa(ns->netstack_stackid,
+	    (ipsa->ipsa_type == SADB_SATYPE_AH) ? IPPROTO_AH : IPPROTO_ESP,
+	    ipsa->ipsa_spi, ipsa->ipsa_addrfam, *srcaddr, *dstaddr, NULL);
+
+	/*
+	 * Check the packet's netstack id in case we go asynch with a
+	 * taskq_dispatch.
+	 */
+	ASSERT(((ipsec_in_t *)bpkt->b_rptr)->ipsec_in_type == IPSEC_IN);
+	ASSERT(((ipsec_in_t *)bpkt->b_rptr)->ipsec_in_stackid ==
+	    ns->netstack_stackid);
 
 	mutex_enter(&ipsa->ipsa_lock);
 	ipsa->ipsa_mblkcnt++;
@@ -6943,15 +6967,30 @@ void
 sadb_clear_buf_pkt(void *ipkt)
 {
 	mblk_t	*tmp, *buf_pkt;
+	netstack_t *ns;
+	ipsec_in_t *ii;
 
 	buf_pkt = (mblk_t *)ipkt;
+
+	ii = (ipsec_in_t *)buf_pkt->b_rptr;
+	ASSERT(ii->ipsec_in_type == IPSEC_IN);
+	ns = netstack_find_by_stackid(ii->ipsec_in_stackid);
+	if (ns != NULL && ns != ii->ipsec_in_ns) {
+		netstack_rele(ns);
+		ns = NULL;  /* For while-loop below. */
+	}
 
 	while (buf_pkt != NULL) {
 		tmp = buf_pkt->b_next;
 		buf_pkt->b_next = NULL;
-		ip_fanout_proto_again(buf_pkt, NULL, NULL, NULL);
+		if (ns != NULL)
+			ip_fanout_proto_again(buf_pkt, NULL, NULL, NULL);
+		else
+			freemsg(buf_pkt);
 		buf_pkt = tmp;
 	}
+	if (ns != NULL)
+		netstack_rele(ns);
 }
 /*
  * Walker callback used by sadb_alg_update() to free/create crypto

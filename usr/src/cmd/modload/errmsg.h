@@ -19,14 +19,12 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_ERRMSG_H
 #define	_ERRMSG_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #ifdef	__cplusplus
 extern "C" {
@@ -78,12 +76,14 @@ extern "C" {
 #define	ERR_NO_MEM		"Not enough memory\n"
 #define	ERR_DEL_ENTRY	"Cannot delete entry for driver (%s) from file (%s).\n"
 #define	ERR_NO_ENTRY	"No entry found for driver (%s) in file (%s).\n"
+#define	ERR_DEV_IN_USE	"One or more devices remain in use for driver %s.\n"
 #define	ERR_INT_UPDATE	"Internal error updating (%s).\n"
 #define	ERR_NOMOD	"Cannot find module (%s).\n"
 #define	ERR_MAX_MAJOR	"Cannot get major device information.\n"
 #define	ERR_NO_FREE_MAJOR	"No available major numbers.\n"
 #define	ERR_NOT_UNIQUE	"Driver (%s) is already installed.\n"
 #define	ERR_NOT_INSTALLED "Driver (%s) not installed.\n"
+#define	ERR_ALIAS_NOT_BOUND "Alias not bound to driver %s.\n"
 #define	ERR_UPDATE	"Cannot update (%s).\n"
 #define	ERR_MAX_EXCEEDS "Major number (%d) exceeds maximum (%d).\n"
 #define	ERR_NO_CLEAN	"Cannot update; check file %s and rem_drv %s by hand.\n"
@@ -122,10 +122,10 @@ extern "C" {
 /* update_drv messages */
 #define	UPD_DRV_USAGE	\
 	"Usage:\tupdate_drv [ -f | -v ] <driver_module>\n" \
-	"\tupdate_drv [ -b basedir ] [ -f | -v ] -a\n" \
+	"\tupdate_drv [ -b basedir ] [ -f | -v | -n ] -a\n" \
 		"\t\t[-m 'permission'] [-i 'identify_name']\n" \
 		"\t\t[-P privilege] [-p 'policy']  <driver_module>\n" \
-	"\tupdate_drv [ -b basedir ] [ -f | -v ] -d\n" \
+	"\tupdate_drv [ -b basedir ] [ -f | -v | -n ] -d\n" \
 		"\t\t[-m 'permission'] [-i 'identify_name']\n" \
 		"\t\t[-P privilege] [-p 'policy']  <driver_module>\n\n"\
 	"NOTE: at least one of m/i/P/p must be specified with -a and -d.\n"
@@ -137,7 +137,8 @@ extern "C" {
 
 /* remdrv messages */
 
-#define	REM_USAGE1 "Usage:\n\t rem_drv [ -C ] [ -b <basedir> ] driver_name\n"
+#define	REM_USAGE1	\
+	"Usage:\n\t rem_drv [ -C ] [ -b <basedir> ] [ -n ] driver_name\n"
 #define	ERR_NO_MAJ	"Cannot get major number for :  %s\n"
 #define	ERR_UNLINK	"Warning: Cannot remove %s from devfs namespace.\n"
 #define	ERR_PIPE	"System error : Cannot create pipe\n"

@@ -20,7 +20,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
@@ -309,7 +309,9 @@
 # message is formatted to conform to the pattern used by the MSG_BINFO messages.
 @ MSG_BND_REJECT	"binding file=%s to file=%s: symbol `%s'  \
 			 (rejected: %s)"
-@ MSG_BNDREJ_NODIR	"attempt to directly bind to a NODIRECT definition"
+@ MSG_BNDREJ_DIRECT	"attempt to directly bind to a NODIRECT definition"
+@ MSG_BNDREJ_GROUP	"attempt to bind within a group to a NODIRECT \
+			 definition"
 @ MSG_BNDREJ_SINGLE	"attempt to bind to a SINGLETON definition without \
 			 following default search model"
 
@@ -404,11 +406,13 @@
 @ MSG_FIL_CONFIG	"file=%s  [ ELF ]; configuration alternate found: %s"
 
 
-@ MSG_FIL_DATA_DB	"    dynamic:  %#18llx  base:   %#18llx"
-@ MSG_FIL_DATA_SE	"    size:     %#18llx  entry:  %#18llx"
-@ MSG_FIL_DATA_S	"    size:     %#18llx"
+@ MSG_FIL_DATA_AS	"    addr:     %#18llx  size:   %#18llx"
 @ MSG_FIL_DATA_LL	"    lmid:     %18.18s  lmco:   %#18llx"
 @ MSG_FIL_DATA_EA	"    envp:     %#18llx  auxv:   %#18llx"
+
+@ MSG_FIL_MMAPOBJ	"file=%s  mmapobj entries=%d"
+@ MSG_FIL_MMAPOBJ_1	"  [%d]: addr:  %#18llx  fsize:  %#18llx  %s"
+@ MSG_FIL_MMAPOBJ_2	"       offset: %#17llx  msize:  %#18llx"
 
 @ MSG_FIL_BND_ADD	"file=%s;  add binding to:"
 @ MSG_FIL_BND_FILE	"    file=%s   %s"
@@ -425,7 +429,7 @@
 @ MSG_FIL_DEP_ORPHAN	"    file=%s;  object remains on orphan handle  %s"
 @ MSG_FIL_DEP_REINST	"    file=%s;  object reinstated  %s"
 
-@ MSG_FIL_HDL_CREATE	"handle=%s;  creating:"
+@ MSG_FIL_HDL_CREATE	"handle=%s;  creating: 0x%llx"
 @ MSG_FIL_HDL_ADD	"handle=%s;  adding dependent objects:"
 @ MSG_FIL_HDL_DELETE	"handle=%s;  inspecting for deletion:"
 @ MSG_FIL_HDL_ORPHAN	"handle=%s;  deletion cannot be completed: moving to \
@@ -539,9 +543,11 @@
 @ MSG_MOVE_ADJEXPAND	"for symbol=%s roffset: new=0x%llx"
 @ MSG_MOVE_ADJMOVE	"for symbol=%s roffset: from=0x%llx, to=0x%llx"
 @ MSG_MOVE_OUTSCTADJ	"adjusting addend for symbol=%s"
-@ MSG_MOVE_PAREXPN	"expanding %s into .SUNW_data1: %s"
+@ MSG_MOVE_PAREXPN	"expanding %s into .data: %s"
 @ MSG_MOVE_OUTMOVE	"copying move entries for %s into .SUNW_move"
 @ MSG_MOVE_INPUT	"collecting move entries: file=%s"
+@ MSG_MOVE_BAD		"move %lld offset invalid: %s: offset=0x%llx \
+			 lies outside memory image; move discarded"
 
 # Section header messages
 
@@ -628,12 +634,12 @@
 @ MSG_SUP_REQ		"support object request=%s  (%s)"
 @ MSG_SUP_REQ_ENV	"supplied via SGS_SUPPORT"
 @ MSG_SUP_REQ_CMD	"supplied via -S"
-@ MSG_SUP_REQ_DEF	"default"
 
 @ MSG_SUP_ROUTINE	"  support object=%s:  provides routine %s"
 
 @ MSG_SUP_CALLING_1	"  calling routine=%s (%s)"
 @ MSG_SUP_CALLING_2	"  calling routine=%s (%s)  %s=%s"
+@ MSG_SUP_VNONE		"  unloading object=%s: version=LD_SUP_VNONE"
 @ MSG_SUP_OUTFILE	"output file"
 @ MSG_SUP_INFILE	"input file"
 @ MSG_SUP_INSEC		"input section"
@@ -749,9 +755,6 @@
 @ MSG_UTL_FINI		"calling .fini: %s"
 @ MSG_UTL_ARRAY		"calling %s[%d]:0x%llx: %s"
 @ MSG_UTL_TRANS		"transferring control: %s"
-@ MSG_UTL_WAIT		"suspending thread: %s from %s for completion of init \
-			 for %s"
-@ MSG_UTL_BROAD		"signal suspended threads: %s init complete"
 @ MSG_UTL_INTOOLATE	"loading after relocation has started: interposition \
 			 request (DF_1_INTERPOSE) ignored: %s"
 
@@ -791,7 +794,6 @@
 @ MSG_STR_ADD		"adding"
 @ MSG_STR_UP_1		"updating"
 @ MSG_STR_UP_2		"updated"
-@ MSG_STR_SYMBOL	"symbol binding"
 
 @ MSG_STR_UNKNOWN	"<unknown>"
 @ MSG_STR_ORPHAN	"<orphan>"
@@ -1344,3 +1346,9 @@
 # TLS information flags
 
 @ MSG_TLS_FLAG_STATIC	"STATIC-TLS"
+
+# mmapobj() mr_flags.
+
+@ MSG_MR_PADDING	"[ PADDING ]"
+@ MSG_MR_HDR_ELF	"[ HDR_ELF ]"
+@ MSG_MR_HDR_AOUT	"[ HDR_AOUT ]"

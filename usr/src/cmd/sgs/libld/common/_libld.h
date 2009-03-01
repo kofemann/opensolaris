@@ -23,7 +23,7 @@
  *	Copyright (c) 1988 AT&T
  *	  All Rights Reserved
  *
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -65,7 +65,8 @@ typedef struct {
 	uchar_t		m_data;		/* Target byte order */
 
 	Xword		m_segm_align;	/* segment alignment */
-	Xword		m_segm_origin;	/* Default 1st segment offset */
+	Xword		m_segm_origin;	/* Default 1st segment origin */
+	Xword		m_segm_aorigin;	/* Alternative 1st segment origin */
 	Word		m_dataseg_perm;	/* data segment permission mask */
 	Word		m_word_align;	/* alignment to use for Word sections */
 	const char	*m_def_interp;	/* Def. interpreter for dyn objects */
@@ -304,7 +305,7 @@ struct _ld_heap {
 	void		*lh_end;
 };
 
-#define	HEAPBLOCK	0x68000		/* default allocation block size */
+#define	HEAPBLOCK	0x800000	/* default allocation block size */
 #define	HEAPALIGN	0x8		/* heap blocks alignment requirement */
 
 /*
@@ -333,6 +334,7 @@ typedef struct {
 #define	AL_CNT_OFL_DTSFLTRS	4	/* ofl_dtsfltrs initial alist count */
 #define	AL_CNT_OFL_SYMFLTRS	20	/* ofl_symfltrs initial alist count */
 #define	AL_CNT_OS_MSTRISDESCS	10	/* os_mstrisdescs */
+#define	AL_CNT_OS_RELISDESCS	100	/* os_relisdescs */
 #define	AL_CNT_OS_COMDATS	20	/* os_comdats */
 #define	AL_CNT_SG_OSDESC	40	/* sg_osdescs initial alist count */
 #define	AL_CNT_SG_SECORDER	40	/* sg_secorder initial alist count */
@@ -378,8 +380,8 @@ extern List		lib_support;
 extern int		demangle_flag;
 extern const Msg	reject[];
 extern int		Verbose;
-extern const int	ldynsym_symtype[STT_NUM];
-extern const int	dynsymsort_symtype[STT_NUM];
+extern const int	ldynsym_symtype[];
+extern const int	dynsymsort_symtype[];
 
 
 /*
@@ -473,7 +475,6 @@ extern const int	dynsymsort_symtype[STT_NUM];
 		(*_cnt_var)_inc_or_dec_op;	/* Increment/Decrement */ \
 }
 
-
 /*
  * The OFL_SWAP_RELOC macros are used to determine whether
  * relocation processing needs to swap the data being relocated.
@@ -481,15 +482,19 @@ extern const int	dynsymsort_symtype[STT_NUM];
  * the function call in the case where the linker host and the
  * target have the same byte order.
  */
-
 #define	OFL_SWAP_RELOC_DATA(_ofl, _rel) \
 	(((_ofl)->ofl_flags1 & FLG_OF1_ENCDIFF) && \
 	ld_swap_reloc_data(_ofl, _rel))
 
 /*
- * For backward compatibility provide a /dev/zero file descriptor.
+ * Define an AVL node for maintaining input section descriptors.  AVL trees of
+ * these descriptors are used to process group and COMDAT section.
  */
-extern int		dz_fd;
+typedef struct {
+	avl_node_t	isd_avl;	/* avl book-keeping (see SGSOFFSETOF) */
+	Is_desc		*isd_isp;	/* input section descriptor */
+	uint_t		isd_hash;	/* input section name hash value */
+} Isd_node;
 
 /*
  * Local functions.
@@ -507,6 +512,8 @@ extern Listnode		*list_appendc(List *, const void *);
 extern Listnode		*list_insertc(List *, const void *, Listnode *);
 extern Listnode		*list_prependc(List *, const void *);
 extern Listnode		*list_where(List *, Word num);
+
+extern int		isdavl_compare(const void *, const void *);
 
 extern Sdf_desc		*sdf_add(const char *, List *);
 extern Sdf_desc		*sdf_find(const char *, List *);
@@ -547,9 +554,9 @@ extern Sdf_desc		*sdf_find(const char *, List *);
 #define	ld_process_files	ld64_process_files
 #define	ld_process_flags	ld64_process_flags
 #define	ld_process_ifl		ld64_process_ifl
+#define	ld_process_open		ld64_process_open
 #define	ld_process_ordered	ld64_process_ordered
 #define	ld_process_sym_reloc	ld64_process_sym_reloc
-#define	ld_recalc_shdrcnt	ld64_recalc_shdrcnt
 #define	ld_reloc_GOT_relative	ld64_reloc_GOT_relative
 #define	ld_reloc_plt		ld64_reloc_plt
 #define	ld_reloc_remain_entry	ld64_reloc_remain_entry
@@ -631,9 +638,9 @@ extern Sdf_desc		*sdf_find(const char *, List *);
 #define	ld_process_files	ld32_process_files
 #define	ld_process_flags	ld32_process_flags
 #define	ld_process_ifl		ld32_process_ifl
+#define	ld_process_open		ld32_process_open
 #define	ld_process_ordered	ld32_process_ordered
 #define	ld_process_sym_reloc	ld32_process_sym_reloc
-#define	ld_recalc_shdrcnt	ld32_recalc_shdrcnt
 #define	ld_reloc_GOT_relative	ld32_reloc_GOT_relative
 #define	ld_reloc_plt		ld32_reloc_plt
 #define	ld_reloc_remain_entry	ld32_reloc_remain_entry
@@ -733,11 +740,11 @@ extern uintptr_t	ld_process_files(Ofl_desc *, int, char **);
 extern uintptr_t	ld_process_flags(Ofl_desc *, int, char **);
 extern Ifl_desc		*ld_process_ifl(const char *, const char *, int, Elf *,
 			    Word, Ofl_desc *, Rej_desc *);
+extern Ifl_desc		*ld_process_open(const char *, const char *, int *,
+			    Ofl_desc *, Word, Rej_desc *);
 extern uintptr_t	ld_process_ordered(Ifl_desc *, Ofl_desc *, Word, Word);
 extern uintptr_t	ld_process_sym_reloc(Ofl_desc *, Rel_desc *, Rel *,
 			    Is_desc *, const char *);
-
-extern void		ld_recalc_shdrcnt(Ofl_desc *);
 
 extern uintptr_t	ld_reloc_GOT_relative(Boolean, Rel_desc *, Ofl_desc *);
 extern uintptr_t	ld_reloc_plt(Rel_desc *, Ofl_desc *);
@@ -801,7 +808,6 @@ extern uintptr_t	add_regsym(Sym_desc *, Ofl_desc *);
 extern Word		hashbkts(Word);
 extern Xword		lcm(Xword, Xword);
 extern Listnode		*list_where(List *, Word);
-
 
 /*
  * Most platforms have both a 32 and 64-bit variant (e.g. EM_SPARC and

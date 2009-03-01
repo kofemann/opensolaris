@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -504,6 +504,7 @@ i_mac_destructor(void *buf, void *arg)
 	ASSERT(mip->mi_kstat_count == 0);
 	ASSERT(mip->mi_nclients == 0);
 	ASSERT(mip->mi_nactiveclients == 0);
+	ASSERT(mip->mi_single_active_client == NULL);
 	ASSERT(mip->mi_state_flags == 0);
 	ASSERT(mip->mi_factory_addr == NULL);
 	ASSERT(mip->mi_factory_addr_num == 0);
@@ -1712,6 +1713,12 @@ mac_tx_client_unblock(mac_client_impl_t *mcip)
 	mac_tx_lock_all(mcip);
 	mcip->mci_tx_flag &= ~MCI_TX_QUIESCE;
 	mac_tx_unlock_all(mcip);
+	/*
+	 * We may fail to disable flow control for the last MAC_NOTE_TX
+	 * notification because the MAC client is quiesced. Send the
+	 * notification again.
+	 */
+	i_mac_notify(mcip->mci_mip, MAC_NOTE_TX);
 }
 
 /*
@@ -2350,10 +2357,8 @@ i_mac_tx_srs_notify(mac_impl_t *mip, mac_ring_handle_t ring)
 	    cclient = cclient->mci_client_next) {
 		if ((mac_srs = MCIP_TX_SRS(cclient)) != NULL)
 			mac_tx_srs_wakeup(mac_srs, ring);
-		if (!FLOW_TAB_EMPTY(cclient->mci_subflow_tab)) {
-			(void) mac_flow_walk_nolock(cclient->mci_subflow_tab,
-			    mac_tx_flow_srs_wakeup, ring);
-		}
+		(void) mac_flow_walk(cclient->mci_subflow_tab,
+		    mac_tx_flow_srs_wakeup, ring);
 	}
 	rw_exit(&mip->mi_rw_lock);
 	rw_exit(&i_mac_impl_lock);
@@ -2733,12 +2738,23 @@ mac_set_prop(mac_handle_t mh, mac_prop_t *macprop, void *val, uint_t valsize)
 		bcopy(val, &mrp, sizeof (mrp));
 		return (mac_set_resources(mh, &mrp));
 	}
-	/* For driver properties, call driver's callback */
-	if (mip->mi_callbacks->mc_callbacks & MC_SETPROP) {
-		err = mip->mi_callbacks->mc_setprop(mip->mi_driver,
-		    macprop->mp_name, macprop->mp_id, valsize, val);
-	}
+	switch (macprop->mp_id) {
+	case MAC_PROP_MTU: {
+		uint32_t mtu;
 
+		if (valsize < sizeof (mtu))
+			return (EINVAL);
+		bcopy(val, &mtu, sizeof (mtu));
+		err = mac_set_mtu(mh, mtu, NULL);
+		break;
+	}
+	default:
+		/* For other driver properties, call driver's callback */
+		if (mip->mi_callbacks->mc_callbacks & MC_SETPROP) {
+			err = mip->mi_callbacks->mc_setprop(mip->mi_driver,
+			    macprop->mp_name, macprop->mp_id, valsize, val);
+		}
+	}
 	return (err);
 }
 
@@ -2778,15 +2794,20 @@ mac_get_prop(mac_handle_t mh, mac_prop_t *macprop, void *val, uint_t valsize,
 		if ((macprop->mp_flags & MAC_PROP_DEFAULT) == 0) {
 			mac_sdu_get(mh, NULL, &sdu);
 			bcopy(&sdu, val, sizeof (sdu));
-			if (mac_set_prop(mh, macprop, val, sizeof (sdu)) != 0)
-				*perm = MAC_PROP_PERM_READ;
-			else
+			if ((mip->mi_callbacks->mc_callbacks & MC_SETPROP) &&
+			    (mip->mi_callbacks->mc_setprop(mip->mi_driver,
+			    macprop->mp_name, macprop->mp_id, valsize,
+			    val) == 0)) {
 				*perm = MAC_PROP_PERM_RW;
+			} else {
+				*perm = MAC_PROP_PERM_READ;
+			}
 			return (0);
 		} else {
 			if (mip->mi_info.mi_media == DL_ETHER) {
 				sdu = ETHERMTU;
 				bcopy(&sdu, val, sizeof (sdu));
+
 				return (0);
 			}
 			/*
@@ -3759,38 +3780,6 @@ mac_check_macaddr_shared(mac_address_t *map)
 }
 
 /*
- * Enable a MAC address by enabling promiscuous mode.
- */
-static int
-mac_add_macaddr_promisc(mac_impl_t *mip, mac_group_t *group)
-{
-	ASSERT(MAC_PERIM_HELD((mac_handle_t)mip));
-
-	/*
-	 * Current interface only allow to set promiscuous mode with the
-	 * default group. Note, mip->mi_rx_groups might be NULL.
-	 */
-	ASSERT(group == mip->mi_rx_groups);
-
-	if (group == mip->mi_rx_groups)
-		return (i_mac_promisc_set(mip, B_TRUE, MAC_DEVPROMISC));
-	else
-		return (ENOTSUP);
-}
-
-/*
- * Remove a MAC address that was added by enabling promiscuous mode.
- */
-static int
-mac_remove_macaddr_promisc(mac_impl_t *mip, mac_group_t *group)
-{
-	ASSERT(MAC_PERIM_HELD((mac_handle_t)mip));
-	ASSERT(group == mip->mi_rx_groups);
-
-	return (i_mac_promisc_set(mip, B_FALSE, MAC_DEVPROMISC));
-}
-
-/*
  * Remove the specified MAC address from the MAC address list and free it.
  */
 static void
@@ -3833,7 +3822,8 @@ mac_free_macaddr(mac_address_t *map)
  * capability.
  */
 int
-mac_add_macaddr(mac_impl_t *mip, mac_group_t *group, uint8_t *mac_addr)
+mac_add_macaddr(mac_impl_t *mip, mac_group_t *group, uint8_t *mac_addr,
+    boolean_t use_hw)
 {
 	mac_address_t *map;
 	int err = 0;
@@ -3883,29 +3873,33 @@ mac_add_macaddr(mac_impl_t *mip, mac_group_t *group, uint8_t *mac_addr)
 	}
 
 	/*
-	 * Try promiscuous mode. Note that rx_groups could be NULL, so we
-	 * need to handle drivers that don't advertise the RINGS capability.
+	 * The MAC address addition failed. If the client requires a
+	 * hardware classified MAC address, fail the operation.
 	 */
-	if (group == mip->mi_rx_groups) {
-		/*
-		 * For drivers that don't advertise RINGS capability, do
-		 * nothing for the primary address.
-		 */
-		if ((group == NULL) &&
-		    (bcmp(map->ma_addr, mip->mi_addr, map->ma_len) == 0)) {
-			map->ma_type = MAC_ADDRESS_TYPE_UNICAST_CLASSIFIED;
-			return (0);
-		}
+	if (use_hw) {
+		err = ENOSPC;
+		goto bail;
+	}
 
-		/*
-		 * Enable promiscuous mode in order to receive traffic
-		 * to the new MAC address.
-		 */
-		err = mac_add_macaddr_promisc(mip, group);
-		if (err == 0) {
-			map->ma_type = MAC_ADDRESS_TYPE_UNICAST_PROMISC;
-			return (0);
-		}
+	/*
+	 * Try promiscuous mode.
+	 *
+	 * For drivers that don't advertise RINGS capability, do
+	 * nothing for the primary address.
+	 */
+	if ((group == NULL) &&
+	    (bcmp(map->ma_addr, mip->mi_addr, map->ma_len) == 0)) {
+		map->ma_type = MAC_ADDRESS_TYPE_UNICAST_CLASSIFIED;
+		return (0);
+	}
+
+	/*
+	 * Enable promiscuous mode in order to receive traffic
+	 * to the new MAC address.
+	 */
+	if ((err = i_mac_promisc_set(mip, B_TRUE, MAC_DEVPROMISC)) == 0) {
+		map->ma_type = MAC_ADDRESS_TYPE_UNICAST_PROMISC;
+		return (0);
 	}
 
 	/*
@@ -3914,6 +3908,7 @@ mac_add_macaddr(mac_impl_t *mip, mac_group_t *group, uint8_t *mac_addr)
 	 * for the primary MAC address which was pre-allocated by
 	 * mac_init_macaddr(), and which must remain on the list.
 	 */
+bail:
 	map->ma_nusers--;
 	if (allocated_map)
 		mac_free_macaddr(map);
@@ -3959,7 +3954,7 @@ mac_remove_macaddr(mac_address_t *map)
 		err = mac_group_remmac(map->ma_group, map->ma_addr);
 		break;
 	case MAC_ADDRESS_TYPE_UNICAST_PROMISC:
-		err = mac_remove_macaddr_promisc(mip, map->ma_group);
+		err = i_mac_promisc_set(mip, B_FALSE, MAC_DEVPROMISC);
 		break;
 	default:
 		ASSERT(B_FALSE);
@@ -4117,8 +4112,13 @@ mac_fini_macaddr(mac_impl_t *mip)
 {
 	mac_address_t *map = mip->mi_addresses;
 
-	/* there should be exactly one entry left on the list */
-	ASSERT(map != NULL);
+	if (map == NULL)
+		return;
+
+	/*
+	 * If mi_addresses is initialized, there should be exactly one
+	 * entry left on the list with no users.
+	 */
 	ASSERT(map->ma_nusers == 0);
 	ASSERT(map->ma_next == NULL);
 
@@ -4574,7 +4574,42 @@ mac_reserve_tx_ring(mac_impl_t *mip, mac_ring_t *desired_ring)
 					break;
 				}
 			}
-			ASSERT(client != NULL);
+			if (client == NULL) {
+				/*
+				 * The TX ring is in use, but it's not
+				 * associated with any clients, so it
+				 * has to be the default ring. In that
+				 * case we can simply assign a new ring
+				 * as the default ring, and we're done.
+				 */
+				ASSERT(mip->mi_default_tx_ring ==
+				    (mac_ring_handle_t)desired_ring);
+
+				/*
+				 * Quiesce all clients on top of
+				 * the NIC to make sure there are no
+				 * pending threads still relying on
+				 * that default ring, for example
+				 * the multicast path.
+				 */
+				for (client = mip->mi_clients_list;
+				    client != NULL;
+				    client = client->mci_client_next) {
+					mac_tx_client_quiesce(client,
+					    SRS_QUIESCE);
+				}
+
+				mip->mi_default_tx_ring = (mac_ring_handle_t)
+				    mac_reserve_tx_ring(mip, NULL);
+
+				/* resume the clients */
+				for (client = mip->mi_clients_list;
+				    client != NULL;
+				    client = client->mci_client_next)
+					mac_tx_client_restart(client);
+
+				break;
+			}
 
 			/*
 			 * Note that we cannot simply invoke the group
@@ -4595,23 +4630,6 @@ mac_reserve_tx_ring(mac_impl_t *mip, mac_ring_t *desired_ring)
 				 * on that MAC instance. The client
 				 * will fallback to the shared TX
 				 * ring.
-				 *
-				 * XXX if the user required the client
-				 * to have a hardware transmit ring,
-				 * we need to ensure we don't remove
-				 * the last ring from the client.
-				 * In that case look for a repacement
-				 * ring from a client which does not
-				 * require a hardware ring, we could
-				 * add an argument to
-				 * mac_reserve_tx_ring() which causes
-				 * it to take a ring from such a client
-				 * even if the desired ring is NULL.
-				 * This will have to be done as part
-				 * of the fix for CR 6758935. If that still
-				 * fails, i.e. if all rings are allocated
-				 * to clients which require rings, then
-				 * cleanly fail the operation.
 				 */
 				mac_tx_srs_add_ring(srs, sring);
 			}
@@ -4622,6 +4640,47 @@ mac_reserve_tx_ring(mac_impl_t *mip, mac_ring_t *desired_ring)
 			/* restart the client */
 			mac_tx_client_restart(client);
 
+			if (mip->mi_default_tx_ring ==
+			    (mac_ring_handle_t)desired_ring) {
+				/*
+				 * The desired ring is the default ring,
+				 * and there are one or more clients
+				 * using that default ring directly.
+				 */
+				mip->mi_default_tx_ring =
+				    (mac_ring_handle_t)sring;
+				/*
+				 * Find clients using default ring and
+				 * swap it with the new default ring.
+				 */
+				for (client = mip->mi_clients_list;
+				    client != NULL;
+				    client = client->mci_client_next) {
+					srs = MCIP_TX_SRS(client);
+					if (srs != NULL &&
+					    mac_tx_srs_ring_present(srs,
+					    desired_ring)) {
+						/* first quiece the client */
+						mac_tx_client_quiesce(client,
+						    SRS_QUIESCE);
+
+						/*
+						 * Give it the new default
+						 * ring, and remove the old
+						 * one.
+						 */
+						if (sring != NULL) {
+							mac_tx_srs_add_ring(srs,
+							    sring);
+						}
+						mac_tx_srs_del_ring(srs,
+						    desired_ring);
+
+						/* restart the client */
+						mac_tx_client_restart(client);
+					}
+				}
+			}
 			break;
 		}
 	}

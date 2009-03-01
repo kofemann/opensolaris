@@ -6,7 +6,7 @@
  *
  * CDDL LICENSE SUMMARY
  *
- * Copyright(c) 1999 - 2008 Intel Corporation. All rights reserved.
+ * Copyright(c) 1999 - 2009 Intel Corporation. All rights reserved.
  *
  * The contents of this file are subject to the terms of Version
  * 1.0 of the Common Development and Distribution License (the "License").
@@ -19,7 +19,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -119,7 +119,8 @@ e1000g_m_tx(void *arg, mblk_t *mp)
 
 	rw_enter(&Adapter->chip_lock, RW_READER);
 
-	if ((Adapter->chip_state != E1000G_START) ||
+	if ((Adapter->e1000g_state & E1000G_SUSPENDED) ||
+	    !(Adapter->e1000g_state & E1000G_STARTED) ||
 	    (Adapter->link_state != LINK_STATE_UP)) {
 		freemsgchain(mp);
 		mp = NULL;
@@ -271,7 +272,7 @@ e1000g_send(struct e1000g *Adapter, mblk_t *mp)
 		 */
 		if ((nmp != mp) ||
 		    (P2NPHASE((uintptr_t)nmp->b_rptr, Adapter->sys_page_sz)
-		    < len)) {
+		    < cur_context.hdr_len)) {
 			E1000G_DEBUG_STAT(tx_ring->stat_lso_header_fail);
 			/*
 			 * reallocate the mblk for the last header fragment,
@@ -287,9 +288,9 @@ e1000g_send(struct e1000g *Adapter, mblk_t *mp)
 			new_mp->b_cont = nmp;
 			if (pre_mp)
 				pre_mp->b_cont = new_mp;
-			nmp->b_rptr += hdr_frag_len;
-			if (hdr_frag_len == cur_context.hdr_len)
+			else
 				mp = new_mp;
+			nmp->b_rptr += hdr_frag_len;
 			frag_count ++;
 		}
 adjust_threshold:
@@ -719,6 +720,8 @@ e1000g_fill_tx_ring(e1000g_tx_ring_t *tx_ring, LIST_DESCRIBER *pending_list,
 			first_packet = NULL;
 		}
 
+		packet->tickstamp = lbolt64;
+
 		previous_packet = packet;
 		packet = (p_tx_sw_packet_t)
 		    QUEUE_GET_NEXT(pending_list, &packet->Link);
@@ -809,7 +812,7 @@ e1000g_fill_tx_ring(e1000g_tx_ring_t *tx_ring, LIST_DESCRIBER *pending_list,
 
 	if (e1000g_check_acc_handle(Adapter->osdep.reg_handle) != DDI_FM_OK) {
 		ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_DEGRADED);
-		Adapter->chip_state = E1000G_ERROR;
+		Adapter->e1000g_state |= E1000G_ERROR;
 	}
 
 	/* Put the pending SwPackets to the "Used" list */
@@ -963,6 +966,7 @@ e1000g_recycle(e1000g_tx_ring_t *tx_ring)
 	mblk_t *nmp;
 	struct e1000_tx_desc *descriptor;
 	int desc_count;
+	int64_t delta;
 
 	/*
 	 * This function will examine each TxSwPacket in the 'used' queue
@@ -971,11 +975,11 @@ e1000g_recycle(e1000g_tx_ring_t *tx_ring)
 	 * returned to the 'free' queue.
 	 */
 	Adapter = tx_ring->adapter;
+	delta = 0;
 
 	packet = (p_tx_sw_packet_t)QUEUE_GET_HEAD(&tx_ring->used_list);
 	if (packet == NULL) {
-		tx_ring->recycle_fail = 0;
-		tx_ring->stall_watchdog = 0;
+		Adapter->stall_flag = B_FALSE;
 		return (0);
 	}
 
@@ -988,7 +992,7 @@ e1000g_recycle(e1000g_tx_ring_t *tx_ring)
 	if (e1000g_check_dma_handle(
 	    tx_ring->tbd_dma_handle) != DDI_FM_OK) {
 		ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_DEGRADED);
-		Adapter->chip_state = E1000G_ERROR;
+		Adapter->e1000g_state |= E1000G_ERROR;
 		return (0);
 	}
 
@@ -1036,6 +1040,7 @@ e1000g_recycle(e1000g_tx_ring_t *tx_ring)
 			 * with then there is no reason to check the rest
 			 * of the queue.
 			 */
+			delta = lbolt64 - packet->tickstamp;
 			break;
 		}
 	}
@@ -1046,13 +1051,18 @@ e1000g_recycle(e1000g_tx_ring_t *tx_ring)
 	mutex_exit(&tx_ring->usedlist_lock);
 
 	if (desc_count == 0) {
-		tx_ring->recycle_fail++;
 		E1000G_DEBUG_STAT(tx_ring->stat_recycle_none);
+		/*
+		 * If the packet hasn't been sent out for seconds,
+		 * the transmitter is considered to be stalled.
+		 */
+		if (delta > Adapter->stall_threshold) {
+			Adapter->stall_flag = B_TRUE;
+		}
 		return (0);
 	}
 
-	tx_ring->recycle_fail = 0;
-	tx_ring->stall_watchdog = 0;
+	Adapter->stall_flag = B_FALSE;
 
 	mp = NULL;
 	nmp = NULL;

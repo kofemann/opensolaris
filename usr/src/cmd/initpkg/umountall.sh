@@ -20,10 +20,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 #
 #	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T
 #	  All Rights Reserved
@@ -34,8 +32,8 @@ usage () {
 	if [ -n "$1" ]; then
 		echo "umountall: $1" 1>&2
 	fi
-	echo "Usage:\n\tumountall [-k] [-s] [-F FSType] [-l|-r] [-n]" 1>&2
-	echo "\tumountall [-k] [-s] [-h host] [-n]" 1>&2
+	echo "Usage:\n\tumountall [-k] [-s] [-F FSType] [-l|-r] [-Z] [-n]" 1>&2
+	echo "\tumountall [-k] [-s] [-h host] [-Z] [-n]" 1>&2
 	exit 2
 }
 
@@ -68,7 +66,6 @@ MNTTAB=/etc/mnttab
 # /usr/bin/sleep	-k, to sleep after an fuser -c -k on the mountpoint
 # /usr/sbin/fuser	-k, to kill processes keeping a mount point busy
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
 # In addition, we use /usr/bin/tail if it is available; if not we use
 # slower shell constructs to reverse a file.
 
@@ -86,18 +83,19 @@ RFLAG=
 LFLAG=
 SFLAG=
 KFLAG=
+ZFLAG=
 NFLAG=
 LOCALNAME=
 UMOUNTFLAG=
 
 
-while getopts ?rslkF:h:n c
+while getopts ?rslkF:h:Zn c
 do
 	case $c in
 	r)	RFLAG="r";;
 	l)	LFLAG="l";;
 	s)	SFLAG="s";;
-	k) 	KFLAG="k";;
+	k)	KFLAG="k";;
 	h)	if [ -n "$HFLAG" ]; then
 			usage "more than one host specified"
 		fi
@@ -115,6 +113,7 @@ do
 			usage "FSType ${FSType} exceeds 8 characters"
 		esac;
 		;;
+	Z)	ZFLAG="z";;
 	n)	NFLAG="n"
 		# Alias any commands that would perform real actions to
 		# something that tells what action would have been performed
@@ -172,8 +171,8 @@ ZONENAME=`zonename`
 
 # Check and if needed sync the boot archive before unmounting everything.
 #
-if [ -z "${RFLAG}${NFLAG}${HFLAG}${FSType}" -a "$ZONENAME" = "global" -a \
-    `uname -p` = "i386" -a -x /sbin/bootadm ] ; then
+if [ -z "${RFLAG}${NFLAG}${HFLAG}${FSType}" -a "$ZONENAME" = "global" \
+    -a -x /sbin/bootadm ] ; then
 	/sbin/bootadm -a update_all
 fi
 
@@ -200,7 +199,7 @@ fi
 # Take advantage of parallel unmounting at this point if we have no
 # criteria to match and we are in the global zone
 #
-if [ -z "${SFLAG}${LFLAG}${RFLAG}${HFLAG}${KFLAG}${FFLAG}" -a \
+if [ -z "${SFLAG}${LFLAG}${RFLAG}${HFLAG}${KFLAG}${FFLAG}${ZFLAG}" -a \
     "$ZONENAME" = "global" ]; then
 	umount -a ${UMOUNTFLAG}
 	exit			# with return code of the umount -a
@@ -246,6 +245,7 @@ doumounts () {
 	(
 	rc=0
 	fslist=""
+	nfslist=""
 	while read dev mountp fstype mode dummy
 	do
 		case "${mountp}" in
@@ -288,7 +288,29 @@ doumounts () {
 				continue
 			fi
 			if [ -n "$LFLAG" -a "$fstype" = "nfs" ]; then
+				nfslist="$nfslist $mountp"
 				continue
+			fi
+			#
+			# This will filter out autofs mounts with nfs file
+			# system mounted on the top of it.
+			#
+			# WARNING: use of any syscall on a NFS file system has
+			# the danger to go over-the-wire and could cause nfs
+			# clients to hang on shutdown, if the nfs server is
+			# down beforehand.
+			# For the reason described above, a simple test like 
+			# "df -F nfs $mountp" can't be used to filter out
+			# nfs-over-autofs mounts. We loop over a list instead:
+			#
+			if [ -n "$LFLAG" -a -n "$nfslist" -a "$fstype" = "autofs" ]
+			then
+				for m in $nfslist; do
+					if [ "$mountp" = "$m" ]; then
+						# Resume the outer while loop
+						continue 2
+					fi
+				done
 			fi
 			if [ -n "$RFLAG" -a "$fstype" != "nfs" ]; then
 				continue
@@ -304,6 +326,24 @@ doumounts () {
 					fi
 				done
 				if [ "$option" != "zone=$ZONENAME" ]; then
+					continue
+				fi
+			# we are called from the global zone
+			else 
+				for option in `echo $mode | tr , '\012'`; do
+					case "$option" in
+					zone=*)
+						option="zone="
+						break
+					;;
+					esac
+				done
+				# skip mounts from non-global zones if ZFLAG is not set
+				if [ "$option" = "zone=" -a -z "$ZFLAG" ]; then
+					continue
+				fi
+				# skip mounts from the global zone if ZFLAG is set
+				if [ "$option" != "zone=" -a -n "$ZFLAG" ]; then
 					continue
 				fi
 			fi

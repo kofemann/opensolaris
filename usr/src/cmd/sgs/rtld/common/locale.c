@@ -20,11 +20,9 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * Messaging support.  To minimize ld.so.1's overhead, messaging support isn't
@@ -146,7 +144,7 @@ open_mofile(Domain * dom)
 	const char	*domain = dom->dom_name;
 	char		path[PATH_MAX];
 	int		fd;
-	struct stat	status;
+	rtld_stat_t	status;
 	const Msghdr	*msghdr;
 	int		count;
 	size_t		size_tot, size_old, size_new;
@@ -159,7 +157,7 @@ open_mofile(Domain * dom)
 	if ((fd = open(path, O_RDONLY, 0)) == -1)
 		return;
 
-	if ((fstat(fd, &status) == -1) ||
+	if ((rtld_fstat(fd, &status) == -1) ||
 	    (status.st_size < sizeof (Msghdr))) {
 		(void) close(fd);
 		return;
@@ -230,7 +228,7 @@ dgettext(const char *domain, const char *msgid)
 	 * Determine if we've initialized any domains yet.
 	 */
 	if (domaincnt == 0) {
-		if ((domains = (Domain *)calloc(sizeof (Domain), 2)) == 0)
+		if ((domains = calloc(sizeof (Domain), 2)) == NULL)
 			return ((char *)msgid);
 		domains[0].dom_name = MSG_ORIG(MSG_SUNW_OST_SGS);
 		domains[1].dom_name = MSG_ORIG(MSG_SUNW_OST_OSLIB);

@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/sunddi.h>
 #ifndef _KERNEL
@@ -31,7 +29,7 @@
 #include <strings.h>
 #endif /* _KERNEL */
 #include <smbsrv/smb_xdr.h>
-
+#include <sys/socket.h>
 #ifdef _KERNEL
 /*
  * xdr_vector():
@@ -201,6 +199,22 @@ smb_opipe_context_decode(smb_opipe_context_t *ctx, uint8_t *buf,
 }
 
 bool_t
+xdr_smb_inaddr_t(XDR *xdrs, smb_inaddr_t *objp)
+{
+	if (!xdr_int32_t(xdrs, &objp->a_family))
+		return (FALSE);
+	if (objp->a_family == AF_INET) {
+		if (!xdr_uint32_t(xdrs, (in_addr_t *)&objp->a_ipv4))
+			return (FALSE);
+	} else {
+		if (!xdr_vector(xdrs, (char *)&objp->a_ipv6,
+		    sizeof (objp->a_ipv6), sizeof (char), (xdrproc_t)xdr_char))
+			return (FALSE);
+	}
+	return (TRUE);
+}
+
+bool_t
 smb_opipe_context_xdr(XDR *xdrs, smb_opipe_context_t *objp)
 {
 	if (!xdr_uint64_t(xdrs, &objp->oc_session_id))
@@ -219,7 +233,7 @@ smb_opipe_context_xdr(XDR *xdrs, smb_opipe_context_t *objp)
 		return (FALSE);
 	if (!xdr_string(xdrs, &objp->oc_workstation, ~0))
 		return (FALSE);
-	if (!xdr_uint32_t(xdrs, &objp->oc_ipaddr))
+	if (!xdr_smb_inaddr_t(xdrs, &objp->oc_ipaddr))
 		return (FALSE);
 	if (!xdr_int32_t(xdrs, &objp->oc_native_os))
 		return (FALSE);
@@ -229,7 +243,6 @@ smb_opipe_context_xdr(XDR *xdrs, smb_opipe_context_t *objp)
 		return (FALSE);
 	return (TRUE);
 }
-
 
 bool_t
 xdr_smb_dr_ulist_t(xdrs, objp)
@@ -255,5 +268,52 @@ xdr_smb_dr_kshare_t(xdrs, objp)
 		return (FALSE);
 	if (!xdr_string(xdrs, &objp->k_sharename, MAXNAMELEN))
 		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_smb_dr_get_gmttokens_t(XDR *xdrs, smb_dr_get_gmttokens_t *objp)
+{
+	if (!xdr_uint32_t(xdrs, &objp->gg_count)) {
+		return (FALSE);
+	}
+	if (!xdr_string(xdrs, &objp->gg_path, ~0)) {
+		return (FALSE);
+	}
+	return (TRUE);
+}
+
+bool_t
+xdr_gmttoken(XDR *xdrs, gmttoken *objp)
+{
+	if (!xdr_string(xdrs, objp, SMB_VSS_GMT_SIZE)) {
+		return (FALSE);
+	}
+	return (TRUE);
+}
+
+bool_t
+xdr_smb_dr_return_gmttokens_t(XDR *xdrs, smb_dr_return_gmttokens_t *objp)
+{
+	if (!xdr_uint32_t(xdrs, &objp->rg_count)) {
+		return (FALSE);
+	}
+	if (!xdr_array(xdrs, (char **)&objp->rg_gmttokens.rg_gmttokens_val,
+	    (uint_t *)&objp->rg_gmttokens.rg_gmttokens_len, ~0,
+	    sizeof (gmttoken), (xdrproc_t)xdr_gmttoken)) {
+		return (FALSE);
+	}
+	return (TRUE);
+}
+
+bool_t
+xdr_smb_dr_map_gmttoken_t(XDR *xdrs, smb_dr_map_gmttoken_t *objp)
+{
+	if (!xdr_string(xdrs, &objp->mg_path, MAXPATHLEN)) {
+		return (FALSE);
+	}
+	if (!xdr_string(xdrs, &objp->mg_gmttoken, SMB_VSS_GMT_SIZE)) {
+		return (FALSE);
+	}
 	return (TRUE);
 }

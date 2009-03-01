@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -187,6 +187,21 @@ static const cma_subscriber_t cma_subrs[] = {
 	{ "fault.cpu.*", FM_FMRI_SCHEME_CPU, FM_CPU_SCHEME_VERSION,
 	    cma_cpu_hc_retire },
 #elif defined(sun4v)
+	/*
+	 * The following are PI sun4v faults
+	 */
+	{ "fault.memory.memlink", FM_FMRI_SCHEME_HC,
+	    FM_HC_SCHEME_VERSION, NULL },
+	{ "fault.memory.memlink-uc", FM_FMRI_SCHEME_HC,
+	    FM_HC_SCHEME_VERSION, NULL },
+	{ "fault.memory.memlink-failover", FM_FMRI_SCHEME_HC,
+	    FM_HC_SCHEME_VERSION, NULL },
+	{ "fault.memory.dimm-ue-imminent", FM_FMRI_SCHEME_HC,
+	    FM_HC_SCHEME_VERSION, NULL },
+	{ "fault.memory.dram-ue-imminent", FM_FMRI_SCHEME_HC,
+	    FM_HC_SCHEME_VERSION, NULL },
+	{ "fault.memory.dimm-page-retires-excessive", FM_FMRI_SCHEME_HC,
+	    FM_HC_SCHEME_VERSION, NULL },
 	{ "fault.memory.page", FM_FMRI_SCHEME_MEM, FM_MEM_SCHEME_VERSION,
 	    cma_page_retire },
 	{ "fault.memory.dimm", FM_FMRI_SCHEME_MEM, FM_MEM_SCHEME_VERSION,
@@ -396,9 +411,7 @@ cma_recv_list(fmd_hdl_t *hdl, nvlist_t *nvl, const char *class)
 	uint_t keepopen;
 	int err = 0;
 	nvlist_t *asru = NULL;
-#ifndef i386
 	uint32_t index;
-#endif
 
 	err |= nvlist_lookup_string(nvl, FM_SUSPECT_UUID, &uuid);
 	err |= nvlist_lookup_nvlist_array(nvl, FM_SUSPECT_FAULT_LIST,
@@ -441,7 +454,6 @@ cma_recv_list(fmd_hdl_t *hdl, nvlist_t *nvl, const char *class)
 		}
 	}
 
-#ifndef i386
 	/*
 	 * Do not close the case if we are handling cache faults.
 	 */
@@ -454,7 +466,6 @@ cma_recv_list(fmd_hdl_t *hdl, nvlist_t *nvl, const char *class)
 			}
 		}
 	}
-#endif
 
 	if (!keepopen && strcmp(class, FM_LIST_REPAIRED_CLASS) == 0)
 		fmd_case_uuresolved(hdl, uuid);

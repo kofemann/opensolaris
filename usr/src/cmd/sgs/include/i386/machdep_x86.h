@@ -23,7 +23,7 @@
  *	Copyright (c) 1988 AT&T
  *	  All Rights Reserved
  *
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  * Global include file for all sgs ia32 based machine dependent macros,
@@ -79,6 +79,15 @@ extern "C" {
 #define	M_SROUND(X)	(((X) + M_SEGSIZE - 1) & ~(M_SEGSIZE - 1))
 
 /*
+ * Relocation type macros.
+ */
+#if	defined(_ELF64)
+#define	M_RELOC		Rela
+#else
+#define	M_RELOC		Rel
+#endif
+
+/*
  * TLS static segments must be rounded to the following requirements,
  * due to libthread stack allocation.
  */
@@ -87,7 +96,6 @@ extern "C" {
 #else
 #define	M_TLSSTATALIGN	0x08
 #endif
-
 
 /*
  * Other machine dependent entities
@@ -117,15 +125,21 @@ extern "C" {
 #define	M_BIND_ADJ	1		/* adjustment for end of */
 					/*	elf_rtbndr() address */
 #ifdef _ELF64
+/*
+ * Provide default starting addresses.  64-bit programs can also be restricted
+ * to a 32-bit address space (SF1_SUNW_ADDR32), and these programs provide an
+ * alternative origin.
+ */
+#define	M_SEGM_ORIGIN	(Addr)0x400000ULL	/* default 1st segment origin */
+#define	M_SEGM_AORIGIN	(Addr)0x10000ULL	/* alternative 1st segment */
+						/*    origin */
 #define	M_WORD_ALIGN	8
-#define	M_SEGM_ORIGIN	(Addr)0x00400000  /* default first segment offset */
 #else
-
-#define	M_WORD_ALIGN	4
-
 #define	M_STACK_GAP	(0x08000000)
 #define	M_STACK_PGS	(0x00048000)
 #define	M_SEGM_ORIGIN	(Addr)(M_STACK_GAP + M_STACK_PGS)
+#define	M_SEGM_AORIGIN	M_SEGM_ORIGIN
+#define	M_WORD_ALIGN	4
 #endif
 
 

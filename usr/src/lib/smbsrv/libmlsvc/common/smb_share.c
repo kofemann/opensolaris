@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -36,6 +36,7 @@
 #include <pthread.h>
 #include <assert.h>
 #include <libshare.h>
+#include <libzfs.h>
 
 #include <smbsrv/libsmb.h>
 #include <smbsrv/libsmbns.h>
@@ -47,6 +48,8 @@
 #include <smbsrv/nterror.h>
 
 #define	SMB_SHR_ERROR_THRESHOLD		3
+
+#define	SMB_SHR_CSC_BUFSZ		64
 
 /*
  * Cache functions and vars
@@ -106,7 +109,15 @@ static void smb_shr_cache_freent(HT_ITEM *);
 static void *smb_shr_sa_loadall(void *);
 static void smb_shr_sa_loadgrp(sa_group_t);
 static uint32_t smb_shr_sa_load(sa_share_t, sa_resource_t);
+static uint32_t smb_shr_sa_loadbyname(char *);
 static uint32_t smb_shr_sa_get(sa_share_t, sa_resource_t, smb_share_t *);
+
+/*
+ * .ZFS management functions
+ */
+static void smb_shr_zfs_add(smb_share_t *);
+static void smb_shr_zfs_remove(smb_share_t *);
+static void smb_shr_zfs_rename(smb_share_t *, smb_share_t *);
 
 /*
  * share publishing
@@ -153,23 +164,32 @@ static void smb_shr_unpublish(const char *, const char *);
 /*
  * Utility/helper functions
  */
+static uint32_t smb_shr_lookup(char *, smb_share_t *);
 static uint32_t smb_shr_addipc(void);
 static void smb_shr_set_oemname(smb_share_t *);
 
+
 /*
- * Starts the publisher thread and another thread which
- * populates the share cache by share information stored
- * by sharemgr
+ * libshare handle and synchronization
+ */
+typedef struct smb_sa_handle {
+	sa_handle_t	sa_handle;
+	mutex_t		sa_mtx;
+	boolean_t	sa_in_service;
+} smb_sa_handle_t;
+
+static smb_sa_handle_t smb_sa_handle;
+
+/*
+ * Creates and initializes the cache and starts the publisher
+ * thread.
  */
 int
 smb_shr_start(void)
 {
-	pthread_t load_thr;
-	pthread_attr_t tattr;
-	int rc;
-
-	if ((rc = smb_shr_publisher_start()) != 0)
-		return (rc);
+	(void) mutex_lock(&smb_sa_handle.sa_mtx);
+	smb_sa_handle.sa_in_service = B_TRUE;
+	(void) mutex_unlock(&smb_sa_handle.sa_mtx);
 
 	if (smb_shr_cache_create() != NERR_Success)
 		return (ENOMEM);
@@ -177,12 +197,7 @@ smb_shr_start(void)
 	if (smb_shr_addipc() != NERR_Success)
 		return (ENOMEM);
 
-	(void) pthread_attr_init(&tattr);
-	(void) pthread_attr_setdetachstate(&tattr, PTHREAD_CREATE_DETACHED);
-	rc = pthread_create(&load_thr, &tattr, smb_shr_sa_loadall, 0);
-	(void) pthread_attr_destroy(&tattr);
-
-	return (rc);
+	return (smb_shr_publisher_start());
 }
 
 void
@@ -190,6 +205,68 @@ smb_shr_stop(void)
 {
 	smb_shr_cache_destroy();
 	smb_shr_publisher_stop();
+
+	(void) mutex_lock(&smb_sa_handle.sa_mtx);
+	smb_sa_handle.sa_in_service = B_FALSE;
+
+	if (smb_sa_handle.sa_handle != NULL) {
+		sa_fini(smb_sa_handle.sa_handle);
+		smb_sa_handle.sa_handle = NULL;
+	}
+
+	(void) mutex_unlock(&smb_sa_handle.sa_mtx);
+}
+
+/*
+ * Get a handle and exclusive access to the libshare API.
+ */
+sa_handle_t
+smb_shr_sa_enter(void)
+{
+	(void) mutex_lock(&smb_sa_handle.sa_mtx);
+	if (!smb_sa_handle.sa_in_service) {
+		(void) mutex_unlock(&smb_sa_handle.sa_mtx);
+		return (NULL);
+	}
+
+	if (smb_sa_handle.sa_handle == NULL) {
+		smb_sa_handle.sa_handle = sa_init(SA_INIT_SHARE_API);
+		if (smb_sa_handle.sa_handle == NULL) {
+			syslog(LOG_ERR, "share: failed to get libshare handle");
+			(void) mutex_unlock(&smb_sa_handle.sa_mtx);
+			return (NULL);
+		}
+	}
+
+	return (smb_sa_handle.sa_handle);
+}
+
+/*
+ * Release exclusive access to the libshare API.
+ */
+void
+smb_shr_sa_exit(void)
+{
+	(void) mutex_unlock(&smb_sa_handle.sa_mtx);
+}
+
+/*
+ * Launches a thread to populate the share cache by share information
+ * stored in sharemgr
+ */
+int
+smb_shr_load(void)
+{
+	pthread_t load_thr;
+	pthread_attr_t tattr;
+	int rc;
+
+	(void) pthread_attr_init(&tattr);
+	(void) pthread_attr_setdetachstate(&tattr, PTHREAD_CREATE_DETACHED);
+	rc = pthread_create(&load_thr, &tattr, smb_shr_sa_loadall, 0);
+	(void) pthread_attr_destroy(&tattr);
+
+	return (rc);
 }
 
 /*
@@ -301,6 +378,10 @@ smb_shr_add(smb_share_t *si)
 
 	if (rc == 0) {
 		smb_shr_publish(si->shr_name, si->shr_container);
+
+		/* If path is ZFS, add the .zfs/shares/<share> entry. */
+		smb_shr_zfs_add(si);
+
 		return (NERR_Success);
 	}
 
@@ -356,6 +437,12 @@ smb_shr_remove(char *sharename)
 		}
 	}
 
+	/*
+	 * If path is ZFS, remove the .zfs/shares/<share> entry.  Need
+	 * to remove before cleanup of cache occurs.
+	 */
+	smb_shr_zfs_remove(si);
+
 	(void) strlcpy(path, si->shr_path, sizeof (path));
 	(void) strlcpy(container, si->shr_container, sizeof (container));
 	smb_shr_cache_delent(sharename);
@@ -408,6 +495,9 @@ smb_shr_rename(char *from_name, char *to_name)
 	bcopy(from_si, &to_si, sizeof (smb_share_t));
 	(void) strlcpy(to_si.shr_name, to_name, sizeof (to_si.shr_name));
 
+	/* If path is ZFS, rename the .zfs/shares/<share> entry. */
+	smb_shr_zfs_rename(from_si, &to_si);
+
 	if ((status = smb_shr_cache_addent(&to_si)) != NERR_Success) {
 		smb_shr_cache_unlock();
 		return (status);
@@ -425,25 +515,23 @@ smb_shr_rename(char *from_name, char *to_name)
 /*
  * Load the information for the specified share into the supplied share
  * info structure.
+ *
+ * First looks up the cache to see if the specified share exists, if there
+ * is a miss then it looks up sharemgr.
  */
 uint32_t
 smb_shr_get(char *sharename, smb_share_t *si)
 {
-	smb_share_t *cached_si;
-	uint32_t status = NERR_NetNameNotFound;
+	uint32_t status;
 
 	if (sharename == NULL || *sharename == '\0')
 		return (NERR_NetNameNotFound);
 
-	if (smb_shr_cache_lock(SMB_SHR_CACHE_RDLOCK) == NERR_Success) {
-		cached_si = smb_shr_cache_findent(sharename);
-		if (cached_si != NULL) {
-			bcopy(cached_si, si, sizeof (smb_share_t));
-			status = NERR_Success;
-		}
+	if ((status = smb_shr_lookup(sharename, si)) == NERR_Success)
+		return (status);
 
-		smb_shr_cache_unlock();
-	}
+	if ((status = smb_shr_sa_loadbyname(sharename)) == NERR_Success)
+		status = smb_shr_lookup(sharename, si);
 
 	return (status);
 }
@@ -461,6 +549,7 @@ smb_shr_modify(smb_share_t *new_si)
 	smb_share_t *si;
 	boolean_t adc_changed = B_FALSE;
 	char old_container[MAXPATHLEN];
+	uint32_t cscopt;
 	uint32_t access;
 
 	assert(new_si != NULL);
@@ -479,9 +568,7 @@ smb_shr_modify(smb_share_t *new_si)
 		return (ERROR_ACCESS_DENIED);
 	}
 
-	if (strcmp(new_si->shr_cmnt, si->shr_cmnt) != 0)
-		(void) strlcpy(si->shr_cmnt, new_si->shr_cmnt,
-		    sizeof (si->shr_cmnt));
+	(void) strlcpy(si->shr_cmnt, new_si->shr_cmnt, sizeof (si->shr_cmnt));
 
 	adc_changed = (strcmp(new_si->shr_container, si->shr_container) != 0);
 	if (adc_changed) {
@@ -492,7 +579,12 @@ smb_shr_modify(smb_share_t *new_si)
 		    sizeof (si->shr_container));
 	}
 
+	cscopt = (new_si->shr_flags & SMB_SHRF_CSC_MASK);
+	si->shr_flags &= ~SMB_SHRF_CSC_MASK;
+	si->shr_flags |= cscopt;
+
 	access = (new_si->shr_flags & SMB_SHRF_ACC_ALL);
+	si->shr_flags &= ~SMB_SHRF_ACC_ALL;
 	si->shr_flags |= access;
 
 	if (access & SMB_SHRF_ACC_NONE)
@@ -553,9 +645,11 @@ smb_shr_exists(char *sharename)
  * Precedence is none is checked first followed by ro then rw if
  * needed.  If x is wildcard (< 0) then check to see if the other
  * values are a match. If a match, that wins.
+ *
+ * ipv6 is wide open for now, see smb_chk_hostaccess
  */
 void
-smb_shr_hostaccess(smb_share_t *si, ipaddr_t ipaddr)
+smb_shr_hostaccess(smb_share_t *si, smb_inaddr_t *ipaddr)
 {
 	int acc = SMB_SHRF_ACC_OPEN;
 
@@ -563,7 +657,8 @@ smb_shr_hostaccess(smb_share_t *si, ipaddr_t ipaddr)
 	 * Check to see if there area any share level access
 	 * restrictions.
 	 */
-	if (ipaddr != 0 && (si->shr_flags & SMB_SHRF_ACC_ALL) != 0) {
+	if ((!smb_inet_iszero(ipaddr)) &&
+	    (si->shr_flags & SMB_SHRF_ACC_ALL) != 0) {
 		int none = SMB_SHRF_ACC_OPEN;
 		int rw = SMB_SHRF_ACC_OPEN;
 		int ro = SMB_SHRF_ACC_OPEN;
@@ -574,7 +669,6 @@ smb_shr_hostaccess(smb_share_t *si, ipaddr_t ipaddr)
 			rw = smb_chk_hostaccess(ipaddr, si->shr_access_rw);
 		if (si->shr_flags & SMB_SHRF_ACC_RO)
 			ro = smb_chk_hostaccess(ipaddr, si->shr_access_ro);
-
 		/* make first pass to get basic value */
 		if (none != 0)
 			acc = SMB_SHRF_ACC_NONE;
@@ -782,6 +876,30 @@ smb_shr_list(int offset, smb_shrlist_t *list)
  */
 
 /*
+ * Looks up the given share in the cache and return
+ * the info in 'si'
+ */
+static uint32_t
+smb_shr_lookup(char *sharename, smb_share_t *si)
+{
+	smb_share_t *cached_si;
+	uint32_t status = NERR_NetNameNotFound;
+
+	if (sharename == NULL || *sharename == '\0')
+		return (NERR_NetNameNotFound);
+	if (smb_shr_cache_lock(SMB_SHR_CACHE_RDLOCK) == NERR_Success) {
+		cached_si = smb_shr_cache_findent(sharename);
+		if (cached_si != NULL) {
+			bcopy(cached_si, si, sizeof (smb_share_t));
+			status = NERR_Success;
+		}
+
+		smb_shr_cache_unlock();
+	}
+	return (status);
+}
+
+/*
  * Add IPC$ to the cache upon startup.
  */
 static uint32_t
@@ -923,22 +1041,11 @@ static uint32_t
 smb_shr_cache_lock(int mode)
 {
 	(void) mutex_lock(&smb_shr_cache.sc_mtx);
-	switch (smb_shr_cache.sc_state) {
-	case SMB_SHR_CACHE_STATE_CREATED:
-		smb_shr_cache.sc_nops++;
-		break;
-
-	case SMB_SHR_CACHE_STATE_DESTROYING:
+	if (smb_shr_cache.sc_state != SMB_SHR_CACHE_STATE_CREATED) {
 		(void) mutex_unlock(&smb_shr_cache.sc_mtx);
 		return (NERR_InternalError);
-
-	case SMB_SHR_CACHE_STATE_NONE:
-	default:
-		assert(0);
-		(void) mutex_unlock(&smb_shr_cache.sc_mtx);
-		return (NERR_InternalError);
-
 	}
+	smb_shr_cache.sc_nops++;
 	(void) mutex_unlock(&smb_shr_cache.sc_mtx);
 
 	/*
@@ -1101,10 +1208,8 @@ smb_shr_sa_loadall(void *args)
 	char *gstate;
 	boolean_t gdisabled;
 
-	if ((handle = sa_init(SA_INIT_SHARE_API)) == NULL) {
-		syslog(LOG_ERR, "share: failed to get libshare API handle");
+	if ((handle = smb_shr_sa_enter()) == NULL)
 		return (NULL);
-	}
 
 	for (group = sa_get_group(handle, NULL);
 	    group != NULL; group = sa_get_next_group(group)) {
@@ -1127,7 +1232,7 @@ smb_shr_sa_loadall(void *args)
 
 	}
 
-	sa_fini(handle);
+	smb_shr_sa_exit();
 	return (NULL);
 }
 
@@ -1172,12 +1277,28 @@ smb_shr_sa_loadgrp(sa_group_t group)
 
 /*
  * Load a share definition from sharemgr and add it to the cache.
+ * If the share is already in the cache then it doesn't do anything.
+ *
+ * This function does not report duplicate shares as error since
+ * a share might have been added by smb_shr_get() while load is
+ * in progress.
  */
 static uint32_t
 smb_shr_sa_load(sa_share_t share, sa_resource_t resource)
 {
 	smb_share_t si;
+	char *sharename;
 	uint32_t status;
+	boolean_t loaded;
+
+	if ((sharename = sa_get_resource_attr(resource, "name")) == NULL)
+		return (NERR_InternalError);
+
+	loaded = smb_shr_exists(sharename);
+	sa_free_attr_string(sharename);
+
+	if (loaded)
+		return (NERR_Success);
 
 	if ((status = smb_shr_sa_get(share, resource, &si)) != NERR_Success) {
 		syslog(LOG_DEBUG, "share: failed to load %s (%d)",
@@ -1185,7 +1306,8 @@ smb_shr_sa_load(sa_share_t share, sa_resource_t resource)
 		return (status);
 	}
 
-	if ((status = smb_shr_add(&si)) != NERR_Success) {
+	status = smb_shr_add(&si);
+	if ((status != NERR_Success) && (status != NERR_DuplicateShare)) {
 		syslog(LOG_DEBUG, "share: failed to cache %s (%d)",
 		    si.shr_name, status);
 		return (status);
@@ -1222,7 +1344,6 @@ smb_shr_sa_get(sa_share_t share, sa_resource_t resource, smb_share_t *si)
 
 	(void) strlcpy(si->shr_path, path, sizeof (si->shr_path));
 	(void) strlcpy(si->shr_name, rname, sizeof (si->shr_name));
-
 	sa_free_attr_string(path);
 	sa_free_attr_string(rname);
 
@@ -1239,11 +1360,19 @@ smb_shr_sa_get(sa_share_t share, sa_resource_t resource, smb_share_t *si)
 	if (opts == NULL)
 		return (NERR_Success);
 
-	prop = (sa_property_t)sa_get_property(opts, SMB_SHROPT_AD_CONTAINER);
+	prop = (sa_property_t)sa_get_property(opts, SHOPT_AD_CONTAINER);
 	if (prop != NULL) {
 		if ((val = sa_get_property_attr(prop, "value")) != NULL) {
 			(void) strlcpy(si->shr_container, val,
 			    sizeof (si->shr_container));
+			free(val);
+		}
+	}
+
+	prop = (sa_property_t)sa_get_property(opts, SHOPT_CSC);
+	if (prop != NULL) {
+		if ((val = sa_get_property_attr(prop, "value")) != NULL) {
+			smb_shr_sa_csc_option(val, si);
 			free(val);
 		}
 	}
@@ -1280,6 +1409,86 @@ smb_shr_sa_get(sa_share_t share, sa_resource_t resource, smb_share_t *si)
 
 	sa_free_derived_optionset(opts);
 	return (NERR_Success);
+}
+
+/*
+ * Map a client-side caching (CSC) option to the appropriate share
+ * flag.  Only one option is allowed; an error will be logged if
+ * multiple options have been specified.  We don't need to do anything
+ * about multiple values here because the SRVSVC will not recognize
+ * a value containing multiple flags and will return the default value.
+ *
+ * If the option value is not recognized, it will be ignored: invalid
+ * values will typically be caught and rejected by sharemgr.
+ */
+void
+smb_shr_sa_csc_option(const char *value, smb_share_t *si)
+{
+	struct {
+		char *value;
+		uint32_t flag;
+	} cscopt[] = {
+		{ "disabled",	SMB_SHRF_CSC_DISABLED },
+		{ "manual",	SMB_SHRF_CSC_MANUAL },
+		{ "auto",	SMB_SHRF_CSC_AUTO },
+		{ "vdo",	SMB_SHRF_CSC_VDO }
+	};
+
+	int i;
+
+	for (i = 0; i < (sizeof (cscopt) / sizeof (cscopt[0])); ++i) {
+		if (strcasecmp(value, cscopt[i].value) == 0) {
+			si->shr_flags |= cscopt[i].flag;
+			break;
+		}
+	}
+
+	switch (si->shr_flags & SMB_SHRF_CSC_MASK) {
+	case 0:
+	case SMB_SHRF_CSC_DISABLED:
+	case SMB_SHRF_CSC_MANUAL:
+	case SMB_SHRF_CSC_AUTO:
+	case SMB_SHRF_CSC_VDO:
+		break;
+
+	default:
+		syslog(LOG_INFO, "csc option conflict: 0x%08x",
+		    si->shr_flags & SMB_SHRF_CSC_MASK);
+		break;
+	}
+}
+
+/*
+ * looks up sharemgr for the given share (resource) and loads
+ * the definition into cache if lookup is successful
+ */
+static uint32_t
+smb_shr_sa_loadbyname(char *sharename)
+{
+	sa_handle_t handle;
+	sa_share_t share;
+	sa_resource_t resource;
+	uint32_t status;
+
+	if ((handle = smb_shr_sa_enter()) == NULL)
+		return (NERR_InternalError);
+
+	resource = sa_find_resource(handle, sharename);
+	if (resource == NULL) {
+		smb_shr_sa_exit();
+		return (NERR_NetNameNotFound);
+	}
+
+	share = sa_get_resource_parent(resource);
+	if (share == NULL) {
+		smb_shr_sa_exit();
+		return (NERR_InternalError);
+	}
+
+	status = smb_shr_sa_load(share, resource);
+
+	smb_shr_sa_exit();
+	return (status);
 }
 
 /*
@@ -1517,5 +1726,133 @@ smb_shr_publisher_flush(list_t *lst)
 	while ((shr = list_head(lst)) != NULL) {
 		list_remove(lst, shr);
 		free(shr);
+	}
+}
+
+/*
+ * Management functions for .zfs/shares/<share> object
+ */
+
+static void
+smb_shr_get_dataset(smb_share_t *si, char *dataset, size_t len)
+{
+	char tmppath[MAXPATHLEN];
+	char *cp;
+	FILE *fp;
+	struct mnttab mnttab;
+	struct mnttab mntpref;
+
+	(void) strlcpy(tmppath, si->shr_path, MAXPATHLEN);
+	fp = fopen(MNTTAB, "r");
+	if (fp == NULL)
+		return;
+	(void) memset(&mnttab, '\0', sizeof (mnttab));
+	cp = tmppath;
+
+	while (*cp != '\0') {
+		resetmnttab(fp);
+		(void) memset(&mntpref, '\0', sizeof (mntpref));
+		mntpref.mnt_mountp = tmppath;
+		if (getmntany(fp, &mnttab, &mntpref) == 0) {
+			(void) strlcpy(dataset, mnttab.mnt_special, len);
+			break;
+		}
+		/* strip last component off if there is one */
+		cp = strrchr(cp, '/');
+		if (cp != NULL) {
+			*cp = '\0';
+			if (tmppath[0] == '\0')
+				(void) strcpy(tmppath, "/");
+		}
+		cp = tmppath;
+	}
+	(void) fclose(fp);
+}
+
+
+/*
+ * If the share/path refers to a ZFS file system, add the
+ * .zfs/shares/<share> object.
+ */
+
+static void
+smb_shr_zfs_add(smb_share_t *si)
+{
+	libzfs_handle_t *libhandle;
+	zfs_handle_t *handle = NULL;
+	int ret = 0;
+	char dataset[MAXPATHLEN];
+
+	if (sa_path_is_zfs(si->shr_path)) {
+		libhandle = libzfs_init();
+		smb_shr_get_dataset(si, dataset, MAXPATHLEN);
+		handle = zfs_open(libhandle, dataset, ZFS_TYPE_FILESYSTEM);
+		ret = zfs_smb_acl_add(libhandle, dataset,
+		    si->shr_path, si->shr_name);
+		if (ret != 0 && errno != EAGAIN && errno != EEXIST)
+			syslog(LOG_INFO,
+			    "share: failed to add ACL object: %s: %s\n",
+			    si->shr_name, strerror(errno));
+		if (handle != NULL)
+			zfs_close(handle);
+		libzfs_fini(libhandle);
+	}
+}
+
+/*
+ * If the share/path refers to a ZFS file system, remove the
+ * .zfs/shares/<share> object.
+ */
+
+static void
+smb_shr_zfs_remove(smb_share_t *si)
+{
+	libzfs_handle_t *libhandle;
+	zfs_handle_t *handle = NULL;
+	int ret = 0;
+	char dataset[MAXPATHLEN];
+
+	if (sa_path_is_zfs(si->shr_path)) {
+		libhandle = libzfs_init();
+		smb_shr_get_dataset(si, dataset, MAXPATHLEN);
+		handle = zfs_open(libhandle, dataset, ZFS_TYPE_FILESYSTEM);
+		ret = zfs_smb_acl_remove(libhandle, dataset,
+		    si->shr_path, si->shr_name);
+		if (ret != 0 && errno != EAGAIN)
+			syslog(LOG_INFO,
+			    "share: failed to remove ACL object: %s\n",
+			    si->shr_name);
+		if (handle != NULL)
+			zfs_close(handle);
+		libzfs_fini(libhandle);
+	}
+}
+
+/*
+ * If the share/path refers to a ZFS file system, rename the
+ * .zfs/shares/<share> object.
+ */
+
+static void
+smb_shr_zfs_rename(smb_share_t *from, smb_share_t *to)
+{
+	libzfs_handle_t *libhandle;
+	zfs_handle_t *handle = NULL;
+	int ret = 0;
+	char dataset[MAXPATHLEN];
+
+	if (sa_path_is_zfs(from->shr_path)) {
+		libhandle = libzfs_init();
+		smb_shr_get_dataset(from, dataset, MAXPATHLEN);
+		handle = zfs_open(libhandle, dataset, ZFS_TYPE_FILESYSTEM);
+		ret = zfs_smb_acl_rename(libhandle, dataset,
+		    from->shr_path, from->shr_name, to->shr_name);
+		if (ret != 0 && errno != EAGAIN)
+			syslog(LOG_INFO,
+			    "share: failed to rename ACL object: %s\n",
+			    from->shr_name);
+		if (handle != NULL)
+			zfs_close(handle);
+		libzfs_fini(libhandle);
 	}
 }

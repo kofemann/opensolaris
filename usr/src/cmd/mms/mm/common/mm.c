@@ -18,7 +18,7 @@
  *
  * CDDL HEADER END
  *
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -104,6 +104,47 @@ mm_signal_handler(int signo)
 		mms_trace(MMS_DEVP, "SIGPIPE received");
 		break;
 	}
+}
+
+/*
+ * mm_is_exiting
+ *
+ * Parameters:
+ *	None
+ *
+ * This routine determines if mm is exiting by
+ * detecting if our smf service is disabled.
+ *
+ * Return Values:
+ *	Non-zero if mm should exit.
+ *
+ */
+int
+mm_is_exiting(void)
+{
+	int		signum;
+	sigset_t	mask;
+	struct timespec	ts;
+
+	/* any thread check for service disabled */
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGINT);
+	sigaddset(&mask, SIGHUP);
+	sigaddset(&mask, SIGTERM);
+	sigaddset(&mask, SIGPIPE);
+
+	/* set timeout to zero, don't wait for signal */
+	(void) memset(&ts, 0, sizeof (struct timespec));
+
+	/* query for pending signal */
+	if ((signum = sigtimedwait(&mask, NULL, &ts)) != -1) {
+		/* let signal hander set state */
+		mms_trace(MMS_DEVP, "thread %d signal check, signum %d",
+		    pthread_self(), signum);
+		mm_signal_handler(signum);
+	}
+
+	return (mm_exiting);
 }
 
 /*
@@ -1700,7 +1741,7 @@ mm_remove_commands(mm_data_t *mm_data, mm_db_t *db_main, mm_wka_t *mm_wka) {
 			/* and reset manager states */
 			cur_cmd->cmd_mount_info.
 				cmi_reset_states = 1;
-			(void) mm_rm_mount(cur_cmd);
+			(void) mm_rm_mount(cur_cmd, db_main);
 			cur_cmd->cmd_mount_info.
 				cmi_need_clear = 1;
 			/* Could optimize this clear */
@@ -1719,7 +1760,7 @@ mm_remove_commands(mm_data_t *mm_data, mm_db_t *db_main, mm_wka_t *mm_wka) {
 			mms_trace(MMS_DEVP,
 			    "client has an outstanding "
 			    "unmount command");
-			(void) mm_rm_unmount(cur_cmd);
+			(void) mm_rm_unmount(cur_cmd, db_main);
 			cur_cmd->cmd_mount_info.
 				cmi_need_clear = 1;
 			cur_cmd->cmd_mount_info.
@@ -3373,6 +3414,8 @@ mm_cmd_dispatch(mm_command_t *cmd)
  *
  * Parameters:
  *	- cmd : ptr to mm_command_t
+ *	- db : ptr to valid db connection, mm_db_t
+ *
  *
  * Do additional steps to clean up when the command
  * being removed is an unmount command
@@ -3386,8 +3429,7 @@ mm_cmd_dispatch(mm_command_t *cmd)
  *
  */
 int
-mm_rm_unmount(mm_command_t *cmd) {
-	mm_db_t		*db = &cmd->cmd_mm_data->mm_db_main;
+mm_rm_unmount(mm_command_t *cmd, mm_db_t *db) {
 	PGresult	 *drive_results;
 	mm_command_t	*cur_cmd;
 
@@ -3455,6 +3497,7 @@ mm_rm_unmount(mm_command_t *cmd) {
  *
  * Parameters:
  *	- cmd : ptr to mm_command_t
+ *	- db : ptr to valid db connection, mm_db_t
  *
  * Do additional steps to clean up when the command
  * being removed is a mount command
@@ -3468,13 +3511,12 @@ mm_rm_unmount(mm_command_t *cmd) {
  *
  */
 int
-mm_rm_mount(mm_command_t *cmd)
+mm_rm_mount(mm_command_t *cmd, mm_db_t *db)
 {
 	/* This function is called when a client has disconnected */
 	/* with an outstanding mount command */
 	/* need to deallocate the resources and reset device manager states */
 
-	mm_db_t		*db = &cmd->cmd_mm_data->mm_db_main;
 	PGresult	 *drive_results;
 
 	if (cmd->cmd_root == NULL) {

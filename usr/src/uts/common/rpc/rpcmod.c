@@ -35,6 +35,7 @@
 #include <sys/types.h>
 #include <sys/stream.h>
 #include <sys/stropts.h>
+#include <sys/strsubr.h>
 #include <sys/tihdr.h>
 #include <sys/timod.h>
 #include <sys/tiuser.h>
@@ -160,6 +161,10 @@ _init(void)
 	 */
 	rw_init(&rdma_lock, NULL, RW_DEFAULT, NULL);
 	mutex_init(&rdma_modload_lock, NULL, MUTEX_DEFAULT, NULL);
+
+	cv_init(&rdma_wait.svc_cv, NULL, CV_DEFAULT, NULL);
+	mutex_init(&rdma_wait.svc_lock, NULL, MUTEX_DEFAULT, NULL);
+
 	mt_kstat_init();
 
 	/*
@@ -480,8 +485,8 @@ rmm_open(queue_t *q, dev_t *devp, int flag, int sflag, cred_t *crp)
 	/*
 	 * Allocate the required messages upfront.
 	 */
-	if ((bp = allocb(sizeof (struct T_info_req) +
-	    sizeof (struct T_info_ack), BPRI_LO)) == (mblk_t *)NULL) {
+	if ((bp = allocb_cred(sizeof (struct T_info_req) +
+	    sizeof (struct T_info_ack), crp, curproc->p_pid)) == NULL) {
 		return (ENOBUFS);
 	}
 

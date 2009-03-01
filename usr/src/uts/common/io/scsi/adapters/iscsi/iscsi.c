@@ -20,7 +20,7 @@
  */
 /*
  * Copyright 2000 by Cisco Systems, Inc.  All rights reserved.
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  * iSCSI Software Initiator
@@ -31,7 +31,7 @@
  */
 #include "iscsi.h"		/* main header */
 #include <sys/scsi/adapters/iscsi_if.h>		/* ioctl interfaces */
-#include <sys/scsi/adapters/iscsi_protocol.h>
+#include <sys/iscsi_protocol.h>
 /* protocol structs and defines */
 
 #include "iscsi_targetparam.h"
@@ -185,6 +185,7 @@ static struct dev_ops iscsi_dev_ops = {
 	&iscsi_cb_ops,		/* driver operations */
 	NULL,			/* bus ops */
 	NULL,			/* power management */
+	ddi_quiesce_not_needed,	/* quiesce */
 };
 
 static struct modldrv modldrv = {
@@ -950,7 +951,8 @@ iscsi_tran_start(struct scsi_address *ap, struct scsi_pkt *pkt)
 		mutex_enter(&icmdp->cmd_mutex);
 		while ((icmdp->cmd_state != ISCSI_CMD_STATE_COMPLETED) ||
 		    (icmdp->cmd_un.scsi.r2t_icmdp != NULL) ||
-		    (icmdp->cmd_un.scsi.abort_icmdp != NULL)) {
+		    (icmdp->cmd_un.scsi.abort_icmdp != NULL) ||
+		    (icmdp->cmd_un.scsi.r2t_more == B_TRUE)) {
 			cv_wait(&icmdp->cmd_completion, &icmdp->cmd_mutex);
 		}
 		icmdp->cmd_state = ISCSI_CMD_STATE_FREE;
@@ -1369,6 +1371,7 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 	int			list_space	= 0;
 	int			lun_sz		= 0;
 	int			did;
+	int			retry;
 	iscsi_hba_t		*ihp		= NULL;
 	iscsi_sess_t		*isp		= NULL;
 	iscsi_conn_t		*icp		= NULL;
@@ -2279,6 +2282,11 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 				    iscsi_targetparam_get_name(chap->c_oid);
 			}
 
+			if (name == NULL) {
+				rw_exit(&ihp->hba_sess_list_rwlock);
+				rtn = EFAULT;
+				break;
+			}
 			/*
 			 * Initialize the target-side chap name to the
 			 * session name if no chap settings have been
@@ -2995,25 +3003,48 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 	/*
 	 * ISCSI_DISCOVERY_CLEAR -
 	 */
+#define	ISCSI_DISCOVERY_DELAY 2	/* seconds */
 	case ISCSI_DISCOVERY_CLEAR:
 		if (ddi_copyin((caddr_t)arg, &method, sizeof (method), mode)) {
 			rtn = EFAULT;
 			break;
 		}
 
-		/* Attempt to logout of all associated targets first */
-		if (iscsid_disable_discovery(ihp, method) == B_FALSE) {
-			rtn = EBUSY;
+		/* If discovery in progress, try few times before return busy */
+		retry = 0;
+		mutex_enter(&ihp->hba_discovery_events_mutex);
+		while (ihp->hba_discovery_in_progress == B_TRUE) {
+			if (++retry == 5) {
+				rtn = EBUSY;
+				break;
+			}
+			mutex_exit(&ihp->hba_discovery_events_mutex);
+			delay(SEC_TO_TICK(ISCSI_DISCOVERY_DELAY));
+			mutex_enter(&ihp->hba_discovery_events_mutex);
+		}
+#undef	ISCSI_DISCOVERY_DELAY
+
+		/*
+		 * Clear discovery first, so that any bus config or
+		 * discovery requests will ignore this discovery method
+		 */
+		if (rtn == 0 && persistent_disc_meth_clear(method) == B_FALSE) {
+			rtn = EIO;
+		}
+		mutex_exit(&ihp->hba_discovery_events_mutex);
+
+		if (rtn != 0) {
 			break;
 		}
 
-		/*
-		 * Successfully logged out of targets, Update
-		 * Persistent store.
-		 */
-		if (persistent_disc_meth_clear(method) == B_FALSE) {
-			rtn = EIO;
-			break;
+		/* Attempt to logout from all associated targets */
+		if (iscsid_disable_discovery(ihp, method) == B_FALSE) {
+			/* Failure!, reset the discovery */
+			if (persistent_disc_meth_set(method) == B_FALSE) {
+				cmn_err(CE_WARN, "Failed to reset discovery "
+				    "method after discovery disable failure.");
+			}
+			rtn = EBUSY;
 		}
 		break;
 
@@ -3091,8 +3122,10 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 			rw_enter(&isp->sess_lun_list_rwlock, RW_READER);
 			for (ilp = isp->sess_lun_list; ilp;
 			    ilp = ilp->lun_next) {
-				if (ilp->lun_state ==
-				    ISCSI_LUN_STATE_ONLINE) {
+				if ((ilp->lun_state &
+				    ISCSI_LUN_STATE_ONLINE) &&
+				    !(ilp->lun_state &
+				    ISCSI_LUN_STATE_INVALID)) {
 					if (llp->ll_out_cnt <
 					    llp->ll_in_cnt) {
 						iscsi_if_lun_t *lp;
@@ -3163,7 +3196,9 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 				}
 
 				if (lun_dip != NULL &&
-				    i_ddi_devi_attached(lun_dip)) {
+				    ((i_ddi_devi_attached(lun_dip)) ||
+				    (ddi_get_devstate(lun_dip) ==
+				    DDI_DEVSTATE_UP))) {
 					(void) ddi_pathname(lun_dip,
 					    lun->lp_pathname);
 				} else {
@@ -3244,6 +3279,9 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 					    sizeof (*cp),
 					    (caddr_t)arg,
 					    mode);
+				} else {
+					kmem_free(cp, sizeof (*cp));
+					cp = NULL;
 				}
 			}
 			break;
@@ -3453,7 +3491,10 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 			}
 		}
 
-		if (persistent_auth_set((char *)name, auth) == B_FALSE) {
+		if (name == NULL) {
+			rtn = EFAULT;
+		} else if (persistent_auth_set((char *)name, auth)
+		    == B_FALSE) {
 			rtn = EIO;
 		}
 
@@ -3831,6 +3872,9 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 		/* If iSNS discovery mode is not set, return with zero entry */
 		method = persistent_disc_meth_get();
 		if ((method & iSCSIDiscoveryMethodISNS) == 0) {
+			kmem_free(server_pg_list_hdr,
+			    sizeof (*server_pg_list_hdr));
+			server_pg_list_hdr = NULL;
 			rtn = EACCES;
 			break;
 		}
@@ -3842,6 +3886,7 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 			initiator_node_name = NULL;
 			kmem_free(server_pg_list_hdr,
 			    sizeof (*server_pg_list_hdr));
+			server_pg_list_hdr = NULL;
 			rtn = EIO;
 			break;
 		}
@@ -3850,6 +3895,7 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 			initiator_node_name = NULL;
 			kmem_free(server_pg_list_hdr,
 			    sizeof (*server_pg_list_hdr));
+			server_pg_list_hdr = NULL;
 			rtn = EIO;
 			break;
 		}
@@ -3941,9 +3987,16 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 		}
 		DTRACE_PROBE1(iscsi_ioctl_iscsi_isns_server_get_pg_sz,
 		    int, pg_list_sz);
+		kmem_free(initiator_node_name, ISCSI_MAX_NAME_LEN);
+		initiator_node_name = NULL;
+		kmem_free(initiator_node_alias, ISCSI_MAX_NAME_LEN);
+		initiator_node_alias = NULL;
 		kmem_free(pg_list, pg_list_sz);
+		pg_list = NULL;
 		kmem_free(server_pg_list, server_pg_list_sz);
+		server_pg_list = NULL;
 		kmem_free(server_pg_list_hdr, sizeof (*server_pg_list_hdr));
+		server_pg_list_hdr = NULL;
 		break;
 
 	/*
@@ -3964,6 +4017,7 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 		if (ics->ics_ver != ISCSI_INTERFACE_VERSION) {
 			rtn = EINVAL;
 			kmem_free(ics, size);
+			ics = NULL;
 			break;
 		}
 
@@ -3990,6 +4044,9 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 				/* copyout data for gets */
 				rtn = iscsi_ioctl_copyout(ics, size,
 				    (caddr_t)arg, mode);
+			} else {
+				kmem_free(ics, size);
+				ics = NULL;
 			}
 		} else {
 			/* set */
@@ -4003,11 +4060,15 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 					 * with mpxio enabled
 					 */
 					if (!iscsi_reconfig_boot_sess(ihp)) {
+						kmem_free(ics, size);
+						ics = NULL;
 						rtn = EINVAL;
 						break;
 					}
 				}
 			}
+			kmem_free(ics, size);
+			ics = NULL;
 		}
 		break;
 

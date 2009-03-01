@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -33,8 +33,8 @@ extern "C" {
 #include <hxge_rdc_hw.h>
 #include <hpi_rxdma.h>
 
-#define	RXDMA_CK_DIV_DEFAULT		8 	/* 27 nsec */
-#define	RXDMA_RCR_PTHRES_DEFAULT	0x20
+#define	RXDMA_CK_DIV_DEFAULT		25000	/* 84 usec */
+#define	RXDMA_RCR_PTHRES_DEFAULT	0x1
 #define	RXDMA_RCR_TO_DEFAULT		0x1
 #define	RXDMA_HDR_SIZE_DEFAULT		2
 #define	RXDMA_HDR_SIZE_FULL		6	/* entire header of 6B */
@@ -159,8 +159,6 @@ extern "C" {
 				RDC_STAT_RBR_PRE_EMPTY | 	\
 				RDC_STAT_RBR_PRE_PAR |		\
 				RDC_STAT_RCR_SHA_PAR |		\
-				RDC_STAT_RCR_TO | 		\
-				RDC_STAT_RCR_THRES |		\
 				RDC_STAT_RBR_CPL |		\
 				RDC_STAT_PEU_ERR)
 
@@ -314,6 +312,11 @@ typedef struct _rx_msg_t {
 typedef struct _rx_rcr_ring_t {
 	hxge_os_dma_common_t	rcr_desc;
 	struct _hxge_t		*hxgep;
+	mac_ring_handle_t   	rcr_mac_handle;
+	uint64_t		rcr_gen_num;
+	boolean_t		poll_flag;
+	p_hxge_ldv_t		ldvp;
+	p_hxge_ldg_t		ldgp;
 
 	p_hxge_rx_ring_stats_t	rdc_stats;	/* pointer to real kstats */
 
@@ -343,7 +346,6 @@ typedef struct _rx_rcr_ring_t {
 	struct _rx_rbr_ring_t	*rx_rbr_p;
 	uint32_t		intr_timeout;
 	uint32_t		intr_threshold;
-	uint64_t		max_receive_pkts;
 	uint32_t		rcvd_pkt_bytes; /* Received bytes of a packet */
 } rx_rcr_ring_t, *p_rx_rcr_ring_t;
 
@@ -387,7 +389,7 @@ typedef struct _rx_rbr_ring_t {
 	hxge_os_mutex_t		lock;
 	hxge_os_mutex_t		post_lock;
 	boolean_t		rbr_is_empty;
-	uint32_t		accumulate;
+	uint32_t		rbr_used;
 	uint16_t		index;
 	struct _hxge_t		*hxgep;
 	uint16_t		rdc;
@@ -481,6 +483,10 @@ hxge_status_t hxge_enable_rxdma_channel(p_hxge_t hxgep,
 hxge_status_t hxge_rxdma_hw_mode(p_hxge_t hxgep, boolean_t enable);
 int hxge_rxdma_get_ring_index(p_hxge_t hxgep, uint16_t channel);
 hxge_status_t hxge_rxdma_handle_sys_errors(p_hxge_t hxgep);
+
+extern int hxge_enable_poll(void *arg);
+extern int hxge_disable_poll(void *arg);
+extern mblk_t *hxge_rx_poll(void *arg, int bytes_to_read);
 
 
 #ifdef	__cplusplus

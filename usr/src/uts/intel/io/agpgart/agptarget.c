@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -374,6 +374,8 @@ static gms_mode_t gms_modes[] = {
 	{INTEL_BR_Q45, I8XX_CONF_GC, I8XX_GC_MODE_MASK,
 		GMS_SIZE(gms_G4X), gms_G4X},
 	{INTEL_BR_G45, I8XX_CONF_GC, I8XX_GC_MODE_MASK,
+		GMS_SIZE(gms_G4X), gms_G4X},
+	{INTEL_BR_G41, I8XX_CONF_GC, I8XX_GC_MODE_MASK,
 		GMS_SIZE(gms_G4X), gms_G4X}
 };
 static int
@@ -870,7 +872,7 @@ static struct dev_ops agp_target_ops = {
 	&agp_target_cb_ops,	/* devo_cb_ops */
 	0,			/* devo_bus_ops */
 	0,			/* devo_power */
-	ddi_quiesce_not_supported,	/* devo_quiesce */
+	ddi_quiesce_not_needed,	/* devo_quiesce */
 };
 
 static  struct modldrv modldrv = {

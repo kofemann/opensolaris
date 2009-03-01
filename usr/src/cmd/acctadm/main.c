@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -41,6 +41,8 @@
 #include "aconf.h"
 #include "res.h"
 
+#define	ACCTADM_NET_LOG_INTERVAL	20
+
 static const char USAGE[] = "\
 Usage:\n\
     acctadm [ {process | task | flow | net} ]\n\
@@ -51,6 +53,8 @@ Usage:\n\
     acctadm -e resources -d resources {process | task | flow | net}\n";
 
 static const char OPTS[] = "rsxf:e:d:ED";
+
+dladm_handle_t dld_handle = NULL;
 
 static void
 usage()
@@ -124,6 +128,7 @@ main(int argc, char *argv[])
 	int optcnt = 0;
 	int state;
 	const char *fmri;	/* FMRI for this instance */
+	int err = 0;
 
 	setup_privs();
 
@@ -256,16 +261,22 @@ main(int argc, char *argv[])
 		return (E_SUCCESS);
 	}
 
+	/* Open the libdladm handle */
+	if (dladm_open(&dld_handle) != DLADM_STATUS_OK)
+		die(gettext("failed to open dladm handle\n"));
+
 	/*
 	 * smf(5) start method.  The FMRI to operate on is retrieved from the
 	 * SMF_FMRI environment variable that the restarter provides.
 	 */
 	if (sflg) {
-		if ((fmri = getenv("SMF_FMRI")) != NULL)
-			return (aconf_setup(fmri));
+		if ((fmri = getenv("SMF_FMRI")) != NULL) {
+			int ret = aconf_setup(fmri);
+			dladm_close(dld_handle);
+			return (ret);
+		}
 
-		warn(gettext("-s option should only be invoked by smf(5)\n"));
-		return (E_ERROR);
+		die(gettext("-s option should only be invoked by smf(5)\n"));
 	}
 
 	assert(type == AC_PROC || type == AC_TASK || type == AC_FLOW ||
@@ -301,9 +312,14 @@ main(int argc, char *argv[])
 		if (type & AC_NET) {
 			(void) priv_set(PRIV_ON, PRIV_EFFECTIVE,
 			    PRIV_SYS_DL_CONFIG, NULL);
-			(void) dladm_stop_usagelog(DLADM_LOGTYPE_FLOW);
+			err = dladm_stop_usagelog(dld_handle,
+			    DLADM_LOGTYPE_FLOW);
 			(void) priv_set(PRIV_OFF, PRIV_EFFECTIVE,
 			    PRIV_SYS_DL_CONFIG, NULL);
+			if (err != DLADM_STATUS_OK) {
+				die(gettext("failed to stop logging network "
+				    "information, error %d\n"), errno);
+			}
 		}
 		state = AC_OFF;
 
@@ -347,17 +363,44 @@ main(int argc, char *argv[])
 			if (type & AC_NET) {
 				(void) priv_set(PRIV_ON, PRIV_EFFECTIVE,
 				    PRIV_SYS_DL_CONFIG, NULL);
-				(void) dladm_stop_usagelog(strncmp(disabled,
-				    "basic", strlen("basic")) == 0 ?
+				err = dladm_stop_usagelog(dld_handle,
+				    strcmp(disabled, "basic") == 0 ?
 				    DLADM_LOGTYPE_LINK : DLADM_LOGTYPE_FLOW);
 				(void) priv_set(PRIV_OFF, PRIV_EFFECTIVE,
 				    PRIV_SYS_DL_CONFIG, NULL);
+				if (err != DLADM_STATUS_OK) {
+					die(gettext("failed to stop logging "
+					    "network information, error %d\n"),
+					    errno);
+				}
 			}
 			str2buf(buf, disabled, AC_OFF, type);
 		}
-		if (enabled)
+		if (enabled) {
+			/*
+			 * Lets us get network logging started.
+			 */
+			if (type & AC_NET) {
+				/*
+				 * Default logging interval for AC_NET is
+				 * ACCTADM_NET_LOG_INTERVAL.
+				 */
+				(void) priv_set(PRIV_ON, PRIV_EFFECTIVE,
+				    PRIV_SYS_DL_CONFIG, NULL);
+				err = dladm_start_usagelog(dld_handle,
+				    strcmp(enabled, "basic") == 0 ?
+				    DLADM_LOGTYPE_LINK : DLADM_LOGTYPE_FLOW,
+				    ACCTADM_NET_LOG_INTERVAL);
+				(void) priv_set(PRIV_OFF, PRIV_EFFECTIVE,
+				    PRIV_SYS_DL_CONFIG, NULL);
+				if (err != DLADM_STATUS_OK) {
+					die(gettext("failed to start logging "
+					    "network information, error %d\n"),
+					    errno);
+				}
+			}
 			str2buf(buf, enabled, AC_ON, type);
-
+		}
 		(void) priv_set(PRIV_ON, PRIV_EFFECTIVE, PRIV_SYS_ACCT, NULL);
 		if (acctctl(type | AC_RES_SET, buf, AC_BUFSIZE) == -1) {
 			free(buf);
@@ -374,24 +417,6 @@ main(int argc, char *argv[])
 		if (aconf_set_string(AC_PROP_UNTRACKED, untracked) == -1)
 			die(gettext("cannot update %s property\n"),
 			    AC_PROP_UNTRACKED);
-		/*
-		 * We will enable net logging after turning it on so that
-		 * it can immediately start writing log.
-		 */
-		if (type & AC_NET && enabled != NULL) {
-			/*
-			 * Default logging interval for AC_NET is 20.
-			 * XXX need to find the right place to
-			 * configure it.
-			 */
-			(void) priv_set(PRIV_ON, PRIV_EFFECTIVE,
-			    PRIV_SYS_DL_CONFIG, NULL);
-			(void) dladm_start_usagelog(strncmp(enabled, "basic",
-			    strlen("basic")) == 0 ? DLADM_LOGTYPE_LINK :
-			    DLADM_LOGTYPE_FLOW, 20);
-			(void) priv_set(PRIV_OFF, PRIV_EFFECTIVE,
-			    PRIV_SYS_DL_CONFIG, NULL);
-		}
 		free(tracked);
 		free(untracked);
 		free(buf);
@@ -403,8 +428,10 @@ main(int argc, char *argv[])
 		 * Open new accounting file
 		 */
 		(void) priv_set(PRIV_ON, PRIV_EFFECTIVE, PRIV_SYS_ACCT, NULL);
-		if (open_exacct_file(file, type) == -1)
+		if (open_exacct_file(file, type) == -1) {
+			dladm_close(dld_handle);
 			exit(E_ERROR);
+		}
 		if (aconf_set_string(AC_PROP_FILE, file) == -1)
 			die(gettext("cannot update %s property\n"),
 			    AC_PROP_FILE);
@@ -433,9 +460,14 @@ main(int argc, char *argv[])
 		if (type & AC_NET) {
 			(void) priv_set(PRIV_ON, PRIV_EFFECTIVE,
 			    PRIV_SYS_DL_CONFIG, NULL);
-			(void) dladm_stop_usagelog(DLADM_LOGTYPE_FLOW);
+			err = dladm_stop_usagelog(dld_handle,
+			    DLADM_LOGTYPE_FLOW);
 			(void) priv_set(PRIV_OFF, PRIV_EFFECTIVE,
 			    PRIV_SYS_DL_CONFIG, NULL);
+			if (err != DLADM_STATUS_OK) {
+				die(gettext("failed to stop logging "
+				    "network information, error %d\n"), errno);
+			}
 		}
 		state = AC_OFF;
 
@@ -455,6 +487,26 @@ main(int argc, char *argv[])
 		/*
 		 * Enable accounting
 		 */
+
+		/*
+		 * Let's get network logging started.
+		 */
+		if (type & AC_NET) {
+			/*
+			 * Default logging interval for AC_NET is
+			 * ACCTADM_NET_LOG_INTERVAL.
+			 */
+			(void) priv_set(PRIV_ON, PRIV_EFFECTIVE,
+			    PRIV_SYS_DL_CONFIG, NULL);
+			err = dladm_start_usagelog(dld_handle,
+			    DLADM_LOGTYPE_FLOW, ACCTADM_NET_LOG_INTERVAL);
+			(void) priv_set(PRIV_OFF, PRIV_EFFECTIVE,
+			    PRIV_SYS_DL_CONFIG, NULL);
+			if (err != DLADM_STATUS_OK) {
+				die(gettext("failed to start logging "
+				    "network information, error %d\n"), errno);
+			}
+		}
 		state = AC_ON;
 
 		(void) priv_set(PRIV_ON, PRIV_EFFECTIVE, PRIV_SYS_ACCT, NULL);
@@ -467,17 +519,6 @@ main(int argc, char *argv[])
 			die(gettext("cannot update %s property\n"),
 			    AC_PROP_STATE);
 		modified++;
-		if (type & AC_NET) {
-			/*
-			 * Default logging interval for AC_NET is 20,
-			 * XXX need to find the right place to configure it.
-			 */
-			(void) priv_set(PRIV_ON, PRIV_EFFECTIVE,
-			    PRIV_SYS_DL_CONFIG, NULL);
-			(void) dladm_start_usagelog(DLADM_LOGTYPE_FLOW, 20);
-			(void) priv_set(PRIV_OFF, PRIV_EFFECTIVE,
-			    PRIV_SYS_DL_CONFIG, NULL);
-		}
 	}
 	(void) priv_set(PRIV_OFF, PRIV_PERMITTED, PRIV_SYS_ACCT, NULL);
 
@@ -513,5 +554,6 @@ main(int argc, char *argv[])
 		free(smf_state);
 	}
 	aconf_scf_fini();
+	dladm_close(dld_handle);
 	return (E_SUCCESS);
 }

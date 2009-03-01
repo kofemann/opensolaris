@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -62,7 +62,8 @@ nssad_cfg_discover_props(const char *domain, ad_disc_t ad_ctx,
 		return (-1);
 	if (props->domain_controller == NULL)
 		props->domain_controller =
-		    ad_disc_get_DomainController(ad_ctx, AD_DISC_PREFER_SITE);
+		    ad_disc_get_DomainController(ad_ctx, AD_DISC_PREFER_SITE,
+		    NULL);
 	return (0);
 }
 
@@ -157,7 +158,6 @@ nssad_cfg_create(const char *domain)
 		free(cp);
 		return (NULL);
 	}
-	adutils_set_log(-1, TRUE, FALSE);
 	if ((cp->ad_ctx = ad_disc_init()) == NULL)
 		goto errout;
 	if ((cp->props.domain_name = strdup(domain)) == NULL)

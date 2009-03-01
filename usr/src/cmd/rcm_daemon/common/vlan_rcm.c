@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -98,6 +98,8 @@ static link_cache_t	cache_tail;
 static mutex_t		cache_lock;
 static int		events_registered = 0;
 
+static dladm_handle_t	dld_handle = NULL;
+
 /*
  * RCM module interface prototypes
  */
@@ -161,6 +163,9 @@ static struct rcm_mod_ops vlan_ops =
 struct rcm_mod_ops *
 rcm_mod_init(void)
 {
+	dladm_status_t status;
+	char errmsg[DLADM_STRSIZE];
+
 	rcm_log_message(RCM_TRACE1, "VLAN: mod_init\n");
 
 	cache_head.vc_next = &cache_tail;
@@ -168,6 +173,13 @@ rcm_mod_init(void)
 	cache_tail.vc_prev = &cache_head;
 	cache_tail.vc_next = NULL;
 	(void) mutex_init(&cache_lock, 0, NULL);
+
+	if ((status = dladm_open(&dld_handle)) != DLADM_STATUS_OK) {
+		rcm_log_message(RCM_WARNING,
+		    "VLAN: mod_init failed: cannot open datalink handle: %s\n",
+		    dladm_status2str(status, errmsg));
+		return (NULL);
+	}
 
 	/* Return the ops vectors */
 	return (&vlan_ops);
@@ -200,6 +212,8 @@ rcm_mod_fini(void)
 	 */
 	cache_free();
 	(void) mutex_destroy(&cache_lock);
+
+	dladm_close(dld_handle);
 	return (RCM_SUCCESS);
 }
 
@@ -396,7 +410,7 @@ vlan_online_vlan(link_cache_t *node)
 		if (!(vlan->dv_flags & VLAN_OFFLINED))
 			continue;
 
-		if ((status = dladm_vlan_up(vlan->dv_vlanid)) !=
+		if ((status = dladm_vlan_up(dld_handle, vlan->dv_vlanid)) !=
 		    DLADM_STATUS_OK) {
 			/*
 			 * Print a warning message and continue to online
@@ -425,7 +439,7 @@ vlan_offline_vlan(link_cache_t *node, uint32_t flags, cache_node_state_t state)
 	 * Try to delete all explicit created VLAN
 	 */
 	for (vlan = node->vc_vlan; vlan != NULL; vlan = vlan->dv_next) {
-		if ((status = dladm_vlan_delete(vlan->dv_vlanid,
+		if ((status = dladm_vlan_delete(dld_handle, vlan->dv_vlanid,
 		    DLADM_OPT_ACTIVE)) != DLADM_STATUS_OK) {
 			rcm_log_message(RCM_WARNING,
 			    _("VLAN: VLAN offline failed (%u): %s\n"),
@@ -669,8 +683,8 @@ vlan_usage(link_cache_t *node)
 	rcm_log_message(RCM_TRACE2, "VLAN: usage(%s)\n", node->vc_resource);
 
 	assert(MUTEX_HELD(&cache_lock));
-	if ((status = dladm_datalink_id2info(node->vc_linkid, NULL, NULL, NULL,
-	    name, sizeof (name))) != DLADM_STATUS_OK) {
+	if ((status = dladm_datalink_id2info(dld_handle, node->vc_linkid, NULL,
+	    NULL, NULL, name, sizeof (name))) != DLADM_STATUS_OK) {
 		rcm_log_message(RCM_ERROR,
 		    _("VLAN: usage(%s) get link name failure(%s)\n"),
 		    node->vc_resource, dladm_status2str(status, errmsg));
@@ -710,8 +724,9 @@ vlan_usage(link_cache_t *node)
 	for (vlan = node->vc_vlan; vlan != NULL; vlan = vlan->dv_next) {
 		rcm_log_message(RCM_DEBUG, "VLAN:= %u\n", vlan->dv_vlanid);
 
-		if ((status = dladm_datalink_id2info(vlan->dv_vlanid, NULL,
-		    NULL, NULL, name, sizeof (name))) != DLADM_STATUS_OK) {
+		if ((status = dladm_datalink_id2info(dld_handle,
+		    vlan->dv_vlanid, NULL, NULL, NULL, name,
+		    sizeof (name))) != DLADM_STATUS_OK) {
 			rcm_log_message(RCM_ERROR,
 			    _("VLAN: usage(%s) get vlan %u name failure(%s)\n"),
 			    node->vc_resource, vlan->dv_vlanid,
@@ -827,7 +842,7 @@ typedef struct vlan_update_arg_s {
  * vlan_update() - Update physical interface properties
  */
 static int
-vlan_update(datalink_id_t vlanid, void *arg)
+vlan_update(dladm_handle_t handle, datalink_id_t vlanid, void *arg)
 {
 	vlan_update_arg_t *vlan_update_argp = arg;
 	rcm_handle_t *hd = vlan_update_argp->hd;
@@ -843,7 +858,7 @@ vlan_update(datalink_id_t vlanid, void *arg)
 	rcm_log_message(RCM_TRACE2, "VLAN: vlan_update(%u)\n", vlanid);
 
 	assert(MUTEX_HELD(&cache_lock));
-	status = dladm_vlan_info(vlanid, &vlan_attr, DLADM_OPT_ACTIVE);
+	status = dladm_vlan_info(handle, vlanid, &vlan_attr, DLADM_OPT_ACTIVE);
 	if (status != DLADM_STATUS_OK) {
 		rcm_log_message(RCM_TRACE1,
 		    "VLAN: vlan_update() cannot get vlan information for "
@@ -935,8 +950,8 @@ vlan_update_all(rcm_handle_t *hd)
 
 	assert(MUTEX_HELD(&cache_lock));
 	arg.hd = hd;
-	(void) dladm_walk_datalink_id(vlan_update, &arg, DATALINK_CLASS_VLAN,
-	    DATALINK_ANY_MEDIATYPE, DLADM_OPT_ACTIVE);
+	(void) dladm_walk_datalink_id(vlan_update, dld_handle, &arg,
+	    DATALINK_CLASS_VLAN, DATALINK_ANY_MEDIATYPE, DLADM_OPT_ACTIVE);
 	return (arg.retval);
 }
 
@@ -1061,8 +1076,8 @@ vlan_log_err(datalink_id_t linkid, char **errorp, char *errmsg)
 		    RCM_LINK_PREFIX, linkid);
 
 		rcm_log_message(RCM_ERROR, _("VLAN: %s(%s)\n"), errmsg, rsrc);
-		if ((status = dladm_datalink_id2info(linkid, NULL, NULL,
-		    NULL, link, sizeof (link))) != DLADM_STATUS_OK) {
+		if ((status = dladm_datalink_id2info(dld_handle, linkid, NULL,
+		    NULL, NULL, link, sizeof (link))) != DLADM_STATUS_OK) {
 			rcm_log_message(RCM_WARNING,
 			    _("VLAN: cannot get link name for (%s) %s\n"),
 			    rsrc, dladm_status2str(status, errstr));
@@ -1247,14 +1262,14 @@ typedef struct vlan_up_arg_s {
 } vlan_up_arg_t;
 
 static int
-vlan_up(datalink_id_t vlanid, void *arg)
+vlan_up(dladm_handle_t handle, datalink_id_t vlanid, void *arg)
 {
 	vlan_up_arg_t *vlan_up_argp = arg;
 	dladm_status_t status;
 	dladm_vlan_attr_t vlan_attr;
 	char errmsg[DLADM_STRSIZE];
 
-	status = dladm_vlan_info(vlanid, &vlan_attr, DLADM_OPT_PERSIST);
+	status = dladm_vlan_info(handle, vlanid, &vlan_attr, DLADM_OPT_PERSIST);
 	if (status != DLADM_STATUS_OK) {
 		rcm_log_message(RCM_TRACE1,
 		    "VLAN: vlan_up(): cannot get information for VLAN %u "
@@ -1266,7 +1281,7 @@ vlan_up(datalink_id_t vlanid, void *arg)
 		return (DLADM_WALK_CONTINUE);
 
 	rcm_log_message(RCM_TRACE3, "VLAN: vlan_up(%u)\n", vlanid);
-	if ((status = dladm_vlan_up(vlanid)) == DLADM_STATUS_OK)
+	if ((status = dladm_vlan_up(handle, vlanid)) == DLADM_STATUS_OK)
 		return (DLADM_WALK_CONTINUE);
 
 	/*
@@ -1307,8 +1322,8 @@ vlan_configure(rcm_handle_t *hd, datalink_id_t linkid)
 	(void) mutex_unlock(&cache_lock);
 
 	arg.linkid = linkid;
-	(void) dladm_walk_datalink_id(vlan_up, &arg, DATALINK_CLASS_VLAN,
-	    DATALINK_ANY_MEDIATYPE, DLADM_OPT_PERSIST);
+	(void) dladm_walk_datalink_id(vlan_up, dld_handle, &arg,
+	    DATALINK_CLASS_VLAN, DATALINK_ANY_MEDIATYPE, DLADM_OPT_PERSIST);
 
 	if (arg.retval == 0) {
 		rcm_log_message(RCM_TRACE2,

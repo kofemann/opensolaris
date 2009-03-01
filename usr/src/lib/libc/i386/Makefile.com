@@ -18,8 +18,9 @@
 #
 # CDDL HEADER END
 #
+
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
@@ -618,6 +619,7 @@ PORTPRINT_W=			\
 	doprnt_w.o
 
 PORTPRINT=			\
+	asprintf.o		\
 	doprnt.o		\
 	fprintf.o		\
 	printf.o		\
@@ -965,6 +967,9 @@ CFLAGS += $(XINLINE)
 # This is automatically enabled for DEBUG builds, not for non-debug builds.
 THREAD_DEBUG =
 $(NOT_RELEASE_BUILD)THREAD_DEBUG = -DTHREAD_DEBUG
+
+# Make string literals read-only to save memory.
+CFLAGS += $(XSTRCONST)
 
 ALTPICS= $(TRACEOBJS:%=pics/%)
 

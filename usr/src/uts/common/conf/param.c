@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -63,6 +63,7 @@
 #include <sys/cyclic_impl.h>
 #include <sys/disp.h>
 #include <sys/tuneable.h>
+#include <sys/systeminfo.h>
 
 #include <sys/vmem.h>
 #include <sys/clock.h>
@@ -194,6 +195,7 @@ extern void pg_cmt_class_init(void);
 extern void pg_cpu0_init(void);
 extern void clock_tick_mp_init(void);
 extern void callout_mp_init(void);
+extern void cpu_seq_tbl_init(void);
 
 void	(*init_tbl[])(void) = {
 	system_taskq_init,
@@ -211,6 +213,7 @@ void	(*init_tbl[])(void) = {
 	anon_init,
 	segvn_init,
 	flk_init,
+	cpu_seq_tbl_init,
 	pg_init,
 	pg_cmt_class_init,
 	pg_cpu0_init,
@@ -324,9 +327,14 @@ short nomagic = 0;
 #define	AOUT_ZMAGIC_STRING	"\x1""\x0b"	/* 0413 */
 #define	NOMAGIC_STRING		""
 
+#define	SHBIN_CNTL(x)	((x)&037)
+#define	SHBINMAGIC_STRING {SHBIN_CNTL('k'), SHBIN_CNTL('s'), SHBIN_CNTL('h'), 0}
+#define	SHBINMAGIC_LEN	4
+
 char elf32magicstr[] = ELF32MAGIC_STRING;
 char elf64magicstr[] = ELF64MAGIC_STRING;
 char intpmagicstr[] = INTPMAGIC_STRING;
+char shbinmagicstr[] = SHBINMAGIC_STRING;
 char javamagicstr[] = JAVAMAGIC_STRING;
 #if defined(__sparc)
 char aout_nmagicstr[] = AOUT_NMAGIC_STRING;
@@ -341,6 +349,7 @@ char *execswnames[] = {
 	"elfexec",	/* Elf64 */
 #endif
 	"intpexec",
+	"shbinexec",
 	"javaexec",
 #if defined(__sparc)
 	"aoutexec",
@@ -358,6 +367,7 @@ struct execsw execsw[] = {
 	{ elf64magicstr, 0, 5, NULL, NULL, NULL },
 #endif
 	{ intpmagicstr, 0, 2, NULL, NULL, NULL },
+	{ shbinmagicstr, 0, SHBINMAGIC_LEN, NULL, NULL, NULL },
 	{ javamagicstr, 0, 4, NULL, NULL, NULL },
 #if defined(__sparc)
 	{ aout_zmagicstr, 2, 2, NULL, NULL, NULL },
@@ -485,6 +495,14 @@ struct var v;			/* System Configuration Information */
  * System Configuration Information
  */
 
+/*
+ * The physical system's host identifier, expressed as a decimal string.
+ * Code should only directly access this value when writing to it (setting the
+ * physical system's host identifier).  Code that reads the physical system's
+ * host identifier should use zone_get_hostid(NULL) instead.
+ */
+char hw_serial[HW_HOSTID_LEN] = "0";
+
 #if defined(__sparc)
 
 /*
@@ -493,7 +511,6 @@ struct var v;			/* System Configuration Information */
  */
 char architecture[] = "sparcv9";
 char architecture_32[] = "sparc";
-char hw_serial[11];
 char hw_provider[] = "Sun_Microsystems";
 
 #elif defined(__i386)
@@ -504,7 +521,6 @@ char hw_provider[] = "Sun_Microsystems";
  */
 char architecture[] = "i386";
 char architecture_32[] = "i386";
-char hw_serial[11] = "0";
 char hw_provider[SYS_NMLN] = "";
 
 #elif defined(__amd64)
@@ -515,7 +531,6 @@ char hw_provider[SYS_NMLN] = "";
  */
 char architecture[] = "amd64";
 char architecture_32[] = "i386";
-char hw_serial[11] = "0";
 char hw_provider[SYS_NMLN] = "";
 
 #else

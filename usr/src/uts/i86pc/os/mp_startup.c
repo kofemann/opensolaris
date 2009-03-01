@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1130,7 +1130,7 @@ workaround_errata(struct cpu *cpu)
 #else	/* __xpv */
 		} else if ((x86_feature & X86_SSE2) && ((opteron_get_nnodes() *
 		    cpuid_get_ncpu_per_chip(cpu)) > 1)) {
-			if ((xrdmsr(MSR_AMD_BU_CFG) & 0x02) == 0)
+			if ((xrdmsr(MSR_AMD_BU_CFG) & (UINT64_C(1) << 33)) == 0)
 				opteron_workaround_6323525++;
 #endif	/* __xpv */
 		}
@@ -1405,6 +1405,10 @@ start_other_cpus(int cprboot)
 		}
 		if (start_cpu(who) != 0)
 			CPUSET_DEL(mp_cpus, who);
+
+		mutex_enter(&cpu_lock);
+		cpu_state_change_notify(who, CPU_SETUP);
+		mutex_exit(&cpu_lock);
 	}
 
 	/* Free the space allocated to hold the microcode file */

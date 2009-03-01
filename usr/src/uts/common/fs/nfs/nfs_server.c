@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -70,6 +70,7 @@
 #include <rpc/auth_des.h>
 #include <rpc/svc.h>
 #include <rpc/xdr.h>
+#include <rpc/rpc_rdma.h>
 
 #include <nfs/nfs.h>
 #include <nfs/export.h>
@@ -590,6 +591,8 @@ rdma_start(struct rdma_svc_args *rsa)
 {
 	int error;
 	rdma_xprt_group_t started_rdma_xprts;
+	rdma_stat stat;
+	int svc_state = 0;
 
 	/* Double check the vers min/max ranges */
 	if ((rsa->nfs_versmin > rsa->nfs_versmax) ||
@@ -621,15 +624,52 @@ rdma_start(struct rdma_svc_args *rsa)
 	started_rdma_xprts.rtg_count = 0;
 	started_rdma_xprts.rtg_listhead = NULL;
 	started_rdma_xprts.rtg_poolid = rsa->poolid;
+
+restart:
 	error = svc_rdma_kcreate(rsa->netid, &nfs_sct_rdma, rsa->poolid,
 	    &started_rdma_xprts);
 
-	if (error == 0) {
-		mutex_enter(&rdma_wait_mutex);
-		if (!cv_wait_sig(&rdma_wait_cv, &rdma_wait_mutex)) {
-			rdma_stop(started_rdma_xprts);
+	svc_state = !error;
+
+	while (!error) {
+
+		/*
+		 * wait till either interrupted by a signal on
+		 * nfs service stop/restart or signalled by a
+		 * rdma plugin attach/detatch.
+		 */
+
+		stat = rdma_kwait();
+
+		/*
+		 * stop services if running -- either on a HCA detach event
+		 * or if the nfs service is stopped/restarted.
+		 */
+
+		if ((stat == RDMA_HCA_DETACH || stat == RDMA_INTR) &&
+		    svc_state) {
+			rdma_stop(&started_rdma_xprts);
+			svc_state = 0;
 		}
-		mutex_exit(&rdma_wait_mutex);
+
+		/*
+		 * nfs service stop/restart, break out of the
+		 * wait loop and return;
+		 */
+		if (stat == RDMA_INTR)
+			return (0);
+
+		/*
+		 * restart stopped services on a HCA attach event
+		 * (if not already running)
+		 */
+
+		if ((stat == RDMA_HCA_ATTACH) && (svc_state == 0))
+			goto restart;
+
+		/*
+		 * loop until a nfs service stop/restart
+		 */
 	}
 
 	return (error);
@@ -2123,15 +2163,11 @@ checkauth(struct exportinfo *exi, struct svc_req *req, cred_t *cr, int anon_ok,
 
 	} else if (access & NFSAUTH_WRONGSEC) {
 		/*
-		 * NFSAUTH_WRONGSEC is used for NFSv4. Since V2/V3 already
-		 * negotiates the security flavor thru MOUNT protocol, the
-		 * only way it can get NFSAUTH_WRONGSEC here is from
-		 * NFS_ACL for V4. This could be for a limited view, so
-		 * map it to RO access. V4 lookup/readdir will take care
-		 * of the limited view portion.
+		 * NFSAUTH_WRONGSEC is used for NFSv4. If we get here,
+		 * it means a client ignored the list of allowed flavors
+		 * returned via the MOUNT protocol. So we just disallow it!
 		 */
-		access |= NFSAUTH_RO;
-		access &= ~NFSAUTH_WRONGSEC;
+		return (0);
 	}
 
 	switch (rpcflavor) {

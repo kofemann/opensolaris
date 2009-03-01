@@ -20,7 +20,7 @@
  */
 /*
  * Copyright 2000 by Cisco Systems, Inc.  All rights reserved.
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -48,7 +48,7 @@ extern "C" {
 #include <sys/sdt.h>
 
 #include <sys/scsi/adapters/iscsi_if.h>
-#include <sys/scsi/adapters/iscsi_protocol.h>
+#include <sys/iscsi_protocol.h>
 #include <iscsiAuthClient.h>
 #include <iscsi_stats.h>
 #include <iscsi_thread.h>
@@ -374,6 +374,11 @@ typedef struct iscsi_cmd {
 			 * command (if any)
 			 */
 			struct iscsi_cmd	*r2t_icmdp;
+			/*
+			 * It will be true if this command has
+			 * another R2T to handle.
+			 */
+			boolean_t		r2t_more;
 		} scsi;
 		/* ISCSI_CMD_TYPE_ABORT */
 		struct {
@@ -467,8 +472,10 @@ typedef struct iscsi_lun {
 	uchar_t			lun_pid[ISCSI_INQ_PID_BUF_LEN];	/* Product ID */
 } iscsi_lun_t;
 
-#define	ISCSI_LUN_STATE_OFFLINE	0
-#define	ISCSI_LUN_STATE_ONLINE	1
+#define	ISCSI_LUN_STATE_CLEAR	0		/* used to clear all states */
+#define	ISCSI_LUN_STATE_OFFLINE	1
+#define	ISCSI_LUN_STATE_ONLINE	2
+#define	ISCSI_LUN_STATE_INVALID	4		/* offline failed */
 
 #define	ISCSI_LUN_CAP_RESET   0x01
 
@@ -546,7 +553,7 @@ typedef struct iscsi_conn {
 	kcondvar_t		conn_state_change;
 	boolean_t		conn_state_destroy;
 
-	struct sonode		*conn_socket;	/* aka. kernel net. socket */
+	void			*conn_socket;	/* kernel socket */
 
 	/* base connection information */
 	iscsi_sockaddr_t	conn_base_addr;
@@ -836,6 +843,14 @@ typedef struct iscsi_sess {
 
 } iscsi_sess_t;
 
+/*
+ * This structure will be used to store sessions to be online
+ * during normal login operation.
+ */
+typedef struct iscsi_sess_list {
+	iscsi_sess_t		*session;
+	struct iscsi_sess_list	*next;
+} iscsi_sess_list_t;
 
 /*
  * iscsi_network
@@ -846,7 +861,7 @@ typedef struct iscsi_network {
 	int (*connect)(void *, struct sockaddr *, int, int, int);
 	int (*listen)(void *, int);
 	void* (*accept)(void *, struct sockaddr *, int *);
-	int (*getsockname)(void *);
+	int (*getsockname)(void *, struct sockaddr *, socklen_t *);
 	int (*getsockopt)(void *, int, int, void *, int *, int);
 	int (*setsockopt)(void *, int, int, void *, int);
 	int (*shutdown)(void *, int);
@@ -1010,7 +1025,7 @@ iscsi_sess_t *iscsi_sess_create(iscsi_hba_t *ihp,
     iSCSIDiscoveryMethod_t method, struct sockaddr *addr_dsc,
     char *target_name, int tpgt, uchar_t isid_lsb,
     iscsi_sess_type_t type, uint32_t *oid);
-void iscsi_sess_online(iscsi_sess_t *isp);
+void iscsi_sess_online(void *arg);
 int iscsi_sess_get(uint32_t oid, iscsi_hba_t *ihp, iscsi_sess_t **ispp);
 iscsi_status_t iscsi_sess_destroy(iscsi_sess_t *isp);
 void iscsi_sess_state_machine(iscsi_sess_t *isp, iscsi_sess_event_t event);

@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -107,6 +107,7 @@ char brand_name[MAXNAMELEN];
 boolean_t zone_isnative;
 boolean_t zone_iscluster;
 static zoneid_t zone_id;
+dladm_handle_t dld_handle = NULL;
 
 static char pre_statechg_hook[2 * MAXPATHLEN];
 static char post_statechg_hook[2 * MAXPATHLEN];
@@ -765,10 +766,6 @@ zone_bootup(zlog_t *zlogp, const char *bootargs, int zstate)
 
 	if (brand_prestatechg(zlogp, zstate, Z_BOOT) != 0)
 		return (-1);
-
-	if (init_console_slave(zlogp) != 0)
-		return (-1);
-	reset_slave_terminal(zlogp);
 
 	if ((zoneid = getzoneidbyname(zone_name)) == -1) {
 		zerror(zlogp, B_TRUE, "unable to get zoneid");
@@ -1907,7 +1904,7 @@ main(int argc, char *argv[])
 	 * serve_console_sock() below gets called, and any pending
 	 * connection is accept()ed).
 	 */
-	if (!zonecfg_in_alt_root() && init_console(zlogp) == -1)
+	if (!zonecfg_in_alt_root() && init_console(zlogp) < 0)
 		goto child_out;
 
 	/*
@@ -1922,6 +1919,12 @@ main(int argc, char *argv[])
 	if (sema_init(&scratch_sem, 0, USYNC_THREAD, NULL) == -1) {
 		zerror(zlogp, B_TRUE,
 		    "failed to initialize semaphore for scratch zone");
+		goto child_out;
+	}
+
+	/* open the dladm handle */
+	if (dladm_open(&dld_handle) != DLADM_STATUS_OK) {
+		zerror(zlogp, B_FALSE, "failed to open dladm handle");
 		goto child_out;
 	}
 
@@ -1984,6 +1987,7 @@ main(int argc, char *argv[])
 	 */
 	assert(!MUTEX_HELD(&lock));
 	(void) fdetach(zone_door_path);
+
 	for (;;)
 		(void) pause();
 
@@ -2006,5 +2010,9 @@ child_out:
 		(void) door_revoke(zone_door);
 		(void) fdetach(zone_door_path);
 	}
+
+	if (dld_handle != NULL)
+		dladm_close(dld_handle);
+
 	return (1); /* return from main() forcibly exits an MT process */
 }

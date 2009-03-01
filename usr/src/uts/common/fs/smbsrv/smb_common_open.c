@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -30,7 +30,6 @@
 
 #include <smbsrv/smb_incl.h>
 #include <smbsrv/smb_fsops.h>
-#include <smbsrv/mlsvc.h>
 #include <smbsrv/nterror.h>
 #include <smbsrv/ntstatus.h>
 #include <smbsrv/smbinfo.h>
@@ -549,7 +548,8 @@ smb_open_subr(smb_request_t *sr)
 			if ((!(op->desired_access &
 			    (FILE_WRITE_DATA | FILE_APPEND_DATA |
 			    FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA))) ||
-			    (!smb_sattr_check(&node->attr, NULL, op->dattr))) {
+			    (!smb_sattr_check(node->attr.sa_dosattr,
+			    op->dattr, NULL))) {
 				rw_exit(&node->n_share_lock);
 				smb_node_release(node);
 				smb_node_release(dnode);
@@ -664,8 +664,7 @@ smb_open_subr(smb_request_t *sr)
 		dnode = op->fqi.dir_snode;
 
 		if (is_dir == 0)
-			is_stream = smb_stream_parse_name(op->fqi.path,
-			    NULL, NULL);
+			is_stream = smb_is_stream_name(op->fqi.path);
 
 		if ((op->create_disposition == FILE_OPEN) ||
 		    (op->create_disposition == FILE_OVERWRITE)) {
@@ -741,14 +740,13 @@ smb_open_subr(smb_request_t *sr)
 
 			if (status == NT_STATUS_SHARING_VIOLATION) {
 				rw_exit(&node->n_share_lock);
+				smb_rwx_rwexit(&dnode->n_lock);
 				SMB_DEL_NEWOBJ(op->fqi);
 				smb_node_release(node);
 				smb_node_release(dnode);
 				SMB_NULL_FQI_NODES(op->fqi);
 				return (status);
 			}
-
-
 		} else {
 			op->dattr |= FILE_ATTRIBUTE_DIRECTORY;
 			new_attr.sa_vattr.va_type = VDIR;
@@ -879,10 +877,12 @@ smb_open_subr(smb_request_t *sr)
 /*
  * smb_validate_object_name
  *
- * Very basic file name validation. Directory validation is handed off
- * to smb_validate_dirname. For filenames, we check for names of the
- * form "AAAn:". Names that contain three characters, a single digit
- * and a colon (:) are reserved as DOS device names, i.e. "COM1:".
+ * Very basic file name validation.
+ * Directory validation is handed off to smb_validate_dirname.
+ * For filenames, we check for names of the form "AAAn:". Names that
+ * contain three characters, a single digit and a colon (:) are reserved
+ * as DOS device names, i.e. "COM1:".
+ * Stream name validation is handed off to smb_validate_stream_name
  *
  * Returns NT status codes.
  */
@@ -910,6 +910,9 @@ smb_validate_object_name(char *path, unsigned int ftype)
 	    filename[4] == ':') {
 		return (NT_STATUS_OBJECT_NAME_INVALID);
 	}
+
+	if (smb_is_stream_name(path))
+		return (smb_validate_stream_name(path));
 
 	return (0);
 }

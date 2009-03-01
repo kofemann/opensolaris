@@ -19,10 +19,22 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
+
+#
+# MAPFILE HEADER START
+#
+# WARNING:  STOP NOW.  DO NOT MODIFY THIS FILE.
+# Object versioning must comply with the rules detailed in
+#
+#	usr/src/lib/README.mapfiles
+#
+# You should not be making modifications here until you've read the most current
+# copy of that file. If you need help, contact a gatekeeper for guidance.
+#
+# MAPFILE HEADER END
 #
 
 SUNWprivate_1.1 {
@@ -106,6 +118,7 @@ SUNWprivate_1.1 {
 	zonecfg_getdsent;
 	zonecfg_getfsent;
 	zonecfg_get_handle;
+	zonecfg_get_hostid;
 	zonecfg_getipdent;
 	zonecfg_get_iptype;
 	zonecfg_get_limitpriv;
@@ -133,6 +146,7 @@ SUNWprivate_1.1 {
 	zonecfg_init_lock_file;
 	zonecfg_is_rctl;
 	zonecfg_is_scratch;
+	zonecfg_lock_file_held;
 	zonecfg_lock_scratch;
 	zonecfg_lookup_attr;
 	zonecfg_lookup_dev;
@@ -177,6 +191,7 @@ SUNWprivate_1.1 {
 	zonecfg_setdevperment;
 	zonecfg_setdsent;
 	zonecfg_setfsent;
+	zonecfg_set_hostid;
 	zonecfg_setipdent;
 	zonecfg_set_iptype;
 	zonecfg_set_limitpriv;
@@ -193,6 +208,7 @@ SUNWprivate_1.1 {
 	zonecfg_validate_zonename;
 	zonecfg_valid_alias_limit;
 	zonecfg_valid_fs_type;
+	zonecfg_valid_hostid;
 	zonecfg_valid_importance;
 	zonecfg_valid_memlimit;
 	zonecfg_valid_ncpus;

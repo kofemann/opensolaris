@@ -6,7 +6,7 @@
  *
  * CDDL LICENSE SUMMARY
  *
- * Copyright(c) 1999 - 2008 Intel Corporation. All rights reserved.
+ * Copyright(c) 1999 - 2009 Intel Corporation. All rights reserved.
  *
  * The contents of this file are subject to the terms of Version
  * 1.0 of the Common Development and Distribution License (the "License").
@@ -19,7 +19,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -151,6 +151,7 @@ e1000g_update_stats(kstat_t *ksp, int rw)
 	p_e1000g_stat_t e1000g_ksp;
 	e1000g_tx_ring_t *tx_ring;
 	e1000g_rx_ring_t *rx_ring;
+	e1000g_rx_data_t *rx_data;
 	uint64_t val;
 	uint32_t low_val, high_val;
 
@@ -165,6 +166,7 @@ e1000g_update_stats(kstat_t *ksp, int rw)
 
 	tx_ring = Adapter->tx_ring;
 	rx_ring = Adapter->rx_ring;
+	rx_data = rx_ring->rx_data;
 
 	rw_enter(&Adapter->chip_lock, RW_WRITER);
 
@@ -172,7 +174,6 @@ e1000g_update_stats(kstat_t *ksp, int rw)
 	e1000g_ksp->reset_count.value.ul = Adapter->reset_count;
 
 	e1000g_ksp->rx_error.value.ul = rx_ring->stat_error;
-	e1000g_ksp->rx_esballoc_fail.value.ul = rx_ring->stat_esballoc_fail;
 	e1000g_ksp->rx_allocb_fail.value.ul = rx_ring->stat_allocb_fail;
 
 	e1000g_ksp->tx_no_swpkt.value.ul = tx_ring->stat_no_swpkt;
@@ -185,8 +186,8 @@ e1000g_update_stats(kstat_t *ksp, int rw)
 	e1000g_ksp->rx_none.value.ul = rx_ring->stat_none;
 	e1000g_ksp->rx_multi_desc.value.ul = rx_ring->stat_multi_desc;
 	e1000g_ksp->rx_no_freepkt.value.ul = rx_ring->stat_no_freepkt;
-	e1000g_ksp->rx_avail_freepkt.value.ul = rx_ring->avail_freepkt +
-	    rx_ring->recycle_freepkt;
+	if (rx_data != NULL)
+		e1000g_ksp->rx_avail_freepkt.value.ul = rx_data->avail_freepkt;
 
 	e1000g_ksp->tx_under_size.value.ul = tx_ring->stat_under_size;
 	e1000g_ksp->tx_exceed_frags.value.ul = tx_ring->stat_exceed_frags;
@@ -320,6 +321,11 @@ e1000g_m_stat(void *arg, uint_t stat, uint64_t *val)
 	e1000g_ksp = (p_e1000g_stat_t)Adapter->e1000g_ksp->ks_data;
 
 	rw_enter(&Adapter->chip_lock, RW_READER);
+
+	if (Adapter->e1000g_state & E1000G_SUSPENDED) {
+		rw_exit(&Adapter->chip_lock);
+		return (ECANCELED);
+	}
 
 	switch (stat) {
 	case MAC_STAT_IFSPEED:
@@ -725,8 +731,6 @@ e1000g_init_stats(struct e1000g *Adapter)
 	    KSTAT_DATA_ULONG);
 
 	kstat_named_init(&e1000g_ksp->rx_error, "Rx Error",
-	    KSTAT_DATA_ULONG);
-	kstat_named_init(&e1000g_ksp->rx_esballoc_fail, "Rx Desballoc Failure",
 	    KSTAT_DATA_ULONG);
 	kstat_named_init(&e1000g_ksp->rx_allocb_fail, "Rx Allocb Failure",
 	    KSTAT_DATA_ULONG);

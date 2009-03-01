@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * This module provides the high level interface to the LSA RPC functions.
@@ -31,121 +29,104 @@
 
 #include <strings.h>
 #include <unistd.h>
-#include <netdb.h>
-#include <pwd.h>
-#include <grp.h>
 
 #include <smbsrv/libsmb.h>
-#include <smbsrv/libsmbns.h>
 #include <smbsrv/libmlsvc.h>
 #include <smbsrv/libsmbrdr.h>
-#include <smbsrv/lsalib.h>
 #include <smbsrv/ntstatus.h>
 #include <smbsrv/smbinfo.h>
 #include <smbsrv/smb_token.h>
 
-/*
- * Name Lookup modes
- */
-#define	MLSVC_LOOKUP_BUILTIN	1
-#define	MLSVC_LOOKUP_LOCAL	2
-#define	MLSVC_LOOKUP_DOMAIN	3
-#define	MLSVC_LOOKUP_DOMLOC	4
+#include <lsalib.h>
 
-static int lsa_lookup_mode(const char *, const char *);
-static uint32_t lsa_lookup_name_builtin(char *, smb_userinfo_t *);
-static uint32_t lsa_lookup_name_local(char *, char *, uint16_t,
-    smb_userinfo_t *);
-static uint32_t lsa_lookup_name_lusr(char *, smb_sid_t **);
-static uint32_t lsa_lookup_name_lgrp(char *, smb_sid_t **);
-static uint32_t lsa_lookup_name_domain(char *, char *, char *,
-    smb_userinfo_t *);
+static uint32_t lsa_lookup_name_builtin(char *, char *, smb_account_t *);
+static uint32_t lsa_lookup_name_domain(char *, smb_account_t *);
 
-static uint32_t lsa_lookup_sid_builtin(smb_sid_t *, smb_userinfo_t *);
-static uint32_t lsa_lookup_sid_local(smb_sid_t *, smb_userinfo_t *);
-static uint32_t lsa_lookup_sid_domain(smb_sid_t *, smb_userinfo_t *);
+static uint32_t lsa_lookup_sid_builtin(smb_sid_t *, smb_account_t *);
+static uint32_t lsa_lookup_sid_domain(smb_sid_t *, smb_account_t *);
 
 static int lsa_list_accounts(mlsvc_handle_t *);
 
 /*
- * lsa_lookup_name
- *
  * Lookup the given account and returns the account information
- * in 'ainfo'
+ * in the passed smb_account_t structure.
+ *
+ * The lookup is performed in the following order:
+ *    well known accounts
+ *    local accounts
+ *    domain accounts
+ *
+ * If it's established the given account is well know or local
+ * but the lookup fails for some reason, the next step(s) won't be
+ * performed.
  *
  * If the name is a domain account, it may refer to a user, group or
  * alias. If it is a local account, its type should be specified
  * in the sid_type parameter. In case the account type is unknown
  * sid_type should be set to SidTypeUnknown.
  *
- * account argument could be either [domain\\]name or [domain/]name.
- * If domain is not specified and service is in domain mode then it
- * first does a domain lookup and then a local lookup.
+ * account argument could be either [domain\]name or [domain/]name.
+ *
+ * Return status:
+ *
+ *   NT_STATUS_SUCCESS		Account is successfully translated
+ *   NT_STATUS_NONE_MAPPED	Couldn't translate the account
  */
 uint32_t
-lsa_lookup_name(char *server, char *account, uint16_t sid_type,
-    smb_userinfo_t *ainfo)
+lsa_lookup_name(char *account, uint16_t type, smb_account_t *info)
 {
-	nt_domain_t *dominfo;
-	int lookup_mode;
-	char *name;
-	char *domain;
-	uint32_t status = NT_STATUS_NONE_MAPPED;
+	char nambuf[SMB_USERNAME_MAXLEN];
+	char dombuf[SMB_PI_MAX_DOMAIN];
+	char *name, *domain;
+	uint32_t status;
+	char *slash;
 
-	(void) strsubst(account, '\\', '/');
-	name = strchr(account, '/');
-	if (name) {
-		/* domain is specified */
-		*name++ = '\0';
-		domain = account;
+	(void) strsubst(account, '/', '\\');
+	(void) strcanon(account, "\\");
+	/* \john -> john */
+	account += strspn(account, "\\");
+
+	if ((slash = strchr(account, '\\')) != NULL) {
+		*slash = '\0';
+		(void) strlcpy(dombuf, account, sizeof (dombuf));
+		(void) strlcpy(nambuf, slash + 1, sizeof (nambuf));
+		*slash = '\\';
+		name = nambuf;
+		domain = dombuf;
 	} else {
 		name = account;
 		domain = NULL;
 	}
 
-	lookup_mode = lsa_lookup_mode(domain, name);
-
-	switch (lookup_mode) {
-	case MLSVC_LOOKUP_BUILTIN:
-		return (lsa_lookup_name_builtin(name, ainfo));
-
-	case MLSVC_LOOKUP_LOCAL:
-		return (lsa_lookup_name_local(domain, name, sid_type, ainfo));
-
-	case MLSVC_LOOKUP_DOMAIN:
-		return (lsa_lookup_name_domain(server, domain, name, ainfo));
-
-	default:
-		/* lookup the name in domain */
-		dominfo = nt_domain_lookupbytype(NT_DOMAIN_PRIMARY);
-		if (dominfo == NULL)
-			return (NT_STATUS_INTERNAL_ERROR);
-		status = lsa_lookup_name_domain(server, dominfo->name, name,
-		    ainfo);
-		if (status != NT_STATUS_NONE_MAPPED)
+	status = lsa_lookup_name_builtin(domain, name, info);
+	if (status == NT_STATUS_NOT_FOUND) {
+		status = smb_sam_lookup_name(domain, name, type, info);
+		if (status == NT_STATUS_SUCCESS)
 			return (status);
 
-		mlsvc_release_user_info(ainfo);
-		/* lookup the name locally */
-		status = lsa_lookup_name_local(domain, name, sid_type, ainfo);
+		if ((domain == NULL) || (status == NT_STATUS_NOT_FOUND))
+			status = lsa_lookup_name_domain(account, info);
 	}
 
-	return (status);
+	return ((status == NT_STATUS_SUCCESS) ? status : NT_STATUS_NONE_MAPPED);
 }
 
 uint32_t
-lsa_lookup_sid(smb_sid_t *sid, smb_userinfo_t *ainfo)
+lsa_lookup_sid(smb_sid_t *sid, smb_account_t *info)
 {
+	uint32_t status;
+
 	if (!smb_sid_isvalid(sid))
 		return (NT_STATUS_INVALID_SID);
 
-	if (smb_sid_islocal(sid))
-		return (lsa_lookup_sid_local(sid, ainfo));
+	status = lsa_lookup_sid_builtin(sid, info);
+	if (status == NT_STATUS_NOT_FOUND) {
+		status = smb_sam_lookup_sid(sid, info);
+		if (status == NT_STATUS_NOT_FOUND)
+			status = lsa_lookup_sid_domain(sid, info);
+	}
 
-	if (smb_wka_lookup_sid(sid, NULL))
-		return (lsa_lookup_sid_builtin(sid, ainfo));
-
-	return (lsa_lookup_sid_domain(sid, ainfo));
+	return ((status == NT_STATUS_SUCCESS) ? status : NT_STATUS_NONE_MAPPED);
 }
 
 /*
@@ -157,20 +138,23 @@ lsa_lookup_sid(smb_sid_t *sid, smb_userinfo_t *ainfo)
  * should query the database to obtain a reference to the primary
  * domain information.
  *
+ * The requested information will be returned via 'info' argument.
+ * Caller must call lsa_free_info() when done.
+ *
  * Returns NT status codes.
  */
 DWORD
-lsa_query_primary_domain_info(void)
+lsa_query_primary_domain_info(char *server, char *domain, lsa_info_t *info)
 {
 	mlsvc_handle_t domain_handle;
 	DWORD status;
 	char *user = smbrdr_ipc_get_user();
 
-	if ((lsar_open(NULL, NULL, user, &domain_handle)) != 0)
+	if ((lsar_open(server, domain, user, &domain_handle)) != 0)
 		return (NT_STATUS_CANT_ACCESS_DOMAIN_INFO);
 
 	status = lsar_query_info_policy(&domain_handle,
-	    MSLSA_POLICY_PRIMARY_DOMAIN_INFO);
+	    MSLSA_POLICY_PRIMARY_DOMAIN_INFO, info);
 
 	(void) lsar_close(&domain_handle);
 	return (status);
@@ -185,20 +169,51 @@ lsa_query_primary_domain_info(void)
  * should query the database to obtain a reference to the account
  * domain information.
  *
+ * The requested information will be returned via 'info' argument.
+ * Caller must invoke lsa_free_info() to when done.
+ *
  * Returns NT status codes.
  */
 DWORD
-lsa_query_account_domain_info(void)
+lsa_query_account_domain_info(char *server, char *domain, lsa_info_t *info)
 {
 	mlsvc_handle_t domain_handle;
 	DWORD status;
 	char *user = smbrdr_ipc_get_user();
 
-	if ((lsar_open(NULL, NULL, user, &domain_handle)) != 0)
+	if ((lsar_open(server, domain, user, &domain_handle)) != 0)
 		return (NT_STATUS_CANT_ACCESS_DOMAIN_INFO);
 
 	status = lsar_query_info_policy(&domain_handle,
-	    MSLSA_POLICY_ACCOUNT_DOMAIN_INFO);
+	    MSLSA_POLICY_ACCOUNT_DOMAIN_INFO, info);
+
+	(void) lsar_close(&domain_handle);
+	return (status);
+}
+
+/*
+ * lsa_query_dns_domain_info
+ *
+ * Obtains the DNS domain info from the specified server
+ * (domain controller).
+ *
+ * The requested information will be returned via 'info' argument.
+ * Caller must call lsa_free_info() when done.
+ *
+ * Returns NT status codes.
+ */
+DWORD
+lsa_query_dns_domain_info(char *server, char *domain, lsa_info_t *info)
+{
+	mlsvc_handle_t domain_handle;
+	DWORD status;
+	char *user = smbrdr_ipc_get_user();
+
+	if ((lsar_open(server, domain, user, &domain_handle)) != 0)
+		return (NT_STATUS_CANT_ACCESS_DOMAIN_INFO);
+
+	status = lsar_query_info_policy(&domain_handle,
+	    MSLSA_POLICY_DNS_DOMAIN_INFO, info);
 
 	(void) lsar_close(&domain_handle);
 	return (status);
@@ -212,22 +227,25 @@ lsa_query_account_domain_info(void)
  * lsar_enum_trusted_domains call. The caller should query the database
  * to obtain a reference to the trusted domain information.
  *
+ * The requested information will be returned via 'info' argument.
+ * Caller must call lsa_free_info() when done.
+ *
  * Returns NT status codes.
  */
 DWORD
-lsa_enum_trusted_domains(void)
+lsa_enum_trusted_domains(char *server, char *domain, lsa_info_t *info)
 {
 	mlsvc_handle_t domain_handle;
 	DWORD enum_context;
 	DWORD status;
 	char *user = smbrdr_ipc_get_user();
 
-	if ((lsar_open(NULL, NULL, user, &domain_handle)) != 0)
+	if ((lsar_open(server, domain, user, &domain_handle)) != 0)
 		return (NT_STATUS_CANT_ACCESS_DOMAIN_INFO);
 
 	enum_context = 0;
 
-	status = lsar_enum_trusted_domains(&domain_handle, &enum_context);
+	status = lsar_enum_trusted_domains(&domain_handle, &enum_context, info);
 	if (status == MLSVC_NO_MORE_DATA) {
 		/*
 		 * MLSVC_NO_MORE_DATA indicates that we
@@ -241,181 +259,116 @@ lsa_enum_trusted_domains(void)
 }
 
 /*
- * lsa_lookup_name_builtin
- *
- * lookup builtin account table to see if account_name is
- * there. If it is there, set sid_name_use, domain_sid,
- * domain_name, and rid fields of the passed user_info
- * structure.
+ * lsa_free_info
  */
-static uint32_t
-lsa_lookup_name_builtin(char *account_name, smb_userinfo_t *user_info)
+void
+lsa_free_info(lsa_info_t *info)
 {
-	char *domain;
-	int res;
+	lsa_trusted_domainlist_t *list;
+	int i;
 
-	user_info->user_sid = smb_wka_lookup_name(account_name,
-	    &user_info->sid_name_use);
+	if (!info)
+		return;
 
-	if (user_info->user_sid == NULL)
-		return (NT_STATUS_NONE_MAPPED);
+	switch (info->i_type) {
+	case LSA_INFO_PRIMARY_DOMAIN:
+		smb_sid_free(info->i_domain.di_primary.n_sid);
+		break;
 
-	user_info->domain_sid = smb_sid_dup(user_info->user_sid);
-	res = smb_sid_split(user_info->domain_sid, &user_info->rid);
-	if (res < 0)
-		return (NT_STATUS_INTERNAL_ERROR);
+	case LSA_INFO_ACCOUNT_DOMAIN:
+		smb_sid_free(info->i_domain.di_account.n_sid);
+		break;
 
-	domain = smb_wka_lookup_domain(account_name);
-	if (domain) {
-		user_info->domain_name = strdup(domain);
-		return (NT_STATUS_SUCCESS);
+	case LSA_INFO_DNS_DOMAIN:
+		smb_sid_free(info->i_domain.di_dns.d_sid);
+		break;
+
+	case LSA_INFO_TRUSTED_DOMAINS:
+		list = &info->i_domain.di_trust;
+		for (i = 0; i < list->t_num; i++)
+			smb_sid_free(list->t_domains[i].n_sid);
+		free(list->t_domains);
+		break;
+
+	case LSA_INFO_NONE:
+		break;
 	}
-
-	return (NT_STATUS_INTERNAL_ERROR);
 }
 
 /*
- * lsa_lookup_name_local
+ * Lookup well known accounts table
  *
- * Obtains the infomation for the given local account name if it
- * can be found. The type of account is specified by sid_type,
- * which can be of user, group or unknown type. If the caller
- * doesn't know whether the name is a user or group name then
- * SidTypeUnknown should be passed, in which case this
- * function first tries to find a user and then a group match.
+ * Return status:
  *
- * CAVEAT: if there are both a user and a group account with
- * the same name, user SID will always be returned.
+ *   NT_STATUS_SUCCESS		Account is translated successfully
+ *   NT_STATUS_NOT_FOUND	This is not a well known account
+ *   NT_STATUS_NONE_MAPPED	Account is found but domains don't match
+ *   NT_STATUS_NO_MEMORY	Memory shortage
+ *   NT_STATUS_INTERNAL_ERROR	Internal error/unexpected failure
  */
 static uint32_t
-lsa_lookup_name_local(char *domain, char *name, uint16_t sid_type,
-    smb_userinfo_t *ainfo)
+lsa_lookup_name_builtin(char *domain, char *name, smb_account_t *info)
 {
-	char hostname[MAXHOSTNAMELEN];
-	smb_sid_t *sid;
-	uint32_t status;
+	smb_wka_t *wka;
+	char *wkadom;
 
-	switch (sid_type) {
-	case SidTypeUser:
-		status = lsa_lookup_name_lusr(name, &sid);
-		if (status != NT_STATUS_SUCCESS)
-			return (status);
-		break;
+	bzero(info, sizeof (smb_account_t));
 
-	case SidTypeGroup:
-	case SidTypeAlias:
-		status = lsa_lookup_name_lgrp(name, &sid);
-		if (status != NT_STATUS_SUCCESS)
-			return (status);
-		break;
+	if ((wka = smb_wka_lookup_name(name)) == NULL)
+		return (NT_STATUS_NOT_FOUND);
 
-	case SidTypeUnknown:
-		sid_type = SidTypeUser;
-		status = lsa_lookup_name_lusr(name, &sid);
-		if (status == NT_STATUS_SUCCESS)
-			break;
+	if ((wkadom = smb_wka_get_domain(wka->wka_domidx)) == NULL)
+		return (NT_STATUS_INTERNAL_ERROR);
 
-		if (status == NT_STATUS_NONE_MAPPED)
-			return (status);
+	if ((domain != NULL) && (utf8_strcasecmp(domain, wkadom) != 0))
+		return (NT_STATUS_NONE_MAPPED);
 
-		sid_type = SidTypeAlias;
-		status = lsa_lookup_name_lgrp(name, &sid);
-		if (status != NT_STATUS_SUCCESS)
-			return (status);
-		break;
+	info->a_name = strdup(name);
+	info->a_sid = smb_sid_dup(wka->wka_binsid);
+	info->a_domain = strdup(wkadom);
+	info->a_domsid = smb_sid_split(wka->wka_binsid, &info->a_rid);
+	info->a_type = wka->wka_type;
 
-	default:
-			return (NT_STATUS_INVALID_PARAMETER);
-	}
-
-	ainfo->sid_name_use = sid_type;
-	ainfo->user_sid = sid;
-	ainfo->domain_sid = smb_sid_dup(sid);
-	if (ainfo->domain_sid == NULL)
+	if (!smb_account_validate(info)) {
+		smb_account_free(info);
 		return (NT_STATUS_NO_MEMORY);
-
-	(void) smb_sid_split(ainfo->domain_sid, &ainfo->rid);
-	if ((domain == NULL) || (*domain == '\0')) {
-		(void) smb_getnetbiosname(hostname, sizeof (hostname));
-		ainfo->domain_name = strdup(hostname);
-	} else {
-		ainfo->domain_name = strdup(domain);
 	}
-
-	if (ainfo->domain_name == NULL)
-		return (NT_STATUS_NO_MEMORY);
 
 	return (NT_STATUS_SUCCESS);
 }
 
 /*
- * lsa_lookup_name_domain
+ * Lookup the given account in domain.
  *
- * Lookup a name on the specified server (domain controller) and obtain
- * the appropriate SID. The information is returned in the user_info
- * structure. The caller is responsible for allocating and releasing
- * this structure. On success sid_name_use will be set to indicate the
- * type of SID. If the name is the domain name, this function will be
- * identical to lsa_domain_info. Otherwise the rid and name fields will
- * also be valid. On failure sid_name_use will be set to SidTypeUnknown.
+ * The information is returned in the user_info structure.
+ * The caller is responsible for allocating and releasing
+ * this structure.
  */
 static uint32_t
-lsa_lookup_name_domain(char *server, char *domain, char *account_name,
-    smb_userinfo_t *user_info)
+lsa_lookup_name_domain(char *account_name, smb_account_t *info)
 {
 	mlsvc_handle_t domain_handle;
+	smb_domain_t dinfo;
 	char *user = smbrdr_ipc_get_user();
 	uint32_t status;
 
-	if (lsar_open(server, domain, user, &domain_handle) != 0)
+	if (!smb_domain_getinfo(&dinfo))
+		return (NT_STATUS_CANT_ACCESS_DOMAIN_INFO);
+
+	if (lsar_open(dinfo.d_dc, dinfo.d_nbdomain, user, &domain_handle) != 0)
 		return (NT_STATUS_INVALID_PARAMETER);
 
-	status = lsar_lookup_names2(&domain_handle, account_name, user_info);
+	status = lsar_lookup_names2(&domain_handle, account_name, info);
 	if (status == NT_STATUS_REVISION_MISMATCH) {
 		/*
 		 * Not a Windows 2000 domain controller:
 		 * use the NT compatible call.
 		 */
-		status = lsar_lookup_names(&domain_handle, account_name,
-		    user_info);
+		status = lsar_lookup_names(&domain_handle, account_name, info);
 	}
 
 	(void) lsar_close(&domain_handle);
 	return (status);
-}
-
-/*
- * lsa_test_lookup
- *
- * Test routine for lsa_lookup_name_domain and lsa_lookup_sid2.
- */
-void
-lsa_test_lookup(char *name)
-{
-	smb_userinfo_t *user_info;
-	smb_sid_t *sid;
-	DWORD status;
-	smb_ntdomain_t *di;
-
-	if ((di = smb_getdomaininfo(0)) == 0)
-		return;
-
-	user_info = mlsvc_alloc_user_info();
-
-	if (lsa_lookup_name_builtin(name, user_info) != 0) {
-		status = lsa_lookup_name_domain(di->server, di->domain, name,
-		    user_info);
-
-		if (status == 0) {
-			sid = smb_sid_splice(user_info->domain_sid,
-			    user_info->rid);
-
-			(void) lsa_lookup_sid_domain(sid, user_info);
-			free(sid);
-		}
-	}
-
-	mlsvc_free_user_info(user_info);
 }
 
 /*
@@ -433,14 +386,18 @@ lsa_test_lookup(char *name)
  */
 /*ARGSUSED*/
 int
-lsa_lookup_privs(char *server, char *account_name, char *target_name,
-    smb_userinfo_t *user_info)
+lsa_lookup_privs(char *account_name, char *target_name, smb_account_t *ainfo)
 {
 	mlsvc_handle_t domain_handle;
 	int rc;
 	char *user = smbrdr_ipc_get_user();
+	smb_domain_t dinfo;
 
-	if ((lsar_open(NULL, NULL, user, &domain_handle)) != 0)
+	if (!smb_domain_getinfo(&dinfo))
+		return (-1);
+
+	if ((lsar_open(dinfo.d_dc, dinfo.d_nbdomain, user,
+	    &domain_handle)) != 0)
 		return (-1);
 
 	rc = lsa_list_accounts(&domain_handle);
@@ -486,32 +443,6 @@ lsa_list_privs(char *server, char *domain)
 }
 
 /*
- * lsa_test
- *
- * LSA test routine: open and close the LSA interface.
- * TBD: the parameters should be server and domain.
- *
- * On success 0 is returned. Otherwise a -ve error code.
- */
-/*ARGSUSED*/
-int
-lsa_test(char *server, char *account_name)
-{
-	mlsvc_handle_t domain_handle;
-	int rc;
-	char *user = smbrdr_ipc_get_user();
-
-	rc = lsar_open(NULL, NULL, user, &domain_handle);
-	if (rc != 0)
-		return (-1);
-
-	if (lsar_close(&domain_handle) != 0)
-		return (-1);
-
-	return (0);
-}
-
-/*
  * lsa_list_accounts
  *
  * This function can be used to list the accounts in the specified
@@ -525,14 +456,11 @@ lsa_list_accounts(mlsvc_handle_t *domain_handle)
 	mlsvc_handle_t account_handle;
 	struct mslsa_EnumAccountBuf accounts;
 	struct mslsa_sid *sid;
-	char *name;
-	WORD sid_name_use;
-	smb_userinfo_t *user_info;
+	smb_account_t ainfo;
 	DWORD enum_context = 0;
 	int rc;
 	int i;
 
-	user_info = mlsvc_alloc_user_info();
 	bzero(&accounts, sizeof (struct mslsa_EnumAccountBuf));
 
 	do {
@@ -544,199 +472,77 @@ lsa_list_accounts(mlsvc_handle_t *domain_handle)
 		for (i = 0; i < accounts.entries_read; ++i) {
 			sid = accounts.info[i].sid;
 
-			name = smb_wka_lookup_sid((smb_sid_t *)sid,
-			    &sid_name_use);
-
-			if (name == 0) {
-				if (lsar_lookup_sids(domain_handle, sid,
-				    user_info) == 0) {
-					name = user_info->name;
-					sid_name_use = user_info->sid_name_use;
-				} else {
-					name = "unknown";
-					sid_name_use = SidTypeUnknown;
-				}
-			}
-
 			if (lsar_open_account(domain_handle, sid,
 			    &account_handle) == 0) {
 				(void) lsar_enum_privs_account(&account_handle,
-				    user_info);
+				    &ainfo);
 				(void) lsar_close(&account_handle);
 			}
 
 			free(accounts.info[i].sid);
-			mlsvc_release_user_info(user_info);
 		}
 
 		if (accounts.info)
 			free(accounts.info);
 	} while (rc == 0 && accounts.entries_read != 0);
 
-	mlsvc_free_user_info(user_info);
 	return (0);
 }
 
 /*
- * lsa_lookup_name_lusr
+ * Lookup well known accounts table for the given SID
  *
- * Obtains the SID for the given local user name if it
- * can be found. Upon successful return the allocated memory
- * for the returned SID must be freed by the caller.
+ * Return status:
  *
- * Note that in domain mode this function might actually return
- * a domain SID if local users are mapped to domain users.
+ *   NT_STATUS_SUCCESS		Account is translated successfully
+ *   NT_STATUS_NOT_FOUND	This is not a well known account
+ *   NT_STATUS_NO_MEMORY	Memory shortage
+ *   NT_STATUS_INTERNAL_ERROR	Internal error/unexpected failure
  */
 static uint32_t
-lsa_lookup_name_lusr(char *name, smb_sid_t **sid)
+lsa_lookup_sid_builtin(smb_sid_t *sid, smb_account_t *ainfo)
 {
-	struct passwd *pw;
+	smb_wka_t *wka;
+	char *wkadom;
 
-	if ((pw = getpwnam(name)) == NULL)
-		return (NT_STATUS_NO_SUCH_USER);
+	bzero(ainfo, sizeof (smb_account_t));
 
-	if (smb_idmap_getsid(pw->pw_uid, SMB_IDMAP_USER, sid) != IDMAP_SUCCESS)
-		return (NT_STATUS_NONE_MAPPED);
+	if ((wka = smb_wka_lookup_sid(sid)) == NULL)
+		return (NT_STATUS_NOT_FOUND);
 
-	return (NT_STATUS_SUCCESS);
-}
+	if ((wkadom = smb_wka_get_domain(wka->wka_domidx)) == NULL)
+		return (NT_STATUS_INTERNAL_ERROR);
 
-/*
- * lsa_lookup_name_lgrp
- *
- * Obtains the SID for the given local group name if it
- * can be found. Upon successful return the allocated memory
- * for the returned SID must be freed by the caller.
- *
- * Note that in domain mode this function might actually return
- * a domain SID if local groups are mapped to domain groups.
- */
-static uint32_t
-lsa_lookup_name_lgrp(char *name, smb_sid_t **sid)
-{
-	struct group *gr;
+	ainfo->a_name = strdup(wka->wka_name);
+	ainfo->a_sid = smb_sid_dup(wka->wka_binsid);
+	ainfo->a_domain = strdup(wkadom);
+	ainfo->a_domsid = smb_sid_split(ainfo->a_sid, &ainfo->a_rid);
+	ainfo->a_type = wka->wka_type;
 
-	if ((gr = getgrnam(name)) == NULL)
-		return (NT_STATUS_NO_SUCH_ALIAS);
-
-	if (smb_idmap_getsid(gr->gr_gid, SMB_IDMAP_GROUP, sid) != IDMAP_SUCCESS)
-		return (NT_STATUS_NONE_MAPPED);
-
-	return (NT_STATUS_SUCCESS);
-}
-
-static int
-lsa_lookup_mode(const char *domain, const char *name)
-{
-	int lookup_mode;
-
-	if (smb_wka_lookup((char *)name))
-		return (MLSVC_LOOKUP_BUILTIN);
-
-	if (smb_config_get_secmode() == SMB_SECMODE_WORKGRP)
-		return (MLSVC_LOOKUP_LOCAL);
-
-	if ((domain == NULL) || (*domain == '\0'))
-		return (MLSVC_LOOKUP_DOMLOC);
-
-	if (mlsvc_is_local_domain(domain) == 1)
-		lookup_mode = MLSVC_LOOKUP_LOCAL;
-	else
-		lookup_mode = MLSVC_LOOKUP_DOMAIN;
-
-	return (lookup_mode);
-}
-
-static uint32_t
-lsa_lookup_sid_local(smb_sid_t *sid, smb_userinfo_t *ainfo)
-{
-	char hostname[MAXHOSTNAMELEN];
-	struct passwd *pw;
-	struct group *gr;
-	uid_t id;
-	int id_type;
-
-	id_type = SMB_IDMAP_UNKNOWN;
-	if (smb_idmap_getid(sid, &id, &id_type) != IDMAP_SUCCESS)
-		return (NT_STATUS_NONE_MAPPED);
-
-	switch (id_type) {
-	case SMB_IDMAP_USER:
-		ainfo->sid_name_use = SidTypeUser;
-		if ((pw = getpwuid(id)) == NULL)
-			return (NT_STATUS_NO_SUCH_USER);
-
-		ainfo->name = strdup(pw->pw_name);
-		break;
-
-	case SMB_IDMAP_GROUP:
-		ainfo->sid_name_use = SidTypeAlias;
-		if ((gr = getgrgid(id)) == NULL)
-			return (NT_STATUS_NO_SUCH_ALIAS);
-
-		ainfo->name = strdup(gr->gr_name);
-		break;
-
-	default:
-		return (NT_STATUS_NONE_MAPPED);
+	if (!smb_account_validate(ainfo)) {
+		smb_account_free(ainfo);
+		return (NT_STATUS_NO_MEMORY);
 	}
 
-	if (ainfo->name == NULL)
-		return (NT_STATUS_NO_MEMORY);
-
-	ainfo->domain_sid = smb_sid_dup(sid);
-	if (smb_sid_split(ainfo->domain_sid, &ainfo->rid) < 0)
-		return (NT_STATUS_INTERNAL_ERROR);
-	*hostname = '\0';
-	(void) smb_getnetbiosname(hostname, MAXHOSTNAMELEN);
-	if ((ainfo->domain_name = strdup(hostname)) == NULL)
-		return (NT_STATUS_NO_MEMORY);
-
 	return (NT_STATUS_SUCCESS);
 }
 
 static uint32_t
-lsa_lookup_sid_builtin(smb_sid_t *sid, smb_userinfo_t *ainfo)
-{
-	char *name;
-	WORD sid_name_use;
-
-	if ((name = smb_wka_lookup_sid(sid, &sid_name_use)) == NULL)
-		return (NT_STATUS_NONE_MAPPED);
-
-	ainfo->sid_name_use = sid_name_use;
-	ainfo->name = strdup(name);
-	ainfo->domain_sid = smb_sid_dup(sid);
-
-	if (ainfo->name == NULL || ainfo->domain_sid == NULL)
-		return (NT_STATUS_NO_MEMORY);
-
-	if (sid_name_use != SidTypeDomain)
-		(void) smb_sid_split(ainfo->domain_sid, &ainfo->rid);
-
-	if ((name = smb_wka_lookup_domain(ainfo->name)) != NULL)
-		ainfo->domain_name = strdup(name);
-	else
-		ainfo->domain_name = strdup("UNKNOWN");
-
-	if (ainfo->domain_name == NULL)
-		return (NT_STATUS_NO_MEMORY);
-
-	return (NT_STATUS_SUCCESS);
-}
-
-static uint32_t
-lsa_lookup_sid_domain(smb_sid_t *sid, smb_userinfo_t *ainfo)
+lsa_lookup_sid_domain(smb_sid_t *sid, smb_account_t *ainfo)
 {
 	mlsvc_handle_t domain_handle;
 	char *user = smbrdr_ipc_get_user();
 	uint32_t status;
+	smb_domain_t dinfo;
 
-	if (lsar_open(NULL, NULL, user, &domain_handle) != 0)
+	if (!smb_domain_getinfo(&dinfo))
+		return (NT_STATUS_CANT_ACCESS_DOMAIN_INFO);
+
+	if (lsar_open(dinfo.d_dc, dinfo.d_nbdomain, user, &domain_handle) != 0)
 		return (NT_STATUS_INVALID_PARAMETER);
 
-	status = lsar_lookup_sids2(&domain_handle,
-	    (struct mslsa_sid *)sid, ainfo);
+	status = lsar_lookup_sids2(&domain_handle, (struct mslsa_sid *)sid,
+	    ainfo);
 
 	if (status == NT_STATUS_REVISION_MISMATCH) {
 		/*
