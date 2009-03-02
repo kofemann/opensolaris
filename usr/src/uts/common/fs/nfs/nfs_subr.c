@@ -3303,6 +3303,21 @@ newname(void)
 	return (news);
 }
 
+int
+nfs_atoi(char *cp)
+{
+	int n;
+
+	n = 0;
+	while (*cp != '\0') {
+		n = n * 10 + (*cp - '0');
+		cp++;
+	}
+
+	return (n);
+}
+
+
 /*
  * Snapshot callback for nfs:0:nfs_client as registered with the kstat
  * framework.
