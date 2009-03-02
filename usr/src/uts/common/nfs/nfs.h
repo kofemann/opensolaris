@@ -971,6 +971,7 @@ extern int	setdirgid(vnode_t *, gid_t *, cred_t *);
 extern int	setdirmode(vnode_t *, mode_t *, cred_t *);
 extern int	newnum(void);
 extern char	*newname(void);
+extern int	nfs_atoi(char *);
 extern int	nfs_subrinit(void);
 extern void	nfs_subrfini(void);
 extern enum nfsstat puterrno(int);

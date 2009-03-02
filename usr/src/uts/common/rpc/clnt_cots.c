@@ -2346,7 +2346,7 @@ use_new_conn:
 					 */
 					return (connmgr_wrapconnect(cm_entry,
 					    waitp, destaddr, addrfmly, srcaddr,
-					    rpcerr, TRUE, nosignal, cr));
+					    rpcerr, TRUE, nosignal, p->cku_cred));
 				}
 				i++;
 				if (cm_entry->x_time - prev_time <= 0 ||
@@ -2509,7 +2509,7 @@ start_retry_loop:
 			if (cm_entry->x_connected == FALSE) {
 				return (connmgr_wrapconnect(cm_entry,
 				    waitp, destaddr, addrfmly, NULL,
-				    rpcerr, TRUE, nosignal, cr));
+				    rpcerr, TRUE, nosignal, p->cku_cred));
 			} else {
 				CONN_HOLD(cm_entry);
 
