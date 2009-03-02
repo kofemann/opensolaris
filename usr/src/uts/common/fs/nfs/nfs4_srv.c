@@ -472,7 +472,7 @@ rfs4_init_compound_state(struct compound_state *cs)
 void
 rfs4_grace_start(nfs_server_instance_t *sip)
 {
-	rw_enter(&sip->rwlock, RW_WRITER);
+	rw_enter(&sip->reclaimlst_lock, RW_WRITER);
 	sip->start_time = (time_t)TICK_TO_SEC(lbolt);
 	sip->grace_period = rfs4_grace_period;
 	rw_exit(&sip->reclaimlst_lock);

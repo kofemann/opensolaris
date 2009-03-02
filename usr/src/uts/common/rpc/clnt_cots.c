@@ -2728,7 +2728,7 @@ start_retry_loop:
 		 * This is a bound end-point so don't close it's stream.
 		 */
 		connected = connmgr_connect(cm_entry, wq, destaddr, addrfmly,
-		    &call, &tidu_size, FALSE, waitp, nosignal, cr);
+		    &call, &tidu_size, FALSE, waitp, nosignal, p->cku_cred);
 		*rpcerr = call.call_err;
 		cv_destroy(&call.call_cv);
 
