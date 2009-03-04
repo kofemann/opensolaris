@@ -1230,6 +1230,7 @@ mds_layout_grant_mkkey(rfs4_entry_t entry)
 	return (entry);
 }
 
+#ifdef NOT_USED_NOW
 static uint32_t
 mds_layout_grant_id_hash(void *key)
 {
@@ -1261,6 +1262,7 @@ mds_layout_grant_id_mkkey(rfs4_entry_t entry)
 
 	return (&lgp->lo_stateid);
 }
+#endif
 
 /*ARGSUSED*/
 static bool_t
@@ -1363,12 +1365,6 @@ mds_ever_grant_mkkey(rfs4_entry_t entry)
 	return (entry);
 }
 
-static uint32_t
-mds_ever_grant_fsid_hash(void *key)
-{
-	return ((uint32_t)(uintptr_t)key);
-}
-
 static bool_t
 mds_ever_grant_fsid_compare(rfs4_entry_t entry, void *key)
 {
@@ -1378,6 +1374,13 @@ mds_ever_grant_fsid_compare(rfs4_entry_t entry, void *key)
 	return (egp->eg_key == g_key);
 }
 
+#ifdef NOT_USED_NOW
+static uint32_t
+mds_ever_grant_fsid_hash(void *key)
+{
+	return ((uint32_t)(uintptr_t)key);
+}
+
 static void *
 mds_ever_grant_fsid_mkkey(rfs4_entry_t entry)
 {
@@ -1385,6 +1388,7 @@ mds_ever_grant_fsid_mkkey(rfs4_entry_t entry)
 
 	return ((void*)(uintptr_t)egp->eg_key);
 }
+#endif
 
 /*ARGSUSED*/
 static bool_t
@@ -2961,7 +2965,7 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	rw_init(&instp->mds_layout_lock, NULL, RW_DEFAULT, NULL);
 
 	instp->mds_layout_tab = rfs4_table_create(instp,
-	    "Layout", instp->reap_time, 2, mds_layout_create,
+	    "Layout", instp->reap_time, 1, mds_layout_create,
 	    mds_layout_destroy,
 	    mds_do_not_expire, sizeof (mds_layout_t), MDS_TABSIZE,
 	    MDS_MAXTABSZ, 100);
@@ -2977,8 +2981,8 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	 * to clients. It is indexed by the layout state_id and also by client.
 	 */
 	instp->mds_layout_grant_tab = rfs4_table_create(instp,
-	    "Layout_grant", instp->reap_time, 2, mds_layout_grant_create,
-	    mds_layout_grant_destroy, mds_do_not_expire,
+	    "Layout_grant", instp->reap_time, 1, mds_layout_grant_create,
+	    mds_layout_grant_destroy, NULL,
 	    sizeof (mds_layout_grant_t), MDS_TABSIZE, MDS_MAXTABSZ, 100);
 
 	instp->mds_layout_grant_idx =
@@ -2986,10 +2990,12 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	    "layout-grant-idx", mds_layout_grant_hash, mds_layout_grant_compare,
 	    mds_layout_grant_mkkey, TRUE);
 
+#ifdef NOT_USED_NOW
 	instp->mds_layout_grant_ID_idx =
 	    rfs4_index_create(instp->mds_layout_grant_tab,
 	    "layout-grant-ID-idx", mds_layout_grant_id_hash,
 	    mds_layout_grant_id_compare, mds_layout_grant_id_mkkey, FALSE);
+#endif
 
 	/*
 	 * Create the ever_grant table.
@@ -2998,8 +3004,8 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	 * belong to an FSID. It is indexed by the FSID and also by client.
 	 */
 	instp->mds_ever_grant_tab = rfs4_table_create(instp,
-	    "Ever_grant", instp->reap_time, 2, mds_ever_grant_create,
-	    mds_ever_grant_destroy, mds_do_not_expire,
+	    "Ever_grant", instp->reap_time, 1, mds_ever_grant_create,
+	    mds_ever_grant_destroy, NULL,
 	    sizeof (mds_ever_grant_t), MDS_TABSIZE, MDS_MAXTABSZ, 100);
 
 	instp->mds_ever_grant_idx =
@@ -3007,16 +3013,18 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	    "ever-grant-idx", mds_ever_grant_hash, mds_ever_grant_compare,
 	    mds_ever_grant_mkkey, TRUE);
 
+#ifdef NOT_USED_NOW
 	instp->mds_ever_grant_fsid_idx =
 	    rfs4_index_create(instp->mds_ever_grant_tab,
 	    "ever-grant-fsid-idx", mds_ever_grant_fsid_hash,
 	    mds_ever_grant_fsid_compare, mds_ever_grant_fsid_mkkey, FALSE);
+#endif
 
 	/*
 	 * Data server addresses.
 	 */
 	instp->ds_addrlist_tab = rfs4_table_create(instp,
-	    "DSaddrlist", instp->reap_time, 3, ds_addrlist_create,
+	    "DSaddrlist", instp->reap_time, 2, ds_addrlist_create,
 	    ds_addrlist_destroy, mds_do_not_expire, sizeof (ds_addrlist_t),
 	    MDS_TABSIZE, MDS_MAXTABSZ, 200);
 
@@ -3032,7 +3040,7 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	 * Multipath Device table.
 	 */
 	instp->mds_mpd_tab = rfs4_table_create(instp,
-	    "mpd", instp->reap_time, 3, mds_mpd_create, mds_mpd_destroy,
+	    "mpd", instp->reap_time, 1, mds_mpd_create, mds_mpd_destroy,
 	    mds_do_not_expire, sizeof (mds_mpd_t), MDS_TABSIZE,
 	    MDS_MAXTABSZ, 200);
 
@@ -3060,7 +3068,7 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	 * data-server guid information table.
 	 */
 	instp->ds_guid_info_tab = rfs4_table_create(instp,
-	    "DS_guid", instp->reap_time, 2, ds_guid_info_create,
+	    "DS_guid", instp->reap_time, 1, ds_guid_info_create,
 	    ds_guid_info_destroy,
 	    mds_do_not_expire, sizeof (ds_guid_info_t), MDS_TABSIZE,
 	    MDS_MAXTABSZ, 100);
