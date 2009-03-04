@@ -2337,9 +2337,13 @@ rfs4_return_deleg(rfs4_deleg_state_t *dsp, bool_t revoked)
 			slot = dsp->rs.slotno;
 			sp = mds_findsession_by_id(instp, dsp->rs.sessid);
 			if (sp != NULL) {
+				rfs4_dbe_lock(sp->dbe);
 				slp = &sp->sn_slrc->sc_slot[slot];
-				if (slp->p == dsp)
+				if (slp->p == dsp) {
 					rfs41_rs_erase(dsp);
+					slp->p = NULL;
+				}
+				rfs4_dbe_unlock(sp->dbe);
 				rfs41_session_rele(sp);
 			}
 		}
