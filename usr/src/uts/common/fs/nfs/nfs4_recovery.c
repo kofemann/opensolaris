@@ -1626,6 +1626,7 @@ wait_for_ds_recovery(nfs4_call_t *cp, int noblock)
 	}
 	/*
 	 * Synchronize with DS recovery.
+	 * XXXrsb - Do we need to check NFS4_THREAD_EXIT in np->s_thread_exit?
 	 */
 	while (SVR_IN_RECOVERY(np)) {
 		if (noblock) {
@@ -1796,19 +1797,24 @@ nfs4_recov_thread(recov_info_t *recovp)
 		if ((sp = cp->nc_ds_nfs4_srv) == NULL) {
 			mutex_enter(&nfs4_server_lst_lock);
 			/* This locks sp if it is found */
-			sp = servinfo4_to_nfs4_server(cp->nc_ds_servinfo);
-			mutex_exit(&nfs4_server_lst_lock);
-			mutex_exit(&sp->s_lock);
+			sp = find_nfs4_server_by_addr(
+			    &cp->nc_ds_servinfo->sv_addr,
+			    cp->nc_ds_servinfo->sv_knconf);
 
-			/* Now that we have it, what do we do with it? */
-			mutex_enter(cp->nc_lock);
-			if (cp->nc_ds_nfs4_srv == NULL) {
-				cp->nc_ds_nfs4_srv = sp;
-				mutex_exit(cp->nc_lock);
+			if (sp == NULL) {
+				mutex_exit(&nfs4_server_lst_lock);
 			} else {
-				/* Damn, someone snuck in */
-				mutex_exit(cp->nc_lock);
-				nfs4_server_rele(sp);
+				mutex_exit(&sp->s_lock);
+
+				mutex_enter(cp->nc_lock);
+				if (cp->nc_ds_nfs4_srv == NULL) {
+					cp->nc_ds_nfs4_srv = sp;
+					mutex_exit(cp->nc_lock);
+				} else {
+					/* D'oh!  Someone snuck in */
+					mutex_exit(cp->nc_lock);
+					nfs4_server_rele(sp);
+				}
 			}
 		}
 
@@ -1863,7 +1869,7 @@ nfs4_recov_thread(recov_info_t *recovp)
 			 * can be tossed, even if there are lost lock or
 			 * lost state calls in the recovery queue.
 			 */
-			if (mi->mi_recovflags &
+			if (is_dataserver == FALSE && mi->mi_recovflags &
 			    (MI4R_NEED_CLIENTID | MI4R_REOPEN_FILES)) {
 				NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
 				"nfs4_recov_thread: bailing out"));
@@ -1882,7 +1888,8 @@ nfs4_recov_thread(recov_info_t *recovp)
 			 * have to do "lost state" recovery later (e.g., a
 			 * user process exits).
 			 */
-			if (!(mi->mi_recovflags & MI4R_LOST_STATE)) {
+			if (is_dataserver == FALSE &&
+			    !(mi->mi_recovflags & MI4R_LOST_STATE)) {
 				done = 1;
 				mutex_exit(&mi->mi_lock);
 				break;
@@ -1895,7 +1902,17 @@ nfs4_recov_thread(recov_info_t *recovp)
 				mutex_enter(&sp->s_lock);
 				activesrv = nfs4_fs_active(sp);
 			}
-			if (!activesrv) {
+
+			/*
+			 * XXXrecovery - In order to deal with MDS/DS
+			 * combo servers, we really need to have an
+			 * is_dataserver_only flag based on the "use"
+			 * flags (N4S_USE_PNFS_DS, N4S_USE_PNFS_MDS,
+			 * N4S_USE_NON_PNFS) set in the nfs4_server_t's
+			 * s_flags... but we need to make sure those
+			 * flags are set properly.
+			 */
+			if (is_dataserver == FALSE && !activesrv) {
 				NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
 				    "no active fs for server %p",
 				    (void *)sp));
@@ -1936,7 +1953,8 @@ nfs4_recov_thread(recov_info_t *recovp)
 
 		/*
 		 * Check if we need to recover the clientid and/or session.
-		 * This must be done before file and lock recovery, and it
+		 * If we're recoving an MDS/non-PNFS server, then this
+		 * must be done before file and lock recovery, and it
 		 * potentially affects the recovery threads for other
 		 * filesystems, so it gets special treatment.
 		 */
@@ -2278,12 +2296,7 @@ recov_done_ds(nfs4_server_t *sp)
 
 	sp->s_recovthread = NULL;
 	sp->s_flags &= ~N4S_RECOV_ACTIV;
-	/*
-	 * We don't need to cv_broadcast(sp->s_clientid_pend) or
-	 * further modify the s_flags since that would have happened
-	 * in nfs4_set_clientid() and/or nfs4create_session() when we
-	 * recovered the dataserver.
-	 */
+	cv_broadcast(&sp->s_clientid_pend);
 }
 
 /*

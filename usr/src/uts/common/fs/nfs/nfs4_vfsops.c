@@ -4004,13 +4004,15 @@ nfs4_server_t *
 find_nfs4_server_by_addr(struct netbuf *nb, struct knetconfig *knc)
 {
 	nfs4_server_t *np;
+	zoneid_t zoneid = nfs_zoneid();
 
 	ASSERT(MUTEX_HELD(&nfs4_server_lst_lock));
 
 	for (np = nfs4_server_lst.forw; np != &nfs4_server_lst; np = np->forw) {
 		mutex_enter(&np->s_lock);
 
-		if (np->saddr.len == nb->len &&
+		if (np->zoneid == zoneid &&
+		    np->saddr.len == nb->len &&
 		    bcmp(np->saddr.buf, nb->buf, np->saddr.len) == 0 &&
 		    (np->s_thread_exit != NFS4_THREAD_EXIT)) {
 			mutex_exit(&nfs4_server_lst_lock);
