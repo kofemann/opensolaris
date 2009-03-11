@@ -19,20 +19,56 @@
  * CDDL HEADER END
  */
 /*
- * This file was machine generated for
- *  draft-ietf-nfsv4-minorversion1-23
- * Last updated Mon May 12 09:14:57 CDT 2008
- */
-/*
- *  Copyright (C) The IETF Trust (2007-2008)
- *  All Rights Reserved.
+ * Copyright (c) 2008 IETF Trust and the persons identified
+ * as the document authors. All rights reserved.
  *
- *  Copyright (C) The Internet Society (1998-2006).
- *  All Rights Reserved.
+ * The document authors are identified in [RFC3530] and
+ * [draft-ietf-nfsv4-minorversion1-xx.txt].
+ *
+ * Redistribution and use in source and binary forms, with
+ * or without modification, are permitted provided that the
+ * following conditions are met:
+ *
+ * o Redistributions of source code must retain the above
+ *   copyright notice, this list of conditions and the
+ *   following disclaimer.
+ *
+ * o Redistributions in binary form must reproduce the above
+ *   copyright notice, this list of conditions and the
+ *   following disclaimer in the documentation and/or other
+ *   materials provided with the distribution.
+ *
+ * o Neither the name of Internet Society, IETF or IETF
+ *   Trust, nor the names of specific contributors, may be
+ *   used to endorse or promote products derived from this
+ *   software without specific prior written permission.
+ *
+ *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS
+ *   AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
+ *   WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ *   IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ *   FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+ *   EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+ *   LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ *   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ *   NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+ *   SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ *   INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ *   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+ *   OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+ *   IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+ *   ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 /*
- *      nfs41_prot.x
+ * This code was derived from [RFC3530]. Please
+ * reproduce this note if possible.
+ *
+ * This file was machine generated for
+ *  draft-ietf-nfsv4-minorversion1-29
+ * Last updated Mon Dec 15 11:26:38 PST 2008
+ */
+/*
+ *      nfs4_prot.x
  */
 
 %#ifndef _AUTH_SYS_DEFINE_FOR_NFSv41
@@ -98,7 +134,13 @@ enum nfsstat4 {
  NFS4ERR_ACCESS         = 13,   /* access denied           */
  NFS4ERR_EXIST          = 17,   /* file already exists     */
  NFS4ERR_XDEV           = 18,   /* different filesystems   */
- /* Unused/reserved       19 */
+
+ /*
+  * Please do not allocate value 19; it was used in NFSv3
+  * and we do not want a value in NFSv3 to have a different
+  * meaning in NFSv4.x.
+  */
+
  NFS4ERR_NOTDIR         = 20,   /* should be a directory   */
  NFS4ERR_ISDIR          = 21,   /* should not be directory */
  NFS4ERR_INVAL          = 22,   /* invalid argument        */
@@ -187,7 +229,7 @@ enum nfsstat4 {
  NFS4ERR_TOO_MANY_OPS   = 10070,/*too many ops in [CB_]COMP*/
  NFS4ERR_OP_NOT_IN_SESSION =10071,/* op needs [CB_]SEQ. op */
  NFS4ERR_HASH_ALG_UNSUPP = 10072, /* hash alg. not supp.   */
-				/* Error 10073 is unused.  */
+                                /* Error 10073 is unused.  */
  NFS4ERR_CLIENTID_BUSY  = 10074,/* clientid has state      */
  NFS4ERR_PNFS_IO_HOLE   = 10075,/* IO to _SPARSE file hole */
  NFS4ERR_SEQ_FALSE_RETRY= 10076,/* Retry != original req.  */
@@ -200,7 +242,8 @@ enum nfsstat4 {
  NFS4ERR_WRONG_TYPE     = 10083,/* op on wrong type object */
  NFS4ERR_DIRDELEG_UNAVAIL=10084,/* delegation not avail.   */
  NFS4ERR_REJECT_DELEG   = 10085,/* cb rejected delegation  */
- NFS4ERR_RETURNCONFLICT = 10086 /* layout get before return*/
+ NFS4ERR_RETURNCONFLICT = 10086,/* layout get before return*/
+ NFS4ERR_DELEG_REVOKED  = 10087 /* deleg./layout revoked   */
 };
 
 /*
@@ -598,7 +641,7 @@ enum fs4_status_type {
 };
 
 struct fs4_status {
-	bool		fss_absent;
+        bool            fss_absent;
         fs4_status_type fss_type;
         utf8str_cs      fss_source;
         utf8str_cs      fss_current;
@@ -2465,7 +2508,7 @@ union deleg_claim4 switch (open_claim_type4 dc_claim) {
  * by filehandle.
  */
 case CLAIM_FH: /* new to v4.1 */
-	/* CURRENT_FH: object being delegated */
+        /* CURRENT_FH: object being delegated */
         void;
 
 /*

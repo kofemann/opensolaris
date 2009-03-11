@@ -181,7 +181,7 @@ get_usage(zfs_help_t idx)
 		    "\tcreate [-ps] [-b blocksize] [-o property=value] ... "
 		    "-V <size> <volume>\n"
 		    "\tcreate [-o property=value] -t pnfsdata "
-		    "<pnfs-dataset>\n"));
+		    "<pnfsdata>\n"));
 	case HELP_DESTROY:
 		return (gettext("\tdestroy [-rRf] "
 		    "<filesystem|volume|snapshot>\n"));
@@ -1773,7 +1773,7 @@ zfs_do_list(int argc, char **argv)
 	boolean_t scripted = B_FALSE;
 	static char default_fields[] =
 	    "name,used,available,referenced,mountpoint";
-	int types = ZFS_TYPE_DATASET | ZFS_TYPE_PNFS;
+	int types = ZFS_TYPE_DATASET;
 	boolean_t types_specified = B_FALSE;
 	char *fields = NULL;
 	list_cbdata_t cb = { 0 };

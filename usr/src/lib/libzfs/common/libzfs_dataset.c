@@ -72,9 +72,9 @@ zfs_type_to_name(zfs_type_t type)
 	case ZFS_TYPE_VOLUME:
 		return (dgettext(TEXT_DOMAIN, "volume"));
 	case ZFS_TYPE_PNFS:
-		return (dgettext(TEXT_DOMAIN, "pnfs-dataset"));
+		return (dgettext(TEXT_DOMAIN, "pnfsdata"));
 	case ZFS_TYPE_PNFSOBJS:
-		return (dgettext(TEXT_DOMAIN, "pnfs-data"));
+		return (dgettext(TEXT_DOMAIN, "pnfsdata"));
 	}
 
 	return (NULL);
@@ -99,9 +99,9 @@ path_to_str(const char *path, int types)
 	if (types == ZFS_TYPE_VOLUME)
 		return (dgettext(TEXT_DOMAIN, "volume"));
 	if (types == ZFS_TYPE_PNFS)
-		return (dgettext(TEXT_DOMAIN, "pnfs-dataset"));
+		return (dgettext(TEXT_DOMAIN, "pnfsdata"));
 	if (types == ZFS_TYPE_PNFSOBJS)
-		return (dgettext(TEXT_DOMAIN, "pnfs-data"));
+		return (dgettext(TEXT_DOMAIN, "pnfsdata"));
 
 	/*
 	 * The user is requesting more than one type of dataset.  If this is the
@@ -118,17 +118,17 @@ path_to_str(const char *path, int types)
 	/*
 	 * The user has requested either filesystems, pNFS datasets or volumes.
 	 * We have no way of knowing a priori what type this would be, so always
-	 * report it as "filesystem", "pnfs-dataset" or "volume", our three
+	 * report it as "filesystem", "pnfsdata" or "volume", our three
 	 * primative types.
 	 */
 	if (types & ZFS_TYPE_FILESYSTEM)
 		return (dgettext(TEXT_DOMAIN, "filesystem"));
 
 	if (types & ZFS_TYPE_PNFS)
-		return (dgettext(TEXT_DOMAIN, "pnfs-dataset"));
+		return (dgettext(TEXT_DOMAIN, "pnfsdata"));
 
 	if (types & ZFS_TYPE_PNFSOBJS)
-		return (dgettext(TEXT_DOMAIN, "pnfs-data"));
+		return (dgettext(TEXT_DOMAIN, "pnfsdata"));
 
 	assert(types & ZFS_TYPE_VOLUME);
 	return (dgettext(TEXT_DOMAIN, "volume"));
@@ -2653,10 +2653,10 @@ zfs_prop_get(zfs_handle_t *zhp, zfs_prop_t prop, char *propbuf, size_t proplen,
 			str = "snapshot";
 			break;
 		case ZFS_TYPE_PNFS:
-			str = "pnfs-dataset";
+			str = "pnfsdata";
 			break;
 		case ZFS_TYPE_PNFSOBJS:
-			str = "pnfs-data";
+			str = "pnfsdata";
 			break;
 		default:
 			abort();
@@ -3037,7 +3037,7 @@ check_parents(libzfs_handle_t *hdl, const char *path, uint64_t *zoned,
 	/* make sure parent is a filesystem */
 	if ((zfs_get_type(zhp) != ZFS_TYPE_FILESYSTEM)) {
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "parent is not a filesystem or pnfsdataset"));
+		    "parent is not a filesystem or pnfs dataset"));
 		(void) zfs_error(hdl, EZFS_BADTYPE, errbuf);
 		zfs_close(zhp);
 		return (-1);

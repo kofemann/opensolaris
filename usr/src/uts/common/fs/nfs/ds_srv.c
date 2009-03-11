@@ -376,6 +376,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 */
 	cs = rfs41_compound_state_alloc(mds_server);
 	cs->vp = vp;
+	cs->nn = np;
 
 	/*
 	 * Do a checkstate via nnode interface.
@@ -413,6 +414,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	if (mds_put_layout(fp->flp, fp->vp)) {
 		rfs4_state_rele(sp);
 		rfs4_file_rele(fp);
+		rfs41_compound_state_free(cs);
 		/*
 		 * DSERR_RESOURCE? DSERR_NOSPC?
 		 */
