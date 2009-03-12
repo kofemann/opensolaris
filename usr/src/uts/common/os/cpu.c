@@ -56,6 +56,7 @@
 #include <sys/msacct.h>
 #include <sys/time.h>
 #include <sys/archsystm.h>
+#include <sys/sdt.h>
 #if defined(__x86) || defined(__amd64)
 #include <sys/x86_archext.h>
 #endif
@@ -1696,7 +1697,7 @@ cpu_list_init(cpu_t *cp)
 	 */
 	cpu_seq = &cpu_list;
 
-	cp->cpu_cache_offset = KMEM_CACHE_SIZE(cp->cpu_seqid);
+	cp->cpu_cache_offset = KMEM_CPU_CACHE_OFFSET(cp->cpu_seqid);
 	cp_default.cp_cpulist = cp;
 	cp_default.cp_ncpus = 1;
 	cp->cpu_next_part = cp;
@@ -1752,7 +1753,7 @@ cpu_add_unit(cpu_t *cp)
 	cp->cpu_seqid = seqid;
 	ASSERT(ncpus < max_ncpus);
 	ncpus++;
-	cp->cpu_cache_offset = KMEM_CACHE_SIZE(cp->cpu_seqid);
+	cp->cpu_cache_offset = KMEM_CPU_CACHE_OFFSET(cp->cpu_seqid);
 	cpu[cp->cpu_id] = cp;
 	CPUSET_ADD(cpu_available, cp->cpu_id);
 	cpu_seq[cp->cpu_seqid] = cp;
@@ -2163,6 +2164,8 @@ static struct {
 	kstat_named_t ci_pkg_core_id;
 	kstat_named_t ci_ncpuperchip;
 	kstat_named_t ci_ncoreperchip;
+	kstat_named_t ci_max_cstates;
+	kstat_named_t ci_curr_cstate;
 #endif
 } cpu_info_template = {
 	{ "state",			KSTAT_DATA_CHAR },
@@ -2189,6 +2192,8 @@ static struct {
 	{ "pkg_core_id",		KSTAT_DATA_LONG },
 	{ "ncpu_per_chip",		KSTAT_DATA_INT32 },
 	{ "ncore_per_chip",		KSTAT_DATA_INT32 },
+	{ "supported_max_cstates",	KSTAT_DATA_INT32 },
+	{ "current_cstate",		KSTAT_DATA_INT32 },
 #endif
 };
 
@@ -2258,6 +2263,8 @@ cpu_info_kstat_update(kstat_t *ksp, int rw)
 	cpu_info_template.ci_ncoreperchip.value.l =
 	    cpuid_get_ncore_per_chip(cp);
 	cpu_info_template.ci_pkg_core_id.value.l = cpuid_get_pkgcoreid(cp);
+	cpu_info_template.ci_max_cstates.value.l = cp->cpu_m.max_cstates;
+	cpu_info_template.ci_curr_cstate.value.l = cp->cpu_m.curr_cstate;
 #endif
 
 	return (0);
@@ -2957,6 +2964,25 @@ cpu_set_supp_freqs(cpu_t *cp, const char *freqs)
 		ksp->ks_data_size += len;
 		mutex_exit(ksp->ks_lock);
 	}
+}
+
+/*
+ * Indicate the current CPU's clock freqency (in Hz).
+ * The calling context must be such that CPU references are safe.
+ */
+void
+cpu_set_curr_clock(uint64_t new_clk)
+{
+	uint64_t old_clk;
+
+	old_clk = CPU->cpu_curr_clock;
+	CPU->cpu_curr_clock = new_clk;
+
+	/*
+	 * The cpu-change-speed DTrace probe exports the frequency in Hz
+	 */
+	DTRACE_PROBE3(cpu__change__speed, processorid_t, CPU->cpu_id,
+	    uint64_t, old_clk, uint64_t, new_clk);
 }
 
 /*

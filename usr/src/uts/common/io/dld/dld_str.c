@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -59,7 +59,8 @@ static void	dld_ioc(dld_str_t *, mblk_t *);
 static void	dld_wput_nondata(dld_str_t *, mblk_t *);
 
 static void	str_mdata_raw_put(dld_str_t *, mblk_t *);
-static mblk_t	*i_dld_ether_header_update_tag(mblk_t *, uint_t, uint16_t);
+static mblk_t	*i_dld_ether_header_update_tag(mblk_t *, uint_t, uint16_t,
+    link_tagmode_t);
 static mblk_t	*i_dld_ether_header_strip_tag(mblk_t *);
 
 static uint32_t		str_count;
@@ -332,25 +333,28 @@ dld_wput(queue_t *wq, mblk_t *mp)
 	switch (DB_TYPE(mp)) {
 	case M_DATA:
 		mutex_enter(&dsp->ds_lock);
-		if (dsp->ds_dlstate == DL_IDLE) {
-			mode = dsp->ds_mode;
-			if (mode == DLD_FASTPATH || mode == DLD_RAW) {
-				DLD_DATATHR_INC(dsp);
-				mutex_exit(&dsp->ds_lock);
-				if (mode == DLD_FASTPATH) {
-					(void) str_mdata_fastpath_put(dsp, mp,
-					    0, 0);
-				} else {
-					str_mdata_raw_put(dsp, mp);
-				}
-				DLD_DATATHR_DCR(dsp);
-				break;
-			}
+		mode = dsp->ds_mode;
+		if ((dsp->ds_dlstate != DL_IDLE) ||
+		    (mode != DLD_FASTPATH && mode != DLD_RAW)) {
+			mutex_exit(&dsp->ds_lock);
+			freemsg(mp);
+			break;
 		}
-		mutex_exit(&dsp->ds_lock);
-		freemsg(mp);
-		break;
 
+		DLD_DATATHR_INC(dsp);
+		mutex_exit(&dsp->ds_lock);
+		if (mode == DLD_FASTPATH) {
+			if (dsp->ds_mip->mi_media == DL_ETHER &&
+			    (MBLKL(mp) < sizeof (struct ether_header))) {
+				freemsg(mp);
+			} else {
+				(void) str_mdata_fastpath_put(dsp, mp, 0, 0);
+			}
+		} else {
+			str_mdata_raw_put(dsp, mp);
+		}
+		DLD_DATATHR_DCR(dsp);
+		break;
 	case M_PROTO:
 	case M_PCPROTO: {
 		t_uscalar_t	prim;
@@ -694,7 +698,8 @@ str_destructor(void *buf, void *cdrarg)
  * If vid is VLAN_ID_NONE, use the VID encoded in the packet.
  */
 static mblk_t *
-i_dld_ether_header_update_tag(mblk_t *mp, uint_t pri, uint16_t vid)
+i_dld_ether_header_update_tag(mblk_t *mp, uint_t pri, uint16_t vid,
+    link_tagmode_t tagmode)
 {
 	mblk_t *hmp;
 	struct ether_vlan_header *evhp;
@@ -709,7 +714,6 @@ i_dld_ether_header_update_tag(mblk_t *mp, uint_t pri, uint16_t vid)
 		/*
 		 * Tagged packet, update the priority bits.
 		 */
-		old_tci = ntohs(evhp->ether_tci);
 		len = sizeof (struct ether_vlan_header);
 
 		if ((DB_REF(mp) > 1) || (MBLKL(mp) < len)) {
@@ -729,11 +733,18 @@ i_dld_ether_header_update_tag(mblk_t *mp, uint_t pri, uint16_t vid)
 		}
 
 		evhp = (struct ether_vlan_header *)mp->b_rptr;
+		old_tci = ntohs(evhp->ether_tci);
 	} else {
 		/*
-		 * Untagged packet. Insert the special priority tag.
-		 * First allocate a header mblk.
+		 * Untagged packet.  Two factors will cause us to insert a
+		 * VLAN header:
+		 * - This is a VLAN link (vid is specified)
+		 * - The link supports user priority tagging and the priority
+		 *   is non-zero.
 		 */
+		if (vid == VLAN_ID_NONE && tagmode == LINK_TAGMODE_VLANONLY)
+			return (mp);
+
 		hmp = allocb(sizeof (struct ether_vlan_header), BPRI_MED);
 		if (hmp == NULL)
 			return (NULL);
@@ -792,7 +803,7 @@ str_mdata_fastpath_put(dld_str_t *dsp, mblk_t *mp, uintptr_t f_hint,
 
 		if (pri != 0) {
 			newmp = i_dld_ether_header_update_tag(mp, pri,
-			    VLAN_ID_NONE);
+			    VLAN_ID_NONE, dsp->ds_dlp->dl_tagmode);
 			if (newmp == NULL)
 				goto discard;
 			mp = newmp;
@@ -891,8 +902,8 @@ str_mdata_raw_put(dld_str_t *dsp, mblk_t *mp)
 		 */
 		pri = (pri == 0) ? dsp->ds_pri : 0;
 		if ((pri != 0) || (dvid != VLAN_ID_NONE)) {
-			if ((newmp = i_dld_ether_header_update_tag(mp,
-			    pri, dvid)) == NULL) {
+			if ((newmp = i_dld_ether_header_update_tag(mp, pri,
+			    dvid, dsp->ds_dlp->dl_tagmode)) == NULL) {
 				goto discard;
 			}
 			mp = newmp;

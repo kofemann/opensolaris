@@ -61,7 +61,7 @@ extern "C" {
 /* Logical Destination register */
 #define	APIC_DEST_REG		0x34
 
-/* Destination Format rgister */
+/* Destination Format register */
 #define	APIC_FORMAT_REG		0x38
 
 /* Spurious Interrupt Vector register */
@@ -107,7 +107,7 @@ extern "C" {
 #define	LOCAL_X2APIC		0x3
 
 /* x2APIC SELF IPI Register */
-#define	X2APIC_SELF_IPI		0x100
+#define	X2APIC_SELF_IPI		0xFC
 
 /* General x2APIC constants used at various places */
 #define	APIC_SVR		12
@@ -840,8 +840,6 @@ extern int apic_nproc;
 extern int apic_next_bind_cpu;
 extern int apic_redistribute_sample_interval;
 extern int apic_multi_msi_enable;
-extern int apic_multi_msi_max;
-extern int apic_msix_max;
 extern int apic_sci_vect;
 extern uchar_t apic_ipls[];
 extern apic_reg_ops_t *apic_reg_ops;

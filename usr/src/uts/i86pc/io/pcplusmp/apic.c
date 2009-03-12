@@ -68,6 +68,7 @@
 #include <sys/sunddi.h>
 #include <sys/x_call.h>
 #include <sys/reboot.h>
+#include <sys/hpet.h>
 
 /*
  *	Local Function Prototypes
@@ -1011,10 +1012,11 @@ apic_intr_enter(int ipl, int *vectorp)
 	 * cache usage. So, we leave it as is.
 	 */
 	if (!apic_level_intr[irq]) {
-		if (apic_mode == LOCAL_APIC)
+		if (apic_mode == LOCAL_APIC) {
 			LOCAL_APIC_WRITE_REG(APIC_EOI_REG, 0);
-		else
+		} else {
 			X2APIC_WRITE(APIC_EOI_REG, 0);
+		}
 	}
 
 #ifdef	DEBUG
@@ -1650,6 +1652,8 @@ apic_shutdown(int cmd, int fcn)
 	uchar_t	byte;
 	ulong_t iflag;
 
+	hpet_acpi_fini();
+
 	/* Send NMI to all CPUs except self to do per processor shutdown */
 	iflag = intr_clear();
 #ifdef	DEBUG
@@ -2039,6 +2043,41 @@ apic_timer_disable(void)
 	    (apic_clkvect + APIC_BASE_VECT) | AV_MASK);
 }
 
+/*
+ * Set timer far into the future and return timer
+ * current Count in nanoseconds.
+ */
+hrtime_t
+apic_timer_stop_count(void)
+{
+	hrtime_t	ns_val;
+	int		enable_val, count_val;
+
+	/*
+	 * Should be called with interrupts disabled.
+	 */
+	ASSERT(!interrupts_enabled());
+
+	enable_val = apic_reg_ops->apic_read(APIC_LOCAL_TIMER);
+	if ((enable_val & AV_MASK) == AV_MASK)
+		return ((hrtime_t)-1);		/* timer is disabled */
+
+	count_val = apic_reg_ops->apic_read(APIC_CURR_COUNT);
+	ns_val = APIC_TICKS_TO_NSECS(count_val);
+
+	apic_reg_ops->apic_write(APIC_INIT_COUNT, APIC_MAXVAL);
+
+	return (ns_val);
+}
+
+/*
+ * Reprogram timer after Deep C-State.
+ */
+void
+apic_timer_restart(hrtime_t time)
+{
+	apic_timer_reprogram(time);
+}
 
 ddi_periodic_t apic_periodic_id;
 
@@ -2203,13 +2242,10 @@ apic_alloc_msi_vectors(dev_info_t *dip, int inum, int count, int pri,
 
 	if (count > 1) {
 		if (behavior == DDI_INTR_ALLOC_STRICT &&
-		    (apic_multi_msi_enable == 0 || count > apic_multi_msi_max))
+		    apic_multi_msi_enable == 0)
 			return (0);
-
 		if (apic_multi_msi_enable == 0)
 			count = 1;
-		else if (count > apic_multi_msi_max)
-			count = apic_multi_msi_max;
 	}
 
 	if ((rcount = apic_navail_vector(dip, pri)) > count)
@@ -2298,14 +2334,6 @@ apic_alloc_msix_vectors(dev_info_t *dip, int inum, int count, int pri,
 {
 	int	rcount, i;
 	major_t	major;
-
-	if (count > 1) {
-		if (behavior == DDI_INTR_ALLOC_STRICT) {
-			if (count > apic_msix_max)
-				return (0);
-		} else if (count > apic_msix_max)
-			count = apic_msix_max;
-	}
 
 	mutex_enter(&airq_mutex);
 

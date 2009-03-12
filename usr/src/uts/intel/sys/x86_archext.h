@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -214,6 +214,15 @@ extern "C" {
 #define	REG_APIC_BASE_MSR	0x1b
 #define	REG_X2APIC_BASE_MSR	0x800	/* The MSR address offset of x2APIC */
 
+#if !defined(__xpv)
+/*
+ * AMD C1E
+ */
+#define	MSR_AMD_INT_PENDING_CMP_HALT	0xC0010055
+#define	AMD_ACTONCMPHALT_SHIFT	27
+#define	AMD_ACTONCMPHALT_MASK	3
+#endif
+
 #define	MSR_DEBUGCTL		0x1d9
 
 #define	DEBUGCTL_LBR		0x01
@@ -355,6 +364,11 @@ extern "C" {
 	"\30sse4a\27mwait\26tscp\25cmp\24cx16\23sse3\22nx\21asysc"\
 	"\20htt\17sse2\16sse\15sep\14pat\13cx8\12pae\11mca"	\
 	"\10mmx\7cmov\6de\5pge\4mtrr\3msr\2tsc\1lgpg"
+
+/*
+ * Intel Deep C-State invariant TSC in leaf 0x80000007.
+ */
+#define	CPUID_TSC_CSTATE_INVARIANCE	(0x100)
 
 /*
  * x86_type is a legacy concept; this is supplanted
@@ -605,6 +619,7 @@ extern uint_t cpuid_get_dtlb_nent(struct cpu *, size_t);
 #if !defined(__xpv)
 extern uint32_t *cpuid_mwait_alloc(struct cpu *);
 extern void cpuid_mwait_free(struct cpu *);
+extern int cpuid_deep_cstates_supported(void);
 #endif
 
 struct cpu_ucode_info;
@@ -630,6 +645,8 @@ extern	char bcopy_patch_start;
 extern	char bcopy_patch_end;
 extern	char bcopy_ck_size;
 #endif
+
+extern void post_startup_cpu_fixups(void);
 
 extern uint_t workaround_errata(struct cpu *);
 

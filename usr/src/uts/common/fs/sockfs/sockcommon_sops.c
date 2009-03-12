@@ -877,20 +877,32 @@ so_poll(struct sonode *so, short events, int anyyet, short *reventsp,
 	int state = so->so_state;
 	*reventsp = 0;
 
+	/*
+	 * In sockets the errors are represented as input/output events
+	 */
 	if (so->so_error != 0 &&
-	    ((POLLIN|POLLRDNORM|POLLOUT) & events)  != 0) {
+	    ((POLLIN|POLLRDNORM|POLLOUT) & events) != 0) {
 		*reventsp = (POLLIN|POLLRDNORM|POLLOUT) & events;
 		return (0);
 	}
 
 	/*
-	 * As long as there is buffer to send data, and the socket is
-	 * in a state where it can send data (i.e., connected for
-	 * connection oriented protocols), then turn on POLLOUT events
+	 * If the socket is in a state where it can send data
+	 * turn on POLLWRBAND and POLLOUT events.
 	 */
-	if (!so->so_snd_qfull && ((so->so_mode & SM_CONNREQUIRED) == 0 ||
-	    state & SS_ISCONNECTED)) {
-		*reventsp |= POLLOUT & events;
+	if ((so->so_mode & SM_CONNREQUIRED) == 0 || (state & SS_ISCONNECTED)) {
+		/*
+		 * out of band data is allowed even if the connection
+		 * is flow controlled
+		 */
+		*reventsp |= POLLWRBAND & events;
+		if (!so->so_snd_qfull) {
+			/*
+			 * As long as there is buffer to send data
+			 * turn on POLLOUT events
+			 */
+			*reventsp |= POLLOUT & events;
+		}
 	}
 
 	/*
@@ -922,8 +934,9 @@ so_poll(struct sonode *so, short events, int anyyet, short *reventsp,
 			*reventsp |= (POLLIN|POLLRDNORM) & events;
 
 		/* Urgent data */
-		if ((state & SS_OOBPEND) != 0)
-			*reventsp |= (POLLRDBAND) & events;
+		if ((state & SS_OOBPEND) != 0) {
+			*reventsp |= (POLLRDBAND | POLLPRI) & events;
+		}
 	}
 
 	if (!*reventsp && !anyyet) {
@@ -1190,7 +1203,7 @@ so_queue_msg(sock_upper_handle_t sock_handle, mblk_t *mp,
 	}
 
 	mutex_enter(&so->so_lock);
-	if (so->so_state & (SS_FALLBACK_PENDING | SS_FALLBACK_COMP)) {
+	if (so->so_state & (SS_FALLBACK_DRAIN | SS_FALLBACK_COMP)) {
 		SOD_DISABLE(sodp);
 		mutex_exit(&so->so_lock);
 		*errorp = EOPNOTSUPP;

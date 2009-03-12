@@ -1,6 +1,6 @@
 /*
- * Copyright 2008, Intel Corporation
- * Copyright 2008, Sun Microsystems, Inc
+ * Copyright 2009, Intel Corporation
+ * Copyright 2009, Sun Microsystems, Inc
  *
  * This file is part of PowerTOP
  *
@@ -49,6 +49,7 @@
 int 		g_ncpus;
 processorid_t 	*cpu_table;
 const int	true = 1;
+boolean_t	gui;
 
 int
 main(int argc, char **argv)
@@ -79,8 +80,10 @@ main(int argc, char **argv)
 	ticktime = ticktime_usr = INTERVAL_DEFAULT;
 	displaytime 	= 0.0;
 	dump 		= 0;
+	gui		= B_FALSE;
 	event_mode	= ' ';
 	max_cstate	= 0;
+	g_turbo_supported = B_FALSE;
 
 	while ((c = getopt_long(argc, argv, "d:vt:h", opts, &index2)) != EOF) {
 		if (c == -1)
@@ -126,7 +129,7 @@ main(int argc, char **argv)
 		usage();
 	}
 
-	(void) printf("%s   (C) 2008 Intel Corporation\n\n", TITLE);
+	(void) printf("%s   (C) 2009 Intel Corporation\n\n", TITLE);
 
 	/*
 	 * Enumerate the system's CPUs
@@ -159,8 +162,16 @@ main(int argc, char **argv)
 	if (pt_events_stat_prepare() != -1)
 		features |= FEATURE_EVENTS;
 
+	/* Prepare turbo statistics */
+	if (pt_turbo_stat_prepare() == 0) {
+		features |= FEATURE_TURBO;
+	}
+
 	(void) printf(_("Collecting data for %.2f second(s) \n"),
 	    (float)ticktime);
+
+	if (!dump)
+		gui = B_TRUE;
 
 	last = gethrtime();
 
@@ -229,6 +240,12 @@ main(int argc, char **argv)
 
 		if (reinit)
 			continue;
+
+		/* Collect turbo statistics */
+		if (features & FEATURE_TURBO &&
+		    pt_turbo_stat_collect() < 0) {
+			exit(EXIT_FAILURE);
+		}
 
 		/*
 		 * Initialize curses if we're not dumping and

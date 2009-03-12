@@ -2524,22 +2524,33 @@ configure_shared_network_interfaces(zlog_t *zlogp)
 	return (0);
 }
 
+static void
+zdlerror(zlog_t *zlogp, dladm_status_t err, const char *dlname, const char *str)
+{
+	char errmsg[DLADM_STRSIZE];
+
+	(void) dladm_status2str(err, errmsg);
+	zerror(zlogp, B_FALSE, "%s '%s': %s", str, dlname, errmsg);
+}
+
 static int
 add_datalink(zlog_t *zlogp, char *zone_name, char *dlname)
 {
+	dladm_status_t err;
+
 	/* First check if it's in use by global zone. */
 	if (zonecfg_ifname_exists(AF_INET, dlname) ||
 	    zonecfg_ifname_exists(AF_INET6, dlname)) {
-		errno = EPERM;
-		zerror(zlogp, B_TRUE, "WARNING: skipping network interface "
-		    "'%s' which is used in the global zone.", dlname);
+		zerror(zlogp, B_FALSE, "WARNING: skipping network interface "
+		    "'%s' which is used in the global zone", dlname);
 		return (-1);
 	}
 
 	/* Set zoneid of this link. */
-	if (dladm_setzid(dld_handle, dlname, zone_name) != DLADM_STATUS_OK) {
-		zerror(zlogp, B_TRUE, "WARNING: unable to add network "
-		    "interface '%s'.", dlname);
+	err = dladm_setzid(dld_handle, dlname, zone_name);
+	if (err != DLADM_STATUS_OK) {
+		zdlerror(zlogp, err, dlname,
+		    "WARNING: unable to add network interface");
 		return (-1);
 	}
 
@@ -2549,10 +2560,12 @@ add_datalink(zlog_t *zlogp, char *zone_name, char *dlname)
 static int
 remove_datalink(zlog_t *zlogp, char *dlname)
 {
-	if (dladm_setzid(dld_handle, dlname, GLOBAL_ZONENAME)
-	    != DLADM_STATUS_OK) {
-		zerror(zlogp, B_TRUE, "unable to release network "
-		    "interface '%s'", dlname);
+	dladm_status_t err;
+
+	err = dladm_setzid(dld_handle, dlname, GLOBAL_ZONENAME);
+	if (err != DLADM_STATUS_OK) {
+		zdlerror(zlogp, err, dlname,
+		    "unable to release network interface");
 		return (-1);
 	}
 	return (0);
@@ -4224,6 +4237,14 @@ vplat_create(zlog_t *zlogp, zone_mnt_t mount_cmd)
 		    (bh = brand_open(attr.ba_brandname)) == NULL) {
 			zerror(zlogp, B_FALSE,
 			    "unable to determine brand name");
+			goto error;
+		}
+
+		if (!is_system_labeled() &&
+		    (strcmp(attr.ba_brandname, LABELED_BRAND_NAME) == 0)) {
+			brand_close(bh);
+			zerror(zlogp, B_FALSE,
+			    "cannot boot labeled zone on unlabeled system");
 			goto error;
 		}
 

@@ -484,7 +484,7 @@ smb_delete_remove_file(smb_request_t *sr, smb_error_t *err)
 	fqi = &sr->arg.dirop.fqi;
 	node = fqi->last_snode;
 
-	smb_oplock_break(node);
+	(void) smb_oplock_break(node, SMB_SESSION_GET_ID(sr->session), B_FALSE);
 
 	smb_node_start_crit(node, RW_READER);
 
@@ -570,22 +570,26 @@ smb_delete_check_path(smb_request_t *sr, boolean_t *wildcard)
 		{"..\\", 3}
 	};
 
-	/* check for wildcards in path */
-	wildcards = smb_convert_unicode_wildcards(fqi->path);
-
 	/* find last component, strip trailing '\\' */
 	p = fqi->path + strlen(fqi->path) - 1;
 	while (*p == '\\') {
 		*p = '\0';
 		--p;
 	}
-	if ((p = strrchr(fqi->path, '\\')) == NULL) {
+
+	if ((p = strrchr(fqi->path, '\\')) == NULL)
 		last_comp = fqi->path;
-	} else {
+	else
 		last_comp = ++p;
 
-		/* wildcards in path > wildcards in last_comp */
-		if (smb_convert_unicode_wildcards(last_comp) != wildcards) {
+	wildcards = smb_convert_wildcards(last_comp);
+
+	if (last_comp != fqi->path) {
+		/*
+		 * Wildcards are only allowed in the last component.
+		 * Check for additional wildcards in the path.
+		 */
+		if (smb_convert_wildcards(fqi->path) != wildcards) {
 			smbsr_error(sr, NT_STATUS_OBJECT_NAME_INVALID,
 			    ERRDOS, ERROR_INVALID_NAME);
 			return (-1);

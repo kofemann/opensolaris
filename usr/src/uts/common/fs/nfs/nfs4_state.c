@@ -1816,6 +1816,11 @@ rfs4_findfile_withlock(nfs_server_instance_t *instp, vnode_t *vp, nfs_fh4 *fh,
 				rfs4_dbe_hold(fp->dbe);
 				rfs4_dbe_unlock(fp->dbe);
 				rw_enter(&fp->file_rwlock, RW_WRITER);
+				if (fp->vp == NULL) {
+					rw_exit(&fp->file_rwlock);
+					rfs4_file_rele(fp);
+					fp = NULL;
+				}
 			}
 		}
 	} else {

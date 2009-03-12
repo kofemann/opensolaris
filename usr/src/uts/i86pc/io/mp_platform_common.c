@@ -62,7 +62,10 @@
 #include <sys/note.h>
 #include <sys/pci_intr_lib.h>
 #include <sys/sunndi.h>
-
+#if !defined(__xpv)
+#include <sys/hpet.h>
+#include <sys/clock.h>
+#endif
 
 /*
  *	Local Function Prototypes
@@ -103,6 +106,12 @@ int apic_debug_mps_id = 0;	/* 1 - print MPS ID strings */
 int apic_sci_vect = -1;
 iflag_t apic_sci_flags;
 
+#if !defined(__xpv)
+/* ACPI HPET interrupt configuration; -1 if HPET not used */
+int apic_hpet_vect = -1;
+iflag_t apic_hpet_flags;
+#endif
+
 /*
  * psm name pointer
  */
@@ -133,7 +142,7 @@ struct ioapic_reprogram_data apic_reprogram_info[APIC_MAX_VECTOR+1];
  * is indexed by IRQ number, NOT by vector number.
  */
 
-int	apic_intr_policy = INTR_ROUND_ROBIN_WITH_AFFINITY;
+int	apic_intr_policy = INTR_ROUND_ROBIN;
 
 int	apic_next_bind_cpu = 1; /* For round robin assignment */
 				/* start with cpu 1 */
@@ -892,6 +901,17 @@ acpi_probe(char *modname)
 			cmn_err(CE_CONT,
 			    "?Using ACPI for CPU/IOAPIC information ONLY\n");
 		}
+
+#if !defined(__xpv)
+		/*
+		 * probe ACPI for hpet information here which is used later
+		 * in apic_picinit().
+		 */
+		if (hpet_acpi_init(&apic_hpet_vect, &apic_hpet_flags) < 0) {
+			cmn_err(CE_NOTE, "!ACPI HPET table query failed\n");
+		}
+#endif
+
 		return (PSM_SUCCESS);
 	}
 	/* if setting APIC mode failed above, we fall through to cleanup */
@@ -1324,6 +1344,40 @@ ioapic_init_intr(int mask_apic)
 
 		irqptr->airq_share++;
 	}
+
+#if !defined(__xpv)
+	/*
+	 * Hack alert: deal with ACPI HPET interrupt chicken/egg here.
+	 */
+	if (apic_hpet_vect > 0) {
+		/*
+		 * hpet has already done add_avintr(); we just need
+		 * to finish the job by mimicing translate_irq()
+		 *
+		 * Fake up an intrspec and setup the tables
+		 */
+		ispec.intrspec_vec = apic_hpet_vect;
+		ispec.intrspec_pri = CBE_HIGH_PIL;
+
+		if (apic_setup_irq_table(NULL, apic_hpet_vect, NULL,
+		    &ispec, &apic_hpet_flags, DDI_INTR_TYPE_FIXED) < 0) {
+			cmn_err(CE_WARN, "!apic: HPET setup failed");
+			return;
+		}
+		irqptr = apic_irq_table[apic_hpet_vect];
+
+		iflag = intr_clear();
+		lock_set(&apic_ioapic_lock);
+
+		/* Program I/O APIC */
+		(void) apic_setup_io_intr(irqptr, apic_hpet_vect, B_FALSE);
+
+		lock_clear(&apic_ioapic_lock);
+		intr_restore(iflag);
+
+		irqptr->airq_share++;
+	}
+#endif	/* !defined(__xpv) */
 }
 
 /*
@@ -1651,9 +1705,6 @@ apic_delspl_common(int irqno, int ipl, int min_ipl, int max_ipl)
 		 * of the multi-MSI support
 		 */
 		if (i_ddi_intr_get_current_nenables(irqptr->airq_dip) == 1) {
-			apic_pci_msi_unconfigure(irqptr->airq_dip,
-			    DDI_INTR_TYPE_MSI, irqptr->airq_ioapicindex);
-
 			apic_pci_msi_disable_mode(irqptr->airq_dip,
 			    DDI_INTR_TYPE_MSI);
 		}
@@ -2356,10 +2407,11 @@ apic_bind_intr(dev_info_t *dip, int irq, uchar_t ioapicid, uchar_t intin)
 
 					cmn_err(CE_CONT,
 					    "!%s: %s (%s) instance #%d "
-					    "vector 0x%x ioapic 0x%x "
+					    "irq 0x%x vector 0x%x ioapic 0x%x "
 					    "intin 0x%x is bound to cpu %d\n",
 					    psm_name,
 					    name, drv_name, instance, irq,
+					    apic_irq_table[irq]->airq_vector,
 					    ioapicid, intin, cpu);
 					return (cpu);
 				}
@@ -2426,14 +2478,16 @@ apic_bind_intr(dev_info_t *dip, int irq, uchar_t ioapicid, uchar_t intin)
 		}
 	}
 	if (drv_name != NULL)
-		cmn_err(CE_CONT, "!%s: %s (%s) instance %d "
+		cmn_err(CE_CONT, "!%s: %s (%s) instance %d irq 0x%x "
 		    "vector 0x%x ioapic 0x%x intin 0x%x is bound to cpu %d\n",
-		    psm_name, name, drv_name, instance,
-		    irq, ioapicid, intin, bind_cpu & ~IRQ_USER_BOUND);
+		    psm_name, name, drv_name, instance, irq,
+		    apic_irq_table[irq]->airq_vector, ioapicid, intin,
+		    bind_cpu & ~IRQ_USER_BOUND);
 	else
-		cmn_err(CE_CONT, "!%s: "
+		cmn_err(CE_CONT, "!%s: irq 0x%x "
 		    "vector 0x%x ioapic 0x%x intin 0x%x is bound to cpu %d\n",
-		    psm_name, irq, ioapicid, intin, bind_cpu & ~IRQ_USER_BOUND);
+		    psm_name, irq, apic_irq_table[irq]->airq_vector, ioapicid,
+		    intin, bind_cpu & ~IRQ_USER_BOUND);
 
 	return ((uint32_t)bind_cpu);
 }

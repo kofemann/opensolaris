@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- *	Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ *	Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  *	Use is subject to license terms.
  */
 
@@ -78,8 +78,6 @@ static rkstat_t rkstat_template = {
 /* maximum number of messages allowed on the mi's mi_msg_list */
 int nfs4_msg_max = NFS4_MSG_MAX;
 #define	DEFAULT_LEASE	180
-
-static char *strdup(const char *);
 
 /*
  * Sets the appropiate fields of "ep", given "id" and various parameters.
@@ -1516,22 +1514,4 @@ nfs4_mi_kstat_inc_no_grace(mntinfo4_t *mi)
 
 	rsp = (rkstat_t *)mi->mi_recov_ksp->ks_data;
 	rsp->no_grace.value.ul++;
-}
-
-/*
- * Allocate and copy a string.  XXX There really ought to be a single
- * strdup() for the entire kernel.
- */
-static char *
-strdup(const char *s)
-{
-	size_t len;
-	char *new;
-
-	len = strlen(s);
-	new = kmem_alloc(len + 1, KM_SLEEP);
-	bcopy(s, new, len);
-	new[len] = '\0';
-
-	return (new);
 }

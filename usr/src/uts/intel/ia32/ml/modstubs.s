@@ -849,6 +849,7 @@ fcnname/**/_info:							\
 	STUB(consconfig, consconfig,	0);
 	STUB(consconfig, consconfig_get_usb_kb_path,	0);
 	STUB(consconfig, consconfig_get_usb_ms_path,	0);
+	STUB(consconfig, consconfig_get_plat_fbpath,	0);
 	END_MODULE(consconfig);
 #endif
 
@@ -1313,6 +1314,26 @@ fcnname/**/_info:							\
 	NO_UNLOAD_STUB(dcopy, dcopy_cmd_post, nomod_minus_one);
 	NO_UNLOAD_STUB(dcopy, dcopy_cmd_poll, nomod_minus_one);
 	END_MODULE(dcopy);
+#endif
+
+/*
+ * Stubs for acpica
+ */
+#ifndef ACPICA_MODULE
+	MODULE(acpica,misc);
+	NO_UNLOAD_STUB(acpica, AcpiOsReadPort, nomod_minus_one) ;
+	NO_UNLOAD_STUB(acpica, AcpiOsWritePort, nomod_minus_one) ;
+	NO_UNLOAD_STUB(acpica, AcpiInstallNotifyHandler, nomod_minus_one) ;
+	NO_UNLOAD_STUB(acpica, AcpiRemoveNotifyHandler, nomod_minus_one) ;
+	NO_UNLOAD_STUB(acpica, AcpiEvaluateObject, nomod_minus_one) ;
+	NO_UNLOAD_STUB(acpica, AcpiEvaluateObjectTyped, nomod_minus_one) ;
+	NO_UNLOAD_STUB(acpica, AcpiSetRegister, nomod_minus_one) ;
+	NO_UNLOAD_STUB(acpica, AcpiGetRegister, nomod_minus_one) ;
+	NO_UNLOAD_STUB(acpica, AcpiOsFree, nomod_minus_one) ;
+	NO_UNLOAD_STUB(acpica, acpica_get_handle_cpu, nomod_minus_one) ;
+	NO_UNLOAD_STUB(acpica, acpica_get_global_FADT, nomod_minus_one) ;
+	NO_UNLOAD_STUB(acpica, __acpi_wbinvd, nomod_minus_one) ;
+	END_MODULE(acpica);
 #endif
 
 #ifndef IPNET_MODULE

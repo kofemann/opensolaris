@@ -108,7 +108,6 @@
 #include <sys/kobj.h>
 #include <sys/kobj_lex.h>
 #include <sys/cpc_impl.h>
-#include <sys/x86_archext.h>
 #include <sys/cpu_module.h>
 #include <sys/smbios.h>
 #include <sys/debug_info.h>
@@ -137,6 +136,7 @@ extern void progressbar_init(void);
 extern void progressbar_start(void);
 extern void brand_init(void);
 extern void pcf_init(void);
+extern void pg_init(void);
 
 extern int size_pse_array(pgcnt_t, int);
 
@@ -2114,6 +2114,7 @@ startup_end(void)
 		prom_printf("ERROR: failed to attach AMD IOMMU\n");
 	}
 #endif
+	post_startup_cpu_fixups();
 
 	PRM_POINT("startup_end() done");
 }
@@ -2128,6 +2129,8 @@ ulong_t  _bdhs34;
 void
 post_startup(void)
 {
+	extern void cpupm_init(cpu_t *);
+
 	/*
 	 * Set the system wide, processor-specific flags to be passed
 	 * to userland via the aux vector for performance hints and
@@ -2186,7 +2189,11 @@ post_startup(void)
 
 	maxmem = freemem;
 
+	cpupm_init(CPU);
+
 	add_cpunode2devtree(CPU->cpu_id, CPU->cpu_m.mcpu_cpi);
+
+	pg_init();
 }
 
 static int

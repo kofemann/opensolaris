@@ -21,7 +21,7 @@
 #
 # uts/i86pc/pv_cmdk/Makefile
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #	This makefile drives the production of the xdc driver.
@@ -61,8 +61,8 @@ ALL_TARGET	= $(BINARY)
 LINT_TARGET	= $(LINT_MODULE).lint
 INSTALL_TARGET	= $(BINARY) $(ROOTMODULE)
 
-LDFLAGS		+= -dy -Nmisc/strategy -Nmisc/cmlb
-LDFLAGS		+= -Ndrv/xpvd -Ndrv/xdf
+LDFLAGS		+= -dy -Nmisc/strategy -Nmisc/cmlb -Ndrv/xpvd -Ndrv/xdf
+LDFLAGS		+= -Nmisc/hvm_cmdk
 
 CPPFLAGS	+= -D_EXTVTOC
 

@@ -601,7 +601,7 @@ udapl/udapl_tavor:	udapl/libdat
 libzfs:		libdevinfo libdevid libgen libnvpair libuutil libiscsitgt
 libzfs_jni:	libdiskmgt libnvpair libzfs
 libzpool:	libavl libumem libnvpair
-libsec:		libavl
+libsec:		libavl libidmap
 libdserv:	libc libumem libuutil libscf
 libnfs:		libc libumem libuutil libscf libzfs
 brand:		libc libsocket

@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -54,6 +54,7 @@
 #include <sys/socket.h>
 #include <sys/ksocket.h>
 #include <sys/sodirect.h>
+#include <sys/kstat.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -191,19 +192,19 @@ struct sonode {
 	short		so_pollev;	/* events that should be generated */
 
 	/* Receive */
-	unsigned int	so_rcv_queued;
-	mblk_t		*so_rcv_q_head;
+	unsigned int	so_rcv_queued;	/* # bytes on both rcv lists */
+	mblk_t		*so_rcv_q_head;	/* processing/copyout rcv queue */
 	mblk_t		*so_rcv_q_last_head;
-	mblk_t		*so_rcv_head;		/* 1st mblk in the list */
+	mblk_t		*so_rcv_head;	/* protocol prequeue */
 	mblk_t		*so_rcv_last_head;	/* last mblk in b_next chain */
-	kcondvar_t	so_rcv_cv;
+	kcondvar_t	so_rcv_cv;	/* wait for data */
 	uint_t		so_rcv_wanted;	/* # of bytes wanted by app */
 	timeout_id_t	so_rcv_timer_tid;
 
 #define	so_rcv_thresh	so_proto_props.sopp_rcvthresh
 #define	so_rcv_timer_interval so_proto_props.sopp_rcvtimer
 
-	kcondvar_t	so_snd_cv;
+	kcondvar_t	so_snd_cv;	/* wait for snd buffers */
 	uint32_t
 		so_snd_qfull: 1,	/* Transmit full */
 		so_rcv_wakeup: 1,
@@ -291,14 +292,12 @@ struct sonode {
 
 #define	SS_SODIRECT		0x00400000 /* transport supports sodirect */
 
-/*	unused			0x01000000 */	/* was SS_LADDR_VALID */
-/*	unused			0x02000000 */	/* was SS_FADDR_VALID */
+#define	SS_SENTLASTREADSIG	0x01000000 /* last rx signal has been sent */
+#define	SS_SENTLASTWRITESIG	0x02000000 /* last tx signal has been sent */
 
-#define	SS_SENTLASTREADSIG	0x10000000 /* last rx signal has been sent */
-#define	SS_SENTLASTWRITESIG	0x20000000 /* last tx signal has been sent */
-
-#define	SS_FALLBACK_PENDING	0x40000000
-#define	SS_FALLBACK_COMP	0x80000000
+#define	SS_FALLBACK_DRAIN	0x20000000 /* data was/is being drained */
+#define	SS_FALLBACK_PENDING	0x40000000 /* fallback is pending */
+#define	SS_FALLBACK_COMP	0x80000000 /* fallback has completed */
 
 
 /* Set of states when the socket can't be rebound */
@@ -412,6 +411,12 @@ typedef struct smod_info {
 	list_node_t	smod_node;
 } smod_info_t;
 
+typedef struct sockparams_stats {
+	kstat_named_t	sps_nfallback;	/* # of fallbacks to TPI */
+	kstat_named_t	sps_nactive;	/* # of active sockets */
+	kstat_named_t	sps_ncreate;	/* total # of created sockets */
+} sockparams_stats_t;
+
 /*
  * sockparams
  *
@@ -433,6 +438,8 @@ struct sockparams {
 
 	kmutex_t	sp_lock;	/* lock for refcnt */
 	uint64_t	sp_refcnt;	/* entry reference count */
+	sockparams_stats_t sp_stats;
+	kstat_t		*sp_kstat;
 
 	/*
 	 * The entries below are only modified while holding

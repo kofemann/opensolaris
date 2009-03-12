@@ -23,14 +23,12 @@
 
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef _SYS_TYPES_H
 #define	_SYS_TYPES_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/feature_tests.h>
 #include <sys/isa_defs.h>
@@ -191,7 +189,15 @@ typedef	long		blksize_t;	/* used for block sizes */
 typedef enum { _B_FALSE, _B_TRUE } boolean_t;
 #else
 typedef enum { B_FALSE, B_TRUE } boolean_t;
+#ifdef _KERNEL
+#define	VALID_BOOLEAN(x)	(((x) == B_FALSE) || ((x) == B_TRUE))
+#define	VOID2BOOLEAN(x)		(((uintptr_t)(x) == 0) ? B_FALSE : B_TRUE)
+#endif /* _KERNEL */
 #endif /* defined(__XOPEN_OR_POSIX) */
+
+#ifdef _KERNEL
+#define	BOOLEAN2VOID(x)		((x) ? 1 : 0)
+#endif /* _KERNEL */
 
 /*
  * The {u,}pad64_t types can be used in structures such that those structures
@@ -570,6 +576,13 @@ typedef	unsigned long	ulong;
 #define	LONG_MAX	2147483647L	/* max value of a "long int" */
 #define	ULONG_MAX	4294967295UL	/* max of "unsigned long int" */
 #endif
+
+#define	LLONG_MIN	(-9223372036854775807LL-1LL)
+					/* min of "long long int" */
+#define	LLONG_MAX	9223372036854775807LL
+					/* max of "long long int" */
+#define	ULLONG_MAX	18446744073709551615ULL
+					/* max of "unsigned long long int" */
 
 #endif	/* defined(_KERNEL) */
 

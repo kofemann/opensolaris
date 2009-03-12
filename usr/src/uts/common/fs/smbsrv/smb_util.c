@@ -23,6 +23,8 @@
  * Use is subject to license terms.
  */
 
+#include <sys/param.h>
+#include <sys/types.h>
 #include <sys/tzfile.h>
 #include <sys/atomic.h>
 #include <sys/kidmap.h>
@@ -34,15 +36,15 @@
 #include <smbsrv/smbinfo.h>
 #include <smbsrv/smb_xdr.h>
 #include <smbsrv/smb_vops.h>
-
 #include <smbsrv/smb_idmap.h>
 
 #include <sys/sid.h>
 #include <sys/priv_names.h>
 
-#ifdef DEBUG
-uint_t smb_tsd_key;
-#endif
+#define	SMB_NAME83_BASELEN		8
+#define	SMB_NAME83_EXTLEN		3
+
+static void smb_replace_wildcards(char *);
 
 static boolean_t
 smb_thread_continue_timedwait_locked(smb_thread_t *thread, int ticks);
@@ -95,69 +97,130 @@ smb_ascii_or_unicode_null_len(struct smb_request *sr)
 	return (1);
 }
 
+/*
+ * Substitute wildcards and return the number of wildcards in the post
+ * conversion pattern.
+ */
 int
-smb_convert_unicode_wildcards(char *path)
+smb_convert_wildcards(char *pattern)
 {
-	int	wildcards = 0;
-	char	*ptr = path;
-	char	nch;
+	char	*p = pattern;
+	int	n_wildcard = 0;
 
-	/*
-	 * Special case "<" for "dir *."
-	 */
-	if (strcmp(path, "<") == 0) {
-		return (1);
-	}
-	while (*ptr) {
-		nch = *(ptr + 1);
-		switch (*ptr) {
-		case '*' : /* Count non-unicode wildcards while we're at it */
-		case '?' :
-			wildcards++;
-			break;
-		case '<' :
-			if (nch == '.') {
-				*(ptr++) = '*';
-				wildcards++;
-			}
-			break;
-		case '>' :
-			*ptr = '?';
-			wildcards++;
-			break;
-		case '\"' :
-			*ptr = '.';
-			break;
-		}
-		ptr++;
-	}
-	/* NT DOS wildcards... */
-	if (strcmp(path, "????????.???") == 0) {
-		(void) strcpy(path, "*");
-	} else if (strncmp(path, "????????.", 9) == 0) {
-		*path = '*';
-		(void) strcpy(path+1, path+8);
+	smb_replace_wildcards(pattern);
+
+	while (*p != '\0') {
+		if (*p == '*' || *p == '?')
+			++n_wildcard;
+		++p;
 	}
 
-	return (wildcards);
+	return (n_wildcard);
 }
 
 /*
- * smb_is_dot_or_dotdot
+ * When replacing wildcards a '.' in a name is treated as a base and
+ * extension separator even if the name is longer than 8.3.
  *
- * Use when checking for the "." and ".." entries in a directory.
- * Returns B_TRUE if the name is "." or "..". Otherwise returns B_FALSE.
+ * The '*' character matches an entire part of the name.  For example,
+ * "*.abc" matches any name with an extension of "abc".
+ *
+ * The '?' character matches a single character.
+ * If the base contains all ? (8 or more) then it is treated as *.
+ * If the extension contains all ? (3 or more) then it is treated as *.
+ *
+ * Clients convert ASCII wildcards to Unicode wildcards as follows:
+ *
+ *	? is converted to >
+ *	. is converted to " if it is followed by ? or *
+ *	* is converted to < if it is followed by .
+ *
+ * Note that clients convert "*." to '< and drop the '.' but "*.txt"
+ * is sent as "<.TXT", i.e.
+ *
+ * 	dir *.		->	dir <
+ * 	dir *.txt	->	dir <.TXT
+ *
+ * Since " and < are illegal in Windows file names, we always convert
+ * these Unicode wildcards without checking the following character.
  */
-boolean_t
-smb_is_dot_or_dotdot(const char *name)
+static void
+smb_replace_wildcards(char *pattern)
 {
-	if (*name != '.')
-		return (B_FALSE);
+	static char *match_all[] = {
+		"*.",
+		"*.*"
+	};
+	char	*extension;
+	char	*p;
+	int	len;
+	int	i;
 
-	if ((name[1] == 0) || (name[1] == '.' && name[2] == 0))
-		return (B_TRUE);
+	/*
+	 * Special case "<" for "dir *.", and fast-track for "*".
+	 */
+	if ((*pattern == '<') || (*pattern == '*')) {
+		if (*(pattern + 1) == '\0') {
+			*pattern = '*';
+			return;
+		}
+	}
 
-	return (B_FALSE);
+	for (p = pattern; *p != '\0'; ++p) {
+		switch (*p) {
+		case '<':
+			*p = '*';
+			break;
+		case '>':
+			*p = '?';
+			break;
+		case '\"':
+			*p = '.';
+			break;
+		default:
+			break;
+		}
+	}
+
+	/*
+	 * Replace "????????.ext" with "*.ext".
+	 */
+	p = pattern;
+	p += strspn(p, "?");
+	if (*p == '.') {
+		*p = '\0';
+		len = strlen(pattern);
+		*p = '.';
+		if (len >= SMB_NAME83_BASELEN) {
+			*pattern = '*';
+			(void) strlcpy(pattern + 1, p, MAXPATHLEN - 1);
+		}
+	}
+
+	/*
+	 * Replace "base.???" with 'base.*'.
+	 */
+	if ((extension = strrchr(pattern, '.')) != NULL) {
+		p = ++extension;
+		p += strspn(p, "?");
+		if (*p == '\0') {
+			len = strlen(extension);
+			if (len >= SMB_NAME83_EXTLEN) {
+				*extension = '\0';
+				(void) strlcat(pattern, "*", MAXPATHLEN);
+			}
+		}
+	}
+
+	/*
+	 * Replace anything that matches an entry in match_all with "*".
+	 */
+	for (i = 0; i < sizeof (match_all) / sizeof (match_all[0]); ++i) {
+		if (strcmp(pattern, match_all[i]) == 0) {
+			(void) strlcpy(pattern, "*", MAXPATHLEN);
+			break;
+		}
+	}
 }
 
 /*
@@ -195,14 +258,8 @@ smb_is_dot_or_dotdot(const char *name)
  * Returns true if the file and sattr match; otherwise, returns false.
  */
 boolean_t
-smb_sattr_check(uint16_t dosattr, uint16_t sattr, char *name)
+smb_sattr_check(uint16_t dosattr, uint16_t sattr)
 {
-	if (name) {
-		if (smb_is_dot_or_dotdot(name) &&
-		    !(sattr & FILE_ATTRIBUTE_HIDDEN))
-			return (B_FALSE);
-	}
-
 	if ((dosattr & FILE_ATTRIBUTE_DIRECTORY) &&
 	    !(sattr & FILE_ATTRIBUTE_DIRECTORY))
 		return (B_FALSE);
@@ -1794,37 +1851,6 @@ smb_timegm(struct tm *tm)
 	return (tsec);
 }
 
-#ifdef	DEBUG
-uint32_t	smb_audit_flags = SMB_AUDIT_NODE;
-#else
-uint32_t	smb_audit_flags = 0;
-#endif
-
-void
-smb_audit_buf_node_create(smb_node_t *node)
-{
-	smb_audit_buf_node_t	*abn;
-
-	if (smb_audit_flags & SMB_AUDIT_NODE) {
-		abn = kmem_zalloc(sizeof (smb_audit_buf_node_t), KM_SLEEP);
-		abn->anb_max_index = SMB_AUDIT_BUF_MAX_REC - 1;
-		node->n_audit_buf = abn;
-	}
-}
-
-void
-smb_audit_buf_node_destroy(smb_node_t *node)
-{
-	smb_audit_buf_node_t	*abn;
-
-	abn = node->n_audit_buf;
-
-	if (abn) {
-		node->n_audit_buf = NULL;
-		kmem_free(abn, sizeof (smb_audit_buf_node_t));
-	}
-}
-
 /*
  * smb_cred_set_sid
  *
@@ -2090,4 +2116,16 @@ smb_cred_create_privs(cred_t *user_cr, uint32_t privileges)
 	}
 
 	return (cr);
+}
+
+/*
+ * smb_panic
+ *
+ * Logs the file name, function name and line number passed in and panics the
+ * system.
+ */
+void
+smb_panic(char *file, const char *func, int line)
+{
+	cmn_err(CE_PANIC, "%s:%s:%d\n", file, func, line);
 }

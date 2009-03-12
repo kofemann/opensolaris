@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/param.h>
@@ -175,8 +173,8 @@ ndi_prop_remove_all(dev_info_t *dip)
  * requests to remove an eventcall would bubble up the tree.  Today, this
  * parameter is ignored.
  * Input Parameters:
- *	dip 	- Ignored.
- *	rdip 	- device driver posting the event
+ *	dip	- Ignored.
+ *	rdip	- device driver posting the event
  *	cookie	- valid ddi_eventcookie_t, obtained by caller prior to
  *		  invocation of this routine
  *	impl_data - used by framework
@@ -1724,7 +1722,7 @@ ndi_event_add_callback(ndi_event_hdl_t handle, dev_info_t *child_dip,
 	cb->ndi_evtcb_callback	= event_callback;
 	cb->ndi_evtcb_arg	= arg;
 	cb->ndi_evtcb_cookie	= cookie;
-	cb->devname 		= (char *)ddi_driver_name(child_dip);
+	cb->devname		= (char *)ddi_driver_name(child_dip);
 
 	*cb_id = (ddi_callback_id_t)cb;
 	mutex_enter(&ndi_event_hdl->ndi_evthdl_cb_mutex);
@@ -2157,8 +2155,9 @@ ndi_dev_is_pseudo_node(dev_info_t *dip)
 {
 	/*
 	 * NOTE: this does NOT mean the pseudo branch of the device tree,
-	 * it means the node was created by software (DEVI_SID_NODEID |
-	 * DEVI_PSEUDO_NODEID) instead of being generated from a PROM node.
+	 * it means the node was created by software (DEVI_SID_NODEID ||
+	 * DEVI_PSEUDO_NODEID || DEVI_SID_HIDDEN_NODEID) instead of being
+	 * generated from a PROM node.
 	 */
 	return (DEVI(dip)->devi_node_class == DDI_NC_PSEUDO);
 }
@@ -2167,6 +2166,24 @@ int
 ndi_dev_is_persistent_node(dev_info_t *dip)
 {
 	return ((DEVI(dip)->devi_node_attributes & DDI_PERSISTENT) != 0);
+}
+
+int
+ndi_dev_is_hidden_node(dev_info_t *dip)
+{
+	return ((DEVI(dip)->devi_node_attributes & DDI_HIDDEN_NODE) != 0);
+}
+
+void
+ndi_devi_set_hidden(dev_info_t *dip)
+{
+	DEVI(dip)->devi_node_attributes |= DDI_HIDDEN_NODE;
+}
+
+void
+ndi_devi_clr_hidden(dev_info_t *dip)
+{
+	DEVI(dip)->devi_node_attributes &= ~DDI_HIDDEN_NODE;
 }
 
 int
@@ -2498,5 +2515,72 @@ ndi_port_type(dev_info_t *dip, boolean_t up, uint32_t port_type)
 	} else {
 		return ((DEVI(dip)->devi_bus.port_down.info.port.type) ==
 		    port_type);
+	}
+}
+
+/* Interfaces for 'self' to set/get a child's flavor */
+void
+ndi_flavor_set(dev_info_t *child, ndi_flavor_t child_flavor)
+{
+	DEVI(child)->devi_flavor = child_flavor;
+}
+
+ndi_flavor_t
+ndi_flavor_get(dev_info_t *child)
+{
+	return (DEVI(child)->devi_flavor);
+}
+
+/*
+ * Interfaces to maintain flavor-specific private data of flavored
+ * children of self.
+ *
+ * The flavor count always includes the default (0) vanilla flavor,
+ * but storage for the vanilla flavor data pointer is in the same
+ * place that ddi_[sg]et_driver_private uses, so the flavorv
+ * storage is just for flavors 1..{nflavors-1}.
+ */
+void
+ndi_flavorv_alloc(dev_info_t *self, int nflavors)
+{
+	ASSERT(nflavors > 0 && (DEVI(self)->devi_flavorv == NULL ||
+	    nflavors == DEVI(self)->devi_flavorv_n));
+	if (nflavors <= 1 || (DEVI(self)->devi_flavorv)) {
+		return;
+	}
+	DEVI(self)->devi_flavorv =
+	    kmem_zalloc((nflavors - 1) * sizeof (void *), KM_SLEEP);
+	DEVI(self)->devi_flavorv_n = nflavors;
+}
+
+void
+ndi_flavorv_set(dev_info_t *self, ndi_flavor_t child_flavor, void *v)
+{
+	ASSERT(child_flavor < DEVI(self)->devi_flavorv_n &&
+	    DEVI(self)->devi_flavorv != NULL);
+	if (child_flavor > DEVI(self)->devi_flavorv_n ||
+	    DEVI(self)->devi_flavorv == NULL) {
+		return;
+	}
+	if (child_flavor == NDI_FLAVOR_VANILLA) {
+		ddi_set_driver_private(self, v);
+	} else {
+		DEVI(self)->devi_flavorv[child_flavor - 1] = v;
+	}
+}
+
+void	*
+ndi_flavorv_get(dev_info_t *self, ndi_flavor_t child_flavor)
+{
+	ASSERT(child_flavor < DEVI(self)->devi_flavorv_n &&
+	    DEVI(self)->devi_flavorv != NULL);
+	if (child_flavor > DEVI(self)->devi_flavorv_n ||
+	    DEVI(self)->devi_flavorv == NULL) {
+		return (NULL);
+	}
+	if (child_flavor == NDI_FLAVOR_VANILLA) {
+		return (ddi_get_driver_private(self));
+	} else {
+		return (DEVI(self)->devi_flavorv[child_flavor - 1]);
 	}
 }

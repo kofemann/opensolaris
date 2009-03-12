@@ -99,6 +99,10 @@ extern "C" {
  *
  *  o	DEVI_PSEUDO_NODEID specifics a node without persistence.
  *  o	DEVI_SID_NODEID specifies a node with persistence.
+ *  o	DEVI_SID_HIDDEN_NODEID specifies a hidden node with persistence.
+ *
+ * A node with the 'hidden' attribute will not show up in devinfo snapshots
+ * or in /devices file system.
  *
  * A node with the 'persistent' attribute will not be automatically removed by
  * the framework in the current implementation - driver.conf nodes are without
@@ -111,6 +115,7 @@ extern "C" {
 
 #define	DEVI_PSEUDO_NODEID	((int)-1)
 #define	DEVI_SID_NODEID		((int)-2)
+#define	DEVI_SID_HIDDEN_NODEID	((int)-3)
 
 #define	DEVI_PSEUDO_NEXNAME	"pseudo"
 #define	DEVI_ISA_NEXNAME	"isa"
@@ -388,6 +393,10 @@ typedef enum {
 #define	DDI_MODEL_NATIVE	DATAMODEL_NATIVE
 #define	DDI_MODEL_NONE		DATAMODEL_NONE
 
+extern char *ddi_strdup(const char *str, int flag);
+extern char *strdup(const char *str);
+extern void strfree(char *str);
+
 /*
  * Functions and data references which really should be in <sys/ddi.h>
  */
@@ -398,8 +407,6 @@ extern int physio(int (*)(struct buf *), struct buf *, dev_t,
 	int, void (*)(struct buf *), struct uio *);
 extern void disksort(struct diskhd *, struct buf *);
 
-extern long strtol(const char *, char **, int);
-extern unsigned long strtoul(const char *, char **, int);
 extern size_t strlen(const char *) __PURE;
 extern size_t strnlen(const char *, size_t) __PURE;
 extern char *strcpy(char *, const char *);
@@ -452,6 +459,8 @@ extern void *memchr(const void *, int, size_t);
 
 extern int ddi_strtol(const char *, char **, int, long *);
 extern int ddi_strtoul(const char *, char **, int, unsigned long *);
+extern int ddi_strtoll(const char *, char **, int, longlong_t *);
+extern int ddi_strtoull(const char *, char **, int, u_longlong_t *);
 
 /*
  * kiconv functions and their macros.

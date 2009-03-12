@@ -19,22 +19,22 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_PWRNOW_H
 #define	_PWRNOW_H
 
-#include <sys/cpudrv_mach.h>
+#include <sys/cpupm.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-boolean_t pwrnow_supported();
+extern boolean_t pwrnow_supported();
 
-cpudrv_pstate_ops_t pwrnow_ops;
+extern cpupm_state_ops_t pwrnow_ops;
 
 #ifdef __cplusplus
 }
