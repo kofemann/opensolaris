@@ -3866,7 +3866,7 @@ rfs4_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 			nbl_end_crit(vp);
 		VN_RELE(vp);
 		if (fp) {
-			rfs4_clear_dont_grant(fp);
+			rfs4_clear_dont_grant(cs->instp, fp);
 			rfs4_file_rele(fp);
 		}
 		goto out;
