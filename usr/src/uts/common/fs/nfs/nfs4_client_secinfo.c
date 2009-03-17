@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -456,37 +456,32 @@ check_mnt_secinfo(servinfo4_t *svp, vnode_t *vp)
 static int
 secinfo_tryroot_otw(mntinfo4_t *mi, cred_t *cr)
 {
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 argop;
-	int doqueue = 1;
+	nfs4_call_t *cp;
 	bool_t needrecov = FALSE;
 	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
 
 	/* use the flavors supported on the client */
 	secinfo_update(mi->mi_curr_serv, secinfo_support);
 
-	/* Compound {Putroofh} */
-	args.ctag = TAG_PUTROOTFH;
-
-	args.array_len = 1;
-	args.array = &argop;
-
-	argop.argop = OP_PUTROOTFH;
 retry:
 	NFS4_DEBUG(nfs4_client_call_debug, (CE_NOTE,
 	    "secinfo_tryroot_otw: %s call, mi 0x%p",
 	    needrecov ? "recov" : "first", (void*)mi));
 
-	rfs4call(mi, NULL, &args, &res, cr, &doqueue, RFSCALL_SOFT, &e);
+	cp = nfs4_call_init(mi, cr, TAG_PUTROOTFH);
+	(void) nfs4_op_putrootfh(cp);
+
+	cp->nc_rfs4call_flags |= RFSCALL_SOFT;
+	rfs4call(cp, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
 	if (e.error && !needrecov) {
+		nfs4_call_rele(cp);
 		return (e.error);
 	}
 
-	if (res.status == NFS4ERR_WRONGSEC) {
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+	if (cp->nc_res.status == NFS4ERR_WRONGSEC) {
+		nfs4_call_rele(cp);
 		if (secinfo_check(mi->mi_curr_serv))
 			goto retry;
 		/*
@@ -494,21 +489,19 @@ retry:
 		 * but still get NFS4ERR_WRONGSEC. Nothing more can
 		 * be done.
 		 */
-		return (geterrno4(res.status));
+		return (geterrno4(cp->nc_res.status));
 	}
 
 	if (needrecov) {
 		NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
 		    "secinfo_tryroot_otw: let the caller retry\n"));
-
-		if (!e.error)
-			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+		nfs4_call_rele(cp);
 		return (0);
 	}
 
-	if (res.status) {
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		return (geterrno4(res.status));
+	if (cp->nc_res.status) {
+		nfs4_call_rele(cp);
+		return (geterrno4(cp->nc_res.status));
 	}
 
 	/*
@@ -518,7 +511,7 @@ retry:
 	 * SV4_TRYSECINFO has been cleared in rfs4call.
 	 * sv_currsec will be used.
 	 */
-	(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+	nfs4_call_rele(cp);
 	return (e.error);
 }
 
@@ -617,19 +610,16 @@ comp_getn(char *inpath, int nth, component4 *comp)
 static int
 nfs4secinfo_otw(mntinfo4_t *mi, cred_t *cr, servinfo4_t *svp, int isrecov)
 {
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 *argop;
-	nfs_resop4 *resop;
-	lookup4_param_t lookuparg;
+	nfs4_call_t *cp;
+	COMPOUND4node_clnt *node;
 	uint_t path_len;
-	int doqueue;
-	int numops, num_argops;
 	char *tmp_path;
 	component4 comp;
 	uint_t ncomp, tcomp;
 	bool_t needrecov = FALSE;
 	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
+	PUTROOTFH4res *putrootfh_res;
+	SECINFO4res *secinfo_res;
 
 	(void) nfs_rw_enter_sig(&svp->sv_lock, RW_READER, 0);
 	ncomp = tcomp = comp_total(svp->sv_path);
@@ -638,83 +628,75 @@ nfs4secinfo_otw(mntinfo4_t *mi, cred_t *cr, servinfo4_t *svp, int isrecov)
 	ASSERT(ncomp > 0);
 
 retry:
+	cp = nfs4_call_init(mi, cr, TAG_SECINFO);
 	tmp_path = kmem_alloc(path_len + 1, KM_SLEEP);
 	(void) nfs_rw_enter_sig(&svp->sv_lock, RW_READER, 0);
 	bcopy(svp->sv_path, tmp_path, path_len + 1);
 	nfs_rw_exit(&svp->sv_lock);
 	comp_getn(tmp_path, ncomp, &comp);
 
-	args.ctag = TAG_SECINFO;
-
-	lookuparg.l4_getattrs = LKP4_NO_ATTRIBUTES;
-	lookuparg.argsp = &args;
-	lookuparg.resp = &res;
-	lookuparg.header_len = 1;	/* Putrootfh */
-	lookuparg.trailer_len = 1;	/* Secinfo */
-	lookuparg.ga_bits = MI4_EMPTY_ATTRMAP(mi);
-	lookuparg.mi = mi;
+	/* put root fh */
+	putrootfh_res = nfs4_op_putrootfh(cp);
 
 	/* setup LOOKUPs for parent path */
-	(void) nfs4lookup_setup(tmp_path, &lookuparg, 0);
-
-	argop = args.array;
-
-	/* put root fh */
-	argop[0].argop = OP_PUTROOTFH;
+	nfs4lookup_setup(cp, tmp_path, LKP4_NO_ATTRIBUTES,
+	    MI4_EMPTY_ATTRMAP(mi), 0);
 
 	/* setup SECINFO op */
-	num_argops = args.array_len;
-	argop[num_argops - 1].argop = OP_SECINFO;
-	argop[num_argops - 1].nfs_argop4_u.opsecinfo.name.utf8string_len =
-	    comp.utf8string_len;
-	argop[num_argops - 1].nfs_argop4_u.opsecinfo.name.utf8string_val =
-	    comp.utf8string_val;
-
-	doqueue = 1;
+	secinfo_res = nfs4_op_secinfo(cp, &comp);
 
 	NFS4_DEBUG(nfs4_client_call_debug, (CE_NOTE,
 	    "nfs4secinfo_otw: %s call, mi 0x%p",
 	    needrecov ? "recov" : "first", (void*)mi));
 
-	rfs4call(mi, NULL, &args, &res, cr, &doqueue, RFSCALL_SOFT, &e);
+	cp->nc_rfs4call_flags |= RFSCALL_SOFT;
+	rfs4call(cp, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
-	if (e.error && !needrecov) {
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-		kmem_free(tmp_path, path_len + 1);
-		return (e.error);
-	}
+	if (e.error && !needrecov)
+		goto out;
 
 	/*
 	 * Secinfo compound op may fail with NFS4ERR_WRONGSEC from
 	 * PUTROOTFH or LOOKUP. Special handling here to recover it.
 	 */
-	if (res.status == NFS4ERR_WRONGSEC) {
-
-		if (res.array_len == 1) {
+	if (cp->nc_res.status == NFS4ERR_WRONGSEC) {
+		if (putrootfh_res->status != NFS4_OK) {
 			/*
 			 * If a flavor can not be found via trying
 			 * all supported flavors on the client, no
 			 * more operations.
 			 */
 			ncomp = tcomp;
-			nfs4args_lookup_free(argop, num_argops);
-			kmem_free(argop,
-			    lookuparg.arglen * sizeof (nfs_argop4));
-			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+			nfs4args_lookup_free(cp);
 			kmem_free(tmp_path, path_len + 1);
+			nfs4_call_rele(cp);
 
 			if (e.error = secinfo_tryroot_otw(mi, cr)) {
 				return (e.error);
 			}
 			goto retry;
 		}
-		ncomp = res.array_len - 1;
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+
+		/* find the component that failed lookup */
+		ncomp = 0;
+		for (node = list_head(&cp->nc_args.args);
+		    node != NULL;
+		    node = list_next(&cp->nc_args.args, node)) {
+			if (node->res.resop != OP_LOOKUP)
+				continue;
+			ncomp++;
+			if (node->res.nfs_resop4_u.oplookup.status != NFS4_OK)
+				break;
+		}
+		if (node == NULL) {
+			e.error = geterrno4(cp->nc_res.status);
+			goto out;
+		}
+
+		nfs4args_lookup_free(cp);
 		kmem_free(tmp_path, path_len + 1);
+		nfs4_call_rele(cp);
 		goto retry;
 	}
 
@@ -730,17 +712,9 @@ retry:
 
 		/* If not in a recovery thread, bail out */
 		if (!isrecov) {
-			if (!e.error) {
-				e.error = geterrno4(res.status);
-				(void) xdr_free(xdr_COMPOUND4res_clnt,
-				    (caddr_t)&res);
-			}
-
-			nfs4args_lookup_free(argop, num_argops);
-			kmem_free(argop,
-			    lookuparg.arglen * sizeof (nfs_argop4));
-			kmem_free(tmp_path, path_len + 1);
-			return (e.error);
+			if (!e.error)
+				e.error = geterrno4(cp->nc_res.status);
+			goto out;
 		}
 
 		NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
@@ -748,51 +722,36 @@ retry:
 
 		abort = nfs4_start_recovery(&e, mi, NULL,
 		    NULL, NULL, NULL, OP_SECINFO, NULL);
-		if (!e.error) {
-			e.error = geterrno4(res.status);
-			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		}
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-		kmem_free(tmp_path, path_len + 1);
+		if (!e.error)
+			e.error = geterrno4(cp->nc_res.status);
 		if (abort == FALSE) {
 			/*
 			 * Return ok to let the outer loop in
 			 * nfs4_recov_thread continue with the recovery action.
 			 */
-			return (0);
+			e.error = 0;
 		}
-		return (e.error);
+		goto out;
 	}
 
-	if (res.status) {
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		kmem_free(tmp_path, path_len + 1);
-		return (geterrno4(res.status));
+	if (cp->nc_res.status) {
+		e.error = geterrno4(cp->nc_res.status);
+		goto out;
 	}
 
 	/*
 	 * Success! Now get the SECINFO result.
 	 */
-	numops = res.array_len;
-	resop = &res.array[numops-1];	/* secinfo res */
-	ASSERT(resop->resop == OP_SECINFO);
-
-	if (resop->nfs_resop4_u.opsecinfo.SECINFO4resok_len == 0) {
+	if (secinfo_res->SECINFO4resok_len == 0) {
 		/*
 		 * Server does not return any flavor for this export point.
 		 * Return EACCES.
 		 */
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(tmp_path, path_len + 1);
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		kmem_free(argop, num_argops * sizeof (nfs_argop4));
-		return (EACCES);
+		e.error = EACCES;
+		goto out;
 	}
 
-	secinfo_update(mi->mi_curr_serv, &resop->nfs_resop4_u.opsecinfo);
+	secinfo_update(mi->mi_curr_serv, secinfo_res);
 
 	(void) nfs_rw_enter_sig(&svp->sv_lock, RW_READER, 0);
 	if (svp->sv_secinfo == NULL) {
@@ -802,11 +761,8 @@ retry:
 		 * the client does not have netname/syncaddr data
 		 * from sv_dhsec.
 		 */
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		kmem_free(tmp_path, path_len + 1);
-		return (EACCES);
+		e.error = EACCES;
+		goto out;
 	}
 	nfs_rw_exit(&svp->sv_lock);
 
@@ -815,22 +771,20 @@ retry:
 	 * new secinfo data in mi.
 	 */
 	if (ncomp != tcomp) {
-
 		ncomp = tcomp;
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+		nfs4args_lookup_free(cp);
 		kmem_free(tmp_path, path_len + 1);
+		nfs4_call_rele(cp);
 		goto retry;
 	}
 
+out:
 	/* Done! */
-	nfs4args_lookup_free(argop, num_argops);
-	kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-	(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+	nfs4args_lookup_free(cp);
 	kmem_free(tmp_path, path_len + 1);
+	nfs4_call_rele(cp);
 
-	return (0); /* got the secinfo */
+	return (e.error);
 }
 
 /*
@@ -912,57 +866,47 @@ nfs4_secinfo_path(mntinfo4_t *mi, cred_t *cr, int isrecov)
 int
 nfs4_secinfo_fh_otw(mntinfo4_t *mi, nfs4_sharedfh_t *fh, char *nm, cred_t *cr)
 {
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 argop[2];
-	nfs_resop4 *resop;
-	int num_argops, doqueue;
+	nfs4_call_t *cp;
 	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
 	servinfo4_t *svp;
+	SECINFO4res *secinfo_res;
 
 	ASSERT(strlen(nm) > 0);
 
-	num_argops = 2; /* Putfh, Secinfo nm */
-	args.ctag = TAG_SECINFO;
-	args.array_len = num_argops;
-	args.array = argop;
+	cp = nfs4_call_init(mi, cr, TAG_SECINFO);
 
 	/* putfh fh */
-	argop[0].argop = OP_CPUTFH;
-	argop[0].nfs_argop4_u.opcputfh.sfh = fh;
+	(void) nfs4_op_cputfh(cp, fh);
 
 	/* setup SECINFO op */
-	argop[1].argop = OP_CSECINFO;
-	argop[1].nfs_argop4_u.opcsecinfo.cname = nm;
+	secinfo_res = nfs4_op_csecinfo(cp, nm);
 
-	doqueue = 1;
+	cp->nc_rfs4call_flags |= RFSCALL_SOFT;
+	rfs4call(cp, &e);
 
-	rfs4call(mi, NULL, &args, &res, cr, &doqueue, RFSCALL_SOFT, &e);
-
-	if (e.error)
+	if (e.error) {
+		nfs4_call_rele(cp);
 		return (e.error);
+	}
 
-	if (res.status) {
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-		return (geterrno4(res.status));
+	if (cp->nc_res.status) {
+		nfs4_call_rele(cp);
+		return (geterrno4(cp->nc_res.status));
 	}
 
 	/*
 	 * Success! Now get the SECINFO result.
 	 */
-	resop = &res.array[1];	/* secinfo res */
-	ASSERT(resop->resop == OP_SECINFO);
-
-	if (resop->nfs_resop4_u.opsecinfo.SECINFO4resok_len == 0) {
+	if (secinfo_res->SECINFO4resok_len == 0) {
 		/*
 		 * Server does not return any flavor for this export point.
 		 * Return EACCES.
 		 */
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+		nfs4_call_rele(cp);
 		return (EACCES);
 	}
 
-	secinfo_update(mi->mi_curr_serv, &resop->nfs_resop4_u.opsecinfo);
+	secinfo_update(mi->mi_curr_serv, secinfo_res);
 
 	svp = mi->mi_curr_serv;
 	(void) nfs_rw_enter_sig(&svp->sv_lock, RW_READER, 0);
@@ -973,14 +917,13 @@ nfs4_secinfo_fh_otw(mntinfo4_t *mi, nfs4_sharedfh_t *fh, char *nm, cred_t *cr)
 		 * the client does not have netname/syncaddr data
 		 * from sv_dhsec.
 		 */
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+		nfs4_call_rele(cp);
 		return (EACCES);
 	}
 	nfs_rw_exit(&svp->sv_lock);
 
 	/* Done! */
-	(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-
+	nfs4_call_rele(cp);
 	return (0); /* got the secinfo */
 }
 

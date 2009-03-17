@@ -1611,10 +1611,6 @@ extern int	nfs4_putpages(vnode_t *, u_offset_t, size_t, int, cred_t *);
 extern int	nfs4_setopts(vnode_t *, model_t, struct nfs_args *);
 extern void	nfs4_mnt_kstat_init(struct vfs *);
 
-extern void	rfs4call(struct mntinfo4 *, servinfo4_t *,
-			struct COMPOUND4args_clnt *,
-			struct COMPOUND4res_clnt *,
-			cred_t *, int *, int, nfs4_error_t *);
 extern void	nfs4_acl_fill_cache(struct rnode4 *, vsecattr_t *);
 extern int	nfs4_attr_otw(vnode_t *, nfs4_tag_type_t,
 				nfs4_ga_res_t *, attrmap4 *, cred_t *);
@@ -1632,7 +1628,6 @@ extern void	nfs4rename_update(vnode_t *, vnode_t *, nfs_fh4 *, char *);
 extern void	nfs4_update_paths(vnode_t *, char *, vnode_t *, char *,
 			vnode_t *);
 
-extern void	nfs4args_lookup_free(nfs_argop4 *, int);
 extern void	nfs4args_copen_free(OPEN4cargs *);
 
 extern void	nfs4_printfhandle(nfs4_fhandle_t *);
@@ -2410,8 +2405,9 @@ typedef struct {
 
 	/* needed by rfs4call */
 	int		nc_doqueue[1];
-	int		nc_rfs4call_flags;	/* typically 0 */
+	int		nc_rfs4call_flags;
 	cred_t		*nc_cr;
+	servinfo4_t	*nc_svp;
 
 	/* new pnfs stuffs */
 	servinfo4_t	*nc_ds_servinfo;	/* NULL if call targets MDS */
@@ -2420,11 +2416,14 @@ typedef struct {
 	uint_t		nc_count;
 	int		nc_needs_recovery;
 	int		nc_wait_for_recovery;
+
+	COMPOUND4args_clnt	nc_args;
+	COMPOUND4res_clnt	nc_res;
+	int			nc_flags;
 } nfs4_call_t;
 
-extern nfs4_call_t *nfs4_call_init(void);
-extern void nfs4_call_rele(nfs4_call_t *);
-extern void nfs4_call_hold(nfs4_call_t *);
+#define	NFS4_CALL_FLAG_RESFREE		0x01	/* need to free nc_res */
+#define	NFS4_CALL_FLAG_SEQADDED		0x02	/* sequence op added */
 
 /*
  * Flags for client-side recovery interfaces.
@@ -2432,13 +2431,81 @@ extern void nfs4_call_hold(nfs4_call_t *);
  */
 #define	RCV_DONTBLOCK	0x00000001	/* Don't block, return EAGAIN */
 
+#ifdef _KERNEL
+extern nfs4_call_t *nfs4_call_init(mntinfo4_t *mi, cred_t *cr, int ctag);
+extern void nfs4_call_hold(nfs4_call_t *);
+extern void nfs4_call_rele(nfs4_call_t *);
+extern void nfs4_call_opresfree(nfs4_call_t *);
+extern COMPOUND4node_clnt *nfs4_op_generic(nfs4_call_t *, nfs_opnum4);
+extern SEQUENCE4res *nfs4_op_sequence(nfs4_call_t *);
+extern PUTFH4res *nfs4_op_cputfh(nfs4_call_t *, nfs4_sharedfh_t *);
+extern GETFH4res *nfs4_op_getfh(nfs4_call_t *);
+extern SAVEFH4res *nfs4_op_savefh(nfs4_call_t *);
+extern RESTOREFH4res *nfs4_op_restorefh(nfs4_call_t *);
+extern ACCESS4res *nfs4_op_access(nfs4_call_t *, uint32_t);
+extern GETATTR4res *nfs4_op_getattr(nfs4_call_t *, attrmap4);
+extern OPEN4res *nfs4_op_copen(nfs4_call_t *, OPEN4cargs **);
+extern OPEN_DOWNGRADE4res *nfs4_op_open_downgrade(nfs4_call_t *, stateid4 *,
+    seqid4, uint32_t, uint32_t);
+extern CLOSE4res *nfs4_op_close(nfs4_call_t *, seqid4, stateid4);
+extern LAYOUTCOMMIT4res *nfs4_op_layoutcommit(nfs4_call_t *,
+    LAYOUTCOMMIT4args **);
+extern WRITE4res *nfs4_op_write(nfs4_call_t *, stable_how4, WRITE4args **);
+extern READ4res *nfs4_op_read(nfs4_call_t *, READ4args **);
+extern SETATTR4res *nfs4_op_setattr(nfs4_call_t *, SETATTR4args **);
+extern VERIFY4res *nfs4_op_verify(nfs4_call_t *, VERIFY4args **);
+extern NVERIFY4res *nfs4_op_nverify(nfs4_call_t *, NVERIFY4args **);
+extern READLINK4res *nfs4_op_readlink(nfs4_call_t *);
+extern REMOVE4res *nfs4_op_cremove(nfs4_call_t *, char *);
+extern LOOKUP4res *nfs4_op_lookup(nfs4_call_t *, utf8string *);
+extern LOOKUP4res *nfs4_op_clookup(nfs4_call_t *, char *);
+extern LOOKUPP4res *nfs4_op_lookupp(nfs4_call_t *);
+extern OPENATTR4res *nfs4_op_openattr(nfs4_call_t *, bool_t);
+extern CREATE4res *nfs4_op_ccreate(nfs4_call_t *, char *, nfs_ftype4, void *,
+    CREATE4cargs **);
+extern LINK4res *nfs4_op_clink(nfs4_call_t *, char *);
+extern RENAME4res *nfs4_op_crename(nfs4_call_t *, char *, char *);
+extern READDIR4res_clnt *nfs4_op_readdir(nfs4_call_t *, READDIR4args **);
+extern COMMIT4res *nfs4_op_commit(nfs4_call_t *, offset4, count4);
+extern OPEN_CONFIRM4res *nfs4_op_open_confirm(nfs4_call_t *, seqid4,
+    stateid4 *);
+extern LOCK4res *nfs4_op_lock(nfs4_call_t *, LOCK4args **);
+extern LOCKU4res *nfs4_op_locku(nfs4_call_t *, LOCKU4args **);
+extern LOCKT4res *nfs4_op_lockt(nfs4_call_t *, LOCKT4args **);
+extern PUTPUBFH4res *nfs4_op_putpubfh(nfs4_call_t *);
+extern PUTROOTFH4res *nfs4_op_putrootfh(nfs4_call_t *);
+extern SECINFO4res *nfs4_op_secinfo(nfs4_call_t *, component4 *);
+extern SECINFO4res *nfs4_op_csecinfo(nfs4_call_t *, char *);
+extern BIND_CONN_TO_SESSION4res *nfs4_op_bind_conn_to_session(nfs4_call_t *cp,
+    sessionid4 *, channel_dir_from_client4, bool_t);
+extern DELEGRETURN4res *nfs4_op_delegreturn(nfs4_call_t *, stateid4 *);
+extern RENEW4res *nfs4_op_renew(nfs4_call_t *, clientid4);
+extern EXCHANGE_ID4res *nfs4_op_exchange_id(nfs4_call_t *, EXCHANGE_ID4args **);
+extern CREATE_SESSION4res *nfs4_op_create_session(nfs4_call_t *,
+    CREATE_SESSION4args **);
+extern SETCLIENTID4res *nfs4_op_setclientid(nfs4_call_t *, SETCLIENTID4args **);
+extern SETCLIENTID_CONFIRM4res *nfs4_op_setclientid_confirm(nfs4_call_t *,
+    clientid4, verifier4);
+extern RECLAIM_COMPLETE4res *nfs4_op_reclaim_complete(nfs4_call_t *, bool_t);
+extern GETDEVICEINFO4res *nfs4_op_getdeviceinfo(nfs4_call_t *, deviceid4,
+    layouttype4, count4, bitmap4);
+extern LAYOUTRETURN4res *nfs4_op_layoutreturn(nfs4_call_t *,
+    LAYOUTRETURN4args **);
+extern LAYOUTGET4res *nfs4_op_layoutget(nfs4_call_t *, LAYOUTGET4args **);
+extern GETDEVICELIST4res *nfs4_op_getdevicelist(nfs4_call_t *,
+    GETDEVICELIST4args **);
+
+extern void nfs4lookup_setup(nfs4_call_t *, char *, lkp4_attr_setup_t,
+    attrmap4, int);
+extern void nfs4args_lookup_free(nfs4_call_t *);
+extern void rfs4call(nfs4_call_t *, nfs4_error_t *);
+
 /* interim */
 extern int nfs4_start_op_impl(nfs4_call_t *, uint32_t);
 extern void nfs4_end_op_impl(nfs4_call_t *);
 extern int nfs4_needs_recovery_impl(nfs4_call_t *);
 extern int nfs4_start_recovery_impl(nfs4_call_t *);
-extern void rfs4call_impl(nfs4_call_t *, COMPOUND4args_clnt *,
-    COMPOUND4res_clnt *);
+#endif /* _KERNEL */
 
 #ifdef	__cplusplus
 }

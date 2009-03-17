@@ -234,10 +234,9 @@ nfs4_needs_recovery(nfs4_error_t *ep, bool_t stateful, vfs_t *vfsp)
 	nfs4_call_t *cp;
 	int error;
 
-	cp = nfs4_call_init();
+	cp = nfs4_call_init(VFTOMI4(vfsp), CRED(), 0);
 	cp->nc_e = *ep;
 	cp->nc_stateful = (int)stateful;
-	cp->nc_mi = VFTOMI4(vfsp);
 
 	error = nfs4_needs_recovery_impl(cp);
 	nfs4_call_rele(cp);
@@ -564,9 +563,8 @@ nfs4_start_recovery(nfs4_error_t *ep, mntinfo4_t *mi, vnode_t *vp1,
 	nfs4_call_t *cp;
 	bool_t	abort;
 
-	cp = nfs4_call_init();
+	cp = nfs4_call_init(mi, CRED(), 0);
 	cp->nc_e = *ep;
-	cp->nc_mi = mi;
 	cp->nc_vp1 = vp1;
 	cp->nc_vp2 = vp2;
 	cp->nc_sidp = sid;
@@ -1060,8 +1058,7 @@ nfs4_start_fop(mntinfo4_t *mi, vnode_t *vp1, vnode_t *vp2, nfs4_op_hint_t op,
 	nfs4_call_t *cp;
 	int error;
 
-	cp = nfs4_call_init();
-	cp->nc_mi = mi;
+	cp = nfs4_call_init(mi, CRED(), 0);
 	cp->nc_vp1 = vp1;
 	cp->nc_vp2 = vp2;
 	cp->nc_ophint = op;
@@ -1427,8 +1424,7 @@ nfs4_end_fop(mntinfo4_t *mi, vnode_t *vp1, vnode_t *vp2, nfs4_op_hint_t op,
 {
 	nfs4_call_t *cp;
 
-	cp = nfs4_call_init();
-	cp->nc_mi = mi;
+	cp = nfs4_call_init(mi, CRED(), 0);
 	cp->nc_vp1 = vp1;
 	cp->nc_vp2 = vp2;
 	cp->nc_ophint = op;
@@ -4534,49 +4530,25 @@ recov_bad_seqid(recov_info_t *recovp)
 	mutex_exit(&mi->mi_lock);
 }
 
-static void
-nfs4reclaim_complete_otw(mntinfo4_t *mi, nfs4_error_t *ep)
-{
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 argops[2];
-	int numops;
-	int doqueue = 1;
-
-	bzero(&args, sizeof (args));
-	bzero(&res, sizeof (res));
-
-	args.ctag = TAG_RECLAIM_COMPLETE;
-
-	numops = 2;		/* SEQUENCE, RECLAIM_COMPLETE */
-
-	args.array = argops;
-	args.array_len = numops;
-	args.minor_vers = mi->mi_minorversion;
-
-	argops[0].argop = OP_SEQUENCE;
-
-	argops[1].argop = OP_RECLAIM_COMPLETE;
-	argops[1].nfs_argop4_u.opreclaim_complete.rca_one_fs = FALSE;
-
-	rfs4call(mi, NULL, &args, &res, kcred, &doqueue, 0, ep);
-
-	if (ep->error)
-		return;
-
-	(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-}
-
 static int
 nfs4_reclaim_complete(mntinfo4_t *mi, nfs4_server_t *sp)
 {
+	nfs4_call_t *cp;
 	int recov = 0;
 	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
 
 	(void) nfs_rw_enter_sig(&sp->s_recovlock, RW_READER, 0);
 	(void) nfs_rw_enter_sig(&mi->mi_recovlock, RW_WRITER, 0);
 
-	nfs4reclaim_complete_otw(mi, &e);
+	cp = nfs4_call_init(mi, CRED(), TAG_RECLAIM_COMPLETE);
+
+	/* SEQUENCE, RECLAIM_COMPLETE */
+	(void) nfs4_op_sequence(cp);
+	(void) nfs4_op_reclaim_complete(cp, FALSE);
+
+	rfs4call(cp, &e);
+
+	nfs4_call_rele(cp);
 
 	if (recov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp)) {
 		(void) nfs4_start_recovery(&e, mi, NULL, NULL, NULL,

@@ -2087,46 +2087,31 @@ nfs4delegreturn_save_lost_rqst(int error, nfs4_lost_rqst_t *lost_rqstp,
 static void
 nfs4delegreturn_otw(rnode4_t *rp, cred_t *cr, nfs4_error_t *ep)
 {
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 argops[3];
-	nfs4_ga_res_t *garp = NULL;
+	nfs4_call_t *cp;
 	hrtime_t t;
-	int numops;
-	int doqueue = 1;
+	GETATTR4res *getattr_res;
 	mntinfo4_t *mi = VTOMI4(RTOV4(rp));
 
-	args.ctag = TAG_DELEGRETURN;
+	cp = nfs4_call_init(mi, cr, TAG_DELEGRETURN);
 
-	numops = 3;		/* PUTFH, GETATTR, DELEGRETURN */
-
-	args.array = argops;
-	args.array_len = numops;
-
-	argops[0].argop = OP_CPUTFH;
-	argops[0].nfs_argop4_u.opcputfh.sfh = rp->r_fh;
-
-	argops[1].argop = OP_GETATTR;
-	argops[1].nfs_argop4_u.opgetattr.attr_request =
-	    MI4_DEFAULT_ATTRMAP(mi);
-	argops[1].nfs_argop4_u.opgetattr.mi = VTOMI4(RTOV4(rp));
-
-	argops[2].argop = OP_DELEGRETURN;
-	argops[2].nfs_argop4_u.opdelegreturn.deleg_stateid =
-	    rp->r_deleg_stateid;
+	/* PUTFH, GETATTR, DELEGRETURN */
+	(void) nfs4_op_cputfh(cp, rp->r_fh);
+	getattr_res = nfs4_op_getattr(cp, MI4_DEFAULT_ATTRMAP(mi));
+	(void) nfs4_op_delegreturn(cp, &rp->r_deleg_stateid);
 
 	t = gethrtime();
-	rfs4call(VTOMI4(RTOV4(rp)), NULL, &args, &res, cr, &doqueue, 0, ep);
+	rfs4call(cp, ep);
 
-	if (ep->error)
+	if (ep->error) {
+		nfs4_call_rele(cp);
 		return;
-
-	if (res.status == NFS4_OK) {
-		garp = &res.array[1].nfs_resop4_u.opgetattr.ga_res;
-		nfs4_attr_cache(RTOV4(rp), garp, t, cr, TRUE, NULL);
-
 	}
-	(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+
+	if (cp->nc_res.status == NFS4_OK) {
+		nfs4_attr_cache(RTOV4(rp), &getattr_res->ga_res, t, cr,
+		    TRUE, NULL);
+	}
+	nfs4_call_rele(cp);
 }
 
 int

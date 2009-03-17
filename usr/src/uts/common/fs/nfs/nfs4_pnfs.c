@@ -32,7 +32,6 @@
 static kmem_cache_t *file_io_read_cache;
 static kmem_cache_t *read_task_cache;
 static kmem_cache_t *stripe_dev_cache;
-static kmem_cache_t *pnfs_read_compound_cache;
 static kmem_cache_t *pnfs_layout_cache;
 static kmem_cache_t *file_io_write_cache;
 static kmem_cache_t *file_io_commit_cache;
@@ -238,27 +237,6 @@ pnfs_layout_destroy(void *vlayout, void *foo)
 	cv_destroy(&layout->plo_wait);
 
 	/* AVL for segments */
-}
-
-/*ARGSUSED*/
-static int
-pnfs_read_compound_construct(void *vc, void *foo, int bar)
-{
-	pnfs_read_compound_t *r = vc;
-
-	r->args.array = r->argop;
-	r->read = &r->argop[2].nfs_argop4_u.opread;
-	r->fh = &r->argop[1].nfs_argop4_u.opcputfh.sfh;
-
-	r->args.ctag = TAG_PNFS_READ;
-	r->args.array_len = 3;
-
-	r->argop[0].argop = OP_SEQUENCE;
-	/* read responses need never be cached */
-	r->argop[0].nfs_argop4_u.opsequence.sa_cachethis = 0;
-	r->argop[1].argop = OP_CPUTFH;
-	r->argop[2].argop = OP_READ;
-	return (0);
 }
 
 /*ARGSUSED*/
@@ -499,10 +477,6 @@ nfs4_pnfs_init()
 	    sizeof (stripe_dev_t), 0,
 	    stripe_dev_construct, stripe_dev_destroy, NULL,
 	    NULL, NULL, 0);
-	pnfs_read_compound_cache = kmem_cache_create("pnfs_read_compound_cache",
-	    sizeof (pnfs_read_compound_t), 0,
-	    pnfs_read_compound_construct, NULL, NULL,
-	    NULL, NULL, 0);
 	pnfs_layout_cache = kmem_cache_create("pnfs_layout_cache",
 	    sizeof (pnfs_layout_t), 0,
 	    pnfs_layout_construct, pnfs_layout_destroy, NULL,
@@ -564,7 +538,6 @@ nfs4_pnfs_fini()
 	kmem_cache_destroy(file_io_commit_cache);
 	kmem_cache_destroy(commit_task_cache);
 	kmem_cache_destroy(stripe_dev_cache);
-	kmem_cache_destroy(pnfs_read_compound_cache);
 	kmem_cache_destroy(pnfs_layout_cache);
 	kmem_cache_destroy(task_get_devicelist_cache);
 	kmem_cache_destroy(task_layoutget_cache);
@@ -763,6 +736,9 @@ netaddr2netbuf(netaddr4 *nap, struct netbuf *nbp, struct knetconfig *kncp)
 		return (EINVAL);
 	}
 
+	if (error)
+		kmem_free(nbp->buf, nbp->maxlen);
+
 	return (error);
 }
 
@@ -809,6 +785,7 @@ retry:
 		if (np->s_flags & N4S_EXID_FAILED) {
 			mutex_exit(&np->s_lock);
 			nfs4_server_rele(np);
+			kmem_free(nb.buf, nb.maxlen);
 			return (EIO);
 		}
 
@@ -832,6 +809,7 @@ retry:
 		}
 
 		mutex_exit(&np->s_lock);
+		kmem_free(nb.buf, nb.maxlen);
 
 		*npp = np;
 		return (0);
@@ -872,6 +850,7 @@ retry:
 		*npp = np;
 	}
 
+	kmem_free(nb.buf, nb.maxlen);
 	return (error);
 }
 
@@ -1183,7 +1162,7 @@ stripe_dev_prepare(
  */
 /*ARGSUSED*/
 static void
-pnfs_call(nfs4_call_t *cp, COMPOUND4args_clnt *argsp, COMPOUND4res_clnt	*resp)
+pnfs_call(nfs4_call_t *cp)
 {
 	ASSERT(cp->nc_ds_servinfo != NULL);
 
@@ -1191,12 +1170,8 @@ pnfs_call(nfs4_call_t *cp, COMPOUND4args_clnt *argsp, COMPOUND4res_clnt	*resp)
 	if (cp->nc_e.error)
 		return;
 
-	resp->argsp = argsp;
-	resp->array = NULL;
-	resp->status = 0;
-	resp->decode_len = 0;
-
-	rfs4call_impl(cp, argsp, resp);
+	cp->nc_svp = cp->nc_ds_servinfo;
+	rfs4call(cp, NULL);
 
 	if (nfs4_needs_recovery_impl(cp)) {
 		/* does the return value need to go back to ET? */
@@ -1205,7 +1180,6 @@ pnfs_call(nfs4_call_t *cp, COMPOUND4args_clnt *argsp, COMPOUND4res_clnt	*resp)
 		cp->nc_needs_recovery = 1;
 	}
 
-	/* NB - xdr results freed higher up */
 	nfs4_end_op_impl(cp);
 }
 
@@ -1216,8 +1190,7 @@ pnfs_task_read(void *v)
 	file_io_read_t *job = task->rt_job;
 	nfs4_call_t *cp = task->rt_call;
 	/* stripe_dev_t *stripe = task->rt_dev; */
-	pnfs_read_compound_t *readargs;
-	COMPOUND4res_clnt res;
+	READ4args *rargs;
 	READ4res *rres;
 	struct timeval wait;
 	int error = 0;
@@ -1240,24 +1213,24 @@ pnfs_task_read(void *v)
 	}
 	mutex_exit(&job->fir_lock);
 
-	TICK_TO_TIMEVAL(30 * hz / 10, &wait); /* XXX 30?  SHORTWAIT? */
-	readargs = kmem_cache_alloc(pnfs_read_compound_cache, KM_SLEEP);
-	readargs->args.minor_vers = VTOMI4(cp->nc_vp1)->mi_minorversion;
-	readargs->read->stateid = job->fir_stateid;
-	*(readargs->fh) = task->rt_dev->std_fh;
-	readargs->read->offset = task->rt_offset;
-	readargs->read->count = task->rt_count;
-	readargs->read->res_data_val_alt = NULL;
-	readargs->read->res_mblk = NULL;
-	readargs->read->res_uiop = NULL;
-	readargs->read->res_maxsize = 0;
-	if (task->rt_have_uio)
-		readargs->read->res_uiop = &task->rt_uio;
-	else
-		readargs->read->res_data_val_alt = task->rt_base;
-	readargs->read->res_maxsize = task->rt_count;
+	(void) nfs4_op_cputfh(cp, task->rt_dev->std_fh);
+	rres = nfs4_op_read(cp, &rargs);
 
-	pnfs_call(cp, &readargs->args, &res);
+	TICK_TO_TIMEVAL(30 * hz / 10, &wait); /* XXX 30?  SHORTWAIT? */
+	rargs->stateid = job->fir_stateid;
+	rargs->offset = task->rt_offset;
+	rargs->count = task->rt_count;
+	rargs->res_data_val_alt = NULL;
+	rargs->res_mblk = NULL;
+	rargs->res_uiop = NULL;
+	rargs->res_maxsize = 0;
+	if (task->rt_have_uio)
+		rargs->res_uiop = &task->rt_uio;
+	else
+		rargs->res_data_val_alt = task->rt_base;
+	rargs->res_maxsize = task->rt_count;
+
+	pnfs_call(cp);
 	error = cp->nc_e.error;
 
 	if (error == EAGAIN || cp->nc_needs_recovery) {
@@ -1265,9 +1238,6 @@ pnfs_task_read(void *v)
 		 * If the task needs recovery or needs to be redriven (EAGAIN),
 		 * then leave it on the job list and kick it back to ET.
 		 */
-
-		if (error == 0)
-			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 
 		mutex_enter(&job->fir_lock);
 		job->fir_remaining--;
@@ -1278,35 +1248,32 @@ pnfs_task_read(void *v)
 	}
 
 	if (error == 0) {
-		if (res.status == NFS4_OK) {
-			rres = &res.array[2].nfs_resop4_u.opread;
-			if (rres->status == NFS4_OK) {
-				data_len = rres->data_len;
-				if (rres->eof) {
-					eof = 1;
-					/*
-					 * offset may have been modified
-					 * if we are using dense stripes,
-					 * use the offset in the uio.
-					 */
-					eof_offset =
-					    task->rt_uio.uio_loffset + data_len;
-				}
+		if (rres->status == NFS4_OK) {
+			data_len = rres->data_len;
+			if (rres->eof) {
+				eof = 1;
 				/*
-				 * Registering a data-server-io count for
-				 * the file
+				 * offset may have been modified
+				 * if we are using dense stripes,
+				 * use the offset in the uio.
 				 */
-				rp = VTOR4(cp->nc_vp1);
-				mutex_enter(&rp->r_statelock);
-				rp->r_dsio_count++;
-				mutex_exit(&rp->r_statelock);
-			}
+				eof_offset =
+				    task->rt_uio.uio_loffset + data_len;
+				}
+
+			/*
+			 * Registering a data-server-io count for
+			 * the file
+			 */
+			rp = VTOR4(cp->nc_vp1);
+			mutex_enter(&rp->r_statelock);
+			rp->r_dsio_count++;
+			mutex_exit(&rp->r_statelock);
 		} else {
-			error = geterrno4(res.status);
+			error = geterrno4(cp->nc_res.status);
 		}
 
 		ASSERT(cp->nc_e.rpc_status == 0);
-		xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 	}
 
 	mutex_enter(&job->fir_lock);
@@ -1324,7 +1291,6 @@ pnfs_task_read(void *v)
 		cv_broadcast(&job->fir_cv);
 	mutex_exit(&job->fir_lock);
 
-	kmem_cache_free(pnfs_read_compound_cache, readargs);
 	read_task_free(task);
 }
 
@@ -1348,14 +1314,11 @@ pnfs_task_write(void *v)
 	file_io_write_t *job = task->wt_job;
 	stripe_dev_t *dev = task->wt_dev;
 	nfs4_call_t *cp = task->wt_call;
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 argop[3];
 	int error = 0;
+	WRITE4args *wargs;
 	WRITE4res *wres;
 	rnode4_t *rp;
 	stable_how4 stable = FILE_SYNC4;
-	int free_res = 0;
 
 	mutex_enter(&job->fiw_lock);
 	if (job->fiw_error) {
@@ -1369,27 +1332,16 @@ pnfs_task_write(void *v)
 	}
 	mutex_exit(&job->fiw_lock);
 
-	args.ctag = TAG_PNFS_WRITE;
-	args.minor_vers = VTOMI4(cp->nc_vp1)->mi_minorversion;
-	args.array_len = 3;
-	args.array = argop;
+	(void) nfs4_op_cputfh(cp, dev->std_fh);
+	wres = nfs4_op_write(cp, job->fiw_stable_how, &wargs);
 
-	argop[0].argop = OP_SEQUENCE;
-	/* the args for OP_SEQUENCE are filled out later */
+	wargs->stateid = job->fiw_stateid;
+	wargs->mblk = NULL;
+	wargs->offset = task->wt_offset;
+	wargs->data_len = task->wt_count;
+	wargs->data_val = task->wt_base;
 
-	argop[1].argop = OP_CPUTFH;
-	argop[1].nfs_argop4_u.opcputfh.sfh = dev->std_fh;
-
-	argop[2].argop = OP_WRITE;
-	argop[2].nfs_argop4_u.opwrite.stable = job->fiw_stable_how;
-	argop[2].nfs_argop4_u.opwrite.stateid = job->fiw_stateid;
-	argop[2].nfs_argop4_u.opwrite.mblk = NULL;
-
-	argop[2].nfs_argop4_u.opwrite.offset = task->wt_offset;
-	argop[2].nfs_argop4_u.opwrite.data_len = task->wt_count;
-	argop[2].nfs_argop4_u.opwrite.data_val = task->wt_base;
-
-	pnfs_call(cp, &args, &res);
+	pnfs_call(cp);
 	error = cp->nc_e.error;
 
 	if (error == EAGAIN || cp->nc_needs_recovery) {
@@ -1397,9 +1349,6 @@ pnfs_task_write(void *v)
 		 * If the task needs recovery or needs to be redriven (EAGAIN),
 		 * then leave it on the job list and kick it back to ET.
 		 */
-		if (error == 0)
-			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-
 		mutex_enter(&job->fiw_lock);
 		job->fiw_remaining--;
 		if (job->fiw_remaining == 0)
@@ -1411,13 +1360,11 @@ pnfs_task_write(void *v)
 	if (error)
 		goto out;
 	ASSERT(cp->nc_e.rpc_status == 0);
-	free_res = 1;
 
-	if (res.status != NFS4_OK) {
-		error = geterrno4(res.status);
+	if (cp->nc_res.status != NFS4_OK) {
+		error = geterrno4(cp->nc_res.status);
 		goto out;
 	}
-	wres = &res.array[2].nfs_resop4_u.opwrite;
 	if (wres->status != NFS4_OK) {
 		error = geterrno4(wres->status);
 		goto out;
@@ -1473,8 +1420,6 @@ pnfs_task_write(void *v)
 	mutex_exit(&rp->r_statelock);
 
 out:
-	if (free_res)
-		xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 	mutex_enter(&job->fiw_lock);
 	if (stable == UNSTABLE4)
 		job->fiw_stable_result = stable;
@@ -1508,31 +1453,17 @@ pnfs_task_commit(void *v)
 	file_io_commit_t *job = task->cm_job;
 	stripe_dev_t *dev = task->cm_dev;
 	nfs4_call_t *cp = task->cm_call;
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 argop[2];
-	nfs_resop4 *resop;
 	int error = 0;
 	COMMIT4res *cm_res;
 	rnode4_t *rp;
-	int free_res = 0;
 
 	if (job->fic_error)
 		goto out;
 
-	args.ctag = TAG_PNFS_COMMIT;
-	args.minor_vers = VTOMI4(cp->nc_vp1)->mi_minorversion;
-	args.array_len = 2;
-	args.array = argop;
+	(void) nfs4_op_cputfh(cp, dev->std_fh);
+	cm_res = nfs4_op_commit(cp, task->cm_offset, task->cm_count);
 
-	argop[0].argop = OP_CPUTFH;
-	argop[0].nfs_argop4_u.opcputfh.sfh = dev->std_fh;
-
-	argop[1].argop = OP_COMMIT;
-	argop[1].nfs_argop4_u.opcommit.offset = task->cm_offset;
-	argop[1].nfs_argop4_u.opcommit.count = task->cm_count;
-
-	pnfs_call(task->cm_call, &args, &res);
+	pnfs_call(cp);
 
 	/* XXXcommit - Needs to check if recovery is needed */
 
@@ -1540,14 +1471,11 @@ pnfs_task_commit(void *v)
 	if (error)
 		goto out;
 	ASSERT(task->cm_call->nc_e.rpc_status == 0);
-	free_res = 1;
 
-	if (res.status != NFS4_OK) {
-		error = geterrno4(res.status);
+	if (cp->nc_res.status != NFS4_OK) {
+		error = geterrno4(cp->nc_res.status);
 		goto out;
 	}
-	resop = &res.array[1];
-	cm_res = &resop->nfs_resop4_u.opcommit;
 	if (cm_res->status != NFS4_OK) {
 		error = geterrno4(cm_res->status);
 		goto out;
@@ -1566,8 +1494,6 @@ pnfs_task_commit(void *v)
 	mutex_exit(&dev->std_lock);
 
 out:
-	if (free_res)
-		xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 	mutex_enter(&job->fic_lock);
 	if (error && (error != NFS_VERF_MISMATCH))
 		pnfs_set_pageerror(job->fic_plist, task->cm_layout,
@@ -1667,7 +1593,6 @@ pnfs_create_device(nfs4_server_t *n4sp, deviceid4 devid, avl_index_t where)
 	return (new);
 }
 
-#define	GDIres		nfs_resop4_u.opgetdeviceinfo
 #define	GDIresok	GETDEVICEINFO4res_u.gdir_resok4
 
 /* set this to 1 to preface GETDEVICEINFO with PUTFH */
@@ -1680,56 +1605,35 @@ int pnfs_gdia_maxcount = 65536;
 static int
 pnfs_getdeviceinfo(mntinfo4_t *mi, devnode_t *dip, cred_t *cr)
 {
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 argop[2];
-	GETDEVICEINFO4args *gdi_args;
+	nfs4_call_t *cp;
 	GETDEVICEINFO4res *gdi_res;
 	nfs4_error_t e = {0, NFS4_OK, RPC_SUCCESS};
-	int doqueue = 1;
 	int nr, abort;
 	nfs4_recov_state_t recov_state;
-	int gdi_ndx;
 
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 
 retry:
+	cp = nfs4_call_init(mi, cr, TAG_PNFS_GETDEVINFO);
+
 	if (nfs4_start_op(mi, NULL, NULL, &recov_state))
 		goto out;
 
-	args.ctag = TAG_PNFS_GETDEVINFO;
-	args.array = argop;
-	args.array_len = 1;
-	gdi_ndx = 0;
+	if (pnfs_gdi_hack)
+		(void) nfs4_op_cputfh(cp, mi->mi_rootfh);
+	gdi_res = nfs4_op_getdeviceinfo(cp, dip->dn_devid,
+	    LAYOUT4_NFSV4_1_FILES, pnfs_gdia_maxcount,
+	    pnfs_enable_dino ? pnfs_devno_mask : 0);
 
-	if (pnfs_gdi_hack) {
-		argop[0].argop = OP_CPUTFH;
-		argop[0].nfs_argop4_u.opcputfh.sfh = mi->mi_rootfh;
-		args.array_len = 2;
-		gdi_ndx++;
-	}
-	argop[gdi_ndx].argop = OP_GETDEVICEINFO;
-	gdi_args = &argop[gdi_ndx].nfs_argop4_u.opgetdeviceinfo;
-	DEV_ASSIGN(gdi_args->gdia_device_id, dip->dn_devid);
-	gdi_args->gdia_layout_type = LAYOUT4_NFSV4_1_FILES;
-	gdi_args->gdia_maxcount = pnfs_gdia_maxcount;
-	if (pnfs_enable_dino)
-		gdi_args->gdia_notify_types = pnfs_devno_mask;
-	else
-		gdi_args->gdia_notify_types = 0;
-
-	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(cp, &e);
 
 	if ((nr = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp))) {
-
 		abort = nfs4_start_recovery(&e, mi, NULL, NULL,
 		    NULL, NULL, 0, NULL);
 
 		nfs4_end_fop(mi, NULL, NULL, 0, &recov_state, nr);
-		if (e.error == 0 && e.rpc_status == 0)
-			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-
+		nfs4_call_rele(cp);
 		if (abort) {
 			if (e.error)
 				return (e.error);
@@ -1740,12 +1644,8 @@ retry:
 	}
 
 	if ((e.error == 0) && (e.stat == NFS4_OK)) {
-
-		gdi_res = &res.array[gdi_ndx].GDIres;
 		if (gdi_res->gdir_status == 0) {
-
 			/* Populate the device entry */
-
 			e.error = pnfs_populate_device(dip,
 			    &gdi_res->GDIresok.gdir_device_addr);
 		} else {
@@ -1760,13 +1660,13 @@ retry:
 
 			e.error = geterrno4(gdi_res->gdir_status);
 		}
-
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 	} else if (e.error == 0 && e.stat != NFS4_OK)
 		e.error = geterrno4(e.stat);
 
 	nfs4_end_op(mi, NULL, NULL, &recov_state, 0);
 out:
+	nfs4_call_rele(cp);
+
 	/* return EAGAIN to trigger MDS I/O */
 	return (e.error ? EAGAIN : e.error);
 }
@@ -1903,22 +1803,21 @@ pnfs_task_layoutreturn(void *v)
 {
 	task_layoutreturn_t *task = v;
 	mntinfo4_t *mi = task->tlr_mi;
-	nfs4_server_t	*np;
+	nfs4_server_t *np;
 	nfs4_fsidlt_t *ltp, lt;
 	rnode4_t *found, *rp;
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 argop[2];
+	nfs4_call_t *cp;
 	LAYOUTRETURN4args *arg;
 	LAYOUTRETURN4res *lrres;
 	layoutreturn_file4 *lrf;
 	nfs4_error_t e = {0, NFS4_OK, RPC_SUCCESS};
-	int doqueue = 1, opx;
 	nfs4_recov_state_t recov_state;
-	avl_index_t	where;
+	avl_index_t where;
 
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
+
+	cp = nfs4_call_init(mi, task->tlr_cr, TAG_PNFS_LAYOUTRETURN);
 
 	/*
 	 * XXX - todo need to pass vp for LAYOUTRETURN4_FILE
@@ -1927,28 +1826,16 @@ pnfs_task_layoutreturn(void *v)
 	if (nfs4_start_op(mi, NULL, NULL, &recov_state))
 		goto out;
 
-	args.ctag = TAG_PNFS_LAYOUTRETURN;
-	args.array = argop;
-
 	if (task->tlr_return_type == LAYOUTRETURN4_FILE) {
 		rp = VTOR4(task->tlr_vp);
-		argop[0].argop = OP_CPUTFH;
-		argop[0].nfs_argop4_u.opcputfh.sfh = rp->r_fh;
-		args.array_len = 2;
-		opx = 1;
+		(void) nfs4_op_cputfh(cp, rp->r_fh);
 	} else if (task->tlr_return_type == LAYOUTRETURN4_FSID) {
-		argop[0].argop = OP_CPUTFH;
-		argop[0].nfs_argop4_u.opcputfh.sfh = mi->mi_rootfh;
-		args.array_len = 2;
-		opx = 1;
+		(void) nfs4_op_cputfh(cp, mi->mi_rootfh);
 	} else {
 		ASSERT(task->tlr_return_type == LAYOUTRETURN4_ALL);
-		opx = 0;
-		args.array_len = 1;
 	}
 
-	argop[opx].argop = OP_LAYOUTRETURN;
-	arg = &argop[opx].nfs_argop4_u.oplayoutreturn;
+	lrres = nfs4_op_layoutreturn(cp, &arg);
 	arg->lora_layoutreturn.lr_returntype = task->tlr_return_type;
 	lrf = &arg->lora_layoutreturn.layoutreturn4_u.lr_layout;
 	lrf->lrf_offset = task->tlr_offset;
@@ -1959,7 +1846,7 @@ pnfs_task_layoutreturn(void *v)
 	arg->lora_iomode = task->tlr_iomode;
 	arg->lora_layout_type = task->tlr_layout_type;
 
-	rfs4call(mi, NULL, &args, &res, task->tlr_cr, &doqueue, 0, &e);
+	rfs4call(cp, &e);
 
 	/* XXX need needs_recovery/start_recovery logic here */
 
@@ -1968,7 +1855,6 @@ pnfs_task_layoutreturn(void *v)
 		goto done;
 
 	if (e.error == 0 && e.stat == NFS4_OK) {
-		lrres = &res.array[0].nfs_resop4_u.oplayoutreturn;
 		if (lrres->lorr_status == NFS4_OK) {
 			if (lrres->LAYOUTRETURN4res_u.lorr_stateid.
 			    lrs_present == FALSE) {
@@ -2045,8 +1931,6 @@ pnfs_task_layoutreturn(void *v)
 
 	nfs4_server_rele(np);
 done:
-	if (e.error == 0 && e.rpc_status == RPC_SUCCESS)
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 	nfs4_end_op(mi, NULL, NULL, &recov_state, 0);
 	/*
 	 * At this point, we don't worry about failure.  We will either
@@ -2056,6 +1940,7 @@ done:
 	 */
 
 out:
+	nfs4_call_rele(cp);
 	task_layoutreturn_free(task);
 }
 
@@ -2068,16 +1953,14 @@ pnfs_task_layoutget(void *v)
 	mntinfo4_t *mi = task->tlg_mi;
 	nfs4_server_t *np;
 	rnode4_t *rp = VTOR4(task->tlg_vp);
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 argop[2];
+	nfs4_call_t *cp;
 	LAYOUTGET4args *arg;
+	LAYOUTGET4res *resp;
 	nfs4_error_t e = {0, NFS4_OK, RPC_SUCCESS};
-	int doqueue = 1, trynext_sid = 0;
+	int trynext_sid = 0;
 	rnode4_t	*found;
 	avl_index_t	where;
 	nfs4_fsidlt_t lt, *ltp;
-
 	cred_t *cr = task->tlg_cred;
 	nfs4_recov_state_t recov_state;
 	nfs4_stateid_types_t sid_types;
@@ -2087,22 +1970,6 @@ pnfs_task_layoutget(void *v)
 
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
-
-	args.ctag = TAG_PNFS_LAYOUTGET;
-	args.array_len = 2;
-	args.array = argop;
-
-	argop[0].argop = OP_CPUTFH;
-	argop[0].nfs_argop4_u.opcputfh.sfh = rp->r_fh;
-
-	argop[1].argop = OP_LAYOUTGET;
-	arg = &argop[1].nfs_argop4_u.oplayoutget;
-	arg->loga_layout_type = LAYOUT4_NFSV4_1_FILES;
-	arg->loga_iomode = task->tlg_iomode;
-	arg->loga_offset = 0;
-	arg->loga_length = ~0;
-	arg->loga_minlength = 8192; /* XXX */
-	arg->loga_maxcount = mi->mi_tsize;
 
 	/*
 	 * This code assumes we don't already have a layout and
@@ -2114,7 +1981,16 @@ pnfs_task_layoutget(void *v)
 	nfs4_init_stateid_types(&sid_types);
 
 recov_retry:
+	cp = nfs4_call_init(mi, cr, TAG_PNFS_LAYOUTGET);
+	(void) nfs4_op_cputfh(cp, rp->r_fh);
+	resp = nfs4_op_layoutget(cp, &arg);
 
+	arg->loga_layout_type = LAYOUT4_NFSV4_1_FILES;
+	arg->loga_iomode = task->tlg_iomode;
+	arg->loga_offset = 0;
+	arg->loga_length = ~0;
+	arg->loga_minlength = 8192; /* XXX */
+	arg->loga_maxcount = mi->mi_tsize;
 	arg->loga_stateid = nfs4_get_stateid(cr, rp, -1, mi, OP_READ,
 	    &sid_types, (GETSID_LAYOUT | trynext_sid));
 
@@ -2129,10 +2005,9 @@ recov_retry:
 	if (nfs4_start_op(mi, NULL, NULL, &recov_state))
 		goto out;
 
-	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(cp, &e);
 
 	if ((e.error == 0) && (e.stat == NFS4_OK)) {
-		LAYOUTGET4res *resp = &res.array[1].nfs_resop4_u.oplayoutget;
 		mutex_enter(&rp->r_statelock);
 		if (rp->r_flags & R4LAYOUTVALID) {
 			pnfs_layout_return(task->tlg_vp, cr, rp->r_lostateid,
@@ -2191,26 +2066,24 @@ recov_retry:
 		}
 		mutex_exit(&ltp->lt_rlt_lock);
 		nfs4_server_rele(np);
-	} else if (e.error == 0 && res.status == NFS4ERR_BAD_STATEID &&
+	} else if (e.error == 0 && cp->nc_res.status == NFS4ERR_BAD_STATEID &&
 	    sid_types.cur_sid_type != OPEN_SID) {
 		nfs4_save_stateid(&arg->loga_stateid, &sid_types);
 		trynext_sid = GETSID_TRYNEXT;
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 		nfs4_end_op(mi, NULL, NULL, &recov_state, 0);
+		nfs4_call_rele(cp);
 		goto recov_retry;
-	} else if (e.error == 0 && res.status == NFS4ERR_LAYOUTUNAVAILABLE) {
+	} else if (e.error == 0 &&
+	    cp->nc_res.status == NFS4ERR_LAYOUTUNAVAILABLE) {
 		mutex_enter(&rp->r_statelock);
 		rp->r_flags |= R4LAYOUTUNAVAIL;
 		mutex_exit(&rp->r_statelock);
 	}
 
-	if (e.error == 0 && e.rpc_status == RPC_SUCCESS) {
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-	}
-
 	nfs4_end_op(mi, NULL, NULL, &recov_state, 0);
 
 out:
+	nfs4_call_rele(cp);
 	mutex_enter(&rp->r_statelock);
 	rp->r_flags &= ~R4LOGET;
 	cv_broadcast(&rp->r_lowait);
@@ -2540,11 +2413,9 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 			task->rt_free_uio = 0;
 			task->rt_uio.uio_loffset = off;
 		}
-		task->rt_call = nfs4_call_init();
-		task->rt_call->nc_mi = mi;
+		task->rt_call = nfs4_call_init(mi, cr, TAG_PNFS_READ);
 		task->rt_call->nc_vp1 = vp;
 		task->rt_call->nc_ds_servinfo = task->rt_dev->std_svp;
-		task->rt_call->nc_cr = cr;
 		task->rt_call->nc_opnum = OP_READ;
 		task->rt_call->nc_ophint = OH_READ;
 
@@ -2811,11 +2682,9 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		/* XXX do we need a more conservative calculation? */
 		task->wt_count = MIN(layout->plo_stripe_unit - stripeoff,
 		    count);
-		task->wt_call = nfs4_call_init();
-		task->wt_call->nc_mi = mi;
+		task->wt_call = nfs4_call_init(mi, cr, TAG_PNFS_WRITE);
 		task->wt_call->nc_vp1 = vp;
 		task->wt_call->nc_ds_servinfo = task->wt_dev->std_svp;
-		task->wt_call->nc_cr = cr;
 		task->wt_call->nc_opnum = OP_WRITE;
 		task->wt_call->nc_ophint = OH_WRITE;
 
@@ -3236,47 +3105,6 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	return (0);
 }
 
-/* based on @(#)nfs4_call_t.c 1.1 08/06/25 */
-
-nfs4_call_t *
-nfs4_call_init(void)
-{
-	nfs4_call_t *cp;
-
-	cp = kmem_zalloc(sizeof (*cp), KM_SLEEP);
-	nfs4_error_zinit(&cp->nc_e);	/* Paranoia! */
-	mutex_init(cp->nc_lock, NULL, MUTEX_DEFAULT, NULL);
-	cp->nc_doqueue[0] = 1;
-	cp->nc_count = 1;
-	return (cp);
-}
-
-void
-nfs4_call_hold(nfs4_call_t *cp)
-{
-	mutex_enter(cp->nc_lock);
-	ASSERT(cp->nc_count > 0);
-	cp->nc_count++;
-	mutex_exit(cp->nc_lock);
-}
-
-void
-nfs4_call_rele(nfs4_call_t *cp)
-{
-	/*
-	 * Using a self-protecting mutex is ok here because of the
-	 * code above which always allocates a new structure.
-	 */
-	mutex_enter(cp->nc_lock);
-	if (cp->nc_count-- > 1) {
-		mutex_exit(cp->nc_lock);
-		return;
-	}
-	mutex_exit(cp->nc_lock);
-	mutex_destroy(cp->nc_lock);
-	kmem_free(cp, sizeof (*cp));
-}
-
 #ifdef	USE_GETDEVICELIST
 
 /*
@@ -3288,31 +3116,25 @@ pnfs_task_getdevicelist(void *v)
 {
 	task_get_devicelist_t *task = v;
 	mntinfo4_t *mi = task->tgd_mi;
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 argop[2];
+	nfs4_call_t *cp;
 	GETDEVICELIST4args *gdargs;
+	GETDEVICELIST4res *gdres;
+	GETDEVICELIST4resok *gdresok;
 	nfs4_error_t e = {0, NFS4_OK, RPC_SUCCESS};
-	int doqueue = 1;
-	GETDEVICELIST4resok *gdres;
 	int i, eof;
 	nfs4_recov_state_t recov_state;
 
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 
+	cp = nfs4_call_init(mi, task->tgd_cred, TAG_PNFS_GETDEVLIST);
+
 	if (nfs4_start_op(mi, NULL, NULL, &recov_state))
 		goto out;
 
-	args.ctag = TAG_PNFS_GETDEVLIST;
-	args.array_len = 2;
-	args.array = argop;
+	(void) nfs4_op_cputfh(cp, mi->mi_rootfh);
+	gdres = nfs4_op_getdevicelist(cp, &gdargs);
 
-	argop[0].argop = OP_CPUTFH;
-	argop[0].nfs_argop4_u.opcputfh.sfh = mi->mi_rootfh;
-
-	argop[1].argop = OP_GETDEVICELIST;
-	gdargs = &argop[1].nfs_argop4_u.opgetdevicelist;
 	gdargs->gdla_layout_type = LAYOUT4_NFSV4_1_FILES;
 	gdargs->gdla_maxcount = 64; /* XXX make abstraction */
 	gdargs->gdla_cookie = 0;
@@ -3328,19 +3150,16 @@ pnfs_task_getdevicelist(void *v)
 		}
 		mutex_exit(&mi->mi_lock);
 
-		rfs4call(mi, NULL, &args, &res, task->tgd_cred,
-		    &doqueue, 0, &e);
+		rfs4call(cp, &e);
 		if ((e.error == 0) && (e.stat == NFS4_OK)) {
-			gdres =
-			    &res.array[1].nfs_resop4_u.opgetdevicelist.\
-			    GETDEVICELIST4res_u.gdlr_resok4;
-			for (i = 0; i < gdres->GDL_ADDRL; i++)
+			gdresok = &gdres->GETDEVICELIST4res_u.gdlr_resok4;
+			for (i = 0; i < gdresok->GDL_ADDRL; i++)
 				pnfs_intern_devlist_item(mi,
-				    gdres->GDL_ADDRV + i,
+				    gdresok->GDL_ADDRV + i,
 				    LAYOUT4_NFSV4_1_FILES);
-			gdargs->gdla_cookie = gdres->gdlr_cookie;
-			gdargs->gdla_cookieverf = gdres->gdlr_cookieverf;
-			eof = gdres->gdlr_eof;
+			gdargs->gdla_cookie = gdresok->gdlr_cookie;
+			gdargs->gdla_cookieverf = gdresok->gdlr_cookieverf;
+			eof = gdresok->gdlr_eof;
 
 			/* XXX */
 			if (eof == 0) {
@@ -3352,13 +3171,12 @@ pnfs_task_getdevicelist(void *v)
 			/* exit loop gracefully on error */
 			eof = 1;
 
-		if (e.error == 0 && e.rpc_status == RPC_SUCCESS)
-			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-
+		nfs4_call_opresfree(cp);
 	} while (! eof);
 
 	nfs4_end_op(mi, NULL, NULL, &recov_state, 0);
 out:
+	nfs4_call_rele(cp);
 	task_get_devicelist_free(task);
 }
 
@@ -3524,11 +3342,9 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 	 * XXXcommit - reconcile vp, cr, opnum, and ophint between
 	 * the commit_task_t and the nfs4_call_t.
 	 */
-			task->cm_call = nfs4_call_init();
-			task->cm_call->nc_mi = mi;
+			task->cm_call = nfs4_call_init(mi, cr, TAG_PNFS_COMMIT);
 			task->cm_call->nc_vp1 = vp;
 			task->cm_call->nc_ds_servinfo = task->cm_dev->std_svp;
-			task->cm_call->nc_cr = cr;
 			task->cm_call->nc_opnum = OP_COMMIT;
 			task->cm_call->nc_ophint = OH_COMMIT;
 	/*

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -4567,13 +4567,112 @@ xdr_cnfs_argop4(XDR *xdrs, nfs_argop4 *objp)
 	return (FALSE);
 }
 
+static bool_t
+xdr_nfs_resop4_free(XDR *xdrs, nfs_resop4 *rp)
+{
+	ASSERT(xdrs->x_op == XDR_FREE);
+
+	/*
+	 * These should be ordered by frequency of use
+	 */
+	switch (rp->resop) {
+	case OP_PUTFH:
+		break;
+	case OP_GETATTR:
+		if (rp->nfs_resop4_u.opgetattr.status != NFS4_OK)
+			break;
+		if (rp->nfs_resop4_u.opgetattr.ga_res.n4g_ext_res)
+			kmem_free(rp->nfs_resop4_u.opgetattr.ga_res.n4g_ext_res,
+			    sizeof (struct nfs4_ga_ext_res));
+		break;
+	case OP_GETFH:
+		if (rp->nfs_resop4_u.opgetfh.status != NFS4_OK)
+			break;
+		if (rp->nfs_resop4_u.opgetfh.object.nfs_fh4_val != NULL) {
+			kmem_free(rp->nfs_resop4_u.opgetfh.object.nfs_fh4_val,
+			    rp->nfs_resop4_u.opgetfh.object.nfs_fh4_len);
+		}
+		break;
+	case OP_LOOKUP:
+		break;
+	case OP_OPEN:
+		(void) xdr_OPEN4res(xdrs, &rp->nfs_resop4_u.opopen);
+		break;
+	case OP_CLOSE:
+	case OP_ACCESS:
+		break;
+	case OP_READ:
+		(void) xdr_READ4res(xdrs, &rp->nfs_resop4_u.opread);
+		break;
+	case OP_WRITE:
+	case OP_DELEGRETURN:
+	case OP_LOOKUPP:
+	case OP_READDIR:
+	case OP_REMOVE:
+	case OP_COMMIT:
+	case OP_CREATE:
+	case OP_DELEGPURGE:
+	case OP_LINK:
+		break;
+	case OP_LOCK:
+		(void) xdr_LOCK4res(xdrs, &rp->nfs_resop4_u.oplock);
+		break;
+	case OP_LOCKT:
+		(void) xdr_LOCKT4res(xdrs, &rp->nfs_resop4_u.oplockt);
+		break;
+	case OP_LOCKU:
+	case OP_NVERIFY:
+	case OP_OPENATTR:
+	case OP_OPEN_CONFIRM:
+	case OP_OPEN_DOWNGRADE:
+	case OP_PUTPUBFH:
+	case OP_PUTROOTFH:
+	case OP_RENAME:
+	case OP_RENEW:
+	case OP_RESTOREFH:
+	case OP_SAVEFH:
+		break;
+	case OP_READLINK:
+		(void) xdr_READLINK4res(xdrs, &rp->nfs_resop4_u.opreadlink);
+		break;
+	case OP_SECINFO:
+		(void) xdr_array(xdrs,
+		    (char **)&rp->nfs_resop4_u.opsecinfo.SECINFO4resok_val,
+		    (uint_t *)&rp->nfs_resop4_u.opsecinfo.SECINFO4resok_len,
+		    NFS4_SECINFO_LIMIT, sizeof (secinfo4),
+		    (xdrproc_t)xdr_secinfo4);
+		break;
+	case OP_SETCLIENTID:
+		(void) xdr_SETCLIENTID4res(xdrs,
+		    &rp->nfs_resop4_u.opsetclientid);
+		break;
+	case OP_SETATTR:
+	case OP_SETCLIENTID_CONFIRM:
+	case OP_VERIFY:
+	case OP_RELEASE_LOCKOWNER:
+	case OP_ILLEGAL:
+		break;
+	default:
+		/*
+		 * An invalid op is a coding error, it should never
+		 * have been decoded.
+		 * Don't error because the caller cannot finish
+		 * freeing the residual memory of the array.
+		 */
+		break;
+	}
+
+	return (TRUE);
+}
+
 /*
  * Note that the len and decode_len will only be different in the case
  * of the client's use of this free function.  If the server is
  * freeing results, then the len/decode_len will always match.
  */
 static bool_t
-xdr_nfs_resop4_free(XDR *xdrs, nfs_resop4 **arrayp, int len, int decode_len)
+xdr_nfs_resop4_array_free(XDR *xdrs, nfs_resop4 **arrayp, int len,
+    int decode_len)
 {
 	int i;
 	nfs_resop4 *array = *arrayp;
@@ -4587,119 +4686,10 @@ xdr_nfs_resop4_free(XDR *xdrs, nfs_resop4 **arrayp, int len, int decode_len)
 		return (TRUE);
 
 	for (i = 0; i < decode_len; i++) {
-		/*
-		 * These should be ordered by frequency of use
-		 */
-		switch (array[i].resop) {
-		case OP_PUTFH:
-			continue;
-		case OP_GETATTR:
-			if (array[i].nfs_resop4_u.opgetattr.status != NFS4_OK)
-				continue;
-			if (array[i].nfs_resop4_u.opgetattr.ga_res.n4g_ext_res)
-				kmem_free(array[i].nfs_resop4_u.opgetattr.
-				    ga_res.n4g_ext_res,
-				    sizeof (struct nfs4_ga_ext_res));
-			continue;
-		case OP_GETFH:
-			if (array[i].nfs_resop4_u.opgetfh.status != NFS4_OK)
-				continue;
-			if (array[i].nfs_resop4_u.opgetfh.object.nfs_fh4_val !=
-			    NULL) {
-				kmem_free(array[i].nfs_resop4_u.opgetfh.object.
-				    nfs_fh4_val,
-				    array[i].nfs_resop4_u.opgetfh.object.
-				    nfs_fh4_len);
-			}
-			continue;
-		case OP_LOOKUP:
-			continue;
-		case OP_OPEN:
-			(void) xdr_OPEN4res(xdrs, &array[i].nfs_resop4_u.
-			    opopen);
-			continue;
-		case OP_CLOSE:
-		case OP_ACCESS:
-			continue;
-		case OP_READ:
-			(void) xdr_READ4res(xdrs,
-			    &array[i].nfs_resop4_u.opread);
-			continue;
-		case OP_WRITE:
-		case OP_DELEGRETURN:
-		case OP_LOOKUPP:
-		case OP_READDIR:
-		case OP_REMOVE:
-		case OP_COMMIT:
-		case OP_CREATE:
-		case OP_DELEGPURGE:
-		case OP_LINK:
-			continue;
-		case OP_LOCK:
-			(void) xdr_LOCK4res(xdrs, &array[i].nfs_resop4_u.
-			    oplock);
-			continue;
-		case OP_LOCKT:
-			(void) xdr_LOCKT4res(xdrs, &array[i].nfs_resop4_u.
-			    oplockt);
-			continue;
-		case OP_LOCKU:
-		case OP_NVERIFY:
-		case OP_OPENATTR:
-		case OP_OPEN_CONFIRM:
-		case OP_OPEN_DOWNGRADE:
-		case OP_PUTPUBFH:
-		case OP_PUTROOTFH:
-		case OP_RENAME:
-		case OP_RENEW:
-		case OP_RESTOREFH:
-		case OP_SAVEFH:
-			continue;
-		case OP_READLINK:
-			(void) xdr_READLINK4res(xdrs, &array[i].nfs_resop4_u.
-			    opreadlink);
-			continue;
-		case OP_SECINFO:
-			(void) xdr_array(xdrs,
-			    (char **)&array[i].nfs_resop4_u.opsecinfo.
-			    SECINFO4resok_val,
-			    (uint_t *)&array[i].nfs_resop4_u.opsecinfo.
-			    SECINFO4resok_len,
-			    NFS4_SECINFO_LIMIT, sizeof (secinfo4),
-			    (xdrproc_t)xdr_secinfo4);
-			continue;
-		case OP_SETCLIENTID:
-			(void) xdr_SETCLIENTID4res(xdrs,
-			    &array[i].nfs_resop4_u.opsetclientid);
-			continue;
-		case OP_SETATTR:
-		case OP_SETCLIENTID_CONFIRM:
-		case OP_VERIFY:
-		case OP_RELEASE_LOCKOWNER:
-		case OP_ILLEGAL:
-			continue;
-		default:
-			/*
-			 * An invalid op is a coding error, it should never
-			 * have been decoded.
-			 * Don't error because the caller cannot finish
-			 * freeing the residual memory of the array.
-			 */
-			continue;
-		}
+		xdr_nfs_resop4_free(xdrs, &array[i]);
 	}
 
-	/*
-	 * This shouldn't be here.  It's a manifestation of the
-	 * was rfs4call adds sequence ops.  If the sequence op
-	 * fails, then rfs4call has no results array to return
-	 * since rfs4call added the failing op itself.  Still,
-	 * we must return the error properly (especially in cases
-	 * like NFS4ERR_EXPIRED to kick off recovery).
-	 */
-
-	if (len > 0 && *arrayp != NULL)
-		kmem_free(*arrayp, len * sizeof (nfs_resop4));
+	kmem_free(*arrayp, len * sizeof (nfs_resop4));
 	*arrayp = NULL;
 	return (TRUE);
 }
@@ -4707,7 +4697,7 @@ xdr_nfs_resop4_free(XDR *xdrs, nfs_resop4 **arrayp, int len, int decode_len)
 static bool_t
 xdr_snfs_resop4_free(XDR *xdrs, nfs_resop4 **arrayp, int len, int decode_len)
 {
-	return (xdr_nfs_resop4_free(xdrs, arrayp, len, decode_len));
+	return (xdr_nfs_resop4_array_free(xdrs, arrayp, len, decode_len));
 }
 
 /*
@@ -4922,6 +4912,7 @@ xdr_COMPOUND4args_clnt(XDR *xdrs, COMPOUND4args_clnt *objp)
 	rpc_inline_t *ptr;
 	rdma_chunkinfo_t rci;
 	struct xdr_ops *xops = xdrrdma_xops();
+	COMPOUND4node_clnt *nodep;
 
 	/*
 	 * XDR_ENCODE only
@@ -4965,9 +4956,17 @@ xdr_COMPOUND4args_clnt(XDR *xdrs, COMPOUND4args_clnt *objp)
 		XDR_CONTROL(xdrs, XDR_RDMA_ADD_CHUNK, &rci);
 	}
 
-	return (xdr_array(xdrs, (char **)&objp->array,
-	    (uint_t *)&objp->array_len, NFS4_COMPOUND_LIMIT,
-	    sizeof (nfs_argop4), (xdrproc_t)xdr_cnfs_argop4));
+	/* encode link list of args as an xdr array */
+	if (!xdr_u_int(xdrs, &objp->args_len))
+		return (FALSE);
+	for (nodep = list_head(&objp->args);
+	    nodep != NULL;
+	    nodep = list_next(&objp->args, nodep)) {
+		if (!xdr_cnfs_argop4(xdrs, &nodep->arg))
+			return (FALSE);
+	}
+
+	return (TRUE);
 }
 
 bool_t
@@ -5189,8 +5188,10 @@ xdr_COMPOUND4res_clnt(XDR *xdrs, COMPOUND4res_clnt *objp)
 {
 	uint32_t len;
 	int32_t *ptr;
-	nfs_argop4 *argop;
-	nfs_resop4 *resop;
+	nfs_argop4 *argp;
+	nfs_resop4 *resp;
+	COMPOUND4node_clnt *nodep;
+	COMPOUND4args_clnt *ap = objp->argsp;
 
 	/*
 	 * No XDR_ENCODE
@@ -5216,39 +5217,53 @@ xdr_COMPOUND4res_clnt(XDR *xdrs, COMPOUND4res_clnt *objp)
 		if (!XDR_CONTROL(xdrs, XDR_SKIPBYTES, &len))
 			return (FALSE);
 
-		if (!xdr_int(xdrs, (int32_t *)&objp->array_len))
+		if (!xdr_int(xdrs, (int32_t *)&objp->args_len))
 			return (FALSE);
 
-		if (objp->array_len > objp->argsp->array_len)
+		if (objp->args_len > ap->args_len)
 			return (FALSE);
 
 		if (objp->status == NFS_OK &&
-		    objp->array_len != objp->argsp->array_len)
+		    objp->args_len != ap->args_len)
 			return (FALSE);
 
-		/* Alloc the results array */
-		argop = objp->argsp->array;
-		len = objp->array_len * sizeof (nfs_resop4);
+		len = 0;
 		objp->decode_len = 0;
-		objp->array = resop = kmem_zalloc(len, KM_SLEEP);
-
-		for (len = 0; len < objp->array_len;
-		    len++, resop++, argop++, objp->decode_len++) {
-			if (!xdr_nfs_resop4_clnt(xdrs, resop, argop)) {
+		for (nodep = list_head(&ap->args);
+		    nodep != NULL && len < objp->args_len;
+		    nodep = list_next(&ap->args, nodep)) {
+			resp = &nodep->res;
+			argp = &nodep->arg;
+			if (!xdr_nfs_resop4_clnt(xdrs, resp, argp)) {
 				/*
-				 * Make sure to free anything that may
-				 * have been allocated along the way.
+				 * Decode error.
+				 * Free allocations already done.
 				 */
 				xdrs->x_op = XDR_FREE;
-				(void) xdr_nfs_resop4_free(xdrs, &objp->array,
-				    objp->array_len, objp->decode_len);
+				for (nodep = list_head(&ap->args);
+				    nodep != NULL && len != 0;
+				    nodep = list_next(&ap->args, nodep)) {
+					resp = &nodep->res;
+					xdr_nfs_resop4_free(xdrs, resp);
+					len--;
+				}
 				return (FALSE);
 			}
+			len++;
+			objp->decode_len++;
 		}
-		return (TRUE);
+	} else {
+		/* XDR_FREE */
+		len = 0;
+		for (nodep = list_head(&ap->args);
+		    nodep != NULL && len < objp->decode_len;
+		    nodep = list_next(&ap->args, nodep)) {
+			xdr_nfs_resop4_free(xdrs, &nodep->res);
+			len++;
+		}
 	}
-	return (xdr_nfs_resop4_free(xdrs, &objp->array,
-	    objp->array_len, objp->decode_len));
+
+	return (TRUE);
 }
 
 bool_t

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -195,13 +195,15 @@ nfs4_setopts(vnode_t *vp, model_t model, struct nfs_args *buf)
 int
 nfs4_need_to_bump_seqid(COMPOUND4res_clnt *res)
 {
-	int i, seqid_dep_op = 0;
-	nfs_resop4 *resop;
+	COMPOUND4node_clnt *nodep;
+	uint32_t len;
+	int seqid_dep_op = 0;
 
-	resop = res->array;
-
-	for (i = 0; i < res->array_len; i++) {
-		switch (resop[i].resop) {
+	len = 0;
+	for (nodep = list_head(&res->argsp->args);
+	    nodep != NULL && len < res->decode_len;
+	    nodep = list_next(&res->argsp->args, nodep)) {
+		switch (nodep->res.resop) {
 		case OP_CLOSE:
 		case OP_OPEN:
 		case OP_OPEN_CONFIRM:
@@ -213,6 +215,7 @@ nfs4_need_to_bump_seqid(COMPOUND4res_clnt *res)
 		default:
 			continue;
 		}
+		len++;
 	}
 
 	if (!seqid_dep_op)

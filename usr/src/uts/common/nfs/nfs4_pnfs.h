@@ -165,13 +165,6 @@ typedef struct {
 	list_node_t rt_next;
 } read_task_t;
 
-typedef struct {
-	COMPOUND4args_clnt args;
-	nfs_argop4 argop[3];	/* SEQUENCE, PUTFH, READ */
-	READ4args *read;
-	void **fh;
-} pnfs_read_compound_t;
-
 /* a batch of write i/o work requested of pNFS */
 typedef struct {
 	kmutex_t	fiw_lock;

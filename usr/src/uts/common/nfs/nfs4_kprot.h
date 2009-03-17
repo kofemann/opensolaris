@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -40,6 +40,7 @@ extern "C" {
 #include <rpc/rpc_rdma.h>
 #endif
 #include <sys/stream.h>
+#include <sys/list.h>
 #include <nfs/nfs4_attrmap.h>
 
 #define	NFS4_FHSIZE 128
@@ -1394,8 +1395,8 @@ typedef struct CB_ILLEGAL4res CB_ILLEGAL4res;
 struct COMPOUND4args_clnt {
 	int ctag;
 	uint32_t minor_vers;
-	uint_t array_len;
-	nfs_argop4 *array;
+	uint_t args_len;
+	list_t args;		/* list of COMPOUND4node_clnt objects */
 };
 typedef struct COMPOUND4args_clnt COMPOUND4args_clnt;
 
@@ -1409,9 +1410,8 @@ typedef struct COMPOUND4args COMPOUND4args;
 
 struct COMPOUND4res_clnt {
 	nfsstat4 status;
-	uint_t array_len;
+	uint_t args_len;
 	uint_t decode_len;
-	nfs_resop4 *array;
 	COMPOUND4args_clnt *argsp;
 };
 typedef struct COMPOUND4res_clnt COMPOUND4res_clnt;
@@ -1432,6 +1432,13 @@ struct COMPOUND4res_srv {
 	uint32_t minorversion;	/* won't go otw */
 };
 typedef struct COMPOUND4res_srv COMPOUND4res_srv;
+
+struct COMPOUND4node_clnt {
+	list_node_t node;
+	nfs_argop4 arg;
+	nfs_resop4 res;
+};
+typedef struct COMPOUND4node_clnt COMPOUND4node_clnt;
 
 /*
  * XXX - nfs_cb_opnum4, nfs_cb_argop4, and nfs_cb_resop4 were

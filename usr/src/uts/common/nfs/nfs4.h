@@ -1564,31 +1564,14 @@ struct mntinfo4;
  * volatile filehandle recovery), or stuff that needs OPENATTR (e.g.
  * looking up a named attribute or it's hidden directory).
  */
-enum lkp4_attr_setup {
+typedef enum lkp4_attr_setup {
 	LKP4_NO_ATTRIBUTES = 0,		/* no attrs or filehandles */
 	LKP4_ALL_ATTRIBUTES = 3,	/* multi-comp: attrs for all comps */
 	LKP4_LAST_NAMED_ATTR = 5,	/* multi-comp: named attr & attrdir */
 	LKP4_LAST_ATTRDIR = 6,		/* multi-comp: just attrdir */
 	LKP4_ALL_ATTR_SECINFO = 7	/* multi-comp: attrs for all comp and */
 					/*	secinfo for last comp */
-};
-
-/*
- * lookup4_param a set of parameters to nfs4lookup_setup -
- * used to setup a path lookup compound request.
- */
-typedef struct lookup4_param {
-	enum lkp4_attr_setup l4_getattrs; /* (in) get attrs in the lookup? */
-	int 		header_len;	/* (in) num ops before first lookup  */
-	int 		trailer_len;	/* (in) num ops after last	*/
-					/*	Lookup/Getattr		*/
-	attrmap4 	ga_bits;	/* (in) Which attributes for Getattr */
-	COMPOUND4args_clnt *argsp;	/* (in/out) args for compound struct */
-	COMPOUND4res_clnt  *resp;	/* (in/out) res for compound  struct */
-	int 		arglen;		/* (out) argop buffer alloc'd length */
-	struct mntinfo4 *mi;
-} lookup4_param_t;
-
+} lkp4_attr_setup_t;
 
 #define	NFS4_FATTR4_FINISH	-1	/* fattr4 index indicating finish */
 
@@ -1633,7 +1616,6 @@ extern void	rfs4_op_readdir(nfs_argop4 *, nfs_resop4 *,
 			struct svc_req *, struct compound_state *);
 extern void	nfs_fh4_copy(nfs_fh4 *, nfs_fh4 *);
 extern void	nfs4_fattr4_free(fattr4 *);
-extern int	nfs4lookup_setup(char *, lookup4_param_t *, int);
 extern void	nfs4_getattr_otw_norecovery(vnode_t *,
 			nfs4_ga_res_t *, nfs4_error_t *, cred_t *, int);
 extern int	nfs4_getattr_otw(vnode_t *, nfs4_ga_res_t *, cred_t *, int);

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -604,8 +604,6 @@ extern attrmap4 rfs4_rddir_supp_attrmap[];
 	FATTR4_OWNER_GROUP_MASK		|	\
 	FATTR4_LAYOUT_HINT_MASK		|	\
 	FATTR4_TIME_ACCESS_SET_MASK)
-
-#define	ga_arg_attrreq	nfs_argop4_u.opgetattr.attr_request
 
 #define	FATTR4_FSID_EQ(a, b)					\
 	((a)->major == (b)->major && (a)->minor == (b)->minor)

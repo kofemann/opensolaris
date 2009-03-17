@@ -1649,24 +1649,55 @@ nfs4_rfscall(mntinfo4_t *mi, servinfo4_t *svp,
 	return (rpcerr.re_errno);
 }
 
-/*
- * rfs4call - general wrapper for RPC calls initiated by the client
- * KLR-make this a nosequence rfs4call which will not add a sequence op
- * XXXrsb - External callers now user rfs4call() with RFS4CALL_NOSEQ.
- */
-static void
-rfs4call_nosequence(mntinfo4_t *mi, servinfo4_t *svp, COMPOUND4args_clnt *argsp,
-    COMPOUND4res_clnt *resp, cred_t *cr, int *doqueue, int flags,
-    nfs4_error_t *ep)
+void
+rfs4call(nfs4_call_t *cp, nfs4_error_t *copy_ep)
 {
-	int i, error;
+	int i, error, doseq;
+	nfs4_slot_t *slot;
+	COMPOUND4node_clnt *node;
+	SEQUENCE4res *seqres;
+	nfs4_server_t *np;
+	nfs4_error_t *ep = &cp->nc_e;
 	enum clnt_stat rpc_status = NFS4_OK;
-	int num_resops;
 	struct nfs4_clnt *nfscl;
+	mntinfo4_t *mi = cp->nc_mi;
+	nfs_opnum4 resop;
+
+	if (NFS4_MINORVERSION(mi) == 0 ||
+	    (cp->nc_rfs4call_flags & RFS4CALL_NOSEQ)) {
+		doseq = 0;
+	} else {
+		doseq = 1;
+	}
+
+	if (doseq) {
+		/*
+		 * XXXrsb - The following code is likely to change.
+		 * We have a pointer from the servinfo4 to the nfs4_server
+		 * If we have a servinfo4 and the pointer is valid, then use it.
+		 * One note, we may have to deal with the "np == NULL" case.
+		 */
+		if (cp->nc_svp && cp->nc_svp->sv_ds_n4sp) {
+			np = cp->nc_svp->sv_ds_n4sp;
+			nfs4_server_hold(np);
+		} else {
+			np = find_nfs4_server(mi);
+			ASSERT(np != NULL);
+			mutex_exit(&np->s_lock);
+		}
+
+		/* add sequence op if needed */
+		if ((cp->nc_flags & NFS4_CALL_FLAG_SEQADDED) == 0)
+			(void) nfs4_op_sequence(cp);
+
+		/* Set up the sequence OP */
+		nfs4sequence_setup(&np->ssx, &cp->nc_args, &slot);
+	}
 
 	ASSERT(nfs_zone() == mi->mi_zone);
 	nfscl = zone_getspecific(nfs4clnt_zone_key, nfs_zone());
 	ASSERT(nfscl != NULL);
+
 	/*
 	 * Note that the first call will be accounted for the default
 	 * minor version, even if there are no mounts for that minor
@@ -1679,255 +1710,105 @@ rfs4call_nosequence(mntinfo4_t *mi, servinfo4_t *svp, COMPOUND4args_clnt *argsp,
 	nfscl->nfscl_stat[NFS4_MINORVERSION(mi)].calls.value.ui64++;
 	mi->mi_reqs[NFSPROC4_COMPOUND].value.ui64++;
 
-		/* XXX - Set up minorversion */
-	argsp->minor_vers = NFS4_MINORVERSION(mi);
+	error = nfs4_rfscall(mi, cp->nc_svp, NFSPROC4_COMPOUND,
+	    xdr_COMPOUND4args_clnt, (caddr_t)&cp->nc_args,
+	    xdr_COMPOUND4res_clnt, (caddr_t)&cp->nc_res, cp->nc_cr,
+	    cp->nc_doqueue, &rpc_status, cp->nc_rfs4call_flags, nfscl);
 
-	/* Set up the results struct for XDR usage */
-	resp->argsp = argsp;
-	resp->array = NULL;
-	resp->status = 0;
-	resp->decode_len = 0;
-
-	error = nfs4_rfscall(mi, svp, NFSPROC4_COMPOUND,
-	    xdr_COMPOUND4args_clnt, (caddr_t)argsp,
-	    xdr_COMPOUND4res_clnt, (caddr_t)resp, cr,
-	    doqueue, &rpc_status, flags, nfscl);
-
-	/*
-	 * Map the connection not bound rpc error to nfs
-	 * error. Currently with no connection binding enforcement
-	 * by the client, we won't hit this. With connection binding
-	 * enforcement in the future (with SSV), the below method is
-	 * needed to drive a bind_conn_to_session after a connection
-	 * loss by the client (See section - 2.10.10.1.4 of the draft)
-	 */
-	if (error && rpc_status == RPC_CONN_NOT_BOUND) {
-		ep->error = 0;
-		ep->rpc_status = 0;
-		ep->stat = NFS4ERR_CONN_NOT_BOUND_TO_SESSION;
-		return;
-	}
-
-	/* Return now if it was any other RPC error */
 	if (error) {
-		ep->error = error;
-		ep->stat = resp->status;
-		ep->rpc_status = rpc_status;
-		return;
-	}
-	/*
-	 * else we'll count the processed operations. Note that we will
-	 * NOT enter here in case of NFS4ERR_MINOR_VERS_MISMATCH.
-	 */
-	num_resops = resp->decode_len;
-	for (i = 0; i < num_resops; i++) {
 		/*
-		 * Count the individual operations
-		 * processed by the server.
+		 * Map the connection not bound rpc error to nfs
+		 * error. Currently with no connection binding enforcement
+		 * by the client, we won't hit this. With connection binding
+		 * enforcement in the future (with SSV), the below method is
+		 * needed to drive a bind_conn_to_session after a connection
+		 * loss by the client (See section - 2.10.10.1.4 of the draft)
 		 */
-		if (NFS4_MINORVERSION(mi) == NFS4_MINOR_v1) {
-			if (resp->array[i].resop >= NFSPROC4_NULL &&
-			    resp->array[i].resop <= OP_RECLAIM_COMPLETE) {
-				mi->mi_reqs[resp->array[i].resop].value.ui64++;
-			}
-		} else if (NFS4_MINORVERSION(mi) == NFS4_MINOR_v0) {
-			if (resp->array[i].resop >= NFSPROC4_NULL &&
-			    resp->array[i].resop <= OP_RELEASE_LOCKOWNER) {
-				mi->mi_reqs[resp->array[i].resop].value.ui64++;
-			}
-		}
-	}
-
-	ep->error = 0;
-	ep->stat = resp->status;
-	ep->rpc_status = rpc_status;
-}
-
-void
-rfs41_call(mntinfo4_t *mi, servinfo4_t *svp, COMPOUND4args_clnt *argsp,
-	COMPOUND4res_clnt *resp, cred_t *cr, int *doqueue, int flags,
-	nfs4_error_t *ep)
-{
-	nfs4_slot_t		*slot;
-	SEQUENCE4res		*seqres;
-	struct nfs4_server	*np;
-	COMPOUND4args_clnt	rfs_args, *rfsargp;
-	COMPOUND4res_clnt	rfs_res, *rfsresp;
-	int			add_seq = 0;
-
-	/*
-	 * XXXrsb - The following code is likely to change
-	 * For now, we have a pointer from the servinfo4 to the nfs4_server
-	 * If we have a servinfo4 and the pointer is valid, then use it.
-	 * One note, we may have to deal with the "np == NULL" case.
-	 */
-	if (svp && svp->sv_ds_n4sp) {
-		np = svp->sv_ds_n4sp;
-		nfs4_server_hold(np);
-	} else {
-		np = find_nfs4_server(mi);
-		ASSERT(np != NULL);
-		mutex_exit(&np->s_lock);
-	}
-
-
-	/*
-	 * Allocate another args array so we can insert
-	 * a SEQUENCE Op as the first operation, copy already
-	 * built args into it also.
-	 */
-	if (argsp->array->argop != OP_SEQUENCE) {
-		rfs_args.ctag = argsp->ctag;
-		rfs_args.array_len = argsp->array_len + 1;
-		rfs_args.array = kmem_zalloc(sizeof (nfs_argop4) *
-		    rfs_args.array_len, KM_SLEEP);
-
-		bcopy(argsp->array, rfs_args.array + 1,
-		    sizeof (nfs_argop4) * argsp->array_len);
-
-		ASSERT(argsp->array_len >= 1);
-		rfs_args.array->argop = OP_SEQUENCE;
-		rfsargp = &rfs_args;
-		rfsresp = &rfs_res;
-		add_seq = 1;
-	} else {
-		rfsargp = argsp;
-		rfsresp = resp;
-	}
-
-	/* Set up the sequence OP */
-
-	nfs4sequence_setup(&np->ssx, rfsargp, &slot);
-
-	/*
-	 * Send it using rfs4call_nosequence()
-	 * XXXrsb - this will likely be refactored with the rest of
-	 * the rfs4call() family
-	 */
-	rfs4call_nosequence(mi, svp, rfsargp, rfsresp, cr, doqueue, flags, ep);
-
-#if	0
-	zcmn_err(mi->mi_zone->zone_id, CE_WARN,
-	    "Tag: %x SEQUENCE slot: %x seq: %x estatus: %x nstatus: %x",
-	    rfsargp->ctag,
-	    rfsargp->array->nfs_argop4_u.opsequence.sa_slotid,
-	    rfsargp->array->nfs_argop4_u.opsequence.sa_sequenceid,
-	    ep->error,
-	    rfsresp->array != NULL ?
-	    rfsresp->array->nfs_resop4_u.opsequence.status : 0);
-
-	if (ep->error || ep->stat || ep->rpc_status)
-		cmn_err(CE_WARN, "rfs4call failed: %d, %d, %d",
-		    ep->error, ep->stat, ep->rpc_status);
-#endif
-
-	nfs4sequence_fin(&np->ssx, rfsresp, slot, ep);
-
-	/*
-	 * If the OTW call failed completely, or if the
-	 * results array is NULL, just get out
-	 */
-	if (ep->error || (ep->stat && rfsresp->array == NULL)) {
-
-		if (ep->error == 0) {
-			ep->error = geterrno4(ep->stat);
-		}
-
-		if (add_seq)
-			kmem_free(rfs_args.array,
-			    sizeof (nfs_argop4) * rfs_args.array_len);
-
-		nfs4_server_rele(np);
-		return;
-	}
-
-	/*
-	 * Check the results of the sequence op.  If it failed and we
-	 * added it for the caller, then we don't have any results
-	 * to return.
-	 */
-	seqres = &rfsresp->array->nfs_resop4_u.opsequence;
-	if (seqres->sr_status != NFS4_OK) {
-
-		cmn_err(CE_WARN, "rfs4call: sequence OP failed %d",
-		    seqres->sr_status);
-
-		if (add_seq) {
-			kmem_free(rfs_args.array,
-			    sizeof (nfs_argop4) * rfs_args.array_len);
-			resp->status = seqres->sr_status;
-			resp->array_len = resp->decode_len = 0;
-			resp->array = NULL;
-		}
-		/* XXX - xdr_free? free cpy */
-		nfs4_server_rele(np);
-		return;
-	}
-
-	/*
-	 * Update lease time if we have state since SEQUENCE op was successful
-	 */
-	mutex_enter(&np->s_lock);
-	if (np->lease_valid == NFS4_LEASE_VALID && np->state_ref_count)
-		np->last_renewal_time = gethrestime_sec();
-	mutex_exit(&np->s_lock);
-
-	/*
-	 * We some results of interest to the, so
-	 * Allocate an additional response array which doesn't have
-	 * SEQUENCE op results, copy results to it if not just a
-	 * SEQUENCE op for lease renewal.
-	 */
-	if (add_seq) {
-		resp->status = rfsresp->status;
-		resp->array_len =
-		    rfsresp->array_len == 0 ? 0 :rfsresp->array_len - 1;
-		resp->decode_len = rfsresp->decode_len == 0 ? 0 :
-		    rfsresp->decode_len - 1;
-		resp->argsp = argsp;
-		if (resp->array_len > 0) {
-			ASSERT(rfs_res.array != NULL);
-			resp->array =
-			    kmem_alloc(sizeof (nfs_resop4) *
-			    resp->array_len, KM_SLEEP);
-			bcopy(rfsresp->array + 1, resp->array,
-			    sizeof (nfs_resop4) * resp->array_len);
+		if (rpc_status == RPC_CONN_NOT_BOUND) {
+			ep->error = 0;
+			ep->rpc_status = 0;
+			ep->stat = NFS4ERR_CONN_NOT_BOUND_TO_SESSION;
 		} else {
-			resp->array = NULL;
+			ep->error = error;
+			ep->stat = cp->nc_res.status;
+			ep->rpc_status = rpc_status;
 		}
-		kmem_free(rfs_args.array,
-		    sizeof (nfs_argop4) * rfs_args.array_len);
-		kmem_free(rfs_res.array,
-		    sizeof (nfs_resop4) * rfs_res.array_len);
+	} else {
+		cp->nc_flags |= NFS4_CALL_FLAG_RESFREE;
+
+		/*
+		 * Count the processed operations. Note that we will
+		 * NOT enter here in case of NFS4ERR_MINOR_VERS_MISMATCH.
+		 */
+		node = list_head(&cp->nc_args.args);
+		for (i = 0; i < cp->nc_res.decode_len; i++) {
+			ASSERT(node != NULL);
+			resop = node->res.resop;
+			/*
+			 * Count the individual operations
+			 * processed by the server.
+			 */
+			if (NFS4_MINORVERSION(mi) == NFS4_MINOR_v1) {
+				if (resop >= NFSPROC4_NULL &&
+				    resop <= OP_RECLAIM_COMPLETE) {
+					mi->mi_reqs[resop].value.ui64++;
+				}
+			} else if (NFS4_MINORVERSION(mi) == NFS4_MINOR_v0) {
+				if (resop >= NFSPROC4_NULL &&
+				    resop <= OP_RELEASE_LOCKOWNER) {
+					mi->mi_reqs[resop].value.ui64++;
+				}
+			}
+			node = list_next(&cp->nc_args.args, node);
+		}
+
+		ep->error = 0;
+		ep->stat = cp->nc_res.status;
+		ep->rpc_status = rpc_status;
 	}
-	nfs4_server_rele(np);
-}
 
-void
-rfs4call(mntinfo4_t *mi, servinfo4_t *svp, COMPOUND4args_clnt *argsp,
-	COMPOUND4res_clnt *resp, cred_t *cr, int *doqueue, int flags,
-	nfs4_error_t *ep)
-{
-	if (NFS4_MINORVERSION(mi) == 0 || (flags & RFS4CALL_NOSEQ)) {
-		rfs4call_nosequence(mi, svp, argsp, resp, cr, doqueue,
-		    flags, ep);
-		return;
+	if (doseq) {
+		nfs4sequence_fin(&np->ssx, &cp->nc_res, slot, ep);
+
+		/*
+		 * If the OTW call failed completely, or if the
+		 * results array is empty, just get out
+		 */
+		if (ep->error || (ep->stat && cp->nc_res.decode_len == 0)) {
+			if (ep->error == 0) {
+				ep->error = geterrno4(ep->stat);
+			}
+		} else {
+			/*
+			 * Check the result of the sequence op.
+			 */
+			node = list_head(&cp->nc_args.args);
+			ASSERT(node != NULL);
+			ASSERT(node->arg.argop == OP_SEQUENCE);
+			seqres = &node->res.nfs_resop4_u.opsequence;
+			if (seqres->sr_status != NFS4_OK) {
+				cmn_err(CE_WARN,
+				    "rfs4call: sequence OP failed %d",
+				    seqres->sr_status);
+			} else {
+				/*
+				 * Update lease time if we have state since
+				 * SEQUENCE op was successful.
+				 */
+				mutex_enter(&np->s_lock);
+				if (np->lease_valid ==
+				    NFS4_LEASE_VALID && np->state_ref_count)
+					np->last_renewal_time =
+					    gethrestime_sec();
+				mutex_exit(&np->s_lock);
+			}
+		}
+		nfs4_server_rele(np);
 	}
-	rfs41_call(mi, svp, argsp, resp, cr, doqueue, flags, ep);
-}
 
-/*
- * This is simply scaffolding for pNFS until rfs4call() is modified
- * to use nfs4_call_t.
- */
-void
-rfs4call_impl(nfs4_call_t *cp, COMPOUND4args_clnt *args, COMPOUND4res_clnt *res)
-{
-	/* NB: nc_ds_servinfo will be NULL for MDS ops */
-	rfs4call(cp->nc_mi, cp->nc_ds_servinfo, args, res, cp->nc_cr,
-	    cp->nc_doqueue, cp->nc_rfs4call_flags, &cp->nc_e);
+	if (copy_ep != NULL)
+		*copy_ep = cp->nc_e;
 }
-
 
 /*
  * nfs4rename_update - updates stored state after a rename.  Currently this
@@ -1960,16 +1841,13 @@ remap_lookup(nfs4_fname_t *fname, vnode_t *rootvp,
     nfs_fh4 *pfhp, nfs4_ga_res_t *pgarp,	/* fh, attrs for parent */
     nfs4_error_t *ep)
 {
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	nfs_argop4 *argop;
-	nfs_resop4 *resop;
-	int num_argops;
-	lookup4_param_t lookuparg;
+	nfs4_call_t *cp;
+	COMPOUND4node_clnt *node;
 	nfs_fh4 *tmpfhp;
-	int doqueue = 1;
 	char *path;
 	mntinfo4_t *mi;
+	int ctag;
+	lkp4_attr_setup_t l4_getattrs;
 
 	ASSERT(fname != NULL);
 	ASSERT(rootvp->v_type == VDIR);
@@ -1978,51 +1856,60 @@ remap_lookup(nfs4_fname_t *fname, vnode_t *rootvp,
 	path = fn_path(fname);
 	switch (filetype) {
 	case RML_NAMED_ATTR:
-		lookuparg.l4_getattrs = LKP4_LAST_NAMED_ATTR;
-		args.ctag = TAG_REMAP_LOOKUP_NA;
+		l4_getattrs = LKP4_LAST_NAMED_ATTR;
+		ctag = TAG_REMAP_LOOKUP_NA;
 		break;
 	case RML_ATTRDIR:
-		lookuparg.l4_getattrs = LKP4_LAST_ATTRDIR;
-		args.ctag = TAG_REMAP_LOOKUP_AD;
+		l4_getattrs = LKP4_LAST_ATTRDIR;
+		ctag = TAG_REMAP_LOOKUP_AD;
 		break;
 	case RML_ORDINARY:
-		lookuparg.l4_getattrs = LKP4_ALL_ATTRIBUTES;
-		args.ctag = TAG_REMAP_LOOKUP;
+		l4_getattrs = LKP4_ALL_ATTRIBUTES;
+		ctag = TAG_REMAP_LOOKUP;
 		break;
 	default:
 		ep->error = EINVAL;
 		return;
 	}
-	lookuparg.argsp = &args;
-	lookuparg.resp = &res;
-	lookuparg.header_len = 1;	/* Putfh */
-	lookuparg.trailer_len = 0;
-	lookuparg.ga_bits = MI4_DEFAULT_ATTRMAP(mi);
-	lookuparg.mi = VTOMI4(rootvp);
 
-	(void) nfs4lookup_setup(path, &lookuparg, 1);
+	cp = nfs4_call_init(mi, cr, ctag);
 
 	/* 0: putfh directory */
-	argop = args.array;
-	argop[0].argop = OP_CPUTFH;
-	argop[0].nfs_argop4_u.opcputfh.sfh = VTOR4(rootvp)->r_fh;
+	(void) nfs4_op_cputfh(cp, VTOR4(rootvp)->r_fh);
 
-	num_argops = args.array_len;
+	nfs4lookup_setup(cp, path, l4_getattrs, MI4_DEFAULT_ATTRMAP(mi), 1);
 
-	rfs4call(mi, NULL, &args, &res, cr, &doqueue, RFSCALL_SOFT, ep);
+	cp->nc_rfs4call_flags |= RFSCALL_SOFT;
+	rfs4call(cp, ep);
 
-	if (ep->error || res.status != NFS4_OK)
+	if (ep->error || cp->nc_res.status != NFS4_OK)
 		goto exit;
 
-	/* get the object filehandle */
-	resop = &res.array[res.array_len - 2];
-	if (resop->resop != OP_GETFH) {
+	/*
+	 * -1: get the object attributes
+	 * If the caller wants the attributes of the last lookup
+	 * component, and if we have the attributes,
+	 * copy them out.
+	 */
+	node = list_tail(&cp->nc_args.args);
+	ASSERT(node != NULL);
+	if (garp && node->res.resop == OP_GETATTR)
+		*garp = node->res.nfs_resop4_u.opgetattr.ga_res;
+
+	/*
+	 * -2: get the object filehandle
+	 * Make sure we got the file handle of the last lookup component.
+	 * Otherwise an error, get out.
+	 */
+	node = list_prev(&cp->nc_args.args, node);
+	ASSERT(node != NULL);
+	if (node->res.resop != OP_GETFH) {
 		nfs4_queue_event(RE_FAIL_REMAP_OP, mi, NULL,
 		    0, NULL, NULL, 0, NULL, 0, TAG_NONE, TAG_NONE, 0, 0);
 		ep->stat = NFS4ERR_SERVERFAULT;
 		goto exit;
 	}
-	tmpfhp = &resop->nfs_resop4_u.opgetfh.object;
+	tmpfhp = &node->res.nfs_resop4_u.opgetfh.object;
 	if (tmpfhp->nfs_fh4_len > NFS4_FHSIZE) {
 		nfs4_queue_event(RE_FAIL_REMAP_LEN, mi, NULL,
 		    tmpfhp->nfs_fh4_len, NULL, NULL, 0, NULL, 0, TAG_NONE,
@@ -2033,24 +1920,28 @@ remap_lookup(nfs4_fname_t *fname, vnode_t *rootvp,
 	fhp->nfs_fh4_val = kmem_alloc(tmpfhp->nfs_fh4_len, KM_SLEEP);
 	nfs_fh4_copy(tmpfhp, fhp);
 
-	/* get the object attributes */
-	resop = &res.array[res.array_len - 1];
-	if (garp && resop->resop == OP_GETATTR)
-		*garp = resop->nfs_resop4_u.opgetattr.ga_res;
-
-	/* See if there are enough fields in the response for parent info */
-	if ((int)res.array_len - 5 <= 0)
+	/* -3: not needed */
+	node = list_prev(&cp->nc_args.args, node);
+	if (node == NULL)
 		goto exit;
 
-	/* get the parent filehandle */
-	resop = &res.array[res.array_len - 5];
-	if (resop->resop != OP_GETFH) {
+	/* -4: get the parent attributes if they exist */
+	node = list_prev(&cp->nc_args.args, node);
+	if (node == NULL)
+		goto exit;
+	if (pgarp && node->res.resop == OP_GETATTR)
+		*pgarp = node->res.nfs_resop4_u.opgetattr.ga_res;
+
+	/* -5: get the parent filehandle */
+	node = list_prev(&cp->nc_args.args, node);
+	ASSERT(node != NULL);
+	if (node->res.resop != OP_GETFH) {
 		nfs4_queue_event(RE_FAIL_REMAP_OP, mi, NULL,
 		    0, NULL, NULL, 0, NULL, 0, TAG_NONE, TAG_NONE, 0, 0);
 		ep->stat = NFS4ERR_SERVERFAULT;
 		goto exit;
 	}
-	tmpfhp = &resop->nfs_resop4_u.opgetfh.object;
+	tmpfhp = &node->res.nfs_resop4_u.opgetfh.object;
 	if (tmpfhp->nfs_fh4_len > NFS4_FHSIZE) {
 		nfs4_queue_event(RE_FAIL_REMAP_LEN, mi, NULL,
 		    tmpfhp->nfs_fh4_len, NULL, NULL, 0, NULL, 0, TAG_NONE,
@@ -2061,20 +1952,9 @@ remap_lookup(nfs4_fname_t *fname, vnode_t *rootvp,
 	pfhp->nfs_fh4_val = kmem_alloc(tmpfhp->nfs_fh4_len, KM_SLEEP);
 	nfs_fh4_copy(tmpfhp, pfhp);
 
-	/* get the parent attributes */
-	resop = &res.array[res.array_len - 4];
-	if (pgarp && resop->resop == OP_GETATTR)
-		*pgarp = resop->nfs_resop4_u.opgetattr.ga_res;
-
 exit:
-	/*
-	 * It is too hard to remember where all the OP_LOOKUPs are
-	 */
-	nfs4args_lookup_free(argop, num_argops);
-	kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-
-	if (!ep->error)
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+	nfs4args_lookup_free(cp);
+	nfs4_call_rele(cp);
 	kmem_free(path, strlen(path)+1);
 }
 
@@ -3494,13 +3374,20 @@ int nfs4_sessions_debug;
 
 void
 nfs4sequence_setup(nfs4_session_t *np, COMPOUND4args_clnt *rfsargp,
-	nfs4_slot_t **slotpp)
+    nfs4_slot_t **slotpp)
 {
 	int			slot_id = 0;
 	nfs4_slot_t		*slot;
+	nfs_argop4 *argp;
+	COMPOUND4node_clnt *seq_node;
+
+	seq_node = list_head(&rfsargp->args);
+	ASSERT(seq_node != NULL);
+	ASSERT(seq_node->arg.argop == OP_SEQUENCE);
+	argp = &seq_node->arg;
 
 	bcopy(&np->sessionid,
-	    rfsargp->array->nfs_argop4_u.opsequence.sa_sessionid,
+	    argp->nfs_argop4_u.opsequence.sa_sessionid,
 	    sizeof (sessionid4));
 
 	/*
@@ -3540,10 +3427,9 @@ nfs4sequence_setup(nfs4_session_t *np, COMPOUND4args_clnt *rfsargp,
 	/*
 	 * Update SEQUENCE args
 	 */
-	rfsargp->array->nfs_argop4_u.opsequence.sa_sequenceid =
-	    slot->slot_seqid;
-	rfsargp->array->nfs_argop4_u.opsequence.sa_slotid = slot->slot_id;
-	rfsargp->array->nfs_argop4_u.opsequence.sa_highest_slotid  =
+	argp->nfs_argop4_u.opsequence.sa_sequenceid = slot->slot_seqid;
+	argp->nfs_argop4_u.opsequence.sa_slotid = slot->slot_id;
+	argp->nfs_argop4_u.opsequence.sa_highest_slotid  =
 	    np->maxslots - np->slots_available;
 	/* XXX - rick - need sr_target_highest_slotid */
 	mutex_exit(&np->slot_lock);
@@ -3552,9 +3438,16 @@ nfs4sequence_setup(nfs4_session_t *np, COMPOUND4args_clnt *rfsargp,
 
 void
 nfs4sequence_fin(nfs4_session_t *np, COMPOUND4res_clnt *rfsresp,
-	nfs4_slot_t *slot, nfs4_error_t *ep)
+    nfs4_slot_t *slot, nfs4_error_t *ep)
 {
 	SEQUENCE4resok		*seqres;
+	nfs_resop4 *resp;
+	COMPOUND4node_clnt *seq_node;
+
+	seq_node = list_head(&rfsresp->argsp->args);
+	ASSERT(seq_node != NULL);
+	ASSERT(seq_node->arg.argop == OP_SEQUENCE);
+	resp = &seq_node->res;
 
 	mutex_enter(&np->slot_lock);
 
@@ -3573,9 +3466,8 @@ nfs4sequence_fin(nfs4_session_t *np, COMPOUND4res_clnt *rfsresp,
 			np->next_slot = slot->slot_id;
 
 		/* Update slot seqid on successful op_sequence */
-		if (ep->error == 0 && (rfsresp->array != NULL &&
-		    rfsresp->array->nfs_resop4_u.opsequence.sr_status ==
-		    NFS4_OK))
+		if (ep->error == 0 && (rfsresp->decode_len > 0 &&
+		    resp->nfs_resop4_u.opsequence.sr_status == NFS4_OK))
 			slot->slot_seqid++;
 
 		if (np->slots_available++ == 0) {
@@ -3589,16 +3481,15 @@ nfs4sequence_fin(nfs4_session_t *np, COMPOUND4res_clnt *rfsresp,
 
 	/* SEQUENCE Op Successful? */
 	if (ep->error != 0 || rfsresp->status != NFS4_OK ||
-	    (rfsresp->array != NULL &&
-	    rfsresp->array->nfs_resop4_u.opsequence.sr_status != NFS4_OK)) {
+	    (rfsresp->decode_len > 0 &&
+	    resp->nfs_resop4_u.opsequence.sr_status != NFS4_OK)) {
 		/*
 		 * cmn_err(CE_WARN, "sequence op failed or missing\n");
 		 */
 		return;
 	}
 
-	seqres = &rfsresp->array->nfs_resop4_u.opsequence.
-	    SEQUENCE4res_u.sr_resok4;
+	seqres = &resp->nfs_resop4_u.opsequence.SEQUENCE4res_u.sr_resok4;
 
 	/*
 	 * Sequence Op Successful, Handle Errors and maxslot changes.

@@ -1250,11 +1250,7 @@ static int
 getlinktext_otw(mntinfo4_t *mi, nfs_fh4 *fh, char **linktextp, cred_t *cr,
     int flags)
 {
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	int doqueue;
-	nfs_argop4 argop[2];
-	nfs_resop4 *resop;
+	nfs4_call_t *cp;
 	READLINK4res *lr_res;
 	uint_t len;
 	bool_t needrecov = FALSE;
@@ -1269,30 +1265,25 @@ getlinktext_otw(mntinfo4_t *mi, nfs_fh4 *fh, char **linktextp, cred_t *cr,
 	recov_state.rs_num_retry_despite_err = 0;
 
 recov_retry:
+	cp = nfs4_call_init(mi, cr, TAG_GET_SYMLINK);
 	nfs4_error_zinit(&e);
-
-	args.array_len = 2;
-	args.array = argop;
-	args.ctag = TAG_GET_SYMLINK;
 
 	if (! recovery) {
 		e.error = nfs4_start_op(mi, NULL, NULL, &recov_state);
 		if (e.error) {
 			sfh4_rele(&sfh);
+			nfs4_call_rele(cp);
 			return (e.error);
 		}
 	}
 
 	/* 0. putfh symlink fh */
-	argop[0].argop = OP_CPUTFH;
-	argop[0].nfs_argop4_u.opcputfh.sfh = sfh;
+	(void) nfs4_op_cputfh(cp, sfh);
 
 	/* 1. readlink */
-	argop[1].argop = OP_READLINK;
+	lr_res = nfs4_op_readlink(cp);
 
-	doqueue = 1;
-
-	rfs4call(mi, NULL, &args, &res, cr, &doqueue, 0, &e);
+	rfs4call(cp, &e);
 
 	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
 
@@ -1304,9 +1295,7 @@ recov_retry:
 		if (nfs4_start_recovery(&e, mi, NULL, NULL, NULL, NULL,
 		    OP_READLINK, NULL) == FALSE) {
 			nfs4_end_op(mi, NULL, NULL, &recov_state, needrecov);
-			if (!e.error)
-				(void) xdr_free(xdr_COMPOUND4res_clnt,
-				    (caddr_t)&res);
+			nfs4_call_rele(cp);
 			goto recov_retry;
 		}
 	}
@@ -1318,23 +1307,21 @@ recov_retry:
 		if (! recovery)
 			nfs4_end_op(mi, NULL, NULL, &recov_state, needrecov);
 		sfh4_rele(&sfh);
+		nfs4_call_rele(cp);
 		return (e.error);
 	}
 
-	if (res.status) {
-		e.error = geterrno4(res.status);
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+	if (cp->nc_res.status) {
+		e.error = geterrno4(cp->nc_res.status);
 		if (! recovery)
 			nfs4_end_op(mi, NULL, NULL, &recov_state, needrecov);
 		sfh4_rele(&sfh);
+		nfs4_call_rele(cp);
 		return (e.error);
 	}
 
-	/* res.status == NFS4_OK */
-	ASSERT(res.status == NFS4_OK);
-
-	resop = &res.array[1];  /* readlink res */
-	lr_res = &resop->nfs_resop4_u.opreadlink;
+	/* cp->nc_res.status == NFS4_OK */
+	ASSERT(cp->nc_res.status == NFS4_OK);
 
 	/* treat symlink name as data */
 	*linktextp = utf8_to_str(&lr_res->link, &len, NULL);
@@ -1342,7 +1329,7 @@ recov_retry:
 	if (! recovery)
 		nfs4_end_op(mi, NULL, NULL, &recov_state, needrecov);
 	sfh4_rele(&sfh);
-	(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+	nfs4_call_rele(cp);
 	return (0);
 }
 
@@ -1560,22 +1547,17 @@ static void
 nfs4getfh_otw(struct mntinfo4 *mi, servinfo4_t *svp, vtype_t *vtp,
     int flags, cred_t *cr, nfs4_error_t *ep)
 {
-	COMPOUND4args_clnt args;
-	COMPOUND4res_clnt res;
-	int doqueue = 1;
-	nfs_argop4 *argop;
-	nfs_resop4 *resop;
+	nfs4_call_t *cp;
+	COMPOUND4node_clnt *node, *snode, *gna, *gnb;
 	nfs4_ga_res_t *garp;
-	int num_argops;
-	lookup4_param_t lookuparg;
 	nfs_fh4 *tmpfhp;
 	nfs_fh4 *resfhp;
 	bool_t needrecov = FALSE;
 	nfs4_recov_state_t recov_state;
-	int llndx;
 	int nthcomp;
 	int recovery = !(flags & NFS4_GETFH_NEEDSOP);
 	int versmismatch = 0;
+	int ctag;
 
 	(void) nfs_rw_enter_sig(&svp->sv_lock, RW_READER, 0);
 	ASSERT(svp->sv_path != NULL);
@@ -1605,6 +1587,12 @@ nfs4getfh_otw(struct mntinfo4 *mi, servinfo4_t *svp, vtype_t *vtp,
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 recov_retry:
+	if (recovery)
+		ctag = TAG_REMAP_MOUNT;
+	else
+		ctag = TAG_MOUNT;
+	cp = nfs4_call_init(mi, cr, ctag);
+
 	nfs4_error_zinit(ep);
 
 	if (!recovery) {
@@ -1632,6 +1620,7 @@ recov_retry:
 					    &mi->mi_lock);
 			}
 			mutex_exit(&mi->mi_lock);
+			nfs4_call_rele(cp);
 			return;
 		}
 
@@ -1650,41 +1639,27 @@ recov_retry:
 		}
 	}
 
-	if (recovery)
-		args.ctag = TAG_REMAP_MOUNT;
+	/* choose public or root filehandle */
+	if (flags & NFS4_GETFH_PUBLIC)
+		(void) nfs4_op_putpubfh(cp);
 	else
-		args.ctag = TAG_MOUNT;
+		(void) nfs4_op_putrootfh(cp);
 
-	lookuparg.l4_getattrs = LKP4_ALL_ATTRIBUTES;
-	lookuparg.argsp = &args;
-	lookuparg.resp = &res;
-	lookuparg.header_len = 2;	/* Putrootfh, getfh */
-	lookuparg.trailer_len = 0;
-	lookuparg.ga_bits = MI4_FSINFO_ATTRMAP(mi);
-	lookuparg.mi = mi;
+	/* get fh */
+	(void) nfs4_op_getfh(cp);
 
 	(void) nfs_rw_enter_sig(&svp->sv_lock, RW_READER, 0);
 	ASSERT(svp->sv_path != NULL);
-	llndx = nfs4lookup_setup(svp->sv_path, &lookuparg, 0);
+	nfs4lookup_setup(cp, svp->sv_path, LKP4_ALL_ATTRIBUTES,
+	    MI4_FSINFO_ATTRMAP(mi), 0);
 	nfs_rw_exit(&svp->sv_lock);
-
-	argop = args.array;
-	num_argops = args.array_len;
-
-	/* choose public or root filehandle */
-	if (flags & NFS4_GETFH_PUBLIC)
-		argop[0].argop = OP_PUTPUBFH;
-	else
-		argop[0].argop = OP_PUTROOTFH;
-
-	/* get fh */
-	argop[1].argop = OP_GETFH;
 
 	NFS4_DEBUG(nfs4_client_call_debug, (CE_NOTE,
 	    "nfs4getfh_otw: %s call, mi 0x%p",
 	    needrecov ? "recov" : "first", (void *)mi));
 
-	rfs4call(mi, NULL, &args, &res, cr, &doqueue, RFSCALL_SOFT, ep);
+	cp->nc_rfs4call_flags |= RFSCALL_SOFT;
+	rfs4call(cp, ep);
 
 	needrecov = nfs4_needs_recovery(ep, FALSE, mi->mi_vfsp);
 
@@ -1692,12 +1667,8 @@ recov_retry:
 		bool_t abort;
 
 		if (recovery) {
-			nfs4args_lookup_free(argop, num_argops);
-			kmem_free(argop,
-			    lookuparg.arglen * sizeof (nfs_argop4));
-			if (!ep->error)
-				(void) xdr_free(xdr_COMPOUND4res_clnt,
-				    (caddr_t)&res);
+			nfs4args_lookup_free(cp);
+			nfs4_call_rele(cp);
 			return;
 		}
 
@@ -1707,12 +1678,11 @@ recov_retry:
 		abort = nfs4_start_recovery(ep, mi, NULL,
 		    NULL, NULL, NULL, OP_GETFH, NULL);
 		if (!ep->error) {
-			ep->error = geterrno4(res.status);
-			(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+			ep->error = geterrno4(cp->nc_res.status);
 		}
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
+		nfs4args_lookup_free(cp);
 		nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state, needrecov);
+		nfs4_call_rele(cp);
 		/* have another go? */
 		if (abort == FALSE)
 			goto recov_retry;
@@ -1723,25 +1693,22 @@ recov_retry:
 	 * No recovery, but check if error is set.
 	 */
 	if (ep->error)  {
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
+		nfs4args_lookup_free(cp);
 		if (!recovery)
 			nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state,
 			    needrecov);
+		nfs4_call_rele(cp);
 		return;
 	}
 
-is_link_err:
-
 	/* for non-recovery errors */
-	if (res.status && res.status != NFS4ERR_SYMLINK) {
+	if (cp->nc_res.status && cp->nc_res.status != NFS4ERR_SYMLINK) {
 		if (!recovery) {
 			nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state,
 			    needrecov);
 		}
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+		nfs4args_lookup_free(cp);
+		nfs4_call_rele(cp);
 		return;
 	}
 
@@ -1749,9 +1716,7 @@ is_link_err:
 	 * If any intermediate component in the path is a symbolic link,
 	 * resolve the symlink, then try mount again using the new path.
 	 */
-	if (res.status == NFS4ERR_SYMLINK) {
-		int where;
-
+	if (cp->nc_res.status == NFS4ERR_SYMLINK) {
 		/*
 		 * This must be from OP_LOOKUP failure. The (cfh) for this
 		 * OP_LOOKUP is a symlink node. Found out where the
@@ -1762,15 +1727,36 @@ is_link_err:
 		 * LOOKUP comp2, GETFH, GETATTR, LOOKUP comp3, GETFH, GETATTR
 		 *
 		 * LOOKUP comp3 fails with SYMLINK because comp2 is a symlink.
-		 * In this case, where = 7, nthcomp = 2.
+		 * In this case nthcomp = 2.
 		 */
-		where = res.array_len - 2;
-		ASSERT(where > 0);
+		snode = NULL;
+		nthcomp = 0;
+		for (node = list_head(&cp->nc_args.args);
+		    node != NULL;
+		    node = list_next(&cp->nc_args.args, node)) {
+			if (node->res.resop != OP_LOOKUP)
+				continue;
+			if (node->res.nfs_resop4_u.oplookup.status != NFS4_OK)
+				break;
+			snode = node;
+			nthcomp++;
+		}
 
-		resop = &res.array[where - 1];
-		ASSERT(resop->resop == OP_GETFH);
-		tmpfhp = &resop->nfs_resop4_u.opgetfh.object;
-		nthcomp = res.array_len/3 - 1;
+		/*
+		 * Make sure the symlink error is on the right compound op.
+		 * The right compound is a OP_LOOKUP node that failed
+		 * with NFS4ERR_SYMLINK, preceeded by a OP_GETFH node
+		 * that succeeded.
+		 * Otherwise do not try to resolve the symlink below.
+		 */
+		if ((node == NULL) ||
+		    (snode == NULL) ||
+		    ((snode = list_next(&cp->nc_args.args, snode)) == NULL) ||
+		    (snode->res.resop != OP_GETFH) ||
+		    (snode->res.nfs_resop4_u.opgetfh.status != NFS4_OK))
+			ep->error = geterrno4(cp->nc_res.status);
+		else
+			tmpfhp = &snode->res.nfs_resop4_u.opgetfh.object;
 
 		/*
 		 * Need to call nfs4_end_op before resolve_sympath to avoid
@@ -1780,27 +1766,25 @@ is_link_err:
 			nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state,
 			    needrecov);
 
-		ep->error = resolve_sympath(mi, svp, nthcomp, tmpfhp, cr,
-		    flags);
-
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-
+		if (!ep->error)
+			ep->error = resolve_sympath(mi, svp, nthcomp, tmpfhp,
+			    cr, flags);
+		nfs4args_lookup_free(cp);
+		nfs4_call_rele(cp);
 		if (ep->error)
 			return;
-
 		goto recov_retry;
 	}
 
-	/* getfh */
-	resop = &res.array[res.array_len - 2];
-	ASSERT(resop->resop == OP_GETFH);
-	resfhp = &resop->nfs_resop4_u.opgetfh.object;
-
 	/* getattr fsinfo res */
-	resop++;
-	garp = &resop->nfs_resop4_u.opgetattr.ga_res;
+	node = list_tail(&cp->nc_args.args);
+	ASSERT(node->res.resop == OP_GETATTR);
+	garp = &node->res.nfs_resop4_u.opgetattr.ga_res;
+
+	/* getfh */
+	node = list_prev(&cp->nc_args.args, node);
+	ASSERT(node->res.resop == OP_GETFH);
+	resfhp = &node->res.nfs_resop4_u.opgetfh.object;
 
 	/*
 	 * verify attrs successfully decoded before
@@ -1811,9 +1795,8 @@ is_link_err:
 			nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state,
 			    needrecov);
 		ep->error = garp->n4g_attrerr;
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+		nfs4args_lookup_free(cp);
+		nfs4_call_rele(cp);
 		return;
 	}
 
@@ -1872,16 +1855,17 @@ is_link_err:
 	 */
 	if (*vtp == VLNK) {
 		/*
-		 * nthcomp is the total result length minus
-		 * the 1st 2 OPs (PUTROOTFH, GETFH),
-		 * then divided by 3 (LOOKUP,GETFH,GETATTR)
-		 *
+		 * nthcomp is the number of components
 		 * e.g. PUTROOTFH GETFH LOOKUP 1st-comp GETFH GETATTR
 		 *	LOOKUP 2nd-comp GETFH GETATTR
-		 *
-		 *	(8 - 2)/3 = 2
 		 */
-		nthcomp = (res.array_len - 2)/3;
+		nthcomp = 0;
+		for (node = list_head(&cp->nc_args.args);
+		    node != NULL;
+		    node = list_next(&cp->nc_args.args, node)) {
+			if (node->res.resop == OP_LOOKUP)
+				nthcomp++;
+		}
 
 		/*
 		 * Need to call nfs4_end_op before resolve_sympath to avoid
@@ -1894,10 +1878,8 @@ is_link_err:
 		ep->error = resolve_sympath(mi, svp, nthcomp, resfhp, cr,
 		    flags);
 
-		nfs4args_lookup_free(argop, num_argops);
-		kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-
+		nfs4args_lookup_free(cp);
+		nfs4_call_rele(cp);
 		if (ep->error)
 			return;
 
@@ -1911,21 +1893,29 @@ is_link_err:
 	 * PUTROOTFH, GETFH.
 	 * If the object to be mounted is in the root, then the compound is:
 	 * PUTROOTFH, GETFH, LOOKUP, GETFH, GETATTR.
-	 * In either of these cases, the index of the GETFH is 1.
 	 * If it is not at the root, then it's something like:
 	 * PUTROOTFH, GETFH, LOOKUP, GETFH, GETATTR,
 	 * LOOKUP, GETFH, GETATTR
-	 * In this case, the index is llndx (last lookup index) - 2.
+	 * The algorithm below is:
+	 *	choose the next to last GETFH response if more than one
+	 *	otherwise choose the only GETFH response
 	 */
-	if (llndx == -1 || llndx == 2)
-		resop = &res.array[1];
-	else {
-		ASSERT(llndx > 2);
-		resop = &res.array[llndx-2];
+	gna = NULL;
+	gnb = NULL;
+	for (node = list_head(&cp->nc_args.args);
+	    node != NULL;
+	    node = list_next(&cp->nc_args.args, node)) {
+		if (node->res.resop == OP_GETFH) {
+			gna = gnb;
+			gnb = node;
+		}
 	}
+	if (gna == NULL)
+		gna = gnb;
+	ASSERT(gna != NULL);
 
-	ASSERT(resop->resop == OP_GETFH);
-	tmpfhp = &resop->nfs_resop4_u.opgetfh.object;
+	ASSERT(gna->res.resop == OP_GETFH);
+	tmpfhp = &gna->res.nfs_resop4_u.opgetfh.object;
 
 	/* save the filehandles for the replica */
 	(void) nfs_rw_enter_sig(&svp->sv_lock, RW_WRITER, 0);
@@ -1942,14 +1932,12 @@ is_link_err:
 	svp->sv_supp_attrs = garp->n4g_ext_res->n4g_suppattrs;
 	ATTRMAP_SET(svp->sv_supp_attrs, MI4_MAND_ATTRMAP(mi));
 	svp->sv_supp_exclcreat = garp->n4g_ext_res->n4g_supp_exclcreat;
-
 	nfs_rw_exit(&svp->sv_lock);
 
-	nfs4args_lookup_free(argop, num_argops);
-	kmem_free(argop, lookuparg.arglen * sizeof (nfs_argop4));
-	(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 	if (!recovery)
 		nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state, needrecov);
+	nfs4args_lookup_free(cp);
+	nfs4_call_rele(cp);
 }
 
 static ushort_t nfs4_max_threads = 8;	/* max number of active async threads */
@@ -2965,45 +2953,25 @@ int
 nfs4bind_conn_to_session(nfs4_server_t *np, servinfo4_t *svp, mntinfo4_t *mi,
     cred_t *cr, channel_dir_from_client4 dir)
 {
-	COMPOUND4args_clnt		args;
-	COMPOUND4res_clnt		res;
-	nfs_argop4			argop[1];
-	BIND_CONN_TO_SESSION4args	*argp;
-	nfs4_error_t			e;
-	int 				doqueue = 1;
-	int				setcb;
-	int				needrecov = 0;
+	nfs4_call_t *cp;
+	nfs4_error_t e;
+	int needrecov = 0;
 
-	res.argsp = &args;
+	cp = nfs4_call_init(mi, cr, TAG_BIND_CONN_TO_SESSION);
 
-	args.ctag = TAG_BIND_CONN_TO_SESSION;
-	args.array = argop;
-	args.array_len = 1;
-
-	args.minor_vers = mi->mi_minorversion;
-
-	argop[0].argop = OP_BIND_CONN_TO_SESSION;
-	argp = &argop[0].nfs_argop4_u.opbind_conn_to_session;
-	bcopy(&np->ssx.sessionid, &argp->bctsa_sessid,
-	    sizeof (np->ssx.sessionid));
+	(void) nfs4_op_bind_conn_to_session(cp, &np->ssx.sessionid, dir, FALSE);
 
 	mutex_exit(&np->s_lock);
-
-	argp->bctsa_dir = dir;
-	argp->bctsa_use_conn_in_rdma_mode = FALSE;
 
 	/*
 	 * Avoid callback server setup, if this is a non
 	 * bi-directional rpc connection that is for fore channel only.
 	 */
+	if (dir != CDFC4_FORE)
+		cp->nc_rfs4call_flags |= RFS4CALL_SETCB;
 
-	if (dir == CDFC4_FORE)
-		setcb = 0;
-	else
-		setcb = RFS4CALL_SETCB;
-
-
-	rfs4call(mi, svp, &args, &res, cr, &doqueue, setcb, &e);
+	cp->nc_svp = svp;
+	rfs4call(cp, &e);
 
 	/*
 	 * The errors we need to worry about involve a bad/dead
@@ -3014,17 +2982,16 @@ nfs4bind_conn_to_session(nfs4_server_t *np, servinfo4_t *svp, mntinfo4_t *mi,
 
 	if (e.error && !needrecov) {
 		mutex_enter(&np->s_lock);
+		nfs4_call_rele(cp);
 		return (e.error);
 	}
-
-	if (!e.error)
-		(void) xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 
 	if (needrecov) {
 		(void) nfs4_start_recovery(&e, mi, NULL,
 		    NULL, NULL, NULL, OP_BIND_CONN_TO_SESSION, NULL);
 	}
 	mutex_enter(&np->s_lock);
+	nfs4_call_rele(cp);
 	return (e.error);
 }
 
@@ -4132,30 +4099,31 @@ nfs4destroy_session_otw(nfs4_session_t *sessp, CLIENT *clientp)
 {
 	COMPOUND4args_clnt	args;
 	COMPOUND4res_clnt	res;
-	nfs_argop4		argop[2];
+	COMPOUND4node_clnt	node[2];
 	nfs4_slot_t		*slotp;
 	struct timeval		wait;
 	enum	clnt_stat	status;
 	nfs4_error_t		e;
 	uint32_t		zilch = 0;
 
-	res.argsp = &args;
-	res.array = NULL;
-	res.status = 0;
-	res.array_len = 0;
-	res.decode_len = 0;
+	bzero(&res, sizeof (res));
+	bzero(&args, sizeof (args));
+	bzero(node, sizeof (node));
 
 	args.ctag = TAG_DESTROY_SESSION;
-
-	args.array = argop;
-	args.array_len = 2;
+	args.args_len = 2;
 	args.minor_vers = nfs4_max_minor_version;
+	list_create(&args.args, sizeof (COMPOUND4node_clnt),
+	    offsetof(COMPOUND4node_clnt, node));
+	res.argsp = &args;
 
-	argop[0].argop = OP_SEQUENCE;
+	list_insert_head(&args.args, &node[0]);
+	node[0].arg.argop = OP_SEQUENCE;
 
-	argop[1].argop = OP_DESTROY_SESSION;
+	list_insert_tail(&args.args, &node[1]);
+	node[1].arg.argop = OP_DESTROY_SESSION;
 	bcopy(sessp->sessionid,
-	    argop[1].nfs_argop4_u.opdestroy_session.dsa_sessionid,
+	    node[1].arg.nfs_argop4_u.opdestroy_session.dsa_sessionid,
 	    sizeof (sessp->sessionid));
 
 	TICK_TO_TIMEVAL(30 * hz / 10, &wait);
@@ -4175,14 +4143,15 @@ nfs4destroy_session_otw(nfs4_session_t *sessp, CLIENT *clientp)
 	nfs4_error_set(&e, status, res.status);
 	nfs4sequence_fin(sessp, &res, slotp, &e);
 
+
 	if (status != RPC_SUCCESS || res.status ||
-	    res.array[1].nfs_resop4_u.opdestroy_session.dsr_status) {
+	    node[1].res.nfs_resop4_u.opdestroy_session.dsr_status) {
 		DTRACE_PROBE1(nfsc__i_destroysession, char *,
 		    "Destroy_session request failed, destroying anyways");
-		goto destroy;
 	}
 
-	xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
+	if (status == RPC_SUCCESS)
+		xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 
 destroy:
 	kmem_free(sessp->slot_table,
