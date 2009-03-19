@@ -23,7 +23,7 @@
 /* PROTOLIB1 */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -469,7 +469,7 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 	netaddr4 *na;
 	enum clnt_stat ds_status;
 	long port;
-	uint32_t kernel_bufsize;
+	uint32_t kernel_bufsize, si_list_len;
 	uint32_t lo_status;
 	int cur_rec_size, j, error;
 	int mpl_len;
@@ -521,24 +521,30 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 
 	append_musec(decoded_stats->plo_creation_sec,
 	    decoded_stats->plo_creation_musec, str_time);
-	printf("\tLayout creation timestamp: %s", str_time);
+	printf("\tLayout obtained at: %s", str_time);
 	iomode = decoded_stats->iomode;
 	lo_status = decoded_stats->plo_status;
-	if (lo_status & (PLO_UNAVAIL | PLO_GET | PLO_BAD)) {
-		sprintf(record, "status: UNAVAILABLE");
-	}
-	if (lo_status & (PLO_ROC | PLO_RETURN | PLO_RECALL |
-	    PLO_COM2MDS | R4LAYOUTVALID)) {
-		sprintf(record, "status: AVAILABLE");
-	}
-	if (lo_status & PLO_TRYLATER) {
-		sprintf(record, "status: TRYLATER");
+	if (lo_status == 0) {
+		sprintf(record, "status: UNKNOWN");
+	} else {
+
+		if (lo_status & (PLO_UNAVAIL | PLO_GET | PLO_BAD)) {
+			sprintf(record, "status: UNAVAILABLE");
+		}
+		if (lo_status & (PLO_ROC | PLO_RETURN | PLO_RECALL |
+		    PLO_COM2MDS | R4LAYOUTVALID)) {
+			sprintf(record, "status: AVAILABLE");
+		}
+		if (lo_status & PLO_TRYLATER) {
+			sprintf(record, "status: TRYLATER");
+		}
 	}
 
 	cur_rec_size = strlen(record);
 	buf_pos = record;
 	record[cur_rec_size] = ',';
 	buf_pos += cur_rec_size + 1;
+
 	switch (iomode) {
 	case LAYOUTIOMODE4_READ:
 		sprintf(buf_pos, " iomode: LAYOUTIOMODE_READ");
@@ -568,15 +574,17 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 	 * Print data server specific information for each stripe of the
 	 * layout.
 	 */
-	si_list_val = decoded_stats->
-	    plo_stripe_info_list.plo_stripe_info_list_val;
-	if (decoded_stats->plo_stripe_count == 0 || si_list_val == NULL) {
+	si_list_len = decoded_stats->
+	    plo_stripe_info_list.plo_stripe_info_list_len;
+	if (decoded_stats->plo_stripe_count == 0 || si_list_len == 0) {
 		sprintf(record, "Data server information not"
 		    " available");
 		printf("\t%-s\n", record);
 		free(decoded_stats);
 		return;
 	}
+	si_list_val = decoded_stats->
+	    plo_stripe_info_list.plo_stripe_info_list_val;
 	do {
 		sprintf(record, "\tStripe [%d]:", i);
 		printf("%-s\n", record);
@@ -612,8 +620,8 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 				 * Do a NULL procedure ping to check the status
 				 * of the data server.
 				 */
-				error = null_procedure_ping(na->na_r_netid,
-				    na->na_r_addr, &ds_status);
+				error = null_procedure_ping(hostname,
+				    na->na_r_netid, &ds_status);
 				if (error == 0) {
 					record[strlen(record)] = ' ';
 					if (ds_status == RPC_SUCCESS) {
@@ -622,13 +630,11 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 						sprintf(record, " FAILED (%s)",
 						    clnt_sperrno(ds_status));
 					}
+					printf("%-s\n", record);
 				} else {
 					sprintf(record, " CANNOT DETERMINE");
+					printf("%-s\n", record);
 					switch (error) {
-					case ETLI:
-						clnt_pcreateerror(
-						"\t\tnfsstat");
-						break;
 					case ENETCONF:
 						fprintf(stderr, "\t\tNetwork"
 						" address error\n");
@@ -637,11 +643,11 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 						netdir_perror("\t\tnfsstat");
 						break;
 					default:
-						fprintf(stderr,
-						    "Unknown error\n");
+						clnt_pcreateerror(
+						"\t\tnfsstat");
+						break;
 					}
 				}
-				printf("%-s\n", record);
 			}
 		} else {
 			sprintf(record, "Data server information"

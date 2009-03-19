@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -112,11 +112,9 @@ extern bool_t xdr_length4(XDR *xdrs, length4 *objp);
 extern bool_t xdr_netaddr4(XDR* xdrs, netaddr4 *objp);
 extern bool_t xdr_stripe_info_t(XDR *xdrs, stripe_info_t *objp);
 extern bool_t xdr_layoutstats_t(XDR *xdrs, layoutstats_t *objp);
-static int create_client_handle(char *address, struct netconfig *nconf,
-    ulong_t prog, ulong_t vers, CLIENT **client);
 extern int lookup_name_port(netaddr4 *na, long *port,
     char *hostname, char *ipaddress);
-extern int null_procedure_ping(char *netid, char *address,
+extern int null_procedure_ping(char *hostname, char *netid,
     enum clnt_stat *ds_status);
 #ifdef __cplusplus
 }

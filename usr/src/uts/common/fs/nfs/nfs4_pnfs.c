@@ -2878,7 +2878,6 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 		return (ec);
 	}
 	if (vp == NULL) {
-		cmn_err(CE_NOTE, "nfsstat: vnode pointer is NULL");
 		ec = ESYSCALL;
 		return (ec);
 	}
@@ -2912,7 +2911,6 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	mi = VTOMI4(vp);
 	if (rp == NULL || mi == NULL) {
 		VN_RELE(vp);
-		cmn_err(CE_NOTE, "nfsstat: rnode or mountinfo is NULL");
 		ec = ESYSCALL;
 		return (ec);
 	}
@@ -2938,7 +2936,6 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	    !(rp->r_flags & R4LAYOUTVALID)) {
 		mutex_exit(&rp->r_statelock);
 		VN_RELE(vp);
-		cmn_err(CE_NOTE, "nfsstat: File layout is NULL");
 		ec = ENOLAYOUT;
 		return (ec);
 	}
@@ -2960,8 +2957,6 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 		lostats.iomode = flayout->plo_iomode;
 		lostats.plo_offset = flayout->plo_offset;
 		lostats.plo_length = flayout->plo_length;
-		lostats.plo_stripe_info_list.plo_stripe_info_list_len =
-		    flayout->plo_stripe_count;
 		lostats.plo_creation_sec = flayout->plo_creation_sec;
 		lostats.plo_creation_musec = flayout->plo_creation_musec;
 		DEV_ASSIGN(deviceid, flayout->plo_deviceid);
@@ -2977,11 +2972,10 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 			mutex_exit(&np->s_lock);
 		}
 
-		if (dip == NULL || error == EINPROGRESS || error == ENODEV) {
-			si_node->multipath_list.multipath_list_len = 0;
-			si_node->multipath_list.multipath_list_val = NULL;
-		} else {
-
+		if ((dip != NULL) && (error != EINPROGRESS) &&
+		    (error != ENODEV)) {
+			lostats.plo_stripe_info_list.plo_stripe_info_list_len =
+			    lostats.plo_stripe_count;
 			lostats.plo_stripe_info_list.plo_stripe_info_list_val =
 			    kmem_zalloc(lostats.plo_stripe_count *
 			    sizeof (stripe_info_t), KM_SLEEP);
@@ -3008,8 +3002,9 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 				    mpl_item->multipath_list4_val;
 			}
 		}
-	} else
+	} else {
 		mutex_exit(&rp->r_statelock);
+	}
 
 	/*
 	 * Get the user buffer and fill it with XDR encoded stream.
@@ -3043,8 +3038,7 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 
 	if (encode_failed) {
 		kmem_free(data_buffer, xdr_len);
-		cmn_err(CE_WARN, "nfsstat: xdr_layoutstats_t failed"
-		    " in the kernel");
+		DTRACE_PROBE(nfsstat__e__xdr_layoutstats_t_failed);
 		ec = ESYSCALL;
 		return (ec);
 	}
@@ -3056,14 +3050,13 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	kernel_bufsize = STRUCT_FGETP(plo_args, kernel_bufsize);
 	if (kernel_bufsize == NULL) {
 		kmem_free(data_buffer, xdr_len);
-		cmn_err(CE_WARN, "nfsstat: The user memory passed to the"
-		    " kernel is NULL");
+		DTRACE_PROBE(nfsstat__e__user_memory_null);
 		ec = ESYSCALL;
 		return (ec);
 	}
 	if (copyout(&xdr_len, kernel_bufsize, sizeof (uint32_t))) {
 		kmem_free(data_buffer, xdr_len);
-		cmn_err(CE_WARN, "nfsstat: Copying to the user space failed");
+		DTRACE_PROBE(nfsstat__e__copyout_failed);
 		ec = ESYSCALL;
 		return (ec);
 	}
@@ -3074,8 +3067,7 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	user_bufsize = STRUCT_FGET(plo_args, user_bufsize);
 	if (xdr_len > user_bufsize) {
 		kmem_free(data_buffer, xdr_len);
-		cmn_err(CE_NOTE, "nfsstat: User buffer not big enough"
-		    " to hold the xdr encoded stream");
+		DTRACE_PROBE(nfsstat__i__user_buffer_size_overflow);
 		ec = EOVERFLOW;
 		return (ec);
 	}
@@ -3086,14 +3078,13 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	user_data_buffer = STRUCT_FGETP(plo_args, layoutstats);
 	if (user_data_buffer == NULL) {
 		kmem_free(data_buffer, xdr_len);
-		cmn_err(CE_WARN, "nfsstat: The user memory passed to"
-		    " the kernel is NULL");
+		DTRACE_PROBE(nfsstat__e__user_memory_null);
 		ec = ESYSCALL;
 		return (ec);
 	}
 	if (copyout(data_buffer, user_data_buffer, xdr_len) != 0) {
 		kmem_free(data_buffer, xdr_len);
-		cmn_err(CE_WARN, "nfsstat: Copying to the user space failed");
+		DTRACE_PROBE(nfsstat__e__copyout_failed);
 		ec = ESYSCALL;
 		return (ec);
 	}

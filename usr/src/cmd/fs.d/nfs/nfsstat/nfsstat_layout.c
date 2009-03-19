@@ -112,46 +112,10 @@ xdr_layoutstats_t(XDR *xdrs, layoutstats_t *objp)
 }
 
 /*
- * Function borrowed from rpcinfo.c.
- */
-static int
-create_client_handle(address, nconf, prog, vers, client)
-	char *address;
-	struct netconfig *nconf;
-	ulong_t prog;
-	ulong_t vers;
-	CLIENT **client;
-{
-
-	struct netbuf *nbuf;
-	int fd = RPC_ANYFD;
-	struct t_info tinfo;
-
-	if (fd == RPC_ANYFD) {
-		if ((fd = t_open(nconf->nc_device, O_RDWR, &tinfo)) == -1) {
-			rpc_createerr.cf_stat = RPC_TLIERROR;
-			rpc_createerr.cf_error.re_terrno = t_errno;
-			return (ETLI);
-		}
-		/* Convert the uaddr to taddr */
-		nbuf = uaddr2taddr(nconf, address);
-		if (nbuf == NULL) {
-			return (ENETADDR);
-		}
-	}
-	*client = clnt_tli_create(fd, nconf, nbuf, prog, vers, 0, 0);
-	if (*client == (CLIENT *)NULL) {
-		return (ETLI);
-	}
-
-	return (0);
-}
-
-/*
  * Do a RPC NULL procedure ping to the data servers.
  */
 int
-null_procedure_ping(char *netid, char *address, enum clnt_stat *ds_status)
+null_procedure_ping(char *hostname, char *netid, enum clnt_stat *ds_status)
 {
 
 	CLIENT *client = NULL;
@@ -160,22 +124,18 @@ null_procedure_ping(char *netid, char *address, enum clnt_stat *ds_status)
 	struct netconfig *nconf;
 	ulong_t prognum = NFS_PROGRAM;
 	ulong_t versnum = 4;
-	int rc;
-
-	nconf = getnetconfigent(netid);
-	if (nconf == (struct netconfig *)NULL) {
-		return (ENETCONF);
-	}
+	int rc = -1;
 
 	to.tv_sec = 5;
 	to.tv_usec = 0;
 
-	rc = create_client_handle(address, nconf, prognum, versnum, &client);
+	client = clnt_create_timed(hostname, prognum, versnum, netid, &to);
 	if (client != NULL) {
 		rpc_stat = clnt_call(client, NULLPROC, (xdrproc_t)xdr_void,
 		    (char *)NULL, (xdrproc_t)xdr_void,
 		    (char *)NULL, to);
 		*ds_status = rpc_stat;
+		rc = 0;
 	}
 	return (rc);
 }

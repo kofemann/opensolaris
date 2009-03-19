@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 1983,1984,1985,1986,1987,1988,1989  AT&T.
@@ -343,9 +343,6 @@ nfssys(enum nfssys_op opcode, void *arg)
 	case NFSSTAT_LAYOUT: {
 		STRUCT_DECL(pnfs_getflo_args, pla);
 
-		if (!INGLOBALZONE(curproc)) {
-			return (set_errno(EPERM));
-		}
 		STRUCT_INIT(pla, get_udatamodel());
 		if (copyin(arg, STRUCT_BUF(pla), STRUCT_SIZE(pla))) {
 			error = EFAULT;
