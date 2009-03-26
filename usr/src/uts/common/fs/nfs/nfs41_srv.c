@@ -2864,22 +2864,26 @@ mds_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		}
 	}
 
-	cs->cr = crdup(cs->basecr);
-
-	ASSERT(cs->cr != NULL);
-
 	error = nnode_from_fh_v41(&cs->nn, &args->object);
 	if (error != 0) {
 		resp->status = *cs->statusp = nnode_stat4(error, 1);
 		goto final;
 	}
+	ASSERT(cs->nn != NULL);
+
 	cs->vp = nnop_io_getvp(cs->nn);
+
+	cs->cr = crdup(cs->basecr);
+	ASSERT(cs->cr != NULL);
 
 	if (fhp->type == FH41_TYPE_NFS) {
 		if ((resp->status = call_checkauth4(cs, req)) != NFS4_OK) {
+			nnode_rele(&cs->nn);
 			VN_RELE(cs->vp);
-			*cs->statusp = resp->status;
 			cs->vp = NULL;
+			crfree(cs->cr);
+			cs->cr = NULL;
+			*cs->statusp = resp->status;
 			DTRACE_PROBE(nfss41__e__fail_auth);
 			goto final;
 		}
@@ -4244,6 +4248,8 @@ mds_compound(compound_state_t *cs,
 			*rv = 1;
 		return;
 	}
+	if (cs->basecr != NULL)
+		crfree(cs->basecr);
 	cs->basecr = cr;
 	cs->req = req;
 

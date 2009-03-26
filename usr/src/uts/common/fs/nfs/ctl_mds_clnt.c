@@ -63,6 +63,7 @@ ctl_mds_clnt_call(ds_addrlist_t *dp, rpcproc_t proc,
 		error = EIO;
 	}
 
+	AUTH_DESTROY(client->cl_auth);
 	CLNT_DESTROY(client);
 
 out:

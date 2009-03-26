@@ -1211,13 +1211,16 @@ ctl_mds_srv_remove(CTL_MDS_REMOVEargs *argp, CTL_MDS_REMOVEres *resp,
 			    obj.obj_val[i]);
 
 			ds_fh = get_mds_ds_fh(otw_fh);
-			if ((ds_fh == NULL)) {
+			if (ds_fh == NULL) {
 				resp->status = DSERR_BADHANDLE;
 				goto out;
 			}
 
+			if (nn != NULL)
+				nnode_rele(&nn);
 			nn = NULL;
 			nerr = nnode_from_fh_ds(&nn, ds_fh);
+			kmem_free(ds_fh, sizeof (mds_ds_fh));
 
 			switch (nerr) {
 			case 0: /* Success */
@@ -1430,7 +1433,7 @@ dserv_dispatch(struct svc_req *req, SVCXPRT *xprt)
 	 * free results
 	 */
 	if (disp->resfree)
-		(*disp->resfree)(dres);
+		(*disp->resfree)(&dres);
 
 	/*
 	 * free args
