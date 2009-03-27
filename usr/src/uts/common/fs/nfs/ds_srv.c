@@ -46,6 +46,7 @@ rfs4_client_t *mds_findclient(nfs_client_id4 *, bool_t *, rfs4_client_t *);
 
 static void nullfree(void);
 static void ds_reportavail_free(DS_REPORTAVAILres *);
+static void ds_checkstate_free(DS_CHECKSTATEres *);
 
 void ds_map_mds_dataset_id(DS_MAP_MDS_DATASET_IDargs *,
     DS_MAP_MDS_DATASET_IDres *, struct svc_req *);
@@ -76,7 +77,6 @@ struct nfs_cp_disp {
 	char    *name;
 };
 
-
 union nfs_ds_cp_sarg {
 	DS_EXIBIargs			ds_exchange;
 	DS_CHECKSTATEargs		ds_checkstate;
@@ -99,11 +99,10 @@ union nfs_ds_cp_sres {
 	DS_SHUTDOWNres			ds_shutdown;
 };
 
-
 struct nfs_cp_disp nfs_ds_cp_v1[] = {
 	{NULL, NULL, NULL, NULL, NULL}, /* RPC Null */
 	{ds_checkstate, xdr_DS_CHECKSTATEargs, xdr_DS_CHECKSTATEres,
-	    nullfree, "DS_CheckSstate"},
+	    ds_checkstate_free, "DS_Checkstate"},
 	{ds_exchange, xdr_DS_EXIBIargs, xdr_DS_EXIBIres,
 	    nullfree, "DS_EXIBI"},
 	{ds_fmatpt, xdr_DS_FMATPTargs, xdr_DS_FMATPTres,
@@ -124,6 +123,34 @@ static uint_t nfs_ds_cp_cnt =
     sizeof (nfs_ds_cp_v1) / sizeof (struct nfs_cp_disp);
 
 #define	NFS_CP_ILLEGAL_PROC (nfs_ds_cp_cnt)
+
+/*
+ * XXX: The layout field of the response is not being filled, and hence
+ * will not be freed here. The for loop will not be entered.
+ */
+static void
+ds_checkstate_free(DS_CHECKSTATEres *resp)
+{
+	int i;
+	uint_t lo_len;
+	layout4 *lo_val;
+	uint_t loc_len;
+	char *loc_val;
+	ds_filestate *fs;
+
+	fs = &(resp->DS_CHECKSTATEres_u.file_state);
+	if (resp->status == DS_OK && fs != NULL) {
+		lo_len = fs->layout.layout_len;
+		lo_val = fs->layout.layout_val;
+
+		for (i = 0; i < lo_len; i++) {
+			loc_len = lo_val[i].lo_content.loc_body.loc_body_len;
+			loc_val = lo_val[i].lo_content.loc_body.loc_body_val;
+			kmem_free(loc_val, loc_len);
+			kmem_free(&lo_val[i], sizeof (layout4));
+		}
+	}
+}
 
 static void
 ds_reportavail_free(DS_REPORTAVAILres *resp)
@@ -154,10 +181,17 @@ ds_reportavail_free(DS_REPORTAVAILres *resp)
 				/* Free the mds_sid */
 				kmem_free(&sid_array[j], sizeof (mds_sid));
 			}
+			/*
+			 * No need to free the ds_guid, since we did not
+			 * allocate any extra memory for it, while filling in
+			 * the response.
+			 */
 		}
 		/* Free the guid_map */
-		kmem_free(res_ok->guid_map.guid_map_val,
-		    res_ok->guid_map.guid_map_len);
+		kmem_free(
+		    res_ok->guid_map.guid_map_val,
+		    res_ok->guid_map.guid_map_len *
+		    sizeof (struct ds_guid_map));
 	}
 }
 
@@ -1083,5 +1117,20 @@ nfs_ds_cp_dispatch(struct svc_req *req, SVCXPRT *xprt)
 		DTRACE_PROBE2(nfssrv__e__dscp__sendreply,
 		    rpcvers_t, req->rq_vers, rpcproc_t, which);
 		svcerr_systemerr(xprt);
+	}
+
+	/*
+	 * free results
+	 */
+	if (disp->resfree) {
+		(*disp->resfree)(&dres);
+	}
+
+	/*
+	 * free arguments
+	 */
+	if (!SVC_FREEARGS(xprt, disp->decode_args, (char *)&darg)) {
+		DTRACE_PROBE2(nfssrv__e__svc__freeargs, rpcvers_t, req->rq_vers,
+		    rpcproc_t, which);
 	}
 }

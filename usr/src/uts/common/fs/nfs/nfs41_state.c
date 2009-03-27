@@ -2713,26 +2713,43 @@ mds_dup_zfsattr(ds_zfsattr *src, ds_guid_info_t *dst)
 	}
 }
 
-/*
- */
 /*ARGSUSED*/
 static bool_t
 ds_guid_info_create(rfs4_entry_t e, void *arg)
 {
 	pinfo_create_t *p = (pinfo_create_t *)arg;
 	ds_guid_info_t *pip = (ds_guid_info_t *)e;
+	ds_guid *d_ds_guid;	/* destination ds_guid */
+	ds_guid *s_ds_guid;	/* source ds_guid */
 
 	pip->ds_ownerp  = p->dop;
 
 	/* Only supported type is ZFS */
 	ASSERT(p->si->type == ZFS);
 
-	pip->ds_guid = p->si->ds_storinfo_u.zfs_info.guid_map.ds_guid;
+	s_ds_guid = &(p->si->ds_storinfo_u.zfs_info.guid_map.ds_guid);
+	d_ds_guid = &pip->ds_guid;
+	d_ds_guid->stor_type = s_ds_guid->stor_type;
 
+	/*
+	 * Copy ds_guid
+	 */
+	d_ds_guid->ds_guid_u.zfsguid.zfsguid_len =
+	    s_ds_guid->ds_guid_u.zfsguid.zfsguid_len;
+	d_ds_guid->ds_guid_u.zfsguid.zfsguid_val =
+	    kmem_zalloc(
+	    d_ds_guid->ds_guid_u.zfsguid.zfsguid_len,
+	    KM_SLEEP);
+	bcopy(s_ds_guid->ds_guid_u.zfsguid.zfsguid_val,
+	    d_ds_guid->ds_guid_u.zfsguid.zfsguid_val,
+	    d_ds_guid->ds_guid_u.zfsguid.zfsguid_len);
+
+	/*
+	 * Copy zfs attrs
+	 */
 	pip->ds_attr_len = p->si->ds_storinfo_u.zfs_info.attrs.attrs_len;
 	pip->ds_attr_val = kmem_alloc(
 	    sizeof (ds_zfsattr) * pip->ds_attr_len, KM_SLEEP);
-
 	mds_dup_zfsattr(p->si->ds_storinfo_u.zfs_info.attrs.attrs_val, pip);
 
 	return (TRUE);

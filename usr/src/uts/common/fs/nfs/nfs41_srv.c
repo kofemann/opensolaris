@@ -269,6 +269,7 @@ static void mds_op_get_devinfo(nfs_argop4 *, nfs_resop4 *,
 
 static void mds_op_layout_get(nfs_argop4 *, nfs_resop4 *,
 		struct svc_req *, compound_state_t *);
+static void mds_op_layout_get_free(nfs_resop4 *, compound_state_t *);
 
 static void mds_op_layout_commit(nfs_argop4 *, nfs_resop4 *,
 		struct svc_req *, compound_state_t *);
@@ -453,7 +454,7 @@ static op_disp_tbl_t mds_disptab[] = {
 	{mds_op_get_devinfo, nullfree,  DISP_OP_MDS, "GET_DEVINFO"},
 	{mds_op_get_devlist, nullfree,  DISP_OP_MDS, "GET_DEVLIST"},
 	{mds_op_layout_commit, nullfree,  DISP_OP_MDS, "LAYOUT_COMMIT"},
-	{mds_op_layout_get, nullfree,  DISP_OP_MDS, "LAYOUT_GET"},
+	{mds_op_layout_get, mds_op_layout_get_free,  DISP_OP_MDS, "LAYOUT_GET"},
 	{mds_op_layout_return, nullfree,  DISP_OP_MDS, "LAYOUT_RETURN"},
 	{mds_op_secinfonn, nullfree,
 	    DISP_OP_BOTH, "SECINFO_NONAME"},
@@ -8045,6 +8046,20 @@ mds_fetch_layout(struct compound_state *cs,
 		err = mds_alloc_ds_fh(cs->exi->exi_fsid, fid,
 		    &(nfl_fh_list[i]));
 		if (err) {
+			int j;
+			for (j = 0; j < i; j++) {
+				kmem_free(nfl_fh_list[j].nfs_fh4_val,
+				    nfl_fh_list[j].nfs_fh4_len);
+			}
+
+			/*
+			 * Check for the last (ith) element. The memory may
+			 * have been allocated even on error.
+			 */
+			if (nfl_fh_list[i].nfs_fh4_val != NULL) {
+				kmem_free(nfl_fh_list[i].nfs_fh4_val,
+				    nfl_fh_list[i].nfs_fh4_len);
+			}
 			kmem_free(nfl_fh_list, nfl_size);
 			return (NFS4ERR_LAYOUTUNAVAILABLE);
 		}
@@ -8064,6 +8079,10 @@ mds_fetch_layout(struct compound_state *cs,
 	 */
 	xdr_buffer = kmem_alloc(xdr_size, KM_NOSLEEP);
 	if (xdr_buffer == NULL) {
+		for (i = 0; i < lp->stripe_count; i++) {
+			kmem_free(nfl_fh_list[i].nfs_fh4_val,
+			    nfl_fh_list[i].nfs_fh4_len);
+		}
 		kmem_free(nfl_fh_list, nfl_size);
 		return (NFS4ERR_LAYOUTTRYLATER);
 	}
@@ -8076,6 +8095,10 @@ mds_fetch_layout(struct compound_state *cs,
 
 	if (xdr_nfsv4_1_file_layout4(&xdr, &otw_flo) == FALSE) {
 		kmem_free(xdr_buffer, xdr_size);
+		for (i = 0; i < lp->stripe_count; i++) {
+			kmem_free(nfl_fh_list[i].nfs_fh4_val,
+			    nfl_fh_list[i].nfs_fh4_len);
+		}
 		kmem_free(nfl_fh_list, nfl_size);
 		return (NFS4ERR_LAYOUTTRYLATER);
 	}
@@ -8092,6 +8115,10 @@ mds_fetch_layout(struct compound_state *cs,
 		printf("rfs41_findlogrant() returned NULL; create=%d\n ",
 		    create);
 		kmem_free(xdr_buffer, xdr_size);
+		for (i = 0; i < lp->stripe_count; i++) {
+			kmem_free(nfl_fh_list[i].nfs_fh4_val,
+			    nfl_fh_list[i].nfs_fh4_len);
+		}
 		kmem_free(nfl_fh_list, nfl_size);
 		return (NFS4ERR_SERVERFAULT);
 	}
@@ -8147,6 +8174,10 @@ mds_fetch_layout(struct compound_state *cs,
 	logrp->lo_content.loc_body.loc_body_len = xdr_size;
 	logrp->lo_content.loc_body.loc_body_val = xdr_buffer;
 
+	for (i = 0; i < lp->stripe_count; i++) {
+		kmem_free(nfl_fh_list[i].nfs_fh4_val,
+		    nfl_fh_list[i].nfs_fh4_len);
+	}
 	kmem_free(nfl_fh_list, nfl_size);
 	return (NFS4_OK);
 }
@@ -8317,11 +8348,22 @@ final:
 	    LAYOUTGET4res *, resp);
 }
 
+/*
+ * Freeing the layoutget response.
+ */
 /*ARGSUSED*/
 static void
-mds_layoutget_free(nfs_resop4 *resop)
+mds_op_layout_get_free(nfs_resop4 *resop, compound_state_t *cs)
 {
+	LAYOUTGET4res	*resp = &(resop->nfs_resop4_u.oplayoutget);
+	layout4 *lo =
+	    resp->LAYOUTGET4res_u.logr_resok4.logr_layout.logr_layout_val;
 
+	if ((resp->logr_status == NFS4_OK) && (lo != NULL)) {
+		kmem_free(lo->lo_content.loc_body.loc_body_val,
+		    lo->lo_content.loc_body.loc_body_len);
+		kmem_free(lo, sizeof (layout4));
+	}
 }
 
 /*ARGSUSED*/
