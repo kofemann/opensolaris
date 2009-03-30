@@ -139,6 +139,7 @@ xdr_encode_ds_fh(mds_ds_fh *fhp, nfs_fh4 *objp)
 	XDR xdr;
 	char *xdr_ptr;
 	uint_t otw_len;
+	bool_t ret;
 
 	objp->nfs_fh4_val = NULL;
 	objp->nfs_fh4_len = 0;
@@ -152,5 +153,18 @@ xdr_encode_ds_fh(mds_ds_fh *fhp, nfs_fh4 *objp)
 	objp->nfs_fh4_len = otw_len;
 	xdrmem_create(&xdr, xdr_ptr, otw_len, XDR_ENCODE);
 
-	return (xdr_ds_fh_fmt(&xdr, fhp));
+	ret = xdr_ds_fh_fmt(&xdr, fhp);
+	if (ret == FALSE)
+		xdr_free_ds_fh(objp);
+	return (ret);
+}
+
+void
+xdr_free_ds_fh(nfs_fh4 *objp)
+{
+	if (objp->nfs_fh4_val == NULL)
+		return;
+	mem_free(objp->nfs_fh4_val, objp->nfs_fh4_len);
+	objp->nfs_fh4_val = NULL;
+	objp->nfs_fh4_len = 0;
 }

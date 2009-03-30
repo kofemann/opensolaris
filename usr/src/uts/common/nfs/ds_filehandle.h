@@ -86,6 +86,7 @@ extern bool_t xdr_mds_dataset_id(XDR *, mds_dataset_id *);
 extern bool_t xdr_ds_fh_v1(XDR *, ds_fh_v1 *);
 extern bool_t xdr_encode_ds_fh(mds_ds_fh *, nfs_fh4 *);
 extern bool_t xdr_decode_ds_fh(XDR *, nfs_fh4 *);
+extern void xdr_free_ds_fh(nfs_fh4 *);
 
 #ifdef	__cplusplus
 }

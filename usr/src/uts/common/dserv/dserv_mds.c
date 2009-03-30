@@ -977,6 +977,7 @@ cp_ds_mds_checkstateid(mds_ds_fh *fh, struct compound_state *cs,
 		DTRACE_PROBE1(dserv__i__checkstate_status,
 		    int, NFS4ERR_SERVERFAULT);
 	}
+	xdr_free_ds_fh(&args.fh);
 
 out:
 	dserv_instance_exit(inst);
@@ -1027,8 +1028,8 @@ dserv_mds_reportavail()
 
 	char	path_buf[MAXPATHLEN];
 
-	memset(&args, '\0', sizeof (args));
-	memset(&res, '\0', sizeof (res));
+	(void) memset(&args, '\0', sizeof (args));
+	(void) memset(&res, '\0', sizeof (res));
 
 	error = dserv_instance_enter(RW_READER, B_FALSE, &inst);
 	if (error)

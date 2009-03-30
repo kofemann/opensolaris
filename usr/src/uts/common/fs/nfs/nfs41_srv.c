@@ -7972,6 +7972,16 @@ mds_get_flo(struct compound_state *cs, mds_layout_t **flopp)
 	return (NFS4_OK);
 }
 
+static void
+mds_free_fh_list(nfs_fh4 *nfl_fh_list, int count)
+{
+	int i;
+
+	for (i = 0; i < count; i++)
+		xdr_free_ds_fh(&(nfl_fh_list[i]));
+	kmem_free(nfl_fh_list, count * sizeof (nfs_fh4));
+}
+
 /*ARGSUSED*/
 nfsstat4
 mds_fetch_layout(struct compound_state *cs,
@@ -8026,7 +8036,7 @@ mds_fetch_layout(struct compound_state *cs,
 	 */
 	nfl_size = lp->stripe_count * sizeof (nfs_fh4);
 
-	nfl_fh_list = kmem_alloc(nfl_size, KM_NOSLEEP);
+	nfl_fh_list = kmem_zalloc(nfl_size, KM_NOSLEEP);
 
 	if (nfl_fh_list == NULL)
 		return (NFS4ERR_LAYOUTTRYLATER);
@@ -8046,21 +8056,7 @@ mds_fetch_layout(struct compound_state *cs,
 		err = mds_alloc_ds_fh(cs->exi->exi_fsid, fid,
 		    &(nfl_fh_list[i]));
 		if (err) {
-			int j;
-			for (j = 0; j < i; j++) {
-				kmem_free(nfl_fh_list[j].nfs_fh4_val,
-				    nfl_fh_list[j].nfs_fh4_len);
-			}
-
-			/*
-			 * Check for the last (ith) element. The memory may
-			 * have been allocated even on error.
-			 */
-			if (nfl_fh_list[i].nfs_fh4_val != NULL) {
-				kmem_free(nfl_fh_list[i].nfs_fh4_val,
-				    nfl_fh_list[i].nfs_fh4_len);
-			}
-			kmem_free(nfl_fh_list, nfl_size);
+			mds_free_fh_list(nfl_fh_list, lp->stripe_count);
 			return (NFS4ERR_LAYOUTUNAVAILABLE);
 		}
 
@@ -8079,11 +8075,7 @@ mds_fetch_layout(struct compound_state *cs,
 	 */
 	xdr_buffer = kmem_alloc(xdr_size, KM_NOSLEEP);
 	if (xdr_buffer == NULL) {
-		for (i = 0; i < lp->stripe_count; i++) {
-			kmem_free(nfl_fh_list[i].nfs_fh4_val,
-			    nfl_fh_list[i].nfs_fh4_len);
-		}
-		kmem_free(nfl_fh_list, nfl_size);
+		mds_free_fh_list(nfl_fh_list, lp->stripe_count);
 		return (NFS4ERR_LAYOUTTRYLATER);
 	}
 
@@ -8095,11 +8087,7 @@ mds_fetch_layout(struct compound_state *cs,
 
 	if (xdr_nfsv4_1_file_layout4(&xdr, &otw_flo) == FALSE) {
 		kmem_free(xdr_buffer, xdr_size);
-		for (i = 0; i < lp->stripe_count; i++) {
-			kmem_free(nfl_fh_list[i].nfs_fh4_val,
-			    nfl_fh_list[i].nfs_fh4_len);
-		}
-		kmem_free(nfl_fh_list, nfl_size);
+		mds_free_fh_list(nfl_fh_list, lp->stripe_count);
 		return (NFS4ERR_LAYOUTTRYLATER);
 	}
 
@@ -8115,11 +8103,7 @@ mds_fetch_layout(struct compound_state *cs,
 		printf("rfs41_findlogrant() returned NULL; create=%d\n ",
 		    create);
 		kmem_free(xdr_buffer, xdr_size);
-		for (i = 0; i < lp->stripe_count; i++) {
-			kmem_free(nfl_fh_list[i].nfs_fh4_val,
-			    nfl_fh_list[i].nfs_fh4_len);
-		}
-		kmem_free(nfl_fh_list, nfl_size);
+		mds_free_fh_list(nfl_fh_list, lp->stripe_count);
 		return (NFS4ERR_SERVERFAULT);
 	}
 	if (create == TRUE) {
@@ -8174,11 +8158,7 @@ mds_fetch_layout(struct compound_state *cs,
 	logrp->lo_content.loc_body.loc_body_len = xdr_size;
 	logrp->lo_content.loc_body.loc_body_val = xdr_buffer;
 
-	for (i = 0; i < lp->stripe_count; i++) {
-		kmem_free(nfl_fh_list[i].nfs_fh4_val,
-		    nfl_fh_list[i].nfs_fh4_len);
-	}
-	kmem_free(nfl_fh_list, nfl_size);
+	mds_free_fh_list(nfl_fh_list, lp->stripe_count);
 	return (NFS4_OK);
 }
 
