@@ -37,7 +37,7 @@ static char bge_ident[] = "Broadcom Gb Ethernet";
 /*
  * Make sure you keep the version ID up to date!
  */
-static char bge_version[] = "Broadcom Gb Ethernet v1.02";
+static char bge_version[] = "Broadcom Gb Ethernet v1.03";
 
 /*
  * Property names
@@ -3505,7 +3505,7 @@ bge_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 #endif
 
 	ddi_report_dev(devinfo);
-	cmn_err(CE_CONT, "%s\n", bge_version);
+	BGE_REPORT((bgep, "bge version: %s", bge_version));
 
 	return (DDI_SUCCESS);
 

@@ -1784,6 +1784,16 @@ aggr_m_capab_get(void *arg, mac_capab_t cap, void *cap_data)
 		*hcksum_txflags = grp->lg_hcksum_txflags;
 		break;
 	}
+	case MAC_CAPAB_LSO: {
+		mac_capab_lso_t *cap_lso = cap_data;
+
+		if (grp->lg_lso) {
+			*cap_lso = grp->lg_cap_lso;
+			break;
+		} else {
+			return (B_FALSE);
+		}
+	}
 	case MAC_CAPAB_NO_NATIVEVLAN:
 		return (!grp->lg_vlan);
 	case MAC_CAPAB_NO_ZCOPY:
@@ -2092,6 +2102,7 @@ aggr_grp_capab_set(aggr_grp_t *grp)
 {
 	uint32_t cksum;
 	aggr_port_t *port;
+	mac_capab_lso_t cap_lso;
 
 	ASSERT(grp->lg_mh == NULL);
 	ASSERT(grp->lg_ports != NULL);
@@ -2099,6 +2110,10 @@ aggr_grp_capab_set(aggr_grp_t *grp)
 	grp->lg_hcksum_txflags = (uint32_t)-1;
 	grp->lg_zcopy = B_TRUE;
 	grp->lg_vlan = B_TRUE;
+
+	grp->lg_lso = B_TRUE;
+	grp->lg_cap_lso.lso_flags = (t_uscalar_t)-1;
+	grp->lg_cap_lso.lso_basic_tcp_ipv4.lso_max = (t_uscalar_t)-1;
 
 	for (port = grp->lg_ports; port != NULL; port = port->lp_next) {
 		if (!mac_capab_get(port->lp_mh, MAC_CAPAB_HCKSUM, &cksum))
@@ -2110,6 +2125,16 @@ aggr_grp_capab_set(aggr_grp_t *grp)
 
 		grp->lg_zcopy &=
 		    !mac_capab_get(port->lp_mh, MAC_CAPAB_NO_ZCOPY, NULL);
+
+		grp->lg_lso &=
+		    mac_capab_get(port->lp_mh, MAC_CAPAB_LSO, &cap_lso);
+		if (grp->lg_lso) {
+			grp->lg_cap_lso.lso_flags &= cap_lso.lso_flags;
+			if (grp->lg_cap_lso.lso_basic_tcp_ipv4.lso_max >
+			    cap_lso.lso_basic_tcp_ipv4.lso_max)
+				grp->lg_cap_lso.lso_basic_tcp_ipv4.lso_max =
+				    cap_lso.lso_basic_tcp_ipv4.lso_max;
+		}
 	}
 }
 
@@ -2140,6 +2165,21 @@ aggr_grp_capab_check(aggr_grp_t *grp, aggr_port_t *port)
 	} else if ((hcksum_txflags & grp->lg_hcksum_txflags) !=
 	    grp->lg_hcksum_txflags) {
 		return (B_FALSE);
+	}
+
+	if (grp->lg_lso) {
+		mac_capab_lso_t cap_lso;
+
+		if (mac_capab_get(port->lp_mh, MAC_CAPAB_LSO, &cap_lso)) {
+			if ((grp->lg_cap_lso.lso_flags & cap_lso.lso_flags) !=
+			    grp->lg_cap_lso.lso_flags)
+				return (B_FALSE);
+			if (grp->lg_cap_lso.lso_basic_tcp_ipv4.lso_max >
+			    cap_lso.lso_basic_tcp_ipv4.lso_max)
+				return (B_FALSE);
+		} else {
+			return (B_FALSE);
+		}
 	}
 
 	return (B_TRUE);
@@ -2243,8 +2283,9 @@ aggr_set_port_sdu(aggr_grp_t *grp, aggr_port_t *port, uint32_t sdu,
 	}
 	err = mac_set_mtu(port->lp_mh, sdu, old_mtu);
 try_again:
-	if (removed && (rv = mac_unicast_primary_add(port->lp_mch,
-	    &port->lp_mah, &diag)) != 0) {
+	if (removed && (rv = mac_unicast_add(port->lp_mch, NULL,
+	    MAC_UNICAST_PRIMARY | MAC_UNICAST_DISABLE_TX_VID_CHECK,
+	    &port->lp_mah, 0, &diag)) != 0) {
 		/*
 		 * following is a workaround for a bug in 'bge' driver.
 		 * See CR 6794654 for more information and this work around
@@ -2255,7 +2296,7 @@ try_again:
 			goto try_again;
 		}
 		/*
-		 * if mac_unicast_primary_add() failed while setting the MTU,
+		 * if mac_unicast_add() failed while setting the MTU,
 		 * detach the port from the group.
 		 */
 		mac_perim_enter_by_mh(port->lp_mh, &mph);

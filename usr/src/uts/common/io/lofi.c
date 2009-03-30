@@ -132,6 +132,7 @@
 #include <sys/zmod.h>
 #include <sys/crypto/common.h>
 #include <sys/crypto/api.h>
+#include <LzmaDec.h>
 
 /*
  * The basis for CRYOFF is derived from usr/src/uts/common/sys/fs/ufs_fs.h.
@@ -181,14 +182,67 @@ static int lofi_taskq_nthreads = 4;	/* # of taskq threads per device */
 uint32_t lofi_max_files = LOFI_MAX_FILES;
 const char lofi_crypto_magic[6] = LOFI_CRYPTO_MAGIC;
 
+/*
+ * To avoid decompressing data in a compressed segment multiple times
+ * when accessing small parts of a segment's data, we cache and reuse
+ * the uncompressed segment's data.
+ *
+ * A single cached segment is sufficient to avoid lots of duplicate
+ * segment decompress operations. A small cache size also reduces the
+ * memory footprint.
+ *
+ * lofi_max_comp_cache is the maximum number of decompressed data segments
+ * cached for each compressed lofi image. It can be set to 0 to disable
+ * caching.
+ */
+
+uint32_t lofi_max_comp_cache = 1;
+
 static int gzip_decompress(void *src, size_t srclen, void *dst,
 	size_t *destlen, int level);
+
+static int lzma_decompress(void *src, size_t srclen, void *dst,
+	size_t *dstlen, int level);
 
 lofi_compress_info_t lofi_compress_table[LOFI_COMPRESS_FUNCTIONS] = {
 	{gzip_decompress,	NULL,	6,	"gzip"}, /* default */
 	{gzip_decompress,	NULL,	6,	"gzip-6"},
-	{gzip_decompress,	NULL,	9,	"gzip-9"}
+	{gzip_decompress,	NULL,	9,	"gzip-9"},
+	{lzma_decompress,	NULL,	0,	"lzma"}
 };
+
+/*ARGSUSED*/
+static void
+*SzAlloc(void *p, size_t size)
+{
+	return (kmem_alloc(size, KM_SLEEP));
+}
+
+/*ARGSUSED*/
+static void
+SzFree(void *p, void *address, size_t size)
+{
+	kmem_free(address, size);
+}
+
+static ISzAlloc g_Alloc = { SzAlloc, SzFree };
+
+/*
+ * Free data referenced by the linked list of cached uncompressed
+ * segments.
+ */
+static void
+lofi_free_comp_cache(struct lofi_state *lsp)
+{
+	struct lofi_comp_cache *lc;
+
+	while ((lc = list_remove_head(&lsp->ls_comp_cache)) != NULL) {
+		kmem_free(lc->lc_data, lsp->ls_uncomp_seg_sz);
+		kmem_free(lc, sizeof (struct lofi_comp_cache));
+		lsp->ls_comp_cache_count--;
+	}
+	ASSERT(lsp->ls_comp_cache_count == 0);
+}
 
 static int
 lofi_busy(void)
@@ -325,10 +379,20 @@ lofi_free_handle(dev_t dev, minor_t minor, struct lofi_state *lsp,
 		mutex_destroy(&lsp->ls_kstat_lock);
 	}
 
+	/*
+	 * Free cached decompressed segment data
+	 */
+	lofi_free_comp_cache(lsp);
+	list_destroy(&lsp->ls_comp_cache);
+	mutex_destroy(&lsp->ls_comp_cache_lock);
+
 	if (lsp->ls_uncomp_seg_sz > 0) {
 		kmem_free(lsp->ls_comp_index_data, lsp->ls_comp_index_data_sz);
 		lsp->ls_uncomp_seg_sz = 0;
 	}
+
+	mutex_destroy(&lsp->ls_vp_lock);
+
 	ddi_soft_state_free(lofi_statep, minor);
 }
 
@@ -484,12 +548,14 @@ lofi_blk_mech(struct lofi_state *lsp, longlong_t lblkno)
 		    lblkno, ret);
 		if (lsp->ls_mech.cm_param != iv)
 			kmem_free(iv, iv_len);
+
 		return (ret);
 	}
 
 	/* clean up the iv from the last computation */
 	if (lsp->ls_mech.cm_param != NULL && lsp->ls_mech.cm_param != iv)
 		kmem_free(lsp->ls_mech.cm_param, lsp->ls_mech.cm_param_len);
+
 	lsp->ls_mech.cm_param_len = iv_len;
 	lsp->ls_mech.cm_param = iv;
 
@@ -745,14 +811,134 @@ lofi_mapped_rdwr(caddr_t bufaddr, offset_t offset, struct buf *bp,
 	return (error);
 }
 
+/*
+ * Check if segment seg_index is present in the decompressed segment
+ * data cache.
+ *
+ * Returns a pointer to the decompressed segment data cache entry if
+ * found, and NULL when decompressed data for this segment is not yet
+ * cached.
+ */
+static struct lofi_comp_cache *
+lofi_find_comp_data(struct lofi_state *lsp, uint64_t seg_index)
+{
+	struct lofi_comp_cache *lc;
+
+	ASSERT(mutex_owned(&lsp->ls_comp_cache_lock));
+
+	for (lc = list_head(&lsp->ls_comp_cache); lc != NULL;
+	    lc = list_next(&lsp->ls_comp_cache, lc)) {
+		if (lc->lc_index == seg_index) {
+			/*
+			 * Decompressed segment data was found in the
+			 * cache.
+			 *
+			 * The cache uses an LRU replacement strategy;
+			 * move the entry to head of list.
+			 */
+			list_remove(&lsp->ls_comp_cache, lc);
+			list_insert_head(&lsp->ls_comp_cache, lc);
+			return (lc);
+		}
+	}
+	return (NULL);
+}
+
+/*
+ * Add the data for a decompressed segment at segment index
+ * seg_index to the cache of the decompressed segments.
+ *
+ * Returns a pointer to the cache element structure in case
+ * the data was added to the cache; returns NULL when the data
+ * wasn't cached.
+ */
+static struct lofi_comp_cache *
+lofi_add_comp_data(struct lofi_state *lsp, uint64_t seg_index,
+    uchar_t *data)
+{
+	struct lofi_comp_cache *lc;
+
+	ASSERT(mutex_owned(&lsp->ls_comp_cache_lock));
+
+	while (lsp->ls_comp_cache_count > lofi_max_comp_cache) {
+		lc = list_remove_tail(&lsp->ls_comp_cache);
+		ASSERT(lc != NULL);
+		kmem_free(lc->lc_data, lsp->ls_uncomp_seg_sz);
+		kmem_free(lc, sizeof (struct lofi_comp_cache));
+		lsp->ls_comp_cache_count--;
+	}
+
+	/*
+	 * Do not cache when disabled by tunable variable
+	 */
+	if (lofi_max_comp_cache == 0)
+		return (NULL);
+
+	/*
+	 * When the cache has not yet reached the maximum allowed
+	 * number of segments, allocate a new cache element.
+	 * Otherwise the cache is full; reuse the last list element
+	 * (LRU) for caching the decompressed segment data.
+	 *
+	 * The cache element for the new decompressed segment data is
+	 * added to the head of the list.
+	 */
+	if (lsp->ls_comp_cache_count < lofi_max_comp_cache) {
+		lc = kmem_alloc(sizeof (struct lofi_comp_cache), KM_SLEEP);
+		lc->lc_data = NULL;
+		list_insert_head(&lsp->ls_comp_cache, lc);
+		lsp->ls_comp_cache_count++;
+	} else {
+		lc = list_remove_tail(&lsp->ls_comp_cache);
+		if (lc == NULL)
+			return (NULL);
+		list_insert_head(&lsp->ls_comp_cache, lc);
+	}
+
+	/*
+	 * Free old uncompressed segment data when reusing a cache
+	 * entry.
+	 */
+	if (lc->lc_data != NULL)
+		kmem_free(lc->lc_data, lsp->ls_uncomp_seg_sz);
+
+	lc->lc_data = data;
+	lc->lc_index = seg_index;
+	return (lc);
+}
+
+
 /*ARGSUSED*/
-static int gzip_decompress(void *src, size_t srclen, void *dst,
+static int
+gzip_decompress(void *src, size_t srclen, void *dst,
     size_t *dstlen, int level)
 {
 	ASSERT(*dstlen >= srclen);
 
 	if (z_uncompress(dst, dstlen, src, srclen) != Z_OK)
 		return (-1);
+	return (0);
+}
+
+#define	LZMA_HEADER_SIZE	(LZMA_PROPS_SIZE + 8)
+/*ARGSUSED*/
+static int
+lzma_decompress(void *src, size_t srclen, void *dst,
+	size_t *dstlen, int level)
+{
+	size_t insizepure;
+	void *actual_src;
+	ELzmaStatus status;
+
+	insizepure = srclen - LZMA_HEADER_SIZE;
+	actual_src = (void *)((Byte *)src + LZMA_HEADER_SIZE);
+
+	if (LzmaDecode((Byte *)dst, (size_t *)dstlen,
+	    (const Byte *)actual_src, &insizepure,
+	    (const Byte *)src, LZMA_PROPS_SIZE, LZMA_FINISH_ANY, &status,
+	    &g_Alloc) != SZ_OK) {
+		return (-1);
+	}
 	return (0);
 }
 
@@ -811,12 +997,14 @@ lofi_strategy_task(void *arg)
 	} else if (lsp->ls_uncomp_seg_sz == 0) {
 		error = lofi_mapped_rdwr(bufaddr, offset, bp, lsp);
 	} else {
-		unsigned char *compressed_seg = NULL, *cmpbuf;
-		unsigned char *uncompressed_seg = NULL;
+		uchar_t *compressed_seg = NULL, *cmpbuf;
+		uchar_t *uncompressed_seg = NULL;
 		lofi_compress_info_t *li;
 		size_t oblkcount;
-		unsigned long seglen;
+		ulong_t seglen;
 		uint64_t sblkno, eblkno, cmpbytes;
+		uint64_t uncompressed_seg_index;
+		struct lofi_comp_cache *lc;
 		offset_t sblkoff, eblkoff;
 		u_offset_t salign, ealign;
 		u_offset_t sdiff;
@@ -850,6 +1038,36 @@ lofi_strategy_task(void *arg)
 		sblkoff = offset & (lsp->ls_uncomp_seg_sz - 1);
 		eblkno = (offset + bp->b_bcount) >> lsp->ls_comp_seg_shift;
 		eblkoff = (offset + bp->b_bcount) & (lsp->ls_uncomp_seg_sz - 1);
+
+		/*
+		 * Check the decompressed segment cache.
+		 *
+		 * The cache is used only when the requested data
+		 * is within a segment. Requests that cross
+		 * segment boundaries bypass the cache.
+		 */
+		if (sblkno == eblkno ||
+		    (sblkno + 1 == eblkno && eblkoff == 0)) {
+			/*
+			 * Request doesn't cross a segment boundary,
+			 * now check the cache.
+			 */
+			mutex_enter(&lsp->ls_comp_cache_lock);
+			lc = lofi_find_comp_data(lsp, sblkno);
+			if (lc != NULL) {
+				/*
+				 * We've found the decompressed segment
+				 * data in the cache; reuse it.
+				 */
+				bcopy(lc->lc_data + sblkoff, bufaddr,
+				    bp->b_bcount);
+				mutex_exit(&lsp->ls_comp_cache_lock);
+				bp->b_resid = 0;
+				error = 0;
+				goto done;
+			}
+			mutex_exit(&lsp->ls_comp_cache_lock);
+		}
 
 		/*
 		 * Align start offset to block boundary for segmap
@@ -904,8 +1122,20 @@ lofi_strategy_task(void *arg)
 		 * We have the compressed blocks, now uncompress them
 		 */
 		cmpbuf = compressed_seg + sdiff;
-		for (i = sblkno; i < (eblkno + 1) && i < lsp->ls_comp_index_sz;
-		    i++) {
+		for (i = sblkno; i <= eblkno; i++) {
+			ASSERT(i < lsp->ls_comp_index_sz - 1);
+
+			/*
+			 * The last segment is special in that it is
+			 * most likely not going to be the same
+			 * (uncompressed) size as the other segments.
+			 */
+			if (i == (lsp->ls_comp_index_sz - 2)) {
+				seglen = lsp->ls_uncomp_last_seg_sz;
+			} else {
+				seglen = lsp->ls_uncomp_seg_sz;
+			}
+
 			/*
 			 * Each of the segment index entries contains
 			 * the starting block number for that segment.
@@ -914,14 +1144,8 @@ lofi_strategy_task(void *arg)
 			 * block number of this segment and the starting
 			 * block number of the next segment.
 			 */
-			if ((i == eblkno) &&
-			    (i == lsp->ls_comp_index_sz - 1)) {
-				cmpbytes = lsp->ls_vp_comp_size -
-				    lsp->ls_comp_seg_index[i];
-			} else {
-				cmpbytes = lsp->ls_comp_seg_index[i + 1] -
-				    lsp->ls_comp_seg_index[i];
-			}
+			cmpbytes = lsp->ls_comp_seg_index[i + 1] -
+			    lsp->ls_comp_seg_index[i];
 
 			/*
 			 * The first byte in a compressed segment is a flag
@@ -932,8 +1156,6 @@ lofi_strategy_task(void *arg)
 				bcopy((cmpbuf + SEGHDR), uncompressed_seg,
 				    (cmpbytes - SEGHDR));
 			} else {
-				seglen = lsp->ls_uncomp_seg_sz;
-
 				if (li->l_decompress((cmpbuf + SEGHDR),
 				    (cmpbytes - SEGHDR), uncompressed_seg,
 				    &seglen, li->l_level) != 0) {
@@ -942,19 +1164,15 @@ lofi_strategy_task(void *arg)
 				}
 			}
 
+			uncompressed_seg_index = i;
+
 			/*
 			 * Determine how much uncompressed data we
 			 * have to copy and copy it
 			 */
 			xfersize = lsp->ls_uncomp_seg_sz - sblkoff;
-			if (i == eblkno) {
-				if (i == (lsp->ls_comp_index_sz - 1))
-					xfersize -= (lsp->ls_uncomp_last_seg_sz
-					    - eblkoff);
-				else
-					xfersize -=
-					    (lsp->ls_uncomp_seg_sz - eblkoff);
-			}
+			if (i == eblkno)
+				xfersize -= (lsp->ls_uncomp_seg_sz - eblkoff);
 
 			bcopy((uncompressed_seg + sblkoff), bufaddr, xfersize);
 
@@ -966,6 +1184,22 @@ lofi_strategy_task(void *arg)
 			if (bp->b_resid == 0)
 				break;
 		}
+
+		/*
+		 * Add the data for the last decopressed segment to
+		 * the cache.
+		 *
+		 * In case the uncompressed segment data was added to (and
+		 * is referenced by) the cache, make sure we don't free it
+		 * here.
+		 */
+		mutex_enter(&lsp->ls_comp_cache_lock);
+		if ((lc = lofi_add_comp_data(lsp, uncompressed_seg_index,
+		    uncompressed_seg)) != NULL) {
+			uncompressed_seg = NULL;
+		}
+		mutex_exit(&lsp->ls_comp_cache_lock);
+
 done:
 		if (compressed_seg != NULL)
 			kmem_free(compressed_seg, comp_data_sz);
@@ -1406,7 +1640,8 @@ lofi_map_compressed_file(struct lofi_state *lsp, char *buf)
 	/*
 	 * The compressed segment size must be a power of 2
 	 */
-	if (lsp->ls_uncomp_seg_sz % 2)
+	if (lsp->ls_uncomp_seg_sz < DEV_BSIZE ||
+	    !ISP2(lsp->ls_uncomp_seg_sz))
 		return (EINVAL);
 
 	for (i = 0; !((lsp->ls_uncomp_seg_sz >> i) & 1); i++)
@@ -1434,7 +1669,7 @@ lofi_map_compressed_file(struct lofi_state *lsp, char *buf)
 	    + lsp->ls_uncomp_last_seg_sz;
 
 	/*
-	 * Index size is rounded up to a 512 byte boundary for ease
+	 * Index size is rounded up to DEV_BSIZE for ease
 	 * of segmapping
 	 */
 	index_sz = sizeof (*lsp->ls_comp_seg_index) * lsp->ls_comp_index_sz;
@@ -1645,6 +1880,10 @@ lofi_map_file(dev_t dev, struct lofi_ioctl *ulip, int pickminor,
 	}
 	cv_init(&lsp->ls_vp_cv, NULL, CV_DRIVER, NULL);
 	mutex_init(&lsp->ls_vp_lock, NULL, MUTEX_DRIVER, NULL);
+
+	list_create(&lsp->ls_comp_cache, sizeof (struct lofi_comp_cache),
+	    offsetof(struct lofi_comp_cache, lc_list));
+	mutex_init(&lsp->ls_comp_cache_lock, NULL, MUTEX_DRIVER, NULL);
 
 	/*
 	 * save open mode so file can be closed properly and vnode counts

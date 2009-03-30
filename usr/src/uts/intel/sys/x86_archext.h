@@ -620,6 +620,7 @@ extern uint_t cpuid_get_dtlb_nent(struct cpu *, size_t);
 extern uint32_t *cpuid_mwait_alloc(struct cpu *);
 extern void cpuid_mwait_free(struct cpu *);
 extern int cpuid_deep_cstates_supported(void);
+extern int vmware_platform(void);
 #endif
 
 struct cpu_ucode_info;
@@ -670,6 +671,17 @@ extern int opteron_erratum_121;
 extern int opteron_workaround_6323525;
 extern void patch_workaround_6323525(void);
 #endif
+
+extern int get_hwenv(void);
+extern int is_controldom(void);
+
+/*
+ * Defined hardware environments
+ */
+#define	HW_NATIVE	0x00	/* Running on bare metal */
+#define	HW_XEN_PV	0x01	/* Running on Xen Hypervisor paravirutualized */
+#define	HW_XEN_HVM	0x02	/* Running on Xen hypervisor HVM */
+#define	HW_VMWARE	0x03	/* Running on VMware hypervisor */
 
 #endif	/* _KERNEL */
 

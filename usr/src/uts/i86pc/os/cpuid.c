@@ -113,6 +113,10 @@ uint_t pentiumpro_bug4046376;
 uint_t pentiumpro_bug4064495;
 
 uint_t enable486;
+/*
+ * This is set to platform type Solaris is running on.
+ */
+static int platform_type = HW_NATIVE;
 
 /*
  * monitor/mwait info.
@@ -421,12 +425,11 @@ cpuid_free_space(cpu_t *cpu)
 #if !defined(__xpv)
 
 static void
-check_for_hvm()
+determine_platform()
 {
 	struct cpuid_regs cp;
 	char *xen_str;
 	uint32_t xen_signature[4];
-	extern int xpv_is_hvm;
 
 	/*
 	 * In a fully virtualized domain, Xen's pseudo-cpuid function
@@ -441,9 +444,39 @@ check_for_hvm()
 	xen_signature[2] = cp.cp_edx;
 	xen_signature[3] = 0;
 	xen_str = (char *)xen_signature;
-	if (strcmp("XenVMMXenVMM", xen_str) == 0 && cp.cp_eax <= 0x40000002)
-		xpv_is_hvm = 1;
+	if (strcmp("XenVMMXenVMM", xen_str) == 0 && cp.cp_eax <= 0x40000002) {
+		platform_type = HW_XEN_HVM;
+	} else if (vmware_platform()) { /* running under vmware hypervisor? */
+		platform_type = HW_VMWARE;
+	}
 }
+
+int
+get_hwenv(void)
+{
+	return (platform_type);
+}
+
+int
+is_controldom(void)
+{
+	return (0);
+}
+
+#else
+
+int
+get_hwenv(void)
+{
+	return (HW_XEN_PV);
+}
+
+int
+is_controldom(void)
+{
+	return (DOMAIN_IS_INITDOMAIN(xen_info));
+}
+
 #endif	/* __xpv */
 
 uint_t
@@ -1188,7 +1221,7 @@ cpuid_pass1(cpu_t *cpu)
 
 pass1_done:
 #if !defined(__xpv)
-	check_for_hvm();
+	determine_platform();
 #endif
 	cpi->cpi_pass = 1;
 	return (feature);

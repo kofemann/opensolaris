@@ -99,7 +99,7 @@ int mac_soft_ring_poll_thres = 16;
  * If no TX rings are available, then MAC client(s) will be assigned the
  * default Tx ring. Default Tx ring can be shared among multiple MAC clients.
  */
-uint32_t mac_tx_ring_count = 8;
+uint32_t mac_tx_ring_count = 32;
 boolean_t mac_tx_serialize = B_FALSE;
 
 /*
@@ -3362,11 +3362,9 @@ mac_fanout_recompute(mac_impl_t *mip)
 {
 	mac_client_impl_t	*mcip;
 
-
 	i_mac_perim_enter(mip);
-	ASSERT(!(mip->mi_state_flags & MIS_IS_VNIC));
-
-	if (mip->mi_linkstate != LINK_STATE_UP) {
+	if ((mip->mi_state_flags & MIS_IS_VNIC) != 0 ||
+	    mip->mi_linkstate != LINK_STATE_UP) {
 		i_mac_perim_exit(mip);
 		return;
 	}

@@ -103,8 +103,6 @@ uint32_t 	nxge_dvma_thresh = TX_FASTDVMA_MIN;
 uint32_t 	nxge_dma_stream_thresh = TX_STREAM_MIN;
 uint32_t	nxge_jumbo_mtu	= TX_JUMBO_MTU;
 boolean_t	nxge_jumbo_enable = B_FALSE;
-uint16_t	nxge_rcr_timeout = NXGE_RDC_RCR_TIMEOUT;
-uint16_t	nxge_rcr_threshold = NXGE_RDC_RCR_THRESHOLD;
 nxge_tx_mode_t	nxge_tx_scheme = NXGE_USE_SERIAL;
 
 /* MAX LSO size */
@@ -5630,7 +5628,7 @@ nxge_group_add_ring(mac_group_driver_t gh, mac_ring_driver_t rh,
 		rdc_grp->map |= (1 << channel);
 		rdc_grp->max_rdcs++;
 
-		(void) nxge_init_fzc_rdc_tbl(nxge, rgroup->rdctbl);
+		(void) nxge_init_fzc_rdc_tbl(nxge, rdc_grp, rgroup->rdctbl);
 		break;
 	}
 }
@@ -5675,7 +5673,7 @@ nxge_group_rem_ring(mac_group_driver_t gh, mac_ring_driver_t rh,
 		rdc_grp->map &= ~(1 << channel);
 		rdc_grp->max_rdcs--;
 
-		(void) nxge_init_fzc_rdc_tbl(nxge, rgroup->rdctbl);
+		(void) nxge_init_fzc_rdc_tbl(nxge, rdc_grp, rgroup->rdctbl);
 		break;
 	}
 }

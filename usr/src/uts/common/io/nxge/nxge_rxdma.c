@@ -39,13 +39,6 @@
 	(rdc + nxgep->pt_config.hw_config.start_rdc)
 
 /*
- * XXX: This is a tunable to limit the number of packets each interrupt
- * handles.  0 (default) means that each interrupt takes as much packets
- * as it finds.
- */
-extern int	nxge_max_intr_pkts;
-
-/*
  * Globals: tunable parameters (/etc/system or adb)
  *
  */
@@ -61,9 +54,6 @@ extern uint32_t nxge_mblks_pending;
  */
 extern uint32_t nxge_max_rx_pkts;
 boolean_t nxge_jumbo_enable;
-
-extern uint16_t nxge_rcr_timeout;
-extern uint16_t nxge_rcr_threshold;
 
 /*
  * Tunables to manage the receive buffer blocks.
@@ -2239,13 +2229,6 @@ nxge_rx_pkts(p_nxge_t nxgep, p_rx_rcr_ring_t rcr_p, rx_dma_ctl_stat_t cs,
 		    (totallen >= bytes_to_pickup)) {
 			break;
 		}
-
-		/* limit the number of packets for interrupt */
-		if (!(rcr_p->poll_flag)) {
-			if (npkt_read == nxge_max_intr_pkts) {
-				break;
-			}
-		}
 	}
 
 	rcr_p->rcr_desc_rd_head_pp = rcr_desc_rd_head_pp;
@@ -3324,15 +3307,6 @@ nxge_map_rxdma(p_nxge_t nxgep, int channel)
 
 	if (nxge_alloc_rxb(nxgep, channel) != NXGE_OK)
 		return (NXGE_ERROR);
-
-	/*
-	 * Timeout should be set based on the system clock divider.
-	 * A timeout value of 1 assumes that the
-	 * granularity (1000) is 3 microseconds running at 300MHz.
-	 */
-
-	nxgep->intr_threshold = nxge_rcr_threshold;
-	nxgep->intr_timeout = nxge_rcr_timeout;
 
 	/*
 	 * Map descriptors from the buffer polls for each dma channel.

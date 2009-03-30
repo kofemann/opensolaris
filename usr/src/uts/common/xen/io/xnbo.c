@@ -280,7 +280,8 @@ xnbo_open_mac(xnb_t *xnbp, char *mac)
 		return (B_FALSE);
 	}
 
-	err = mac_unicast_primary_add(xnbop->o_mch, &xnbop->o_mah, &diag);
+	err = mac_unicast_add(xnbop->o_mch, NULL, MAC_UNICAST_PRIMARY,
+	    &xnbop->o_mah, 0, &diag);
 	if (err != 0) {
 		cmn_err(CE_WARN, "xnbo_open_mac: "
 		    "failed to get the primary MAC address of "
@@ -386,7 +387,7 @@ xnbo_close_mac(xnbo_t *xnbop)
 
 	if (xnbop->o_promiscuous) {
 		if (xnbop->o_mphp != NULL) {
-			(void) mac_promisc_remove(xnbop->o_mphp);
+			mac_promisc_remove(xnbop->o_mphp);
 			xnbop->o_mphp = NULL;
 		}
 		xnbop->o_promiscuous = B_FALSE;

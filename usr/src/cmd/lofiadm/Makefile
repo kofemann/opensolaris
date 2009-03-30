@@ -20,26 +20,39 @@
 #
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
 PROG= lofiadm
 OBJS= main.o utils.o
+LZMAOBJS= LzmaEnc.o LzFind.o
+
 SRCS= $(OBJS:%.o=%.c)
+
 POFILES= $(OBJS:%.o=%.po) 
 
 include ../Makefile.cmd
 
-CPPFLAGS += -I $(SRC)/common/crypto
+CPPFLAGS += -I $(SRC)/common/crypto -I $(SRC)/common/lzma
 LDLIBS += -ldevinfo -lpkcs11 -lcryptoutil
+
+LINTFLAGS += -erroff=E_NAME_USED_NOT_DEF2
 
 .KEEP_STATE:
 
-all: $(PROG)
+all: $(LZMAOBJS) $(PROG) $(POFILE)
+
+LzmaEnc.o:	$(SRC)/common/lzma/LzmaEnc.c
+	$(COMPILE.c) -o $@ $(SRC)/common/lzma/LzmaEnc.c
+	$(POST_PROCESS)
+
+LzFind.o:	$(SRC)/common/lzma/LzFind.c
+	$(COMPILE.c) -o $@ $(SRC)/common/lzma/LzFind.c
+	$(POST_PROCESS)
 
 $(PROG): $(OBJS)
-	$(LINK.c) -o $@ $(OBJS) $(LDLIBS)
+	$(LINK.c) -o $@ $(OBJS) $(LZMAOBJS) $(LDLIBS)
 	$(POST_PROCESS)
 
 install: all $(ROOTUSRSBINPROG)
@@ -49,7 +62,7 @@ $(POFILE): $(POFILES)
 	cat $(POFILES) > $@
 
 clean:
-	$(RM) $(OBJS)
+	$(RM) $(PROG) $(OBJS) $(LZMAOBJS) $(POFILE) $(POFILES)
 
 lint:	lint_SRCS
 

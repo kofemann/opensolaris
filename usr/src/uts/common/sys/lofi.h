@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -33,6 +33,7 @@
 #include <sys/vtoc.h>
 #include <sys/dkio.h>
 #include <sys/vnode.h>
+#include <sys/list.h>
 #include <sys/crypto/api.h>
 
 #ifdef	__cplusplus
@@ -162,6 +163,20 @@ struct lofi_ioctl {
 
 #if defined(_KERNEL)
 
+
+/*
+ * Cache decompressed data segments for the compressed lofi images.
+ *
+ * To avoid that we have to decompress data of a compressed
+ * segment multiple times when accessing parts of the segment's
+ * data we cache the uncompressed data, using a simple linked list.
+ */
+struct lofi_comp_cache {
+	list_node_t	lc_list;		/* linked list */
+	uchar_t		*lc_data;		/* decompressed segment data */
+	uint64_t	lc_index;		/* segment index */
+};
+
 /*
  * We limit the maximum number of active lofi devices to 128, which seems very
  * large. You can tune this by changing lofi_max_files in /etc/system.
@@ -229,6 +244,11 @@ struct lofi_state {
 	uint32_t	ls_comp_index_data_sz;
 	u_offset_t	ls_vp_comp_size; /* actual compressed file size */
 
+	/* lock and anchor for compressed segment caching */
+	kmutex_t	ls_comp_cache_lock;	/* protects ls_comp_cache */
+	list_t		ls_comp_cache;		/* cached decompressed segs */
+	uint32_t	ls_comp_cache_count;
+
 	/* the following fields are required for encryption support */
 	boolean_t		ls_crypto_enabled;
 	u_offset_t		ls_crypto_offset;	/* crypto meta size */
@@ -265,6 +285,7 @@ enum lofi_compress {
 	LOFI_COMPRESS_GZIP = 0,
 	LOFI_COMPRESS_GZIP_6 = 1,
 	LOFI_COMPRESS_GZIP_9 = 2,
+	LOFI_COMPRESS_LZMA = 3,
 	LOFI_COMPRESS_FUNCTIONS
 };
 

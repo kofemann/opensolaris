@@ -31,7 +31,9 @@
 #include <sys/kmem.h>
 #include <sys/psm.h>
 #include <sys/pci_cfgspace.h>
+#include <sys/apic.h>
 #include <sys/ddi.h>
+#include <sys/sunddi.h>
 #include <sys/sunndi.h>
 #include <sys/pci.h>
 #include <sys/kobj.h>
@@ -517,9 +519,71 @@ AcpiOsFree(void *Memory)
 	kmem_free(tmp_ptr, size);
 }
 
+static int napics_found;	/* number of ioapic addresses in array */
+static ACPI_PHYSICAL_ADDRESS ioapic_paddr[MAX_IO_APIC];
+static ACPI_TABLE_MADT *acpi_mapic_dtp = NULL;
+static void *dummy_ioapicadr;
+
+void
+acpica_find_ioapics(void)
+{
+	int			madt_seen, madt_size;
+	ACPI_SUBTABLE_HEADER		*ap;
+	ACPI_MADT_IO_APIC		*mia;
+
+	if (acpi_mapic_dtp != NULL)
+		return;	/* already parsed table */
+	if (AcpiGetTable(ACPI_SIG_MADT, 1,
+	    (ACPI_TABLE_HEADER **) &acpi_mapic_dtp) != AE_OK)
+		return;
+
+	napics_found = 0;
+
+	/*
+	 * Search the MADT for ioapics
+	 */
+	ap = (ACPI_SUBTABLE_HEADER *) (acpi_mapic_dtp + 1);
+	madt_size = acpi_mapic_dtp->Header.Length;
+	madt_seen = sizeof (*acpi_mapic_dtp);
+
+	while (madt_seen < madt_size) {
+
+		switch (ap->Type) {
+		case ACPI_MADT_TYPE_IO_APIC:
+			mia = (ACPI_MADT_IO_APIC *) ap;
+			if (napics_found < MAX_IO_APIC) {
+				ioapic_paddr[napics_found++] =
+				    (ACPI_PHYSICAL_ADDRESS)
+				    (mia->Address & PAGEMASK);
+			}
+			break;
+
+		default:
+			break;
+		}
+
+		/* advance to next entry */
+		madt_seen += ap->Length;
+		ap = (ACPI_SUBTABLE_HEADER *)(((char *)ap) + ap->Length);
+	}
+	if (dummy_ioapicadr == NULL)
+		dummy_ioapicadr = kmem_zalloc(PAGESIZE, KM_SLEEP);
+}
+
+
 void *
 AcpiOsMapMemory(ACPI_PHYSICAL_ADDRESS PhysicalAddress, ACPI_SIZE Size)
 {
+	int	i;
+
+	/*
+	 * If the iopaic address table is populated, check if trying
+	 * to access an ioapic.  Instead, return a pointer to a dummy ioapic.
+	 */
+	for (i = 0; i < napics_found; i++) {
+		if ((PhysicalAddress & PAGEMASK) == ioapic_paddr[i])
+			return (dummy_ioapicadr);
+	}
 	/* FUTUREWORK: test PhysicalAddress for > 32 bits */
 	return (psm_map_new((paddr_t)PhysicalAddress,
 	    (size_t)Size, PSM_PROT_WRITE | PSM_PROT_READ));
@@ -528,6 +592,11 @@ AcpiOsMapMemory(ACPI_PHYSICAL_ADDRESS PhysicalAddress, ACPI_SIZE Size)
 void
 AcpiOsUnmapMemory(void *LogicalAddress, ACPI_SIZE Size)
 {
+	/*
+	 * Check if trying to unmap dummy ioapic address.
+	 */
+	if (LogicalAddress == dummy_ioapicadr)
+		return;
 
 	psm_unmap((caddr_t)LogicalAddress, (size_t)Size);
 }
@@ -1395,65 +1464,6 @@ acpica_get_handle_cpu(int cpu_id, ACPI_HANDLE *rh)
 }
 
 /*
- * Convert CPU device _UID strings into unique integers
- * ACPI 3.0 spec 6.1.9 permits _UID to be either
- * an arbitrary string or numeric value.  ACPI CA converts
- * numeric types to a string, providing a consistent API,
- * but it can not be assumed that _UID is always numeric.
- * Keep a private list of CPU _UIDs and convert them to
- * an integer representation.
- */
-
-struct acpica_cpu_uid {
-	struct acpica_cpu_uid *next;
-	char *uid;
-};
-
-static struct acpica_cpu_uid *acpica_cpu_uid_list = NULL;
-
-static UINT32
-acpica_cpu_uid_str_to_uint(char *uidstr)
-{
-	UINT32	n;
-	struct acpica_cpu_uid *current, **tail;
-
-	ASSERT(uidstr != NULL);
-
-	n = 0;
-	current = acpica_cpu_uid_list;
-	tail = &acpica_cpu_uid_list;
-	while (current != NULL) {
-		if (strcmp(current->uid, uidstr) == 0)
-			break;
-		n++;
-		tail = &current->next;
-		current = current->next;
-	}
-
-	/*
-	 * failed to find a matching element; create it here
-	 */
-	if (current == NULL) {
-		/* allocate new list element as current one */
-		current = (struct acpica_cpu_uid *)kmem_zalloc(
-		    sizeof (struct acpica_cpu_uid), KM_SLEEP);
-
-		/* allocate storage for the device ID string */
-		current->uid = (char *)kmem_zalloc(strlen(uidstr) + 1,
-		    KM_SLEEP);
-
-		strcpy(current->uid, uidstr);
-		*tail = current;
-	}
-
-	/*
-	 * 'n' correctly contains the index for either
-	 * a new element or an existing element
-	 */
-	return (n);
-}
-
-/*
  * Determine if this object is a processor
  */
 static ACPI_STATUS
@@ -1461,7 +1471,7 @@ acpica_probe_processor(ACPI_HANDLE obj, UINT32 level, void *ctx, void **rv)
 {
 	ACPI_STATUS status;
 	ACPI_OBJECT_TYPE objtype;
-	UINT32 acpi_id;
+	unsigned long acpi_id;
 	ACPI_BUFFER rb;
 
 	if (AcpiGetType(obj, &objtype) != AE_OK)
@@ -1474,7 +1484,7 @@ acpica_probe_processor(ACPI_HANDLE obj, UINT32 level, void *ctx, void **rv)
 		status = AcpiEvaluateObjectTyped(obj, NULL, NULL, &rb,
 		    ACPI_TYPE_PROCESSOR);
 		if (status != AE_OK) {
-			cmn_err(CE_WARN, "acpica: error probing Processor");
+			cmn_err(CE_WARN, "!acpica: error probing Processor");
 			return (status);
 		}
 		acpi_id = ((ACPI_OBJECT *)rb.Pointer)->Processor.ProcId;
@@ -1486,13 +1496,20 @@ acpica_probe_processor(ACPI_HANDLE obj, UINT32 level, void *ctx, void **rv)
 		status = AcpiGetObjectInfo(obj, &rb);
 		if (status != AE_OK) {
 			cmn_err(CE_WARN,
-			    "acpica: error probing Processor Device\n");
+			    "!acpica: error probing Processor Device\n");
 			return (status);
 		}
 		ASSERT(((ACPI_OBJECT *)rb.Pointer)->Type ==
 		    ACPI_TYPE_DEVICE);
-		acpi_id = acpica_cpu_uid_str_to_uint(
-		    ((ACPI_DEVICE_INFO *)rb.Pointer)->UniqueId.Value);
+
+		if (ddi_strtoul(
+		    ((ACPI_DEVICE_INFO *)rb.Pointer)->UniqueId.Value,
+		    NULL, 10, &acpi_id) != 0) {
+			AcpiOsFree(rb.Pointer);
+			cmn_err(CE_WARN,
+			    "!acpica: error probing Processor Device _UID\n");
+			return (AE_ERROR);
+		}
 		AcpiOsFree(rb.Pointer);
 	}
 

@@ -1981,6 +1981,18 @@ create_contig_pfnlist(uint_t flags)
 		if (++contig_pfn_cnt == contig_pfn_max)
 			break;
 	}
+	/*
+	 * Sanity check the new list.
+	 */
+	if (contig_pfn_cnt < 2) { /* no contig pfns */
+		contig_pfn_cnt = 0;
+		contig_pfnlist_buildfailed++;
+		kmem_free(contig_pfn_list, contig_pfn_max * sizeof (pfn_t));
+		contig_pfn_list = NULL;
+		contig_pfn_max = 0;
+		ret = 0;
+		goto out;
+	}
 	qsort(contig_pfn_list, contig_pfn_cnt, sizeof (pfn_t), mfn_compare);
 	compact_contig_pfn_list();
 	/*
@@ -2062,8 +2074,13 @@ update_contig_pfnlist(pfn_t pfn, mfn_t oldmfn, mfn_t newmfn)
 			probe_hi = probe_pos;
 		probe_pos = (probe_hi + probe_lo) / 2;
 	}
-	if (probe_pos >= 0)  { /* remove pfn fom list */
-		contig_pfn_cnt--;
+	if (probe_pos >= 0) {
+		/*
+		 * Remove pfn from list and ensure next alloc
+		 * position stays in bounds.
+		 */
+		if (--contig_pfn_cnt <= next_alloc_pfn)
+			next_alloc_pfn = 0;
 		ovbcopy(&contig_pfn_list[probe_pos + 1],
 		    &contig_pfn_list[probe_pos],
 		    (contig_pfn_cnt - probe_pos) * sizeof (pfn_t));
@@ -3707,25 +3724,34 @@ exec_get_spslew(void)
  * available - this would have a minimal impact on page coloring.
  */
 page_t *
-page_get_physical(int flags)
+page_get_physical(uintptr_t seed)
 {
 	page_t *pp;
-	u_offset_t offset = (u_offset_t)1 << 41;	/* in VA hole */
+	u_offset_t offset;
 	static struct seg tmpseg;
 	static uintptr_t ctr = 0;
-	static kmutex_t pgp_mutex;
 
 	/*
 	 * This code is gross, we really need a simpler page allocator.
 	 *
+	 * We need to assign an offset for the page to call page_create_va()
 	 * To avoid conflicts with other pages, we get creative with the offset.
 	 * For 32 bits, we need an offset > 4Gig
 	 * For 64 bits, need an offset somewhere in the VA hole.
 	 */
-	if (page_resv(1, flags & KM_NOSLEEP) == 0)
+	offset = seed;
+	if (offset > kernelbase)
+		offset -= kernelbase;
+	offset <<= MMU_PAGESHIFT;
+#if defined(__amd64)
+	offset += mmu.hole_start;	/* something in VA hole */
+#else
+	offset += 1ULL << 40;	/* something > 4 Gig */
+#endif
+
+	if (page_resv(1, KM_NOSLEEP) == 0)
 		return (NULL);
 
-	mutex_enter(&pgp_mutex);
 #ifdef	DEBUG
 	pp = page_exists(&kvp, offset);
 	if (pp != NULL)
@@ -3737,31 +3763,7 @@ page_get_physical(int flags)
 	if (pp != NULL) {
 		page_io_unlock(pp);
 		page_hashout(pp, NULL);
-		mutex_exit(&pgp_mutex);
 		page_downgrade(pp);
-	} else {
-		mutex_exit(&pgp_mutex);
 	}
 	return (pp);
-}
-
-void
-page_free_physical(page_t *pp)
-{
-	/*
-	 * Get an exclusive lock, might have to wait for a kmem reader.
-	 */
-	ASSERT(PAGE_SHARED(pp));
-	if (!page_tryupgrade(pp)) {
-		page_unlock(pp);
-		/*
-		 * RFE: we could change this to not loop forever
-		 * George Cameron had some idea on how to do that.
-		 * For now looping works - it's just like sfmmu.
-		 */
-		while (!page_lock(pp, SE_EXCL, (kmutex_t *)NULL, P_RECLAIM))
-			continue;
-	}
-	page_free(pp, 1);
-	page_unresv(1);
 }
