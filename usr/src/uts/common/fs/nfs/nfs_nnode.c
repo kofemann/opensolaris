@@ -146,10 +146,10 @@ nnode_sweep(nnode_bucket_sweep_task_t *task)
 			continue;
 		}
 		atask = nnode_bucket_sweep_task_alloc(task, KM_NOSLEEP);
-		if (atask != NULL)
-			(void) taskq_dispatch(nnode_taskq,
-			    nnode_bucket_sweep_task, atask,
-			    TQ_NOSLEEP);
+		if ((atask != NULL) &&
+		    (taskq_dispatch(nnode_taskq, nnode_bucket_sweep_task,
+		    atask, TQ_NOSLEEP) == (taskqid_t)0))
+			nnode_bucket_sweep_task_free(atask);
 	}
 }
 
