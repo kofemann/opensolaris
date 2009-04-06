@@ -1965,9 +1965,6 @@ pnfs_task_layoutget(void *v)
 	nfs4_recov_state_t recov_state;
 	nfs4_stateid_types_t sid_types;
 
-	if (pnfs_no_layoutget)
-		goto out;
-
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 
@@ -1982,6 +1979,10 @@ pnfs_task_layoutget(void *v)
 
 recov_retry:
 	cp = nfs4_call_init(mi, cr, TAG_PNFS_LAYOUTGET);
+
+	if (pnfs_no_layoutget)
+		goto out;
+
 	(void) nfs4_op_cputfh(cp, rp->r_fh);
 	resp = nfs4_op_layoutget(cp, &arg);
 

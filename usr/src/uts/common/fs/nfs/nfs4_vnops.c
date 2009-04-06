@@ -3694,7 +3694,7 @@ nfs4setattr(vnode_t *vp, struct vattr *vap, int flags, cred_t *cr,
     vsecattr_t *vsap)
 {
 	attrmap4 attr_request;
-	GETATTR4res *getattr_res;
+	GETATTR4res *getattr_res = NULL;
 	GETATTR4res *getattr2_res;
 	int dogetattr = 0;
 	nfs4_ga_res_t *garp;
