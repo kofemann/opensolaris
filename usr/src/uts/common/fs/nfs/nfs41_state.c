@@ -2157,7 +2157,7 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 
 		no.notify_mask = NOTIFY_DEVICEID4_DELETE_MASK;
 		nodd.ndd_layouttype = LAYOUT4_NFSV4_1_FILES;
-		memset(&nodd.ndd_deviceid, 0, sizeof (deviceid4));
+		(void) memset(&nodd.ndd_deviceid, 0, sizeof (deviceid4));
 		bcopy(&ndp->nd_args.dev_id, &nodd.ndd_deviceid,
 		    sizeof (ndp->nd_args.dev_id));
 
@@ -2181,7 +2181,7 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 
 		no.notify_mask = NOTIFY_DEVICEID4_CHANGE_MASK;
 		nodc.ndc_layouttype = LAYOUT4_NFSV4_1_FILES;
-		memset(&nodc.ndc_deviceid, 0, sizeof (deviceid4));
+		(void) memset(&nodc.ndc_deviceid, 0, sizeof (deviceid4));
 		bcopy(&ndp->nd_args.dev_id, &nodc.ndc_deviceid,
 		    sizeof (ndp->nd_args.dev_id));
 

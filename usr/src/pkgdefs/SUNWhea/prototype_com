@@ -447,6 +447,7 @@ f none usr/include/nfs/nnode_impl.h 644 root bin
 f none usr/include/nfs/nnode_vn.h 644 root bin
 f none usr/include/nfs/rnode.h 644 root bin
 f none usr/include/nfs/rnode4.h 644 root bin
+f none usr/include/nfs/dserv_impl.h 644 root bin
 f none usr/include/nl_types.h 644 root bin
 f none usr/include/nlist.h 644 root bin
 f none usr/include/note.h 644 root bin
@@ -805,8 +806,6 @@ f none usr/include/sys/door.h 644 root bin
 f none usr/include/sys/door_data.h 644 root bin
 f none usr/include/sys/door_impl.h 644 root bin
 f none usr/include/sys/dnlc.h 644 root bin
-f none usr/include/sys/dserv.h 644 root bin
-f none usr/include/sys/dserv_impl.h 644 root bin
 f none usr/include/sys/dumphdr.h 644 root bin
 f none usr/include/sys/ecppio.h 644 root bin
 f none usr/include/sys/ecppreg.h 644 root bin

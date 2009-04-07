@@ -31,8 +31,8 @@
 #include <nfs/nfs4.h>
 #include <nfs/nfs4_kprot.h>
 #include <nfs/nfs_dispatch.h>
-#include <sys/dserv.h>
-#include <sys/dserv_impl.h>
+#include <nfs/nfssys.h>
+#include <nfs/dserv_impl.h>
 #include <sys/systm.h>
 #include <sys/sdt.h>
 #include <nfs/ds.h>

@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * dservd -- daemon for dserv
@@ -78,8 +76,7 @@ instance_shutdown(void)
 		    gettext("shutdown: cannot create libdserv handle: %m"));
 		exit(1);
 	}
-	if ((dserv_myinstance(handle) != 0) ||
-	    (dserv_kmod_open(handle) != 0)) {
+	if (dserv_myinstance(handle) != 0) {
 		dserv_log(handle, LOG_ERR, NULL);
 		exit(1);
 	}
@@ -116,8 +113,7 @@ main(int argc, char *argv[])
 	if (handle == NULL)
 		dserv_log(NULL, LOG_ERR,
 		    gettext("cannot create libdserv handle: %m"));
-	if ((dserv_myinstance(handle) != 0) ||
-	    (dserv_kmod_open(handle) != 0)) {
+	if (dserv_myinstance(handle) != 0) {
 		dserv_log(handle, LOG_ERR, NULL);
 		exit(1);
 	}

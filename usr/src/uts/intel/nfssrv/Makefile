@@ -21,7 +21,7 @@
 #
 # uts/intel/nfssrv/Makefile
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #
@@ -65,6 +65,9 @@ INSTALL_TARGET	= $(BINARY) $(ROOTMODULE)
 #
 LDFLAGS         += -dy -Nstrmod/rpcmod -Nfs/nfs -Nmisc/rpcsec
 LDFLAGS		+= -Nmisc/klmmod
+LDFLAGS		+= -Nfs/zfs
+
+INC_PATH	+= -I$(UTSBASE)/common/fs/zfs
 
 #
 # For now, disable these lint checks; maintainers should endeavor
@@ -110,6 +113,13 @@ mds_odl_xdr.c: $(PROTOCOL_DIR)/mds_odl.x
 $(OBJS_DIR)/mds_odl_xdr.o: mds_odl_xdr.c $(NFSHDR)/mds_odl.h
 	$(COMPILE.c) -o $@ mds_odl_xdr.c
 	$(CTFCONVERT_O)
+
+
+$(NFSHDR)/ds_prot.h: $(PROTOCOL_DIR)/ds_prot.x
+	cd $(NFSHDR); $(MAKE) $(@F)
+
+$(NFSHDR)/ds_nfs_xdr.h: $(PROTOCOL_DIR)/ds_nfs_com.x
+	cd $(NFSHDR); $(MAKE) $(@F)
 
 #
 #	Include common targets.

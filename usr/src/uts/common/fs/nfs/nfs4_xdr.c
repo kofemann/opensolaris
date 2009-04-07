@@ -4686,7 +4686,7 @@ xdr_nfs_resop4_array_free(XDR *xdrs, nfs_resop4 **arrayp, int len,
 		return (TRUE);
 
 	for (i = 0; i < decode_len; i++) {
-		xdr_nfs_resop4_free(xdrs, &array[i]);
+		(void) xdr_nfs_resop4_free(xdrs, &array[i]);
 	}
 
 	kmem_free(*arrayp, len * sizeof (nfs_resop4));
@@ -5244,7 +5244,7 @@ xdr_COMPOUND4res_clnt(XDR *xdrs, COMPOUND4res_clnt *objp)
 				    nodep != NULL && len != 0;
 				    nodep = list_next(&ap->args, nodep)) {
 					resp = &nodep->res;
-					xdr_nfs_resop4_free(xdrs, resp);
+					(void) xdr_nfs_resop4_free(xdrs, resp);
 					len--;
 				}
 				return (FALSE);
@@ -5258,7 +5258,7 @@ xdr_COMPOUND4res_clnt(XDR *xdrs, COMPOUND4res_clnt *objp)
 		for (nodep = list_head(&ap->args);
 		    nodep != NULL && len < objp->decode_len;
 		    nodep = list_next(&ap->args, nodep)) {
-			xdr_nfs_resop4_free(xdrs, &nodep->res);
+			(void) xdr_nfs_resop4_free(xdrs, &nodep->res);
 			len++;
 		}
 	}

@@ -19,10 +19,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-#ident	"%Z%%M%	%I%	%E% SMI"
 #
 #	This makefile drives the production of the Parallel NFS data server
 #	kernel module.
@@ -39,7 +37,6 @@ MODULE		= dserv
 OBJECTS		= $(DSERV_OBJS:%=$(OBJS_DIR)/%)
 LINTS		= $(DSERV_OBJS:%.o=$(LINTS_DIR)/%.ln)
 ROOTMODULE	= $(ROOT_DRV_DIR)/$(MODULE)
-CONF_SRCDIR	= $(UTSBASE)/common/dserv
 NFSHDR		= $(UTSBASE)/common/nfs
 DERIVED_HDRS	= $(NFSHDR)/ds_prot.h $(NFSHDR)/ds_nfs_xdr.h
 PROTOCOL_DIR	= $(UTSBASE)/../head
@@ -52,9 +49,9 @@ include $(UTSBASE)/intel/Makefile.intel
 #
 #	Define targets
 #
-ALL_TARGET	= $(BINARY) $(SRC_CONFILE)
+ALL_TARGET	= $(BINARY)
 LINT_TARGET	= $(MODULE).lint
-INSTALL_TARGET	= $(BINARY) $(ROOTMODULE) $(ROOT_CONFFILE)
+INSTALL_TARGET	= $(BINARY) $(ROOTMODULE)
 
 #
 #	Overrides

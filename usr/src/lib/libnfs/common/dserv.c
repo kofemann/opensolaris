@@ -19,31 +19,14 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include "libnfs_impl.h"
+#include <nfs/nfssys.h>
 
-#include <sys/dserv.h>
-
-int
-libnfs_dserv_open(libnfs_handle_t *handle)
-{
-	if (handle->lh_flags & LIBNFS_LH_FLAG_DSERV)
-		return (0);
-
-	handle->lh_dserv_fd = open(LIBNFS_PATH_DSERV, O_RDWR);
-	if (handle->lh_dserv_fd < 0) {
-		libnfs_error_set(handle, LIBNFS_ERR_DSERV_CANTOPEN);
-		return (-1);
-	}
-
-	handle->lh_flags |= LIBNFS_LH_FLAG_DSERV;
-	return (0);
-}
+extern int _nfssys(enum nfssys_op, void *);
 
 int
 libnfs_dserv_push_dataset(libnfs_handle_t *handle, const char *dataset,
@@ -51,11 +34,6 @@ libnfs_dserv_push_dataset(libnfs_handle_t *handle, const char *dataset,
 {
 	dserv_dataset_props_t kprops;
 	int ioc;
-
-	if (! (handle->lh_flags & LIBNFS_LH_FLAG_DSERV)) {
-		libnfs_error_set(handle, LIBNFS_ERR_DSERV_NOTOPEN);
-		return (-1);
-	}
 
 	if (strlcpy(kprops.ddp_name, dataset,
 	    sizeof (kprops.ddp_name)) >=
@@ -76,9 +54,9 @@ libnfs_dserv_push_dataset(libnfs_handle_t *handle, const char *dataset,
 		return (-1);
 	}
 
-	ioc = ioctl(handle->lh_dserv_fd, DSERV_IOC_DATASET_PROPS, &kprops);
-	if (ioc < 0) {
-		libnfs_error_set(handle, LIBNFS_ERR_DSERV_IOCTL);
+	if (_nfssys(DSERV_DATASET_PROPS, &kprops) < 0) {
+		libnfs_error_set(handle, LIBNFS_ERR_DSERV_DATASET_PROPS);
+		handle->lh_errno_error = errno;
 		return (-1);
 	}
 

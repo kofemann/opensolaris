@@ -19,41 +19,21 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include "libdserv_impl.h"
 #include <sys/param.h>
-#include <sys/dserv.h>
+#include <nfs/nfssys.h>
 
-int
-dserv_kmod_open(dserv_handle_t *handle)
-{
-	int rc = 0;
-
-	handle->dsh_dev_fd = open(DSERV_DEV_PATH, O_RDWR);
-	if (handle->dsh_dev_fd < 0) {
-		handle->dsh_error = DSERV_ERR_DEVOPEN;
-		handle->dsh_errno_error = errno;
-		rc = -1;
-	}
-
-	return (rc);
-}
+extern int _nfssys(enum nfssys_op, void *);
 
 int
 dserv_kmod_regpool(dserv_handle_t *handle, const char *datasetname)
 {
 	dserv_dataset_info_t kinfo;
-	int ioc;
-
-	if (handle->dsh_dev_fd < 0) {
-		handle->dsh_error = DSERV_ERR_DEVNOTOPEN;
-		return (-1);
-	}
+	int err;
 
 	if (strlcpy(kinfo.dataset_name, datasetname,
 	    sizeof (kinfo.dataset_name)) >=
@@ -62,9 +42,9 @@ dserv_kmod_regpool(dserv_handle_t *handle, const char *datasetname)
 		return (-1);
 	}
 
-	ioc = ioctl(handle->dsh_dev_fd, DSERV_IOC_DATASET_INFO, &kinfo);
-	if (ioc < 0) {
-		handle->dsh_error = DSERV_ERR_IOCTL;
+	err = _nfssys(DSERV_DATASET_INFO, &kinfo);
+	if (err < 0) {
+		handle->dsh_error = DSERV_ERR_NFSSYS;
 		handle->dsh_errno_error = errno;
 		return (-1);
 	}
@@ -72,19 +52,15 @@ dserv_kmod_regpool(dserv_handle_t *handle, const char *datasetname)
 	return (0);
 }
 
+
 int
 dserv_kmod_setmds(dserv_handle_t *handle, dserv_setmds_args_t *args)
 {
-	int ioc;
+	int err;
 
-	if (handle->dsh_dev_fd < 0) {
-		handle->dsh_error = DSERV_ERR_DEVNOTOPEN;
-		return (-1);
-	}
-
-	ioc = ioctl(handle->dsh_dev_fd, DSERV_IOC_SETMDS, args);
-	if (ioc < 0) {
-		handle->dsh_error = DSERV_ERR_IOCTL;
+	err = _nfssys(DSERV_SETMDS, args);
+	if (err < 0) {
+		handle->dsh_error = DSERV_ERR_NFSSYS;
 		handle->dsh_errno_error = errno;
 		return (-1);
 	}
@@ -95,18 +71,13 @@ dserv_kmod_setmds(dserv_handle_t *handle, dserv_setmds_args_t *args)
 int
 dserv_kmod_svc(dserv_handle_t *handle, dserv_svc_args_t *args)
 {
-	int ioc;
-
-	if (handle->dsh_dev_fd < 0) {
-		handle->dsh_error = DSERV_ERR_DEVNOTOPEN;
-		return (-1);
-	}
+	int err;
 
 	args->poolid = handle->dsh_svc_pool_id;
 
-	ioc = ioctl(handle->dsh_dev_fd, DSERV_IOC_SVC, args);
-	if (ioc < 0) {
-		handle->dsh_error = DSERV_ERR_IOCTL;
+	err = _nfssys(DSERV_SVC, args);
+	if (err < 0) {
+		handle->dsh_error = DSERV_ERR_NFSSYS;
 		handle->dsh_errno_error = errno;
 		return (-1);
 	}
@@ -117,16 +88,11 @@ dserv_kmod_svc(dserv_handle_t *handle, dserv_svc_args_t *args)
 int
 dserv_kmod_setport(dserv_handle_t *handle, dserv_setport_args_t *args)
 {
-	int ioc;
+	int err;
 
-	if (handle->dsh_dev_fd < 0) {
-		handle->dsh_error = DSERV_ERR_DEVNOTOPEN;
-		return (-1);
-	}
-
-	ioc = ioctl(handle->dsh_dev_fd, DSERV_IOC_SETPORT, args);
-	if (ioc < 0) {
-		handle->dsh_error = DSERV_ERR_IOCTL;
+	err = _nfssys(DSERV_SETPORT, args);
+	if (err < 0) {
+		handle->dsh_error = DSERV_ERR_NFSSYS;
 		handle->dsh_errno_error = errno;
 		return (-1);
 	}
@@ -137,16 +103,11 @@ dserv_kmod_setport(dserv_handle_t *handle, dserv_setport_args_t *args)
 int
 dserv_kmod_reportavail(dserv_handle_t *handle)
 {
-	int ioc;
+	int err;
 
-	if (handle->dsh_dev_fd < 0) {
-		handle->dsh_error = DSERV_ERR_DEVNOTOPEN;
-		return (-1);
-	}
-
-	ioc = ioctl(handle->dsh_dev_fd, DSERV_IOC_REPORTAVAIL, NULL);
-	if (ioc < 0) {
-		handle->dsh_error = DSERV_ERR_IOCTL;
+	err = _nfssys(DSERV_REPORTAVAIL, NULL);
+	if (err < 0) {
+		handle->dsh_error = DSERV_ERR_NFSSYS;
 		handle->dsh_errno_error = errno;
 		return (-1);
 	}
@@ -157,16 +118,11 @@ dserv_kmod_reportavail(dserv_handle_t *handle)
 int
 dserv_kmod_instance_shutdown(dserv_handle_t *handle)
 {
-	int ioc;
+	int err;
 
-	if (handle->dsh_dev_fd < 0) {
-		handle->dsh_error = DSERV_ERR_DEVNOTOPEN;
-		return (-1);
-	}
-
-	ioc = ioctl(handle->dsh_dev_fd, DSERV_IOC_INSTANCE_SHUTDOWN, NULL);
-	if (ioc < 0) {
-		handle->dsh_error = DSERV_ERR_IOCTL;
+	err = _nfssys(DSERV_INSTANCE_SHUTDOWN, NULL);
+	if (err < 0) {
+		handle->dsh_error = DSERV_ERR_NFSSYS;
 		handle->dsh_errno_error = errno;
 		return (-1);
 	}

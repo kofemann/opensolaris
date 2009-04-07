@@ -20,7 +20,8 @@
 #
 #
 # uts/sparc/nfssrv/Makefile
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+#
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #
@@ -66,6 +67,9 @@ INSTALL_TARGET	= $(BINARY) $(ROOTMODULE)
 CFLAGS		+= $(CCVERBOSE)
 LDFLAGS         += -dy -Nstrmod/rpcmod -Nfs/nfs -Nmisc/rpcsec
 LDFLAGS         += -Nmisc/klmmod
+LDFLAGS		+= -Nfs/zfs
+
+INC_PATH	+= -I$(UTSBASE)/common/fs/zfs
 
 #
 # For now, disable these lint checks; maintainers should endeavor

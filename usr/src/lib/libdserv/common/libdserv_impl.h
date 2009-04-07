@@ -20,14 +20,12 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_LIBDSERV_IMPL_H
 #define	_LIBDSERV_IMPL_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <umem.h>
 #include <fcntl.h>
@@ -45,7 +43,6 @@ extern "C" {
 #endif
 
 #define	DSERV_SERVICE_FMRI	"svc:/network/dserv"
-#define	DSERV_DEV_PATH		"/dev/dserv"
 #define	DSERV_ERRBUF_SIZE	(1024)
 #define	DSERV_ASTRING_SIZE	(1024)
 

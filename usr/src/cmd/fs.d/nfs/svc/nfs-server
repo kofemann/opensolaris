@@ -63,6 +63,31 @@ configure_ipfilter()
 
 case "$1" in
 'start')
+	#
+	# XXX start BFU hack XXX
+	# 
+	# If /dev/dserv or /kernel/drv/[amd64|sparcv9]dserv exist then
+	# remove them.  This cleans up the dummy dserv kmod pushed with
+	# the changes merging dserv into nfssrv.  The hack below lets
+	# us avoid writing special purpose (dead-end) packaging code
+	# and requiring a custom version of the BFU script.
+	#
+	# This hack will be removed before the project is pushed.  It is
+	# only needed if the system being BFU'd is already running a version
+	# of the nfs41 bits which preceeds the merged nfssrv+dserv kmod.
+	#
+	[ -f /kernel/drv/dserv ] && \
+		/usr/bin/rm -f /kernel/drv/dserv
+	[ -f /kernel/drv/amd64/dserv ] && \
+		/usr/bin/rm -f /kernel/drv/amd64/dserv
+	[ -f /kernel/drv/sparcv9/dserv ] && \
+		/usr/bin/rm -f /kernel/drv/sparcv9/dserv
+	[ -f /kernel/drv/dserv.conf ]	&& /usr/bin/rm -f /kernel/drv/dserv.conf
+	[ -f /dev/dserv ]		&& /usr/bin/rm -f /dev/dserv
+	#
+	# XXX stop BFU hack XXX
+	#
+
 	# The NFS server is not supported in a local zone
 	if smf_is_nonglobalzone; then
 		/usr/sbin/svcadm disable -t svc:/network/nfs/server

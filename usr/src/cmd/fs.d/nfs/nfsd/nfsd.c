@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -169,7 +169,6 @@ main(int ac, char *av[])
 	libhandle = libnfs_handle_create(LIBNFS_VERSION);
 	libnfs_error_mode_set(libhandle, LIBNFS_ERRMODE_DIE);
 	(void) libnfs_myinstance(libhandle);
-	(void) libnfs_dserv_open(libhandle);
 
 	MyName = *av;
 

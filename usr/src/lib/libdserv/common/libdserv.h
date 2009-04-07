@@ -20,18 +20,18 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_LIBDSERV_H
 #define	_LIBDSERV_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <libscf.h>
 #include <syslog.h>
-#include <sys/dserv.h>
+#include <rpc/rpc.h>
+#include <nfs/nfs4.h>
+#include <nfs/nfssys.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -54,7 +54,7 @@ typedef enum {
 	DSERV_ERR_MDS_NOT_FOUND,
 	DSERV_ERR_DEVOPEN,
 	DSERV_ERR_DEVNOTOPEN,
-	DSERV_ERR_IOCTL
+	DSERV_ERR_NFSSYS
 } dserv_error_t;
 
 #define	DSERV_INSTANCE_CREATE 0x01
@@ -85,7 +85,6 @@ char *dserv_firstpool(dserv_handle_t *);
 char *dserv_nextpool(dserv_handle_t *);
 char *dserv_getmds(dserv_handle_t *);
 
-int dserv_kmod_open(dserv_handle_t *);
 int dserv_kmod_regpool(dserv_handle_t *, const char *);
 int dserv_kmod_setmds(dserv_handle_t *, dserv_setmds_args_t *);
 int dserv_kmod_svc(dserv_handle_t *, dserv_svc_args_t *);

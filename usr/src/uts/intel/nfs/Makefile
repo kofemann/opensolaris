@@ -21,10 +21,8 @@
 #
 # uts/intel/nfs/Makefile
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-#ident	"%Z%%M%	%I%	%E% SMI"
 #
 #	This makefile drives the production of the nfs file system
 #	kernel module.
@@ -70,6 +68,7 @@ INSTALL_TARGET	= $(BINARY) $(ROOTMODULE) $(ROOTLINK)
 MODSTUBS_DIR	 = $(OBJS_DIR)
 $(MODSTUBS_O)	:= AS_CPPFLAGS += -DNFS_MODULE
 CLEANFILES	+= $(MODSTUBS_O)
+INC_PATH	+= -I$(UTSBASE)/common/fs/zfs
 
 #
 # For now, disable these lint checks; maintainers should endeavor

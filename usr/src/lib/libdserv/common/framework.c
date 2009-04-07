@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <stdio.h>
 #include <string.h>
@@ -101,8 +99,6 @@ dserv_handle_create()
 	rc->dsh_pg_net = NULL;
 	rc->dsh_iter_zpools = NULL;
 
-	rc->dsh_dev_fd = -1;
-
 	return (rc);
 }
 
@@ -126,9 +122,6 @@ dserv_handle_destroy(dserv_handle_t *handle)
 		scf_pg_destroy(handle->dsh_pg_net);
 	if (handle->dsh_iter_zpools != NULL)
 		scf_iter_destroy(handle->dsh_iter_zpools);
-
-	if (handle->dsh_dev_fd >= 0)
-		(void) close(handle->dsh_dev_fd);
 
 	umem_cache_free(dserv_handle_cache, handle);
 }
@@ -209,9 +202,9 @@ dserv_strerror(dserv_handle_t *handle)
 		(void) strlcpy(handle->dsh_errstring,
 		    gettext("dserv device not opened"), DSERV_ERRBUF_SIZE);
 		break;
-	case DSERV_ERR_IOCTL:
+	case DSERV_ERR_NFSSYS:
 		(void) snprintf(handle->dsh_errstring, DSERV_ERRBUF_SIZE,
-		    gettext("ioctl failed: %s"),
+		    gettext("nfssys failed: %s"),
 		    strerror(handle->dsh_errno_error));
 		break;
 	default:

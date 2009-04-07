@@ -20,14 +20,12 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_LIBNFS_H
 #define	_LIBNFS_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <libscf.h>
 #include <syslog.h>
@@ -47,11 +45,9 @@ typedef enum {
 	LIBNFS_ERR_INVALID_ERRMODE,
 	LIBNFS_ERR_ILLEGAL_ERRMODE,
 	LIBNFS_ERR_NOTRY,
-	LIBNFS_ERR_DSERV_NOTOPEN,
-	LIBNFS_ERR_DSERV_CANTOPEN,
 	LIBNFS_ERR_DSERV_LONGDATASET,
 	LIBNFS_ERR_DSERV_LONGMDSINFO,
-	LIBNFS_ERR_DSERV_IOCTL,
+	LIBNFS_ERR_DSERV_DATASET_PROPS,
 	LIBNFS_ERR_LAST /* must be last */
 } libnfs_error_t;
 

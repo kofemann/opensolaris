@@ -44,6 +44,8 @@
 #include <rpc/svc.h>
 #include <rpc/xdr.h>
 #include <sys/cmn_err.h>
+#include <sys/sdt.h>
+#include <nfs/dserv_impl.h>
 
 /*
  * This is filled in with an appropriate address for the
@@ -534,6 +536,86 @@ nfssys(enum nfssys_op opcode, void *arg)
 			return (set_errno(EFAULT));
 		nfscmd_args(did);
 		error = 0;
+		break;
+	}
+
+	case DSERV_DATASET_INFO: {
+		dserv_dataset_info_t dinfo;
+
+		error = copyin((void *)arg, &dinfo,
+		    sizeof (dserv_dataset_info_t));
+		if (error)
+			return (EFAULT);
+
+		error = dserv_mds_addobjset(dinfo.dataset_name);
+		break;
+	}
+
+	case DSERV_DATASET_PROPS: {
+		dserv_dataset_props_t dprops;
+
+		error = copyin((void *)arg, &dprops,
+		    sizeof (dserv_dataset_props_t));
+		if (error)
+			return (EFAULT);
+		DTRACE_PROBE3(dserv__i__dataset_props,
+		    char *, dprops.ddp_name,
+		    char *, dprops.ddp_mds_netid,
+		    char *, dprops.ddp_mds_uaddr);
+		break;
+	}
+
+	case DSERV_INSTANCE_SHUTDOWN: {
+		error = dserv_mds_instance_teardown();
+		break;
+	}
+
+	case DSERV_REPORTAVAIL: {
+		error = dserv_mds_reportavail();
+		break;
+	}
+
+	case DSERV_SVC: {
+		dserv_svc_args_t svcargs;
+
+		error = copyin((void *)arg, &svcargs,
+		    sizeof (dserv_svc_args_t));
+		if (error)
+			return (EFAULT);
+
+		error =	dserv_svc(&svcargs);
+		break;
+	}
+
+	case DSERV_SETMDS: {
+		dserv_setmds_args_t smargs;
+
+		error = copyin((void *)arg, &smargs,
+		    sizeof (dserv_setmds_args_t));
+		if (error)
+			return (EFAULT);
+
+		DTRACE_PROBE2(dserv__i__setmds,
+		    char *, smargs.dsm_mds_uaddr, char *, smargs.dsm_mds_netid);
+
+		error = dserv_mds_setmds(smargs.dsm_mds_netid,
+		    smargs.dsm_mds_uaddr);
+		break;
+	}
+
+	case DSERV_SETPORT: {
+		dserv_setport_args_t spargs;
+
+		error = copyin((void *)arg, &spargs,
+		    sizeof (dserv_setport_args_t));
+		if (error)
+			return (EFAULT);
+
+		DTRACE_PROBE2(dserv__i__setport, char *, spargs.dsa_uaddr,
+		    char *, spargs.dsa_proto);
+
+		error = dserv_mds_addport(spargs.dsa_uaddr, spargs.dsa_proto,
+		    spargs.dsa_name);
 		break;
 	}
 

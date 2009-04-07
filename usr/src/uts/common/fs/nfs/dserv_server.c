@@ -23,7 +23,7 @@
  * Use is subject to license terms.
  */
 
-#include <sys/dserv_impl.h>
+#include <nfs/dserv_impl.h>
 
 #include <sys/list.h>
 #include <nfs/nfs.h>
@@ -31,6 +31,7 @@
 #include <nfs/nfs4_kprot.h>
 #include <nfs/nfs41_sessions.h>
 #include <nfs/nfs_dispatch.h>
+#include <nfs/nfssys.h>
 #include <nfs/nnode.h>
 #include <nfs/ds_prot.h>
 #include <sys/systm.h>

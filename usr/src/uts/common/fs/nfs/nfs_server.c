@@ -84,6 +84,7 @@
 #include <nfs/nfs4_drc.h>
 #include <nfs/nnode.h>
 #include <nfs/ds.h>
+#include <nfs/dserv_impl.h>
 
 #include <sys/modctl.h>
 #include <sys/cladm.h>
@@ -2588,6 +2589,8 @@ nfs_srvinit(void)
 	cv_init(&rdma_wait_cv, NULL, CV_DEFAULT, NULL);
 
 	nnode_mod_init();
+	dserv_server_setup();
+	dserv_mds_setup();
 
 	return (0);
 }
@@ -2600,7 +2603,10 @@ nfs_srvinit(void)
 void
 nfs_srvfini(void)
 {
+	dserv_mds_teardown();
+	dserv_server_teardown();
 	(void) nnode_mod_fini();
+
 	nfsauth_fini();
 	rfs3_srvrfini();
 	rfs_srvrfini();

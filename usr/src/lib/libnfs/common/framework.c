@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <stdio.h>
 #include <string.h>
@@ -149,9 +147,6 @@ libnfs_handle_destroy(libnfs_handle_t *handle)
 	if (handle->lh_zfs_handle != NULL)
 		libzfs_fini(handle->lh_zfs_handle);
 
-	if (handle->lh_flags & LIBNFS_LH_FLAG_DSERV)
-		(void) close(handle->lh_dserv_fd);
-
 	umem_cache_free(libnfs_handle_cache, handle);
 }
 
@@ -266,14 +261,6 @@ libnfs_strerror(libnfs_handle_t *handle)
 		snprintf(handle->lh_errstring, LIBNFS_ERRBUF_SIZE,
 		    gettext("getcontext() failure; try block unreachable"));
 		break;
-	case LIBNFS_ERR_DSERV_NOTOPEN:
-		snprintf(handle->lh_errstring, LIBNFS_ERRBUF_SIZE,
-		    gettext("dserv pseudo-device not open"));
-		break;
-	case LIBNFS_ERR_DSERV_CANTOPEN:
-		snprintf(handle->lh_errstring, LIBNFS_ERRBUF_SIZE,
-		    gettext("cannot open dserv pseudo-device"));
-		break;
 	case LIBNFS_ERR_DSERV_LONGDATASET:
 		snprintf(handle->lh_errstring, LIBNFS_ERRBUF_SIZE,
 		    gettext("dataset name too long"));
@@ -281,10 +268,6 @@ libnfs_strerror(libnfs_handle_t *handle)
 	case LIBNFS_ERR_DSERV_LONGMDSINFO:
 		snprintf(handle->lh_errstring, LIBNFS_ERRBUF_SIZE,
 		    gettext("MDS info too long"));
-		break;
-	case LIBNFS_ERR_DSERV_IOCTL:
-		snprintf(handle->lh_errstring, LIBNFS_ERRBUF_SIZE,
-		    gettext("dserv ioctl failed"));
 		break;
 	default:
 		(void) strlcpy(handle->lh_errstring,

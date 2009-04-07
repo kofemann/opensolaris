@@ -26,8 +26,6 @@
 #ifndef	_SYS_DSERV_IMPL_H
 #define	_SYS_DSERV_IMPL_H
 
-#include <sys/dserv.h>
-
 #include <sys/vfs.h>
 #include <sys/list.h>
 #include <sys/avl.h>

@@ -1091,8 +1091,10 @@ NFSSRV_OBJS +=	nfs_server.o		\
 		nfs41_srv_readdir.o	\
 		nfs41_state.o		\
 		nfs_serv_inst.o		\
-		ds_srv.o		\
-		ctl_mds_clnt.o
+		ctl_ds_srv.o		\
+		ctl_mds_clnt.o		\
+		dserv_mds.o		\
+		dserv_server.o
 
 SMBSRV_SHARED_OBJS += \
 		smb_inet.o \
@@ -1194,7 +1196,7 @@ SMBSRV_OBJS +=	$(SMBSRV_SHARED_OBJS)			\
 		smb_write_raw.o				\
 		smb_xlate.o
 
-DSERV_OBJS +=	dserv_ioctl.o	dserv_server.o	dserv_mds.o
+DSERV_OBJS +=	dserv_stub.o
 
 PCFS_OBJS +=	pc_alloc.o	pc_dir.o	pc_node.o	pc_subr.o \
 		pc_vfsops.o	pc_vnops.o

@@ -472,8 +472,14 @@ stubs_base:
 	STUB(nfssrv,		nfsl_flush,	nomod_minus_one);
 	STUB(nfssrv,		rfs4_check_delegated, nomod_zero);
 	STUB(nfssrv,		mountd_args,	nomod_minus_one);
+	STUB(nfssrv,		dserv_mds_addobjset,	nomod_minus_one);
+	STUB(nfssrv,		dserv_mds_instance_teardown, nomod_minus_one);
+	STUB(nfssrv,		dserv_mds_addport,	nomod_minus_one);
+	STUB(nfssrv,		dserv_mds_reportavail,	nomod_minus_one);
+	STUB(nfssrv,		dserv_mds_setmds,	nomod_minus_one);
 	NO_UNLOAD_STUB(nfssrv,	rdma_start,	nomod_zero);
 	NO_UNLOAD_STUB(nfssrv,	nfs_svc,	nomod_zero);
+	NO_UNLOAD_STUB(nfssrv,	dserv_svc,	nomod_zero);
 	END_MODULE(nfssrv);
 #endif
 

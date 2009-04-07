@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -51,7 +51,10 @@ enum nfssys_op	{ OLD_NFS_SVC, OLD_ASYNC_DAEMON, EXPORTFS, OLD_NFS_GETFH,
     NFS4_SVC_REQUEST_QUIESCE, NFS_GETFH, NFS4_DSS_SETPATHS,
     NFS4_DSS_SETPATHS_SIZE, NFS4_EPHEMERAL_MOUNT_TO, MOUNTD_ARGS,
     NFSCMD_ARGS, MDS_RECALL_LAYOUT, MDS_NOTIFY_DEVICE,
-    NFS_INIT_STATESTORE, NFS_FINI_STATESTORE, NFSSTAT_LAYOUT };
+    NFS_INIT_STATESTORE, NFS_FINI_STATESTORE, NFSSTAT_LAYOUT,
+    DSERV_DATASET_INFO, DSERV_SETPORT, DSERV_SETMDS, DSERV_REPORTAVAIL,
+    DSERV_DATASET_PROPS, DSERV_INSTANCE_SHUTDOWN, DSERV_SVC
+};
 
 struct nfs_svc_args {
 	int		fd;		/* Connection endpoint */
@@ -251,6 +254,60 @@ struct mds_reclo_args32 {
 };
 #endif
 
+
+/*
+ * DSERV__DATASET_INFO argruments
+ */
+
+#define	DSERV_MAX_NETID	32
+#define	DSERV_MAX_UADDR	128
+
+typedef struct dserv_dataset_props {
+	char ddp_name[MAXPATHLEN];
+	char ddp_mds_netid[DSERV_MAX_NETID];
+	char ddp_mds_uaddr[DSERV_MAX_UADDR];
+} dserv_dataset_props_t;
+
+typedef struct dserv_dataset_info {
+	char	dataset_name[MAXPATHLEN];
+} dserv_dataset_info_t;
+
+typedef struct dserv_setmds_args {
+	char dsm_mds_netid[DSERV_MAX_NETID];
+	char dsm_mds_uaddr[DSERV_MAX_UADDR];
+} dserv_setmds_args_t;
+
+
+/*
+ * DSERV_SVC arguments
+ * Note: DSERV_SVC will be removed when dservd merged with nfsd.
+ */
+/*
+ * XXX Lisa
+ * 1.) If netid is tcp or rdma(?), we'll use a sockaddr_in.  If netid
+ * is tcp6, we'll use a sockaddr_in6.  Note: we will only support tcp not udp.
+ * 2.) make sure this is packed correctly.
+ * 3.) May need versions.
+ */
+
+typedef struct dserv_svc_args {
+	int	fd;
+	int	poolid;
+	char	netid[KNC_STRSIZE];
+	union {
+		struct sockaddr_in	sin;
+		struct sockaddr_in6	sin6;
+	} sin;
+
+} dserv_svc_args_t;
+
+typedef struct dserv_setport_args {
+	char dsa_proto[32]; /* XXX use a constant */
+	char dsa_uaddr[128]; /* XXX use a constant */
+	char dsa_name[MAXPATHLEN];
+} dserv_setport_args_t;
+
+
 /*
  * These structure are still used by the MDS as part of its layout
  * and device construction, but are never passed through nfssys.
@@ -311,6 +368,7 @@ union nfssysargs {
 	struct nfs4clrst_args   *nfs4clrst_u;		/* nfs4 clear state */
 	struct nfsidmap_args	*nfsidmap_u;		/* nfsidmap */
 	struct mds_adddev_args  *adddev_u;
+	dserv_dataset_props_t	*ds_dset_props;		/* dataset props */
 };
 
 struct nfssysa {
@@ -437,6 +495,7 @@ extern int	exportfs(struct exportfs_args *, model_t, cred_t *);
 extern int	nfs_getfh(struct nfs_getfh_args *, model_t, cred_t *);
 extern int 	pnfs_collect_layoutstats(
     struct pnfs_getflo_args *, model_t, cred_t *);
+extern int	dserv_svc(dserv_svc_args_t *);
 extern int	nfs_svc(struct nfs_svc_args *, model_t);
 extern int	lm_svc(struct lm_svc_args *uap);
 extern int	lm_shutdown(void);

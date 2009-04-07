@@ -19,10 +19,9 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
 
 PROG =		dservadm
 OBJS =		dservadm.o
@@ -32,7 +31,7 @@ POFILES = 	$(OBJS:.o=.po)
 include ../../Makefile.cmd
 
 POFILE = 	$(PROG)_all.po
-LDLIBS +=	-ldserv -lnfs
+LDLIBS +=	-ldserv
 
 lint := LINTFLAGS = -ux
 

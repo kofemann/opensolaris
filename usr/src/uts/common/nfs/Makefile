@@ -68,7 +68,8 @@ HDRS=	export.h		\
 	range_impl.h		\
 	nnode.h			\
 	nnode_impl.h		\
-	nnode_vn.h
+	nnode_vn.h		\
+	dserv_impl.h
 
 
 PROTOCOL_DIR = $(SRC)/head/rpcsvc

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -54,7 +54,6 @@
 #include <zone.h>
 #include <sys/socket.h>
 #include <tsol/label.h>
-#include <sys/dserv.h>
 
 /*
  * Determine valid semantics for most applications.

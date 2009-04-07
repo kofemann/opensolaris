@@ -19,22 +19,19 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include <nfs/nfs.h>
 #include <nfs/nfs4.h>
-#include <sys/dserv.h>
-#include <libdserv.h>
 #include <libintl.h>
 #include <sys/param.h>
 #include <sys/tiuser.h>
 #include <rpc/svc.h>
 #include "nfs_tbind.h"
 #include <nfs/nfssys.h>
+#include <libdserv.h>
 #include <dservd.h>
 
 #define	PNFSCTLMDS	104000
