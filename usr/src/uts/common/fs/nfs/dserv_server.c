@@ -686,6 +686,7 @@ dserv_nnode_data_getobjset(dserv_nnode_data_t *dnd, int create)
 	open_root_objset_t *root_objset;
 	mds_sid sid = dnd->dnd_fh->fh.v1.mds_sid;
 	mds_dataset_id dataset_id = dnd->dnd_fh->fh.v1.mds_dataset_id;
+	open_mdsfs_objset_t *new_mdsfs;
 	char mdsfs_objset_name[MAXPATHLEN];
 	char *mdsfs = NULL;
 	nnode_error_t error = 0;
@@ -748,29 +749,31 @@ dserv_nnode_data_getobjset(dserv_nnode_data_t *dnd, int create)
 	    root_objset->oro_objsetname, "/", mdsfs);
 
 	if (create) {
-		open_mdsfs_objset_t *new_mdsfs;
-
 		error = get_create_mdsfs_objset(mdsfs_objset_name,
 		    &dnd->dnd_objset);
 		if (error)
 			goto out;
-
-		/* Place entry in the the MDS-FS objset linked list */
-		new_mdsfs = kmem_cache_alloc(dserv_open_mdsfs_objset_cache,
-		    KM_SLEEP);
-		bcopy(dataset_id.val, new_mdsfs->omo_dataset_id.val,
-		    dataset_id.len);
-		new_mdsfs->omo_dataset_id.len = dataset_id.len;
-		new_mdsfs->omo_osp = dnd->dnd_objset;
-
-		list_insert_tail(&root_objset->oro_open_mdsfs_objsets,
-		    new_mdsfs);
 	} else {
 		error = get_mdsfs_objset(mdsfs_objset_name, &dnd->dnd_objset);
 		if (error)
 			goto out;
 	}
 
+	/* Place entry in the the MDS-FS objset linked list */
+	new_mdsfs = kmem_cache_alloc(dserv_open_mdsfs_objset_cache,
+	    KM_SLEEP);
+	bcopy(dataset_id.val, new_mdsfs->omo_dataset_id.val,
+	    dataset_id.len);
+	new_mdsfs->omo_dataset_id.len = dataset_id.len;
+	new_mdsfs->omo_osp = dnd->dnd_objset;
+
+	list_insert_tail(&root_objset->oro_open_mdsfs_objsets,
+	    new_mdsfs);
+
+	/*
+	 * Set the OBJSET flag in the nnode signifying that we have
+	 * found the object set!
+	 */
 	dnd->dnd_flags |= DSERV_NNODE_FLAG_OBJSET;
 
 out:
