@@ -361,6 +361,7 @@ nnode_mod_init(void)
 	    NULL, NULL, NULL,
 	    NULL, NULL, 0);
 	nnode_vn_init();
+	nnode_proxy_init();
 
 	for (int i = 0; i < nnode_hash_size; i++)
 		nnode_hash[i] = nnode_bucket_alloc();
@@ -394,6 +395,7 @@ nnode_mod_fini(void)
 	kmem_cache_destroy(nnode_bucket_cache);
 	kmem_cache_destroy(nnode_kmem_cache);
 	kmem_cache_destroy(nnode_bucket_sweep_task_cache);
+	nnode_proxy_fini();
 	nnode_vn_fini();
 
 	return (0);

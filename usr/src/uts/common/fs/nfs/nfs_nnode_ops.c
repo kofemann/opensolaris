@@ -102,6 +102,7 @@ nnop_io_prep(nnode_t *nn, nnode_io_flags_t *flags, cred_t *cr,
  * Known implementations:
  * nnode_vn_read
  * dserv_nnode_read
+ * nnode_proxy_read
  */
 
 nnode_error_t
@@ -120,6 +121,7 @@ nnop_read(nnode_t *nn, nnode_io_flags_t *flags, cred_t *cr,
  * Known implementations:
  * nnode_vn_write
  * dserv_nnode_write
+ * nnode_proxy_write
  */
 
 nnode_error_t
@@ -132,6 +134,22 @@ nnop_write(nnode_t *nn, nnode_io_flags_t *flags, uio_t *uiop, int ioflags,
 
 	return (nn->nn_data_ops->ndo_write)(nn->nn_data_ops_data,
 	    flags, uiop, ioflags, cr, ct, wcc);
+}
+
+/*
+ * Known implementations:
+ * nnode_proxy_update
+ */
+
+void
+nnop_update(nnode_t *nn, nnode_io_flags_t flags, cred_t *cr,
+    caller_context_t *ct, off64_t off)
+{
+	if ((nn->nn_data_ops == NULL) ||
+	    (nn->nn_data_ops->ndo_update == NULL))
+		return;
+
+	(nn->nn_data_ops->ndo_update)(nn->nn_data_ops_data, flags, cr, ct, off);
 }
 
 /*

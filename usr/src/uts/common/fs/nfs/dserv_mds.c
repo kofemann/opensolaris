@@ -386,6 +386,8 @@ dserv_open_root_objset_destroy(void *voro, void *foo)
 	list_destroy(&oro->oro_open_mdsfs_objsets);
 }
 
+u_longlong_t dserv_caller_id;
+
 void
 dserv_mds_setup()
 {
@@ -421,6 +423,7 @@ dserv_mds_setup()
 	    sizeof (dserv_mds_instance_t), 0,
 	    dserv_mds_instance_construct, dserv_mds_instance_destroy, NULL,
 	    NULL, NULL, 0);
+	dserv_caller_id = fs_new_caller_id();
 }
 
 int

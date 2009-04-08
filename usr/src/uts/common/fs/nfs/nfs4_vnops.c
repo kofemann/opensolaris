@@ -3273,15 +3273,20 @@ recov_retry:
 	return (e.error);
 }
 
+int nfs4_forceproxyio = 0;
+
 static int
 nfs4write(vnode_t *vp, caddr_t base, u_offset_t offset, int count, cred_t *cr,
 	stable_how4 *stab_comm)
 {
-	int error;
+	int error = EAGAIN;
 	mntinfo4_t *mi = VTOMI4(vp);
 
 	if (mi->mi_flags & MI4_PNFS) {
-		error = pnfs_write(vp, base, offset, count, cr, stab_comm);
+		if (nfs4_forceproxyio == 0) {
+			error = pnfs_write(vp, base, offset, count, cr,
+			    stab_comm);
+		}
 		if (error != EAGAIN) {
 			return (error);
 		}
@@ -3518,8 +3523,6 @@ recov_retry:
 
 	return (e.error);
 }
-
-int nfs4_forceproxyio = 0;
 
 static int
 nfs4read(vnode_t *vp, caddr_t base, offset_t offset, int count,
@@ -11219,11 +11222,13 @@ int
 nfs4_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
     cred_t *cr)
 {
-	int error;
+	int error = EAGAIN;
 	mntinfo4_t *mi = VTOMI4(vp);
 
 	if (mi->mi_flags & MI4_PNFS) {
-		error = pnfs_commit(vp, plist, offset, count, cr);
+		if (nfs4_forceproxyio == 0) {
+			error = pnfs_commit(vp, plist, offset, count, cr);
+		}
 		if (error != EAGAIN)
 			return (error);
 	}

@@ -63,8 +63,18 @@ void nfs_ds_cp_dispatch(struct svc_req *, SVCXPRT *);
 
 static enum ds_status get_ds_status(nfsstat4);
 static void get_access_mode(compound_state_t *, DS_CHECKSTATEres *);
-
 ds_owner_t *mds_dsinfo_alloc(DS_EXIBIargs *);
+
+/*
+ * XXX
+ * This variable is used to select regular NFS server behaviour
+ * (no DSs) vs. the need to use proxy I/O to read/write data
+ * from the DSs.  At some point, this needs to be replaced by
+ * a per-export setting that indicates whether data is local
+ * or remote, so that we can handle both pNFS and locally-
+ * provisioned UFS or other data.
+ */
+int nfs_ds_present = 0;			/* Has a DS checked in yet? */
 
 /*
  * Dispatch structure for the control protocol
@@ -854,7 +864,7 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 	char *xdr_buffer;
 	ds_addrlist_t *dp;
 	ds_addr *addrp;
-	nfs_server_instance_t *instp;
+	nfs_server_instance_t *instp = dbe_to_instp(dop->dbe);
 
 	/*
 	 * First deal with the universal addresses
@@ -862,7 +872,6 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 	for (i = 0; i < argp->ds_addrs.ds_addrs_len; i++) {
 		addrp = &argp->ds_addrs.ds_addrs_val[i];
 		(void) mds_ds_addrlist_update(dop, addrp);
-		instp = dbe_to_instp(dop->dbe);
 		dp = mds_find_ds_addrlist_by_uaddr(instp,
 		    addrp->addr.na_r_addr);
 		if (dp == NULL)
@@ -949,6 +958,12 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 		res_ok->guid_map.guid_map_len = 0;
 		res_ok->guid_map.guid_map_val = NULL;
 	}
+
+	/*
+	 * Make sure we set the bit that we've seen a DS check in
+	 */
+	if (nfs_ds_present == 0)
+		nfs_ds_present = 1;
 
 	return (DS_OK);
 }

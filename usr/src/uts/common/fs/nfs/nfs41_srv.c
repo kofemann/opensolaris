@@ -2840,7 +2840,6 @@ mds_op_putfh(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		VN_RELE(cs->vp);
 		cs->vp = NULL;
 	}
-
 	if (cs->cr) {
 		crfree(cs->cr);
 		cs->cr = NULL;
@@ -3965,7 +3964,6 @@ final:
 	    SETATTR4res *, resp);
 }
 
-
 /* ARGSUSED */
 static void
 mds_op_write(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
@@ -4120,6 +4118,7 @@ err:
 
 	resp->writeverf = cs->instp->Write4verf;
 
+	nnop_update(nn, nnioflags, cr, &ct, args->offset + resp->count);
 out:
 	nnop_io_release(nn, nnioflags, &ct);
 
@@ -4328,7 +4327,6 @@ out:
 	/*
 	 * done with this compound request, free the label
 	 */
-
 	if (req->rq_label != NULL) {
 		kmem_free(req->rq_label, sizeof (bslabel_t));
 		req->rq_label = NULL;
@@ -7934,16 +7932,17 @@ fake_spe(nfs_server_instance_t *instp, mds_layout_t **flp)
  * compound state
  */
 nfsstat4
-mds_get_flo(struct compound_state *cs, mds_layout_t **flopp)
+mds_get_flo(nfs_server_instance_t *instp, vnode_t *vp, mds_layout_t **flopp)
 {
 	rfs4_file_t *fp;
 
-	ASSERT(cs->vp);
+	ASSERT(vp);
+	ASSERT(instp);
 	ASSERT(flopp);
 
-	mutex_enter(&cs->vp->v_lock);
-	fp = (rfs4_file_t *)vsd_get(cs->vp, cs->instp->vkey);
-	mutex_exit(&cs->vp->v_lock);
+	mutex_enter(&vp->v_lock);
+	fp = (rfs4_file_t *)vsd_get(vp, instp->vkey);
+	mutex_exit(&vp->v_lock);
 
 	/* Odd.. no rfs4_file_t for the vnode.. */
 	if (fp == NULL)
@@ -7952,13 +7951,13 @@ mds_get_flo(struct compound_state *cs, mds_layout_t **flopp)
 	/* do we have a odl already ? */
 	if (fp->flp == NULL) {
 		/* Nope, read from disk */
-		if (mds_get_odl(cs->vp, &fp->flp) != NFS4_OK) {
+		if (mds_get_odl(vp, &fp->flp) != NFS4_OK) {
 			/*
 			 * XXXXX:
 			 * XXXXX: No ODL, so lets go query PE
 			 * XXXXX:
 			 */
-			fake_spe(cs->instp, &fp->flp);
+			fake_spe(instp, &fp->flp);
 
 			if (fp->flp == NULL)
 				return (NFS4ERR_LAYOUTUNAVAILABLE);
@@ -7971,6 +7970,8 @@ mds_get_flo(struct compound_state *cs, mds_layout_t **flopp)
 	*flopp = (mds_layout_t *)fp->flp;
 	return (NFS4_OK);
 }
+
+int no_layouts = 0;
 
 static void
 mds_free_fh_list(nfs_fh4 *nfl_fh_list, int count)
@@ -8004,7 +8005,7 @@ mds_fetch_layout(struct compound_state *cs,
 	char *xdr_buffer;
 
 
-	if (mds_get_flo(cs, &lp) != NFS4_OK)
+	if (no_layouts || mds_get_flo(cs->instp, cs->vp, &lp) != NFS4_OK)
 		return (NFS4ERR_LAYOUTUNAVAILABLE);
 
 	/* validate the device id */

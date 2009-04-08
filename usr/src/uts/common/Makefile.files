@@ -1073,6 +1073,7 @@ NFSSRV_OBJS +=	nfs_server.o		\
 		nfs_nnode.o		\
 		nfs_nnode_ops.o		\
 		nfs_nnode_vn.o		\
+		nfs_nnode_proxy.o	\
 		nfs_export.o		\
 		nfs_log.o		\
 		nfs_log_xdr.o		\

@@ -34,7 +34,7 @@
 #include <rpc/rpc.h>
 #include <sys/sdt.h>
 
-static int
+int
 ctl_mds_clnt_call(ds_addrlist_t *dp, rpcproc_t proc,
     xdrproc_t xdrarg, void * argp,
     xdrproc_t xdrres, void * resp)

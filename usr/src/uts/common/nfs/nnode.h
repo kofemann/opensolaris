@@ -177,6 +177,8 @@ nnode_error_t nnop_read(nnode_t *, nnode_io_flags_t *, cred_t *,
     caller_context_t *, uio_t *, int);
 nnode_error_t nnop_write(nnode_t *, nnode_io_flags_t *, uio_t *, int, cred_t *,
     caller_context_t *, wcc_data *);
+void nnop_update(nnode_t *, nnode_io_flags_t, cred_t *, caller_context_t *,
+    off64_t);
 nnode_error_t nnop_remove_obj(nnode_t *);
 void nnop_io_release(nnode_t *, nnode_io_flags_t, caller_context_t *);
 void nnop_post_op_attr(nnode_t *, post_op_attr *);
@@ -198,6 +200,8 @@ typedef struct {
 	int (*ndo_write)(void *, nnode_io_flags_t *, uio_t *, int, cred_t *,
 	    caller_context_t *, wcc_data *);
 	int (*ndo_remove_obj)(void *);
+	void (*ndo_update)(void *, nnode_io_flags_t, cred_t *,
+	    caller_context_t *, off64_t);
 	void (*ndo_io_release)(void *, nnode_io_flags_t, caller_context_t *);
 	void (*ndo_post_op_attr)(void *, post_op_attr *);
 	void (*ndo_wcc_data_err)(void *, wcc_data *);
@@ -253,6 +257,8 @@ void nnode_mod_init(void);
 int nnode_mod_fini(void);
 void nnode_vn_init(void);
 void nnode_vn_fini(void);
+void nnode_proxy_init(void);
+void nnode_proxy_fini(void);
 
 /* nnode flag setting functions */
 

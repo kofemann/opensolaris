@@ -40,10 +40,13 @@
 #include <sys/zap.h>
 #include <sys/zio.h>
 #include <sys/txg.h>
-#include <rpc/xdr.h>
-#include <nfs/ds.h>
 #include <sys/crc32.h>
 #include <sys/sysmacros.h>
+#include <sys/nbmlock.h>
+#include <sys/strsubr.h>
+#include <rpc/xdr.h>
+#include <nfs/ds.h>
+#include <nfs/export.h>
 
 uint32_t max_blksize = SPA_MAXBLOCKSIZE;
 
@@ -51,13 +54,14 @@ static nnode_error_t dserv_nnode_from_fh_ds(nnode_t **, mds_ds_fh *);
 static void dserv_nnode_key_free(void *);
 static dserv_nnode_data_t *dserv_nnode_data_alloc(void);
 static dserv_nnode_state_t *dserv_nnode_state_alloc(void);
-
 static nnode_error_t dserv_nnode_data_getobject(dserv_nnode_data_t *, int);
 static nnode_error_t dserv_nnode_data_getobjset(dserv_nnode_data_t *, int);
+
 static void dserv_dispatch(struct svc_req *, SVCXPRT *);
 static void dmov_dispatch(struct svc_req *, SVCXPRT *);
-
 static void dserv_grow_blocksize(dserv_nnode_data_t *, uint32_t, dmu_tx_t *);
+
+union ctl_mds_srv_res;
 
 static void ds_commit(DS_COMMITargs *,  DS_COMMITres *,
     struct svc_req *);
@@ -95,6 +99,10 @@ static void ds_snap(DS_SNAPargs *, DS_SNAPres *,
 static void ds_write(DS_WRITEargs *, DS_WRITEres *,
     struct svc_req *);
 static void cp_nullfree(void);
+static void ds_read_free(union ctl_mds_srv_res *);
+static void ds_write_free(union ctl_mds_srv_res *);
+
+extern u_longlong_t dserv_caller_id;
 
 void dispatch_dserv_nfsv41(struct svc_req *, SVCXPRT *);
 
@@ -184,7 +192,7 @@ struct ctl_mds_srv_disp ctl_mds_srv_v1[] = {
 	{ds_pnfsstat, xdr_DS_PNFSSTATargs, xdr_DS_PNFSSTATres,
 	    cp_nullfree, "DS_PNFSSTAT"},
 	{ds_read, xdr_DS_READargs, xdr_DS_READres,
-	    cp_nullfree, "DS_READ"},
+	    ds_read_free, "DS_READ"},
 	{ctl_mds_srv_remove, xdr_CTL_MDS_REMOVEargs, xdr_CTL_MDS_REMOVEres,
 	    cp_nullfree, "DS_REMOVE"},
 	{ds_setattr, xdr_DS_SETATTRargs, xdr_DS_SETATTRres,
@@ -194,7 +202,7 @@ struct ctl_mds_srv_disp ctl_mds_srv_v1[] = {
 	{ds_snap, xdr_DS_SNAPargs, xdr_DS_SNAPres,
 	    cp_nullfree, "DS_SNAP"},
 	{ds_write, xdr_DS_WRITEargs, xdr_DS_WRITEres,
-	    cp_nullfree, "DS_WRITE"}
+	    ds_write_free, "DS_WRITE"}
 };
 
 static uint_t ctl_mds_srv_cnt =
@@ -831,11 +839,12 @@ dserv_nnode_read(void *vdata, nnode_io_flags_t *nnflags, cred_t *cr,
     caller_context_t *ct, uio_t *uiop, int ioflag)
 {
 	dserv_nnode_data_t *data = vdata;
-	nnode_error_t err;
+	nnode_error_t err = 0;
 	ssize_t n, nbytes;
 
 	rw_enter(&data->dnd_rwlock, RW_READER);
-	ASSERT(uiop->uio_loffset < data->dnd_phys->dp_size);
+	if (uiop->uio_loffset >= data->dnd_phys->dp_size)
+		return (0);
 	ASSERT(data->dnd_flags & DSERV_NNODE_FLAG_OBJECT);
 	n = MIN(uiop->uio_resid, data->dnd_phys->dp_size - uiop->uio_loffset);
 	while (n > 0) {
@@ -1189,7 +1198,167 @@ ds_pnfsstat(DS_PNFSSTATargs *argp, DS_PNFSSTATres *resp, struct svc_req *req)
 void
 ds_read(DS_READargs *argp, DS_READres *resp, struct svc_req *req)
 {
-	resp->status = DSERR_NOTSUPP;
+	nnode_t *nn = NULL;
+	nnode_error_t nerr;
+	nnode_io_flags_t nnioflags = 0;
+	struct iovec iov;
+	struct uio uio;
+	u_offset_t offset;
+	caller_context_t ct;
+	int i, segs, length;
+	int prep = 0;
+	ds_fileseg *segp;
+	DS_READresok *rrok;
+	mds_ds_fh *ds_fh;
+	nfs_fh4 *otw_fh;
+
+	/* Find nnode from filehandle */
+	otw_fh =  &argp->fh;
+	ds_fh = get_mds_ds_fh(otw_fh);
+	if ((ds_fh == NULL)) {
+		resp->status = DSERR_BADHANDLE;
+		return;
+	}
+	nerr = nnode_from_fh_ds(&nn, ds_fh);
+	kmem_free(ds_fh, sizeof (mds_ds_fh));
+
+	switch (nerr) {
+	case 0:
+		break;
+	case ESTALE:
+		resp->status = DSERR_STALE;
+		goto out;
+	default:
+		resp->status = DSERR_BADHANDLE;
+		goto out;
+	}
+
+	ct.cc_sysid = 0;
+	ct.cc_pid = 0;
+	ct.cc_caller_id = dserv_caller_id;
+
+	rrok = &resp->DS_READres_u.res_ok;
+	ASSERT(rrok);
+
+	/* Got work? */
+	if (argp->count == 0) {
+		rrok->count = 0;
+		resp->status = DS_OK;
+		goto out;
+	}
+
+	/*
+	 * Do each requested I/O
+	 */
+	resp->status = DS_OK;
+	rrok->count = 0;
+	segs = argp->rdv.rdv_len;
+	segp = argp->rdv.rdv_val;
+	rrok->rdv.rdv_len = segs;
+	rrok->rdv.rdv_val =
+	    kmem_zalloc(segs * sizeof (ds_filesegbuf), KM_SLEEP);
+	for (i = 0; i < segs; i++) {
+		char *base;
+
+		length = segp[i].count;
+		offset = segp[i].offset;
+
+		if (length == 0) {
+			rrok->count = 0;
+			rrok->rdv.rdv_val[i].offset = offset;
+			rrok->rdv.rdv_val[i].data.data_len = 0;
+			rrok->rdv.rdv_val[i].data.data_val = NULL;
+			continue;
+		}
+
+		nerr = nnop_io_prep(nn, &nnioflags, NULL, &ct,
+		    offset, length, NULL);
+		if (nerr != 0) {
+			resp->status = DSERR_INVAL;
+			goto out;
+		}
+		prep = 1;
+
+		if (nnioflags & NNODE_IO_FLAG_PAST_EOF) {
+			resp->status = DS_OK;
+			rrok->eof = TRUE;
+			rrok->rdv.rdv_val[i].offset = offset;
+			rrok->rdv.rdv_val[i].data.data_len = 0;
+			rrok->rdv.rdv_val[i].data.data_val = NULL;
+			goto out;
+		}
+
+		if (length > rfs4_tsize(req))
+			length = rfs4_tsize(req);
+
+		/* Get a buffer to read into */
+		base = kmem_alloc(length, KM_SLEEP);
+		ASSERT(base != NULL);
+
+		/* Set up a uio for nnop_read() */
+		iov.iov_base = base;
+		iov.iov_len = length;
+		uio.uio_iov = &iov;
+		uio.uio_iovcnt = 1;
+		uio.uio_segflg = UIO_SYSSPACE;
+		uio.uio_extflg = UIO_COPY_CACHED;
+		uio.uio_loffset = offset;
+		uio.uio_resid = length;
+
+		nerr = nnop_read(nn, &nnioflags, NULL, &ct, &uio, 0);
+
+		if (nerr) {
+			if (base != NULL)
+				kmem_free(base, length);
+			resp->status = DSERR_INVAL;
+			goto out;
+		}
+
+		ASSERT(uio.uio_resid >= 0);
+		rrok->count = length - uio.uio_resid;
+		if (rrok->count != length) {
+			char *base2 = NULL;
+
+			if (rrok->count != 0) {
+				base2 = kmem_alloc(rrok->count, KM_SLEEP);
+				bcopy(base, base2, rrok->count);
+			}
+			kmem_free(base, length);
+			base = base2;
+		}
+		ASSERT(rrok->rdv.rdv_val);
+		rrok->rdv.rdv_val[i].offset = offset;
+		rrok->rdv.rdv_val[i].data.data_len = rrok->count;
+		rrok->rdv.rdv_val[i].data.data_val = base;
+
+		rrok->eof = (nnioflags & NNODE_IO_FLAG_EOF) ? TRUE : FALSE;
+
+		nnop_io_release(nn, nnioflags, &ct);
+		prep = 0;
+	}
+
+	resp->status = DS_OK;
+
+out:
+	if (prep)
+		nnop_io_release(nn, nnioflags, &ct);
+	if (nn != NULL)
+		nnode_rele(&nn);
+}
+
+static void
+ds_read_free(union ctl_mds_srv_res *dres)
+{
+	DS_READres *rres = (DS_READres *)dres;
+	DS_READresok *rrok;
+	int i;
+
+	rrok = &rres->DS_READres_u.res_ok;
+	for (i = 0; i < rrok->rdv.rdv_len; i++)
+		kmem_free(rrok->rdv.rdv_val[i].data.data_val,
+		    rrok->rdv.rdv_val[i].data.data_len);
+	kmem_free(rrok->rdv.rdv_val,
+	    rrok->rdv.rdv_len * sizeof (ds_filesegbuf));
 }
 
 /* ARGSUSED */
@@ -1222,7 +1391,6 @@ ctl_mds_srv_remove(CTL_MDS_REMOVEargs *argp, CTL_MDS_REMOVEres *resp,
 
 			if (nn != NULL)
 				nnode_rele(&nn);
-			nn = NULL;
 			nerr = nnode_from_fh_ds(&nn, ds_fh);
 			kmem_free(ds_fh, sizeof (mds_ds_fh));
 
@@ -1361,7 +1529,133 @@ ds_snap(DS_SNAPargs *argp, DS_SNAPres *resp, struct svc_req *req)
 void
 ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
 {
-	resp->status = DSERR_NOTSUPP;
+	nnode_t *nn = NULL;
+	nnode_error_t nerr;
+	nnode_io_flags_t nnioflags = NNODE_IO_FLAG_WRITE;
+	struct iovec iov;
+	struct uio uio;
+	u_offset_t offset;
+	caller_context_t ct;
+	int i, segs, length;
+	int prep = 0;
+	DS_WRITEresok *wrok;
+	ds_filesegbuf *segp;
+	mds_ds_fh *ds_fh;
+	nfs_fh4 *otw_fh;
+
+	/* Find nnode from filehandle */
+	otw_fh =  &argp->fh;
+	ds_fh = get_mds_ds_fh(otw_fh);
+	if ((ds_fh == NULL)) {
+		resp->status = DSERR_BADHANDLE;
+		return;
+	}
+	nerr = nnode_from_fh_ds(&nn, ds_fh);
+	kmem_free(ds_fh, sizeof (mds_ds_fh));
+
+	switch (nerr) {
+	case 0:
+		break;
+	case ESTALE:
+		resp->status = DSERR_STALE;
+		goto out;
+	default:
+		resp->status = DSERR_BADHANDLE;
+		goto out;
+	}
+
+	ct.cc_sysid = 0;
+	ct.cc_pid = 0;
+	ct.cc_caller_id = dserv_caller_id;
+
+	wrok = &resp->DS_WRITEres_u.res_ok;
+	ASSERT(wrok);
+
+	/* Got work? */
+	if (argp->count == 0) {
+		wrok->wrv.wrv_len = 0;
+		resp->status = DS_OK;
+		goto out;
+	}
+
+	/*
+	 * Do each requested I/O
+	 */
+	resp->status = DS_OK;
+	segs = argp->wrv.wrv_len;
+	segp = argp->wrv.wrv_val;
+	wrok->wrv.wrv_len = segs;
+	wrok->wrv.wrv_val =
+	    kmem_zalloc(segs * sizeof (count4), KM_SLEEP);
+	for (i = 0; i < segs; i++) {
+		char *base;
+
+		length = segp[i].data.data_len;
+		offset = segp[i].offset;
+
+		if (length == 0) {
+			wrok->wrv.wrv_val[i] = 0;
+			continue;
+		}
+
+		nerr = nnop_io_prep(nn, &nnioflags, NULL, &ct,
+		    offset, length, NULL);
+		if (nerr != 0) {
+			resp->status = DSERR_INVAL;
+			wrok->wrv.wrv_val[i] = 0;
+			goto out;
+		}
+		prep = 1;
+
+		if (length > rfs4_tsize(req))
+			length = rfs4_tsize(req);
+
+		/* Find data to write */
+		base = segp[i].data.data_val;
+		ASSERT(base != NULL);
+
+		/* Set up a uio for nnop_write() */
+		iov.iov_base = base;
+		iov.iov_len = length;
+		uio.uio_iov = &iov;
+		uio.uio_iovcnt = 1;
+		uio.uio_segflg = UIO_SYSSPACE;
+		uio.uio_extflg = UIO_COPY_CACHED;
+		uio.uio_loffset = offset;
+		uio.uio_resid = length;
+
+		nerr = nnop_write(nn, &nnioflags, &uio, 0, NULL, &ct, NULL);
+
+		if (nerr) {
+			resp->status = DSERR_INVAL;
+			goto out;
+		}
+
+		ASSERT(uio.uio_resid >= 0);
+		ASSERT(wrok->wrv.wrv_val);
+		wrok->wrv.wrv_val[i] = length - uio.uio_resid;
+
+		nnop_io_release(nn, nnioflags, &ct);
+		prep = 0;
+	}
+
+	resp->status = DS_OK;
+
+out:
+	if (prep)
+		nnop_io_release(nn, nnioflags, &ct);
+	if (nn != NULL)
+		nnode_rele(&nn);
+}
+
+static void
+ds_write_free(union ctl_mds_srv_res *dres)
+{
+	DS_WRITEres *wres = (DS_WRITEres *)dres;
+	DS_WRITEresok *wrok;
+
+	wrok = &wres->DS_WRITEres_u.res_ok;
+	kmem_free(wrok->wrv.wrv_val, wrok->wrv.wrv_len * sizeof (count4));
 }
 
 /* ARGSUSED */

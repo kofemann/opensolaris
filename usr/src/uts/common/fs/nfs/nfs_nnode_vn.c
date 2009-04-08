@@ -55,17 +55,20 @@ static nnode_vn_md_t *nnode_vn_md_alloc(void);
 static void nnode_vn_md_free(void *);
 static nnode_vn_state_t *nnode_vn_state_alloc(void);
 static void nnode_vn_state_free(void *);
+void nnode_data_setup(nnode_seed_t *, vnode_t *, fsid_t, int, char *);
+void nnode_vn_data_setup(nnode_seed_t *, vnode_t *);
+void nnode_proxy_data_setup(nnode_seed_t *, vnode_t *, fsid_t, int, char *);
 
-static int nnode_vn_io_prep(void *, nnode_io_flags_t *, cred_t *,
+int nnode_vn_io_prep(void *, nnode_io_flags_t *, cred_t *,
     caller_context_t *, offset_t, size_t, bslabel_t *);
-static int nnode_vn_read(void *, nnode_io_flags_t *, cred_t *,
+int nnode_vn_read(void *, nnode_io_flags_t *, cred_t *,
     caller_context_t *, uio_t *, int);
-static int nnode_vn_write(void *, nnode_io_flags_t *, uio_t *, int, cred_t *,
+int nnode_vn_write(void *, nnode_io_flags_t *, uio_t *, int, cred_t *,
     caller_context_t *, wcc_data *);
-static void nnode_vn_io_release(void *, nnode_io_flags_t, caller_context_t *);
-static void nnode_vn_post_op_attr(void *, post_op_attr *);
-static void nnode_vn_wcc_data_err(void *, wcc_data *);
-static vnode_t *nnode_vn_io_getvp(void *);
+void nnode_vn_io_release(void *, nnode_io_flags_t, caller_context_t *);
+void nnode_vn_post_op_attr(void *, post_op_attr *);
+void nnode_vn_wcc_data_err(void *, wcc_data *);
+vnode_t *nnode_vn_io_getvp(void *);
 
 static vnode_t *nnode_vn_md_getvp(void *);
 
@@ -99,6 +102,8 @@ static kmem_cache_t *nnode_fid_key_v4_cache;
 static kmem_cache_t *nnode_fid_key_v3_cache;
 static kmem_cache_t *nnode_fid_key_vp_cache;
 
+extern int nfs_ds_present;
+
 /* vnode-based nnode ops */
 
 /*
@@ -107,7 +112,7 @@ static kmem_cache_t *nnode_fid_key_vp_cache;
  * Do the "critical" rain dance, check permissions, return the actual size.
  */
 
-static int
+int
 nnode_vn_io_prep(void *vdata, nnode_io_flags_t *flags, cred_t *cr,
     caller_context_t *ct, offset_t off, size_t len, bslabel_t *clabel)
 {
@@ -207,7 +212,7 @@ out:
 	return (rc);
 }
 
-static int
+int
 nnode_vn_read(void *vdata, nnode_io_flags_t *flags, cred_t *cr,
     caller_context_t *ct, uio_t *uiop, int ioflag)
 {
@@ -249,7 +254,7 @@ out:
 	return (rc);
 }
 
-static int
+int
 nnode_vn_write(void *vdata, nnode_io_flags_t *flags, uio_t *uiop, int ioflags,
     cred_t *cr, caller_context_t *ct, wcc_data *wcc)
 {
@@ -298,7 +303,7 @@ out:
 	return (rc);
 }
 
-static void
+void
 nnode_vn_io_release(void *vdata, nnode_io_flags_t flags, caller_context_t *ct)
 {
 	nnode_vn_data_t *data = vdata;
@@ -314,7 +319,7 @@ nnode_vn_io_release(void *vdata, nnode_io_flags_t flags, caller_context_t *ct)
 		nbl_end_crit(vp);
 }
 
-static void
+void
 nnode_vn_post_op_attr(void *vdata, post_op_attr *poa)
 {
 	nnode_vn_data_t *data = vdata;
@@ -322,7 +327,7 @@ nnode_vn_post_op_attr(void *vdata, post_op_attr *poa)
 	vattr_to_post_op_attr(&data->nvd_vattr, poa);
 }
 
-static void
+void
 nnode_vn_wcc_data_err(void *vdata, wcc_data *wcc)
 {
 	nnode_vn_data_t *data = vdata;
@@ -335,7 +340,7 @@ nnode_vn_wcc_data_err(void *vdata, wcc_data *wcc)
 	mutex_exit(&data->nvd_lock);
 }
 
-static vnode_t *
+vnode_t *
 nnode_vn_io_getvp(void *vdata)
 {
 	nnode_vn_data_t *data = vdata;
@@ -636,6 +641,28 @@ nnode_vn_state_free(void *vstate)
 	kmem_cache_free(nnode_vn_state_cache, state);
 }
 
+void
+nnode_vn_data_setup(nnode_seed_t *seed, vnode_t *vp)
+{
+	nnode_vn_data_t *data;
+
+	data = nnode_vn_data_alloc();
+	data->nvd_vp = vp;
+	/* no need to VN_HOLD; we steal the reference */
+	seed->ns_data = data;
+	seed->ns_data_ops = &nnode_vn_data_ops;
+}
+
+void
+nnode_data_setup(nnode_seed_t *seed, vnode_t *vp, fsid_t fsid,
+    int len, char *fid)
+{
+	if (nfs_ds_present)
+		nnode_proxy_data_setup(seed, vp, fsid, len, fid);
+	else
+		nnode_vn_data_setup(seed, vp);
+}
+
 /*
  * Initialize the nnode_seed_t.  Each of the data structures
  * nnode_vn_data_t, nnode_vn_md_t, and nnode_vn_state_t are
@@ -649,10 +676,12 @@ nnode_build_v3(nnode_seed_t *seed, void *vv3seed)
 	nnode_seed_v3data_t *v3seed = vv3seed;
 	nnode_fid_key_v3_t *key;
 	vnode_t *vp;
-	nnode_vn_data_t *data;
 	nnode_vn_md_t *md;
 	nnode_vn_state_t *state;
 	int rc = 0;
+	fsid_t fsid;
+	int fidlen;
+	char *fid;
 
 	key = kmem_cache_alloc(nnode_fid_key_v3_cache, KM_SLEEP);
 	bcopy(v3seed->nsv_fh, &key->nfk_fh, sizeof (key->nfk_fh));
@@ -663,9 +692,10 @@ nnode_build_v3(nnode_seed_t *seed, void *vv3seed)
 		goto out;
 	}
 
-	data = nnode_vn_data_alloc();
-	data->nvd_vp = vp;
-	/* no need to VN_HOLD; we steal the reference */
+	fsid = v3seed->nsv_fh->fh3_fsid;
+	fidlen = v3seed->nsv_fh->fh3_len;
+	fid = v3seed->nsv_fh->fh3_data;
+	nnode_data_setup(seed, vp, fsid, fidlen, fid);
 	md = nnode_vn_md_alloc();
 	md->nvm_vp = vp;
 	VN_HOLD(md->nvm_vp);
@@ -676,8 +706,6 @@ nnode_build_v3(nnode_seed_t *seed, void *vv3seed)
 	seed->ns_key = key;
 	seed->ns_key_compare = nnode_compare_fsid;
 	seed->ns_key_free = nnode_fid_key_v3_free;
-	seed->ns_data_ops = &nnode_vn_data_ops;
-	seed->ns_data = data;
 	seed->ns_metadata_ops = &nnode_vn_md_ops;
 	seed->ns_metadata = md;
 	seed->ns_state_ops = &nnode_vn_state_ops;
@@ -699,18 +727,22 @@ nnode_build_vp(nnode_seed_t *seed, void *vvpseed)
 {
 	nnode_seed_vpdata_t *vpseed = vvpseed;
 	nnode_fid_key_vp_t *key;
-	nnode_vn_data_t *data;
 	nnode_vn_md_t *md;
 	nnode_vn_state_t *state;
+	fsid_t fsid;
+	int fidlen;
+	char *fid;
 
 	key = kmem_cache_alloc(nnode_fid_key_vp_cache, KM_SLEEP);
 	key->nfk_real_fsid = vpseed->nsv_fsid;
 	bcopy(vpseed->nsv_fidp, &key->nfk_real_fid,
 	    sizeof (key->nfk_real_fid));
 
-	data = nnode_vn_data_alloc();
-	data->nvd_vp = vpseed->nsv_vp;
-	VN_HOLD(data->nvd_vp);
+	fsid = vpseed->nsv_fsid;
+	fidlen = vpseed->nsv_fidp->fid_len;
+	fid = vpseed->nsv_fidp->fid_data;
+	nnode_data_setup(seed, vpseed->nsv_vp, fsid, fidlen, fid);
+	VN_HOLD(vpseed->nsv_vp);
 	md = nnode_vn_md_alloc();
 	md->nvm_vp = vpseed->nsv_vp;
 	VN_HOLD(md->nvm_vp);
@@ -721,8 +753,6 @@ nnode_build_vp(nnode_seed_t *seed, void *vvpseed)
 	seed->ns_key = key;
 	seed->ns_key_compare = nnode_compare_fsid;
 	seed->ns_key_free = nnode_fid_key_vp_free;
-	seed->ns_data_ops = &nnode_vn_data_ops;
-	seed->ns_data = data;
 	seed->ns_metadata_ops = &nnode_vn_md_ops;
 	seed->ns_metadata = md;
 	seed->ns_state_ops = &nnode_vn_state_ops;
@@ -747,10 +777,12 @@ nnode_build_v41(nnode_seed_t *seed, void *vfh)
 	struct exportinfo *exi;
 	nfsstat4 stat; /* XXX */
 	vnode_t *vp;
-	nnode_vn_data_t *data;
 	nnode_vn_md_t *md;
 	nnode_vn_state_t *state;
 	int rc = 0;
+	fsid_t fsid;
+	int fidlen;
+	char *fid;
 
 	key = kmem_cache_alloc(nnode_fid_key_v41_cache, KM_SLEEP);
 	key->nfk_real_fid.fid_len = fmt->fh.v1.obj_fid.len;
@@ -770,9 +802,10 @@ nnode_build_v41(nnode_seed_t *seed, void *vfh)
 		goto out;
 	}
 
-	data = nnode_vn_data_alloc();
-	data->nvd_vp = vp;
-	/* no need to VN_HOLD, we steal the reference */
+	fsid = fmt->fh.v1.export_fsid;
+	fidlen = fmt->fh.v1.obj_fid.len;
+	fid = fmt->fh.v1.obj_fid.val;
+	nnode_data_setup(seed, vp, fsid, fidlen, fid);
 	md = nnode_vn_md_alloc();
 	md->nvm_vp = vp;
 	VN_HOLD(md->nvm_vp);
@@ -783,8 +816,6 @@ nnode_build_v41(nnode_seed_t *seed, void *vfh)
 	seed->ns_key = key;
 	seed->ns_key_compare = nnode_compare_fsid;
 	seed->ns_key_free = nnode_fid_key_v41_free;
-	seed->ns_data_ops = &nnode_vn_data_ops;
-	seed->ns_data = data;
 	seed->ns_metadata_ops = &nnode_vn_md_ops;
 	seed->ns_metadata = md;
 	seed->ns_state_ops = &nnode_vn_state_ops;
@@ -811,10 +842,12 @@ nnode_build_v4(nnode_seed_t *seed, void *vfh)
 	struct exportinfo *exi;
 	nfsstat4 stat;
 	vnode_t *vp;
-	nnode_vn_data_t *data;
 	nnode_vn_md_t *md;
 	nnode_vn_state_t *state;
 	int rc = 0;
+	fsid_t fsid;
+	int fidlen;
+	char *fid;
 
 	key = kmem_cache_alloc(nnode_fid_key_v4_cache, KM_SLEEP);
 	bcopy(fh->nfs_fh4_val, &key->nfk_fh, sizeof (key->nfk_fh));
@@ -827,9 +860,10 @@ nnode_build_v4(nnode_seed_t *seed, void *vfh)
 		goto out;
 	}
 
-	data = nnode_vn_data_alloc();
-	data->nvd_vp = vp;
-	/* no need for VN_HOLD, we steal the reference */
+	fsid = exi->exi_fsid;
+	fidlen = key->nfk_fid->fid_len;
+	fid = key->nfk_fid->fid_data;
+	nnode_data_setup(seed, vp, fsid, fidlen, fid);
 	md = nnode_vn_md_alloc();
 	md->nvm_vp = vp;
 	VN_HOLD(md->nvm_vp);
@@ -840,8 +874,6 @@ nnode_build_v4(nnode_seed_t *seed, void *vfh)
 	seed->ns_key = key;
 	seed->ns_key_compare = nnode_compare_fsid;
 	seed->ns_key_free = nnode_fid_key_v4_free;
-	seed->ns_data_ops = &nnode_vn_data_ops;
-	seed->ns_data = data;
 	seed->ns_metadata_ops = &nnode_vn_md_ops;
 	seed->ns_metadata = md;
 	seed->ns_state_ops = &nnode_vn_state_ops;
