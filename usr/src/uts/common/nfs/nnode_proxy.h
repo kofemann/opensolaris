@@ -32,6 +32,10 @@
 #include <nfs/ds_filehandle.h>
 #include <nfs/mds_state.h>
 
+#ifdef	__cplusplus
+extern "C" {
+#endif
+
 #define	MDS_MAXREAD	(1 * 1024 * 1024)
 
 typedef struct {
@@ -79,5 +83,9 @@ typedef struct {
 	mds_strategy_t	*mnd_strategy;
 	int		mnd_eof;
 } nnode_proxy_data_t;
+
+#ifdef	__cplusplus
+}
+#endif
 
 #endif /* _NNODE_PROXY_H */
