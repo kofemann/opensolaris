@@ -69,6 +69,7 @@ HDRS=	export.h		\
 	nnode.h			\
 	nnode_impl.h		\
 	nnode_vn.h		\
+	nnode_proxy.h		\
 	dserv_impl.h
 
 
