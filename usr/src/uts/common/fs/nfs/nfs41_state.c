@@ -510,9 +510,9 @@ mds_destroysession(mds_session_t *sp)
 	rfs4_dbe_unlock(sp->dbe);
 
 	/*
-	 * The client struct will expire and the session no longer keeps
-	 * a hold on the client struct, so an explicit call to client close
-	 * is not needed.
+	 * The reference/hold maintained from the session to the client
+	 * struct gets nuked when the DB calls rfs4_dbe_destroy, which
+	 * in turn calls mds_session_destroy.
 	 */
 	if (cbs == NFS4_OK)
 		rfs41_session_rele(sp);
@@ -679,9 +679,10 @@ mds_session_create(rfs4_entry_t u_entry,
 	instp = dbe_to_instp(sp->dbe);
 
 	/*
-	 * Back pointer to rfs4_client_t and sessionid
+	 * Back pointer/ref to parent data struct (rfs4_client_t)
 	 */
 	sp->sn_clnt = (rfs4_client_t *)ap->cs_client;
+	rfs4_dbe_hold(sp->sn_clnt->dbe);
 	mxprt = (SVCMASTERXPRT *)ap->cs_xprt->xp_master;
 
 	/*
@@ -886,6 +887,12 @@ mds_session_destroy(rfs4_entry_t u_entry)
 		kmem_free(sp->sn_slrc, sizeof (rfs41_slrc_t));
 		sp->sn_slrc = NULL;
 	}
+
+	/*
+	 * Remove reference to parent data struct
+	 */
+	if (sp->sn_clnt)
+		rfs4_client_rele(sp->sn_clnt);
 }
 
 static bool_t
@@ -894,6 +901,9 @@ mds_session_expiry(rfs4_entry_t u_entry)
 	mds_session_t	*sp = (mds_session_t *)u_entry;
 
 	if (sp == NULL || rfs4_dbe_is_invalid(sp->dbe))
+		return (TRUE);
+
+	if (rfs4_lease_expired(sp->sn_clnt))
 		return (TRUE);
 
 	return (FALSE);
@@ -2966,7 +2976,7 @@ mds_sstor_init(nfs_server_instance_t *instp)
 
 	instp->mds_session_tab = rfs4_table_create(instp,
 	    "Session", instp->reap_time, 2, mds_session_create,
-	    mds_session_destroy, NULL, sizeof (mds_session_t),
+	    mds_session_destroy, mds_session_expiry, sizeof (mds_session_t),
 	    MDS_TABSIZE, MDS_MAXTABSZ/8, 100);
 
 	instp->mds_session_idx = rfs4_index_create(instp->mds_session_tab,

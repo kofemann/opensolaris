@@ -1786,6 +1786,8 @@ extern nfsstat4	pnfs_delete_device(struct nfs4_server *,
 extern void	 rfs41_lo_seqid(stateid_t *);
 extern void	 rfs4freeargres(CB_COMPOUND4args *, CB_COMPOUND4res *);
 extern char	*nfs41_strerror(nfsstat4);
+extern void	 mds_clean_up_sessions(rfs4_client_t *);
+extern void	 mds_clean_up_grants(rfs4_client_t *);
 
 #endif
 #ifdef	__cplusplus

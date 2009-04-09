@@ -242,7 +242,7 @@ rfs41_compute_seq4_flags(COMPOUND4res *rp, compound_state_t *cs)
 		 * no CB path available at either scope (sess or
 		 * clid), so flag gets set based on session ctxt
 		 */
-		sflags |= sp->sn_seq4[sn_idx].ba_sonly ? sn_flag : cp_flag;
+		sflags |= (sp->sn_seq4[sn_idx].ba_sonly ? sn_flag : cp_flag);
 	}
 
 	/*
@@ -366,6 +366,11 @@ rfs41_compound_state_free(compound_state_t *cs)
 	if (cs->basecr) {
 		crfree(cs->basecr);
 	}
+	if (cs->sp) {
+		rfs41_session_rele(cs->sp);
+		if (cs->cp)
+			rfs4_client_rele(cs->cp);
+	}
 	kmem_cache_free(rfs41_compound_state_cache, cs);
 }
 
@@ -455,9 +460,6 @@ reply:
 	}
 
 out:
-	if (cs->sp)
-		rfs41_session_rele(cs->sp);
-
 	/*
 	 * Only free on error. Otherwise, it stays in the
 	 * slot replay cache until ejected by the next

@@ -6896,6 +6896,7 @@ case1:			/* case 1 - utok */
 				 * force the reaper thread to clean it up.
 				 */
 				ocp = cp;
+				mds_clean_up_sessions(ocp);
 				rfs4_dbe_hide(ocp->dbe);
 				rfs4_client_rele(ocp);
 
@@ -7190,12 +7191,10 @@ replay:
 	rfs4_update_lease(cp);
 
 	/*
-	 * Don't hold the client struct or it will never be able to expire.
-	 * If the client goes away w/o sending a destroy session (reboot
-	 * or panic), the client struct must expire.
+	 * References from the session to the client are
+	 * accounted for while session is being created.
 	 */
 	rfs4_client_rele(cp);
-
 	rfs41_session_rele(sp);
 
 final:
@@ -7441,12 +7440,11 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	SEQUENCE4args		*args = &argop->nfs_argop4_u.opsequence;
 	SEQUENCE4res		*resp = &resop->nfs_resop4_u.opsequence;
 	SEQUENCE4resok		*rok  = &resp->SEQUENCE4res_u.sr_resok4;
-	mds_session_t		*sp = cs ->sp;
+	mds_session_t		*sp = cs->sp;
 	slot41_t		*slp;
-	slotid4			 slot    = args->sa_slotid;
-	nfsstat4		 status  = NFS4_OK;
+	slotid4			 slot   = args->sa_slotid;
+	nfsstat4		 status = NFS4_OK;
 	uint32_t		 cbstat = 0x0;
-	rfs4_client_t		*cp;
 
 	DTRACE_NFSV4_2(op__sequence__start,
 	    struct compound_state *, cs,
@@ -7490,6 +7488,7 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 		}
 	}
 	cs->cp = sp->sn_clnt;
+	rfs4_dbe_hold(cs->cp->dbe);	/* compound state ref */
 	DTRACE_PROBE1(nfss41__i__compound_clid, clientid4, cs->cp->clientid);
 
 	/*
@@ -7545,12 +7544,8 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	 */
 	cs->slotno = slot;
 	cs->seqid = slp->seqid;
-	cp = sp->sn_clnt;
 	sp->sn_laccess = gethrestime_sec();
-
-	rfs4_dbe_hold(cp->dbe);
-	rfs4_update_lease(cp);
-	rfs4_client_rele(cp);
+	rfs4_update_lease(cs->cp);
 
 	/*
 	 * Let's keep it simple for now

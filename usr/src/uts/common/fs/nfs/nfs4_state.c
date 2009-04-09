@@ -970,8 +970,6 @@ rfs4_clean_reclaim_list(nfs_server_instance_t *instp)
 void
 rfs4_client_destroy(rfs4_entry_t u_entry)
 {
-	extern void mds_clean_up_sessions(rfs4_client_t *);
-	extern void mds_clean_up_grants(rfs4_client_t *);
 	rfs4_client_t *cp = (rfs4_client_t *)u_entry;
 	nfs_server_instance_t *instp;
 
