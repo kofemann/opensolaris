@@ -82,6 +82,7 @@ struct pci_devfunc {
 	boolean_t reprogram;	/* this device needs to be reprogrammed */
 };
 
+extern int pseudo_isa;
 extern int pci_bios_nbus;
 static uchar_t max_dev_pci = 32;	/* PCI standard */
 int pci_boot_debug = 0;
@@ -121,6 +122,15 @@ extern int pci_slot_names_prop(int, char *, int);
 
 /* set non-zero to force PCI peer-bus renumbering */
 int pci_bus_always_renumber = 0;
+
+/*
+ * used to register ISA resource usage which must not be made
+ * "available" from other PCI node' resource maps
+ */
+static struct {
+	struct memlist *io_ports_used;
+	struct memlist *mem_space_used;
+} isa_res;
 
 /*
  * Enumerate all PCI devices
@@ -297,55 +307,12 @@ pci_renumber_root_busses(void)
 	}
 }
 
-static void
-remove_resource_range(struct memlist **list, int *ranges, int range_count)
+void
+pci_register_isa_resources(int type, uint32_t base, uint32_t size)
 {
-	struct range {
-		uint32_t base;
-		uint32_t len;
-	};
-	int index;
-
-	for (index = 0; index < range_count; index++) {
-		/* all done if list is or has become empty */
-		if (*list == NULL)
-			break;
-		(void) memlist_remove(list,
-		    (uint64_t)((struct range *)ranges)[index].base,
-		    (uint64_t)((struct range *)ranges)[index].len);
-	}
-}
-
-static void
-remove_used_resources()
-{
-	dev_info_t *used;
-	int	*narray;
-	uint_t	ncount;
-	int	status;
-	int	bus;
-
-	used = ddi_find_devinfo("used-resources", -1, 0);
-	if (used == NULL)
-		return;
-
-	status = ddi_prop_lookup_int_array(DDI_DEV_T_ANY, used,
-	    DDI_PROP_DONTPASS, "io-space", &narray, &ncount);
-	if (status == DDI_PROP_SUCCESS) {
-		for (bus = 0; bus <= pci_bios_nbus; bus++)
-			remove_resource_range(&pci_bus_res[bus].io_ports,
-			    narray, ncount / 2);
-		ddi_prop_free(narray);
-	}
-
-	status = ddi_prop_lookup_int_array(DDI_DEV_T_ANY, used,
-	    DDI_PROP_DONTPASS, "device-memory", &narray, &ncount);
-	if (status == DDI_PROP_SUCCESS) {
-		for (bus = 0; bus <= pci_bios_nbus; bus++)
-			remove_resource_range(&pci_bus_res[bus].mem_space,
-			    narray, ncount / 2);
-		ddi_prop_free(narray);
-	}
+	(void) memlist_insert(
+	    (type == 1) ?  &isa_res.io_ports_used : &isa_res.mem_space_used,
+	    base, size);
 }
 
 /*
@@ -869,11 +836,34 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 		}
 
 		if (pci_bus_res[secbus].mem_reprogram) {
-			/* reprogram PPB regs */
+			/* reprogram PPB MEM regs */
 			pci_putw(bus, dev, func, PCI_BCNF_MEM_BASE,
 			    (uint16_t)((mem_base>>16) & 0xfff0));
 			pci_putw(bus, dev, func, PCI_BCNF_MEM_LIMIT,
 			    (uint16_t)((mem_limit>>16) & 0xfff0));
+			/*
+			 * Disable PMEM window by setting base > limit.
+			 * We currently don't reprogram the PMEM like we've
+			 * done for I/O and MEM. (Devices that support prefetch
+			 * can use non-prefetch MEM.) Anyway, if the MEM access
+			 * bit is initially disabled by BIOS, we disable the
+			 * PMEM window manually by setting PMEM base > PMEM
+			 * limit here, in case there are incorrect values in
+			 * them from BIOS, so that we won't get in trouble once
+			 * the MEM access bit is enabled at the end of this
+			 * function.
+			 */
+			if (!(cmd_reg & PCI_COMM_MAE)) {
+				pci_putw(bus, dev, func, PCI_BCNF_PF_BASE_LOW,
+				    0xfff0);
+				pci_putw(bus, dev, func, PCI_BCNF_PF_LIMIT_LOW,
+				    0x0);
+				pci_putl(bus, dev, func, PCI_BCNF_PF_BASE_HIGH,
+				    0xffffffff);
+				pci_putl(bus, dev, func, PCI_BCNF_PF_LIMIT_HIGH,
+				    0x0);
+			}
+
 			add_ranges_prop(secbus, 1);
 
 			cmn_err(CE_NOTE, "!reprogram mem-range on"
@@ -917,7 +907,7 @@ pci_reprogram(void)
 
 
 		/*
-		 * 2. Remove the used resource lists from the bus resources
+		 * 2. Remove used PCI and ISA resources from bus resource map
 		 */
 
 		memlist_remove_list(&pci_bus_res[bus].io_ports,
@@ -930,8 +920,15 @@ pci_reprogram(void)
 		    pci_bus_res[bus].pmem_space_used);
 		memlist_remove_list(&pci_bus_res[bus].pmem_space,
 		    pci_bus_res[bus].mem_space_used);
+
+		memlist_remove_list(&pci_bus_res[bus].io_ports,
+		    isa_res.io_ports_used);
+		memlist_remove_list(&pci_bus_res[bus].mem_space,
+		    isa_res.mem_space_used);
 	}
 
+	memlist_free_all(&isa_res.io_ports_used);
+	memlist_free_all(&isa_res.mem_space_used);
 
 	/* add bus-range property for root/peer bus nodes */
 	for (i = 0; i <= pci_bios_nbus; i++) {
@@ -952,8 +949,6 @@ pci_reprogram(void)
 		ddi_prop_free(onoff);
 	}
 
-	/* remove used-resources from PCI resource maps */
-	remove_used_resources();
 	remove_subtractive_res();
 
 	/* reprogram the non-subtractive PPB */
@@ -1411,6 +1406,9 @@ set_devpm_d0(uchar_t bus, uchar_t dev, uchar_t func)
 
 }
 
+#define	is_isa(bc, sc)	\
+	(((bc) == PCI_CLASS_BRIDGE) && ((sc) == PCI_BRIDGE_ISA))
+
 static void
 process_devfunc(uchar_t bus, uchar_t dev, uchar_t func, uchar_t header,
     ushort_t vendorid, int config_op)
@@ -1469,6 +1467,8 @@ process_devfunc(uchar_t bus, uchar_t dev, uchar_t func, uchar_t header,
 
 	if (is_display(classcode))
 		(void) snprintf(nodename, sizeof (nodename), "display");
+	else if (!pseudo_isa && is_isa(basecl, subcl))
+		(void) snprintf(nodename, sizeof (nodename), "isa");
 	else if (subvenid != 0)
 		(void) snprintf(nodename, sizeof (nodename),
 		    "pci%x,%x", subvenid, subdevid);
@@ -1688,6 +1688,13 @@ process_devfunc(uchar_t bus, uchar_t dev, uchar_t func, uchar_t header,
 		gfx_devinfo_list = gfxp;
 		if (gfxp->g_next)
 			gfxp->g_next->g_prev = gfxp;
+	}
+
+	/* special handling for isa */
+	if (!pseudo_isa && is_isa(basecl, subcl)) {
+		/* add device_type */
+		(void) ndi_prop_update_string(DDI_DEV_T_NONE, dip,
+		    "device_type", "isa");
 	}
 
 	if (reprogram && (entry != NULL))

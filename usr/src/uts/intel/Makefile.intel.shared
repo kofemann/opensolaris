@@ -194,6 +194,7 @@ DRV_KMODS	+= arp
 DRV_KMODS	+= asy
 DRV_KMODS	+= ata
 DRV_KMODS	+= ath
+DRV_KMODS	+= atu
 DRV_KMODS	+= audio810
 DRV_KMODS	+= audiohd
 DRV_KMODS	+= audioixp
@@ -295,6 +296,7 @@ DRV_KMODS	+= rsm
 DRV_KMODS	+= rts
 DRV_KMODS	+= rtw
 DRV_KMODS	+= rum
+DRV_KMODS	+= rwn
 DRV_KMODS	+= sad
 DRV_KMODS	+= sctp
 DRV_KMODS	+= sctp6
@@ -318,11 +320,13 @@ DRV_KMODS	+= tcp
 DRV_KMODS	+= tcp6
 DRV_KMODS	+= tl
 DRV_KMODS	+= tnf
+DRV_KMODS	+= tpm
 DRV_KMODS	+= udp
 DRV_KMODS	+= udp6
 DRV_KMODS	+= ucode
 DRV_KMODS	+= ural
 DRV_KMODS	+= vgatext
+DRV_KMODS	+= heci
 DRV_KMODS	+= vnic
 DRV_KMODS	+= vscan
 DRV_KMODS	+= wc
@@ -334,6 +338,8 @@ DRV_KMODS	+= zyd
 DRV_KMODS	+= stmf
 DRV_KMODS	+= stmf_sbd
 DRV_KMODS	+= fct
+DRV_KMODS	+= fcoe
+DRV_KMODS	+= fcoet
 DRV_KMODS	+= qlt
 DRV_KMODS	+= iscsit
 DRV_KMODS	+= ncall nsctl sdbc nskern sv
@@ -461,7 +467,7 @@ DRV_KMODS	+= dcam1394
 #
 #	InfiniBand pseudo drivers
 #
-DRV_KMODS	+= ib ibd rdsib sdp
+DRV_KMODS	+= ib ibd rdsib sdp iser
 
 #
 #	LVM modules

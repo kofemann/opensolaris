@@ -365,6 +365,8 @@ usr/include/inet/udp_impl.h		sparc
 usr/include/inet/tcp_impl.h		sparc
 usr/include/inet/ip_impl.h		sparc
 usr/include/inet/ip_ndp.h		sparc
+usr/include/inet/ip2mac.h		sparc
+usr/include/inet/ip2mac_impl.h		sparc
 usr/include/inet/tun.h			sparc
 usr/include/protocols/ripngd.h		sparc
 usr/include/libmail.h			sparc
@@ -511,6 +513,7 @@ usr/lib/libinetsvc.so			sparc
 # the shared object is shipped.
 #
 usr/include/libinetutil.h		sparc
+usr/include/ofmt.h			sparc
 usr/include/netinet/inetutil.h		sparc
 usr/lib/llib-linetutil			sparc
 usr/lib/llib-linetutil.ln		sparc
@@ -1273,7 +1276,6 @@ usr/include/sys/fibre-channel/ulp/fcsm.h	sparc
 # private AVS headers
 #
 usr/bin/sd_stats			sparc
-usr/bin/errgen				sparc
 usr/bin/dscfgcli			sparc
 usr/bin/sd_diag				sparc
 usr/include/nsctl.h			sparc

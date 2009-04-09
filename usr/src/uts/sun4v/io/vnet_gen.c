@@ -73,8 +73,11 @@
 /* vgen proxy entry points */
 int vgen_init(void *vnetp, uint64_t regprop, dev_info_t *vnetdip,
     const uint8_t *macaddr, void **vgenhdl);
-int vgen_uninit(void *arg);
+void vgen_uninit(void *arg);
 int vgen_dds_tx(void *arg, void *dmsg);
+void vgen_mod_init(void);
+int vgen_mod_cleanup(void);
+void vgen_mod_fini(void);
 static int vgen_start(void *arg);
 static void vgen_stop(void *arg);
 static mblk_t *vgen_tx(void *arg, mblk_t *mp);
@@ -332,6 +335,9 @@ uint32_t vgen_tx_delay = 0x30;		/* delay when tx descr not available */
 
 int vgen_rcv_thread_enabled = 1;	/* Enable Recieve thread */
 
+static vio_mblk_pool_t	*vgen_rx_poolp = NULL;
+static krwlock_t	vgen_rw;
+
 /*
  * max # of packets accumulated prior to sending them up. It is best
  * to keep this at 60% of the number of recieve buffers.
@@ -527,7 +533,7 @@ vgen_init_fail:
  * Called by vnet to undo the initializations done by vgen_init().
  * The handle provided by generic transport during vgen_init() is the argument.
  */
-int
+void
 vgen_uninit(void *arg)
 {
 	vgen_t		*vgenp = (vgen_t *)arg;
@@ -535,7 +541,7 @@ vgen_uninit(void *arg)
 	vio_mblk_pool_t	*nrp;
 
 	if (vgenp == NULL) {
-		return (DDI_FAILURE);
+		return;
 	}
 
 	DBG1(vgenp, NULL, "enter\n");
@@ -556,9 +562,10 @@ vgen_uninit(void *arg)
 	while (rp != NULL) {
 		nrp = vgenp->rmp = rp->nextp;
 		if (vio_destroy_mblks(rp)) {
-			vgenp->rmp = rp;
-			mutex_exit(&vgenp->lock);
-			return (DDI_FAILURE);
+			WRITE_ENTER(&vgen_rw);
+			rp->nextp = vgen_rx_poolp;
+			vgen_rx_poolp = rp;
+			RW_EXIT(&vgen_rw);
 		}
 		rp = nrp;
 	}
@@ -580,8 +587,52 @@ vgen_uninit(void *arg)
 
 	DBG1(vgenp, NULL, "exit\n");
 	KMEM_FREE(vgenp);
+}
 
-	return (DDI_SUCCESS);
+/*
+ * module specific initialization common to all instances of vnet/vgen.
+ */
+void
+vgen_mod_init(void)
+{
+	rw_init(&vgen_rw, NULL, RW_DRIVER, NULL);
+}
+
+/*
+ * module specific cleanup common to all instances of vnet/vgen.
+ */
+int
+vgen_mod_cleanup(void)
+{
+	vio_mblk_pool_t	*poolp, *npoolp;
+
+	/*
+	 * If any rx mblk pools are still in use, return
+	 * error and stop the module from unloading.
+	 */
+	WRITE_ENTER(&vgen_rw);
+	poolp = vgen_rx_poolp;
+	while (poolp != NULL) {
+		npoolp = vgen_rx_poolp = poolp->nextp;
+		if (vio_destroy_mblks(poolp) != 0) {
+			vgen_rx_poolp = poolp;
+			RW_EXIT(&vgen_rw);
+			return (EBUSY);
+		}
+		poolp = npoolp;
+	}
+	RW_EXIT(&vgen_rw);
+
+	return (0);
+}
+
+/*
+ * module specific uninitialization common to all instances of vnet/vgen.
+ */
+void
+vgen_mod_fini(void)
+{
+	rw_destroy(&vgen_rw);
 }
 
 /* enable transmit/receive for the device */
@@ -1321,11 +1372,9 @@ vgen_detach_ports(vgen_t *vgenp)
 
 	plistp = &(vgenp->vgenports);
 	WRITE_ENTER(&plistp->rwlock);
-
 	while ((portp = plistp->headp) != NULL) {
 		vgen_port_detach(portp);
 	}
-
 	RW_EXIT(&plistp->rwlock);
 }
 
@@ -2830,9 +2879,18 @@ vgen_ldc_attach(vgen_port_t *portp, uint64_t ldc_id)
 	/* allocate receive resources */
 	status = vgen_init_multipools(ldcp);
 	if (status != 0) {
-		goto ldc_attach_failed;
+		/*
+		 * We do not return failure if receive mblk pools can't be
+		 * allocated; instead allocb(9F) will be used to dynamically
+		 * allocate buffers during receive.
+		 */
+		DWARN(vgenp, ldcp,
+		    "vnet%d: status(%d), failed to allocate rx mblk pools for "
+		    "channel(0x%lx)\n",
+		    vgenp->instance, status, ldcp->ldc_id);
+	} else {
+		attach_state |= AST_create_rxmblks;
 	}
-	attach_state |= AST_create_rxmblks;
 
 	/* Setup kstats for the channel */
 	instance = vgenp->instance;
@@ -2870,7 +2928,6 @@ ldc_attach_failed:
 	}
 	if (attach_state & AST_create_rxmblks) {
 		vio_mblk_pool_t *fvmp = NULL;
-
 		vio_destroy_multipools(&ldcp->vmp, &fvmp);
 		ASSERT(fvmp == NULL);
 	}
@@ -6636,7 +6693,6 @@ vgen_ldc_rcv_worker(void *arg)
 	CALLB_CPR_INIT(&cprinfo, &ldcp->rcv_thr_lock, callb_generic_cpr,
 	    "vnet_rcv_thread");
 	mutex_enter(&ldcp->rcv_thr_lock);
-	ldcp->rcv_thr_flags |= VGEN_WTHR_RUNNING;
 	while (!(ldcp->rcv_thr_flags & VGEN_WTHR_STOP)) {
 
 		CALLB_CPR_SAFE_BEGIN(&cprinfo);
@@ -6670,9 +6726,10 @@ vgen_ldc_rcv_worker(void *arg)
 	 * Update the run status and wakeup the thread that
 	 * has sent the stop request.
 	 */
-	ldcp->rcv_thr_flags &= ~VGEN_WTHR_RUNNING;
-	cv_signal(&ldcp->rcv_thr_cv);
+	ldcp->rcv_thr_flags &= ~VGEN_WTHR_STOP;
+	ldcp->rcv_thread = NULL;
 	CALLB_CPR_EXIT(&cprinfo);
+
 	thread_exit();
 	DBG1(vgenp, ldcp, "exit\n");
 }
@@ -6681,6 +6738,7 @@ vgen_ldc_rcv_worker(void *arg)
 static void
 vgen_stop_rcv_thread(vgen_ldc_t *ldcp)
 {
+	kt_did_t	tid = 0;
 	vgen_t *vgenp = LDC_TO_VGEN(ldcp);
 
 	DBG1(vgenp, ldcp, "enter\n");
@@ -6689,16 +6747,16 @@ vgen_stop_rcv_thread(vgen_ldc_t *ldcp)
 	 * wait until the receive thread stops.
 	 */
 	mutex_enter(&ldcp->rcv_thr_lock);
-	if (ldcp->rcv_thr_flags & VGEN_WTHR_RUNNING) {
+	if (ldcp->rcv_thread != NULL) {
+		tid = ldcp->rcv_thread->t_did;
 		ldcp->rcv_thr_flags |= VGEN_WTHR_STOP;
 		cv_signal(&ldcp->rcv_thr_cv);
-		DBG2(vgenp, ldcp, "waiting...");
-		while (ldcp->rcv_thr_flags & VGEN_WTHR_RUNNING) {
-			cv_wait(&ldcp->rcv_thr_cv, &ldcp->rcv_thr_lock);
-		}
 	}
 	mutex_exit(&ldcp->rcv_thr_lock);
-	ldcp->rcv_thread = NULL;
+
+	if (tid != 0) {
+		thread_join(tid);
+	}
 	DBG1(vgenp, ldcp, "exit\n");
 }
 

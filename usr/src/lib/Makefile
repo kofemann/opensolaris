@@ -152,6 +152,7 @@ SUBDIRS += \
 	libkrb5	.WAIT	\
 	krb5	.WAIT	\
 	libsmbfs	\
+	libfcoe		\
 	libstmf		\
 	libnsctl	\
 	libunistat	\
@@ -250,6 +251,7 @@ SUBDIRS += \
 	libipmi		\
 	libexacct/demo	\
 	libvscan	\
+	libgrubmgmt	\
 	smbsrv		\
 	scsi		\
 	mms		\
@@ -312,10 +314,12 @@ MSGSUBDIRS=		\
 	libdiskmgt	\
 	libdladm	\
 	libdll		\
+	libgrubmgmt	\
 	libgss		\
 	libidmap	\
 	libinetcfg	\
 	libipmp		\
+	libinetutil	\
 	libnsl		\
 	libpam		\
 	libpicl		\
@@ -431,6 +435,7 @@ HDRSUBDIRS=		\
 	libslp		\
 	libsmedia	\
 	libsqlite	\
+	libfcoe		\
 	libstmf		\
 	libsum		\
 	libsysevent	\
@@ -463,6 +468,7 @@ HDRSUBDIRS=		\
 	libshare	\
 	libidmap	\
 	libvscan	\
+	libgrubmgmt	\
 	smbsrv		\
 	libdserv	\
 	libnfs		\
@@ -548,7 +554,8 @@ libdevinfo:	libnvpair libsec
 libdhcpagent:	libsocket libdhcputil libuuid libdlpi
 libdhcpsvc:	libinetutil
 libdhcputil:	libnsl libgen libinetutil libdlpi
-libdladm:	libdevinfo libinetutil libsocket libnsl libexacct libscf
+libdladm:	libdevinfo libinetutil libsocket libscf librcm libnvpair \
+		libexacct libnsl libkstat libcurses
 libdll: 	libast
 libdlpi:	libinetutil libdladm
 libdscfg:	libnsctl libunistat libsocket libnsl
@@ -590,7 +597,7 @@ libwanboot:	libnvpair libresolv libnsl libsocket libdevinfo libinetutil \
 		libdhcputil openssl
 libwanbootutil:	libnsl
 pam_modules:	libproject passwdutil $(SMARTCARD) smbsrv
-libscf:		libuutil libmd libgen
+libscf:		libuutil libmd libgen libsmbios
 libinetsvc:	libscf
 librestart:	libuutil libscf
 ../cmd/sgs/libdl:	../cmd/sgs/libconv
@@ -613,6 +620,7 @@ smbsrv:		libsocket libnsl libmd libxnet libpthread librt \
 libvscan:	libscf
 scsi:		libnvpair
 mpapi:		libpthread libdevinfo libsysevent libnvpair
+libgrubmgmt:	libdevinfo libzfs libfstyp
 
 #
 # The reason this rule checks for the existence of the

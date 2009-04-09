@@ -325,7 +325,7 @@ static ohci_trans_wrapper_t  *ohci_create_isoc_transfer_wrapper(
 				ushort_t		pkt_count,
 				size_t			td_count,
 				uint_t			usb_flags);
-static int	ohci_allocate_tds_for_tw(
+int	ohci_allocate_tds_for_tw(
 				ohci_state_t		*ohcip,
 				ohci_trans_wrapper_t	*tw,
 				size_t			td_count);
@@ -2062,6 +2062,16 @@ ohci_alloc_hcdi_ops(ohci_state_t	*ohcip)
 	    ohci_hcdi_polled_input_exit;
 	usba_hcdi_ops->usba_hcdi_console_input_fini =
 	    ohci_hcdi_polled_input_fini;
+
+	usba_hcdi_ops->usba_hcdi_console_output_init =
+	    ohci_hcdi_polled_output_init;
+	usba_hcdi_ops->usba_hcdi_console_output_enter =
+	    ohci_hcdi_polled_output_enter;
+	usba_hcdi_ops->usba_hcdi_console_write = ohci_hcdi_polled_write;
+	usba_hcdi_ops->usba_hcdi_console_output_exit =
+	    ohci_hcdi_polled_output_exit;
+	usba_hcdi_ops->usba_hcdi_console_output_fini =
+	    ohci_hcdi_polled_output_fini;
 
 	return (usba_hcdi_ops);
 }
@@ -6752,7 +6762,7 @@ ohci_td_iommu_to_cpu(
  * Returns USB_NO_RESOURCES if it was not able to allocate all the requested TD
  * otherwise USB_SUCCESS.
  */
-static int
+int
 ohci_allocate_tds_for_tw(
 	ohci_state_t		*ohcip,
 	ohci_trans_wrapper_t	*tw,
@@ -6884,14 +6894,9 @@ ohci_create_transfer_wrapper(
 		return (NULL);
 	}
 
-	/* SLEEP flag should not be used in interrupt context */
-	if (servicing_interrupt()) {
-		kmem_flag = KM_NOSLEEP;
-		dmamem_wait = DDI_DMA_DONTWAIT;
-	} else {
-		kmem_flag = KM_SLEEP;
-		dmamem_wait = DDI_DMA_SLEEP;
-	}
+	/* SLEEP flag should not be used while holding mutex */
+	kmem_flag = KM_NOSLEEP;
+	dmamem_wait = DDI_DMA_DONTWAIT;
 
 	/* Allocate space for the transfer wrapper */
 	tw = kmem_zalloc(sizeof (ohci_trans_wrapper_t), kmem_flag);
@@ -11302,6 +11307,10 @@ ohci_quiesce(dev_info_t *dip)
 	if (ohcip == NULL)
 		return (DDI_FAILURE);
 
+#ifndef lint
+	_NOTE(NO_COMPETING_THREADS_NOW);
+#endif
+
 	if (ohcip->ohci_flags & OHCI_INTR) {
 
 		/* Disable all HC ED list processing */
@@ -11347,6 +11356,9 @@ ohci_quiesce(dev_info_t *dip)
 		Set_OpReg(hcr_cmd_status, HCR_STATUS_RESET);
 	}
 
+#ifndef lint
+	_NOTE(COMPETING_THREADS_NOW);
+#endif
 	return (DDI_SUCCESS);
 }
 #endif	/* __sparc */

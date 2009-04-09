@@ -1033,6 +1033,12 @@ uninit_node(dev_info_t *dip)
 
 	error = (*f)(pdip, pdip, DDI_CTLOPS_UNINITCHILD, dip, (void *)NULL);
 	if (error == DDI_SUCCESS) {
+		/* ensure that devids are unregistered */
+		if (DEVI(dip)->devi_flags & DEVI_REGISTERED_DEVID) {
+			DEVI(dip)->devi_flags &= ~DEVI_REGISTERED_DEVID;
+			ddi_devid_unregister(dip);
+		}
+
 		/* if uninitchild forgot to set devi_addr to NULL do it now */
 		ddi_set_name_addr(dip, NULL);
 
@@ -1224,14 +1230,7 @@ attach_node(dev_info_t *dip)
 
 	if (rv != DDI_SUCCESS) {
 		DEVI_CLR_NEED_RESET(dip);
-
-		/* ensure that devids are unregistered */
-		if (DEVI(dip)->devi_flags & DEVI_REGISTERED_DEVID) {
-			DEVI(dip)->devi_flags &= ~DEVI_REGISTERED_DEVID;
-			mutex_exit(&DEVI(dip)->devi_lock);
-			ddi_devid_unregister(dip);
-		} else
-			mutex_exit(&DEVI(dip)->devi_lock);
+		mutex_exit(&DEVI(dip)->devi_lock);
 
 		/*
 		 * Cleanup dacf reservations
@@ -1347,14 +1346,7 @@ detach_node(dev_info_t *dip, uint_t flag)
 	/* a detached node can't have attached or .conf children */
 	mutex_enter(&DEVI(dip)->devi_lock);
 	DEVI(dip)->devi_flags &= ~(DEVI_MADE_CHILDREN|DEVI_ATTACHED_CHILDREN);
-
-	/* ensure that devids registered during attach are unregistered */
-	if (DEVI(dip)->devi_flags & DEVI_REGISTERED_DEVID) {
-		DEVI(dip)->devi_flags &= ~DEVI_REGISTERED_DEVID;
-		mutex_exit(&DEVI(dip)->devi_lock);
-		ddi_devid_unregister(dip);
-	} else
-		mutex_exit(&DEVI(dip)->devi_lock);
+	mutex_exit(&DEVI(dip)->devi_lock);
 
 	/*
 	 * If the instance has successfully detached in detach_driver() context,
@@ -3717,9 +3709,9 @@ ddi_is_pci_dip(dev_info_t *dip)
  * the ioc, look for minor node dhcp. If not found, pass ":dhcp"
  * to ioc's bus_config entry point.
  */
-static int
-parse_pathname(char *pathname,
-	dev_info_t **dipp, dev_t *devtp, int *spectypep, dev_info_t **pci_dipp)
+int
+resolve_pathname(char *pathname,
+	dev_info_t **dipp, dev_t *devtp, int *spectypep)
 {
 	int			error;
 	dev_info_t		*parent, *child;
@@ -3731,9 +3723,6 @@ parse_pathname(char *pathname,
 	int			spectype;
 	struct ddi_minor_data	*dmn;
 	int			circ;
-
-	if (pci_dipp)
-		*pci_dipp = NULL;
 
 	if (*pathname != '/')
 		return (EINVAL);
@@ -3777,10 +3766,6 @@ parse_pathname(char *pathname,
 			pn_free(&pn);
 			kmem_free(component, MAXNAMELEN);
 			kmem_free(config_name, MAXNAMELEN);
-			if (pci_dipp && *pci_dipp) {
-				ndi_rele_devi(*pci_dipp);
-				*pci_dipp = NULL;
-			}
 			return (-1);
 		}
 
@@ -3788,15 +3773,6 @@ parse_pathname(char *pathname,
 		ndi_rele_devi(parent);
 		parent = child;
 		pn_skipslash(&pn);
-		if (pci_dipp) {
-			if (ddi_is_pci_dip(child)) {
-				ndi_hold_devi(child);
-				if (*pci_dipp != NULL) {
-					ndi_rele_devi(*pci_dipp);
-				}
-				*pci_dipp = child;
-			}
-		}
 	}
 
 	/*
@@ -3814,10 +3790,6 @@ parse_pathname(char *pathname,
 			kmem_free(config_name, MAXNAMELEN);
 			NDI_CONFIG_DEBUG((CE_NOTE,
 			    "%s: minor node not found\n", pathname));
-			if (pci_dipp && *pci_dipp) {
-				ndi_rele_devi(*pci_dipp);
-				*pci_dipp = NULL;
-			}
 			return (-1);
 		}
 		minorname = NULL;	/* look for default minor */
@@ -3876,7 +3848,7 @@ parse_pathname(char *pathname,
 	 */
 	if (dipp != NULL)
 		*dipp = parent;
-	else if (pci_dipp == NULL) {
+	else {
 		/*
 		 * We should really keep the ref count to keep the node from
 		 * detaching but ddi_pathname_to_dev_t() specifies a NULL dipp,
@@ -3892,9 +3864,6 @@ parse_pathname(char *pathname,
 		 * In addition, the callers of this new interfaces would then
 		 * need to call ndi_rele_devi when the reference is complete.
 		 *
-		 * NOTE: If pci_dipp is non-NULL we are only interested
-		 * in the PCI parent which is returned held. No need to hold
-		 * the leaf dip.
 		 */
 		(void) ddi_prop_update_int(DDI_DEV_T_NONE, parent,
 		    DDI_NO_AUTODETACH, 1);
@@ -3902,19 +3871,6 @@ parse_pathname(char *pathname,
 	}
 
 	return (0);
-}
-
-int
-resolve_pathname(char *pathname,
-	dev_info_t **dipp, dev_t *devtp, int *spectypep)
-{
-	return (parse_pathname(pathname, dipp, devtp, spectypep, NULL));
-}
-
-int
-ddi_find_pci_parent(char *pathname, dev_info_t **pci_dipp)
-{
-	return (parse_pathname(pathname, NULL, NULL, NULL, pci_dipp));
 }
 
 /*
@@ -6612,6 +6568,7 @@ hold_devi(major_t major, int instance, int flags)
 	struct devnames	*dnp;
 	dev_info_t	*dip;
 	char		*path;
+	char		*vpath;
 
 	if ((major >= devcnt) || (instance == -1))
 		return (NULL);
@@ -6665,8 +6622,26 @@ hold_devi(major_t major, int instance, int flags)
 
 	/* reconstruct the path and drive attach by path through devfs. */
 	path = kmem_alloc(MAXPATHLEN, KM_SLEEP);
-	if (e_ddi_majorinstance_to_path(major, instance, path) == 0)
+	if (e_ddi_majorinstance_to_path(major, instance, path) == 0) {
 		dip = e_ddi_hold_devi_by_path(path, flags);
+
+		/*
+		 * Verify that we got the correct device - a path_to_inst file
+		 * with a bogus/corrupt path (or a nexus that changes its
+		 * unit-address format) could result in an incorrect answer
+		 *
+		 * Verify major, instance, and path.
+		 */
+		vpath = kmem_alloc(MAXPATHLEN, KM_SLEEP);
+		if (dip &&
+		    ((DEVI(dip)->devi_major != major) ||
+		    ((DEVI(dip)->devi_instance != instance)) ||
+		    (strcmp(path, ddi_pathname(dip, vpath)) != 0))) {
+			ndi_rele_devi(dip);
+			dip = NULL;	/* no answer better than wrong answer */
+		}
+		kmem_free(vpath, MAXPATHLEN);
+	}
 	kmem_free(path, MAXPATHLEN);
 	return (dip);			/* with devi held */
 }

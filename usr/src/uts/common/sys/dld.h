@@ -37,13 +37,9 @@
 
 #include <sys/types.h>
 #include <sys/stream.h>
-#include <sys/dld_ioc.h>
 #include <sys/mac_flow.h>
 #include <sys/conf.h>
 #include <sys/sad.h>
-#include <net/if.h>
-#include <sys/ddi.h>
-#include <sys/sunddi.h>
 #include <sys/mac.h>
 
 #ifdef	__cplusplus
@@ -411,6 +407,9 @@ int	dld_open(queue_t *, dev_t *, int, int, cred_t *);
 int	dld_close(queue_t *);
 void	dld_wput(queue_t *, mblk_t *);
 void	dld_wsrv(queue_t *);
+int	dld_str_open(queue_t *, dev_t *, void *);
+int	dld_str_close(queue_t *);
+void	*dld_str_private(queue_t *);
 void	dld_init_ops(struct dev_ops *, const char *);
 void	dld_fini_ops(struct dev_ops *);
 int	dld_autopush(dev_t *, struct dlautopush *);

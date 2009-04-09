@@ -819,8 +819,6 @@ static void	conn_drain_fini(ip_stack_t *);
 static void	conn_drain_tail(conn_t *connp, boolean_t closing);
 
 static void	conn_walk_drain(ip_stack_t *, idl_tx_list_t *);
-static void	conn_walk_fanout_table(connf_t *, uint_t, pfv_t, void *,
-    zoneid_t);
 static void	conn_setqfull(conn_t *);
 static void	conn_clrqfull(conn_t *);
 
@@ -860,8 +858,6 @@ static int	icmp_kstat_update(kstat_t *kp, int rw);
 static void	*ip_kstat2_init(netstackid_t, ip_stat_t *);
 static void	ip_kstat2_fini(netstackid_t, kstat_t *);
 
-static int	ip_conn_report(queue_t *, mblk_t *, caddr_t, cred_t *);
-
 static mblk_t	*ip_tcp_input(mblk_t *, ipha_t *, ill_t *, boolean_t,
     ire_t *, mblk_t *, uint_t, queue_t *, ill_rx_ring_t *);
 
@@ -873,7 +869,8 @@ static void ipobs_fini(ip_stack_t *);
 ipaddr_t	ip_g_all_ones = IP_HOST_MASK;
 
 /* How long, in seconds, we allow frags to hang around. */
-#define	IP_FRAG_TIMEOUT	15
+#define	IP_FRAG_TIMEOUT		15
+#define	IPV6_FRAG_TIMEOUT	60
 
 /*
  * Threshold which determines whether MDT should be used when
@@ -1000,21 +997,11 @@ static ipndp_t	lcl_ndp_arr[] = {
 #define	IPNDP_IP6_FORWARDING_OFFSET	1
 	{  ip_param_generic_get,	ip_forward_set,	NULL,
 	    "ip6_forwarding" },
-	{  ip_ill_report,	NULL,		NULL,
-	    "ip_ill_status" },
-	{  ip_ipif_report,	NULL,		NULL,
-	    "ip_ipif_status" },
-	{  ip_conn_report,	NULL,		NULL,
-	    "ip_conn_status" },
-	{  nd_get_long,		nd_set_long,	(caddr_t)&ip_rput_pullups,
-	    "ip_rput_pullups" },
-	{  ip_srcid_report,	NULL,		NULL,
-	    "ip_srcid_status" },
 	{ ip_param_generic_get, ip_input_proc_set,
 	    (caddr_t)&ip_squeue_enter, "ip_squeue_enter" },
 	{ ip_param_generic_get, ip_int_set,
 	    (caddr_t)&ip_squeue_fanout, "ip_squeue_fanout" },
-#define	IPNDP_CGTP_FILTER_OFFSET	9
+#define	IPNDP_CGTP_FILTER_OFFSET	4
 	{  ip_cgtp_filter_get,	ip_cgtp_filter_set, NULL,
 	    "ip_cgtp_filter" },
 	{  ip_param_generic_get, ip_int_set, (caddr_t)&ip_debug,
@@ -6057,6 +6044,8 @@ ip_stack_init(netstackid_t stackid, netstack_t *ns)
 
 	ipst->ips_ip_g_frag_timeout = IP_FRAG_TIMEOUT;
 	ipst->ips_ip_g_frag_timo_ms = IP_FRAG_TIMEOUT * 1000;
+	ipst->ips_ipv6_frag_timeout = IPV6_FRAG_TIMEOUT;
+	ipst->ips_ipv6_frag_timo_ms = IPV6_FRAG_TIMEOUT * 1000;
 
 	ipst->ips_ip_multirt_log_interval = 1000;
 
@@ -13002,12 +12991,8 @@ ip_tcp_input(mblk_t *mp, ipha_t *ipha, ill_t *recv_ill, boolean_t mctl_present,
 
 	/* multiple mblks of tcp data? */
 	if ((mp1 = mp->b_cont) != NULL) {
-		/* more then two? */
-		if (mp1->b_cont != NULL) {
-			IP_STAT(ipst, ip_multipkttcp);
-			goto multipkttcp;
-		}
-		len += mp1->b_wptr - mp1->b_rptr;
+		IP_STAT(ipst, ip_multipkttcp);
+		len += msgdsize(mp1);
 	}
 
 	up = (uint16_t *)(rptr + IP_SIMPLE_HDR_LENGTH + TCP_PORTS_OFFSET);
@@ -13315,10 +13300,8 @@ tcpoptions:
 	}
 
 	/* Get the total packet length in len, including headers. */
-	if (mp->b_cont) {
-multipkttcp:
+	if (mp->b_cont)
 		len = msgdsize(mp);
-	}
 
 	/*
 	 * Check the TCP checksum by pulling together the pseudo-
@@ -15825,8 +15808,6 @@ ip_rput_dlpi_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
 
 		switch (dlea->dl_error_primitive) {
 		case DL_DISABMULTI_REQ:
-			if (!ill->ill_isv6)
-				ipsq_current_finish(ipsq);
 			ill_dlpi_done(ill, dlea->dl_error_primitive);
 			break;
 		case DL_PROMISCON_REQ:
@@ -15902,18 +15883,17 @@ ip_rput_dlpi_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
 				mp1 = ipsq_pending_mp_get(ipsq, &connp);
 			if (mp1 != NULL) {
 				/*
-				 * This operation (SIOCSLIFFLAGS) must have
-				 * happened from a conn.
+				 * This might be a result of a DL_NOTE_REPLUMB
+				 * notification. In that case, connp is NULL.
 				 */
-				ASSERT(connp != NULL);
-				q = CONNP_TO_WQ(connp);
+				if (connp != NULL)
+					q = CONNP_TO_WQ(connp);
+
 				(void) ipif_down(ipif, NULL, NULL);
 				/* error is set below the switch */
 			}
 			break;
 		case DL_ENABMULTI_REQ:
-			if (!ill->ill_isv6)
-				ipsq_current_finish(ipsq);
 			ill_dlpi_done(ill, DL_ENABMULTI_REQ);
 
 			if (ill->ill_dlpi_multicast_state == IDS_INPROGRESS)
@@ -16030,11 +16010,11 @@ ip_rput_dlpi_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
 		if (mp1 == NULL)
 			break;
 		/*
-		 * Because mp1 was added by ill_dl_up(), and it always
-		 * passes a valid connp, connp must be valid here.
+		 * mp1 was added by ill_dl_up(). if that is a result of
+		 * a DL_NOTE_REPLUMB notification, connp could be NULL.
 		 */
-		ASSERT(connp != NULL);
-		q = CONNP_TO_WQ(connp);
+		if (connp != NULL)
+			q = CONNP_TO_WQ(connp);
 
 		/*
 		 * We are exclusive. So nothing can change even after
@@ -16056,12 +16036,14 @@ ip_rput_dlpi_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
 		 */
 		if (ill->ill_isv6) {
 			if (ill->ill_flags & ILLF_XRESOLV) {
-				mutex_enter(&connp->conn_lock);
+				if (connp != NULL)
+					mutex_enter(&connp->conn_lock);
 				mutex_enter(&ill->ill_lock);
 				success = ipsq_pending_mp_add(connp, ipif, q,
 				    mp1, 0);
 				mutex_exit(&ill->ill_lock);
-				mutex_exit(&connp->conn_lock);
+				if (connp != NULL)
+					mutex_exit(&connp->conn_lock);
 				if (success) {
 					err = ipif_resolver_up(ipif,
 					    Res_act_initial);
@@ -16087,11 +16069,13 @@ ip_rput_dlpi_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
 			 * Leave the pending mblk intact so that
 			 * the ioctl completes in ip_rput().
 			 */
-			mutex_enter(&connp->conn_lock);
+			if (connp != NULL)
+				mutex_enter(&connp->conn_lock);
 			mutex_enter(&ill->ill_lock);
 			success = ipsq_pending_mp_add(connp, ipif, q, mp1, 0);
 			mutex_exit(&ill->ill_lock);
-			mutex_exit(&connp->conn_lock);
+			if (connp != NULL)
+				mutex_exit(&connp->conn_lock);
 			if (success) {
 				err = ipif_resolver_up(ipif, Res_act_initial);
 				if (err == EINPROGRESS) {
@@ -16152,6 +16136,15 @@ ip_rput_dlpi_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
 		case DL_NOTE_PHYS_ADDR:
 			err = ill_set_phys_addr(ill, mp);
 			break;
+
+		case DL_NOTE_REPLUMB:
+			/*
+			 * Directly return after calling ill_replumb().
+			 * Note that we should not free mp as it is reused
+			 * in the ill_replumb() function.
+			 */
+			err = ill_replumb(ill, mp);
+			return;
 
 		case DL_NOTE_FASTPATH_FLUSH:
 			ill_fastpath_flush(ill);
@@ -16462,8 +16455,6 @@ ip_rput_dlpi_writer(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
 		switch (dloa->dl_correct_primitive) {
 		case DL_ENABMULTI_REQ:
 		case DL_DISABMULTI_REQ:
-			if (!ill->ill_isv6)
-				ipsq_current_finish(ipsq);
 			ill_dlpi_done(ill, dloa->dl_correct_primitive);
 			break;
 		case DL_PROMISCON_REQ:
@@ -17334,6 +17325,7 @@ ill_frag_timer(void *arg)
 	ill_t	*ill = (ill_t *)arg;
 	boolean_t frag_pending;
 	ip_stack_t	*ipst = ill->ill_ipst;
+	time_t	timeout;
 
 	mutex_enter(&ill->ill_lock);
 	ASSERT(!ill->ill_fragtimer_executing);
@@ -17345,7 +17337,12 @@ ill_frag_timer(void *arg)
 	ill->ill_fragtimer_executing = 1;
 	mutex_exit(&ill->ill_lock);
 
-	frag_pending = ill_frag_timeout(ill, ipst->ips_ip_g_frag_timeout);
+	if (ill->ill_isv6)
+		timeout = ipst->ips_ipv6_frag_timeout;
+	else
+		timeout = ipst->ips_ip_g_frag_timeout;
+
+	frag_pending = ill_frag_timeout(ill, timeout);
 
 	/*
 	 * Restart the timer, if we have fragments pending or if someone
@@ -17363,6 +17360,7 @@ void
 ill_frag_timer_start(ill_t *ill)
 {
 	ip_stack_t	*ipst = ill->ill_ipst;
+	clock_t	timeo_ms;
 
 	ASSERT(MUTEX_HELD(&ill->ill_lock));
 
@@ -17382,13 +17380,17 @@ ill_frag_timer_start(ill_t *ill)
 	}
 
 	if (ill->ill_frag_timer_id == 0) {
+		if (ill->ill_isv6)
+			timeo_ms = ipst->ips_ipv6_frag_timo_ms;
+		else
+			timeo_ms = ipst->ips_ip_g_frag_timo_ms;
 		/*
 		 * The timer is neither running nor is the timeout handler
 		 * executing. Post a timeout so that ill_frag_timer will be
 		 * called
 		 */
 		ill->ill_frag_timer_id = timeout(ill_frag_timer, ill,
-		    MSEC_TO_TICK(ipst->ips_ip_g_frag_timo_ms >> 1));
+		    MSEC_TO_TICK(timeo_ms >> 1));
 		ill->ill_fragtimer_needrestart = 0;
 	}
 }
@@ -27048,20 +27050,6 @@ ip_process_ioctl(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *arg)
 	ipsq_current_start(ipsq, ci.ci_ipif, ipip->ipi_cmd);
 
 	/*
-	 * For most set ioctls that come here, this serves as a single point
-	 * where we set the IPIF_CHANGING flag. This ensures that there won't
-	 * be any new references to the ipif. This helps functions that go
-	 * through this path and end up trying to wait for the refcnts
-	 * associated with the ipif to go down to zero.  The exception is
-	 * SIOCSLIFREMOVEIF, which sets IPIF_CONDEMNED internally after
-	 * identifying the right ipif to operate on.
-	 */
-	mutex_enter(&(ci.ci_ipif)->ipif_ill->ill_lock);
-	if (ipip->ipi_cmd != SIOCLIFREMOVEIF)
-		(ci.ci_ipif)->ipif_state_flags |= IPIF_CHANGING;
-	mutex_exit(&(ci.ci_ipif)->ipif_ill->ill_lock);
-
-	/*
 	 * A return value of EINPROGRESS means the ioctl is
 	 * either queued and waiting for some reason or has
 	 * already completed.
@@ -27321,7 +27309,7 @@ nak:
 			break;
 		switch (((arc_t *)mp->b_rptr)->arc_cmd) {
 		case AR_ENTRY_SQUERY:
-			ip_wput_ctl(q, mp);
+			putnext(q, mp);
 			return;
 		case AR_CLIENT_NOTIFY:
 			ip_arp_news(q, mp);
@@ -28464,30 +28452,6 @@ ill_flow_enable(void *arg, ip_mac_tx_cookie_t cookie)
 }
 
 /*
- * Walk the list of all conn's calling the function provided with the
- * specified argument for each.	 Note that this only walks conn's that
- * have been bound.
- * Applies to both IPv4 and IPv6.
- */
-static void
-conn_walk_fanout(pfv_t func, void *arg, zoneid_t zoneid, ip_stack_t *ipst)
-{
-	conn_walk_fanout_table(ipst->ips_ipcl_udp_fanout,
-	    ipst->ips_ipcl_udp_fanout_size,
-	    func, arg, zoneid);
-	conn_walk_fanout_table(ipst->ips_ipcl_conn_fanout,
-	    ipst->ips_ipcl_conn_fanout_size,
-	    func, arg, zoneid);
-	conn_walk_fanout_table(ipst->ips_ipcl_bind_fanout,
-	    ipst->ips_ipcl_bind_fanout_size,
-	    func, arg, zoneid);
-	conn_walk_fanout_table(ipst->ips_ipcl_proto_fanout,
-	    IPPROTO_MAX, func, arg, zoneid);
-	conn_walk_fanout_table(ipst->ips_ipcl_proto_fanout_v6,
-	    IPPROTO_MAX, func, arg, zoneid);
-}
-
-/*
  * Flowcontrol has relieved, and STREAMS has backenabled us. For each list
  * of conns that need to be drained, check if drain is already in progress.
  * If so set the idl_repeat bit, indicating that the last conn in the list
@@ -28524,97 +28488,6 @@ conn_walk_drain(ip_stack_t *ipst, idl_tx_list_t *tx_list)
 		}
 		mutex_exit(&idl->idl_lock);
 	}
-}
-
-/*
- * Walk an conn hash table of `count' buckets, calling func for each entry.
- */
-static void
-conn_walk_fanout_table(connf_t *connfp, uint_t count, pfv_t func, void *arg,
-    zoneid_t zoneid)
-{
-	conn_t	*connp;
-
-	while (count-- > 0) {
-		mutex_enter(&connfp->connf_lock);
-		for (connp = connfp->connf_head; connp != NULL;
-		    connp = connp->conn_next) {
-			if (zoneid == GLOBAL_ZONEID ||
-			    zoneid == connp->conn_zoneid) {
-				CONN_INC_REF(connp);
-				mutex_exit(&connfp->connf_lock);
-				(*func)(connp, arg);
-				mutex_enter(&connfp->connf_lock);
-				CONN_DEC_REF(connp);
-			}
-		}
-		mutex_exit(&connfp->connf_lock);
-		connfp++;
-	}
-}
-
-/* conn_walk_fanout routine invoked for ip_conn_report for each conn. */
-static void
-conn_report1(conn_t *connp, void *mp)
-{
-	char	buf1[INET6_ADDRSTRLEN];
-	char	buf2[INET6_ADDRSTRLEN];
-	uint_t	print_len, buf_len;
-
-	ASSERT(connp != NULL);
-
-	buf_len = ((mblk_t *)mp)->b_datap->db_lim - ((mblk_t *)mp)->b_wptr;
-	if (buf_len <= 0)
-		return;
-	(void) inet_ntop(AF_INET6, &connp->conn_srcv6, buf1, sizeof (buf1));
-	(void) inet_ntop(AF_INET6, &connp->conn_remv6, buf2, sizeof (buf2));
-	print_len = snprintf((char *)((mblk_t *)mp)->b_wptr, buf_len,
-	    MI_COL_PTRFMT_STR MI_COL_PTRFMT_STR MI_COL_PTRFMT_STR
-	    "%5d %s/%05d %s/%05d\n",
-	    (void *)connp, (void *)CONNP_TO_RQ(connp),
-	    (void *)CONNP_TO_WQ(connp), connp->conn_zoneid,
-	    buf1, connp->conn_lport,
-	    buf2, connp->conn_fport);
-	if (print_len < buf_len) {
-		((mblk_t *)mp)->b_wptr += print_len;
-	} else {
-		((mblk_t *)mp)->b_wptr += buf_len;
-	}
-}
-
-/*
- * Named Dispatch routine to produce a formatted report on all conns
- * that are listed in one of the fanout tables.
- * This report is accessed by using the ndd utility to "get" ND variable
- * "ip_conn_status".
- */
-/* ARGSUSED */
-static int
-ip_conn_report(queue_t *q, mblk_t *mp, caddr_t arg, cred_t *ioc_cr)
-{
-	conn_t *connp = Q_TO_CONN(q);
-
-	(void) mi_mpprintf(mp,
-	    "CONN      " MI_COL_HDRPAD_STR
-	    "rfq      " MI_COL_HDRPAD_STR
-	    "stq      " MI_COL_HDRPAD_STR
-	    " zone local		 remote");
-
-	/*
-	 * Because of the ndd constraint, at most we can have 64K buffer
-	 * to put in all conn info.  So to be more efficient, just
-	 * allocate a 64K buffer here, assuming we need that large buffer.
-	 * This should be OK as only privileged processes can do ndd /dev/ip.
-	 */
-	if ((mp->b_cont = allocb(ND_MAX_BUF_LEN, BPRI_HI)) == NULL) {
-		/* The following may work even if we cannot get a large buf. */
-		(void) mi_mpprintf(mp, "<< Out of buffer >>\n");
-		return (0);
-	}
-
-	conn_walk_fanout(conn_report1, mp->b_cont, connp->conn_zoneid,
-	    connp->conn_netstack->netstack_ip);
-	return (0);
 }
 
 /*

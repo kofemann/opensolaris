@@ -282,6 +282,17 @@ lpd_add_rfc1179_attributes(service_t *svc, papi_attribute_t **attributes,
 		    "rfc-1179-font-s", s);
 	}
 
+	/*
+	 * The document format needs to be added, but the control line
+	 * should be added when the filenames are figured out.
+	 */
+	s = NULL;
+	papiAttributeListGetString(attributes, NULL, "document-format", &s);
+	if (s != NULL) {
+		papiAttributeListAddString(used, PAPI_ATTR_EXCL,
+		    "document-format", s);
+	}
+
 	return (status);
 }
 
@@ -351,11 +362,11 @@ lpd_add_svr4_attributes(service_t *svc, papi_attribute_t **attributes,
 	/* Handling */
 	s = NULL;
 	papiAttributeListGetString(attributes, NULL, "job-hold-until", &s);
-	if ((s != NULL) && (strcmp(s, "indefinite"))) {
+	if ((s != NULL) && (strcmp(s, "indefinite") == 0)) {
 		add_svr4_control_line(metadata, 'H', "hold");
 		papiAttributeListAddString(used, PAPI_ATTR_EXCL,
 		    "job-hold-until", "indefinite");
-	} else if ((s != NULL) && (strcmp(s, "no-hold"))) {
+	} else if ((s != NULL) && (strcmp(s, "no-hold") == 0)) {
 		add_svr4_control_line(metadata, 'H', "immediate");
 		papiAttributeListAddString(used, PAPI_ATTR_EXCL,
 		    "job-hold-until", "no-hold");
@@ -507,7 +518,12 @@ lpd_job_add_files(service_t *svc, papi_attribute_t **attributes,
 			return (PAPI_NOT_AUTHORIZED);
 		}
 		if (strcmp("standard input", files[i]) != 0) {
-			stat(files[i], &statbuf);
+			if (stat(files[i], &statbuf) < 0) {
+				detailed_error(svc,
+				    gettext("Cannot access file: %s: %s"),
+				    files[i], strerror(errno));
+				return (PAPI_DOCUMENT_ACCESS_ERROR);
+			}
 			if (statbuf.st_size == 0) {
 				detailed_error(svc,
 				    gettext("Zero byte (empty) file: %s"),

@@ -2,7 +2,7 @@
 # Two "#" are comments that are copied to audit_record_attr
 # other comments are removed.
 ##
-## Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+## Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 ## Use is subject to license terms.
 ##
 ## CDDL HEADER START
@@ -35,21 +35,26 @@
 # first section: general attributes
 
 # skipClass=<class name of items to skip if only in that class>
-#skipClass=no    # uncomment to filter unused events
+# skipClass=no    # uncomment to filter unused events
 
 # token name abbreviations
 # token=alias:fullname  -- short names for key tokens
 
 token=arg:argument
 token=attr:attribute
+token=acl:acl_entry
 token=cmd:command
 token=data:data
+token=exec_args:exec_arguments
+token=exec_env:exec_environment
 token=group:group
 token=inaddr:ip_addr
 token=inet:socket
 token=ipc:ipc
+token=ipc_perm:ipc_perm
 token=newgroup:newgroups
 token=path:path
+token=path_attr:attribute_path
 token=privset:privilege
 token=proc:process
 token=text:text
@@ -66,10 +71,14 @@ token=ret:return
 token=exit:exit
 
 # note names -- certain notes show up repeatedly; collected here
+#
+# To achieve the maximum line length to be less than 80 characters, the 
+# note names (message=) can be defined as a multi line, each line except the
+# last one finished with the backslash character. 
 
-message=ipc_perm:The ipc and ipc_perm tokens are not included if the message ID is not valid.
+message=ipc_perm:The ipc and ipc_perm tokens are not included if \
+  the message ID is not valid.
 
-message=socket:The socket token for a bad socket is reported as "argument (1, "fd", socket descriptor)"
 
 # basic record pattern ("insert" is where event-specific tokens
 # are listed.)
@@ -98,12 +107,34 @@ user=head:subj:insert:ret
 # use "format=kernel" or "format="user".
 #
 # comment is an array of strings separated by colons.  If comments
-# are listed on separate lines, the preceeding comment must end with
-# a colon.  The array starts at 1. (If the comment contains a colon,
-# use "&colon;" without the quotes.)
+# are listed on separate lines (recommended due to better
+# readability/sustainability of the file), the preceding comment 
+# must end with  a colon.  The array starts at 1. (If the comment 
+# contains a colon, use "&colon;" without the quotes.)
 #
 # case is used to generate alternate descriptions for a given
 # record.
+#
+# Constraints - the string length; bear in mind, that any annotation of
+# primitives below longer than is specified, will be silently truncated 
+# to given/defined amount of characters in the bsmrecord(1M) runtime:
+#
+#     primitive <= max (non-truncated) string length
+#	case	<= unlimited; if necessary, text continues on a new line
+#	comment	<= unlimited; if necessary, text continues on a new line
+#	label	<= 43
+#	note	<= unlimited; if necessary, text continues on a new line
+#	program	<= 20
+#	see	<= 39
+#	syscall	<= 20
+#	title	<= 46
+#	token	<= 28 (full name)
+#
+# To achieve the maximum line length to be less than 80 characters, one can
+# define the unlimited primitives as a multi line, each line except the
+# last one finished with the backslash character. In addition to above
+# mentioned, the "format=" record attribute follows the same rule.
+#
 #
 # AUE_ACCEPT illustrates the use of all the above.  Note that
 # case is not nested; ellipsis (...) is used to give the effect
@@ -430,24 +461,20 @@ label=AUE_AUDITSYS
 
 label=AUE_BIND
 # differs from documented version.
-# cases "no vnode" and "not AF_INT" not confirmed
+# cases "no vnode" not fully confirmed
 # family and type need argument number
-
   case=Invalid socket handle
     format=arg1
       comment=1, file descriptor, "so"
   case=If there is no vnode for this file descriptor
-    format=[arg]1
-      comment=1, file descriptor, "Bad fd"
   case=or if the socket is not of the AF_INET family
-    format=[arg]1:[text]2
-      comment=1, file descriptor, "fd":
-      comment=bad socket address
-  case=or for all other conditions
-    format=arg1:[arg]2:[arg]3:inet4
+    format=arg1:arg2:arg3
       comment=1, file descriptor, "so":
       comment=1, socket family, "family":
-      comment=1, socket type, "type":
+      comment=1, socket type, "type"
+  case=or for all other conditions
+    format=arg1:inet2
+      comment=1, file descriptor, "so":
       comment=socket address
 
 label=AUE_BRANDSYS
@@ -461,7 +488,7 @@ label=AUE_BRANDSYS
     comment=4, command args, "arg":
     comment=5, command args, "arg":
     comment=6, command args, "arg":
-    comment=7, command args, "arg":
+    comment=7, command args, "arg"
 
 label=AUE_BSMSYS
   skip=Not used.
@@ -535,32 +562,38 @@ label=AUE_CHROOT
 #	return,failure: Not owner,-1
 #	trailer,152
 
+label=AUE_CLOCK_SETTIME
+  format=kernel
+
 label=AUE_CLOSE
   format=arg1:[path]:[attr]
     comment=1, file descriptor, "fd"
 
+label=AUE_CONFIGKSSL
+  case=Adding KSSL entry.
+    format=text1:inaddr2:text3:text4
+      comment=opcode, KSSL_ADD_ENTRY:
+      comment=local IP address:
+      comment=SSL port number:
+      comment=proxy port number
+  case=Deleting KSSL entry.
+    format=text1:inaddr2:text3
+      comment=opcode, KSSL_DELETE_ENTRY:
+      comment=local IP address:
+      comment=SSL port number
+
 label=AUE_CONNECT
+# cases "no vnode" not fully confirmed
+  case=If there is no vnode for this file descriptor
   case=If the socket address is not part of the AF_INET family
-    format=arg1:text2:text3
+    format=arg1:arg2:arg3
       comment=1, file descriptor, "so":
-      comment=bad socket address:
-      comment=bad peer address
+      comment=1, socket family, "family":
+      comment=1, socket type, "type"
   case=If the socket address is part of the AF_INET family
-    case=...If there is no vnode for this file descriptor
-      format=[arg]1
-	comment=1, file descriptor, "bad fd"
-    case=...or if the socket is not bound
-      format=[arg]1:[text]2
-	comment=1, file descriptor, "fd":
-	comment=socket not bound
-    case=...or if the socket address length = 0
-      format=[arg]1:[text]2
-	comment=1, file descriptor, "fd":
-        comment=bad socket address
-    case=...or for all other conditions
-      format=[inet]1:inet1
-	comment=socket address
-# can't match this to code in audit_event.c for the not inet case
+    format=arg1:inet2
+      comment=1, file descriptor, "so":
+      comment=socket address
 
 label=AUE_CORE
   syscall=none
@@ -590,16 +623,17 @@ label=AUE_CREAT
 #	return,failure: Permission denied,-1
 #	trailer,83
 
+label=AUE_CRYPTOADM
+  title=kernel cryptographic framework
+  format=text1:(0..n)[text]2
+  comment=cryptoadm command/operation:
+  comment=mechanism list
+
 label=AUE_DOORFS
   skip=Not used.  (Place holder for set of door audit events.)
 
 label=AUE_DOORFS_DOOR_BIND
-# audit_event.c shows no output.
-  # as documented:
-  # format=arg1
-  #   comment=1, door ID, "door ID"
-  # as implemented:
-  format=kernel
+  skip=Not used.
   syscall=doorfs:  DOOR_BIND
 
 label=AUE_DOORFS_DOOR_CALL
@@ -614,11 +648,11 @@ label=AUE_DOORFS_DOOR_CREATE
   syscall=doorfs:  DOOR_CREATE
 
 label=AUE_DOORFS_DOOR_CRED
-  format=kernel
+  skip=Not used.
   syscall=doorfs:  DOOR_CRED
 
 label=AUE_DOORFS_DOOR_INFO
-  format=kernel
+  skip=Not used.
   syscall=doorfs:  DOOR_INFO
 
 label=AUE_DOORFS_DOOR_RETURN
@@ -631,8 +665,7 @@ label=AUE_DOORFS_DOOR_REVOKE
   syscall=doorfs:  DOOR_REVOKE
 
 label=AUE_DOORFS_DOOR_UNBIND
-  format=arg1
-    comment=1, door ID, "door ID"
+  skip=Not used.
   syscall=doorfs:  DOOR_UNBIND
 
 label=AUE_DUP2
@@ -648,13 +681,13 @@ label=AUE_ENTERPROM
 #	return,success,0
 
 label=AUE_EXEC
-  format=path:[attr]1:[exec_arg]2:[exec_env]3
+  format=path:[attr]1:[exec_args]2:[exec_env]3
     comment=omitted on error:
     comment=output if argv policy is set:
     comment=output if arge policy is set
 
 label=AUE_EXECVE
-  format=path:[attr]1:[exec_arg]2:[exec_env]3
+  format=path:[attr]1:[exec_args]2:[exec_env]3
     comment=omitted on error:
     comment=output if argv policy is set:
     comment=output if arge policy is set
@@ -690,19 +723,18 @@ label=AUE_FACLSET
   case=Invalid file descriptor
     format=arg1:arg2
       comment=2, SETACL, "cmd":
-      comment=3, number of ACL entries, "nentries":
+      comment=3, number of ACL entries, "nentries"
   case=Zero path
-    format=arg1:arg2:arg3:(0..n)[acl]4
+    format=arg1:arg2:arg3:[attr]:(0..n)[acl]4
       comment=2, SETACL, "cmd":
       comment=3, number of ACL entries, "nentries":
-      comment=1, file descriptor, "no path  fd":
+      comment=1, file descriptor, "no path&colon; fd":
       comment=ACLs
   case=Non-zero path
     format=arg1:arg2:path:[attr]:(0..n)[acl]3
       comment=2, SETACL, "cmd":
       comment=3, number of ACL entries, "nentries":
       comment=ACLs
-# old BSM manual misses a case; see audit_event.c
 
 label=AUE_FCHDIR
   format=[path]:[attr]
@@ -718,13 +750,16 @@ label=AUE_FCHDIR
 #	trailer,68
 
 label=AUE_FCHMOD
-  case=With a valid file descriptor
+  case=With a valid file descriptor and path
     format=arg1:path:[attr]
+      comment=2, mode, "new file mode"
+  case=With a valid file descriptor and invalid path
+    format=arg1:[arg]2:[attr]
       comment=2, mode, "new file mode":
+      comment=1, file descriptor, "no path&colon; fd"
   case=With an invalid file descriptor
-    format=arg1:[arg]2
-      comment=2, mode, "new file mode":
-      comment=1, file descriptor, "no path  fd"
+    format=arg1
+      comment=2, mode, "new file mode"
 #	header,168,2,fchmod(2),,Sat Apr 29 12:28:06 2000, + 350000000 msec
 #	argument,2,0x1a4,new file mode
 #	path,/export/home/CC/icenine/arv/fchmod/obj_succ
@@ -758,20 +793,14 @@ label=AUE_FCHOWN
 
 label=AUE_FCHOWNAT
   see=openat(2)
-  case=With a valid file descriptor
-    format=arg1:arg2:[path]:[attr]
-      comment=2, uid, "new file uid":
-      comment=3, gid, "new file gid"
-  case=With an invalid file descriptor
-    format=arg1:arg2:[arg]3:[attr]
-       comment=2, uid, "new file uid":
-       comment=3, gid, "new file gid":
-       comment=1, file descriptor, "no path fd"
-# not verified
+  case=With a valid absolute/relative file path 
+    format=path:[path_attr]:[attr]
+  case=With an file path eq. NULL and valid file descriptor
+    format=kernel
 
 label=AUE_FCHROOT
   format=[path]:[attr]
-# Not verified
+# fchroot -> chdirec -> audit_chdirec
 
 label=AUE_FCNTL
   case=With a valid file descriptor
@@ -814,8 +843,7 @@ label=AUE_FSTAT
   skip=Not used.
 
 label=AUE_FSTATAT
-# No information.
-# see=openat(2)
+  format=path:[path_attr]:[attr]
 
 label=AUE_FSTATFS
   case=With a valid file descriptor
@@ -827,9 +855,14 @@ label=AUE_FSTATFS
 label=AUE_FTRUNCATE
   skip=Not used.
 
+label=AUE_FUSERS
+  syscall=utssys: UTS_FUSERS
+  format=path:attr
+
+
 label=AUE_FUTIMESAT
-# No information 
-# see=openat(2)
+  syscall=utimes(2)
+  format=[path]:[path_attr]:[attr]
 
 label=AUE_GETAUDIT
   format=kernel
@@ -867,16 +900,25 @@ label=AUE_GETKERNSTATE
   skip=Not used.
 
 label=AUE_GETMSG
+  case=With a valid file descriptor
+  format=arg1:[path]:attr:arg2
+    comment=1, file descriptor, "fd":
+    comment=4, priority, "pri"
+  case=With an invalid file descriptor
   format=arg1:arg2
     comment=1, file descriptor, "fd":
     comment=4, priority, "pri"
 
 label=AUE_GETPMSG
+  case=With a valid file descriptor
+  format=arg1:[path]:attr
+    comment=1, file descriptor, "fd"
+  case=With an invalid file descriptor
   format=arg1
     comment=1, file descriptor, "fd"
 
 label=AUE_GETPORTAUDIT
-  format=kernel
+  format=Not used.
 
 label=AUE_GETUSERAUDIT
   skip=Not used.
@@ -884,8 +926,6 @@ label=AUE_GETUSERAUDIT
 label=AUE_INST_SYNC
   format=arg1
     comment=2, flags value, "flags"
-# ok, but audit_event should show ad instead of as
-#See 4381430 and its dup 4381450 (the latter says "ad" is correct)
 
 label=AUE_IOCTL
   case=With an invalid file descriptor
@@ -895,10 +935,6 @@ label=AUE_IOCTL
       comment=3, arg, "arg"
   case=With a valid file descriptor
     format=path:[attr]:arg1:arg2
-      comment=2, ioctl cmd, "cmd":
-      comment=3, ioctl arg, "arg"
-  case=Socket
-    format=[socket]:arg1:arg2
       comment=2, ioctl cmd, "cmd":
       comment=3, ioctl arg, "arg"
   case=Non-file file descriptor
@@ -932,25 +968,21 @@ label=AUE_LCHOWN
   format=arg1:arg2:path:[attr]
     comment=2, uid, "new file uid":
     comment=3, gid, "new file gid"
-# failed verify against audit_event.c -- path and attr not there
 
 label=AUE_LINK
-  format=path1:[attr]2:path3
-     comment=from path:
+  format=path1:[attr]:path2
      comment=from path:
      comment=to path
-# Not verified
 
 label=AUE_LSEEK
   skip=Not used.
 
 label=AUE_LSTAT
   format=path:[attr]
-# not verified
 
 label=AUE_LXSTAT
   skip=Not used.
-# AUE_LXSTAT now maps to AUE_LSTAT
+# AUE_LXSTAT now maps to AUE_LSTAT 
 
 label=AUE_MCTL
   skip=Not used.
@@ -965,52 +997,62 @@ label=AUE_MEMCNTL
     comment=6, 0, "mask"
 
 label=AUE_MKDIR
-  format=arg1:path
+  format=arg1:path:[attr]
     comment=2, mode, "mode"
-#audit_event.c shows no attr token
-  # format=arg1:path:[attr]
 
 label=AUE_MKNOD
   format=arg1:arg2:path:[attr]
     comment=2, mode, "mode":
     comment=3, dev, "dev"
-# not verified
 
 label=AUE_MMAP
   case=With a valid file descriptor
-    format=arg1:arg2:[path]:[attr]
+    format=arg1:arg2:[path]3:[attr]
       comment=1, segment address, "addr":
-      comment=2, segment address, "len"
+      comment=2, segment address, "len":
+      comment=if no path, then argument&colon; \
+        1, "nopath&colon; fd", file descriptor
   case=With an invalid file descriptor
     format=arg1:arg2:arg3
       comment=1, segment address, "addr":
       comment=2, segment address, "len":
       comment=1, file descriptor, "no path&colon; fd"
-# format may have changed in S9, current format not verified
-# class is no, not usually printed
 
 label=AUE_MODADDMAJ
   title=modctl: bind module
   syscall=modctl
-  format=[text]1:[text]2:text3:text4:arg5:(0..n)[text]6
+  format=[text]1:[text]2:text3:arg4:(0..n)[text]5
     comment=driver major number:
     comment=driver name:
-    comment=root directory or "no rootdir":
     comment=driver major number or "no drvname":
     comment=5, number of aliases, "":
     comment=aliases
-# NOT verified against audit_event.c -- 3rd text arg does not exist
+
+label=AUE_MODADDPRIV
+  format=kernel
 
 label=AUE_MODCONFIG
-  syscall=modctl
-  title=modctl: configure module
-  format=text1:text2
-    comment=root directory or "no rootdir":
-    comment=driver major number or "no drvname"
-# NOT verified against audit_event.c -- first text arg does not exist
+  skip=Not used.
 
 label=AUE_MODCTL
-  format=kernel
+  skip=Not used. (placeholder)
+
+label=AUE_MODDEVPLCY
+  syscall=modctl
+  title=modctl: set device policy
+  case=If unknown minor name/pattern
+    format=arg1:arg2:arg3:arg4:arg5
+      comment=2, "major", major number:
+      comment=2, "lomin", low minor number, if known:
+      comment=2, "himin", hi minor number, if known:
+      comment=privileges required for reading:
+      comment=privileges required for writing
+  case=else
+    format=arg1:text2:arg3:arg4
+      comment=2, "major", major number:
+      comment=minor name/pattern:
+      comment=privileges required for reading:
+      comment=privileges required for writing
 
 label=AUE_MODLOAD
   syscall=modctl
@@ -1027,7 +1069,7 @@ label=AUE_MODUNLOAD
 
 label=AUE_MOUNT
   case=UNIX file system
-    format=arg1:text2:path:[attr]:[path]:[attr]
+    format=arg1:text2:path:[attr]
       comment=3, flags, "flags":
       comment=filesystem type
   case=NFS file system
@@ -1049,55 +1091,57 @@ label=AUE_MOUNT
 #		       ^^^^^^^^^^         <- bugid 4333559
 
 label=AUE_MSGCTL
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, message ID, "msg ID"
   note=ipc_perm
-# audit_event.c shows no IPC token
+# ipc, ipc_perm: msgctl -> ipc_lookup -> audit_ipc
 
 label=AUE_MSGCTL_RMID
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, message ID, "msg ID"
   note=ipc_perm
   syscall=msgctl: IPC_RMID
-# audit_event.c shows no IPC token
+# ipc, ipc_perm: msgctl -> ipc_lookup -> audit_ipc
 
 label=AUE_MSGCTL_SET
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, message ID, "msg ID"
   note=ipc_perm
   syscall=msgctl: IPC_SET
-# audit_event.c shows no IPC token
+# ipc, ipc_perm: msgctl -> ipc_lookup -> audit_ipc
 
 label=AUE_MSGCTL_STAT
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, message ID, "msg ID"
   note=ipc_perm
   syscall=msgctl: IPC_STAT
-# audit_event.c shows no IPC token
+# ipc, ipc_perm: msgctl -> ipc_lookup -> audit_ipc
 
 label=AUE_MSGGET
-  format=arg1:[ipc]
+  format=arg1:ipc
     comment=1, message key, "msg key"
   note=ipc_perm
-# audit_event.c shows no IPC token
+  syscall=msgget
 
 label=AUE_MSGGETL
   skip=Not used.
 
 label=AUE_MSGRCV
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, message ID, "msg ID"
   note=ipc_perm
-# audit_event.c shows no IPC token
+  syscall=msgrcv
+# ipc, ipc_perm: msgrcv -> ipc_lookup -> audit_ipc
 
 label=AUE_MSGRCVL
   skip=Not used.
 
 label=AUE_MSGSND
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, message ID, "msg ID"
   note=ipc_perm
-# audit_event.c shows no IPC token
+  syscall=msgsnd
+# ipc, ipc_perm: msgsnd -> ipc_lookup -> audit_ipc
 
 label=AUE_MSGSNDL
   skip=Not used.
@@ -1129,6 +1173,9 @@ label=AUE_NULL
   skip=Not used.  (placeholder)
 # used internal to audit_event.c for minimal audit
 
+label=AUE_NTP_ADJTIME
+  format=kernel
+
 label=AUE_ONESIDE
   skip=Not used.
 
@@ -1140,9 +1187,8 @@ label=AUE_OPEN_R
   see=open(2) - read
 
 label=AUE_OPENAT_R
-  format=path:[attr]
+  format=path:[path_attr]:[attr]
   see=openat(2)
-# not verified
 
 label=AUE_OPEN_RC
   format=path:[attr]
@@ -1150,8 +1196,8 @@ label=AUE_OPEN_RC
 
 label=AUE_OPENAT_RC
   see=openat(2)
-  format=path:[attr]
-# not verified
+  format=path:[path_attr]:[attr]
+# aui_fsat(): fm & O_CREAT mangling
 
 label=AUE_OPEN_RT
   format=path:[attr]
@@ -1159,8 +1205,8 @@ label=AUE_OPEN_RT
 
 label=AUE_OPENAT_RT
   see=openat(2)
-  format=path:[attr]
-# not verified
+  format=path:[path_attr]:[attr]
+# aui_fsat(): fm & O_TRUNC mangling
 
 label=AUE_OPEN_RTC
   format=path:[attr]
@@ -1168,8 +1214,8 @@ label=AUE_OPEN_RTC
 
 label=AUE_OPENAT_RTC
   see=openat(2)
-  format=path:[attr]
-# not verified
+  format=path:[path_attr]:[attr]
+# aui_fsat(): fm & O_TRUNC mangling, fm & O_CREAT mangling
 
 label=AUE_OPEN_RW
   format=path:[attr]
@@ -1177,8 +1223,8 @@ label=AUE_OPEN_RW
 
 label=AUE_OPENAT_RW
   see=openat(2)
-  format=path:[attr]
-# not verified
+  format=path:[path_attr]:[attr]
+# aui_fsat(): fm & O_RDWR 
 
 label=AUE_OPEN_RWC
   format=path:[attr]
@@ -1186,8 +1232,8 @@ label=AUE_OPEN_RWC
 
 label=AUE_OPENAT_RWC
   see=openat(2)
-  format=path:[attr]
-# not verified
+  format=path:[path_attr]:[attr]
+# aui_fsat(): fm & O_RDWR, fm & O_CREAT mangling
 
 label=AUE_OPEN_RWT
   format=path:[attr]
@@ -1195,8 +1241,8 @@ label=AUE_OPEN_RWT
 
 label=AUE_OPENAT_RWT
   see=openat(2)
-  format=path:[attr]
-# not verified
+  format=path:[path_attr]:[attr]
+# aui_fsat(): fm & O_RDWR, fm & O_TRUNC mangling
 
 label=AUE_OPEN_RWTC
   format=path:[attr]
@@ -1204,8 +1250,8 @@ label=AUE_OPEN_RWTC
 
 label=AUE_OPENAT_RWTC
   see=openat(2)
-  format=path:[attr]
-# not verified
+  format=path:[path_attr]:[attr]
+# aui_fsat(): fm & O_RDWR, fm & O_TRUNC mangling, fm & O_CREAT mangling
 
 label=AUE_OPEN_W
   format=path:[attr]
@@ -1213,8 +1259,7 @@ label=AUE_OPEN_W
 
 label=AUE_OPENAT_W
   see=openat(2)
-  format=path:[attr]
-# not verified
+  format=path:[path_attr]:[attr]
 
 label=AUE_OPEN_WC
   format=path:[attr]
@@ -1222,8 +1267,8 @@ label=AUE_OPEN_WC
 
 label=AUE_OPENAT_WC
   see=openat(2)
-  format=path:[attr]
-# not verified
+  format=path:[path_attr]:[attr]
+# aui_fsat(): fm & O_WRONLY, fm & O_CREAT mangling
 
 label=AUE_OPEN_WT
   format=path:[attr]
@@ -1231,8 +1276,8 @@ label=AUE_OPEN_WT
 
 label=AUE_OPENAT_WT
   see=openat(2)
-  format=path:[attr]
-# not verified
+  format=path:[path_attr]:[attr]
+# aui_fsat(): fm & O_WRONLY, fm & O_TRUNC mangling
 
 label=AUE_OPEN_WTC
   format=path:[attr]
@@ -1240,29 +1285,40 @@ label=AUE_OPEN_WTC
 
 label=AUE_OPENAT_WTC
   see=openat(2)
-  format=path:[attr]
-# not verified
+  format=path:[path_attr]:[attr]
+# aui_fsat(): fm & O_WRONLY, fm & O_TRUNC mangling, fm & O_CREAT mangling
 
 label=AUE_OSETPGRP
   skip=Not used.
-
-label=AUE_OSETUID
-  skip=Not used.
-  syscall=old setuid
-# probably not generated.
-# not referenced anywhere, including audit_kevents.h
-# and AUE_OSETUID is not defined anywhere
 
 label=AUE_OSTAT
   skip=Not used.
 
 label=AUE_PATHCONF
   format=path:[attr]
-# not verified
 
 label=AUE_PIPE
 format=kernel
 # class is no, not usually printed
+
+label=AUE_PORTFS
+  skip=Not used (placeholder for AUE_PORTFS_*).
+
+label=AUE_PORTFS
+  skip=Not used (placeholder for AUE_PORTFS_*).
+
+label=AUE_PORTFS_ASSOCIATE
+  syscall=portfs
+  see=port_associate(3C)
+  case=Port association via PORT_SOURCE_FILE
+  format=[path]1:attr
+    comment=name of the file/directory to be watched
+
+label=AUE_PORTFS_DISSOCIATE
+  syscall=portfs
+  see=port_dissociate(3C)
+  case=Port disassociation via PORT_SOURCE_FILE
+  format=kernel
 
 label=AUE_PRIOCNTLSYS
   syscall=priocntl
@@ -1272,7 +1328,7 @@ label=AUE_PRIOCNTLSYS
     comment=3, command, "cmd"
 
 label=AUE_PROCESSOR_BIND
-  case=No threads bound to the processor
+  case=No LWP/thread bound to the processor
     format=arg1:arg2:text3:[proc]
       comment=1, type of ID, "ID type":
       comment=2, ID value, "ID":
@@ -1283,20 +1339,15 @@ label=AUE_PROCESSOR_BIND
       comment=2, ID value, "ID":
       comment=3, processor ID, "processor_id"
 
-
 label=AUE_PUTMSG
-  format=arg1:arg2
+  see=putmsg(2)
+  format=arg1:[path]:[attr]:arg2
     comment=1, file descriptor, "fd":
     comment=4, priority, "pri"
 
 label=AUE_PUTPMSG
-see=putmsg(2)
-# old BSM doc mismatch against audit_event.c
-  # documented:
-  # format=arg1
-  #   comment=1, file descriptor, "fd"
-  # implemented:
-  format=arg1:arg2:arg3
+  see=putpmsg(2)
+  format=arg1:[path]:[attr]:arg2:arg3
     comment=1, file descriptor, "fd":
     comment=4, priority, "pri":   
     comment=5, flags, "flags"
@@ -1305,7 +1356,8 @@ label=AUE_P_ONLINE
   format=arg1:arg2:text3
     comment=1, processor ID, "processor ID":
     comment=2, flags value, "flags":
-    comment=text form of flags.  Values&colon;  P_ONLINE, P_OFFLINE, P_NOINTR, P_SPARE, P_FAULTED, P_STATUS
+    comment=text form of flags.  Values&colon;  \
+      P_ONLINE, P_OFFLINE, P_NOINTR, P_SPARE, P_FAULTED, P_STATUS
 
 label=AUE_QUOTACTL
   skip=Not used.
@@ -1318,7 +1370,6 @@ label=AUE_READL
 
 label=AUE_READLINK
   format=path:[attr]
-# see audit_read.c
 
 label=AUE_READV
   skip=Not used (obsolete)
@@ -1332,13 +1383,24 @@ label=AUE_REBOOT
   skip=Not used.
 
 label=AUE_RECV
-  format=arg1:[arg]2:[arg]3:[inet]
-    comment=1, file descriptor, "so":
-    comment=1, family, "family":
-    comment=1, type, "type"
+  case=If address family is AF_INET or AF_INET6
+    format=[arg]1:[inet]
+      comment=1, file descriptor, "so"
+  case=If address family is AF_UNIX and path is defined
+    format=[path]1:[attr]
+      comment=1, file descriptor, "so"
+  case=If address family is AF_UNIX and path is NULL
+    format=[path]1:[attr]
+      comment=1, file descriptor, "no path&colon; fd"
+  case=If address family is other than AF_UNIX, AF_INET, AF_INET6
+    format=[arg]1:[arg]2:[arg]3
+      comment=1, file descriptor, "so":
+      comment=1, family, "family":
+      comment=1, type, "type"
+# associated class remapped to AUE_READ's class (audit_event.c:audit_s2e[237])
 
 label=AUE_RECVFROM
-  format=inet:arg1:[arg2]:inet3:arg4
+  format=inet:arg1:[arg]2:inet3:arg4
     comment=3, message length, "len":
     comment=4, flags, "flags":
     comment=from address:
@@ -1347,25 +1409,37 @@ label=AUE_RECVFROM
   note=token (1, socket descriptor, "fd")"
 
 label=AUE_RECVMSG
-  format=inet:arg1:inet2:arg3
-    comment=4, flags, "flags":
-    comment=from address:
-    comment=6, address length, "tolen"
-  note=The socket token for a bad socket is reported as 'argument 
-  note=token (1, "fd", socket descriptor)'
+  case=If invalid file descriptor
+    format=arg1:arg2
+      comment=1, file descriptor, "so":
+      comment=3, flags, "flags"
+  case=If valid file descriptor and socket is AF_UNIX and no path
+  format=arg1:[attr]
+    comment=1, file descriptor, "no path&colon; fd"
+  case=If valid file descriptor and socket is AF_UNIX and path defined
+  format=path:attr
+  case=If valid file descriptor and socket is AF_INET or AF_INET6
+  case=.. if socket type is SOCK_DGRAM or SOCK_RAW or SOCK_STREAM
+  format=arg1:arg2:inet
+    comment=1, file descriptor, "so":
+    comment=2, flags, "flags"
+  case=.. if socket type is unknown
+  format=arg1:arg2:arg3:arg4
+    comment=1, file descriptor, "so":
+    comment=1, family, "family":
+    comment=1, type, "type":
+    comment=3, flags, "flags"
 
 label=AUE_RENAME
   format=path1:[attr]1:[path]2
   comment=from name:
   comment=to name
-# not verified
 
 label=AUE_RENAMEAT
 # see openat(2)
-  format=path1:[attr]1:[path]2
+  format=path1:[path_attr]:[attr]1:[path]2:[path_attr]
   comment=from name:
   comment=to name
-# not verified
 
 label=AUE_RFSSYS
   skip=Not used.
@@ -1373,106 +1447,118 @@ label=AUE_RFSSYS
 
 label=AUE_RMDIR
   format=path:[attr]
-# Not verified
 
 label=AUE_SEMCTL
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
-# can't find where ipc token is generated, if at all
+# ipc, ipc_perm token: semctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMCTL_GETALL
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
   syscall=semctl: GETALL
-# can't find where ipc token is generated, if at all
+# ipc, ipc_perm token: semctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMCTL_GETNCNT
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
   syscall=semctl: GETNCNT
-# can't find where ipc token is generated, if at all
+# ipc, ipc_perm token: semctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMCTL_GETPID
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
   syscall=semctl: GETPID
-# can't find where ipc token is generated, if at all
+# ipc, ipc_perm token: semctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMCTL_GETVAL
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
   syscall=semctl: GETVAL
-# can't find where ipc token is generated, if at all
+# ipc, ipc_perm token: semctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMCTL_GETZCNT
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
   syscall=semctl: GETZCNT
-# can't find where ipc token is generated, if at all
+# ipc, ipc_perm token: semctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMCTL_RMID
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
   syscall=semctl: IPC_RMID
-# can't find where ipc token is generated, if at all
+# ipc, ipc_perm token: semctl -> ipc_rmid -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMCTL_SET
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
   syscall=semctl: IPC_SET
-# can't find where ipc token is generated, if at all
+# ipc, ipc_perm token: semctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMCTL_SETALL
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
   syscall=semctl: SETALL
-# can't find where ipc token is generated, if at all
+# ipc, ipc_perm token: semctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMCTL_SETVAL
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
   syscall=semctl: SETVAL
-# can't find where ipc token is generated, if at all
+# ipc, ipc_perm token: semctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMCTL_STAT
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
   syscall=semctl: IPC_STAT
-# can't find where ipc token is generated, if at all
+# ipc, ipc_perm token: semctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMGET
-  format=arg1:[ipc]
-    comment=1, semaphore ID, "sem ID"
+  format=arg1:[ipc_perm]:ipc
+    comment=1, semaphore ID, "sem key"
   note=ipc_perm
   syscall=semctl: SETVAL
-# audit_event.c does not match old BSM manual
-# can't find where ipc token is generated, if at all
+# ipc_perm token: semget -> audit_ipcget
 
 label=AUE_SEMGETL
   skip=Not used.
 
 label=AUE_SEMOP
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, semaphore ID, "sem ID"
   note=ipc_perm
+# ipc, ipc_perm token: semop -> ipc_lookup -> audit_ipc
 
 label=AUE_SEMSYS
   skip=Not used.  (place holder) -- defaults to a semget variant
 
 label=AUE_SEND
-  format=kernel
-# not clear from audit_event.c
+  case=If address family is AF_INET or AF_INET6
+    format=[arg]1:[inet]
+      comment=1, file descriptor, "so"
+  case=If address family is AF_UNIX and path is defined
+    format=[path]1:[attr]
+      comment=1, file descriptor, "so"
+  case=If address family is AF_UNIX and path is NULL
+    format=[path]1:[attr]
+      comment=1, file descriptor, "no path&colon; fd"
+  case=If address family is other than AF_UNIX, AF_INET, AF_INET6
+    format=[arg]1:[arg]2:[arg]3
+      comment=1, file descriptor, "so":
+      comment=1, family, "family":
+      comment=1, type, "type"
+# associated class remapped to AUE_WRITE's class (audit_event.c:audit_s2e[240])
 
 label=AUE_SENDMSG
   case=If invalid file descriptor
@@ -1480,20 +1566,23 @@ label=AUE_SENDMSG
       comment=1, file descriptor, "so":
       comment=3, flags, "flags"
   case=If valid file descriptor
-  case=...and socket is AF_UNIX
-    format=path1:arg2:[arg]3:[arg]4:[arg]5
-      comment=if no path, will be argument&colon; 1, "nopath&colon; fd", file descriptor:
+  case=...and address family is AF_UNIX and path is defined
+    format=path:attr
+  case=...and address family is AF_UNIX and path is NULL
+    format=path1:attr
+      comment=1, file descriptor, "nopath&colon; fd"
+  case=...and address family is AF_INET or AF_INET6, \
+    socket is SOCK_DGRAM, SOCK_RAW or SOCK_STREAM
+    format=arg1:arg2:inet
+      comment=1, file descriptor, "so":
+      comment=3, flags, "flags"
+  case=...and unknown address family or address family AF_INET or AF_INET6 \
+    and not socket SOCK_DGRAM, SOCK_RAW or SOCK_STREAM
+    format=arg1:arg2:arg3:arg4
       comment=1, file descriptor, "so":
       comment=1, family, "family":
       comment=1, type, "type":
-      comment=3, message flags, "flags"
-  case=...and socket is AF_INET or AF_INET6
-    format=arg1:[arg]2:[arg]3:[arg]4
-      comment=1, file descriptor, "so":
-      comment=1, family, "family":
-      comment=1, type, "type":
-      comment=3, message flags, "flags"
-# audit_event.c doesn't match doc, use audit_event.c
+      comment=1, flags, "flags"
 
 label=AUE_SENDTO
   case=If invalid file descriptor
@@ -1501,20 +1590,21 @@ label=AUE_SENDTO
       comment=1, file descriptor, "so":
       comment=3, flags, "flags"
   case=If valid file descriptor
-  case=...and socket is AF_UNIX
-    format=path1:arg2:[arg]3:[arg]4:[arg]5
-      comment=if no path, will be argument&colon; 1, file descriptor, "nopath&colon; fd":
+  case=...and socket is AF_UNIX and path is defined
+    format=path:attr
+  case=...and address family is AF_UNIX and path is NULL
+    format=path1:attr
+      comment=1, file descriptor, "nopath&colon; fd"
+  case=...and address family is AF_INET or AF_INET6
+    format=arg1:arg2:inet
+      comment=1, file descriptor, "so":
+      comment=3, flags, "flags"
+  case=...and unknown address family
+    format=arg1:arg2:arg3:arg4
       comment=1, file descriptor, "so":
       comment=1, family, "family":
       comment=1, type, "type":
-      comment=3, message flags, "flags"
-  case=...and socket is AF_INET or AF_INET6
-    format=arg1:[arg]2:[arg]3:[arg]4
-      comment=1, file descriptor, "so":
-      comment=1, family, "family":
-      comment=1, type, "type":
-      comment=3, message flags, "flags"
-# audit_event.c doesn't match doc, use audit_event.c
+      comment=1, flags, "flags"
 
 label=AUE_SETAUDIT
   case=With a valid program stack address
@@ -1550,7 +1640,7 @@ label=AUE_SETAUDIT
 
 label=AUE_SETAUDIT_ADDR
   case=With a valid program stack address
-    format=arg1:arg2:arg3:ip address4:arg5:arg6:arg7
+    format=arg1:arg2:arg3:inaddr4:arg5:arg6:arg7
       comment=1, audit user ID, "auid":
       comment=1, terminal ID, "port":
       comment=1, type, "type":
@@ -1592,14 +1682,14 @@ label=AUE_SETGID
     comment=1, group ID, "gid"
 
 label=AUE_SETGROUPS
+  note=If more than NGROUPS_MAX_DEFAULT groups listed,
+  note=no tokens are generated.
   case=If no groups in list
     format=[arg]1
       comment=1, 0, "setgroups"
   case=If 1 or more groups in list
     format=(1..n)arg1
       comment=1, gid, "setgroups"
-# mismatch with audit_event.c; use audit_event.c
-# if too many gids listed, no tokens are generated
 
 label=AUE_SETHOSTNAME
   skip=Not used.  (See AUE_SYSINFO)
@@ -1608,10 +1698,12 @@ label=AUE_SETHOSTNAME
 label=AUE_SETKERNSTATE
   skip=Not used.
 
-label=AUE_SETPGRP
+label=AUE_SETPGID
   format=[proc]:[arg]1
-    comment=2, pgrp, "pgrp"
-# audit_event shows more tokens than documented
+  comment=2, pgid, "pgid"
+
+label=AUE_SETPGRP
+  format=kernel
 
 label=AUE_SETPRIORITY
   skip=Not used.
@@ -1626,7 +1718,7 @@ label=AUE_SETPPRIV
     comment=setppriv operation:
     comment=privileges actually switched on
   case=operation privileges off
-  format=arg1:privset:privset
+  format=arg1:privset2:privset3
     comment=setppriv operation:
     comment=privileges before privset:
     comment=privileges after privset
@@ -1653,15 +1745,19 @@ label=AUE_SETRLIMIT
 #	subject,tuser1,tuser1,staff,tuser1,staff,9707,497,0 0 tmach2
 #	return,success,0
 
+label=AUE_SETSID
+  format=kernel
+
 label=AUE_SETSOCKOPT
   case=Invalid file descriptor
     format=arg1:arg2
       comment=1, file descriptor, "so":
-      comment=3, flags, "flags"
+      comment=2, level, "level"
   case=Valid file descriptor
   case=...and socket is AF_UNIX
-    format=path1:arg2:[arg]3:[arg]4:arg5:arg6:arg7:data8:inet
-      comment=if no path, will be argument&colon; 1, "nopath&colon; fd", file descriptor:
+    format=path1:arg2:arg3:arg4:arg5:arg6:[arg]7:[data]8
+      comment=if no path, will be argument&colon; 1, "nopath&colon; fd", \
+        file descriptor:
       comment=1, file descriptor, "so":
       comment=1, family, "family":
       comment=1, type, "type":
@@ -1670,7 +1766,14 @@ label=AUE_SETSOCKOPT
       comment=5, option length, "optlen":
       comment=option data
   case=...and socket is AF_INET or AF_INET6
-    format=arg1:[arg]2:[arg]3:arg4:arg5:arg6:data7:inet
+    format=arg1:arg2:arg3:[arg]4:[data]5:inet
+      comment=1, file descriptor, "so":
+      comment=2, protocol level, "level":
+      comment=3, option name, "optname":
+      comment=5, option length, "optlen":
+      comment=option data
+  case=...and socket adddress family is unknown
+    format=arg1:arg2:arg3:arg4:arg5:[arg]6:[data]7
       comment=1, file descriptor, "so":
       comment=1, family, "family":
       comment=1, type, "type":
@@ -1678,10 +1781,14 @@ label=AUE_SETSOCKOPT
       comment=3, option name, "optname":
       comment=5, option length, "optlen":
       comment=option data
-# document misses some tokens; this matches audit_event.c
 
 label=AUE_SETTIMEOFDAY
   skip=Not used.
+
+label=AUE_SETUID
+  syscall=setuid
+  format=arg1
+    comment=1, "uid" to be set
 
 label=AUE_SETUSERAUDIT
   skip=Not used.
@@ -1689,36 +1796,36 @@ label=AUE_SETUSERAUDIT
 label=AUE_SHMAT
   format=arg1:arg2:[ipc]:[ipc_perm]
     comment=1, shared memory ID, "shm ID":
-    comment=2, shared mem addr, "shmaddr"
+    comment=2, shared mem addr, "shm addr"
   note=ipc_perm
-# audit_event.c does not show ipc and ipc_perm
+# ipc, ipc_perm token: shmat -> ipc_lookup -> audit_ipc
 
 label=AUE_SHMCTL
-  format=arg1:[ipc]
+  format=arg1:[ipc]:[ipc_perm]
     comment=1, shared memory ID, "shm ID"
   note=ipc_perm
-# verified against audit_event.c EXCEPT for ipc token
+# ipc, ipc_perm token: shmctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SHMCTL_RMID
-  format=arg1:[ipc]:ipc_perm
-  comment=1, shared memory ID, "shm ID":
+  format=arg1:[ipc]:[ipc_perm]
+  comment=1, shared memory ID, "shm ID"
   note=ipc_perm
   syscall=semctl:  IPC_RMID
-# verified against audit_event.c except for ipc
+# ipc, ipc_perm token: shmctl -> ipc_rmid -> ipc_lookup -> audit_ipc
 
 label=AUE_SHMCTL_SET
   format=arg1:[ipc]:[ipc_perm]
-    comment=1, shared memory ID, "shm ID":
+    comment=1, shared memory ID, "shm ID"
   note=ipc_perm
   syscall=semctl:  IPC_SET
-# verified against audit_event.c except for ipc
+# ipc, ipc_perm token: shmctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SHMCTL_STAT
-  format=arg1:[ipc]
-    comment=1, shared memory ID, "shm ID":
+  format=arg1:[ipc]:[ipc_perm]
+    comment=1, shared memory ID, "shm ID"
   note=ipc_perm
   syscall=semctl:  IPC_STAT
-# verified against audit_event.c except for ipc
+# ipc, ipc_perm token: shmctl -> ipc_lookup -> audit_ipc
 
 label=AUE_SHMDT
   format=arg1
@@ -1728,7 +1835,7 @@ label=AUE_SHMGET
   format=arg1:[ipc_perm]:[ipc]
     comment=0, shared memory key, "shm key"
   note=ipc_perm
-# does not match audit_event.c; used audit_event.c
+# ipc_perm: shmget -> audit_ipcget
 
 label=AUE_SHMGETL
   skip=Not used.
@@ -1756,14 +1863,16 @@ label=AUE_SHUTDOWN
   case=If the socket address is AF_UNIX
     case=...with zero file descriptor
       format=path1:arg2:[arg]3:[arg]4:[arg]5
-	comment=If error&colon; argument&colon; 1, "no path&colon; fd", file descriptor:
+	comment=If error&colon; argument&colon; \
+	  1, "no path&colon; fd", file descriptor:
 	comment=1, file descriptor, "so":
 	comment=1, family, "family":
 	comment=1, type, "type":
 	comment=2, how shutdown code, "how"
     case=...with non-zero file descriptor
       format=path1:arg2:arg3:inet
-	comment=If error&colon; argument&colon; 1, file descriptor, "no path&colon; fd":
+	comment=If error&colon; argument&colon; \
+	  1, file descriptor, "no path&colon; fd":
 	comment=1, file descriptor, "so":
 	comment=2, how shutdown code, "how"
 #old BSM manual wrong; used audit_event.c
@@ -1802,29 +1911,26 @@ label=AUE_SOCKETPAIR
 
 label=AUE_SOCKRECEIVE
   syscall=getmsg
-  format=inet:arg1:[path]:attr:arg
+  format=inet:arg1:[path]:attr:arg2
     comment=1, file descriptor, "fd":
     comment=4, priority, "pri"
 # see AUE_SOCKACCEPT
 
 label=AUE_SOCKSEND
 syscall=putmsg
-  format=inet:arg1:[path]:attr:arg
+  format=inet:arg1:[path]:attr:arg2
     comment=1, file descriptor, "fd":
     comment=4, priority, "pri"
 # see AUE_SOCKACCEPT
 
 label=AUE_STAT
   format=path:[attr]
-# Not verified
 
 label=AUE_STATFS
   format=path:[attr]
-# Not verified
 
 label=AUE_STATVFS
   format=path:[attr]
-# Not verified
 
 label=AUE_STIME
   format=kernel
@@ -1833,19 +1939,15 @@ label=AUE_SWAPON
   skip=Not used.
 
 label=AUE_SYMLINK
-  format=text1:path:[attr]
-    comment=symbolic link string
-# does not match audit_event.c (can't find where path
-# is generated
+  format=path:text1:[attr]
+    comment=symbolic link string 
 
 label=AUE_SYSINFO
+  note=Only SI_SET_HOSTNAME and SI_SET_SRPC_DOMAIN commands
+  note=are currently audited.
   format=arg1:[text]2
     comment=1, command, "cmd":
     comment=name
-#	header,85,2,sysinfo(2),,Thu Nov 08 15:02:07 2001, + 0 msec
-#	argument,1,0x202,cmd
-#	subject,tuser1,tuser1,staff,tuser1,staff,9662,497,0 0 tmach2
-#	return,success,85
 
 label=AUE_SYSTEMBOOT
   title=system booted
@@ -1862,8 +1964,9 @@ label=AUE_TRUNCATE
 
 label=AUE_UMOUNT
   syscall=umount: old version
-  format=path:[attr]
-# Not verified
+  note=Implemented as call of the newer umount2(2).
+  format=path:arg1:[path]:[attr]
+    comment=2, mflag value = 0, "flags"
 
 label=AUE_UMOUNT2
   syscall=umount2
@@ -1872,34 +1975,19 @@ label=AUE_UMOUNT2
 
 label=AUE_UNLINK
   format=path:[attr]
-#header,137,2,unlink(2),fe,test1,Mon Oct  6 13:36:42 PDT 2003, + 848 msec
-#path,/usr/bin/ls
-#attribute,100555,root,bin,32,953,0
-#subject,tuser,tuser,staff,tuser,staff,467,445,198 197121 test0
-#use of privilege,failed use of priv,ALL
-#return,failure: Permission denied,-1
 
 label=AUE_UNLINKAT
   see=openat(2)
-  format=path:[attr]
-# Not verified
+  format=path:[path_attr]:[attr]
 
 label=AUE_UNMOUNT
   skip=Not used.
 
 label=AUE_UTIME
   format=path:[attr]
-# Not verified
 
 label=AUE_UTIMES
   format=path:[attr]
-# Not verified
-
-label=AUE_UTSSYS
-  skip=Not used.
-# source of documented format not determined
-# no such system call.  utssys seems to be a dummy for uname,
-# ustat (actual system call) and fusers (no such call).
 
 label=AUE_VFORK
   format=arg1
@@ -1911,7 +1999,7 @@ label=AUE_VPIXSYS
   skip=Not used.
 
 label=AUE_VTRACE
-  format=kernel
+  skip=Not used.
 
 label=AUE_WRITE
   format=path1:attr
@@ -1919,14 +2007,6 @@ label=AUE_WRITE
   note:An audit record is generated for write only once per file close.
 
 label=AUE_WRITEV
-  skip=Not used. (obsolete)
-# audit_event should use "no" instead of "sl"
-
-label=AUE_WRITEL
-  skip=Not used. (obsolete)
-# audit_event should use "no" instead of "sl"
-
-label=AUE_WRITEVL
   skip=Not used. (obsolete)
 
 label=AUE_XMKNOD
@@ -2012,58 +2092,37 @@ label=AUE_allocate_succ
 label=AUE_at_create
   program=/usr/bin/at
   title=at: at-create crontab
-  format=user
-# Not verified
+  format=path
 
 label=AUE_at_delete
   program=/usr/bin/at
   title=at: at-delete atjob (at or atrm)
   format=text1:path
-  comment=""ancillary file&colon;" filename or "bad format of at-job name"
+  comment="ancillary file&colon;" filename or "bad format of at-job name"
 
 label=AUE_at_perm
   skip=Not used.
 # not referenced outside uevents.h
 
 label=AUE_create_user
-  program=administration: create user
-  format=text1:text2:text3:text4:text5:text6:text7:text8:text9:text10:text11:text12:text13:text14
-    comment=uid:
-    comment=user name:
-    comment=primary gid:
-    comment=secondary gids; blank if none:
-    comment=login shell:
-    comment=password type:
-    comment=min change:
-    comment=max change:
-    comment=max inactive:
-    comment=expiration date:
-    comment=warning:
-    comment=path:
-    comment=server:
-    comment=permissions
-# Obsolete, last used by AdminSuite 3.0; SMC uses new records types
+  skip=Not used.
 
 label=AUE_cron_invoke
   program=/usr/sbin/cron
   title=cron: cron-invoke at or cron
-  format=text1:[text]2:[text3]:text4
-    comment="at-job", "batch-job", "crontab-job", "queue-job", or "unknown job type":
-    comment="bad user" name or "user <name> account expired":
-    comment=shell:
-    comment=cmd
-# See audit_cron.c
-#	header,116,2,cron-invoke,,Thu Nov 08 15:14:01 2001, + 713 msec
-#	subject,tuser1,tuser1,staff,tuser1,staff,9689,12289,0 0 tmach2
-#	text,crontab-job
-#	text,/home/tuser1/bin/filterPOP -timeoff
-#	return,success,0
+  case=If issue with account find
+  format=text1
+    comment="bad user" name or "user <name> account expired"
+  case=else
+  format=text1:text2
+    comment="at-job", "batch-job", "crontab-job", "queue-job (<queue_name>)", \
+      or "unknown job type (<job_type_id>)":
+    comment=command
 
 label=AUE_crontab_create
   program=/usr/bin/crontab
   title=crontab: crontab created
-  format=[text]1:path
-  comment=crontab content
+  format=path
 # See audit_crontab.c
 
 label=AUE_crontab_delete
@@ -2075,8 +2134,7 @@ label=AUE_crontab_delete
 label=AUE_crontab_mod
   program=/usr/bin/crontab
   title=crontab:  crontab modify
-  format=[text]1:path
-  comment=crontab diffs
+  format=path
 # See audit_crontab.c
 
 label=AUE_crontab_perm
@@ -2097,22 +2155,13 @@ label=AUE_deallocate_succ
 # See audit_allocate.c
 
 label=AUE_delete_user
-  program=administration: delete user
-  format=text1
-    comment=uid
-# Obsolete, last used by AdminSuite 3.0; SMC uses new records types
+  skip=Not used.
 
 label=AUE_disable_user
-  program=administration: disable user
-  format=text1
-    comment=uid
-# Obsolete, last used by AdminSuite 3.0; SMC uses new records types
+  skip=Not used.
 
 label=AUE_enable_user
-  program=administration: enable user
-  format=text1
-    comment=uid
-# Obsolete, last used by AdminSuite 3.0; SMC uses new records types
+  skip=Not used.
 
 label=AUE_ftpd
   program=/usr/sbin/in.ftpd
@@ -2124,7 +2173,7 @@ label=AUE_ftpd
 label=AUE_ftpd_logout
   program=/usr/sbin/in.ftpd
   title=in.ftpd
-  format=text
+  format=user
 # See audit_ftpd
 
 label=AUE_halt_solaris
@@ -2186,23 +2235,7 @@ label=AUE_listdevice_succ
 # See audit_allocate.c
 
 label=AUE_modify_user
-  program=administration: modify user
-  format=text1:text2:text3:text4:text5:text6:text7:text8:text9:text10:text11:text12:text13:text14
-    comment=uid:
-    comment=user name:
-    comment=primary gid:
-    comment=secondary gids; blank if none:
-    comment=login shell:
-    comment=password type:
-    comment=min change:
-    comment=max change:
-    comment=max inactive:
-    comment=expiration date:
-    comment=warning:
-    comment=path:
-    comment=server:
-    comment=permissions
-# Obsolete, last used by AdminSuite 3.0; SMC uses new records types
+  skip=Not used.
 
 label=AUE_mountd_mount
   title=mountd: NFS mount
@@ -2211,14 +2244,15 @@ label=AUE_mountd_mount
   format=text1:path2
     comment=remote client hostname:
     comment=mount dir
-# See audit_mountd.c; old BSM manual is way off
+# See audit_mountd.c
 
 label=AUE_mountd_umount
   title=mountd: NFS unmount
   program=/usr/lib/nfs/mountd
-  format=path1
+  format=text1:path2
+  comment=remote client hostname:
   comment=mount dir
-# See audit_mountd.c; old BSM manual is way off
+# See audit_mountd.c
 
 label=AUE_poweroff_solaris
   program=/usr/sbin/poweroff
@@ -2238,7 +2272,7 @@ label=AUE_reboot_solaris
 label=AUE_rexd
   program=/usr/sbin/rpc.rexd
   title=rpc.rexd
-  format=[text]1:text2:text3:[text]4:text5
+  format=[text]1:text2:text3:[text]4:[text]5
     comment=error message (failure only):
     comment="Remote execution requested by&colon;" hostname:
     comment="Username&colon;" username:
@@ -2259,7 +2293,7 @@ label=AUE_rexecd
 label=AUE_rshd
   program=/usr/sbin/in.rshd
   title=in.rshd
-  format=text1:text2:text3:[text]4
+  format=text1:text2:[text]3:[text]4
     comment="cmd" command:
     comment="remote user" remote user:
     comment="local user" local user:
@@ -2329,4 +2363,3 @@ label=AUE_LABELSYS_TNMLP
       comment=2, protocol number, "proto num":
       comment=2, starting mlp port number, "mlp_port":
       comment=2, ending mlp port number, "mlp_port_upper"
-

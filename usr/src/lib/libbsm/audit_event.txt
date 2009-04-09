@@ -1,5 +1,5 @@
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #
@@ -100,7 +100,7 @@
 33:AUE_ACCEPT:accept(2):nt
 34:AUE_BIND:bind(2):nt
 35:AUE_SETSOCKOPT:setsockopt(2):nt
-36:AUE_VTRACE:vtrace(2):pm
+36:AUE_VTRACE:vtrace(2):no
 37:AUE_SETTIMEOFDAY:settimeofday(2):no
 38:AUE_FCHOWN:fchown(2):fm
 39:AUE_FCHMOD:fchmod(2):fm
@@ -234,7 +234,7 @@
 197:AUE_NFS:nfs server:no
 198:AUE_READV:readv(2):no
 199:AUE_OSTAT:old stat(2):no
-200:AUE_SETUID:old setuid(2):pm
+200:AUE_SETUID:setuid(2):pm
 201:AUE_STIME:old stime(2):as
 202:AUE_UTIME:old utime(2):fm
 203:AUE_NICE:old nice(2):pm
@@ -335,7 +335,7 @@
 290:AUE_MODDEVPLCY:modctl(2) - configure device policy:as
 291:AUE_MODADDPRIV:modctl(2) - configure additional privilege:as
 292:AUE_CRYPTOADM:kernel cryptographic framework:as
-293:AUE_CONFIGSSL:configure kernel SSL:as
+293:AUE_CONFIGKSSL:configure kernel SSL:as
 294:AUE_BRANDSYS:brandsys(2):ot
 295:AUE_PF_POLICY_ADDRULE:Add IPsec policy rule:as
 296:AUE_PF_POLICY_DELRULE:Delete IPsec policy rule:as
@@ -343,11 +343,18 @@
 298:AUE_PF_POLICY_FLIP:Flip IPsec policy:as
 299:AUE_PF_POLICY_FLUSH:Flush IPsec policy rules:as
 300:AUE_PF_POLICY_ALGS:Update IPsec algorithms:as
-301:AUE_PORTFS:portfs(2) - file events source:fa
+# AUE_PORTFS is a placeholder and won't be generated.
+301:AUE_PORTFS:portfs(2) - file events source - place holder:no
 #
 302:AUE_LABELSYS_TNRH:tnrh(2) - config TN remote host cache:as
 303:AUE_LABELSYS_TNRHTP:tnrhtp(2) - config TN remote host template cache:as
 304:AUE_LABELSYS_TNMLP:tnmlp(2) - config TN multi-level port entry:as
+#
+305:AUE_PORTFS_ASSOCIATE:portfs(2) - file events source - PORT_ASSOCIATE:fa
+306:AUE_PORTFS_DISSOCIATE:portfs(2) - file events source - PORT_DISSOCIATE:fa
+#
+307:AUE_SETSID:setsid(2):pm
+308:AUE_SETPGID:setpgid(2):pm
 #
 # user level audit events
 #	2048 -  6143	Reserved
@@ -410,11 +417,11 @@
 6203:AUE_deallocate_fail:deallocate-device failure:ot
 6205:AUE_listdevice_succ:allocate-list devices success:ot
 6206:AUE_listdevice_fail:allocate-list devices failure:ot
-6207:AUE_create_user:create user:ua
-6208:AUE_modify_user:modify user:ua
-6209:AUE_delete_user:delete user:ua
-6210:AUE_disable_user:disable user:ua
-6211:AUE_enable_user:enable user:ua
+6207:AUE_create_user:create user:no
+6208:AUE_modify_user:modify user:no
+6209:AUE_delete_user:delete user:no
+6210:AUE_disable_user:disable user:no
+6211:AUE_enable_user:enable user:no
 6212:AUE_newgrp_login:newgrp login:lo
 6213:AUE_admin_authenticate:admin login:lo
 6214:AUE_kadmind_auth:authenticated kadmind request:ua
@@ -458,6 +465,7 @@
 6252:AUE_cpu_performance:set max CPU freq governor:ss
 6253:AUE_cpu_threshold:set CPU freq threshold:ss
 6254:AUE_uadmin_thaw:uadmin(1m) - thaw after freeze:ss,na
+6255:AUE_uadmin_config:uadmin(1m) - config:ss
 
 #
 # SMF(5) svc.configd events (svcadm(1M) related)
@@ -501,6 +509,30 @@
 #
 6300:AUE_nwam_attach:attach nwam user:ss
 6301:AUE_nwam_detach:detach nwam user:ss
+#
+# TCSD(8) events
+#
+6400:AUE_tpm_takeownership:take ownership of TPM:as
+6401:AUE_tpm_clearowner:clear ownership of TPM:as
+6402:AUE_tpm_setoperatorauth:set TPM operator authorization:as
+6403:AUE_tpm_setownerinstall:set TPM ownership flag:as
+6404:AUE_tpm_selftestfull:test all TPM protected capabilities:as
+6405:AUE_tpm_certifyselftest:perform full TPM self-test:as
+6406:AUE_tpm_continueselftest:complete TPM self-test:as
+6407:AUE_tpm_ownersetdisable:change the status of TPM disable flag:as
+6408:AUE_tpm_ownerclear:perform the clear operation under TPM owner auth:as
+6409:AUE_tpm_disableownerclear:disable TPM_OwnerClear command permanently:as
+6410:AUE_tpm_forceclear:perform TPM clear operation under physical access:as
+6411:AUE_tpm_disableforceclear:disable ForceClear execution until next startup:as
+6412:AUE_tpm_physicaldisable:disable TPM physical presence:as
+6413:AUE_tpm_physicalenable:enable TPM physical presence:as
+6414:AUE_tpm_physicaldeactivate:set TPM deactivated flag:as
+6415:AUE_tpm_settempdeactivated:set volatile TPM deactivated flag to TRUE:as
+6416:AUE_tpm_settempdeactivated2:set volatile TPM deactivated flag TRUE with auth:as
+6417:AUE_tpm_physicalpresence:set the TPM physical presence flag:as
+6418:AUE_tpm_fieldupgrade:update TPM protected capabilities:as
+6419:AUE_tpm_resetlockvalue:reset TPM failed authorization attempt lock:as
+
 #
 # Trusted Extensions events:
 #

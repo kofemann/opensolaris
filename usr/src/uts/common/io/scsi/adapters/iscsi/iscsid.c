@@ -76,6 +76,7 @@ static boolean_t iscsid_make_entry(ib_boot_prop_t *boot_prop_entry,
 extern int modrootloaded;
 int iscsi_configroot_retry = 20;
 static boolean_t iscsi_configroot_printed = FALSE;
+static int iscsi_net_up = 0;
 extern ib_boot_prop_t   *iscsiboot_prop;
 
 /*
@@ -242,38 +243,29 @@ iscsi_boot_session_create(iscsi_hba_t *ihp,
 }
 
 /*
- * iscsid_init -- load data from persistent storage and start discovery threads
- *
- * If restart is B_TRUE than someone has issued an ISCSI_DB_RELOAD ioctl.
- * The most likely reason is that a new database has been copied into
- * /etc/iscsi and the driver needs to read the contents.
+ * iscsid_init -- to initialize stuffs related to iscsi daemon,
+ * and to create boot session if needed
  */
 boolean_t
-iscsid_init(iscsi_hba_t *ihp, boolean_t restart)
+iscsid_init(iscsi_hba_t *ihp)
 {
-	boolean_t		rval = B_FALSE;
-	iSCSIDiscoveryMethod_t  dm;
-	iSCSIDiscoveryMethod_t	*fdm;
+	boolean_t		rval = B_TRUE;
 
 	sema_init(&iscsid_config_semaphore, 1, NULL,
 	    SEMA_DRIVER, NULL);
+	persistent_init();
+	iscsid_threads_create(ihp);
 
-	if (iscsiboot_prop) {
-		if (ihp->persistent_loaded) {
-			rval = persistent_init(B_TRUE);
+	if (modrootloaded == 1) {
+		/* normal case, load the persistent store */
+		if (persistent_load() == B_TRUE) {
+			ihp->hba_persistent_loaded = B_TRUE;
 		} else {
-			rval = persistent_init(B_FALSE);
-			if (rval)
-				ihp->persistent_loaded = B_TRUE;
-		}
-	} else {
-		rval = persistent_init(restart);
-		if (restart == B_FALSE) {
-			ihp->persistent_loaded = B_TRUE;
+			return (B_FALSE);
 		}
 	}
 
-	if ((modrootloaded == 0) && (iscsiboot_prop != NULL) && rval) {
+	if ((modrootloaded == 0) && (iscsiboot_prop != NULL)) {
 		if (!iscsid_boot_init_config(ihp)) {
 			rval = B_FALSE;
 		} else {
@@ -288,44 +280,88 @@ iscsid_init(iscsi_hba_t *ihp, boolean_t restart)
 				rval = B_FALSE;
 			}
 		}
-		if (!rval) {
-			cmn_err(CE_NOTE, "Initializaton of iscsi initiator"
+		if (rval == B_FALSE) {
+			cmn_err(CE_NOTE, "Initializaton of iscsi boot session"
 			    " partially failed");
 		}
-	} else {
+	}
+
+	return (rval);
+}
+
+/*
+ * iscsid_start -- start the iscsi initiator daemon, actually this code
+ * is just to enable discovery methods which are set enabled in
+ * persistent store, as an economic way to present the 'daemon' funtionality
+ */
+boolean_t
+iscsid_start(iscsi_hba_t *ihp) {
+	boolean_t		rval = B_FALSE;
+	iSCSIDiscoveryMethod_t	dm;
+	iSCSIDiscoveryMethod_t	*fdm;
+
+	rval = iscsid_init_config(ihp);
+	if (rval == B_TRUE) {
+		rval = iscsid_init_targets(ihp);
+	}
+
+	if (rval == B_TRUE) {
+		dm = persistent_disc_meth_get();
+		rval = iscsid_enable_discovery(ihp, dm, B_TRUE);
 		if (rval == B_TRUE) {
-			rval = iscsid_init_config(ihp);
-			if (rval == B_TRUE) {
-				rval = iscsid_init_targets(ihp);
-			}
-		}
-
-		if (rval == B_TRUE) {
-			if (restart == B_FALSE) {
-				iscsid_threads_create(ihp);
-			}
-
-			dm = persistent_disc_meth_get();
-			rval = iscsid_enable_discovery(ihp, dm, B_FALSE);
-			if (rval == B_TRUE) {
-				rval = iscsid_disable_discovery(ihp, ~dm);
-			}
-
-		}
-		if (rval == B_FALSE) {
-			/*
-			 * In case of failure the events still need to be sent
-			 * because the door daemon will pause until all these
-			 * events have occurred.
-			 */
-			for (fdm = &for_failure[0]; *fdm !=
-			    iSCSIDiscoveryMethodUnknown; fdm++) {
-				/* ---- Send both start and end events ---- */
-				iscsi_discovery_event(ihp, *fdm, B_TRUE);
-				iscsi_discovery_event(ihp, *fdm, B_FALSE);
-			}
+			iscsid_poke_discovery(ihp,
+			    iSCSIDiscoveryMethodUnknown);
+			(void) iscsid_login_tgt(ihp, NULL,
+			    iSCSIDiscoveryMethodUnknown, NULL);
 		}
 	}
+
+	if (rval == B_FALSE) {
+		/*
+		 * In case of failure the events still need to be sent
+		 * because the door daemon will pause until all these
+		 * events have occurred.
+		 */
+		for (fdm = &for_failure[0]; *fdm !=
+		    iSCSIDiscoveryMethodUnknown; fdm++) {
+			/* ---- Send both start and end events ---- */
+			iscsi_discovery_event(ihp, *fdm, B_TRUE);
+			iscsi_discovery_event(ihp, *fdm, B_FALSE);
+		}
+	}
+
+	return (rval);
+}
+
+/*
+ * iscsid_stop -- stop the iscsi initiator daemon, by disabling
+ * all the discovery methods first, and then try to stop all
+ * related threads
+ */
+boolean_t
+iscsid_stop(iscsi_hba_t *ihp) {
+	boolean_t		rval = B_FALSE;
+
+	if (iscsid_disable_discovery(ihp,
+	    ISCSI_ALL_DISCOVERY_METHODS) == B_FALSE) {
+		(void) iscsid_enable_discovery(ihp,
+		    ISCSI_ALL_DISCOVERY_METHODS, B_TRUE);
+		return (rval);
+	}
+
+	/* final check */
+	rw_enter(&ihp->hba_sess_list_rwlock, RW_READER);
+	if (ihp->hba_sess_list == NULL) {
+		rval = B_TRUE;
+	}
+	rw_exit(&ihp->hba_sess_list_rwlock);
+
+	if (rval == B_FALSE) {
+		(void) iscsid_enable_discovery(ihp,
+		    ISCSI_ALL_DISCOVERY_METHODS, B_TRUE);
+		return (rval);
+	}
+
 	return (rval);
 }
 
@@ -336,11 +372,11 @@ iscsid_init(iscsi_hba_t *ihp, boolean_t restart)
 void
 iscsid_fini()
 {
-	iscsid_threads_destroy();
 	if (iscsi_boot_wd_handle != NULL) {
 		iscsi_thread_destroy(iscsi_boot_wd_handle);
 		iscsi_boot_wd_handle = NULL;
 	}
+	iscsid_threads_destroy();
 	persistent_fini();
 	sema_destroy(&iscsid_config_semaphore);
 }
@@ -706,6 +742,15 @@ iscsid_config_one(iscsi_hba_t *ihp, char *name, boolean_t protect)
 			    " iSCSI boot session...");
 			iscsi_configroot_printed = B_TRUE;
 		}
+		if (iscsi_net_up == 0) {
+			if (iscsi_net_interface() == ISCSI_STATUS_SUCCESS) {
+				iscsi_net_up = 1;
+			} else {
+				cmn_err(CE_WARN, "Failed to configure interface"
+				    " for iSCSI boot session");
+				return;
+			}
+		}
 		while (rc == B_FALSE && retry <
 		    iscsi_configroot_retry) {
 			rc = iscsid_login_tgt(ihp, name,
@@ -787,6 +832,11 @@ iscsid_config_all(iscsi_hba_t *ihp, boolean_t protect)
 			    " iSCSI boot session...");
 			iscsi_configroot_printed = B_TRUE;
 		}
+		if (iscsi_net_up == 0) {
+			if (iscsi_net_interface() == ISCSI_STATUS_SUCCESS) {
+				iscsi_net_up = 1;
+			}
+		}
 		while (rc == B_FALSE && retry <
 		    iscsi_configroot_retry) {
 			rc = iscsid_login_tgt(ihp, NULL,
@@ -862,6 +912,17 @@ isns_scn_callback(void *arg)
 	}
 
 	if ((ihp = (iscsi_hba_t *)ddi_get_soft_state(iscsi_state, 0)) == NULL) {
+		kmem_free(arg, sizeof (isns_scn_callback_arg_t));
+		return;
+	}
+
+	/*
+	 * All isns callbacks are from a standalone taskq
+	 * therefore the blocking here doesn't affect the enable/disable
+	 * of isns discovery method
+	 */
+	if (iscsi_client_request_service(ihp) == B_FALSE) {
+		kmem_free(arg, sizeof (isns_scn_callback_arg_t));
 		return;
 	}
 
@@ -962,6 +1023,7 @@ isns_scn_callback(void *arg)
 		break;
 	}
 
+	iscsi_client_release_service(ihp);
 	kmem_free(arg, sizeof (isns_scn_callback_arg_t));
 }
 
@@ -1060,6 +1122,13 @@ iscsid_add(iscsi_hba_t *ihp, iSCSIDiscoveryMethod_t method,
 
 		/* create or find matching connection */
 		if (!ISCSI_SUCCESS(iscsi_conn_create(addr_tgt, isp, &icp))) {
+			/*
+			 * Teardown the session we just created.  It can't
+			 * have any luns or connections associated with it
+			 * so this should always succeed (luckily since what
+			 * would we do if it failed?)
+			 */
+			(void) iscsi_sess_destroy(isp);
 			rtn = B_FALSE;
 			break;
 		}
@@ -2225,17 +2294,26 @@ iscsi_add_boot_sess(iscsi_hba_t *ihp, int isid)
 static void
 iscsid_thread_boot_wd(iscsi_thread_t *thread, void *p)
 {
-	int		rc = 1;
+	int			rc = 1;
 	iscsi_hba_t		*ihp = (iscsi_hba_t *)p;
+	boolean_t		reconfigured = B_FALSE;
 
 	while (rc != 0) {
-		if (iscsiboot_prop && (modrootloaded == 1) &&
-		    (ihp->persistent_loaded == B_TRUE)) {
-			(void) iscsid_init(ihp, B_FALSE);
-			(void) iscsi_reconfig_boot_sess(ihp);
-			iscsid_poke_discovery(ihp, iSCSIDiscoveryMethodUnknown);
-			(void) iscsid_login_tgt(ihp, NULL,
-			    iSCSIDiscoveryMethodUnknown, NULL);
+		if (iscsiboot_prop && (modrootloaded == 1)) {
+			if (ihp->hba_persistent_loaded == B_FALSE) {
+				if (persistent_load() == B_TRUE) {
+					ihp->hba_persistent_loaded = B_TRUE;
+				}
+			}
+			if ((ihp->hba_persistent_loaded == B_TRUE) &&
+			    (reconfigured == B_FALSE)) {
+				(void) iscsi_reconfig_boot_sess(ihp);
+				iscsid_poke_discovery(ihp,
+				    iSCSIDiscoveryMethodUnknown);
+				(void) iscsid_login_tgt(ihp, NULL,
+				    iSCSIDiscoveryMethodUnknown, NULL);
+				reconfigured = B_TRUE;
+			}
 			break;
 		}
 		rc = iscsi_thread_wait(thread, SEC_TO_TICK(1));

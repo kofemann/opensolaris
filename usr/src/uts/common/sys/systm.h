@@ -23,7 +23,7 @@
 
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -93,6 +93,7 @@ extern boolean_t root_is_ramdisk;	/* root is boot_archive ramdisk */
 extern uint32_t  ramdisk_size;		/* (KB) set only for sparc netboots */
 extern char *volatile panicstr;	/* panic string pointer */
 extern va_list  panicargs;	/* panic arguments */
+extern volatile int quiesce_active;	/* quiesce(9E) is in progress */
 
 extern int	rstchown;	/* 1 ==> restrictive chown(2) semantics */
 extern int	klustsize;
@@ -246,7 +247,10 @@ extern void longjmp(label_t *)
 #pragma unknown_control_flow(setjmp)
 #endif
 
-void prefetch64(caddr_t);
+void prefetch_read_once(void *);
+void prefetch_write_once(void *);
+void prefetch_read_many(void *);
+void prefetch_write_many(void *);
 caddr_t caller(void);
 caddr_t callee(void);
 int getpcstack(pc_t *, int);

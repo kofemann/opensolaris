@@ -1364,7 +1364,8 @@ check_again:
 			 */
 			if (mac_srs->srs_state & SRS_LATENCY_OPT) {
 				mac_srs->srs_drain_func(mac_srs, SRS_POLL_PROC);
-				if (srs_rx->sr_poll_pkt_cnt <=
+				if (!(mac_srs->srs_state & SRS_PAUSE) &&
+				    srs_rx->sr_poll_pkt_cnt <=
 				    srs_rx->sr_lowat) {
 					srs_rx->sr_poll_again++;
 					goto check_again;
@@ -3538,7 +3539,7 @@ mac_rx_deliver(void *arg1, mac_resource_handle_t mrh, mblk_t *mp_chain,
 	mac_client_impl_t *mcip = arg1;
 
 	if (mcip->mci_nvids == 1 &&
-	    !(mcip->mci_state_flags & MCIS_TAG_DISABLE)) {
+	    !(mcip->mci_state_flags & MCIS_STRIP_DISABLE)) {
 		/*
 		 * If the client has exactly one VID associated with it
 		 * and striping of VLAN header is not disabled,

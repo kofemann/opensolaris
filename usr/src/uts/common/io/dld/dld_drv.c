@@ -32,6 +32,7 @@
 #include	<sys/modctl.h>
 #include	<sys/stat.h>
 #include	<sys/dld_impl.h>
+#include	<sys/dld_ioc.h>
 #include	<sys/dls_impl.h>
 #include	<sys/softmac.h>
 #include	<sys/mac.h>
@@ -824,16 +825,19 @@ drv_ioc_usagelog(void *karg, intptr_t arg, int mode, cred_t *cred,
     int *rvalp)
 {
 	dld_ioc_usagelog_t	*log_info = (dld_ioc_usagelog_t *)karg;
+	int			err = 0;
 
 	if (log_info->ul_type < MAC_LOGTYPE_LINK ||
 	    log_info->ul_type > MAC_LOGTYPE_FLOW)
 		return (EINVAL);
 
-	if (log_info->ul_onoff)
-		mac_start_logusage(log_info->ul_type, log_info->ul_interval);
-	else
+	if (log_info->ul_onoff) {
+		err = mac_start_logusage(log_info->ul_type,
+		    log_info->ul_interval);
+	} else {
 		mac_stop_logusage(log_info->ul_type);
-	return (0);
+	}
+	return (err);
 }
 
 /*

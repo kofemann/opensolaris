@@ -303,8 +303,9 @@ superfluous_nonglobal_zone_files="
 	lib/libmeta.so
 	lib/libmeta.so.1
 	lib/svc/method/fc-fabric
-	lib/svc/method/iscsid
+	lib/svc/method/iscsi-initiator
 	lib/svc/method/npivconfig
+	lib/svc/method/fcoeconfig
 	lib/svc/method/sf880dr
 	lib/svc/method/svc-cvcd
 	lib/svc/method/svc-dcs
@@ -360,8 +361,9 @@ superfluous_nonglobal_zone_files="
 	usr/platform/SUNW,SPARC-Enterprise/sbin/prtdscp
 	var/adm/pool
 	var/log/pool
-	var/svc/manifest/network/iscsi_initiator.xml
+	var/svc/manifest/network/iscsi/iscsi-initiator.xml
 	var/svc/manifest/network/npiv_config.xml
+	var/svc/manifest/network/fcoe_config.xml
 	var/svc/manifest/network/rpc/mdcomm.xml
 	var/svc/manifest/network/rpc/meta.xml
 	var/svc/manifest/network/rpc/metamed.xml
@@ -1444,6 +1446,7 @@ smf_obsolete_manifests="
 	var/svc/manifest/network/aggregation.xml
 	var/svc/manifest/network/datalink.xml
 	var/svc/manifest/network/datalink-init.xml
+	var/svc/manifest/network/iscsi_initiator.xml
 "
 
 # smf services whose manifests have been renamed
@@ -1465,6 +1468,7 @@ smf_obsolete_methods="
 	lib/svc/method/svc-kdc.master
 	lib/svc/method/svc-kdc.slave
 	lib/svc/share/krb_include.sh
+	lib/svc/method/iscsid
 "
 
 smf_cleanup () {
@@ -4164,6 +4168,32 @@ fixup_mpxio()
 		#
 		[ $mpxio_child -eq 0 ] && disable_mpxio_using_fpconf
 	fi
+}
+
+fixup_isa_bfu()
+{
+	aliasfile=$rootprefix/etc/driver_aliases
+	parentalias=$rootprefix/bfu.parent/etc/driver_aliases
+	pathtoinst=$rootprefix/etc/path_to_inst
+	tmppath=/tmp/path_to_inst
+	isaalias="pciclass,060100"
+
+	if [ $target_isa != i386 ]; then
+		return;
+	fi
+	egrep -s "\"\/isa[\"\/]" $pathtoinst && child_pseudo_isa=1
+	egrep -s "\"$isaalias\"" $parentalias || parent_pseudo_isa=1
+	if [ "$child_pseudo_isa" != "$parent_pseudo_isa" ]; then
+		sed -e '/\/isa[\"\/@]/d' <$pathtoinst >$tmppath
+		mv $tmppath $pathtoinst
+	fi
+
+	# bfu forwards, just return
+	[[ "$parent_pseudo_isa" != 1 ]] && return
+
+	# remove the pciclass,060100 entry for isa when going backwards
+	egrep -s "\"$isaalias\"" $aliasfile || return
+	/tmp/bfubin/update_drv -b $root -d -i "$isaalias" isa >/dev/null 2>&1
 }
 
 #
@@ -8127,6 +8157,8 @@ mondo_loop() {
 	update_policy_conf
 
 	tx_check_bkbfu
+
+	fixup_isa_bfu
 
 	update_aac_conf
 

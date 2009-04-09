@@ -193,6 +193,8 @@ static void	ill_glist_delete(ill_t *);
 static void	ill_phyint_reinit(ill_t *ill);
 static void	ill_set_nce_router_flags(ill_t *, boolean_t);
 static void	ill_set_phys_addr_tail(ipsq_t *, queue_t *, mblk_t *, void *);
+static void	ill_replumb_tail(ipsq_t *, queue_t *, mblk_t *, void *);
+
 static ip_v6intfid_func_t ip_ether_v6intfid, ip_ib_v6intfid;
 static ip_v6intfid_func_t ip_ipmp_v6intfid, ip_nodef_v6intfid;
 static ip_v6mapinfo_func_t ip_ether_v6mapinfo, ip_ib_v6mapinfo;
@@ -432,45 +434,6 @@ static ipft_t	ip_ioctl_ftbl[] = {
 /* Simple ICMP IP Header Template */
 static ipha_t icmp_ipha = {
 	IP_SIMPLE_HDR_VERSION, 0, 0, 0, 0, 0, IPPROTO_ICMP
-};
-
-/* Flag descriptors for ip_ipif_report */
-static nv_t	ipif_nv_tbl[] = {
-	{ IPIF_UP,		"UP" },
-	{ IPIF_BROADCAST,	"BROADCAST" },
-	{ ILLF_DEBUG,		"DEBUG" },
-	{ PHYI_LOOPBACK,	"LOOPBACK" },
-	{ IPIF_POINTOPOINT,	"POINTOPOINT" },
-	{ ILLF_NOTRAILERS,	"NOTRAILERS" },
-	{ PHYI_RUNNING,		"RUNNING" },
-	{ ILLF_NOARP,		"NOARP" },
-	{ PHYI_PROMISC,		"PROMISC" },
-	{ PHYI_ALLMULTI,	"ALLMULTI" },
-	{ PHYI_INTELLIGENT,	"INTELLIGENT" },
-	{ ILLF_MULTICAST,	"MULTICAST" },
-	{ PHYI_MULTI_BCAST,	"MULTI_BCAST" },
-	{ IPIF_UNNUMBERED,	"UNNUMBERED" },
-	{ IPIF_DHCPRUNNING,	"DHCP" },
-	{ IPIF_PRIVATE,		"PRIVATE" },
-	{ IPIF_NOXMIT,		"NOXMIT" },
-	{ IPIF_NOLOCAL,		"NOLOCAL" },
-	{ IPIF_DEPRECATED,	"DEPRECATED" },
-	{ IPIF_PREFERRED,	"PREFERRED" },
-	{ IPIF_TEMPORARY,	"TEMPORARY" },
-	{ IPIF_ADDRCONF,	"ADDRCONF" },
-	{ PHYI_VIRTUAL,		"VIRTUAL" },
-	{ ILLF_ROUTER,		"ROUTER" },
-	{ ILLF_NONUD,		"NONUD" },
-	{ IPIF_ANYCAST,		"ANYCAST" },
-	{ ILLF_NORTEXCH,	"NORTEXCH" },
-	{ ILLF_IPV4,		"IPV4" },
-	{ ILLF_IPV6,		"IPV6" },
-	{ IPIF_NOFAILOVER,	"NOFAILOVER" },
-	{ PHYI_FAILED,		"FAILED" },
-	{ PHYI_STANDBY,		"STANDBY" },
-	{ PHYI_INACTIVE,	"INACTIVE" },
-	{ PHYI_OFFLINE,		"OFFLINE" },
-	{ PHYI_IPMP,		"IPMP" }
 };
 
 static uchar_t	ip_six_byte_all_ones[] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
@@ -1587,18 +1550,24 @@ conn_cleanup_ill(conn_t *connp, caddr_t arg)
 	mutex_exit(&connp->conn_lock);
 }
 
-/* ARGSUSED */
-void
-ipif_all_down_tail(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
+static void
+ill_down_ipifs_tail(ill_t *ill)
 {
-	ill_t	*ill = q->q_ptr;
 	ipif_t	*ipif;
 
-	ASSERT(IAM_WRITER_IPSQ(ipsq));
+	ASSERT(IAM_WRITER_ILL(ill));
 	for (ipif = ill->ill_ipif; ipif != NULL; ipif = ipif->ipif_next) {
 		ipif_non_duplicate(ipif);
 		ipif_down_tail(ipif);
 	}
+}
+
+/* ARGSUSED */
+void
+ipif_all_down_tail(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy_arg)
+{
+	ASSERT(IAM_WRITER_IPSQ(ipsq));
+	ill_down_ipifs_tail(q->q_ptr);
 	freemsg(mp);
 	ipsq_current_finish(ipsq);
 }
@@ -3007,10 +2976,10 @@ ill_capability_dld_ack(ill_t *ill, mblk_t *mp, dl_capability_sub_t *isub)
 			    ill->ill_name);
 			return;
 		}
-		idc->idc_capab_df = (ip_capab_func_t)dld.dld_capab;
-		idc->idc_capab_dh = (void *)dld.dld_capab_handle;
 		ill->ill_dld_capab = idc;
 	}
+	idc->idc_capab_df = (ip_capab_func_t)dld.dld_capab;
+	idc->idc_capab_dh = (void *)dld.dld_capab_handle;
 	ip1dbg(("ill_capability_dld_ack: interface %s "
 	    "supports DLD version %d\n", ill->ill_name, DLD_CURRENT_VERSION));
 
@@ -4737,6 +4706,43 @@ phyint_assign_ifindex(phyint_t *phyi, ip_stack_t *ipst)
 }
 
 /*
+ * Initialize the flags on `phyi' as per the provided mactype.
+ */
+static void
+phyint_flags_init(phyint_t *phyi, t_uscalar_t mactype)
+{
+	uint64_t flags = 0;
+
+	/*
+	 * Initialize PHYI_RUNNING and PHYI_FAILED.  For non-IPMP interfaces,
+	 * we always presume the underlying hardware is working and set
+	 * PHYI_RUNNING (if it's not, the driver will subsequently send a
+	 * DL_NOTE_LINK_DOWN message).  For IPMP interfaces, at initialization
+	 * there are no active interfaces in the group so we set PHYI_FAILED.
+	 */
+	if (mactype == SUNW_DL_IPMP)
+		flags |= PHYI_FAILED;
+	else
+		flags |= PHYI_RUNNING;
+
+	switch (mactype) {
+	case SUNW_DL_VNI:
+		flags |= PHYI_VIRTUAL;
+		break;
+	case SUNW_DL_IPMP:
+		flags |= PHYI_IPMP;
+		break;
+	case DL_LOOP:
+		flags |= (PHYI_LOOPBACK | PHYI_VIRTUAL);
+		break;
+	}
+
+	mutex_enter(&phyi->phyint_lock);
+	phyi->phyint_flags |= flags;
+	mutex_exit(&phyi->phyint_lock);
+}
+
+/*
  * Return a pointer to the ill which matches the supplied name.  Note that
  * the ill name length includes the null termination character.  (May be
  * called as writer.)
@@ -4804,6 +4810,8 @@ ill_lookup_on_name(char *name, boolean_t do_alloc, boolean_t isv6,
 	else
 		ill->ill_phyint->phyint_illv4 = ill;
 	mutex_init(&ill->ill_phyint->phyint_lock, NULL, MUTEX_DEFAULT, 0);
+	phyint_flags_init(ill->ill_phyint, DL_LOOP);
+
 	ill->ill_max_frag = IP_LOOPBACK_MTU;
 	/* Add room for tcp+ip headers */
 	if (isv6) {
@@ -4899,16 +4907,6 @@ ill_lookup_on_name(char *name, boolean_t do_alloc, boolean_t isv6,
 	 */
 	if (ipsq != ill->ill_phyint->phyint_ipsq)
 		ipsq_delete(ipsq);
-
-	/*
-	 * Delay this till the ipif is allocated as ipif_allocate
-	 * de-references ill_phyint for getting the ifindex. We
-	 * can't do this before ipif_allocate because ill_phyint_reinit
-	 * -> phyint_assign_ifindex expects ipif to be present.
-	 */
-	mutex_enter(&ill->ill_phyint->phyint_lock);
-	ill->ill_phyint->phyint_flags |= PHYI_LOOPBACK | PHYI_VIRTUAL;
-	mutex_exit(&ill->ill_phyint->phyint_lock);
 
 	if (ipst->ips_loopback_ksp == NULL) {
 		/* Export loopback interface statistics */
@@ -5216,134 +5214,6 @@ ill_waiter_dcr(ill_t *ill)
 }
 
 /*
- * Named Dispatch routine to produce a formatted report on all ILLs.
- * This report is accessed by using the ndd utility to "get" ND variable
- * "ip_ill_status".
- */
-/* ARGSUSED */
-int
-ip_ill_report(queue_t *q, mblk_t *mp, caddr_t arg, cred_t *ioc_cr)
-{
-	ill_t		*ill;
-	ill_walk_context_t ctx;
-	ip_stack_t	*ipst;
-
-	ipst = CONNQ_TO_IPST(q);
-
-	(void) mi_mpprintf(mp,
-	    "ILL      " MI_COL_HDRPAD_STR
-	/*   01234567[89ABCDEF] */
-	    "rq       " MI_COL_HDRPAD_STR
-	/*   01234567[89ABCDEF] */
-	    "wq       " MI_COL_HDRPAD_STR
-	/*   01234567[89ABCDEF] */
-	    "upcnt mxfrg err name");
-	/*   12345 12345 123 xxxxxxxx  */
-
-	rw_enter(&ipst->ips_ill_g_lock, RW_READER);
-	ill = ILL_START_WALK_ALL(&ctx, ipst);
-	for (; ill != NULL; ill = ill_next(&ctx, ill)) {
-		(void) mi_mpprintf(mp,
-		    MI_COL_PTRFMT_STR MI_COL_PTRFMT_STR MI_COL_PTRFMT_STR
-		    "%05u %05u %03d %s",
-		    (void *)ill, (void *)ill->ill_rq, (void *)ill->ill_wq,
-		    ill->ill_ipif_up_count,
-		    ill->ill_max_frag, ill->ill_error, ill->ill_name);
-	}
-	rw_exit(&ipst->ips_ill_g_lock);
-
-	return (0);
-}
-
-/*
- * Named Dispatch routine to produce a formatted report on all IPIFs.
- * This report is accessed by using the ndd utility to "get" ND variable
- * "ip_ipif_status".
- */
-/* ARGSUSED */
-int
-ip_ipif_report(queue_t *q, mblk_t *mp, caddr_t arg, cred_t *ioc_cr)
-{
-	char	buf1[INET6_ADDRSTRLEN];
-	char	buf2[INET6_ADDRSTRLEN];
-	char	buf3[INET6_ADDRSTRLEN];
-	char	buf4[INET6_ADDRSTRLEN];
-	char	buf5[INET6_ADDRSTRLEN];
-	char	buf6[INET6_ADDRSTRLEN];
-	char	buf[LIFNAMSIZ];
-	ill_t	*ill;
-	ipif_t	*ipif;
-	nv_t	*nvp;
-	uint64_t flags;
-	zoneid_t zoneid;
-	ill_walk_context_t ctx;
-	ip_stack_t *ipst = CONNQ_TO_IPST(q);
-
-	(void) mi_mpprintf(mp,
-	    "IPIF metric mtu in/out/forward name zone flags...\n"
-	    "\tlocal address\n"
-	    "\tsrc address\n"
-	    "\tsubnet\n"
-	    "\tmask\n"
-	    "\tbroadcast\n"
-	    "\tp-p-dst");
-
-	ASSERT(q->q_next == NULL);
-	zoneid = Q_TO_CONN(q)->conn_zoneid;	/* IP is a driver */
-
-	rw_enter(&ipst->ips_ill_g_lock, RW_READER);
-	ill = ILL_START_WALK_ALL(&ctx, ipst);
-	for (; ill != NULL; ill = ill_next(&ctx, ill)) {
-		for (ipif = ill->ill_ipif; ipif != NULL;
-		    ipif = ipif->ipif_next) {
-			if (zoneid != GLOBAL_ZONEID &&
-			    zoneid != ipif->ipif_zoneid &&
-			    ipif->ipif_zoneid != ALL_ZONES)
-				continue;
-
-			ipif_get_name(ipif, buf, sizeof (buf));
-			(void) mi_mpprintf(mp,
-			    MI_COL_PTRFMT_STR
-			    "%04u %05u %u/%u/%u %s %d",
-			    (void *)ipif,
-			    ipif->ipif_metric, ipif->ipif_mtu,
-			    ipif->ipif_ib_pkt_count,
-			    ipif->ipif_ob_pkt_count,
-			    ipif->ipif_fo_pkt_count,
-			    buf,
-			    ipif->ipif_zoneid);
-
-		flags = ipif->ipif_flags | ipif->ipif_ill->ill_flags |
-		    ipif->ipif_ill->ill_phyint->phyint_flags;
-
-		/* Tack on text strings for any flags. */
-		nvp = ipif_nv_tbl;
-		for (; nvp < A_END(ipif_nv_tbl); nvp++) {
-			if (nvp->nv_value & flags)
-				(void) mi_mpprintf_nr(mp, " %s",
-				    nvp->nv_name);
-		}
-		(void) mi_mpprintf(mp,
-		    "\t%s\n\t%s\n\t%s\n\t%s\n\t%s\n\t%s",
-		    inet_ntop(AF_INET6,
-		    &ipif->ipif_v6lcl_addr, buf1, sizeof (buf1)),
-		    inet_ntop(AF_INET6,
-		    &ipif->ipif_v6src_addr, buf2, sizeof (buf2)),
-		    inet_ntop(AF_INET6,
-		    &ipif->ipif_v6subnet, buf3, sizeof (buf3)),
-		    inet_ntop(AF_INET6,
-		    &ipif->ipif_v6net_mask, buf4, sizeof (buf4)),
-		    inet_ntop(AF_INET6,
-		    &ipif->ipif_v6brd_addr, buf5, sizeof (buf5)),
-		    inet_ntop(AF_INET6,
-		    &ipif->ipif_v6pp_dst_addr, buf6, sizeof (buf6)));
-		}
-	}
-	rw_exit(&ipst->ips_ill_g_lock);
-	return (0);
-}
-
-/*
  * ip_ll_subnet_defaults is called when we get the DL_INFO_ACK back from the
  * driver.  We construct best guess defaults for lower level information that
  * we need.  If an interface is brought up without injection of any overriding
@@ -5421,10 +5291,11 @@ ip_ll_subnet_defaults(ill_t *ill, mblk_t *mp)
 		if (dlia->dl_provider_style == DL_STYLE2)
 			ill->ill_needs_attach = 1;
 
+		phyint_flags_init(ill->ill_phyint, ill->ill_mactype);
+
 		/*
-		 * Allocate the first ipif on this ill. We don't delay it
-		 * further as ioctl handling assumes atleast one ipif to
-		 * be present.
+		 * Allocate the first ipif on this ill.  We don't delay it
+		 * further as ioctl handling assumes at least one ipif exists.
 		 *
 		 * At this point we don't know whether the ill is v4 or v6.
 		 * We will know this whan the SIOCSLIFNAME happens and
@@ -5509,7 +5380,6 @@ ip_ll_subnet_defaults(ill_t *ill, mblk_t *mp)
 		if (ill->ill_phys_addr_length == 0) {
 			if (ill->ill_media->ip_m_mac_type == SUNW_DL_VNI) {
 				ill->ill_ipif->ipif_flags |= IPIF_NOXMIT;
-				ill->ill_phyint->phyint_flags |= PHYI_VIRTUAL;
 			} else {
 				/* pt-pt supports multicast. */
 				ill->ill_flags |= ILLF_MULTICAST;
@@ -5533,7 +5403,7 @@ ip_ll_subnet_defaults(ill_t *ill, mblk_t *mp)
 			ill->ill_ipif->ipif_flags |= IPIF_BROADCAST;
 	}
 
-	/* For IPMP, PHYI_IPMP should already be set by ipif_allocate() */
+	/* For IPMP, PHYI_IPMP should already be set by phyint_flags_init() */
 	if (ill->ill_mactype == SUNW_DL_IPMP)
 		ASSERT(ill->ill_phyint->phyint_flags & PHYI_IPMP);
 
@@ -6317,6 +6187,10 @@ ipif_ill_refrele_tail(ill_t *ill)
 			qwriter_ip(ill, ill->ill_rq, mp,
 			    ill_set_phys_addr_tail, CUR_OP, B_TRUE);
 			return;
+		case DL_NOTE_REPLUMB:
+			qwriter_ip(ill, ill->ill_rq, mp,
+			    ill_replumb_tail, CUR_OP, B_TRUE);
+			return;
 		default:
 			ASSERT(0);
 			ill_refrele(ill);
@@ -6747,7 +6621,7 @@ ip_rt_add(ipaddr_t dst_addr, ipaddr_t mask, ipaddr_t gw_addr,
 					ipif_refrele(ipif);
 				return (EEXIST);
 			}
-			ip1dbg(("ipif_up_done: 0x%p creating IRE 0x%x"
+			ip1dbg(("ip_rt_add: 0x%p creating IRE 0x%x"
 			    "for 0x%x\n", (void *)ipif,
 			    ipif->ipif_ire_type,
 			    ntohl(ipif->ipif_lcl_addr)));
@@ -8021,6 +7895,7 @@ ipsq_exit(ipsq_t *ipsq)
 void
 ipsq_current_start(ipsq_t *ipsq, ipif_t *ipif, int ioccmd)
 {
+	ill_t *ill = ipif->ipif_ill;
 	ipxop_t *ipx = ipsq->ipsq_xop;
 
 	ASSERT(IAM_WRITER_IPSQ(ipsq));
@@ -8032,6 +7907,39 @@ ipsq_current_start(ipsq_t *ipsq, ipif_t *ipif, int ioccmd)
 	mutex_enter(&ipx->ipx_lock);
 	ipx->ipx_current_ipif = ipif;
 	mutex_exit(&ipx->ipx_lock);
+
+	/*
+	 * Set IPIF_CHANGING on one or more ipifs associated with the
+	 * current exclusive operation.  IPIF_CHANGING prevents any new
+	 * references to the ipif (so that the references will eventually
+	 * drop to zero) and also prevents any "get" operations (e.g.,
+	 * SIOCGLIFFLAGS) from being able to access the ipif until the
+	 * operation has completed and the ipif is again in a stable state.
+	 *
+	 * For ioctls, IPIF_CHANGING is set on the ipif associated with the
+	 * ioctl.  For internal operations (where ioccmd is zero), all ipifs
+	 * on the ill are marked with IPIF_CHANGING since it's unclear which
+	 * ipifs will be affected.
+	 *
+	 * Note that SIOCLIFREMOVEIF is a special case as it sets
+	 * IPIF_CONDEMNED internally after identifying the right ipif to
+	 * operate on.
+	 */
+	switch (ioccmd) {
+	case SIOCLIFREMOVEIF:
+		break;
+	case 0:
+		mutex_enter(&ill->ill_lock);
+		ipif = ipif->ipif_ill->ill_ipif;
+		for (; ipif != NULL; ipif = ipif->ipif_next)
+			ipif->ipif_state_flags |= IPIF_CHANGING;
+		mutex_exit(&ill->ill_lock);
+		break;
+	default:
+		mutex_enter(&ill->ill_lock);
+		ipif->ipif_state_flags |= IPIF_CHANGING;
+		mutex_exit(&ill->ill_lock);
+	}
 }
 
 /*
@@ -8061,7 +7969,13 @@ ipsq_current_finish(ipsq_t *ipsq)
 
 		mutex_enter(&ill->ill_lock);
 		dlpi_pending = ill->ill_dlpi_pending;
-		ipif->ipif_state_flags &= ~IPIF_CHANGING;
+		if (ipx->ipx_current_ioctl == 0) {
+			ipif = ill->ill_ipif;
+			for (; ipif != NULL; ipif = ipif->ipif_next)
+				ipif->ipif_state_flags &= ~IPIF_CHANGING;
+		} else {
+			ipif->ipif_state_flags &= ~IPIF_CHANGING;
+		}
 		mutex_exit(&ill->ill_lock);
 	}
 
@@ -13245,7 +13159,6 @@ ipif_allocate(ill_t *ill, int id, uint_t ire_type, boolean_t initialize,
     boolean_t insert)
 {
 	ipif_t	*ipif;
-	phyint_t *phyi = ill->ill_phyint;
 	ip_stack_t *ipst = ill->ill_ipst;
 
 	ip1dbg(("ipif_allocate(%s:%d ill %p)\n",
@@ -13283,55 +13196,29 @@ ipif_allocate(ill_t *ill, int id, uint_t ire_type, boolean_t initialize,
 		ipif_assign_seqid(ipif);
 
 	/*
-	 * If this is ipif zero, configure ill/phyint-wide information.
-	 * Defer most configuration until we're guaranteed we're attached.
+	 * If this is the zeroth ipif on the IPMP ill, create the illgrp
+	 * (which must not exist yet because the zeroth ipif is created once
+	 * per ill).  However, do not not link it to the ipmp_grp_t until
+	 * I_PLINK is called; see ip_sioctl_plink_ipmp() for details.
 	 */
-	if (id == 0) {
-		if (ill->ill_mactype == SUNW_DL_IPMP) {
-			/*
-			 * Set PHYI_IPMP and also set PHYI_FAILED since there
-			 * are no active interfaces.  Similarly, PHYI_RUNNING
-			 * isn't set until the group has an active interface.
-			 */
-			mutex_enter(&phyi->phyint_lock);
-			phyi->phyint_flags |= (PHYI_IPMP | PHYI_FAILED);
-			mutex_exit(&phyi->phyint_lock);
-
-			/*
-			 * Create the illgrp (which must not exist yet because
-			 * the zeroth ipif is created once per ill).  However,
-			 * do not not link it to the ipmp_grp_t until I_PLINK
-			 * is called; see ip_sioctl_plink_ipmp() for details.
-			 */
-			if (ipmp_illgrp_create(ill) == NULL) {
-				if (insert) {
-					rw_enter(&ipst->ips_ill_g_lock,
-					    RW_WRITER);
-					ipif_remove(ipif);
-					rw_exit(&ipst->ips_ill_g_lock);
-				}
-				mi_free(ipif);
-				return (NULL);
+	if (id == 0 && IS_IPMP(ill)) {
+		if (ipmp_illgrp_create(ill) == NULL) {
+			if (insert) {
+				rw_enter(&ipst->ips_ill_g_lock, RW_WRITER);
+				ipif_remove(ipif);
+				rw_exit(&ipst->ips_ill_g_lock);
 			}
-		} else {
-			/*
-			 * By default, PHYI_RUNNING is set when the zeroth
-			 * ipif is created.  For other ipifs, we don't touch
-			 * it since DLPI notifications may have changed it.
-			 */
-			mutex_enter(&phyi->phyint_lock);
-			phyi->phyint_flags |= PHYI_RUNNING;
-			mutex_exit(&phyi->phyint_lock);
+			mi_free(ipif);
+			return (NULL);
 		}
 	}
 
 	/*
-	 * We grab the ill_lock and phyint_lock to protect the flag changes.
-	 * The ipif is still not up and can't be looked up until the
-	 * ioctl completes and the IPIF_CHANGING flag is cleared.
+	 * We grab ill_lock to protect the flag changes.  The ipif is still
+	 * not up and can't be looked up until the ioctl completes and the
+	 * IPIF_CHANGING flag is cleared.
 	 */
 	mutex_enter(&ill->ill_lock);
-	mutex_enter(&phyi->phyint_lock);
 
 	ipif->ipif_ire_type = ire_type;
 
@@ -13374,9 +13261,8 @@ ipif_allocate(ill_t *ill, int id, uint_t ire_type, boolean_t initialize,
 	 */
 	if (ill->ill_bcast_addr_length != 0 || IS_IPMP(ill)) {
 		/*
-		 * Later detect lack of DLPI driver multicast
-		 * capability by catching DL_ENABMULTI errors in
-		 * ip_rput_dlpi.
+		 * Later detect lack of DLPI driver multicast capability by
+		 * catching DL_ENABMULTI_REQ errors in ip_rput_dlpi().
 		 */
 		ill->ill_flags |= ILLF_MULTICAST;
 		if (!ipif->ipif_isv6)
@@ -13396,23 +13282,17 @@ ipif_allocate(ill_t *ill, int id, uint_t ire_type, boolean_t initialize,
 				ill->ill_flags |= ILLF_NOARP;
 		}
 		if (ill->ill_phys_addr_length == 0) {
-			if (ill->ill_mactype == SUNW_DL_VNI) {
+			if (IS_VNI(ill)) {
 				ipif->ipif_flags |= IPIF_NOXMIT;
-				phyi->phyint_flags |= PHYI_VIRTUAL;
 			} else {
 				/* pt-pt supports multicast. */
 				ill->ill_flags |= ILLF_MULTICAST;
-				if (ill->ill_net_type == IRE_LOOPBACK) {
-					phyi->phyint_flags |=
-					    (PHYI_LOOPBACK | PHYI_VIRTUAL);
-				} else {
+				if (ill->ill_net_type != IRE_LOOPBACK)
 					ipif->ipif_flags |= IPIF_POINTOPOINT;
-				}
 			}
 		}
 	}
 out:
-	mutex_exit(&phyi->phyint_lock);
 	mutex_exit(&ill->ill_lock);
 	return (ipif);
 }
@@ -14010,20 +13890,9 @@ ill_up_ipifs_on_ill(ill_t *ill, queue_t *q, mblk_t *mp)
 	if (ill == NULL)
 		return (0);
 
-	/*
-	 * Except for ipif_state_flags and ill_state_flags the other
-	 * fields of the ipif/ill that are modified below are protected
-	 * implicitly since we are a writer. We would have tried to down
-	 * even an ipif that was already down, in ill_down_ipifs. So we
-	 * just blindly clear the IPIF_CHANGING flag here on all ipifs.
-	 */
 	ASSERT(IAM_WRITER_ILL(ill));
-
 	ill->ill_up_ipifs = B_TRUE;
 	for (ipif = ill->ill_ipif; ipif != NULL; ipif = ipif->ipif_next) {
-		mutex_enter(&ill->ill_lock);
-		ipif->ipif_state_flags &= ~IPIF_CHANGING;
-		mutex_exit(&ill->ill_lock);
 		if (ipif->ipif_was_up) {
 			if (!(ipif->ipif_flags & IPIF_UP))
 				err = ipif_up(ipif, q, mp);
@@ -14060,19 +13929,16 @@ ill_up_ipifs(ill_t *ill, queue_t *q, mblk_t *mp)
 }
 
 /*
- * Bring down any IPIF_UP ipifs on ill.
+ * Bring down any IPIF_UP ipifs on ill. If "logical" is B_TRUE, we bring
+ * down the ipifs without sending DL_UNBIND_REQ to the driver.
  */
 static void
-ill_down_ipifs(ill_t *ill)
+ill_down_ipifs(ill_t *ill, boolean_t logical)
 {
 	ipif_t *ipif;
 
 	ASSERT(IAM_WRITER_ILL(ill));
 
-	/*
-	 * Except for ipif_state_flags the other fields of the ipif/ill that
-	 * are modified below are protected implicitly since we are a writer
-	 */
 	for (ipif = ill->ill_ipif; ipif != NULL; ipif = ipif->ipif_next) {
 		/*
 		 * We go through the ipif_down logic even if the ipif
@@ -14083,19 +13949,19 @@ ill_down_ipifs(ill_t *ill)
 		if (ipif->ipif_flags & IPIF_UP)
 			ipif->ipif_was_up = B_TRUE;
 
-		mutex_enter(&ill->ill_lock);
-		ipif->ipif_state_flags |= IPIF_CHANGING;
-		mutex_exit(&ill->ill_lock);
-
 		/*
 		 * Need to re-create net/subnet bcast ires if
 		 * they are dependent on ipif.
 		 */
 		if (!ipif->ipif_isv6)
 			ipif_check_bcast_ires(ipif);
-		(void) ipif_logical_down(ipif, NULL, NULL);
-		ipif_non_duplicate(ipif);
-		ipif_down_tail(ipif);
+		if (logical) {
+			(void) ipif_logical_down(ipif, NULL, NULL);
+			ipif_non_duplicate(ipif);
+			ipif_down_tail(ipif);
+		} else {
+			(void) ipif_down(ipif, NULL, NULL);
+		}
 	}
 }
 
@@ -14408,6 +14274,7 @@ ill_dlpi_dispatch(ill_t *ill, mblk_t *mp)
 {
 	union DL_primitives *dlp;
 	t_uscalar_t prim;
+	boolean_t waitack = B_FALSE;
 
 	ASSERT(DB_TYPE(mp) == M_PROTO || DB_TYPE(mp) == M_PCPROTO);
 
@@ -14437,11 +14304,20 @@ ill_dlpi_dispatch(ill_t *ill, mblk_t *mp)
 	 * we only wait for the ACK of the DL_UNBIND_REQ.
 	 */
 	mutex_enter(&ill->ill_lock);
-	if (!(ill->ill_state_flags & ILL_CONDEMNED) || (prim == DL_UNBIND_REQ))
+	if (!(ill->ill_state_flags & ILL_CONDEMNED) ||
+	    (prim == DL_UNBIND_REQ)) {
 		ill->ill_dlpi_pending = prim;
+		waitack = B_TRUE;
+	}
 
 	mutex_exit(&ill->ill_lock);
 	putnext(ill->ill_wq, mp);
+
+	/*
+	 * There is no ack for DL_NOTIFY_CONF messages
+	 */
+	if (waitack && prim == DL_NOTIFY_CONF)
+		ill_dlpi_done(ill, prim);
 }
 
 /*
@@ -16165,14 +16041,13 @@ ill_dl_up(ill_t *ill, ipif_t *ipif, mblk_t *mp, queue_t *q)
 	 * Record state needed to complete this operation when the
 	 * DL_BIND_ACK shows up.  Also remember the pre-allocated mblks.
 	 */
-	ASSERT(WR(q)->q_next == NULL);
-	connp = Q_TO_CONN(q);
-
-	mutex_enter(&connp->conn_lock);
+	connp = CONN_Q(q) ? Q_TO_CONN(q) : NULL;
+	ASSERT(connp != NULL || !CONN_Q(q));
+	GRAB_CONN_LOCK(q);
 	mutex_enter(&ipif->ipif_ill->ill_lock);
 	success = ipsq_pending_mp_add(connp, ipif, q, mp, 0);
 	mutex_exit(&ipif->ipif_ill->ill_lock);
-	mutex_exit(&connp->conn_lock);
+	RELEASE_CONN_LOCK(q);
 	if (!success)
 		goto bad;
 
@@ -18550,17 +18425,14 @@ ill_phyint_reinit(ill_t *ill)
 	 * Generate an event within the hooks framework to indicate that
 	 * a new interface has just been added to IP.  For this event to
 	 * be generated, the network interface must, at least, have an
-	 * ifindex assigned to it.
+	 * ifindex assigned to it.  (We don't generate the event for
+	 * loopback since ill_lookup_on_name() has its own NE_PLUMB event.)
 	 *
 	 * This needs to be run inside the ill_g_lock perimeter to ensure
 	 * that the ordering of delivered events to listeners matches the
 	 * order of them in the kernel.
-	 *
-	 * This function could be called from ill_lookup_on_name. In that case
-	 * the interface is loopback "lo", which will not generate a NIC event.
 	 */
-	if (ill->ill_name_length <= 2 ||
-	    ill->ill_name[0] != 'l' || ill->ill_name[1] != 'o') {
+	if (!IS_LOOPBACK(ill)) {
 		ill_nic_event_dispatch(ill, 0, NE_PLUMB, ill->ill_name,
 		    ill->ill_name_length);
 	}
@@ -19981,7 +19853,7 @@ ill_set_phys_addr(ill_t *ill, mblk_t *mp)
 	 * If we can quiesce the ill, then set the address.  If not, then
 	 * ill_set_phys_addr_tail() will be called from ipif_ill_refrele_tail().
 	 */
-	ill_down_ipifs(ill);
+	ill_down_ipifs(ill, B_TRUE);
 	mutex_enter(&ill->ill_lock);
 	if (!ill_is_quiescent(ill)) {
 		/* call cannot fail since `conn_t *' argument is NULL */
@@ -20060,6 +19932,75 @@ ill_set_ndmp(ill_t *ill, mblk_t *ndmp, uint_t addroff, uint_t addrlen)
 	ill->ill_nd_lla = ndmp->b_rptr + addroff;
 	ill->ill_nd_lla_mp = ndmp;
 	ill->ill_nd_lla_len = addrlen;
+}
+
+/*
+ * Replumb the ill.
+ */
+int
+ill_replumb(ill_t *ill, mblk_t *mp)
+{
+	ipsq_t *ipsq = ill->ill_phyint->phyint_ipsq;
+
+	ASSERT(IAM_WRITER_IPSQ(ipsq));
+
+	ipsq_current_start(ipsq, ill->ill_ipif, 0);
+
+	/*
+	 * If we can quiesce the ill, then continue.  If not, then
+	 * ill_replumb_tail() will be called from ipif_ill_refrele_tail().
+	 */
+	ill_down_ipifs(ill, B_FALSE);
+
+	mutex_enter(&ill->ill_lock);
+	if (!ill_is_quiescent(ill)) {
+		/* call cannot fail since `conn_t *' argument is NULL */
+		(void) ipsq_pending_mp_add(NULL, ill->ill_ipif, ill->ill_rq,
+		    mp, ILL_DOWN);
+		mutex_exit(&ill->ill_lock);
+		return (EINPROGRESS);
+	}
+	mutex_exit(&ill->ill_lock);
+
+	ill_replumb_tail(ipsq, ill->ill_rq, mp, NULL);
+	return (0);
+}
+
+/* ARGSUSED */
+static void
+ill_replumb_tail(ipsq_t *ipsq, queue_t *q, mblk_t *mp, void *dummy)
+{
+	ill_t *ill = q->q_ptr;
+
+	ASSERT(IAM_WRITER_IPSQ(ipsq));
+
+	ill_down_ipifs_tail(ill);
+
+	freemsg(ill->ill_replumb_mp);
+	ill->ill_replumb_mp = copyb(mp);
+
+	/*
+	 * Successfully quiesced and brought down the interface, now we send
+	 * the DL_NOTE_REPLUMB_DONE message down to the driver. Reuse the
+	 * DL_NOTE_REPLUMB message.
+	 */
+	mp = mexchange(NULL, mp, sizeof (dl_notify_conf_t), M_PROTO,
+	    DL_NOTIFY_CONF);
+	ASSERT(mp != NULL);
+	((dl_notify_conf_t *)mp->b_rptr)->dl_notification =
+	    DL_NOTE_REPLUMB_DONE;
+	ill_dlpi_send(ill, mp);
+
+	/*
+	 * If there are ipifs to bring up, ill_up_ipifs() will return
+	 * EINPROGRESS, and ipsq_current_finish() will be called by
+	 * ip_rput_dlpi_writer() or ip_arp_done() when the last ipif is
+	 * brought up.
+	 */
+	if (ill->ill_replumb_mp == NULL ||
+	    ill_up_ipifs(ill, q, ill->ill_replumb_mp) != EINPROGRESS) {
+		ipsq_current_finish(ipsq);
+	}
 }
 
 major_t IP_MAJ;

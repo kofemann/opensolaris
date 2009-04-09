@@ -304,9 +304,9 @@ get_lcinterface(Rt_map *lmp, Lc_interface *funcs)
 
 		case CI_VERSION:
 			if ((rtld_flags2 & RT_FL2_RTLDSEEN) == 0) {
-				Listnode	*lnp;
-				Lm_list		*lml2;
-				int		version;
+				Aliste	idx;
+				Lm_list	*lml2;
+				int	version;
 
 				rtld_flags2 |= RT_FL2_RTLDSEEN;
 
@@ -333,9 +333,9 @@ get_lcinterface(Rt_map *lmp, Lc_interface *funcs)
 					break;
 
 				/*
-				 * Yes, we did. Take care of them.
+				 * Yes, we did.  Take care of them.
 				 */
-				for (LIST_TRAVERSE(&dynlm_list, lnp, lml2)) {
+				for (APLIST_TRAVERSE(dynlm_list, idx, lml2)) {
 					Rt_map *map = (Rt_map *)lml2->lm_head;
 
 					if (FLAGS(map) & FLG_RT_AUDIT) {
@@ -543,6 +543,15 @@ thr_min_stack()
 #else
 	return (4 * 1024);
 #endif
+}
+
+/*
+ * munmap() calls this.  It is unnecessary in the dynamic linker.
+ */
+/* ARGSUSED */
+void
+unregister_locks(caddr_t addr, size_t len)
+{
 }
 
 /*

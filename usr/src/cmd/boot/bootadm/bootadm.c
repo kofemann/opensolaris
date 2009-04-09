@@ -213,6 +213,8 @@ typedef struct {
 #define	DIR_PERMS	(S_IRWXU|S_IRGRP|S_IXGRP|S_IROTH|S_IXOTH)
 #define	FILE_STAT_MODE	(S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH)
 
+#define	FILE_STAT_TIMESTAMP	"boot/solaris/timestamp.cache"
+
 /* Globals */
 int bam_verbose;
 int bam_force;
@@ -230,6 +232,7 @@ static char *bam_opt;
 static char **bam_argv;
 static int bam_argc;
 static int bam_check;
+static int bam_saved_check;
 static int bam_smf_check;
 static int bam_lock_fd = -1;
 static int bam_zfs;
@@ -363,6 +366,7 @@ typedef struct _dirinfo {
 #define	IS_SPARC_TARGET		0x00000002
 #define	UPDATE_ERROR		0x00000004
 #define	RDONLY_FSCHK		0x00000008
+#define	INVALIDATE_CACHE	0x00000010
 
 #define	is_flag_on(flag)	(walk_arg.update_flags & flag ? 1 : 0)
 #define	set_flag(flag)		(walk_arg.update_flags |= flag)
@@ -644,6 +648,17 @@ parse_args_internal(int argc, char *argv[])
 			break;
 		case 'n':
 			bam_check = 1;
+			/*
+			 * We save the original value of bam_check. The new
+			 * approach in case of a read-only filesystem is to
+			 * behave as a check, so we need a way to restore the
+			 * original value after the evaluation of the read-only
+			 * filesystem has been done.
+			 * Even if we don't allow at the moment a check with
+			 * update_all, this approach is more robust than
+			 * simply resetting bam_check to zero.
+			 */
+			bam_saved_check = 1;
 			break;
 		case 'o':
 			if (bam_opt) {
@@ -1978,7 +1993,7 @@ set_cache_dir(char *root, int what)
 		return (BAM_ERROR);
 	}
 
-	if (bam_purge)
+	if (bam_purge || is_flag_on(INVALIDATE_CACHE))
 		(void) rmdir_r(get_cachedir(what));
 
 	if (stat(get_cachedir(what), &sb) != 0 || !(S_ISDIR(sb.st_mode))) {
@@ -2049,7 +2064,8 @@ static int
 is_valid_archive(char *root, int what)
 {
 	char 		archive_path[PATH_MAX];
-	struct stat 	sb;
+	char		timestamp_path[PATH_MAX];
+	struct stat 	sb, timestamp;
 	int 		ret;
 
 	if (what == FILE64 && !is_flag_on(IS_SPARC_TARGET))
@@ -2068,6 +2084,45 @@ is_valid_archive(char *root, int what)
 	if (stat(archive_path, &sb) != 0) {
 		if (bam_verbose && !bam_check)
 			bam_print(UPDATE_ARCH_MISS, archive_path);
+		set_dir_flag(what, NEED_UPDATE);
+		set_dir_flag(what, NO_MULTI);
+		return (BAM_SUCCESS);
+	}
+
+	/*
+	 * The timestamp file is used to prevent stale files in the archive
+	 * cache.
+	 * Stale files can happen if the system is booted back and forth across
+	 * the transition from bootadm-before-the-cache to
+	 * bootadm-after-the-cache, since older versions of bootadm don't know
+	 * about the existence of the archive cache.
+	 *
+	 * Since only bootadm-after-the-cache versions know about about this
+	 * file, we require that the boot archive be older than this file.
+	 */
+	ret = snprintf(timestamp_path, sizeof (timestamp_path), "%s%s", root,
+	    FILE_STAT_TIMESTAMP);
+
+	if (ret >= sizeof (timestamp_path)) {
+		bam_error(PATH_TOO_LONG, rootbuf);
+		return (BAM_ERROR);
+	}
+
+	if (stat(timestamp_path, &timestamp) != 0 ||
+	    sb.st_mtime > timestamp.st_mtime) {
+		if (bam_verbose && !bam_check)
+			bam_print(UPDATE_CACHE_OLD, timestamp);
+		/*
+		 * Don't generate a false positive for the boot-archive service
+		 * but trigger an update of the archive cache in
+		 * boot-archive-update.
+		 */
+		if (bam_smf_check) {
+			(void) creat(NEED_UPDATE_FILE, 0644);
+			return (BAM_SUCCESS);
+		}
+
+		set_flag(INVALIDATE_CACHE);
 		set_dir_flag(what, NEED_UPDATE);
 		set_dir_flag(what, NO_MULTI);
 		return (BAM_SUCCESS);
@@ -2455,6 +2510,30 @@ walk_list(char *root, filelist_t *flistp)
 
 	return (BAM_SUCCESS);
 }
+
+/*
+ * Update the timestamp file.
+ */
+static void
+update_timestamp(char *root)
+{
+	char	timestamp_path[PATH_MAX];
+
+	/* this path length has already been checked in check_flags_and_files */
+	(void) snprintf(timestamp_path, sizeof (timestamp_path), "%s%s", root,
+	    FILE_STAT_TIMESTAMP);
+
+	/*
+	 * recreate the timestamp file. Since an outdated or absent timestamp
+	 * file translates in a complete rebuild of the archive cache, notify
+	 * the user of the performance issue.
+	 */
+	if (creat(timestamp_path, FILE_STAT_MODE) < 0) {
+		bam_error(OPEN_FAIL, timestamp_path, strerror(errno));
+		bam_error(TIMESTAMP_FAIL, rootbuf);
+	}
+}
+
 
 static void
 savenew(char *root)
@@ -3378,6 +3457,12 @@ update_archive(char *root, char *opt)
 		return (BAM_SUCCESS);
 
 	/*
+	 * Don't generate archive on ramdisk.
+	 */
+	if (is_ramdisk(root))
+		return (BAM_SUCCESS);
+
+	/*
 	 * root must be writable. This check applies to alternate
 	 * root (-R option); bam_root_readonly applies to '/' only.
 	 * The behaviour translates into being the one of a 'check'.
@@ -3386,12 +3471,6 @@ update_archive(char *root, char *opt)
 		set_flag(RDONLY_FSCHK);
 		bam_check = 1;
 	}
-
-	/*
-	 * Don't generate archive on ramdisk.
-	 */
-	if (is_ramdisk(root))
-		return (BAM_SUCCESS);
 
 	/*
 	 * Now check if an update is really needed.
@@ -3406,6 +3485,7 @@ update_archive(char *root, char *opt)
 	 */
 	if (bam_nowrite()) {
 		if (is_flag_on(RDONLY_FSCHK)) {
+			bam_check = bam_saved_check;
 			if (ret > 0)
 				bam_error(RDONLY_FS, root);
 			if (bam_update_all)
@@ -3420,9 +3500,13 @@ update_archive(char *root, char *opt)
 		ret = create_ramdisk(root);
 	}
 
-	/* if the archive is updated, save the new stat data */
+	/*
+	 * if the archive is updated, save the new stat data and update the
+	 * timestamp file
+	 */
 	if (ret == 0 && walk_arg.new_nvlp != NULL) {
 		savenew(root);
+		update_timestamp(root);
 	}
 
 	clear_walk_args();
@@ -3597,17 +3681,6 @@ menu_sync:
 		return (BAM_ERROR);
 	}
 	BAM_DPRINTF((D_PROPAGATED_CKSUM_FILE, fcn, LU_MENU_CKSUM));
-
-	(void) snprintf(cmdline, sizeof (cmdline),
-	    "/bin/sh -c '. %s > /dev/null; %s %s no > /dev/null'",
-	    LULIB, LULIB_PROPAGATE_FILE, BOOTADM);
-	ret = exec_cmd(cmdline, NULL);
-	INJECT_ERROR1("PROPAGATE_BOOTADM_FILE", ret = 1);
-	if (ret != 0) {
-		bam_error(BOOTADM_PROP_FAIL, BOOTADM);
-		return (BAM_ERROR);
-	}
-	BAM_DPRINTF((D_PROPAGATED_BOOTADM, fcn, BOOTADM));
 
 	return (BAM_SUCCESS);
 }

@@ -657,3 +657,13 @@ Notes on packaging:
    6809729 Panic in function 'e1000g_rxfree_func' on T2000
    6809877 e1000g E1000G_IPALIGNROOM code can be rewritten
 
+5.3.7
+======
+  This version has the following fixes:
+   6812227 e1000g(intel 82571 adapter) must support MTU size of 9216
+
+5.3.8
+======
+  This version has the following fixes:
+   6775380 the e1000g link hung at "up" state after down and unplumb the interface
+   6816786 e1000g panics on Lenovo X301 with snv_109

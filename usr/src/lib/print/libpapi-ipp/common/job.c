@@ -37,6 +37,7 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <libintl.h>
 
 #ifndef OPID_CUPS_MOVE_JOB
 #define	OPID_CUPS_MOVE_JOB 0x400D
@@ -140,6 +141,23 @@ populate_job_request(service_t *svc, papi_attribute_t ***request,
 
 	/* add the job attributes group to the request */
 	if (job != NULL) {
+		/*
+		 * Add job-originating-host-name to attributes
+		 * if not already set.
+		 */
+		char *hostname = NULL;
+
+		papiAttributeListGetString(job, NULL,
+		    "job-originating-host-name", &hostname);
+
+		if (hostname == NULL) {
+			char host[BUFSIZ];
+
+			if (gethostname(host, sizeof (host)) == 0)
+				papiAttributeListAddString(&job, PAPI_ATTR_EXCL,
+				    "job-originating-host-name", host);
+		}
+
 		papiAttributeListAddCollection(request, PAPI_ATTR_REPLACE,
 		    "job-attributes-group", job);
 		papiAttributeListFree(job);
@@ -232,7 +250,14 @@ internal_job_submit(papi_service_t handle, char *printer,
 				}
 
 				if (strcmp("standard input", files[i]) != 0) {
-					stat(files[i], &statbuf);
+					if (stat(files[i], &statbuf) < 0) {
+						detailed_error(svc, gettext(
+						    "Cannot access file: %s:"
+						    " %s"), files[i],
+						    strerror(errno));
+						return (
+						    PAPI_DOCUMENT_ACCESS_ERROR);
+					}
 					if (statbuf.st_size == 0) {
 						detailed_error(svc,
 						    "Zero byte (empty) file: "
@@ -254,6 +279,14 @@ internal_job_submit(papi_service_t handle, char *printer,
 
 	if ((*job = j = calloc(1, sizeof (*j))) == NULL)
 		return (PAPI_TEMPORARY_ERROR);
+
+	/*
+	 * before creating IPP request
+	 * add the job-name
+	 */
+	if ((files != NULL) && (files[0] != NULL))
+		papiAttributeListAddString(&job_attributes, PAPI_ATTR_EXCL,
+		    "job-name", files[0]);
 
 	/* create IPP request */
 	populate_job_request(svc, &request, job_attributes, printer, req_type);

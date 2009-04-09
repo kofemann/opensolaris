@@ -376,6 +376,8 @@ usr/include/inet/udp_impl.h		i386
 usr/include/inet/tcp_impl.h		i386
 usr/include/inet/ip_impl.h		i386
 usr/include/inet/ip_ndp.h		i386
+usr/include/inet/ip2mac.h		i386
+usr/include/inet/ip2mac_impl.h		i386
 usr/include/inet/tun.h			i386
 usr/include/protocols/ripngd.h		i386
 usr/include/libmail.h			i386
@@ -508,6 +510,7 @@ usr/lib/libinetsvc.so			i386
 # the shared object is shipped.
 #
 usr/include/libinetutil.h		i386
+usr/include/ofmt.h			i386
 usr/include/netinet/inetutil.h		i386
 usr/lib/llib-linetutil			i386
 usr/lib/llib-linetutil.ln		i386
@@ -1167,7 +1170,6 @@ usr/include/sys/fibre-channel/ulp/fcsm.h	i386
 # private AVS headers, commands and libraries
 #
 usr/bin/sd_stats			i386
-usr/bin/errgen				i386
 usr/bin/dscfgcli			i386
 usr/bin/sd_diag				i386
 usr/include/nsctl.h			i386

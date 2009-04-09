@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -100,6 +100,7 @@ static au_event_t	aui_doorfs(au_event_t);
 static au_event_t	aui_privsys(au_event_t);
 static au_event_t	aui_forksys(au_event_t);
 static au_event_t	aui_labelsys(au_event_t);
+static au_event_t	aui_setpgrp(au_event_t);
 
 static void	aus_open(struct t_audit_data *);
 static void	aus_acl(struct t_audit_data *);
@@ -122,6 +123,7 @@ static void	aus_semsys(struct t_audit_data *);
 static void	aus_close(struct t_audit_data *);
 static void	aus_fstatfs(struct t_audit_data *);
 static void	aus_setgid(struct t_audit_data *);
+static void	aus_setpgrp(struct t_audit_data *);
 static void	aus_setuid(struct t_audit_data *);
 static void	aus_shmsys(struct t_audit_data *);
 static void	aus_doorfs(struct t_audit_data *);
@@ -273,7 +275,7 @@ aui_null,	AUE_KILL,	aus_kill,	/* 37 kill */
 		auf_null,	0,
 aui_null,	AUE_FSTATFS,	aus_fstatfs,	/* 38 fstatfs */
 		auf_null,	S2E_PUB,
-aui_null,	AUE_SETPGRP,	aus_null,	/* 39 setpgrp */
+aui_setpgrp,	AUE_SETPGRP,	aus_setpgrp,	/* 39 setpgrp */
 		auf_null,	0,
 aui_null,	AUE_NULL,	aus_null,	/* 40 uucopystr */
 		auf_null,	0,
@@ -580,7 +582,7 @@ aui_null,	AUE_NULL,	aus_null,	/* 180 (loadable) kaio */
 aui_null,	AUE_NULL,	aus_null,	/* 181 (loadable) */
 		auf_null,	0,
 aui_portfs,	AUE_PORTFS,	aus_null,	/* 182 (loadable) portfs */
-		auf_null,	0,
+		auf_null,	S2E_MLD,
 aui_null,	AUE_NULL,	aus_null,	/* 183 (loadable) */
 		auf_null,	0,
 aui_labelsys,	AUE_NULL,	aus_labelsys,	/* 184 labelsys */
@@ -1702,12 +1704,10 @@ aus_msgsys(struct t_audit_data *tad)
 		break;
 	case AUE_MSGCTL:		/* msgctl */
 	case AUE_MSGCTL_RMID:		/* msgctl */
+	case AUE_MSGCTL_SET:		/* msgctl */
 	case AUE_MSGCTL_STAT:		/* msgctl */
 	case AUE_MSGRCV:		/* msgrcv */
 	case AUE_MSGSND:		/* msgsnd */
-		au_uwrite(au_to_arg32(1, "msg ID", msgid));
-		break;
-	case AUE_MSGCTL_SET:		/* msgctl */
 		au_uwrite(au_to_arg32(1, "msg ID", msgid));
 		break;
 	}
@@ -1769,13 +1769,11 @@ aus_semsys(struct t_audit_data *tad)
 	case AUE_SEMCTL_GETVAL:
 	case AUE_SEMCTL_GETALL:
 	case AUE_SEMCTL_GETZCNT:
+	case AUE_SEMCTL_SET:
 	case AUE_SEMCTL_SETVAL:
 	case AUE_SEMCTL_SETALL:
 	case AUE_SEMCTL:
 	case AUE_SEMOP:
-		au_uwrite(au_to_arg32(1, "sem ID", semid));
-		break;
-	case AUE_SEMCTL_SET:
 		au_uwrite(au_to_arg32(1, "sem ID", semid));
 		break;
 	case AUE_SEMGET:
@@ -1914,62 +1912,126 @@ aus_fstatfs(struct t_audit_data *tad)
 	releasef(fd);
 }
 
-#ifdef NOTYET
+static au_event_t
+aui_setpgrp(au_event_t e)
+{
+	klwp_t *clwp = ttolwp(curthread);
+	int flag;
+
+	struct a {
+		long	flag;
+		long	pid;
+		long	pgid;
+	} *uap = (struct a *)clwp->lwp_ap;
+
+	flag = (int)uap->flag;
+
+
+	switch (flag) {
+
+	case 1:	/* setpgrp() */
+		e = AUE_SETPGRP;
+		break;
+
+	case 3: /* setsid() */
+		e = AUE_SETSID;
+		break;
+
+	case 5: /* setpgid() */
+		e = AUE_SETPGID;
+		break;
+
+	case 0: /* getpgrp()	- not security relevant */
+	case 2: /* getsid()	- not security relevant */
+	case 4: /* getpgid() 	- not security relevant */
+		e = AUE_NULL;
+		break;
+
+	default:
+		e = AUE_NULL;
+		break;
+	}
+
+	return (e);
+}
+
 /*ARGSUSED*/
 static void
 aus_setpgrp(struct t_audit_data *tad)
 {
-	klwp_t *clwp = ttolwp(curthread);
-	uint32_t pgrp;
-	struct proc *p;
-	uid_t uid, ruid;
-	gid_t gid, rgid;
-	pid_t pid;
-	const auditinfo_addr_t *ainfo;
-	cred_t *cr;
+	klwp_t		*clwp = ttolwp(curthread);
+	pid_t		pgid;
+	struct proc	*p;
+	uid_t		uid, ruid;
+	gid_t		gid, rgid;
+	pid_t		pid;
+	cred_t		*cr;
+	int		flag;
+	const auditinfo_addr_t	*ainfo;
 
 	struct a {
+		long	flag;
 		long	pid;
-		long	pgrp;
+		long	pgid;
 	} *uap = (struct a *)clwp->lwp_ap;
 
+	flag = (int)uap->flag;
 	pid  = (pid_t)uap->pid;
-	pgrp = (uint32_t)uap->pgrp;
+	pgid = (pid_t)uap->pgid;
+
+
+	switch (flag) {
+
+	case 0: /* getpgrp() */
+	case 1: /* setpgrp() */
+	case 2: /* getsid() */
+	case 3: /* setsid() */
+	case 4: /* getpgid() */
+		break;
+
+	case 5: /* setpgid() */
 
 		/* current process? */
-	if (pid == 0)
-		(return);
+		if (pid == 0) {
+			return;
+		}
 
-	mutex_enter(&pidlock);
-	p = prfind(pid);
-	if (p == NULL || p->p_as == &kas) {
+		mutex_enter(&pidlock);
+		p = prfind(pid);
+		if (p == NULL || p->p_as == &kas ||
+		    p->p_stat == SIDL || p->p_stat == SZOMB) {
+			mutex_exit(&pidlock);
+			return;
+		}
+		mutex_enter(&p->p_lock);	/* so process doesn't go away */
 		mutex_exit(&pidlock);
-		return;
-	}
-	mutex_enter(&p->p_lock);	/* so process doesn't go away */
-	mutex_exit(&pidlock);
 
-	mutex_enter(&p->p_crlock);
-	crhold(cr = p->p_cred);
-	mutex_exit(&p->p_crlock);
-	mutex_exit(&p->p_lock);
+		mutex_enter(&p->p_crlock);
+		crhold(cr = p->p_cred);
+		mutex_exit(&p->p_crlock);
+		mutex_exit(&p->p_lock);
 
-	ainfo = crgetauinfo(cr);
-	if (ainfo == NULL) {
+		ainfo = crgetauinfo(cr);
+		if (ainfo == NULL) {
+			crfree(cr);
+			return;
+		}
+
+		uid  = crgetuid(cr);
+		gid  = crgetgid(cr);
+		ruid = crgetruid(cr);
+		rgid = crgetrgid(cr);
+		au_uwrite(au_to_process(uid, gid, ruid, rgid, pid,
+		    ainfo->ai_auid, ainfo->ai_asid, &ainfo->ai_termid));
 		crfree(cr);
-		return;
-	}
+		au_uwrite(au_to_arg32(2, "pgid", pgid));
+		break;
 
-	uid  = crgetuid(cr);
-	gid  = crgetgid(cr);
-	ruid = crgetruid(cr);
-	rgid = crgetrgid(cr);
-	au_uwrite(au_to_process(uid, gid, ruid, rgid, pid,
-	    ainfo->ai_auid, ainfo->ai_asid, &ainfo->ai_termid));
-	crfree(cr);
-	au_uwrite(au_to_arg32(2, "pgrp", pgrp));
+	default:
+		break;
+	}
 }
-#endif
+
 
 /*ARGSUSED*/
 static void
@@ -2784,9 +2846,6 @@ aui_auditsys(au_event_t e)
 	case BSM_AUDIT:
 		e = AUE_AUDIT;
 		break;
-	case BSM_GETPORTAUDIT:
-		e = AUE_GETPORTAUDIT;
-		break;
 	case BSM_AUDITON:
 	case BSM_AUDITCTL:
 
@@ -3035,7 +3094,6 @@ aus_auditsys(struct t_audit_data *tad)
 	case AUE_GETAUDIT:
 	case AUE_GETAUDIT_ADDR:
 	case AUE_AUDIT:
-	case AUE_GETPORTAUDIT:
 	case AUE_AUDITON_GPOLICY:
 	case AUE_AUDITON_GQCTRL:
 	case AUE_AUDITON_GETKMASK:
@@ -5064,8 +5122,9 @@ aui_acl(au_event_t e)
 		break;
 	case GETACL:
 	case GETACLCNT:
+	case ACE_GETACL:
 	case ACE_GETACLCNT:
-		/* do nothing for these two values. */
+		/* do nothing for these four values. */
 		e = AUE_NULL;
 		break;
 	default:
@@ -5607,12 +5666,19 @@ aui_portfs(au_event_t e)
 	 */
 	switch (((uint_t)uap->a1) & PORT_CODE_MASK) {
 	case PORT_ASSOCIATE:
+		/* check source */
+		if (((uint_t)uap->a3 == PORT_SOURCE_FILE) ||
+		    ((uint_t)uap->a3 == PORT_SOURCE_FD)) {
+			e = AUE_PORTFS_ASSOCIATE;
+		} else {
+			e = AUE_NULL;
+		}
+		break;
 	case PORT_DISSOCIATE:
-		/*
-		 * check source
-		 */
-		if ((uint_t)uap->a3 == PORT_SOURCE_FILE) {
-			e = AUE_PORTFS;
+		/* check source */
+		if (((uint_t)uap->a3 == PORT_SOURCE_FILE) ||
+		    ((uint_t)uap->a3 == PORT_SOURCE_FD)) {
+			e = AUE_PORTFS_DISSOCIATE;
 		} else {
 			e = AUE_NULL;
 		}

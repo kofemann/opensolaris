@@ -86,7 +86,7 @@ static char err_msg[ERR_MSG_SIZE];
 		DTRACE_PROBE1(cpu_ts_err_msg, char *, msg); \
 		break; \
 	default: \
-		cmn_err(err_lvl, "%s", msg); \
+		cmn_err(err_lvl, "!%s", msg); \
 		break; \
 	} \
 }
@@ -123,7 +123,7 @@ cpu_acpi_cache_ctrl_regs(cpu_acpi_handle_t handle, cpu_acpi_obj_t objtype,
 
 	obj = abuf.Pointer;
 	if (obj->Package.Count != 2) {
-		p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: %s package"
+		p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: %s package"
 		    " bad count %d.", cpu_acpi_obj_attrs[objtype].name,
 		    obj->Package.Count);
 		if (p_res >= 0)
@@ -137,7 +137,7 @@ cpu_acpi_cache_ctrl_regs(cpu_acpi_handle_t handle, cpu_acpi_obj_t objtype,
 	 */
 	for (i = 0; i < obj->Package.Count; i++) {
 		if (obj->Package.Elements[i].Type != ACPI_TYPE_BUFFER) {
-			p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: "
+			p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: "
 			    "Unexpected data in %s package.",
 			    cpu_acpi_obj_attrs[objtype].name);
 			if (p_res >= 0)
@@ -149,7 +149,7 @@ cpu_acpi_cache_ctrl_regs(cpu_acpi_handle_t handle, cpu_acpi_obj_t objtype,
 		    obj->Package.Elements[i].Buffer.Pointer;
 		if (greg->DescriptorType !=
 		    ACPI_RESOURCE_NAME_GENERIC_REGISTER) {
-			p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: "
+			p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: "
 			    "%s package has format error.",
 			    cpu_acpi_obj_attrs[objtype].name);
 			if (p_res >= 0)
@@ -158,7 +158,7 @@ cpu_acpi_cache_ctrl_regs(cpu_acpi_handle_t handle, cpu_acpi_obj_t objtype,
 		}
 		if (greg->ResourceLength !=
 		    ACPI_AML_SIZE_LARGE(AML_RESOURCE_GENERIC_REGISTER)) {
-			p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: "
+			p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: "
 			    "%s package not right size.",
 			    cpu_acpi_obj_attrs[objtype].name);
 			if (p_res >= 0)
@@ -167,7 +167,7 @@ cpu_acpi_cache_ctrl_regs(cpu_acpi_handle_t handle, cpu_acpi_obj_t objtype,
 		}
 		if (greg->AddressSpaceId != ACPI_ADR_SPACE_FIXED_HARDWARE &&
 		    greg->AddressSpaceId != ACPI_ADR_SPACE_SYSTEM_IO) {
-			p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_apci: "
+			p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_apci: "
 			    "%s contains unsupported address space type %x",
 			    cpu_acpi_obj_attrs[objtype].name,
 			    greg->AddressSpaceId);
@@ -267,7 +267,7 @@ cpu_acpi_cache_state_dependencies(cpu_acpi_handle_t handle,
 	if (((objtype != CSD_OBJ) && (pkg->Package.Count != 1)) ||
 	    ((objtype == CSD_OBJ) && (pkg->Package.Count != 1) &&
 	    (pkg->Package.Count != 2))) {
-		p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: %s "
+		p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: %s "
 		    "unsupported package count %d.",
 		    cpu_acpi_obj_attrs[objtype].name, pkg->Package.Count);
 		if (p_res >= 0)
@@ -281,7 +281,7 @@ cpu_acpi_cache_state_dependencies(cpu_acpi_handle_t handle,
 	 */
 	if (pkg->Package.Elements[0].Type != ACPI_TYPE_PACKAGE ||
 	    pkg->Package.Elements[0].Package.Count != number) {
-		p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: "
+		p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: "
 		    "Unexpected data in %s package.",
 		    cpu_acpi_obj_attrs[objtype].name);
 		if (p_res >= 0)
@@ -291,7 +291,7 @@ cpu_acpi_cache_state_dependencies(cpu_acpi_handle_t handle,
 	elements = pkg->Package.Elements[0].Package.Elements;
 	if (elements[0].Integer.Value != number ||
 	    elements[1].Integer.Value != 0) {
-		p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: Unexpected"
+		p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: Unexpected"
 		    " %s revision.", cpu_acpi_obj_attrs[objtype].name);
 		if (p_res >= 0)
 			PRINT_ERR_MSG(CE_NOTE, err_msg, objtype);
@@ -453,7 +453,7 @@ cpu_acpi_cache_supported_states(cpu_acpi_handle_t handle,
 	if (ACPI_FAILURE(AcpiEvaluateObjectTyped(handle->cs_handle,
 	    cpu_acpi_obj_attrs[objtype].name, NULL, &abuf,
 	    ACPI_TYPE_PACKAGE))) {
-		p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: %s "
+		p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: %s "
 		    "package not found.", cpu_acpi_obj_attrs[objtype].name);
 		if (p_res >= 0)
 			PRINT_ERR_MSG(CE_NOTE, err_msg, objtype);
@@ -461,7 +461,7 @@ cpu_acpi_cache_supported_states(cpu_acpi_handle_t handle,
 	}
 	obj = abuf.Pointer;
 	if (obj->Package.Count < 2) {
-		p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: %s package"
+		p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: %s package"
 		    " bad count %d.", cpu_acpi_obj_attrs[objtype].name,
 		    obj->Package.Count);
 		if (p_res >= 0)
@@ -476,7 +476,7 @@ cpu_acpi_cache_supported_states(cpu_acpi_handle_t handle,
 	for (i = 0, l = NULL; i < obj->Package.Count; i++, l = q) {
 		if (obj->Package.Elements[i].Type != ACPI_TYPE_PACKAGE ||
 		    obj->Package.Elements[i].Package.Count != fcnt) {
-			p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: "
+			p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: "
 			    "Unexpected data in %s package.",
 			    cpu_acpi_obj_attrs[objtype].name);
 			if (p_res >= 0)
@@ -488,7 +488,7 @@ cpu_acpi_cache_supported_states(cpu_acpi_handle_t handle,
 		for (j = 0; j < fcnt; j++) {
 			if (q[j].Type != ACPI_TYPE_INTEGER) {
 				p_res = snprintf(err_msg, ERR_MSG_SIZE,
-				    "!cpu_acpi: %s element invalid (type)",
+				    "cpu_acpi: %s element invalid (type)",
 				    cpu_acpi_obj_attrs[objtype].name);
 				if (p_res >= 0)
 					PRINT_ERR_MSG(CE_NOTE, err_msg,
@@ -519,7 +519,7 @@ cpu_acpi_cache_supported_states(cpu_acpi_handle_t handle,
 		 * an the end-of-table entry.
 		 */
 		if (eot) {
-			p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: "
+			p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: "
 			    "Unexpected data in %s package after eot.",
 			    cpu_acpi_obj_attrs[objtype].name);
 			if (p_res >= 0)
@@ -531,7 +531,7 @@ cpu_acpi_cache_supported_states(cpu_acpi_handle_t handle,
 		 * states must be defined in order from highest to lowest.
 		 */
 		if (l != NULL && l[0].Integer.Value < q[0].Integer.Value) {
-			p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: "
+			p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: "
 			    "%s package state definitions out of order.",
 			    cpu_acpi_obj_attrs[objtype].name);
 			if (p_res >= 0)
@@ -688,6 +688,7 @@ cpu_acpi_cache_cst(cpu_acpi_handle_t handle)
 	ACPI_OBJECT *obj;
 	ACPI_INTEGER cnt;
 	cpu_acpi_cstate_t *cstate, *p;
+	size_t alloc_size;
 	int i, count;
 
 	CPU_ACPI_OBJ_IS_NOT_CACHED(handle, CPU_ACPI_CST_CACHED);
@@ -695,8 +696,8 @@ cpu_acpi_cache_cst(cpu_acpi_handle_t handle)
 	abuf.Length = ACPI_ALLOCATE_BUFFER;
 	abuf.Pointer = NULL;
 
-	if (ACPI_FAILURE(AcpiEvaluateObject(handle->cs_handle, "_CST",
-	    NULL, &abuf))) {
+	if (ACPI_FAILURE(AcpiEvaluateObjectTyped(handle->cs_handle, "_CST",
+	    NULL, &abuf, ACPI_TYPE_PACKAGE))) {
 		cmn_err(CE_NOTE, "!cpu_acpi: _CST evaluate failure");
 		return (-1);
 	}
@@ -721,8 +722,8 @@ cpu_acpi_cache_cst(cpu_acpi_handle_t handle)
 	}
 
 	CPU_ACPI_CSTATES_COUNT(handle) = (uint32_t)cnt;
-	CPU_ACPI_CSTATES(handle) = kmem_zalloc(CPU_ACPI_CSTATES_SIZE(cnt),
-	    KM_SLEEP);
+	alloc_size = CPU_ACPI_CSTATES_SIZE(cnt);
+	CPU_ACPI_CSTATES(handle) = kmem_zalloc(alloc_size, KM_SLEEP);
 	CPU_ACPI_BM_INFO(handle) = 0;
 	cstate = (cpu_acpi_cstate_t *)CPU_ACPI_CSTATES(handle);
 	p = cstate;
@@ -775,6 +776,9 @@ cpu_acpi_cache_cst(cpu_acpi_handle_t handle)
 	if (count < 2) {
 		cmn_err(CE_NOTE, "!cpu_acpi: _CST invalid count %d < 2",
 		    count);
+		kmem_free(CPU_ACPI_CSTATES(handle), alloc_size);
+		CPU_ACPI_CSTATES(handle) = NULL;
+		CPU_ACPI_CSTATES_COUNT(handle) = (uint32_t)0;
 		AcpiOsFree(abuf.Pointer);
 		return (-1);
 	}
@@ -782,12 +786,23 @@ cpu_acpi_cache_cst(cpu_acpi_handle_t handle)
 	if (cstate[0].cs_type != CPU_ACPI_C1) {
 		cmn_err(CE_NOTE, "!cpu_acpi: _CST first element type not C1: "
 		    "%d", (int)cstate->cs_type);
+		kmem_free(CPU_ACPI_CSTATES(handle), alloc_size);
+		CPU_ACPI_CSTATES(handle) = NULL;
+		CPU_ACPI_CSTATES_COUNT(handle) = (uint32_t)0;
 		AcpiOsFree(abuf.Pointer);
 		return (-1);
 	}
 
-	if (count != cnt)
+	if (count != cnt) {
+		void	*orig = CPU_ACPI_CSTATES(handle);
+
 		CPU_ACPI_CSTATES_COUNT(handle) = (uint32_t)count;
+		CPU_ACPI_CSTATES(handle) = kmem_zalloc(
+		    CPU_ACPI_CSTATES_SIZE(count), KM_SLEEP);
+		(void) memcpy(CPU_ACPI_CSTATES(handle), orig,
+		    CPU_ACPI_CSTATES_SIZE(count));
+		kmem_free(orig, alloc_size);
+	}
 
 	AcpiOsFree(abuf.Pointer);
 	CPU_ACPI_OBJ_IS_CACHED(handle, CPU_ACPI_CST_CACHED);
@@ -845,7 +860,7 @@ cpu_acpi_cache_tstate_data(cpu_acpi_handle_t handle)
 	int p_res;
 
 	if (cpu_acpi_cache_ptc(handle) < 0) {
-		p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: error "
+		p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: error "
 		    "parsing _PTC for CPU %d", handle->cs_id);
 		if (p_res >= 0)
 			PRINT_ERR_MSG(CE_NOTE, err_msg, PTC_OBJ);
@@ -853,7 +868,7 @@ cpu_acpi_cache_tstate_data(cpu_acpi_handle_t handle)
 	}
 
 	if (cpu_acpi_cache_tstates(handle) != 0) {
-		p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: error "
+		p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: error "
 		    "parsing _TSS for CPU %d", handle->cs_id);
 		if (p_res >= 0)
 			PRINT_ERR_MSG(CE_NOTE, err_msg, TSS_OBJ);
@@ -861,7 +876,7 @@ cpu_acpi_cache_tstate_data(cpu_acpi_handle_t handle)
 	}
 
 	if (cpu_acpi_cache_tsd(handle) < 0) {
-		p_res = snprintf(err_msg, ERR_MSG_SIZE, "!cpu_acpi: error "
+		p_res = snprintf(err_msg, ERR_MSG_SIZE, "cpu_acpi: error "
 		    "parsing _TSD for CPU %d", handle->cs_id);
 		if (p_res >= 0)
 			PRINT_ERR_MSG(CE_NOTE, err_msg, TSD_OBJ);

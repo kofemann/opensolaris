@@ -28,10 +28,9 @@
 #define	_SYS_MAC_H
 
 #include <sys/types.h>
-#include <sys/ddi.h>
+#ifdef	_KERNEL
 #include <sys/sunddi.h>
-#include <sys/stream.h>
-#include <sys/mac_flow.h>
+#endif
 
 /*
  * MAC Services Module
@@ -258,20 +257,6 @@ typedef struct mac_info_s {
 	uint8_t		*mi_unicst_addr;
 	uint8_t		*mi_brdcst_addr;
 } mac_info_t;
-
-/*
- * Information for legacy devices.
- */
-typedef struct mac_capab_legacy_s {
-	/*
-	 * Notifications that the legacy device does not support.
-	 */
-	uint32_t	ml_unsup_note;
-	/*
-	 * dev_t of the legacy device; can be held to force attach.
-	 */
-	dev_t		ml_dev;
-} mac_capab_legacy_t;
 
 /*
  * When VNICs are created on top of the NIC, there are two levels
@@ -569,13 +554,15 @@ extern void			mac_margin_get(mac_handle_t, uint32_t *);
 extern int			mac_margin_remove(mac_handle_t, uint32_t);
 extern int			mac_margin_add(mac_handle_t, uint32_t *,
 				    boolean_t);
+extern int			mac_fastpath_disable(mac_handle_t);
+extern void			mac_fastpath_enable(mac_handle_t);
 
 extern mactype_register_t	*mactype_alloc(uint_t);
 extern void			mactype_free(mactype_register_t *);
 extern int			mactype_register(mactype_register_t *);
 extern int			mactype_unregister(const char *);
 
-extern void			mac_start_logusage(mac_logtype_t, uint_t);
+extern int			mac_start_logusage(mac_logtype_t, uint_t);
 extern void			mac_stop_logusage(mac_logtype_t);
 
 extern mac_handle_t		mac_get_lower_mac_handle(mac_handle_t);

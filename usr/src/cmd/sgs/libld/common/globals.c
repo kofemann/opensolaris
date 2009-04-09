@@ -36,7 +36,7 @@
 
 Ld_heap		*ld_heap;	/* list of allocated blocks for */
 				/* 	link-edit dynamic allocations */
-List		lib_support;	/* list of support libraries specified */
+APlist		*lib_support;	/* list of support libraries specified */
 				/*	(-S option) */
 int		demangle_flag;	/* symbol demangling required */
 
@@ -47,7 +47,6 @@ int		demangle_flag;	/* symbol demangling required */
 char		*Plibpath;	/* User specified -YP or defaults to LIBPATH */
 char		*Llibdir;	/* User specified -YL */
 char		*Ulibdir;	/* User specified -YU */
-Listnode	*insert_lib;	/* insertion point for -L libraries */
 
 /*
  * A default library search path is used if one was not supplied on the command
@@ -90,7 +89,7 @@ ldynsym_symtype[] = {
 		1,			/* STT_FILE */
 		0,			/* STT_COMMON */
 		0,			/* STT_TLS */
-		0,			/* 7 */
+		0,			/* STT_IFUNC */
 		0,			/* 8 */
 		0,			/* 9 */
 		0,			/* 10 */
@@ -100,7 +99,7 @@ ldynsym_symtype[] = {
 		0,			/* 14 */
 		0,			/* 15 */
 };
-#if STT_NUM != (STT_TLS + 1)
+#if STT_NUM != (STT_IFUNC + 1)
 #error "STT_NUM has grown. Update ldynsym_symtype[]."
 #endif
 
@@ -117,7 +116,7 @@ dynsymsort_symtype[] = {
 		0,			/* STT_FILE */
 		1,			/* STT_COMMON */
 		0,			/* STT_TLS */
-		0,			/* 7 */
+		0,			/* STT_IFUNC */
 		0,			/* 8 */
 		0,			/* 9 */
 		0,			/* 10 */
@@ -127,6 +126,6 @@ dynsymsort_symtype[] = {
 		0,			/* 14 */
 		0,			/* 15 */
 };
-#if STT_NUM != (STT_TLS + 1)
+#if STT_NUM != (STT_IFUNC + 1)
 #error "STT_NUM has grown. Update dynsymsort_symtype[]."
 #endif

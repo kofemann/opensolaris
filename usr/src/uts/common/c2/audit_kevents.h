@@ -19,14 +19,12 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef _BSM_AUDIT_KEVENTS_H
 #define	_BSM_AUDIT_KEVENTS_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #ifdef	__cplusplus
 extern "C" {
@@ -48,7 +46,6 @@ extern "C" {
 #define	AUE_NULL		0	/* =no indir system call */
 #define	AUE_EXIT		1	/* =ps exit(2) */
 #define	AUE_FORKALL		2	/* =ps forkall(2) */
-#define	AUE_FORK	AUE_FORKALL	/* historical */
 #define	AUE_OPEN		3	/* =no open(2): place holder */
 #define	AUE_CREAT		4	/* =fc create(2) */
 #define	AUE_LINK		5	/* =fc link(2) */
@@ -82,7 +79,7 @@ extern "C" {
 #define	AUE_ACCEPT		33	/* =nt accept(2) */
 #define	AUE_BIND		34	/* =nt bind(2) */
 #define	AUE_SETSOCKOPT		35	/* =nt setsockopt(2) */
-#define	AUE_VTRACE		36	/* =pm vtrace(2) */
+#define	AUE_VTRACE		36	/* =no vtrace(2) */
 #define	AUE_SETTIMEOFDAY	37	/* =no settimeofday(2) */
 #define	AUE_FCHOWN		38	/* =fm fchown(2) */
 #define	AUE_FCHMOD		39	/* =fm fchmod(2) */
@@ -170,9 +167,9 @@ extern "C" {
 #define	AUE_SETAUID		131	/* =aa setauid(2) */
 #define	AUE_GETAUDIT		132	/* =aa getaudit(2) */
 #define	AUE_SETAUDIT		133	/* =aa setaudit(2) */
-#define	AUE_GETUSERAUDIT	134	/* =no getuseraudit(2) */
-#define	AUE_SETUSERAUDIT	135	/* =no setuseraudit(2) */
-/* 				136	    OBSOLETE */
+/*				134	    OBSOLETE */
+/*				135	    OBSOLETE */
+#define	AUE_AUDITSVC		136	/* =no auditsvc(2): obsolete */
 /*				137	    OBSOLETE */
 #define	AUE_AUDITON		138	/* =no auditon(2) */
 #define	AUE_AUDITON_GTERMID	139	/* =no auditctl(2): GETTERMID */
@@ -183,32 +180,32 @@ extern "C" {
 #define	AUE_AUDITON_SESTATE	144	/* =no auditctl(2): SETESTATE */
 #define	AUE_AUDITON_GQCTRL	145	/* =as auditctl(2): GETQCTRL */
 #define	AUE_AUDITON_SQCTRL	146	/* =as auditctl(2): SETQCTRL */
-#define	AUE_GETKERNSTATE	147	/* =no getkernstate(2) */
-#define	AUE_SETKERNSTATE	148	/* =no setkernstate(2) */
-#define	AUE_GETPORTAUDIT	149	/* =no getportaudit(2) */
-#define	AUE_AUDITSTAT		150	/* =no auditstat(2) */
-#define	AUE_REVOKE		151	/* =no revoke(2) */
-#define	AUE_MAC			152	/* =no MAC use */
+/*				147	    OBSOLETE */
+/*				148	    OBSOLETE */
+/*				149	    OBSOLETE */
+/*				150	    OBSOLETE */
+/*				151	    OBSOLETE */
+/*				152	    OBSOLETE */
 #define	AUE_ENTERPROM		153	/* =na enter prom */
 #define	AUE_EXITPROM		154	/* =na exit prom */
-#define	AUE_IFLOAT		155	/* =no inode IL float */
-#define	AUE_PFLOAT		156	/* =no process IL float */
-#define	AUE_UPRIV		157	/* =no privilege use */
+/*				155	    OBSOLETE */
+/*				156	    OBSOLETE */
+/*				157	    OBSOLETE */
 #define	AUE_IOCTL		158	/* =io ioctl(2) */
-#define	AUE_FIND_RH		159	/* =no ipintr: pkt from unknown host */
-#define	AUE_BADSATTR		160	/* =no ipintr: unknown security attr */
-#define	AUE_TN_GEN		161	/* =no ipintr: out-of-sync generat */
-#define	AUE_TFRWRD		162	/* =no ipintr: bad forward route */
-#define	AUE_TN_BYPASS		163	/* =no ipintr: bypassed security */
-#define	AUE_TN_ISPRIV		164	/* =no ipintr: insufficient privilege */
-#define	AUE_TN_CKRT		165	/* =no ipintr: route security reject */
-#define	AUE_TN_CKIPOUT		166	/* =no ipintr: ip outpt securty rjct */
-#define	AUE_KTNETD		167	/* =no tnetd turned off */
-#define	AUE_STNETD		168	/* =no tnetd started */
-#define	AUE_HLTSR		169	/* =no session record halted */
-#define	AUE_STRTSR		170	/* =no session record started */
-#define	AUE_FREESR		171	/* =no session record freed */
-#define	AUE_TN_ACCRED		172	/* =no import accred failed */
+/*				159	    OBSOLETE */
+/*				160	    OBSOLETE */
+/*				161	    OBSOLETE */
+/*				162	    OBSOLETE */
+/*				163	    OBSOLETE */
+/*				164	    OBSOLETE */
+/*				165	    OBSOLETE */
+/*				166	    OBSOLETE */
+/*				167	    OBSOLETE */
+/*				168	    OBSOLETE */
+/*				169	    OBSOLETE */
+/*				170	    OBSOLETE */
+/*				171	    OBSOLETE */
+/*				172	    OBSOLETE */
 #define	AUE_ONESIDE		173	/* =no one-sided session record */
 #define	AUE_MSGGETL		174	/* =no msggetl(2) */
 #define	AUE_MSGRCVL		175	/* =no msgrcvl(2) */
@@ -259,15 +256,15 @@ extern "C" {
 #define	AUE_AUDITSYS		220	/* =no place holder */
 #define	AUE_AUDITON_GETKMASK	221	/* =aa */
 #define	AUE_AUDITON_SETKMASK	222	/* =as */
-#define	AUE_AUDITON_GETCWD	223	/* =as */
-#define	AUE_AUDITON_GETCAR	224	/* =as */
+#define	AUE_AUDITON_GETCWD	223	/* =aa,as */
+#define	AUE_AUDITON_GETCAR	224	/* =aa,as */
 #define	AUE_AUDITON_GETSTAT	225	/* =as */
 #define	AUE_AUDITON_SETSTAT	226	/* =as */
 #define	AUE_AUDITON_SETUMASK	227	/* =as */
 #define	AUE_AUDITON_SETSMASK	228	/* =as */
 #define	AUE_AUDITON_GETCOND	229	/* =aa */
 #define	AUE_AUDITON_SETCOND	230	/* =as */
-#define	AUE_AUDITON_GETCLASS	231	/* =as */
+#define	AUE_AUDITON_GETCLASS	231	/* =aa,as */
 #define	AUE_AUDITON_SETCLASS	232	/* =as */
 #define	AUE_FUSERS		233	/* =fa */
 #define	AUE_STATVFS		234	/* =fa */
@@ -325,9 +322,9 @@ extern "C" {
 #define	AUE_UNLINKAT		286	/* =fd unlinkat(2) */
 #define	AUE_CLOCK_SETTIME	287	/* =as clock_settime(3RT) */
 #define	AUE_NTP_ADJTIME		288	/* =as ntp_adjtime(2) */
-#define	AUE_SETPPRIV		289	/* =pc setppriv(2) */
-#define	AUE_MODDEVPLCY		290	/* =ad modctl(2) */
-#define	AUE_MODADDPRIV		291	/* =ad modctl(2) */
+#define	AUE_SETPPRIV		289	/* =pm setppriv(2) */
+#define	AUE_MODDEVPLCY		290	/* =as modctl(2) */
+#define	AUE_MODADDPRIV		291	/* =as modctl(2) */
 #define	AUE_CRYPTOADM		292	/* =as kernel cryptographic framework */
 #define	AUE_CONFIGKSSL		293	/* =as kernel SSL */
 #define	AUE_BRANDSYS		294	/* =ot */
@@ -337,14 +334,20 @@ extern "C" {
 #define	AUE_PF_POLICY_FLIP	298	/* =as Flip IPsec policy */
 #define	AUE_PF_POLICY_FLUSH	299	/* =as Flush IPsec policy rules */
 #define	AUE_PF_POLICY_ALGS	300	/* =as Update IPsec algorithms */
-#define	AUE_PORTFS		301	/* =fa */
+#define	AUE_PORTFS		301	/* =no portfs(2) - place holder */
 #define	AUE_LABELSYS_TNRH	302	/* =as tnrh(2) */
 #define	AUE_LABELSYS_TNRHTP	303	/* =as tnrhtp(2) */
 #define	AUE_LABELSYS_TNMLP	304	/* =as tnmlp(2) */
+#define	AUE_PORTFS_ASSOCIATE	305	/* =fa portfs(2) - port associate */
+#define	AUE_PORTFS_DISSOCIATE	306	/* =fa portfs(2) - port disassociate */
+#define	AUE_SETSID		307	/* =pm setsid(2) */
+#define	AUE_SETPGID		308	/* =pm setpgid(2) */
+
+
 
 /* NOTE: update MAX_KEVENTS below if events are added. */
 
-#define	MAX_KEVENTS		304
+#define	MAX_KEVENTS		308
 
 
 #ifdef __cplusplus
