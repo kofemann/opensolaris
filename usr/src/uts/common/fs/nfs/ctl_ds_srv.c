@@ -364,6 +364,9 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	nnode_t *np;
 	clientid4 clientid;
 	vnode_t *vp;
+#ifdef PERSIST_LO_ENABLED
+	rfs4_file_t *fp;
+#endif
 
 	bzero(resp, sizeof (*resp));
 
@@ -450,21 +453,30 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 */
 	get_access_mode(cs, resp);
 
-#ifdef PERSISTENT_LAYOUT_ENABLED
-	/*
-	 * If layout has not been written to stable storage,
-	 * then do so before issuing the reply.
-	 */
-	if (mds_put_layout(fp->flp, fp->vp)) {
-		rfs4_state_rele(sp);
-		rfs4_file_rele(fp);
-		rfs41_compound_state_free(cs);
+#ifdef PERSIST_LO_ENABLED
+	deleg = FALSE;	/* ugly reuse */
+	fp = rfs4_findfile(cs->instp, vp, NULL, &deleg);
+	if (fp != NULL) {
 		/*
-		 * DSERR_RESOURCE? DSERR_NOSPC?
+		 * If layout has not been written to stable storage,
+		 * then do so before issuing the reply.
 		 */
+		if (mds_put_layout(fp->layoutp, fp->vp)) {
+			rfs4_file_rele(fp);
+			rfs41_compound_state_free(cs);
+			/*
+			 * DSERR_RESOURCE? DSERR_NOSPC?
+			 */
+			resp->status = DSERR_SERVERFAULT;
+			return;
+		}
+		rfs4_file_rele(fp);
+		resp->status = DS_OK;
+	} else {
 		resp->status = DSERR_SERVERFAULT;
-		return;
 	}
+#else
+	resp->status = DS_OK;
 #endif
 	/*
 	 * XXX: Todo List
@@ -474,7 +486,6 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 */
 
 	rfs41_compound_state_free(cs);
-	resp->status = DS_OK;
 }
 
 /*

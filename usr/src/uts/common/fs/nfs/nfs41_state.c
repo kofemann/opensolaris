@@ -1020,6 +1020,7 @@ mds_gen_mpd(nfs_server_instance_t *instp, struct mds_gather_args *args)
 {
 	nfsv4_1_file_layout_ds_addr4 ds_dev;
 
+	/* is this right?  the id will always be 0.  only 1? */
 	mds_addmpd_t map = { .id = 0, .ds_addr4 = &ds_dev };
 	mds_mpd_t *mp;
 	uint_t len;
@@ -1089,6 +1090,7 @@ mds_gen_default_layout(nfs_server_instance_t *instp, int max_devs_needed)
 
 	bzero(&args, sizeof (args));
 
+	args.dex = 0;
 	args.max_devs_needed = MIN(max_devs_needed,
 	    MIN(mds_max_lo_devs, 99));
 
@@ -1158,8 +1160,10 @@ mds_layout_create(rfs4_entry_t u_entry, void *arg)
 		lp->devs[i] = alop->lo_devs[i];
 		dp = mds_find_ds_addrlist(instp, alop->lo_devs[i]);
 		/* lets hope this doesn't occur */
-		if (dp == NULL)
+		if (dp == NULL) {
+			printf("layout_create FAILED to find ds_addrlist\n");
 			return (FALSE);
+		}
 		gap->dev_ptr[i] = dp;
 	}
 
@@ -1167,6 +1171,13 @@ mds_layout_create(rfs4_entry_t u_entry, void *arg)
 
 	/* Need to generate a device for this layout */
 	mp = mds_gen_mpd(instp, gap);
+
+	/*
+	 * XXX - remove this comment
+	 * I've noticed that mpd_id is always 0, that is
+	 * whether creating the default layout, or adding
+	 * a layout created from an ODL, dev_id is always 0.
+	 */
 
 	/* save the dev_id save the world */
 	lp->dev_id = mp->mpd_id;
@@ -1180,16 +1191,19 @@ mds_layout_destroy(rfs4_entry_t bugger)
 {
 }
 
-void
-mds_add_layout(struct mds_addlo_args *lop)
+mds_layout_t *
+mds_add_layout(struct mds_gather_args *gap)
 {
 	bool_t create = FALSE;
 	rfs4_entry_t e;
+	struct mds_addlo_args *addlop = &gap->lo_arg;
+	mds_layout_t *lop;
 
 	rw_enter(&mds_server->mds_layout_lock, RW_WRITER);
 
+	/* Probably could skip this if addlop->loid == 0 */
 	if ((e = rfs4_dbsearch(mds_server->mds_layout_idx,
-	    (void *)(uintptr_t)lop->loid,
+	    (void *)(uintptr_t)addlop->loid,
 	    &create,
 	    NULL,
 	    RFS4_DBS_VALID)) != NULL) {
@@ -1200,13 +1214,15 @@ mds_add_layout(struct mds_addlo_args *lop)
 		rfs4_dbe_invalidate(e->dbe);
 	}
 
-	if (rfs4_dbcreate(mds_server->mds_layout_idx, (void *)lop) == NULL) {
+	lop = (mds_layout_t *)rfs4_dbcreate(mds_server->mds_layout_idx,
+	    (void *)gap);
+	rw_exit(&mds_server->mds_layout_lock);
+	if (lop == NULL) {
 		printf("mds_add_layout: failed\n");
 		(void) set_errno(EFAULT);
 	}
-	rw_exit(&mds_server->mds_layout_lock);
-	return;
 
+	return (lop);
 }
 
 #define	ADDRHASH(key) ((unsigned long)(key) >> 3)
@@ -1460,6 +1476,7 @@ mds_clean_up_grants(rfs4_client_t *cp)
 	mds_layout_grant_t *lgp;
 	nfs_server_instance_t *instp;
 
+	rfs4_dbe_lock(cp->dbe);
 	while (cp->clientgrantlist.next->lgp != NULL) {
 		lgp = cp->clientgrantlist.next->lgp;
 		remque(&lgp->clientgrantlist);
@@ -1479,8 +1496,63 @@ mds_clean_up_grants(rfs4_client_t *cp)
 		rfs4_dbe_invalidate(lgp->dbe);
 		rfs41_lo_grant_rele(lgp);
 	}
+
 	instp = dbe_to_instp(cp->dbe);
+	rfs4_dbe_unlock(cp->dbe);
+
+	rw_enter(&instp->mds_ever_grant_lock, RW_READER);
 	rfs4_dbe_walk(instp->mds_ever_grant_tab, mds_kill_eg_callout, cp);
+	rw_exit(&instp->mds_ever_grant_lock);
+}
+
+struct grant_arg {
+	rfs4_client_t *cp;
+	vnode_t *vp;
+};
+
+void
+mds_rm_grant_callout(rfs4_entry_t u_entry, void *arg)
+{
+	mds_layout_grant_t *lgp = (mds_layout_grant_t *)u_entry;
+	struct grant_arg *ga = (struct grant_arg *)arg;
+	vnode_t *vp = lgp->fp->vp;
+
+	if (ga->cp == lgp->cp && vp && ga->vp->v_vfsp == vp->v_vfsp) {
+		rfs4_dbe_lock(lgp->cp->dbe);
+		remque(&lgp->clientgrantlist);
+		rfs4_dbe_unlock(lgp->cp->dbe);
+
+		lgp->clientgrantlist.next = lgp->clientgrantlist.prev =
+		    &lgp->clientgrantlist;
+		lgp->cp = NULL;
+
+		rfs4_dbe_lock(lgp->fp->dbe);
+		remque(&lgp->lo_grant_list);
+		rfs4_dbe_unlock(lgp->fp->dbe);
+
+		lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
+		    &lgp->lo_grant_list;
+		rfs4_file_rele(lgp->fp);
+
+		lgp->fp = NULL;
+		rfs4_dbe_invalidate(lgp->dbe);
+		rfs41_lo_grant_rele(lgp);
+	}
+}
+
+void
+mds_clean_grants_by_fsid(rfs4_client_t *cp, vnode_t *vp)
+{
+	struct grant_arg ga;
+	nfs_server_instance_t *instp;
+
+	ga.cp = cp;
+	ga.vp = vp;
+	instp = dbe_to_instp(cp->dbe);
+
+	rw_enter(&instp->mds_layout_grant_lock, RW_READER);
+	rfs4_dbe_walk(instp->mds_layout_grant_tab, mds_rm_grant_callout, &ga);
+	rw_exit(&instp->mds_layout_grant_lock);
 }
 
 /*
@@ -1574,9 +1646,12 @@ mds_do_lorecall(mds_lorec_t *lorec)
 		break;
 
 	case LAYOUTRECALL4_FSID:
+		sp->sn_clnt->bulk_recall = LAYOUTRETURN4_FSID;
 		break;
 
 	case LAYOUTRECALL4_ALL:
+		sp->sn_clnt->bulk_recall = LAYOUTRETURN4_ALL;
+		break;
 	default:
 		break;
 	}
@@ -1693,6 +1768,7 @@ retry:
 
 		case LAYOUTRECALL4_FSID:
 		case LAYOUTRECALL4_ALL:
+			sp->sn_clnt->bulk_recall = 0;
 			/*
 			 * XXX - how do we determine if layouts still
 			 *	 outstanding for fsid/all cases ?
@@ -3361,26 +3437,58 @@ mds_create_name(vnode_t *vp, int *len)
 static char *
 xdr_convert_layout(mds_layout_t *lop, int *size)
 {
-	int xdr_size;
+	int xdr_size, i, sid_sz;
 	char *xdr_buf;
 	XDR xdr;
+	odl on_disk;
+	odl_t odlt;
+	odl_sid *sids;
 
-	xdr_size = xdr_sizeof(xdr_odl, lop->odl);
+	/* otw_flo.nfl_first_stripe_index hard coded to 0 */
+	odlt.start_idx = 0;
+	odlt.unit_size = lop->stripe_unit;
+
+	/* offset and length are currently hard coded, as well */
+	odlt.offset = 0;
+	odlt.length = -1;
+
+	/*
+	 * XXX - jw - remove this comment
+	 * the dev array that is being stored in the ODL as the
+	 * the sid array, below, is dynamically generated.  This isn't
+	 * very good for being persistent across reboots.  You can see
+	 * where these "devs" come from in mds_gather_devs().
+	 */
+	sid_sz = lop->stripe_count * sizeof (odl_sid);
+	sids = (odl_sid *)kmem_zalloc(sid_sz, KM_SLEEP);
+	for (i = 0; i < lop->stripe_count; i++)
+		sids[i].aun = lop->devs[i];
+	odlt.sid.sid_len = lop->stripe_count;
+	odlt.sid.sid_val = sids;
+
+	on_disk.odl_type = PNFS;
+	on_disk.odl_u.odl_pnfs.odl_vers = VERS_1;
+	on_disk.odl_u.odl_pnfs.odl_lo_u.odl_content.odl_content_len = 1;
+	on_disk.odl_u.odl_pnfs.odl_lo_u.odl_content.odl_content_val = &odlt;
+
+	xdr_size = xdr_sizeof(xdr_odl, (char *)&on_disk);
 	xdr_buf = kmem_zalloc(xdr_size, KM_SLEEP);
 
 	xdrmem_create(&xdr, xdr_buf, xdr_size, XDR_ENCODE);
 
-	if (xdr_odl(&xdr, lop->odl) == FALSE) {
+	if (xdr_odl(&xdr, &on_disk) == FALSE) {
 		*size = 0;
+		kmem_free(sids, sid_sz);
 		kmem_free(xdr_buf, xdr_size);
 		return (NULL);
 	}
 
+	kmem_free(sids, sid_sz);
 	*size = xdr_size;
 	return (xdr_buf);
 }
 
-/* xdr decode an on-disk layout to a mds_layout */
+/* xdr decode an on-disk layout to an odl struct */
 /*ARGSUSED*/
 static odl *
 xdr_convert_odl(char *odlp, int size)
@@ -3392,14 +3500,27 @@ xdr_convert_odl(char *odlp, int size)
 	sz = sizeof (odl);
 	unxdr_buf = kmem_zalloc(sz, KM_SLEEP);
 
-	xdrmem_create(&xdr, unxdr_buf, sz, XDR_DECODE);
+	xdrmem_create(&xdr, odlp, size, XDR_DECODE);
 
-	if (xdr_odl(&xdr, (odl *)odlp) == FALSE) {
+	if (xdr_odl(&xdr, (odl *)unxdr_buf) == FALSE) {
 		kmem_free(unxdr_buf, sz);
 		return (NULL);
 	}
 
 	return ((odl *)unxdr_buf);
+}
+
+int
+odl_already_written(char *name)
+{
+	vnode_t *vp;
+
+	if (vn_open(name, UIO_SYSSPACE, FREAD, 0, &vp, 0, 0))
+		return (0);	/* does not exist */
+
+	(void) VOP_CLOSE(vp, FREAD, 1, (offset_t)0, CRED(), NULL);
+	VN_RELE(vp);
+	return (1);	/* has already been written */
 }
 
 int
@@ -3412,6 +3533,11 @@ mds_put_layout(mds_layout_t *lop, vnode_t *vp)
 	name = mds_create_name(vp, &len);
 	if (name == NULL) {
 		return (-1);
+	}
+
+	if (odl_already_written(name)) {
+		kmem_free(name, len);
+		return (0);
 	}
 
 	/* mythical xdr encode routine */
@@ -3433,9 +3559,14 @@ int
 mds_get_odl(vnode_t *vp, mds_layout_t **lopp)
 {
 	char *odlp;
-	int len, size;
+	int len, size, i;
 	char *name;
 	mds_layout_t *lop;
+	odl *on_disk;
+	odl_sid *sidp;
+	odl_t *odlt;
+	struct mds_gather_args gargs;
+	struct mds_addlo_args *lo_args;
 
 	ASSERT(lopp != NULL);
 
@@ -3449,16 +3580,40 @@ mds_get_odl(vnode_t *vp, mds_layout_t **lopp)
 		return (NFS4ERR_LAYOUTTRYLATER);
 	}
 
-	lop = *lopp;
-
 	/* the magic xdr decode routine */
-	lop->odl = xdr_convert_odl(odlp, size);
+	on_disk = xdr_convert_odl(odlp, size);
 
 	kmem_free(name, len);
 	kmem_free(odlp, size);
 
-	if (lop->odl == NULL)
+	if (on_disk == NULL)
 		return (NFS4ERR_LAYOUTTRYLATER);
+
+	odlt = on_disk->odl_u.odl_pnfs.odl_lo_u.odl_content.odl_content_val;
+	sidp = odlt->sid.sid_val;
+	gargs.lo_arg.loid = 0;
+	gargs.lo_arg.lo_stripe_unit = odlt->unit_size;
+	lo_args = &gargs.lo_arg;
+	for (i = 0; i < odlt->sid.sid_len; i++) {
+		lo_args->lo_devs[i] = (int)sidp[i].aun;
+	}
+	lo_args->lo_devs[i] = 0;
+
+	gargs.dex = i;
+	gargs.max_devs_needed = i;
+
+#ifdef Not_Done_Yet
+	/* these were allocated by the xdr decode process */
+	free(sidp, (i * sizeof (odl_sid)));
+	free(odlt, sizeof (odl_t));
+#endif
+	kmem_free(on_disk, sizeof (odl));
+
+	lop = mds_add_layout(&gargs);
+	if (lop == NULL)
+		return (NFS4ERR_LAYOUTTRYLATER);
+
+	*lopp = lop;
 
 	return (NFS4_OK);
 }

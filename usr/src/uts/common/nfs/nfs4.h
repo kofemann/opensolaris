@@ -972,7 +972,7 @@ typedef struct rfs4_file {
 	uint32_t	deny_write;
 	krwlock_t	file_rwlock;
 	struct rfs41_grant_list lo_grant_list;
-	struct mds_layout    *flp;
+	struct mds_layout    *layoutp;
 } rfs4_file_t;
 
 /*

@@ -323,6 +323,8 @@ static void	mds_op_nverify(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
 
 extern mds_mpd_t *mds_find_mpd(nfs_server_instance_t *, uint32_t);
 extern void rfs41_lo_seqid(stateid_t *);
+extern void mds_delete_layout(vnode_t *);
+extern void mds_clean_grants_by_fsid(rfs4_client_t *, vnode_t *);
 
 nfsstat4
 create_vnode(vnode_t *, char *,  vattr_t *, createmode4, timespec32_t *,
@@ -3200,7 +3202,7 @@ do_ctl_mds_remove(vnode_t *vp, rfs4_file_t *fp, compound_state_t *cs)
 	 * the errors are ignored and will not be retried.  This may
 	 * cause leaked space on the the data server.
 	 */
-	if (fp->flp != NULL) {
+	if (fp->layoutp != NULL) {
 		error = vop_fid_pseudo(vp, &fid);
 		if (error) {
 			DTRACE_PROBE(nfss__e__vop_fid_pseudo_failed);
@@ -3211,7 +3213,7 @@ do_ctl_mds_remove(vnode_t *vp, rfs4_file_t *fp, compound_state_t *cs)
 		}
 
 		error = ctl_mds_clnt_remove_file(cs->instp, cs->exi->exi_fsid,
-		    nfs41_fid, fp->flp);
+		    nfs41_fid, fp->layoutp);
 	} else
 		DTRACE_PROBE(nfss__i__layout_is_null_cannot_remove);
 
@@ -3414,6 +3416,9 @@ mds_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 						nbl_end_crit(vp);
 						in_crit = 0;
 					}
+
+					/* Remove the layout */
+					mds_delete_layout(tvp);
 
 					/*
 					 * Remove objects on data servers.
@@ -7930,39 +7935,41 @@ nfsstat4
 mds_get_flo(nfs_server_instance_t *instp, vnode_t *vp, mds_layout_t **flopp)
 {
 	rfs4_file_t *fp;
+	bool_t create = FALSE;
 
 	ASSERT(vp);
 	ASSERT(instp);
 	ASSERT(flopp);
 
-	mutex_enter(&vp->v_lock);
-	fp = (rfs4_file_t *)vsd_get(vp, instp->vkey);
-	mutex_exit(&vp->v_lock);
+	fp = rfs4_findfile(instp, vp, NULL, &create);
 
 	/* Odd.. no rfs4_file_t for the vnode.. */
 	if (fp == NULL)
 		return (NFS4ERR_LAYOUTUNAVAILABLE);
 
-	/* do we have a odl already ? */
-	if (fp->flp == NULL) {
+	/* do we have a layout already ? */
+	if (fp->layoutp == NULL) {
 		/* Nope, read from disk */
-		if (mds_get_odl(vp, &fp->flp) != NFS4_OK) {
+		if (mds_get_odl(vp, &fp->layoutp) != NFS4_OK) {
 			/*
 			 * XXXXX:
 			 * XXXXX: No ODL, so lets go query PE
 			 * XXXXX:
 			 */
-			fake_spe(instp, &fp->flp);
+			fake_spe(instp, &fp->layoutp);
 
-			if (fp->flp == NULL)
+			if (fp->layoutp == NULL) {
+				rfs4_file_rele(fp);
 				return (NFS4ERR_LAYOUTUNAVAILABLE);
+			}
 		}
 	}
 
 	/*
 	 * pass back the mds_layout
 	 */
-	*flopp = (mds_layout_t *)fp->flp;
+	*flopp = (mds_layout_t *)fp->layoutp;
+	rfs4_file_rele(fp);
 	return (NFS4_OK);
 }
 
@@ -7993,7 +8000,7 @@ mds_fetch_layout(struct compound_state *cs,
 	mds_ever_grant_t *egp;
 
 	int i, err, nfl_size;
-	bool_t create = TRUE;
+	bool_t create;
 
 	XDR  xdr;
 	int  xdr_size = 0;
@@ -8090,16 +8097,18 @@ mds_fetch_layout(struct compound_state *cs,
 	/*
 	 * create the layout grant
 	 */
-	mutex_enter(&cs->vp->v_lock);
-	fp = (rfs4_file_t *)vsd_get(cs->vp, cs->instp->vkey);
-	mutex_exit(&cs->vp->v_lock);
+	create = FALSE;
+	fp = rfs4_findfile(cs->instp, cs->vp, NULL, &create);
+	/* what if fp == NULL??? */
 
+	create = TRUE;
 	lgp = rfs41_findlogrant(cs, fp, cs->cp, &create);
 	if (lgp == NULL) {
 		printf("rfs41_findlogrant() returned NULL; create=%d\n ",
 		    create);
 		kmem_free(xdr_buffer, xdr_size);
 		mds_free_fh_list(nfl_fh_list, lp->stripe_count);
+		rfs4_file_rele(fp);
 		return (NFS4ERR_SERVERFAULT);
 	}
 	if (create == TRUE) {
@@ -8113,6 +8122,7 @@ mds_fetch_layout(struct compound_state *cs,
 		insque(&lgp->lo_grant_list, fp->lo_grant_list.prev);
 		rfs4_dbe_unlock(fp->dbe);
 	}
+	rfs4_file_rele(fp);
 
 	lgp->lop = lp;
 
@@ -8168,16 +8178,15 @@ mds_get_lo_grant_by_cp(struct compound_state *cs)
 	mds_layout_grant_t *lgp;
 	bool_t create = FALSE;
 
-	mutex_enter(&cs->vp->v_lock);
-	fp = (rfs4_file_t *)vsd_get(cs->vp, cs->instp->vkey);
-	mutex_exit(&cs->vp->v_lock);
-	if (fp == NULL)
-		return (NULL);
-
 	if (cp->clientgrantlist.next->lgp == NULL)
 		return (NULL);
 
+	fp = rfs4_findfile(cs->instp, cs->vp, NULL, &create);
+	if (fp == NULL)
+		return (NULL);
+
 	lgp = rfs41_findlogrant(cs, fp, cp, &create);
+	rfs4_file_rele(fp);
 
 	return (lgp);
 }
@@ -8209,22 +8218,22 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 	    LAYOUTGET4args *, argp);
 
 	if (cs->vp == NULL) {
-		*cs->statusp = resp->logr_status = NFS4ERR_NOFILEHANDLE;
+		nfsstat = NFS4ERR_NOFILEHANDLE;
 		goto final;
 	}
 
 	if (argp->loga_layout_type != LAYOUT4_NFSV4_1_FILES) {
-		*cs->statusp = resp->logr_status = NFS4ERR_UNKNOWN_LAYOUTTYPE;
+		nfsstat = NFS4ERR_UNKNOWN_LAYOUTTYPE;
 		goto final;
 	}
 
 	if (argp->loga_iomode == LAYOUTIOMODE4_ANY) {
-		*cs->statusp = resp->logr_status = NFS4ERR_BADIOMODE;
+		nfsstat = NFS4ERR_BADIOMODE;
 		goto final;
 	}
 
 	if (argp->loga_length < argp->loga_minlength) {
-		*cs->statusp = resp->logr_status = NFS4ERR_INVAL;
+		nfsstat = NFS4ERR_INVAL;
 		goto final;
 	}
 
@@ -8494,18 +8503,24 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 	bool_t create = FALSE;
 	nfs_range_query_t remain;
 
-	mutex_enter(&cs->vp->v_lock);
-	fp = (rfs4_file_t *)vsd_get(cs->vp, cs->instp->vkey);
-	mutex_exit(&cs->vp->v_lock);
+	fp = rfs4_findfile(cs->instp, cs->vp, NULL, &create);
+	/* what if fp == NULL??? */
 
 	lgp = rfs41_findlogrant(cs, fp, cs->cp, &create);
 	if (lgp == NULL) {
+		/*
+		 * Is this really so bad?  If the server reboots and then
+		 * the client returns a layout, we won't have a grant
+		 * structure for it.
+		 */
 		cmn_err(CE_WARN, "lo_return(): findlogrant returned NULL");
+		rfs4_file_rele(fp);
 		return (NFS4ERR_SERVERFAULT);
 	}
 
 	if (!layout_match(lgp->lo_stateid, lorf->lrf_stateid, &status)) {
 		rfs41_lo_grant_rele(lgp);
+		rfs4_file_rele(fp);
 		return (status);
 	}
 
@@ -8585,10 +8600,60 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 #endif
 	}
 
+	rfs4_file_rele(fp);
 	rfs41_lo_grant_rele(lgp);
 
 	return (NFS4_OK);
 }
+
+#define	JW_STARTED	1
+
+#ifdef JW_STARTED
+void
+mds_return_layout_fsid(struct compound_state *cs)
+{
+	mds_ever_grant_t *egp;
+	bool_t create = FALSE;
+
+	/*
+	 * hg nits doesn't like any of this so i'm making it a comment block
+	 * loop through the DS's
+	 * 	mds_invalidate_ds_state(fsid, cp, LAYOUT_FSID)
+	 * }
+	 *
+	 * clean up state
+	 * 1) ever_grant
+	 * 2) layout_grants
+	 */
+	egp = rfs41_findevergrant(cs->cp, cs->vp, &create);
+	if (egp != NULL) {
+		rfs4_dbe_lock(egp->dbe);
+		egp->cp = NULL;
+		rfs4_dbe_invalidate(egp->dbe);
+		rfs4_dbe_unlock(egp->dbe);
+		rfs41_ever_grant_rele(egp);
+	}
+
+	mds_clean_grants_by_fsid(cs->cp, cs->vp);
+}
+
+void
+mds_return_layout_all(rfs4_client_t *cp)
+{
+	/*
+	 * loop throug the DS's
+	 * 	mds_invalidate_ds_state(NULL, cp, LAYOUT_ALL)
+	 * }
+	 */
+
+	/*
+	 * clean up state
+	 * 1) layout_grants
+	 * 2) ever_grants
+	 */
+	mds_clean_up_grants(cp);
+}
+#endif
 
 /*ARGSUSED*/
 static void
@@ -8651,8 +8716,9 @@ mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
 			nfsstat = NFS4ERR_INVAL;
 			goto final;
 		}
-#ifdef NOT_DONE
+#ifdef JW_STARTED
 		mds_return_layout_fsid(cs);
+		nfsstat = NFS4_OK;
 #else
 		cmn_err(CE_NOTE, "loreturn: LAYOUTRETURN4_FSID");
 		nfsstat = NFS4ERR_NOTSUPP;
@@ -8665,8 +8731,9 @@ mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
 			nfsstat = NFS4ERR_INVAL;
 			goto final;
 		}
-#ifdef NOT_DONE
+#ifdef JW_STARTED
 		mds_return_layout_all(cp);
+		nfsstat = NFS4_OK;
 #else
 		cmn_err(CE_NOTE, "loreturn: LAYOUTRETURN4_ALL");
 		nfsstat = NFS4ERR_NOTSUPP;
@@ -8685,37 +8752,3 @@ final:
 	    struct compound_state *, cs,
 	    LAYOUTRETURN4res *, resp);
 }
-
-#ifdef JUST_HERE_TO_REMIND_ME
-mds_return_layout_fsid(struct compound_state *cs)
-{
-	rfs4_client_t *cp = cs->cp;
-
-	/* we need the fsid for this recall */
-	fsid = get_fsid_from_fh(cs->fh);
-
-	/*
-	 * hg nits doesn't like any of this so i'm making it a comment block
-	 * loop through the DS's
-	 * 	mds_invalidate_ds_state(fsid, cp, LAYOUT_FSID)
-	 * }
-	 *
-	 * clean up state
-	 * 1) ever_grant
-	 * 2) layout_grants
-	 */
-}
-
-mds_return_layout_all(rfs4_client_t *cp)
-{
-	/*
-	 * loop throug the DS's
-	 * 	mds_invalidate_ds_state(NULL, cp, LAYOUT_ALL)
-	 * }
-	 *
-	 * clean up state
-	 * 1) ever_grant
-	 * 2) layout_grants
-	 */
-}
-#endif
