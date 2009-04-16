@@ -2702,13 +2702,13 @@ nfs4create_session(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 {
 	nfs4_call_t		*cp;
 	sessionid4		tmp_sessid;
-	int			slotid;
 	CREATE_SESSION4args	*sargp;
 	CREATE_SESSION4res	*sess_res;
 	CREATE_SESSION4resok	*s_resok;
-	timespec_t		prop_time;
-	timespec_t		after_time;
+	timespec_t		 prop_time;
+	timespec_t		 after_time;
 	int			flags = RFS4CALL_NOSEQ;
+	int			max_slots = 0;
 
 	cp = nfs4_call_init(mi, cr, TAG_CREATE_SESSION);
 
@@ -2827,44 +2827,21 @@ nfs4create_session(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 	bcopy(np->ssx.sessionid, tmp_sessid, sizeof (sessionid4));
 
 	bcopy(&s_resok->csr_sessionid, &np->ssx.sessionid, sizeof (sessionid4));
-
-	np->ssx.maxslots = s_resok->csr_fore_chan_attrs.ca_maxrequests;
-	np->ssx.slots_available = np->ssx.maxslots;
-	/* LINTED */
-	np->ssx.slot_table_size =
-	    (np->ssx.maxslots * 5) / 4; /* Increase by 25% */
-	np->ssx.slot_table = kmem_zalloc(np->ssx.slot_table_size *
-	    sizeof (void *), KM_SLEEP);
-	for (slotid = 0; slotid < np->ssx.slot_table_size; slotid++) {
-		nfs4_slot_t	*slotp;
-		slotp = kmem_zalloc(sizeof (nfs4_slot_t), KM_SLEEP);
-		np->ssx.slot_table[slotid] = slotp;
-		slotp->slot_seqid = np->ssx.sequenceid + 1;
-		slotp->slot_id = slotid;
-	}
+	/* Setup fore channel slot cache. */
+	max_slots = s_resok->csr_fore_chan_attrs.ca_maxrequests;
+	slot_table_create(&np->ssx.slot_table, max_slots);
 
 	np->ssx.fore_chan_attr = s_resok->csr_fore_chan_attrs;
 	np->ssx.back_chan_attr = s_resok->csr_back_chan_attrs;
 
+	/* Set up back channel slot cache */
 	if (np->ssx.back_chan_attr.ca_maxrequests > 0 &&
 	    np->ssx.back_chan_attr.ca_maxrequests <= NFS41_CLNT_DEFAULT_SLOTS)
-		np->ssx.cb_slot_table_size =
-		    np->ssx.back_chan_attr.ca_maxrequests;
+		max_slots = np->ssx.back_chan_attr.ca_maxrequests;
 	else
-		np->ssx.cb_slot_table_size = NFS41_CLNT_DEFAULT_SLOTS;
+		max_slots = NFS41_CLNT_DEFAULT_SLOTS;
 
-	/*
-	 * Setup callback slot table.
-	 */
-	np->ssx.cb_slot_table = kmem_zalloc(np->ssx.cb_slot_table_size *
-	    sizeof (void *), KM_SLEEP);
-	for (slotid = 0; slotid < np->ssx.cb_slot_table_size; slotid++) {
-		nfs41_cb_slot_t	*cslot;
-		cslot = kmem_zalloc(sizeof (nfs41_cb_slot_t), KM_SLEEP);
-		np->ssx.cb_slot_table[slotid] = cslot;
-		mutex_init(&cslot->cb_lock, NULL, MUTEX_DEFAULT, NULL);
-		cslot->cb_slot_id = slotid;
-	}
+	slot_table_create(&np->ssx.cb_slot_table, max_slots);
 
 	/* Add mi to np's mntinfo4 list */
 	if (!(svp->sv_flags & SV4_ISA_DS))

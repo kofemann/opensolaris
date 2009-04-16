@@ -112,69 +112,33 @@ rfs41_find_and_set_session(COMPOUND4args_srv *ap, struct compound_state *cs)
 		return (NFS4ERR_BADSESSION);
 
 	slot = ap->sargs->sa_slotid;
-	if (slot < 0 || slot >= sp->sn_slrc->sc_maxslot) {
+	if (slot < 0 || slot >= sp->sn_replay->st_currw) {
 		rfs41_session_rele(sp);
 		return (NFS4ERR_BADSLOT);
 	}
-
-	ap->slp = (slot41_t *)&sp->sn_slrc->sc_slot[slot];
 	cs->sp = sp;
 	return (NFS4_OK);
 }
 
+
 slrc_stat_t
-rfs41_slrc_prologue(COMPOUND4args_srv *cap, COMPOUND4res_srv **rpp)
+rfs41_slrc_prologue(mds_session_t *sess, COMPOUND4args_srv *cap,
+    COMPOUND4res_srv **rpp)
 {
-	slot41_t	*slp;
-	sequenceid4	 seqid;
+	stok_t *handle = sess->sn_replay;
+	slotid4 slot = cap->sargs->sa_slotid;
+	sequenceid4 seq = cap->sargs->sa_sequenceid;
+	slot_ent_t *slt = NULL;
+	int ret = 0;
 
-	slp = cap->slp;
-	seqid = cap->sargs->sa_sequenceid;
-
-	if (seqid == slp->seqid) {			/* Replay/Retransmit */
-
-		if (seqid == 0)		/* corner case */
+	ret = slrc_slot_alloc(handle, slot, seq, &slt);
+	/* Take care of the replay case. */
+	if ((ret == SEQRES_REPLAY) && (slt != NULL)) {
+		if (seq == 0)		/* corner case */
 			create_rtag(cap, (COMPOUND4res *)*rpp);
-
-		/*
-		 * If cached results exist then reply w/those.
-		 */
-		switch (slp->state) {
-		case SLRC_CACHED_OKAY:
-		case SLRC_INPROG_REPLAY:
-			/*
-			 * We need additional status (SLRC_INPROG_REPLAY)
-			 * to show we're already handling this slot/seqid
-			 * combo, in case additional retransmissions are
-			 * received while the server is executing the req.
-			 */
-			*rpp = &(slp->res);
-			slp->state = SLRC_INPROG_REPLAY;
-			return (SEQRES_REPLAY);
-			/* NOTREACHED */
-
-		default:
-			/*
-			 * If no cached results exist, then
-			 * treat this replay as a new request.
-			 */
-			slp->state = SLRC_INPROG_NEWREQ;
-			return (SEQRES_NEWREQ);
-			/* NOTREACHED */
-		}
-
-	} else if (seqid == slp->seqid + 1) {		/* New Request */
-		slp->state = SLRC_INPROG_NEWREQ;
-		return (SEQRES_NEWREQ);
-
-	} else if (seqid < slp->seqid) {		/* Misordered Replay */
-		return (SEQRES_MISORD_REPLAY);
-
-	} else if (seqid >= slp->seqid + 2) {		/* Misordered Request */
-		return (SEQRES_MISORD_NEWREQ);
+		*rpp = &slt->se_buf;
 	}
-
-	return (SEQRES_BADSESSION);
+	return (ret);
 }
 
 /*
@@ -256,56 +220,49 @@ rfs41_compute_seq4_flags(COMPOUND4res *rp, compound_state_t *cs)
 }
 
 int
-rfs41_slrc_epilogue(COMPOUND4args_srv *cap, COMPOUND4res_srv *resp,
-    compound_state_t *cs)
+rfs41_slrc_epilogue(mds_session_t *sess, COMPOUND4args_srv *cap,
+    COMPOUND4res_srv *resp, compound_state_t *cs)
 {
-	slot41_t	*slp;
-	int		 error = 0;
+	int	error = 0;
+	stok_t *handle = sess->sn_replay;
+	slot_ent_t *slt = NULL;
+	slotid4 slot = cap->sargs->sa_slotid;
 
 	/* compute SEQ4 flags before caching response */
 	rfs41_compute_seq4_flags((COMPOUND4res *)resp, cs);
 
-	/*
-	 * Slot cache entry eviction and insertion
-	 */
-	slp = (slot41_t *)cap->slp;
-	switch (slp->state) {
+	slt = slrc_slot_get(handle, slot);
+	mutex_enter(&slt->se_lock);
+	switch (slt->se_state) {
 	case SLRC_INPROG_NEWREQ:
 		if (resp->status == NFS4_OK) {
-			if (slp->res.array != NULL) {
-				slp->state = SLRC_CACHED_PURGING;
+			if (slt->se_buf.array != NULL) {
+				slt->se_state = SLRC_CACHED_PURGING;
 				DTRACE_PROBE2(nfss41__i__cache_evict,
-				    COMPOUND4res *, &slp->res,
-				    nfs_resop4 *, slp->res.array);
-				rfs41_compound_free((COMPOUND4res *)&slp->res,
+				    COMPOUND4res *, &slt->se_buf,
+				    nfs_resop4 *, slt->se_buf.array);
+				rfs41_compound_free(
+				    (COMPOUND4res *)&slt->se_buf,
 				    cs);
 			}
-			slp->status = NFS4_OK;
-			slp->res = *resp;
+			slt->se_status = NFS4_OK;
+			slt->se_buf = *resp;
+			slt->se_state = SLRC_CACHED_OKAY;
+
 			DTRACE_PROBE2(nfss41__i__cache_insert,
-			    COMPOUND4res *, &slp->res,
-			    nfs_resop4 *, slp->res.array);
-			slp->state = SLRC_CACHED_OKAY;
+			    COMPOUND4res *, &slt->se_buf,
+			    nfs_resop4 *, slt->se_buf.array);
 		} else {
-			/*
-			 * XXX: ?? I'm not sure what this means..
-			 */
-			slp->state = SLRC_SERVER_ERROR;
+			slt->se_state = SLRC_SERVER_ERROR;
 			error = 1;
 		}
 		break;
-
-	case SLRC_INPROG_REPLAY:
-		/* response already points to cached results */
-		slp->state = SLRC_CACHED_OKAY;
-		resp->status = slp->status = slp->res.status;
-		break;
-
 	default:
 		error = 1;
 		break;
 	}
-
+	cv_signal(&slt->se_wait);
+	mutex_exit(&slt->se_lock);
 	return (error);
 }
 
@@ -374,6 +331,22 @@ rfs41_compound_state_free(compound_state_t *cs)
 	kmem_cache_free(rfs41_compound_state_cache, cs);
 }
 
+static void
+rfs41_slrc_cacheok(mds_session_t *sess, COMPOUND4args_srv *cap)
+{
+	stok_t *handle = sess->sn_replay;
+	slot_ent_t *slt = NULL;
+	slotid4 slot;
+
+	slot = cap->sargs->sa_slotid;
+	slt = slrc_slot_get(handle, slot);
+	mutex_enter(&slt->se_lock);
+	slt->se_state = SLRC_CACHED_OKAY;
+	slt->se_status = NFS4_OK;
+	cv_signal(&slt->se_wait);
+	mutex_exit(&slt->se_lock);
+}
+
 /* ARGSUSED */
 int
 rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
@@ -383,7 +356,7 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 	COMPOUND4res_srv	*rbp;
 	COMPOUND4args_srv	*cap;
 	int			 error = 0;
-	int			 rv;
+	int			 rv, replay_flag = 0;
 
 	cs = rfs41_compound_state_alloc(mds_server);
 	bzero(&res_buf, sizeof (COMPOUND4res_srv));
@@ -408,7 +381,7 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 				goto reply;
 			}
 
-			switch (rfs41_slrc_prologue(cap, &rbp)) {
+			switch (rfs41_slrc_prologue(cs->sp, cap, &rbp)) {
 			case SEQRES_NEWREQ:
 				break;
 
@@ -417,6 +390,10 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 				rbp->status = NFS4ERR_SEQ_MISORDERED;
 				seqop_error(cap, (COMPOUND4res *)rbp);
 				goto reply;
+
+			case SEQRES_REPLAY:
+				replay_flag = 1;
+				goto  reply;
 
 			case SEQRES_BADSESSION:
 			default:
@@ -446,7 +423,7 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 
 slrc:
 	if (cs->sp)		/* only cache SEQUENCE'd compounds */
-		(void) rfs41_slrc_epilogue(cap, rbp, cs);
+		(void) rfs41_slrc_epilogue(cs->sp, cap, rbp, cs);
 
 reply:
 	/*
@@ -458,7 +435,10 @@ reply:
 		svcerr_systemerr(xprt);
 		error++;
 	}
-
+	if (replay_flag) {
+		(void) rfs41_slrc_cacheok(cs->sp, cap);
+		replay_flag = 0;
+	}
 out:
 	/*
 	 * Only free on error. Otherwise, it stays in the

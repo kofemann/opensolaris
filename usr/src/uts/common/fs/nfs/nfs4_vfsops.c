@@ -3659,12 +3659,6 @@ new_nfs4_server(struct servinfo4 *svp, cred_t *cr)
 		np->ssx.bi_rpc = 1;
 	}
 
-	/*
-	 * Initialize Slot management fields
-	 */
-	cv_init(&np->ssx.slot_wait, NULL, CV_DEFAULT, NULL);
-	nfs_rw_init(&np->ssx.slot_table_rwlock, NULL, RW_DEFAULT, NULL);
-	mutex_init(&np->ssx.slot_lock, NULL, MUTEX_DEFAULT, NULL);
 	return (np);
 }
 
@@ -4100,7 +4094,7 @@ nfs4destroy_session_otw(nfs4_session_t *sessp, CLIENT *clientp)
 	COMPOUND4args_clnt	args;
 	COMPOUND4res_clnt	res;
 	COMPOUND4node_clnt	node[2];
-	nfs4_slot_t		*slotp;
+	slot_ent_t		*slotp;
 	struct timeval		wait;
 	enum	clnt_stat	status;
 	nfs4_error_t		e;
@@ -4154,10 +4148,6 @@ nfs4destroy_session_otw(nfs4_session_t *sessp, CLIENT *clientp)
 		xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
 
 destroy:
-	kmem_free(sessp->slot_table,
-	    sessp->slot_table_size * sizeof (void *));
-	kmem_free(sessp->cb_slot_table,
-	    sessp->cb_slot_table_size * sizeof (void *));
 	kmem_free(sessp->saddr.buf, sessp->saddr.len);
 }
 
@@ -4166,6 +4156,7 @@ nfs4destroy_session(nfs4_server_t *np, CLIENT *seqhandle)
 {
 	struct nfs41_cb_info	*cbi;
 	struct nfs4_callback_globals	*ncg = np->zone_globals;
+	nfs4_session_t	*sess;
 
 	/* XXX currently no otw destroy for null client handles */
 	if (seqhandle != NULL)
@@ -4206,6 +4197,13 @@ nfs4destroy_session(nfs4_server_t *np, CLIENT *seqhandle)
 	}
 	mutex_exit(&cbi->cb_reflock);
 
+	/* Destroy the slot table cache's for fore and back channel. */
+	sess = &np->ssx;
+	if (sess->slot_table != NULL)
+		slot_table_destroy(sess->slot_table);
+	if (sess->cb_slot_table != NULL)
+		slot_table_destroy(sess->cb_slot_table);
+	sess->slot_table = sess->cb_slot_table = NULL;
 	mutex_enter(&np->s_lock);
 	nfs4callback_destroy(np);
 	np->s_flags &= ~(N4S_SESSION_CREATED);

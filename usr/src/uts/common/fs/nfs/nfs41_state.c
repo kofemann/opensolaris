@@ -671,6 +671,7 @@ mds_session_create(rfs4_entry_t u_entry,
 	channel_dir_from_server4 dir;
 	sess_bcsd_t		*bsdp;
 	nfs_server_instance_t *instp;
+	int			max_slots;
 
 	ASSERT(sp != NULL);
 	if (sp == NULL)
@@ -774,7 +775,7 @@ mds_session_create(rfs4_entry_t u_entry,
 			cmn_err(CE_PANIC, "Back Chan Spec Data Not Set\t"
 			    "<Internal Inconsistency>");
 		}
-		bsdp->bsd_stok = sltab_create(slrc_slot_size);	/* bdrpc */
+		slrc_table_create(&bsdp->bsd_stok, slrc_slot_size);
 		sp->sn_csflags |= CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
 		sp->sn_back = ocp;
 
@@ -783,7 +784,7 @@ mds_session_create(rfs4_entry_t u_entry,
 		 * If not doing bdrpc, then we expect the client to perform
 		 * an explicit BIND_CONN_TO_SESSION if it wants callback
 		 * traffic. Subsequently, the cb channel should be set up
-		 * at that point along with its corresponding sltab (see
+		 * at that point along with its corresponding slot (see
 		 * rfs41_bc_setup).
 		 */
 		sp->sn_csflags &= ~CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
@@ -818,15 +819,8 @@ mds_session_create(rfs4_entry_t u_entry,
 	 * NFS4ERR_SEQ_MISORDERED. Note that we zero out the entries
 	 * by virtue of the z-alloc.
 	 */
-	sp->sn_slrc =
-	    (rfs41_slrc_t *)kmem_zalloc(sizeof (rfs41_slrc_t), KM_SLEEP);
-	sp->sn_slrc->sc_maxslot = ocp->cn_attrs.ca_maxrequests;
-
-	for (i = 0; i < sp->sn_slrc->sc_maxslot; i++) {
-		sp->sn_slrc->sc_slot[i].status = NFS4ERR_SEQ_MISORDERED;
-		sp->sn_slrc->sc_slot[i].res.status = NFS4ERR_SEQ_MISORDERED;
-		sp->sn_slrc->sc_slot[i].p = NULL;
-	}
+	max_slots = ocp->cn_attrs.ca_maxrequests;
+	slrc_table_create(&sp->sn_replay, max_slots);
 
 	/* only initialize bits relevant to session scope */
 	bzero(&sp->sn_seq4, sizeof (bit_attr_t) * BITS_PER_WORD);
@@ -865,7 +859,7 @@ mds_session_destroy(rfs4_entry_t u_entry)
 	sess_bcsd_t	*bsdp;
 
 	if (SN_CB_CHAN_EST(sp) && ((bsdp = CTOBSD(sp->sn_back)) != NULL))
-		sltab_destroy(bsdp->bsd_stok);
+		slrc_table_destroy(bsdp->bsd_stok);
 
 	/*
 	 * XXX - A session can have multiple BC clnt handles that need
@@ -883,9 +877,9 @@ mds_session_destroy(rfs4_entry_t u_entry)
 	/*
 	 * Nuke slot replay cache for this session
 	 */
-	if (sp->sn_slrc) {
-		kmem_free(sp->sn_slrc, sizeof (rfs41_slrc_t));
-		sp->sn_slrc = NULL;
+	if (sp->sn_replay) {
+		slrc_table_destroy(sp->sn_replay);
+		sp->sn_replay = NULL;
 	}
 
 	/*

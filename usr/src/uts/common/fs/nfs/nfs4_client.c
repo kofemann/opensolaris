@@ -3691,7 +3691,7 @@ nfs4sequence_nomount(nfs4_server_t *np, CLIENT *seqclient)
 	COMPOUND4args_clnt	args;
 	COMPOUND4res_clnt	res;
 	COMPOUND4node_clnt	node[1];
-	nfs4_slot_t		*slotp;
+	slot_ent_t 		*slotp;
 	nfs4_error_t		e;
 	enum clnt_stat		status;
 	struct timeval 		wait;

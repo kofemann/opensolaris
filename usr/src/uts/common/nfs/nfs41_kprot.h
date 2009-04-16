@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 #ifndef _NFS41_KPROT_H
@@ -1391,7 +1391,7 @@ struct COMPOUND4args_srv {
 	uint_t		array_len;
 	nfs_argop4	*array;
 	SEQUENCE4args	*sargs;		/* server internal only */
-	void		*slp;		/* (slot41_t *) */
+	void		*slp;
 };
 typedef struct COMPOUND4args_srv COMPOUND4args_srv;
 

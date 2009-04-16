@@ -4787,7 +4787,8 @@ void
 rfs41_rs_record(struct compound_state *cs, stateid_type_t type, void *p)
 {
 	rfs4_deleg_state_t	*dsp;
-	slot41_t		*slp;
+	slot_ent_t		*slotent;
+
 #ifdef	DEBUG_VERBOSE
 	/*
 	 * XXX - Do not change this to a static D probe;
@@ -4815,10 +4816,13 @@ rfs41_rs_record(struct compound_state *cs, stateid_type_t type, void *p)
 		rfs41_deleg_rs_hold(dsp);
 
 		/* add it to slrc slot to track slot-reuse case */
-		slp = &cs->sp->sn_slrc->sc_slot[cs->slotno];
-		ASSERT(slp != NULL);
-		ASSERT(slp->p == NULL);
-		slp->p = (rfs4_deleg_state_t *)dsp;
+		slotent = slrc_slot_get(cs->sp->sn_replay, cs->slotno);
+		ASSERT(slotent != NULL);
+		ASSERT(slotent->se_p == NULL);
+		mutex_enter(&slotent->se_lock);
+		slotent->se_p = (rfs4_deleg_state_t *)dsp;
+		mutex_exit(&slotent->se_lock);
+
 		rfs4_dbe_hold(dsp->dbe);	/* added ref to deleg_state */
 		break;
 
@@ -7432,7 +7436,6 @@ out:
 	thread_exit();
 }
 
-
 /*
  * Process the SEQUENCE operation. The session pointer has already been
  * cached in the compound state, so we just dereference
@@ -7446,7 +7449,7 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	SEQUENCE4res		*resp = &resop->nfs_resop4_u.opsequence;
 	SEQUENCE4resok		*rok  = &resp->SEQUENCE4res_u.sr_resok4;
 	mds_session_t		*sp = cs->sp;
-	slot41_t		*slp;
+	slot_ent_t		*slt;
 	slotid4			 slot   = args->sa_slotid;
 	nfsstat4		 status = NFS4_OK;
 	uint32_t		 cbstat = 0x0;
@@ -7499,7 +7502,7 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Valid range is [0, N-1]
 	 */
-	if (slot < 0 || slot >= sp->sn_slrc->sc_maxslot) {
+	if (slot < 0 || slot >= sp->sn_replay->st_currw) {
 		/* slot not in valid range */
 		cmn_err(CE_WARN, "mds_op_sequence: Bad Slot");
 		*cs->statusp = resp->sr_status = NFS4ERR_BADSLOT;
@@ -7515,40 +7518,41 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * checks and return NFS4_OK if everything looks kosher;
 	 * this reply will need to be cached by our caller.
 	 */
-	slp = &sp->sn_slrc->sc_slot[slot];
-
-	/* XXX - still need to account for wraparound */
-	if (args->sa_sequenceid != slp->seqid + 1) {
+	slt = slrc_slot_get(sp->sn_replay, slot);
+	ASSERT(slt != NULL);
+	if (args->sa_sequenceid != slt->se_seqid + 1) {
 		cmn_err(CE_WARN, "mds_op_sequence: Misordered New Request");
-		slp->status = NFS4ERR_SEQ_MISORDERED;
+		slt->se_status = NFS4ERR_SEQ_MISORDERED;
 		*cs->statusp = resp->sr_status = NFS4ERR_SEQ_MISORDERED;
 		goto sessrel;
 
 	}
 
-	if (args->sa_sequenceid == slp->seqid + 1) {
+	if (args->sa_sequenceid == slt->se_seqid + 1) {
 		/*
 		 * New request.
 		 */
-		slp->status = NFS4_OK;	/* SLRC_NR_INPROG */
-		slp->seqid = args->sa_sequenceid;
-		if (slp->p != NULL) {
+		mutex_enter(&slt->se_lock);
+		slt->se_status = NFS4_OK;	/* SLRC_NR_INPROG */
+		slt->se_seqid = args->sa_sequenceid;
+		if (slt->se_p != NULL) {
 			/*
 			 * slot previously used to return recallable state;
 			 * since slot reused (NEW request) we are guaranteed
 			 * the client saw the reply, so it's safe to nuke the
 			 * race-detection accounting info.
 			 */
-			rfs41_rs_erase(slp->p);
-			slp->p = NULL;
+			rfs41_rs_erase(slt->se_p);
+			slt->se_p = NULL;
 		}
+		mutex_exit(&slt->se_lock);
 	}
 
 	/*
 	 * Update access time and lease
 	 */
 	cs->slotno = slot;
-	cs->seqid = slp->seqid;
+	cs->seqid = slt->se_seqid;
 	sp->sn_laccess = gethrestime_sec();
 	rfs4_update_lease(cs->cp);
 
@@ -7556,10 +7560,10 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * Let's keep it simple for now
 	 */
 	bcopy(sp->sn_sessid, rok->sr_sessionid, sizeof (sessionid4));
-	rok->sr_sequenceid = slp->seqid;
-	rok->sr_slotid = sp->sn_slrc->sc_slotid = slot;
-	rok->sr_highest_slotid = sp->sn_slrc->sc_maxslot;
-	rok->sr_target_highest_slotid = sp->sn_slrc->sc_maxslot;
+	rok->sr_sequenceid = slt->se_seqid;
+	rok->sr_slotid = slot;
+	rok->sr_highest_slotid = sp->sn_replay->st_currw;
+	rok->sr_target_highest_slotid = sp->sn_replay->st_currw;
 	rok->sr_status_flags |= cbstat;
 	*cs->statusp = resp->sr_status = NFS4_OK;
 
@@ -7616,7 +7620,7 @@ rfs41_bc_setup(mds_session_t *sp)
 		 *	have been saved off by the originating CREATE_SESSION
 		 *	call. If that's not the case, default to MAXSLOTS.
 		 */
-		bsdp->bsd_stok = sltab_create(MAXSLOTS);	/* XXX - 4now */
+		slrc_table_create(&bsdp->bsd_stok, MAXSLOTS);
 		rw_exit(&bsdp->bsd_rwlock);
 	}
 	rw_exit(&bcp->cn_lock);

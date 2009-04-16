@@ -172,8 +172,9 @@ static int nfs4delegreturn_impl(rnode4_t *, int,
     struct nfs4_callback_globals *);
 static void nfs4delegreturn_cleanup_impl(rnode4_t *, nfs4_server_t *,
     struct nfs4_callback_globals *);
-
-
+static void cb_slrc_epilogue(nfs4_server_t *, CB_COMPOUND4res *,
+    slotid4);
+static void cb_compound_free(CB_COMPOUND4res *);
 /*
  * Only used for non-bidirectional RPC --Performs a BC2S and
  * starts the cbconn_thread.
@@ -327,12 +328,15 @@ nfs4_cbconn_thread(nfs4_server_t *np)
 	zthread_exit();
 }
 
-static void
+CB_COMPOUND4res *
 cb_sequence(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
 	struct compound_state *cs, struct nfs4_callback_globals *ncg)
 {
 	nfs4_server_t	*np;
-	nfs41_cb_slot_t	*cslot;
+	slot_ent_t	*cslot = NULL;
+	stok_t		*st;
+	nfs4_session_t	*ssp;
+	int ret = 0;
 
 	CB_SEQUENCE4args *args = &argop->nfs_cb_argop4_u.opcbsequence;
 	CB_SEQUENCE4res *resp = &resop->nfs_cb_resop4_u.opcbsequence;
@@ -345,7 +349,7 @@ cb_sequence(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
 	if (nfs4_server_vlock(np, 0) == FALSE) {
 		CB_WARN("cb_sequence: cannot find server\n");
 		*cs->statusp = resp->csr_status = NFS4ERR_BADHANDLE;
-		return;
+		return (NULL);
 	}
 
 	bcopy(&args->csa_sessionid,
@@ -365,28 +369,42 @@ cb_sequence(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
 		*cs->statusp = resp->csr_status = NFS4ERR_BADSESSION;
 		mutex_exit(&np->s_lock);
 		nfs4_server_rele(np);
-		return;
+		return (NULL);
 	}
 
-	if (args->csa_slotid >= np->ssx.cb_slot_table_size) {
+	ssp = &np->ssx;
+	st = ssp->cb_slot_table;
+	if (args->csa_slotid >= st->st_currw) {
 		CB_WARN("cb_sequence: Bad Slotid\n");
 		*cs->statusp = resp->csr_status = NFS4ERR_BADSLOT;
 		mutex_exit(&np->s_lock);
 		nfs4_server_rele(np);
-		return;
+		return (NULL);
 	}
-
-	cslot = np->ssx.cb_slot_table[args->csa_slotid];
-
-	if (args->csa_sequenceid != cslot->cb_seq + 1 || (cslot->cb_inuse)) {
-		CB_WARN("cb_sequence: Bad Sequence\n");
-		*cs->statusp = resp->csr_status = NFS4ERR_SEQ_MISORDERED;
-		mutex_exit(&np->s_lock);
-		nfs4_server_rele(np);
-		return;
+	ret = slrc_slot_alloc(st, args->csa_slotid, args->csa_sequenceid,
+	    &cslot);
+	switch (ret) {
+		case SEQRES_NEWREQ:
+			break;
+		case SEQRES_REPLAY:
+			/* If its replay, send the same result. */
+			if (cslot != NULL) {
+				*cs->statusp = resp->csr_status = NFS4_OK;
+				mutex_exit(&np->s_lock);
+				nfs4_server_rele(np);
+				return ((CB_COMPOUND4res *)&cslot->se_buf);
+			}
+		default:
+			CB_WARN("cb_sequence: Bad Sequence\n");
+			*cs->statusp = resp->csr_status =
+			    NFS4ERR_SEQ_MISORDERED;
+			mutex_exit(&np->s_lock);
+			nfs4_server_rele(np);
+			return (NULL);
 	}
-
-	cslot->cb_seq = args->csa_sequenceid;
+	mutex_enter(&cslot->se_lock);
+	cslot->se_seqid = args->csa_sequenceid;
+	mutex_exit(&cslot->se_lock);
 	/*
 	 * todo: need to set inuse and deal with server having
 	 * multiple callbacks in-flight.
@@ -395,6 +413,7 @@ cb_sequence(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
 	*cs->statusp = resp->csr_status = NFS4_OK;
 	mutex_exit(&np->s_lock);
 	nfs4_server_rele(np);
+	return (NULL);
 }
 
 static void
@@ -899,7 +918,7 @@ cb_notify_deviceid(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop,
 
 static void
 cb_recall(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
-	struct compound_state *cs, struct nfs4_callback_globals *ncg)
+    struct compound_state *cs, struct nfs4_callback_globals *ncg)
 {
 	CB_RECALL4args * args = &argop->nfs_cb_argop4_u.opcbrecall;
 	CB_RECALL4res *resp = &resop->nfs_cb_resop4_u.opcbrecall;
@@ -989,9 +1008,7 @@ cb_recall(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
 	nfs4_server_rele(sp);
 
 	if (found == FALSE) {
-
 		CB_WARN("cb_recall: bad stateid\n");
-
 		*cs->statusp = resp->status = NFS4ERR_BAD_STATEID;
 		return;
 	}
@@ -1063,6 +1080,42 @@ cb_illegal(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
 }
 
 static void
+cb_slrc_epilogue(nfs4_server_t *np, CB_COMPOUND4res *res, slotid4 slot)
+{
+	stok_t *handle;
+	slot_ent_t *slt;
+	nfs4_session_t *ssp;
+	CB_COMPOUND4res *bres;
+
+	ssp = &np->ssx;
+	handle = ssp->cb_slot_table;
+	slt = slrc_slot_get(handle, slot);
+	ASSERT(slt != NULL);
+	bres = (CB_COMPOUND4res*)&slt->se_buf;
+	mutex_enter(&slt->se_lock);
+	switch (slt->se_state) {
+		case SLRC_INPROG_NEWREQ:
+			if (res->status == NFS4_OK) {
+				if (slt->se_buf.array != NULL) {
+					cb_compound_free(bres);
+				}
+				slt->se_status = NFS4_OK;
+				slt->se_buf = *(COMPOUND4res_srv *)res;
+				slt->se_state = SLRC_CACHED_OKAY;
+			}
+			break;
+		case SLRC_INPROG_REPLAY:
+			slt->se_state = SLRC_CACHED_OKAY;
+			slt->se_status = NFS4_OK;
+			break;
+		default:
+			break;
+	}
+	cv_signal(&slt->se_wait);
+	mutex_exit(&slt->se_lock);
+}
+
+static void
 cb_compound(CB_COMPOUND4args *args, CB_COMPOUND4res *resp, struct svc_req *req,
 	struct nfs4_callback_globals *ncg)
 {
@@ -1072,6 +1125,10 @@ cb_compound(CB_COMPOUND4args *args, CB_COMPOUND4res *resp, struct svc_req *req,
 	nfs_cb_resop4 *resop, *new_res;
 	uint_t op, mvers_0;
 	boolean_t	sequenced = FALSE;
+	slotid4 slot;
+	CB_SEQUENCE4args *seq_args;
+	CB_COMPOUND4res *sbuf = NULL;
+	nfs4_server_t *np;
 
 	bzero(&cs, sizeof (cs));
 	cs.statusp = &resp->status;
@@ -1141,9 +1198,19 @@ cb_compound(CB_COMPOUND4args *args, CB_COMPOUND4res *resp, struct svc_req *req,
 				cb_illegal(argop, resop, req, &cs, ncg);
 				break;
 			}
-			cb_sequence(argop, resop, req, &cs, ncg);
-			if (*cs.statusp == NFS4_OK)
+			sbuf = cb_sequence(argop, resop, req, &cs, ncg);
+			if (*cs.statusp == NFS4_OK) {
 				sequenced = TRUE;
+			}
+			if (!mvers_0) {
+				seq_args =
+				    &argop->nfs_cb_argop4_u.opcbsequence;
+				slot = seq_args->csa_slotid;
+			}
+			if ((sbuf != NULL) && !mvers_0) {
+				resp = sbuf;
+				goto epilogue;
+			}
 			break;
 
 		case OP_CB_GETATTR:
@@ -1232,7 +1299,20 @@ cb_compound(CB_COMPOUND4args *args, CB_COMPOUND4res *resp, struct svc_req *req,
 			resp->array = new_res;
 		}
 	}
-
+epilogue:
+	if (!mvers_0) {
+		mutex_enter(&ncg->nfs4_cb_lock);
+		np = ncg->nfs4prog2server[req->rq_prog - NFS4_CALLBACK];
+		mutex_exit(&ncg->nfs4_cb_lock);
+		if (nfs4_server_vlock(np, 0) == FALSE) {
+			CB_WARN("cb_compound: cannot find server\n");
+			*cs.statusp = resp->status = NFS4ERR_BADHANDLE;
+		} else {
+			cb_slrc_epilogue(np, resp, slot);
+			mutex_exit(&np->s_lock);
+			nfs4_server_rele(np);
+		}
+	}
 }
 
 static void
@@ -1329,8 +1409,10 @@ cb_dispatch(struct svc_req *req, SVCXPRT *xprt)
 		svcerr_systemerr(xprt);
 	}
 
-	if (freeproc)
-		(*freeproc)(&res);
+	if (args.minorversion != CB4_MINOR_v1) {
+		if (freeproc)
+			(*freeproc)(&res);
+	}
 
 	if (!SVC_FREEARGS(xprt, xdr_args, (caddr_t)&args)) {
 

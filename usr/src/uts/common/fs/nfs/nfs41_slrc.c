@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -86,249 +86,396 @@
  *		happily oblivious.
  */
 
-/*
- * Create a slot table to use for 'client-side' sessions.
- */
-void *
-sltab_create(uint_t width)
+static int
+sltab_slot_cmp(const void *a, const void *b)
 {
-	stok_t		 *tp;
-	slot_ent_t	**t;
-	uint_t		  i;
+	const slot_ent_t *ra = (slot_ent_t *)a;
+	const slot_ent_t *rb = (slot_ent_t *)b;
 
-	if (width == 0)
-		return (NULL);
+	/*
+	 * Comparision is with slot id.
+	 */
+	if (ra->se_sltno  < rb->se_sltno)
+		return (-1);
+	if (ra->se_sltno > rb->se_sltno)
+		return (+1);
+	return (0);
+}
 
-	tp = (stok_t *)kmem_zalloc(sizeof (stok_t), KM_SLEEP);
-	t = tp->st_sltab = kmem_zalloc(width * sizeof (slot_ent_t *), KM_SLEEP);
-	mutex_init(&tp->st_lock, NULL, MUTEX_DEFAULT, NULL);
-	cv_init(&tp->st_wait, NULL, CV_DEFAULT, NULL);
-	for (i = 0; i < width; i++) {
-		t[i] = (slot_ent_t *)kmem_zalloc(sizeof (slot_ent_t), KM_SLEEP);
-		mutex_init(&t[i]->se_lock, NULL, MUTEX_DEFAULT, NULL);
-		cv_init(&t[i]->se_wait, NULL, CV_DEFAULT, NULL);
-		t[i]->se_seqid = 1;
-		t[i]->se_sltno = i;
-		t[i]->se_state = SLOT_FREE;
+
+void
+sltab_create(stok_t **handle, int max_slots)
+{
+	avl_tree_t *tree = NULL;
+	stok_t *tok;
+
+	tok  = kmem_alloc(sizeof (stok_t), KM_SLEEP);
+	tree = kmem_alloc(sizeof (avl_tree_t), KM_SLEEP);
+	avl_create(tree,
+	    sltab_slot_cmp,
+	    sizeof (slot_ent_t),
+	    offsetof(slot_ent_t, se_node));
+	mutex_init(&tok->st_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&tok->st_wait,  NULL, CV_DEFAULT, NULL);
+	tok->st_sltab = tree;
+	tok->st_currw = max_slots;
+	tok->st_fslots = max_slots;
+	*handle = tok;
+}
+
+void
+sltab_destroy(stok_t *handle)
+{
+	avl_tree_t *replaytree = handle->st_sltab;
+	slot_ent_t *tmp, *next;
+
+	mutex_enter(&handle->st_lock);
+	for (tmp = avl_first(replaytree); tmp != NULL; tmp = next) {
+		next = AVL_NEXT(replaytree, tmp);
+		slot_delete(handle, tmp);
 	}
-	tp->st_fslots = tp->st_currw = width;
-	return ((void *)tp);
+	mutex_exit(&handle->st_lock);
+	avl_destroy(replaytree);
+	kmem_free(replaytree, sizeof (avl_tree_t));
+	cv_destroy(&handle->st_wait);
+	mutex_destroy(&handle->st_lock);
+	kmem_free(handle, sizeof (stok_t));
+	handle = NULL;
 }
 
 /*
- * To grow or shrink the slot table, we won't be destroying the opaque
- * token. We'll merely resize the table accordingly and adjusting the
- * accounting, but new slot_XXX callers should remain oblivious as to
- * the new size of the slot table.
+ * Resize the tree.
+ * If the maxslots are decreased, remove the nodes.
+ * Set the sc_maxslot entry to the new maxslots.
  */
-/*ARGSUSED*/
-uint_t
-sltab_resize(void *stt, uint_t ns)
+int
+sltab_resize(stok_t *handle, int maxslots)
 {
+	slot_ent_t *tmp, *phd;
+	avl_tree_t *replaytree = handle->st_sltab;
+	int more = 0;
+
+	mutex_enter(&handle->st_lock);
+	/* Max slots are reduced.. */
+	if (handle->st_currw > maxslots) {
+		for (tmp = avl_first(replaytree); tmp != NULL;
+		    tmp = phd) {
+			phd = AVL_NEXT(replaytree, tmp);
+			if (tmp->se_sltno > maxslots) {
+				slot_delete(handle, tmp);
+			}
+		}
+	} else {
+		more = maxslots - handle->st_currw;
+		handle->st_fslots += more;
+		handle->st_currw = maxslots;
+	}
+	mutex_exit(&handle->st_lock);
 	return (0);
 }
 
 void
-sltab_query(void *stt, slt_query_t qf, void *res)
+sltab_query(stok_t *handle, slt_query_t qf, void *res)
 {
-	stok_t	*sttp = (stok_t *)stt;
-
-	ASSERT(sttp != NULL);
+	ASSERT(handle != NULL);
 	ASSERT(res != NULL);
 
-	mutex_enter(&sttp->st_lock);
+	mutex_enter(&handle->st_lock);
 	switch (qf) {
 		case SLT_MAXSLOT:
 		{
-			uint_t	*p = (uint_t *)res;
-			*p = (slotid4)sttp->st_currw;
+			uint_t *p = (uint_t *)res;
+			*p = (slotid4)handle->st_currw;
 			break;
 		}
 		default:
 			break;
 	}
-	mutex_exit(&sttp->st_lock);
+	mutex_exit(&handle->st_lock);
 }
 
-/*
- * nuke slot table associated with 'stt' token
- */
-void
-sltab_destroy(void *stt)
+int
+slot_delete(stok_t *handle, slot_ent_t *node)
 {
-	stok_t		 *sttp = (stok_t *)stt;
-	slot_ent_t	**t;
-	uint_t		  i;
+	avl_tree_t *replaytree = handle->st_sltab;
 
-	ASSERT(sttp != NULL);
-	if (sttp == NULL)
-		return;
-
-	for (i = 0, t = sttp->st_sltab; i < sttp->st_currw; i++) {
-		cv_destroy(&t[i]->se_wait);
-		mutex_destroy(&t[i]->se_lock);
-		kmem_free(t[i], sizeof (slot_ent_t));
-	}
-	cv_destroy(&sttp->st_wait);
-	mutex_destroy(&sttp->st_lock);
-	kmem_free(sttp->st_sltab, sttp->st_currw * sizeof (slot_ent_t *));
-	kmem_free(sttp, sizeof (stok_t));
+	ASSERT(MUTEX_HELD(&handle->st_lock));
+	cv_destroy(&node->se_wait);
+	mutex_destroy(&node->se_lock);
+	avl_remove(replaytree, node);
+	kmem_free(node, sizeof (*node));
+	node = NULL;
+	handle->st_fslots -= 1;
+	return (0);
 }
 
-/*
- * NOTE: Callers of slot_alloc() interface are responsible for the
- *	 correct behavior in the SLT_SLEEP case, in which obviously
- *	 this interface blocks.
- *
- * slt_arg_t
- *      sltno			- alloc a 'specific' slot
- *	flags
- *		SA_SLOT_ANY	- 'any' slot will do
- *		SA_SLOT_SPEC	- only slot specified by 'sltno' will do
- * slt_wait_t
- *	SLT_NOSLEEP		- don't wait/block if all slots are used
- *	SLT_SLEEP		- wait/block until [spec/any] slot is avail
- *
- * lock order: st_lock -> se_lock
- */
 slot_ent_t *
-slot_alloc(void *stt, slt_wait_t f, slt_arg_t *argp)
+sltab_get(stok_t *handle, slotid4 slot)
 {
-	stok_t		*sttp = (stok_t *)stt;
-	slot_ent_t	*p;
-	uint_t		 i;
+	slot_ent_t *node = NULL, tmp;
+	avl_index_t where;
+	avl_tree_t *replaytree = handle->st_sltab;
 
-	ASSERT(sttp != NULL);
-	mutex_enter(&sttp->st_lock);
-	if (argp == NULL)
-		goto retry;			/* no arg == SA_SLOT_ANY */
+	tmp.se_sltno = slot;
+	mutex_enter(&handle->st_lock);
+	node = (slot_ent_t *)avl_find(replaytree, &tmp, &where);
+	mutex_exit(&handle->st_lock);
+	if (node != NULL)
+		return (node);
+	return (NULL);
+}
 
-	if (argp->sa_flags & SA_SLOT_SPEC) {		/* fast path */
-		slotid4	slid = argp->sa_sltno;
+/*
+ * Check if an entry is present or not.
+ * If the slot exists, find out if sequences are correct.
+ * If its a new slot reply back wth SEQRES_NEWREQ.
+ * If its NEWREQ/REPLAY, assign res to that node.
+ */
+uint_t
+slrc_slot_alloc(stok_t *handle, slotid4 slot, sequenceid4 seq, slot_ent_t **res)
+{
+	slot_ent_t *phd = NULL;
+	slot_ent_t *tnode;
+	avl_tree_t *replaytree = handle->st_sltab;
+	avl_index_t where;
+	uint_t	ret;
 
-		if (slid < 0 || slid >= sttp->st_currw) {
-			mutex_exit(&sttp->st_lock);
-			return (NULL);
-		}
-		p = sttp->st_sltab[slid];
-		mutex_enter(&p->se_lock);	/* grab slot lock */
-		mutex_exit(&sttp->st_lock);	/* rele table lock */
-
-		if (p->se_state == SLOT_INUSE && f == SLT_NOSLEEP) {
-			/* don't wait for it if it's in use */
-			mutex_exit(&p->se_lock);
-			return (NULL);
-		}
-
-		/*
-		 * NB - if we cv_wait, this thread will block and p->se_lock
-		 * will be freed, obviously. However, if we encapsulate the
-		 * slot's mutex with the table's mutex, we are sure to lock
-		 * out any other threads from releasing their slots (since
-		 * they cannot acquire the table's mutex) and hence, no
-		 * progress would be made.
-		 */
-		while (p->se_state == SLOT_INUSE)
-			cv_wait(&p->se_wait, &p->se_lock);
-		ASSERT(p->se_state == SLOT_FREE);
-		p->se_state = SLOT_INUSE;
-		atomic_add_32(&sttp->st_fslots, -1);	/* see NB above */
-		mutex_exit(&p->se_lock);
-		return (p);
+	/* Check if the node falls within the range. */
+	if (slot < 0 || (slot > handle->st_currw - 1)) {
+		return (SEQRES_BADSESSION);
 	}
-
-retry:	/* SA_SLOT_ANY */
-	for (i = 0; i < sttp->st_currw; i++) {
-		p = sttp->st_sltab[i];
-
-		mutex_enter(&p->se_lock);
-		if (p->se_state == SLOT_FREE) {
-			p->se_state = SLOT_INUSE;
-			sttp->st_fslots -= 1;
-			mutex_exit(&p->se_lock);
-			mutex_exit(&sttp->st_lock);
-			return (p);
+	phd = slot_get(handle, slot);
+	if (phd != NULL) {
+		mutex_enter(&phd->se_lock);
+find_again:
+		if ((phd->se_state & SLRC_INPROG_NEWREQ) ||
+		    (phd->se_state & SLRC_INPROG_REPLAY)) {
+			/*
+			 * Synchronization problem.
+			 * Another process is tyring to update the node.
+			 * Wait till its updated and try again.
+			 */
+			cv_wait(&phd->se_wait, &phd->se_lock);
+			goto find_again;
 		}
-		mutex_exit(&p->se_lock);
+		if (seq == phd->se_seqid) {
+			phd->se_state = SLRC_INPROG_REPLAY;
+			*res = phd;
+			mutex_exit(&phd->se_lock);
+			return (SEQRES_REPLAY);
+		}
+		if (seq == phd->se_seqid + 1) {
+			phd->se_state = SLRC_INPROG_NEWREQ;
+			*res = phd;
+			mutex_exit(&phd->se_lock);
+			return (SEQRES_NEWREQ);
+		}
+		if (seq < phd->se_seqid) {
+			mutex_exit(&phd->se_lock);
+			return (SEQRES_MISORD_REPLAY);
+		}
+		if (seq >= phd->se_seqid + 2) {
+			mutex_exit(&phd->se_lock);
+			return (SEQRES_MISORD_NEWREQ);
+		}
+		mutex_exit(&phd->se_lock);
+		return (SEQRES_BADSESSION);
 	}
+	/* Create a new slot node. */
+	tnode = kmem_zalloc(sizeof (slot_ent_t), KM_SLEEP);
+	tnode->se_seqid = 0;
+	tnode->se_sltno = slot;
+	tnode->se_state = SLRC_INPROG_NEWREQ;
+	tnode->se_status = NFS4ERR_SEQ_MISORDERED;
+	mutex_init(&tnode->se_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&tnode->se_wait,  NULL, CV_DEFAULT, NULL);
+	mutex_enter(&handle->st_lock);
+	phd =  (slot_ent_t *)avl_find(replaytree, tnode, &where);
+	if (phd == NULL) {
+		avl_insert(replaytree, tnode, where);
+		ret = SEQRES_NEWREQ;
+		*res = tnode;
+	} else {
+		mutex_destroy(&tnode->se_lock);
+		cv_destroy(&tnode->se_wait);
+		kmem_free(tnode, sizeof (slot_ent_t));
+		ret = SEQRES_MISORD_NEWREQ;
+	}
+	mutex_exit(&handle->st_lock);
+	return (ret);
+}
 
+
+int
+slot_alloc(stok_t  *handle, slt_wait_t f, slot_ent_t **res)
+{
+	avl_tree_t *replaytree = handle->st_sltab;
+	slot_ent_t *tmp = NULL, *phd, *tnode = NULL;
+	uint_t		i, ret = 0;
+	avl_index_t where;
+
+	ASSERT(handle != NULL);
+	ASSERT(handle->st_sltab->avl_numnodes <= handle->st_currw);
+
+retry:
+	for (i = 0; i < handle->st_currw; i++) {
+		tmp =  slot_get(handle, i);
+		if (tmp == NULL) {
+			tnode = kmem_zalloc(sizeof (slot_ent_t),
+			    KM_SLEEP);
+			mutex_enter(&handle->st_lock);
+			tnode->se_seqid = 1;
+			tnode->se_sltno = i;
+			tnode->se_state = SLOT_INUSE;
+			mutex_init(&tnode->se_lock, NULL, MUTEX_DEFAULT, NULL);
+			cv_init(&tnode->se_wait,  NULL, CV_DEFAULT, NULL);
+			phd =  (slot_ent_t *)avl_find(replaytree,
+			    tnode, &where);
+			if (phd == NULL) {
+				avl_insert(replaytree, tnode, where);
+				handle->st_fslots -= 1;
+				*res = tnode;
+				mutex_exit(&handle->st_lock);
+				return (ret);
+			} else {
+				/*
+				 * Somebody already snuck in a slot
+				 * continue with the search
+				 */
+				cv_destroy(&tnode->se_wait);
+				mutex_destroy(&tnode->se_lock);
+				kmem_free(tnode, sizeof (slot_ent_t));
+				mutex_exit(&handle->st_lock);
+				continue;
+			}
+		} else {
+			mutex_enter(&tmp->se_lock);
+			if (tmp->se_state & SLOT_FREE) {
+				tmp->se_state = SLOT_INUSE;
+				handle->st_fslots -= 1;
+				*res = tmp;
+				mutex_exit(&tmp->se_lock);
+				return (ret);
+			}
+			mutex_exit(&tmp->se_lock);
+		}
+	}
 	if (f == SLT_NOSLEEP) {
-		mutex_exit(&sttp->st_lock);
+		res = NULL;
 		return (NULL);
 	}
 
 	ASSERT(f == SLT_SLEEP);
-	while (sttp->st_fslots < 1)
-		cv_wait(&sttp->st_wait, &sttp->st_lock);
+
+	/*
+	 * wait for a free slot
+	 */
+	mutex_enter(&handle->st_lock);
+	while (handle->st_fslots < 1)
+		cv_wait(&handle->st_wait, &handle->st_lock);
+	mutex_exit(&handle->st_lock);
+
+	/*
+	 * try for a free slot again
+	 */
 	goto retry;
-	/* NOTREACHED */
+
 }
 
-/*
- * 1) change slot's state, update accounting
- * 2) cv_signal any 'specific' slot waiters
- * 3) cv_signal any 'generic' slot waiters
- * 4) release slot's and table's lock
- */
 void
-slot_free(void *stt, slot_ent_t *p)
+slot_incr_seq(slot_ent_t *p, int incr)
 {
-	stok_t	*sttp = (stok_t *)stt;
+	atomic_add_32(&p->se_seqid, incr);
+}
 
-	ASSERT(sttp != NULL);
-	mutex_enter(&sttp->st_lock);
+void
+slot_free(stok_t *handle, slot_ent_t *p)
+{
+	ASSERT(handle != NULL);
+
+	mutex_enter(&handle->st_lock);
 	mutex_enter(&p->se_lock);
 
 	p->se_state = SLOT_FREE;
-	sttp->st_fslots += 1;
-	ASSERT(sttp->st_fslots <= sttp->st_currw);
-
+	handle->st_fslots += 1;
+	ASSERT(handle->st_fslots <= handle->st_currw);
 	cv_signal(&p->se_wait);
 	mutex_exit(&p->se_lock);
-	cv_signal(&sttp->st_wait);
-	mutex_exit(&sttp->st_lock);
+	cv_signal(&handle->st_wait);
+	mutex_exit(&handle->st_lock);
 }
 
+
 nfsstat4
-slot_cb_status(void *stt)
+slot_cb_status(stok_t *handle)
 {
-	stok_t		*sttp = (stok_t *)stt;
-	nfsstat4	 status = NFS4_OK;
-	slot_ent_t	*p;
-	uint_t		 i;
+	avl_tree_t	*replaytree = handle->st_sltab;
+	nfsstat4	status = NFS4_OK;
+	slot_ent_t *tmp = NULL, *next;
 
 	/*
 	 * If there is even one CB call outstanding, error off;
 	 * Slot is still in use, session cannot be destroyed.
 	 */
-	ASSERT(sttp != NULL);
-	mutex_enter(&sttp->st_lock);
-	for (i = 0; i < sttp->st_currw; i++) {
+	ASSERT(handle != NULL);
+	mutex_enter(&handle->st_lock);
 
-		p = sttp->st_sltab[i];
-		mutex_enter(&p->se_lock);
-		if (p->se_state == SLOT_INUSE) {
+	for (tmp = avl_first(replaytree); tmp != NULL; tmp = next) {
+		mutex_enter(&tmp->se_lock);
+		if (tmp->se_state & SLOT_INUSE) {
 			status = NFS4ERR_BACK_CHAN_BUSY;
-			mutex_exit(&p->se_lock);
+			mutex_exit(&tmp->se_lock);
 			break;
 		} else {
-			/* slot not in use */
-			if (p->se_clnt != NULL) {
-				CLIENT  *ch = p->se_clnt;
-				AUTH    *ap = ch->cl_auth;
-
-				if (ap)
-					AUTH_DESTROY(ap);
-				CLNT_DESTROY(ch);
-				p->se_clnt = NULL;
-			}
-			p->se_state = SLOT_FREE;
+			tmp->se_state = SLOT_FREE;
 		}
-		mutex_exit(&p->se_lock);
+		mutex_exit(&tmp->se_lock);
 	}
-	mutex_exit(&sttp->st_lock);
+	mutex_exit(&handle->st_lock);
 	return (status);
 }
+
+void
+slot_set_state(slot_ent_t *slot, int state)
+{
+	mutex_enter(&slot->se_lock);	/* grab slot lock */
+	slot->se_state |= state;
+	mutex_exit(&slot->se_lock);
+}
+
+int
+slot_mark(stok_t *handle, slotid4 slid, sequenceid4 seqid)
+{
+	slot_ent_t *slot;
+
+	ASSERT(handle != NULL);
+	mutex_enter(&handle->st_lock);
+
+
+	if (slid < 0 || slid >= handle->st_currw) {
+		mutex_exit(&handle->st_lock);
+		return (NULL);
+	}
+
+	mutex_exit(&handle->st_lock);
+	slot = slot_get(handle, slid);
+	mutex_enter(&slot->se_lock);	/* grab slot lock */
+
+	/*
+	 * no race. slot has already been used.
+	 */
+	if ((slot->se_state & SLOT_FREE) ||
+	    (slot->se_state & SLOT_ERROR) ||
+	    (slot->se_seqid > seqid)) {
+		mutex_exit(&slot->se_lock);
+		return (0);
+	}
+
+	slot->se_state |= SLOT_HOLD;
+	mutex_exit(&slot->se_lock);
+	return (1);
+}
+
 
 /*
  * No particular place to put this, so might as well be here
@@ -357,4 +504,65 @@ log2(uint32_t x)		/* k = log2(x) */
 		if (x & 1 || k == BITS_PER_WORD)
 			break;
 	return (k);
+}
+
+void
+slrc_table_create(stok_t **handle, int max_slots)
+{
+	(void) sltab_create(handle, max_slots);
+}
+
+void
+slrc_table_destroy(stok_t *handle)
+{
+	(void) sltab_destroy(handle);
+}
+
+void
+slrc_table_resize(stok_t *handle, int max_slots)
+{
+	(void) sltab_resize(handle, max_slots);
+}
+
+void
+slrc_table_query(stok_t *handle, slt_query_t q, void *res)
+{
+	(void) sltab_query(handle, q, res);
+}
+
+slot_ent_t *
+slrc_slot_get(stok_t *handle, slotid4 slot)
+{
+	return (sltab_get(handle, slot));
+}
+
+
+void
+slot_table_create(stok_t **handle, int max_slots)
+{
+	(void) sltab_create(handle, max_slots);
+}
+
+void
+slot_table_destroy(stok_t *handle)
+{
+	(void) sltab_destroy(handle);
+}
+
+void
+slot_table_resize(stok_t *handle, int max_slots)
+{
+	(void) sltab_resize(handle, max_slots);
+}
+
+void
+slot_table_query(stok_t *handle, slt_query_t q, void *res)
+{
+	(void) sltab_query(handle, q, res);
+}
+
+slot_ent_t *
+slot_get(stok_t *handle, slotid4 slot)
+{
+	return (sltab_get(handle, slot));
 }

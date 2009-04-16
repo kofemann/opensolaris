@@ -402,25 +402,36 @@ extern void	rfs41_seq4_rele(void *, uint32_t);
 /*
  * NFSv4.1: slot support (nfs41_slrc)
  */
-typedef enum {
-	SLOT_ERROR		= -1,	/* slot error */
-	SLOT_FREE		= 0,	/* free slot */
-	SLOT_INUSE		= 1	/* slot in use */
-} slot_state_t;
 
+/* se_state values */
+#define	SLRC_SERVER_ERROR	0x00000001
+#define	SLRC_CACHED_OKAY	0x00000002
+#define	SLRC_CACHED_PURGING	0x00000004
+#define	SLRC_INPROG_NEWREQ	0x00000008
+#define	SLRC_INPROG_REPLAY	0x00000010
+#define	SLOT_FREE		0x00000020
+#define	SLOT_ERROR		0x00000040
+#define	SLOT_INUSE		0x00000080
+#define	SLOT_HOLD		0x00000100
+
+/* Slot entry structure */
 typedef struct slot_ent {
+	avl_node_t	  se_node;
+	slotid4		  se_sltno;
+	uint32_t	  se_state;
+	nfsstat4	  se_status;
+	sequenceid4	  se_seqid;
+	COMPOUND4res_srv  se_buf; /* Buf for slot and replays */
+	void		  *se_p;   /* Call-back race detection info buf */
 	kmutex_t	  se_lock;
 	kcondvar_t	  se_wait;
-	slotid4		  se_sltno;
-	sequenceid4	  se_seqid;
-	slot_state_t	  se_state;
-	CLIENT		 *se_clnt;	/* XXX - for now; generalize ! */
 } slot_ent_t;
 
+/* Slot table token */
 typedef struct slot_tab_token {
 	uint_t		  st_currw;	/* current width of slot table */
 	uint_t		  st_fslots;	/* current # of available slots */
-	slot_ent_t	**st_sltab;	/* array of 'currw' pointers */
+	avl_tree_t	  *st_sltab;	/* tree of 'currw' pointers */
 	kmutex_t	  st_lock;	/* cache lock; resize or destroy */
 	kcondvar_t	  st_wait;
 } stok_t;
@@ -445,21 +456,14 @@ typedef enum {
 /*
  * NFSv4.1 Sessions
  */
-typedef enum {
-	SLRC_SERVER_ERROR	= -1,	/* Slot Replay Cache Error */
-	SLRC_CACHED_OKAY	= 0,	/* Valid cached reply in the slrc */
-	SLRC_CACHED_PURGING	= 1,	/* Cached results are being evicted */
-	SLRC_INPROG_NEWREQ	= 2,	/* New Request handling in prog */
-	SLRC_INPROG_REPLAY	= 3 	/* Retransmission handling in prog */
-} rfs41_slrc_state_t;
 
-typedef struct slot41 {
-	rfs41_slrc_state_t	 state;
+typedef struct rfs41_csr_slot {
+	uint_t			state;
 	nfsstat4		 status;
 	sequenceid4		 seqid;
 	COMPOUND4res_srv	 res;
 	void			*p;
-} slot41_t;
+} rfs41_csr_slot_t;
 
 /*
  * 4.1 only: delegation recallable state info.
@@ -474,7 +478,7 @@ typedef struct {
 
 typedef struct rfs41_csr {	/* contrived create_session result */
 	sequenceid4		xi_sid;		/* seqid response to EXCHG_ID */
-	slot41_t		cs_slot;	/* slot cache of size 1 */
+	rfs41_csr_slot_t	cs_slot;	/* slot cache of size 1 */
 	CREATE_SESSION4resok	cs_res;		/* cached results if NFS4_OK */
 } rfs41_csr_t;
 
@@ -529,12 +533,6 @@ typedef struct {
 #define	SNTOBC(s)	((sess_channel_t *)(((mds_session_t *)(s))->sn_back))
 
 #define	MAXSLOTS	1024			/* XXX - For now */
-typedef struct rfs41_slrc {
-	slotid4			  sc_slotid;	/* slot id target */
-	slotid4			  sc_maxslot;	/* curr length of slot cache */
-	/* slot41_t		**sc_slot; */	/* ptr to array of slot41_t's */
-	slot41_t		  sc_slot[MAXSLOTS];	/* XXX - For now */
-} rfs41_slrc_t;
 
 typedef struct {
 	state_protect_how4	 sp_type;
@@ -546,11 +544,11 @@ typedef struct {
 } rfs41_digest_t;
 
 typedef enum {
-	SEQRES_INTERROR		= -1,	/* Internal Error */
-	SEQRES_NEWREQ		= 0,	/* New Request */
-	SEQRES_REPLAY		= 1,	/* Replay/Retransmission */
-	SEQRES_MISORD_NEWREQ	= 2,	/* Misordered New Request */
-	SEQRES_MISORD_REPLAY	= 3,	/* Misordered Replay/Retransmission */
+	SEQRES_INTERROR		= -1,   /* Internal Error */
+	SEQRES_NEWREQ		= 0,    /* New Request */
+	SEQRES_REPLAY		= 1,    /* Replay/Retransmission */
+	SEQRES_MISORD_NEWREQ	= 2,    /* Misordered New Request */
+	SEQRES_MISORD_REPLAY	= 3,    /* Misordered Replay/Retransmission */
 	SEQRES_BADSESSION	= 4	/* Bad sessionid provided */
 } slrc_stat_t;
 
@@ -978,25 +976,27 @@ typedef struct rfs4_file {
 /*
  * NFSv4.1 Sessions (cont'd)
  *
- *   rfs41_session_t          rfs4_client_t
- *   +------------+           +--------------------+
- *   | sn_sessid  |           | clientid           |
- *   | sn_clnt * -|---------> |    :               |
- *   | sn_fore    |           +--------------------+
- *   | sn_back    |
- *   | sn_slrc * -|---------> +----------------------------+
- *   |    .       |           | sc_slotid                  |
- *   |    :       |           | sc_maxslot                 |
- *   +------------+           | sc_slot[ ]                 |
- *                            |  +-----------------------+ |
- *                            |  | status, seqid, resp *-|------> << Results >>
- *                            |  +-----------------------+ |
- *                            |  | status, seqid, resp * | |
- *                            |  +-----------------------+ |
- *                            |  | status, seqid, resp * | |
- *                            |  +-----------------------+ |
- *                            +----------------------------+
- *                            rfs41_slrc_t
+ *   mds_session_t             rfs4_client_t
+ *   +-------------+           +--------------------+
+ *   | sn_sessid   |           | clientid           |
+ *   | sn_clnt *  -|---------->|    :               |
+ *   | sn_fore     |           +--------------------+
+ *   | sn_back     |
+ *   | sn_replay* -|---------> +--------------------------------+
+ *   |    .        |           | st_currw                       |
+ *   |    :        |           | st_fslots                      |
+ *   +-------------+           | st_sltab  (slot_ent_t)         |
+ *                             |  +----------------------------+|
+ *                             |  | status, slot, seqid, resp *||------><Res>
+ *                             |  +----------------------------+|
+ *                             |  | status, slot, seqid, resp *||
+ *                             |  +----------------------------+|
+ *                             |  | status, slot, seqid, resp *||
+ *                             |  +----------------------------+|
+ *			       | .				|
+ *			       | : 				|
+ *                             +--------------------------------+
+ *                             stok_t
  */
 typedef struct {
 	nfsstat4		 cs_error;
@@ -1016,7 +1016,7 @@ typedef struct mds_session {
 	rfs4_client_t		*sn_clnt;	/* back ptr to client state */
 	sess_channel_t		*sn_fore;	/* fore chan for this session */
 	sess_channel_t		*sn_back;	/* back chan for this session */
-	rfs41_slrc_t		*sn_slrc;	/* sessions slot replay cache */
+	stok_t			*sn_replay;	/* slot replay cache */
 	rfs41_digest_t		 sn_digest;	/* digest; for use in SSV op */
 	time_t			 sn_laccess;	/* struct was last accessed */
 	int			 sn_csflags;	/* create_session only flags */
@@ -1731,13 +1731,15 @@ void rfs41_srvrinit(void);
 void rfs41_dispatch_init(void);
 
 /* NFSv4.1: slot support */
-extern void		*sltab_create(uint_t);
-extern uint_t		 sltab_resize(void *, uint_t);
-extern void		 sltab_query(void *, slt_query_t, void *);
-extern void		 sltab_destroy(void *);
-extern slot_ent_t	*slot_alloc(void *, slt_wait_t, slt_arg_t *);
-extern void		 slot_free(void *, slot_ent_t *);
-extern nfsstat4		 slot_cb_status(void *);
+extern void		 sltab_create(stok_t **, int);
+extern int		 sltab_resize(stok_t *, int);
+extern void		 sltab_query(stok_t *, slt_query_t, void *);
+extern void		 sltab_destroy(stok_t *);
+extern int		 slot_alloc(stok_t *, slt_wait_t, slot_ent_t **);
+extern void		 slot_free(stok_t *, slot_ent_t *);
+extern int		 slot_mark(stok_t *, slotid4, sequenceid4);
+extern void		 slot_set_state(slot_ent_t *, int);
+extern nfsstat4		 slot_cb_status(stok_t *);
 extern slotid4		 svc_slot_maxslot(mds_session_t *);
 extern slot_ent_t	*svc_slot_alloc(mds_session_t *);
 extern void		 svc_slot_free(mds_session_t *, slot_ent_t *);
@@ -1789,6 +1791,24 @@ extern char	*nfs41_strerror(nfsstat4);
 extern void	 mds_clean_up_sessions(rfs4_client_t *);
 extern void	 mds_clean_up_grants(rfs4_client_t *);
 
+/*
+ * NFS4.1 Slot replay cache.
+ */
+void	slrc_table_create(stok_t **, int);
+void	slot_table_create(stok_t **, int);
+uint_t	slrc_slot_alloc(stok_t *, slotid4, sequenceid4, slot_ent_t **);
+void	slot_incr_seq(slot_ent_t *, int);
+void	slrc_table_destroy(stok_t *);
+void	slot_table_destroy(stok_t *);
+void	slrc_table_query(stok_t *, slt_query_t, void *);
+void	slot_table_query(stok_t *, slt_query_t, void *);
+slot_ent_t	*slot_get(stok_t *, slotid4);
+slot_ent_t	*slrc_slot_get(stok_t *, slotid4);
+
+/*
+ * Internal helper routines.
+ */
+int slot_delete(stok_t *handle, slot_ent_t *node);
 #endif
 #ifdef	__cplusplus
 }

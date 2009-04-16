@@ -1300,21 +1300,6 @@ typedef struct mntinfo4 {
  */
 struct nfs4_callback_globals;
 
-typedef struct nfs41_cb_slot {
-	sequenceid4		cb_seq;
-	int			cb_slot_id;
-	int			cb_inuse;
-	kmutex_t		cb_lock;
-	void			*cb_response;
-} nfs41_cb_slot_t;
-
-typedef struct nfs4_slot {
-	sequenceid4		slot_seqid;
-	int			slot_id;
-	int			slot_inuse;
-	int			slot_bad;
-} nfs4_slot_t;
-
 /*
  * The nfs4_fsidlt_t will be the structure inserted as a node onto
  * the nfs4_server_t's fsidlt (fsid layout tree).  There will be one
@@ -1338,19 +1323,14 @@ typedef struct nfs4_fsidlt
 	avl_tree_t	lt_rlayout_tree; /* rnode layout tree by fh */
 } nfs4_fsidlt_t;
 
+/*
+ * Max slots and available slots can be accessed by stok_t->st_currw
+ * and stok_t->st_fslots.
+ */
 typedef struct nfs4_session {
 	sessionid4		sessionid;
-	sequenceid4		sequenceid;
-	nfs4_slot_t		**slot_table;
-	int			next_slot;
-	int			slots_available;
-	int			maxslots;	/* maxslots size from server */
-	int			slot_table_size; /* Total slots in table */
-	kmutex_t		slot_lock;
-	kcondvar_t		slot_wait;	/* Wait for available slot */
-	nfs_rwlock_t		slot_table_rwlock;
-	nfs41_cb_slot_t		**cb_slot_table;
-	int			cb_slot_table_size;
+	stok_t			*slot_table; /* Fore channel slot table. */
+	stok_t			*cb_slot_table; /* Back Channel slot table */
 	int			bi_rpc;
 	channel_attrs4		fore_chan_attr;
 	channel_attrs4		back_chan_attr;
@@ -2244,9 +2224,9 @@ extern char	*nfs4_op_to_str(nfs_opnum4);
 extern void	nfs4exchange_id_otw(mntinfo4_t *, servinfo4_t *, cred_t *,
 			nfs4_server_t *, nfs4_error_t *, int *);
 extern void	nfs4sequence_setup(nfs4_session_t *, COMPOUND4args_clnt *,
-			nfs4_slot_t **);
+			slot_ent_t **);
 extern void	nfs4sequence_fin(nfs4_session_t *, COMPOUND4res_clnt *,
-			nfs4_slot_t *, nfs4_error_t *);
+			slot_ent_t *, nfs4_error_t *);
 extern void	nfs4session_init(void);
 extern void	nfs4_pnfs_init_n4s(struct nfs4_server *);
 

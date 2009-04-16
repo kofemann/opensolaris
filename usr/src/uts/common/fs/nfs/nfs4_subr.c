@@ -1653,7 +1653,7 @@ void
 rfs4call(nfs4_call_t *cp, nfs4_error_t *copy_ep)
 {
 	int i, error, doseq;
-	nfs4_slot_t *slot;
+	slot_ent_t *slot;
 	COMPOUND4node_clnt *node;
 	SEQUENCE4res *seqres;
 	nfs4_server_t *np;
@@ -3370,14 +3370,11 @@ rnode4info(rnode4_t *rp)
 }
 #endif
 
-int nfs4_sessions_debug;
-
 void
 nfs4sequence_setup(nfs4_session_t *np, COMPOUND4args_clnt *rfsargp,
-    nfs4_slot_t **slotpp)
+    slot_ent_t **slotpp)
 {
-	int			slot_id = 0;
-	nfs4_slot_t		*slot;
+	slot_ent_t		*slot = NULL;
 	nfs_argop4 *argp;
 	COMPOUND4node_clnt *seq_node;
 
@@ -3393,52 +3390,26 @@ nfs4sequence_setup(nfs4_session_t *np, COMPOUND4args_clnt *rfsargp,
 	/*
 	 * Find a slot to use.
 	 */
-	(void) nfs_rw_enter_sig(&np->slot_table_rwlock, RW_READER, 0);
-	mutex_enter(&np->slot_lock);
-	slot_id = np->next_slot;
-	while ((np->slot_table[slot_id]->slot_inuse != 0) ||
-	    (np->slot_table[slot_id]->slot_bad != 0)) {
-		/*
-		 * Can drop the rwlock here so we don't hold it over
-		 * a possible cv_wait.
-		 */
-		nfs_rw_exit(&np->slot_table_rwlock);
+	(void) slot_alloc(np->slot_table, SLT_SLEEP, &slot);
 
-		/*
-		 * This slot is still in use.
-		 * Check next slot if there are still some available.
-		 */
-
-		while (np->slots_available == 0) {
-			if (nfs4_sessions_debug)
-				cmn_err(CE_WARN, "Waiting for Available Slot");
-			cv_wait(&np->slot_wait, &np->slot_lock);
-		}
-		slot_id++;
-		if (slot_id == np->maxslots)
-			slot_id = 0;
-		(void) nfs_rw_enter_sig(&np->slot_table_rwlock, RW_READER, 0);
-	}
-	*slotpp = slot = np->slot_table[slot_id];
-	slot->slot_inuse = 1;
-	np->slots_available--;
-	np->next_slot = slot_id + 1 == np->maxslots ? 0 : slot_id + 1;
-
+	ASSERT(slot != NULL);
 	/*
 	 * Update SEQUENCE args
 	 */
-	argp->nfs_argop4_u.opsequence.sa_sequenceid = slot->slot_seqid;
-	argp->nfs_argop4_u.opsequence.sa_slotid = slot->slot_id;
+	mutex_enter(&slot->se_lock);
+	argp->nfs_argop4_u.opsequence.sa_sequenceid = slot->se_seqid;
+	argp->nfs_argop4_u.opsequence.sa_slotid = slot->se_sltno;
 	argp->nfs_argop4_u.opsequence.sa_highest_slotid  =
-	    np->maxslots - np->slots_available;
+	    np->slot_table->st_fslots;
 	/* XXX - rick - need sr_target_highest_slotid */
-	mutex_exit(&np->slot_lock);
-	nfs_rw_exit(&np->slot_table_rwlock);
+	mutex_exit(&slot->se_lock);
+
+	*slotpp = slot;
 }
 
 void
 nfs4sequence_fin(nfs4_session_t *np, COMPOUND4res_clnt *rfsresp,
-    nfs4_slot_t *slot, nfs4_error_t *ep)
+    slot_ent_t *slot, nfs4_error_t *ep)
 {
 	SEQUENCE4resok		*seqres;
 	nfs_resop4 *resp;
@@ -3449,35 +3420,22 @@ nfs4sequence_fin(nfs4_session_t *np, COMPOUND4res_clnt *rfsresp,
 	ASSERT(seq_node->arg.argop == OP_SEQUENCE);
 	resp = &seq_node->res;
 
-	mutex_enter(&np->slot_lock);
-
-	ASSERT(slot->slot_inuse);
-	slot->slot_inuse = 0;
-
 	/* if call started but not completed, mark slot as bad */
 	if ((ep->error != 0) &&
 	    ((ep->rpc_status == RPC_TIMEDOUT) ||
 	    (ep->rpc_status == RPC_INTR))) {
 		cmn_err(CE_WARN, "SEQUENCE failed %d, bad slot %d:%d",
-		    ep->rpc_status, slot->slot_id, slot->slot_seqid);
-		slot->slot_bad = 1;
+		    ep->rpc_status, slot->se_sltno, slot->se_seqid);
+		slot_set_state(slot, SLOT_ERROR);
 	} else {
-		if (slot->slot_id < np->next_slot)
-			np->next_slot = slot->slot_id;
 
 		/* Update slot seqid on successful op_sequence */
 		if (ep->error == 0 && (rfsresp->decode_len > 0 &&
 		    resp->nfs_resop4_u.opsequence.sr_status == NFS4_OK))
-			slot->slot_seqid++;
+			slot_incr_seq(slot, 1);
 
-		if (np->slots_available++ == 0) {
-			if (nfs4_sessions_debug)
-				cmn_err(CE_WARN, "Slots Available");
-			cv_broadcast(&np->slot_wait);
-		}
+		slot_free(np->slot_table, slot);
 	}
-
-	mutex_exit(&np->slot_lock);
 
 	/* SEQUENCE Op Successful? */
 	if (ep->error != 0 || rfsresp->status != NFS4_OK ||

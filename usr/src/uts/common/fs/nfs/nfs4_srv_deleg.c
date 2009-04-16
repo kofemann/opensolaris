@@ -963,7 +963,7 @@ svc_slot_maxslot(mds_session_t *sp)
 		cmn_err(CE_PANIC, "svc_slot_maxslot: BC Specific Data Not Set");
 
 	rw_enter(&bsdp->bsd_rwlock, RW_READER);
-	sltab_query(bsdp->bsd_stok, SLT_MAXSLOT, &ms);
+	slot_table_query(bsdp->bsd_stok, SLT_MAXSLOT, &ms);
 	rw_exit(&bsdp->bsd_rwlock);
 
 	rw_exit(&bcp->cn_lock);
@@ -971,7 +971,7 @@ svc_slot_maxslot(mds_session_t *sp)
 }
 
 /*
- * Server-side slot allocations from BC's sltab
+ * Server-side slot allocations from BC's slot table.
  */
 slot_ent_t *
 svc_slot_alloc(mds_session_t *sp)
@@ -989,7 +989,7 @@ svc_slot_alloc(mds_session_t *sp)
 		cmn_err(CE_PANIC, "svc_slot_alloc: BC Specific Data Not Set");
 
 	rw_enter(&bsdp->bsd_rwlock, RW_READER);
-	p = slot_alloc(bsdp->bsd_stok, SLT_SLEEP, NULL);
+	(void) slot_alloc(bsdp->bsd_stok, SLT_SLEEP, &p);
 	rw_exit(&bsdp->bsd_rwlock);
 
 	rw_exit(&bcp->cn_lock);
@@ -997,7 +997,7 @@ svc_slot_alloc(mds_session_t *sp)
 }
 
 /*
- * Server-side slot allocations from BC's sltab
+ * Server-side slot allocations from BC's slot table.
  */
 void
 svc_slot_free(mds_session_t *sp, slot_ent_t *p)
@@ -1032,8 +1032,9 @@ svc_slot_cb_seqid(CB_COMPOUND4res *resp, slot_ent_t *p)
 
 	ASSERT(resp->array->resop == OP_CB_SEQUENCE);
 	rp = &resp->array->nfs_cb_resop4_u.opcbsequence;
-	if (rp->csr_status == NFS4_OK)
-		atomic_add_32(&p->se_seqid, 1);
+	if (rp->csr_status == NFS4_OK) {
+		slot_incr_seq(p, 1);
+	}
 }
 
 /*
@@ -2344,7 +2345,7 @@ rfs4_return_deleg(rfs4_deleg_state_t *dsp, bool_t revoked)
 	if (instp->inst_flags & NFS_INST_v41) {
 		mds_session_t	*sp;
 		slotid4		 slot;
-		slot41_t	*slp;
+		slot_ent_t	*slp;
 		extern void rfs41_rs_erase(void *);
 
 		if (dsp->rs.refcnt > 0) {
@@ -2359,10 +2360,12 @@ rfs4_return_deleg(rfs4_deleg_state_t *dsp, bool_t revoked)
 			sp = mds_findsession_by_id(instp, dsp->rs.sessid);
 			if (sp != NULL) {
 				rfs4_dbe_lock(sp->dbe);
-				slp = &sp->sn_slrc->sc_slot[slot];
-				if (slp->p == dsp) {
+				ASSERT(sp->sn_replay != NULL);
+				slp = slrc_slot_get(sp->sn_replay, slot);
+				ASSERT(slp->se_p != NULL);
+				if (slp->se_p == dsp) {
 					rfs41_rs_erase(dsp);
-					slp->p = NULL;
+					slp->se_p = NULL;
 				}
 				rfs4_dbe_unlock(sp->dbe);
 				rfs41_session_rele(sp);
