@@ -120,7 +120,8 @@ nnode_vn_io_prep(void *vdata, nnode_io_flags_t *flags, cred_t *cr,
 	vnode_t *vp = data->nvd_vp;
 	nbl_op_t op;
 	vattr_t *vap;
-	int rc = 0;
+	int rc;
+	int lockstatus;
 	int acc, writelock, labelcheck;
 
 	*flags &= ~NNODE_IO_FLAG_IN_CRIT;
@@ -190,12 +191,19 @@ nnode_vn_io_prep(void *vdata, nnode_io_flags_t *flags, cred_t *cr,
 	if (off > vap->va_size)
 		*flags |= NNODE_IO_FLAG_PAST_EOF;
 
-	rc = VOP_RWLOCK(vp, writelock, ct);
-	if (rc == V_WRITELOCK_TRUE)
-		*flags |= NNODE_IO_FLAG_RWLOCK;
-	else if ((rc == EAGAIN) && (ct->cc_flags & CC_WOULDBLOCK))
+	/*
+	 * XXX: Need to investigate and ensure that the pNFS gate code is aware
+	 * of the proper  usage rules while calling VOP_RWLOCK if we intend to
+	 * support UFS file systems with forcedirectio on the server.
+	 */
+
+	lockstatus = VOP_RWLOCK(vp, writelock, ct);
+	if ((lockstatus == EAGAIN) && (ct->cc_flags & CC_WOULDBLOCK)) {
 		rc = NNODE_ERROR_AGAIN;
-	rc = 0;
+	} else {
+		*flags |= NNODE_IO_FLAG_RWLOCK;
+		rc = 0;
+	}
 
 out:
 	if (rc != 0) {
