@@ -552,6 +552,20 @@ typedef enum {
 	SEQRES_BADSESSION	= 4	/* Bad sessionid provided */
 } slrc_stat_t;
 
+/*
+ * trunk info entry
+ */
+typedef struct rfs41_tie {
+	list_node_t	 t_link;
+	t_scalar_t	 t_xtype;	/* T_COTS_ORD or T_RDMA */
+	sa_family_t	 t_famly;	/* AF_INET or AF_INET6 */
+	struct netbuf	*t_netbf;	/* our copy of netbuf */
+	union {				/* shortcut to ip addr */
+		struct in_addr  ip4;
+		struct in6_addr ip6;
+	}		 t_ipaddr_u;
+} rfs41_tie_t;
+
 #include <nfs/nfs_serv_inst.h>
 
 extern void rfs4_hold_deleg_policy(nfs_server_instance_t *);
@@ -751,6 +765,7 @@ typedef struct rfs4_client {
 	int			bulk_recall;
 	int			clid_scope;
 	bit_attr_t		seq4[BITS_PER_WORD];
+	list_t			trunkinfo;
 } rfs4_client_t;
 
 /*
@@ -1790,6 +1805,8 @@ extern void	 rfs4freeargres(CB_COMPOUND4args *, CB_COMPOUND4res *);
 extern char	*nfs41_strerror(nfsstat4);
 extern void	 mds_clean_up_sessions(rfs4_client_t *);
 extern void	 mds_clean_up_grants(rfs4_client_t *);
+extern void	 mds_clean_up_trunkinfo(rfs4_client_t *);
+extern char	*tohex(const void *, int);
 
 /*
  * NFS4.1 Slot replay cache.

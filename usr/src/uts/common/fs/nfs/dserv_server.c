@@ -321,25 +321,6 @@ dserv_nnode_compare(const void *va, const void *vb)
 	return (0);
 }
 
-static char *
-dserv_tohex(const void *bytes, int len)
-{
-	static char *hexvals = "0123456789ABCDEF";
-	char *rc;
-	const unsigned char *c = bytes;
-	int i;
-
-	rc = kmem_alloc(len * 2 + 1, KM_SLEEP);
-	rc[len * 2] = '\0';
-
-	for (i = 0; i < len; i++) {
-		rc[2 * i] = hexvals[c[i] >> 4];
-		rc[2 * i + 1] = hexvals[c[i] & 0xf];
-	}
-
-	return (rc);
-}
-
 /*
  * Frees a data server file handle
  */
@@ -752,7 +733,7 @@ dserv_nnode_data_getobjset(dserv_nnode_data_t *dnd, int create)
 	 * pNFS dataset gets renamed.  If we continue to store the dataset
 	 * name we will have to handle the case where a dataset gets renamed.
 	 */
-	mdsfs = dserv_tohex(dataset_id.val, dataset_id.len);
+	mdsfs = tohex(dataset_id.val, dataset_id.len);
 	(void) snprintf(mdsfs_objset_name, MAXPATHLEN, "%s%s%s",
 	    root_objset->oro_objsetname, "/", mdsfs);
 
@@ -1480,7 +1461,7 @@ dserv_nnode_remove_obj(void *vdnd)
 	dmu_tx_t	*tx;
 	int		error;
 
-	hex_fid = dserv_tohex(dnd->dnd_fid->val, dnd->dnd_fid->len);
+	hex_fid = tohex(dnd->dnd_fid->val, dnd->dnd_fid->len);
 
 	tx = dmu_tx_create(dnd->dnd_objset);
 	dmu_tx_hold_zap(tx, DMU_PNFS_FID_TO_OBJID_OBJECT, FALSE, NULL);
@@ -1948,7 +1929,7 @@ dserv_nnode_data_getobject(dserv_nnode_data_t *dnd, int create)
 
 	ASSERT(dnd->dnd_flags & DSERV_NNODE_FLAG_OBJSET);
 
-	hexfid = dserv_tohex(dnd->dnd_fid->val, dnd->dnd_fid->len);
+	hexfid = tohex(dnd->dnd_fid->val, dnd->dnd_fid->len);
 	if (create)
 		rc = get_create_object_state(dnd, hexfid);
 	else

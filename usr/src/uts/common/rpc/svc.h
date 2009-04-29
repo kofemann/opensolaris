@@ -546,10 +546,12 @@ struct __svcxprt {
  */
 #define	svc_getrpccaller(x) (&(x)->xp_rtaddr)
 #ifdef _KERNEL
-#define	svc_getendpoint(x) (&(x)->xp_lcladdr.buf)
-#define	svc_getcaller(x) (&(x)->xp_rtaddr.buf)
-#define	svc_getaddrmask(x) (&(x)->xp_master->xp_addrmask)
-#define	svc_getnetid(x) ((x)->xp_master->xp_netid)
+#define	svc_getlocaladdr(x)	((struct netbuf *)(&(x)->xp_lcladdr))
+#define	svc_getendpoint(x)	((x)->xp_lcladdr.buf)
+#define	svc_getcaller(x)	(&(x)->xp_rtaddr.buf)
+#define	svc_getaddrmask(x)	(&(x)->xp_master->xp_addrmask)
+#define	svc_getnetid(x)		((x)->xp_master->xp_netid)
+#define	svc_gettype(x)		((x)->xp_type)
 #endif	/* _KERNEL */
 
 /*

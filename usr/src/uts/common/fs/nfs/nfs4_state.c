@@ -997,6 +997,7 @@ rfs4_client_destroy(rfs4_entry_t u_entry)
 	if (instp->inst_flags & NFS_INST_v41) {
 		mds_clean_up_sessions(cp);
 		mds_clean_up_grants(cp);
+		mds_clean_up_trunkinfo(cp);
 	}
 
 	/* Free the client supplied client id */
@@ -1101,6 +1102,9 @@ rfs4_client_create(rfs4_entry_t u_entry, void *arg)
 			break;
 		}
 	}
+
+	list_create(&cp->trunkinfo, sizeof (rfs41_tie_t),
+	    offsetof(rfs41_tie_t, t_link));
 	return (TRUE);
 }
 

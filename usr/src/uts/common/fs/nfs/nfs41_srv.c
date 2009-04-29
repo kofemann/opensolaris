@@ -55,6 +55,7 @@
 #include <sys/sdt.h>
 #include <sys/ddi.h>
 #include <sys/modctl.h>
+#include <sys/timod.h>
 
 #include <rpc/types.h>
 #include <rpc/auth.h>
@@ -239,6 +240,7 @@ static void	mds_op_write(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
 			compound_state_t *);
 static void	mds_op_exchange_id(nfs_argop4 *, nfs_resop4 *,
 			struct svc_req *, compound_state_t *);
+static void	mds_op_exid_free(nfs_resop4 *, compound_state_t *);
 static void	mds_op_secinfo(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
 			compound_state_t *);
 static void	mds_op_secinfonn(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
@@ -448,7 +450,7 @@ static op_disp_tbl_t mds_disptab[] = {
 	{mds_op_backchannel_ctl, nullfree,  DISP_OP_BOTH, "BACKCHANNEL_CTL"},
 	{mds_op_bind_conn_to_session, nullfree,
 	    DISP_OP_BOTH, "BIND_CONN_TO_SESS"},
-	{mds_op_exchange_id, nullfree,  DISP_OP_BOTH, "EXCHANGE_ID"},
+	{mds_op_exchange_id, mds_op_exid_free,  DISP_OP_BOTH, "EXCHANGE_ID"},
 	{mds_op_create_session, nullfree,  DISP_OP_BOTH, "CREATE_SESS"},
 	{mds_op_destroy_session, nullfree,  DISP_OP_BOTH, "DESTROY_SESS"},
 	{mds_op_illegal, nullfree,  DISP_OP_MDS, "FREE_STATEID"},
@@ -6553,12 +6555,6 @@ mds_lease_chk(mds_session_t *sp)
 	return (error);
 }
 
-void
-mds_get_server_owner(server_owner4 *sop)
-{
-	bzero(sop, sizeof (server_owner4));	/* XXX - for now */
-}
-
 /*
  * Rudimentary server implementation (XXX - for now)
  */
@@ -6813,6 +6809,304 @@ done:
 	return (rc);
 }
 
+/*
+ * Session Trunking Support
+ */
+static struct netbuf *
+netbuf_dup(struct netbuf *obp)
+{
+	struct netbuf	*np = NULL;
+
+	np = (struct netbuf *)kmem_zalloc(sizeof (struct netbuf), KM_SLEEP);
+	np->maxlen = np->len = obp->len;
+	np->buf = (char *)kmem_zalloc(obp->len, KM_SLEEP);
+	bcopy(obp->buf, np->buf, obp->len);
+
+	return (np);
+}
+
+static void
+netbuf_destroy(struct netbuf *np)
+{
+	kmem_free((char *)np->buf, np->len);
+	kmem_free((struct netbuf *)np, sizeof (struct netbuf));
+}
+
+static t_scalar_t
+svc_get_type(SVCXPRT *xprt)
+{
+	t_scalar_t	xtype;
+
+	xtype = svc_gettype(xprt);
+	switch (xtype) {
+	case T_RDMA:
+		break;
+
+	case T_COTS:
+	case T_COTS_ORD:
+		xtype = T_COTS_ORD;
+		break;
+
+	case T_CLTS:
+	default:
+		cmn_err(CE_WARN, "svc_get_type: Bad service type %d\n", xtype);
+		xtype = 0;
+	}
+	return (xtype);
+}
+
+static rfs41_tie_t *
+rfs41_tie_init(SVCXPRT *xprt)
+{
+	rfs41_tie_t		*tip = NULL;
+	struct sockaddr		*sa;
+	struct sockaddr_in	*sa4;
+	struct sockaddr_in6	*sa6;
+
+	tip = kmem_zalloc(sizeof (rfs41_tie_t), KM_SLEEP);
+
+	sa = (struct sockaddr *)svc_getendpoint(xprt);
+	tip->t_famly = sa->sa_family;
+	tip->t_xtype = svc_get_type(xprt);
+	tip->t_netbf = netbuf_dup(svc_getlocaladdr(xprt));
+
+	switch (tip->t_famly) {
+	case AF_INET:
+		sa4 = (struct sockaddr_in *)(tip->t_netbf->buf);
+		bcopy(&sa4->sin_addr, &tip->t_ipaddr_u.ip4,
+		    sizeof (struct in_addr));
+		break;
+
+	case AF_INET6:
+		sa6 = (struct sockaddr_in6 *)(tip->t_netbf->buf);
+		bcopy(&sa6->sin6_addr, &tip->t_ipaddr_u.ip6,
+		    sizeof (struct in6_addr));
+		break;
+
+	default:
+		cmn_err(CE_WARN, "rfs41_tie_init: Bad family (%d)\n",
+		    tip->t_famly);
+		netbuf_destroy(tip->t_netbf);
+		kmem_free(tip, sizeof (rfs41_tie_t));
+		tip = NULL;
+		break;
+	}
+	return (tip);
+}
+
+static void
+rfs41_exid_so_major(struct server_owner4 *sop, struct compound_state *cs)
+{
+	int len = sizeof (void *) / sizeof (char);
+
+	sop->so_major_id.so_major_id_len = (len * 2) + 1;
+	sop->so_major_id.so_major_id_val = tohex(cs->instp, len);
+}
+
+/*
+ * XXX - rfs4_srv_trunk_test is disabled by default; enabling it will
+ *	 cause ip_dump() to spew addresses of inbound EXCHANGE_ID's
+ *	 to the console. rfs4_srv_trunk_test and ip_dump() will go
+ *	 away after client trunking is done. This is handy info to
+ *	 have for debugging.
+ */
+int	rfs4_srv_trunk_test = 0;
+
+static void
+ip_dump(struct netbuf *np, char *msg)
+{
+	struct sockaddr_in	*sa4;
+	struct sockaddr_in6	*sa6;
+
+	if (np == NULL || np->buf == NULL || !rfs4_srv_trunk_test)
+		return;
+
+	sa4 = (struct sockaddr_in *)(np->buf);
+	switch (sa4->sin_family) {
+	case AF_INET:
+		cmn_err(CE_WARN, "\n%s ip: %d.%d.%d.%d", msg,
+		    sa4->sin_addr.S_un.S_un_b.s_b1,
+		    sa4->sin_addr.S_un.S_un_b.s_b2,
+		    sa4->sin_addr.S_un.S_un_b.s_b3,
+		    sa4->sin_addr.S_un.S_un_b.s_b4);
+		break;
+
+	case AF_INET6:
+		sa6 = (struct sockaddr_in6 *)(np->buf);
+		cmn_err(CE_WARN, "\n%s ip6: "
+		    "%2x%2x:%0x%0x:%0x%0x:%0x%0x:%2x%2x:%2x%2x:%2x%2x:%2x%2x",
+		    msg,
+		    sa6->sin6_addr._S6_un._S6_u8[0],
+		    sa6->sin6_addr._S6_un._S6_u8[1],
+		    sa6->sin6_addr._S6_un._S6_u8[2],
+		    sa6->sin6_addr._S6_un._S6_u8[3],
+		    sa6->sin6_addr._S6_un._S6_u8[4],
+		    sa6->sin6_addr._S6_un._S6_u8[5],
+		    sa6->sin6_addr._S6_un._S6_u8[6],
+		    sa6->sin6_addr._S6_un._S6_u8[7],
+		    sa6->sin6_addr._S6_un._S6_u8[8],
+		    sa6->sin6_addr._S6_un._S6_u8[9],
+		    sa6->sin6_addr._S6_un._S6_u8[10],
+		    sa6->sin6_addr._S6_un._S6_u8[11],
+		    sa6->sin6_addr._S6_un._S6_u8[12],
+		    sa6->sin6_addr._S6_un._S6_u8[13],
+		    sa6->sin6_addr._S6_un._S6_u8[14],
+		    sa6->sin6_addr._S6_un._S6_u8[15]);
+		break;
+
+	default:
+		cmn_err(CE_WARN, "%s <cannot translate ip>", msg);
+		break;
+	}
+}
+
+static int
+ip_addr_cmp(rfs41_tie_t *tip, rfs41_tie_t *p)
+{
+	int	match = 0;
+
+	ASSERT(tip != NULL);
+	ASSERT(p != NULL);
+
+	if (tip->t_famly != p->t_famly)
+		return (0);
+
+	if (tip->t_famly == AF_INET) {
+		if (bcmp(&tip->t_ipaddr_u.ip4, &p->t_ipaddr_u.ip4,
+		    sizeof (struct in_addr)) == 0) {
+			match = 1;			/* IPv4 addr match */
+		}
+	} else if (tip->t_famly == AF_INET6) {
+		if (bcmp(&tip->t_ipaddr_u.ip6, &p->t_ipaddr_u.ip6,
+		    sizeof (struct in6_addr)) == 0) {
+			match = 1;			/* IPv6 addr match */
+		}
+	}
+
+	return (match);
+}
+
+static void
+rfs41_set_trunkinfo(SVCXPRT *xprt, struct compound_state *cs, rfs4_client_t *cp,
+    EXCHANGE_ID4resok *rok)
+{
+	rfs41_tie_t	*tip;
+	rfs41_tie_t	*p;
+
+	ASSERT(cs != NULL && cp != NULL && rok != NULL);
+	if (cs == NULL || cp == NULL || rok == NULL)
+		return;
+
+	/*
+	 * start out w/some sane defaults
+	 * XXX - scope needs to be revisited.
+	 */
+	rok->eir_clientid = cp->clientid;
+	rfs41_exid_so_major(&rok->eir_server_owner, cs);
+
+	ip_dump(svc_getlocaladdr(xprt), "inbound");
+
+	/* build trunkinfo entry */
+	if (xprt == NULL || (tip = rfs41_tie_init(xprt)) == NULL)
+		return;
+
+	/* fastpath for 1st exid */
+	rfs4_dbe_lock(cp->dbe);
+	if (list_is_empty(&cp->trunkinfo)) {
+		list_insert_head(&cp->trunkinfo, tip);
+		ip_dump(tip->t_netbf, "first-in-list");
+		rok->eir_server_owner.so_minor_id =
+		    (uint64_t)(uintptr_t)&cp->trunkinfo;
+		rfs4_dbe_unlock(cp->dbe);
+		return;
+	}
+
+	/* run thru trunkinfo list to see if IP has been seen */
+	for (p = list_head(&cp->trunkinfo); p != NULL;
+	    p = list_next(&cp->trunkinfo, p)) {
+
+		/*
+		 * Is the IP already in list ?
+		 */
+		if (ip_addr_cmp(tip, p)) {
+			ip_dump(p->t_netbf, "already-in-list");
+			rok->eir_server_owner.so_minor_id =
+			    (uint64_t)(uintptr_t)&cp->trunkinfo;
+			rfs4_dbe_unlock(cp->dbe);
+			return;
+		}
+	}
+
+	/* IP hasn't been seen; rerun list to see if equivalent exists */
+	for (p = list_head(&cp->trunkinfo); p != NULL;
+	    p = list_next(&cp->trunkinfo, p)) {
+
+		/*
+		 * Do we have an equivalent (ie. transport) entry
+		 */
+		if (p->t_xtype == tip->t_xtype) {
+			list_insert_head(&cp->trunkinfo, tip);
+			ip_dump(tip->t_netbf, "Equiv FOUND: inserted-in-list");
+			rok->eir_server_owner.so_minor_id =
+			    (uint64_t)(uintptr_t)&cp->trunkinfo;
+			rfs4_dbe_unlock(cp->dbe);
+			return;
+		}
+	}
+
+	/* nothing in list has same IP addr or is equivalent to tip */
+	list_insert_head(&cp->trunkinfo, tip);
+	ip_dump(tip->t_netbf, "No IP or Equiv FOUND: inserted-in-list");
+	rfs4_dbe_unlock(cp->dbe);
+	rok->eir_server_owner.so_minor_id = (uint64_t)(uintptr_t)&tip;
+}
+
+void
+mds_clean_up_trunkinfo(rfs4_client_t *cp)
+{
+	rfs41_tie_t	*p;
+
+	ASSERT(cp != NULL);
+	if (cp == NULL)
+		return;
+
+	rfs4_dbe_lock(cp->dbe);
+	while (p = list_remove_head(&cp->trunkinfo)) {
+		netbuf_destroy(p->t_netbf);
+		kmem_free(p, sizeof (rfs41_tie_t));
+	}
+	list_destroy(&cp->trunkinfo);
+	rfs4_dbe_unlock(cp->dbe);
+}
+
+/*ARGSUSED*/
+static void
+mds_op_exid_free(nfs_resop4 *resop, compound_state_t *cs)
+{
+	EXCHANGE_ID4res		*resp = &resop->nfs_resop4_u.opexchange_id;
+	EXCHANGE_ID4resok	*rok = &resp->EXCHANGE_ID4res_u.eir_resok4;
+	struct server_owner4	*sop = &rok->eir_server_owner;
+	nfs_impl_id4		*nip;
+	int			 len = 0;
+
+	/* Server Owner: major */
+	if ((len = sop->so_major_id.so_major_id_len) != 0)
+		kmem_free(sop->so_major_id.so_major_id_val, len);
+
+	if ((nip = rok->eir_server_impl_id.eir_server_impl_id_val) != NULL) {
+		/* Immplementation */
+		len = nip->nii_name.utf8string_len;
+		kmem_free(nip->nii_name.utf8string_val, len * sizeof (char));
+
+		/* Domain */
+		len = nip->nii_domain.utf8string_len;
+		kmem_free(nip->nii_domain.utf8string_val, len * sizeof (char));
+
+		/* Server Impl */
+		kmem_free(nip, sizeof (nfs_impl_id4));
+	}
+}
+
 /* XXX - NOTE: EXCHANGE_ID conforms to draft-19 behavior */
 
 /*ARGSUSED*/
@@ -7007,8 +7301,6 @@ out:
 	if (args->eia_flags & EXCHGID4_FLAG_SUPP_MOVED_MIGR)
 		rok->eir_flags &= ~EXCHGID4_FLAG_SUPP_MOVED_MIGR;
 
-	bzero(&rok->eir_server_scope, sizeof (uint_t) + sizeof (char *));
-
 	/*
 	 * Add the appropriate "use_pnfs" flags.
 	 */
@@ -7016,8 +7308,6 @@ out:
 
 	/* force no state protection for now */
 	rok->eir_state_protect.spr_how = SP4_NONE;
-
-	mds_get_server_owner(&rok->eir_server_owner);
 
 	/* Implementation specific mojo */
 	if (args->eia_client_impl_id.eia_client_impl_id_len != 0)
@@ -7028,6 +7318,11 @@ out:
 
 	/* Server's implementation */
 	mds_get_server_impl_id(rok);
+
+	/* compute trunking capabilities */
+	bzero(&rok->eir_server_scope, sizeof (rok->eir_server_scope));
+	bzero(&rok->eir_server_owner, sizeof (server_owner4));
+	rfs41_set_trunkinfo(req->rq_xprt, cs, cp, rok);
 
 	/*
 	 * XXX - jw - best guess
@@ -8755,4 +9050,23 @@ final:
 	DTRACE_NFSV4_2(op__layoutreturn__done,
 	    struct compound_state *, cs,
 	    LAYOUTRETURN4res *, resp);
+}
+
+char *
+tohex(const void *bytes, int len)
+{
+	static char		*hexvals = "0123456789ABCDEF";
+	char			*rc;
+	const unsigned char	*c = bytes;
+	int			 i;
+
+	rc = kmem_alloc(len * 2 + 1, KM_SLEEP);
+	rc[len * 2] = '\0';
+
+	for (i = 0; i < len; i++) {
+		rc[2 * i] = hexvals[c[i] >> 4];
+		rc[2 * i + 1] = hexvals[c[i] & 0xf];
+	}
+
+	return (rc);
 }
