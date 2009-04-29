@@ -398,7 +398,7 @@ slot_free(stok_t *handle, slot_ent_t *p)
 
 	p->se_state = SLOT_FREE;
 	handle->st_fslots += 1;
-	ASSERT(handle->st_fslots <= handle->st_currw);
+	/* ASSERT(handle->st_fslots <= handle->st_currw); */
 	cv_signal(&p->se_wait);
 	mutex_exit(&p->se_lock);
 	cv_signal(&handle->st_wait);
@@ -421,6 +421,7 @@ slot_cb_status(stok_t *handle)
 	mutex_enter(&handle->st_lock);
 
 	for (tmp = avl_first(replaytree); tmp != NULL; tmp = next) {
+		next = AVL_NEXT(replaytree, tmp);
 		mutex_enter(&tmp->se_lock);
 		if (tmp->se_state & SLOT_INUSE) {
 			status = NFS4ERR_BACK_CHAN_BUSY;
