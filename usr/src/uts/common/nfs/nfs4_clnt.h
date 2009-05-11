@@ -58,7 +58,7 @@ extern "C" {
 #define	NFS4_SEQHB_STARTED		1
 #define	NFS4_SEQHB_EXITING		2
 #define	NFS4_SEQHB_EXIT			4
-#define	NFS4_SEQHB_DESTROY		8
+#define	NFS4_SEQHB_DESTROY_INZONE	8
 
 /* Four states of nfs4_server's lease_valid */
 #define	NFS4_LEASE_INVALID		0
@@ -72,6 +72,7 @@ extern "C" {
  */
 #define	RFS4CALL_SETCB	0x00000002
 #define	RFS4CALL_NOSEQ	0x00000004	/* Don't add sequence op (4.1+ only) */
+#define	RFS4CALL_FORCE	0x00000008	/* Force OTW, even if unmounted */
 
 #define	NFS4_TAG_SWAP		0x001
 #define	NFS4_TAG_DESTROY	0x002
@@ -673,12 +674,6 @@ typedef struct servinfo4 {
 	attrmap4	sv_supp_attrs;
 	struct servinfo4  *sv_next;	/* next in list */
 	nfs_rwlock_t	   sv_lock;
-	/*
-	 * XXXrsb - the following (sv_ds_n4sp) is likely to change.
-	 * If the servinfo4 refers to a pnfs data server, then the following
-	 * is a pointer to the corresponding nfs4_server.  Otherwise, NULL.
-	 */
-	struct nfs4_server *sv_ds_n4sp;
 	attrmap4	sv_supp_exclcreat;
 } servinfo4_t;
 
@@ -1378,6 +1373,8 @@ typedef struct nfs4_server {
 	kmutex_t		s_lt_lock; /* layout tree lock */
 	avl_tree_t		s_fsidlt; /* fsid layout tree */
 	avl_tree_t		s_devid_tree;	/* Device ID tree */
+	mntinfo4_t		*s_hb_mi;	/* mi held by hb thread */
+	servinfo4_t		*s_hb_svp;	/* servinfo4 for hb thread */
 } nfs4_server_t;
 
 /* nfs4_server flags */
@@ -1432,7 +1429,8 @@ typedef enum {
 	OH_GETATTR,
 	OH_LOOKUP,
 	OH_READDIR,
-	OH_SEQUENCE
+	OH_SEQUENCE,
+	OH_DESTROY_SESS
 } nfs4_op_hint_t;
 
 /*
@@ -1556,10 +1554,12 @@ typedef struct nfs4_ephemeral_tree {
 
 /*
  * This macro evaluates to non-zero if the given op releases state at the
- * server.
+ * server.  For 4.1 sequence and destroy session, they are allowed after
+ * an unmount.
  */
 #define	OH_IS_STATE_RELE(op)	((op) == OH_CLOSE || (op) == OH_LOCKU || \
-				(op) == OH_DELEGRETURN)
+				(op) == OH_DELEGRETURN || \
+				(op) == OH_SEQUENCE || (op) == OH_DESTROY_SESS)
 
 #ifdef _KERNEL
 
@@ -1613,7 +1613,8 @@ extern void	nfs4args_copen_free(OPEN4cargs *);
 extern void	nfs4_printfhandle(nfs4_fhandle_t *);
 
 extern void	nfs_free_mi4(mntinfo4_t *);
-extern servinfo4_t *new_servinfo4(struct knetconfig *, struct netbuf *, int);
+extern servinfo4_t *new_servinfo4(mntinfo4_t *, char *, struct knetconfig *,
+			struct netbuf *, int);
 extern void	sv4_free(servinfo4_t *);
 
 extern void	nfs4_mi_zonelist_add(mntinfo4_t *);
@@ -2060,9 +2061,16 @@ extern void	nfs4_save_stateid(stateid4 *, nfs4_stateid_types_t *);
 
 extern kmutex_t nfs4_server_lst_lock;
 
-extern void 	nfs4_cleanup_oldsession(nfs4_server_t *);
-extern void	nfs4destroy_session(nfs4_server_t *, CLIENT *);
-extern void	nfs4destroy_session_otw(nfs4_session_t *, CLIENT *);
+extern void 	nfs4_cleanup_oldsession(mntinfo4_t *, servinfo4_t *,
+		    nfs4_server_t *);
+
+/* flags for nfs4destroy_session */
+#define	N4DS_TERMINATE_HB_THREAD	1
+#define	N4DS_DESTROY_OTW		2
+#define	N4DS_DESTROY_INZONE		4
+
+extern void	nfs4destroy_session(nfs4_server_t *, mntinfo4_t *,
+		    servinfo4_t *, nfs4_error_t *, int);
 extern void	nfs41_cbinfo_rele(struct nfs41_cb_info *);
 extern void	nfs4callback_destroy(nfs4_server_t *);
 extern void	nfs4_callback_init(void);
@@ -2474,6 +2482,7 @@ extern LAYOUTRETURN4res *nfs4_op_layoutreturn(nfs4_call_t *,
 extern LAYOUTGET4res *nfs4_op_layoutget(nfs4_call_t *, LAYOUTGET4args **);
 extern GETDEVICELIST4res *nfs4_op_getdevicelist(nfs4_call_t *,
     GETDEVICELIST4args **);
+extern DESTROY_SESSION4res *nfs4_op_destroy_session(nfs4_call_t *, sessionid4);
 
 extern void nfs4lookup_setup(nfs4_call_t *, char *, lkp4_attr_setup_t,
     attrmap4, int);

@@ -1242,16 +1242,16 @@ mir_set_cbinfo(queue_t *wq, void *info)
 
 	CBSERVER_ARGS	*cbsrv_args = (CBSERVER_ARGS *)info;
 	mir_t	*mir = (mir_t *)wq->q_ptr;
-	SVCCB *scb = mir->mir_cb;
-
-	if (scb != NULL) {
-		/* shouldn't this be an ASSERT? */
-		cmn_err(CE_WARN, "mir_set_cbinfo: scb != NULL");
-		kmem_free(scb, sizeof (SVCCB));
-		mir->mir_cb = NULL;
-	}
+	SVCCB *scb;
 
 	scb = kmem_zalloc(sizeof (SVCCB), KM_SLEEP);
+	mutex_enter(&mir->mir_mutex);
+	if (mir->mir_cb != NULL) {
+		/* shouldn't this be an ASSERT? */
+		cmn_err(CE_WARN, "mir_set_cbinfo: scb != NULL");
+		kmem_free(mir->mir_cb, sizeof (SVCCB));
+		mir->mir_cb = NULL;
+	}
 	mutex_init(&scb->r_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&scb->r_cbwait, NULL, CV_DEFAULT, NULL);
 	cv_init(&scb->r_cbexit, NULL, CV_DEFAULT, NULL);
@@ -1263,6 +1263,7 @@ mir_set_cbinfo(queue_t *wq, void *info)
 	scb->r_thread =
 	    zthread_create(NULL, 0, mir_callback_thread, scb, 0, minclsyspri);
 	ASSERT(scb->r_thread != NULL);
+	mutex_exit(&mir->mir_mutex);
 }
 
 void
@@ -1456,6 +1457,9 @@ mir_close(queue_t *q)
 		mutex_exit(&mir->mir_mutex);
 		qprocsoff(q);
 	}
+
+	if (mir->mir_cb)
+		mir_clear_cbinfo(q);
 
 	mutex_destroy(&mir->mir_mutex);
 	cv_destroy(&mir->mir_condvar);

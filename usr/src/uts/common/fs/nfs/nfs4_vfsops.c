@@ -2915,9 +2915,12 @@ void
 nfs4_freevfs(vfs_t *vfsp)
 {
 	mntinfo4_t *mi;
+	extern vfs_t EIO_vfs;
 
 	/* need to release the initial hold */
 	mi = VFTOMI4(vfsp);
+	/* smash the vfs pointer, mi might be hanging around */
+	mi->mi_vfsp = &EIO_vfs;
 	MI4_RELE(mi);
 }
 
@@ -3532,11 +3535,19 @@ nfs4_mark_srv_dead(nfs4_server_t *sp, uint_t zone_shutdown)
 {
 	ASSERT(MUTEX_HELD(&sp->s_lock));
 
-	if (zone_shutdown)
-		sp->seqhb_flags |= NFS4_SEQHB_EXIT;
-	else
-		sp->seqhb_flags |= NFS4_SEQHB_EXITING;
-	sp->s_thread_exit = NFS4_THREAD_EXIT;
+	if (sp->s_minorversion > 0)
+		if (zone_shutdown)
+			sp->seqhb_flags |= NFS4_SEQHB_EXIT;
+		else
+			sp->seqhb_flags |= NFS4_SEQHB_EXITING;
+
+	/*
+	 * For 4.0 mounts, tell the renew threads to exit
+	 * immediately.  For 4.1 and greater, the various
+	 * heartbeat threads will hang around awhile.
+	 */
+	if (sp->s_minorversion < 1 || zone_shutdown == TRUE)
+		sp->s_thread_exit = NFS4_THREAD_EXIT;
 	cv_broadcast(&sp->cv_thread_exit);
 }
 
@@ -4037,165 +4048,13 @@ nfs4_server_rele_lockt(nfs4_server_t *sp)
 	destroy_nfs4_server(sp);
 }
 
-/*
- *  Initiate and wait for destroy of a session.
- */
-
 void
-nfs4_cleanup_oldsession(nfs4_server_t *np)
+nfs4session_teardown(mntinfo4_t *mi, servinfo4_t *svp, nfs4_server_t *np)
 {
-	mutex_enter(&np->s_lock);
-	if (np->seqhb_flags & NFS4_SEQHB_STARTED) {
-
-		/*
-		 * If not already signalled in start_recovery()
-		 * signal sequence_heartbeat_thread() to exit.
-		 */
-
-		if (!(np->seqhb_flags & NFS4_SEQHB_EXIT)) {
-			np->seqhb_flags |= NFS4_SEQHB_EXIT;
-			np->s_refcnt++;
-			cv_broadcast(&np->cv_thread_exit);
-		}
-
-		/*
-		 * Wait for the sequence heartbeat thread to exit
-		 * On it's way out, this will destroy the session.
-		 */
-
-		while (np->seqhb_flags & NFS4_SEQHB_EXIT) {
-			cv_wait(&np->ssx_wait, &np->s_lock);
-		}
-
-		mutex_exit(&np->s_lock);
-
-	} else if (np->seqhb_flags & NFS4_SEQHB_DESTROY) {
-		/*
-		 * If (seqhb_flags & NFS4_SEQHB_DESTROY == TRUE) then the
-		 * sequence heart beat thread raced us and has already
-		 * destroyed the session. Nothing more to do.
-		 */
-		mutex_exit(&np->s_lock);
-	} else {
-		/*
-		 * No sequence heartbeat thread means this
-		 * session is to a data server. Just destroy the
-		 * the session.
-		 */
-		np->seqhb_flags = 0;
-		mutex_exit(&np->s_lock);
-		nfs4destroy_session(np, NULL);
-	}
-}
-
-void
-nfs4destroy_session_otw(nfs4_session_t *sessp, CLIENT *clientp)
-{
-	COMPOUND4args_clnt	args;
-	COMPOUND4res_clnt	res;
-	COMPOUND4node_clnt	node[2];
-	slot_ent_t		*slotp;
-	struct timeval		wait;
-	enum	clnt_stat	status;
-	nfs4_error_t		e;
-	uint32_t		zilch = 0;
-
-	bzero(&res, sizeof (res));
-	bzero(&args, sizeof (args));
-	bzero(node, sizeof (node));
-
-	args.ctag = TAG_DESTROY_SESSION;
-	args.args_len = 2;
-	args.minor_vers = nfs4_max_minor_version;
-	list_create(&args.args, sizeof (COMPOUND4node_clnt),
-	    offsetof(COMPOUND4node_clnt, node));
-	res.argsp = &args;
-
-	list_insert_head(&args.args, &node[0]);
-	node[0].arg.argop = OP_SEQUENCE;
-
-	list_insert_tail(&args.args, &node[1]);
-	node[1].arg.argop = OP_DESTROY_SESSION;
-	bcopy(sessp->sessionid,
-	    node[1].arg.nfs_argop4_u.opdestroy_session.dsa_sessionid,
-	    sizeof (sessp->sessionid));
-
-	TICK_TO_TIMEVAL(30 * hz / 10, &wait);
-
-	if (!(CLNT_CONTROL(clientp, CLSET_XID, (char *)&zilch))) {
-		zcmn_err(getzoneid(), CE_WARN,
-		    "Failed to zero xid to destroy session");
-		goto destroy;
-	}
-
-	nfs4sequence_setup(sessp, &args, &slotp);
-	status = CLNT_CALL(clientp, NFSPROC4_COMPOUND,
-	    xdr_COMPOUND4args_clnt, (caddr_t)&args,
-	    xdr_COMPOUND4res_clnt, (caddr_t)&res,
-	    wait);
-
-	nfs4_error_set(&e, status, res.status);
-	nfs4sequence_fin(sessp, &res, slotp, &e);
-
-
-	if (status != RPC_SUCCESS || res.status ||
-	    node[1].res.nfs_resop4_u.opdestroy_session.dsr_status) {
-		DTRACE_PROBE1(nfsc__i_destroysession, char *,
-		    "Destroy_session request failed, destroying anyways");
-	}
-
-	if (status == RPC_SUCCESS)
-		xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-
-destroy:
-	kmem_free(sessp->saddr.buf, sessp->saddr.len);
-}
-
-void
-nfs4destroy_session(nfs4_server_t *np, CLIENT *seqhandle)
-{
-	struct nfs41_cb_info	*cbi;
-	struct nfs4_callback_globals	*ncg = np->zone_globals;
-	nfs4_session_t	*sess;
-
-	/* XXX currently no otw destroy for null client handles */
-	if (seqhandle != NULL)
-		nfs4destroy_session_otw(&np->ssx, seqhandle);
-
-	/*
-	 * XXXrsb bandage: Will be removed with DS heartbeat changes
-	 * we really shouldn't be here if s_program == 0
-	 */
-	if (np->s_program == 0)
-		return;
-
-	mutex_enter(&np->s_lock);
-	cbi = ncg->nfs4prog2cbinfo[np->s_program - NFS4_CALLBACK];
-	mutex_exit(&np->s_lock);
-
-	/*
-	 * Tell callback connection thread to exit.
-	 */
-	mutex_enter(&cbi->cb_cbconn_lock);
-	cbi->cb_cbconn_exit = TRUE;
-	cv_broadcast(&cbi->cb_cbconn_wait);
-	mutex_exit(&cbi->cb_cbconn_lock);
-
-	/*
-	 * Tell the RPC callback thread to cleanup
-	 */
-	if (seqhandle != NULL &&
-	    (!CLNT_CONTROL(seqhandle, CLSET_CBSERVER_CLEANUP,
-	    (char *)(np->ssx.sessionid)))) {
-			zcmn_err(getzoneid(),
-			    CE_WARN, "Failed destroy rpc cbserver");
-	}
-
-	mutex_enter(&cbi->cb_reflock);
-	while (cbi->cb_refcnt != 1) {
-		cv_wait(&cbi->cb_destroy_wait, &cbi->cb_reflock);
-	}
-	mutex_exit(&cbi->cb_reflock);
+	nfs4_session_t *sess;
+	struct nfs41_cb_info *cbi;
+	struct nfs4_callback_globals *ncg = np->zone_globals;
+	int error;
 
 	/* Destroy the slot table cache's for fore and back channel. */
 	sess = &np->ssx;
@@ -4204,10 +4063,134 @@ nfs4destroy_session(nfs4_server_t *np, CLIENT *seqhandle)
 	if (sess->cb_slot_table != NULL)
 		slot_table_destroy(sess->cb_slot_table);
 	sess->slot_table = sess->cb_slot_table = NULL;
+
+	mutex_enter(&np->s_lock);
+	if (sess->saddr.buf) {
+		kmem_free(sess->saddr.buf, sess->saddr.len);
+		sess->saddr.buf = NULL;
+	}
+	if (np->s_program == 0) {
+		mutex_exit(&np->s_lock);
+		return;
+	}
+
+	cbi = ncg->nfs4prog2cbinfo[np->s_program - NFS4_CALLBACK];
+	mutex_exit(&np->s_lock);
+
+	/*
+	 * Tell callback connection thread to exit.
+	 */
+	if (cbi->cb_client) {
+		mutex_enter(&cbi->cb_cbconn_lock);
+		cbi->cb_cbconn_exit = TRUE;
+		cv_broadcast(&cbi->cb_cbconn_wait);
+		mutex_exit(&cbi->cb_cbconn_lock);
+		mutex_enter(&cbi->cb_reflock);
+		while (cbi->cb_refcnt != 1)
+			cv_wait(&cbi->cb_destroy_wait, &cbi->cb_reflock);
+		mutex_exit(&cbi->cb_reflock);
+	} else
+		cbi->cb_cbconn_exit = TRUE;
+
+	/*
+	 * Tell the RPC callback thread to cleanup.
+	 */
+	if ((error = nfs4_tag_ctl(np, mi, svp, sess->sessionid,
+	    NFS4_CBSERVER_CLEANUP, np->s_cred)) != 0) {
+		zcmn_err(getzoneid(), CE_WARN, "Failed destroy rpc cbserver %d",
+		    error);
+	}
+
 	mutex_enter(&np->s_lock);
 	nfs4callback_destroy(np);
-	np->s_flags &= ~(N4S_SESSION_CREATED);
 	mutex_exit(&np->s_lock);
+}
+
+static void
+nfs4destroy_session_otw(mntinfo4_t *mi, servinfo4_t *svp, nfs4_server_t *np,
+	nfs4_error_t *ep)
+{
+	nfs4_session_t		*sessp = &np->ssx;
+	nfs4_call_t		*cp;
+	DESTROY_SESSION4res	*resp;
+
+	cp = nfs4_call_init(mi, np->s_cred, TAG_DESTROY_SESSION);
+	cp->nc_svp = cp->nc_ds_servinfo = svp;
+	cp->nc_ophint = OH_DESTROY_SESS;
+	cp->nc_rfs4call_flags = RFS4CALL_FORCE;
+
+	ep->error = nfs4_start_op_impl(cp, 0);
+	if (ep->error) {
+		cmn_err(CE_WARN, "nfs4destroy_session_otw: start op failed %d",
+		    ep->error);
+		nfs4_call_rele(cp);
+		return;
+	}
+
+	(void) nfs4_op_sequence(cp);
+	resp = nfs4_op_destroy_session(cp, sessp->sessionid);
+
+	rfs4call(cp, ep);
+
+	nfs4_end_op_impl(cp);
+
+	if (ep->error != 0 || ep->stat != NFS4_OK ||
+	    (ep->error == 0 && resp->dsr_status)) {
+		DTRACE_PROBE1(nfsc__i_destroysession, char *,
+		    "Destroy_session request failed, destroying anyways");
+		cmn_err(CE_WARN, "nfs4destroy_session_otw: rfs4call failed "
+		    " %d/%d", ep->error, ep->stat);
+	}
+	nfs4_call_rele(cp);
+}
+
+void
+nfs4destroy_session(nfs4_server_t *np, mntinfo4_t *mi, servinfo4_t *svp,
+    nfs4_error_t *ep, int flags)
+{
+	mutex_enter(&np->s_lock);
+	/*
+	 * XXXrsb bandage: Will be removed with DS heartbeat changes
+	 * we really shouldn't be here if s_program == 0
+	 */
+	if (np->s_program == 0) {
+		mutex_exit(&np->s_lock);
+		return;
+	}
+
+	if (flags & N4DS_TERMINATE_HB_THREAD) {
+		if (np->seqhb_flags & NFS4_SEQHB_STARTED) {
+			/*
+			 * If not already signalled in start_recovery()
+			 * signal sequence_heartbeat_thread() to exit.
+			 */
+
+			if (!(np->seqhb_flags & NFS4_SEQHB_EXIT)) {
+				np->seqhb_flags |= NFS4_SEQHB_EXIT;
+				if (flags & N4DS_DESTROY_INZONE)
+					np->seqhb_flags |=
+					    NFS4_SEQHB_DESTROY_INZONE;
+				np->s_refcnt++;
+				cv_broadcast(&np->cv_thread_exit);
+			}
+
+			/* Wait for the sequence heartbeat thread to exit */
+
+			while (np->seqhb_flags & NFS4_SEQHB_EXIT) {
+				cv_wait(&np->ssx_wait, &np->s_lock);
+			}
+		}
+	}
+	mutex_exit(&np->s_lock);
+
+	/*
+	 * Now, destroy the session, although the HB thread already
+	 * beat us to it.
+	 */
+	if (flags & N4DS_DESTROY_OTW)
+		nfs4destroy_session_otw(mi, svp, np, ep);
+
+	nfs4session_teardown(mi, svp, np);
 }
 
 static void

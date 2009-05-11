@@ -1384,7 +1384,7 @@ nfs4_rfscall(mntinfo4_t *mi, servinfo4_t *svp,
 		mutex_exit(&mi->mi_lock);
 
 		if ((mi->mi_vfsp->vfs_flag & VFS_UNMOUNTED) &&
-		    (!is_recov || !firstcall)) {
+		    (!is_recov && !firstcall) && !(flags & RFS4CALL_FORCE)) {
 			clfree4(client, ch, nfscl);
 			if (cred_cloned)
 				crfree(cr);
@@ -1393,8 +1393,9 @@ nfs4_rfscall(mntinfo4_t *mi, servinfo4_t *svp,
 
 		if (zone_status_get(curproc->p_zone) >= ZONE_IS_SHUTTING_DOWN) {
 			mutex_enter(&mi->mi_lock);
-			if ((mi->mi_flags & MI4_TIMEDOUT) ||
-			    !is_recov || !firstcall) {
+			if (((mi->mi_flags & MI4_TIMEDOUT) ||
+			    !is_recov || !firstcall) &&
+			    (!(flags & RFS4CALL_FORCE)) && !firstcall) {
 				mutex_exit(&mi->mi_lock);
 				clfree4(client, ch, nfscl);
 				if (cred_cloned)
@@ -1673,13 +1674,28 @@ rfs4call(nfs4_call_t *cp, nfs4_error_t *copy_ep)
 	if (doseq) {
 		/*
 		 * XXXrsb - The following code is likely to change.
-		 * We have a pointer from the servinfo4 to the nfs4_server
-		 * If we have a servinfo4 and the pointer is valid, then use it.
+		 *
+		 * If the servinfo4 pointer is set in the call_t, then
+		 * use that to find the nfs4_server_t.  Otherwise, just
+		 * use mi in the normal way.  In the future, start_op will
+		 * do this, and leave behind a pointer to the n4s.
+		 *
 		 * One note, we may have to deal with the "np == NULL" case.
 		 */
-		if (cp->nc_svp && cp->nc_svp->sv_ds_n4sp) {
-			np = cp->nc_svp->sv_ds_n4sp;
-			nfs4_server_hold(np);
+		if (cp->nc_svp) {
+			mutex_enter(&nfs4_server_lst_lock);
+			np = find_nfs4_server_by_addr(&cp->nc_svp->sv_addr,
+			    cp->nc_svp->sv_knconf);
+			if (np == NULL) {
+				/*
+				 * Very odd, probably means the caller has
+				 * not done start_op.
+				 */
+				mutex_exit(&nfs4_server_lst_lock);
+				ep->error = EIO;
+				return;
+			}
+			mutex_exit(&np->s_lock);
 		} else {
 			np = find_nfs4_server(mi);
 			ASSERT(np != NULL);
@@ -2468,14 +2484,6 @@ sv4_free(servinfo4_t *svp)
 			kmem_free(svp->sv_path, svp->sv_pathlen);
 		}
 		nfs_rw_destroy(&svp->sv_lock);
-
-		/*
-		 * If we have an nfs4_server from a pnfs data server...
-		 * XXXrsb This may go away or change
-		 */
-		if (svp->sv_ds_n4sp)
-			nfs4_server_rele(svp->sv_ds_n4sp);
-
 		kmem_free(svp, sizeof (*svp));
 		svp = next;
 	}
@@ -3512,21 +3520,41 @@ netbuf_match(struct netbuf *n1, struct netbuf *n2)
 	return (0);
 }
 
-void *
-new_string(void *cur)
-{
-	void *v;
+/*
+ * copy the secdata from the MDS's servinfo.  XXX - this is copied
+ * from mirror mount code, nfs4_trigger_nargs_create.  That code needs
+ * to be refactored to be called from here.
+ */
 
-	v = kmem_alloc(strlen(cur)+1, KM_SLEEP);
-	(void) strcpy(v, cur);
-	return (v);
+static void
+secdatacopy(servinfo4_t *svp, servinfo4_t *dsvp)
+{
+	if (svp->sv_flags & SV4_TRYSECDEFAULT) {
+		/*
+		 * As a starting point for negotiation, copy parent
+		 * mount's negotiated flavour (sv_currsec) if available,
+		 * or its passed-in flavour (sv_secdata) if not.
+		 */
+		if (svp->sv_currsec != NULL)
+			dsvp->sv_secdata = copy_sec_data(svp->sv_currsec);
+		else if (svp->sv_secdata != NULL)
+			dsvp->sv_secdata = copy_sec_data(svp->sv_secdata);
+		else
+			dsvp->sv_secdata = NULL;
+	} else {
+		/* do not enable negotiation; copy parent's passed-in flavour */
+		if (svp->sv_secdata != NULL)
+			dsvp->sv_secdata = copy_sec_data(svp->sv_secdata);
+		else
+			dsvp->sv_secdata = NULL;
+	}
 }
 
 servinfo4_t *
-new_servinfo4(struct knetconfig *knc, struct netbuf *nb, int flags)
+new_servinfo4(mntinfo4_t *mi, char *hostname, struct knetconfig *knc,
+    struct netbuf *nb, int flags)
 {
 	servinfo4_t *svp;
-	struct sec_data *secdata;
 
 	/*
 	 * Allocate a servinfo4 struct.
@@ -3537,8 +3565,10 @@ new_servinfo4(struct knetconfig *knc, struct netbuf *nb, int flags)
 
 	svp->sv_knconf = kmem_alloc(sizeof (*knc), KM_SLEEP);
 	svp->sv_knconf->knc_semantics = knc->knc_semantics;
-	svp->sv_knconf->knc_protofmly = new_string(knc->knc_protofmly);
-	svp->sv_knconf->knc_proto = new_string(knc->knc_proto);
+	svp->sv_knconf->knc_protofmly = kmem_alloc(KNC_STRSIZE, KM_SLEEP);
+	(void) strcpy(svp->sv_knconf->knc_protofmly, knc->knc_protofmly);
+	svp->sv_knconf->knc_proto = kmem_alloc(KNC_STRSIZE, KM_SLEEP);
+	(void) strcpy(svp->sv_knconf->knc_proto, knc->knc_proto);
 	svp->sv_knconf->knc_rdev = knc->knc_rdev;
 	bzero(svp->sv_knconf->knc_unused, sizeof (knc->knc_unused));
 
@@ -3547,38 +3577,26 @@ new_servinfo4(struct knetconfig *knc, struct netbuf *nb, int flags)
 	svp->sv_addr.buf = kmem_alloc(nb->maxlen, KM_SLEEP);
 	bcopy(nb->buf, svp->sv_addr.buf, nb->len);
 
-	/* XXX, ought to inherit sec data from parent servinfo4 */
-	secdata = kmem_alloc(sizeof (*secdata), KM_SLEEP);
-	secdata->secmod = secdata->rpcflavor = AUTH_SYS;
-	secdata->data = NULL;
-	svp->sv_secdata = secdata;
+	/* copy the mountinfo's security data */
+	secdatacopy(mi->mi_curr_serv, svp);
 
-	/* XXX */
-	svp->sv_path = "/";
-	svp->sv_pathlen = 1;
-	svp->sv_hostname = "data-server";
-	svp->sv_hostnamelen = strlen("data-server");
+	/*
+	 * There is no path for a DS because there is no
+	 * root fh nor any namespace.
+	 */
+	svp->sv_path = NULL;
+	svp->sv_pathlen = 0;
+
+	/*
+	 * Use the string representation of the data server's
+	 * IP address, it's not worth it to do an upcall to do
+	 * a reverse DNS lookup (or similar).
+	 */
+	svp->sv_hostnamelen = strlen(hostname) + 1;
+	svp->sv_hostname = kmem_alloc(svp->sv_hostnamelen, KM_SLEEP);
+	bcopy(hostname, svp->sv_hostname, svp->sv_hostnamelen);
 
 	return (svp);
-}
-
-/*
- * XXX - this will be eliminated once everyone is calling rfs4call()
- * emulate the behavior of rfs4call for those who call
- * CLNT_CALL directly
- */
-void
-nfs4_error_set(nfs4_error_t *ep, enum clnt_stat rpc_status, enum nfsstat4 stat)
-{
-	if (rpc_status == RPC_SUCCESS) {
-		ep->error = 0;	/* geterrno4 happens higher up */
-		ep->stat = stat;
-		ep->rpc_status = RPC_SUCCESS;
-	} else {
-		ep->error = EPROTO;	/* XXX */
-		ep->stat = 0;
-		ep->rpc_status = rpc_status;
-	}
 }
 
 /*

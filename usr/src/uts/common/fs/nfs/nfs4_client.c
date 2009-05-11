@@ -107,7 +107,8 @@ static time_t	nfs4_client_resumed = 0;
 static	callb_id_t cid = 0;
 
 static int	nfs4renew(nfs4_server_t *);
-static int	nfs4sequence(nfs4_server_t *, CLIENT *);
+static void	nfs4sequence(mntinfo4_t *, nfs4_server_t *, servinfo4_t *,
+		    nfs4_error_t *);
 static void	nfs4_attrcache_va(vnode_t *, nfs4_ga_res_t *, int);
 static void	nfs4_pgflush_thread(pgflush_t *);
 static void	flush_pages(vnode_t *, cred_t *);
@@ -2883,23 +2884,39 @@ nfs4_mi_shutdown(zoneid_t zoneid, void *data)
 	/*
 	 * Tell each renew thread in the zone to exit
 	 */
+the_top:
 	mutex_enter(&nfs4_server_lst_lock);
 	for (np = nfs4_server_lst.forw; np != &nfs4_server_lst; np = np->forw) {
 		mutex_enter(&np->s_lock);
 		if (np->zoneid == zoneid) {
+			nfs4_error_t e;
 
-			/*
-			 * If the sequence heartbeat thread was never started
-			 * for this server destroy the session now (this case's
-			 * only valid for a server which is just a Data server).
-			 * XXX The below nfs4destroy_session() does not destroy
-			 * the session otw. To be fixed in future.
-			 */
-			if ((np->s_flags & N4S_SESSION_CREATED) &&
-			    !(np->seqhb_flags & NFS4_SEQHB_STARTED)) {
+			if (np->seqhb_flags & NFS4_SEQHB_STARTED) {
+				/*
+				 * Tell the heartbeat thread to destroy
+				 * the session and terminate if it is
+				 * still around.  If not, then just clean
+				 * up the session.  Take a reference on
+				 * np to prevent it from disappearing due
+				 * to the action of the hb thread.
+				 */
+				np->s_refcnt++;
 				mutex_exit(&np->s_lock);
-				nfs4destroy_session(np, NULL);
-				continue;
+				mutex_exit(&nfs4_server_lst_lock);
+				nfs4destroy_session(np, np->s_hb_mi,
+				    np->s_hb_svp, &e,
+				    N4DS_TERMINATE_HB_THREAD|
+				    N4DS_DESTROY_INZONE);
+
+				/*
+				 * Release our ref from above.    Start
+				 * again from the top.  Since we dropped
+				 * the list lock, the list could have
+				 * changed, although no new entries for
+				 * this zone should have been added.
+				 */
+				nfs4_server_rele(np);
+				goto the_top;
 			}
 
 			/*
@@ -3195,6 +3212,12 @@ nfs4_client_cpr_callb(void *arg, int code)
 	return (B_TRUE);
 }
 
+/*
+ * By default, the sequence heartbeat thread will wait 4
+ * minutes before dying after the last ref goes away.
+ */
+int nfs4_sequence_hbt_timeout = 4;
+
 void
 nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 {
@@ -3204,10 +3227,8 @@ nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 	clock_t 		time_left = 0;
 	callb_cpr_t 		cpr_info;
 	kmutex_t 		cpr_lock;
-	struct knetconfig	knc;
-	struct netbuf		nb;
-	CLIENT			*seqclient = NULL;
-	int			error;
+	nfs4_error_t		e = { 0, NFS4_OK, RPC_SUCCESS };
+	int			destroy = 0;
 
 	NFS4_DEBUG(nfs4_seqhb_debug, (CE_NOTE,
 	    "nfs4_seq_heartbeat_thread: active on np 0x%p", (void*)np));
@@ -3216,27 +3237,7 @@ nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 	CALLB_CPR_INIT(&cpr_info, &cpr_lock, callb_generic_cpr, "nfsv4seqhb");
 
 	mutex_enter(&np->s_lock);
-	bcopy(np->mntinfo4_list->mi_curr_serv->sv_knconf, &knc, sizeof (knc));
-	bcopy(&np->mntinfo4_list->mi_curr_serv->sv_addr, &nb, sizeof (nb));
-	mutex_exit(&np->s_lock);
-
-	error = clnt_tli_kcreate(&knc, &nb, NFS4_PROGRAM, NFS_V4, 0, 0,
-	    np->s_cred, &seqclient);
-	if (error) {
-		zcmn_err(getzoneid(), CE_WARN,
-		    "No CLIENT for OP_SEQUENCE without mounts");
-		goto errout;
-	}
-
-	mutex_enter(&np->s_lock);
 	np->seqhb_flags = NFS4_SEQHB_STARTED;
-
-	if (!CLNT_CONTROL(seqclient, CLSET_TAG, (char *)(np->ssx.sessionid))) {
-		zcmn_err(getzoneid(), CE_WARN,
-		    "nfs4_sequence_heartbeat_thread"
-		    "CLSET_TAG failed on clnt handle");
-		goto errout;
-	}
 
 	while (!(np->seqhb_flags & NFS4_SEQHB_EXIT)) {
 		kip_secs = MAX((np->s_lease_time >> 1) -
@@ -3274,13 +3275,24 @@ nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 		 */
 
 		if (!(np->seqhb_flags & NFS4_SEQHB_EXIT)) {
-			(void) nfs4sequence(np, seqclient);
+			nfs4sequence(np->s_hb_mi, np, np->s_hb_svp, &e);
 
 			/*
 			 * Need to reacquire sp's lock,
 			 * nfs4sequence() relinquishes it.
 			 */
 			mutex_enter(&np->s_lock);
+
+			/*
+			 * If we got BAD_SESSION from the sequence op,
+			 * then we are going to be terminating.  Don't
+			 * bother doing DESTROY_SESSION otw.
+			 */
+			if (e.stat == NFS4ERR_BADSESSION) {
+				destroy = 0;
+				break;
+			}
+
 		}
 
 		if (np->seqhb_flags & NFS4_SEQHB_EXITING) {
@@ -3294,8 +3306,8 @@ nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 				if (cur_time >= die_time) {
 					if (np->mntinfo4_list == NULL) {
 						np->seqhb_flags |=
-						    (NFS4_SEQHB_EXIT |
-						    NFS4_SEQHB_DESTROY);
+						    NFS4_SEQHB_EXIT;
+						destroy = 1;
 					} else {
 						die_time = 0;
 					}
@@ -3303,7 +3315,8 @@ nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 					    ~(NFS4_SEQHB_EXITING);
 				}
 			} else {
-				die_time = SEC_TO_TICK(4 * 60) + lbolt;
+				die_time = SEC_TO_TICK
+				    (nfs4_sequence_hbt_timeout * 60) + lbolt;
 			}
 		}
 	}
@@ -3327,9 +3340,14 @@ nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 		CALLB_CPR_SAFE_END(&cpr_info, &cpr_lock);
 		mutex_exit(&cpr_lock);
 	}
+
+	if (np->seqhb_flags & NFS4_SEQHB_DESTROY_INZONE)
+		destroy = 1;
 	mutex_exit(&np->s_lock);
 
-	nfs4destroy_session(np, seqclient);
+	if (destroy)
+		nfs4destroy_session(np, np->s_hb_mi, np->s_hb_svp, &e,
+		    N4DS_DESTROY_OTW);
 
 	/*
 	 * signal recovery thread (if waiting) that we are done.
@@ -3337,16 +3355,13 @@ nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 	mutex_enter(&np->s_lock);
 	np->seqhb_flags &= ~NFS4_SEQHB_STARTED;
 	np->seqhb_flags &= ~NFS4_SEQHB_EXIT;
-	np->seqhb_flags |= NFS4_SEQHB_DESTROY;
 	cv_signal(&np->ssx_wait);
 	mutex_exit(&np->s_lock);
 
-errout:
+	MI4_RELE(np->s_hb_mi);
 	nfs4_server_rele(np);		/* free the thread's reference */
 	nfs4_server_rele(np);		/* free the list's reference */
 	np = NULL;
-
-	CLNT_DESTROY(seqclient);
 
 	mutex_enter(&cpr_lock);
 	CALLB_CPR_EXIT(&cpr_info);	/* drops cpr_lock */
@@ -3685,93 +3700,29 @@ recov_retry:
 	return (e.error);
 }
 
-static int
-nfs4sequence_nomount(nfs4_server_t *np, CLIENT *seqclient)
-{
-	COMPOUND4args_clnt	args;
-	COMPOUND4res_clnt	res;
-	COMPOUND4node_clnt	node[1];
-	slot_ent_t 		*slotp;
-	nfs4_error_t		e;
-	enum clnt_stat		status;
-	struct timeval 		wait;
-	uint32_t		zilch = 0;
-
-	ASSERT(seqclient != NULL);
-
-	bzero(&res, sizeof (res));
-	bzero(&args, sizeof (args));
-	bzero(node, sizeof (node));
-	TICK_TO_TIMEVAL(30 * hz / 10, &wait);
-
-	args.ctag = TAG_SEQUENCE;
-	args.args_len = 1;
-	args.minor_vers = 1;
-	node[0].arg.argop = OP_SEQUENCE;
-	res.argsp = &args;
-
-	list_create(&args.args, sizeof (COMPOUND4node_clnt),
-	    offsetof(COMPOUND4node_clnt, node));
-	list_insert_head(&args.args, &node[0]);
-
-	if (!(CLNT_CONTROL(seqclient, CLSET_XID, (char *)&zilch))) {
-		zcmn_err(getzoneid(), CE_WARN,
-		    "Failed to zero XID for nomount op_sequence");
-		return (EIO);
-	}
-
-	nfs4sequence_setup(&np->ssx, &args, &slotp);
-	status = CLNT_CALL(seqclient, NFSPROC4_COMPOUND,
-	    xdr_COMPOUND4args_clnt, (caddr_t)&args,
-	    xdr_COMPOUND4res_clnt, (caddr_t)&res,
-	    wait);
-	nfs4_error_set(&e, status, res.status);
-	nfs4sequence_fin(&np->ssx, &res, slotp, &e);
-	if (status != RPC_SUCCESS) {
-		zcmn_err(getzoneid(), CE_WARN,
-		    "Error on SEQ with no mounts, tearing down session");
-		return (status);
-	}
-	if (res.status)
-		status = geterrno4(res.status);
-	xdr_free(xdr_COMPOUND4res_clnt, (caddr_t)&res);
-	return (status);
-}
-
 /*
- * Send out a RENEW op to the server.
- * Assumes sp is locked down.
+ * Send a compound with a single SEQUENCE operation to renew
+ * the lease with the server. Assumes s_lock is held, but this
+ * function releases it because it goes otw.  The caller must
+ * reacquire it if desired.
  */
-static int
-nfs4sequence(nfs4_server_t *sp, CLIENT *seqclient)
+static void
+nfs4sequence(mntinfo4_t *mi, nfs4_server_t *sp, servinfo4_t *svp,
+	nfs4_error_t *ep)
 {
 	nfs4_call_t *cp;
 	cred_t *cr;
-	mntinfo4_t *mi;
 	timespec_t prop_time, after_time;
 	int needrecov = FALSE;
-	nfs4_recov_state_t recov_state;
-	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
 
 	NFS4_DEBUG(nfs4_client_lease_debug, (CE_NOTE, "nfs4renew"));
 
-	recov_state.rs_flags = 0;
-	recov_state.rs_num_retry_despite_err = 0;
-
 recov_retry:
-	/*
-	 * If nfs4_server is marked to exit, rfs41call() will not
-	 * be able to find the nfs4_server down the path. Use direct
-	 * calls in that case.
-	 * XXX will change with changes in rfs4call re-design.
-	 * XXXrsb - Resolve this!
-	 */
-	mi = sp->mntinfo4_list;
-	if ((mi == NULL) || (sp->s_thread_exit == NFS4_THREAD_EXIT)) {
+	if (sp->s_thread_exit == NFS4_THREAD_EXIT) {
 		mutex_exit(&sp->s_lock);
-		return (nfs4sequence_nomount(sp, seqclient));
+		ep->error = EIO;
+		return;
 	}
-	VFS_HOLD(mi->mi_vfsp);
 
 	cr = sp->s_cred;
 	ASSERT(cr != NULL);
@@ -3780,40 +3731,51 @@ recov_retry:
 
 	cp = nfs4_call_init(mi, cr, TAG_SEQUENCE);
 	crfree(cr);
+	cp->nc_svp = cp->nc_ds_servinfo = svp;
+	cp->nc_ophint = OH_SEQUENCE;
+	cp->nc_rfs4call_flags = RFS4CALL_FORCE;
 
-	e.error = nfs4_start_fop(mi, NULL, NULL, OH_SEQUENCE,
-	    &recov_state, NULL);
-	if (e.error) {
-		VFS_RELE(mi->mi_vfsp);
+	ep->error = nfs4_start_op_impl(cp, 0);
+	if (ep->error) {
 		nfs4_call_rele(cp);
-		return (e.error);
+		return;
 	}
 
 	/* Check to see if we're dealing with a marked-dead sp */
 	mutex_enter(&sp->s_lock);
 	if (sp->seqhb_flags & NFS4_SEQHB_EXIT) {
 		mutex_exit(&sp->s_lock);
-		nfs4_end_fop(mi, NULL, NULL, OH_SEQUENCE,
-		    &recov_state, needrecov);
-		VFS_RELE(mi->mi_vfsp);
+		nfs4_end_op_impl(cp);
 		nfs4_call_rele(cp);
-		return (0);
+		return;
 	}
 
-	/* Make sure mi hasn't changed on us */
-	if (mi != sp->mntinfo4_list) {
+#ifdef	NOTYET
 		/*
-		 * Must drop sp's lock to avoid a recursive mutex
-		 * enter
+		 * XXX
+		 * This needs to be re-thought and isn't even correct
+		 * as coded.  mntinfo4_list is the anchor of a list, so
+		 * who's to say that mi is the first thing on that list?
+		 *
+		 * In the NEW version of start_op, the current nfs4_server_t
+		 * will be captured and returned in the call_t.  From there,
+		 * if we need this check, it will be something like
+		 * if (sp != callt->n4sp), then loop back.
 		 */
-		mutex_exit(&sp->s_lock);
-		nfs4_end_fop(mi, NULL, NULL, OH_SEQUENCE,
-		    &recov_state, needrecov);
-		VFS_RELE(mi->mi_vfsp);
-		nfs4_call_rele(cp);
-		mutex_enter(&sp->s_lock);
-		goto recov_retry;
-	}
+
+		/* Make sure mi hasn't changed on us */
+		if (mi != sp->mntinfo4_list) {
+			/*
+			 * Must drop sp's lock to avoid a recursive mutex
+			 * enter
+			 */
+			mutex_exit(&sp->s_lock);
+			nfs4_end_op_impl(cp);
+			nfs4_call_rele(cp);
+			mutex_enter(&sp->s_lock);
+			goto recov_retry;
+		}
+#endif
 	mutex_exit(&sp->s_lock);
 
 	/* 0: sequence */
@@ -3831,7 +3793,7 @@ recov_retry:
 	DTRACE_PROBE2(nfs4__sequence__start, nfs4_server_t *, sp,
 	    mntinfo4_t *, mi);
 
-	rfs4call(cp, &e);
+	rfs4call(cp, ep);
 
 	DTRACE_PROBE2(nfs4__sequence__end, nfs4_server_t *, sp,
 	    mntinfo4_t *, mi);
@@ -3846,44 +3808,38 @@ recov_retry:
 	NFS4_DEBUG(nfs4_client_lease_debug, (CE_NOTE, "after : %ld s %ld ns ",
 	    after_time.tv_sec, after_time.tv_nsec));
 
-	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
-	if (!needrecov && e.error) {
-		nfs4_end_fop(mi, NULL, NULL, OH_SEQUENCE,
-		    &recov_state, needrecov);
-		VFS_RELE(mi->mi_vfsp);
+	needrecov = nfs4_needs_recovery_impl(cp);
+	if (!needrecov && ep->error) {
+		nfs4_end_op_impl(cp);
 		nfs4_call_rele(cp);
-		return (e.error);
+		return;
 	}
 
 	if (needrecov) {
 		NFS4_DEBUG(nfs4_seqhb_debug, (CE_NOTE,
 		    "nfs4sequence: initiating recovery\n"));
 
-		if (nfs4_start_recovery(&e, mi, NULL, NULL, NULL, NULL,
-		    OP_SEQUENCE, NULL) == FALSE) {
-			nfs4_end_fop(mi, NULL, NULL, OH_SEQUENCE, &recov_state,
-			    needrecov);
-			VFS_RELE(mi->mi_vfsp);
+		if (nfs4_start_recovery_impl(cp) == FALSE) {
+			nfs4_end_op_impl(cp);
 			nfs4_call_rele(cp);
 			/*
 			 * The sequence heartbeat thread needs to exit to
 			 * recover from a bad session. Don't retry, just
 			 * return and let recovery take place.
 			 */
-			if (e.stat == NFS4ERR_BADSESSION) {
-				return (e.error);
-			}
+			if (ep->stat == NFS4ERR_BADSESSION)
+				return;
 			mutex_enter(&sp->s_lock);
 			goto recov_retry;
+		} else {
+			mutex_enter(&sp->s_lock);
+			sp->seqhb_flags |= NFS4_SEQHB_EXIT;
+			mutex_exit(&sp->s_lock);
 		}
-		/* fall through for recovery abort case */
 	}
 
-	nfs4_end_fop(mi, NULL, NULL, OH_SEQUENCE, &recov_state, needrecov);
-	VFS_RELE(mi->mi_vfsp);
+	nfs4_end_op_impl(cp);
 	nfs4_call_rele(cp);
-
-	return (e.error);
 }
 
 void
@@ -5387,5 +5343,17 @@ nfs4_op_getdevicelist(nfs4_call_t *cp, GETDEVICELIST4args **args)
 	*args = &np->arg.nfs_argop4_u.opgetdevicelist;
 	r = &np->res.nfs_resop4_u.opgetdevicelist;
 	r->gdlr_status = NFS4ERR_INVAL;
+	return (r);
+}
+
+DESTROY_SESSION4res *
+nfs4_op_destroy_session(nfs4_call_t *cp, sessionid4 s)
+{
+	DESTROY_SESSION4res *r;
+	COMPOUND4node_clnt *np = nfs4_op_generic(cp, OP_DESTROY_SESSION);
+	bcopy(s, np->arg.nfs_argop4_u.opdestroy_session.dsa_sessionid,
+	    sizeof (sessionid4));
+	r = &np->res.nfs_resop4_u.opdestroy_session;
+	r->dsr_status = NFS4ERR_INVAL;
 	return (r);
 }

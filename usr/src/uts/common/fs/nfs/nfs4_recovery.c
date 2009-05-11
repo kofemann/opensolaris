@@ -837,18 +837,24 @@ again:
 				 * thread to exit.
 				 */
 
-				sp->seqhb_flags |= NFS4_SEQHB_EXIT;
+				if (sp->seqhb_flags & NFS4_SEQHB_STARTED) {
+					sp->seqhb_flags |= NFS4_SEQHB_EXIT;
 
-				/*
-				 * sequence heartbeat thread releases the lists
-				 * reference to the nfs4_server. But we need the
-				 * nfs4_server to stick around, so add an extra
-				 * reference here.
-				 * XXX Need a double check on the requirement of
-				 * this ugliness.
-				 */
-				sp->s_refcnt++;
-				cv_broadcast(&sp->cv_thread_exit);
+					/*
+					 * sequence heartbeat thread
+					 * releases the lists
+					 * reference to the nfs4_server.
+					 * But we need the
+					 * nfs4_server to stick around,
+					 * so add an extra
+					 * reference here.
+					 * XXX Need a double check on
+					 * the requirement of
+					 * this ugliness.
+					 */
+					sp->s_refcnt++;
+					cv_broadcast(&sp->cv_thread_exit);
+				}
 			}
 			mutex_exit(&sp->s_lock);
 		}
@@ -2213,7 +2219,7 @@ nfs4_recov_thread(recov_info_t *recovp)
 				delay(SEC_TO_TICK(nfs4_unmount_delay));
 			}
 		} else
-			done = 1;	/* XXXweb, are we really done? */
+			done = 1;	/* XXX, are we really done? */
 
 	} while (!done);
 
@@ -2507,7 +2513,17 @@ recov_clientid(recov_info_t *recovp, nfs4_server_t *sp)
 		 * First cleanup old session.
 		 */
 		if (NFS41_SERVER(sp))
-			nfs4_cleanup_oldsession(sp);
+			/*
+			 * If the target was the MDS, then ds_servinfo
+			 * will be NULL and the underlying code will
+			 * use mi_curr_serv (as it should).
+			 *
+			 * Terminate the heartbeat thread if it is still
+			 * around, but do not send destroy_session OTW
+			 */
+			nfs4destroy_session(sp, mi,
+			    recovp->rc_callp->nc_ds_servinfo,
+			    &n4e, N4DS_TERMINATE_HB_THREAD);
 
 		nfs4_error_zinit(&n4e);
 		/*
@@ -2662,16 +2678,18 @@ recov_badsession(recov_info_t *recovp, nfs4_server_t *np)
 	servinfo4_t *svp;
 	nfs4_error_t e;
 
-	/*
-	 * Cleanup the current session.
-	 */
-
-	nfs4_cleanup_oldsession(np);
-
 	if (is_dataserver)
 		svp = cp->nc_ds_servinfo;
 	else
-		svp =  mi->mi_curr_serv;
+		svp = mi->mi_curr_serv;
+
+	/*
+	 * Cleanup the current session.
+	 * Terminate the heartbeat thread if it is still
+	 * around, but do not send destroy_session OTW
+	 */
+	nfs4destroy_session(np, mi, recovp->rc_callp->nc_ds_servinfo,
+	    &e, N4DS_TERMINATE_HB_THREAD);
 
 	nfs4create_session(mi, svp, kcred, np, &e);
 
@@ -3391,8 +3409,6 @@ recov_openfiles(recov_info_t *recovp, nfs4_server_t *sp)
 	fattr4_change pre_change;
 
 	ASSERT(sp != NULL);
-
-	pnfs_trash_devtree(sp);
 
 	/*
 	 * This check is to allow a 10ms pause before we reopen files

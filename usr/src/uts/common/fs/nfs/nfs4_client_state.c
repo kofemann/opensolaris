@@ -2466,14 +2466,9 @@ err_out:
 	nfs4_call_rele(cp);
 }
 
-/*
- * Start the heartbeat thread for this nfs4_server.  Note that
- * nfs4_servers for data servers do not require heartbeats.  Do
- * getattr on the root fh to fetch the server's lease time.
- */
-void
-nfs4start_hb_thread(mntinfo4_t *mi, cred_t *cr,
-	struct nfs4_server *np, nfs4_error_t *ep)
+static void
+nfs4get_lease_time(mntinfo4_t *mi, struct nfs4_server *np,
+	nfs4_error_t *ep, cred_t *cr)
 {
 	nfs4_call_t		*cp;
 	GETATTR4res		*getattr_res;
@@ -2543,6 +2538,27 @@ nfs4start_hb_thread(mntinfo4_t *mi, cred_t *cr,
 		mutex_exit(&np->s_lock);
 	}
 	nfs4_call_rele(cp);
+}
+
+/*
+ * Start the heartbeat thread for this nfs4_server.  For metadata
+ * servers to a GETATTR on the root file handle to get the lease
+ * time.  For data servers, use the lease time for the MDS.
+ */
+void
+nfs4start_hb_thread(mntinfo4_t *mi, servinfo4_t *svp,
+	struct nfs4_server *np, nfs4_error_t *ep, cred_t *cr)
+{
+	/* SV4_ISA_DS is set when the target server is ONLY a DS.  */
+	if (svp->sv_flags & SV4_ISA_DS) {
+		mutex_enter(&np->s_lock);
+		np->s_lease_time = mi->mi_lease_period;
+		mutex_exit(&np->s_lock);
+	} else {
+		nfs4get_lease_time(mi, np, ep, cr);
+		if (ep->error || ep->stat)
+			return;
+	}
 
 	mutex_enter(&np->s_lock);
 	if (!(np->seqhb_flags & NFS4_SEQHB_STARTED)) {
@@ -2552,8 +2568,20 @@ nfs4start_hb_thread(mntinfo4_t *mi, cred_t *cr,
 		 */
 
 		np->s_refcnt++;		/* pass reference to thread */
+		/*
+		 * Pass a reference to the mi to the new thread.  This
+		 * reference will remain as long as the thread remains
+		 * active, even if the file system is unmounted.  Once
+		 * the thread terminates, it will release the reference
+		 * This reference does not interfere with unmount.
+		 */
+		MI4_HOLD(mi);
+		np->s_hb_mi = mi;
+		np->s_hb_svp = svp;
+
 		(void) zthread_create(NULL, 0, nfs4_sequence_heartbeat_thread,
 		    np, 0, minclsyspri);
+
 	}
 	mutex_exit(&np->s_lock);
 }
@@ -2795,7 +2823,7 @@ nfs4create_session(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 	 */
 	if (cp->nc_res.status) {
 		nfs4_call_rele(cp);
-		nfs4destroy_session(np, NULL);
+		nfs4destroy_session(np, mi, svp, ep, 0);
 		return;
 	}
 
@@ -2867,15 +2895,13 @@ nfs4create_session(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 
 	/* KLR - need SET_SSV and BIND_CONN_TO_SESSION here when ready */
 
-	if (!(svp->sv_flags & SV4_ISA_DS)) {
-		nfs4start_hb_thread(mi, cr, np, ep);
-		if (ep->error || ep->stat) {
-			cmn_err(CE_WARN, "nfs4 hb_thread start failed");
-			nfs4destroy_session(np, NULL);
-			return;
-		}
+	/* Start a thread to keep the lease active. */
+	nfs4start_hb_thread(mi, svp, np, ep, cr);
+	if (ep->error || ep->stat) {
+		cmn_err(CE_WARN, "nfs4 hb_thread start failed");
+		nfs4destroy_session(np, mi, svp, ep, N4DS_DESTROY_OTW);
+		return;
 	}
-
 	mutex_enter(&np->s_lock);
 
 	/*

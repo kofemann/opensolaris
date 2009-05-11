@@ -1480,10 +1480,10 @@ nfs41_cbinfo_rele(struct nfs41_cb_info *cbi)
 		mutex_exit(&cbi->cb_reflock);
 		return;
 	}
-	ASSERT(cbi->cb_cbconn_exit);
 	mutex_exit(&cbi->cb_reflock);
 
 	if (cbi->cb_client) {
+		ASSERT(cbi->cb_cbconn_exit);
 		if (!(CLNT_CONTROL(cbi->cb_client,
 		    CLSET_BACKCHANNEL_CLEAR, NULL))) {
 			zcmn_err(getzoneid(), CE_WARN,

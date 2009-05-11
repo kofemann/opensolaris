@@ -1343,9 +1343,13 @@ nfs4_queue_event(nfs4_event_type_t id, mntinfo4_t *mi, char *server1,
 
 	cur_srv = mi->mi_curr_serv->sv_hostname;
 	msg->msg_srv = strdup(cur_srv);
-	mntpt = vfs_getmntpoint(mi->mi_vfsp);
-	msg->msg_mntpt = strdup(refstr_value(mntpt));
-	refstr_rele(mntpt);
+	if (mi->mi_vfsp->vfs_flag & VFS_UNMOUNTED)
+		msg->msg_mntpt = strdup("(unmounted)");
+	else {
+		mntpt = vfs_getmntpoint(mi->mi_vfsp);
+		msg->msg_mntpt = strdup(refstr_value(mntpt));
+		refstr_rele(mntpt);
+	}
 
 	set_event(id, ep, mi, rp1, rp2, count, pid, nfs4_error, server1,
 	    why, tag1, tag2, seqid1, seqid2);
@@ -1406,9 +1410,13 @@ nfs4_queue_fact(nfs4_fact_type_t fid, mntinfo4_t *mi, nfsstat4 stat4,
 		cur_srv = mi->mi_curr_serv->sv_hostname;
 
 	msg->msg_srv = strdup(cur_srv);
-	mntpt = vfs_getmntpoint(mi->mi_vfsp);
-	msg->msg_mntpt = strdup(refstr_value(mntpt));
-	refstr_rele(mntpt);
+	if (mi->mi_vfsp->vfs_flag & VFS_UNMOUNTED)
+		msg->msg_mntpt = strdup("(unmounted)");
+	else {
+		mntpt = vfs_getmntpoint(mi->mi_vfsp);
+		msg->msg_mntpt = strdup(refstr_value(mntpt));
+		refstr_rele(mntpt);
+	}
 
 	fp = &msg->rmsg_u.msg_fact;
 	fp->rf_type = fid;

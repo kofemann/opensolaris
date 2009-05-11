@@ -500,7 +500,11 @@ pnfs_trash_devtree(nfs4_server_t *n4sp)
 {
 	devnode_t *dp;
 	void *cookie = NULL;
-	int i, ns;
+	int ns;
+#ifdef	NOTYET
+	int i;
+	servinfo4_t *dssp;	/* for the data servers */
+#endif
 
 	/* The server structure is being decommissioned, no locking needed. */
 
@@ -511,11 +515,24 @@ pnfs_trash_devtree(nfs4_server_t *n4sp)
 			ns = dp->dn_ds_addrs.mpl_len;
 			xdr_free(xdr_nfsv4_1_file_layout_ds_addr4,
 			    (char *)&dp->dn_ds_addrs);
+			/*
+			 * Free the servinfo4 from the device.  This will
+			 * need to change when multiple servers are present
+			 * in the list.
+			 */
+#ifdef	NOTYET
+			/*
+			 * XXX - The servinfo4 cannot be freed yet because
+			 * it is in use by the heartbeat thread.
+			 */
 			for (i = 0; i < ns; i++)
-				if (dp->dn_server_list[i])
-					nfs4_server_rele(dp->dn_server_list[i]);
-			kmem_free(dp->dn_server_list, ns *
-			    sizeof (nfs4_server_t *));
+				if ((dssp = dp->dn_server_list[i].ds_curr_serv)
+				    != NULL) {
+					sv4_free(dssp);
+				}
+#endif
+
+			kmem_free(dp->dn_server_list, ns * sizeof (ds_info_t));
 			kmem_free(dp, sizeof (devnode_t));
 		}
 	}
@@ -743,21 +760,17 @@ netaddr2netbuf(netaddr4 *nap, struct netbuf *nbp, struct knetconfig *kncp)
 }
 
 /*
- * Find the nfs4_server structure for the server described by IP address
+ * Build a servinfo4 structure for the server described by IP address
  * in netbuf.  If necessary, make a new nfs4_server_t/servinfo4_t and
  * perform an Exchange ID and Create Session if needed.  On success,
- * return 0 and set *npp to point to the twice-HELD nfs4_server_t that
- * we found/created.  Otherwise, return an error.
- *
- * Users of *npp are responsible for doing the nfs4_server_rele().
- * The two holds are the one from svp->sv_ds_n4sp and the other
- * is done for the benefit of the caller.
+ * return 0 and set *svpp to point to the servinfo4 we found or created.
+ * Otherwise, return an error.
  */
 static int
-find_nfs4_server_by_netaddr4(
+netaddr4_to_servinfo4(
 	netaddr4 *nap,		/* netaddr4 from the devid_tree */
 	mntinfo4_t *mi,		/* mntinfo4 from MDS */
-	nfs4_server_t **npp)	/* returned nfs4_server */
+	servinfo4_t **svpp)	/* returned servinfo4 */
 {
 	struct netbuf nb;
 	struct knetconfig knc;
@@ -802,28 +815,25 @@ retry:
 		 * is implemented.
 		 */
 		if (np->s_ds_svp == NULL) {
-			svp = new_servinfo4(&knc, &nb, SV4_ISA_DS);
+			svp = new_servinfo4(mi, nap->na_r_addr,
+			    &knc, &nb, SV4_ISA_DS);
 			np->s_ds_svp = svp;
-			svp->sv_ds_n4sp = np;
-			np->s_refcnt++;	/* Lock is held, just bump the count */
-		}
+		} else
+			svp = np->s_ds_svp;
 
 		mutex_exit(&np->s_lock);
 		kmem_free(nb.buf, nb.maxlen);
 
-		*npp = np;
+		*svpp = svp;
 		return (0);
 	}
 
-	svp = new_servinfo4(&knc, &nb, SV4_ISA_DS);
+	svp = new_servinfo4(mi, nap->na_r_addr, &knc, &nb, SV4_ISA_DS);
 	np = add_new_nfs4_server(svp, kcred);
 	np->s_ds_svp = svp;
-	svp->sv_ds_n4sp = np;	/* Use the hold from add_new_nfs4_server() */
 
 	mutex_exit(&np->s_lock);
 	mutex_exit(&nfs4_server_lst_lock);
-
-	nfs4_server_hold(np);	/* This hold is for the caller's benefit */
 
 	/*
 	 * XXXrsb - Either we should use start_op/end_op or
@@ -836,6 +846,13 @@ retry:
 
 	nfs_rw_exit(&mi->mi_recovlock);
 
+	/*
+	 * Drop the initial reference on the nfs4_server.  The
+	 * list still maintains a ref as well as the heartbeat
+	 * thread, started by nfs4exchange_id_otw et al.
+	 */
+	nfs4_server_rele(np);
+
 	if (e.error || e.stat) {
 		mutex_enter(&np->s_lock);
 		np->s_flags |= N4S_EXID_FAILED;
@@ -843,11 +860,12 @@ retry:
 		mutex_exit(&np->s_lock);
 		nfs4_server_rele(np);
 		cmn_err(CE_WARN,
-		    "find_nfs4_server_by_netaddr4: exchange_id failed");
+		    "netaddr4_to_servinfo4: exchange_id failed %d, %d",
+		    e.error, e.stat);
 		error = e.error;
 	} else {
 		/* All good, let's go home */
-		*npp = np;
+		*svpp = svp;
 	}
 
 	kmem_free(nb.buf, nb.maxlen);
@@ -1044,7 +1062,8 @@ stripe_dev_prepare(
 	int mpl_index;
 	multipath_list4 *mpl_item;
 	netaddr4 *nap;
-	nfs4_server_t *dsp, *mdsp;
+	nfs4_server_t *mdsp;
+	servinfo4_t *svp;	/* servinfo4 for the target DS */
 	int error = 0;
 	deviceid4 did;
 
@@ -1101,13 +1120,13 @@ stripe_dev_prepare(
 	/* XXX - always choose multipath item 0 */
 	nap = &mpl_item->multipath_list4_val[0];
 
-	if ((dsp = dip->dn_server_list[mpl_index]) == NULL) {
+	if ((svp = dip->dn_server_list[mpl_index].ds_curr_serv) == NULL) {
 		/*
-		 * Drop these locks since find_nfs4_server_by_netaddr4()
+		 * Drop these locks since netaddr4_to_servinfo4()
 		 * may go OTW to do EXID/CR_SESS.
 		 */
 		mutex_exit(&mdsp->s_lock);
-		error = find_nfs4_server_by_netaddr4(nap, mi, &dsp);
+		error = netaddr4_to_servinfo4(nap, mi, &svp);
 		mutex_enter(&mdsp->s_lock);
 
 		if (error) {
@@ -1116,27 +1135,17 @@ stripe_dev_prepare(
 			return (error);
 		}
 
-		ASSERT(dsp->s_ds_svp != NULL);	/* 1 of 2 */
-
 		/* Initialize the server list, if needed */
 
-		if (dip->dn_server_list[mpl_index] == NULL) {
-			dip->dn_server_list[mpl_index] = dsp;
+		if (dip->dn_server_list[mpl_index].ds_curr_serv == NULL) {
+			dip->dn_server_list[mpl_index].ds_curr_serv = svp;
 		} else {
 			/*
-			 * Someone else got here first.  Drop the hold
-			 * and use whatever is in the tree (below)
+			 * Someone else got here first, use the
+			 * current server value.
 			 *
-			 * Be careful here, dsp might point to the same
-			 * server as mdsp (ie. the data server is on
-			 * the same addr/port as the mds).
 			 */
-			if (dsp != mdsp)
-				nfs4_server_rele(dsp);
-			else
-				dsp->s_refcnt--;
-
-			dsp = dip->dn_server_list[mpl_index];
+			svp = dip->dn_server_list[mpl_index].ds_curr_serv;
 		}
 	}
 	pnfs_rele_device(mdsp, dip);
@@ -1145,7 +1154,7 @@ stripe_dev_prepare(
 
 	mutex_enter(&dev->std_lock);
 	if (dev->std_svp == NULL)
-		dev->std_svp = dsp->s_ds_svp;
+		dev->std_svp = svp;
 
 	ASSERT(dev->std_svp != NULL);
 	mutex_exit(&dev->std_lock);
@@ -1572,7 +1581,7 @@ pnfs_populate_device(devnode_t *dp, device_addr4 *da)
 
 	/* Allocate the server array, it will be initialized later */
 	dp->dn_server_list = kmem_zalloc(dp->dn_ds_addrs.mpl_len *
-	    sizeof (nfs4_server_t *), KM_SLEEP);
+	    sizeof (ds_info_t), KM_SLEEP);
 
 	return (0);
 }
