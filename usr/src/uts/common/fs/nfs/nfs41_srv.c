@@ -1442,6 +1442,7 @@ mds_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	cred_t *cr = cs->cr;
 	vnode_t *dvp = cs->vp;
 	vnode_t *vp = NULL;
+	vnode_t *realvp;
 	char *nm, *lnm;
 	uint_t len, llen;
 	int syncval = 0;
@@ -1751,7 +1752,15 @@ mds_op_create(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	else
 		resp->cinfo.atomic = FALSE;
 
-	(void) VOP_FSYNC(vp, syncval, cr, &ct);
+	/*
+	 * Force modified metadata out to stable storage.
+	 *
+	 * if a underlying vp exists, pass it to VOP_FSYNC
+	 */
+	if (VOP_REALVP(vp, &realvp, &ct) == 0)
+		(void) VOP_FSYNC(realvp, syncval, cr, &ct);
+	else
+		(void) VOP_FSYNC(vp, syncval, cr, &ct);
 
 	if (resp->status != NFS4_OK) {
 		VN_RELE(vp);
@@ -8803,7 +8812,10 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 	nfs_range_query_t remain;
 
 	fp = rfs4_findfile(cs->instp, cs->vp, NULL, &create);
-	/* what if fp == NULL??? */
+	if (fp == NULL) {
+		cmn_err(CE_WARN, "lo_return(): findfile returned NULL");
+		return (NFS4ERR_SERVERFAULT);
+	}
 
 	lgp = rfs41_findlogrant(cs, fp, cs->cp, &create);
 	if (lgp == NULL) {

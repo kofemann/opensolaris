@@ -1530,7 +1530,7 @@ mds_rm_grant_callout(rfs4_entry_t u_entry, void *arg)
 
 		lgp->fp = NULL;
 		rfs4_dbe_invalidate(lgp->dbe);
-		rfs41_lo_grant_rele(lgp);
+		rfs4_dbe_rele_nolock(lgp->dbe);
 	}
 }
 

@@ -825,7 +825,8 @@ dserv_nnode_read(void *vdata, nnode_io_flags_t *nnflags, cred_t *cr,
 
 	rw_enter(&data->dnd_rwlock, RW_READER);
 	if (uiop->uio_loffset >= data->dnd_phys->dp_size)
-		return (0);
+		goto out;
+
 	ASSERT(data->dnd_flags & DSERV_NNODE_FLAG_OBJECT);
 	n = MIN(uiop->uio_resid, data->dnd_phys->dp_size - uiop->uio_loffset);
 	while (n > 0) {
