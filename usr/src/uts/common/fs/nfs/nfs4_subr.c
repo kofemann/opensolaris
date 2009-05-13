@@ -3550,6 +3550,8 @@ secdatacopy(servinfo4_t *svp, servinfo4_t *dsvp)
 	}
 }
 
+int nfs4_secdatacopy;
+
 servinfo4_t *
 new_servinfo4(mntinfo4_t *mi, char *hostname, struct knetconfig *knc,
     struct netbuf *nb, int flags)
@@ -3577,8 +3579,19 @@ new_servinfo4(mntinfo4_t *mi, char *hostname, struct knetconfig *knc,
 	svp->sv_addr.buf = kmem_alloc(nb->maxlen, KM_SLEEP);
 	bcopy(nb->buf, svp->sv_addr.buf, nb->len);
 
-	/* copy the mountinfo's security data */
-	secdatacopy(mi->mi_curr_serv, svp);
+	if (nfs4_secdatacopy) {
+		/* copy the mountinfo's security data */
+		secdatacopy(mi->mi_curr_serv, svp);
+	} else {
+		struct sec_data *secdata;
+
+		/* XXX - just use AUTH_SYS, for helen */
+
+		secdata = kmem_alloc(sizeof (*secdata), KM_SLEEP);
+		secdata->secmod = secdata->rpcflavor = AUTH_SYS;
+		secdata->data = NULL;
+		svp->sv_secdata = secdata;
+	}
 
 	/*
 	 * There is no path for a DS because there is no
