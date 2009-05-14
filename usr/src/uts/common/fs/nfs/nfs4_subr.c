@@ -3404,11 +3404,13 @@ nfs4sequence_setup(nfs4_session_t *np, COMPOUND4args_clnt *rfsargp,
 	/*
 	 * Update SEQUENCE args
 	 */
+	mutex_enter(&np->slot_table->st_lock);
+	argp->nfs_argop4_u.opsequence.sa_highest_slotid  =
+	    np->slot_table->st_fslots;
+	mutex_exit(&np->slot_table->st_lock);
 	mutex_enter(&slot->se_lock);
 	argp->nfs_argop4_u.opsequence.sa_sequenceid = slot->se_seqid;
 	argp->nfs_argop4_u.opsequence.sa_slotid = slot->se_sltno;
-	argp->nfs_argop4_u.opsequence.sa_highest_slotid  =
-	    np->slot_table->st_fslots;
 	/* XXX - rick - need sr_target_highest_slotid */
 	mutex_exit(&slot->se_lock);
 

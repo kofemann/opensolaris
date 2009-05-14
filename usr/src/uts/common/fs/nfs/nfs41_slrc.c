@@ -220,9 +220,7 @@ sltab_get(stok_t *handle, slotid4 slot)
 	mutex_enter(&handle->st_lock);
 	node = (slot_ent_t *)avl_find(replaytree, &tmp, &where);
 	mutex_exit(&handle->st_lock);
-	if (node != NULL)
-		return (node);
-	return (NULL);
+	return (node);
 }
 
 /*
@@ -349,15 +347,18 @@ retry:
 				continue;
 			}
 		} else {
+			mutex_enter(&handle->st_lock);
 			mutex_enter(&tmp->se_lock);
 			if (tmp->se_state & SLOT_FREE) {
 				tmp->se_state = SLOT_INUSE;
 				handle->st_fslots -= 1;
 				*res = tmp;
 				mutex_exit(&tmp->se_lock);
+				mutex_exit(&handle->st_lock);
 				return (ret);
 			}
 			mutex_exit(&tmp->se_lock);
+			mutex_exit(&handle->st_lock);
 		}
 	}
 	if (f == SLT_NOSLEEP) {
@@ -398,8 +399,7 @@ slot_free(stok_t *handle, slot_ent_t *p)
 
 	p->se_state = SLOT_FREE;
 	handle->st_fslots += 1;
-	/* ASSERT(handle->st_fslots <= handle->st_currw); */
-	cv_signal(&p->se_wait);
+	ASSERT(handle->st_fslots <= handle->st_currw);
 	mutex_exit(&p->se_lock);
 	cv_signal(&handle->st_wait);
 	mutex_exit(&handle->st_lock);
@@ -418,8 +418,8 @@ slot_cb_status(stok_t *handle)
 	 * Slot is still in use, session cannot be destroyed.
 	 */
 	ASSERT(handle != NULL);
-	mutex_enter(&handle->st_lock);
 
+	mutex_enter(&handle->st_lock);
 	for (tmp = avl_first(replaytree); tmp != NULL; tmp = next) {
 		next = AVL_NEXT(replaytree, tmp);
 		mutex_enter(&tmp->se_lock);
@@ -427,9 +427,9 @@ slot_cb_status(stok_t *handle)
 			status = NFS4ERR_BACK_CHAN_BUSY;
 			mutex_exit(&tmp->se_lock);
 			break;
-		} else {
-			tmp->se_state = SLOT_FREE;
 		}
+		tmp->se_state = SLOT_FREE;
+		handle->st_fslots += 1;
 		mutex_exit(&tmp->se_lock);
 	}
 	mutex_exit(&handle->st_lock);
