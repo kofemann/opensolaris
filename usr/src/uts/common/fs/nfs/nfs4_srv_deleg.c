@@ -2362,7 +2362,6 @@ rfs4_return_deleg(rfs4_deleg_state_t *dsp, bool_t revoked)
 				rfs4_dbe_lock(sp->dbe);
 				ASSERT(sp->sn_replay != NULL);
 				slp = slrc_slot_get(sp->sn_replay, slot);
-				ASSERT(slp->se_p != NULL);
 				if (slp->se_p == dsp) {
 					rfs41_rs_erase(dsp);
 					slp->se_p = NULL;
