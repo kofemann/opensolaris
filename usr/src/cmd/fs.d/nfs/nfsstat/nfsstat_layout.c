@@ -126,7 +126,7 @@ null_procedure_ping(char *hostname, char *netid, enum clnt_stat *ds_status)
 	ulong_t versnum = 4;
 	int rc = -1;
 
-	to.tv_sec = 5;
+	to.tv_sec = 60;
 	to.tv_usec = 0;
 
 	client = clnt_create_timed(hostname, prognum, versnum, netid, &to);
