@@ -122,6 +122,18 @@ typedef struct mds_ever_grant {
 #define	eg_fsid	eg_un.fsid
 #define	eg_key	eg_un.key
 
+/*
+ * A ds_owner has a list of ds_addrlist entries and
+ * a list of ds_guid entries. As an entry is added into
+ * a list, it will bump the refcnts in both the ds_owner
+ * and itself. It does this to prevent both references
+ * from becoming invalid.
+ *
+ * This sounds nasty and recursive. It is. If an entry
+ * destroy function is called without going through the
+ * external linked list release functions, well, this
+ * is your only warning not to do that.
+ */
 typedef struct {
 	rfs4_dbe_t	*dbe;
 	time_t		last_access;
@@ -171,6 +183,7 @@ typedef struct {
 	struct knetconfig	*dev_knc;
 	struct netbuf		*dev_nb;
 	uint_t			dev_flags;
+	uint32_t		locnt;
 	ds_owner_t		*ds_owner;
 	list_node_t		ds_addrlist_next;
 } ds_addrlist_t;
@@ -201,7 +214,7 @@ typedef struct mds_device_list {
  */
 typedef struct {
 	rfs4_dbe_t	*dbe;
-	ds_owner_t   	*ds_ownerp;
+	ds_owner_t   	*ds_owner;
 } mds_ds_state_t;
 
 /*
@@ -210,7 +223,7 @@ typedef struct {
  */
 typedef struct {
 	rfs4_dbe_t 	*dbe;
-	ds_owner_t 	*ds_ownerp;
+	ds_owner_t 	*ds_owner;
 	list_node_t	ds_guid_next;
 	ds_guid_t	ds_guid;
 	uint_t    	ds_attr_len;
@@ -223,7 +236,7 @@ typedef struct {
  */
 typedef struct {
 	struct ds_storinfo *si;
-	ds_owner_t *dop;
+	ds_owner_t *ds_owner;
 } pinfo_create_t;
 
 extern int mds_get_odl(vnode_t *, mds_layout_t **);
@@ -231,6 +244,8 @@ extern void mds_xdr_devicelist(rfs4_entry_t, void *);
 extern ds_addrlist_t *mds_find_ds_addrlist(nfs_server_instance_t *, uint32_t);
 extern ds_addrlist_t *mds_find_ds_addrlist_by_uaddr(nfs_server_instance_t *,
 	char *);
+extern void mds_ds_addrlist_rele(ds_addrlist_t *);
+extern ds_guid_info_t *mds_find_ds_guid_info_by_id(ds_guid_t guid);
 extern int uaddr2sockaddr(int, char *, void *, in_port_t *);
 extern int mds_put_layout(mds_layout_t *, vnode_t *);
 

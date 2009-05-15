@@ -94,7 +94,7 @@ seqop_error(COMPOUND4args_srv *ap, COMPOUND4res *rp)
 
 /*
  * If this function successfully completes the compound state
- * will have contain a session pointer.
+ * will contain a session pointer.
  */
 nfsstat4
 rfs41_find_and_set_session(COMPOUND4args_srv *ap, struct compound_state *cs)
@@ -364,6 +364,21 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 	rbp->minorversion = NFS4_MINOR_v1;
 	cap = (COMPOUND4args_srv *)ap;
 	cs->statusp = &rbp->status;
+
+	/*
+	 * First check to see if the instance has been
+	 * fully setup!
+	 *
+	 * But wait, we might also be tearing down the
+	 * instance!
+	 */
+	if (mds_server == NULL ||
+	    !(mds_server->inst_flags & NFS_INST_STORE_INIT) ||
+	    (mds_server->inst_flags & NFS_INST_TERMINUS)) {
+		rbp->status = error = NFS4ERR_BADSESSION;
+		seqop_error(cap, (COMPOUND4res *)rbp);
+		goto reply;
+	}
 
 	/*
 	 * Validate the first operation in the compound,

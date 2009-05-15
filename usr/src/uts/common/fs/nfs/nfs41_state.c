@@ -327,9 +327,9 @@ mds_file_walk_callout(rfs4_entry_t u_entry, void *e)
 		return;
 
 	if ((vp = fp->vp) != NULL) {
-
 		instp = dbe_to_instp(fp->dbe);
 		ASSERT(instp);
+
 		/*
 		 * don't leak monitors and remove the reference
 		 * put on the vnode when the delegation was granted.
@@ -343,12 +343,14 @@ mds_file_walk_callout(rfs4_entry_t u_entry, void *e)
 			    (void *)fp);
 			vn_open_downgrade(vp, FREAD|FWRITE);
 		}
+
 		mutex_enter(&vp->v_lock);
 		(void) vsd_set(vp, instp->vkey, NULL);
 		mutex_exit(&vp->v_lock);
 		VN_RELE(vp);
 		fp->vp = NULL;
 	}
+
 	rfs4_dbe_invalidate(fp->dbe);
 }
 
@@ -909,12 +911,13 @@ mds_kill_session_callout(rfs4_entry_t u_entry, void *arg)
 	rfs4_client_t *cp = (rfs4_client_t *)arg;
 	mds_session_t *sp = (mds_session_t *)u_entry;
 
-	if (sp->sn_clnt == cp && !(rfs4_dbe_is_invalid(sp->dbe)))
+	if (sp->sn_clnt == cp && !(rfs4_dbe_is_invalid(sp->dbe))) {
 		/*
 		 * client is going away; so no need to check for
 		 * CB channel traffic before destroying a session.
 		 */
 		rfs4_dbe_invalidate(sp->dbe);
+	}
 }
 
 void
@@ -928,7 +931,6 @@ mds_clean_up_sessions(rfs4_client_t *cp)
 		rfs4_dbe_walk(instp->mds_session_tab,
 		    mds_kill_session_callout, cp);
 }
-
 
 /*
  * -----------------------------------------------
@@ -987,10 +989,27 @@ mds_nuke_mpd(nfs_server_instance_t *instp, uint32_t mpd_id)
 	if ((e = rfs4_dbsearch(instp->mds_mpd_idx, (void *)(uintptr_t)mpd_id,
 	    &create, NULL, RFS4_DBS_VALID)) != NULL) {
 		rfs4_dbe_invalidate(e->dbe);
+		rfs4_dbe_rele(e->dbe);
 	}
 	rw_exit(&instp->mds_mpd_lock);
 }
 
+void
+mds_ds_addrlist_layout_hold(ds_addrlist_t *dp)
+{
+	atomic_add_32(&dp->locnt, 1);
+}
+
+void
+mds_ds_addrlist_layout_rele(ds_addrlist_t *dp)
+{
+	ASSERT(dp->locnt > 0);
+	atomic_add_32(&dp->locnt, -1);
+}
+
+/*
+ * For each entry called, the refcnt is effectively bumped.
+ */
 void
 mds_gather_devs(rfs4_entry_t entry, void *arg)
 {
@@ -1002,8 +1021,49 @@ mds_gather_devs(rfs4_entry_t entry, void *arg)
 
 	if (gap->dex < gap->max_devs_needed) {
 		gap->lo_arg.lo_devs[gap->dex] = rfs4_dbe_getid(dp->dbe);
+		rfs4_dbe_hold(dp->dbe);
 		gap->dev_ptr[gap->dex] = dp;
+		mds_ds_addrlist_layout_hold(dp);
 		gap->dex++;
+	}
+}
+
+/*
+ * Now go back and release them.
+ *
+ * Note that the design is inherently broken. We *assume* that if
+ * we find an entry with a locnt > 1, then we must have been the one
+ * to grab a reference for this layout. But take away the locnt and
+ * we see that the original design implicitly made this assumption.
+ *
+ * Well, not really, it assumed that the layout never went away
+ * and blithely kept on bumping the refcnt.
+ *
+ * XXX:
+ * With the addition of locnt, we'll make sure to not dump an
+ * entry that has already been released. We may end up dumping
+ * one that is really in use by another layout, so we'll have
+ * to revist this code once we allow multiple layouts!
+ */
+/*ARGSUSED*/
+void
+mds_release_devs(rfs4_entry_t entry, void *arg)
+{
+	ds_addrlist_t	*dp = (ds_addrlist_t *)entry;
+
+	/*
+	 * We have to consider every entry because we may be
+	 * releasing this hold after it has been invalidated.
+	 *
+	 * Also note that if the locnt is greater than 0, then
+	 * it implies that we do have a hold on this entry.
+	 *
+	 * Furthermore, the entry is locked, the bucket is locked,
+	 * and so is the table!
+	 */
+	if (dp->locnt > 0) {
+		mds_ds_addrlist_layout_rele(dp);
+		rfs4_dbe_rele_nolock(dp->dbe);
 	}
 }
 
@@ -1014,6 +1074,11 @@ mds_gen_mpd(nfs_server_instance_t *instp, struct mds_gather_args *args)
 {
 	nfsv4_1_file_layout_ds_addr4 ds_dev;
 
+	/*
+	 * The key to understanding the way these data structures
+	 * interact is that map points to ds_dev. And map is stuck
+	 * into the mds_mpd_idx database.
+	 */
 	/* is this right?  the id will always be 0.  only 1? */
 	mds_addmpd_t map = { .id = 0, .ds_addr4 = &ds_dev };
 	mds_mpd_t *mp;
@@ -1115,6 +1180,33 @@ mds_nuke_layout(nfs_server_instance_t *instp, uint32_t layout_id)
 	bool_t create = FALSE;
 	rfs4_entry_t e;
 
+	/*
+	 * XXX: Dummy for now!
+	 *
+	 * If we were doing sanity checking, we should pass
+	 * in how many devices we expect to release...
+	 */
+	struct mds_gather_args args;
+
+	bzero(&args, sizeof (args));
+
+	args.dex = 0;
+	args.max_devs_needed = MIN(mds_max_lo_devs,
+	    MIN(mds_max_lo_devs, 99));
+
+	/*
+	 * This walk is to only release entries held
+	 * by generating a layout. That whole process is a hack
+	 * and so is this one.
+	 *
+	 * Note: If no layout was generated, we sure as all
+	 * better not release anything here. But after this
+	 * walk, we need to release everything.
+	 */
+	rw_enter(&instp->ds_addrlist_lock, RW_READER);
+	rfs4_dbe_walk(instp->ds_addrlist_tab, mds_release_devs, &args);
+	rw_exit(&instp->ds_addrlist_lock);
+
 	rw_enter(&instp->mds_layout_lock, RW_WRITER);
 	if ((e = rfs4_dbsearch(instp->mds_layout_idx,
 	    (void *)(uintptr_t)layout_id,
@@ -1122,6 +1214,7 @@ mds_nuke_layout(nfs_server_instance_t *instp, uint32_t layout_id)
 	    NULL,
 	    RFS4_DBS_VALID)) != NULL) {
 		rfs4_dbe_invalidate(e->dbe);
+		rfs4_dbe_rele(e->dbe);
 	}
 	rw_exit(&instp->mds_layout_lock);
 }
@@ -1138,7 +1231,8 @@ mds_layout_create(rfs4_entry_t u_entry, void *arg)
 
 	nfs_server_instance_t *instp;
 	int i;
-
+	int devs_loaded;
+	bool_t rc = TRUE;
 
 	if (alop->loid == 0)
 		lp->layout_id = rfs4_dbe_getid(lp->dbe);
@@ -1155,11 +1249,19 @@ mds_layout_create(rfs4_entry_t u_entry, void *arg)
 		dp = mds_find_ds_addrlist(instp, alop->lo_devs[i]);
 		/* lets hope this doesn't occur */
 		if (dp == NULL) {
+			/*
+			 * XXX: mmm, dtrace!
+			 */
 			printf("layout_create FAILED to find ds_addrlist\n");
-			return (FALSE);
+			rc = FALSE;
+			devs_loaded = i;
+
+			goto cleanup;
 		}
 		gap->dev_ptr[i] = dp;
 	}
+
+	devs_loaded = i;
 
 	lp->stripe_count = i;
 
@@ -1176,12 +1278,24 @@ mds_layout_create(rfs4_entry_t u_entry, void *arg)
 	/* save the dev_id save the world */
 	lp->dev_id = mp->mpd_id;
 
-	return (TRUE);
+cleanup:
+
+	/*
+	 * And we are done!
+	 */
+	for (i = 0; gap->dev_ptr[i] && i < devs_loaded; i++) {
+		dp = gap->dev_ptr[i];
+		if (dp) {
+			mds_ds_addrlist_rele(dp);
+		}
+	}
+
+	return (rc);
 }
 
 /*ARGSUSED*/
 static void
-mds_layout_destroy(rfs4_entry_t bugger)
+mds_layout_destroy(rfs4_entry_t u_entry)
 {
 }
 
@@ -1206,6 +1320,7 @@ mds_add_layout(struct mds_gather_args *gap)
 		 * the entry in order to create a new one.
 		 */
 		rfs4_dbe_invalidate(e->dbe);
+		rfs4_dbe_rele(e->dbe);
 	}
 
 	lop = (mds_layout_t *)rfs4_dbcreate(mds_server->mds_layout_idx,
@@ -2392,23 +2507,44 @@ ds_addrlist_create(rfs4_entry_t u_entry, void *arg)
 	ds_addrlist_t *dp = (ds_addrlist_t *)u_entry;
 	struct mds_adddev_args *u_dp = (struct mds_adddev_args *)arg;
 
-	dp->dev_addr.na_r_netid = u_dp->dev_netid;
-	dp->dev_addr.na_r_addr = u_dp->dev_addr;
+	dp->dev_addr.na_r_netid = kstrdup(u_dp->dev_netid);
+	dp->dev_addr.na_r_addr = kstrdup(u_dp->dev_addr);
 	dp->ds_owner = NULL;
 	dp->dev_knc = NULL;
 	dp->dev_nb = NULL;
+	dp->locnt = 0;
+
 	return (TRUE);
 }
-
 
 /*ARGSUSED*/
 static void
 ds_addrlist_destroy(rfs4_entry_t foo)
 {
 	ds_addrlist_t *dp = (ds_addrlist_t *)foo;
+	int	i;
+
+	rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
+	if (dp->ds_owner != NULL) {
+		list_remove(&dp->ds_owner->ds_addrlist_list, dp);
+		rfs4_dbe_rele(dp->ds_owner->dbe);
+		dp->ds_owner = NULL;
+	}
+	rw_exit(&mds_server->ds_addrlist_lock);
+
+	if (dp->dev_addr.na_r_netid) {
+		i = strlen(dp->dev_addr.na_r_netid) + 1;
+		kmem_free(dp->dev_addr.na_r_netid, i);
+	}
+
+	if (dp->dev_addr.na_r_addr) {
+		i = strlen(dp->dev_addr.na_r_addr) + 1;
+		kmem_free(dp->dev_addr.na_r_addr, i);
+	}
 
 	if (dp->dev_knc != NULL)
 		kmem_free(dp->dev_knc, sizeof (struct knetconfig));
+
 	if (dp->dev_nb != NULL) {
 		if (dp->dev_nb->buf)
 			kmem_free(dp->dev_nb->buf, dp->dev_nb->maxlen);
@@ -2571,6 +2707,11 @@ mds_find_ds_addrlist(nfs_server_instance_t *instp, uint32_t id)
 	return (dp);
 }
 
+void
+mds_ds_addrlist_rele(ds_addrlist_t *dp)
+{
+	rfs4_dbe_rele(dp->dbe);
+}
 
 /*
  */
@@ -2589,6 +2730,14 @@ mds_str_hash(void *key)
 	return (hash);
 }
 
+static bool_t
+ds_invalid_expiry(rfs4_entry_t entry)
+{
+	if (rfs4_dbe_is_invalid(entry->dbe))
+		return (TRUE);
+
+	return (FALSE);
+}
 
 static void *
 ds_addrlist_uaddr_mkkey(rfs4_entry_t entry)
@@ -2677,6 +2826,37 @@ ds_owner_alloc(DS_EXIBIargs *drap)
 	    (void *)drap);
 	rw_exit(&mds_server->ds_owner_lock);
 	return (dop);
+}
+
+static void
+ds_owner_destroy(rfs4_entry_t u_entry)
+{
+	ds_owner_t *dop = (ds_owner_t *)u_entry;
+
+	int	i;
+
+	i = strlen(dop->identity) + 1;
+	kmem_free(dop->identity, i);
+
+#ifdef	DEBUG
+	/*
+	 * We should never get here as the ds_addrlist
+	 * entries should be holding a reference against
+	 * this owner!
+	 */
+	rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
+	ASSERT(list_is_empty(&dop->ds_addrlist_list));
+	rw_exit(&mds_server->ds_addrlist_lock);
+
+	/*
+	 * We should never get here as the ds_guid_info
+	 * entries should be holding a reference against
+	 * this owner!
+	 */
+	rw_enter(&mds_server->ds_guid_info_lock, RW_WRITER);
+	ASSERT(list_is_empty(&dop->ds_guid_list));
+	rw_exit(&mds_server->ds_guid_info_lock);
+#endif
 }
 
 void
@@ -2793,22 +2973,25 @@ mds_dup_zfsattr(ds_zfsattr *src, ds_guid_info_t *dst)
 	}
 }
 
-/*ARGSUSED*/
 static bool_t
 ds_guid_info_create(rfs4_entry_t e, void *arg)
 {
 	pinfo_create_t *p = (pinfo_create_t *)arg;
-	ds_guid_info_t *pip = (ds_guid_info_t *)e;
+	ds_guid_info_t *pgi = (ds_guid_info_t *)e;
 	ds_guid *d_ds_guid;	/* destination ds_guid */
 	ds_guid *s_ds_guid;	/* source ds_guid */
 
-	pip->ds_ownerp  = p->dop;
+	pgi->ds_owner = p->ds_owner;
+	rfs4_dbe_hold(pgi->ds_owner->dbe);
+
+	list_insert_tail(&pgi->ds_owner->ds_guid_list, pgi);
+	rfs4_dbe_hold(pgi->dbe);
 
 	/* Only supported type is ZFS */
 	ASSERT(p->si->type == ZFS);
 
 	s_ds_guid = &(p->si->ds_storinfo_u.zfs_info.guid_map.ds_guid);
-	d_ds_guid = &pip->ds_guid;
+	d_ds_guid = &pgi->ds_guid;
 	d_ds_guid->stor_type = s_ds_guid->stor_type;
 
 	/*
@@ -2827,10 +3010,10 @@ ds_guid_info_create(rfs4_entry_t e, void *arg)
 	/*
 	 * Copy zfs attrs
 	 */
-	pip->ds_attr_len = p->si->ds_storinfo_u.zfs_info.attrs.attrs_len;
-	pip->ds_attr_val = kmem_alloc(
-	    sizeof (ds_zfsattr) * pip->ds_attr_len, KM_SLEEP);
-	mds_dup_zfsattr(p->si->ds_storinfo_u.zfs_info.attrs.attrs_val, pip);
+	pgi->ds_attr_len = p->si->ds_storinfo_u.zfs_info.attrs.attrs_len;
+	pgi->ds_attr_val = kmem_alloc(
+	    sizeof (ds_zfsattr) * pgi->ds_attr_len, KM_SLEEP);
+	mds_dup_zfsattr(p->si->ds_storinfo_u.zfs_info.attrs.attrs_val, pgi);
 
 	return (TRUE);
 }
@@ -2862,16 +3045,19 @@ ds_guid_info_hash(void *key)
 static void
 ds_guid_info_destroy(rfs4_entry_t e)
 {
-	ds_guid_info_t *gip = (ds_guid_info_t *)e;
-	ds_guid_free(&gip->ds_guid);
-	mds_free_zfsattr(gip);
+	ds_guid_info_t *pgi = (ds_guid_info_t *)e;
+
+	rw_enter(&mds_server->ds_guid_info_lock, RW_WRITER);
+	if (pgi->ds_owner) {
+		list_remove(&pgi->ds_owner->ds_guid_list, pgi);
+		rfs4_dbe_rele(pgi->ds_owner->dbe);
+	}
+	rw_exit(&mds_server->ds_guid_info_lock);
+
+	ds_guid_free(&pgi->ds_guid);
+	mds_free_zfsattr(pgi);
 }
 
-/*ARGSUSED*/
-static void
-ds_owner_destroy(rfs4_entry_t foo)
-{
-}
 /*
  * XXX this should be populated during startup. we
  * XXX should get the data from stable store. For now
@@ -2924,8 +3110,9 @@ mds_mapzap_destroy(rfs4_entry_t foo)
 /*
  * Used to initialize the NFSv4.1 server's state.
  * All of the tables are created and timers are set.
+ *
+ * Upon success, the state_lock is held.
  */
-
 int
 sstor_init(nfs_server_instance_t *instp, int def_reap)
 {
@@ -2968,6 +3155,9 @@ sstor_init(nfs_server_instance_t *instp, int def_reap)
 /*
  * Create/init just the session stateStore tables.
  * used for data-server
+ *
+ * NOTE: This code should be very suspect, it has never
+ * been called. The DS actually uses the MDS tables!
  */
 void
 ds_sstor_init(nfs_server_instance_t *instp)
@@ -3006,6 +3196,17 @@ ds_sstor_init(nfs_server_instance_t *instp)
 	instp->mds_sess_clientid_idx = rfs4_index_create(instp->mds_session_tab,
 	    "sess_clnt_idx", clientid_hash, sess_clid_compare, sess_clid_mkkey,
 	    FALSE);
+
+	/*
+	 * Mark it as fully initialized
+	 */
+	instp->inst_flags |= NFS_INST_STORE_INIT | NFS_INST_DS;
+
+	/*
+	 * In case we are ever able to re-init the state,
+	 * make sure we clean-up the termination!
+	 */
+	instp->inst_flags &= ~NFS_INST_TERMINUS;
 }
 
 /*
@@ -3021,9 +3222,10 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	/*
 	 * Create the state store and set the
 	 * start-up time.
+	 *
+	 * Upon success, the state_lock is held!
 	 */
 	need_sstor_init = sstor_init(instp, 60);
-
 	if (need_sstor_init == 0)
 		return;
 
@@ -3122,7 +3324,7 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	 */
 	instp->ds_addrlist_tab = rfs4_table_create(instp,
 	    "DSaddrlist", instp->reap_time, 2, ds_addrlist_create,
-	    ds_addrlist_destroy, mds_do_not_expire, sizeof (ds_addrlist_t),
+	    ds_addrlist_destroy, ds_invalid_expiry, sizeof (ds_addrlist_t),
 	    MDS_TABSIZE, MDS_MAXTABSZ, 200);
 
 	instp->ds_addrlist_idx = rfs4_index_create(instp->ds_addrlist_tab,
@@ -3167,7 +3369,7 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	instp->ds_guid_info_tab = rfs4_table_create(instp,
 	    "DS_guid", instp->reap_time, 1, ds_guid_info_create,
 	    ds_guid_info_destroy,
-	    mds_do_not_expire, sizeof (ds_guid_info_t), MDS_TABSIZE,
+	    ds_invalid_expiry, sizeof (ds_guid_info_t), MDS_TABSIZE,
 	    MDS_MAXTABSZ, 100);
 
 	instp->ds_guid_info_idx = rfs4_index_create(instp->ds_guid_info_tab,
@@ -3181,6 +3383,12 @@ mds_sstor_init(nfs_server_instance_t *instp)
 	 * Mark it as fully initialized
 	 */
 	instp->inst_flags |= NFS_INST_STORE_INIT | NFS_INST_v41;
+
+	/*
+	 * In case we are ever able to re-init the state,
+	 * make sure we clean-up the termination!
+	 */
+	instp->inst_flags &= ~NFS_INST_TERMINUS;
 
 	mutex_exit(&instp->state_lock);
 }

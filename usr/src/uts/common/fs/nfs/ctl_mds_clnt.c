@@ -115,12 +115,16 @@ ctl_mds_clnt_remove_file(nfs_server_instance_t *instp, fsid_t fsid,
 		nfs_server_instance_t *instp;
 
 		instp = dbe_to_instp(lop->dbe);
-		ds_addr = mds_find_ds_addrlist(instp, lop->devs[i]);
 
-		error = ctl_mds_clnt_call(ds_addr, CTL_MDS_REMOVE,
-		    xdr_CTL_MDS_REMOVEargs, (caddr_t)&args,
-		    xdr_CTL_MDS_REMOVEres, (caddr_t)&res);
+		ds_addr = mds_find_ds_addrlist(instp, lop->devs[i]);
+		if (ds_addr) {
+			error = ctl_mds_clnt_call(ds_addr, CTL_MDS_REMOVE,
+			    xdr_CTL_MDS_REMOVEargs, (caddr_t)&args,
+			    xdr_CTL_MDS_REMOVEres, (caddr_t)&res);
 		/* For now, ignore the error and results from REMOVE */
+
+			mds_ds_addrlist_rele(ds_addr);
+		}
 	}
 
 	/* Allocated from mds_alloc_ds_fh */

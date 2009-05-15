@@ -38,7 +38,6 @@
 #include <nfs/mds_state.h>
 #include <nfs/nfssys.h>
 #include <nfs/ds.h>
-#include <sys/cmn_err.h>
 #include <sys/utsname.h>
 #include <sys/systeminfo.h>
 
@@ -167,42 +166,39 @@ ds_reportavail_free(DS_REPORTAVAILres *resp)
 {
 	int i, j;
 
-	if (resp->status == DS_OK) {
-		DS_REPORTAVAILresok *res_ok =
-		    &(resp->DS_REPORTAVAILres_u.res_ok);
-		mds_sid *sid_array;
-		uint32_t sid_array_len;
+	DS_REPORTAVAILresok *res_ok;
+	mds_sid *sid_array;
+	uint32_t sid_array_len;
 
-		/* Free the contents of the guid_map array */
-		for (i = 0; i < res_ok->guid_map.guid_map_len; i++) {
-			sid_array =
-			    res_ok->guid_map.guid_map_val[i].mds_sid_array.
-			    mds_sid_array_val;
-			sid_array_len =
-			    res_ok->guid_map.guid_map_val[i].mds_sid_array.
-			    mds_sid_array_len;
+	if (resp->status != DS_OK)
+		return;
 
-			/* Free the contents of the mds_sid_array */
-			for (j = 0; j < sid_array_len; j++) {
-				/* Free the mds_sid_content */
-				kmem_free(sid_array[j].val,
-				    sid_array[j].len);
+	res_ok = &(resp->DS_REPORTAVAILres_u.res_ok);
 
-				/* Free the mds_sid */
-				kmem_free(&sid_array[j], sizeof (mds_sid));
-			}
-			/*
-			 * No need to free the ds_guid, since we did not
-			 * allocate any extra memory for it, while filling in
-			 * the response.
-			 */
+	/* Free the contents of the guid_map array */
+	for (i = 0; i < res_ok->guid_map.guid_map_len; i++) {
+		sid_array =
+		    res_ok->guid_map.guid_map_val[i].mds_sid_array.
+		    mds_sid_array_val;
+		sid_array_len =
+		    res_ok->guid_map.guid_map_val[i].mds_sid_array.
+		    mds_sid_array_len;
+
+		/* Free the contents of the mds_sid_array */
+		for (j = 0; j < sid_array_len; j++) {
+			/* Free the mds_sid_content */
+			kmem_free(sid_array[j].val,
+			    sid_array[j].len);
+
+			/* Free the mds_sid */
+			kmem_free(&sid_array[j], sizeof (mds_sid));
 		}
-		/* Free the guid_map */
-		kmem_free(
-		    res_ok->guid_map.guid_map_val,
-		    res_ok->guid_map.guid_map_len *
-		    sizeof (struct ds_guid_map));
 	}
+
+	/* Free the guid_map */
+	kmem_free(res_ok->guid_map.guid_map_val,
+	    res_ok->guid_map.guid_map_len *
+	    sizeof (struct ds_guid_map));
 }
 
 static void
@@ -221,7 +217,7 @@ get_mds_ds_fh(nfs_fh4 *otw_fh)
 
 	fh = kmem_zalloc(sizeof (mds_ds_fh), KM_SLEEP);
 
-	if (! xdr_ds_fh_fmt(&x, fh)) {
+	if (!xdr_ds_fh_fmt(&x, fh)) {
 		kmem_free(fh, sizeof (mds_ds_fh));
 		return (NULL);
 	}
@@ -302,31 +298,32 @@ get_ds_status(nfsstat4 stat)
 {
 	ds_status status;
 	switch (stat) {
-			case NFS4ERR_INVAL:
-				status = DSERR_INVAL;
-				break;
-			case NFS4ERR_EXPIRED:
-				status = DSERR_EXPIRED;
-				break;
-			case NFS4ERR_STALE_STATEID:
-				status = DSERR_STALE_STATEID;
-				break;
-			case NFS4ERR_OPENMODE:
-				status = DSERR_ACCESS;
-				break;
-			case NFS4ERR_BAD_STATEID:
-				status = DSERR_BAD_STATEID;
-				break;
-			case NFS4ERR_OLD_STATEID:
-				status = DSERR_OLD_STATEID;
-				break;
-			case NFS4ERR_GRACE:
-				status = DSERR_GRACE;
-				break;
-			default:
-				status = DSERR_RESOURCE;
-				break;
-		}
+		case NFS4ERR_INVAL:
+			status = DSERR_INVAL;
+			break;
+		case NFS4ERR_EXPIRED:
+			status = DSERR_EXPIRED;
+			break;
+		case NFS4ERR_STALE_STATEID:
+			status = DSERR_STALE_STATEID;
+			break;
+		case NFS4ERR_OPENMODE:
+			status = DSERR_ACCESS;
+			break;
+		case NFS4ERR_BAD_STATEID:
+			status = DSERR_BAD_STATEID;
+			break;
+		case NFS4ERR_OLD_STATEID:
+			status = DSERR_OLD_STATEID;
+			break;
+		case NFS4ERR_GRACE:
+			status = DSERR_GRACE;
+			break;
+		default:
+			status = DSERR_RESOURCE;
+			break;
+	}
+
 	return (status);
 }
 
@@ -336,7 +333,6 @@ get_ds_status(nfsstat4 stat)
 static void
 get_access_mode(compound_state_t *cs, DS_CHECKSTATEres *resp)
 {
-
 	rfs4_file_t *fp;
 	bool_t create = FALSE;
 
@@ -540,7 +536,6 @@ ds_renew(DS_RENEWargs *argp, DS_RENEWres *resp, struct svc_req *rqstp)
 	}
 
 	dop = mds_find_ds_owner_by_id(argp->ds_id);
-
 	if (dop == NULL) {
 		resp->status = DSERR_EXPIRED;
 		return;
@@ -558,6 +553,8 @@ ds_renew(DS_RENEWargs *argp, DS_RENEWres *resp, struct svc_req *rqstp)
 
 	resp->DS_RENEWres_u.mds_boottime = mds_server->Write4verf;
 	resp->status = DS_OK;
+
+	rfs4_dbe_rele(dop->dbe);   /* search */
 }
 
 /* ARGSUSED */
@@ -660,21 +657,36 @@ ds_guid_info_t *
 ds_guid_info_add(ds_owner_t *dop, struct ds_storinfo *si)
 {
 	pinfo_create_t pic_arg;
-	ds_guid_info_t *pip;
+	ds_guid_info_t *pgi;
 
-	pic_arg.dop = dop;
+	pic_arg.ds_owner = dop;
 	pic_arg.si = si;
 
 	rw_enter(&mds_server->ds_guid_info_lock, RW_WRITER);
-
-	if ((pip = (ds_guid_info_t *)rfs4_dbcreate(
+	if ((pgi = (ds_guid_info_t *)rfs4_dbcreate(
 	    mds_server->ds_guid_info_idx,
 	    (void *)&pic_arg)) == NULL) {
 		rw_exit(&mds_server->ds_guid_info_lock);
 		return (NULL);
 	}
 	rw_exit(&mds_server->ds_guid_info_lock);
-	return (pip);
+
+	return (pgi);
+}
+
+ds_guid_info_t *
+mds_find_ds_guid_info_by_id(ds_guid_t guid)
+{
+	ds_guid_info_t *pgi;
+	bool_t create = FALSE;
+
+	rw_enter(&mds_server->ds_guid_info_lock, RW_READER);
+	pgi = (ds_guid_info_t *)rfs4_dbsearch(mds_server->ds_guid_info_idx,
+	    (void *)&guid,
+	    &create, NULL, RFS4_DBS_VALID);
+	rw_exit(&mds_server->ds_guid_info_lock);
+
+	return (pgi);
 }
 
 char *
@@ -723,7 +735,7 @@ mds_find_ds_owner(DS_EXIBIargs *args, bool_t *create)
 
 	/*
 	 * using the data-server identity string find
-	 * an the ds_owner structure
+	 * the ds_owner structure
 	 */
 	rw_enter(&mds_server->ds_owner_lock, RW_READER);
 	dop = (ds_owner_t *)rfs4_dbsearch(mds_server->ds_owner_inst_idx,
@@ -732,47 +744,6 @@ mds_find_ds_owner(DS_EXIBIargs *args, bool_t *create)
 	rw_exit(&mds_server->ds_owner_lock);
 
 	return (dop);
-}
-
-/*
- */
-ds_status
-mds_ds_addrlist_update(ds_owner_t *dop, struct ds_addr *dap)
-{
-	struct mds_adddev_args darg;
-	bool_t create = FALSE;
-	ds_addrlist_t *devp;
-	ds_status stat = DS_OK;
-
-	/* search for existing entry */
-	rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
-	if ((devp = (ds_addrlist_t *)rfs4_dbsearch(
-	    mds_server->ds_addrlist_uaddr_idx,
-	    (void *)dap->addr.na_r_addr,
-	    &create, NULL, RFS4_DBS_VALID)) != NULL) {
-		MDS_SET_DS_FLAGS(devp->dev_flags, dap->validuse);
-		rw_exit(&mds_server->ds_addrlist_lock);
-		return (stat);
-	}
-
-	bzero(&darg, sizeof (darg));
-
-	darg.dev_netid = kstrdup(dap->addr.na_r_netid);
-	darg.dev_addr  = kstrdup(dap->addr.na_r_addr);
-
-	/* make it */
-	devp = (ds_addrlist_t *)rfs4_dbcreate(mds_server->ds_addrlist_idx,
-	    (void *)&darg);
-
-	if (devp) {
-		devp->ds_owner = dop;
-		MDS_SET_DS_FLAGS(devp->dev_flags, dap->validuse);
-		list_insert_tail(&dop->ds_addrlist_list, devp);
-	} else
-		stat = DSERR_INVAL;
-
-	rw_exit(&mds_server->ds_addrlist_lock);
-	return (stat);
 }
 
 /*
@@ -862,32 +833,74 @@ out:
 	return (error);
 }
 
+void
+mds_ds_addrlist_update(ds_owner_t *dop, struct ds_addr *dap)
+{
+	struct mds_adddev_args darg;
+	bool_t create = FALSE;
+	ds_addrlist_t *dp;
+
+	/* search for existing entry */
+	rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
+	if ((dp = (ds_addrlist_t *)rfs4_dbsearch(
+	    mds_server->ds_addrlist_uaddr_idx,
+	    (void *)dap->addr.na_r_addr,
+	    &create, NULL, RFS4_DBS_VALID)) != NULL) {
+		goto done;
+	}
+
+	bzero(&darg, sizeof (darg));
+
+	darg.dev_netid = dap->addr.na_r_netid;
+	darg.dev_addr  = dap->addr.na_r_addr;
+
+	/* make it */
+	dp = (ds_addrlist_t *)rfs4_dbcreate(mds_server->ds_addrlist_idx,
+	    (void *)&darg);
+	if (dp == NULL) {
+		rw_exit(&mds_server->ds_addrlist_lock);
+		return;
+	}
+
+	dp->ds_owner = dop;
+	rfs4_dbe_hold(dop->dbe);
+	list_insert_tail(&dop->ds_addrlist_list, dp);
+
+done:
+
+	MDS_SET_DS_FLAGS(dp->dev_flags, dap->validuse);
+	rw_exit(&mds_server->ds_addrlist_lock);
+	(void) mds_ds_initnet(dp);
+
+	rfs4_dbe_rele(dp->dbe);
+}
+
 ds_status
 mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
     DS_REPORTAVAILres  *resp)
 {
 	int i, count;
-	ds_guid_info_t *gip;
+	ds_guid_info_t *pgi;
 	struct ds_guid_map *guid_map;
 	DS_REPORTAVAILresok *res_ok;
 	XDR xdr;
 	int xdr_size;
 	char *xdr_buffer;
-	ds_addrlist_t *dp;
 	ds_addr *addrp;
-	nfs_server_instance_t *instp = dbe_to_instp(dop->dbe);
+
+	ds_status dsrc = DS_OK;
 
 	/*
 	 * First deal with the universal addresses
 	 */
 	for (i = 0; i < argp->ds_addrs.ds_addrs_len; i++) {
 		addrp = &argp->ds_addrs.ds_addrs_val[i];
-		(void) mds_ds_addrlist_update(dop, addrp);
-		dp = mds_find_ds_addrlist_by_uaddr(instp,
-		    addrp->addr.na_r_addr);
-		if (dp == NULL)
-			continue;
-		(void) mds_ds_initnet(dp);
+
+		/*
+		 * Create the entry and link it into the
+		 * ds_owner's list of addrlist entries.
+		 */
+		mds_ds_addrlist_update(dop, addrp);
 	}
 
 	res_ok = &(resp->DS_REPORTAVAILres_u.res_ok);
@@ -913,53 +926,60 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 
 	count = 0;
 	for (i = 0; i < argp->ds_storinfo.ds_storinfo_len; i++) {
-		gip = ds_guid_info_add(dop,
+		mds_sid *sid;
+		mds_sid_content sid_content;
+
+		pgi = ds_guid_info_add(dop,
 		    &argp->ds_storinfo.ds_storinfo_val[i]);
-		if (gip != NULL) {
-			mds_sid *sid;
-			mds_sid_content sid_content;
+		if (pgi == NULL)
+			continue;
 
-			/* Data Server GUIDs */
-			/* Only supported type is ZFS */
-			ASSERT(gip->ds_guid.stor_type == ZFS);
-			guid_map[count].ds_guid = gip->ds_guid;
+		/* Data Server GUIDs */
+		/* Only supported type is ZFS */
+		ASSERT(pgi->ds_guid.stor_type == ZFS);
+		guid_map[count].ds_guid = pgi->ds_guid;
 
-			ASSERT(gip->ds_guid.ds_guid_u.zfsguid.zfsguid_len
-			    == sizeof (mds_sid_content));
+		ASSERT(pgi->ds_guid.ds_guid_u.zfsguid.zfsguid_len
+		    == sizeof (mds_sid_content));
 
-			/*
-			 * MDS SIDs: these would come from the mds_mapzap,
-			 * but for now we just reuse the ds_guid
-			 */
-			bcopy(gip->ds_guid.ds_guid_u.zfsguid.zfsguid_val,
-			    &sid_content, sizeof (sid_content));
+		/*
+		 * MDS SIDs: these would come from the mds_mapzap,
+		 * but for now we just reuse the ds_guid
+		 */
+		bcopy(pgi->ds_guid.ds_guid_u.zfsguid.zfsguid_val,
+		    &sid_content, sizeof (sid_content));
 
-			xdr_size = xdr_sizeof(xdr_mds_sid_content,
-			    &sid_content);
-			ASSERT(xdr_size);
+		xdr_size = xdr_sizeof(xdr_mds_sid_content,
+		    &sid_content);
+		ASSERT(xdr_size);
 
-			xdr_buffer = kmem_alloc(xdr_size, KM_SLEEP);
-			xdrmem_create(&xdr, xdr_buffer, xdr_size, XDR_ENCODE);
+		xdr_buffer = kmem_alloc(xdr_size, KM_SLEEP);
+		xdrmem_create(&xdr, xdr_buffer, xdr_size, XDR_ENCODE);
 
-			if (xdr_mds_sid_content(&xdr, &sid_content) ==
-			    FALSE) {
-				kmem_free(xdr_buffer, xdr_size);
-				return (DSERR_XDR);
-			}
-			sid = kmem_alloc(sizeof (mds_sid), KM_SLEEP);
-			sid->len = xdr_size;
-			sid->val = xdr_buffer;
+		if (xdr_mds_sid_content(&xdr, &sid_content) == FALSE) {
+			kmem_free(xdr_buffer, xdr_size);
 
-			/*
-			 * There is only one MDS SID associated with this
-			 * DS GUID
-			 */
-			guid_map[count].mds_sid_array.mds_sid_array_len = 1;
-			guid_map[count].mds_sid_array.mds_sid_array_val =
-			    sid;
-			count++;
-			rfs4_dbe_rele(gip->dbe);
+			list_remove(&pgi->ds_owner->ds_guid_list, pgi);
+			rfs4_dbe_rele(pgi->ds_owner->dbe);
+
+			rfs4_dbe_invalidate(pgi->dbe);
+			dsrc = DSERR_XDR;
+			goto cleanup;
 		}
+
+		sid = kmem_alloc(sizeof (mds_sid), KM_SLEEP);
+		sid->len = xdr_size;
+		sid->val = xdr_buffer;
+
+		/*
+		 * There is only one MDS SID associated with this
+		 * DS GUID
+		 */
+		guid_map[count].mds_sid_array.mds_sid_array_len = 1;
+		guid_map[count].mds_sid_array.mds_sid_array_val = sid;
+		count++;
+
+		rfs4_dbe_rele(pgi->dbe);
 	}
 
 	if (count) {
@@ -976,7 +996,36 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 	if (nfs_ds_present == 0)
 		nfs_ds_present = 1;
 
-	return (DS_OK);
+	return (dsrc);
+
+cleanup:
+
+	for (i = 0; i < count; i++) {
+		pgi = mds_find_ds_guid_info_by_id(guid_map[i].ds_guid);
+		if (pgi != NULL) {
+			mds_sid *sid;
+
+			/*
+			 * These is only one MDS SID, right?
+			 */
+			sid = guid_map[i].mds_sid_array.mds_sid_array_val;
+			kmem_free(sid->val, sid->len);
+
+			kmem_free(sid, sizeof (mds_sid));
+
+			rfs4_dbe_rele(pgi->dbe);   /* search */
+
+			list_remove(&pgi->ds_owner->ds_guid_list, pgi);
+			rfs4_dbe_rele(pgi->ds_owner->dbe);
+
+			rfs4_dbe_invalidate(pgi->dbe);
+		}
+	}
+
+	kmem_free(guid_map, sizeof (struct ds_guid_map) *
+	    argp->ds_storinfo.ds_storinfo_len);
+
+	return (dsrc);
 }
 
 /* ARGSUSED */
@@ -996,7 +1045,6 @@ ds_reportavail(DS_REPORTAVAILargs *argp, DS_REPORTAVAILres *resp,
 	}
 
 	dop = mds_find_ds_owner_by_id(argp->ds_id);
-
 	if (dop == NULL) {
 		resp->status = DSERR_NOT_AUTH;
 		return;
@@ -1004,6 +1052,18 @@ ds_reportavail(DS_REPORTAVAILargs *argp, DS_REPORTAVAILres *resp,
 
 	/*
 	 * ToDo: Check the verifier (args->ds_verifier).
+	 *
+	 * This is currently a NOP since a DS can only
+	 * send a DS_REPORTAVAIL after a reboot, which
+	 * means a DS_EXIBI, which means that this list
+	 * is always NULL.
+	 *
+	 * If we ever do go down the mds_rpt_avail_update()
+	 * path, we will need to be careful on accounting
+	 * for that hold we just did in the
+	 * mds_find_ds_owner_by_id(). I.e., if we overwrite
+	 * an entry, we need to do a rele. If we replace
+	 * an entry, then it should just work.
 	 */
 	if (list_head(&dop->ds_addrlist_list) == NULL)
 		stat = mds_rpt_avail_add(dop, argp, resp);
@@ -1011,6 +1071,8 @@ ds_reportavail(DS_REPORTAVAILargs *argp, DS_REPORTAVAILres *resp,
 		stat = mds_rpt_avail_update(dop, argp, resp);
 
 	resp->status = stat;
+
+	rfs4_dbe_rele(dop->dbe);   /* search */
 }
 
 /*
@@ -1026,6 +1088,7 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 
 	ds_owner_t *dop;
 	ds_addrlist_t *dp;
+	ds_guid_info_t	*pgi;
 	bool_t do_create = TRUE;
 	DS_EXIBIresok *dser = &(resp->DS_EXIBIres_u.res_ok);
 
@@ -1042,6 +1105,11 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 
 	dop = mds_find_ds_owner(argp, &do_create);
 	ASSERT(dop);
+	if (!dop) {
+		resp->status = DSERR_NOENT;
+		return;
+	}
+
 	/*
 	 * If the find found the ds_owner we need to do
 	 * some clean up
@@ -1058,11 +1126,21 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 		/* brute force it */
 		rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
 		while (dp = list_head(&dop->ds_addrlist_list)) {
-			rfs4_dbe_invalidate(dp->dbe);
 			list_remove(&dop->ds_addrlist_list, dp);
+			dp->ds_owner = NULL;
+			rfs4_dbe_rele(dop->dbe);
+			rfs4_dbe_invalidate(dp->dbe);
 		}
 		rw_exit(&mds_server->ds_addrlist_lock);
-		/* what about the ds_guid_info list ?? */
+
+		rw_enter(&mds_server->ds_guid_info_lock, RW_WRITER);
+		while (pgi = list_head(&dop->ds_guid_list)) {
+			list_remove(&dop->ds_guid_list, pgi);
+			pgi->ds_owner = NULL;
+			rfs4_dbe_rele(dop->dbe);
+			rfs4_dbe_invalidate(pgi->dbe);
+		}
+		rw_exit(&mds_server->ds_guid_info_lock);
 	}
 
 	/* Again, needs rework */
@@ -1076,18 +1154,20 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 	 * XXXX: may have not changed (but ds_verifier would have)
 	 * XXXX: Hmmm..perhaps the correct place is in ds_reportavail
 	 * XXXX: when we notice an update (as opposed to add)
+	 *
+	 * XXX: But we wouldn't notice an update because we just
+	 * emptied the addrlist above.
 	 */
 	resp->status = DS_OK;
 	dser->ds_id = dop->ds_id;
 
 	(void) ddi_strtoul(hw_serial, NULL, 10, &hostid);
 	dser->mds_id = (uint64_t)hostid;
-
 	dser->mds_boot_verifier = mds_server->Write4verf;
-
 	dser->mds_lease_period = mds_server->lease_period;
-}
 
+	rfs4_dbe_rele(dop->dbe);   /* create */
+}
 
 void
 nfs_ds_cp_dispatch(struct svc_req *req, SVCXPRT *xprt)

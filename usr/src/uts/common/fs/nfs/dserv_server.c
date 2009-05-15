@@ -277,18 +277,19 @@ dispatch_dserv_nfsv41(struct svc_req *req, SVCXPRT *xprt)
 		dserv_mds_instance_t *inst;
 
 		error = dserv_instance_enter(RW_READER, B_FALSE, &inst);
-		if (error) {
+		if (!error) {
+			(void) rfs41_dispatch(req, xprt, (char *)&args);
+			dserv_instance_exit(inst);
+		} else {
 			/*
+			 * This is a non-recoverable error.
 			 * Either we weren't able to find our instance
 			 * (e.g. it has been shutdown) or the instance
-			 * is in the process of being shutdown.  Either
-			 * way, this is a non-recoverable error.
+			 * is in the process of being shutdown.
 			 */
 			send_nfs4err(NFS4ERR_IO, xprt);
+			DTRACE_PROBE1(dserv__e__instancing, int, error);
 		}
-
-		(void) rfs41_dispatch(req, xprt, (char *)&args);
-		dserv_instance_exit(inst);
 	}
 
 	if (!SVC_FREEARGS(xprt, xdr_COMPOUND4args_srv, (char *)&args))

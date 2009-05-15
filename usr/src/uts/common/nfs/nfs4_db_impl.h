@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -38,7 +38,7 @@ extern "C" {
 /*
  * A database is made up of a collection of tables.
  * Tables are in turn made up of a collection of
- * entries. Each table may haveone or more indices
+ * entries. Each table may have one or more indices
  * associtated with it.
  */
 

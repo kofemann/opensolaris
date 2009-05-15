@@ -8265,7 +8265,6 @@ mds_get_flo(nfs_server_instance_t *instp, vnode_t *vp, mds_layout_t **flopp)
 			 * XXXXX:
 			 */
 			fake_spe(instp, &fp->layoutp);
-
 			if (fp->layoutp == NULL) {
 				rfs4_file_rele(fp);
 				return (NFS4ERR_LAYOUTUNAVAILABLE);
@@ -8291,6 +8290,11 @@ mds_free_fh_list(nfs_fh4 *nfl_fh_list, int count)
 	for (i = 0; i < count; i++)
 		xdr_free_ds_fh(&(nfl_fh_list[i]));
 	kmem_free(nfl_fh_list, count * sizeof (nfs_fh4));
+}
+
+static void
+mds_free_devices_list()
+{
 }
 
 /*ARGSUSED*/
@@ -8320,13 +8324,12 @@ mds_fetch_layout(struct compound_state *cs,
 
 	/* validate the device id */
 	dp = mds_find_mpd(cs->instp, lp->dev_id);
-
-	bzero(&otw_flo, sizeof (otw_flo));
-
 	if (dp == NULL) {
 		DTRACE_PROBE1(nfss41__e__bad_devid, uint32_t, lp->dev_id);
 		return (NFS4ERR_LAYOUTUNAVAILABLE);
 	}
+
+	bzero(&otw_flo, sizeof (otw_flo));
 
 	mds_set_deviceid(lp->dev_id, &otw_flo.nfl_deviceid);
 
@@ -8348,7 +8351,6 @@ mds_fetch_layout(struct compound_state *cs,
 	nfl_size = lp->stripe_count * sizeof (nfs_fh4);
 
 	nfl_fh_list = kmem_zalloc(nfl_size, KM_NOSLEEP);
-
 	if (nfl_fh_list == NULL)
 		return (NFS4ERR_LAYOUTTRYLATER);
 
@@ -8380,7 +8382,7 @@ mds_fetch_layout(struct compound_state *cs,
 	ASSERT(xdr_size);
 
 	/*
-	 * Not big deal if we are resource constrained
+	 * Not a big deal if we are resource constrained
 	 * and the kmem_alloc fails. NFS Client will have
 	 * to do IO through MDS.
 	 */

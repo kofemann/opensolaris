@@ -27,6 +27,7 @@
 #include <sys/systeminfo.h>
 #include <sys/sunddi.h>
 #include <sys/avl.h>
+#include <sys/atomic.h>
 #include <nfs/nfs.h>
 #include <nfs/nfs4.h>
 #include <nfs/nfs4_kprot.h>
@@ -74,6 +75,7 @@ dserv_mds_instance_construct(void *vdmi, void *foo, int bar)
 	dserv_mds_instance_t *dmi = vdmi;
 
 	rw_init(&dmi->dmi_inst_lock, NULL, RW_DEFAULT, NULL);
+
 	mutex_init(&dmi->dmi_content_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&dmi->dmi_zap_lock, NULL, MUTEX_DEFAULT, NULL);
 	list_create(&dmi->dmi_datasets,
@@ -211,6 +213,7 @@ dserv_instance_enter(krw_t lock_type, boolean_t create_instance,
 	dserv_mds_instance_t **instpp)
 {
 	dserv_mds_instance_t *inst;
+	bool_t grab_lock = FALSE;
 
 	if (create_instance)
 		inst = dserv_mds_create_my_instance();
@@ -220,7 +223,29 @@ dserv_instance_enter(krw_t lock_type, boolean_t create_instance,
 	if (inst == NULL)
 		return (ESRCH);
 
-	rw_enter(&inst->dmi_inst_lock, lock_type);
+	/*
+	 * If dmi_teardown_in_progress is set, then we can't grab the
+	 * lock. I.e., we are in the midst of either tearing it
+	 * down or we have torn it down.
+	 */
+retry_with_lock:
+	if (grab_lock) {
+		/*
+		 * Now we have to grab the lock and make sure that it is not
+		 * true!
+		 *
+		 * Note that there is currently only one case were we
+		 * are a WRITER and that is during tear-down. So if a
+		 * READER has to block, it is because tear-down is
+		 * pending.
+		 */
+		if (rw_tryenter(&inst->dmi_inst_lock, lock_type) == 0) {
+			if (lock_type == RW_READER)
+				return (EIO);
+			rw_enter(&inst->dmi_inst_lock, lock_type);
+		}
+	}
+
 	/*
 	 * dmi_teardown_in_progress is only set in one place,
 	 * dserv_mds_teardown_instance() and when doing so the dmi_inst_lock
@@ -228,15 +253,20 @@ dserv_instance_enter(krw_t lock_type, boolean_t create_instance,
 	 * holding the dmi_content_lock.
 	 */
 	if (inst->dmi_teardown_in_progress == B_TRUE) {
-		rw_exit(&inst->dmi_inst_lock);
+		if (grab_lock)
+			rw_exit(&inst->dmi_inst_lock);
+
 		if (lock_type == RW_READER)
 			return (EIO);
-		else if (lock_type == RW_WRITER)
-			/*
-			 * This will protect from receiving multiple teardown
-			 * commands happening at once.
-			 */
-			return (EBUSY);
+
+		/*
+		 * This will protect from receiving multiple teardown
+		 * commands happening at once.
+		 */
+		return (EBUSY);
+	} else if (!grab_lock) {
+		grab_lock = TRUE;
+		goto retry_with_lock;
 	}
 
 	*instpp = inst;

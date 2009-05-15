@@ -135,15 +135,20 @@ proxy_get_strategy(nnode_proxy_data_t *mnd)
 	io_array_size = lp->stripe_count * sizeof (ds_io_t);
 	io_array = kmem_zalloc(io_array_size, KM_SLEEP);
 
-	if (io_array == NULL)
-		return (NFS4ERR_LAYOUTTRYLATER);
+	mnd->mnd_strategy = kmem_alloc(sizeof (mds_strategy_t), KM_SLEEP);
+	mnd->mnd_strategy->offset = offset;
+	mnd->mnd_strategy->len = len;
+	mnd->mnd_eof = 0;
+	mnd->mnd_strategy->startidx = startidx;
+	mnd->mnd_strategy->stripe_unit = lp->stripe_unit;
+	mnd->mnd_strategy->stripe_count = 0;
+	mnd->mnd_strategy->io_array_size = io_array_size;
+	mnd->mnd_strategy->io_array = io_array;
 
 	/* XXX - this is good for one big honking buffer. */
 	/* Get our DS filehandles and dev descriptors */
 	for (i = 0; i < lp->stripe_count; i++) {
 		int e;
-
-		bzero(&io_array[i].fh, sizeof (nfs_fh4));
 
 		e = mds_alloc_ds_fh(mnd->mnd_fsid, mnd->mnd_fid,
 		    &io_array[i].fh);
@@ -152,18 +157,16 @@ proxy_get_strategy(nnode_proxy_data_t *mnd)
 
 		io_array[i].ds = mds_find_ds_addrlist(mnd->mnd_instp,
 		    lp->devs[i]);
-		if (io_array[i].ds == NULL)
+		if (io_array[i].ds == NULL) {
+			/* We can only cleanup a complete "row" */
+			kmem_free(io_array[i].fh.nfs_fh4_val,
+			    io_array[i].fh.nfs_fh4_len);
 			return (NFS4ERR_LAYOUTUNAVAILABLE);
+		}
+
+		/* Keep track of how many loaded error-free */
+		mnd->mnd_strategy->stripe_count++;
 	}
-	mnd->mnd_strategy = kmem_alloc(sizeof (mds_strategy_t), KM_SLEEP);
-	mnd->mnd_strategy->offset = offset;
-	mnd->mnd_strategy->len = len;
-	mnd->mnd_eof = 0;
-	mnd->mnd_strategy->startidx = startidx;
-	mnd->mnd_strategy->stripe_unit = lp->stripe_unit;
-	mnd->mnd_strategy->stripe_count = lp->stripe_count;
-	mnd->mnd_strategy->io_array_size = io_array_size;
-	mnd->mnd_strategy->io_array = io_array;
 
 	return (0);
 }
@@ -172,14 +175,17 @@ void
 proxy_free_strategy(nnode_proxy_data_t *mnd)
 {
 	mds_strategy_t *msp = mnd->mnd_strategy;
-	mds_layout_t *lp = mnd->mnd_layout;
 	int i;
 
 	if (msp == NULL)
 		return;
-	for (i = 0; i < lp->stripe_count; i++)
+
+	for (i = 0; i < msp->stripe_count; i++) {
+		mds_ds_addrlist_rele(msp->io_array[i].ds);
 		kmem_free(msp->io_array[i].fh.nfs_fh4_val,
 		    msp->io_array[i].fh.nfs_fh4_len);
+	}
+
 	kmem_free(msp->io_array, msp->io_array_size);
 	kmem_free(msp, sizeof (mds_strategy_t));
 	mnd->mnd_strategy = NULL;

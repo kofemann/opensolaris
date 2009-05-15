@@ -24,6 +24,7 @@
  */
 
 #include <sys/systm.h>
+#include <sys/sdt.h>
 #include <sys/cmn_err.h>
 #include <sys/kmem.h>
 #include <sys/disp.h>
@@ -41,7 +42,6 @@ static rfs4_dbe_t *rfs4_dbe_create(rfs4_table_t *, rfs4_entry_t);
 static void rfs4_start_reaper(rfs4_table_t *);
 
 krwlock_t nsi_lock;
-
 
 id_t
 rfs4_dbe_getid(rfs4_dbe_t *e)
@@ -438,9 +438,11 @@ rfs4_dbe_destroy(rfs4_dbe_t *entry)
 	rfs4_table_t *table = entry->table;
 	rfs4_link *l;
 
+#ifdef	DEBUG
 	mutex_enter(entry->lock);
 	ASSERT(entry->refcnt == 0);
 	mutex_exit(entry->lock);
+#endif
 
 	/* Unlink from all indices */
 	for (ip = table->indices; ip; ip = ip->inext) {
@@ -472,13 +474,14 @@ rfs4_dbe_destroy(rfs4_dbe_t *entry)
 	kmem_cache_free(table->mem_cache, entry);
 }
 
-
+/*
+ * If a valid entry is created, then the refcnt will be 1.
+ */
 static rfs4_dbe_t *
 rfs4_dbe_create(rfs4_table_t *table, rfs4_entry_t data)
 {
 	rfs4_dbe_t *entry;
 	int i;
-
 
 	entry = kmem_cache_alloc(table->mem_cache, KM_SLEEP);
 
@@ -498,7 +501,7 @@ rfs4_dbe_create(rfs4_table_t *table, rfs4_entry_t data)
 		/*
 		 * We mark the entry as not indexed by setting the low
 		 * order bit, since address are word aligned. This has
-		 * the advantage of causeing a trap if the address is
+		 * the advantage of causing a trap if the address is
 		 * used. After the entry is linked in to the
 		 * corresponding index the bit will be cleared.
 		 */
@@ -510,7 +513,10 @@ rfs4_dbe_create(rfs4_table_t *table, rfs4_entry_t data)
 	entry->data->dbe = entry;
 
 	if (!(*table->create)(entry->data, data)) {
+		if (table->id_space)
+			id_free(table->id_space, entry->id);
 		kmem_cache_free(table->mem_cache, entry);
+
 		return (NULL);
 	}
 
@@ -521,6 +527,14 @@ rfs4_dbe_create(rfs4_table_t *table, rfs4_entry_t data)
 	return (entry);
 }
 
+/*
+ * If *create is TRUE and we end up creating an entry, then the entry will
+ * have a refcnt of 2. The entry may not be reaped until the hold done here
+ * has been released.
+ *
+ * If the entry was not created here and is returned, then this function
+ * will bump the refcnt. It will also need to be released when appropriate.
+ */
 rfs4_entry_t
 rfs4_dbsearch(rfs4_index_t *idx, void *key, bool_t *create, void *arg,
 		rfs4_dbsearch_type_t dbsearch_type)
@@ -571,7 +585,7 @@ retry:
 			mutex_exit(l->entry->lock);
 			rw_exit(bp->lock);
 
-			/* entry will be set if we retired so clean it up */
+			/* entry will be set if we retried so clean it up */
 			if (entry) {
 				/*
 				 * The entry has not been placed in a
@@ -581,7 +595,8 @@ retry:
 				entry->refcnt--;
 				rfs4_dbe_destroy(entry);
 			}
-			/* inform called we did not create this entry */
+
+			/* inform caller we did not create this entry */
 			*create = FALSE;
 
 			return (l->entry->data);
@@ -616,7 +631,6 @@ retry:
 
 	/* Now that we've allocated  */
 	if (rw_read_locked(bp->lock) && !rw_tryupgrade(bp->lock)) {
-
 		rw_exit(bp->lock);
 		rw_enter(bp->lock, RW_WRITER);
 
@@ -723,9 +737,7 @@ rfs4_dbe_walk(rfs4_table_t *table,
 		}
 		rw_exit(bp->lock);
 	}
-
 }
-
 
 /* ARGSUSED */
 static void
@@ -740,10 +752,20 @@ rfs4_dbe_reap(rfs4_table_t *table, time_t cache_time, uint32_t desired)
 	int count = 0;
 
 
-	/* Walk the buckets looking for entries to release/destroy */
+	/*
+	 * Walk the buckets looking for entries to release/destroy.
+	 * Note that we do not need to grab the entry's lock because
+	 * the refcnt can only be 0 or 1 if nothing else has a
+	 * reference. Once the refcnt transistions to one of these
+	 * states (and the entry has been fully created), it is not
+	 * allowed to be incremented.
+	 */
 	for (i = 0; i < table->len; i++) {
 		bp = &buckets[i];
 		do {
+			/*
+			 * First pass is to look for unreferenced entries.
+			 */
 			found = FALSE;
 			rw_enter(bp->lock, RW_READER);
 			for (l = bp->head; l; l = l->next) {
@@ -767,6 +789,10 @@ rfs4_dbe_reap(rfs4_table_t *table, time_t cache_time, uint32_t desired)
 					mutex_exit(e->lock);
 				}
 			}
+
+			/*
+			 * Second pass is to destroy them.
+			 */
 			if (found) {
 				if (!rw_tryupgrade(bp->lock)) {
 					rw_exit(bp->lock);
@@ -788,8 +814,9 @@ rfs4_dbe_reap(rfs4_table_t *table, time_t cache_time, uint32_t desired)
 				}
 			}
 			rw_exit(bp->lock);
+
 			/*
-			 * delay slightly if there is more work to do
+			 * Delay slightly if there is more work to do
 			 * with the expectation that other reaper
 			 * threads are freeing data structures as well
 			 * and in turn will reduce ref counts on
@@ -805,10 +832,12 @@ rfs4_dbe_reap(rfs4_table_t *table, time_t cache_time, uint32_t desired)
 		 */
 		} while (table->reaper_shutdown && bp->head != NULL);
 
+		/*
+		 * XXX - Is the second clause redundant?
+		 */
 		if (!table->reaper_shutdown && desired && count >= desired)
 			break;
 	}
-
 }
 
 
@@ -878,7 +907,7 @@ rfs4_dbcreate(rfs4_index_t *idx, void *ap)
 
 	/*
 	 * Add one ref for entry into table's hash - only one
-	 * reference added evn though there may be multiple indices
+	 * reference added even though there may be multiple indices
 	 */
 	rw_enter(bp->lock, RW_WRITER);
 	rfs4_dbe_hold(entry);

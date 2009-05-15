@@ -2173,7 +2173,7 @@ rfs4_state_destroy(rfs4_entry_t u_entry)
 	if (!sp->closed)
 		rfs4_unshare(sp);
 
-	/* Were done with the file */
+	/* We are done with the file */
 	rfs4_file_rele(sp->finfo);
 	sp->finfo = NULL;
 
@@ -3828,6 +3828,12 @@ rfs4_sstor_init(nfs_server_instance_t *instp)
 	 * Mark it as fully initialized
 	 */
 	instp->inst_flags |= NFS_INST_STORE_INIT | NFS_INST_v40;
+
+	/*
+	 * Clear out any old init state.
+	 */
+	instp->inst_flags &= ~NFS_INST_TERMINUS;
+
 	mutex_exit(&instp->state_lock);
 }
 
@@ -3846,6 +3852,11 @@ rfs4_sstor_fini(nfs_server_instance_t *instp)
 		mutex_exit(&instp->state_lock);
 		return;
 	}
+
+	/*
+	 * Mark it as being terminated.
+	 */
+	instp->inst_flags |= NFS_INST_TERMINUS;
 
 	rfs4_set_deleg_policy(instp, SRV_NEVER_DELEGATE);
 	dbp = instp->state_store;
@@ -3883,4 +3894,10 @@ rfs4_sstor_fini(nfs_server_instance_t *instp)
 	if (rfs4_dss_paths)
 		nvlist_free(rfs4_dss_paths);
 	rfs4_dss_paths = rfs4_dss_oldpaths = NULL;
+
+	/*
+	 * Clear out that it was initialized.
+	 */
+	instp->inst_flags &= ~(NFS_INST_STORE_INIT|NFS_INST_v40|
+	    NFS_INST_v41|NFS_INST_DS);
 }
