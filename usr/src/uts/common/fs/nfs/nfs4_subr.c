@@ -3399,8 +3399,8 @@ nfs4sequence_setup(nfs4_session_t *np, COMPOUND4args_clnt *rfsargp,
 	 * Find a slot to use.
 	 */
 	(void) slot_alloc(np->slot_table, SLT_SLEEP, &slot);
-
 	ASSERT(slot != NULL);
+
 	/*
 	 * Update SEQUENCE args
 	 */
@@ -3409,6 +3409,7 @@ nfs4sequence_setup(nfs4_session_t *np, COMPOUND4args_clnt *rfsargp,
 	    np->slot_table->st_fslots;
 	mutex_exit(&np->slot_table->st_lock);
 	mutex_enter(&slot->se_lock);
+	argp->nfs_argop4_u.opsequence.sa_cachethis = 0;	/* XXX - for BAT */
 	argp->nfs_argop4_u.opsequence.sa_sequenceid = slot->se_seqid;
 	argp->nfs_argop4_u.opsequence.sa_slotid = slot->se_sltno;
 	/* XXX - rick - need sr_target_highest_slotid */
