@@ -243,6 +243,7 @@ nnop_md_getvp(nnode_t *nn)
 /*
  * Known implementations:
  * nnode_vn_st_checkstate
+ * dserv_mds_checkstate
  */
 
 nfsstat4

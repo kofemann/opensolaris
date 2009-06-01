@@ -299,6 +299,7 @@ nfs4_needs_recovery_impl(nfs4_call_t *cp)
 		switch (ep->stat) {
 		case NFS4ERR_STALE_CLIENTID:
 		case NFS4ERR_BADSESSION:
+		case NFS4ERR_DELAY:
 			recov = 1;
 			break;
 #ifdef DEBUG

@@ -180,6 +180,8 @@ typedef struct {
 	list_t		dmi_handles;
 	boolean_t	dmi_teardown_in_progress;
 	kmutex_t	dmi_zap_lock;
+	boolean_t	dmi_recov_in_progress;
+	ds_verifier	dmi_mds_boot_verifier;
 } dserv_mds_instance_t;
 
 #define	DSERV_MDS_INSTANCE_NET_VALID 0x01
@@ -209,10 +211,13 @@ int dserv_mds_reportavail(void);
 nfsstat4 dserv_mds_checkstate(void *, compound_state_t *, int mode,
     stateid4 *, bool_t, bool_t *, bool_t, caller_context_t *, clientid4 *);
 dserv_mds_instance_t *dserv_mds_get_my_instance(void);
-int dserv_instance_enter(krw_t, boolean_t, dserv_mds_instance_t **);
+int dserv_instance_enter(krw_t, boolean_t, dserv_mds_instance_t **, pid_t *);
 void dserv_instance_exit(dserv_mds_instance_t *);
 char *dserv_strdup(const char *);
 void dserv_strfree(char *);
+int dserv_mds_do_reportavail(dserv_mds_instance_t *, ds_status *);
+int dserv_mds_exibi(dserv_mds_instance_t *, ds_status *);
+void dserv_mds_heartbeat_thread();
 
 /*
  * Globals

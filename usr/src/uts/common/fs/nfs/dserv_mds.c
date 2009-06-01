@@ -55,6 +55,7 @@ static kmem_cache_t *dserv_mds_handle_cache = NULL;
 static enum nfsstat4 get_nfs_status(ds_status);
 static nfsstat4 cp_ds_mds_checkstateid(mds_ds_fh *,
     compound_state_t *, stateid4 *, int);
+extern time_t rfs4_ds_mds_hb_time;
 
 static int
 dserv_mds_instance_compare(const void *va, const void *vb)
@@ -169,6 +170,7 @@ dserv_mds_instance_init(dserv_mds_instance_t *inst)
 
 	inst->dmi_verifier = *(uint64_t *)&verf;
 	inst->dmi_teardown_in_progress = B_FALSE;
+	inst->dmi_recov_in_progress = B_FALSE;
 }
 
 static dserv_mds_instance_t *
@@ -210,15 +212,20 @@ dserv_mds_create_my_instance()
  */
 int
 dserv_instance_enter(krw_t lock_type, boolean_t create_instance,
-	dserv_mds_instance_t **instpp)
+	dserv_mds_instance_t **instpp, pid_t *pid)
 {
 	dserv_mds_instance_t *inst;
 	bool_t grab_lock = FALSE;
 
 	if (create_instance)
 		inst = dserv_mds_create_my_instance();
-	else
-		inst = dserv_mds_get_my_instance();
+	else {
+		if (pid == NULL) {
+			inst = dserv_mds_get_my_instance();
+		} else {
+			inst = dserv_mds_get_instance(*pid);
+		}
+	}
 
 	if (inst == NULL)
 		return (ESRCH);
@@ -462,7 +469,7 @@ dserv_mds_instance_teardown()
 	dserv_mds_instance_t *inst;
 	int error = 0;
 
-	error = dserv_instance_enter(RW_WRITER, B_FALSE, &inst);
+	error = dserv_instance_enter(RW_WRITER, B_FALSE, &inst, NULL);
 	if (error)
 		return (error);
 
@@ -676,7 +683,7 @@ dserv_mds_setmds(char *netid, char *uaddr)
 	int error;
 	int af;
 
-	error = dserv_instance_enter(RW_READER, B_TRUE, &inst);
+	error = dserv_instance_enter(RW_READER, B_TRUE, &inst, NULL);
 	if (error)
 		return (error);
 
@@ -799,7 +806,7 @@ dserv_mds_addobjset(const char *objsetname)
 	spa_t *spa = NULL;
 	int error = 0;
 
-	error = dserv_instance_enter(RW_READER, B_TRUE, &inst);
+	error = dserv_instance_enter(RW_READER, B_TRUE, &inst, NULL);
 	if (error)
 		return (error);
 
@@ -861,46 +868,209 @@ out:
 	return (error);
 }
 
+void
+dserv_mds_heartbeat_thread(pid_t *pid)
+{
+	int 			error = 0;
+	DS_RENEWargs 		args;
+	DS_RENEWres  		res;
+	dserv_mds_instance_t	*inst = NULL;
+	callb_cpr_t		cpr_info;
+	kmutex_t		cpr_lock;
+	ds_status 		status = 0;
+
+
+	ASSERT(pid != NULL);
+	mutex_init(&cpr_lock, NULL, MUTEX_DEFAULT, NULL);
+	CALLB_CPR_INIT(&cpr_info, &cpr_lock,
+	    callb_generic_cpr, "pnfs_ds_mds_renew_hb");
+
+	bzero(&args, sizeof (args));
+	bzero(&res, sizeof (res));
+
+	for (;;) {
+		mutex_enter(&cpr_lock);
+		CALLB_CPR_SAFE_BEGIN(&cpr_info);
+		mutex_exit(&cpr_lock);
+		delay(SEC_TO_TICK(rfs4_ds_mds_hb_time));
+		mutex_enter(&cpr_lock);
+		CALLB_CPR_SAFE_END(&cpr_info, &cpr_lock);
+		mutex_exit(&cpr_lock);
+
+		error = dserv_instance_enter(RW_READER, B_FALSE, &inst, pid);
+		if (error) {
+			DTRACE_PROBE1(dserv__i__dserv_mds_hb_error, int, *pid);
+
+			/*
+			 * ESRCH implies that there is no instance. If there is
+			 * no instance, then there is no point of having a
+			 * heartbeat for that instance, so we exit.
+			 */
+			if (error == ESRCH) {
+				DTRACE_PROBE(dserv__i__ds_mds_hb_ESRCH_error);
+				break;
+			}
+
+			/*
+			 * Some other error happened. Just keep retrying.
+			 */
+			continue;
+		}
+
+		/*
+		 * Check if the instance is shutting down. If yes, then
+		 * we exit the heartbeat thread.
+		 */
+		mutex_enter(&inst->dmi_content_lock);
+		if (inst->dmi_teardown_in_progress == B_TRUE) {
+			DTRACE_PROBE(dserv__i__dmi_teardown_in_progress);
+			mutex_exit(&inst->dmi_content_lock);
+			dserv_instance_exit(inst);
+			break;
+		}
+
+		args.ds_id = inst->dmi_ds_id;
+		args.ds_boottime = inst->dmi_verifier;
+		mutex_exit(&inst->dmi_content_lock);
+
+		/*
+		 * Invoke DS_RENEW to the MDS
+		 */
+		error = dserv_mds_call(inst, DS_RENEW,
+		    (caddr_t)&args, xdr_DS_RENEWargs,
+		    (caddr_t)&res, xdr_DS_RENEWres);
+
+		/*
+		 * Detect reboot if the RPC succeeds.
+		 */
+		DTRACE_PROBE2(dserv__i__dserv_mds_call_resp_status,
+		    int, res.status, int, error);
+		if (error == 0) {
+
+			/*
+			 * error == 0 simply implies that the DS_RENEW RPC
+			 * succeeded, not necessarily with DS_OK though.  Take
+			 * recovery actions if MDS reboot is detected.
+			 */
+			mutex_enter(&inst->dmi_content_lock);
+			if (res.status == DSERR_STALE_DSID ||
+			    inst->dmi_recov_in_progress == B_TRUE ||
+			    inst->dmi_mds_boot_verifier !=
+			    res.DS_RENEWres_u.mds_boottime) {
+				DTRACE_PROBE(dserv__i__dserv_recovery_starts);
+
+				/*
+				 * Spawning another thread to do recovery seems
+				 * like an overkill here, so doing it inline.
+				 * First do DS_EXIBI, and continue on to
+				 * DS_REPORTAVAIL only if DS_EXIBI passes.
+				 */
+				inst->dmi_recov_in_progress = B_TRUE;
+				mutex_exit(&inst->dmi_content_lock);
+
+				error = dserv_mds_exibi(inst, &status);
+				if (error || status != DS_OK) {
+					DTRACE_PROBE(dserv__i__exibi_failed);
+					dserv_instance_exit(inst);
+					continue;
+				}
+
+				/* DS_EXIBI is done, now do DS_REPORTAVAIL. */
+				error = dserv_mds_do_reportavail(inst, &status);
+				if (error || status != DS_OK) {
+					DTRACE_PROBE(
+					    dserv__i__reportavail_failed);
+					dserv_instance_exit(inst);
+					continue;
+				} else {
+					/*
+					 * Recovery is done. Mark all the
+					 * appropriate flags so that we are
+					 * ready for the next round of recovery
+					 * actions.
+					 */
+					mutex_enter(&inst->dmi_content_lock);
+					inst->dmi_recov_in_progress = B_FALSE;
+					mutex_exit(&inst->dmi_content_lock);
+				}
+			} else {
+				DTRACE_PROBE(dserv__i__dserv_no_recovery);
+				mutex_exit(&inst->dmi_content_lock);
+			}
+		}
+		dserv_instance_exit(inst);
+	}
+
+	DTRACE_PROBE(dserv__i__hb_thread_exiting);
+
+	kmem_free(pid, sizeof (pid_t));
+
+	mutex_enter(&cpr_lock);
+	CALLB_CPR_EXIT(&cpr_info);
+	mutex_destroy(&cpr_lock);
+
+	zthread_exit();
+	/* NOTREACHED */
+}
+
 int
 dserv_mds_addport(const char *uaddr, const char *proto, const char *aname)
 {
 	dserv_mds_instance_t *inst;
 	dserv_uaddr_t *keep;
-	DS_EXIBIargs args;
-	DS_EXIBIres res;
-	char in[MAXPATHLEN];
 	int error;
+	char in[MAXPATHLEN];
+	ds_status status = 0;
 
-	error = dserv_instance_enter(RW_READER, B_TRUE, &inst);
+	error = dserv_instance_enter(RW_READER, B_TRUE, &inst, NULL);
 	if (error)
 		return (error);
 
 	keep = kmem_cache_alloc(dserv_uaddr_cache, KM_SLEEP);
 	keep->du_addr = dserv_strdup(uaddr);
 	keep->du_proto = dserv_strdup(proto);
+	(void) sprintf(in, "%s: %s:", hw_serial, aname);
 
 	mutex_enter(&inst->dmi_content_lock);
 	list_insert_tail(&inst->dmi_uaddrs, keep);
+	inst->dmi_name = dserv_strdup(in);
 	mutex_exit(&inst->dmi_content_lock);
 
-	(void) sprintf(in, "%s: %s:", hw_serial, aname);
+	error = dserv_mds_exibi(inst, &status);
 
-	inst->dmi_name = dserv_strdup(in);
+	dserv_instance_exit(inst);
+	return (error);
+}
+
+int
+dserv_mds_exibi(dserv_mds_instance_t *inst, ds_status *status)
+{
+	DS_EXIBIargs args;
+	DS_EXIBIres res;
+	int error;
+
+	bzero(&args, sizeof (args));
 	bzero(&res, sizeof (res));
 
+	mutex_enter(&inst->dmi_content_lock);
 	args.ds_ident.boot_verifier = inst->dmi_verifier;
 	args.ds_ident.instance.instance_len = strlen(inst->dmi_name) + 1;
 	args.ds_ident.instance.instance_val = inst->dmi_name;
+	mutex_exit(&inst->dmi_content_lock);
 
 	error = dserv_mds_call(inst, DS_EXIBI,
 	    (caddr_t)&args, xdr_DS_EXIBIargs,
 	    (caddr_t)&res, xdr_DS_EXIBIres);
 
-	if (error == 0 && res.status == DS_OK)
+	if (error == 0 && res.status == DS_OK) {
+		mutex_enter(&inst->dmi_content_lock);
 		inst->dmi_ds_id = res.DS_EXIBIres_u.res_ok.ds_id;
+		inst->dmi_mds_boot_verifier =
+		    res.DS_EXIBIres_u.res_ok.mds_boot_verifier;
+		mutex_exit(&inst->dmi_content_lock);
+	}
 
-out:
-	dserv_instance_exit(inst);
+	*status = res.status;
 	return (error);
 }
 
@@ -961,11 +1131,35 @@ cp_ds_mds_checkstateid(mds_ds_fh *fh, struct compound_state *cs,
 	 */
 	co4 = (client_owner4*)&cs->sp->sn_clnt->nfs_client;
 
-	error = dserv_instance_enter(RW_READER, B_FALSE, &inst);
+	error = dserv_instance_enter(RW_READER, B_FALSE, &inst, NULL);
 	if (error) {
 		status = NFS4ERR_SERVERFAULT;
 		return (status);
 	}
+
+	/*
+	 * Checkstate will be done on each I/O, it may or may not go OTW, but
+	 * the state will be checked. Hence, it seems to be a good place for
+	 * sychronizing with the DS heartbeat thread, where the heartbeat
+	 * thread redrives DS_EXIBI and DS_REPORTAVAIL if the MDS reboots.
+	 *
+	 * Note that in the current implementation, if the recovery is in
+	 * progress then we deny the I/O. This is inefficient, since the I/Os
+	 * in flight from the client with valid state will get penalized
+	 * unncessarily.  However, the I/Os are currently being denied only
+	 * because we do not have state caching implemented. If we had state
+	 * caching, we would first check if the state that comes along
+	 * with the I/O operation is valid, and if so, we would allow the
+	 * I/O even if the recovery is in progress.
+	 */
+
+	mutex_enter(&inst->dmi_content_lock);
+	if (inst->dmi_recov_in_progress == B_TRUE) {
+		mutex_exit(&inst->dmi_content_lock);
+		status = NFS4ERR_DELAY;
+		return (status);
+	}
+	mutex_exit(&inst->dmi_content_lock);
 
 	/*
 	 * XXX: check some sort of cache or something. The design for the
@@ -1041,7 +1235,62 @@ dserv_mds_checkstate(void *dnstate, compound_state_t *cs, int mode,
 int
 dserv_mds_reportavail()
 {
-	dserv_mds_instance_t *inst;
+	dserv_mds_instance_t *inst = NULL;
+	int error = 0;
+	pid_t *pid = NULL;
+	ds_status status = 0;
+
+	error = dserv_instance_enter(RW_READER, B_FALSE, &inst, NULL);
+	if (error) {
+		return (error);
+	}
+
+	error = dserv_mds_do_reportavail(inst, &status);
+
+	/*
+	 * If the first DS_REPORTAVAIL (and the previous  DS_EXIBI)
+	 * completes successfully, start a heartbeat thread from the DS
+	 * to the MDS. Using the heartbeat thread, the DS will detect
+	 * MDS reboot and the MDS will detect DS reboot. DS_RENEW is
+	 * the control protocol operation that gets invoked in the
+	 * heartbeat thread.
+	 *
+	 * There are two reasons for starting the heartbeat
+	 * thread here:
+	 *
+	 * 1. No point starting the heartbeat if the initial set of
+	 * exchanges between the DS and MDS return in an error.
+	 *
+	 * 2. We could start the heartbeat thread in the user space,
+	 * and issue a system call for doing DS_RENEW, but that would
+	 * be inefficient, since the DS_RENEW is a frequently executed
+	 * operation.
+	 *
+	 * Note that each instance will have its own heartbeat thread,
+	 * since: (a) each instance will invoke DS_REPORTAVAIL and DS_EXIBI;
+	 * (b): each instance can be stopped and started independently; (c)
+	 * instances can be serving a different pNFS communities and/or
+	 * datasets.
+	 */
+	if (error == 0 && status == DS_OK) {
+		DTRACE_PROBE1(dserv__i__dmi_pid, int, inst->dmi_pid);
+		pid = kmem_zalloc(sizeof (pid_t), KM_NOSLEEP);
+		mutex_enter(&inst->dmi_content_lock);
+		*pid = inst->dmi_pid;
+		mutex_exit(&inst->dmi_content_lock);
+
+		DTRACE_PROBE(dserv__i__creating_heartbeat_thread);
+		(void) zthread_create(NULL, 0, dserv_mds_heartbeat_thread,
+		    pid, 0, minclsyspri);
+	}
+
+	dserv_instance_exit(inst);
+	return (error);
+}
+
+int
+dserv_mds_do_reportavail(dserv_mds_instance_t *inst, ds_status *status)
+{
 	DS_REPORTAVAILargs args;
 	DS_REPORTAVAILres res;
 	dserv_uaddr_t *ua;
@@ -1064,9 +1313,6 @@ dserv_mds_reportavail()
 	(void) memset(&args, '\0', sizeof (args));
 	(void) memset(&res, '\0', sizeof (res));
 
-	error = dserv_instance_enter(RW_READER, B_FALSE, &inst);
-	if (error)
-		return (error);
 
 	mutex_enter(&inst->dmi_content_lock);
 	acount = 0;
@@ -1178,6 +1424,8 @@ dserv_mds_reportavail()
 	    (caddr_t)&args, xdr_DS_REPORTAVAILargs,
 	    (caddr_t)&res, xdr_DS_REPORTAVAILres);
 
+	*status = res.status;
+
 	/*
 	 * ToDo: Store MDS SIDs that we get back in the on-disk storage
 	 * and in the in-memory MDS SID map.
@@ -1221,6 +1469,5 @@ out:
 	if (!error)
 		xdr_free(xdr_DS_REPORTAVAILres, (caddr_t)&res);
 
-	dserv_instance_exit(inst);
 	return (error);
 }

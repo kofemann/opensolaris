@@ -537,7 +537,7 @@ ds_renew(DS_RENEWargs *argp, DS_RENEWres *resp, struct svc_req *rqstp)
 
 	dop = mds_find_ds_owner_by_id(argp->ds_id);
 	if (dop == NULL) {
-		resp->status = DSERR_EXPIRED;
+		resp->status = DSERR_STALE_DSID;
 		return;
 	}
 
@@ -1111,8 +1111,16 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 	}
 
 	/*
-	 * If the find found the ds_owner we need to do
-	 * some clean up
+	 * If the find found the ds_owner we need to do some clean up.
+	 *
+	 * XXX: The following appears suboptimal. The reboot should be  assumed
+	 * only if the verifier is different. If the verifier is the same, then
+	 * we should do nothing. This is the case when another DS_EXIBI has
+	 * come in, which is a repeat of the previous DS_EXIBI. The key changes
+	 * need to happen in the DS_REPORTAVAIL processing, in ds_reportavail,
+	 * where, if the arguments are deemed duplicate, then they should not be
+	 * added to the device list. The following makes sense only if the
+	 * ds_reportavail has no support for eliminating duplicates.
 	 */
 	if (do_create == FALSE) {
 		/*
@@ -1124,6 +1132,7 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 		 */
 
 		/* brute force it */
+		DTRACE_PROBE(nfssrv__i__dscp_freeing_device_entries);
 		rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
 		while (dp = list_head(&dop->ds_addrlist_list)) {
 			list_remove(&dop->ds_addrlist_list, dp);

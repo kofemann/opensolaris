@@ -8672,7 +8672,6 @@ mds_op_layout_commit(nfs_argop4 *argop, nfs_resop4 *resop,
 	vnode_t *vp = cs->vp;
 	cred_t *cr = cs->cr;
 	rfs4_client_t *cp = cs->cp;
-	mds_layout_grant_t *lgp;
 	offset4 newsize;
 	caller_context_t ct;
 	vattr_t va;
@@ -8700,10 +8699,14 @@ mds_op_layout_commit(nfs_argop4 *argop, nfs_resop4 *resop,
 			*cs->statusp = resp->locr_status = NFS4ERR_NO_GRACE;
 			goto final;
 		}
-	} else {
+	}
+#ifdef NOT_FIXED_6846909
+	else {
 		/*
 		 * validate loca_stateid
 		 */
+
+		mds_layout_grant_t *lgp;
 		if ((lgp = mds_get_lo_grant_by_cp(cs)) == NULL) {
 			*cs->statusp = resp->locr_status = NFS4ERR_BADLAYOUT;
 			goto final;
@@ -8718,7 +8721,7 @@ mds_op_layout_commit(nfs_argop4 *argop, nfs_resop4 *resop,
 
 		rfs41_lo_grant_rele(lgp);
 	}
-
+#endif
 	resp->LAYOUTCOMMIT4res_u.locr_resok4.locr_newsize.\
 	    ns_sizechanged = FALSE;
 

@@ -276,7 +276,7 @@ dispatch_dserv_nfsv41(struct svc_req *req, SVCXPRT *xprt)
 	} else {
 		dserv_mds_instance_t *inst;
 
-		error = dserv_instance_enter(RW_READER, B_FALSE, &inst);
+		error = dserv_instance_enter(RW_READER, B_FALSE, &inst, NULL);
 		if (!error) {
 			(void) rfs41_dispatch(req, xprt, (char *)&args);
 			dserv_instance_exit(inst);
@@ -977,7 +977,7 @@ dserv_nnode_state_alloc(void)
 {
 	dserv_nnode_state_t *dns;
 	dns = kmem_cache_alloc(dserv_nnode_state_cache, KM_SLEEP);
-	dns->fh = kmem_zalloc(sizeof (mds_ds_fh), KM_SLEEP);
+	dns->fh = NULL;
 	return (dns);
 }
 

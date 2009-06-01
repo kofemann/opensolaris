@@ -68,6 +68,13 @@ void (*nfs_srv_quiesce_func)(void) = NULL;
 extern void nfscmd_args(uint_t);
 
 /*
+ * Time period in seconds for DS_RENEW requests from the heartbeat thread
+ * between DS and MDS
+ */
+#define	DS_MDS_HEARTBEAT_TIME 5
+time_t rfs4_ds_mds_hb_time = DS_MDS_HEARTBEAT_TIME;
+
+/*
  * These will be reset by klmmod:lm_svc(), when lockd starts NLM service,
  * based on values read by lockd from /etc/default/nfs. Since nfssrv depends on
  * klmmod, the declarations need to be here (in nfs, on which both depend) so
