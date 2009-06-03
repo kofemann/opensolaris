@@ -184,6 +184,8 @@ typedef struct {
 	struct netbuf		*dev_nb;
 	uint_t			dev_flags;
 	uint32_t		locnt;
+	uint32_t		ds_port_key;
+	uint64_t		ds_addr_key;
 	ds_owner_t		*ds_owner;
 	list_node_t		ds_addrlist_next;
 } ds_addrlist_t;

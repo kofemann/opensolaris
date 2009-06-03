@@ -1016,14 +1016,44 @@ mds_gather_devs(rfs4_entry_t entry, void *arg)
 	ds_addrlist_t	*dp = (ds_addrlist_t *)entry;
 	struct mds_gather_args *gap = (struct mds_gather_args *)arg;
 
+	int i, j;
+
 	if (rfs4_dbe_skip_or_invalid(dp->dbe))
 		return;
 
 	if (gap->dex < gap->max_devs_needed) {
-		gap->lo_arg.lo_devs[gap->dex] = rfs4_dbe_getid(dp->dbe);
 		rfs4_dbe_hold(dp->dbe);
-		gap->dev_ptr[gap->dex] = dp;
 		mds_ds_addrlist_layout_hold(dp);
+
+		/*
+		 * Insert in order.
+		 */
+		for (i = 0; i < gap->dex; i++) {
+			if (dp->ds_addr_key < gap->dev_ptr[i]->ds_addr_key ||
+			    (dp->ds_addr_key == gap->dev_ptr[i]->ds_addr_key &&
+			    dp->ds_port_key < gap->dev_ptr[i]->ds_port_key)) {
+				for (j = gap->dex; j > i; j--) {
+					gap->dev_ptr[j] = gap->dev_ptr[j - 1];
+					gap->lo_arg.lo_devs[j] =
+					    gap->lo_arg.lo_devs[j - 1];
+				}
+
+				gap->dev_ptr[i] = dp;
+				gap->lo_arg.lo_devs[i] =
+				    rfs4_dbe_getid(dp->dbe);
+
+				break;
+			}
+		}
+
+		/*
+		 * Not found
+		 */
+		if (i == gap->dex) {
+			gap->lo_arg.lo_devs[gap->dex] = rfs4_dbe_getid(dp->dbe);
+			gap->dev_ptr[gap->dex] = dp;
+		}
+
 		gap->dex++;
 	}
 }
@@ -2513,6 +2543,8 @@ ds_addrlist_create(rfs4_entry_t u_entry, void *arg)
 	dp->dev_knc = NULL;
 	dp->dev_nb = NULL;
 	dp->locnt = 0;
+	dp->ds_addr_key = 0;
+	dp->ds_port_key = 0;
 
 	return (TRUE);
 }

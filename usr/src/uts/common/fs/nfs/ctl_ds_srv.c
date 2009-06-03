@@ -25,6 +25,7 @@
 
 #include <sys/systm.h>
 #include <sys/sdt.h>
+#include <sys/ddi.h>
 #include <rpc/types.h>
 #include <sys/cmn_err.h>
 #include <rpc/auth.h>
@@ -40,6 +41,8 @@
 #include <nfs/ds.h>
 #include <sys/utsname.h>
 #include <sys/systeminfo.h>
+
+extern int inet_pton(int, const char *, void *);
 
 rfs4_client_t *mds_findclient(nfs_client_id4 *, bool_t *, rfs4_client_t *);
 
@@ -746,6 +749,53 @@ mds_find_ds_owner(DS_EXIBIargs *args, bool_t *create)
 	return (dop);
 }
 
+void
+mds_ds_address_to_key(ds_addrlist_t *dp, int af)
+{
+	int	len;
+	int	t;
+
+	char	*address, *port;
+
+	address = kstrdup(dp->dev_addr.na_r_addr);
+	len = strlen(address) + 1;
+
+	/*
+	 * These are network addresses + port information
+	 * We don't care about the format for the network
+	 * address, but we do care that the port is
+	 * described by .NUM.NUM after it.
+	 */
+	port = strrchr(address, '.');
+	if (!port)
+		goto error;
+
+	*port++ = '\0';
+	t = stoi(&port);
+	dp->ds_port_key = t;
+
+	port = strrchr(address, '.');
+	if (!port)
+		goto error;
+
+	*port++ = '\0';
+	t = stoi(&port);
+	dp->ds_port_key |= t << 8;
+
+	t = inet_pton(af, address, &dp->ds_addr_key);
+	if (t != 1)
+		goto error;
+
+	kmem_free(address, len);
+	return;
+
+error:
+	dp->ds_addr_key = 0;
+	dp->ds_port_key = 0;
+
+	kmem_free(address, len);
+}
+
 /*
  * mds_ds_initnet builds a knetconfig structure for the
  * netid, address and port.
@@ -816,6 +866,8 @@ mds_ds_initnet(ds_addrlist_t *dp)
 		error = uaddr2sockaddr(af, dp->dev_addr.na_r_addr,
 		    &addr6->sin6_addr, &addr6->sin6_port);
 	}
+
+	mds_ds_address_to_key(dp, af);
 
 out:
 	if (error) {
