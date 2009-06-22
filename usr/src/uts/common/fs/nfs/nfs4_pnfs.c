@@ -287,8 +287,6 @@ read_task_free(read_task_t *iowork)
 	stripe_dev_rele(&iowork->rt_dev);
 	if (iowork->rt_free_uio)
 		kmem_free(iowork->rt_uio.uio_iov, iowork->rt_free_uio);
-	if (cp && cp->nc_vp1)
-		VN_RELE(cp->nc_vp1);
 	if (cp)
 		nfs4_call_rele(cp);
 	kmem_cache_free(read_task_cache, iowork);
@@ -339,8 +337,6 @@ write_task_free(write_task_t *w)
 
 	stripe_dev_rele(&w->wt_dev);
 	crfree(w->wt_cred);
-	if (cp->nc_vp1)
-		VN_RELE(cp->nc_vp1);
 	if (cp)
 		nfs4_call_rele(cp);
 	kmem_cache_free(write_task_cache, w);
@@ -387,8 +383,6 @@ commit_task_free(commit_task_t *p)
 
 	stripe_dev_rele(&p->cm_dev);
 	crfree(p->cm_cred);
-	if (cp->nc_vp1)
-		VN_RELE(cp->nc_vp1);
 	if (cp)
 		nfs4_call_rele(cp);
 	kmem_cache_free(commit_task_cache, p);
@@ -1171,25 +1165,25 @@ stripe_dev_prepare(
  */
 /*ARGSUSED*/
 static void
-pnfs_call(nfs4_call_t *cp)
+pnfs_call(nfs4_call_t *cp, nfs4_recov_state_t *rsp)
 {
 	ASSERT(cp->nc_ds_servinfo != NULL);
 
-	cp->nc_e.error = nfs4_start_op_impl(cp, RCV_DONTBLOCK);
+	cp->nc_flags |= NFS4_CALL_FLAG_RCV_DONTBLOCK;
+	cp->nc_e.error = nfs4_start_op(cp, rsp);
 	if (cp->nc_e.error)
 		return;
 
 	cp->nc_svp = cp->nc_ds_servinfo;
 	rfs4call(cp, NULL);
 
-	if (nfs4_needs_recovery_impl(cp)) {
+	nfs4_needs_recovery(cp);
+	if (cp->nc_needs_recovery) {
 		/* does the return value need to go back to ET? */
-		(void) nfs4_start_recovery_impl(cp);
-		/* XXX ought to be moved into needs_recovery */
-		cp->nc_needs_recovery = 1;
+		(void) nfs4_start_recovery(cp);
 	}
 
-	nfs4_end_op_impl(cp);
+	nfs4_end_op(cp, rsp);
 }
 
 static void
@@ -1239,7 +1233,7 @@ pnfs_task_read(void *v)
 		rargs->res_data_val_alt = task->rt_base;
 	rargs->res_maxsize = task->rt_count;
 
-	pnfs_call(cp);
+	pnfs_call(cp, &task->rt_recov_state);
 	error = cp->nc_e.error;
 
 	if (error == EAGAIN || cp->nc_needs_recovery) {
@@ -1350,7 +1344,7 @@ pnfs_task_write(void *v)
 	wargs->data_len = task->wt_count;
 	wargs->data_val = task->wt_base;
 
-	pnfs_call(cp);
+	pnfs_call(cp, &task->wt_recov_state);
 	error = cp->nc_e.error;
 
 	if (error == EAGAIN || cp->nc_needs_recovery) {
@@ -1472,7 +1466,7 @@ pnfs_task_commit(void *v)
 	(void) nfs4_op_cputfh(cp, dev->std_fh);
 	cm_res = nfs4_op_commit(cp, task->cm_offset, task->cm_count);
 
-	pnfs_call(cp);
+	pnfs_call(cp, &task->cm_recov_state);
 
 	/* XXXcommit - Needs to check if recovery is needed */
 
@@ -1617,16 +1611,17 @@ pnfs_getdeviceinfo(mntinfo4_t *mi, devnode_t *dip, cred_t *cr)
 	nfs4_call_t *cp;
 	GETDEVICEINFO4res *gdi_res;
 	nfs4_error_t e = {0, NFS4_OK, RPC_SUCCESS};
-	int nr, abort;
+	int abort;
 	nfs4_recov_state_t recov_state;
 
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 
 retry:
-	cp = nfs4_call_init(mi, cr, TAG_PNFS_GETDEVINFO);
+	cp = nfs4_call_init(TAG_PNFS_GETDEVINFO, OP_GETDEVICEINFO, OH_OTHER,
+	    FALSE, mi, NULL, NULL, cr);
 
-	if (nfs4_start_op(mi, NULL, NULL, &recov_state))
+	if (nfs4_start_op(cp, &recov_state))
 		goto out;
 
 	if (pnfs_gdi_hack)
@@ -1637,11 +1632,11 @@ retry:
 
 	rfs4call(cp, &e);
 
-	if ((nr = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp))) {
-		abort = nfs4_start_recovery(&e, mi, NULL, NULL,
-		    NULL, NULL, 0, NULL);
+	nfs4_needs_recovery(cp);
+	if (cp->nc_needs_recovery) {
+		abort = nfs4_start_recovery(cp);
 
-		nfs4_end_fop(mi, NULL, NULL, 0, &recov_state, nr);
+		nfs4_end_op(cp, &recov_state);
 		nfs4_call_rele(cp);
 		if (abort) {
 			if (e.error)
@@ -1672,7 +1667,7 @@ retry:
 	} else if (e.error == 0 && e.stat != NFS4_OK)
 		e.error = geterrno4(e.stat);
 
-	nfs4_end_op(mi, NULL, NULL, &recov_state, 0);
+	nfs4_end_op(cp, &recov_state);
 out:
 	nfs4_call_rele(cp);
 
@@ -1826,13 +1821,14 @@ pnfs_task_layoutreturn(void *v)
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 
-	cp = nfs4_call_init(mi, task->tlr_cr, TAG_PNFS_LAYOUTRETURN);
+	cp = nfs4_call_init(TAG_PNFS_LAYOUTRETURN, OP_LAYOUTRETURN, OH_OTHER,
+	    FALSE, mi, NULL, NULL, task->tlr_cr);
 
 	/*
 	 * XXX - todo need to pass vp for LAYOUTRETURN4_FILE
 	 * XXX - if start_op fails, should we remove the layout from the tree?
 	 */
-	if (nfs4_start_op(mi, NULL, NULL, &recov_state))
+	if (nfs4_start_op(cp, &recov_state))
 		goto out;
 
 	if (task->tlr_return_type == LAYOUTRETURN4_FILE) {
@@ -1940,7 +1936,7 @@ pnfs_task_layoutreturn(void *v)
 
 	nfs4_server_rele(np);
 done:
-	nfs4_end_op(mi, NULL, NULL, &recov_state, 0);
+	nfs4_end_op(cp, &recov_state);
 	/*
 	 * At this point, we don't worry about failure.  We will either
 	 * be asked to return the layout again, or the servers will stop
@@ -1987,7 +1983,8 @@ pnfs_task_layoutget(void *v)
 	nfs4_init_stateid_types(&sid_types);
 
 recov_retry:
-	cp = nfs4_call_init(mi, cr, TAG_PNFS_LAYOUTGET);
+	cp = nfs4_call_init(TAG_PNFS_LAYOUTGET, OP_LAYOUTGET, OH_OTHER, FALSE,
+	    mi, NULL, NULL, cr);
 
 	if (pnfs_no_layoutget)
 		goto out;
@@ -2012,7 +2009,7 @@ recov_retry:
 	if (sid_types.cur_sid_type == SPEC_SID)
 		goto out;
 
-	if (nfs4_start_op(mi, NULL, NULL, &recov_state))
+	if (nfs4_start_op(cp, &recov_state))
 		goto out;
 
 	rfs4call(cp, &e);
@@ -2080,7 +2077,7 @@ recov_retry:
 	    sid_types.cur_sid_type != OPEN_SID) {
 		nfs4_save_stateid(&arg->loga_stateid, &sid_types);
 		trynext_sid = GETSID_TRYNEXT;
-		nfs4_end_op(mi, NULL, NULL, &recov_state, 0);
+		nfs4_end_op(cp, &recov_state);
 		nfs4_call_rele(cp);
 		goto recov_retry;
 	} else if (e.error == 0 &&
@@ -2090,7 +2087,7 @@ recov_retry:
 		mutex_exit(&rp->r_statelock);
 	}
 
-	nfs4_end_op(mi, NULL, NULL, &recov_state, 0);
+	nfs4_end_op(cp, &recov_state);
 
 out:
 	nfs4_call_rele(cp);
@@ -2303,15 +2300,17 @@ pnfs_start_read(read_task_t *task)
 	 * Synchronize with recovery actions.  If either the MDS or
 	 * the target DS are in recovery, or need recovery, then
 	 * start_op will block.
+	 * end_op is called before starting task to avoid possible race.
 	 */
-	if ((cp->nc_e.error = nfs4_start_op_impl(cp, 0)) != 0) {
+	if ((cp->nc_e.error = nfs4_start_op(cp, &task->rt_recov_state)) != 0) {
 		cmn_err(CE_WARN, "pnfs_start_read: start_op failed");
 		return;
 	}
+	nfs4_end_op(cp, &task->rt_recov_state);
+
 	(void) taskq_dispatch(cp->nc_mi->mi_pnfs_io_taskq,
 	    pnfs_task_read, task, 0);
 
-	nfs4_end_op_impl(cp);
 }
 
 int
@@ -2398,7 +2397,6 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		    layout->plo_stripe_dev[stripenum %
 		    layout->plo_stripe_count];
 		stripe_dev_hold(task->rt_dev);
-		VN_HOLD(vp);	/* VN_RELE() in pnfs_call() */
 		task->rt_cred = cr;
 		crhold(cr);
 
@@ -2423,11 +2421,11 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 			task->rt_free_uio = 0;
 			task->rt_uio.uio_loffset = off;
 		}
-		task->rt_call = nfs4_call_init(mi, cr, TAG_PNFS_READ);
-		task->rt_call->nc_vp1 = vp;
+		task->rt_call = nfs4_call_init(TAG_PNFS_READ, OP_READ, OH_READ,
+		    FALSE, mi, vp, NULL, cr);
 		task->rt_call->nc_ds_servinfo = task->rt_dev->std_svp;
-		task->rt_call->nc_opnum = OP_READ;
-		task->rt_call->nc_ophint = OH_READ;
+		task->rt_recov_state.rs_flags = 0;
+		task->rt_recov_state.rs_num_retry_despite_err = 0;
 
 		off += task->rt_count;
 		if (base)
@@ -2518,8 +2516,10 @@ more:
 			 * already captured next, and it cannot be
 			 * removed.
 			 */
-			cp->nc_needs_recovery = 0;
-			nfs4_error_zinit(&cp->nc_e);	/* Clear error */
+			nfs4_call_rele(cp);
+			task->rt_call = nfs4_call_init(TAG_PNFS_READ, OP_READ,
+			    OH_READ, FALSE, mi, vp, NULL, cr);
+			task->rt_call->nc_ds_servinfo = task->rt_dev->std_svp;
 			mutex_exit(&job->fir_lock);
 			pnfs_start_read(task);
 			mutex_enter(&job->fir_lock);
@@ -2597,15 +2597,16 @@ pnfs_start_write(write_task_t *task)
 	 * Synchronize with recovery actions.  If either the MDS or
 	 * the target DS are in recovery, or need recovery, then
 	 * start_op will block.
+	 * end_op is called before starting task to avoid possible race.
 	 */
-	if ((cp->nc_e.error = nfs4_start_op_impl(cp, 0)) != 0) {
+	if ((cp->nc_e.error = nfs4_start_op(cp, &task->wt_recov_state)) != 0) {
 		cmn_err(CE_WARN, "pnfs_start_write: start_op failed");
 		return;
 	}
+	nfs4_end_op(cp, &task->wt_recov_state);
+
 	(void) taskq_dispatch(cp->nc_mi->mi_pnfs_io_taskq,
 	    pnfs_task_write, task, 0);
-
-	nfs4_end_op_impl(cp);
 }
 
 int
@@ -2674,7 +2675,6 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 
 		task = kmem_cache_alloc(write_task_cache, KM_SLEEP);
 		task->wt_job = job;
-		VN_HOLD(vp);	/* VN_RELE() in pnfs_call() */
 		task->wt_cred = cr;
 		task->wt_layout = layout;
 		crhold(task->wt_cred);
@@ -2692,11 +2692,11 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		/* XXX do we need a more conservative calculation? */
 		task->wt_count = MIN(layout->plo_stripe_unit - stripeoff,
 		    count);
-		task->wt_call = nfs4_call_init(mi, cr, TAG_PNFS_WRITE);
-		task->wt_call->nc_vp1 = vp;
+		task->wt_call = nfs4_call_init(TAG_PNFS_WRITE, OP_WRITE,
+		    OH_WRITE, FALSE, mi, vp, NULL, cr);
 		task->wt_call->nc_ds_servinfo = task->wt_dev->std_svp;
-		task->wt_call->nc_opnum = OP_WRITE;
-		task->wt_call->nc_ophint = OH_WRITE;
+		task->wt_recov_state.rs_flags = 0;
+		task->wt_recov_state.rs_num_retry_despite_err = 0;
 
 		off += task->wt_count;
 		base += task->wt_count;
@@ -2783,8 +2783,10 @@ more:
 			 * already captured next, and it cannot be
 			 * removed.
 			 */
-			cp->nc_needs_recovery = 0;
-			nfs4_error_zinit(&cp->nc_e);	/* Clear error */
+			nfs4_call_rele(cp);
+			task->wt_call = nfs4_call_init(TAG_PNFS_WRITE, OP_WRITE,
+			    OH_WRITE, FALSE, mi, vp, NULL, cr);
+			task->wt_call->nc_ds_servinfo = task->wt_dev->std_svp;
 			mutex_exit(&job->fiw_lock);
 			pnfs_start_write(task);
 			mutex_enter(&job->fiw_lock);
@@ -3128,9 +3130,10 @@ pnfs_task_getdevicelist(void *v)
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 
-	cp = nfs4_call_init(mi, task->tgd_cred, TAG_PNFS_GETDEVLIST);
+	cp = nfs4_call_init(TAG_PNFS_GETDEVLIST, OP_GETDEVICELIST, OH_OTHER,
+	    FALSE, mi, NULL, NULL, task->tgd_cred);
 
-	if (nfs4_start_op(mi, NULL, NULL, &recov_state))
+	if (nfs4_start_op(cp, &recov_state))
 		goto out;
 
 	(void) nfs4_op_cputfh(cp, mi->mi_rootfh);
@@ -3175,7 +3178,7 @@ pnfs_task_getdevicelist(void *v)
 		nfs4_call_opresfree(cp);
 	} while (! eof);
 
-	nfs4_end_op(mi, NULL, NULL, &recov_state, 0);
+	nfs4_end_op(cp, &recov_state);
 out:
 	nfs4_call_rele(cp);
 	task_get_devicelist_free(task);
@@ -3323,8 +3326,6 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 				continue;
 			task = kmem_cache_alloc(commit_task_cache, KM_SLEEP);
 			task->cm_job = job;
-			VN_HOLD(vp);
-
 			task->cm_cred = cr;
 			crhold(task->cm_cred);
 			task->cm_layout = layout;
@@ -3339,15 +3340,11 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 			task->cm_dev = layout->plo_stripe_dev[i];
 			stripe_dev_hold(task->cm_dev);
 			task->cm_count = ext->ce_length;
-	/*
-	 * XXXcommit - reconcile vp, cr, opnum, and ophint between
-	 * the commit_task_t and the nfs4_call_t.
-	 */
-			task->cm_call = nfs4_call_init(mi, cr, TAG_PNFS_COMMIT);
-			task->cm_call->nc_vp1 = vp;
+			task->cm_call = nfs4_call_init(TAG_PNFS_COMMIT,
+			    OP_COMMIT, OH_COMMIT, FALSE, mi, vp, NULL, cr);
 			task->cm_call->nc_ds_servinfo = task->cm_dev->std_svp;
-			task->cm_call->nc_opnum = OP_COMMIT;
-			task->cm_call->nc_ophint = OH_COMMIT;
+			task->cm_recov_state.rs_flags = 0;
+			task->cm_recov_state.rs_num_retry_despite_err = 0;
 	/*
 	 * XXXcommit - Add the task to the job list here.
 	 * Convert task dispatching to pnfs_commit_start()

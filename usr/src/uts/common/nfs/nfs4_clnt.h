@@ -2112,12 +2112,17 @@ extern void	nfs4_log_badowner(mntinfo4_t *, nfs_opnum4);
  * NFS4_RS_DELAY_MSG		Set once we have uprintf'ed a delay message.
  * NFS4_RS_RECALL_HELD1		r_deleg_recall_lock for vp1 was held.
  * NFS4_RS_RECALL_HELD2		r_deleg_recall_lock for vp2 was held.
+ * NFS4_RS_NEEDS_RECOVERY	Indicates recovery needed (for debug).
  */
 #define	NFS4_RS_RENAME_HELD	0x000000001
 #define	NFS4_RS_GRACE_MSG	0x000000002
 #define	NFS4_RS_DELAY_MSG	0x000000004
 #define	NFS4_RS_RECALL_HELD1	0x000000008
 #define	NFS4_RS_RECALL_HELD2	0x000000010
+#define	NFS4_RS_NEEDS_RECOVERY	0x000000020
+
+#define	NFS4_RS_RECOVSTR(rs)	\
+	(((rs)->rs_flags & NFS4_RS_NEEDS_RECOVERY) ? "recov" : "first")
 
 /*
  * Information that is retrieved from nfs4_start_op() and that is
@@ -2169,19 +2174,7 @@ extern int	nfs4_make_dotdot(struct nfs4_sharedfh *, hrtime_t,
 			vnode_t *, cred_t *, vnode_t **, int);
 extern void	nfs4_fail_recov(vnode_t *, char *, int, nfsstat4);
 
-extern int	nfs4_needs_recovery(nfs4_error_t *, bool_t, vfs_t *);
 extern int	nfs4_recov_marks_dead(nfsstat4);
-extern bool_t	nfs4_start_recovery(nfs4_error_t *, struct mntinfo4 *,
-			vnode_t *, vnode_t *, stateid4 *,
-			nfs4_lost_rqst_t *, nfs_opnum4, nfs4_bseqid_entry_t *);
-extern int	nfs4_start_op(struct mntinfo4 *, vnode_t *, vnode_t *,
-			nfs4_recov_state_t *);
-extern void	nfs4_end_op(struct mntinfo4 *, vnode_t *, vnode_t *,
-			nfs4_recov_state_t *, bool_t);
-extern int	nfs4_start_fop(struct mntinfo4 *, vnode_t *, vnode_t *,
-			nfs4_op_hint_t, nfs4_recov_state_t *, bool_t *);
-extern void	nfs4_end_fop(struct mntinfo4 *, vnode_t *, vnode_t *,
-				nfs4_op_hint_t, nfs4_recov_state_t *, bool_t);
 extern char	*nfs4_recov_action_to_str(nfs4_recov_t);
 
 /*
@@ -2370,9 +2363,7 @@ struct nfs4_clnt {
 /*
  * New recovery interfaces & structures
  */
-typedef struct {
-	nfs4_recov_state_t nc_recov_state;
-
+typedef struct nfs4_call {
 	mntinfo4_t	*nc_mi;
 	vnode_t		*nc_vp1;
 	vnode_t		*nc_vp2;
@@ -2387,7 +2378,6 @@ typedef struct {
 
 	/* needed by start_recovery */
 	nfs_opnum4	nc_opnum;
-	stateid4	*nc_sidp;
 	nfs4_lost_rqst_t *nc_lost_rqst;
 	nfs4_bseqid_entry_t *nc_bseqid_rqst;
 
@@ -2412,15 +2402,11 @@ typedef struct {
 
 #define	NFS4_CALL_FLAG_RESFREE		0x01	/* need to free nc_res */
 #define	NFS4_CALL_FLAG_SEQADDED		0x02	/* sequence op added */
-
-/*
- * Flags for client-side recovery interfaces.
- * Passed in as flags to nfs4_start_op()
- */
-#define	RCV_DONTBLOCK	0x00000001	/* Don't block, return EAGAIN */
+#define	NFS4_CALL_FLAG_RCV_DONTBLOCK	0x04	/* Don't block, return EAGAIN */
 
 #ifdef _KERNEL
-extern nfs4_call_t *nfs4_call_init(mntinfo4_t *mi, cred_t *cr, int ctag);
+extern nfs4_call_t *nfs4_call_init(int, nfs_opnum4, nfs4_op_hint_t, int,
+    mntinfo4_t *, vnode_t *, vnode_t *, cred_t *);
 extern void nfs4_call_hold(nfs4_call_t *);
 extern void nfs4_call_rele(nfs4_call_t *);
 extern void nfs4_call_opresfree(nfs4_call_t *);
@@ -2488,12 +2474,16 @@ extern void nfs4lookup_setup(nfs4_call_t *, char *, lkp4_attr_setup_t,
     attrmap4, int);
 extern void nfs4args_lookup_free(nfs4_call_t *);
 extern void rfs4call(nfs4_call_t *, nfs4_error_t *);
+extern int nfs4_start_op(nfs4_call_t *, nfs4_recov_state_t *);
+extern void nfs4_end_op(nfs4_call_t *, nfs4_recov_state_t *);
+extern void nfs4_needs_recovery(nfs4_call_t *);
+extern bool_t nfs4_start_recovery(nfs4_call_t *);
 
 /* interim */
-extern int nfs4_start_op_impl(nfs4_call_t *, uint32_t);
-extern void nfs4_end_op_impl(nfs4_call_t *);
-extern int nfs4_needs_recovery_impl(nfs4_call_t *);
-extern int nfs4_start_recovery_impl(nfs4_call_t *);
+extern int nfs4_needs_recovery_old(nfs4_error_t *, bool_t, vfs_t *);
+extern bool_t nfs4_start_recovery_old(nfs4_error_t *, struct mntinfo4 *,
+    vnode_t *, vnode_t *, nfs4_lost_rqst_t *, nfs_opnum4,
+    nfs4_bseqid_entry_t *);
 #endif /* _KERNEL */
 
 #ifdef	__cplusplus

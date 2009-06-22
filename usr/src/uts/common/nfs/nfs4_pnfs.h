@@ -155,6 +155,7 @@ typedef struct {
 	file_io_read_t *rt_job;
 	stripe_dev_t *rt_dev;
 	nfs4_call_t *rt_call;
+	nfs4_recov_state_t rt_recov_state;
 	cred_t *rt_cred;
 	offset4 rt_offset;
 	count4 rt_count;
@@ -184,6 +185,7 @@ typedef struct {
 	file_io_write_t *wt_job;
 	stripe_dev_t *wt_dev;
 	nfs4_call_t *wt_call;
+	nfs4_recov_state_t wt_recov_state;
 	cred_t *wt_cred;
 	pnfs_layout_t *wt_layout;
 	caddr_t wt_base;
@@ -207,6 +209,7 @@ typedef struct {
 	file_io_commit_t *cm_job;
 	stripe_dev_t *cm_dev;
 	nfs4_call_t *cm_call;
+	nfs4_recov_state_t cm_recov_state;
 	cred_t *cm_cred;
 	pnfs_layout_t *cm_layout;
 	offset4 cm_offset;

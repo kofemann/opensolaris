@@ -1888,7 +1888,8 @@ remap_lookup(nfs4_fname_t *fname, vnode_t *rootvp,
 		return;
 	}
 
-	cp = nfs4_call_init(mi, cr, ctag);
+	cp = nfs4_call_init(ctag, OP_LOOKUP, OH_OTHER, FALSE, mi, NULL, NULL,
+	    cr);
 
 	/* 0: putfh directory */
 	(void) nfs4_op_cputfh(cp, VTOR4(rootvp)->r_fh);
@@ -2240,6 +2241,7 @@ int
 nfs4_make_dotdot(nfs4_sharedfh_t *fhp, hrtime_t t, vnode_t *dvp,
     cred_t *cr, vnode_t **vpp, int need_start_op)
 {
+	nfs4_call_t *cp = NULL;
 	mntinfo4_t *mi = VTOMI4(dvp);
 	nfs4_fname_t *np = NULL, *pnp = NULL;
 	vnode_t *vp = NULL, *rootvp = NULL;
@@ -2294,9 +2296,12 @@ nfs4_make_dotdot(nfs4_sharedfh_t *fhp, hrtime_t t, vnode_t *dvp,
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 recov_retry:
+	nfs4_error_zinit(&e);
+	cp = nfs4_call_init(0, OP_LOOKUP, OH_LOOKUP, FALSE, mi, rootvp, NULL,
+	    cr);
+
 	if (need_start_op) {
-		e.error = nfs4_start_fop(mi, rootvp, NULL, OH_LOOKUP,
-		    &recov_state, NULL);
+		e.error = nfs4_start_op(cp, &recov_state);
 		if (e.error != 0) {
 			goto out;
 		}
@@ -2305,21 +2310,22 @@ recov_retry:
 	pva.va_type = VNON;
 	remap_lookup(np, rootvp, RML_ORDINARY, cr,
 	    &newfh, &gar, &newpfh, &pgar, &e);
-	if (nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp)) {
+	cp->nc_e = e;
+	nfs4_needs_recovery(cp);
+	if (cp->nc_needs_recovery) {
 		if (need_start_op) {
 			bool_t abort;
 
-			abort = nfs4_start_recovery(&e, mi,
-			    rootvp, NULL, NULL, NULL, OP_LOOKUP, NULL);
+			abort = nfs4_start_recovery(cp);
 			if (abort) {
-				nfs4_end_fop(mi, rootvp, NULL, OH_LOOKUP,
-				    &recov_state, FALSE);
+				cp->nc_needs_recovery = FALSE;
+				nfs4_end_op(cp, &recov_state);
 				if (e.error == 0)
 					e.error = EIO;
 				goto out;
 			}
-			nfs4_end_fop(mi, rootvp, NULL, OH_LOOKUP,
-			    &recov_state, TRUE);
+			nfs4_end_op(cp, &recov_state);
+			nfs4_call_rele(cp);
 			goto recov_retry;
 		}
 		if (e.error == 0)
@@ -2335,8 +2341,7 @@ recov_retry:
 	if ((e.error != 0) ||
 	    (va.va_type != VDIR)) {
 		if (need_start_op)
-			nfs4_end_fop(mi, rootvp, NULL, OH_LOOKUP,
-			    &recov_state, FALSE);
+			nfs4_end_op(cp, &recov_state);
 		if (e.error == 0)
 			e.error = EIO;
 		goto out;
@@ -2344,8 +2349,7 @@ recov_retry:
 
 	if (e.stat != NFS4_OK) {
 		if (need_start_op)
-			nfs4_end_fop(mi, rootvp, NULL, OH_LOOKUP,
-			    &recov_state, FALSE);
+			nfs4_end_op(cp, &recov_state);
 		e.error = EIO;
 		goto out;
 	}
@@ -2363,24 +2367,22 @@ recov_retry:
 		if (pnp != NULL) {
 			remap_lookup(pnp, rootvp, RML_ORDINARY, cr,
 			    &newpfh, &pgar, NULL, NULL, &e);
-			if (nfs4_needs_recovery(&e, FALSE,
-			    mi->mi_vfsp)) {
+			cp->nc_e = e;
+			nfs4_needs_recovery(cp);
+			if (cp->nc_needs_recovery) {
 				if (need_start_op) {
 					bool_t abort;
 
-					abort = nfs4_start_recovery(&e, mi,
-					    rootvp, NULL, NULL, NULL,
-					    OP_LOOKUP, NULL);
+					abort = nfs4_start_recovery(cp);
 					if (abort) {
-						nfs4_end_fop(mi, rootvp, NULL,
-						    OH_LOOKUP, &recov_state,
-						    FALSE);
+						cp->nc_needs_recovery = FALSE;
+						nfs4_end_op(cp, &recov_state);
 						if (e.error == 0)
 							e.error = EIO;
 						goto out;
 					}
-					nfs4_end_fop(mi, rootvp, NULL,
-					    OH_LOOKUP, &recov_state, TRUE);
+					nfs4_end_op(cp, &recov_state);
+					nfs4_call_rele(cp);
 					goto recov_retry;
 				}
 				if (e.error == 0)
@@ -2390,8 +2392,7 @@ recov_retry:
 
 			if (e.stat != NFS4_OK) {
 				if (need_start_op)
-					nfs4_end_fop(mi, rootvp, NULL,
-					    OH_LOOKUP, &recov_state, FALSE);
+					nfs4_end_op(cp, &recov_state);
 				e.error = EIO;
 				goto out;
 			}
@@ -2400,8 +2401,7 @@ recov_retry:
 		    (e.error != 0) ||
 		    (pva.va_type == VNON)) {
 			if (need_start_op)
-				nfs4_end_fop(mi, rootvp, NULL, OH_LOOKUP,
-				    &recov_state, FALSE);
+				nfs4_end_op(cp, &recov_state);
 			if (e.error == 0)
 				e.error = EIO;
 			goto out;
@@ -2409,13 +2409,15 @@ recov_retry:
 	}
 	ASSERT(newpfh.nfs_fh4_len != 0);
 	if (need_start_op)
-		nfs4_end_fop(mi, rootvp, NULL, OH_LOOKUP, &recov_state, FALSE);
+		nfs4_end_op(cp, &recov_state);
 	psfh = sfh4_get(&newpfh, mi);
 
 	sfh = sfh4_get(&newfh, mi);
 	vp = makenfs4node_by_fh(sfh, psfh, &np, &gar, mi, cr, t);
 
 out:
+	if (cp != NULL)
+		nfs4_call_rele(cp);
 	if (np != NULL)
 		fn_rele(&np);
 	if (pnp != NULL)

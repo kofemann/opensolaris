@@ -1887,7 +1887,6 @@ nfs4_open_downgrade(int access_close, int deny_close, nfs4_open_owner_t *oop,
 	GETATTR4res		*getattr_res;
 	OPEN_DOWNGRADE4res	*odg_res;
 	rnode4_t		*rp;
-	bool_t			needrecov = FALSE;
 	seqid4			seqid = 0;
 	cred_t			*cred_otw;
 	hrtime_t		t;
@@ -2006,7 +2005,8 @@ cred_retry:
 		ctag = TAG_OPEN_DG_LOST;
 	else
 		ctag = TAG_OPEN_DG;
-	cp = nfs4_call_init(mi, cred_otw, ctag);
+	cp = nfs4_call_init(ctag, OP_OPEN_DOWNGRADE, OH_OTHER, TRUE, mi,
+	    NULL, NULL, cred_otw);
 
 	/* 0: putfh */
 	(void) nfs4_op_cputfh(cp, rp->r_fh);
@@ -2038,9 +2038,9 @@ cred_retry:
 		goto cred_retry;
 	}
 
-	needrecov = nfs4_needs_recovery(ep, TRUE, mi->mi_vfsp);
+	nfs4_needs_recovery(cp);
 
-	if (needrecov && recov_credpp) {
+	if (cp->nc_needs_recovery && recov_credpp) {
 		*recov_credpp = cred_otw;
 		crhold(*recov_credpp);
 		if (recov_seqidp)
@@ -2160,7 +2160,7 @@ nfs4_resend_open_otw(vnode_t **vpp, nfs4_lost_rqst_t *resend_rqstp,
 		ctag = TAG_OPEN_LOST;
 	}
 
-	cp = nfs4_call_init(mi, cr, ctag);
+	cp = nfs4_call_init(ctag, OP_OPEN, OH_OTHER, FALSE, mi, NULL, NULL, cr);
 
 	/* 0: putfh */
 	(void) nfs4_op_cputfh(cp, sfh);
@@ -2475,8 +2475,10 @@ nfs4get_lease_time(mntinfo4_t *mi, struct nfs4_server *np,
 	nfs4_ga_res_t		*garp;
 	attrmap4		attr_request;
 
-	/* Get the lease time */
-	cp = nfs4_call_init(mi, cr, TAG_GETATTR);
+	/* Use a GETATTR operation to retrieve the lease time */
+
+	cp = nfs4_call_init(TAG_GETATTR, OP_PUTROOTFH, OH_OTHER, FALSE, mi,
+	    NULL, NULL, cr);
 
 	/* 0: putrootfh */
 	(void) nfs4_op_putrootfh(cp);
@@ -2604,7 +2606,8 @@ nfs4exchange_id_otw(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 
 	ASSERT(!MUTEX_HELD(&np->s_lock));
 
-	cp = nfs4_call_init(mi, cr, TAG_EXCHANGE_ID);
+	cp = nfs4_call_init(TAG_EXCHANGE_ID, OP_EXCHANGE_ID, OH_OTHER, FALSE,
+	    mi, NULL, NULL, cr);
 
 	/* EXCHANGE_ID */
 	exch_res = nfs4_op_exchange_id(cp, &argp);
@@ -2738,7 +2741,8 @@ nfs4create_session(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 	int			flags = RFS4CALL_NOSEQ;
 	int			max_slots = 0;
 
-	cp = nfs4_call_init(mi, cr, TAG_CREATE_SESSION);
+	cp = nfs4_call_init(TAG_CREATE_SESSION, OP_CREATE_SESSION, OH_OTHER,
+	    FALSE, mi, NULL, NULL, cr);
 
 	sess_res = nfs4_op_create_session(cp, &sargp);
 
@@ -2939,7 +2943,8 @@ nfs4setclientid_otw(mntinfo4_t *mi, struct servinfo4 *svp, cred_t *cr,
 
 	ASSERT(!MUTEX_HELD(&np->s_lock));
 
-	cp = nfs4_call_init(mi, cr, TAG_SETCLIENTID);
+	cp = nfs4_call_init(TAG_SETCLIENTID, OP_SETCLIENTID, OH_OTHER, FALSE,
+	    mi, NULL, NULL, cr);
 
 	/* 0: putrootfh */
 	(void) nfs4_op_putrootfh(cp);
@@ -3065,7 +3070,8 @@ nfs4setclientid_otw(mntinfo4_t *mi, struct servinfo4 *svp, cred_t *cr,
 
 	/* Confirm the client id and get the lease_time attribute */
 
-	cp = nfs4_call_init(mi, cr, TAG_SETCLIENTID_CF);
+	cp = nfs4_call_init(TAG_SETCLIENTID_CF, OP_SETCLIENTID_CONFIRM,
+	    OH_OTHER, FALSE, mi, NULL, NULL, cr);
 
 	/* 0: setclientid_confirm */
 	(void) nfs4_op_setclientid_confirm(cp, tmp_clientid, verf);

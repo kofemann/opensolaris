@@ -1253,7 +1253,6 @@ getlinktext_otw(mntinfo4_t *mi, nfs_fh4 *fh, char **linktextp, cred_t *cr,
 	nfs4_call_t *cp;
 	READLINK4res *lr_res;
 	uint_t len;
-	bool_t needrecov = FALSE;
 	nfs4_recov_state_t recov_state;
 	nfs4_sharedfh_t *sfh;
 	nfs4_error_t e;
@@ -1265,11 +1264,12 @@ getlinktext_otw(mntinfo4_t *mi, nfs_fh4 *fh, char **linktextp, cred_t *cr,
 	recov_state.rs_num_retry_despite_err = 0;
 
 recov_retry:
-	cp = nfs4_call_init(mi, cr, TAG_GET_SYMLINK);
+	cp = nfs4_call_init(TAG_GET_SYMLINK, OP_READLINK, OH_OTHER, FALSE,
+	    mi, NULL, NULL, cr);
 	nfs4_error_zinit(&e);
 
 	if (! recovery) {
-		e.error = nfs4_start_op(mi, NULL, NULL, &recov_state);
+		e.error = nfs4_start_op(cp, &recov_state);
 		if (e.error) {
 			sfh4_rele(&sfh);
 			nfs4_call_rele(cp);
@@ -1285,16 +1285,15 @@ recov_retry:
 
 	rfs4call(cp, &e);
 
-	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
+	nfs4_needs_recovery(cp);
 
-	if (needrecov && !recovery && num_retry-- > 0) {
+	if (cp->nc_needs_recovery && !recovery && num_retry-- > 0) {
 
 		NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
 		    "getlinktext_otw: initiating recovery\n"));
 
-		if (nfs4_start_recovery(&e, mi, NULL, NULL, NULL, NULL,
-		    OP_READLINK, NULL) == FALSE) {
-			nfs4_end_op(mi, NULL, NULL, &recov_state, needrecov);
+		if (nfs4_start_recovery(cp) == FALSE) {
+			nfs4_end_op(cp, &recov_state);
 			nfs4_call_rele(cp);
 			goto recov_retry;
 		}
@@ -1305,7 +1304,7 @@ recov_retry:
 	 */
 	if (e.error != 0) {
 		if (! recovery)
-			nfs4_end_op(mi, NULL, NULL, &recov_state, needrecov);
+			nfs4_end_op(cp, &recov_state);
 		sfh4_rele(&sfh);
 		nfs4_call_rele(cp);
 		return (e.error);
@@ -1314,7 +1313,7 @@ recov_retry:
 	if (cp->nc_res.status) {
 		e.error = geterrno4(cp->nc_res.status);
 		if (! recovery)
-			nfs4_end_op(mi, NULL, NULL, &recov_state, needrecov);
+			nfs4_end_op(cp, &recov_state);
 		sfh4_rele(&sfh);
 		nfs4_call_rele(cp);
 		return (e.error);
@@ -1327,7 +1326,7 @@ recov_retry:
 	*linktextp = utf8_to_str(&lr_res->link, &len, NULL);
 
 	if (! recovery)
-		nfs4_end_op(mi, NULL, NULL, &recov_state, needrecov);
+		nfs4_end_op(cp, &recov_state);
 	sfh4_rele(&sfh);
 	nfs4_call_rele(cp);
 	return (0);
@@ -1552,7 +1551,6 @@ nfs4getfh_otw(struct mntinfo4 *mi, servinfo4_t *svp, vtype_t *vtp,
 	nfs4_ga_res_t *garp;
 	nfs_fh4 *tmpfhp;
 	nfs_fh4 *resfhp;
-	bool_t needrecov = FALSE;
 	nfs4_recov_state_t recov_state;
 	int nthcomp;
 	int recovery = !(flags & NFS4_GETFH_NEEDSOP);
@@ -1591,13 +1589,13 @@ recov_retry:
 		ctag = TAG_REMAP_MOUNT;
 	else
 		ctag = TAG_MOUNT;
-	cp = nfs4_call_init(mi, cr, ctag);
+	cp = nfs4_call_init(ctag, OP_GETFH, OH_MOUNT, FALSE, mi, NULL, NULL,
+	    cr);
 
 	nfs4_error_zinit(ep);
 
 	if (!recovery) {
-		ep->error = nfs4_start_fop(mi, NULL, NULL, OH_MOUNT,
-		    &recov_state, NULL);
+		ep->error = nfs4_start_op(cp, &recov_state);
 
 		/*
 		 * If recovery has been started and this request as
@@ -1656,14 +1654,14 @@ recov_retry:
 
 	NFS4_DEBUG(nfs4_client_call_debug, (CE_NOTE,
 	    "nfs4getfh_otw: %s call, mi 0x%p",
-	    needrecov ? "recov" : "first", (void *)mi));
+	    NFS4_RS_RECOVSTR(&recov_state), (void *)mi));
 
 	cp->nc_rfs4call_flags |= RFSCALL_SOFT;
 	rfs4call(cp, ep);
 
-	needrecov = nfs4_needs_recovery(ep, FALSE, mi->mi_vfsp);
+	nfs4_needs_recovery(cp);
 
-	if (needrecov) {
+	if (cp->nc_needs_recovery) {
 		bool_t abort;
 
 		if (recovery) {
@@ -1675,13 +1673,12 @@ recov_retry:
 		NFS4_DEBUG(nfs4_client_recov_debug,
 		    (CE_NOTE, "nfs4getfh_otw: initiating recovery\n"));
 
-		abort = nfs4_start_recovery(ep, mi, NULL,
-		    NULL, NULL, NULL, OP_GETFH, NULL);
+		abort = nfs4_start_recovery(cp);
 		if (!ep->error) {
 			ep->error = geterrno4(cp->nc_res.status);
 		}
 		nfs4args_lookup_free(cp);
-		nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state, needrecov);
+		nfs4_end_op(cp, &recov_state);
 		nfs4_call_rele(cp);
 		/* have another go? */
 		if (abort == FALSE)
@@ -1695,8 +1692,7 @@ recov_retry:
 	if (ep->error)  {
 		nfs4args_lookup_free(cp);
 		if (!recovery)
-			nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state,
-			    needrecov);
+			nfs4_end_op(cp, &recov_state);
 		nfs4_call_rele(cp);
 		return;
 	}
@@ -1704,8 +1700,7 @@ recov_retry:
 	/* for non-recovery errors */
 	if (cp->nc_res.status && cp->nc_res.status != NFS4ERR_SYMLINK) {
 		if (!recovery) {
-			nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state,
-			    needrecov);
+			nfs4_end_op(cp, &recov_state);
 		}
 		nfs4args_lookup_free(cp);
 		nfs4_call_rele(cp);
@@ -1763,8 +1758,7 @@ recov_retry:
 		 * potential nfs4_start_op deadlock.
 		 */
 		if (!recovery)
-			nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state,
-			    needrecov);
+			nfs4_end_op(cp, &recov_state);
 
 		if (!ep->error)
 			ep->error = resolve_sympath(mi, svp, nthcomp, tmpfhp,
@@ -1792,8 +1786,7 @@ recov_retry:
 	 */
 	if (garp->n4g_attrerr != NFS4_GETATTR_OP_OK) {
 		if (!recovery)
-			nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state,
-			    needrecov);
+			nfs4_end_op(cp, &recov_state);
 		ep->error = garp->n4g_attrerr;
 		nfs4args_lookup_free(cp);
 		nfs4_call_rele(cp);
@@ -1872,8 +1865,7 @@ recov_retry:
 		 * potential nfs4_start_op deadlock. See RFE 4777612.
 		 */
 		if (!recovery)
-			nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state,
-			    needrecov);
+			nfs4_end_op(cp, &recov_state);
 
 		ep->error = resolve_sympath(mi, svp, nthcomp, resfhp, cr,
 		    flags);
@@ -1935,7 +1927,7 @@ recov_retry:
 	nfs_rw_exit(&svp->sv_lock);
 
 	if (!recovery)
-		nfs4_end_fop(mi, NULL, NULL, OH_MOUNT, &recov_state, needrecov);
+		nfs4_end_op(cp, &recov_state);
 	nfs4args_lookup_free(cp);
 	nfs4_call_rele(cp);
 }
@@ -2958,9 +2950,9 @@ nfs4bind_conn_to_session(nfs4_server_t *np, servinfo4_t *svp, mntinfo4_t *mi,
 {
 	nfs4_call_t *cp;
 	nfs4_error_t e;
-	int needrecov = 0;
 
-	cp = nfs4_call_init(mi, cr, TAG_BIND_CONN_TO_SESSION);
+	cp = nfs4_call_init(TAG_BIND_CONN_TO_SESSION, OP_BIND_CONN_TO_SESSION,
+	    OH_OTHER, FALSE, mi, NULL, NULL, cr);
 
 	(void) nfs4_op_bind_conn_to_session(cp, &np->ssx.sessionid, dir, FALSE);
 
@@ -2981,17 +2973,16 @@ nfs4bind_conn_to_session(nfs4_server_t *np, servinfo4_t *svp, mntinfo4_t *mi,
 	 * session. That is handled by the recovery action.
 	 */
 
-	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
+	nfs4_needs_recovery(cp);
 
-	if (e.error && !needrecov) {
+	if (e.error && !cp->nc_needs_recovery) {
 		mutex_enter(&np->s_lock);
 		nfs4_call_rele(cp);
 		return (e.error);
 	}
 
-	if (needrecov) {
-		(void) nfs4_start_recovery(&e, mi, NULL,
-		    NULL, NULL, NULL, OP_BIND_CONN_TO_SESSION, NULL);
+	if (cp->nc_needs_recovery) {
+		(void) nfs4_start_recovery(cp);
 	}
 	mutex_enter(&np->s_lock);
 	nfs4_call_rele(cp);
@@ -3035,6 +3026,7 @@ nfs4_set_clientid(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 		    bool_t recovery, nfs4_error_t *n4ep)
 {
 	struct nfs4_server	*np;
+	nfs4_call_t		*cp;
 	nfs4_recov_state_t	 recov_state;
 	int			 num_retries = 0;
 	bool_t			 retry;
@@ -3127,6 +3119,9 @@ recov_retry:
 	}
 	mutex_exit(&np->s_lock);
 
+	cp = nfs4_call_init(0, OP_SETCLIENTID, OH_OTHER, FALSE, mi, NULL, NULL,
+	    cr);
+
 	/*
 	 * Drop the mi_recovlock since nfs4_start_op will
 	 * acquire it again for us.
@@ -3139,8 +3134,9 @@ recov_retry:
 	 */
 	if (!recovery) {
 		nfs_rw_exit(&mi->mi_recovlock);
-		n4ep->error = nfs4_start_op(mi, NULL, NULL, &recov_state);
+		n4ep->error = nfs4_start_op(cp, &recov_state);
 		if (n4ep->error) {
+			nfs4_call_rele(cp);
 			nfs4_server_rele(np);
 			return;
 		}
@@ -3153,9 +3149,10 @@ recov_retry:
 			mutex_exit(&np->s_lock);
 			nfs4_server_rele(np);
 			/* XXXrsb - See comment above about start_op/end_op */
-			if (!recovery)
-				nfs4_end_op(mi, NULL, NULL, &recov_state,
-				    recovery);
+			if (!recovery) {
+				nfs4_end_op(cp, &recov_state);
+			}
+			nfs4_call_rele(cp);
 			n4ep->error = EINTR;
 			return;
 		}
@@ -3174,8 +3171,10 @@ recov_retry:
 		}
 		mutex_exit(&np->s_lock);
 		nfs4_server_rele(np);
-		if (!recovery)
-			nfs4_end_op(mi, NULL, NULL, &recov_state, recovery);
+		if (!recovery) {
+			nfs4_end_op(cp, &recov_state);
+		}
+		nfs4_call_rele(cp);
 		return;
 	}
 
@@ -3228,8 +3227,8 @@ recov_retry:
 		 * retries).
 		 */
 		if (FAILOVER_MOUNT4(mi) && nfs4_try_failover(n4ep)) {
-			(void) nfs4_start_recovery(n4ep, mi, NULL,
-			    NULL, NULL, NULL, OP_SETCLIENTID, NULL);
+			cp->nc_e = *n4ep;
+			(void) nfs4_start_recovery(cp);
 			/*
 			 * Don't retry here, just return and let
 			 * recovery take over.
@@ -3279,8 +3278,10 @@ recov_retry:
 		mutex_exit(&np->s_lock);
 	}
 
-	if (!recovery)
-		nfs4_end_op(mi, NULL, NULL, &recov_state, recovery);
+	if (!recovery) {
+		nfs4_end_op(cp, &recov_state);
+	}
+	nfs4_call_rele(cp);
 
 
 	if (retry && num_retries++ < nfs4_num_sclid_retries) {
@@ -4113,13 +4114,17 @@ nfs4destroy_session_otw(mntinfo4_t *mi, servinfo4_t *svp, nfs4_server_t *np,
 	nfs4_session_t		*sessp = &np->ssx;
 	nfs4_call_t		*cp;
 	DESTROY_SESSION4res	*resp;
+	nfs4_recov_state_t	recov_state;
 
-	cp = nfs4_call_init(mi, np->s_cred, TAG_DESTROY_SESSION);
+	recov_state.rs_flags = 0;
+	recov_state.rs_num_retry_despite_err = 0;
+
+	cp = nfs4_call_init(TAG_DESTROY_SESSION, 0, OH_DESTROY_SESS,
+	    FALSE, mi, NULL, NULL, np->s_cred);
 	cp->nc_svp = cp->nc_ds_servinfo = svp;
-	cp->nc_ophint = OH_DESTROY_SESS;
 	cp->nc_rfs4call_flags = RFS4CALL_FORCE;
 
-	ep->error = nfs4_start_op_impl(cp, 0);
+	ep->error = nfs4_start_op(cp, &recov_state);
 	if (ep->error) {
 		cmn_err(CE_WARN, "nfs4destroy_session_otw: start op failed %d",
 		    ep->error);
@@ -4132,7 +4137,7 @@ nfs4destroy_session_otw(mntinfo4_t *mi, servinfo4_t *svp, nfs4_server_t *np,
 
 	rfs4call(cp, ep);
 
-	nfs4_end_op_impl(cp);
+	nfs4_end_op(cp, &recov_state);
 
 	if (ep->error != 0 || ep->stat != NFS4_OK ||
 	    (ep->error == 0 && resp->dsr_status)) {

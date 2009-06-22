@@ -2167,33 +2167,26 @@ nfs4delegreturn_save_lost_rqst(int error, nfs4_lost_rqst_t *lost_rqstp,
 }
 
 static void
-nfs4delegreturn_otw(rnode4_t *rp, cred_t *cr, nfs4_error_t *ep)
+nfs4delegreturn_otw(rnode4_t *rp, nfs4_call_t *cp, nfs4_error_t *ep)
 {
-	nfs4_call_t *cp;
 	hrtime_t t;
 	GETATTR4res *getattr_res;
-	mntinfo4_t *mi = VTOMI4(RTOV4(rp));
-
-	cp = nfs4_call_init(mi, cr, TAG_DELEGRETURN);
 
 	/* PUTFH, GETATTR, DELEGRETURN */
 	(void) nfs4_op_cputfh(cp, rp->r_fh);
-	getattr_res = nfs4_op_getattr(cp, MI4_DEFAULT_ATTRMAP(mi));
+	getattr_res = nfs4_op_getattr(cp, MI4_DEFAULT_ATTRMAP(cp->nc_mi));
 	(void) nfs4_op_delegreturn(cp, &rp->r_deleg_stateid);
 
 	t = gethrtime();
 	rfs4call(cp, ep);
 
-	if (ep->error) {
-		nfs4_call_rele(cp);
+	if (ep->error)
 		return;
-	}
 
 	if (cp->nc_res.status == NFS4_OK) {
-		nfs4_attr_cache(RTOV4(rp), &getattr_res->ga_res, t, cr,
+		nfs4_attr_cache(RTOV4(rp), &getattr_res->ga_res, t, cp->nc_cr,
 		    TRUE, NULL);
 	}
-	nfs4_call_rele(cp);
 }
 
 int
@@ -2204,14 +2197,16 @@ nfs4_do_delegreturn(rnode4_t *rp, int flags, cred_t *cr,
 	mntinfo4_t *mi = VTOMI4(vp);
 	nfs4_lost_rqst_t lost_rqst;
 	nfs4_recov_state_t recov_state;
-	bool_t needrecov = FALSE, recovonly, done = FALSE;
+	bool_t done = FALSE;
 	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
+	nfs4_call_t *cp;
 
 	ncg->nfs4_callback_stats.delegreturn.value.ui64++;
 
 	while (!done) {
-		e.error = nfs4_start_fop(mi, vp, NULL, OH_DELEGRETURN,
-		    &recov_state, &recovonly);
+		cp = nfs4_call_init(TAG_DELEGRETURN, OP_DELEGRETURN, OH_OTHER,
+		    TRUE, mi, NULL, NULL, cr);
+		e.error = nfs4_start_op(cp, &recov_state);
 
 		if (e.error) {
 			if (flags & NFS4_DR_FORCE) {
@@ -2231,11 +2226,12 @@ nfs4_do_delegreturn(rnode4_t *rp, int flags, cred_t *cr,
 		 */
 		if (rp->r_deleg_type == OPEN_DELEGATE_NONE) {
 			e.error = 0;
-			nfs4_end_op(mi, vp, NULL, &recov_state, needrecov);
+			nfs4_end_op(cp, &recov_state);
+			nfs4_call_rele(cp);
 			break;
 		}
 
-		if (recovonly) {
+		if (cp->nc_start_recov) {
 			/*
 			 * Delegation will be returned via the
 			 * recovery framework.  Build a lost request
@@ -2244,15 +2240,16 @@ nfs4_do_delegreturn(rnode4_t *rp, int flags, cred_t *cr,
 			nfs4_error_init(&e, EINTR);
 			nfs4delegreturn_save_lost_rqst(e.error, &lost_rqst,
 			    cr, vp);
-			(void) nfs4_start_recovery(&e, mi, vp,
-			    NULL, &rp->r_deleg_stateid,
-			    lost_rqst.lr_op == OP_DELEGRETURN ?
-			    &lost_rqst : NULL, OP_DELEGRETURN, NULL);
-			nfs4_end_op(mi, vp, NULL, &recov_state, needrecov);
+			if (lost_rqst.lr_op == OP_DELEGRETURN)
+				cp->nc_lost_rqst = &lost_rqst;
+			cp->nc_e = e;
+			(void) nfs4_start_recovery(cp);
+			nfs4_end_op(cp, &recov_state);
+			nfs4_call_rele(cp);
 			break;
 		}
 
-		nfs4delegreturn_otw(rp, cr, &e);
+		nfs4delegreturn_otw(rp, cp, &e);
 
 		/*
 		 * Ignore some errors on delegreturn; no point in marking
@@ -2260,24 +2257,27 @@ nfs4_do_delegreturn(rnode4_t *rp, int flags, cred_t *cr,
 		 */
 		if (e.error == 0 && (nfs4_recov_marks_dead(e.stat) ||
 		    e.stat == NFS4ERR_BADHANDLE ||
-		    e.stat == NFS4ERR_STALE))
-			needrecov = FALSE;
-		else
-			needrecov = nfs4_needs_recovery(&e, TRUE, vp->v_vfsp);
+		    e.stat == NFS4ERR_STALE)) {
+			cp->nc_needs_recovery = FALSE;
+		} else {
+			cp->nc_e = e;
+			nfs4_needs_recovery(cp);
+		}
 
-		if (needrecov) {
+		if (cp->nc_needs_recovery) {
 			nfs4delegreturn_save_lost_rqst(e.error, &lost_rqst,
 			    cr, vp);
-			(void) nfs4_start_recovery(&e, mi, vp,
-			    NULL, &rp->r_deleg_stateid,
-			    lost_rqst.lr_op == OP_DELEGRETURN ?
-			    &lost_rqst : NULL, OP_DELEGRETURN, NULL);
+			if (lost_rqst.lr_op == OP_DELEGRETURN)
+				cp->nc_lost_rqst = &lost_rqst;
+			cp->nc_e = e;
+			(void) nfs4_start_recovery(cp);
 		} else {
 			nfs4delegreturn_cleanup_impl(rp, NULL, ncg);
 			done = TRUE;
 		}
 
-		nfs4_end_op(mi, vp, NULL, &recov_state, needrecov);
+		nfs4_end_op(cp, &recov_state);
+		nfs4_call_rele(cp);
 	}
 	return (e.error);
 }
@@ -2291,6 +2291,8 @@ nfs4_resend_delegreturn(nfs4_lost_rqst_t *lorp, nfs4_error_t *ep,
 	nfs4_server_t *np)
 {
 	rnode4_t *rp = VTOR4(lorp->lr_vp);
+	mntinfo4_t *mi = VTOMI4(RTOV4(rp));
+	nfs4_call_t *cp;
 
 	/* If the file failed recovery, just quit. */
 	mutex_enter(&rp->r_statelock);
@@ -2299,8 +2301,11 @@ nfs4_resend_delegreturn(nfs4_lost_rqst_t *lorp, nfs4_error_t *ep,
 	}
 	mutex_exit(&rp->r_statelock);
 
+	cp = nfs4_call_init(TAG_DELEGRETURN, OP_DELEGRETURN, OH_OTHER, TRUE,
+	    mi, NULL, NULL, lorp->lr_cr);
+
 	if (!ep->error)
-		nfs4delegreturn_otw(rp, lorp->lr_cr, ep);
+		nfs4delegreturn_otw(rp, cp, ep);
 
 	/*
 	 * If recovery is now needed, then return the error
@@ -2308,12 +2313,17 @@ nfs4_resend_delegreturn(nfs4_lost_rqst_t *lorp, nfs4_error_t *ep,
 	 * including re-driving another delegreturn.  Otherwise,
 	 * just give up and clean up the delegation.
 	 */
-	if (nfs4_needs_recovery(ep, TRUE, lorp->lr_vp->v_vfsp))
+	cp->nc_e = *ep;
+	nfs4_needs_recovery(cp);
+	if (cp->nc_needs_recovery) {
+		nfs4_call_rele(cp);
 		return;
+	}
 
 	if (rp->r_deleg_type != OPEN_DELEGATE_NONE)
 		nfs4delegreturn_cleanup(rp, np);
 
+	nfs4_call_rele(cp);
 	nfs4_error_zinit(ep);
 }
 
@@ -2635,11 +2645,11 @@ deleg_reopen(vnode_t *vp, bool_t *recovp, struct nfs4_callback_globals *ncg,
 {
 	nfs4_open_stream_t *osp;
 	nfs4_recov_state_t recov_state;
-	bool_t needrecov = FALSE;
 	mntinfo4_t *mi;
 	rnode4_t *rp;
 	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
 	int claimnull;
+	nfs4_call_t *cp;
 
 	mi = VTOMI4(vp);
 	rp = VTOR4(vp);
@@ -2648,7 +2658,10 @@ deleg_reopen(vnode_t *vp, bool_t *recovp, struct nfs4_callback_globals *ncg,
 	recov_state.rs_num_retry_despite_err = 0;
 
 retry:
-	if ((e.error = nfs4_start_op(mi, vp, NULL, &recov_state)) != 0) {
+	cp = nfs4_call_init(0, OP_OPEN, OH_OTHER, TRUE, mi, vp, NULL, CRED());
+
+	if ((e.error = nfs4_start_op(cp, &recov_state)) != 0) {
+		nfs4_call_rele(cp);
 		return (e.error);
 	}
 
@@ -2678,7 +2691,9 @@ retry:
 		}
 
 		if (e.error == EAGAIN) {
-			nfs4_end_op(mi, vp, NULL, &recov_state, TRUE);
+			cp->nc_needs_recovery = TRUE;
+			nfs4_end_op(cp, &recov_state);
+			nfs4_call_rele(cp);
 			goto retry;
 		}
 
@@ -2692,9 +2707,10 @@ retry:
 			break;
 		}
 
-		needrecov = nfs4_needs_recovery(&e, TRUE, vp->v_vfsp);
+		cp->nc_e = e;
+		nfs4_needs_recovery(cp);
 
-		if (e.error != 0 && !needrecov) {
+		if (e.error != 0 && !cp->nc_needs_recovery) {
 			/*
 			 * Recovery is not possible, but don't give up yet;
 			 * we'd still like to do delegreturn after
@@ -2704,13 +2720,12 @@ retry:
 
 			ncg->nfs4_callback_stats.recall_failed.value.ui64++;
 
-		} else if (needrecov) {
+		} else if (cp->nc_needs_recovery) {
 			/*
 			 * Start recovery and bail out.  The recovery
 			 * thread will take it from here.
 			 */
-			(void) nfs4_start_recovery(&e, mi, vp, NULL, NULL,
-			    NULL, OP_OPEN, NULL);
+			(void) nfs4_start_recovery(cp);
 			open_stream_rele(osp, rp);
 			*recovp = TRUE;
 			break;
@@ -2719,7 +2734,8 @@ retry:
 		open_stream_rele(osp, rp);
 	}
 
-	nfs4_end_op(mi, vp, NULL, &recov_state, needrecov);
+	nfs4_end_op(cp, &recov_state);
+	nfs4_call_rele(cp);
 
 	return (e.error);
 }

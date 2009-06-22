@@ -457,7 +457,6 @@ static int
 secinfo_tryroot_otw(mntinfo4_t *mi, cred_t *cr)
 {
 	nfs4_call_t *cp;
-	bool_t needrecov = FALSE;
 	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
 
 	/* use the flavors supported on the client */
@@ -465,17 +464,17 @@ secinfo_tryroot_otw(mntinfo4_t *mi, cred_t *cr)
 
 retry:
 	NFS4_DEBUG(nfs4_client_call_debug, (CE_NOTE,
-	    "secinfo_tryroot_otw: %s call, mi 0x%p",
-	    needrecov ? "recov" : "first", (void*)mi));
+	    "secinfo_tryroot_otw: mi 0x%p", (void*)mi));
 
-	cp = nfs4_call_init(mi, cr, TAG_PUTROOTFH);
+	cp = nfs4_call_init(TAG_PUTROOTFH, OP_PUTROOTFH, OH_OTHER, FALSE, mi,
+	    NULL, NULL, cr);
 	(void) nfs4_op_putrootfh(cp);
 
 	cp->nc_rfs4call_flags |= RFSCALL_SOFT;
 	rfs4call(cp, &e);
 
-	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
-	if (e.error && !needrecov) {
+	nfs4_needs_recovery(cp);
+	if (e.error && !cp->nc_needs_recovery) {
 		nfs4_call_rele(cp);
 		return (e.error);
 	}
@@ -492,7 +491,7 @@ retry:
 		return (geterrno4(cp->nc_res.status));
 	}
 
-	if (needrecov) {
+	if (cp->nc_needs_recovery) {
 		NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
 		    "secinfo_tryroot_otw: let the caller retry\n"));
 		nfs4_call_rele(cp);
@@ -616,7 +615,6 @@ nfs4secinfo_otw(mntinfo4_t *mi, cred_t *cr, servinfo4_t *svp, int isrecov)
 	char *tmp_path;
 	component4 comp;
 	uint_t ncomp, tcomp;
-	bool_t needrecov = FALSE;
 	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
 	PUTROOTFH4res *putrootfh_res;
 	SECINFO4res *secinfo_res;
@@ -628,7 +626,8 @@ nfs4secinfo_otw(mntinfo4_t *mi, cred_t *cr, servinfo4_t *svp, int isrecov)
 	ASSERT(ncomp > 0);
 
 retry:
-	cp = nfs4_call_init(mi, cr, TAG_SECINFO);
+	cp = nfs4_call_init(TAG_SECINFO, OP_SECINFO, OH_OTHER, FALSE, mi,
+	    NULL, NULL, cr);
 	tmp_path = kmem_alloc(path_len + 1, KM_SLEEP);
 	(void) nfs_rw_enter_sig(&svp->sv_lock, RW_READER, 0);
 	bcopy(svp->sv_path, tmp_path, path_len + 1);
@@ -646,14 +645,13 @@ retry:
 	secinfo_res = nfs4_op_secinfo(cp, &comp);
 
 	NFS4_DEBUG(nfs4_client_call_debug, (CE_NOTE,
-	    "nfs4secinfo_otw: %s call, mi 0x%p",
-	    needrecov ? "recov" : "first", (void*)mi));
+	    "nfs4secinfo_otw: mi 0x%p", (void*)mi));
 
 	cp->nc_rfs4call_flags |= RFSCALL_SOFT;
 	rfs4call(cp, &e);
 
-	needrecov = nfs4_needs_recovery(&e, FALSE, mi->mi_vfsp);
-	if (e.error && !needrecov)
+	nfs4_needs_recovery(cp);
+	if (e.error && !cp->nc_needs_recovery)
 		goto out;
 
 	/*
@@ -707,7 +705,7 @@ retry:
 	 * return ok back to the outer loop in nfs4_recov_thread for
 	 * recovery.
 	 */
-	if (needrecov) {
+	if (cp->nc_needs_recovery) {
 		bool_t abort;
 
 		/* If not in a recovery thread, bail out */
@@ -720,8 +718,7 @@ retry:
 		NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
 		    "nfs4secinfo_otw: recovery in a recovery thread\n"));
 
-		abort = nfs4_start_recovery(&e, mi, NULL,
-		    NULL, NULL, NULL, OP_SECINFO, NULL);
+		abort = nfs4_start_recovery(cp);
 		if (!e.error)
 			e.error = geterrno4(cp->nc_res.status);
 		if (abort == FALSE) {
@@ -873,7 +870,8 @@ nfs4_secinfo_fh_otw(mntinfo4_t *mi, nfs4_sharedfh_t *fh, char *nm, cred_t *cr)
 
 	ASSERT(strlen(nm) > 0);
 
-	cp = nfs4_call_init(mi, cr, TAG_SECINFO);
+	cp = nfs4_call_init(TAG_SECINFO, OP_SECINFO, OH_OTHER, FALSE, mi,
+	    NULL, NULL, cr);
 
 	/* putfh fh */
 	(void) nfs4_op_cputfh(cp, fh);
