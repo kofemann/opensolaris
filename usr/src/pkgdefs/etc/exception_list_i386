@@ -117,6 +117,7 @@ usr/include/libdlflow_impl.h	i386
 usr/include/libdlvlan.h		i386
 usr/include/libdlmgmt.h		i386
 usr/include/libdlstat.h		i386
+usr/include/libdlsim.h		i386
 lib/libdladm.so			i386
 lib/llib-ldladm.ln		i386
 lib/amd64/libdladm.so		i386
@@ -363,10 +364,13 @@ usr/include/ike/sshrandom.h		i386
 usr/include/ike/sshhash.h		i386
 usr/include/ike/sshconf.h		i386
 usr/lib/libike.so			i386
+usr/lib/llib-like			i386
 usr/lib/llib-like.ln			i386
 usr/lib/llib-lipsecutil			i386
 usr/lib/libipsecutil.so			i386
 usr/lib/llib-lipsecutil.ln		i386
+usr/lib/amd64/libike.so			i386
+usr/lib/amd64/llib-like.ln		i386
 usr/lib/amd64/libipsecutil.so		i386
 usr/lib/amd64/llib-lipsecutil.ln	i386
 #
@@ -480,6 +484,14 @@ lib/llib-ldhcputil			i386
 lib/llib-ldhcputil.ln			i386
 lib/libdhcpagent.so			i386
 lib/libdhcputil.so			i386
+#
+# These files are installed in the proto area by the build of libinstzones
+# and libpkg
+#
+usr/lib/llib-linstzones			i386
+usr/lib/llib-linstzones.ln		i386
+usr/lib/llib-lpkg			i386
+usr/lib/llib-lpkg.ln			i386
 #
 # These files are installed in the proto area by the build of libinetcfg.
 # Only the shared object is shipped.
@@ -623,15 +635,12 @@ var/krb5				i386
 var/svc/manifest/network/security/kadmin.xml	i386
 var/svc/manifest/network/security/krb5_prop.xml	i386
 var/svc/manifest/network/security/krb5kdc.xml	i386
-etc/sfw/openssl/certs			i386
-etc/sfw/openssl/private			i386
 #
 # these are "removed" from the source product build because the only
 # packages that currently deliver them are removed.
 # they really should't be in here.
 #
 etc/sfw					i386
-usr/sfw/bin				i386
 #
 # Entries for the libmech_krb5 symlink, which has been included
 # for build purposes only, not delivered to customers.
@@ -664,6 +673,8 @@ usr/include/sys/net80211_crypto.h	i386
 # PPPoE files not delivered to customers.
 usr/include/net/pppoe.h			i386
 usr/include/net/sppptun.h		i386
+#
+usr/include/net/simnet.h		i386
 usr/include/net/wpa.h			i386
 #
 # The ses driver is not currently delivered on Intel
@@ -1249,6 +1260,15 @@ usr/include/sys/scsi/adapters/iscsi_if.h		i386
 usr/include/sys/stmf_sbd_ioctl.h	i386
 
 #
+w# portable object file and dictionary used by libfmd_msg test
+#
+usr/lib/fm/dict/TEST.dict		i386
+usr/lib/locale/C/LC_MESSAGES/TEST.mo	i386
+usr/lib/locale/C/LC_MESSAGES/TEST.po	i386
+
+# Private idmap RPC protocol
+usr/include/rpcsvc/idmap_prot.h		i386
+usr/include/rpcsvc/idmap_prot.x		i386
 # Until we have product, let's not worry about how/what
 # to package. For now, ignore the new NFSv4.1 headers.
 #

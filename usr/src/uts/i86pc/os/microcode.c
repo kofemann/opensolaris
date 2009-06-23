@@ -160,7 +160,8 @@ ucode_free_space(cpu_t *cp)
 void
 ucode_cleanup()
 {
-	ASSERT(ucode);
+	if (ucode == NULL)
+		return;
 
 	ucode->file_reset(&ucodefile, -1);
 }
@@ -1085,8 +1086,7 @@ ucode_update(uint8_t *ucodep, int size)
 
 		CPUSET_ADD(cpuset, id);
 		kpreempt_disable();
-		xc_sync((xc_arg_t)uusp, 0, 0, X_CALL_HIPRI, cpuset,
-		    ucode_write);
+		xc_sync((xc_arg_t)uusp, 0, 0, CPUSET2BV(cpuset), ucode_write);
 		kpreempt_enable();
 		CPUSET_DEL(cpuset, id);
 
@@ -1142,6 +1142,7 @@ ucode_check(cpu_t *cp)
 			ucode = &ucode_intel;
 			break;
 		default:
+			ucode = NULL;
 			return;
 		}
 

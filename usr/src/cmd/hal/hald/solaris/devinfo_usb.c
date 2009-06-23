@@ -16,6 +16,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <libdevinfo.h>
+#include <unistd.h>
+#include <dirent.h>
 #include <sys/types.h>
 #include <sys/mkdev.h>
 #include <sys/stat.h>
@@ -36,7 +38,10 @@ static HalDevice *devinfo_usb_if_add(HalDevice *d, di_node_t node, gchar *devfs_
 				     gchar *if_devfs_path, int ifnum);
 static HalDevice *devinfo_usb_scsa2usb_add(HalDevice *d, di_node_t node);
 static HalDevice *devinfo_usb_printer_add(HalDevice *usbd, di_node_t node);
-const gchar *devinfo_printer_prnio_get_prober (HalDevice *d, int *timeout);
+static HalDevice *devinfo_usb_input_add(HalDevice *usbd, di_node_t node);
+static HalDevice *devinfo_usb_video4linux_add(HalDevice *usbd, di_node_t node);
+const gchar *devinfo_printer_prnio_get_prober(HalDevice *d, int *timeout);
+const gchar *devinfo_keyboard_get_prober(HalDevice *d, int *timeout);
 static void set_usb_properties(HalDevice *d, di_node_t node, gchar *devfs_path, char *driver_name);
 
 DevinfoDevHandler devinfo_usb_handler = {
@@ -55,6 +60,15 @@ DevinfoDevHandler devinfo_usb_printer_handler = {
 	NULL,
 	NULL,
 	devinfo_printer_prnio_get_prober
+};
+
+DevinfoDevHandler devinfo_usb_keyboard_handler = {
+	devinfo_usb_add,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	devinfo_keyboard_get_prober
 };
 
 static gboolean
@@ -76,6 +90,34 @@ is_usb_node(di_node_t node)
 	}
 
 	return (FALSE);
+}
+
+static char *
+get_usb_devlink(char *devfs_path, const char *dir_name)
+{
+	char *result = NULL;
+	DIR *dp;
+
+	if ((dp = opendir(dir_name)) != NULL) {
+		struct dirent *ep;
+
+		while ((ep = readdir(dp)) != NULL) {
+			char path[MAXPATHLEN], lpath[MAXPATHLEN];
+
+			strncpy(path, dir_name, strlen(dir_name));
+			strncat(path, ep->d_name, strlen(ep->d_name));
+			memset(lpath, 0, sizeof (lpath));
+			if ((readlink(path, lpath, sizeof (lpath)) > 0) &&
+			    (strstr(lpath, devfs_path) != NULL)) {
+				result = strdup(path);
+				break;
+			}
+			memset(path, 0, sizeof (path));
+		}
+		closedir(dp);
+	}
+
+	return (result);
 }
 
 HalDevice *
@@ -146,10 +188,9 @@ devinfo_usb_add(HalDevice *parent, di_node_t node, char *devfs_path, char *devic
 		    (strncmp (binding_name, "usbif,", sizeof ("usbif,") - 1) == 0)) {
 
 			snprintf (if_devfs_path, sizeof (if_devfs_path), "%s:if%d",
-			     devfs_path, 0);
+			    devfs_path, 0);
 			if ((nd = devinfo_usb_if_add (d, node, if_devfs_path,
-			     if_devfs_path, 0)) != NULL) {
-
+			    if_devfs_path, 0)) != NULL) {
 				d = nd;
 				nd = NULL;
 				devfs_path = if_devfs_path;
@@ -176,11 +217,22 @@ devinfo_usb_add(HalDevice *parent, di_node_t node, char *devfs_path, char *devic
 	}
 
 	/* driver specific */
-	if ((driver_name != NULL) && (strcmp (driver_name, "scsa2usb") == 0)) {
-		nd = devinfo_usb_scsa2usb_add (d, node);
-	} else if ((driver_name != NULL) &&
-	    (strcmp (driver_name, "usbprn") == 0)) {
-		nd = devinfo_usb_printer_add (d, node);
+	if (driver_name != NULL) {
+		if (strcmp (driver_name, "scsa2usb") == 0) {
+			nd = devinfo_usb_scsa2usb_add (d, node);
+		} else if (strcmp (driver_name, "usbprn") == 0) {
+			nd = devinfo_usb_printer_add (d, node);
+		} else if (strcmp(driver_name, "hid") == 0) {
+			if (hdl = di_devlink_init(devfs_path, DI_MAKE_LINK)) {
+				di_devlink_fini(&hdl);
+			}
+			nd = devinfo_usb_input_add(d, node);
+		} else if (strcmp(driver_name, "usbvc") == 0) {
+			if (hdl = di_devlink_init(devfs_path, DI_MAKE_LINK)) {
+				di_devlink_fini(&hdl);
+			}
+			nd = devinfo_usb_video4linux_add(d, node);
+		}
 	}
 
 out:
@@ -256,7 +308,7 @@ parse_usb_if_descr(di_node_t node, int ifnum)
 {
 	unsigned char	*rdata = NULL;
 	usb_if_descr_t	*if_descrp=NULL;	/* interface descriptor */
-	di_node_t tmp_node = DI_NODE_NIL;
+	di_node_t	tmp_node = DI_NODE_NIL;
 	uint8_t num, length, type;
 	int rlen;
 	gchar *devpath = NULL;
@@ -276,7 +328,7 @@ parse_usb_if_descr(di_node_t node, int ifnum)
 			if (p == NULL)
 				goto out;
 			*p = '\0';
-			
+
 			if ((tmp_node = di_init (devpath, DINFOCPYALL)) == DI_NODE_NIL)
 				goto out;
 
@@ -369,7 +421,7 @@ devinfo_usb_if_add(HalDevice *parent, di_node_t node, gchar *devfs_path,
 
 
 static void
-get_dev_link_path(di_node_t node, char *nodetype, char *re, char **devlink, char **minor_path)
+get_dev_link_path(di_node_t node, char *nodetype, char *re, char **devlink, char **minor_path, char **minor_name)
 {
 	di_devlink_handle_t devlink_hdl;
 	int	major;
@@ -378,9 +430,9 @@ get_dev_link_path(di_node_t node, char *nodetype, char *re, char **devlink, char
 
 	*devlink = NULL;
 	*minor_path = NULL;
+	*minor_name = NULL;
 
 	if ((devlink_hdl = di_devlink_init(NULL, 0)) == NULL) {
-		printf("di_devlink_init() failed\n");
 		return;
 	}
 
@@ -400,14 +452,168 @@ get_dev_link_path(di_node_t node, char *nodetype, char *re, char **devlink, char
 			continue;
 		}
 
-		if ((strcmp (di_minor_nodetype(minor), nodetype) == 0) &&
-		    ((*devlink = get_devlink(devlink_hdl, re, *minor_path)) != NULL)) {
-			break;
+		if (strcmp(di_minor_nodetype(minor), nodetype) == 0) {
+			*devlink = get_devlink(devlink_hdl, re, *minor_path);
+			/*
+			 * During hotplugging, devlink could be NULL for usb
+			 * devices due to devlink database has not yet been
+			 * updated when hal try to read from it although the
+			 * actually dev link path has been created. In such a
+			 * situation, we will read the devlink name from
+			 * /dev/usb directory.
+			 */
+			if ((*devlink == NULL) &&
+			    ((strstr(re, "hid") != NULL) || (strstr(re, "video") != NULL))) {
+				*devlink = get_usb_devlink(*minor_path, "/dev/usb/");
+			}
+
+			if (*devlink != NULL) {
+				*minor_name = di_minor_name(minor);
+				break;
+			}
 		}
+
 		di_devfs_path_free (*minor_path);
 		*minor_path = NULL;
 	}
 	di_devlink_fini (&devlink_hdl);
+}
+
+static HalDevice *
+devinfo_usb_video4linux_add(HalDevice *usbd, di_node_t node)
+{
+	HalDevice *d = NULL;
+	int	major;
+	di_minor_t minor;
+	dev_t	devt;
+	char	*devlink = NULL;
+	char	*dev_videolink = NULL;
+	char	*minor_path = NULL;
+	char	*minor_name = NULL;
+	char	udi[HAL_PATH_MAX];
+	char	*s;
+
+	get_dev_link_path(node, "usb_video",
+	    "^usb/video+",  &devlink, &minor_path, &minor_name);
+
+	if ((minor_path == NULL) || (devlink == NULL)) {
+
+		goto out;
+	}
+
+	HAL_DEBUG(("devlink %s, minor_name %s", devlink, minor_name));
+	if (strcmp(minor_name, "usbvc") != 0) {
+
+		goto out;
+	}
+
+	d = hal_device_new();
+
+	devinfo_set_default_properties(d, usbd, node, minor_path);
+	hal_device_property_set_string(d, "info.subsystem", "video4linux");
+	hal_device_property_set_string(d, "info.category", "video4linux");
+
+	hal_device_add_capability(d, "video4linux");
+
+	/* Get logic link under /dev (/dev/video+) */
+	dev_videolink = get_usb_devlink(strstr(devlink, "usb"), "/dev/");
+
+	hal_device_property_set_string(d, "video4linux.device", dev_videolink);
+
+	hal_util_compute_udi(hald_get_gdl(), udi, sizeof (udi),
+	    "%s_video4linux", hal_device_get_udi(usbd));
+
+	hal_device_set_udi(d, udi);
+	hal_device_property_set_string(d, "info.udi", udi);
+	PROP_STR(d, node, s, "usb-product-name", "info.product");
+
+	devinfo_add_enqueue(d, minor_path, &devinfo_usb_handler);
+
+
+out:
+	if (devlink) {
+		free(devlink);
+	}
+
+	if (minor_path) {
+		di_devfs_path_free(minor_path);
+	}
+
+	return (d);
+}
+
+static HalDevice *
+devinfo_usb_input_add(HalDevice *usbd, di_node_t node)
+{
+	HalDevice *d = NULL;
+	int	major;
+	di_minor_t minor;
+	dev_t	devt;
+	char	*devlink = NULL;
+	char	*minor_path = NULL;
+	char	*minor_name = NULL;
+	char	udi[HAL_PATH_MAX];
+
+	get_dev_link_path(node, "ddi_pseudo",
+	    "^usb/hid+",  &devlink, &minor_path, &minor_name);
+
+	if ((minor_path == NULL) || (devlink == NULL)) {
+
+		goto out;
+	}
+
+	HAL_DEBUG(("devlink %s, minor_name %s", devlink, minor_name));
+	if ((strcmp(minor_name, "keyboard") != 0) &&
+	    (strcmp(minor_name, "mouse") != 0)) {
+
+		goto out;
+	}
+
+	d = hal_device_new();
+
+	devinfo_set_default_properties(d, usbd, node, minor_path);
+	hal_device_property_set_string(d, "info.subsystem", "input");
+	hal_device_property_set_string(d, "info.category", "input");
+
+	hal_device_add_capability(d, "input");
+
+	if (strcmp(minor_name, "keyboard") == 0) {
+		hal_device_add_capability(d, "input.keyboard");
+		hal_device_add_capability(d, "input.keys");
+		hal_device_add_capability(d, "button");
+	} else if (strcmp(minor_name, "mouse") == 0) {
+		hal_device_add_capability (d, "input.mouse");
+	}
+
+	hal_device_property_set_string(d, "input.device", devlink);
+	hal_device_property_set_string(d, "input.originating_device",
+	    hal_device_get_udi(usbd));
+
+	hal_util_compute_udi(hald_get_gdl(), udi, sizeof (udi),
+	    "%s_logicaldev_input", hal_device_get_udi(usbd));
+
+	hal_device_set_udi(d, udi);
+	hal_device_property_set_string(d, "info.udi", udi);
+
+	if (strcmp(minor_name, "keyboard") == 0) {
+		devinfo_add_enqueue(d, minor_path, &devinfo_usb_keyboard_handler);
+	} else {
+		devinfo_add_enqueue(d, minor_path, &devinfo_usb_handler);
+	}
+
+	/* add to TDL so preprobing callouts and prober can access it */
+	hal_device_store_add(hald_get_tdl(), d);
+
+out:
+	if (devlink) {
+		free(devlink);
+	}
+
+	if (minor_path) {
+		di_devfs_path_free(minor_path);
+	}
+
+	return (d);
 }
 
 static HalDevice *
@@ -419,10 +625,11 @@ devinfo_usb_scsa2usb_add(HalDevice *usbd, di_node_t node)
 	di_minor_t minor;
 	dev_t	devt;
 	char	*minor_path = NULL;
+	char	*minor_name = NULL;
 	char	*devlink = NULL;
 	char	udi[HAL_PATH_MAX];
 
-	get_dev_link_path(node, "ddi_ctl:devctl:scsi", NULL,  &devlink, &minor_path);
+	get_dev_link_path(node, "ddi_ctl:devctl:scsi", NULL,  &devlink, &minor_path, &minor_name);
 
 	if ((devlink == NULL) || (minor_path == NULL)) {
 		goto out;
@@ -463,10 +670,10 @@ devinfo_usb_printer_add(HalDevice *parent, di_node_t node)
 	HalDevice *d = NULL;
 	char	udi[HAL_PATH_MAX];
 	char *s;
-	char *devlink = NULL, *minor_path = NULL;
+	char *devlink = NULL, *minor_path = NULL, *minor_name = NULL;
 	const char	*subsystem;
 
-	get_dev_link_path(node, "ddi_printer", "printers/.+", &devlink, &minor_path);
+	get_dev_link_path(node, "ddi_printer", "printers/.+", &devlink, &minor_path, &minor_name);
 
 	if ((devlink == NULL) || (minor_path == NULL)) {
 		goto out;
@@ -509,4 +716,11 @@ devinfo_printer_prnio_get_prober (HalDevice *d, int *timeout)
 {
 	*timeout = 5 * 1000;	/* 5 second timeout */
 	return ("hald-probe-printer");
+}
+
+const gchar *
+devinfo_keyboard_get_prober(HalDevice *d, int *timeout)
+{
+	*timeout = 5 * 1000;	/* 5 second timeout */
+	return ("hald-probe-xkb");
 }

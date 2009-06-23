@@ -43,9 +43,6 @@ i386_HDRS=			\
 	agp/agptarget_io.h	\
 	agpgart.h		\
 	asy.h			\
-	audio/audio810.h	\
-	audio/audiohd.h	\
-	audio/audioixp.h	\
 	fd_debug.h		\
 	fdc.h			\
 	fdmedia.h		\
@@ -55,8 +52,6 @@ i386_HDRS=			\
 	ucode.h
 
 sparc_HDRS= 			\
-	audio/audiots.h		\
-	audio/am_src2.h		\
 	mouse.h			\
 	scsi/targets/ssddef.h	\
 	$(MDESCHDRS)
@@ -64,7 +59,8 @@ sparc_HDRS= 			\
 # Generated headers
 GENHDRS=			\
 	priv_const.h		\
-	priv_names.h
+	priv_names.h		\
+	usb/usbdevs.h
 
 CHKHDRS=			\
 	acpi_drv.h		\
@@ -84,7 +80,6 @@ CHKHDRS=			\
 	attr.h			\
 	audio.h			\
 	audioio.h		\
-	audiovar.h		\
 	autoconf.h		\
 	auxv.h			\
 	auxv_386.h		\
@@ -135,7 +130,6 @@ CHKHDRS=			\
 	cpr.h			\
 	cpupart.h		\
 	cpuvar.h		\
-	cpu_pm.h		\
 	crc32.h			\
 	cred.h			\
 	cred_impl.h		\
@@ -504,7 +498,7 @@ CHKHDRS=			\
 	socket_proto.h		\
 	socketvar.h		\
 	sockio.h		\
-	sodirect.h		\
+	soundcard.h		\
 	squeue.h		\
 	squeue_impl.h		\
 	srn.h			\
@@ -653,12 +647,9 @@ HDRS=				\
 
 AUDIOHDRS=			\
 	ac97.h			\
-	am_src1.h		\
-	audio_apm.h		\
-	audio_mixer.h		\
-	audio_src.h		\
-	audio_support.h		\
-	audio_trace.h		\
+	audio_common.h		\
+	audio_driver.h		\
+	audio_oss.h		\
 	g711.h
 
 AVHDRS=				\
@@ -727,6 +718,12 @@ IBMGTHDRS=		\
 
 IBDHDRS=		\
 	ibd.h
+
+TAVORHDRS=		\
+	tavor_ioctl.h
+
+HERMONHDRS=		\
+	hermon_ioctl.h
 
 IDMHDRS=		\
 	idm.h		\
@@ -838,7 +835,8 @@ FSHDRS=				\
 	ufs_quota.h		\
 	ufs_snap.h              \
 	ufs_trans.h		\
-	zfs.h
+	zfs.h			\
+	zut.h
 
 PCMCIAHDRS=		\
 	pcata.h		\
@@ -969,6 +967,13 @@ USBHDRS=	\
 	usba.h	\
 	usbai.h
 
+UWBHDRS=	\
+	uwb.h	\
+	uwbai.h
+
+UWBAHDRS=	\
+	uwba.h
+
 USBAUDHDRS=           \
 	usb_audio.h
 
@@ -978,6 +983,9 @@ USBHUBDHDRS=		\
 
 USBHIDHDRS=		\
 	hid.h
+
+USBHWARCHDRS=		\
+	hwarc.h
 
 USBMSHDRS=		\
 	usb_bulkonly.h	\
@@ -1138,12 +1146,15 @@ CHECKHDRS=						\
 	$(USBAUDHDRS:%.h=usb/clients/audio/%.check)   \
 	$(USBHUBDHDRS:%.h=usb/hubd/%.check)		\
 	$(USBHIDHDRS:%.h=usb/clients/hid/%.check)	\
+	$(USBHWARCHDRS:%.h=usb/clients/hwarc/%.check)	\
 	$(USBMSHDRS:%.h=usb/clients/mass_storage/%.check)	\
 	$(USBPRNHDRS:%.h=usb/clients/printer/%.check)   \
 	$(USBCDCHDRS:%.h=usb/clients/usbcdc/%.check)	\
 	$(USBVIDHDRS:%.h=usb/clients/video/usbvc/%.check)   \
 	$(UGENHDRS:%.h=usb/clients/ugen/%.check)   \
 	$(USBHDRS:%.h=usb/%.check)                      \
+	$(UWBHDRS:%.h=uwb/%.check)                      \
+	$(UWBAHDRS:%.h=uwb/uwba/%.check)                      \
 	$(I1394HDRS:%.h=1394/%.check)			\
 	$(RSMHDRS:%.h=rsm/%.check)			\
 	$(TSOLHDRS:%.h=tsol/%.check)			\
@@ -1179,6 +1190,7 @@ CHECKHDRS=						\
 	$(ROOTIBMGTHDRS)	\
 	$(ROOTIBMFHDRS)		\
 	$(ROOTTAVORHDRS)	\
+	$(ROOTHERMONHDRS)	\
 	$(ROOTLVMHDRS)		\
 	$(ROOTPCMCIAHDRS)	\
 	$(ROOTSCSIHDRS)		\
@@ -1192,9 +1204,12 @@ CHECKHDRS=						\
 	$(ROOTSYSEVENTHDRS)     \
 	$(ROOTCONTRACTHDRS)     \
 	$(ROOTUSBHDRS)		\
+	$(ROOTUWBHDRS)		\
+	$(ROOTUWBAHDRS)		\
 	$(ROOTUSBAUDHDRS)	\
 	$(ROOTUSBHUBDHDRS)	\
 	$(ROOTUSBHIDHDRS)	\
+	$(ROOTUSBHRCHDRS)	\
 	$(ROOTUSBMSHDRS)	\
 	$(ROOTUSBPRNHDRS)       \
 	$(ROOTUSBCDCHDRS)       \
@@ -1237,6 +1252,7 @@ install_h:			\
 	$(ROOTIBMGTHDRS)	\
 	$(ROOTIBMFHDRS)		\
 	$(ROOTTAVORHDRS)	\
+	$(ROOTHERMONHDRS)	\
 	$(ROOTLVMHDRS)		\
 	$(ROOTPCMCIAHDRS)	\
 	$(ROOTSCSIHDRS)		\
@@ -1249,10 +1265,13 @@ install_h:			\
 	$(ROOTSDCARDHDRS)	\
 	$(ROOTSYSEVENTHDRS)     \
 	$(ROOTCONTRACTHDRS)     \
+	$(ROOTUWBHDRS)		\
+	$(ROOTUWBAHDRS)		\
 	$(ROOTUSBHDRS)		\
 	$(ROOTUSBAUDHDRS)	\
 	$(ROOTUSBHUBDHDRS)	\
 	$(ROOTUSBHIDHDRS)	\
+	$(ROOTUSBHRCHDRS)	\
 	$(ROOTUSBMSHDRS)	\
 	$(ROOTUSBPRNHDRS)       \
 	$(ROOTUSBCDCHDRS)       \
@@ -1272,6 +1291,9 @@ priv_const.h: $(PRIVS_AWK) $(PRIVS_DEF)
 
 priv_names.h: $(PRIVS_AWK) $(PRIVS_DEF)
 	$(NAWK) -f $(PRIVS_AWK) < $(PRIVS_DEF) -v pubhfile=$@
+
+usb/usbdevs.h: $(USBDEVS_AWK) $(USBDEVS_DATA)
+	$(NAWK) -f $(USBDEVS_AWK) $(USBDEVS_DATA) -H > $@
 
 LVMDERIVED_H:
 	cd $(SRC)/uts/common/sys/lvm; pwd; $(MAKE)

@@ -2153,6 +2153,22 @@ snf_direct_io(file_t *fp, file_t *rfp, u_offset_t fileoff, u_offset_t size,
 	return (error);
 }
 
+/* Maximum no.of pages allocated by vpm for sendfile at a time */
+#define	SNF_VPMMAXPGS	(VPMMAXPGS/2)
+
+/*
+ * Maximum no.of elements in the list returned by vpm, including
+ * NULL for the last entry
+ */
+#define	SNF_MAXVMAPS	(SNF_VPMMAXPGS + 1)
+
+typedef struct {
+	unsigned int	snfv_ref;
+	frtn_t		snfv_frtn;
+	vnode_t		*snfv_vp;
+	struct vmap	snfv_vml[SNF_MAXVMAPS];
+} snf_vmap_desbinfo;
+
 typedef struct {
 	frtn_t		snfi_frtn;
 	caddr_t		snfi_base;
@@ -2162,9 +2178,25 @@ typedef struct {
 } snf_smap_desbinfo;
 
 /*
- * The callback function when the last ref of the mblk is dropped,
- * normally occurs when TCP receives the ack. But it can be the driver
- * too due to lazy reclaim.
+ * The callback function used for vpm mapped mblks called when the last ref of
+ * the mblk is dropped which normally occurs when TCP receives the ack. But it
+ * can be the driver too due to lazy reclaim.
+ */
+void
+snf_vmap_desbfree(snf_vmap_desbinfo *snfv)
+{
+	ASSERT(snfv->snfv_ref != 0);
+	if (atomic_add_32_nv(&snfv->snfv_ref, -1) == 0) {
+		vpm_unmap_pages(snfv->snfv_vml, S_READ);
+		VN_RELE(snfv->snfv_vp);
+		kmem_free(snfv, sizeof (snf_vmap_desbinfo));
+	}
+}
+
+/*
+ * The callback function used for segmap'ped mblks called when the last ref of
+ * the mblk is dropped which normally occurs when TCP receives the ack. But it
+ * can be the driver too due to lazy reclaim.
  */
 void
 snf_smap_desbfree(snf_smap_desbinfo *snfi)
@@ -2189,26 +2221,33 @@ snf_smap_desbfree(snf_smap_desbinfo *snfi)
 }
 
 /*
- * Use segmap instead of bcopy to send down a desballoca'ed, mblk.  The mblk
- * contains a segmap slot of no more than MAXBSIZE.
+ * Use segmap or vpm instead of bcopy to send down a desballoca'ed, mblk.
+ * When segmap is used, the mblk contains a segmap slot of no more
+ * than MAXBSIZE.
+ *
+ * With vpm, a maximum of SNF_MAXVMAPS page-sized mappings can be obtained
+ * in each iteration and sent by socket_sendmblk until an error occurs or
+ * the requested size has been transferred. An mblk is esballoca'ed from
+ * each mapped page and a chain of these mblk is sent to the transport layer.
+ * vpm will be called to unmap the pages when all mblks have been freed by
+ * free_func.
  *
  * At the end of the whole sendfile() operation, we wait till the data from
  * the last mblk is ack'ed by the transport before returning so that the
  * caller of sendfile() can safely modify the file content.
  */
 int
-snf_segmap(file_t *fp, vnode_t *fvp, u_offset_t fileoff, u_offset_t size,
+snf_segmap(file_t *fp, vnode_t *fvp, u_offset_t fileoff, u_offset_t total_size,
     ssize_t *count, boolean_t nowait)
 {
 	caddr_t base;
 	int mapoff;
 	vnode_t *vp;
-	mblk_t *mp;
-	int iosize;
+	mblk_t *mp = NULL;
+	int chain_size;
 	int error;
 	short fflag;
 	int ksize;
-	snf_smap_desbinfo *snfi;
 	struct vattr va;
 	boolean_t dowait = B_FALSE;
 	struct nmsghdr msg;
@@ -2224,65 +2263,140 @@ snf_segmap(file_t *fp, vnode_t *fvp, u_offset_t fileoff, u_offset_t size,
 			break;
 		}
 
-		mapoff = fileoff & MAXBOFFSET;
-		iosize = MAXBSIZE - mapoff;
-		if (iosize > size)
-			iosize = size;
-		/*
-		 * we don't forcefault because we'll call
-		 * segmap_fault(F_SOFTLOCK) next.
-		 *
-		 * S_READ will get the ref bit set (by either
-		 * segmap_getmapflt() or segmap_fault()) and page
-		 * shared locked.
-		 */
-		base = segmap_getmapflt(segkmap, fvp, fileoff, iosize,
-		    segmap_kpm ? SM_FAULT : 0, S_READ);
+		if (vpm_enable) {
+			snf_vmap_desbinfo *snfv;
+			mblk_t *nmp;
+			int mblk_size;
+			int maxsize;
+			int i;
 
-		snfi = kmem_alloc(sizeof (*snfi), KM_SLEEP);
-		snfi->snfi_len = (size_t)roundup(mapoff+iosize,
-		    PAGESIZE)- (mapoff & PAGEMASK);
-		/*
-		 * We must call segmap_fault() even for segmap_kpm
-		 * because that's how error gets returned.
-		 * (segmap_getmapflt() never fails but segmap_fault()
-		 * does.)
-		 */
-		if (segmap_fault(kas.a_hat, segkmap,
-		    (caddr_t)(uintptr_t)(((uintptr_t)base + mapoff) & PAGEMASK),
-		    snfi->snfi_len, F_SOFTLOCK, S_READ) != 0) {
-			(void) segmap_release(segkmap, base, 0);
-			kmem_free(snfi, sizeof (*snfi));
-			error = EIO;
-			goto out;
+			mapoff = fileoff & PAGEOFFSET;
+			maxsize = MIN((SNF_VPMMAXPGS * PAGESIZE), total_size);
+
+			snfv = kmem_zalloc(sizeof (snf_vmap_desbinfo),
+			    KM_SLEEP);
+
+			/* Get vpm mappings for maxsize with read access */
+			if (vpm_map_pages(fvp, fileoff, (size_t)maxsize,
+			    (VPM_FETCHPAGE), snfv->snfv_vml, SNF_MAXVMAPS,
+			    NULL, S_READ) != 0) {
+				kmem_free(snfv, sizeof (snf_vmap_desbinfo));
+				error = EIO;
+				goto out;
+			}
+			snfv->snfv_frtn.free_func = snf_vmap_desbfree;
+			snfv->snfv_frtn.free_arg = (caddr_t)snfv;
+
+			/* Construct the mblk chain from the page mappings */
+			chain_size = 0;
+			for (i = 0; (snfv->snfv_vml[i].vs_addr != NULL) &&
+			    total_size > 0; i++) {
+				ASSERT(chain_size < maxsize);
+				mblk_size = MIN(snfv->snfv_vml[i].vs_len -
+				    mapoff, total_size);
+				nmp = esballoca(
+				    (uchar_t *)snfv->snfv_vml[i].vs_addr +
+				    mapoff, mblk_size, BPRI_HI,
+				    &snfv->snfv_frtn);
+
+				/*
+				 * We return EAGAIN after unmapping the pages
+				 * if we cannot allocate the the head of the
+				 * chain. Otherwise, we continue sending the
+				 * mblks constructed so far.
+				 */
+				if (nmp == NULL) {
+					if (i == 0) {
+						vpm_unmap_pages(snfv->snfv_vml,
+						    S_READ);
+						kmem_free(snfv,
+						    sizeof (snf_vmap_desbinfo));
+						error = EAGAIN;
+						goto out;
+					}
+					break;
+				}
+				/* Mark this dblk with the zero-copy flag */
+				nmp->b_datap->db_struioflag |= STRUIO_ZC;
+				nmp->b_wptr += mblk_size;
+				chain_size += mblk_size;
+				fileoff += mblk_size;
+				total_size -= mblk_size;
+				snfv->snfv_ref++;
+				mapoff = 0;
+				if (i > 0)
+					linkb(mp, nmp);
+				else
+					mp = nmp;
+			}
+			VN_HOLD(fvp);
+			snfv->snfv_vp = fvp;
+		} else {
+			/* vpm not supported. fallback to segmap */
+			snf_smap_desbinfo *snfi;
+
+			mapoff = fileoff & MAXBOFFSET;
+			chain_size = MAXBSIZE - mapoff;
+			if (chain_size > total_size)
+				chain_size = total_size;
+			/*
+			 * we don't forcefault because we'll call
+			 * segmap_fault(F_SOFTLOCK) next.
+			 *
+			 * S_READ will get the ref bit set (by either
+			 * segmap_getmapflt() or segmap_fault()) and page
+			 * shared locked.
+			 */
+			base = segmap_getmapflt(segkmap, fvp, fileoff,
+			    chain_size, segmap_kpm ? SM_FAULT : 0, S_READ);
+
+			snfi = kmem_alloc(sizeof (*snfi), KM_SLEEP);
+			snfi->snfi_len = (size_t)roundup(mapoff+chain_size,
+			    PAGESIZE)- (mapoff & PAGEMASK);
+			/*
+			 * We must call segmap_fault() even for segmap_kpm
+			 * because that's how error gets returned.
+			 * (segmap_getmapflt() never fails but segmap_fault()
+			 * does.)
+			 */
+			if (segmap_fault(kas.a_hat, segkmap,
+			    (caddr_t)(uintptr_t)(((uintptr_t)base + mapoff) &
+			    PAGEMASK), snfi->snfi_len,
+			    F_SOFTLOCK, S_READ) != 0) {
+				(void) segmap_release(segkmap, base, 0);
+				kmem_free(snfi, sizeof (*snfi));
+				error = EIO;
+				goto out;
+			}
+			snfi->snfi_frtn.free_func = snf_smap_desbfree;
+			snfi->snfi_frtn.free_arg = (caddr_t)snfi;
+			snfi->snfi_base = base;
+			snfi->snfi_mapoff = mapoff;
+			mp = esballoca((uchar_t *)base + mapoff, chain_size,
+			    BPRI_HI, &snfi->snfi_frtn);
+
+			if (mp == NULL) {
+				(void) segmap_fault(kas.a_hat, segkmap,
+				    (caddr_t)(uintptr_t)(((uintptr_t)base +
+				    mapoff) & PAGEMASK), snfi->snfi_len,
+				    F_SOFTUNLOCK, S_OTHER);
+				(void) segmap_release(segkmap, base, 0);
+				kmem_free(snfi, sizeof (*snfi));
+				freemsg(mp);
+				error = EAGAIN;
+				goto out;
+			}
+			VN_HOLD(fvp);
+			snfi->snfi_vp = fvp;
+			mp->b_wptr += chain_size;
+
+			/* Mark this dblk with the zero-copy flag */
+			mp->b_datap->db_struioflag |= STRUIO_ZC;
+			fileoff += chain_size;
+			total_size -= chain_size;
 		}
-		snfi->snfi_frtn.free_func = snf_smap_desbfree;
-		snfi->snfi_frtn.free_arg = (caddr_t)snfi;
-		snfi->snfi_base = base;
-		snfi->snfi_mapoff = mapoff;
-		mp = esballoca((uchar_t *)base + mapoff, iosize, BPRI_HI,
-		    &snfi->snfi_frtn);
 
-		if (mp == NULL) {
-			(void) segmap_fault(kas.a_hat, segkmap,
-			    (caddr_t)(uintptr_t)(((uintptr_t)base + mapoff)
-			    & PAGEMASK), snfi->snfi_len, F_SOFTUNLOCK, S_OTHER);
-			(void) segmap_release(segkmap, base, 0);
-			kmem_free(snfi, sizeof (*snfi));
-			freemsg(mp);
-			error = EAGAIN;
-			goto out;
-		}
-		VN_HOLD(fvp);
-		snfi->snfi_vp = fvp;
-		mp->b_wptr += iosize;
-
-		/* Mark this dblk with the zero-copy flag */
-		mp->b_datap->db_struioflag |= STRUIO_ZC;
-		fileoff += iosize;
-		size -= iosize;
-
-		if (size == 0 && !nowait) {
+		if (total_size == 0 && !nowait) {
 			ASSERT(!dowait);
 			dowait = B_TRUE;
 			mp->b_datap->db_struioflag |= STRUIO_ZCNOTIFY;
@@ -2290,13 +2404,17 @@ snf_segmap(file_t *fp, vnode_t *fvp, u_offset_t fileoff, u_offset_t size,
 		VOP_RWUNLOCK(fvp, V_WRITELOCK_FALSE, NULL);
 		error = socket_sendmblk(VTOSO(vp), &msg, fflag, CRED(), &mp);
 		if (error != 0) {
-			*count = ksize;
+			/*
+			 * mp contains the mblks that were not sent by
+			 * socket_sendmblk. Use its size to update *count
+			 */
+			*count = ksize + (chain_size - msgdsize(mp));
 			if (mp != NULL)
 				freemsg(mp);
 			return (error);
 		}
-		ksize += iosize;
-		if (size == 0)
+		ksize += chain_size;
+		if (total_size == 0)
 			goto done;
 
 		(void) VOP_RWLOCK(fvp, V_WRITELOCK_FALSE, NULL);
@@ -2307,8 +2425,8 @@ snf_segmap(file_t *fp, vnode_t *fvp, u_offset_t fileoff, u_offset_t size,
 		/* Read as much as possible. */
 		if (fileoff >= va.va_size)
 			break;
-		if (size + fileoff > va.va_size)
-			size = va.va_size - fileoff;
+		if (total_size + fileoff > va.va_size)
+			total_size = va.va_size - fileoff;
 	}
 out:
 	VOP_RWUNLOCK(fvp, V_WRITELOCK_FALSE, NULL);

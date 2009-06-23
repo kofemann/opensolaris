@@ -180,6 +180,8 @@ softmac_upper_destructor(void *buf, void *arg)
 	ASSERT(!sup->su_tx_busy);
 	ASSERT(!sup->su_bound);
 	ASSERT(!sup->su_taskq_scheduled);
+	ASSERT(sup->su_tx_notify_func == NULL);
+	ASSERT(sup->su_tx_notify_arg == NULL);
 	ASSERT(list_is_empty(&sup->su_req_list));
 
 	list_destroy(&sup->su_req_list);
@@ -254,8 +256,6 @@ softmac_cmn_open(queue_t *rq, dev_t *devp, int flag, int sflag, cred_t *credp)
 		slp->sl_wq = WR(rq);
 		cv_init(&slp->sl_cv, NULL, CV_DRIVER, NULL);
 		mutex_init(&slp->sl_mutex, NULL, MUTEX_DRIVER, NULL);
-		cv_init(&slp->sl_ctl_cv, NULL, CV_DRIVER, NULL);
-		mutex_init(&slp->sl_ctl_mutex, NULL, MUTEX_DRIVER, NULL);
 		slp->sl_pending_prim = DL_PRIM_INVAL;
 		rq->q_ptr = WR(rq)->q_ptr = slp;
 		qprocson(rq);
@@ -289,14 +289,11 @@ softmac_mod_close(queue_t *rq)
 	slp->sl_lh = NULL;
 
 	ASSERT(slp->sl_ack_mp == NULL);
-	ASSERT(slp->sl_ctl_inprogress == B_FALSE);
 	ASSERT(slp->sl_pending_prim == DL_PRIM_INVAL);
 	ASSERT(slp->sl_pending_ioctl == B_FALSE);
 
 	cv_destroy(&slp->sl_cv);
 	mutex_destroy(&slp->sl_mutex);
-	cv_destroy(&slp->sl_ctl_cv);
-	mutex_destroy(&slp->sl_ctl_mutex);
 
 	kmem_free(slp, sizeof (*slp));
 	return (0);
@@ -661,10 +658,22 @@ softmac_drv_wsrv(queue_t *wq)
 	} else if (sup->su_tx_busy && SOFTMAC_CANPUTNEXT(sup->su_slp->sl_wq)) {
 		/*
 		 * The flow-conctol of the dedicated-lower-stream is
-		 * relieved, relieve the flow-control of the
-		 * upper-stream too.
+		 * relieved. If DLD_CAPAB_DIRECT is enabled, call tx_notify
+		 * callback to relieve the flow-control of the specific client,
+		 * otherwise relieve the flow-control of all the upper-stream
+		 * using the traditional STREAM mechanism.
 		 */
-		sup->su_tx_flow_mp = getq(wq);
+		if (sup->su_tx_notify_func != NULL) {
+			sup->su_tx_inprocess++;
+			mutex_exit(&sup->su_mutex);
+			sup->su_tx_notify_func(sup->su_tx_notify_arg,
+			    (mac_tx_cookie_t)sup);
+			mutex_enter(&sup->su_mutex);
+			if (--sup->su_tx_inprocess == 0)
+				cv_signal(&sup->su_cv);
+		}
+		ASSERT(sup->su_tx_flow_mp == NULL);
+		VERIFY((sup->su_tx_flow_mp = getq(wq)) != NULL);
 		sup->su_tx_busy = B_FALSE;
 	}
 	mutex_exit(&sup->su_mutex);

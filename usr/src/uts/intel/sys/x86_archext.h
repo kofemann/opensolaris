@@ -22,6 +22,10 @@
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
+/*
+ * Copyright (c) 2009, Intel Corporation.
+ * All rights reserved.
+ */
 
 #ifndef _SYS_X86_ARCHEXT_H
 #define	_SYS_X86_ARCHEXT_H
@@ -86,7 +90,7 @@ extern "C" {
  */
 
 #define	CPUID_INTC_ECX_SSE3	0x00000001	/* Yet more SSE extensions */
-						/* 0x00000002 - reserved */
+#define	CPUID_INTC_ECX_PCLMULQDQ 0x00000002 	/* PCLMULQDQ insn */
 						/* 0x00000004 - reserved */
 #define	CPUID_INTC_ECX_MON	0x00000008	/* MONITOR/MWAIT */
 #define	CPUID_INTC_ECX_DSCPL	0x00000010	/* CPL-qualified debug store */
@@ -108,12 +112,14 @@ extern "C" {
 #define	CPUID_INTC_ECX_SSE4_2	0x00100000	/* SSE4.2 insns */
 #define	CPUID_INTC_ECX_MOVBE	0x00400000	/* MOVBE insn */
 #define	CPUID_INTC_ECX_POPCNT	0x00800000	/* POPCNT insn */
+#define	CPUID_INTC_ECX_AES	0x02000000	/* AES insns */
 
 #define	FMT_CPUID_INTC_ECX					\
 	"\20"							\
+	"\32aes"						\
 	"\30popcnt\27movbe\25sse4.2\24sse4.1\23dca"		\
 	"\20\17etprd\16cx16\13cid\12ssse3\11tm2"		\
-	"\10est\7smx\6vmx\5dscpl\4mon\1sse3"
+	"\10est\7smx\6vmx\5dscpl\4mon\2pclmulqdq\1sse3"
 
 /*
  * cpuid instruction feature flags in %edx (extended function 0x80000001)
@@ -349,6 +355,14 @@ extern "C" {
 #define	X86_1GPG	0x10000000
 #define	X86_CLFSH	0x20000000
 #define	X86_64		0x40000000
+#define	X86_AES		0x80000000
+
+#define	FMT_X86_FEATURE						\
+	"\20"							\
+	"\40aes\34sse4_2\33sse4_1\32ssse3\31cpuid"		\
+	"\30sse4a\27mwait\26tscp\25cmp\24cx16\23sse3\22nx\21asysc"\
+	"\20htt\17sse2\16sse\15sep\14pat\13cx8\12pae\11mca"	\
+	"\10mmx\7cmov\6de\5pge\4mtrr\3msr\2tsc\1lgpg"
 
 /*
  * flags to patch tsc_read routine.
@@ -358,17 +372,15 @@ extern "C" {
 #define	X86_TSC_MFENCE		0x2
 #define	X86_TSC_LFENCE		0x4
 
-#define	FMT_X86_FEATURE						\
-	"\20"							\
-	"\34sse4_2\33sse4_1\32ssse3\31cpuid"			\
-	"\30sse4a\27mwait\26tscp\25cmp\24cx16\23sse3\22nx\21asysc"\
-	"\20htt\17sse2\16sse\15sep\14pat\13cx8\12pae\11mca"	\
-	"\10mmx\7cmov\6de\5pge\4mtrr\3msr\2tsc\1lgpg"
-
 /*
  * Intel Deep C-State invariant TSC in leaf 0x80000007.
  */
 #define	CPUID_TSC_CSTATE_INVARIANCE	(0x100)
+
+/*
+ * Intel Deep C-state always-running local APIC timer
+ */
+#define	CPUID_CSTATE_ARAT	(0x4)
 
 /*
  * x86_type is a legacy concept; this is supplanted
@@ -494,6 +506,15 @@ extern "C" {
 	_X86_CHIPREV_MKREV(X86_VENDOR_AMD, 0x10, 0x0002)
 #define	X86_CHIPREV_AMD_10_REV_C \
 	_X86_CHIPREV_MKREV(X86_VENDOR_AMD, 0x10, 0x0004)
+#define	X86_CHIPREV_AMD_10_REV_D \
+	_X86_CHIPREV_MKREV(X86_VENDOR_AMD, 0x10, 0x0008)
+
+/*
+ * Definitions for AMD Family 0x11.
+ */
+#define	X86_CHIPREV_AMD_11 \
+	_X86_CHIPREV_MKREV(X86_VENDOR_AMD, 0x11, 0x0003)
+
 
 /*
  * Various socket/package types, extended as the need to distinguish
@@ -511,7 +532,7 @@ extern "C" {
 
 #define	X86_SOCKET_MATCH(s, mask) \
 	(_X86_SOCKET_VENDOR(s) == _X86_SOCKET_VENDOR(mask) && \
-	(_X86_SOCKET_TYPE(s) & _X86_SOCKET_TYPE(mask)) != 0)
+	(_X86_SOCKET_TYPE(s) == _X86_SOCKET_TYPE(mask)))
 
 #define	X86_SOCKET_UNKNOWN 0x0
 	/*
@@ -523,6 +544,12 @@ extern "C" {
 #define	X86_SOCKET_S1g1		_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000008)
 #define	X86_SOCKET_AM2		_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000010)
 #define	X86_SOCKET_F1207	_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000020)
+#define	X86_SOCKET_S1g2		_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000030)
+#define	X86_SOCKET_S1g3		_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000040)
+#define	X86_SOCKET_AM		_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000050)
+#define	X86_SOCKET_AM2R2	_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000060)
+#define	X86_SOCKET_AM3		_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000070)
+#define	X86_SOCKET_G34		_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000080)
 
 #if !defined(_ASM)
 
@@ -592,6 +619,7 @@ extern int cpuid_get_chipid(struct cpu *);
 extern id_t cpuid_get_coreid(struct cpu *);
 extern int cpuid_get_pkgcoreid(struct cpu *);
 extern int cpuid_get_clogid(struct cpu *);
+extern uint32_t cpuid_get_apicid(struct cpu *);
 extern int cpuid_is_cmt(struct cpu *);
 extern int cpuid_syscall32_insn(struct cpu *);
 extern int getl2cacheinfo(struct cpu *, int *, int *, int *);
@@ -599,6 +627,7 @@ extern int getl2cacheinfo(struct cpu *, int *, int *, int *);
 extern uint32_t cpuid_getchiprev(struct cpu *);
 extern const char *cpuid_getchiprevstr(struct cpu *);
 extern uint32_t cpuid_getsockettype(struct cpu *);
+extern const char *cpuid_getsocketstr(struct cpu *);
 
 extern int cpuid_opteron_erratum(struct cpu *, uint_t);
 
@@ -611,7 +640,8 @@ extern uint_t cpuid_pass1(struct cpu *);
 extern void cpuid_pass2(struct cpu *);
 extern void cpuid_pass3(struct cpu *);
 extern uint_t cpuid_pass4(struct cpu *);
-extern void add_cpunode2devtree(processorid_t, struct cpuid_info *);
+extern void cpuid_set_cpu_properties(void *, processorid_t,
+    struct cpuid_info *);
 
 extern void cpuid_get_addrsize(struct cpu *, uint_t *, uint_t *);
 extern uint_t cpuid_get_dtlb_nent(struct cpu *, size_t);
@@ -620,6 +650,7 @@ extern uint_t cpuid_get_dtlb_nent(struct cpu *, size_t);
 extern uint32_t *cpuid_mwait_alloc(struct cpu *);
 extern void cpuid_mwait_free(struct cpu *);
 extern int cpuid_deep_cstates_supported(void);
+extern int cpuid_arat_supported(void);
 extern int vmware_platform(void);
 #endif
 

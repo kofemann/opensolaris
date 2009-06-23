@@ -51,6 +51,7 @@ static const mdb_bitmask_t rtflags_bits[] = {
 	{ MSG_ORIG(MSG_FLG_SETGROUP), FLG_RT_SETGROUP, FLG_RT_SETGROUP},
 	{ MSG_ORIG(MSG_FLG_HWCAP), FLG_RT_HWCAP, FLG_RT_HWCAP},
 	{ MSG_ORIG(MSG_FLG_OBJECT), FLG_RT_OBJECT, FLG_RT_OBJECT},
+	{ MSG_ORIG(MSG_FLG_NEWLOAD), FLG_RT_NEWLOAD, FLG_RT_NEWLOAD},
 	{ MSG_ORIG(MSG_FLG_NODUMP), FLG_RT_NODUMP, FLG_RT_NODUMP},
 	{ MSG_ORIG(MSG_FLG_DELETE), FLG_RT_DELETE, FLG_RT_DELETE},
 	{ MSG_ORIG(MSG_FLG_ANALYZED), FLG_RT_ANALYZED, FLG_RT_ANALYZED},
@@ -70,11 +71,11 @@ static const mdb_bitmask_t rtflags_bits[] = {
 	{ MSG_ORIG(MSG_FLG_OBJINTPO), FLG_RT_OBJINTPO, FLG_RT_OBJINTPO},
 	{ MSG_ORIG(MSG_FLG_SYMINTPO), FLG_RT_SYMINTPO, FLG_RT_SYMINTPO},
 	{ MSG_ORIG(MSG_FLG_MOVE), FLG_RT_MOVE, FLG_RT_MOVE},
-	{ MSG_ORIG(MSG_FLG_TMPLIST), FLG_RT_TMPLIST, FLG_RT_TMPLIST},
+	{ MSG_ORIG(MSG_FLG_RELOCING), FLG_RT_RELOCING, FLG_RT_RELOCING},
 	{ MSG_ORIG(MSG_FLG_REGSYMS), FLG_RT_REGSYMS, FLG_RT_REGSYMS},
 	{ MSG_ORIG(MSG_FLG_INITCLCT), FLG_RT_INITCLCT, FLG_RT_INITCLCT},
-	{ MSG_ORIG(MSG_FLG_HANDLE), FLG_RT_HANDLE, FLG_RT_HANDLE},
-	{ MSG_ORIG(MSG_FLG_RELOCING), FLG_RT_RELOCING, FLG_RT_RELOCING},
+	{ MSG_ORIG(MSG_FLG_PUBHDL), FLG_RT_PUBHDL, FLG_RT_PUBHDL},
+	{ MSG_ORIG(MSG_FLG_PRIHDL), FLG_RT_PRIHDL, FLG_RT_PRIHDL},
 	{ NULL, 0, 0}
 };
 
@@ -144,6 +145,8 @@ static const mdb_bitmask_t bndflags_bits[] = {
 };
 
 static const mdb_bitmask_t grhflags_bits[] = {
+	{ MSG_ORIG(MSG_GPH_PUBLIC), GPH_PUBLIC, GPH_PUBLIC },
+	{ MSG_ORIG(MSG_GPH_PRIVATE), GPH_PRIVATE, GPH_PRIVATE },
 	{ MSG_ORIG(MSG_GPH_ZERO), GPH_ZERO, GPH_ZERO },
 	{ MSG_ORIG(MSG_GPH_LDSO), GPH_LDSO, GPH_LDSO },
 	{ MSG_ORIG(MSG_GPH_FIRST), GPH_FIRST, GPH_FIRST },
@@ -159,8 +162,8 @@ static const mdb_bitmask_t grdflags_bits[] = {
 	{ MSG_ORIG(MSG_GPD_ADDEPS), GPD_ADDEPS, GPD_ADDEPS },
 	{ MSG_ORIG(MSG_GPD_PARENT), GPD_PARENT, GPD_PARENT },
 	{ MSG_ORIG(MSG_GPD_FILTER), GPD_FILTER, GPD_FILTER },
-	{ MSG_ORIG(MSG_GPD_PROMOTE), GPD_PROMOTE, GPD_PROMOTE },
 	{ MSG_ORIG(MSG_GPD_REMOVE), GPD_REMOVE, GPD_REMOVE },
+	{ MSG_ORIG(MSG_GPD_MODECHANGE), GPD_MODECHANGE, GPD_MODECHANGE },
 	{ NULL, 0, 0}
 };
 
@@ -1346,7 +1349,7 @@ dcmd_ElfDyn(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	}
 
 	mdb_printf(MSG_ORIG(MSG_ELFDYN_TITLE), addr);
-	dynstr = conv_dyn_tag(dyn.d_tag, M_MACH, 0, &inv_buf);
+	dynstr = conv_dyn_tag(dyn.d_tag, ELFOSABI_SOLARIS, M_MACH, 0, &inv_buf);
 	mdb_printf(MSG_ORIG(MSG_ELFDYN_LINE1), addr, dynstr, dyn.d_un.d_ptr);
 
 	mdb_set_dot(addr + sizeof (Dyn));
@@ -1394,7 +1397,7 @@ dcmd_ElfEhdr(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	    conv_ehdr_mach(ehdr.e_machine, 0, &inv_buf1),
 	    conv_ehdr_vers(ehdr.e_version, 0, &inv_buf2));
 	mdb_printf(MSG_ORIG(MSG_EHDR_LINE4),
-	    conv_ehdr_type(ehdr.e_type, 0, &inv_buf1));
+	    conv_ehdr_type(ehdr.e_ident[EI_OSABI], ehdr.e_type, 0, &inv_buf1));
 
 	/*
 	 * Line up the flags differently depending on whether we
@@ -1445,9 +1448,10 @@ dcmd_ElfPhdr(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 
 	mdb_printf(MSG_ORIG(MSG_EPHDR_TITLE), addr);
 	mdb_printf(MSG_ORIG(MSG_EPHDR_LINE1), phdr.p_vaddr,
-	    conv_phdr_flags(phdr.p_flags, 0, &phdr_flags_buf));
+	    conv_phdr_flags(ELFOSABI_SOLARIS, phdr.p_flags, 0,
+	    &phdr_flags_buf));
 	mdb_printf(MSG_ORIG(MSG_EPHDR_LINE2), phdr.p_paddr,
-	    conv_phdr_type(M_MACH, phdr.p_type, 0, &inv_buf));
+	    conv_phdr_type(ELFOSABI_SOLARIS, M_MACH, phdr.p_type, 0, &inv_buf));
 	mdb_printf(MSG_ORIG(MSG_EPHDR_LINE3), phdr.p_filesz, phdr.p_memsz);
 	mdb_printf(MSG_ORIG(MSG_EPHDR_LINE4), phdr.p_offset, phdr.p_align);
 

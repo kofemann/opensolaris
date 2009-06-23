@@ -335,8 +335,15 @@ void
 filebench_shutdown(int error) {
 
 	if (error) {
-		filebench_log(LOG_DEBUG_IMPL, "Shutdown on error");
+		filebench_log(LOG_DEBUG_IMPL, "Shutdown on error %d", error);
+		(void) ipc_mutex_lock(&filebench_shm->shm_procflow_lock);
+		if (filebench_shm->shm_f_abort == FILEBENCH_ABORT_FINI) {
+			(void) ipc_mutex_unlock(
+			    &filebench_shm->shm_procflow_lock);
+			return;
+		}
 		filebench_shm->shm_f_abort = FILEBENCH_ABORT_ERROR;
+		(void) ipc_mutex_unlock(&filebench_shm->shm_procflow_lock);
 	} else {
 		filebench_log(LOG_DEBUG_IMPL, "Shutdown");
 	}

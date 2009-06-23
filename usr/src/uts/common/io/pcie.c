@@ -45,36 +45,10 @@ static void pcie_fini_pfd(dev_info_t *);
 static void pcie_check_io_mem_range(ddi_acc_handle_t, boolean_t *, boolean_t *);
 #endif /* defined(__i386) || defined(__amd64) */
 
-#ifdef	DEBUG
+#ifdef DEBUG
 uint_t pcie_debug_flags = 0;
-
 static void pcie_print_bus(pcie_bus_t *bus_p);
-
-#define	PCIE_DBG pcie_dbg
-/* Common Debugging shortcuts */
-#define	PCIE_DBG_CFG(dip, bus_p, name, sz, off, org) \
-	PCIE_DBG("%s:%d:(0x%x) %s(0x%x) 0x%x -> 0x%x\n", ddi_node_name(dip), \
-	    ddi_get_instance(dip), bus_p->bus_bdf, name, off, org, \
-	    PCIE_GET(sz, bus_p, off))
-#define	PCIE_DBG_CAP(dip, bus_p, name, sz, off, org) \
-	PCIE_DBG("%s:%d:(0x%x) %s(0x%x) 0x%x -> 0x%x\n", ddi_node_name(dip), \
-	    ddi_get_instance(dip), bus_p->bus_bdf, name, off, org, \
-	    PCIE_CAP_GET(sz, bus_p, off))
-#define	PCIE_DBG_AER(dip, bus_p, name, sz, off, org) \
-	PCIE_DBG("%s:%d:(0x%x) %s(0x%x) 0x%x -> 0x%x\n", ddi_node_name(dip), \
-	    ddi_get_instance(dip), bus_p->bus_bdf, name, off, org, \
-	    PCIE_AER_GET(sz, bus_p, off))
-
-static void pcie_dbg(char *fmt, ...);
-
-#else	/* DEBUG */
-
-#define	PCIE_DBG_CFG 0 &&
-#define	PCIE_DBG 0 &&
-#define	PCIE_DBG_CAP 0 &&
-#define	PCIE_DBG_AER 0 &&
-
-#endif	/* DEBUG */
+#endif /* DEBUG */
 
 /* Variable to control default PCI-Express config settings */
 ushort_t pcie_command_default =
@@ -560,6 +534,7 @@ pcie_init_bus(dev_info_t *cdip)
 	ddi_acc_handle_t	eh = NULL;
 	int			range_size;
 	dev_info_t		*pdip;
+	const char		*errstr = NULL;
 
 	ASSERT(PCIE_DIP2UPBUS(cdip) == NULL);
 
@@ -572,14 +547,17 @@ pcie_init_bus(dev_info_t *cdip)
 
 	/* Create an config access special to error handling */
 	if (pci_config_setup(cdip, &eh) != DDI_SUCCESS) {
+		errstr = "Cannot setup config access";
 		goto fail;
 	}
 	bus_p->bus_cfg_hdl = eh;
 	bus_p->bus_fm_flags = 0;
 
 	/* get device's bus/dev/function number */
-	if (pcie_get_bdf_from_dip(cdip, &bus_p->bus_bdf) != DDI_SUCCESS)
+	if (pcie_get_bdf_from_dip(cdip, &bus_p->bus_bdf) != DDI_SUCCESS) {
+		errstr = "Cannot get device BDF";
 		goto fail;
+	}
 
 	/* Save the Vendor Id Device Id */
 	bus_p->bus_dev_ven_id = PCIE_GET(32, bus_p, PCI_CONF_VENID);
@@ -625,8 +603,10 @@ pcie_init_bus(dev_info_t *cdip)
 		range_size = sizeof (pci_bus_range_t);
 		if (ddi_getlongprop_buf(DDI_DEV_T_ANY, cdip, DDI_PROP_DONTPASS,
 		    "bus-range", (caddr_t)&bus_p->bus_bus_range, &range_size)
-		    != DDI_PROP_SUCCESS)
+		    != DDI_PROP_SUCCESS) {
+			errstr = "Cannot find \"bus-range\" property";
 			goto fail;
+		}
 
 		/* get secondary bus number */
 		bus_p->bus_bdg_secbus = PCIE_GET(8, bus_p, PCI_BCNF_SECBUS);
@@ -676,6 +656,8 @@ pcie_init_bus(dev_info_t *cdip)
 
 	bus_p->bus_mps = 0;
 
+	pcie_init_plat(cdip);
+
 	PCIE_DBG("Add %s(dip 0x%p, bdf 0x%x, secbus 0x%x)\n",
 	    ddi_driver_name(cdip), (void *)cdip, bus_p->bus_bdf,
 	    bus_p->bus_bdg_secbus);
@@ -685,8 +667,8 @@ pcie_init_bus(dev_info_t *cdip)
 
 	return (bus_p);
 fail:
-	cmn_err(CE_WARN, "PCIE init err info failed BDF 0x%x\n",
-	    bus_p->bus_bdf);
+	cmn_err(CE_WARN, "PCIE init err info failed BDF 0x%x:%s\n",
+	    bus_p->bus_bdf, errstr);
 	if (eh)
 		pci_config_teardown(&eh);
 	kmem_free(bus_p, sizeof (pcie_bus_t));
@@ -721,6 +703,7 @@ pcie_fini_bus(dev_info_t *cdip)
 {
 	pcie_bus_t	*bus_p;
 
+	pcie_fini_plat(cdip);
 	pcie_fini_pfd(cdip);
 
 	bus_p = PCIE_DIP2UPBUS(cdip);
@@ -1510,7 +1493,7 @@ pcie_print_bus(pcie_bus_t *bus_p)
  * o taskq to print at lower pil
  */
 int pcie_dbg_print = 0;
-static void
+void
 pcie_dbg(char *fmt, ...)
 {
 	va_list ap;

@@ -762,6 +762,7 @@ emlxs_port_offline(emlxs_port_t *port, uint32_t scope)
 	uint32_t unreg_vpi;
 	uint32_t update;
 	uint32_t adisc_support;
+	uint8_t format;
 
 	/* Target mode only uses this routine for linkdowns */
 	if (port->tgt_mode && (scope != 0xffffffff) && (scope != 0xfeffffff)) {
@@ -779,7 +780,9 @@ emlxs_port_offline(emlxs_port_t *port, uint32_t scope)
 		return (0);
 	}
 
-	switch (aid->aff_format) {
+	format = aid->aff_format;
+
+	switch (format) {
 	case 0:	/* Port */
 		mask = 0x00ffffff;
 		break;
@@ -840,15 +843,16 @@ emlxs_port_offline(emlxs_port_t *port, uint32_t scope)
 					    &emlxs_link_down_msg, NULL);
 				}
 
-				if (port->tgt_mode) {
-#ifdef SFCT_SUPPORT
-					emlxs_fct_link_down(port);
-#endif /* SFCT_SUPPORT */
-
-				} else if (port->ini_mode) {
+				if (port->ini_mode) {
 					port->ulp_statec_cb(port->ulp_handle,
 					    FC_STATE_OFFLINE);
 				}
+#ifdef SFCT_SUPPORT
+				else if (port->tgt_mode) {
+					emlxs_fct_link_down(port);
+				}
+#endif /* SFCT_SUPPORT */
+
 			} else {
 				if (port->vpi == 0) {
 					EMLXS_MSGF(EMLXS_CONTEXT,
@@ -1377,14 +1381,15 @@ emlxs_port_online(emlxs_port_t *vport)
 				    linkspeed, topology, mode);
 			}
 
-			if (vport->tgt_mode) {
-#ifdef SFCT_SUPPORT
-				emlxs_fct_link_up(vport);
-#endif /* SFCT_SUPPORT */
-			} else if (vport->ini_mode) {
+			if (vport->ini_mode) {
 				vport->ulp_statec_cb(vport->ulp_handle,
 				    state);
 			}
+#ifdef SFCT_SUPPORT
+			else if (vport->tgt_mode) {
+				emlxs_fct_link_up(vport);
+			}
+#endif /* SFCT_SUPPORT */
 		} else {
 			if (vport->vpi == 0) {
 				EMLXS_MSGF(EMLXS_CONTEXT, &emlxs_link_up_msg,
@@ -1707,6 +1712,13 @@ emlxs_offline(emlxs_hba_t *hba)
 	if (hba->bus_type == SBUS_FC) {
 		WRITE_SBUS_CSR_REG(hba, FC_SHS_REG(hba, hba->sbus_csr_addr),
 		    0x9A);
+#ifdef FMA_SUPPORT
+		if (emlxs_fm_check_acc_handle(hba, hba->sbus_csr_handle)
+		    != DDI_FM_OK) {
+			EMLXS_MSGF(EMLXS_CONTEXT,
+			    &emlxs_invalid_access_handle_msg, NULL);
+		}
+#endif  /* FMA_SUPPORT */
 	}
 
 	/* Stop the timer */
@@ -1749,6 +1761,9 @@ done:
 extern int
 emlxs_power_down(emlxs_hba_t *hba)
 {
+#ifdef FMA_SUPPORT
+	emlxs_port_t *port = &PPORT;
+#endif  /* FMA_SUPPORT */
 	int32_t rval = 0;
 	uint32_t *ptr;
 	uint32_t i;
@@ -1770,6 +1785,15 @@ emlxs_power_down(emlxs_hba_t *hba)
 	    (uint8_t *)(hba->pci_addr + PCI_PM_CONTROL_REGISTER),
 	    (uint8_t)PCI_PM_D3_STATE);
 
+#ifdef FMA_SUPPORT
+	if (emlxs_fm_check_acc_handle(hba, hba->pci_acc_handle)
+	    != DDI_FM_OK) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+		return (1);
+	}
+#endif  /* FMA_SUPPORT */
+
 	return (0);
 
 }  /* End emlxs_power_down */
@@ -1778,6 +1802,9 @@ emlxs_power_down(emlxs_hba_t *hba)
 extern int
 emlxs_power_up(emlxs_hba_t *hba)
 {
+#ifdef FMA_SUPPORT
+	emlxs_port_t *port = &PPORT;
+#endif  /* FMA_SUPPORT */
 	int32_t rval = 0;
 	uint32_t *ptr;
 	uint32_t i;
@@ -1797,6 +1824,15 @@ emlxs_power_up(emlxs_hba_t *hba)
 		(void) ddi_put32(hba->pci_acc_handle,
 		    (uint32_t *)(hba->pci_addr + i), *ptr);
 	}
+
+#ifdef FMA_SUPPORT
+	if (emlxs_fm_check_acc_handle(hba, hba->pci_acc_handle)
+	    != DDI_FM_OK) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+		return (1);
+	}
+#endif  /* FMA_SUPPORT */
 
 	/* Bring adapter online */
 	if ((rval = emlxs_online(hba))) {
@@ -3438,9 +3474,8 @@ emlxs_create_close_xri_cx(emlxs_port_t *port, NODELIST *ndlp, uint16_t xid,
 
 
 void
-emlxs_abort_ct_exchange(emlxs_port_t *port, uint32_t rxid)
+emlxs_abort_ct_exchange(emlxs_hba_t *hba, emlxs_port_t *port, uint32_t rxid)
 {
-	emlxs_hba_t *hba = HBA;
 	RING *rp;
 	IOCBQ *iocbq;
 
@@ -3454,8 +3489,9 @@ emlxs_abort_ct_exchange(emlxs_port_t *port, uint32_t rxid)
 	} else {
 		iocbq = emlxs_create_close_xri_cx(port, NULL, rxid, rp);
 	}
-	iocbq->port = port;
-	emlxs_sli_issue_iocb_cmd(hba, rp, iocbq);
+	if (iocbq) {
+		emlxs_sli_issue_iocb_cmd(hba, rp, iocbq);
+	}
 }
 
 

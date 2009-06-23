@@ -138,7 +138,7 @@ struct fct {
 #define	AL_CNT_ALIAS	2		/* ALIAS() */
 #define	AL_CNT_DEPENDS	20		/* DEPENDS() */
 #define	AL_CNT_CALLERS	20		/* CALLERS() */
-#define	AL_CNT_GROUPS	4		/* GROUPS() */
+#define	AL_CNT_GROUPS	20		/* GROUPS() */
 #define	AL_CNT_COPYREL	10		/* COPY() */
 #define	AL_CNT_LAZYFIND	10		/* elf_lazy_find_sym() */
 #define	AL_CNT_GRPCLCT	10		/* gdp_collect() */
@@ -567,7 +567,7 @@ extern APlist		*free_alp;	/* defragmentation list */
 extern uint_t		audit_argcnt;	/* no. of stack args to copy */
 extern Audit_desc	*auditors;	/* global auditors */
 
-extern char		**_environ;
+extern char		**_environ;	/* environ reference for libc */
 
 extern const char	*dbg_file;	/* debugging directed to a file */
 
@@ -610,8 +610,9 @@ extern caddr_t		caller(void);
 extern void		*calloc(size_t, size_t);
 extern void		cap_assign(Cap *, Rt_map *);
 extern const char	*_conv_reloc_type(uint_t rel);
+extern Aliste		create_cntl(Lm_list *, int);
 extern void		defrag(void);
-extern uintptr_t	dbg_setup(const char *, Dbg_desc *);
+extern int		dbg_setup(const char *, Dbg_desc *);
 extern const char	*demangle(const char *);
 extern int		dlclose_intn(Grp_hdl *, Rt_map *);
 extern int		dlclose_core(Grp_hdl *, Rt_map *, Lm_list *);
@@ -628,7 +629,7 @@ extern uint_t		expand(char **, size_t *, char **, uint_t, uint_t,
 			    Rt_map *);
 extern int		expand_paths(Rt_map *, const char *, Alist **, Aliste,
 			    uint_t, uint_t);
-extern void		free_hdl(Grp_hdl *, Rt_map *, uint_t);
+extern void		free_hdl(Grp_hdl *);
 extern void		file_notfound(Lm_list *, const char *, Rt_map *,
 			    uint_t, Rej_desc *);
 extern int		find_path(Lm_list *, Rt_map *, uint_t, Fdesc *,
@@ -641,7 +642,7 @@ extern void		fpavl_remove(Rt_map *);
 extern size_t		fullpath(Rt_map *, Fdesc *);
 extern Lmid_t		get_linkmap_id(Lm_list *);
 extern Pdesc		*get_next_dir(Spath_desc *, Rt_map *, uint_t);
-extern int		hdl_add(Grp_hdl *, Rt_map *, uint_t);
+extern Grp_desc		*hdl_add(Grp_hdl *, Rt_map *, uint_t, int *);
 extern Grp_hdl		*hdl_create(Lm_list *, Rt_map *, Rt_map *, uint_t,
 			    uint_t, uint_t);
 extern int		hdl_initialize(Grp_hdl *, Rt_map *, int, int);
@@ -689,6 +690,7 @@ extern void		remove_lml(Lm_list *);
 extern void		remove_plist(Alist **, int);
 extern void		remove_so(Lm_list *, Rt_map *);
 extern int		rt_cond_wait(Rt_cond *, Rt_lock *);
+extern int		rt_critical(void);
 extern int		rt_bind_guard(int);
 extern int		rt_bind_clear(int);
 extern int		rt_get_extern(Lm_list *, Rt_map *);

@@ -53,8 +53,11 @@
 #include <sys/atomic.h>
 #include <sys/socket.h>
 #include <sys/ksocket.h>
-#include <sys/sodirect.h>
 #include <sys/kstat.h>
+
+#ifdef _KERNEL
+#include <sys/vfs_opreg.h>
+#endif
 
 #ifdef	__cplusplus
 extern "C" {
@@ -97,6 +100,8 @@ struct sockaddr_ux {
 
 typedef struct sonodeops sonodeops_t;
 typedef struct sonode sonode_t;
+
+struct sodirect_s;
 
 /*
  * The sonode represents a socket. A sonode never exist in the file system
@@ -226,8 +231,8 @@ struct sonode {
 	void			*so_ksock_cb_arg;	/* callback argument */
 	kcondvar_t		so_closing_cv;
 
-	/* != NULL for sodirect_t enabled socket */
-	sodirect_t		*so_direct;
+	/* != NULL for sodirect enabled socket */
+	struct sodirect_s	*so_direct;
 };
 
 #define	SO_HAVE_DATA(so)						\

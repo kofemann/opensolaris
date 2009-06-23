@@ -57,11 +57,6 @@ static int iscsit_drv_open(dev_t *, int, int, cred_t *);
 static int iscsit_drv_close(dev_t, int, int, cred_t *);
 static boolean_t iscsit_drv_busy(void);
 static int iscsit_drv_ioctl(dev_t, int, intptr_t, int, cred_t *, int *);
-static boolean_t iscsit_cmdsn_in_window(iscsit_conn_t *ict, uint32_t cmdsn);
-static void iscsit_send_direct_scsi_resp(iscsit_conn_t *ict, idm_pdu_t *rx_pdu,
-    uint8_t response, uint8_t cmd_status);
-static void iscsit_send_task_mgmt_resp(idm_pdu_t *tm_resp_pdu,
-    uint8_t tm_status);
 
 extern struct mod_ops mod_miscops;
 
@@ -200,6 +195,12 @@ iscsit_tm_task_alloc(iscsit_conn_t *ict);
 static void
 iscsit_tm_task_free(iscsit_task_t *itask);
 
+static idm_status_t
+iscsit_task_start(iscsit_task_t *itask);
+
+static void
+iscsit_task_done(iscsit_task_t *itask);
+
 static int
 iscsit_status_pdu_constructor(void *pdu_void, void *arg, int flags);
 
@@ -211,6 +212,12 @@ iscsit_config_merge(it_config_t *cfg);
 
 static idm_status_t
 iscsit_login_fail(idm_conn_t *ic);
+
+static boolean_t iscsit_cmdsn_in_window(iscsit_conn_t *ict, uint32_t cmdsn);
+static void iscsit_send_direct_scsi_resp(iscsit_conn_t *ict, idm_pdu_t *rx_pdu,
+    uint8_t response, uint8_t cmd_status);
+static void iscsit_send_task_mgmt_resp(idm_pdu_t *tm_resp_pdu,
+    uint8_t tm_status);
 
 int
 _init(void)
@@ -857,6 +864,11 @@ iscsit_task_aborted(idm_task_t *idt, idm_status_t status)
 		if (itask->it_stmf_abort) {
 			mutex_exit(&itask->it_mutex);
 			/*
+			 * Task is no longer active
+			 */
+			iscsit_task_done(itask);
+
+			/*
 			 * STMF has already asked for this task to be aborted
 			 *
 			 * STMF specification is wrong... says to return
@@ -947,7 +959,9 @@ iscsit_build_hdr(idm_task_t *idm_task, idm_pdu_t *pdu, uint8_t opcode)
 	dh->opcode = opcode;
 	dh->itt = itask->it_itt;
 	dh->ttt = itask->it_ttt;
-	/* Statsn is only set during phase collapse */
+	/* Maintain current statsn for RTT responses */
+	dh->statsn = (opcode == ISCSI_OP_RTT_RSP) ?
+	    htonl(itask->it_ict->ict_statsn) : 0;
 	dh->expcmdsn = htonl(itask->it_ict->ict_sess->ist_expcmdsn);
 	dh->maxcmdsn = htonl(itask->it_ict->ict_sess->ist_maxcmdsn);
 
@@ -965,6 +979,46 @@ iscsit_build_hdr(idm_task_t *idm_task, idm_pdu_t *pdu, uint8_t opcode)
 	 */
 }
 
+void
+iscsit_keepalive(idm_conn_t *ic)
+{
+	idm_pdu_t		*nop_in_pdu;
+	iscsi_nop_in_hdr_t	*nop_in;
+	iscsit_conn_t		*ict = ic->ic_handle;
+
+	/*
+	 * IDM noticed the connection has been idle for too long so it's
+	 * time to provoke some activity.  Build and transmit an iSCSI
+	 * nop-in PDU -- when the initiator responds it will be counted
+	 * as "activity" and keep the connection alive.
+	 *
+	 * We don't actually care about the response here at the iscsit level
+	 * so we will just throw it away without looking at it when it arrives.
+	 */
+	nop_in_pdu = idm_pdu_alloc(sizeof (*nop_in), 0);
+	idm_pdu_init(nop_in_pdu, ic, NULL, NULL);
+
+	nop_in = (iscsi_nop_in_hdr_t *)nop_in_pdu->isp_hdr;
+	bzero(nop_in, sizeof (*nop_in));
+	nop_in->opcode = ISCSI_OP_NOOP_IN;
+	nop_in->flags = ISCSI_FLAG_FINAL;
+	nop_in->itt = ISCSI_RSVD_TASK_TAG;
+	/*
+	 * This works because we don't currently allocate ttt's anywhere else
+	 * in iscsit so as long as we stay out of IDM's range we are safe.
+	 * If we need to allocate ttt's for other PDU's in the future this will
+	 * need to be improved.
+	 */
+	mutex_enter(&ict->ict_mutex);
+	nop_in->ttt = ict->ict_keepalive_ttt;
+	ict->ict_keepalive_ttt++;
+	if (ict->ict_keepalive_ttt == ISCSI_RSVD_TASK_TAG)
+		ict->ict_keepalive_ttt = IDM_TASKIDS_MAX;
+	mutex_exit(&ict->ict_mutex);
+
+	iscsit_pdu_tx(nop_in_pdu);
+}
+
 static idm_status_t
 iscsit_conn_accept(idm_conn_t *ic)
 {
@@ -975,7 +1029,13 @@ iscsit_conn_accept(idm_conn_t *ic)
 	 * doesn't get shutdown prior to establishing a session. This
 	 * gets released in iscsit_conn_destroy().
 	 */
+	ISCSIT_GLOBAL_LOCK(RW_READER);
+	if (iscsit_global.global_svc_state != ISE_ENABLED) {
+		ISCSIT_GLOBAL_UNLOCK();
+		return (IDM_STATUS_FAIL);
+	}
 	iscsit_global_hold();
+	ISCSIT_GLOBAL_UNLOCK();
 
 	/*
 	 * Allocate an associated iscsit structure to represent this
@@ -986,6 +1046,7 @@ iscsit_conn_accept(idm_conn_t *ic)
 
 	ict->ict_ic = ic;
 	ict->ict_statsn = 1;
+	ict->ict_keepalive_ttt = IDM_TASKIDS_MAX; /* Avoid IDM TT range */
 	ic->ic_handle = ict;
 	mutex_init(&ict->ict_mutex, NULL, MUTEX_DRIVER, NULL);
 	idm_refcnt_init(&ict->ict_refcnt, ict);
@@ -994,6 +1055,10 @@ iscsit_conn_accept(idm_conn_t *ic)
 	 * Initialize login state machine
 	 */
 	if (iscsit_login_sm_init(ict) != IDM_STATUS_SUCCESS) {
+		iscsit_global_rele();
+		/*
+		 * Cleanup the ict after idm notifies us about this failure
+		 */
 		return (IDM_STATUS_FAIL);
 	}
 
@@ -1132,6 +1197,12 @@ iscsit_conn_destroy(idm_conn_t *ic)
 
 	idm_refcnt_wait_ref(&ict->ict_refcnt);
 
+	/* Reap the login state machine */
+	iscsit_login_sm_fini(ict);
+
+	/* Clean up any text command remnants */
+	iscsit_text_cmd_fini(ict);
+
 	mutex_destroy(&ict->ict_mutex);
 	idm_refcnt_destroy(&ict->ict_refcnt);
 	kmem_free(ict, sizeof (*ict));
@@ -1247,7 +1318,6 @@ iscsit_xfer_scsi_data(scsi_task_t *task, stmf_data_buf_t *dbuf,
 	 */
 	ASSERT(ibuf->ibuf_is_immed == B_FALSE);
 	if (dbuf->db_flags & DB_DIRECTION_TO_RPORT) {
-
 		/*
 		 * IDM will call iscsit_build_hdr so lock now to serialize
 		 * access to the SN values.  We need to lock here to enforce
@@ -1361,6 +1431,14 @@ iscsit_send_scsi_status(scsi_task_t *task, uint32_t ioflags)
 		return (STMF_SUCCESS);
 	}
 
+	/*
+	 * Remove the task from the session task list
+	 */
+	iscsit_task_done(itask);
+
+	/*
+	 * Send status
+	 */
 	mutex_enter(&itask->it_idm_task->idt_mutex);
 	if ((itask->it_idm_task->idt_state == TASK_ACTIVE) &&
 	    (task->task_completion_status == STMF_SUCCESS) &&
@@ -1530,6 +1608,11 @@ iscsit_abort(stmf_local_port_t *lport, int abort_cmd, void *arg, uint32_t flags)
 	if (iscsit_task->it_aborted) {
 		mutex_exit(&iscsit_task->it_mutex);
 		/*
+		 * Task is no longer active
+		 */
+		iscsit_task_done(iscsit_task);
+
+		/*
 		 * STMF specification is wrong... says to return
 		 * STMF_ABORTED, the code actually looks for
 		 * STMF_ABORT_SUCCESS.
@@ -1625,14 +1708,15 @@ iscsit_op_scsi_cmd(idm_conn_t *ic, idm_pdu_t *rx_pdu)
 
 	itask = iscsit_task_alloc(ict);
 	if (itask == NULL) {
+		/* Finish processing request */
+		iscsit_set_cmdsn(ict, rx_pdu);
+
 		iscsit_send_direct_scsi_resp(ict, rx_pdu,
 		    ISCSI_STATUS_CMD_COMPLETED, STATUS_BUSY);
 		idm_pdu_complete(rx_pdu, IDM_STATUS_SUCCESS);
 		return;
 	}
 
-	/* Finish processing request */
-	iscsit_set_cmdsn(ict, rx_pdu);
 
 	/*
 	 * Note CmdSN and ITT in task.  IDM will have already validated this
@@ -1660,6 +1744,37 @@ iscsit_op_scsi_cmd(idm_conn_t *ic, idm_pdu_t *rx_pdu)
 
 	ict = rx_pdu->isp_ic->ic_handle; /* IDM client private */
 
+	/*
+	 * Add task to session list.  This function will also check to
+	 * ensure that the task does not already exist.
+	 */
+	if (iscsit_task_start(itask) != IDM_STATUS_SUCCESS) {
+		/*
+		 * Task exists, free all resources and reject.  Don't
+		 * update expcmdsn in this case because RFC 3720 says
+		 * "The CmdSN of the rejected command PDU (if it is a
+		 * non-immediate command) MUST NOT be considered received
+		 * by the target (i.e., a command sequence gap must be
+		 * assumed for the CmdSN), even though the CmdSN of the
+		 * rejected command PDU may be reliably ascertained.  Upon
+		 * receiving the Reject, the initiator MUST plug the CmdSN
+		 * gap in order to continue to use the session.  The gap
+		 * may be plugged either by transmitting a command PDU
+		 * with the same CmdSN, or by aborting the task (see section
+		 * 6.9 on how an abort may plug a CmdSN gap)." (Section 6.3)
+		 */
+		iscsit_task_free(itask);
+		iscsit_send_reject(ict, rx_pdu, ISCSI_REJECT_TASK_IN_PROGRESS);
+		idm_pdu_complete(rx_pdu, IDM_STATUS_SUCCESS);
+		return;
+	}
+
+	/* Update sequence numbers */
+	iscsit_set_cmdsn(ict, rx_pdu);
+
+	/*
+	 * Allocate STMF task
+	 */
 	itask->it_stmf_task = stmf_task_alloc(
 	    itask->it_ict->ict_sess->ist_lport,
 	    itask->it_ict->ict_sess->ist_stmf_sess, iscsi_scsi->lun,
@@ -1670,10 +1785,11 @@ iscsit_op_scsi_cmd(idm_conn_t *ic, idm_pdu_t *rx_pdu)
 		 * more likely, the LU is currently in reset.  Either way
 		 * we have no choice but to fail the request.
 		 */
+		iscsit_task_done(itask);
 		iscsit_task_free(itask);
 		iscsit_send_direct_scsi_resp(ict, rx_pdu,
 		    ISCSI_STATUS_CMD_COMPLETED, STATUS_BUSY);
-		idm_pdu_complete(rx_pdu, IDM_STATUS_FAIL);
+		idm_pdu_complete(rx_pdu, IDM_STATUS_SUCCESS);
 		return;
 	}
 
@@ -1734,6 +1850,10 @@ iscsit_op_scsi_cmd(idm_conn_t *ic, idm_pdu_t *rx_pdu)
 		bcopy(ahs_hdr->ahs_extscb, task->task_cdb + 16, addl_cdb_len);
 	}
 
+	DTRACE_ISCSI_3(scsi__command, idm_conn_t *, ic,
+	    iscsi_scsi_cmd_hdr_t *, (iscsi_scsi_cmd_hdr_t *)rx_pdu->isp_hdr,
+	    scsi_task_t *, task);
+
 	/*
 	 * Copy the transport header into the task handle from the PDU
 	 * handle. The transport header describes this task's remote tagged
@@ -1764,7 +1884,19 @@ iscsit_op_scsi_cmd(idm_conn_t *ic, idm_pdu_t *rx_pdu)
 		    rx_pdu->isp_datalen;
 		ibuf->ibuf_stmf_buf->db_sglist[0].seg_addr = rx_pdu->isp_data;
 
+		DTRACE_ISCSI_8(xfer__start, idm_conn_t *, ic,
+		    uintptr_t, ibuf->ibuf_stmf_buf->db_sglist[0].seg_addr,
+		    uint32_t, ibuf->ibuf_stmf_buf->db_relative_offset,
+		    uint64_t, 0, uint32_t, 0, uint32_t, 0, /* no raddr */
+		    uint32_t, rx_pdu->isp_datalen, int, XFER_BUF_TX_TO_INI);
+
 		stmf_post_task(task, ibuf->ibuf_stmf_buf);
+
+		DTRACE_ISCSI_8(xfer__done, idm_conn_t *, ic,
+		    uintptr_t, ibuf->ibuf_stmf_buf->db_sglist[0].seg_addr,
+		    uint32_t, ibuf->ibuf_stmf_buf->db_relative_offset,
+		    uint64_t, 0, uint32_t, 0, uint32_t, 0, /* no raddr */
+		    uint32_t, rx_pdu->isp_datalen, int, XFER_BUF_TX_TO_INI);
 	} else {
 		stmf_post_task(task, NULL);
 		idm_pdu_complete(rx_pdu, IDM_STATUS_SUCCESS);
@@ -2090,10 +2222,12 @@ iscsit_pdu_op_noop(iscsit_conn_t *ict, idm_pdu_t *rx_pdu)
 	int resp_datalen;
 	idm_pdu_t *resp;
 
-	/* Get iSCSI session handle */
 	/* Ignore the response from initiator */
-	if (out->ttt != ISCSI_RSVD_TASK_TAG)
+	if ((out->itt == ISCSI_RSVD_TASK_TAG) ||
+	    (out->ttt != ISCSI_RSVD_TASK_TAG)) {
+		idm_pdu_complete(rx_pdu, IDM_STATUS_SUCCESS);
 		return;
+	}
 
 	/* Allocate a PDU to respond */
 	resp_datalen = ntoh24(out->dlength);
@@ -2272,9 +2406,8 @@ iscsit_send_async_event(iscsit_conn_t *ict, uint8_t event)
 		idm_conn_event(ict->ict_ic, CE_TRANSPORT_FAIL, NULL);
 		return;
 	}
-	idm_pdu_init(abt, ict->ict_ic, NULL, NULL);
 
-	ASSERT(abt != NULL);
+	idm_pdu_init(abt, ict->ict_ic, NULL, NULL);
 	abt->isp_datalen = 0;
 
 	async_abt = (iscsi_async_evt_hdr_t *)abt->isp_hdr;
@@ -2300,6 +2433,41 @@ iscsit_send_async_event(iscsit_conn_t *ict, uint8_t event)
 	}
 
 	iscsit_pdu_tx(abt);
+}
+
+void
+iscsit_send_reject(iscsit_conn_t *ict, idm_pdu_t *rejected_pdu, uint8_t reason)
+{
+	idm_pdu_t		*reject_pdu;
+	iscsi_reject_rsp_hdr_t	*reject;
+
+	/*
+	 * Get a PDU to build the abort request.
+	 */
+	reject_pdu = idm_pdu_alloc(sizeof (iscsi_hdr_t),
+	    rejected_pdu->isp_hdrlen);
+	if (reject_pdu == NULL) {
+		idm_conn_event(ict->ict_ic, CE_TRANSPORT_FAIL, NULL);
+		return;
+	}
+	idm_pdu_init(reject_pdu, ict->ict_ic, NULL, NULL);
+
+	reject_pdu->isp_datalen = rejected_pdu->isp_hdrlen;
+	bcopy(rejected_pdu->isp_hdr, reject_pdu->isp_data,
+	    rejected_pdu->isp_hdrlen);
+
+	reject = (iscsi_reject_rsp_hdr_t *)reject_pdu->isp_hdr;
+	bzero(reject, sizeof (*reject));
+	reject->opcode = ISCSI_OP_REJECT_MSG;
+	reject->reason = reason;
+	reject->flags = ISCSI_FLAG_FINAL;
+	hton24(reject->dlength, rejected_pdu->isp_hdrlen);
+	reject->must_be_ff[0] = 0xff;
+	reject->must_be_ff[1] = 0xff;
+	reject->must_be_ff[2] = 0xff;
+	reject->must_be_ff[3] = 0xff;
+
+	iscsit_pdu_tx(reject_pdu);
 }
 
 
@@ -2389,6 +2557,47 @@ iscsit_tm_task_free(iscsit_task_t *itask)
 	idm_conn_rele(itask->it_ict->ict_ic);
 	mutex_destroy(&itask->it_mutex);
 	kmem_free(itask, sizeof (iscsit_task_t));
+}
+
+static idm_status_t
+iscsit_task_start(iscsit_task_t *itask)
+{
+	iscsit_sess_t *ist = itask->it_ict->ict_sess;
+	avl_index_t		where;
+
+	/*
+	 * Sanity check the ITT and ensure that this task does not already
+	 * exist.  If not then add the task to the session task list.
+	 */
+	mutex_enter(&ist->ist_mutex);
+	mutex_enter(&itask->it_mutex);
+	itask->it_active = 1;
+	if (avl_find(&ist->ist_task_list, itask, &where) == NULL) {
+		/* New task, add to AVL */
+		avl_insert(&ist->ist_task_list, itask, where);
+		mutex_exit(&itask->it_mutex);
+		mutex_exit(&ist->ist_mutex);
+		return (IDM_STATUS_SUCCESS);
+	}
+	mutex_exit(&itask->it_mutex);
+	mutex_exit(&ist->ist_mutex);
+
+	return (IDM_STATUS_REJECT);
+}
+
+static void
+iscsit_task_done(iscsit_task_t *itask)
+{
+	iscsit_sess_t *ist = itask->it_ict->ict_sess;
+
+	mutex_enter(&ist->ist_mutex);
+	mutex_enter(&itask->it_mutex);
+	if (itask->it_active) {
+		avl_remove(&ist->ist_task_list, itask);
+		itask->it_active = 0;
+	}
+	mutex_exit(&itask->it_mutex);
+	mutex_exit(&ist->ist_mutex);
 }
 
 /*

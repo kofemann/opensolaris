@@ -73,8 +73,11 @@ void stmf_target_reset_poll(struct scsi_task *task);
 void stmf_handle_lun_reset(scsi_task_t *task);
 void stmf_handle_target_reset(scsi_task_t *task);
 void stmf_xd_to_dbuf(stmf_data_buf_t *dbuf);
-int stmf_load_ppd_ioctl(stmf_ppioctl_data_t *ppi);
+int stmf_load_ppd_ioctl(stmf_ppioctl_data_t *ppi, uint64_t *ppi_token,
+    uint32_t *err_ret);
 int stmf_delete_ppd_ioctl(stmf_ppioctl_data_t *ppi);
+int stmf_get_ppd_ioctl(stmf_ppioctl_data_t *ppi, stmf_ppioctl_data_t *ppi_out,
+    uint32_t *err_ret);
 void stmf_delete_ppd(stmf_pp_data_t *ppd);
 void stmf_delete_all_ppds();
 void stmf_trace_clear();
@@ -82,6 +85,11 @@ void stmf_worker_init();
 stmf_status_t stmf_worker_fini();
 void stmf_worker_mgmt();
 void stmf_worker_task(void *arg);
+
+static void stmf_update_kstat_lu_q(scsi_task_t *, void());
+static void stmf_update_kstat_lport_q(scsi_task_t *, void());
+static void stmf_update_kstat_lu_io(scsi_task_t *, stmf_data_buf_t *);
+static void stmf_update_kstat_lport_io(scsi_task_t *, stmf_data_buf_t *);
 
 extern struct mod_ops mod_driverops;
 
@@ -181,7 +189,8 @@ static struct dev_ops stmf_ops = {
 	NULL			/* power */
 };
 
-#define	STMF_NAME	"COMSTAR STMF"
+#define	STMF_NAME		"COMSTAR STMF"
+#define	STMF_MODULE_NAME	"stmf"
 
 static struct modldrv modldrv = {
 	&mod_driverops,
@@ -276,7 +285,8 @@ stmf_getinfo(dev_info_t *dip, ddi_info_cmd_t cmd, void *arg, void **result)
 		*result = stmf_state.stmf_dip;
 		break;
 	case DDI_INFO_DEVT2INSTANCE:
-		*result = (void *)(uintptr_t)ddi_get_instance(dip);
+		*result =
+		    (void *)(uintptr_t)ddi_get_instance(stmf_state.stmf_dip);
 		break;
 	default:
 		return (DDI_FAILURE);
@@ -427,8 +437,9 @@ stmf_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 	slist_scsi_session_t *iss_list;
 	sioc_lu_props_t *lup;
 	sioc_target_port_props_t *lportp;
-	stmf_ppioctl_data_t *ppi;
-	uint8_t *p_id;
+	stmf_ppioctl_data_t *ppi, *ppi_out = NULL;
+	uint64_t *ppi_token = NULL;
+	uint8_t *p_id, *id;
 	stmf_state_desc_t *std;
 	stmf_status_t ctl_ret;
 	stmf_state_change_info_t ssi;
@@ -439,11 +450,9 @@ stmf_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 	stmf_group_name_t *grpname;
 	stmf_view_op_entry_t *ve;
 	stmf_id_type_t idtype;
-#if 0
 	stmf_id_data_t *id_entry;
 	stmf_id_list_t	*id_list;
 	stmf_view_entry_t *view_entry;
-#endif
 	uint32_t	veid;
 
 	if ((cmd & 0xff000000) != STMF_IOCTL) {
@@ -461,6 +470,36 @@ stmf_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 
 	switch (cmd) {
 	case STMF_IOCTL_LU_LIST:
+		/* retrieves both registered/unregistered */
+		mutex_enter(&stmf_state.stmf_lock);
+		id_list = &stmf_state.stmf_luid_list;
+		n = min(id_list->id_count,
+		    (iocd->stmf_obuf_size)/sizeof (slist_lu_t));
+		iocd->stmf_obuf_max_nentries = id_list->id_count;
+		luid_list = (slist_lu_t *)obuf;
+		id_entry = id_list->idl_head;
+		for (i = 0; i < n; i++) {
+			bcopy(id_entry->id_data, luid_list[i].lu_guid, 16);
+			id_entry = id_entry->id_next;
+		}
+
+		n = iocd->stmf_obuf_size/sizeof (slist_lu_t);
+		for (ilu = stmf_state.stmf_ilulist; ilu; ilu = ilu->ilu_next) {
+			id = (uint8_t *)ilu->ilu_lu->lu_id;
+			if (stmf_lookup_id(id_list, 16, id + 4) == NULL) {
+				iocd->stmf_obuf_max_nentries++;
+				if (i < n) {
+					bcopy(id + 4, luid_list[i].lu_guid,
+					    sizeof (slist_lu_t));
+					i++;
+				}
+			}
+		}
+		iocd->stmf_obuf_nentries = i;
+		mutex_exit(&stmf_state.stmf_lock);
+		break;
+
+	case STMF_IOCTL_REG_LU_LIST:
 		mutex_enter(&stmf_state.stmf_lock);
 		iocd->stmf_obuf_max_nentries = stmf_state.stmf_nlus;
 		n = min(stmf_state.stmf_nlus,
@@ -473,6 +512,22 @@ stmf_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 			id = (uint8_t *)ilu->ilu_lu->lu_id;
 			bcopy(id + 4, luid_list[i].lu_guid, 16);
 			ilu = ilu->ilu_next;
+		}
+		mutex_exit(&stmf_state.stmf_lock);
+		break;
+
+	case STMF_IOCTL_VE_LU_LIST:
+		mutex_enter(&stmf_state.stmf_lock);
+		id_list = &stmf_state.stmf_luid_list;
+		n = min(id_list->id_count,
+		    (iocd->stmf_obuf_size)/sizeof (slist_lu_t));
+		iocd->stmf_obuf_max_nentries = id_list->id_count;
+		iocd->stmf_obuf_nentries = n;
+		luid_list = (slist_lu_t *)obuf;
+		id_entry = id_list->idl_head;
+		for (i = 0; i < n; i++) {
+			bcopy(id_entry->id_data, luid_list[i].lu_guid, 16);
+			id_entry = id_entry->id_next;
 		}
 		mutex_exit(&stmf_state.stmf_lock);
 		break;
@@ -922,7 +977,6 @@ stmf_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 		    &iocd->stmf_error);
 		mutex_exit(&stmf_state.stmf_lock);
 		break;
-#if 0
 	case STMF_IOCTL_GET_HG_LIST:
 		id_list = &stmf_state.stmf_hg_list;
 		/* FALLTHROUGH */
@@ -937,9 +991,17 @@ stmf_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 		id_entry = id_list->idl_head;
 		grpname = (stmf_group_name_t *)obuf;
 		for (i = 0; i < n; i++) {
-			grpname[i].name_size = id_entry->id_data_size;
-			bcopy(id_entry->id_data, grpname[i].name,
+			if (id_entry->id_data[0] == '*') {
+				if (iocd->stmf_obuf_nentries > 0) {
+					iocd->stmf_obuf_nentries--;
+				}
+				id_entry = id_entry->id_next;
+				continue;
+			}
+			grpname->name_size = id_entry->id_data_size;
+			bcopy(id_entry->id_data, grpname->name,
 			    id_entry->id_data_size);
+			grpname++;
 			id_entry = id_entry->id_next;
 		}
 		mutex_exit(&stmf_state.stmf_lock);
@@ -972,50 +1034,114 @@ stmf_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 			id_entry = id_list->idl_head;
 			grp_entry = (stmf_ge_ident_t *)obuf;
 			for (i = 0; i < n; i++) {
-				bcopy(id_entry->id_data, grp_entry,
+				bcopy(id_entry->id_data, grp_entry->ident,
 				    id_entry->id_data_size);
+				grp_entry->ident_size = id_entry->id_data_size;
 				id_entry = id_entry->id_next;
+				grp_entry++;
 			}
 		}
 		mutex_exit(&stmf_state.stmf_lock);
 		break;
+
 	case STMF_IOCTL_GET_VE_LIST:
 		n = iocd->stmf_obuf_size/sizeof (stmf_view_op_entry_t);
 		mutex_enter(&stmf_state.stmf_lock);
-		id_entry = stmf_state.stmf_luid_list.idl_head;
 		ve = (stmf_view_op_entry_t *)obuf;
-		while (id_entry) {
-			view_entry =
-			    (stmf_view_entry_t *)id_entry->id_impl_specific;
-			for (; view_entry; view_entry = view_entry->ve_next) {
+		for (id_entry = stmf_state.stmf_luid_list.idl_head;
+		    id_entry; id_entry = id_entry->id_next) {
+			for (view_entry = (stmf_view_entry_t *)
+			    id_entry->id_impl_specific; view_entry;
+			    view_entry = view_entry->ve_next) {
+				iocd->stmf_obuf_max_nentries++;
+				if (iocd->stmf_obuf_nentries >= n)
+					continue;
 				ve->ve_ndx_valid = 1;
 				ve->ve_ndx = view_entry->ve_id;
 				ve->ve_lu_number_valid = 1;
 				bcopy(view_entry->ve_lun, ve->ve_lu_nbr, 8);
 				bcopy(view_entry->ve_luid->id_data, ve->ve_guid,
 				    view_entry->ve_luid->id_data_size);
-				if (view_entry->ve_hg->id_data[0] == '*')
+				if (view_entry->ve_hg->id_data[0] == '*') {
 					ve->ve_all_hosts = 1;
-				else
+				} else {
 					bcopy(view_entry->ve_hg->id_data,
 					    ve->ve_host_group.name,
 					    view_entry->ve_hg->id_data_size);
-				if (view_entry->ve_tg->id_data[0] == '*')
+					ve->ve_host_group.name_size =
+					    view_entry->ve_hg->id_data_size;
+				}
+
+				if (view_entry->ve_tg->id_data[0] == '*') {
 					ve->ve_all_targets = 1;
-				else
+				} else {
 					bcopy(view_entry->ve_tg->id_data,
 					    ve->ve_target_group.name,
 					    view_entry->ve_tg->id_data_size);
+					ve->ve_target_group.name_size =
+					    view_entry->ve_tg->id_data_size;
+				}
+				ve++;
 				iocd->stmf_obuf_nentries++;
-				if (iocd->stmf_obuf_nentries >= n)
-					break;
 			}
-			if (iocd->stmf_obuf_nentries >= n)
-				break;
 		}
 		mutex_exit(&stmf_state.stmf_lock);
 		break;
-#endif
+
+	case STMF_IOCTL_LU_VE_LIST:
+		p_id = (uint8_t *)ibuf;
+		if ((iocd->stmf_ibuf_size != 16) ||
+		    (iocd->stmf_obuf_size < sizeof (stmf_view_op_entry_t))) {
+			ret = EINVAL;
+			break;
+		}
+
+		n = iocd->stmf_obuf_size/sizeof (stmf_view_op_entry_t);
+		mutex_enter(&stmf_state.stmf_lock);
+		ve = (stmf_view_op_entry_t *)obuf;
+		for (id_entry = stmf_state.stmf_luid_list.idl_head;
+		    id_entry; id_entry = id_entry->id_next) {
+			if (bcmp(id_entry->id_data, p_id, 16) != 0)
+				continue;
+			for (view_entry = (stmf_view_entry_t *)
+			    id_entry->id_impl_specific; view_entry;
+			    view_entry = view_entry->ve_next) {
+				iocd->stmf_obuf_max_nentries++;
+				if (iocd->stmf_obuf_nentries >= n)
+					continue;
+				ve->ve_ndx_valid = 1;
+				ve->ve_ndx = view_entry->ve_id;
+				ve->ve_lu_number_valid = 1;
+				bcopy(view_entry->ve_lun, ve->ve_lu_nbr, 8);
+				bcopy(view_entry->ve_luid->id_data, ve->ve_guid,
+				    view_entry->ve_luid->id_data_size);
+				if (view_entry->ve_hg->id_data[0] == '*') {
+					ve->ve_all_hosts = 1;
+				} else {
+					bcopy(view_entry->ve_hg->id_data,
+					    ve->ve_host_group.name,
+					    view_entry->ve_hg->id_data_size);
+					ve->ve_host_group.name_size =
+					    view_entry->ve_hg->id_data_size;
+				}
+
+				if (view_entry->ve_tg->id_data[0] == '*') {
+					ve->ve_all_targets = 1;
+				} else {
+					bcopy(view_entry->ve_tg->id_data,
+					    ve->ve_target_group.name,
+					    view_entry->ve_tg->id_data_size);
+					ve->ve_target_group.name_size =
+					    view_entry->ve_tg->id_data_size;
+				}
+				ve++;
+				iocd->stmf_obuf_nentries++;
+			}
+			break;
+		}
+		mutex_exit(&stmf_state.stmf_lock);
+		break;
+
 	case STMF_IOCTL_LOAD_PP_DATA:
 		if (stmf_state.stmf_config_state == STMF_CONFIG_NONE) {
 			ret = EACCES;
@@ -1028,7 +1154,35 @@ stmf_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 			ret = EINVAL;
 			break;
 		}
-		ret = stmf_load_ppd_ioctl(ppi);
+		/* returned token */
+		ppi_token = (uint64_t *)obuf;
+		if ((ppi_token == NULL) ||
+		    (iocd->stmf_obuf_size < sizeof (uint64_t))) {
+			ret = EINVAL;
+			break;
+		}
+		ret = stmf_load_ppd_ioctl(ppi, ppi_token, &iocd->stmf_error);
+		break;
+
+	case STMF_IOCTL_GET_PP_DATA:
+		if (stmf_state.stmf_config_state == STMF_CONFIG_NONE) {
+			ret = EACCES;
+			iocd->stmf_error = STMF_IOCERR_UPDATE_NEED_CFG_INIT;
+			break;
+		}
+		ppi = (stmf_ppioctl_data_t *)ibuf;
+		if (ppi == NULL ||
+		    (iocd->stmf_ibuf_size < sizeof (stmf_ppioctl_data_t))) {
+			ret = EINVAL;
+			break;
+		}
+		ppi_out = (stmf_ppioctl_data_t *)obuf;
+		if ((ppi_out == NULL) ||
+		    (iocd->stmf_obuf_size < sizeof (stmf_ppioctl_data_t))) {
+			ret = EINVAL;
+			break;
+		}
+		ret = stmf_get_ppd_ioctl(ppi, ppi_out, &iocd->stmf_error);
 		break;
 
 	case STMF_IOCTL_CLEAR_PP_DATA:
@@ -1559,7 +1713,8 @@ stmf_deregister_port_provider(stmf_port_provider_t *pp)
 }
 
 int
-stmf_load_ppd_ioctl(stmf_ppioctl_data_t *ppi)
+stmf_load_ppd_ioctl(stmf_ppioctl_data_t *ppi, uint64_t *ppi_token,
+    uint32_t *err_ret)
 {
 	stmf_i_port_provider_t		*ipp;
 	stmf_i_lu_provider_t		*ilp;
@@ -1567,6 +1722,8 @@ stmf_load_ppd_ioctl(stmf_ppioctl_data_t *ppi)
 	nvlist_t			*nv;
 	int				s;
 	int				ret;
+
+	*err_ret = 0;
 
 	if ((ppi->ppi_lu_provider + ppi->ppi_port_provider) != 1) {
 		return (EINVAL);
@@ -1632,6 +1789,19 @@ stmf_load_ppd_ioctl(stmf_ppioctl_data_t *ppi)
 		stmf_state.stmf_ppdlist = ppd;
 	}
 
+	/*
+	 * User is requesting that the token be checked.
+	 * If there was another set after the user's get
+	 * it's an error
+	 */
+	if (ppi->ppi_token_valid) {
+		if (ppi->ppi_token != ppd->ppd_token) {
+			*err_ret = STMF_IOCERR_PPD_UPDATED;
+			mutex_exit(&stmf_state.stmf_lock);
+			return (EINVAL);
+		}
+	}
+
 	if ((ret = nvlist_unpack((char *)ppi->ppi_data,
 	    (size_t)ppi->ppi_data_size, &nv, KM_NOSLEEP)) != 0) {
 		mutex_exit(&stmf_state.stmf_lock);
@@ -1642,6 +1812,13 @@ stmf_load_ppd_ioctl(stmf_ppioctl_data_t *ppi)
 	if (ppd->ppd_nv)
 		nvlist_free(ppd->ppd_nv);
 	ppd->ppd_nv = nv;
+
+	/* set the token for writes */
+	ppd->ppd_token++;
+	/* return token to caller */
+	if (ppi_token) {
+		*ppi_token = ppd->ppd_token;
+	}
 
 	/* If there is a provider registered, do the notifications */
 	if (ppd->ppd_provider) {
@@ -1744,6 +1921,59 @@ stmf_delete_ppd_ioctl(stmf_ppioctl_data_t *ppi)
 	return (ret);
 }
 
+int
+stmf_get_ppd_ioctl(stmf_ppioctl_data_t *ppi, stmf_ppioctl_data_t *ppi_out,
+    uint32_t *err_ret)
+{
+	stmf_pp_data_t *ppd;
+	size_t req_size;
+	int ret = ENOENT;
+	char *bufp = (char *)ppi_out->ppi_data;
+
+	if ((ppi->ppi_lu_provider + ppi->ppi_port_provider) != 1) {
+		return (EINVAL);
+	}
+
+	mutex_enter(&stmf_state.stmf_lock);
+
+	for (ppd = stmf_state.stmf_ppdlist; ppd != NULL; ppd = ppd->ppd_next) {
+		if (ppi->ppi_lu_provider) {
+			if (!ppd->ppd_lu_provider)
+				continue;
+		} else if (ppi->ppi_port_provider) {
+			if (!ppd->ppd_port_provider)
+				continue;
+		}
+		if (strncmp(ppi->ppi_name, ppd->ppd_name, 254) == 0)
+			break;
+	}
+
+	if (ppd && ppd->ppd_nv) {
+		ppi_out->ppi_token = ppd->ppd_token;
+		if ((ret = nvlist_size(ppd->ppd_nv, &req_size,
+		    NV_ENCODE_XDR)) != 0) {
+			goto done;
+		}
+		ppi_out->ppi_data_size = req_size;
+		if (req_size > ppi->ppi_data_size) {
+			*err_ret = STMF_IOCERR_INSUFFICIENT_BUF;
+			ret = EINVAL;
+			goto done;
+		}
+
+		if ((ret = nvlist_pack(ppd->ppd_nv, &bufp, &req_size,
+		    NV_ENCODE_XDR, 0)) != 0) {
+			goto done;
+		}
+		ret = 0;
+	}
+
+done:
+	mutex_exit(&stmf_state.stmf_lock);
+
+	return (ret);
+}
+
 void
 stmf_delete_all_ppds()
 {
@@ -1754,6 +1984,241 @@ stmf_delete_all_ppds()
 		nppd = ppd->ppd_next;
 		stmf_delete_ppd(ppd);
 	}
+}
+
+/*
+ * 16 is the max string length of a protocol_ident, increase
+ * the size if needed.
+ */
+#define	STMF_KSTAT_LU_SZ	(STMF_GUID_INPUT + 1 + 256)
+#define	STMF_KSTAT_TGT_SZ	(256 * 2 + 16)
+
+typedef struct stmf_kstat_lu_info {
+	kstat_named_t		i_lun_guid;
+	kstat_named_t		i_lun_alias;
+} stmf_kstat_lu_info_t;
+
+typedef struct stmf_kstat_tgt_info {
+	kstat_named_t		i_tgt_name;
+	kstat_named_t		i_tgt_alias;
+	kstat_named_t		i_protocol;
+} stmf_kstat_tgt_info_t;
+
+/*
+ * This array matches the Protocol Identifier in stmf_ioctl.h
+ */
+char *protocol_ident[PROTOCOL_ANY] = {
+	"Fibre Channel",
+	"Parallel SCSI",
+	"SSA",
+	"IEEE_1394",
+	"SRP",
+	"iSCSI",
+	"SAS",
+	"ADT",
+	"ATAPI",
+	"UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN", "UNKNOWN"
+};
+
+/*
+ * Update the lun wait/run queue count
+ */
+static void
+stmf_update_kstat_lu_q(scsi_task_t *task, void func())
+{
+	stmf_i_lu_t		*ilu;
+	kstat_io_t		*kip;
+
+	if (task->task_lu == dlun0)
+		return;
+	ilu = (stmf_i_lu_t *)task->task_lu->lu_stmf_private;
+	if (ilu != NULL && ilu->ilu_kstat_io != NULL) {
+		kip = KSTAT_IO_PTR(ilu->ilu_kstat_io);
+		if (kip != NULL) {
+			mutex_enter(ilu->ilu_kstat_io->ks_lock);
+			func(kip);
+			mutex_exit(ilu->ilu_kstat_io->ks_lock);
+		}
+	}
+}
+
+/*
+ * Update the target(lport) wait/run queue count
+ */
+static void
+stmf_update_kstat_lport_q(scsi_task_t *task, void func())
+{
+	stmf_i_local_port_t	*ilp;
+	kstat_io_t		*kip;
+
+	ilp = (stmf_i_local_port_t *)task->task_lport->lport_stmf_private;
+	if (ilp != NULL && ilp->ilport_kstat_io != NULL) {
+		kip = KSTAT_IO_PTR(ilp->ilport_kstat_io);
+		if (kip != NULL) {
+			mutex_enter(ilp->ilport_kstat_io->ks_lock);
+			func(kip);
+			mutex_exit(ilp->ilport_kstat_io->ks_lock);
+		}
+	}
+}
+
+static void
+stmf_update_kstat_lport_io(scsi_task_t *task, stmf_data_buf_t *dbuf)
+{
+	stmf_i_local_port_t	*ilp;
+	kstat_io_t		*kip;
+
+	ilp = (stmf_i_local_port_t *)task->task_lport->lport_stmf_private;
+	if (ilp != NULL && ilp->ilport_kstat_io != NULL) {
+		kip = KSTAT_IO_PTR(ilp->ilport_kstat_io);
+		if (kip != NULL) {
+			mutex_enter(ilp->ilport_kstat_io->ks_lock);
+			STMF_UPDATE_KSTAT_IO(kip, dbuf);
+			mutex_exit(ilp->ilport_kstat_io->ks_lock);
+		}
+	}
+}
+
+static void
+stmf_update_kstat_lu_io(scsi_task_t *task, stmf_data_buf_t *dbuf)
+{
+	stmf_i_lu_t		*ilu;
+	kstat_io_t		*kip;
+
+	ilu = (stmf_i_lu_t *)task->task_lu->lu_stmf_private;
+	if (ilu != NULL && ilu->ilu_kstat_io != NULL) {
+		kip = KSTAT_IO_PTR(ilu->ilu_kstat_io);
+		if (kip != NULL) {
+			mutex_enter(ilu->ilu_kstat_io->ks_lock);
+			STMF_UPDATE_KSTAT_IO(kip, dbuf);
+			mutex_exit(ilu->ilu_kstat_io->ks_lock);
+		}
+	}
+}
+
+static void
+stmf_create_kstat_lu(stmf_i_lu_t *ilu)
+{
+	char				ks_nm[KSTAT_STRLEN];
+	stmf_kstat_lu_info_t		*ks_lu;
+
+	/* create kstat lun info */
+	ks_lu = (stmf_kstat_lu_info_t *)kmem_zalloc(STMF_KSTAT_LU_SZ,
+	    KM_NOSLEEP);
+	if (ks_lu == NULL) {
+		cmn_err(CE_WARN, "STMF: kmem_zalloc failed");
+		return;
+	}
+
+	bzero(ks_nm, sizeof (ks_nm));
+	(void) sprintf(ks_nm, "stmf_lu_%"PRIxPTR"", (uintptr_t)ilu);
+	if ((ilu->ilu_kstat_info = kstat_create(STMF_MODULE_NAME, 0,
+	    ks_nm, "misc", KSTAT_TYPE_NAMED,
+	    sizeof (stmf_kstat_lu_info_t) / sizeof (kstat_named_t),
+	    KSTAT_FLAG_VIRTUAL)) == NULL) {
+		kmem_free(ks_lu, STMF_KSTAT_LU_SZ);
+		cmn_err(CE_WARN, "STMF: kstat_create lu failed");
+		return;
+	}
+
+	ilu->ilu_kstat_info->ks_data_size = STMF_KSTAT_LU_SZ;
+	ilu->ilu_kstat_info->ks_data = ks_lu;
+
+	kstat_named_init(&ks_lu->i_lun_guid, "lun-guid",
+	    KSTAT_DATA_STRING);
+	kstat_named_init(&ks_lu->i_lun_alias, "lun-alias",
+	    KSTAT_DATA_STRING);
+
+	/* convert guid to hex string */
+	int		i;
+	uint8_t		*p = ilu->ilu_lu->lu_id->ident;
+	bzero(ilu->ilu_ascii_hex_guid, sizeof (ilu->ilu_ascii_hex_guid));
+	for (i = 0; i < STMF_GUID_INPUT / 2; i++) {
+		(void) sprintf(&ilu->ilu_ascii_hex_guid[i * 2], "%02x", p[i]);
+	}
+	kstat_named_setstr(&ks_lu->i_lun_guid,
+	    (const char *)ilu->ilu_ascii_hex_guid);
+	kstat_named_setstr(&ks_lu->i_lun_alias,
+	    (const char *)ilu->ilu_lu->lu_alias);
+	kstat_install(ilu->ilu_kstat_info);
+
+	/* create kstat lun io */
+	bzero(ks_nm, sizeof (ks_nm));
+	(void) sprintf(ks_nm, "stmf_lu_io_%"PRIxPTR"", (uintptr_t)ilu);
+	if ((ilu->ilu_kstat_io = kstat_create(STMF_MODULE_NAME, 0,
+	    ks_nm, "io", KSTAT_TYPE_IO, 1, 0)) == NULL) {
+		cmn_err(CE_WARN, "STMF: kstat_create lu_io failed");
+		return;
+	}
+	mutex_init(&ilu->ilu_kstat_lock, NULL, MUTEX_DRIVER, 0);
+	ilu->ilu_kstat_io->ks_lock = &ilu->ilu_kstat_lock;
+	kstat_install(ilu->ilu_kstat_io);
+}
+
+static void
+stmf_create_kstat_lport(stmf_i_local_port_t *ilport)
+{
+	char				ks_nm[KSTAT_STRLEN];
+	stmf_kstat_tgt_info_t		*ks_tgt;
+	int				id, len;
+
+	/* create kstat lport info */
+	ks_tgt = (stmf_kstat_tgt_info_t *)kmem_zalloc(STMF_KSTAT_TGT_SZ,
+	    KM_NOSLEEP);
+	if (ks_tgt == NULL) {
+		cmn_err(CE_WARN, "STMF: kmem_zalloc failed");
+		return;
+	}
+
+	bzero(ks_nm, sizeof (ks_nm));
+	(void) sprintf(ks_nm, "stmf_tgt_%"PRIxPTR"", (uintptr_t)ilport);
+	if ((ilport->ilport_kstat_info = kstat_create(STMF_MODULE_NAME,
+	    0, ks_nm, "misc", KSTAT_TYPE_NAMED,
+	    sizeof (stmf_kstat_tgt_info_t) / sizeof (kstat_named_t),
+	    KSTAT_FLAG_VIRTUAL)) == NULL) {
+		kmem_free(ks_tgt, STMF_KSTAT_TGT_SZ);
+		cmn_err(CE_WARN, "STMF: kstat_create target failed");
+		return;
+	}
+
+	ilport->ilport_kstat_info->ks_data_size = STMF_KSTAT_TGT_SZ;
+	ilport->ilport_kstat_info->ks_data = ks_tgt;
+
+	kstat_named_init(&ks_tgt->i_tgt_name, "target-name",
+	    KSTAT_DATA_STRING);
+	kstat_named_init(&ks_tgt->i_tgt_alias, "target-alias",
+	    KSTAT_DATA_STRING);
+	kstat_named_init(&ks_tgt->i_protocol, "protocol",
+	    KSTAT_DATA_STRING);
+
+	/* ident might not be null terminated */
+	len = ilport->ilport_lport->lport_id->ident_length;
+	bcopy(ilport->ilport_lport->lport_id->ident,
+	    ilport->ilport_kstat_tgt_name, len);
+	ilport->ilport_kstat_tgt_name[len + 1] = NULL;
+	kstat_named_setstr(&ks_tgt->i_tgt_name,
+	    (const char *)ilport->ilport_kstat_tgt_name);
+	kstat_named_setstr(&ks_tgt->i_tgt_alias,
+	    (const char *)ilport->ilport_lport->lport_alias);
+	/* protocol */
+	if ((id = ilport->ilport_lport->lport_id->protocol_id) > PROTOCOL_ANY) {
+		cmn_err(CE_WARN, "STMF: protocol_id out of bound");
+		id = PROTOCOL_ANY;
+	}
+	kstat_named_setstr(&ks_tgt->i_protocol, protocol_ident[id]);
+	kstat_install(ilport->ilport_kstat_info);
+
+	/* create kstat lport io */
+	bzero(ks_nm, sizeof (ks_nm));
+	(void) sprintf(ks_nm, "stmf_tgt_io_%"PRIxPTR"", (uintptr_t)ilport);
+	if ((ilport->ilport_kstat_io = kstat_create(STMF_MODULE_NAME, 0,
+	    ks_nm, "io", KSTAT_TYPE_IO, 1, 0)) == NULL) {
+		cmn_err(CE_WARN, "STMF: kstat_create target_io failed");
+		return;
+	}
+	mutex_init(&ilport->ilport_kstat_lock, NULL, MUTEX_DRIVER, 0);
+	ilport->ilport_kstat_io->ks_lock = &ilport->ilport_kstat_lock;
+	kstat_install(ilport->ilport_kstat_io);
 }
 
 stmf_status_t
@@ -1805,6 +2270,7 @@ stmf_register_lu(stmf_lu_t *lu)
 	}
 	ilu->ilu_cur_task_cntr = &ilu->ilu_task_cntr1;
 	STMF_EVENT_ALLOC_HANDLE(ilu->ilu_event_hdl);
+	stmf_create_kstat_lu(ilu);
 	mutex_exit(&stmf_state.stmf_lock);
 
 	/* XXX we should probably check if this lu can be brought online */
@@ -1882,6 +2348,13 @@ stmf_deregister_lu(stmf_lu_t *lu)
 		mutex_exit(&stmf_state.stmf_lock);
 		return (STMF_BUSY);
 	}
+	if (ilu->ilu_kstat_info) {
+		kstat_delete(ilu->ilu_kstat_info);
+	}
+	if (ilu->ilu_kstat_io) {
+		kstat_delete(ilu->ilu_kstat_io);
+		mutex_destroy(&ilu->ilu_kstat_lock);
+	}
 	mutex_exit(&stmf_state.stmf_lock);
 	return (STMF_SUCCESS);
 }
@@ -1916,6 +2389,7 @@ stmf_register_local_port(stmf_local_port_t *lport)
 	    lport->lport_id->ident_length);
 	ilport->ilport_rtpid = atomic_add_16_nv(&stmf_rtpid_counter, 1);
 	STMF_EVENT_ALLOC_HANDLE(ilport->ilport_event_hdl);
+	stmf_create_kstat_lport(ilport);
 	if (stmf_workers_state == STMF_WORKERS_DISABLED) {
 		stmf_workers_state = STMF_WORKERS_ENABLING;
 		start_workers = 1;
@@ -1966,6 +2440,13 @@ stmf_deregister_local_port(stmf_local_port_t *lport)
 	} else {
 		mutex_exit(&stmf_state.stmf_lock);
 		return (STMF_BUSY);
+	}
+	if (ilport->ilport_kstat_info) {
+		kstat_delete(ilport->ilport_kstat_info);
+	}
+	if (ilport->ilport_kstat_io) {
+		kstat_delete(ilport->ilport_kstat_io);
+		mutex_destroy(&ilport->ilport_kstat_lock);
 	}
 	mutex_exit(&stmf_state.stmf_lock);
 	return (STMF_SUCCESS);
@@ -2831,6 +3312,7 @@ stmf_post_task(scsi_task_t *task, stmf_data_buf_t *dbuf)
 	}
 	if (w1->worker_queue_depth < w->worker_queue_depth)
 		w = w1;
+
 	mutex_enter(&w->worker_lock);
 	if (((w->worker_flags & STMF_WORKER_STARTED) == 0) ||
 	    (w->worker_flags & STMF_WORKER_TERMINATE)) {
@@ -2888,6 +3370,10 @@ stmf_post_task(scsi_task_t *task, stmf_data_buf_t *dbuf)
 		itask->itask_allocated_buf_map = 0;
 		itask->itask_dbufs[0] = NULL;
 	}
+
+	stmf_update_kstat_lu_q(task, kstat_waitq_enter);
+	stmf_update_kstat_lport_q(task, kstat_waitq_enter);
+
 	if ((w->worker_flags & STMF_WORKER_ACTIVE) == 0)
 		cv_signal(&w->worker_cv);
 	mutex_exit(&w->worker_lock);
@@ -2944,6 +3430,10 @@ stmf_xfer_data(scsi_task_t *task, stmf_data_buf_t *dbuf, uint32_t ioflags)
 			return (STMF_SUCCESS);
 	}
 #endif
+
+	stmf_update_kstat_lu_io(task, dbuf);
+	stmf_update_kstat_lport_io(task, dbuf);
+
 	DTRACE_PROBE2(scsi__xfer__start, scsi_task_t *, task,
 	    stmf_data_buf_t *, dbuf);
 	ret = task->task_lport->lport_xfer_data(task, dbuf, ioflags);
@@ -3024,6 +3514,8 @@ stmf_data_xfer_done(scsi_task_t *task, stmf_data_buf_t *dbuf, uint32_t iof)
 		if ((itask->itask_flags & (ITASK_KNOWN_TO_LU |
 		    ITASK_KNOWN_TO_TGT_PORT | ITASK_IN_WORKER_QUEUE |
 		    ITASK_BEING_ABORTED)) == 0) {
+			stmf_update_kstat_lu_q(task, kstat_runq_exit);
+			stmf_update_kstat_lport_q(task, kstat_runq_exit);
 			stmf_task_free(task);
 		}
 	}
@@ -3116,6 +3608,9 @@ stmf_send_status_done(scsi_task_t *task, stmf_status_t s, uint32_t iof)
 		}
 	} while (atomic_cas_32(&itask->itask_flags, old, new) != old);
 	task->task_completion_status = s;
+
+	stmf_update_kstat_lu_q(task, kstat_runq_exit);
+	stmf_update_kstat_lport_q(task, kstat_runq_exit);
 
 	if (queue_it) {
 		ASSERT(itask->itask_ncmds < ITASK_MAX_NCMDS);
@@ -3821,6 +4316,53 @@ stmf_prepare_tpgs_data()
 	return (xd);
 }
 
+struct scsi_devid_desc *
+stmf_scsilib_get_devid_desc(uint16_t rtpid)
+{
+	scsi_devid_desc_t *devid = NULL;
+	stmf_i_local_port_t *ilport;
+
+	mutex_enter(&stmf_state.stmf_lock);
+
+	for (ilport = stmf_state.stmf_ilportlist; ilport;
+	    ilport = ilport->ilport_next) {
+		if (ilport->ilport_rtpid == rtpid) {
+			scsi_devid_desc_t *id = ilport->ilport_lport->lport_id;
+			uint32_t id_sz = sizeof (scsi_devid_desc_t) - 1 +
+			    id->ident_length;
+			devid = (scsi_devid_desc_t *)kmem_zalloc(id_sz,
+			    KM_NOSLEEP);
+			if (devid != NULL) {
+				bcopy(id, devid, id_sz);
+			}
+			break;
+		}
+	}
+
+	mutex_exit(&stmf_state.stmf_lock);
+	return (devid);
+}
+
+uint16_t
+stmf_scsilib_get_lport_rtid(struct scsi_devid_desc *devid)
+{
+	stmf_i_local_port_t	*ilport;
+	scsi_devid_desc_t	*id;
+	uint16_t		rtpid = 0;
+
+	mutex_enter(&stmf_state.stmf_lock);
+	for (ilport = stmf_state.stmf_ilportlist; ilport;
+	    ilport = ilport->ilport_next) {
+		id = ilport->ilport_lport->lport_id;
+		if ((devid->ident_length == id->ident_length) &&
+		    (memcmp(devid->ident, id->ident, id->ident_length) == 0)) {
+			rtpid = ilport->ilport_rtpid;
+			break;
+		}
+	}
+	mutex_exit(&stmf_state.stmf_lock);
+	return (rtpid);
+}
 
 static uint16_t stmf_lu_id_gen_number = 0;
 
@@ -3850,7 +4392,6 @@ stmf_scsilib_uniq_lu_id(uint32_t company_id, scsi_devid_desc_t *lu_id)
 	p[7] = (company_id << 4) & 0xf0;
 	if (!localetheraddr((struct ether_addr *)NULL, &mac)) {
 		int hid = BE_32((int)zone_get_hostid(NULL));
-
 		e[0] = (hid >> 24) & 0xff;
 		e[1] = (hid >> 16) & 0xff;
 		e[2] = (hid >> 8) & 0xff;
@@ -4423,6 +4964,8 @@ out_itask_flag_loop:
 		case ITASK_CMD_NEW_TASK:
 			iss = (stmf_i_scsi_session_t *)
 			    task->task_session->ss_stmf_private;
+			stmf_update_kstat_lu_q(task, kstat_waitq_to_runq);
+			stmf_update_kstat_lport_q(task, kstat_waitq_to_runq);
 			if (iss->iss_flags & ISS_LUN_INVENTORY_CHANGED) {
 				if (stmf_handle_cmd_during_ic(itask))
 					break;

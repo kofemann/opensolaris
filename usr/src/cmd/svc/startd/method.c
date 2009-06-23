@@ -18,6 +18,7 @@
  *
  * CDDL HEADER END
  */
+
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
@@ -431,19 +432,19 @@ exec_method(const restarter_inst_t *inst, int type, const char *method,
 	/* Set credentials. */
 	rsmc_errno = restarter_set_method_context(mcp, &errf);
 	if (rsmc_errno != 0) {
-		(void) fputs("svc.startd could not set context for method: ",
-		    stderr);
+		log_instance(inst, B_FALSE,
+		    "svc.startd could not set context for method: ");
 
 		if (rsmc_errno == -1) {
 			if (strcmp(errf, "core_set_process_path") == 0) {
-				(void) fputs("Could not set corefile path.\n",
-				    stderr);
+				log_instance(inst, B_FALSE,
+				    "Could not set corefile path.");
 			} else if (strcmp(errf, "setproject") == 0) {
-				(void) fprintf(stderr, "%s: a resource control "
-				    "assignment failed\n", errf);
+				log_instance(inst, B_FALSE, "%s: a resource "
+				    "control assignment failed", errf);
 			} else if (strcmp(errf, "pool_set_binding") == 0) {
-				(void) fprintf(stderr, "%s: a system error "
-				    "occurred\n", errf);
+				log_instance(inst, B_FALSE, "%s: a system "
+				    "error occurred", errf);
 			} else {
 #ifndef NDEBUG
 				uu_warn("%s:%d: Bad function name \"%s\" for "
@@ -460,18 +461,19 @@ exec_method(const restarter_inst_t *inst, int type, const char *method,
 		if (errf != NULL && strcmp(errf, "pool_set_binding") == 0) {
 			switch (rsmc_errno) {
 			case ENOENT:
-				(void) fprintf(stderr, "%s: the pool could not "
-				    "be found\n", errf);
+				log_instance(inst, B_FALSE, "%s: the pool "
+				    "could not be found", errf);
 				break;
 
 			case EBADF:
-				(void) fprintf(stderr, "%s: the configuration "
-				    "is invalid\n", errf);
+				log_instance(inst, B_FALSE, "%s: the "
+				    "configuration is invalid", errf);
 				break;
 
 			case EINVAL:
-				(void) fprintf(stderr, "%s: pool name \"%s\" "
-				    "is invalid\n", errf, mcp->resource_pool);
+				log_instance(inst, B_FALSE, "%s: pool name "
+				    "\"%s\" is invalid", errf,
+				    mcp->resource_pool);
 				break;
 
 			default:
@@ -507,13 +509,13 @@ exec_method(const restarter_inst_t *inst, int type, const char *method,
 
 		switch (rsmc_errno) {
 		case ENOMEM:
-			(void) fputs("Out of memory.\n", stderr);
+			log_instance(inst, B_FALSE, "Out of memory.");
 			exit(1);
 			/* NOTREACHED */
 
 		case ENOENT:
-			(void) fputs("Missing passwd entry for user.\n",
-			    stderr);
+			log_instance(inst, B_FALSE, "Missing passwd entry for "
+			    "user.");
 			exit(SMF_EXIT_ERR_CONFIG);
 			/* NOTREACHED */
 
@@ -602,7 +604,7 @@ method_run(restarter_inst_t **instp, int type, int *exit_code)
 	scf_handle_t *h;
 	scf_snapshot_t *snap;
 	const char *mname;
-	const char *errstr;
+	mc_error_t *m_error;
 	struct method_context *mcp;
 	int result = 0, timeout_fired = 0;
 	int sig, r;
@@ -748,11 +750,12 @@ method_run(restarter_inst_t **instp, int type, int *exit_code)
 	log_framework(LOG_DEBUG, "%s: forking to run method %s\n",
 	    inst->ri_i.i_fmri, method);
 
-	errstr = restarter_get_method_context(RESTARTER_METHOD_CONTEXT_VERSION,
+	m_error = restarter_get_method_context(RESTARTER_METHOD_CONTEXT_VERSION,
 	    inst->ri_m_inst, snap, mname, method, &mcp);
 
-	if (errstr != NULL) {
-		log_error(LOG_WARNING, "%s: %s\n", inst->ri_i.i_fmri, errstr);
+	if (m_error != NULL) {
+		log_instance(inst, B_TRUE, "%s", m_error->msg);
+		restarter_mc_error_destroy(m_error);
 		result = EINVAL;
 		goto out;
 	}

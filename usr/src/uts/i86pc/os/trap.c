@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -961,10 +961,10 @@ trap(struct regs *rp, caddr_t addr, processorid_t cpuid)
 		if (tudebug && tudebugfpe)
 			showregs(type, rp, addr);
 		if (fpnoextflt(rp)) {
-			siginfo.si_signo = SIGFPE;
+			siginfo.si_signo = SIGILL;
 			siginfo.si_code  = ILL_ILLOPC;
 			siginfo.si_addr  = (caddr_t)rp->r_pc;
-			fault = FLTFPE;
+			fault = FLTILL;
 		}
 		break;
 
@@ -1354,8 +1354,11 @@ trap(struct regs *rp, caddr_t addr, processorid_t cpuid)
 	case T_AST + USER:	/* profiling, resched, h/w error pseudo trap */
 		if (lwp->lwp_pcb.pcb_flags & ASYNC_HWERR) {
 			proc_t *p = ttoproc(curthread);
+			extern void print_msg_hwerr(ctid_t ct_id, proc_t *p);
 
 			lwp->lwp_pcb.pcb_flags &= ~ASYNC_HWERR;
+			print_msg_hwerr(p->p_ct_process->conp_contract.ct_id,
+			    p);
 			contract_process_hwerr(p->p_ct_process, p);
 			siginfo.si_signo = SIGKILL;
 			siginfo.si_code = SI_NOINFO;
@@ -1407,7 +1410,7 @@ trap(struct regs *rp, caddr_t addr, processorid_t cpuid)
 	}
 
 	if (siginfo.si_signo)
-		trapsig(&siginfo, (fault == FLTCPCOVF)? 0 : 1);
+		trapsig(&siginfo, (fault != FLTFPE && fault != FLTCPCOVF));
 
 	if (lwp->lwp_oweupc)
 		profil_tick(rp->r_pc);
@@ -2159,12 +2162,6 @@ dump_ttrace(void)
 					}
 				break;
 
-			case TT_XCALL:
-				printf(fmt2, "xcal",
-				    rec->ttr_info.xc_entry.xce_marker);
-				printf(fmt3, "");
-				break;
-
 			default:
 				break;
 			}
@@ -2216,36 +2213,6 @@ dump_ttrace(void)
 			current -= sizeof (trap_trace_rec_t);
 		}
 	}
-}
-
-/*
- * Help with constructing traptrace records in C
- */
-trap_trace_rec_t *
-trap_trace_get_traceptr(uint8_t marker, ulong_t pc, ulong_t sp)
-{
-	trap_trace_rec_t *ttr;
-
-	if (trap_trace_freeze)
-		ttr = &trap_trace_postmort;
-	else {
-		trap_trace_ctl_t *ttc = &trap_trace_ctl[CPU->cpu_id];
-
-		ttr = (void *)ttc->ttc_next;
-
-		if (ttc->ttc_next >= ttc->ttc_limit)
-			ttc->ttc_next = ttc->ttc_first;
-		else
-			ttc->ttc_next += sizeof (trap_trace_rec_t);
-	}
-
-	ttr->ttr_regs.r_sp = sp;
-	ttr->ttr_regs.r_pc = pc;
-	ttr->ttr_cr2 = getcr2();
-	ttr->ttr_curthread = (uintptr_t)curthread;
-	ttr->ttr_stamp = tsc_read();
-	ttr->ttr_marker = marker;
-	return (ttr);
 }
 
 #endif	/* TRAPTRACE */

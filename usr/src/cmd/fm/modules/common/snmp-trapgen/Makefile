@@ -20,7 +20,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #
@@ -35,7 +35,7 @@ ROOTSMASNMPCONFS = $(SMASNMPCONFS:%=$(ROOTSMASNMPDIR)/%)
 
 include ../../Makefile.plugin
 
-SNMPLIBS = -lnetsnmp -lnetsnmpagent
+SNMPLIBS = -lnetsnmp -lnetsnmpagent -lfmd_msg
 lint := SNMPLIBS =
 
 LDFLAGS += -L$(ROOT)/usr/lib/fm -R/usr/lib/fm

@@ -165,11 +165,11 @@ struct spa {
 	kmutex_t	spa_suspend_lock;	/* protects suspend_zio_root */
 	kcondvar_t	spa_suspend_cv;		/* notification of resume */
 	uint8_t		spa_suspended;		/* pool is suspended */
-	boolean_t	spa_import_faulted;	/* allow faulted vdevs */
 	boolean_t	spa_is_root;		/* pool is root */
 	int		spa_minref;		/* num refs when first opened */
 	int		spa_mode;		/* FREAD | FWRITE */
 	spa_log_state_t spa_log_state;		/* log state */
+	uint64_t	spa_autoexpand;		/* lun expansion on/off */
 	/*
 	 * spa_refcnt & spa_config_lock must be the last elements
 	 * because refcount_t changes size based on compilation options.

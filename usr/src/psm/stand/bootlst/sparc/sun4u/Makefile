@@ -19,10 +19,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-#ident	"%Z%%M%	%I%	%E% SMI"
 #
 
 TOPDIR =	../../../../..
@@ -60,5 +58,6 @@ include ../../common/Makefile.com
 include $(TOPDIR)/psm/Makefile.psm.64
 CFLAGS64 += -xchip=ultra $(CCABS32)
 
-.KEEP_STATE:
+POST_PROCESS +=	; $(CHK4UBINARY)
 
+.KEEP_STATE:

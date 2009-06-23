@@ -553,6 +553,10 @@ reset:
 		}
 	}
 
+#ifdef FMA_SUPPORT
+reset_fail:
+#endif  /* FMA_SUPPORT */
+
 	/* Timeout occurred */
 	EMLXS_MSGF(EMLXS_CONTEXT, &emlxs_reset_failed_msg,
 	    "Timeout: status=0x%x", status);
@@ -565,6 +569,23 @@ reset:
 
 done:
 
+	/* Initialize hc_copy */
+	hba->hc_copy = READ_CSR_REG(hba, FC_HC_REG(hba, hba->csr_addr));
+
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if ((emlxs_fm_check_acc_handle(hba, hba->pci_acc_handle)
+	    != DDI_FM_OK) ||
+	    (emlxs_fm_check_acc_handle(hba, hba->slim_acc_handle)
+	    != DDI_FM_OK) ||
+	    (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK)) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+		goto reset_fail;
+	}
+#endif  /* FMA_SUPPORT */
+
 	/* Reset the hba structure */
 	hba->flag &= FC_RESET_MASK;
 	bzero(hba->ring_tx_count, sizeof (hba->ring_tx_count));
@@ -576,9 +597,6 @@ done:
 	hba->discovery_timer = 0;
 	hba->linkup_timer = 0;
 	hba->loopback_tics = 0;
-
-	/* Initialize hc_copy */
-	hba->hc_copy = READ_CSR_REG(hba, FC_HC_REG(hba, hba->csr_addr));
 
 	/* Reset the ring objects */
 	for (i = 0; i < MAX_RINGS; i++) {
@@ -1021,11 +1039,11 @@ emlxs_sli4_bde_setup(emlxs_port_t *port, emlxs_buf_t *sbp)
 } /* emlxs_sli4_bde_setup */
 
 
+#ifdef SFCT_SUPPORT
 /* Only used for FCP Data xfers */
 uint32_t
 emlxs_sli2_fct_bde_setup(emlxs_port_t *port, emlxs_buf_t *sbp)
 {
-#ifdef SFCT_SUPPORT
 	emlxs_hba_t *hba = HBA;
 	scsi_task_t *fct_task;
 	MATCHMAP *bmp;
@@ -1119,21 +1137,21 @@ emlxs_sli2_fct_bde_setup(emlxs_port_t *port, emlxs_buf_t *sbp)
 	iocb->ulpBdeCount = 1;
 	iocb->ulpLe = 1;
 	sbp->bmp = bmp;
-#endif /* SFCT_SUPPORT */
 
 	return (0);
 
 }  /* emlxs_sli2_fct_bde_setup */
+#endif /* SFCT_SUPPORT */
 
 
 
 #ifdef SLI3_SUPPORT
 
+#ifdef SFCT_SUPPORT
 /*ARGSUSED*/
 uint32_t
 emlxs_sli3_fct_bde_setup(emlxs_port_t *port, emlxs_buf_t *sbp)
 {
-#ifdef SFCT_SUPPORT
 	scsi_task_t *fct_task;
 	ULP_BDE64 *bde;
 	IOCB *iocb;
@@ -1198,11 +1216,11 @@ emlxs_sli3_fct_bde_setup(emlxs_port_t *port, emlxs_buf_t *sbp)
 
 	iocb->ulpBdeCount = 0;
 	iocb->ulpLe = 0;
-#endif /* SFCT_SUPPORT */
 
 	return (0);
 
 }  /* emlxs_sli3_fct_bde_setup */
+#endif /* SFCT_SUPPORT */
 
 #endif /* SLI3_SUPPORT */
 
@@ -1473,6 +1491,17 @@ sendit:
 		}
 	}
 
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if ((emlxs_fm_check_acc_handle(hba, hba->slim_acc_handle)
+	    != DDI_FM_OK) ||
+	    (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK)) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+	}
+#endif  /* FMA_SUPPORT */
+
 	mutex_exit(&EMLXS_CMD_RING_LOCK(ringno));
 
 	return;
@@ -1515,6 +1544,17 @@ busy:
 	} else {
 		HBASTATS.IocbRingFull[ringno]++;
 	}
+
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if ((emlxs_fm_check_acc_handle(hba, hba->slim_acc_handle)
+	    != DDI_FM_OK) ||
+	    (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK)) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+	}
+#endif  /* FMA_SUPPORT */
 
 	mutex_exit(&EMLXS_CMD_RING_LOCK(ringno));
 
@@ -1765,6 +1805,18 @@ emlxs_sli3_issue_mbox_cmd(emlxs_hba_t *hba, MAILBOX *mb, int32_t flag,
 	WRITE_CSR_REG(hba, FC_CA_REG(hba, hba->csr_addr), CA_MBATT);
 
 	mutex_exit(&EMLXS_PORT_LOCK);
+
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if ((emlxs_fm_check_acc_handle(hba, hba->slim_acc_handle)
+	    != DDI_FM_OK) ||
+	    (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK)) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+		return (MBX_HARDWARE_ERROR);
+	}
+#endif  /* FMA_SUPPORT */
 
 	switch (flag) {
 	case MBX_NOWAIT:
@@ -2616,6 +2668,9 @@ extern uint32_t
 emlxs_sli3_msi_intr(char *arg1, char *arg2)
 {
 	emlxs_hba_t *hba = (emlxs_hba_t *)arg1;
+#ifdef FMA_SUPPORT
+	emlxs_port_t *port = &PPORT;
+#endif	/* FMA_SUPPORT */
 	uint16_t msgid;
 	uint32_t hc_copy;
 	uint32_t ha_copy;
@@ -2706,6 +2761,14 @@ emlxs_sli3_msi_intr(char *arg1, char *arg2)
 		mutex_enter(&EMLXS_PORT_LOCK);
 		WRITE_CSR_REG(hba, FC_HC_REG(hba, hba->csr_addr),
 		    hba->hc_copy);
+#ifdef FMA_SUPPORT
+		/* Access handle validation */
+		if ((emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+		    != DDI_FM_OK)) {
+			EMLXS_MSGF(EMLXS_CONTEXT,
+			    &emlxs_invalid_access_handle_msg, NULL);
+		}
+#endif  /* FMA_SUPPORT */
 		mutex_exit(&EMLXS_PORT_LOCK);
 	}
 
@@ -2780,6 +2843,9 @@ emlxs_sli4_intx_intr(char *arg)
 uint32_t
 emlxs_get_attention(emlxs_hba_t *hba, uint32_t msgid)
 {
+#ifdef FMA_SUPPORT
+	emlxs_port_t *port = &PPORT;
+#endif  /* FMA_SUPPORT */
 	uint32_t ha_copy = 0;
 	uint32_t ha_copy2;
 	uint32_t mask = hba->hc_copy;
@@ -2861,6 +2927,15 @@ read_ha_register:
 		WRITE_CSR_REG(hba, FC_HA_REG(hba, hba->csr_addr), ha_copy2);
 	}
 
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if ((emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK)) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+	}
+#endif  /* FMA_SUPPORT */
+
 	return (ha_copy);
 
 }  /* emlxs_get_attention() */
@@ -2869,6 +2944,10 @@ read_ha_register:
 void
 emlxs_proc_attention(emlxs_hba_t *hba, uint32_t ha_copy)
 {
+#ifdef FMA_SUPPORT
+	emlxs_port_t *port = &PPORT;
+#endif  /* FMA_SUPPORT */
+
 	/* ha_copy should be pre-filtered */
 
 	/*
@@ -2939,6 +3018,17 @@ emlxs_proc_attention(emlxs_hba_t *hba, uint32_t ha_copy)
 
 	/* Set heartbeat flag to show activity */
 	hba->heartbeat_flag = 1;
+
+#ifdef FMA_SUPPORT
+	if (hba->bus_type == SBUS_FC) {
+		/* Access handle validation */
+		if ((emlxs_fm_check_acc_handle(hba, hba->sbus_csr_handle)
+		    != DDI_FM_OK)) {
+			EMLXS_MSGF(EMLXS_CONTEXT,
+			    &emlxs_invalid_access_handle_msg, NULL);
+		}
+	}
+#endif  /* FMA_SUPPORT */
 
 	return;
 
@@ -3018,13 +3108,22 @@ emlxs_handle_ff_error(emlxs_hba_t *hba)
 	emlxs_ffstate_change(hba, FC_ERROR);
 
 	if (status & HS_FFER6) {
-		thread_create(NULL, 0, emlxs_restart_thread, (char *)hba, 0,
-		    &p0, TS_RUN, v.v_maxsyspri - 2);
+		emlxs_thread_spawn(hba, emlxs_restart_thread, NULL, NULL);
 	} else {
 go_shutdown:
-		thread_create(NULL, 0, emlxs_shutdown_thread, (char *)hba, 0,
-		    &p0, TS_RUN, v.v_maxsyspri - 2);
+		emlxs_thread_spawn(hba, emlxs_shutdown_thread, NULL, NULL);
 	}
+
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if ((emlxs_fm_check_acc_handle(hba, hba->slim_acc_handle)
+	    != DDI_FM_OK) ||
+	    (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK)) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+	}
+#endif  /* FMA_SUPPORT */
 
 }  /* emlxs_handle_ff_error() */
 
@@ -3064,6 +3163,15 @@ emlxs_handle_link_event(emlxs_hba_t *hba)
 			 */
 			WRITE_CSR_REG(hba, FC_HA_REG(hba, hba->csr_addr),
 			    HA_LATT);
+
+#ifdef FMA_SUPPORT
+			/* Access handle validation */
+			if ((emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+			    != DDI_FM_OK)) {
+				EMLXS_MSGF(EMLXS_CONTEXT,
+				    &emlxs_invalid_access_handle_msg, NULL);
+			}
+#endif  /* FMA_SUPPORT */
 
 			mutex_exit(&EMLXS_PORT_LOCK);
 		} else {
@@ -3347,6 +3455,14 @@ next:
 			    1) * sizeof (uint32_t)));
 			WRITE_SLIM_ADDR(hba, (volatile uint32_t *)ioa2,
 			    rp->fc_rspidx);
+#ifdef FMA_SUPPORT
+			/* Access handle validation */
+			if ((emlxs_fm_check_acc_handle(hba,
+			    hba->slim_acc_handle) != DDI_FM_OK)) {
+				EMLXS_MSGF(EMLXS_CONTEXT,
+				    &emlxs_invalid_access_handle_msg, NULL);
+			}
+#endif  /* FMA_SUPPORT */
 		}
 
 		if (reg & HA_R0RE_REQ) {
@@ -3358,6 +3474,15 @@ next:
 			chipatt = ((CA_R0ATT | CA_R0RE_RSP) << (ring_no * 4));
 			WRITE_CSR_REG(hba, FC_CA_REG(hba, hba->csr_addr),
 			    chipatt);
+
+#ifdef FMA_SUPPORT
+			/* Access handle validation */
+			if ((emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+			    != DDI_FM_OK)) {
+				EMLXS_MSGF(EMLXS_CONTEXT,
+				    &emlxs_invalid_access_handle_msg, NULL);
+			}
+#endif  /* FMA_SUPPORT */
 
 			mutex_exit(&EMLXS_PORT_LOCK);
 		}
@@ -3549,15 +3674,16 @@ emlxs_handle_rcv_seq(emlxs_hba_t *hba, RING *rp, IOCBQ *iocbq)
 
 	case FC_ELS_RING:
 		/* If this is a target port, then let fct handle this */
-		if (port->tgt_mode) {
-#ifdef SFCT_SUPPORT
-			(void) emlxs_fct_handle_unsol_els(port, rp, iocbq, mp,
-			    size);
-#endif /* SFCT_SUPPORT */
-		} else {
+		if (port->ini_mode) {
 			(void) emlxs_els_handle_unsol_req(port, rp, iocbq, mp,
 			    size);
 		}
+#ifdef SFCT_SUPPORT
+		else if (port->tgt_mode) {
+			(void) emlxs_fct_handle_unsol_els(port, rp, iocbq, mp,
+			    size);
+		}
+#endif /* SFCT_SUPPORT */
 		break;
 
 	case FC_CT_RING:
@@ -3923,6 +4049,17 @@ done:
 
 	emlxs_ffstate_change_locked(hba, FC_KILLED);
 
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if ((emlxs_fm_check_acc_handle(hba, hba->slim_acc_handle)
+	    != DDI_FM_OK) ||
+	    (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK)) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+	}
+#endif  /* FMA_SUPPORT */
+
 	mutex_exit(&EMLXS_PORT_LOCK);
 
 	return (FC_SUCCESS);
@@ -4142,6 +4279,17 @@ emlxs_handle_mb_event(emlxs_hba_t *hba)
 		}
 #endif /* MBOX_EXT_SUPPORT */
 
+#ifdef FMA_SUPPORT
+	if (!(hba->flag & FC_SLIM2_MODE)) {
+		/* Access handle validation */
+		if (emlxs_fm_check_acc_handle(hba, hba->slim_acc_handle)
+		    != DDI_FM_OK) {
+			EMLXS_MSGF(EMLXS_CONTEXT,
+			    &emlxs_invalid_access_handle_msg, NULL);
+		}
+	}
+#endif  /* FMA_SUPPORT */
+
 	/* Now sync the memory buffer if one was used */
 	if (hba->mbox_bp) {
 		mbox_bp = (MATCHMAP *)hba->mbox_bp;
@@ -4319,6 +4467,14 @@ emlxs_handle_mb_event(emlxs_hba_t *hba)
 			hba->hc_copy |= HC_LAINT_ENA;
 			WRITE_CSR_REG(hba, FC_HC_REG(hba, hba->csr_addr),
 			    hba->hc_copy);
+#ifdef FMA_SUPPORT
+			/* Access handle validation */
+			if (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+			    != DDI_FM_OK) {
+				EMLXS_MSGF(EMLXS_CONTEXT,
+				    &emlxs_invalid_access_handle_msg, NULL);
+			}
+#endif  /* FMA_SUPPORT */
 		}
 
 		mutex_exit(&EMLXS_PORT_LOCK);
@@ -4368,6 +4524,16 @@ emlxs_handle_mb_event(emlxs_hba_t *hba)
 				    hba->hc_copy);
 			}
 		}
+
+#ifdef FMA_SUPPORT
+		/* Access handle validation */
+		if (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+		    != DDI_FM_OK) {
+			EMLXS_MSGF(EMLXS_CONTEXT,
+			    &emlxs_invalid_access_handle_msg, NULL);
+		}
+#endif  /* FMA_SUPPORT */
+
 		mutex_exit(&EMLXS_PORT_LOCK);
 
 		break;
@@ -4530,17 +4696,34 @@ emlxs_mb_handle_cmd(emlxs_hba_t *hba, MAILBOX *mb)
 	case MBX_READ_SPARM:	/* a READ SPARAM command completed */
 	case MBX_READ_SPARM64:	/* a READ SPARAM command completed */
 	{
+		uint8_t null_wwn[8];
+
 		if (mp) {
 			bcopy((caddr_t)mp->virt, (caddr_t)&hba->sparam,
 			    sizeof (SERV_PARM));
 
-			bcopy((caddr_t)&hba->sparam.nodeName,
-			    (caddr_t)&hba->wwnn, sizeof (NAME_TYPE));
+			/* Initialize the node name and port name only once */
+			bzero(null_wwn, 8);
+			if ((bcmp((caddr_t)&hba->wwnn,
+			    (caddr_t)null_wwn, 8) == 0) &&
+			    (bcmp((caddr_t)&hba->wwpn,
+			    (caddr_t)null_wwn, 8) == 0)) {
+				bcopy((caddr_t)&hba->sparam.nodeName,
+				    (caddr_t)&hba->wwnn, sizeof (NAME_TYPE));
 
-			bcopy((caddr_t)&hba->sparam.portName,
-			    (caddr_t)&hba->wwpn, sizeof (NAME_TYPE));
+				bcopy((caddr_t)&hba->sparam.portName,
+				    (caddr_t)&hba->wwpn, sizeof (NAME_TYPE));
+			} else {
+				bcopy((caddr_t)&hba->wwnn,
+				    (caddr_t)&hba->sparam.nodeName,
+				    sizeof (NAME_TYPE));
 
-				/* Initialize the physical port */
+				bcopy((caddr_t)&hba->wwpn,
+				    (caddr_t)&hba->sparam.portName,
+				    sizeof (NAME_TYPE));
+			}
+
+			/* Initialize the physical port */
 			bcopy((caddr_t)&hba->sparam,
 			    (caddr_t)&port->sparam, sizeof (SERV_PARM));
 			bcopy((caddr_t)&hba->wwpn, (caddr_t)&port->wwpn,
@@ -4548,7 +4731,7 @@ emlxs_mb_handle_cmd(emlxs_hba_t *hba, MAILBOX *mb)
 			bcopy((caddr_t)&hba->wwnn, (caddr_t)&port->wwnn,
 			    sizeof (NAME_TYPE));
 
-				/* Initialize the virtual ports */
+			/* Initialize the virtual ports */
 			for (i = 1; i < MAX_VPORTS; i++) {
 				vport = &VPORT(i);
 				if (vport->flag & EMLXS_PORT_BOUND) {
@@ -4567,7 +4750,6 @@ emlxs_mb_handle_cmd(emlxs_hba_t *hba, MAILBOX *mb)
 				    (caddr_t)&vport->sparam.portName,
 				    sizeof (NAME_TYPE));
 			}
-
 		}
 		break;
 	}
@@ -4905,10 +5087,9 @@ emlxs_mb_handle_cmd(emlxs_hba_t *hba, MAILBOX *mb)
 
 				/* Check FCoE attention bit */
 				if (la.fa == 1) {
-					thread_create(NULL, 0,
+					emlxs_thread_spawn(hba,
 					    emlxs_fcoe_attention_thread,
-					    (char *)hba, 0, &p0, TS_RUN,
-					    v.v_maxsyspri - 2);
+					    NULL, NULL);
 				}
 			}
 #endif /* MENLO_SUPPORT */
@@ -4961,6 +5142,14 @@ emlxs_mb_handle_cmd(emlxs_hba_t *hba, MAILBOX *mb)
 			hba->hc_copy |= HC_LAINT_ENA;
 			WRITE_CSR_REG(hba, FC_HC_REG(hba, hba->csr_addr),
 			    hba->hc_copy);
+#ifdef FMA_SUPPORT
+			/* Access handle validation */
+			if (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+			    != DDI_FM_OK) {
+				EMLXS_MSGF(EMLXS_CONTEXT,
+				    &emlxs_invalid_access_handle_msg, NULL);
+			}
+#endif  /* FMA_SUPPORT */
 		}
 
 		mutex_exit(&EMLXS_PORT_LOCK);
@@ -4979,6 +5168,14 @@ emlxs_mb_handle_cmd(emlxs_hba_t *hba, MAILBOX *mb)
 			hba->hc_copy |= HC_LAINT_ENA;
 			WRITE_CSR_REG(hba, FC_HC_REG(hba, hba->csr_addr),
 			    hba->hc_copy);
+#ifdef FMA_SUPPORT
+			/* Access handle validation */
+			if (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+			    != DDI_FM_OK) {
+				EMLXS_MSGF(EMLXS_CONTEXT,
+				    &emlxs_invalid_access_handle_msg, NULL);
+			}
+#endif  /* FMA_SUPPORT */
 		}
 
 		if (hba->state >= FC_LINK_UP) {
@@ -5067,6 +5264,14 @@ emlxs_timer_check_mbox(emlxs_hba_t *hba)
 			mb = FC_SLIM1_MAILBOX(hba);
 			word0 =
 			    READ_SLIM_ADDR(hba, ((volatile uint32_t *)mb));
+#ifdef FMA_SUPPORT
+			/* Access handle validation */
+			if (emlxs_fm_check_acc_handle(hba, hba->slim_acc_handle)
+			    != DDI_FM_OK) {
+				EMLXS_MSGF(EMLXS_CONTEXT,
+				    &emlxs_invalid_access_handle_msg, NULL);
+			}
+#endif  /* FMA_SUPPORT */
 		}
 
 		mb = (MAILBOX *)&word0;
@@ -5127,8 +5332,7 @@ emlxs_timer_check_mbox(emlxs_hba_t *hba)
 	emlxs_mb_fini(hba, NULL, MBX_TIMEOUT);
 
 	/* Trigger adapter shutdown */
-	thread_create(NULL, 0, emlxs_shutdown_thread, (char *)hba, 0,
-	    &p0, TS_RUN, v.v_maxsyspri - 2);
+	emlxs_thread_spawn(hba, emlxs_shutdown_thread, NULL, NULL);
 
 	return;
 
@@ -5291,6 +5495,14 @@ emlxs_mb_config_port(emlxs_hba_t *hba, MAILBOX *mb, uint32_t sli_mode,
 		((SLIM2 *)hba->slim2.virt)->pcb.hgpAddrLow =
 		    (uint32_t)(Laddr + hba->hgp_ring_offset);
 
+#ifdef FMA_SUPPORT
+		/* Access handle validation */
+		if (emlxs_fm_check_acc_handle(hba, hba->pci_acc_handle)
+		    != DDI_FM_OK) {
+			EMLXS_MSGF(EMLXS_CONTEXT,
+			    &emlxs_invalid_access_handle_msg, NULL);
+		}
+#endif  /* FMA_SUPPORT */
 	}
 
 	pgp = hba->slim2.phys + (uint64_t)((unsigned long)&(mbox->us.s2.port));
@@ -5441,6 +5653,7 @@ emlxs_hbq_setup(emlxs_hba_t *hba, uint32_t hbq_id)
 			EMLXS_MSGF(EMLXS_CONTEXT, &emlxs_mem_alloc_msg,
 			    "emlxs_hbq_setup: Unable to allocate HBQ buffer. "
 			    "cnt=%d", j);
+			(void) emlxs_mem_put(hba, MEM_MBOX, (uint8_t *)mb);
 			emlxs_hbq_free_all(hba, hbq_id);
 			return (1);
 		}
@@ -5479,6 +5692,17 @@ emlxs_hbq_setup(emlxs_hba_t *hba, uint32_t hbq_id)
 	hba->hbq_count++;
 
 	(void) emlxs_mem_put(hba, MEM_MBOX, (uint8_t *)mb);
+
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if (emlxs_fm_check_acc_handle(hba, hba->slim_acc_handle)
+	    != DDI_FM_OK) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+		emlxs_hbq_free_all(hba, hbq_id);
+		return (1);
+	}
+#endif  /* FMA_SUPPORT */
 
 	return (0);
 
@@ -5555,6 +5779,9 @@ emlxs_hbq_free_all(emlxs_hba_t *hba, uint32_t hbq_id)
 void
 emlxs_update_HBQ_index(emlxs_hba_t *hba, uint32_t hbq_id)
 {
+#ifdef FMA_SUPPORT
+	emlxs_port_t *port = &PPORT;
+#endif  /* FMA_SUPPORT */
 	void *ioa2;
 	uint32_t status;
 	uint32_t HBQ_PortGetIdx;
@@ -5606,6 +5833,15 @@ emlxs_update_HBQ_index(emlxs_hba_t *hba, uint32_t hbq_id)
 	status = hbq->HBQ_PutIdx;
 	WRITE_SLIM_ADDR(hba, (volatile uint32_t *)ioa2, status);
 
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if (emlxs_fm_check_acc_handle(hba, hba->slim_acc_handle)
+	    != DDI_FM_OK) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+	}
+#endif  /* FMA_SUPPORT */
+
 	return;
 
 }  /* emlxs_update_HBQ_index() */
@@ -5614,6 +5850,9 @@ emlxs_update_HBQ_index(emlxs_hba_t *hba, uint32_t hbq_id)
 void
 emlxs_intr_initialize(emlxs_hba_t *hba)
 {
+#ifdef FMA_SUPPORT
+	emlxs_port_t *port = &PPORT;
+#endif  /* FMA_SUPPORT */
 	uint32_t status;
 
 	/* Enable mailbox, error attention interrupts */
@@ -5634,30 +5873,74 @@ emlxs_intr_initialize(emlxs_hba_t *hba)
 
 	hba->hc_copy = status;
 	WRITE_CSR_REG(hba, FC_HC_REG(hba, hba->csr_addr), hba->hc_copy);
+
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+	}
+#endif  /* FMA_SUPPORT */
 }
 
 void
 emlxs_enable_latt(emlxs_hba_t *hba)
 {
+#ifdef FMA_SUPPORT
+	emlxs_port_t *port = &PPORT;
+#endif  /* FMA_SUPPORT */
+
 	mutex_enter(&EMLXS_PORT_LOCK);
 	hba->hc_copy |= HC_LAINT_ENA;
 	WRITE_CSR_REG(hba, FC_HC_REG(hba, hba->csr_addr), hba->hc_copy);
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+	}
+#endif  /* FMA_SUPPORT */
 	mutex_exit(&EMLXS_PORT_LOCK);
 }
 
 void
 emlxs_disable_intr(emlxs_hba_t *hba, uint32_t att)
 {
+#ifdef FMA_SUPPORT
+	emlxs_port_t *port = &PPORT;
+#endif  /* FMA_SUPPORT */
+
 	/* Disable all adapter interrupts */
 	hba->hc_copy = att;
 	WRITE_CSR_REG(hba, FC_HC_REG(hba, hba->csr_addr), hba->hc_copy);
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+	}
+#endif  /* FMA_SUPPORT */
 }
 
 uint32_t
 emlxs_check_attention(emlxs_hba_t *hba)
 {
+#ifdef FMA_SUPPORT
+	emlxs_port_t *port = &PPORT;
+#endif  /* FMA_SUPPORT */
 	uint32_t ha_copy;
 
 	ha_copy = READ_CSR_REG(hba, FC_HA_REG(hba, hba->csr_addr));
+#ifdef FMA_SUPPORT
+	/* Access handle validation */
+	if (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+	}
+#endif  /* FMA_SUPPORT */
 	return (ha_copy);
 }

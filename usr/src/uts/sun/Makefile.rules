@@ -20,10 +20,8 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 # uts/sun/Makefile.rules
 #
@@ -43,20 +41,14 @@
 #	Section 1a: C object build rules
 #
 
-$(OBJS_DIR)/hme.o	:=	CFLAGS += -dalign
 $(OBJS_DIR)/%.o:		$(UTSBASE)/sun/io/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
-$(OBJS_DIR)/%.o:		$(UTSBASE)/sun/io/audio/sada/drv/audiocs/%.c
+$(OBJS_DIR)/%.o:		$(UTSBASE)/sun/io/audio/drv/audiocs/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
-$(OBJS_DIR)/%.o:		$(UTSBASE)/sun/io/audio/sada/drv/audio1575/%.c
-	$(COMPILE.c) -o $@ $<
-	$(CTFCONVERT_O)
-
-$(OBJS_DIR)/eri.o	:=	CFLAGS += -dalign
 $(OBJS_DIR)/%.o:		$(UTSBASE)/sun/io/eri/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
@@ -77,10 +69,6 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/sun/io/dada/targets/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
-$(OBJS_DIR)/esp.o	:=	CFLAGS += -dalign
-$(OBJS_DIR)/fas.o	:=	CFLAGS += -dalign
-$(OBJS_DIR)/fas_callbacks.o :=	CFLAGS += -dalign
-$(OBJS_DIR)/sf.o	:=	CFLAGS += -dalign
 $(OBJS_DIR)/%.o:		$(UTSBASE)/sun/io/scsi/adapters/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
@@ -99,10 +87,7 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/common/io/scsi/adapters/%.c
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/sun/io/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
-$(LINTS_DIR)/%.ln:		$(UTSBASE)/sun/io/audio/sada/drv/audiocs/%.c
-	@($(LHEAD) $(LINT.c) $< $(LTAIL))
-
-$(LINTS_DIR)/%.ln:		$(UTSBASE)/sun/io/audio/sada/drv/audio1575/%.c
+$(LINTS_DIR)/%.ln:		$(UTSBASE)/sun/io/audio/drv/audiocs/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/sun/io/eri/%.c

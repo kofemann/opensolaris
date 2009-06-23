@@ -23,18 +23,23 @@
  *	  All Rights Reserved
  *
  *
- * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_DUMP_H
 #define	_DUMP_H
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include	<sys/elf.h>
 #include	<sys/machelf.h>
 #include	<gelf.h>
+
+/*
+ * DUMP_CONVFMT defines the libconv formatting options we want to use:
+ *	- Unknown items to be printed as integers using decimal formatting
+ *	- The "Dump Style" versions of strings.
+ */
+#define	DUMP_CONVFMT (CONV_FMT_DECIMAL|CONV_FMT_ALT_DUMP)
 
 #define	DATESIZE 60
 

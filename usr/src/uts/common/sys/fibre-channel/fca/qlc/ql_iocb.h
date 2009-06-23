@@ -1276,7 +1276,8 @@ typedef struct vp_modify_entry {
 	uint8_t  reserved_3[2];
 	uint8_t  second_port_name[8];
 	uint8_t  second_node_name[8];
-	uint8_t  reserved_4[8];
+	uint8_t  reserved_4[6];
+	uint16_t fcf_index;
 } vp_modify_entry_t;
 
 /*
@@ -1302,7 +1303,8 @@ typedef struct vp_control_entry {
 	uint8_t  vp_count;
 	uint8_t  vp_count_h;
 	uint8_t  vp_index[16];
-	uint8_t  reserved[32];
+	uint8_t  reserved[30];
+	uint16_t fcf_index;
 } vp_control_entry_t;
 
 /*
@@ -1310,8 +1312,9 @@ typedef struct vp_control_entry {
  */
 #define	VPC_ENABLE		0x0
 #define	VPC_DISABLE		0x8
-#define	VPC_DISABLE_INIT	0x9
+#define	VPC_DISABLE_INIT	0x9	/* Only 2400 & 2500 */
 #define	VPC_DISABLE_LOGOUT	0xa
+#define	VPC_DISABLE_LOGOUT_ALL	0xb
 
 /*
  * ISP2400 queue - Report ID Acquisition IOCB structure definition.
@@ -1432,21 +1435,16 @@ typedef union ql_mbx_iocb {
  * Global Function Prototypes in ql_iocb.c source file.
  */
 void ql_start_iocb(ql_adapter_state_t *, ql_srb_t *);
-int ql_req_pkt(ql_adapter_state_t *, request_t **);
 void ql_isp_cmd(ql_adapter_state_t *);
 int ql_marker(ql_adapter_state_t *, uint16_t, uint16_t, uint8_t);
 void ql_isp_rcvbuf(ql_adapter_state_t *);
-int ql_modify_lun(ql_adapter_state_t *);
-void ql_notify_acknowledge_iocb(ql_adapter_state_t *, tgt_cmd_t *,
-    notify_acknowledge_entry_t *);
 void ql_command_iocb(ql_adapter_state_t *, ql_srb_t *, void *);
 void ql_ms_iocb(ql_adapter_state_t *, ql_srb_t *, void *);
 void ql_ip_iocb(ql_adapter_state_t *, ql_srb_t *, void *);
-void ql_continue_target_io_iocb(ql_adapter_state_t *, ql_srb_t *, void *);
 void ql_command_24xx_iocb(ql_adapter_state_t *, ql_srb_t *, void *);
 void ql_ms_24xx_iocb(ql_adapter_state_t *, ql_srb_t *, void *);
 void ql_ip_24xx_iocb(ql_adapter_state_t *, ql_srb_t *, void *);
-void ql_continue_target_io_2400_iocb(ql_adapter_state_t *, ql_srb_t *, void *);
+void ql_els_24xx_iocb(ql_adapter_state_t *, ql_srb_t *, void *);
 
 #ifdef	__cplusplus
 }

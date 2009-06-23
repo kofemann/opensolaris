@@ -59,15 +59,12 @@ static int iscsid_copyto_param_set(uint32_t param_id,
     iscsi_login_params_t *params, iscsi_param_set_t *ipsp);
 static void iscsid_add_pg_list_to_cache(iscsi_hba_t *ihp,
     isns_portal_group_list_t *pg_list);
-static void iscsid_set_default_initiator_node_settings(iscsi_hba_t *ihp);
 static void iscsid_remove_target_param(char *name);
 static boolean_t iscsid_add(iscsi_hba_t *ihp, iSCSIDiscoveryMethod_t method,
     struct sockaddr *addr_dsc, char *target_name, int tpgt,
     struct sockaddr *addr_tgt);
 static void iscsi_discovery_event(iscsi_hba_t *ihp,
     iSCSIDiscoveryMethod_t m, boolean_t start);
-static void iscsi_send_sysevent(iscsi_hba_t *ihp,
-    char *subclass, nvlist_t *np);
 static boolean_t iscsid_boot_init_config(iscsi_hba_t *ihp);
 static iscsi_sess_t *iscsi_add_boot_sess(iscsi_hba_t *ihp, int isid);
 static boolean_t iscsid_make_entry(ib_boot_prop_t *boot_prop_entry,
@@ -1441,7 +1438,7 @@ iscsid_init_config(iscsi_hba_t *ihp)
 		 * a default initiator name so that the initiator can
 		 * be brought up properly.
 		 */
-		iscsid_set_default_initiator_node_settings(ihp);
+		iscsid_set_default_initiator_node_settings(ihp, B_FALSE);
 		(void) strncpy(initiatorName, (const char *)ihp->hba_name,
 		    ISCSI_MAX_NAME_LEN);
 	}
@@ -1905,8 +1902,8 @@ iscsid_add_pg_list_to_cache(iscsi_hba_t *ihp,
  * unique if the NIC is moved between hosts.  The alias
  * is just the hostname.
  */
-static void
-iscsid_set_default_initiator_node_settings(iscsi_hba_t *ihp)
+void
+iscsid_set_default_initiator_node_settings(iscsi_hba_t *ihp, boolean_t minimal)
 {
 	int		    i;
 	time_t		    x;
@@ -1941,10 +1938,17 @@ iscsid_set_default_initiator_node_settings(iscsi_hba_t *ihp)
 			(void) strncpy((char *)ihp->hba_alias,
 			    utsname.nodename, ISCSI_MAX_NAME_LEN);
 			ihp->hba_alias_length = strlen((char *)ihp->hba_alias);
-			(void) persistent_alias_name_set(
-			    (char *)ihp->hba_alias);
+			if (minimal == B_FALSE) {
+				(void) persistent_alias_name_set(
+				    (char *)ihp->hba_alias);
+			}
 		}
 	}
+
+	if (minimal == B_TRUE) {
+		return;
+	}
+
 	(void) persistent_initiator_name_set((char *)ihp->hba_name);
 
 	/* Set default initiator-node CHAP settings */
@@ -2082,16 +2086,20 @@ iscsi_discovery_event(iscsi_hba_t *ihp, iSCSIDiscoveryMethod_t m,
 		break;
 	}
 	mutex_exit(&ihp->hba_discovery_events_mutex);
-	iscsi_send_sysevent(ihp, subclass, NULL);
+	iscsi_send_sysevent(ihp, EC_ISCSI, subclass, NULL);
 }
 
 /*
- * iscsi_send_sysevent -- send sysevent using iscsi class
+ * iscsi_send_sysevent -- send sysevent using specified class
  */
-static void
-iscsi_send_sysevent(iscsi_hba_t *ihp, char *subclass, nvlist_t *np)
+void
+iscsi_send_sysevent(
+    iscsi_hba_t	*ihp,
+    char	*eventclass,
+    char	*subclass,
+    nvlist_t	*np)
 {
-	(void) ddi_log_sysevent(ihp->hba_dip, DDI_VENDOR_SUNW, EC_ISCSI,
+	(void) ddi_log_sysevent(ihp->hba_dip, DDI_VENDOR_SUNW, eventclass,
 	    subclass, np, NULL, DDI_SLEEP);
 }
 
@@ -2307,11 +2315,13 @@ iscsid_thread_boot_wd(iscsi_thread_t *thread, void *p)
 			}
 			if ((ihp->hba_persistent_loaded == B_TRUE) &&
 			    (reconfigured == B_FALSE)) {
-				(void) iscsi_reconfig_boot_sess(ihp);
-				iscsid_poke_discovery(ihp,
-				    iSCSIDiscoveryMethodUnknown);
-				(void) iscsid_login_tgt(ihp, NULL,
-				    iSCSIDiscoveryMethodUnknown, NULL);
+				if (iscsi_chk_bootlun_mpxio(ihp) == B_TRUE) {
+					(void) iscsi_reconfig_boot_sess(ihp);
+					iscsid_poke_discovery(ihp,
+					    iSCSIDiscoveryMethodUnknown);
+					(void) iscsid_login_tgt(ihp, NULL,
+					    iSCSIDiscoveryMethodUnknown, NULL);
+				}
 				reconfigured = B_TRUE;
 			}
 			break;

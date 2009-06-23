@@ -60,15 +60,6 @@ typedef struct softmac_lower_s {
 	softmac_lower_rxinfo_t	*sl_rxinfo;
 
 	/*
-	 * sl_ctl_inprogress is used to serialize the control path.  It will
-	 * be set when either an ioctl or an M_{PC,}PROTO message is received
-	 * from the upper layer, and will be cleared when processing done.
-	 */
-	kmutex_t		sl_ctl_mutex;
-	kcondvar_t		sl_ctl_cv;
-	boolean_t		sl_ctl_inprogress;
-
-	/*
 	 * When a control message is processed, either sl_pending_prim or
 	 * sl_pending_ioctl will be set.  They will be cleared when the
 	 * acknowledgement of the specific control message is received
@@ -332,6 +323,12 @@ typedef struct softmac_upper_s {
 	 * Whether this stream is already scheduled in softmac_taskq_list.
 	 */
 	boolean_t		su_taskq_scheduled;	/* softmac_taskq_lock */
+
+	/*
+	 * The DLD_CAPAB_DIRECT related notify callback.
+	 */
+	mac_tx_notify_t		su_tx_notify_func;	/* su_mutex */
+	void			*su_tx_notify_arg;	/* su_mutex */
 } softmac_upper_t;
 
 #define	SOFTMAC_EQ_PENDING(sup, mp) {					\

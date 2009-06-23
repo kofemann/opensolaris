@@ -113,6 +113,7 @@ struct vdev {
 	uint64_t	vdev_guid;	/* unique ID for this vdev	*/
 	uint64_t	vdev_guid_sum;	/* self guid + all child guids	*/
 	uint64_t	vdev_asize;	/* allocatable device capacity	*/
+	uint64_t	vdev_min_asize;	/* min acceptable asize		*/
 	uint64_t	vdev_ashift;	/* block alignment shift	*/
 	uint64_t	vdev_state;	/* see VDEV_STATE_* #defines	*/
 	uint64_t	vdev_prevstate;	/* used when reopening a vdev	*/
@@ -125,6 +126,7 @@ struct vdev {
 	uint64_t	vdev_children;	/* number of children		*/
 	space_map_t	vdev_dtl[DTL_TYPES]; /* in-core dirty time logs	*/
 	vdev_stat_t	vdev_stat;	/* virtual device statistics	*/
+	boolean_t	vdev_expanding;	/* expand the vdev?		*/
 
 	/*
 	 * Top-level vdev state.
@@ -159,6 +161,7 @@ struct vdev {
 	char		*vdev_path;	/* vdev path (if any)		*/
 	char		*vdev_devid;	/* vdev devid (if any)		*/
 	char		*vdev_physpath;	/* vdev device path (if any)	*/
+	char		*vdev_fru;	/* physical FRU location	*/
 	uint64_t	vdev_not_present; /* not present during import	*/
 	uint64_t	vdev_unspare;	/* unspare when resilvering done */
 	hrtime_t	vdev_last_try;	/* last reopen time		*/
@@ -238,6 +241,7 @@ typedef struct vdev_label {
 #define	VDEV_ALLOC_ADD		1
 #define	VDEV_ALLOC_SPARE	2
 #define	VDEV_ALLOC_L2CACHE	3
+#define	VDEV_ALLOC_ROOTPOOL	4
 
 /*
  * Allocate or free a vdev
@@ -258,6 +262,7 @@ extern void vdev_remove_parent(vdev_t *cvd);
 /*
  * vdev sync load and sync
  */
+extern void vdev_load_log_state(vdev_t *vd, nvlist_t *nv);
 extern void vdev_load(vdev_t *vd);
 extern void vdev_sync(vdev_t *vd, uint64_t txg);
 extern void vdev_sync_done(vdev_t *vd, uint64_t txg);
@@ -279,7 +284,8 @@ extern vdev_ops_t vdev_spare_ops;
  * Common size functions
  */
 extern uint64_t vdev_default_asize(vdev_t *vd, uint64_t psize);
-extern uint64_t vdev_get_rsize(vdev_t *vd);
+extern uint64_t vdev_get_min_asize(vdev_t *vd);
+extern void vdev_set_min_asize(vdev_t *vd);
 
 /*
  * zdb uses this tunable, so it must be declared here to make lint happy.

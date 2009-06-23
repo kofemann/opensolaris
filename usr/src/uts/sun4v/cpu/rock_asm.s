@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -32,23 +32,8 @@
 #include <sys/fsr.h>		/* FPRS_FEF, FPRS_DU */
 #include <vm/hat_sfmmu.h>	/* TSBTAG_INVALID */
 
-#define	TRANS_RETRY_COUNT	3
-
-/*
- * XXX Delete this comment and these #undef's when the corresponding
- * Makefile.workarounds lines are deleted.
- * XXX
- *
- * Transactional instructions are used here regardless of what's in
- * Makefile.workarounds.
- */
-#undef	chkpt
-#undef	commit
-
-
 #if defined(lint)
-
-#include <sys/mutex.h>
+#include <sys/types.h>
 
 void
 cpu_smt_pause(void)
@@ -129,23 +114,42 @@ void
 cpu_inv_tsb(caddr_t tsb_base, uint_t tsb_bytes)
 {}
 
+void
+cpu_atomic_delay(void)
+{}
+
+void
+rock_mutex_delay(void)
+{}
 #else	/* lint */
 
-/* XXX TODO XXX
- * When we get real hardware, we need to do performance tuning on this.
- * Does it help?  Does it ever hurt?  How many membar's should we have here?
+/*
+ * Called from various spin loops to prevent this strand from
+ * stealing too many cycles from its sibling, who is presumably
+ * doing useful work.
+ *
+ * With a 2.1 GHz clock, 100 membar #Halt instructions plus
+ * the call/return overhead will take approximately 500 nanoseconds.
+ * That is a suitable time for a PAUSE, as it is roughly equal to
+ * two memory accesses.
  */
-	/*
-	 * Called from various spin loops to prevent this strand from
-	 * stealing too many cycles from its sibling, who is presumably
-	 * doing useful work.
-	 */
 	ENTRY_NP(cpu_smt_pause)
+	mov	10, %o0
+1:	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	subcc	%o0, 1, %o0
+	bg,pt	%xcc, 1b
 	membar	#Halt
 	retl
-	nop
+	membar	#Halt
 	SET_SIZE(cpu_smt_pause)
-
 
 /*
  * fp_zero() - clear all fp data registers and the fsr
@@ -436,4 +440,47 @@ fp_zero_zero:
 	restore
 	SET_SIZE(cpu_inv_tsb)
 
+/*
+ * This is CPU specific delay routine for atomic backoff.
+ * It is used in case of Rock CPU. The rd instruction uses
+ * less resources than casx on these CPUs.
+ */
+	.align	32
+	ENTRY(cpu_atomic_delay)
+	rd	%ccr, %g0
+	rd	%ccr, %g0
+	retl
+	rd	%ccr, %g0
+	SET_SIZE(cpu_atomic_delay)
+
+/*
+ * Delay to last ~100 nano seconds on a 2.1 GHz. Membars
+ * should be linear and not in a loop to avoid impact
+ * on the sibling strand (BR pipeline is shared by
+ * two sibling strands).
+ */
+	.align	64
+	ENTRY(rock_mutex_delay)
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	membar	#Halt
+	retl
+	membar	#Halt
+	SET_SIZE(rock_mutex_delay)
 #endif /* lint */

@@ -747,7 +747,6 @@ f none usr/include/sys/cpr.h 644 root bin
 f none usr/include/sys/cpu.h 644 root bin
 f none usr/include/sys/cpupart.h 644 root bin
 f none usr/include/sys/cpuvar.h 644 root bin
-f none usr/include/sys/cpu_pm.h 644 root bin
 f none usr/include/sys/crc32.h 644 root bin
 f none usr/include/sys/cred.h 644 root bin
 f none usr/include/sys/cred_impl.h 644 root bin
@@ -1269,7 +1268,6 @@ f none usr/include/sys/socket_impl.h 644 root bin
 f none usr/include/sys/socketvar.h 644 root bin
 f none usr/include/sys/sockio.h 644 root bin
 f none usr/include/sys/socket_proto.h 644 root bin
-f none usr/include/sys/sodirect.h 644 root bin
 f none usr/include/sys/sservice.h 644 root bin
 f none usr/include/sys/squeue.h 644 root bin
 f none usr/include/sys/squeue_impl.h 644 root bin

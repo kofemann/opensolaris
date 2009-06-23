@@ -54,7 +54,7 @@
  * in6addr_any is currently all zeroes, but use the macro in case this
  * ever changes.
  */
-const struct in6_addr in6addr_any = IN6ADDR_ANY_INIT;
+static const struct in6_addr in6addr_any = IN6ADDR_ANY_INIT;
 
 static void idm_sorx_cache_pdu_cb(idm_pdu_t *pdu, idm_status_t status);
 static void idm_sorx_addl_pdu_cb(idm_pdu_t *pdu, idm_status_t status);
@@ -167,6 +167,10 @@ idm_so_init(idm_transport_t *it)
 	    sizeof (idm_pdu_t) + IDM_SORX_CACHE_HDRLEN, 8,
 	    &idm_sorx_pdu_constructor, NULL, NULL, NULL, NULL, KM_SLEEP);
 
+	/* 128k buffer cache */
+	idm.idm_so_128k_buf_cache = kmem_cache_create("idm_128k_buf_cache",
+	    IDM_SO_BUF_CACHE_UB, 8, NULL, NULL, NULL, NULL, NULL, KM_SLEEP);
+
 	/* Set the sockets transport ops */
 	it->it_ops = &idm_so_transport_ops;
 }
@@ -178,6 +182,7 @@ idm_so_init(idm_transport_t *it)
 void
 idm_so_fini(void)
 {
+	kmem_cache_destroy(idm.idm_so_128k_buf_cache);
 	kmem_cache_destroy(idm.idm_sotx_pdu_cache);
 	kmem_cache_destroy(idm.idm_sorx_pdu_cache);
 }
@@ -218,6 +223,104 @@ void
 idm_sodestroy(ksocket_t ks)
 {
 	(void) ksocket_close(ks, CRED());
+}
+
+/*
+ * Function to compare two addresses in sockaddr_storage format
+ */
+
+int
+idm_ss_compare(const struct sockaddr_storage *cmp_ss1,
+    const struct sockaddr_storage *cmp_ss2,
+    boolean_t v4_mapped_as_v4)
+{
+	struct sockaddr_storage			mapped_v4_ss1, mapped_v4_ss2;
+	const struct sockaddr_storage		*ss1, *ss2;
+	struct in_addr				*in1, *in2;
+	struct in6_addr				*in61, *in62;
+	int i;
+
+	/*
+	 * Normalize V4-mapped IPv6 addresses into V4 format if
+	 * v4_mapped_as_v4 is B_TRUE.
+	 */
+	ss1 = cmp_ss1;
+	ss2 = cmp_ss2;
+	if (v4_mapped_as_v4 && (ss1->ss_family == AF_INET6)) {
+		in61 = &((struct sockaddr_in6 *)ss1)->sin6_addr;
+		if (IN6_IS_ADDR_V4MAPPED(in61)) {
+			bzero(&mapped_v4_ss1, sizeof (mapped_v4_ss1));
+			mapped_v4_ss1.ss_family = AF_INET;
+			((struct sockaddr_in *)&mapped_v4_ss1)->sin_port =
+			    ((struct sockaddr_in *)ss1)->sin_port;
+			IN6_V4MAPPED_TO_INADDR(in61,
+			    &((struct sockaddr_in *)&mapped_v4_ss1)->sin_addr);
+			ss1 = &mapped_v4_ss1;
+		}
+	}
+	ss2 = cmp_ss2;
+	if (v4_mapped_as_v4 && (ss2->ss_family == AF_INET6)) {
+		in62 = &((struct sockaddr_in6 *)ss2)->sin6_addr;
+		if (IN6_IS_ADDR_V4MAPPED(in62)) {
+			bzero(&mapped_v4_ss2, sizeof (mapped_v4_ss2));
+			mapped_v4_ss2.ss_family = AF_INET;
+			((struct sockaddr_in *)&mapped_v4_ss2)->sin_port =
+			    ((struct sockaddr_in *)ss2)->sin_port;
+			IN6_V4MAPPED_TO_INADDR(in62,
+			    &((struct sockaddr_in *)&mapped_v4_ss2)->sin_addr);
+			ss2 = &mapped_v4_ss2;
+		}
+	}
+
+	/*
+	 * Compare ports, then address family, then ip address
+	 */
+	if (((struct sockaddr_in *)ss1)->sin_port !=
+	    ((struct sockaddr_in *)ss2)->sin_port) {
+		if (((struct sockaddr_in *)ss1)->sin_port >
+		    ((struct sockaddr_in *)ss2)->sin_port)
+			return (1);
+		else
+			return (-1);
+	}
+
+	/*
+	 * ports are the same
+	 */
+	if (ss1->ss_family != ss2->ss_family) {
+		if (ss1->ss_family == AF_INET)
+			return (1);
+		else
+			return (-1);
+	}
+
+	/*
+	 * address families are the same
+	 */
+	if (ss1->ss_family == AF_INET) {
+		in1 = &((struct sockaddr_in *)ss1)->sin_addr;
+		in2 = &((struct sockaddr_in *)ss2)->sin_addr;
+
+		if (in1->s_addr > in2->s_addr)
+			return (1);
+		else if (in1->s_addr < in2->s_addr)
+			return (-1);
+		else
+			return (0);
+	} else if (ss1->ss_family == AF_INET6) {
+		in61 = &((struct sockaddr_in6 *)ss1)->sin6_addr;
+		in62 = &((struct sockaddr_in6 *)ss2)->sin6_addr;
+
+		for (i = 0; i < 4; i++) {
+			if (in61->s6_addr32[i] > in62->s6_addr32[i])
+				return (1);
+			else if (in61->s6_addr32[i] < in62->s6_addr32[i])
+				return (-1);
+		}
+		return (0);
+	}
+
+	return (1);
 }
 
 /*
@@ -1153,6 +1256,12 @@ idm_so_free_task_rsrc(idm_task_t *idt)
 			/*
 			 * idm_buf_rx_from_ini_done releases idt->idt_mutex
 			 */
+			DTRACE_ISCSI_8(xfer__done, idm_conn_t *, idt->idt_ic,
+			    uintptr_t, idb->idb_buf,
+			    uint32_t, idb->idb_bufoffset,
+			    uint64_t, 0, uint32_t, 0, uint32_t, 0,
+			    uint32_t, idb->idb_xfer_len,
+			    int, XFER_BUF_RX_FROM_INI);
 			idm_buf_rx_from_ini_done(idt, idb, IDM_STATUS_ABORTED);
 			mutex_enter(&idt->idt_mutex);
 		}
@@ -1170,6 +1279,12 @@ idm_so_free_task_rsrc(idm_task_t *idt)
 			/*
 			 * idm_buf_tx_to_ini_done releases idt->idt_mutex
 			 */
+			DTRACE_ISCSI_8(xfer__done, idm_conn_t *, idt->idt_ic,
+			    uintptr_t, idb->idb_buf,
+			    uint32_t, idb->idb_bufoffset,
+			    uint64_t, 0, uint32_t, 0, uint32_t, 0,
+			    uint32_t, idb->idb_xfer_len,
+			    int, XFER_BUF_TX_TO_INI);
 			idm_buf_tx_to_ini_done(idt, idb, IDM_STATUS_ABORTED);
 			mutex_enter(&idt->idt_mutex);
 		}
@@ -1463,6 +1578,11 @@ idm_so_rx_dataout(idm_conn_t *ic, idm_pdu_t *pdu)
 		/*
 		 * idm_buf_rx_from_ini_done releases idt->idt_mutex
 		 */
+		DTRACE_ISCSI_8(xfer__done, idm_conn_t *, idt->idt_ic,
+		    uintptr_t, idb->idb_buf, uint32_t, idb->idb_bufoffset,
+		    uint64_t, 0, uint32_t, 0, uint32_t, 0,
+		    uint32_t, idb->idb_xfer_len,
+		    int, XFER_BUF_RX_FROM_INI);
 		idm_buf_rx_from_ini_done(idt, idb, IDM_STATUS_SUCCESS);
 		idm_pdu_complete(pdu, IDM_STATUS_SUCCESS);
 		return;
@@ -2061,12 +2181,22 @@ idm_so_buf_tx_to_ini(idm_task_t *idt, idm_buf_t *idb)
 	 */
 	mutex_enter(&so_conn->ic_tx_mutex);
 
+	DTRACE_ISCSI_8(xfer__start, idm_conn_t *, idt->idt_ic,
+	    uintptr_t, idb->idb_buf, uint32_t, idb->idb_bufoffset,
+	    uint64_t, 0, uint32_t, 0, uint32_t, 0,
+	    uint32_t, idb->idb_xfer_len, int, XFER_BUF_TX_TO_INI);
+
 	if (!so_conn->ic_tx_thread_running) {
 		mutex_exit(&so_conn->ic_tx_mutex);
 		/*
 		 * Don't release idt->idt_mutex since we're supposed to hold
 		 * in when calling idm_buf_tx_to_ini_done
 		 */
+		DTRACE_ISCSI_8(xfer__done, idm_conn_t *, idt->idt_ic,
+		    uintptr_t, idb->idb_buf, uint32_t, idb->idb_bufoffset,
+		    uint64_t, 0, uint32_t, 0, uint32_t, 0,
+		    uint32_t, idb->idb_xfer_len,
+		    int, XFER_BUF_TX_TO_INI);
 		idm_buf_tx_to_ini_done(idt, idb, IDM_STATUS_ABORTED);
 		return (IDM_STATUS_FAIL);
 	}
@@ -2115,6 +2245,11 @@ idm_so_buf_rx_from_ini(idm_task_t *idt, idm_buf_t *idb)
 
 	ASSERT(mutex_owned(&idt->idt_mutex));
 
+	DTRACE_ISCSI_8(xfer__start, idm_conn_t *, idt->idt_ic,
+	    uintptr_t, idb->idb_buf, uint32_t, idb->idb_bufoffset,
+	    uint64_t, 0, uint32_t, 0, uint32_t, 0,
+	    uint32_t, idb->idb_xfer_len, int, XFER_BUF_RX_FROM_INI);
+
 	pdu = kmem_cache_alloc(idm.idm_sotx_pdu_cache, KM_SLEEP);
 	pdu->isp_ic = idt->idt_ic;
 	bzero(pdu->isp_hdr, sizeof (iscsi_rtt_hdr_t));
@@ -2146,12 +2281,21 @@ idm_so_buf_rx_from_ini(idm_task_t *idt, idm_buf_t *idb)
 static idm_status_t
 idm_so_buf_alloc(idm_buf_t *idb, uint64_t buflen)
 {
-	idb->idb_buf = kmem_alloc(buflen, KM_NOSLEEP);
+	if ((buflen > IDM_SO_BUF_CACHE_LB) && (buflen <= IDM_SO_BUF_CACHE_UB)) {
+		idb->idb_buf = kmem_cache_alloc(idm.idm_so_128k_buf_cache,
+		    KM_NOSLEEP);
+		idb->idb_buf_private = idm.idm_so_128k_buf_cache;
+	} else {
+		idb->idb_buf = kmem_alloc(buflen, KM_NOSLEEP);
+		idb->idb_buf_private = NULL;
+	}
+
 	if (idb->idb_buf == NULL) {
 		IDM_CONN_LOG(CE_NOTE,
 		    "idm_so_buf_alloc: failed buffer allocation");
 		return (IDM_STATUS_FAIL);
 	}
+
 	return (IDM_STATUS_SUCCESS);
 }
 
@@ -2175,7 +2319,11 @@ idm_so_buf_teardown(idm_buf_t *idb)
 static void
 idm_so_buf_free(idm_buf_t *idb)
 {
-	kmem_free(idb->idb_buf, idb->idb_buflen);
+	if (idb->idb_buf_private == NULL) {
+		kmem_free(idb->idb_buf, idb->idb_buflen);
+	} else {
+		kmem_cache_free(idb->idb_buf_private, idb->idb_buf);
+	}
 }
 
 static void
@@ -2326,6 +2474,13 @@ idm_so_send_buf_region(idm_task_t *idt, idm_buf_t *idb,
 			bhs->flags = ISCSI_FLAG_FINAL; /* F bit set to 1 */
 		}
 
+		/* Instrument the data-send DTrace probe. */
+		if (IDM_PDU_OPCODE(pdu) == ISCSI_OP_SCSI_DATA_RSP) {
+			DTRACE_ISCSI_2(data__send,
+			    idm_conn_t *, idt->idt_ic,
+			    iscsi_data_rsp_hdr_t *,
+			    (iscsi_data_rsp_hdr_t *)pdu->isp_hdr);
+		}
 		/* setup data */
 		pdu->isp_data	=  (uint8_t *)idb->idb_buf + data_offset;
 		pdu->isp_datalen = (uint_t)chunk;
@@ -2501,6 +2656,13 @@ idm_sotx_thread(void *arg)
 				 * idm_buf_tx_to_ini_done releases
 				 * idt->idt_mutex
 				 */
+				DTRACE_ISCSI_8(xfer__done,
+				    idm_conn_t *, idt->idt_ic,
+				    uintptr_t, idb->idb_buf,
+				    uint32_t, idb->idb_bufoffset,
+				    uint64_t, 0, uint32_t, 0, uint32_t, 0,
+				    uint32_t, idb->idb_xfer_len,
+				    int, XFER_BUF_TX_TO_INI);
 				idm_buf_tx_to_ini_done(idt, idb, status);
 			} else {
 				idm_so_send_rtt_data_done(idt, idb);
@@ -2556,6 +2718,13 @@ tx_bail:
 				 * idm_buf_tx_to_ini_done releases
 				 * idt->idt_mutex
 				 */
+				DTRACE_ISCSI_8(xfer__done,
+				    idm_conn_t *, idt->idt_ic,
+				    uintptr_t, idb->idb_buf,
+				    uint32_t, idb->idb_bufoffset,
+				    uint64_t, 0, uint32_t, 0, uint32_t, 0,
+				    uint32_t, idb->idb_xfer_len,
+				    int, XFER_BUF_TX_TO_INI);
 				idm_buf_tx_to_ini_done(idt, idb,
 				    IDM_STATUS_ABORTED);
 			} else {

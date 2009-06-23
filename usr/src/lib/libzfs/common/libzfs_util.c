@@ -210,6 +210,9 @@ libzfs_error_description(libzfs_handle_t *hdl)
 	case EZFS_ACTIVE_SPARE:
 		return (dgettext(TEXT_DOMAIN, "pool has active shared spare "
 		    "device"));
+	case EZFS_UNPLAYED_LOGS:
+		return (dgettext(TEXT_DOMAIN, "log device has unplayed intent "
+		    "logs"));
 	case EZFS_UNKNOWN:
 		return (dgettext(TEXT_DOMAIN, "unknown error"));
 	default:
@@ -1221,7 +1224,7 @@ addlist(libzfs_handle_t *hdl, char *propname, zprop_list_t **listp,
 	 * dataset property,
 	 */
 	if (prop == ZPROP_INVAL && (type == ZFS_TYPE_POOL ||
-	    !zfs_prop_user(propname))) {
+	    (!zfs_prop_user(propname) && !zfs_prop_userquota(propname)))) {
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 		    "invalid property '%s'"), propname);
 		return (zfs_error(hdl, EZFS_BADPROP,

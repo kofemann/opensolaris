@@ -71,6 +71,10 @@ static int vnet_m_promisc(void *, boolean_t);
 static int vnet_m_multicst(void *, boolean_t, const uint8_t *);
 static int vnet_m_unicst(void *, const uint8_t *);
 mblk_t *vnet_m_tx(void *, mblk_t *);
+static void vnet_m_ioctl(void *arg, queue_t *q, mblk_t *mp);
+#ifdef	VNET_IOC_DEBUG
+static void vnet_force_link_state(vnet_t *vnetp, queue_t *q, mblk_t *mp);
+#endif
 
 /* vnet internal functions */
 static int vnet_unattach(vnet_t *vnetp);
@@ -94,7 +98,11 @@ static void vnet_stop_resources(vnet_t *vnetp);
 static void vnet_dispatch_res_task(vnet_t *vnetp);
 static void vnet_res_start_task(void *arg);
 static void vnet_handle_res_err(vio_net_handle_t vrh, vio_net_err_val_t err);
+
+/* Exported to vnet_gen */
 int vnet_mtu_update(vnet_t *vnetp, uint32_t mtu);
+void vnet_link_update(vnet_t *vnetp, link_state_t link_state);
+void vnet_dds_cleanup_hio(vnet_t *vnetp);
 
 static kstat_t *vnet_hio_setup_kstats(char *ks_mod, char *ks_name,
     vnet_res_t *vresp);
@@ -121,6 +129,7 @@ extern int vdds_init(vnet_t *vnetp);
 extern void vdds_cleanup(vnet_t *vnetp);
 extern void vdds_process_dds_msg(vnet_t *vnetp, vio_dds_msg_t *dmsg);
 extern void vdds_cleanup_hybrid_res(void *arg);
+extern void vdds_cleanup_hio(vnet_t *vnetp);
 
 #define	DRV_NAME	"vnet"
 #define	VNET_FDBE_REFHOLD(p)						\
@@ -135,8 +144,14 @@ extern void vdds_cleanup_hybrid_res(void *arg);
 	atomic_dec_32(&(p)->refcnt);					\
 }
 
+#ifdef	VNET_IOC_DEBUG
+#define	VNET_M_CALLBACK_FLAGS	(MC_IOCTL)
+#else
+#define	VNET_M_CALLBACK_FLAGS	(0)
+#endif
+
 static mac_callbacks_t vnet_m_callbacks = {
-	0,
+	VNET_M_CALLBACK_FLAGS,
 	vnet_m_stat,
 	vnet_m_start,
 	vnet_m_stop,
@@ -144,7 +159,7 @@ static mac_callbacks_t vnet_m_callbacks = {
 	vnet_m_multicst,
 	vnet_m_unicst,
 	vnet_m_tx,
-	NULL,
+	vnet_m_ioctl,
 	NULL,
 	NULL
 };
@@ -422,6 +437,7 @@ vnetattach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	if (status != DDI_SUCCESS) {
 		goto vnet_attach_fail;
 	}
+	vnetp->link_state = LINK_STATE_UNKNOWN;
 
 	attach_progress |= AST_macreg;
 
@@ -585,8 +601,16 @@ vnet_m_stop(void *arg)
 
 	WRITE_ENTER(&vnetp->vrwlock);
 	if (vnetp->flags & VNET_STARTED) {
-		vnet_stop_resources(vnetp);
+		/*
+		 * Set the flags appropriately; this should prevent starting of
+		 * any new resources that are added(see vnet_res_start_task()),
+		 * while we release the vrwlock in vnet_stop_resources() before
+		 * stopping each resource.
+		 */
 		vnetp->flags &= ~VNET_STARTED;
+		vnetp->flags |= VNET_STOPPING;
+		vnet_stop_resources(vnetp);
+		vnetp->flags &= ~VNET_STOPPING;
 	}
 	RW_EXIT(&vnetp->vrwlock);
 
@@ -1172,6 +1196,27 @@ vnet_mtu_update(vnet_t *vnetp, uint32_t mtu)
 }
 
 /*
+ * Update the link state of vnet to the mac layer.
+ */
+void
+vnet_link_update(vnet_t *vnetp, link_state_t link_state)
+{
+	if (vnetp == NULL || vnetp->mh == NULL) {
+		return;
+	}
+
+	WRITE_ENTER(&vnetp->vrwlock);
+	if (vnetp->link_state == link_state) {
+		RW_EXIT(&vnetp->vrwlock);
+		return;
+	}
+	vnetp->link_state = link_state;
+	RW_EXIT(&vnetp->vrwlock);
+
+	mac_link_update(vnetp->mh, link_state);
+}
+
+/*
  * vio_net_resource_reg -- An interface called to register a resource
  *	with vnet.
  *	macp -- a GLDv3 mac_register that has all the details of
@@ -1247,16 +1292,21 @@ int vio_net_resource_reg(mac_register_t *macp, vio_net_res_type_t type,
 void
 vio_net_resource_unreg(vio_net_handle_t vhp)
 {
-	vnet_res_t *vresp = (vnet_res_t *)vhp;
-	vnet_t *vnetp = vresp->vnetp;
-	vnet_res_t *vrp;
-	kstat_t *ksp = NULL;
+	vnet_res_t	*vresp = (vnet_res_t *)vhp;
+	vnet_t		*vnetp = vresp->vnetp;
+	vnet_res_t	*vrp;
+	kstat_t		*ksp = NULL;
 
 	DBG1(NULL, "Resource Registerig hdl=0x%p", vhp);
 
 	ASSERT(vnetp != NULL);
+	/*
+	 * Remove the resource from fdb; this ensures
+	 * there are no references to the resource.
+	 */
 	vnet_fdbe_del(vnetp, vresp);
 
+	/* Now remove the resource from the list */
 	WRITE_ENTER(&vnetp->vrwlock);
 	if (vresp == vnetp->vres_list) {
 		vnetp->vres_list = vresp->nextp;
@@ -1307,6 +1357,15 @@ vnet_send_dds_msg(vnet_t *vnetp, void *dmsg)
 }
 
 /*
+ * vnet_cleanup_hio -- an interface called by vgen to cleanup hio resources.
+ */
+void
+vnet_dds_cleanup_hio(vnet_t *vnetp)
+{
+	vdds_cleanup_hio(vnetp);
+}
+
+/*
  * vnet_handle_res_err -- A callback function called by a resource
  *	to report an error. For example, vgen can call to report
  *	an LDC down/reset event. This will trigger cleanup of associated
@@ -1318,7 +1377,6 @@ vnet_handle_res_err(vio_net_handle_t vrh, vio_net_err_val_t err)
 {
 	vnet_res_t *vresp = (vnet_res_t *)vrh;
 	vnet_t *vnetp = vresp->vnetp;
-	int rv;
 
 	if (vnetp == NULL) {
 		return;
@@ -1327,13 +1385,8 @@ vnet_handle_res_err(vio_net_handle_t vrh, vio_net_err_val_t err)
 	    (vresp->type != VIO_NET_RES_HYBRID)) {
 		return;
 	}
-	rv = ddi_taskq_dispatch(vnetp->taskqp, vdds_cleanup_hybrid_res,
-	    vnetp, DDI_NOSLEEP);
-	if (rv != DDI_SUCCESS) {
-		cmn_err(CE_WARN,
-		    "vnet%d:Failed to dispatch task to cleanup hybrid resource",
-		    vnetp->instance);
-	}
+
+	vdds_cleanup_hio(vnetp);
 }
 
 /*
@@ -1344,17 +1397,19 @@ vnet_dispatch_res_task(vnet_t *vnetp)
 {
 	int rv;
 
-	WRITE_ENTER(&vnetp->vrwlock);
-	if (vnetp->flags & VNET_STARTED) {
-		rv = ddi_taskq_dispatch(vnetp->taskqp, vnet_res_start_task,
-		    vnetp, DDI_NOSLEEP);
-		if (rv != DDI_SUCCESS) {
-			cmn_err(CE_WARN,
-			    "vnet%d:Can't dispatch start resource task",
-			    vnetp->instance);
-		}
+	/*
+	 * Dispatch the task. It could be the case that vnetp->flags does
+	 * not have VNET_STARTED set. This is ok as vnet_rest_start_task()
+	 * can abort the task when the task is started. See related comments
+	 * in vnet_m_stop() and vnet_stop_resources().
+	 */
+	rv = ddi_taskq_dispatch(vnetp->taskqp, vnet_res_start_task,
+	    vnetp, DDI_NOSLEEP);
+	if (rv != DDI_SUCCESS) {
+		cmn_err(CE_WARN,
+		    "vnet%d:Can't dispatch start resource task",
+		    vnetp->instance);
 	}
-	RW_EXIT(&vnetp->vrwlock);
 }
 
 /*
@@ -1386,6 +1441,8 @@ vnet_start_resources(vnet_t *vnetp)
 
 	DBG1(vnetp, "enter\n");
 
+	ASSERT(RW_WRITE_HELD(&vnetp->vrwlock));
+
 	for (vresp = vnetp->vres_list; vresp != NULL; vresp = vresp->nextp) {
 		/* skip if it is already started */
 		if (vresp->flags & VNET_STARTED) {
@@ -1415,21 +1472,44 @@ static void
 vnet_stop_resources(vnet_t *vnetp)
 {
 	vnet_res_t	*vresp;
-	vnet_res_t	*nvresp;
 	mac_register_t	*macp;
 	mac_callbacks_t	*cbp;
 
 	DBG1(vnetp, "enter\n");
 
+	ASSERT(RW_WRITE_HELD(&vnetp->vrwlock));
+
 	for (vresp = vnetp->vres_list; vresp != NULL; ) {
-		nvresp = vresp->nextp;
 		if (vresp->flags & VNET_STARTED) {
+			/*
+			 * Release the lock while invoking mc_stop() of the
+			 * underlying resource. We hold a reference to this
+			 * resource to prevent being removed from the list in
+			 * vio_net_resource_unreg(). Note that new resources
+			 * can be added to the head of the list while the lock
+			 * is released, but they won't be started, as
+			 * VNET_STARTED flag has been cleared for the vnet
+			 * device in vnet_m_stop(). Also, while the lock is
+			 * released a resource could be removed from the list
+			 * in vio_net_resource_unreg(); but that is ok, as we
+			 * re-acquire the lock and only then access the forward
+			 * link (vresp->nextp) to continue with the next
+			 * resource.
+			 */
+			vresp->flags &= ~VNET_STARTED;
+			vresp->flags |= VNET_STOPPING;
 			macp = &vresp->macreg;
 			cbp = macp->m_callbacks;
+			VNET_FDBE_REFHOLD(vresp);
+			RW_EXIT(&vnetp->vrwlock);
+
 			cbp->mc_stop(macp->m_driver);
-			vresp->flags &= ~VNET_STARTED;
+
+			WRITE_ENTER(&vnetp->vrwlock);
+			vresp->flags &= ~VNET_STOPPING;
+			VNET_FDBE_REFRELE(vresp);
 		}
-		vresp = nvresp;
+		vresp = vresp->nextp;
 	}
 	DBG1(vnetp, "exit\n");
 }
@@ -1629,3 +1709,81 @@ vnet_hio_get_stats(vnet_res_t *vresp, vnet_hio_stats_t *statsp)
 		}
 	}
 }
+
+#ifdef	VNET_IOC_DEBUG
+
+/*
+ * The ioctl entry point is used only for debugging for now. The ioctl commands
+ * can be used to force the link state of the channel connected to vsw.
+ */
+static void
+vnet_m_ioctl(void *arg, queue_t *q, mblk_t *mp)
+{
+	struct iocblk	*iocp;
+	vnet_t		*vnetp;
+
+	iocp = (struct iocblk *)(uintptr_t)mp->b_rptr;
+	iocp->ioc_error = 0;
+	vnetp = (vnet_t *)arg;
+
+	if (vnetp == NULL) {
+		miocnak(q, mp, 0, EINVAL);
+		return;
+	}
+
+	switch (iocp->ioc_cmd) {
+
+	case VNET_FORCE_LINK_DOWN:
+	case VNET_FORCE_LINK_UP:
+		vnet_force_link_state(vnetp, q, mp);
+		break;
+
+	default:
+		iocp->ioc_error = EINVAL;
+		miocnak(q, mp, 0, iocp->ioc_error);
+		break;
+
+	}
+}
+
+static void
+vnet_force_link_state(vnet_t *vnetp, queue_t *q, mblk_t *mp)
+{
+	mac_register_t	*macp;
+	mac_callbacks_t	*cbp;
+	vnet_res_t	*vresp;
+
+	READ_ENTER(&vnetp->vsw_fp_rw);
+
+	vresp = vnetp->vsw_fp;
+	if (vresp == NULL) {
+		RW_EXIT(&vnetp->vsw_fp_rw);
+		return;
+	}
+
+	macp = &vresp->macreg;
+	cbp = macp->m_callbacks;
+	cbp->mc_ioctl(macp->m_driver, q, mp);
+
+	RW_EXIT(&vnetp->vsw_fp_rw);
+}
+
+#else
+
+static void
+vnet_m_ioctl(void *arg, queue_t *q, mblk_t *mp)
+{
+	vnet_t		*vnetp;
+
+	vnetp = (vnet_t *)arg;
+
+	if (vnetp == NULL) {
+		miocnak(q, mp, 0, EINVAL);
+		return;
+	}
+
+	/* ioctl support only for debugging */
+	miocnak(q, mp, 0, ENOTSUP);
+}
+
+#endif

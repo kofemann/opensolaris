@@ -245,7 +245,6 @@ EXPORT_SRC:
 	@cd cmd/gss/gssd;         pwd; $(MAKE) EXPORT_SRC
 	@cd cmd/krb5/kadmin;  pwd; $(MAKE) EXPORT_SRC
 	@cd cmd/sendmail/src; pwd; $(MAKE) EXPORT_SRC
-	@cd cmd/xntpd;	  pwd; $(MAKE) EXPORT_SRC
 	@cd common/crypto/aes;	  pwd; $(MAKE) EXPORT_SRC
 	@cd common/crypto/arcfour; pwd; $(MAKE) EXPORT_SRC
 	@cd common/crypto/blowfish;	  pwd; $(MAKE) EXPORT_SRC
@@ -266,7 +265,6 @@ EXPORT_SRC:
 	@cd lib/sasl_plugins; pwd; $(MAKE) EXPORT_SRC
 	@cd $(CLOSED)/lib/smartcard;	  pwd; $(MAKE) EXPORT_SRC
 	@cd lib/pam_modules/krb5;   pwd; $(MAKE) EXPORT_SRC
-	@cd lib/udapl; pwd; $(MAKE) EXPORT_SRC
 	@cd lib/libresolv2; pwd; $(MAKE) EXPORT_SRC
 	@cd psm/stand/boot; pwd; $(MAKE) EXPORT_SRC
 	@cd uts/common/crypto/io; pwd; $(MAKE) EXPORT_SRC

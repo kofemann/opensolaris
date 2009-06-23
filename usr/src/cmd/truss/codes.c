@@ -84,6 +84,7 @@
 #include <sys/ptms.h>
 #include <sys/aggr.h>
 #include <sys/dld.h>
+#include <net/simnet.h>
 #include <sys/vnic.h>
 #include <sys/fs/zfs.h>
 #include <inet/kssl/kssl.h>
@@ -247,7 +248,7 @@ const char *const PATHCONFname[] = {
 	"_PC_CASE_BEHAVIOR",		/* 22 */
 	"_PC_SATTR_ENABLED",		/* 23 */
 	"_PC_SATTR_EXISTS",		/* 24 */
-	NULL,				/* 25 */
+	"_PC_ACCESS_FILTERING",		/* 25 */
 	NULL,				/* 26 */
 	NULL,				/* 27 */
 	NULL,				/* 28 */
@@ -373,6 +374,7 @@ const struct ioc {
 	{ (uint_t)TIOCSTART,	"TIOCSTART",	NULL },
 	{ (uint_t)TIOCSTOP,	"TIOCSTOP",	NULL },
 	{ (uint_t)TIOCNOTTY,	"TIOCNOTTY",	NULL },
+	{ (uint_t)TIOCSCTTY,	"TIOCSCTTY",	NULL },
 	{ (uint_t)TIOCOUTQ,	"TIOCOUTQ",	NULL },
 	{ (uint_t)TIOCGLTC,	"TIOCGLTC",	NULL },
 	{ (uint_t)TIOCSLTC,	"TIOCSLTC",	NULL },
@@ -384,6 +386,16 @@ const struct ioc {
 	{ (uint_t)TIOCLSET,	"TIOCLSET",	NULL },
 	{ (uint_t)TIOCLBIC,	"TIOCLBIC",	NULL },
 	{ (uint_t)TIOCLBIS,	"TIOCLBIS",	NULL },
+
+	{ (uint_t)TIOCSILOOP,	"TIOCSILOOP",	NULL },
+	{ (uint_t)TIOCCILOOP,	"TIOCSILOOP",	NULL },
+
+	{ (uint_t)TIOCSETLD,	"TIOCSETLD",	NULL },
+	{ (uint_t)TIOCGETLD,	"TIOCGETLD",	NULL },
+
+	{ (uint_t)TIOCGPPS,	"TIOCGPPS",	NULL },
+	{ (uint_t)TIOCSPPS,	"TIOCSPPS",	NULL },
+	{ (uint_t)TIOCGPPSEV,	"TIOCGPPSEV",	NULL },
 
 	{ (uint_t)TIOCPKT,	"TIOCPKT",	NULL },	/* ptyvar.h */
 	{ (uint_t)TIOCUCNTL,	"TIOCUCNTL",	NULL },
@@ -967,6 +979,16 @@ const struct ioc {
 	{ (uint_t)DLDIOC_USAGELOG,		"DLDIOC_USAGELOG",
 		"dld_ioc_usagelog"},
 
+	/* simnet ioctls */
+	{ (uint_t)SIMNET_IOC_CREATE,		"SIMNET_IOC_CREATE",
+		"simnet_ioc_create"},
+	{ (uint_t)SIMNET_IOC_DELETE,		"SIMNET_IOC_DELETE",
+		"simnet_ioc_delete"},
+	{ (uint_t)SIMNET_IOC_INFO,		"SIMNET_IOC_INFO",
+		"simnet_ioc_info"},
+	{ (uint_t)SIMNET_IOC_MODIFY,		"SIMNET_IOC_MODIFY",
+		"simnet_ioc_info"},
+
 	/* vnic ioctls */
 	{ (uint_t)VNIC_IOC_CREATE,		"VNIC_IOC_CREATE",
 		"vnic_ioc_create"},
@@ -1009,6 +1031,8 @@ const struct ioc {
 	{ (uint_t)ZFS_IOC_VDEV_DETACH,		"ZFS_IOC_VDEV_DETACH",
 		"zfs_cmd_t" },
 	{ (uint_t)ZFS_IOC_VDEV_SETPATH,		"ZFS_IOC_VDEV_SETPATH",
+		"zfs_cmd_t" },
+	{ (uint_t)ZFS_IOC_VDEV_SETFRU,		"ZFS_IOC_VDEV_SETFRU",
 		"zfs_cmd_t" },
 	{ (uint_t)ZFS_IOC_OBJSET_STATS,		"ZFS_IOC_OBJSET_STATS",
 		"zfs_cmd_t" },
@@ -1071,6 +1095,12 @@ const struct ioc {
 	{ (uint_t)ZFS_IOC_INHERIT_PROP,		"ZFS_IOC_INHERIT_PROP",
 		"zfs_cmd_t" },
 	{ (uint_t)ZFS_IOC_SMB_ACL,		"ZFS_IOC_SMB_ACL",
+		"zfs_cmd_t" },
+	{ (uint_t)ZFS_IOC_USERSPACE_ONE,	"ZFS_IOC_USERSPACE_ONE",
+		"zfs_cmd_t" },
+	{ (uint_t)ZFS_IOC_USERSPACE_MANY,	"ZFS_IOC_USERSPACE_MANY",
+		"zfs_cmd_t" },
+	{ (uint_t)ZFS_IOC_USERSPACE_UPGRADE,	"ZFS_IOC_USERSPACE_UPGRADE",
 		"zfs_cmd_t" },
 
 	/* kssl ioctls */

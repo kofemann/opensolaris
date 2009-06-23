@@ -1217,6 +1217,7 @@ static void
 startup_kmem(void)
 {
 	extern void page_set_colorequiv_arr(void);
+	const char *fmt = "?features: %b\n";
 
 	PRM_POINT("startup_kmem() starting...");
 
@@ -1325,7 +1326,7 @@ startup_kmem(void)
 	/*
 	 * print this out early so that we know what's going on
 	 */
-	cmn_err(CE_CONT, "?features: %b\n", x86_feature, FMT_X86_FEATURE);
+	cmn_err(CE_CONT, fmt, x86_feature, FMT_X86_FEATURE);
 
 	/*
 	 * Initialize bp_mapin().
@@ -1969,7 +1970,6 @@ startup_vm(void)
 	if (kpm_desired) {
 		kpm_init();
 		kpm_enable = 1;
-		vpm_enable = 1;
 	}
 
 	/*
@@ -2016,6 +2016,7 @@ startup_end(void)
 {
 	int i;
 	extern void setx86isalist(void);
+	extern void cpu_event_init(void);
 
 	PRM_POINT("startup_end() starting...");
 
@@ -2030,6 +2031,11 @@ startup_end(void)
 	 * Perform CPC initialization for this CPU.
 	 */
 	kcpc_hw_init(CPU);
+
+	/*
+	 * Initialize cpu event framework.
+	 */
+	cpu_event_init();
 
 #if defined(OPTERON_WORKAROUND_6323525)
 	if (opteron_workaround_6323525)
@@ -2125,6 +2131,7 @@ void
 post_startup(void)
 {
 	extern void cpupm_init(cpu_t *);
+	extern void cpu_event_init_cpu(cpu_t *);
 
 	/*
 	 * Set the system wide, processor-specific flags to be passed
@@ -2184,9 +2191,9 @@ post_startup(void)
 
 	maxmem = freemem;
 
+	cpu_event_init_cpu(CPU);
 	cpupm_init(CPU);
-
-	add_cpunode2devtree(CPU->cpu_id, CPU->cpu_m.mcpu_cpi);
+	(void) mach_cpu_create_device_node(CPU, NULL);
 
 	pg_init();
 }
@@ -2318,11 +2325,14 @@ kphysm_init(
 	struct memlist	*pmem;
 	struct memseg	*cur_memseg;
 	pfn_t		base_pfn;
+	pfn_t		end_pfn;
 	pgcnt_t		num;
 	pgcnt_t		pages_done = 0;
 	uint64_t	addr;
 	uint64_t	size;
 	extern pfn_t	ddiphysmin;
+	extern int	mnode_xwa;
+	int		ms = 0, me = 0;
 
 	ASSERT(page_hash != NULL && page_hashsz != 0);
 
@@ -2379,39 +2389,75 @@ kphysm_init(
 		}
 
 		/*
-		 * Build the memsegs entry
+		 * mnode_xwa is greater than 1 when large pages regions can
+		 * cross memory node boundaries. To prevent the formation
+		 * of these large pages, configure the memsegs based on the
+		 * memory node ranges which had been made non-contiguous.
 		 */
-		cur_memseg->pages = pp;
-		cur_memseg->epages = pp + num;
-		cur_memseg->pages_base = base_pfn;
-		cur_memseg->pages_end = base_pfn + num;
+		if (mnode_xwa > 1) {
 
-		/*
-		 * Insert into memseg list in decreasing pfn range order.
-		 * Low memory is typically more fragmented such that this
-		 * ordering keeps the larger ranges at the front of the list
-		 * for code that searches memseg.
-		 * This ASSERTS that the memsegs coming in from boot are in
-		 * increasing physical address order and not contiguous.
-		 */
-		if (memsegs != NULL) {
-			ASSERT(cur_memseg->pages_base >= memsegs->pages_end);
-			cur_memseg->next = memsegs;
+			end_pfn = base_pfn + num - 1;
+			ms = PFN_2_MEM_NODE(base_pfn);
+			me = PFN_2_MEM_NODE(end_pfn);
+
+			if (ms != me) {
+				/*
+				 * current range spans more than 1 memory node.
+				 * Set num to only the pfn range in the start
+				 * memory node.
+				 */
+				num = mem_node_config[ms].physmax - base_pfn
+				    + 1;
+				ASSERT(end_pfn > mem_node_config[ms].physmax);
+			}
 		}
-		memsegs = cur_memseg;
 
-		/*
-		 * add_physmem() initializes the PSM part of the page
-		 * struct by calling the PSM back with add_physmem_cb().
-		 * In addition it coalesces pages into larger pages as
-		 * it initializes them.
-		 */
-		add_physmem(pp, num, base_pfn);
-		cur_memseg++;
-		availrmem_initial += num;
-		availrmem += num;
+		for (;;) {
+			/*
+			 * Build the memsegs entry
+			 */
+			cur_memseg->pages = pp;
+			cur_memseg->epages = pp + num;
+			cur_memseg->pages_base = base_pfn;
+			cur_memseg->pages_end = base_pfn + num;
 
-		pp += num;
+			/*
+			 * Insert into memseg list in decreasing pfn range
+			 * order. Low memory is typically more fragmented such
+			 * that this ordering keeps the larger ranges at the
+			 * front of the list for code that searches memseg.
+			 * This ASSERTS that the memsegs coming in from boot
+			 * are in increasing physical address order and not
+			 * contiguous.
+			 */
+			if (memsegs != NULL) {
+				ASSERT(cur_memseg->pages_base >=
+				    memsegs->pages_end);
+				cur_memseg->next = memsegs;
+			}
+			memsegs = cur_memseg;
+
+			/*
+			 * add_physmem() initializes the PSM part of the page
+			 * struct by calling the PSM back with add_physmem_cb().
+			 * In addition it coalesces pages into larger pages as
+			 * it initializes them.
+			 */
+			add_physmem(pp, num, base_pfn);
+			cur_memseg++;
+			availrmem_initial += num;
+			availrmem += num;
+
+			pp += num;
+			if (ms >= me)
+				break;
+
+			/* process next memory node range */
+			ms++;
+			base_pfn = mem_node_config[ms].physbase;
+			num = MIN(mem_node_config[ms].physmax,
+			    end_pfn) - base_pfn + 1;
+		}
 	}
 
 	PRM_DEBUG(availrmem_initial);

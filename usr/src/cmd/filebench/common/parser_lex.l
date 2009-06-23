@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  * Portions Copyright 2008 Denis Cheng
@@ -62,20 +62,23 @@ extern int dofile;			/* are we processing a file? */
 
 <INITIAL>#.*			;
 
-eventgen                { return FSC_EVENTGEN; }
 create                  { return FSC_CREATE; }
 define			{ return FSC_DEFINE; }
 debug                   { return FSC_DEBUG; }
 domultisync		{ return FSC_DOMULTISYNC; }
 echo                    { return FSC_ECHO; }
 enable			{ return FSC_ENABLE; }
+eventgen                { return FSC_EVENTGEN; }
 exit		        { return FSC_QUIT; }
 foreach                 { return FSC_FOREACH; }
 flowop		        { return FSC_FLOWOP; }
+fscheck		        { return FSC_FSCHECK; }
+fsflush		        { return FSC_FSFLUSH; }
 help		        { return FSC_HELP; }
 list		        { return FSC_LIST; }
 load                    { return FSC_LOAD; }
 log		        { return FSC_LOG; }
+nousestats		{ return FSC_NOUSESTATS; }
 run                     { return FSC_RUN; }
 set                     { return FSC_SET; }
 shutdown                { return FSC_SHUTDOWN; }
@@ -85,6 +88,7 @@ system                  { return FSC_SYSTEM; }
 usage                   { return FSC_USAGE; }
 vars                    { return FSC_VARS; }
 version                 { return FSC_VERSION; }
+warmup                  { return FSC_WARMUP; }
 quit		        { return FSC_QUIT; }
 
 file[s]*       	        { return FSE_FILE; }
@@ -103,56 +107,60 @@ all                     { return FSE_ALL; }
 mode                    { return FSE_MODE; }
 multi			{ return FSE_MULTI; }
 
+alldone                 { return FSA_ALLDONE; }
+blocking                { return FSA_BLOCKING; }
 cached                  { return FSA_CACHED; }
+client			{ return FSA_CLIENT; }
 dirwidth                { return FSA_DIRWIDTH; }
 dirdepthrv              { return FSA_DIRDEPTHRV; }
-dirgamma                { return FSA_DIRGAMMA; }
-filesize                { return FSA_SIZE; }
-filesizegamma           { return FSA_FILESIZEGAMMA; }
 directio                { return FSA_DIRECTIO; }
+dirgamma                { return FSA_DIRGAMMA; }
 dsync                   { return FSA_DSYNC;  }
+entries                 { return FSA_ENTRIES;}
 fd                      { return FSA_FD; }
-srcfd                   { return FSA_SRCFD; }
-opennext                { return FSA_ROTATEFD; }
 filename                { return FSA_FILE; }
 filesetname             { return FSA_FILE; }
+filesize                { return FSA_SIZE; }
+filesizegamma           { return FSA_FILESIZEGAMMA; }
+firstdone               { return FSA_FIRSTDONE; }
+fstype		        { return FSA_FSTYPE; }
+gamma                   { return FSA_RANDGAMMA; }
+highwater               { return FSA_HIGHWATER; }
+indexed                 { return FSA_INDEXED; }
 instances               { return FSA_INSTANCES;}                  
 iosize                  { return FSA_IOSIZE; }
-indexed                 { return FSA_INDEXED; }
 iters                   { return FSA_ITERS;}
+leafdirs                { return FSA_LEAFDIRS;}
 master			{ return FSA_MASTER; }
-client			{ return FSA_CLIENT; }
+mean                    { return FSA_RANDMEAN; }
 memsize                 { return FSA_MEMSIZE; }
+min                     { return FSA_RANDMIN; }
 name                    { return FSA_NAME;}
 namelength              { return FSA_NAMELENGTH; }
 nice                    { return FSA_NICE;}
-entries                 { return FSA_ENTRIES;}
-leafdirs                { return FSA_LEAFDIRS;}
-prealloc                { return FSA_PREALLOC; }
+opennext                { return FSA_ROTATEFD; }
 paralloc                { return FSA_PARALLOC; }
-reuse                   { return FSA_REUSE; }
 path                    { return FSA_PATH; }
+prealloc                { return FSA_PREALLOC; }
 procname                { return FSA_PROCESS; }
 random                  { return FSA_RANDOM;}
+randsrc			{ return FSA_RANDSRC; }
+randtable		{ return FSA_RANDTABLE; }
 rate                    { return FSA_RATE;}
+readonly		{ return FSA_READONLY; }
+reuse                   { return FSA_REUSE; }
+round			{ return FSA_RANDROUND; }
+seed			{ return FSA_RANDSEED; }
 size                    { return FSA_SIZE; }
+srcfd                   { return FSA_SRCFD; }
 target                  { return FSA_TARGET;}
+timeout                 { return FSA_TIMEOUT; }
+trusttree		{ return FSA_TRUSTTREE; }
+type			{ return FSA_TYPE; }
 useism                  { return FSA_USEISM;}
 value                   { return FSA_VALUE;}
 workingset              { return FSA_WSS; }
-blocking                { return FSA_BLOCKING; }
-highwater               { return FSA_HIGHWATER; }
-alldone                 { return FSA_ALLDONE; }
-firstdone               { return FSA_FIRSTDONE; }
-timeout                 { return FSA_TIMEOUT; }
-type			{ return FSA_TYPE; }
-seed			{ return FSA_RANDSEED; }
-gamma                   { return FSA_RANDGAMMA; }
-mean                    { return FSA_RANDMEAN; }
-min                     { return FSA_RANDMIN; }
-round			{ return FSA_RANDROUND; }
-randsrc			{ return FSA_RANDSRC; }
-randtable		{ return FSA_RANDTABLE; }
+
 uniform                 { return FSV_RANDUNI; }
 tabular			{ return FSV_RANDTAB; }
 "."type			{ return FSS_TYPE; }
@@ -212,6 +220,10 @@ rand48			{ return FSV_RAND48; }
 <INITIAL>=			{ return FSK_ASSIGN; }
 <INITIAL>\,			{ return FSK_SEPLST; }
 <INITIAL>in                     { return FSK_IN; }
+<INITIAL>\+                     { return FSK_PLUS; }
+<INITIAL>\-                     { return FSK_MINUS; }
+<INITIAL>\*                     { return FSK_MULTIPLY; }
+<INITIAL>\/                     { return FSK_DIVIDE; }
 
 <INITIAL>[0-9]+	{
                                 errno = 0;

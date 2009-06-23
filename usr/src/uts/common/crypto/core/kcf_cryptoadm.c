@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -100,7 +100,7 @@ kcf_soft_config_init(void)
 	 * # /etc/crypto/kcf.conf
 	 * des:supportedlist=CKM_DES_CBC,CKM_DES_ECB,CKM_DES3_CBC,CKM_DES3_ECB
 	 * aes:supportedlist=CKM_AES_ECB,CKM_AES_CBC,CKM_AES_CTR,CKM_AES_CCM,
-	 * CKM_AES_GCM
+	 * CKM_AES_GCM,CKM_AES_GMAC
 	 * arcfour:supportedlist=CKM_RC4
 	 * blowfish:supportedlist=CKM_BLOWFISH_ECB,CKM_BLOWFISH_CBC
 	 * ecc:supportedlist=CKM_EC_KEY_PAIR_GEN,CKM_ECDH1_DERIVE,CKM_ECDSA,\
@@ -132,7 +132,7 @@ kcf_soft_config_init(void)
 	    "CKM_DES_CBC", "CKM_DES_ECB", "CKM_DES3_CBC", "CKM_DES3_ECB", ""};
 	static crypto_mech_name_t	aes_mechs[] = {
 	    "CKM_AES_ECB", "CKM_AES_CBC", "CKM_AES_CTR", "CKM_AES_CCM",
-	    "CKM_AES_GCM", ""};
+	    "CKM_AES_GCM", "CKM_AES_GMAC", ""};
 	static crypto_mech_name_t	arcfour_mechs[] = {
 	    "CKM_RC4", ""};
 	static crypto_mech_name_t	blowfish_mechs[] = {
@@ -713,12 +713,11 @@ crypto_load_soft_disabled(char *name, uint_t new_count,
 		if (provider->pd_kstat != NULL)
 			KCF_PROV_REFRELE(provider);
 
-		mutex_enter(&provider->pd_lock);
 		/* Wait till the existing requests complete. */
-		while (provider->pd_state != KCF_PROV_FREED) {
-			cv_wait(&provider->pd_remove_cv, &provider->pd_lock);
+		while (kcf_get_refcnt(provider, B_TRUE) > 0) {
+			/* wait 1 second and try again. */
+			delay(1 * drv_usectohz(1000000));
 		}
-		mutex_exit(&provider->pd_lock);
 	}
 
 	if (new_count == 0) {

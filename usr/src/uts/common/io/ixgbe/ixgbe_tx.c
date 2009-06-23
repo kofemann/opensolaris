@@ -1,6 +1,7 @@
 /*
  * CDDL HEADER START
  *
+ * Copyright(c) 2007-2009 Intel Corporation. All rights reserved.
  * The contents of this file are subject to the terms of the
  * Common Development and Distribution License (the "License").
  * You may not use this file except in compliance with the License.
@@ -20,11 +21,7 @@
  */
 
 /*
- * Copyright(c) 2007-2008 Intel Corporation. All rights reserved.
- */
-
-/*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -43,7 +40,7 @@ static int ixgbe_get_context(mblk_t *, ixgbe_tx_context_t *);
 static boolean_t ixgbe_check_context(ixgbe_tx_ring_t *,
     ixgbe_tx_context_t *);
 static void ixgbe_fill_context(struct ixgbe_adv_tx_context_desc *,
-    ixgbe_tx_context_t *, int);
+    ixgbe_tx_context_t *);
 
 #ifndef IXGBE_DEBUG
 #pragma inline(ixgbe_save_desc)
@@ -125,8 +122,9 @@ ixgbe_ring_tx(void *arg, mblk_t *mp)
 		 * If the mblk size exceeds the max size ixgbe could
 		 * process, then discard this mblk, and return NULL.
 		 */
-		if ((ctx->lso_flag && ((mbsize - ctx->mac_hdr_len)
-		    > IXGBE_LSO_MAXLEN)) || (!ctx->lso_flag &&
+		if ((ctx->lso_flag &&
+		    ((mbsize - ctx->mac_hdr_len) > IXGBE_LSO_MAXLEN)) ||
+		    (!ctx->lso_flag &&
 		    (mbsize > (ixgbe->max_frame_size - ETHERFCSL)))) {
 			freemsg(mp);
 			IXGBE_DEBUGLOG_0(ixgbe, "ixgbe_tx: packet oversize");
@@ -140,8 +138,9 @@ ixgbe_ring_tx(void *arg, mblk_t *mp)
 	 * Check and recycle tx descriptors.
 	 * The recycle threshold here should be selected carefully
 	 */
-	if (tx_ring->tbd_free < tx_ring->recycle_thresh)
+	if (tx_ring->tbd_free < tx_ring->recycle_thresh) {
 		tx_ring->tx_recycle(tx_ring);
+	}
 
 	/*
 	 * After the recycling, if the tbd_free is less than the
@@ -200,7 +199,7 @@ ixgbe_ring_tx(void *arg, mblk_t *mp)
 		 */
 		if ((nmp != mp) ||
 		    (P2NPHASE((uintptr_t)nmp->b_rptr, ixgbe->sys_page_size)
-		    < len)) {
+		    < hdr_len)) {
 			IXGBE_DEBUG_STAT(tx_ring->stat_lso_header_fail);
 			/*
 			 * reallocate the mblk for the last header fragment,
@@ -209,7 +208,7 @@ ixgbe_ring_tx(void *arg, mblk_t *mp)
 			 */
 			new_mp = allocb(hdr_frag_len, NULL);
 			if (!new_mp)
-				return (B_FALSE);
+				return (mp);
 			bcopy(nmp->b_rptr, new_mp->b_rptr, hdr_frag_len);
 			/* link the new header fragment with the other parts */
 			new_mp->b_wptr = new_mp->b_rptr + hdr_frag_len;
@@ -369,6 +368,67 @@ adjust_threshold:
 	ASSERT(tcb);
 	ASSERT(tcb->mp == NULL);
 	tcb->mp = mp;
+
+	/*
+	 * 82598/82599 chipset has a limitation that no more than 32 tx
+	 * descriptors can be transmited out at one time.
+	 *
+	 * Here is a workaround for it: pull up the mblk then send it
+	 * out with bind way. By doing so, no more than MAX_COOKIE (18)
+	 * descriptors is needed.
+	 */
+	if (desc_total + 1 > IXGBE_TX_DESC_LIMIT) {
+		IXGBE_DEBUG_STAT(tx_ring->stat_break_tbd_limit);
+
+		/*
+		 * Discard the mblk and free the used resources
+		 */
+		tcb = (tx_control_block_t *)LIST_GET_HEAD(&pending_list);
+		while (tcb) {
+			tcb->mp = NULL;
+			ixgbe_free_tcb(tcb);
+			tcb = (tx_control_block_t *)
+			    LIST_GET_NEXT(&pending_list, &tcb->link);
+		}
+
+		/*
+		 * Return the tx control blocks in the pending list to
+		 * the free list.
+		 */
+		ixgbe_put_free_list(tx_ring, &pending_list);
+
+		/*
+		 * pull up the mblk and send it out with bind way
+		 */
+		if ((nmp = msgpullup(mp, -1)) == NULL) {
+			freemsg(mp);
+			return (NULL);
+		} else {
+			freemsg(mp);
+			mp = nmp;
+		}
+
+		LINK_LIST_INIT(&pending_list);
+		tcb = ixgbe_get_free_list(tx_ring);
+		if (tcb == NULL) {
+			IXGBE_DEBUG_STAT(tx_ring->stat_fail_no_tcb);
+			freemsg(mp);
+			return (NULL);
+		}
+		LIST_PUSH_TAIL(&pending_list, &tcb->link);
+
+		desc_num = ixgbe_tx_bind(tx_ring, tcb, mp, mbsize);
+		if ((desc_num < 0) ||
+		    ((desc_num + 1) > IXGBE_TX_DESC_LIMIT)) {
+			ixgbe_free_tcb(tcb);
+			ixgbe_put_free_list(tx_ring, &pending_list);
+			freemsg(mp);
+			return (NULL);
+		}
+
+		desc_total = desc_num;
+		tcb->mp = mp;
+	}
 
 	/*
 	 * Before fill the tx descriptor ring with the data, we need to
@@ -569,8 +629,10 @@ ixgbe_get_context(mblk_t *mp, ixgbe_tx_context_t *ctx)
 	hcksum_retrieve(mp, NULL, NULL, &start, NULL, NULL, NULL, &hckflags);
 	bzero(ctx, sizeof (ixgbe_tx_context_t));
 
-	if (hckflags == 0)
+	if (hckflags == 0) {
 		return (0);
+	}
+
 	ctx->hcksum_flags = hckflags;
 
 	lso_info_get(mp, &mss, &lsoflags);
@@ -771,7 +833,7 @@ ixgbe_check_context(ixgbe_tx_ring_t *tx_ring, ixgbe_tx_context_t *ctx)
  */
 static void
 ixgbe_fill_context(struct ixgbe_adv_tx_context_desc *ctx_tbd,
-    ixgbe_tx_context_t *ctx, int ring_index)
+    ixgbe_tx_context_t *ctx)
 {
 	/*
 	 * Fill the context descriptor with the checksum
@@ -808,12 +870,13 @@ ixgbe_fill_context(struct ixgbe_adv_tx_context_desc *ctx_tbd,
 	}
 
 	ctx_tbd->seqnum_seed = 0;
-	ctx_tbd->mss_l4len_idx = ring_index << 4;
 
 	if (ctx->lso_flag) {
-		ctx_tbd->mss_l4len_idx |=
+		ctx_tbd->mss_l4len_idx =
 		    (ctx->l4_hdr_len << IXGBE_ADVTXD_L4LEN_SHIFT) |
 		    (ctx->mss << IXGBE_ADVTXD_MSS_SHIFT);
+	} else {
+		ctx_tbd->mss_l4len_idx = 0;
 	}
 }
 
@@ -861,8 +924,6 @@ ixgbe_tx_fill_ring(ixgbe_tx_ring_t *tx_ring, link_list_t *pending_list,
 		load_context = ixgbe_check_context(tx_ring, ctx);
 
 		if (load_context) {
-			first_tcb = (tx_control_block_t *)
-			    LIST_GET_HEAD(pending_list);
 			tbd = &tx_ring->tbd_ring[index];
 
 			/*
@@ -870,8 +931,7 @@ ixgbe_tx_fill_ring(ixgbe_tx_ring_t *tx_ring, link_list_t *pending_list,
 			 * hardware checksum offload informations.
 			 */
 			ixgbe_fill_context(
-			    (struct ixgbe_adv_tx_context_desc *)tbd,
-			    ctx, tx_ring->index);
+			    (struct ixgbe_adv_tx_context_desc *)tbd, ctx);
 
 			index = NEXT_INDEX(index, 1, tx_ring->ring_size);
 			desc_num++;
@@ -899,6 +959,7 @@ ixgbe_tx_fill_ring(ixgbe_tx_ring_t *tx_ring, link_list_t *pending_list,
 	 * control block.
 	 */
 	tcb = (tx_control_block_t *)LIST_POP_HEAD(pending_list);
+	first_tcb = tcb;
 	while (tcb != NULL) {
 
 		for (i = 0; i < tcb->desc_num; i++) {
@@ -907,22 +968,13 @@ ixgbe_tx_fill_ring(ixgbe_tx_ring_t *tx_ring, link_list_t *pending_list,
 			tbd->read.buffer_addr = tcb->desc[i].address;
 			tbd->read.cmd_type_len = tcb->desc[i].length;
 
-			tbd->read.cmd_type_len |= IXGBE_ADVTXD_DCMD_RS |
-			    IXGBE_ADVTXD_DCMD_DEXT | IXGBE_ADVTXD_DTYP_DATA;
+			tbd->read.cmd_type_len |= IXGBE_ADVTXD_DCMD_DEXT
+			    | IXGBE_ADVTXD_DTYP_DATA;
 
 			tbd->read.olinfo_status = 0;
 
 			index = NEXT_INDEX(index, 1, tx_ring->ring_size);
 			desc_num++;
-		}
-
-		if (first_tcb != NULL) {
-			/*
-			 * Count the checksum context descriptor for
-			 * the first tx control block.
-			 */
-			first_tcb->desc_num++;
-			first_tcb = NULL;
 		}
 
 		/*
@@ -935,26 +987,47 @@ ixgbe_tx_fill_ring(ixgbe_tx_ring_t *tx_ring, link_list_t *pending_list,
 		tcb = (tx_control_block_t *)LIST_POP_HEAD(pending_list);
 	}
 
+	if (load_context) {
+		/*
+		 * Count the context descriptor for
+		 * the first tx control block.
+		 */
+		first_tcb->desc_num++;
+	}
+	first_tcb->last_index = PREV_INDEX(index, 1, tx_ring->ring_size);
+
 	/*
 	 * The Insert Ethernet CRC (IFCS) bit and the checksum fields are only
 	 * valid in the first descriptor of the packet.
+	 * Setting paylen in every first_tbd for all parts.
+	 * 82599 requires the packet length in paylen field with or without
+	 * LSO and 82598 will ignore it in non-LSO mode.
 	 */
 	ASSERT(first_tbd != NULL);
 	first_tbd->read.cmd_type_len |= IXGBE_ADVTXD_DCMD_IFCS;
-	first_tbd->read.olinfo_status |= (tx_ring->index << 4);
 
-	if (ctx != NULL && ctx->lso_flag) {
-		first_tbd->read.cmd_type_len |= IXGBE_ADVTXD_DCMD_TSE;
-		first_tbd->read.olinfo_status |=
-		    (mbsize - ctx->mac_hdr_len - ctx->ip_hdr_len
-		    - ctx->l4_hdr_len) << IXGBE_ADVTXD_PAYLEN_SHIFT;
-	}
-
-	if (ctx != NULL && ctx->lso_flag) {
-		first_tbd->read.cmd_type_len |= IXGBE_ADVTXD_DCMD_TSE;
-		first_tbd->read.olinfo_status |=
-		    (mbsize - ctx->mac_hdr_len - ctx->ip_hdr_len
-		    - ctx->l4_hdr_len) << IXGBE_ADVTXD_PAYLEN_SHIFT;
+	switch (hw->mac.type) {
+	case ixgbe_mac_82599EB:
+		if (ctx != NULL && ctx->lso_flag) {
+			first_tbd->read.cmd_type_len |= IXGBE_ADVTXD_DCMD_TSE;
+			first_tbd->read.olinfo_status |=
+			    (mbsize - ctx->mac_hdr_len - ctx->ip_hdr_len
+			    - ctx->l4_hdr_len) << IXGBE_ADVTXD_PAYLEN_SHIFT;
+		} else {
+			first_tbd->read.olinfo_status |=
+			    (mbsize << IXGBE_ADVTXD_PAYLEN_SHIFT);
+		}
+		break;
+	case ixgbe_mac_82598EB:
+		if (ctx != NULL && ctx->lso_flag) {
+			first_tbd->read.cmd_type_len |= IXGBE_ADVTXD_DCMD_TSE;
+			first_tbd->read.olinfo_status |=
+			    (mbsize - ctx->mac_hdr_len - ctx->ip_hdr_len
+			    - ctx->l4_hdr_len) << IXGBE_ADVTXD_PAYLEN_SHIFT;
+		}
+		break;
+	default:
+		break;
 	}
 
 	/* Set hardware checksum bits */
@@ -1048,16 +1121,12 @@ ixgbe_save_desc(tx_control_block_t *tcb, uint64_t address, size_t length)
 uint32_t
 ixgbe_tx_recycle_legacy(ixgbe_tx_ring_t *tx_ring)
 {
-	uint32_t index, last_index;
+	uint32_t index, last_index, prev_index;
 	int desc_num;
 	boolean_t desc_done;
 	tx_control_block_t *tcb;
 	link_list_t pending_list;
 
-	/*
-	 * The mutex_tryenter() is used to avoid unnecessary
-	 * lock contention.
-	 */
 	mutex_enter(&tx_ring->recycle_lock);
 
 	ASSERT(tx_ring->tbd_free <= tx_ring->ring_size);
@@ -1091,18 +1160,24 @@ ixgbe_tx_recycle_legacy(ixgbe_tx_ring_t *tx_ring)
 	tcb = tx_ring->work_list[index];
 	ASSERT(tcb != NULL);
 
-	desc_done = B_TRUE;
-	while (desc_done && (tcb != NULL)) {
-
+	while (tcb != NULL) {
 		/*
-		 * Get the last tx descriptor of the tx control block.
-		 * If the last tx descriptor is done, it is done with
-		 * all the tx descriptors of the tx control block.
-		 * Then the tx control block and all the corresponding
-		 * tx descriptors can be recycled.
+		 * Get the last tx descriptor of this packet.
+		 * If the last tx descriptor is done, then
+		 * we can recycle all descriptors of a packet
+		 * which usually includes several tx control blocks.
+		 * For 82599, LSO descriptors can not be recycled
+		 * unless the whole packet's transmission is done.
+		 * That's why packet level recycling is used here.
+		 * For 82598, there's not such limit.
 		 */
-		last_index = NEXT_INDEX(index, tcb->desc_num - 1,
-		    tx_ring->ring_size);
+		last_index = tcb->last_index;
+		/*
+		 * MAX_TX_RING_SIZE is used to judge whether
+		 * the index is a valid value or not.
+		 */
+		if (last_index == MAX_TX_RING_SIZE)
+			break;
 
 		/*
 		 * Check if the Descriptor Done bit is set
@@ -1111,23 +1186,35 @@ ixgbe_tx_recycle_legacy(ixgbe_tx_ring_t *tx_ring)
 		    IXGBE_TXD_STAT_DD;
 		if (desc_done) {
 			/*
-			 * Strip off the tx control block from the work list,
-			 * and add it to the pending list.
+			 * recycle all descriptors of the packet
 			 */
-			tx_ring->work_list[index] = NULL;
-			LIST_PUSH_TAIL(&pending_list, &tcb->link);
+			while (tcb != NULL) {
+				/*
+				 * Strip off the tx control block from
+				 * the work list, and add it to the
+				 * pending list.
+				 */
+				tx_ring->work_list[index] = NULL;
+				LIST_PUSH_TAIL(&pending_list, &tcb->link);
 
-			/*
-			 * Count the total number of the tx descriptors recycled
-			 */
-			desc_num += tcb->desc_num;
+				/*
+				 * Count the total number of the tx
+				 * descriptors recycled
+				 */
+				desc_num += tcb->desc_num;
 
-			/*
-			 * Advance the index of the tx descriptor ring
-			 */
-			index = NEXT_INDEX(last_index, 1, tx_ring->ring_size);
+				index = NEXT_INDEX(index, tcb->desc_num,
+				    tx_ring->ring_size);
 
-			tcb = tx_ring->work_list[index];
+				tcb = tx_ring->work_list[index];
+
+				prev_index = PREV_INDEX(index, 1,
+				    tx_ring->ring_size);
+				if (prev_index == last_index)
+					break;
+			}
+		} else {
+			break;
 		}
 	}
 
@@ -1368,6 +1455,7 @@ ixgbe_free_tcb(tx_control_block_t *tcb)
 	}
 
 	tcb->tx_type = USE_NONE;
+	tcb->last_index = MAX_TX_RING_SIZE;
 	tcb->frag_num = 0;
 	tcb->desc_num = 0;
 }

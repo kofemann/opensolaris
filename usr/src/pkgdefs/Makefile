@@ -58,7 +58,6 @@ sparc_SUBDIRS= \
 	SUNWfruip.u \
 	SUNWfsr \
 	SUNWfsu \
-	SUNWhmd    \
 	SUNWhmdu   \
 	SUNWidn.u \
 	SUNWifp  \
@@ -131,6 +130,7 @@ i386_SUBDIRS= \
 	SUNWgrub \
 	SUNWgrubS \
 	SUNWdcopy \
+	SUNWfipe \
 	SUNWipw \
 	SUNWiwh	\
 	SUNWiwi \
@@ -141,10 +141,12 @@ i386_SUBDIRS= \
 	SUNWmegasas \
 	SUNWmv88sx \
 	SUNWnge \
+	SUNWntfsprogs \
 	SUNWnvsata \
 	SUNWnxge \
 	SUNWonmtst.i \
 	SUNWos86r  \
+	SUNWparted  \
 	SUNWpsdcr  \
 	SUNWpsdir  \
 	SUNWpsh \
@@ -157,6 +159,7 @@ i386_SUBDIRS= \
 	SUNWsi3124 \
 	SUNWtpm \
 	SUNWural \
+	SUNWurtw \
 	SUNWvia823x \
 	SUNWwpi \
 	SUNWxdt \
@@ -270,9 +273,12 @@ COMMON_SUBDIRS= \
 	SUNWhal \
 	SUNWhalr \
 	SUNWhea  \
+	SUNWhermon  \
+	SUNWhmd    \
 	SUNWhwdata \
 	SUNWhxge \
 	SUNWib \
+	SUNWibdmar \
 	SUNWibsdpu \
 	SUNWibsdp \
 	SUNWiir \
@@ -282,9 +288,11 @@ COMMON_SUBDIRS= \
 	SUNWimac \
 	SUNWimar \
 	SUNWimacr \
+	SUNWinstallint \
 	SUNWintgige \
 	SUNWiotu  \
 	SUNWioth  \
+	SUNWio-tools  \
 	SUNWipc  \
 	SUNWipfh  \
 	SUNWipfr  \
@@ -349,8 +357,6 @@ COMMON_SUBDIRS= \
 	SUNWnfscu \
 	SUNWnisr  \
 	SUNWnisu  \
-	SUNWntpr  \
-	SUNWntpu  \
 	SUNWnwamintr \
 	SUNWnwamintu \
 	SUNWocf \
@@ -359,11 +365,6 @@ COMMON_SUBDIRS= \
 	SUNWocfr \
 	SUNWonfmes \
 	SUNWonzfs \
-	SUNWopenssl-man \
-	SUNWopenssl-libraries \
-	SUNWopenssl-include \
-	SUNWopenssl-commands \
-	SUNWopensslr \
 	SUNWosdem \
 	SUNWypr \
 	SUNWypu \
@@ -379,14 +380,14 @@ COMMON_SUBDIRS= \
 	SUNWpcu	\
 	SUNWpcwl \
 	SUNWpd    \
-	SUNWphx \
-	SUNWpolkit \
-	PHXext \
 	SUNWperl584core \
 	SUNWperl584usr \
 	SUNWpiclh \
 	SUNWpiclu \
 	SUNWpiclr \
+	SUNWpkgcmdsr \
+	SUNWpkgcmdsu \
+	SUNWpolkit \
 	SUNWpool \
 	SUNWpoold \
 	SUNWpoolr \
@@ -467,6 +468,8 @@ COMMON_SUBDIRS= \
 	SUNWspsvu \
 	SUNWsra  \
 	SUNWsrh  \
+	SUNWsrptr  \
+	SUNWsrptu  \
 	SUNWsshcu \
 	SUNWsshr \
 	SUNWsshu \
@@ -474,6 +477,7 @@ COMMON_SUBDIRS= \
 	SUNWsshdu \
 	SUNWstmf \
 	SUNWstmfu \
+	SUNWtavor \
 	SUNWtcpd \
 	SUNWtcpdS \
 	SUNWtecla \
@@ -492,10 +496,13 @@ COMMON_SUBDIRS= \
 	SUNWuacm \
 	SUNWucbt \
 	SUNWudaplr \
+	SUNWudapltr \
+	SUNWudapltu \
 	SUNWudaplu \
 	SUNWudf \
 	SUNWudfr \
 	SUNWuedg \
+	SUNWuftdi \
 	SUNWugen \
 	SUNWugenu \
 	SUNWuksp \
@@ -505,6 +512,8 @@ COMMON_SUBDIRS= \
 	SUNWusb \
 	SUNWusbs \
 	SUNWusbu \
+	SUNWuwb \
+	SUNWvr \
 	SUNWvscankr \
 	SUNWvscanr \
 	SUNWvscanu \
@@ -525,15 +534,11 @@ COMMON_SUBDIRS= \
 
 COMMON_XMODS= \
 	SUNWcryptoint \
-	SUNWhermon  \
 	SUNWibsdpib \
 	SUNWkdcr \
 	SUNWkdcu \
 	SUNWstatl \
 	SUNWsvvs \
-	SUNWtavor \
-	SUNWudapltr \
-	SUNWudapltu \
 	SUNWwbint \
 	SUNWwbsup
 

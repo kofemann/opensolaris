@@ -170,6 +170,8 @@ extern "C" {
 #define	DDI_NT_ENCLOSURE	"ddi_enclosure"
 #define	DDI_NT_SCSI_ENCLOSURE	"ddi_enclosure:scsi"
 
+#define	DDI_NT_BLOCK_SAS	"ddi_block:sas"
+
 /*
  * xVM virtual block devices
  */
@@ -2008,9 +2010,6 @@ char
 
 void
 ddi_devid_free_guid(char *guid);
-
-int
-ddi_devid_str_to_wwn(const char *string, uint64_t *wwn);
 
 int
 ddi_lyr_get_devid(dev_t dev, ddi_devid_t *ret_devid);

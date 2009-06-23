@@ -22,6 +22,10 @@
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
+/*
+ * Copyright (c) 2009, Intel Corporation.
+ * All rights reserved.
+ */
 
 #define	PSMI_1_6
 #include <sys/smp_impldefs.h>
@@ -36,6 +40,7 @@
 #include <sys/x86_archext.h>
 #include <sys/cpupart.h>
 #include <sys/cpuvar.h>
+#include <sys/cpu_event.h>
 #include <sys/cmt.h>
 #include <sys/cpu.h>
 #include <sys/disp.h>
@@ -54,6 +59,8 @@
 #include <sys/kdi_machimpl.h>
 #include <sys/sdt.h>
 #include <sys/hpet.h>
+#include <sys/sunddi.h>
+#include <sys/sunndi.h>
 
 #define	OFFSETOF(s, m)		(size_t)(&(((s *)0)->m))
 
@@ -84,6 +91,8 @@ static void cpu_wakeup(cpu_t *, int);
 void cpu_idle_mwait(void);
 static void cpu_wakeup_mwait(cpu_t *, int);
 #endif
+static int mach_cpu_create_devinfo(cpu_t *cp, dev_info_t **dipp);
+
 /*
  *	External reference functions
  */
@@ -142,6 +151,8 @@ int (*psm_state)(psm_state_request_t *) = (int (*)(psm_state_request_t *))
 
 void (*notify_error)(int, char *) = (void (*)(int, char *))return_instr;
 void (*hrtime_tick)(void)	= return_instr;
+
+int (*psm_cpu_create_devinfo)(cpu_t *, dev_info_t **) = mach_cpu_create_devinfo;
 
 /*
  * True if the generic TSC code is our source of hrtime, rather than whatever
@@ -370,18 +381,28 @@ cpu_idle_adaptive(void)
 	(*CPU->cpu_m.mcpu_idle_cpu)();
 }
 
-void
-cpu_dtrace_idle_probe(uint_t cstate)
+/*
+ * Function called by CPU idle notification framework to check whether CPU
+ * has been awakened. It will be called with interrupt disabled.
+ * If CPU has been awakened, call cpu_idle_exit() to notify CPU idle
+ * notification framework.
+ */
+/*ARGSUSED*/
+static void
+cpu_idle_check_wakeup(void *arg)
 {
-	cpu_t		*cpup = CPU;
-	struct machcpu	*mcpu = &(cpup->cpu_m);
-
-	mcpu->curr_cstate = cstate;
-	DTRACE_PROBE1(idle__state__transition, uint_t, cstate);
+	/*
+	 * Toggle interrupt flag to detect pending interrupts.
+	 * If interrupt happened, do_interrupt() will notify CPU idle
+	 * notification framework so no need to call cpu_idle_exit() here.
+	 */
+	sti();
+	SMT_PAUSE();
+	cli();
 }
 
 /*
- * Idle the present CPU until awoken via an interrupt
+ * Idle the present CPU until wakened via an interrupt
  */
 void
 cpu_idle(void)
@@ -407,7 +428,7 @@ cpu_idle(void)
 	 *
 	 * When a thread becomes runnable, it is placed on the queue
 	 * and then the halted CPU bitmap is checked to determine who
-	 * (if anyone) should be awoken. We therefore need to first
+	 * (if anyone) should be awakened. We therefore need to first
 	 * add ourselves to the bitmap, and and then check if there
 	 * is any work available. The order is important to prevent a race
 	 * that can lead to work languishing on a run queue somewhere while
@@ -479,11 +500,11 @@ cpu_idle(void)
 		return;
 	}
 
-	cpu_dtrace_idle_probe(IDLE_STATE_C1);
-
-	mach_cpu_idle();
-
-	cpu_dtrace_idle_probe(IDLE_STATE_C0);
+	if (cpu_idle_enter(IDLE_STATE_C1, 0,
+	    cpu_idle_check_wakeup, NULL) == 0) {
+		mach_cpu_idle();
+		cpu_idle_exit(CPU_IDLE_CB_FLAG_IDLE);
+	}
 
 	/*
 	 * We're no longer halted
@@ -560,7 +581,37 @@ cpu_wakeup(cpu_t *cpu, int bound)
 
 #ifndef __xpv
 /*
- * Idle the present CPU until awoken via touching its monitored line
+ * Function called by CPU idle notification framework to check whether CPU
+ * has been awakened. It will be called with interrupt disabled.
+ * If CPU has been awakened, call cpu_idle_exit() to notify CPU idle
+ * notification framework.
+ */
+static void
+cpu_idle_mwait_check_wakeup(void *arg)
+{
+	volatile uint32_t *mcpu_mwait = (volatile uint32_t *)arg;
+
+	ASSERT(arg != NULL);
+	if (*mcpu_mwait != MWAIT_HALTED) {
+		/*
+		 * CPU has been awakened, notify CPU idle notification system.
+		 */
+		cpu_idle_exit(CPU_IDLE_CB_FLAG_IDLE);
+	} else {
+		/*
+		 * Toggle interrupt flag to detect pending interrupts.
+		 * If interrupt happened, do_interrupt() will notify CPU idle
+		 * notification framework so no need to call cpu_idle_exit()
+		 * here.
+		 */
+		sti();
+		SMT_PAUSE();
+		cli();
+	}
+}
+
+/*
+ * Idle the present CPU until awakened via touching its monitored line
  */
 void
 cpu_idle_mwait(void)
@@ -632,13 +683,13 @@ cpu_idle_mwait(void)
 	 */
 	i86_monitor(mcpu_mwait, 0, 0);
 	if (*mcpu_mwait == MWAIT_HALTED) {
-		cpu_dtrace_idle_probe(IDLE_STATE_C1);
-
-		tlb_going_idle();
-		i86_mwait(0, 0);
-		tlb_service();
-
-		cpu_dtrace_idle_probe(IDLE_STATE_C0);
+		if (cpu_idle_enter(IDLE_STATE_C1, 0,
+		    cpu_idle_mwait_check_wakeup, (void *)mcpu_mwait) == 0) {
+			if (*mcpu_mwait == MWAIT_HALTED) {
+				i86_mwait(0, 0);
+			}
+			cpu_idle_exit(CPU_IDLE_CB_FLAG_IDLE);
+		}
 	}
 
 	/*
@@ -741,12 +792,12 @@ mp_disable_intr(int cpun)
 	/*
 	 * raise ipl to just below cross call
 	 */
-	splx(XC_MED_PIL-1);
+	splx(XC_SYS_PIL - 1);
 	/*
 	 *	set base spl to prevent the next swtch to idle from
 	 *	lowering back to ipl 0
 	 */
-	CPU->cpu_intr_actv |= (1 << (XC_MED_PIL-1));
+	CPU->cpu_intr_actv |= (1 << (XC_SYS_PIL - 1));
 	set_base_spl();
 	affinity_clear();
 	return (DDI_SUCCESS);
@@ -762,7 +813,7 @@ mp_enable_intr(int cpun)
 	/*
 	 * clear the interrupt active mask
 	 */
-	CPU->cpu_intr_actv &= ~(1 << (XC_MED_PIL-1));
+	CPU->cpu_intr_actv &= ~(1 << (XC_SYS_PIL - 1));
 	set_base_spl();
 	(void) spl0();
 	affinity_clear();
@@ -803,7 +854,7 @@ mach_get_platform(int owner)
 
 	/*
 	 * Save the version of the PSM module, in case we need to
-	 * bahave differently based on version.
+	 * behave differently based on version.
 	 */
 	mach_ver[0] = mach_ver[owner];
 
@@ -1045,12 +1096,9 @@ mach_smpinit(void)
 
 	psm_get_ipivect = pops->psm_get_ipivect;
 
-	(void) add_avintr((void *)NULL, XC_HI_PIL, xc_serv, "xc_hi_intr",
+	(void) add_avintr((void *)NULL, XC_HI_PIL, xc_serv, "xc_intr",
 	    (*pops->psm_get_ipivect)(XC_HI_PIL, PSM_INTR_IPI_HI),
-	    (caddr_t)X_CALL_HIPRI, NULL, NULL, NULL);
-	(void) add_avintr((void *)NULL, XC_MED_PIL, xc_serv, "xc_med_intr",
-	    (*pops->psm_get_ipivect)(XC_MED_PIL, PSM_INTR_IPI_LO),
-	    (caddr_t)X_CALL_MEDPRI, NULL, NULL, NULL);
+	    NULL, NULL, NULL, NULL);
 
 	(void) (*pops->psm_get_ipivect)(XC_CPUPOKE_PIL, PSM_INTR_POKE);
 }
@@ -1419,6 +1467,95 @@ mach_cpuid_start(processorid_t id, void *ctx)
 		return (0);
 #endif
 	return ((*pops->psm_cpu_start)(id, ctx));
+}
+
+/*
+ * Default handler to create device node for CPU.
+ * One reference count will be held on created device node.
+ */
+static int
+mach_cpu_create_devinfo(cpu_t *cp, dev_info_t **dipp)
+{
+	int rv, circ;
+	dev_info_t *dip;
+	static kmutex_t cpu_node_lock;
+	static dev_info_t *cpu_nex_devi = NULL;
+
+	ASSERT(cp != NULL);
+	ASSERT(dipp != NULL);
+	*dipp = NULL;
+
+	if (cpu_nex_devi == NULL) {
+		mutex_enter(&cpu_node_lock);
+		/* First check whether cpus exists. */
+		cpu_nex_devi = ddi_find_devinfo("cpus", -1, 0);
+		/* Create cpus if it doesn't exist. */
+		if (cpu_nex_devi == NULL) {
+			ndi_devi_enter(ddi_root_node(), &circ);
+			rv = ndi_devi_alloc(ddi_root_node(), "cpus",
+			    (pnode_t)DEVI_SID_NODEID, &dip);
+			if (rv != NDI_SUCCESS) {
+				mutex_exit(&cpu_node_lock);
+				cmn_err(CE_CONT,
+				    "?failed to create cpu nexus device.\n");
+				return (PSM_FAILURE);
+			}
+			ASSERT(dip != NULL);
+			(void) ndi_devi_online(dip, 0);
+			ndi_devi_exit(ddi_root_node(), circ);
+			cpu_nex_devi = dip;
+		}
+		mutex_exit(&cpu_node_lock);
+	}
+
+	/*
+	 * create a child node for cpu identified as 'cpu_id'
+	 */
+	ndi_devi_enter(cpu_nex_devi, &circ);
+	dip = ddi_add_child(cpu_nex_devi, "cpu", DEVI_SID_NODEID, cp->cpu_id);
+	if (dip == NULL) {
+		cmn_err(CE_CONT,
+		    "?failed to create device node for cpu%d.\n", cp->cpu_id);
+		rv = PSM_FAILURE;
+	} else {
+		*dipp = dip;
+		(void) ndi_hold_devi(dip);
+		rv = PSM_SUCCESS;
+	}
+	ndi_devi_exit(cpu_nex_devi, circ);
+
+	return (rv);
+}
+
+/*
+ * Create cpu device node in device tree and online it.
+ * Return created dip with reference count held if requested.
+ */
+int
+mach_cpu_create_device_node(struct cpu *cp, dev_info_t **dipp)
+{
+	int rv;
+	dev_info_t *dip = NULL;
+
+	ASSERT(psm_cpu_create_devinfo != NULL);
+	rv = psm_cpu_create_devinfo(cp, &dip);
+	if (rv == PSM_SUCCESS) {
+		cpuid_set_cpu_properties(dip, cp->cpu_id, cp->cpu_m.mcpu_cpi);
+		/* Recursively attach driver for parent nexus device. */
+		if (i_ddi_attach_node_hierarchy(ddi_get_parent(dip)) ==
+		    DDI_SUCCESS) {
+			/* Configure cpu itself and descendants. */
+			(void) ndi_devi_online(dip,
+			    NDI_ONLINE_ATTACH | NDI_CONFIG);
+		}
+		if (dipp != NULL) {
+			*dipp = dip;
+		} else {
+			(void) ndi_rele_devi(dip);
+		}
+	}
+
+	return (rv);
 }
 
 /*ARGSUSED*/

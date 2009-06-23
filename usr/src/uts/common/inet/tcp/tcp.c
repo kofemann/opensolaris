@@ -62,7 +62,6 @@
 #include <sys/isa_defs.h>
 #include <sys/md5.h>
 #include <sys/random.h>
-#include <sys/sodirect.h>
 #include <sys/uio.h>
 #include <sys/systm.h>
 #include <netinet/in.h>
@@ -217,23 +216,6 @@
  * behaviour. Once tcp_issocket is unset, its never set for the
  * life of that connection.
  *
- * In support of on-board asynchronous DMA hardware (e.g. Intel I/OAT)
- * two consoldiation private KAPIs are used to enqueue M_DATA mblk_t's
- * directly to the socket (sodirect) and start an asynchronous copyout
- * to a user-land receive-side buffer (uioa) when a blocking socket read
- * (e.g. read, recv, ...) is pending.
- *
- * This is accomplished when tcp_issocket is set and tcp_sodirect is not
- * NULL so points to an sodirect_t and if marked enabled then we enqueue
- * all mblk_t's directly to the socket.
- *
- * Further, if the sodirect_t sod_uioa and if marked enabled (due to a
- * blocking socket read, e.g. user-land read, recv, ...) then an asynchronous
- * copyout will be started directly to the user-land uio buffer. Also, as we
- * have a pending read, TCP's push logic can take into account the number of
- * bytes to be received and only awake the blocked read()er when the uioa_t
- * byte count has been satisfied.
- *
  * IPsec notes :
  *
  * Since a packet is always executed on the correct TCP perimeter
@@ -259,37 +241,6 @@
  */
 int tcp_squeue_wput = 2;	/* /etc/systems */
 int tcp_squeue_flag;
-
-/*
- * Macros for sodirect:
- *
- * SOD_PTR_ENTER(tcp, sodp) - for the tcp_t pointer "tcp" set the
- * sodirect_t pointer "sodp" to the socket/tcp shared sodirect_t
- * if it exists and is enabled, else to NULL. Note, in the current
- * sodirect implementation the sod_lockp must not be held across any
- * STREAMS call (e.g. putnext) else a "recursive mutex_enter" PANIC
- * will result as sod_lockp is the streamhead stdata.sd_lock.
- *
- * SOD_NOT_ENABLED(tcp) - return true if not a sodirect tcp_t or the
- * sodirect_t isn't enabled, usefull for ASSERT()ing that a recieve
- * side tcp code path dealing with a tcp_rcv_list or putnext() isn't
- * being used when sodirect code paths should be.
- */
-
-#define	SOD_PTR_ENTER(tcp, sodp)					\
-	(sodp) = (tcp)->tcp_sodirect;					\
-									\
-	if ((sodp) != NULL) {						\
-		mutex_enter((sodp)->sod_lockp);				\
-		if (!((sodp)->sod_state & SOD_ENABLED)) {		\
-			mutex_exit((sodp)->sod_lockp);			\
-			(sodp) = NULL;					\
-		}							\
-	}
-
-#define	SOD_NOT_ENABLED(tcp)						\
-	((tcp)->tcp_sodirect == NULL ||					\
-	    !((tcp)->tcp_sodirect->sod_state & SOD_ENABLED))
 
 /*
  * This controls how tiny a write must be before we try to copy it
@@ -741,7 +692,7 @@ static void	tcp_linger_interrupted(void *arg, mblk_t *mp, void *arg2);
 static void	tcp_random_init(void);
 int		tcp_random(void);
 static void	tcp_tli_accept(tcp_t *tcp, mblk_t *mp);
-static void	tcp_accept_swap(tcp_t *listener, tcp_t *acceptor,
+static int	tcp_accept_swap(tcp_t *listener, tcp_t *acceptor,
 		    tcp_t *eager);
 static int	tcp_adapt_ire(tcp_t *tcp, mblk_t *ire_mp);
 static in_port_t tcp_bindi(tcp_t *tcp, in_port_t port, const in6_addr_t *laddr,
@@ -918,7 +869,7 @@ static int	tcp_open(queue_t *, dev_t *, int, int, cred_t *, boolean_t);
 static int	tcp_openv4(queue_t *, dev_t *, int, int, cred_t *);
 static int	tcp_openv6(queue_t *, dev_t *, int, int, cred_t *);
 static int	tcp_tpi_close(queue_t *, int);
-static int	tcpclose_accept(queue_t *);
+static int	tcp_tpi_close_accept(queue_t *);
 
 static void	tcp_squeue_add(squeue_t *);
 static boolean_t tcp_zcopy_check(tcp_t *);
@@ -936,7 +887,8 @@ static int tcp_accept(sock_lower_handle_t, sock_lower_handle_t,
 	    sock_upper_handle_t, cred_t *);
 static int tcp_listen(sock_lower_handle_t, int, cred_t *);
 static int tcp_post_ip_bind(tcp_t *, mblk_t *, int, cred_t *, pid_t);
-static int tcp_do_listen(conn_t *, int, cred_t *);
+static int tcp_do_listen(conn_t *, struct sockaddr *, socklen_t, int, cred_t *,
+    boolean_t);
 static int tcp_do_connect(conn_t *, const struct sockaddr *, socklen_t,
     cred_t *, pid_t);
 static int tcp_do_bind(conn_t *, struct sockaddr *, socklen_t, cred_t *,
@@ -1017,7 +969,7 @@ struct qinit tcp_fallback_sock_winit = {
  * been created.
  */
 struct qinit tcp_acceptor_rinit = {
-	NULL, (pfi_t)tcp_rsrv, NULL, tcpclose_accept, NULL, &tcp_winfo
+	NULL, (pfi_t)tcp_rsrv, NULL, tcp_tpi_close_accept, NULL, &tcp_winfo
 };
 
 struct qinit tcp_acceptor_winit = {
@@ -1700,9 +1652,9 @@ tcp_cleanup(tcp_t *tcp)
 		crfree(connp->conn_cred);
 		connp->conn_cred = NULL;
 	}
-	if (connp->conn_peercred != NULL) {
-		crfree(connp->conn_peercred);
-		connp->conn_peercred = NULL;
+	if (connp->conn_effective_cred != NULL) {
+		crfree(connp->conn_effective_cred);
+		connp->conn_effective_cred = NULL;
 	}
 	ipcl_conn_cleanup(connp);
 	connp->conn_flags = IPCL_TCPCONN;
@@ -1939,6 +1891,7 @@ tcp_tli_accept(tcp_t *listener, mblk_t *mp)
 	mblk_t	*ok_mp;
 	mblk_t	*mp1;
 	tcp_stack_t	*tcps = listener->tcp_tcps;
+	int	error;
 
 	if ((mp->b_wptr - mp->b_rptr) < sizeof (*tcr)) {
 		tcp_err_ack(listener, mp, TPROTO, 0);
@@ -2193,7 +2146,15 @@ tcp_tli_accept(tcp_t *listener, mblk_t *mp)
 	 * the tcp_accept_swap is done since it would be dangerous to
 	 * let the application start using the new fd prior to the swap.
 	 */
-	tcp_accept_swap(listener, acceptor, eager);
+	error = tcp_accept_swap(listener, acceptor, eager);
+	if (error != 0) {
+		CONN_DEC_REF(acceptor->tcp_connp);
+		CONN_DEC_REF(eager->tcp_connp);
+		freemsg(ok_mp);
+		/* Original mp has been freed by now, so use mp1 */
+		tcp_err_ack(listener, mp1, TSYSERR, error);
+		return;
+	}
 
 	/*
 	 * tcp_accept_swap unlinks eager from listener but does not drop
@@ -2394,10 +2355,11 @@ finish:
  *
  * See the block comment on top of tcp_accept() and tcp_wput_accept().
  */
-static void
+static int
 tcp_accept_swap(tcp_t *listener, tcp_t *acceptor, tcp_t *eager)
 {
 	conn_t	*econnp, *aconnp;
+	cred_t	*effective_cred = NULL;
 
 	ASSERT(eager->tcp_rq == listener->tcp_rq);
 	ASSERT(eager->tcp_detached && !acceptor->tcp_detached);
@@ -2405,6 +2367,27 @@ tcp_accept_swap(tcp_t *listener, tcp_t *acceptor, tcp_t *eager)
 	ASSERT(!TCP_IS_SOCKET(acceptor));
 	ASSERT(!TCP_IS_SOCKET(eager));
 	ASSERT(!TCP_IS_SOCKET(listener));
+
+	econnp = eager->tcp_connp;
+	aconnp = acceptor->tcp_connp;
+
+	/*
+	 * Trusted Extensions may need to use a security label that is
+	 * different from the acceptor's label on MLP and MAC-Exempt
+	 * sockets. If this is the case, the required security label
+	 * already exists in econnp->conn_effective_cred. Use this label
+	 * to generate a new effective cred for the acceptor.
+	 *
+	 * We allow for potential application level retry attempts by
+	 * checking for transient errors before modifying eager.
+	 */
+	if (is_system_labeled() &&
+	    aconnp->conn_cred != NULL && econnp->conn_effective_cred != NULL) {
+		effective_cred = copycred_from_tslabel(aconnp->conn_cred,
+		    crgetlabel(econnp->conn_effective_cred), KM_NOSLEEP);
+		if (effective_cred == NULL)
+			return (ENOMEM);
+	}
 
 	acceptor->tcp_detached = B_TRUE;
 	/*
@@ -2424,9 +2407,6 @@ tcp_accept_swap(tcp_t *listener, tcp_t *acceptor, tcp_t *eager)
 	eager->tcp_rq = acceptor->tcp_rq;
 	eager->tcp_wq = acceptor->tcp_wq;
 
-	econnp = eager->tcp_connp;
-	aconnp = acceptor->tcp_connp;
-
 	eager->tcp_rq->q_ptr = econnp;
 	eager->tcp_wq->q_ptr = econnp;
 
@@ -2445,22 +2425,24 @@ tcp_accept_swap(tcp_t *listener, tcp_t *acceptor, tcp_t *eager)
 
 	econnp->conn_dev = aconnp->conn_dev;
 	econnp->conn_minor_arena = aconnp->conn_minor_arena;
+
 	ASSERT(econnp->conn_minor_arena != NULL);
 	if (eager->tcp_cred != NULL)
 		crfree(eager->tcp_cred);
 	eager->tcp_cred = econnp->conn_cred = aconnp->conn_cred;
+	if (econnp->conn_effective_cred != NULL)
+		crfree(econnp->conn_effective_cred);
+	econnp->conn_effective_cred = effective_cred;
+	aconnp->conn_cred = NULL;
+	ASSERT(aconnp->conn_effective_cred == NULL);
+
 	ASSERT(econnp->conn_netstack == aconnp->conn_netstack);
 	ASSERT(eager->tcp_tcps == acceptor->tcp_tcps);
-
-	aconnp->conn_cred = NULL;
 
 	econnp->conn_zoneid = aconnp->conn_zoneid;
 	econnp->conn_allzones = aconnp->conn_allzones;
 
-	econnp->conn_mac_exempt = aconnp->conn_mac_exempt;
 	aconnp->conn_mac_exempt = B_FALSE;
-
-	ASSERT(aconnp->conn_peercred == NULL);
 
 	/* Do the IPC initialization */
 	CONN_INC_REF(econnp);
@@ -2471,6 +2453,7 @@ tcp_accept_swap(tcp_t *listener, tcp_t *acceptor, tcp_t *eager)
 
 	/* Done with old IPC. Drop its ref on its connp */
 	CONN_DEC_REF(aconnp);
+	return (0);
 }
 
 
@@ -3069,20 +3052,12 @@ tcp_tpi_bind(tcp_t *tcp, mblk_t *mp)
 		return;
 	}
 
-	error = tcp_bind_check(connp, sa, len, cr,
-	    tbr->PRIM_type != O_T_BIND_REQ);
-	if (error == 0) {
-		if (tcp->tcp_family == AF_INET) {
-			sin = (sin_t *)sa;
-			sin->sin_port = tcp->tcp_lport;
-		} else {
-			sin6 = (sin6_t *)sa;
-			sin6->sin6_port = tcp->tcp_lport;
-		}
-
-		if (backlog > 0) {
-			error = tcp_do_listen(connp, backlog, cr);
-		}
+	if (backlog > 0) {
+		error = tcp_do_listen(connp, sa, len, backlog, DB_CRED(mp),
+		    tbr->PRIM_type != O_T_BIND_REQ);
+	} else {
+		error = tcp_do_bind(connp, sa, len, DB_CRED(mp),
+		    tbr->PRIM_type != O_T_BIND_REQ);
 	}
 done:
 	if (error > 0) {
@@ -3090,6 +3065,16 @@ done:
 	} else if (error < 0) {
 		tcp_err_ack(tcp, mp, -error, 0);
 	} else {
+		/*
+		 * Update port information as sockfs/tpi needs it for checking
+		 */
+		if (tcp->tcp_family == AF_INET) {
+			sin = (sin_t *)sa;
+			sin->sin_port = tcp->tcp_lport;
+		} else {
+			sin6 = (sin6_t *)sa;
+			sin6->sin6_port = tcp->tcp_lport;
+		}
 		mp->b_datap->db_type = M_PCPROTO;
 		tbr->PRIM_type = T_BIND_ACK;
 		putnext(tcp->tcp_rq, mp);
@@ -3440,7 +3425,6 @@ tcp_clean_death(tcp_t *tcp, int err, uint8_t tag)
 	queue_t	*q;
 	conn_t	*connp = tcp->tcp_connp;
 	tcp_stack_t	*tcps = tcp->tcp_tcps;
-	sodirect_t	*sodp;
 
 	TCP_CLD_STAT(tag);
 
@@ -3490,13 +3474,6 @@ tcp_clean_death(tcp_t *tcp, int err, uint8_t tag)
 	}
 
 	TCP_STAT(tcps, tcp_clean_death_nondetached);
-
-	/* If sodirect, not anymore */
-	SOD_PTR_ENTER(tcp, sodp);
-	if (sodp != NULL) {
-		tcp->tcp_sodirect = NULL;
-		mutex_exit(sodp->sod_lockp);
-	}
 
 	q = tcp->tcp_rq;
 
@@ -3785,7 +3762,7 @@ done:
 }
 
 static int
-tcpclose_accept(queue_t *q)
+tcp_tpi_close_accept(queue_t *q)
 {
 	vmem_t	*minor_arena;
 	dev_t	conn_dev;
@@ -3887,11 +3864,6 @@ tcp_close_output(void *arg, mblk_t *mp, void *arg2)
 		 */
 		/* FALLTHRU */
 	default:
-		if (tcp->tcp_sodirect != NULL) {
-			/* Ok, no more sodirect */
-			tcp->tcp_sodirect = NULL;
-		}
-
 		if (tcp->tcp_fused)
 			tcp_unfuse(tcp);
 
@@ -4058,7 +4030,6 @@ finish:
 	cv_signal(&tcp->tcp_closecv);
 	mutex_exit(&tcp->tcp_closelock);
 }
-
 
 /*
  * Clean up the b_next and b_prev fields of every mblk pointed at by *mpp.
@@ -5048,7 +5019,7 @@ tcp_get_conn(void *arg, tcp_stack_t *tcps)
 	squeue_t		*sqp = (squeue_t *)arg;
 	tcp_squeue_priv_t 	*tcp_time_wait;
 	netstack_t		*ns;
-	mblk_t			*rsrv_mp;
+	mblk_t			*tcp_rsrv_mp = NULL;
 
 	tcp_time_wait =
 	    *((tcp_squeue_priv_t **)squeue_getprivate(sqp, SQPRIVATE_TCP));
@@ -5077,20 +5048,23 @@ tcp_get_conn(void *arg, tcp_stack_t *tcps)
 	}
 	mutex_exit(&tcp_time_wait->tcp_time_wait_lock);
 	/*
-	 * Pre-allocate the tcp_rsrv_mp.  This mblk will not be freed
-	 * until this conn_t/tcp_t is freed at ipcl_conn_destroy().
+	 * Pre-allocate the tcp_rsrv_mp. This mblk will not be freed until
+	 * this conn_t/tcp_t is freed at ipcl_conn_destroy().
 	 */
-	if ((rsrv_mp = allocb(0, BPRI_HI)) == NULL)
+	tcp_rsrv_mp = allocb(0, BPRI_HI);
+	if (tcp_rsrv_mp == NULL)
 		return (NULL);
+
 	if ((connp = ipcl_conn_create(IPCL_TCPCONN, KM_NOSLEEP,
 	    tcps->tcps_netstack)) == NULL) {
-		freeb(rsrv_mp);
+		freeb(tcp_rsrv_mp);
 		return (NULL);
 	}
-	tcp = connp->conn_tcp;
-	tcp->tcp_rsrv_mp = rsrv_mp;
 
+	tcp = connp->conn_tcp;
+	tcp->tcp_rsrv_mp = tcp_rsrv_mp;
 	mutex_init(&tcp->tcp_rsrv_mp_lock, NULL, MUTEX_DEFAULT, NULL);
+
 	tcp->tcp_tcps = tcps;
 	TCPS_REFHOLD(tcps);
 
@@ -5112,7 +5086,6 @@ tcp_update_label(tcp_t *tcp, const cred_t *cr)
 		int added;
 
 		if (tsol_compute_label(cr, tcp->tcp_remote, optbuf,
-		    connp->conn_mac_exempt,
 		    tcp->tcp_tcps->tcps_netstack->netstack_ip) != 0)
 			return (B_FALSE);
 
@@ -5137,7 +5110,6 @@ tcp_update_label(tcp_t *tcp, const cred_t *cr)
 		uchar_t optbuf[TSOL_MAX_IPV6_OPTION];
 
 		if (tsol_compute_label_v6(cr, &tcp->tcp_remote_v6, optbuf,
-		    connp->conn_mac_exempt,
 		    tcp->tcp_tcps->tcps_netstack->netstack_ip) != 0)
 			return (B_FALSE);
 		if (tsol_update_sticky(&tcp->tcp_sticky_ipp,
@@ -5399,28 +5371,25 @@ tcp_conn_request(void *arg, mblk_t *mp, void *arg2)
 		goto error3;
 
 	eager = econnp->conn_tcp;
-
-	/*
-	 * Pre-allocate the T_ordrel_ind mblk for TPI socket so that at close
-	 * time, we will always have that to send up.  Otherwise, we need to do
-	 * special handling in case the allocation fails at that time.
-	 */
 	ASSERT(eager->tcp_ordrel_mp == NULL);
-	if (!IPCL_IS_NONSTR(econnp) &&
-	    (eager->tcp_ordrel_mp = mi_tpi_ordrel_ind()) == NULL)
-		goto error3;
 
+	if (!IPCL_IS_NONSTR(econnp)) {
+		/*
+		 * Pre-allocate the T_ordrel_ind mblk for TPI socket so that
+		 * at close time, we will always have that to send up.
+		 * Otherwise, we need to do special handling in case the
+		 * allocation fails at that time.
+		 */
+		if ((eager->tcp_ordrel_mp = mi_tpi_ordrel_ind()) == NULL)
+			goto error3;
+	}
 	/* Inherit various TCP parameters from the listener */
 	eager->tcp_naglim = tcp->tcp_naglim;
-	eager->tcp_first_timer_threshold =
-	    tcp->tcp_first_timer_threshold;
-	eager->tcp_second_timer_threshold =
-	    tcp->tcp_second_timer_threshold;
+	eager->tcp_first_timer_threshold = tcp->tcp_first_timer_threshold;
+	eager->tcp_second_timer_threshold = tcp->tcp_second_timer_threshold;
 
-	eager->tcp_first_ctimer_threshold =
-	    tcp->tcp_first_ctimer_threshold;
-	eager->tcp_second_ctimer_threshold =
-	    tcp->tcp_second_ctimer_threshold;
+	eager->tcp_first_ctimer_threshold = tcp->tcp_first_ctimer_threshold;
+	eager->tcp_second_ctimer_threshold = tcp->tcp_second_ctimer_threshold;
 
 	/*
 	 * tcp_adapt_ire() may change tcp_rwnd according to the ire metrics.
@@ -5456,31 +5425,71 @@ tcp_conn_request(void *arg, mblk_t *mp, void *arg2)
 	econnp->conn_cred = eager->tcp_cred = credp = connp->conn_cred;
 	crhold(credp);
 
-	/*
-	 * If the caller has the process-wide flag set, then default to MAC
-	 * exempt mode.  This allows read-down to unlabeled hosts.
-	 */
-	if (getpflags(NET_MAC_AWARE, credp) != 0)
-		econnp->conn_mac_exempt = B_TRUE;
-
+	ASSERT(econnp->conn_effective_cred == NULL);
 	if (is_system_labeled()) {
 		cred_t *cr;
+		ts_label_t *tsl;
 
-		if (connp->conn_mlp_type != mlptSingle) {
-			cr = econnp->conn_peercred = msg_getcred(mp, NULL);
-			if (cr != NULL)
-				crhold(cr);
-			else
-				cr = econnp->conn_cred;
-			DTRACE_PROBE2(mlp_syn_accept, conn_t *,
-			    econnp, cred_t *, cr)
+		/*
+		 * If this is an MLP connection or a MAC-Exempt connection
+		 * with an unlabeled node, packets are to be
+		 * exchanged using the security label of the received
+		 * SYN packet instead of the server application's label.
+		 */
+		if ((cr = msg_getcred(mp, NULL)) != NULL &&
+		    (tsl = crgetlabel(cr)) != NULL &&
+		    (connp->conn_mlp_type != mlptSingle ||
+		    (connp->conn_mac_exempt == B_TRUE &&
+		    (tsl->tsl_flags & TSLF_UNLABELED)))) {
+			if ((econnp->conn_effective_cred =
+			    copycred_from_tslabel(econnp->conn_cred,
+			    tsl, KM_NOSLEEP)) != NULL) {
+				DTRACE_PROBE2(
+				    syn_accept_peerlabel,
+				    conn_t *, econnp, cred_t *,
+				    econnp->conn_effective_cred);
+			} else {
+				DTRACE_PROBE3(
+				    tx__ip__log__error__set__eagercred__tcp,
+				    char *,
+				    "SYN mp(1) label on eager connp(2) failed",
+				    mblk_t *, mp, conn_t *, econnp);
+				goto error3;
+			}
 		} else {
-			cr = econnp->conn_cred;
 			DTRACE_PROBE2(syn_accept, conn_t *,
-			    econnp, cred_t *, cr)
+			    econnp, cred_t *, econnp->conn_cred)
 		}
 
-		if (!tcp_update_label(eager, cr)) {
+		/*
+		 * Verify the destination is allowed to receive packets
+		 * at the security label of the SYN-ACK we are generating.
+		 * tsol_check_dest() may create a new effective cred for
+		 * this connection with a modified label or label flags.
+		 */
+		if (IN6_IS_ADDR_V4MAPPED(&econnp->conn_remv6)) {
+			uint32_t dst;
+			IN6_V4MAPPED_TO_IPADDR(&econnp->conn_remv6, dst);
+			err = tsol_check_dest(CONN_CRED(econnp), &dst,
+			    IPV4_VERSION, B_FALSE, &cr);
+		} else {
+			err = tsol_check_dest(CONN_CRED(econnp),
+			    &econnp->conn_remv6, IPV6_VERSION,
+			    B_FALSE, &cr);
+		}
+		if (err != 0)
+			goto error3;
+		if (cr != NULL) {
+			if (econnp->conn_effective_cred != NULL)
+				crfree(econnp->conn_effective_cred);
+			econnp->conn_effective_cred = cr;
+		}
+
+		/*
+		 * Generate the security label to be used in the text of
+		 * this connection's outgoing packets.
+		 */
+		if (!tcp_update_label(eager, CONN_CRED(econnp))) {
 			DTRACE_PROBE3(
 			    tx__ip__log__error__connrequest__tcp,
 			    char *, "eager connp(1) label on SYN mp(2) failed",
@@ -6158,6 +6167,23 @@ tcp_connect_ipv4(tcp_t *tcp, ipaddr_t *dstaddrp, in_port_t dstport,
 		goto failed;
 	}
 
+	/*
+	 * Verify the destination is allowed to receive packets
+	 * at the security label of the connection we are initiating.
+	 * tsol_check_dest() may create a new effective cred for this
+	 * connection with a modified label or label flags.
+	 */
+	if (is_system_labeled()) {
+		ASSERT(tcp->tcp_connp->conn_effective_cred == NULL);
+		if ((error = tsol_check_dest(CONN_CRED(tcp->tcp_connp),
+		    &dstaddr, IPV4_VERSION, tcp->tcp_connp->conn_mac_exempt,
+		    &tcp->tcp_connp->conn_effective_cred)) != 0) {
+			if (error != EHOSTUNREACH)
+				error = -TSYSERR;
+			goto failed;
+		}
+	}
+
 	tcp->tcp_ipha->ipha_dst = dstaddr;
 	IN6_IPADDR_TO_V4MAPPED(dstaddr, &tcp->tcp_remote_v6);
 
@@ -6340,6 +6366,23 @@ tcp_connect_ipv6(tcp_t *tcp, in6_addr_t *dstaddrp, in_port_t dstport,
 	    (dstport == tcp->tcp_lport)) {
 		error = -TBADADDR;
 		goto failed;
+	}
+
+	/*
+	 * Verify the destination is allowed to receive packets
+	 * at the security label of the connection we are initiating.
+	 * check_dest may create a new effective cred for this
+	 * connection with a modified label or label flags.
+	 */
+	if (is_system_labeled()) {
+		ASSERT(tcp->tcp_connp->conn_effective_cred == NULL);
+		if ((error = tsol_check_dest(CONN_CRED(tcp->tcp_connp),
+		    dstaddrp, IPV6_VERSION, tcp->tcp_connp->conn_mac_exempt,
+		    &tcp->tcp_connp->conn_effective_cred)) != 0) {
+			if (error != EHOSTUNREACH)
+				error = -TSYSERR;
+			goto failed;
+		}
 	}
 
 	tcp->tcp_ip6h->ip6_dst = *dstaddrp;
@@ -6783,7 +6826,7 @@ tcp_eager_kill(void *arg, mblk_t *mp, void *arg2)
 		CONN_DEC_REF(listener->tcp_connp);
 	}
 
-	if (eager->tcp_state > TCPS_BOUND)
+	if (eager->tcp_state != TCPS_CLOSED)
 		tcp_close_detached(eager);
 }
 
@@ -7472,6 +7515,11 @@ tcp_reinit(tcp_t *tcp)
 	conn_delete_ire(tcp->tcp_connp, NULL);
 	tcp_ipsec_cleanup(tcp);
 
+	if (tcp->tcp_connp->conn_effective_cred != NULL) {
+		crfree(tcp->tcp_connp->conn_effective_cred);
+		tcp->tcp_connp->conn_effective_cred = NULL;
+	}
+
 	if (tcp->tcp_conn_req_max != 0) {
 		/*
 		 * This is the case when a TLI program uses the same
@@ -7834,9 +7882,6 @@ tcp_reinit_values(tcp)
 	ASSERT(!tcp->tcp_kssl_pending);
 	PRESERVE(tcp->tcp_kssl_ent);
 
-	/* Sodirect */
-	tcp->tcp_sodirect = NULL;
-
 	tcp->tcp_closemp_used = B_FALSE;
 
 	PRESERVE(tcp->tcp_rsrv_mp);
@@ -7933,9 +7978,6 @@ tcp_init_values(tcp_t *tcp)
 	tcp->tcp_fuse_rcv_hiwater = 0;
 	tcp->tcp_fuse_rcv_unread_hiwater = 0;
 	tcp->tcp_fuse_rcv_unread_cnt = 0;
-
-	/* Sodirect */
-	tcp->tcp_sodirect = NULL;
 
 	/* Initialize the header template */
 	if (tcp->tcp_ipversion == IPV4_VERSION) {
@@ -9117,6 +9159,12 @@ tcp_mss_set(tcp_t *tcp, uint32_t mss, boolean_t do_ss)
 	if ((mss << 2) > tcp->tcp_xmit_hiwater)
 		tcp->tcp_xmit_hiwater = mss << 2;
 
+	/*
+	 * Set the xmit_lowater to at least twice of MSS.
+	 */
+	if ((mss << 1) > tcp->tcp_xmit_lowater)
+		tcp->tcp_xmit_lowater = mss << 1;
+
 	if (do_ss) {
 		/*
 		 * Either the tcp_cwnd is as yet uninitialized, or mss is
@@ -9353,8 +9401,8 @@ tcp_open(queue_t *q, dev_t *devp, int flag, int sflag, cred_t *credp,
 		q->q_qinfo = &tcp_acceptor_rinit;
 		/*
 		 * the conn_dev and minor_arena will be subsequently used by
-		 * tcp_wput_accept() and tcpclose_accept() to figure out the
-		 * minor device number for this connection from the q_ptr.
+		 * tcp_wput_accept() and tcp_tpi_close_accept() to figure out
+		 * the minor device number for this connection from the q_ptr.
 		 */
 		RD(q)->q_ptr = (void *)conn_dev;
 		WR(q)->q_qinfo = &tcp_acceptor_winit;
@@ -9380,10 +9428,11 @@ tcp_open(queue_t *q, dev_t *devp, int flag, int sflag, cred_t *credp,
 	ASSERT(q->q_qinfo == &tcp_rinitv4 || q->q_qinfo == &tcp_rinitv6);
 	ASSERT(WR(q)->q_qinfo == &tcp_winit);
 
+	tcp = connp->conn_tcp;
+
 	if (issocket) {
 		WR(q)->q_qinfo = &tcp_sock_winit;
 	} else {
-		tcp = connp->conn_tcp;
 #ifdef  _ILP32
 		tcp->tcp_acceptor_id = (t_uscalar_t)RD(q);
 #else
@@ -9841,7 +9890,7 @@ tcp_getsockopt(sock_lower_handle_t proto_handle, int level, int option_name,
 
 	optvalp_buf = kmem_alloc(max_optbuf_len, KM_SLEEP);
 
-	error = squeue_synch_enter(sqp, connp, 0);
+	error = squeue_synch_enter(sqp, connp, NULL);
 	if (error == ENOMEM) {
 		return (ENOMEM);
 	}
@@ -10769,7 +10818,7 @@ tcp_setsockopt(sock_lower_handle_t proto_handle, int level, int option_name,
 		}
 	}
 
-	error = squeue_synch_enter(sqp, connp, 0);
+	error = squeue_synch_enter(sqp, connp, NULL);
 	if (error == ENOMEM) {
 		return (ENOMEM);
 	}
@@ -11409,8 +11458,8 @@ tcp_rcv_drain(tcp_t *tcp)
 	if (tcp->tcp_listener != NULL)
 		return (ret);
 
-	/* Can't be a non-STREAMS connection or sodirect enabled */
-	ASSERT((!IPCL_IS_NONSTR(tcp->tcp_connp)) && SOD_NOT_ENABLED(tcp));
+	/* Can't be a non-STREAMS connection */
+	ASSERT(!IPCL_IS_NONSTR(tcp->tcp_connp));
 
 	/* No need for the push timer now. */
 	if (tcp->tcp_push_tid != 0) {
@@ -11494,224 +11543,6 @@ tcp_rcv_enqueue(tcp_t *tcp, mblk_t *mp, uint_t seg_len)
 	tcp->tcp_rcv_last_tail = mp;
 	tcp->tcp_rcv_cnt += seg_len;
 	tcp->tcp_rwnd -= seg_len;
-}
-
-/*
- * The tcp_rcv_sod_XXX() functions enqueue data directly to the socket
- * above, in addition when uioa is enabled schedule an asynchronous uio
- * prior to enqueuing. They implement the combinhed semantics of the
- * tcp_rcv_XXX() functions, tcp_rcv_list push logic, and STREAMS putnext()
- * canputnext(), i.e. flow-control with backenable.
- *
- * tcp_sod_wakeup() is called where tcp_rcv_drain() would be called in the
- * non sodirect connection but as there are no tcp_tcv_list mblk_t's we deal
- * with the rcv_wnd and push timer and call the sodirect wakeup function.
- *
- * Must be called with sodp->sod_lockp held and will return with the lock
- * released.
- */
-static uint_t
-tcp_rcv_sod_wakeup(tcp_t *tcp, sodirect_t *sodp)
-{
-	queue_t		*q = tcp->tcp_rq;
-	uint_t		thwin;
-	tcp_stack_t	*tcps = tcp->tcp_tcps;
-	uint_t		ret = 0;
-
-	/* Can't be an eager connection */
-	ASSERT(tcp->tcp_listener == NULL);
-
-	/* Caller must have lock held */
-	ASSERT(MUTEX_HELD(sodp->sod_lockp));
-
-	/* Sodirect mode so must not be a tcp_rcv_list */
-	ASSERT(tcp->tcp_rcv_list == NULL);
-
-	if (SOD_QFULL(sodp)) {
-		/* Q is full, mark Q for need backenable */
-		SOD_QSETBE(sodp);
-	}
-	/* Last advertised rwnd, i.e. rwnd last sent in a packet */
-	thwin = ((uint_t)BE16_TO_U16(tcp->tcp_tcph->th_win))
-	    << tcp->tcp_rcv_ws;
-	/* This is peer's calculated send window (our available rwnd). */
-	thwin -= tcp->tcp_rnxt - tcp->tcp_rack;
-	/*
-	 * Increase the receive window to max.  But we need to do receiver
-	 * SWS avoidance.  This means that we need to check the increase of
-	 * of receive window is at least 1 MSS.
-	 */
-	if (!SOD_QFULL(sodp) && (q->q_hiwat - thwin >= tcp->tcp_mss)) {
-		/*
-		 * If the window that the other side knows is less than max
-		 * deferred acks segments, send an update immediately.
-		 */
-		if (thwin < tcp->tcp_rack_cur_max * tcp->tcp_mss) {
-			BUMP_MIB(&tcps->tcps_mib, tcpOutWinUpdate);
-			ret = TH_ACK_NEEDED;
-		}
-		tcp->tcp_rwnd = q->q_hiwat;
-	}
-
-	if (!SOD_QEMPTY(sodp)) {
-		/* Wakeup to socket */
-		sodp->sod_state &= SOD_WAKE_CLR;
-		sodp->sod_state |= SOD_WAKE_DONE;
-		(sodp->sod_wakeup)(sodp);
-		/* wakeup() does the mutex_ext() */
-	} else {
-		/* Q is empty, no need to wake */
-		sodp->sod_state &= SOD_WAKE_CLR;
-		sodp->sod_state |= SOD_WAKE_NOT;
-		mutex_exit(sodp->sod_lockp);
-	}
-
-	/* No need for the push timer now. */
-	if (tcp->tcp_push_tid != 0) {
-		(void) TCP_TIMER_CANCEL(tcp, tcp->tcp_push_tid);
-		tcp->tcp_push_tid = 0;
-	}
-
-	return (ret);
-}
-
-/*
- * Called where tcp_rcv_enqueue()/putnext(RD(q)) would be. For M_DATA
- * mblk_t's if uioa enabled then start a uioa asynchronous copy directly
- * to the user-land buffer and flag the mblk_t as such.
- *
- * Also, handle tcp_rwnd.
- */
-uint_t
-tcp_rcv_sod_enqueue(tcp_t *tcp, sodirect_t *sodp, mblk_t *mp, uint_t seg_len)
-{
-	uioa_t		*uioap = &sodp->sod_uioa;
-	boolean_t	qfull;
-	uint_t		thwin;
-
-	/* Can't be an eager connection */
-	ASSERT(tcp->tcp_listener == NULL);
-
-	/* Caller must have lock held */
-	ASSERT(MUTEX_HELD(sodp->sod_lockp));
-
-	/* Sodirect mode so must not be a tcp_rcv_list */
-	ASSERT(tcp->tcp_rcv_list == NULL);
-
-	/* Passed in segment length must be equal to mblk_t chain data size */
-	ASSERT(seg_len == msgdsize(mp));
-
-	if (DB_TYPE(mp) != M_DATA) {
-		/* Only process M_DATA mblk_t's */
-		goto enq;
-	}
-	if (uioap->uioa_state & UIOA_ENABLED) {
-		/* Uioa is enabled */
-		mblk_t		*mp1 = mp;
-		mblk_t		*lmp = NULL;
-
-		if (seg_len > uioap->uio_resid) {
-			/*
-			 * There isn't enough uio space for the mblk_t chain
-			 * so disable uioa such that this and any additional
-			 * mblk_t data is handled by the socket and schedule
-			 * the socket for wakeup to finish this uioa.
-			 */
-			uioap->uioa_state &= UIOA_CLR;
-			uioap->uioa_state |= UIOA_FINI;
-			if (sodp->sod_state & SOD_WAKE_NOT) {
-				sodp->sod_state &= SOD_WAKE_CLR;
-				sodp->sod_state |= SOD_WAKE_NEED;
-			}
-			goto enq;
-		}
-		do {
-			uint32_t	len = MBLKL(mp1);
-
-			if (!uioamove(mp1->b_rptr, len, UIO_READ, uioap)) {
-				/* Scheduled, mark dblk_t as such */
-				DB_FLAGS(mp1) |= DBLK_UIOA;
-			} else {
-				/* Error, turn off async processing */
-				uioap->uioa_state &= UIOA_CLR;
-				uioap->uioa_state |= UIOA_FINI;
-				break;
-			}
-			lmp = mp1;
-		} while ((mp1 = mp1->b_cont) != NULL);
-
-		if (mp1 != NULL || uioap->uio_resid == 0) {
-			/*
-			 * Not all mblk_t(s) uioamoved (error) or all uio
-			 * space has been consumed so schedule the socket
-			 * for wakeup to finish this uio.
-			 */
-			sodp->sod_state &= SOD_WAKE_CLR;
-			sodp->sod_state |= SOD_WAKE_NEED;
-
-			/* Break the mblk chain if neccessary. */
-			if (mp1 != NULL && lmp != NULL) {
-				mp->b_next = mp1;
-				lmp->b_cont = NULL;
-			}
-		}
-	} else if (uioap->uioa_state & UIOA_FINI) {
-		/*
-		 * Post UIO_ENABLED waiting for socket to finish processing
-		 * so just enqueue and update tcp_rwnd.
-		 */
-		if (SOD_QFULL(sodp))
-			tcp->tcp_rwnd -= seg_len;
-	} else if (sodp->sod_want > 0) {
-		/*
-		 * Uioa isn't enabled but sodirect has a pending read().
-		 */
-		if (SOD_QCNT(sodp) + seg_len >= sodp->sod_want) {
-			if (sodp->sod_state & SOD_WAKE_NOT) {
-				/* Schedule socket for wakeup */
-				sodp->sod_state &= SOD_WAKE_CLR;
-				sodp->sod_state |= SOD_WAKE_NEED;
-			}
-			tcp->tcp_rwnd -= seg_len;
-		}
-	} else if (SOD_QCNT(sodp) + seg_len >= tcp->tcp_rq->q_hiwat >> 3) {
-		/*
-		 * No pending sodirect read() so used the default
-		 * TCP push logic to guess that a push is needed.
-		 */
-		if (sodp->sod_state & SOD_WAKE_NOT) {
-			/* Schedule socket for wakeup */
-			sodp->sod_state &= SOD_WAKE_CLR;
-			sodp->sod_state |= SOD_WAKE_NEED;
-		}
-		tcp->tcp_rwnd -= seg_len;
-	} else {
-		/* Just update tcp_rwnd */
-		tcp->tcp_rwnd -= seg_len;
-	}
-enq:
-	qfull = SOD_QFULL(sodp);
-
-	(sodp->sod_enqueue)(sodp, mp);
-
-	if (! qfull && SOD_QFULL(sodp)) {
-		/* Wasn't QFULL, now QFULL, need back-enable */
-		SOD_QSETBE(sodp);
-	}
-
-	/*
-	 * Check to see if remote avail swnd < mss due to delayed ACK,
-	 * first get advertised rwnd.
-	 */
-	thwin = ((uint_t)BE16_TO_U16(tcp->tcp_tcph->th_win));
-	/* Minus delayed ACK count */
-	thwin -= tcp->tcp_rnxt - tcp->tcp_rack;
-	if (thwin < tcp->tcp_mss) {
-		/* Remote avail swnd < mss, need ACK now */
-		return (TH_ACK_NEEDED);
-	}
-
-	return (0);
 }
 
 /*
@@ -12529,8 +12360,7 @@ tcp_send_conn_ind(void *arg, mblk_t *mp, void *arg2)
 		conn_ind->OPT_length = 0;
 		conn_ind->OPT_offset = 0;
 	}
-	if (listener->tcp_state == TCPS_CLOSED ||
-	    TCP_IS_DETACHED(listener)) {
+	if (listener->tcp_state != TCPS_LISTEN) {
 		/*
 		 * If listener has closed, it would have caused a
 		 * a cleanup/blowoff to happen for the eager. We
@@ -13086,8 +12916,15 @@ tcp_rput_data(void *arg, mblk_t *mp, void *arg2)
 			 * until after some checks below.
 			 */
 			mp1 = NULL;
+			/*
+			 * tcp_sendmsg() checks tcp_state without entering
+			 * the squeue so tcp_state should be updated before
+			 * sending up connection confirmation
+			 */
+			tcp->tcp_state = TCPS_ESTABLISHED;
 			if (!tcp_conn_con(tcp, iphdr, tcph, mp,
 			    tcp->tcp_loopback ? &mp1 : NULL)) {
+				tcp->tcp_state = TCPS_SYN_SENT;
 				freemsg(mp);
 				return;
 			}
@@ -13098,7 +12935,6 @@ tcp_rput_data(void *arg, mblk_t *mp, void *arg2)
 			/* One for the SYN */
 			tcp->tcp_suna = tcp->tcp_iss + 1;
 			tcp->tcp_valid_bits &= ~TCP_ISS_VALID;
-			tcp->tcp_state = TCPS_ESTABLISHED;
 
 			/*
 			 * If SYN was retransmitted, need to reset all
@@ -14135,14 +13971,20 @@ process_ack:
 			}
 		}
 
+		/*
+		 * We are seeing the final ack in the three way
+		 * hand shake of a active open'ed connection
+		 * so we must send up a T_CONN_CON
+		 *
+		 * tcp_sendmsg() checks tcp_state without entering
+		 * the squeue so tcp_state should be updated before
+		 * sending up connection confirmation.
+		 */
+		tcp->tcp_state = TCPS_ESTABLISHED;
 		if (tcp->tcp_active_open) {
-			/*
-			 * We are seeing the final ack in the three way
-			 * hand shake of a active open'ed connection
-			 * so we must send up a T_CONN_CON
-			 */
 			if (!tcp_conn_con(tcp, iphdr, tcph, mp, NULL)) {
 				freemsg(mp);
+				tcp->tcp_state = TCPS_SYN_RCVD;
 				return;
 			}
 			/*
@@ -14193,7 +14035,6 @@ process_ack:
 			tcp->tcp_max_swnd = new_swnd;
 		tcp->tcp_swl1 = seg_seq;
 		tcp->tcp_swl2 = seg_ack;
-		tcp->tcp_state = TCPS_ESTABLISHED;
 		tcp->tcp_valid_bits &= ~TCP_ISS_VALID;
 
 		/* Fuse when both sides are in ESTABLISHED state */
@@ -15051,24 +14892,6 @@ update_ack:
 			tcp_rcv_enqueue(tcp, mp, seg_len);
 		}
 	} else {
-		sodirect_t	*sodp = tcp->tcp_sodirect;
-
-		/*
-		 * If an sodirect connection and an enabled sodirect_t then
-		 * sodp will be set to point to the tcp_t/sonode_t shared
-		 * sodirect_t and the sodirect_t's lock will be held.
-		 */
-		if (sodp != NULL) {
-			mutex_enter(sodp->sod_lockp);
-			if (!(sodp->sod_state & SOD_ENABLED) ||
-			    (tcp->tcp_kssl_ctx != NULL &&
-			    DB_TYPE(mp) == M_DATA)) {
-				mutex_exit(sodp->sod_lockp);
-				sodp = NULL;
-			} else {
-				mutex_exit(sodp->sod_lockp);
-			}
-		}
 		if (mp->b_datap->db_type != M_DATA ||
 		    (flags & TH_MARKNEXT_NEEDED)) {
 			if (IPCL_IS_NONSTR(connp)) {
@@ -15084,16 +14907,6 @@ update_ack:
 					ASSERT(error != EOPNOTSUPP);
 					if (error == ENOSPC)
 						tcp->tcp_rwnd -= seg_len;
-				}
-			} else if (sodp != NULL) {
-				mutex_enter(sodp->sod_lockp);
-				SOD_UIOAFINI(sodp);
-				if (!SOD_QEMPTY(sodp) &&
-				    (sodp->sod_state & SOD_WAKE_NOT)) {
-					flags |= tcp_rcv_sod_wakeup(tcp, sodp);
-					/* sod_wakeup() did the mutex_exit() */
-				} else {
-					mutex_exit(sodp->sod_lockp);
 				}
 			} else if (tcp->tcp_rcv_list != NULL) {
 				flags |= tcp_rcv_drain(tcp);
@@ -15151,25 +14964,6 @@ update_ack:
 				 */
 				flags |= tcp_rwnd_reopen(tcp);
 			}
-		} else if (sodp != NULL) {
-			/*
-			 * Sodirect so all mblk_t's are queued on the
-			 * socket directly, check for wakeup of blocked
-			 * reader (if any), and last if flow-controled.
-			 */
-			mutex_enter(sodp->sod_lockp);
-			flags |= tcp_rcv_sod_enqueue(tcp, sodp, mp, seg_len);
-			if ((sodp->sod_state & SOD_WAKE_NEED) ||
-			    (flags & (TH_PUSH|TH_FIN))) {
-				flags |= tcp_rcv_sod_wakeup(tcp, sodp);
-				/* sod_wakeup() did the mutex_exit() */
-			} else {
-				if (SOD_QFULL(sodp)) {
-					/* Q is full, need backenable */
-					SOD_QSETBE(sodp);
-				}
-				mutex_exit(sodp->sod_lockp);
-			}
 		} else if ((flags & (TH_PUSH|TH_FIN)) ||
 		    tcp->tcp_rcv_cnt + seg_len >= tcp->tcp_recv_hiwater >> 3) {
 			if (tcp->tcp_rcv_list != NULL) {
@@ -15197,8 +14991,6 @@ update_ack:
 			/*
 			 * Enqueue all packets when processing an mblk
 			 * from the co queue and also enqueue normal packets.
-			 * For packets which belong to SSL stream do SSL
-			 * processing first.
 			 */
 			tcp_rcv_enqueue(tcp, mp, seg_len);
 		}
@@ -15206,18 +14998,8 @@ update_ack:
 		 * Make sure the timer is running if we have data waiting
 		 * for a push bit. This provides resiliency against
 		 * implementations that do not correctly generate push bits.
-		 *
-		 * Note, for sodirect if Q isn't empty and there's not a
-		 * pending wakeup then we need a timer. Also note that sodp
-		 * is assumed to be still valid after exit()ing the sod_lockp
-		 * above and while the SOD state can change it can only change
-		 * such that the Q is empty now even though data was added
-		 * above.
 		 */
-		if (!IPCL_IS_NONSTR(connp) &&
-		    ((sodp != NULL && !SOD_QEMPTY(sodp) &&
-		    (sodp->sod_state & SOD_WAKE_NOT)) ||
-		    (sodp == NULL && tcp->tcp_rcv_list != NULL)) &&
+		if (!IPCL_IS_NONSTR(connp) && tcp->tcp_rcv_list != NULL &&
 		    tcp->tcp_push_tid == 0) {
 			/*
 			 * The connection may be closed at this point, so don't
@@ -15305,28 +15087,13 @@ ack_check:
 		/*
 		 * Send up any queued data and then send the mark message
 		 */
-		sodirect_t *sodp;
-
-		SOD_PTR_ENTER(tcp, sodp);
-
-		mp1 = tcp->tcp_urp_mark_mp;
-		tcp->tcp_urp_mark_mp = NULL;
-		if (sodp != NULL) {
-			if (sodp->sod_uioa.uioa_state & UIOA_ENABLED) {
-				sodp->sod_uioa.uioa_state &= UIOA_CLR;
-				sodp->sod_uioa.uioa_state |= UIOA_FINI;
-			}
-			ASSERT(tcp->tcp_rcv_list == NULL);
-
-			flags |= tcp_rcv_sod_wakeup(tcp, sodp);
-			/* sod_wakeup() does the mutex_exit() */
-		} else if (tcp->tcp_rcv_list != NULL) {
+		if (tcp->tcp_rcv_list != NULL) {
 			flags |= tcp_rcv_drain(tcp);
 
-			ASSERT(tcp->tcp_rcv_list == NULL ||
-			    tcp->tcp_fused_sigurg);
-
 		}
+		ASSERT(tcp->tcp_rcv_list == NULL || tcp->tcp_fused_sigurg);
+		mp1 = tcp->tcp_urp_mark_mp;
+		tcp->tcp_urp_mark_mp = NULL;
 		putnext(tcp->tcp_rq, mp1);
 #ifdef DEBUG
 		(void) strlog(TCP_MOD_ID, 0, 1, SL_TRACE,
@@ -15371,8 +15138,6 @@ ack_check:
 		 * In the eager case tcp_rsrv will do this when run
 		 * after tcp_accept is done.
 		 */
-		sodirect_t *sodp;
-
 		ASSERT(tcp->tcp_listener == NULL);
 
 		if (IPCL_IS_NONSTR(connp)) {
@@ -15383,31 +15148,13 @@ ack_check:
 			goto done;
 		}
 
-		SOD_PTR_ENTER(tcp, sodp);
-		if (sodp != NULL) {
-			if (sodp->sod_uioa.uioa_state & UIOA_ENABLED) {
-				sodp->sod_uioa.uioa_state &= UIOA_CLR;
-				sodp->sod_uioa.uioa_state |= UIOA_FINI;
-			}
-			/* No more sodirect */
-			tcp->tcp_sodirect = NULL;
-			if (!SOD_QEMPTY(sodp)) {
-				/* Mblk(s) to process, notify */
-				flags |= tcp_rcv_sod_wakeup(tcp, sodp);
-				/* sod_wakeup() does the mutex_exit() */
-			} else {
-				/* Nothing to process */
-				mutex_exit(sodp->sod_lockp);
-			}
-		} else if (tcp->tcp_rcv_list != NULL) {
+		if (tcp->tcp_rcv_list != NULL) {
 			/*
 			 * Push any mblk(s) enqueued from co processing.
 			 */
 			flags |= tcp_rcv_drain(tcp);
-
-			ASSERT(tcp->tcp_rcv_list == NULL ||
-			    tcp->tcp_fused_sigurg);
 		}
+		ASSERT(tcp->tcp_rcv_list == NULL || tcp->tcp_fused_sigurg);
 
 		mp1 = tcp->tcp_ordrel_mp;
 		tcp->tcp_ordrel_mp = NULL;
@@ -15835,11 +15582,9 @@ tcp_rsrv_input(void *arg, mblk_t *mp, void *arg2)
 	conn_t	*connp = (conn_t *)arg;
 	tcp_t	*tcp = connp->conn_tcp;
 	queue_t	*q = tcp->tcp_rq;
-	uint_t	thwin;
 	tcp_stack_t	*tcps = tcp->tcp_tcps;
-	sodirect_t	*sodp;
-	boolean_t	fc;
 
+	ASSERT(!IPCL_IS_NONSTR(connp));
 	mutex_enter(&tcp->tcp_rsrv_mp_lock);
 	tcp->tcp_rsrv_mp = mp;
 	mutex_exit(&tcp->tcp_rsrv_mp_lock);
@@ -15851,71 +15596,14 @@ tcp_rsrv_input(void *arg, mblk_t *mp, void *arg2)
 	}
 
 	if (tcp->tcp_fused) {
-		tcp_t *peer_tcp = tcp->tcp_loopback_peer;
-
-		ASSERT(tcp->tcp_fused);
-		ASSERT(peer_tcp != NULL && peer_tcp->tcp_fused);
-		ASSERT(peer_tcp->tcp_loopback_peer == tcp);
-		ASSERT(!TCP_IS_DETACHED(tcp));
-		ASSERT(tcp->tcp_connp->conn_sqp ==
-		    peer_tcp->tcp_connp->conn_sqp);
-
-		/*
-		 * Normally we would not get backenabled in synchronous
-		 * streams mode, but in case this happens, we need to plug
-		 * synchronous streams during our drain to prevent a race
-		 * with tcp_fuse_rrw() or tcp_fuse_rinfop().
-		 */
-		TCP_FUSE_SYNCSTR_PLUG_DRAIN(tcp);
-		if (tcp->tcp_rcv_list != NULL)
-			(void) tcp_rcv_drain(tcp);
-
-		if (peer_tcp > tcp) {
-			mutex_enter(&peer_tcp->tcp_non_sq_lock);
-			mutex_enter(&tcp->tcp_non_sq_lock);
-		} else {
-			mutex_enter(&tcp->tcp_non_sq_lock);
-			mutex_enter(&peer_tcp->tcp_non_sq_lock);
-		}
-
-		if (peer_tcp->tcp_flow_stopped &&
-		    (TCP_UNSENT_BYTES(peer_tcp) <=
-		    peer_tcp->tcp_xmit_lowater)) {
-			tcp_clrqfull(peer_tcp);
-		}
-		mutex_exit(&peer_tcp->tcp_non_sq_lock);
-		mutex_exit(&tcp->tcp_non_sq_lock);
-
-		TCP_FUSE_SYNCSTR_UNPLUG_DRAIN(tcp);
-		TCP_STAT(tcps, tcp_fusion_backenabled);
+		tcp_fuse_backenable(tcp);
 		return;
 	}
 
-	SOD_PTR_ENTER(tcp, sodp);
-	if (sodp != NULL) {
-		/* An sodirect connection */
-		if (SOD_QFULL(sodp)) {
-			/* Flow-controlled, need another back-enable */
-			fc = B_TRUE;
-			SOD_QSETBE(sodp);
-		} else {
-			/* Not flow-controlled */
-			fc = B_FALSE;
-		}
-		mutex_exit(sodp->sod_lockp);
-	} else if (canputnext(q)) {
-		/* STREAMS, not flow-controlled */
-		fc = B_FALSE;
-	} else {
-		/* STREAMS, flow-controlled */
-		fc = B_TRUE;
-	}
-	if (!fc) {
+	if (canputnext(q)) {
 		/* Not flow-controlled, open rwnd */
 		tcp->tcp_rwnd = q->q_hiwat;
-		thwin = ((uint_t)BE16_TO_U16(tcp->tcp_tcph->th_win))
-		    << tcp->tcp_rcv_ws;
-		thwin -= tcp->tcp_rnxt - tcp->tcp_rack;
+
 		/*
 		 * Send back a window update immediately if TCP is above
 		 * ESTABLISHED state and the increase of the rcv window
@@ -15923,11 +15611,10 @@ tcp_rsrv_input(void *arg, mblk_t *mp, void *arg2)
 		 * control is lifted.
 		 */
 		if (tcp->tcp_state >= TCPS_ESTABLISHED &&
-		    (q->q_hiwat - thwin >= tcp->tcp_mss)) {
+		    tcp_rwnd_reopen(tcp) == TH_ACK_NEEDED) {
 			tcp_xmit_ctl(NULL, tcp,
 			    (tcp->tcp_swnd == 0) ? tcp->tcp_suna :
 			    tcp->tcp_snxt, tcp->tcp_rnxt, TH_ACK);
-			BUMP_MIB(&tcps->tcps_mib, tcpOutWinUpdate);
 		}
 	}
 }
@@ -16231,10 +15918,20 @@ tcp_snmp_get(queue_t *q, mblk_t *mpctl)
 					mlp.tme_flags |= MIB2_TMEF_PRIVATE;
 				needattr = B_TRUE;
 			}
-			if (connp->conn_peercred != NULL) {
+			if (connp->conn_anon_mlp) {
+				mlp.tme_flags |= MIB2_TMEF_ANONMLP;
+				needattr = B_TRUE;
+			}
+			if (connp->conn_mac_exempt) {
+				mlp.tme_flags |= MIB2_TMEF_MACEXEMPT;
+				needattr = B_TRUE;
+			}
+			if (connp->conn_fully_bound &&
+			    connp->conn_effective_cred != NULL) {
 				ts_label_t *tsl;
 
-				tsl = crgetlabel(connp->conn_peercred);
+				tsl = crgetlabel(connp->conn_effective_cred);
+				mlp.tme_flags |= MIB2_TMEF_IS_LABELED;
 				mlp.tme_doi = label2doi(tsl);
 				mlp.tme_label = *label2bslabel(tsl);
 				needattr = B_TRUE;
@@ -16865,7 +16562,7 @@ tcp_timer(void *arg)
 	 * But we assume that SYN's are not dropped for loopback connections.
 	 */
 	if (tcp->tcp_state == TCPS_SYN_SENT) {
-		mblk_setcred(mp, tcp->tcp_cred, tcp->tcp_cpid);
+		mblk_setcred(mp, CONN_CRED(tcp->tcp_connp), tcp->tcp_cpid);
 	}
 
 	tcp->tcp_csuna = tcp->tcp_snxt;
@@ -17648,8 +17345,7 @@ tcp_accept_finish(void *arg, mblk_t *mp, void *arg2)
 		DB_TYPE(stropt_mp) = M_SETOPTS;
 		stropt = (struct stroptions *)stropt_mp->b_rptr;
 		stropt_mp->b_wptr += sizeof (struct stroptions);
-		stropt = (struct stroptions *)stropt_mp->b_rptr;
-		stropt->so_flags |= SO_HIWAT | SO_WROFF | SO_MAXBLK;
+		stropt->so_flags = SO_HIWAT | SO_WROFF | SO_MAXBLK;
 		stropt->so_hiwat = sopp_rxhiwat;
 		stropt->so_wroff = sopp_wroff;
 		stropt->so_maxblk = sopp_maxblk;
@@ -17715,7 +17411,6 @@ tcp_accept_finish(void *arg, mblk_t *mp, void *arg2)
 			tcp->tcp_rcv_cnt = 0;
 		} else {
 			/* We drain directly in case of fused tcp loopback */
-			sodirect_t *sodp;
 
 			if (!tcp->tcp_fused && canputnext(q)) {
 				tcp->tcp_rwnd = q->q_hiwat;
@@ -17728,25 +17423,7 @@ tcp_accept_finish(void *arg, mblk_t *mp, void *arg2)
 				}
 			}
 
-			SOD_PTR_ENTER(tcp, sodp);
-			if (sodp != NULL) {
-				/* Sodirect, move from rcv_list */
-				ASSERT(!tcp->tcp_fused);
-				while ((mp = tcp->tcp_rcv_list) != NULL) {
-					tcp->tcp_rcv_list = mp->b_next;
-					mp->b_next = NULL;
-					(void) tcp_rcv_sod_enqueue(tcp, sodp,
-					    mp, msgdsize(mp));
-				}
-				tcp->tcp_rcv_last_head = NULL;
-				tcp->tcp_rcv_last_tail = NULL;
-				tcp->tcp_rcv_cnt = 0;
-				(void) tcp_rcv_sod_wakeup(tcp, sodp);
-				/* sod_wakeup() did the mutex_exit() */
-			} else {
-				/* Not sodirect, drain */
-				(void) tcp_rcv_drain(tcp);
-			}
+			(void) tcp_rcv_drain(tcp);
 		}
 
 		/*
@@ -17841,19 +17518,12 @@ tcp_send_pending(void *arg, mblk_t *mp, void *arg2)
 	bcopy(mp->b_rptr + conn_ind->OPT_offset, &tcp,
 	    conn_ind->OPT_length);
 
-	if (listener->tcp_state == TCPS_CLOSED ||
-	    TCP_IS_DETACHED(listener)) {
+	if (listener->tcp_state != TCPS_LISTEN) {
 		/*
 		 * If listener has closed, it would have caused a
-		 * a cleanup/blowoff to happen for the eager.
-		 *
-		 * We need to drop the ref on eager that was put
-		 * tcp_rput_data() before trying to send the conn_ind
-		 * to listener. The conn_ind was deferred in tcp_send_conn_ind
-		 * and tcp_wput_accept() is sending this deferred conn_ind but
-		 * listener is closed so we drop the ref.
+		 * a cleanup/blowoff to happen for the eager, so
+		 * we don't need to do anything more.
 		 */
-		CONN_DEC_REF(tcp->tcp_connp);
 		freemsg(mp);
 		return;
 	}
@@ -17875,15 +17545,6 @@ tcp_accept_common(conn_t *lconnp, conn_t *econnp, cred_t *cr)
 	ASSERT(eager->tcp_listener != NULL);
 
 	ASSERT(eager->tcp_rq != NULL);
-
-	/* If tcp_fused and sodirect enabled disable it */
-	if (eager->tcp_fused && eager->tcp_sodirect != NULL) {
-		/* Fused, disable sodirect */
-		mutex_enter(eager->tcp_sodirect->sod_lockp);
-		SOD_DISABLE(eager->tcp_sodirect);
-		mutex_exit(eager->tcp_sodirect->sod_lockp);
-		eager->tcp_sodirect = NULL;
-	}
 
 	opt_mp = allocb(sizeof (struct tcp_options), BPRI_HI);
 	if (opt_mp == NULL) {
@@ -18052,7 +17713,6 @@ tcp_accept(sock_lower_handle_t lproto_handle,
 
 	ASSERT(eager->tcp_rq != NULL);
 
-	eager->tcp_sodirect = SOD_SOTOSODP(sock_handle);
 	return (tcp_accept_common(lconnp, econnp, cr));
 }
 
@@ -18109,7 +17769,7 @@ tcp_tpi_accept(queue_t *q, mblk_t *mp)
 		 * rq->q_qinfo->qi_qclose to cleanup the acceptor stream.
 		 * we need to do the allocb up here because we have to
 		 * make sure rq->q_qinfo->qi_qclose still points to the
-		 * correct function (tcpclose_accept) in case allocb
+		 * correct function (tcp_tpi_close_accept) in case allocb
 		 * fails.
 		 */
 		bcopy(mp->b_rptr + conn_res->OPT_offset,
@@ -18131,11 +17791,6 @@ tcp_tpi_accept(queue_t *q, mblk_t *mp)
 		q->q_qinfo = &tcp_winit;
 		listener = eager->tcp_listener;
 
-		/*
-		 * TCP is _D_SODIRECT and sockfs is directly above so
-		 * save shared sodirect_t pointer (if any).
-		 */
-		eager->tcp_sodirect = SOD_QTOSODP(eager->tcp_rq);
 		if (tcp_accept_common(listener->tcp_connp,
 		    econnp, cr) < 0) {
 			mp = mi_tpi_err_ack_alloc(mp, TPROTO, 0);
@@ -18819,12 +18474,12 @@ tcp_send_data(tcp_t *tcp, queue_t *q, mblk_t *mp)
 	 * both getpeerucred and TX.
 	 * If this is a SYN then the caller already set db_credp so
 	 * that getpeerucred will work. But if TX is in use we might have
-	 * a conn_peercred which is different, and we need to use that cred
-	 * to make TX use the correct label and label dependent route.
+	 * a conn_effective_cred which is different, and we need to use that
+	 * cred to make TX use the correct label and label dependent route.
 	 */
 	if (is_system_labeled()) {
 		cr = msg_getcred(mp, &cpid);
-		if (cr == NULL || connp->conn_peercred != NULL)
+		if (cr == NULL || connp->conn_effective_cred != NULL)
 			mblk_setcred(mp, CONN_CRED(connp), cpid);
 	}
 
@@ -19304,13 +18959,15 @@ data_null:
 		goto done;
 	}
 
-	if (tcp->tcp_cork) {
-		/*
-		 * if the tcp->tcp_cork option is set, then we have to force
-		 * TCP not to send partial segment (smaller than MSS bytes).
-		 * We are calculating the usable now based on full mss and
-		 * will save the rest of remaining data for later.
-		 */
+	/*
+	 * If tcp_zero_win_probe is not set and the tcp->tcp_cork option
+	 * is set, then we have to force TCP not to send partial segment
+	 * (smaller than MSS bytes). We are calculating the usable now
+	 * based on full mss and will save the rest of remaining data for
+	 * later. When tcp_zero_win_probe is set, TCP needs to send out
+	 * something to do zero window probe.
+	 */
+	if (tcp->tcp_cork && !tcp->tcp_zero_win_probe) {
 		if (usable < mss)
 			goto done;
 		usable = (usable / mss) * mss;
@@ -21883,7 +21540,6 @@ tcp_disable_direct_sockfs(tcp_t *tcp)
 		tcp_fuse_disable_pair(tcp, B_FALSE);
 	}
 	tcp->tcp_issocket = B_FALSE;
-	tcp->tcp_sodirect = NULL;
 	TCP_STAT(tcp->tcp_tcps, tcp_sock_fallback);
 }
 
@@ -22376,6 +22032,7 @@ tcp_xmit_early_reset(char *str, mblk_t *mp, uint32_t seq,
 	queue_t		*q = tcps->tcps_g_q;
 	tcp_t		*tcp;
 	cred_t		*cr;
+	pid_t		pid;
 	mblk_t		*nmp;
 	ip_stack_t	*ipst = tcps->tcps_netstack->netstack_ip;
 
@@ -22524,18 +22181,18 @@ tcp_xmit_early_reset(char *str, mblk_t *mp, uint32_t seq,
 	}
 
 	/* IP trusts us to set up labels when required. */
-	if (is_system_labeled() && (cr = msg_getcred(mp, NULL)) != NULL &&
+	if (is_system_labeled() && (cr = msg_getcred(mp, &pid)) != NULL &&
 	    crgetlabel(cr) != NULL) {
 		int err;
 
 		if (IPH_HDR_VERSION(mp->b_rptr) == IPV4_VERSION)
 			err = tsol_check_label(cr, &mp,
 			    tcp->tcp_connp->conn_mac_exempt,
-			    tcps->tcps_netstack->netstack_ip);
+			    tcps->tcps_netstack->netstack_ip, pid);
 		else
 			err = tsol_check_label_v6(cr, &mp,
 			    tcp->tcp_connp->conn_mac_exempt,
-			    tcps->tcps_netstack->netstack_ip);
+			    tcps->tcps_netstack->netstack_ip, pid);
 		if (mctl_present)
 			ipsec_mp->b_cont = mp;
 		else
@@ -23250,8 +22907,6 @@ tcp_push_timer(void *arg)
 {
 	conn_t	*connp = (conn_t *)arg;
 	tcp_t *tcp = connp->conn_tcp;
-	uint_t		flags;
-	sodirect_t	*sodp;
 
 	TCP_DBGSTAT(tcp->tcp_tcps, tcp_push_timer_cnt);
 
@@ -23266,14 +22921,8 @@ tcp_push_timer(void *arg)
 	TCP_FUSE_SYNCSTR_PLUG_DRAIN(tcp);
 	tcp->tcp_push_tid = 0;
 
-	SOD_PTR_ENTER(tcp, sodp);
-	if (sodp != NULL) {
-		flags = tcp_rcv_sod_wakeup(tcp, sodp);
-		/* sod_wakeup() does the mutex_exit() */
-	} else if (tcp->tcp_rcv_list != NULL) {
-		flags = tcp_rcv_drain(tcp);
-	}
-	if (flags == TH_ACK_NEEDED)
+	if (tcp->tcp_rcv_list != NULL &&
+	    tcp_rcv_drain(tcp) == TH_ACK_NEEDED)
 		tcp_xmit_ctl(NULL, tcp, tcp->tcp_snxt, tcp->tcp_rnxt, TH_ACK);
 
 	TCP_FUSE_SYNCSTR_UNPLUG_DRAIN(tcp);
@@ -25975,6 +25624,8 @@ tcp_post_ip_bind(tcp_t *tcp, mblk_t *mp, int error, cred_t *cr, pid_t pid)
 	mblk_t	*lsoi;
 	int	retval;
 	tcph_t	*tcph;
+	cred_t	*ecr;
+	ts_label_t	*tsl;
 	uint32_t	mss;
 	queue_t	*q = tcp->tcp_rq;
 	conn_t	*connp = tcp->tcp_connp;
@@ -26135,11 +25786,49 @@ tcp_post_ip_bind(tcp_t *tcp, mblk_t *mp, int error, cred_t *cr, pid_t pid)
 		syn_mp = tcp_xmit_mp(tcp, NULL, 0, NULL, NULL,
 		    tcp->tcp_iss, B_FALSE, NULL, B_FALSE);
 		if (syn_mp) {
+			/*
+			 * cr contains the cred from the thread calling
+			 * connect().
+			 *
+			 * If no thread cred is available, use the
+			 * socket creator's cred instead. If still no
+			 * cred, drop the request rather than risk a
+			 * panic on production systems.
+			 */
 			if (cr == NULL) {
-				cr = tcp->tcp_cred;
+				cr = CONN_CRED(connp);
 				pid = tcp->tcp_cpid;
+				ASSERT(cr != NULL);
+				if (cr != NULL) {
+					mblk_setcred(syn_mp, cr, pid);
+				} else {
+					error = ECONNABORTED;
+					goto ipcl_rm;
+				}
+
+			/*
+			 * If an effective security label exists for
+			 * the connection, create a copy of the thread's
+			 * cred but with the effective label attached.
+			 */
+			} else if (is_system_labeled() &&
+			    connp->conn_effective_cred != NULL &&
+			    (tsl = crgetlabel(connp->
+			    conn_effective_cred)) != NULL) {
+				if ((ecr = copycred_from_tslabel(cr,
+				    tsl, KM_NOSLEEP)) == NULL) {
+					error = ENOMEM;
+					goto ipcl_rm;
+				}
+				mblk_setcred(syn_mp, ecr, pid);
+				crfree(ecr);
+
+			/*
+			 * Default to using the thread's cred unchanged.
+			 */
+			} else {
+				mblk_setcred(syn_mp, cr, pid);
 			}
-			mblk_setcred(syn_mp, cr, pid);
 			tcp_send_data(tcp, tcp->tcp_wq, syn_mp);
 		}
 	after_syn_sent:
@@ -26406,7 +26095,6 @@ tcp_bind_check(conn_t *connp, struct sockaddr *sa, socklen_t len, cred_t *cr,
 	tcp_t	*tcp = connp->conn_tcp;
 	sin_t	*sin;
 	sin6_t  *sin6;
-	sin6_t	sin6addr;
 	in_port_t requested_port;
 	ipaddr_t	v4addr;
 	in6_addr_t	v6addr;
@@ -26426,7 +26114,9 @@ tcp_bind_check(conn_t *connp, struct sockaddr *sa, socklen_t len, cred_t *cr,
 	}
 	origipversion = tcp->tcp_ipversion;
 
-	if (sa != NULL && !OK_32PTR((char *)sa)) {
+	ASSERT(sa != NULL && len != 0);
+
+	if (!OK_32PTR((char *)sa)) {
 		if (tcp->tcp_debug) {
 			(void) strlog(TCP_MOD_ID, 0, 1,
 			    SL_ERROR|SL_TRACE,
@@ -26438,24 +26128,6 @@ tcp_bind_check(conn_t *connp, struct sockaddr *sa, socklen_t len, cred_t *cr,
 	}
 
 	switch (len) {
-	case 0:		/* request for a generic port */
-		if (tcp->tcp_family == AF_INET) {
-			sin = (sin_t *)&sin6addr;
-			*sin = sin_null;
-			sin->sin_family = AF_INET;
-			tcp->tcp_ipversion = IPV4_VERSION;
-			IN6_IPADDR_TO_V4MAPPED(INADDR_ANY, &v6addr);
-		} else {
-			ASSERT(tcp->tcp_family == AF_INET6);
-			sin6 = (sin6_t *)&sin6addr;
-			*sin6 = sin6_null;
-			sin6->sin6_family = AF_INET6;
-			tcp->tcp_ipversion = IPV6_VERSION;
-			V6_SET_ZERO(v6addr);
-		}
-		requested_port = 0;
-		break;
-
 	case sizeof (sin_t):	/* Complete IPv4 address */
 		sin = (sin_t *)sa;
 		/*
@@ -26552,14 +26224,6 @@ tcp_do_bind(conn_t *connp, struct sockaddr *sa, socklen_t len, cred_t *cr,
 
 	tcp->tcp_conn_req_max = 0;
 
-	/*
-	 * We need to make sure that the conn_recv is set to a non-null
-	 * value before we insert the conn into the classifier table.
-	 * This is to avoid a race with an incoming packet which does an
-	 * ipcl_classify().
-	 */
-	connp->conn_recv = tcp_conn_request;
-
 	if (tcp->tcp_family == AF_INET6) {
 		ASSERT(tcp->tcp_connp->conn_af_isv6);
 		error = ip_proto_bind_laddr_v6(connp, NULL, IPPROTO_TCP,
@@ -26586,7 +26250,7 @@ tcp_bind(sock_lower_handle_t proto_handle, struct sockaddr *sa,
 	ASSERT(sqp != NULL);
 	ASSERT(connp->conn_upper_handle != NULL);
 
-	error = squeue_synch_enter(sqp, connp, 0);
+	error = squeue_synch_enter(sqp, connp, NULL);
 	if (error != 0) {
 		/* failed to enter */
 		return (ENOSR);
@@ -26759,7 +26423,7 @@ tcp_connect(sock_lower_handle_t proto_handle, const struct sockaddr *sa,
 		return (error);
 	}
 
-	error = squeue_synch_enter(sqp, connp, 0);
+	error = squeue_synch_enter(sqp, connp, NULL);
 	if (error != 0) {
 		/* failed to enter */
 		return (ENOSR);
@@ -27076,9 +26740,6 @@ tcp_fallback_noneager(tcp_t *tcp, mblk_t *stropt_mp, queue_t *q,
 	int			error;
 	mblk_t			*mp;
 
-	/* Disable I/OAT during fallback */
-	tcp->tcp_sodirect = NULL;
-
 	connp->conn_dev = (dev_t)RD(q)->q_ptr;
 	connp->conn_minor_arena = WR(q)->q_ptr;
 
@@ -27103,8 +26764,7 @@ tcp_fallback_noneager(tcp_t *tcp, mblk_t *stropt_mp, queue_t *q,
 	DB_TYPE(stropt_mp) = M_SETOPTS;
 	stropt = (struct stroptions *)stropt_mp->b_rptr;
 	stropt_mp->b_wptr += sizeof (struct stroptions);
-	stropt = (struct stroptions *)stropt_mp->b_rptr;
-	stropt->so_flags |= SO_HIWAT | SO_WROFF | SO_MAXBLK;
+	stropt->so_flags = SO_HIWAT | SO_WROFF | SO_MAXBLK;
 
 	stropt->so_wroff = tcp->tcp_hdr_len + (tcp->tcp_loopback ? 0 :
 	    tcp->tcp_tcps->tcps_wroff_xtra);
@@ -27219,7 +26879,7 @@ tcp_fallback(sock_lower_handle_t proto_handle, queue_t *q,
 	/*
 	 * Enter the squeue so that no new packets can come in
 	 */
-	error = squeue_synch_enter(connp->conn_sqp, connp, 0);
+	error = squeue_synch_enter(connp->conn_sqp, connp, NULL);
 	if (error != 0) {
 		/* failed to enter, free all the pre-allocated messages. */
 		freeb(stropt_mp);
@@ -27349,13 +27009,13 @@ tcp_listen(sock_lower_handle_t proto_handle, int backlog, cred_t *cr)
 	/* All Solaris components should pass a cred for this operation. */
 	ASSERT(cr != NULL);
 
-	error = squeue_synch_enter(sqp, connp, 0);
+	error = squeue_synch_enter(sqp, connp, NULL);
 	if (error != 0) {
 		/* failed to enter */
 		return (ENOBUFS);
 	}
 
-	error = tcp_do_listen(connp, backlog, cr);
+	error = tcp_do_listen(connp, NULL, 0, backlog, cr, FALSE);
 	if (error == 0) {
 		(*connp->conn_upcalls->su_opctl)(connp->conn_upper_handle,
 		    SOCK_OPCTL_ENAB_ACCEPT, (uintptr_t)backlog);
@@ -27370,11 +27030,10 @@ tcp_listen(sock_lower_handle_t proto_handle, int backlog, cred_t *cr)
 }
 
 static int
-tcp_do_listen(conn_t *connp, int backlog, cred_t *cr)
+tcp_do_listen(conn_t *connp, struct sockaddr *sa, socklen_t len,
+    int backlog, cred_t *cr, boolean_t bind_to_req_port_only)
 {
 	tcp_t		*tcp = connp->conn_tcp;
-	sin_t		*sin;
-	sin6_t  	*sin6;
 	int		error = 0;
 	tcp_stack_t	*tcps = tcp->tcp_tcps;
 
@@ -27399,27 +27058,33 @@ tcp_do_listen(conn_t *connp, int backlog, cred_t *cr)
 		}
 		return (-TOUTSTATE);
 	} else {
-		int32_t len;
-		sin6_t	addr;
+		if (sa == NULL) {
+			sin6_t	addr;
+			sin_t *sin;
+			sin6_t *sin6;
 
-		/* Do an implicit bind: Request for a generic port. */
-		if (tcp->tcp_family == AF_INET) {
-			len = sizeof (sin_t);
-			sin = (sin_t *)&addr;
-			*sin = sin_null;
-			sin->sin_family = AF_INET;
-			tcp->tcp_ipversion = IPV4_VERSION;
-		} else {
-			ASSERT(tcp->tcp_family == AF_INET6);
-			len = sizeof (sin6_t);
-			sin6 = (sin6_t *)&addr;
-			*sin6 = sin6_null;
-			sin6->sin6_family = AF_INET6;
-			tcp->tcp_ipversion = IPV6_VERSION;
+			ASSERT(IPCL_IS_NONSTR(connp));
+
+			/* Do an implicit bind: Request for a generic port. */
+			if (tcp->tcp_family == AF_INET) {
+				len = sizeof (sin_t);
+				sin = (sin_t *)&addr;
+				*sin = sin_null;
+				sin->sin_family = AF_INET;
+				tcp->tcp_ipversion = IPV4_VERSION;
+			} else {
+				ASSERT(tcp->tcp_family == AF_INET6);
+				len = sizeof (sin6_t);
+				sin6 = (sin6_t *)&addr;
+				*sin6 = sin6_null;
+				sin6->sin6_family = AF_INET6;
+				tcp->tcp_ipversion = IPV6_VERSION;
+			}
+			sa = (struct sockaddr *)&addr;
 		}
 
-		error = tcp_bind_check(connp, (struct sockaddr *)&addr, len,
-		    cr, B_FALSE);
+		error = tcp_bind_check(connp, sa, len, cr,
+		    bind_to_req_port_only);
 		if (error)
 			return (error);
 		/* Fall through and do the fanout insertion */
@@ -27475,30 +27140,46 @@ tcp_clr_flowctrl(sock_lower_handle_t proto_handle)
 {
 	conn_t  *connp = (conn_t *)proto_handle;
 	tcp_t	*tcp = connp->conn_tcp;
-	tcp_stack_t	*tcps = tcp->tcp_tcps;
-	uint_t thwin;
+	mblk_t *mp;
+	int error;
 
 	ASSERT(connp->conn_upper_handle != NULL);
 
-	(void) squeue_synch_enter(connp->conn_sqp, connp, 0);
-
-	/* Flow control condition has been removed. */
-	tcp->tcp_rwnd = tcp->tcp_recv_hiwater;
-	thwin = ((uint_t)BE16_TO_U16(tcp->tcp_tcph->th_win))
-	    << tcp->tcp_rcv_ws;
-	thwin -= tcp->tcp_rnxt - tcp->tcp_rack;
 	/*
-	 * Send back a window update immediately if TCP is above
-	 * ESTABLISHED state and the increase of the rcv window
-	 * that the other side knows is at least 1 MSS after flow
-	 * control is lifted.
+	 * If tcp->tcp_rsrv_mp == NULL, it means that tcp_clr_flowctrl()
+	 * is currently running.
 	 */
-	if (tcp->tcp_state >= TCPS_ESTABLISHED &&
-	    (tcp->tcp_recv_hiwater - thwin >= tcp->tcp_mss)) {
-		tcp_xmit_ctl(NULL, tcp,
-		    (tcp->tcp_swnd == 0) ? tcp->tcp_suna :
-		    tcp->tcp_snxt, tcp->tcp_rnxt, TH_ACK);
-		BUMP_MIB(&tcps->tcps_mib, tcpOutWinUpdate);
+	mutex_enter(&tcp->tcp_rsrv_mp_lock);
+	if ((mp = tcp->tcp_rsrv_mp) == NULL) {
+		mutex_exit(&tcp->tcp_rsrv_mp_lock);
+		return;
+	}
+	tcp->tcp_rsrv_mp = NULL;
+	mutex_exit(&tcp->tcp_rsrv_mp_lock);
+
+	error = squeue_synch_enter(connp->conn_sqp, connp, mp);
+	ASSERT(error == 0);
+
+	mutex_enter(&tcp->tcp_rsrv_mp_lock);
+	tcp->tcp_rsrv_mp = mp;
+	mutex_exit(&tcp->tcp_rsrv_mp_lock);
+
+	if (tcp->tcp_fused) {
+		tcp_fuse_backenable(tcp);
+	} else {
+		tcp->tcp_rwnd = tcp->tcp_recv_hiwater;
+		/*
+		 * Send back a window update immediately if TCP is above
+		 * ESTABLISHED state and the increase of the rcv window
+		 * that the other side knows is at least 1 MSS after flow
+		 * control is lifted.
+		 */
+		if (tcp->tcp_state >= TCPS_ESTABLISHED &&
+		    tcp_rwnd_reopen(tcp) == TH_ACK_NEEDED) {
+			tcp_xmit_ctl(NULL, tcp,
+			    (tcp->tcp_swnd == 0) ? tcp->tcp_suna :
+			    tcp->tcp_snxt, tcp->tcp_rnxt, TH_ACK);
+		}
 	}
 
 	squeue_synch_exit(connp->conn_sqp, connp);

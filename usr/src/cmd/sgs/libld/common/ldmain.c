@@ -35,6 +35,7 @@
  * ld -- link/editor main program
  */
 #include	<sys/types.h>
+#include	<sys/time.h>
 #include	<sys/mman.h>
 #include	<string.h>
 #include	<stdio.h>
@@ -114,26 +115,28 @@ ld_main(int argc, char **argv, Half mach)
 	Ofl_desc	*ofl;
 
 	/*
-	 * Initialize signal handlers, and output file variables.  Establish a
-	 * default output ELF header to satisfy diagnostic requirements.
+	 * Establish a base time.  Total time diagnostics are relative to
+	 * entering the link-editor here.
 	 */
+	(void) gettimeofday(&DBG_TOTALTIME, NULL);
+	DBG_DELTATIME = DBG_TOTALTIME;
+
+	/* Output file descriptor */
 	if ((ofl = libld_calloc(1, sizeof (Ofl_desc))) == 0)
 		return (1);
 
-	/* Initilize target state */
+	/* Initialize target state */
 	if (ld_init_target(NULL, mach) != 0)
 		return (1);
 
 	/*
-	 * Set up the output ELF header, and initialize the machine
-	 * and class details.
+	 * Set up the default output ELF header to satisfy diagnostic
+	 * requirements, and initialize the machine and class details.
 	 */
 	ofl->ofl_dehdr = &def_ehdr;
 	def_ehdr.e_ident[EI_CLASS] = ld_targ.t_m.m_class;
 	def_ehdr.e_ident[EI_DATA] = ld_targ.t_m.m_data;
 	def_ehdr.e_machine = ld_targ.t_m.m_mach;
-
-	ld_init(ofl);
 
 	/*
 	 * Build up linker version string
@@ -163,6 +166,9 @@ ld_main(int argc, char **argv, Half mach)
 	if (ofl->ofl_flags1 & FLG_OF1_DONE)
 		return (0);
 
+	/* Initialize signal handler */
+	ld_init_sighandler(ofl);
+
 	/*
 	 * Determine whether any support libraries should be loaded,
 	 * (either through the SGS_SUPPORT environment variable and/or
@@ -186,10 +192,10 @@ ld_main(int argc, char **argv, Half mach)
 			do {
 				if (ld_sup_loadso(ofl, lib) == S_ERROR)
 					return (ld_exit(ofl));
+				DBG_CALL(Dbg_util_nl(ofl->ofl_lml, DBG_NL_STD));
 
 			} while ((lib = strtok_r(NULL, sep, &lasts)) != NULL);
 		}
-		DBG_CALL(Dbg_util_nl(ofl->ofl_lml, DBG_NL_STD));
 	}
 	if (lib_support) {
 		Aliste	idx;
@@ -200,13 +206,15 @@ ld_main(int argc, char **argv, Half mach)
 			    DBG_SUP_CMDLINE));
 			if (ld_sup_loadso(ofl, lib) == S_ERROR)
 				return (ld_exit(ofl));
+			DBG_CALL(Dbg_util_nl(ofl->ofl_lml, DBG_NL_STD));
 		}
 	}
-	DBG_CALL(Dbg_util_nl(ofl->ofl_lml, DBG_NL_STD));
 
-	DBG_CALL(Dbg_ent_print(ofl->ofl_lml, ofl->ofl_dehdr->e_machine,
+	DBG_CALL(Dbg_ent_print(ofl->ofl_lml,
+	    ofl->ofl_dehdr->e_ident[EI_OSABI], ofl->ofl_dehdr->e_machine,
 	    ofl->ofl_ents, (ofl->ofl_flags & FLG_OF_DYNAMIC) != 0));
-	DBG_CALL(Dbg_seg_list(ofl->ofl_lml, ofl->ofl_dehdr->e_machine,
+	DBG_CALL(Dbg_seg_list(ofl->ofl_lml,
+	    ofl->ofl_dehdr->e_ident[EI_OSABI], ofl->ofl_dehdr->e_machine,
 	    ofl->ofl_segs));
 
 	/*
@@ -381,6 +389,12 @@ ld_main(int argc, char **argv, Half mach)
 	ld_sup_atexit(ofl, 0);
 
 	DBG_CALL(Dbg_statistics_ld(ofl));
+	DBG_CALL(Dbg_basic_finish(ofl->ofl_lml));
+
+	/*
+	 * Wrap up debug output file if one is open
+	 */
+	dbg_cleanup();
 
 	/*
 	 * For performance reasons we don't actually free up the memory we've

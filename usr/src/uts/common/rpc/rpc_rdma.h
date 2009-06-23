@@ -134,7 +134,7 @@ typedef enum {
 }rpccall_write_t;
 
 typedef enum {
-	CLIST_REG_SOURCE,
+	CLIST_REG_SOURCE = 1,
 	CLIST_REG_DST
 } clist_dstsrc;
 
@@ -244,6 +244,7 @@ typedef struct rdma_buf {
 struct clist {
 	uint32		c_xdroff;	/* XDR offset */
 	uint32		c_len;		/* Length */
+	clist_dstsrc	c_regtype;	/* type of registration */
 	struct mrc	c_smemhandle;	/* src memory handle */
 	uint64 		c_ssynchandle;	/* src sync handle */
 	union {
@@ -332,6 +333,10 @@ typedef enum {
 	C_REMOTE_DOWN	= 0x00000020
 } conn_c_state;
 
+/* c_flags */
+#define	C_CLOSE_NOTNEEDED	0x00000001	/* just free the channel */
+#define	C_CLOSE_PENDING		0x00000002	/* a close in progress */
+
 /*
  * RDMA Connection information
  */
@@ -344,6 +349,7 @@ typedef struct conn {
 	struct conn	*c_prev;	/* prev in list of connections */
 	caddr_t		c_private;	/* transport specific stuff */
 	conn_c_state	c_state;	/* state of connection */
+	int		c_flags;	/* flags for connection management */
 	rdma_cc_type_t	c_cc_type;	/* client or server, for credit cntrl */
 	union {
 		rdma_clnt_cred_ctrl_t	c_clnt_cc;
@@ -351,6 +357,8 @@ typedef struct conn {
 	} rdma_conn_cred_ctrl_u;
 	kmutex_t	c_lock;		/* protect c_state and c_ref fields */
 	kcondvar_t	c_cv;		/* to signal when pending is done */
+	timeout_id_t	c_timeout;	/* timeout id for untimeout() */
+	time_t		c_last_used;	/* last time any activity on the conn */
 } CONN;
 
 
@@ -398,8 +406,8 @@ typedef struct rdmaops {
 	rdma_stat	(*rdma_reachable)(int addr_type, struct netbuf *,
 						void **handle);
 	/* Connection */
-	rdma_stat	(*rdma_get_conn)(struct netbuf *, int addr_type,
-						void *, CONN **);
+	rdma_stat	(*rdma_get_conn)(struct netbuf *, struct netbuf *,
+					int addr_type, void *, CONN **);
 	rdma_stat	(*rdma_rel_conn)(CONN *);
 	/* Server side listner start and stop routines */
 	void		(*rdma_svc_listen)(struct rdma_svc_data *);
@@ -444,8 +452,8 @@ extern rdma_svc_wait_t rdma_wait;
 #define	RDMA_REACHABLE(rdma_ops, addr_type, addr, handle)	\
 	(*(rdma_ops)->rdma_reachable)(addr_type, addr, handle)
 
-#define	RDMA_GET_CONN(rdma_ops, addr, addr_type, handle, conn)	\
-	(*(rdma_ops)->rdma_get_conn)(addr, addr_type, handle, conn)
+#define	RDMA_GET_CONN(rdma_ops, saddr, daddr, addr_type, handle, conn)	\
+	(*(rdma_ops)->rdma_get_conn)(saddr, daddr, addr_type, handle, conn)
 
 #define	RDMA_REL_CONN(conn)	\
 	(*(conn)->c_rdmamod->rdma_ops->rdma_rel_conn)(conn)
@@ -518,8 +526,10 @@ extern struct clist *clist_alloc(void);
 extern void clist_add(struct clist **, uint32_t, int,
 	struct mrc *, caddr_t, struct mrc *, caddr_t);
 extern void clist_free(struct clist *);
+extern uint32_t clist_len(struct clist *);
+extern void clist_zero_len(struct clist *);
 extern rdma_stat clist_register(CONN *conn, struct clist *cl, clist_dstsrc);
-extern rdma_stat clist_deregister(CONN *conn, struct clist *cl, clist_dstsrc);
+extern rdma_stat clist_deregister(CONN *conn, struct clist *cl);
 extern rdma_stat clist_syncmem(CONN *conn, struct clist *cl, clist_dstsrc);
 extern rdma_stat rdma_clnt_postrecv(CONN *conn, uint32_t xid);
 extern rdma_stat rdma_clnt_postrecv_remove(CONN *conn, uint32_t xid);
@@ -531,6 +541,7 @@ extern void rdma_buf_free(CONN *, rdma_buf_t *);
 extern int rdma_modload();
 extern bool_t   rdma_get_wchunk(struct svc_req *, iovec_t *, struct clist *);
 extern rdma_stat rdma_kwait(void);
+extern int rdma_setup_read_chunks(struct clist *, uint32_t, int *);
 
 /*
  * RDMA XDR
@@ -559,8 +570,8 @@ extern bool_t xdr_encode_reply_wchunk(XDR *, struct clist *,
 		uint32_t seg_array_len);
 bool_t xdrrdma_getrdmablk(XDR *, struct clist **, uint_t *,
 	CONN **conn, const uint_t);
-bool_t xdrrdma_read_from_client(struct clist **, CONN **, uint_t);
-bool_t xdrrdma_send_read_data(XDR *, struct clist *);
+bool_t xdrrdma_read_from_client(struct clist *, CONN **, uint_t);
+bool_t xdrrdma_send_read_data(XDR *, uint_t, struct clist *);
 bool_t xdrrdma_free_clist(CONN *, struct clist *);
 #endif /* _KERNEL */
 

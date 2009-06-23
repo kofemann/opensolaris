@@ -88,6 +88,14 @@ extern "C" {
 #define	MBSS_MULTIPLE_OPEN_EXCH		0x0018
 #define	MBSS_IOCB_COUNT_ERR		0x0019
 #define	MBSS_CMD_AFTER_FW_INIT_ERR	0x001A
+#define	MBSS_NO_VIRTUAL_PORT_ID		0x001B
+#define	MBSS_INVALID_FCF_INDEX		0x0022
+#define	MBSS_MPI_PROCESSOR_ERR		0x0023
+#define	MBSS_SEMAPHORE_ERR		0x0024
+#define	MBSS_RANGE_ERR			0x0025
+#define	MBSS_TRANSFER_SIZE_TO_LARGE	0x0026
+#define	MBSS_CHECKSUM_ERR		0x0027
+#define	MBSS_CONFIGURATION_ERR		0x0028
 
 /*
  * ISP mailbox asynchronous event status codes
@@ -118,9 +126,13 @@ extern "C" {
 #define	MBA_IP_RCV_BUFFER_EMPTY 0x8026  /* IP receive buffer queue empty. */
 #define	MBA_IP_HDR_DATA_SPLIT   0x8027  /* IP header/data splitting feature */
 					/* used. */
+#define	MBA_ERROR_LOGGING_DISABLED	0x8029  /* Error Logging Disabled. */
 #define	MBA_POINT_TO_POINT	0x8030  /* Point to point mode. */
+#define	MBA_DCBX_COMPLETED	0x8030  /* DCBX completed. */
 #define	MBA_CMPLT_1_16BIT	0x8031	/* Completion 1 16bit IOSB. */
+#define	MBA_FCF_CONFIG_ERROR	0x8031	/* FCF configuration error. */
 #define	MBA_CMPLT_2_16BIT	0x8032	/* Completion 2 16bit IOSB. */
+#define	MBA_DCBX_PARAM_CHANGED	0x8032	/* DCBX parameters changed. */
 #define	MBA_CMPLT_3_16BIT	0x8033	/* Completion 3 16bit IOSB. */
 #define	MBA_CMPLT_4_16BIT	0x8034	/* Completion 4 16bit IOSB. */
 #define	MBA_CMPLT_5_16BIT	0x8035	/* Completion 5 16bit IOSB. */
@@ -131,6 +143,12 @@ extern "C" {
 #define	MBA_RECEIVE_ERROR	0x8048	/* Receive Error */
 #define	MBA_LS_RJT_SENT		0x8049	/* LS_RJT response sent */
 #define	MBA_FW_RESTART_COMP	0x8060	/* Firmware Restart Complete. */
+#define	MBA_IDC_COMPLETE	0x8100	/* Inter-driver communication */
+					/* complete. */
+#define	MBA_IDC_NOTIFICATION	0x8101	/* Inter-driver communication */
+					/* notification. */
+#define	MBA_IDC_TIME_EXTENDED	0x8102	/* Inter-driver communication */
+					/* time extended. */
 
 /* Driver defined. */
 #define	MBA_CMPLT_1_32BIT	0x9000	/* Completion 1 32bit IOSB. */
@@ -141,6 +159,13 @@ extern "C" {
 #define	MBX23_MBX_OR_ASYNC_EVENT	0x0
 #define	MBX23_RESPONSE_QUEUE_UPDATE	0x1
 #define	MBX23_SCSI_COMPLETION		0x2
+
+/*
+ * System Error event (0x8002) defines
+ */
+#define	SE_MPI_RISC	BIT_2
+#define	SE_NIC_1	BIT_1
+#define	SE_NIC_2	BIT_0
 
 /*
  * Menlo alert event defines
@@ -179,10 +204,12 @@ extern "C" {
 #define	MBC_GET_ID			0x20	/* Get loop id of ISP2200. */
 #define	MBC_GET_TIMEOUT_PARAMETERS	0x22	/* Get Timeout Parameters. */
 #define	MBC_TRACE_CONTROL		0x27	/* Trace control. */
-#define	MBC_READ_SFP			0x31	/* Read SFP. */
 #define	MBC_GET_FIRMWARE_OPTIONS	0x28	/* Get firmware options */
+#define	MBC_READ_SFP			0x31	/* Read SFP. */
 #define	MBC_SET_FIRMWARE_OPTIONS	0x38	/* set firmware options */
 #define	MBC_RESET_MENLO			0x3a	/* Reset Menlo. */
+#define	MBC_RESTART_MPI			0x3d	/* Restart MPI. */
+#define	MBC_FLASH_ACCESS		0x3e	/* Flash Access Control */
 #define	MBC_LOOP_PORT_BYPASS		0x40	/* Loop Port Bypass. */
 #define	MBC_LOOP_PORT_ENABLE		0x41	/* Loop Port Enable. */
 #define	MBC_GET_RESOURCE_COUNTS		0x42	/* Get Resource Counts. */
@@ -192,6 +219,7 @@ extern "C" {
 #define	MBC_ONLINE_SELF_TEST		0x46	/* Online self-test. */
 #define	MBC_ENHANCED_GET_PORT_DATABASE	0x47	/* Get Port Database + login */
 #define	MBC_INITIALIZE_MULTI_ID_FW	0x48	/* Initialize multi-id fw */
+#define	MBC_GET_DCBX_PARAMS		0x51	/* Get DCBX parameters */
 #define	MBC_RESET_LINK_STATUS		0x52	/* Reset Link Error Status */
 #define	MBC_EXECUTE_IOCB		0x54	/* 64 Bit Execute IOCB cmd. */
 #define	MBC_SEND_RNID_ELS		0x57	/* Send RNID ELS request */
@@ -222,23 +250,120 @@ extern "C" {
 #define	MBC_INITIALIZE_IP		0x77	/* Initialize IP */
 #define	MBC_SEND_FARP_REQ_COMMAND	0x78	/* FARP request. */
 #define	MBC_UNLOAD_IP			0x79	/* Unload IP */
+#define	MBC_GET_XGMAC_STATS		0x7a	/* Get XGMAC Statistics. */
 #define	MBC_GET_ID_LIST			0x7c	/* Get port ID list. */
 #define	MBC_SEND_LFA_COMMAND		0x7d	/* Send Loop Fabric Address */
 #define	MBC_LUN_RESET			0x7e	/* Send Task mgmt LUN reset */
+#define	MBC_IDC_REQUEST			0x100	/* IDC request */
+#define	MBC_IDC_ACK			0x101	/* IDC acknowledge */
+#define	MBC_IDC_TIME_EXTEND		0x102	/* IDC extend time */
+#define	MBC_PORT_RESET			0x120	/* Port Reset */
+#define	MBC_SET_PORT_CONFIG		0x122	/* Set port configuration */
+#define	MBC_GET_PORT_CONFIG		0x123	/* Get port configuration */
+
+/*
+ * Mbc 0x100 (IDC request)
+ */
+/* Timeout Value */
+#define	IDC_TIMEOUT_POS		8
+#define	IDC_TIMEOUT_MASK	(BIT_11 | BIT_10 | BIT_9 | BIT_8)
+
+/* Function Destination Selector */
+#define	IDC_FUNC_DST_MASK	(BIT_5 | BIT_4)
+#define	IDC_FUNC_DST_MBX3	0
+#define	IDC_FUNC_DST_SP		0x10
+
+/* Function Source */
+#define	IDC_FUNC_SRC_MASK	(BIT_3 | BIT_2 | BIT_1 | BIT_0)
+
+/* Information opcode */
+#define	IDC_OPC_DRV_START	0x100
+#define	IDC_OPC_FLASH_ACC	0x101
+#define	IDC_OPC_RESTART_MPI	0x102
+
+/* Function Destination Mask */
+#define	IDC_FUNC_3		BIT_3
+#define	IDC_FUNC_2		BIT_2
+#define	IDC_FUNC_1		BIT_1
+#define	IDC_FUNC_0		BIT_0
+#define	IDC_FC_FUNC		(BIT_3 | BIT_2)
+#define	IDC_NIC_FUNC		(BIT_1 | BIT_0)
+#define	IDC_ALL_FUNC		(IDC_FC_FUNC | IDC_NIC_FUNC)
+
+/* Requestor Id Function Type */
+#define	IDC_RIT_MASK		(BIT_6 | BIT_5 | BIT_4)
+#define	IDC_RIT_NIC		0
+#define	IDC_RIT_FC		0x10
+
+/* Requestor Id Originator */
+#define	IDC_RIO_MASK		(BIT_3 | BIT_2 | BIT_1 | BIT_0)
+#define	IDC_RIO_DRV		0
+#define	IDC_RIO_FW		1
+#define	IDC_RIO_MPI		2
+#define	IDC_RIO_DRV_APP		3
+#define	IDC_RIO_QL_APP		4
+#define	IDC_RIO_QL_MFG		5
+#define	IDC_RIO_OTH_APP		6
+
+/* Region Code */
+#define	IDC_RC_POS		8
+#define	IDC_RC_MASK		0xFF00
+
+/* Region Size in 64k blocks */
+#define	IDC_RS_POS		0
+#define	IDC_RS_MASK		0xFF
+
+/* Message Source */
+#define	IDC_MSG_QLGC		BIT_15
+
+/* Message Subcode */
+#define	IDC_MS_MASK		(BIT_7 | BIT_6 | BIT_5 | BIT_4)
+#define	IDC_MS_NONE		0x00
+#define	IDC_MS_READ		0x10
+#define	IDC_MS_WRITE		0x20
+#define	IDC_MS_ERASE		0x30
+
+/* Marker */
+#define	IDC_MM_MASK		(BIT_3 | BIT_2 | BIT_1 | BIT_0)
+#define	IDC_MM_NONE		0x0
+#define	IDC_MM_BEG		0x1
+#define	IDC_MM_END		0x2
+#define	IDC_MM_WIP		0x3
+#define	IDC_MM_ABORT		0x4
+
+/*
+ * Mbc 0x3e (Flash Access Control)
+ */
+#define	FAC_FORCE_SEMA_LOCK	BIT_15
+#define	FAC_APPL_ID		BIT_14
+#define	FAC_WRT_PROTECT		0
+#define	FAC_WRT_ENABLE		1
+#define	FAC_ERASE_SECTOR	2
+#define	FAC_SEMA_LOCK		3
+#define	FAC_SEMA_UNLOCK		4
+#define	FAC_GET_SECTOR_SIZE	5
+#define	FAC_ADDR_MASK		0x3fff
 
 /*
  * Mbc 20h (Get ID) returns the switch capabilities in mailbox7.
  * The extra bits were added with 4.00.28 MID firmware.
  */
-#define	FLOGI_SEQ_DEL			BIT_8
-#define	FLOGI_NPIV_SUPPORT		BIT_10	/* implies FDISC support */
-#define	FLOGI_VSAN_SUPPORT		BIT_12
-#define	FLOGI_SP_SUPPORT		BIT_13
+#define	GID_TOP_NL_PORT			0
+#define	GID_TOP_FL_PORT			1
+#define	GID_TOP_N_PORT			2
+#define	GID_TOP_F_PORT			3
+#define	GID_TOP_N_PORT_NO_TGT		4
+
+#define	GID_FP_IN_ORDER			BIT_8
+#define	GID_FP_MAC_ADDR			BIT_9
+#define	GID_FP_NPIV_SUPPORT		BIT_10	/* implies FDISC support */
+#define	GID_FP_VF_SUPPORT		BIT_12
+#define	GID_FP_SP_SUPPORT		BIT_13
 
 /*
  * Driver Mailbox command definitions.
  */
-#define	MAILBOX_TOV		30		/* Default Timeout value. */
+#define	MAILBOX_TOV		30	/* Default Timeout value. */
 
 /* Mailbox command parameter structure definition. */
 typedef struct mbx_cmd {
@@ -296,7 +421,6 @@ typedef struct ql_mbx_data {
 #define	MBX_0_THRU_9	MBX_0_THRU_8|MBX_9
 #define	MBX_0_THRU_10	MBX_0_THRU_9|MBX_10
 
-
 /*
  * Firmware state codes from get firmware state mailbox command
  */
@@ -320,13 +444,20 @@ typedef struct ql_mbx_data {
 #define	FO1_AE_AUTO_BYPASS		BIT_9
 #define	FO1_ENABLE_PURE_IOCB		BIT_10
 #define	FO1_AE_PLOGI_RJT		BIT_11
+#define	FO1_AE_IMMEDIATE_NOTIFY_IOCB	BIT_11
 #define	FO1_ENABLE_ABORT_SEQUENCE	BIT_12
 #define	FO1_AE_QUEUE_FULL		BIT_13
+#define	FO1_POST_NOTIFY_ACK_IOCB_2_ATIO	BIT_13
+#define	FO1_POST_NOTIFY_ACK_IOCB	BIT_14
 
+#define	FO2_ENABLE_SELECTIVE_CLASS_2	BIT_5
 #define	FO2_REV_LOOPBACK		BIT_1
 #define	FO2_ENABLE_ATIO_TYPE_3		BIT_0
 
+#define	FO3_NO_ABORT_IO_ON_LINK_DOWN	BIT_14
+#define	FO3_HOLD_STS_FOR_ABTS_RSP	BIT_12
 #define	FO3_STARTUP_OPTS_VALID		BIT_5
+#define	FO3_SEND_N2N_PRLI		BIT_4
 #define	FO3_AE_RND_ERROR		BIT_1
 #define	FO3_ENABLE_EMERG_IOCB		BIT_0
 
@@ -345,7 +476,7 @@ typedef struct ql_mbx_data {
 #define	FTO_FCEMAXTRACEBUF	0x840	/* max frame size */
 
 /*
- * fw_attributes defines from firmware version mailbox command
+ * fw version 1 attributes defines from firmware version mailbox command
  */
 #define	FWATTRIB_EF		0x7
 #define	FWATTRIB_TP		0x17
@@ -354,6 +485,19 @@ typedef struct ql_mbx_data {
 #define	FWATTRIB_IPX		0x137
 #define	FWATTRIB_FL		0x217
 #define	FWATTRIB_FPX		0x317
+
+/*
+ * fw version 2 attributes defines
+ */
+#define	FWATTRIB2_CLASS2	BIT_0
+#define	FWATTRIB2_IP		BIT_1
+#define	FWATTRIB2_MID		BIT_2
+#define	FWATTRIB2_SB2		BIT_3
+#define	FWATTRIB2_T10_CRC	BIT_4
+#define	FWATTRIB2_VI		BIT_5
+#define	FWATTRIB2_MQUE		BIT_6
+#define	FWATTRIB2_FCOE		BIT_11
+#define	FWATTRIB2_EX_REL	BIT_13
 
 /*
  * Diagnostic ELS ECHO parameter structure definition.
@@ -379,44 +523,6 @@ typedef struct lfa_cmd {
 	uint8_t  subcommand[2];
 	uint8_t	 payload[LFA_PAYLOAD_SIZE];
 } lfa_cmd_t;
-
-/*
- * Deivce ID list definitions.
- */
-struct ql_dev_id {
-	uint8_t		al_pa;
-	uint8_t		area;
-	uint8_t		domain;
-	uint8_t		loop_id;
-};
-
-struct ql_ex_dev_id {
-	uint8_t		al_pa;
-	uint8_t		area;
-	uint8_t		domain;
-	uint8_t		reserved;
-	uint8_t		loop_id_l;
-	uint8_t		loop_id_h;
-};
-
-struct ql_24_dev_id {
-	uint8_t		al_pa;
-	uint8_t		area;
-	uint8_t		domain;
-	uint8_t		reserved;
-	uint8_t		n_port_hdl_l;
-	uint8_t		n_port_hdl_h;
-	uint8_t		reserved_1[2];
-};
-
-typedef union ql_dev_id_list {
-	struct ql_dev_id	d;
-	struct ql_ex_dev_id	d_ex;
-	struct ql_24_dev_id	d_24;
-} ql_dev_id_list_t;
-
-/* Define maximum number of device list entries.. */
-#define	DEVICE_LIST_ENTRIES	MAX_24_FIBRE_DEVICES
 
 /* Define size of Loop Position Map. */
 #define	LOOP_POSITION_MAP_SIZE  128	/* bytes */
@@ -557,8 +663,8 @@ typedef struct port_database_24 {
 int ql_initialize_ip(ql_adapter_state_t *);
 int ql_shutdown_ip(ql_adapter_state_t *);
 int ql_online_selftest(ql_adapter_state_t *);
-int ql_loop_back(ql_adapter_state_t *, lbp_t *, uint32_t, uint32_t);
-int ql_echo(ql_adapter_state_t *, echo_t *);
+int ql_loop_back(ql_adapter_state_t *, uint16_t, lbp_t *, uint32_t, uint32_t);
+int ql_echo(ql_adapter_state_t *, uint16_t, echo_t *);
 int ql_send_change_request(ql_adapter_state_t *, uint16_t);
 int ql_send_lfa(ql_adapter_state_t *, lfa_cmd_t *);
 int ql_clear_aca(ql_adapter_state_t *, ql_tgt_t *, uint16_t);
@@ -604,9 +710,9 @@ int ql_get_firmware_state(ql_adapter_state_t *, ql_mbx_data_t *);
 int ql_get_adapter_id(ql_adapter_state_t *, ql_mbx_data_t *);
 int ql_get_fw_version(ql_adapter_state_t *, ql_mbx_data_t *);
 int ql_data_rate(ql_adapter_state_t *, ql_mbx_data_t *);
-int ql_diag_loopback(ql_adapter_state_t *, caddr_t, uint32_t, uint16_t,
-    uint32_t, ql_mbx_data_t *);
-int ql_diag_echo(ql_adapter_state_t *, caddr_t, uint32_t, uint16_t,
+int ql_diag_loopback(ql_adapter_state_t *, uint16_t, caddr_t, uint32_t,
+    uint16_t, uint32_t, ql_mbx_data_t *);
+int ql_diag_echo(ql_adapter_state_t *, uint16_t, caddr_t, uint32_t, uint16_t,
     ql_mbx_data_t *);
 int ql_serdes_param(ql_adapter_state_t *, ql_mbx_data_t *);
 int ql_get_timeout_parameters(ql_adapter_state_t *, uint16_t *);
@@ -615,6 +721,17 @@ int ql_read_sfp(ql_adapter_state_t *, dma_mem_t *, uint16_t, uint16_t);
 int ql_iidma_rate(ql_adapter_state_t *, uint16_t, uint32_t *, uint32_t);
 int ql_fw_etrace(ql_adapter_state_t *, dma_mem_t *, uint16_t);
 int ql_reset_menlo(ql_adapter_state_t *, ql_mbx_data_t *, uint16_t);
+int ql_restart_mpi(ql_adapter_state_t *);
+int ql_idc_request(ql_adapter_state_t *, ql_mbx_data_t *);
+int ql_idc_ack(ql_adapter_state_t *);
+int ql_idc_time_extend(ql_adapter_state_t *, ql_mbx_data_t *);
+int ql_port_reset(ql_adapter_state_t *);
+int ql_set_port_config(ql_adapter_state_t *, ql_mbx_data_t *);
+int ql_get_port_config(ql_adapter_state_t *, ql_mbx_data_t *);
+int ql_flash_access(ql_adapter_state_t *, uint16_t, uint32_t, uint32_t,
+    uint32_t *);
+int ql_get_xgmac_stats(ql_adapter_state_t *, size_t, caddr_t);
+int ql_get_dcbx_params(ql_adapter_state_t *, uint32_t, caddr_t);
 /*
  * Mailbox command table initializer
  */
@@ -645,9 +762,12 @@ int ql_reset_menlo(ql_adapter_state_t *, ql_mbx_data_t *, uint16_t);
 	{MBC_GET_ID, "MBC_GET_ID"},					\
 	{MBC_GET_TIMEOUT_PARAMETERS, "MBC_GET_TIMEOUT_PARAMETERS"},	\
 	{MBC_TRACE_CONTROL, "MBC_TRACE_CONTROL"},			\
-	{MBC_READ_SFP, "MBC_READ_SFP"},					\
 	{MBC_GET_FIRMWARE_OPTIONS, "MBC_GET_FIRMWARE_OPTIONS"},		\
+	{MBC_READ_SFP, "MBC_READ_SFP"},					\
 	{MBC_SET_FIRMWARE_OPTIONS, "MBC_SET_FIRMWARE_OPTIONS"},		\
+	{MBC_RESET_MENLO, "MBC_RESET_MENLO"},				\
+	{MBC_RESTART_MPI, "MBC_RESTART_MPI"},				\
+	{MBC_FLASH_ACCESS, "MBC_FLASH_ACCESS"},				\
 	{MBC_LOOP_PORT_BYPASS, "MBC_LOOP_PORT_BYPASS"},			\
 	{MBC_LOOP_PORT_ENABLE, "MBC_LOOP_PORT_ENABLE"},			\
 	{MBC_GET_RESOURCE_COUNTS, "MBC_GET_RESOURCE_COUNTS"},		\
@@ -657,6 +777,7 @@ int ql_reset_menlo(ql_adapter_state_t *, ql_mbx_data_t *, uint16_t);
 	{MBC_ONLINE_SELF_TEST, "MBC_ONLINE_SELF_TEST"},			\
 	{MBC_ENHANCED_GET_PORT_DATABASE, "MBC_ENHANCED_GET_PORT_DATABASE"},\
 	{MBC_INITIALIZE_MULTI_ID_FW, "MBC_INITIALIZE_MULTI_ID_FW"},	\
+	{MBC_GET_DCBX_PARAMS, "MBC_GET_DCBX_PARAMS"},			\
 	{MBC_RESET_LINK_STATUS, "MBC_RESET_LINK_STATUS"},		\
 	{MBC_EXECUTE_IOCB, "MBC_EXECUTE_IOCB"},				\
 	{MBC_SEND_RNID_ELS, "MBC_SEND_RNID_ELS"},			\
@@ -686,9 +807,16 @@ int ql_reset_menlo(ql_adapter_state_t *, ql_mbx_data_t *, uint16_t);
 	{MBC_INITIALIZE_IP, "MBC_INITIALIZE_IP"},			\
 	{MBC_SEND_FARP_REQ_COMMAND, "MBC_SEND_FARP_REQ_COMMAND"},	\
 	{MBC_UNLOAD_IP, "MBC_UNLOAD_IP"},				\
+	{MBC_GET_XGMAC_STATS, "MBC_GET_XGMAC_STATS"},			\
 	{MBC_GET_ID_LIST, "MBC_GET_ID_LIST"},				\
 	{MBC_SEND_LFA_COMMAND, "MBC_SEND_LFA_COMMAND"},			\
 	{MBC_LUN_RESET, "MBC_LUN_RESET"},				\
+	{MBC_IDC_REQUEST, "MBC_IDC_REQUEST"},				\
+	{MBC_IDC_ACK, "MBC_IDC_ACK"},					\
+	{MBC_IDC_TIME_EXTEND, "MBC_IDC_TIME_EXTEND"},			\
+	{MBC_PORT_RESET, "MBC_PORT_RESET"},				\
+	{MBC_SET_PORT_CONFIG, "MBC_SET_PORT_CONFIG"},			\
+	{MBC_GET_PORT_CONFIG, "MBC_GET_PORT_CONFIG"},			\
 	{NULL, "Unsupported"}						\
 }
 

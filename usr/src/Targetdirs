@@ -38,14 +38,13 @@
 SYMLINKS=	$(SYM.ROOT.SYS) $(SYM.ROOT.BIN) $(SYM.OTHERS)
 
 TARGETDIRS=	$(ROOT.SYS) $(ROOT.BIN) $(ROOT.SYS2) \
-		$(UUCP.UUCP) $(OTHERS) $(ROOT.SFW) $(ROOT.OTHER) \
+		$(UUCP.UUCP) $(OTHERS) $(ROOT.OTHER) \
 		$(SYM.USRCCSLIB) $(SYM.USRLIB)
 
 $(BUILD64)	TARGETDIRS += $(ROOT.SYS64.2) $(ROOT.BIN64) \
-		$(ROOT.SFW64) \
 		$(SYM.USRCCSLIB64) $(SYM.USRLIB64)
 
-$(BUILD64)	SYMLINKS += $(SYM.ROOT.BIN64) $(SYM.ROOT.SFW64)
+$(BUILD64)	SYMLINKS += $(SYM.ROOT.BIN64)
 
 TARGETDIRS	+= $(SYMLINKS)
 
@@ -160,6 +159,8 @@ ROOT.SYS= \
 	/var/log \
 	/var/log/pool \
 	/var/sadm \
+	/var/sadm/pkg \
+	/var/sadm/security \
 	/var/opt \
 	/var/run \
 	/var/smb \
@@ -197,9 +198,6 @@ ROOT.SYS= \
 
 # EXPORT DELETE START
 XROOT.BIN= \
-	/etc/openssl \
-	/etc/openssl/certs \
-	/etc/openssl/private \
 	/usr/lib/inet/wanboot
 # EXPORT DELETE END
 
@@ -255,7 +253,6 @@ ROOT.BIN= \
 	/usr/include/kerberosv5 \
 	/usr/include/libmilter \
 	/usr/include/libpolkit \
-	/usr/include/openssl \
 	/usr/include/sasl \
 	/usr/include/scsi \
 	/usr/include/security \
@@ -264,7 +261,6 @@ ROOT.BIN= \
 	/usr/lib \
 	/usr/lib/abi \
 	/usr/lib/brand \
-	/usr/lib/brand/labeled \
 	/usr/lib/brand/native \
 	/usr/lib/brand/shared \
 	/usr/lib/brand/sn1 \
@@ -285,6 +281,7 @@ ROOT.BIN= \
 	/usr/lib/inet/dhcp/nsu \
 	/usr/lib/inet/dhcp/svc \
 	/usr/lib/inet/dhcp/svcadm \
+	/usr/lib/inet/$(MACH32) \
 	$(XROOT.BIN) \
 	/usr/lib/fm    \
 	/usr/lib/gss    \
@@ -297,6 +294,9 @@ ROOT.BIN= \
 	/usr/lib/localedef/src \
 	/usr/lib/lwp \
 	/usr/lib/pool \
+	/usr/lib/python2.4 \
+	/usr/lib/python2.4/vendor-packages \
+	/usr/lib/python2.4/vendor-packages/zfs \
 	/usr/lib/rcap \
 	/usr/lib/rcap/$(MACH32) \
 	/usr/lib/saf \
@@ -307,6 +307,7 @@ ROOT.BIN= \
 	/usr/lib/smbsrv \
 	/usr/lib/term \
 	/usr/lib/vscan \
+	/usr/lib/zfs \
 	/usr/lib/zones \
 	/usr/old \
 	/usr/openwin \
@@ -314,6 +315,7 @@ ROOT.BIN= \
 	/usr/proc/bin \
 	/usr/sadm \
 	/usr/sadm/install \
+	/usr/sadm/install/bin \
 	/usr/sadm/install/scripts \
 	/usr/sadm/sysadm \
 	/usr/sadm/sysadm/add-ons \
@@ -341,7 +343,11 @@ ROOT.BIN= \
 	/var/news \
 	/var/preserve \
 	/var/saf \
-	/var/spool
+	/var/sadm/install \
+	/var/sadm/install/admin \
+	/var/sadm/install/logs \
+	/var/spool \
+	/var/spool/pkg
 
 sparcv9_ROOT.BIN64= \
 	/platform/sun4u/lib \
@@ -372,6 +378,7 @@ ROOT.BIN64= \
 	/usr/lib/elfedit/$(MACH64) \
 	/usr/lib/fm/$(MACH64) \
 	/usr/lib/fp/libp/$(MACH64) \
+	/usr/lib/inet/$(MACH64) \
 	/usr/lib/krb5/$(MACH64) \
 	/usr/lib/libp/$(MACH64) \
 	/usr/lib/link_audit/$(MACH64) \
@@ -432,14 +439,6 @@ UUCP.UUCP= \
 	/var/spool/uucp \
 	/var/spool/uucppublic \
 	/var/uucp
-
-ROOT.SFW= \
-	/usr/sfw/bin \
-	/usr/sfw/lib
-
-ROOT.SFW64= \
-	/usr/sfw/bin/$(MACH64) \
-	/usr/sfw/lib/$(MACH64)
 
 OTHERS=  \
 	/dev/term  \
@@ -527,12 +526,8 @@ SYM.ROOT.BIN64= \
 	/var/ld/64 \
 	/usr/ucblib/64
 
-SYM.ROOT.SFW64= \
-	/usr/sfw/lib/64
-
 SYM.OTHERS=  \
 	/etc/log  \
-	/etc/sfw/openssl \
 	/usr/mail  \
 	/usr/tmp
 
@@ -597,6 +592,7 @@ $(ROOT)/etc/mail/cf/sh \
 $(ROOT)/usr/mail \
 $(ROOT)/var/mail  :=	GROUP= mail
 
+
 $(ROOT)/etc/dladm :=		OWNER= dladm
 $(ROOT)/etc/dladm :=		GROUP= sys
 
@@ -617,7 +613,15 @@ $(ROOT)/root:=		DIRMODE= 700
 
 $(ROOT)/var/krb5/rcache/root:=	DIRMODE= 700
 
-$(ROOT)/etc/openssl/private:=	DIRMODE= 700
+
+#
+# These permissions must match those set
+# in pkgdefs.
+#
+$(ROOT)/var/sadm/pkg \
+$(ROOT)/var/sadm/security \
+$(ROOT)/var/sadm/install/logs :=	DIRMODE= 555
+
 
 #
 # These permissions must match the ones set
@@ -655,7 +659,6 @@ $(ROOT)/etc/lib/ld.so.1:=		LINKDEST=../../lib/ld.so.1
 $(ROOT)/etc/lib/libdl.so.1:=		LINKDEST=../../lib/libdl.so.1
 $(ROOT)/etc/lib/nss_files.so.1:=	LINKDEST=../../lib/nss_files.so.1
 $(ROOT)/etc/log:=			LINKDEST=../var/adm/log
-$(ROOT)/etc/sfw/openssl:=		LINKDEST=../openssl
 $(ROOT)/usr/mail:=			LINKDEST=../var/mail
 $(ROOT)/usr/news:=			LINKDEST=../var/news
 $(ROOT)/usr/preserve:=			LINKDEST=../var/preserve
@@ -688,7 +691,6 @@ $(BUILD64) $(ROOT)/usr/lib/secure/64:=	LINKDEST=$(MACH64)
 $(BUILD64) $(ROOT)/usr/lib/security/64:=	LINKDEST=$(MACH64)
 $(BUILD64) $(ROOT)/usr/xpg4/lib/64:=	LINKDEST=$(MACH64)
 $(BUILD64) $(ROOT)/var/ld/64:=		LINKDEST=$(MACH64)
-$(BUILD64) $(ROOT)/usr/sfw/lib/64:=	LINKDEST=$(MACH64)
 $(BUILD64) $(ROOT)/usr/ucblib/64:=	LINKDEST=$(MACH64)
 
 # Installing a directory symlink calls for overriding INS.dir to install

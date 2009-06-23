@@ -1,5 +1,5 @@
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # CDDL HEADER START
@@ -21,7 +21,6 @@
 #
 # CDDL HEADER END
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
 
 one hid_state
 one ohci_state
@@ -47,6 +46,7 @@ root	usb_get_if_number
 root	usb_parse_CV_cfg_descr
 root	usb_parse_CV_ep_descr
 root	usb_parse_CV_if_descr
+root	usb_parse_comp_ep_descr
 root	usb_pipe_get_private
 root	usb_get_current_frame_number
 root	usb_get_max_isoc_pkts
@@ -115,6 +115,10 @@ root	hubd_cpr_post_user_callb
 root	ohci_intr
 root	ehci_intr
 
+root	ohci_quiesce
+root	uhci_quiesce
+root	ehci_quiesce
+
 root	usba_dbuf_tail
 root	usb_log
 root	hubd_restore_state_cb
@@ -169,8 +173,6 @@ root hid_polled_read
 root usba_dbuf_tail
 
 ### thread functions in hid module
-root hid_consconfig_relink
-
 add usba_pipe_async_req::sync_func targets usba_pipe_sync_close
 add usba_pipe_async_req::sync_func targets usba_pipe_sync_reset
 
@@ -190,6 +192,7 @@ add ehci_trans_wrapper::tw_handle_qtd targets ehci_handle_ctrl_qtd
 add ehci_trans_wrapper::tw_handle_qtd targets ehci_handle_bulk_qtd
 add ehci_trans_wrapper::tw_handle_qtd targets ehci_handle_intr_qtd
 
+add hubd::h_cleanup_child targets warlock_dummy
 add usba_hcdi_ops::usba_hcdi_console_input_init targets \
                                                 ohci_hcdi_polled_input_init
 add usba_hcdi_ops::usba_hcdi_console_input_fini targets \

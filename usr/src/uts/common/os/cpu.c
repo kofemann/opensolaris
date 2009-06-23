@@ -32,6 +32,7 @@
 #include <sys/var.h>
 #include <sys/thread.h>
 #include <sys/cpuvar.h>
+#include <sys/cpu_event.h>
 #include <sys/kstat.h>
 #include <sys/uadmin.h>
 #include <sys/systm.h>
@@ -143,7 +144,7 @@ cpu_t *cpu_inmotion;
 /*
  * Can be raised to suppress further weakbinding, which are instead
  * satisfied by disabling preemption.  Must be raised/lowered under cpu_lock,
- * while individual thread weakbinding synchronisation is done under thread
+ * while individual thread weakbinding synchronization is done under thread
  * lock.
  */
 int weakbindingbarrier;
@@ -2166,6 +2167,7 @@ static struct {
 	kstat_named_t ci_ncoreperchip;
 	kstat_named_t ci_max_cstates;
 	kstat_named_t ci_curr_cstate;
+	kstat_named_t ci_sktstr;
 #endif
 } cpu_info_template = {
 	{ "state",			KSTAT_DATA_CHAR },
@@ -2194,6 +2196,7 @@ static struct {
 	{ "ncore_per_chip",		KSTAT_DATA_INT32 },
 	{ "supported_max_cstates",	KSTAT_DATA_INT32 },
 	{ "current_cstate",		KSTAT_DATA_INT32 },
+	{ "socket_type",		KSTAT_DATA_STRING },
 #endif
 };
 
@@ -2264,7 +2267,9 @@ cpu_info_kstat_update(kstat_t *ksp, int rw)
 	    cpuid_get_ncore_per_chip(cp);
 	cpu_info_template.ci_pkg_core_id.value.l = cpuid_get_pkgcoreid(cp);
 	cpu_info_template.ci_max_cstates.value.l = cp->cpu_m.max_cstates;
-	cpu_info_template.ci_curr_cstate.value.l = cp->cpu_m.curr_cstate;
+	cpu_info_template.ci_curr_cstate.value.l = cpu_idle_get_cpu_state(cp);
+	kstat_named_setstr(&cpu_info_template.ci_sktstr,
+	    cpuid_getsocketstr(cp));
 #endif
 
 	return (0);

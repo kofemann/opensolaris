@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -165,7 +165,6 @@ static char sw_intr_intv[] = "sw-intr-intvl";
 static char nge_desc_mode[] = "desc-mode";
 static char default_mtu[] = "default_mtu";
 static char low_memory_mode[] = "minimal-memory-usage";
-static char mac_addr_reversion[] = "mac-addr-reversion";
 extern kmutex_t nge_log_mutex[1];
 
 static int		nge_m_start(void *);
@@ -998,8 +997,6 @@ nge_get_props(nge_t *ngep)
 	    DDI_PROP_DONTPASS, nge_desc_mode, dev_param_p->desc_type);
 	ngep->lowmem_mode = ddi_prop_get_int(DDI_DEV_T_ANY, devinfo,
 	    DDI_PROP_DONTPASS, low_memory_mode, 0);
-	ngep->mac_addr_reversion = ddi_prop_get_int(DDI_DEV_T_ANY, devinfo,
-	    DDI_PROP_DONTPASS, mac_addr_reversion, 0);
 
 	if (dev_param_p->jumbo) {
 		ngep->default_mtu = ddi_prop_get_int(DDI_DEV_T_ANY, devinfo,
@@ -1112,6 +1109,7 @@ static void
 nge_m_stop(void *arg)
 {
 	nge_t *ngep = arg;		/* private device info	*/
+	int err;
 
 	NGE_TRACE(("nge_m_stop($%p)", arg));
 
@@ -1127,7 +1125,11 @@ nge_m_stop(void *arg)
 	}
 	rw_enter(ngep->rwlock, RW_WRITER);
 
-	(void) nge_chip_stop(ngep, B_FALSE);
+	err = nge_chip_stop(ngep, B_FALSE);
+	if (err == DDI_FAILURE)
+		err = nge_chip_reset(ngep);
+	if (err == DDI_FAILURE)
+		nge_problem(ngep, "nge_m_stop: stop chip failed");
 	ngep->nge_mac_state = NGE_MAC_STOPPED;
 
 	/* Recycle all the TX BD */
@@ -1907,6 +1909,22 @@ nge_m_getprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 			err = nge_get_priv_prop(ngep, pr_name, pr_flags,
 			    pr_valsize, pr_val);
 			break;
+		case MAC_PROP_MTU: {
+			mac_propval_range_t range;
+
+			if (!(pr_flags & MAC_PROP_POSSIBLE))
+				return (ENOTSUP);
+			if (pr_valsize < sizeof (mac_propval_range_t))
+				return (EINVAL);
+			range.mpr_count = 1;
+			range.mpr_type = MAC_PROPVAL_UINT32;
+			range.range_uint32[0].mpur_min =
+			    range.range_uint32[0].mpur_max = ETHERMTU;
+			if (ngep->dev_spec_param.jumbo)
+				range.range_uint32[0].mpur_max = NGE_MAX_MTU;
+			bcopy(&range, pr_val, sizeof (range));
+			break;
+		}
 		default:
 			err = ENOTSUP;
 	}
@@ -2204,6 +2222,48 @@ nge_chip_cyclic(void *arg)
 	nge_wake_factotum(ngep);
 }
 
+/*
+ * Get/Release semaphore of SMU
+ * For SMU enabled chipset
+ * When nge driver is attached, driver should acquire
+ * semaphore before PHY init and accessing MAC registers.
+ * When nge driver is unattached, driver should release
+ * semaphore.
+ */
+
+static int
+nge_smu_sema(nge_t *ngep, boolean_t acquire)
+{
+	nge_tx_en tx_en;
+	uint32_t tries;
+
+	if (acquire) {
+		for (tries = 0; tries < 5; tries++) {
+			tx_en.val = nge_reg_get32(ngep, NGE_TX_EN);
+			if (tx_en.bits.smu2mac == NGE_SMU_FREE)
+				break;
+			delay(drv_usectohz(1000000));
+		}
+		if (tx_en.bits.smu2mac != NGE_SMU_FREE)
+			return (DDI_FAILURE);
+		for (tries = 0; tries < 5; tries++) {
+			tx_en.val = nge_reg_get32(ngep, NGE_TX_EN);
+			tx_en.bits.mac2smu = NGE_SMU_GET;
+			nge_reg_put32(ngep, NGE_TX_EN, tx_en.val);
+			tx_en.val = nge_reg_get32(ngep, NGE_TX_EN);
+
+			if (tx_en.bits.mac2smu == NGE_SMU_GET &&
+			    tx_en.bits.smu2mac == NGE_SMU_FREE)
+				return (DDI_SUCCESS);
+			drv_usecwait(10);
+		}
+		return (DDI_FAILURE);
+	} else
+		nge_reg_put32(ngep, NGE_TX_EN, 0x0);
+
+	return (DDI_SUCCESS);
+
+}
 static void
 nge_unattach(nge_t *ngep)
 {
@@ -2236,6 +2296,10 @@ nge_unattach(nge_t *ngep)
 		mutex_enter(ngep->genlock);
 		nge_restore_mac_addr(ngep);
 		(void) nge_chip_stop(ngep, B_FALSE);
+		if (ngep->chipinfo.device == DEVICE_ID_MCP55_373 ||
+		    ngep->chipinfo.device == DEVICE_ID_MCP55_372) {
+			(void) nge_smu_sema(ngep, B_FALSE);
+		}
 		mutex_exit(ngep->genlock);
 	}
 
@@ -2441,6 +2505,14 @@ nge_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 
 	mutex_enter(ngep->genlock);
 
+	if (ngep->chipinfo.device == DEVICE_ID_MCP55_373 ||
+	    ngep->chipinfo.device == DEVICE_ID_MCP55_372) {
+		err = nge_smu_sema(ngep, B_TRUE);
+		if (err != DDI_SUCCESS) {
+			nge_problem(ngep, "nge_attach: nge_smu_sema() failed");
+			goto attach_fail;
+		}
+	}
 	/*
 	 * Initialise link state variables
 	 * Stop, reset & reinitialise the chip.

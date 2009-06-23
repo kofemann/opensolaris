@@ -2763,6 +2763,12 @@ nfs4_fwrite:
 			resid = uiop->uio_resid;
 			offset = uiop->uio_loffset;
 			error = rp->r_error;
+			/*
+			 * A close may have cleared r_error, if so,
+			 * propagate ESTALE error return properly
+			 */
+			if (error == 0)
+				error = ESTALE;
 			goto bottom;
 		}
 
@@ -2805,6 +2811,12 @@ nfs4_fwrite:
 
 		if (rp->r_flags & R4STALE) {
 			error = rp->r_error;
+			/*
+			 * A close may have cleared r_error, if so,
+			 * propagate ESTALE error return properly
+			 */
+			if (error == 0)
+				error = ESTALE;
 			break;
 		}
 
@@ -7729,6 +7741,21 @@ link_call:
 }
 
 /*
+ * When the parent directory has changed, sv_dfh must be updated
+ */
+static void
+update_parentdir_sfh(vnode_t *vp, vnode_t *ndvp)
+{
+	svnode_t *sv = VTOSV(vp);
+	nfs4_sharedfh_t *old_dfh = sv->sv_dfh;
+	nfs4_sharedfh_t *new_dfh = VTOR4(ndvp)->r_fh;
+
+	sfh4_hold(new_dfh);
+	sv->sv_dfh = new_dfh;
+	sfh4_rele(&old_dfh);
+}
+
+/*
  * nfs4rename_persistent does the otw portion of renaming in NFS Version 4,
  * when it is known that the filehandle is persistent through rename.
  *
@@ -7861,6 +7888,8 @@ recov_retry:
 			 *
 			 */
 			if (ndvp != odvp) {
+				update_parentdir_sfh(renvp, ndvp);
+
 				if (dinfop)
 					dinfo.di_garp = &getattr2_res->ga_res;
 
@@ -8090,6 +8119,7 @@ recov_retry:
 
 	/* Update source cache attribute, readdir and dnlc caches */
 	if (ndvp != odvp) {
+		update_parentdir_sfh(ovp, ndvp);
 		/*
 		 * If dinfop is non-NULL, then compound succeded, so
 		 * set di_garp to attrs for source dir.  dinfop is only
@@ -9105,8 +9135,15 @@ write_again:
 				mutex_exit(&rp->r_statelock);
 			}
 			crfree(cred_otw);
-		} else
+		} else {
 			error = rp->r_error;
+			/*
+			 * A close may have cleared r_error, if so,
+			 * propagate ESTALE error return properly
+			 */
+			if (error == 0)
+				error = ESTALE;
+		}
 	}
 
 	if (error != 0 && error != NFS_EOF)

@@ -20,10 +20,9 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include	<sgs.h>
 #include	<_debug.h>
@@ -31,15 +30,15 @@
 #include	<msg.h>
 
 void
-Elf_shdr(Lm_list *lml, Half mach, Shdr *shdr)
+Elf_shdr(Lm_list *lml, uchar_t osabi, Half mach, Shdr *shdr)
 {
 	Conv_inv_buf_t		inv_buf1, inv_buf2;
 	Conv_sec_flags_buf_t	sec_flags_buf;
 
 	dbg_print(lml, MSG_ORIG(MSG_SHD_ADDR), EC_ADDR(shdr->sh_addr),
-	    conv_sec_flags(shdr->sh_flags, 0, &sec_flags_buf));
+	    conv_sec_flags(osabi, mach, shdr->sh_flags, 0, &sec_flags_buf));
 	dbg_print(lml, MSG_ORIG(MSG_SHD_SIZE), EC_XWORD(shdr->sh_size),
-	    conv_sec_type(mach, shdr->sh_type, 0, &inv_buf1));
+	    conv_sec_type(osabi, mach, shdr->sh_type, 0, &inv_buf1));
 	if (shdr->sh_entsize == 0) {
 		dbg_print(lml, MSG_ORIG(MSG_SHD_OFFSET),
 		    EC_OFF(shdr->sh_offset), EC_XWORD(shdr->sh_entsize));
@@ -59,22 +58,28 @@ Elf_shdr(Lm_list *lml, Half mach, Shdr *shdr)
 }
 
 void
-Dbg_shdr_modified(Lm_list *lml, const char *obj, Half mach, Shdr *oshdr,
-    Shdr *nshdr, const char *name)
+Dbg_shdr_modified(Lm_list *lml, const char *obj, uchar_t osabi, Half mach,
+    Word ndx, Shdr *oshdr, Shdr *nshdr, const char *name)
 {
+	dbg_isec_name_buf_t	buf;
+	char			*alloc_mem;
+
 	if (DBG_NOTCLASS(DBG_C_SECTIONS | DBG_C_SUPPORT))
 		return;
 	if (DBG_NOTDETAIL())
 		return;
 
 	Dbg_util_nl(lml, DBG_NL_STD);
-	dbg_print(lml, MSG_INTL(MSG_SHD_MODIFIED), name, obj);
+	dbg_print(lml, MSG_INTL(MSG_SHD_MODIFIED),
+	    dbg_fmt_isec_name2(name, ndx, buf, &alloc_mem), obj);
+	if (alloc_mem != NULL)
+		free(alloc_mem);
 
 	dbg_print(lml, MSG_INTL(MSG_SHD_ORIG));
-	Elf_shdr(lml, mach, oshdr);
+	Elf_shdr(lml, osabi, mach, oshdr);
 
 	dbg_print(lml, MSG_INTL(MSG_SHD_NEW));
-	Elf_shdr(lml, mach, nshdr);
+	Elf_shdr(lml, osabi, mach, nshdr);
 
 	Dbg_util_nl(lml, DBG_NL_STD);
 }

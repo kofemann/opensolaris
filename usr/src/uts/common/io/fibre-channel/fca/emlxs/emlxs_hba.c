@@ -128,6 +128,14 @@ emlxs_ffinit(emlxs_hba_t *hba)
 	if (hba->bus_type == SBUS_FC) {
 		(void) READ_SBUS_CSR_REG(hba, FC_SHS_REG(hba,
 		    hba->sbus_csr_addr));
+#ifdef FMA_SUPPORT
+		if (emlxs_fm_check_acc_handle(hba, hba->sbus_csr_handle)
+		    != DDI_FM_OK) {
+			EMLXS_MSGF(EMLXS_CONTEXT,
+			    &emlxs_invalid_access_handle_msg, NULL);
+			return (EIO);
+		}
+#endif  /* FMA_SUPPORT */
 	}
 
 #ifdef SLI3_SUPPORT
@@ -184,17 +192,15 @@ reset:
 
 #ifdef FMA_SUPPORT
 	/* Access handle validation */
-	if (hba->fm_caps & DDI_FM_ACCCHK_CAPABLE) {
-		if ((emlxs_fm_check_acc_handle(hba->pci_acc_handle)
-		    != DDI_FM_OK) ||
-		    (emlxs_fm_check_acc_handle(hba->slim_acc_handle)
-		    != DDI_FM_OK) ||
-		    (emlxs_fm_check_acc_handle(hba->csr_acc_handle)
-		    != DDI_FM_OK)) {
-			EMLXS_MSGF(EMLXS_CONTEXT,
-			    &emlxs_invalid_access_handle_msg, NULL);
-			return (EIO);
-		}
+	if ((emlxs_fm_check_acc_handle(hba, hba->pci_acc_handle)
+	    != DDI_FM_OK) ||
+	    (emlxs_fm_check_acc_handle(hba, hba->slim_acc_handle)
+	    != DDI_FM_OK) ||
+	    (emlxs_fm_check_acc_handle(hba, hba->csr_acc_handle)
+	    != DDI_FM_OK)) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+		return (EIO);
 	}
 #endif	/* FMA_SUPPORT */
 
@@ -3367,6 +3373,15 @@ emlxs_init_adapter_info(emlxs_hba_t *hba)
 
 	}
 
+#ifdef FMA_SUPPORT
+	if (emlxs_fm_check_acc_handle(hba, hba->pci_acc_handle)
+	    != DDI_FM_OK) {
+		EMLXS_MSGF(EMLXS_CONTEXT,
+		    &emlxs_invalid_access_handle_msg, NULL);
+		return (0);
+	}
+#endif  /* FMA_SUPPORT */
+
 	if (hba->model_info.sli_mask & EMLXS_SLI4_MASK) {
 		return (0);
 	}
@@ -3448,24 +3463,24 @@ emlxs_handle_async_event(emlxs_hba_t *hba, RING *rp, IOCBQ *iocbq)
 }  /* emlxs_handle_async_event() */
 
 
+/* ARGSUSED */
 extern void
-emlxs_reset_link_thread(void *arg)
+emlxs_reset_link_thread(emlxs_hba_t *hba, void *arg1, void *arg2)
 {
-	emlxs_hba_t *hba = (emlxs_hba_t *)arg;
 	emlxs_port_t *port = &PPORT;
 
 	/* Attempt a link reset to recover */
 	(void) emlxs_reset(port, FC_FCA_LINK_RESET);
 
-	thread_exit();
+	return;
 
 }  /* emlxs_reset_link_thread() */
 
 
+/* ARGSUSED */
 extern void
-emlxs_restart_thread(void *arg)
+emlxs_restart_thread(emlxs_hba_t *hba, void *arg1, void *arg2)
 {
-	emlxs_hba_t *hba = (emlxs_hba_t *)arg;
 	emlxs_port_t *port = &PPORT;
 
 	EMLXS_MSGF(EMLXS_CONTEXT, &emlxs_adapter_trans_msg, "Restarting...");
@@ -3474,25 +3489,25 @@ emlxs_restart_thread(void *arg)
 	if (emlxs_reset(port, FC_FCA_RESET) != FC_SUCCESS) {
 		emlxs_ffstate_change(hba, FC_ERROR);
 
-		thread_create(NULL, 0, emlxs_shutdown_thread, (char *)hba, 0,
-		    &p0, TS_RUN, v.v_maxsyspri - 2);
+		(void) thread_create(NULL, 0, emlxs_shutdown_thread,
+		    (char *)hba, 0, &p0, TS_RUN, v.v_maxsyspri - 2);
 	}
 
-	thread_exit();
+	return;
 
 }  /* emlxs_restart_thread() */
 
 
+/* ARGSUSED */
 extern void
-emlxs_shutdown_thread(void *arg)
+emlxs_shutdown_thread(emlxs_hba_t *hba, void *arg1, void *arg2)
 {
-	emlxs_hba_t *hba = (emlxs_hba_t *)arg;
 	emlxs_port_t *port = &PPORT;
 
 	mutex_enter(&EMLXS_PORT_LOCK);
 	if (hba->flag & FC_SHUTDOWN) {
 		mutex_exit(&EMLXS_PORT_LOCK);
-		thread_exit();
+		return;
 	}
 	hba->flag |= FC_SHUTDOWN;
 	mutex_exit(&EMLXS_PORT_LOCK);
@@ -3508,7 +3523,7 @@ emlxs_shutdown_thread(void *arg)
 
 	EMLXS_MSGF(EMLXS_CONTEXT, &emlxs_shutdown_msg, "Reboot required.");
 
-	thread_exit();
+	return;
 
 }  /* emlxs_shutdown_thread() */
 

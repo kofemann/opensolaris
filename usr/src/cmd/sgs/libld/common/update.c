@@ -1478,6 +1478,8 @@ update_osym(Ofl_desc *ofl)
 						    &symtab[symtab_ndx];
 						symtab_ndx++;
 					}
+				} else {
+					wk.wk_symtab = NULL;
 				}
 				if (dynsym) {
 					if (!local) {
@@ -1489,6 +1491,8 @@ update_osym(Ofl_desc *ofl)
 						    &ldynsym[ldynscopesym_ndx];
 						ldynscopesym_ndx++;
 					}
+				} else {
+					wk.wk_dynsym = NULL;
 				}
 				wk.wk_weak = sdp;
 				wk.wk_alias = _sdp;
@@ -1776,7 +1780,7 @@ update_osym(Ofl_desc *ofl)
 
 		sdp = wkp->wk_weak;
 		_sdp = wkp->wk_alias;
-		_sym = _sdp->sd_sym;
+		_sym = __sym = _sdp->sd_sym;
 
 		sdp->sd_flags |= FLG_SY_WEAKDEF;
 
@@ -1797,8 +1801,7 @@ update_osym(Ofl_desc *ofl)
 			bind = STB_WEAK;
 
 		DBG_CALL(Dbg_syms_old(ofl, sdp));
-		if ((sym = wkp->wk_symtab) != 0) {
-			sym = wkp->wk_symtab;
+		if ((sym = wkp->wk_symtab) != NULL) {
 			sym->st_value = _sym->st_value;
 			sym->st_size = _sym->st_size;
 			sym->st_other = _sym->st_other;
@@ -1807,8 +1810,7 @@ update_osym(Ofl_desc *ofl)
 			    ELF_ST_TYPE(sym->st_info));
 			__sym = sym;
 		}
-		if ((sym = wkp->wk_dynsym) != 0) {
-			sym = wkp->wk_dynsym;
+		if ((sym = wkp->wk_dynsym) != NULL) {
 			sym->st_value = _sym->st_value;
 			sym->st_size = _sym->st_size;
 			sym->st_other = _sym->st_other;
@@ -3121,7 +3123,7 @@ update_ogroup(Ofl_desc *ofl)
 		 * output GROUP sections - we know there is only one
 		 * item on the list.
 		 */
-		isp = (Is_desc *)osp->os_isdescs->apl_data[0];
+		isp = ld_os_first_isdesc(osp);
 
 		ifl = isp->is_file;
 		sdp = ifl->ifl_oldndx[isp->is_shdr->sh_info];
@@ -3190,7 +3192,7 @@ translate_link(Ofl_desc *ofl, Os_desc *osp, Word link, const char *msg)
 	 * then there is no translation to do.  In this case we will assume that
 	 * if sh_link has a value, it's the right value.
 	 */
-	isp = (Is_desc *)osp->os_isdescs->apl_data[0];
+	isp = ld_os_first_isdesc(osp);
 	if ((ifl = isp->is_file) == NULL)
 		return (link);
 

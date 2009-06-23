@@ -8117,7 +8117,7 @@ dtrace_difo_validate(dtrace_difo_t *dp, dtrace_vstate_t *vstate, uint_t nregs,
 			break;
 
 		default:
-			err += efunc(dp->dtdo_len - 1, "bad return size");
+			err += efunc(dp->dtdo_len - 1, "bad return size\n");
 		}
 	}
 
@@ -11016,7 +11016,8 @@ dtrace_dof_copyin(uintptr_t uarg, int *errp)
 
 	dof = kmem_alloc(hdr.dofh_loadsz, KM_SLEEP);
 
-	if (copyin((void *)uarg, dof, hdr.dofh_loadsz) != 0) {
+	if (copyin((void *)uarg, dof, hdr.dofh_loadsz) != 0 ||
+	    dof->dofh_loadsz != hdr.dofh_loadsz) {
 		kmem_free(dof, hdr.dofh_loadsz);
 		*errp = EFAULT;
 		return (NULL);
@@ -11742,6 +11743,13 @@ dtrace_dof_slurp(dof_hdr_t *dof, dtrace_vstate_t *vstate, cred_t *cr,
 				    "for enabling");
 				return (-1);
 			}
+		}
+
+		if (DOF_SEC_ISLOADABLE(sec->dofs_type) &&
+		    !(sec->dofs_flags & DOF_SECF_LOAD)) {
+			dtrace_dof_error(dof, "loadable section with load "
+			    "flag unset");
+			return (-1);
 		}
 
 		if (!(sec->dofs_flags & DOF_SECF_LOAD))

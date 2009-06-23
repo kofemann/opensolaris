@@ -19,14 +19,12 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	STATES_H
 #define	STATES_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -100,6 +98,8 @@ struct dhcp_smach_s {
 
 	uint16_t	*dsm_prl;	/* if non-NULL, param request list */
 	uint_t		dsm_prllen;	/* param request list len */
+	uint16_t	*dsm_pil;	/* if non-NULL, param ignore list */
+	uint_t		dsm_pillen;	/* param ignore list len */
 
 	uint_t		dsm_nrouters;	/* the number of default routers */
 	struct in_addr	*dsm_routers;	/* an array of default routers */
@@ -290,6 +290,7 @@ void		release_smach(dhcp_smach_t *);
 void		remove_smach(dhcp_smach_t *);
 dhcp_smach_t	*next_smach(dhcp_smach_t *, boolean_t);
 dhcp_smach_t	*primary_smach(boolean_t);
+dhcp_smach_t	*info_primary_smach(boolean_t);
 void		make_primary(dhcp_smach_t *);
 dhcp_smach_t	*lookup_smach(const char *, boolean_t);
 dhcp_smach_t	*lookup_smach_by_uindex(uint16_t, dhcp_smach_t *, boolean_t);
@@ -307,6 +308,7 @@ void		nuke_smach_list(void);
 boolean_t	schedule_smach_timer(dhcp_smach_t *, int, uint32_t,
 		    iu_tq_callback_t *);
 void		cancel_offer_timer(dhcp_smach_t *);
+void		cancel_smach_timers(dhcp_smach_t *);
 void		discard_default_routes(dhcp_smach_t *);
 void		remove_default_routes(dhcp_smach_t *);
 boolean_t	is_bound_state(DHCPSTATE);

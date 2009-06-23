@@ -979,6 +979,9 @@ init()
     HOST=""		# NULL or <hostname>
     NAWK="/usr/bin/nawk"
     RM="/usr/bin/rm"
+    WC="/usr/bin/wc"
+    CAT="/usr/bin/cat"
+    SED="/usr/bin/sed"
 
     DOM=""              # Set to NULL
     # If DNS domain (resolv.conf) exists use that, otherwise use domainname.
@@ -1010,6 +1013,7 @@ init()
     LDAP_SUFFIX=""
     LDAP_DOMAIN=$DOM	# domainname on Server (default value)
     GEN_CMD=""
+    PROXY_ACI_NAME="LDAP_Naming_Services_proxy_password_read"
 
     # LDAP COMMANDS
     LDAPSEARCH="/bin/ldapsearch -r"
@@ -2594,11 +2598,12 @@ EOF
 }
 
 #
-# allow_admin_write_shadow(): Give Admin write permission for shadow data.
+# allow_admin_read_write_shadow(): Give Admin read/write permission
+# to shadow data.
 #
-allow_admin_write_shadow()
+allow_admin_read_write_shadow()
 {
-    [ $DEBUG -eq 1 ] && ${ECHO} "In allow_admin_write_shadow()"
+    [ $DEBUG -eq 1 ] && ${ECHO} "In allow_admin_read_write_shadow()"
 
     # Set ACI Name
     ADMIN_ACI_NAME="LDAP_Naming_Services_admin_shadow_write"
@@ -2606,7 +2611,11 @@ allow_admin_write_shadow()
     # Search for ACI_NAME
     eval "${LDAPSEARCH} ${LDAP_ARGS} -b \"${LDAP_BASEDN}\" \
     -s base objectclass=* aci > ${TMPDIR}/chk_adminwrite_aci 2>&1"
-    ${GREP} "${ADMIN_ACI_NAME}" ${TMPDIR}/chk_adminwrite_aci > /dev/null 2>&1
+
+    # if an ACI with ${ADMIN_ACI_NAME} and "write,compare,read,search"
+    # and ${LDAP_ADMINDN} already exists, we are done
+    ${EGREP} ".*${ADMIN_ACI_NAME}.*write,compare,read,search.*${LDAP_ADMINDN}.*" \
+    	${TMPDIR}/chk_adminwrite_aci 2>&1 > /dev/null
     if [ $? -eq 0 ]; then
 	MSG="Admin ACI ${ADMIN_ACI_NAME} already exists for ${LDAP_BASEDN}."
 	if [ $EXISTING_PROFILE -eq 1 ]; then
@@ -2618,26 +2627,35 @@ allow_admin_write_shadow()
 	return 0
     fi
 
+    # If an ACI with ${ADMIN_ACI_NAME} and "(write)" and ${LDAP_ADMINDN}
+    # already exists, delete it first.
+    find_and_delete_ACI ".*${ADMIN_ACI_NAME}.*(write).*${LDAP_ADMINDN}.*" \
+	${TMPDIR}/chk_adminwrite_aci ${ADMIN_ACI_NAME}
+
     # Create the tmp file to add.
     ( cat <<EOF
 dn: ${LDAP_BASEDN}
 changetype: modify
 add: aci
-aci: (target="ldap:///${LDAP_BASEDN}")(targetattr="shadowLastChange||shadowMin||shadowMax||shadowWarning||shadowInactive||shadowExpire||shadowFlag||userPassword||loginShell||homeDirectory||gecos")(version 3.0; acl ${ADMIN_ACI_NAME}; allow (write) userdn = "ldap:///${LDAP_ADMINDN}";)
+aci: (target="ldap:///${LDAP_BASEDN}")(targetattr="shadowLastChange
+ ||shadowMin||shadowMax||shadowWarning||shadowInactive||shadowExpire
+ ||shadowFlag||userPassword||loginShell||homeDirectory||gecos")
+  (version 3.0; acl ${ADMIN_ACI_NAME}; allow (write,compare,read,search)
+  userdn = "ldap:///${LDAP_ADMINDN}";)
 EOF
 ) > ${TMPDIR}/admin_write
     
     # Add the entry.
     ${EVAL} "${LDAPMODIFY} ${LDAP_ARGS} -f ${TMPDIR}/admin_write ${VERB}"
     if [ $? -ne 0 ]; then
-	${ECHO} "  ERROR: Allow ${LDAP_ADMINDN} to write shadow data failed!"
+	${ECHO} "  ERROR: Allow ${LDAP_ADMINDN} read/write access to shadow data failed!"
 	cleanup
 	exit 1
     fi
 
     ${RM} -f ${TMPDIR}/admin_write
     # Display message that the administrator ACL is set.
-    MSG="Give ${LDAP_ADMINDN} write permission for shadow."
+    MSG="Give ${LDAP_ADMINDN} read/write access to shadow data."
     if [ $EXISTING_PROFILE -eq 1 ]; then
 	${ECHO} "  ACI SET: $MSG"
     else
@@ -2647,12 +2665,12 @@ EOF
 }
 
 #
-# allow_host_write_shadow(): Give host principal write permission
+# allow_host_read_write_shadow(): Give host principal read/write permission
 # for shadow data.
 #
-allow_host_write_shadow()
+allow_host_read_write_shadow()
 {
-    [ $DEBUG -eq 1 ] && ${ECHO} "In allow_host_write_shadow()"
+    [ $DEBUG -eq 1 ] && ${ECHO} "In allow_host_read_write_shadow()"
 
     # Set ACI Name
     HOST_ACI_NAME="LDAP_Naming_Services_host_shadow_write"
@@ -2676,20 +2694,20 @@ allow_host_write_shadow()
 dn: ${LDAP_BASEDN}
 changetype: modify
 add: aci
-aci: (target="ldap:///${LDAP_BASEDN}")(targetattr="shadowLastChange||shadowMin||shadowMax||shadowWarning||shadowInactive||shadowExpire||shadowFlag||userPassword||loginShell||homeDirectory||gecos")(version 3.0; acl ${HOST_ACI_NAME}; allow (read, write) authmethod="sasl GSSAPI" and userdn = "ldap:///cn=*+ipHostNumber=*,ou=Hosts,${LDAP_BASEDN}";)
+aci: (target="ldap:///${LDAP_BASEDN}")(targetattr="shadowLastChange||shadowMin||shadowMax||shadowWarning||shadowInactive||shadowExpire||shadowFlag||userPassword||loginShell||homeDirectory||gecos")(version 3.0; acl ${HOST_ACI_NAME}; allow (write,compare,read,search) authmethod="sasl GSSAPI" and userdn = "ldap:///cn=*+ipHostNumber=*,ou=Hosts,${LDAP_BASEDN}";)
 EOF
-) > ${TMPDIR}/host_write
+) > ${TMPDIR}/host_read_write
     
     # Add the entry.
-    ${EVAL} "${LDAPMODIFY} ${LDAP_ARGS} -f ${TMPDIR}/host_write ${VERB}"
+    ${EVAL} "${LDAPMODIFY} ${LDAP_ARGS} -f ${TMPDIR}/host_read_write ${VERB}"
     if [ $? -ne 0 ]; then
 	${ECHO} "  ERROR: Allow Host Principal to write shadow data failed!"
 	cleanup
 	exit 1
     fi
 
-    ${RM} -f ${TMPDIR}/host_write
-    MSG="Give host principal write permission for shadow."
+    ${RM} -f ${TMPDIR}/host_read_write
+    MSG="Give host principal read/write permission for shadow."
     if [ $EXISTING_PROFILE -eq 1 ]; then
 	${ECHO} "  ACI SET: $MSG"
     else
@@ -2732,8 +2750,9 @@ setup_shadow_update() {
 	    MSG="Use host principal for shadow data update (y/n/h)?"
 	    get_confirm "$MSG" "y" "use_host_principal_help"
 	    if [ $? -eq 1 ]; then
-		allow_host_write_shadow
-		modify_top_aci
+		delete_proxy_read_pw
+		allow_host_read_write_shadow
+		deny_non_host_shadow_access
 	        ${ECHO} ""
 		${ECHO} "  Shadow update has been enabled."
 	    else
@@ -2750,8 +2769,9 @@ setup_shadow_update() {
 	get_adminDN
 	get_admin_pw
 	add_admin
-	allow_admin_write_shadow
-	modify_top_aci
+	delete_proxy_read_pw
+	allow_admin_read_write_shadow
+	deny_non_admin_shadow_access
         ${ECHO} ""
 	${ECHO} "  Shadow update has been enabled."
 	return
@@ -2799,6 +2819,7 @@ prompt_config_info()
 
     if [ "$LDAP_ENABLE_SHADOW_UPDATE" = "TRUE" ];then
 	setup_shadow_update
+	cleanup
 	exit 0
     fi
 
@@ -3709,7 +3730,7 @@ modify_cn()
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.1.1.2.7 NAME 'ipNetwork' DESC 'Standard LDAP objectclass' SUP top STRUCTURAL MUST ( ipNetworkNumber ) MAY ( ipNetmaskNumber $ manager $ cn $ l $ description ) X-ORIGIN 'RFC 2307' ))
+objectclasses: ( 1.3.6.1.1.1.2.7 NAME 'ipNetwork' DESC 'Standard LDAP objectclass' SUP top STRUCTURAL MUST ipNetworkNumber MAY ( ipNetmaskNumber $ manager $ cn $ l $ description ) X-ORIGIN 'RFC 2307' )
 EOF
 ) > ${TMPDIR}/ipNetwork_cn
 
@@ -4200,101 +4221,101 @@ update_schema_attr()
 dn: cn=schema
 changetype: modify
 add: attributetypes
-attributetypes: ( 1.3.6.1.1.1.1.28 NAME 'nisPublickey' DESC 'NIS public key' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' )
-attributetypes: ( 1.3.6.1.1.1.1.29 NAME 'nisSecretkey' DESC 'NIS secret key' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' )
-attributetypes: ( 1.3.6.1.1.1.1.30 NAME 'nisDomain' DESC 'NIS domain' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' )
-attributetypes: ( 1.3.6.1.1.1.1.31 NAME 'automountMapName' DESC 'automount Map Name' EQUALITY caseExactIA5Match SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.1.1.1.32 NAME 'automountKey' DESC 'automount Key Value' EQUALITY caseExactIA5Match SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.1.1.1.33 NAME 'automountInformation' DESC 'automount information' EQUALITY caseExactIA5Match SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.1.1.12 NAME 'nisNetIdUser' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.1.1.13 NAME 'nisNetIdGroup' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.1.1.14 NAME 'nisNetIdHost' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' )
-attributetypes: ( rfc822mailMember-oid NAME 'rfc822mailMember' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' )
-attributetypes: ( 2.16.840.1.113730.3.1.30 NAME 'mgrpRFC822MailMember' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.15 NAME 'SolarisLDAPServers' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.16 NAME 'SolarisSearchBaseDN' SYNTAX '1.3.6.1.4.1.1466.115.121.1.12' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.17 NAME 'SolarisCacheTTL' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.18 NAME 'SolarisBindDN' SYNTAX '1.3.6.1.4.1.1466.115.121.1.12' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.19 NAME 'SolarisBindPassword' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.20 NAME 'SolarisAuthMethod' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15')
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.21 NAME 'SolarisTransportSecurity' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15')
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.22 NAME 'SolarisCertificatePath' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.23 NAME 'SolarisCertificatePassword' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.24 NAME 'SolarisDataSearchDN' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15')
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.25 NAME 'SolarisSearchScope' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.26 NAME 'SolarisSearchTimeLimit' SYNTAX '1.3.6.1.4.1.1466.115.121.1.27' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.27 NAME 'SolarisPreferredServer' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15')
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.28 NAME 'SolarisPreferredServerOnly' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.29 NAME 'SolarisSearchReferral' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.4 NAME 'SolarisAttrKeyValue' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.5 NAME 'SolarisAuditAlways' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.6 NAME 'SolarisAuditNever' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.7 NAME 'SolarisAttrShortDesc' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.8 NAME 'SolarisAttrLongDesc' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.9 NAME 'SolarisKernelSecurityPolicy' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.10 NAME 'SolarisProfileType' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.11 NAME 'SolarisProfileId' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.12 NAME 'SolarisUserQualifier' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.13 NAME 'SolarisAttrReserved1' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.14 NAME 'SolarisAttrReserved2' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.1 NAME 'SolarisProjectID' SYNTAX '1.3.6.1.4.1.1466.115.121.1.27' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.2 NAME 'SolarisProjectName' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.3 NAME 'SolarisProjectAttr' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' )
-attributetypes: ( memberGid-oid NAME 'memberGid' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.0 NAME 'defaultServerList' DESC 'Default LDAP server host address used by a DUA' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.1 NAME 'defaultSearchBase' DESC 'Default LDAP base DN used by a DUA' SYNTAX '1.3.6.1.4.1.1466.115.121.1.12' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.2 NAME 'preferredServerList' DESC 'Preferred LDAP server host addresses to be used by a DUA' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.3 NAME 'searchTimeLimit' DESC 'Maximum time in seconds a DUA should allow for a search to complete' SYNTAX '1.3.6.1.4.1.1466.115.121.1.27' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.4 NAME 'bindTimeLimit' DESC 'Maximum time in seconds a DUA should allow for the bind operation to complete' SYNTAX '1.3.6.1.4.1.1466.115.121.1.27' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.5 NAME 'followReferrals' DESC 'Tells DUA if it should follow referrals returned by a DSA search result' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.6 NAME 'authenticationMethod' DESC 'A keystring which identifies the type of authentication method used to contact the DSA' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.7 NAME 'profileTTL' DESC 'Time to live before a client DUA should re-read this configuration profile' SYNTAX '1.3.6.1.4.1.1466.115.121.1.27' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.14 NAME 'serviceSearchDescriptor' DESC 'LDAP search descriptor list used by Naming-DUA' SYNTAX '1.3.6.1.4.1.1466.115.121.1.26' )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.9 NAME 'attributeMap' DESC 'Attribute mappings used by a Naming-DUA' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.10 NAME 'credentialLevel' DESC 'Identifies type of credentials a DUA should use when binding to the LDAP server' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.11 NAME 'objectclassMap' DESC 'Objectclass mappings used by a Naming-DUA' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' )
-attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.12 NAME 'defaultSearchScope' DESC 'Default search scope used by a DUA' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.1.1.1.28 NAME 'nisPublickey' DESC 'NIS public key' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.6.1.1.1.1.29 NAME 'nisSecretkey' DESC 'NIS secret key' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.6.1.1.1.1.30 NAME 'nisDomain' DESC 'NIS domain' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.6.1.1.1.1.31 NAME 'automountMapName' DESC 'automount Map Name' EQUALITY caseExactIA5Match SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.1.1.1.32 NAME 'automountKey' DESC 'automount Key Value' EQUALITY caseExactIA5Match SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.1.1.1.33 NAME 'automountInformation' DESC 'automount information' EQUALITY caseExactIA5Match SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.1.1.12 NAME 'nisNetIdUser' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.1.1.13 NAME 'nisNetIdGroup' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.1.1.14 NAME 'nisNetIdHost' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.2.1.15 NAME 'rfc822mailMember' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 )
+attributetypes: ( 2.16.840.1.113730.3.1.30 NAME 'mgrpRFC822MailMember' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.15 NAME 'SolarisLDAPServers' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.16 NAME 'SolarisSearchBaseDN' SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.17 NAME 'SolarisCacheTTL' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.18 NAME 'SolarisBindDN' SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.19 NAME 'SolarisBindPassword' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.20 NAME 'SolarisAuthMethod' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.21 NAME 'SolarisTransportSecurity' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.22 NAME 'SolarisCertificatePath' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.23 NAME 'SolarisCertificatePassword' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.24 NAME 'SolarisDataSearchDN' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.25 NAME 'SolarisSearchScope' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.26 NAME 'SolarisSearchTimeLimit' SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.27 NAME 'SolarisPreferredServer' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.28 NAME 'SolarisPreferredServerOnly' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.29 NAME 'SolarisSearchReferral' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.4 NAME 'SolarisAttrKeyValue' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.5 NAME 'SolarisAuditAlways' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.6 NAME 'SolarisAuditNever' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.7 NAME 'SolarisAttrShortDesc' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.8 NAME 'SolarisAttrLongDesc' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.9 NAME 'SolarisKernelSecurityPolicy' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.10 NAME 'SolarisProfileType' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.11 NAME 'SolarisProfileId' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.12 NAME 'SolarisUserQualifier' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.13 NAME 'SolarisAttrReserved1' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.14 NAME 'SolarisAttrReserved2' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.1 NAME 'SolarisProjectID' SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.2 NAME 'SolarisProjectName' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.3 NAME 'SolarisProjectAttr' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.30 NAME 'memberGid' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.0 NAME 'defaultServerList' DESC 'Default LDAP server host address used by a DUA' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.1 NAME 'defaultSearchBase' DESC 'Default LDAP base DN used by a DUA' SYNTAX 1.3.6.1.4.1.1466.115.121.1.12 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.2 NAME 'preferredServerList' DESC 'Preferred LDAP server host addresses to be used by a DUA' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.3 NAME 'searchTimeLimit' DESC 'Maximum time in seconds a DUA should allow for a search to complete' SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.4 NAME 'bindTimeLimit' DESC 'Maximum time in seconds a DUA should allow for the bind operation to complete' SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.5 NAME 'followReferrals' DESC 'Tells DUA if it should follow referrals returned by a DSA search result' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.6 NAME 'authenticationMethod' DESC 'A keystring which identifies the type of authentication method used to contact the DSA' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.7 NAME 'profileTTL' DESC 'Time to live before a client DUA should re-read this configuration profile' SYNTAX 1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.14 NAME 'serviceSearchDescriptor' DESC 'LDAP search descriptor list used by Naming-DUA' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.9 NAME 'attributeMap' DESC 'Attribute mappings used by a Naming-DUA' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.10 NAME 'credentialLevel' DESC 'Identifies type of credentials a DUA should use when binding to the LDAP server' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.11 NAME 'objectclassMap' DESC 'Objectclass mappings used by a Naming-DUA' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.12 NAME 'defaultSearchScope' DESC 'Default search scope used by a DUA' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
 attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.13 NAME 'serviceCredentialLevel' DESC 'Search scope used by a service of the DUA' EQUALITY caseIgnoreIA5Match SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 )
 attributetypes: ( 1.3.6.1.4.1.11.1.3.1.1.15 NAME 'serviceAuthenticationMethod' DESC 'Authentication Method used by a service of the DUA' EQUALITY caseIgnoreMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
-attributetypes:( 1.3.18.0.2.4.1140 NAME 'printer-uri' DESC 'A URI supported by this printer.  This URI SHOULD be used as a relative distinguished name (RDN).  If printer-xri-supported is implemented, then this URI value MUST be listed in a member value of printer-xri-supported.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1107 NAME 'printer-xri-supported' DESC 'The unordered list of XRI (extended resource identifiers) supported by this printer.  Each member of the list consists of a URI (uniform resource identifier) followed by optional authentication and security metaparameters.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
-attributetypes:( 1.3.18.0.2.4.1135 NAME 'printer-name' DESC 'The site-specific administrative name of this printer, more end-user friendly than a URI.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127}  SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1119 NAME 'printer-natural-language-configured' DESC 'The configured language in which error and status messages will be generated (by default) by this printer.  Also, a possible language for printer string attributes set by operator, system administrator, or manufacturer.  Also, the (declared) language of the "printer-name", "printer-location", "printer-info", and "printer-make-and-model" attributes of this printer. For example: "en-us" (US English) or "fr-fr" (French in France) Legal values of language tags conform to [RFC3066] "Tags for the Identification of Languages".' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127}  SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1136 NAME 'printer-location' DESC 'Identifies the location of the printer. This could include things like: "in Room 123A", "second floor of building XYZ".' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1139 NAME 'printer-info' DESC 'Identifies the descriptive information about this printer.  This could include things like: "This printer can be used for printing color transparencies for HR presentations", or "Out of courtesy for others, please print only small (1-5 page) jobs at this printer", or even "This printer is going away on July 1, 1997, please find a new printer".' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1134 NAME 'printer-more-info' DESC 'A URI used to obtain more information about this specific printer.  For example, this could be an HTTP type URI referencing an HTML page accessible to a Web Browser.  The information obtained from this URI is intended for end user consumption.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1138 NAME 'printer-make-and-model' DESC 'Identifies the make and model of the device.  The device manufacturer MAY initially populate this attribute.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15{127}  SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1133 NAME 'printer-ipp-versions-supported' DESC 'Identifies the IPP protocol version(s) that this printer supports, including major and minor versions, i.e., the version numbers for which this Printer implementation meets the conformance requirements.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
-attributetypes:( 1.3.18.0.2.4.1132 NAME 'printer-multiple-document-jobs-supported' DESC 'Indicates whether or not the printer supports more than one document per job, i.e., more than one Send-Document or Send-Data operation with document data.' EQUALITY booleanMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.7 SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1109 NAME 'printer-charset-configured' DESC 'The configured charset in which error and status messages will be generated (by default) by this printer.  Also, a possible charset for printer string attributes set by operator, system administrator, or manufacturer.  For example: "utf-8" (ISO 10646/Unicode) or "iso-8859-1" (Latin1).  Legal values are defined by the IANA Registry of Coded Character Sets and the "(preferred MIME name)" SHALL be used as the tag.  For coherence with IPP Model, charset tags in this attribute SHALL be lowercase normalized.  This attribute SHOULD be static (time of registration) and SHOULD NOT be dynamically refreshed attributetypes: (subsequently).' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{63} SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1131 NAME 'printer-charset-supported' DESC 'Identifies the set of charsets supported for attribute type values of type Directory String for this directory entry.  For example: "utf-8" (ISO 10646/Unicode) or "iso-8859-1" (Latin1).  Legal values are defined by the IANA Registry of Coded Character Sets and the preferred MIME name.' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{63} )
-attributetypes:( 1.3.18.0.2.4.1137 NAME 'printer-generated-natural-language-supported' DESC 'Identifies the natural language(s) supported for this directory entry.  For example: "en-us" (US English) or "fr-fr" (French in France).  Legal values conform to [RFC3066], Tags for the Identification of Languages.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{63} )
-attributetypes:( 1.3.18.0.2.4.1130 NAME 'printer-document-format-supported' DESC 'The possible document formats in which data may be interpreted and printed by this printer.  Legal values are MIME types come from the IANA Registry of Internet Media Types.' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
-attributetypes:( 1.3.18.0.2.4.1129 NAME 'printer-color-supported' DESC 'Indicates whether this printer is capable of any type of color printing at all, including highlight color.' EQUALITY booleanMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.7  SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1128 NAME 'printer-compression-supported' DESC 'Compression algorithms supported by this printer.  For example: "deflate, gzip".  Legal values include; "none", "deflate" attributetypes: (public domain ZIP), "gzip" (GNU ZIP), "compress" (UNIX).' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{255} )
-attributetypes:( 1.3.18.0.2.4.1127 NAME 'printer-pages-per-minute' DESC 'The nominal number of pages per minute which may be output by this printer (e.g., a simplex or black-and-white printer).  This attribute is informative, NOT a service guarantee.  Typically, it is the value used in marketing literature to describe this printer.' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27  SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1126 NAME 'printer-pages-per-minute-color' DESC 'The nominal number of color pages per minute which may be output by this printer (e.g., a simplex or color printer).  This attribute is informative, NOT a service guarantee.  Typically, it is the value used in marketing literature to describe this printer.' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27  SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1125 NAME 'printer-finishings-supported' DESC 'The possible finishing operations supported by this printer. Legal values include; "none", "staple", "punch", "cover", "bind", "saddle-stitch", "edge-stitch", "staple-top-left", "staple-bottom-left", "staple-top-right", "staple-bottom-right", "edge-stitch-left", "edge-stitch-top", "edge-stitch-right", "edge-stitch-bottom", "staple-dual-left", "staple-dual-top", "staple-dual-right", "staple-dual-bottom".' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{255} )
-attributetypes:( 1.3.18.0.2.4.1124 NAME 'printer-number-up-supported' DESC 'The possible numbers of print-stream pages to impose upon a single side of an instance of a selected medium. Legal values include; 1, 2, and 4.  Implementations may support other values.' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27 )
-attributetypes:( 1.3.18.0.2.4.1123 NAME 'printer-sides-supported' DESC 'The number of impression sides (one or two) and the two-sided impression rotations supported by this printer.  Legal values include; "one-sided", "two-sided-long-edge", "two-sided-short-edge".' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
-attributetypes:( 1.3.18.0.2.4.1122 NAME 'printer-media-supported' DESC 'The standard names/types/sizes (and optional color suffixes) of the media supported by this printer.  For example: "iso-a4",  "envelope", or "na-letter-white".  Legal values  conform to ISO 10175, Document Printing Application (DPA), and any IANA registered extensions.' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{255} )
-attributetypes:( 1.3.18.0.2.4.1117 NAME 'printer-media-local-supported' DESC 'Site-specific names of media supported by this printer, in the language in "printer-natural-language-configured".  For example: "purchasing-form" (site-specific name) as opposed to (in "printer-media-supported"): "na-letter" (standard keyword from ISO 10175).' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{255} )
-attributetypes:( 1.3.18.0.2.4.1121 NAME 'printer-resolution-supported' DESC 'List of resolutions supported for printing documents by this printer.  Each resolution value is a string with 3 fields:  1) Cross feed direction resolution (positive integer), 2) Feed direction resolution (positive integer), 3) Resolution unit.  Legal values are "dpi" (dots per inch) and "dpcm" (dots per centimeter).  Each resolution field is delimited by ">".  For example:  "300> 300> dpi>".' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{255} )
-attributetypes:( 1.3.18.0.2.4.1120 NAME 'printer-print-quality-supported' DESC 'List of print qualities supported for printing documents on this printer.  For example: "draft, normal".  Legal values include; "unknown", "draft", "normal", "high".' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
-attributetypes:( 1.3.18.0.2.4.1110 NAME 'printer-job-priority-supported' DESC 'Indicates the number of job priority levels supported.  An IPP conformant printer which supports job priority must always support a full range of priorities from "1" to "100" (to ensure consistent behavior), therefore this attribute describes the "granularity".  Legal values of this attribute are from "1" to "100".' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27  SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1118 NAME 'printer-copies-supported' DESC 'The maximum number of copies of a document that may be printed as a single job.  A value of "0" indicates no maximum limit.  A value of "-1" indicates unknown.' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27  SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1111 NAME 'printer-job-k-octets-supported' DESC 'The maximum size in kilobytes (1,024 octets actually) incoming print job that this printer will accept.  A value of "0" indicates no maximum limit.  A value of "-1" indicates unknown.' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27  SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1112 NAME 'printer-current-operator' DESC 'The name of the current human operator responsible for operating this printer.  It is suggested that this string include information that would enable other humans to reach the operator, such as a phone number.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1113 NAME 'printer-service-person' DESC 'The name of the current human service person responsible for servicing this printer.  It is suggested that this string include information that would enable other humans to reach the service person, such as a phone number.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127}  SINGLE-VALUE )
-attributetypes:( 1.3.18.0.2.4.1114 NAME 'printer-delivery-orientation-supported' DESC 'The possible delivery orientations of pages as they are printed and ejected from this printer.  Legal values include; "unknown", "face-up", and "face-down".' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
-attributetypes:( 1.3.18.0.2.4.1115 NAME 'printer-stacking-order-supported' DESC 'The possible stacking order of pages as they are printed and ejected from this printer. Legal values include; "unknown", "first-to-last", "last-to-first".' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
-attributetypes:( 1.3.18.0.2.4.1116 NAME 'printer-output-features-supported' DESC 'The possible output features supported by this printer. Legal values include; "unknown", "bursting", "decollating", "page-collating", "offset-stacking".' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
-attributetypes:( 1.3.18.0.2.4.1108 NAME 'printer-aliases' DESC 'Site-specific administrative names of this printer in addition the printer name specified for printer-name.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
-attributetypes:( 1.3.6.1.4.1.42.2.27.5.1.63 NAME 'sun-printer-bsdaddr' DESC 'Sets the server, print queue destination name and whether the client generates protocol extensions. "Solaris" specifies a Solaris print server extension. The value is represented by the following value: server "," destination ", Solaris".' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' SINGLE-VALUE )
-attributetypes:( 1.3.6.1.4.1.42.2.27.5.1.64 NAME 'sun-printer-kvp' DESC 'This attribute contains a set of key value pairs which may have meaning to the print subsystem or may be user defined. Each value is represented by the following: key "=" value.' SYNTAX '1.3.6.1.4.1.1466.115.121.1.15' )
+attributetypes: ( 1.3.18.0.2.4.1140 NAME 'printer-uri' DESC 'A URI supported by this printer.  This URI SHOULD be used as a relative distinguished name (RDN).  If printer-xri-supported is implemented, then this URI value MUST be listed in a member value of printer-xri-supported.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1107 NAME 'printer-xri-supported' DESC 'The unordered list of XRI (extended resource identifiers) supported by this printer.  Each member of the list consists of a URI (uniform resource identifier) followed by optional authentication and security metaparameters.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
+attributetypes: ( 1.3.18.0.2.4.1135 NAME 'printer-name' DESC 'The site-specific administrative name of this printer, more end-user friendly than a URI.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127}  SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1119 NAME 'printer-natural-language-configured' DESC 'The configured language in which error and status messages will be generated (by default) by this printer.  Also, a possible language for printer string attributes set by operator, system administrator, or manufacturer.  Also, the (declared) language of the "printer-name", "printer-location", "printer-info", and "printer-make-and-model" attributes of this printer. For example: "en-us" (US English) or "fr-fr" (French in France) Legal values of language tags conform to [RFC3066] "Tags for the Identification of Languages".' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127}  SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1136 NAME 'printer-location' DESC 'Identifies the location of the printer. This could include things like: "in Room 123A", "second floor of building XYZ".' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1139 NAME 'printer-info' DESC 'Identifies the descriptive information about this printer.  This could include things like: "This printer can be used for printing color transparencies for HR presentations", or "Out of courtesy for others, please print only small (1-5 page) jobs at this printer", or even "This printer is going away on July 1, 1997, please find a new printer".' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1134 NAME 'printer-more-info' DESC 'A URI used to obtain more information about this specific printer.  For example, this could be an HTTP type URI referencing an HTML page accessible to a Web Browser.  The information obtained from this URI is intended for end user consumption.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1138 NAME 'printer-make-and-model' DESC 'Identifies the make and model of the device.  The device manufacturer MAY initially populate this attribute.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.15{127}  SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1133 NAME 'printer-ipp-versions-supported' DESC 'Identifies the IPP protocol version(s) that this printer supports, including major and minor versions, i.e., the version numbers for which this Printer implementation meets the conformance requirements.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
+attributetypes: ( 1.3.18.0.2.4.1132 NAME 'printer-multiple-document-jobs-supported' DESC 'Indicates whether or not the printer supports more than one document per job, i.e., more than one Send-Document or Send-Data operation with document data.' EQUALITY booleanMatch SYNTAX 1.3.6.1.4.1.1466.115.121.1.7 SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1109 NAME 'printer-charset-configured' DESC 'The configured charset in which error and status messages will be generated (by default) by this printer.  Also, a possible charset for printer string attributes set by operator, system administrator, or manufacturer.  For example: "utf-8" (ISO 10646/Unicode) or "iso-8859-1" (Latin1).  Legal values are defined by the IANA Registry of Coded Character Sets and the "(preferred MIME name)" SHALL be used as the tag.  For coherence with IPP Model, charset tags in this attribute SHALL be lowercase normalized.  This attribute SHOULD be static (time of registration) and SHOULD NOT be dynamically refreshed attributetypes: (subsequently).' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{63} SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1131 NAME 'printer-charset-supported' DESC 'Identifies the set of charsets supported for attribute type values of type Directory String for this directory entry.  For example: "utf-8" (ISO 10646/Unicode) or "iso-8859-1" (Latin1).  Legal values are defined by the IANA Registry of Coded Character Sets and the preferred MIME name.' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{63} )
+attributetypes: ( 1.3.18.0.2.4.1137 NAME 'printer-generated-natural-language-supported' DESC 'Identifies the natural language(s) supported for this directory entry.  For example: "en-us" (US English) or "fr-fr" (French in France).  Legal values conform to [RFC3066], Tags for the Identification of Languages.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{63} )
+attributetypes: ( 1.3.18.0.2.4.1130 NAME 'printer-document-format-supported' DESC 'The possible document formats in which data may be interpreted and printed by this printer.  Legal values are MIME types come from the IANA Registry of Internet Media Types.' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
+attributetypes: ( 1.3.18.0.2.4.1129 NAME 'printer-color-supported' DESC 'Indicates whether this printer is capable of any type of color printing at all, including highlight color.' EQUALITY booleanMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.7 SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1128 NAME 'printer-compression-supported' DESC 'Compression algorithms supported by this printer.  For example: "deflate, gzip".  Legal values include; "none", "deflate" attributetypes: (public domain ZIP), "gzip" (GNU ZIP), "compress" (UNIX).' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{255} )
+attributetypes: ( 1.3.18.0.2.4.1127 NAME 'printer-pages-per-minute' DESC 'The nominal number of pages per minute which may be output by this printer (e.g., a simplex or black-and-white printer).  This attribute is informative, NOT a service guarantee.  Typically, it is the value used in marketing literature to describe this printer.' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1126 NAME 'printer-pages-per-minute-color' DESC 'The nominal number of color pages per minute which may be output by this printer (e.g., a simplex or color printer).  This attribute is informative, NOT a service guarantee.  Typically, it is the value used in marketing literature to describe this printer.' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1125 NAME 'printer-finishings-supported' DESC 'The possible finishing operations supported by this printer. Legal values include; "none", "staple", "punch", "cover", "bind", "saddle-stitch", "edge-stitch", "staple-top-left", "staple-bottom-left", "staple-top-right", "staple-bottom-right", "edge-stitch-left", "edge-stitch-top", "edge-stitch-right", "edge-stitch-bottom", "staple-dual-left", "staple-dual-top", "staple-dual-right", "staple-dual-bottom".' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{255} )
+attributetypes: ( 1.3.18.0.2.4.1124 NAME 'printer-number-up-supported' DESC 'The possible numbers of print-stream pages to impose upon a single side of an instance of a selected medium. Legal values include; 1, 2, and 4.  Implementations may support other values.' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27 )
+attributetypes: ( 1.3.18.0.2.4.1123 NAME 'printer-sides-supported' DESC 'The number of impression sides (one or two) and the two-sided impression rotations supported by this printer.  Legal values include; "one-sided", "two-sided-long-edge", "two-sided-short-edge".' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
+attributetypes: ( 1.3.18.0.2.4.1122 NAME 'printer-media-supported' DESC 'The standard names/types/sizes (and optional color suffixes) of the media supported by this printer.  For example: "iso-a4",  "envelope", or "na-letter-white".  Legal values  conform to ISO 10175, Document Printing Application (DPA), and any IANA registered extensions.' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{255} )
+attributetypes: ( 1.3.18.0.2.4.1117 NAME 'printer-media-local-supported' DESC 'Site-specific names of media supported by this printer, in the language in "printer-natural-language-configured".  For example: "purchasing-form" (site-specific name) as opposed to (in "printer-media-supported"): "na-letter" (standard keyword from ISO 10175).' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{255} )
+attributetypes: ( 1.3.18.0.2.4.1121 NAME 'printer-resolution-supported' DESC 'List of resolutions supported for printing documents by this printer.  Each resolution value is a string with 3 fields:  1) Cross feed direction resolution (positive integer), 2) Feed direction resolution (positive integer), 3) Resolution unit.  Legal values are "dpi" (dots per inch) and "dpcm" (dots per centimeter).  Each resolution field is delimited by ">".  For example:  "300> 300> dpi>".' EQUALITY caseIgnoreMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{255} )
+attributetypes: ( 1.3.18.0.2.4.1120 NAME 'printer-print-quality-supported' DESC 'List of print qualities supported for printing documents on this printer.  For example: "draft, normal".  Legal values include; "unknown", "draft", "normal", "high".' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
+attributetypes: ( 1.3.18.0.2.4.1110 NAME 'printer-job-priority-supported' DESC 'Indicates the number of job priority levels supported.  An IPP conformant printer which supports job priority must always support a full range of priorities from "1" to "100" (to ensure consistent behavior), therefore this attribute describes the "granularity".  Legal values of this attribute are from "1" to "100".' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1118 NAME 'printer-copies-supported' DESC 'The maximum number of copies of a document that may be printed as a single job.  A value of "0" indicates no maximum limit.  A value of "-1" indicates unknown.' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1111 NAME 'printer-job-k-octets-supported' DESC 'The maximum size in kilobytes (1,024 octets actually) incoming print job that this printer will accept.  A value of "0" indicates no maximum limit.  A value of "-1" indicates unknown.' EQUALITY integerMatch ORDERING integerOrderingMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.27 SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1112 NAME 'printer-current-operator' DESC 'The name of the current human operator responsible for operating this printer.  It is suggested that this string include information that would enable other humans to reach the operator, such as a phone number.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1113 NAME 'printer-service-person' DESC 'The name of the current human service person responsible for servicing this printer.  It is suggested that this string include information that would enable other humans to reach the service person, such as a phone number.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127}  SINGLE-VALUE )
+attributetypes: ( 1.3.18.0.2.4.1114 NAME 'printer-delivery-orientation-supported' DESC 'The possible delivery orientations of pages as they are printed and ejected from this printer.  Legal values include; "unknown", "face-up", and "face-down".' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
+attributetypes: ( 1.3.18.0.2.4.1115 NAME 'printer-stacking-order-supported' DESC 'The possible stacking order of pages as they are printed and ejected from this printer. Legal values include; "unknown", "first-to-last", "last-to-first".' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
+attributetypes: ( 1.3.18.0.2.4.1116 NAME 'printer-output-features-supported' DESC 'The possible output features supported by this printer. Legal values include; "unknown", "bursting", "decollating", "page-collating", "offset-stacking".' EQUALITY caseIgnoreMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
+attributetypes: ( 1.3.18.0.2.4.1108 NAME 'printer-aliases' DESC 'Site-specific administrative names of this printer in addition the printer name specified for printer-name.' EQUALITY caseIgnoreMatch ORDERING caseIgnoreOrderingMatch SUBSTR caseIgnoreSubstringsMatch SYNTAX  1.3.6.1.4.1.1466.115.121.1.15{127} )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.63 NAME 'sun-printer-bsdaddr' DESC 'Sets the server, print queue destination name and whether the client generates protocol extensions. "Solaris" specifies a Solaris print server extension. The value is represented by the following value: server "," destination ", Solaris".' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.64 NAME 'sun-printer-kvp' DESC 'This attribute contains a set of key value pairs which may have meaning to the print subsystem or may be user defined. Each value is represented by the following: key "=" value.' SYNTAX 1.3.6.1.4.1.1466.115.121.1.15 )
 attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.57 NAME 'nisplusTimeZone' DESC 'tzone column from NIS+ timezone table' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
-attributetypes:( 1.3.6.1.4.1.42.2.27.5.1.67 NAME 'ipTnetTemplateName' DESC 'Trusted Solaris network template template_name' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
-attributetypes:( 1.3.6.1.4.1.42.2.27.5.1.68 NAME 'ipTnetNumber' DESC 'Trusted Solaris network template ip_address' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.67 NAME 'ipTnetTemplateName' DESC 'Trusted Solaris network template template_name' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+attributetypes: ( 1.3.6.1.4.1.42.2.27.5.1.68 NAME 'ipTnetNumber' DESC 'Trusted Solaris network template ip_address' SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
 EOF
 ) > ${TMPDIR}/schema_attr
 
@@ -4324,132 +4345,132 @@ update_schema_obj()
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.1.1.2.14 NAME 'NisKeyObject' SUP 'top' MUST (objectclass $ cn $ nisPublickey $ nisSecretkey) MAY (uidNumber $ description))
+objectclasses: ( 1.3.6.1.1.1.2.14 NAME 'NisKeyObject' SUP top MUST ( cn $ nisPublickey $ nisSecretkey ) MAY ( uidNumber $ description ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.1.1.2.15 NAME 'nisDomainObject' SUP 'top' MUST (objectclass $ nisDomain) MAY ())
+objectclasses: ( 1.3.6.1.1.1.2.15 NAME 'nisDomainObject' SUP top MUST nisDomain )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.1.1.2.16 NAME 'automountMap' SUP 'top' MUST (objectclass $ automountMapName) MAY (description))
+objectclasses: ( 1.3.6.1.1.1.2.16 NAME 'automountMap' SUP top MUST automountMapName MAY description )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.1.1.2.17 NAME 'automount' SUP 'top' MUST (objectclass $ automountKey $ automountInformation ) MAY (description))
+objectclasses: ( 1.3.6.1.1.1.2.17 NAME 'automount' SUP top MUST ( automountKey $ automountInformation ) MAY description )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.7 NAME 'SolarisNamingProfile' SUP 'top' MUST (objectclass $ cn $ SolarisLDAPservers $ SolarisSearchBaseDN) MAY (SolarisBindDN $ SolarisBindPassword $ SolarisAuthMethod $ SolarisTransportSecurity $ SolarisCertificatePath $ SolarisCertificatePassword $ SolarisDataSearchDN $ SolarisSearchScope $ SolarisSearchTimeLimit $ SolarisPreferredServer $ SolarisPreferredServerOnly $ SolarisCacheTTL $ SolarisSearchReferral))
+objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.7 NAME 'SolarisNamingProfile' SUP top MUST ( cn $ SolarisLDAPservers $ SolarisSearchBaseDN ) MAY ( SolarisBindDN $ SolarisBindPassword $ SolarisAuthMethod $ SolarisTransportSecurity $ SolarisCertificatePath $ SolarisCertificatePassword $ SolarisDataSearchDN $ SolarisSearchScope $ SolarisSearchTimeLimit $ SolarisPreferredServer $ SolarisPreferredServerOnly $ SolarisCacheTTL $ SolarisSearchReferral ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 2.16.840.1.113730.3.2.4 NAME 'mailGroup' SUP 'top' MUST (objectclass $ mail) MAY (cn $ mgrpRFC822MailMember))
+objectclasses: ( 2.16.840.1.113730.3.2.4 NAME 'mailGroup' SUP top MUST mail MAY ( cn $ mgrpRFC822MailMember ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.4.1.42.2.27.1.2.5 NAME 'nisMailAlias' SUP 'top' MUST (objectclass $ cn) MAY (rfc822mailMember))
+objectclasses: ( 1.3.6.1.4.1.42.2.27.1.2.5 NAME 'nisMailAlias' SUP top MUST cn MAY rfc822mailMember )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.4.1.42.2.27.1.2.6 NAME 'nisNetId' SUP 'top' MUST (objectclass $ cn) MAY (nisNetIdUser $ nisNetIdGroup $ nisNetIdHost))
+objectclasses: ( 1.3.6.1.4.1.42.2.27.1.2.6 NAME 'nisNetId' SUP top MUST cn MAY ( nisNetIdUser $ nisNetIdGroup $ nisNetIdHost ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.2 NAME 'SolarisAuditUser' SUP 'top' AUXILIARY MUST (objectclass) MAY (SolarisAuditAlways $ SolarisAuditNever))
+objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.2 NAME 'SolarisAuditUser' SUP top AUXILIARY MAY ( SolarisAuditAlways $ SolarisAuditNever ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.3 NAME 'SolarisUserAttr' SUP 'top' AUXILIARY MUST (objectclass) MAY (SolarisUserQualifier $ SolarisAttrReserved1 $ SolarisAttrReserved2 $ SolarisAttrKeyValue))
+objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.3 NAME 'SolarisUserAttr' SUP top AUXILIARY MAY ( SolarisUserQualifier $ SolarisAttrReserved1 $ SolarisAttrReserved2 $ SolarisAttrKeyValue ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.4 NAME 'SolarisAuthAttr' SUP 'top' MUST (objectclass $ cn) MAY (SolarisAttrReserved1 $ SolarisAttrReserved2 $ SolarisAttrShortDesc $ SolarisAttrLongDesc $ SolarisAttrKeyValue))
+objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.4 NAME 'SolarisAuthAttr' SUP top MUST cn MAY ( SolarisAttrReserved1 $ SolarisAttrReserved2 $ SolarisAttrShortDesc $ SolarisAttrLongDesc $ SolarisAttrKeyValue ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.5 NAME 'SolarisProfAttr' SUP 'top' MUST (objectclass $ cn) MAY (SolarisAttrReserved1 $ SolarisAttrReserved2 $ SolarisAttrLongDesc $ SolarisAttrKeyValue))
+objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.5 NAME 'SolarisProfAttr' SUP top MUST cn MAY ( SolarisAttrReserved1 $ SolarisAttrReserved2 $ SolarisAttrLongDesc $ SolarisAttrKeyValue ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.6 NAME 'SolarisExecAttr' SUP 'top' AUXILIARY MUST (objectclass) MAY (SolarisKernelSecurityPolicy $ SolarisProfileType $ SolarisAttrReserved1 $ SolarisAttrReserved2 $ SolarisProfileID $ SolarisAttrKeyValue))
+objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.6 NAME 'SolarisExecAttr' SUP top AUXILIARY MAY ( SolarisKernelSecurityPolicy $ SolarisProfileType $ SolarisAttrReserved1 $ SolarisAttrReserved2 $ SolarisProfileID $ SolarisAttrKeyValue ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.1 NAME 'SolarisProject' SUP 'top' MUST (objectclass $ SolarisProjectID $ SolarisProjectName) MAY (memberUid $ memberGid $ description $ SolarisProjectAttr))
+objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.1 NAME 'SolarisProject' SUP top MUST ( SolarisProjectID $ SolarisProjectName ) MAY ( memberUid $ memberGid $ description $ SolarisProjectAttr ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.4.1.11.1.3.1.2.4 NAME 'DUAConfigProfile' SUP 'top' DESC 'Abstraction of a base configuration for a DUA' MUST (cn) MAY (defaultServerList $ preferredServerList $ defaultSearchBase $ defaultSearchScope $ searchTimeLimit $ bindTimeLimit $ credentialLevel $ authenticationMethod $ followReferrals $ serviceSearchDescriptor $ serviceCredentialLevel $ serviceAuthenticationMethod $ objectclassMap $ attributeMap $ profileTTL))
+objectclasses: ( 1.3.6.1.4.1.11.1.3.1.2.4 NAME 'DUAConfigProfile' SUP top DESC 'Abstraction of a base configuration for a DUA' MUST cn MAY ( defaultServerList $ preferredServerList $ defaultSearchBase $ defaultSearchScope $ searchTimeLimit $ bindTimeLimit $ credentialLevel $ authenticationMethod $ followReferrals $ serviceSearchDescriptor $ serviceCredentialLevel $ serviceAuthenticationMethod $ objectclassMap $ attributeMap $ profileTTL ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.18.0.2.6.2549 NAME 'slpService' DESC 'DUMMY definition' SUP 'top' MUST (objectclass) MAY ())
+objectclasses: ( 1.3.18.0.2.6.2549 NAME 'slpService' DESC 'DUMMY definition' SUP top MUST objectclass )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.18.0.2.6.254 NAME 'slpServicePrinter' DESC 'Service Location Protocol (SLP) information.' AUXILIARY SUP 'slpService')
+objectclasses: ( 1.3.18.0.2.6.254 NAME 'slpServicePrinter' DESC 'Service Location Protocol (SLP) information.' SUP slpService AUXILIARY )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.18.0.2.6.258 NAME 'printerAbstract' DESC 'Printer related information.' ABSTRACT SUP 'top' MAY ( printer-name $ printer-natural-language-configured $ printer-location $ printer-info $ printer-more-info $ printer-make-and-model $ printer-multiple-document-jobs-supported $ printer-charset-configured $ printer-charset-supported $ printer-generated-natural-language-supported $ printer-document-format-supported $ printer-color-supported $ printer-compression-supported $ printer-pages-per-minute $ printer-pages-per-minute-color $ printer-finishings-supported $ printer-number-up-supported $ printer-sides-supported $ printer-media-supported $ printer-media-local-supported $ printer-resolution-supported $ printer-print-quality-supported $ printer-job-priority-supported $ printer-copies-supported $ printer-job-k-octets-supported $ printer-current-operator $ printer-service-person $ printer-delivery-orientation-supported $ printer-stacking-order-supported $ printer-output-features-supported ))
+objectclasses: ( 1.3.18.0.2.6.258 NAME 'printerAbstract' DESC 'Printer related information.' SUP top ABSTRACT MAY ( printer-name $ printer-natural-language-configured $ printer-location $ printer-info $ printer-more-info $ printer-make-and-model $ printer-multiple-document-jobs-supported $ printer-charset-configured $ printer-charset-supported $ printer-generated-natural-language-supported $ printer-document-format-supported $ printer-color-supported $ printer-compression-supported $ printer-pages-per-minute $ printer-pages-per-minute-color $ printer-finishings-supported $ printer-number-up-supported $ printer-sides-supported $ printer-media-supported $ printer-media-local-supported $ printer-resolution-supported $ printer-print-quality-supported $ printer-job-priority-supported $ printer-copies-supported $ printer-job-k-octets-supported $ printer-current-operator $ printer-service-person $ printer-delivery-orientation-supported $ printer-stacking-order-supported $ printer-output-features-supported ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.18.0.2.6.255 NAME 'printerService' DESC 'Printer information.' STRUCTURAL SUP 'printerAbstract' MAY ( printer-uri $ printer-xri-supported ))
+objectclasses: ( 1.3.18.0.2.6.255 NAME 'printerService' DESC 'Printer information.' SUP printerAbstract STRUCTURAL MAY ( printer-uri $ printer-xri-supported ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.18.0.2.6.257 NAME 'printerServiceAuxClass' DESC 'Printer information.' AUXILIARY SUP 'printerAbstract' MAY ( printer-uri $ printer-xri-supported ))
+objectclasses: ( 1.3.18.0.2.6.257 NAME 'printerServiceAuxClass' DESC 'Printer information.' SUP printerAbstract AUXILIARY MAY ( printer-uri $ printer-xri-supported ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.18.0.2.6.256 NAME 'printerIPP' DESC 'Internet Printing Protocol (IPP) information.' AUXILIARY SUP 'top' MAY   ( printer-ipp-versions-supported $ printer-multiple-document-jobs-supported ))
+objectclasses: ( 1.3.18.0.2.6.256 NAME 'printerIPP' DESC 'Internet Printing Protocol (IPP) information.' SUP top AUXILIARY MAY ( printer-ipp-versions-supported $ printer-multiple-document-jobs-supported ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.18.0.2.6.253 NAME 'printerLPR' DESC 'LPR information.' AUXILIARY SUP 'top' MUST ( printer-name ) MAY ( printer-aliases))
+objectclasses: ( 1.3.18.0.2.6.253 NAME 'printerLPR' DESC 'LPR information.' SUP top AUXILIARY MUST printer-name MAY printer-aliases )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.14 NAME 'sunPrinter' DESC 'Sun printer information' SUP 'top' AUXILIARY MUST (objectclass $ printer-name)  MAY (sun-printer-bsdaddr $ sun-printer-kvp))
+objectclasses: ( 1.3.6.1.4.1.42.2.27.5.2.14 NAME 'sunPrinter' DESC 'Sun printer information' SUP top AUXILIARY MUST printer-name MAY ( sun-printer-bsdaddr $ sun-printer-kvp ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses:	( 1.3.6.1.4.1.42.2.27.5.2.12 NAME 'nisplusTimeZoneData' DESC 'NIS+ timezone table data' SUP top STRUCTURAL MUST ( cn ) MAY ( nisplusTimeZone $ description ) )
+objectclasses:	( 1.3.6.1.4.1.42.2.27.5.2.12 NAME 'nisplusTimeZoneData' DESC 'NIS+ timezone table data' SUP top STRUCTURAL MUST cn MAY ( nisplusTimeZone $ description ) )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses:  ( 1.3.6.1.4.1.42.2.27.5.2.8 NAME 'ipTnetTemplate' DESC 'Object class for TSOL network templates' SUP 'top' MUST ( objectclass $ ipTnetTemplateName ) MAY ( SolarisAttrKeyValue ) )
+objectclasses:  ( 1.3.6.1.4.1.42.2.27.5.2.8 NAME 'ipTnetTemplate' DESC 'Object class for TSOL network templates' SUP top MUST ipTnetTemplateName MAY SolarisAttrKeyValue )
 
 dn: cn=schema
 changetype: modify
 add: objectclasses
-objectclasses:	( 1.3.6.1.4.1.42.2.27.5.2.9 NAME 'ipTnetHost' DESC 'Associates an IP address or wildcard with a TSOL template_name' SUP 'top' AUXILIARY MUST ( objectclass $ ipTnetNumber ) )
+objectclasses:	( 1.3.6.1.4.1.42.2.27.5.2.9 NAME 'ipTnetHost' DESC 'Associates an IP address or wildcard with a TSOL template_name' SUP top AUXILIARY MUST ipTnetNumber )
 EOF
 ) > ${TMPDIR}/schema_obj
 
@@ -4465,7 +4486,6 @@ EOF
     ${ECHO} "  ${STEP}. Schema objectclass definitions have been added."
     STEP=`expr $STEP + 1`
 }
-
 
 #
 # modify_top_aci(): Modify the ACI for the top entry to disable self modify
@@ -4486,38 +4506,11 @@ modify_top_aci()
 	cleanup
 	exit 1
     fi
-
-    # Display "already exists" message if necessary. For shadow update,
-    # check also if the deny self-write to userPassword has been done.
-    # If not, more to do, don't display the message.
-    MSG="Top level ACI ${ACI_NAME} already exists for ${LDAP_BASEDN}."
     ${GREP} "${ACI_NAME}" ${TMPDIR}/chk_top_aci > /dev/null 2>&1
     if [ $? -eq 0 ]; then
-	if [ "$LDAP_ENABLE_SHADOW_UPDATE" != "TRUE" ];then
-	    ${ECHO} "  ${STEP}. $MSG"
-	    STEP=`expr $STEP + 1`
-	    return 0
-	else
-	    ${GREP} "${ACI_NAME}" ${TMPDIR}/chk_top_aci | ${GREP} -i  \
-	    userPassword > /dev/null 2>&1
-	    if [ $? -eq 0 ]; then
-		# userPassword is already on the deny list, no more to do
-		if [ $EXISTING_PROFILE -eq 1 ];then
-		    ${ECHO} "  NOT SET: $MSG"
-		else
-		    ${ECHO} "  ${STEP}. $MSG"
-		    STEP=`expr $STEP + 1`
-		fi
-	        return 0
-	    fi
-	fi
-    fi
-
-    # if shadow update is enabled, also deny self-write to userPassword
-    if [ "$LDAP_ENABLE_SHADOW_UPDATE" = "TRUE" ];then
-	PWD_SELF_CHANGE="userPassword||"
-    else
-	PWD_SELF_CHANGE=""
+	${ECHO} "  ${STEP}. Top level ACI ${ACI_NAME} already exists for ${LDAP_BASEDN}."
+	STEP=`expr $STEP + 1`
+	return 0
     fi
 
     # Crate LDIF for top level ACI.
@@ -4525,7 +4518,7 @@ modify_top_aci()
 dn: ${LDAP_BASEDN}
 changetype: modify
 add: aci
-aci: (targetattr = "${PWD_SELF_CHANGE}cn||uid||uidNumber||gidNumber||homeDirectory||shadowLastChange||shadowMin||shadowMax||shadowWarning||shadowInactive||shadowExpire||shadowFlag||memberUid||SolarisAuditAlways||SolarisAuditNever||SolarisAttrKeyValue||SolarisAttrReserved1||SolarisAttrReserved2||SolarisUserQualifier")(version 3.0; acl ${ACI_NAME}; deny (write) userdn = "ldap:///self";)
+aci: (targetattr = "cn||uid||uidNumber||gidNumber||homeDirectory||shadowLastChange||shadowMin||shadowMax||shadowWarning||shadowInactive||shadowExpire||shadowFlag||memberUid||SolarisAuditAlways||SolarisAuditNever||SolarisAttrKeyValue||SolarisAttrReserved1||SolarisAttrReserved2||SolarisUserQualifier")(version 3.0; acl ${ACI_NAME}; deny (write) userdn = "ldap:///self";)
 -
 EOF
 ) > ${TMPDIR}/top_aci
@@ -4538,9 +4531,190 @@ EOF
 	exit 1
     fi
 
-    # Display message that schema is updated.
+    # Display message that ACI is updated.
     MSG="ACI for ${LDAP_BASEDN} modified to disable self modify."
     if [ $EXISTING_PROFILE -eq 1 ];then
+	${ECHO} "  ACI SET: $MSG"
+    else
+	${ECHO} "  ${STEP}. $MSG"
+	STEP=`expr $STEP + 1`
+    fi
+}
+
+#
+# find_and_delete_ACI(): Find an ACI in file $2 with a matching pattern $1.
+# Delete the ACI and print a message using $3 as the ACI name. $3 is needed
+# because it could have a different value than that of $1.
+find_and_delete_ACI()
+{
+    [ $DEBUG -eq 1 ] && ${ECHO} "In find_and_delete_ACI"
+
+    # if an ACI with pattern $1 exists in file $2, delete it from ${LDAP_BASEDN}
+    ${EGREP} $1 $2 | ${SED} -e 's/aci=//' > ${TMPDIR}/grep_find_delete_aci 2>&1
+    if [ -s ${TMPDIR}/grep_find_delete_aci ]; then
+	aci_to_delete=`${CAT} ${TMPDIR}/grep_find_delete_aci`
+
+	# Create the tmp file to delete the ACI.
+	( cat <<EOF
+dn: ${LDAP_BASEDN}
+changetype: modify
+delete: aci
+aci: ${aci_to_delete}
+EOF
+	) > ${TMPDIR}/find_delete_aci
+
+	# Delete the ACI
+	${EVAL} "${LDAPMODIFY} ${LDAP_ARGS} -f ${TMPDIR}/find_delete_aci ${VERB}"
+	if [ $? -ne 0 ]; then
+	    ${ECHO} "  ERROR: Remove of $3 ACI failed!"
+	    cleanup
+	    exit 1
+	fi
+
+	${RM} -f ${TMPDIR}/find_delete_aci
+	# Display message that an ACL is deleted.
+	MSG="ACI $3 deleted."
+	if [ $EXISTING_PROFILE -eq 1 ]; then
+	    ${ECHO} "  ACI DELETED: $MSG"
+	else
+	    ${ECHO} "  ${STEP}. $MSG"
+	    STEP=`expr $STEP + 1`
+	fi
+    fi
+}
+
+#
+# Add an ACI to deny non-admin access to shadow data when
+# shadow update is enabled.
+#
+deny_non_admin_shadow_access()
+{
+    [ $DEBUG -eq 1 ] && ${ECHO} "In deny_non_admin_shadow_access()"
+
+    # Set ACI Names
+    ACI_TO_ADD="LDAP_Naming_Services_deny_non_admin_shadow_access"
+    ACI_TO_DEL="LDAP_Naming_Services_deny_non_host_shadow_access"
+
+    # Search for ACI_TO_ADD
+    eval "${LDAPSEARCH} ${LDAP_ARGS} -b \"${LDAP_BASEDN}\" -s base objectclass=* aci > ${TMPDIR}/chk_aci_non_admin 2>&1"
+    if [ $? -ne 0 ]; then
+	${ECHO} "Error searching aci for ${LDAP_BASEDN}"
+	cleanup
+	exit 1
+    fi
+
+    # If an ACI with ${ACI_TO_ADD} already exists, we are done.
+    ${EGREP} ${ACI_TO_ADD} ${TMPDIR}/chk_aci_non_admin 2>&1 > /dev/null
+    if [ $? -eq 0 ]; then
+	MSG="ACI ${ACI_TO_ADD} already set for ${LDAP_BASEDN}."
+	if [ $EXISTING_PROFILE -eq 1 ]; then
+	    ${ECHO} "  NOT SET: $MSG"
+	else
+	    ${ECHO} "  ${STEP}. $MSG"
+	    STEP=`expr $STEP + 1`	
+	fi
+	return 0
+    fi
+
+    # The deny_non_admin_shadow_access and deny_non_host_shadow_access ACIs
+    # should be mutually exclusive, so if the latter exists, delete it.
+    find_and_delete_ACI ${ACI_TO_DEL} ${TMPDIR}/chk_aci_non_admin ${ACI_TO_DEL}
+
+    # Create the tmp file to add.
+    ( cat <<EOF
+dn: ${LDAP_BASEDN}
+changetype: modify
+add: aci
+aci: (target="ldap:///${LDAP_BASEDN}")(targetattr = "shadowLastChange||
+ shadowMin|| shadowMax||shadowWarning||shadowInactive||shadowExpire||
+ shadowFlag||userPassword") (version 3.0; acl ${ACI_TO_ADD};
+ deny (write,read,search,compare) userdn != "ldap:///${LDAP_ADMINDN}";)
+EOF
+) > ${TMPDIR}/non_admin_aci_write
+    
+    # Add the entry.
+    ${EVAL} "${LDAPMODIFY} ${LDAP_ARGS} -f ${TMPDIR}/non_admin_aci_write ${VERB}"
+    if [ $? -ne 0 ]; then
+	${ECHO} "  ERROR: Adding ACI ${ACI_TO_ADD} failed!"
+	${CAT} ${TMPDIR}/non_admin_aci_write
+	cleanup
+	exit 1
+    fi
+
+    ${RM} -f ${TMPDIR}/non_admin_aci_write
+    # Display message that the non-admin access to shadow data is denied.
+    MSG="Non-Admin access to shadow data denied."
+    if [ $EXISTING_PROFILE -eq 1 ]; then
+	${ECHO} "  ACI SET: $MSG"
+    else
+	${ECHO} "  ${STEP}. $MSG"
+	STEP=`expr $STEP + 1`
+    fi
+}
+
+#
+# Add an ACI to deny non-host access to shadow data when
+# shadow update is enabled and auth Method if gssapi.
+#
+deny_non_host_shadow_access()
+{
+    [ $DEBUG -eq 1 ] && ${ECHO} "In deny_non_host_shadow_access()"
+
+    # Set ACI Names
+    ACI_TO_ADD="LDAP_Naming_Services_deny_non_host_shadow_access"
+    ACI_TO_DEL="LDAP_Naming_Services_deny_non_admin_shadow_access"
+
+    # Search for ACI_TO_ADD
+    eval "${LDAPSEARCH} ${LDAP_ARGS} -b \"${LDAP_BASEDN}\" -s base objectclass=* aci > ${TMPDIR}/chk_aci_non_host 2>&1"
+    if [ $? -ne 0 ]; then
+	${ECHO} "Error searching aci for ${LDAP_BASEDN}"
+	cleanup
+	exit 1
+    fi
+
+    # If an ACI with ${ACI_TO_ADD} already exists, we are done.
+    ${EGREP} ${ACI_TO_ADD} ${TMPDIR}/chk_aci_non_host 2>&1 > /dev/null
+    if [ $? -eq 0 ]; then
+	MSG="ACI ${ACI_TO_ADD} already set for ${LDAP_BASEDN}."
+	if [ $EXISTING_PROFILE -eq 1 ]; then
+	    ${ECHO} "  NOT SET: $MSG"
+	else
+	    ${ECHO} "  ${STEP}. $MSG"
+	    STEP=`expr $STEP + 1`	
+	fi
+	return 0
+    fi
+
+    # The deny_non_admin_shadow_access and deny_non_host_shadow_access ACIs
+    # should be mutually exclusive, so if the former exists, delete it.
+    find_and_delete_ACI ${ACI_TO_DEL} ${TMPDIR}/chk_aci_non_host ${ACI_TO_DEL}
+
+    # Create the tmp file to add.
+    ( cat <<EOF
+dn: ${LDAP_BASEDN}
+changetype: modify
+add: aci
+aci: (target="ldap:///${LDAP_BASEDN}")(targetattr = "shadowLastChange||
+ shadowMin|| shadowMax||shadowWarning||shadowInactive||shadowExpire||
+ shadowFlag||userPassword") (version 3.0; acl ${ACI_TO_ADD};
+  deny (write,read,search,compare)
+  userdn != "ldap:///cn=*+ipHostNumber=*,ou=Hosts,${LDAP_BASEDN}";)
+EOF
+) > ${TMPDIR}/non_host_aci_write
+    
+    # Add the entry.
+    ${EVAL} "${LDAPMODIFY} ${LDAP_ARGS} -f ${TMPDIR}/non_host_aci_write ${VERB}"
+    if [ $? -ne 0 ]; then
+	${ECHO} "  ERROR: Adding ACI ${ACI_TO_ADD} failed!"
+	${CAT} ${TMPDIR}/non_host_aci_write
+	cleanup
+	exit 1
+    fi
+
+    ${RM} -f ${TMPDIR}/non_host_aci_write
+    # Display message that the non-host access to shadow data is denied.
+    MSG="Non-host access to shadow data is denied."
+    if [ $EXISTING_PROFILE -eq 1 ]; then
 	${ECHO} "  ACI SET: $MSG"
     else
 	${ECHO} "  ${STEP}. $MSG"
@@ -4885,7 +5059,7 @@ add_proxyagent()
 {
     [ $DEBUG -eq 1 ] && ${ECHO} "In add_proxyagent()"
 
-    # Check if nismaps already exist.
+    # Check if proxy agent already exists.
     eval "${LDAPSEARCH} ${LDAP_ARGS} -b \"${LDAP_PROXYAGENT}\" -s base \"objectclass=*\" ${VERB}"
     if [ $? -eq 0 ]; then
 	${ECHO} "  ${STEP}. Proxy Agent ${LDAP_PROXYAGENT} already exists."
@@ -4927,9 +5101,6 @@ allow_proxy_read_pw()
 {
     [ $DEBUG -eq 1 ] && ${ECHO} "In allow_proxy_read_pw()"
 
-    # Set ACI Name
-    PROXY_ACI_NAME="LDAP_Naming_Services_proxy_password_read"
-
     # Search for ACI_NAME
     eval "${LDAPSEARCH} ${LDAP_ARGS} -b \"${LDAP_BASEDN}\" -s base objectclass=* aci > ${TMPDIR}/chk_proxyread_aci 2>&1"
     ${GREP} "${PROXY_ACI_NAME}" ${TMPDIR}/chk_proxyread_aci > /dev/null 2>&1
@@ -4944,7 +5115,9 @@ allow_proxy_read_pw()
 dn: ${LDAP_BASEDN}
 changetype: modify
 add: aci
-aci: (target="ldap:///${LDAP_BASEDN}")(targetattr="userPassword")(version 3.0; acl ${PROXY_ACI_NAME}; allow (compare,read,search) userdn = "ldap:///${LDAP_PROXYAGENT}";)
+aci: (target="ldap:///${LDAP_BASEDN}")(targetattr="userPassword")
+  (version 3.0; acl ${PROXY_ACI_NAME}; allow (compare,read,search)
+  userdn = "ldap:///${LDAP_PROXYAGENT}";)
 EOF
 ) > ${TMPDIR}/proxy_read
     
@@ -4959,6 +5132,83 @@ EOF
     # Display message that schema is updated.
     ${ECHO} "  ${STEP}. Give ${LDAP_PROXYAGENT} read permission for password."
     STEP=`expr $STEP + 1`
+}
+
+#  Delete Proxy Agent read permission for password.
+delete_proxy_read_pw()
+{
+    [ $DEBUG -eq 1 ] && ${ECHO} "In delete_proxy_read_pw()"
+
+    # Search for ACI_NAME
+    eval "${LDAPSEARCH} ${LDAP_ARGS} -b \"${LDAP_BASEDN}\" -s base objectclass=* aci > ${TMPDIR}/chk_proxyread_aci 2>&1"
+    ${GREP} "${PROXY_ACI_NAME}" ${TMPDIR}/chk_proxyread_aci | \
+	${SED} -e 's/aci=//' > ${TMPDIR}/grep_proxyread_aci 2>&1
+    if [ $? -ne 0 ]; then
+	${ECHO} "Proxy ACI ${PROXY_ACI_NAME} does not exist for ${LDAP_BASEDN}."
+	return 0
+    fi
+
+    # We need to remove proxy agent's read access to user passwords,
+    # but We do not know the value of the ${LDAP_PROXYAGENT} here, so
+    # 1. if only one match found, delete it
+    # 2. if more than one matches found, ask the user which one to delete
+    HOWMANY=`${WC} -l ${TMPDIR}/grep_proxyread_aci | ${NAWK} '{print $1}'`
+    if [ $HOWMANY -eq 0 ]; then
+	${ECHO} "Proxy ACI ${PROXY_ACI_NAME} does not exist for ${LDAP_BASEDN}."
+	return 0
+    fi
+    if [ $HOWMANY -eq 1 ];then
+	proxy_aci=`${CAT} ${TMPDIR}/grep_proxyread_aci`
+    else
+	    ${CAT} << EOF
+
+Proxy agent is not allowed to read user passwords when shadow
+update is enabled. There are more than one proxy agents found.
+Please select the currently proxy agent being used, so that
+idsconfig can remove its read access to user passwords.
+
+The proxy agents are:
+
+EOF
+	    # generate the proxy agent list
+    	    ${SED} -e "s/.*ldap:\/\/\/.*ldap:\/\/\///" \
+	    ${TMPDIR}/grep_proxyread_aci | ${SED} -e "s/\";)//" > \
+	    	${TMPDIR}/proxy_agent_list
+
+	    # print the proxy agent list
+	    ${NAWK} '{print NR ": " $0}' ${TMPDIR}/proxy_agent_list
+
+	    # ask the user to pick one
+	    _MENU_PROMPT="Select the proxy agent (1-$HOWMANY): "
+	    get_menu_choice "${_MENU_PROMPT}" "0" "$HOWMANY"
+	    _CH=$MN_CH
+	    proxy_aci=`${SED} -n "$_CH p" ${TMPDIR}/grep_proxyread_aci`
+    fi
+
+    # Create the tmp file to delete the ACI.
+    ( cat <<EOF
+dn: ${LDAP_BASEDN}
+changetype: modify
+delete: aci
+aci: ${proxy_aci}
+EOF
+    ) > ${TMPDIR}/proxy_delete
+
+    # Delete the ACI
+    ${EVAL} "${LDAPMODIFY} ${LDAP_ARGS} -f ${TMPDIR}/proxy_delete ${VERB}"
+    if [ $? -ne 0 ]; then
+	${ECHO} "  ERROR: Remove of ${PROXY_ACI_NAME} ACI failed!"
+	cat ${TMPDIR}/proxy_delete
+	cleanup
+	exit 1
+    fi
+
+    # Display message that ACI is updated.
+    MSG="Removed ${PROXY_ACI_NAME} ACI for proxyagent read permission for password."
+    ${ECHO} " "
+    ${ECHO} "  ACI REMOVED: $MSG"
+    ${ECHO} "  The ACI removed is $proxy_aci"
+    ${ECHO} " "
 }
 
 #
@@ -5156,20 +5406,29 @@ add_vlv_aci
 # if Proxy needed, Add Proxy Agent and give read permission for password.
 if [ $NEED_PROXY -eq 1 ]; then
     add_proxyagent
-    allow_proxy_read_pw
+    if [ "$LDAP_ENABLE_SHADOW_UPDATE" != "TRUE" ]; then
+	allow_proxy_read_pw
+    fi
 fi
 
 # If admin needed for shadow update, Add the administrator identity and
-# give write permission for shadow.
+# give read/write permission for shadow, and deny all others read/write
+# access to it.
 if [ $NEED_ADMIN -eq 1 ]; then
     add_admin
-    allow_admin_write_shadow
+    allow_admin_read_write_shadow
+    # deny non-admin access to shadow data
+    deny_non_admin_shadow_access
 fi
 
-# if use host principal for shadow update, give write permission for shadow.
+# If use host principal for shadow update, give read/write permission for
+# shadow, and deny all others' read/write access to it.
 if [ $NEED_HOSTACL -eq 1 ]; then
-    allow_host_write_shadow
+    allow_host_read_write_shadow
+    # deny non-host access to shadow data
+    deny_non_host_shadow_access
 fi
+
 
 # Generate client profile and add it to the server.
 add_profile

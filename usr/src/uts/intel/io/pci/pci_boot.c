@@ -25,6 +25,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/sunndi.h>
 #include <sys/pci.h>
 #include <sys/pci_impl.h>
@@ -60,6 +61,14 @@
 
 #define	PPB_IO_ALIGNMENT	0x1000		/* 4K aligned */
 #define	PPB_MEM_ALIGNMENT	0x100000	/* 1M aligned */
+/* round down to nearest power of two */
+#define	P2LE(align)					\
+	{						\
+		int i = 0;				\
+		while (align >>= 1)			\
+			i ++;				\
+		align = 1 << i;				\
+	}						\
 
 /* See AMD-8111 Datasheet Rev 3.03, Page 149: */
 #define	LPC_IO_CONTROL_REG_1	0x40
@@ -544,7 +553,7 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 	uchar_t bus, dev, func;
 	uchar_t parbus, subbus;
 	uint_t io_base, io_limit, mem_base, mem_limit;
-	uint_t io_size, mem_size;
+	uint_t io_size, mem_size, io_align, mem_align;
 	uint64_t addr = 0;
 	int *regp = NULL;
 	uint_t reglen;
@@ -631,22 +640,38 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 	}
 
 	/*
-	 * Calculate required IO size
-	 * We are going to assign 512 bytes per bus. The size needs to be
-	 * 4K aligned and the maximum size is 16K.
+	 * Calculate required IO size and alignment
+	 * If bus io_size is zero, we are going to assign 512 bytes per bus,
+	 * otherwise, we'll choose the maximum value of such calculation and
+	 * bus io_size. The size needs to be 4K aligned.
+	 *
+	 * We calculate alignment as the largest power of two less than the
+	 * the sum of all children's IO size requirements, because this will
+	 * align to the size of the largest child request within that size
+	 * (which is always a power of two).
 	 */
 	io_size = (subbus - secbus + 1) * 0x200;
-	io_size = (io_size + PPB_IO_ALIGNMENT) & (~(PPB_IO_ALIGNMENT - 1));
-	if (io_size > 0x4 * PPB_IO_ALIGNMENT)
-		io_size = 0x4 * PPB_IO_ALIGNMENT;
+	if (io_size <  pci_bus_res[secbus].io_size)
+		io_size = pci_bus_res[secbus].io_size;
+	io_size = P2ROUNDUP(io_size, PPB_IO_ALIGNMENT);
+	io_align = io_size;
+	P2LE(io_align);
+
 	/*
-	 * Calculate required MEM size
-	 * We are going to assign 1M bytes per bus. The size needs to be
-	 * 1M aligned and the maximum size is 8M.
+	 * Calculate required MEM size and alignment
+	 * If bus mem_size is zero, we are going to assign 1M bytes per bus,
+	 * otherwise, we'll choose the maximum value of such calculation and
+	 * bus mem_size. The size needs to be 1M aligned.
+	 *
+	 * For the alignment, refer to the I/O comment above.
 	 */
 	mem_size = (subbus - secbus + 1) * PPB_MEM_ALIGNMENT;
-	if (mem_size > 0x8 * PPB_MEM_ALIGNMENT)
-		mem_size = 0x8 * PPB_MEM_ALIGNMENT;
+	if (mem_size < pci_bus_res[secbus].mem_size) {
+		mem_size = pci_bus_res[secbus].mem_size;
+		mem_size = P2ROUNDUP(mem_size, PPB_MEM_ALIGNMENT);
+	}
+	mem_align = mem_size;
+	P2LE(mem_align);
 
 	/* Subtractive bridge */
 	if (pci_bus_res[secbus].subtractive && prog_sub) {
@@ -675,7 +700,7 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 		 */
 		if (pci_bus_res[secbus].io_ports == NULL) {
 			addr = get_parbus_io_res(parbus, secbus, io_size,
-			    PPB_IO_ALIGNMENT);
+			    io_align);
 			if (addr) {
 				add_ranges_prop(secbus, 1);
 				pci_bus_res[secbus].io_reprogram =
@@ -692,7 +717,7 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 		 */
 		if (pci_bus_res[secbus].mem_space == NULL) {
 			addr = get_parbus_mem_res(parbus, secbus, mem_size,
-			    PPB_MEM_ALIGNMENT);
+			    mem_align);
 			if (addr) {
 				add_ranges_prop(secbus, 1);
 				pci_bus_res[secbus].mem_reprogram =
@@ -757,7 +782,7 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 		} else {
 			/* get new io ports from parent bus */
 			addr = get_parbus_io_res(parbus, secbus, io_size,
-			    PPB_IO_ALIGNMENT);
+			    io_align);
 			if (addr) {
 				io_base = addr;
 				io_limit = addr + io_size - 1;
@@ -827,7 +852,7 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 		} else {
 			/* get new mem resource from parent bus */
 			addr = get_parbus_mem_res(parbus, secbus, mem_size,
-			    PPB_MEM_ALIGNMENT);
+			    mem_align);
 			if (addr) {
 				mem_base = addr;
 				mem_limit = addr + mem_size - 1;
@@ -1147,6 +1172,10 @@ enumerate_bus_devs(uchar_t bus, int config_op)
 
 		par_bus = pci_bus_res[bus].par_bus;
 		while (par_bus != (uchar_t)-1) {
+			pci_bus_res[par_bus].io_size +=
+			    pci_bus_res[bus].io_size;
+			pci_bus_res[par_bus].mem_size +=
+			    pci_bus_res[bus].mem_size;
 
 			if (pci_bus_res[bus].io_ports_used)
 				memlist_merge(&pci_bus_res[bus].io_ports_used,
@@ -1385,7 +1414,7 @@ set_devpm_d0(uchar_t bus, uchar_t dev, uchar_t func)
 
 	header = pci_getb(bus, dev, func, PCI_CONF_HEADER) & PCI_HEADER_TYPE_M;
 	if (header == PCI_HEADER_CARDBUS)
-		cap_ptr = pci_getb(bus, dev, func, PCI_CBUS_RESERVED1);
+		cap_ptr = pci_getb(bus, dev, func, PCI_CBUS_CAP_PTR);
 	else
 		cap_ptr = pci_getb(bus, dev, func, PCI_CONF_CAP_PTR);
 	/*
@@ -1702,6 +1731,23 @@ process_devfunc(uchar_t bus, uchar_t dev, uchar_t func, uchar_t header,
 }
 
 /*
+ * Some vendors do not use unique subsystem IDs in their products, which
+ * makes the use of form 2 compatible names (pciSSSS,ssss) inappropriate.
+ * Allow for these compatible forms to be excluded on a per-device basis.
+ */
+/*ARGSUSED*/
+static boolean_t
+subsys_compat_exclude(ushort_t venid, ushort_t devid, ushort_t subvenid,
+    ushort_t subdevid, uchar_t revid, uint_t classcode)
+{
+	/* Nvidia display adapters */
+	if ((venid == 0x10de) && (is_display(classcode)))
+		return (B_TRUE);
+
+	return (B_FALSE);
+}
+
+/*
  * Set the compatible property to a value compliant with
  * rev 2.1 of the IEEE1275 PCI binding.
  * (Also used for PCI-Express devices).
@@ -1786,10 +1832,14 @@ add_compatible(dev_info_t *dip, ushort_t subvenid, ushort_t subdevid,
 		size -= strlen(curr) + 1;
 		curr += strlen(curr) + 1;
 
-		compat[i++] = curr;	/* form 2 */
-		(void) snprintf(curr, size, "pci%x,%x", subvenid, subdevid);
-		size -= strlen(curr) + 1;
-		curr += strlen(curr) + 1;
+		if (subsys_compat_exclude(vendorid, deviceid, subvenid,
+		    subdevid, revid, classcode) == B_FALSE) {
+			compat[i++] = curr;	/* form 2 */
+			(void) snprintf(curr, size, "pci%x,%x", subvenid,
+			    subdevid);
+			size -= strlen(curr) + 1;
+			curr += strlen(curr) + 1;
+		}
 	}
 	compat[i++] = curr;	/* form 3 */
 	(void) snprintf(curr, size, "pci%x,%x.%x", vendorid, deviceid, revid);
@@ -1924,6 +1974,7 @@ add_reg_props(dev_info_t *dip, uchar_t bus, uchar_t dev, uchar_t func,
 		break;
 	case PCI_HEADER_CARDBUS:
 		max_basereg = PCI_CBUS_BASE_NUM;
+		reprogram = 1;
 		break;
 	default:
 		max_basereg = 0;
@@ -1947,8 +1998,6 @@ add_reg_props(dev_info_t *dip, uchar_t bus, uchar_t dev, uchar_t func,
 	end = PCI_CONF_BASE0 + max_basereg * sizeof (uint_t);
 	for (j = 0, offset = PCI_CONF_BASE0; offset < end;
 	    j++, offset += bar_sz) {
-		int hard_decode = 0;
-
 		/* determine the size of the address space */
 		base = pci_getl(bus, dev, func, offset);
 		pci_putl(bus, dev, func, offset, 0xffffffff);
@@ -1957,6 +2006,8 @@ add_reg_props(dev_info_t *dip, uchar_t bus, uchar_t dev, uchar_t func,
 
 		/* construct phys hi,med.lo, size hi, lo */
 		if ((pciide && j < 4) || (base & PCI_BASE_SPACE_IO)) {
+			int hard_decode = 0;
+
 			/* i/o space */
 			bar_sz = PCI_BAR_SZ_32;
 			value &= PCI_BASE_IO_ADDR_M;
@@ -1974,20 +2025,14 @@ add_reg_props(dev_info_t *dip, uchar_t bus, uchar_t dev, uchar_t func,
 				continue;
 			}
 
+			regs[nreg].pci_phys_hi = PCI_ADDR_IO | devloc |
+			    (hard_decode ? PCI_RELOCAT_B : offset);
+			regs[nreg].pci_phys_low = hard_decode ?
+			    base & PCI_BASE_IO_ADDR_M : 0;
+			assigned[nasgn].pci_phys_hi =
+			    PCI_RELOCAT_B | regs[nreg].pci_phys_hi;
 			regs[nreg].pci_size_low =
 			    assigned[nasgn].pci_size_low = len;
-			if (!hard_decode) {
-				regs[nreg].pci_phys_hi =
-				    (PCI_ADDR_IO | devloc) + offset;
-			} else {
-				regs[nreg].pci_phys_hi =
-				    (PCI_RELOCAT_B | PCI_ADDR_IO | devloc) +
-				    offset;
-				regs[nreg].pci_phys_low =
-				    base & PCI_BASE_IO_ADDR_M;
-			}
-			assigned[nasgn].pci_phys_hi =
-			    (PCI_RELOCAT_B | PCI_ADDR_IO | devloc) + offset;
 			type = base & (~PCI_BASE_IO_ADDR_M);
 			base &= PCI_BASE_IO_ADDR_M;
 			/*
@@ -2020,8 +2065,10 @@ add_reg_props(dev_info_t *dip, uchar_t bus, uchar_t dev, uchar_t func,
 					(void) memlist_remove(io_res, base,
 					    len);
 					memlist_insert(io_res_used, base, len);
-				} else
+				} else {
 					reprogram = 1;
+				}
+				pci_bus_res[bus].io_size += len;
 			} else if ((*io_res && base == 0) ||
 			    pci_bus_res[bus].io_reprogram) {
 				base = (uint_t)memlist_find(io_res, len, len);
@@ -2117,8 +2164,10 @@ add_reg_props(dev_info_t *dip, uchar_t bus, uchar_t dev, uchar_t func,
 					else
 						memlist_insert(mem_res_used,
 						    base, len);
-				} else
+				} else {
 					reprogram = 1;
+				}
+				pci_bus_res[bus].mem_size += len;
 			} else if ((*mem_res && base == NULL) ||
 			    pci_bus_res[bus].mem_reprogram) {
 				/*
@@ -2234,7 +2283,7 @@ add_reg_props(dev_info_t *dip, uchar_t bus, uchar_t dev, uchar_t func,
 
 		/* Video memory */
 		regs[nreg].pci_phys_hi = assigned[nasgn].pci_phys_hi =
-		    (PCI_RELOCAT_B | PCI_ADDR_MEM32 | devloc);
+		    (PCI_RELOCAT_B | PCI_ALIAS_B | PCI_ADDR_MEM32 | devloc);
 		regs[nreg].pci_phys_low =
 		    assigned[nasgn].pci_phys_low = 0xa0000;
 		regs[nreg].pci_size_low =

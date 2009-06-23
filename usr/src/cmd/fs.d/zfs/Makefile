@@ -18,14 +18,13 @@
 #
 # CDDL HEADER END
 #
+
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
-#
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
-SUBDIRS=	fstyp
+SUBDIRS=	fstyp zfsdle
 
 all:=		TARGET= all
 install:=	TARGET= install

@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * Autovectored Interrupt Configuration and Deconfiguration
@@ -478,7 +476,7 @@ rem_avintr(void *intr_id, int lvl, avfunc xxintr, int vect)
  * seen each cpu not executing an interrupt at that level--so we know our
  * change has taken effect completely (no old state in registers, etc).
  */
-void
+static void
 wait_till_seen(int ipl)
 {
 	int cpu_in_chain, cix;
@@ -491,7 +489,7 @@ wait_till_seen(int ipl)
 		for (cix = 0; cix < NCPU; cix++) {
 			cpup = cpu[cix];
 			if (cpup != NULL && CPU_IN_SET(cpus_to_check, cix)) {
-				if (intr_active(cpup, ipl)) {
+				if (INTR_ACTIVE(cpup, ipl)) {
 					cpu_in_chain = 1;
 				} else {
 					CPUSET_DEL(cpus_to_check, cix);
@@ -638,7 +636,7 @@ siron_poke_cpu(cpuset_t poke)
 			return;
 	}
 
-	xc_call(0, 0, 0, X_CALL_MEDPRI, poke, (xc_func_t)siron_poke_intr);
+	xc_call(0, 0, 0, CPUSET2BV(poke), (xc_func_t)siron_poke_intr);
 }
 
 /*

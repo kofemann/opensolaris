@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -165,34 +165,39 @@ mc_prop_read_pair(mc_pcicfg_hdl_t cfghdl, uint32_t *r1, off_t r1addr,
 	}
 }
 
-#define	NSKT	6
+/*ARGSUSED*/
+static int
+mc_nvl_add_socket_cb(cmi_hdl_t whdl, void *arg1, void *arg2, void *arg3)
+{
+	uint32_t skt = *((uint32_t *)arg1);
+	cmi_hdl_t *hdlp = (cmi_hdl_t *)arg2;
+
+	if (cmi_hdl_getsockettype(whdl) == skt) {
+		cmi_hdl_hold(whdl);	/* short-term hold */
+		*hdlp = whdl;
+		return (CMI_HDL_WALK_DONE);
+	} else {
+		return (CMI_HDL_WALK_NEXT);
+	}
+}
 
 static void
 mc_nvl_add_socket(nvlist_t *nvl, mc_t *mc)
 {
-	const char *s = "Unknown";
-	int i;
+	cmi_hdl_t hdl = NULL;
+	const char *s;
 
-	static const struct {
-		uint32_t type;
-		const char *name;
-	} sktnames[NSKT] = {
-		{ X86_SOCKET_754, "Socket 754" },
-		{ X86_SOCKET_939, "Socket 939" },
-		{ X86_SOCKET_940, "Socket 940" },
-		{ X86_SOCKET_AM2, "Socket AM2" },
-		{ X86_SOCKET_F1207, "Socket F(1207)" },
-		{ X86_SOCKET_S1g1, "Socket S1g1" },
-	};
-
-	for (i = 0; i < NSKT; i++) {
-		if (mc->mc_socket == sktnames[i].type) {
-			s = sktnames[i].name;
-			break;
-		}
-	}
+	cmi_hdl_walk(mc_nvl_add_socket_cb, (void *)&mc->mc_socket,
+	    (void *)&hdl, NULL);
+	if (hdl == NULL)
+		s = "Unknown";  /* no cpu for this chipid found */
+	else
+		s = cmi_hdl_getsocketstr(hdl);
 
 	(void) nvlist_add_string(nvl, "socket", s);
+
+	if (hdl != NULL)
+		cmi_hdl_rele(hdl);
 }
 
 static uint32_t
@@ -1349,6 +1354,8 @@ cmi_errno_t
 mc_scrubber_enable(mc_t *mc)
 {
 	mc_props_t *mcp = &mc->mc_props;
+	chipid_t chipid = (chipid_t)mcp->mcp_num;
+	uint32_t rev = (uint32_t)mcp->mcp_rev;
 	mc_cfgregs_t *mcr = &mc->mc_cfgregs;
 	union mcreg_scrubctl scrubctl;
 	union mcreg_dramscrublo dalo;
@@ -1414,8 +1421,8 @@ mc_scrubber_enable(mc_t *mc)
 		break;
 	}
 
-#ifdef	OPTERON_ERRATUM_99
 	/*
+	 * OPTERON_ERRATUM_99:
 	 * This erratum applies on revisions D and earlier.
 	 * This erratum also applies on revisions E and later,
 	 * if BIOS uses chip-select hoisting instead of DRAM hole
@@ -1425,16 +1432,15 @@ mc_scrubber_enable(mc_t *mc)
 	 * for the node are not contiguous.
 	 */
 	if (mc_scrub_rate_dram != AMD_NB_SCRUBCTL_RATE_NONE &&
-	    mc->mc_csdiscontig)
+	    mc->mc_csdiscontig) {
 		cmn_err(CE_CONT, "?Opteron DRAM scrubber disabled on revision "
 		    "%s chip %d because DRAM hole is present on this node",
 		    mc->mc_revname, chipid);
 		mc_scrub_rate_dram = AMD_NB_SCRUBCTL_RATE_NONE;
 	}
-#endif
 
-#ifdef OPTERON_ERRATUM_101
 	/*
+	 * OPTERON_ERRATUM_101:
 	 * This erratum applies on revisions D and earlier.
 	 *
 	 * If the DRAM Base Address register's IntlvEn field indicates that
@@ -1449,7 +1455,6 @@ mc_scrubber_enable(mc_t *mc)
 		    mc->mc_revname, chipid);
 		mc_scrub_rate_dram = AMD_NB_SCRUBCTL_RATE_NONE;
 	}
-#endif
 
 	if (mc_scrub_rate_dram != AMD_NB_SCRUBCTL_RATE_NONE) {
 		MCREG_FIELD_CMN(&scrubctl, DramScrub) = mc_scrub_rate_dram;

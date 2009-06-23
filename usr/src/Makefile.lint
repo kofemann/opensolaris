@@ -35,6 +35,8 @@ COMMON_SUBDIRS = \
 	cmd/acctadm \
 	cmd/asa \
 	cmd/amt \
+	cmd/audio/audiotest \
+	cmd/audio/mixerctl \
 	cmd/audit \
 	cmd/auditconfig \
 	cmd/auditd \
@@ -199,6 +201,7 @@ COMMON_SUBDIRS = \
 	cmd/mknod \
 	cmd/mms	\
 	cmd/mpathadm \
+	cmd/modload \
 	cmd/msgfmt \
 	cmd/msgid \
 	cmd/mt \
@@ -219,6 +222,7 @@ COMMON_SUBDIRS = \
 	cmd/pathchk \
 	cmd/pbind \
 	cmd/pcidr \
+	cmd/pcitool \
 	cmd/pfexec \
 	cmd/pgrep \
 	cmd/picl/picld \
@@ -302,6 +306,7 @@ COMMON_SUBDIRS = \
 	cmd/who \
 	cmd/whodo \
 	cmd/wracct \
+	cmd/wusbadm \
 	cmd/xargs \
 	cmd/xstr \
 	cmd/yes \
@@ -316,6 +321,7 @@ COMMON_SUBDIRS = \
 	cmd/zonecfg \
 	cmd/zonename \
 	cmd/zpool \
+	cmd/zlook \
 	cmd/ztest \
 	lib/abi \
 	lib/auditd_plugins \
@@ -364,6 +370,7 @@ COMMON_SUBDIRS = \
 	lib/libinetcfg \
 	lib/libinetsvc \
 	lib/libinetutil \
+	lib/libinstzones \
 	lib/libipmi \
 	lib/libipmp \
 	lib/libipp \
@@ -431,7 +438,6 @@ COMMON_SUBDIRS = \
 	lib/nametoaddr \
 	lib/ncad_addr \
 	lib/nsswitch \
-	lib/openssl/libcrypto \
 	lib/pam_modules \
 	lib/passwdutil \
 	lib/pkcs11 \
@@ -457,7 +463,6 @@ COMMON_SUBDIRS = \
 $(CLOSED_BUILD)COMMON_SUBDIRS += \
 	$(CLOSED)/cmd/cmd-inet/usr.lib/in.iked \
 	$(CLOSED)/cmd/pax \
-	$(CLOSED)/cmd/pcitool \
 	$(CLOSED)/cmd/sed_xpg4 \
 	$(CLOSED)/cmd/smartcard \
 	$(CLOSED)/cmd/tail \

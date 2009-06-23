@@ -36,7 +36,7 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -447,27 +447,23 @@ packet_put_cstring(const char *str)
 }
 
 void
-packet_put_ascii_cstring(const char *str)
+packet_put_utf8_cstring(const char *str)
 {
-	buffer_put_ascii_cstring(&outgoing_packet, str);
+	if (datafellows & SSH_BUG_STRING_ENCODING)
+		buffer_put_cstring(&outgoing_packet, str);
+	else
+		buffer_put_utf8_cstring(&outgoing_packet, str);
 }
+
 void
-packet_put_utf8_cstring(const u_char *str)
+packet_put_utf8_string(const char *str, uint_t len)
 {
-	buffer_put_utf8_cstring(&outgoing_packet, str);
+	if (datafellows & SSH_BUG_STRING_ENCODING)
+		buffer_put_string(&outgoing_packet, str, len);
+	else
+		buffer_put_utf8_string(&outgoing_packet, str, len);
 }
-#if 0
-void
-packet_put_ascii_string(const void *buf, u_int len)
-{
-	buffer_put_ascii_string(&outgoing_packet, buf, len);
-}
-void
-packet_put_utf8_string(const void *buf, u_int len)
-{
-	buffer_put_utf8_string(&outgoing_packet, buf, len);
-}
-#endif
+
 void
 packet_put_raw(const void *buf, u_int len)
 {
@@ -601,7 +597,7 @@ set_newkeys(int mode)
 	enc  = &newkeys[mode]->enc;
 	mac  = &newkeys[mode]->mac;
 	comp = &newkeys[mode]->comp;
-	if (mac->md != NULL)
+	if (mac_init(mac) == 0)
 		mac->enabled = 1;
 #ifdef	PACKET_DEBUG
 	debug("new encryption key:\n");
@@ -671,12 +667,15 @@ free_keys(Newkeys *keys)
 	enc  = &keys->enc;
 	mac  = &keys->mac;
 	comp = &keys->comp;
-	memset(mac->key, 0, mac->key_len);
 	xfree(enc->name);
 	xfree(enc->iv);
 	xfree(enc->key);
-	xfree(mac->name);
+
+	memset(mac->key, 0, mac->key_len);
 	xfree(mac->key);
+	xfree(mac->name);
+	mac_clear(mac);
+
 	xfree(comp->name);
 	xfree(keys);
 }
@@ -1262,7 +1261,8 @@ packet_read_poll_seqnr(u_int32_t *seqnr_p)
 				break;
 			case SSH2_MSG_DEBUG:
 				packet_get_char();
-				msg = packet_get_string(NULL);
+				msg = packet_get_utf8_string(NULL);
+				msg = g11n_filter_string(msg);
 				debug("Remote: %.900s", msg);
 				xfree(msg);
 				msg = packet_get_string(NULL);
@@ -1270,7 +1270,8 @@ packet_read_poll_seqnr(u_int32_t *seqnr_p)
 				break;
 			case SSH2_MSG_DISCONNECT:
 				reason = packet_get_int();
-				msg = packet_get_string(NULL);
+				msg = packet_get_utf8_string(NULL);
+				msg = g11n_filter_string(msg);
 				log("Received disconnect from %s: %u: %.400s",
 				    get_remote_ipaddr(), reason, msg);
 				xfree(msg);
@@ -1392,15 +1393,14 @@ packet_get_string(u_int *length_ptr)
 {
 	return buffer_get_string(&incoming_packet, length_ptr);
 }
+
 char *
-packet_get_ascii_cstring()
+packet_get_utf8_string(uint_t *length_ptr)
 {
-	return buffer_get_ascii_cstring(&incoming_packet);
-}
-u_char *
-packet_get_utf8_cstring()
-{
-	return buffer_get_utf8_cstring(&incoming_packet);
+	if (datafellows & SSH_BUG_STRING_ENCODING)
+		return (buffer_get_string(&incoming_packet, length_ptr));
+	else
+		return (buffer_get_utf8_string(&incoming_packet, length_ptr));
 }
 
 /*
@@ -1436,7 +1436,7 @@ packet_send_debug(const char *fmt,...)
 	if (compat20) {
 		packet_start(SSH2_MSG_DEBUG);
 		packet_put_char(0);	/* bool: always display */
-		packet_put_cstring(buf);
+		packet_put_utf8_cstring(buf);
 		packet_put_cstring("");
 	} else {
 		packet_start(SSH_MSG_DEBUG);
@@ -1489,7 +1489,7 @@ packet_disconnect(const char *fmt,...)
 	if (compat20) {
 		packet_start(SSH2_MSG_DISCONNECT);
 		packet_put_int(SSH2_DISCONNECT_PROTOCOL_ERROR);
-		packet_put_cstring(buf);
+		packet_put_utf8_cstring(buf);
 		packet_put_cstring("");
 	} else {
 		packet_start(SSH_MSG_DISCONNECT);

@@ -516,6 +516,9 @@ CLOBBERFILES += $(POFILE) $(POFILES)
 COMPILE.cpp= $(CC) -E -C $(CFLAGS) $(CPPFLAGS)
 XGETTEXT= /usr/bin/xgettext
 XGETFLAGS= -c TRANSLATION_NOTE
+GNUXGETTEXT= /usr/gnu/bin/xgettext
+GNUXGETFLAGS= --add-comments=TRANSLATION_NOTE --keyword=_ \
+	--strict --no-location --omit-header
 BUILD.po= $(XGETTEXT) $(XGETFLAGS) -d $(<F) $<.i ;\
 	$(RM)	$@ ;\
 	$(SED) "/^domain/d" < $(<F).po > $@ ;\
@@ -770,6 +773,7 @@ ZNODELETE=	-znodelete
 ZNODLOPEN=	-znodlopen
 ZNODUMP=	-znodump
 ZNOLAZYLOAD=	-znolazyload
+ZNOLDYNSYM=	-znoldynsym
 ZNORELOC=	-znoreloc
 ZNOVERSION=	-znoversion
 ZRECORD=	-zrecord
@@ -924,6 +928,15 @@ POST_PROCESS=		$(PROCESS_COMMENT) $@ ; $(STRIP_STABS) ; \
 			$(ELFSIGN_OBJECT)
 
 #
+# chk4ubin is a tool that inspects a module for a symbol table
+# ELF section size which can trigger an OBP bug on older platforms.
+# This problem affects only specific sun4u bootable modules.
+#
+CHK4UBIN=	$(ONBLD_TOOLS)/bin/$(MACH)/chk4ubin
+CHK4UBINFLAGS=
+CHK4UBINARY=	$(CHK4UBIN) $(CHK4UBINFLAGS) $@
+
+#
 # The PKGDEFS macro points to the source directory containing the majority
 # of ON's package definitions plus Makefiles with general package creation
 # rules.
@@ -1009,8 +1022,6 @@ PKGARCHIVE=$(SRC)/../../packages/$(MACH)/nightly$(PKGARCHIVESUFFIX)
 
 #
 # Python and Perl executable and message catalog build rules.
-# Note that Python i18n isn't supported by this rule set yet,
-# as it requires a special build tool (pygettext.py).
 #
 .SUFFIXES: .pl .pm .py .pyc
 
@@ -1026,6 +1037,9 @@ PKGARCHIVE=$(SRC)/../../packages/$(MACH)/nightly$(PKGARCHIVESUFFIX)
 	$(RM) $@
 	$(PYTHON) -mpy_compile $<
 	@[ $(<)c = $@ ] || $(MV) $(<)c $@
+
+.py.po:
+	$(GNUXGETTEXT) $(GNUXGETFLAGS) -d $(<F:%.py=%) $< ;
 
 .pl.po .pm.po:
 	$(XGETTEXT) $(XGETFLAGS) -d $(<F) $< ;

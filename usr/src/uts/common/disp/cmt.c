@@ -74,12 +74,15 @@
  * each PG can have at most one parent, and siblings are the group of PGs
  * sharing the same parent.
  *
- * On NUMA systems, the CMT load balancing algorithm balances across the
- * CMT PGs within their respective lgroups. On UMA based system, there
- * exists a top level group of PGs to balance across. On NUMA systems multiple
- * top level groups are instantiated, where the top level balancing begins by
- * balancng across the CMT PGs within their respective (per lgroup) top level
- * groups.
+ * On UMA based systems, the CMT load balancing algorithm begins by balancing
+ * load across the group of top level PGs in the system hierarchy.
+ * On NUMA systems, the CMT load balancing algorithm balances load across the
+ * group of top level PGs in each leaf lgroup...but for root homed threads,
+ * is willing to balance against all the top level PGs in the system.
+ *
+ * Groups of top level PGs are maintained to implement the above, one for each
+ * leaf lgroup (containing the top level PGs in that lgroup), and one (for the
+ * root lgroup) that contains all the top level PGs in the system.
  */
 static cmt_lgrp_t	*cmt_lgrps = NULL;	/* cmt_lgrps list head */
 static cmt_lgrp_t	*cpu0_lgrp = NULL;	/* boot CPU's initial lgrp */
@@ -90,7 +93,8 @@ static int		is_cpu0 = 1; /* true if this is boot CPU context */
 
 /*
  * Array of hardware sharing relationships that are blacklisted.
- * PGs won't be instantiated for blacklisted hardware sharing relationships.
+ * CMT scheduling optimizations won't be performed for blacklisted sharing
+ * relationships.
  */
 static int		cmt_hw_blacklisted[PGHW_NUM_COMPONENTS];
 
@@ -134,8 +138,8 @@ static pg_cid_t		pg_cmt_class_id;		/* PG class id */
 
 static pg_t		*pg_cmt_alloc();
 static void		pg_cmt_free(pg_t *);
-static void		pg_cmt_cpu_init(cpu_t *);
-static void		pg_cmt_cpu_fini(cpu_t *);
+static void		pg_cmt_cpu_init(cpu_t *, cpu_pg_t *);
+static void		pg_cmt_cpu_fini(cpu_t *, cpu_pg_t *);
 static void		pg_cmt_cpu_active(cpu_t *);
 static void		pg_cmt_cpu_inactive(cpu_t *);
 static void		pg_cmt_cpupart_in(cpu_t *, cpupart_t *);
@@ -152,7 +156,8 @@ static void		cmt_ev_thread_swtch(pg_t *, cpu_t *, hrtime_t,
 static void		cmt_ev_thread_swtch_pwr(pg_t *, cpu_t *, hrtime_t,
 			    kthread_t *, kthread_t *);
 static void		cmt_ev_thread_remain_pwr(pg_t *, cpu_t *, kthread_t *);
-static cmt_lineage_validation_t	pg_cmt_lineage_validate(pg_cmt_t **, int *);
+static cmt_lineage_validation_t	pg_cmt_lineage_validate(pg_cmt_t **, int *,
+			    cpu_pg_t *);
 
 
 /*
@@ -295,6 +300,13 @@ pg_cmt_hier_rank(pg_cmt_t *pg1, pg_cmt_t *pg2)
 static void
 cmt_callback_init(pg_t *pg)
 {
+	/*
+	 * Stick with the default callbacks if there isn't going to be
+	 * any CMT thread placement optimizations implemented.
+	 */
+	if (((pg_cmt_t *)pg)->cmt_policy == CMT_NO_POLICY)
+		return;
+
 	switch (((pghw_t *)pg)->pghw_hw) {
 	case PGHW_POW_ACTIVE:
 		pg->pg_cb.thread_swtch = cmt_ev_thread_swtch_pwr;
@@ -308,11 +320,16 @@ cmt_callback_init(pg_t *pg)
 
 /*
  * Promote PG above it's current parent.
- * This is only legal if PG has an equal or greater number of CPUs
- * than it's parent.
+ * This is only legal if PG has an equal or greater number of CPUs than its
+ * parent.
+ *
+ * This routine operates on the CPU specific processor group data (for the CPUs
+ * in the PG being promoted), and may be invoked from a context where one CPU's
+ * PG data is under construction. In this case the argument "pgdata", if not
+ * NULL, is a reference to the CPU's under-construction PG data.
  */
 static void
-cmt_hier_promote(pg_cmt_t *pg)
+cmt_hier_promote(pg_cmt_t *pg, cpu_pg_t *pgdata)
 {
 	pg_cmt_t	*parent;
 	group_t		*children;
@@ -393,16 +410,24 @@ cmt_hier_promote(pg_cmt_t *pg)
 	PG_CPU_ITR_INIT(pg, cpu_iter);
 	while ((cpu = pg_cpu_next(&cpu_iter)) != NULL) {
 		int		idx;
-		group_t		*pgs;
 		pg_cmt_t	*cpu_pg;
+		cpu_pg_t	*pgd;	/* CPU's PG data */
+
+		/*
+		 * The CPU's whose lineage is under construction still
+		 * references the bootstrap CPU PG data structure.
+		 */
+		if (pg_cpu_is_bootstrapped(cpu))
+			pgd = pgdata;
+		else
+			pgd = cpu->cpu_pg;
 
 		/*
 		 * Iterate over the CPU's PGs updating the children
 		 * of the PG being promoted, since they have a new parent.
 		 */
-		pgs = &cpu->cpu_pg->pgs;
 		group_iter_init(&iter);
-		while ((cpu_pg = group_iterate(pgs, &iter)) != NULL) {
+		while ((cpu_pg = group_iterate(&pgd->cmt_pgs, &iter)) != NULL) {
 			if (cpu_pg->cmt_parent == pg) {
 				cpu_pg->cmt_parent = parent;
 			}
@@ -411,29 +436,28 @@ cmt_hier_promote(pg_cmt_t *pg)
 		/*
 		 * Update the CMT load balancing lineage
 		 */
-		pgs = &cpu->cpu_pg->cmt_pgs;
-		if ((idx = group_find(pgs, (void *)pg)) == -1) {
+		if ((idx = group_find(&pgd->cmt_pgs, (void *)pg)) == -1) {
 			/*
 			 * Unless this is the CPU who's lineage is being
 			 * constructed, the PG being promoted should be
 			 * in the lineage.
 			 */
-			ASSERT(GROUP_SIZE(pgs) == 0);
+			ASSERT(pg_cpu_is_bootstrapped(cpu));
 			continue;
 		}
 
-		ASSERT(GROUP_ACCESS(pgs, idx - 1) == parent);
+		ASSERT(GROUP_ACCESS(&pgd->cmt_pgs, idx - 1) == parent);
 		ASSERT(idx > 0);
 
 		/*
 		 * Have the child and the parent swap places in the CPU's
 		 * lineage
 		 */
-		group_remove_at(pgs, idx);
-		group_remove_at(pgs, idx - 1);
-		err = group_add_at(pgs, parent, idx);
+		group_remove_at(&pgd->cmt_pgs, idx);
+		group_remove_at(&pgd->cmt_pgs, idx - 1);
+		err = group_add_at(&pgd->cmt_pgs, parent, idx);
 		ASSERT(err == 0);
-		err = group_add_at(pgs, pg, idx - 1);
+		err = group_add_at(&pgd->cmt_pgs, pg, idx - 1);
 		ASSERT(err == 0);
 	}
 
@@ -448,9 +472,18 @@ cmt_hier_promote(pg_cmt_t *pg)
 
 /*
  * CMT class callback for a new CPU entering the system
+ *
+ * This routine operates on the CPU specific processor group data (for the CPU
+ * being initialized). The argument "pgdata" is a reference to the CPU's PG
+ * data to be constructed.
+ *
+ * cp->cpu_pg is used by the dispatcher to access the CPU's PG data
+ * references a "bootstrap" structure. pg_cmt_cpu_init() and the routines it
+ * calls must be careful to operate only on the "pgdata" argument, and not
+ * cp->cpu_pg.
  */
 static void
-pg_cmt_cpu_init(cpu_t *cp)
+pg_cmt_cpu_init(cpu_t *cp, cpu_pg_t *pgdata)
 {
 	pg_cmt_t	*pg;
 	group_t		*cmt_pgs;
@@ -463,6 +496,7 @@ pg_cmt_cpu_init(cpu_t *cp)
 	cmt_lineage_validation_t	lineage_status;
 
 	ASSERT(MUTEX_HELD(&cpu_lock));
+	ASSERT(pg_cpu_is_bootstrapped(cp));
 
 	if (cmt_sched_disabled)
 		return;
@@ -473,8 +507,8 @@ pg_cmt_cpu_init(cpu_t *cp)
 	 * has any performance or efficiency relevant
 	 * sharing relationships
 	 */
-	cmt_pgs = &cp->cpu_pg->cmt_pgs;
-	cp->cpu_pg->cmt_lineage = NULL;
+	cmt_pgs = &pgdata->cmt_pgs;
+	pgdata->cmt_lineage = NULL;
 
 	bzero(cpu_cmt_hier, sizeof (cpu_cmt_hier));
 	levels = 0;
@@ -492,12 +526,12 @@ pg_cmt_cpu_init(cpu_t *cp)
 			continue;
 
 		/*
-		 * Continue if the hardware sharing relationship has been
-		 * blacklisted.
+		 * We will still create the PGs for hardware sharing
+		 * relationships that have been blacklisted, but won't
+		 * implement CMT thread placement optimizations against them.
 		 */
-		if (cmt_hw_blacklisted[hw]) {
-			continue;
-		}
+		if (cmt_hw_blacklisted[hw] == 1)
+			policy = CMT_NO_POLICY;
 
 		/*
 		 * Find (or create) the PG associated with
@@ -534,7 +568,7 @@ pg_cmt_cpu_init(cpu_t *cp)
 		}
 
 		/* Add the CPU to the PG */
-		pg_cpu_add((pg_t *)pg, cp);
+		pg_cpu_add((pg_t *)pg, cp, pgdata);
 
 		/*
 		 * Ensure capacity of the active CPU group/bitset
@@ -585,10 +619,18 @@ pg_cmt_cpu_init(cpu_t *cp)
 	 * If it returns anything other than VALID or REPAIRED, an
 	 * unrecoverable error has occurred, and we cannot proceed.
 	 */
-	lineage_status = pg_cmt_lineage_validate(cpu_cmt_hier, &levels);
+	lineage_status = pg_cmt_lineage_validate(cpu_cmt_hier, &levels, pgdata);
 	if ((lineage_status != CMT_LINEAGE_VALID) &&
-	    (lineage_status != CMT_LINEAGE_REPAIRED))
+	    (lineage_status != CMT_LINEAGE_REPAIRED)) {
+		/*
+		 * In the case of an unrecoverable error where CMT scheduling
+		 * has been disabled, assert that the under construction CPU's
+		 * PG data has an empty CMT load balancing lineage.
+		 */
+		ASSERT((cmt_sched_disabled == 0) ||
+		    (GROUP_SIZE(&(pgdata->cmt_pgs)) == 0));
 		return;
+	}
 
 	/*
 	 * For existing PGs in the lineage, verify that the parent is
@@ -607,7 +649,7 @@ pg_cmt_cpu_init(cpu_t *cp)
 		 */
 		while (pg->cmt_parent &&
 		    pg->cmt_parent != cpu_cmt_hier[level + 1]) {
-			cmt_hier_promote(pg);
+			cmt_hier_promote(pg, pgdata);
 			reorg++;
 		}
 		if (reorg > 0)
@@ -632,7 +674,7 @@ pg_cmt_cpu_init(cpu_t *cp)
 		ASSERT(err == 0);
 
 		if (level == 0)
-			cp->cpu_pg->cmt_lineage = (pg_t *)pg;
+			pgdata->cmt_lineage = (pg_t *)pg;
 
 		if (pg->cmt_siblings != NULL) {
 			/* Already initialized */
@@ -691,7 +733,6 @@ pg_cmt_cpu_init(cpu_t *cp)
 
 	/* CPU0 only initialization */
 	if (is_cpu0) {
-		pg_cmt_cpu_startup(cp);
 		is_cpu0 = 0;
 		cpu0_lgrp = lgrp;
 	}
@@ -700,9 +741,16 @@ pg_cmt_cpu_init(cpu_t *cp)
 
 /*
  * Class callback when a CPU is leaving the system (deletion)
+ *
+ * "pgdata" is a reference to the CPU's PG data to be deconstructed.
+ *
+ * cp->cpu_pg is used by the dispatcher to access the CPU's PG data
+ * references a "bootstrap" structure across this function's invocation.
+ * pg_cmt_cpu_init() and the routines it calls must be careful to operate only
+ * on the "pgdata" argument, and not cp->cpu_pg.
  */
 static void
-pg_cmt_cpu_fini(cpu_t *cp)
+pg_cmt_cpu_fini(cpu_t *cp, cpu_pg_t *pgdata)
 {
 	group_iter_t	i;
 	pg_cmt_t	*pg;
@@ -713,8 +761,10 @@ pg_cmt_cpu_fini(cpu_t *cp)
 	if (cmt_sched_disabled)
 		return;
 
-	pgs = &cp->cpu_pg->pgs;
-	cmt_pgs = &cp->cpu_pg->cmt_pgs;
+	ASSERT(pg_cpu_is_bootstrapped(cp));
+
+	pgs = &pgdata->pgs;
+	cmt_pgs = &pgdata->cmt_pgs;
 
 	/*
 	 * Find the lgroup that encapsulates this CPU's CMT hierarchy
@@ -749,7 +799,7 @@ pg_cmt_cpu_fini(cpu_t *cp)
 	 * First, clean up anything load balancing specific for each of
 	 * the CPU's PGs that participated in CMT load balancing
 	 */
-	pg = (pg_cmt_t *)cp->cpu_pg->cmt_lineage;
+	pg = (pg_cmt_t *)pgdata->cmt_lineage;
 	while (pg != NULL) {
 
 		/*
@@ -787,7 +837,7 @@ pg_cmt_cpu_fini(cpu_t *cp)
 		if (IS_CMT_PG(pg) == 0)
 			continue;
 
-		pg_cpu_delete((pg_t *)pg, cp);
+		pg_cpu_delete((pg_t *)pg, cp, pgdata);
 		/*
 		 * Deleting the CPU from the PG changes the CPU's
 		 * PG group over which we are actively iterating
@@ -1199,7 +1249,7 @@ cmt_pad_enable(pghw_type_t type)
 		    (pg->cmt_parent->cmt_policy != pg->cmt_policy) &&
 		    (PG_NUM_CPUS((pg_t *)pg) ==
 		    PG_NUM_CPUS((pg_t *)pg->cmt_parent))) {
-			cmt_hier_promote(pg);
+			cmt_hier_promote(pg, NULL);
 		}
 	}
 
@@ -1240,7 +1290,7 @@ cmt_pad_disable(pghw_type_t type)
 		    GROUP_SIZE(pg->cmt_children) == 1) {
 			child = GROUP_ACCESS(pg->cmt_children, 0);
 			if ((child->cmt_policy & CMT_BALANCE) == 0) {
-				cmt_hier_promote(child);
+				cmt_hier_promote(child, NULL);
 			}
 		}
 		pg->cmt_policy = CMT_BALANCE;
@@ -1352,10 +1402,15 @@ pg_cmt_policy_name(pg_t *pg)
 
 /*
  * Prune PG, and all other instances of PG's hardware sharing relationship
- * from the PG hierarchy.
+ * from the CMT PG hierarchy.
+ *
+ * This routine operates on the CPU specific processor group data (for the CPUs
+ * in the PG being pruned), and may be invoked from a context where one CPU's
+ * PG data is under construction. In this case the argument "pgdata", if not
+ * NULL, is a reference to the CPU's under-construction PG data.
  */
 static int
-pg_cmt_prune(pg_cmt_t *pg_bad, pg_cmt_t **lineage, int *sz)
+pg_cmt_prune(pg_cmt_t *pg_bad, pg_cmt_t **lineage, int *sz, cpu_pg_t *pgdata)
 {
 	group_t		*hwset, *children;
 	int		i, j, r, size = *sz;
@@ -1398,7 +1453,13 @@ pg_cmt_prune(pg_cmt_t *pg_bad, pg_cmt_t **lineage, int *sz)
 	hwset = pghw_set_lookup(hw);
 
 	/*
-	 * Blacklist the hardware so that future groups won't be created.
+	 * Blacklist the hardware so future processor groups of this type won't
+	 * participate in CMT thread placement.
+	 *
+	 * XXX
+	 * For heterogeneous system configurations, this might be overkill.
+	 * We may only need to blacklist the illegal PGs, and other instances
+	 * of this hardware sharing relationship may be ok.
 	 */
 	cmt_hw_blacklisted[hw] = 1;
 
@@ -1428,6 +1489,7 @@ pg_cmt_prune(pg_cmt_t *pg_bad, pg_cmt_t **lineage, int *sz)
 			    pg->cmt_siblings != &cmt_root->cl_pgs) {
 				group_expand(&cmt_root->cl_pgs,
 				    GROUP_SIZE(&cmt_root->cl_pgs) + cap_needed);
+				cmt_root->cl_npgs += cap_needed;
 			}
 		}
 	}
@@ -1456,6 +1518,13 @@ pg_cmt_prune(pg_cmt_t *pg_bad, pg_cmt_t **lineage, int *sz)
 			(void) group_remove(&cmt_root->cl_pgs, pg,
 			    GRP_NORESIZE);
 		}
+
+		/*
+		 * Indicate that no CMT policy will be implemented across
+		 * this PG.
+		 */
+		pg->cmt_policy = CMT_NO_POLICY;
+
 		/*
 		 * Move PG's children from it's children set to it's parent's
 		 * children set. Note that the parent's children set, and PG's
@@ -1476,6 +1545,14 @@ pg_cmt_prune(pg_cmt_t *pg_bad, pg_cmt_t **lineage, int *sz)
 					r = group_add(pg->cmt_siblings, child,
 					    GRP_NORESIZE);
 					ASSERT(r == 0);
+
+					if (pg->cmt_parent == NULL &&
+					    pg->cmt_siblings !=
+					    &cmt_root->cl_pgs) {
+						r = group_add(&cmt_root->cl_pgs,
+						    child, GRP_NORESIZE);
+						ASSERT(r == 0);
+					}
 				}
 			}
 			group_empty(pg->cmt_children);
@@ -1491,18 +1568,27 @@ pg_cmt_prune(pg_cmt_t *pg_bad, pg_cmt_t **lineage, int *sz)
 		 */
 		PG_CPU_ITR_INIT(pg, cpu_iter);
 		while ((cpu = pg_cpu_next(&cpu_iter)) != NULL) {
-			group_t		*pgs;
 			pg_cmt_t	*cpu_pg;
 			group_iter_t	liter;	/* Iterator for the lineage */
+			cpu_pg_t	*cpd;	/* CPU's PG data */
+
+			/*
+			 * The CPU's lineage is under construction still
+			 * references the bootstrap CPU PG data structure.
+			 */
+			if (pg_cpu_is_bootstrapped(cpu))
+				cpd = pgdata;
+			else
+				cpd = cpu->cpu_pg;
 
 			/*
 			 * Iterate over the CPU's PGs updating the children
 			 * of the PG being promoted, since they have a new
 			 * parent and siblings set.
 			 */
-			pgs = &cpu->cpu_pg->pgs;
 			group_iter_init(&liter);
-			while ((cpu_pg = group_iterate(pgs, &liter)) != NULL) {
+			while ((cpu_pg = group_iterate(&cpd->pgs,
+			    &liter)) != NULL) {
 				if (cpu_pg->cmt_parent == pg) {
 					cpu_pg->cmt_parent = pg->cmt_parent;
 					cpu_pg->cmt_siblings = pg->cmt_siblings;
@@ -1511,11 +1597,11 @@ pg_cmt_prune(pg_cmt_t *pg_bad, pg_cmt_t **lineage, int *sz)
 
 			/*
 			 * Update the CPU's lineages
+			 *
+			 * Remove the PG from the CPU's group used for CMT
+			 * scheduling.
 			 */
-			pgs = &cpu->cpu_pg->cmt_pgs;
-			(void) group_remove(pgs, pg, GRP_NORESIZE);
-			pgs = &cpu->cpu_pg->pgs;
-			(void) group_remove(pgs, pg, GRP_NORESIZE);
+			(void) group_remove(&cpd->cmt_pgs, pg, GRP_NORESIZE);
 		}
 	}
 	start_cpus();
@@ -1528,7 +1614,9 @@ pg_cmt_prune(pg_cmt_t *pg_bad, pg_cmt_t **lineage, int *sz)
 static void
 pg_cmt_disable(void)
 {
-	cpu_t	*cpu;
+	cpu_t		*cpu;
+
+	ASSERT(MUTEX_HELD(&cpu_lock));
 
 	pause_cpus(NULL);
 	cpu = cpu_list;
@@ -1586,9 +1674,15 @@ pg_cmt_disable(void)
  *
  * Otherwise, this routine will return a value indicating which error it
  * was unable to recover from (and set cmt_lineage_status along the way).
+ *
+ *
+ * This routine operates on the CPU specific processor group data (for the CPU
+ * whose lineage is being validated), which is under-construction.
+ * "pgdata" is a reference to the CPU's under-construction PG data.
+ * This routine must be careful to operate only on "pgdata", and not cp->cpu_pg.
  */
 static cmt_lineage_validation_t
-pg_cmt_lineage_validate(pg_cmt_t **lineage, int *sz)
+pg_cmt_lineage_validate(pg_cmt_t **lineage, int *sz, cpu_pg_t *pgdata)
 {
 	int		i, j, size;
 	pg_cmt_t	*pg, *pg_next, *pg_bad, *pg_tmp;
@@ -1711,8 +1805,20 @@ handle_error:
 		 * to do CMT thread placement across lgroups, as this would
 		 * conflict with policies implementing MPO thread affinity.
 		 *
-		 * The handling for this falls through to the next case.
+		 * If the PG is of a sharing relationship type known to
+		 * legitimately span lgroups, specify that no CMT thread
+		 * placement policy should be implemented, and prune the PG
+		 * from the existing CMT PG hierarchy.
+		 *
+		 * Otherwise, fall though to the case below for handling.
 		 */
+		if (((pghw_t *)pg)->pghw_hw == PGHW_CHIP) {
+			if (pg_cmt_prune(pg, lineage, sz, pgdata) == 0) {
+				cmt_lineage_status = CMT_LINEAGE_REPAIRED;
+				goto revalidate;
+			}
+		}
+		/*LINTED*/
 	case CMT_LINEAGE_NON_PROMOTABLE:
 		/*
 		 * We've detected a PG that already exists in another CPU's
@@ -1720,7 +1826,7 @@ handle_error:
 		 * without breaking the invariants of the hierarchy.
 		 */
 		if (PG_CMT_HW_SUSPECT(((pghw_t *)pg)->pghw_hw)) {
-			if (pg_cmt_prune(pg, lineage, sz) == 0) {
+			if (pg_cmt_prune(pg, lineage, sz, pgdata) == 0) {
 				cmt_lineage_status = CMT_LINEAGE_REPAIRED;
 				goto revalidate;
 			}
@@ -1763,7 +1869,7 @@ handle_error:
 			}
 		}
 		if (pg_bad) {
-			if (pg_cmt_prune(pg_bad, lineage, sz) == 0) {
+			if (pg_cmt_prune(pg_bad, lineage, sz, pgdata) == 0) {
 				cmt_lineage_status = CMT_LINEAGE_REPAIRED;
 				goto revalidate;
 			}

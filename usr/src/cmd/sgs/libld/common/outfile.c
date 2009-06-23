@@ -377,6 +377,8 @@ ld_create_outfile(Ofl_desc *ofl)
 	Boolean		fixalign = FALSE;
 	int		fd, nseg = 0, shidx, dataidx, ptloadidx = 0;
 
+	DBG_CALL(Dbg_basic_create(ofl->ofl_lml));
+
 	/*
 	 * If DF_1_NOHDR was set in map_parse() or FLG_OF1_VADDR was set,
 	 * we need to do alignment adjustment.
@@ -432,6 +434,13 @@ ld_create_outfile(Ofl_desc *ofl)
 		 * header table. If a segment is empty, ignore it.
 		 */
 		if (!(flags & FLG_OF_RELOBJ)) {
+			/*
+			 * If the program header type belongs to the os range,
+			 * the resulting object is ELFOSABI_SOLARIS.
+			 */
+			if ((ptype >= PT_LOOS) && (ptype <= PT_HIOS))
+				ofl->ofl_flags |= FLG_OF_OSABI;
+
 			if (ptype == PT_PHDR) {
 				/*
 				 * If we are generating an interp section (and
@@ -502,9 +511,11 @@ ld_create_outfile(Ofl_desc *ofl)
 		shidx = 0;
 		for (APLIST_TRAVERSE(sgp->sg_osdescs, idx2, osp)) {
 			Aliste	idx3;
+			int	os_isdescs_idx;
 
 			dataidx = 0;
-			for (APLIST_TRAVERSE(osp->os_isdescs, idx3, isp)) {
+
+			OS_ISDESCS_TRAVERSE(os_isdescs_idx, osp, idx3, isp) {
 				Elf_Data	*data;
 				Ifl_desc	*ifl = isp->is_file;
 
@@ -665,6 +676,16 @@ ld_create_outfile(Ofl_desc *ofl)
 			 */
 			osp->os_szoutrels = 0;
 		}
+	}
+
+	/*
+	 * Did we use ELF features from the osabi range? If so,
+	 * update the ELF header osabi fields. If this doesn't happen,
+	 * those fields remain 0, reflecting a generic System V ELF ABI.
+	 */
+	if (ofl->ofl_flags & FLG_OF_OSABI) {
+		ofl->ofl_nehdr->e_ident[EI_OSABI] = ELFOSABI_SOLARIS;
+		ofl->ofl_nehdr->e_ident[EI_ABIVERSION] = EAV_SUNW_CURRENT;
 	}
 
 	/*

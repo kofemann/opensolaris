@@ -131,6 +131,8 @@ typedef struct fileset {
 	avd_t		fs_paralloc;	/* Attr */
 	avd_t		fs_cached;	/* Attr */
 	avd_t		fs_reuse;	/* Attr */
+	avd_t		fs_readonly;	/* Attr */
+	avd_t		fs_trust_tree;	/* Attr */
 	double		fs_meandepth;	/* Computed mean depth */
 	double		fs_meanwidth;	/* Specified mean dir width */
 	double		fs_meansize;	/* Specified mean file size */
@@ -174,6 +176,7 @@ typedef struct fileset {
 } fileset_t;
 
 int fileset_createset(fileset_t *);
+void fileset_delete_all_filesets(void);
 int fileset_openfile(fb_fdesc_t *fd, fileset_t *fileset,
     filesetentry_t *entry, int flag, int mode, int attrs);
 fileset_t *fileset_define(avd_t);

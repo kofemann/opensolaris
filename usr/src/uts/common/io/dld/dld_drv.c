@@ -620,8 +620,7 @@ drv_ioc_prop_common(dld_ioc_macprop_t *prop, intptr_t arg, boolean_t set,
 	}
 
 done:
-	if (!set && err == 0 &&
-	    ddi_copyout(kprop, (void *)arg, dsize, mode) != 0)
+	if (!set && ddi_copyout(kprop, (void *)arg, dsize, mode) != 0)
 		err = EFAULT;
 
 	if (dlp != NULL)
@@ -1190,7 +1189,8 @@ typedef struct dld_ioc_modentry {
 static dld_ioc_modentry_t dld_ioc_modtable[] = {
 	{DLD_IOC,	"dld",	drv_ioc_list, DLDIOCCNT(drv_ioc_list)},
 	{AGGR_IOC,	"aggr",	NULL, 0},
-	{VNIC_IOC,	"vnic",	NULL, 0}
+	{VNIC_IOC,	"vnic",	NULL, 0},
+	{SIMNET_IOC,	"simnet", NULL, 0}
 };
 #define	DLDIOC_CNT	\
 	(sizeof (dld_ioc_modtable) / sizeof (dld_ioc_modentry_t))

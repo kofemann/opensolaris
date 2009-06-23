@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -104,7 +104,24 @@ kcf_mech_entry_tab_t kcf_mech_tabs_tab[KCF_LAST_OPSCLASS + 1] = {
 };
 
 /*
- * Per-algorithm internal threasholds for the minimum input size of before
+ * Protects fields in kcf_mech_entry. This is an array
+ * of locks indexed by the cpuid. A reader needs to hold
+ * a single lock while a writer needs to hold all locks.
+ * krwlock_t is not an option here because the hold time
+ * is very small for these locks.
+ */
+kcf_lock_withpad_t *me_mutexes;
+
+#define	ME_MUTEXES_ENTER_ALL()	\
+	for (int i = 0; i < max_ncpus; i++)	\
+		mutex_enter(&me_mutexes[i].kl_lock);
+
+#define	ME_MUTEXES_EXIT_ALL()	\
+	for (int i = 0; i < max_ncpus; i++)	\
+		mutex_exit(&me_mutexes[i].kl_lock);
+
+/*
+ * Per-algorithm internal thresholds for the minimum input size of before
  * offloading to hardware provider.
  * Dispatching a crypto operation  to a hardware provider entails paying the
  * cost of an additional context switch.  Measurments with Sun Accelerator 4000
@@ -207,7 +224,7 @@ kcf_init_mech_tabs()
 	kcf_cipher_mechs_tab[8].me_threshold = kcf_rc4_threshold;
 
 
-	/* 4 HMACs */
+	/* 5 HMACs */
 	(void) strncpy(kcf_mac_mechs_tab[0].me_name, SUN_CKM_MD5_HMAC,
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_mac_mechs_tab[0].me_threshold = kcf_md5_threshold;
@@ -224,6 +241,9 @@ kcf_init_mech_tabs()
 	    CRYPTO_MAX_MECH_NAME);
 	kcf_mac_mechs_tab[3].me_threshold = kcf_sha1_threshold;
 
+	(void) strncpy(kcf_mac_mechs_tab[4].me_name, SUN_CKM_AES_GMAC,
+	    CRYPTO_MAX_MECH_NAME);
+	kcf_mac_mechs_tab[4].me_threshold = kcf_sha1_threshold;
 
 	/* 1 random number generation pseudo mechanism */
 	(void) strncpy(kcf_misc_mechs_tab[0].me_name, SUN_RANDOM,
@@ -236,8 +256,6 @@ kcf_init_mech_tabs()
 		max = kcf_mech_tabs_tab[class].met_size;
 		me_tab = kcf_mech_tabs_tab[class].met_tab;
 		for (i = 0; i < max; i++) {
-			mutex_init(&(me_tab[i].me_mutex), NULL,
-			    MUTEX_DEFAULT, NULL);
 			if (me_tab[i].me_name[0] != 0) {
 				me_tab[i].me_mechid = KCF_MECHID(class, i);
 				(void) mod_hash_insert(kcf_mech_hash,
@@ -245,6 +263,12 @@ kcf_init_mech_tabs()
 				    (mod_hash_val_t)&(me_tab[i].me_mechid));
 			}
 		}
+	}
+
+	me_mutexes = kmem_zalloc(max_ncpus * sizeof (kcf_lock_withpad_t),
+	    KM_SLEEP);
+	for (i = 0; i < max_ncpus; i++) {
+		mutex_init(&me_mutexes[i].kl_lock, NULL, MUTEX_DEFAULT, NULL);
 	}
 }
 
@@ -302,7 +326,7 @@ kcf_create_mech_entry(kcf_ops_class_t class, char *mechname)
 	size = kcf_mech_tabs_tab[class].met_size;
 
 	while (i < size) {
-		mutex_enter(&(me_tab[i].me_mutex));
+		ME_MUTEXES_ENTER_ALL();
 		if (me_tab[i].me_name[0] == 0) {
 			/* Found an empty spot */
 			(void) strncpy(me_tab[i].me_name, mechname,
@@ -315,14 +339,14 @@ kcf_create_mech_entry(kcf_ops_class_t class, char *mechname)
 			 */
 			me_tab[i].me_threshold = 0;
 
-			mutex_exit(&(me_tab[i].me_mutex));
+			ME_MUTEXES_EXIT_ALL();
 			/* Add the new mechanism to the hash table */
 			(void) mod_hash_insert(kcf_mech_hash,
 			    (mod_hash_key_t)me_tab[i].me_name,
 			    (mod_hash_val_t)&(me_tab[i].me_mechid));
 			break;
 		}
-		mutex_exit(&(me_tab[i].me_mutex));
+		ME_MUTEXES_EXIT_ALL();
 		i++;
 	}
 
@@ -438,7 +462,6 @@ kcf_add_mech_provider(short mech_indx,
 	    [KCF_MECH2INDEX(kcf_mech_type)] = mech_indx;
 
 	KCF_PROV_REFHOLD(prov_desc);
-	KCF_PROV_IREFHOLD(prov_desc);
 
 	dual_fg_mask = mech_info->cm_func_group_mask & CRYPTO_FG_DUAL_MASK;
 
@@ -478,9 +501,9 @@ kcf_add_mech_provider(short mech_indx,
 		 * Ignore hard-coded entries in the mech table
 		 * if the provider hasn't registered.
 		 */
-		mutex_enter(&me->me_mutex);
+		ME_MUTEXES_ENTER_ALL();
 		if (me->me_hw_prov_chain == NULL && me->me_sw_prov == NULL) {
-			mutex_exit(&me->me_mutex);
+			ME_MUTEXES_EXIT_ALL();
 			kmem_free(mil, sizeof (*mil));
 			kmem_free(mil2, sizeof (*mil2));
 			continue;
@@ -505,7 +528,7 @@ kcf_add_mech_provider(short mech_indx,
 
 		if (prov_mech2 == NULL) {
 			kmem_free(mil2, sizeof (*mil2));
-			mutex_exit(&me->me_mutex);
+			ME_MUTEXES_EXIT_ALL();
 			continue;
 		}
 
@@ -529,7 +552,7 @@ kcf_add_mech_provider(short mech_indx,
 		if (prov_mech2 == NULL)
 			kmem_free(mil2, sizeof (*mil2));
 
-		mutex_exit(&me->me_mutex);
+		ME_MUTEXES_EXIT_ALL();
 	}
 
 add_entry:
@@ -540,16 +563,16 @@ add_entry:
 	switch (prov_desc->pd_prov_type) {
 
 	case CRYPTO_HW_PROVIDER:
-		mutex_enter(&mech_entry->me_mutex);
+		ME_MUTEXES_ENTER_ALL();
 		prov_mech->pm_me = mech_entry;
 		prov_mech->pm_next = mech_entry->me_hw_prov_chain;
 		mech_entry->me_hw_prov_chain = prov_mech;
 		mech_entry->me_num_hwprov++;
-		mutex_exit(&mech_entry->me_mutex);
+		ME_MUTEXES_EXIT_ALL();
 		break;
 
 	case CRYPTO_SW_PROVIDER:
-		mutex_enter(&mech_entry->me_mutex);
+		ME_MUTEXES_ENTER_ALL();
 		if (mech_entry->me_sw_prov != NULL) {
 			/*
 			 * There is already a SW provider for this mechanism.
@@ -576,7 +599,7 @@ add_entry:
 			/* We'll wrap around after 4 billion registrations! */
 			mech_entry->me_gen_swprov = kcf_gen_swprov++;
 		}
-		mutex_exit(&mech_entry->me_mutex);
+		ME_MUTEXES_EXIT_ALL();
 		break;
 	}
 
@@ -630,7 +653,7 @@ kcf_remove_mech_provider(char *mech_name, kcf_provider_desc_t *prov_desc)
 		return;
 	}
 
-	mutex_enter(&mech_entry->me_mutex);
+	ME_MUTEXES_ENTER_ALL();
 
 	switch (prov_desc->pd_prov_type) {
 
@@ -646,7 +669,7 @@ kcf_remove_mech_provider(char *mech_name, kcf_provider_desc_t *prov_desc)
 
 		if (prov_mech == NULL) {
 			/* entry not found, simply return */
-			mutex_exit(&mech_entry->me_mutex);
+			ME_MUTEXES_EXIT_ALL();
 			return;
 		}
 
@@ -660,7 +683,7 @@ kcf_remove_mech_provider(char *mech_name, kcf_provider_desc_t *prov_desc)
 		if (mech_entry->me_sw_prov == NULL ||
 		    mech_entry->me_sw_prov->pm_prov_desc != prov_desc) {
 			/* not the software provider for this mechanism */
-			mutex_exit(&mech_entry->me_mutex);
+			ME_MUTEXES_EXIT_ALL();
 			return;
 		}
 		prov_mech = mech_entry->me_sw_prov;
@@ -668,7 +691,7 @@ kcf_remove_mech_provider(char *mech_name, kcf_provider_desc_t *prov_desc)
 		break;
 	}
 
-	mutex_exit(&mech_entry->me_mutex);
+	ME_MUTEXES_EXIT_ALL();
 
 	/* Free the dual ops cross-reference lists  */
 	mil = prov_mech->pm_mi_list;
@@ -680,7 +703,7 @@ kcf_remove_mech_provider(char *mech_name, kcf_provider_desc_t *prov_desc)
 			continue;
 		}
 
-		mutex_enter(&mech_entry->me_mutex);
+		ME_MUTEXES_ENTER_ALL();
 		if (prov_desc->pd_prov_type == CRYPTO_HW_PROVIDER)
 			prov_chain = mech_entry->me_hw_prov_chain;
 		else
@@ -704,14 +727,13 @@ kcf_remove_mech_provider(char *mech_name, kcf_provider_desc_t *prov_desc)
 			prov_chain = prov_chain->pm_next;
 		}
 
-		mutex_exit(&mech_entry->me_mutex);
+		ME_MUTEXES_EXIT_ALL();
 		kmem_free(mil, sizeof (crypto_mech_info_list_t));
 		mil = next;
 	}
 
 	/* free entry  */
 	KCF_PROV_REFRELE(prov_mech->pm_prov_desc);
-	KCF_PROV_IREFRELE(prov_mech->pm_prov_desc);
 	kmem_free(prov_mech, sizeof (kcf_prov_mech_desc_t));
 }
 
@@ -808,6 +830,7 @@ crypto_mech2id_common(char *mechname, boolean_t load_module)
 	kcf_ops_class_t class;
 	boolean_t second_time = B_FALSE;
 	boolean_t try_to_load_software_provider = B_FALSE;
+	kcf_lock_withpad_t *mp;
 
 try_again:
 	mt = kcf_mech_hash_find(mechname);
@@ -818,11 +841,13 @@ try_again:
 		class = KCF_MECH2CLASS(mt);
 		i = KCF_MECH2INDEX(mt);
 		me = &(kcf_mech_tabs_tab[class].met_tab[i]);
-		mutex_enter(&(me->me_mutex));
+		mp = &me_mutexes[CPU_SEQID];
+		mutex_enter(&mp->kl_lock);
+
 		if (load_module && !auto_unload_flag_set(me->me_sw_prov)) {
 			try_to_load_software_provider = B_TRUE;
 		}
-		mutex_exit(&(me->me_mutex));
+		mutex_exit(&mp->kl_lock);
 	}
 
 	if (mt == CRYPTO_MECH_INVALID || try_to_load_software_provider) {

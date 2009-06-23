@@ -9,7 +9,6 @@ pcelx:* 0666 root sys
 clone:ibd 0666 root sys
 ibd:* 0666 root sys
 clone:eri 0666 root sys
-clone:hme 0666 root sys
 arp:arp 0666 root sys
 icmp:icmp 0666 root sys
 icmp6:icmp6 0666 root sys
@@ -140,7 +139,7 @@ ipf:* 0666 root sys
 bl:* 0666 root sys
 sctp:* 0666 root sys
 sctp6:* 0666 root sys
-vni:* 0666 root sys
+dlpistub:* 0666 root sys
 cpuid:self 0644 root sys
 mdesc:* 0666 root sys
 dld:* 0666 root sys
@@ -165,6 +164,7 @@ clone:vnet 0666 root sys
 clone:afe 0666 root sys
 clone:mxfe 0666 root sys
 clone:rtls 0666 root sys
+clone:simnet 0666 root sys
 clone:vnic 0666 root sys
 bge:* 0666 root sys
 igb:* 0666 root sys
@@ -179,9 +179,9 @@ pcan:* 0666 root sys
 vscan:* 0640 root sys
 vsw:* 0666 root sys
 vnet:* 0666 root sys
-afe:* 0666 root sys
 mxfe:* 0666 root sys
 rtls:* 0666 root sys
+simnet:* 0666 root sys
 vnic:* 0666 root sys
 physmem:* 0600 root sys
 sdp:sdp 0666 root sys

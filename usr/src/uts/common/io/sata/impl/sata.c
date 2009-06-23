@@ -774,7 +774,7 @@ sata_hba_attach(dev_info_t *dip, sata_hba_tran_t *sata_tran,
 	    sizeof (taskq_name) - strlen(taskq_name),
 	    "-%d", DEVI(dip)->devi_instance);
 	sata_hba_inst->satahba_taskq = taskq_create(taskq_name, 1,
-	    minclsyspri, 1, sata_tran->sata_tran_hba_num_cports,
+	    minclsyspri, 1, sata_tran->sata_tran_hba_num_cports * 4,
 	    TASKQ_DYNAMIC);
 
 	hba_attach_state |= HBA_ATTACH_STAGE_SETUP;
@@ -9481,6 +9481,20 @@ sata_identify_device(sata_hba_inst_t *sata_hba_inst,
 	}
 #endif
 
+	/*
+	 * For Disk devices, if it doesn't support UDMA mode, we would
+	 * like to return failure directly.
+	 */
+	if ((sdinfo->satadrv_type == SATA_DTYPE_ATADISK) &&
+	    !((sdinfo->satadrv_id.ai_validinfo & SATA_VALIDINFO_88) != 0 &&
+	    (sdinfo->satadrv_id.ai_ultradma & SATA_UDMA_SUP_MASK) != 0)) {
+		sata_log(sata_hba_inst, CE_WARN,
+		    "SATA disk device at port %d does not support UDMA",
+		    sdinfo->satadrv_addr.cport);
+		rval = SATA_FAILURE;
+		goto fail_unknown;
+	}
+
 	return (SATA_SUCCESS);
 
 fail_unknown:
@@ -9789,28 +9803,12 @@ sata_free_local_buffer(sata_pkt_txlate_t *spx)
 	spx->txlt_sata_pkt->satapkt_cmd.satacmd_num_dma_cookies = 0;
 	spx->txlt_sata_pkt->satapkt_cmd.satacmd_dma_cookie_list = NULL;
 
-	if (spx->txlt_buf_dma_handle != NULL) {
-		/* Free DMA resources */
-		(void) ddi_dma_unbind_handle(spx->txlt_buf_dma_handle);
-		ddi_dma_free_handle(&spx->txlt_buf_dma_handle);
-		spx->txlt_buf_dma_handle = 0;
-
-		if (spx->txlt_dma_cookie_list != &spx->txlt_dma_cookie) {
-			kmem_free(spx->txlt_dma_cookie_list,
-			    spx->txlt_dma_cookie_list_len *
-			    sizeof (ddi_dma_cookie_t));
-			spx->txlt_dma_cookie_list = NULL;
-			spx->txlt_dma_cookie_list_len = 0;
-		}
-	}
+	sata_common_free_dma_rsrcs(spx);
 
 	/* Free buffer */
 	scsi_free_consistent_buf(spx->txlt_sata_pkt->satapkt_cmd.satacmd_bp);
 	spx->txlt_sata_pkt->satapkt_cmd.satacmd_bp = NULL;
 }
-
-
-
 
 /*
  * Allocate sata_pkt
@@ -10601,7 +10599,7 @@ sata_set_dma_mode(sata_hba_inst_t *sata_hba_inst, sata_drive_info_t *sdinfo)
 	sata_pkt_t *spkt;
 	sata_cmd_t *scmd;
 	sata_pkt_txlate_t *spx;
-	int i, mode;
+	int mode;
 	uint8_t subcmd;
 	int rval = SATA_SUCCESS;
 
@@ -10625,14 +10623,16 @@ sata_set_dma_mode(sata_hba_inst_t *sata_hba_inst, sata_drive_info_t *sdinfo)
 		if (mode < 4)
 			return (SATA_FAILURE);
 #endif
-		/* Find UDMA mode currently selected */
-		for (i = 6; i >= 0; --i) {
-			if (sdinfo->satadrv_id.ai_ultradma & (1 << (i + 8)))
-				break;
-		}
-		if (i >= mode)
-			/* Nothing to do */
-			return (SATA_SUCCESS);
+
+		/*
+		 * We're still going to set DMA mode whatever is selected
+		 * by default
+		 *
+		 * We saw an old maxtor sata drive will select Ultra DMA and
+		 * Multi-Word DMA simultaneouly by default, which is going
+		 * to cause DMA command timed out, so we need to select DMA
+		 * mode even when it's already done by default
+		 */
 
 		subcmd = SATAC_TRANSFER_MODE_ULTRA_DMA;
 
@@ -10642,14 +10642,16 @@ sata_set_dma_mode(sata_hba_inst_t *sata_hba_inst, sata_drive_info_t *sdinfo)
 			if (sdinfo->satadrv_id.ai_dworddma & (1 << mode))
 				break;
 		}
-		/* Find highest MultiWord DMA mode selected */
-		for (i = 2; i >= 0; --i) {
-			if (sdinfo->satadrv_id.ai_dworddma & (1 << (i + 8)))
-				break;
-		}
-		if (i >= mode)
-			/* Nothing to do */
-			return (SATA_SUCCESS);
+
+		/*
+		 * We're still going to set DMA mode whatever is selected
+		 * by default
+		 *
+		 * We saw an old maxtor sata drive will select Ultra DMA and
+		 * Multi-Word DMA simultaneouly by default, which is going
+		 * to cause DMA command timed out, so we need to select DMA
+		 * mode even when it's already done by default
+		 */
 
 		subcmd = SATAC_TRANSFER_MODE_MULTI_WORD_DMA;
 	} else
@@ -12825,8 +12827,14 @@ sata_target_devid_register(dev_info_t *dip, sata_drive_info_t *sdinfo)
 
 	/* initialize/register devid */
 	if ((rval = ddi_devid_init(dip, DEVID_ATA_SERIAL,
-	    (ushort_t)(modlen + serlen), hwid, &devid)) == DDI_SUCCESS)
+	    (ushort_t)(modlen + serlen), hwid, &devid)) == DDI_SUCCESS) {
 		rval = ddi_devid_register(dip, devid);
+		/*
+		 * Free up the allocated devid buffer.
+		 * NOTE: This doesn't mean unregistering devid.
+		 */
+		ddi_devid_free(devid);
+	}
 
 	if (rval != DDI_SUCCESS)
 		cmn_err(CE_WARN, "sata: failed to create devid for the disk"

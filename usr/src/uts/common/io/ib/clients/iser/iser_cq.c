@@ -87,6 +87,7 @@ iser_ib_poll_send_completions(ibt_cq_hdl_t cq_hdl, iser_chan_t *iser_chan)
 	ibt_status_t	status;
 	iser_conn_t	*iser_conn;
 	idm_status_t	idm_status;
+	iser_mr_t	*mr;
 
 	iser_conn = iser_chan->ic_conn;
 
@@ -155,6 +156,8 @@ iser_ib_poll_send_completions(ibt_cq_hdl_t cq_hdl, iser_chan_t *iser_chan)
 			if (wr->iw_buf != NULL) {
 				/* Invoke buffer callback */
 				idb = wr->iw_buf;
+				mr = ((iser_buf_t *)
+				    idb->idb_buf_private)->iser_mr;
 #ifdef DEBUG
 				bcopy(&wc[i],
 				    &((iser_buf_t *)idb->idb_buf_private)->
@@ -163,9 +166,25 @@ iser_ib_poll_send_completions(ibt_cq_hdl_t cq_hdl, iser_chan_t *iser_chan)
 				idt = idb->idb_task_binding;
 				mutex_enter(&idt->idt_mutex);
 				if (wr->iw_type == ISER_WR_RDMAW) {
+					DTRACE_ISCSI_8(xfer__done,
+					    idm_conn_t *, idt->idt_ic,
+					    uintptr_t, idb->idb_buf,
+					    uint32_t, idb->idb_bufoffset,
+					    uint64_t, mr->is_mrva, uint32_t, 0,
+					    uint32_t, mr->is_mrrkey,
+					    uint32_t, idb->idb_xfer_len,
+					    int, XFER_BUF_TX_TO_INI);
 					idm_buf_tx_to_ini_done(idt, idb,
 					    IDM_STATUS_FAIL);
 				} else { /* ISER_WR_RDMAR */
+					DTRACE_ISCSI_8(xfer__done,
+					    idm_conn_t *, idt->idt_ic,
+					    uintptr_t, idb->idb_buf,
+					    uint32_t, idb->idb_bufoffset,
+					    uint64_t, mr->is_mrva, uint32_t, 0,
+					    uint32_t, mr->is_mrrkey,
+					    uint32_t, idb->idb_xfer_len,
+					    int, XFER_BUF_RX_FROM_INI);
 					idm_buf_rx_from_ini_done(idt, idb,
 					    IDM_STATUS_FAIL);
 				}
@@ -241,6 +260,7 @@ iser_ib_poll_send_completions(ibt_cq_hdl_t cq_hdl, iser_chan_t *iser_chan)
 			 * the buffer will be freed there.
 			 */
 			idb = wr->iw_buf;
+			mr = ((iser_buf_t *)idb->idb_buf_private)->iser_mr;
 #ifdef DEBUG
 			bcopy(&wc[i],
 			    &((iser_buf_t *)idb->idb_buf_private)->buf_wc,
@@ -250,8 +270,24 @@ iser_ib_poll_send_completions(ibt_cq_hdl_t cq_hdl, iser_chan_t *iser_chan)
 
 			mutex_enter(&idt->idt_mutex);
 			if (wr->iw_type == ISER_WR_RDMAW) {
+				DTRACE_ISCSI_8(xfer__done,
+				    idm_conn_t *, idt->idt_ic,
+				    uintptr_t, idb->idb_buf,
+				    uint32_t, idb->idb_bufoffset,
+				    uint64_t, mr->is_mrva, uint32_t, 0,
+				    uint32_t, mr->is_mrrkey,
+				    uint32_t, idb->idb_xfer_len,
+				    int, XFER_BUF_TX_TO_INI);
 				idm_buf_tx_to_ini_done(idt, idb, idm_status);
 			} else {
+				DTRACE_ISCSI_8(xfer__done,
+				    idm_conn_t *, idt->idt_ic,
+				    uintptr_t, idb->idb_buf,
+				    uint32_t, idb->idb_bufoffset,
+				    uint64_t, mr->is_mrva, uint32_t, 0,
+				    uint32_t, mr->is_mrrkey,
+				    uint32_t, idb->idb_xfer_len,
+				    int, XFER_BUF_RX_FROM_INI);
 				idm_buf_rx_from_ini_done(idt, idb, idm_status);
 			}
 
@@ -337,17 +373,19 @@ iser_ib_poll_recv_completions(ibt_cq_hdl_t cq_hdl, iser_chan_t *iser_chan)
 	 * to see if we need to fill the RQ back up (or if
 	 * we are already on the taskq).
 	 */
+	mutex_enter(&iser_chan->ic_conn->ic_lock);
 	mutex_enter(&iser_qp->qp_lock);
 	iser_qp->rq_level--;
 
 	if ((iser_qp->rq_taskqpending == B_FALSE) &&
-	    (iser_qp->rq_level <= iser_qp->rq_lwm)) {
+	    (iser_qp->rq_level <= iser_qp->rq_lwm) &&
+	    (iser_chan->ic_conn->ic_stage >= ISER_CONN_STAGE_IC_CONNECTED) &&
+	    (iser_chan->ic_conn->ic_stage <= ISER_CONN_STAGE_LOGGED_IN)) {
 		/* Set the pending flag and fire off a post_recv */
 		iser_qp->rq_taskqpending = B_TRUE;
 		mutex_exit(&iser_qp->qp_lock);
 
-		status = ddi_taskq_dispatch(iser_taskq, iser_ib_post_recv,
-		    (void *)iser_chan->ic_chanhdl, DDI_NOSLEEP);
+		status = iser_ib_post_recv_async(iser_chan->ic_chanhdl);
 
 		if (status != DDI_SUCCESS) {
 			ISER_LOG(CE_NOTE, "iser_ib_poll_recv_completions: "
@@ -368,7 +406,6 @@ iser_ib_poll_recv_completions(ibt_cq_hdl_t cq_hdl, iser_chan_t *iser_chan)
 		 * Tell IDM that the channel has gone down,
 		 * unless he already knows.
 		 */
-		mutex_enter(&iser_chan->ic_conn->ic_lock);
 		switch (iser_chan->ic_conn->ic_stage) {
 		case ISER_CONN_STAGE_IC_DISCONNECTED:
 		case ISER_CONN_STAGE_IC_FREED:
@@ -387,6 +424,8 @@ iser_ib_poll_recv_completions(ibt_cq_hdl_t cq_hdl, iser_chan_t *iser_chan)
 		iser_msg_free(msg);
 		return (DDI_SUCCESS);
 	} else {
+		mutex_exit(&iser_chan->ic_conn->ic_lock);
+
 		/*
 		 * We have an iSER message in, let's handle it.
 		 * We will free the iser_msg_t later in this path,

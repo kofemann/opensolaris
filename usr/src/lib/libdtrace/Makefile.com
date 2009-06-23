@@ -19,10 +19,9 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 
 LIBRARY = libdtrace.a
@@ -75,14 +74,17 @@ DRTIOBJ = $(DRTISRC:%.c=%.o)
 
 DLIBSRCS += \
 	errno.d \
+	fc.d \
 	io.d \
 	ip.d \
+	iscsit.d \
 	net.d \
 	nfs.d \
 	procfs.d \
 	regs.d \
 	sched.d \
 	signal.d \
+	scsi.d \
 	sysevent.d \
 	unistd.d
 

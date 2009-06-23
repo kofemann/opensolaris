@@ -2076,10 +2076,11 @@ sadb_keysock_hello(queue_t **pfkey_qp, queue_t *q, mblk_t *mp,
 
 	/*
 	 * If we made it past the casptr, then we have "exclusive" access
-	 * to the timeout handle.  Fire it off in 4 seconds, because it
-	 * just seems like a good interval.
+	 * to the timeout handle.  Fire it off after the default ager
+	 * interval.
 	 */
-	*top = qtimeout(*pfkey_qp, ager, agerarg, drv_usectohz(4000000));
+	*top = qtimeout(*pfkey_qp, ager, agerarg,
+	    drv_usectohz(SADB_AGE_INTERVAL_DEFAULT * 1000));
 
 	putnext(*pfkey_qp, mp);
 }
@@ -2794,7 +2795,8 @@ sadb_delget_sa(mblk_t *mp, keysock_in_t *ksi, sadbp_t *spp,
 		}
 		if (ipsapp->ipsap_psa_ptr != NULL) {
 			mutex_enter(&ipsapp->ipsap_psa_ptr->ipsa_lock);
-			if (sadb_msg_type == SADB_X_DELPAIR) {
+			if (sadb_msg_type == SADB_X_DELPAIR ||
+			    ipsapp->ipsap_psa_ptr->ipsa_haspeer) {
 				if (ipsapp->ipsap_psa_ptr->ipsa_flags &
 				    IPSA_F_INBOUND) {
 					sadb_delete_cluster(
@@ -4360,7 +4362,7 @@ sadb_retimeout(hrtime_t begin, queue_t *pfkey_q, void (*ager)(void *),
 	 * See how long this took.  If it took too long, increase the
 	 * aging interval.
 	 */
-	if ((end - begin) > interval * 1000000) {
+	if ((end - begin) > (hrtime_t)interval * (hrtime_t)1000000) {
 		if (interval >= intmax) {
 			/* XXX Rate limit this?  Or recommend flush? */
 			(void) strlog(mid, 0, 0, SL_ERROR | SL_WARN,
@@ -4371,7 +4373,7 @@ sadb_retimeout(hrtime_t begin, queue_t *pfkey_q, void (*ager)(void *),
 			interval <<= 1;
 			interval = min(interval, intmax);
 		}
-	} else if ((end - begin) <= interval * 500000 &&
+	} else if ((end - begin) <= (hrtime_t)interval * (hrtime_t)500000 &&
 	    interval > SADB_AGE_INTERVAL_DEFAULT) {
 		/*
 		 * If I took less than half of the interval, then I should
@@ -4379,7 +4381,10 @@ sadb_retimeout(hrtime_t begin, queue_t *pfkey_q, void (*ager)(void *),
 		 * shift below the default aging interval.
 		 *
 		 * NOTE:This even overrides manual setting of the age
-		 *	interval using NDD.
+		 *	interval using NDD to lower the setting past the
+		 *	default.  In other words, if you set the interval
+		 *	lower than the default, and your SADB gets too big,
+		 *	the interval will only self-lower back to the default.
 		 */
 		/* Halve by shifting one bit. */
 		interval >>= 1;
@@ -4387,7 +4392,7 @@ sadb_retimeout(hrtime_t begin, queue_t *pfkey_q, void (*ager)(void *),
 	}
 	*intp = interval;
 	return (qtimeout(pfkey_q, ager, agerarg,
-	    interval * drv_usectohz(1000)));
+	    drv_usectohz(interval * 1000)));
 }
 
 
@@ -5065,6 +5070,18 @@ sadb_acquire(mblk_t *mp, ipsec_out_t *io, boolean_t need_ah, boolean_t need_esp)
 	}
 
 	if (tunnel_mode) {
+		if (pp == NULL) {
+			/*
+			 * Tunnel mode with no policy pointer means this is a
+			 * reflected ICMP (like a ECHO REQUEST) that came in
+			 * with self-encapsulated protection.  Until we better
+			 * support this, drop the packet.
+			 */
+			ip_drop_packet(mp, B_FALSE, NULL, NULL,
+			    DROPPER(ipss, ipds_spd_got_selfencap),
+			    &ipss->ipsec_spd_dropper);
+			return;
+		}
 		/* Snag inner addresses. */
 		isrc = io->ipsec_out_insrc;
 		idst = io->ipsec_out_indst;
@@ -5510,6 +5527,8 @@ sadb_extended_acquire(ipsec_selector_t *sel, ipsec_policy_t *pol,
 		 * strange things with unions, consult your local C language
 		 * lawyer for details).
 		 */
+		ASSERT(pol != NULL);
+
 		ipsl = &(pol->ipsp_sel->ipsl_key);
 		if (ipsl->ipsl_valid & IPSL_IPV4) {
 			af = AF_INET;
@@ -7240,7 +7259,7 @@ ipsec_check_key(crypto_mech_type_t mech_type, sadb_key_t *sadb_key,
  * SOFT EXPIRE time. The reason for this is to stop
  * peers trying to renegotiate SOFT expiring SA's at
  * the same time. The amount of fuzz needs to be at
- * least 10 seconds which is the typical interval
+ * least 8 seconds which is the typical interval
  * sadb_ager(), although this is only a guide as it
  * selftunes.
  */
@@ -7253,7 +7272,7 @@ lifetime_fuzz(ipsa_t *assoc)
 		return;
 
 	(void) random_get_pseudo_bytes(&rnd, sizeof (rnd));
-	rnd = (rnd & 0xF) + 10;
+	rnd = (rnd & 0xF) + 8;
 	assoc->ipsa_softexpiretime -= rnd;
 	assoc->ipsa_softaddlt -= rnd;
 }

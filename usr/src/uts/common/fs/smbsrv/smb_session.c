@@ -136,7 +136,7 @@ smb_session_reconnection_check(smb_session_list_t *se, smb_session_t *sess)
 		    (strcasecmp(sn->workstation, sess->workstation) == 0) &&
 		    (sn->opentime <= sess->opentime) &&
 		    (sn->s_kid < sess->s_kid)) {
-			tsignal(sn->s_thread, SIGINT);
+			tsignal(sn->s_thread, SIGUSR1);
 		}
 		sn = list_next(&se->se_act.lst, sn);
 	}
@@ -771,9 +771,7 @@ smb_session_cancel(smb_session_t *session)
 		smb_xa_close(xa);
 		xa = nextxa;
 	}
-	smb_rwx_rwenter(&session->s_lock, RW_WRITER);
 	smb_user_logoff_all(session);
-	smb_rwx_rwexit(&session->s_lock);
 }
 
 /*
@@ -1021,7 +1019,7 @@ smb_session_list_signal(smb_session_list_t *se)
 	while (session) {
 
 		ASSERT(session->s_magic == SMB_SESSION_MAGIC);
-		tsignal(session->s_thread, SIGINT);
+		tsignal(session->s_thread, SIGUSR1);
 		session = list_next(&se->se_act.lst, session);
 	}
 	rw_exit(&se->se_lock);

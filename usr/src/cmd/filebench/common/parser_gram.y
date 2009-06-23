@@ -35,6 +35,7 @@
 #include <sys/types.h>
 #include <locale.h>
 #include <sys/utsname.h>
+#include <sys/statvfs.h>
 #ifdef HAVE_STDINT_H
 #include <stdint.h>
 #endif
@@ -66,6 +67,7 @@ static GetLine *gl;			/* GetLine resource object */
 #endif
 
 char *execname;
+char *fbbasepath = FILEBENCHDIR;
 char *fscriptname;
 int noproc = 0;
 var_t *var_list = NULL;
@@ -117,24 +119,27 @@ static void parser_flowop_create(cmd_t *);
 static void parser_fileset_create(cmd_t *);
 
 /* set commands */
-static void parser_set_integer(char *, fbint_t);
-static void parser_set_var(char *, char *);
+static void parser_set_integer(cmd_t *cmd);
+static void parser_set_var(cmd_t *cmd);
+static void parser_set_var_op_int(cmd_t *cmd);
+static void parser_set_int_op_var(cmd_t *cmd);
+static void parser_set_var_op_var(cmd_t *cmd);
 
 /* Shutdown Commands */
 static void parser_proc_shutdown(cmd_t *);
 static void parser_filebench_shutdown(cmd_t *cmd);
 
 /* Other Commands */
+static void parser_echo(cmd_t *cmd);
 static void parser_foreach_integer(cmd_t *cmd);
 static void parser_foreach_string(cmd_t *cmd);
-static void parser_sleep(cmd_t *cmd);
-static void parser_sleep_variable(cmd_t *cmd);
+static void parser_fscheck(cmd_t *cmd);
+static void parser_fsflush(cmd_t *cmd);
 static void parser_log(cmd_t *cmd);
 static void parser_statscmd(cmd_t *cmd);
 static void parser_statsdump(cmd_t *cmd);
 static void parser_statsxmldump(cmd_t *cmd);
 static void parser_statsmultidump(cmd_t *cmd);
-static void parser_echo(cmd_t *cmd);
 static void parser_usage(cmd_t *cmd);
 static void parser_vars(cmd_t *cmd);
 static void parser_printvars(cmd_t *cmd);
@@ -146,6 +151,10 @@ static void parser_enable_mc(cmd_t *cmd);
 static void parser_domultisync(cmd_t *cmd);
 static void parser_run(cmd_t *cmd);
 static void parser_run_variable(cmd_t *cmd);
+static void parser_sleep(cmd_t *cmd);
+static void parser_sleep_variable(cmd_t *cmd);
+static void parser_warmup(cmd_t *cmd);
+static void parser_warmup_variable(cmd_t *cmd);
 static void parser_help(cmd_t *cmd);
 static void arg_parse(const char *command);
 static void parser_abort(int arg);
@@ -170,6 +179,7 @@ static void parser_version(cmd_t *cmd);
 %token FSC_LIST FSC_DEFINE FSC_EXEC FSC_QUIT FSC_DEBUG FSC_CREATE
 %token FSC_SLEEP FSC_STATS FSC_FOREACH FSC_SET FSC_SHUTDOWN FSC_LOG
 %token FSC_SYSTEM FSC_FLOWOP FSC_EVENTGEN FSC_ECHO FSC_LOAD FSC_RUN
+%token FSC_WARMUP FSC_NOUSESTATS FSC_FSCHECK FSC_FSFLUSH
 %token FSC_USAGE FSC_HELP FSC_VARS FSC_VERSION FSC_ENABLE FSC_DOMULTISYNC
 %token FSV_STRING FSV_VAL_INT FSV_VAL_BOOLEAN FSV_VARIABLE FSV_WHITESTRING
 %token FSV_RANDUNI FSV_RANDTAB FSV_RANDVAR FSV_URAND FSV_RAND48
@@ -178,15 +188,15 @@ static void parser_version(cmd_t *cmd);
 %token FSE_DIRECTORY FSE_COMMAND FSE_FILESET FSE_XMLDUMP FSE_RAND FSE_MODE
 %token FSE_MULTI FSE_MULTIDUMP
 %token FSK_SEPLST FSK_OPENLST FSK_CLOSELST FSK_ASSIGN FSK_IN FSK_QUOTE
-%token FSK_DIRSEPLST
+%token FSK_DIRSEPLST FSK_PLUS FSK_MINUS FSK_MULTIPLY FSK_DIVIDE
 %token FSA_SIZE FSA_PREALLOC FSA_PARALLOC FSA_PATH FSA_REUSE
-%token FSA_PROCESS FSA_MEMSIZE FSA_RATE FSA_CACHED
+%token FSA_PROCESS FSA_MEMSIZE FSA_RATE FSA_CACHED FSA_READONLY FSA_TRUSTTREE
 %token FSA_IOSIZE FSA_FILE FSA_WSS FSA_NAME FSA_RANDOM FSA_INSTANCES
 %token FSA_DSYNC FSA_TARGET FSA_ITERS FSA_NICE FSA_VALUE FSA_BLOCKING
 %token FSA_HIGHWATER FSA_DIRECTIO FSA_DIRWIDTH FSA_FD FSA_SRCFD FSA_ROTATEFD
 %token FSA_NAMELENGTH FSA_FILESIZE FSA_ENTRIES FSA_FILESIZEGAMMA FSA_DIRDEPTHRV
 %token FSA_DIRGAMMA FSA_USEISM FSA_TYPE FSA_RANDTABLE FSA_RANDSRC FSA_RANDROUND
-%token FSA_LEAFDIRS FSA_INDEXED
+%token FSA_LEAFDIRS FSA_INDEXED FSA_FSTYPE
 %token FSA_RANDSEED FSA_RANDGAMMA FSA_RANDMEAN FSA_RANDMIN FSA_MASTER
 %token FSA_CLIENT
 %token FSS_TYPE FSS_SEED FSS_GAMMA FSS_MEAN FSS_MIN FSS_SRC FSS_ROUND
@@ -218,6 +228,8 @@ static void parser_version(cmd_t *cmd);
 %type <cmd> eventgen_command quit_command flowop_list thread_list
 %type <cmd> thread echo_command usage_command help_command vars_command
 %type <cmd> version_command enable_command multisync_command
+%type <cmd> warmup_command fscheck_command fsflush_command
+%type <cmd> set_integer_command set_other_command
 
 %type <attr> files_attr_op files_attr_ops pt_attr_op pt_attr_ops
 %type <attr> fo_attr_op fo_attr_ops ev_attr_op ev_attr_ops
@@ -225,6 +237,7 @@ static void parser_version(cmd_t *cmd);
 %type <attr> randvar_attr_srcop attr_value attr_list_value
 %type <attr> comp_lvar_def comp_attr_op comp_attr_ops
 %type <attr> enable_multi_ops enable_multi_op multisync_op
+%type <attr> fscheck_attr_op
 %type <list> integer_seplist string_seplist string_list var_string_list
 %type <list> var_string whitevar_string whitevar_string_list
 %type <ival> attrs_define_file attrs_define_thread attrs_flowop
@@ -233,6 +246,7 @@ static void parser_version(cmd_t *cmd);
 %type <ival> randvar_attr_name FSA_TYPE randtype_name randvar_attr_param
 %type <ival> randsrc_name FSA_RANDSRC randvar_attr_tsp em_attr_name
 %type <ival> FSS_TYPE FSS_SEED FSS_GAMMA FSS_MEAN FSS_MIN FSS_SRC
+%type <ival> fscheck_attr_name FSA_FSTYPE binary_op
 
 %type <rndtb>  probtabentry_list probtabentry
 %type <avd> var_int_val
@@ -290,6 +304,8 @@ command:
 | usage_command
 | vars_command
 | foreach_command
+| fscheck_command
+| fsflush_command
 | help_command
 | list_command
 | load_command
@@ -298,6 +314,7 @@ command:
 | set_command
 | shutdown_command
 | sleep_command
+| warmup_command
 | stats_command
 | system_command
 | version_command
@@ -737,6 +754,28 @@ list_command: FSC_LIST
 	$1->cmd = &parser_flowop_list;
 };
 
+fscheck_command: FSC_FSCHECK fscheck_attr_op
+{
+	if (($$ = alloc_cmd()) == NULL)
+		YYERROR;
+	$$->cmd = &parser_fscheck;
+
+	$$->cmd_attr_list = $2;
+}
+| fscheck_command fscheck_attr_op
+{
+	$1->cmd_attr_list->attr_next = $2;
+};
+
+fsflush_command: FSC_FSFLUSH fscheck_attr_op
+{
+	if (($$ = alloc_cmd()) == NULL)
+		YYERROR;
+	$$->cmd = &parser_fsflush;
+
+	$$->cmd_attr_list = $2;
+};
+
 log_command: FSC_LOG whitevar_string_list
 {
 	if (($$ = alloc_cmd()) == NULL)
@@ -755,18 +794,68 @@ debug_command: FSC_DEBUG FSV_VAL_INT
 		yydebug = 1;
 };
 
-set_command: FSC_SET FSV_VARIABLE FSK_ASSIGN FSV_VAL_INT
+set_command:
+   set_integer_command
+ | set_other_command;
+
+set_integer_command: FSC_SET FSV_VARIABLE FSK_ASSIGN FSV_VAL_INT
 {
 	if (($$ = alloc_cmd()) == NULL)
 		YYERROR;
-	var_assign_integer($2, $4);
+	$$->cmd_tgt1 = $2;
+	$$->cmd_qty = $4;
 	if (parentscript) {
-		$$->cmd_tgt1 = $2;
 		parser_vars($$);
 	}
-	$$->cmd = NULL;
+	$$->cmd = parser_set_integer;
+}| FSC_SET FSV_VARIABLE FSK_ASSIGN FSV_VARIABLE
+{
+	if (($$ = alloc_cmd()) == NULL)
+		YYERROR;
+	var_assign_var($2, $4);
+	$$->cmd_tgt1 = $2;
+	$$->cmd_tgt2 = $4;
+	if (parentscript) {
+		parser_vars($$);
+	}
+	$$->cmd = parser_set_var;
 }
-| FSC_SET FSV_VARIABLE FSK_ASSIGN FSV_VAL_BOOLEAN
+| set_integer_command binary_op FSV_VAL_INT
+{
+	if ($1->cmd == parser_set_integer) {
+		switch ($2) {
+		case FSK_PLUS:
+			var_assign_integer($1->cmd_tgt1, $1->cmd_qty + $3);
+			break;
+		case FSK_MINUS:
+			var_assign_integer($1->cmd_tgt1, $1->cmd_qty - $3);
+			break;
+		case FSK_MULTIPLY:
+			var_assign_integer($1->cmd_tgt1, $1->cmd_qty * $3);
+			break;
+		case FSK_DIVIDE:
+			var_assign_integer($1->cmd_tgt1, $1->cmd_qty / $3);
+			break;
+		}
+		$$->cmd = NULL;
+	} else {
+		$1->cmd_qty = $3;
+		$1->cmd_subtype = $2;
+		$1->cmd = parser_set_var_op_int;
+	}
+}
+| set_integer_command binary_op FSV_VARIABLE
+{
+	$1->cmd_tgt3 = $3;
+	$1->cmd_subtype = $2;
+	if ($1->cmd == parser_set_integer) {
+		$$->cmd = parser_set_int_op_var;
+	} else {
+		$1->cmd = parser_set_var_op_var;
+	}
+};
+
+set_other_command: FSC_SET FSV_VARIABLE FSK_ASSIGN FSV_VAL_BOOLEAN
 {
 	if (($$ = alloc_cmd()) == NULL)
 		YYERROR;
@@ -797,16 +886,6 @@ set_command: FSC_SET FSV_VARIABLE FSK_ASSIGN FSV_VAL_INT
 		parser_vars($$);
 	}
 	$$->cmd = NULL;
-}| FSC_SET FSV_VARIABLE FSK_ASSIGN FSV_VARIABLE
-{
-	if (($$ = alloc_cmd()) == NULL)
-		YYERROR;
-	var_assign_var($2, $4);
-	if (parentscript) {
-		$$->cmd_tgt1 = $2;
-		parser_vars($$);
-	}
-	$$->cmd = NULL;
 } | FSC_SET FSE_MODE FSC_QUIT FSA_TIMEOUT
 {
 	filebench_shm->shm_rmode = FILEBENCH_MODE_TIMEOUT;
@@ -825,7 +904,14 @@ set_command: FSC_SET FSV_VARIABLE FSK_ASSIGN FSV_VAL_INT
 	if (($$ = alloc_cmd()) == NULL)
 		YYERROR;
 	$$->cmd = NULL;
-}| FSC_SET FSV_RANDVAR FSS_TYPE FSK_ASSIGN randvar_attr_typop
+} | FSC_SET FSE_MODE FSC_NOUSESTATS
+{
+	filebench_shm->shm_mmode |= FILEBENCH_MODE_NOUSAGE;
+	filebench_log(LOG_INFO, "disabling CPU usage statistics");
+	if (($$ = alloc_cmd()) == NULL)
+		YYERROR;
+	$$->cmd = NULL;
+} | FSC_SET FSV_RANDVAR FSS_TYPE FSK_ASSIGN randvar_attr_typop
 {
 	if (($$ = alloc_cmd()) == NULL)
 		YYERROR;
@@ -834,7 +920,7 @@ set_command: FSC_SET FSV_VARIABLE FSK_ASSIGN FSV_VAL_INT
 	$$->cmd_qty = FSS_TYPE;
 	$$->cmd_attr_list = $5;
 
-}| FSC_SET FSV_RANDVAR FSS_SRC FSK_ASSIGN randvar_attr_srcop
+} | FSC_SET FSV_RANDVAR FSS_SRC FSK_ASSIGN randvar_attr_srcop
 {
 	if (($$ = alloc_cmd()) == NULL)
 		YYERROR;
@@ -843,7 +929,7 @@ set_command: FSC_SET FSV_VARIABLE FSK_ASSIGN FSV_VAL_INT
 	$$->cmd_qty = FSS_SRC;
 	$$->cmd_attr_list = $5;
 
-}| FSC_SET FSV_RANDVAR randvar_attr_param FSK_ASSIGN attr_value
+} | FSC_SET FSV_RANDVAR randvar_attr_param FSK_ASSIGN attr_value
 {
 	if (($$ = alloc_cmd()) == NULL)
 		YYERROR;
@@ -1047,11 +1133,32 @@ shutdown_command: FSC_SHUTDOWN entity
 	case FSE_PROC:
 		$$->cmd = &parser_proc_shutdown;
 		break;
+	case FSE_FILE:
+	case FSE_FILESET:
+		$$->cmd = &parser_fileset_shutdown;
+		break;
 	default:
 		filebench_log(LOG_ERROR, "unknown entity", $2);
 		YYERROR;
 	}
 
+};
+
+warmup_command: FSC_WARMUP FSV_VAL_INT
+{
+	if (($$ = alloc_cmd()) == NULL)
+		YYERROR;
+	$$->cmd = parser_warmup;
+	$$->cmd_qty = $2;
+}
+| FSC_WARMUP FSV_VARIABLE
+{
+	fbint_t *integer;
+
+	if (($$ = alloc_cmd()) == NULL)
+		YYERROR;
+	$$->cmd = parser_warmup_variable;
+	$$->cmd_tgt1 = fb_stralloc($2);
 };
 
 sleep_command: FSC_SLEEP FSV_VAL_INT
@@ -1127,7 +1234,7 @@ load_command: FSC_LOAD FSV_STRING
 	(void) strcat(loadfile, ".f");
 
 	if ((newfile = fopen(loadfile, "r")) == NULL) {
-		(void) strcpy(loadfile, FILEBENCHDIR);
+		(void) strcpy(loadfile, fbbasepath);
 		(void) strcat(loadfile, "/workloads/");
 		(void) strcat(loadfile, $2);
 		(void) strcat(loadfile, ".f");
@@ -1401,13 +1508,27 @@ enable_multi_op: em_attr_name FSK_ASSIGN attr_value
 {
 	$$ = $3;
 	$$->attr_name = $1;
-}
+};
 
 multisync_op: FSA_VALUE FSK_ASSIGN attr_value
 {
 	$$ = $3;
 	$$->attr_name = FSA_VALUE;
-}
+};
+
+fscheck_attr_op: fscheck_attr_name FSK_ASSIGN FSV_STRING
+{
+	if (($$ = alloc_attr()) == NULL)
+		YYERROR;
+	$$->attr_avd = avd_str_alloc($3);
+	$$->attr_name = $1;
+};
+
+binary_op:
+   FSK_PLUS {$$ = FSK_PLUS;}
+ | FSK_MINUS {$$ = FSK_MINUS;}
+ | FSK_MULTIPLY {$$ = FSK_MULTIPLY;}
+ | FSK_DIVIDE {$$ = FSK_DIVIDE;};
 
 files_attr_name: attrs_define_file
 |attrs_define_fileset;
@@ -1428,6 +1549,8 @@ attrs_define_file:
   FSA_SIZE { $$ = FSA_SIZE;}
 | FSA_NAME { $$ = FSA_NAME;}
 | FSA_PATH { $$ = FSA_PATH;}
+| FSA_READONLY { $$ = FSA_READONLY;}
+| FSA_TRUSTTREE { $$ = FSA_TRUSTTREE;}
 | FSA_REUSE { $$ = FSA_REUSE;}
 | FSA_PREALLOC { $$ = FSA_PREALLOC;}
 | FSA_PARALLOC { $$ = FSA_PARALLOC;};
@@ -1441,10 +1564,12 @@ attrs_define_fileset:
 | FSA_PREALLOC { $$ = FSA_PREALLOC;}
 | FSA_PARALLOC { $$ = FSA_PARALLOC;}
 | FSA_REUSE { $$ = FSA_REUSE;}
+| FSA_READONLY { $$ = FSA_READONLY;}
+| FSA_TRUSTTREE { $$ = FSA_TRUSTTREE;}
 | FSA_FILESIZEGAMMA { $$ = FSA_FILESIZEGAMMA;}
 | FSA_DIRGAMMA { $$ = FSA_DIRGAMMA;}
 | FSA_CACHED { $$ = FSA_CACHED;}
-| FSA_ENTRIES { $$ = FSA_ENTRIES;};
+| FSA_ENTRIES { $$ = FSA_ENTRIES;}
 | FSA_LEAFDIRS { $$ = FSA_LEAFDIRS;};
 
 randvar_attr_name:
@@ -1524,8 +1649,12 @@ attrs_eventgen:
   FSA_RATE { $$ = FSA_RATE;};
 
 em_attr_name:
-  FSA_MASTER { $$ = FSA_MASTER;};
+  FSA_MASTER { $$ = FSA_MASTER;}
 | FSA_CLIENT { $$ = FSA_CLIENT;};
+
+fscheck_attr_name:
+  FSA_PATH { $$ = FSA_PATH;}
+| FSA_FSTYPE { $$ = FSA_FSTYPE;};
 
 comp_attr_ops: comp_attr_op
 {
@@ -2267,6 +2396,9 @@ parser_flowop_get_attrs(cmd_t *cmd, flowop_t *flowop)
 			    "define flowop: no filename specfied");
 			filebench_shutdown(1);
 		}
+	} else {
+		/* no filename attribute specified */
+		flowop->fo_filename = NULL;
 	}
 
 	/* Get the iosize of the op */
@@ -2305,8 +2437,13 @@ parser_flowop_get_attrs(cmd_t *cmd, flowop_t *flowop)
 		flowop->fo_value = avd_int_alloc(0);
 
 	/* FD */
-	if (attr = get_attr_integer(cmd, FSA_FD))
+	if (attr = get_attr_integer(cmd, FSA_FD)) {
 		flowop->fo_fdnumber = avd_get_int(attr->attr_avd);
+		if (flowop->fo_filename != NULL)
+			filebench_log(LOG_DEBUG_SCRIPT, "It is not "
+			    "advisable to supply both an fd number "
+			    "and a fileset name in most cases");
+	}
 
 	/* Rotatefd? */
 	if (attr = get_attr_bool(cmd, FSA_ROTATEFD))
@@ -2668,11 +2805,23 @@ parser_fileset_define_common(cmd_t *cmd)
 	else
 		fileset->fs_paralloc = avd_bool_alloc(FALSE);
 
+	/* Should we allow writes to the file? */
+	if (attr = get_attr_bool(cmd, FSA_READONLY))
+		fileset->fs_readonly = attr->attr_avd;
+	else
+		fileset->fs_readonly = avd_bool_alloc(FALSE);
+
 	/* Should we reuse the existing file? */
 	if (attr = get_attr_bool(cmd, FSA_REUSE))
 		fileset->fs_reuse = attr->attr_avd;
 	else
 		fileset->fs_reuse = avd_bool_alloc(FALSE);
+
+	/* Should we check for files actual existance? */
+	if (attr = get_attr_bool(cmd, FSA_TRUSTTREE))
+		fileset->fs_trust_tree = attr->attr_avd;
+	else
+		fileset->fs_trust_tree = avd_bool_alloc(FALSE);
 
 	/* Should we leave in cache? */
 	if (attr = get_attr_bool(cmd, FSA_CACHED))
@@ -2818,6 +2967,8 @@ static void
 parser_proc_create(cmd_t *cmd)
 {
 	filebench_shm->shm_1st_err = 0;
+	filebench_shm->shm_f_abort = FILEBENCH_OK;
+
 	if (procflow_init() != 0) {
 		filebench_log(LOG_ERROR, "Failed to create processes\n");
 		filebench_shutdown(1);
@@ -2871,6 +3022,17 @@ parser_fileset_create(cmd_t *cmd)
 }
 
 /*
+ * Deletes the files and directories that represent files and filesets on the
+ * storage medium.
+ */
+static void
+parser_fileset_shutdown(cmd_t *cmd)
+{
+	filebench_log(LOG_INFO, "Shutting down filesets");
+	fileset_delete_all_filesets();
+}
+
+/*
  * Shuts down all processes and their associated threads. When finished
  * it deletes interprocess shared memory and resets the event generator.
  * It does not exit the filebench program though.
@@ -2910,7 +3072,7 @@ parser_filebench_shutdown(cmd_t *cmd)
  * is raised. If given a time of zero or less, or the mode is stop on
  * lack of resources, it will pause until f_abort is raised.
  */
-static void
+static int
 parser_pause(int ptime)
 {
 	int timeslept = 0;
@@ -2933,8 +3095,7 @@ parser_pause(int ptime)
 				break;
 		}
 	}
-
-	filebench_log(LOG_INFO, "Run took %d seconds...", timeslept);
+	return (timeslept);
 }
 
 /*
@@ -2948,6 +3109,7 @@ static void
 parser_run(cmd_t *cmd)
 {
 	int runtime;
+	int timeslept;
 
 	runtime = cmd->cmd_qty;
 
@@ -2961,8 +3123,9 @@ parser_run(cmd_t *cmd)
 	filebench_log(LOG_INFO, "Running...");
 	stats_clear();
 
-	parser_pause(runtime);
+	timeslept = parser_pause(runtime);
 
+	filebench_log(LOG_INFO, "Run took %d seconds...", timeslept);
 	parser_statssnap(cmd);
 	parser_proc_shutdown(cmd);
 }
@@ -2976,6 +3139,7 @@ parser_run_variable(cmd_t *cmd)
 {
 	avd_t integer = var_ref_attr(cmd->cmd_tgt1);
 	int runtime;
+	int timeslept;
 
 	if (integer == NULL) {
 		filebench_log(LOG_ERROR, "Unknown variable %s",
@@ -2992,8 +3156,9 @@ parser_run_variable(cmd_t *cmd)
 	filebench_log(LOG_INFO, "Running...");
 	stats_clear();
 
-	parser_pause(runtime);
+	timeslept = parser_pause(runtime);
 
+	filebench_log(LOG_INFO, "Run took %d seconds...", timeslept);
 	parser_statssnap(cmd);
 	parser_proc_shutdown(cmd);
 }
@@ -3012,7 +3177,7 @@ parser_help(cmd_t *cmd)
 	} else {
 		filebench_log(LOG_INFO,
 		    "load <personality> (ls "
-		    FILEBENCHDIR "/workloads for list)");
+		    "%s/workloads for list)", fbbasepath);
 	}
 }
 
@@ -3117,31 +3282,13 @@ parser_vars(cmd_t *cmd)
 }
 
 /*
- * Sleeps for cmd->cmd_qty seconds, one second at a time.
- */
-static void
-parser_sleep(cmd_t *cmd)
-{
-	int sleeptime;
-
-	/* check for startup errors */
-	if (filebench_shm->shm_f_abort)
-		return;
-
-	sleeptime = cmd->cmd_qty;
-	filebench_log(LOG_INFO, "Running...");
-
-	parser_pause(sleeptime);
-}
-
-/*
  * used by the set command to set the integer part of a regular
  * variable, or the appropriate field of a random variable
  */
 static void
-parser_set_integer(char *name, fbint_t integer)
+parser_set_integer(cmd_t *cmd)
 {
-	var_assign_integer(name, integer);
+	var_assign_integer(cmd->cmd_tgt1, cmd->cmd_qty);
 }
 
 /*
@@ -3150,18 +3297,127 @@ parser_set_integer(char *name, fbint_t integer)
  * random variable from another variable
  */
 static void
-parser_set_var(char *dst_name, char *src_name)
+parser_set_var(cmd_t *cmd)
 {
-	var_assign_var(dst_name, src_name);
+	var_assign_var(cmd->cmd_tgt1, cmd->cmd_tgt2);
 }
 
+/*
+ * Used by the set command to set up for a binary operation of a
+ * variable from a var, with an integer
+ */
+static void
+parser_set_var_op_int(cmd_t *cmd)
+{
+	printf("parser_set_var_op_int: Called\n");
+	switch (cmd->cmd_subtype) {
+	case FSK_PLUS:
+		var_assign_op_var_int(cmd->cmd_tgt1, VAR_IND_INT_SUM_IV,
+		    cmd->cmd_tgt2, cmd->cmd_qty);
+		break;
+
+	case FSK_MINUS:
+		var_assign_op_var_int(cmd->cmd_tgt1, VAR_IND_IV_DIF_INT,
+		    cmd->cmd_tgt2, cmd->cmd_qty);
+		break;
+
+	case FSK_MULTIPLY:
+		var_assign_op_var_int(cmd->cmd_tgt1, VAR_IND_INT_MUL_IV,
+		    cmd->cmd_tgt2, cmd->cmd_qty);
+		break;
+
+	case FSK_DIVIDE:
+		var_assign_op_var_int(cmd->cmd_tgt1, VAR_IND_IV_DIV_INT,
+		    cmd->cmd_tgt2, cmd->cmd_qty);
+		break;
+	}
+}
+
+/*
+ * Used by the set command to set up for a binary operation of an
+ * integer with a variable from a var
+ */
+static void
+parser_set_int_op_var(cmd_t *cmd)
+{
+	switch (cmd->cmd_subtype) {
+	case FSK_PLUS:
+		var_assign_op_var_int(cmd->cmd_tgt1, VAR_IND_INT_SUM_IV,
+		    cmd->cmd_tgt3, cmd->cmd_qty);
+		break;
+
+	case FSK_MINUS:
+		var_assign_op_var_int(cmd->cmd_tgt1, VAR_IND_INT_DIF_IV,
+		    cmd->cmd_tgt3, cmd->cmd_qty);
+		break;
+
+	case FSK_MULTIPLY:
+		var_assign_op_var_int(cmd->cmd_tgt1, VAR_IND_INT_MUL_IV,
+		    cmd->cmd_tgt3, cmd->cmd_qty);
+		break;
+
+	case FSK_DIVIDE:
+		var_assign_op_var_int(cmd->cmd_tgt1, VAR_IND_INT_DIV_IV,
+		    cmd->cmd_tgt3, cmd->cmd_qty);
+		break;
+	}
+}
+
+/*
+ * Used by the set command to set up for a binary operation of two
+ * variables from other vars.
+ */
+static void
+parser_set_var_op_var(cmd_t *cmd)
+{
+	switch (cmd->cmd_subtype) {
+	case FSK_PLUS:
+		var_assign_op_var_var(cmd->cmd_tgt1, VAR_IND_IV_SUM_IV,
+		    cmd->cmd_tgt2, cmd->cmd_tgt3);
+		break;
+
+	case FSK_MINUS:
+		var_assign_op_var_var(cmd->cmd_tgt1, VAR_IND_IV_DIF_IV,
+		    cmd->cmd_tgt2, cmd->cmd_tgt3);
+		break;
+
+	case FSK_MULTIPLY:
+		var_assign_op_var_var(cmd->cmd_tgt1, VAR_IND_IV_MUL_IV,
+		    cmd->cmd_tgt2, cmd->cmd_tgt3);
+		break;
+
+	case FSK_DIVIDE:
+		var_assign_op_var_var(cmd->cmd_tgt1, VAR_IND_IV_DIV_IV,
+		    cmd->cmd_tgt2, cmd->cmd_tgt3);
+		break;
+	}
+}
+
+
+/*
+ * Sleeps for cmd->cmd_qty seconds, one second at a time.
+ */
+static void
+parser_warmup(cmd_t *cmd)
+{
+	int sleeptime;
+
+	/* check for startup errors */
+	if (filebench_shm->shm_f_abort)
+		return;
+
+	sleeptime = cmd->cmd_qty;
+	filebench_log(LOG_INFO, "Warming up...");
+
+	(void) parser_pause(sleeptime);
+}
 
 /*
  * Same as parser_sleep, except the sleep time is obtained from a variable
  * whose name is passed to it as an argument on the command line.
  */
 static void
-parser_sleep_variable(cmd_t *cmd)
+parser_warmup_variable(cmd_t *cmd)
 {
 	avd_t integer = var_ref_attr(cmd->cmd_tgt1);
 	int sleeptime;
@@ -3178,9 +3434,60 @@ parser_sleep_variable(cmd_t *cmd)
 	if (filebench_shm->shm_f_abort)
 		return;
 
+	filebench_log(LOG_INFO, "Warming up...");
+
+	(void) parser_pause(sleeptime);
+}
+
+/*
+ * Sleeps for cmd->cmd_qty seconds, one second at a time.
+ */
+static void
+parser_sleep(cmd_t *cmd)
+{
+	int sleeptime;
+	int timeslept;
+
+	/* check for startup errors */
+	if (filebench_shm->shm_f_abort)
+		return;
+
+	sleeptime = cmd->cmd_qty;
 	filebench_log(LOG_INFO, "Running...");
 
-	parser_pause(sleeptime);
+	timeslept = parser_pause(sleeptime);
+
+	filebench_log(LOG_INFO, "Run took %d seconds...", timeslept);
+}
+
+/*
+ * Same as parser_sleep, except the sleep time is obtained from a variable
+ * whose name is passed to it as an argument on the command line.
+ */
+static void
+parser_sleep_variable(cmd_t *cmd)
+{
+	avd_t integer = var_ref_attr(cmd->cmd_tgt1);
+	int sleeptime;
+	int timeslept;
+
+	if (integer == NULL) {
+		filebench_log(LOG_ERROR, "Unknown variable %s",
+		cmd->cmd_tgt1);
+		return;
+	}
+
+	sleeptime = avd_get_int(integer);
+
+	/* check for startup errors */
+	if (filebench_shm->shm_f_abort)
+		return;
+
+	filebench_log(LOG_INFO, "Running...");
+
+	timeslept = parser_pause(sleeptime);
+
+	filebench_log(LOG_INFO, "Run took %d seconds...", timeslept);
 }
 
 /*
@@ -3363,6 +3670,7 @@ parser_system(cmd_t *cmd)
 		filebench_log(LOG_ERROR,
 		    "system exec failed: %s",
 		    strerror(errno));
+		filebench_shutdown(1);
 	}
 	free(string);
 }
@@ -3384,6 +3692,131 @@ parser_echo(cmd_t *cmd)
 		return;
 
 	filebench_log(LOG_INFO, "%s", string);
+}
+
+/*
+ * Checks to see if the specified data directory exists and it's mounted file
+ * system is the correct type.
+ */
+static void
+parser_fscheck(cmd_t *cmd)
+{
+	int fstype_idx;
+	char *pathname = NULL;
+	char *filesys = "tmpfs";
+	char string[MAXPATHLEN];
+	struct statvfs64 statbuf;
+	attr_t *attr;
+
+	if (cmd->cmd_attr_list == NULL)
+		return;
+
+	for (attr = cmd->cmd_attr_list; attr; attr = attr->attr_next) {
+
+		switch(attr->attr_name) {
+		case FSA_PATH:
+			pathname = avd_get_str(attr->attr_avd);
+			break;
+		case FSA_FSTYPE:
+			filesys = avd_get_str(attr->attr_avd);
+			break;
+		}
+	}
+
+	if (pathname == NULL)
+		return;
+
+	if (statvfs64(pathname, &statbuf) < 0) {
+		filebench_log(LOG_ERROR,
+		    "%s error with supplied data path name: %s; exiting",
+		    strerror(errno), pathname);
+		filebench_shutdown(1);
+		return;
+	}
+
+	if (strncmp(filesys, statbuf.f_basetype, FSTYPSZ) != 0) {
+		filebench_log(LOG_ERROR,
+		    "File System is of type %s, NOT %s as indicated",
+		    statbuf.f_basetype, filesys);
+		filebench_shutdown(1);
+		return;
+	}
+}
+
+/*
+ * Checks to see if any filesets need to have their caches flushed, and
+ * if so invokes the fs_flush script.
+ */
+static void
+parser_fsflush(cmd_t *cmd)
+{
+	fileset_t *fileset;
+	char **fspathlist;
+	char *pathname = NULL;
+	char *filesys = NULL;
+	char string[MAXPATHLEN];
+	attr_t *attr;
+	int fsidx;
+
+	if ((attr = cmd->cmd_attr_list) == NULL)
+		return;
+
+	/* Get supplied file system type */
+	if (attr->attr_name == FSA_FSTYPE)
+		filesys = avd_get_str(attr->attr_avd);
+
+	if (filesys == NULL) {
+		filebench_log(LOG_ERROR,
+		    "FSFLUSH command lacks file system type");
+		return;
+	}
+
+	/* Check all filesets for any that remain cached and count them*/
+	fsidx = 0;
+	for (fileset = filebench_shm->shm_filesetlist; fileset != NULL;
+	     fileset = fileset->fs_next) {
+
+		if (avd_get_bool(fileset->fs_cached))
+			return;
+
+		fsidx++;
+	}
+
+	/* allocated space for fileset path pointers */
+	fspathlist = (char **)malloc(fsidx * sizeof(char *));
+
+	/* If flushing still required, flush all filesets */
+	fsidx = 0;
+	for (fileset = filebench_shm->shm_filesetlist; fileset != NULL;
+	     fileset = fileset->fs_next) {
+		int idx;
+
+		if ((pathname = avd_get_str(fileset->fs_path)) == NULL)
+			return;
+
+		for (idx = 0; idx < fsidx; idx++) {
+			if (strcmp(pathname, fspathlist[idx]) == 0)
+				break;
+		}
+
+		if (fsidx == idx) {
+
+			/* found a new path */
+			fspathlist[fsidx++] = pathname;
+
+			/* now flush it */
+			snprintf(string, MAXPATHLEN,
+			    "%s/scripts/fs_flush %s %s", fbbasepath,
+			    filesys, pathname);
+
+			if (system(string) < 0) {
+				filebench_log(LOG_ERROR,
+				    "exec of fs_flush script failed: %s",
+				    strerror(errno));
+				filebench_shutdown(1);
+			}
+		}
+	}
 }
 
 /*

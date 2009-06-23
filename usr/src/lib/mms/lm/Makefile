@@ -29,7 +29,8 @@ SUBDIRS = \
 	libl180 \
 	libl500 \
 	libl700 \
-	libsl3000
+	libsl3000 \
+	libsl8500
 
 .KEEP_STATE:
 

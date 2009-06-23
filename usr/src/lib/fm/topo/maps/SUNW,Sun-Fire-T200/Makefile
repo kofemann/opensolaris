@@ -20,10 +20,9 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
 
 PLATFORMS = SUNW,Sun-Fire-T200
 CLASS = platform
@@ -32,7 +31,6 @@ TOPOFILE = Sun-Fire-T200-hc-topology.xml	\
 	Sun-Fire-T1000-hc-topology.xml	\
 	SPARC-Enterprise-T1000-hc-topology.xml \
 	SPARC-Enterprise-T2000-hc-topology.xml \
-	Sun-Blade-T6300-hc-topology.xml \
 	Netra-T2000-hc-topology.xml
 
 SRCDIR = ../SUNW,Sun-Fire-T200

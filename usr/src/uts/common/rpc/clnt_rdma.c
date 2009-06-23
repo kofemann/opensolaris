@@ -64,7 +64,7 @@ static int clnt_compose_rpcmsg(CLIENT *, rpcproc_t, rdma_buf_t *,
 static int  clnt_compose_rdma_header(CONN *, CLIENT *, rdma_buf_t *,
 		    XDR **, uint_t *);
 static int clnt_setup_rlist(CONN *, XDR *, XDR *);
-static int clnt_setup_wlist(CONN *, XDR *, XDR *);
+static int clnt_setup_wlist(CONN *, XDR *, XDR *, rdma_buf_t *);
 static int clnt_setup_long_reply(CONN *, struct clist **, uint_t);
 static void clnt_check_credit(CONN *);
 static void clnt_return_credit(CONN *);
@@ -73,7 +73,6 @@ static void clnt_decode_long_reply(CONN *, struct clist *,
 		struct clist *, uint_t, uint_t);
 
 static void clnt_update_credit(CONN *, uint32_t);
-static void check_dereg_wlist(CONN *, struct clist *);
 
 static enum clnt_stat clnt_rdma_kcallit(CLIENT *, rpcproc_t, xdrproc_t,
     caddr_t, xdrproc_t, caddr_t, struct timeval);
@@ -117,6 +116,7 @@ typedef struct cku_private {
 	CLIENT			cku_client;	/* client handle */
 	rdma_mod_t		*cku_rd_mod;	/* underlying RDMA mod */
 	void			*cku_rd_handle;	/* underlying RDMA device */
+	struct netbuf		cku_srcaddr;	/* source address for retries */
 	struct netbuf		cku_addr;	/* remote netbuf address */
 	int			cku_addrfmly;	/* for finding addr_type */
 	struct rpc_err		cku_err;	/* error status */
@@ -268,6 +268,9 @@ clnt_rdma_kcreate(char *proto, void *handle, struct netbuf *raddr, int family,
 	 * Set up the rpc information
 	 */
 	p->cku_cred = cred;
+	p->cku_srcaddr.buf = kmem_zalloc(raddr->maxlen, KM_SLEEP);
+	p->cku_srcaddr.maxlen = raddr->maxlen;
+	p->cku_srcaddr.len = 0;
 	p->cku_addr.buf = kmem_zalloc(raddr->maxlen, KM_SLEEP);
 	p->cku_addr.maxlen = raddr->maxlen;
 	p->cku_addr.len = raddr->len;
@@ -283,6 +286,7 @@ clnt_rdma_kdestroy(CLIENT *h)
 {
 	struct cku_private *p = htop(h);
 
+	kmem_free(p->cku_srcaddr.buf, p->cku_srcaddr.maxlen);
 	kmem_free(p->cku_addr.buf, p->cku_addr.maxlen);
 	kmem_free(p, sizeof (*p));
 }
@@ -325,6 +329,8 @@ clnt_rdma_kinit(CLIENT *h, char *proto, void *handle, struct netbuf *raddr,
 		p->cku_addr.buf = kmem_zalloc(raddr->maxlen, KM_SLEEP);
 		p->cku_addr.maxlen = raddr->maxlen;
 	}
+
+	p->cku_srcaddr.len = 0;
 
 	p->cku_addr.len = raddr->len;
 	bcopy(raddr->buf, p->cku_addr.buf, raddr->len);
@@ -456,24 +462,63 @@ clnt_setup_rlist(CONN *conn, XDR *xdrs, XDR *call_xdrp)
  * the memory and encode the clist into the outbound XDR stream.
  */
 static int
-clnt_setup_wlist(CONN *conn, XDR *xdrs, XDR *call_xdrp)
+clnt_setup_wlist(CONN *conn, XDR *xdrs, XDR *call_xdrp, rdma_buf_t *rndbuf)
 {
 	int status;
-	struct clist *wlist;
+	struct clist *wlist, *rndcl;
+	int wlen, rndlen;
 	int32_t xdr_flag = XDR_RDMA_WLIST_REG;
 
 	XDR_CONTROL(call_xdrp, XDR_RDMA_GET_WLIST, &wlist);
 
 	if (wlist != NULL) {
+		/*
+		 * If we are sending a non 4-byte alligned length
+		 * the server will roundup the length to 4-byte
+		 * boundary. In such a case, a trailing chunk is
+		 * added to take any spill over roundup bytes.
+		 */
+		wlen = clist_len(wlist);
+		rndlen = (roundup(wlen, BYTES_PER_XDR_UNIT) - wlen);
+		if (rndlen) {
+			rndcl = clist_alloc();
+			/*
+			 * calc_length() will allocate a PAGESIZE
+			 * buffer below.
+			 */
+			rndcl->c_len = calc_length(rndlen);
+			rndcl->rb_longbuf.type = RDMA_LONG_BUFFER;
+			rndcl->rb_longbuf.len = rndcl->c_len;
+			if (rdma_buf_alloc(conn, &rndcl->rb_longbuf)) {
+				clist_free(rndcl);
+				return (CLNT_RDMA_FAIL);
+			}
+
+			/* Roundup buffer freed back in caller */
+			*rndbuf = rndcl->rb_longbuf;
+
+			rndcl->u.c_daddr3 = rndcl->rb_longbuf.addr;
+			rndcl->c_next = NULL;
+			rndcl->c_dmemhandle = rndcl->rb_longbuf.handle;
+			wlist->c_next = rndcl;
+		}
+
 		status = clist_register(conn, wlist, CLIST_REG_DST);
 		if (status != RDMA_SUCCESS) {
+			rdma_buf_free(conn, rndbuf);
+			bzero(rndbuf, sizeof (rdma_buf_t));
 			return (CLNT_RDMA_FAIL);
 		}
 		XDR_CONTROL(call_xdrp, XDR_RDMA_SET_FLAGS, &xdr_flag);
 	}
 
-	if (!xdr_encode_wlist(xdrs, wlist))
+	if (!xdr_encode_wlist(xdrs, wlist)) {
+		if (rndlen) {
+			rdma_buf_free(conn, rndbuf);
+			bzero(rndbuf, sizeof (rdma_buf_t));
+		}
 		return (CLNT_RDMA_FAIL);
+	}
 
 	return (CLNT_RDMA_SUCCESS);
 }
@@ -539,6 +584,7 @@ clnt_rdma_kcallit(CLIENT *h, rpcproc_t procnum, xdrproc_t xdr_args,
 	struct clist *cl_rdma_reply;
 	struct clist *cl_rpcreply_wlist;
 	struct clist *cl_long_reply;
+	rdma_buf_t  rndup;
 
 	uint_t vers;
 	uint_t op;
@@ -564,6 +610,7 @@ call_again:
 
 	bzero(&clmsg, sizeof (clmsg));
 	bzero(&rpcmsg, sizeof (rpcmsg));
+	bzero(&rndup, sizeof (rndup));
 	try_call_again = 0;
 	cl_sendlist = NULL;
 	cl_recvlist = NULL;
@@ -606,8 +653,8 @@ call_again:
 	if (p->cku_xid == 0)
 		p->cku_xid = alloc_xid();
 
-	status = RDMA_GET_CONN(p->cku_rd_mod->rdma_ops, &p->cku_addr,
-	    p->cku_addrfmly, p->cku_rd_handle, &conn);
+	status = RDMA_GET_CONN(p->cku_rd_mod->rdma_ops, &p->cku_srcaddr,
+	    &p->cku_addr, p->cku_addrfmly, p->cku_rd_handle, &conn);
 	rw_exit(&rdma_lock);
 
 	/*
@@ -662,6 +709,18 @@ call_again:
 
 		return (p->cku_err.re_status);
 	}
+
+	if (p->cku_srcaddr.maxlen < conn->c_laddr.len) {
+		if ((p->cku_srcaddr.maxlen != 0) &&
+		    (p->cku_srcaddr.buf != NULL))
+			kmem_free(p->cku_srcaddr.buf, p->cku_srcaddr.maxlen);
+		p->cku_srcaddr.buf = kmem_zalloc(conn->c_laddr.maxlen,
+		    KM_SLEEP);
+		p->cku_srcaddr.maxlen = conn->c_laddr.maxlen;
+	}
+
+	p->cku_srcaddr.len = conn->c_laddr.len;
+	bcopy(conn->c_laddr.buf, p->cku_srcaddr.buf, conn->c_laddr.len);
 
 	clnt_check_credit(conn);
 
@@ -813,7 +872,7 @@ call_again:
 	 * other operations will have a NULL which will result
 	 * as a NULL list in the XDR stream.
 	 */
-	status = clnt_setup_wlist(conn, rdmahdr_o_xdrs, call_xdrp);
+	status = clnt_setup_wlist(conn, rdmahdr_o_xdrs, call_xdrp, &rndup);
 	if (status != CLNT_RDMA_SUCCESS) {
 		rdma_buf_free(conn, &clmsg);
 		p->cku_err.re_status = RPC_CANTSEND;
@@ -1092,13 +1151,17 @@ done:
 	 * If rpc reply is in a chunk, free it now.
 	 */
 	if (cl_long_reply) {
-		(void) clist_deregister(conn, cl_long_reply, CLIST_REG_DST);
+		(void) clist_deregister(conn, cl_long_reply);
 		rdma_buf_free(conn, &cl_long_reply->rb_longbuf);
 		clist_free(cl_long_reply);
 	}
 
 	if (call_xdrp)
 		XDR_DESTROY(call_xdrp);
+
+	if (rndup.rb_private) {
+		rdma_buf_free(conn, &rndup);
+	}
 
 	if (reply_xdrp) {
 		(void) xdr_rpc_free_verifier(reply_xdrp, &reply_msg);
@@ -1321,23 +1384,4 @@ rdma_reachable(int addr_type, struct netbuf *addr, struct knetconfig **knconf)
 	}
 	rw_exit(&rdma_lock);
 	return (-1);
-}
-
-static void
-check_dereg_wlist(CONN *conn, clist *rwc)
-{
-	int status;
-
-	if (rwc == NULL)
-		return;
-
-	if (rwc->c_dmemhandle.mrc_rmr && rwc->c_len) {
-
-		status = clist_deregister(conn, rwc, CLIST_REG_DST);
-
-		if (status != RDMA_SUCCESS) {
-			DTRACE_PROBE1(krpc__e__clntrdma__dereg_wlist,
-			    int, status);
-		}
-	}
 }

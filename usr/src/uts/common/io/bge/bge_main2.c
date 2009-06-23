@@ -37,7 +37,7 @@ static char bge_ident[] = "Broadcom Gb Ethernet";
 /*
  * Make sure you keep the version ID up to date!
  */
-static char bge_version[] = "Broadcom Gb Ethernet v1.04";
+static char bge_version[] = "Broadcom Gb Ethernet v1.07";
 
 /*
  * Property names
@@ -1089,6 +1089,23 @@ bge_m_getprop(void *barg, const char *pr_name, mac_prop_id_t pr_num,
 			err = bge_get_priv_prop(bgep, pr_name, pr_flags,
 			    pr_valsize, pr_val);
 			return (err);
+		case MAC_PROP_MTU: {
+			mac_propval_range_t range;
+
+			if (!(pr_flags & MAC_PROP_POSSIBLE))
+				return (ENOTSUP);
+			if (pr_valsize < sizeof (mac_propval_range_t))
+				return (EINVAL);
+			range.mpr_count = 1;
+			range.mpr_type = MAC_PROPVAL_UINT32;
+			range.range_uint32[0].mpur_min =
+			    range.range_uint32[0].mpur_max = BGE_DEFAULT_MTU;
+			if (bge_jumbo_enable && !(flags & CHIP_FLAG_NO_JUMBO))
+				range.range_uint32[0].mpur_max =
+				    BGE_MAXIMUM_MTU;
+			bcopy(&range, pr_val, sizeof (range));
+			break;
+		}
 		default:
 			return (ENOTSUP);
 	}
@@ -1166,20 +1183,53 @@ bge_set_priv_prop(bge_t *bgep, const char *pr_name, uint_t pr_valsize,
 		}
 		return (err);
 	}
-	if (strcmp(pr_name, "_intr_coalesce_blank_time") == 0) {
+	if (strcmp(pr_name, "_rx_intr_coalesce_blank_time") == 0) {
 		if (ddi_strtol(pr_val, (char **)NULL, 0, &result) != 0)
 			return (EINVAL);
-
-		bgep->chipid.rx_ticks_norm = (uint32_t)result;
-		return (0);
+		if (result < 0)
+			err = EINVAL;
+		else {
+			bgep->chipid.rx_ticks_norm = (uint32_t)result;
+			bge_chip_coalesce_update(bgep);
+		}
+		return (err);
 	}
 
-	if (strcmp(pr_name, "_intr_coalesce_pkt_cnt") == 0) {
+	if (strcmp(pr_name, "_rx_intr_coalesce_pkt_cnt") == 0) {
 		if (ddi_strtol(pr_val, (char **)NULL, 0, &result) != 0)
 			return (EINVAL);
 
-		bgep->chipid.rx_count_norm = (uint32_t)result;
-		return (0);
+		if (result < 0)
+			err = EINVAL;
+		else {
+			bgep->chipid.rx_count_norm = (uint32_t)result;
+			bge_chip_coalesce_update(bgep);
+		}
+		return (err);
+	}
+	if (strcmp(pr_name, "_tx_intr_coalesce_blank_time") == 0) {
+		if (ddi_strtol(pr_val, (char **)NULL, 0, &result) != 0)
+			return (EINVAL);
+		if (result < 0)
+			err = EINVAL;
+		else {
+			bgep->chipid.tx_ticks_norm = (uint32_t)result;
+			bge_chip_coalesce_update(bgep);
+		}
+		return (err);
+	}
+
+	if (strcmp(pr_name, "_tx_intr_coalesce_pkt_cnt") == 0) {
+		if (ddi_strtol(pr_val, (char **)NULL, 0, &result) != 0)
+			return (EINVAL);
+
+		if (result < 0)
+			err = EINVAL;
+		else {
+			bgep->chipid.tx_count_norm = (uint32_t)result;
+			bge_chip_coalesce_update(bgep);
+		}
+		return (err);
 	}
 	return (ENOTSUP);
 }

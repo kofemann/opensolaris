@@ -32,7 +32,8 @@
  * Print out a single `segment descriptor' entry.
  */
 void
-Dbg_seg_desc_entry(Lm_list *lml, Half mach, int ndx, Sg_desc *sgp)
+Dbg_seg_desc_entry(Lm_list *lml, uchar_t osabi, Half mach, int ndx,
+    Sg_desc *sgp)
 {
 	Conv_seg_flags_buf_t	seg_flags_buf;
 	const char		*str;
@@ -45,7 +46,7 @@ Dbg_seg_desc_entry(Lm_list *lml, Half mach, int ndx, Sg_desc *sgp)
 	Dbg_util_nl(lml, DBG_NL_STD);
 	dbg_print(lml, MSG_ORIG(MSG_SEG_NAME), ndx, str);
 
-	Elf_phdr(lml, mach, &sgp->sg_phdr);
+	Elf_phdr(lml, osabi, mach, &sgp->sg_phdr);
 
 	dbg_print(lml, MSG_ORIG(MSG_SEG_LENGTH), EC_ADDR(sgp->sg_length));
 	dbg_print(lml, MSG_ORIG(MSG_SEG_FLAGS),
@@ -83,14 +84,15 @@ Dbg_seg_entry(Ofl_desc *ofl, int ndx, Sg_desc *sgp)
 	if (DBG_NOTCLASS(DBG_C_SEGMENTS))
 		return;
 
-	Dbg_seg_desc_entry(ofl->ofl_lml, ofl->ofl_dehdr->e_machine, ndx, sgp);
+	Dbg_seg_desc_entry(ofl->ofl_lml, ofl->ofl_dehdr->e_ident[EI_OSABI],
+	    ofl->ofl_dehdr->e_machine, ndx, sgp);
 }
 
 /*
  * Print out the available segment descriptors.
  */
 void
-Dbg_seg_list(Lm_list *lml, Half mach, APlist *apl)
+Dbg_seg_list(Lm_list *lml, uchar_t osabi, Half mach, APlist *apl)
 {
 	Aliste		idx;
 	Sg_desc		*sgp;
@@ -102,7 +104,7 @@ Dbg_seg_list(Lm_list *lml, Half mach, APlist *apl)
 	Dbg_util_nl(lml, DBG_NL_STD);
 	dbg_print(lml, MSG_INTL(MSG_SEG_DESC_AVAIL));
 	for (APLIST_TRAVERSE(apl, idx, sgp))
-		Dbg_seg_desc_entry(lml, mach, ndx++, sgp);
+		Dbg_seg_desc_entry(lml, osabi, mach, ndx++, sgp);
 }
 
 /*
@@ -120,12 +122,15 @@ Dbg_seg_os(Ofl_desc *ofl, Os_desc *osp, int ndx)
 	Is_desc		*isp;
 	Elf_Data	*data;
 	Shdr		*shdr;
+	const char	*empty = MSG_ORIG(MSG_STR_EMPTY);
+	int		os_isdescs_idx;
 
 	if (DBG_NOTCLASS(DBG_C_SEGMENTS))
 		return;
 
 	dbg_print(lml, MSG_ORIG(MSG_SEC_NAME), ndx, osp->os_name);
-	Elf_shdr(lml, ofl->ofl_dehdr->e_machine, osp->os_shdr);
+	Elf_shdr(lml, ofl->ofl_dehdr->e_ident[EI_OSABI],
+	    ofl->ofl_dehdr->e_machine, osp->os_shdr);
 	dbg_print(lml, MSG_INTL(MSG_EDATA_TITLE));
 
 	shdr = osp->os_shdr;
@@ -133,15 +138,16 @@ Dbg_seg_os(Ofl_desc *ofl, Os_desc *osp, int ndx)
 	dbg_print(lml, MSG_INTL(MSG_EDATA_ENTRY), MSG_INTL(MSG_STR_OUT),
 	    EC_ADDR(shdr->sh_addr), conv_elfdata_type(data->d_type, &inv_buf),
 	    EC_XWORD(data->d_size), EC_OFF(data->d_off),
-	    EC_XWORD(data->d_align), MSG_ORIG(MSG_STR_EMPTY),
-	    MSG_ORIG(MSG_STR_EMPTY));
+	    EC_XWORD(data->d_align), empty, empty, empty);
 
 	if (DBG_NOTDETAIL())
 		return;
 
-	for (APLIST_TRAVERSE(osp->os_isdescs, idx, isp)) {
-		const char	*file, *str;
-		Addr		addr;
+	OS_ISDESCS_TRAVERSE(os_isdescs_idx, osp, idx, isp) {
+		dbg_isec_name_buf_t	buf;
+		char			*alloc_mem;
+		const char		*file, *str;
+		Addr			addr;
 
 		data = isp->is_indata;
 
@@ -149,18 +155,21 @@ Dbg_seg_os(Ofl_desc *ofl, Os_desc *osp, int ndx)
 			str = MSG_INTL(MSG_EDATA_IGNSCN);
 			addr = 0;
 		} else {
-			str = MSG_ORIG(MSG_STR_EMPTY);
+			str = empty;
 			addr = (Addr)(shdr->sh_addr + data->d_off);
 		}
 
 		if (isp->is_file && isp->is_file->ifl_name)
 			file = isp->is_file->ifl_name;
 		else
-			file = MSG_ORIG(MSG_STR_EMPTY);
+			file = empty;
 
 		dbg_print(lml, MSG_INTL(MSG_EDATA_ENTRY), MSG_INTL(MSG_STR_IN),
 		    EC_ADDR(addr), conv_elfdata_type(data->d_type, &inv_buf),
 		    EC_XWORD(data->d_size), EC_OFF(data->d_off),
-		    EC_XWORD(data->d_align), file, str);
+		    EC_XWORD(data->d_align), file,
+		    dbg_fmt_isec_name(isp, buf, &alloc_mem), str);
+		if (alloc_mem != NULL)
+			free(alloc_mem);
 	}
 }

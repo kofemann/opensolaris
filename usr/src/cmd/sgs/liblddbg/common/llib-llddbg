@@ -15,7 +15,7 @@
  * If applicable, add the following below this CDDL HEADER, with the
  * fields enclosed by brackets "[]" replaced with your own identifying
  * information: Portions Copyright [yyyy] [name of copyright owner]
- *
+
  * CDDL HEADER END
  */
 /* LINTLIBRARY */
@@ -26,19 +26,16 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"@(#)llib-llddbg	1.79	08/06/20 SMI"
-
 #include <sys/types.h>
 #include <sys/auxv.h>
 #include <debug.h>
 
-uintptr_t
-	Dbg_setup(const char *, Dbg_desc *);
+int	Dbg_setup(dbg_setup_caller_t, const char *, Dbg_desc *, const char **);
 const char *
 	Dbg_demangle_name(const char *);
 
-void	Dbg_args_files(Lm_list *, int, char *);
-void	Dbg_args_opts(Lm_list *, int, int, char *);
+void	Dbg_args_file(Lm_list *, int, char *);
+void	Dbg_args_option(Lm_list *, int, int, char *);
 void	Dbg_args_str2chr(Lm_list *, int, const char *, int);
 void	Dbg_args_Wldel(Lm_list *, int, const char *);
 void	Dbg_audit_ignore(Rt_map *);
@@ -50,6 +47,14 @@ void	Dbg_audit_symval(Lm_list *, const char *, const char *, const char *,
 void	Dbg_audit_skip(Lm_list *, const char *, const char *);
 void	Dbg_audit_terminate(Lm_list *, const char *);
 void	Dbg_audit_version(Lm_list *, const char *, ulong_t);
+
+void	Dbg_basic_collect(Lm_list *);
+void	Dbg_basic_create(Lm_list *);
+void	Dbg_basic_files(Lm_list *);
+void	Dbg_basic_finish(Lm_list *);
+void	Dbg_basic_options(Lm_list *);
+void	Dbg_basic_relocate(Lm_list *);
+void	Dbg_basic_validate(Lm_list *);
 
 void	Dbg_tls_modactivity(Lm_list *, void *, uint_t);
 void	Dbg_tls_static_block(Lm_list *, void *, ulong_t, ulong_t);
@@ -81,8 +86,8 @@ void	Dbg64_cap_sec_title(Lm_list *, const char *);
 void	Dbg32_cap_val_hw1(Lm_list *, Elf32_Word, Elf32_Half);
 void	Dbg64_cap_val_hw1(Lm_list *, Elf64_Xword, Elf64_Half);
 
-void	Dbg32_ent_print(Lm_list *, Elf32_Half, Alist *, Boolean);
-void	Dbg64_ent_print(Lm_list *, Elf64_Half, Alist *, Boolean);
+void	Dbg32_ent_print(Lm_list *, uchar_t, Elf32_Half, Alist *, Boolean);
+void	Dbg64_ent_print(Lm_list *, uchar_t, Elf64_Half, Alist *, Boolean);
 
 void	Dbg32_file_analyze(Rt_map *);
 void	Dbg64_file_analyze64(Rt_map *);
@@ -270,9 +275,9 @@ void	Dbg64_reloc_error(Lm_list *, int, Elf64_Half, Elf64_Word, void *,
 void	Dbg32_reloc_generate(Lm_list *, Os_desc *, Elf32_Word);
 void	Dbg64_reloc_generate(Lm_list *, Os_desc *, Elf64_Word);
 void	Dbg32_reloc_in(Lm_list *, int, Elf32_Half, Elf32_Word, void *,
-	    const char *, const char *);
+	    const char *, Elf32_Word, const char *);
 void	Dbg64_reloc_in(Lm_list *, int, Elf64_Half, Elf64_Word, void *,
-	    const char *, const char *);
+	    const char *, Elf64_Word, const char *);
 void	Dbg32_reloc_ors_entry(Lm_list *, int, Elf32_Word, Elf32_Half, Rel_desc *);
 void	Dbg64_reloc_ors_entry(Lm_list *, int, Elf64_Word, Elf64_Half, Rel_desc *);
 void	Dbg32_reloc_out(Ofl_desc *, int, Elf32_Word, void *, const char *,
@@ -296,34 +301,34 @@ void	Dbg32_sec_discarded(Lm_list *, Is_desc *, Is_desc *);
 void	Dbg64_sec_discarded(Lm_list *, Is_desc *, Is_desc *);
 void	Dbg32_sec_group(Lm_list *, Is_desc *, Group_desc *);
 void	Dbg64_sec_group(Lm_list *, Is_desc *, Group_desc *);
-void	Dbg32_sec_gnu_comdat(Lm_list *, const char *, uint_t, uint_t);
-void	Dbg64_sec_gnu_comdat(Lm_list *, const char *, uint_t, uint_t);
+void	Dbg32_sec_gnu_comdat(Lm_list *, Is_desc *, uint_t, uint_t);
+void	Dbg64_sec_gnu_comdat(Lm_list *, Is_desc *, uint_t, uint_t);
 void	Dbg32_sec_in(Lm_list *, Is_desc *);
 void	Dbg64_sec_in(Lm_list *, Is_desc *);
 void	Dbg32_sec_order_error(Lm_list *, Ifl_desc *, Elf32_Word, int);
 void	Dbg64_sec_order_error(Lm_list *, Ifl_desc *, Elf64_Word, int);
 void	Dbg32_sec_order_list(Ofl_desc *, int);
 void	Dbg64_sec_order_list(Ofl_desc *, int);
-void	Dbg32_sec_redirected(Lm_list *, const char *, const char *);
-void	Dbg64_sec_redirected(Lm_list *, const char *, const char *);
+void	Dbg32_sec_redirected(Lm_list *, Is_desc *, const char *);
+void	Dbg64_sec_redirected(Lm_list *, Is_desc *, const char *);
 void	Dbg32_sec_strtab(Lm_list *, Os_desc *, Str_tbl *);
 void	Dbg64_sec_strtab(Lm_list *, Os_desc *, Str_tbl *);
 
-void	Dbg32_seg_desc_entry(Lm_list *, Elf32_Half, int, Sg_desc *);
-void	Dbg64_seg_desc_entry(Lm_list *, Elf64_Half, int, Sg_desc *);
+void	Dbg32_seg_desc_entry(Lm_list *, uchar_t, Elf32_Half, int, Sg_desc *);
+void	Dbg64_seg_desc_entry(Lm_list *, uchar_t, Elf64_Half, int, Sg_desc *);
 void	Dbg32_seg_entry(Ofl_desc *, int, Sg_desc *);
 void	Dbg64_seg_entry(Ofl_desc *, int, Sg_desc *);
-void	Dbg32_seg_list(Lm_list *, Elf32_Half, APlist *);
-void	Dbg64_seg_list(Lm_list *, Elf64_Half, APlist *);
+void	Dbg32_seg_list(Lm_list *, uchar_t, Elf32_Half, APlist *);
+void	Dbg64_seg_list(Lm_list *, uchar_t, Elf64_Half, APlist *);
 void	Dbg32_seg_os(Ofl_desc *, Os_desc *, int);
 void	Dbg64_seg_os(Ofl_desc *, Os_desc *, int);
 void    Dbg32_seg_title(Lm_list *);
 void    Dbg64_seg_title(Lm_list *);
 
-void	Dbg32_shdr_modified(Lm_list *, const char *, Half, Shdr *, Shdr *,
-	    const char *);
-void	Dbg64_shdr_modified(Lm_list *, const char *, Half, Shdr *, Shdr *,
-	    const char *);
+void	Dbg32_shdr_modified(Lm_list *, const char *, uchar_t, Half,
+	    Elf32_Word, Shdr *, Shdr *, const char *);
+void	Dbg64_shdr_modified(Lm_list *, const char *, uchar_t, Half,
+	    Elf64_Word, Shdr *, Shdr *, const char *);
 
 void	Dbg32_statistics_ar(Ofl_desc *);
 void	Dbg64_statistics_ar(Ofl_desc *);
@@ -471,8 +476,10 @@ void Elf32_cap_entry(Lm_list *, Elf32_Cap *, int ndx, Elf32_Half);
 void Elf64_cap_title(Lm_list *);
 void Elf32_cap_title(Lm_list *);
 
-void Elf64_dyn_entry(Lm_list *, Elf64_Dyn *, int, const char *, Elf64_Half);
-void Elf32_dyn_entry(Lm_list *, Elf32_Dyn *, int, const char *, Elf32_Half);
+void Elf64_dyn_entry(Lm_list *, Elf64_Dyn *, int, const char *, uchar_t,
+    Elf64_Half);
+void Elf32_dyn_entry(Lm_list *, Elf32_Dyn *, int, const char *, uchar_t,
+    Elf32_Half);
 void Elf64_dyn_null_entry(Lm_list *, Elf64_Dyn *, int, int);
 void Elf32_dyn_null_entry(Lm_list *, Elf32_Dyn *, int, int);
 void Elf64_dyn_title(Lm_list *);
@@ -488,8 +495,8 @@ void Elf32_got_entry(Lm_list *, Elf32_Sword, Elf32_Addr, Elf32_Word,
 void Elf64_got_title(Lm_list *);
 void Elf32_got_title(Lm_list *);
 
-void Elf64_phdr(Lm_list *, Elf64_Half, Elf64_Phdr *);
-void Elf32_phdr(Lm_list *, Elf32_Half, Elf32_Phdr *);
+void Elf64_phdr(Lm_list *, uchar_t, Elf64_Half, Elf64_Phdr *);
+void Elf32_phdr(Lm_list *, uchar_t, Elf32_Half, Elf32_Phdr *);
 
 void Elf64_reloc_apply_reg(Lm_list *, int, Elf64_Half, Elf64_Xword,
     Elf64_Xword);
@@ -508,12 +515,12 @@ void Elf32_reloc_entry_2(Lm_list *, int, const char *, Word, const char *,
 void Elf64_reloc_title(Lm_list *, int, Word);
 void Elf32_reloc_title(Lm_list *, int, Word);
 
-void Elf64_shdr(Lm_list *, Elf64_Half, Elf64_Shdr *);
-void Elf32_shdr(Lm_list *, Elf32_Half, Elf32_Shdr *);
+void Elf64_shdr(Lm_list *, uchar_t, Elf64_Half, Elf64_Shdr *);
+void Elf32_shdr(Lm_list *, uchar_t, Elf32_Half, Elf32_Shdr *);
 
-void Elf64_syms_table_entry(Lm_list *, int, const char *, Elf64_Half,
+void Elf64_syms_table_entry(Lm_list *, int, const char *, uchar_t, Elf64_Half,
     Elf64_Sym *, Elf64_Versym, int, const char *, const char *);
-void Elf32_syms_table_entry(Lm_list *, int, const char *, Elf32_Half,
+void Elf32_syms_table_entry(Lm_list *, int, const char *, uchar_t, Elf32_Half,
     Elf32_Sym *, Elf32_Versym, int, const char *, const char *);
 void Elf64_syms_table_title(Lm_list *, int);
 void Elf32_syms_table_title(Lm_list *, int);

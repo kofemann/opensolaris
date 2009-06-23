@@ -39,22 +39,29 @@
  * files: metadata, index and data.
  *
  * The metadata file contains cartridge information such as version,
- * capacity, stripe alignment, directio alignment, and the write
- * protect tab.
+ * capacity, stripe alignment, direct I/O alignment, and the write
+ * protect tab. The user application sets the alignments when the dda
+ * media is created.
  *
- * The index file contains index records which describes the media format.
- * An index record contains the data file offset, number of consective
- * same size records and the number of consective filemarks. The data file
- * offset is adjusted for stripe and directio alignment. Stripe alignment
- * occurs at bot and when data follows a filemark. Directio alignment is
- * checked for at bot and the data alignment occurs when the data length
- * is modulus the sector size. An index record that contains updated
- * information is written when a filemark or position change occurs. The
- * index record file is in big endian.
+ * The index file contains index records which describes the data file.
+ * An index record contains the data file offset, number of consecutive
+ * same size records and filemarks. An new index record is generated
+ * when a write changes record sizes or data follows a filemark. A on
+ * disk binary search is used for locate or space filemarks operations.
+ * An advisory file lock is held on the index file to prevent multiple
+ * loads for the same piece of dda media and to prevent a load when
+ * the user is changing the cartridge write protect tab. The data file
+ * offset is adjusted for alignment at bot, when data follows a filemark,
+ * or the record size changes. Stripe alignment occurs at bot or after a
+ * filemark. Direct I/O alignment occurs for every read or write operation
+ * and is applied after the stripe alignment.
  *
  * The data file contains user data along with holes for stripe and
- * directio alignment.
+ * direct I/O alignment.
  *
+ * The metadata and index file records are used in native endian format
+ * in memory and are stored on disk in big endian format. The data file
+ * is in the host's native endian format.
  */
 
 #include <sys/devops.h>			/* used by dev_ops */
@@ -84,12 +91,10 @@
 #include <sys/mtio.h>			/* tape io */
 #include <sys/systeminfo.h>		/* for hostid access */
 #include <sys/scsi/targets/stdef.h>
-#include <sys/fs/ufs_inode.h>
 #include <sys/vfs.h>
 #include <limits.h>
-#include <sys/sdt.h>
-#include <sys/flock.h>	/* non-blocking file lock */
-#include <nfs/lm.h>
+#include <sys/sdt.h>			/* d-trace */
+#include <sys/flock.h>			/* advisory non-blocking file lock */
 #include "dda.h"
 
 /* vnode mode is read, write, large files, allow symlinks */
@@ -214,7 +219,6 @@ static int dda_tape_locate(dda_t *dda, int64_t position);
 static int dda_tape_erase(dda_t *dda);
 
 /* support routines */
-static void dda_gen_serial_num(dda_t *dda);
 static void dda_set_unloaded(dda_t *dda);
 static int64_t dda_get_fileno(dda_t *dda);
 static int dda_get_blkno(dda_t *dda, int64_t *blkno);
@@ -227,10 +231,9 @@ static void dda_gen_next_index(dda_t *dda, int32_t blksize);
 static void dda_save_istate(dda_t *dda, dda_istate_t *istate);
 static void dda_restore_istate(dda_t *dda, dda_istate_t *istate);
 
-/* stripe and directio alignment */
+/* data file offset */
 static off64_t dda_stripe_align(dda_t *dda);
 static off64_t dda_data_offset(dda_t *dda);
-static int dda_sector_align(dda_t *dda);
 
 /* space */
 static int dda_tape_capacity(dda_t *dda, int64_t *space);
@@ -468,7 +471,6 @@ dda_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 		dda->dda_dip = dip;
 		dda->dda_inst = instance;
-		dda_gen_serial_num(dda);
 		mutex_init(&dda->dda_mutex, NULL, MUTEX_DRIVER, NULL);
 		dda_set_unloaded(dda);
 		return (DDI_SUCCESS);
@@ -921,20 +923,6 @@ dda_ioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *credp, int *rvalp)
 
 		if (ddi_copyout(&blklmt, (void *)arg,
 		    sizeof (dda_blklmt_t), flag)) {
-			return (EFAULT);
-		}
-		return (0);
-	}
-	case DDA_CMD_SERIAL: {
-		dda_serial_t	serial;
-
-		mutex_enter(&dda->dda_mutex);
-		dda->dda_resid = 0;
-		(void) snprintf(serial, sizeof (dda_serial_t), "%s",
-		    dda->dda_serial);
-		mutex_exit(&dda->dda_mutex);
-		if (ddi_copyout(serial, (void *)arg,
-		    sizeof (dda_serial_t), flag)) {
 			return (EFAULT);
 		}
 		return (0);
@@ -1624,42 +1612,6 @@ dda_tape_unload(dda_t *dda)
 /* support routines */
 
 /*
- * dda_gen_serial_num
- *
- * Parameters:
- *	- dda:		DDA tape drive.
- *
- * Generate DDA unit serial number from the computer hostid and drive
- * instance number.
- *
- * Return Values:
- *      None
- *
- */
-static void
-dda_gen_serial_num(dda_t *dda)
-{
-	char		sn[100];
-	int		len;
-	int		off;
-
-	/*
-	 * Generate unit serial number:
-	 *	zeros, hostid, instance number
-	 */
-	len = snprintf(sn, sizeof (sn), "%016x%x%x", 0, zone_get_hostid(NULL),
-	    dda->dda_inst);
-
-	/*
-	 * Use least significant part of generated serial number
-	 */
-	if ((off = len - sizeof (dda_serial_t) + 1) < 0) {
-		off = 0;
-	}
-	bcopy(&sn[off], dda->dda_serial, sizeof (dda_serial_t));
-}
-
-/*
  * dda_set_unloaded
  *
  * Parameters:
@@ -1760,7 +1712,7 @@ dda_get_blkno(dda_t *dda, int64_t *blkno)
  *	- dda:		DDA tape drive.
  *
  * Truncate DDA media at the current position.
- * If at bot then align data file offset for directio.
+ * If at bot then stripe align the data file offset.
  *
  * Return Values:
  *	0 : success
@@ -1822,9 +1774,6 @@ dda_write_truncate(dda_t *dda)
 	}
 
 	if (DDA_IS_BOT(dda)) {
-		if (err = dda_sector_align(dda)) {
-			return (err);
-		}
 		dda->dda_index.dda_offset += dda_stripe_align(dda);
 	}
 
@@ -1898,20 +1847,13 @@ dda_sync(dda_t *dda)
 	short	status;
 
 	/*
-	 * Sync all files, report first error
+	 * Sync index and data files, report first error
 	 */
 
 	err = dda_vn_sync(dda, dda->dda_index_vp);
 	status = dda->dda_status;
 
 	if (rc = dda_vn_sync(dda, dda->dda_data_vp)) {
-		if (err == 0) {
-			status = dda->dda_status;
-			err = rc;
-		}
-	}
-
-	if (rc = dda_vn_sync(dda, dda->dda_metadata_vp)) {
 		if (err == 0) {
 			status = dda->dda_status;
 			err = rc;
@@ -2334,14 +2276,13 @@ write_error:
  * A fixed length read requires the data length to be a multiple of
  * the record size.
  *
- * If zero length read then return.
- * Calculate the number of blocks to read based on the
- * record size.
+ * If zero length read then return success.
+ * Calculate the number of blocks to read based on the record size.
  * Get early warning and physical end of media.
  * Adjust length (blocks) to read based on tape space remaining.
  * Read the data from the data file.
- * If read error occurred then set status and return.
- * If read returns residual then adjust counts.
+ * If a read error occurred or residual from dda's adjusted read length
+ * then set status and return.
  * Update the index record with new media position.
  * Read complete.
  *
@@ -2570,6 +2511,11 @@ dda_tape_read(dda_t *dda, struct uio *uio)
 	err = VOP_READ(dda->dda_data_vp, uio, 0, dda->dda_cred, NULL);
 	VOP_RWUNLOCK(dda->dda_data_vp, V_WRITELOCK_FALSE, NULL);
 
+	/*
+	 * If a read error occurred or residual from dda adjusted length
+	 * then don't return any data.
+	 */
+
 	if (err) {
 		DDA_DEBUG4((dda_cmd_read_vn_err,
 		    int, dda->dda_inst,
@@ -2602,6 +2548,11 @@ dda_tape_read(dda_t *dda, struct uio *uio)
 		dda_restore_istate(dda, &istate);
 		return (EIO);
 	}
+
+
+	/*
+	 * Successful read, adjust index record and counters.
+	 */
 
 	dda->dda_pos += blkcount;
 
@@ -3516,11 +3467,11 @@ dda_stripe_align(dda_t *dda)
  * Parameters:
  *	- dda:		DDA tape drive.
  *
- * Align data file offset for the index record.
- * If directio is enable then the alignment is calculated.
+ * Generate data file offset using the index record and
+ * metadata direct I/O alignment.
  *
  * Return Values:
- *	Aligned data file offset.
+ *	Data file offset.
  *
  */
 static off64_t
@@ -3555,28 +3506,26 @@ dda_data_offset(dda_t *dda)
 
 	}
 
-	if (DDA_LEN_ALIGNED(dda->dda_index.dda_blksize, sector) == 0) {
+	if (dda->dda_metadata.dda_sector > 0 &&
+	    DDA_LEN_ALIGNED(dda->dda_index.dda_blksize, sector) == 0) {
 
-		if (dda->dda_metadata.dda_sector) {
+		/* adjust for direct I/O */
 
-			/* fs supports directio */
+		amount = DDA_OFF_ALIGNED(offset, sector);
 
-			amount = DDA_OFF_ALIGNED(offset, sector);
+		if (amount) {
 
-			if (amount) {
+			/* bytes needed for sector alignment */
 
-				/* bytes needed for sector alignment */
-
-				amount = sector - amount;
-			}
-
-			offset += amount;
-
-			DDA_DEBUG3((dda_data_offset_align,
-			    int, dda->dda_inst,
-			    off64_t, offset,
-			    off64_t, amount));
+			amount = sector - amount;
 		}
+
+		offset += amount;
+
+		DDA_DEBUG3((dda_data_offset_align,
+		    int, dda->dda_inst,
+		    off64_t, offset,
+		    off64_t, amount));
 	}
 
 	DDA_DEBUG3((dda_data_offset,
@@ -3585,84 +3534,6 @@ dda_data_offset(dda_t *dda)
 	    off64_t, offset));
 
 	return (offset);
-}
-
-/*
- * dda_sector_align
- *
- * Parameters:
- *	- dda:		DDA tape drive.
- *
- * If filesystem is capable of directio then update metadata file with
- * sector size.
- *
- * Return Values:
- *	0 : success
- *	errno : failure
- *
- */
-static int
-dda_sector_align(dda_t *dda)
-{
-	struct inode	*ip;
-	int32_t		sector;
-	int		err;
-	dda_metadata_t	metadata;
-
-	/*
-	 * Set sector alignment at bot then use to eom.
-	 */
-	if (dda->dda_data_vp == NULL) {
-		DDA_DEBUG1((dda_sec_align_vn_null,
-		    int, dda->dda_inst));
-		dda->dda_status = KEY_MEDIUM_ERROR;
-		return (EIO);
-	}
-
-	sector = dda->dda_metadata.dda_sector;
-
-	/* ufs directio flag */
-	ip = VTOI(dda->dda_data_vp);
-	if (ip->i_flag & IDIRECTIO) {
-
-		/*
-		 * Directio on, do sector alignment.
-		 */
-		dda->dda_metadata.dda_sector = DEV_BSIZE;
-	} else {
-
-		/*
-		 * Directio off, don't do sector alignment.
-		 */
-		dda->dda_metadata.dda_sector = 0;
-	}
-
-	if (dda->dda_metadata.dda_sector == sector) {
-
-		/*
-		 * Metadata already contains sector alignment.
-		 */
-		return (0);
-	}
-
-	/*
-	 * Save sector alignment change.
-	 */
-	DDA_BE_METADATA(dda->dda_metadata, metadata);
-	if (err = dda_vn_write(dda, dda->dda_metadata_vp, &metadata,
-	    sizeof (dda_metadata_t), 0)) {
-		DDA_DEBUG2((dda_sec_align_err,
-		    int, dda->dda_inst,
-		    int, err));
-		return (err);
-	}
-
-	DDA_DEBUG3((dda_sec_align,
-	    int, dda->dda_inst,
-	    int32_t, sector,
-	    int32_t, dda->dda_metadata.dda_sector));
-
-	return (0);
 }
 
 /* space */

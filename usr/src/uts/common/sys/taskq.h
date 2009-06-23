@@ -19,14 +19,12 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_SYS_TASKQ_H
 #define	_SYS_TASKQ_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/thread.h>
@@ -47,7 +45,7 @@ typedef void (task_func_t)(void *);
 #define	TASKQ_PREPOPULATE	0x0001	/* Prepopulate with threads and data */
 #define	TASKQ_CPR_SAFE		0x0002	/* Use CPR safe protocol */
 #define	TASKQ_DYNAMIC		0x0004	/* Use dynamic thread scheduling */
-#define	TASKQ_PERZONE		0x0008	/* Create taskq threads per zone */
+#define	TASKQ_THREADS_CPU_PCT	0x0008	/* number of threads as % of ncpu */
 
 /*
  * Flags for taskq_dispatch. TQ_SLEEP/TQ_NOSLEEP should be same as
@@ -63,6 +61,7 @@ typedef void (task_func_t)(void *);
 extern taskq_t *system_taskq;
 
 extern void	taskq_init(void);
+extern void	taskq_mp_init(void);
 
 extern taskq_t	*taskq_create(const char *, int, pri_t, int, int, uint_t);
 extern taskq_t	*taskq_create_instance(const char *, int, int, pri_t, int,

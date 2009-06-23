@@ -94,6 +94,39 @@ typedef enum {
 } link_tagmode_t;
 
 /*
+ * Defines range of uint32 values
+ */
+typedef struct mac_propval_uint32_range_s {
+	uint32_t mpur_min;
+	uint32_t mpur_max;
+} mac_propval_uint32_range_t;
+
+/*
+ * Data type of the value
+ */
+typedef enum {
+	MAC_PROPVAL_UINT32 = 0x1
+} mac_propval_type_t;
+
+/*
+ * Captures possible values for a given property. A property can have
+ * range of values (int32, int64, uint32, uint64, et al) or collection/
+ * enumeration of values (strings).
+ * Can be used as a value-result parameter.
+ *
+ * See PSARC 2009/235 for more information.
+ */
+typedef struct mac_propval_range_s {
+	uint_t mpr_count;			/* count of ranges */
+	mac_propval_type_t mpr_type;		/* type of value */
+	union {
+		mac_propval_uint32_range_t mpr_uint32[1];
+	} u;
+} mac_propval_range_t;
+
+#define	range_uint32	u.mpr_uint32
+
+/*
  * Maximum MAC address length
  */
 #define	MAXMACADDRLEN		20
@@ -114,7 +147,15 @@ typedef enum {
  * The _ADV_* values are those that are currently exposed over the wire.
  */
 #define	MAXLINKPROPNAME		256
-#define	MAC_PROP_DEFAULT	0x0001
+#define	MAC_PROP_DEFAULT	0x0001		/* default property value */
+
+/*
+ * Indicates the linkprop framework is interested in knowing the list of
+ * possible property values. When used to obtain possible values for a
+ * property, one may have to change all the drivers. See PSARC 2009/235.
+ */
+#define	MAC_PROP_POSSIBLE	0x0002		/* possible property values */
+
 typedef enum {
 	MAC_PROP_DUPLEX = 0x00000001,
 	MAC_PROP_SPEED,
@@ -165,6 +206,8 @@ typedef enum {
 	MAC_PROP_PRIO,
 	MAC_PROP_BIND_CPU,
 	MAC_PROP_TAGMODE,
+	MAC_PROP_ADV_10GFDX_CAP,
+	MAC_PROP_EN_10GFDX_CAP,
 	MAC_PROP_PRIVATE = -1
 } mac_prop_id_t;
 
@@ -287,10 +330,8 @@ typedef struct mac_capab_aggr_s {
 
 typedef enum {
 	MAC_NOTE_LINK,
-	MAC_NOTE_PROMISC,
 	MAC_NOTE_UNICST,
 	MAC_NOTE_TX,
-	MAC_NOTE_RESOURCE,
 	MAC_NOTE_DEVPROMISC,
 	MAC_NOTE_FASTPATH_FLUSH,
 	MAC_NOTE_SDU_SIZE,
@@ -303,14 +344,6 @@ typedef void		(*mac_notify_t)(void *, mac_notify_type_t);
 typedef void		(*mac_rx_t)(void *, mac_resource_handle_t, mblk_t *,
 			    boolean_t);
 typedef	mblk_t		*(*mac_receive_t)(void *, int);
-
-/*
- * MAC promiscuous types
- */
-typedef enum {
-	MAC_PROMISC = 0x01,		/* MAC instance is promiscuous */
-	MAC_DEVPROMISC = 0x02		/* Device is promiscuous */
-} mac_promisc_type_t;
 
 /*
  * MAC resource types
@@ -545,7 +578,6 @@ extern int			mac_maxsdu_update(mac_handle_t, uint_t);
 
 extern void 			mac_unicst_update(mac_handle_t,
 				    const uint8_t *);
-extern void			mac_resource_update(mac_handle_t);
 extern void			mac_capab_update(mac_handle_t);
 extern int			mac_pdata_update(mac_handle_t, void *,
 				    size_t);

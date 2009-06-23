@@ -173,8 +173,13 @@ $SkipUnusedSearchPath = qr{
 	/usr/sfw/lib.*\ from\ .*libdbus-glib-1\.so\.2 |		# non-OSNet
 	/usr/sfw/lib.*\ from\ .*libglib-2\.0\.so\.0 |		# non-OSNet
 	/usr/X11/lib.*\ from\ .*libglib-2\.0\.so\.0 |		# non-OSNet
+	/usr/sfw/lib.*\ from\ .*libgmodule-2\.0\.so\.0 |	# non-OSNet
+	/usr/X11/lib.*\ from\ .*libgmodule-2\.0\.so\.0 |	# non-OSNet
+	/usr/sfw/lib.*\ from\ .*libgnomevfs-2\.so\.0 |		# non-OSNet
 	/usr/sfw/lib.*\ from\ .*libgobject-2\.0\.so\.0 |	# non-OSNet
 	/usr/X11/lib.*\ from\ .*libgobject-2\.0\.so\.0 |	# non-OSNet
+	/usr/sfw/lib.*\ from\ .*libgthread-2\.0\.so\.0 |	# non-OSNet
+	/usr/X11/lib.*\ from\ .*libgthread-2\.0\.so\.0 |	# non-OSNet
 	/usr/sfw/lib.*\ from\ .*libcrypto\.so\.0\.9\.8 |	# non-OSNet
 	/usr/sfw/lib.*\ from\ .*libnetsnmp\.so\.5 |		# non-OSNet
 	/usr/sfw/lib.*\ from\ .*libgcc_s\.so\.1 |		# non-OSNet
@@ -202,7 +207,8 @@ $SkipUnrefObject = qr{
 	/lib.*\ of\ .*libssl3\.so |				# non-OSNET
 	/lib.*\ of\ .*libxml2\.so\.2 |				# non-OSNET
 	/lib.*\ of\ .*libxslt\.so\.1 |				# non-OSNET
-	/lib.*\ of\ .*libpq\.so\.4 				# non-OSNET
+	/lib.*\ of\ .*libpq\.so\.4 |				# non-OSNET
+	/lib.*\ of\ .*libpython2\.4\.so\.1\.0 			# non-OSNET
 }x;
 
 # Define any files that should only have unused (ldd -u) processing.

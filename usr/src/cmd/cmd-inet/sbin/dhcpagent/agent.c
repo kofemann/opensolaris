@@ -25,6 +25,7 @@
 
 #include <sys/types.h>
 #include <stdlib.h>
+#include <assert.h>
 #include <errno.h>
 #include <locale.h>
 #include <string.h>
@@ -123,8 +124,7 @@ static uint_t ipc_cmd_flags[DHCP_NIPC] = {
 	/* DHCP_GET_TAG */	CMD_BOOTP|CMD_IMMED
 };
 
-static boolean_t
-is_iscsi_active(void);
+static boolean_t is_iscsi_active(void);
 
 int
 main(int argc, char **argv)
@@ -518,11 +518,16 @@ ipc_event(iu_eh_t *ehp, int fd, short events, iu_event_id_t id, void *arg)
 
 	if (dsmp == NULL) {
 		/*
-		 * If the user asked for the primary DHCP interface, but there
-		 * is none, then report failure.
+		 * If the user asked for the primary DHCP interface by giving
+		 * an empty string and there is no primary, then check if we're
+		 * handling dhcpinfo.  If so, then simulate primary selection.
+		 * Otherwise, report failure.
 		 */
 		if (ifname[0] == '\0') {
-			error = DHCP_IPC_E_NOPRIMARY;
+			if (ia.ia_cmd == DHCP_GET_TAG)
+				dsmp = info_primary_smach(isv6);
+			if (dsmp == NULL)
+				error = DHCP_IPC_E_NOPRIMARY;
 
 		/*
 		 * If there's no interface, and we're starting up, then create
@@ -724,6 +729,15 @@ ipc_event(iu_eh_t *ehp, int fd, short events, iu_event_id_t id, void *arg)
 		if (dsmp->dsm_droprelease)
 			break;
 		dsmp->dsm_droprelease = B_TRUE;
+
+		/*
+		 * Ensure that a timer associated with the existing state
+		 * doesn't pop while we're waiting for the script to complete.
+		 * (If so, chaos can result -- e.g., a timer causes us to end
+		 * up in dhcp_selecting() would start acquiring a new lease on
+		 * dsmp while our DHCP_DROP dismantling is ongoing.)
+		 */
+		cancel_smach_timers(dsmp);
 		(void) script_start(dsmp, isv6 ? EVENT_DROP6 : EVENT_DROP,
 		    dhcp_drop, NULL, NULL);
 		break;		/* not an immediate function */
@@ -738,6 +752,7 @@ ipc_event(iu_eh_t *ehp, int fd, short events, iu_event_id_t id, void *arg)
 		uint_t		optlen;
 		boolean_t	did_alloc = B_FALSE;
 		PKT_LIST	*ack = dsmp->dsm_ack;
+		int		i;
 
 		/*
 		 * verify the request makes sense.
@@ -757,6 +772,12 @@ load_option:
 
 		case DSYM_SITE:			/* FALLTHRU */
 		case DSYM_STANDARD:
+			for (i = 0; i < dsmp->dsm_pillen; i++) {
+				if (dsmp->dsm_pil[i] == optnum.code)
+					break;
+			}
+			if (i < dsmp->dsm_pillen)
+				break;
 			if (isv6) {
 				opt = dhcpv6_pkt_option(ack, NULL, optnum.code,
 				    NULL);
@@ -929,6 +950,7 @@ load_option:
 		if (dsmp->dsm_droprelease)
 			break;
 		dsmp->dsm_droprelease = B_TRUE;
+		cancel_smach_timers(dsmp); /* see comment in DHCP_DROP above */
 		(void) script_start(dsmp, isv6 ? EVENT_RELEASE6 :
 		    EVENT_RELEASE, dhcp_release, "Finished with lease.", NULL);
 		break;		/* not an immediate function */
@@ -1412,8 +1434,6 @@ rtsock_event(iu_eh_t *ehp, int fd, short events, iu_event_id_t id, void *arg)
 
 		if ((isv6 && !check_main_lif(dsmp, &msg.ifam, msglen)) ||
 		    (!isv6 && !verify_lif(dsmp->dsm_lif))) {
-			if (dsmp->dsm_script_pid != -1)
-				script_stop(dsmp);
 			dsmp->dsm_droprelease = B_TRUE;
 			(void) script_start(dsmp, isv6 ? EVENT_DROP6 :
 			    EVENT_DROP, dhcp_drop, NULL, NULL);
@@ -1497,20 +1517,14 @@ check_cmd_allowed(DHCPSTATE state, dhcp_ipc_type_t cmd)
 static boolean_t
 is_iscsi_active(void)
 {
-	int	fd;
-	int	active;
+	int fd;
+	int active = 0;
 
-	if ((fd = open(ISCSI_DRIVER_DEVCTL, O_RDONLY)) == -1) {
-		return (B_FALSE);
+	if ((fd = open(ISCSI_DRIVER_DEVCTL, O_RDONLY)) != -1) {
+		if (ioctl(fd, ISCSI_IS_ACTIVE, &active) != 0)
+			active = 0;
+		(void) close(fd);
 	}
 
-	if ((ioctl(fd, ISCSI_IS_ACTIVE, &active)) != 0) {
-		active = 0;
-	}
-	(void) close(fd);
-	if (active) {
-		return (B_TRUE);
-	} else {
-		return (B_FALSE);
-	}
+	return (active != 0);
 }

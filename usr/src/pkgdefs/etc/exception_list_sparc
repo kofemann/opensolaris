@@ -106,6 +106,7 @@ usr/include/libdlvnic.h		sparc
 usr/include/libdlvlan.h		sparc
 usr/include/libdlmgmt.h		sparc
 usr/include/libdlstat.h		sparc
+usr/include/libdlsim.h		sparc
 lib/libdladm.so			sparc
 lib/llib-ldladm.ln		sparc
 lib/sparcv9/libdladm.so		sparc
@@ -343,10 +344,13 @@ usr/include/ike/sshrandom.h		sparc
 usr/include/ike/sshhash.h		sparc
 usr/include/ike/sshconf.h		sparc
 usr/lib/libike.so			sparc
+usr/lib/llib-like			sparc
 usr/lib/llib-like.ln			sparc
 usr/lib/llib-lipsecutil			sparc
 usr/lib/libipsecutil.so			sparc
 usr/lib/llib-lipsecutil.ln		sparc
+usr/lib/sparcv9/libike.so		sparc
+usr/lib/sparcv9/llib-like.ln		sparc
 usr/lib/sparcv9/libipsecutil.so		sparc
 usr/lib/sparcv9/llib-lipsecutil.ln	sparc
 #
@@ -483,6 +487,14 @@ lib/llib-ldhcputil			sparc
 lib/llib-ldhcputil.ln			sparc
 lib/libdhcpagent.so			sparc
 lib/libdhcputil.so			sparc
+#
+# These files are installed in the proto area by the build of libinstzones
+# and libpkg
+#
+usr/lib/llib-linstzones			sparc
+usr/lib/llib-linstzones.ln		sparc    
+usr/lib/llib-lpkg			sparc
+usr/lib/llib-lpkg.ln			sparc
 #
 # These files are installed in the proto area by the build of libinetcfg.
 # Only the shared object is shipped.
@@ -633,9 +645,6 @@ var/svc/manifest/network/security/krb5kdc.xml	sparc
 # they really should't be in here.
 #
 etc/sfw					sparc
-usr/sfw/bin				sparc
-usr/sfw/lib/64				sparc
-usr/sfw/lib/sparcv9			sparc
 #
 # Entries for the libmech_krb5 symlink, which has been included
 # for build purposes only, not delivered to customers.
@@ -660,6 +669,8 @@ usr/platform/sun4u/include/sys/fcode.h		sparc
 #
 usr/include/net/pppoe.h			sparc
 usr/include/net/sppptun.h		sparc
+#
+usr/include/net/simnet.h		sparc
 usr/include/net/wpa.h			sparc
 # Private net80211 headers
 usr/include/sys/net80211.h		sparc
@@ -818,21 +829,6 @@ kernel/drv/usbskel.conf			sparc
 # Public libdevid interfaces provided by devid.h
 #
 usr/include/sys/libdevid.h		sparc
-#
-# amd 8111 audio driver doesn't ship in sparc platform.
-#
-kernel/drv/sparcv9/audio810		sparc
-kernel/drv/audio810.conf		sparc
-#
-# High definition audio driver doesn't ship in sparc platform.
-#
-kernel/drv/sparcv9/audiohd		sparc
-kernel/drv/audiohd.conf			sparc
-#
-# VIA VT823x audio driver doesn't ship in sparc platform.
-#
-kernel/drv/sparcv9/audiovia823x		sparc
-kernel/drv/audiovia823x.conf		sparc
 #
 # The following files are installed in the proto area by the build of
 # libprtdiag.  libprtdiag contains interfaces which are all private.
@@ -1358,3 +1354,14 @@ usr/include/sys/scsi/adapters/qusmail.h	sparc
 
 # sbd ioctl hdr
 usr/include/sys/stmf_sbd_ioctl.h	sparc
+
+#
+# portable object file and dictionary used by libfmd_msg test
+#
+usr/lib/fm/dict/TEST.dict		sparc
+usr/lib/locale/C/LC_MESSAGES/TEST.mo	sparc
+usr/lib/locale/C/LC_MESSAGES/TEST.po	sparc
+
+# Private idmap RPC protocol
+usr/include/rpcsvc/idmap_prot.h		sparc
+usr/include/rpcsvc/idmap_prot.x		sparc

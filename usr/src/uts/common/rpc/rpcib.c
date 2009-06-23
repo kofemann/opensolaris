@@ -82,7 +82,8 @@
 #include <nfs/nfs.h>
 #include <sys/atomic.h>
 
-#define	NFS_RDMA_PORT	2050
+#define	NFS_RDMA_PORT	20049
+
 
 /*
  * Convenience structures for connection management
@@ -113,6 +114,10 @@ static int	rpcib_do_ip_ioctl(int, int, void *);
 static boolean_t rpcib_get_ib_addresses(rpcib_ipaddrs_t *, rpcib_ipaddrs_t *);
 static int rpcib_cache_kstat_update(kstat_t *, int);
 static void rib_force_cleanup(void *);
+static void rib_stop_hca_services(rib_hca_t *);
+static void rib_attach_hca(void);
+static int rib_find_hca_connection(rib_hca_t *hca, struct netbuf *s_svcaddr,
+		struct netbuf *d_svcaddr, CONN **conn);
 
 struct {
 	kstat_named_t cache_limit;
@@ -205,18 +210,12 @@ typedef	struct cache_struct	{
 	avl_node_t		avl_link;
 } cache_avl_struct_t;
 
-static uint64_t	rib_total_buffers = 0;
 uint64_t	cache_limit = 100 * 1024 * 1024;
-static volatile uint64_t	cache_allocation = 0;
 static uint64_t	cache_watermark = 80 * 1024 * 1024;
-static uint64_t	cache_hits = 0;
-static uint64_t	cache_misses = 0;
-static uint64_t	cache_cold_misses = 0;
-static uint64_t	cache_hot_misses = 0;
-static uint64_t	cache_misses_above_the_limit = 0;
 static bool_t	stats_enabled = FALSE;
 
 static uint64_t max_unsignaled_rws = 5;
+int nfs_rdma_port = NFS_RDMA_PORT;
 
 /*
  * rib_stat: private data pointer used when registering
@@ -227,9 +226,25 @@ static rpcib_state_t *rib_stat = NULL;
 
 #define	RNR_RETRIES	IBT_RNR_RETRY_1
 #define	MAX_PORTS	2
+#define	RDMA_DUMMY_WRID	0x4D3A1D4D3A1D
+#define	RDMA_CONN_REAP_RETRY	10	/* 10 secs */
 
 int preposted_rbufs = RDMA_BUFS_GRANT;
 int send_threshold = 1;
+
+/*
+ * Old cards with Tavor driver have limited memory footprint
+ * when booted in 32bit. The rib_max_rbufs tunable can be
+ * tuned for more buffers if needed.
+ */
+
+#if !defined(_ELF64) && !defined(__sparc)
+int rib_max_rbufs = MAX_BUFS;
+#else
+int rib_max_rbufs = 10 * MAX_BUFS;
+#endif	/* !(_ELF64) && !(__sparc) */
+
+int rib_conn_timeout = 60 * 12;		/* 12 minutes */
 
 /*
  * State of the plugin.
@@ -248,9 +263,6 @@ ldi_ident_t rpcib_li;
 /*
  * RPCIB RDMATF operations
  */
-#if defined(MEASURE_POOL_DEPTH)
-static void rib_posted_rbufs(uint32_t x) { return; }
-#endif
 static rdma_stat rib_reachable(int addr_type, struct netbuf *, void **handle);
 static rdma_stat rib_disconnect(CONN *conn);
 static void rib_listen(struct rdma_svc_data *rd);
@@ -287,8 +299,11 @@ static rdma_stat rib_recv(CONN *conn, struct clist **clp, uint32_t msgid);
 static rdma_stat rib_read(CONN *conn, struct clist *cl, int wait);
 static rdma_stat rib_write(CONN *conn, struct clist *cl, int wait);
 static rdma_stat rib_ping_srv(int addr_type, struct netbuf *, rpcib_ping_t *);
-static rdma_stat rib_conn_get(struct netbuf *, int addr_type, void *, CONN **);
+static rdma_stat rib_conn_get(struct netbuf *, struct netbuf *,
+	int addr_type, void *, CONN **);
 static rdma_stat rib_conn_release(CONN *conn);
+static rdma_stat rib_connect(struct netbuf *, struct netbuf *, int,
+	rpcib_ping_t *, CONN **);
 static rdma_stat rib_getinfo(rdma_info_t *info);
 
 static rib_lrc_entry_t *rib_get_cache_buf(CONN *conn, uint32_t len);
@@ -299,6 +314,7 @@ static int avl_compare(const void *t1, const void *t2);
 
 static void rib_stop_services(rib_hca_t *);
 static void rib_close_channels(rib_conn_list_t *);
+static void rib_conn_close(void *);
 
 /*
  * RPCIB addressing operations
@@ -341,7 +357,7 @@ static rdma_mod_t rib_mod = {
 	&rib_ops,	/* rdma op vector for ibtf */
 };
 
-static rdma_stat open_hcas(rpcib_state_t *);
+static rdma_stat rpcib_open_hcas(rpcib_state_t *);
 static rdma_stat rib_qp_init(rib_qp_t *, int);
 static void rib_svc_scq_handler(ibt_cq_hdl_t, void *);
 static void rib_clnt_scq_handler(ibt_cq_hdl_t, void *);
@@ -374,6 +390,9 @@ static struct recv_wid *rib_create_wid(rib_qp_t *, ibt_wr_ds_t *, uint32_t);
 static void rib_free_wid(struct recv_wid *);
 static rdma_stat rib_disconnect_channel(CONN *, rib_conn_list_t *);
 static void rib_detach_hca(rib_hca_t *);
+static void rib_close_a_channel(CONN *);
+static void rib_send_hold(rib_qp_t *);
+static void rib_send_rele(rib_qp_t *);
 
 /*
  * Registration with IBTF as a consumer
@@ -475,6 +494,65 @@ rpcib_getinfo(dev_info_t *dip, ddi_info_cmd_t cmd, void *arg, void **result)
 	return (ret);
 }
 
+static void
+rpcib_free_hca_list()
+{
+	rib_hca_t *hca, *hcap;
+
+	rw_enter(&rib_stat->hcas_list_lock, RW_WRITER);
+	hca = rib_stat->hcas_list;
+	rib_stat->hcas_list = NULL;
+	rw_exit(&rib_stat->hcas_list_lock);
+	while (hca != NULL) {
+		rw_enter(&hca->state_lock, RW_WRITER);
+		hcap = hca;
+		hca = hca->next;
+		rib_stat->nhca_inited--;
+		rib_mod.rdma_count--;
+		hcap->state = HCA_DETACHED;
+		rw_exit(&hcap->state_lock);
+		rib_stop_hca_services(hcap);
+
+		kmem_free(hcap, sizeof (*hcap));
+	}
+}
+
+static rdma_stat
+rpcib_free_service_list()
+{
+	rib_service_t *service;
+	ibt_status_t ret;
+
+	rw_enter(&rib_stat->service_list_lock, RW_WRITER);
+	while (rib_stat->service_list != NULL) {
+		service = rib_stat->service_list;
+		ret = ibt_unbind_all_services(service->srv_hdl);
+		if (ret != IBT_SUCCESS) {
+			rw_exit(&rib_stat->service_list_lock);
+#ifdef DEBUG
+			cmn_err(CE_NOTE, "rpcib_free_service_list: "
+			    "ibt_unbind_all_services failed (%d)\n", (int)ret);
+#endif
+			return (RDMA_FAILED);
+		}
+		ret = ibt_deregister_service(rib_stat->ibt_clnt_hdl,
+		    service->srv_hdl);
+		if (ret != IBT_SUCCESS) {
+			rw_exit(&rib_stat->service_list_lock);
+#ifdef DEBUG
+			cmn_err(CE_NOTE, "rpcib_free_service_list: "
+			    "ibt_deregister_service failed (%d)\n", (int)ret);
+#endif
+			return (RDMA_FAILED);
+		}
+		rib_stat->service_list = service->next;
+		kmem_free(service, sizeof (rib_service_t));
+	}
+	rw_exit(&rib_stat->service_list_lock);
+
+	return (RDMA_SUCCESS);
+}
+
 static int
 rpcib_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 {
@@ -511,10 +589,14 @@ rpcib_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	if (rib_stat == NULL) {
 		rib_stat = kmem_zalloc(sizeof (*rib_stat), KM_SLEEP);
 		mutex_init(&rib_stat->open_hca_lock, NULL, MUTEX_DRIVER, NULL);
+		rw_init(&rib_stat->hcas_list_lock, NULL, RW_DRIVER, NULL);
+		mutex_init(&rib_stat->listen_lock, NULL, MUTEX_DRIVER, NULL);
 	}
 
-	rib_stat->hca_count = ibt_get_hca_list(&rib_stat->hca_guids);
+	rib_stat->hca_count = ibt_get_hca_list(NULL);
 	if (rib_stat->hca_count < 1) {
+		mutex_destroy(&rib_stat->listen_lock);
+		rw_destroy(&rib_stat->hcas_list_lock);
 		mutex_destroy(&rib_stat->open_hca_lock);
 		kmem_free(rib_stat, sizeof (*rib_stat));
 		rib_stat = NULL;
@@ -525,15 +607,18 @@ rpcib_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	    (void *)rib_stat, &rib_stat->ibt_clnt_hdl);
 
 	if (ibt_status != IBT_SUCCESS) {
-		ibt_free_hca_list(rib_stat->hca_guids, rib_stat->hca_count);
+		mutex_destroy(&rib_stat->listen_lock);
+		rw_destroy(&rib_stat->hcas_list_lock);
 		mutex_destroy(&rib_stat->open_hca_lock);
 		kmem_free(rib_stat, sizeof (*rib_stat));
 		rib_stat = NULL;
 		return (DDI_FAILURE);
 	}
 
+	rib_stat->service_list = NULL;
+	rw_init(&rib_stat->service_list_lock, NULL, RW_DRIVER, NULL);
 	mutex_enter(&rib_stat->open_hca_lock);
-	if (open_hcas(rib_stat) != RDMA_SUCCESS) {
+	if (rpcib_open_hcas(rib_stat) != RDMA_SUCCESS) {
 		mutex_exit(&rib_stat->open_hca_lock);
 		goto open_fail;
 	}
@@ -549,7 +634,6 @@ rpcib_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	/*
 	 * Register with rdmatf
 	 */
-	rib_mod.rdma_count = rib_stat->nhca_inited;
 	r_status = rdma_register_mod(&rib_mod);
 	if (r_status != RDMA_SUCCESS && r_status != RDMA_REG_EXIST) {
 		cmn_err(CE_WARN, "rpcib_attach:rdma_register_mod failed, "
@@ -560,11 +644,15 @@ rpcib_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	return (DDI_SUCCESS);
 
 register_fail:
-	rib_detach_hca(rib_stat->hca);
+
 open_fail:
-	ibt_free_hca_list(rib_stat->hca_guids, rib_stat->hca_count);
 	(void) ibt_detach(rib_stat->ibt_clnt_hdl);
+	rpcib_free_hca_list();
+	(void) rpcib_free_service_list();
+	mutex_destroy(&rib_stat->listen_lock);
+	rw_destroy(&rib_stat->hcas_list_lock);
 	mutex_destroy(&rib_stat->open_hca_lock);
+	rw_destroy(&rib_stat->service_list_lock);
 	kmem_free(rib_stat, sizeof (*rib_stat));
 	rib_stat = NULL;
 	return (DDI_FAILURE);
@@ -590,15 +678,17 @@ rpcib_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	mutex_enter(&plugin_state_lock);
 	plugin_state = NO_ACCEPT;
 	mutex_exit(&plugin_state_lock);
-	rib_detach_hca(rib_stat->hca);
-	ibt_free_hca_list(rib_stat->hca_guids, rib_stat->hca_count);
+
+	if (rpcib_free_service_list() != RDMA_SUCCESS)
+		return (DDI_FAILURE);
+	rpcib_free_hca_list();
+
 	(void) ibt_detach(rib_stat->ibt_clnt_hdl);
+	mutex_destroy(&rib_stat->listen_lock);
+	rw_destroy(&rib_stat->hcas_list_lock);
 	mutex_destroy(&rib_stat->open_hca_lock);
-	if (rib_stat->hcas) {
-		kmem_free(rib_stat->hcas, rib_stat->hca_count *
-		    sizeof (rib_hca_t));
-		rib_stat->hcas = NULL;
-	}
+	rw_destroy(&rib_stat->service_list_lock);
+
 	kmem_free(rib_stat, sizeof (*rib_stat));
 	rib_stat = NULL;
 
@@ -625,7 +715,7 @@ static rdma_stat rib_rm_conn(CONN *, rib_conn_list_t *);
  */
 static rdma_stat
 rib_create_cq(rib_hca_t *hca, uint32_t cq_size, ibt_cq_handler_t cq_handler,
-	rib_cq_t **cqp, rpcib_state_t *ribstat)
+	rib_cq_t **cqp)
 {
 	rib_cq_t	*cq;
 	ibt_cq_attr_t	cq_attr;
@@ -645,7 +735,7 @@ rib_create_cq(rib_hca_t *hca, uint32_t cq_size, ibt_cq_handler_t cq_handler,
 		error = RDMA_FAILED;
 		goto fail;
 	}
-	ibt_set_cq_handler(cq->rib_cq_hdl, cq_handler, ribstat);
+	ibt_set_cq_handler(cq->rib_cq_hdl, cq_handler, hca);
 
 	/*
 	 * Enable CQ callbacks. CQ Callbacks are single shot
@@ -670,8 +760,25 @@ fail:
 	return (error);
 }
 
+/*
+ * rpcib_find_hca
+ *
+ * Caller should have already locked the hcas_lock before calling
+ * this function.
+ */
+static rib_hca_t *
+rpcib_find_hca(rpcib_state_t *ribstat, ib_guid_t guid)
+{
+	rib_hca_t *hca = ribstat->hcas_list;
+
+	while (hca && hca->hca_guid != guid)
+		hca = hca->next;
+
+	return (hca);
+}
+
 static rdma_stat
-open_hcas(rpcib_state_t *ribstat)
+rpcib_open_hcas(rpcib_state_t *ribstat)
 {
 	rib_hca_t		*hca;
 	ibt_status_t		ibt_status;
@@ -683,25 +790,31 @@ open_hcas(rpcib_state_t *ribstat)
 	kstat_t *ksp;
 	cache_avl_struct_t example_avl_node;
 	char rssc_name[32];
+	int old_nhca_inited = ribstat->nhca_inited;
+	ib_guid_t		*hca_guids;
 
 	ASSERT(MUTEX_HELD(&ribstat->open_hca_lock));
 
-	if (ribstat->hcas == NULL)
-		ribstat->hcas = kmem_zalloc(ribstat->hca_count *
-		    sizeof (rib_hca_t), KM_SLEEP);
+	ribstat->hca_count = ibt_get_hca_list(&hca_guids);
+	if (ribstat->hca_count == 0)
+		return (RDMA_FAILED);
 
+	rw_enter(&ribstat->hcas_list_lock, RW_WRITER);
 	/*
 	 * Open a hca and setup for RDMA
 	 */
 	for (i = 0; i < ribstat->hca_count; i++) {
+		if (rpcib_find_hca(ribstat, hca_guids[i]))
+			continue;
+		hca = kmem_zalloc(sizeof (rib_hca_t), KM_SLEEP);
+
 		ibt_status = ibt_open_hca(ribstat->ibt_clnt_hdl,
-		    ribstat->hca_guids[i],
-		    &ribstat->hcas[i].hca_hdl);
+		    hca_guids[i], &hca->hca_hdl);
 		if (ibt_status != IBT_SUCCESS) {
+			kmem_free(hca, sizeof (rib_hca_t));
 			continue;
 		}
-		ribstat->hcas[i].hca_guid = ribstat->hca_guids[i];
-		hca = &(ribstat->hcas[i]);
+		hca->hca_guid = hca_guids[i];
 		hca->ibt_clnt_hdl = ribstat->ibt_clnt_hdl;
 		hca->state = HCA_INITED;
 
@@ -744,25 +857,25 @@ open_hcas(rpcib_state_t *ribstat)
 		 * cq's will be needed.
 		 */
 		status = rib_create_cq(hca, cq_size, rib_svc_rcq_handler,
-		    &hca->svc_rcq, ribstat);
+		    &hca->svc_rcq);
 		if (status != RDMA_SUCCESS) {
 			goto fail3;
 		}
 
 		status = rib_create_cq(hca, cq_size, rib_svc_scq_handler,
-		    &hca->svc_scq, ribstat);
+		    &hca->svc_scq);
 		if (status != RDMA_SUCCESS) {
 			goto fail3;
 		}
 
 		status = rib_create_cq(hca, cq_size, rib_clnt_rcq_handler,
-		    &hca->clnt_rcq, ribstat);
+		    &hca->clnt_rcq);
 		if (status != RDMA_SUCCESS) {
 			goto fail3;
 		}
 
 		status = rib_create_cq(hca, cq_size, rib_clnt_scq_handler,
-		    &hca->clnt_scq, ribstat);
+		    &hca->clnt_scq);
 		if (status != RDMA_SUCCESS) {
 			goto fail3;
 		}
@@ -772,13 +885,13 @@ open_hcas(rpcib_state_t *ribstat)
 		 * Note rib_rbuf_create also allocates memory windows.
 		 */
 		hca->recv_pool = rib_rbufpool_create(hca,
-		    RECV_BUFFER, MAX_BUFS);
+		    RECV_BUFFER, rib_max_rbufs);
 		if (hca->recv_pool == NULL) {
 			goto fail3;
 		}
 
 		hca->send_pool = rib_rbufpool_create(hca,
-		    SEND_BUFFER, MAX_BUFS);
+		    SEND_BUFFER, rib_max_rbufs);
 		if (hca->send_pool == NULL) {
 			rib_rbufpool_destroy(hca, RECV_BUFFER);
 			goto fail3;
@@ -786,7 +899,8 @@ open_hcas(rpcib_state_t *ribstat)
 
 		if (hca->server_side_cache == NULL) {
 			(void) sprintf(rssc_name,
-			    "rib_server_side_cache_%04d", i);
+			    "rib_srvr_cache_%llx",
+			    (long long unsigned int) hca->hca_guid);
 			hca->server_side_cache = kmem_cache_create(
 			    rssc_name,
 			    sizeof (cache_avl_struct_t), 0,
@@ -802,9 +916,12 @@ open_hcas(rpcib_state_t *ribstat)
 		    (uint_t)(uintptr_t)&example_avl_node.avl_link-
 		    (uint_t)(uintptr_t)&example_avl_node);
 
+		rw_init(&hca->bound_services_lock, NULL, RW_DRIVER,
+		    hca->iblock);
+		rw_init(&hca->state_lock, NULL, RW_DRIVER, hca->iblock);
 		rw_init(&hca->avl_rw_lock,
 		    NULL, RW_DRIVER, hca->iblock);
-		mutex_init(&hca->cache_allocation,
+		mutex_init(&hca->cache_allocation_lock,
 		    NULL, MUTEX_DRIVER, NULL);
 		hca->avl_init = TRUE;
 
@@ -824,17 +941,14 @@ open_hcas(rpcib_state_t *ribstat)
 				stats_enabled = TRUE;
 			}
 		}
-		if (NULL == hca->reg_cache_clean_up) {
-			hca->reg_cache_clean_up = ddi_taskq_create(NULL,
-			    "REG_CACHE_CLEANUP", 1, TASKQ_DEFAULTPRI, 0);
-		}
+		if (hca->cleanup_helper == NULL) {
+			char tq_name[sizeof (hca->hca_guid) * 2 + 1];
 
-		/*
-		 * Initialize the registered service list and
-		 * the lock
-		 */
-		hca->service_list = NULL;
-		rw_init(&hca->service_list_lock, NULL, RW_DRIVER, hca->iblock);
+			(void) snprintf(tq_name, sizeof (tq_name), "%llX",
+			    (unsigned long long int) hca->hca_guid);
+			hca->cleanup_helper = ddi_taskq_create(NULL,
+			    tq_name, 1, TASKQ_DEFAULTPRI, 0);
+		}
 
 		mutex_init(&hca->cb_lock, NULL, MUTEX_DRIVER, hca->iblock);
 		cv_init(&hca->cb_cv, NULL, CV_DRIVER, NULL);
@@ -842,17 +956,14 @@ open_hcas(rpcib_state_t *ribstat)
 		    hca->iblock);
 		rw_init(&hca->srv_conn_list.conn_lock, NULL, RW_DRIVER,
 		    hca->iblock);
-		rw_init(&hca->state_lock, NULL, RW_DRIVER, hca->iblock);
 		mutex_init(&hca->inuse_lock, NULL, MUTEX_DRIVER, hca->iblock);
 		hca->inuse = TRUE;
-		/*
-		 * XXX One hca only. Add multi-hca functionality if needed
-		 * later.
-		 */
-		ribstat->hca = hca;
+
+		hca->next = ribstat->hcas_list;
+		ribstat->hcas_list = hca;
 		ribstat->nhca_inited++;
 		ibt_free_portinfo(hca->hca_ports, hca->hca_pinfosz);
-		break;
+		continue;
 
 fail3:
 		ibt_free_portinfo(hca->hca_ports, hca->hca_pinfosz);
@@ -860,9 +971,16 @@ fail2:
 		(void) ibt_free_pd(hca->hca_hdl, hca->pd_hdl);
 fail1:
 		(void) ibt_close_hca(hca->hca_hdl);
-
+		kmem_free(hca, sizeof (rib_hca_t));
 	}
-	if (ribstat->hca != NULL)
+	rw_exit(&ribstat->hcas_list_lock);
+	ibt_free_hca_list(hca_guids, ribstat->hca_count);
+	rib_mod.rdma_count = rib_stat->nhca_inited;
+
+	/*
+	 * return success if at least one new hca has been configured.
+	 */
+	if (ribstat->nhca_inited != old_nhca_inited)
 		return (RDMA_SUCCESS);
 	else
 		return (RDMA_FAILED);
@@ -881,93 +999,9 @@ rib_clnt_scq_handler(ibt_cq_hdl_t cq_hdl, void *arg)
 {
 	ibt_status_t	ibt_status;
 	ibt_wc_t	wc;
-	int		i;
-
-	/*
-	 * Re-enable cq notify here to avoid missing any
-	 * completion queue notification.
-	 */
-	(void) ibt_enable_cq_notify(cq_hdl, IBT_NEXT_COMPLETION);
-
-	ibt_status = IBT_SUCCESS;
-	while (ibt_status != IBT_CQ_EMPTY) {
-	bzero(&wc, sizeof (wc));
-	ibt_status = ibt_poll_cq(cq_hdl, &wc, 1, NULL);
-	if (ibt_status != IBT_SUCCESS)
-		return;
-
-	/*
-	 * Got a send completion
-	 */
-	if (wc.wc_id != NULL) {	/* XXX can it be otherwise ???? */
-		struct send_wid *wd = (struct send_wid *)(uintptr_t)wc.wc_id;
-		CONN	*conn = qptoc(wd->qp);
-
-		mutex_enter(&wd->sendwait_lock);
-		switch (wc.wc_status) {
-		case IBT_WC_SUCCESS:
-			wd->status = RDMA_SUCCESS;
-			break;
-		case IBT_WC_WR_FLUSHED_ERR:
-			wd->status = RDMA_FAILED;
-			break;
-		default:
-/*
- *    RC Send Q Error Code		Local state     Remote State
- *    ==================== 		===========     ============
- *    IBT_WC_BAD_RESPONSE_ERR             ERROR           None
- *    IBT_WC_LOCAL_LEN_ERR                ERROR           None
- *    IBT_WC_LOCAL_CHAN_OP_ERR            ERROR           None
- *    IBT_WC_LOCAL_PROTECT_ERR            ERROR           None
- *    IBT_WC_MEM_WIN_BIND_ERR             ERROR           None
- *    IBT_WC_REMOTE_INVALID_REQ_ERR       ERROR           ERROR
- *    IBT_WC_REMOTE_ACCESS_ERR            ERROR           ERROR
- *    IBT_WC_REMOTE_OP_ERR                ERROR           ERROR
- *    IBT_WC_RNR_NAK_TIMEOUT_ERR          ERROR           None
- *    IBT_WC_TRANS_TIMEOUT_ERR            ERROR           None
- *    IBT_WC_WR_FLUSHED_ERR               None            None
- */
-			/*
-			 * Channel in error state. Set connection to
-			 * ERROR and cleanup will happen either from
-			 * conn_release  or from rib_conn_get
-			 */
-			wd->status = RDMA_FAILED;
-			mutex_enter(&conn->c_lock);
-			if (conn->c_state != C_DISCONN_PEND)
-				conn->c_state = C_ERROR_CONN;
-			mutex_exit(&conn->c_lock);
-			break;
-		}
-
-		if (wd->cv_sig == 1) {
-			/*
-			 * Notify poster
-			 */
-			cv_signal(&wd->wait_cv);
-			mutex_exit(&wd->sendwait_lock);
-		} else {
-			/*
-			 * Poster not waiting for notification.
-			 * Free the send buffers and send_wid
-			 */
-			for (i = 0; i < wd->nsbufs; i++) {
-				rib_rbuf_free(qptoc(wd->qp), SEND_BUFFER,
-				    (void *)(uintptr_t)wd->sbufaddr[i]);
-				}
-			mutex_exit(&wd->sendwait_lock);
-			(void) rib_free_sendwait(wd);
-			}
-		}
-	}
-}
-
-/* ARGSUSED */
-static void
-rib_svc_scq_handler(ibt_cq_hdl_t cq_hdl, void *arg)
-{
-	ibt_status_t	ibt_status;
-	ibt_wc_t	wc;
+	struct send_wid	*wd;
+	CONN		*conn;
+	rib_qp_t	*qp;
 	int		i;
 
 	/*
@@ -986,18 +1020,49 @@ rib_svc_scq_handler(ibt_cq_hdl_t cq_hdl, void *arg)
 		/*
 		 * Got a send completion
 		 */
-		if (wc.wc_id != NULL) { /* XXX NULL possible ???? */
-			struct send_wid *wd =
-			    (struct send_wid *)(uintptr_t)wc.wc_id;
+		if (wc.wc_id != RDMA_DUMMY_WRID) {
+			wd = (struct send_wid *)(uintptr_t)wc.wc_id;
+			qp = wd->qp;
+			conn = qptoc(qp);
+
 			mutex_enter(&wd->sendwait_lock);
+			switch (wc.wc_status) {
+			case IBT_WC_SUCCESS:
+				wd->status = RDMA_SUCCESS;
+				break;
+			default:
+/*
+ *    RC Send Q Error Code		Local state     Remote State
+ *    ==================== 		===========     ============
+ *    IBT_WC_BAD_RESPONSE_ERR             ERROR           None
+ *    IBT_WC_LOCAL_LEN_ERR                ERROR           None
+ *    IBT_WC_LOCAL_CHAN_OP_ERR            ERROR           None
+ *    IBT_WC_LOCAL_PROTECT_ERR            ERROR           None
+ *    IBT_WC_MEM_WIN_BIND_ERR             ERROR           None
+ *    IBT_WC_REMOTE_INVALID_REQ_ERR       ERROR           ERROR
+ *    IBT_WC_REMOTE_ACCESS_ERR            ERROR           ERROR
+ *    IBT_WC_REMOTE_OP_ERR                ERROR           ERROR
+ *    IBT_WC_RNR_NAK_TIMEOUT_ERR          ERROR           None
+ *    IBT_WC_TRANS_TIMEOUT_ERR            ERROR           None
+ *    IBT_WC_WR_FLUSHED_ERR               ERROR           None
+ */
+				/*
+				 * Channel in error state. Set connection to
+				 * ERROR and cleanup will happen either from
+				 * conn_release  or from rib_conn_get
+				 */
+				wd->status = RDMA_FAILED;
+				mutex_enter(&conn->c_lock);
+				if (conn->c_state != C_DISCONN_PEND)
+					conn->c_state = C_ERROR_CONN;
+				mutex_exit(&conn->c_lock);
+				break;
+			}
+
 			if (wd->cv_sig == 1) {
 				/*
-				 * Update completion status and notify poster
+				 * Notify poster
 				 */
-				if (wc.wc_status == IBT_WC_SUCCESS)
-					wd->status = RDMA_SUCCESS;
-				else
-					wd->status = RDMA_FAILED;
 				cv_signal(&wd->wait_cv);
 				mutex_exit(&wd->sendwait_lock);
 			} else {
@@ -1010,6 +1075,88 @@ rib_svc_scq_handler(ibt_cq_hdl_t cq_hdl, void *arg)
 					    SEND_BUFFER,
 					    (void *)(uintptr_t)wd->sbufaddr[i]);
 				}
+
+				/* decrement the send ref count */
+				rib_send_rele(qp);
+
+				mutex_exit(&wd->sendwait_lock);
+				(void) rib_free_sendwait(wd);
+			}
+		}
+	}
+}
+
+/* ARGSUSED */
+static void
+rib_svc_scq_handler(ibt_cq_hdl_t cq_hdl, void *arg)
+{
+	ibt_status_t	ibt_status;
+	ibt_wc_t	wc;
+	struct send_wid	*wd;
+	rib_qp_t	*qp;
+	CONN		*conn;
+	int		i;
+
+	/*
+	 * Re-enable cq notify here to avoid missing any
+	 * completion queue notification.
+	 */
+	(void) ibt_enable_cq_notify(cq_hdl, IBT_NEXT_COMPLETION);
+
+	ibt_status = IBT_SUCCESS;
+	while (ibt_status != IBT_CQ_EMPTY) {
+		bzero(&wc, sizeof (wc));
+		ibt_status = ibt_poll_cq(cq_hdl, &wc, 1, NULL);
+		if (ibt_status != IBT_SUCCESS)
+			return;
+
+		/*
+		 * Got a send completion
+		 */
+		if (wc.wc_id != RDMA_DUMMY_WRID) {
+			wd = (struct send_wid *)(uintptr_t)wc.wc_id;
+			qp = wd->qp;
+			conn = qptoc(qp);
+			mutex_enter(&wd->sendwait_lock);
+
+			switch (wc.wc_status) {
+			case IBT_WC_SUCCESS:
+				wd->status = RDMA_SUCCESS;
+				break;
+			default:
+				/*
+				 * Channel in error state. Set connection to
+				 * ERROR and cleanup will happen either from
+				 * conn_release  or conn timeout.
+				 */
+				wd->status = RDMA_FAILED;
+				mutex_enter(&conn->c_lock);
+				if (conn->c_state != C_DISCONN_PEND)
+					conn->c_state = C_ERROR_CONN;
+				mutex_exit(&conn->c_lock);
+				break;
+			}
+
+			if (wd->cv_sig == 1) {
+				/*
+				 * Update completion status and notify poster
+				 */
+				cv_signal(&wd->wait_cv);
+				mutex_exit(&wd->sendwait_lock);
+			} else {
+				/*
+				 * Poster not waiting for notification.
+				 * Free the send buffers and send_wid
+				 */
+				for (i = 0; i < wd->nsbufs; i++) {
+					rib_rbuf_free(qptoc(wd->qp),
+					    SEND_BUFFER,
+					    (void *)(uintptr_t)wd->sbufaddr[i]);
+				}
+
+				/* decrement the send ref count */
+				rib_send_rele(qp);
+
 				mutex_exit(&wd->sendwait_lock);
 				(void) rib_free_sendwait(wd);
 			}
@@ -1184,9 +1331,6 @@ rib_svc_rcq_handler(ibt_cq_hdl_t cq_hdl, void *arg)
 		conn = qptoc(qp);
 		mutex_enter(&qp->posted_rbufs_lock);
 		qp->n_posted_rbufs--;
-#if defined(MEASURE_POOL_DEPTH)
-		rib_posted_rbufs(preposted_rbufs -  qp->n_posted_rbufs);
-#endif
 		if (qp->n_posted_rbufs == 0)
 			cv_signal(&qp->posted_rbufs_cv);
 		mutex_exit(&qp->posted_rbufs_lock);
@@ -1290,6 +1434,15 @@ rib_svc_rcq_handler(ibt_cq_hdl_t cq_hdl, void *arg)
 	}
 }
 
+static void
+rib_attach_hca()
+{
+	mutex_enter(&rib_stat->open_hca_lock);
+	(void) rpcib_open_hcas(rib_stat);
+	rib_listen(NULL);
+	mutex_exit(&rib_stat->open_hca_lock);
+}
+
 /*
  * Handles DR event of IBT_HCA_DETACH_EVENT.
  */
@@ -1298,20 +1451,46 @@ static void
 rib_async_handler(void *clnt_private, ibt_hca_hdl_t hca_hdl,
 	ibt_async_code_t code, ibt_async_event_t *event)
 {
-
 	switch (code) {
 	case IBT_HCA_ATTACH_EVENT:
-		/* ignore */
+		rib_attach_hca();
 		break;
 	case IBT_HCA_DETACH_EVENT:
 	{
-		ASSERT(rib_stat->hca->hca_hdl == hca_hdl);
-		rib_detach_hca(rib_stat->hca);
+		rib_hca_t *hca;
+
+		rw_enter(&rib_stat->hcas_list_lock, RW_READER);
+		for (hca = rib_stat->hcas_list; hca; hca = hca->next) {
+			rw_enter(&hca->state_lock, RW_READER);
+			if ((hca->state != HCA_DETACHED) &&
+			    (hca->hca_hdl == hca_hdl)) {
+				rw_exit(&hca->state_lock);
+				break;
+			}
+			rw_exit(&hca->state_lock);
+		}
+		rw_exit(&rib_stat->hcas_list_lock);
+
+		if (hca == NULL)
+			return;
+		ASSERT(hca->hca_hdl == hca_hdl);
+		rib_detach_hca(hca);
 #ifdef DEBUG
 		cmn_err(CE_NOTE, "rib_async_handler(): HCA being detached!\n");
 #endif
 		break;
 	}
+	case IBT_EVENT_PORT_UP:
+		/*
+		 * A port is up. We should call rib_listen() since there is
+		 * a chance that rib_listen() may have failed during
+		 * rib_attach_hca() because the port had not been up yet.
+		 */
+		rib_listen(NULL);
+#ifdef DEBUG
+		cmn_err(CE_NOTE, "rib_async_handler(): IBT_EVENT_PORT_UP\n");
+#endif
+		break;
 #ifdef DEBUG
 	case IBT_EVENT_PATH_MIGRATED:
 		cmn_err(CE_NOTE, "rib_async_handler(): "
@@ -1345,9 +1524,6 @@ rib_async_handler(void *clnt_private, ibt_hca_hdl_t hca_hdl,
 	case IBT_ERROR_PORT_DOWN:
 		cmn_err(CE_NOTE, "rib_async_handler(): IBT_ERROR_PORT_DOWN\n");
 		break;
-	case IBT_EVENT_PORT_UP:
-		cmn_err(CE_NOTE, "rib_async_handler(): IBT_EVENT_PORT_UP\n");
-		break;
 	case IBT_ASYNC_OPAQUE1:
 		cmn_err(CE_NOTE, "rib_async_handler(): IBT_ASYNC_OPAQUE1\n");
 		break;
@@ -1374,22 +1550,16 @@ rib_reachable(int addr_type, struct netbuf *raddr, void **handle)
 {
 	rdma_stat	status;
 	rpcib_ping_t	rpt;
+	struct netbuf	saddr;
+	CONN		*conn;
 
-	/*
-	 * First check if a hca is still attached
-	 */
-	rw_enter(&rib_stat->hca->state_lock, RW_READER);
-	if (rib_stat->hca->state != HCA_INITED) {
-		rw_exit(&rib_stat->hca->state_lock);
-		return (RDMA_FAILED);
-	}
-
-	bzero(&rpt, sizeof (rpcib_ping_t));
-	status = rib_ping_srv(addr_type, raddr, &rpt);
-	rw_exit(&rib_stat->hca->state_lock);
+	bzero(&saddr, sizeof (struct netbuf));
+	status = rib_connect(&saddr, raddr, addr_type, &rpt, &conn);
 
 	if (status == RDMA_SUCCESS) {
 		*handle = (void *)rpt.hca;
+		/* release the reference */
+		(void) rib_conn_release(conn);
 		return (RDMA_SUCCESS);
 	} else {
 		*handle = NULL;
@@ -1426,6 +1596,8 @@ rib_clnt_create_chan(rib_hca_t *hca, struct netbuf *raddr, rib_qp_t **qp)
 	cv_init(&kqp->cb_conn_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&kqp->posted_rbufs_cv, NULL, CV_DEFAULT, NULL);
 	mutex_init(&kqp->posted_rbufs_lock, NULL, MUTEX_DRIVER, hca->iblock);
+	cv_init(&kqp->send_rbufs_cv, NULL, CV_DEFAULT, NULL);
+	mutex_init(&kqp->send_rbufs_lock, NULL, MUTEX_DRIVER, hca->iblock);
 	mutex_init(&kqp->replylist_lock, NULL, MUTEX_DRIVER, hca->iblock);
 	mutex_init(&kqp->rdlist_lock, NULL, MUTEX_DEFAULT, hca->iblock);
 	mutex_init(&kqp->cb_lock, NULL, MUTEX_DRIVER, hca->iblock);
@@ -1504,6 +1676,8 @@ rib_svc_create_chan(rib_hca_t *hca, caddr_t q, uint8_t port, rib_qp_t **qp)
 	cv_init(&kqp->posted_rbufs_cv, NULL, CV_DEFAULT, NULL);
 	mutex_init(&kqp->replylist_lock, NULL, MUTEX_DEFAULT, hca->iblock);
 	mutex_init(&kqp->posted_rbufs_lock, NULL, MUTEX_DRIVER, hca->iblock);
+	cv_init(&kqp->send_rbufs_cv, NULL, CV_DEFAULT, NULL);
+	mutex_init(&kqp->send_rbufs_lock, NULL, MUTEX_DRIVER, hca->iblock);
 	mutex_init(&kqp->rdlist_lock, NULL, MUTEX_DEFAULT, hca->iblock);
 	mutex_init(&kqp->cb_lock, NULL, MUTEX_DRIVER, hca->iblock);
 	cv_init(&kqp->rdmaconn.c_cv, NULL, CV_DEFAULT, NULL);
@@ -1540,11 +1714,9 @@ rib_clnt_cm_handler(void *clnt_hdl, ibt_cm_event_t *event,
     ibt_cm_return_args_t *ret_args, void *priv_data,
     ibt_priv_data_len_t len)
 {
-	rpcib_state_t   *ribstat;
 	rib_hca_t	*hca;
 
-	ribstat = (rpcib_state_t *)clnt_hdl;
-	hca = (rib_hca_t *)ribstat->hca;
+	hca = (rib_hca_t *)clnt_hdl;
 
 	switch (event->cm_type) {
 
@@ -1586,14 +1758,6 @@ rib_clnt_cm_handler(void *clnt_hdl, ibt_cm_event_t *event,
 			conn->c_state = C_ERROR_CONN;
 
 			/*
-			 * Free the rc_channel. Channel has already
-			 * transitioned to ERROR state and WRs have been
-			 * FLUSHED_ERR already.
-			 */
-			(void) ibt_free_channel(qp->qp_hdl);
-			qp->qp_hdl = NULL;
-
-			/*
 			 * Free the conn if c_ref is down to 0 already
 			 */
 			if (conn->c_ref == 0) {
@@ -1602,9 +1766,18 @@ rib_clnt_cm_handler(void *clnt_hdl, ibt_cm_event_t *event,
 				 */
 				conn->c_state = C_DISCONN_PEND;
 				mutex_exit(&conn->c_lock);
-				(void) rib_disconnect_channel(conn,
-				    &hca->cl_conn_list);
+				rw_enter(&hca->state_lock, RW_READER);
+				if (hca->state != HCA_DETACHED)
+					(void) rib_disconnect_channel(conn,
+					    &hca->cl_conn_list);
+				rw_exit(&hca->state_lock);
 			} else {
+				/*
+				 * conn will be freed when c_ref goes to 0.
+				 * Indicate to cleaning thread not to close
+				 * the connection, but just free the channel.
+				 */
+				conn->c_flags |= C_CLOSE_NOTNEEDED;
 				mutex_exit(&conn->c_lock);
 			}
 #ifdef DEBUG
@@ -1662,7 +1835,7 @@ rib_conn_to_srv(rib_hca_t *hca, rib_qp_t *qp, rpcib_ping_t *rptp)
 		break;
 	}
 
-	ipcm_info.src_port = NFS_RDMA_PORT;
+	ipcm_info.src_port = (in_port_t)nfs_rdma_port;
 
 	ibt_status = ibt_format_ip_private_data(&ipcm_info,
 	    IBT_IP_HDR_PRIV_DATA_SZ, cmp_ip_pvt);
@@ -1685,10 +1858,11 @@ rib_conn_to_srv(rib_hca_t *hca, rib_qp_t *qp, rpcib_ping_t *rptp)
 	qp_attr.rc_control = IBT_CEP_RDMA_RD | IBT_CEP_RDMA_WR;
 	qp_attr.rc_flags = IBT_WR_SIGNALED;
 
-	rptp->path.pi_sid = ibt_get_ip_sid(IPPROTO_TCP, NFS_RDMA_PORT);
+	rptp->path.pi_sid = ibt_get_ip_sid(IPPROTO_TCP, nfs_rdma_port);
 	chan_args.oc_path = &rptp->path;
+
 	chan_args.oc_cm_handler = rib_clnt_cm_handler;
-	chan_args.oc_cm_clnt_private = (void *)rib_stat;
+	chan_args.oc_cm_clnt_private = (void *)hca;
 	chan_args.oc_rdma_ra_out = 4;
 	chan_args.oc_rdma_ra_in = 4;
 	chan_args.oc_path_retry_cnt = 2;
@@ -1751,7 +1925,7 @@ refresh:
 rdma_stat
 rib_ping_srv(int addr_type, struct netbuf *raddr, rpcib_ping_t *rptp)
 {
-	uint_t			i;
+	uint_t			i, addr_count;
 	ibt_status_t		ibt_status;
 	uint8_t			num_paths_p;
 	ibt_ip_path_attr_t	ipattr;
@@ -1760,8 +1934,11 @@ rib_ping_srv(int addr_type, struct netbuf *raddr, rpcib_ping_t *rptp)
 	rpcib_ipaddrs_t		addrs6;
 	struct sockaddr_in	*sinp;
 	struct sockaddr_in6	*sin6p;
-	rdma_stat		retval = RDMA_SUCCESS;
+	rdma_stat		retval = RDMA_FAILED;
+	rib_hca_t *hca;
 
+	if ((addr_type != AF_INET) && (addr_type != AF_INET6))
+		return (RDMA_INVAL);
 	ASSERT(raddr->buf != NULL);
 
 	bzero(&ipattr, sizeof (ibt_ip_path_attr_t));
@@ -1769,57 +1946,45 @@ rib_ping_srv(int addr_type, struct netbuf *raddr, rpcib_ping_t *rptp)
 	if (!rpcib_get_ib_addresses(&addrs4, &addrs6) ||
 	    (addrs4.ri_count == 0 && addrs6.ri_count == 0)) {
 		retval = RDMA_FAILED;
-		goto done;
+		goto done2;
 	}
 
-	/* Prep the destination address */
-	switch (addr_type) {
-	case AF_INET:
+	if (addr_type == AF_INET) {
+		addr_count = addrs4.ri_count;
 		sinp = (struct sockaddr_in *)raddr->buf;
 		rptp->dstip.family = AF_INET;
 		rptp->dstip.un.ip4addr = sinp->sin_addr.s_addr;
 		sinp = addrs4.ri_list;
-
-		ipattr.ipa_dst_ip 	= &rptp->dstip;
-		ipattr.ipa_hca_guid	= rib_stat->hca->hca_guid;
-		ipattr.ipa_ndst		= 1;
-		ipattr.ipa_max_paths	= 1;
-		ipattr.ipa_src_ip.family = rptp->dstip.family;
-		for (i = 0; i < addrs4.ri_count; i++) {
-			num_paths_p = 0;
-			ipattr.ipa_src_ip.un.ip4addr = sinp[i].sin_addr.s_addr;
-			bzero(&srcip, sizeof (ibt_path_ip_src_t));
-
-			ibt_status = ibt_get_ip_paths(rib_stat->ibt_clnt_hdl,
-			    IBT_PATH_NO_FLAGS, &ipattr, &rptp->path,
-			    &num_paths_p, &srcip);
-			if (ibt_status == IBT_SUCCESS &&
-			    num_paths_p != 0 &&
-			    rptp->path.pi_hca_guid == rib_stat->hca->hca_guid) {
-				rptp->hca = rib_stat->hca;
-				rptp->srcip.family = AF_INET;
-				rptp->srcip.un.ip4addr =
-				    srcip.ip_primary.un.ip4addr;
-				goto done;
-			}
-		}
-		retval = RDMA_FAILED;
-		break;
-
-	case AF_INET6:
+	} else {
+		addr_count = addrs6.ri_count;
 		sin6p = (struct sockaddr_in6 *)raddr->buf;
 		rptp->dstip.family = AF_INET6;
 		rptp->dstip.un.ip6addr = sin6p->sin6_addr;
 		sin6p = addrs6.ri_list;
+	}
+
+	rw_enter(&rib_stat->hcas_list_lock, RW_READER);
+	for (hca = rib_stat->hcas_list; hca; hca = hca->next) {
+		rw_enter(&hca->state_lock, RW_READER);
+		if (hca->state == HCA_DETACHED) {
+			rw_exit(&hca->state_lock);
+			continue;
+		}
 
 		ipattr.ipa_dst_ip 	= &rptp->dstip;
-		ipattr.ipa_hca_guid	= rib_stat->hca->hca_guid;
+		ipattr.ipa_hca_guid	= hca->hca_guid;
 		ipattr.ipa_ndst		= 1;
 		ipattr.ipa_max_paths	= 1;
 		ipattr.ipa_src_ip.family = rptp->dstip.family;
-		for (i = 0; i < addrs6.ri_count; i++) {
+		for (i = 0; i < addr_count; i++) {
 			num_paths_p = 0;
-			ipattr.ipa_src_ip.un.ip6addr = sin6p[i].sin6_addr;
+			if (addr_type == AF_INET) {
+				ipattr.ipa_src_ip.un.ip4addr =
+				    sinp[i].sin_addr.s_addr;
+			} else {
+				ipattr.ipa_src_ip.un.ip6addr =
+				    sin6p[i].sin6_addr;
+			}
 			bzero(&srcip, sizeof (ibt_path_ip_src_t));
 
 			ibt_status = ibt_get_ip_paths(rib_stat->ibt_clnt_hdl,
@@ -1827,23 +1992,28 @@ rib_ping_srv(int addr_type, struct netbuf *raddr, rpcib_ping_t *rptp)
 			    &num_paths_p, &srcip);
 			if (ibt_status == IBT_SUCCESS &&
 			    num_paths_p != 0 &&
-			    rptp->path.pi_hca_guid == rib_stat->hca->hca_guid) {
-				rptp->hca = rib_stat->hca;
-				rptp->srcip.family = AF_INET6;
-				rptp->srcip.un.ip6addr =
-				    srcip.ip_primary.un.ip6addr;
-				goto done;
+			    rptp->path.pi_hca_guid == hca->hca_guid) {
+				rptp->hca = hca;
+				rw_exit(&hca->state_lock);
+				if (addr_type == AF_INET) {
+					rptp->srcip.family = AF_INET;
+					rptp->srcip.un.ip4addr =
+					    srcip.ip_primary.un.ip4addr;
+				} else {
+					rptp->srcip.family = AF_INET6;
+					rptp->srcip.un.ip6addr =
+					    srcip.ip_primary.un.ip6addr;
+
+				}
+				retval = RDMA_SUCCESS;
+				goto done1;
 			}
 		}
-		retval = RDMA_FAILED;
-		break;
-
-	default:
-		retval = RDMA_INVAL;
-		break;
+		rw_exit(&hca->state_lock);
 	}
-done:
-
+done1:
+	rw_exit(&rib_stat->hcas_list_lock);
+done2:
 	if (addrs4.ri_size > 0)
 		kmem_free(addrs4.ri_list, addrs4.ri_size);
 	if (addrs6.ri_size > 0)
@@ -1861,6 +2031,18 @@ rib_disconnect_channel(CONN *conn, rib_conn_list_t *conn_list)
 	rib_qp_t	*qp = ctoqp(conn);
 	rib_hca_t	*hca;
 
+	mutex_enter(&conn->c_lock);
+	if (conn->c_timeout != NULL) {
+		mutex_exit(&conn->c_lock);
+		(void) untimeout(conn->c_timeout);
+		mutex_enter(&conn->c_lock);
+	}
+
+	while (conn->c_flags & C_CLOSE_PENDING) {
+		cv_wait(&conn->c_cv, &conn->c_lock);
+	}
+	mutex_exit(&conn->c_lock);
+
 	/*
 	 * c_ref == 0 and connection is in C_DISCONN_PEND
 	 */
@@ -1868,23 +2050,23 @@ rib_disconnect_channel(CONN *conn, rib_conn_list_t *conn_list)
 	if (conn_list != NULL)
 		(void) rib_rm_conn(conn, conn_list);
 
+	/*
+	 * There is only one case where we get here with
+	 * qp_hdl = NULL, which is during connection setup on
+	 * the client. In such a case there are no posted
+	 * send/recv buffers.
+	 */
 	if (qp->qp_hdl != NULL) {
-		/*
-		 * If the channel has not been establised,
-		 * ibt_flush_channel is called to flush outstanding WRs
-		 * on the Qs.  Otherwise, ibt_close_rc_channel() is
-		 * called.  The channel is then freed.
-		 */
-		if (conn_list != NULL)
-			(void) ibt_close_rc_channel(qp->qp_hdl,
-			    IBT_BLOCKING, NULL, 0, NULL, NULL, 0);
-		else
-			(void) ibt_flush_channel(qp->qp_hdl);
-
 		mutex_enter(&qp->posted_rbufs_lock);
 		while (qp->n_posted_rbufs)
 			cv_wait(&qp->posted_rbufs_cv, &qp->posted_rbufs_lock);
 		mutex_exit(&qp->posted_rbufs_lock);
+
+		mutex_enter(&qp->send_rbufs_lock);
+		while (qp->n_send_rbufs)
+			cv_wait(&qp->send_rbufs_cv, &qp->send_rbufs_lock);
+		mutex_exit(&qp->send_rbufs_lock);
+
 		(void) ibt_free_channel(qp->qp_hdl);
 		qp->qp_hdl = NULL;
 	}
@@ -1897,10 +2079,11 @@ rib_disconnect_channel(CONN *conn, rib_conn_list_t *conn_list)
 
 	cv_destroy(&qp->cb_conn_cv);
 	cv_destroy(&qp->posted_rbufs_cv);
+	cv_destroy(&qp->send_rbufs_cv);
 	mutex_destroy(&qp->cb_lock);
-
 	mutex_destroy(&qp->replylist_lock);
 	mutex_destroy(&qp->posted_rbufs_lock);
+	mutex_destroy(&qp->send_rbufs_lock);
 	mutex_destroy(&qp->rdlist_lock);
 
 	cv_destroy(&conn->c_cv);
@@ -1950,6 +2133,32 @@ rib_disconnect_channel(CONN *conn, rib_conn_list_t *conn_list)
 	}
 
 	return (RDMA_SUCCESS);
+}
+
+/*
+ * All sends are done under the protection of
+ * the wdesc->sendwait_lock. n_send_rbufs count
+ * is protected using the send_rbufs_lock.
+ * lock ordering is:
+ * sendwait_lock -> send_rbufs_lock
+ */
+
+void
+rib_send_hold(rib_qp_t *qp)
+{
+	mutex_enter(&qp->send_rbufs_lock);
+	qp->n_send_rbufs++;
+	mutex_exit(&qp->send_rbufs_lock);
+}
+
+void
+rib_send_rele(rib_qp_t *qp)
+{
+	mutex_enter(&qp->send_rbufs_lock);
+	qp->n_send_rbufs--;
+	if (qp->n_send_rbufs == 0)
+		cv_signal(&qp->send_rbufs_cv);
+	mutex_exit(&qp->send_rbufs_lock);
 }
 
 /*
@@ -2015,16 +2224,25 @@ rib_sendwait(rib_qp_t *qp, struct send_wid *wd)
 	if (wd->status != (uint_t)SEND_WAIT) {
 		/* got send completion */
 		if (wd->status != RDMA_SUCCESS) {
-			error = wd->status;
-		if (wd->status != RDMA_CONNLOST)
-			error = RDMA_FAILED;
+			switch (wd->status) {
+			case RDMA_CONNLOST:
+				error = RDMA_CONNLOST;
+				break;
+			default:
+				error = RDMA_FAILED;
+				break;
+			}
 		}
 		for (i = 0; i < wd->nsbufs; i++) {
 			rib_rbuf_free(qptoc(qp), SEND_BUFFER,
 			    (void *)(uintptr_t)wd->sbufaddr[i]);
 		}
+
+		rib_send_rele(qp);
+
 		mutex_exit(&wd->sendwait_lock);
 		(void) rib_free_sendwait(wd);
+
 	} else {
 		mutex_exit(&wd->sendwait_lock);
 	}
@@ -2116,17 +2334,18 @@ rib_send_and_wait(CONN *conn, struct clist *cl, uint32_t msgid,
 		tx_wr.wr_flags = IBT_WR_SEND_SIGNAL;
 		wdesc = rib_init_sendwait(msgid, cv_sig, qp);
 		*swid = (caddr_t)wdesc;
+		tx_wr.wr_id = (ibt_wrid_t)(uintptr_t)wdesc;
+		mutex_enter(&wdesc->sendwait_lock);
+		wdesc->nsbufs = nds;
+		for (i = 0; i < nds; i++) {
+			wdesc->sbufaddr[i] = sgl[i].ds_va;
+		}
 	} else {
 		tx_wr.wr_flags = IBT_WR_NO_FLAGS;
-		wdesc = rib_init_sendwait(msgid, 0, qp);
-		*swid = (caddr_t)wdesc;
-	}
-	wdesc->nsbufs = nds;
-	for (i = 0; i < nds; i++) {
-		wdesc->sbufaddr[i] = sgl[i].ds_va;
+		*swid = NULL;
+		tx_wr.wr_id = (ibt_wrid_t)RDMA_DUMMY_WRID;
 	}
 
-	tx_wr.wr_id = (ibt_wrid_t)(uintptr_t)wdesc;
 	tx_wr.wr_opcode = IBT_WRC_SEND;
 	tx_wr.wr_trans = IBT_RC_SRV;
 	tx_wr.wr_nds = nds;
@@ -2141,18 +2360,22 @@ rib_send_and_wait(CONN *conn, struct clist *cl, uint32_t msgid,
 		if (conn->c_state != C_DISCONN_PEND)
 			conn->c_state = C_ERROR_CONN;
 		mutex_exit(&conn->c_lock);
-		for (i = 0; i < nds; i++) {
-			rib_rbuf_free(conn, SEND_BUFFER,
-			    (void *)(uintptr_t)wdesc->sbufaddr[i]);
+		if (send_sig) {
+			for (i = 0; i < nds; i++) {
+				rib_rbuf_free(conn, SEND_BUFFER,
+				    (void *)(uintptr_t)wdesc->sbufaddr[i]);
+			}
+			mutex_exit(&wdesc->sendwait_lock);
+			(void) rib_free_sendwait(wdesc);
 		}
-
-		(void) rib_free_sendwait(wdesc);
-
 		return (RDMA_CONNLOST);
 	}
+
 	mutex_exit(&conn->c_lock);
 
 	if (send_sig) {
+		rib_send_hold(qp);
+		mutex_exit(&wdesc->sendwait_lock);
 		if (cv_sig) {
 			/*
 			 * cv_wait for send to complete.
@@ -2181,7 +2404,8 @@ rib_send(CONN *conn, struct clist *cl, uint32_t msgid)
 }
 
 /*
- * Server interface (svc_rdma_ksend).
+ * Deprecated/obsolete interface not used currently
+ * but earlier used for READ-READ protocol.
  * Send RPC reply and wait for RDMA_DONE.
  */
 rdma_stat
@@ -2516,19 +2740,16 @@ rib_write(CONN *conn, struct clist *cl, int wait)
 {
 	ibt_send_wr_t	tx_wr;
 	int		cv_sig;
-	int		i;
 	ibt_wr_ds_t	sgl[DSEG_MAX];
 	struct send_wid	*wdesc;
 	ibt_status_t	ibt_status;
 	rdma_stat	ret = RDMA_SUCCESS;
 	rib_qp_t	*qp = ctoqp(conn);
 	uint64_t	n_writes = 0;
-	bool_t		force_wait = FALSE;
 
 	if (cl == NULL) {
 		return (RDMA_FAILED);
 	}
-
 
 	while ((cl != NULL)) {
 		if (cl->c_len > 0) {
@@ -2541,22 +2762,25 @@ rib_write(CONN *conn, struct clist *cl, int wait)
 			sgl[0].ds_len = cl->c_len;
 
 			if (wait) {
-				tx_wr.wr_flags = IBT_WR_SEND_SIGNAL;
 				cv_sig = 1;
 			} else {
 				if (n_writes > max_unsignaled_rws) {
 					n_writes = 0;
-					force_wait = TRUE;
-					tx_wr.wr_flags = IBT_WR_SEND_SIGNAL;
 					cv_sig = 1;
 				} else {
-					tx_wr.wr_flags = IBT_WR_NO_FLAGS;
 					cv_sig = 0;
 				}
 			}
 
-			wdesc = rib_init_sendwait(0, cv_sig, qp);
-			tx_wr.wr_id = (ibt_wrid_t)(uintptr_t)wdesc;
+			if (cv_sig) {
+				tx_wr.wr_flags = IBT_WR_SEND_SIGNAL;
+				wdesc = rib_init_sendwait(0, cv_sig, qp);
+				tx_wr.wr_id = (ibt_wrid_t)(uintptr_t)wdesc;
+				mutex_enter(&wdesc->sendwait_lock);
+			} else {
+				tx_wr.wr_flags = IBT_WR_NO_FLAGS;
+				tx_wr.wr_id = (ibt_wrid_t)RDMA_DUMMY_WRID;
+			}
 			tx_wr.wr_opcode = IBT_WRC_RDMAW;
 			tx_wr.wr_trans = IBT_RC_SRV;
 			tx_wr.wr_nds = 1;
@@ -2572,29 +2796,26 @@ rib_write(CONN *conn, struct clist *cl, int wait)
 				if (conn->c_state != C_DISCONN_PEND)
 					conn->c_state = C_ERROR_CONN;
 				mutex_exit(&conn->c_lock);
-				(void) rib_free_sendwait(wdesc);
+				if (cv_sig) {
+					mutex_exit(&wdesc->sendwait_lock);
+					(void) rib_free_sendwait(wdesc);
+				}
 				return (RDMA_CONNLOST);
 			}
+
 			mutex_exit(&conn->c_lock);
 
 			/*
 			 * Wait for send to complete
 			 */
-			if (wait || force_wait) {
-				force_wait = FALSE;
-				ret = rib_sendwait(qp, wdesc);
-				if (ret != 0) {
-					return (ret);
-				}
-			} else {
-				mutex_enter(&wdesc->sendwait_lock);
-				for (i = 0; i < wdesc->nsbufs; i++) {
-					rib_rbuf_free(qptoc(qp), SEND_BUFFER,
-					    (void *)(uintptr_t)
-					    wdesc->sbufaddr[i]);
-				}
+			if (cv_sig) {
+
+				rib_send_hold(qp);
 				mutex_exit(&wdesc->sendwait_lock);
-				(void) rib_free_sendwait(wdesc);
+
+				ret = rib_sendwait(qp, wdesc);
+				if (ret != 0)
+					return (ret);
 			}
 			n_writes ++;
 		}
@@ -2610,8 +2831,7 @@ rdma_stat
 rib_read(CONN *conn, struct clist *cl, int wait)
 {
 	ibt_send_wr_t	rx_wr;
-	int		cv_sig;
-	int		i;
+	int		cv_sig = 0;
 	ibt_wr_ds_t	sgl;
 	struct send_wid	*wdesc;
 	ibt_status_t	ibt_status = IBT_SUCCESS;
@@ -2634,16 +2854,23 @@ rib_read(CONN *conn, struct clist *cl, int wait)
 		sgl.ds_key = cl->c_dmemhandle.mrc_lmr; /* lkey */
 		sgl.ds_len = cl->c_len;
 
-		if (wait) {
-			rx_wr.wr_flags = IBT_WR_SEND_SIGNAL;
+		/*
+		 * If there are multiple chunks to be read, and
+		 * wait is set, ask for signal only for the last chunk
+		 * and wait only on the last chunk. The completion of
+		 * RDMA_READ on last chunk ensures that reads on all
+		 * previous chunks are also completed.
+		 */
+		if (wait && (cl->c_next == NULL)) {
 			cv_sig = 1;
+			wdesc = rib_init_sendwait(0, cv_sig, qp);
+			rx_wr.wr_flags = IBT_WR_SEND_SIGNAL;
+			rx_wr.wr_id = (ibt_wrid_t)(uintptr_t)wdesc;
+			mutex_enter(&wdesc->sendwait_lock);
 		} else {
 			rx_wr.wr_flags = IBT_WR_NO_FLAGS;
-			cv_sig = 0;
+			rx_wr.wr_id = (ibt_wrid_t)RDMA_DUMMY_WRID;
 		}
-
-		wdesc = rib_init_sendwait(0, cv_sig, qp);
-		rx_wr.wr_id = (ibt_wrid_t)(uintptr_t)wdesc;
 		rx_wr.wr_opcode = IBT_WRC_RDMAR;
 		rx_wr.wr_trans = IBT_RC_SRV;
 		rx_wr.wr_nds = 1;
@@ -2658,9 +2885,13 @@ rib_read(CONN *conn, struct clist *cl, int wait)
 			if (conn->c_state != C_DISCONN_PEND)
 				conn->c_state = C_ERROR_CONN;
 			mutex_exit(&conn->c_lock);
-			(void) rib_free_sendwait(wdesc);
+			if (wait && (cl->c_next == NULL)) {
+				mutex_exit(&wdesc->sendwait_lock);
+				(void) rib_free_sendwait(wdesc);
+			}
 			return (RDMA_CONNLOST);
 		}
+
 		mutex_exit(&conn->c_lock);
 
 		/*
@@ -2668,18 +2899,13 @@ rib_read(CONN *conn, struct clist *cl, int wait)
 		 * last item in the list.
 		 */
 		if (wait && cl->c_next == NULL) {
-			ret = rib_sendwait(qp, wdesc);
-			if (ret != 0) {
-				return (ret);
-			}
-		} else {
-			mutex_enter(&wdesc->sendwait_lock);
-			for (i = 0; i < wdesc->nsbufs; i++) {
-				rib_rbuf_free(qptoc(qp), SEND_BUFFER,
-				    (void *)(uintptr_t)wdesc->sbufaddr[i]);
-			}
+			rib_send_hold(qp);
 			mutex_exit(&wdesc->sendwait_lock);
-			(void) rib_free_sendwait(wdesc);
+
+			ret = rib_sendwait(qp, wdesc);
+
+			if (ret != 0)
+				return (ret);
 		}
 		cl = cl->c_next;
 	}
@@ -2698,7 +2924,6 @@ rib_srv_cm_handler(void *any, ibt_cm_event_t *event,
 {
 	queue_t		*q;
 	rib_qp_t	*qp;
-	rpcib_state_t	*ribstat;
 	rib_hca_t	*hca;
 	rdma_stat	status = RDMA_SUCCESS;
 	int		i;
@@ -2716,9 +2941,7 @@ rib_srv_cm_handler(void *any, ibt_cm_event_t *event,
 	ASSERT(any != NULL);
 	ASSERT(event != NULL);
 
-	ribstat = (rpcib_state_t *)any;
-	hca = (rib_hca_t *)ribstat->hca;
-	ASSERT(hca != NULL);
+	hca = (rib_hca_t *)any;
 
 	/* got a connection request */
 	switch (event->cm_type) {
@@ -2765,6 +2988,13 @@ rib_srv_cm_handler(void *any, ibt_cm_event_t *event,
 			rdbuf.type = RECV_BUFFER;
 			buf = rib_rbuf_alloc(conn, &rdbuf);
 			if (buf == NULL) {
+				/*
+				 * A connection is not established yet.
+				 * Just flush the channel. Buffers
+				 * posted till now will error out with
+				 * IBT_WC_WR_FLUSHED_ERR.
+				 */
+				(void) ibt_flush_channel(qp->qp_hdl);
 				(void) rib_disconnect_channel(conn, NULL);
 				return (IBT_CM_REJECT);
 			}
@@ -2777,6 +3007,13 @@ rib_srv_cm_handler(void *any, ibt_cm_event_t *event,
 			cl.c_next = NULL;
 			status = rib_post_recv(conn, &cl);
 			if (status != RDMA_SUCCESS) {
+				/*
+				 * A connection is not established yet.
+				 * Just flush the channel. Buffers
+				 * posted till now will error out with
+				 * IBT_WC_WR_FLUSHED_ERR.
+				 */
+				(void) ibt_flush_channel(qp->qp_hdl);
 				(void) rib_disconnect_channel(conn, NULL);
 				return (IBT_CM_REJECT);
 			}
@@ -2872,14 +3109,6 @@ rib_srv_cm_handler(void *any, ibt_cm_event_t *event,
 			conn->c_state = C_ERROR_CONN;
 
 			/*
-			 * Free the rc_channel. Channel has already
-			 * transitioned to ERROR state and WRs have been
-			 * FLUSHED_ERR already.
-			 */
-			(void) ibt_free_channel(qp->qp_hdl);
-			qp->qp_hdl = NULL;
-
-			/*
 			 * Free the conn if c_ref goes down to 0
 			 */
 			if (conn->c_ref == 0) {
@@ -2891,6 +3120,12 @@ rib_srv_cm_handler(void *any, ibt_cm_event_t *event,
 				(void) rib_disconnect_channel(conn,
 				    &hca->srv_conn_list);
 			} else {
+				/*
+				 * conn will be freed when c_ref goes to 0.
+				 * Indicate to cleaning thread not to close
+				 * the connection, but just free the channel.
+				 */
+				conn->c_flags |= C_CLOSE_NOTNEEDED;
 				mutex_exit(&conn->c_lock);
 			}
 			DTRACE_PROBE(rpcib__i__srvcm_chandisconnect);
@@ -2935,7 +3170,8 @@ rib_srv_cm_handler(void *any, ibt_cm_event_t *event,
 }
 
 static rdma_stat
-rib_register_service(rib_hca_t *hca, int service_type)
+rib_register_service(rib_hca_t *hca, int service_type,
+	uint8_t protocol_num, in_port_t dst_port)
 {
 	ibt_srv_desc_t		sdesc;
 	ibt_hca_portinfo_t	*port_infop;
@@ -2944,7 +3180,7 @@ rib_register_service(rib_hca_t *hca, int service_type)
 	uint_t			port_size;
 	uint_t			pki, i, num_ports, nbinds;
 	ibt_status_t		ibt_status;
-	rib_service_t		*new_service;
+	rib_service_t		*service;
 	ib_pkey_t		pkey;
 
 	/*
@@ -2983,75 +3219,123 @@ rib_register_service(rib_hca_t *hca, int service_type)
 	 * IP addresses as its different names. For now the only
 	 * type of service we support in RPCIB is NFS.
 	 */
-	rw_enter(&hca->service_list_lock, RW_WRITER);
+	rw_enter(&rib_stat->service_list_lock, RW_WRITER);
 	/*
 	 * Start registering and binding service to active
 	 * on active ports on this HCA.
 	 */
 	nbinds = 0;
-	new_service = NULL;
+	for (service = rib_stat->service_list;
+	    service && (service->srv_type != service_type);
+	    service = service->next)
+		;
 
-	/*
-	 * We use IP addresses as the service names for
-	 * service registration.  Register each of them
-	 * with CM to obtain a svc_id and svc_hdl.  We do not
-	 * register the service with machine's loopback address.
-	 */
-	(void) bzero(&srv_id, sizeof (ib_svc_id_t));
-	(void) bzero(&srv_hdl, sizeof (ibt_srv_hdl_t));
-	(void) bzero(&sdesc, sizeof (ibt_srv_desc_t));
+	if (service == NULL) {
+		/*
+		 * We use IP addresses as the service names for
+		 * service registration.  Register each of them
+		 * with CM to obtain a svc_id and svc_hdl.  We do not
+		 * register the service with machine's loopback address.
+		 */
+		(void) bzero(&srv_id, sizeof (ib_svc_id_t));
+		(void) bzero(&srv_hdl, sizeof (ibt_srv_hdl_t));
+		(void) bzero(&sdesc, sizeof (ibt_srv_desc_t));
+		sdesc.sd_handler = rib_srv_cm_handler;
+		sdesc.sd_flags = 0;
+		ibt_status = ibt_register_service(hca->ibt_clnt_hdl,
+		    &sdesc, ibt_get_ip_sid(protocol_num, dst_port),
+		    1, &srv_hdl, &srv_id);
+		if ((ibt_status != IBT_SUCCESS) &&
+		    (ibt_status != IBT_CM_SERVICE_EXISTS)) {
+			rw_exit(&rib_stat->service_list_lock);
+			DTRACE_PROBE1(rpcib__i__regservice__ibtres,
+			    int, ibt_status);
+			ibt_free_portinfo(port_infop, port_size);
+			return (RDMA_FAILED);
+		}
 
-	sdesc.sd_handler = rib_srv_cm_handler;
-	sdesc.sd_flags = 0;
-	ibt_status = ibt_register_service(hca->ibt_clnt_hdl,
-	    &sdesc, ibt_get_ip_sid(IPPROTO_TCP, NFS_RDMA_PORT),
-	    1, &srv_hdl, &srv_id);
+		/*
+		 * Allocate and prepare a service entry
+		 */
+		service = kmem_zalloc(sizeof (rib_service_t), KM_SLEEP);
+
+		service->srv_type = service_type;
+		service->srv_hdl = srv_hdl;
+		service->srv_id = srv_id;
+
+		service->next = rib_stat->service_list;
+		rib_stat->service_list = service;
+		DTRACE_PROBE1(rpcib__i__regservice__new__service,
+		    int, service->srv_type);
+	} else {
+		srv_hdl = service->srv_hdl;
+		srv_id = service->srv_id;
+		DTRACE_PROBE1(rpcib__i__regservice__existing__service,
+		    int, service->srv_type);
+	}
 
 	for (i = 0; i < num_ports; i++) {
+		ibt_sbind_hdl_t		sbp;
+		rib_hca_service_t	*hca_srv;
+		ib_gid_t		gid;
+
 		if (port_infop[i].p_linkstate != IBT_PORT_ACTIVE)
 			continue;
 
 		for (pki = 0; pki < port_infop[i].p_pkey_tbl_sz; pki++) {
 			pkey = port_infop[i].p_pkey_tbl[pki];
+
+			rw_enter(&hca->bound_services_lock, RW_READER);
+			gid = port_infop[i].p_sgid_tbl[0];
+			for (hca_srv = hca->bound_services; hca_srv;
+			    hca_srv = hca_srv->next) {
+				if ((hca_srv->srv_id == service->srv_id) &&
+				    (hca_srv->gid.gid_prefix ==
+				    gid.gid_prefix) &&
+				    (hca_srv->gid.gid_guid == gid.gid_guid))
+					break;
+			}
+			rw_exit(&hca->bound_services_lock);
+			if (hca_srv != NULL) {
+				/*
+				 * port is alreay bound the the service
+				 */
+				DTRACE_PROBE1(
+				    rpcib__i__regservice__already__bound,
+				    int, i+1);
+				nbinds++;
+				continue;
+			}
+
 			if ((pkey & IBSRM_HB) &&
 			    (pkey != IB_PKEY_INVALID_FULL)) {
 
-				/*
-				 * Allocate and prepare a service entry
-				 */
-				new_service =
-				    kmem_zalloc(1 * sizeof (rib_service_t),
-				    KM_SLEEP);
-
-				new_service->srv_type = service_type;
-				new_service->srv_hdl = srv_hdl;
-				new_service->srv_next = NULL;
-
+				sbp = NULL;
 				ibt_status = ibt_bind_service(srv_hdl,
-				    port_infop[i].p_sgid_tbl[0],
-				    NULL, rib_stat, NULL);
+				    gid, NULL, hca, &sbp);
+
+				if (ibt_status == IBT_SUCCESS) {
+					hca_srv = kmem_zalloc(
+					    sizeof (rib_hca_service_t),
+					    KM_SLEEP);
+					hca_srv->srv_id = srv_id;
+					hca_srv->gid = gid;
+					hca_srv->sbind_hdl = sbp;
+
+					rw_enter(&hca->bound_services_lock,
+					    RW_WRITER);
+					hca_srv->next = hca->bound_services;
+					hca->bound_services = hca_srv;
+					rw_exit(&hca->bound_services_lock);
+					nbinds++;
+				}
 
 				DTRACE_PROBE1(rpcib__i__regservice__bindres,
 				    int, ibt_status);
-
-				if (ibt_status != IBT_SUCCESS) {
-					kmem_free(new_service,
-					    sizeof (rib_service_t));
-					new_service = NULL;
-					continue;
-				}
-
-				/*
-				 * Add to the service list for this HCA
-				 */
-				new_service->srv_next = hca->service_list;
-				hca->service_list = new_service;
-				new_service = NULL;
-				nbinds++;
 			}
 		}
 	}
-	rw_exit(&hca->service_list_lock);
+	rw_exit(&rib_stat->service_list_lock);
 
 	ibt_free_portinfo(port_infop, port_size);
 
@@ -3072,39 +3356,64 @@ rib_register_service(rib_hca_t *hca, int service_type)
 void
 rib_listen(struct rdma_svc_data *rd)
 {
-	rdma_stat status = RDMA_SUCCESS;
+	rdma_stat status;
+	int n_listening = 0;
+	rib_hca_t *hca;
 
-	rd->active = 0;
-	rd->err_code = RDMA_FAILED;
-
+	mutex_enter(&rib_stat->listen_lock);
 	/*
-	 * First check if a hca is still attached
+	 * if rd parameter is NULL then it means that rib_stat->q is
+	 * already initialized by a call from RDMA and we just want to
+	 * add a newly attached HCA to the same listening state as other
+	 * HCAs.
 	 */
-	rw_enter(&rib_stat->hca->state_lock, RW_READER);
-	if (rib_stat->hca->state != HCA_INITED) {
-		rw_exit(&rib_stat->hca->state_lock);
-		return;
+	if (rd == NULL) {
+		if (rib_stat->q == NULL) {
+			mutex_exit(&rib_stat->listen_lock);
+			return;
+		}
+	} else {
+		rib_stat->q = &rd->q;
 	}
-	rw_exit(&rib_stat->hca->state_lock);
+	rw_enter(&rib_stat->hcas_list_lock, RW_READER);
+	for (hca = rib_stat->hcas_list; hca; hca = hca->next) {
+		/*
+		 * First check if a hca is still attached
+		 */
+		rw_enter(&hca->state_lock, RW_READER);
+		if (hca->state != HCA_INITED) {
+			rw_exit(&hca->state_lock);
+			continue;
+		}
+		rw_exit(&hca->state_lock);
 
-	rib_stat->q = &rd->q;
-	/*
-	 * Right now the only service type is NFS. Hence force feed this
-	 * value. Ideally to communicate the service type it should be
-	 * passed down in rdma_svc_data.
-	 */
-	rib_stat->service_type = NFS;
-	status = rib_register_service(rib_stat->hca, NFS);
-	if (status != RDMA_SUCCESS) {
-		rd->err_code = status;
-		return;
+		/*
+		 * Right now the only service type is NFS. Hence
+		 * force feed this value. Ideally to communicate
+		 * the service type it should be passed down in
+		 * rdma_svc_data.
+		 */
+		status = rib_register_service(hca, NFS,
+		    IPPROTO_TCP, nfs_rdma_port);
+		if (status == RDMA_SUCCESS)
+			n_listening++;
 	}
+	rw_exit(&rib_stat->hcas_list_lock);
+
 	/*
 	 * Service active on an HCA, check rd->err_code for more
 	 * explainable errors.
 	 */
-	rd->active = 1;
-	rd->err_code = status;
+	if (rd) {
+		if (n_listening > 0) {
+			rd->active = 1;
+			rd->err_code = RDMA_SUCCESS;
+		} else {
+			rd->active = 0;
+			rd->err_code = RDMA_FAILED;
+		}
+	}
+	mutex_exit(&rib_stat->listen_lock);
 }
 
 /* XXXX */
@@ -3114,6 +3423,7 @@ rib_listen_stop(struct rdma_svc_data *svcdata)
 {
 	rib_hca_t		*hca;
 
+	mutex_enter(&rib_stat->listen_lock);
 	/*
 	 * KRPC called the RDMATF to stop the listeners, this means
 	 * stop sending incomming or recieved requests to KRPC master
@@ -3126,64 +3436,72 @@ rib_listen_stop(struct rdma_svc_data *svcdata)
 		svcdata->active = 0;
 	mutex_exit(&plugin_state_lock);
 
-	/*
-	 * First check if a hca is still attached
-	 */
-	hca = rib_stat->hca;
-	rw_enter(&hca->state_lock, RW_READER);
-	if (hca->state != HCA_INITED) {
+	rw_enter(&rib_stat->hcas_list_lock, RW_READER);
+	for (hca = rib_stat->hcas_list; hca; hca = hca->next) {
+		/*
+		 * First check if a hca is still attached
+		 */
+		rw_enter(&hca->state_lock, RW_READER);
+		if (hca->state == HCA_DETACHED) {
+			rw_exit(&hca->state_lock);
+			continue;
+		}
+		rib_close_channels(&hca->srv_conn_list);
+		rib_stop_services(hca);
 		rw_exit(&hca->state_lock);
-		return;
 	}
-	rib_close_channels(&hca->srv_conn_list);
-	rib_stop_services(hca);
-	rw_exit(&hca->state_lock);
+	rw_exit(&rib_stat->hcas_list_lock);
+
+	/*
+	 * Avoid rib_listen() using the stale q field.
+	 * This could happen if a port goes up after all services
+	 * are already unregistered.
+	 */
+	rib_stat->q = NULL;
+	mutex_exit(&rib_stat->listen_lock);
 }
 
 /*
  * Traverse the HCA's service list to unbind and deregister services.
- * Instead of unbinding the service for a service handle by
- * calling ibt_unbind_service() for each port/pkey, we unbind
- * all the services for the service handle by making only one
- * call to ibt_unbind_all_services().  Then, we deregister the
- * service for the service handle.
- *
- * When traversing the entries in service_list, we compare the
- * srv_hdl of the current entry with that of the next.  If they
- * are different or if the next entry is NULL, the current entry
- * marks the last binding of the service handle.  In this case,
- * call ibt_unbind_all_services() and deregister the service for
- * the service handle.  If they are the same, the current and the
- * next entries are bound to the same service handle.  In this
- * case, move on to the next entry.
+ * For each bound service of HCA to be removed, first find the corresponding
+ * service handle (srv_hdl) and then unbind the service by calling
+ * ibt_unbind_service().
  */
 static void
 rib_stop_services(rib_hca_t *hca)
 {
-	rib_service_t		*srv_list, *to_remove;
+	rib_hca_service_t *srv_list, *to_remove;
 
 	/*
 	 * unbind and deregister the services for this service type.
 	 * Right now there is only one service type. In future it will
 	 * be passed down to this function.
 	 */
-	rw_enter(&hca->service_list_lock, RW_WRITER);
-	srv_list = hca->service_list;
+	rw_enter(&hca->bound_services_lock, RW_READER);
+	srv_list = hca->bound_services;
+	hca->bound_services = NULL;
+	rw_exit(&hca->bound_services_lock);
+
 	while (srv_list != NULL) {
+		rib_service_t *sc;
+
 		to_remove = srv_list;
-		srv_list = to_remove->srv_next;
-		if (srv_list == NULL || bcmp(to_remove->srv_hdl,
-		    srv_list->srv_hdl, sizeof (ibt_srv_hdl_t))) {
-
-			(void) ibt_unbind_all_services(to_remove->srv_hdl);
-			(void) ibt_deregister_service(hca->ibt_clnt_hdl,
-			    to_remove->srv_hdl);
-		}
-
-		kmem_free(to_remove, sizeof (rib_service_t));
+		srv_list = to_remove->next;
+		rw_enter(&rib_stat->service_list_lock, RW_READER);
+		for (sc = rib_stat->service_list;
+		    sc && (sc->srv_id != to_remove->srv_id);
+		    sc = sc->next)
+			;
+		/*
+		 * if sc is NULL then the service doesn't exist anymore,
+		 * probably just removed completely through rib_stat.
+		 */
+		if (sc != NULL)
+			(void) ibt_unbind_service(sc->srv_hdl,
+			    to_remove->sbind_hdl);
+		rw_exit(&rib_stat->service_list_lock);
+		kmem_free(to_remove, sizeof (rib_hca_service_t));
 	}
-	hca->service_list = NULL;
-	rw_exit(&hca->service_list_lock);
 }
 
 static struct svc_recv *
@@ -3320,7 +3638,7 @@ rib_reg_mem(rib_hca_t *hca, caddr_t adsp, caddr_t buf, uint_t size,
 	    IBT_MR_ENABLE_WINDOW_BIND | spec;
 
 	rw_enter(&hca->state_lock, RW_READER);
-	if (hca->state == HCA_INITED) {
+	if (hca->state != HCA_DETACHED) {
 		ibt_status = ibt_register_mr(hca->hca_hdl, hca->pd_hdl,
 		    &mem_attr, mr_hdlp, mr_descp);
 		rw_exit(&hca->state_lock);
@@ -3439,7 +3757,7 @@ rib_syncmem(CONN *conn, RIB_SYNCMEM_HANDLE shandle, caddr_t buf,
 		mr_segment.ms_flags = IBT_SYNC_READ;
 	}
 	rw_enter(&hca->state_lock, RW_READER);
-	if (hca->state == HCA_INITED) {
+	if (hca->state != HCA_DETACHED) {
 		status = ibt_sync_mr(hca->hca_hdl, &mr_segment, 1);
 		rw_exit(&hca->state_lock);
 	} else {
@@ -3513,7 +3831,7 @@ rib_rbufpool_create(rib_hca_t *hca, int ptype, int num)
 	    sizeof (ibt_mr_desc_t), KM_SLEEP);
 	rw_enter(&hca->state_lock, RW_READER);
 
-	if (hca->state != HCA_INITED) {
+	if (hca->state == HCA_DETACHED) {
 		rw_exit(&hca->state_lock);
 		goto fail;
 	}
@@ -3677,16 +3995,6 @@ rib_reg_buf_alloc(CONN *conn, rdma_buf_t *rdbuf)
 		return (RDMA_FAILED);
 }
 
-#if defined(MEASURE_POOL_DEPTH)
-static void rib_recv_bufs(uint32_t x) {
-
-}
-
-static void rib_send_bufs(uint32_t x) {
-
-}
-#endif
-
 /*
  * Fetch a buffer of specified type.
  * Note that rdbuf->handle is mw's rkey.
@@ -3738,12 +4046,6 @@ rib_rbuf_alloc(CONN *conn, rdma_buf_t *rdbuf)
 			    (uintptr_t)rbp->mr_hdl[i];
 			rdbuf->handle.mrc_lmr =
 			    (uint32_t)rbp->mr_desc[i].md_lkey;
-#if defined(MEASURE_POOL_DEPTH)
-			if (ptype == SEND_BUFFER)
-				rib_send_bufs(MAX_BUFS - (bp->buffree+1));
-			if (ptype == RECV_BUFFER)
-				rib_recv_bufs(MAX_BUFS - (bp->buffree+1));
-#endif
 			bp->buffree--;
 
 			mutex_exit(&bp->buflock);
@@ -3838,44 +4140,33 @@ rib_rm_conn(CONN *cn, rib_conn_list_t *connlist)
 	return (RDMA_SUCCESS);
 }
 
-/*
- * Connection management.
- * IBTF does not support recycling of channels. So connections are only
- * in four states - C_CONN_PEND, or C_CONNECTED, or C_ERROR_CONN or
- * C_DISCONN_PEND state. No C_IDLE state.
- * C_CONN_PEND state: Connection establishment in progress to the server.
- * C_CONNECTED state: A connection when created is in C_CONNECTED state.
- * It has an RC channel associated with it. ibt_post_send/recv are allowed
- * only in this state.
- * C_ERROR_CONN state: A connection transitions to this state when WRs on the
- * channel are completed in error or an IBT_CM_EVENT_CONN_CLOSED event
- * happens on the channel or a IBT_HCA_DETACH_EVENT occurs on the HCA.
- * C_DISCONN_PEND state: When a connection is in C_ERROR_CONN state and when
- * c_ref drops to 0 (this indicates that RPC has no more references to this
- * connection), the connection should be destroyed. A connection transitions
- * into this state when it is being destroyed.
- */
 /* ARGSUSED */
 static rdma_stat
-rib_conn_get(struct netbuf *svcaddr, int addr_type, void *handle, CONN **conn)
+rib_conn_get(struct netbuf *s_svcaddr, struct netbuf *d_svcaddr,
+    int addr_type, void *handle, CONN **conn)
 {
-	CONN *cn;
-	int status = RDMA_SUCCESS;
-	rib_hca_t *hca = rib_stat->hca;
-	rib_qp_t *qp;
-	clock_t cv_stat, timout;
+	rdma_stat status;
 	rpcib_ping_t rpt;
 
-	if (hca == NULL)
-		return (RDMA_FAILED);
+	status = rib_connect(s_svcaddr, d_svcaddr, addr_type, &rpt, conn);
+	return (status);
+}
 
-	rw_enter(&rib_stat->hca->state_lock, RW_READER);
-	if (hca->state == HCA_DETACHED) {
-		rw_exit(&rib_stat->hca->state_lock);
-		return (RDMA_FAILED);
-	}
-	rw_exit(&rib_stat->hca->state_lock);
+/*
+ * rib_find_hca_connection
+ *
+ * if there is an existing connection to the specified address then
+ * it will be returned in conn, otherwise conn will be set to NULL.
+ * Also cleans up any connection that is in error state.
+ */
+static int
+rib_find_hca_connection(rib_hca_t *hca, struct netbuf *s_svcaddr,
+    struct netbuf *d_svcaddr, CONN **conn)
+{
+	CONN *cn;
+	clock_t cv_stat, timout;
 
+	*conn = NULL;
 again:
 	rw_enter(&hca->cl_conn_list.conn_lock, RW_READER);
 	cn = hca->cl_conn_list.conn_hd;
@@ -3892,8 +4183,7 @@ again:
 				cn->c_state = C_DISCONN_PEND;
 				mutex_exit(&cn->c_lock);
 				rw_exit(&hca->cl_conn_list.conn_lock);
-				(void) rib_disconnect_channel(cn,
-				    &hca->cl_conn_list);
+				rib_conn_close((void *)cn);
 				goto again;
 			}
 			mutex_exit(&cn->c_lock);
@@ -3905,8 +4195,18 @@ again:
 			cn = cn->c_next;
 			continue;
 		}
-		if ((cn->c_raddr.len == svcaddr->len) &&
-		    bcmp(svcaddr->buf, cn->c_raddr.buf, svcaddr->len) == 0) {
+
+		/*
+		 * source address is only checked for if there is one,
+		 * this is the case for retries.
+		 */
+		if ((cn->c_raddr.len == d_svcaddr->len) &&
+		    (bcmp(d_svcaddr->buf, cn->c_raddr.buf,
+		    d_svcaddr->len) == 0) &&
+		    ((s_svcaddr->len == 0) ||
+		    ((cn->c_laddr.len == s_svcaddr->len) &&
+		    (bcmp(s_svcaddr->buf, cn->c_laddr.buf,
+		    s_svcaddr->len) == 0)))) {
 			/*
 			 * Our connection. Give up conn list lock
 			 * as we are done traversing the list.
@@ -3916,7 +4216,7 @@ again:
 				cn->c_ref++;	/* sharing a conn */
 				mutex_exit(&cn->c_lock);
 				*conn = cn;
-				return (status);
+				return (RDMA_SUCCESS);
 			}
 			if (cn->c_state == C_CONN_PEND) {
 				/*
@@ -3943,7 +4243,7 @@ again:
 				if (cn->c_state == C_CONNECTED) {
 					*conn = cn;
 					mutex_exit(&cn->c_lock);
-					return (status);
+					return (RDMA_SUCCESS);
 				} else {
 					cn->c_ref--;
 					mutex_exit(&cn->c_lock);
@@ -3955,23 +4255,89 @@ again:
 		cn = cn->c_next;
 	}
 	rw_exit(&hca->cl_conn_list.conn_lock);
+	*conn = NULL;
+	return (RDMA_FAILED);
+}
 
-	bzero(&rpt, sizeof (rpcib_ping_t));
+/*
+ * Connection management.
+ * IBTF does not support recycling of channels. So connections are only
+ * in four states - C_CONN_PEND, or C_CONNECTED, or C_ERROR_CONN or
+ * C_DISCONN_PEND state. No C_IDLE state.
+ * C_CONN_PEND state: Connection establishment in progress to the server.
+ * C_CONNECTED state: A connection when created is in C_CONNECTED state.
+ * It has an RC channel associated with it. ibt_post_send/recv are allowed
+ * only in this state.
+ * C_ERROR_CONN state: A connection transitions to this state when WRs on the
+ * channel are completed in error or an IBT_CM_EVENT_CONN_CLOSED event
+ * happens on the channel or a IBT_HCA_DETACH_EVENT occurs on the HCA.
+ * C_DISCONN_PEND state: When a connection is in C_ERROR_CONN state and when
+ * c_ref drops to 0 (this indicates that RPC has no more references to this
+ * connection), the connection should be destroyed. A connection transitions
+ * into this state when it is being destroyed.
+ */
+/* ARGSUSED */
+static rdma_stat
+rib_connect(struct netbuf *s_svcaddr, struct netbuf *d_svcaddr,
+    int addr_type, rpcib_ping_t *rpt, CONN **conn)
+{
+	CONN *cn;
+	int status;
+	rib_hca_t *hca;
+	rib_qp_t *qp;
+	int s_addr_len;
+	char *s_addr_buf;
 
-	status = rib_ping_srv(addr_type, svcaddr, &rpt);
+	rw_enter(&rib_stat->hcas_list_lock, RW_READER);
+	for (hca = rib_stat->hcas_list; hca; hca = hca->next) {
+		rw_enter(&hca->state_lock, RW_READER);
+		if (hca->state != HCA_DETACHED) {
+			status = rib_find_hca_connection(hca, s_svcaddr,
+			    d_svcaddr, conn);
+			rw_exit(&hca->state_lock);
+			if ((status == RDMA_INTR) || (status == RDMA_SUCCESS)) {
+				rw_exit(&rib_stat->hcas_list_lock);
+				return (status);
+			}
+		} else
+			rw_exit(&hca->state_lock);
+	}
+	rw_exit(&rib_stat->hcas_list_lock);
+
+	/*
+	 * No existing connection found, establish a new connection.
+	 */
+	bzero(rpt, sizeof (rpcib_ping_t));
+
+	status = rib_ping_srv(addr_type, d_svcaddr, rpt);
 	if (status != RDMA_SUCCESS) {
+		return (RDMA_FAILED);
+	}
+	hca = rpt->hca;
+
+	if (rpt->srcip.family == AF_INET) {
+		s_addr_len = sizeof (rpt->srcip.un.ip4addr);
+		s_addr_buf = (char *)&rpt->srcip.un.ip4addr;
+	} else if (rpt->srcip.family == AF_INET6) {
+		s_addr_len = sizeof (rpt->srcip.un.ip6addr);
+		s_addr_buf = (char *)&rpt->srcip.un.ip6addr;
+	} else {
 		return (RDMA_FAILED);
 	}
 
 	/*
 	 * Channel to server doesn't exist yet, create one.
 	 */
-	if (rib_clnt_create_chan(hca, svcaddr, &qp) != RDMA_SUCCESS) {
+	if (rib_clnt_create_chan(hca, d_svcaddr, &qp) != RDMA_SUCCESS) {
 		return (RDMA_FAILED);
 	}
 	cn = qptoc(qp);
 	cn->c_state = C_CONN_PEND;
 	cn->c_ref = 1;
+
+	cn->c_laddr.buf = kmem_alloc(s_addr_len, KM_SLEEP);
+	bcopy(s_addr_buf, cn->c_laddr.buf, s_addr_len);
+	cn->c_laddr.len = cn->c_laddr.maxlen = s_addr_len;
 
 	/*
 	 * Add to conn list.
@@ -3984,7 +4350,7 @@ again:
 	 * WRITER lock.
 	 */
 	(void) rib_add_connlist(cn, &hca->cl_conn_list);
-	status = rib_conn_to_srv(hca, qp, &rpt);
+	status = rib_conn_to_srv(hca, qp, rpt);
 	mutex_enter(&cn->c_lock);
 	if (status == RDMA_SUCCESS) {
 		cn->c_state = C_CONNECTED;
@@ -3998,29 +4364,123 @@ again:
 	return (status);
 }
 
+static void
+rib_conn_close(void *rarg)
+{
+	CONN *conn = (CONN *)rarg;
+	rib_qp_t *qp = ctoqp(conn);
+
+	mutex_enter(&conn->c_lock);
+	if (!(conn->c_flags & C_CLOSE_NOTNEEDED)) {
+
+		conn->c_flags |= (C_CLOSE_NOTNEEDED | C_CLOSE_PENDING);
+		/*
+		 * Live connection in CONNECTED state.
+		 */
+		if (conn->c_state == C_CONNECTED) {
+			conn->c_state = C_ERROR_CONN;
+		}
+		mutex_exit(&conn->c_lock);
+
+		rib_close_a_channel(conn);
+
+		mutex_enter(&conn->c_lock);
+		conn->c_flags &= ~C_CLOSE_PENDING;
+		cv_signal(&conn->c_cv);
+	}
+
+	mutex_exit(&conn->c_lock);
+
+	if (qp->mode == RIB_SERVER)
+		(void) rib_disconnect_channel(conn,
+		    &qp->hca->srv_conn_list);
+	else
+		(void) rib_disconnect_channel(conn,
+		    &qp->hca->cl_conn_list);
+}
+
+static void
+rib_conn_timeout_call(void *carg)
+{
+	time_t idle_time;
+	CONN *conn = (CONN *)carg;
+	rib_hca_t *hca = ctoqp(conn)->hca;
+	int error;
+
+	mutex_enter(&conn->c_lock);
+	if ((conn->c_ref > 0) ||
+	    (conn->c_state == C_DISCONN_PEND)) {
+		conn->c_timeout = NULL;
+		mutex_exit(&conn->c_lock);
+		return;
+	}
+
+	idle_time = (gethrestime_sec() - conn->c_last_used);
+
+	if ((idle_time <= rib_conn_timeout) &&
+	    (conn->c_state != C_ERROR_CONN)) {
+		/*
+		 * There was activity after the last timeout.
+		 * Extend the conn life. Unless the conn is
+		 * already in error state.
+		 */
+		conn->c_timeout = timeout(rib_conn_timeout_call, conn,
+		    SEC_TO_TICK(rib_conn_timeout - idle_time));
+		mutex_exit(&conn->c_lock);
+		return;
+	}
+
+	error = ddi_taskq_dispatch(hca->cleanup_helper, rib_conn_close,
+	    (void *)conn, DDI_NOSLEEP);
+
+	/*
+	 * If taskq dispatch fails above, then reset the timeout
+	 * to try again after 10 secs.
+	 */
+
+	if (error != DDI_SUCCESS) {
+		conn->c_timeout = timeout(rib_conn_timeout_call, conn,
+		    SEC_TO_TICK(RDMA_CONN_REAP_RETRY));
+		mutex_exit(&conn->c_lock);
+		return;
+	}
+
+	conn->c_state = C_DISCONN_PEND;
+	mutex_exit(&conn->c_lock);
+}
+
 static rdma_stat
 rib_conn_release(CONN *conn)
 {
-	rib_qp_t	*qp = ctoqp(conn);
 
 	mutex_enter(&conn->c_lock);
 	conn->c_ref--;
 
+	conn->c_last_used = gethrestime_sec();
+	if (conn->c_ref > 0) {
+		mutex_exit(&conn->c_lock);
+		return (RDMA_SUCCESS);
+	}
+
 	/*
 	 * If a conn is C_ERROR_CONN, close the channel.
-	 * If it's CONNECTED, keep it that way.
 	 */
 	if (conn->c_ref == 0 && conn->c_state == C_ERROR_CONN) {
 		conn->c_state = C_DISCONN_PEND;
 		mutex_exit(&conn->c_lock);
-		if (qp->mode == RIB_SERVER)
-			(void) rib_disconnect_channel(conn,
-			    &qp->hca->srv_conn_list);
-		else
-			(void) rib_disconnect_channel(conn,
-			    &qp->hca->cl_conn_list);
+		rib_conn_close((void *)conn);
 		return (RDMA_SUCCESS);
 	}
+
+	/*
+	 * c_ref == 0, set a timeout for conn release
+	 */
+
+	if (conn->c_timeout == NULL) {
+		conn->c_timeout = timeout(rib_conn_timeout_call, conn,
+		    SEC_TO_TICK(rib_conn_timeout));
+	}
+
 	mutex_exit(&conn->c_lock);
 	return (RDMA_SUCCESS);
 }
@@ -4103,6 +4563,28 @@ rdma_done_notify(rib_qp_t *qp, uint32_t xid)
 	    int, xid);
 }
 
+/*
+ * Expects conn->c_lock to be held by the caller.
+ */
+
+static void
+rib_close_a_channel(CONN *conn)
+{
+	rib_qp_t	*qp;
+	qp = ctoqp(conn);
+
+	if (qp->qp_hdl == NULL) {
+		/* channel already freed */
+		return;
+	}
+
+	/*
+	 * Call ibt_close_rc_channel in blocking mode
+	 * with no callbacks.
+	 */
+	(void) ibt_close_rc_channel(qp->qp_hdl, IBT_NOCALLBACKS,
+	    NULL, 0, NULL, NULL, 0);
+}
 
 /*
  * Goes through all connections and closes the channel
@@ -4112,41 +4594,33 @@ rdma_done_notify(rib_qp_t *qp, uint32_t xid)
 static void
 rib_close_channels(rib_conn_list_t *connlist)
 {
-	CONN 		*conn;
-	rib_qp_t	*qp;
+	CONN 		*conn, *tmp;
 
 	rw_enter(&connlist->conn_lock, RW_READER);
 	conn = connlist->conn_hd;
 	while (conn != NULL) {
 		mutex_enter(&conn->c_lock);
-		qp = ctoqp(conn);
-		if (conn->c_state == C_CONNECTED) {
+		tmp = conn->c_next;
+		if (!(conn->c_flags & C_CLOSE_NOTNEEDED)) {
+
+			conn->c_flags |= (C_CLOSE_NOTNEEDED | C_CLOSE_PENDING);
+
 			/*
 			 * Live connection in CONNECTED state.
-			 * Call ibt_close_rc_channel in nonblocking mode
-			 * with no callbacks.
 			 */
-			conn->c_state = C_ERROR_CONN;
-			(void) ibt_close_rc_channel(qp->qp_hdl,
-			    IBT_NOCALLBACKS, NULL, 0, NULL, NULL, 0);
-			(void) ibt_free_channel(qp->qp_hdl);
-			qp->qp_hdl = NULL;
-		} else {
-			if (conn->c_state == C_ERROR_CONN &&
-			    qp->qp_hdl != NULL) {
-				/*
-				 * Connection in ERROR state but
-				 * channel is not yet freed.
-				 */
-				(void) ibt_close_rc_channel(qp->qp_hdl,
-				    IBT_NOCALLBACKS, NULL, 0, NULL,
-				    NULL, 0);
-				(void) ibt_free_channel(qp->qp_hdl);
-				qp->qp_hdl = NULL;
-			}
+			if (conn->c_state == C_CONNECTED)
+				conn->c_state = C_ERROR_CONN;
+			mutex_exit(&conn->c_lock);
+
+			rib_close_a_channel(conn);
+
+			mutex_enter(&conn->c_lock);
+			conn->c_flags &= ~C_CLOSE_PENDING;
+			/* Signal a pending rib_disconnect_channel() */
+			cv_signal(&conn->c_cv);
 		}
 		mutex_exit(&conn->c_lock);
-		conn = conn->c_next;
+		conn = tmp;
 	}
 	rw_exit(&connlist->conn_lock);
 }
@@ -4198,11 +4672,86 @@ top:
 }
 
 /*
+ * Free all the HCA resources and close
+ * the hca.
+ */
+
+static void
+rib_free_hca(rib_hca_t *hca)
+{
+	(void) ibt_free_cq(hca->clnt_rcq->rib_cq_hdl);
+	(void) ibt_free_cq(hca->clnt_scq->rib_cq_hdl);
+	(void) ibt_free_cq(hca->svc_rcq->rib_cq_hdl);
+	(void) ibt_free_cq(hca->svc_scq->rib_cq_hdl);
+
+	kmem_free(hca->clnt_rcq, sizeof (rib_cq_t));
+	kmem_free(hca->clnt_scq, sizeof (rib_cq_t));
+	kmem_free(hca->svc_rcq, sizeof (rib_cq_t));
+	kmem_free(hca->svc_scq, sizeof (rib_cq_t));
+
+	rib_rbufpool_destroy(hca, RECV_BUFFER);
+	rib_rbufpool_destroy(hca, SEND_BUFFER);
+	rib_destroy_cache(hca);
+	if (rib_mod.rdma_count == 0)
+		rdma_unregister_mod(&rib_mod);
+	(void) ibt_free_pd(hca->hca_hdl, hca->pd_hdl);
+	(void) ibt_close_hca(hca->hca_hdl);
+	hca->hca_hdl = NULL;
+}
+
+
+static void
+rib_stop_hca_services(rib_hca_t *hca)
+{
+	rib_stop_services(hca);
+	rib_close_channels(&hca->cl_conn_list);
+	rib_close_channels(&hca->srv_conn_list);
+
+	rib_purge_connlist(&hca->cl_conn_list);
+	rib_purge_connlist(&hca->srv_conn_list);
+
+	if ((rib_stat->hcas_list == NULL) && stats_enabled) {
+		kstat_delete_byname_zone("unix", 0, "rpcib_cache",
+		    GLOBAL_ZONEID);
+		stats_enabled = FALSE;
+	}
+
+	rw_enter(&hca->srv_conn_list.conn_lock, RW_READER);
+	rw_enter(&hca->cl_conn_list.conn_lock, RW_READER);
+	if (hca->srv_conn_list.conn_hd == NULL &&
+	    hca->cl_conn_list.conn_hd == NULL) {
+		/*
+		 * conn_lists are NULL, so destroy
+		 * buffers, close hca and be done.
+		 */
+		rib_free_hca(hca);
+	}
+	rw_exit(&hca->cl_conn_list.conn_lock);
+	rw_exit(&hca->srv_conn_list.conn_lock);
+
+	if (hca->hca_hdl != NULL) {
+		mutex_enter(&hca->inuse_lock);
+		while (hca->inuse)
+			cv_wait(&hca->cb_cv, &hca->inuse_lock);
+		mutex_exit(&hca->inuse_lock);
+
+		rib_free_hca(hca);
+	}
+	rw_destroy(&hca->bound_services_lock);
+
+	if (hca->cleanup_helper != NULL) {
+		ddi_taskq_destroy(hca->cleanup_helper);
+		hca->cleanup_helper = NULL;
+	}
+}
+
+/*
  * Cleans and closes up all uses of the HCA
  */
 static void
 rib_detach_hca(rib_hca_t *hca)
 {
+	rib_hca_t **hcap;
 
 	/*
 	 * Stop all services on the HCA
@@ -4222,75 +4771,20 @@ rib_detach_hca(rib_hca_t *hca)
 	}
 
 	hca->state = HCA_DETACHED;
+	rw_enter(&rib_stat->hcas_list_lock, RW_WRITER);
+	for (hcap = &rib_stat->hcas_list; *hcap && (*hcap != hca);
+	    hcap = &(*hcap)->next)
+		;
+	ASSERT(*hcap == hca);
+	*hcap = hca->next;
 	rib_stat->nhca_inited--;
-
-	rib_stop_services(hca);
-	rib_close_channels(&hca->cl_conn_list);
-	rib_close_channels(&hca->srv_conn_list);
-
 	rib_mod.rdma_count--;
-
+	rw_exit(&rib_stat->hcas_list_lock);
 	rw_exit(&hca->state_lock);
 
-	/*
-	 * purge will free all datastructures used by CQ handlers. We don't
-	 * want to receive completions after purge, so we'll free the CQs now.
-	 */
-	(void) ibt_free_cq(hca->clnt_rcq->rib_cq_hdl);
-	(void) ibt_free_cq(hca->clnt_scq->rib_cq_hdl);
-	(void) ibt_free_cq(hca->svc_rcq->rib_cq_hdl);
-	(void) ibt_free_cq(hca->svc_scq->rib_cq_hdl);
+	rib_stop_hca_services(hca);
 
-	rib_purge_connlist(&hca->cl_conn_list);
-	rib_purge_connlist(&hca->srv_conn_list);
-
-	kmem_free(hca->clnt_rcq, sizeof (rib_cq_t));
-	kmem_free(hca->clnt_scq, sizeof (rib_cq_t));
-	kmem_free(hca->svc_rcq, sizeof (rib_cq_t));
-	kmem_free(hca->svc_scq, sizeof (rib_cq_t));
-	if (stats_enabled) {
-		kstat_delete_byname_zone("unix", 0, "rpcib_cache",
-		    GLOBAL_ZONEID);
-	}
-
-	rw_enter(&hca->srv_conn_list.conn_lock, RW_READER);
-	rw_enter(&hca->cl_conn_list.conn_lock, RW_READER);
-	if (hca->srv_conn_list.conn_hd == NULL &&
-	    hca->cl_conn_list.conn_hd == NULL) {
-		/*
-		 * conn_lists are NULL, so destroy
-		 * buffers, close hca and be done.
-		 */
-		rib_rbufpool_destroy(hca, RECV_BUFFER);
-		rib_rbufpool_destroy(hca, SEND_BUFFER);
-		rib_destroy_cache(hca);
-		rdma_unregister_mod(&rib_mod);
-		(void) ibt_free_pd(hca->hca_hdl, hca->pd_hdl);
-		(void) ibt_close_hca(hca->hca_hdl);
-		hca->hca_hdl = NULL;
-	}
-	rw_exit(&hca->cl_conn_list.conn_lock);
-	rw_exit(&hca->srv_conn_list.conn_lock);
-
-	if (hca->hca_hdl != NULL) {
-		mutex_enter(&hca->inuse_lock);
-		while (hca->inuse)
-			cv_wait(&hca->cb_cv, &hca->inuse_lock);
-		mutex_exit(&hca->inuse_lock);
-
-		rdma_unregister_mod(&rib_mod);
-
-		/*
-		 * conn_lists are now NULL, so destroy
-		 * buffers, close hca and be done.
-		 */
-		rib_rbufpool_destroy(hca, RECV_BUFFER);
-		rib_rbufpool_destroy(hca, SEND_BUFFER);
-		rib_destroy_cache(hca);
-		(void) ibt_free_pd(hca->hca_hdl, hca->pd_hdl);
-		(void) ibt_close_hca(hca->hca_hdl);
-		hca->hca_hdl = NULL;
-	}
+	kmem_free(hca, sizeof (*hca));
 }
 
 static void
@@ -4308,13 +4802,13 @@ rib_server_side_cache_reclaim(void *argp)
 	while (rcas != NULL) {
 		while (rcas->r.forw != &rcas->r) {
 			rcas->elements--;
-			rib_total_buffers --;
 			rb = rcas->r.forw;
 			remque(rb);
 			if (rb->registered)
 				(void) rib_deregistermem_via_hca(hca,
 				    rb->lrc_buf, rb->lrc_mhandle);
-			cache_allocation -= rb->lrc_len;
+
+			hca->cache_allocation -= rb->lrc_len;
 			kmem_free(rb->lrc_buf, rb->lrc_len);
 			kmem_free(rb, sizeof (rib_lrc_entry_t));
 		}
@@ -4334,12 +4828,12 @@ rib_server_side_cache_cleanup(void *argp)
 	rib_lrc_entry_t		*rb;
 	rib_hca_t *hca = (rib_hca_t *)argp;
 
-	rw_enter(&hca->avl_rw_lock, RW_READER);
-	if (cache_allocation < cache_limit) {
-		rw_exit(&hca->avl_rw_lock);
+	mutex_enter(&hca->cache_allocation_lock);
+	if (hca->cache_allocation < cache_limit) {
+		mutex_exit(&hca->cache_allocation_lock);
 		return;
 	}
-	rw_exit(&hca->avl_rw_lock);
+	mutex_exit(&hca->cache_allocation_lock);
 
 	rw_enter(&hca->avl_rw_lock, RW_WRITER);
 	rcas = avl_last(&hca->avl_tree);
@@ -4349,13 +4843,14 @@ rib_server_side_cache_cleanup(void *argp)
 	while (rcas != NULL) {
 		while (rcas->r.forw != &rcas->r) {
 			rcas->elements--;
-			rib_total_buffers --;
 			rb = rcas->r.forw;
 			remque(rb);
 			if (rb->registered)
 				(void) rib_deregistermem_via_hca(hca,
 				    rb->lrc_buf, rb->lrc_mhandle);
-			cache_allocation -= rb->lrc_len;
+
+			hca->cache_allocation -= rb->lrc_len;
+
 			kmem_free(rb->lrc_buf, rb->lrc_len);
 			kmem_free(rb, sizeof (rib_lrc_entry_t));
 		}
@@ -4363,7 +4858,8 @@ rib_server_side_cache_cleanup(void *argp)
 		if (hca->server_side_cache) {
 			kmem_cache_free(hca->server_side_cache, rcas);
 		}
-		if ((cache_allocation) < cache_limit) {
+
+		if (hca->cache_allocation < cache_limit) {
 			rw_exit(&hca->avl_rw_lock);
 			return;
 		}
@@ -4390,10 +4886,6 @@ avl_compare(const void *t1, const void *t2)
 static void
 rib_destroy_cache(rib_hca_t *hca)
 {
-	if (hca->reg_cache_clean_up != NULL) {
-		ddi_taskq_destroy(hca->reg_cache_clean_up);
-		hca->reg_cache_clean_up = NULL;
-	}
 	if (hca->avl_init) {
 		rib_server_side_cache_reclaim((void *)hca);
 		if (hca->server_side_cache) {
@@ -4401,7 +4893,7 @@ rib_destroy_cache(rib_hca_t *hca)
 			hca->server_side_cache = NULL;
 		}
 		avl_destroy(&hca->avl_tree);
-		mutex_destroy(&hca->cache_allocation);
+		mutex_destroy(&hca->cache_allocation_lock);
 		rw_destroy(&hca->avl_rw_lock);
 	}
 	hca->avl_init = FALSE;
@@ -4410,9 +4902,9 @@ rib_destroy_cache(rib_hca_t *hca)
 static void
 rib_force_cleanup(void *hca)
 {
-	if (((rib_hca_t *)hca)->reg_cache_clean_up != NULL)
+	if (((rib_hca_t *)hca)->cleanup_helper != NULL)
 		(void) ddi_taskq_dispatch(
-		    ((rib_hca_t *)hca)->reg_cache_clean_up,
+		    ((rib_hca_t *)hca)->cleanup_helper,
 		    rib_server_side_cache_cleanup,
 		    (void *)hca, DDI_NOSLEEP);
 }
@@ -4433,9 +4925,9 @@ rib_get_cache_buf(CONN *conn, uint32_t len)
 
 	rw_enter(&hca->avl_rw_lock, RW_READER);
 
-	mutex_enter(&hca->cache_allocation);
-	c_alloc = cache_allocation;
-	mutex_exit(&hca->cache_allocation);
+	mutex_enter(&hca->cache_allocation_lock);
+	c_alloc = hca->cache_allocation;
+	mutex_exit(&hca->cache_allocation_lock);
 
 	if ((rcas = (cache_avl_struct_t *)avl_find(&hca->avl_tree, &cas,
 	    &where)) == NULL) {
@@ -4443,7 +4935,9 @@ rib_get_cache_buf(CONN *conn, uint32_t len)
 		if ((c_alloc + len) >= cache_limit) {
 			rib_force_cleanup((void *)hca);
 			rw_exit(&hca->avl_rw_lock);
-			cache_misses_above_the_limit ++;
+			mutex_enter(&hca->cache_allocation_lock);
+			hca->cache_misses_above_the_limit ++;
+			mutex_exit(&hca->cache_allocation_lock);
 
 			/* Allocate and register the buffer directly */
 			goto error_alloc;
@@ -4472,28 +4966,33 @@ rib_get_cache_buf(CONN *conn, uint32_t len)
 	mutex_enter(&rcas->node_lock);
 
 	if (rcas->r.forw != &rcas->r && rcas->elements > 0) {
-		rib_total_buffers--;
-		cache_hits++;
 		reply_buf = rcas->r.forw;
 		remque(reply_buf);
 		rcas->elements--;
 		mutex_exit(&rcas->node_lock);
 		rw_exit(&hca->avl_rw_lock);
-		mutex_enter(&hca->cache_allocation);
-		cache_allocation -= len;
-		mutex_exit(&hca->cache_allocation);
+
+		mutex_enter(&hca->cache_allocation_lock);
+		hca->cache_hits++;
+		hca->cache_allocation -= len;
+		mutex_exit(&hca->cache_allocation_lock);
 	} else {
 		/* Am I above the cache limit */
 		mutex_exit(&rcas->node_lock);
 		if ((c_alloc + len) >= cache_limit) {
 			rib_force_cleanup((void *)hca);
 			rw_exit(&hca->avl_rw_lock);
-			cache_misses_above_the_limit ++;
+
+			mutex_enter(&hca->cache_allocation_lock);
+			hca->cache_misses_above_the_limit++;
+			mutex_exit(&hca->cache_allocation_lock);
 			/* Allocate and register the buffer directly */
 			goto error_alloc;
 		}
 		rw_exit(&hca->avl_rw_lock);
-		cache_misses ++;
+		mutex_enter(&hca->cache_allocation_lock);
+		hca->cache_misses++;
+		mutex_exit(&hca->cache_allocation_lock);
 		/* Allocate a reply_buf entry */
 		reply_buf = (rib_lrc_entry_t *)
 		    kmem_zalloc(sizeof (rib_lrc_entry_t), KM_SLEEP);
@@ -4540,16 +5039,15 @@ rib_free_cache_buf(CONN *conn, rib_lrc_entry_t *reg_buf)
 		rw_exit(&hca->avl_rw_lock);
 		goto error_free;
 	} else {
-		rib_total_buffers ++;
 		cas.len = reg_buf->lrc_len;
 		mutex_enter(&rcas->node_lock);
 		insque(reg_buf, &rcas->r);
 		rcas->elements ++;
 		mutex_exit(&rcas->node_lock);
 		rw_exit(&hca->avl_rw_lock);
-		mutex_enter(&hca->cache_allocation);
-		cache_allocation += cas.len;
-		mutex_exit(&hca->cache_allocation);
+		mutex_enter(&hca->cache_allocation_lock);
+		hca->cache_allocation += cas.len;
+		mutex_exit(&hca->cache_allocation_lock);
 	}
 
 	return;
@@ -4750,20 +5248,28 @@ rpcib_get_ib_addresses(rpcib_ipaddrs_t *addrs4, rpcib_ipaddrs_t *addrs6)
 }
 
 /* ARGSUSED */
-static int rpcib_cache_kstat_update(kstat_t *ksp, int rw) {
+static int
+rpcib_cache_kstat_update(kstat_t *ksp, int rw)
+{
+	rib_hca_t *hca;
 
 	if (KSTAT_WRITE == rw) {
 		return (EACCES);
 	}
+
 	rpcib_kstat.cache_limit.value.ui64 =
 	    (uint64_t)cache_limit;
-	rpcib_kstat.cache_allocation.value.ui64 =
-	    (uint64_t)cache_allocation;
-	rpcib_kstat.cache_hits.value.ui64 =
-	    (uint64_t)cache_hits;
-	rpcib_kstat.cache_misses.value.ui64 =
-	    (uint64_t)cache_misses;
-	rpcib_kstat.cache_misses_above_the_limit.value.ui64 =
-	    (uint64_t)cache_misses_above_the_limit;
+	rw_enter(&rib_stat->hcas_list_lock, RW_READER);
+	for (hca = rib_stat->hcas_list; hca; hca = hca->next) {
+		rpcib_kstat.cache_allocation.value.ui64 +=
+		    (uint64_t)hca->cache_allocation;
+		rpcib_kstat.cache_hits.value.ui64 +=
+		    (uint64_t)hca->cache_hits;
+		rpcib_kstat.cache_misses.value.ui64 +=
+		    (uint64_t)hca->cache_misses;
+		rpcib_kstat.cache_misses_above_the_limit.value.ui64 +=
+		    (uint64_t)hca->cache_misses_above_the_limit;
+	}
+	rw_exit(&rib_stat->hcas_list_lock);
 	return (0);
 }

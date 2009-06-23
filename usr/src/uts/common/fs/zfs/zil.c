@@ -25,6 +25,7 @@
 
 #include <sys/zfs_context.h>
 #include <sys/spa.h>
+#include <sys/spa_impl.h>
 #include <sys/dmu.h>
 #include <sys/zap.h>
 #include <sys/arc.h>
@@ -508,6 +509,13 @@ zil_claim(char *osname, void *txarg)
 	zilog = dmu_objset_zil(os);
 	zh = zil_header_in_syncing_context(zilog);
 
+	if (zilog->zl_spa->spa_log_state == SPA_LOG_CLEAR) {
+		if (!BP_IS_HOLE(&zh->zh_log))
+			zio_free_blk(zilog->zl_spa, &zh->zh_log, first_txg);
+		BP_ZERO(&zh->zh_log);
+		dsl_dataset_dirty(dmu_objset_ds(os), tx);
+	}
+
 	/*
 	 * Record here whether the zil has any records to replay.
 	 * If the header block pointer is null or the block points
@@ -520,8 +528,10 @@ zil_claim(char *osname, void *txarg)
 	 * Note, the intent log can be empty but still need the
 	 * stubby to be claimed.
 	 */
-	if (!zil_empty(zilog))
+	if (!zil_empty(zilog)) {
 		zh->zh_flags |= ZIL_REPLAY_NEEDED;
+		dsl_dataset_dirty(dmu_objset_ds(os), tx);
+	}
 
 	/*
 	 * Claim all log blocks if we haven't already done so, and remember
@@ -588,36 +598,6 @@ zil_check_log_chain(char *osname, void *txarg)
 	if (error == ECKSUM)
 		return (0); /* normal end of chain */
 	return (error);
-}
-
-/*
- * Clear a log chain
- */
-/* ARGSUSED */
-int
-zil_clear_log_chain(char *osname, void *txarg)
-{
-	zilog_t *zilog;
-	zil_header_t *zh;
-	objset_t *os;
-	dmu_tx_t *tx;
-	int error;
-
-	error = dmu_objset_open(osname, DMU_OST_ANY, DS_MODE_USER, &os);
-	if (error) {
-		cmn_err(CE_WARN, "can't open objset for %s", osname);
-		return (0);
-	}
-
-	zilog = dmu_objset_zil(os);
-	tx = dmu_tx_create(zilog->zl_os);
-	(void) dmu_tx_assign(tx, TXG_WAIT);
-	zh = zil_header_in_syncing_context(zilog);
-	BP_ZERO(&zh->zh_log);
-	dsl_dataset_dirty(dmu_objset_ds(os), tx);
-	dmu_tx_commit(tx);
-	dmu_objset_close(os);
-	return (0);
 }
 
 static int
@@ -722,18 +702,26 @@ zil_lwb_write_done(zio_t *zio)
 	ASSERT(zio->io_bp->blk_fill == 0);
 
 	/*
-	 * Now that we've written this log block, we have a stable pointer
-	 * to the next block in the chain, so it's OK to let the txg in
-	 * which we allocated the next block sync.
+	 * Ensure the lwb buffer pointer is cleared before releasing
+	 * the txg. If we have had an allocation failure and
+	 * the txg is waiting to sync then we want want zil_sync()
+	 * to remove the lwb so that it's not picked up as the next new
+	 * one in zil_commit_writer(). zil_sync() will only remove
+	 * the lwb if lwb_buf is null.
 	 */
-	txg_rele_to_sync(&lwb->lwb_txgh);
-
 	zio_buf_free(lwb->lwb_buf, lwb->lwb_sz);
 	mutex_enter(&zilog->zl_lock);
 	lwb->lwb_buf = NULL;
 	if (zio->io_error)
 		zilog->zl_log_error = B_TRUE;
 	mutex_exit(&zilog->zl_lock);
+
+	/*
+	 * Now that we've written this log block, we have a stable pointer
+	 * to the next block in the chain, so it's OK to let the txg in
+	 * which we allocated the next block sync.
+	 */
+	txg_rele_to_sync(&lwb->lwb_txgh);
 }
 
 /*
@@ -755,9 +743,9 @@ zil_lwb_write_init(zilog_t *zilog, lwb_t *lwb)
 	}
 	if (lwb->lwb_zio == NULL) {
 		lwb->lwb_zio = zio_rewrite(zilog->zl_root_zio, zilog->zl_spa,
-		    0, &lwb->lwb_blk, lwb->lwb_buf,
-		    lwb->lwb_sz, zil_lwb_write_done, lwb,
-		    ZIO_PRIORITY_LOG_WRITE, ZIO_FLAG_CANFAIL, &zb);
+		    0, &lwb->lwb_blk, lwb->lwb_buf, lwb->lwb_sz,
+		    zil_lwb_write_done, lwb, ZIO_PRIORITY_LOG_WRITE,
+		    ZIO_FLAG_CANFAIL | ZIO_FLAG_SPECULATIVE, &zb);
 	}
 }
 
@@ -1043,7 +1031,7 @@ zil_clean(zilog_t *zilog)
 	if ((itx != NULL) &&
 	    (itx->itx_lr.lrc_txg <= spa_last_synced_txg(zilog->zl_spa))) {
 		(void) taskq_dispatch(zilog->zl_clean_taskq,
-		    (void (*)(void *))zil_itx_clean, zilog, TQ_NOSLEEP);
+		    (task_func_t *)zil_itx_clean, zilog, TQ_SLEEP);
 	}
 	mutex_exit(&zilog->zl_lock);
 }
@@ -1219,6 +1207,13 @@ zil_sync(zilog_t *zilog, dmu_tx_t *tx)
 	spa_t *spa = zilog->zl_spa;
 	lwb_t *lwb;
 
+	/*
+	 * We don't zero out zl_destroy_txg, so make sure we don't try
+	 * to destroy it twice.
+	 */
+	if (spa_sync_pass(spa) != 1)
+		return;
+
 	mutex_enter(&zilog->zl_lock);
 
 	ASSERT(zilog->zl_stop_sync == 0);
@@ -1229,7 +1224,6 @@ zil_sync(zilog_t *zilog, dmu_tx_t *tx)
 		blkptr_t blk = zh->zh_log;
 
 		ASSERT(list_head(&zilog->zl_lwb_list) == NULL);
-		ASSERT(spa_sync_pass(spa) == 1);
 
 		bzero(zh, sizeof (zil_header_t));
 		bzero(zilog->zl_replayed_seq, sizeof (zilog->zl_replayed_seq));
@@ -1248,12 +1242,7 @@ zil_sync(zilog_t *zilog, dmu_tx_t *tx)
 		}
 	}
 
-	for (;;) {
-		lwb = list_head(&zilog->zl_lwb_list);
-		if (lwb == NULL) {
-			mutex_exit(&zilog->zl_lock);
-			return;
-		}
+	while ((lwb = list_head(&zilog->zl_lwb_list)) != NULL) {
 		zh->zh_log = lwb->lwb_blk;
 		if (lwb->lwb_buf != NULL || lwb->lwb_max_txg > txg)
 			break;
@@ -1654,4 +1643,25 @@ out:
 	cv_broadcast(&zilog->zl_cv_writer);
 	mutex_exit(&zilog->zl_lock);
 	return (ret);
+}
+
+/* ARGSUSED */
+int
+zil_vdev_offline(char *osname, void *arg)
+{
+	objset_t *os;
+	zilog_t *zilog;
+	int error;
+
+	error = dmu_objset_open(osname, DMU_OST_ANY, DS_MODE_USER, &os);
+	if (error)
+		return (error);
+
+	zilog = dmu_objset_zil(os);
+	if (zil_suspend(zilog) != 0)
+		error = EEXIST;
+	else
+		zil_resume(zilog);
+	dmu_objset_close(os);
+	return (error);
 }

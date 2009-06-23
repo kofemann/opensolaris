@@ -373,10 +373,10 @@ emlxs_config_t  emlxs_cfg[] = {
 
 #ifdef FMA_SUPPORT
 	/* CFG_FM_CAPS */
-	{"fm-cap",
+	{"fm-capable",
 		0, 0xF, 0xF, 0,
-		PARM_HIDDEN,
-	"Sets FMA capabilities."},
+		PARM_HEX,
+	"Sets FMA capabilities. [bit 3:errcb, 2:dmachk, 1:accchk, 0:ereport]"},
 #endif	/* FMA_SUPPORT */
 
 #ifdef MAX_RRDY_PATCH

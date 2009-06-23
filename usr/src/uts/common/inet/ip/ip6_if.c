@@ -1564,12 +1564,15 @@ ipif_ndp_up(ipif_t *ipif, boolean_t initial)
 			state = ND_REACHABLE;
 			flags |= NCE_F_UNSOL_ADV;
 		}
+retry:
 		/*
-		 * NOTE: for IPMP, local addresses are always associated with
-		 * the ill they're bound to, so don't match across the illgrp.
+		 * Create an nce for the local address. We pass a match_illgrp
+		 * of B_TRUE because the local address must be unique across
+		 * the illgrp, and the existence of an nce with nce_ill set
+		 * to any ill in the group is indicative of a duplicate address
 		 */
 		err = ndp_lookup_then_add_v6(bound_ill,
-		    B_FALSE,
+		    B_TRUE,
 		    hw_addr,
 		    &ipif->ipif_v6lcl_addr,
 		    &ipv6_all_ones,
@@ -1583,16 +1586,41 @@ ipif_ndp_up(ipif_t *ipif, boolean_t initial)
 			ip1dbg(("ipif_ndp_up: NCE created for %s\n",
 			    ill->ill_name));
 			ipif->ipif_addr_ready = 1;
+			ipif->ipif_added_nce = 1;
+			nce->nce_ipif_cnt++;
 			break;
 		case EINPROGRESS:
 			ip1dbg(("ipif_ndp_up: running DAD now for %s\n",
 			    ill->ill_name));
+			ipif->ipif_added_nce = 1;
+			nce->nce_ipif_cnt++;
 			break;
 		case EEXIST:
-			NCE_REFRELE(nce);
 			ip1dbg(("ipif_ndp_up: NCE already exists for %s\n",
 			    ill->ill_name));
-			goto fail;
+			if (!(nce->nce_flags & NCE_F_PERMANENT)) {
+				ndp_delete(nce);
+				NCE_REFRELE(nce);
+				nce = NULL;
+				goto retry;
+			}
+			if ((ipif->ipif_flags & IPIF_POINTOPOINT) == 0) {
+				NCE_REFRELE(nce);
+				goto fail;
+			}
+			/*
+			 * Duplicate local addresses are permissible for
+			 * IPIF_POINTOPOINT interfaces which will get marked
+			 * IPIF_UNNUMBERED later in
+			 * ip_addr_availability_check().
+			 *
+			 * The nce_ipif_cnt field tracks the number of
+			 * ipifs that have nce_addr as their local address.
+			 */
+			ipif->ipif_addr_ready = 1;
+			ipif->ipif_added_nce = 1;
+			nce->nce_ipif_cnt++;
+			break;
 		default:
 			ip1dbg(("ipif_ndp_up: NCE creation failed for %s\n",
 			    ill->ill_name));
@@ -1635,17 +1663,19 @@ ipif_ndp_down(ipif_t *ipif)
 		else
 			bound_ill = ill;
 
-		if (bound_ill != NULL) {
+		if (bound_ill != NULL && ipif->ipif_added_nce) {
 			nce = ndp_lookup_v6(bound_ill,
-			    B_FALSE,	/* see comment in ipif_ndp_up() */
+			    B_TRUE,
 			    &ipif->ipif_v6lcl_addr,
 			    B_FALSE);
-			if (nce != NULL) {
-				ndp_delete(nce);
-				NCE_REFRELE(nce);
-			}
+			if (nce == NULL)
+				goto no_nce;
+			if (--nce->nce_ipif_cnt == 0)
+				ndp_delete(nce); /* last ipif for nce */
+			ipif->ipif_added_nce = 0;
+			NCE_REFRELE(nce);
 		}
-
+no_nce:
 		/*
 		 * Make IPMP aware of the deleted data address.
 		 */
@@ -2425,6 +2455,8 @@ ipif_select_source_v6(ill_t *dstill, const in6_addr_t *dst,
 		if (IS_UNDER_IPMP(ill))
 			continue;
 
+		if (ill->ill_ipif == NULL)
+			continue;
 		/*
 		 * For source address selection, we treat the ipif list as
 		 * circular and continue until we get back to where we
@@ -2826,6 +2858,7 @@ ill_dl_phys(ill_t *ill, ipif_t *ipif, mblk_t *mp, queue_t *q)
 	((dl_notify_req_t *)notify_mp->b_rptr)->dl_notifications =
 	    (DL_NOTE_PHYS_ADDR | DL_NOTE_SDU_SIZE | DL_NOTE_FASTPATH_FLUSH |
 	    DL_NOTE_LINK_UP | DL_NOTE_LINK_DOWN | DL_NOTE_CAPAB_RENEG |
+	    DL_NOTE_PROMISC_ON_PHYS | DL_NOTE_PROMISC_OFF_PHYS |
 	    DL_NOTE_REPLUMB);
 
 	phys_mp = ip_dlpi_alloc(sizeof (dl_phys_addr_req_t) +
@@ -3214,6 +3247,10 @@ ipif_up_done_v6(ipif_t *ipif)
 		 * ip_addr_availability_check() identifies this case for us and
 		 * returns EADDRINUSE; we need to turn it into EADDRNOTAVAIL
 		 * which is the expected error code.
+		 *
+		 * Note that, for the non-XRESOLV case, ipif_ndp_down() will
+		 * only delete the nce in the case when the nce_ipif_cnt drops
+		 * to 0.
 		 */
 		if (err == EADDRINUSE) {
 			if (ipif->ipif_ill->ill_flags & ILLF_XRESOLV) {

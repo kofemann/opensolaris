@@ -1,7 +1,7 @@
 /*
  * CDDL HEADER START
  *
- * Copyright(c) 2007-2008 Intel Corporation. All rights reserved.
+ * Copyright(c) 2007-2009 Intel Corporation. All rights reserved.
  * The contents of this file are subject to the terms of the
  * Common Development and Distribution License (the "License").
  * You may not use this file except in compliance with the License.
@@ -22,11 +22,10 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
- * Use is subject to license terms of the CDDL.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+ * Use is subject to license terms.
  */
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include "ixgbe_sw.h"
 
@@ -643,6 +642,8 @@ ixgbe_alloc_tcb_lists(ixgbe_tx_ring_t *tx_ring)
 			ixgbe_error(ixgbe, "Allocate tx dma buffer failed");
 			goto alloc_tcb_lists_fail;
 		}
+
+		tcb->last_index = MAX_TX_RING_SIZE;
 	}
 
 	return (IXGBE_SUCCESS);
@@ -803,14 +804,9 @@ ixgbe_alloc_rcb_lists(ixgbe_rx_ring_t *rx_ring)
 		rcb->free_rtn.free_arg = (char *)rcb;
 
 		rcb->mp = desballoc((unsigned char *)
-		    rx_buf->address - IPHDR_ALIGN_ROOM,
-		    rx_buf->size + IPHDR_ALIGN_ROOM,
+		    rx_buf->address,
+		    rx_buf->size,
 		    0, &rcb->free_rtn);
-
-		if (rcb->mp != NULL) {
-			rcb->mp->b_rptr += IPHDR_ALIGN_ROOM;
-			rcb->mp->b_wptr += IPHDR_ALIGN_ROOM;
-		}
 	}
 
 	return (IXGBE_SUCCESS);

@@ -1460,6 +1460,13 @@ getSecret(char *secret, int *secretLen, int minSecretLen, int maxSecretLen)
 	/* get password */
 	chapSecret = getpassphrase(gettext("Enter secret:"));
 
+	if (chapSecret == NULL) {
+		(void) fprintf(stderr, "%s: %s\n", cmdName,
+		    gettext("Unable to get secret"));
+		*secret = NULL;
+		return (1);
+	}
+
 	if (strlen(chapSecret) > maxSecretLen) {
 		(void) fprintf(stderr, "%s: %s %d\n", cmdName,
 		    gettext("secret too long, maximum length is"),
@@ -1479,6 +1486,14 @@ getSecret(char *secret, int *secretLen, int minSecretLen, int maxSecretLen)
 	(void) strcpy(secret, chapSecret);
 
 	chapSecret = getpassphrase(gettext("Re-enter secret:"));
+
+	if (chapSecret == NULL) {
+		(void) fprintf(stderr, "%s: %s\n", cmdName,
+		    gettext("Unable to get secret"));
+		*secret = NULL;
+		return (1);
+	}
+
 	if (strcmp(secret, chapSecret) != 0) {
 		(void) fprintf(stderr, "%s: %s\n", cmdName,
 		    gettext("secrets do not match, secret not changed"));
@@ -4257,6 +4272,11 @@ addStaticConfig(int operandLen, char *operand[], int *funcRet)
 			return (1);
 		}
 	}
+
+	if (ret != 0) {
+		*funcRet = 1;
+	}
+
 	return (ret);
 }
 
@@ -5237,6 +5257,8 @@ parseTarget(char *targetStr,
 				*tpgt = atoi(commaPos2);
 				*tpgtSpecified = B_TRUE;
 			} else {
+				(void) fprintf(stderr, "%s: %s\n", cmdName,
+				    gettext("parse target invalid TPGT"));
 				return (PARSE_TARGET_INVALID_TPGT);
 			}
 		}

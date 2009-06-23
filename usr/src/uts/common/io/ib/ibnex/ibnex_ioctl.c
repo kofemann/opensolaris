@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -2351,8 +2351,7 @@ ibnex_vppa_conf_entry_delete(char *msg, char *service)
 
 	/* find matching index */
 	for (i = 0; i < nsvcs; i++) {
-		if (strncmp(ibnex.ibnex_vppa_comm_svc_names[i], service,
-		    strlen(service)))
+		if (strcmp(ibnex.ibnex_vppa_comm_svc_names[i], service))
 			continue;
 		found = B_TRUE;
 		match_ndx = i;
@@ -2437,8 +2436,7 @@ ibnex_port_conf_entry_delete(char *msg, char *service)
 
 	/* find matching index */
 	for (i = 0; i < nsvcs; i++) {
-		if (strncmp(ibnex.ibnex_comm_svc_names[i], service,
-		    strlen(service)))
+		if (strcmp(ibnex.ibnex_comm_svc_names[i], service))
 			continue;
 		found = B_TRUE;
 		match_ndx = i;
@@ -2517,8 +2515,7 @@ ibnex_hcasvc_conf_entry_delete(char *msg, char *service)
 
 	/* find matching index */
 	for (i = 0; i < nsvcs; i++) {
-		if (strncmp(ibnex.ibnex_hcasvc_comm_svc_names[i], service,
-		    strlen(service)))
+		if (strcmp(ibnex.ibnex_hcasvc_comm_svc_names[i], service))
 			continue;
 		found = B_TRUE;
 		match_ndx = i;
@@ -2628,7 +2625,7 @@ ibnex_ioc_fininode(dev_info_t *dip, ibnex_ioc_node_t *ioc_nodep)
 int
 ibnex_offline_childdip(dev_info_t *dip)
 {
-	int		rval = MDI_SUCCESS;
+	int		rval = MDI_SUCCESS, rval2;
 	mdi_pathinfo_t	*path = NULL, *temp;
 
 	IBTF_DPRINTF_L4("ibnex", "\toffline_childdip; begin");
@@ -2640,15 +2637,25 @@ ibnex_offline_childdip(dev_info_t *dip)
 	for (path = mdi_get_next_phci_path(dip, path); path; ) {
 		IBTF_DPRINTF_L4("ibnex", "\toffline_childdip: "
 		    "offling path %p", path);
-		rval = mdi_pi_offline(path, NDI_UNCONFIG);
-		if (rval != MDI_SUCCESS) {
-			IBTF_DPRINTF_L2("ibnex", "\toffline_childdip: "
-			    "mdi_pi_offline failed %p", dip);
-			break;
+		rval2 = MDI_SUCCESS;
+		if (MDI_PI_IS_ONLINE(path)) {
+			rval2 = mdi_pi_offline(path, NDI_UNCONFIG);
+			/* If it cannot be offlined, log this path and error */
+			if (rval2 != MDI_SUCCESS) {
+				rval = rval2;
+				cmn_err(CE_WARN,
+				    "!ibnex\toffline_childdip (0x%p): "
+				    "mdi_pi_offline path (0x%p) failed with %d",
+				    (void *)dip, (void *)path, rval2);
+			}
 		}
+		/* prepare the next path */
 		temp = path;
 		path = mdi_get_next_phci_path(dip, path);
-		(void) mdi_pi_free(temp, 0);
+		/* free the offline path */
+		if (rval2 == MDI_SUCCESS) {
+			(void) mdi_pi_free(temp, 0);
+		}
 	}
 	return (rval);
 }

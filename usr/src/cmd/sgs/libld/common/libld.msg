@@ -55,6 +55,7 @@
 #        	[-c file]       record configuration `file'
 #
 @ MSG_ARG_USAGE		"usage: ld [-%s] file(s)\n"
+@ MSG_ARG_DETAIL_3	"\t[-32]\t\tenforce a 32-bit link-edit\n"
 @ MSG_ARG_DETAIL_6	"\t[-64]\t\tenforce a 64-bit link-edit\n"
 @ MSG_ARG_DETAIL_A	"\t[-a]\t\tcreate an absolute file\n"
 @ MSG_ARG_DETAIL_B	"\t[-b]\t\tdo not do special PIC relocations in a.out\n"
@@ -732,16 +733,18 @@
 
 # Entry criteria strings (segment names)
 
-@ MSG_ENT_PHDR		"phdr"
-@ MSG_ENT_INTERP	"interp"
-@ MSG_ENT_TEXT		"text"
-@ MSG_ENT_DATA		"data"
 @ MSG_ENT_BSS		"bss"
+@ MSG_ENT_DATA		"data"
 @ MSG_ENT_DTRACE	"dtrace"
 @ MSG_ENT_DYNAMIC	"dynamic"
+@ MSG_ENT_EXTRA		"extra"
+@ MSG_ENT_INTERP	"interp"
+@ MSG_ENT_LBSS		"lbss"
 @ MSG_ENT_LDATA		"ldata"
 @ MSG_ENT_LRODATA	"lrodata"
 @ MSG_ENT_NOTE		"note"
+@ MSG_ENT_PHDR		"phdr"
+@ MSG_ENT_TEXT		"text"
 @ MSG_ENT_TLS		"tls"
 @ MSG_ENT_UNWIND	"unwind"
 
@@ -1072,6 +1075,8 @@
 # Reference to this strings is via the MSG_ORIG() macro, and thus no message
 # translation is required.
 
+@ MSG_DBG_FOPEN_MODE	"w"
+
 @ MSG_DBG_CLS32_FMT	"32: "
 @ MSG_DBG_CLS64_FMT	"64: "
 
@@ -1104,12 +1109,13 @@
 @ MSG_STR_HWCAP_1	"hwcap_1"
 @ MSG_STR_SFCAP_1	"sfcap_1"
 
-@ MSG_STR_OPTIONS	"6:abc:d:e:f:h:il:mo:p:rstu:z:B:CD:F:GI:L:M:N:P:Q:R:\
+@ MSG_STR_OPTIONS	"3:6:abc:d:e:f:h:il:mo:p:rstu:z:B:CD:F:GI:L:M:N:P:Q:R:\
 			 S:VW:Y:?"
 
 
 # Argument processing strings
 
+@ MSG_ARG_3		"-3"
 @ MSG_ARG_6		"-6"
 @ MSG_ARG_A		"-a"
 @ MSG_ARG_B		"-b"
@@ -1200,6 +1206,7 @@
 @ MSG_ARG_NOLDYNSYM	"noldynsym"
 @ MSG_ARG_RELAXRELOC	"relaxreloc"
 @ MSG_ARG_NORELAXRELOC	"norelaxreloc"
+@ MSG_ARG_NOSIGHANDLER	"nosighandler"
 @ MSG_ARG_GLOBAUDIT	"globalaudit"
 @ MSG_ARG_TARGET	"target="
 @ MSG_ARG_HELP		"help"

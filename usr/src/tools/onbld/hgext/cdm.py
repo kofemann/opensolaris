@@ -814,15 +814,18 @@ def cdm_recommit(ui, repo, **opts):
 
     if clearedtags:
         ui.write("Removed tags:\n")
-        for name, nd, rev, local in clearedtags:
-            ui.write("  %s %s:%s%s\n" % (name, rev, node.short(nd),
-                                         (local and ' (local)') or ''))
+        for name, nd, rev, local in sorted(clearedtags,
+                                           key=lambda x: x[0].lower()):
+            ui.write("  %5s:%s:\t%s%s\n" % (rev, node.short(nd),
+                                            name, (local and ' (local)' or '')))
 
-    for ntag, nnode in repo.tags().items():
-        if ntag in oldtags and ntag != "tip":
-            if oldtags[ntag] != nnode:
-                ui.write("tag %s now refers to revision %d:%s\n" %
-                         (ntag, repo.changelog.rev(nnode), node.short(nnode)))
+        for ntag, nnode in sorted(repo.tags().items(),
+                                  key=lambda x: x[0].lower()):
+            if ntag in oldtags and ntag != "tip":
+                if oldtags[ntag] != nnode:
+                    ui.write("tag '%s' now refers to revision %d:%s\n" %
+                             (ntag, repo.changelog.rev(nnode),
+                              node.short(nnode)))
 
 
 def do_eval(cmd, files, root, changedir=True):
@@ -1081,7 +1084,9 @@ cmdtable = {
                'hg rtichk [-N] [-p PARENT]'),
     'tagchk': (cdm_tagchk, [('p', 'parent', '', 'parent workspace')],
                'hg tagchk [-p PARENT]'),
-    'webrev': (cdm_webrev, [('D', 'D', '', 'delete remote webrev'),
+    'webrev': (cdm_webrev, [('C', 'C', '', 'ITS priority file'),
+                            ('D', 'D', '', 'delete remote webrev'),
+                            ('I', 'I', '', 'ITS configuration file'),
                             ('i', 'i', '', 'include file'),
                             ('l', 'l', '', 'extract file list from putback -n'),
                             ('N', 'N', None, 'supress comments'),

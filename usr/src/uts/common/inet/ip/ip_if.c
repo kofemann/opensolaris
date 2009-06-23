@@ -2070,37 +2070,10 @@ ill_capability_dld_reset_fill(ill_t *ill, mblk_t *mp)
 }
 
 /*
- * Send a DL_NOTIFY_REQ to the specified ill to enable
- * DL_NOTE_PROMISC_ON/OFF_PHYS notifications.
- * Invoked by ill_capability_ipsec_ack() before enabling IPsec hardware
- * acceleration.
- * Returns B_TRUE on success, B_FALSE if the message could not be sent.
- */
-static boolean_t
-ill_enable_promisc_notify(ill_t *ill)
-{
-	mblk_t *mp;
-	dl_notify_req_t *req;
-
-	IPSECHW_DEBUG(IPSECHW_PKT, ("ill_enable_promisc_notify:\n"));
-
-	mp = ip_dlpi_alloc(sizeof (dl_notify_req_t), DL_NOTIFY_REQ);
-	if (mp == NULL)
-		return (B_FALSE);
-
-	req = (dl_notify_req_t *)mp->b_rptr;
-	req->dl_notifications = DL_NOTE_PROMISC_ON_PHYS |
-	    DL_NOTE_PROMISC_OFF_PHYS;
-
-	ill_dlpi_send(ill, mp);
-
-	return (B_TRUE);
-}
-
-/*
  * Allocate an IPsec capability request which will be filled by our
  * caller to turn on support for one or more algorithms.
  */
+/* ARGSUSED */
 static mblk_t *
 ill_alloc_ipsec_cap_req(ill_t *ill, dl_capability_sub_t *isub)
 {
@@ -2110,16 +2083,6 @@ ill_alloc_ipsec_cap_req(ill_t *ill, dl_capability_sub_t *isub)
 	dl_capab_ipsec_t	*icip;
 	uint8_t			*ptr;
 	icip = (dl_capab_ipsec_t *)(isub + 1);
-
-	/*
-	 * The first time around, we send a DL_NOTIFY_REQ to enable
-	 * PROMISC_ON/OFF notification from the provider. We need to
-	 * do this before enabling the algorithms to avoid leakage of
-	 * cleartext packets.
-	 */
-
-	if (!ill_enable_promisc_notify(ill))
-		return (NULL);
 
 	/*
 	 * Allocate new mblk which will contain a new capability
@@ -3054,6 +3017,9 @@ ill_capability_direct_enable(ill_t *ill)
 		idd->idd_tx_cb_dh = direct.di_tx_cb_dh;
 		idd->idd_tx_fctl_df = (ip_dld_fctl_t)direct.di_tx_fctl_df;
 		idd->idd_tx_fctl_dh = direct.di_tx_fctl_dh;
+		ASSERT(idd->idd_tx_cb_df != NULL);
+		ASSERT(idd->idd_tx_fctl_df != NULL);
+		ASSERT(idd->idd_tx_df != NULL);
 		/*
 		 * One time registration of flow enable callback function
 		 */
@@ -3728,7 +3694,8 @@ ill_forward_set_on_ill(ill_t *ill, boolean_t enable)
 	if (ill->ill_isv6)
 		ill_set_nce_router_flags(ill, enable);
 	/* Notify routing socket listeners of this change. */
-	ip_rts_ifmsg(ill->ill_ipif, RTSQ_DEFAULT);
+	if (ill->ill_ipif != NULL)
+		ip_rts_ifmsg(ill->ill_ipif, RTSQ_DEFAULT);
 }
 
 /*
@@ -14974,6 +14941,24 @@ ill_stq_cache_delete(ire_t *ire, char *ill_arg)
 }
 
 /*
+ * Delete all the IREs whose ire_stq's reference any ill in the same IPMP
+ * group as `ill_arg'.  Used by ipmp_ill_deactivate() to flush all IRE_CACHE
+ * entries for the illgrp.
+ */
+void
+ill_grp_cache_delete(ire_t *ire, char *ill_arg)
+{
+	ill_t	*ill = (ill_t *)ill_arg;
+
+	ASSERT(IAM_WRITER_ILL(ill));
+
+	if (ire->ire_type == IRE_CACHE &&
+	    IS_IN_SAME_ILLGRP((ill_t *)ire->ire_stq->q_ptr, ill)) {
+		ire_delete(ire);
+	}
+}
+
+/*
  * Delete all broadcast IREs with a source address on `ill_arg'.
  */
 static void
@@ -15351,7 +15336,17 @@ ipif_mtu_change(ire_t *ire, char *ipif_arg)
 
 	if (ire->ire_stq == NULL || ire->ire_ipif != ipif)
 		return;
-	ire->ire_max_frag = MIN(ipif->ipif_mtu, IP_MAXPACKET);
+
+	mutex_enter(&ire->ire_lock);
+	if (ire->ire_marks & IRE_MARK_PMTU) {
+		/* Avoid increasing the PMTU */
+		ire->ire_max_frag = MIN(ipif->ipif_mtu, ire->ire_max_frag);
+		if (ire->ire_max_frag == ipif->ipif_mtu)
+			ire->ire_marks &= ~IRE_MARK_PMTU;
+	} else {
+		ire->ire_max_frag = MIN(ipif->ipif_mtu, IP_MAXPACKET);
+	}
+	mutex_exit(&ire->ire_lock);
 }
 
 /*
@@ -15366,7 +15361,19 @@ ill_mtu_change(ire_t *ire, char *ill_arg)
 
 	if (ire->ire_stq == NULL || ire->ire_ipif->ipif_ill != ill)
 		return;
-	ire->ire_max_frag = ire->ire_ipif->ipif_mtu;
+
+	mutex_enter(&ire->ire_lock);
+	if (ire->ire_marks & IRE_MARK_PMTU) {
+		/* Avoid increasing the PMTU */
+		ire->ire_max_frag = MIN(ire->ire_ipif->ipif_mtu,
+		    ire->ire_max_frag);
+		if (ire->ire_max_frag == ire->ire_ipif->ipif_mtu) {
+			ire->ire_marks &= ~IRE_MARK_PMTU;
+		}
+	} else {
+		ire->ire_max_frag = MIN(ire->ire_ipif->ipif_mtu, IP_MAXPACKET);
+	}
+	mutex_exit(&ire->ire_lock);
 }
 
 /*
@@ -17461,6 +17468,7 @@ ip_sioctl_slifname(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
 	phyint_t *phyi;
 	ip_stack_t *ipst;
 	struct lifreq *lifr = if_req;
+	uint64_t new_flags;
 
 	ASSERT(ipif != NULL);
 	ip1dbg(("ip_sioctl_slifname %s\n", lifr->lifr_name));
@@ -17480,18 +17488,6 @@ ip_sioctl_slifname(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
 
 	if (ill->ill_name[0] != '\0')
 		return (EALREADY);
-
-	/*
-	 * Set all the flags. Allows all kinds of override. Provide some
-	 * sanity checking by not allowing IFF_BROADCAST and IFF_MULTICAST
-	 * unless there is either multicast/broadcast support in the driver
-	 * or it is a pt-pt link.
-	 */
-	if (lifr->lifr_flags & (IFF_PROMISC|IFF_ALLMULTI)) {
-		/* Meaningless to IP thus don't allow them to be set. */
-		ip1dbg(("ip_setname: EINVAL 1\n"));
-		return (EINVAL);
-	}
 
 	/*
 	 * If there's another ill already with the requested name, ensure
@@ -17517,59 +17513,60 @@ ip_sioctl_slifname(ipif_t *ipif, sin_t *sin, queue_t *q, mblk_t *mp,
 	}
 
 	/*
-	 * For a DL_STYLE2 driver (ill_needs_attach), we would not have the
-	 * ill_bcast_addr_length info.
+	 * We start off as IFF_IPV4 in ipif_allocate and become
+	 * IFF_IPV4 or IFF_IPV6 here depending  on lifr_flags value.
+	 * The only flags that we read from user space are IFF_IPV4,
+	 * IFF_IPV6, IFF_XRESOLV and IFF_BROADCAST.
+	 *
+	 * This ill has not been inserted into the global list.
+	 * So we are still single threaded and don't need any lock
+	 *
+	 * Saniy check the flags.
 	 */
-	if (!ill->ill_needs_attach &&
-	    ((lifr->lifr_flags & IFF_MULTICAST) &&
-	    !(lifr->lifr_flags & IFF_POINTOPOINT) &&
-	    ill->ill_bcast_addr_length == 0)) {
-		/* Link not broadcast/pt-pt capable i.e. no multicast */
-		ip1dbg(("ip_setname: EINVAL 2\n"));
-		return (EINVAL);
-	}
+
 	if ((lifr->lifr_flags & IFF_BROADCAST) &&
 	    ((lifr->lifr_flags & IFF_IPV6) ||
 	    (!ill->ill_needs_attach && ill->ill_bcast_addr_length == 0))) {
-		/* Link not broadcast capable or IPv6 i.e. no broadcast */
-		ip1dbg(("ip_setname: EINVAL 3\n"));
+		ip1dbg(("ip_sioctl_slifname: link not broadcast capable "
+		    "or IPv6 i.e., no broadcast \n"));
 		return (EINVAL);
 	}
-	if (lifr->lifr_flags & IFF_UP) {
-		/* Can only be set with SIOCSLIFFLAGS */
-		ip1dbg(("ip_setname: EINVAL 4\n"));
-		return (EINVAL);
-	}
-	if ((lifr->lifr_flags & (IFF_IPV6|IFF_IPV4)) != IFF_IPV6 &&
-	    (lifr->lifr_flags & (IFF_IPV6|IFF_IPV4)) != IFF_IPV4) {
-		ip1dbg(("ip_setname: EINVAL 5\n"));
+
+	new_flags =
+	    lifr->lifr_flags & (IFF_IPV6|IFF_IPV4|IFF_XRESOLV|IFF_BROADCAST);
+
+	if ((new_flags ^ (IFF_IPV6|IFF_IPV4)) == 0) {
+		ip1dbg(("ip_sioctl_slifname: flags must be exactly one of "
+		    "IFF_IPV4 or IFF_IPV6\n"));
 		return (EINVAL);
 	}
 	/*
 	 * Only allow the IFF_XRESOLV flag to be set on IPv6 interfaces.
 	 */
-	if ((lifr->lifr_flags & IFF_XRESOLV) &&
-	    !(lifr->lifr_flags & IFF_IPV6) &&
+	if ((new_flags & IFF_XRESOLV) && !(new_flags & IFF_IPV6) &&
 	    !(ipif->ipif_isv6)) {
-		ip1dbg(("ip_setname: EINVAL 6\n"));
+		ip1dbg(("ip_sioctl_slifname: XRESOLV only allowed on "
+		    "IPv6 interface\n"));
 		return (EINVAL);
 	}
 
 	/*
-	 * The user has done SIOCGLIFFLAGS prior to this ioctl and hence
-	 * we have all the flags here. So, we assign rather than we OR.
-	 * We can't OR the flags here because we don't want to set
-	 * both IFF_IPV4 and IFF_IPV6. We start off as IFF_IPV4 in
-	 * ipif_allocate and become IFF_IPV4 or IFF_IPV6 here depending
-	 * on lifr_flags value here.
+	 * We always start off as IPv4, so only need to check for IPv6.
 	 */
-	/*
-	 * This ill has not been inserted into the global list.
-	 * So we are still single threaded and don't need any lock
-	 */
-	ipif->ipif_flags = lifr->lifr_flags & IFF_LOGINT_FLAGS & ~IFF_DUPLICATE;
-	ill->ill_flags = lifr->lifr_flags & IFF_PHYINTINST_FLAGS;
-	ill->ill_phyint->phyint_flags = lifr->lifr_flags & IFF_PHYINT_FLAGS;
+	if ((new_flags & IFF_IPV6) != 0) {
+		ill->ill_flags |= ILLF_IPV6;
+		ill->ill_flags &= ~ILLF_IPV4;
+	}
+
+	if ((new_flags & IFF_BROADCAST) != 0)
+		ipif->ipif_flags |= IPIF_BROADCAST;
+	else
+		ipif->ipif_flags &= ~IPIF_BROADCAST;
+
+	if ((new_flags & IFF_XRESOLV) != 0)
+		ill->ill_flags |= ILLF_XRESOLV;
+	else
+		ill->ill_flags &= ~ILLF_XRESOLV;
 
 	/* We started off as V4. */
 	if (ill->ill_flags & ILLF_IPV6) {

@@ -517,22 +517,22 @@ static const struct rpc_cots_client {
 		atomic_add_64(&(p)->x.value.ui64, 1)
 
 #define	CLNT_MAX_CONNS	1	/* concurrent connections between clnt/srvr */
-static int clnt_max_conns = CLNT_MAX_CONNS;
+int clnt_max_conns = CLNT_MAX_CONNS;
 
 #define	CLNT_MIN_TIMEOUT	10	/* seconds to wait after we get a */
 					/* connection reset */
 #define	CLNT_MIN_CONNTIMEOUT	5	/* seconds to wait for a connection */
 
 
-static int clnt_cots_min_tout = CLNT_MIN_TIMEOUT;
-static int clnt_cots_min_conntout = CLNT_MIN_CONNTIMEOUT;
+int clnt_cots_min_tout = CLNT_MIN_TIMEOUT;
+int clnt_cots_min_conntout = CLNT_MIN_CONNTIMEOUT;
 
 /*
  * Limit the number of times we will attempt to receive a reply without
  * re-sending a response.
  */
 #define	CLNT_MAXRECV_WITHOUT_RETRY	3
-static uint_t clnt_cots_maxrecv	= CLNT_MAXRECV_WITHOUT_RETRY;
+uint_t clnt_cots_maxrecv	= CLNT_MAXRECV_WITHOUT_RETRY;
 
 uint_t *clnt_max_msg_sizep;
 void (*clnt_stop_idle)(queue_t *wq);
@@ -554,7 +554,7 @@ void (*clnt_stop_idle)(queue_t *wq);
  * use non-reserved ports.  Users of kRPC may override this by using
  * CLNT_CONTROL() and CLSET_BINDRESVPORT.
  */
-static int clnt_cots_do_bindresvport = 1;
+int clnt_cots_do_bindresvport = 1;
 
 static zone_key_t zone_cots_key;
 
@@ -905,7 +905,7 @@ clnt_cots_kcallit(CLIENT *h, rpcproc_t procnum, xdrproc_t xdr_args,
 	struct netbuf *retryaddr;
 	struct cm_xprt *cm_entry = NULL;
 	queue_t *wq;
-	int len;
+	int len, waitsecs, max_waitsecs;
 	int mpsize;
 	int refreshes = REFRESHES;
 	int interrupted;
@@ -920,7 +920,6 @@ clnt_cots_kcallit(CLIENT *h, rpcproc_t procnum, xdrproc_t xdr_args,
 
 	RPCLOG(2, "clnt_cots_kcallit: wait.tv_sec: %ld\n", wait.tv_sec);
 	RPCLOG(2, "clnt_cots_kcallit: wait.tv_usec: %ld\n", wait.tv_usec);
-
 	/*
 	 * Bug ID 1240234:
 	 * Look out for zero length timeouts. We don't want to
@@ -1227,21 +1226,51 @@ call_again:
 	    tidu_size);
 
 	wq = cm_entry->x_wq;
+	waitsecs = 0;
+
+dispatch_again:
 	status = clnt_dispatch_send(wq, mp, call, p->cku_xid,
 	    (p->cku_flags & CKU_ONQUEUE));
 
-	if (status == RPC_CANTSEND) {
+	if ((status == RPC_CANTSEND) && (call->call_reason == ENOBUFS)) {
+		/*
+		 * QFULL condition, allow some time for queue to drain
+		 * and try again. Give up after waiting for all timeout
+		 * specified for the call, or zone is going away.
+		 */
+		max_waitsecs = wait.tv_sec ? wait.tv_sec : clnt_cots_min_tout;
+		if ((waitsecs++ < max_waitsecs) &&
+		    !(zone_status_get(curproc->p_zone) >=
+		    ZONE_IS_SHUTTING_DOWN)) {
+
+			/* wait 1 sec for queue to drain */
+			if (clnt_delay(drv_usectohz(1000000),
+			    h->cl_nosignal) == EINTR) {
+				p->cku_err.re_errno = EINTR;
+				p->cku_err.re_status = RPC_INTR;
+
+				goto cots_done;
+			}
+
+			/* and try again */
+			goto dispatch_again;
+		}
 		p->cku_err.re_status = status;
-		p->cku_err.re_errno = EIO;
+		p->cku_err.re_errno = call->call_reason;
 		DTRACE_PROBE(krpc__e__clntcots__kcallit__cantsend);
 
-		/*
-		 * Allow for processing of the QFULL queue.
-		 */
-		delay_first = TRUE;
-		ticks = clnt_cots_min_tout * drv_usectohz(1000000);
-
 		goto cots_done;
+	}
+
+	if (waitsecs) {
+		/* adjust timeout to account for time wait to send */
+		wait.tv_sec -= waitsecs;
+		if (wait.tv_sec < 0) {
+			/* pick up reply on next retry */
+			wait.tv_sec = 0;
+		}
+		DTRACE_PROBE2(clnt_cots__sendwait, CLIENT *, h,
+		    int, waitsecs);
 	}
 
 	RPCLOG(64, "clnt_cots_kcallit: sent call for xid 0x%x\n",
@@ -2227,6 +2256,10 @@ connmgr_cb_totest(CLIENT *h, void *conn_num)
  * does not already exist in the list of cached transports, a new connection
  * is created, connected, and added to the list. The connection is for sending
  * only - the reply message may come back on another transport connection.
+ *
+ * To implement round-robin load balancing with multiple client connections,
+ * the last entry on the list is always selected. Once the entry is selected
+ * it's re-inserted to the head of the list.
  */
 static struct cm_xprt *
 connmgr_get(
@@ -2236,12 +2269,11 @@ connmgr_get(
 {
 	struct cm_xprt *cm_entry;
 	struct cm_xprt *lru_entry;
-	struct cm_xprt **cmp;
+	struct cm_xprt **cmp, **prev;
 	queue_t *wq;
 	TIUSER *tiptr;
 	int i;
 	int retval;
-	clock_t prev_time;
 	int tidu_size;
 	bool_t	connected;
 	zoneid_t zoneid = rpc_zoneid();
@@ -2272,9 +2304,8 @@ connmgr_get(
 use_new_conn:
 		i = 0;
 		cm_entry = lru_entry = NULL;
-		prev_time = lbolt;
 
-		cmp = &cm_hd;
+		prev = cmp = &cm_hd;
 		while ((cm_entry = *cmp) != NULL) {
 			ASSERT(cm_entry != cm_entry->x_next);
 			/*
@@ -2349,11 +2380,10 @@ use_new_conn:
 					    rpcerr, TRUE, nosignal, p->cku_cred));
 				}
 				i++;
-				if (cm_entry->x_time - prev_time <= 0 ||
-				    lru_entry == NULL) {
-					prev_time = cm_entry->x_time;
-					lru_entry = cm_entry;
-				}
+
+				/* keep track of the last entry */
+				lru_entry = cm_entry;
+				prev = cmp;
 			}
 
 			cmp = &cm_entry->x_next;
@@ -2397,6 +2427,16 @@ use_new_conn:
 			}
 
 			CONN_HOLD(lru_entry);
+
+			if ((i > 1) && (prev != &cm_hd)) {
+				/*
+				 * remove and re-insert entry at head of list.
+				 */
+				*prev = lru_entry->x_next;
+				lru_entry->x_next = cm_hd;
+				cm_hd = lru_entry;
+			}
+
 			mutex_exit(&connmgr_lock);
 			return (lru_entry);
 		}
@@ -3217,8 +3257,10 @@ connmgr_connect(
 			e->call_status = RPC_INTR;
 		else if (error == ETIME)
 			e->call_status = RPC_TIMEDOUT;
-		else if (error == EPROTO)
+		else if (error == EPROTO) {
 			e->call_status = RPC_SYSTEMERROR;
+			e->call_reason = EPROTO;
+		}
 
 		RPCLOG(8, "connmgr_connect: can't connect, status: "
 		    "%s\n", clnt_sperrno(e->call_status));
@@ -3641,7 +3683,7 @@ clnt_dispatch_send(queue_t *q, mblk_t *mp, calllist_t *e, uint_t xid,
 
 	if (!canput(q)) {
 		e->call_status = RPC_CANTSEND;
-		e->call_reason = EIO;
+		e->call_reason = ENOBUFS;
 		return (RPC_CANTSEND);
 	}
 
@@ -3714,6 +3756,7 @@ clnt_dispatch_notify(mblk_t *mp, zoneid_t zoneid, uint32_t xid)
 		if (e->call_zoneid != zoneid) {
 			mutex_exit(&e->call_lock);
 			mutex_exit(&chtp->ct_lock);
+			RPCLOG0(1, "clnt_dispatch_notify: incorrect zoneid\n");
 			return (FALSE);
 		}
 

@@ -798,6 +798,7 @@ Pbuild_file_ctf(struct ps_prochandle *P, file_info_t *fptr)
 
 	fptr->file_ctfp = ctf_bufopen(&ctdata, &symtab, &strtab, &err);
 	if (fptr->file_ctfp == NULL) {
+		dprintf("ctf_bufopen() failed, error code %d\n", err);
 		free(fptr->file_ctf_buf);
 		fptr->file_ctf_buf = NULL;
 		return (NULL);
@@ -2651,6 +2652,9 @@ i_Pobject_iter(struct ps_prochandle *P, boolean_t lmresolve,
 
 		if ((rc = func(cd, &mptr->map_pmap, lname)) != 0)
 			return (rc);
+
+		if (!P->info_valid)
+			Pupdate_maps(P);
 	}
 	return (0);
 }

@@ -26,6 +26,7 @@
  * instances.
  */
 
+#include <assert.h>
 #include <stdlib.h>
 #include <search.h>
 #include <string.h>
@@ -38,6 +39,7 @@
 #include <dhcpmsg.h>
 #include <dhcpagent_util.h>
 #include <dhcp_stable.h>
+#include <dhcp_inittab.h>
 
 #include "agent.h"
 #include "states.h"
@@ -80,6 +82,84 @@ iaid_retry(iu_tq_t *tqp, void *arg)
 }
 
 /*
+ * parse_param_list(): parse a parameter list.
+ *
+ *   input: const char *: parameter list string with comma-separated entries
+ *	    uint_t *: return parameter; number of entries decoded
+ *	    const char *: name of parameter list for logging purposes
+ *	    dhcp_smach_t *: smach pointer for logging
+ *  output: uint16_t *: allocated array of parameters, or NULL if none.
+ */
+
+static uint16_t *
+parse_param_list(const char *param_list, uint_t *param_cnt,
+    const char *param_name, dhcp_smach_t *dsmp)
+{
+	int i, maxparam;
+	char tsym[DSYM_MAX_SYM_LEN + 1];
+	uint16_t *params;
+	const char *cp;
+	dhcp_symbol_t *entry;
+
+	*param_cnt = 0;
+
+	if (param_list == NULL)
+		return (NULL);
+
+	for (maxparam = 1, i = 0; param_list[i] != '\0'; i++) {
+		if (param_list[i] == ',')
+			maxparam++;
+	}
+
+	params = malloc(maxparam * sizeof (*params));
+	if (params == NULL) {
+		dhcpmsg(MSG_WARNING,
+		    "cannot allocate parameter %s list for %s (continuing)",
+		    param_name, dsmp->dsm_name);
+		return (NULL);
+	}
+
+	for (i = 0; i < maxparam; ) {
+
+		if (isspace(*param_list))
+			param_list++;
+
+		/* extract the next element on the list */
+		cp = strchr(param_list, ',');
+		if (cp == NULL || cp - param_list >= sizeof (tsym))
+			(void) strlcpy(tsym, param_list, sizeof (tsym));
+		else
+			(void) strlcpy(tsym, param_list, cp - param_list + 1);
+
+		/* LINTED -- do nothing with blanks on purpose */
+		if (tsym[0] == '\0') {
+			;
+		} else if (isalpha(tsym[0])) {
+			entry = inittab_getbyname(ITAB_CAT_SITE |
+			    ITAB_CAT_STANDARD |
+			    (dsmp->dsm_isv6 ? ITAB_CAT_V6 : 0),
+			    ITAB_CONS_INFO, tsym);
+			if (entry == NULL) {
+				dhcpmsg(MSG_INFO, "ignored unknown %s list "
+				    "entry '%s' for %s", param_name, tsym,
+				    dsmp->dsm_name);
+			} else {
+				params[i++] = entry->ds_code;
+				free(entry);
+			}
+		} else {
+			params[i++] = strtoul(tsym, NULL, 0);
+		}
+		if (cp == NULL)
+			break;
+		param_list = cp + 1;
+	}
+
+	*param_cnt = i;
+	return (params);
+}
+
+/*
  * insert_smach(): Create a state machine instance on a given logical
  *		   interface.  The state machine holds the caller's LIF
  *		   reference on success, and frees it on failure.
@@ -94,7 +174,7 @@ insert_smach(dhcp_lif_t *lif, int *error)
 {
 	dhcp_smach_t *dsmp, *alt_primary;
 	boolean_t isv6;
-	const char *prl;
+	const char *plist;
 
 	if ((dsmp = calloc(1, sizeof (*dsmp))) == NULL) {
 		dhcpmsg(MSG_ERR, "cannot allocate state machine entry for %s",
@@ -158,48 +238,24 @@ insert_smach(dhcp_lif_t *lif, int *error)
 			return (NULL);
 		}
 	}
-	dsmp->dsm_retrans_timer		= -1;
-	dsmp->dsm_offer_timer		= -1;
-	dsmp->dsm_neg_hrtime		= gethrtime();
-	dsmp->dsm_script_fd		= -1;
-	dsmp->dsm_script_pid		= -1;
-	dsmp->dsm_script_helper_pid	= -1;
-	dsmp->dsm_script_event_id	= -1;
-	dsmp->dsm_start_timer		= -1;
 
+	script_init(dsmp);
 	ipc_action_init(&dsmp->dsm_ia);
 
+	dsmp->dsm_neg_hrtime = gethrtime();
+	dsmp->dsm_offer_timer = -1;
+	dsmp->dsm_start_timer = -1;
+	dsmp->dsm_retrans_timer = -1;
+
 	/*
-	 * initialize the parameter request list, if there is one.
+	 * Initialize the parameter request and ignore lists, if any.
 	 */
-
-	prl = df_get_string(dsmp->dsm_name, isv6, DF_PARAM_REQUEST_LIST);
-	if (prl == NULL) {
-		dsmp->dsm_prl = NULL;
-	} else {
-		int i;
-
-		for (dsmp->dsm_prllen = 1, i = 0; prl[i] != '\0'; i++) {
-			if (prl[i] == ',')
-				dsmp->dsm_prllen++;
-		}
-
-		dsmp->dsm_prl = malloc(dsmp->dsm_prllen *
-		    sizeof (*dsmp->dsm_prl));
-		if (dsmp->dsm_prl == NULL) {
-			dhcpmsg(MSG_WARNING, "insert_smach: cannot allocate "
-			    "parameter request list for %s (continuing)",
-			    dsmp->dsm_name);
-		} else {
-			for (i = 0; i < dsmp->dsm_prllen; prl++, i++) {
-				dsmp->dsm_prl[i] = strtoul(prl, NULL, 0);
-				while (*prl != ',' && *prl != '\0')
-					prl++;
-				if (*prl == '\0')
-					break;
-			}
-		}
-	}
+	plist = df_get_string(dsmp->dsm_name, isv6, DF_PARAM_REQUEST_LIST);
+	dsmp->dsm_prl = parse_param_list(plist, &dsmp->dsm_prllen, "request",
+	    dsmp);
+	plist = df_get_string(dsmp->dsm_name, isv6, DF_PARAM_IGNORE_LIST);
+	dsmp->dsm_pil = parse_param_list(plist, &dsmp->dsm_pillen, "ignore",
+	    dsmp);
 
 	dsmp->dsm_offer_wait = df_get_int(dsmp->dsm_name, isv6,
 	    DF_OFFER_WAIT);
@@ -274,6 +330,7 @@ free_smach(dhcp_smach_t *dsmp)
 	free(dsmp->dsm_send_pkt.pkt);
 	free(dsmp->dsm_cid);
 	free(dsmp->dsm_prl);
+	free(dsmp->dsm_pil);
 	free(dsmp->dsm_routers);
 	free(dsmp->dsm_reqhost);
 	free(dsmp);
@@ -373,6 +430,47 @@ primary_smach(boolean_t isv6)
 			break;
 	}
 	return (dsmp);
+}
+
+/*
+ * info_primary_smach(): loop through all state machines of the given type (v4
+ *			 or v6) in the system, and locate the one that should
+ *			 be considered "primary" for dhcpinfo.
+ *
+ *   input: boolean_t: B_TRUE for IPv6
+ *  output: dhcp_smach_t *: the dhcpinfo primary state machine
+ */
+
+dhcp_smach_t *
+info_primary_smach(boolean_t isv6)
+{
+	dhcp_smach_t *bestdsm = NULL;
+	dhcp_smach_t *dsmp;
+
+	for (dsmp = next_smach(NULL, isv6); dsmp != NULL;
+	    dsmp = next_smach(dsmp, isv6)) {
+		/*
+		 * If there is a primary, then something previously went wrong
+		 * with verification, because the caller uses primary_smach()
+		 * before calling this routine.  There's nothing else we can do
+		 * but return failure, as the designated primary must be bad.
+		 */
+		if (dsmp->dsm_dflags & DHCP_IF_PRIMARY)
+			return (NULL);
+
+		/* If we have no information, then we're not primary. */
+		if (dsmp->dsm_ack == NULL)
+			continue;
+
+		/*
+		 * Among those interfaces that have DHCP information, the
+		 * "primary" is the one that sorts lexically first.
+		 */
+		if (bestdsm == NULL ||
+		    strcmp(dsmp->dsm_name, bestdsm->dsm_name) < 0)
+			bestdsm = dsmp;
+	}
+	return (bestdsm);
 }
 
 /*
@@ -576,7 +674,7 @@ cancel_offer_timer(dhcp_smach_t *dsmp)
  *	    and thus don't require any protection or ordering on cancellation.
  */
 
-static void
+void
 cancel_smach_timers(dhcp_smach_t *dsmp)
 {
 	dhcp_lease_t *dlp;
@@ -1112,13 +1210,13 @@ reset_smach(dhcp_smach_t *dsmp)
 	remove_default_routes(dsmp);
 
 	free_pkt_list(&dsmp->dsm_recv_pkt_list);
-
+	free_pkt_entry(dsmp->dsm_ack);
 	if (dsmp->dsm_orig_ack != dsmp->dsm_ack)
 		free_pkt_entry(dsmp->dsm_orig_ack);
-
-	free_pkt_entry(dsmp->dsm_ack);
-
 	dsmp->dsm_ack = dsmp->dsm_orig_ack = NULL;
+
+	free(dsmp->dsm_reqhost);
+	dsmp->dsm_reqhost = NULL;
 
 	cancel_smach_timers(dsmp);
 
@@ -1129,15 +1227,13 @@ reset_smach(dhcp_smach_t *dsmp)
 		IN6_IPADDR_TO_V4MAPPED(htonl(INADDR_BROADCAST),
 		    &dsmp->dsm_server);
 	}
-	dsmp->dsm_neg_hrtime		= gethrtime();
-	dsmp->dsm_script_fd		= -1;
-	dsmp->dsm_script_pid		= -1;
-	dsmp->dsm_script_helper_pid	= -1;
-	dsmp->dsm_script_callback	= NULL;
-	dsmp->dsm_callback_arg		= NULL;
-	dsmp->dsm_script_event_id	= -1;
-	free(dsmp->dsm_reqhost);
-	dsmp->dsm_reqhost		= NULL;
+	dsmp->dsm_neg_hrtime = gethrtime();
+	/*
+	 * We must never get here with a script running, since it means we're
+	 * resetting an smach that is still in the middle of another state
+	 * transition with a pending dsm_script_callback.
+	 */
+	assert(dsmp->dsm_script_pid == -1);
 }
 
 /*
@@ -1216,8 +1312,6 @@ nuke_smach_list(void)
 			dsmp->dsm_droprelease = B_TRUE;
 
 			cancel_smach_timers(dsmp);
-			if (dsmp->dsm_script_pid != -1)
-				script_stop(dsmp);
 
 			/*
 			 * If the script is started by script_start, dhcp_drop
@@ -1225,7 +1319,9 @@ nuke_smach_list(void)
 			 * after the script exits.
 			 */
 			if (df_get_bool(dsmp->dsm_name, isv6,
-			    DF_RELEASE_ON_SIGTERM)) {
+			    DF_RELEASE_ON_SIGTERM) ||
+			    df_get_bool(dsmp->dsm_name, isv6,
+			    DF_VERIFIED_LEASE_ONLY)) {
 				if (script_start(dsmp, isv6 ? EVENT_RELEASE6 :
 				    EVENT_RELEASE, dhcp_release,
 				    "DHCP agent is exiting", &status)) {

@@ -118,7 +118,7 @@ static dld_ioc_macprop_t *i_dladm_buf_alloc_by_id(size_t, datalink_id_t,
 static dld_ioc_macprop_t *i_dladm_get_public_prop(dladm_handle_t, datalink_id_t,
 			    char *, uint_t, dladm_status_t *, uint_t *);
 
-static dladm_status_t i_dladm_set_prop(dladm_handle_t, datalink_id_t,
+static dladm_status_t i_dladm_set_private_prop(dladm_handle_t, datalink_id_t,
 			    const char *, char **, uint_t, uint_t);
 static dladm_status_t i_dladm_get_priv_prop(dladm_handle_t, datalink_id_t,
 			    const char *, char **, uint_t *, dladm_prop_type_t,
@@ -133,7 +133,7 @@ static pd_getf_t	do_get_zone, do_get_autopush, do_get_rate_mod,
 			i_dladm_binary_get, i_dladm_uint32_get,
 			i_dladm_flowctl_get, i_dladm_maxbw_get,
 			i_dladm_cpus_get, i_dladm_priority_get,
-			i_dladm_tagmode_get;
+			i_dladm_tagmode_get, i_dladm_range_get;
 
 static pd_setf_t	do_set_zone, do_set_rate_prop,
 			do_set_powermode_prop, do_set_radio_prop,
@@ -240,6 +240,10 @@ static link_attr_t link_attr[] = {
 	{ MAC_PROP_ZONE,	sizeof (dld_ioc_zid_t),	"zone"},
 
 	{ MAC_PROP_AUTOPUSH,	sizeof (struct dlautopush), "autopush"},
+
+	{ MAC_PROP_ADV_10GFDX_CAP, sizeof (uint8_t),	"adv_10gfdx_cap"},
+
+	{ MAC_PROP_EN_10GFDX_CAP, sizeof (uint8_t),	"en_10gfdx_cap"},
 
 	{ MAC_PROP_ADV_1000FDX_CAP, sizeof (uint8_t),	"adv_1000fdx_cap"},
 
@@ -417,13 +421,23 @@ static prop_desc_t	prop_table[] = {
 	    0, DATALINK_CLASS_PHYS, DL_ETHER },
 
 	{ "mtu", { "", 0 }, NULL, 0,
-	    i_dladm_set_public_prop, NULL, i_dladm_uint32_get,
-	    i_dladm_defmtu_check, 0, DATALINK_CLASS_ALL,
+	    i_dladm_set_public_prop, i_dladm_range_get,
+	    i_dladm_uint32_get, i_dladm_defmtu_check, 0, DATALINK_CLASS_ALL,
 	    DATALINK_ANY_MEDIATYPE },
 
 	{ "flowctrl", { "", 0 },
 	    link_flow_vals, VALCNT(link_flow_vals),
 	    i_dladm_set_public_prop, NULL, i_dladm_flowctl_get, NULL,
+	    0, DATALINK_CLASS_PHYS, DL_ETHER },
+
+	{ "adv_10gfdx_cap", { "", 0 },
+	    link_01_vals, VALCNT(link_01_vals),
+	    NULL, NULL, i_dladm_binary_get, NULL,
+	    0, DATALINK_CLASS_PHYS, DL_ETHER },
+
+	{ "en_10gfdx_cap", { "", 0 },
+	    link_01_vals, VALCNT(link_01_vals),
+	    i_dladm_set_public_prop, NULL, i_dladm_binary_get, NULL,
 	    0, DATALINK_CLASS_PHYS, DL_ETHER },
 
 	{ "adv_1000fdx_cap", { "", 0 },
@@ -696,8 +710,8 @@ i_dladm_set_linkprop(dladm_handle_t handle, datalink_id_t linkid,
 	if (!found) {
 		if (prop_name[0] == '_') {
 			/* other private properties */
-			status = i_dladm_set_prop(handle, linkid, prop_name,
-			    prop_val, val_cnt, flags);
+			status = i_dladm_set_private_prop(handle, linkid,
+			    prop_name, prop_val, val_cnt, flags);
 		} else  {
 			status = DLADM_STATUS_NOTFOUND;
 		}
@@ -722,6 +736,10 @@ dladm_set_linkprop(dladm_handle_t handle, datalink_id_t linkid,
 		return (DLADM_STATUS_BADARG);
 	}
 
+	/*
+	 * Check for valid link property against the flags passed
+	 * and set the link property when active flag is passed.
+	 */
 	status = i_dladm_set_linkprop(handle, linkid, prop_name, prop_val,
 	    val_cnt, flags);
 	if (status != DLADM_STATUS_OK)
@@ -796,7 +814,9 @@ dladm_get_linkprop(dladm_handle_t handle, datalink_id_t linkid,
 	uint_t			perm_flags;
 
 	if (type == DLADM_PROP_VAL_DEFAULT)
-		dld_flags = MAC_PROP_DEFAULT;
+		dld_flags |= MAC_PROP_DEFAULT;
+	else if (type == DLADM_PROP_VAL_MODIFIABLE)
+		dld_flags |= MAC_PROP_POSSIBLE;
 
 	if (linkid == DATALINK_INVALID_LINKID || prop_name == NULL ||
 	    prop_val == NULL || val_cntp == NULL || *val_cntp == 0)
@@ -2509,6 +2529,98 @@ i_dladm_uint32_get(dladm_handle_t handle, prop_desc_t *pdp,
 	return (DLADM_STATUS_OK);
 }
 
+/*
+ * Determines the size of the structure that needs to be sent to drivers
+ * for retrieving the property range values.
+ */
+static int
+i_dladm_range_size(mac_propval_range_t *r, size_t *sz)
+{
+	uint_t count = r->mpr_count;
+
+	*sz = sizeof (mac_propval_range_t);
+	--count;
+
+	switch (r->mpr_type) {
+	case MAC_PROPVAL_UINT32:
+		*sz += (count * sizeof (mac_propval_uint32_range_t));
+		return (0);
+	default:
+		break;
+	}
+	*sz = 0;
+	return (EINVAL);
+}
+
+/* ARGSUSED */
+static dladm_status_t
+i_dladm_range_get(dladm_handle_t handle, prop_desc_t *pdp,
+    datalink_id_t linkid, char **prop_val, uint_t *val_cnt,
+    datalink_media_t media, uint_t flags, uint_t *perm_flags)
+{
+	dld_ioc_macprop_t *dip;
+	dladm_status_t status = DLADM_STATUS_OK;
+	size_t	sz;
+	mac_propval_range_t *rangep;
+
+	sz = sizeof (mac_propval_range_t);
+
+	/*
+	 * As caller we don't know number of value ranges, the driver
+	 * supports. To begin with we assume that number to be 1. If the
+	 * buffer size is insufficient, driver returns back with the
+	 * actual count of value ranges. See mac.h for more details.
+	 */
+retry:
+	if ((dip = i_dladm_buf_alloc_by_name(sz, linkid, pdp->pd_name, flags,
+	    &status)) == NULL)
+		return (status);
+
+	status = i_dladm_macprop(handle, dip, B_FALSE);
+	if (status != DLADM_STATUS_OK) {
+		if (status == DLADM_STATUS_TOOSMALL) {
+			int err;
+
+			rangep = (mac_propval_range_t *)(void *)&dip->pr_val;
+			if ((err = i_dladm_range_size(rangep, &sz)) == 0) {
+				free(dip);
+				goto retry;
+			} else {
+				status = dladm_errno2status(err);
+			}
+		}
+		free(dip);
+		return (status);
+	}
+	rangep = (mac_propval_range_t *)(void *)&dip->pr_val;
+
+	switch (rangep->mpr_type) {
+	case MAC_PROPVAL_UINT32: {
+		mac_propval_uint32_range_t *ur;
+		uint_t	count = rangep->mpr_count, i;
+
+		ur = &rangep->range_uint32[0];
+
+		for (i = 0; i < count; i++, ur++) {
+			if (ur->mpur_min == ur->mpur_max) {
+				(void) snprintf(prop_val[i], DLADM_PROP_VAL_MAX,
+				    "%ld", ur->mpur_min);
+			} else {
+				(void) snprintf(prop_val[i], DLADM_PROP_VAL_MAX,
+				    "%ld-%ld", ur->mpur_min, ur->mpur_max);
+			}
+		}
+		*val_cnt = count;
+		break;
+	}
+	default:
+		status = DLADM_STATUS_BADARG;
+		break;
+	}
+	free(dip);
+	return (status);
+}
+
 /* ARGSUSED */
 static dladm_status_t
 i_dladm_tagmode_get(dladm_handle_t handle, prop_desc_t *pdp,
@@ -2580,7 +2692,7 @@ i_dladm_flowctl_get(dladm_handle_t handle, prop_desc_t *pdp,
 
 /* ARGSUSED */
 static dladm_status_t
-i_dladm_set_prop(dladm_handle_t handle, datalink_id_t linkid,
+i_dladm_set_private_prop(dladm_handle_t handle, datalink_id_t linkid,
     const char *prop_name, char **prop_val, uint_t val_cnt, uint_t flags)
 
 {
@@ -2597,6 +2709,9 @@ i_dladm_set_prop(dladm_handle_t handle, datalink_id_t linkid,
 	p = dladm_name2prop(prop_name);
 	if (p->pp_id != MAC_PROP_PRIVATE)
 		return (DLADM_STATUS_BADARG);
+
+	if (!(flags & DLADM_OPT_ACTIVE))
+		return (DLADM_STATUS_OK);
 
 	/*
 	 * private properties: all parsing is done in the kernel.

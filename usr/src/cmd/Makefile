@@ -132,6 +132,7 @@ COMMON_SUBDIRS=		\
 	dispadmin	\
 	dladm		\
 	dmesg		\
+	dodatadm	\
 	dserv		\
 	dtrace		\
 	du		\
@@ -288,7 +289,6 @@ COMMON_SUBDIRS=		\
 	nscd		\
 	oamuser		\
 	oawk		\
-	openssl		\
 	pack		\
 	pagesize	\
 	passmgmt	\
@@ -297,6 +297,7 @@ COMMON_SUBDIRS=		\
 	pathchk		\
 	pbind		\
 	pcidr		\
+	pcitool		\
 	pcmciad		\
 	pfexec		\
 	pgrep		\
@@ -328,6 +329,7 @@ COMMON_SUBDIRS=		\
 	pwck		\
 	pwconv		\
 	pwd		\
+	pyzfs		\
 	raidctl		\
 	ramdiskadm	\
 	rcap		\
@@ -376,6 +378,7 @@ COMMON_SUBDIRS=		\
 	split		\
 	sqlite		\
 	srchtxt		\
+	srptsvc		\
 	ssh		\
 	stat		\
 	stmfadm		\
@@ -387,6 +390,7 @@ COMMON_SUBDIRS=		\
 	sulogin		\
 	sunpc		\
 	svc		\
+	svr4pkg		\
 	swap		\
 	sync		\
 	sysdef		\
@@ -441,7 +445,7 @@ COMMON_SUBDIRS=		\
 	whodo		\
 	wracct		\
 	write		\
-	xntpd		\
+	wusbadm		\
 	xargs		\
 	xstr		\
 	yes		\
@@ -458,10 +462,10 @@ COMMON_SUBDIRS=		\
 	zonecfg		\
 	zonename	\
 	zpool		\
+	zlook		\
 	ztest
 
 $(CLOSED_BUILD)COMMON_SUBDIRS += \
-	$(CLOSED)/cmd/dodatadm	\
 	$(CLOSED)/cmd/iconv	\
 	$(CLOSED)/cmd/ksh	\
 	$(CLOSED)/cmd/llc2	\
@@ -471,7 +475,6 @@ $(CLOSED_BUILD)COMMON_SUBDIRS += \
 	$(CLOSED)/cmd/od	\
 	$(CLOSED)/cmd/patch	\
 	$(CLOSED)/cmd/pax	\
-	$(CLOSED)/cmd/pcitool	\
 	$(CLOSED)/cmd/printf	\
 	$(CLOSED)/cmd/sed	\
 	$(CLOSED)/cmd/sed_xpg4	\
@@ -484,7 +487,9 @@ i386_SUBDIRS=		\
 	biosdev		\
 	diskscan	\
 	lms		\
+	ntfsprogs	\
 	OWconfig	\
+	parted		\
 	rtc		\
 	ucodeadm	\
 	xvm
@@ -518,6 +523,7 @@ MSGSUBDIRS=		\
 	audio		\
 	audit		\
 	auditd		\
+	auditrecord	\
 	auths		\
 	autopush	\
 	avs		\
@@ -529,7 +535,6 @@ MSGSUBDIRS=		\
 	basename	\
 	bnu		\
 	bsmconv		\
-	bsmrecord	\
 	bsmunconv	\
 	busstat		\
 	cal		\
@@ -669,6 +674,7 @@ MSGSUBDIRS=		\
 	ptools		\
 	pwconv		\
 	pwd		\
+	pyzfs		\
 	raidctl		\
 	ramdiskadm	\
 	rcap		\
@@ -700,6 +706,7 @@ MSGSUBDIRS=		\
 	strings		\
 	su		\
 	svc		\
+	svr4pkg		\
 	swap		\
 	syseventadm	\
 	syseventd	\
@@ -733,6 +740,7 @@ MSGSUBDIRS=		\
 	whodo		\
 	wracct		\
 	write		\
+	wusbadm		\
 	xargs		\
 	yppasswd	\
 	zdump		\
@@ -789,20 +797,20 @@ $(CLOSED_BUILD)DCSUBDIRS += \
 	$(CLOSED)/cmd/pax
 
 #
-# commands that belong only to the basic security module
+# commands that belong only to audit and device allocation
 #
-BSMSUBDIRS=		\
+AUDITSUBDIRS=		\
 	allocate	\
 	amt		\
 	audit		\
 	audit_warn	\
 	auditconfig	\
 	auditd		\
+	auditrecord	\
 	auditreduce	\
 	auditstat	\
 	praudit		\
 	bsmconv		\
-	bsmrecord	\
 	bsmunconv
 
 #
@@ -823,9 +831,10 @@ _dc :=		TARGET = _dc
 
 SUBDIRS = $(COMMON_SUBDIRS) $($(MACH)_SUBDIRS)
 
-.PARALLEL:	$(BWOSDIRS) $(SUBDIRS) $(MSGSUBDIRS) $(BSMSUBDIRS)
+.PARALLEL:	$(BWOSDIRS) $(SUBDIRS) $(MSGSUBDIRS) $(AUDITSUBDIRS)
 
-all install clean clobber lint: $(FIRST_SUBDIRS) .WAIT $(SUBDIRS) $(BSMSUBDIRS)
+all install clean clobber lint: $(FIRST_SUBDIRS) .WAIT $(SUBDIRS) \
+	$(AUDITSUBDIRS)
 
 #
 # Manifests cannot be checked in parallel, because we are using
@@ -851,8 +860,9 @@ _dc: $(DCSUBDIRS)
 #
 fs.d: fstyp
 ksh:	shcomp isaexec
+print:	lp
 
-$(FIRST_SUBDIRS) $(BWOSDIRS) $(SUBDIRS) $(BSMSUBDIRS): FRC
+$(FIRST_SUBDIRS) $(BWOSDIRS) $(SUBDIRS) $(AUDITSUBDIRS): FRC
 	@if [ -f $@/Makefile  ]; then \
 		cd $@; pwd; $(MAKE) $(TARGET); \
 	else \

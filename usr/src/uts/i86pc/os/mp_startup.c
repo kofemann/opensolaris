@@ -395,7 +395,7 @@ mp_startup_init(int cpun)
 	 * alloc space for ucode_info
 	 */
 	ucode_alloc_space(cp);
-
+	xc_init_cpu(cp);
 	hat_cpu_online(cp);
 
 #ifdef TRAPTRACE
@@ -854,7 +854,7 @@ workaround_errata(struct cpu *cpu)
 	/*LINTED*/
 	if (cpuid_opteron_erratum(cpu, 109) > 0) do {
 		/*
-		 * Certain Reverse REP MOVS May Produce Unpredictable Behaviour
+		 * Certain Reverse REP MOVS May Produce Unpredictable Behavior
 		 */
 #if defined(OPTERON_ERRATUM_109)
 		/*
@@ -1388,7 +1388,7 @@ start_other_cpus(int cprboot)
 	 */
 	cpu_pause_init();
 
-	xc_init();		/* initialize processor crosscalls */
+	xc_init_cpu(CPU);		/* initialize processor crosscalls */
 
 	if (mach_cpucontext_init() != 0)
 		goto done;
@@ -1470,9 +1470,11 @@ mp_startup(void)
 {
 	struct cpu *cp = CPU;
 	uint_t new_x86_feature;
+	extern void cpu_event_init_cpu(cpu_t *);
 #ifndef __xpv
 	extern void cpupm_init(cpu_t *);
 #endif
+	const char *fmt = "?cpu%d: %b\n";
 
 	/*
 	 * We need to get TSC on this proc synced (i.e., any delta
@@ -1540,8 +1542,8 @@ mp_startup(void)
 	 * gets large enough.
 	 */
 	if ((x86_feature & new_x86_feature) != x86_feature) {
-		cmn_err(CE_CONT, "?cpu%d: %b\n",
-		    cp->cpu_id, new_x86_feature, FMT_X86_FEATURE);
+		cmn_err(CE_CONT, fmt, cp->cpu_id, new_x86_feature,
+		    FMT_X86_FEATURE);
 		cmn_err(CE_WARN, "cpu%d feature mismatch", cp->cpu_id);
 	}
 
@@ -1555,7 +1557,7 @@ mp_startup(void)
 	/*
 	 * We could be more sophisticated here, and just mark the CPU
 	 * as "faulted" but at this point we'll opt for the easier
-	 * answer of dieing horribly.  Provided the boot cpu is ok,
+	 * answer of dying horribly.  Provided the boot cpu is ok,
 	 * the system can be recovered by booting with use_mp set to zero.
 	 */
 	if (workaround_errata(cp) != 0)
@@ -1590,7 +1592,7 @@ mp_startup(void)
 	/*
 	 * Enable preemption here so that contention for any locks acquired
 	 * later in mp_startup may be preempted if the thread owning those
-	 * locks is continously executing on other CPUs (for example, this
+	 * locks is continuously executing on other CPUs (for example, this
 	 * CPU must be preemptible to allow other CPUs to pause it during their
 	 * startup phases).  It's safe to enable preemption here because the
 	 * CPU state is pretty-much fully constructed.
@@ -1601,10 +1603,10 @@ mp_startup(void)
 	ASSERT(cp->cpu_base_spl == ipltospl(LOCK_LEVEL));
 	set_base_spl();		/* Restore the spl to its proper value */
 
+	cpu_event_init_cpu(cp);
 #ifndef __xpv
 	cpupm_init(cp);
 #endif
-	add_cpunode2devtree(cp->cpu_id, cp->cpu_m.mcpu_cpi);
 
 	/*
 	 * Processor group initialization for this CPU is dependent on the
@@ -1661,6 +1663,8 @@ mp_startup(void)
 	 */
 	cmn_err(CE_CONT, "!cpu%d initialization complete - online\n",
 	    cp->cpu_id);
+
+	(void) mach_cpu_create_device_node(cp, NULL);
 
 	/*
 	 * Now we are done with the startup thread, so free it up.

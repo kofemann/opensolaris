@@ -1771,7 +1771,7 @@ propagate_stop(graph_vertex_t *v, void *arg)
 	}
 }
 
-static void
+void
 offline_vertex(graph_vertex_t *v)
 {
 	scf_handle_t *h = libscf_handle_create_bound_loop();
@@ -2038,8 +2038,9 @@ graph_change_restarter(graph_vertex_t *v, const char *fmri_arg, scf_handle_t *h,
 	assert(err == 0 || err == EEXIST);
 
 	if (rv->gv_delegate_initialized == 0) {
-		rv->gv_delegate_channel = restarter_protocol_init_delegate(
-		    rv->gv_name);
+		if ((rv->gv_delegate_channel = restarter_protocol_init_delegate(
+		    rv->gv_name)) == NULL)
+			return (EINVAL);
 		rv->gv_delegate_initialized = 1;
 	}
 	v->gv_restarter_id = rv->gv_id;
@@ -3185,10 +3186,12 @@ configure_vertex(graph_vertex_t *v, scf_instance_t *inst)
 		case SCF_ERROR_CONNECTION_BROKEN:
 		default:
 			scf_pg_destroy(pg);
+			startd_free(restarter_fmri, max_scf_value_size);
 			return (ECONNABORTED);
 
 		case SCF_ERROR_DELETED:
 			scf_pg_destroy(pg);
+			startd_free(restarter_fmri, max_scf_value_size);
 			return (ECANCELED);
 
 		case SCF_ERROR_NOT_SET:
@@ -3203,6 +3206,7 @@ configure_vertex(graph_vertex_t *v, scf_instance_t *inst)
 		case ECONNABORTED:
 		case ECANCELED:
 			scf_pg_destroy(pg);
+			startd_free(restarter_fmri, max_scf_value_size);
 			return (err);
 
 		default:
@@ -3232,11 +3236,13 @@ init_state:
 		case ECONNABORTED:
 			startd_free((void *)idata.i_fmri, max_scf_fmri_size);
 			scf_pg_destroy(pg);
+			startd_free(restarter_fmri, max_scf_value_size);
 			return (ECONNABORTED);
 
 		case ENOENT:
 			startd_free((void *)idata.i_fmri, max_scf_fmri_size);
 			scf_pg_destroy(pg);
+			startd_free(restarter_fmri, max_scf_value_size);
 			return (ECANCELED);
 
 		case EPERM:
@@ -3277,6 +3283,7 @@ init_state:
 
 			case ECONNABORTED:
 			case ECANCELED:
+				startd_free(restarter_fmri, max_scf_value_size);
 				return (err);
 
 			case EROFS:
@@ -3301,6 +3308,7 @@ init_state:
 
 			case ECONNABORTED:
 			case ECANCELED:
+				startd_free(restarter_fmri, max_scf_value_size);
 				return (err);
 
 			case EPERM:
@@ -3367,7 +3375,7 @@ init_state:
 
 		if (err == EINVAL) {
 			log_framework(LOG_ERR, emsg_invalid_restarter,
-			    v->gv_name);
+			    v->gv_name, restarter_fmri);
 			reason = "invalid_restarter";
 		} else {
 			handle_cycle(v->gv_name, path);
@@ -3500,36 +3508,6 @@ do_uadmin(void)
 	else
 		uu_warn("Could not create \"%s\"", resetting);
 
-	/*
-	 * Right now, fast reboot is supported only on i386.
-	 * scf_is_fastboot_default() should take care of it.
-	 * If somehow we got there on unsupported platform -
-	 * print warning and fall back to regular reboot.
-	 */
-	if (halting == AD_FASTREBOOT) {
-#if defined(__i386)
-		int rc;
-
-		if ((rc = grub_get_boot_args(&fbarg, NULL,
-		    GRUB_ENTRY_DEFAULT)) == 0) {
-			mdep = (uintptr_t)&fbarg.gba_bootargs;
-		} else {
-			/*
-			 * Failed to read GRUB menu, fall back to normal reboot
-			 */
-			halting = AD_BOOT;
-			uu_warn("Failed to process GRUB menu entry "
-			    "for fast reboot.\n\t%s\n"
-			    "Falling back to regular reboot.\n",
-			    grub_strerror(rc));
-		}
-#else	/* __i386 */
-		halting = AD_BOOT;
-		uu_warn("Fast reboot configured, but not supported by "
-		    "this ISA\n");
-#endif	/* __i386 */
-	}
-
 	/* Kill dhcpagent if we're not using nfs for root */
 	if ((statvfs("/", &vfs) == 0) &&
 	    (strncmp(vfs.f_basetype, "nfs", sizeof ("nfs") - 1) != 0))
@@ -3564,6 +3542,36 @@ do_uadmin(void)
 	 */
 	if (getzoneid() == 0 && access("/usr/sbin/bootadm", X_OK) == 0)
 		fork_with_timeout("/usr/sbin/bootadm -ea update_all", 0, 3600);
+
+	/*
+	 * Right now, fast reboot is supported only on i386.
+	 * scf_is_fastboot_default() should take care of it.
+	 * If somehow we got there on unsupported platform -
+	 * print warning and fall back to regular reboot.
+	 */
+	if (halting == AD_FASTREBOOT) {
+#if defined(__i386)
+		int rc;
+
+		if ((rc = grub_get_boot_args(&fbarg, NULL,
+		    GRUB_ENTRY_DEFAULT)) == 0) {
+			mdep = (uintptr_t)&fbarg.gba_bootargs;
+		} else {
+			/*
+			 * Failed to read GRUB menu, fall back to normal reboot
+			 */
+			halting = AD_BOOT;
+			uu_warn("Failed to process GRUB menu entry "
+			    "for fast reboot.\n\t%s\n"
+			    "Falling back to regular reboot.\n",
+			    grub_strerror(rc));
+		}
+#else	/* __i386 */
+		halting = AD_BOOT;
+		uu_warn("Fast reboot configured, but not supported by "
+		    "this ISA\n");
+#endif	/* __i386 */
+	}
 
 	fork_with_timeout("/sbin/umountall -l", 0, 5);
 	fork_with_timeout("/sbin/umount /tmp /var/adm /var/run /var "
@@ -3766,8 +3774,7 @@ run_sulogin(const char *msg)
 	if (console_login_ready) {
 		v = vertex_get_by_name(console_login_fmri);
 
-		if (v != NULL && v->gv_state == RESTARTER_STATE_OFFLINE &&
-		    !inst_running(v)) {
+		if (v != NULL && v->gv_state == RESTARTER_STATE_OFFLINE) {
 			if (v->gv_start_f == NULL)
 				vertex_send_event(v,
 				    RESTARTER_EVENT_TYPE_START);

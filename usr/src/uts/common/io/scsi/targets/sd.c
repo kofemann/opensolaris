@@ -775,10 +775,13 @@ static const int sd_disk_table_size =
 #define	SD_INTERCONNECT_FIBRE		2
 #define	SD_INTERCONNECT_SSA		3
 #define	SD_INTERCONNECT_SATA		4
+#define	SD_INTERCONNECT_SAS		5
+
 #define	SD_IS_PARALLEL_SCSI(un)		\
 	((un)->un_interconnect_type == SD_INTERCONNECT_PARALLEL)
 #define	SD_IS_SERIAL(un)		\
-	((un)->un_interconnect_type == SD_INTERCONNECT_SATA)
+	(((un)->un_interconnect_type == SD_INTERCONNECT_SATA) ||\
+	((un)->un_interconnect_type == SD_INTERCONNECT_SAS))
 
 /*
  * Definitions used by device id registration routines
@@ -7019,6 +7022,13 @@ sd_unit_attach(dev_info_t *devi)
 		SD_INFO(SD_LOG_ATTACH_DETACH, un,
 		    "sd_unit_attach: un:0x%p SD_INTERCONNECT_PARALLEL\n", un);
 		break;
+	case INTERCONNECT_SAS:
+		un->un_f_is_fibre = FALSE;
+		un->un_interconnect_type = SD_INTERCONNECT_SAS;
+		un->un_node_type = DDI_NT_BLOCK_SAS;
+		SD_INFO(SD_LOG_ATTACH_DETACH, un,
+		    "sd_unit_attach: un:0x%p SD_INTERCONNECT_SAS\n", un);
+		break;
 	case INTERCONNECT_SATA:
 		un->un_f_is_fibre = FALSE;
 		un->un_interconnect_type = SD_INTERCONNECT_SATA;
@@ -8495,12 +8505,16 @@ sd_unit_detach(dev_info_t *devi)
 	 * Unregister and free device id if it was not registered
 	 * by the transport.
 	 */
-	if (un->un_f_devid_transport_defined == FALSE) {
+	if (un->un_f_devid_transport_defined == FALSE)
 		ddi_devid_unregister(devi);
-		if (un->un_devid) {
-			ddi_devid_free(un->un_devid);
-			un->un_devid = NULL;
-		}
+
+	/*
+	 * free the devid structure if allocated before (by ddi_devid_init()
+	 * or ddi_devid_get()).
+	 */
+	if (un->un_devid) {
+		ddi_devid_free(un->un_devid);
+		un->un_devid = NULL;
 	}
 
 	/*

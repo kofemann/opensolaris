@@ -157,7 +157,10 @@ SUBDIRS += \
 	libnsctl	\
 	libunistat	\
 	libdscfg	\
-	librdc
+	librdc		\
+	libinstzones	\
+	libpkg
+
 $(CLOSED_BUILD)SUBDIRS += \
 	$(CLOSED)/lib/smartcard
 SUBDIRS += \
@@ -224,7 +227,6 @@ SUBDIRS += \
 	lvm		\
 	libsmedia	\
 	libipp		\
-	openssl		\
 	libdiskmgt	\
 	liblgrp		\
 	libfsmgt	\
@@ -238,6 +240,7 @@ SUBDIRS += \
 	libzpool	\
 	libzfs		\
 	libzfs_jni	\
+	pyzfs		\
 	libmapid	\
 	brand		\
 	policykit	\
@@ -259,6 +262,10 @@ SUBDIRS += \
 	libsun_ima	\
 	mpapi		\
 	$($(MACH)_SUBDIRS)
+
+i386_SUBDIRS=		\
+	libntfs		\
+	libparted
 
 sparc_SUBDIRS= .WAIT	\
 	efcode		\
@@ -320,10 +327,12 @@ MSGSUBDIRS=		\
 	libinetcfg	\
 	libipmp		\
 	libinetutil	\
+	libinstzones	\
 	libnsl		\
 	libpam		\
 	libpicl		\
 	libpool		\
+	libpkg		\
 	libpp		\
 	libscf		\
 	libsasl		\
@@ -348,6 +357,7 @@ MSGSUBDIRS=		\
 	mms		\
 	mpss		\
 	pam_modules	\
+	pyzfs		\
 	rpcsec_gss
 $(CLOSED_BUILD)MSGSUBDIRS += \
 	$(CLOSED)/lib/smartcard
@@ -457,7 +467,6 @@ HDRSUBDIRS=		\
 	hal		\
 	policykit	\
 	lvm		\
-	openssl		\
 	pkcs11		\
 	passwdutil	\
 	../cmd/sendmail/libmilter	\
@@ -551,7 +560,7 @@ libcmdutils:	libavl
 libcontract:	libnvpair
 libdevid:	libdevinfo
 libdevinfo:	libnvpair libsec
-libdhcpagent:	libsocket libdhcputil libuuid libdlpi
+libdhcpagent:	libsocket libdhcputil libuuid libdlpi libcontract
 libdhcpsvc:	libinetutil
 libdhcputil:	libnsl libgen libinetutil libdlpi
 libdladm:	libdevinfo libinetutil libsocket libscf librcm libnvpair \
@@ -567,13 +576,15 @@ libelfsign:	libcryptoutil libkmf
 libidmap:	libadutils libldap5 libavl libsldap
 libinetcfg:	libnsl libsocket libdlpi
 libiscsit:	libc libnvpair libstmf libuuid libnsl
-libkmf:		libcryptoutil pkcs11 openssl
+libkmf:		libcryptoutil pkcs11
 libnsl:		libmd5 libscf
 libmapid:	libresolv
 libnwam:	libdoor
 librdc:		libsocket libnsl libnsctl libunistat libdscfg
 libuuid:	libdlpi
 libinetutil:	libsocket
+libinstzones:	libzonecfg libcontract
+libpkg:		libwanboot libscf libadm
 libsecdb:	libnsl
 libsasl:	libgss libsocket pkcs11 libmd
 sasl_plugins:	pkcs11 libgss libsocket libsasl
@@ -594,7 +605,7 @@ libproject:	libpool libproc libsecdb
 libtsnet:	libnsl libtsol libsecdb
 libwrap:	libnsl libsocket
 libwanboot:	libnvpair libresolv libnsl libsocket libdevinfo libinetutil \
-		libdhcputil openssl
+		libdhcputil
 libwanbootutil:	libnsl
 pam_modules:	libproject passwdutil $(SMARTCARD) smbsrv
 libscf:		libuutil libmd libgen libsmbios
@@ -605,7 +616,8 @@ librestart:	libuutil libscf
 pkcs11:		libcryptoutil
 print:		libldap5
 udapl/udapl_tavor:	udapl/libdat
-libzfs:		libdevinfo libdevid libgen libnvpair libuutil libiscsitgt
+libzfs:		libdevinfo libdevid libgen libnvpair libuutil libiscsitgt \
+		libavl libefi libidmap libsec
 libzfs_jni:	libdiskmgt libnvpair libzfs
 libzpool:	libavl libumem libnvpair
 libsec:		libavl libidmap
@@ -621,6 +633,7 @@ libvscan:	libscf
 scsi:		libnvpair
 mpapi:		libpthread libdevinfo libsysevent libnvpair
 libgrubmgmt:	libdevinfo libzfs libfstyp
+pyzfs:		libnvpair libsec libidmap libzfs
 
 #
 # The reason this rule checks for the existence of the

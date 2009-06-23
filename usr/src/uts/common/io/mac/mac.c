@@ -499,7 +499,6 @@ i_mac_destructor(void *buf, void *arg)
 	ASSERT(mip->mi_active == 0);
 	ASSERT(mip->mi_linkstate == LINK_STATE_UNKNOWN);
 	ASSERT(mip->mi_devpromisc == 0);
-	ASSERT(mip->mi_promisc == 0);
 	ASSERT(mip->mi_ksp == NULL);
 	ASSERT(mip->mi_kstat_count == 0);
 	ASSERT(mip->mi_nclients == 0);
@@ -1133,19 +1132,13 @@ mac_stop(mac_handle_t mh)
 }
 
 int
-i_mac_promisc_set(mac_impl_t *mip, boolean_t on, mac_promisc_type_t ptype)
+i_mac_promisc_set(mac_impl_t *mip, boolean_t on)
 {
 	int		err = 0;
 
 	ASSERT(MAC_PERIM_HELD((mac_handle_t)mip));
 	ASSERT(mip->mi_setpromisc != NULL);
-	ASSERT(ptype == MAC_DEVPROMISC || ptype == MAC_PROMISC);
 
-	/*
-	 * Determine whether we should enable or disable promiscuous mode.
-	 * For details on the distinction between "device promiscuous mode"
-	 * and "MAC promiscuous mode", see PSARC/2005/289.
-	 */
 	if (on) {
 		/*
 		 * Enable promiscuous mode on the device if not yet enabled.
@@ -1158,12 +1151,6 @@ i_mac_promisc_set(mac_impl_t *mip, boolean_t on, mac_promisc_type_t ptype)
 			}
 			i_mac_notify(mip, MAC_NOTE_DEVPROMISC);
 		}
-
-		/*
-		 * Enable promiscuous mode on the MAC if not yet enabled.
-		 */
-		if (ptype == MAC_PROMISC && mip->mi_promisc++ == 0)
-			i_mac_notify(mip, MAC_NOTE_PROMISC);
 	} else {
 		if (mip->mi_devpromisc == 0)
 			return (EPROTO);
@@ -1180,33 +1167,9 @@ i_mac_promisc_set(mac_impl_t *mip, boolean_t on, mac_promisc_type_t ptype)
 			}
 			i_mac_notify(mip, MAC_NOTE_DEVPROMISC);
 		}
-
-		/*
-		 * Disable promiscuous mode on the MAC if this is the last
-		 * enabling.
-		 */
-		if (ptype == MAC_PROMISC && --mip->mi_promisc == 0)
-			i_mac_notify(mip, MAC_NOTE_PROMISC);
 	}
 
 	return (0);
-}
-
-int
-mac_promisc_set(mac_handle_t mh, boolean_t on, mac_promisc_type_t ptype)
-{
-	mac_impl_t	*mip = (mac_impl_t *)mh;
-	int		rv;
-
-	i_mac_perim_enter(mip);
-	rv = i_mac_promisc_set(mip, on, ptype);
-	if (rv != 0 && !on) {
-		cmn_err(CE_WARN, "%s: failed to switch OFF promiscuous mode "
-		    "because of error 0x%x", mip->mi_name, rv);
-		rv = 0;
-	}
-	i_mac_perim_exit(mip);
-	return (rv);
 }
 
 /*
@@ -1215,19 +1178,14 @@ mac_promisc_set(mac_handle_t mh, boolean_t on, mac_promisc_type_t ptype)
  * to bracket the entire sequence with mac_perim_enter/exit
  */
 boolean_t
-mac_promisc_get(mac_handle_t mh, mac_promisc_type_t ptype)
+mac_promisc_get(mac_handle_t mh)
 {
 	mac_impl_t		*mip = (mac_impl_t *)mh;
-
-	ASSERT(ptype == MAC_DEVPROMISC || ptype == MAC_PROMISC);
 
 	/*
 	 * Return the current promiscuity.
 	 */
-	if (ptype == MAC_DEVPROMISC)
-		return (mip->mi_devpromisc != 0);
-	else
-		return (mip->mi_promisc != 0);
+	return (mip->mi_devpromisc != 0);
 }
 
 /*
@@ -2781,8 +2739,11 @@ mac_get_prop(mac_handle_t mh, mac_prop_t *macprop, void *val, uint_t valsize,
 {
 	int err = ENOTSUP;
 	mac_impl_t *mip = (mac_impl_t *)mh;
-	uint32_t sdu;
 	link_state_t link_state;
+	boolean_t is_getprop, is_setprop;
+
+	is_getprop = (mip->mi_callbacks->mc_callbacks & MC_GETPROP);
+	is_setprop = (mip->mi_callbacks->mc_callbacks & MC_SETPROP);
 
 	/* If mac property, read from cache */
 	if (mac_is_macprop(macprop)) {
@@ -2797,16 +2758,42 @@ mac_get_prop(mac_handle_t mh, mac_prop_t *macprop, void *val, uint_t valsize,
 	}
 
 	switch (macprop->mp_id) {
-	case MAC_PROP_MTU:
+	case MAC_PROP_MTU: {
+		uint32_t sdu;
+		mac_propval_range_t range;
+
+		if ((macprop->mp_flags & MAC_PROP_POSSIBLE) != 0) {
+			if (valsize < sizeof (mac_propval_range_t))
+				return (EINVAL);
+			if (is_getprop) {
+				err = mip->mi_callbacks->mc_getprop(mip->
+				    mi_driver, macprop->mp_name, macprop->mp_id,
+				    macprop->mp_flags, valsize, val, perm);
+			}
+			/*
+			 * If the driver doesn't have *_m_getprop defined or
+			 * if the driver doesn't support setting MTU then
+			 * return the CURRENT value as POSSIBLE value.
+			 */
+			if (!is_getprop || err == ENOTSUP) {
+				mac_sdu_get(mh, NULL, &sdu);
+				range.mpr_count = 1;
+				range.mpr_type = MAC_PROPVAL_UINT32;
+				range.range_uint32[0].mpur_min =
+				    range.range_uint32[0].mpur_max = sdu;
+				bcopy(&range, val, sizeof (range));
+				err = 0;
+			}
+			return (err);
+		}
 		if (valsize < sizeof (sdu))
 			return (EINVAL);
 		if ((macprop->mp_flags & MAC_PROP_DEFAULT) == 0) {
 			mac_sdu_get(mh, NULL, &sdu);
 			bcopy(&sdu, val, sizeof (sdu));
-			if ((mip->mi_callbacks->mc_callbacks & MC_SETPROP) &&
-			    (mip->mi_callbacks->mc_setprop(mip->mi_driver,
-			    macprop->mp_name, macprop->mp_id, valsize,
-			    val) == 0)) {
+			if (is_setprop && (mip->mi_callbacks->mc_setprop(mip->
+			    mi_driver, macprop->mp_name, macprop->mp_id,
+			    valsize, val) == 0)) {
 				*perm = MAC_PROP_PERM_RW;
 			} else {
 				*perm = MAC_PROP_PERM_READ;
@@ -2824,6 +2811,7 @@ mac_get_prop(mac_handle_t mh, mac_prop_t *macprop, void *val, uint_t valsize,
 			 */
 			break;
 		}
+	}
 	case MAC_PROP_STATUS:
 		if (valsize < sizeof (link_state))
 			return (EINVAL);
@@ -2836,7 +2824,7 @@ mac_get_prop(mac_handle_t mh, mac_prop_t *macprop, void *val, uint_t valsize,
 
 	}
 	/* If driver property, request from driver */
-	if (mip->mi_callbacks->mc_callbacks & MC_GETPROP) {
+	if (is_getprop) {
 		err = mip->mi_callbacks->mc_getprop(mip->mi_driver,
 		    macprop->mp_name, macprop->mp_id, macprop->mp_flags,
 		    valsize, val, perm);
@@ -3928,7 +3916,7 @@ mac_add_macaddr(mac_impl_t *mip, mac_group_t *group, uint8_t *mac_addr,
 	 * Enable promiscuous mode in order to receive traffic
 	 * to the new MAC address.
 	 */
-	if ((err = i_mac_promisc_set(mip, B_TRUE, MAC_DEVPROMISC)) == 0) {
+	if ((err = i_mac_promisc_set(mip, B_TRUE)) == 0) {
 		map->ma_type = MAC_ADDRESS_TYPE_UNICAST_PROMISC;
 		return (0);
 	}
@@ -3985,7 +3973,7 @@ mac_remove_macaddr(mac_address_t *map)
 		err = mac_group_remmac(map->ma_group, map->ma_addr);
 		break;
 	case MAC_ADDRESS_TYPE_UNICAST_PROMISC:
-		err = i_mac_promisc_set(mip, B_FALSE, MAC_DEVPROMISC);
+		err = i_mac_promisc_set(mip, B_FALSE);
 		break;
 	default:
 		ASSERT(B_FALSE);

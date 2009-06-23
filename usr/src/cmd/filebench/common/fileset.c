@@ -308,6 +308,7 @@ fileset_alloc_file(filesetentry_t *entry)
 	char *pathtmp;
 	off64_t seek;
 	fb_fdesc_t fdesc;
+	int trust_tree;
 
 	fileset = entry->fse_fileset;
 	(void) fb_strlcpy(path, avd_get_str(fileset->fs_path), MAXPATHLEN);
@@ -320,7 +321,9 @@ fileset_alloc_file(filesetentry_t *entry)
 	filebench_log(LOG_DEBUG_IMPL, "Populated %s", entry->fse_path);
 
 	/* see if reusing and this file exists */
-	if ((entry->fse_flags & FSE_REUSING) && (FB_STAT(path, &sb) == 0)) {
+	trust_tree = avd_get_bool(fileset->fs_trust_tree);
+	if ((entry->fse_flags & FSE_REUSING) && (trust_tree ||
+	    (FB_STAT(path, &sb) == 0))) {
 		if (FB_OPEN(&fdesc, path, O_RDWR, 0) == FILEBENCH_ERROR) {
 			filebench_log(LOG_INFO,
 			    "Attempted but failed to Re-use file %s",
@@ -329,7 +332,7 @@ fileset_alloc_file(filesetentry_t *entry)
 			return (FILEBENCH_ERROR);
 		}
 
-		if (sb.st_size == (off64_t)entry->fse_size) {
+		if (trust_tree || (sb.st_size == (off64_t)entry->fse_size)) {
 			filebench_log(LOG_DEBUG_IMPL,
 			    "Re-using file %s", path);
 
@@ -1012,8 +1015,12 @@ fileset_create(fileset_t *fileset)
 	(void) fb_strlcat(path, "/", MAXPATHLEN);
 	(void) fb_strlcat(path, fileset_name, MAXPATHLEN);
 
+	/* if reusing and trusting to exist, just blindly reuse */
+	if (avd_get_bool(fileset->fs_trust_tree)) {
+		reusing = 1;
+
 	/* if exists and resusing, then don't create new */
-	if (((stat64(path, &sb) == 0)&& (strlen(path) > 3) &&
+	} else if (((stat64(path, &sb) == 0)&& (strlen(path) > 3) &&
 	    (strlen(avd_get_str(fileset->fs_path)) > 2)) &&
 	    avd_get_bool(fileset->fs_reuse)) {
 		reusing = 1;
@@ -1022,11 +1029,8 @@ fileset_create(fileset_t *fileset)
 	}
 
 	if (!reusing) {
-		char cmd[MAXPATHLEN];
-
 		/* Remove existing */
-		(void) snprintf(cmd, sizeof (cmd), "rm -rf %s", path);
-		(void) system(cmd);
+		FB_RECUR_RM(path);
 		filebench_log(LOG_VERBOSE,
 		    "Removed any existing %s %s in %llu seconds",
 		    fileset_entity_name(fileset), fileset_name,
@@ -1161,6 +1165,83 @@ exit:
 	return (FILEBENCH_OK);
 }
 
+/*
+ * Removes all files and directories associated with a fileset
+ * from the storage subsystem.
+ */
+static void
+fileset_delete_storage(fileset_t *fileset)
+{
+	char path[MAXPATHLEN];
+	char *fileset_path;
+	char *fileset_name;
+
+	if ((fileset_path = avd_get_str(fileset->fs_path)) == NULL)
+		return;
+
+	if ((fileset_name = avd_get_str(fileset->fs_name)) == NULL)
+		return;
+
+#ifdef HAVE_RAW_SUPPORT
+	/* treat raw device as special case */
+	if (fileset->fs_attrs & FILESET_IS_RAW_DEV)
+		return;
+#endif /* HAVE_RAW_SUPPORT */
+
+	/* set up path to file */
+	(void) fb_strlcpy(path, fileset_path, MAXPATHLEN);
+	(void) fb_strlcat(path, "/", MAXPATHLEN);
+	(void) fb_strlcat(path, fileset_name, MAXPATHLEN);
+
+	/* now delete any files and directories on the disk */
+	FB_RECUR_RM(path);
+}
+
+/*
+ * Removes the fileset entity and all of its filesetentry entities.
+ */
+static void
+fileset_delete_fileset(fileset_t *fileset)
+{
+	filesetentry_t *entry, *next_entry;
+
+	/* run down the file list, removing and freeing each filesetentry */
+	for (entry = fileset->fs_filelist; entry; entry = next_entry) {
+
+		/* free the entry */
+		next_entry = entry->fse_next;
+
+		/* return it to the pool */
+		switch (entry->fse_flags & FSE_TYPE_MASK) {
+		case FSE_TYPE_FILE:
+		case FSE_TYPE_LEAFDIR:
+		case FSE_TYPE_DIR:
+			ipc_free(FILEBENCH_FILESETENTRY, (void *)entry);
+			break;
+		default:
+			filebench_log(LOG_ERROR,
+			    "Unallocated filesetentry found on list");
+			break;
+		}
+	}
+
+	ipc_free(FILEBENCH_FILESET, (void *)fileset);
+}
+
+void
+fileset_delete_all_filesets(void)
+{
+	fileset_t *fileset, *next_fileset;
+
+	for (fileset = filebench_shm->shm_filesetlist;
+	    fileset; fileset = next_fileset) {
+		next_fileset = fileset->fs_next;
+		fileset_delete_storage(fileset);
+		fileset_delete_fileset(fileset);
+	}
+
+	filebench_shm->shm_filesetlist = NULL;
+}
 /*
  * Adds an entry to the fileset's file list. Single threaded so
  * no locking needed.

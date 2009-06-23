@@ -95,6 +95,8 @@ typedef struct {
 	avl_node_t		portal_tpg_ln;
 	iscsit_tpg_t		*portal_tpg;
 	idm_svc_t		*portal_svc;
+	boolean_t		portal_default;
+	void			*portal_isns;
 } iscsit_portal_t;
 
 
@@ -359,6 +361,7 @@ typedef struct {
 	uint16_t		ist_tpgt_tag;
 	uint32_t		ist_expcmdsn;
 	uint32_t		ist_maxcmdsn;
+	avl_tree_t		ist_task_list;
 } iscsit_sess_t;
 
 /* Update iscsit_ils_name table whenever login states are modified */
@@ -466,7 +469,6 @@ typedef struct {
 	uint8_t			icl_login_resp_err_class;
 	uint8_t			icl_login_resp_err_detail;
 	iscsi_login_rsp_hdr_t	*icl_login_resp_tmpl;
-	idm_pdu_t		*icl_login_resp;
 	nvlist_t		*icl_request_nvlist;
 	nvlist_t		*icl_response_nvlist;
 	nvlist_t		*icl_negotiated_values;
@@ -487,10 +489,20 @@ typedef struct iscsit_conn_s {
 	iscsit_op_params_t	ict_op;
 	uint16_t		ict_cid;
 	uint32_t		ict_statsn;
+	uint32_t		ict_keepalive_ttt;
 	struct iscsit_conn_s	*ict_reinstate_conn;
 	uint32_t		ict_reinstating:1,
 				ict_lost:1,
 				ict_destroyed:1;
+	/*
+	 * Parameters for processing text commands
+	 */
+	char			*ict_text_rsp_buf;
+	uint32_t		ict_text_rsp_len;
+	uint32_t		ict_text_rsp_valid_len;
+	uint32_t		ict_text_rsp_off;
+	uint32_t		ict_text_req_itt;	/* from initiator */
+	uint32_t		ict_text_rsp_ttt;
 } iscsit_conn_t;
 
 #define	ICT_FLAGS_DISCOVERY	0x00000001
@@ -511,11 +523,13 @@ typedef struct {
 	idm_pdu_t		*it_tm_pdu;
 	uint32_t		it_stmf_abort:1,
 				it_aborted:1,
+				it_active:1,
 				it_tm_task:1,
 				it_tm_responded:1;
 	uint32_t		it_cmdsn;
 	uint32_t		it_itt;
 	uint32_t		it_ttt;
+	avl_node_t		it_sess_ln;
 } iscsit_task_t;
 
 typedef struct iscsit_isns_cfg {
@@ -590,6 +604,12 @@ iscsit_send_async_event(iscsit_conn_t *ict, uint8_t async_event);
 void
 iscsit_pdu_tx(idm_pdu_t *pdu);
 
+void
+iscsit_send_reject(iscsit_conn_t *ict, idm_pdu_t *rejected_pdu, uint8_t reason);
+
+void
+iscsit_text_cmd_fini(iscsit_conn_t *ict);
+
 /*
  * IDM conn ops
  */
@@ -600,6 +620,7 @@ idm_rx_pdu_error_cb_t	iscsit_rx_pdu_error;
 idm_task_cb_t		iscsit_task_aborted;
 idm_client_notify_cb_t	iscsit_client_notify;
 idm_build_hdr_cb_t	iscsit_build_hdr;
+idm_keepalive_cb_t	iscsit_keepalive;
 
 /*
  * lport entry points

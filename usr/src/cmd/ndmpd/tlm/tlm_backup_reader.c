@@ -617,6 +617,7 @@ tlm_output_xattr(char  *dir, char *name, char *chkdir,
 	char	*snapname;		/* snapshot name */
 	int	section;		/* section of a huge file */
 	int	fd;
+	int	afd = 0;
 	longlong_t seek_spot = 0;	/* location in the file */
 					/* for Multi Volume record */
 	u_longlong_t pos;
@@ -626,8 +627,10 @@ tlm_output_xattr(char  *dir, char *name, char *chkdir,
 	char *fnamep;
 	int rv = 0;
 
-	if (S_ISLNK(tlm_acls->acl_attr.st_mode))
+	if (S_ISLNK(tlm_acls->acl_attr.st_mode) ||
+	    S_ISFIFO(tlm_acls->acl_attr.st_mode)) {
 		return (TLM_NO_SOURCE_FILE);
+	}
 
 	fullname = ndmp_malloc(TLM_MAX_PATH_NAME);
 	if (fullname == NULL) {
@@ -695,16 +698,15 @@ tlm_output_xattr(char  *dir, char *name, char *chkdir,
 		if (sysattr_rdonly(dtp->d_name))
 			continue;
 
-		(void) close(fd);
-		fd = attropen(fnamep, dtp->d_name, O_RDONLY);
-		if (fd == -1) {
+		afd = attropen(fnamep, dtp->d_name, O_RDONLY);
+		if (afd == -1) {
 			NDMP_LOG(LOG_DEBUG,
 			    "problem(%d) opening xattr file [%s][%s]", errno,
 			    fullname, fnamep);
 			goto tear_down;
 		}
 
-		(void) output_xattr_header(fullname, dtp->d_name, fd,
+		(void) output_xattr_header(fullname, dtp->d_name, afd,
 		    tlm_acls, section, local_commands);
 		(void) snprintf(attrname, TLM_MAX_PATH_NAME, "/dev/null/%s",
 		    dtp->d_name);
@@ -763,7 +765,7 @@ tlm_output_xattr(char  *dir, char *name, char *chkdir,
 			}
 
 			read_size = min(section_size, actual_size);
-			if ((actual_size = read(fd, buf, read_size)) < 0)
+			if ((actual_size = read(afd, buf, read_size)) < 0)
 				break;
 
 			if (sysattr_read) {
@@ -788,14 +790,19 @@ tlm_output_xattr(char  *dir, char *name, char *chkdir,
 			seek_spot += actual_size;
 			section_size -= actual_size;
 		}
+		(void) close(afd);
+		afd = -1;
 	}
 
 tear_down:
 	local_commands->tc_buffers->tbs_buffer[
 	    local_commands->tc_buffers->tbs_buffer_in].tb_seek_spot = 0;
 
+	if (afd > 0)
+		(void) close(afd);
+
+	/* closedir closes fd too */
 	(void) closedir(dp);
-	(void) close(fd);
 
 err_out:
 	free(fullname);
@@ -858,12 +865,15 @@ tlm_output_file(char *dir, char *name, char *chkdir,
 	pos = tlm_get_data_offset(local_commands);
 	NDMP_LOG(LOG_DEBUG, "pos: %10lld  [%s]", pos, name);
 
-	if (S_ISLNK(tlm_acls->acl_attr.st_mode)) {
-		file_size = tlm_readlink(fullname, snapname, linkname,
-		    TLM_MAX_PATH_NAME-1);
-		if (file_size < 0) {
-			real_size = -ENOENT;
-			goto err_out;
+	if (S_ISLNK(tlm_acls->acl_attr.st_mode) ||
+	    S_ISFIFO(tlm_acls->acl_attr.st_mode)) {
+		if (S_ISLNK(tlm_acls->acl_attr.st_mode)) {
+			file_size = tlm_readlink(fullname, snapname, linkname,
+			    TLM_MAX_PATH_NAME-1);
+			if (file_size < 0) {
+				real_size = -ENOENT;
+				goto err_out;
+			}
 		}
 
 		/*

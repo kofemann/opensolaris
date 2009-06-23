@@ -19,7 +19,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1619,7 +1619,7 @@ find_common (char *arg, char *root, int for_root, int flags)
         grub_sprintf(bootsign, "%s/%s", BOOTSIGN_DIR, arg);
 	filename = bootsign;
 	goto harddisk;
-  } else if (for_root) {
+  } else if (for_root && !grub_strchr(arg, '/')) {
 	/* Boot signature without partition/slice information */
         grub_sprintf(bootsign, "%s/%s", BOOTSIGN_DIR, arg);
 	filename = bootsign;
@@ -3721,13 +3721,6 @@ partnew_func (char *arg, int flags)
   if (! rawread (current_drive, 0, 0, SECTOR_SIZE, mbr))
     return 1;
 
-  /* Check if the new partition will fit in the disk.  */
-  if (new_start + new_len > buf_geom.total_sectors)
-    {
-      errnum = ERR_GEOM;
-      return 1;
-    }
-
   /* Store the partition information in the MBR.  */
   lba_to_chs (new_start, &start_cl, &start_ch, &start_dh);
   lba_to_chs (new_start + new_len - 1, &end_cl, &end_ch, &end_dh);
@@ -4154,7 +4147,7 @@ static struct builtin builtin_root =
 
 
 /* findroot */
-static int
+int
 findroot_func (char *arg, int flags)
 {
   int ret;
@@ -4166,11 +4159,6 @@ findroot_func (char *arg, int flags)
   }
 
   if (arg[0] == '\0') {
-  	errnum = ERR_BAD_ARGUMENT;
-	return 1;
-  }
-
-  if (grub_strchr(arg, '/')) {
   	errnum = ERR_BAD_ARGUMENT;
 	return 1;
   }

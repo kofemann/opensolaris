@@ -45,8 +45,6 @@
 #define	ISCSIT_SESS_SM_STRINGS
 #include <iscsit.h>
 
-
-
 typedef struct {
 	list_node_t		se_ctx_node;
 	iscsit_session_event_t	se_ctx_event;
@@ -85,6 +83,8 @@ static void
 sess_sm_new_state(iscsit_sess_t *ist, sess_event_ctx_t *ctx,
     iscsit_session_state_t new_state);
 
+static int
+iscsit_task_itt_compare(const void *void_task1, const void *void_task2);
 
 static uint16_t
 iscsit_tsih_alloc(void)
@@ -118,6 +118,7 @@ iscsit_sess_create(iscsit_tgt_t *tgt, iscsit_conn_t *ict,
 {
 	iscsit_sess_t *result;
 
+	*error_class = ISCSI_STATUS_CLASS_SUCCESS;
 
 	/*
 	 * Even if this session create "fails" for some reason we still need
@@ -145,6 +146,8 @@ iscsit_sess_create(iscsit_tgt_t *tgt, iscsit_conn_t *ict,
 	    offsetof(sess_event_ctx_t, se_ctx_node));
 	list_create(&result->ist_conn_list, sizeof (iscsit_conn_t),
 	    offsetof(iscsit_conn_t, ict_sess_ln));
+	avl_create(&result->ist_task_list, iscsit_task_itt_compare,
+	    sizeof (iscsit_task_t), offsetof(iscsit_task_t, it_sess_ln));
 
 	result->ist_state = SS_Q1_FREE;
 	result->ist_last_state = SS_Q1_FREE;
@@ -152,7 +155,10 @@ iscsit_sess_create(iscsit_tgt_t *tgt, iscsit_conn_t *ict,
 	result->ist_tpgt_tag = tag;
 
 	result->ist_tgt = tgt;
-	result->ist_expcmdsn = cmdsn + 1;
+	/*
+	 * cmdsn/expcmdsn do not advance during login phase.
+	 */
+	result->ist_expcmdsn = cmdsn;
 	result->ist_maxcmdsn = result->ist_expcmdsn + 1;
 
 	result->ist_initiator_name =
@@ -168,10 +174,30 @@ iscsit_sess_create(iscsit_tgt_t *tgt, iscsit_conn_t *ict,
 
 	/* Login code will fill in ist_stmf_sess if necessary */
 
-	/* Kick session state machine (also binds connection to session) */
-	iscsit_sess_sm_event(result, SE_CONN_IN_LOGIN, ict);
+	if (*error_class == ISCSI_STATUS_CLASS_SUCCESS) {
+		/*
+		 * Make sure the service is still enabled and if so get a global
+		 * hold to represent this session.
+		 */
+		ISCSIT_GLOBAL_LOCK(RW_READER);
+		if (iscsit_global.global_svc_state == ISE_ENABLED) {
+			iscsit_global_hold();
+			ISCSIT_GLOBAL_UNLOCK();
 
-	*error_class = ISCSI_STATUS_CLASS_SUCCESS;
+			/*
+			 * Kick session state machine (also binds connection
+			 * to session)
+			 */
+			iscsit_sess_sm_event(result, SE_CONN_IN_LOGIN, ict);
+
+			*error_class = ISCSI_STATUS_CLASS_SUCCESS;
+		} else {
+			ISCSIT_GLOBAL_UNLOCK();
+			*error_class = ISCSI_STATUS_CLASS_TARGET_ERR;
+			*error_detail = ISCSI_LOGIN_STATUS_SVC_UNAVAILABLE;
+		}
+	}
+
 	/*
 	 * As noted above we must return a session pointer even if something
 	 * failed.  The resources will get freed later.
@@ -206,6 +232,7 @@ iscsit_sess_unref(void *ist_void)
 	mutex_exit(&ist->ist_mutex);
 
 	iscsit_sess_destroy(ist);
+	iscsit_global_rele();
 }
 
 void
@@ -224,6 +251,7 @@ iscsit_sess_destroy(iscsit_sess_t *ist)
 	if (ist->ist_target_alias)
 		kmem_free(ist->ist_target_alias,
 		    strlen(ist->ist_target_alias) + 1);
+	avl_destroy(&ist->ist_task_list);
 	list_destroy(&ist->ist_conn_list);
 	list_destroy(&ist->ist_events);
 	cv_destroy(&ist->ist_cv);
@@ -396,6 +424,19 @@ iscsit_sess_avl_compare(const void *void_sess1, const void *void_sess2)
 	return (0);
 }
 
+int
+iscsit_task_itt_compare(const void *void_task1, const void *void_task2)
+{
+	const iscsit_task_t	*task1 = void_task1;
+	const iscsit_task_t	*task2 = void_task2;
+
+	if (task1->it_itt < task2->it_itt)
+		return (-1);
+	else if (task1->it_itt > task2->it_itt)
+		return (1);
+
+	return (0);
+}
 
 /*
  * State machine
@@ -678,6 +719,17 @@ sess_sm_q6_done(iscsit_sess_t *ist, sess_event_ctx_t *ctx)
 {
 	/* Terminal state */
 	switch (ctx->se_ctx_event) {
+	case SE_CONN_LOGGED_IN:
+		/*
+		 * It's possible to get this event if we encountered
+		 * an SE_SESSION_REINSTATE_EVENT while we were in
+		 * SS_Q2_ACTIVE state.  If so we want to update
+		 * ist->ist_ffp_conn_count because we know an
+		 * SE_CONN_FFP_FAIL or SE_CONN_FFP_DISABLE is on the
+		 * way.
+		 */
+		ist->ist_ffp_conn_count++;
+		break;
 	case SE_CONN_FFP_FAIL:
 	case SE_CONN_FFP_DISABLE:
 		ASSERT(ist->ist_ffp_conn_count >= 1);

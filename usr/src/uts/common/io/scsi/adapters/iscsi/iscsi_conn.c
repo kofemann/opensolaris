@@ -870,10 +870,12 @@ iscsi_conn_sync_params(iscsi_conn_t *icp)
 		bcopy(&ics->ics_bindings[idx].i_addr.in4,
 		    &icp->conn_bound_addr.sin4.sin_addr.s_addr,
 		    sizeof (struct in_addr));
+		icp->conn_bound_addr.sin4.sin_family = AF_INET;
 	} else {
 		bcopy(&ics->ics_bindings[idx].i_addr.in6,
 		    &icp->conn_bound_addr.sin6.sin6_addr.s6_addr,
 		    sizeof (struct in6_addr));
+		icp->conn_bound_addr.sin6.sin6_family = AF_INET6;
 	}
 
 	kmem_free(ics, size);
@@ -911,6 +913,13 @@ iscsi_conn_flush_active_cmds(iscsi_conn_t *icp)
 	/* Flush active queue */
 	icmdp = icp->conn_queue_active.head;
 	while (icmdp != NULL) {
+
+		mutex_enter(&icmdp->cmd_mutex);
+		if (icmdp->cmd_type == ISCSI_CMD_TYPE_SCSI) {
+			icmdp->cmd_un.scsi.pkt_stat |= STAT_ABORTED;
+		}
+		mutex_exit(&icmdp->cmd_mutex);
+
 		iscsi_cmd_state_machine(icmdp,
 		    ISCSI_CMD_EVENT_E7, isp);
 		icmdp = icp->conn_queue_active.head;

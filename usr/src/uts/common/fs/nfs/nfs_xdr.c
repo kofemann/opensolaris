@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -144,9 +144,30 @@ xdr_writeargs(XDR *xdrs, struct nfswriteargs *wa)
 			wa->wa_begoff = IXDR_GET_U_INT32(ptr);
 			wa->wa_offset = IXDR_GET_U_INT32(ptr);
 			wa->wa_totcount = IXDR_GET_U_INT32(ptr);
-			if (xdrs->x_ops == &xdrmblk_ops)
+			wa->wa_mblk = NULL;
+			wa->wa_data = NULL;
+			wa->wa_rlist = NULL;
+			wa->wa_conn = NULL;
+			if (xdrs->x_ops == &xdrmblk_ops) {
 				return (xdrmblk_getmblk(xdrs, &wa->wa_mblk,
 				    &wa->wa_count));
+			} else {
+				if (xdrs->x_ops == &xdrrdmablk_ops) {
+					if (xdrrdma_getrdmablk(xdrs,
+					    &wa->wa_rlist,
+					    &wa->wa_count,
+					    &wa->wa_conn,
+					    NFS_MAXDATA) == TRUE)
+					return (xdrrdma_read_from_client(
+					    wa->wa_rlist,
+					    &wa->wa_conn,
+					    wa->wa_count));
+
+					wa->wa_rlist = NULL;
+					wa->wa_conn = NULL;
+				}
+			}
+
 			/*
 			 * It is just as efficient to xdr_bytes
 			 * an array of unknown length as to inline copy it.
@@ -177,7 +198,7 @@ xdr_writeargs(XDR *xdrs, struct nfswriteargs *wa)
 					    &wa->wa_conn,
 					    NFS_MAXDATA) == TRUE)
 					return (xdrrdma_read_from_client(
-					    &wa->wa_rlist,
+					    wa->wa_rlist,
 					    &wa->wa_conn,
 					    wa->wa_count));
 
@@ -472,15 +493,10 @@ xdr_rrok(XDR *xdrs, struct nfsrrok *rrok)
 			 * xdr_bytes() below.   RDMA_WRITE transfers the data.
 			 */
 			if (rrok->rrok_wlist) {
-				/* adjust length to match in the rdma header */
-				if (rrok->rrok_wlist->c_len !=
-				    rrok->rrok_count) {
-					rrok->rrok_wlist->c_len =
-					    rrok->rrok_count;
-				}
 				if (rrok->rrok_count != 0) {
 					return (xdrrdma_send_read_data(
-					    xdrs, rrok->rrok_wlist));
+					    xdrs, rrok->rrok_count,
+					    rrok->rrok_wlist));
 				}
 				return (TRUE);
 			}
@@ -500,8 +516,15 @@ xdr_rrok(XDR *xdrs, struct nfsrrok *rrok)
 					rrok->rrok_wlist_len = 0;
 					rrok->rrok_count = 0;
 				} else {
-					rrok->rrok_wlist_len = cl->c_len;
-					rrok->rrok_count = cl->c_len;
+					rrok->rrok_wlist_len = clist_len(cl);
+					if (rrok->rrok_wlist_len !=
+					    roundup(count,
+					    BYTES_PER_XDR_UNIT)) {
+						rrok->rrok_wlist_len = 0;
+						rrok->rrok_count = 0;
+						return (FALSE);
+					}
+					rrok->rrok_count = count;
 				}
 				return (TRUE);
 			}

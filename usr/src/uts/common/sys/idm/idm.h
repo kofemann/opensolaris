@@ -149,6 +149,8 @@ typedef void (idm_task_cb_t)(struct idm_task_s *task, idm_status_t status);
 typedef void (idm_build_hdr_cb_t)(
     struct idm_task_s *task, struct idm_pdu_s *pdu, uint8_t opcode);
 
+typedef void (idm_keepalive_cb_t)(struct idm_conn_s *ic);
+
 typedef union idm_sockaddr {
 	struct sockaddr		sin;
 	struct sockaddr_in	sin4;
@@ -167,6 +169,7 @@ typedef struct {
 	idm_task_cb_t		*icb_task_aborted;
 	idm_client_notify_cb_t	*icb_client_notify;
 	idm_build_hdr_cb_t	*icb_build_hdr;
+	idm_keepalive_cb_t	*icb_keepalive;
 } idm_conn_ops_t;
 
 typedef struct {
@@ -337,6 +340,15 @@ idm_conn_hold(idm_conn_t *ic);
 void
 idm_conn_rele(idm_conn_t *ic);
 
+void
+idm_conn_set_target_name(idm_conn_t *ic, char *target_name);
+
+void
+idm_conn_set_initiator_name(idm_conn_t *ic, char *initiator_name);
+
+void
+idm_conn_set_isid(idm_conn_t *ic, uint8_t isid[ISCSI_ISID_LEN]);
+
 /*
  * Target data transfer services
  */
@@ -356,6 +368,8 @@ idm_buf_tx_to_ini_done(idm_task_t *idt, idm_buf_t *idb, idm_status_t status);
 void
 idm_buf_rx_from_ini_done(idm_task_t *idt, idm_buf_t *idb, idm_status_t status);
 
+#define	XFER_BUF_TX_TO_INI	0
+#define	XFER_BUF_RX_FROM_INI	1
 /*
  * Shared Initiator/Target Services
  */

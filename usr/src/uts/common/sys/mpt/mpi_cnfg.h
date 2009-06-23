@@ -1,5 +1,5 @@
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1084,7 +1084,7 @@ typedef struct config_page_raid_vol_0 {
 	raid_vol0_status_t	VolumeStatus;
 	raid_vol0_settings_t	VolumeSettings;
 	uint32_t		MaxLBA;
-	uint32_t		Reserved1;
+	uint32_t		MaxLBAHigh;
 	uint32_t		StripeSize;
 	uint32_t		Reserved2;
 	uint32_t		Reserved3;
@@ -1284,7 +1284,8 @@ typedef struct mpi_sas_io_unit0_phy_data {
 
 typedef struct config_page_sas_io_unit_0 {
 	config_extended_page_header_t	Header;
-	uint32_t			Reserved1;
+	uint16_t			NvdataVersionDefault;
+	uint16_t			NvdataVersionPersistent;
 	uint8_t				NumPhys;
 	uint8_t				Reserved2;
 	uint16_t			Reserved3;

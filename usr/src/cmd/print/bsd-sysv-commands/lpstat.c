@@ -39,6 +39,7 @@
 #include <papi.h>
 #include <uri.h>
 #include "common.h"
+#include "lp.h"
 
 static void
 usage(char *program)
@@ -234,7 +235,7 @@ report_device(papi_service_t svc, char *name, papi_printer_t printer,
 			return (0);
 		} else if (uri != NULL) {
 			printf(gettext("system for %s: %s (as %s)\n"), name,
-			    u->host, uri);
+			    u->host?u->host:"localhost", uri);
 			return (0);
 		}
 
@@ -329,6 +330,42 @@ report_class(papi_service_t svc, char *name, papi_printer_t printer,
 	return (0);
 }
 
+static int
+get_remote_hostname(papi_attribute_t **attrs, char **host)
+{
+	char *uri = NULL;
+	uri_t *u;
+	char *nodename;
+
+	*host = NULL;
+	(void) papiAttributeListGetString(attrs, NULL,
+	    "job-originating-host-name", host);
+	(void) papiAttributeListGetString(attrs, NULL,
+	    "printer-uri-supported", &uri);
+	if (*host == NULL) {
+		if (uri != NULL) {
+			if (uri_from_string(uri, &u) == 0) {
+				if (u->host == NULL) {
+					uri_free(u);
+					return (0);
+				}
+				*host = strdup(u->host);
+				uri_free(u);
+			} else {
+				return (0);
+			}
+		} else {
+			return (0);
+		}
+	}
+	nodename = localhostname();
+	if ((strcasecmp(*host, "localhost") == 0) ||
+	    (strcasecmp(*host, nodename) == 0)) {
+		return (0);
+	}
+	return (1);
+}
+
 static char *report_printer_keys[] = { "printer-name",
 			"printer-uri-supported", "printer-state",
 			"printer-up-time", "printer-state-time",
@@ -391,13 +428,10 @@ report_printer(papi_service_t svc, char *name, papi_printer_t printer,
 					    NULL, "job-id", &jobid);
 
 					/*
-					 * If the job-state is not
-					 * "held", "cancelled" or
-					 * "completed" then only print.
+					 * If the job-state is in
+					 * RS_PRINTING then only print.
 					 */
-					if ((jstate != 0x04) &&
-					    (jstate != 0x07) &&
-					    (jstate != 0x09)) {
+					if (jstate == 0x0008) {
 						if (flag == 0)
 							printf(gettext
 							    ("now printing"\
@@ -440,7 +474,15 @@ report_printer(papi_service_t svc, char *name, papi_printer_t printer,
 	if (verbose == 1) {
 		void *iter;
 		char *str;
+		char *host = NULL;
 
+		if ((get_remote_hostname(attrs, &host)) != 0) {
+			(void) printf(
+			    gettext("\tRemote Name: %s\n\tRemote Server: "
+			    "%s\n"), name, host);
+			free(host);
+			return (0);
+		}
 		str = "";
 		(void) papiAttributeListGetString(attrs, NULL,
 		    "form-ready", &str);
@@ -603,70 +645,96 @@ printer_query(char *name, int (*report)(papi_service_t, char *, papi_printer_t,
 					int, int), papi_encryption_t encryption,
 		int verbose, int description)
 {
-	int result = 0;
+	int result = 0, i = 0;
 	papi_status_t status;
 	papi_service_t svc = NULL;
+	char **list = getlist(name, LP_WS, LP_SEP);
 
-	status = papiServiceCreate(&svc, name, NULL, NULL, cli_auth_callback,
-	    encryption, NULL);
-	if (status != PAPI_OK) {
-		if (status == PAPI_NOT_FOUND)
-			fprintf(stderr, gettext("%s: unknown printer\n"),
-			    name ? name : "(NULL)");
-		else
-			fprintf(stderr, gettext(
-			    "Failed to contact service for %s: %s\n"),
-			    name ? name : "(NULL)",
-			    verbose_papi_message(svc, status));
-		papiServiceDestroy(svc);
-		return (-1);
+	if (list == NULL) {
+		list = (char **)malloc(sizeof (char *));
+		list[0] = name;
 	}
 
-	if (name == NULL) { /* all */
-		char **interest = interest_list(svc);
+	/*
+	 * The for loop executes once for every printer
+	 * entry in list. If list is NULL that implies
+	 * name is also NULL, the loop runs only one time.
+	 */
 
-		if (interest != NULL) {
-			int i;
+	for (i = 0; name == NULL || list[i] != NULL; i++) {
+		name = list[i];
 
-			for (i = 0; interest[i] != NULL; i++)
-				result += printer_query(interest[i], report,
-				    encryption, verbose,
-				    description);
-		}
-	} else {
-		papi_printer_t printer = NULL;
-		char **keys = NULL;
-
-		/*
-		 * Limit the query to only required data to reduce the need
-		 * to go remote for information.
-		 */
-		if (report == report_device)
-			keys = report_device_keys;
-		else if (report == report_class)
-			keys = report_class_keys;
-		else if (report == report_accepting)
-			keys = report_accepting_keys;
-		else if ((report == report_printer) && (verbose == 0))
-			keys = report_printer_keys;
-
-		status = papiPrinterQuery(svc, name, keys, NULL, &printer);
+		status = papiServiceCreate(&svc, name, NULL, NULL,
+		    cli_auth_callback, encryption, NULL);
 		if (status != PAPI_OK) {
-			fprintf(stderr, gettext(
-			    "Failed to get printer info for %s: %s\n"),
-			    name, verbose_papi_message(svc, status));
+			if (status == PAPI_NOT_FOUND)
+				fprintf(stderr,
+				    gettext("%s: unknown printer\n"),
+				    name ? name : "(NULL)");
+			else
+				fprintf(stderr, gettext(
+				    "Failed to contact service for %s: %s\n"),
+				    name ? name : "(NULL)",
+				    verbose_papi_message(svc, status));
 			papiServiceDestroy(svc);
-			return (-1);
+			result--;
+			continue;
 		}
 
-		if (printer != NULL)
-			result = report(svc, name, printer, verbose,
-			    description);
+		if (name == NULL) { /* all */
+			char **interest = interest_list(svc);
 
-		papiPrinterFree(printer);
+			if (interest != NULL) {
+				int i;
+
+				for (i = 0; interest[i] != NULL; i++)
+					result += printer_query(interest[i],
+					    report, encryption, verbose,
+					    description);
+			}
+		} else {
+			papi_printer_t printer = NULL;
+			char **keys = NULL;
+
+			/*
+			 * Limit the query to only required data
+			 * to reduce the need to go remote for
+			 * information.
+			 */
+			if (report == report_device)
+				keys = report_device_keys;
+			else if (report == report_class)
+				keys = report_class_keys;
+			else if (report == report_accepting)
+				keys = report_accepting_keys;
+			else if ((report == report_printer) && (verbose == 0))
+				keys = report_printer_keys;
+
+			status = papiPrinterQuery(svc, name, keys,
+			    NULL, &printer);
+			if (status != PAPI_OK) {
+				fprintf(stderr, gettext(
+				    "Failed to get printer info for %s: %s\n"),
+				    name, verbose_papi_message(svc, status));
+				papiServiceDestroy(svc);
+				result--;
+				continue;
+			}
+
+			if (printer != NULL)
+				result += report(svc, name, printer, verbose,
+				    description);
+
+			papiPrinterFree(printer);
+		}
+
+		papiServiceDestroy(svc);
+
+		if (name == NULL)
+			break;
 	}
 
-	papiServiceDestroy(svc);
+	freelist(list);
 
 	return (result);
 }
@@ -687,7 +755,7 @@ match_user(char *user, char **list)
 static char **users = NULL;
 
 static int
-report_job(papi_job_t job, int show_rank, int verbose)
+report_job(char *printer, papi_job_t job, int show_rank, int verbose)
 {
 	papi_attribute_t **attrs = papiJobGetAttributeList(job);
 	time_t clock = 0;
@@ -797,7 +865,11 @@ report_job(papi_job_t job, int show_rank, int verbose)
 	    "printer-name", &destination);
 	(void) papiAttributeListGetInteger(attrs, NULL,
 	    "job-id", &id);
-	snprintf(request, sizeof (request), "%s-%d", destination, id);
+	(void) papiAttributeListGetInteger(attrs, NULL,
+	    "job-id-requested", &id);
+
+
+	snprintf(request, sizeof (request), "%s-%d", printer, id);
 
 	if (show_rank != 0) {
 		int32_t rank = -1;
@@ -813,12 +885,25 @@ report_job(papi_job_t job, int show_rank, int verbose)
 
 	(void) papiAttributeListGetInteger(attrs, NULL,
 	    "job-state", &jstate);
-	if (jstate == 0x04)
-		printf(gettext(", being held"));
-	else if (jstate == 0x07)
-		printf(gettext(", cancelled"));
-	else if (jstate == 0x09)
-		printf(gettext(", complete"));
+
+	if (jstate == 0x0001)
+		printf(gettext(" being held"));
+	else if (jstate == 0x0800)
+		printf(gettext(" notifying user"));
+	else if (jstate == 0x0040)
+		printf(gettext(" cancelled"));
+	else if (jstate == 0x0010)
+		printf(gettext(" finished printing"));
+	else if (jstate == 0x0008)
+		printf(gettext(" on %s"), destination);
+	else if (jstate == 0x2000)
+		printf(gettext(" held by admin"));
+	else if (jstate == 0x0002)
+		printf(gettext(" being filtered"));
+	else if (jstate == 0x0004)
+		printf(gettext(" filtered"));
+	else if (jstate == 0x0020)
+		printf(gettext(" held for change"));
 
 	if (verbose == 1) {
 		char *form = NULL;
@@ -841,7 +926,7 @@ report_job(papi_job_t job, int show_rank, int verbose)
 }
 
 static int
-job_query(char *request, int (*report)(papi_job_t, int, int),
+job_query(char *request, int (*report)(char *, papi_job_t, int, int),
 		papi_encryption_t encryption, int show_rank, int verbose)
 {
 	int result = 0;
@@ -910,18 +995,32 @@ job_query(char *request, int (*report)(papi_job_t, int, int),
 				int i;
 
 				for (i = 0; jobs[i] != NULL; i++)
-					result += report(jobs[i],
-					    show_rank, verbose);
+					result += report(printer,
+					    jobs[i], show_rank,
+					    verbose);
 			}
 
 			papiJobListFree(jobs);
 		} else {	/* a job */
 			papi_job_t job = NULL;
+			int rid = id;
 
 			/* Once a job has been found stop processing */
 			flag = 0;
 
-			status = papiJobQuery(svc, printer, id, NULL, &job);
+			/*
+			 * Job-id could be the job-id requested
+			 * Check if it is job-id or job-id-requested
+			 */
+			id = job_to_be_queried(svc, printer, id);
+
+			if (id > 0)
+				status = papiJobQuery(svc, printer, id,
+				    NULL, &job);
+			else
+				status = papiJobQuery(svc, printer, rid,
+				    NULL, &job);
+
 			if (status != PAPI_OK) {
 				if (!print_flag)
 					fprintf(stderr, gettext(
@@ -934,7 +1033,8 @@ job_query(char *request, int (*report)(papi_job_t, int, int),
 			}
 
 			if (job != NULL)
-				result = report(job, show_rank, verbose);
+				result = report(printer, job,
+				    show_rank, verbose);
 
 			papiJobFree(job);
 		}
@@ -1070,7 +1170,27 @@ main(int ac, char *av[])
 	ac = c;
 
 	/* preprocess argument list looking for '-l' or '-R' so it can trail */
-	while ((c = getopt(ac, argv, "LEDf:S:stc:p:a:drs:v:l:o:R:u:")) != EOF)
+	while ((c = getopt(ac, argv, "LEDf:S:stc:p:a:drs:v:l:o:R:u:")) != EOF) {
+		switch (c) {    /* these may or may not have an option */
+		case 'a':
+		case 'c':
+		case 'p':
+		case 'o':
+		case 'R':
+		case 'u':
+		case 'v':
+		case 'l':
+		case 'f':
+		case 'S':
+			if (optarg[0] == '-') {
+				/* this check stop a possible infinite loop */
+				if ((optind > 1) && (argv[optind-1][1] != c))
+					optind--;
+				optarg = NULL;
+			} else if (strcmp(optarg, "all") == 0)
+				optarg = NULL;
+		}
+
 		switch (c) {
 		case 'l':
 			if ((optarg == NULL) || (optarg[0] == '-'))
@@ -1089,6 +1209,7 @@ main(int ac, char *av[])
 		default:
 			break;
 		}
+	}
 	optind = 1;
 
 	/* process command line arguments */

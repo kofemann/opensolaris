@@ -24,6 +24,11 @@
  * Use is subject to license terms.
  */
 
+/*
+ * Copyright (c) 2009, Intel Corporation.
+ * All rights reserved.
+ */
+
 #include <sys/errno.h>
 #include <sys/types.h>
 #include <sys/conf.h>
@@ -805,6 +810,65 @@ ioat_ring_seed(ioat_channel_t channel, ioat_chan_dma_desc_t *in_desc)
 
 }
 
+/*
+ * ioat_ring_loop()
+ * Make the ring loop for CB v1
+ * This function assume we are in the ring->cr_desc_mutex mutex context
+ */
+int
+ioat_ring_loop(ioat_channel_ring_t *ring, dcopy_cmd_t cmd)
+{
+	uint64_t count;
+	ioat_channel_t channel;
+	ioat_chan_dma_desc_t *curr;
+	ioat_cmd_private_t *prevpriv;
+	ioat_cmd_private_t *currpriv;
+
+	channel = ring->cr_chan;
+	ASSERT(channel->ic_ver == IOAT_CBv1);
+
+	/*
+	 * For each cmd in the command queue, check whether they are continuous
+	 * in descriptor ring. Return error if not continuous.
+	 */
+	for (count = 0, prevpriv = NULL;
+	    cmd != NULL && count <= channel->ic_chan_desc_cnt;
+	    prevpriv = currpriv) {
+		currpriv = cmd->dp_private->pr_device_cmd_private;
+		if (prevpriv != NULL &&
+		    currpriv->ip_index + 1 != prevpriv->ip_start &&
+		    currpriv->ip_index + 1 != prevpriv->ip_start +
+		    channel->ic_chan_desc_cnt) {
+			/* Non-continuous, other commands get interleaved */
+			return (DCOPY_FAILURE);
+		}
+		if (currpriv->ip_index < currpriv->ip_start) {
+			count += channel->ic_chan_desc_cnt
+			    + currpriv->ip_index - currpriv->ip_start + 1;
+		} else {
+			count += currpriv->ip_index - currpriv->ip_start + 1;
+		}
+		cmd = currpriv->ip_next;
+	}
+	/*
+	 * Check for too many descriptors which would cause wrap around in
+	 * descriptor ring. And make sure there is space for cancel operation.
+	 */
+	if (count >= channel->ic_chan_desc_cnt) {
+		return (DCOPY_FAILURE);
+	}
+
+	/* Point next descriptor to header of chain. */
+	curr = (ioat_chan_dma_desc_t *)&ring->cr_desc[ring->cr_desc_prev];
+	curr->dd_next_desc = ring->cr_phys_desc + (currpriv->ip_start << 6);
+
+	/* sync the last desc */
+	(void) ddi_dma_sync(channel->ic_desc_dma_handle,
+	    ring->cr_desc_prev << 6, 64, DDI_DMA_SYNC_FORDEV);
+
+	return (DCOPY_SUCCESS);
+}
+
 
 /*
  * ioat_cmd_alloc()
@@ -915,7 +979,26 @@ ioat_cmd_post(void *private, dcopy_cmd_t cmd)
 	state = channel->ic_state;
 	ring = channel->ic_ring;
 
-	mutex_enter(&ring->cr_desc_mutex);
+	/*
+	 * Special support for DCOPY_CMD_LOOP option, only supported on CBv1.
+	 * DCOPY_CMD_QUEUE should also be set if DCOPY_CMD_LOOP is set.
+	 */
+	if ((cmd->dp_flags & DCOPY_CMD_LOOP) &&
+	    (channel->ic_ver != IOAT_CBv1 ||
+	    (cmd->dp_flags & DCOPY_CMD_QUEUE))) {
+		return (DCOPY_FAILURE);
+	}
+
+	if ((cmd->dp_flags & DCOPY_CMD_NOWAIT) == 0) {
+		mutex_enter(&ring->cr_desc_mutex);
+
+	/*
+	 * Try to acquire mutex if NOWAIT flag is set.
+	 * Return failure if failed to acquire mutex.
+	 */
+	} else if (mutex_tryenter(&ring->cr_desc_mutex) == 0) {
+		return (DCOPY_FAILURE);
+	}
 
 	/* if the channel has had a fatal failure, return failure */
 	if (channel->ic_channel_state == IOAT_CHANNEL_IN_FAILURE) {
@@ -945,6 +1028,7 @@ ioat_cmd_post(void *private, dcopy_cmd_t cmd)
 	src_addr = cmd->dp.copy.cc_source;
 	dest_addr = cmd->dp.copy.cc_dest;
 	size = cmd->dp.copy.cc_size;
+	priv->ip_start = ring->cr_desc_next;
 	while (size > 0) {
 		src_paddr = pa_to_ma(src_addr);
 		dest_paddr = pa_to_ma(dest_addr);
@@ -971,6 +1055,12 @@ ioat_cmd_post(void *private, dcopy_cmd_t cmd)
 		 * for interrupt.
 		 */
 		ctrl = 0;
+		if (cmd->dp_flags & DCOPY_CMD_NOSRCSNP) {
+			ctrl |= IOAT_DESC_CTRL_NOSRCSNP;
+		}
+		if (cmd->dp_flags & DCOPY_CMD_NODSTSNP) {
+			ctrl |= IOAT_DESC_CTRL_NODSTSNP;
+		}
 		if (xfer_size == size) {
 			if (!(cmd->dp_flags & DCOPY_CMD_NOSTAT)) {
 				ctrl |= IOAT_DESC_CTRL_CMPL;
@@ -989,17 +1079,23 @@ ioat_cmd_post(void *private, dcopy_cmd_t cmd)
 		size -= xfer_size;
 	}
 
-	/*
-	 * if we are going to create a completion, save away the state so we
-	 * can poll on it.
-	 */
-	if (!(cmd->dp_flags & DCOPY_CMD_NOSTAT)) {
-		priv->ip_generation = ring->cr_desc_gen_prev;
-		priv->ip_index = ring->cr_desc_prev;
-	}
+	/* save away the state so we can poll on it. */
+	priv->ip_generation = ring->cr_desc_gen_prev;
+	priv->ip_index = ring->cr_desc_prev;
 
 	/* if queue not defined, tell the DMA engine about it */
 	if (!(cmd->dp_flags & DCOPY_CMD_QUEUE)) {
+		/*
+		 * Link the ring to a loop (currently only for FIPE).
+		 */
+		if (cmd->dp_flags & DCOPY_CMD_LOOP) {
+			e = ioat_ring_loop(ring, cmd);
+			if (e != DCOPY_SUCCESS) {
+				mutex_exit(&ring->cr_desc_mutex);
+				return (DCOPY_FAILURE);
+			}
+		}
+
 		if (channel->ic_ver == IOAT_CBv1) {
 			ddi_put8(state->is_reg_handle,
 			    (uint8_t *)&channel->ic_regs[IOAT_V1_CHAN_CMD],
@@ -1024,9 +1120,13 @@ ioat_cmd_post(void *private, dcopy_cmd_t cmd)
 static void
 ioat_cmd_post_dca(ioat_channel_ring_t *ring, uint32_t dca_id)
 {
+	ioat_chan_dca_desc_t *saved_prev;
 	ioat_chan_dca_desc_t *desc;
 	ioat_chan_dca_desc_t *prev;
 	ioat_channel_t channel;
+	uint64_t next_desc_phys;
+	off_t prev_offset;
+	off_t next_offset;
 
 
 	channel = ring->cr_chan;
@@ -1051,19 +1151,14 @@ ioat_cmd_post_dca(ioat_channel_ring_t *ring, uint32_t dca_id)
 		desc->dd_cntx = dca_id;
 	}
 
-	/* Put the descriptors physical address in the previous descriptor */
-	/*LINTED:E_TRUE_LOGICAL_EXPR*/
-	ASSERT(sizeof (ioat_chan_dca_desc_t) == 64);
-
-	/* sync the current desc */
-	(void) ddi_dma_sync(channel->ic_desc_dma_handle,
-	    ring->cr_desc_next << 6, 64, DDI_DMA_SYNC_FORDEV);
-
-	/* update the previous desc and sync it too */
-	prev->dd_next_desc = ring->cr_phys_desc +
-	    (ring->cr_desc_next << 6);
-	(void) ddi_dma_sync(channel->ic_desc_dma_handle,
-	    ring->cr_desc_prev << 6, 64, DDI_DMA_SYNC_FORDEV);
+	/*
+	 * save next desc and prev offset for when we link the two
+	 * descriptors together.
+	 */
+	saved_prev = prev;
+	prev_offset = ring->cr_desc_prev << 6;
+	next_offset = ring->cr_desc_next << 6;
+	next_desc_phys = ring->cr_phys_desc + next_offset;
 
 	/* save the current desc_next and desc_last for the completion */
 	ring->cr_desc_prev = ring->cr_desc_next;
@@ -1087,10 +1182,24 @@ ioat_cmd_post_dca(ioat_channel_ring_t *ring, uint32_t dca_id)
 		    &ring->cr_desc[ring->cr_desc_prev];
 		desc->dd_ctrl = 0;
 		desc->dd_next_desc = 0x0;
-
+		(void) ddi_dma_sync(channel->ic_desc_dma_handle,
+		    ring->cr_desc_next << 6, 64, DDI_DMA_SYNC_FORDEV);
 		prev->dd_next_desc = ring->cr_phys_desc +
 		    (ring->cr_desc_next << 6);
 	}
+
+	/* Put the descriptors physical address in the previous descriptor */
+	/*LINTED:E_TRUE_LOGICAL_EXPR*/
+	ASSERT(sizeof (ioat_chan_dca_desc_t) == 64);
+
+	/* sync the current desc */
+	(void) ddi_dma_sync(channel->ic_desc_dma_handle, next_offset, 64,
+	    DDI_DMA_SYNC_FORDEV);
+
+	/* update the previous desc and sync it too */
+	saved_prev->dd_next_desc = next_desc_phys;
+	(void) ddi_dma_sync(channel->ic_desc_dma_handle, prev_offset, 64,
+	    DDI_DMA_SYNC_FORDEV);
 }
 
 
@@ -1102,9 +1211,13 @@ static void
 ioat_cmd_post_copy(ioat_channel_ring_t *ring, uint64_t src_addr,
     uint64_t dest_addr, uint32_t size, uint32_t ctrl)
 {
+	ioat_chan_dma_desc_t *saved_prev;
 	ioat_chan_dma_desc_t *desc;
 	ioat_chan_dma_desc_t *prev;
 	ioat_channel_t channel;
+	uint64_t next_desc_phy;
+	off_t prev_offset;
+	off_t next_offset;
 
 
 	channel = ring->cr_chan;
@@ -1121,19 +1234,14 @@ ioat_cmd_post_copy(ioat_channel_ring_t *ring, uint64_t src_addr,
 	desc->dd_dest_paddr = dest_addr;
 	desc->dd_next_desc = 0x0;
 
-	/* Put the descriptors physical address in the previous descriptor */
-	/*LINTED:E_TRUE_LOGICAL_EXPR*/
-	ASSERT(sizeof (ioat_chan_dma_desc_t) == 64);
-
-	/* sync the current desc */
-	(void) ddi_dma_sync(channel->ic_desc_dma_handle,
-	    ring->cr_desc_next << 6, 64, DDI_DMA_SYNC_FORDEV);
-
-	/* update the previous desc and sync it too */
-	prev->dd_next_desc = ring->cr_phys_desc +
-	    (ring->cr_desc_next << 6);
-	(void) ddi_dma_sync(channel->ic_desc_dma_handle,
-	    ring->cr_desc_prev << 6, 64, DDI_DMA_SYNC_FORDEV);
+	/*
+	 * save next desc and prev offset for when we link the two
+	 * descriptors together.
+	 */
+	saved_prev = prev;
+	prev_offset = ring->cr_desc_prev << 6;
+	next_offset = ring->cr_desc_next << 6;
+	next_desc_phy = ring->cr_phys_desc + next_offset;
 
 	/* increment next/gen so it points to the next free desc */
 	ring->cr_desc_prev = ring->cr_desc_next;
@@ -1158,10 +1266,24 @@ ioat_cmd_post_copy(ioat_channel_ring_t *ring, uint64_t src_addr,
 		desc->dd_size = 0;
 		desc->dd_ctrl = 0;
 		desc->dd_next_desc = 0x0;
-
+		(void) ddi_dma_sync(channel->ic_desc_dma_handle,
+		    ring->cr_desc_next << 6, 64, DDI_DMA_SYNC_FORDEV);
 		prev->dd_next_desc = ring->cr_phys_desc +
 		    (ring->cr_desc_next << 6);
 	}
+
+	/* Put the descriptors physical address in the previous descriptor */
+	/*LINTED:E_TRUE_LOGICAL_EXPR*/
+	ASSERT(sizeof (ioat_chan_dma_desc_t) == 64);
+
+	/* sync the current desc */
+	(void) ddi_dma_sync(channel->ic_desc_dma_handle, next_offset, 64,
+	    DDI_DMA_SYNC_FORDEV);
+
+	/* update the previous desc and sync it too */
+	saved_prev->dd_next_desc = next_desc_phy;
+	(void) ddi_dma_sync(channel->ic_desc_dma_handle, prev_offset, 64,
+	    DDI_DMA_SYNC_FORDEV);
 }
 
 
@@ -1177,14 +1299,23 @@ ioat_cmd_poll(void *private, dcopy_cmd_t cmd)
 	uint64_t generation;
 	uint64_t last_cmpl;
 
-
+	ASSERT(cmd != NULL);
 	channel = (ioat_channel_t)private;
 	priv = cmd->dp_private->pr_device_cmd_private;
 
 	ring = channel->ic_ring;
 	ASSERT(ring != NULL);
 
-	mutex_enter(&ring->cr_cmpl_mutex);
+	if ((cmd->dp_flags & DCOPY_CMD_NOWAIT) == 0) {
+		mutex_enter(&ring->cr_cmpl_mutex);
+
+	/*
+	 * Try to acquire mutex if NOWAIT flag is set.
+	 * Return failure if failed to acquire mutex.
+	 */
+	} else if (mutex_tryenter(&ring->cr_cmpl_mutex) == 0) {
+		return (DCOPY_FAILURE);
+	}
 
 	/* if the channel had a fatal failure, fail all polls */
 	if ((channel->ic_channel_state == IOAT_CHANNEL_IN_FAILURE) ||
@@ -1224,7 +1355,7 @@ ioat_cmd_poll(void *private, dcopy_cmd_t cmd)
 	 * if cmd isn't passed in, well return.  Useful for updating the
 	 * consumer pointer (ring->cr_cmpl_last).
 	 */
-	if (cmd == NULL) {
+	if (cmd->dp_flags & DCOPY_CMD_SYNC) {
 		return (DCOPY_PENDING);
 	}
 
@@ -1314,7 +1445,9 @@ ioat_ring_reserve(ioat_channel_t channel, ioat_channel_ring_t *ring,
 				 * if we think the ring is full, update where
 				 * the H/W really is and check for full again.
 				 */
-				(void) ioat_cmd_poll(channel, NULL);
+				cmd->dp_flags |= DCOPY_CMD_SYNC;
+				(void) ioat_cmd_poll(channel, cmd);
+				cmd->dp_flags &= ~DCOPY_CMD_SYNC;
 				if (ring->cr_cmpl_last == 0) {
 					return (DCOPY_NORESOURCES);
 				}
@@ -1336,7 +1469,9 @@ ioat_ring_reserve(ioat_channel_t channel, ioat_channel_ring_t *ring,
 				 * if we think the ring is full, update where
 				 * the H/W really is and check for full again.
 				 */
-				(void) ioat_cmd_poll(channel, NULL);
+				cmd->dp_flags |= DCOPY_CMD_SYNC;
+				(void) ioat_cmd_poll(channel, cmd);
+				cmd->dp_flags &= ~DCOPY_CMD_SYNC;
 				if ((desc + 1) == ring->cr_cmpl_last) {
 					return (DCOPY_NORESOURCES);
 				}

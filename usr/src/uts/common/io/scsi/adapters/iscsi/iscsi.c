@@ -425,7 +425,13 @@ iscsi_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			ihp->hba_sig	= ISCSI_SIG_HBA;
 			ihp->hba_tran	= tran;
 			ihp->hba_dip	= dip;
-			ihp->hba_service_status = ISCSI_SERVICE_DISABLED;
+			if (iscsiboot_prop == NULL) {
+				ihp->hba_service_status =
+				    ISCSI_SERVICE_DISABLED;
+			} else {
+				ihp->hba_service_status =
+				    ISCSI_SERVICE_ENABLED;
+			}
 			ihp->hba_service_client_count = 0;
 
 			mutex_enter(&iscsi_oid_mutex);
@@ -496,6 +502,9 @@ iscsi_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 			/* setup hba defaults */
 			iscsi_set_default_login_params(&ihp->hba_params);
+
+			/* setup minimal initiator params */
+			iscsid_set_default_initiator_node_settings(ihp, B_TRUE);
 
 			/* hba set up */
 			tran->tran_hba_private  = ihp;
@@ -1059,7 +1068,7 @@ iscsi_tran_getcap(struct scsi_address *ap, char *cap, int whom)
 static int
 iscsi_tran_setcap(struct scsi_address *ap, char *cap, int value, int whom)
 {
-	return (iscsi_i_commoncap(ap, cap, 0, whom, 1));
+	return (iscsi_i_commoncap(ap, cap, value, whom, 1));
 }
 
 
@@ -1726,6 +1735,7 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 		kmem_free(ils, sizeof (*ils));
 		if (rtn != 0) {
 			kmem_free(initiator_node_name, ISCSI_MAX_NAME_LEN);
+			initiator_node_name = NULL;
 			break;
 		}
 
@@ -1807,12 +1817,12 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 			    isns_scn_callback);
 			iscsid_do_isns_query(ihp);
 
-			/* Done using the name and alias - free them. */
-			kmem_free(initiator_node_name, ISCSI_MAX_NAME_LEN);
-			initiator_node_name = NULL;
 			kmem_free(initiator_node_alias, ISCSI_MAX_NAME_LEN);
 			initiator_node_alias = NULL;
 		}
+
+		kmem_free(initiator_node_name, ISCSI_MAX_NAME_LEN);
+		initiator_node_name = NULL;
 		break;
 
 	/*
@@ -3884,8 +3894,8 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 
 		if (rval == B_TRUE) {
 			iscsi_exit_service_zone(ihp, ISCSI_SERVICE_DISABLED);
-		} else {
 			iscsi_door_unbind();
+		} else {
 			iscsi_exit_service_zone(ihp, ISCSI_SERVICE_ENABLED);
 			rtn = EFAULT;
 		}

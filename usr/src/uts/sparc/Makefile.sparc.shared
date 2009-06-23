@@ -210,7 +210,7 @@ DRV_KMODS	+= ipsecesp iwscn keysock kmdb kstat ksyms llc1
 DRV_KMODS	+= lofi
 DRV_KMODS	+= log logindmux kssl mm nca physmem pm poll pool
 DRV_KMODS	+= pseudo ptc ptm pts ptsl ramdisk random rsm rts sad
-DRV_KMODS	+= softmac sppp sppptun sy sysevent sysmsg 
+DRV_KMODS	+= simnet softmac sppp sppptun sy sysevent sysmsg 
 DRV_KMODS	+= spdsock
 DRV_KMODS	+= tcp tcp6 tl tnf ttymux udp udp6 wc winlock zcons
 DRV_KMODS	+= ippctl sctp sctp6
@@ -240,7 +240,6 @@ $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= llc2
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= mpt
 $(CLOSED_BUILD)CLOSED_DRV_KMODS += qus
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= se
-$(CLOSED_BUILD)CLOSED_DRV_KMODS += rtls
 
 #
 #       Hardware Drivers in common space
@@ -253,16 +252,19 @@ DRV_KMODS	+= mxfe
 DRV_KMODS	+= pcan
 DRV_KMODS	+= pcwl
 DRV_KMODS	+= rge
+DRV_KMODS	+= rtls
 DRV_KMODS	+= sfe
 DRV_KMODS	+= aac
 DRV_KMODS	+= igb
 DRV_KMODS	+= ixgbe
+DRV_KMODS	+= vr
+DRV_KMODS	+= mr_sas
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= ixgb
 
 #
 #	Machine Specific Driver Modules (/kernel/drv):
 #
-DRV_KMODS	+= audio1575 audio810 audiohd audiocs audiots
+DRV_KMODS	+= audio audio1575 audioens audiocs audiots audiopci austr
 DRV_KMODS	+= bge bpp dmfe eri esp fas hme qfe
 DRV_KMODS	+= openeepr options sd ses st
 DRV_KMODS	+= ssd
@@ -272,9 +274,11 @@ DRV_KMODS	+= usbser usbsacm usbsksp usbsprl
 DRV_KMODS	+= usb_as usb_ac
 DRV_KMODS	+= usbskel
 DRV_KMODS	+= usbvc
+DRV_KMODS	+= usbftdi
+DRV_KMODS	+= wusb_df hwahc hwarc wusb_ca
 DRV_KMODS	+= hci1394 av1394 scsa1394 dcam1394
 DRV_KMODS	+= sbp2
-DRV_KMODS	+= ib ibd rdsib sdp iser
+DRV_KMODS	+= ib ibd rdsib sdp iser daplt hermon tavor
 DRV_KMODS	+= pci_pci px_pci pxb_plx pxb_bcm pcie
 DRV_KMODS	+= i8042 kb8042 mouse8042
 DRV_KMODS	+= fcode
@@ -304,9 +308,8 @@ DRV_KMODS	+= ncall nsctl sdbc nskern sv
 DRV_KMODS	+= ii rdc rdcsrv rdcstub 
 DRV_KMODS	+= iscsi
 DRV_KMODS	+= emlxs
+DRV_KMODS	+= srpt
 
-$(CLOSED_BUILD)CLOSED_DRV_KMODS	+= audioens
-$(CLOSED_BUILD)CLOSED_DRV_KMODS	+= audiovia823x
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= ifp
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= uata
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= usbser_edge
@@ -351,7 +354,7 @@ SCHED_KMODS	+= RT TS RT_DPTBL TS_DPTBL IA FSS FX FX_DPTBL
 #	File System Modules (/kernel/fs):
 #
 FS_KMODS	+= dev devfs fdfs fifofs hsfs lofs namefs nfs pcfs tmpfs zfs
-FS_KMODS	+= specfs udfs ufs autofs cachefs procfs sockfs mntfs
+FS_KMODS	+= zut specfs udfs ufs autofs cachefs procfs sockfs mntfs
 FS_KMODS	+= ctfs objfs sharefs dcfs smbfs
 
 #
@@ -377,7 +380,7 @@ SYS_KMODS	+= doorfs pset acctctl portfs
 #
 #	'User' Modules (/kernel/misc):
 #
-MISC_KMODS	+= amsrc2 audiosup mixer
+MISC_KMODS	+= ac97
 MISC_KMODS	+= bignum
 MISC_KMODS	+= consconfig gld ipc nfs_dlboot nfssrv scsi
 MISC_KMODS	+= strplumb swapgeneric tlimod
@@ -392,6 +395,7 @@ MISC_KMODS	+= kcf
 MISC_KMODS	+= ksocket
 MISC_KMODS	+= ibcm
 MISC_KMODS	+= ibdm
+MISC_KMODS	+= ibdma
 MISC_KMODS	+= ibmf
 MISC_KMODS	+= ibtl
 MISC_KMODS	+= idm
@@ -408,14 +412,18 @@ MISC_KMODS	+= scsi_vhci_f_sym_hds
 MISC_KMODS	+= scsi_vhci_f_tape scsi_vhci_f_tpgs_tape
 MISC_KMODS	+= fctl
 MISC_KMODS	+= emlxs_fw
-MISC_KMODS	+= qlc_fw_2200 qlc_fw_2300 qlc_fw_2400 qlc_fw_2500 qlc_fw_6322
+MISC_KMODS	+= qlc_fw_2200
+MISC_KMODS	+= qlc_fw_2300
+MISC_KMODS	+= qlc_fw_2400
+MISC_KMODS	+= qlc_fw_2500
+MISC_KMODS	+= qlc_fw_6322
+MISC_KMODS	+= qlc_fw_8100
 MISC_KMODS	+= blk2scsa
 MISC_KMODS	+= sda
 MISC_KMODS	+= spuni
+MISC_KMODS	+= hwa1480_fw uwba
 
-$(CLOSED_BUILD)CLOSED_MISC_KMODS	+= amsrc1
 $(CLOSED_BUILD)CLOSED_MISC_KMODS	+= klmmod klmops
-$(CLOSED_BUILD)CLOSED_MISC_KMODS	+= phx
 $(CLOSED_BUILD)CLOSED_MISC_KMODS	+= scsi_vhci_f_asym_lsi
 $(CLOSED_BUILD)CLOSED_MISC_KMODS	+= scsi_vhci_f_asym_emc
 $(CLOSED_BUILD)CLOSED_MISC_KMODS	+= scsi_vhci_f_sym_emc
@@ -468,16 +476,13 @@ SVVS		+= svvs
 #
 XMODS		+=
 $(CLOSED_BUILD)CLOSED_XMODS =		\
-	daplt		\
-	hermon		\
 	sdpib		\
-	tavor		\
 	wsdrv
 
 #
 #	'Dacf' Modules (/kernel/dacf):
 #
-DACF_KMODS	+= usb_ac_dacf net_dacf
+DACF_KMODS	+= net_dacf
 
 #
 #	MAC-Type Plugin Modules (/kernel/mac)

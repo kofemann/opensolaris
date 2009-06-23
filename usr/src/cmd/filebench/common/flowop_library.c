@@ -49,10 +49,6 @@
 #include <sys/asynch.h>
 #endif /* HAVE_SYS_ASYNC_H */
 
-#ifndef HAVE_UINT_T
-#define	uint_t unsigned int
-#endif /* HAVE_UINT_T */
-
 #ifndef HAVE_SYSV_SEM
 #include <semaphore.h>
 #endif /* HAVE_SYSV_SEM */
@@ -392,6 +388,28 @@ flowoplib_filesetup(threadflow_t *threadflow, flowop_t *flowop,
 
 	if (fd == -1)
 		return (FILEBENCH_ERROR);
+
+	/* check for conflicting fdnumber and file name */
+	if ((fd > 0) && (threadflow->tf_fse[fd] != NULL)) {
+		char *fd_based_name;
+
+		fd_based_name =
+		    avd_get_str(threadflow->tf_fse[fd]->fse_fileset->fs_name);
+
+		if (flowop->fo_filename != NULL) {
+			char *fo_based_name;
+
+			fo_based_name = avd_get_str(flowop->fo_filename);
+			if (strcmp(fd_based_name, fo_based_name) != 0) {
+				filebench_log(LOG_ERROR, "Name of fd refer"
+				    "enced fileset name (%s) CONFLICTS with"
+				    " flowop supplied fileset name (%s)",
+				    fd_based_name, fo_based_name);
+				filebench_shutdown(1);
+				return (FILEBENCH_ERROR);
+			}
+		}
+	}
 
 	if (threadflow->tf_fd[fd].fd_ptr == NULL) {
 		int ret;
@@ -740,7 +758,7 @@ static int
 flowoplib_eventlimit(threadflow_t *threadflow, flowop_t *flowop)
 {
 	/* Immediately bail if not set/enabled */
-	if (filebench_shm->shm_eventgen_hz == NULL)
+	if (!filebench_shm->shm_eventgen_enabled)
 		return (FILEBENCH_OK);
 
 	if (flowop->fo_initted == 0) {
@@ -750,7 +768,7 @@ flowoplib_eventlimit(threadflow_t *threadflow, flowop_t *flowop)
 	}
 
 	flowop_beginop(threadflow, flowop);
-	while (filebench_shm->shm_eventgen_hz != NULL) {
+	while (filebench_shm->shm_eventgen_enabled) {
 		(void) ipc_mutex_lock(&filebench_shm->shm_eventgen_lock);
 		if (filebench_shm->shm_eventgen_q > 0) {
 			filebench_shm->shm_eventgen_q--;
@@ -803,7 +821,7 @@ flowoplib_iopslimit(threadflow_t *threadflow, flowop_t *flowop)
 	uint64_t events;
 
 	/* Immediately bail if not set/enabled */
-	if (filebench_shm->shm_eventgen_hz == NULL)
+	if (!filebench_shm->shm_eventgen_enabled)
 		return (FILEBENCH_OK);
 
 	if (flowop->fo_initted == 0) {
@@ -858,7 +876,7 @@ flowoplib_iopslimit(threadflow_t *threadflow, flowop_t *flowop)
 	events = iops;
 
 	flowop_beginop(threadflow, flowop);
-	while (filebench_shm->shm_eventgen_hz != NULL) {
+	while (filebench_shm->shm_eventgen_enabled) {
 
 		(void) ipc_mutex_lock(&filebench_shm->shm_eventgen_lock);
 		if (filebench_shm->shm_eventgen_q >= events) {
@@ -891,7 +909,7 @@ flowoplib_opslimit(threadflow_t *threadflow, flowop_t *flowop)
 	uint64_t events;
 
 	/* Immediately bail if not set/enabled */
-	if (filebench_shm->shm_eventgen_hz == NULL)
+	if (!filebench_shm->shm_eventgen_enabled)
 		return (FILEBENCH_OK);
 
 	if (flowop->fo_initted == 0) {
@@ -932,7 +950,7 @@ flowoplib_opslimit(threadflow_t *threadflow, flowop_t *flowop)
 	events = ops;
 
 	flowop_beginop(threadflow, flowop);
-	while (filebench_shm->shm_eventgen_hz != NULL) {
+	while (filebench_shm->shm_eventgen_enabled) {
 		(void) ipc_mutex_lock(&filebench_shm->shm_eventgen_lock);
 		if (filebench_shm->shm_eventgen_q >= events) {
 			filebench_shm->shm_eventgen_q -= events;
@@ -966,7 +984,7 @@ flowoplib_bwlimit(threadflow_t *threadflow, flowop_t *flowop)
 	uint64_t events;
 
 	/* Immediately bail if not set/enabled */
-	if (filebench_shm->shm_eventgen_hz == NULL)
+	if (!filebench_shm->shm_eventgen_enabled)
 		return (FILEBENCH_OK);
 
 	if (flowop->fo_initted == 0) {
@@ -1025,7 +1043,7 @@ flowoplib_bwlimit(threadflow_t *threadflow, flowop_t *flowop)
 	    (u_longlong_t)bytes, (u_longlong_t)events);
 
 	flowop_beginop(threadflow, flowop);
-	while (filebench_shm->shm_eventgen_hz != NULL) {
+	while (filebench_shm->shm_eventgen_enabled) {
 		(void) ipc_mutex_lock(&filebench_shm->shm_eventgen_lock);
 		if (filebench_shm->shm_eventgen_q >= events) {
 			filebench_shm->shm_eventgen_q -= events;
@@ -1482,6 +1500,7 @@ flowoplib_openfile_common(threadflow_t *threadflow, flowop_t *flowop, int fd)
 	filesetentry_t *file;
 	char *fileset_name;
 	int tid = 0;
+	int openflag = 0;
 	int err;
 
 	if (flowop->fo_fileset == NULL) {
@@ -1495,6 +1514,14 @@ flowoplib_openfile_common(threadflow_t *threadflow, flowop_t *flowop, int fd)
 		    "flowop %s: fileset has no name", flowop->fo_name);
 		return (FILEBENCH_ERROR);
 	}
+
+	/*
+	 * set the open flag for read only or read/write, as appropriate.
+	 */
+	if (avd_get_bool(flowop->fo_fileset->fs_readonly) == TRUE)
+		openflag = O_RDONLY;
+	else
+		openflag = O_RDWR;
 
 	/*
 	 * If the flowop doesn't default to persistent fd
@@ -1532,7 +1559,7 @@ flowoplib_openfile_common(threadflow_t *threadflow, flowop_t *flowop, int fd)
 		    "open raw device %s flags %d = %d", name, open_attrs, fd);
 
 		if (FB_OPEN(&(threadflow->tf_fd[fd]), name,
-		    O_RDWR | open_attrs, 0666) == FILEBENCH_ERROR) {
+		    openflag | open_attrs, 0666) == FILEBENCH_ERROR) {
 			filebench_log(LOG_ERROR,
 			    "Failed to open raw device %s: %s",
 			    name, strerror(errno));
@@ -1562,7 +1589,7 @@ flowoplib_openfile_common(threadflow_t *threadflow, flowop_t *flowop, int fd)
 
 	flowop_beginop(threadflow, flowop);
 	err = fileset_openfile(&threadflow->tf_fd[fd], flowop->fo_fileset,
-	    file, O_RDWR, 0666, flowoplib_fileattrs(flowop));
+	    file, openflag, 0666, flowoplib_fileattrs(flowop));
 	flowop_endop(threadflow, flowop, 0);
 
 	if (err == FILEBENCH_ERROR) {
@@ -1608,6 +1635,13 @@ flowoplib_createfile(threadflow_t *threadflow, flowop_t *flowop)
 		filebench_log(LOG_ERROR, "flowop NULL file");
 		return (FILEBENCH_ERROR);
 	}
+
+	if (avd_get_bool(flowop->fo_fileset->fs_readonly) == TRUE) {
+		filebench_log(LOG_ERROR, "Can not CREATE the READONLY file %s",
+		    avd_get_str(flowop->fo_fileset->fs_name));
+		return (FILEBENCH_ERROR);
+	}
+
 
 #ifdef HAVE_RAW_SUPPORT
 	/* can't be used with raw devices */
