@@ -1243,8 +1243,8 @@ taskq_thread_create(taskq_t *tq)
 		t = thread_create(NULL, 0, taskq_thread, tq, 0, &p0,
 		    TS_RUN, tq->tq_pri);
 	else
-		t = zthread_create(NULL, 0, taskq_thread, tq, 0, &p0,
-		    0, tq->tq_pri);
+		t = zthread_create(NULL, 0, taskq_thread, tq, 0,
+		    tq->tq_pri);
 
 	t->t_taskq = tq;
 }
