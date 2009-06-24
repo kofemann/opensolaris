@@ -786,7 +786,8 @@ populate_mds_sid_cache(objset_t *osp, dserv_mds_instance_t *inst)
 	size = dmu_obj_info.doi_physical_blks * 512;
 	buf = kmem_zalloc(size, KM_SLEEP);
 
-	error = dmu_read(osp, DMU_PNFS_METADATA_OBJECT, 0, size, buf);
+	error = dmu_read(osp, DMU_PNFS_METADATA_OBJECT, 0, size,
+	    buf, DMU_READ_PREFETCH);
 	if (error) {
 		kmem_free(buf, size);
 		return (error);
