@@ -97,6 +97,7 @@ struct taskq {
 	kcondvar_t	tq_wait_cv;
 	kcondvar_t	tq_exit_cv;
 	pri_t		tq_pri;		/* Scheduling priority */
+	zoneid_t	tq_zoneid;
 	uint_t		tq_flags;
 	int		tq_active;
 	int		tq_nthreads;

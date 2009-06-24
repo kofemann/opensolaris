@@ -46,6 +46,7 @@ typedef void (task_func_t)(void *);
 #define	TASKQ_CPR_SAFE		0x0002	/* Use CPR safe protocol */
 #define	TASKQ_DYNAMIC		0x0004	/* Use dynamic thread scheduling */
 #define	TASKQ_THREADS_CPU_PCT	0x0008	/* number of threads as % of ncpu */
+#define	TASKQ_PERZONE		0x0010	/* Create taskq threads per zone */
 
 /*
  * Flags for taskq_dispatch. TQ_SLEEP/TQ_NOSLEEP should be same as

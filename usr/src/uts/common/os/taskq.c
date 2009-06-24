@@ -1238,8 +1238,14 @@ taskq_thread_create(taskq_t *tq)
 
 	tq->tq_flags |= TASKQ_THREAD_CREATED;
 	tq->tq_active++;
-	t = thread_create(NULL, 0, taskq_thread, tq, 0, &p0, TS_RUN,
-	    tq->tq_pri);
+
+	if (tq->tq_zoneid == GLOBAL_ZONEID)
+		t = thread_create(NULL, 0, taskq_thread, tq, 0, &p0,
+		    TS_RUN, tq->tq_pri);
+	else
+		t = zthread_create(NULL, 0, taskq_thread, tq, 0, &p0,
+		    0, tq->tq_pri);
+
 	t->t_taskq = tq;
 }
 
@@ -1353,7 +1359,6 @@ taskq_thread(void *arg)
 
 	if (tq->tq_zoneid != GLOBAL_ZONEID)
 		gz = 0;
-
 
 	if (tq->tq_nthreads_max == 1)
 		tq->tq_thread = NULL;
@@ -1623,6 +1628,7 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 	tq->tq_maxalloc = maxalloc;
 	tq->tq_nbuckets = bsize;
 	tq->tq_pri = pri;
+
 	if (flags & TASKQ_PERZONE)
 		tq->tq_zoneid = getzoneid();
 	else
@@ -1692,10 +1698,10 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 	}
 
 	if (flags & TASKQ_DYNAMIC) {
-		if ((tq->tq_kstat = kstat_create("unix", instance,
+		if ((tq->tq_kstat = kstat_create_zone("unix", instance,
 		    tq->tq_name, "taskq_d", KSTAT_TYPE_NAMED,
 		    sizeof (taskq_d_kstat) / sizeof (kstat_named_t),
-		    KSTAT_FLAG_VIRTUAL)) != NULL) {
+		    KSTAT_FLAG_VIRTUAL, tq->tq_zoneid)) != NULL) {
 			tq->tq_kstat->ks_lock = &taskq_d_kstat_lock;
 			tq->tq_kstat->ks_data = &taskq_d_kstat;
 			tq->tq_kstat->ks_update = taskq_d_kstat_update;
@@ -1703,10 +1709,10 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 			kstat_install(tq->tq_kstat);
 		}
 	} else {
-		if ((tq->tq_kstat = kstat_create("unix", instance, tq->tq_name,
-		    "taskq", KSTAT_TYPE_NAMED,
+		if ((tq->tq_kstat = kstat_create_zone("unix", instance,
+		    tq->tq_name, "taskq", KSTAT_TYPE_NAMED,
 		    sizeof (taskq_kstat) / sizeof (kstat_named_t),
-		    KSTAT_FLAG_VIRTUAL)) != NULL) {
+		    KSTAT_FLAG_VIRTUAL, tq->tq_zoneid)) != NULL) {
 			tq->tq_kstat->ks_lock = &taskq_kstat_lock;
 			tq->tq_kstat->ks_data = &taskq_kstat;
 			tq->tq_kstat->ks_update = taskq_kstat_update;
