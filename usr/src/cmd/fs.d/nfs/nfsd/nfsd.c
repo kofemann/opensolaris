@@ -387,7 +387,7 @@ main(int ac, char *av[])
 	if ((proto == NULL) && (provider == NULL)) {
 		if (svcrdma(NFS_SVCPOOL_ID, nfs_server_vers_min,
 		    nfs_server_vers_max, nfs_server_delegation,
-		    doorfs)) {
+		    doorfd)) {
 			fprintf(stderr,
 			    "Can't set up RDMA creator thread : %s",
 			    strerror(errno));
