@@ -1260,7 +1260,7 @@ usr/include/sys/scsi/adapters/iscsi_if.h		i386
 usr/include/sys/stmf_sbd_ioctl.h	i386
 
 #
-w# portable object file and dictionary used by libfmd_msg test
+# portable object file and dictionary used by libfmd_msg test
 #
 usr/lib/fm/dict/TEST.dict		i386
 usr/lib/locale/C/LC_MESSAGES/TEST.mo	i386
