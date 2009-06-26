@@ -207,6 +207,10 @@ main(int ac, char *av[])
 	}
 	df_provider = libnfs_prop_string(libhandle,
 	    LIBNFS_PROP_SERVER_DEVICE);
+	if (strncasecmp("ALL", df_provider, 3) == 0) {
+		libnfs_strfree(libhandle, df_provider);
+		df_provider = NULL;
+	}
 	maxservers = libnfs_prop_num(libhandle,
 	    LIBNFS_PROP_SERVER_SERVERS);
 	nfs_server_vers_min = libnfs_prop_num(libhandle,
