@@ -384,7 +384,9 @@ main(int ac, char *av[])
 	 * start rdma services and block in the kernel.
 	 * (only if proto or provider is not set to TCP or UDP)
 	 */
+#ifdef NOT_NOW_BROWN_COW
 	if ((proto == NULL) && (provider == NULL)) {
+#endif
 		if (svcrdma(NFS_SVCPOOL_ID, nfs_server_vers_min,
 		    nfs_server_vers_max, nfs_server_delegation,
 		    doorfd)) {
@@ -392,7 +394,9 @@ main(int ac, char *av[])
 			    "Can't set up RDMA creator thread : %s",
 			    strerror(errno));
 		}
+#ifdef NOT_NOW_BROWN_COW
 	}
+#endif
 
 	/*
 	 * Now open up for signal delivery
