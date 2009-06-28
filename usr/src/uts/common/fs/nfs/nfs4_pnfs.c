@@ -806,7 +806,7 @@ retry:
 
 		/*
 		 * XXXrsb - This will likely go away when ds_info_t
-		 * is implemented.
+		 e is implemented.
 		 */
 		if (np->s_ds_svp == NULL) {
 			svp = new_servinfo4(mi, nap->na_r_addr,
@@ -856,7 +856,10 @@ retry:
 		cmn_err(CE_WARN,
 		    "netaddr4_to_servinfo4: exchange_id failed %d, %d",
 		    e.error, e.stat);
-		error = e.error;
+		if (e.error)
+			error = e.error;
+		else
+			error = EIO;	/* XXX: Just something here */
 	} else {
 		/* All good, let's go home */
 		*svpp = svp;
