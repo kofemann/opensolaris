@@ -856,10 +856,7 @@ retry:
 		cmn_err(CE_WARN,
 		    "netaddr4_to_servinfo4: exchange_id failed %d, %d",
 		    e.error, e.stat);
-		if (e.error)
-			error = e.error;
-		else
-			error = EIO;	/* XXX: Just something here */
+		error = e.error;
 	} else {
 		/* All good, let's go home */
 		*svpp = svp;
