@@ -2527,16 +2527,6 @@ nfs4get_lease_time(mntinfo4_t *mi, struct nfs4_server *np,
 
 		mutex_enter(&np->s_lock);
 		np->s_lease_time = garp->n4g_ext_res->n4g_leasetime;
-
-		/*
-		 * Keep track of the lease period for the mi's
-		 * mi_msg_list.  We need an appropiate time
-		 * bound to associate past facts with a current
-		 * event.  The lease period is perfect for this.
-		 */
-		mutex_enter(&mi->mi_msg_list_lock);
-		mi->mi_lease_period = np->s_lease_time;
-		mutex_exit(&mi->mi_msg_list_lock);
 		mutex_exit(&np->s_lock);
 	}
 	nfs4_call_rele(cp);
@@ -2554,7 +2544,9 @@ nfs4start_hb_thread(mntinfo4_t *mi, servinfo4_t *svp,
 	/* SV4_ISA_DS is set when the target server is ONLY a DS.  */
 	if (svp->sv_flags & SV4_ISA_DS) {
 		mutex_enter(&np->s_lock);
+		mutex_enter(&mi->mi_msg_list_lock);
 		np->s_lease_time = mi->mi_lease_period;
+		mutex_exit(&mi->mi_msg_list_lock);
 		mutex_exit(&np->s_lock);
 	} else {
 		nfs4get_lease_time(mi, np, ep, cr);
@@ -3006,16 +2998,6 @@ nfs4setclientid_otw(mntinfo4_t *mi, struct servinfo4 *svp, cred_t *cr,
 
 		mutex_enter(&np->s_lock);
 		np->s_lease_time = garp->n4g_ext_res->n4g_leasetime;
-
-		/*
-		 * Keep track of the lease period for the mi's
-		 * mi_msg_list.  We need an appropiate time
-		 * bound to associate past facts with a current
-		 * event.  The lease period is perfect for this.
-		 */
-		mutex_enter(&mi->mi_msg_list_lock);
-		mi->mi_lease_period = np->s_lease_time;
-		mutex_exit(&mi->mi_msg_list_lock);
 		mutex_exit(&np->s_lock);
 	}
 

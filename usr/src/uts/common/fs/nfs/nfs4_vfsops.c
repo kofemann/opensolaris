@@ -2989,6 +2989,28 @@ nfs4bind_conn_to_session(nfs4_server_t *np, servinfo4_t *svp, mntinfo4_t *mi,
 	return (e.error);
 }
 
+/*
+ * Initialize mi_lease_period.
+ *
+ * Keep track of the lease period for the mi's
+ * mi_msg_list.	 We need an appropiate time
+ * bound to associate past facts with a current
+ * event.  The lease period is perfect for this.
+ *
+ * mi_lease_period is also used to inherit the
+ * lease time for a data server from the MDS.
+ */
+static void
+nfs4_setup_mi_lease_period(nfs4_server_t *np, mntinfo4_t *mi)
+{
+	ASSERT(MUTEX_HELD(&np->s_lock));
+	mutex_enter(&mi->mi_msg_list_lock);
+	mi->mi_lease_period = np->s_lease_time;
+	if (mi->mi_lease_period == 0)
+		cmn_err(CE_WARN, "nfs4_setup_mi_lease_period: lease time 0");
+	mutex_exit(&mi->mi_msg_list_lock);
+}
+
 static void
 nfs4_setup_pnfs_mi(nfs4_server_t *np, mntinfo4_t *mi, servinfo4_t *svp)
 {
@@ -3110,6 +3132,7 @@ recov_retry:
 			/* See XXXrsb above */
 			if (is_dataserver == FALSE)
 				nfs4_setup_pnfs_mi(np, mi, svp);
+			nfs4_setup_mi_lease_period(np, mi);
 
 			nfs_rw_exit(&mi->mi_recovlock);
 		}
@@ -3168,6 +3191,7 @@ recov_retry:
 			nfs4_set_minorversion(mi, np->s_minorversion);
 			if (is_dataserver == FALSE)
 				nfs4_setup_pnfs_mi(np, mi, svp);
+			nfs4_setup_mi_lease_period(np, mi);
 		}
 		mutex_exit(&np->s_lock);
 		nfs4_server_rele(np);
