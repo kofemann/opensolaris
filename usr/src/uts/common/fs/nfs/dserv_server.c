@@ -806,7 +806,8 @@ dserv_nnode_io_prep(void *vdata, nnode_io_flags_t *nnflags, cred_t *cr,
 out:
 	rw_exit(&data->dnd_rwlock);
 
-	if ((err == ENOENT) && (! (*nnflags & NNODE_IO_FLAG_WRITE))) {
+	if ((err == ENOENT) && !(*nnflags & NNODE_IO_FLAG_WRITE) &&
+	    !(*nnflags & NNODE_IO_REMOVE_OBJ)) {
 		*nnflags |= NNODE_IO_FLAG_PAST_EOF;
 		err = 0;
 	}
@@ -1464,6 +1465,9 @@ dserv_nnode_remove_obj(void *vdnd)
 	int		error;
 
 	hex_fid = tohex(dnd->dnd_fid->val, dnd->dnd_fid->len);
+
+	/* The file has to exist on this dh */
+	ASSERT(dnd->dnd_objset != NULL);
 
 	tx = dmu_tx_create(dnd->dnd_objset);
 	dmu_tx_hold_zap(tx, DMU_PNFS_FID_TO_OBJID_OBJECT, FALSE, NULL);

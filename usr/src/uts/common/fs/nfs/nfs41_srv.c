@@ -8816,6 +8816,11 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 	bool_t create = FALSE;
 	nfs_range_query_t remain;
 
+	if (cs->vp == NULL) {
+		cmn_err(CE_WARN, "lo_return(): putfh first");
+		return (NFS4ERR_NOFILEHANDLE);
+	}
+
 	fp = rfs4_findfile(cs->instp, cs->vp, NULL, &create);
 	if (fp == NULL) {
 		cmn_err(CE_WARN, "lo_return(): findfile returned NULL");
