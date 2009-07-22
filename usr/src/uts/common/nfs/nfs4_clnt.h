@@ -1392,6 +1392,7 @@ typedef struct nfs4_server {
 #define	N4S_USE_NON_PNFS	0x400	/* server is a non pNFS 4.1 server */
 #define	N4S_NEED_BC2S		0x800	/* need bind_conn_to_session */
 #define	N4S_RECOV_ACTIV		0x1000	/* Recovery is active for this server */
+#define	N4S_SRV_DEAD		0x2000	/* nfs4_mark_srv_dead() called */
 
 #define	N4S_CB_PAUSE_TIME	10000	/* Amount of time to pause (10ms) */
 

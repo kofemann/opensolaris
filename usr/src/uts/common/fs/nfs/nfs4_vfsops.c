@@ -3560,6 +3560,8 @@ nfs4_mark_srv_dead(nfs4_server_t *sp, uint_t zone_shutdown)
 {
 	ASSERT(MUTEX_HELD(&sp->s_lock));
 
+	sp->s_flags |= N4S_SRV_DEAD;
+
 	if (sp->s_minorversion > 0)
 		if (zone_shutdown)
 			sp->seqhb_flags |= NFS4_SEQHB_EXIT;

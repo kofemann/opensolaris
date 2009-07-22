@@ -2945,8 +2945,10 @@ the_top:
 			 * unconditionally release its holds on the
 			 * nfs4_server_t.
 			 */
-			np->s_refcnt++;
-			nfs4_mark_srv_dead(np, 1);
+			if (!(np->s_flags & N4S_SRV_DEAD)) {
+				np->s_refcnt++;
+				nfs4_mark_srv_dead(np, 1);
+			}
 		}
 		mutex_exit(&np->s_lock);
 	}
