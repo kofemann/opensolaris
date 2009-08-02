@@ -1116,6 +1116,7 @@ recov_retry:
 
 	t = gethrtime();
 
+	cp->nc_rfs4call_flags = RFS4CALL_SHOLD;
 	rfs4call(cp, &e);
 
 	if (!e.error && nfs4_need_to_bump_seqid(&cp->nc_res))
@@ -1454,6 +1455,14 @@ recov_retry:
 
 	/* accept delegation, if any */
 	nfs4_delegation_accept(rp, CLAIM_NULL, op_res, garp, cred_otw);
+
+	/* release the slot, return the delegation if recalled */
+	nfs4_call_slot_release(cp);
+	if (cp->nc_flags & NFS4_CALL_FLAG_SLOT_RECALLED) {
+		int flags = NFS4_DR_PUSH | NFS4_DR_DID_OP |
+		    NFS4_DR_REOPEN | NFS4_DR_RECALL;
+		nfs4delegreturn(rp, flags);
+	}
 
 	nfs4_end_op(cp, &recov_state);
 
@@ -1815,6 +1824,7 @@ top:
 
 	t = gethrtime();
 
+	cp->nc_rfs4call_flags = RFS4CALL_SHOLD;
 	rfs4call(cp, ep);
 
 	garp = &getattr_res->ga_res;
@@ -2077,6 +2087,11 @@ top:
 
 	/* accept delegation, if any */
 	nfs4_delegation_accept(rp, claim, op_res, garp, cred_otw);
+
+	/* release the slot, add delegation to return list if recalled */
+	nfs4_call_slot_release(cp);
+	if (cp->nc_flags & NFS4_CALL_FLAG_SLOT_RECALLED)
+		nfs4_dlistadd(rp, NFS4_DR_PUSH | NFS4_DR_RECALL);
 
 	nfs4args_copen_free(open_args);
 

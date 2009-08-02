@@ -412,7 +412,7 @@ extern void	rfs41_seq4_rele(void *, uint32_t);
 #define	SLOT_FREE		0x00000020
 #define	SLOT_ERROR		0x00000040
 #define	SLOT_INUSE		0x00000080
-#define	SLOT_HOLD		0x00000100
+#define	SLOT_RECALLED		0x00000100
 
 /* Slot entry structure */
 typedef struct slot_ent {

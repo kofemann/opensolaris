@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- *	Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ *	Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  *	Use is subject to license terms.
  */
 
@@ -516,6 +516,7 @@ extern void nfs4_delegation_accept(rnode4_t *, open_claim_type4, OPEN4res *,
 		nfs4_ga_res_t *, cred_t *);
 
 extern void	nfs4_dlistclean(void);
+extern void	nfs4_dlistadd(rnode4_t *, int);
 extern void	nfs4_deleg_discard(mntinfo4_t *, nfs4_server_t *);
 
 extern void	rddir4_cache_create(rnode4_t *);

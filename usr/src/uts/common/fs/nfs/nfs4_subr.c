@@ -113,6 +113,8 @@ static void rddir4_cache_free(rddir4_cache_impl *);
 static rddir4_cache *rddir4_cache_alloc(int);
 static void rddir4_cache_hold(rddir4_cache *);
 static int try_failover(enum clnt_stat);
+static void nfs4sequence_setup(nfs4_call_t *, nfs4_server_t *);
+static void nfs4sequence_fin(nfs4_call_t *cp);
 
 static int nfs4_readdir_cache_hits = 0;
 static int nfs4_readdir_cache_waits = 0;
@@ -1669,7 +1671,6 @@ void
 rfs4call(nfs4_call_t *cp, nfs4_error_t *copy_ep)
 {
 	int i, error, doseq;
-	slot_ent_t *slot;
 	COMPOUND4node_clnt *node;
 	SEQUENCE4res *seqres;
 	nfs4_server_t *np;
@@ -1686,7 +1687,12 @@ rfs4call(nfs4_call_t *cp, nfs4_error_t *copy_ep)
 		doseq = 1;
 	}
 
+	cp->nc_flags &= ~(NFS4_CALL_FLAG_SLOT_INCR |
+	    NFS4_CALL_FLAG_SLOT_RECALLED);
+
 	if (doseq) {
+		ASSERT((cp->nc_flags & NFS4_CALL_FLAG_SLOT_HELD) == 0);
+
 		/*
 		 * XXXrsb - The following code is likely to change.
 		 *
@@ -1722,7 +1728,7 @@ rfs4call(nfs4_call_t *cp, nfs4_error_t *copy_ep)
 			(void) nfs4_op_sequence(cp);
 
 		/* Set up the sequence OP */
-		nfs4sequence_setup(&np->ssx, &cp->nc_args, &slot);
+		nfs4sequence_setup(cp, np);
 	}
 
 	ASSERT(nfs_zone() == mi->mi_zone);
@@ -1799,7 +1805,7 @@ rfs4call(nfs4_call_t *cp, nfs4_error_t *copy_ep)
 	}
 
 	if (doseq) {
-		nfs4sequence_fin(&np->ssx, &cp->nc_res, slot, ep);
+		nfs4sequence_fin(cp);
 
 		/*
 		 * If the OTW call failed completely, or if the
@@ -3395,53 +3401,60 @@ rnode4info(rnode4_t *rp)
 }
 #endif
 
-void
-nfs4sequence_setup(nfs4_session_t *np, COMPOUND4args_clnt *rfsargp,
-    slot_ent_t **slotpp)
+static void
+nfs4sequence_setup(nfs4_call_t *cp, nfs4_server_t *np)
 {
-	slot_ent_t		*slot = NULL;
+	nfs4_session_t	*ssp = &np->ssx;
+	slot_ent_t *slot = NULL;
 	nfs_argop4 *argp;
 	COMPOUND4node_clnt *seq_node;
 
-	seq_node = list_head(&rfsargp->args);
+	seq_node = list_head(&cp->nc_args.args);
 	ASSERT(seq_node != NULL);
 	ASSERT(seq_node->arg.argop == OP_SEQUENCE);
 	argp = &seq_node->arg;
 
-	bcopy(&np->sessionid,
+	bcopy(&ssp->sessionid,
 	    argp->nfs_argop4_u.opsequence.sa_sessionid,
 	    sizeof (sessionid4));
 
 	/*
 	 * Find a slot to use.
 	 */
-	(void) slot_alloc(np->slot_table, SLT_SLEEP, &slot);
+	(void) slot_alloc(ssp->slot_table, SLT_SLEEP, &slot);
 	ASSERT(slot != NULL);
+
+	nfs4_server_hold(np);
+	cp->nc_slot_srv = np;
+	cp->nc_slot_ent = slot;
+	cp->nc_flags |= NFS4_CALL_FLAG_SLOT_HELD;
 
 	/*
 	 * Update SEQUENCE args
 	 */
-	mutex_enter(&np->slot_table->st_lock);
+	mutex_enter(&ssp->slot_table->st_lock);
 	argp->nfs_argop4_u.opsequence.sa_highest_slotid  =
-	    np->slot_table->st_fslots;
-	mutex_exit(&np->slot_table->st_lock);
+	    ssp->slot_table->st_fslots;
+	mutex_exit(&ssp->slot_table->st_lock);
 	mutex_enter(&slot->se_lock);
 	argp->nfs_argop4_u.opsequence.sa_cachethis = 0;	/* XXX - for BAT */
 	argp->nfs_argop4_u.opsequence.sa_sequenceid = slot->se_seqid;
 	argp->nfs_argop4_u.opsequence.sa_slotid = slot->se_sltno;
 	/* XXX - rick - need sr_target_highest_slotid */
 	mutex_exit(&slot->se_lock);
-
-	*slotpp = slot;
 }
 
-void
-nfs4sequence_fin(nfs4_session_t *np, COMPOUND4res_clnt *rfsresp,
-    slot_ent_t *slot, nfs4_error_t *ep)
+static void
+nfs4sequence_fin(nfs4_call_t *cp)
 {
-	SEQUENCE4resok		*seqres;
+	COMPOUND4res_clnt *rfsresp = &cp->nc_res;
+	slot_ent_t *slot = cp->nc_slot_ent;
+	nfs4_error_t *ep = &cp->nc_e;
+	SEQUENCE4resok *seqres;
 	nfs_resop4 *resp;
 	COMPOUND4node_clnt *seq_node;
+
+	ASSERT(cp->nc_flags & NFS4_CALL_FLAG_SLOT_HELD);
 
 	seq_node = list_head(&rfsresp->argsp->args);
 	ASSERT(seq_node != NULL);
@@ -3456,13 +3469,19 @@ nfs4sequence_fin(nfs4_session_t *np, COMPOUND4res_clnt *rfsresp,
 		    ep->rpc_status, slot->se_sltno, slot->se_seqid);
 		slot_set_state(slot, SLOT_ERROR);
 	} else {
-
 		/* Update slot seqid on successful op_sequence */
-		if (ep->error == 0 && (rfsresp->decode_len > 0 &&
-		    resp->nfs_resop4_u.opsequence.sr_status == NFS4_OK))
-			slot_incr_seq(slot, 1);
+		if ((ep->error == 0) && (rfsresp->decode_len > 0) &&
+		    (resp->nfs_resop4_u.opsequence.sr_status == NFS4_OK))
+			cp->nc_flags |= NFS4_CALL_FLAG_SLOT_INCR;
 
-		slot_free(np->slot_table, slot);
+		/*
+		 * Release slot unless caller wants to keep slot
+		 * allocated. If the op_sequence failed, release slot
+		 * regardless.
+		 */
+		if (((cp->nc_flags & NFS4_CALL_FLAG_SLOT_INCR) == 0) ||
+		    ((cp->nc_rfs4call_flags & RFS4CALL_SHOLD) == 0))
+			nfs4_call_slot_release(cp);
 	}
 
 	/* SEQUENCE Op Successful? */
@@ -3482,11 +3501,7 @@ nfs4sequence_fin(nfs4_session_t *np, COMPOUND4res_clnt *rfsresp,
 	 */
 
 	if (seqres->sr_status_flags & SEQ4_STATUS_CB_PATH_DOWN) {
-#ifdef	notyet
-		nfs4_delegreturn_all(np);
-#else
 		cmn_err(CE_WARN, "SEQ4_STATUS_CB_PATH_DOWN not handled");
-#endif
 	}
 
 	if (seqres->sr_status_flags & SEQ4_STATUS_CB_GSS_CONTEXTS_EXPIRING) {

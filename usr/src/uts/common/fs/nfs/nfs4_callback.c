@@ -166,7 +166,6 @@ static nfs4_open_stream_t *get_next_deleg_stream(rnode4_t *, int);
 static void nfs4delegreturn_thread(struct cb_recall_pass *);
 static int deleg_reopen(vnode_t *, bool_t *, struct nfs4_callback_globals *,
     int);
-static void nfs4_dlistadd(rnode4_t *, struct nfs4_callback_globals *, int);
 static void nfs4_dlistclean_impl(struct nfs4_callback_globals *, int);
 static int nfs4delegreturn_impl(rnode4_t *, int,
     struct nfs4_callback_globals *);
@@ -328,15 +327,47 @@ nfs4_cbconn_thread(nfs4_server_t *np)
 	zthread_exit();
 }
 
+/*
+ * Returns 0 if no race's detected.
+ */
+static int
+cb_rcl_markslots(nfs4_server_t *np, referring_call_list4 *rcl)
+{
+	referring_call4 *rc;
+	int rc_len;
+	int i = 0;
+	int race_found = 0;
+
+	if (bcmp(&np->ssx.sessionid, &rcl->rcl_sessionid,
+	    sizeof (np->ssx.sessionid)) != 0) {
+		return (0);
+	}
+	rc_len = rcl->rcl_referring_calls.rcl_referring_calls_len;
+	rc = rcl->rcl_referring_calls.rcl_referring_calls_val;
+
+	for (i = 0; i < rc_len; i++, rc++) {
+		/*
+		 * Mark the slot if a cb_recall race is detected.
+		 */
+		if (slot_mark(np->ssx.slot_table, rc->rc_slotid,
+		    rc->rc_sequenceid))
+			race_found++;
+	}
+	return (race_found);
+}
+
+
 CB_COMPOUND4res *
 cb_sequence(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
-	struct compound_state *cs, struct nfs4_callback_globals *ncg)
+    struct compound_state *cs, struct nfs4_callback_globals *ncg, int *cb_racep)
 {
 	nfs4_server_t	*np;
 	slot_ent_t	*cslot = NULL;
 	stok_t		*st;
 	nfs4_session_t	*ssp;
-	int ret = 0;
+	int		ret = 0;
+	int		xx, rc_len;
+	referring_call_list4 *rcl;
 
 	CB_SEQUENCE4args *args = &argop->nfs_cb_argop4_u.opcbsequence;
 	CB_SEQUENCE4res *resp = &resop->nfs_cb_resop4_u.opcbsequence;
@@ -381,6 +412,14 @@ cb_sequence(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
 		nfs4_server_rele(np);
 		return (NULL);
 	}
+
+	rc_len = args->csa_referring_call_lists.csa_referring_call_lists_len;
+	rcl = args->csa_referring_call_lists.csa_referring_call_lists_val;
+	for (xx = 0; xx < rc_len; xx++, rcl++) {
+		if (cb_rcl_markslots(np, rcl))
+			*cb_racep = 1;
+	}
+
 	ret = slrc_slot_alloc(st, args->csa_slotid, args->csa_sequenceid,
 	    &cslot);
 	switch (ret) {
@@ -918,7 +957,7 @@ cb_notify_deviceid(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop,
 
 static void
 cb_recall(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
-    struct compound_state *cs, struct nfs4_callback_globals *ncg)
+    struct compound_state *cs, struct nfs4_callback_globals *ncg, int cb_race)
 {
 	CB_RECALL4args * args = &argop->nfs_cb_argop4_u.opcbrecall;
 	CB_RECALL4res *resp = &resop->nfs_cb_resop4_u.opcbrecall;
@@ -1008,8 +1047,18 @@ cb_recall(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
 	nfs4_server_rele(sp);
 
 	if (found == FALSE) {
-		CB_WARN("cb_recall: bad stateid\n");
-		*cs->statusp = resp->status = NFS4ERR_BAD_STATEID;
+		/*
+		 * If we know that there is a callback race in
+		 * progress, then return DELAY. The delegation
+		 * will be returned by the thread which
+		 * requested it.
+		 */
+		if (cb_race) {
+			*cs->statusp = resp->status = NFS4ERR_DELAY;
+		} else {
+			CB_WARN("cb_recall: bad stateid\n");
+			*cs->statusp = resp->status = NFS4ERR_BAD_STATEID;
+		}
 		return;
 	}
 
@@ -1129,6 +1178,7 @@ cb_compound(CB_COMPOUND4args *args, CB_COMPOUND4res *resp, struct svc_req *req,
 	CB_SEQUENCE4args *seq_args;
 	CB_COMPOUND4res *sbuf = NULL;
 	nfs4_server_t *np;
+	int cb_race = 0;
 
 	bzero(&cs, sizeof (cs));
 	cs.statusp = &resp->status;
@@ -1198,7 +1248,8 @@ cb_compound(CB_COMPOUND4args *args, CB_COMPOUND4res *resp, struct svc_req *req,
 				cb_illegal(argop, resop, req, &cs, ncg);
 				break;
 			}
-			sbuf = cb_sequence(argop, resop, req, &cs, ncg);
+			sbuf = cb_sequence(argop, resop, req, &cs, ncg,
+			    &cb_race);
 			if (*cs.statusp == NFS4_OK) {
 				sequenced = TRUE;
 			}
@@ -1229,7 +1280,7 @@ cb_compound(CB_COMPOUND4args *args, CB_COMPOUND4res *resp, struct svc_req *req,
 				    NFS4ERR_SEQUENCE_POS;
 				break;
 			}
-			cb_recall(argop, resop, req, &cs, ncg);
+			cb_recall(argop, resop, req, &cs, ncg, cb_race);
 			break;
 
 		case OP_CB_LAYOUTRECALL:
@@ -3088,7 +3139,7 @@ nfs4_delegation_accept(rnode4_t *rp, open_claim_type4 claim, OPEN4res *res,
 			else
 				dr_flags = NFS4_DR_PUSH|NFS4_DR_DISCARD;
 
-			nfs4_dlistadd(rp, ncg, dr_flags);
+			nfs4_dlistadd(rp, dr_flags);
 			dr_flags = 0;
 		} else {
 			/*
@@ -3223,11 +3274,14 @@ wait_for_recall(vnode_t *vp1, vnode_t *vp2, nfs4_op_hint_t op,
  * nfs4_dlistadd - Add this rnode to a list of rnodes to be
  * DELEGRETURN'd at the end of recovery.
  */
-
-static void
-nfs4_dlistadd(rnode4_t *rp, struct nfs4_callback_globals *ncg, int flags)
+void
+nfs4_dlistadd(rnode4_t *rp, int flags)
 {
 	struct nfs4_dnode *dp;
+	struct nfs4_callback_globals *ncg;
+
+	ncg = zone_getspecific(nfs4_callback_zone_key, nfs_zone());
+	ASSERT(ncg != NULL);
 
 	ASSERT(mutex_owned(&rp->r_statev4_lock));
 	/*

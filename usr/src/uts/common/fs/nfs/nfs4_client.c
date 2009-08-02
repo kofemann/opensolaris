@@ -4732,6 +4732,8 @@ nfs4_call_init(int ctag, nfs_opnum4 opnum, nfs4_op_hint_t ophint,
 	cp->nc_rfs4call_flags = 0;
 	cp->nc_cr = cr;
 	cp->nc_svp = NULL;
+	cp->nc_slot_srv = NULL;
+	cp->nc_slot_ent = NULL;
 	cp->nc_ds_servinfo = NULL;
 	cp->nc_ds_nfs4_srv = NULL;
 	cp->nc_count = 1;
@@ -4781,6 +4783,8 @@ nfs4_call_rele(nfs4_call_t *cp)
 		VN_RELE(cp->nc_vp2);
 	}
 
+	nfs4_call_slot_release(cp);
+
 	/* clean up contents of compound args/response list */
 	nfs4_call_opresfree(cp);
 	while (np = list_remove_head(&cp->nc_args.args)) {
@@ -4791,6 +4795,33 @@ nfs4_call_rele(nfs4_call_t *cp)
 	MI4_RELE(cp->nc_mi)
 
 	kmem_cache_free(nfs4_call_cache, cp);
+}
+
+void
+nfs4_call_slot_release(nfs4_call_t *cp)
+{
+	nfs4_server_t *np;
+	slot_ent_t *slot;
+
+	if (cp->nc_flags & NFS4_CALL_FLAG_SLOT_HELD) {
+		np = cp->nc_slot_srv;
+		slot = cp->nc_slot_ent;
+		ASSERT(np);
+		ASSERT(slot);
+
+		if (slot->se_state & SLOT_RECALLED)
+			cp->nc_flags |= NFS4_CALL_FLAG_SLOT_RECALLED;
+
+		if (cp->nc_flags & NFS4_CALL_FLAG_SLOT_INCR)
+			slot_incr_seq(slot, 1);
+		if ((slot->se_state & SLOT_ERROR) == 0)
+			slot_free(np->ssx.slot_table, slot);
+		nfs4_server_rele(np);
+
+		cp->nc_flags &= ~NFS4_CALL_FLAG_SLOT_HELD;
+		cp->nc_slot_srv = NULL;
+		cp->nc_slot_ent = NULL;
+	}
 }
 
 void

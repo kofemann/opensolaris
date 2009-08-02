@@ -452,10 +452,9 @@ slot_mark(stok_t *handle, slotid4 slid, sequenceid4 seqid)
 	ASSERT(handle != NULL);
 	mutex_enter(&handle->st_lock);
 
-
 	if (slid < 0 || slid >= handle->st_currw) {
 		mutex_exit(&handle->st_lock);
-		return (NULL);
+		return (0);
 	}
 
 	mutex_exit(&handle->st_lock);
@@ -467,12 +466,12 @@ slot_mark(stok_t *handle, slotid4 slid, sequenceid4 seqid)
 	 */
 	if ((slot->se_state & SLOT_FREE) ||
 	    (slot->se_state & SLOT_ERROR) ||
-	    (slot->se_seqid > seqid)) {
+	    (slot->se_seqid != seqid)) {
 		mutex_exit(&slot->se_lock);
 		return (0);
 	}
 
-	slot->se_state |= SLOT_HOLD;
+	slot->se_state |= SLOT_RECALLED;
 	mutex_exit(&slot->se_lock);
 	return (1);
 }

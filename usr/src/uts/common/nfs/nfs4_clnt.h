@@ -73,6 +73,7 @@ extern "C" {
 #define	RFS4CALL_SETCB	0x00000002
 #define	RFS4CALL_NOSEQ	0x00000004	/* Don't add sequence op (4.1+ only) */
 #define	RFS4CALL_FORCE	0x00000008	/* Force OTW, even if unmounted */
+#define	RFS4CALL_SHOLD	0x00000010	/* hold slot for caller  to release */
 
 #define	NFS4_TAG_SWAP		0x001
 #define	NFS4_TAG_DESTROY	0x002
@@ -2226,10 +2227,6 @@ extern char	*nfs4_stat_to_str(nfsstat4);
 extern char	*nfs4_op_to_str(nfs_opnum4);
 extern void	nfs4exchange_id_otw(mntinfo4_t *, servinfo4_t *, cred_t *,
 			nfs4_server_t *, nfs4_error_t *, int *);
-extern void	nfs4sequence_setup(nfs4_session_t *, COMPOUND4args_clnt *,
-			slot_ent_t **);
-extern void	nfs4sequence_fin(nfs4_session_t *, COMPOUND4res_clnt *,
-			slot_ent_t *, nfs4_error_t *);
 extern void	nfs4session_init(void);
 extern void	nfs4_pnfs_init_n4s(struct nfs4_server *);
 
@@ -2388,6 +2385,8 @@ typedef struct nfs4_call {
 	int		nc_rfs4call_flags;
 	cred_t		*nc_cr;
 	servinfo4_t	*nc_svp;
+	nfs4_server_t	*nc_slot_srv;
+	slot_ent_t	*nc_slot_ent;
 
 	/* new pnfs stuffs */
 	servinfo4_t	*nc_ds_servinfo;	/* NULL if call targets MDS */
@@ -2405,12 +2404,16 @@ typedef struct nfs4_call {
 #define	NFS4_CALL_FLAG_RESFREE		0x01	/* need to free nc_res */
 #define	NFS4_CALL_FLAG_SEQADDED		0x02	/* sequence op added */
 #define	NFS4_CALL_FLAG_RCV_DONTBLOCK	0x04	/* Don't block, return EAGAIN */
+#define	NFS4_CALL_FLAG_SLOT_HELD	0x08	/* slot is held */
+#define	NFS4_CALL_FLAG_SLOT_RECALLED	0x10	/* slot was recalled */
+#define	NFS4_CALL_FLAG_SLOT_INCR	0x20	/* increment slot seq */
 
 #ifdef _KERNEL
 extern nfs4_call_t *nfs4_call_init(int, nfs_opnum4, nfs4_op_hint_t, int,
     mntinfo4_t *, vnode_t *, vnode_t *, cred_t *);
 extern void nfs4_call_hold(nfs4_call_t *);
 extern void nfs4_call_rele(nfs4_call_t *);
+extern void nfs4_call_slot_release(nfs4_call_t *);
 extern void nfs4_call_opresfree(nfs4_call_t *);
 extern COMPOUND4node_clnt *nfs4_op_generic(nfs4_call_t *, nfs_opnum4);
 extern SEQUENCE4res *nfs4_op_sequence(nfs4_call_t *);
