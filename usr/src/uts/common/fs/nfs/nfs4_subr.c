@@ -1705,8 +1705,7 @@ rfs4call(nfs4_call_t *cp, nfs4_error_t *copy_ep)
 		 */
 		if (cp->nc_svp) {
 			mutex_enter(&nfs4_server_lst_lock);
-			np = find_nfs4_server_by_addr(&cp->nc_svp->sv_addr,
-			    cp->nc_svp->sv_knconf);
+			np = find_nfs4_server_by_servinfo4(cp->nc_svp);
 			if (np == NULL) {
 				/*
 				 * Very odd, probably means the caller has

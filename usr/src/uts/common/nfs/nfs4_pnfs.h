@@ -61,7 +61,7 @@ typedef struct {
 	servinfo4_t	*ds_curr_serv;
 } ds_info_t;
 
-typedef struct {
+typedef struct devnode {
 	/* key */
 	deviceid4	dn_devid;
 	avl_node_t	dn_avl;
@@ -76,8 +76,18 @@ typedef struct {
 	nfsv4_1_file_layout_ds_addr4 dn_ds_addrs;
 } devnode_t;
 
-#define	DN_GDI_INFLIGHT	1
-#define	DN_GDI_FAILED	2
+/*
+ * Definitions for dn_flags
+ *
+ * DN_GDI_INFLIGHT	GETDEVICEINFO is currently OTW
+ * DN_GDI_FAILED	GETDEVICEINFO has failed
+ * DN_ORPHAN		The devnode is orphaned from the tree
+ * DN_INSERTED		the devnode is inserted into the tree
+ */
+#define	DN_GDI_INFLIGHT	0x01
+#define	DN_GDI_FAILED	0x02
+#define	DN_ORPHAN	0x04
+#define	DN_INSERTED	0x08
 
 /*
  * GETDEVICE OTW and NO_OTW

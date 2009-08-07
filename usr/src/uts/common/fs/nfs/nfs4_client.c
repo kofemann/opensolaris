@@ -3232,11 +3232,15 @@ nfs4_client_cpr_callb(void *arg, int code)
 	return (B_TRUE);
 }
 
+#ifdef	DEBUG
+int nfs4_sequence_hbt_timeout = 0;
+#else
 /*
  * By default, the sequence heartbeat thread will wait 4
  * minutes before dying after the last ref goes away.
  */
 int nfs4_sequence_hbt_timeout = 4;
+#endif
 
 void
 nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
@@ -3376,6 +3380,14 @@ nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 	np->seqhb_flags &= ~NFS4_SEQHB_STARTED;
 	np->seqhb_flags &= ~NFS4_SEQHB_EXIT;
 	cv_signal(&np->ssx_wait);
+
+	/*
+	 * Release our ref on the device node, if there is one.
+	 * This would be the case if the nfs4_server exists only
+	 * to be a data server.  s_lock must be held.
+	 */
+	if (np->s_devnode)
+		pnfs_rele_device(np, np->s_devnode);
 	mutex_exit(&np->s_lock);
 
 	MI4_RELE(np->s_hb_mi);

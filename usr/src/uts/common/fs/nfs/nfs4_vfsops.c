@@ -4000,7 +4000,7 @@ find_nfs4_server_all(mntinfo4_t *mi, int all)
 
 /* ARGSUSED */
 nfs4_server_t *
-find_nfs4_server_by_addr(struct netbuf *nb, struct knetconfig *knc)
+find_nfs4_server_by_servinfo4(servinfo4_t *svp)
 {
 	nfs4_server_t *np;
 	zoneid_t zoneid = nfs_zoneid();
@@ -4011,8 +4011,8 @@ find_nfs4_server_by_addr(struct netbuf *nb, struct knetconfig *knc)
 		mutex_enter(&np->s_lock);
 
 		if (np->zoneid == zoneid &&
-		    np->saddr.len == nb->len &&
-		    bcmp(np->saddr.buf, nb->buf, np->saddr.len) == 0 &&
+		    np->saddr.len == svp->sv_addr.len &&
+		    bcmp(np->saddr.buf, svp->sv_addr.buf, np->saddr.len) == 0 &&
 		    (np->s_thread_exit != NFS4_THREAD_EXIT)) {
 			mutex_exit(&nfs4_server_lst_lock);
 			np->s_refcnt++;
@@ -4179,6 +4179,8 @@ void
 nfs4destroy_session(nfs4_server_t *np, mntinfo4_t *mi, servinfo4_t *svp,
     nfs4_error_t *ep, int flags)
 {
+	int held = 0;
+
 	mutex_enter(&np->s_lock);
 	/*
 	 * XXXrsb bandage: Will be removed with DS heartbeat changes
@@ -4202,6 +4204,7 @@ nfs4destroy_session(nfs4_server_t *np, mntinfo4_t *mi, servinfo4_t *svp,
 					np->seqhb_flags |=
 					    NFS4_SEQHB_DESTROY_INZONE;
 				np->s_refcnt++;
+				held = 1;
 				cv_broadcast(&np->cv_thread_exit);
 			}
 
@@ -4222,6 +4225,8 @@ nfs4destroy_session(nfs4_server_t *np, mntinfo4_t *mi, servinfo4_t *svp,
 		nfs4destroy_session_otw(mi, svp, np, ep);
 
 	nfs4session_teardown(mi, svp, np);
+	if (held)
+		nfs4_server_rele(np);
 }
 
 static void

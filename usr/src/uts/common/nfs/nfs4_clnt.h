@@ -1296,6 +1296,7 @@ typedef struct mntinfo4 {
  * s_recovlock > s_lock
  */
 struct nfs4_callback_globals;
+struct devnode;
 
 /*
  * The nfs4_fsidlt_t will be the structure inserted as a node onto
@@ -1377,6 +1378,7 @@ typedef struct nfs4_server {
 	avl_tree_t		s_devid_tree;	/* Device ID tree */
 	mntinfo4_t		*s_hb_mi;	/* mi held by hb thread */
 	servinfo4_t		*s_hb_svp;	/* servinfo4 for hb thread */
+	struct devnode 		*s_devnode;
 } nfs4_server_t;
 
 /* nfs4_server flags */
@@ -2029,8 +2031,7 @@ extern void		nfs4_cbconn_thread(nfs4_server_t *);
 extern nfs4_server_t	*find_nfs4_server(mntinfo4_t *);
 extern nfs4_server_t	*find_nfs4_server_nolock(mntinfo4_t *);
 extern nfs4_server_t	*find_nfs4_server_all(mntinfo4_t *, int all);
-extern nfs4_server_t	*find_nfs4_server_by_addr(struct netbuf *,
-				struct knetconfig *);
+extern nfs4_server_t	*find_nfs4_server_by_servinfo4(servinfo4_t *);
 extern nfs4_server_t	*new_nfs4_server(servinfo4_t *,	cred_t *);
 extern nfs4_server_t	*add_new_nfs4_server(servinfo4_t *, cred_t *);
 extern void		nfs4_mark_srv_dead(nfs4_server_t *, uint_t);
@@ -2229,6 +2230,7 @@ extern void	nfs4exchange_id_otw(mntinfo4_t *, servinfo4_t *, cred_t *,
 			nfs4_server_t *, nfs4_error_t *, int *);
 extern void	nfs4session_init(void);
 extern void	nfs4_pnfs_init_n4s(struct nfs4_server *);
+extern void	pnfs_rele_device(struct nfs4_server *, struct devnode *);
 
 extern void	nfs4_queue_event(nfs4_event_type_t, mntinfo4_t *, char *,
 		    uint_t, vnode_t *, vnode_t *, nfsstat4, char *, pid_t,

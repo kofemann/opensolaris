@@ -1560,8 +1560,7 @@ wait_for_ds_recovery(nfs4_call_t *cp, int noblock)
 	nfs4_server_t *np;
 
 	mutex_enter(&nfs4_server_lst_lock);
-	np = find_nfs4_server_by_addr(&cp->nc_ds_servinfo->sv_addr,
-	    cp->nc_ds_servinfo->sv_knconf);
+	np = find_nfs4_server_by_servinfo4(cp->nc_ds_servinfo);
 	if (np == NULL) {
 		mutex_exit(&nfs4_server_lst_lock);
 		/* what to do here? */
@@ -1741,9 +1740,7 @@ nfs4_recov_thread(recov_info_t *recovp)
 		if ((sp = cp->nc_ds_nfs4_srv) == NULL) {
 			mutex_enter(&nfs4_server_lst_lock);
 			/* This locks sp if it is found */
-			sp = find_nfs4_server_by_addr(
-			    &cp->nc_ds_servinfo->sv_addr,
-			    cp->nc_ds_servinfo->sv_knconf);
+			sp = find_nfs4_server_by_servinfo4(cp->nc_ds_servinfo);
 
 			if (sp == NULL) {
 				mutex_exit(&nfs4_server_lst_lock);

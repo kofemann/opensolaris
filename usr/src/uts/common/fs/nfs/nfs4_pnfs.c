@@ -490,47 +490,128 @@ nfs4_pnfs_init()
 }
 
 void
+pnfs_free_device(nfs4_server_t *np, devnode_t *dp)
+{
+	int i, ns;
+	servinfo4_t *svp;	/* for the data servers */
+
+	ASSERT(MUTEX_HELD(&np->s_lock));
+	ASSERT(dp->dn_count == 0);
+
+	if (dp->dn_flags & DN_INSERTED) {
+		dp->dn_flags &= ~DN_INSERTED;
+		avl_remove(&np->s_devid_tree, dp);
+	}
+
+	ns = dp->dn_ds_addrs.mpl_len;
+	if (ns > 0) {
+		xdr_free(xdr_nfsv4_1_file_layout_ds_addr4,
+		    (char *)&dp->dn_ds_addrs);
+		/*
+		 * Free the servinfo4 from the device.  This will
+		 * need to change when multiple servers are present
+		 * in the ds_servers list.
+		 */
+		for (i = 0; i < ns; i++)
+			if ((svp = dp->dn_server_list[i].ds_curr_serv) != NULL)
+				sv4_free(svp);
+
+		kmem_free(dp->dn_server_list, ns * sizeof (ds_info_t));
+	}
+	kmem_free(dp, sizeof (devnode_t));
+}
+
+/*
+ * pnfs_orphan_device - turn the device node into an orphan, meaning
+ * that is no longer in the device tree (and cannot be found again).
+ * This is used when the nfs4_server for an MDS is decommissioned, yet
+ * there is still an active reference, probably from a heartbeat thread.
+ * We prod the heartbeat thread to terminate, destroying the session
+ * and releasing the devnode, causing it to be freed.
+ */
+void
+pnfs_orphan_device(nfs4_server_t *np, devnode_t *dp)
+{
+	int i, ns;
+	servinfo4_t *svp;
+	nfs4_server_t *xp;
+	nfs4_error_t e;
+
+	ASSERT(MUTEX_HELD(&np->s_lock));
+	ASSERT(dp->dn_count > 0);
+
+	dp->dn_flags |= DN_ORPHAN;
+	/* Go ahead and remove it from the tree */
+	if (dp->dn_flags & DN_INSERTED) {
+		dp->dn_flags &= ~DN_INSERTED;
+		avl_remove(&np->s_devid_tree, dp);
+	}
+
+	ns = dp->dn_ds_addrs.mpl_len;
+	for (i = 0; i < ns; i++) {
+		if ((svp = dp->dn_server_list[i].ds_curr_serv) != NULL) {
+			mutex_exit(&np->s_lock);
+			mutex_enter(&nfs4_server_lst_lock);
+			if ((xp = find_nfs4_server_by_servinfo4(svp)) != NULL) {
+				if (xp->s_devnode == dp) {
+					mutex_exit(&xp->s_lock);
+					nfs4destroy_session(xp, xp->s_hb_mi,
+					    xp->s_hb_svp, &e,
+					    N4DS_TERMINATE_HB_THREAD |
+					    N4DS_DESTROY_INZONE);
+					/*
+					 * The current thread does not
+					 * have a reference on the mi, but
+					 * the HB thread does.  Using
+					 * INZONE lets the HB thread
+					 * clean up using its ref.
+					 */
+				} else
+					mutex_exit(&xp->s_lock);
+				nfs4_server_rele(xp);
+			} else
+				/* not found */
+				mutex_exit(&nfs4_server_lst_lock);
+
+			mutex_enter(&np->s_lock);
+		}
+	}
+}
+
+/*
+ * pnfs_trash_devtree - remove all of the device nodes and remove
+ * the device node tree from the nfs4_server_t.
+ */
+void
 pnfs_trash_devtree(nfs4_server_t *n4sp)
 {
 	devnode_t *dp;
 	void *cookie = NULL;
-	int ns;
-#ifdef	NOTYET
-	int i;
-	servinfo4_t *dssp;	/* for the data servers */
-#endif
 
-	/* The server structure is being decommissioned, no locking needed. */
-
+	mutex_enter(&n4sp->s_lock);
 	while ((dp = avl_destroy_nodes(&n4sp->s_devid_tree, &cookie)) != NULL) {
-		if (dp->dn_count > 0)
-			cmn_err(CE_WARN, "devnode count > 0");
+		/*
+		 * avl_destroy_nodes has removed the node from the
+		 * tree, so clear DN_INSERTED so that the destructor
+		 * doesn't do avl_remove.
+		 */
+		dp->dn_flags &= ~DN_INSERTED;
+		if (dp->dn_count == 0)
+			pnfs_free_device(n4sp, dp);
 		else {
-			ns = dp->dn_ds_addrs.mpl_len;
-			xdr_free(xdr_nfsv4_1_file_layout_ds_addr4,
-			    (char *)&dp->dn_ds_addrs);
 			/*
-			 * Free the servinfo4 from the device.  This will
-			 * need to change when multiple servers are present
-			 * in the list.
+			 * pnfs_orphan_device may need to drop s_lock,
+			 * so take a reference on the devnode to prevent
+			 * it from disappearing.
 			 */
-#ifdef	NOTYET
-			/*
-			 * XXX - The servinfo4 cannot be freed yet because
-			 * it is in use by the heartbeat thread.
-			 */
-			for (i = 0; i < ns; i++)
-				if ((dssp = dp->dn_server_list[i].ds_curr_serv)
-				    != NULL) {
-					sv4_free(dssp);
-				}
-#endif
-
-			kmem_free(dp->dn_server_list, ns * sizeof (ds_info_t));
-			kmem_free(dp, sizeof (devnode_t));
+			dp->dn_count++;
+			pnfs_orphan_device(n4sp, dp);
+			pnfs_rele_device(n4sp, dp);
 		}
 	}
+
 	avl_destroy(&n4sp->s_devid_tree);
+	mutex_exit(&n4sp->s_lock);
 }
 
 void
@@ -754,11 +835,10 @@ netaddr2netbuf(netaddr4 *nap, struct netbuf *nbp, struct knetconfig *kncp)
 }
 
 /*
- * Build a servinfo4 structure for the server described by IP address
- * in netbuf.  If necessary, make a new nfs4_server_t/servinfo4_t and
- * perform an Exchange ID and Create Session if needed.  On success,
- * return 0 and set *svpp to point to the servinfo4 we found or created.
- * Otherwise, return an error.
+ * Build a servinfo4 structure for the server described by a netaddr4.
+ * The caller is responsible for freeing the resulting servinfo4
+ * via sv4_free().  The new servinfo4 will inherit characteristics from
+ * the servinfo4 for the mi.
  */
 static int
 netaddr4_to_servinfo4(
@@ -769,10 +849,6 @@ netaddr4_to_servinfo4(
 	struct netbuf nb;
 	struct knetconfig knc;
 	servinfo4_t *svp;
-	nfs4_server_t *np;
-	nfs4_error_t e = {0, 0, 0};
-	int ri;
-	int error = 0;
 
 	if (nap == NULL || mi == NULL) {
 		return (EINVAL);
@@ -781,18 +857,38 @@ netaddr4_to_servinfo4(
 	if (netaddr2netbuf(nap, &nb, &knc)) {
 		return (EINVAL);
 	}
+	svp = new_servinfo4(mi, nap->na_r_addr, &knc, &nb, SV4_ISA_DS);
+	kmem_free(nb.buf, nb.maxlen);
+	*svpp = svp;
+	return (0);
+}
+
+/*
+ * nfs4_activate_server - Find and activate an nfs4_server for
+ * the data server described by a servinfo4.  If necessary, make a new
+ * nfs4_server and perform an Exchange ID and Create Session.  This will
+ * also cause a new heartbeat thread to be created and that thread will
+ * hold a reference on the devnode until it exits.
+ * On success, return 0; otherwise, return the error.
+ */
+static int
+nfs4_activate_server(mntinfo4_t *mi, nfs4_server_t *mdsp, servinfo4_t *svp,
+    devnode_t *dip)
+{
+	nfs4_server_t *np;
+	nfs4_error_t e = {0, 0, 0};
+	int ri;
 
 retry:
 	mutex_enter(&nfs4_server_lst_lock);
-	if ((np = find_nfs4_server_by_addr(&nb, &knc)) != NULL) {
+	if ((np = find_nfs4_server_by_servinfo4(svp)) != NULL) {
 		/*
-		 * N.B., find_nfs4_server_by_addr() drops the
+		 * N.B., find_nfs4_server_by_servinfo4() drops the
 		 * nfs4_server_lst_lock when it returns a match
 		 */
 		if (np->s_flags & N4S_EXID_FAILED) {
 			mutex_exit(&np->s_lock);
 			nfs4_server_rele(np);
-			kmem_free(nb.buf, nb.maxlen);
 			return (EIO);
 		}
 
@@ -803,31 +899,20 @@ retry:
 			nfs4_server_rele(np);
 			goto retry;
 		}
-
-		/*
-		 * XXXrsb - This will likely go away when ds_info_t
-		 * is implemented.
-		 */
-		if (np->s_ds_svp == NULL) {
-			svp = new_servinfo4(mi, nap->na_r_addr,
-			    &knc, &nb, SV4_ISA_DS);
-			np->s_ds_svp = svp;
-		} else
-			svp = np->s_ds_svp;
-
 		mutex_exit(&np->s_lock);
-		kmem_free(nb.buf, nb.maxlen);
-
-		*svpp = svp;
+		nfs4_server_rele(np);
 		return (0);
 	}
 
-	svp = new_servinfo4(mi, nap->na_r_addr, &knc, &nb, SV4_ISA_DS);
 	np = add_new_nfs4_server(svp, kcred);
-	np->s_ds_svp = svp;
-
+	ASSERT(np->s_devnode == NULL);
+	np->s_devnode = dip;
 	mutex_exit(&np->s_lock);
 	mutex_exit(&nfs4_server_lst_lock);
+
+	mutex_enter(&mdsp->s_lock);
+	dip->dn_count++;
+	mutex_exit(&mdsp->s_lock);
 
 	/*
 	 * XXXrsb - Either we should use start_op/end_op or
@@ -840,47 +925,53 @@ retry:
 
 	nfs_rw_exit(&mi->mi_recovlock);
 
-	/*
-	 * Drop the initial reference on the nfs4_server.  The
-	 * list still maintains a ref as well as the heartbeat
-	 * thread, started by nfs4exchange_id_otw et al.
-	 */
-	nfs4_server_rele(np);
-
 	if (e.error || e.stat) {
+		mutex_enter(&mdsp->s_lock);
+		pnfs_rele_device(mdsp, dip);
+		mutex_exit(&mdsp->s_lock);
+
 		mutex_enter(&np->s_lock);
 		np->s_flags |= N4S_EXID_FAILED;
 		cv_broadcast(&np->s_clientid_pend);
 		mutex_exit(&np->s_lock);
 		nfs4_server_rele(np);
 		cmn_err(CE_WARN,
-		    "netaddr4_to_servinfo4: exchange_id failed %d, %d",
+		    "nfs4_activate_server: exchange_id failed %d, %d",
 		    e.error, e.stat);
-		error = e.error ? e.error : geterrno4(e.stat);
+		if (e.error == 0)
+			e.error = geterrno4(e.stat);
 	} else {
 		/* All good, let's go home */
-		*svpp = svp;
+		nfs4_server_rele(np);
 	}
-
-	kmem_free(nb.buf, nb.maxlen);
-	return (error);
+	return (e.error);
 }
 
-static void
+void
 pnfs_rele_device(nfs4_server_t *np, devnode_t *dp)
 {
 	ASSERT(MUTEX_HELD(&np->s_lock));
 	ASSERT(dp->dn_count > 0);
 	dp->dn_count--;
+	if (dp->dn_count > 0)
+		return;
 	/*
 	 * No point in caching a failed getdeviceinfo.  Throw away
-	 * the devnode.  The devnode cannot have a server list or
-	 * xdr data since getdeviceinfo failed.
+	 * the devnode.
+	 *
+	 * If the device node is an orphan, then go ahead and
+	 * free it up.
 	 */
-	if (dp->dn_flags & DN_GDI_FAILED && dp->dn_count == 0) {
-		avl_remove(&np->s_devid_tree, dp);
-		kmem_free(dp, sizeof (*dp));
+	if (dp->dn_flags & DN_GDI_FAILED ||
+	    dp->dn_flags & DN_ORPHAN) {
+		pnfs_free_device(np, dp);
+		return;
 	}
+
+	/*
+	 * If neither DN_GDI_FAILED nor DN_ORPHAN is set, then
+	 * the devnode remains cached.
+	 */
 }
 
 static int
@@ -1115,15 +1206,26 @@ stripe_dev_prepare(
 	nap = &mpl_item->multipath_list4_val[0];
 
 	if ((svp = dip->dn_server_list[mpl_index].ds_curr_serv) == NULL) {
-		/*
-		 * Drop these locks since netaddr4_to_servinfo4()
-		 * may go OTW to do EXID/CR_SESS.
-		 */
+
 		mutex_exit(&mdsp->s_lock);
 		error = netaddr4_to_servinfo4(nap, mi, &svp);
-		mutex_enter(&mdsp->s_lock);
 
 		if (error) {
+			mutex_enter(&mdsp->s_lock);
+			pnfs_rele_device(mdsp, dip);
+			nfs4_server_rele_lockt(mdsp);
+			return (error);
+		}
+
+		/*
+		 * Activate the data server associated with
+		 * svp, possibly doing EXID & CR_SESS.
+		 */
+		error = nfs4_activate_server(mi, mdsp, svp, dip);
+
+		mutex_enter(&mdsp->s_lock);
+		if (error) {
+			sv4_free(svp);
 			pnfs_rele_device(mdsp, dip);
 			nfs4_server_rele_lockt(mdsp);
 			return (error);
@@ -1139,6 +1241,7 @@ stripe_dev_prepare(
 			 * current server value.
 			 *
 			 */
+			sv4_free(svp);
 			svp = dip->dn_server_list[mpl_index].ds_curr_serv;
 		}
 	}
@@ -1580,20 +1683,21 @@ pnfs_populate_device(devnode_t *dp, device_addr4 *da)
 	return (0);
 }
 
-/*ARGSUSED*/
 static devnode_t *
-pnfs_create_device(nfs4_server_t *n4sp, deviceid4 devid, avl_index_t where)
+pnfs_create_device(nfs4_server_t *np, deviceid4 devid, avl_index_t where)
 {
-	devnode_t *new;
+	devnode_t *dp;
 
-	new = kmem_zalloc(sizeof (devnode_t), KM_SLEEP);
-	DEV_ASSIGN(new->dn_devid, devid);
-	new->dn_count = 1;
-	cv_init(new->dn_cv, NULL, CV_DEFAULT, NULL);
+	ASSERT(MUTEX_HELD(&np->s_lock));
+	dp = kmem_zalloc(sizeof (devnode_t), KM_SLEEP);
+	DEV_ASSIGN(dp->dn_devid, devid);
+	dp->dn_count = 1;
+	cv_init(dp->dn_cv, NULL, CV_DEFAULT, NULL);
 
 	/* insert the new devid into the tree */
-	avl_insert(&n4sp->s_devid_tree, new, where);
-	return (new);
+	avl_insert(&np->s_devid_tree, dp, where);
+	dp->dn_flags |= DN_INSERTED;
+	return (dp);
 }
 
 #define	GDIresok	GETDEVICEINFO4res_u.gdir_resok4
