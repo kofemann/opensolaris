@@ -24,38 +24,44 @@
  * Use is subject to license terms.
  */
 
-#ifndef	_DAEMON_UTILS_H
-#define	_DAEMON_UTILS_H
+#ifndef _SPE_IMPL_H
+#define	_SPE_IMPL_H
 
-#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/types.h>
+
+#include <nfs/mds_state.h>
+
+/*
+ * This is a private header file.  Applications should not directly include
+ * this file.
+ */
 
 #ifdef	__cplusplus
 extern "C" {
 #endif
 
-#define	AUTOMOUNTD	"svc:/system/filesystem/autofs:default"
-#define	LOCKD		"svc:/network/nfs/nlockmgr:default"
-#define	STATD		"svc:/network/nfs/status:default"
-#define	NFSD		"svc:/network/nfs/server:default"
-#define	MOUNTD		"svc:/network/nfs/mountd:default"
-#define	NFS4CBD		"svc:/network/nfs/cbd:default"
-#define	NFSMAPID	"svc:/network/nfs/mapid:default"
-#define	RQUOTAD		"svc:/network/nfs/rquota:default"
-#define	SPED		"svc:/network/nfs/spe:default"
+/*
+ *  Ask the Policy engine to allocate the pool mds_sids; stripe count
+ *  and unit size.
+ */
+extern int nfs41_spe_allocate(vattr_t *, struct netbuf *, char *,
+    layout_core_t *, int);
 
-#define	DAEMON_UID	 1
-#define	DAEMON_GID	12
+/*
+ * Given a dataset name, get the mds sid
+ */
+extern int (*nfs41_spe_path2mds_sid)(utf8string *, mds_sid *);
+extern int mds_ds_path_to_mds_sid(utf8string *, mds_sid *);
 
-#define	DAEMON_DIR	"/var/run/daemon"
-#define	DAEMON_DIR_MODE	(S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH)
-
-extern void _check_services(char **);
-extern int _check_daemon_lock(const char *);
-extern int _create_daemon_lock(const char *, uid_t, gid_t);
-extern pid_t _enter_daemon_lock(const char *);
+/*
+ * Stop and start routines for the kspe.
+ */
+extern void nfs41_spe_fini(void);
+extern void nfs41_spe_init(void);
 
 #ifdef	__cplusplus
 }
 #endif
 
-#endif	/* _DAEMON_UTILS_H */
+#endif /* _SPE_IMPL_H */

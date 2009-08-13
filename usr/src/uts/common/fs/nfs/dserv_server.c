@@ -314,28 +314,20 @@ dserv_nnode_compare(const void *va, const void *vb)
 	const dserv_nnode_key_t *b = vb;
 	int rc;
 
+	NFS_AVL_COMPARE(a->dnk_sid->len, b->dnk_sid->len);
+	rc = memcmp(a->dnk_sid->val, b->dnk_sid->val, a->dnk_sid->len);
+	NFS_AVL_RETURN(rc);
+
 	NFS_AVL_COMPARE(a->dnk_fid->len, b->dnk_fid->len);
-	rc = memcmp(a->dnk_fid->val, b->dnk_fid->val,
-	    a->dnk_fid->len);
+	rc = memcmp(a->dnk_fid->val, b->dnk_fid->val, a->dnk_fid->len);
 	NFS_AVL_RETURN(rc);
 
 	return (0);
 }
 
 /*
- * Frees a data server file handle
- */
-static void
-free_ds_fh(mds_ds_fh *fhp)
-{
-	kmem_free(fhp->fh.v1.mds_sid.val, fhp->fh.v1.mds_sid.len);
-
-	kmem_free(fhp, sizeof (*fhp));
-}
-
-/*
  * Allocates memory for dest_fh and copies source_fh into it.  Caller is
- * responsible for freeing memory allocated (using copy_ds_fh()).
+ * responsible for freeing memory allocated (using free_mds_ds_fh()).
  *
  * Function will return 0 on success and non-zero on failure.
  */
@@ -379,20 +371,27 @@ out:
 static nnode_error_t
 dserv_nnode_build(nnode_seed_t *seed, void *vfh)
 {
-	mds_ds_fh *fh = vfh;
+	mds_ds_fh *fhp = vfh;
 	dserv_nnode_key_t *key = NULL;
 	nnode_error_t rc = 0;
 	dserv_nnode_data_t *data = NULL;
 	dserv_nnode_state_t *state = NULL;
 
 	key = kmem_cache_alloc(dserv_nnode_key_cache, KM_SLEEP);
-	key->dnk_real_fid.len = fh->fh.v1.mds_fid.len;
-	bcopy(fh->fh.v1.mds_fid.val, key->dnk_real_fid.val,
+	key->dnk_real_fid.len = fhp->fh.v1.mds_fid.len;
+	bcopy(fhp->fh.v1.mds_fid.val, key->dnk_real_fid.val,
 	    key->dnk_real_fid.len);
+	key->dnk_sid = kmem_alloc(sizeof (mds_sid), KM_SLEEP);
+	key->dnk_sid->len = fhp->fh.v1.mds_sid.len;
+	key->dnk_sid->val = kmem_alloc(key->dnk_sid->len,
+	    KM_SLEEP);
+
+	bcopy(fhp->fh.v1.mds_sid.val, key->dnk_sid->val,
+	    key->dnk_sid->len);
 
 	data = dserv_nnode_data_alloc();
 	data->dnd_fid = key->dnk_fid;
-	rc = copy_ds_fh(fh, &data->dnd_fh);
+	rc = copy_ds_fh(fhp, &data->dnd_fh);
 	if (rc)
 		goto out;
 
@@ -403,7 +402,7 @@ dserv_nnode_build(nnode_seed_t *seed, void *vfh)
 	seed->ns_data = data;
 
 	state = dserv_nnode_state_alloc();
-	rc = copy_ds_fh(fh, &state->fh);
+	rc = copy_ds_fh(fhp, &state->fh);
 	if (rc)
 		goto out;
 
@@ -426,9 +425,12 @@ out:
 static nnode_error_t
 dserv_nnode_from_fh_ds(nnode_t **npp, mds_ds_fh *fhp)
 {
-	dserv_nnode_key_t dskey;
-	nnode_key_t key;
-	uint32_t hash;
+	dserv_nnode_key_t	dskey;
+
+	nnode_key_t	key;
+	uint32_t	hash;
+
+	nnode_error_t	ne;
 
 	if (fhp->vers < 1)
 		return (ESTALE); /* XXX badhandle */
@@ -436,8 +438,15 @@ dserv_nnode_from_fh_ds(nnode_t **npp, mds_ds_fh *fhp)
 		return (ESTALE);
 	if (fhp->fh.v1.mds_fid.len > DS_MAXFIDSZ)
 		return (ESTALE);
-	/* XXX cannot do sid until mds_sid is sane */
-	dskey.dnk_sid = NULL;
+
+	dskey.dnk_sid = kmem_alloc(sizeof (mds_sid), KM_SLEEP);
+	dskey.dnk_sid->len = fhp->fh.v1.mds_sid.len;
+	dskey.dnk_sid->val = kmem_alloc(dskey.dnk_sid->len,
+	    KM_SLEEP);
+
+	bcopy(fhp->fh.v1.mds_sid.val, dskey.dnk_sid->val,
+	    dskey.dnk_sid->len);
+
 	dskey.dnk_fid = &fhp->fh.v1.mds_fid;
 
 	hash = dserv_nnode_hash(&dskey);
@@ -445,7 +454,12 @@ dserv_nnode_from_fh_ds(nnode_t **npp, mds_ds_fh *fhp)
 	key.nk_keydata = &dskey;
 	key.nk_compare = dserv_nnode_compare;
 
-	return (nnode_find_or_create(npp, &key, hash, fhp, dserv_nnode_build));
+	ne = nnode_find_or_create(npp, &key, hash, fhp, dserv_nnode_build);
+
+	kmem_free(dskey.dnk_sid->val, dskey.dnk_sid->len);
+	kmem_free(dskey.dnk_sid, sizeof (mds_sid));
+
+	return (ne);
 }
 
 static void
@@ -542,12 +556,14 @@ static int
 find_open_root_objset(dserv_mds_instance_t *inst, mds_sid mds_sid,
     open_root_objset_t **root_objset)
 {
-#if 0
 	int found_root_objset = 0;
-	mds_sid_map_t *tmp_sid;
 	int found_mds_sid = 0;
+
 	dserv_guid_t ds_guid;
-#endif
+
+	mds_sid_map_t		*sid_map;
+	open_root_objset_t	*poro;
+
 	ASSERT(MUTEX_HELD(&inst->dmi_content_lock));
 
 	/*
@@ -559,26 +575,33 @@ find_open_root_objset(dserv_mds_instance_t *inst, mds_sid mds_sid,
 		return (ENOENT);
 	}
 
-	*root_objset = list_head(&inst->dmi_datasets);
-	return (0);
-#if 0
-/*
- * This portion of the code will be put in when:
- * 1. the data server populates its MDS SID to DS_GUID map
- * (in memory (mds_sid_map_t) and on disk).
- * 2. the MDS is embedding the appropriate MDS SIDs in its file handle.
- */
+	/*
+	 * XXX: This portion of the code will be put in when:
+	 * 1. the data server populates its MDS SID to DS_GUID map
+	 * (in memory (mds_sid_map_t) and on disk).
+	 *
+	 * Not yet done.
+	 *
+	 * 2. the MDS is embedding the appropriate MDS SIDs in
+	 * its file handle.
+	 *
+	 * Done in the sense that the MDS SID is the dataset info
+	 * sent in the DS_REPORTAVAIL...
+	 */
+
 	/*
 	 * Use the MDS SID (from the file handle) to find the real data
 	 * server guid (zpool guid + id of the root pNFS object set).
 	 */
-	for (tmp_sid = list_head(&inst->dmi_mds_sids); tmp_sid != NULL;
-	    tmp_sid = list_next(&inst->dmi_mds_sids, tmp_sid)) {
-		if ((mds_sid.len == tmp_sid->msm_mds_storid.len) &&
-		    (memcmp(mds_sid.val, tmp_sid->msm_mds_storid.val,
-		    tmp_sid->msm_mds_storid.len) == 0)) {
+	sid_map = list_head(&inst->dmi_mds_sids);
+
+	for (sid_map = list_head(&inst->dmi_mds_sids); sid_map != NULL;
+	    sid_map = list_next(&inst->dmi_mds_sids, sid_map)) {
+		if ((mds_sid.len == sid_map->msm_mds_storid.len) &&
+		    (memcmp(mds_sid.val, sid_map->msm_mds_storid.val,
+		    sid_map->msm_mds_storid.len) == 0)) {
 			found_mds_sid = 1;
-			ds_guid = tmp_sid->msm_ds_guid;
+			ds_guid = sid_map->msm_ds_guid;
 			break;
 		}
 	}
@@ -596,15 +619,17 @@ find_open_root_objset(dserv_mds_instance_t *inst, mds_sid mds_sid,
 	/*
 	 * Find the root pNFS object set.
 	 */
-	for (tmp_root = list_head(&inst->dmi_datasets); tmp_root != NULL;
-	    tmp_root = list_next(&inst->dmi_datasets, tmp_root)) {
+	for (poro = list_head(&inst->dmi_datasets);
+	    poro != NULL;
+	    poro = list_next(&inst->dmi_datasets, poro)) {
 		if (ds_guid.dg_zpool_guid ==
-		    tmp_root->oro_ds_guid.dg_zpool_guid &&
+		    poro->oro_ds_guid.dg_zpool_guid &&
 		    ds_guid.dg_objset_guid ==
-		    tmp_root->oro_ds_guid.dg_objset_guid) {
+		    poro->oro_ds_guid.dg_objset_guid) {
 			/*
 			 * This is our root pNFS object set!
 			 */
+			*root_objset = poro;
 			found_root_objset = 1;
 			break;
 		}
@@ -614,7 +639,6 @@ find_open_root_objset(dserv_mds_instance_t *inst, mds_sid mds_sid,
 		return (ENOENT);
 
 	return (0);
-#endif
 }
 
 /*
@@ -962,7 +986,7 @@ dserv_nnode_data_free(void *vdnd)
 	}
 
 	if (dnd->dnd_fh != NULL)
-		free_ds_fh(dnd->dnd_fh);
+		free_mds_ds_fh(dnd->dnd_fh);
 
 	dnd->dnd_flags = 0;
 	dnd->dnd_fh = NULL;
@@ -979,6 +1003,7 @@ dserv_nnode_state_alloc(void)
 	dserv_nnode_state_t *dns;
 	dns = kmem_cache_alloc(dserv_nnode_state_cache, KM_SLEEP);
 	dns->fh = NULL;
+
 	return (dns);
 }
 
@@ -986,9 +1011,10 @@ static void
 dserv_nnode_state_free(void *dstate)
 {
 	dserv_nnode_state_t *dns = dstate;
-	if (dns->fh != NULL) {
-		free_ds_fh(dns->fh);
-	}
+
+	if (dns->fh != NULL)
+		free_mds_ds_fh(dns->fh);
+
 	kmem_cache_free(dserv_nnode_state_cache, dns);
 }
 
@@ -998,6 +1024,7 @@ dserv_nnode_key_construct(void *vdnk, void *foo, int bar)
 {
 	dserv_nnode_key_t *key = vdnk;
 
+	key->dnk_sid = NULL;
 	key->dnk_fid = &key->dnk_real_fid;
 
 	return (0);
@@ -1006,6 +1033,13 @@ dserv_nnode_key_construct(void *vdnk, void *foo, int bar)
 static void
 dserv_nnode_key_free(void *dnk)
 {
+	dserv_nnode_key_t *key = dnk;
+
+	if (key->dnk_sid) {
+		kmem_free(key->dnk_sid->val, key->dnk_sid->len);
+		kmem_free(key->dnk_sid, sizeof (mds_sid));
+	}
+
 	kmem_cache_free(dserv_nnode_key_cache, dnk);
 }
 
@@ -1204,7 +1238,7 @@ ds_read(DS_READargs *argp, DS_READres *resp, struct svc_req *req)
 		return;
 	}
 	nerr = nnode_from_fh_ds(&nn, ds_fh);
-	kmem_free(ds_fh, sizeof (mds_ds_fh));
+	free_mds_ds_fh(ds_fh);
 
 	switch (nerr) {
 	case 0:
@@ -1376,7 +1410,7 @@ ctl_mds_srv_remove(CTL_MDS_REMOVEargs *argp, CTL_MDS_REMOVEres *resp,
 			if (nn != NULL)
 				nnode_rele(&nn);
 			nerr = nnode_from_fh_ds(&nn, ds_fh);
-			kmem_free(ds_fh, sizeof (mds_ds_fh));
+			free_mds_ds_fh(ds_fh);
 
 			switch (nerr) {
 			case 0: /* Success */
@@ -1538,7 +1572,7 @@ ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
 		return;
 	}
 	nerr = nnode_from_fh_ds(&nn, ds_fh);
-	kmem_free(ds_fh, sizeof (mds_ds_fh));
+	free_mds_ds_fh(ds_fh);
 
 	switch (nerr) {
 	case 0:

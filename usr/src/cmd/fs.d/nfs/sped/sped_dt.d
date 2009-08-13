@@ -23,41 +23,12 @@
  * Use is subject to license terms.
  */
 
-%#include <nfs/nfs4.h>
-%#include <nfs/mds_odl.h> 
-%#include <nfs/ds_filehandle.h>
-
-
-const MAX_MDS_SID = 16;
-
-struct odl_t {
-	uint32_t	start_idx;
-	uint32_t	unit_size;
-	uint64_t        offset;
-	uint64_t        length;
-	mds_sid         sid<MAX_MDS_SID>;       
+provider sped {
+	probe daemon__domain(string);
 };
 
-enum odl_layout_type {
-	PNFS = 0,
-	LUSTRE = 1
-};
-
-enum odl_pnfs_lo_vers {
-     VERS_1 = 1
-};
-
-union odl_lo switch (odl_pnfs_lo_vers odl_vers) {
-case VERS_1:
-	odl_t odl_content<>;
-default:
-	void;
-};
-
-union odl switch (odl_layout_type odl_type) {
-case PNFS:
-	odl_lo	odl_pnfs;
-default:
-	void;
-};
-
+#pragma D attributes Private/Private/Common provider sped provider
+#pragma D attributes Private/Private/Common provider sped module
+#pragma D attributes Private/Private/Common provider sped function
+#pragma D attributes Private/Private/Common provider sped name
+#pragma D attributes Private/Private/Common provider sped args

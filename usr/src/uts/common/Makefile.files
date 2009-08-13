@@ -1115,7 +1115,8 @@ NFS_OBJS +=	nfs_client.o		\
 		nfs4_pnfs.o		\
 		nfs41_filehandle_xdr.o	\
 		ds_filehandle_xdr.o	\
-		nfs41_slrc.o
+		nfs41_slrc.o		\
+		spe.o
 
 NFSSRV_OBJS +=	nfs_server.o		\
 		nfs_srv.o		\

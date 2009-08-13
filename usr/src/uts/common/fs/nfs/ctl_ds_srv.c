@@ -39,10 +39,11 @@
 #include <nfs/mds_state.h>
 #include <nfs/nfssys.h>
 #include <nfs/ds.h>
+#include <nfs/spe_impl.h>
 #include <sys/utsname.h>
 #include <sys/systeminfo.h>
 
-extern int inet_pton(int, const char *, void *);
+extern int inet_pton(int, char *, void *);
 
 rfs4_client_t *mds_findclient(nfs_client_id4 *, bool_t *, rfs4_client_t *);
 
@@ -192,10 +193,10 @@ ds_reportavail_free(DS_REPORTAVAILres *resp)
 			/* Free the mds_sid_content */
 			kmem_free(sid_array[j].val,
 			    sid_array[j].len);
-
-			/* Free the mds_sid */
-			kmem_free(&sid_array[j], sizeof (mds_sid));
 		}
+
+		/* Free the mds_sid */
+		kmem_free(sid_array, sid_array_len * sizeof (mds_sid));
 	}
 
 	/* Free the guid_map */
@@ -212,8 +213,8 @@ nullfree(void)
 mds_ds_fh *
 get_mds_ds_fh(nfs_fh4 *otw_fh)
 {
-	XDR x;
-	mds_ds_fh *fh;
+	XDR		x;
+	mds_ds_fh	*fh;
 
 	xdrmem_create(&x, otw_fh->nfs_fh4_val,
 	    otw_fh->nfs_fh4_len, XDR_DECODE);
@@ -221,7 +222,7 @@ get_mds_ds_fh(nfs_fh4 *otw_fh)
 	fh = kmem_zalloc(sizeof (mds_ds_fh), KM_SLEEP);
 
 	if (!xdr_ds_fh_fmt(&x, fh)) {
-		kmem_free(fh, sizeof (mds_ds_fh));
+		free_mds_ds_fh(fh);
 		return (NULL);
 	}
 	return (fh);
@@ -363,9 +364,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	nnode_t *np;
 	clientid4 clientid;
 	vnode_t *vp;
-#ifdef PERSIST_LO_ENABLED
 	rfs4_file_t *fp;
-#endif
 
 	bzero(resp, sizeof (*resp));
 
@@ -380,9 +379,8 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	/*
 	 * Sanity check. Ensure that we are dealing with a DS file handle.
 	 */
-	if (dfhp->type != FH41_TYPE_DMU_DS ||
-	    dfhp->vers != DS_FH_v1) {
-		kmem_free(dfhp, sizeof (mds_ds_fh));
+	if (dfhp->type != FH41_TYPE_DMU_DS || dfhp->vers != DS_FH_v1) {
+		free_mds_ds_fh(dfhp);
 		resp->status = DSERR_BADHANDLE;
 		return;
 	}
@@ -392,7 +390,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 * check_stateid.
 	 */
 	vp = ds_fhtovp(dfhp, &resp->status);
-	kmem_free(dfhp, sizeof (mds_ds_fh));
+	free_mds_ds_fh(dfhp);
 
 	/*
 	 * We steal the reference from VFS_VGET in ds_fhtovp, so do not need to
@@ -452,7 +450,6 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	 */
 	get_access_mode(cs, resp);
 
-#ifdef PERSIST_LO_ENABLED
 	deleg = FALSE;	/* ugly reuse */
 	fp = rfs4_findfile(cs->instp, vp, NULL, &deleg);
 	if (fp != NULL) {
@@ -474,9 +471,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 	} else {
 		resp->status = DSERR_SERVERFAULT;
 	}
-#else
-	resp->status = DS_OK;
-#endif
+
 	/*
 	 * XXX: Todo List
 	 * Validate security flavor.
@@ -521,7 +516,7 @@ void
 mds_ds_rebooted(ds_owner_t *dop)
 {
 	/*
-	 * clean up MDSs' DS state held or something!
+	 * XXX: clean up MDSs' DS state held or something!
 	 */
 }
 
@@ -645,48 +640,35 @@ ds_get_remote_uaddr(struct svc_req *rp, char *buf, int with_port)
 }
 
 /* ARGSUSED */
-int
-mds_rpt_avail_update(ds_owner_t *dp,
-		DS_REPORTAVAILargs *argp,
-		DS_REPORTAVAILres *resp)
-{
-	printf("DS_REPORTAVAIL: Update\n");
-
-	return (0);
-}
-
-/* ARGSUSED */
 ds_guid_info_t *
 ds_guid_info_add(ds_owner_t *dop, struct ds_storinfo *si)
 {
-	pinfo_create_t pic_arg;
-	ds_guid_info_t *pgi;
+	pinfo_create_t	pic_arg;
+	ds_guid_info_t	*pgi;
+
+	bool_t	create = FALSE;
 
 	pic_arg.ds_owner = dop;
 	pic_arg.si = si;
 
 	rw_enter(&mds_server->ds_guid_info_lock, RW_WRITER);
-	if ((pgi = (ds_guid_info_t *)rfs4_dbcreate(
+	pgi = (ds_guid_info_t *)rfs4_dbsearch(
 	    mds_server->ds_guid_info_idx,
-	    (void *)&pic_arg)) == NULL) {
-		rw_exit(&mds_server->ds_guid_info_lock);
-		return (NULL);
+	    (void *)&si->ds_storinfo_u.zfs_info.guid_map.ds_guid,
+	    &create, (void *)&pic_arg, RFS4_DBS_VALID);
+
+	/*
+	 * Get rid of the old one.
+	 */
+	if (pgi) {
+		rfs4_dbe_rele(pgi->dbe);
+		rfs4_dbe_invalidate(pgi->dbe);
 	}
-	rw_exit(&mds_server->ds_guid_info_lock);
 
-	return (pgi);
-}
+	pgi = (ds_guid_info_t *)rfs4_dbcreate(
+	    mds_server->ds_guid_info_idx,
+	    (void *)&pic_arg);
 
-ds_guid_info_t *
-mds_find_ds_guid_info_by_id(ds_guid_t guid)
-{
-	ds_guid_info_t *pgi;
-	bool_t create = FALSE;
-
-	rw_enter(&mds_server->ds_guid_info_lock, RW_READER);
-	pgi = (ds_guid_info_t *)rfs4_dbsearch(mds_server->ds_guid_info_idx,
-	    (void *)&guid,
-	    &create, NULL, RFS4_DBS_VALID);
 	rw_exit(&mds_server->ds_guid_info_lock);
 
 	return (pgi);
@@ -740,7 +722,7 @@ mds_find_ds_owner(DS_EXIBIargs *args, bool_t *create)
 	 * using the data-server identity string find
 	 * the ds_owner structure
 	 */
-	rw_enter(&mds_server->ds_owner_lock, RW_READER);
+	rw_enter(&mds_server->ds_owner_lock, RW_WRITER);
 	dop = (ds_owner_t *)rfs4_dbsearch(mds_server->ds_owner_inst_idx,
 	    (void *)args->ds_ident.instance.instance_val,
 	    create, (void *)args, RFS4_DBS_VALID);
@@ -889,15 +871,35 @@ void
 mds_ds_addrlist_update(ds_owner_t *dop, struct ds_addr *dap)
 {
 	struct mds_adddev_args darg;
-	bool_t create = FALSE;
-	ds_addrlist_t *dp;
+	bool_t		create = FALSE;
+	ds_addrlist_t	*dp;
+	ds_addrlist_t	dp_map;
+
+	int		af;
+
+	dp_map.dev_addr.na_r_addr = dap->addr.na_r_addr;
+	dp_map.dev_addr.na_r_netid = dap->addr.na_r_netid;
+	if (strcmp(dp_map.dev_addr.na_r_netid, "tcp") == 0) {
+		af = AF_INET;
+	} else if (strcmp(dp_map.dev_addr.na_r_netid, "tcp6") == 0) {
+		af = AF_INET6;
+	} else {
+		return;
+	}
+
+	mds_ds_address_to_key(&dp_map, af);
+
+	rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
 
 	/* search for existing entry */
-	rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
-	if ((dp = (ds_addrlist_t *)rfs4_dbsearch(
-	    mds_server->ds_addrlist_uaddr_idx,
-	    (void *)dap->addr.na_r_addr,
-	    &create, NULL, RFS4_DBS_VALID)) != NULL) {
+	dp = (ds_addrlist_t *)rfs4_dbsearch(
+	    mds_server->ds_addrlist_addrkey_idx,
+	    (void *)&dp_map.ds_addr_key,
+	    &create, NULL, RFS4_DBS_VALID);
+	if (dp != NULL) {
+		/*
+		 * XXX: Check to see that we are on the same port.
+		 */
 		goto done;
 	}
 
@@ -927,32 +929,56 @@ done:
 	rfs4_dbe_rele(dp->dbe);
 }
 
-ds_status
-mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
-    DS_REPORTAVAILres  *resp)
+/* ARGSUSED */
+void
+ds_reportavail(DS_REPORTAVAILargs *argp, DS_REPORTAVAILres *resp,
+	struct svc_req *rqstp)
 {
-	int i, count;
-	ds_guid_info_t *pgi;
-	struct ds_guid_map *guid_map;
-	DS_REPORTAVAILresok *res_ok;
-	XDR xdr;
-	int xdr_size;
-	char *xdr_buffer;
-	ds_addr *addrp;
+	ds_owner_t	*dop;
 
-	ds_status dsrc = DS_OK;
+	int	i, j;
+	int	count;
+
+	ds_guid_info_t		*pgi;
+	struct ds_guid_map	*guid_map;
+	DS_REPORTAVAILresok	*res_ok;
+
+	ds_addr	*dap;
+
+	mds_sid_content	sid_content;
+
+	mds_sid		*sid_array;
+	uint32_t	sid_array_len;
+
+	/*
+	 * data-server has no id so no soup for you.
+	 */
+	if (argp->ds_id == 0) {
+		resp->status = DSERR_INVAL;
+		return;
+	}
+
+	dop = mds_find_ds_owner_by_id(argp->ds_id);
+	if (dop == NULL) {
+		resp->status = DSERR_NOT_AUTH;
+		return;
+	}
+
+	/*
+	 * ToDo: Check the verifier (args->ds_verifier).
+	 */
 
 	/*
 	 * First deal with the universal addresses
 	 */
 	for (i = 0; i < argp->ds_addrs.ds_addrs_len; i++) {
-		addrp = &argp->ds_addrs.ds_addrs_val[i];
+		dap = &argp->ds_addrs.ds_addrs_val[i];
 
 		/*
 		 * Create the entry and link it into the
 		 * ds_owner's list of addrlist entries.
 		 */
-		mds_ds_addrlist_update(dop, addrp);
+		mds_ds_addrlist_update(dop, dap);
 	}
 
 	res_ok = &(resp->DS_REPORTAVAILres_u.res_ok);
@@ -978,13 +1004,17 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 
 	count = 0;
 	for (i = 0; i < argp->ds_storinfo.ds_storinfo_len; i++) {
-		mds_sid *sid;
-		mds_sid_content sid_content;
-
+		/*
+		 * Note: If we find an pre-existing entry, we
+		 * will delete it and create a new one.
+		 * If there is then an error, then the old
+		 * entry will still be unavailable.
+		 */
 		pgi = ds_guid_info_add(dop,
 		    &argp->ds_storinfo.ds_storinfo_val[i]);
-		if (pgi == NULL)
+		if (pgi == NULL) {
 			continue;
+		}
 
 		/* Data Server GUIDs */
 		/* Only supported type is ZFS */
@@ -997,38 +1027,36 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 		/*
 		 * MDS SIDs: these would come from the mds_mapzap,
 		 * but for now we just reuse the ds_guid
+		 *
+		 * Note that whatever is used as the MDS SID
+		 * can not just be the ZFS id for the root fileset
+		 * as a mds could have multiple root filesets...
 		 */
 		bcopy(pgi->ds_guid.ds_guid_u.zfsguid.zfsguid_val,
 		    &sid_content, sizeof (sid_content));
 
-		xdr_size = xdr_sizeof(xdr_mds_sid_content,
-		    &sid_content);
-		ASSERT(xdr_size);
-
-		xdr_buffer = kmem_alloc(xdr_size, KM_SLEEP);
-		xdrmem_create(&xdr, xdr_buffer, xdr_size, XDR_ENCODE);
-
-		if (xdr_mds_sid_content(&xdr, &sid_content) == FALSE) {
-			kmem_free(xdr_buffer, xdr_size);
-
-			list_remove(&pgi->ds_owner->ds_guid_list, pgi);
-			rfs4_dbe_rele(pgi->ds_owner->dbe);
-
-			rfs4_dbe_invalidate(pgi->dbe);
-			dsrc = DSERR_XDR;
-			goto cleanup;
-		}
-
-		sid = kmem_alloc(sizeof (mds_sid), KM_SLEEP);
-		sid->len = xdr_size;
-		sid->val = xdr_buffer;
-
 		/*
 		 * There is only one MDS SID associated with this
 		 * DS GUID
+		 *
+		 * XXX: But as we move a dataset to a new DS,
+		 * we might have multiple MDS SIDs.
 		 */
-		guid_map[count].mds_sid_array.mds_sid_array_len = 1;
-		guid_map[count].mds_sid_array.mds_sid_array_val = sid;
+		guid_map[count].mds_sid_array.mds_sid_array_len =
+		    sid_array_len = 1;
+		guid_map[count].mds_sid_array.mds_sid_array_val =
+		    sid_array =
+		    kmem_zalloc(sid_array_len * sizeof (mds_sid),
+		    KM_SLEEP);
+
+		/*
+		 * Note, since we stuff the xdr_buffer into the
+		 * sid_array, we never explicitly free it by name!
+		 */
+		sid_array[0].len = pgi->ds_guid.ds_guid_u.zfsguid.zfsguid_len;
+		sid_array[0].val = kmem_alloc(sid_array[0].len, KM_SLEEP);
+		bcopy(pgi->ds_guid.ds_guid_u.zfsguid.zfsguid_val,
+		    sid_array[0].val, sid_array[0].len);
 		count++;
 
 		rfs4_dbe_rele(pgi->dbe);
@@ -1037,6 +1065,14 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 	if (count) {
 		res_ok->guid_map.guid_map_len = count;
 		res_ok->guid_map.guid_map_val = guid_map;
+
+		/*
+		 * XXX: Once we finish kspe with the SMF work,
+		 * we will end up pulling this out!
+		 */
+		rw_enter(&mds_server->ds_guid_info_lock, RW_WRITER);
+		mds_server->ds_guid_info_count += count;
+		rw_exit(&mds_server->ds_guid_info_lock);
 	} else {
 		res_ok->guid_map.guid_map_len = 0;
 		res_ok->guid_map.guid_map_val = NULL;
@@ -1048,22 +1084,27 @@ mds_rpt_avail_add(ds_owner_t *dop, DS_REPORTAVAILargs *argp,
 	if (nfs_ds_present == 0)
 		nfs_ds_present = 1;
 
-	return (dsrc);
+	rfs4_dbe_rele(dop->dbe);   /* search */
+
+	resp->status = DS_OK;
+
+	return;
 
 cleanup:
 
 	for (i = 0; i < count; i++) {
-		pgi = mds_find_ds_guid_info_by_id(guid_map[i].ds_guid);
+		sid_array = guid_map[i].mds_sid_array.mds_sid_array_val;
+		sid_array_len = guid_map[i].mds_sid_array.mds_sid_array_len;
+
+		pgi = mds_find_ds_guid_info_by_id(&guid_map[i].ds_guid);
 		if (pgi != NULL) {
-			mds_sid *sid;
+			for (j = 0; j < sid_array_len; j++) {
+				kmem_free(sid_array[j].val,
+				    sid_array[j].len);
+			}
 
-			/*
-			 * These is only one MDS SID, right?
-			 */
-			sid = guid_map[i].mds_sid_array.mds_sid_array_val;
-			kmem_free(sid->val, sid->len);
-
-			kmem_free(sid, sizeof (mds_sid));
+			kmem_free(sid_array,
+			    sid_array_len * sizeof (mds_sid));
 
 			rfs4_dbe_rele(pgi->dbe);   /* search */
 
@@ -1077,53 +1118,6 @@ cleanup:
 	kmem_free(guid_map, sizeof (struct ds_guid_map) *
 	    argp->ds_storinfo.ds_storinfo_len);
 
-	return (dsrc);
-}
-
-/* ARGSUSED */
-void
-ds_reportavail(DS_REPORTAVAILargs *argp, DS_REPORTAVAILres *resp,
-	struct svc_req *rqstp)
-{
-	ds_owner_t *dop;
-	ds_status stat;
-
-	/*
-	 * data-server has no id so no soup for you.
-	 */
-	if (argp->ds_id == 0) {
-		resp->status = DSERR_INVAL;
-		return;
-	}
-
-	dop = mds_find_ds_owner_by_id(argp->ds_id);
-	if (dop == NULL) {
-		resp->status = DSERR_NOT_AUTH;
-		return;
-	}
-
-	/*
-	 * ToDo: Check the verifier (args->ds_verifier).
-	 *
-	 * This is currently a NOP since a DS can only
-	 * send a DS_REPORTAVAIL after a reboot, which
-	 * means a DS_EXIBI, which means that this list
-	 * is always NULL.
-	 *
-	 * If we ever do go down the mds_rpt_avail_update()
-	 * path, we will need to be careful on accounting
-	 * for that hold we just did in the
-	 * mds_find_ds_owner_by_id(). I.e., if we overwrite
-	 * an entry, we need to do a rele. If we replace
-	 * an entry, then it should just work.
-	 */
-	if (list_head(&dop->ds_addrlist_list) == NULL)
-		stat = mds_rpt_avail_add(dop, argp, resp);
-	else
-		stat = mds_rpt_avail_update(dop, argp, resp);
-
-	resp->status = stat;
-
 	rfs4_dbe_rele(dop->dbe);   /* search */
 }
 
@@ -1136,7 +1130,12 @@ ds_reportavail(DS_REPORTAVAILargs *argp, DS_REPORTAVAILres *resp,
 void
 ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 {
+	/*
+	 * XXX: This will go away with the SMF work!
+	 */
 	extern void mds_nuke_layout(nfs_server_instance_t *, uint32_t);
+
+	int	lo_id;
 
 	ds_owner_t *dop;
 	ds_addrlist_t *dp;
@@ -1163,49 +1162,54 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 	}
 
 	/*
-	 * If the find found the ds_owner we need to do some clean up.
-	 *
-	 * XXX: The following appears suboptimal. The reboot should be  assumed
-	 * only if the verifier is different. If the verifier is the same, then
-	 * we should do nothing. This is the case when another DS_EXIBI has
-	 * come in, which is a repeat of the previous DS_EXIBI. The key changes
-	 * need to happen in the DS_REPORTAVAIL processing, in ds_reportavail,
-	 * where, if the arguments are deemed duplicate, then they should not be
-	 * added to the device list. The following makes sense only if the
-	 * ds_reportavail has no support for eliminating duplicates.
+	 * We found a match, now we need to see if it is the same
+	 * instance as before!
 	 */
 	if (do_create == FALSE) {
 		/*
-		 * XXXXXX Needs rework XXXXXXX
-		 *
-		 * pre-existing ds_owner, for now just
-		 * trash existing devices, assume data-server
-		 * reboot and remove default layout...
+		 * Only if the verifiers differ should we assume
+		 * a reboot.
 		 */
+		if (argp->ds_ident.boot_verifier != dop->verifier) {
+			/* brute force it */
+			DTRACE_PROBE(nfssrv__i__dscp_freeing_device_entries);
+			rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
+			while (dp = list_head(&dop->ds_addrlist_list)) {
+				list_remove(&dop->ds_addrlist_list, dp);
+				dp->ds_owner = NULL;
+				rfs4_dbe_rele(dop->dbe);
+				rfs4_dbe_invalidate(dp->dbe);
+			}
+			rw_exit(&mds_server->ds_addrlist_lock);
 
-		/* brute force it */
-		DTRACE_PROBE(nfssrv__i__dscp_freeing_device_entries);
-		rw_enter(&mds_server->ds_addrlist_lock, RW_WRITER);
-		while (dp = list_head(&dop->ds_addrlist_list)) {
-			list_remove(&dop->ds_addrlist_list, dp);
-			dp->ds_owner = NULL;
-			rfs4_dbe_rele(dop->dbe);
-			rfs4_dbe_invalidate(dp->dbe);
-		}
-		rw_exit(&mds_server->ds_addrlist_lock);
+			rw_enter(&mds_server->ds_guid_info_lock, RW_WRITER);
+			while (pgi = list_head(&dop->ds_guid_list)) {
+				list_remove(&dop->ds_guid_list, pgi);
 
-		rw_enter(&mds_server->ds_guid_info_lock, RW_WRITER);
-		while (pgi = list_head(&dop->ds_guid_list)) {
-			list_remove(&dop->ds_guid_list, pgi);
-			pgi->ds_owner = NULL;
-			rfs4_dbe_rele(dop->dbe);
-			rfs4_dbe_invalidate(pgi->dbe);
+				/*
+				 * XXX: Hack alert!
+				 */
+				ASSERT(mds_server->ds_guid_info_count > 0);
+				mds_server->ds_guid_info_count--;
+
+				pgi->ds_owner = NULL;
+				rfs4_dbe_rele(dop->dbe);
+				rfs4_dbe_invalidate(pgi->dbe);
+			}
+			rw_exit(&mds_server->ds_guid_info_lock);
 		}
-		rw_exit(&mds_server->ds_guid_info_lock);
+
+		/*
+		 * XXX: This stuff needs to give way to something
+		 * smarter.
+		 */
+		rw_enter(&mds_server->mds_layout_lock, RW_WRITER);
+		lo_id = mds_server->mds_layout_default_idx;
+		mds_server->mds_layout_default_idx = 0;
+		rw_exit(&mds_server->mds_layout_lock);
+
+		mds_nuke_layout(mds_server, lo_id);
 	}
-
-	/* Again, needs rework */
-	mds_nuke_layout(mds_server, 1);
 
 	/*
 	 * XXXX: This would be a good place to notice the
@@ -1227,7 +1231,7 @@ ds_exchange(DS_EXIBIargs *argp, DS_EXIBIres *resp, struct svc_req *rqstp)
 	dser->mds_boot_verifier = mds_server->Write4verf;
 	dser->mds_lease_period = mds_server->lease_period;
 
-	rfs4_dbe_rele(dop->dbe);   /* create */
+	rfs4_dbe_rele(dop->dbe);   /* create/search */
 }
 
 void

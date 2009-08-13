@@ -53,7 +53,8 @@ enum nfssys_op	{ OLD_NFS_SVC, OLD_ASYNC_DAEMON, EXPORTFS, OLD_NFS_GETFH,
     NFSCMD_ARGS, MDS_RECALL_LAYOUT, MDS_NOTIFY_DEVICE,
     NFS_INIT_STATESTORE, NFS_FINI_STATESTORE, NFSSTAT_LAYOUT,
     DSERV_DATASET_INFO, DSERV_SETPORT, DSERV_SETMDS, DSERV_REPORTAVAIL,
-    DSERV_DATASET_PROPS, DSERV_INSTANCE_SHUTDOWN, DSERV_SVC
+    DSERV_DATASET_PROPS, DSERV_INSTANCE_SHUTDOWN, DSERV_SVC,
+    NFS_SPE
 };
 
 struct nfs_svc_args {
@@ -298,7 +299,6 @@ typedef struct dserv_svc_args {
 		struct sockaddr_in	sin;
 		struct sockaddr_in6	sin6;
 	} sin;
-
 } dserv_svc_args_t;
 
 typedef struct dserv_setport_args {
@@ -307,24 +307,9 @@ typedef struct dserv_setport_args {
 	char dsa_name[MAXPATHLEN];
 } dserv_setport_args_t;
 
-
 /*
- * These structure are still used by the MDS as part of its layout
- * and device construction, but are never passed through nfssys.
+ * XXX: Description?
  */
-struct mds_addlo_args {
-	int loid;
-	int lo_stripe_unit;
-	int lo_devs[100];
-};
-
-struct mds_adddev_args {
-	int	dev_id;
-	char	*dev_netid;
-	char	*dev_addr;
-	char	*ds_addr;
-};
-
 struct mds_notifydev_args {
 	int	dev_id;
 	int	notify_how;
@@ -354,6 +339,35 @@ struct nfsidmap_args {
 #define	NFSL_RENAME	0x02		/* Rename buffer(s) */
 #define	NFSL_SYNC	0x04		/* Perform operation synchronously? */
 
+typedef enum nfsspe_op {
+	SPE_OP_SET_DOOR,
+	SPE_OP_POLICY_POPULATE,
+	SPE_OP_POLICY_NUKE,
+	SPE_OP_POLICY_ADD,
+	SPE_OP_POLICY_DELETE,
+	SPE_OP_NPOOL_POPULATE,
+	SPE_OP_NPOOL_NUKE,
+	SPE_OP_NPOOL_ADD,
+	SPE_OP_NPOOL_DELETE,
+	SPE_OP_SCHEDULE
+} nfsspe_op_t;
+
+struct nfsspe_args {
+	nfsspe_op_t	nsa_opcode;	/* operation discriminator */
+	uint_t		nsa_did;	/* Door id to upcall */
+	char		*nsa_xdr;	/* XDR data */
+	size_t		nsa_xdr_len;	/* Size of XDR data */
+};
+
+#ifdef _SYSCALL32
+struct nfsspe_args32 {
+	nfsspe_op_t	nsa_opcode;	/* operation discriminator */
+	uint32_t	nsa_did;	/* Door id to upcall */
+	caddr32_t	nsa_xdr;	/* XDR data */
+	size32_t	nsa_xdr_len;	/* Size of XDR data */
+};
+#endif
+
 #ifdef _KERNEL
 union nfssysargs {
 	struct exportfs_args	*exportfs_args_u;	/* exportfs args */
@@ -367,6 +381,7 @@ union nfssysargs {
 	struct svcpool_args	*svcpool_args_u;	/* svcpool args */
 	struct nfs4clrst_args   *nfs4clrst_u;		/* nfs4 clear state */
 	struct nfsidmap_args	*nfsidmap_u;		/* nfsidmap */
+	struct nfsspe_args	*nfsspe_u;		/* nfsspe */
 	struct mds_adddev_args  *adddev_u;
 	dserv_dataset_props_t	*ds_dset_props;		/* dataset props */
 };
@@ -385,6 +400,7 @@ struct nfssysa {
 #define	nfssysarg_svcpool	arg.svcpool_args_u
 #define	nfssysarg_nfs4clrst	arg.nfs4clrst_u
 #define	nfssysarg_nfsidmap	arg.nfsidmap_u
+#define	nfssysarg_nfsspe	arg.nfsspe_u
 
 #ifdef _SYSCALL32
 union nfssysargs32 {
@@ -504,6 +520,7 @@ extern int	nfs4_svc(struct nfs4_svc_args *, model_t);
 extern int 	rdma_start(struct rdma_svc_args *);
 extern void	rfs4_clear_client_state(struct nfs4clrst_args *);
 extern void	nfs_idmap_args(struct nfsidmap_args *);
+extern void	nfs41_spe_svc(void *);
 extern void	nfs4_ephemeral_set_mount_to(uint_t);
 extern void	mountd_args(uint_t);
 extern void (*rfs4_client_clrst)(struct nfs4clrst_args *);

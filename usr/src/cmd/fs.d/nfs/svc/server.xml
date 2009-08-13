@@ -66,6 +66,13 @@
 		<service_fmri value='svc:/network/nfs/mapid' />
 	</dependency>
 
+	<dependency name='spe'
+	    grouping='optional_all'
+	    restart_on='error'
+	    type='service'>
+		<service_fmri value='svc:/network/nfs/spe' />
+	</dependency>
+
 	<dependency name='rpcbind'
 	    grouping='require_all'
 	    restart_on='restart'

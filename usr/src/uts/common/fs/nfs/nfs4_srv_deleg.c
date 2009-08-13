@@ -2095,7 +2095,6 @@ rfs4_check_delegated(int mode, vnode_t *vp, bool_t trunc, bool_t do_delay,
 		    (nsip->deleg_policy != SRV_NEVER_DELEGATE)) {
 
 			fp = rfs4_findfile(nsip, vp, NULL, &create);
-
 			if (fp != NULL) {
 				if (rfs4_check_delegated_byfp(nsip, mode, fp,
 				    trunc, do_delay, is_rm, cp))

@@ -70,11 +70,14 @@ HDRS=	export.h		\
 	nnode_impl.h		\
 	nnode_vn.h		\
 	nnode_proxy.h		\
+	spe.h			\
+	spe_attr.h		\
+	spe_impl.h		\
 	dserv_impl.h
 
 
 PROTOCOL_DIR = $(SRC)/head/rpcsvc
-DERIVED_FILES = ds_prot.h ds_nfs_xdr.h mds_odl.h
+DERIVED_FILES = ds_prot.h ds_nfs_xdr.h mds_odl.h spe_prot.h
 
 CLEANFILES += $(DERIVED_FILES)
 
@@ -119,3 +122,6 @@ mds_odl.h: $(PROTOCOL_DIR)/mds_odl.x
 ds_nfs_xdr.h: $(PROTOCOL_DIR)/ds_nfs_com.x
 	$(RPCGEN) -C -h $(PROTOCOL_DIR)/ds_nfs_com.x | \
 	egrep 'bool_t xdr_.+\(XDR \*\, ' >$@ 
+
+spe_prot.h: $(PROTOCOL_DIR)/spe_prot.x
+	$(RPCGEN) -C -h $(PROTOCOL_DIR)/spe_prot.x >$@

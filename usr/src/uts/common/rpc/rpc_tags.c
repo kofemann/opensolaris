@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -79,7 +79,9 @@ void
 rpc_init_taglist(void **xlst)
 {
 	rpc_xprt_taglist_t *xptlst;
+
 	xptlst = kmem_zalloc(sizeof (rpc_xprt_taglist_t), KM_SLEEP);
+
 	mutex_init(&xptlst->rxtl_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&xptlst->rxtl_cv, NULL, CV_DEFAULT, NULL);
 	list_create(&xptlst->rxtl_list, sizeof (rpc_xprt_tag_t),
@@ -91,11 +93,14 @@ void
 rpc_destroy_taglist(void **xlst)
 {
 	rpc_xprt_taglist_t *xptlst;
+
 	xptlst = (rpc_xprt_taglist_t *)*xlst;
 	mutex_destroy(&xptlst->rxtl_lock);
 	cv_destroy(&xptlst->rxtl_cv);
 	ASSERT(list_is_empty(&xptlst->rxtl_list));
 	list_destroy(&xptlst->rxtl_list);
+
+	kmem_free(xptlst, sizeof (rpc_xprt_taglist_t));
 	*xlst = NULL;
 }
 

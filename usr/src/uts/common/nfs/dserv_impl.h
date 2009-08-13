@@ -121,10 +121,9 @@ typedef struct dserv_nnode_data_phys {
  */
 
 typedef struct {
-	mds_sid_content *dnk_sid;
-	nfs41_fid_t *dnk_fid;
-
-	nfs41_fid_t dnk_real_fid;
+	mds_sid		*dnk_sid;
+	nfs41_fid_t	*dnk_fid;
+	nfs41_fid_t	dnk_real_fid;
 } dserv_nnode_key_t;
 
 typedef struct dserv_nnode_data {

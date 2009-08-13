@@ -449,6 +449,10 @@ f none usr/include/nfs/nnode_proxy.h 644 root bin
 f none usr/include/nfs/nnode_vn.h 644 root bin
 f none usr/include/nfs/rnode.h 644 root bin
 f none usr/include/nfs/rnode4.h 644 root bin
+f none usr/include/nfs/spe.h 644 root bin
+f none usr/include/nfs/spe_impl.h 644 root bin
+f none usr/include/nfs/spe_attr.h 644 root bin
+f none usr/include/nfs/spe_prot.h 644 root bin
 f none usr/include/nfs/dserv_impl.h 644 root bin
 f none usr/include/nl_types.h 644 root bin
 f none usr/include/nlist.h 644 root bin
@@ -601,6 +605,8 @@ f none usr/include/rpcsvc/sm_inter.h 644 root bin
 f none usr/include/rpcsvc/sm_inter.x 644 root bin
 f none usr/include/rpcsvc/nsm_addr.h 644 root bin
 f none usr/include/rpcsvc/nsm_addr.x 644 root bin
+f none usr/include/rpcsvc/spe_prot.h 644 root bin
+f none usr/include/rpcsvc/spe_prot.x 644 root bin
 f none usr/include/rpcsvc/spray.h 644 root bin
 f none usr/include/rpcsvc/spray.x 644 root bin
 f none usr/include/rpcsvc/ufs_prot.h 644 root bin

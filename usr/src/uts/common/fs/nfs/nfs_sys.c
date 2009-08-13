@@ -58,7 +58,6 @@
 void (*rfs4_client_clrst)(struct nfs4clrst_args *) = NULL;
 
 /* Temp: used by mdsadm */
-void (*mds_addlo)(struct mds_addlo_args *) = NULL;
 int (*mds_recall_lo)(struct mds_reclo_args *, cred_t *) = NULL;
 int (*mds_notify_device)(struct mds_notifydev_args *, cred_t *) = NULL;
 
@@ -130,7 +129,7 @@ nfssys(enum nfssys_op opcode, void *arg)
 		struct nfs_state_init_args nsi_args;
 		STRUCT_DECL(nfs_state_init_args, ua);
 
-		if (mds_addlo == NULL) {
+		if (mds_recall_lo == NULL) {
 			printf(":-P .. NFS server is not loaded\n");
 			break;
 		}
@@ -160,7 +159,7 @@ nfssys(enum nfssys_op opcode, void *arg)
 		struct nfs_state_init_args nsi_args;
 		STRUCT_DECL(nfs_state_init_args, ua);
 
-		if (mds_addlo == NULL) {
+		if (mds_recall_lo == NULL) {
 			printf(":-P .. NFS server is not loaded\n");
 			break;
 		}
@@ -191,6 +190,9 @@ nfssys(enum nfssys_op opcode, void *arg)
 		int buf[2] = {0, 0};
 		XDR xdrs;
 
+		if (mds_recall_lo == NULL)
+			return (set_errno(ENOTSUP));
+
 		if (copyin(arg, (char *)buf, sizeof (buf)))
 			return (set_errno(EFAULT));
 
@@ -217,6 +219,9 @@ nfssys(enum nfssys_op opcode, void *arg)
 
 	case MDS_NOTIFY_DEVICE: {
 		struct mds_notifydev_args dargs;
+
+		if (mds_notify_device == NULL)
+			return (set_errno(ENOTSUP));
 
 		if (copyin(arg, (char *)&dargs, sizeof (dargs)))
 			return (set_errno(EFAULT));
@@ -458,6 +463,12 @@ nfssys(enum nfssys_op opcode, void *arg)
 			return (set_errno(EFAULT));
 
 		nfs_idmap_args(&idm);
+		error = 0;
+		break;
+	}
+
+	case NFS_SPE: {
+		nfs41_spe_svc(arg);
 		error = 0;
 		break;
 	}

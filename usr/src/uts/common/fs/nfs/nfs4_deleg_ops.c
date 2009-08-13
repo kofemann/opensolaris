@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -36,6 +36,7 @@
 #include <sys/time.h>
 #include <sys/fem.h>
 #include <sys/cmn_err.h>
+#include <sys/sdt.h>
 
 
 /*
@@ -64,10 +65,23 @@ recall_read_delegations(
 	rfs4_file_t *fp,
 	caller_context_t *ct)
 {
-	int i, cnt, j;
-	clock_t rc;
-	rfs4_file_t **fpa, *fap;
-	nfs_server_instance_t *instp;
+	int	i;
+	int	cnt;
+	int	active = -1;
+
+	clock_t	rc;
+
+	rfs4_file_t	**fpa;
+
+	nfs_server_instance_t	*instp;
+
+	/*
+	 * Put a hold on this 'fp' such that it will be treated
+	 * the same as the rest of the array!
+	 */
+	rfs4_dbe_lock(fp->dbe);
+	rfs4_dbe_hold(fp->dbe);
+	rfs4_dbe_unlock(fp->dbe);
 
 	/*
 	 * More than one instance could have given out read delegations to this
@@ -78,37 +92,44 @@ recall_read_delegations(
 	rfs4_recall_deleg(fp, FALSE, NULL);
 
 	/*
-	 * is there more than one file structure for this vp?
-	 * get the vsd for each instance of the server, if it exists.
+	 * Is there more than one file structure for this vp?
+	 * Get the vsd for each instance of the server, if it exists.
 	 */
-	fpa = kmem_alloc((sizeof (rfs4_file_t *) * nsi_count), KM_SLEEP);
+	fpa = kmem_zalloc((sizeof (rfs4_file_t *) * nsi_count), KM_SLEEP);
+
 	fpa[0] = fp;
 	cnt = 1;
 	mutex_enter(&vp->v_lock);
 	for (instp = list_head(&nsi_head); instp != NULL;
 	    instp = list_next(&nsi_head, &instp->nsi_list)) {
-		fpa[cnt] = (rfs4_file_t *)vsd_get(vp, instp->vkey);
-		if (fpa[cnt] && (fpa[cnt] != fp))
-			cnt++;
+		rfs4_file_t	*temp;
+
+		temp = (rfs4_file_t *)vsd_get(vp, instp->vkey);
+		if (temp && (temp != fp)) {
+			ASSERT(cnt < nsi_count);
+			fpa[cnt++] = temp;
+		}
 	}
 	mutex_exit(&vp->v_lock);
+
+	ASSERT(cnt <= nsi_count);
 
 	/*
 	 * 'cnt' now equals the number of instances that have a file struct
 	 * for this file.  Now check if it is a valid file and if it has
 	 * a delegation.  If so, send a recall.
 	 */
-	for (j = 1; j < cnt; j++) {
-		rfs4_dbe_lock(fpa[j]->dbe);
-		if (fpa[j]->dinfo->dtype == OPEN_DELEGATE_NONE ||
-		    rfs4_dbe_is_invalid(fpa[j]->dbe) ||
-		    (rfs4_dbe_refcnt(fpa[j]->dbe) == 0)) {
-			rfs4_dbe_unlock(fpa[j]->dbe);
-			fpa[j] = NULL;
+	for (i = 1; i < cnt; i++) {
+		rfs4_dbe_lock(fpa[i]->dbe);
+		if (fpa[i]->dinfo->dtype == OPEN_DELEGATE_NONE ||
+		    rfs4_dbe_is_invalid(fpa[i]->dbe) ||
+		    (rfs4_dbe_refcnt(fpa[i]->dbe) == 0)) {
+			rfs4_dbe_unlock(fpa[i]->dbe);
+			fpa[i] = NULL;
 		} else {
-			rfs4_dbe_hold(fpa[j]->dbe);
-			rfs4_dbe_unlock(fpa[j]->dbe);
-			rfs4_recall_deleg(fpa[j], FALSE, NULL);
+			rfs4_dbe_hold(fpa[i]->dbe);
+			rfs4_dbe_unlock(fpa[i]->dbe);
+			rfs4_recall_deleg(fpa[i], FALSE, NULL);
 		}
 	}
 
@@ -119,44 +140,73 @@ recall_read_delegations(
 	 * Check to see if the delegations have been returned already.
 	 * If so, then we are done, return success.
 	 */
-	for (j = 0; j < cnt; j++) {
-		fap = fpa[j];
-		if (fap != NULL) {
-			rfs4_dbe_lock(fap->dbe);
-			if (fap->dinfo->dtype != OPEN_DELEGATE_NONE)
+	for (i = 0; i < cnt; i++) {
+		if (fpa[i] != NULL) {
+			rfs4_dbe_lock(fpa[i]->dbe);
+			if (fpa[i]->dinfo->dtype != OPEN_DELEGATE_NONE) {
+				active = i;
 				break;
-			rfs4_dbe_unlock(fap->dbe);
+			}
+			rfs4_dbe_rele_nolock(fpa[i]->dbe);
+			rfs4_dbe_unlock(fpa[i]->dbe);
+			fpa[i] = NULL;	/* this one is done */
 		}
 	}
 
-	if (j == cnt)
+	if (i == cnt) {
+		kmem_free(fpa, sizeof (rfs4_file_t *) * nsi_count);
 		return (0);
+	}
 
 	/*
-	 * Not all delegations have been returned yet.  Check the caller
-	 * context to see if we should wait for their return, or just
-	 * return now with an error.
+	 * Not all delegations have been returned yet.
+	 * fpa[active] is the first file which is undone.
+	 * Check the caller context to see if we should wait
+	 * for their return, or just return now with an error.
 	 */
 	if (ct && ct->cc_flags & CC_DONTBLOCK) {
-		rfs4_dbe_unlock(fap->dbe);
+		ASSERT(fpa[active] != NULL);
+		rfs4_dbe_unlock(fpa[active]->dbe);
 		ct->cc_flags |= CC_WOULDBLOCK;
+
+		/*
+		 * Go through the remaining items and
+		 * release the hold we put on them for the
+		 * fpa array!
+		 */
+		for (i = active; i < cnt; i++) {
+			if (fpa[i] != NULL) {
+				rfs4_file_rele(fpa[i]);
+			}
+		}
+
+		kmem_free(fpa, sizeof (rfs4_file_t *) * nsi_count);
 		return (NFS4ERR_DELAY);
 	}
 
-	/* let the waiting begin (note: fap is still locked from above) */
+	/*
+	 * Let the waiting begin.
+	 *
+	 * Note, if this is the first time through,
+	 * then fpa[active] is locked from above. If this is a
+	 * jump from below, then fpa[active] is still locked.
+	 */
 wait:
-	while (fap->dinfo->dtype != OPEN_DELEGATE_NONE) {
-		rc = rfs4_dbe_twait(fap->dbe,
-		    lbolt + SEC_TO_TICK(dbe_to_instp(fap->dbe)->lease_period));
+	ASSERT(fpa[active] != NULL);
+	while (fpa[active]->dinfo->dtype != OPEN_DELEGATE_NONE) {
+		rc = rfs4_dbe_twait(fpa[active]->dbe,
+		    lbolt +
+		    SEC_TO_TICK(dbe_to_instp(fpa[active]->dbe)->lease_period));
 		if (rc == -1) { /* timed out */
-			rfs4_dbe_unlock(fap->dbe);
-			rfs4_recall_deleg(fap, FALSE, NULL);
-			rfs4_dbe_lock(fap->dbe);
+			rfs4_dbe_unlock(fpa[active]->dbe);
+			rfs4_recall_deleg(fpa[active], FALSE, NULL);
+			rfs4_dbe_lock(fpa[active]->dbe);
+
 			/*
 			 * Send recalls to any other instance's clients who
 			 * haven't returned their delegation yet.
 			 */
-			for (i = j + 1; j < cnt; i++) {
+			for (i = active + 1; i < cnt; i++) {
 				if (fpa[i] == NULL)
 					continue;
 				rfs4_dbe_lock(fpa[i]->dbe);
@@ -165,28 +215,38 @@ wait:
 					rfs4_dbe_unlock(fpa[i]->dbe);
 					rfs4_recall_deleg(fpa[i], FALSE, NULL);
 				} else {
+					rfs4_file_rele(fpa[i]);
 					rfs4_dbe_unlock(fpa[i]->dbe);
 					fpa[i] = NULL;	/* this one is done */
 				}
 			}
 		}
 	}
-	rfs4_dbe_unlock(fap->dbe);
+	rfs4_dbe_rele_nolock(fpa[active]->dbe);
+	rfs4_dbe_unlock(fpa[active]->dbe);
+	fpa[active] = NULL;
 
 	/* have they all completed returning the delegations? */
-	for (i = j + 1; j < cnt; i++) {
+	for (i = active + 1; i < cnt; i++) {
 		if (fpa[i] == NULL)
 			continue;
+
+		/*
+		 * We found one which was not done, so lock it
+		 * and start waiting again!
+		 */
 		rfs4_dbe_lock(fpa[i]->dbe);
 		if (fpa[i]->dinfo->dtype != OPEN_DELEGATE_NONE) {
-			fap = fpa[i];
-			j = i;
+			active = i;
 			goto wait;
 		}
+
+		rfs4_dbe_rele_nolock(fpa[i]->dbe);
 		rfs4_dbe_unlock(fpa[i]->dbe);
 		fpa[i] = NULL;
 	}
 
+	kmem_free(fpa, sizeof (rfs4_file_t *) * nsi_count);
 	return (0);
 }
 

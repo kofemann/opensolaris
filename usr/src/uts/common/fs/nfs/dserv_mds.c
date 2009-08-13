@@ -105,6 +105,7 @@ dserv_mds_instance_destroy(void *vdmi, void *foo)
 	list_destroy(&dmi->dmi_datasets);
 	list_destroy(&dmi->dmi_mds_sids);
 	list_destroy(&dmi->dmi_uaddrs);
+
 	mutex_destroy(&dmi->dmi_zap_lock);
 	mutex_destroy(&dmi->dmi_content_lock);
 	rw_destroy(&dmi->dmi_inst_lock);
@@ -532,13 +533,18 @@ dserv_mds_instance_teardown()
 	}
 
 	if (!list_is_empty(&inst->dmi_mds_sids)) {
-		mds_sid_map_t *tmp_sid;
+		mds_sid_map_t *sid_map;
 
-		for (tmp_sid = list_head(&inst->dmi_mds_sids);
-		    tmp_sid != NULL;
-		    tmp_sid = list_head(&inst->dmi_mds_sids)) {
-			list_remove(&inst->dmi_mds_sids, tmp_sid);
-			kmem_cache_free(mds_sid_map_cache, tmp_sid);
+		for (sid_map = list_head(&inst->dmi_mds_sids);
+		    sid_map != NULL;
+		    sid_map = list_head(&inst->dmi_mds_sids)) {
+			list_remove(&inst->dmi_mds_sids, sid_map);
+
+			if (sid_map->msm_mds_storid.len)
+				kmem_free(sid_map->msm_mds_storid.val,
+				    sid_map->msm_mds_storid.len);
+
+			kmem_cache_free(mds_sid_map_cache, sid_map);
 		}
 	}
 
@@ -1296,7 +1302,7 @@ dserv_mds_do_reportavail(dserv_mds_instance_t *inst, ds_status *status)
 	DS_REPORTAVAILres res;
 	dserv_uaddr_t *ua;
 	open_root_objset_t *root;
-	ds_zfsguid zfsguid;
+	ds_zfsguid *zfsguid = NULL;
 	XDR xdr;
 	int xdr_size = 0;
 	char *xdr_buffer;
@@ -1314,7 +1320,6 @@ dserv_mds_do_reportavail(dserv_mds_instance_t *inst, ds_status *status)
 	(void) memset(&args, '\0', sizeof (args));
 	(void) memset(&res, '\0', sizeof (res));
 
-
 	mutex_enter(&inst->dmi_content_lock);
 	acount = 0;
 	for (ua = list_head(&inst->dmi_uaddrs); ua != NULL;
@@ -1331,6 +1336,14 @@ dserv_mds_do_reportavail(dserv_mds_instance_t *inst, ds_status *status)
 		error = ESRCH;
 		goto out;
 	}
+
+	/*
+	 * The GUID Map will come back in the same order we
+	 * create entries. So instead of decoding them, we
+	 * just sock them away.
+	 */
+	zfsguid = kmem_zalloc(pcount * sizeof (ds_zfsguid),
+	    KM_SLEEP);
 
 	args.ds_id = inst->dmi_ds_id;
 	args.ds_verifier = inst->dmi_verifier;
@@ -1376,16 +1389,21 @@ dserv_mds_do_reportavail(dserv_mds_instance_t *inst, ds_status *status)
 		(void) sprintf(path_buf, "%s:%s", uts_nodename(),
 		    root->oro_objsetname);
 
-		(void) str_to_utf8("datset",
+		(void) str_to_utf8("dataset",
 		    &dz->attrs.attrs_val[0].attrname);
 		(void) str_to_utf8(path_buf,
 		    (utf8string *)&dz->attrs.attrs_val[0].attrvalue);
 
-		/* GUID Map */
+		/*
+		 * GUID Map
+		 *
+		 * XXX: A "GUID Map" seems to be used for both a
+		 * mapping of guids and as a collection of such mappings.
+		 */
 		dz->guid_map.ds_guid.stor_type = ZFS;
 
-		zfsguid.zpool_guid = root->oro_ds_guid.dg_zpool_guid;
-		zfsguid.dataset_guid = root->oro_ds_guid.dg_objset_guid;
+		zfsguid[i].zpool_guid = root->oro_ds_guid.dg_zpool_guid;
+		zfsguid[i].dataset_guid = root->oro_ds_guid.dg_objset_guid;
 
 		/*
 		 * We do this here because of a possible
@@ -1393,13 +1411,13 @@ dserv_mds_do_reportavail(dserv_mds_instance_t *inst, ds_status *status)
 		 */
 		pcount_done++;
 
-		xdr_size = xdr_sizeof(xdr_ds_zfsguid, &zfsguid);
+		xdr_size = xdr_sizeof(xdr_ds_zfsguid, &zfsguid[i]);
 		ASSERT(xdr_size);
 		xdr_buffer = kmem_alloc(xdr_size, KM_SLEEP);
 
 		xdrmem_create(&xdr, xdr_buffer, xdr_size, XDR_ENCODE);
 
-		if (xdr_ds_zfsguid(&xdr, &zfsguid) == FALSE) {
+		if (xdr_ds_zfsguid(&xdr, &zfsguid[i]) == FALSE) {
 			mutex_exit(&inst->dmi_content_lock);
 			kmem_free(xdr_buffer, xdr_size);
 			error = EIO;
@@ -1428,9 +1446,83 @@ dserv_mds_do_reportavail(dserv_mds_instance_t *inst, ds_status *status)
 	*status = res.status;
 
 	/*
-	 * ToDo: Store MDS SIDs that we get back in the on-disk storage
-	 * and in the in-memory MDS SID map.
+	 * XXX: Store MDS SIDs that we get back in the
+	 * 1) on-disk storage and,
+	 *	Need to do
+	 * 2) in the in-memory MDS SID map.
+	 *	Done below!
 	 */
+	if (error == 0 && res.status == DS_OK) {
+		ASSERT(pcount ==
+		    res.DS_REPORTAVAILres_u.res_ok.guid_map.guid_map_len);
+
+		mutex_enter(&inst->dmi_content_lock);
+		for (i = 0;
+		    i < res.DS_REPORTAVAILres_u.res_ok.guid_map.guid_map_len;
+		    i++) {
+			ds_guid_map	*guid_map;
+			mds_sid_map_t	*sid_map;
+
+			guid_map = &res.DS_REPORTAVAILres_u.res_ok.guid_map.
+			    guid_map_val[i];
+
+			for (j = 0;
+			    j < guid_map->mds_sid_array.mds_sid_array_len;
+			    j++) {
+				mds_sid	*sid =
+				    &guid_map->mds_sid_array
+				    .mds_sid_array_val[j];
+				bool_t	bFound = FALSE;
+
+				/*
+				 * Can we find it first?
+				 */
+				for (sid_map = list_head(&inst->dmi_mds_sids);
+				    sid_map != NULL;
+				    sid_map = list_next(&inst->dmi_mds_sids,
+				    sid_map)) {
+					if ((sid->len ==
+					    sid_map->msm_mds_storid.len) &&
+					    (memcmp(sid->val,
+					    sid_map->msm_mds_storid.val,
+					    sid_map->msm_mds_storid.len)
+					    == 0)) {
+						bFound = TRUE;
+						break;
+					}
+				}
+
+				/*
+				 * If we found it, then it can't have changed.
+				 * So do nothing.
+				 */
+				if (bFound == FALSE) {
+					sid_map = kmem_cache_alloc(
+					    mds_sid_map_cache,
+					    KM_SLEEP);
+					sid_map->msm_mds_storid.len =
+					    sid->len;
+					sid_map->msm_mds_storid.val =
+					    kmem_zalloc(
+					    sid_map->msm_mds_storid.len,
+					    KM_SLEEP);
+
+					bcopy(sid->val,
+					    sid_map->msm_mds_storid.val,
+					    sid_map->msm_mds_storid.len);
+
+					sid_map->msm_ds_guid.dg_zpool_guid =
+					    zfsguid[i].zpool_guid;
+					sid_map->msm_ds_guid.dg_objset_guid =
+					    zfsguid[i].dataset_guid;
+
+					list_insert_tail(&inst->dmi_mds_sids,
+					    sid_map);
+				}
+			}
+		}
+		mutex_exit(&inst->dmi_content_lock);
+	}
 
 out:
 	/* Free arguments and results */
@@ -1464,8 +1556,12 @@ out:
 		dserv_strfree(args.ds_addrs.ds_addrs_val[i].addr.na_r_addr);
 	}
 
-	kmem_free(args.ds_addrs.ds_addrs_val,
-	    args.ds_addrs.ds_addrs_len * sizeof (struct ds_addr));
+	if (zfsguid)
+		kmem_free(zfsguid, pcount * sizeof (ds_zfsguid));
+
+	if (args.ds_addrs.ds_addrs_val)
+		kmem_free(args.ds_addrs.ds_addrs_val,
+		    args.ds_addrs.ds_addrs_len * sizeof (struct ds_addr));
 
 	if (!error)
 		xdr_free(xdr_DS_REPORTAVAILres, (caddr_t)&res);

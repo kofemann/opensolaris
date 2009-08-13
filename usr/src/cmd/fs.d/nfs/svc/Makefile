@@ -19,14 +19,13 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 
 MANIFEST=	server.xml client.xml rquota.xml mapid.xml nlockmgr.xml \
-		status.xml cbd.xml
+		status.xml cbd.xml spe.xml
 SVCMETHOD=	nfs-server nfs-client nlockmgr
 
 include $(SRC)/cmd/Makefile.cmd

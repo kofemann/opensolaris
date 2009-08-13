@@ -19,10 +19,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 #
 # This required package information file contains a list of package contents.
 # The 'pkgmk' command uses this file to identify the contents of a package
@@ -59,6 +57,7 @@ f none usr/lib/fs/nfs/umount 555 root bin
 f none usr/lib/fs/nfs/nfsfind 555 root sys
 d none usr/lib/nfs 755 root sys
 f none usr/lib/nfs/lockd 555 root bin
+f none usr/lib/nfs/sped 555 root bin
 f none usr/lib/nfs/statd 555 root bin
 f none usr/lib/nfs/nfsmapid 555 root bin
 f none usr/lib/nfs/nfs4cbd 555 root bin

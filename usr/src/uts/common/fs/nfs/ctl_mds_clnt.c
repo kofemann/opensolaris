@@ -81,7 +81,7 @@ out:
 /* ARGSUSED */
 int
 ctl_mds_clnt_remove_file(nfs_server_instance_t *instp, fsid_t fsid,
-    nfs41_fid_t fid, mds_layout_t *lop)
+    nfs41_fid_t fid, mds_layout_t *lp)
 {
 	CTL_MDS_REMOVEargs args;
 	CTL_MDS_REMOVEres res;
@@ -101,33 +101,48 @@ ctl_mds_clnt_remove_file(nfs_server_instance_t *instp, fsid_t fsid,
 	args.CTL_MDS_REMOVEargs_u.obj.obj_val = kmem_alloc(sizeof (nfs_fh4),
 	    KM_SLEEP);
 
-	error = mds_alloc_ds_fh(fsid, fid,
-	    &(args.CTL_MDS_REMOVEargs_u.obj.obj_val[0]));
-	if (error)
-		return (error);
-
 	/*
 	 * Take the layout, extract the data server information and send
 	 * the DS_REMOVEs to the appropriate places.
 	 */
-	for (i = 0; i < lop->stripe_count; i++) {
-		ds_addrlist_t *ds_addr;
-		nfs_server_instance_t *instp;
+	for (i = 0; i < lp->mlo_lc.lc_stripe_count; i++) {
+		ds_addrlist_t		*dp;
+		nfs_server_instance_t	*instp;
 
-		instp = dbe_to_instp(lop->dbe);
+		instp = dbe_to_instp(lp->dbe);
 
-		ds_addr = mds_find_ds_addrlist(instp, lop->devs[i]);
-		if (ds_addr) {
-			error = ctl_mds_clnt_call(ds_addr, CTL_MDS_REMOVE,
-			    xdr_CTL_MDS_REMOVEargs, (caddr_t)&args,
-			    xdr_CTL_MDS_REMOVEres, (caddr_t)&res);
-		/* For now, ignore the error and results from REMOVE */
-
-			mds_ds_addrlist_rele(ds_addr);
+		/*
+		 * We reuse the 0th fh!
+		 */
+		if (i > 0) {
+			xdr_free_ds_fh(
+			    &(args.CTL_MDS_REMOVEargs_u.obj.obj_val[0]));
 		}
+
+		error = mds_alloc_ds_fh(fsid, fid, &lp->mlo_lc.lc_mds_sids[i],
+		    &(args.CTL_MDS_REMOVEargs_u.obj.obj_val[0]));
+		if (error) {
+			kmem_free(args.CTL_MDS_REMOVEargs_u.obj.obj_val,
+			    sizeof (nfs_fh4));
+			return (error);
+		}
+
+		dp = mds_find_ds_addrlist_by_mds_sid(instp,
+		    &lp->mlo_lc.lc_mds_sids[i]);
+		if (dp == NULL)
+			continue;
+
+		error = ctl_mds_clnt_call(dp, CTL_MDS_REMOVE,
+		    xdr_CTL_MDS_REMOVEargs, (caddr_t)&args,
+		    xdr_CTL_MDS_REMOVEres, (caddr_t)&res);
+
+		/*
+		 * XXX: For now, ignore the error and results
+		 * from REMOVE
+		 */
+		mds_ds_addrlist_rele(dp);
 	}
 
-	/* Allocated from mds_alloc_ds_fh */
 	xdr_free_ds_fh(&(args.CTL_MDS_REMOVEargs_u.obj.obj_val[0]));
 	kmem_free(args.CTL_MDS_REMOVEargs_u.obj.obj_val, sizeof (nfs_fh4));
 

@@ -24,38 +24,81 @@
  * Use is subject to license terms.
  */
 
-#ifndef	_DAEMON_UTILS_H
-#define	_DAEMON_UTILS_H
+#ifndef _SPE_H
+#define	_SPE_H
 
-#include <sys/stat.h>
+#ifndef _KERNEL
+#include <stddef.h>
+#endif
+
+#include <sys/sysmacros.h>
+#include <sys/types.h>
+
+#include <nfs/spe_prot.h>
+
+/*
+ * Simple Policy Engine - spe
+ *
+ * This daemon is used to determine simple policies for pnfs layouts.
+ */
 
 #ifdef	__cplusplus
 extern "C" {
 #endif
 
-#define	AUTOMOUNTD	"svc:/system/filesystem/autofs:default"
-#define	LOCKD		"svc:/network/nfs/nlockmgr:default"
-#define	STATD		"svc:/network/nfs/status:default"
-#define	NFSD		"svc:/network/nfs/server:default"
-#define	MOUNTD		"svc:/network/nfs/mountd:default"
-#define	NFS4CBD		"svc:/network/nfs/cbd:default"
-#define	NFSMAPID	"svc:/network/nfs/mapid:default"
-#define	RQUOTAD		"svc:/network/nfs/rquota:default"
-#define	SPED		"svc:/network/nfs/spe:default"
+/*
+ * spe messages from the kernel to the daemon
+ */
+#define	SPE_SPE_STATS		1
+#define	SPE_DS_ZPOOL		2
+#define	SPE_RE_EVENT		3
+#define	SPE_SS_EVENT		4
 
-#define	DAEMON_UID	 1
-#define	DAEMON_GID	12
+/*
+ * sped messages from the daemon to the kernel
+ */
+#define	SPE_DOOR_MAP			1
 
-#define	DAEMON_DIR	"/var/run/daemon"
-#define	DAEMON_DIR_MODE	(S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH)
+/*
+ * The sped data structures...
+ */
 
-extern void _check_services(char **);
-extern int _check_daemon_lock(const char *);
-extern int _create_daemon_lock(const char *, uid_t, gid_t);
-extern pid_t _enter_daemon_lock(const char *);
+#define	MAXBUFSIZE 1024
+
+#ifndef FALSE
+#define	FALSE 0
+#endif
+
+#ifndef TRUE
+#define	TRUE 1
+#endif
+
+typedef struct {
+	char	*path;
+	char	*ext;
+	char	*base;
+	char	*file;
+} spe_path;
+
+typedef struct {
+	uid_t		uid;
+	gid_t		gid;
+	int		day;
+	int		hour;
+	uint_t		addr;
+	uint_t		mask;
+	char		*weekday;
+	char		*user;
+	char		*group;
+	char		*host;
+	char		*domain;
+	char		*fqdn;
+	spe_path	sp_server;
+	spe_path	sp_client;
+} policy_attributes;
 
 #ifdef	__cplusplus
 }
 #endif
 
-#endif	/* _DAEMON_UTILS_H */
+#endif /* _SPE_H */

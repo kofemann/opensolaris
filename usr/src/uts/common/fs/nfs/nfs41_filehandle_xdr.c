@@ -129,6 +129,19 @@ xdr_encode_nfs41_fh(XDR *xdrs, nfs_fh4 *objp)
 
 extern bool_t xdr_ds_fh(XDR *, mds_ds_fh *);
 
+/*
+ * Put this here so everyone can enjoy it!
+ */
+void
+free_mds_ds_fh(mds_ds_fh *fp)
+{
+	if (fp->fh.v1.mds_sid.val) {
+		kmem_free(fp->fh.v1.mds_sid.val, fp->fh.v1.mds_sid.len);
+	}
+
+	kmem_free(fp, sizeof (mds_ds_fh));
+}
+
 bool_t
 xdr_decode_nfs41_fh(XDR *xdrs, nfs_fh4 *objp)
 {
@@ -174,7 +187,7 @@ xdr_decode_nfs41_fh(XDR *xdrs, nfs_fh4 *objp)
 		dfhp->type = FH41_TYPE_DMU_DS;
 
 		if (!xdr_ds_fh(xdrs, dfhp)) {
-			kmem_free(dfhp, sizeof (mds_ds_fh));
+			free_mds_ds_fh(dfhp);
 			return (FALSE);
 		}
 

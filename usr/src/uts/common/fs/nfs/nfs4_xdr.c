@@ -41,6 +41,7 @@
 #include <nfs/rnode4.h>
 #include <nfs/nfs4.h>
 #include <nfs/nfs4_clnt.h>
+#include <nfs/ds_filehandle.h>
 #include <sys/sdt.h>
 #include <rpc/rpc_rdma.h>
 #include <sys/cmn_err.h>
@@ -4032,10 +4033,12 @@ xdr_WRITE4res(XDR *xdrs, WRITE4res *objp)
 }
 
 static bool_t
-xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len)
+xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len,
+    uint32_t minorversion)
 {
-	int i;
-	nfs_argop4 *array = *arrayp;
+	int	i;
+
+	nfs_argop4	*array = *arrayp;
 
 	/*
 	 * Optimized XDR_FREE only args array
@@ -4053,15 +4056,39 @@ xdr_snfs_argop4_free(XDR *xdrs, nfs_argop4 **arrayp, int len)
 		 * These should be ordered by frequency of use
 		 */
 		switch (array[i].argop) {
-		case OP_PUTFH:
-			if (array[i].nfs_argop4_u.opputfh.object.nfs_fh4_val !=
-			    NULL) {
-				kmem_free(array[i].nfs_argop4_u.opputfh.object.
-				    nfs_fh4_val,
-				    array[i].nfs_argop4_u.opputfh.object.
-				    nfs_fh4_len);
+		case OP_PUTFH: {
+			nfs_fh4	*obj = &array[i].nfs_argop4_u.opputfh.object;
+
+			if (obj->nfs_fh4_val == NULL)
+				continue;
+
+			DTRACE_NFSV4_1(xdr__i__op_putfh_version, uint32_t,
+			    minorversion);
+			if (minorversion != 0) {
+				struct mds_ds_fh	*dsfh =
+				    (struct mds_ds_fh *)obj->nfs_fh4_val;
+
+				DTRACE_NFSV4_1(xdr__i__op_putfh_type,
+				    nfs41_fh_type_t, dsfh->type);
+
+				/*
+				 * Is it really a DS filehandle?
+				 */
+				if (dsfh->type == FH41_TYPE_DMU_DS) {
+					mds_sid	*sid = &dsfh->fh.v1.mds_sid;
+
+					DTRACE_NFSV4_1(xdr__i__op_putfh_sid,
+					    mds_sid *, sid);
+
+					if (sid->val) {
+						kmem_free(sid->val, sid->len);
+					}
+				}
 			}
+
+			kmem_free(obj->nfs_fh4_val, obj->nfs_fh4_len);
 			continue;
+		}
 		case OP_GETATTR:
 		case OP_GETFH:
 			continue;
@@ -5002,7 +5029,7 @@ xdr_COMPOUND4args_srv(XDR *xdrs, COMPOUND4args_srv *objp)
 				 */
 				xdrs->x_op = XDR_FREE;
 				(void) xdr_snfs_argop4_free(xdrs, &objp->array,
-				    objp->array_len);
+				    objp->array_len, objp->minorversion);
 				goto retfalse;
 			}
 		}
@@ -5013,7 +5040,7 @@ xdr_COMPOUND4args_srv(XDR *xdrs, COMPOUND4args_srv *objp)
 			UTF8STRING_FREE(objp->tag)
 
 		return (xdr_snfs_argop4_free(xdrs, &objp->array,
-		    objp->array_len));
+		    objp->array_len, objp->minorversion));
 	}
 
 retfalse:

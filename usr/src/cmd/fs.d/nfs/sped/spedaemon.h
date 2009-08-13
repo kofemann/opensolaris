@@ -24,38 +24,52 @@
  * Use is subject to license terms.
  */
 
-#ifndef	_DAEMON_UTILS_H
-#define	_DAEMON_UTILS_H
+#ifndef _SPEDAEMON_H
+#define	_SPEDAEMON_H
 
-#include <sys/stat.h>
+/*
+ * Definitions for the policy list and parse trees.
+ */
 
-#ifdef	__cplusplus
+#ifdef __cplusplus
 extern "C" {
 #endif
 
-#define	AUTOMOUNTD	"svc:/system/filesystem/autofs:default"
-#define	LOCKD		"svc:/network/nfs/nlockmgr:default"
-#define	STATD		"svc:/network/nfs/status:default"
-#define	NFSD		"svc:/network/nfs/server:default"
-#define	MOUNTD		"svc:/network/nfs/mountd:default"
-#define	NFS4CBD		"svc:/network/nfs/cbd:default"
-#define	NFSMAPID	"svc:/network/nfs/mapid:default"
-#define	RQUOTAD		"svc:/network/nfs/rquota:default"
-#define	SPED		"svc:/network/nfs/spe:default"
+#define	MAXBUFSIZE 1024
 
-#define	DAEMON_UID	 1
-#define	DAEMON_GID	12
+#ifndef FALSE
+#define	FALSE 0
+#endif
 
-#define	DAEMON_DIR	"/var/run/daemon"
-#define	DAEMON_DIR_MODE	(S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH)
+#ifndef TRUE
+#define	TRUE 1
+#endif
 
-extern void _check_services(char **);
-extern int _check_daemon_lock(const char *);
-extern int _create_daemon_lock(const char *, uid_t, gid_t);
-extern pid_t _enter_daemon_lock(const char *);
+#define	UTF8STRING_FREE(str)			\
+	if ((str).utf8string_len > 0)		\
+		free((str).utf8string_val);	\
+	(str).utf8string_val = NULL;		\
+	(str).utf8string_len = 0;
 
-#ifdef	__cplusplus
+/*
+ * Roll with previous definitions in the kernel
+ */
+#define	UTF8STRING_NULL(str)			\
+	(str).utf8string_len == 0 ? TRUE : FALSE
+
+extern spe_policy *Spe_policies;
+extern spe_npool *Spe_npools;
+
+extern void spe_populate_policies(spe_policy *);
+extern void spe_populate_npools(spe_npool *);
+
+extern char *utf8_to_str(utf8string *, uint_t *, char *);
+extern utf8string *str_to_utf8(char *, utf8string *);
+extern utf8string *utf8_copy(utf8string *, utf8string *);
+extern int utf8_compare(const utf8string *, const utf8string *);
+
+#ifdef __cplusplus
 }
 #endif
 
-#endif	/* _DAEMON_UTILS_H */
+#endif /* _SPEDAEMON_H */

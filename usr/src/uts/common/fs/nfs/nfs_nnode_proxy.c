@@ -65,7 +65,7 @@ ksema_t proxy_sema;
 
 static kmem_cache_t *nnode_proxy_data_cache;
 
-extern nfsstat4 mds_get_flo(nfs_server_instance_t *, vnode_t *,
+extern nfsstat4 mds_get_file_layout(nfs_server_instance_t *, vnode_t *,
     mds_layout_t **);
 
 /* proxy I/O nnode ops */
@@ -77,7 +77,7 @@ proxy_get_layout(nnode_proxy_data_t *mnd)
 	mds_layout_t *lp;
 	nfsstat4 stat;
 
-	stat = mds_get_flo(mnd->mnd_instp, mnd->mnd_vp, &lp);
+	stat = mds_get_file_layout(mnd->mnd_instp, mnd->mnd_vp, &lp);
 	if (lp == NULL || stat != NFS4_OK)
 		return (NFS4ERR_LAYOUTUNAVAILABLE);
 	mnd->mnd_layout = lp;
@@ -88,6 +88,7 @@ proxy_get_layout(nnode_proxy_data_t *mnd)
 void
 proxy_free_layout(nnode_proxy_data_t *mnd)
 {
+	rfs4_dbe_rele(mnd->mnd_layout->dbe);
 	mnd->mnd_layout = NULL;
 }
 
@@ -129,10 +130,11 @@ proxy_get_strategy(nnode_proxy_data_t *mnd)
 
 	/* Figure out first DS to hit */
 	relstart = offset - segstart;
-	startidx = (segidx + (relstart / lp->stripe_unit)) % lp->stripe_count;
+	startidx = (segidx + (relstart / lp->mlo_lc.lc_stripe_unit)) %
+	    lp->mlo_lc.lc_stripe_count;
 
 	/* Allocate space for our DS filehandles and devices */
-	io_array_size = lp->stripe_count * sizeof (ds_io_t);
+	io_array_size = lp->mlo_lc.lc_stripe_count * sizeof (ds_io_t);
 	io_array = kmem_zalloc(io_array_size, KM_SLEEP);
 
 	mnd->mnd_strategy = kmem_alloc(sizeof (mds_strategy_t), KM_SLEEP);
@@ -140,23 +142,24 @@ proxy_get_strategy(nnode_proxy_data_t *mnd)
 	mnd->mnd_strategy->len = len;
 	mnd->mnd_eof = 0;
 	mnd->mnd_strategy->startidx = startidx;
-	mnd->mnd_strategy->stripe_unit = lp->stripe_unit;
+	mnd->mnd_strategy->stripe_unit = lp->mlo_lc.lc_stripe_unit;
 	mnd->mnd_strategy->stripe_count = 0;
 	mnd->mnd_strategy->io_array_size = io_array_size;
 	mnd->mnd_strategy->io_array = io_array;
 
 	/* XXX - this is good for one big honking buffer. */
 	/* Get our DS filehandles and dev descriptors */
-	for (i = 0; i < lp->stripe_count; i++) {
+	for (i = 0; i < lp->mlo_lc.lc_stripe_count; i++) {
 		int e;
 
 		e = mds_alloc_ds_fh(mnd->mnd_fsid, mnd->mnd_fid,
-		    &io_array[i].fh);
+		    &lp->mlo_lc.lc_mds_sids[i], &io_array[i].fh);
 		if (e)
 			return (NFS4ERR_LAYOUTTRYLATER);
 
-		io_array[i].ds = mds_find_ds_addrlist(mnd->mnd_instp,
-		    lp->devs[i]);
+		io_array[i].ds =
+		    mds_find_ds_addrlist_by_mds_sid(mnd->mnd_instp,
+		    &lp->mlo_lc.lc_mds_sids[i]);
 		if (io_array[i].ds == NULL) {
 			/* We can only cleanup a complete "row" */
 			kmem_free(io_array[i].fh.nfs_fh4_val,

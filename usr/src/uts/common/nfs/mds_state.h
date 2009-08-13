@@ -55,7 +55,35 @@ typedef union {
 	deviceid4 did4;
 } ba_devid_t;
 
-extern void mds_set_deviceid(uint32_t, deviceid4 *);
+extern void mds_set_deviceid(id_t, deviceid4 *);
+
+/*
+ * mds_mpd:
+ *
+ * The fields mdp_encoded_* are in fact the already
+ * encoded value for a nfsv4_1_file_layout_ds_addr4
+ */
+typedef struct mds_mpd {
+	rfs4_dbe_t	*dbe;
+	id_t		mpd_id;
+	uint_t 		mpd_encoded_len;
+	char 		*mpd_encoded_val;
+	list_t		mpd_layouts_list;
+} mds_mpd_t;
+
+/*
+ * Used to build the reply to getdevicelist
+ */
+typedef struct mds_device_list {
+	int count;
+	deviceid4 *dl;
+} mds_device_list_t;
+
+typedef struct layout_core {
+	length4		lc_stripe_unit;
+	int		lc_stripe_count;
+	mds_sid		*lc_mds_sids;
+} layout_core_t;
 
 /*
  * mds_layout has the information for the layout that has been
@@ -73,16 +101,16 @@ extern void mds_set_deviceid(uint32_t, deviceid4 *);
  */
 typedef struct mds_layout {
 	rfs4_dbe_t	*dbe;
-	int		layout_id;
-	layouttype4 	layout_type;
-	length4		stripe_unit;
-	int		stripe_count;
-	uint32_t	dev_id;
-	uint32_t	dev_index;
-	uint32_t	devs[100];
-	uint32_t	lo_flags;
-	rfs4_file_t	*fp;
-	odl		*odl;
+	int		mlo_id;
+	layouttype4 	mlo_type;
+
+	layout_core_t	mlo_lc;
+	uint32_t	mlo_flags;
+	rfs4_file_t	*mlo_fp;
+	odl		*mlo_odl;
+	mds_mpd_t	*mlo_mpd;
+	id_t		mlo_mpd_id;
+	list_node_t	mpd_layouts_next;
 } mds_layout_t;
 
 #define	LO_GRANTED		0x00000001
@@ -173,9 +201,6 @@ typedef struct {
  *
  * This list is updated via the control-protocol
  * message DS_REPORTAVAIL.
- *
- * FOR NOW: We scan this list to automatically build the default
- * layout and the multipath device struct (mds_mpd)
  */
 typedef struct {
 	rfs4_dbe_t		*dbe;
@@ -183,33 +208,11 @@ typedef struct {
 	struct knetconfig	*dev_knc;
 	struct netbuf		*dev_nb;
 	uint_t			dev_flags;
-	uint32_t		locnt;
 	uint32_t		ds_port_key;
 	uint64_t		ds_addr_key;
 	ds_owner_t		*ds_owner;
 	list_node_t		ds_addrlist_next;
 } ds_addrlist_t;
-
-/*
- * mds_mpd:
- *
- * the fields mdp_encoded_* are infact the already
- * encoded value for a nfsv4_1_file_layout_ds_addr4
- */
-typedef struct mds_mpd {
-	rfs4_dbe_t	*dbe;
-	uint32_t	mpd_id;
-	uint_t 		mpd_encoded_len;
-	char 		*mpd_encoded_val;
-} mds_mpd_t;
-
-/*
- * used to build the reply to getdevicelist
- */
-typedef struct mds_device_list {
-	int count;
-	deviceid4 *dl;
-} mds_device_list_t;
 
 /*
  * Tracks the state 'handed out' to the data-server.
@@ -219,6 +222,18 @@ typedef struct {
 	ds_owner_t   	*ds_owner;
 } mds_ds_state_t;
 
+struct mds_adddev_args {
+	int	dev_id;
+	char	*dev_netid;
+	char	*dev_addr;
+	char	*ds_addr;
+};
+
+/*
+ * Identify the dataset...
+ */
+
+
 /*
  * Tracks the mds_sid to data-server guid, and
  * associated attributes.
@@ -227,9 +242,10 @@ typedef struct {
 	rfs4_dbe_t 	*dbe;
 	ds_owner_t 	*ds_owner;
 	list_node_t	ds_guid_next;
-	ds_guid_t	ds_guid;
+	ds_guid_t	ds_guid;	/* This is the mds_dataset_id */
+	utf8string	ds_dataset_name;	/* Name of the dataset */
 	uint_t    	ds_attr_len;
-	ds_zfsattr 	*ds_attr_val; /* XXX Should this be more general? */
+	ds_zfsattr 	*ds_attr_val;	/* XXX Should this be more general? */
 } ds_guid_info_t;
 
 /*
@@ -237,17 +253,19 @@ typedef struct {
  * entry.
  */
 typedef struct {
-	struct ds_storinfo *si;
-	ds_owner_t *ds_owner;
+	struct ds_storinfo	*si;
+	ds_owner_t		*ds_owner;
 } pinfo_create_t;
 
 extern int mds_get_odl(vnode_t *, mds_layout_t **);
 extern void mds_xdr_devicelist(rfs4_entry_t, void *);
 extern ds_addrlist_t *mds_find_ds_addrlist(nfs_server_instance_t *, uint32_t);
+extern ds_addrlist_t *mds_find_ds_addrlist_by_mds_sid(nfs_server_instance_t *,
+    mds_sid *);
 extern ds_addrlist_t *mds_find_ds_addrlist_by_uaddr(nfs_server_instance_t *,
-	char *);
+    char *);
 extern void mds_ds_addrlist_rele(ds_addrlist_t *);
-extern ds_guid_info_t *mds_find_ds_guid_info_by_id(ds_guid_t guid);
+extern ds_guid_info_t *mds_find_ds_guid_info_by_id(ds_guid_t *guid);
 extern int uaddr2sockaddr(int, char *, void *, in_port_t *);
 extern int mds_put_layout(mds_layout_t *, vnode_t *);
 

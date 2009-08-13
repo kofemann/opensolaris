@@ -241,6 +241,10 @@ extern "C" {
 
 #define	DTRACE_NFSV4_3(name, type1, arg1, type2, arg2, type3, arg3) \
 	DTRACE_PROBE3(__nfsv4_##name, type1, arg1, type2, arg2, type3, arg3);
+#define	DTRACE_NFSV4_4(name, type1, arg1, type2, arg2, 			\
+    type3, arg3, type4, arg4)						\
+	DTRACE_PROBE4(__nfsv4_##name, type1, arg1, type2, arg2,		\
+	    type3, arg3, type4, arg4);
 
 #define	DTRACE_SMB_1(name, type1, arg1) \
 	DTRACE_PROBE1(__smb_##name, type1, arg1);

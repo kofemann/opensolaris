@@ -58,18 +58,21 @@ struct mds_dataset_id {
 typedef struct mds_dataset_id mds_dataset_id;
 
 struct ds_fh_v1 {
-	uint32_t flags;
-	uint32_t gen;
-	uint64_t mds_id;
-	mds_sid mds_sid;
-	mds_dataset_id mds_dataset_id;
-	nfs41_fid_t mds_fid;
+	uint32_t flags;			/* FH flags */
+	uint32_t gen;			/* Used to revoke/recall */
+	uint64_t mds_id;		/* Which MDS contains the object */
+	mds_sid mds_sid;		/* Used to map where on the DS */
+					/* the object resides in. */
+	mds_dataset_id mds_dataset_id;	/* Used to map where on the MDS */
+					/* the object resides in. */
+	nfs41_fid_t mds_fid;		/* Used by both the DS and MDS */
+					/* to index into the dataset */
 };
 typedef struct ds_fh_v1 ds_fh_v1;
 
 struct mds_ds_fh {
-	nfs41_fh_type_t type;
-	ds_fh_version vers;
+	nfs41_fh_type_t type;		/* MDS or DS? */
+	ds_fh_version vers;		/* OTW version number */
 	union {
 		ds_fh_v1 v1;
 		/* new versions will be added here */
@@ -77,8 +80,9 @@ struct mds_ds_fh {
 };
 typedef struct mds_ds_fh mds_ds_fh;
 
+extern void free_mds_ds_fh(mds_ds_fh *);
 extern mds_ds_fh *get_mds_ds_fh(nfs_fh4 *);
-extern int mds_alloc_ds_fh(fsid_t, nfs41_fid_t, nfs_fh4 *);
+extern int mds_alloc_ds_fh(fsid_t, nfs41_fid_t, mds_sid *, nfs_fh4 *);
 extern bool_t xdr_ds_fh_fmt(XDR *, mds_ds_fh *);
 extern bool_t xdr_mds_sid_content(XDR *, mds_sid_content *);
 extern bool_t xdr_mds_sid(XDR *, mds_sid *);

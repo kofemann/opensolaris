@@ -85,6 +85,7 @@
 #include <nfs/nnode.h>
 #include <nfs/ds.h>
 #include <nfs/dserv_impl.h>
+#include <nfs/spe_impl.h>
 
 #include <sys/modctl.h>
 #include <sys/cladm.h>
@@ -136,6 +137,7 @@ _init(void)
 	 */
 	nfs_srv_quiesce_func = nfs_srv_quiesce_all;
 	nfs_srv_dss_func = rfs4_dss_setpaths;
+	nfs41_spe_path2mds_sid = mds_ds_path_to_mds_sid;
 
 	/* setup DSS paths here; must be done before initial server startup */
 	rfs4_dss_paths = rfs4_dss_oldpaths = NULL;

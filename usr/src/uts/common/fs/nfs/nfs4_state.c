@@ -44,9 +44,12 @@
 #include <sys/nvpair.h>
 #include <sys/sdt.h>
 #include <sys/disp.h>
+#include <sys/id_space.h>
 
 #include <nfs/nfs_sstor_impl.h>
 #include <nfs/mds_state.h>
+
+#include <nfs/spe_impl.h>
 
 extern int nfs_doorfd;
 
@@ -1657,6 +1660,11 @@ rfs4_file_destroy(rfs4_entry_t u_entry)
 	rfs4_file_t *fp = (rfs4_file_t *)u_entry;
 
 	ASSERT(fp->delegationlist.next == &fp->delegationlist);
+
+	if (fp->layoutp) {
+		rfs4_dbe_rele(fp->layoutp->dbe);
+		fp->layoutp = NULL;
+	}
 
 	if (fp->filehandle.nfs_fh4_val)
 		kmem_free(fp->filehandle.nfs_fh4_val,
@@ -3862,6 +3870,11 @@ rfs4_sstor_fini(nfs_server_instance_t *instp)
 	dbp = instp->state_store;
 
 	/*
+	 * Cleanup the kspe policies.
+	 */
+	nfs41_spe_fini();
+
+	/*
 	 * Cleanup the CPR callback.
 	 */
 	if (instp->cpr_id)
@@ -3879,6 +3892,11 @@ rfs4_sstor_fini(nfs_server_instance_t *instp)
 
 	/* Now actually destroy/release the database and its tables */
 	rfs4_database_destroy(dbp);
+
+	/* If the mds, then cleanup the id_space for mds_mpd */
+	if (instp->mds_mpd_id_space) {
+		id_space_destroy(instp->mds_mpd_id_space);
+	}
 
 	mutex_exit(&instp->state_lock);
 

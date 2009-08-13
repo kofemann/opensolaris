@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 # head/Makefile
@@ -277,6 +277,7 @@ RPCSVC_GEN_HDRS = \
 	ufs_prot.h	\
 	nfs_acl.h	\
 	nfs41_prot.h	\
+	spe_prot.h	\
 	ds_prot.h
 
 LVMRPCHDRS = \

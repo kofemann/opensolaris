@@ -56,6 +56,7 @@
 #include <sys/ddi.h>
 #include <sys/modctl.h>
 #include <sys/timod.h>
+#include <sys/id_space.h>
 
 #include <rpc/types.h>
 #include <rpc/auth.h>
@@ -84,6 +85,8 @@
 
 #include <nfs/nfs41_filehandle.h>
 #include <nfs/ctl_mds_clnt.h>
+
+#include <nfs/spe_impl.h>
 
 #define	RFS4_MAXLOCK_TRIES 4	/* Try to get the lock this many times */
 static int rfs4_maxlock_tries = RFS4_MAXLOCK_TRIES;
@@ -323,10 +326,11 @@ rfs4_openowner_t *mds_findopenowner(nfs_server_instance_t *, open_owner4 *,
 static void	mds_op_nverify(nfs_argop4 *, nfs_resop4 *, struct svc_req *,
 			compound_state_t *);
 
-extern mds_mpd_t *mds_find_mpd(nfs_server_instance_t *, uint32_t);
+extern mds_mpd_t *mds_find_mpd(nfs_server_instance_t *, id_t);
 extern void rfs41_lo_seqid(stateid_t *);
 extern void mds_delete_layout(vnode_t *);
 extern void mds_clean_grants_by_fsid(rfs4_client_t *, vnode_t *);
+extern mds_layout_t *mds_add_layout(layout_core_t *lc);
 
 nfsstat4
 create_vnode(vnode_t *, char *,  vattr_t *, createmode4, timespec32_t *,
@@ -3194,10 +3198,10 @@ do_ctl_mds_remove(vnode_t *vp, rfs4_file_t *fp, compound_state_t *cs)
 	 * rfs4_file_t either this means that we do not have a layout
 	 * or it needs to be read in from disk.  Right now, we do not
 	 * attempt to read the layout in from disk, but future phases
-	 * of REMOVE handling will take * this into consideration.
+	 * of REMOVE handling will take this into consideration.
 	 *
 	 * Known Problems with this implementation of REMOVE:
-	 * 1. Not attempting to read a layout * from disk could mean
+	 * 1. Not attempting to read a layout from disk could mean
 	 * that if an on-disk layout did exist, storage on the data
 	 * servers will not be freed.  Although, the implementation
 	 * doesn't currently persistenly store layouts so we'll never
@@ -3380,6 +3384,13 @@ mds_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	if (error) {
 		*cs->statusp = resp->status = puterrno4(error);
 		kmem_free(nm, len);
+		if (in_crit)
+			nbl_end_crit(vp);
+		VN_RELE(vp);
+		if (fp) {
+			rfs4_clear_dont_grant(cs->instp, fp);
+			rfs4_file_rele(fp);
+		}
 		goto final;
 	}
 	NFS4_SET_FATTR4_CHANGE(resp->cinfo.before, bdva.va_ctime)
@@ -3452,6 +3463,7 @@ mds_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	if (fp) {
 		rfs4_clear_dont_grant(cs->instp, fp);
 		rfs4_file_rele(fp);
+		fp = NULL;
 	}
 	kmem_free(nm, len);
 
@@ -3671,8 +3683,8 @@ mds_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 			goto err_out;
 		}
 	}
-	fp_rele_grant_hold = 1;
 
+	fp_rele_grant_hold = 1;
 
 	/* Check for NBMAND lock on both source and target */
 	if (nbl_need_check(srcvp)) {
@@ -3763,10 +3775,12 @@ mds_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	if (sfp) {
 		rfs4_clear_dont_grant(cs->instp, sfp);
 		rfs4_file_rele(sfp);
+		sfp = NULL;
 	}
 	if (fp) {
 		rfs4_clear_dont_grant(cs->instp, fp);
 		rfs4_file_rele(fp);
+		fp = NULL;
 	}
 
 	kmem_free(onm, olen);
@@ -4408,18 +4422,111 @@ do_41_deleg_hack(int osa)
 }
 
 /*
- * this could be a handy function to call out to the SPE in.. :-D
+ * XXX: This will go away with the SMF work for npools.
  */
-nfsstat4
+extern mds_layout_t *mds_gen_default_layout(nfs_server_instance_t *);
+
+/*
+ * We are going to create the file, so we need to get
+ * a layout in play for it.
+ */
+static nfsstat4
+mds_createfile_get_layout(struct svc_req *req, vnode_t *vp,
+    struct compound_state *cs, caller_context_t *ct, mds_layout_t **plo)
+{
+	vattr_t		spe_va;
+
+	int		i;
+
+	layout_core_t	lc;
+
+	int		error;
+	struct netbuf	*claddr;
+
+	nfsstat4	status = NFS4_OK;
+
+	spe_va.va_mask = AT_GID|AT_UID;
+	error = VOP_GETATTR(vp, &spe_va, 0, cs->cr, ct);
+	if (error)
+		return (puterrno4(error));
+
+	/*
+	 * Taken from nfsauth_cache_get():
+	 */
+	claddr = svc_getrpccaller(req->rq_xprt);
+
+	lc.lc_mds_sids = NULL;
+
+	/*
+	 * XXX: We may not be able to trust vp->v_path,
+	 * but if it is filled in, we will use it. Otherwise
+	 * we will evaluate polices ignoring the path components.
+	 */
+	error = nfs41_spe_allocate(&spe_va, claddr,
+	    vp->v_path, &lc, TRUE);
+	if (error) {
+		/*
+		 * XXX: Until we get the SMF code
+		 * in place, we handle all errors by
+		 * using the default layout of the
+		 * old prototype code
+		 *
+		 * At that point, we should return the
+		 * given error.
+		 */
+		*plo = mds_gen_default_layout(cs->instp);
+		if (*plo == NULL) {
+			status = NFS4ERR_LAYOUTUNAVAILABLE;
+		} else {
+			/*
+			 * Record the layout, don't get
+			 * bent out of shape if it fails,
+			 * we'll try again at checkstate time.
+			 */
+			(void) mds_put_layout(*plo, vp);
+		}
+
+		return (status);
+	}
+
+	*plo = mds_add_layout(&lc);
+
+	if (lc.lc_mds_sids) {
+		for (i = 0; i < lc.lc_stripe_count; i++) {
+			kmem_free(lc.lc_mds_sids[i].val,
+			    lc.lc_mds_sids[i].len);
+		}
+
+		kmem_free(lc.lc_mds_sids,
+		    lc.lc_stripe_count * sizeof (mds_sid));
+	}
+
+	if (*plo == NULL) {
+		status = NFS4ERR_LAYOUTUNAVAILABLE;
+	} else {
+		/*
+		 * Record the layout, don't get bent out of shape
+		 * if it fails, we'll try again at checkstate time.
+		 */
+		(void) mds_put_layout(*plo, vp);
+	}
+
+	return (status);
+}
+
+/*
+ * If we call the spe in here, we return the new layout in *plo.
+ */
+static nfsstat4
 mds_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
-    change_info4 *cinfo, attrmap4 *attrset)
+    change_info4 *cinfo, attrmap4 *attrset, mds_layout_t **plo)
 {
 	struct nfs4_svgetit_arg sarg;
 	struct nfs4_ntov_table ntov;
 
 	bool_t ntov_table_init = FALSE;
 	struct statvfs64 sb;
-	nfsstat4 status;
+	nfsstat4	status = NFS4_OK;
 	vnode_t *vp;
 	vattr_t bva, ava, iva, cva, *vap;
 	vnode_t *dvp;
@@ -4782,7 +4889,20 @@ mds_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
 		status = check_open_access(args->share_access, cs, req);
 		if (status != NFS4_OK)
 			*attrset = NFS4_EMPTY_ATTRMAP(avers);
+	} else {
+		status = mds_createfile_get_layout(req, vp, cs, &ct, plo);
+
+		/*
+		 * Allow mds_createfile_get_layout() to be verbose
+		 * in what it presents as a status, but be aware
+		 * that it is permissible to not generate a
+		 * layout.
+		 */
+		if (status == NFS4ERR_LAYOUTUNAVAILABLE) {
+			status = NFS4_OK;
+		}
 	}
+
 	return (status);
 }
 
@@ -4884,7 +5004,8 @@ static void
 mds_do_open(struct compound_state *cs, struct svc_req *req,
 		rfs4_openowner_t *oo, delegreq_t deleg,
 		uint32_t access, uint32_t deny,
-		OPEN4res *resp, int deleg_cur)
+		OPEN4res *resp, int deleg_cur,
+		mds_layout_t *plo)
 {
 	rfs4_state_t *state;
 	rfs4_file_t *file;
@@ -4928,6 +5049,19 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 			rfs4_state_close(state, FALSE, FALSE, cs->cr);
 		rfs4_state_rele(state);
 		return;
+	}
+
+	/*
+	 * Assign the layout if there is one
+	 * Note that this means the file was just created.
+	 */
+	if (plo) {
+		ASSERT(file->layoutp == NULL);
+		if (file->layoutp) {
+			rfs4_dbe_rele(file->layoutp->dbe);
+		}
+
+		file->layoutp = plo;
 	}
 
 	/* Calculate the fflags for this OPEN */
@@ -5209,8 +5343,10 @@ mds_do_opennull(struct compound_state *cs,
 		rfs4_openowner_t *oo,
 		OPEN4res *resp)
 {
-	change_info4 *cinfo = &resp->cinfo;
-	attrmap4 *attrset = &resp->attrset;
+	change_info4 	*cinfo = &resp->cinfo;
+	attrmap4 	*attrset = &resp->attrset;
+
+	mds_layout_t	*plo = NULL;
 
 	if (args->opentype == OPEN4_NOCREATE)
 		resp->status = mds_lookupfile(&args->open_claim4_u.file,
@@ -5221,15 +5357,19 @@ mds_do_opennull(struct compound_state *cs,
 		if (args->mode == EXCLUSIVE4)
 			rfs4_disable_delegation(cs->instp);
 
-		resp->status = mds_createfile(args, req, cs, cinfo, attrset);
+		/*
+		 * Create the file and get the layout.
+		 */
+		resp->status = mds_createfile(args, req, cs, cinfo,
+		    attrset, &plo);
 	}
 
 	if (resp->status == NFS4_OK) {
 
-		/* cs->vp cs->fh now reference the desired file */
-
+		/* cs->vp and cs->fh now references the desired file */
 		mds_do_open(cs, req, oo, do_41_deleg_hack(args->share_access),
-		    (args->share_access & 0xff), args->share_deny, resp, 0);
+		    (args->share_access & 0xff), args->share_deny, resp,
+		    0, plo);
 
 		/*
 		 * If rfs4_createfile set attrset, we must
@@ -5238,8 +5378,7 @@ mds_do_opennull(struct compound_state *cs,
 		if (resp->status != NFS4_OK)
 			resp->attrset =
 			    NFS4_EMPTY_ATTRMAP(RFS4_ATTRVERS(cs));
-	}
-	else
+	} else
 		*cs->statusp = resp->status;
 
 	if (args->mode == EXCLUSIVE4)
@@ -5306,7 +5445,7 @@ mds_do_openprev(struct compound_state *cs, struct svc_req *req,
 
 	mds_do_open(cs, req, oo,
 	    NFS4_DELEG4TYPE2REQTYPE(args->open_claim4_u.delegate_type),
-	    (args->share_access && 0xff), args->share_deny, resp, 0);
+	    (args->share_access && 0xff), args->share_deny, resp, 0, NULL);
 }
 
 static void
@@ -5361,7 +5500,7 @@ mds_do_opendelcur(struct compound_state *cs, struct svc_req *req,
 	rfs4_deleg_state_rele(dsp);
 	mds_do_open(cs, req, oo, DELEG_NONE,
 	    (args->share_access & 0xff),
-	    args->share_deny, resp, 1);
+	    args->share_deny, resp, 1, NULL);
 }
 
 /*ARGSUSED*/
@@ -5641,7 +5780,6 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	DTRACE_NFSV4_2(op__open__downgrade__start, struct compound_state *, cs,
 	    OPEN_DOWNGRADE4args *, args);
 
-
 	if (cs->vp == NULL) {
 		*cs->statusp = resp->status = NFS4ERR_NOFILEHANDLE;
 		goto final;
@@ -5854,7 +5992,6 @@ mds_op_close(nfs_argop4 *argop, nfs_resop4 *resop,
 
 	DTRACE_NFSV4_2(op__close__start, struct compound_state *, cs,
 	    CLOSE4args *, args);
-
 
 	if (cs->vp == NULL) {
 		*cs->statusp = resp->status = NFS4ERR_NOFILEHANDLE;
@@ -8104,7 +8241,7 @@ mds_op_get_devinfo(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *reqp,
     compound_state_t *cs)
 {
 	ba_devid_t devid;
-	mds_mpd_t *mp;
+	mds_mpd_t *mp = NULL;
 
 	GETDEVICEINFO4args *argp = &argop->nfs_argop4_u.opgetdeviceinfo;
 	GETDEVICEINFO4res *resp = &resop->nfs_resop4_u.opgetdeviceinfo;
@@ -8122,7 +8259,6 @@ mds_op_get_devinfo(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *reqp,
 	bcopy(&argp->gdia_device_id, &devid, sizeof (devid));
 
 	mp = mds_find_mpd(cs->instp, devid.i.did);
-
 	if (mp == NULL)
 		goto final;
 
@@ -8159,18 +8295,17 @@ final:
 	DTRACE_NFSV4_2(op__getdeviceinfo__done,
 	    struct compound_state *, cs,
 	    GETDEVICEINFO4res *, resp);
+
+	if (mp != NULL)
+		rfs4_dbe_rele(mp->dbe);
 }
 
-
-/*
- * XXXX: Needs to pass in MDS_SID
- */
-extern bool_t xdr_ds_fh_fmt(XDR *, mds_ds_fh *);
 int
-mds_alloc_ds_fh(fsid_t fsid, nfs41_fid_t fid, nfs_fh4 *fhp)
+mds_alloc_ds_fh(fsid_t fsid, nfs41_fid_t fid, mds_sid *sid,
+    nfs_fh4 *fhp)
 {
-	mds_ds_fh dsfh;
-	unsigned long hostid = 0;
+	mds_ds_fh	dsfh;
+	unsigned long	hostid = 0;
 
 	(void) ddi_strtoul(hw_serial, NULL, 10, &hostid);
 
@@ -8181,12 +8316,8 @@ mds_alloc_ds_fh(fsid_t fsid, nfs41_fid_t fid, nfs_fh4 *fhp)
 	dsfh.fh.v1.mds_id = (uint64_t)hostid;
 
 	/*
-	 * XXX - Still need the MDS SID portion of the
-	 * file handle to be filled in.
-	 */
-	/*
 	 * Use the FSID for the MDS Dataset ID for now.  In the future
-	 * the MDS Dataset ID will be made up of information from the
+	 * the MDS MDS Dataset ID will be made up of information from the
 	 * ZFS dataset (i.e. dataset guid) on the MDS.  Regardless,
 	 * the mds_dataset_id portion of the file handle is opaque so
 	 * we can put what we want there (as long as it identifies the
@@ -8195,6 +8326,21 @@ mds_alloc_ds_fh(fsid_t fsid, nfs41_fid_t fid, nfs_fh4 *fhp)
 	dsfh.fh.v1.mds_dataset_id.len = sizeof (fsid);
 	bcopy(&fsid, dsfh.fh.v1.mds_dataset_id.val,
 	    dsfh.fh.v1.mds_dataset_id.len);
+
+	/*
+	 * The MDS SID portion identifies which dataset
+	 * on the DS to use...
+	 */
+	dsfh.fh.v1.mds_sid.len = sid->len;
+
+	/*
+	 * The mds_dataset_id already has storage allocated
+	 * for the value. The mds_sid does not. We could
+	 * allocate it here, but why? We are abotu to just
+	 * throw it away. So instead, we copy the pointer
+	 * and avoid the free case in the error cleanup.
+	 */
+	dsfh.fh.v1.mds_sid.val = sid->val;
 
 	dsfh.fh.v1.mds_fid.len = fid.len;
 	bcopy(fid.val, dsfh.fh.v1.mds_fid.val, fid.len);
@@ -8207,51 +8353,22 @@ mds_alloc_ds_fh(fsid_t fsid, nfs41_fid_t fid, nfs_fh4 *fhp)
 
 int mds_layout_is_dense = 1;
 
-void
-fake_spe(nfs_server_instance_t *instp, mds_layout_t **flp)
-{
-	extern int mds_max_lo_devs;
-	extern mds_layout_t *mds_gen_default_layout(nfs_server_instance_t *,
-	    int);
-
-	mds_layout_t *lp;
-	bool_t create = FALSE;
-	int key = 1;
-
-	if (flp == NULL)
-		return;
-
-	*flp = NULL;
-
-	rw_enter(&instp->mds_layout_lock, RW_READER);
-	lp = (mds_layout_t *)rfs4_dbsearch(instp->mds_layout_idx,
-	    (void *)(uintptr_t)key, &create, NULL, RFS4_DBS_VALID);
-	rw_exit(&instp->mds_layout_lock);
-
-	if (lp == NULL)
-		lp = mds_gen_default_layout(instp, mds_max_lo_devs);
-
-	if (lp != NULL)
-		*flp = lp;
-}
-
 /*
- * get file layout XXX? should the rfs4_file_t be cached in
- * compound state
+ * get file layout
+ * XXX? should the rfs4_file_t be cached in compound state?
  */
 nfsstat4
-mds_get_flo(nfs_server_instance_t *instp, vnode_t *vp, mds_layout_t **flopp)
+mds_get_file_layout(nfs_server_instance_t *instp, vnode_t *vp,
+    mds_layout_t **plp)
 {
 	rfs4_file_t *fp;
 	bool_t create = FALSE;
 
 	ASSERT(vp);
 	ASSERT(instp);
-	ASSERT(flopp);
+	ASSERT(plp);
 
 	fp = rfs4_findfile(instp, vp, NULL, &create);
-
-	/* Odd.. no rfs4_file_t for the vnode.. */
 	if (fp == NULL)
 		return (NFS4ERR_LAYOUTUNAVAILABLE);
 
@@ -8260,22 +8377,29 @@ mds_get_flo(nfs_server_instance_t *instp, vnode_t *vp, mds_layout_t **flopp)
 		/* Nope, read from disk */
 		if (mds_get_odl(vp, &fp->layoutp) != NFS4_OK) {
 			/*
-			 * XXXXX:
-			 * XXXXX: No ODL, so lets go query PE
-			 * XXXXX:
+			 * So how can we not have already gotten
+			 * a layout from the create or not have
+			 * one on disk?
 			 */
-			fake_spe(instp, &fp->layoutp);
-			if (fp->layoutp == NULL) {
-				rfs4_file_rele(fp);
-				return (NFS4ERR_LAYOUTUNAVAILABLE);
-			}
+			rfs4_file_rele(fp);
+			return (NFS4ERR_LAYOUTUNAVAILABLE);
+		} else {
+			/*
+			 * We've stuffed it in the rfs4_file_t!
+			 */
+			rfs4_dbe_hold(fp->layoutp->dbe);
 		}
+	} else {
+		/*
+		 * We need to hold a reference to it
+		 */
+		rfs4_dbe_hold(fp->layoutp->dbe);
 	}
 
 	/*
 	 * pass back the mds_layout
 	 */
-	*flopp = (mds_layout_t *)fp->layoutp;
+	*plp = (mds_layout_t *)fp->layoutp;
 	rfs4_file_rele(fp);
 	return (NFS4_OK);
 }
@@ -8303,7 +8427,7 @@ mds_fetch_layout(struct compound_state *cs,
     LAYOUTGET4args *argp, LAYOUTGET4res *resp)
 {
 	mds_layout_t *lp;
-	mds_mpd_t *dp;
+	mds_mpd_t *mp;
 	layout4 *logrp;
 	nfsv4_1_file_layout4 otw_flo;
 	nfs_fh4 *nfl_fh_list;
@@ -8318,25 +8442,31 @@ mds_fetch_layout(struct compound_state *cs,
 	int  xdr_size = 0;
 	char *xdr_buffer;
 
-
-	if (no_layouts || mds_get_flo(cs->instp, cs->vp, &lp) != NFS4_OK)
+	if (no_layouts ||
+	    mds_get_file_layout(cs->instp, cs->vp, &lp) != NFS4_OK)
 		return (NFS4ERR_LAYOUTUNAVAILABLE);
 
-	/* validate the device id */
-	dp = mds_find_mpd(cs->instp, lp->dev_id);
-	if (dp == NULL) {
-		DTRACE_PROBE1(nfss41__e__bad_devid, uint32_t, lp->dev_id);
+	/*
+	 * validate the device id
+	 */
+	mp = mds_find_mpd(cs->instp, lp->mlo_mpd_id);
+	if (mp == NULL) {
+		DTRACE_PROBE1(nfss41__e__bad_devid, uint32_t, lp->mlo_mpd_id);
+		rfs4_dbe_rele(lp->dbe);
 		return (NFS4ERR_LAYOUTUNAVAILABLE);
 	}
 
+	rfs4_dbe_rele(mp->dbe);
+
 	bzero(&otw_flo, sizeof (otw_flo));
 
-	mds_set_deviceid(lp->dev_id, &otw_flo.nfl_deviceid);
+	mds_set_deviceid(lp->mlo_mpd_id, &otw_flo.nfl_deviceid);
 
 	/*
 	 * 	NFL4_UFLG_COMMIT_THRU_MDS is FALSE
 	 */
-	otw_flo.nfl_util = (lp->stripe_unit & NFL4_UFLG_STRIPE_UNIT_SIZE_MASK);
+	otw_flo.nfl_util = (lp->mlo_lc.lc_stripe_unit &
+	    NFL4_UFLG_STRIPE_UNIT_SIZE_MASK);
 
 	if (mds_layout_is_dense)
 		otw_flo.nfl_util |= NFL4_UFLG_DENSE;
@@ -8348,18 +8478,20 @@ mds_fetch_layout(struct compound_state *cs,
 
 	/*
 	 */
-	nfl_size = lp->stripe_count * sizeof (nfs_fh4);
+	nfl_size = lp->mlo_lc.lc_stripe_count * sizeof (nfs_fh4);
 
 	nfl_fh_list = kmem_zalloc(nfl_size, KM_NOSLEEP);
-	if (nfl_fh_list == NULL)
+	if (nfl_fh_list == NULL) {
+		rfs4_dbe_rele(lp->dbe);
 		return (NFS4ERR_LAYOUTTRYLATER);
+	}
 
 	/*
-	 * this of course is totally bogus and this
-	 * whole function will be re-whacked in the
+	 * this of course is still somewhat bogus and this
+	 * whole function might be re-whacked in the
 	 * product.
 	 */
-	for (i = 0; i < lp->stripe_count; i++) {
+	for (i = 0; i < lp->mlo_lc.lc_stripe_count; i++) {
 		nfs41_fid_t fid =
 		    ((nfs41_fh_fmt_t *)cs->fh.nfs_fh4_val)->fh.v1.obj_fid;
 
@@ -8367,15 +8499,17 @@ mds_fetch_layout(struct compound_state *cs,
 		 * Build DS Filehandles.
 		 */
 		err = mds_alloc_ds_fh(cs->exi->exi_fsid, fid,
-		    &(nfl_fh_list[i]));
+		    &lp->mlo_lc.lc_mds_sids[i], &(nfl_fh_list[i]));
 		if (err) {
-			mds_free_fh_list(nfl_fh_list, lp->stripe_count);
+			mds_free_fh_list(nfl_fh_list,
+			    lp->mlo_lc.lc_stripe_count);
+			rfs4_dbe_rele(lp->dbe);
 			return (NFS4ERR_LAYOUTUNAVAILABLE);
 		}
 
 	}
 
-	otw_flo.nfl_fh_list.nfl_fh_list_len = lp->stripe_count;
+	otw_flo.nfl_fh_list.nfl_fh_list_len = lp->mlo_lc.lc_stripe_count;
 	otw_flo.nfl_fh_list.nfl_fh_list_val = nfl_fh_list;
 
 	xdr_size = xdr_sizeof(xdr_nfsv4_1_file_layout4, &otw_flo);
@@ -8388,7 +8522,8 @@ mds_fetch_layout(struct compound_state *cs,
 	 */
 	xdr_buffer = kmem_alloc(xdr_size, KM_NOSLEEP);
 	if (xdr_buffer == NULL) {
-		mds_free_fh_list(nfl_fh_list, lp->stripe_count);
+		mds_free_fh_list(nfl_fh_list, lp->mlo_lc.lc_stripe_count);
+		rfs4_dbe_rele(lp->dbe);
 		return (NFS4ERR_LAYOUTTRYLATER);
 	}
 
@@ -8400,7 +8535,8 @@ mds_fetch_layout(struct compound_state *cs,
 
 	if (xdr_nfsv4_1_file_layout4(&xdr, &otw_flo) == FALSE) {
 		kmem_free(xdr_buffer, xdr_size);
-		mds_free_fh_list(nfl_fh_list, lp->stripe_count);
+		mds_free_fh_list(nfl_fh_list, lp->mlo_lc.lc_stripe_count);
+		rfs4_dbe_rele(lp->dbe);
 		return (NFS4ERR_LAYOUTTRYLATER);
 	}
 
@@ -8417,10 +8553,12 @@ mds_fetch_layout(struct compound_state *cs,
 		printf("rfs41_findlogrant() returned NULL; create=%d\n ",
 		    create);
 		kmem_free(xdr_buffer, xdr_size);
-		mds_free_fh_list(nfl_fh_list, lp->stripe_count);
+		mds_free_fh_list(nfl_fh_list, lp->mlo_lc.lc_stripe_count);
 		rfs4_file_rele(fp);
+		rfs4_dbe_rele(lp->dbe);
 		return (NFS4ERR_SERVERFAULT);
 	}
+
 	if (create == TRUE) {
 		/* Insert the grant on the client's list */
 		rfs4_dbe_lock(cs->cp->dbe);
@@ -8470,11 +8608,12 @@ mds_fetch_layout(struct compound_state *cs,
 	logrp->lo_offset = 0;
 	logrp->lo_length = -1;
 	logrp->lo_iomode = LAYOUTIOMODE4_RW;
-	logrp->lo_content.loc_type = lp->layout_type;
+	logrp->lo_content.loc_type = lp->mlo_type;
 	logrp->lo_content.loc_body.loc_body_len = xdr_size;
 	logrp->lo_content.loc_body.loc_body_val = xdr_buffer;
 
-	mds_free_fh_list(nfl_fh_list, lp->stripe_count);
+	mds_free_fh_list(nfl_fh_list, lp->mlo_lc.lc_stripe_count);
+	rfs4_dbe_rele(lp->dbe);
 	return (NFS4_OK);
 }
 
