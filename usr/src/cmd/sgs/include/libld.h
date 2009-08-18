@@ -390,7 +390,7 @@ struct ofl_desc {
 #define	FLG_OF1_TLSOREL	0x00100000	/* output relocation against .tlsbss */
 					/*	section */
 #define	FLG_OF1_MEMORY	0x00200000	/* produce a memory model */
-
+#define	FLG_OF1_NGLBDIR	0x00400000	/* no DT_1_DIRECT flag allowed */
 #define	FLG_OF1_ENCDIFF	0x00800000	/* Host running linker has different */
 					/*	byte order than output object */
 #define	FLG_OF1_VADDR	0x01000000	/* user segment defines a vaddr */
@@ -544,7 +544,7 @@ struct ifl_desc {			/* input file descriptor */
 	Word		ifl_shstrndx;	/* index to .shstrtab */
 	Word		ifl_vercnt;	/* number of versions in file */
 	Half		ifl_neededndx;	/* index to NEEDED in .dyn section */
-	Word		ifl_flags;	/* Explicit/implicit reference */
+	Word		ifl_flags;	/* explicit/implicit reference */
 	Is_desc		**ifl_isdesc;	/* isdesc[scn ndx] = Is_desc ptr */
 	Sdf_desc	*ifl_sdfdesc;	/* control definition */
 	Versym		*ifl_versym;	/* version symbol table array */
@@ -954,35 +954,31 @@ struct sym_avlnode {
  * Structure to manage the shared object definition lists.  There are two lists
  * that use this structure:
  *
- *  o	ofl_soneed; maintain the list of implicitly required dependencies
+ *  -	ofl_soneed; maintain the list of implicitly required dependencies
  *	(ie. shared objects needed by other shared objects).  These definitions
  *	may include RPATH's required to locate the dependencies, and any
  *	version requirements.
  *
- *  o	ofl_socntl; maintains the shared object control definitions.  These are
+ *  -	ofl_socntl; maintains the shared object control definitions.  These are
  *	provided by the user (via a mapfile) and are used to indicate any
- *	SONAME translations and verion control requirements.
+ *	version control requirements.
  */
 struct	sdf_desc {
 	const char	*sdf_name;	/* the shared objects file name */
-	const char	*sdf_soname;	/* the shared objects SONAME */
 	char		*sdf_rpath;	/* library search path DT_RPATH */
 	const char	*sdf_rfile;	/* referencing file for diagnostics */
 	Ifl_desc	*sdf_file;	/* the final input file descriptor */
 	Alist		*sdf_vers;	/* list of versions that are required */
 					/*	from this object */
 	Alist		*sdf_verneed;	/* list of VERNEEDS to create for */
-					/*	this object (via SPECVERS or */
-					/*	ADDVERS) */
+					/*	object via mapfile ADDVERS */
 	Word		sdf_flags;
 };
 
-#define	FLG_SDF_SONAME	0x02		/* An alternative SONAME is supplied */
-#define	FLG_SDF_SELECT	0x04		/* version control selection required */
-#define	FLG_SDF_VERIFY	0x08		/* version definition verification */
+#define	FLG_SDF_SELECT	0x01		/* version control selection required */
+#define	FLG_SDF_VERIFY	0x02		/* version definition verification */
 					/*	required */
-#define	FLG_SDF_SPECVER	0x10		/* specify VERNEEDS */
-#define	FLG_SDF_ADDVER	0x20		/* add VERNEED references */
+#define	FLG_SDF_ADDVER	0x04		/* add VERNEED references */
 
 /*
  * Structure to manage shared object version usage requirements.
@@ -999,12 +995,12 @@ struct	sdv_desc {
  * Structures to manage versioning information.  Two versioning structures are
  * defined:
  *
- *   o	a version descriptor maintains a linked list of versions and their
+ *   -	a version descriptor maintains a linked list of versions and their
  *	associated dependencies.  This is used to build the version definitions
  *	for an image being created (see map_symbol), and to determine the
  *	version dependency graph for any input files that are versioned.
  *
- *   o	a version index array contains each version of an input file that is
+ *   -	a version index array contains each version of an input file that is
  *	being processed.  It informs us which versions are available for
  *	binding, and is used to generate any version dependency information.
  */
@@ -1034,9 +1030,7 @@ struct	ver_index {
 
 #define	FLG_VER_AVAIL	0x10		/* version is available for binding */
 #define	FLG_VER_REFER	0x20		/* version has been referenced */
-#define	FLG_VER_SPECVER	0x40		/* via $SPECVERS in mapfile. */
-					/* 	Cannot be normalized away */
-#define	FLG_VER_CYCLIC	0x80		/* a member of cyclic dependency */
+#define	FLG_VER_CYCLIC	0x40		/* a member of cyclic dependency */
 
 /*
  * isalist(1) descriptor - used to break an isalist string into its component

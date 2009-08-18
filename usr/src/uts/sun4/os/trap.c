@@ -1312,7 +1312,7 @@ trap_cleanup(
 		}
 
 		if (curthread->t_rprof != NULL) {
-			realsigprof(0, 0);
+			realsigprof(0, 0, 0);
 			curthread->t_sig_check = 1;
 		}
 	}
@@ -1566,6 +1566,7 @@ trap_rtt(void)
 	}
 	if (CPU->cpu_runrun || curthread->t_schedflag & TS_ANYWAITQ)
 		preempt();
+	prunstop();
 	if (lwp->lwp_pcb.pcb_step != STEP_NONE)
 		prdostep();
 

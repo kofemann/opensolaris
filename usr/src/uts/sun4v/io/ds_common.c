@@ -168,6 +168,8 @@ static int ds_svc_port_up(ds_svc_t *svc, void *arg);
 /* service utilities */
 static void ds_reset_svc(ds_svc_t *svc, ds_port_t *port);
 static int ds_svc_register_onport(ds_svc_t *svc, ds_port_t *port);
+static int ds_svc_register_onport_walker(ds_svc_t *svc, void *arg);
+static void ds_set_port_ready(ds_port_t *port, uint16_t major, uint16_t minor);
 
 /* port utilities */
 static void ds_port_reset(ds_port_t *port);
@@ -195,7 +197,6 @@ static ds_svc_t *ds_find_clnt_svc_by_hdl_port(ds_svc_hdl_t hdl,
 static ds_svc_t *ds_find_svc_by_id_port(char *svc_id, int is_client,
     ds_port_t *port);
 static ds_svc_t *ds_svc_clone(ds_svc_t *svc);
-static void ds_portset_del_active_clients(char *service, ds_portset_t *portsp);
 static void ds_check_for_dup_services(ds_svc_t *svc);
 static void ds_delete_svc_entry(ds_svc_t *svc);
 
@@ -407,6 +408,7 @@ ds_ldc_fini(ds_port_t *port)
 	char	ebuf[DS_EBUFSIZE];
 
 	ASSERT(port->state >= DS_PORT_LDC_INIT);
+	ASSERT(MUTEX_HELD(&port->lock));
 
 	DS_DBG_LDC(CE_NOTE, "ds@%lx: %s: ldc_id=%ld" DS_EOL, PORTID(port),
 	    __func__, port->ldc.id);
@@ -428,6 +430,10 @@ ds_ldc_fini(ds_port_t *port)
 		    PORTID(port), __func__, ds_errno_to_str(rv, ebuf));
 		return (rv);
 	}
+
+	port->ldc.id = (uint64_t)-1;
+	port->ldc.hdl = NULL;
+	port->ldc.state = 0;
 
 	return (rv);
 }
@@ -459,7 +465,13 @@ ds_recv_msg(ds_port_t *port, caddr_t msgp, size_t *sizep)
 
 		nbytes = bytes_left;
 
-		if ((rv = ldc_read(port->ldc.hdl, msgp, &nbytes)) != 0) {
+		mutex_enter(&port->lock);
+		if (port->ldc.state == LDC_UP) {
+			rv = ldc_read(port->ldc.hdl, msgp, &nbytes);
+		} else
+			rv = ENXIO;
+		mutex_exit(&port->lock);
+		if (rv != 0) {
 			if (rv == ECONNRESET) {
 				break;
 			} else if (rv != EAGAIN) {
@@ -537,7 +549,15 @@ ds_handle_recv(void *arg)
 
 	mutex_enter(&port->rcv_lock);
 
-	while (((rv = ldc_chkq(port->ldc.hdl, &hasdata)) == 0) && hasdata) {
+	for (;;) {
+		mutex_enter(&port->lock);
+		if (port->ldc.state == LDC_UP) {
+			rv = ldc_chkq(port->ldc.hdl, &hasdata);
+		} else
+			rv = ENXIO;
+		mutex_exit(&port->lock);
+		if (rv != 0 || !hasdata)
+			break;
 
 		DS_DBG(CE_NOTE, "ds@%lx: %s: reading next message" DS_EOL,
 		    PORTID(port), __func__);
@@ -672,6 +692,8 @@ ds_send_msg(ds_port_t *port, caddr_t msg, size_t msglen)
 	    __func__, msglen);
 	DS_DUMP_MSG(DS_DBG_FLAG_LDC, msg, msglen);
 
+	(void) ds_log_add_msg(DS_LOG_OUT(port->id), (uint8_t *)msg, msglen);
+
 	/*
 	 * Ensure that no other messages can be sent on this port by holding
 	 * the tx_lock mutex in case the write doesn't get sent with one write.
@@ -680,7 +702,13 @@ ds_send_msg(ds_port_t *port, caddr_t msg, size_t msglen)
 	mutex_enter(&port->tx_lock);
 
 	do {
-		if ((rv = ldc_write(port->ldc.hdl, currp, &msglen)) != 0) {
+		mutex_enter(&port->lock);
+		if (port->ldc.state == LDC_UP) {
+			rv = ldc_write(port->ldc.hdl, currp, &msglen);
+		} else
+			rv = ENXIO;
+		mutex_exit(&port->lock);
+		if (rv != 0) {
 			if (rv == ECONNRESET) {
 				mutex_exit(&port->tx_lock);
 				ds_handle_down_reset_events(port);
@@ -689,9 +717,10 @@ ds_send_msg(ds_port_t *port, caddr_t msg, size_t msglen)
 			    (loopcnt++ < ds_retries)) {
 				drv_usecwait(ds_delay);
 			} else {
-				cmn_err(CE_WARN, "ds@%lx: send_msg: ldc_write "
-				    "failed (%d), %d bytes remaining" DS_EOL,
-				    PORTID(port), rv, (int)amt_left);
+				DS_DBG_PRCL(CE_NOTE, "ds@%lx: send_msg: "
+				    "ldc_write failed (%d), %d bytes "
+				    "remaining" DS_EOL, PORTID(port), rv,
+				    (int)amt_left);
 				goto error;
 			}
 		} else {
@@ -780,6 +809,10 @@ ds_handle_init_req(ds_port_t *port, caddr_t buf, size_t len)
 	 */
 	(void) ds_send_msg(port, msg, msglen);
 	DS_FREE(msg, msglen);
+
+	if (match) {
+		ds_set_port_ready(port, req->major_vers, ack->minor_vers);
+	}
 }
 
 static void
@@ -787,6 +820,8 @@ ds_handle_init_ack(ds_port_t *port, caddr_t buf, size_t len)
 {
 	ds_init_ack_t	*ack;
 	ds_ver_t	*ver;
+	uint16_t	major;
+	uint16_t	minor;
 	size_t		explen = DS_MSG_LEN(ds_init_ack_t);
 
 	/* sanity check the incoming message */
@@ -801,6 +836,13 @@ ds_handle_init_ack(ds_port_t *port, caddr_t buf, size_t len)
 
 	mutex_enter(&port->lock);
 
+	if (port->state == DS_PORT_READY) {
+		DS_DBG_PRCL(CE_NOTE, "ds@%lx: <init_ack: port ready" DS_EOL,
+		    PORTID(port));
+		mutex_exit(&port->lock);
+		return;
+	}
+
 	if (port->state != DS_PORT_INIT_REQ) {
 		DS_DBG_PRCL(CE_NOTE, "ds@%lx: <init_ack: invalid state: %d"
 		    DS_EOL, PORTID(port), port->state);
@@ -809,49 +851,14 @@ ds_handle_init_ack(ds_port_t *port, caddr_t buf, size_t len)
 	}
 
 	ver = &(ds_vers[port->ver_idx]);
-
-	/* agreed upon a major version */
-	port->ver.major = ver->major;
-
-	/*
-	 * If the returned minor version is larger than
-	 * the requested minor version, use the lower of
-	 * the two, i.e. the requested version.
-	 */
-	if (ack->minor_vers >= ver->minor) {
-		/*
-		 * Use the minor version specified in the
-		 * original request.
-		 */
-		port->ver.minor = ver->minor;
-	} else {
-		/*
-		 * Use the lower minor version returned in
-		 * the ack. By definition, all lower minor
-		 * versions must be supported.
-		 */
-		port->ver.minor = ack->minor_vers;
-	}
-
-	port->state = DS_PORT_READY;
-
-	DS_DBG_PRCL(CE_NOTE, "ds@%lx: <init_ack: port ready v%d.%d" DS_EOL,
-	    PORTID(port), port->ver.major, port->ver.minor);
-
+	major = ver->major;
+	minor = MIN(ver->minor, ack->minor_vers);
 	mutex_exit(&port->lock);
 
-	/*
-	 * The port came up, so update all the services
-	 * with this information. Follow that up with an
-	 * attempt to register any service that is not
-	 * already registered.
-	 */
-	mutex_enter(&ds_svcs.lock);
+	DS_DBG_PRCL(CE_NOTE, "ds@%lx: <init_ack: port ready v%d.%d" DS_EOL,
+	    PORTID(port), major, minor);
 
-	(void) ds_walk_svcs(ds_svc_port_up, port);
-	(void) ds_walk_svcs(ds_svc_register, NULL);
-
-	mutex_exit(&ds_svcs.lock);
+	ds_set_port_ready(port, major, minor);
 }
 
 static void
@@ -1245,11 +1252,10 @@ ds_try_next_port(ds_svc_t *svc, int portid)
 	/*
 	 * Get the ports that haven't been tried yet and are available to try.
 	 */
-	DS_PORTSET_SETNULL(totry);
+	DS_PORTSET_DUP(totry, svc->avail);
 	for (i = 0; i < DS_MAX_PORTS; i++) {
-		if (!DS_PORT_IN_SET(svc->tried, i) &&
-		    DS_PORT_IN_SET(svc->avail, i))
-			DS_PORTSET_ADD(totry, i);
+		if (DS_PORT_IN_SET(svc->tried, i))
+			DS_PORTSET_DEL(totry, i);
 	}
 
 	if (DS_PORTSET_ISNULL(totry))
@@ -1326,8 +1332,9 @@ ds_handle_reg_nack(ds_port_t *port, caddr_t buf, size_t len)
 
 	/* make sure the message makes sense */
 	if (svc->state != DS_SVC_REG_PENDING) {
-		cmn_err(CE_WARN, "ds@%lx: <reg_nack: invalid state (%d)" DS_EOL,
-		    PORTID(port), svc->state);
+		DS_DBG_PRCL(CE_NOTE, "ds@%lx: <reg_nack: '%s' handle: 0x%llx "
+		    "invalid state (%d)" DS_EOL, PORTID(port), svc->cap.svc_id,
+		    (u_longlong_t)nack->svc_handle, svc->state);
 		goto done;
 	}
 
@@ -1397,6 +1404,7 @@ ds_handle_unreg_req(ds_port_t *port, caddr_t buf, size_t len)
 	char		*msg;
 	size_t		msglen;
 	size_t		explen = DS_MSG_LEN(ds_unreg_req_t);
+	boolean_t	is_up;
 
 	/* sanity check the incoming message */
 	if (len != explen) {
@@ -1415,10 +1423,15 @@ ds_handle_unreg_req(ds_port_t *port, caddr_t buf, size_t len)
 	    ((svc = ds_find_clnt_svc_by_hdl_port(req->svc_handle, port))
 	    == NULL && ((svc = ds_get_svc(req->svc_handle)) == NULL ||
 	    svc->port != port))) {
-		cmn_err(CE_WARN, "ds@%lx: <unreg_req: invalid handle 0x%llx"
+		mutex_exit(&ds_svcs.lock);
+		mutex_enter(&port->lock);
+		is_up = (port->ldc.state == LDC_UP);
+		mutex_exit(&port->lock);
+		if (!is_up)
+			return;
+		DS_DBG_PRCL(CE_NOTE, "ds@%lx: <unreg_req: invalid handle 0x%llx"
 		    DS_EOL, PORTID(port), (u_longlong_t)req->svc_handle);
 		ds_send_unreg_nack(port, req->svc_handle);
-		mutex_exit(&ds_svcs.lock);
 		return;
 	}
 
@@ -2072,6 +2085,23 @@ ds_svc_free(ds_svc_t *svc, void *arg)
 	return (0);
 }
 
+static void
+ds_set_svc_port_tried(char *svc_id, ds_port_t *port)
+{
+	int		idx;
+	ds_svc_t	*svc;
+
+	ASSERT(MUTEX_HELD(&ds_svcs.lock));
+
+	/* walk every table entry */
+	for (idx = 0; idx < ds_svcs.maxsvcs; idx++) {
+		svc = ds_svcs.tbl[idx];
+		if (!DS_SVC_ISFREE(svc) && (svc->flags & DSSF_ISCLIENT) != 0 &&
+		    strcmp(svc_id, svc->cap.svc_id) == 0)
+			DS_PORTSET_ADD(svc->tried, PORTID(port));
+	}
+}
+
 static int
 ds_svc_register_onport(ds_svc_t *svc, ds_port_t *port)
 {
@@ -2083,7 +2113,23 @@ ds_svc_register_onport(ds_svc_t *svc, ds_port_t *port)
 	if (!DS_PORT_IN_SET(svc->avail, PORTID(port)))
 		return (0);
 
-	DS_PORTSET_ADD(svc->tried, PORTID(port));
+	if (DS_PORT_IN_SET(svc->tried, PORTID(port)))
+		return (0);
+
+	if ((svc->flags & DSSF_ISCLIENT) == 0) {
+		DS_PORTSET_ADD(svc->tried, PORTID(port));
+		if (svc->state != DS_SVC_INACTIVE)
+			return (0);
+	} else {
+		ds_set_svc_port_tried(svc->cap.svc_id, port);
+
+		/*
+		 * Never send a client reg req to the SP.
+		 */
+		if (PORTID(port) == ds_sp_port_id) {
+			return (0);
+		}
+	}
 
 	if (ds_send_reg_req(svc, port) == 0) {
 		/* register sent successfully */
@@ -2094,6 +2140,18 @@ ds_svc_register_onport(ds_svc_t *svc, ds_port_t *port)
 		/* reset the service */
 		ds_reset_svc(svc, port);
 	}
+	return (0);
+}
+
+static int
+ds_svc_register_onport_walker(ds_svc_t *svc, void *arg)
+{
+	ASSERT(MUTEX_HELD(&ds_svcs.lock));
+
+	if (DS_SVC_ISFREE(svc))
+		return (0);
+
+	(void) ds_svc_register_onport(svc, arg);
 	return (0);
 }
 
@@ -2112,7 +2170,10 @@ ds_svc_register(ds_svc_t *svc, void *arg)
 
 	DS_PORTSET_DUP(ports, svc->avail);
 	if (svc->flags & DSSF_ISCLIENT) {
-		ds_portset_del_active_clients(svc->cap.svc_id, &ports);
+		for (idx = 0; idx < DS_MAX_PORTS; idx++) {
+			if (DS_PORT_IN_SET(svc->tried, idx))
+				DS_PORTSET_DEL(ports, idx);
+		}
 	} else if (svc->state != DS_SVC_INACTIVE)
 		return (0);
 
@@ -2138,7 +2199,6 @@ ds_svc_register(ds_svc_t *svc, void *arg)
 		if (ds_svc_register_onport(svc, port)) {
 			if ((svc->flags & DSSF_ISCLIENT) == 0)
 				break;
-			DS_PORTSET_DEL(svc->avail, idx);
 		}
 	}
 
@@ -2209,6 +2269,37 @@ ds_svc_port_up(ds_svc_t *svc, void *arg)
 	DS_PORTSET_DEL(svc->tried, port->id);
 
 	return (0);
+}
+
+static void
+ds_set_port_ready(ds_port_t *port, uint16_t major, uint16_t minor)
+{
+	boolean_t was_ready;
+
+	mutex_enter(&port->lock);
+	was_ready = (port->state == DS_PORT_READY);
+	if (!was_ready) {
+		port->state = DS_PORT_READY;
+		port->ver.major = major;
+		port->ver.minor = minor;
+	}
+	mutex_exit(&port->lock);
+
+	if (!was_ready) {
+
+		/*
+		 * The port came up, so update all the services
+		 * with this information. Follow that up with an
+		 * attempt to register any service that is not
+		 * already registered.
+		 */
+		mutex_enter(&ds_svcs.lock);
+
+		(void) ds_walk_svcs(ds_svc_port_up, port);
+		(void) ds_walk_svcs(ds_svc_register_onport_walker, port);
+
+		mutex_exit(&ds_svcs.lock);
+	}
 }
 
 ds_svc_t *
@@ -2731,16 +2822,11 @@ ds_port_common_init(ds_port_t *port)
 }
 
 void
-ds_port_common_fini(ds_port_t *port, int is_fini)
+ds_port_common_fini(ds_port_t *port)
 {
-	port->state = DS_PORT_FREE;
+	ASSERT(MUTEX_HELD(&port->lock));
 
-	if (is_fini && (port->flags & DS_PORT_MUTEX_INITED) != 0) {
-		mutex_destroy(&port->lock);
-		mutex_destroy(&port->tx_lock);
-		mutex_destroy(&port->rcv_lock);
-		port->flags &= ~DS_PORT_MUTEX_INITED;
-	}
+	port->state = DS_PORT_FREE;
 
 	DS_PORTSET_DEL(ds_allports, port->id);
 
@@ -3147,37 +3233,6 @@ ds_hdl_lookup(char *service, uint_t is_client, ds_svc_hdl_t *hdlp,
 	*nhdlsp = i_ds_hdl_lookup(service, is_client, hdlp, maxhdls);
 	mutex_exit(&ds_svcs.lock);
 	return (0);
-}
-
-static void
-ds_portset_del_active_clients(char *service, ds_portset_t *portsp)
-{
-	ds_portset_t ports;
-	int idx;
-	ds_svc_t *svc;
-
-	ASSERT(MUTEX_HELD(&ds_svcs.lock));
-
-	DS_PORTSET_DUP(ports, *portsp);
-	for (idx = 0; idx < ds_svcs.maxsvcs; idx++) {
-		svc = ds_svcs.tbl[idx];
-		if (DS_SVC_ISFREE(svc))
-			continue;
-		if (strcmp(svc->cap.svc_id, service) == 0 &&
-		    (svc->flags & DSSF_ISCLIENT) != 0 &&
-		    svc->state != DS_SVC_INACTIVE &&
-		    svc->port != NULL) {
-			DS_PORTSET_DEL(ports, PORTID(svc->port));
-		}
-	}
-
-	/*
-	 * Never send a client reg req to the SP.
-	 */
-	if (ds_sp_port_id != DS_PORTID_INVALID) {
-		DS_PORTSET_DEL(ports, ds_sp_port_id);
-	}
-	DS_PORTSET_DUP(*portsp, ports);
 }
 
 /*

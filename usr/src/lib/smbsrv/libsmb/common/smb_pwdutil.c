@@ -45,8 +45,6 @@
 #define	SMB_PASSTEMP	"/var/smb/ptmp"
 #define	SMB_PASSLCK	"/var/smb/.pwd.lock"
 
-#define	SMB_LIB_ALT	"/usr/lib/smbsrv/libsmb_pwd.so"
-
 #define	SMB_PWD_DISABLE	"*DIS*"
 #define	SMB_PWD_BUFSIZE 256
 
@@ -98,7 +96,7 @@ typedef struct smb_pwbuf {
 #define	SMB_PWD_GETF_NOPWD	2	/* password is not needed */
 
 static smb_pwbuf_t *smb_pwd_fgetent(FILE *, smb_pwbuf_t *, uint32_t);
-static int smb_pwd_fputent(FILE *, smb_pwbuf_t *);
+static int smb_pwd_fputent(FILE *, const smb_pwbuf_t *);
 static int smb_pwd_chgpwent(smb_passwd_t *, const char *, int);
 static int smb_pwd_update(const char *, const char *, int);
 
@@ -172,11 +170,9 @@ smb_pwd_init(boolean_t create_cache)
 		smb_lucache_update();
 	}
 
-	smb_pwd_hdl = dlopen(SMB_LIB_ALT, RTLD_NOW | RTLD_LOCAL);
-	if (smb_pwd_hdl == NULL) {
-		/* No library is interposed */
+	smb_pwd_hdl = smb_dlopen();
+	if (smb_pwd_hdl == NULL)
 		return;
-	}
 
 	bzero((void *)&smb_pwd_ops, sizeof (smb_pwd_ops));
 
@@ -212,7 +208,7 @@ smb_pwd_init(boolean_t create_cache)
 	    smb_pwd_ops.pwop_iteropen == NULL ||
 	    smb_pwd_ops.pwop_iterclose == NULL ||
 	    smb_pwd_ops.pwop_iterate == NULL) {
-		(void) dlclose(smb_pwd_hdl);
+		smb_dlclose(smb_pwd_hdl);
 		smb_pwd_hdl = NULL;
 
 		/* If error or function(s) are missing, use original lib */
@@ -230,11 +226,9 @@ void
 smb_pwd_fini(void)
 {
 	smb_lucache_destroy();
-
-	if (smb_pwd_hdl) {
-		(void) dlclose(smb_pwd_hdl);
-		smb_pwd_hdl = NULL;
-	}
+	smb_dlclose(smb_pwd_hdl);
+	smb_pwd_hdl = NULL;
+	bzero((void *)&smb_pwd_ops, sizeof (smb_pwd_ops));
 }
 
 /*
@@ -695,11 +689,11 @@ smb_pwd_chgpwent(smb_passwd_t *smbpw, const char *password, int control)
 		*smbpw->pw_lmhash = '\0';
 	} else {
 		smbpw->pw_flags |= SMB_PWF_LM;
-		(void) smb_auth_lm_hash((char *)password, smbpw->pw_lmhash);
+		(void) smb_auth_lm_hash(password, smbpw->pw_lmhash);
 	}
 
 	smbpw->pw_flags |= SMB_PWF_NT;
-	(void) smb_auth_ntlm_hash((char *)password, smbpw->pw_nthash);
+	(void) smb_auth_ntlm_hash(password, smbpw->pw_nthash);
 	return (SMB_PWE_SUCCESS);
 }
 
@@ -711,7 +705,7 @@ smb_pwd_chgpwent(smb_passwd_t *smbpw, const char *password, int control)
  * file.
  */
 static int
-smb_pwd_fputent(FILE *fp, smb_pwbuf_t *pwbuf)
+smb_pwd_fputent(FILE *fp, const smb_pwbuf_t *pwbuf)
 {
 	smb_passwd_t *pw = pwbuf->pw_pwd;
 	char hex_nthash[SMBAUTH_HEXHASH_SZ+1];

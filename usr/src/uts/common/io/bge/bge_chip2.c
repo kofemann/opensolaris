@@ -149,8 +149,6 @@ static uint16_t bge_dma_miss_limit	= 20;
 
 static uint32_t bge_stop_start_on_sync	= 0;
 
-boolean_t bge_jumbo_enable		= B_TRUE;
-
 /*
  * bge_intr_max_loop controls the maximum loop number within bge_intr.
  * When loading NIC with heavy network traffic, it is useful.
@@ -1185,7 +1183,7 @@ bge_mii_get16(bge_t *bgep, bge_regno_t regno)
 	ASSERT(mutex_owned(bgep->genlock));
 
 	if (DEVICE_5906_SERIES_CHIPSETS(bgep) && ((regno == MII_AUX_CONTROL) ||
-	    (regno == MII_1000BASE_T_CONTROL)))
+	    (regno == MII_MSCONTROL)))
 		return (0);
 
 	return (bge_mii_access(bgep, regno, 0, MI_COMMS_COMMAND_READ));
@@ -1203,7 +1201,7 @@ bge_mii_put16(bge_t *bgep, bge_regno_t regno, uint16_t data)
 	ASSERT(mutex_owned(bgep->genlock));
 
 	if (DEVICE_5906_SERIES_CHIPSETS(bgep) && ((regno == MII_AUX_CONTROL) ||
-	    (regno == MII_1000BASE_T_CONTROL)))
+	    (regno == MII_MSCONTROL)))
 		return;
 
 	(void) bge_mii_access(bgep, regno, data, MI_COMMS_COMMAND_WRITE);
@@ -2356,8 +2354,7 @@ bge_chip_id_init(bge_t *bgep)
 	 * std buffer size should be set to BGE_JUMBO_BUFF_SIZE when jumbo
 	 * feature is enabled.
 	 */
-	if (bge_jumbo_enable &&
-	    !(cidp->flags & CHIP_FLAG_NO_JUMBO) &&
+	if (!(cidp->flags & CHIP_FLAG_NO_JUMBO) &&
 	    (cidp->default_mtu > BGE_DEFAULT_MTU) &&
 	    (cidp->default_mtu <= BGE_MAXIMUM_MTU)) {
 		if (DEVICE_5714_SERIES_CHIPSETS(bgep)) {

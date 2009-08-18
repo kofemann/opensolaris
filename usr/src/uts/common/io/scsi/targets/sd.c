@@ -354,6 +354,33 @@ _NOTE(MUTEX_PROTECTS_DATA(sd_scsi_probe_cache_mutex,
 _NOTE(MUTEX_PROTECTS_DATA(sd_scsi_probe_cache_mutex,
     sd_scsi_probe_cache_head))
 
+/*
+ * Power attribute table
+ */
+static sd_power_attr_ss sd_pwr_ss = {
+	{ "NAME=spindle-motor", "0=off", "1=on", NULL },
+	{0, 100},
+	{30, 0},
+	{20000, 0}
+};
+
+static sd_power_attr_pc sd_pwr_pc = {
+	{ "NAME=spindle-motor", "0=stopped", "1=standby", "2=idle",
+		"3=active", NULL },
+	{0, 0, 0, 100},
+	{90, 90, 20, 0},
+	{15000, 15000, 1000, 0}
+};
+
+/*
+ * Power level to power condition
+ */
+static int sd_pl2pc[] = {
+	SD_TARGET_START_VALID,
+	SD_TARGET_STANDBY,
+	SD_TARGET_IDLE,
+	SD_TARGET_ACTIVE
+};
 
 /*
  * Vendor specific data name property declarations
@@ -707,6 +734,7 @@ static sd_disk_config_t sd_disk_table[] = {
 		SD_CONF_BSET_LUN_RESET_ENABLED,
 		&pirus_properties },
 	{ "SUN     STK6580_6780", SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
+	{ "SUN     SUN_6180", SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
 	{ "STK     OPENstorage", SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
 	{ "STK     OpenStorage", SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
 	{ "STK     BladeCtlr",	SD_CONF_BSET_NRR_COUNT, &lsi_oem_properties },
@@ -863,9 +891,8 @@ static int sd_pm_idletime = 1;
 #define	sd_setup_pm			ssd_setup_pm
 #define	sd_create_pm_components		ssd_create_pm_components
 #define	sd_ddi_suspend			ssd_ddi_suspend
-#define	sd_ddi_pm_suspend		ssd_ddi_pm_suspend
 #define	sd_ddi_resume			ssd_ddi_resume
-#define	sd_ddi_pm_resume		ssd_ddi_pm_resume
+#define	sd_pm_state_change		ssd_pm_state_change
 #define	sdpower				ssdpower
 #define	sdattach			ssdattach
 #define	sddetach			ssddetach
@@ -1017,6 +1044,7 @@ static int sd_pm_idletime = 1;
 #define	sd_free_rqs			ssd_free_rqs
 #define	sd_dump_memory			ssd_dump_memory
 #define	sd_get_media_info		ssd_get_media_info
+#define	sd_get_media_info_ext		ssd_get_media_info_ext
 #define	sd_dkio_ctrl_info		ssd_dkio_ctrl_info
 #define	sd_nvpair_str_decode		ssd_nvpair_str_decode
 #define	sd_strtok_r			ssd_strtok_r
@@ -1093,6 +1121,7 @@ static int sd_pm_idletime = 1;
 #define	sd_is_lsi			ssd_is_lsi
 #define	sd_tg_rdwr			ssd_tg_rdwr
 #define	sd_tg_getinfo			ssd_tg_getinfo
+#define	sd_rmw_msg_print_handler	ssd_rmw_msg_print_handler
 
 #endif	/* #if (defined(__fibre)) */
 
@@ -1203,9 +1232,8 @@ static void sd_setup_pm(sd_ssc_t *ssc, dev_info_t *devi);
 static void sd_create_pm_components(dev_info_t *devi, struct sd_lun *un);
 
 static int  sd_ddi_suspend(dev_info_t *devi);
-static int  sd_ddi_pm_suspend(struct sd_lun *un);
 static int  sd_ddi_resume(dev_info_t *devi);
-static int  sd_ddi_pm_resume(struct sd_lun *un);
+static int  sd_pm_state_change(struct sd_lun *un, int level, int flag);
 static int  sdpower(dev_info_t *devi, int component, int level);
 
 static int  sdattach(dev_info_t *devi, ddi_attach_cmd_t cmd);
@@ -1463,9 +1491,9 @@ static int sd_send_scsi_DOORLOCK(sd_ssc_t *ssc, int flag, int path_flag);
 static int sd_send_scsi_READ_CAPACITY(sd_ssc_t *ssc, uint64_t *capp,
 	uint32_t *lbap, int path_flag);
 static int sd_send_scsi_READ_CAPACITY_16(sd_ssc_t *ssc, uint64_t *capp,
-	uint32_t *lbap, int path_flag);
-static int sd_send_scsi_START_STOP_UNIT(sd_ssc_t *ssc, int flag,
-	int path_flag);
+	uint32_t *lbap, uint32_t *psp, int path_flag);
+static int sd_send_scsi_START_STOP_UNIT(sd_ssc_t *ssc, int pc_flag,
+	int flag, int path_flag);
 static int sd_send_scsi_INQUIRY(sd_ssc_t *ssc, uchar_t *bufaddr,
 	size_t buflen, uchar_t evpd, uchar_t page_code, size_t *residp);
 static int sd_send_scsi_TEST_UNIT_READY(sd_ssc_t *ssc, int flag);
@@ -1510,6 +1538,7 @@ static void sd_panic_for_res_conflict(struct sd_lun *un);
  * Disk Ioctl Function Prototypes
  */
 static int sd_get_media_info(dev_t dev, caddr_t arg, int flag);
+static int sd_get_media_info_ext(dev_t dev, caddr_t arg, int flag);
 static int sd_dkio_ctrl_info(dev_t dev, caddr_t arg, int flag);
 static int sd_dkio_get_temp(dev_t dev, caddr_t arg, int flag);
 
@@ -1608,6 +1637,11 @@ static int sd_tg_rdwr(dev_info_t *devi, uchar_t cmd, void *bufaddr,
     diskaddr_t start_block, size_t reqlength, void *tg_cookie);
 
 static int sd_tg_getinfo(dev_info_t *devi, int cmd, void *arg, void *tg_cookie);
+
+/*
+ * For printing RMW warning message timely
+ */
+static void sd_rmw_msg_print_handler(void *arg);
 
 /*
  * Constants for failfast support:
@@ -1781,13 +1815,19 @@ static sd_chain_t sd_iostart_chain[] = {
 	sd_mapblockaddr_iostart,	/* Index: 3 */
 	sd_core_iostart,		/* Index: 4 */
 
-	/* Chain for buf IO for removable-media targets (PM enabled) */
+	/*
+	 * Chain for buf IO for removable-media or large sector size
+	 * disk drive targets with RMW needed (PM enabled)
+	 */
 	sd_mapblockaddr_iostart,	/* Index: 5 */
 	sd_mapblocksize_iostart,	/* Index: 6 */
 	sd_pm_iostart,			/* Index: 7 */
 	sd_core_iostart,		/* Index: 8 */
 
-	/* Chain for buf IO for removable-media targets (PM disabled) */
+	/*
+	 * Chain for buf IO for removable-media or large sector size
+	 * disk drive targets with RMW needed (PM disabled)
+	 */
 	sd_mapblockaddr_iostart,	/* Index: 9 */
 	sd_mapblocksize_iostart,	/* Index: 10 */
 	sd_core_iostart,		/* Index: 11 */
@@ -1817,6 +1857,26 @@ static sd_chain_t sd_iostart_chain[] = {
 
 	/* Chain for "direct priority" USCSI commands (all targets) */
 	sd_core_iostart,		/* Index: 25 */
+
+	/*
+	 * Chain for buf IO for large sector size disk drive targets
+	 * with RMW needed with checksumming (PM enabled)
+	 */
+	sd_mapblockaddr_iostart,	/* Index: 26 */
+	sd_mapblocksize_iostart,	/* Index: 27 */
+	sd_checksum_iostart,		/* Index: 28 */
+	sd_pm_iostart,			/* Index: 29 */
+	sd_core_iostart,		/* Index: 30 */
+
+	/*
+	 * Chain for buf IO for large sector size disk drive targets
+	 * with RMW needed with checksumming (PM disabled)
+	 */
+	sd_mapblockaddr_iostart,	/* Index: 31 */
+	sd_mapblocksize_iostart,	/* Index: 32 */
+	sd_checksum_iostart,		/* Index: 33 */
+	sd_core_iostart,		/* Index: 34 */
+
 };
 
 /*
@@ -1825,7 +1885,9 @@ static sd_chain_t sd_iostart_chain[] = {
  */
 #define	SD_CHAIN_DISK_IOSTART			0
 #define	SD_CHAIN_DISK_IOSTART_NO_PM		3
+#define	SD_CHAIN_MSS_DISK_IOSTART		5
 #define	SD_CHAIN_RMMEDIA_IOSTART		5
+#define	SD_CHAIN_MSS_DISK_IOSTART_NO_PM		9
 #define	SD_CHAIN_RMMEDIA_IOSTART_NO_PM		9
 #define	SD_CHAIN_CHKSUM_IOSTART			12
 #define	SD_CHAIN_CHKSUM_IOSTART_NO_PM		16
@@ -1833,6 +1895,8 @@ static sd_chain_t sd_iostart_chain[] = {
 #define	SD_CHAIN_USCSI_CHKSUM_IOSTART		21
 #define	SD_CHAIN_DIRECT_CMD_IOSTART		24
 #define	SD_CHAIN_PRIORITY_CMD_IOSTART		25
+#define	SD_CHAIN_MSS_CHKSUM_IOSTART		26
+#define	SD_CHAIN_MSS_CHKSUM_IOSTART_NO_PM	31
 
 
 /*
@@ -1859,13 +1923,19 @@ static sd_chain_t sd_iodone_chain[] = {
 	sd_buf_iodone,			/* Index: 3 */
 	sd_mapblockaddr_iodone,		/* Index: 4 */
 
-	/* Chain for buf IO for removable-media targets (PM enabled) */
+	/*
+	 * Chain for buf IO for removable-media or large sector size
+	 * disk drive targets with RMW needed (PM enabled)
+	 */
 	sd_buf_iodone,			/* Index: 5 */
 	sd_mapblockaddr_iodone,		/* Index: 6 */
 	sd_mapblocksize_iodone,		/* Index: 7 */
 	sd_pm_iodone,			/* Index: 8 */
 
-	/* Chain for buf IO for removable-media targets (PM disabled) */
+	/*
+	 * Chain for buf IO for removable-media or large sector size
+	 * disk drive targets with RMW needed (PM disabled)
+	 */
 	sd_buf_iodone,			/* Index: 9 */
 	sd_mapblockaddr_iodone,		/* Index: 10 */
 	sd_mapblocksize_iodone,		/* Index: 11 */
@@ -1895,6 +1965,25 @@ static sd_chain_t sd_iodone_chain[] = {
 
 	/* Chain for "direct priority" USCSI commands (all targets) */
 	sd_uscsi_iodone,		/* Index: 25 */
+
+	/*
+	 * Chain for buf IO for large sector size disk drive targets
+	 * with checksumming (PM enabled)
+	 */
+	sd_buf_iodone,			/* Index: 26 */
+	sd_mapblockaddr_iodone,		/* Index: 27 */
+	sd_mapblocksize_iodone,		/* Index: 28 */
+	sd_checksum_iodone,		/* Index: 29 */
+	sd_pm_iodone,			/* Index: 30 */
+
+	/*
+	 * Chain for buf IO for large sector size disk drive targets
+	 * with checksumming (PM disabled)
+	 */
+	sd_buf_iodone,			/* Index: 31 */
+	sd_mapblockaddr_iodone,		/* Index: 32 */
+	sd_mapblocksize_iodone,		/* Index: 33 */
+	sd_checksum_iodone,		/* Index: 34 */
 };
 
 
@@ -1910,14 +1999,17 @@ static sd_chain_t sd_iodone_chain[] = {
 #define	SD_CHAIN_DISK_IODONE			2
 #define	SD_CHAIN_DISK_IODONE_NO_PM		4
 #define	SD_CHAIN_RMMEDIA_IODONE			8
+#define	SD_CHAIN_MSS_DISK_IODONE		8
 #define	SD_CHAIN_RMMEDIA_IODONE_NO_PM		11
+#define	SD_CHAIN_MSS_DISK_IODONE_NO_PM		11
 #define	SD_CHAIN_CHKSUM_IODONE			15
 #define	SD_CHAIN_CHKSUM_IODONE_NO_PM		18
 #define	SD_CHAIN_USCSI_CMD_IODONE		20
 #define	SD_CHAIN_USCSI_CHKSUM_IODONE		22
 #define	SD_CHAIN_DIRECT_CMD_IODONE		24
 #define	SD_CHAIN_PRIORITY_CMD_IODONE		25
-
+#define	SD_CHAIN_MSS_CHKSUM_IODONE		30
+#define	SD_CHAIN_MSS_CHKSUM_IODONE_NO_PM	34
 
 
 
@@ -1940,13 +2032,19 @@ static sd_initpkt_t	sd_initpkt_map[] = {
 	sd_initpkt_for_buf,		/* Index: 3 */
 	sd_initpkt_for_buf,		/* Index: 4 */
 
-	/* Chain for buf IO for removable-media targets (PM enabled) */
+	/*
+	 * Chain for buf IO for removable-media or large sector size
+	 * disk drive targets (PM enabled)
+	 */
 	sd_initpkt_for_buf,		/* Index: 5 */
 	sd_initpkt_for_buf,		/* Index: 6 */
 	sd_initpkt_for_buf,		/* Index: 7 */
 	sd_initpkt_for_buf,		/* Index: 8 */
 
-	/* Chain for buf IO for removable-media targets (PM disabled) */
+	/*
+	 * Chain for buf IO for removable-media or large sector size
+	 * disk drive targets (PM disabled)
+	 */
 	sd_initpkt_for_buf,		/* Index: 9 */
 	sd_initpkt_for_buf,		/* Index: 10 */
 	sd_initpkt_for_buf,		/* Index: 11 */
@@ -1977,6 +2075,24 @@ static sd_initpkt_t	sd_initpkt_map[] = {
 	/* Chain for "direct priority" USCSI commands (all targets) */
 	sd_initpkt_for_uscsi,		/* Index: 25 */
 
+	/*
+	 * Chain for buf IO for large sector size disk drive targets
+	 * with checksumming (PM enabled)
+	 */
+	sd_initpkt_for_buf,		/* Index: 26 */
+	sd_initpkt_for_buf,		/* Index: 27 */
+	sd_initpkt_for_buf,		/* Index: 28 */
+	sd_initpkt_for_buf,		/* Index: 29 */
+	sd_initpkt_for_buf,		/* Index: 30 */
+
+	/*
+	 * Chain for buf IO for large sector size disk drive targets
+	 * with checksumming (PM disabled)
+	 */
+	sd_initpkt_for_buf,		/* Index: 31 */
+	sd_initpkt_for_buf,		/* Index: 32 */
+	sd_initpkt_for_buf,		/* Index: 33 */
+	sd_initpkt_for_buf,		/* Index: 34 */
 };
 
 
@@ -1999,13 +2115,19 @@ static sd_destroypkt_t	sd_destroypkt_map[] = {
 	sd_destroypkt_for_buf,		/* Index: 3 */
 	sd_destroypkt_for_buf,		/* Index: 4 */
 
-	/* Chain for buf IO for removable-media targets (PM enabled) */
+	/*
+	 * Chain for buf IO for removable-media or large sector size
+	 * disk drive targets (PM enabled)
+	 */
 	sd_destroypkt_for_buf,		/* Index: 5 */
 	sd_destroypkt_for_buf,		/* Index: 6 */
 	sd_destroypkt_for_buf,		/* Index: 7 */
 	sd_destroypkt_for_buf,		/* Index: 8 */
 
-	/* Chain for buf IO for removable-media targets (PM disabled) */
+	/*
+	 * Chain for buf IO for removable-media or large sector size
+	 * disk drive targets (PM disabled)
+	 */
 	sd_destroypkt_for_buf,		/* Index: 9 */
 	sd_destroypkt_for_buf,		/* Index: 10 */
 	sd_destroypkt_for_buf,		/* Index: 11 */
@@ -2036,6 +2158,24 @@ static sd_destroypkt_t	sd_destroypkt_map[] = {
 	/* Chain for "direct priority" USCSI commands (all targets) */
 	sd_destroypkt_for_uscsi,	/* Index: 25 */
 
+	/*
+	 * Chain for buf IO for large sector size disk drive targets
+	 * with checksumming (PM disabled)
+	 */
+	sd_destroypkt_for_buf,		/* Index: 26 */
+	sd_destroypkt_for_buf,		/* Index: 27 */
+	sd_destroypkt_for_buf,		/* Index: 28 */
+	sd_destroypkt_for_buf,		/* Index: 29 */
+	sd_destroypkt_for_buf,		/* Index: 30 */
+
+	/*
+	 * Chain for buf IO for large sector size disk drive targets
+	 * with checksumming (PM enabled)
+	 */
+	sd_destroypkt_for_buf,		/* Index: 31 */
+	sd_destroypkt_for_buf,		/* Index: 32 */
+	sd_destroypkt_for_buf,		/* Index: 33 */
+	sd_destroypkt_for_buf,		/* Index: 34 */
 };
 
 
@@ -2066,13 +2206,19 @@ static int sd_chain_type_map[] = {
 	SD_CHAIN_BUFIO,			/* Index: 3 */
 	SD_CHAIN_BUFIO,			/* Index: 4 */
 
-	/* Chain for buf IO for removable-media targets (PM enabled) */
+	/*
+	 * Chain for buf IO for removable-media or large sector size
+	 * disk drive targets (PM enabled)
+	 */
 	SD_CHAIN_BUFIO,			/* Index: 5 */
 	SD_CHAIN_BUFIO,			/* Index: 6 */
 	SD_CHAIN_BUFIO,			/* Index: 7 */
 	SD_CHAIN_BUFIO,			/* Index: 8 */
 
-	/* Chain for buf IO for removable-media targets (PM disabled) */
+	/*
+	 * Chain for buf IO for removable-media or large sector size
+	 * disk drive targets (PM disabled)
+	 */
 	SD_CHAIN_BUFIO,			/* Index: 9 */
 	SD_CHAIN_BUFIO,			/* Index: 10 */
 	SD_CHAIN_BUFIO,			/* Index: 11 */
@@ -2095,13 +2241,32 @@ static int sd_chain_type_map[] = {
 	/* Chain for USCSI commands (checksum targets) */
 	SD_CHAIN_USCSI,			/* Index: 21 */
 	SD_CHAIN_USCSI,			/* Index: 22 */
-	SD_CHAIN_USCSI,			/* Index: 22 */
+	SD_CHAIN_USCSI,			/* Index: 23 */
 
 	/* Chain for "direct" USCSI commands (all targets) */
 	SD_CHAIN_DIRECT,		/* Index: 24 */
 
 	/* Chain for "direct priority" USCSI commands (all targets) */
 	SD_CHAIN_DIRECT_PRIORITY,	/* Index: 25 */
+
+	/*
+	 * Chain for buf IO for large sector size disk drive targets
+	 * with checksumming (PM enabled)
+	 */
+	SD_CHAIN_BUFIO,			/* Index: 26 */
+	SD_CHAIN_BUFIO,			/* Index: 27 */
+	SD_CHAIN_BUFIO,			/* Index: 28 */
+	SD_CHAIN_BUFIO,			/* Index: 29 */
+	SD_CHAIN_BUFIO,			/* Index: 30 */
+
+	/*
+	 * Chain for buf IO for large sector size disk drive targets
+	 * with checksumming (PM disabled)
+	 */
+	SD_CHAIN_BUFIO,			/* Index: 31 */
+	SD_CHAIN_BUFIO,			/* Index: 32 */
+	SD_CHAIN_BUFIO,			/* Index: 33 */
+	SD_CHAIN_BUFIO,			/* Index: 34 */
 };
 
 
@@ -2147,6 +2312,9 @@ static struct sd_chain_index	sd_chain_index_map[] = {
 	{ SD_CHAIN_USCSI_CHKSUM_IOSTART,	SD_CHAIN_USCSI_CHKSUM_IODONE },
 	{ SD_CHAIN_DIRECT_CMD_IOSTART,		SD_CHAIN_DIRECT_CMD_IODONE },
 	{ SD_CHAIN_PRIORITY_CMD_IOSTART,	SD_CHAIN_PRIORITY_CMD_IODONE },
+	{ SD_CHAIN_MSS_CHKSUM_IOSTART,		SD_CHAIN_MSS_CHKSUM_IODONE },
+	{ SD_CHAIN_MSS_CHKSUM_IOSTART_NO_PM, SD_CHAIN_MSS_CHKSUM_IODONE_NO_PM },
+
 };
 
 
@@ -2158,9 +2326,13 @@ static struct sd_chain_index	sd_chain_index_map[] = {
 #define	SD_CHAIN_INFO_DISK		0
 #define	SD_CHAIN_INFO_DISK_NO_PM	1
 #define	SD_CHAIN_INFO_RMMEDIA		2
+#define	SD_CHAIN_INFO_MSS_DISK		2
 #define	SD_CHAIN_INFO_RMMEDIA_NO_PM	3
+#define	SD_CHAIN_INFO_MSS_DSK_NO_PM	3
 #define	SD_CHAIN_INFO_CHKSUM		4
 #define	SD_CHAIN_INFO_CHKSUM_NO_PM	5
+#define	SD_CHAIN_INFO_MSS_DISK_CHKSUM	10
+#define	SD_CHAIN_INFO_MSS_DISK_CHKSUM_NO_PM	11
 
 /* un->un_uscsi_chain_type must be set to one of these */
 #define	SD_CHAIN_INFO_USCSI_CMD		6
@@ -3030,9 +3202,11 @@ sd_spin_up_unit(sd_ssc_t *ssc)
 	 * condition (0x2/0x4/0x3) if the device is "inactive," but
 	 * we don't want to fail the attach because it may become
 	 * "active" later.
+	 * We don't know if power condition is supported or not at
+	 * this stage, use START STOP bit.
 	 */
-	status = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_START,
-	    SD_PATH_DIRECT);
+	status = sd_send_scsi_START_STOP_UNIT(ssc, SD_START_STOP,
+	    SD_TARGET_START, SD_PATH_DIRECT);
 
 	if (status != 0) {
 		if (status == EACCES)
@@ -3875,6 +4049,20 @@ sd_set_properties(struct sd_lun *un, char *name, char *value)
 		return;
 	}
 
+	if (strcasecmp(name, "power-condition") == 0) {
+		if (strcasecmp(value, "true") == 0) {
+			un->un_f_power_condition_disabled = FALSE;
+		} else if (strcasecmp(value, "false") == 0) {
+			un->un_f_power_condition_disabled = TRUE;
+		} else {
+			goto value_invalid;
+		}
+		SD_INFO(SD_LOG_ATTACH_DETACH, un, "sd_set_properties: "
+		    "power condition disabled flag set to %d\n",
+		    un->un_f_power_condition_disabled);
+		return;
+	}
+
 	if (strcasecmp(name, "timeout-releasereservation") == 0) {
 		if (ddi_strtol(value, &endptr, 0, &val) == 0) {
 			un->un_reserve_release_time = val;
@@ -3965,6 +4153,16 @@ sd_set_properties(struct sd_lun *un, char *name, char *value)
 		}
 		SD_INFO(SD_LOG_ATTACH_DETACH, un, "sd_set_properties: "
 		    "min throttle set to %d\n", un->un_min_throttle);
+	}
+
+	if (strcasecmp(name, "rmw-type") == 0) {
+		if (ddi_strtol(value, &endptr, 0, &val) == 0) {
+			un->un_f_rmw_type = val;
+		} else {
+			goto value_invalid;
+		}
+		SD_INFO(SD_LOG_ATTACH_DETACH, un, "sd_set_properties: "
+		    "RMW type set to %d\n", un->un_f_rmw_type);
 	}
 
 	/*
@@ -4075,6 +4273,12 @@ sd_get_tunables_from_conf(struct sd_lun *un, int flags, int *data_list,
 			    "sd_get_tunables_from_conf: \
 			    suppress_cache_flush = %d"
 			    "\n", values->sdt_suppress_cache_flush);
+			break;
+		case SD_CONF_BSET_PC_DISABLED:
+			values->sdt_disk_sort_dis = data_list[i];
+			SD_INFO(SD_LOG_ATTACH_DETACH, un,
+			    "sd_get_tunables_from_conf: power_condition_dis = "
+			    "%d\n", values->sdt_power_condition_dis);
 			break;
 		}
 	}
@@ -4557,6 +4761,16 @@ sd_set_vers1_properties(struct sd_lun *un, int flags, sd_tunables *prop_list)
 		    prop_list->sdt_suppress_cache_flush);
 	}
 
+	if (flags & SD_CONF_BSET_PC_DISABLED) {
+		un->un_f_power_condition_disabled =
+		    (prop_list->sdt_power_condition_dis != 0) ?
+		    TRUE : FALSE;
+		SD_INFO(SD_LOG_ATTACH_DETACH, un,
+		    "sd_set_vers1_properties: power_condition_disabled "
+		    "flag set to %d\n",
+		    prop_list->sdt_power_condition_dis);
+	}
+
 	/*
 	 * Validate the throttle values.
 	 * If any of the numbers are invalid, set everything to defaults.
@@ -4996,7 +5210,10 @@ sd_update_block_info(struct sd_lun *un, uint32_t lbasize, uint64_t capacity)
 {
 	if (lbasize != 0) {
 		un->un_tgt_blocksize = lbasize;
-		un->un_f_tgt_blocksize_is_valid	= TRUE;
+		un->un_f_tgt_blocksize_is_valid = TRUE;
+		if (!un->un_f_has_removable_media) {
+			un->un_sys_blocksize = lbasize;
+		}
 	}
 
 	if (capacity != 0) {
@@ -5290,7 +5507,7 @@ sd_get_devid(sd_ssc_t *ssc)
 	/* Calculate the checksum */
 	chksum = 0;
 	ip = (uint_t *)dkdevid;
-	for (i = 0; i < ((un->un_sys_blocksize - sizeof (int))/sizeof (int));
+	for (i = 0; i < ((DEV_BSIZE - sizeof (int)) / sizeof (int));
 	    i++) {
 		chksum ^= ip[i];
 	}
@@ -5386,6 +5603,7 @@ static int
 sd_write_deviceid(sd_ssc_t *ssc)
 {
 	struct dk_devid		*dkdevid;
+	uchar_t			*buf;
 	diskaddr_t		blk;
 	uint_t			*ip, chksum;
 	int			status;
@@ -5406,7 +5624,8 @@ sd_write_deviceid(sd_ssc_t *ssc)
 
 
 	/* Allocate the buffer */
-	dkdevid = kmem_zalloc(un->un_sys_blocksize, KM_SLEEP);
+	buf = kmem_zalloc(un->un_sys_blocksize, KM_SLEEP);
+	dkdevid = (struct dk_devid *)buf;
 
 	/* Fill in the revision */
 	dkdevid->dkd_rev_hi = DK_DEVID_REV_MSB;
@@ -5421,7 +5640,7 @@ sd_write_deviceid(sd_ssc_t *ssc)
 	/* Calculate the checksum */
 	chksum = 0;
 	ip = (uint_t *)dkdevid;
-	for (i = 0; i < ((un->un_sys_blocksize - sizeof (int))/sizeof (int));
+	for (i = 0; i < ((DEV_BSIZE - sizeof (int)) / sizeof (int));
 	    i++) {
 		chksum ^= ip[i];
 	}
@@ -5430,12 +5649,12 @@ sd_write_deviceid(sd_ssc_t *ssc)
 	DKD_FORMCHKSUM(chksum, dkdevid);
 
 	/* Write the reserved sector */
-	status = sd_send_scsi_WRITE(ssc, dkdevid, un->un_sys_blocksize, blk,
+	status = sd_send_scsi_WRITE(ssc, buf, un->un_sys_blocksize, blk,
 	    SD_PATH_DIRECT);
 	if (status != 0)
 		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 
-	kmem_free(dkdevid, un->un_sys_blocksize);
+	kmem_free(buf, un->un_sys_blocksize);
 
 	mutex_enter(SD_MUTEX(un));
 	return (status);
@@ -5590,6 +5809,9 @@ sd_setup_pm(sd_ssc_t *ssc, dev_info_t *devi)
 	 * This complies with the new power management framework
 	 * for certain desktop machines. Create the pm_components
 	 * property as a string array property.
+	 * If un_f_pm_supported is TRUE, that means the disk
+	 * attached HBA has set the "pm-capable" property and
+	 * the value of this property is bigger than 0.
 	 */
 	if (un->un_f_pm_supported) {
 		/*
@@ -5600,9 +5822,19 @@ sd_setup_pm(sd_ssc_t *ssc, dev_info_t *devi)
 		 * device has a motor.
 		 */
 		un->un_f_start_stop_supported = TRUE;
-		rval = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_START,
-		    SD_PATH_DIRECT);
 
+		if (un->un_f_power_condition_supported) {
+			rval = sd_send_scsi_START_STOP_UNIT(ssc,
+			    SD_POWER_CONDITION, SD_TARGET_ACTIVE,
+			    SD_PATH_DIRECT);
+			if (rval != 0) {
+				un->un_f_power_condition_supported = FALSE;
+			}
+		}
+		if (!un->un_f_power_condition_supported) {
+			rval = sd_send_scsi_START_STOP_UNIT(ssc,
+			    SD_START_STOP, SD_TARGET_START, SD_PATH_DIRECT);
+		}
 		if (rval != 0) {
 			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 			un->un_f_start_stop_supported = FALSE;
@@ -5612,11 +5844,39 @@ sd_setup_pm(sd_ssc_t *ssc, dev_info_t *devi)
 		 * create pm properties anyways otherwise the parent can't
 		 * go to sleep
 		 */
-		(void) sd_create_pm_components(devi, un);
 		un->un_f_pm_is_enabled = TRUE;
+		(void) sd_create_pm_components(devi, un);
+
+		/*
+		 * If it claims that log sense is supported, check it out.
+		 */
+		if (un->un_f_log_sense_supported) {
+			rval = sd_log_page_supported(ssc,
+			    START_STOP_CYCLE_PAGE);
+			if (rval == 1) {
+				/* Page found, use it. */
+				un->un_start_stop_cycle_page =
+				    START_STOP_CYCLE_PAGE;
+			} else {
+				/*
+				 * Page not found or log sense is not
+				 * supported.
+				 * Notice we do not check the old style
+				 * START_STOP_CYCLE_VU_PAGE because this
+				 * code path does not apply to old disks.
+				 */
+				un->un_f_log_sense_supported = FALSE;
+				un->un_f_pm_log_sense_smart = FALSE;
+			}
+		}
+
 		return;
 	}
 
+	/*
+	 * For the disk whose attached HBA has not set the "pm-capable"
+	 * property, check if it supports the power management.
+	 */
 	if (!un->un_f_log_sense_supported) {
 		un->un_power_level = SD_SPINDLE_ON;
 		un->un_f_pm_is_enabled = FALSE;
@@ -5634,7 +5894,7 @@ sd_setup_pm(sd_ssc_t *ssc, dev_info_t *devi)
 
 	/*
 	 * If the start-stop cycle counter log page is not supported
-	 * or if the pm-capable property is SD_PM_CAPABLE_FALSE (0)
+	 * or if the pm-capable property is set to be false (0),
 	 * then we should not create the pm_components property.
 	 */
 	if (rval == -1) {
@@ -5724,44 +5984,53 @@ sd_setup_pm(sd_ssc_t *ssc, dev_info_t *devi)
 static void
 sd_create_pm_components(dev_info_t *devi, struct sd_lun *un)
 {
-	char *pm_comp[] = { "NAME=spindle-motor", "0=off", "1=on", NULL };
-
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 
-	if (ddi_prop_update_string_array(DDI_DEV_T_NONE, devi,
-	    "pm-components", pm_comp, 3) == DDI_PROP_SUCCESS) {
-		/*
-		 * When components are initially created they are idle,
-		 * power up any non-removables.
-		 * Note: the return value of pm_raise_power can't be used
-		 * for determining if PM should be enabled for this device.
-		 * Even if you check the return values and remove this
-		 * property created above, the PM framework will not honor the
-		 * change after the first call to pm_raise_power. Hence,
-		 * removal of that property does not help if pm_raise_power
-		 * fails. In the case of removable media, the start/stop
-		 * will fail if the media is not present.
-		 */
-		if (un->un_f_attach_spinup && (pm_raise_power(SD_DEVINFO(un), 0,
-		    SD_SPINDLE_ON) == DDI_SUCCESS)) {
-			mutex_enter(SD_MUTEX(un));
-			un->un_power_level = SD_SPINDLE_ON;
-			mutex_enter(&un->un_pm_mutex);
-			/* Set to on and not busy. */
-			un->un_pm_count = 0;
-		} else {
-			mutex_enter(SD_MUTEX(un));
-			un->un_power_level = SD_SPINDLE_OFF;
-			mutex_enter(&un->un_pm_mutex);
-			/* Set to off. */
-			un->un_pm_count = -1;
+	if (un->un_f_power_condition_supported) {
+		if (ddi_prop_update_string_array(DDI_DEV_T_NONE, devi,
+		    "pm-components", sd_pwr_pc.pm_comp, 5)
+		    != DDI_PROP_SUCCESS) {
+			un->un_power_level = SD_SPINDLE_ACTIVE;
+			un->un_f_pm_is_enabled = FALSE;
+			return;
 		}
-		mutex_exit(&un->un_pm_mutex);
-		mutex_exit(SD_MUTEX(un));
 	} else {
-		un->un_power_level = SD_SPINDLE_ON;
-		un->un_f_pm_is_enabled = FALSE;
+		if (ddi_prop_update_string_array(DDI_DEV_T_NONE, devi,
+		    "pm-components", sd_pwr_ss.pm_comp, 3)
+		    != DDI_PROP_SUCCESS) {
+			un->un_power_level = SD_SPINDLE_ON;
+			un->un_f_pm_is_enabled = FALSE;
+			return;
+		}
 	}
+	/*
+	 * When components are initially created they are idle,
+	 * power up any non-removables.
+	 * Note: the return value of pm_raise_power can't be used
+	 * for determining if PM should be enabled for this device.
+	 * Even if you check the return values and remove this
+	 * property created above, the PM framework will not honor the
+	 * change after the first call to pm_raise_power. Hence,
+	 * removal of that property does not help if pm_raise_power
+	 * fails. In the case of removable media, the start/stop
+	 * will fail if the media is not present.
+	 */
+	if (un->un_f_attach_spinup && (pm_raise_power(SD_DEVINFO(un), 0,
+	    SD_PM_STATE_ACTIVE(un)) == DDI_SUCCESS)) {
+		mutex_enter(SD_MUTEX(un));
+		un->un_power_level = SD_PM_STATE_ACTIVE(un);
+		mutex_enter(&un->un_pm_mutex);
+		/* Set to on and not busy. */
+		un->un_pm_count = 0;
+	} else {
+		mutex_enter(SD_MUTEX(un));
+		un->un_power_level = SD_PM_STATE_STOPPED(un);
+		mutex_enter(&un->un_pm_mutex);
+		/* Set to off. */
+		un->un_pm_count = -1;
+	}
+	mutex_exit(&un->un_pm_mutex);
+	mutex_exit(SD_MUTEX(un));
 }
 
 
@@ -5903,6 +6172,14 @@ sd_ddi_suspend(dev_info_t *devi)
 		mutex_exit(&un->un_pm_mutex);
 	}
 
+	if (un->un_rmw_msg_timeid != NULL) {
+		timeout_id_t temp_id = un->un_rmw_msg_timeid;
+		un->un_rmw_msg_timeid = NULL;
+		mutex_exit(SD_MUTEX(un));
+		(void) untimeout(temp_id);
+		mutex_enter(SD_MUTEX(un));
+	}
+
 	if (un->un_retry_timeid != NULL) {
 		timeout_id_t temp_id = un->un_retry_timeid;
 		un->un_retry_timeid = NULL;
@@ -5951,69 +6228,6 @@ sd_ddi_suspend(dev_info_t *devi)
 	mutex_exit(SD_MUTEX(un));
 
 	SD_TRACE(SD_LOG_IO_PM, un, "sd_ddi_suspend: exit\n");
-
-	return (DDI_SUCCESS);
-}
-
-
-/*
- *    Function: sd_ddi_pm_suspend
- *
- * Description: Set the drive state to low power.
- *		Someone else is required to actually change the drive
- *		power level.
- *
- *   Arguments: un - driver soft state (unit) structure
- *
- * Return Code: DDI_FAILURE or DDI_SUCCESS
- *
- *     Context: Kernel thread context
- */
-
-static int
-sd_ddi_pm_suspend(struct sd_lun *un)
-{
-	ASSERT(un != NULL);
-	SD_TRACE(SD_LOG_POWER, un, "sd_ddi_pm_suspend: entry\n");
-
-	ASSERT(!mutex_owned(SD_MUTEX(un)));
-	mutex_enter(SD_MUTEX(un));
-
-	/*
-	 * Exit if power management is not enabled for this device, or if
-	 * the device is being used by HA.
-	 */
-	if ((un->un_f_pm_is_enabled == FALSE) || (un->un_resvd_status &
-	    (SD_RESERVE | SD_WANT_RESERVE | SD_LOST_RESERVE))) {
-		mutex_exit(SD_MUTEX(un));
-		SD_TRACE(SD_LOG_POWER, un, "sd_ddi_pm_suspend: exiting\n");
-		return (DDI_SUCCESS);
-	}
-
-	SD_INFO(SD_LOG_POWER, un, "sd_ddi_pm_suspend: un_ncmds_in_driver=%ld\n",
-	    un->un_ncmds_in_driver);
-
-	/*
-	 * See if the device is not busy, ie.:
-	 *    - we have no commands in the driver for this device
-	 *    - not waiting for resources
-	 */
-	if ((un->un_ncmds_in_driver == 0) &&
-	    (un->un_state != SD_STATE_RWAIT)) {
-		/*
-		 * The device is not busy, so it is OK to go to low power state.
-		 * Indicate low power, but rely on someone else to actually
-		 * change it.
-		 */
-		mutex_enter(&un->un_pm_mutex);
-		un->un_pm_count = -1;
-		mutex_exit(&un->un_pm_mutex);
-		un->un_power_level = SD_SPINDLE_OFF;
-	}
-
-	mutex_exit(SD_MUTEX(un));
-
-	SD_TRACE(SD_LOG_POWER, un, "sd_ddi_pm_suspend: exit\n");
 
 	return (DDI_SUCCESS);
 }
@@ -6075,7 +6289,8 @@ sd_ddi_resume(dev_info_t *devi)
 	 */
 	if (un->un_f_attach_spinup) {
 		mutex_exit(SD_MUTEX(un));
-		(void) pm_raise_power(SD_DEVINFO(un), 0, SD_SPINDLE_ON);
+		(void) pm_raise_power(SD_DEVINFO(un), 0,
+		    SD_PM_STATE_ACTIVE(un));
 		mutex_enter(SD_MUTEX(un));
 	}
 
@@ -6125,42 +6340,76 @@ sd_ddi_resume(dev_info_t *devi)
 
 
 /*
- *    Function: sd_ddi_pm_resume
+ *    Function: sd_pm_state_change
  *
- * Description: Set the drive state to powered on.
- *		Someone else is required to actually change the drive
- *		power level.
+ * Description: Change the driver power state.
+ * 		Someone else is required to actually change the driver
+ * 		power level.
  *
  *   Arguments: un - driver soft state (unit) structure
+ *              level - the power level that is changed to
+ *              flag - to decide how to change the power state
  *
  * Return Code: DDI_SUCCESS
  *
  *     Context: Kernel thread context
  */
-
 static int
-sd_ddi_pm_resume(struct sd_lun *un)
+sd_pm_state_change(struct sd_lun *un, int level, int flag)
 {
 	ASSERT(un != NULL);
+	SD_TRACE(SD_LOG_POWER, un, "sd_pm_state_change: entry\n");
 
 	ASSERT(!mutex_owned(SD_MUTEX(un)));
 	mutex_enter(SD_MUTEX(un));
-	un->un_power_level = SD_SPINDLE_ON;
 
-	ASSERT(!mutex_owned(&un->un_pm_mutex));
-	mutex_enter(&un->un_pm_mutex);
-	if (SD_DEVICE_IS_IN_LOW_POWER(un)) {
-		un->un_pm_count++;
-		ASSERT(un->un_pm_count == 0);
+	if (flag == SD_PM_STATE_ROLLBACK || SD_PM_IS_IO_CAPABLE(un, level)) {
+		un->un_power_level = level;
+		ASSERT(!mutex_owned(&un->un_pm_mutex));
+		mutex_enter(&un->un_pm_mutex);
+		if (SD_DEVICE_IS_IN_LOW_POWER(un)) {
+			un->un_pm_count++;
+			ASSERT(un->un_pm_count == 0);
+		}
+		mutex_exit(&un->un_pm_mutex);
+	} else {
 		/*
-		 * Note: no longer do the cv_broadcast on un_suspend_cv. The
-		 * un_suspend_cv is for a system resume, not a power management
-		 * device resume. (4297749)
-		 *	 cv_broadcast(&un->un_suspend_cv);
+		 * Exit if power management is not enabled for this device,
+		 * or if the device is being used by HA.
 		 */
+		if ((un->un_f_pm_is_enabled == FALSE) || (un->un_resvd_status &
+		    (SD_RESERVE | SD_WANT_RESERVE | SD_LOST_RESERVE))) {
+			mutex_exit(SD_MUTEX(un));
+			SD_TRACE(SD_LOG_POWER, un,
+			    "sd_pm_state_change: exiting\n");
+			return (DDI_FAILURE);
+		}
+
+		SD_INFO(SD_LOG_POWER, un, "sd_pm_state_change: "
+		    "un_ncmds_in_driver=%ld\n", un->un_ncmds_in_driver);
+
+		/*
+		 * See if the device is not busy, ie.:
+		 *    - we have no commands in the driver for this device
+		 *    - not waiting for resources
+		 */
+		if ((un->un_ncmds_in_driver == 0) &&
+		    (un->un_state != SD_STATE_RWAIT)) {
+			/*
+			 * The device is not busy, so it is OK to go to low
+			 * power state. Indicate low power, but rely on someone
+			 * else to actually change it.
+			 */
+			mutex_enter(&un->un_pm_mutex);
+			un->un_pm_count = -1;
+			mutex_exit(&un->un_pm_mutex);
+			un->un_power_level = level;
+		}
 	}
-	mutex_exit(&un->un_pm_mutex);
+
 	mutex_exit(SD_MUTEX(un));
+
+	SD_TRACE(SD_LOG_POWER, un, "sd_pm_state_change: exit\n");
 
 	return (DDI_SUCCESS);
 }
@@ -6217,7 +6466,7 @@ sd_pm_idletimeout_handler(void *arg)
 		} else {
 			un->un_buf_chain_type = SD_CHAIN_INFO_DISK;
 		}
-		un->un_uscsi_chain_type  = SD_CHAIN_INFO_USCSI_CMD;
+		un->un_uscsi_chain_type = SD_CHAIN_INFO_USCSI_CMD;
 
 		SD_TRACE(SD_LOG_IO_PM, un,
 		    "sd_pm_idletimeout_handler: idling device\n");
@@ -6282,12 +6531,12 @@ sdpower(dev_info_t *devi, int component, int level)
 	uchar_t		state_before_pm;
 	int		got_semaphore_here;
 	sd_ssc_t	*ssc;
+	int	last_power_level;
 
 	instance = ddi_get_instance(devi);
 
 	if (((un = ddi_get_soft_state(sd_state, instance)) == NULL) ||
-	    (SD_SPINDLE_OFF > level) || (level > SD_SPINDLE_ON) ||
-	    component != 0) {
+	    !SD_PM_IS_LEVEL_VALID(un, level) || component != 0) {
 		return (DDI_FAILURE);
 	}
 
@@ -6318,10 +6567,11 @@ sdpower(dev_info_t *devi, int component, int level)
 	 * If un_ncmds_in_driver is non-zero it indicates commands are
 	 * already being processed in the driver, or if the semaphore was
 	 * not gotten here it indicates an open or close is being processed.
-	 * At the same time somebody is requesting to go low power which
-	 * can't happen, therefore we need to return failure.
+	 * At the same time somebody is requesting to go to a lower power
+	 * that can't perform I/O, which can't happen, therefore we need to
+	 * return failure.
 	 */
-	if ((level == SD_SPINDLE_OFF) &&
+	if ((!SD_PM_IS_IO_CAPABLE(un, level)) &&
 	    ((un->un_ncmds_in_driver != 0) || (got_semaphore_here == 0))) {
 		mutex_exit(SD_MUTEX(un));
 
@@ -6367,11 +6617,12 @@ sdpower(dev_info_t *devi, int component, int level)
 	mutex_exit(SD_MUTEX(un));
 
 	/*
-	 * If "pm-capable" property is set to TRUE by HBA drivers,
-	 * bypass the following checking, otherwise, check the log
-	 * sense information for this device
+	 * If log sense command is not supported, bypass the
+	 * following checking, otherwise, check the log sense
+	 * information for this device.
 	 */
-	if ((level == SD_SPINDLE_OFF) && un->un_f_log_sense_supported) {
+	if (SD_PM_STOP_MOTOR_NEEDED(un, level) &&
+	    un->un_f_log_sense_supported) {
 		/*
 		 * Get the log sense information to understand whether the
 		 * the powercycle counts have gone beyond the threshhold.
@@ -6432,17 +6683,24 @@ sdpower(dev_info_t *devi, int component, int level)
 		    (log_page_data[0x1c] << 24) | (log_page_data[0x1d] << 16) |
 		    (log_page_data[0x1E] << 8)  | log_page_data[0x1F];
 
-		sd_pm_tran_data.un.scsi_cycles.lifemax = maxcycles;
-
 		ncycles =
 		    (log_page_data[0x24] << 24) | (log_page_data[0x25] << 16) |
 		    (log_page_data[0x26] << 8)  | log_page_data[0x27];
 
-		sd_pm_tran_data.un.scsi_cycles.ncycles = ncycles;
-
-		for (i = 0; i < DC_SCSI_MFR_LEN; i++) {
-			sd_pm_tran_data.un.scsi_cycles.svc_date[i] =
-			    log_page_data[8+i];
+		if (un->un_f_pm_log_sense_smart) {
+			sd_pm_tran_data.un.smart_count.allowed = maxcycles;
+			sd_pm_tran_data.un.smart_count.consumed = ncycles;
+			sd_pm_tran_data.un.smart_count.flag = 0;
+			sd_pm_tran_data.format = DC_SMART_FORMAT;
+		} else {
+			sd_pm_tran_data.un.scsi_cycles.lifemax = maxcycles;
+			sd_pm_tran_data.un.scsi_cycles.ncycles = ncycles;
+			for (i = 0; i < DC_SCSI_MFR_LEN; i++) {
+				sd_pm_tran_data.un.scsi_cycles.svc_date[i] =
+				    log_page_data[8+i];
+			}
+			sd_pm_tran_data.un.scsi_cycles.flag = 0;
+			sd_pm_tran_data.format = DC_SCSI_FORMAT;
 		}
 
 		kmem_free(log_page_data, log_page_size);
@@ -6451,10 +6709,6 @@ sdpower(dev_info_t *devi, int component, int level)
 		 * Call pm_trans_check routine to get the Ok from
 		 * the global policy
 		 */
-
-		sd_pm_tran_data.format = DC_SCSI_FORMAT;
-		sd_pm_tran_data.un.scsi_cycles.flag = 0;
-
 		rval = pm_trans_check(&sd_pm_tran_data, &intvlp);
 #ifdef	SDDEBUG
 		if (sd_force_pm_supported) {
@@ -6535,13 +6789,14 @@ sdpower(dev_info_t *devi, int component, int level)
 		}
 	}
 
-	if (level == SD_SPINDLE_OFF) {
+	if (!SD_PM_IS_IO_CAPABLE(un, level)) {
 		/*
 		 * Save the last state... if the STOP FAILS we need it
 		 * for restoring
 		 */
 		mutex_enter(SD_MUTEX(un));
 		save_state = un->un_last_state;
+		last_power_level = un->un_power_level;
 		/*
 		 * There must not be any cmds. getting processed
 		 * in the driver when we get here. Power to the
@@ -6551,10 +6806,11 @@ sdpower(dev_info_t *devi, int component, int level)
 		mutex_exit(SD_MUTEX(un));
 
 		/*
-		 * For now suspend the device completely before spindle is
+		 * For now PM suspend the device completely before spindle is
 		 * turned off
 		 */
-		if ((rval = sd_ddi_pm_suspend(un)) == DDI_FAILURE) {
+		if ((rval = sd_pm_state_change(un, level, SD_PM_STATE_CHANGE))
+		    == DDI_FAILURE) {
 			if (got_semaphore_here != 0) {
 				sema_v(&un->un_semoclose);
 			}
@@ -6565,6 +6821,7 @@ sdpower(dev_info_t *devi, int component, int level)
 			 */
 			mutex_enter(SD_MUTEX(un));
 			un->un_state = state_before_pm;
+			un->un_power_level = last_power_level;
 			cv_broadcast(&un->un_suspend_cv);
 			mutex_exit(SD_MUTEX(un));
 			SD_TRACE(SD_LOG_IO_PM, un,
@@ -6587,19 +6844,28 @@ sdpower(dev_info_t *devi, int component, int level)
 	 * attention.  Don't do retries. Bypass the PM layer, otherwise
 	 * a deadlock on un_pm_busy_cv will occur.
 	 */
-	if (level == SD_SPINDLE_ON) {
+	if (SD_PM_IS_IO_CAPABLE(un, level)) {
 		sval = sd_send_scsi_TEST_UNIT_READY(ssc,
 		    SD_DONT_RETRY_TUR | SD_BYPASS_PM);
 		if (sval != 0)
 			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 	}
 
-	SD_TRACE(SD_LOG_IO_PM, un, "sdpower: sending \'%s\' unit\n",
-	    ((level == SD_SPINDLE_ON) ? "START" : "STOP"));
-
-	sval = sd_send_scsi_START_STOP_UNIT(ssc,
-	    ((level == SD_SPINDLE_ON) ? SD_TARGET_START : SD_TARGET_STOP),
-	    SD_PATH_DIRECT);
+	if (un->un_f_power_condition_supported) {
+		char *pm_condition_name[] = {"STOPPED", "STANDBY",
+		    "IDLE", "ACTIVE"};
+		SD_TRACE(SD_LOG_IO_PM, un,
+		    "sdpower: sending \'%s\' power condition",
+		    pm_condition_name[level]);
+		sval = sd_send_scsi_START_STOP_UNIT(ssc, SD_POWER_CONDITION,
+		    sd_pl2pc[level], SD_PATH_DIRECT);
+	} else {
+		SD_TRACE(SD_LOG_IO_PM, un, "sdpower: sending \'%s\' unit\n",
+		    ((level == SD_SPINDLE_ON) ? "START" : "STOP"));
+		sval = sd_send_scsi_START_STOP_UNIT(ssc, SD_START_STOP,
+		    ((level == SD_SPINDLE_ON) ? SD_TARGET_START :
+		    SD_TARGET_STOP), SD_PATH_DIRECT);
+	}
 	if (sval != 0) {
 		if (sval == EIO)
 			sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
@@ -6621,8 +6887,7 @@ sdpower(dev_info_t *devi, int component, int level)
 	 * In all other cases we setup for the new state
 	 * and return success.
 	 */
-	switch (level) {
-	case SD_SPINDLE_OFF:
+	if (!SD_PM_IS_IO_CAPABLE(un, level)) {
 		if ((medium_present == TRUE) && (sval != 0)) {
 			/* The stop command from above failed */
 			rval = DDI_FAILURE;
@@ -6632,17 +6897,14 @@ sdpower(dev_info_t *devi, int component, int level)
 			 * sd_pm_resume() and set the state back to
 			 * it's previous value.
 			 */
-			(void) sd_ddi_pm_resume(un);
+			(void) sd_pm_state_change(un, last_power_level,
+			    SD_PM_STATE_ROLLBACK);
 			mutex_enter(SD_MUTEX(un));
 			un->un_last_state = save_state;
 			mutex_exit(SD_MUTEX(un));
-			break;
-		}
-		/*
-		 * The stop command from above succeeded.
-		 */
-		if (un->un_f_monitor_media_state) {
+		} else if (un->un_f_monitor_media_state) {
 			/*
+			 * The stop command from above succeeded.
 			 * Terminate watch thread in case of removable media
 			 * devices going into low power state. This is as per
 			 * the requirements of pm framework, otherwise commands
@@ -6662,10 +6924,9 @@ sdpower(dev_info_t *devi, int component, int level)
 				mutex_exit(SD_MUTEX(un));
 			}
 		}
-		break;
-
-	default:	/* The level requested is spindle on... */
+	} else {
 		/*
+		 * The level requested is I/O capable.
 		 * Legacy behavior: return success on a failed spinup
 		 * if there is no media in the drive.
 		 * Do this by looking at medium_present here.
@@ -6673,37 +6934,39 @@ sdpower(dev_info_t *devi, int component, int level)
 		if ((sval != 0) && medium_present) {
 			/* The start command from above failed */
 			rval = DDI_FAILURE;
-			break;
-		}
-		/*
-		 * The start command from above succeeded
-		 * Resume the devices now that we have
-		 * started the disks
-		 */
-		(void) sd_ddi_pm_resume(un);
+		} else {
+			/*
+			 * The start command from above succeeded
+			 * PM resume the devices now that we have
+			 * started the disks
+			 */
+			(void) sd_pm_state_change(un, level,
+			    SD_PM_STATE_CHANGE);
 
-		/*
-		 * Resume the watch thread since it was suspended
-		 * when the device went into low power mode.
-		 */
-		if (un->un_f_monitor_media_state) {
-			mutex_enter(SD_MUTEX(un));
-			if (un->un_f_watcht_stopped == TRUE) {
-				opaque_t temp_token;
-
-				un->un_f_watcht_stopped = FALSE;
-				mutex_exit(SD_MUTEX(un));
-				temp_token = scsi_watch_request_submit(
-				    SD_SCSI_DEVP(un),
-				    sd_check_media_time,
-				    SENSE_LENGTH, sd_media_watch_cb,
-				    (caddr_t)dev);
+			/*
+			 * Resume the watch thread since it was suspended
+			 * when the device went into low power mode.
+			 */
+			if (un->un_f_monitor_media_state) {
 				mutex_enter(SD_MUTEX(un));
-				un->un_swr_token = temp_token;
+				if (un->un_f_watcht_stopped == TRUE) {
+					opaque_t temp_token;
+
+					un->un_f_watcht_stopped = FALSE;
+					mutex_exit(SD_MUTEX(un));
+					temp_token = scsi_watch_request_submit(
+					    SD_SCSI_DEVP(un),
+					    sd_check_media_time,
+					    SENSE_LENGTH, sd_media_watch_cb,
+					    (caddr_t)dev);
+					mutex_enter(SD_MUTEX(un));
+					un->un_swr_token = temp_token;
+				}
+				mutex_exit(SD_MUTEX(un));
 			}
-			mutex_exit(SD_MUTEX(un));
 		}
 	}
+
 	if (got_semaphore_here != 0) {
 		sema_v(&un->un_semoclose);
 	}
@@ -6839,6 +7102,7 @@ sd_unit_attach(dev_info_t *devi)
 	struct	scsi_device	*devp;
 	struct	sd_lun		*un;
 	char			*variantp;
+	char			name_str[48];
 	int	reservation_flag = SD_TARGET_IS_UNRESERVED;
 	int	instance;
 	int	rval;
@@ -7267,6 +7531,7 @@ sd_unit_attach(dev_info_t *devi)
 	 * meaning a non-zero value must be entered to change the default.
 	 */
 	un->un_f_disksort_disabled = FALSE;
+	un->un_f_rmw_type = SD_RMW_TYPE_DEFAULT;
 
 	/*
 	 * Retrieve the properties from the static driver table or the driver
@@ -7906,6 +8171,24 @@ sd_unit_attach(dev_info_t *devi)
 	un->un_f_write_cache_enabled = (wc_enabled != 0);
 	mutex_exit(SD_MUTEX(un));
 
+	if (un->un_f_rmw_type != SD_RMW_TYPE_RETURN_ERROR &&
+	    un->un_tgt_blocksize != DEV_BSIZE) {
+		if (!(un->un_wm_cache)) {
+			(void) snprintf(name_str, sizeof (name_str),
+			    "%s%d_cache",
+			    ddi_driver_name(SD_DEVINFO(un)),
+			    ddi_get_instance(SD_DEVINFO(un)));
+			un->un_wm_cache = kmem_cache_create(
+			    name_str, sizeof (struct sd_w_map),
+			    8, sd_wm_cache_constructor,
+			    sd_wm_cache_destructor, NULL,
+			    (void *)un, NULL, 0);
+			if (!(un->un_wm_cache)) {
+				goto wm_cache_failed;
+			}
+		}
+	}
+
 	/*
 	 * Check the value of the NV_SUP bit and set
 	 * un_f_suppress_cache_flush accordingly.
@@ -7994,7 +8277,7 @@ sd_unit_attach(dev_info_t *devi)
 	/*
 	 * An error occurred during the attach; clean up & return failure.
 	 */
-
+wm_cache_failed:
 devid_failed:
 
 setup_pm_failed:
@@ -8052,6 +8335,15 @@ spinup_failed:
 	if (un->un_reset_throttle_timeid != NULL) {
 		timeout_id_t temp_id = un->un_reset_throttle_timeid;
 		un->un_reset_throttle_timeid = NULL;
+		mutex_exit(SD_MUTEX(un));
+		(void) untimeout(temp_id);
+		mutex_enter(SD_MUTEX(un));
+	}
+
+	/* Cancel rmw warning message timeouts */
+	if (un->un_rmw_msg_timeid != NULL) {
+		timeout_id_t temp_id = un->un_rmw_msg_timeid;
+		un->un_rmw_msg_timeid = NULL;
 		mutex_exit(SD_MUTEX(un));
 		(void) untimeout(temp_id);
 		mutex_enter(SD_MUTEX(un));
@@ -8270,6 +8562,14 @@ sd_unit_detach(dev_info_t *devi)
 		mutex_enter(SD_MUTEX(un));
 	}
 
+	if (un->un_rmw_msg_timeid != NULL) {
+		timeout_id_t temp_id = un->un_rmw_msg_timeid;
+		un->un_rmw_msg_timeid = NULL;
+		mutex_exit(SD_MUTEX(un));
+		(void) untimeout(temp_id);
+		mutex_enter(SD_MUTEX(un));
+	}
+
 	if (un->un_dcvb_timeid != NULL) {
 		timeout_id_t temp_id = un->un_dcvb_timeid;
 		un->un_dcvb_timeid = NULL;
@@ -8387,8 +8687,8 @@ sd_unit_detach(dev_info_t *devi)
 	} else {
 		mutex_exit(&un->un_pm_mutex);
 		if ((un->un_f_pm_is_enabled == TRUE) &&
-		    (pm_lower_power(SD_DEVINFO(un), 0, SD_SPINDLE_OFF) !=
-		    DDI_SUCCESS)) {
+		    (pm_lower_power(SD_DEVINFO(un), 0, SD_PM_STATE_STOPPED(un))
+		    != DDI_SUCCESS)) {
 			SD_ERROR(SD_LOG_ATTACH_DETACH, un,
 		    "sd_dr_detach: Lower power request failed, ignoring.\n");
 			/*
@@ -9056,7 +9356,7 @@ sd_cache_control(sd_ssc_t *ssc, int rcd_flag, int wce_flag)
 		 * Construct select buffer length based on the
 		 * length of the sense data returned.
 		 */
-		sbuflen =  hdrlen + MODE_BLK_DESC_LENGTH +
+		sbuflen =  hdrlen + bd_len +
 		    sizeof (struct mode_page) +
 		    (int)mode_caching_page->mode_page.length;
 
@@ -9512,12 +9812,11 @@ sd_pm_entry(struct sd_lun *un)
 			/*
 			 * pm_raise_power will cause sdpower to be called
 			 * which brings the device power level to the
-			 * desired state, ON in this case. If successful,
-			 * un_pm_count and un_power_level will be updated
-			 * appropriately.
+			 * desired state, If successful, un_pm_count and
+			 * un_power_level will be updated appropriately.
 			 */
 			return_status = pm_raise_power(SD_DEVINFO(un), 0,
-			    SD_SPINDLE_ON);
+			    SD_PM_STATE_ACTIVE(un));
 
 			mutex_enter(&un->un_pm_mutex);
 
@@ -10288,7 +10587,9 @@ sd_ready_and_valid(sd_ssc_t *ssc, int part)
 	 * a media is changed this routine will be called and the
 	 * block size is a function of media rather than device.
 	 */
-	if (un->un_f_non_devbsize_supported && NOT_DEVBSIZE(un)) {
+	if ((un->un_f_rmw_type != SD_RMW_TYPE_RETURN_ERROR ||
+	    un->un_f_non_devbsize_supported) &&
+	    un->un_tgt_blocksize != DEV_BSIZE) {
 		if (!(un->un_wm_cache)) {
 			(void) snprintf(name_str, sizeof (name_str),
 			    "%s%d_cache",
@@ -10518,17 +10819,20 @@ sdread(dev_t dev, struct uio *uio, cred_t *cred_p)
 	/*
 	 * Read requests are restricted to multiples of the system block size.
 	 */
-	secmask = un->un_sys_blocksize - 1;
+	if (un->un_f_rmw_type == SD_RMW_TYPE_RETURN_ERROR)
+		secmask = un->un_tgt_blocksize - 1;
+	else
+		secmask = DEV_BSIZE - 1;
 
 	if (uio->uio_loffset & ((offset_t)(secmask))) {
 		SD_ERROR(SD_LOG_READ_WRITE, un,
 		    "sdread: file offset not modulo %d\n",
-		    un->un_sys_blocksize);
+		    secmask + 1);
 		err = EINVAL;
 	} else if (uio->uio_iov->iov_len & (secmask)) {
 		SD_ERROR(SD_LOG_READ_WRITE, un,
 		    "sdread: transfer length not modulo %d\n",
-		    un->un_sys_blocksize);
+		    secmask + 1);
 		err = EINVAL;
 	} else {
 		err = physio(sdstrategy, NULL, dev, B_READ, sdmin, uio);
@@ -10604,17 +10908,20 @@ sdwrite(dev_t dev, struct uio *uio, cred_t *cred_p)
 	/*
 	 * Write requests are restricted to multiples of the system block size.
 	 */
-	secmask = un->un_sys_blocksize - 1;
+	if (un->un_f_rmw_type == SD_RMW_TYPE_RETURN_ERROR)
+		secmask = un->un_tgt_blocksize - 1;
+	else
+		secmask = DEV_BSIZE - 1;
 
 	if (uio->uio_loffset & ((offset_t)(secmask))) {
 		SD_ERROR(SD_LOG_READ_WRITE, un,
 		    "sdwrite: file offset not modulo %d\n",
-		    un->un_sys_blocksize);
+		    secmask + 1);
 		err = EINVAL;
 	} else if (uio->uio_iov->iov_len & (secmask)) {
 		SD_ERROR(SD_LOG_READ_WRITE, un,
 		    "sdwrite: transfer length not modulo %d\n",
-		    un->un_sys_blocksize);
+		    secmask + 1);
 		err = EINVAL;
 	} else {
 		err = physio(sdstrategy, NULL, dev, B_WRITE, sdmin, uio);
@@ -10690,17 +10997,20 @@ sdaread(dev_t dev, struct aio_req *aio, cred_t *cred_p)
 	/*
 	 * Read requests are restricted to multiples of the system block size.
 	 */
-	secmask = un->un_sys_blocksize - 1;
+	if (un->un_f_rmw_type == SD_RMW_TYPE_RETURN_ERROR)
+		secmask = un->un_tgt_blocksize - 1;
+	else
+		secmask = DEV_BSIZE - 1;
 
 	if (uio->uio_loffset & ((offset_t)(secmask))) {
 		SD_ERROR(SD_LOG_READ_WRITE, un,
 		    "sdaread: file offset not modulo %d\n",
-		    un->un_sys_blocksize);
+		    secmask + 1);
 		err = EINVAL;
 	} else if (uio->uio_iov->iov_len & (secmask)) {
 		SD_ERROR(SD_LOG_READ_WRITE, un,
 		    "sdaread: transfer length not modulo %d\n",
-		    un->un_sys_blocksize);
+		    secmask + 1);
 		err = EINVAL;
 	} else {
 		err = aphysio(sdstrategy, anocancel, dev, B_READ, sdmin, aio);
@@ -10776,17 +11086,20 @@ sdawrite(dev_t dev, struct aio_req *aio, cred_t *cred_p)
 	/*
 	 * Write requests are restricted to multiples of the system block size.
 	 */
-	secmask = un->un_sys_blocksize - 1;
+	if (un->un_f_rmw_type == SD_RMW_TYPE_RETURN_ERROR)
+		secmask = un->un_tgt_blocksize - 1;
+	else
+		secmask = DEV_BSIZE - 1;
 
 	if (uio->uio_loffset & ((offset_t)(secmask))) {
 		SD_ERROR(SD_LOG_READ_WRITE, un,
 		    "sdawrite: file offset not modulo %d\n",
-		    un->un_sys_blocksize);
+		    secmask + 1);
 		err = EINVAL;
 	} else if (uio->uio_iov->iov_len & (secmask)) {
 		SD_ERROR(SD_LOG_READ_WRITE, un,
 		    "sdawrite: transfer length not modulo %d\n",
-		    un->un_sys_blocksize);
+		    secmask + 1);
 		err = EINVAL;
 	} else {
 		err = aphysio(sdstrategy, anocancel, dev, B_WRITE, sdmin, aio);
@@ -11012,6 +11325,7 @@ sdstrategy(struct buf *bp)
 		biodone(bp);
 		return (0);
 	}
+
 	/* As was done in the past, fail new cmds. if state is dumping. */
 	if (un->un_state == SD_STATE_DUMPING) {
 		bioerror(bp, ENXIO);
@@ -11150,6 +11464,27 @@ sd_xbuf_init(struct sd_lun *un, struct buf *bp, struct sd_xbuf *xp,
 		/* FALLTHRU */
 	case SD_CHAIN_BUFIO:
 		index = un->un_buf_chain_type;
+		if ((!un->un_f_has_removable_media) &&
+		    (un->un_tgt_blocksize != 0) &&
+		    (un->un_tgt_blocksize != DEV_BSIZE)) {
+			int secmask = 0, blknomask = 0;
+			blknomask =
+			    (un->un_tgt_blocksize / DEV_BSIZE) - 1;
+			secmask = un->un_tgt_blocksize - 1;
+
+			if ((bp->b_lblkno & (blknomask)) ||
+			    (bp->b_bcount & (secmask))) {
+				if (un->un_f_rmw_type !=
+				    SD_RMW_TYPE_RETURN_ERROR) {
+					if (un->un_f_pm_is_enabled == FALSE)
+						index =
+						    SD_CHAIN_INFO_MSS_DSK_NO_PM;
+					else
+						index =
+						    SD_CHAIN_INFO_MSS_DISK;
+				}
+			}
+		}
 		break;
 	case SD_CHAIN_USCSI:
 		index = un->un_uscsi_chain_type;
@@ -11482,6 +11817,7 @@ sd_ssc_fini(sd_ssc_t *ssc)
  * Return Code: 0 -  successful completion of the given command
  *		EIO - scsi_uscsi_handle_command() failed
  *		ENXIO  - soft state not found for specified dev
+ *		ECANCELED - command cancelled due to low power
  *		EINVAL
  *		EFAULT - copyin/copyout error
  *		return code of scsi_uscsi_handle_command():
@@ -11536,6 +11872,23 @@ sd_ssc_send(sd_ssc_t *ssc, struct uscsi_cmd *incmd, int flag,
 	 * followed to avoid missing FMA telemetries.
 	 */
 	ssc->ssc_flags |= SSC_FLAGS_NEED_ASSESSMENT;
+
+	/*
+	 * if USCSI_PMFAILFAST is set and un is in low power, fail the
+	 * command immediately.
+	 */
+	mutex_enter(SD_MUTEX(un));
+	mutex_enter(&un->un_pm_mutex);
+	if ((uscmd->uscsi_flags & USCSI_PMFAILFAST) &&
+	    SD_DEVICE_IS_IN_LOW_POWER(un)) {
+		SD_TRACE(SD_LOG_IO, un, "sd_ssc_send:"
+		    "un:0x%p is in low power\n", un);
+		mutex_exit(&un->un_pm_mutex);
+		mutex_exit(SD_MUTEX(un));
+		return (ECANCELED);
+	}
+	mutex_exit(&un->un_pm_mutex);
+	mutex_exit(SD_MUTEX(un));
 
 #ifdef SDDEBUG
 	switch (dataspace) {
@@ -12039,6 +12392,20 @@ sd_uscsi_iodone(int index, struct sd_lun *un, struct buf *bp)
  *		request would exceed partition range.  Converts
  *		partition-relative block address to absolute.
  *
+ *              Upon exit of this function:
+ *              1.I/O is aligned
+ *                 xp->xb_blkno represents the absolute sector address
+ *              2.I/O is misaligned
+ *                 xp->xb_blkno represents the absolute logical block address
+ *                 based on DEV_BSIZE. The logical block address will be
+ *                 converted to physical sector address in sd_mapblocksize_\
+ *                 iostart.
+ *              3.I/O is misaligned but is aligned in "overrun" buf
+ *                 xp->xb_blkno represents the absolute logical block address
+ *                 based on DEV_BSIZE. The logical block address will be
+ *                 converted to physical sector address in sd_mapblocksize_\
+ *                 iostart. But no RMW will be issued in this case.
+ *
  *     Context: Can sleep
  *
  *      Issues: This follows what the old code did, in terms of accessing
@@ -12060,6 +12427,8 @@ sd_mapblockaddr_iostart(int index, struct sd_lun *un, struct buf *bp)
 	int	partition;
 	diskaddr_t	partition_offset;
 	struct sd_xbuf *xp;
+	int secmask = 0, blknomask = 0;
+	ushort_t is_aligned = TRUE;
 
 	ASSERT(un != NULL);
 	ASSERT(bp != NULL);
@@ -12116,6 +12485,57 @@ sd_mapblockaddr_iostart(int index, struct sd_lun *un, struct buf *bp)
 	(void) cmlb_partinfo(un->un_cmlbhandle, partition,
 	    &nblocks, &partition_offset, NULL, NULL, (void *)SD_PATH_DIRECT);
 
+	blknomask = (un->un_tgt_blocksize / DEV_BSIZE) - 1;
+	secmask = un->un_tgt_blocksize - 1;
+
+	if ((bp->b_lblkno & (blknomask)) || (bp->b_bcount & (secmask))) {
+		is_aligned = FALSE;
+	}
+
+	if (!(NOT_DEVBSIZE(un))) {
+		/*
+		 * If I/O is aligned, no need to involve RMW(Read Modify Write)
+		 * Convert the logical block number to target's physical sector
+		 * number.
+		 */
+		if (is_aligned) {
+			xp->xb_blkno = SD_SYS2TGTBLOCK(un, xp->xb_blkno);
+		} else {
+			switch (un->un_f_rmw_type) {
+			case SD_RMW_TYPE_RETURN_ERROR:
+				bp->b_flags |= B_ERROR;
+				goto error_exit;
+
+			case SD_RMW_TYPE_DEFAULT:
+				mutex_enter(SD_MUTEX(un));
+				if (un->un_rmw_msg_timeid == NULL) {
+					scsi_log(SD_DEVINFO(un), sd_label,
+					    CE_WARN, "I/O request is not "
+					    "aligned with %d disk sector size. "
+					    "It is handled through Read Modify "
+					    "Write but the performance is "
+					    "very low.\n",
+					    un->un_tgt_blocksize);
+					un->un_rmw_msg_timeid =
+					    timeout(sd_rmw_msg_print_handler,
+					    un, SD_RMW_MSG_PRINT_TIMEOUT);
+				} else {
+					un->un_rmw_incre_count ++;
+				}
+				mutex_exit(SD_MUTEX(un));
+				break;
+
+			case SD_RMW_TYPE_NO_WARNING:
+			default:
+				break;
+			}
+
+			nblocks = SD_TGT2SYSBLOCK(un, nblocks);
+			partition_offset = SD_TGT2SYSBLOCK(un,
+			    partition_offset);
+		}
+	}
+
 	/*
 	 * blocknum is the starting block number of the request. At this
 	 * point it is still relative to the start of the minor device.
@@ -12136,7 +12556,7 @@ sd_mapblockaddr_iostart(int index, struct sd_lun *un, struct buf *bp)
 	 * a multiple of the system block size.
 	 */
 	if ((blocknum < 0) || (blocknum >= nblocks) ||
-	    ((bp->b_bcount & (un->un_sys_blocksize - 1)) != 0)) {
+	    ((bp->b_bcount & (DEV_BSIZE - 1)) != 0)) {
 		bp->b_flags |= B_ERROR;
 		goto error_exit;
 	}
@@ -12145,11 +12565,18 @@ sd_mapblockaddr_iostart(int index, struct sd_lun *un, struct buf *bp)
 	 * If the requsted # blocks exceeds the available # blocks, that
 	 * is an overrun of the partition.
 	 */
-	requested_nblocks = SD_BYTES2SYSBLOCKS(un, bp->b_bcount);
+	if ((!NOT_DEVBSIZE(un)) && is_aligned) {
+		requested_nblocks = SD_BYTES2TGTBLOCKS(un, bp->b_bcount);
+	} else {
+		requested_nblocks = SD_BYTES2SYSBLOCKS(bp->b_bcount);
+	}
+
 	available_nblocks = (size_t)(nblocks - blocknum);
 	ASSERT(nblocks >= blocknum);
 
 	if (requested_nblocks > available_nblocks) {
+		size_t resid;
+
 		/*
 		 * Allocate an "overrun" buf to allow the request to proceed
 		 * for the amount of space available in the partition. The
@@ -12158,8 +12585,14 @@ sd_mapblockaddr_iostart(int index, struct sd_lun *un, struct buf *bp)
 		 * replaces the original buf here, and the original buf
 		 * is saved inside the overrun buf, for later use.
 		 */
-		size_t resid = SD_SYSBLOCKS2BYTES(un,
-		    (offset_t)(requested_nblocks - available_nblocks));
+		if ((!NOT_DEVBSIZE(un)) && is_aligned) {
+			resid = SD_TGTBLOCKS2BYTES(un,
+			    (offset_t)(requested_nblocks - available_nblocks));
+		} else {
+			resid = SD_SYSBLOCKS2BYTES(
+			    (offset_t)(requested_nblocks - available_nblocks));
+		}
+
 		size_t count = bp->b_bcount - resid;
 		/*
 		 * Note: count is an unsigned entity thus it'll NEVER
@@ -12318,7 +12751,7 @@ sd_mapblocksize_iostart(int index, struct sd_lun *un, struct buf *bp)
 	 * un->un_sys_blocksize as its block size or if bcount == 0.
 	 * In this case there is no layer-private data block allocated.
 	 */
-	if ((un->un_tgt_blocksize == un->un_sys_blocksize) ||
+	if ((un->un_tgt_blocksize == DEV_BSIZE) ||
 	    (bp->b_bcount == 0)) {
 		goto done;
 	}
@@ -12333,7 +12766,7 @@ sd_mapblocksize_iostart(int index, struct sd_lun *un, struct buf *bp)
 
 	SD_INFO(SD_LOG_IO_RMMEDIA, un, "sd_mapblocksize_iostart: "
 	    "tgt_blocksize:0x%x sys_blocksize: 0x%x\n",
-	    un->un_tgt_blocksize, un->un_sys_blocksize);
+	    un->un_tgt_blocksize, DEV_BSIZE);
 	SD_INFO(SD_LOG_IO_RMMEDIA, un, "sd_mapblocksize_iostart: "
 	    "request start block:0x%x\n", xp->xb_blkno);
 	SD_INFO(SD_LOG_IO_RMMEDIA, un, "sd_mapblocksize_iostart: "
@@ -12376,7 +12809,7 @@ sd_mapblocksize_iostart(int index, struct sd_lun *un, struct buf *bp)
 	 * Note that end_block is actually the block that follows the last
 	 * block of the request, but that's what is needed for the computation.
 	 */
-	first_byte  = SD_SYSBLOCKS2BYTES(un, (offset_t)xp->xb_blkno);
+	first_byte  = SD_SYSBLOCKS2BYTES((offset_t)xp->xb_blkno);
 	start_block = xp->xb_blkno = first_byte / un->un_tgt_blocksize;
 	end_block   = (first_byte + bp->b_bcount + un->un_tgt_blocksize - 1) /
 	    un->un_tgt_blocksize;
@@ -12519,7 +12952,7 @@ sd_mapblocksize_iodone(int index, struct sd_lun *un, struct buf *bp)
 	 * There is no shadow buf or layer-private data if the target is
 	 * using un->un_sys_blocksize as its block size or if bcount == 0.
 	 */
-	if ((un->un_tgt_blocksize == un->un_sys_blocksize) ||
+	if ((un->un_tgt_blocksize == DEV_BSIZE) ||
 	    (bp->b_bcount == 0)) {
 		goto exit;
 	}
@@ -15550,6 +15983,48 @@ sd_start_retry_command(void *arg)
 	    "sd_start_retry_command: exit\n");
 }
 
+/*
+ *    Function: sd_rmw_msg_print_handler
+ *
+ * Description: If RMW mode is enabled and warning message is triggered
+ *              print I/O count during a fixed interval.
+ *
+ *   Arguments: arg - pointer to associated softstate for the device.
+ *
+ *     Context: timeout(9F) thread context. May not sleep.
+ */
+static void
+sd_rmw_msg_print_handler(void *arg)
+{
+	struct sd_lun *un = arg;
+
+	ASSERT(un != NULL);
+	ASSERT(!mutex_owned(SD_MUTEX(un)));
+
+	SD_TRACE(SD_LOG_IO_CORE | SD_LOG_ERROR, un,
+	    "sd_rmw_msg_print_handler: entry\n");
+
+	mutex_enter(SD_MUTEX(un));
+
+	if (un->un_rmw_incre_count > 0) {
+		scsi_log(SD_DEVINFO(un), sd_label, CE_WARN,
+		    "%"PRIu64" I/O requests are not aligned with %d disk "
+		    "sector size in %ld seconds. They are handled through "
+		    "Read Modify Write but the performance is very low!\n",
+		    un->un_rmw_incre_count, un->un_tgt_blocksize,
+		    drv_hztousec(SD_RMW_MSG_PRINT_TIMEOUT) / 1000000);
+		un->un_rmw_incre_count = 0;
+		un->un_rmw_msg_timeid = timeout(sd_rmw_msg_print_handler,
+		    un, SD_RMW_MSG_PRINT_TIMEOUT);
+	} else {
+		un->un_rmw_msg_timeid = NULL;
+	}
+
+	mutex_exit(SD_MUTEX(un));
+
+	SD_TRACE(SD_LOG_IO_CORE | SD_LOG_ERROR, un,
+	    "sd_rmw_msg_print_handler: exit\n");
+}
 
 /*
  *    Function: sd_start_direct_priority_command
@@ -19336,6 +19811,7 @@ sd_send_scsi_READ_CAPACITY(sd_ssc_t *ssc, uint64_t *capp, uint32_t *lbap,
 	uint32_t		*capacity_buf;
 	uint64_t		capacity;
 	uint32_t		lbasize;
+	uint32_t		pbsize;
 	int			status;
 	struct sd_lun		*un;
 
@@ -19418,7 +19894,7 @@ sd_send_scsi_READ_CAPACITY(sd_ssc_t *ssc, uint64_t *capp, uint32_t *lbap,
 		if (capacity == 0xffffffff) {
 			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 			status = sd_send_scsi_READ_CAPACITY_16(ssc, &capacity,
-			    &lbasize, path_flag);
+			    &lbasize, &pbsize, path_flag);
 			if (status != 0) {
 				return (status);
 			}
@@ -19467,10 +19943,11 @@ sd_send_scsi_READ_CAPACITY(sd_ssc_t *ssc, uint64_t *capp, uint32_t *lbap,
 	 * on the logical unit.  The actual logical block count will be
 	 * this value plus one.
 	 *
-	 * Currently the capacity is saved in terms of un->un_sys_blocksize,
-	 * so scale the capacity value to reflect this.
+	 * Currently, for removable media, the capacity is saved in terms
+	 * of un->un_sys_blocksize, so scale the capacity value to reflect this.
 	 */
-	capacity = (capacity + 1) * (lbasize / un->un_sys_blocksize);
+	if (un->un_f_has_removable_media)
+		capacity = (capacity + 1) * (lbasize / un->un_sys_blocksize);
 
 	/*
 	 * Copy the values from the READ CAPACITY command into the space
@@ -19504,15 +19981,19 @@ sd_send_scsi_READ_CAPACITY(sd_ssc_t *ssc, uint64_t *capp, uint32_t *lbap,
  *		determine the device capacity in number of blocks and the
  *		device native block size.  If this function returns a failure,
  *		then the values in *capp and *lbap are undefined.
- *		This routine should always be called by
- *		sd_send_scsi_READ_CAPACITY which will appy any device
- *		specific adjustments to capacity and lbasize.
+ *		This routine should be called by sd_send_scsi_READ_CAPACITY
+ *              which will apply any device specific adjustments to capacity
+ *              and lbasize. One exception is it is also called by
+ *              sd_get_media_info_ext. In that function, there is no need to
+ *              adjust the capacity and lbasize.
  *
  *   Arguments: ssc   - ssc contains ptr to soft state struct for the target
  *		capp - ptr to unsigned 64-bit variable to receive the
  *			capacity value from the command.
  *		lbap - ptr to unsigned 32-bit varaible to receive the
  *			block size value from the command
+ *              psp  - ptr to unsigned 32-bit variable to receive the
+ *                      physical block size value from the command
  *		path_flag - SD_PATH_DIRECT to use the USCSI "direct" chain and
  *			the normal command waitq, or SD_PATH_DIRECT_PRIORITY
  *			to use the USCSI "direct" chain and bypass the normal
@@ -19533,7 +20014,7 @@ sd_send_scsi_READ_CAPACITY(sd_ssc_t *ssc, uint64_t *capp, uint32_t *lbap,
 
 static int
 sd_send_scsi_READ_CAPACITY_16(sd_ssc_t *ssc, uint64_t *capp,
-	uint32_t *lbap, int path_flag)
+	uint32_t *lbap, uint32_t *psp, int path_flag)
 {
 	struct	scsi_extended_sense	sense_buf;
 	struct	uscsi_cmd	ucmd_buf;
@@ -19541,6 +20022,8 @@ sd_send_scsi_READ_CAPACITY_16(sd_ssc_t *ssc, uint64_t *capp,
 	uint64_t		*capacity16_buf;
 	uint64_t		capacity;
 	uint32_t		lbasize;
+	uint32_t		pbsize;
+	uint32_t		lbpb_exp;
 	int			status;
 	struct sd_lun		*un;
 
@@ -19617,9 +20100,13 @@ sd_send_scsi_READ_CAPACITY_16(sd_ssc_t *ssc, uint64_t *capp,
 		 *  bytes 8-11: Block length in bytes
 		 *		(MSB in byte:8 & LSB in byte:11)
 		 *
+		 *  byte 13: LOGICAL BLOCKS PER PHYSICAL BLOCK EXPONENT
 		 */
 		capacity = BE_64(capacity16_buf[0]);
 		lbasize = BE_32(*(uint32_t *)&capacity16_buf[1]);
+		lbpb_exp = (BE_64(capacity16_buf[1]) >> 40) & 0x0f;
+
+		pbsize = lbasize << lbpb_exp;
 
 		/*
 		 * Done with capacity16_buf
@@ -19666,9 +20153,11 @@ sd_send_scsi_READ_CAPACITY_16(sd_ssc_t *ssc, uint64_t *capp,
 
 	*capp = capacity;
 	*lbap = lbasize;
+	*psp = pbsize;
 
 	SD_TRACE(SD_LOG_IO, un, "sd_send_scsi_READ_CAPACITY_16: "
-	    "capacity:0x%llx  lbasize:0x%x\n", capacity, lbasize);
+	    "capacity:0x%llx  lbasize:0x%x, pbsize: 0x%x\n",
+	    capacity, lbasize, pbsize);
 
 	return (0);
 }
@@ -19681,6 +20170,8 @@ sd_send_scsi_READ_CAPACITY_16(sd_ssc_t *ssc, uint64_t *capp,
  *
  *   Arguments: ssc    - ssc contatins pointer to driver soft state (unit)
  *                       structure for this target.
+ *      pc_flag - SD_POWER_CONDITION
+ *                SD_START_STOP
  *		flag  - SD_TARGET_START
  *			SD_TARGET_STOP
  *			SD_TARGET_EJECT
@@ -19700,7 +20191,8 @@ sd_send_scsi_READ_CAPACITY_16(sd_ssc_t *ssc, uint64_t *capp,
  */
 
 static int
-sd_send_scsi_START_STOP_UNIT(sd_ssc_t *ssc, int flag, int path_flag)
+sd_send_scsi_START_STOP_UNIT(sd_ssc_t *ssc, int pc_flag, int flag,
+    int path_flag)
 {
 	struct	scsi_extended_sense	sense_buf;
 	union scsi_cdb		cdb;
@@ -19717,7 +20209,7 @@ sd_send_scsi_START_STOP_UNIT(sd_ssc_t *ssc, int flag, int path_flag)
 	    "sd_send_scsi_START_STOP_UNIT: entry: un:0x%p\n", un);
 
 	if (un->un_f_check_start_stop &&
-	    ((flag == SD_TARGET_START) || (flag == SD_TARGET_STOP)) &&
+	    ((pc_flag == SD_START_STOP) && (flag != SD_TARGET_EJECT)) &&
 	    (un->un_f_start_stop_supported != TRUE)) {
 		return (0);
 	}
@@ -19741,7 +20233,8 @@ sd_send_scsi_START_STOP_UNIT(sd_ssc_t *ssc, int flag, int path_flag)
 	bzero(&sense_buf, sizeof (struct scsi_extended_sense));
 
 	cdb.scc_cmd = SCMD_START_STOP;
-	cdb.cdb_opaque[4] = (uchar_t)flag;
+	cdb.cdb_opaque[4] = (pc_flag == SD_POWER_CONDITION) ?
+	    (uchar_t)(flag << 4) : (uchar_t)flag;
 
 	ucmd_buf.uscsi_cdb	= (char *)&cdb;
 	ucmd_buf.uscsi_cdblen	= CDB_GROUP0;
@@ -19836,6 +20329,7 @@ sd_start_stop_unit_task(void *arg)
 {
 	struct sd_lun	*un = arg;
 	sd_ssc_t	*ssc;
+	int		power_level;
 	int		rval;
 
 	ASSERT(un != NULL);
@@ -19854,16 +20348,30 @@ sd_start_stop_unit_task(void *arg)
 	}
 	mutex_exit(SD_MUTEX(un));
 
+	ssc = sd_ssc_init(un);
 	/*
 	 * When a START STOP command is issued from here, it is part of a
 	 * failure recovery operation and must be issued before any other
 	 * commands, including any pending retries. Thus it must be sent
 	 * using SD_PATH_DIRECT_PRIORITY. It doesn't matter if the spin up
 	 * succeeds or not, we will start I/O after the attempt.
+	 * If power condition is supported and the current power level
+	 * is capable of performing I/O, we should set the power condition
+	 * to that level. Otherwise, set the power condition to ACTIVE.
 	 */
-	ssc = sd_ssc_init(un);
-	rval = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_START,
-	    SD_PATH_DIRECT_PRIORITY);
+	if (un->un_f_power_condition_supported) {
+		mutex_enter(SD_MUTEX(un));
+		ASSERT(SD_PM_IS_LEVEL_VALID(un, un->un_power_level));
+		power_level = sd_pwr_pc.ran_perf[un->un_power_level]
+		    > 0 ? un->un_power_level : SD_SPINDLE_ACTIVE;
+		mutex_exit(SD_MUTEX(un));
+		rval = sd_send_scsi_START_STOP_UNIT(ssc, SD_POWER_CONDITION,
+		    sd_pl2pc[power_level], SD_PATH_DIRECT_PRIORITY);
+	} else {
+		rval = sd_send_scsi_START_STOP_UNIT(ssc, SD_START_STOP,
+		    SD_TARGET_START, SD_PATH_DIRECT_PRIORITY);
+	}
+
 	if (rval != 0)
 		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
 	sd_ssc_fini(ssc);
@@ -21384,6 +21892,9 @@ sdioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cred_p, int *rval_p)
 		case DKIOCSMBOOT:
 		case DKIOCG_PHYGEOM:
 		case DKIOCG_VIRTGEOM:
+#if defined(__i386) || defined(__amd64)
+		case DKIOCSETEXTPART:
+#endif
 			/* let cmlb handle it */
 			goto skip_ready_valid;
 
@@ -21443,6 +21954,7 @@ sdioctl(dev_t dev, int cmd, intptr_t arg, int flag, cred_t *cred_p, int *rval_p)
 		case DKIOCHOTPLUGGABLE:
 		case DKIOCINFO:
 		case DKIOCGMEDIAINFO:
+		case DKIOCGMEDIAINFOEXT:
 		case MHIOCENFAILFAST:
 		case MHIOCSTATUS:
 		case MHIOCTKOWN:
@@ -21509,6 +22021,11 @@ skip_ready_valid:
 		err = sd_get_media_info(dev, (caddr_t)arg, flag);
 		break;
 
+	case DKIOCGMEDIAINFOEXT:
+		SD_TRACE(SD_LOG_IOCTL, un, "DKIOCGMEDIAINFOEXT\n");
+		err = sd_get_media_info_ext(dev, (caddr_t)arg, flag);
+		break;
+
 	case DKIOCGGEOM:
 	case DKIOCGVTOC:
 	case DKIOCGEXTVTOC:
@@ -21526,6 +22043,9 @@ skip_ready_valid:
 	case DKIOCSMBOOT:
 	case DKIOCG_PHYGEOM:
 	case DKIOCG_VIRTGEOM:
+#if defined(__i386) || defined(__amd64)
+	case DKIOCSETEXTPART:
+#endif
 		SD_TRACE(SD_LOG_IOCTL, un, "DKIOC %d\n", cmd);
 
 		/* TUR should spin up */
@@ -21895,8 +22415,8 @@ skip_ready_valid:
 		if (!ISCD(un)) {
 			err = ENOTTY;
 		} else {
-			err = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_STOP,
-			    SD_PATH_STANDARD);
+			err = sd_send_scsi_START_STOP_UNIT(ssc, SD_START_STOP,
+			    SD_TARGET_STOP, SD_PATH_STANDARD);
 			goto done_with_assess;
 		}
 		break;
@@ -21906,8 +22426,8 @@ skip_ready_valid:
 		if (!ISCD(un)) {
 			err = ENOTTY;
 		} else {
-			err = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_START,
-			    SD_PATH_STANDARD);
+			err = sd_send_scsi_START_STOP_UNIT(ssc, SD_START_STOP,
+			    SD_TARGET_START, SD_PATH_STANDARD);
 			goto done_with_assess;
 		}
 		break;
@@ -21917,8 +22437,8 @@ skip_ready_valid:
 		if (!ISCD(un)) {
 			err = ENOTTY;
 		} else {
-			err = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_CLOSE,
-			    SD_PATH_STANDARD);
+			err = sd_send_scsi_START_STOP_UNIT(ssc, SD_START_STOP,
+			    SD_TARGET_CLOSE, SD_PATH_STANDARD);
 			goto done_with_assess;
 		}
 		break;
@@ -22609,6 +23129,205 @@ no_assessment:
 	return (rval);
 }
 
+/*
+ *    Function: sd_get_media_info_ext
+ *
+ * Description: This routine is the driver entry point for handling ioctl
+ *		requests for the media type or command set profile used by the
+ *		drive to operate on the media (DKIOCGMEDIAINFOEXT). The
+ *		difference this ioctl and DKIOCGMEDIAINFO is the return value
+ *		of this ioctl contains both logical block size and physical
+ *		block size.
+ *
+ *
+ *   Arguments: dev	- the device number
+ *		arg	- pointer to user provided dk_minfo_ext structure
+ *			  specifying the media type, logical block size,
+ *			  physical block size and disk capacity.
+ *		flag	- this argument is a pass through to ddi_copyxxx()
+ *			  directly from the mode argument of ioctl().
+ *
+ * Return Code: 0
+ *		EACCESS
+ *		EFAULT
+ *		ENXIO
+ *		EIO
+ */
+
+static int
+sd_get_media_info_ext(dev_t dev, caddr_t arg, int flag)
+{
+	struct sd_lun		*un = NULL;
+	struct uscsi_cmd	com;
+	struct scsi_inquiry	*sinq;
+	struct dk_minfo_ext	media_info_ext;
+	u_longlong_t		media_capacity;
+	uint64_t		capacity;
+	uint_t			lbasize;
+	uint_t			pbsize;
+	uchar_t			*out_data;
+	uchar_t			*rqbuf;
+	int			rval = 0;
+	int			rtn;
+	sd_ssc_t		*ssc;
+
+	if ((un = ddi_get_soft_state(sd_state, SDUNIT(dev))) == NULL ||
+	    (un->un_state == SD_STATE_OFFLINE)) {
+		return (ENXIO);
+	}
+
+	SD_TRACE(SD_LOG_IOCTL_DKIO, un, "sd_get_media_info_ext: entry\n");
+
+	out_data = kmem_zalloc(SD_PROFILE_HEADER_LEN, KM_SLEEP);
+	rqbuf = kmem_zalloc(SENSE_LENGTH, KM_SLEEP);
+	ssc = sd_ssc_init(un);
+
+	/* Issue a TUR to determine if the drive is ready with media present */
+	rval = sd_send_scsi_TEST_UNIT_READY(ssc, SD_CHECK_FOR_MEDIA);
+	if (rval == ENXIO) {
+		goto done;
+	} else if (rval != 0) {
+		sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	}
+
+	/* Now get configuration data */
+	if (ISCD(un)) {
+		media_info_ext.dki_media_type = DK_CDROM;
+
+		/* Allow SCMD_GET_CONFIGURATION to MMC devices only */
+		if (un->un_f_mmc_cap == TRUE) {
+			rtn = sd_send_scsi_GET_CONFIGURATION(ssc, &com, rqbuf,
+			    SENSE_LENGTH, out_data, SD_PROFILE_HEADER_LEN,
+			    SD_PATH_STANDARD);
+
+			if (rtn) {
+				/*
+				 * We ignore all failures for CD and need to
+				 * put the assessment before processing code
+				 * to avoid missing assessment for FMA.
+				 */
+				sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+				/*
+				 * Failed for other than an illegal request
+				 * or command not supported
+				 */
+				if ((com.uscsi_status == STATUS_CHECK) &&
+				    (com.uscsi_rqstatus == STATUS_GOOD)) {
+					if ((rqbuf[2] != KEY_ILLEGAL_REQUEST) ||
+					    (rqbuf[12] != 0x20)) {
+						rval = EIO;
+						goto no_assessment;
+					}
+				}
+			} else {
+				/*
+				 * The GET CONFIGURATION command succeeded
+				 * so set the media type according to the
+				 * returned data
+				 */
+				media_info_ext.dki_media_type = out_data[6];
+				media_info_ext.dki_media_type <<= 8;
+				media_info_ext.dki_media_type |= out_data[7];
+			}
+		}
+	} else {
+		/*
+		 * The profile list is not available, so we attempt to identify
+		 * the media type based on the inquiry data
+		 */
+		sinq = un->un_sd->sd_inq;
+		if ((sinq->inq_dtype == DTYPE_DIRECT) ||
+		    (sinq->inq_dtype == DTYPE_OPTICAL)) {
+			/* This is a direct access device  or optical disk */
+			media_info_ext.dki_media_type = DK_FIXED_DISK;
+
+			if ((bcmp(sinq->inq_vid, "IOMEGA", 6) == 0) ||
+			    (bcmp(sinq->inq_vid, "iomega", 6) == 0)) {
+				if ((bcmp(sinq->inq_pid, "ZIP", 3) == 0)) {
+					media_info_ext.dki_media_type = DK_ZIP;
+				} else if (
+				    (bcmp(sinq->inq_pid, "jaz", 3) == 0)) {
+					media_info_ext.dki_media_type = DK_JAZ;
+				}
+			}
+		} else {
+			/*
+			 * Not a CD, direct access or optical disk so return
+			 * unknown media
+			 */
+			media_info_ext.dki_media_type = DK_UNKNOWN;
+		}
+	}
+
+	/*
+	 * Now read the capacity so we can provide the lbasize,
+	 * pbsize and capacity.
+	 */
+	rval = sd_send_scsi_READ_CAPACITY_16(ssc, &capacity, &lbasize, &pbsize,
+	    SD_PATH_DIRECT);
+
+	if (rval != 0) {
+		rval = sd_send_scsi_READ_CAPACITY(ssc, &capacity, &lbasize,
+		    SD_PATH_DIRECT);
+
+		switch (rval) {
+		case 0:
+			pbsize = lbasize;
+			media_capacity = capacity;
+			/*
+			 * sd_send_scsi_READ_CAPACITY() reports capacity in
+			 * un->un_sys_blocksize chunks. So we need to convert
+			 * it into cap.lbsize chunks.
+			 */
+			if (un->un_f_has_removable_media) {
+				media_capacity *= un->un_sys_blocksize;
+				media_capacity /= lbasize;
+			}
+			break;
+		case EACCES:
+			rval = EACCES;
+			goto done;
+		default:
+			rval = EIO;
+			goto done;
+		}
+	} else {
+		media_capacity = capacity;
+	}
+
+	/*
+	 * If lun is expanded dynamically, update the un structure.
+	 */
+	mutex_enter(SD_MUTEX(un));
+	if ((un->un_f_blockcount_is_valid == TRUE) &&
+	    (un->un_f_tgt_blocksize_is_valid == TRUE) &&
+	    (capacity > un->un_blockcount)) {
+		sd_update_block_info(un, lbasize, capacity);
+	}
+	mutex_exit(SD_MUTEX(un));
+
+	media_info_ext.dki_lbsize = lbasize;
+	media_info_ext.dki_capacity = media_capacity;
+	media_info_ext.dki_pbsize = pbsize;
+
+	if (ddi_copyout(&media_info_ext, arg, sizeof (struct dk_minfo_ext),
+	    flag)) {
+		rval = EFAULT;
+		goto no_assessment;
+	}
+done:
+	if (rval != 0) {
+		if (rval == EIO)
+			sd_ssc_assessment(ssc, SD_FMT_STATUS_CHECK);
+		else
+			sd_ssc_assessment(ssc, SD_FMT_IGNORE);
+	}
+no_assessment:
+	sd_ssc_fini(ssc);
+	kmem_free(out_data, SD_PROFILE_HEADER_LEN);
+	kmem_free(rqbuf, SENSE_LENGTH);
+	return (rval);
+}
 
 /*
  *    Function: sd_check_media
@@ -24700,17 +25419,51 @@ sddump(dev_t dev, caddr_t addr, daddr_t blkno, int nblk)
 	partition = SDPART(dev);
 	SD_INFO(SD_LOG_DUMP, un, "sddump: partition = %d\n", partition);
 
+	if (!(NOT_DEVBSIZE(un))) {
+		int secmask = 0;
+		int blknomask = 0;
+
+		blknomask = (un->un_tgt_blocksize / DEV_BSIZE) - 1;
+		secmask = un->un_tgt_blocksize - 1;
+
+		if (blkno & blknomask) {
+			SD_TRACE(SD_LOG_DUMP, un,
+			    "sddump: dump start block not modulo %d\n",
+			    un->un_tgt_blocksize);
+			return (EINVAL);
+		}
+
+		if ((nblk * DEV_BSIZE) & secmask) {
+			SD_TRACE(SD_LOG_DUMP, un,
+			    "sddump: dump length not modulo %d\n",
+			    un->un_tgt_blocksize);
+			return (EINVAL);
+		}
+
+	}
+
 	/* Validate blocks to dump at against partition size. */
 
 	(void) cmlb_partinfo(un->un_cmlbhandle, partition,
 	    &nblks, &start_block, NULL, NULL, (void *)SD_PATH_DIRECT);
 
-	if ((blkno + nblk) > nblks) {
-		SD_TRACE(SD_LOG_DUMP, un,
-		    "sddump: dump range larger than partition: "
-		    "blkno = 0x%x, nblk = 0x%x, dkl_nblk = 0x%x\n",
-		    blkno, nblk, nblks);
-		return (EINVAL);
+	if (NOT_DEVBSIZE(un)) {
+		if ((blkno + nblk) > nblks) {
+			SD_TRACE(SD_LOG_DUMP, un,
+			    "sddump: dump range larger than partition: "
+			    "blkno = 0x%x, nblk = 0x%x, dkl_nblk = 0x%x\n",
+			    blkno, nblk, nblks);
+			return (EINVAL);
+		}
+	} else {
+		if (((blkno / (un->un_tgt_blocksize / DEV_BSIZE)) +
+		    (nblk / (un->un_tgt_blocksize / DEV_BSIZE))) > nblks) {
+			SD_TRACE(SD_LOG_DUMP, un,
+			    "sddump: dump range larger than partition: "
+			    "blkno = 0x%x, nblk = 0x%x, dkl_nblk = 0x%x\n",
+			    blkno, nblk, nblks);
+			return (EINVAL);
+		}
 	}
 
 	mutex_enter(&un->un_pm_mutex);
@@ -24722,7 +25475,8 @@ sddump(dev_t dev, caddr_t addr, daddr_t blkno, int nblk)
 		/*
 		 * use pm framework to power on HBA 1st
 		 */
-		(void) pm_raise_power(SD_DEVINFO(un), 0, SD_SPINDLE_ON);
+		(void) pm_raise_power(SD_DEVINFO(un), 0,
+		    SD_PM_STATE_ACTIVE(un));
 
 		/*
 		 * Dump no long uses sdpower to power on a device, it's
@@ -24755,7 +25509,8 @@ sddump(dev_t dev, caddr_t addr, daddr_t blkno, int nblk)
 			return (EIO);
 		}
 		scsi_destroy_pkt(start_pktp);
-		(void) sd_ddi_pm_resume(un);
+		(void) sd_pm_state_change(un, SD_PM_STATE_ACTIVE(un),
+		    SD_PM_STATE_CHANGE);
 	} else {
 		mutex_exit(&un->un_pm_mutex);
 	}
@@ -24813,7 +25568,12 @@ sddump(dev_t dev, caddr_t addr, daddr_t blkno, int nblk)
 	 * Convert the partition-relative block number to a
 	 * disk physical block number.
 	 */
-	blkno += start_block;
+	if (NOT_DEVBSIZE(un)) {
+		blkno += start_block;
+	} else {
+		blkno = blkno / (un->un_tgt_blocksize / DEV_BSIZE);
+		blkno += start_block;
+	}
 
 	SD_INFO(SD_LOG_DUMP, un, "sddump: disk blkno = 0x%x\n", blkno);
 
@@ -24900,6 +25660,10 @@ sddump(dev_t dev, caddr_t addr, daddr_t blkno, int nblk)
 
 	dma_resid = wr_bp->b_bcount;
 	oblkno = blkno;
+
+	if (!(NOT_DEVBSIZE(un))) {
+		nblk = nblk / (un->un_tgt_blocksize / DEV_BSIZE);
+	}
 
 	while (dma_resid != 0) {
 
@@ -27726,8 +28490,8 @@ sr_eject(dev_t dev)
 	}
 
 	ssc = sd_ssc_init(un);
-	rval = sd_send_scsi_START_STOP_UNIT(ssc, SD_TARGET_EJECT,
-	    SD_PATH_STANDARD);
+	rval = sd_send_scsi_START_STOP_UNIT(ssc, SD_START_STOP,
+	    SD_TARGET_EJECT, SD_PATH_STANDARD);
 	sd_ssc_fini(ssc);
 
 	if (rval == 0) {
@@ -29674,7 +30438,7 @@ sd_faultinjection(struct scsi_pkt *pktp)
 static void
 sd_set_unit_attributes(struct sd_lun *un, dev_info_t *devi)
 {
-	int	pm_capable_prop;
+	int	pm_cap;
 
 	ASSERT(un->un_sd);
 	ASSERT(un->un_sd->sd_inq);
@@ -29794,33 +30558,47 @@ sd_set_unit_attributes(struct sd_lun *un, dev_info_t *devi)
 		 * power manage the device without checking the start/stop
 		 * cycle count log sense page.
 		 *
-		 * If "pm-capable" exists and is SD_PM_CAPABLE_FALSE (0)
+		 * If "pm-capable" exists and is set to be false (0),
 		 * then we should not power manage the device.
 		 *
-		 * If "pm-capable" doesn't exist then pm_capable_prop will
+		 * If "pm-capable" doesn't exist then pm_cap will
 		 * be set to SD_PM_CAPABLE_UNDEFINED (-1).  In this case,
 		 * sd will check the start/stop cycle count log sense page
 		 * and power manage the device if the cycle count limit has
 		 * not been exceeded.
 		 */
-		pm_capable_prop = ddi_prop_get_int(DDI_DEV_T_ANY, devi,
+		pm_cap = ddi_prop_get_int(DDI_DEV_T_ANY, devi,
 		    DDI_PROP_DONTPASS, "pm-capable", SD_PM_CAPABLE_UNDEFINED);
-		if (pm_capable_prop == SD_PM_CAPABLE_UNDEFINED) {
+		if (SD_PM_CAPABLE_IS_UNDEFINED(pm_cap)) {
 			un->un_f_log_sense_supported = TRUE;
+			if (!un->un_f_power_condition_disabled &&
+			    SD_INQUIRY(un)->inq_ansi == 6) {
+				un->un_f_power_condition_supported = TRUE;
+			}
 		} else {
 			/*
 			 * pm-capable property exists.
 			 *
-			 * Convert "TRUE" values for pm_capable_prop to
-			 * SD_PM_CAPABLE_TRUE (1) to make it easier to check
-			 * later. "TRUE" values are any values except
-			 * SD_PM_CAPABLE_FALSE (0) and
-			 * SD_PM_CAPABLE_UNDEFINED (-1)
+			 * Convert "TRUE" values for pm_cap to
+			 * SD_PM_CAPABLE_IS_TRUE to make it easier to check
+			 * later. "TRUE" values are any values defined in
+			 * inquiry.h.
 			 */
-			if (pm_capable_prop == SD_PM_CAPABLE_FALSE) {
+			if (SD_PM_CAPABLE_IS_FALSE(pm_cap)) {
 				un->un_f_log_sense_supported = FALSE;
 			} else {
+				/* SD_PM_CAPABLE_IS_TRUE case */
 				un->un_f_pm_supported = TRUE;
+				if (!un->un_f_power_condition_disabled &&
+				    SD_PM_CAPABLE_IS_SPC_4(pm_cap)) {
+					un->un_f_power_condition_supported =
+					    TRUE;
+				}
+				if (SD_PM_CAP_LOG_SUPPORTED(pm_cap)) {
+					un->un_f_log_sense_supported = TRUE;
+					un->un_f_pm_log_sense_smart =
+					    SD_PM_CAP_SMART_LOG(pm_cap);
+				}
 			}
 
 			SD_INFO(SD_LOG_ATTACH_DETACH, un,
@@ -29894,7 +30672,7 @@ sd_tg_rdwr(dev_info_t *devi, uchar_t cmd, void *bufaddr,
 		 * sys_blocksize != tgt_blocksize, need to re-adjust
 		 * blkno and save the index to beginning of dk_label
 		 */
-		first_byte  = SD_SYSBLOCKS2BYTES(un, start_block);
+		first_byte  = SD_SYSBLOCKS2BYTES(start_block);
 		real_addr = first_byte / un->un_tgt_blocksize;
 
 		end_block = (first_byte + reqlength +

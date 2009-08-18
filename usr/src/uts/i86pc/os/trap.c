@@ -420,7 +420,9 @@ emulate_lsahf(struct regs *rp, uchar_t instr)
  *
  * The first byte of prefetch instructions is always 0x0F.
  * The second byte is 0x18 for regular prefetch or 0x0D for AMD 3dnow prefetch.
- * The third byte is between 0 and 3 inclusive.
+ * The third byte (ModRM) contains the register field bits (bits 3-5).
+ * These bits must be between 0 and 3 inclusive for regular prefetch and
+ * 0 and 1 inclusive for AMD 3dnow prefetch.
  *
  * In 64-bit mode, there may be a one-byte REX prefex (0x40-0x4F).
  */
@@ -432,7 +434,8 @@ cmp_to_prefetch(uchar_t *p)
 	if ((p[0] & 0xF0) == 0x40)	/* 64-bit REX prefix */
 		p++;
 #endif
-	return (p[0] == 0x0F && (p[1] == 0x18 || p[1] == 0x0D) && p[2] <= 3);
+	return ((p[0] == 0x0F && p[1] == 0x18 && ((p[2] >> 3) & 7) <= 3) ||
+	    (p[0] == 0x0F && p[1] == 0x0D && ((p[2] >> 3) & 7) <= 1));
 }
 
 static int
@@ -1473,7 +1476,7 @@ trap(struct regs *rp, caddr_t addr, processorid_t cpuid)
 		}
 
 		if (ct->t_rprof != NULL) {
-			realsigprof(0, 0);
+			realsigprof(0, 0, 0);
 			ct->t_sig_check = 1;
 		}
 
@@ -1519,6 +1522,7 @@ out:	/* We can't get here from a system trap */
 	}
 	if (CPU->cpu_runrun || curthread->t_schedflag & TS_ANYWAITQ)
 		preempt();
+	prunstop();
 	(void) new_mstate(ct, mstate);
 
 	/* Kernel probe */

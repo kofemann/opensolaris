@@ -3411,7 +3411,7 @@ sstor_init(nfs_server_instance_t *instp, int def_reap)
 	instp->reap_time = def_reap * rfs4_lease_time;
 
 	instp->state_store = rfs4_database_create();
-	instp->state_store->instp = instp;
+	instp->state_store->db_instp = instp;
 
 	/* reset the "first NFSv4 request" status */
 	instp->seen_first_compound = 0;

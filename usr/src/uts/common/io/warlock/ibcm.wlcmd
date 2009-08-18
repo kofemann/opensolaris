@@ -18,10 +18,9 @@
 #
 # CDDL HEADER END
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
 
 # ibcm api entry points
 root	ibt_open_rc_channel
@@ -64,6 +63,9 @@ root	ibt_get_ip_sid
 root	ibt_release_ip_sid 
 root	ibt_get_src_ip
 
+root	ibt_ofuvcm_get_req_data
+root	ibt_ofuvcm_proceed
+
 root	ibcm_arp_timeout
 root	ibcm_arp_get_srcip_plist
 root	ibcm_arp_lrput
@@ -92,6 +94,7 @@ root	ibcm_resend_post_rep_complete
 
 # Callback handlers from IBTL
 root	ibcm_async_handler
+root	ibcm_ibtl_node_info
 root	ibt_register_subnet_notices
 
 # Callback handlers from ibcm

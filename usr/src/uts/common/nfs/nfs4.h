@@ -41,6 +41,7 @@
 #endif
 #include <nfs/nfs4_attr.h>
 #include <sys/acl.h>
+#include <sys/list.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -352,34 +353,6 @@ rfs4_dss_path_t	*rfs4_dss_pathlist;
 
 /* nvlists of all DSS paths: current, and before last warmstart */
 nvlist_t *rfs4_dss_paths, *rfs4_dss_oldpaths;
-
-/*
- * List declarations (suitable for insque/remque) used to link the
- * various datastructs listed below.
- */
-typedef struct rfs4_state_list {
-	struct rfs4_state_list *next;
-	struct rfs4_state_list *prev;
-	struct rfs4_state *sp;
-} rfs4_state_list_t;
-
-typedef struct rfs4_lo_state_list {
-	struct rfs4_lo_state_list *next;
-	struct rfs4_lo_state_list *prev;
-	struct rfs4_lo_state *lsp;
-} rfs4_lo_state_list_t;
-
-typedef struct rfs4_openowner_list {
-	struct rfs4_openowner_list *next;
-	struct rfs4_openowner_list *prev;
-	struct rfs4_openowner *oop;
-} rfs4_openowner_list_t;
-
-typedef struct rfs4_deleg_list {
-	struct rfs4_deleg_list *next;
-	struct rfs4_deleg_list *prev;
-	struct rfs4_deleg_state *dsp;
-} rfs4_deleg_list_t;
 
 /*
  * Per-(SEQ4 Status Bit) accounting info
@@ -727,7 +700,6 @@ extern void		rfs4_dbe_walk(rfs4_table_t *,
  * cr_set - credentials used for the SETCLIENTID/SETCLIENTID_CONFIRM pair
  * sysid - the lock manager sysid allocated for this client's file locks
  * openownerlist - root of openowners list associated with this client
- * clientdeleglist - root of delegations list provided to this client
  * ss_pn - Pathname to the stable storage file.
  * cl_addr - Clients network address.
  * contrived -  NFSv4.1 create_session res
@@ -739,33 +711,33 @@ extern void		rfs4_dbe_walk(rfs4_table_t *,
  *	RESTART_RECLAIM_NEEDED, DEVID_CHANGED, DEVID_DELETED
  */
 typedef struct rfs4_client {
-	rfs4_dbe_t		*dbe;
-	clientid4		clientid;
-	nfs_client_id4		nfs_client;
-	verifier4		confirm_verf;
-	unsigned		need_confirm:1;
-	unsigned		unlksys_completed:1;
-	unsigned		can_reclaim:1;
-	unsigned 		ss_remove:1;
-	unsigned		forced_expire:1;
-	unsigned		reclaim_completed:1;
-	uint_t			deleg_revoked;
-	struct rfs4_client	*cp_confirmed;
-	time_t			last_access;
-	rfs4_cbinfo_t		cbinfo;
-	cred_princ_t		*cr_set;
-	sysid_t			sysidt;
-	rfs4_openowner_list_t	openownerlist;
-	rfs4_deleg_list_t	clientdeleglist;
-	rfs4_ss_pn_t		*ss_pn;
-	struct sockaddr_storage cl_addr;
-	rfs41_csr_t		contrived;
-	rfs41_sprot_t		state_prot;
-	struct rfs41_grant_list	clientgrantlist;
-	int			bulk_recall;
-	int			clid_scope;
-	bit_attr_t		seq4[BITS_PER_WORD];
-	list_t			trunkinfo;
+	rfs4_dbe_t		*rc_dbe;
+	clientid4		rc_clientid;
+	nfs_client_id4		rc_nfs_client;
+	verifier4		rc_confirm_verf;
+	unsigned		rc_need_confirm:1;
+	unsigned		rc_unlksys_completed:1;
+	unsigned		rc_can_reclaim:1;
+	unsigned 		rc_ss_remove:1;
+	unsigned		rc_forced_expire:1;
+	unsigned		rc_reclaim_completed:1;
+	uint_t			rc_deleg_revoked;
+	struct rfs4_client	*rc_cp_confirmed;
+	time_t			rc_last_access;
+	rfs4_cbinfo_t		rc_cbinfo;
+	cred_princ_t		*rc_cr_set;
+	sysid_t			rc_sysidt;
+	rfs4_openowner_list_t	rc_openownerlist;
+	rfs4_deleg_list_t	rc_clientdeleglist;
+	rfs4_ss_pn_t		*rc_ss_pn;
+	struct sockaddr_storage rc_cl_addr;
+	rfs41_csr_t		rc_contrived;
+	rfs41_sprot_t		rc_state_prot;
+	struct rfs41_grant_list	rc_clientgrantlist;
+	int			rc_bulk_recall;
+	int			rc_clid_scope;
+	bit_attr_t		rc_seq4[BITS_PER_WORD];
+	list_t			rc_trunkinfo;
 } rfs4_client_t;
 
 /*
@@ -783,26 +755,26 @@ typedef struct rfs4_client {
  * open_seqid - what is the next open_seqid expected for this openowner
  * oo_sw - used to serialize access to the open seqid/reply handling
  * cr_set - credential used for the OPEN
- * ownerstateids - root of state struct list associated with this openowner
- * openownerlist - list of openowners for a client struct
+ * statelist - root of state struct list associated with this openowner
+ * node - node for client struct list of openowners
  * reply_fh - open replay processing needs the filehandle so that it is
  *	able to reset the current filehandle for appropriate compound
  *	processing and reply.
  * reply - last reply sent in relation to this openowner
  */
 typedef struct rfs4_openowner {
-	rfs4_dbe_t		*dbe;
-	rfs4_client_t		*client;
-	open_owner4		owner;
-	unsigned		need_confirm:1;
-	unsigned		postpone_confirm:1;
-	seqid4			open_seqid;
-	rfs4_state_wait_t	oo_sw;
-	cred_princ_t		*cr_set;
-	rfs4_state_list_t	ownerstateids;
-	rfs4_openowner_list_t	openownerlist;
-	nfs_fh4			reply_fh;
-	nfs_resop4		reply[1];
+	rfs4_dbe_t		*ro_dbe;
+	rfs4_client_t		*ro_client;
+	open_owner4		ro_owner;
+	unsigned		ro_need_confirm:1;
+	unsigned		ro_postpone_confirm:1;
+	seqid4			ro_open_seqid;
+	rfs4_state_wait_t	ro_sw;
+	cred_princ_t		*ro_cr_set;
+	rfs4_state_list_t	ro_ownerstateids;
+	rfs4_openowner_list_t	ro_openownerlist;
+	nfs_fh4			ro_reply_fh;
+	nfs_resop4		ro_reply[1];
 } rfs4_openowner_t;
 
 /*
@@ -815,20 +787,22 @@ typedef struct rfs4_openowner {
  * finfo - reference to the open file for this state
  * share_access - how did the openowner OPEN the file (access)
  * share_deny - how did the openowner OPEN the file (deny)
+ * opened - has VOP_OPEN been done
  * closed - has this file been closed?
- * lockownerlist - root of list of lockowners associated with this state/file
- * ownerstateids - list of state structs for an openowner
+ * lostatelist - root of list of lo_state associated with this state/file
+ * node - node for state struct list of states
  */
 typedef struct rfs4_state {
-	rfs4_dbe_t		*dbe;
-	stateid_t		stateid;
-	rfs4_openowner_t	*owner;
-	struct rfs4_file	*finfo;
-	uint32_t		share_access;
-	uint32_t		share_deny;
-	unsigned		closed:1;
-	rfs4_lo_state_list_t	lockownerlist;
-	rfs4_state_list_t	ownerstateids;
+	rfs4_dbe_t		*rs_dbe;
+	stateid_t		rs_stateid;
+	rfs4_openowner_t	*rs_owner;
+	struct rfs4_file	*rs_finfo;
+	uint32_t		rs_share_access;
+	uint32_t		rs_share_deny;
+	unsigned		rs_opened:1;
+	unsigned		rs_closed:1;
+	list_t			rs_lostatelist;
+	list_node_t		rs_node;
 } rfs4_state_t;
 
 /*
@@ -840,10 +814,10 @@ typedef struct rfs4_state {
  * pid - local identifier used for file locking
  */
 typedef struct rfs4_lockowner {
-	rfs4_dbe_t	*dbe;
-	rfs4_client_t	*client;
-	lock_owner4	owner;
-	pid_t		pid;
+	rfs4_dbe_t		*rl_dbe;
+	rfs4_client_t		*rl_client;
+	lock_owner4		rl_owner;
+	pid_t			rl_pid;
 } rfs4_lockowner_t;
 
 /*
@@ -858,21 +832,21 @@ typedef struct rfs4_lockowner {
  * locks_cleaned - have all locks been released for this lockowner/file?
  * lock_completed - successful LOCK with lockowner/file?
  * ls_sw - used to serialize update seqid/reply/stateid handling
- * lockownerlist - list of lockowners for a state struct
+ * node - node for state struct list of lo_states
  * reply - last reply sent in relation to this lockowner/state
  */
 typedef struct rfs4_lo_state {
-	rfs4_dbe_t		*dbe;
-	rfs4_state_t		*state;
-	stateid_t		lockid;
-	rfs4_lockowner_t	*locker;
-	seqid4			seqid;
-	unsigned		skip_seqid_check:1;
-	unsigned		locks_cleaned:1;
-	unsigned		lock_completed:1;
-	rfs4_state_wait_t	ls_sw;
-	rfs4_lo_state_list_t	lockownerlist;
-	nfs_resop4		reply[1];
+	rfs4_dbe_t		*rls_dbe;
+	rfs4_state_t		*rls_state;
+	stateid_t		rls_lockid;
+	rfs4_lockowner_t	*rls_locker;
+	seqid4			rls_seqid;
+	unsigned		rls_skip_seqid_check:1;
+	unsigned		rls_locks_cleaned:1;
+	unsigned		rls_lock_completed:1;
+	rfs4_state_wait_t	rls_sw;
+	list_node_t		rls_node;
+	nfs_resop4		rls_reply;
 } rfs4_lo_state_t;
 
 /*
@@ -886,21 +860,20 @@ typedef struct rfs4_lo_state {
  * time_revoked - if revoked, time that the revoke occurred
  * finfo - reference to the file associated with this delegation
  * client - reference to client for which this delegation is associated
- * delegationlist - list of delegations for the file (WRITE == 1, READ == )
- * clientdeleglist - list of delegations for the client
+ * node - list of delegations for the file (WRITE == 1, READ == )
  */
 typedef struct rfs4_deleg_state {
-	rfs4_dbe_t		*dbe;
-	open_delegation_type4	dtype;
-	stateid_t		delegid;
-	time_t			time_granted;
-	time_t			time_recalled;
-	time_t			time_revoked;
-	struct rfs4_file	*finfo;
-	rfs4_client_t		*client;
-	rfs4_deleg_list_t	delegationlist;
-	rfs4_deleg_list_t	clientdeleglist;
-	rfs41_drs_info_t	rs;			/* 4.1 only */
+	rfs4_dbe_t		*rds_dbe;
+	open_delegation_type4	rds_dtype;
+	stateid_t		rds_delegid;
+	time_t			rds_time_granted;
+	time_t			rds_time_recalled;
+	time_t			rds_time_revoked;
+	struct rfs4_file	*rds_finfo;
+	rfs4_client_t		*rds_client;
+	list_node_t		rds_node;
+	rfs4_deleg_list_t	rds_clientdeleglist;
+	rfs41_drs_info_t	rds_rs;			/* 4.1 only */
 } rfs4_deleg_state_t;
 
 
@@ -928,20 +901,20 @@ typedef struct rfs4_deleg_state {
  *	be granted shortly after it has been returned?)
  */
 typedef struct rfs4_dinfo {
-	open_delegation_type4 dtype;
-	time_t		time_returned;
-	time_t		time_recalled;
-	time_t		time_lastgrant;
-	time_t		time_lastwrite;
-	time_t		time_rm_delayed;
-	uint32_t	rdgrants;
-	uint32_t	wrgrants;
-	int32_t		recall_count;
-	kmutex_t	recall_lock[1];
-	kcondvar_t	recall_cv[1];
-	bool_t		ever_recalled;
-	uint32_t	hold_grant;
-	clientid4	conflicted_client;
+	open_delegation_type4 rd_dtype;
+	time_t		rd_time_returned;
+	time_t		rd_time_recalled;
+	time_t		rd_time_lastgrant;
+	time_t		rd_time_lastwrite;
+	time_t		rd_time_rm_delayed;
+	uint32_t	rd_rdgrants;
+	uint32_t	rd_wrgrants;
+	int32_t		rd_recall_count;
+	kmutex_t	rd_recall_lock[1];
+	kcondvar_t	rd_recall_cv[1];
+	bool_t		rd_ever_recalled;
+	uint32_t	rd_hold_grant;
+	clientid4	rd_conflicted_client;
 } rfs4_dinfo_t;
 
 /*
@@ -950,7 +923,7 @@ typedef struct rfs4_dinfo {
  * dbe - encapsulation struct
  * vp - vnode for the file that is open or has a delegation
  * filehandle - the filehandle generated by the server for this file
- * delegationlist - root of delegation list for this file
+ * delegstatelist - root of delegation list for this file
  * dinfo - see struct definition above
  * share_deny - union of all deny modes on file
  * share_access - union of all access modes on file
@@ -972,20 +945,20 @@ typedef struct rfs4_dinfo {
 struct mds_layout;
 
 typedef struct rfs4_file {
-	rfs4_dbe_t	*dbe;
-	vnode_t		*vp;
-	nfs_fh4		filehandle;
-	rfs4_deleg_list_t delegationlist;
-	rfs4_dinfo_t	dinfo[1];
-	uint32_t	share_deny;
-	uint32_t	share_access;
-	uint32_t	access_read;
-	uint32_t	access_write;
-	uint32_t	deny_read;
-	uint32_t	deny_write;
-	krwlock_t	file_rwlock;
-	struct rfs41_grant_list lo_grant_list;
-	struct mds_layout    *layoutp;
+	rfs4_dbe_t	*rf_dbe;
+	vnode_t		*rf_vp;
+	nfs_fh4		rf_filehandle;
+	rfs4_deleg_list_t rf_delegationlist;
+	rfs4_dinfo_t	rf_dinfo[1];
+	uint32_t	rf_share_deny;
+	uint32_t	rf_share_access;
+	uint32_t	rf_access_read;
+	uint32_t	rf_access_write;
+	uint32_t	rf_deny_read;
+	uint32_t	rf_deny_write;
+	krwlock_t	rf_file_rwlock;
+	struct rfs41_grant_list rf_lo_grant_list;
+	struct mds_layout    *rf_layoutp;
 } rfs4_file_t;
 
 /*
@@ -1177,7 +1150,6 @@ extern	rfs4_file_t	*rfs4_findfile_withlock(nfs_server_instance_t *,
 						vnode_t *, nfs_fh4 *,
 						bool_t *);
 extern	void		rfs4_file_rele(rfs4_file_t *);
-extern	void		rfs4_file_rele_withunlock(rfs4_file_t *);
 
 /* General collection of "get state" functions */
 extern	int		rfs4_check_stateid_seqid(rfs4_state_t *, stateid4 *);
@@ -1266,7 +1238,7 @@ extern fem_t	*deleg_wrops;
 
 extern	void	rfs4_unshare(rfs4_state_t *);
 extern	void	rfs4_set_deleg_policy(nfs_server_instance_t *,
-				srv_deleg_policy_t);
+    srv_deleg_policy_t);
 #ifdef DEBUG
 #define	NFS4_DEBUG(var, args) if (var) cmn_err args
 

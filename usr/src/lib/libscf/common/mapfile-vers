@@ -91,7 +91,7 @@ SUNW_1.2 {
 	scf_tmpl_visibility_to_string;
 	scf_type_to_string;
 	scf_values_destroy;
-};
+} SUNW_1.1;
 
 SUNW_1.1 {
     global:
@@ -316,6 +316,7 @@ SUNWprivate_1.1 {
 	scf_instance_delete_prop;
 	scf_get_boot_config;
 	scf_is_fastboot_default;
+	scf_fastreboot_default_set_transient;
     local:
 	*;
 };

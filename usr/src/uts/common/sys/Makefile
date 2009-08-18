@@ -25,7 +25,6 @@
 
 include $(SRC)/uts/Makefile.uts
 
-GROUP=bin
 FILEMODE=644
 
 #
@@ -47,8 +46,6 @@ i386_HDRS=			\
 	fdc.h			\
 	fdmedia.h		\
 	mouse.h			\
-	mse.h			\
-	vuidmice.h		\
 	ucode.h
 
 sparc_HDRS= 			\
@@ -364,6 +361,7 @@ CHKHDRS=			\
 	memlist.h		\
 	mkdev.h			\
 	mhd.h			\
+	mii.h			\
 	miiregs.h		\
 	mixer.h			\
 	mman.h			\
@@ -799,7 +797,6 @@ FSHDRS=				\
 	decomp.h		\
 	dv_node.h		\
 	sdev_impl.h		\
-	sdev_node.h		\
 	fifonode.h		\
 	hsfs_isospec.h		\
 	hsfs_node.h		\

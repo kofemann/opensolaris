@@ -54,6 +54,7 @@
 #include <sys/ib/ibtl/impl/ibtl_ibnex.h>
 #include <sys/file.h>
 #include <sys/hwconf.h>
+#include <sys/fs/dv_node.h>
 
 /* Function prototypes */
 static int		ibnex_attach(dev_info_t *, ddi_attach_cmd_t);
@@ -513,6 +514,18 @@ ibnex_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
+	/*
+	 * Create "devctl" minor node for general ioctl interface to the
+	 * ib nexus.
+	 */
+	if (ddi_create_minor_node(dip, "devctl", S_IFCHR, instance,
+	    DDI_NT_IB_NEXUS, 0) != DDI_SUCCESS) {
+		IBTF_DPRINTF_L2("ibnex",
+		    "\tattach: failed to create devctl minornode");
+		(void) ddi_remove_minor_node(dip, NULL);
+		(void) mdi_vhci_unregister(dip, 0);
+		return (DDI_FAILURE);
+	}
 
 	/*
 	 * Set pm-want-child-notification property for
@@ -1621,8 +1634,6 @@ ibnex_create_vppa_nodes(dev_info_t *parent, ibdm_port_attr_t *port_attr)
 				(void) ibnex_commsvc_initnode(parent, port_attr,
 				    idx, IBNEX_VPPA_COMMSVC_NODE,
 				    pkey, &rval, IBNEX_CFGADM_ENUMERATE);
-				IBTF_DPRINTF_L5("ibnex", "\tcreate_vppa_nodes: "
-				    "commsvc_initnode failed rval %x", rval);
 			}
 		}
 	}
@@ -2936,6 +2947,7 @@ ibnex_dm_callback(void *arg, ibdm_events_t flag)
 	char	hca_guid[IBNEX_HCAGUID_STRSZ];
 	ibdm_ioc_info_t	*ioc_list, *ioc;
 	ibnex_node_data_t	*node_data;
+	dev_info_t		*phci;
 
 	IBTF_DPRINTF_L4("ibnex", "\tdm_callback: attr %p event %x", arg, flag);
 
@@ -2975,6 +2987,16 @@ ibnex_dm_callback(void *arg, ibdm_events_t flag)
 		}
 		mutex_exit(&ibnex.ibnex_mutex);
 		ibdm_ibnex_free_ioc_list(ioc);
+		break;
+
+	case IBDM_EVENT_PORT_UP:
+	case IBDM_EVENT_PORT_PKEY_CHANGE:
+		phci = ibtl_ibnex_hcaguid2dip(*(longlong_t *)arg);
+		devfs_clean(phci, NULL, 0);
+		break;
+	default:
+		break;
+
 	}
 }
 

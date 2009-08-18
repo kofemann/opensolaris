@@ -18,8 +18,9 @@
  *
  * CDDL HEADER END
  */
+
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -44,6 +45,8 @@ extern int getpil(void);
 
 extern ulong_t getcr0(void);
 extern void setcr0(ulong_t);
+extern ulong_t getcr8(void);
+extern void setcr8(ulong_t);
 extern ulong_t getcr2(void);
 extern void iommu_cpu_nop(void);
 extern void clflush_insn(caddr_t addr);
@@ -135,8 +138,6 @@ extern void brand_interpositioning_disable(void);
 struct regs;
 
 extern int instr_size(struct regs *, caddr_t *, enum seg_rw);
-
-extern void realsigprof(int, int);
 
 extern int enable_cbcp; /* patchable in /etc/system */
 

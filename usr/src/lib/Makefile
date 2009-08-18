@@ -265,7 +265,8 @@ SUBDIRS += \
 
 i386_SUBDIRS=		\
 	libntfs		\
-	libparted
+	libparted	\
+	libfdisk
 
 sparc_SUBDIRS= .WAIT	\
 	efcode		\
@@ -367,6 +368,8 @@ MSGSUBDIRS += \
 sparc_MSGSUBDIRS=	\
 	libprtdiag	\
 	libprtdiag_psr
+
+i386_MSGSUBDIRS= libfdisk
 
 HDRSUBDIRS=		\
 	auditd_plugins	\
@@ -474,6 +477,7 @@ HDRSUBDIRS=		\
 	udapl		\
 	libmapid	\
 	libkrb5		\
+	libsmbfs	\
 	libshare	\
 	libidmap	\
 	libvscan	\
@@ -493,6 +497,10 @@ $(CLOSED_BUILD)HDRSUBDIRS += \
 	$(CLOSED)/lib/libc_i18n	\
 	$(CLOSED)/lib/libike	\
 	$(CLOSED)/lib/smartcard
+
+i386_HDRSUBDIRS=	\
+	libparted	\
+	libfdisk
 
 sparc_HDRSUBDIRS=	\
 	libds		\
@@ -617,7 +625,7 @@ pkcs11:		libcryptoutil
 print:		libldap5
 udapl/udapl_tavor:	udapl/libdat
 libzfs:		libdevinfo libdevid libgen libnvpair libuutil libiscsitgt \
-		libavl libefi libidmap libsec
+		libavl libefi libidmap
 libzfs_jni:	libdiskmgt libnvpair libzfs
 libzpool:	libavl libumem libnvpair
 libsec:		libavl libidmap

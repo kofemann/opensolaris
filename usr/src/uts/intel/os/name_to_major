@@ -51,8 +51,6 @@ tl 105
 asy 106
 fdc 111
 ata 112
-logi 114
-msm 115
 mouse8042 116
 isa 120
 eisa 121
@@ -63,7 +61,6 @@ DUMMY_DISK 126
 DUMMY_NET 127
 tnf 128
 st 129
-mscsi 130
 pm 131
 poll 135
 keysock 136
@@ -112,7 +109,7 @@ smbios 180
 power 181
 zfs 182
 npe 183
-pcie_pci 184
+pcieb 184
 kssl 185
 mc-amd 186
 tzmon 187

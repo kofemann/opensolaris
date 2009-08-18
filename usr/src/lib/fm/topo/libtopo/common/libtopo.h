@@ -60,6 +60,7 @@ typedef struct topo_faclist {
 extern topo_hdl_t *topo_open(int, const char *, int *);
 extern void topo_close(topo_hdl_t *);
 extern char *topo_snap_hold(topo_hdl_t *, const char *, int *);
+extern char *topo_snap_hold_no_forceload(topo_hdl_t *, const char *, int *);
 extern void topo_snap_release(topo_hdl_t *);
 
 /*
@@ -226,6 +227,8 @@ extern int topo_prop_set_fmri_array(tnode_t *, const char *, const char *,
 #define	TOPO_PGROUP_SYSTEM	"system"
 #define	TOPO_PROP_ISA		"isa"
 #define	TOPO_PROP_MACHINE	"machine"
+
+#define	TOPO_PGROUP_IPMI	"ipmi"
 
 /*
  * These enum definitions are used to define a set of error tags associated with

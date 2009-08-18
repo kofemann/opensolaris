@@ -80,6 +80,11 @@
  */
 #define	NOFILE_INC_SIZE	64
 
+/*
+ * Default TCP send and receive buffer size of NFS server.
+ */
+#define	NFSD_TCP_BUFSZ	(1024*1024)
+
 struct conn_ind {
 	struct conn_ind *conn_next;
 	struct conn_ind *conn_prev;
@@ -119,6 +124,9 @@ static	struct conn_entry *conn_polled;
 static	int	num_conns;		/* Current number of connections */
 int		(*Mysvc4)(int, struct netbuf *, struct netconfig *, int,
 		struct netbuf *);
+static int	setopt(int fd, int level, int name, int value);
+static int	get_opt(int fd, int level, int name);
+static void	nfslib_set_sockbuf(int fd);
 
 extern bool_t __pmap_set(const rpcprog_t program, const rpcvers_t version,
     const struct netconfig *nconf, const struct netbuf *address);
@@ -236,6 +244,40 @@ nofile_increase(int limit)
 	}
 
 	return (0);
+}
+
+static void
+nfslib_set_sockbuf(int fd)
+{
+	int curval, val;
+
+	val = NFSD_TCP_BUFSZ;
+
+	curval = get_opt(fd, SOL_SOCKET, SO_SNDBUF);
+	syslog(LOG_DEBUG, "Current SO_SNDBUF value is %d", curval);
+	if ((curval != -1) && (curval < val)) {
+		syslog(LOG_DEBUG, "Set SO_SNDBUF  option to %d", val);
+		if (setopt(fd, SOL_SOCKET, SO_SNDBUF, val) < 0) {
+			syslog(LOG_ERR,
+			    "couldn't set SO_SNDBUF to %d - t_errno = %d",
+			    val, t_errno);
+			syslog(LOG_ERR,
+			    "Check and increase system-wide tcp_max_buf");
+		}
+	}
+
+	curval = get_opt(fd, SOL_SOCKET, SO_RCVBUF);
+	syslog(LOG_DEBUG, "Current SO_RCVBUF value is %d", curval);
+	if ((curval != -1) && (curval < val)) {
+		syslog(LOG_DEBUG, "Set SO_RCVBUF  option to %d", val);
+		if (setopt(fd, SOL_SOCKET, SO_RCVBUF, val) < 0) {
+			syslog(LOG_ERR,
+			    "couldn't set SO_RCVBUF to %d - t_errno = %d",
+			    val, t_errno);
+			syslog(LOG_ERR,
+			    "Check and increase system-wide tcp_max_buf");
+		}
+	}
 }
 
 int
@@ -413,9 +455,40 @@ nfslib_bindit(struct netconfig *nconf, struct netbuf **addr,
 	"couldn't set NODELAY option for proto %s: t_errno = %d, %m",
 			    nconf->nc_proto, t_errno);
 		}
+
+		nfslib_set_sockbuf(fd);
 	}
 
 	return (fd);
+}
+
+static int
+get_opt(int fd, int level, int name)
+{
+	struct t_optmgmt req, res;
+	struct {
+		struct opthdr opt;
+		int value;
+	} reqbuf;
+
+	reqbuf.opt.level = level;
+	reqbuf.opt.name = name;
+	reqbuf.opt.len = sizeof (int);
+	reqbuf.value = 0;
+
+	req.flags = T_CURRENT;
+	req.opt.len = sizeof (reqbuf);
+	req.opt.buf = (char *)&reqbuf;
+
+	res.flags = 0;
+	res.opt.buf = (char *)&reqbuf;
+	res.opt.maxlen = sizeof (reqbuf);
+
+	if (t_optmgmt(fd, &req, &res) < 0 || res.flags != T_SUCCESS) {
+		t_error("t_optmgmt");
+		return (-1);
+	}
+	return (reqbuf.value);
 }
 
 static int

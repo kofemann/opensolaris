@@ -1171,6 +1171,7 @@ hermon_drv_init(hermon_state_t *state, dev_info_t *dip, int instance)
 	} else if (HERMON_IS_MAINTENANCE_MODE(state->hs_dip)) {
 		HERMON_FMANOTE(state, HERMON_FMA_MAINT);
 		state->hs_operational_mode = HERMON_MAINTENANCE_MODE;
+		state->hs_fm_degraded_reason = HCA_FW_MISC; /* not fw reason */
 		return (DDI_FAILURE);
 
 	} else {
@@ -1626,6 +1627,7 @@ hermon_hw_init(hermon_state_t *state)
 			    state->hs_fw.fw_rev_subminor);
 		}
 		state->hs_operational_mode = HERMON_MAINTENANCE_MODE;
+		state->hs_fm_degraded_reason = HCA_FW_MISMATCH;
 		hermon_hw_fini(state, cleanup);
 		HERMON_ATTACH_MSG(state->hs_attach_buf,
 		    "hw_init_checkfwver_fail");
@@ -1696,6 +1698,7 @@ hermon_hw_init(hermon_state_t *state)
 		cmn_err(CE_NOTE, "RUN_FW command failed: 0x%08x\n", status);
 		if (status == HERMON_CMD_BAD_NVMEM) {
 			state->hs_operational_mode = HERMON_MAINTENANCE_MODE;
+			state->hs_fm_degraded_reason = HCA_FW_CORRUPT;
 		}
 		hermon_hw_fini(state, cleanup);
 		HERMON_ATTACH_MSG(state->hs_attach_buf, "hw_init_run_fw_fail");
@@ -2720,7 +2723,7 @@ hermon_icm_config_setup(hermon_state_t *state,
 	icm[HERMON_EQC].object_size	= devlim->eqc_entry_sz;
 	icm[HERMON_RDB].object_size	= devlim->rdmardc_entry_sz *
 	    cfg->cp_hca_max_rdma_in_qp;
-	icm[HERMON_MCG].object_size	= HERMON_MCG_SIZE;
+	icm[HERMON_MCG].object_size	= HERMON_MCGMEM_SZ(state);
 	icm[HERMON_ALTC].object_size	= devlim->altc_entry_sz;
 	icm[HERMON_AUXC].object_size	= devlim->aux_entry_sz;
 
@@ -3494,7 +3497,6 @@ hermon_internal_uarpg_init(hermon_state_t *state)
 	int	status;
 	hermon_dbr_info_t 	*info;
 
-
 	/*
 	 * Allocate the UAR page for kernel use. This UAR page is
 	 * the privileged UAR page through which all kernel generated
@@ -3519,9 +3521,7 @@ hermon_internal_uarpg_init(hermon_state_t *state)
 	if (status != DDI_SUCCESS) {
 		return (DDI_FAILURE);
 	}
-
-	/* store the page pointer in the private area - the rest s/b done */
-	state->hs_kern_dbr = info->dbr_page;
+	state->hs_kern_dbr = info;
 	return (DDI_SUCCESS);
 }
 
@@ -3533,10 +3533,8 @@ hermon_internal_uarpg_init(hermon_state_t *state)
 static void
 hermon_internal_uarpg_fini(hermon_state_t *state)
 {
-
 	/* Free up Hermon UAR page #1 (kernel driver doorbells) */
 	hermon_rsrc_free(state, &state->hs_uarkpg_rsrc);
-
 }
 
 
@@ -3549,7 +3547,6 @@ hermon_special_qp_contexts_reserve(hermon_state_t *state)
 {
 	hermon_rsrc_t	*qp0_rsrc, *qp1_rsrc, *qp_resvd;
 	int		status;
-
 
 	/* Initialize the lock used for special QP rsrc management */
 	mutex_init(&state->hs_spec_qplock, NULL, MUTEX_DRIVER,

@@ -48,12 +48,17 @@ extern "C" {
 #define	XB_BSIZE	DEV_BSIZE
 #define	XB_BMASK	(XB_BSIZE - 1)
 #define	XB_BSHIFT	9
-#define	XB_DTOB(bn)	((bn) << XB_BSHIFT)
+#define	XB_DTOB(bn, vdp)	((bn) * (vdp)->xdf_xdev_secsize)
 
 #define	XB_MAX_SEGLEN	(8 * XB_BSIZE)
 #define	XB_SEGOFFSET	(XB_MAX_SEGLEN - 1)
 #define	XB_MAX_XFER	(XB_MAX_SEGLEN * BLKIF_MAX_SEGMENTS_PER_REQUEST)
 #define	XB_MAXPHYS	(XB_MAX_XFER * BLKIF_RING_SIZE)
+
+/* Number of sectors per segement */
+#define	XB_NUM_SECTORS_PER_SEG	(PAGESIZE / XB_BSIZE)
+/* sectors are number 0 through XB_NUM_SECTORS_PER_SEG - 1 */
+#define	XB_LAST_SECTOR_IN_SEG	(XB_NUM_SECTORS_PER_SEG - 1)
 
 
 /*
@@ -222,6 +227,7 @@ typedef struct xdf {
 	kcondvar_t	xdf_dev_cv; /* cv used in I/O path */
 	uint_t		xdf_dinfo; /* disk info from backend xenstore */
 	diskaddr_t	xdf_xdev_nblocks; /* total size in block */
+	uint_t		xdf_xdev_secsize; /* disk blksize from backend */
 	cmlb_geom_t	xdf_pgeom;
 	boolean_t	xdf_pgeom_set;
 	boolean_t	xdf_pgeom_fixed;

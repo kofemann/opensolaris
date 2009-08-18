@@ -207,9 +207,6 @@ $(ROOT_FONT_DIR)/%:	$(OBJS_DIR)/% $(ROOT_MOD_DIR) $(ROOT_FONT_DIR) FRC
 $(ROOT_MAC_DIR)/%:	$(OBJS_DIR)/% $(ROOT_MOD_DIR) $(ROOT_MAC_DIR) FRC
 	$(INS.file)
 
-$(ROOT_DEVNAME_DIR)/%:	$(OBJS_DIR)/% $(ROOT_DEVNAME_DIR) FRC
-	$(INS.file)
-
 $(USR_DRV_DIR)/%:	$(OBJS_DIR)/% $(USR_DRV_DIR) FRC
 	$(INS.file)
 
@@ -235,9 +232,6 @@ $(USR_DACF_DIR)/%:	$(OBJS_DIR)/% $(USR_DACF_DIR) FRC
 	$(INS.file)
 
 $(USR_PCBE_DIR)/%:	$(OBJS_DIR)/% $(USR_PCBE_DIR) FRC
-	$(INS.file)
-
-$(USR_DEVNAME_DIR)/%:	$(OBJS_DIR)/% $(USR_DEVNAME_DIR) FRC
 	$(INS.file)
 
 $(USR_DTRACE_DIR)/%:	$(OBJS_DIR)/% $(USR_DTRACE_DIR) FRC
@@ -268,12 +262,6 @@ $(ROOT_KERN_DIR_64)/%:	$(OBJS_DIR)/% $(ROOT_KERN_DIR_64) FRC
 #
 $(ROOT_CONFFILE):	$(SRC_CONFFILE)	$(ROOT_CONFFILE:%/$(CONFFILE)=%)
 	$(INS.conffile)
-
-#
-#	Targets for '.esa' (activation) file installation.
-#
-$(ROOT_ACTFILE):
-	$(INS.actfile)
 
 #
 #	Targets for creating links between common platforms. ROOT_PLAT_LINKS

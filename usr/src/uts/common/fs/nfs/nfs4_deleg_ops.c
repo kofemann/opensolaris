@@ -256,50 +256,44 @@ wait:
  * the other server instances to see if they have delegated this file.
  */
 int
-recall_write_delegation(
-	rfs4_file_t *fp,
-	bool_t trunc,
-	caller_context_t *ct)
+recall_all_delegations(rfs4_file_t *fp, bool_t trunc, caller_context_t *ct)
 {
 	clock_t rc;
 
 	rfs4_recall_deleg(fp, trunc, NULL);
 	delay(NFS4_DELEGATION_CONFLICT_DELAY);
 
-	rfs4_dbe_lock(fp->dbe);
-	if (fp->dinfo->dtype == OPEN_DELEGATE_NONE) {
-		rfs4_dbe_unlock(fp->dbe);
+	rfs4_dbe_lock(fp->rf_dbe);
+	if (fp->rf_dinfo.rd_dtype == OPEN_DELEGATE_NONE) {
+		rfs4_dbe_unlock(fp->rf_dbe);
 		return (0);
 	}
-	rfs4_dbe_unlock(fp->dbe);
+	rfs4_dbe_unlock(fp->rf_dbe);
 
 	if (ct && ct->cc_flags & CC_DONTBLOCK) {
 		ct->cc_flags |= CC_WOULDBLOCK;
 		return (NFS4ERR_DELAY);
 	}
 
-	rfs4_dbe_lock(fp->dbe);
-	while (fp->dinfo->dtype != OPEN_DELEGATE_NONE) {
-		rc = rfs4_dbe_twait(fp->dbe,
-		    lbolt + SEC_TO_TICK(dbe_to_instp(fp->dbe)->lease_period));
+	rfs4_dbe_lock(fp->rf_dbe);
+	while (fp->rf_dinfo.rd_dtype != OPEN_DELEGATE_NONE) {
+		rc = rfs4_dbe_twait(fp->rf_dbe,
+		    lbolt +
+		    SEC_TO_TICK(dbe_to_instp(fp->rf_dbe)->lease_period));
 		if (rc == -1) { /* timed out */
-			rfs4_dbe_unlock(fp->dbe);
+			rfs4_dbe_unlock(fp->rf_dbe);
 			rfs4_recall_deleg(fp, trunc, NULL);
-			rfs4_dbe_lock(fp->dbe);
+			rfs4_dbe_lock(fp->rf_dbe);
 		}
 	}
-	rfs4_dbe_unlock(fp->dbe);
+	rfs4_dbe_unlock(fp->rf_dbe);
 
 	return (0);
 }
 
 /* monitor for open on read delegated file */
 int
-deleg_rd_open(
-	femarg_t *arg,
-	int mode,
-	cred_t *cr,
-	caller_context_t *ct)
+deleg_rd_open(femarg_t *arg, int mode, cred_t *cr, caller_context_t *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -321,11 +315,7 @@ deleg_rd_open(
 
 /* monitor for open on write delegated file */
 int
-deleg_wr_open(
-	femarg_t *arg,
-	int mode,
-	cred_t *cr,
-	caller_context_t *ct)
+deleg_wr_open(femarg_t *arg, int mode, cred_t *cr, caller_context_t *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -356,12 +346,8 @@ deleg_wr_open(
  * doing a read without doing an open first. like from nfs2/3.
  */
 int
-deleg_wr_read(
-	femarg_t *arg,
-	uio_t *uiop,
-	int ioflag,
-	cred_t *cr,
-	struct caller_context *ct)
+deleg_wr_read(femarg_t *arg, uio_t *uiop, int ioflag, cred_t *cr,
+    struct caller_context *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -384,12 +370,8 @@ deleg_wr_read(
  * conflicts should be caught at open, but NFSv2&3 don't use OPEN.
  */
 int
-deleg_rd_write(
-	femarg_t *arg,
-	uio_t *uiop,
-	int ioflag,
-	cred_t *cr,
-	struct caller_context *ct)
+deleg_rd_write(femarg_t *arg, uio_t *uiop, int ioflag, cred_t *cr,
+    struct caller_context *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -408,12 +390,8 @@ deleg_rd_write(
  * conflicts should be caught at open, but NFSv2&3 don't use OPEN.
  */
 int
-deleg_wr_write(
-	femarg_t *arg,
-	uio_t *uiop,
-	int ioflag,
-	cred_t *cr,
-	struct caller_context *ct)
+deleg_wr_write(femarg_t *arg, uio_t *uiop, int ioflag, cred_t *cr,
+    struct caller_context *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -433,12 +411,8 @@ deleg_wr_write(
 
 /* doing a setattr on a read delegated file is a conflict. */
 int
-deleg_rd_setattr(
-	femarg_t *arg,
-	vattr_t *vap,
-	int flags,
-	cred_t *cr,
-	caller_context_t *ct)
+deleg_rd_setattr(femarg_t *arg, vattr_t *vap, int flags, cred_t *cr,
+    caller_context_t *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -454,12 +428,8 @@ deleg_rd_setattr(
 
 /* only the owner of the write delegation can do a setattr */
 int
-deleg_wr_setattr(
-	femarg_t *arg,
-	vattr_t *vap,
-	int flags,
-	cred_t *cr,
-	caller_context_t *ct)
+deleg_wr_setattr(femarg_t *arg, vattr_t *vap, int flags, cred_t *cr,
+    caller_context_t *ct)
 {
 	int rc;
 	bool_t trunc = FALSE;
@@ -485,10 +455,7 @@ deleg_wr_setattr(
 }
 
 int
-deleg_rd_rwlock(
-	femarg_t *arg,
-	int write_lock,
-	caller_context_t *ct)
+deleg_rd_rwlock(femarg_t *arg, int write_lock, caller_context_t *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -509,10 +476,7 @@ deleg_rd_rwlock(
 
 /* Only the owner of the write delegation should be doing this. */
 int
-deleg_wr_rwlock(
-	femarg_t *arg,
-	int write_lock,
-	caller_context_t *ct)
+deleg_wr_rwlock(femarg_t *arg, int write_lock, caller_context_t *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -532,14 +496,8 @@ deleg_wr_rwlock(
 }
 
 int
-deleg_rd_space(
-	femarg_t *arg,
-	int cmd,
-	flock64_t *bfp,
-	int flag,
-	offset_t offset,
-	cred_t *cr,
-	caller_context_t *ct)
+deleg_rd_space(femarg_t *arg, int cmd, flock64_t *bfp, int flag,
+    offset_t offset, cred_t *cr, caller_context_t *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -554,14 +512,8 @@ deleg_rd_space(
 }
 
 int
-deleg_wr_space(
-	femarg_t *arg,
-	int cmd,
-	flock64_t *bfp,
-	int flag,
-	offset_t offset,
-	cred_t *cr,
-	caller_context_t *ct)
+deleg_wr_space(femarg_t *arg, int cmd, flock64_t *bfp, int flag,
+    offset_t offset, cred_t *cr, caller_context_t *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -581,12 +533,8 @@ deleg_wr_space(
 }
 
 int
-deleg_rd_setsecattr(
-	femarg_t *arg,
-	vsecattr_t *vsap,
-	int flag,
-	cred_t *cr,
-	caller_context_t *ct)
+deleg_rd_setsecattr(femarg_t *arg, vsecattr_t *vsap, int flag, cred_t *cr,
+    caller_context_t *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -603,12 +551,8 @@ deleg_rd_setsecattr(
 }
 
 int
-deleg_wr_setsecattr(
-	femarg_t *arg,
-	vsecattr_t *vsap,
-	int flag,
-	cred_t *cr,
-	caller_context_t *ct)
+deleg_wr_setsecattr(femarg_t *arg, vsecattr_t *vsap, int flag, cred_t *cr,
+    caller_context_t *ct)
 {
 	int rc;
 	rfs4_file_t *fp;
@@ -625,12 +569,8 @@ deleg_wr_setsecattr(
 
 /* currently, vnevents must do synchronous recalls */
 int
-deleg_rd_vnevent(
-	femarg_t *arg,
-	vnevent_t vnevent,
-	vnode_t *dvp,
-	char *name,
-	caller_context_t *ct)
+deleg_rd_vnevent(femarg_t *arg, vnevent_t vnevent, vnode_t *dvp, char *name,
+    caller_context_t *ct)
 {
 	rfs4_file_t *fp;
 	vnode_t *vp = arg->fa_vnode.vp;
@@ -652,12 +592,8 @@ deleg_rd_vnevent(
 }
 
 int
-deleg_wr_vnevent(
-	femarg_t *arg,
-	vnevent_t vnevent,
-	vnode_t *dvp,
-	char *name,
-	caller_context_t *ct)
+deleg_wr_vnevent(femarg_t *arg, vnevent_t vnevent, vnode_t *dvp, char *name,
+    caller_context_t *ct)
 {
 	clock_t rc;
 	rfs4_file_t *fp;
@@ -672,18 +608,18 @@ deleg_wr_vnevent(
 	case VE_RENAME_SRC:
 		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
 		rfs4_recall_deleg(fp, trunc, NULL);
-		rfs4_dbe_lock(fp->dbe);
-		while (fp->dinfo->dtype != OPEN_DELEGATE_NONE) {
-			rc = rfs4_dbe_twait(fp->dbe,
+		rfs4_dbe_lock(fp->rf_dbe);
+		while (fp->rf_dinfo.rd_dtype != OPEN_DELEGATE_NONE) {
+			rc = rfs4_dbe_twait(fp->rf_dbe,
 			    lbolt + SEC_TO_TICK(
-			    dbe_to_instp(fp->dbe)->lease_period));
+			    dbe_to_instp(fp->rf_dbe)->lease_period));
 			if (rc == -1) { /* timed out */
-				rfs4_dbe_unlock(fp->dbe);
+				rfs4_dbe_unlock(fp->rf_dbe);
 				rfs4_recall_deleg(fp, trunc, NULL);
-				rfs4_dbe_lock(fp->dbe);
+				rfs4_dbe_lock(fp->rf_dbe);
 			}
 		}
-		rfs4_dbe_unlock(fp->dbe);
+		rfs4_dbe_unlock(fp->rf_dbe);
 
 		break;
 

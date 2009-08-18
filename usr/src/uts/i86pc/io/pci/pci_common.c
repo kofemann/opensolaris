@@ -178,7 +178,7 @@ pci_get_priority(dev_info_t *dip, ddi_intr_handle_impl_t *hdlp, int *pri)
 
 
 
-static int pcie_pci_intr_pri_counter = 0;
+static int pcieb_intr_pri_counter = 0;
 
 /*
  * pci_common_intr_ops: bus_intr_op() function for interrupt support
@@ -311,13 +311,13 @@ SUPPORTED_TYPES_OUT:
 		    (psm_intr_ops != NULL) &&
 		    (pci_get_priority(rdip, hdlp, &priority) == DDI_SUCCESS)) {
 			/*
-			 * Following check is a special case for 'pcie_pci'.
+			 * Following check is a special case for 'pcieb'.
 			 * This makes sure vectors with the right priority
-			 * are allocated for pcie_pci during ALLOC time.
+			 * are allocated for pcieb during ALLOC time.
 			 */
-			if (strcmp(ddi_driver_name(rdip), "pcie_pci") == 0) {
+			if (strcmp(ddi_driver_name(rdip), "pcieb") == 0) {
 				hdlp->ih_pri =
-				    (pcie_pci_intr_pri_counter % 2) ? 4 : 7;
+				    (pcieb_intr_pri_counter % 2) ? 4 : 7;
 				pciepci = 1;
 			} else
 				hdlp->ih_pri = priority;
@@ -394,7 +394,7 @@ SUPPORTED_TYPES_OUT:
 				ispec = (struct intrspec *)isp;
 				if (ispec)
 					ispec->intrspec_pri = hdlp->ih_pri;
-				++pcie_pci_intr_pri_counter;
+				++pcieb_intr_pri_counter;
 			}
 
 		} else if (hdlp->ih_type == DDI_INTR_TYPE_FIXED) {
@@ -451,16 +451,40 @@ SUPPORTED_TYPES_OUT:
 		if (psm_intr_ops == NULL)
 			return (DDI_FAILURE);
 
+		isp = pci_intx_get_ispec(pdip, rdip, (int)hdlp->ih_inum);
+		ispec = (struct intrspec *)isp;
+		if (ispec == NULL)
+			return (DDI_FAILURE);
+
+		/* For fixed interrupts */
+		if (hdlp->ih_type == DDI_INTR_TYPE_FIXED) {
+			/* if interrupt is shared, return failure */
+			((ihdl_plat_t *)hdlp->ih_private)->ip_ispecp = ispec;
+			psm_rval = (*psm_intr_ops)(rdip, hdlp,
+			    PSM_INTR_OP_GET_SHARED, &psm_status);
+			/*
+			 * For fixed interrupts, the irq may not have been
+			 * allocated when SET_PRI is called, and the above
+			 * GET_SHARED op may return PSM_FAILURE. This is not
+			 * a real error and is ignored below.
+			 */
+			if ((psm_rval != PSM_FAILURE) && (psm_status == 1)) {
+				DDI_INTR_NEXDBG((CE_CONT,
+				    "pci_common_intr_ops: "
+				    "dip 0x%p cannot setpri, psm_rval=%d,"
+				    "psm_status=%d\n", (void *)rdip, psm_rval,
+				    psm_status));
+				return (DDI_FAILURE);
+			}
+		}
+
 		/* Change the priority */
 		if ((*psm_intr_ops)(rdip, hdlp, PSM_INTR_OP_SET_PRI, result) ==
 		    PSM_FAILURE)
 			return (DDI_FAILURE);
 
 		/* update ispec */
-		isp = pci_intx_get_ispec(pdip, rdip, (int)hdlp->ih_inum);
-		ispec = (struct intrspec *)isp;
-		if (ispec)
-			ispec->intrspec_pri = *(int *)result;
+		ispec->intrspec_pri = *(int *)result;
 		break;
 	case DDI_INTROP_ADDISR:
 		/* update ispec */
@@ -681,6 +705,30 @@ SUPPORTED_TYPES_OUT:
 		DDI_INTR_NEXDBG((CE_CONT, "pci: GETPENDING returned = %x\n",
 		    *(int *)result));
 		break;
+	case DDI_INTROP_GETTARGET:
+		DDI_INTR_NEXDBG((CE_CONT, "pci_common_intr_ops: GETTARGET\n"));
+
+		/* Note hdlp->ih_vector is actually an irq */
+		if ((rv = pci_get_cpu_from_vecirq(hdlp->ih_vector, IS_IRQ)) ==
+		    -1)
+			return (DDI_FAILURE);
+		*(int *)result = rv;
+		DDI_INTR_NEXDBG((CE_CONT, "pci_common_intr_ops: GETTARGET "
+		    "vector = 0x%x, cpu = 0x%x\n", hdlp->ih_vector, rv));
+		break;
+	case DDI_INTROP_SETTARGET:
+		DDI_INTR_NEXDBG((CE_CONT, "pci_common_intr_ops: SETTARGET\n"));
+
+		/* hdlp->ih_vector is actually an irq */
+		tmp_hdl.ih_vector = hdlp->ih_vector;
+		tmp_hdl.ih_flags = PSMGI_INTRBY_IRQ;
+		tmp_hdl.ih_private = (void *)(uintptr_t)*(int *)result;
+		psm_rval = (*psm_intr_ops)(rdip, &tmp_hdl, PSM_INTR_OP_SET_CPU,
+		    &psm_status);
+
+		if (psm_rval != PSM_SUCCESS)
+			return (DDI_FAILURE);
+		break;
 	default:
 		return (i_ddi_intr_ops(pdip, rdip, intr_op, hdlp, result));
 	}
@@ -744,8 +792,10 @@ pci_enable_intr(dev_info_t *pdip, dev_info_t *rdip,
 	ispec = (struct intrspec *)pci_intx_get_ispec(pdip, rdip, (int)inum);
 	if (ispec == NULL)
 		return (DDI_FAILURE);
-	if (DDI_INTR_IS_MSI_OR_MSIX(hdlp->ih_type))
+	if (DDI_INTR_IS_MSI_OR_MSIX(hdlp->ih_type)) {
 		ispec->intrspec_vec = inum;
+		ispec->intrspec_pri = hdlp->ih_pri;
+	}
 	ihdl_plat_datap->ip_ispecp = ispec;
 
 	/* translate the interrupt if needed */
@@ -778,8 +828,10 @@ pci_disable_intr(dev_info_t *pdip, dev_info_t *rdip,
 	ispec = (struct intrspec *)pci_intx_get_ispec(pdip, rdip, (int)inum);
 	if (ispec == NULL)
 		return;
-	if (DDI_INTR_IS_MSI_OR_MSIX(hdlp->ih_type))
+	if (DDI_INTR_IS_MSI_OR_MSIX(hdlp->ih_type)) {
 		ispec->intrspec_vec = inum;
+		ispec->intrspec_pri = hdlp->ih_pri;
+	}
 	ihdl_plat_datap->ip_ispecp = ispec;
 
 	/* translate the interrupt if needed */

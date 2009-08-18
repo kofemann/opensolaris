@@ -153,6 +153,7 @@ COMMON_SUBDIRS=		\
 	factor		\
 	false		\
 	fcinfo		\
+	fcoesvc		\
 	fdetach		\
 	fdformat	\
 	fdisk		\
@@ -431,7 +432,6 @@ COMMON_SUBDIRS=		\
 	valtools	\
 	vgrind		\
 	vi		\
-	vna		\
 	volcheck	\
 	volrmmount	\
 	vscan		\
@@ -488,7 +488,6 @@ i386_SUBDIRS=		\
 	diskscan	\
 	lms		\
 	ntfsprogs	\
-	OWconfig	\
 	parted		\
 	rtc		\
 	ucodeadm	\

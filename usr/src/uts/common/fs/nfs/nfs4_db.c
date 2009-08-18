@@ -38,37 +38,37 @@ static int rfs4_reap_interval = RFS4_REAP_INTERVAL;
 
 static void rfs4_dbe_reap(rfs4_table_t *, time_t, uint32_t);
 static void rfs4_dbe_destroy(rfs4_dbe_t *);
-static rfs4_dbe_t *rfs4_dbe_create(rfs4_table_t *, rfs4_entry_t);
+static rfs4_dbe_t *rfs4_dbe_create(rfs4_table_t *, id_t, rfs4_entry_t);
 static void rfs4_start_reaper(rfs4_table_t *);
 
 krwlock_t nsi_lock;
 
 id_t
-rfs4_dbe_getid(rfs4_dbe_t *e)
+rfs4_dbe_getid(rfs4_dbe_t *entry)
 {
-	return (e->id);
+	return (entry->dbe_id);
 }
 
 void
-rfs4_dbe_hold(rfs4_dbe_t *e)
+rfs4_dbe_hold(rfs4_dbe_t *entry)
 {
-	atomic_add_32(&e->refcnt, 1);
+	atomic_add_32(&entry->dbe_refcnt, 1);
 }
 
 /*
  * rfs4_dbe_rele_nolock only decrements the reference count of the entry.
  */
 void
-rfs4_dbe_rele_nolock(rfs4_dbe_t *e)
+rfs4_dbe_rele_nolock(rfs4_dbe_t *entry)
 {
-	atomic_add_32(&e->refcnt, -1);
+	atomic_add_32(&entry->dbe_refcnt, -1);
 }
 
 
 uint32_t
-rfs4_dbe_refcnt(rfs4_dbe_t *e)
+rfs4_dbe_refcnt(rfs4_dbe_t *entry)
 {
-	return (e->refcnt);
+	return (entry->dbe_refcnt);
 }
 
 /*
@@ -76,20 +76,20 @@ rfs4_dbe_refcnt(rfs4_dbe_t *e)
  * Caller does not want this entry to be found any longer
  */
 void
-rfs4_dbe_invalidate(rfs4_dbe_t *e)
+rfs4_dbe_invalidate(rfs4_dbe_t *entry)
 {
-	e->invalid = TRUE;
-	e->skipsearch = TRUE;
-	e->inval_hint = caller();
+	entry->dbe_invalid = TRUE;
+	entry->dbe_skipsearch = TRUE;
+	entry->inval_hint = caller();
 }
 
 /*
  * Is this entry invalid?
  */
 bool_t
-rfs4_dbe_is_invalid(rfs4_dbe_t *e)
+rfs4_dbe_is_invalid(rfs4_dbe_t *entry)
 {
-	return (e->invalid);
+	return (entry->dbe_invalid);
 }
 
 /*
@@ -102,68 +102,68 @@ rfs4_dbe_skip_or_invalid(rfs4_dbe_t *e)
 }
 
 time_t
-rfs4_dbe_get_timerele(rfs4_dbe_t *e)
+rfs4_dbe_get_timerele(rfs4_dbe_t *entry)
 {
-	return (e->time_rele);
+	return (entry->dbe_time_rele);
 }
 
 /*
  * Use these to temporarily hide/unhide a db entry.
  */
 void
-rfs4_dbe_hide(rfs4_dbe_t *e)
+rfs4_dbe_hide(rfs4_dbe_t *entry)
 {
-	rfs4_dbe_lock(e);
-	e->skipsearch = TRUE;
-	rfs4_dbe_unlock(e);
+	rfs4_dbe_lock(entry);
+	entry->dbe_skipsearch = TRUE;
+	rfs4_dbe_unlock(entry);
 }
 
 void
-rfs4_dbe_unhide(rfs4_dbe_t *e)
+rfs4_dbe_unhide(rfs4_dbe_t *entry)
 {
-	rfs4_dbe_lock(e);
-	e->skipsearch = FALSE;
-	rfs4_dbe_unlock(e);
+	rfs4_dbe_lock(entry);
+	entry->dbe_skipsearch = FALSE;
+	rfs4_dbe_unlock(entry);
 }
 
 void
-rfs4_dbe_rele(rfs4_dbe_t *e)
+rfs4_dbe_rele(rfs4_dbe_t *entry)
 {
-	mutex_enter(e->lock);
-	ASSERT(e->refcnt > 1);
-	atomic_add_32(&e->refcnt, -1);
-	e->time_rele = gethrestime_sec();
-	mutex_exit(e->lock);
+	mutex_enter(entry->dbe_lock);
+	ASSERT(entry->dbe_refcnt > 1);
+	atomic_add_32(&entry->dbe_refcnt, -1);
+	entry->dbe_time_rele = gethrestime_sec();
+	mutex_exit(entry->dbe_lock);
 }
 
 void
-rfs4_dbe_lock(rfs4_dbe_t *e)
+rfs4_dbe_lock(rfs4_dbe_t *entry)
 {
-	mutex_enter(e->lock);
+	mutex_enter(entry->dbe_lock);
 }
 
 void
-rfs4_dbe_unlock(rfs4_dbe_t *e)
+rfs4_dbe_unlock(rfs4_dbe_t *entry)
 {
-	mutex_exit(e->lock);
+	mutex_exit(entry->dbe_lock);
 }
 
 bool_t
-rfs4_dbe_islocked(rfs4_dbe_t *e)
+rfs4_dbe_islocked(rfs4_dbe_t *entry)
 {
-	return (mutex_owned(e->lock));
+	return (mutex_owned(entry->dbe_lock));
 }
 
 clock_t
-rfs4_dbe_twait(rfs4_dbe_t *e, clock_t timeout)
+rfs4_dbe_twait(rfs4_dbe_t *entry, clock_t timeout)
 {
-	return (cv_timedwait(e->cv, e->lock, timeout));
+	return (cv_timedwait(entry->dbe_cv, entry->dbe_lock, timeout));
 }
 
 void
-rfs4_dbe_cv_broadcast(rfs4_dbe_t *e)
+rfs4_dbe_cv_broadcast(rfs4_dbe_t *entry)
 {
-	cv_broadcast(e->cv);
+	cv_broadcast(entry->dbe_cv);
 }
 
 /* ARGSUSED */
@@ -172,8 +172,8 @@ rfs4_dbe_kmem_constructor(void *obj, void *private, int kmflag)
 {
 	rfs4_dbe_t *entry = obj;
 
-	mutex_init(entry->lock, NULL, MUTEX_DEFAULT, NULL);
-	cv_init(entry->cv, NULL, CV_DEFAULT, NULL);
+	mutex_init(entry->dbe_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(entry->dbe_cv, NULL, CV_DEFAULT, NULL);
 
 	return (0);
 }
@@ -185,8 +185,8 @@ rfs4_dbe_kmem_destructor(void *obj, void *private)
 	/*LINTED*/
 	rfs4_table_t *table = private;
 
-	mutex_destroy(entry->lock);
-	cv_destroy(entry->cv);
+	mutex_destroy(entry->dbe_lock);
+	cv_destroy(entry->dbe_cv);
 }
 
 rfs4_database_t *
@@ -195,10 +195,10 @@ rfs4_database_create()
 	rfs4_database_t *db;
 
 	db = kmem_alloc(sizeof (rfs4_database_t), KM_SLEEP);
-	mutex_init(db->lock, NULL, MUTEX_DEFAULT, NULL);
-	db->tables = NULL;
-	db->shutdown_count = 0;
-	cv_init(&db->shutdown_wait, NULL, CV_DEFAULT, NULL);
+	mutex_init(db->db_lock, NULL, MUTEX_DEFAULT, NULL);
+	db->db_tables = NULL;
+	db->db_shutdown_count = 0;
+	cv_init(&db->db_shutdown_wait, NULL, CV_DEFAULT, NULL);
 	return (db);
 }
 
@@ -216,18 +216,18 @@ rfs4_database_shutdown(rfs4_database_t *db)
 {
 	rfs4_table_t *table;
 
-	mutex_enter(db->lock);
-	for (table = db->tables; table; table = table->tnext) {
-		table->reaper_shutdown = TRUE;
-		mutex_enter(&table->reaper_cv_lock);
-		cv_broadcast(&table->reaper_wait);
-		db->shutdown_count++;
-		mutex_exit(&table->reaper_cv_lock);
+	mutex_enter(db->db_lock);
+	for (table = db->db_tables; table; table = table->dbt_tnext) {
+		table->dbt_reaper_shutdown = TRUE;
+		mutex_enter(&table->dbt_reaper_cv_lock);
+		cv_broadcast(&table->dbt_reaper_wait);
+		db->db_shutdown_count++;
+		mutex_exit(&table->dbt_reaper_cv_lock);
 	}
-	while (db->shutdown_count > 0) {
-		cv_wait(&db->shutdown_wait, db->lock);
+	while (db->db_shutdown_count > 0) {
+		cv_wait(&db->db_shutdown_wait, db->db_lock);
 	}
-	mutex_exit(db->lock);
+	mutex_exit(db->db_lock);
 }
 
 /*
@@ -240,24 +240,26 @@ rfs4_database_destroy(rfs4_database_t *db)
 {
 	rfs4_table_t *next, *tmp;
 
-	for (next = db->tables; next; ) {
+	for (next = db->db_tables; next; ) {
 		tmp = next;
-		next = tmp->tnext;
+		next = tmp->dbt_tnext;
 		rfs4_table_destroy(db, tmp);
 	}
 
-	mutex_destroy(db->lock);
+	mutex_destroy(db->db_lock);
 	kmem_free(db, sizeof (rfs4_database_t));
 }
 
 rfs4_table_t *
-rfs4_table_create(nfs_server_instance_t *instp,
-    char *tabname, time_t max_cache_time, uint32_t idxcnt,
-    bool_t (*create)(rfs4_entry_t, void *), void (*destroy)(rfs4_entry_t),
-    bool_t (*expiry)(rfs4_entry_t), uint32_t size,
-    uint32_t hashsize, uint32_t maxentries, id_t start)
+rfs4_table_create(nfs_server_instance_t *instp, char *tabname,
+    time_t max_cache_time,
+    uint32_t idxcnt, bool_t (*create)(rfs4_entry_t, void *),
+    void (*destroy)(rfs4_entry_t),
+    bool_t (*expiry)(rfs4_entry_t),
+    uint32_t size, uint32_t hashsize,
+    uint32_t maxentries, id_t start)
 {
-	rfs4_database_t *dbp;
+	rfs4_database_t *db;
 	rfs4_table_t *table;
 
 	int len;
@@ -266,13 +268,13 @@ rfs4_table_create(nfs_server_instance_t *instp,
 	char *id_name;
 
 	table = kmem_alloc(sizeof (rfs4_table_t), KM_SLEEP);
-	table->instp = instp;
-	dbp = instp->state_store;
+	table->dbt_instp = instp;
+	db = instp->state_store;
 
-	rw_init(table->t_lock, NULL, RW_DEFAULT, NULL);
-	mutex_init(table->lock, NULL, MUTEX_DEFAULT, NULL);
-	mutex_init(&table->reaper_cv_lock, NULL, MUTEX_DEFAULT, NULL);
-	cv_init(&table->reaper_wait, NULL, CV_DEFAULT, NULL);
+	rw_init(table->dbt_t_lock, NULL, RW_DEFAULT, NULL);
+	mutex_init(table->dbt_lock, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&table->dbt_reaper_cv_lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&table->dbt_reaper_wait, NULL, CV_DEFAULT, NULL);
 
 	ASSERT(instp);
 
@@ -281,21 +283,21 @@ rfs4_table_create(nfs_server_instance_t *instp,
 
 	len = strlen(tabname) + strlen(tbl_inst_name);
 	/* alloc plus one for the Nul */
-	table->name = kmem_alloc(len+1, KM_SLEEP);
+	table->dbt_name = kmem_alloc(len+1, KM_SLEEP);
 	cache_name = kmem_alloc(len + 12 /* "_entry_cache" */ + 1, KM_SLEEP);
-	(void) sprintf(table->name, "%s%s", tbl_inst_name, tabname);
-	(void) sprintf(cache_name, "%s_entry_cache", table->name);
+	(void) sprintf(table->dbt_name, "%s%s", tbl_inst_name, tabname);
+	(void) sprintf(cache_name, "%s_entry_cache", table->dbt_name);
 
-	table->max_cache_time = max_cache_time;
-	table->usize = size;
-	table->len = hashsize;
-	table->count = 0;
-	table->idxcnt = 0;
-	table->ccnt = 0;
-	table->maxcnt = idxcnt;
-	table->indices = NULL;
-	table->id_space = NULL;
-	table->reaper_shutdown = FALSE;
+	table->dbt_max_cache_time = max_cache_time;
+	table->dbt_usize = size;
+	table->dbt_len = hashsize;
+	table->dbt_count = 0;
+	table->dbt_idxcnt = 0;
+	table->dbt_ccnt = 0;
+	table->dbt_maxcnt = idxcnt;
+	table->dbt_indices = NULL;
+	table->dbt_id_space = NULL;
+	table->dbt_reaper_shutdown = FALSE;
 
 	/*
 	 * If a start value was specified then we
@@ -306,27 +308,31 @@ rfs4_table_create(nfs_server_instance_t *instp,
 		if (maxentries + (uint32_t)start > (uint32_t)INT32_MAX)
 			maxentries = INT32_MAX - start;
 		id_name = kmem_alloc(len + 9 /* "_id_space" */ + 1, KM_SLEEP);
-		(void) sprintf(id_name, "%s_id_space", table->name);
-		table->id_space = id_space_create(id_name, start,
+		(void) sprintf(id_name, "%s_id_space", table->dbt_name);
+		table->dbt_id_space = id_space_create(id_name, start,
 		    maxentries + start);
 		kmem_free(id_name, len + 10);
 	}
-	table->maxentries = maxentries;
-	table->create = create;
-	table->destroy = destroy;
-	table->expiry = expiry;
+	table->dbt_maxentries = maxentries;
+	table->dbt_create = create;
+	table->dbt_destroy = destroy;
+	table->dbt_expiry = expiry;
 
-	table->mem_cache = kmem_cache_create(cache_name,
-	    sizeof (rfs4_dbe_t) + idxcnt * sizeof (rfs4_link) + size,
-	    0, rfs4_dbe_kmem_constructor, rfs4_dbe_kmem_destructor,
-	    NULL, table, NULL, 0);
-
+	table->dbt_mem_cache = kmem_cache_create(cache_name,
+	    sizeof (rfs4_dbe_t) + idxcnt * sizeof (rfs4_link_t) + size,
+	    0,
+	    rfs4_dbe_kmem_constructor,
+	    rfs4_dbe_kmem_destructor,
+	    NULL,
+	    table,
+	    NULL,
+	    0);
 	kmem_free(cache_name, len+13);
 
-	mutex_enter(dbp->lock);
-	table->tnext = dbp->tables;
-	dbp->tables = table;
-	mutex_exit(dbp->lock);
+	mutex_enter(db->db_lock);
+	table->dbt_tnext = db->db_tables;
+	db->db_tables = table;
+	mutex_exit(db->db_lock);
 
 	rfs4_start_reaper(table);
 
@@ -334,44 +340,44 @@ rfs4_table_create(nfs_server_instance_t *instp,
 }
 
 void
-rfs4_table_destroy(rfs4_database_t *dbp, rfs4_table_t *table)
+rfs4_table_destroy(rfs4_database_t *db, rfs4_table_t *table)
 {
 	rfs4_table_t *p;
-	rfs4_index_t *t;
+	rfs4_index_t *idx;
 
-	ASSERT(table->count == 0);
+	ASSERT(table->dbt_count == 0);
 
-	mutex_enter(dbp->lock);
-	if (table == dbp->tables)
-		dbp->tables = table->tnext;
+	mutex_enter(db->db_lock);
+	if (table == db->db_tables)
+		db->db_tables = table->dbt_tnext;
 	else {
-		for (p = dbp->tables; p; p = p->tnext)
-			if (p->tnext == table) {
-				p->tnext = table->tnext;
-				table->tnext = NULL;
+		for (p = db->db_tables; p; p = p->dbt_tnext)
+			if (p->dbt_tnext == table) {
+				p->dbt_tnext = table->dbt_tnext;
+				table->dbt_tnext = NULL;
 				break;
 			}
 		ASSERT(p != NULL);
 	}
-	mutex_exit(dbp->lock);
+	mutex_exit(db->db_lock);
 
 	/* Destroy indices */
-	while (table->indices) {
-		t = table->indices;
-		table->indices = t->inext;
-		rfs4_index_destroy(t);
+	while (table->dbt_indices) {
+		idx = table->dbt_indices;
+		table->dbt_indices = idx->dbi_inext;
+		rfs4_index_destroy(idx);
 	}
 
-	rw_destroy(table->t_lock);
-	mutex_destroy(table->lock);
-	mutex_destroy(&table->reaper_cv_lock);
-	cv_destroy(&table->reaper_wait);
+	rw_destroy(table->dbt_t_lock);
+	mutex_destroy(table->dbt_lock);
+	mutex_destroy(&table->dbt_reaper_cv_lock);
+	cv_destroy(&table->dbt_reaper_wait);
 
-	kmem_free(table->name, strlen(table->name) + 1);
+	kmem_free(table->dbt_name, strlen(table->dbt_name) + 1);
 
-	if (table->id_space)
-		id_space_destroy(table->id_space);
-	kmem_cache_destroy(table->mem_cache);
+	if (table->dbt_id_space)
+		id_space_destroy(table->dbt_id_space);
+	kmem_cache_destroy(table->dbt_mem_cache);
 	kmem_free(table, sizeof (rfs4_table_t));
 }
 
@@ -386,36 +392,37 @@ rfs4_index_create(rfs4_table_t *table,
 	rfs4_index_t *idx;
 	char *tbl_inst_name = "";
 
-	ASSERT(table->idxcnt < table->maxcnt);
+	ASSERT(table->dbt_idxcnt < table->dbt_maxcnt);
 
 	idx = kmem_alloc(sizeof (rfs4_index_t), KM_SLEEP);
 
-	if (table->instp)
-		tbl_inst_name = table->instp->inst_name;
+	if (table->dbt_instp)
+		tbl_inst_name = table->dbt_instp->inst_name;
 
-	idx->table = table;
-	idx->keyname = kmem_alloc(strlen(tbl_inst_name) + strlen(keyname) + 2,
-	    KM_SLEEP);
-	(void) sprintf(idx->keyname, "%s_%s", tbl_inst_name, keyname);
-	idx->hash = hash;
-	idx->compare = compare;
-	idx->mkkey = mkkey;
-	idx->tblidx = table->idxcnt;
-	table->idxcnt++;
+	idx->dbi_table = table;
+	idx->dbi_keyname = kmem_alloc(strlen(tbl_inst_name)
+	    + strlen(keyname) + 2, KM_SLEEP);
+	(void) sprintf(idx->dbi_keyname, "%s_%s", tbl_inst_name, keyname);
+	idx->dbi_hash = hash;
+	idx->dbi_compare = compare;
+	idx->dbi_mkkey = mkkey;
+	idx->dbi_tblidx = table->dbt_idxcnt;
+	table->dbt_idxcnt++;
 	if (createable) {
-		table->ccnt++;
-		if (table->ccnt > 1)
+		table->dbt_ccnt++;
+		if (table->dbt_ccnt > 1)
 			panic("Table %s currently can have only have one "
 			    "index that will allow creation of entries",
-			    table->name);
-		idx->createable = TRUE;
+			    table->dbt_name);
+		idx->dbi_createable = TRUE;
 	} else {
-		idx->createable = FALSE;
+		idx->dbi_createable = FALSE;
 	}
 
-	idx->inext = table->indices;
-	table->indices = idx;
-	idx->buckets = kmem_zalloc(sizeof (rfs4_bucket) * table->len, KM_SLEEP);
+	idx->dbi_inext = table->dbt_indices;
+	table->dbt_indices = idx;
+	idx->dbi_buckets = kmem_zalloc(sizeof (rfs4_bucket_t) * table->dbt_len,
+	    KM_SLEEP);
 
 	return (idx);
 }
@@ -423,81 +430,81 @@ rfs4_index_create(rfs4_table_t *table,
 void
 rfs4_index_destroy(rfs4_index_t *idx)
 {
-	kmem_free(idx->keyname, strlen(idx->keyname) + 1);
-	kmem_free(idx->buckets, sizeof (rfs4_bucket) * idx->table->len);
+	kmem_free(idx->dbi_keyname, strlen(idx->dbi_keyname) + 1);
+	kmem_free(idx->dbi_buckets,
+	    sizeof (rfs4_bucket_t) * idx->dbi_table->dbt_len);
 	kmem_free(idx, sizeof (rfs4_index_t));
 }
 
 static void
 rfs4_dbe_destroy(rfs4_dbe_t *entry)
 {
-	rfs4_index_t *ip;
+	rfs4_index_t *idx;
 	void *key;
 	int i;
-	rfs4_bucket *bp;
-	rfs4_table_t *table = entry->table;
-	rfs4_link *l;
+	rfs4_bucket_t *bp;
+	rfs4_table_t *table = entry->dbe_table;
+	rfs4_link_t *l;
 
 #ifdef	DEBUG
-	mutex_enter(entry->lock);
-	ASSERT(entry->refcnt == 0);
-	mutex_exit(entry->lock);
+	mutex_enter(entry->dbe_lock);
+	ASSERT(entry->dbe_refcnt == 0);
+	mutex_exit(entry->dbe_lock);
 #endif
 
 	/* Unlink from all indices */
-	for (ip = table->indices; ip; ip = ip->inext) {
-		l = &entry->indices[ip->tblidx];
+	for (idx = table->dbt_indices; idx; idx = idx->dbi_inext) {
+		l = &entry->dbe_indices[idx->dbi_tblidx];
 		/* check and see if we were ever linked in to the index */
 		if (INVALID_LINK(l)) {
 			ASSERT(l->next == NULL && l->prev == NULL);
 			continue;
 		}
-		key = ip->mkkey(entry->data);
-		i = HASH(ip, key);
-		bp = &ip->buckets[i];
-		ASSERT(bp->head != NULL);
-		DEQUEUE_IDX(bp, &entry->indices[ip->tblidx]);
+		key = idx->dbi_mkkey(entry->dbe_data);
+		i = HASH(idx, key);
+		bp = &idx->dbi_buckets[i];
+		ASSERT(bp->dbk_head != NULL);
+		DEQUEUE_IDX(bp, &entry->dbe_indices[idx->dbi_tblidx]);
 	}
 
 	/* Destroy user data */
-	if (table->destroy)
-		(*table->destroy)(entry->data);
+	if (table->dbt_destroy)
+		(*table->dbt_destroy)(entry->dbe_data);
 
-	if (table->id_space)
-		id_free(table->id_space, entry->id);
+	if (table->dbt_id_space)
+		id_free(table->dbt_id_space, entry->dbe_id);
 
-	mutex_enter(table->lock);
-	table->count--;
-	mutex_exit(table->lock);
+	mutex_enter(table->dbt_lock);
+	table->dbt_count--;
+	mutex_exit(table->dbt_lock);
 
 	/* Destroy the entry itself */
-	kmem_cache_free(table->mem_cache, entry);
+	kmem_cache_free(table->dbt_mem_cache, entry);
 }
 
 /*
  * If a valid entry is created, then the refcnt will be 1.
  */
 static rfs4_dbe_t *
-rfs4_dbe_create(rfs4_table_t *table, rfs4_entry_t data)
+rfs4_dbe_create(rfs4_table_t *table, id_t id, rfs4_entry_t data)
 {
 	rfs4_dbe_t *entry;
 	int i;
 
-	entry = kmem_cache_alloc(table->mem_cache, KM_SLEEP);
+	entry = kmem_cache_alloc(table->dbt_mem_cache, KM_SLEEP);
+	entry->dbe_refcnt = 1;
+	entry->dbe_invalid = FALSE;
+	entry->dbe_skipsearch = FALSE;
+	entry->dbe_time_rele = 0;
+	entry->dbe_id = 0;
 
-	entry->refcnt = 1;
-	entry->invalid = FALSE;
-	entry->skipsearch = FALSE;
-	entry->time_rele = 0;
-	entry->id = 0;
+	if (table->dbt_id_space)
+		entry->dbe_id = id;
+	entry->dbe_table = table;
 
-	if (table->id_space)
-		entry->id = id_alloc(table->id_space);
-	entry->table = table;
-
-	for (i = 0; i < table->maxcnt; i++) {
-		entry->indices[i].next = entry->indices[i].prev = NULL;
-		entry->indices[i].entry = entry;
+	for (i = 0; i < table->dbt_maxcnt; i++) {
+		entry->dbe_indices[i].next = entry->dbe_indices[i].prev = NULL;
+		entry->dbe_indices[i].entry = entry;
 		/*
 		 * We mark the entry as not indexed by setting the low
 		 * order bit, since address are word aligned. This has
@@ -505,24 +512,24 @@ rfs4_dbe_create(rfs4_table_t *table, rfs4_entry_t data)
 		 * used. After the entry is linked in to the
 		 * corresponding index the bit will be cleared.
 		 */
-		INVALIDATE_ADDR(entry->indices[i].entry);
+		INVALIDATE_ADDR(entry->dbe_indices[i].entry);
 	}
 
-	entry->data = (rfs4_entry_t)&entry->indices[table->maxcnt];
-	bzero(entry->data, table->usize);
-	entry->data->dbe = entry;
+	entry->dbe_data = (rfs4_entry_t)&entry->dbe_indices[table->dbt_maxcnt];
+	bzero(entry->dbe_data, table->dbt_usize);
+	entry->dbe_data->dbe = entry;
 
-	if (!(*table->create)(entry->data, data)) {
-		if (table->id_space)
-			id_free(table->id_space, entry->id);
-		kmem_cache_free(table->mem_cache, entry);
+	if (!(*table->dbt_create)(entry->dbe_data, data)) {
+		if (table->dbt_id_space)
+			id_free(table->idbt_d_space, entry->dbe_id);
+		kmem_cache_free(table->dbt_mem_cache, entry);
 
 		return (NULL);
 	}
 
-	mutex_enter(table->lock);
-	table->count++;
-	mutex_exit(table->lock);
+	mutex_enter(table->dbt_lock);
+	table->dbt_count++;
+	mutex_exit(table->dbt_lock);
 
 	return (entry);
 }
@@ -537,24 +544,25 @@ rfs4_dbe_create(rfs4_table_t *table, rfs4_entry_t data)
  */
 rfs4_entry_t
 rfs4_dbsearch(rfs4_index_t *idx, void *key, bool_t *create, void *arg,
-		rfs4_dbsearch_type_t dbsearch_type)
+    rfs4_dbsearch_type_t dbsearch_type)
 {
 	int already_done;
 	uint32_t i;
-	rfs4_table_t *table = idx->table;
+	rfs4_table_t *table = idx->dbi_table;
 	rfs4_index_t *ip;
-	rfs4_bucket *bp;
-	rfs4_link *l;
-	rfs4_dbe_t *entry = NULL;
+	rfs4_bucket_t *bp;
+	rfs4_link_t *l;
+	rfs4_dbe_t *entry;
+	id_t id = -1;
 
 	/*
 	 * figure out the bucket in idx based on the passed in key value
 	 * and the abstracted key hashing function for the index
 	 */
 	i = HASH(idx, key);
-	bp = &idx->buckets[i];
+	bp = &idx->dbi_buckets[i];
 
-	rw_enter(bp->lock, RW_READER);
+	rw_enter(bp->dbk_lock, RW_READER);
 
 	/*
 	 * Now search the bucket for a match.
@@ -565,41 +573,33 @@ rfs4_dbsearch(rfs4_index_t *idx, void *key, bool_t *create, void *arg,
 	 *   	the entries skipsearch and dbsearch_type.
 	 */
 retry:
-	for (l = bp->head; l; l = l->next) {
-		if (l->entry->refcnt > 0 &&
-		    (l->entry->skipsearch == FALSE ||
-		    (l->entry->skipsearch == TRUE &&
+	for (l = bp->dbk_head; l; l = l->next) {
+		if (l->entry->dbe_refcnt > 0 &&
+		    (l->entry->dbe_skipsearch == FALSE ||
+		    (l->entry->dbe_skipsearch == TRUE &&
 		    dbsearch_type == RFS4_DBS_INVALID)) &&
-		    (*idx->compare)(l->entry->data, key)) {
-			mutex_enter(l->entry->lock);
+		    (*idx->dbi_compare)(l->entry->dbe_data, key)) {
+			mutex_enter(l->entry->dbe_lock);
 
 			/* recheck the refcnt after acquiring the lock */
-			if (l->entry->refcnt == 0) {
-				mutex_exit(l->entry->lock);
+			if (l->entry->dbe_refcnt == 0) {
+				mutex_exit(l->entry->dbe_lock);
 				continue;
 			}
 
 			/* place an additional hold since we are returning */
 			rfs4_dbe_hold(l->entry);
 
-			mutex_exit(l->entry->lock);
-			rw_exit(bp->lock);
+			mutex_exit(l->entry->dbe_lock);
+			rw_exit(bp->dbk_lock);
 
-			/* entry will be set if we retried so clean it up */
-			if (entry) {
-				/*
-				 * The entry has not been placed in a
-				 * table so go ahead and drop the ref
-				 * count and destroy the entry.
-				 */
-				entry->refcnt--;
-				rfs4_dbe_destroy(entry);
-			}
 
 			/* inform caller we did not create this entry */
 			*create = FALSE;
 
-			return (l->entry->data);
+			if (id != -1)
+				id_free(table->dbt_id_space, id);
+			return (l->entry->dbe_data);
 		}
 	}
 
@@ -610,31 +610,43 @@ retry:
 	 * a create function, or the index is not 'allowed' to automatically
 	 * create entries, or the table is FULL!! return NULL to the caller.
 	 */
-	if (!*create || table->create == NULL || !idx->createable ||
-	    table->maxentries == table->count) {
-		*create = FALSE;
-
-		rw_exit(bp->lock);
-
+	if (!*create || table->dbt_create == NULL || !idx->dbi_createable ||
+	    table->dbt_maxentries == table->dbt_count) {
+		rw_exit(bp->dbk_lock);
+		if (id != -1)
+			id_free(table->dbt_id_space, id);
 		return (NULL);
 	}
 
-	/* Create data before grabing an exclusive lock if needed */
-	if (entry == NULL) {
-		entry = rfs4_dbe_create(table, arg);
-		if (entry == NULL) {
-			rw_exit(bp->lock);
+	if (table->dbt_id_space && id == -1) {
+		/* get an id but don't sleep for it */
+		id = id_alloc_nosleep(table->dbt_id_space);
+		if (id == -1) {
+			rw_exit(bp->dbk_lock);
 
-			return (NULL);
+			/* get an id, ok to sleep for it here */
+			id = id_alloc(table->dbt_id_space);
+
+			rw_enter(bp->dbk_lock, RW_WRITER);
+			goto retry;
 		}
 	}
 
-	/* Now that we've allocated  */
-	if (rw_read_locked(bp->lock) && !rw_tryupgrade(bp->lock)) {
-		rw_exit(bp->lock);
-		rw_enter(bp->lock, RW_WRITER);
-
+	/* get an exclusive lock on the bucket */
+	if (rw_read_locked(bp->dbk_lock) && !rw_tryupgrade(bp->dbk_lock)) {
+		rw_exit(bp->dbk_lock);
+		rw_enter(bp->dbk_lock, RW_WRITER);
 		goto retry;
+	}
+
+	/* create entry */
+	entry = rfs4_dbe_create(table, id, arg);
+	if (entry == NULL) {
+		rw_exit(bp->dbk_lock);
+		if (id != -1)
+			id_free(table->dbt_id_space, id);
+
+		return (NULL);
 	}
 
 	/*
@@ -642,33 +654,33 @@ retry:
 	 * reference added even though there may be multiple indices
 	 */
 	rfs4_dbe_hold(entry);
-	ENQUEUE(bp->head, &entry->indices[idx->tblidx]);
-	VALIDATE_ADDR(entry->indices[idx->tblidx].entry);
+	ENQUEUE(bp->dbk_head, &entry->dbe_indices[idx->dbi_tblidx]);
+	VALIDATE_ADDR(entry->dbe_indices[idx->dbi_tblidx].entry);
 
-	already_done = idx->tblidx;
-	rw_exit(bp->lock);
+	already_done = idx->dbi_tblidx;
+	rw_exit(bp->dbk_lock);
 
-	for (ip = table->indices; ip; ip = ip->inext) {
-		if (ip->tblidx == already_done)
+	for (ip = table->dbt_indices; ip; ip = ip->dbi_inext) {
+		if (ip->dbi_tblidx == already_done)
 			continue;
-		l = &entry->indices[ip->tblidx];
-		i = HASH(ip, ip->mkkey(entry->data));
-		ASSERT(i < ip->table->len);
-		bp = &ip->buckets[i];
+		l = &entry->dbe_indices[ip->dbi_tblidx];
+		i = HASH(ip, ip->dbi_mkkey(entry->dbe_data));
+		ASSERT(i < ip->dbi_table->dbt_len);
+		bp = &ip->dbi_buckets[i];
 		ENQUEUE_IDX(bp, l);
 	}
 
-	return (entry->data);
+	return (entry->dbe_data);
 }
 
 boolean_t
 rfs4_cpr_callb(void *arg, int code)
 {
 	nfs_server_instance_t *instp;
-	rfs4_table_t *tbl;
-	rfs4_bucket *buckets, *bp;
-	rfs4_link *l;
-	rfs4_client_t *cl;
+	rfs4_table_t *table;
+	rfs4_bucket_t *buckets, *bp;
+	rfs4_link_t *l;
+	rfs4_client_t *cp;
 	int i;
 
 	if (arg == NULL)
@@ -682,11 +694,11 @@ rfs4_cpr_callb(void *arg, int code)
 	 * For the suspend case we simply don't care!  Nor do we care if
 	 * there are no clients.
 	 */
-	if (code == CB_CODE_CPR_CHKPT || tbl == NULL) {
+	if (code == CB_CODE_CPR_CHKPT || table == NULL) {
 		return (B_TRUE);
 	}
 
-	buckets = tbl->indices->buckets;
+	buckets = table->dbt_indices->dbi_buckets;
 
 	/*
 	 * When we get this far we are in the process of
@@ -696,11 +708,11 @@ rfs4_cpr_callb(void *arg, int code)
 	 * last_access time for all the clients and in
 	 * doing so extend them by one lease period.
 	 */
-	for (i = 0; i < tbl->len; i++) {
+	for (i = 0; i < table->dbt_len; i++) {
 		bp = &buckets[i];
-		for (l = bp->head; l; l = l->next) {
-			cl = (rfs4_client_t *)l->entry->data;
-			cl->last_access = gethrestime_sec();
+		for (l = bp->dbk_head; l; l = l->next) {
+			cp = (rfs4_client_t *)l->entry->dbe_data;
+			cp->rc_last_access = gethrestime_sec();
 		}
 	}
 
@@ -717,25 +729,25 @@ rfs4_cpr_callb(void *arg, int code)
  */
 void
 rfs4_dbe_walk(rfs4_table_t *table,
-		void (*callout)(rfs4_entry_t, void *),
-		void *data)
+    void (*callout)(rfs4_entry_t, void *),
+    void *data)
 {
-	rfs4_bucket *buckets = table->indices->buckets, *bp;
-	rfs4_link *l;
-	rfs4_dbe_t *e;
+	rfs4_bucket_t *buckets = table->dbt_indices->dbi_buckets, *bp;
+	rfs4_link_t *l;
+	rfs4_dbe_t *entry;
 	int i;
 
 	/* Walk the buckets looking for entries to release/destroy */
-	for (i = 0; i < table->len; i++) {
+	for (i = 0; i < table->dbt_len; i++) {
 		bp = &buckets[i];
-		rw_enter(bp->lock, RW_READER);
-		for (l = bp->head; l; l = l->next) {
-			e = l->entry;
-			mutex_enter(e->lock);
-			(*callout)(e->data, data);
-			mutex_exit(e->lock);
+		rw_enter(bp->dbk_lock, RW_READER);
+		for (l = bp->dbk_head; l; l = l->next) {
+			entry = l->entry;
+			mutex_enter(entry->dbe_lock);
+			(*callout)(entry->dbe_data, data);
+			mutex_exit(entry->dbe_lock);
 		}
-		rw_exit(bp->lock);
+		rw_exit(bp->dbk_lock);
 	}
 }
 
@@ -743,10 +755,10 @@ rfs4_dbe_walk(rfs4_table_t *table,
 static void
 rfs4_dbe_reap(rfs4_table_t *table, time_t cache_time, uint32_t desired)
 {
-	rfs4_index_t *ip = table->indices;
-	rfs4_bucket *buckets = ip->buckets, *bp;
-	rfs4_link *l, *t;
-	rfs4_dbe_t *e;
+	rfs4_index_t *idx = table->dbt_indices;
+	rfs4_bucket_t *buckets = idx->dbi_buckets, *bp;
+	rfs4_link_t *l, *t;
+	rfs4_dbe_t *entry;
 	bool_t found;
 	int i;
 	int count = 0;
@@ -760,60 +772,59 @@ rfs4_dbe_reap(rfs4_table_t *table, time_t cache_time, uint32_t desired)
 	 * states (and the entry has been fully created), it is not
 	 * allowed to be incremented.
 	 */
-	for (i = 0; i < table->len; i++) {
+	for (i = 0; i < table->dbt_len; i++) {
 		bp = &buckets[i];
 		do {
 			/*
 			 * First pass is to look for unreferenced entries.
 			 */
 			found = FALSE;
-			rw_enter(bp->lock, RW_READER);
-			for (l = bp->head; l; l = l->next) {
-				e = l->entry;
+			rw_enter(bp->dbk_lock, RW_READER);
+			for (l = bp->dbk_head; l; l = l->next) {
+				entry = l->entry;
 				/*
 				 * Examine an entry.  Ref count of 1 means
 				 * that the only reference is for the hash
 				 * table reference.
 				 */
-				if (e->refcnt == 1) {
-					mutex_enter(e->lock);
-					if (e->refcnt == 1) {
-						if (table->reaper_shutdown ||
-						    table->expiry == NULL ||
-						    (*table->expiry)(e->data)) {
-							e->refcnt--;
-							count++;
-							found = TRUE;
-						}
-					}
-					mutex_exit(e->lock);
+				if (entry->dbe_refcnt != 1)
+					continue;
+				mutex_enter(entry->dbe_lock);
+				if ((entry->dbe_refcnt == 1) &&
+				    (table->dbt_reaper_shutdown ||
+				    table->dbt_expiry == NULL ||
+				    (*table->dbt_expiry)(entry->dbe_data))) {
+					entry->dbe_refcnt--;
+					count++;
+					found = TRUE;
 				}
+				mutex_exit(entry->dbe_lock);
 			}
 
 			/*
 			 * Second pass is to destroy them.
 			 */
 			if (found) {
-				if (!rw_tryupgrade(bp->lock)) {
-					rw_exit(bp->lock);
-					rw_enter(bp->lock, RW_WRITER);
+				if (!rw_tryupgrade(bp->dbk_lock)) {
+					rw_exit(bp->dbk_lock);
+					rw_enter(bp->dbk_lock, RW_WRITER);
 				}
 
-				l = bp->head;
+				l = bp->dbk_head;
 				while (l) {
 					t = l;
-					e = t->entry;
+					entry = t->entry;
 					l = l->next;
-					if (e->refcnt == 0) {
-						DEQUEUE(bp->head, t);
+					if (entry->dbe_refcnt == 0) {
+						DEQUEUE(bp->dbk_head, t);
 						t->next = NULL;
 						t->prev = NULL;
 						INVALIDATE_ADDR(t->entry);
-						rfs4_dbe_destroy(e);
+						rfs4_dbe_destroy(entry);
 					}
 				}
 			}
-			rw_exit(bp->lock);
+			rw_exit(bp->dbk_lock);
 
 			/*
 			 * Delay slightly if there is more work to do
@@ -824,18 +835,18 @@ rfs4_dbe_reap(rfs4_table_t *table, time_t cache_time, uint32_t desired)
 			 * released.  This is only done in the
 			 * instance that the tables are being shut down.
 			 */
-			if (table->reaper_shutdown && bp->head != NULL)
+			if (table->dbt_reaper_shutdown && bp->dbk_head != NULL)
 				delay(hz/100);
 		/*
 		 * If this is a table shutdown, keep going until
 		 * everything is gone
 		 */
-		} while (table->reaper_shutdown && bp->head != NULL);
+		} while (table->dbt_reaper_shutdown && bp->dbk_head != NULL);
 
 		/*
 		 * XXX - Is the second clause redundant?
 		 */
-		if (!table->reaper_shutdown && desired && count >= desired)
+		if (!table->dbt_reaper_shutdown && desired && count >= desired)
 			break;
 	}
 }
@@ -847,28 +858,28 @@ reaper_thread(caddr_t *arg)
 	rfs4_table_t *table = (rfs4_table_t *)arg;
 	clock_t rc, time;
 
-	CALLB_CPR_INIT(&table->reaper_cpr_info, &table->reaper_cv_lock,
+	CALLB_CPR_INIT(&table->dbt_reaper_cpr_info, &table->dbt_reaper_cv_lock,
 	    callb_generic_cpr, "nfsv4Reaper");
 
-	time = MIN(rfs4_reap_interval, table->max_cache_time);
-	mutex_enter(&table->reaper_cv_lock);
+	time = MIN(rfs4_reap_interval, table->dbt_max_cache_time);
+	mutex_enter(&table->dbt_reaper_cv_lock);
 	do {
-		CALLB_CPR_SAFE_BEGIN(&table->reaper_cpr_info);
-		rc = cv_timedwait_sig(&table->reaper_wait,
-		    &table->reaper_cv_lock,
+		CALLB_CPR_SAFE_BEGIN(&table->dbt_reaper_cpr_info);
+		rc = cv_timedwait_sig(&table->dbt_reaper_wait,
+		    &table->dbt_reaper_cv_lock,
 		    lbolt + SEC_TO_TICK(time));
-		CALLB_CPR_SAFE_END(&table->reaper_cpr_info,
-		    &table->reaper_cv_lock);
-		rfs4_dbe_reap(table, table->max_cache_time, 0);
-	} while (rc != 0 && table->reaper_shutdown == FALSE);
+		CALLB_CPR_SAFE_END(&table->dbt_reaper_cpr_info,
+		    &table->dbt_reaper_cv_lock);
+		rfs4_dbe_reap(table, table->dbt_max_cache_time, 0);
+	} while (rc != 0 && table->dbt_reaper_shutdown == FALSE);
 
-	CALLB_CPR_EXIT(&table->reaper_cpr_info);
+	CALLB_CPR_EXIT(&table->dbt_reaper_cpr_info);
 
 	/* Notify the database shutdown processing that the table is shutdown */
-	mutex_enter(table->instp->state_store->lock);
-	table->instp->state_store->shutdown_count--;
-	cv_signal(&table->instp->state_store->shutdown_wait);
-	mutex_exit(table->instp->state_store->lock);
+	mutex_enter(table->dbt_instp->state_store->lock);
+	table->dbt_instp->state_store->shutdown_count--;
+	cv_signal(&table->dbt_instp->state_store->shutdown_wait);
+	mutex_exit(table->dbt_instp->state_store->lock);
 }
 
 static void
@@ -891,47 +902,47 @@ rfs4_dbcreate(rfs4_index_t *idx, void *ap)
 
 	ASSERT(ap != NULL);
 	ASSERT(idx != NULL);
-	ASSERT(idx->table != NULL);
-	if (ap == NULL || idx == NULL || idx->table == NULL)
+	ASSERT(idx->dbi_table != NULL);
+	if (ap == NULL || idx == NULL || idx->dbi_table == NULL)
 		return (NULL);
-	table = idx->table;
+	table = idx->dbi_table;
 
 	/*
 	 * Create the desired object
 	 */
 	if ((entry = rfs4_dbe_create(table, ap)) == NULL)
 		return (NULL);
-	key = idx->mkkey(entry->data);
+	key = idx->dbi_mkkey(entry->dbe_data);
 	i = HASH(idx, key);
-	bp = &idx->buckets[i];
+	bp = &idx->dbi_buckets[i];
 
 	/*
 	 * Add one ref for entry into table's hash - only one
 	 * reference added even though there may be multiple indices
 	 */
-	rw_enter(bp->lock, RW_WRITER);
+	rw_enter(bp->dbk_lock, RW_WRITER);
 	rfs4_dbe_hold(entry);
-	ENQUEUE(bp->head, &entry->indices[idx->tblidx]);
-	VALIDATE_ADDR(entry->indices[idx->tblidx].entry);
-	already_done = idx->tblidx;
+	ENQUEUE(bp->dbk_head, &entry->dbe_indices[idx->dbi_tblidx]);
+	VALIDATE_ADDR(entry->dbe_indices[idx->dbi_tblidx].entry);
+	already_done = idx->dbi_tblidx;
 	rw_exit(bp->lock);
 
 	/*
 	 * Initialize any additional indices to the table,
 	 * remembering to skip the primary index (already_done)
 	 */
-	for (ip = table->indices; ip; ip = ip->inext) {
+	for (ip = table->dbt_indices; ip; ip = ip->dbi_inext) {
 		rfs4_link_t	*l;
 
-		if (ip->tblidx == already_done)
+		if (ip->dbi_tblidx == already_done)
 			continue;
-		l = &entry->indices[ip->tblidx];
-		i = HASH(ip, ip->mkkey(entry->data));
-		ASSERT(i < ip->table->len);
-		bp = &ip->buckets[i];
+		l = &entry->dbe_indices[ip->dbi_tblidx];
+		i = HASH(ip, ip->dbi_mkkey(entry->dbe_data));
+		ASSERT(i < ip->dbi_table->len);
+		bp = &ip->dbi_buckets[i];
 		ENQUEUE_IDX(bp, l);
 	}
-	return (entry->data);
+	return (entry->dbe_data);
 }
 
 /*
@@ -940,5 +951,5 @@ rfs4_dbcreate(rfs4_index_t *idx, void *ap)
 nfs_server_instance_t *
 dbe_to_instp(rfs4_dbe_t *dbp)
 {
-	return (dbp->table->instp);
+	return (dbp->table->dbt_instp);
 }

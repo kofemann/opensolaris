@@ -133,6 +133,9 @@ typedef struct {
  *
  *		Added rtld_flags & FLG_RT_RELOCED to stable flags range
  *
+ * Valid fields for R_RTLDDB_VERSION6
+ *
+ *		rtd_dynlmlst converted from a List to APlist
  */
 #define	R_RTLDDB_VERSION1	1	/* base version level - used for core */
 					/*	file examination */
@@ -141,7 +144,8 @@ typedef struct {
 #define	R_RTLDDB_VERSION3	3
 #define	R_RTLDDB_VERSION4	4
 #define	R_RTLDDB_VERSION5	5
-#define	R_RTLDDB_VERSION	R_RTLDDB_VERSION5	/* current version */
+#define	R_RTLDDB_VERSION6	6
+#define	R_RTLDDB_VERSION	R_RTLDDB_VERSION6	/* current version */
 
 typedef struct rtld_db_priv {
 	struct r_debug	rtd_rdebug;	/* original r_debug structure */
@@ -293,7 +297,8 @@ struct lm_list {
 	Word		lm_tflags;	/* transferable flags */
 	uint_t		lm_obj;		/* total number of objs on link-map */
 	uint_t		lm_init;	/* new obj since last init processing */
-	uint_t		lm_lazy;	/* obj with pending lazy dependencies */
+	uint_t		lm_lazy;	/* number of objects with pending */
+					/*	lazy dependencies */
 	uint_t		lm_tls;		/* new obj that require TLS */
 	uint_t		lm_lmid;	/* unique link-map list identifier, */
 	char		*lm_lmidstr;	/* and associated diagnostic string */
@@ -359,8 +364,6 @@ struct lm_list32 {
 #define	LML_FLG_OBJDELETED	0x00004000	/* object(s) deleted */
 #define	LML_FLG_OBJREEVAL	0x00008000	/* existing object(s) needs */
 						/*	tsort reevaluation */
-#define	LML_FLG_NOPENDGLBLAZY	0x00010000	/* no pending, global, lazy */
-						/*	dependencies remain */
 #define	LML_FLG_INTRPOSETSORT	0x00020000	/* interpose tsorting done */
 #define	LML_FLG_AUDITNOTIFY	0x00040000	/* audit consistent required */
 #define	LML_FLG_GROUPSEXIST	0x00080000	/* local groups exist */
@@ -549,8 +552,7 @@ typedef struct {
  * Define any state that is associated with the handle.
  */
 #define	GPH_INITIAL	0x0100		/* handle is initialized */
-#define	GPH_NOPENDLAZY	0x0200		/* no pending lazy dependencies */
-					/*	remain for this handle */
+
 /*
  * Define a Group Descriptor.
  *
@@ -572,8 +574,6 @@ typedef struct {
 #define	GPD_FILTER	0x0010		/* dependency is our filter */
 #define	GPD_REMOVE	0x0100		/* descriptor is a candidate for */
 					/*	removal from the group */
-#define	GPD_MODECHANGE	0x0200		/* dependency mode has changed, e.g. */
-					/*	promoted to RTLD_GOBAL */
 
 /*
  * Define threading structures.  For compatibility with libthread (T1_VERSION 1
@@ -705,7 +705,8 @@ struct rt_map {
 	uint_t		rt_dyninfocnt;	/* count of dyninfo entries */
 	uint_t		rt_relacount;	/* no. of RELATIVE relocations */
 	uint_t		rt_idx;		/* hold index within linkmap list */
-	uint_t		rt_lazy;	/* lazy dependencies pending */
+	uint_t		rt_lazy;	/* number of lazy dependencies */
+					/*	pending */
 	Xword		rt_hwcap;	/* hardware capabilities */
 	Xword		rt_sfcap;	/* software capabilities */
 	uint_t		rt_cntl;	/* link-map control list we belong to */

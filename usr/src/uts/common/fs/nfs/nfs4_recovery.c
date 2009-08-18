@@ -1079,7 +1079,7 @@ nfs4_start_op(nfs4_call_t *cp, nfs4_recov_state_t *rsp)
 	nfs4_server_t *dsp = NULL;	/* Data server */
 	nfs4_server_t *tsp;
 	nfs4_error_t e = { 0, NFS4_OK, RPC_SUCCESS };
-	time_t droplock_time;
+	uint_t droplock_cnt;
 #ifdef DEBUG
 	void *fop_caller;
 #endif
@@ -1237,7 +1237,7 @@ get_sp:
 	if (sp != NULL) {
 		sp->s_otw_call_count++;
 		mutex_exit(&sp->s_lock);
-		droplock_time = gethrestime_sec();
+		droplock_cnt = mi->mi_srvset_cnt;
 	}
 	nfs_rw_exit(&mi->mi_recovlock);
 
@@ -1274,7 +1274,7 @@ get_sp:
 	 * there's no point in double checking to make sure it
 	 * has switched.
 	 */
-	if (sp == NULL || droplock_time < mi->mi_srvsettime) {
+	if (sp == NULL || droplock_cnt != mi->mi_srvset_cnt) {
 		tsp = find_nfs4_server(mi);
 		if (tsp != sp) {
 			/* try again */

@@ -101,9 +101,6 @@ sparc_SUBDIRS= \
 	SUNWust2.v \
 	SUNWwbsd
 
-sparc_XMODS= \
-	SUNWn2cpact.v
-
 i386_SUBDIRS= \
 	SUNWad810 \
 	SUNWadixp \
@@ -115,10 +112,14 @@ i386_SUBDIRS= \
 	SUNWamt \
 	SUNWamt-lms \
 	SUNWarcmsr \
+	SUNWarn \
 	SUNWatheros \
 	SUNWatigfx \
 	SUNWatu \
+	SUNWaudiocmi \
 	SUNWaudiohd \
+	SUNWaudiovia97 \
+	SUNWbfe	\
 	SUNWcakr.i \
 	SUNWcakrx.i \
 	SUNWcar.i  \
@@ -140,6 +141,7 @@ i386_SUBDIRS= \
 	SUNWlxu \
 	SUNWmegasas \
 	SUNWmv88sx \
+	SUNWbcmsata \
 	SUNWnge \
 	SUNWntfsprogs \
 	SUNWnvsata \
@@ -155,9 +157,11 @@ i386_SUBDIRS= \
 	SUNWrmodu \
 	SUNWrtw \
 	SUNWrum \
+	SUNWrwd	\
 	SUNWrwn	\
 	SUNWsi3124 \
 	SUNWtpm \
+	SUNWuath \
 	SUNWural \
 	SUNWurtw \
 	SUNWvia823x \
@@ -344,6 +348,7 @@ COMMON_SUBDIRS= \
 	SUNWmptsas \
 	SUNWmrsas \
 	SUNWmxfe \
+	SUNWmyri10ge \
 	SUNWncar \
 	SUNWncau \
 	SUNWndmpr \
@@ -364,6 +369,7 @@ COMMON_SUBDIRS= \
 	SUNWocfh \
 	SUNWocfr \
 	SUNWonfmes \
+	SUNWonzfsr \
 	SUNWonzfs \
 	SUNWosdem \
 	SUNWypr \

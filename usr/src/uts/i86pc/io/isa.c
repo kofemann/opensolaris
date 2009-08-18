@@ -38,6 +38,7 @@
 #include <sys/psm.h>
 #include <sys/ddidmareq.h>
 #include <sys/ddi_impldefs.h>
+#include <sys/ddi_subrdefs.h>
 #include <sys/dma_engine.h>
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
@@ -46,9 +47,12 @@
 #include <sys/mach_intr.h>
 #include <sys/pci.h>
 #include <sys/note.h>
+#include <sys/boot_console.h>
 #if defined(__xpv)
 #include <sys/hypervisor.h>
 #include <sys/evtchn_impl.h>
+
+extern int console_hypervisor_device;
 #endif
 
 extern int pseudo_isa;
@@ -57,10 +61,10 @@ extern int (*psm_intr_ops)(dev_info_t *, ddi_intr_handle_impl_t *,
     psm_intr_op_t, int *);
 extern void pci_register_isa_resources(int, uint32_t, uint32_t);
 static char USED_RESOURCES[] = "used-resources";
-static void isa_alloc_nodes(dev_info_t *);
+static void isa_enumerate(int);
 static void enumerate_BIOS_serial(dev_info_t *);
 static void adjust_prtsz(dev_info_t *isa_dip);
-static void isa_postattach(dev_info_t *);
+static void isa_create_ranges_prop(dev_info_t *);
 
 /*
  * The following typedef is used to represent an entry in the "ranges"
@@ -228,13 +232,26 @@ static struct modlinkage modlinkage = {
 int
 _init(void)
 {
-	return (mod_install(&modlinkage));
+	int	err;
+
+	if ((err = mod_install(&modlinkage)) != 0)
+		return (err);
+
+	impl_bus_add_probe(isa_enumerate);
+	return (0);
 }
 
 int
 _fini(void)
 {
-	return (mod_remove(&modlinkage));
+	int	err;
+
+	impl_bus_delete_probe(isa_enumerate);
+
+	if ((err = mod_remove(&modlinkage)) != 0)
+		return (err);
+
+	return (0);
 }
 
 int
@@ -268,19 +285,8 @@ isa_attach(dev_info_t *devi, ddi_attach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
-	bzero(isa_extra_resource, MAX_EXTRA_RESOURCE * sizeof (struct regspec));
-
-	if ((rval = i_dmae_init(devi)) == DDI_SUCCESS) {
+	if ((rval = i_dmae_init(devi)) == DDI_SUCCESS)
 		ddi_report_dev(devi);
-		/*
-		 * Enumerate children -- invoking ACPICA
-		 * This is normally in bus_config(), but we need this
-		 * to happen earlier to boot.
-		 */
-		isa_alloc_nodes(devi);
-	}
-
-	isa_postattach(devi);
 
 	return (rval);
 }
@@ -329,7 +335,7 @@ isa_remove_res_from_pci(int type, int *array, uint_t size)
 }
 
 static void
-isa_postattach(dev_info_t *dip)
+isa_create_ranges_prop(dev_info_t *dip)
 {
 	dev_info_t *used;
 	int *ioarray, *memarray, status;
@@ -813,6 +819,19 @@ isa_intr_ops(dev_info_t *pdip, dev_info_t *rdip, ddi_intr_op_t intr_op,
 		if (psm_intr_ops == NULL)
 			return (DDI_FAILURE);
 
+#if defined(__xpv)
+		/*
+		 * if the hypervisor is using an isa serial port for the
+		 * console, make sure we don't try to use that interrupt as
+		 * it will cause us to panic when xen_bind_pirq() fails.
+		 */
+		if (((ispec->intrspec_vec == 4) &&
+		    (console_hypervisor_device == CONS_TTYA)) ||
+		    ((ispec->intrspec_vec == 3) &&
+		    (console_hypervisor_device == CONS_TTYB))) {
+			return (DDI_FAILURE);
+		}
+#endif
 		((ihdl_plat_t *)hdlp->ih_private)->ip_ispecp = ispec;
 		(void) (*psm_intr_ops)(rdip, hdlp, PSM_INTR_OP_XLATE_VECTOR,
 		    (int *)&hdlp->ih_vector);
@@ -1036,11 +1055,11 @@ add_known_used_resources(void)
 }
 
 static void
-isa_alloc_nodes(dev_info_t *isa_dip)
+isa_enumerate(int reprogram)
 {
-	static int alloced = 0;
 	int circ, i;
 	dev_info_t *xdip;
+	dev_info_t *isa_dip = ddi_find_devinfo("isa", -1, 0);
 
 	/* hard coded isa stuff */
 	struct regspec asy_regs[] = {
@@ -1057,15 +1076,12 @@ isa_alloc_nodes(dev_info_t *isa_dip)
 	char *acpi_prop;
 	int acpi_enum = 1; /* ACPI is default to be on */
 
-	if (alloced)
+	if (reprogram || !isa_dip)
 		return;
 
+	bzero(isa_extra_resource, MAX_EXTRA_RESOURCE * sizeof (struct regspec));
+
 	ndi_devi_enter(isa_dip, &circ);
-	if (alloced) {	/* just in case we are multi-threaded */
-		ndi_devi_exit(isa_dip, circ);
-		return;
-	}
-	alloced = 1;
 
 	if (ddi_prop_lookup_string(DDI_DEV_T_ANY, ddi_root_node(),
 	    DDI_PROP_DONTPASS, "acpi-enum", &acpi_prop) == DDI_PROP_SUCCESS) {
@@ -1086,6 +1102,8 @@ isa_alloc_nodes(dev_info_t *isa_dip)
 
 			/* adjust parallel port size  */
 			adjust_prtsz(isa_dip);
+
+			isa_create_ranges_prop(isa_dip);
 			return;
 		}
 		cmn_err(CE_NOTE, "!Solaris did not detect ACPI BIOS");
@@ -1095,13 +1113,10 @@ isa_alloc_nodes(dev_info_t *isa_dip)
 	/* serial ports */
 	for (i = 0; i < 2; i++) {
 #if defined(__xpv)
-		/*
-		 * the hypervisor may be reserving the serial ports for console
-		 * and/or debug use.  Probe the irqs to see if they are
-		 * available.
-		 */
-		if (ec_probe_pirq(asy_intrs[i]) == 0)
-			continue; /* in use */
+		if ((i == 0 && console_hypervisor_device == CONS_TTYA) ||
+		    (i == 1 && console_hypervisor_device == CONS_TTYB)) {
+			continue;
+		}
 #endif
 		ndi_devi_alloc_sleep(isa_dip, "asy",
 		    (pnode_t)DEVI_SID_NODEID, &xdip);
@@ -1127,6 +1142,7 @@ isa_alloc_nodes(dev_info_t *isa_dip)
 
 	ndi_devi_exit(isa_dip, circ);
 
+	isa_create_ranges_prop(isa_dip);
 }
 
 /*
@@ -1217,47 +1233,40 @@ enumerate_BIOS_serial(dev_info_t *isa_dip)
 			isa_extra_count++;
 		}
 	}
-#if defined(__xpv)
+
 	/*
-	 * Check each serial port to see if it is in use by the hypervisor.
-	 * If it is in use, then remove the node from the device tree.
+	 * An asy node may have been attached via ACPI enumeration, or
+	 * directly from this file.  Check each serial port to see if it
+	 * is in use by the hypervisor.  If it is in use, then remove
+	 * the node from the device tree.
 	 */
+#if defined(__xpv)
 	i = 0;
+
 	for (xdip = ddi_get_child(isa_dip); xdip != NULL; ) {
-		int asy_intr;
 		dev_info_t *curdip;
 
 		curdip = xdip;
 		xdip = ddi_get_next_sibling(xdip);
-		if (strncmp(ddi_node_name(curdip), "asy", 3) != 0) {
-			/* skip non asy */
-			continue;
-		}
-		/*
-		 * Check if the hypervisor is using the serial port by probing
-		 * the irq and if it is using it remove the node
-		 * from the device tree
-		 */
-		asy_intr = ddi_prop_get_int(DDI_DEV_T_ANY, curdip,
-		    DDI_PROP_DONTPASS, "interrupts", -1);
-		if (asy_intr == -1) {
-			/* error */
-			continue;
-		}
 
-		if (ec_probe_pirq(asy_intr)) {
+		if (strncmp(ddi_node_name(curdip), "asy", 3) != 0)
 			continue;
-		}
-		ret = ndi_devi_free(curdip);
-		if (ret != DDI_SUCCESS)
-			cmn_err(CE_WARN,
-			    "could not remove asy%d node", i);
-		else
+
+		if ((i == 0 && console_hypervisor_device == CONS_TTYA) ||
+		    (i == 1 && console_hypervisor_device == CONS_TTYB)) {
+			ret = ndi_devi_free(curdip);
+			if (ret != DDI_SUCCESS) {
+				cmn_err(CE_WARN,
+				    "could not remove asy%d node", i);
+			}
+
 			cmn_err(CE_NOTE, "!asy%d unavailable, reserved"
 			    " to hypervisor", i);
+		}
+
 		i++;
 	}
-#endif	/* __xpv */
+#endif
 
 	psm_unmap((caddr_t)bios_data, size);
 }

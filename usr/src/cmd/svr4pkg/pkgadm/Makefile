@@ -35,7 +35,7 @@ OBJS=           addcert.o	\
 
 include $(SRC)/cmd/svr4pkg/Makefile.svr4pkg
 
-LDLIBS	+=	-lpkg -lcrypto -lgen
+LDLIBS	+=	-lpkg -ladm -lcrypto -lgen
 
 .KEEP_STATE:
 all:            $(PROG)

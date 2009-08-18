@@ -60,7 +60,14 @@ apic_irq_t	*apic_find_irq(dev_info_t *, struct intrspec *, int);
 int	apic_support_msi = 0;
 
 /* Multiple vector support for MSI */
+#if !defined(__xpv)
 int	apic_multi_msi_enable = 1;
+#else
+/*
+ * Xen hypervisor does not seem to properly support multi-MSI
+ */
+int	apic_multi_msi_enable = 0;
+#endif	/* __xpv */
 
 /* Multiple vector support for MSI-X */
 int	apic_msix_enable = 1;
@@ -124,6 +131,10 @@ apic_pci_msi_enable_vector(apic_irq_t *irq_ptr, int type, int inum, int vector,
 		msi_ctrl |= ((highbit(count) -1) << PCI_MSI_MME_SHIFT);
 		pci_config_put16(handle, cap_ptr + PCI_MSI_CTRL, msi_ctrl);
 
+#if !defined(__xpv)
+		/*
+		 * Only set vector if not on hypervisor
+		 */
 		pci_config_put32(handle,
 		    cap_ptr + PCI_MSI_ADDR_OFFSET, msi_addr);
 
@@ -149,9 +160,12 @@ apic_pci_msi_enable_vector(apic_irq_t *irq_ptr, int type, int inum, int vector,
 		    (uint32_t *)(off + PCI_MSIX_DATA_OFFSET), msi_data);
 		ddi_put64(msix_p->msix_tbl_hdl,
 		    (uint64_t *)(off + PCI_MSIX_LOWER_ADDR_OFFSET), msi_addr);
+#endif	/* ! __xpv */
 	}
 }
 
+
+#if !defined(__xpv)
 
 /*
  * This function returns the no. of vectors available for the pri.
@@ -189,6 +203,8 @@ apic_navail_vector(dev_info_t *dip, int pri)
 	}
 	return (navail);
 }
+
+#endif	/* ! __xpv */
 
 /*
  * Finds "count" contiguous MSI vectors starting at the proper alignment
@@ -380,7 +396,6 @@ apic_set_mask(apic_irq_t *irqp)
 	intr_restore(iflag);
 }
 
-#endif	/* ! __xpv */
 
 void
 apic_free_vectors(dev_info_t *dip, int inum, int count, int pri, int type)
@@ -413,6 +428,7 @@ apic_free_vectors(dev_info_t *dip, int inum, int count, int pri, int type)
 	}
 }
 
+#endif	/* ! __xpv */
 
 /*
  * check whether the system supports MSI
@@ -455,6 +471,8 @@ apic_check_msi_support()
 	    "device_type found\n"));
 	return (PSM_FAILURE);
 }
+
+#if !defined(__xpv)
 
 /*
  * apic_pci_msi_unconfigure:
@@ -593,10 +611,9 @@ apic_pci_msi_disable_mode(dev_info_t *rdip, int type)
 	}
 }
 
-#if !defined(__xpv)
 
 static int
-apic_set_cpu(uint32_t vector, int cpu, int *result)
+apic_set_cpu(int irqno, int cpu, int *result)
 {
 	apic_irq_t *irqp;
 	ulong_t iflag;
@@ -604,9 +621,8 @@ apic_set_cpu(uint32_t vector, int cpu, int *result)
 
 	DDI_INTR_IMPLDBG((CE_CONT, "APIC_SET_CPU\n"));
 
-	/* Convert the vector to the irq using vector_to_irq table. */
 	mutex_enter(&airq_mutex);
-	irqp = apic_irq_table[apic_vector_to_irq[vector]];
+	irqp = apic_irq_table[irqno];
 	mutex_exit(&airq_mutex);
 
 	if (irqp == NULL) {
@@ -633,12 +649,17 @@ apic_set_cpu(uint32_t vector, int cpu, int *result)
 		*result = EIO;
 		return (PSM_FAILURE);
 	}
+	/*
+	 * keep tracking the default interrupt cpu binding
+	 */
+	irqp->airq_cpu = cpu;
+
 	*result = 0;
 	return (PSM_SUCCESS);
 }
 
 static int
-apic_grp_set_cpu(uint32_t vector, int new_cpu, int *result)
+apic_grp_set_cpu(int irqno, int new_cpu, int *result)
 {
 	dev_info_t *orig_dip;
 	uint32_t orig_cpu;
@@ -651,6 +672,7 @@ apic_grp_set_cpu(uint32_t vector, int new_cpu, int *result)
 	uint32_t msi_pvm;
 	ddi_acc_handle_t handle;
 	int num_vectors = 0;
+	uint32_t vector;
 
 	DDI_INTR_IMPLDBG((CE_CONT, "APIC_GRP_SET_CPU\n"));
 
@@ -659,15 +681,16 @@ apic_grp_set_cpu(uint32_t vector, int new_cpu, int *result)
 	 * us while we're playing with it.
 	 */
 	mutex_enter(&airq_mutex);
-	irqps[0] = apic_irq_table[apic_vector_to_irq[vector]];
+	irqps[0] = apic_irq_table[irqno];
 	orig_cpu = irqps[0]->airq_temp_cpu;
 	orig_dip = irqps[0]->airq_dip;
 	num_vectors = irqps[0]->airq_intin_no;
+	vector = irqps[0]->airq_vector;
 
 	/* A "group" of 1 */
 	if (num_vectors == 1) {
 		mutex_exit(&airq_mutex);
-		return (apic_set_cpu(vector, new_cpu, result));
+		return (apic_set_cpu(irqno, new_cpu, result));
 	}
 
 	*result = ENXIO;
@@ -748,8 +771,12 @@ apic_grp_set_cpu(uint32_t vector, int new_cpu, int *result)
 	if (apic_rebind_all(irqps[0], new_cpu))
 		(void) apic_rebind_all(irqps[0], orig_cpu);
 	else {
-		for (i = 1; i < num_vectors; i++)
+		irqps[0]->airq_cpu = new_cpu;
+
+		for (i = 1; i < num_vectors; i++) {
 			(void) apic_rebind_all(irqps[i], new_cpu);
+			irqps[i]->airq_cpu = new_cpu;
+		}
 		*result = 0;	/* SUCCESS */
 	}
 
@@ -771,7 +798,32 @@ set_grp_intr_done:
 	return (PSM_SUCCESS);
 }
 
-#endif	/* !__xpv */
+#else	/* !__xpv */
+
+/*
+ * We let the hypervisor deal with msi configutation
+ * so just stub these out.
+ */
+
+/* ARGSUSED */
+void
+apic_pci_msi_unconfigure(dev_info_t *rdip, int type, int inum)
+{
+}
+
+/* ARGSUSED */
+void
+apic_pci_msi_enable_mode(dev_info_t *rdip, int type, int inum)
+{
+}
+
+/* ARGSUSED */
+void
+apic_pci_msi_disable_mode(dev_info_t *rdip, int type)
+{
+}
+
+#endif	/* __xpv */
 
 int
 apic_get_vector_intr_info(int vecirq, apic_get_intr_t *intr_params_p)
@@ -986,32 +1038,40 @@ apic_intr_ops(dev_info_t *dip, ddi_intr_handle_impl_t *hdlp,
 		cap = DDI_INTR_FLAG_PENDING;
 		if (hdlp->ih_type == DDI_INTR_TYPE_FIXED)
 			cap |= DDI_INTR_FLAG_MASKABLE;
+		else if (hdlp->ih_type == DDI_INTR_TYPE_MSIX)
+			cap |= DDI_INTR_FLAG_RETARGETABLE;
 		*result = cap;
 		break;
 	case PSM_INTR_OP_GET_SHARED:
 		if (hdlp->ih_type != DDI_INTR_TYPE_FIXED)
 			return (PSM_FAILURE);
+		ispec = ((ihdl_plat_t *)hdlp->ih_private)->ip_ispecp;
 		if ((irqp = apic_find_irq(dip, ispec, hdlp->ih_type)) == NULL)
 			return (PSM_FAILURE);
-		*result = irqp->airq_share ? 1: 0;
+		*result = (irqp->airq_share > 1) ? 1: 0;
 		break;
 	case PSM_INTR_OP_SET_PRI:
 		old_priority = hdlp->ih_pri;	/* save old value */
 		new_priority = *(int *)result;	/* try the new value */
 
-		/* First, check if "hdlp->ih_scratch1" vectors exist? */
-		if (apic_navail_vector(dip, new_priority) < hdlp->ih_scratch1)
-			return (PSM_FAILURE);
+		if (hdlp->ih_type == DDI_INTR_TYPE_FIXED) {
+			return (PSM_SUCCESS);
+		}
 
 		/* Now allocate the vectors */
-		if (hdlp->ih_type == DDI_INTR_TYPE_MSI)
+		if (hdlp->ih_type == DDI_INTR_TYPE_MSI) {
+			/* SET_PRI does not support the case of multiple MSI */
+			if (i_ddi_intr_get_current_nintrs(hdlp->ih_dip) > 1)
+				return (PSM_FAILURE);
+
 			count_vec = apic_alloc_msi_vectors(dip, hdlp->ih_inum,
-			    hdlp->ih_scratch1, new_priority,
+			    1, new_priority,
 			    DDI_INTR_ALLOC_STRICT);
-		else
+		} else {
 			count_vec = apic_alloc_msix_vectors(dip, hdlp->ih_inum,
-			    hdlp->ih_scratch1, new_priority,
+			    1, new_priority,
 			    DDI_INTR_ALLOC_STRICT);
+		}
 
 		/* Did we get new vectors? */
 		if (!count_vec)
@@ -1020,7 +1080,6 @@ apic_intr_ops(dev_info_t *dip, ddi_intr_handle_impl_t *hdlp,
 		/* Finally, free the previously allocated vectors */
 		apic_free_vectors(dip, hdlp->ih_inum, count_vec,
 		    old_priority, hdlp->ih_type);
-		hdlp->ih_pri = new_priority; /* set the new value */
 		break;
 	case PSM_INTR_OP_SET_CPU:
 	case PSM_INTR_OP_GRP_SET_CPU:
@@ -1036,6 +1095,15 @@ apic_intr_ops(dev_info_t *dip, ddi_intr_handle_impl_t *hdlp,
 			*result = EINVAL;
 			return (PSM_FAILURE);
 		}
+		if (hdlp->ih_vector > APIC_MAX_VECTOR) {
+			DDI_INTR_IMPLDBG((CE_CONT,
+			    "[grp_]set_cpu: vector out of range: %d\n",
+			    hdlp->ih_vector));
+			*result = EINVAL;
+			return (PSM_FAILURE);
+		}
+		if (!(hdlp->ih_flags & PSMGI_INTRBY_IRQ))
+			hdlp->ih_vector = apic_vector_to_irq[hdlp->ih_vector];
 		if (intr_op == PSM_INTR_OP_SET_CPU) {
 			if (apic_set_cpu(hdlp->ih_vector, new_cpu, result) !=
 			    PSM_SUCCESS)

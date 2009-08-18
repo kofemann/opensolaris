@@ -774,6 +774,7 @@ static void	tcp_iss_key_init(uint8_t *phrase, int len, tcp_stack_t *);
 static int	tcp_1948_phrase_set(queue_t *q, mblk_t *mp, char *value,
 		    caddr_t cp, cred_t *cr);
 static void	tcp_process_shrunk_swnd(tcp_t *tcp, uint32_t shrunk_cnt);
+static void	tcp_update_xmit_tail(tcp_t *tcp, uint32_t snxt);
 static mblk_t	*tcp_reass(tcp_t *tcp, mblk_t *mp, uint32_t start);
 static void	tcp_reass_elim_overlap(tcp_t *tcp, mblk_t *mp);
 static void	tcp_reinit(tcp_t *tcp);
@@ -974,16 +975,6 @@ struct qinit tcp_acceptor_rinit = {
 
 struct qinit tcp_acceptor_winit = {
 	(pfi_t)tcp_tpi_accept, NULL, NULL, NULL, NULL, &tcp_winfo
-};
-
-/*
- * Entry points for TCP loopback (read side only)
- * The open routine is only used for reopens, thus no need to
- * have a separate one for tcp_openv6.
- */
-struct qinit tcp_loopback_rinit = {
-	(pfi_t)0, (pfi_t)tcp_rsrv, tcp_openv4, tcp_tpi_close, (pfi_t)0,
-	&tcp_rinfo, NULL, tcp_fuse_rrw, tcp_fuse_rinfop, STRUIOT_STANDARD
 };
 
 /* For AF_INET aka /dev/tcp */
@@ -4255,7 +4246,8 @@ tcp_free(tcp_t *tcp)
 
 	if (tcp->tcp_sack_info != NULL) {
 		if (tcp->tcp_notsack_list != NULL) {
-			TCP_NOTSACK_REMOVE_ALL(tcp->tcp_notsack_list);
+			TCP_NOTSACK_REMOVE_ALL(tcp->tcp_notsack_list,
+			    tcp);
 		}
 		bzero(tcp->tcp_sack_info, sizeof (tcp_sack_info_t));
 	}
@@ -7715,10 +7707,12 @@ tcp_reinit_values(tcp)
 
 	tcp->tcp_cwr = B_FALSE;
 	tcp->tcp_ecn_echo_on = B_FALSE;
+	tcp->tcp_is_wnd_shrnk = B_FALSE;
 
 	if (tcp->tcp_sack_info != NULL) {
 		if (tcp->tcp_notsack_list != NULL) {
-			TCP_NOTSACK_REMOVE_ALL(tcp->tcp_notsack_list);
+			TCP_NOTSACK_REMOVE_ALL(tcp->tcp_notsack_list,
+			    tcp);
 		}
 		kmem_cache_free(tcp_sack_info_cache, tcp->tcp_sack_info);
 		tcp->tcp_sack_info = NULL;
@@ -7862,13 +7856,8 @@ tcp_reinit_values(tcp)
 	tcp->tcp_fused = B_FALSE;
 	tcp->tcp_unfusable = B_FALSE;
 	tcp->tcp_fused_sigurg = B_FALSE;
-	tcp->tcp_direct_sockfs = B_FALSE;
-	tcp->tcp_fuse_syncstr_stopped = B_FALSE;
-	tcp->tcp_fuse_syncstr_plugged = B_FALSE;
 	tcp->tcp_loopback_peer = NULL;
 	tcp->tcp_fuse_rcv_hiwater = 0;
-	tcp->tcp_fuse_rcv_unread_hiwater = 0;
-	tcp->tcp_fuse_rcv_unread_cnt = 0;
 
 	tcp->tcp_lso = B_FALSE;
 
@@ -7971,13 +7960,8 @@ tcp_init_values(tcp_t *tcp)
 	tcp->tcp_fused = B_FALSE;
 	tcp->tcp_unfusable = B_FALSE;
 	tcp->tcp_fused_sigurg = B_FALSE;
-	tcp->tcp_direct_sockfs = B_FALSE;
-	tcp->tcp_fuse_syncstr_stopped = B_FALSE;
-	tcp->tcp_fuse_syncstr_plugged = B_FALSE;
 	tcp->tcp_loopback_peer = NULL;
 	tcp->tcp_fuse_rcv_hiwater = 0;
-	tcp->tcp_fuse_rcv_unread_hiwater = 0;
-	tcp->tcp_fuse_rcv_unread_cnt = 0;
 
 	/* Initialize the header template */
 	if (tcp->tcp_ipversion == IPV4_VERSION) {
@@ -11819,6 +11803,11 @@ tcp_set_rto(tcp_t *tcp, clock_t rtt)
 
 /*
  * tcp_get_seg_mp() is called to get the pointer to a segment in the
+ * send queue which starts at the given sequence number. If the given
+ * sequence number is equal to last valid sequence number (tcp_snxt), the
+ * returned mblk is the last valid mblk, and off is set to the length of
+ * that mblk.
+ *
  * send queue which starts at the given seq. no.
  *
  * Parameters:
@@ -11838,14 +11827,14 @@ tcp_get_seg_mp(tcp_t *tcp, uint32_t seq, int32_t *off)
 	mblk_t	*mp;
 
 	/* Defensive coding.  Make sure we don't send incorrect data. */
-	if (SEQ_LT(seq, tcp->tcp_suna) || SEQ_GEQ(seq, tcp->tcp_snxt))
+	if (SEQ_LT(seq, tcp->tcp_suna) || SEQ_GT(seq, tcp->tcp_snxt))
 		return (NULL);
 
 	cnt = seq - tcp->tcp_suna;
 	mp = tcp->tcp_xmit_head;
 	while (cnt > 0 && mp != NULL) {
 		cnt -= mp->b_wptr - mp->b_rptr;
-		if (cnt < 0) {
+		if (cnt <= 0) {
 			cnt += mp->b_wptr - mp->b_rptr;
 			break;
 		}
@@ -13644,6 +13633,20 @@ ok:;
 	if (flags & TH_URG && urp >= 0) {
 		if (!tcp->tcp_urp_last_valid ||
 		    SEQ_GT(urp + seg_seq, tcp->tcp_urp_last)) {
+			/*
+			 * Non-STREAMS sockets handle the urgent data a litte
+			 * differently from STREAMS based sockets. There is no
+			 * need to mark any mblks with the MSG{NOT,}MARKNEXT
+			 * flags to keep SIOCATMARK happy. Instead a
+			 * su_signal_oob upcall is made to update the mark.
+			 * Neither is a T_EXDATA_IND mblk needed to be
+			 * prepended to the urgent data. The urgent data is
+			 * delivered using the su_recv upcall, where we set
+			 * the MSG_OOB flag to indicate that it is urg data.
+			 *
+			 * Neither TH_SEND_URP_MARK nor TH_MARKNEXT_NEEDED
+			 * are used by non-STREAMS sockets.
+			 */
 			if (IPCL_IS_NONSTR(connp)) {
 				if (!TCP_IS_DETACHED(tcp)) {
 					(*connp->conn_upcalls->su_signal_oob)
@@ -13869,26 +13872,34 @@ ok:;
 		} else if (urp == seg_len) {
 			/*
 			 * The urgent byte is the next byte after this sequence
-			 * number. If there is data it is marked with
-			 * MSGMARKNEXT and any tcp_urp_mark_mp is discarded
-			 * since it is not needed. Otherwise, if the code
-			 * above just allocated a zero-length tcp_urp_mark_mp
-			 * message, that message is tagged with MSGMARKNEXT.
-			 * Sending up these MSGMARKNEXT messages makes
-			 * SIOCATMARK work correctly even though
-			 * the T_EXDATA_IND will not be sent up until the
-			 * urgent byte arrives.
+			 * number. If this endpoint is non-STREAMS, then there
+			 * is nothing to do here since the socket has already
+			 * been notified about the urg pointer by the
+			 * su_signal_oob call above.
+			 *
+			 * In case of STREAMS, some more work might be needed.
+			 * If there is data it is marked with MSGMARKNEXT and
+			 * and any tcp_urp_mark_mp is discarded since it is not
+			 * needed. Otherwise, if the code above just allocated
+			 * a zero-length tcp_urp_mark_mp message, that message
+			 * is tagged with MSGMARKNEXT. Sending up these
+			 * MSGMARKNEXT messages makes SIOCATMARK work correctly
+			 * even though the T_EXDATA_IND will not be sent up
+			 * until the urgent byte arrives.
 			 */
-			if (seg_len != 0) {
-				flags |= TH_MARKNEXT_NEEDED;
-				freemsg(tcp->tcp_urp_mark_mp);
-				tcp->tcp_urp_mark_mp = NULL;
-				flags &= ~TH_SEND_URP_MARK;
-			} else if (tcp->tcp_urp_mark_mp != NULL) {
-				flags |= TH_SEND_URP_MARK;
-				tcp->tcp_urp_mark_mp->b_flag &=
-				    ~MSGNOTMARKNEXT;
-				tcp->tcp_urp_mark_mp->b_flag |= MSGMARKNEXT;
+			if (!IPCL_IS_NONSTR(tcp->tcp_connp)) {
+				if (seg_len != 0) {
+					flags |= TH_MARKNEXT_NEEDED;
+					freemsg(tcp->tcp_urp_mark_mp);
+					tcp->tcp_urp_mark_mp = NULL;
+					flags &= ~TH_SEND_URP_MARK;
+				} else if (tcp->tcp_urp_mark_mp != NULL) {
+					flags |= TH_SEND_URP_MARK;
+					tcp->tcp_urp_mark_mp->b_flag &=
+					    ~MSGNOTMARKNEXT;
+					tcp->tcp_urp_mark_mp->b_flag |=
+					    MSGMARKNEXT;
+				}
 			}
 #ifdef DEBUG
 			(void) strlog(TCP_MOD_ID, 0, 1, SL_TRACE,
@@ -14294,34 +14305,63 @@ process_ack:
 	 * state is handled above, so we can always just drop the segment and
 	 * send an ACK here.
 	 *
+	 * In the case where the peer shrinks the window, we see the new window
+	 * update, but all the data sent previously is queued up by the peer.
+	 * To account for this, in tcp_process_shrunk_swnd(), the sequence
+	 * number, which was already sent, and within window, is recorded.
+	 * tcp_snxt is then updated.
+	 *
+	 * If the window has previously shrunk, and an ACK for data not yet
+	 * sent, according to tcp_snxt is recieved, it may still be valid. If
+	 * the ACK is for data within the window at the time the window was
+	 * shrunk, then the ACK is acceptable. In this case tcp_snxt is set to
+	 * the sequence number ACK'ed.
+	 *
+	 * If the ACK covers all the data sent at the time the window was
+	 * shrunk, we can now set tcp_is_wnd_shrnk to B_FALSE.
+	 *
 	 * Should we send ACKs in response to ACK only segments?
 	 */
-	if (SEQ_GT(seg_ack, tcp->tcp_snxt)) {
-		BUMP_MIB(&tcps->tcps_mib, tcpInAckUnsent);
-		/* drop the received segment */
-		freemsg(mp);
 
-		/*
-		 * Send back an ACK.  If tcp_drop_ack_unsent_cnt is
-		 * greater than 0, check if the number of such
-		 * bogus ACks is greater than that count.  If yes,
-		 * don't send back any ACK.  This prevents TCP from
-		 * getting into an ACK storm if somehow an attacker
-		 * successfully spoofs an acceptable segment to our
-		 * peer.
-		 */
-		if (tcp_drop_ack_unsent_cnt > 0 &&
-		    ++tcp->tcp_in_ack_unsent > tcp_drop_ack_unsent_cnt) {
-			TCP_STAT(tcps, tcp_in_ack_unsent_drop);
+	if (SEQ_GT(seg_ack, tcp->tcp_snxt)) {
+		if ((tcp->tcp_is_wnd_shrnk) &&
+		    (SEQ_LEQ(seg_ack, tcp->tcp_snxt_shrunk))) {
+			uint32_t data_acked_ahead_snxt;
+
+			data_acked_ahead_snxt = seg_ack - tcp->tcp_snxt;
+			tcp_update_xmit_tail(tcp, seg_ack);
+			tcp->tcp_unsent -= data_acked_ahead_snxt;
+		} else {
+			BUMP_MIB(&tcps->tcps_mib, tcpInAckUnsent);
+			/* drop the received segment */
+			freemsg(mp);
+
+			/*
+			 * Send back an ACK.  If tcp_drop_ack_unsent_cnt is
+			 * greater than 0, check if the number of such
+			 * bogus ACks is greater than that count.  If yes,
+			 * don't send back any ACK.  This prevents TCP from
+			 * getting into an ACK storm if somehow an attacker
+			 * successfully spoofs an acceptable segment to our
+			 * peer.
+			 */
+			if (tcp_drop_ack_unsent_cnt > 0 &&
+			    ++tcp->tcp_in_ack_unsent >
+			    tcp_drop_ack_unsent_cnt) {
+				TCP_STAT(tcps, tcp_in_ack_unsent_drop);
+				return;
+			}
+			mp = tcp_ack_mp(tcp);
+			if (mp != NULL) {
+				BUMP_LOCAL(tcp->tcp_obsegs);
+				BUMP_MIB(&tcps->tcps_mib, tcpOutAck);
+				tcp_send_data(tcp, tcp->tcp_wq, mp);
+			}
 			return;
 		}
-		mp = tcp_ack_mp(tcp);
-		if (mp != NULL) {
-			BUMP_LOCAL(tcp->tcp_obsegs);
-			BUMP_MIB(&tcps->tcps_mib, tcpOutAck);
-			tcp_send_data(tcp, tcp->tcp_wq, mp);
-		}
-		return;
+	} else if (tcp->tcp_is_wnd_shrnk && SEQ_GEQ(seg_ack,
+	    tcp->tcp_snxt_shrunk)) {
+			tcp->tcp_is_wnd_shrnk = B_FALSE;
 	}
 
 	/*
@@ -14361,7 +14401,8 @@ process_ack:
 			 */
 			if (tcp->tcp_snd_sack_ok &&
 			    tcp->tcp_notsack_list != NULL) {
-				TCP_NOTSACK_REMOVE_ALL(tcp->tcp_notsack_list);
+				TCP_NOTSACK_REMOVE_ALL(tcp->tcp_notsack_list,
+				    tcp);
 			}
 		} else {
 			if (tcp->tcp_snd_sack_ok &&
@@ -14891,24 +14932,35 @@ update_ack:
 		} else {
 			tcp_rcv_enqueue(tcp, mp, seg_len);
 		}
+	} else if (IPCL_IS_NONSTR(connp)) {
+		/*
+		 * Non-STREAMS socket
+		 *
+		 * Note that no KSSL processing is done here, because
+		 * KSSL is not supported for non-STREAMS sockets.
+		 */
+		boolean_t push = flags & (TH_PUSH|TH_FIN);
+		int error;
+
+		if ((*connp->conn_upcalls->su_recv)(
+		    connp->conn_upper_handle,
+		    mp, seg_len, 0, &error, &push) <= 0) {
+			/*
+			 * We should never be in middle of a
+			 * fallback, the squeue guarantees that.
+			 */
+			ASSERT(error != EOPNOTSUPP);
+			if (error == ENOSPC)
+				tcp->tcp_rwnd -= seg_len;
+		} else if (push) {
+			/* PUSH bit set and sockfs is not flow controlled */
+			flags |= tcp_rwnd_reopen(tcp);
+		}
 	} else {
+		/* STREAMS socket */
 		if (mp->b_datap->db_type != M_DATA ||
 		    (flags & TH_MARKNEXT_NEEDED)) {
-			if (IPCL_IS_NONSTR(connp)) {
-				int error;
-
-				if ((*connp->conn_upcalls->su_recv)
-				    (connp->conn_upper_handle, mp,
-				    seg_len, 0, &error, NULL) <= 0) {
-					/*
-					 * We should never be in middle of a
-					 * fallback, the squeue guarantees that.
-					 */
-					ASSERT(error != EOPNOTSUPP);
-					if (error == ENOSPC)
-						tcp->tcp_rwnd -= seg_len;
-				}
-			} else if (tcp->tcp_rcv_list != NULL) {
+			if (tcp->tcp_rcv_list != NULL) {
 				flags |= tcp_rcv_drain(tcp);
 			}
 			ASSERT(tcp->tcp_rcv_list == NULL ||
@@ -14931,8 +14983,7 @@ update_ack:
 				DTRACE_PROBE1(kssl_mblk__ksslinput_data1,
 				    mblk_t *, mp);
 				tcp_kssl_input(tcp, mp);
-			} else if (!IPCL_IS_NONSTR(connp)) {
-				/* Already handled non-STREAMS case. */
+			} else {
 				putnext(tcp->tcp_rq, mp);
 				if (!canputnext(tcp->tcp_rq))
 					tcp->tcp_rwnd -= seg_len;
@@ -14942,28 +14993,6 @@ update_ack:
 			/* Does this need SSL processing first? */
 			DTRACE_PROBE1(kssl_mblk__ksslinput_data2, mblk_t *, mp);
 			tcp_kssl_input(tcp, mp);
-		} else if (IPCL_IS_NONSTR(connp)) {
-			/* Non-STREAMS socket */
-			boolean_t push = flags & (TH_PUSH|TH_FIN);
-			int	error;
-
-			if ((*connp->conn_upcalls->su_recv)(
-			    connp->conn_upper_handle,
-			    mp, seg_len, 0, &error, &push) <= 0) {
-				/*
-				 * We should never be in middle of a
-				 * fallback, the squeue guarantees that.
-				 */
-				ASSERT(error != EOPNOTSUPP);
-				if (error == ENOSPC)
-					tcp->tcp_rwnd -= seg_len;
-			} else if (push) {
-				/*
-				 * PUSH bit set and sockfs is not
-				 * flow controlled
-				 */
-				flags |= tcp_rwnd_reopen(tcp);
-			}
 		} else if ((flags & (TH_PUSH|TH_FIN)) ||
 		    tcp->tcp_rcv_cnt + seg_len >= tcp->tcp_recv_hiwater >> 3) {
 			if (tcp->tcp_rcv_list != NULL) {
@@ -14999,8 +15028,7 @@ update_ack:
 		 * for a push bit. This provides resiliency against
 		 * implementations that do not correctly generate push bits.
 		 */
-		if (!IPCL_IS_NONSTR(connp) && tcp->tcp_rcv_list != NULL &&
-		    tcp->tcp_push_tid == 0) {
+		if (tcp->tcp_rcv_list != NULL && tcp->tcp_push_tid == 0) {
 			/*
 			 * The connection may be closed at this point, so don't
 			 * do anything for a detached tcp.
@@ -15163,6 +15191,26 @@ ack_check:
 	}
 done:
 	ASSERT(!(flags & TH_MARKNEXT_NEEDED));
+}
+
+/*
+ * This routine adjusts next-to-send sequence number variables, in the
+ * case where the reciever has shrunk it's window.
+ */
+static void
+tcp_update_xmit_tail(tcp_t *tcp, uint32_t snxt)
+{
+	mblk_t *xmit_tail;
+	int32_t offset;
+
+	tcp->tcp_snxt = snxt;
+
+	/* Get the mblk, and the offset in it, as per the shrunk window */
+	xmit_tail = tcp_get_seg_mp(tcp, snxt, &offset);
+	ASSERT(xmit_tail != NULL);
+	tcp->tcp_xmit_tail = xmit_tail;
+	tcp->tcp_xmit_tail_unsent = xmit_tail->b_wptr -
+	    xmit_tail->b_rptr - offset;
 }
 
 /*
@@ -16547,11 +16595,8 @@ tcp_timer(void *arg)
 	/*
 	 * Remove all rexmit SACK blk to start from fresh.
 	 */
-	if (tcp->tcp_snd_sack_ok && tcp->tcp_notsack_list != NULL) {
-		TCP_NOTSACK_REMOVE_ALL(tcp->tcp_notsack_list);
-		tcp->tcp_num_notsack_blk = 0;
-		tcp->tcp_cnt_notsack_list = 0;
-	}
+	if (tcp->tcp_snd_sack_ok && tcp->tcp_notsack_list != NULL)
+		TCP_NOTSACK_REMOVE_ALL(tcp->tcp_notsack_list, tcp);
 	if (mp == NULL) {
 		return;
 	}
@@ -17213,13 +17258,6 @@ tcp_accept_finish(void *arg, mblk_t *mp, void *arg2)
 	}
 
 	/*
-	 * For a loopback connection with tcp_direct_sockfs on, note that
-	 * we don't have to protect tcp_rcv_list yet because synchronous
-	 * streams has not yet been enabled and tcp_fuse_rrw() cannot
-	 * possibly race with us.
-	 */
-
-	/*
 	 * Set the max window size (tcp_rq->q_hiwat) of the acceptor
 	 * properly.  This is the first time we know of the acceptor'
 	 * queue.  So we do it here.
@@ -17333,6 +17371,10 @@ tcp_accept_finish(void *arg, mblk_t *mp, void *arg2)
 			sopp.sopp_tail = sopp_tail;
 			sopp.sopp_zcopyflag = sopp_copyopt;
 		}
+		if (tcp->tcp_loopback) {
+			sopp.sopp_flags |= SOCKOPT_LOOPBACK;
+			sopp.sopp_loopback = B_TRUE;
+		}
 		(*connp->conn_upcalls->su_set_proto_props)
 		    (connp->conn_upper_handle, &sopp);
 	} else {
@@ -17435,24 +17477,13 @@ tcp_accept_finish(void *arg, mblk_t *mp, void *arg2)
 
 			ASSERT(peer_tcp != NULL);
 			ASSERT(peer_tcp->tcp_fused);
-			/*
-			 * In order to change the peer's tcp_flow_stopped,
-			 * we need to take locks for both end points. The
-			 * highest address is taken first.
-			 */
-			if (peer_tcp > tcp) {
-				mutex_enter(&peer_tcp->tcp_non_sq_lock);
-				mutex_enter(&tcp->tcp_non_sq_lock);
-			} else {
-				mutex_enter(&tcp->tcp_non_sq_lock);
-				mutex_enter(&peer_tcp->tcp_non_sq_lock);
-			}
+
+			mutex_enter(&peer_tcp->tcp_non_sq_lock);
 			if (peer_tcp->tcp_flow_stopped) {
 				tcp_clrqfull(peer_tcp);
 				TCP_STAT(tcps, tcp_fusion_backenabled);
 			}
 			mutex_exit(&peer_tcp->tcp_non_sq_lock);
-			mutex_exit(&tcp->tcp_non_sq_lock);
 		}
 	}
 	ASSERT(tcp->tcp_rcv_list == NULL || tcp->tcp_fused_sigurg);
@@ -17472,13 +17503,6 @@ tcp_accept_finish(void *arg, mblk_t *mp, void *arg2)
 	if (tcp->tcp_hard_binding) {
 		tcp->tcp_hard_binding = B_FALSE;
 		tcp->tcp_hard_bound = B_TRUE;
-	}
-
-	/* We can enable synchronous streams for STREAMS tcp endpoint now */
-	if (tcp->tcp_fused && !IPCL_IS_NONSTR(connp) &&
-	    tcp->tcp_loopback_peer != NULL &&
-	    !IPCL_IS_NONSTR(tcp->tcp_loopback_peer->tcp_connp)) {
-		tcp_fuse_syncstr_enable_pair(tcp);
 	}
 
 	if (tcp->tcp_ka_enabled) {
@@ -18638,25 +18662,31 @@ static void
 tcp_process_shrunk_swnd(tcp_t *tcp, uint32_t shrunk_count)
 {
 	uint32_t	snxt = tcp->tcp_snxt;
-	mblk_t		*xmit_tail;
-	int32_t		offset;
 
 	ASSERT(shrunk_count > 0);
+
+	if (!tcp->tcp_is_wnd_shrnk) {
+		tcp->tcp_snxt_shrunk = snxt;
+		tcp->tcp_is_wnd_shrnk = B_TRUE;
+	} else if (SEQ_GT(snxt, tcp->tcp_snxt_shrunk)) {
+		tcp->tcp_snxt_shrunk = snxt;
+	}
 
 	/* Pretend we didn't send the data outside the window */
 	snxt -= shrunk_count;
 
-	/* Get the mblk and the offset in it per the shrunk window */
-	xmit_tail = tcp_get_seg_mp(tcp, snxt, &offset);
-
-	ASSERT(xmit_tail != NULL);
-
 	/* Reset all the values per the now shrunk window */
-	tcp->tcp_snxt = snxt;
-	tcp->tcp_xmit_tail = xmit_tail;
-	tcp->tcp_xmit_tail_unsent = xmit_tail->b_wptr - xmit_tail->b_rptr -
-	    offset;
+	tcp_update_xmit_tail(tcp, snxt);
 	tcp->tcp_unsent += shrunk_count;
+
+	/*
+	 * If the SACK option is set, delete the entire list of
+	 * notsack'ed blocks.
+	 */
+	if (tcp->tcp_sack_info != NULL) {
+		if (tcp->tcp_notsack_list != NULL)
+			TCP_NOTSACK_REMOVE_ALL(tcp->tcp_notsack_list, tcp);
+	}
 
 	if (tcp->tcp_suna == tcp->tcp_snxt && tcp->tcp_swnd == 0)
 		/*
@@ -21516,7 +21546,7 @@ tcp_wput_iocdata(tcp_t *tcp, mblk_t *mp)
 }
 
 static void
-tcp_disable_direct_sockfs(tcp_t *tcp)
+tcp_use_pure_tpi(tcp_t *tcp)
 {
 #ifdef	_ILP32
 	tcp->tcp_acceptor_id = (t_uscalar_t)tcp->tcp_rq;
@@ -21529,16 +21559,6 @@ tcp_disable_direct_sockfs(tcp_t *tcp)
 	 */
 	tcp_acceptor_hash_insert(tcp->tcp_acceptor_id, tcp);
 
-	if (tcp->tcp_fused) {
-		/*
-		 * This is a fused loopback tcp; disable
-		 * read-side synchronous streams interface
-		 * and drain any queued data.  It is okay
-		 * to do this for non-synchronous streams
-		 * fused tcp as well.
-		 */
-		tcp_fuse_disable_pair(tcp, B_FALSE);
-	}
 	tcp->tcp_issocket = B_FALSE;
 	TCP_STAT(tcp->tcp_tcps, tcp_sock_fallback);
 }
@@ -21595,7 +21615,7 @@ tcp_wput_ioctl(void *arg, mblk_t *mp, void *arg2)
 			DB_TYPE(mp) = M_IOCNAK;
 			iocp->ioc_error = EINVAL;
 		} else {
-			tcp_disable_direct_sockfs(tcp);
+			tcp_use_pure_tpi(tcp);
 			DB_TYPE(mp) = M_IOCACK;
 			iocp->ioc_error = 0;
 		}
@@ -21638,8 +21658,7 @@ tcp_wput_proto(void *arg, mblk_t *mp, void *arg2)
 	if ((mp->b_wptr - rptr) >= sizeof (t_scalar_t)) {
 		type = ((union T_primitives *)rptr)->type;
 		if (type == T_EXDATA_REQ) {
-			tcp_output_urgent(connp, mp->b_cont, arg2);
-			freeb(mp);
+			tcp_output_urgent(connp, mp, arg2);
 		} else if (type != T_DATA_REQ) {
 			goto non_urgent_data;
 		} else {
@@ -22914,18 +22933,11 @@ tcp_push_timer(void *arg)
 
 	ASSERT(!IPCL_IS_NONSTR(connp));
 
-	/*
-	 * We need to plug synchronous streams during our drain to prevent
-	 * a race with tcp_fuse_rrw() or tcp_fusion_rinfop().
-	 */
-	TCP_FUSE_SYNCSTR_PLUG_DRAIN(tcp);
 	tcp->tcp_push_tid = 0;
 
 	if (tcp->tcp_rcv_list != NULL &&
 	    tcp_rcv_drain(tcp) == TH_ACK_NEEDED)
 		tcp_xmit_ctl(NULL, tcp, tcp->tcp_snxt, tcp->tcp_rnxt, TH_ACK);
-
-	TCP_FUSE_SYNCSTR_UNPLUG_DRAIN(tcp);
 }
 
 /*
@@ -26455,6 +26467,16 @@ tcp_connect(sock_lower_handle_t proto_handle, const struct sockaddr *sa,
 			error = proto_tlitosyserr(-error);
 		}
 	}
+
+	if (tcp->tcp_loopback) {
+		struct sock_proto_props sopp;
+
+		sopp.sopp_flags = SOCKOPT_LOOPBACK;
+		sopp.sopp_loopback = B_TRUE;
+
+		(*connp->conn_upcalls->su_set_proto_props)(
+		    connp->conn_upper_handle, &sopp);
+	}
 done:
 	squeue_synch_exit(sqp, connp);
 
@@ -26659,9 +26681,8 @@ tcp_output_urgent(void *arg, mblk_t *mp, void *arg2)
 	}
 
 	/*
-	 * Try to force urgent data out on the wire.
-	 * Even if we have unsent data this will
-	 * at least send the urgent flag.
+	 * Try to force urgent data out on the wire. Even if we have unsent
+	 * data this will at least send the urgent flag.
 	 * XXX does not handle more flag correctly.
 	 */
 	len += tcp->tcp_unsent;
@@ -26672,6 +26693,14 @@ tcp_output_urgent(void *arg, mblk_t *mp, void *arg2)
 	/* Bypass tcp protocol for fused tcp loopback */
 	if (tcp->tcp_fused && tcp_fuse_output(tcp, mp, msize))
 		return;
+
+	/* Strip off the T_EXDATA_REQ if the data is from TPI */
+	if (DB_TYPE(mp) != M_DATA) {
+		mblk_t *mp1 = mp;
+		ASSERT(!IPCL_IS_NONSTR(connp));
+		mp = mp->b_cont;
+		freeb(mp1);
+	}
 	tcp_wput_data(tcp, mp, B_TRUE);
 }
 
@@ -26717,7 +26746,7 @@ tcp_getsockname(sock_lower_handle_t proto_handle, struct sockaddr *addr,
  * associated with a conn, and the q_ptrs instead contain the
  * dev and minor area that should be used.
  *
- * The 'direct_sockfs' flag indicates whether the FireEngine
+ * The 'issocket' flag indicates whether the FireEngine
  * optimizations should be used. The common case would be that
  * optimizations are enabled, and they might be subsequently
  * disabled using the _SIOCSOCKFALLBACK ioctl.
@@ -26729,7 +26758,7 @@ tcp_getsockname(sock_lower_handle_t proto_handle, struct sockaddr *addr,
  */
 void
 tcp_fallback_noneager(tcp_t *tcp, mblk_t *stropt_mp, queue_t *q,
-    boolean_t direct_sockfs, so_proto_quiesced_cb_t quiesced_cb)
+    boolean_t issocket, so_proto_quiesced_cb_t quiesced_cb)
 {
 	conn_t			*connp = tcp->tcp_connp;
 	struct stroptions	*stropt;
@@ -26750,8 +26779,8 @@ tcp_fallback_noneager(tcp_t *tcp, mblk_t *stropt_mp, queue_t *q,
 
 	WR(q)->q_qinfo = &tcp_sock_winit;
 
-	if (!direct_sockfs)
-		tcp_disable_direct_sockfs(tcp);
+	if (!issocket)
+		tcp_use_pure_tpi(tcp);
 
 	/*
 	 * free the helper stream
@@ -26858,7 +26887,6 @@ tcp_fallback(sock_lower_handle_t proto_handle, queue_t *q,
 	int			error;
 	mblk_t			*stropt_mp;
 	mblk_t			*ordrel_mp;
-	mblk_t			*fused_sigurp_mp;
 
 	tcp = connp->conn_tcp;
 
@@ -26873,9 +26901,6 @@ tcp_fallback(sock_lower_handle_t proto_handle, queue_t *q,
 	((struct T_ordrel_ind *)ordrel_mp->b_rptr)->PRIM_type = T_ORDREL_IND;
 	ordrel_mp->b_wptr += sizeof (struct T_ordrel_ind);
 
-	/* Pre-allocate the M_PCSIG used by fusion */
-	fused_sigurp_mp = allocb_wait(1, BPRI_HI, STR_NOSIG, NULL);
-
 	/*
 	 * Enter the squeue so that no new packets can come in
 	 */
@@ -26884,7 +26909,6 @@ tcp_fallback(sock_lower_handle_t proto_handle, queue_t *q,
 		/* failed to enter, free all the pre-allocated messages. */
 		freeb(stropt_mp);
 		freeb(ordrel_mp);
-		freeb(fused_sigurp_mp);
 		/*
 		 * We cannot process the eager, so at least send out a
 		 * RST so the peer can reconnect.
@@ -26897,18 +26921,18 @@ tcp_fallback(sock_lower_handle_t proto_handle, queue_t *q,
 	}
 
 	/*
+	 * Both endpoints must be of the same type (either STREAMS or
+	 * non-STREAMS) for fusion to be enabled. So if we are fused,
+	 * we have to unfuse.
+	 */
+	if (tcp->tcp_fused)
+		tcp_unfuse(tcp);
+
+	/*
 	 * No longer a direct socket
 	 */
 	connp->conn_flags &= ~IPCL_NONSTR;
-
 	tcp->tcp_ordrel_mp = ordrel_mp;
-
-	if (tcp->tcp_fused) {
-		ASSERT(tcp->tcp_fused_sigurg_mp == NULL);
-		tcp->tcp_fused_sigurg_mp = fused_sigurp_mp;
-	} else {
-		freeb(fused_sigurp_mp);
-	}
 
 	if (tcp->tcp_listener != NULL) {
 		/* The eager will deal with opts when accept() is called */

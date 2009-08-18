@@ -30,7 +30,6 @@
  * of Solaris SMF service are displayed on the Server/Connection Manager
  * Windows client.
  */
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -40,9 +39,12 @@
 #include <libscf.h>
 #include <libscf_priv.h>
 #include <time.h>
+#include <dlfcn.h>
 #include <sys/types.h>
-
-#include "svcctl_scm.h"
+#include <smbsrv/winsvc.h>
+#include <smbsrv/nterror.h>
+#include <smbsrv/ndl/svcctl.ndl>
+#include <smbsrv/libmlsvc.h>
 
 #define	LEGACY_UNKNOWN	"unknown"
 #define	SVC_NAME_PROP	"name"
@@ -50,6 +52,12 @@
 /* Flags for svcctl_scm_pg_get_val() */
 #define	EMPTY_OK	0x01
 #define	MULTI_OK	0x02
+
+static void *svcctl_scm_interposer_hdl = NULL;
+static struct {
+	int (*svcctl_op_scm_init)(svcctl_manager_context_t *);
+	int (*svcctl_op_scf_init)(svcctl_manager_context_t *);
+} svcctl_scm_ops;
 
 /*
  * svcctl_scm_avl_nodecmp
@@ -533,53 +541,108 @@ svcctl_scm_map_status(const char *state)
 /*
  * svcctl_scm_enum_services
  *
- * Enumerates all SMF services.
+ * Enumerates SMF services: handles wide-char or ascii requests.
+ *
+ * Returns the number of services written to buf.
  */
-void
-svcctl_scm_enum_services(svcctl_manager_context_t *mgr_ctx,
-    unsigned char *services)
+uint32_t
+svcctl_scm_enum_services(svcctl_manager_context_t *mgr_ctx, uint8_t *buf,
+    size_t buflen, uint32_t *resume_handle, boolean_t use_wchar)
 {
-	svcctl_svc_node_t *node = NULL;
-	int base_offset, offset, i;
-	mts_wchar_t *wide_name;
-	char *name;
-
+	svcctl_svc_node_t *node;
+	int base_offset, offset;
+	mts_wchar_t *w_name;
+	char *a_name;
+	char *node_name;
+	size_t namelen;
+	uint32_t numsvcs = mgr_ctx->mc_scf_numsvcs;
+	uint32_t ns;
 	/*LINTED E_BAD_PTR_CAST_ALIGN*/
-	svc_enum_status_t *svc = (svc_enum_status_t *)services;
+	svc_enum_status_t *svc = (svc_enum_status_t *)buf;
 
-	base_offset = mgr_ctx->mc_scf_numsvcs * sizeof (svc_enum_status_t);
+	if (buf == NULL || buflen == 0 || *resume_handle >= numsvcs) {
+		*resume_handle = 0;
+		return (0);
+	}
+
+	base_offset = numsvcs * sizeof (svc_enum_status_t);
+	if (buflen < mgr_ctx->mc_bytes_needed) {
+		while (base_offset > (buflen / 4)) {
+			--numsvcs;
+			base_offset = numsvcs * sizeof (svc_enum_status_t);
+		}
+	}
 
 	offset = base_offset;
 	node = uu_avl_first(mgr_ctx->mc_svcs);
 
-	for (i = 0; ((i < mgr_ctx->mc_scf_numsvcs) && (node != NULL)); ++i) {
-		svc[i].svc_name = offset;
-		/*LINTED E_BAD_PTR_CAST_ALIGN*/
-		wide_name = (mts_wchar_t *)&services[offset];
-		name = node->sn_name;
-		(void) mts_mbstowcs(wide_name, name, (strlen(name) + 1));
+	for (ns = 0; ((ns < *resume_handle) && (node != NULL)); ++ns)
+		node = uu_avl_next(mgr_ctx->mc_svcs, node);
 
-		offset += SVCCTL_WNSTRLEN(name);
+	if (node == NULL) {
+		*resume_handle = 0;
+		return (0);
+	}
 
-		svc[i].display_name = offset;
-		/*LINTED E_BAD_PTR_CAST_ALIGN*/
-		wide_name = (mts_wchar_t *)&services[offset];
-		name = node->sn_fmri;
-		(void) mts_mbstowcs(wide_name, name, (strlen(name) + 1));
+	for (ns = 0; ((ns < numsvcs) && (node != NULL)); ++ns) {
+		node_name = node->sn_name;
+		namelen = strlen(node_name) + 1;
+		svc[ns].svc_name = offset;
 
-		offset += SVCCTL_WNSTRLEN(name);
+		if (use_wchar) {
+			/*LINTED E_BAD_PTR_CAST_ALIGN*/
+			w_name = (mts_wchar_t *)&buf[offset];
+			(void) mts_mbstowcs(w_name, node_name, namelen);
+			offset += SVCCTL_WNSTRLEN(node_name);
+		} else {
+			a_name = (char *)&buf[offset];
+			(void) strlcpy(a_name, node_name, namelen);
+			offset += namelen;
+		}
 
-		svc[i].svc_status.cur_state =
+		if (offset >= buflen)
+			break;
+
+		node_name = node->sn_fmri;
+		namelen = strlen(node_name) + 1;
+		svc[ns].display_name = offset;
+
+		if (use_wchar) {
+			/*LINTED E_BAD_PTR_CAST_ALIGN*/
+			w_name = (mts_wchar_t *)&buf[offset];
+			(void) mts_mbstowcs(w_name, node_name, namelen);
+			offset += SVCCTL_WNSTRLEN(node_name);
+		} else {
+			a_name = (char *)&buf[offset];
+			(void) strlcpy(a_name, node_name, namelen);
+			offset += namelen;
+		}
+
+		if (offset >= buflen)
+			break;
+
+		svc[ns].svc_status.cur_state =
 		    svcctl_scm_map_status(node->sn_state);
-		svc[i].svc_status.service_type = SERVICE_WIN32_SHARE_PROCESS;
-		svc[i].svc_status.ctrl_accepted = 0;
-		svc[i].svc_status.w32_exitcode = 0;
-		svc[i].svc_status.svc_specified_exitcode = 0;
-		svc[i].svc_status.check_point = 0;
-		svc[i].svc_status.wait_hint = 0;
+		svc[ns].svc_status.service_type = SERVICE_WIN32_SHARE_PROCESS;
+		svc[ns].svc_status.ctrl_accepted = 0;
+		svc[ns].svc_status.w32_exitcode = 0;
+		svc[ns].svc_status.svc_specified_exitcode = 0;
+		svc[ns].svc_status.check_point = 0;
+		svc[ns].svc_status.wait_hint = 0;
 
 		node = uu_avl_next(mgr_ctx->mc_svcs, node);
 	}
+
+	if (node == NULL) {
+		*resume_handle = 0;
+	} else {
+		*resume_handle += ns;
+
+		if (*resume_handle >= mgr_ctx->mc_scf_numsvcs)
+			*resume_handle = 0;
+	}
+
+	return (ns);
 }
 
 /*
@@ -604,7 +667,7 @@ svcctl_scm_cb_bytes_needed(void *svc_node, void *byte_cnt)
  *
  * Calculates bytes needed to enumerate SMF services.
  */
-void
+static void
 svcctl_scm_bytes_needed(svcctl_manager_context_t *mgr_ctx)
 {
 	int bytes_needed = 0, svc_enum_status_size = 0;
@@ -651,7 +714,9 @@ svcctl_scm_map_windows_svc(char *svc_name)
 		char *win_svc_name;
 		char *solaris_svc_name;
 	} win2solaris_svc_map[] = {
-		{ "eventlog", "system/system-log:default" }
+		{ "eventlog", "system/system-log:default" },
+		{ "RemoteRegistry", "system/svc/restarter:default" },
+		{ "spooler",  "application/print/ppd-cache-update:default" }
 	};
 
 	size = sizeof (win2solaris_svc_map)/sizeof (win2solaris_svc_map[0]);
@@ -704,6 +769,10 @@ int
 svcctl_scm_refresh(svcctl_manager_context_t *mgr_ctx)
 {
 	svcctl_scm_fini(mgr_ctx);
+
+	if (svcctl_scm_ops.svcctl_op_scm_init != NULL)
+		return (svcctl_scm_ops.svcctl_op_scm_init(mgr_ctx));
+
 	return (svcctl_scm_init(mgr_ctx));
 }
 
@@ -715,6 +784,10 @@ svcctl_scm_refresh(svcctl_manager_context_t *mgr_ctx)
 int
 svcctl_scm_scf_handle_init(svcctl_manager_context_t *mgr_ctx)
 {
+	if (svcctl_scm_ops.svcctl_op_scf_init != NULL)
+		return (svcctl_scm_ops.
+		    svcctl_op_scf_init(mgr_ctx));
+
 	mgr_ctx->mc_scf_hdl = scf_handle_create(SCF_VERSION);
 	if (mgr_ctx->mc_scf_hdl == NULL)
 		return (-1);
@@ -753,8 +826,11 @@ svcctl_scm_scf_handle_fini(svcctl_manager_context_t *mgr_ctx)
 	scf_value_destroy(mgr_ctx->mc_scf_gval);
 	scf_property_destroy(mgr_ctx->mc_scf_gprop);
 	scf_pg_destroy(mgr_ctx->mc_scf_gpg);
-	(void) scf_handle_unbind(mgr_ctx->mc_scf_hdl);
-	scf_handle_destroy(mgr_ctx->mc_scf_hdl);
+
+	if (mgr_ctx->mc_scf_hdl != NULL) {
+		(void) scf_handle_unbind(mgr_ctx->mc_scf_hdl);
+		scf_handle_destroy(mgr_ctx->mc_scf_hdl);
+	}
 }
 
 /*
@@ -771,6 +847,9 @@ svcctl_scm_init(svcctl_manager_context_t *mgr_ctx)
 
 	assert(mgr_ctx->mc_svcs_pool == NULL);
 	assert(mgr_ctx->mc_svcs == NULL);
+
+	if (svcctl_scm_ops.svcctl_op_scm_init != NULL)
+		return (svcctl_scm_ops.svcctl_op_scm_init(mgr_ctx));
 
 	mgr_ctx->mc_svcs_pool = uu_avl_pool_create("smf_svcs_pool",
 	    sizeof (svcctl_svc_node_t), offsetof(svcctl_svc_node_t, sn_node),
@@ -832,4 +911,48 @@ svcctl_scm_fini(svcctl_manager_context_t *mgr_ctx)
 	uu_avl_pool_destroy(mgr_ctx->mc_svcs_pool);
 	mgr_ctx->mc_svcs_pool = NULL;
 	mgr_ctx->mc_svcs = NULL;
+}
+
+/*
+ * svcctl_init
+ *
+ * Initializes the SVCCTL service.
+ * Initializes handle and ops structure to interposed library.
+ */
+void
+svcctl_init(void)
+{
+	svcctl_scm_interposer_hdl = smb_dlopen();
+	if (svcctl_scm_interposer_hdl == NULL)
+		return;
+
+	bzero((void *)&svcctl_scm_ops,
+	    sizeof (svcctl_scm_ops));
+
+	svcctl_scm_ops.svcctl_op_scm_init =
+	    (int (*)())dlsym(svcctl_scm_interposer_hdl, "svcctl_scm_init");
+
+	svcctl_scm_ops.svcctl_op_scf_init =
+	    (int (*)())dlsym(svcctl_scm_interposer_hdl,
+	    "svcctl_scm_scf_handle_init");
+
+	if (svcctl_scm_ops.svcctl_op_scm_init == NULL ||
+	    svcctl_scm_ops.svcctl_op_scf_init == NULL)
+		svcctl_fini();
+
+}
+
+/*
+ * svcctl_fini
+ *
+ * Finalizes the SVCCTL service.
+ * Closes handle to interposed library.
+ */
+void
+svcctl_fini(void)
+{
+	smb_dlclose(svcctl_scm_interposer_hdl);
+	svcctl_scm_interposer_hdl = NULL;
+	bzero((void *)&svcctl_scm_ops,
+	    sizeof (svcctl_scm_ops));
 }

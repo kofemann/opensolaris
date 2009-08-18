@@ -120,7 +120,15 @@ uint_t enable486;
 /*
  * This is set to platform type Solaris is running on.
  */
-static int platform_type = HW_NATIVE;
+static int platform_type = -1;
+
+#if !defined(__xpv)
+/*
+ * Variable to patch if hypervisor platform detection needs to be
+ * disabled (e.g. platform_type will always be HW_NATIVE if this is 0).
+ */
+int enable_platform_detection = 1;
+#endif
 
 /*
  * monitor/mwait info.
@@ -364,6 +372,11 @@ platform_cpuid_mangle(uint_t vendor, uint32_t eax, struct cpuid_regs *cp)
 		break;
 	case X86_VENDOR_AMD:
 		switch (eax) {
+
+		case 0x80000001:
+			cp->cp_ecx &= ~CPUID_AMD_ECX_CR8D;
+			break;
+
 		case 0x80000008:
 			/*
 			 * Zero out the (ncores-per-chip - 1) field
@@ -436,6 +449,11 @@ determine_platform()
 	char *xen_str;
 	uint32_t xen_signature[4];
 
+	platform_type = HW_NATIVE;
+
+	if (!enable_platform_detection)
+		return;
+
 	/*
 	 * In a fully virtualized domain, Xen's pseudo-cpuid function
 	 * 0x40000000 returns a string representing the Xen signature in
@@ -459,6 +477,9 @@ determine_platform()
 int
 get_hwenv(void)
 {
+	if (platform_type == -1)
+		determine_platform();
+
 	return (platform_type);
 }
 
@@ -2533,6 +2554,24 @@ cpuid_get_clogid(cpu_t *cpu)
 {
 	ASSERT(cpuid_checkpass(cpu, 1));
 	return (cpu->cpu_m.mcpu_cpi->cpi_clogid);
+}
+
+/*ARGSUSED*/
+int
+cpuid_have_cr8access(cpu_t *cpu)
+{
+#if defined(__amd64)
+	return (1);
+#else
+	struct cpuid_info *cpi;
+
+	ASSERT(cpu != NULL);
+	cpi = cpu->cpu_m.mcpu_cpi;
+	if (cpi->cpi_vendor == X86_VENDOR_AMD && cpi->cpi_maxeax >= 1 &&
+	    (CPI_FEATURES_XTD_ECX(cpi) & CPUID_AMD_ECX_CR8D) != 0)
+		return (1);
+	return (0);
+#endif
 }
 
 uint32_t

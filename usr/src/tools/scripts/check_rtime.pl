@@ -169,6 +169,7 @@ $SkipUnusedSearchPath = qr{
 	/usr/lib/smbsrv.*\ from\ .*libsmb\.so\.1 |		# future needs
 	/usr/lib/mps/secv1.*\ from\ .*libnss3\.so |		# non-OSNet
 	/usr/lib/mps.*\ from\ .*libnss3\.so |			# non-OSNet
+	/usr/lib/mps.*\ from\ .*libnssutil3.so |		# non-OSNET
 	/usr/sfw/lib.*\ from\ .*libdbus-1\.so\.3 |		# non-OSNet
 	/usr/sfw/lib.*\ from\ .*libdbus-glib-1\.so\.2 |		# non-OSNet
 	/usr/sfw/lib.*\ from\ .*libglib-2\.0\.so\.0 |		# non-OSNet
@@ -181,7 +182,7 @@ $SkipUnusedSearchPath = qr{
 	/usr/sfw/lib.*\ from\ .*libgthread-2\.0\.so\.0 |	# non-OSNet
 	/usr/X11/lib.*\ from\ .*libgthread-2\.0\.so\.0 |	# non-OSNet
 	/usr/sfw/lib.*\ from\ .*libcrypto\.so\.0\.9\.8 |	# non-OSNet
-	/usr/sfw/lib.*\ from\ .*libnetsnmp\.so\.5 |		# non-OSNet
+	/usr/sfw/lib.*\ from\ .*libnetsnmp\.so\.15 |		# non-OSNet
 	/usr/sfw/lib.*\ from\ .*libgcc_s\.so\.1 |		# non-OSNet
 	/usr.*\ from\ .*tst\.gcc\.exe |				# gcc built
 	/usr/postgres/8.3/lib.*\ from\ .*libpq\.so\.5 |		# non-OSNET
@@ -196,10 +197,10 @@ $SkipUnrefObject = qr{
 	/lib.*\ of\ .*/lib/picl/plugins/ |			# picl
 	/lib.*\ of\ .*libcimapi\.so |				# non-OSNET
 	/lib.*\ of\ .*libjvm\.so |				# non-OSNET
-	/lib.*\ of\ .*libnetsnmp\.so\.5 |			# non-OSNET
-	/lib.*\ of\ .*libnetsnmpagent\.so\.5 |			# non-OSNET
-	/lib.*\ of\ .*libnetsnmpmibs\.so\.5 |			# non-OSNET
-	/lib.*\ of\ .*libnetsnmphelpers\.so\.5 |		# non-OSNET
+	/lib.*\ of\ .*libnetsnmp\.so\.15 |			# non-OSNET
+	/lib.*\ of\ .*libnetsnmpagent\.so\.15 |			# non-OSNET
+	/lib.*\ of\ .*libnetsnmpmibs\.so\.15 |			# non-OSNET
+	/lib.*\ of\ .*libnetsnmphelpers\.so\.15 |		# non-OSNET
 	/lib.*\ of\ .*libnspr4\.so |				# non-OSNET
 	/lib.*\ of\ .*libsoftokn3\.so |				# non-OSNET
 	/lib.*\ of\ .*libspmicommon\.so\.1 |			# non-OSNET
@@ -208,7 +209,9 @@ $SkipUnrefObject = qr{
 	/lib.*\ of\ .*libxml2\.so\.2 |				# non-OSNET
 	/lib.*\ of\ .*libxslt\.so\.1 |				# non-OSNET
 	/lib.*\ of\ .*libpq\.so\.4 |				# non-OSNET
-	/lib.*\ of\ .*libpython2\.4\.so\.1\.0 			# non-OSNET
+	/lib.*\ of\ .*libpython2\.4\.so\.1\.0 |			# non-OSNET
+	/lib.*\ of\ .*kcfd |					# interposer
+	/libpkcs11\.so\.1; .*\ of\ .*libkmf\.so\.1		# interposed
 }x;
 
 # Define any files that should only have unused (ldd -u) processing.

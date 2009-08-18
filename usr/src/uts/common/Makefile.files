@@ -424,15 +424,17 @@ AUDIO_OBJS += audio_client.o audio_ddi.o audio_engine.o \
 	   audio_grc3.o audio_output.o audio_input.o \
 	   audio_oss.o audio_sun.o
 
-AUSTR_OBJS += austr.o
-
 AUDIOENS_OBJS += audioens.o
 
 AUDIOVIA823X_OBJS += audiovia823x.o
 
+AUDIOVIA97_OBJS += audiovia97.o
+
 AUDIO1575_OBJS += audio1575.o
 
 AUDIO810_OBJS += audio810.o
+
+AUDIOCMI_OBJS += audiocmi.o
 
 AUDIOHD_OBJS +=	audiohd.o
 
@@ -461,6 +463,9 @@ PTM_OBJS +=	ptm.o
 LX_PTM_OBJS +=	lx_ptm.o
 
 LX_AUDIO_OBJS += lx_audio.o
+
+MII_OBJS +=	mii.o mii_cicada.o mii_natsemi.o mii_intel.o mii_qualsemi.o \
+		mii_other.o
 
 PTS_OBJS +=	pts.o
 
@@ -994,8 +999,6 @@ NV_SATA_OBJS += nv_sata.o
 
 SI3124_OBJS += si3124.o
 
-NSCONFIG_DEVNAME_OBJS += sdev_nsconfig_mod.o
-
 AHCI_OBJS += ahci.o
 
 PCIIDE_OBJS += pci-ide.o
@@ -1187,9 +1190,7 @@ SMBSRV_OBJS +=	$(SMBSRV_SHARED_OBJS)			\
 		smb_fsops.o				\
 		smb_init.o				\
 		smb_kdoor_encdec.o			\
-		smb_kdoor_ops.o				\
 		smb_kdoor_clnt.o			\
-		smb_kdoor_srv.o				\
 		smb_kshare.o				\
 		smb_lock.o				\
 		smb_lock_byte_range.o			\
@@ -1288,8 +1289,8 @@ UFS_OBJS +=	ufs_alloc.o	ufs_bmap.o	ufs_dir.o 	ufs_xattr.o \
 		lufs_log.o	lufs_map.o	lufs_top.o	lufs_debug.o
 VSCAN_OBJS +=	vscan_drv.o	vscan_svc.o vscan_door.o
 
-NSMB_OBJS +=	smb_conn.o	smb_crypt.o	smb_dev.o	smb_iod.o \
-		smb_rq.o	smb_smb.o	smb_tran.o	smb_trantcp.o \
+NSMB_OBJS +=	smb_conn.o	smb_dev.o	smb_iod.o	smb_rq.o \
+		smb_sign.o	smb_smb.o	smb_tran.o	smb_trantcp.o \
 		smb_usr.o	smb_subrs.o	subr_mchain.o	smb_pass.o
 
 SMBFS_OBJS +=	smbfs_vfsops.o	smbfs_vnops.o	smbfs_node.o	\
@@ -1744,7 +1745,7 @@ AFE_OBJS += afe.o
 BGE_OBJS += bge_main2.o bge_chip2.o bge_kstats.o bge_log.o bge_ndd.o \
 		bge_atomic.o bge_mii.o bge_send.o bge_recv2.o bge_mii_5906.o
 
-DMFE_OBJS += dmfe_log.o dmfe_main.o dmfe_mii.o dmfe_ndd.o
+DMFE_OBJS += dmfe_log.o dmfe_main.o dmfe_mii.o
 
 HME_OBJS += hme.o
 
@@ -1757,6 +1758,9 @@ NGE_OBJS += nge_main.o nge_atomic.o nge_chip.o nge_ndd.o nge_kstats.o \
 RGE_OBJS += rge_main.o rge_chip.o rge_ndd.o rge_kstats.o rge_log.o rge_rxtx.o
 
 URTW_OBJS += urtw.o
+
+ARN_OBJS += arn_hw.o arn_eeprom.o arn_mac.o arn_calib.o arn_ani.o arn_phy.o arn_regd.o arn_beacon.o \
+		arn_main.o arn_recv.o arn_xmit.o arn_rc.o
 
 ATH_OBJS += ath_aux.o ath_main.o ath_osdep.o ath_rate.o
 
@@ -1776,7 +1780,13 @@ RAL_OBJS += rt2560.o ral_rate.o
 
 RUM_OBJS += rum.o
 
+RWD_OBJS += rt2661.o
+
 RWN_OBJS += rt2860.o
+
+UATH_OBJS += uath.o
+
+UATHFW_OBJS += uathfw_mod.o
 
 URAL_OBJS += ural.o
 
@@ -1786,7 +1796,11 @@ ZYD_OBJS += zyd.o zyd_usb.o zyd_hw.o zyd_fw.o
 
 MXFE_OBJS += mxfe.o
 
+MPTSAS_OBJS += mptsas.o mptsas_impl.o mptsas_init.o mptsas_raid.o
+
 SFE_OBJS += sfe.o sfe_util.o
+
+BFE_OBJS += bfe.o
 
 DDA_OBJS += dda.o
 
@@ -1816,6 +1830,7 @@ INCLUDE_PATH    += $(INC_PATH) $(CCYFLAG)$(UTSBASE)/common
 
 #
 PCIE_MISC_OBJS += pcie.o pcie_fault.o
+PCIEB_OBJS += pcieb.o pcie_pwr.o
 
 #	Chelsio N110 10G NIC driver module
 #
@@ -1958,6 +1973,12 @@ ISCSI_INITIATOR_OBJS =	chap.o iscsi_io.o iscsi_thread.o	\
 #
 NTXN_OBJS =	unm_nic_init.o unm_gem.o unm_nic_hw.o unm_ndd.o	\
 			unm_nic_main.o unm_nic_isr.o unm_nic_ctx.o niu.o
+
+#
+#	Myricom 10Gb NIC driver module
+#
+MYRI10GE_OBJS =	myri10ge.o myri10ge_lro.o
+
 #	nulldriver module
 #
 NULLDRIVER_OBJS =	nulldriver.o

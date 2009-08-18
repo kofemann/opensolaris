@@ -29,7 +29,7 @@
 #
 # Files in "rbac" class:
 #
-# /etc/security{prof_attr,exec_attr,auth_attr}
+# /etc/security/{prof_attr,exec_attr,auth_attr}
 # /etc/user_attr
 #
 #  Allowable exit codes
@@ -38,6 +38,8 @@
 # 2 - warning or possible error condition. Installation continues. A warning
 #     message is displayed at the time of completion.
 #
+
+umask 022
 
 tmp_dir=${TMPDIR:-/tmp}
 
@@ -290,7 +292,10 @@ function unsplit(list, cnt, delim, str)
 # $2 is the target file
 #
 commit() {
-	$mv_cmd $1 $2
+	# Make sure that the last mv uses rename(2) by first moving to
+	# the same filesystem.
+	$mv_cmd $1 $2.$$
+	$mv_cmd $2.$$ $2
 	return $?
 }
 
@@ -324,10 +329,24 @@ exit_status=0
 # main
 
 while read newfile oldfile ; do
+	if [ -n "$PKGINST" ]
+	then
+		# Install the file in the "fragment" directory.
+		mkdir -m 755 -p ${oldfile}.d
+		rm -f ${oldfile}.d/"$PKGINST"
+		cp $newfile ${oldfile}.d/"$PKGINST"
+
+		# Make sure that it is marked read-only.
+		chmod a-w,a+r ${oldfile}.d/"$PKGINST"
+
+		# We also execute the rest of the i.rbac script.
+	fi
+
 	if [ ! -f $oldfile ]; then
 		cp $newfile $oldfile
 	else
-		set_type_and_outfile $newfile
+		set_type_and_outfile $newfile ||
+			set_type_and_outfile $oldfile
 		if [ $? -ne 0 ]; then
 			echo "$0 : $newfile not one of" \
 			    " prof_attr, exec_attr, auth_attr, user_attr"

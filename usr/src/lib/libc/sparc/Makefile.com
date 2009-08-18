@@ -329,6 +329,7 @@ SYSOBJS=			\
 	__getcontext.o		\
 	_lwp_mutex_unlock.o	\
 	_stack_grow.o		\
+	__uadmin.o		\
 	door.o			\
 	forkx.o			\
 	forkallx.o		\
@@ -854,7 +855,6 @@ PORTSYS=			\
 	execl.o			\
 	execle.o		\
 	execv.o			\
-	faccessat.o		\
 	fsmisc.o		\
 	fstatat.o		\
 	getpagesizes.o		\
@@ -1079,7 +1079,8 @@ SRCS=							\
 	$(LIBCBASE)/gen/siginfolst.c			\
 	$(LIBCBASE)/gen/siglongjmp.c			\
 	$(LIBCBASE)/gen/swapctxt.c			\
-	$(LIBCBASE)/sys/ptrace.c
+	$(LIBCBASE)/sys/ptrace.c			\
+	$(LIBCBASE)/sys/uadmin.c
 
 # conditional assignments
 $(DYNLIB) := CRTI = crti.o

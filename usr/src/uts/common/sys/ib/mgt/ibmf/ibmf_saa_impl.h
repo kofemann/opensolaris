@@ -40,7 +40,7 @@ extern "C" {
 #define	SAA_MAX_CLIENTS_PER_PORT	100
 #define	SAA_MAD_BASE_VERSION		1
 #define	SAA_MAD_CLASS_VERSION		2
-#define	IBMF_SAA_RETRANS_RETRIES 	2
+#define	IBMF_SAA_RETRANS_RETRIES 	0
 #define	IBMF_SAA_MAX_SUBNET_TIMEOUT 	20
 #define	IBMF_SAA_MAX_RESP_TIME		20
 #define	IBMF_SAA_MAX_BUSY_RETRY_COUNT	10
@@ -305,6 +305,8 @@ ibmf_saa_add_event_subscriber(saa_client_data_t *client,
 
 void ibmf_saa_subscribe_events(saa_port_t *saa_portp, boolean_t subscribe,
     boolean_t seq_unsubscribe);
+
+void ibmf_saa_subscribe_sm_events(saa_port_t *saa_portp);
 
 void
 ibmf_saa_notify_event_clients(saa_port_t *saa_portp,

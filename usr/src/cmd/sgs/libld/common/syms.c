@@ -76,8 +76,8 @@ ld_sym_avl_comp(const void *elem1, const void *elem2)
  */
 inline static const char *
 string(Ofl_desc *ofl, Ifl_desc *ifl, Sym *sym, const char *strs, size_t strsize,
-    int symndx, Word shndx, const char *symsecname, const char *strsecname,
-    Word *flags)
+    int symndx, Word shndx, Word symsecndx, const char *symsecname,
+    const char *strsecname, Word *flags)
 {
 	Word	name = sym->st_name;
 
@@ -85,14 +85,15 @@ string(Ofl_desc *ofl, Ifl_desc *ifl, Sym *sym, const char *strs, size_t strsize,
 		if ((ifl->ifl_flags & FLG_IF_HSTRTAB) == 0) {
 			eprintf(ofl->ofl_lml, ERR_FATAL,
 			    MSG_INTL(MSG_FIL_NOSTRTABLE), ifl->ifl_name,
-			    symsecname, symndx, EC_XWORD(name));
+			    EC_WORD(symsecndx), symsecname, symndx,
+			    EC_XWORD(name));
 			return (NULL);
 		}
 		if (name >= (Word)strsize) {
 			eprintf(ofl->ofl_lml, ERR_FATAL,
 			    MSG_INTL(MSG_FIL_EXCSTRTABLE), ifl->ifl_name,
-			    symsecname, symndx, EC_XWORD(name),
-			    strsecname, EC_XWORD(strsize));
+			    EC_WORD(symsecndx), symsecname, symndx,
+			    EC_XWORD(name), strsecname, EC_XWORD(strsize));
 			return (NULL);
 		}
 	}
@@ -122,7 +123,8 @@ string(Ofl_desc *ofl, Ifl_desc *ifl, Sym *sym, const char *strs, size_t strsize,
 	 */
 	if ((name == 0) && (ELF_ST_BIND(sym->st_info) != STB_LOCAL)) {
 		eprintf(ofl->ofl_lml, ERR_WARNING, MSG_INTL(MSG_FIL_NONAMESYM),
-		    ifl->ifl_name, symsecname, symndx, EC_XWORD(name));
+		    ifl->ifl_name, EC_WORD(symsecndx), symsecname, symndx,
+		    EC_XWORD(name));
 	}
 	return (strs + name);
 }
@@ -212,6 +214,15 @@ ld_sym_nodirect(Is_desc *isp, Ifl_desc *ifl, Ofl_desc *ofl)
 	/*
 	 * Get the associated symbol table.
 	 */
+	if ((sifshdr->sh_link == 0) || (sifshdr->sh_link >= ifl->ifl_shnum)) {
+		/*
+		 * Broken input file
+		 */
+		eprintf(ofl->ofl_lml, ERR_FATAL, MSG_INTL(MSG_FIL_INVSHINFO),
+		    ifl->ifl_name, isp->is_name, EC_XWORD(sifshdr->sh_link));
+		ofl->ofl_flags |= FLG_OF_FATAL;
+		return (0);
+	}
 	symshdr = ifl->ifl_isdesc[sifshdr->sh_link]->is_shdr;
 	symdata = ifl->ifl_isdesc[sifshdr->sh_link]->is_indata->d_buf;
 
@@ -235,7 +246,7 @@ ld_sym_nodirect(Is_desc *isp, Ifl_desc *ifl, Ofl_desc *ofl)
 		sym = (Sym *)(symdata + _cnt);
 		str = (char *)(strdata + sym->st_name);
 
-		if (sdp = ld_sym_find(str, SYM_NOHASH, 0, ofl)) {
+		if ((sdp = ld_sym_find(str, SYM_NOHASH, NULL, ofl)) != NULL) {
 			if (ifl != sdp->sd_file)
 				continue;
 
@@ -446,7 +457,7 @@ ld_sym_enter(const char *name, Sym *osym, Word hash, Ifl_desc *ifl,
 			break;
 		case STV_SINGLETON:
 			sdp->sd_flags1 |= (FLG_SY1_SINGLE | FLG_SY1_NDIR);
-			ofl->ofl_flags1 |= FLG_OF1_NDIRECT;
+			ofl->ofl_flags1 |= (FLG_OF1_NDIRECT | FLG_OF1_NGLBDIR);
 			break;
 		case STV_ELIMINATE:
 			sdp->sd_flags1 |= (FLG_SY1_HIDDEN | FLG_SY1_ELIM);
@@ -728,7 +739,7 @@ sym_add_spec(const char *name, const char *uname, Word sdaux_id,
 		usdp->sd_flags1 |= flags1;
 	}
 
-	if (name && (sdp = ld_sym_find(name, SYM_NOHASH, 0, ofl)) &&
+	if (name && (sdp = ld_sym_find(name, SYM_NOHASH, NULL, ofl)) &&
 	    (sdp->sd_sym->st_shndx == SHN_UNDEF)) {
 		uchar_t	bind;
 
@@ -926,7 +937,7 @@ ld_sym_spec(Ofl_desc *ofl)
 	 * Make sure it gets assigned the appropriate special attributes.
 	 */
 	if (((sdp = ld_sym_find(MSG_ORIG(MSG_SYM_GOFTBL_U),
-	    SYM_NOHASH, 0, ofl)) != 0) && (sdp->sd_ref != REF_DYN_SEEN)) {
+	    SYM_NOHASH, NULL, ofl)) != 0) && (sdp->sd_ref != REF_DYN_SEEN)) {
 		if (sym_add_spec(MSG_ORIG(MSG_SYM_GOFTBL),
 		    MSG_ORIG(MSG_SYM_GOFTBL_U), SDAUX_ID_GOT, FLG_SY_DYNSORT,
 		    (FLG_SY1_DEFAULT | FLG_SY1_EXPDEF), ofl) == S_ERROR)
@@ -957,13 +968,13 @@ ld_sym_adjust_vis(Sym_desc *sdp, Ofl_desc *ofl)
 		 *
 		 * A symbol is a candidate for auto-reduction/elimination if:
 		 *
-		 *   .  the symbol wasn't explicitly defined within a mapfile
+		 *  -	the symbol wasn't explicitly defined within a mapfile
 		 *	(in which case all the necessary state has been applied
 		 *	to the symbol), or
-		 *   .	the symbol isn't one of the family of reserved
+		 *  -	the symbol isn't one of the family of reserved
 		 *	special symbols (ie. _end, _etext, etc.), or
-		 *   .	the symbol isn't a SINGLETON, or
-		 *   .  the symbol wasn't explicitly defined within a version
+		 *  -	the symbol isn't a SINGLETON, or
+		 *  -	the symbol wasn't explicitly defined within a version
 		 *	definition associated with an input relocatable object.
 		 *
 		 * Indicate that the symbol has been reduced as it may be
@@ -1119,9 +1130,10 @@ ld_sym_validate(Ofl_desc *ofl)
 		needed = FLG_OF_FATAL;
 
 	/*
-	 * If the output image is being versioned all symbol definitions must be
-	 * associated with a version.  Any symbol that isn't is classified as
-	 * undefined and a fatal error condition will be indicated.
+	 * If the output image is being versioned, then all symbol definitions
+	 * must be associated with a version.  Any symbol that isn't associated
+	 * with a version is classified as undefined, and a fatal error
+	 * condition is indicated.
 	 */
 	if ((oflags & FLG_OF_VERDEF) && (ofl->ofl_vercnt > VER_NDX_GLOBAL))
 		verdesc = FLG_OF_FATAL;
@@ -1146,7 +1158,7 @@ ld_sym_validate(Ofl_desc *ofl)
 
 		for (i = 0; special[i] != NULL; i++) {
 			if (((sdp = ld_sym_find(special[i],
-			    SYM_NOHASH, 0, ofl)) != NULL) &&
+			    SYM_NOHASH, NULL, ofl)) != NULL) &&
 			    (sdp->sd_sym->st_size == 0)) {
 				if (ld_sym_copy(sdp) == S_ERROR)
 					return (S_ERROR);
@@ -1335,7 +1347,7 @@ ld_sym_validate(Ofl_desc *ofl)
 			 * allow being directly bound to.
 			 */
 			if (sdp->sd_flags1 & FLG_SY1_NDIR)
-				ofl->ofl_flags1 |= FLG_OF1_NDIRECT;
+				ofl->ofl_flags1 |= FLG_OF1_NGLBDIR;
 
 			if (sdp->sd_file->ifl_vercnt) {
 				int		vndx;
@@ -1380,15 +1392,23 @@ ld_sym_validate(Ofl_desc *ofl)
 
 		/*
 		 * If the output image is to be versioned then all symbol
-		 * definitions must be associated with a version.
+		 * definitions must be associated with a version.  Remove any
+		 * versioning that might be left associated with an undefined
+		 * symbol.
 		 */
-		if (verdesc && (sdp->sd_ref == REF_REL_NEED) &&
-		    (sym->st_shndx != SHN_UNDEF) &&
-		    (!(sdp->sd_flags1 & FLG_SY1_HIDDEN)) &&
-		    (sdp->sd_aux->sa_overndx == 0)) {
-			sym_undef_entry(ofl, sdp, NOVERSION);
-			ofl->ofl_flags |= verdesc;
-			continue;
+		if (verdesc && (sdp->sd_ref == REF_REL_NEED)) {
+			if (sym->st_shndx == SHN_UNDEF) {
+				if (sdp->sd_aux && sdp->sd_aux->sa_overndx)
+					sdp->sd_aux->sa_overndx = 0;
+			} else {
+				if ((!(sdp->sd_flags1 & FLG_SY1_HIDDEN)) &&
+				    sdp->sd_aux &&
+				    (sdp->sd_aux->sa_overndx == 0)) {
+					sym_undef_entry(ofl, sdp, NOVERSION);
+					ofl->ofl_flags |= verdesc;
+					continue;
+				}
+			}
 		}
 
 		/*
@@ -1601,8 +1621,8 @@ ld_sym_validate(Ofl_desc *ofl)
 	 */
 	ret = 0;
 	if (ofl->ofl_entry) {
-		if ((sdp =
-		    ld_sym_find(ofl->ofl_entry, SYM_NOHASH, 0, ofl)) == NULL) {
+		if ((sdp = ld_sym_find(ofl->ofl_entry, SYM_NOHASH,
+		    NULL, ofl)) == NULL) {
 			eprintf(ofl->ofl_lml, ERR_FATAL,
 			    MSG_INTL(MSG_ARG_NOENTRY), ofl->ofl_entry);
 			ret++;
@@ -1613,12 +1633,12 @@ ld_sym_validate(Ofl_desc *ofl)
 			ofl->ofl_entry = (void *)sdp;
 		}
 	} else if (((sdp = ld_sym_find(MSG_ORIG(MSG_SYM_START),
-	    SYM_NOHASH, 0, ofl)) != NULL) && (ensure_sym_local(ofl,
+	    SYM_NOHASH, NULL, ofl)) != NULL) && (ensure_sym_local(ofl,
 	    sdp, 0) == 0)) {
 		ofl->ofl_entry = (void *)sdp;
 
 	} else if (((sdp = ld_sym_find(MSG_ORIG(MSG_SYM_MAIN),
-	    SYM_NOHASH, 0, ofl)) != NULL) && (ensure_sym_local(ofl,
+	    SYM_NOHASH, NULL, ofl)) != NULL) && (ensure_sym_local(ofl,
 	    sdp, 0) == 0)) {
 		ofl->ofl_entry = (void *)sdp;
 	}
@@ -1822,6 +1842,7 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 	Half		etype = ifl->ifl_ehdr->e_type;
 	int		etype_rel;
 	const char	*symsecname, *strsecname;
+	Word		symsecndx;
 	avl_index_t	where;
 	int		test_gnu_hidden_bit, weak;
 
@@ -1838,6 +1859,7 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 
 	DBG_CALL(Dbg_syms_process(ofl->ofl_lml, ifl));
 
+	symsecndx = isc->is_scnndx;
 	if (isc->is_name)
 		symsecname = isc->is_name;
 	else
@@ -1851,8 +1873,8 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 		ndx = shdr->sh_link;
 		if ((ndx == 0) || (ndx >= ifl->ifl_shnum)) {
 			eprintf(ofl->ofl_lml, ERR_FATAL,
-			    MSG_INTL(MSG_FIL_INVSHLINK),
-			    ifl->ifl_name, symsecname, EC_XWORD(ndx));
+			    MSG_INTL(MSG_FIL_INVSHLINK), ifl->ifl_name,
+			    EC_WORD(symsecndx), symsecname, EC_XWORD(ndx));
 			return (S_ERROR);
 		}
 		strsize = ifl->ifl_isdesc[ndx]->is_shdr->sh_size;
@@ -1935,7 +1957,8 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 			 * Check if st_name has a valid value or not.
 			 */
 			if ((name = string(ofl, ifl, sym, strs, strsize, ndx,
-			    shndx, symsecname, strsecname, &sdflags)) == NULL) {
+			    shndx, symsecndx, symsecname, strsecname,
+			    &sdflags)) == NULL) {
 				ofl->ofl_flags |= FLG_OF_FATAL;
 				continue;
 			}
@@ -1947,7 +1970,7 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 			if (shndx_bad) {
 				eprintf(ofl->ofl_lml, ERR_WARNING,
 				    MSG_INTL(MSG_SYM_INVSHNDX),
-				    demangle_symname(name, isc->is_name, ndx),
+				    demangle_symname(name, symsecname, ndx),
 				    ifl->ifl_name,
 				    conv_sym_shndx(osabi, mach, sym->st_shndx,
 				    CONV_FMT_DECIMAL, &inv_buf));
@@ -1963,7 +1986,7 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 			 * won't become part of the output image, but we must
 			 * process it to test for register conflicts.
 			 */
-			rsdp = sdp = 0;
+			rsdp = sdp = NULL;
 			if (sdflags & FLG_SY_REGSYM) {
 				/*
 				 * The presence of FLG_SY_REGSYM means that
@@ -2073,7 +2096,7 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 				if (sym->st_shndx == SHN_UNDEF) {
 					eprintf(ofl->ofl_lml, ERR_WARNING,
 					    MSG_INTL(MSG_SYM_INVSHNDX),
-					    demangle_symname(name, isc->is_name,
+					    demangle_symname(name, symsecname,
 					    ndx), ifl->ifl_name,
 					    conv_sym_shndx(osabi, mach,
 					    sym->st_shndx, CONV_FMT_DECIMAL,
@@ -2159,7 +2182,7 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 			    (sdp->sd_isc && (sdp->sd_isc->is_osdesc == NULL))) {
 				eprintf(ofl->ofl_lml, ERR_WARNING,
 				    MSG_INTL(MSG_SYM_INVSHNDX),
-				    demangle_symname(name, isc->is_name, ndx),
+				    demangle_symname(name, symsecname, ndx),
 				    ifl->ifl_name,
 				    conv_sym_shndx(osabi, mach, sym->st_shndx,
 				    CONV_FMT_DECIMAL, &inv_buf));
@@ -2239,7 +2262,7 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 		 * Check if st_name has a valid value or not.
 		 */
 		if ((name = string(ofl, ifl, sym, strs, strsize, ndx, shndx,
-		    symsecname, strsecname, &sdflags)) == NULL) {
+		    symsecndx, symsecname, strsecname, &sdflags)) == NULL) {
 			ofl->ofl_flags |= FLG_OF_FATAL;
 			continue;
 		}
@@ -2251,7 +2274,7 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 		if (shndx_bad) {
 			eprintf(ofl->ofl_lml, ERR_WARNING,
 			    MSG_INTL(MSG_SYM_INVSHNDX),
-			    demangle_symname(name, isc->is_name, ndx),
+			    demangle_symname(name, symsecname, ndx),
 			    ifl->ifl_name,
 			    conv_sym_shndx(osabi, mach, sym->st_shndx,
 			    CONV_FMT_DECIMAL, &inv_buf));
@@ -2295,7 +2318,7 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 		if ((bind != STB_GLOBAL) && (bind != STB_WEAK)) {
 			eprintf(ofl->ofl_lml, ERR_WARNING,
 			    MSG_INTL(MSG_SYM_NONGLOB),
-			    demangle_symname(name, isc->is_name, ndx),
+			    demangle_symname(name, symsecname, ndx),
 			    ifl->ifl_name,
 			    conv_sym_info_bind(bind, 0, &inv_buf));
 			continue;
@@ -2320,7 +2343,7 @@ ld_sym_process(Is_desc *isc, Ifl_desc *ifl, Ofl_desc *ofl)
 				 */
 				eprintf(ofl->ofl_lml, ERR_WARNING,
 				    MSG_INTL(MSG_SYM_INVSHNDX),
-				    demangle_symname(name, isc->is_name, ndx),
+				    demangle_symname(name, symsecname, ndx),
 				    ifl->ifl_name,
 				    conv_sym_shndx(osabi, mach, sym->st_shndx,
 				    CONV_FMT_DECIMAL, &inv_buf));
@@ -2664,4 +2687,58 @@ ld_sym_add_u(const char *name, Ofl_desc *ofl, Msg mid)
 	sdp->sd_flags |= FLG_SY_CMDREF;
 
 	return (sdp);
+}
+
+/*
+ * STT_SECTION symbols have their st_name field set to NULL, and consequently
+ * have no name. Generate a name suitable for diagnostic use for such a symbol.
+ * The resulting name will be of the form:
+ *
+ *	"XXX (section)"
+ *
+ * where XXX is the name of the section.
+ *
+ * Diagnostics for STT_SECTION symbols tend to come in clusters,
+ * so we use a static variable to retain the last string we generate. If
+ * another one comes along for the same section before some other section
+ * intervenes, we will reuse the string.
+ *
+ * entry:
+ *	isc - Input section assocated with the symbol.
+ *	fmt - NULL, or format string to use.
+ *
+ * exit:
+ *	Returns the allocated string, or NULL on allocation failure.
+ */
+const const char *
+ld_stt_section_sym_name(Is_desc *isp)
+{
+	static const char	*last_fmt;
+	static Is_desc		*last_isp = NULL;
+	static char		*namestr;
+
+	const char		*fmt;
+	size_t			len;
+
+	if ((isp != NULL) && (isp->is_name != NULL)) {
+		fmt = (isp->is_flags & FLG_IS_GNSTRMRG) ?
+		    MSG_INTL(MSG_STR_SECTION_MSTR) : MSG_INTL(MSG_STR_SECTION);
+
+		if ((last_isp == isp) && (last_fmt == fmt))
+			return (namestr);
+
+		len = strlen(fmt) + strlen(isp->is_name) + 1;
+
+		if ((namestr = libld_malloc(len)) == 0)
+			return (NULL);
+		(void) snprintf(namestr, len, fmt, isp->is_name);
+
+		/* Remember for next time */
+		last_fmt = fmt;
+		last_isp = isp;
+
+		return (namestr);
+	}
+
+	return (NULL);
 }

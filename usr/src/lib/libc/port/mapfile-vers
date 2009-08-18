@@ -101,6 +101,7 @@ SUNW_1.23 {		# SunOS 5.11 (Solaris 11)
 	door_unbind;
 	err;
 	errx;
+	faccessat;
 	fdatasync;
 	fgetattr;
 	forkallx;
@@ -1402,7 +1403,6 @@ SUNWprivate_1.1 {
 	_uberdata;
 	__xpg6 = NODIRECT;
     protected:
-	__accessat;
 	acctctl;
 	allocids;
 	_assert_c99;
@@ -1605,6 +1605,7 @@ SUNWprivate_1.1 {
 	__priv_bracket;
 	__priv_relinquish;
 	pset_assign_forced;
+	pset_bind_lwp;
 	_psignal;
 	_pthread_setcleanupinit;
 	__putwchar_xpg5;

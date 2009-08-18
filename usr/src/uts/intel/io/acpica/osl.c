@@ -44,10 +44,11 @@
 #include <sys/taskq.h>
 #include <sys/strlog.h>
 #include <sys/note.h>
+#include <sys/promif.h>
 
 #include <sys/acpi/acpi.h>
+#include <sys/acpi/accommon.h>
 #include <sys/acpica.h>
-#include <sys/acpi/acinterp.h>
 
 #define	MAX_DAT_FILE_SIZE	(64*1024)
 
@@ -701,11 +702,12 @@ ACPI_THREAD_ID
 AcpiOsGetThreadId(void)
 {
 	/*
-	 * ACPI CA regards thread ID as an error, but it's valid
-	 * on Solaris during kernel initialization.  Thus, 1 is added
-	 * to the kernel thread ID to avoid returning 0
+	 * ACPI CA doesn't care what actual value is returned as long
+	 * as it is non-zero and unique to each existing thread.
+	 * ACPI CA assumes that thread ID is castable to a pointer,
+	 * so we use the current thread pointer.
 	 */
-	return (ddi_get_kt_did() + 1);
+	return (curthread);
 }
 
 /*
@@ -1163,12 +1165,20 @@ acpica_pr_buf(char *buf)
 		*outp++ = c;
 		if (c == '\n' || --out_remaining == 0) {
 			*outp = '\0';
-			if (acpica_console_out)
+			switch (acpica_console_out) {
+			case 1:
 				printf(acpica_outbuf);
-			else
+				break;
+			case 2:
+				prom_printf(acpica_outbuf);
+				break;
+			case 0:
+			default:
 				(void) strlog(0, 0, 0,
 				    SL_CONSOLE | SL_NOTE | SL_LOGONLY,
 				    acpica_outbuf);
+				break;
+			}
 			acpica_outbuf_offset = 0;
 			outp = acpica_outbuf;
 			out_remaining = ACPICA_OUTBUF_LEN - 1;
@@ -2218,4 +2228,16 @@ void
 acpica_get_global_FADT(ACPI_TABLE_FADT **gbl_FADT)
 {
 	*gbl_FADT = &AcpiGbl_FADT;
+}
+
+void
+acpica_write_cpupm_capabilities(boolean_t pstates, boolean_t cstates)
+{
+	if (pstates && AcpiGbl_FADT.PstateControl != 0)
+		(void) AcpiHwRegisterWrite(ACPI_REGISTER_SMI_COMMAND_BLOCK,
+		    AcpiGbl_FADT.PstateControl);
+
+	if (cstates && AcpiGbl_FADT.CstControl != 0)
+		(void) AcpiHwRegisterWrite(ACPI_REGISTER_SMI_COMMAND_BLOCK,
+		    AcpiGbl_FADT.CstControl);
 }

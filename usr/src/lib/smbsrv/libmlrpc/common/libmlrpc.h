@@ -245,7 +245,7 @@ typedef struct ndr_binding {
 
 typedef struct ndr_pipe {
 	int			np_fid;
-	smb_opipe_context_t	np_ctx;
+	smb_netuserinfo_t	np_user;
 	char			*np_buf;
 	struct uio		np_uio;
 	iovec_t			np_iov;
@@ -477,6 +477,16 @@ typedef struct ndr_handle {
 	void			(*nh_data_free)(void *);
 } ndr_handle_t;
 
+#define	NDR_PDU_SIZE_HINT_DEFAULT	(16*1024)
+#define	NDR_BUF_MAGIC			0x4E425546	/* NBUF */
+
+typedef struct ndr_buf {
+	uint32_t		nb_magic;
+	ndr_stream_t		nb_nds;
+	ndr_heap_t		*nb_heap;
+	ndr_typeinfo_t		*nb_ti;
+} ndr_buf_t;
+
 /* ndr_ops.c */
 void nds_initialize(ndr_stream_t *, unsigned, int, ndr_heap_t *);
 void nds_finalize(ndr_stream_t *, ndr_fraglist_t *);
@@ -488,8 +498,9 @@ int ndr_clnt_call(ndr_binding_t *, int, void *);
 void ndr_clnt_free_heap(ndr_client_t *);
 
 /* ndr_marshal.c */
-int ndr_encode_decode_common(ndr_xa_t *, int, unsigned, ndr_typeinfo_t *,
-    void *);
+ndr_buf_t *ndr_buf_init(ndr_typeinfo_t *);
+void ndr_buf_fini(ndr_buf_t *);
+int ndr_buf_decode(ndr_buf_t *, unsigned, const char *data, size_t, void *);
 int ndr_decode_call(ndr_xa_t *, void *);
 int ndr_encode_return(ndr_xa_t *, void *);
 int ndr_encode_call(ndr_xa_t *, void *);
@@ -505,7 +516,6 @@ int ndr_pipe_open(int, uint8_t *, uint32_t);
 int ndr_pipe_close(int);
 int ndr_pipe_read(int, uint8_t *, uint32_t *, uint32_t *);
 int ndr_pipe_write(int, uint8_t *, uint32_t);
-int ndr_pipe_getinfo(int, ndr_pipe_info_t *);
 
 int ndr_generic_call_stub(ndr_xa_t *);
 

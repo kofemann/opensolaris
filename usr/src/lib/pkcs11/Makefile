@@ -35,7 +35,8 @@ CHECKHDRS =	$(HDRDIR)/cryptoki.h
 
 SUBDIRS = \
 	libpkcs11	\
-	libsoftcrypto
+	libsoftcrypto   \
+	libkcfd
 
 #
 # The PKCS11 TPM provider is only available for x86.

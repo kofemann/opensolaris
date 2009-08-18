@@ -297,6 +297,7 @@ typedef struct ibd_state_s {
 	uint16_t		id_pkix;
 	uint8_t			id_port;
 	ibt_mcg_info_t		*id_mcinfo;
+	boolean_t		id_bgroup_created;
 
 	mac_handle_t		id_mh;
 	mac_resource_handle_t	id_rh;
@@ -361,6 +362,8 @@ typedef struct ibd_state_s {
 	uint_t			id_lso_maxlen;
 	int			id_hca_res_lkey_capab;
 	ibt_lkey_t		id_res_lkey;
+
+	uint32_t		id_mac_state;
 } ibd_state_t;
 
 #endif /* _KERNEL && !_BOOT */

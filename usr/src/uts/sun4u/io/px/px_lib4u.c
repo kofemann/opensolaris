@@ -43,7 +43,7 @@
 #include <sys/hotplug/pci/pciehpc.h>
 #include <sys/spl.h>
 #include <px_obj.h>
-#include <pcie_pwr.h>
+#include <sys/pcie_pwr.h>
 #include "px_tools_var.h"
 #include <px_regs.h>
 #include <px_csr.h>
@@ -1498,7 +1498,7 @@ px_lib_clr_errs(px_t *px_p, dev_info_t *rdip, uint64_t addr)
 	px_ranges_t	*ranges_p;
 	int		range_len;
 	uint32_t	addr_high, addr_low;
-	pcie_req_id_t	bdf = 0;
+	pcie_req_id_t	bdf = PCIE_INVALID_BDF;
 
 	/* Create the derr */
 	bzero(&derr, sizeof (ddi_fm_error_t));
@@ -1533,7 +1533,7 @@ px_lib_clr_errs(px_t *px_p, dev_info_t *rdip, uint64_t addr)
 				if (rdip)
 					bdf = PCI_GET_BDF(rdip);
 				else
-					bdf = NULL;
+					bdf = PCIE_INVALID_BDF;
 				break;
 			}
 			break;

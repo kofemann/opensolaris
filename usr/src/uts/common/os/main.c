@@ -346,11 +346,6 @@ start_init(void)
 	lwp_rtt();
 }
 
-#if defined(__i386) || defined(__amd64)
-extern void return_instr(void);
-void (*rootnex_iommu_add_intr)(void) = (void (*)(void))return_instr;
-#endif
-
 void
 main(void)
 {
@@ -456,13 +451,6 @@ main(void)
 	(void) spl0();
 	interrupts_unleashed = 1;
 
-#if defined(__i386) || defined(__amd64)
-	/*
-	 * add intel iommu fault event handler
-	 */
-	rootnex_iommu_add_intr();
-#endif
-
 	vfs_mountroot();	/* Mount the root file system */
 	errorq_init();		/* after vfs_mountroot() so DDI root is ready */
 	cpu_kstat_init(CPU);	/* after vfs_mountroot() so TOD is valid */
@@ -493,7 +481,9 @@ main(void)
 	 * and swap have been set up.
 	 */
 	consconfig();
+#ifndef	__sparc
 	release_bootstrap();
+#endif
 
 	/*
 	 * attach drivers with ddi-forceattach prop
@@ -550,6 +540,14 @@ main(void)
 	 * Perform MP initialization, if any.
 	 */
 	start_other_cpus(0);
+
+#ifdef	__sparc
+	/*
+	 * Release bootstrap here since PROM interfaces are
+	 * used to start other CPUs above.
+	 */
+	release_bootstrap();
+#endif
 
 	/*
 	 * Finish lgrp initialization after all CPUS are brought online.

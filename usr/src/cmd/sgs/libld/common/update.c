@@ -308,9 +308,9 @@ update_osym(Ofl_desc *ofl)
 	if (!(flags & FLG_OF_NOVERSEC) &&
 	    (flags & (FLG_OF_VERNEED | FLG_OF_VERDEF))) {
 		versym = (Versym *)ofl->ofl_osversym->os_outdata->d_buf;
-		versym[0] = 0;
+		versym[0] = NULL;
 	} else
-		versym = 0;
+		versym = NULL;
 
 	/*
 	 * If syminfo section exists be prepared to fill it in.
@@ -319,7 +319,7 @@ update_osym(Ofl_desc *ofl)
 		syminfo = ofl->ofl_ossyminfo->os_outdata->d_buf;
 		syminfo[0].si_flags = SYMINFO_CURRENT;
 	} else
-		syminfo = 0;
+		syminfo = NULL;
 
 	/*
 	 * Setup our string tables.
@@ -949,8 +949,8 @@ update_osym(Ofl_desc *ofl)
 	ssndx = ofl->ofl_scopecnt + ofl->ofl_elimcnt;
 
 	/*
-	 * Traverse the internal symbol table updating information and
-	 * allocating common.
+	 * Traverse the internal symbol table updating global symbol information
+	 * and allocating common.
 	 */
 	for (sav = avl_first(&ofl->ofl_symavl); sav;
 	    sav = AVL_NEXT(&ofl->ofl_symavl, sav)) {
@@ -1222,16 +1222,22 @@ update_osym(Ofl_desc *ofl)
 			if (sdp->sd_ref == REF_DYN_NEED) {
 				/*
 				 * A reference is bound to a needed dependency.
-				 * Save this symbol descriptor, as its boundto
-				 * element will need updating after the .dynamic
-				 * section has been created.  Flag whether this
-				 * reference is lazy loadable, and if a direct
-				 * binding is to be established.
+				 * Save the syminfo entry, so that when the
+				 * .dynamic section has been updated, a
+				 * DT_NEEDED entry can be associated
+				 * (see update_osyminfo()).
 				 */
 				if (aplist_append(alpp, sdp,
 				    AL_CNT_OFL_SYMINFOSYMS) == NULL)
 					return (0);
 
+				/*
+				 * Flag that the symbol has a direct association
+				 * with the external reference (this is an old
+				 * tagging, that has no real effect by itself).
+				 * And flag whether this reference is lazy
+				 * loadable.
+				 */
 				syminfo[ndx].si_flags |= SYMINFO_FLG_DIRECT;
 				if (sdp->sd_flags & FLG_SY_LAZYLD)
 					syminfo[ndx].si_flags |=
@@ -2428,11 +2434,17 @@ update_odynamic(Ofl_desc *ofl)
 	 * via a mapfile, or -znodirect was used on the command line, then
 	 * clear the DF_1_DIRECT flag.  The resultant object will use per-symbol
 	 * direct bindings rather than be enabled for global direct bindings.
+	 *
+	 * If any no-direct bindings exist within this object, set the
+	 * DF_1_NODIRECT flag.  ld(1) recognizes this flag when processing
+	 * dependencies, and performs extra work to ensure that no direct
+	 * bindings are established to the no-direct symbols that exist
+	 * within these dependencies.
 	 */
-	if (ofl->ofl_flags1 & FLG_OF1_NDIRECT) {
+	if (ofl->ofl_flags1 & FLG_OF1_NGLBDIR)
 		ofl->ofl_dtflags_1 &= ~DF_1_DIRECT;
+	if (ofl->ofl_flags1 & FLG_OF1_NDIRECT)
 		ofl->ofl_dtflags_1 |= DF_1_NODIRECT;
-	}
 
 	dyn->d_tag = DT_FLAGS_1;
 	dyn->d_un.d_val = ofl->ofl_dtflags_1;
@@ -2634,7 +2646,6 @@ update_overneed(Ofl_desc *ofl)
 	Verneed		*vnd, *_vnd;
 	Str_tbl		*dynstr;
 	Word		num = 0;
-	int		has_specver;
 
 	dynstr = ofl->ofl_dynstrtab;
 	_vnd = vnd = (Verneed *)ofl->ofl_osverneed->os_outdata->d_buf;
@@ -2647,7 +2658,6 @@ update_overneed(Ofl_desc *ofl)
 		Half		_cnt;
 		Word		cnt = 0;
 		Vernaux		*_vnap, *vnap;
-		Sdf_desc	*sdf = ifl->ifl_sdfdesc;
 		size_t		stoff;
 
 		if (!(ifl->ifl_flags & FLG_IF_VERNEED))
@@ -2659,41 +2669,6 @@ update_overneed(Ofl_desc *ofl)
 		vnd->vn_file = stoff;
 
 		_vnap = vnap = (Vernaux *)(vnd + 1);
-
-		has_specver = sdf && (sdf->sdf_flags & FLG_SDF_SPECVER);
-		if (has_specver) {
-			Sdv_desc	*sdv;
-			Aliste		idx2;
-
-			/*
-			 * If version needed definitions were specified in
-			 * a mapfile ($SPECVERS=*) then record those
-			 * definitions.
-			 */
-			for (ALIST_TRAVERSE(sdf->sdf_verneed, idx2, sdv)) {
-				/*
-				 * If this $SPECVERS item corresponds
-				 * to a real version, then skip it here
-				 * in favor of the real one below.
-				 */
-				if (sdv->sdv_flags & FLG_SDV_MATCHED)
-					continue;
-
-				(void) st_setstring(dynstr, sdv->sdv_name,
-				    &stoff);
-				vnap->vna_name = stoff;
-				/* LINTED */
-				vnap->vna_hash = (Word)elf_hash(sdv->sdv_name);
-				vnap->vna_flags = 0;
-				vnap->vna_other = 0;
-				_vnap = vnap;
-				vnap++;
-				cnt++;
-				/* LINTED */
-				_vnap->vna_next = (Word)((uintptr_t)vnap -
-				    (uintptr_t)_vnap);
-			}
-		}
 
 		/*
 		 * Traverse the version index list recording
@@ -2723,22 +2698,9 @@ update_overneed(Ofl_desc *ofl)
 				 * to verify A at runtime and skip B. The
 				 * version normalization process sets the INFO
 				 * flag for the versions we want ld.so.1 to
-				 * skip. By default, we progagate these flags
-				 * to the output object as computed.
-				 *
-				 * The presence of $SPECVERS items alters
-				 * matters. If $SPECVERS are present in the
-				 * mapfile, then any version that corresponds
-				 * to the $SPECVERS must be validated, and
-				 * all others must be skipped. This is true
-				 * even if it causes ld.so.1 to incorrectly
-				 * validate the object ---- it is an override
-				 * mechanism.
+				 * skip.
 				 */
-				if ((!has_specver &&
-				    (vip->vi_flags & VER_FLG_INFO)) ||
-				    (has_specver &&
-				    !(vip->vi_flags & FLG_VER_SPECVER)))
+				if (vip->vi_flags & VER_FLG_INFO)
 					vnap->vna_flags |= VER_FLG_INFO;
 
 				_vnap = vnap;
@@ -3202,7 +3164,7 @@ translate_link(Ofl_desc *ofl, Os_desc *osp, Word link, const char *msg)
 	 */
 	if (link >= ifl->ifl_shnum) {
 		eprintf(ofl->ofl_lml, ERR_WARNING, msg, ifl->ifl_name,
-		    isp->is_name, EC_XWORD(link));
+		    EC_WORD(isp->is_scnndx), isp->is_name, EC_XWORD(link));
 		return (link);
 	}
 
@@ -3321,10 +3283,10 @@ ld_update_outfile(Ofl_desc *ofl)
 		 * If we are creating a PT_SUNWDTRACE segment, remember where
 		 * the program header is.  The header values are assigned after
 		 * update_osym() has completed and the symbol table addresses
-		 * have been udpated.
+		 * have been updated.
 		 */
 		if (phdr->p_type == PT_SUNWDTRACE) {
-			if ((ofl->ofl_dtracesym) &&
+			if (ofl->ofl_dtracesym &&
 			    ((flags & FLG_OF_RELOBJ) == 0)) {
 				dtracesgp = sgp;
 				dtracesndx = segndx;

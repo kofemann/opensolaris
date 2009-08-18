@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -810,9 +810,16 @@ fake_up_symtab(struct ps_prochandle *P, const elf_file_header_t *ehdr,
 
 	if (symtab->sh_addr == 0 ||
 	    (mp = Paddr2mptr(P, symtab->sh_addr)) == NULL ||
-	    (fp = mp->map_file) == NULL ||
-	    fp->file_symtab.sym_data_pri != NULL) {
+	    (fp = mp->map_file) == NULL) {
 		dprintf("fake_up_symtab: invalid section\n");
+		dprintf("fp->file_symtab.sym_data_pri == %lx\n",
+		    (long)fp->file_symtab.sym_data_pri);
+		return;
+	}
+
+	if (fp->file_symtab.sym_data_pri != NULL) {
+		dprintf("Symbol table already loaded (sh_addr 0x%lx)\n",
+		    (long)symtab->sh_addr);
 		return;
 	}
 
@@ -1288,7 +1295,7 @@ core_find_text(struct ps_prochandle *P, Elf *elf, rd_loadobj_t *rlp)
 	uint_t i;
 	size_t nphdrs;
 
-	if (elf_getphnum(elf, &nphdrs) == 0)
+	if (elf_getphdrnum(elf, &nphdrs) == -1)
 		return (NULL);
 
 	for (i = 0; i < nphdrs; i++) {
@@ -1323,7 +1330,7 @@ core_find_data(struct ps_prochandle *P, Elf *elf, rd_loadobj_t *rlp)
 	 * as the virtual address at which is was loaded.
 	 */
 	if (gelf_getehdr(elf, &ehdr) == NULL ||
-	    elf_getphnum(elf, &nphdrs) == 0)
+	    elf_getphdrnum(elf, &nphdrs) == -1)
 		return (NULL);
 
 	for (i = 0; i < nphdrs; i++) {

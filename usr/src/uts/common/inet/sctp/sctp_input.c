@@ -1201,6 +1201,7 @@ sctp_data_chunk(sctp_t *sctp, sctp_chunk_hdr_t *ch, mblk_t *mp, mblk_t **dups,
 			(sctp)->sctp_force_sack = 1;			\
 	} else if (SEQ_GT(tsn, sctp->sctp_ftsn)) {			\
 		/* Got a gap; record it */				\
+		BUMP_LOCAL(sctp->sctp_outseqtsns);			\
 		dprint(2, ("data_chunk: acking gap %x\n", tsn));	\
 		sctp_ack_add(&sctp->sctp_sack_info, tsn,		\
 		    &sctp->sctp_sack_gaps);				\
@@ -1217,6 +1218,7 @@ sctp_data_chunk(sctp_t *sctp, sctp_chunk_hdr_t *ch, mblk_t *mp, mblk_t **dups,
 	/* Check for duplicates */
 	if (SEQ_LT(tsn, sctp->sctp_ftsn)) {
 		dprint(4, ("sctp_data_chunk: dropping duplicate\n"));
+		BUMP_LOCAL(sctp->sctp_idupchunks);
 		sctp->sctp_force_sack = 1;
 		sctp_add_dup(dc->sdh_tsn, dups);
 		return;
@@ -1230,6 +1232,7 @@ sctp_data_chunk(sctp_t *sctp, sctp_chunk_hdr_t *ch, mblk_t *mp, mblk_t **dups,
 				dprint(4,
 				    ("sctp_data_chunk: dropping dup > "
 				    "cumtsn\n"));
+				BUMP_LOCAL(sctp->sctp_idupchunks);
 				sctp->sctp_force_sack = 1;
 				sctp_add_dup(dc->sdh_tsn, dups);
 				return;
@@ -1617,6 +1620,7 @@ sctp_fill_sack(sctp_t *sctp, unsigned char *dst, int sacklen)
 	}
 
 	BUMP_LOCAL(sctp->sctp_obchunks);
+	BUMP_LOCAL(sctp->sctp_osacks);
 }
 
 mblk_t *
@@ -2323,13 +2327,19 @@ sctp_process_uo_gaps(sctp_t *sctp, uint32_t ctsn, sctp_sack_frag_t *ssf,
 		gapstart = ctsn + ntohs(ssf->ssf_start);
 		gapend = ctsn + ntohs(ssf->ssf_end);
 
-		/* SACK for TSN we have not sent - ABORT */
+		/*
+		 * Sanity checks:
+		 *
+		 * 1. SACK for TSN we have not sent - ABORT
+		 * 2. Invalid or spurious gaps, ignore all gaps
+		 */
 		if (SEQ_GT(gapstart, sctp->sctp_ltsn - 1) ||
 		    SEQ_GT(gapend, sctp->sctp_ltsn - 1)) {
 			BUMP_MIB(&sctps->sctps_mib, sctpInAckUnsent);
 			*trysend = -1;
 			return (acked);
-		} else if (SEQ_LT(gapend, gapstart)) {
+		} else if (SEQ_LT(gapend, gapstart) ||
+		    SEQ_LEQ(gapstart, ctsn)) {
 			break;
 		}
 		/*
@@ -2508,6 +2518,7 @@ sctp_got_sack(sctp_t *sctp, sctp_chunk_hdr_t *sch)
 	sctp_stack_t		*sctps = sctp->sctp_sctps;
 
 	BUMP_LOCAL(sctp->sctp_ibchunks);
+	BUMP_LOCAL(sctp->sctp_isacks);
 	chunklen = ntohs(sch->sch_len);
 	if (chunklen < (sizeof (*sch) + sizeof (*sc)))
 		return (0);
@@ -2568,6 +2579,7 @@ sctp_got_sack(sctp_t *sctp, sctp_chunk_hdr_t *sch)
 			 */
 			fp = sctp->sctp_current;
 			fp->rto = fp->srtt + 4 * fp->rttvar;
+			SCTP_MAX_RTO(sctp, fp);
 			/* Resend the ZWP */
 			pkt = sctp_rexmit_packet(sctp, &meta, &mp1, fp,
 			    &pkt_len);
@@ -2590,6 +2602,7 @@ sctp_got_sack(sctp_t *sctp, sctp_chunk_hdr_t *sch)
 			 */
 			fp = sctp->sctp_current;
 			fp->rto = fp->srtt + 4 * fp->rttvar;
+			SCTP_MAX_RTO(sctp, fp);
 			sctp->sctp_zero_win_probe = B_FALSE;
 			/* This is probably not required */
 			if (!sctp->sctp_rexmitting) {
@@ -2609,6 +2622,7 @@ sctp_got_sack(sctp_t *sctp, sctp_chunk_hdr_t *sch)
 		}
 	}
 	num_gaps = ntohs(sc->ssc_numfrags);
+	UPDATE_LOCAL(sctp->sctp_gapcnt, num_gaps);
 	if (num_gaps == 0 || mp == NULL || !SCTP_CHUNK_ISSENT(mp) ||
 	    chunklen < (sizeof (*sch) + sizeof (*sc) +
 	    num_gaps * sizeof (*ssf))) {
@@ -2667,12 +2681,18 @@ sctp_got_sack(sctp_t *sctp, sctp_chunk_hdr_t *sch)
 		gapstart = cumtsn + ntohs(ssf->ssf_start);
 		gapend = cumtsn + ntohs(ssf->ssf_end);
 
-		/* SACK for TSN we have not sent - ABORT */
+		/*
+		 * Sanity checks:
+		 *
+		 * 1. SACK for TSN we have not sent - ABORT
+		 * 2. Invalid or spurious gaps, ignore all gaps
+		 */
 		if (SEQ_GT(gapstart, sctp->sctp_ltsn - 1) ||
 		    SEQ_GT(gapend, sctp->sctp_ltsn - 1)) {
 			BUMP_MIB(&sctps->sctps_mib, sctpInAckUnsent);
 			return (-1);
-		} else if (SEQ_LT(gapend, gapstart)) {
+		} else if (SEQ_LT(gapend, gapstart) ||
+		    SEQ_LEQ(gapstart, cumtsn)) {
 			break;
 		}
 		/*
@@ -2689,7 +2709,7 @@ sctp_got_sack(sctp_t *sctp, sctp_chunk_hdr_t *sch)
 		 * the fast retransmit threshold, we will fast retransmit
 		 * after processing all the gap blocks.
 		 */
-		ASSERT(SEQ_LT(xtsn, gapstart));
+		ASSERT(SEQ_LEQ(xtsn, gapstart));
 		while (xtsn != gapstart) {
 			SCTP_CHUNK_SET_SACKCNT(mp, SCTP_CHUNK_SACKCNT(mp) + 1);
 			if (SCTP_CHUNK_SACKCNT(mp) ==
@@ -2737,9 +2757,16 @@ sctp_got_sack(sctp_t *sctp, sctp_chunk_hdr_t *sch)
 				ump = ump->b_next;
 				/*
 				 * ump can't be NULL given the sanity check
-				 * above.
+				 * above.  But if it is NULL, it means that
+				 * there is a data corruption.  We'd better
+				 * panic.
 				 */
-				ASSERT(ump != NULL);
+				if (ump == NULL) {
+					panic("Memory corruption detected: gap "
+					    "start TSN 0x%x missing from the "
+					    "xmit list: %p", gapstart,
+					    (void *)sctp);
+				}
 				mp = ump->b_cont;
 			}
 			/*
@@ -2784,7 +2811,10 @@ sctp_got_sack(sctp_t *sctp, sctp_chunk_hdr_t *sch)
 			 * if we are done with all the chunks from the current
 			 * message. Note, it is possible to hit the end of the
 			 * transmit list here, i.e. if we have already completed
-			 * processing the gap block.
+			 * processing the gap block.  But the TSN must be equal
+			 * to the gapend because of the above sanity check.
+			 * If it is not equal, it means that some data is
+			 * missing.
 			 * Also, note that we break here, which means we
 			 * continue processing gap blocks, if any. In case of
 			 * ordered gap blocks there can't be any following
@@ -2797,7 +2827,13 @@ sctp_got_sack(sctp_t *sctp, sctp_chunk_hdr_t *sch)
 			if (mp == NULL) {
 				ump = ump->b_next;
 				if (ump == NULL) {
-					ASSERT(xtsn == gapend);
+					if (xtsn != gapend) {
+						panic("Memory corruption "
+						    "detected: gap end TSN "
+						    "0x%x missing from the "
+						    "xmit list: %p", gapend,
+						    (void *)sctp);
+					}
 					ump = sctp->sctp_xmit_head;
 					mp = mp1;
 					sdc = (sctp_data_hdr_t *)mp->b_rptr;

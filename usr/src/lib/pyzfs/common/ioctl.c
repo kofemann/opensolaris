@@ -33,6 +33,7 @@
 #include <zone.h>
 #include <libintl.h>
 #include <libzfs.h>
+#include <directory.h>
 #include "zfs_prop.h"
 
 static PyObject *ZFSError;
@@ -349,6 +350,25 @@ py_set_fsacl(PyObject *self, PyObject *args)
 }
 
 static PyObject *
+py_get_holds(PyObject *self, PyObject *args)
+{
+	zfs_cmd_t zc = { 0 };
+	char *name;
+	PyObject *nvl;
+
+	if (!PyArg_ParseTuple(args, "s", &name))
+		return (NULL);
+
+	(void) strlcpy(zc.zc_name, name, sizeof (zc.zc_name));
+
+	nvl = ioctl_with_dstnv(ZFS_IOC_GET_HOLDS, &zc);
+	if (nvl == NULL)
+		seterr(_("cannot get holds for %s"), name);
+
+	return (nvl);
+}
+
+static PyObject *
 py_userspace_many(PyObject *self, PyObject *args)
 {
 	zfs_cmd_t zc = { 0 };
@@ -456,43 +476,46 @@ py_sid_to_id(PyObject *self, PyObject *args)
 
 /*
  * Translate the sid string ("S-1-...") to the user@domain name, if
- * possible.  There should be a better way to do this, but for now we
- * just translate to the (possibly ephemeral) uid and then back again.
+ * possible.
  */
 static PyObject *
 py_sid_to_name(PyObject *self, PyObject *args)
 {
-	char *sid;
-	int err, isuser;
-	uid_t id;
-	char *name, *domain;
-	char buf[256];
+	int isuser;
+	char *name, *sid;
+	directory_error_t e;
+	uint64_t classes;
+	PyObject *ret;
 
 	if (!PyArg_ParseTuple(args, "si", &sid, &isuser))
 		return (NULL);
-
-	err = sid_to_id(sid, isuser, &id);
-	if (err) {
+	e = directory_name_from_sid(NULL, sid, &name, &classes);
+	if (e != NULL) {
+		directory_error_free(e);
 		PyErr_SetString(PyExc_KeyError, sid);
 		return (NULL);
 	}
-
+	if (name == NULL) {
+		PyErr_SetString(PyExc_KeyError, sid);
+		return (NULL);
+	}
 	if (isuser) {
-		err = idmap_getwinnamebyuid(id,
-		    IDMAP_REQ_FLG_USE_CACHE, &name, &domain);
+		if (!(classes & DIRECTORY_CLASS_USER)) {
+			free(name);
+			PyErr_SetString(PyExc_KeyError, sid);
+			return (NULL);
+		}
 	} else {
-		err = idmap_getwinnamebygid(id,
-		    IDMAP_REQ_FLG_USE_CACHE, &name, &domain);
+		if (!(classes & DIRECTORY_CLASS_GROUP)) {
+			free(name);
+			PyErr_SetString(PyExc_KeyError, sid);
+			return (NULL);
+		}
 	}
-	if (err != IDMAP_SUCCESS) {
-		PyErr_SetString(PyExc_KeyError, sid);
-		return (NULL);
-	}
-	(void) snprintf(buf, sizeof (buf), "%s@%s", name, domain);
-	free(name);
-	free(domain);
 
-	return (Py_BuildValue("s", buf));
+	ret = PyString_FromString(name);
+	free(name);
+	return (ret);
 }
 
 static PyObject *
@@ -578,6 +601,7 @@ static PyMethodDef zfsmethods[] = {
 	    "Map SID to name@domain."},
 	{"isglobalzone", py_isglobalzone, METH_NOARGS,
 	    "Determine if this is the global zone."},
+	{"get_holds", py_get_holds, METH_VARARGS, "Get user holds."},
 	{NULL, NULL, 0, NULL}
 };
 

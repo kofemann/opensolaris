@@ -220,6 +220,7 @@ global_zone_only_files="
 	kernel/drv/iscsi.conf
 	kernel/drv/md.conf
 	kernel/drv/mpt.conf
+	kernel/drv/mpt_sas.conf
 	kernel/drv/options.conf
 	kernel/drv/qlc.conf
 	kernel/drv/ra.conf
@@ -306,13 +307,13 @@ superfluous_nonglobal_zone_files="
 	lib/svc/method/fc-fabric
 	lib/svc/method/iscsi-initiator
 	lib/svc/method/npivconfig
-	lib/svc/method/fcoeconfig
 	lib/svc/method/sf880dr
 	lib/svc/method/svc-cvcd
 	lib/svc/method/svc-dcs
 	lib/svc/method/svc-drd
 	lib/svc/method/svc-dscp
 	lib/svc/method/svc-dumpadm
+	lib/svc/method/svc-fcoet
 	lib/svc/method/svc-intrd
 	lib/svc/method/svc-hal
 	lib/svc/method/svc-labeld
@@ -364,7 +365,6 @@ superfluous_nonglobal_zone_files="
 	var/log/pool
 	var/svc/manifest/network/iscsi/iscsi-initiator.xml
 	var/svc/manifest/network/npiv_config.xml
-	var/svc/manifest/network/fcoe_config.xml
 	var/svc/manifest/network/rpc/mdcomm.xml
 	var/svc/manifest/network/rpc/meta.xml
 	var/svc/manifest/network/rpc/metamed.xml
@@ -383,6 +383,7 @@ superfluous_nonglobal_zone_files="
 	var/svc/manifest/system/device/devices-audio.xml
 	var/svc/manifest/system/device/devices-fc-fabric.xml
 	var/svc/manifest/system/dumpadm.xml
+	var/svc/manifest/system/fcoe_target.xml
 	var/svc/manifest/system/filesystem/rmvolmgr.xml
 	var/svc/manifest/system/fmd.xml
 	var/svc/manifest/system/hal.xml
@@ -970,7 +971,7 @@ nfsmapid_cfg() {
 #
 BOOMER_PRESENT_SYS=false
 BOOMER_PRESENT_BFU=false
-BOOMER_DRIVERS="audio austr"
+BOOMER_DRIVERS="audio"
 
 check_boomer_sys() {
 	typeset root=$1
@@ -1476,6 +1477,7 @@ smf_obsolete_manifests="
 	var/svc/manifest/network/datalink.xml
 	var/svc/manifest/network/datalink-init.xml
 	var/svc/manifest/network/iscsi_initiator.xml
+	var/svc/manifest/network/fcoe_config.xml
 "
 
 # smf services whose manifests have been renamed
@@ -1498,6 +1500,7 @@ smf_obsolete_methods="
 	lib/svc/method/svc-kdc.slave
 	lib/svc/share/krb_include.sh
 	lib/svc/method/iscsid
+	lib/svc/method/fcoeconfig
 "
 
 smf_cleanup () {
@@ -3890,9 +3893,12 @@ rbac_cleanup()
 	print "\n"
 }
 
-remove_eof_SUNWcry()
+crypto_cleanup()
 {
-	print "SUNWcry/SUNWcryr removal cleanup...\n"
+	# This function will remove no longer needed cryptography
+	# related packages.
+
+	print "SUNWcry, SUNWcryr, SUNWn2cpact.v removal cleanup...\n"
 
 	# This clean up of ipsecalgs is not directly related to the EOF
 	# of SUNWcry and SUWNcryr, but due to mistakes in this file seen
@@ -3910,7 +3916,7 @@ remove_eof_SUNWcry()
 	mv -f ${ipsecalgs}.tmp $ipsecalgs
 
 	# Packages to remove.
-	typeset -r sunwcry_pkgs='SUNWcry SUNWcryr'
+	typeset -r crypt_pkgs='SUNWcry SUNWcryr SUNWn2cpact.v'
 	typeset pkg
 
 	#
@@ -3919,7 +3925,7 @@ remove_eof_SUNWcry()
 	# in the packages being removed should be run even if they
 	# will run as root.
 
-	typeset -r admfile='/tmp/sunwcry_eof.$$'
+	typeset -r admfile='/tmp/crypt_eof.$$'
 	cat > $admfile <<- EOF
 	mail=
 	instance=overwrite
@@ -3935,7 +3941,7 @@ remove_eof_SUNWcry()
 	EOF
 
 	printf '    Removing packages...'
-	for pkg in $sunwcry_pkgs
+	for pkg in $crypt_pkgs
 	do
 		if pkginfo $pkgroot -q $pkg; then
 			printf ' %s' $pkg
@@ -3985,6 +3991,10 @@ remove_eof_SUNWcry()
 	rm -f $rootprefix/kernel/crypto/amd64/blowfish448
 	rm -f $rootprefix/usr/sfw/lib/libssl_extra.so.0.9.8
 	rm -f $rootprefix/usr/sfw/lib/libcrypto_extra.so.0.9.8
+
+	# SUNWn2cpact.v contents go away, if pkgrm didn't take
+	# care of them
+	rm -f $rootprefix/platform/sun4v/kernel/drv/sparcv9/n2cp.esa
 
 	print "\n"
 }
@@ -6043,6 +6053,8 @@ mondo_loop() {
 
 	find $root/kernel/drv -name zvol 2> /dev/null | xargs rm -f
 	rm -f $root/kernel/drv/zvol.conf
+	rm -rf $root/kernel/devname
+	rm -f $usr/include/sys/fs/sdev_node.h
 
 	#
 	# Remove /usr/lib/old_libthread since support for it has
@@ -6509,6 +6521,11 @@ mondo_loop() {
 			rm $rootprefix/kernel/exec/coffexec
 		fi
 	fi
+
+	#
+	# Remove mii private header
+	#
+	rm -f $usr/include/sys/miipriv.h
 
 	#
 	# Remove GMT* zoneinfo files
@@ -7448,19 +7465,28 @@ mondo_loop() {
 	rm -f $root/kernel/drv/amd64/cpqhpc
 
 	#
-	# Remove 64-bit i2o_bs, i2o_msg, i2o_scsi, pci_to_i2o, mscsi, ncrs,
-	# msm, spwr, bscv, bscbus
+	# Remove 64-bit i2o_bs, i2o_msg, i2o_scsi, pci_to_i2o, ncrs,
+	# spwr, bscv, bscbus
 	#
 	rm -f $root/kernel/drv/amd64/i2o_bs
 	rm -f $root/kernel/misc/amd64/i2o_msg
 	rm -f $root/kernel/drv/amd64/i2o_scsi
 	rm -f $root/kernel/drv/amd64/pci_to_i2o
-	rm -f $root/platform/i86pc/kernel/drv/amd64/mscsi
 	rm -f $root/kernel/drv/amd64/ncrs
-	rm -f $root/platform/i86pc/kernel/drv/amd64/msm
 	rm -f $root/kernel/drv/amd64/spwr
 	rm -f $root/platform/i86pc/kernel/drv/amd64/bscv
 	rm -f $root/platform/i86pc/kernel/drv/amd64/bscbus
+
+	# Remove obsolete bus mice drivers
+	rm -f $root/kernel/drv/msm
+	rm -f $root/platform/i86pc/kernel/drv/amd64/msm
+	rm -f $root/kernel/drv/logi
+	rm -f $root/kernel/drv/amd64/logi
+
+	# Remove mscsi
+	rm -f $root/kernel/drv/mscsi
+	rm -f $root/kernel/drv/mscsi.conf
+	rm -f $root/platform/i86pc/kernel/drv/amd64/mscsi
 
 	# Remove obsolete pfil modules, binaries, and configuration files
 	rm -f $root/kernel/drv/pfil
@@ -7473,10 +7499,16 @@ mondo_loop() {
 	rm -f $root/usr/sbin/pfild
 
 	# Remove nsmb and smbfs modules from old locations
-	# Also remove new locations of kmdb stuff for BFU
+	# Also remove new locations of moved stuff for BFU
 	# from newer to older build ("backward BFU").
 	# These will be reinstalled from the archive.
 	# old locations:
+	rm -f $root/kernel/drv/nsmb
+	rm -f $root/kernel/drv/amd64/nsmb
+	rm -f $root/kernel/drv/sparcv9/nsmb
+	rm -f $root/kernel/fs/smbfs
+	rm -f $root/kernel/fs/amd64/smbfs
+	rm -f $root/kernel/fs/sparcv9/smbfs
 	rm -f $root/kernel/kmdb/nsmb
 	rm -f $root/kernel/kmdb/smbfs
 	rm -f $root/kernel/kmdb/amd64/nsmb
@@ -7487,6 +7519,12 @@ mondo_loop() {
 	rm -f $usr/kernel/sys/amd64/smbfs
 	rm -f $usr/kernel/sys/sparcv9/smbfs
 	# new locations:
+	rm -f $usr/kernel/drv/nsmb
+	rm -f $usr/kernel/drv/amd64/nsmb
+	rm -f $usr/kernel/drv/sparcv9/nsmb
+	rm -f $usr/kernel/fs/smbfs
+	rm -f $usr/kernel/fs/amd64/smbfs
+	rm -f $usr/kernel/fs/sparcv9/smbfs
 	rm -f $usr/kernel/kmdb/nsmb
 	rm -f $usr/kernel/kmdb/smbfs
 	rm -f $usr/kernel/kmdb/amd64/nsmb
@@ -7721,6 +7759,18 @@ mondo_loop() {
 	rmdir $root/usr/include/sys/i2o/ 2>/dev/null
 
 	#
+	# Remove px_pci, pxb_plx, pxb_bcm, pcie_pci
+	#
+	rm -f $root/kernel/drv/px_pci.conf
+	rm -f $root/kernel/drv/sparcv9/px_pci
+	rm -f $root/kernel/drv/pxb_plx.conf
+	rm -f $root/kernel/drv/sparcv9/pxb_plx
+	rm -f $root/kernel/drv/sparcv9/pxb_bcm
+	rm -f $root/kernel/drv/pcie_pci.conf
+	rm -f $root/kernel/drv/pcie_pci
+	rm -f $root/kernel/drv/amd64/pcie_pci
+
+	#
 	# Remove /usr/ccs/bin dependency files that now live in
 	# /usr/share/lib/ccs
 	#
@@ -7780,6 +7830,16 @@ mondo_loop() {
 	rm -f $usr/kernel/drv/sparcv9/lo
 	rm -f $usr/kernel/drv/amd64/lo
 	rm -f $usr/include/sys/lo.h
+
+	# Remove ucblinks 4.x dev names generator
+	rm -f $usr/ucb/ucblinks
+	rm -f $usr/ucblib/ucblinks.awk
+	rm -f $usr/ucblib/ucblinks.sh
+
+	rm -f $root/dev/sd[0-9]*
+	rm -f $root/dev/rsd[0-9]*
+	rm -f $root/dev/sr[0-9]*
+	rm -f $root/dev/rsr[0-9]*
 
 	# End of pre-archive extraction hacks.
 
@@ -7963,8 +8023,8 @@ mondo_loop() {
 	done
 
 	#
-	# Remove EOF SUNWcry/SUNWcryr
-	remove_eof_SUNWcry
+	# Remove EOF Crypto packages 
+	crypto_cleanup
 
 	# Add uCF's metaslot feature
 	if [ -f $rootprefix/etc/crypto/pkcs11.conf ] ; then

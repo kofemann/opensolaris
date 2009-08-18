@@ -41,6 +41,7 @@
 #include <sys/taskq.h>
 #include <sys/ib/mgt/ibdm/ibdm_impl.h>
 #include <sys/ib/mgt/ibmf/ibmf_impl.h>
+#include <sys/ib/ibtl/impl/ibtl_ibnex.h>
 #include <sys/modctl.h>
 
 /* Function Prototype declarations */
@@ -81,11 +82,13 @@ static void	ibdm_process_incoming_mad(ibmf_handle_t, ibmf_msg_t *, void *);
 static void	ibdm_ibmf_send_cb(ibmf_handle_t, ibmf_msg_t *, void *);
 static void	ibdm_pkt_timeout_hdlr(void *arg);
 static void	ibdm_initialize_port(ibdm_port_attr_t *);
+static void	ibdm_update_port_pkeys(ibdm_port_attr_t *port);
 static void	ibdm_handle_diagcode(ibmf_msg_t *, ibdm_dp_gidinfo_t *, int *);
 static void	ibdm_probe_gid(ibdm_dp_gidinfo_t *);
 static void	ibdm_alloc_send_buffers(ibmf_msg_t *);
 static void	ibdm_free_send_buffers(ibmf_msg_t *);
 static void	ibdm_handle_hca_detach(ib_guid_t);
+static void	ibdm_handle_port_change_event(ibt_async_event_t *);
 static int	ibdm_fini_port(ibdm_port_attr_t *);
 static int	ibdm_uninit_hca(ibdm_hca_list_t *);
 static void	ibdm_handle_setclassportinfo(ibmf_handle_t, ibmf_msg_t *,
@@ -552,6 +555,14 @@ ibdm_event_hdlr(void *clnt_hdl,
 		hca_list->hl_nports_active++;
 		cv_broadcast(&ibdm.ibdm_port_settle_cv);
 		mutex_exit(&ibdm.ibdm_hl_mutex);
+
+		/* Inform IB nexus driver */
+		mutex_enter(&ibdm.ibdm_ibnex_mutex);
+		if (ibdm.ibdm_ibnex_callback != NULL) {
+			(*ibdm.ibdm_ibnex_callback)((void *)
+			    &event->ev_hca_guid, IBDM_EVENT_PORT_UP);
+		}
+		mutex_exit(&ibdm.ibdm_ibnex_mutex);
 		break;
 
 	case IBT_ERROR_PORT_DOWN:
@@ -573,11 +584,130 @@ ibdm_event_hdlr(void *clnt_hdl,
 		ibdm_reset_all_dgids(port_sa_hdl);
 		break;
 
+	case IBT_PORT_CHANGE_EVENT:
+		IBTF_DPRINTF_L4("ibdm", "\tevent_hdlr: PORT_CHANGE");
+		if (event->ev_port_flags & IBT_PORT_CHANGE_PKEY)
+			ibdm_handle_port_change_event(event);
+		break;
+
 	default:		/* Ignore all other events/errors */
 		break;
 	}
 }
 
+static void
+ibdm_handle_port_change_event(ibt_async_event_t *event)
+{
+	ibdm_port_attr_t	*port;
+	ibdm_hca_list_t		*hca_list;
+
+	IBTF_DPRINTF_L2("ibdm", "\tibdm_handle_port_change_event:"
+	    " HCA guid  %llx", event->ev_hca_guid);
+	mutex_enter(&ibdm.ibdm_hl_mutex);
+	port = ibdm_get_port_attr(event, &hca_list);
+	if (port == NULL) {
+		IBTF_DPRINTF_L2("ibdm", "\tevent_hdlr: HCA not present");
+		mutex_exit(&ibdm.ibdm_hl_mutex);
+		return;
+	}
+	ibdm_update_port_pkeys(port);
+	cv_broadcast(&ibdm.ibdm_port_settle_cv);
+	mutex_exit(&ibdm.ibdm_hl_mutex);
+
+	/* Inform IB nexus driver */
+	mutex_enter(&ibdm.ibdm_ibnex_mutex);
+	if (ibdm.ibdm_ibnex_callback != NULL) {
+		(*ibdm.ibdm_ibnex_callback)((void *)
+		    &event->ev_hca_guid, IBDM_EVENT_PORT_PKEY_CHANGE);
+	}
+	mutex_exit(&ibdm.ibdm_ibnex_mutex);
+}
+
+/*
+ * ibdm_update_port_pkeys()
+ *	Update the pkey table
+ *	Update the port attributes
+ */
+static void
+ibdm_update_port_pkeys(ibdm_port_attr_t *port)
+{
+	uint_t				nports, size;
+	uint_t				pkey_idx, opkey_idx;
+	uint16_t			npkeys;
+	ibt_hca_portinfo_t		*pinfop;
+	ib_pkey_t			pkey;
+	ibdm_pkey_tbl_t			*pkey_tbl;
+	ibdm_port_attr_t		newport;
+
+	IBTF_DPRINTF_L4("ibdm", "\tupdate_port_pkeys:");
+	ASSERT(MUTEX_HELD(&ibdm.ibdm_hl_mutex));
+
+	/* Check whether the port is active */
+	if (ibt_get_port_state(port->pa_hca_hdl, port->pa_port_num, NULL,
+	    NULL) != IBT_SUCCESS)
+		return;
+
+	if (ibt_query_hca_ports(port->pa_hca_hdl, port->pa_port_num,
+	    &pinfop, &nports, &size) != IBT_SUCCESS) {
+		/* This should not occur */
+		port->pa_npkeys = 0;
+		port->pa_pkey_tbl = NULL;
+		return;
+	}
+
+	npkeys = pinfop->p_pkey_tbl_sz;
+	pkey_tbl = kmem_zalloc(npkeys * sizeof (ibdm_pkey_tbl_t), KM_SLEEP);
+	newport.pa_pkey_tbl = pkey_tbl;
+	newport.pa_ibmf_hdl = port->pa_ibmf_hdl;
+
+	for (pkey_idx = 0; pkey_idx < npkeys; pkey_idx++) {
+		pkey = pkey_tbl[pkey_idx].pt_pkey =
+		    pinfop->p_pkey_tbl[pkey_idx];
+		/*
+		 * Is this pkey present in the current table ?
+		 */
+		for (opkey_idx = 0; opkey_idx < port->pa_npkeys; opkey_idx++) {
+			if (pkey == port->pa_pkey_tbl[opkey_idx].pt_pkey) {
+				pkey_tbl[pkey_idx].pt_qp_hdl =
+				    port->pa_pkey_tbl[opkey_idx].pt_qp_hdl;
+				port->pa_pkey_tbl[opkey_idx].pt_qp_hdl = NULL;
+				break;
+			}
+		}
+
+		if (opkey_idx == port->pa_npkeys) {
+			pkey = pkey_tbl[pkey_idx].pt_pkey;
+			if (IBDM_INVALID_PKEY(pkey)) {
+				pkey_tbl[pkey_idx].pt_qp_hdl = NULL;
+				continue;
+			}
+			ibdm_port_attr_ibmf_init(&newport, pkey, pkey_idx);
+		}
+	}
+
+	for (opkey_idx = 0; opkey_idx < port->pa_npkeys; opkey_idx++) {
+		if (port->pa_pkey_tbl[opkey_idx].pt_qp_hdl != NULL) {
+			if (ibdm_port_attr_ibmf_fini(port, opkey_idx) !=
+			    IBDM_SUCCESS) {
+				IBTF_DPRINTF_L2("ibdm", "\tupdate_port_pkeys: "
+				    "ibdm_port_attr_ibmf_fini failed for "
+				    "port pkey 0x%x",
+				    port->pa_pkey_tbl[opkey_idx].pt_pkey);
+			}
+		}
+	}
+
+	if (port->pa_pkey_tbl != NULL) {
+		kmem_free(port->pa_pkey_tbl,
+		    port->pa_npkeys * sizeof (ibdm_pkey_tbl_t));
+	}
+
+	port->pa_npkeys = npkeys;
+	port->pa_pkey_tbl = pkey_tbl;
+	port->pa_sn_prefix = pinfop->p_sgid_tbl[0].gid_prefix;
+	port->pa_state = pinfop->p_linkstate;
+	ibt_free_portinfo(pinfop, size);
+}
 
 /*
  * ibdm_initialize_port()
@@ -1002,8 +1132,11 @@ ibdm_uninit_hca(ibdm_hca_list_t *head)
 		}
 	}
 	if (head->hl_hca_hdl)
-		if (ibt_close_hca(head->hl_hca_hdl) != IBT_SUCCESS)
+		if (ibt_close_hca(head->hl_hca_hdl) != IBT_SUCCESS) {
+			IBTF_DPRINTF_L2("ibdm", "uninit_hca: "
+			    "ibt_close_hca() failed");
 			return (IBDM_FAILURE);
+		}
 	kmem_free(head->hl_port_attr,
 	    head->hl_nports * sizeof (ibdm_port_attr_t));
 	kmem_free(head->hl_hca_port_attr, sizeof (ibdm_port_attr_t));
@@ -1047,7 +1180,7 @@ ibdm_fini_port(ibdm_port_attr_t *port_attr)
 
 		ibmf_status = ibmf_unregister(&port_attr->pa_ibmf_hdl, 0);
 		if (ibmf_status != IBMF_SUCCESS) {
-			IBTF_DPRINTF_L4("ibdm", "\tfini_port: "
+			IBTF_DPRINTF_L2("ibdm", "\tfini_port: "
 			    "ibmf_unregister failed %d", ibmf_status);
 			return (IBDM_FAILURE);
 		}
@@ -1058,7 +1191,7 @@ ibdm_fini_port(ibdm_port_attr_t *port_attr)
 	if (port_attr->pa_sa_hdl) {
 		ibmf_status = ibmf_sa_session_close(&port_attr->pa_sa_hdl, 0);
 		if (ibmf_status != IBMF_SUCCESS) {
-			IBTF_DPRINTF_L4("ibdm", "\tfini_port: "
+			IBTF_DPRINTF_L2("ibdm", "\tfini_port: "
 			    "ibmf_sa_session_close failed %d", ibmf_status);
 			return (IBDM_FAILURE);
 		}
@@ -1546,6 +1679,7 @@ ibdm_probe_gid_thread(void *args)
 	if (ibdm_is_dev_mgt_supported(gid_info) != IBDM_SUCCESS) {
 		mutex_enter(&gid_info->gl_mutex);
 		gid_info->gl_state = IBDM_GID_PROBING_FAILED;
+		gid_info->gl_is_dm_capable = B_FALSE;
 		mutex_exit(&gid_info->gl_mutex);
 		ibdm_delete_glhca_list(gid_info);
 		mutex_enter(&ibdm.ibdm_mutex);
@@ -1554,6 +1688,13 @@ ibdm_probe_gid_thread(void *args)
 		mutex_exit(&ibdm.ibdm_mutex);
 		return;
 	}
+
+	/*
+	 * This GID is Device management capable
+	 */
+	mutex_enter(&gid_info->gl_mutex);
+	gid_info->gl_is_dm_capable = B_TRUE;
+	mutex_exit(&gid_info->gl_mutex);
 
 	/* Get the nodeguid and portguid of the port */
 	if (ibdm_get_node_port_guids(gid_info->gl_sa_hdl, gid_info->gl_dlid,
@@ -4151,6 +4292,7 @@ ibdm_probe_ioc(ib_guid_t nodeguid, ib_guid_t ioc_guid, int reprobe_flag)
 				node_gid->gl_gid = temp_gid;
 				node_gid->gl_ngids++;
 			}
+			new_gid->gl_is_dm_capable = B_TRUE;
 			new_gid->gl_nodeguid = nodeguid;
 			new_gid->gl_portguid = dgid.gid_guid;
 			ibdm_addto_glhcalist(new_gid, hca_list);
@@ -5300,7 +5442,7 @@ ibdm_send_ioc_profile(ibdm_dp_gidinfo_t *gid_info, uint8_t ioc_no)
 	 */
 	if (ibmf_alloc_msg(gid_info->gl_ibmf_hdl, IBMF_ALLOC_SLEEP,
 	    &msg) != IBMF_SUCCESS) {
-		IBTF_DPRINTF_L4("ibdm", "\tsend_ioc_profile: pkt alloc fail");
+		IBTF_DPRINTF_L2("ibdm", "\tsend_ioc_profile: pkt alloc fail");
 		return (IBDM_FAILURE);
 	}
 
@@ -5672,20 +5814,47 @@ ibdm_saa_event_cb(ibmf_saa_handle_t ibmf_saa_handle,
 	if (ibmf_saa_event != IBMF_SAA_EVENT_GID_UNAVAILABLE)
 		return;
 
-	event_arg = (ibdm_saa_event_arg_t *)kmem_alloc(
-	    sizeof (ibdm_saa_event_arg_t), KM_SLEEP);
-	event_arg->ibmf_saa_handle = ibmf_saa_handle;
-	event_arg->ibmf_saa_event = ibmf_saa_event;
-	bcopy(event_details, &event_arg->event_details,
-	    sizeof (ibmf_saa_event_details_t));
-	event_arg->callback_arg = callback_arg;
-
-	if (taskq_dispatch(system_taskq, ibdm_saa_event_taskq,
-	    (void *)event_arg, TQ_NOSLEEP) == NULL) {
+	/*
+	 * GID UNAVAIL EVENT: Try to locate the GID in the GID list.
+	 * If we don't find it we just return.
+	 */
+	mutex_enter(&ibdm.ibdm_mutex);
+	gid_info = ibdm.ibdm_dp_gidlist_head;
+	while (gid_info) {
+		if (gid_info->gl_portguid ==
+		    event_details->ie_gid.gid_guid) {
+			break;
+		}
+		gid_info = gid_info->gl_next;
+	}
+	mutex_exit(&ibdm.ibdm_mutex);
+	if (gid_info == NULL) {
 		IBTF_DPRINTF_L2("ibdm", "\tsaa_event_cb: "
-		    "taskq_dispatch failed");
-		ibdm_free_saa_event_arg(event_arg);
+		    "GID for GUID %llX not found during GID UNAVAIL event",
+		    event_details->ie_gid.gid_guid);
 		return;
+	}
+
+	/*
+	 * If this GID is DM capable, we'll have to check whether this DGID
+	 * is reachable via another port.
+	 */
+	if (gid_info->gl_is_dm_capable == B_TRUE) {
+		event_arg = (ibdm_saa_event_arg_t *)kmem_alloc(
+		    sizeof (ibdm_saa_event_arg_t), KM_SLEEP);
+		event_arg->ibmf_saa_handle = ibmf_saa_handle;
+		event_arg->ibmf_saa_event = ibmf_saa_event;
+		bcopy(event_details, &event_arg->event_details,
+		    sizeof (ibmf_saa_event_details_t));
+		event_arg->callback_arg = callback_arg;
+
+		if (taskq_dispatch(system_taskq, ibdm_saa_event_taskq,
+		    (void *)event_arg, TQ_NOSLEEP) == NULL) {
+			IBTF_DPRINTF_L2("ibdm", "\tsaa_event_cb: "
+			    "taskq_dispatch failed");
+			ibdm_free_saa_event_arg(event_arg);
+			return;
+		}
 	}
 }
 
@@ -6547,7 +6716,7 @@ ibdm_reset_all_dgids(ibmf_saa_handle_t port_sa_hdl)
 				 * going down. This is ensured by
 				 * setting gl_disconnected to 1.
 				 */
-				if (gid_info->gl_nodeguid == 0)
+				if (gid_info->gl_is_dm_capable == B_FALSE)
 					gid_info->gl_disconnected = 1;
 				else
 					ibdm_reset_gidinfo(gid_info);

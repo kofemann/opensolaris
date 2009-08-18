@@ -2279,6 +2279,10 @@ ossmix_ioctl(audio_client_t *c, int cmd, intptr_t arg, int mode, cred_t *credp,
 		rv = sound_mixer_read_recmask(c, (int *)data);
 		break;
 
+	case SOUND_MIXER_READ_CAPS:
+		rv = sound_mixer_read_caps(c, (int *)data);
+		break;
+
 		/*
 		 * Common ioctls shared with DSP
 		 */
@@ -2593,6 +2597,8 @@ static struct audio_client_ops ossmix_ops = {
 	NULL,   /* output */
 	oss_notify,
 	NULL,	/* drain */
+	NULL,	/* wput */
+	NULL,	/* wsrv */
 };
 
 /* nearly the same as ossxmix; different minor name helps devfsadm */
@@ -2611,6 +2617,8 @@ static struct audio_client_ops sndstat_ops = {
 	NULL,	/* output */
 	NULL,	/* notify */
 	NULL,	/* drain */
+	NULL,	/* wput */
+	NULL,	/* wsrv */
 };
 
 void

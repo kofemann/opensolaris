@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -421,6 +421,7 @@ typedef struct ibcm_state_data_s {
 	boolean_t		delete_mra_msg;
 	boolean_t		stale;
 	boolean_t		delete_state_data;
+	boolean_t		skip_rtr;
 
 	boolean_t		open_done;
 	boolean_t		close_done;
@@ -464,6 +465,9 @@ typedef struct ibcm_state_data_s {
 	struct ibcm_state_data_s	*close_link;
 
 	struct ibcm_conn_trace_s	*conn_trace;
+
+	/* For ibt_ofuvcm_get_req_data() */
+	void			*req_msgp;
 
 } ibcm_state_data_t;
 
@@ -2049,7 +2053,7 @@ extern ibcm_state_data_t	*ibcm_timeout_list_hdr, *ibcm_timeout_list_tail;
 extern ibcm_ud_state_data_t	*ibcm_ud_timeout_list_hdr,
 				*ibcm_ud_timeout_list_tail;
 /* Default global retry counts */
-extern uint32_t		ibcm_max_retries;
+extern uint8_t		ibcm_max_retries;
 extern uint32_t		ibcm_max_sa_retries;
 extern int		ibcm_sa_timeout_delay;	/* in ticks */
 
@@ -2068,6 +2072,7 @@ extern ib_time_t	ibcm_max_ib_mad_pkt_lt;
 
 /* Global locks */
 extern kmutex_t		ibcm_svc_info_lock;
+extern kmutex_t		ibcm_mcglist_lock;
 extern kmutex_t		ibcm_global_hca_lock;
 extern kmutex_t		ibcm_qp_list_lock;
 extern kmutex_t		ibcm_timeout_list_lock;
@@ -2178,6 +2183,9 @@ ibt_status_t ibcm_ibmf_analyze_error(int ibmf_status);
 
 ibt_status_t ibcm_contact_sa_access(ibmf_saa_handle_t saa_handle,
     ibmf_saa_access_args_t *access_args, size_t *length, void **results_p);
+
+ibt_status_t	ibcm_ibtl_node_info(ib_guid_t, uint8_t, ib_lid_t,
+    ibt_node_info_t *node_info);
 
 void ibcm_path_cache_init(void);
 void ibcm_path_cache_fini(void);

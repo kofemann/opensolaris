@@ -231,19 +231,30 @@ rfs4_get_pc_encode(vnode_t *vp, rfs4_pc_encode_t *pce, attrmap4 *ar, cred_t *cr)
 
 	if (ATTR_ISSET(*ar, MAXFILESIZE)) {
 		/* Maximum File Size */
-		if (error = VOP_PATHCONF(vp, _PC_FILESIZEBITS, &pc_val, cr,
-		    NULL))
+		error = VOP_PATHCONF(vp, _PC_FILESIZEBITS, &pc_val, cr, NULL);
+		if (error)
 			return (error);
 
-		if (pc_val >= (sizeof (uint64_t) * 8))
-			pce->maxfilesize = UINT64_MAX;
-		else
-			pce->maxfilesize = ((1LL << pc_val) - 1);
+		/*
+		 * If the underlying file system does not support
+		 * _PC_FILESIZEBITS, return a reasonable default. Note that
+		 * error code on VOP_PATHCONF will be 0, even if the underlying
+		 * file system does not support _PC_FILESIZEBITS.
+		 */
+		if (pc_val == (ulong_t)-1) {
+			pce->maxfilesize = MAXOFF32_T;
+		} else {
+			if (pc_val >= (sizeof (uint64_t) * 8))
+				pce->maxfilesize = INT64_MAX;
+			else
+				pce->maxfilesize = ((1LL << (pc_val - 1)) - 1);
+		}
 	}
 
 	if (ATTR_ISSET(*ar, MAXLINK)) {
 		/* Maximum Link Count */
-		if (error = VOP_PATHCONF(vp, _PC_LINK_MAX, &pc_val, cr, NULL))
+		error = VOP_PATHCONF(vp, _PC_LINK_MAX, &pc_val, cr, NULL);
+		if (error)
 			return (error);
 
 		pce->maxlink = pc_val;
@@ -251,7 +262,8 @@ rfs4_get_pc_encode(vnode_t *vp, rfs4_pc_encode_t *pce, attrmap4 *ar, cred_t *cr)
 
 	if (ATTR_ISSET(*ar, MAXNAME)) {
 		/* Maximum Name Length */
-		if (error = VOP_PATHCONF(vp, _PC_NAME_MAX, &pc_val, cr, NULL))
+		error = VOP_PATHCONF(vp, _PC_NAME_MAX, &pc_val, cr, NULL);
+		if (error)
 			return (error);
 
 		pce->maxname = pc_val;
@@ -679,7 +691,8 @@ readagain:
 		 * different vfs; only do this if appropriate.
 		 */
 		if (vp &&
-		    (vfs_different = (dvp->v_vfsp != vp->v_vfsp))) {	
+		    (vfs_different =
+		    (dvp->v_vfsp != vp->v_vfsp))) {	
 			if (ATTRMAP_TST(ar,
 			    RFS4_FS_SPACE_ATTRMAP(avers))) {
 				if (error =

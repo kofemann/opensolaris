@@ -1115,8 +1115,11 @@ again:
 			VM_STAT_ADD(page_exphcontg[4]);
 			return (1);
 		}
+		/*
+		 * Also check whether p_pagenum was modified by DR.
+		 */
 		if (pp->p_szc != pszc || pp->p_vnode != vp ||
-		    pp->p_offset != off) {
+		    pp->p_offset != off || pp->p_pagenum != pfn) {
 			VM_STAT_ADD(page_exphcontg[5]);
 			page_unlock(pp);
 			off = save_off;
@@ -1203,9 +1206,15 @@ again:
 	 */
 
 	for (i = 0; i < pages; i++, pp++, off += PAGESIZE, pfn++) {
-		ASSERT(pp->p_pagenum == pfn);
 		if (!page_trylock(pp, SE_EXCL)) {
 			VM_STAT_ADD(page_exphcontg[12]);
+			break;
+		}
+		/*
+		 * Check whether p_pagenum was modified by DR.
+		 */
+		if (pp->p_pagenum != pfn) {
+			page_unlock(pp);
 			break;
 		}
 		if (pp->p_vnode != vp ||
@@ -2939,6 +2948,12 @@ page_reclaim(page_t *pp, kmutex_t *lock)
 			mutex_enter(&p->pcf_lock);
 			if (p->pcf_count >= 1) {
 				p->pcf_count -= 1;
+				/*
+				 * freemem is not protected by any lock. Thus,
+				 * we cannot have any assertion containing
+				 * freemem here.
+				 */
+				freemem -= 1;
 				enough = 1;
 				break;
 			}
@@ -2998,11 +3013,6 @@ page_reclaim_nomem:
 		}
 	}
 
-	/*
-	 * freemem is not protected by any lock. Thus, we cannot
-	 * have any assertion containing freemem here.
-	 */
-	freemem -= 1;
 
 	VM_STAT_ADD(pagecnt.pc_reclaim);
 
@@ -3077,15 +3087,18 @@ page_destroy(page_t *pp, int dontfree)
 		 * Acquire the "freemem_lock" for availrmem.
 		 * The page_struct_lock need not be acquired for lckcnt
 		 * and cowcnt since the page has an "exclusive" lock.
+		 * We are doing a modified version of page_pp_unlock here.
 		 */
 		if ((pp->p_lckcnt != 0) || (pp->p_cowcnt != 0)) {
 			mutex_enter(&freemem_lock);
 			if (pp->p_lckcnt != 0) {
 				availrmem++;
+				pages_locked--;
 				pp->p_lckcnt = 0;
 			}
 			if (pp->p_cowcnt != 0) {
 				availrmem += pp->p_cowcnt;
+				pages_locked -= pp->p_cowcnt;
 				pp->p_cowcnt = 0;
 			}
 			mutex_exit(&freemem_lock);
@@ -5795,6 +5808,10 @@ page_numtopp_nolock(pfn_t pfnum)
 	 * another cpu and trying to reference it after it has been freed.
 	 * This will keep us on cpu and prevent it from being removed while
 	 * we are still on it.
+	 *
+	 * We may be caching a memseg in vc_pnum_memseg/vc_pnext_memseg
+	 * which is being resued by DR who will flush those references
+	 * before modifying the reused memseg.  See memseg_cpu_vm_flush().
 	 */
 	kpreempt_disable();
 	vc = CPU->cpu_vm_data;
@@ -5830,8 +5847,10 @@ page_numtopp_nolock(pfn_t pfnum)
 		if (pfnum >= seg->pages_base && pfnum < seg->pages_end) {
 			vc->vc_pnum_memseg = seg;
 			pp = seg->pages + (pfnum - seg->pages_base);
-			kpreempt_enable();
-			return ((page_t *)pp);
+			if (pp->p_pagenum == pfnum) {
+				kpreempt_enable();
+				return ((page_t *)pp);
+			}
 		}
 	}
 	vc->vc_pnum_memseg = NULL;
@@ -5847,20 +5866,33 @@ page_numtomemseg_nolock(pfn_t pfnum)
 	struct memseg *seg;
 	page_t *pp;
 
+	/*
+	 * We may be caching a memseg in vc_pnum_memseg/vc_pnext_memseg
+	 * which is being resued by DR who will flush those references
+	 * before modifying the reused memseg.  See memseg_cpu_vm_flush().
+	 */
+	kpreempt_disable();
 	/* Try hash */
 	if (((seg = memseg_hash[MEMSEG_PFN_HASH(pfnum)]) != NULL) &&
 	    (pfnum >= seg->pages_base) && (pfnum < seg->pages_end)) {
 		pp = seg->pages + (pfnum - seg->pages_base);
-		if (pp->p_pagenum == pfnum)
+		if (pp->p_pagenum == pfnum) {
+			kpreempt_enable();
 			return (seg);
+		}
 	}
 
 	/* Else Brute force */
 	for (seg = memsegs; seg != NULL; seg = seg->next) {
 		if (pfnum >= seg->pages_base && pfnum < seg->pages_end) {
-			return (seg);
+			pp = seg->pages + (pfnum - seg->pages_base);
+			if (pp->p_pagenum == pfnum) {
+				kpreempt_enable();
+				return (seg);
+			}
 		}
 	}
+	kpreempt_enable();
 	return ((struct memseg *)NULL);
 }
 
@@ -5885,6 +5917,10 @@ page_nextn(page_t *pp, ulong_t n)
 	 * another cpu and trying to reference it after it has been freed.
 	 * This will keep us on cpu and prevent it from being removed while
 	 * we are still on it.
+	 *
+	 * We may be caching a memseg in vc_pnum_memseg/vc_pnext_memseg
+	 * which is being resued by DR who will flush those references
+	 * before modifying the reused memseg.  See memseg_cpu_vm_flush().
 	 */
 	kpreempt_disable();
 	vc = (vm_cpu_data_t *)CPU->cpu_vm_data;
@@ -5968,12 +6004,12 @@ page_next_scan_large(
 	 * Catch if we went past the end of the current memory segment. If so,
 	 * just move to the next segment with pages.
 	 */
-	if (new_pp >= seg->epages) {
+	if (new_pp >= seg->epages || seg->pages_base == seg->pages_end) {
 		do {
 			seg = seg->next;
 			if (seg == NULL)
 				seg = memsegs;
-		} while (seg->pages == seg->epages);
+		} while (seg->pages_base == seg->pages_end);
 		new_pp = seg->pages;
 		*cookie = (void *)seg;
 	}

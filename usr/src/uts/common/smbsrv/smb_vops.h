@@ -97,6 +97,8 @@ typedef struct smb_attr {
 			SMB_AT_FSID|SMB_AT_NODEID|SMB_AT_NLINK|SMB_AT_SIZE|\
 			SMB_AT_ATIME|SMB_AT_MTIME|SMB_AT_CTIME|SMB_AT_RDEV|\
 			SMB_AT_BLKSIZE|SMB_AT_NBLOCKS|SMB_AT_SEQ|SMB_AT_SMB)
+#define	SMB_AT_TIMES	(SMB_AT_ATIME | SMB_AT_MTIME |\
+			SMB_AT_CTIME | SMB_AT_CRTIME)
 
 int fhopen(const struct smb_node *, int);
 
@@ -115,6 +117,7 @@ int smb_vop_lookup(vnode_t *, char *, vnode_t **, char *, int, int *, vnode_t *,
     cred_t *);
 int smb_vop_create(vnode_t *, char *, smb_attr_t *, vnode_t **, int, cred_t *,
     vsecattr_t *);
+int smb_vop_link(vnode_t *, vnode_t *, char *, int, cred_t *);
 int smb_vop_remove(vnode_t *, char *, int, cred_t *);
 int smb_vop_rename(vnode_t *, char *, vnode_t *, char *, int, cred_t *);
 int smb_vop_mkdir(vnode_t *, char *, smb_attr_t *, vnode_t **, int, cred_t *,

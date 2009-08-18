@@ -743,6 +743,12 @@ auclnt_get_muted(audio_stream_t *sp)
 	return (sp->s_muted);
 }
 
+boolean_t
+auclnt_is_running(audio_stream_t *sp)
+{
+	return (sp->s_running);
+}
+
 void
 auclnt_start(audio_stream_t *sp)
 {
@@ -1224,6 +1230,7 @@ void
 auclnt_release(audio_client_t *c)
 {
 	mutex_enter(&c->c_lock);
+	ASSERT(c->c_refcnt > 0);
 	c->c_refcnt--;
 	if (c->c_refcnt == 0)
 		cv_broadcast(&c->c_cv);
@@ -1338,6 +1345,18 @@ minor_t
 auclnt_get_minor_type(audio_client_t *c)
 {
 	return (c->c_origminor & AUDIO_MN_TYPE_MASK);
+}
+
+queue_t *
+auclnt_get_rq(audio_client_t *c)
+{
+	return (c->c_rq);
+}
+
+queue_t *
+auclnt_get_wq(audio_client_t *c)
+{
+	return (c->c_wq);
 }
 
 pid_t

@@ -292,7 +292,8 @@ typedef struct tcp_s {
 		tcp_tconnind_started : 1, /* conn_ind message is being sent */
 		tcp_lso :1,		/* Lower layer is capable of LSO */
 		tcp_refuse :1,		/* Connection needs refusing */
-		tcp_pad_to_bit_31 : 16;
+		tcp_is_wnd_shrnk : 1, /* Window has shrunk */
+		tcp_pad_to_bit_31 : 15;
 
 	uint32_t	tcp_if_mtu;	/* Outgoing interface MTU. */
 
@@ -531,30 +532,20 @@ typedef struct tcp_s {
 	uint32_t	tcp_in_ack_unsent;	/* ACK for unsent data cnt. */
 
 	/*
-	 * The following fusion-related fields are protected by squeue.
+	 * All fusion-related fields are protected by squeue.
 	 */
 	struct tcp_s *tcp_loopback_peer;	/* peer tcp for loopback */
 	mblk_t	*tcp_fused_sigurg_mp;		/* M_PCSIG mblk for SIGURG */
 	size_t	tcp_fuse_rcv_hiwater;		/* fusion receive queue size */
-	uint_t	tcp_fuse_rcv_unread_hiwater;	/* max # of outstanding pkts */
-	/*
-	 * The following fusion-related fields and bit fields are to be
-	 * manipulated with squeue protection or with tcp_non_sq_lock held.
-	 * tcp_non_sq_lock is used to protect fields that may be modified
-	 * accessed outside the squeue.
-	 */
-	kmutex_t tcp_non_sq_lock;
-	kcondvar_t tcp_fuse_plugcv;
-	uint_t tcp_fuse_rcv_unread_cnt;	/* # of outstanding pkts */
+
 	uint32_t
 		tcp_fused : 1,		/* loopback tcp in fusion mode */
 		tcp_unfusable : 1,	/* fusion not allowed on endpoint */
 		tcp_fused_sigurg : 1,	/* send SIGURG upon draining */
-		tcp_direct_sockfs : 1,	/* direct calls to sockfs */
 
-		tcp_fuse_syncstr_stopped : 1, /* synchronous streams stopped */
-		tcp_fuse_syncstr_plugged : 1, /* synchronous streams plugged */
-		tcp_fuse_to_bit_31 : 26;
+		tcp_fuse_to_bit_31 : 29;
+
+	kmutex_t tcp_non_sq_lock;
 
 	/*
 	 * This variable is accessed without any lock protection
@@ -600,6 +591,11 @@ typedef struct tcp_s {
 	 * protected by the tcp_non_sq_lock lock.
 	 */
 	boolean_t	tcp_flow_stopped;
+
+	/*
+	 * Sender's next sequence number at the time the window was shrunk.
+	 */
+	uint32_t	tcp_snxt_shrunk;
 
 	/*
 	 * The socket generation number is bumped when an outgoing connection

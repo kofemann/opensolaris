@@ -2515,7 +2515,7 @@ aio_req_alloc(aio_req_t **nreqp, aio_result_t *resultp)
 	if (aio_hash_insert(reqp, aiop)) {
 		reqp->aio_req_next = aiop->aio_free;
 		aiop->aio_free = reqp;
-		return (EINVAL);
+		return (EBUSY);
 	}
 	*nreqp = reqp;
 	return (0);
@@ -2594,15 +2594,11 @@ aio_cleanup_thread(aio_t *aiop)
 				aiop->aio_rqclnup = 0;
 				rqclnup = 1;
 			}
-
-			if ((rqclnup || AS_ISUNMAPWAIT(as)) &&
-			    aiop->aio_doneq) {
+			mutex_exit(&as->a_contents);
+			if (aiop->aio_doneq) {
 				aio_req_t *doneqhead = aiop->aio_doneq;
-				mutex_exit(&as->a_contents);
 				aiop->aio_doneq = NULL;
 				aio_cleanupq_concat(aiop, doneqhead, AIO_DONEQ);
-			} else {
-				mutex_exit(&as->a_contents);
 			}
 		}
 		mutex_exit(&aiop->aio_mutex);

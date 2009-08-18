@@ -795,14 +795,6 @@ stmf_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 			break; /* not allowed */
 		}
 		mutex_enter(&stmf_state.stmf_lock);
-		if (idtype == STMF_ID_TYPE_TARGET &&
-		    stmf_state.stmf_service_running) {
-			mutex_exit(&stmf_state.stmf_lock);
-			iocd->stmf_error =
-			    STMF_IOCERR_TG_UPDATE_NEED_SVC_OFFLINE;
-			ret = EBUSY;
-			break; /* not allowed */
-		}
 		ret = stmf_add_group_member(grp_entry->group.name,
 		    grp_entry->group.name_size,
 		    grp_entry->ident + 4,
@@ -834,14 +826,6 @@ stmf_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 			break; /* not allowed */
 		}
 		mutex_enter(&stmf_state.stmf_lock);
-		if (idtype == STMF_ID_TYPE_TARGET &&
-		    stmf_state.stmf_service_running) {
-			mutex_exit(&stmf_state.stmf_lock);
-			iocd->stmf_error =
-			    STMF_IOCERR_TG_UPDATE_NEED_SVC_OFFLINE;
-			ret = EBUSY;
-			break; /* not allowed */
-		}
 		ret = stmf_remove_group_member(grp_entry->group.name,
 		    grp_entry->group.name_size,
 		    grp_entry->ident + 4,
@@ -4260,7 +4244,7 @@ stmf_info(uint32_t cmd, void *arg1, void *arg2, uint8_t *buf,
 }
 
 /*
- * Used by port providers. pwwn is 8 byte wwn, sdid is th devid used by
+ * Used by port providers. pwwn is 8 byte wwn, sdid is the devid used by
  * stmf to register local ports. The ident should have 20 bytes in buffer
  * space to convert the wwn to "wwn.xxxxxxxxxxxxxxxx" string.
  */
@@ -4268,15 +4252,20 @@ void
 stmf_wwn_to_devid_desc(scsi_devid_desc_t *sdid, uint8_t *wwn,
     uint8_t protocol_id)
 {
+	char wwn_str[20+1];
+
 	sdid->protocol_id = protocol_id;
 	sdid->piv = 1;
 	sdid->code_set = CODE_SET_ASCII;
 	sdid->association = ID_IS_TARGET_PORT;
 	sdid->ident_length = 20;
-	(void) sprintf((char *)sdid->ident,
+	/* Convert wwn value to "wwn.XXXXXXXXXXXXXXXX" format */
+	(void) snprintf(wwn_str, sizeof (wwn_str),
 	    "wwn.%02X%02X%02X%02X%02X%02X%02X%02X",
 	    wwn[0], wwn[1], wwn[2], wwn[3], wwn[4], wwn[5], wwn[6], wwn[7]);
+	bcopy(wwn_str, (char *)sdid->ident, 20);
 }
+
 
 stmf_xfer_data_t *
 stmf_prepare_tpgs_data()
@@ -4532,7 +4521,11 @@ stmf_scsilib_handle_report_tpgs(scsi_task_t *task, stmf_data_buf_t *dbuf)
 		    task->task_cmd_xfer_length;
 	}
 
-	if (task->task_cmd_xfer_length < 16) {
+	if (task->task_cmd_xfer_length == 0) {
+		stmf_scsilib_send_status(task, STATUS_GOOD, 0);
+		return;
+	}
+	if (task->task_cmd_xfer_length < 4) {
 		stmf_scsilib_send_status(task, STATUS_CHECK,
 		    STMF_SAA_INVALID_FIELD_IN_CDB);
 		return;

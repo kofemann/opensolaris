@@ -309,6 +309,7 @@ COMSYSOBJS=			\
 SYSOBJS=			\
 	__clock_gettime.o	\
 	__getcontext.o		\
+	__uadmin.o		\
 	_lwp_mutex_unlock.o	\
 	_stack_grow.o		\
 	door.o			\
@@ -798,7 +799,6 @@ PORTSYS=			\
 	execl.o			\
 	execle.o		\
 	execv.o			\
-	faccessat.o		\
 	fsmisc.o		\
 	fstatat.o		\
 	getpagesizes.o		\

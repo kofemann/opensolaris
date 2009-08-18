@@ -40,6 +40,9 @@
 
 SUNWprivate {
     global:
+        ndr_buf_decode;
+        ndr_buf_fini;
+        ndr_buf_init;
         ndr_clnt_bind;
         ndr_clnt_call;
         ndr_clnt_free_heap;
@@ -64,7 +67,6 @@ SUNWprivate {
 	ndr_mbtowc;
 	ndr_native_os;
         ndr_params;
-	ndr_pipe_getinfo;
 	ndr_pipe_open;
 	ndr_pipe_close;
 	ndr_pipe_read;

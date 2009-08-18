@@ -706,6 +706,7 @@ f none usr/include/sys/acpi_drv.h 644 root bin
 f none usr/include/sys/bitmap.h 644 root bin
 f none usr/include/sys/bitset.h 644 root bin
 f none usr/include/sys/bl.h 644 root bin
+f none usr/include/sys/bmc_intf.h 644 root bin
 f none usr/include/sys/bofi.h 644 root bin
 f none usr/include/sys/bofi_impl.h 644 root bin
 f none usr/include/sys/bootconf.h 644 root bin
@@ -900,7 +901,6 @@ f none usr/include/sys/fs/cachefs_dlog.h 644 root bin
 f none usr/include/sys/fs/cachefs_ioctl.h 644 root bin
 f none usr/include/sys/fs/decomp.h 644 root bin
 f none usr/include/sys/fs/dv_node.h 644 root bin
-f none usr/include/sys/fs/sdev_node.h 644 root bin
 f none usr/include/sys/fs/sdev_impl.h 644 root bin
 f none usr/include/sys/fs/fifonode.h 644 root bin
 f none usr/include/sys/fs/hsfs_isospec.h 644 root bin
@@ -961,6 +961,8 @@ d none usr/include/sys/ib/adapters/hermon 755 root bin
 f none usr/include/sys/ib/adapters/hermon/hermon_ioctl.h 644 root bin
 f none usr/include/sys/ib/ib_pkt_hdrs.h 644 root bin
 f none usr/include/sys/ib/ib_types.h 644 root bin
+d none usr/include/sys/ib/ibnex 755 root bin
+f none usr/include/sys/ib/ibnex/ibnex_devctl.h 644 root bin
 d none usr/include/sys/ib/ibtl 755 root bin
 f none usr/include/sys/ib/ibtl/ibci.h 644 root bin
 f none usr/include/sys/ib/ibtl/ibti.h 644 root bin
@@ -1076,6 +1078,7 @@ f none usr/include/sys/md5.h 644 root bin
 f none usr/include/sys/md5_consts.h 644 root bin
 f none usr/include/sys/mkdev.h 644 root bin
 f none usr/include/sys/mhd.h 644 root bin
+f none usr/include/sys/mii.h 644 root bin
 f none usr/include/sys/miiregs.h 644 root bin
 f none usr/include/sys/mman.h 644 root bin
 f none usr/include/sys/mmapobj.h 644 root bin

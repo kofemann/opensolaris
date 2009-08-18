@@ -35,17 +35,16 @@ extern "C" {
 #define	AUDIOHD_VID_INTEL	0x8086
 #define	AUDIOHD_VID_ATI		0x1002
 #define	AUDIOHD_VID_NVIDIA	0x10de
+#define	AUDIOHD_VID_SIGMATEL	0x8384
 
 /*
  * specific codec id used by specific vendors
  */
-#define	AUDIOHD_CODECID_HP	0x111d7608
+#define	AUDIOHD_CODEC_IDT7608	0x111d7608
+#define	AUDIOHD_CODEC_IDT76B2	0x111d76b2
 #define	AUDIOHD_CODECID_ALC888	0x10ec0888
 #define	AUDIOHD_CODECID_SONY1	0x10ec0260
 #define	AUDIOHD_CODECID_SONY2	0x10ec0262
-
-#define	AUDIO_SUCCESS		(0)
-#define	AUDIO_FAILURE		(-1)
 
 #define	AUDIOHD_INTS		50
 #define	AUDIOHD_MAX_INTS	1500
@@ -324,6 +323,11 @@ extern "C" {
 #define	AUDIOHDC_12BIT_VERB_MASK	0xfffff000
 #define	AUDIOHDC_4BIT_VERB_MASK		0xfffffff0
 
+#define	AUDIOHDC_SAMPR48000		48000
+#define	AUDIOHDC_MAX_BEEP_GEN		12000
+#define	AUDIOHDC_MIX_BEEP_GEN		47
+#define	AUDIOHDC_MUTE_BEEP_GEN		0x0
+
 /*
  * 12-bit verbs
  */
@@ -351,6 +355,7 @@ extern "C" {
 #define	AUDIOHDC_VERB_EXEC_PIN_SENSE		0x709
 
 #define	AUDIOHDC_VERB_GET_BEEP_GEN		0xf0a
+#define	AUDIOHDC_VERB_SET_BEEP_GEN		0x70a
 
 #define	AUDIOHDC_VERB_GET_EAPD			0xf0c
 #define	AUDIOHDC_VERB_SET_EAPD			0x70c
@@ -387,6 +392,7 @@ extern "C" {
 
 #define	AUDIOHDC_VERB_GET_AMP_MUTE		0xb
 #define	AUDIOHDC_VERB_SET_AMP_MUTE		0x3
+#define	AUDIOHDC_VERB_SET_BEEP_VOL		0x3A0
 
 /*
  * parameters of nodes
@@ -541,13 +547,14 @@ enum audiohd_pin_color {
 	AUDIOHD_PIN_OTHER = 0xf,
 };
 
-#define	CTRL_NUM	15
+#define	CTRL_NUM	16
 
 /* values for audiohd_widget.path_flags */
 #define	AUDIOHD_PATH_DAC	(1 << 0)
 #define	AUDIOHD_PATH_ADC	(1 << 1)
 #define	AUDIOHD_PATH_MON	(1 << 2)
 #define	AUDIOHD_PATH_NOMON	(1 << 3)
+#define	AUDIOHD_PATH_BEEP	(1 << 4)
 
 typedef struct audiohd_path		audiohd_path_t;
 typedef struct audiohd_widget	audiohd_widget_t;
@@ -628,10 +635,12 @@ struct audiohd_widget {
 typedef enum {
 	PLAY = 0,
 	RECORD = 1,
+	BEEP = 2,
 } path_type_t;
 
 struct audiohd_path {
 	wid_t			adda_wid;
+	wid_t			beep_wid;
 
 	wid_t			pin_wid[AUDIOHD_MAX_PINS];
 	int			sum_selconn[AUDIOHD_MAX_PINS];
@@ -716,6 +725,7 @@ struct audiohd_pin {
 	uint32_t	assoc;
 	uint32_t	seq;
 	wid_t		adc_dac_wid; /* AD/DA wid which can route to this pin */
+	wid_t		beep_wid;
 	int		no_phys_conn;
 	enum audiohda_device_type	device;
 
@@ -774,6 +784,7 @@ struct audiohd_state {
 	uint32_t	hda_flags;
 
 	boolean_t	soft_volume;
+	boolean_t	intr_added;
 
 	caddr_t				hda_reg_base;
 	ddi_acc_handle_t		hda_pci_handle;
@@ -887,13 +898,13 @@ struct audiohd_state {
 	lTmp = audioha_codec_verb_get(statep, caddr, wid, \
 	    AUDIOHDC_VERB_GET_PIN_CTRL, 0); \
 	if (lTmp == AUDIOHD_CODEC_FAILURE) \
-		return (AUDIO_FAILURE); \
+		return (DDI_FAILURE); \
 	lTmp = audioha_codec_verb_get(statep, caddr, wid, \
 	    AUDIOHDC_VERB_SET_PIN_CTRL, \
 	    (lTmp | AUDIOHDC_PIN_CONTROL_OUT_ENABLE | \
 	    AUDIOHDC_PIN_CONTROL_HP_ENABLE)); \
 	if (lTmp == AUDIOHD_CODEC_FAILURE) \
-		return (AUDIO_FAILURE); \
+		return (DDI_FAILURE); \
 }
 
 /*
@@ -906,12 +917,12 @@ struct audiohd_state {
 	lTmp = audioha_codec_verb_get(statep, caddr, wid, \
 	    AUDIOHDC_VERB_GET_PIN_CTRL, 0); \
 	if (lTmp == AUDIOHD_CODEC_FAILURE) \
-		return (AUDIO_FAILURE); \
+		return (DDI_FAILURE); \
 	lTmp = audioha_codec_verb_get(statep, caddr, wid, \
 	    AUDIOHDC_VERB_SET_PIN_CTRL, \
 	    (lTmp & ~AUDIOHDC_PIN_CONTROL_OUT_ENABLE)); \
 	if (lTmp == AUDIOHD_CODEC_FAILURE) \
-		return (AUDIO_FAILURE); \
+		return (DDI_FAILURE); \
 }
 
 /*
@@ -934,12 +945,12 @@ struct audiohd_state {
 	lTmp = audioha_codec_verb_get(statep, caddr, wid, \
 	    AUDIOHDC_VERB_GET_PIN_CTRL, 0); \
 	if (lTmp == AUDIOHD_CODEC_FAILURE) \
-		return (AUDIO_FAILURE); \
+		return (DDI_FAILURE); \
 	lTmp = audioha_codec_verb_get(statep, caddr, wid, \
 	    AUDIOHDC_VERB_SET_PIN_CTRL, \
 	    (lTmp & ~AUDIOHDC_PIN_CONTROL_IN_ENABLE)); \
 	if (lTmp == AUDIOHD_CODEC_FAILURE) \
-		return (AUDIO_FAILURE); \
+		return (DDI_FAILURE); \
 }
 
 /*
@@ -951,7 +962,7 @@ struct audiohd_state {
 	    caddr, wid, AUDIOHDC_VERB_SET_AMP_MUTE, \
 	    AUDIOHDC_AMP_SET_LR_OUTPUT | AUDIOHDC_GAIN_MAX) == \
 	    AUDIOHD_CODEC_FAILURE) \
-		return (AUDIO_FAILURE); \
+		return (DDI_FAILURE); \
 }
 
 #ifdef __cplusplus

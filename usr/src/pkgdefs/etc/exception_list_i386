@@ -67,6 +67,9 @@ usr/include/libelfsign.h		i386
 usr/lib/llib-lsoftcrypto		i386
 usr/lib/llib-lsoftcrypto.ln		i386
 usr/lib/amd64/llib-lsoftcrypto.ln	i386
+lib/llib-lkcfd				i386
+lib/llib-lkcfd.ln			i386
+lib/libkcfd.so				i386
 #
 # The following files are used by the DHCP service, the
 # standalone's DHCP implementation, and the kernel (nfs_dlboot).
@@ -789,11 +792,6 @@ usr/lib/amd64/llib-lcmdutils.ln		i386
 #
 usr/include/aclutils.h			i386
 #
-# User<->kernel interface used by cfgadm/IB only
-#
-usr/include/sys/ib/ibnex		i386
-usr/include/sys/ib/ibnex/ibnex_devctl.h	i386
-#
 # USB skeleton driver stays in sync with the rest of USB but doesn't ship.
 #
 kernel/drv/usbskel			i386
@@ -1133,6 +1131,9 @@ usr/include/sys/sdcard/sda_ioctl.h	i386
 #
 # libsmbfs is private
 #
+usr/include/netsmb			i386
+usr/include/netsmb/smbfs_acl.h		i386
+usr/include/netsmb/smbfs_api.h		i386
 usr/lib/libsmbfs.so			i386
 usr/lib/amd64/libsmbfs.so		i386
 usr/lib/llib-lsmbfs			i386
@@ -1269,6 +1270,9 @@ usr/lib/locale/C/LC_MESSAGES/TEST.po	i386
 # Private idmap RPC protocol
 usr/include/rpcsvc/idmap_prot.h		i386
 usr/include/rpcsvc/idmap_prot.x		i386
+
+# Private idmap directory API
+usr/include/directory.h			i386
 # Until we have product, let's not worry about how/what
 # to package. For now, ignore the new NFSv4.1 headers.
 #

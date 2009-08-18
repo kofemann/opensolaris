@@ -379,9 +379,11 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 		if (mds_server == NULL)
 			cmn_err(CE_WARN, "rfs41_dispatch: mds_server is NULL");
 		else if (!(mds_server->inst_flags & NFS_INST_STORE_INIT))
-			cmn_err(CE_WARN, "rfs41_dispatch: instance not initialized");
+			cmn_err(CE_WARN,
+			    "rfs41_dispatch: instance not initialized");
 		else
-			cmn_err(CE_WARN, "rfs41_dispatch: instance being torn down");
+			cmn_err(CE_WARN,
+			    "rfs41_dispatch: instance being torn down");
 
 		rbp->status = error = NFS4ERR_BADSESSION;
 		seqop_error(cap, (COMPOUND4res *)rbp);
@@ -419,7 +421,8 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 				goto  reply;
 
 			case SEQRES_BADSESSION:
-				cmn_err(CE_WARN, "rfs41_dispatch: SEQRES_BADSESSION");
+				cmn_err(CE_WARN,
+				    "rfs41_dispatch: SEQRES_BADSESSION");
 			default:
 				cmn_err(CE_WARN, "rfs41_dispatch: default");
 				rbp->status = NFS4ERR_BADSESSION;

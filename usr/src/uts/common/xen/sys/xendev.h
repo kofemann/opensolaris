@@ -30,7 +30,7 @@
 
 #include <sys/hypervisor.h>
 #include <sys/taskq.h>
-#ifdef	XPV_HVM_DRIVER
+#ifndef	__xpv
 #include <public/io/ring.h>
 #include <public/event_channel.h>
 #include <public/grant_table.h>
@@ -52,6 +52,7 @@ extern "C" {
 /*
  * Xenbus property interfaces, initialized by backend disk driver
  */
+#define	XBP_SECTOR_SIZE	"sector-size"		/* backend prop: uint */
 #define	XBP_SECTORS	"sectors"		/* backend prop: uint64 */
 #define	XBP_INFO	"info"			/* backend prop: uint */
 #define	XBP_FB		"feature-barrier"	/* backend prop: boolean int */

@@ -265,9 +265,11 @@ hermon_cmd_check_status(hermon_state_t *state, int status)
 			break;
 
 		case HERMON_CMD_BAD_NVMEM:
+			/*
+			 * No need of an ereport here since this case
+			 * is treated as a degradation later.
+			 */
 			HERMON_FMANOTE(state, HERMON_FMA_NVMEM);
-			hermon_fm_ereport(state, HCA_IBA_ERR,
-			    HCA_ERR_NON_FATAL);
 			break;
 
 		default:
@@ -1820,9 +1822,11 @@ hermon_run_fw_cmd_post(hermon_state_t *state)
 #ifdef FMA_TEST
 	if (hermon_test_num == -2) {
 		status = HERMON_CMD_BAD_NVMEM;
+		/*
+		 * No need of an ereport here since this case
+		 * is treated as a degradation later.
+		 */
 		HERMON_FMANOTE(state, HERMON_FMA_BADNVMEM);
-		hermon_fm_ereport(state, HCA_IBA_ERR,
-		    HCA_ERR_NON_FATAL);
 	}
 #endif
 	return (status);
@@ -2038,6 +2042,7 @@ hermon_getportinfo_cmd_post(hermon_state_t *state, uint_t port,
 	 */
 	bcopy((void *)((uintptr_t)mbox_info.mbi_out->mb_addr +
 	    HERMON_CMD_MADDATA_OFFSET), portinfo, size);
+	_NOTE(NOW_INVISIBLE_TO_OTHER_THREADS(*portinfo))
 	HERMON_GETPORTINFO_SWAP(portinfo);
 
 getportinfo_fail:
@@ -2046,14 +2051,17 @@ getportinfo_fail:
 	return (status);
 }
 
-
 /*
  * hermon_getpefcntr_cmd_post()
  *    Context: Can be called from interrupt or base context.
+ *
+ * If reset is zero, read the performance counters of the specified port and
+ * copy them into perfinfo.
+ * If reset is non-zero reset the performance counters of the specified port.
  */
 int
 hermon_getperfcntr_cmd_post(hermon_state_t *state, uint_t port,
-    uint_t sleepflag, hermon_hw_sm_perfcntr_t *perfinfo)
+    uint_t sleepflag, hermon_hw_sm_perfcntr_t *perfinfo, int reset)
 {
 	hermon_mbox_info_t	mbox_info;
 	hermon_cmd_post_t	cmd;
@@ -2074,13 +2082,31 @@ hermon_getperfcntr_cmd_post(hermon_state_t *state, uint_t port,
 	/* Build the GetPortInfo request MAD in the "In" mailbox */
 	size = HERMON_CMD_MAD_IFC_SIZE;
 	mbox = (uint32_t *)mbox_info.mbi_in->mb_addr;
-	ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[0], HERMON_CMD_PERFHDR0);
+
+	if (reset) {
+		ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[0],
+		    HERMON_CMD_PERF_SET);
+	} else {
+		ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[0],
+		    HERMON_CMD_PERF_GET);
+	}
 	ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[1], HERMON_CMD_MADHDR1);
 	ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[2], HERMON_CMD_MADHDR2);
 	ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[3], HERMON_CMD_MADHDR3);
 	ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[4], HERMON_CMD_PERFCNTRS);
 	ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[5], HERMON_CMD_PERFATTR);
-	ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[16], (port << 16));
+
+	if (reset) {
+		/* reset counters for XmitData, RcvData, XmitPkts, RcvPkts */
+		ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[16],
+		    ((port << 16) | 0xf000));
+
+		ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[22], 0);
+		ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[23], 0);
+		ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[24], 0);
+		ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[25], 0);
+	} else
+		ddi_put32(mbox_info.mbi_in->mb_acchdl, &mbox[16], (port << 16));
 
 	/* Sync the mailbox for the device to read */
 	hermon_mbox_sync(mbox_info.mbi_in, 0, size, DDI_DMA_SYNC_FORDEV);
@@ -2102,16 +2128,19 @@ hermon_getperfcntr_cmd_post(hermon_state_t *state, uint_t port,
 	size = HERMON_CMD_MAD_IFC_SIZE;
 	hermon_mbox_sync(mbox_info.mbi_out, 0, size, DDI_DMA_SYNC_FORCPU);
 
-	size = sizeof (hermon_hw_sm_perfcntr_t);	/* for the copy */
-	/*
-	 * Copy Perfcounters into "perfinfo".  We can discard the MAD header and
-	 * the 8 Quadword reserved area of the PERM mgmt class MAD
-	 */
+	if (reset == 0) {
+		size = sizeof (hermon_hw_sm_perfcntr_t); /* for the copy */
+		/*
+		 * Copy Perfcounters into "perfinfo".  We can discard the MAD
+		 * header and the 8 Quadword reserved area of the PERM mgmt
+		 * class MAD
+		 */
 
-	for (i = 0; i < size >> 3; i++) {
-		data = ddi_get64(mbox_info.mbi_out->mb_acchdl,
-		    ((uint64_t *)mbox_info.mbi_out->mb_addr + i + 8));
-		((uint64_t *)(void *)perfinfo)[i] = data;
+		for (i = 0; i < size >> 3; i++) {
+			data = ddi_get64(mbox_info.mbi_out->mb_acchdl,
+			    ((uint64_t *)mbox_info.mbi_out->mb_addr + i + 8));
+			((uint64_t *)(void *)perfinfo)[i] = data;
+		}
 	}
 
 getperfinfo_fail:
@@ -2188,6 +2217,7 @@ hermon_getnodeinfo_cmd_post(hermon_state_t *state, uint_t sleepflag,
 	 */
 	bcopy((void *)((uintptr_t)mbox_info.mbi_out->mb_addr +
 	    HERMON_CMD_MADDATA_OFFSET), nodeinfo, size);
+	_NOTE(NOW_INVISIBLE_TO_OTHER_THREADS(*nodeinfo))
 	HERMON_GETNODEINFO_SWAP(nodeinfo);
 
 getnodeinfo_fail:
@@ -2326,6 +2356,7 @@ hermon_getguidinfo_cmd_post(hermon_state_t *state, uint_t port,
 	 */
 	bcopy((void *)((uintptr_t)mbox_info.mbi_out->mb_addr +
 	    HERMON_CMD_MADDATA_OFFSET), guidinfo, size);
+	_NOTE(NOW_INVISIBLE_TO_OTHER_THREADS(*guidinfo))
 	HERMON_GETGUIDINFO_SWAP(guidinfo);
 
 getguidinfo_fail:
@@ -2397,6 +2428,7 @@ hermon_getpkeytable_cmd_post(hermon_state_t *state, uint_t port,
 	 */
 	bcopy((void *)((uintptr_t)mbox_info.mbi_out->mb_addr +
 	    HERMON_CMD_MADDATA_OFFSET), pkeytable, size);
+	_NOTE(NOW_INVISIBLE_TO_OTHER_THREADS(*pkeytable))
 	HERMON_GETPKEYTABLE_SWAP(pkeytable);
 
 getpkeytable_fail:

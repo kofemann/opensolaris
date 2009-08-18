@@ -118,6 +118,7 @@ int	apic_oneshot_enable = 1; /* to allow disabling one-shot capability */
 /* Now the ones for Dynamic Interrupt distribution */
 int	apic_enable_dynamic_migration = 0;
 
+extern int apic_have_32bit_cr8;
 
 /*
  * These variables are frequently accessed in apic_intr_enter(),
@@ -436,13 +437,10 @@ apic_init()
 	for (i = 0; i <= MAXIPL; i++)
 		apic_cr8pri[i] = apic_ipltopri[i] >> APIC_IPL_SHIFT;
 	CPU->cpu_pri_data = apic_cr8pri;
+#else
+	if (cpuid_have_cr8access(CPU))
+		apic_have_32bit_cr8 = 1;
 #endif	/* __amd64 */
-
-	/*
-	 * initialize interrupt remapping before apic
-	 * hardware initialization
-	 */
-	apic_intrr_init(apic_mode);
 }
 
 /*
@@ -758,6 +756,12 @@ apic_picinit(void)
 	uint32_t ver;
 
 	/*
+	 * initialize interrupt remapping before apic
+	 * hardware initialization
+	 */
+	apic_intrr_init(apic_mode);
+
+	/*
 	 * On UniSys Model 6520, the BIOS leaves vector 0x20 isr
 	 * bit on without clearing it with EOI.  Since softint
 	 * uses vector 0x20 to interrupt itself, so softint will
@@ -953,8 +957,12 @@ apic_intr_enter(int ipl, int *vectorp)
 			setcr8((ulong_t)(apic_ipltopri[nipl] >>
 			    APIC_IPL_SHIFT));
 #else
-			LOCAL_APIC_WRITE_REG(APIC_TASK_REG,
-			    (uint32_t)apic_ipltopri[nipl]);
+			if (apic_have_32bit_cr8)
+				setcr8((ulong_t)(apic_ipltopri[nipl] >>
+				    APIC_IPL_SHIFT));
+			else
+				LOCAL_APIC_WRITE_REG(APIC_TASK_REG,
+				    (uint32_t)apic_ipltopri[nipl]);
 #endif
 			LOCAL_APIC_WRITE_REG(APIC_EOI_REG, 0);
 		} else {
@@ -995,8 +1003,12 @@ apic_intr_enter(int ipl, int *vectorp)
 #if defined(__amd64)
 		setcr8((ulong_t)(apic_ipltopri[nipl] >> APIC_IPL_SHIFT));
 #else
-		LOCAL_APIC_WRITE_REG(APIC_TASK_REG,
-		    (uint32_t)apic_ipltopri[nipl]);
+		if (apic_have_32bit_cr8)
+			setcr8((ulong_t)(apic_ipltopri[nipl] >>
+			    APIC_IPL_SHIFT));
+		else
+			LOCAL_APIC_WRITE_REG(APIC_TASK_REG,
+			    (uint32_t)apic_ipltopri[nipl]);
 #endif
 	} else {
 		X2APIC_WRITE(APIC_TASK_REG, apic_ipltopri[nipl]);
@@ -1059,7 +1071,10 @@ apic_intr_exit(int prev_ipl, int irq)
 #if defined(__amd64)
 	setcr8((ulong_t)apic_cr8pri[prev_ipl]);
 #else
-	apicadr[APIC_TASK_REG] = apic_ipltopri[prev_ipl];
+	if (apic_have_32bit_cr8)
+		setcr8((ulong_t)(apic_ipltopri[prev_ipl] >> APIC_IPL_SHIFT));
+	else
+		apicadr[APIC_TASK_REG] = apic_ipltopri[prev_ipl];
 #endif
 
 	APIC_INTR_EXIT();
@@ -1098,7 +1113,10 @@ apic_setspl(int ipl)
 #if defined(__amd64)
 	setcr8((ulong_t)apic_cr8pri[ipl]);
 #else
-	apicadr[APIC_TASK_REG] = apic_ipltopri[ipl];
+	if (apic_have_32bit_cr8)
+		setcr8((ulong_t)(apic_ipltopri[ipl] >> APIC_IPL_SHIFT));
+	else
+		apicadr[APIC_TASK_REG] = apic_ipltopri[ipl];
 #endif
 
 	/* interrupts at ipl above this cannot be in progress */

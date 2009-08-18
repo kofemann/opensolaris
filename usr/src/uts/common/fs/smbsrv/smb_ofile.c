@@ -164,14 +164,17 @@
 #include <smbsrv/smb_kproto.h>
 #include <smbsrv/smb_fsops.h>
 
-/* Static functions defined further down this file. */
-static void		smb_ofile_delete(smb_ofile_t *of);
-static smb_ofile_t	*smb_ofile_close_and_next(smb_ofile_t *of);
+static boolean_t smb_ofile_is_open_locked(smb_ofile_t *);
+static void smb_ofile_delete(smb_ofile_t *);
+static smb_ofile_t *smb_ofile_close_and_next(smb_ofile_t *);
+static void smb_ofile_set_close_attrs(smb_ofile_t *, uint32_t);
+static int smb_ofile_netinfo_encode(smb_ofile_t *, uint8_t *, size_t,
+    uint32_t *);
+static int smb_ofile_netinfo_init(smb_ofile_t *, smb_netfileinfo_t *);
+static void smb_ofile_netinfo_fini(smb_netfileinfo_t *);
 
 /*
  * smb_ofile_open
- *
- *
  */
 smb_ofile_t *
 smb_ofile_open(
@@ -185,6 +188,7 @@ smb_ofile_open(
 {
 	smb_ofile_t	*of;
 	uint16_t	fid;
+	smb_attr_t	attr;
 
 	if (smb_idpool_alloc(&tree->t_fid_pool, &fid)) {
 		err->status = NT_STATUS_TOO_MANY_OPENED_FILES;
@@ -212,8 +216,10 @@ smb_ofile_open(
 	of->f_user = tree->t_user;
 	of->f_tree = tree;
 	of->f_node = node;
+	of->f_explicit_times = 0;
 	mutex_init(&of->f_mutex, NULL, MUTEX_DEFAULT, NULL);
 	of->f_state = SMB_OFILE_STATE_OPEN;
+
 
 	if (ftype == SMB_FTYPE_MESG_PIPE) {
 		of->f_pipe = kmem_zalloc(sizeof (smb_opipe_t), KM_SLEEP);
@@ -224,7 +230,20 @@ smb_ofile_open(
 		if (of->f_granted_access == FILE_EXECUTE)
 			of->f_flags |= SMB_OFLAGS_EXECONLY;
 
-		if (crgetuid(of->f_cr) == node->attr.sa_vattr.va_uid) {
+		bzero(&attr, sizeof (smb_attr_t));
+		attr.sa_mask |= SMB_AT_UID;
+		if (smb_fsop_getattr(NULL, kcred, node, &attr) != 0) {
+			of->f_magic = 0;
+			mutex_destroy(&of->f_mutex);
+			crfree(of->f_cr);
+			smb_idpool_free(&tree->t_fid_pool, of->f_fid);
+			kmem_cache_free(tree->t_server->si_cache_ofile, of);
+			err->status = NT_STATUS_INTERNAL_ERROR;
+			err->errcls = ERRDOS;
+			err->errcode = ERROR_INTERNAL_ERROR;
+			return (NULL);
+		}
+		if (crgetuid(of->f_cr) == attr.sa_vattr.va_uid) {
 			/*
 			 * Add this bit for the file's owner even if it's not
 			 * specified in the request (Windows behavior).
@@ -262,6 +281,7 @@ smb_ofile_open(
 	smb_llist_enter(&tree->t_ofile_list, RW_WRITER);
 	smb_llist_insert_tail(&tree->t_ofile_list, of);
 	smb_llist_exit(&tree->t_ofile_list);
+	atomic_inc_32(&tree->t_open_files);
 	atomic_inc_32(&tree->t_server->sv_open_files);
 	atomic_inc_32(&of->f_session->s_file_cnt);
 
@@ -270,13 +290,9 @@ smb_ofile_open(
 
 /*
  * smb_ofile_close
- *
- *
  */
 void
-smb_ofile_close(
-    smb_ofile_t		*of,
-    uint32_t		last_wtime)
+smb_ofile_close(smb_ofile_t *of, uint32_t last_wtime)
 {
 	ASSERT(of);
 	ASSERT(of->f_magic == SMB_OFILE_MAGIC);
@@ -293,19 +309,8 @@ smb_ofile_close(
 		if (of->f_ftype == SMB_FTYPE_MESG_PIPE) {
 			smb_opipe_close(of);
 		} else {
-			/*
-			 * For files created readonly, propagate the readonly
-			 * bit to the ofile now
-			 */
-			if (of->f_node->readonly_creator == of) {
-				of->f_node->attr.sa_dosattr |=
-				    FILE_ATTRIBUTE_READONLY;
-				of->f_node->what |= SMB_AT_DOSATTR;
-				of->f_node->readonly_creator = NULL;
-			}
+			smb_ofile_set_close_attrs(of, last_wtime);
 
-			smb_ofile_close_timestamp_update(of, last_wtime);
-			(void) smb_sync_fsattr(NULL, of->f_cr, of->f_node);
 			if (of->f_flags & SMB_OFLAGS_SET_DELETE_ON_CLOSE) {
 				if (smb_tree_has_feature(of->f_tree,
 				    SMB_TREE_CATIA)) {
@@ -328,6 +333,7 @@ smb_ofile_close(
 			if (of->f_node->flags & NODE_FLAGS_NOTIFY_CHANGE)
 				smb_process_file_notify_change_queue(of);
 		}
+		atomic_dec_32(&of->f_tree->t_open_files);
 		atomic_dec_32(&of->f_tree->t_server->sv_open_files);
 
 		mutex_enter(&of->f_mutex);
@@ -409,6 +415,70 @@ smb_ofile_close_all_by_pid(
 }
 
 /*
+ * If the enumeration request is for ofile data, handle it here.
+ * Otherwise, return.
+ *
+ * This function should be called with a hold on the ofile.
+ */
+int
+smb_ofile_enum(smb_ofile_t *of, smb_svcenum_t *svcenum)
+{
+	uint8_t *pb;
+	uint_t nbytes;
+	int rc;
+
+	ASSERT(of);
+	ASSERT(of->f_magic == SMB_OFILE_MAGIC);
+	ASSERT(of->f_refcnt);
+
+	if (svcenum->se_type != SMB_SVCENUM_TYPE_FILE)
+		return (0);
+
+	if (svcenum->se_nskip > 0) {
+		svcenum->se_nskip--;
+		return (0);
+	}
+
+	if (svcenum->se_nitems >= svcenum->se_nlimit) {
+		svcenum->se_nitems = svcenum->se_nlimit;
+		return (0);
+	}
+
+	pb = &svcenum->se_buf[svcenum->se_bused];
+
+	rc = smb_ofile_netinfo_encode(of, pb, svcenum->se_bavail,
+	    &nbytes);
+	if (rc == 0) {
+		svcenum->se_bavail -= nbytes;
+		svcenum->se_bused += nbytes;
+		svcenum->se_nitems++;
+	}
+
+	return (rc);
+}
+
+/*
+ * Take a reference on an open file.
+ */
+boolean_t
+smb_ofile_hold(smb_ofile_t *of)
+{
+	ASSERT(of);
+	ASSERT(of->f_magic == SMB_OFILE_MAGIC);
+
+	mutex_enter(&of->f_mutex);
+
+	if (smb_ofile_is_open_locked(of)) {
+		of->f_refcnt++;
+		mutex_exit(&of->f_mutex);
+		return (B_TRUE);
+	}
+
+	mutex_exit(&of->f_mutex);
+	return (B_FALSE);
+}
+
+/*
  * smb_ofile_release
  *
  */
@@ -487,6 +557,71 @@ smb_ofile_lookup_by_fid(
 }
 
 /*
+ * smb_ofile_lookup_by_uniqid
+ *
+ * Find the open file whose uniqid matches the one specified in the request.
+ */
+smb_ofile_t *
+smb_ofile_lookup_by_uniqid(smb_tree_t *tree, uint32_t uniqid)
+{
+	smb_llist_t	*of_list;
+	smb_ofile_t	*of;
+
+	ASSERT(tree->t_magic == SMB_TREE_MAGIC);
+
+	of_list = &tree->t_ofile_list;
+	smb_llist_enter(of_list, RW_READER);
+	of = smb_llist_head(of_list);
+
+	while (of) {
+		ASSERT(of->f_magic == SMB_OFILE_MAGIC);
+		ASSERT(of->f_tree == tree);
+
+		if (of->f_uniqid == uniqid) {
+			if (smb_ofile_hold(of)) {
+				smb_llist_exit(of_list);
+				return (of);
+			}
+		}
+
+		of = smb_llist_next(of_list, of);
+	}
+
+	smb_llist_exit(of_list);
+	return (NULL);
+}
+
+/*
+ * Disallow NetFileClose on certain ofiles to avoid side-effects.
+ * Closing a tree root is not allowed: use NetSessionDel or NetShareDel.
+ * Closing SRVSVC connections is not allowed because this NetFileClose
+ * request may depend on this ofile.
+ */
+boolean_t
+smb_ofile_disallow_fclose(smb_ofile_t *of)
+{
+	ASSERT(of);
+	ASSERT(of->f_magic == SMB_OFILE_MAGIC);
+	ASSERT(of->f_refcnt);
+
+	switch (of->f_ftype) {
+	case SMB_FTYPE_DISK:
+		ASSERT(of->f_tree);
+		return (of->f_node == of->f_tree->t_snode);
+
+	case SMB_FTYPE_MESG_PIPE:
+		ASSERT(of->f_pipe);
+		if (utf8_strcasecmp(of->f_pipe->p_name, "SRVSVC") == 0)
+			return (B_TRUE);
+		break;
+	default:
+		break;
+	}
+
+	return (B_FALSE);
+}
+
+/*
  * smb_ofile_set_flags
  *
  * Return value:
@@ -526,6 +661,7 @@ smb_ofile_seek(
 {
 	u_offset_t	newoff = 0;
 	int		rc = 0;
+	smb_attr_t	attr;
 
 	ASSERT(of);
 	ASSERT(of->f_magic == SMB_OFILE_MAGIC);
@@ -548,11 +684,17 @@ smb_ofile_seek(
 		break;
 
 	case SMB_SEEK_END:
-		if (off < 0 && (-off) > of->f_node->attr.sa_vattr.va_size)
+		bzero(&attr, sizeof (smb_attr_t));
+		attr.sa_mask |= SMB_AT_SIZE;
+		rc = smb_fsop_getattr(NULL, kcred, of->f_node, &attr);
+		if (rc != 0) {
+			mutex_exit(&of->f_mutex);
+			return (rc);
+		}
+		if (off < 0 && (-off) > attr.sa_vattr.va_size)
 			newoff = 0;
 		else
-			newoff = of->f_node->attr.sa_vattr.va_size +
-			    (u_offset_t)off;
+			newoff = attr.sa_vattr.va_size + (u_offset_t)off;
 		break;
 
 	default:
@@ -576,59 +718,17 @@ smb_ofile_seek(
 }
 
 /*
- * smb_ofile_close_timestamp_update
- *
- * The last_wtime is specified in the request received
- * from the client. If it is neither 0 nor -1, this time
- * should be used as the file's mtime. It must first be
- * converted from the server's localtime (as received in
- * the client's request) to GMT.
- */
-void
-smb_ofile_close_timestamp_update(
-    smb_ofile_t		*of,
-    uint32_t		last_wtime)
-{
-	smb_node_t	*node;
-	timestruc_t	mtime, atime;
-	unsigned int	what = 0;
-
-	mtime.tv_sec = 0;
-	mtime.tv_nsec = 0;
-
-	if (last_wtime != 0 && last_wtime != 0xFFFFFFFF) {
-		mtime.tv_sec = last_wtime + of->f_server->si_gmtoff;
-		what |= SMB_AT_MTIME;
-	}
-
-	/*
-	 * NODE_FLAGS_SYNCATIME is set whenever something is
-	 * written to a file.
-	 */
-	node = of->f_node;
-	if (node->flags & NODE_FLAGS_SYNCATIME) {
-		what |= SMB_AT_ATIME;
-		(void) microtime(&atime);
-	}
-
-	smb_node_set_time(node, 0, &mtime, &atime, 0, what);
-}
-
-/*
  * smb_ofile_is_open
- *
  */
 boolean_t
 smb_ofile_is_open(smb_ofile_t *of)
 {
-	boolean_t	rc = B_FALSE;
+	boolean_t	rc;
 
 	SMB_OFILE_VALID(of);
 
 	mutex_enter(&of->f_mutex);
-	if (of->f_state == SMB_OFILE_STATE_OPEN) {
-		rc = B_TRUE;
-	}
+	rc = smb_ofile_is_open_locked(of);
 	mutex_exit(&of->f_mutex);
 	return (rc);
 }
@@ -644,7 +744,132 @@ smb_ofile_set_oplock_granted(smb_ofile_t *of)
 	mutex_exit(&of->f_mutex);
 }
 
+/*
+ * smb_ofile_pending_write_time
+ *
+ * Flag write times as pending - to be set on close, setattr
+ * or delayed write timer.
+ */
+void
+smb_ofile_set_write_time_pending(smb_ofile_t *of)
+{
+	SMB_OFILE_VALID(of);
+	mutex_enter(&of->f_mutex);
+	of->f_flags |= SMB_OFLAGS_TIMESTAMPS_PENDING;
+	mutex_exit(&of->f_mutex);
+}
+
+boolean_t
+smb_ofile_write_time_pending(smb_ofile_t *of)
+{
+	boolean_t rc = B_FALSE;
+
+	SMB_OFILE_VALID(of);
+	mutex_enter(&of->f_mutex);
+	if (of->f_flags & SMB_OFLAGS_TIMESTAMPS_PENDING)
+		rc = B_TRUE;
+	mutex_exit(&of->f_mutex);
+
+	return (rc);
+}
+
+/*
+ * smb_ofile_set_explicit_time_flag
+ *
+ * Note the timestamps specified in "what", as having been
+ * explicity set for the ofile. Also clear the flag for pending
+ * timestamps as the pending timestamps will have been applied
+ * by the explicit set.
+ */
+void
+smb_ofile_set_explicit_times(smb_ofile_t *of, uint32_t what)
+{
+	SMB_OFILE_VALID(of);
+	mutex_enter(&of->f_mutex);
+	of->f_flags &= ~SMB_OFLAGS_TIMESTAMPS_PENDING;
+	of->f_explicit_times |= (what & SMB_AT_TIMES);
+	mutex_exit(&of->f_mutex);
+}
+
+uint32_t
+smb_ofile_explicit_times(smb_ofile_t *of)
+{
+	uint32_t rc;
+
+	SMB_OFILE_VALID(of);
+	mutex_enter(&of->f_mutex);
+	rc = of->f_explicit_times;
+	mutex_exit(&of->f_mutex);
+
+	return (rc);
+}
+
 /* *************************** Static Functions ***************************** */
+
+/*
+ * Determine whether or not an ofile is open.
+ * This function must be called with the mutex held.
+ */
+static boolean_t
+smb_ofile_is_open_locked(smb_ofile_t *of)
+{
+	switch (of->f_state) {
+	case SMB_OFILE_STATE_OPEN:
+		return (B_TRUE);
+
+	case SMB_OFILE_STATE_CLOSING:
+	case SMB_OFILE_STATE_CLOSED:
+		return (B_FALSE);
+
+	default:
+		ASSERT(0);
+		return (B_FALSE);
+	}
+}
+
+/*
+ * smb_ofile_set_close_attrs
+ *
+ * Updates timestamps, size and readonly bit.
+ * The last_wtime is specified in the request received
+ * from the client. If it is neither 0 nor -1, this time
+ * should be used as the file's mtime. It must first be
+ * converted from the server's localtime (as received in
+ * the client's request) to GMT.
+ *
+ * Call smb_node_setattr even if no attributes are being
+ * explicitly set, to set any pending attributes.
+ */
+static void
+smb_ofile_set_close_attrs(smb_ofile_t *of, uint32_t last_wtime)
+{
+	smb_node_t *node = of->f_node;
+	smb_attr_t attr;
+
+	bzero(&attr, sizeof (smb_attr_t));
+
+	/* For files created readonly, propagate readonly bit */
+	if (node->readonly_creator == of) {
+		attr.sa_mask |= SMB_AT_DOSATTR;
+		if (smb_fsop_getattr(NULL, kcred, node, &attr) &&
+		    (attr.sa_dosattr & FILE_ATTRIBUTE_READONLY)) {
+			attr.sa_mask = 0;
+		} else {
+			attr.sa_dosattr |= FILE_ATTRIBUTE_READONLY;
+		}
+
+		node->readonly_creator = NULL;
+	}
+
+	/* apply last_wtime if specified */
+	if (last_wtime != 0 && last_wtime != 0xFFFFFFFF) {
+		attr.sa_vattr.va_mtime.tv_sec =
+		    last_wtime + of->f_server->si_gmtoff;
+		attr.sa_mask |= SMB_AT_MTIME;
+	}
+
+	(void) smb_node_setattr(NULL, node, of->f_cr, of, &attr);
+}
 
 /*
  * smb_ofile_close_and_next
@@ -655,8 +880,7 @@ smb_ofile_set_oplock_granted(smb_ofile_t *of)
  * RW_READER mode before being called.
  */
 static smb_ofile_t *
-smb_ofile_close_and_next(
-    smb_ofile_t		*of)
+smb_ofile_close_and_next(smb_ofile_t *of)
 {
 	smb_ofile_t	*next_of;
 	smb_tree_t	*tree;
@@ -702,8 +926,7 @@ smb_ofile_close_and_next(
  *
  */
 static void
-smb_ofile_delete(
-    smb_ofile_t		*of)
+smb_ofile_delete(smb_ofile_t *of)
 {
 	ASSERT(of);
 	ASSERT(of->f_magic == SMB_OFILE_MAGIC);
@@ -800,7 +1023,7 @@ smb_ofile_open_check(
 	 * directories, but this check will remain as it is not
 	 * clear whether it was originally put here for a reason.
 	 */
-	if (node->attr.sa_vattr.va_type == VDIR) {
+	if (smb_node_is_dir(node)) {
 		if (SMB_DENY_RW(of->f_share_access) &&
 		    (node->n_orig_uid != crgetuid(cr))) {
 			mutex_exit(&of->f_mutex);
@@ -968,4 +1191,108 @@ smb_ofile_set_delete_on_close(smb_ofile_t *of)
 	mutex_enter(&of->f_mutex);
 	of->f_flags |= SMB_OFLAGS_SET_DELETE_ON_CLOSE;
 	mutex_exit(&of->f_mutex);
+}
+
+/*
+ * Encode open file information into a buffer; needed in user space to
+ * support RPC requests.
+ */
+static int
+smb_ofile_netinfo_encode(smb_ofile_t *of, uint8_t *buf, size_t buflen,
+    uint32_t *nbytes)
+{
+	smb_netfileinfo_t	fi;
+	int			rc;
+
+	rc = smb_ofile_netinfo_init(of, &fi);
+	if (rc == 0) {
+		rc = smb_netfileinfo_encode(&fi, buf, buflen, nbytes);
+		smb_ofile_netinfo_fini(&fi);
+	}
+
+	return (rc);
+}
+
+static int
+smb_ofile_netinfo_init(smb_ofile_t *of, smb_netfileinfo_t *fi)
+{
+	smb_user_t	*user;
+	smb_tree_t	*tree;
+	smb_node_t	*node;
+	char		*path;
+	char		*buf;
+	int		rc;
+
+	ASSERT(of);
+	user = of->f_user;
+	tree = of->f_tree;
+	ASSERT(user);
+	ASSERT(tree);
+
+	buf = kmem_zalloc(MAXPATHLEN, KM_SLEEP);
+
+	switch (of->f_ftype) {
+	case SMB_FTYPE_DISK:
+		node = of->f_node;
+		ASSERT(node);
+
+		fi->fi_permissions = of->f_granted_access;
+		fi->fi_numlocks = smb_lock_get_lock_count(node);
+
+		path = kmem_zalloc(MAXPATHLEN, KM_SLEEP);
+
+		if (node != tree->t_snode) {
+			rc = vnodetopath(tree->t_snode->vp, node->vp, path,
+			    MAXPATHLEN, kcred);
+			if (rc == 0)
+				(void) strsubst(path, '/', '\\');
+			else
+				(void) strlcpy(path, node->od_name, MAXPATHLEN);
+		}
+
+		(void) snprintf(buf, MAXPATHLEN, "%s:%s", tree->t_sharename,
+		    path);
+		kmem_free(path, MAXPATHLEN);
+		break;
+
+	case SMB_FTYPE_MESG_PIPE:
+		ASSERT(of->f_pipe);
+
+		fi->fi_permissions = FILE_READ_DATA | FILE_WRITE_DATA |
+		    FILE_EXECUTE;
+		fi->fi_numlocks = 0;
+		(void) snprintf(buf, MAXPATHLEN, "\\PIPE\\%s",
+		    of->f_pipe->p_name);
+		break;
+
+	default:
+		kmem_free(buf, MAXPATHLEN);
+		return (-1);
+	}
+
+	fi->fi_fid = of->f_fid;
+	fi->fi_uniqid = of->f_uniqid;
+	fi->fi_pathlen = strlen(buf) + 1;
+	fi->fi_path = smb_kstrdup(buf, fi->fi_pathlen);
+	kmem_free(buf, MAXPATHLEN);
+
+	fi->fi_namelen = user->u_domain_len + user->u_name_len + 2;
+	fi->fi_username = kmem_alloc(fi->fi_namelen, KM_SLEEP);
+	(void) snprintf(fi->fi_username, fi->fi_namelen, "%s\\%s",
+	    user->u_domain, user->u_name);
+	return (0);
+}
+
+static void
+smb_ofile_netinfo_fini(smb_netfileinfo_t *fi)
+{
+	if (fi == NULL)
+		return;
+
+	if (fi->fi_path)
+		kmem_free(fi->fi_path, fi->fi_pathlen);
+	if (fi->fi_username)
+		kmem_free(fi->fi_username, fi->fi_namelen);
+
+	bzero(fi, sizeof (smb_netfileinfo_t));
 }

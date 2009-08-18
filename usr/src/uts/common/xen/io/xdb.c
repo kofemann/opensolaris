@@ -299,13 +299,13 @@ xdb_get_buf(xdb_t *vdp, blkif_request_t *req, xdb_request_t *xreq)
 			/*
 			 * first_sect should be no bigger than last_sect and
 			 * both of them should be no bigger than
-			 * (PAGESIZE / XB_BSIZE - 1) according to definition
+			 * XB_LAST_SECTOR_IN_SEG according to definition
 			 * of blk interface by Xen, so sanity check again
 			 */
-			if (fs > (PAGESIZE / XB_BSIZE - 1))
-				fs = PAGESIZE / XB_BSIZE - 1;
-			if (ls > (PAGESIZE / XB_BSIZE - 1))
-				ls = PAGESIZE / XB_BSIZE - 1;
+			if (fs > XB_LAST_SECTOR_IN_SEG)
+				fs = XB_LAST_SECTOR_IN_SEG;
+			if (ls > XB_LAST_SECTOR_IN_SEG)
+				ls = XB_LAST_SECTOR_IN_SEG;
 			if (fs > ls)
 				fs = ls;
 
@@ -406,15 +406,31 @@ xdb_get_buf(xdb_t *vdp, blkif_request_t *req, xdb_request_t *xreq)
 	bp->b_shadow = &xreq->xr_pplist[curseg];
 	bp->b_iodone = xdb_biodone;
 	sectors = 0;
+
+	/*
+	 * Run through the segments. There are XB_NUM_SECTORS_PER_SEG sectors
+	 * per segment. On some OSes (e.g. Linux), there may be empty gaps
+	 * between segments. (i.e. the first segment may end on sector 6 and
+	 * the second segment start on sector 4).
+	 *
+	 * if a segments first sector is not set to 0, and this is not the
+	 * first segment in our buf, end this buf now.
+	 *
+	 * if a segments last sector is not set to XB_LAST_SECTOR_IN_SEG, and
+	 * this is not the last segment in the request, add this segment into
+	 * the buf, then end this buf (updating the pointer to point to the
+	 * next segment next time around).
+	 */
 	for (i = curseg; i < xreq->xr_buf_pages; i++) {
-		/*
-		 * The xreq->xr_segs[i].fs of the first seg can be non-zero
-		 * otherwise, we'll break it into multiple bufs
-		 */
-		if ((i != curseg) && (xreq->xr_segs[i].fs != 0)) {
+		if ((xreq->xr_segs[i].fs != 0) && (i != curseg)) {
 			break;
 		}
 		sectors += (xreq->xr_segs[i].ls - xreq->xr_segs[i].fs + 1);
+		if ((xreq->xr_segs[i].ls != XB_LAST_SECTOR_IN_SEG) &&
+		    (i != (xreq->xr_buf_pages - 1))) {
+			i++;
+			break;
+		}
 	}
 	xreq->xr_curseg = i;
 	bp->b_bcount = sectors * DEV_BSIZE;
@@ -1053,7 +1069,7 @@ xdb_params_init(xdb_t *vdp)
 {
 	dev_info_t		*dip = vdp->xs_dip;
 	char			*str, *xsname;
-	int			err, watch_params = B_FALSE;
+	int			err;
 
 	ASSERT(MUTEX_HELD(&vdp->xs_cbmutex));
 	ASSERT(vdp->xs_params_path == NULL);
@@ -1061,21 +1077,11 @@ xdb_params_init(xdb_t *vdp)
 	if ((xsname = xvdi_get_xsname(dip)) == NULL)
 		return (B_FALSE);
 
-	if ((err = xenbus_read_str(xsname,
-	    "dynamic-device-path", &str)) == ENOENT) {
-		err = xenbus_read_str(xsname, "params", &str);
-		watch_params = B_TRUE;
-	}
-	if (err != 0)
+	err = xenbus_read_str(xsname, "params", &str);
+	if (err != 0) {
 		return (B_FALSE);
+	}
 	vdp->xs_params_path = str;
-
-	/*
-	 * If we got our backing store path from "dynamic-device-path" then
-	 * there's no reason to watch "params"
-	 */
-	if (!watch_params)
-		return (B_TRUE);
 
 	if (xvdi_add_xb_watch_handler(dip, xsname, "params",
 	    xdb_watch_params_cb, NULL) != DDI_SUCCESS) {
@@ -1202,7 +1208,11 @@ xdb_open_device(xdb_t *vdp)
 {
 	dev_info_t *dip = vdp->xs_dip;
 	uint64_t devsize;
+	int blksize;
 	char *nodepath;
+	char *xsname;
+	char *str;
+	int err;
 
 	ASSERT(MUTEX_HELD(&vdp->xs_cbmutex));
 
@@ -1217,6 +1227,18 @@ xdb_open_device(xdb_t *vdp)
 		ASSERT(vdp->xs_ldi_li == NULL);
 		ASSERT(vdp->xs_ldi_hdl == NULL);
 		return (DDI_SUCCESS);
+	}
+
+	/*
+	 * after the hotplug scripts have "connected" the device, check to see
+	 * if we're using a dynamic device.  If so, replace the params path
+	 * with the dynamic one.
+	 */
+	xsname = xvdi_get_xsname(dip);
+	err = xenbus_read_str(xsname, "dynamic-device-path", &str);
+	if (err == 0) {
+		strfree(vdp->xs_params_path);
+		vdp->xs_params_path = str;
 	}
 
 	if (ldi_ident_from_dip(dip, &vdp->xs_ldi_li) != 0)
@@ -1252,7 +1274,17 @@ xdb_open_device(xdb_t *vdp)
 		kmem_free(nodepath, MAXPATHLEN);
 		return (DDI_FAILURE);
 	}
-	vdp->xs_sectors = devsize / XB_BSIZE;
+
+	blksize = ldi_prop_get_int64(vdp->xs_ldi_hdl,
+	    DDI_PROP_DONTPASS | DDI_PROP_NOTPROM,
+	    "blksize", DEV_BSIZE);
+	if (blksize == DEV_BSIZE)
+		blksize = ldi_prop_get_int(vdp->xs_ldi_hdl,
+		    LDI_DEV_T_ANY | DDI_PROP_DONTPASS |
+		    DDI_PROP_NOTPROM, "device-blksize", DEV_BSIZE);
+
+	vdp->xs_sec_size = blksize;
+	vdp->xs_sectors = devsize / blksize;
 
 	/* check if the underlying device is a CD/DVD disc */
 	if (ldi_prop_get_int(vdp->xs_ldi_hdl, LDI_DEV_T_ANY | DDI_PROP_DONTPASS,
@@ -1388,13 +1420,12 @@ trans_retry:
 	/* If feature-barrier isn't present in xenstore, add it.  */
 	fb_exists = xenbus_exists(xsname, XBP_FB);
 
-	/* hard-coded 512-byte sector size */
-	ssize = DEV_BSIZE;
+	ssize = (vdp->xs_sec_size == 0) ? DEV_BSIZE : vdp->xs_sec_size;
 	sectors = vdp->xs_sectors;
 	if (((!fb_exists &&
 	    (err = xenbus_printf(xbt, xsname, XBP_FB, "%d", 1)))) ||
 	    (err = xenbus_printf(xbt, xsname, XBP_INFO, "%u", dinfo)) ||
-	    (err = xenbus_printf(xbt, xsname, "sector-size", "%u", ssize)) ||
+	    (err = xenbus_printf(xbt, xsname, XBP_SECTOR_SIZE, "%u", ssize)) ||
 	    (err = xenbus_printf(xbt, xsname,
 	    XBP_SECTORS, "%"PRIu64, sectors)) ||
 	    (err = xenbus_printf(xbt, xsname, "instance", "%d", instance)) ||

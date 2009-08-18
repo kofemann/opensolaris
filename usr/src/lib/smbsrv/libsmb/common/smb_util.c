@@ -26,6 +26,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <pthread.h>
 #include <sys/varargs.h>
@@ -37,8 +38,11 @@
 #include <sys/systeminfo.h>
 #include <sys/utsname.h>
 #include <libzfs.h>
+#include <dlfcn.h>
 #include <smbsrv/string.h>
 #include <smbsrv/libsmb.h>
+
+#define	SMB_LIB_ALT	"/usr/lib/smbsrv/libsmbex.so"
 
 static uint_t smb_make_mask(char *, uint_t);
 static boolean_t smb_netmatch(struct netbuf *, char *);
@@ -690,6 +694,9 @@ smb_netgroup_match(struct nd_hostservlist *clnames, char  *glist, int grc)
 
 /*
  * Resolve the ZFS dataset from a path.
+ * Returns,
+ *	0  = On success.
+ *	-1 = Failure to open /etc/mnttab file or to get ZFS dataset.
  */
 int
 smb_getdataset(const char *path, char *dataset, size_t len)
@@ -712,9 +719,13 @@ smb_getdataset(const char *path, char *dataset, size_t len)
 		resetmnttab(fp);
 		(void) memset(&mntpref, '\0', sizeof (mntpref));
 		mntpref.mnt_mountp = tmppath;
-		mntpref.mnt_fstype = "zfs";
 
 		if (getmntany(fp, &mnttab, &mntpref) == 0) {
+			if (mnttab.mnt_fstype == NULL)
+				break;
+
+			if (strcmp(mnttab.mnt_fstype, "zfs") != 0)
+				break;
 			/*
 			 * Ensure that there are no leading slashes
 			 * (required for zfs_open).
@@ -745,4 +756,91 @@ smb_getdataset(const char *path, char *dataset, size_t len)
 
 	(void) fclose(fp);
 	return (rc);
+}
+
+/*
+ * smb_dlopen
+ *
+ * Check to see if an interposer library exists.  If it exists
+ * and reports a valid version number and key (UUID), return
+ * a handle to the library.  Otherwise, return NULL.
+ */
+void *
+smb_dlopen(void)
+{
+	uuid_t uuid;
+	void *interposer_hdl;
+	typedef int (*smbex_versionfn_t)(smbex_version_t *);
+	smbex_versionfn_t getversion;
+	smbex_version_t *version;
+
+	bzero(&uuid, sizeof (uuid_t));
+	if (uuid_parse(SMBEX_KEY, uuid) < 0)
+		return (NULL);
+
+	interposer_hdl = dlopen(SMB_LIB_ALT, RTLD_NOW | RTLD_LOCAL);
+	if (interposer_hdl == NULL)
+		return (NULL);
+
+	bzero(&getversion, sizeof (smbex_versionfn_t));
+	getversion = (smbex_versionfn_t)dlsym(interposer_hdl,
+	    "smbex_get_version");
+	if ((getversion == NULL) ||
+	    (version = malloc(sizeof (smbex_version_t))) == NULL) {
+		(void) dlclose(interposer_hdl);
+		return (NULL);
+	}
+	bzero(version, sizeof (smbex_version_t));
+
+	if ((getversion(version) != 0) ||
+	    (version->v_version != SMBEX_VERSION) ||
+	    (uuid_compare(version->v_uuid, uuid) != 0)) {
+		free(version);
+		(void) dlclose(interposer_hdl);
+		return (NULL);
+	}
+
+	free(version);
+	return (interposer_hdl);
+}
+
+/*
+ * smb_dlclose
+ *
+ * Closes handle to the interposed library.
+ */
+void
+smb_dlclose(void *handle)
+{
+	if (handle)
+		(void) dlclose(handle);
+}
+
+/*
+ * Returns the hostname given the IP address.  Wrapper for getnameinfo.
+ */
+int
+smb_getnameinfo(smb_inaddr_t *ip, char *hostname, int hostlen, int flags)
+{
+	socklen_t salen;
+	struct sockaddr_in6 sin6;
+	struct sockaddr_in sin;
+	void *sp;
+
+	if (ip->a_family == AF_INET) {
+		salen = sizeof (struct sockaddr_in);
+		sin.sin_family = ip->a_family;
+		sin.sin_port = 0;
+		sin.sin_addr.s_addr = ip->a_ipv4;
+		sp = &sin;
+	} else {
+		salen = sizeof (struct sockaddr_in6);
+		sin6.sin6_family = ip->a_family;
+		sin6.sin6_port = 0;
+		(void) memcpy(&sin6.sin6_addr.s6_addr, &ip->a_ipv6,
+		    sizeof (sin6.sin6_addr.s6_addr));
+		sp = &sin6;
+	}
+	return (getnameinfo((struct sockaddr *)sp, salen,
+	    hostname, hostlen, NULL, 0, flags));
 }

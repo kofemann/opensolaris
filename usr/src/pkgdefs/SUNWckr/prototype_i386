@@ -63,7 +63,6 @@ f none kernel/crypto/sha1 755 root sys
 f none kernel/crypto/sha2 755 root sys
 f none kernel/crypto/swrand 755 root sys
 f none kernel/dacf/net_dacf 755 root sys
-f none kernel/devname/sdev_nsconfig_mod 755 root sys
 f none kernel/drv/aggr 755 root sys
 f none kernel/drv/arp 755 root sys
 f none kernel/drv/acpi_drv 755 root sys
@@ -120,8 +119,8 @@ f none kernel/drv/nulldriver 755 root sys
 f none kernel/drv/openeepr 755 root sys
 f none kernel/drv/options 755 root sys
 f none kernel/drv/pci_pci 755 root sys
-f none kernel/drv/pcie_pci 755 root sys
-f none kernel/drv/pcie_pci.conf 644 root sys
+f none kernel/drv/pcieb 755 root sys
+f none kernel/drv/pcieb.conf 644 root sys
 f none kernel/drv/physmem 755 root sys
 f none kernel/drv/poll 755 root sys
 f none kernel/drv/power 755 root sys
@@ -220,6 +219,7 @@ f none kernel/misc/kmdbmod 755 root sys
 f none kernel/misc/ksocket 755 root sys
 f none kernel/misc/mac 755 root sys
 l none kernel/misc/md5=../../kernel/crypto/md5
+f none kernel/misc/mii 755 root sys
 f none kernel/misc/net80211 755 root sys
 f none kernel/misc/neti 755 root sys
 f none kernel/misc/pcicfg 755 root sys
@@ -290,8 +290,6 @@ f none kernel/crypto/amd64/sha2 755 root sys
 f none kernel/crypto/amd64/swrand 755 root sys
 d none kernel/dacf/amd64 755 root sys
 f none kernel/dacf/amd64/net_dacf 755 root sys
-d none kernel/devname/amd64 755 root sys
-f none kernel/devname/amd64/sdev_nsconfig_mod 755 root sys
 d none kernel/drv/amd64 755 root sys
 f none kernel/drv/amd64/aggr 755 root sys
 f none kernel/drv/amd64/arp 755 root sys
@@ -340,7 +338,7 @@ f none kernel/drv/amd64/nulldriver 755 root sys
 f none kernel/drv/amd64/openeepr 755 root sys
 f none kernel/drv/amd64/options 755 root sys
 f none kernel/drv/amd64/pci_pci 755 root sys
-f none kernel/drv/amd64/pcie_pci 755 root sys
+f none kernel/drv/amd64/pcieb 755 root sys
 f none kernel/drv/amd64/physmem 755 root sys
 f none kernel/drv/amd64/poll 755 root sys
 f none kernel/drv/amd64/power 755 root sys
@@ -439,6 +437,7 @@ f none kernel/misc/amd64/kmdbmod 755 root sys
 f none kernel/misc/amd64/ksocket 755 root sys
 f none kernel/misc/amd64/mac 755 root sys
 l none kernel/misc/amd64/md5=../../../kernel/crypto/amd64/md5
+f none kernel/misc/amd64/mii 755 root sys
 f none kernel/misc/amd64/net80211 755 root sys
 f none kernel/misc/amd64/neti 755 root sys
 f none kernel/misc/amd64/pcicfg 755 root sys

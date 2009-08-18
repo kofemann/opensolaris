@@ -20,10 +20,8 @@
 #
 
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-#ident	"%Z%%M%	%I%	%E% SMI"
 #
 # This required package information file contains a list of package contents.
 # The 'pkgmk' command uses this file to identify the contents of a package
@@ -51,7 +49,6 @@ i pkginfo
 i postinstall
 i postremove
 i i.mach
-i i.rOWconfig
 i i.sdconf
 i i.manifest
 i r.manifest
@@ -61,30 +58,16 @@ i r.manifest
 d none etc 0755 root sys
 f none etc/bootrc 755 root sys
 e mach etc/mach 644 root sys
-d none etc/openwin 755 root bin
-d none etc/openwin/etc 755 root bin
-d none etc/openwin/etc/devdata 755 root bin
-d none etc/openwin/etc/devdata/SUNWaccel 755 root bin
-d none etc/openwin/etc/devdata/SUNWaccel/monitors 755 root bin
-d none etc/openwin/etc/devdata/SUNWaccel/monitors/pnp 755 root bin
-d none etc/openwin/server 755 root bin
-d none etc/openwin/server/etc 755 root bin
-e rOWconfig etc/openwin/server/etc/OWconfig 644 root bin
 d none kernel 755 root sys
 d none kernel/drv 755 root sys
 f none kernel/drv/sd 755 root sys
 e sdconf kernel/drv/sd.conf 644 root sys
 f none kernel/drv/dnet 755 root sys
-f none kernel/drv/dnet.conf 644 root sys
 f none kernel/drv/elxl 755 root sys
-f none kernel/drv/elxl.conf 644 root sys
 f none kernel/drv/iprb 755 root sys
-f none kernel/drv/iprb.conf 644 root sys
 f none kernel/drv/pcn 755 root sys
-f none kernel/drv/pcn.conf 644 root sys
 # EXPORT DELETE START
 f none kernel/drv/spwr 755 root sys
-f none kernel/drv/spwr.conf 644 root sys
 # EXPORT DELETE END
 d none kernel/drv/amd64 755 root sys
 f none kernel/drv/amd64/dnet 755 root sys

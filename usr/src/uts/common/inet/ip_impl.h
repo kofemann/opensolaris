@@ -423,79 +423,13 @@ typedef struct ip_pdescinfo_s PDESCINFO_STRUCT(2)	ip_pdescinfo_t;
 	(connp)->conn_latch->ipl_out_policy != NULL))
 
 /*
- * These are used by the synchronous streams code in tcp and udp.
- * When we set the flags for a wakeup from a synchronous stream we
- * always set RSLEEP in sd_wakeq, even if we have a read thread waiting
- * to do the io. This is in case the read thread gets interrupted
- * before completing the io. The RSLEEP flag in sd_wakeq is used to
- * indicate that there is data available at the synchronous barrier.
- * The assumption is that subsequent functions calls through rwnext()
- * will reset sd_wakeq appropriately.
- */
-#define	STR_WAKEUP_CLEAR(stp) {						\
-	mutex_enter(&stp->sd_lock);					\
-	stp->sd_wakeq &= ~RSLEEP;					\
-	mutex_exit(&stp->sd_lock);					\
-}
-
-#define	STR_WAKEUP_SET(stp) {						\
-	mutex_enter(&stp->sd_lock);					\
-	if (stp->sd_flag & RSLEEP) {					\
-		stp->sd_flag &= ~RSLEEP;				\
-		cv_broadcast(&_RD(stp->sd_wrq)->q_wait);		\
-	}								\
-	stp->sd_wakeq |= RSLEEP;					\
-	mutex_exit(&stp->sd_lock);					\
-}
-
-/*
- * Combined wakeup and sendsig to avoid dropping and reacquiring the
- * sd_lock. The list of messages waiting at the synchronous barrier is
- * supplied in order to determine whether a wakeup needs to occur. We
- * only send a wakeup to the application when necessary, i.e. during
- * the first enqueue when the received messages list will be NULL.
- */
-#define	STR_WAKEUP_SENDSIG(stp, rcv_list) {				\
-	int _events;							\
-	mutex_enter(&stp->sd_lock);					\
-	if (rcv_list == NULL) {						\
-		if (stp->sd_flag & RSLEEP) {				\
-			stp->sd_flag &= ~RSLEEP;			\
-			cv_broadcast(&_RD(stp->sd_wrq)->q_wait);	\
-		}							\
-		stp->sd_wakeq |= RSLEEP;				\
-	}								\
-	if ((_events = stp->sd_sigflags & (S_INPUT | S_RDNORM)) != 0)	\
-		strsendsig(stp->sd_siglist, _events, 0, 0);		\
-	if (stp->sd_rput_opt & SR_POLLIN) {				\
-		stp->sd_rput_opt &= ~SR_POLLIN;				\
-		mutex_exit(&stp->sd_lock);				\
-		pollwakeup(&stp->sd_pollist, POLLIN | POLLRDNORM);	\
-	} else {							\
-		mutex_exit(&stp->sd_lock);				\
-	}								\
-}
-
-#define	CONN_UDP_SYNCSTR(connp)						\
-	(IPCL_IS_UDP(connp) && (connp)->conn_udp->udp_direct_sockfs)
-
-/*
  * Macro that checks whether or not a particular UDP conn is
- * flow-controlling on the read-side.  If udp module is directly
- * above ip, check to see if the drain queue is full; note here
- * that we check this without any lock protection because this
- * is a coarse granularity inbound flow-control.  If the module
- * above ip is not udp, then use canputnext to determine the
- * flow-control.
+ * flow-controlling on the read-side.
  *
- * Note that these checks are done after the conn is found in
+ * Note that this check is done after the conn is found in
  * the UDP fanout table.
- * FIXME? Might be faster to check both udp_drain_qfull and canputnext.
  */
-#define	CONN_UDP_FLOWCTLD(connp)					\
-	(CONN_UDP_SYNCSTR(connp) ?					\
-	(connp)->conn_udp->udp_drain_qfull :				\
-	!canputnext((connp)->conn_rq))
+#define	CONN_UDP_FLOWCTLD(connp) !canputnext((connp)->conn_rq)
 
 /* Macro that follows definitions of flags for mac_tx() (see mac_client.h) */
 #define	IP_DROP_ON_NO_DESC	0x01	/* Equivalent to MAC_DROP_ON_NO_DESC */

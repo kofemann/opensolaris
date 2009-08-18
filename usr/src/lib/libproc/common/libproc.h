@@ -85,6 +85,7 @@ struct ps_lwphandle;
 extern	int	_libproc_debug;	/* set non-zero to enable debugging fprintfs */
 extern	int	_libproc_no_qsort;	/* set non-zero to inhibit sorting */
 					/* of symbol tables */
+extern	int	_libproc_incore_elf;	/* only use in-core elf data */
 
 #if defined(__sparc)
 #define	R_RVAL1	R_O0		/* register holding a function return value */
@@ -354,8 +355,6 @@ extern	int	pr_getsockopt(struct ps_prochandle *,
 			int, int, int, void *, int *);
 extern	int	pr_processor_bind(struct ps_prochandle *,
 			idtype_t, id_t, int, int *);
-extern	int	pr_pset_bind(struct ps_prochandle *,
-			int, idtype_t, id_t, int *);
 
 /*
  * Function prototypes for accessing per-LWP register information.

@@ -91,13 +91,13 @@ typedef struct 	pci_acc_cfblk {
 } pci_acc_cfblk_t;
 
 struct pci_bus_resource {
-	struct memlist *io_ports;	/* available free io res */
-	struct memlist *io_ports_used;	/* used io res */
-	struct memlist *mem_space;	/* available free mem res */
-	struct memlist *mem_space_used;	/* used mem res */
-	struct memlist *pmem_space; /* available free prefetchable mem res */
-	struct memlist *pmem_space_used; /* used prefetchable mem res */
-	struct memlist *bus_space;	/* available free bus res */
+	struct memlist *io_avail;	/* available free io res */
+	struct memlist *io_used;	/* used io res */
+	struct memlist *mem_avail;	/* available free mem res */
+	struct memlist *mem_used;	/* used mem res */
+	struct memlist *pmem_avail; /* available free prefetchable mem res */
+	struct memlist *pmem_used; /* used prefetchable mem res */
+	struct memlist *bus_avail;	/* available free bus res */
 			/* bus_space_used not needed; can read from regs */
 	dev_info_t *dip;	/* devinfo node */
 	void *privdata;		/* private data for configuration */
@@ -126,6 +126,7 @@ extern uint64_t memlist_find(struct memlist **, uint64_t, int);
 extern uint64_t memlist_find_with_startaddr(struct memlist **, uint64_t,
     uint64_t, int);
 extern void memlist_dump(struct memlist *);
+extern void memlist_subsume(struct memlist **, struct memlist **);
 extern void memlist_merge(struct memlist **, struct memlist **);
 extern struct memlist *memlist_dup(struct memlist *);
 extern int memlist_count(struct memlist *);
@@ -151,6 +152,22 @@ extern int memlist_count(struct memlist *);
 #define	PCI_SLOTID_NDWORDS	1
 #define	PCI_MSIX_NDWORDS	3
 #define	PCI_CAP_SZUNKNOWN	0
+
+#define	PCI_HTCAP_SLPRI_NDWORDS		7
+#define	PCI_HTCAP_HOSTSEC_NDWORDS	6
+#define	PCI_HTCAP_INTCONF_NDWORDS	2
+#define	PCI_HTCAP_REVID_NDWORDS		1
+#define	PCI_HTCAP_UNITID_CLUMP_NDWORDS	3
+#define	PCI_HTCAP_ECFG_NDWORDS		3
+#define	PCI_HTCAP_ADDRMAP_NDWORDS	PCI_CAP_SZUNKNOWN	/* variable */
+#define	PCI_HTCAP_MSIMAP_NDWORDS	3
+#define	PCI_HTCAP_DIRROUTE_NDWORDS	3
+#define	PCI_HTCAP_VCSET_NDWORDS		3
+#define	PCI_HTCAP_RETRYMODE_NDWORDS	3
+#define	PCI_HTCAP_GEN3_NDWORDS		10
+#define	PCI_HTCAP_FUNCEXT_NDWORDS	PCI_CAP_SZUNKNOWN	/* variable */
+#define	PCI_HTCAP_PM_NDWORDS		2
+
 
 #define	CAP_ID(confhdl, cap_ptr, xspace)		\
 	((xspace) ? 0 : pci_config_get8((confhdl), (cap_ptr) + PCI_CAP_ID))
