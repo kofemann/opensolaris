@@ -104,8 +104,6 @@ typedef struct rfs4_dbe		rfs4_dbe_t;	 /* basic opaque db entry */
 typedef struct rfs4_table	rfs4_table_t;	 /* basic table type */
 typedef struct rfs4_index	rfs4_index_t;	 /* index */
 typedef struct rfs4_database	rfs4_database_t; /* and database */
-typedef struct rfs4_bucket	rfs4_bucket_t;	 /* bucket */
-typedef struct rfs4_link	rfs4_link_t;	 /* link */
 
 typedef struct {		/* opaque entry type for later use */
 	rfs4_dbe_t *dbe;
