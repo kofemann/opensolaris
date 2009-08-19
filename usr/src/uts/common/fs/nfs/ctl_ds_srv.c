@@ -281,15 +281,15 @@ mds_findfile_by_dsfh(nfs_server_instance_t *instp, mds_ds_fh *fhp)
 	if (fp == NULL)
 		return (NULL);
 
-	rfs4_dbe_lock(fp->dbe);
-	if (rfs4_dbe_is_invalid(fp->dbe) ||
-	    (rfs4_dbe_refcnt(fp->dbe) == 0)) {
-		rfs4_dbe_unlock(fp->dbe);
+	rfs4_dbe_lock(fp->rf_dbe);
+	if (rfs4_dbe_is_invalid(fp->rf_dbe) ||
+	    (rfs4_dbe_refcnt(fp->rf_dbe) == 0)) {
+		rfs4_dbe_unlock(fp->rf_dbe);
 		return (NULL);
 	}
 
-	rfs4_dbe_hold(fp->dbe);
-	rfs4_dbe_unlock(fp->dbe);
+	rfs4_dbe_hold(fp->rf_dbe);
+	rfs4_dbe_unlock(fp->rf_dbe);
 	return (fp);
 }
 
@@ -345,9 +345,9 @@ get_access_mode(compound_state_t *cs, DS_CHECKSTATEres *resp)
 		resp->status = DSERR_BADHANDLE;
 		return;
 	}
-	rfs4_dbe_lock(fp->dbe);
-	resp->DS_CHECKSTATEres_u.file_state.open_mode = fp->share_access;
-	rfs4_dbe_unlock(fp->dbe);
+	rfs4_dbe_lock(fp->rf_dbe);
+	resp->DS_CHECKSTATEres_u.file_state.open_mode = fp->rf_share_access;
+	rfs4_dbe_unlock(fp->rf_dbe);
 	rfs4_file_rele(fp);
 }
 
@@ -457,7 +457,7 @@ ds_checkstate(DS_CHECKSTATEargs *argp, DS_CHECKSTATEres *resp,
 		 * If layout has not been written to stable storage,
 		 * then do so before issuing the reply.
 		 */
-		if (mds_put_layout(fp->layoutp, fp->vp)) {
+		if (mds_put_layout(fp->rf_mlo, fp->rf_vp)) {
 			rfs4_file_rele(fp);
 			rfs41_compound_state_free(cs);
 			/*

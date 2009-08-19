@@ -1136,7 +1136,7 @@ cp_ds_mds_checkstateid(mds_ds_fh *fh, struct compound_state *cs,
 	 * entry for the sessions pointer happens in the context of
 	 * rfs41_dispatch, so we do not need to worry about that here.
 	 */
-	co4 = (client_owner4*)&cs->sp->sn_clnt->nfs_client;
+	co4 = (client_owner4*)&cs->sp->sn_clnt->rc_nfs_client;
 
 	error = dserv_instance_enter(RW_READER, B_FALSE, &inst, NULL);
 	if (error) {

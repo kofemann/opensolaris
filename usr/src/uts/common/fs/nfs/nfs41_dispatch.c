@@ -179,7 +179,7 @@ rfs41_compute_seq4_flags(COMPOUND4res *rp, compound_state_t *cs)
 		idx = log2(i);
 
 		if (sp->sn_seq4[idx].ba_bit == sn_flag ||
-		    cp->seq4[idx].ba_bit == cp_flag) {
+		    cp->rc_seq4[idx].ba_bit == cp_flag) {
 			/*
 			 * refcnts for these two bits represent active
 			 * connections, so handle them separately.
@@ -190,8 +190,8 @@ rfs41_compute_seq4_flags(COMPOUND4res *rp, compound_state_t *cs)
 		if (sp->sn_seq4[idx].ba_refcnt)
 			sflags |= sp->sn_seq4[idx].ba_bit;
 
-		if (cp->seq4[idx].ba_refcnt)
-			sflags |= cp->seq4[idx].ba_bit;
+		if (cp->rc_seq4[idx].ba_refcnt)
+			sflags |= cp->rc_seq4[idx].ba_bit;
 	}
 
 	/*
@@ -201,7 +201,7 @@ rfs41_compute_seq4_flags(COMPOUND4res *rp, compound_state_t *cs)
 	cp_idx = log2(cp_flag);
 
 	if (sp->sn_seq4[sn_idx].ba_refcnt == 0 &&
-	    cp->seq4[cp_idx].ba_refcnt == 0) {
+	    cp->rc_seq4[cp_idx].ba_refcnt == 0) {
 		/*
 		 * no CB path available at either scope (sess or
 		 * clid), so flag gets set based on session ctxt

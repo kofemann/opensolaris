@@ -145,7 +145,6 @@ free_mds_ds_fh(mds_ds_fh *fp)
 bool_t
 xdr_decode_nfs41_fh(XDR *xdrs, nfs_fh4 *objp)
 {
-
 	uint_t otw_len;
 	uint_t type;
 

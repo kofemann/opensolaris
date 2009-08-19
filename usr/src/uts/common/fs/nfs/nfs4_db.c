@@ -80,7 +80,7 @@ rfs4_dbe_invalidate(rfs4_dbe_t *entry)
 {
 	entry->dbe_invalid = TRUE;
 	entry->dbe_skipsearch = TRUE;
-	entry->inval_hint = caller();
+	entry->dbe_inval_hint = caller();
 }
 
 /*
@@ -96,9 +96,9 @@ rfs4_dbe_is_invalid(rfs4_dbe_t *entry)
  * Is the entry marked to SKIP or INVALID ?
  */
 bool_t
-rfs4_dbe_skip_or_invalid(rfs4_dbe_t *e)
+rfs4_dbe_skip_or_invalid(rfs4_dbe_t *entry)
 {
-	return (e->invalid | e->skipsearch);
+	return (entry->dbe_invalid | entry->dbe_skipsearch);
 }
 
 time_t
@@ -521,7 +521,7 @@ rfs4_dbe_create(rfs4_table_t *table, id_t id, rfs4_entry_t data)
 
 	if (!(*table->dbt_create)(entry->dbe_data, data)) {
 		if (table->dbt_id_space)
-			id_free(table->idbt_d_space, entry->dbe_id);
+			id_free(table->dbt_id_space, entry->dbe_id);
 		kmem_cache_free(table->dbt_mem_cache, entry);
 
 		return (NULL);
@@ -687,7 +687,7 @@ rfs4_cpr_callb(void *arg, int code)
 		return (B_TRUE);
 
 	instp = (nfs_server_instance_t *)arg;
-	tbl = instp->client_tab;
+	table = instp->client_tab;
 
 	/*
 	 * We get called for Suspend and Resume events.
@@ -876,10 +876,10 @@ reaper_thread(caddr_t *arg)
 	CALLB_CPR_EXIT(&table->dbt_reaper_cpr_info);
 
 	/* Notify the database shutdown processing that the table is shutdown */
-	mutex_enter(table->dbt_instp->state_store->lock);
-	table->dbt_instp->state_store->shutdown_count--;
-	cv_signal(&table->dbt_instp->state_store->shutdown_wait);
-	mutex_exit(table->dbt_instp->state_store->lock);
+	mutex_enter(table->dbt_instp->state_store->db_lock);
+	table->dbt_instp->state_store->db_shutdown_count--;
+	cv_signal(&table->dbt_instp->state_store->db_shutdown_wait);
+	mutex_exit(table->dbt_instp->state_store->db_lock);
 }
 
 static void
@@ -899,6 +899,7 @@ rfs4_dbcreate(rfs4_index_t *idx, void *ap)
 	int		 already_done;
 	uint32_t	 i;
 	void		*key;
+	id_t		id = -1;
 
 	ASSERT(ap != NULL);
 	ASSERT(idx != NULL);
@@ -907,10 +908,18 @@ rfs4_dbcreate(rfs4_index_t *idx, void *ap)
 		return (NULL);
 	table = idx->dbi_table;
 
+/*
+ * TDH: Bob, check here please!
+ */
+	if (table->dbt_id_space && id == -1) {
+		/* get an id, ok to sleep for it here */
+		id = id_alloc(table->dbt_id_space);
+	}
+
 	/*
 	 * Create the desired object
 	 */
-	if ((entry = rfs4_dbe_create(table, ap)) == NULL)
+	if ((entry = rfs4_dbe_create(table, id, ap)) == NULL)
 		return (NULL);
 	key = idx->dbi_mkkey(entry->dbe_data);
 	i = HASH(idx, key);
@@ -925,7 +934,7 @@ rfs4_dbcreate(rfs4_index_t *idx, void *ap)
 	ENQUEUE(bp->dbk_head, &entry->dbe_indices[idx->dbi_tblidx]);
 	VALIDATE_ADDR(entry->dbe_indices[idx->dbi_tblidx].entry);
 	already_done = idx->dbi_tblidx;
-	rw_exit(bp->lock);
+	rw_exit(bp->dbk_lock);
 
 	/*
 	 * Initialize any additional indices to the table,
@@ -938,7 +947,7 @@ rfs4_dbcreate(rfs4_index_t *idx, void *ap)
 			continue;
 		l = &entry->dbe_indices[ip->dbi_tblidx];
 		i = HASH(ip, ip->dbi_mkkey(entry->dbe_data));
-		ASSERT(i < ip->dbi_table->len);
+		ASSERT(i < ip->dbi_table->dbt_len);
 		bp = &ip->dbi_buckets[i];
 		ENQUEUE_IDX(bp, l);
 	}
@@ -951,5 +960,5 @@ rfs4_dbcreate(rfs4_index_t *idx, void *ap)
 nfs_server_instance_t *
 dbe_to_instp(rfs4_dbe_t *dbp)
 {
-	return (dbp->table->dbt_instp);
+	return (dbp->dbe_table->dbt_instp);
 }

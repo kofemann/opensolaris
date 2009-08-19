@@ -158,14 +158,14 @@ rfs4_openowner_t *
 mds_findopenowner(nfs_server_instance_t *instp, open_owner4 *openowner,
     bool_t *create)
 {
-	rfs4_openowner_t *op;
+	rfs4_openowner_t *oo;
 	rfs4_openowner_t arg;
 
-	arg.owner = *openowner;
-	arg.open_seqid = 0;
-	op = (rfs4_openowner_t *)rfs4_dbsearch(instp->openowner_idx,
+	arg.ro_owner = *openowner;
+	arg.ro_open_seqid = 0;
+	oo = (rfs4_openowner_t *)rfs4_dbsearch(instp->openowner_idx,
 	    openowner, create, &arg, RFS4_DBS_VALID);
-	return (op);
+	return (oo);
 }
 
 rfs4_lo_state_t *
@@ -176,10 +176,10 @@ mds_findlo_state_by_owner(rfs4_lockowner_t *lo,
 	rfs4_lo_state_t arg;
 	nfs_server_instance_t *instp;
 
-	arg.locker = lo;
-	arg.state = sp;
+	arg.rls_locker = lo;
+	arg.rls_state = sp;
 
-	instp = dbe_to_instp(lo->dbe);
+	instp = dbe_to_instp(lo->rl_dbe);
 
 	lsp = (rfs4_lo_state_t *)rfs4_dbsearch(instp->lo_state_owner_idx,
 	    &arg, create, &arg, RFS4_DBS_VALID);
@@ -187,7 +187,7 @@ mds_findlo_state_by_owner(rfs4_lockowner_t *lo,
 	return (lsp);
 }
 
-/* well clearly this needs to be cleaned up.. */
+/* XXX: well clearly this needs to be cleaned up.. */
 typedef union {
 	struct {
 		uint32_t start_time;
@@ -201,14 +201,14 @@ mds_check_stateid_seqid(rfs4_state_t *sp, stateid4 *stateid)
 {
 	stateid_t *id = (stateid_t *)stateid;
 
-	if (rfs4_lease_expired(sp->owner->client))
+	if (rfs4_lease_expired(sp->rs_owner->ro_client))
 		return (NFS4_CHECK_STATEID_EXPIRED);
 
 	/* Stateid is some time in the future - that's bad */
-	if (sp->stateid.v41_bits.chgseq < id->v41_bits.chgseq)
+	if (sp->rs_stateid.v41_bits.chgseq < id->v41_bits.chgseq)
 		return (NFS4_CHECK_STATEID_BAD);
 
-	if (sp->closed == TRUE)
+	if (sp->rs_closed == TRUE)
 		return (NFS4_CHECK_STATEID_CLOSED);
 
 	return (NFS4_CHECK_STATEID_OKAY);
@@ -247,13 +247,13 @@ mds_lo_state_walk_callout(rfs4_entry_t u_entry, void *e)
 	struct exportinfo *exi = (struct exportinfo *)e;
 	nfs41_fh_fmt_t   *fhp;
 
-	fhp =
-	    (nfs41_fh_fmt_t *)lsp->state->finfo->filehandle.nfs_fh4_val;
+	fhp = (nfs41_fh_fmt_t *)
+	    lsp->rls_state->rs_finfo->rf_filehandle.nfs_fh4_val;
 
 	if (mds_fh_is_exi(exi, fhp)) {
-		rfs4_state_close(lsp->state, FALSE, FALSE, CRED());
-		rfs4_dbe_invalidate(lsp->dbe);
-		rfs4_dbe_invalidate(lsp->state->dbe);
+		rfs4_state_close(lsp->rls_state, FALSE, FALSE, CRED());
+		rfs4_dbe_invalidate(lsp->rls_dbe);
+		rfs4_dbe_invalidate(lsp->rls_state->rs_dbe);
 	}
 }
 
@@ -274,11 +274,11 @@ mds_state_walk_callout(rfs4_entry_t u_entry, void *e)
 	nfs41_fh_fmt_t   *fhp;
 
 	fhp =
-	    (nfs41_fh_fmt_t *)sp->finfo->filehandle.nfs_fh4_val;
+	    (nfs41_fh_fmt_t *)sp->rs_finfo->rf_filehandle.nfs_fh4_val;
 
 	if (mds_fh_is_exi(exi, fhp)) {
 		rfs4_state_close(sp, TRUE, FALSE, CRED());
-		rfs4_dbe_invalidate(sp->dbe);
+		rfs4_dbe_invalidate(sp->rs_dbe);
 	}
 }
 
@@ -299,10 +299,10 @@ mds_deleg_state_walk_callout(rfs4_entry_t u_entry, void *e)
 	nfs41_fh_fmt_t   *fhp;
 
 	fhp =
-	    (nfs41_fh_fmt_t *)dsp->finfo->filehandle.nfs_fh4_val;
+	    (nfs41_fh_fmt_t *)dsp->rds_finfo->rf_filehandle.nfs_fh4_val;
 
 	if (mds_fh_is_exi(exi, fhp)) {
-		rfs4_dbe_invalidate(dsp->dbe);
+		rfs4_dbe_invalidate(dsp->rds_dbe);
 	}
 }
 
@@ -323,24 +323,24 @@ mds_file_walk_callout(rfs4_entry_t u_entry, void *e)
 	vnode_t *vp;
 	nfs_server_instance_t *instp;
 
-	fhp = (nfs41_fh_fmt_t *)fp->filehandle.nfs_fh4_val;
+	fhp = (nfs41_fh_fmt_t *)fp->rf_filehandle.nfs_fh4_val;
 
 	if (mds_fh_is_exi(exi, fhp) == 0)
 		return;
 
-	if ((vp = fp->vp) != NULL) {
-		instp = dbe_to_instp(fp->dbe);
+	if ((vp = fp->rf_vp) != NULL) {
+		instp = dbe_to_instp(fp->rf_dbe);
 		ASSERT(instp);
 
 		/*
 		 * don't leak monitors and remove the reference
 		 * put on the vnode when the delegation was granted.
 		 */
-		if (fp->dinfo->dtype == OPEN_DELEGATE_READ) {
+		if (fp->rf_dinfo->rd_dtype == OPEN_DELEGATE_READ) {
 			(void) fem_uninstall(vp, instp->deleg_rdops,
 			    (void *)fp);
 			vn_open_downgrade(vp, FREAD);
-		} else if (fp->dinfo->dtype == OPEN_DELEGATE_WRITE) {
+		} else if (fp->rf_dinfo->rd_dtype == OPEN_DELEGATE_WRITE) {
 			(void) fem_uninstall(vp, instp->deleg_wrops,
 			    (void *)fp);
 			vn_open_downgrade(vp, FREAD|FWRITE);
@@ -350,10 +350,10 @@ mds_file_walk_callout(rfs4_entry_t u_entry, void *e)
 		(void) vsd_set(vp, instp->vkey, NULL);
 		mutex_exit(&vp->v_lock);
 		VN_RELE(vp);
-		fp->vp = NULL;
+		fp->rf_vp = NULL;
 	}
 
-	rfs4_dbe_invalidate(fp->dbe);
+	rfs4_dbe_invalidate(fp->rf_dbe);
 }
 
 /*
@@ -372,68 +372,68 @@ sessid_hash(void *key)
 static bool_t
 sessid_compare(rfs4_entry_t entry, void *key)
 {
-	mds_session_t	*sp = (mds_session_t *)entry;
+	mds_session_t	*sn = (mds_session_t *)entry;
 	sessionid4	*idp = (sessionid4 *)key;
 
-	return (bcmp(idp, &sp->sn_sessid, sizeof (sessionid4)) == 0);
+	return (bcmp(idp, &sn->sn_sessid, sizeof (sessionid4)) == 0);
 }
 
 static void *
 sessid_mkkey(rfs4_entry_t entry)
 {
-	mds_session_t *sp = (mds_session_t *)entry;
+	mds_session_t *sn = (mds_session_t *)entry;
 
-	return (&sp->sn_sessid);
+	return (&sn->sn_sessid);
 }
 
 static bool_t
 sess_clid_compare(rfs4_entry_t entry, void *key)
 {
-	mds_session_t *sessp = (mds_session_t *)entry;
+	mds_session_t *sn = (mds_session_t *)entry;
 	clientid4 *idp = key;
 
-	return (*idp == sessp->sn_clnt->clientid);
+	return (*idp == sn->sn_clnt->rc_clientid);
 }
 
 static void *
 sess_clid_mkkey(rfs4_entry_t entry)
 {
-	return (&(((mds_session_t *)entry)->sn_clnt->clientid));
+	return (&(((mds_session_t *)entry)->sn_clnt->rc_clientid));
 }
 
 void
-rfs41_session_rele(mds_session_t *sp)
+rfs41_session_rele(mds_session_t *sn)
 {
-	rfs4_dbe_rele(sp->dbe);
+	rfs4_dbe_rele(sn->sn_dbe);
 }
 
 mds_session_t *
 mds_findsession_by_id(nfs_server_instance_t *instp, sessionid4 sessid)
 {
-	mds_session_t	*sp;
+	mds_session_t	*sn;
 	rfs4_index_t	*idx = instp->mds_session_idx;
 	bool_t		 create = FALSE;
 
 	rw_enter(&instp->findsession_lock, RW_READER);
-	sp = (mds_session_t *)rfs4_dbsearch(idx, sessid, &create, NULL,
+	sn = (mds_session_t *)rfs4_dbsearch(idx, sessid, &create, NULL,
 	    RFS4_DBS_VALID);
 	rw_exit(&instp->findsession_lock);
 
-	return (sp);
+	return (sn);
 }
 
 mds_session_t *
 mds_findsession_by_clid(nfs_server_instance_t *instp, clientid4 clid)
 {
-	mds_session_t	*sp;
+	mds_session_t	*sn;
 	bool_t		 create = FALSE;
 
 	rw_enter(&instp->findsession_lock, RW_READER);
-	sp = (mds_session_t *)rfs4_dbsearch(instp->mds_sess_clientid_idx, &clid,
+	sn = (mds_session_t *)rfs4_dbsearch(instp->mds_sess_clientid_idx, &clid,
 	    &create, NULL, RFS4_DBS_VALID);
 	rw_exit(&instp->findsession_lock);
 
-	return (sp);
+	return (sn);
 }
 
 /*
@@ -448,16 +448,16 @@ mds_findsession_by_clid(nfs_server_instance_t *instp, clientid4 clid)
 mds_session_t	*
 mds_createsession(nfs_server_instance_t *instp, session41_create_t *ap)
 {
-	mds_session_t	*sp = NULL;
+	mds_session_t	*sn = NULL;
 	rfs4_index_t	*idx = instp->mds_session_idx;
 
 	rw_enter(&instp->findsession_lock, RW_WRITER);
-	if ((sp = (mds_session_t *)rfs4_dbcreate(idx, (void *)ap)) == NULL) {
+	if ((sn = (mds_session_t *)rfs4_dbcreate(idx, (void *)ap)) == NULL) {
 		DTRACE_PROBE1(mds__srv__createsession__fail,
 		    session41_create_t *, ap);
 	}
 	rw_exit(&instp->findsession_lock);
-	return (sp);
+	return (sn);
 }
 
 /*
@@ -467,15 +467,15 @@ mds_createsession(nfs_server_instance_t *instp, session41_create_t *ap)
  * been established.
  */
 nfsstat4
-mds_session_inval(mds_session_t	*sp)
+mds_session_inval(mds_session_t	*sn)
 {
 	nfsstat4	status;
 
-	ASSERT(sp != NULL);
-	ASSERT(rfs4_dbe_islocked(sp->dbe));
+	ASSERT(sn != NULL);
+	ASSERT(rfs4_dbe_islocked(sn->sn_dbe));
 
-	if (SN_CB_CHAN_EST(sp)) {
-		sess_channel_t	*bcp = sp->sn_back;
+	if (SN_CB_CHAN_EST(sn)) {
+		sess_channel_t	*bcp = sn->sn_back;
 		sess_bcsd_t	*bsdp;
 
 		rw_enter(&bcp->cn_lock, RW_READER);
@@ -494,7 +494,7 @@ mds_session_inval(mds_session_t	*sp)
 
 	/* only invalidate sess if no bc traffic */
 	if (status == NFS4_OK)
-		rfs4_dbe_invalidate(sp->dbe);
+		rfs4_dbe_invalidate(sn->sn_dbe);
 
 	return (status);
 }
@@ -505,13 +505,13 @@ mds_session_inval(mds_session_t	*sp)
  * 3) Eventually the session will be reaped by the reaper_thread
  */
 nfsstat4
-mds_destroysession(mds_session_t *sp)
+mds_destroysession(mds_session_t *sn)
 {
 	nfsstat4	cbs;
 
-	rfs4_dbe_lock(sp->dbe);
-	cbs = mds_session_inval(sp);
-	rfs4_dbe_unlock(sp->dbe);
+	rfs4_dbe_lock(sn->sn_dbe);
+	cbs = mds_session_inval(sn);
+	rfs4_dbe_unlock(sn->sn_dbe);
 
 	/*
 	 * The reference/hold maintained from the session to the client
@@ -519,7 +519,7 @@ mds_destroysession(mds_session_t *sp)
 	 * in turn calls mds_session_destroy.
 	 */
 	if (cbs == NFS4_OK)
-		rfs41_session_rele(sp);
+		rfs41_session_rele(sn);
 
 	return (cbs);
 }
@@ -547,17 +547,17 @@ pd2cd(channel_dir_from_server4 dir)
 void
 rfs41_deleg_rs_hold(rfs4_deleg_state_t *dsp)
 {
-	atomic_add_32(&dsp->rs.refcnt, 1);
+	atomic_add_32(&dsp->rds_rs.refcnt, 1);
 }
 
 void
 rfs41_deleg_rs_rele(rfs4_deleg_state_t *dsp)
 {
-	ASSERT(dsp->rs.refcnt > 0);
-	atomic_add_32(&dsp->rs.refcnt, -1);
-	if (dsp->rs.refcnt == 0) {
-		bzero(dsp->rs.sessid, sizeof (sessionid4));
-		dsp->rs.seqid = dsp->rs.slotno = 0;
+	ASSERT(dsp->rds_rs.refcnt > 0);
+	atomic_add_32(&dsp->rds_rs.refcnt, -1);
+	if (dsp->rds_rs.refcnt == 0) {
+		bzero(dsp->rds_rs.sessid, sizeof (sessionid4));
+		dsp->rds_rs.seqid = dsp->rds_rs.slotno = 0;
 	}
 }
 
@@ -663,7 +663,7 @@ back:
 static bool_t
 mds_session_create(rfs4_entry_t u_entry, void *arg)
 {
-	mds_session_t		*sp = (mds_session_t *)u_entry;
+	mds_session_t		*sn = (mds_session_t *)u_entry;
 	session41_create_t	*ap = (session41_create_t *)arg;
 	sess_channel_t		*ocp = NULL;
 	sid			*sidp;
@@ -676,48 +676,48 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	nfs_server_instance_t *instp;
 	int			max_slots;
 
-	ASSERT(sp != NULL);
-	if (sp == NULL)
+	ASSERT(sn != NULL);
+	if (sn == NULL)
 		return (FALSE);
 
-	instp = dbe_to_instp(sp->dbe);
+	instp = dbe_to_instp(sn->sn_dbe);
 
 	/*
 	 * Back pointer/ref to parent data struct (rfs4_client_t)
 	 */
-	sp->sn_clnt = (rfs4_client_t *)ap->cs_client;
-	rfs4_dbe_hold(sp->sn_clnt->dbe);
+	sn->sn_clnt = (rfs4_client_t *)ap->cs_client;
+	rfs4_dbe_hold(sn->sn_clnt->rc_dbe);
 	mxprt = (SVCMASTERXPRT *)ap->cs_xprt->xp_master;
 
 	/*
 	 * Handcrafting the session id
 	 */
-	sidp = (sid *)&sp->sn_sessid;
+	sidp = (sid *)&sn->sn_sessid;
 	sidp->impl_id.pad0 = 0x00000000;
 	sidp->impl_id.pad1 = 0xFFFFFFFF;
 	sidp->impl_id.start_time = instp->start_time;
-	sidp->impl_id.s_id = (uint32_t)rfs4_dbe_getid(sp->dbe);
+	sidp->impl_id.s_id = (uint32_t)rfs4_dbe_getid(sn->sn_dbe);
 
 	/*
 	 * Process csa_flags; note that CREATE_SESSION4_FLAG_CONN_BACK_CHAN
 	 * is processed below since it affects direction and setup of the
 	 * backchannel accordingly.
 	 */
-	sp->sn_csflags = 0;
+	sn->sn_csflags = 0;
 	if (ap->cs_aotw.csa_flags & CREATE_SESSION4_FLAG_PERSIST)
 		/* XXX - Worry about persistence later */
-		sp->sn_csflags &= ~CREATE_SESSION4_FLAG_PERSIST;
+		sn->sn_csflags &= ~CREATE_SESSION4_FLAG_PERSIST;
 
 	if (ap->cs_aotw.csa_flags & CREATE_SESSION4_FLAG_CONN_RDMA)
 		/* XXX - No RDMA for now */
-		sp->sn_csflags &= ~CREATE_SESSION4_FLAG_CONN_RDMA;
+		sn->sn_csflags &= ~CREATE_SESSION4_FLAG_CONN_RDMA;
 
 	/*
 	 * Initialize some overall sessions values
 	 */
-	sp->sn_bc.progno = ap->cs_aotw.csa_cb_program;
-	sp->sn_laccess = gethrestime_sec();
-	sp->sn_flags = 0;
+	sn->sn_bc.progno = ap->cs_aotw.csa_cb_program;
+	sn->sn_laccess = gethrestime_sec();
+	sn->sn_flags = 0;
 
 	/*
 	 * Check if client has specified that the FORE channel should
@@ -729,12 +729,12 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 
 	if (bdrpc) {
 		SVCCB_ARGS cbargs;
-		prog = sp->sn_bc.progno;
+		prog = sn->sn_bc.progno;
 		cbargs.xprt = mxprt;
 		cbargs.prog = prog;
 		cbargs.vers = NFS_CB;
 		cbargs.family = AF_INET;
-		cbargs.tag = (void *)sp->sn_sessid;
+		cbargs.tag = (void *)sn->sn_sessid;
 
 		if (SVC_CTL(ap->cs_xprt, SVCCTL_SET_CBCONN, (void *)&cbargs)) {
 			/*
@@ -751,11 +751,11 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	/*
 	 * Session's channel flags depending on bdrpc
 	 */
-	sp->sn_bdrpc = bdrpc;
-	dir = sp->sn_bdrpc ? (CDFS4_FORE | CDFS4_BACK) : CDFS4_FORE;
+	sn->sn_bdrpc = bdrpc;
+	dir = sn->sn_bdrpc ? (CDFS4_FORE | CDFS4_BACK) : CDFS4_FORE;
 	ocp = rfs41_create_session_channel(dir);
 	ocp->cn_dir = dir;
-	sp->sn_fore = ocp;
+	sn->sn_fore = ocp;
 
 	/*
 	 * XXX: Let's not worry about channel attribute enforcement now.
@@ -770,7 +770,7 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	 * No need for locks/synchronization at this time,
 	 * since we're barely creating the session.
 	 */
-	if (sp->sn_bdrpc) {
+	if (sn->sn_bdrpc) {
 		/*
 		 * bcsd got built as part of the channel's construction.
 		 */
@@ -779,8 +779,8 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 			    "<Internal Inconsistency>");
 		}
 		slrc_table_create(&bsdp->bsd_stok, slrc_slot_size);
-		sp->sn_csflags |= CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
-		sp->sn_back = ocp;
+		sn->sn_csflags |= CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
+		sn->sn_back = ocp;
 
 	} else {
 		/*
@@ -790,8 +790,8 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 		 * at that point along with its corresponding slot (see
 		 * rfs41_bc_setup).
 		 */
-		sp->sn_csflags &= ~CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
-		sp->sn_back = NULL;
+		sn->sn_csflags &= ~CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
+		sn->sn_back = NULL;
 		prog = 0;
 
 		/*
@@ -810,10 +810,10 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	 * sn_bc fields are all initialized to 0 (via zalloc)
 	 */
 
-	SVC_CTL(ap->cs_xprt, SVCCTL_SET_TAG, (void *)sp->sn_sessid);
+	SVC_CTL(ap->cs_xprt, SVCCTL_SET_TAG, (void *)sn->sn_sessid);
 
-	if (sp->sn_bdrpc) {
-		atomic_add_32(&sp->sn_bc.pngcnt, 1);
+	if (sn->sn_bdrpc) {
+		atomic_add_32(&sn->sn_bc.pngcnt, 1);
 	}
 
 	/*
@@ -823,10 +823,10 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	 * by virtue of the z-alloc.
 	 */
 	max_slots = ocp->cn_attrs.ca_maxrequests;
-	slrc_table_create(&sp->sn_replay, max_slots);
+	slrc_table_create(&sn->sn_replay, max_slots);
 
 	/* only initialize bits relevant to session scope */
-	bzero(&sp->sn_seq4, sizeof (bit_attr_t) * BITS_PER_WORD);
+	bzero(&sn->sn_seq4, sizeof (bit_attr_t) * BITS_PER_WORD);
 	for (i = 1; i <= SEQ4_HIGH_BIT && i != 0; i <<= 1) {
 		uint32_t idx = log2(i);
 
@@ -835,7 +835,7 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 		case SEQ4_STATUS_CB_GSS_CONTEXTS_EXPIRED:
 		case SEQ4_STATUS_CB_PATH_DOWN_SESSION:
 		case SEQ4_STATUS_BACKCHANNEL_FAULT:
-			sp->sn_seq4[idx].ba_bit = i;
+			sn->sn_seq4[idx].ba_bit = i;
 			break;
 		default:
 			/* already bzero'ed */
@@ -843,13 +843,14 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 		}
 	}
 
-	if (sp->sn_bdrpc) {
+	if (sn->sn_bdrpc) {
 		/*
 		 * Recall that for CB_PATH_DOWN[_SESSION], the refcnt
 		 * indicates the number of active back channel conns
 		 */
-		rfs41_seq4_hold(&sp->sn_seq4, SEQ4_STATUS_CB_PATH_DOWN_SESSION);
-		rfs41_seq4_hold(&sp->sn_clnt->seq4, SEQ4_STATUS_CB_PATH_DOWN);
+		rfs41_seq4_hold(&sn->sn_seq4, SEQ4_STATUS_CB_PATH_DOWN_SESSION);
+		rfs41_seq4_hold(&sn->sn_clnt->rc_seq4,
+		    SEQ4_STATUS_CB_PATH_DOWN);
 	}
 	return (TRUE);
 }
@@ -858,10 +859,10 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 static void
 mds_session_destroy(rfs4_entry_t u_entry)
 {
-	mds_session_t	*sp = (mds_session_t *)u_entry;
+	mds_session_t	*sn = (mds_session_t *)u_entry;
 	sess_bcsd_t	*bsdp;
 
-	if (SN_CB_CHAN_EST(sp) && ((bsdp = CTOBSD(sp->sn_back)) != NULL))
+	if (SN_CB_CHAN_EST(sn) && ((bsdp = CTOBSD(sn->sn_back)) != NULL))
 		slrc_table_destroy(bsdp->bsd_stok);
 
 	/*
@@ -875,32 +876,32 @@ mds_session_destroy(rfs4_entry_t u_entry)
 	/*
 	 * Remove the fore and back channels.
 	 */
-	rfs41_destroy_session_channel(sp, CDFS4_BOTH);
+	rfs41_destroy_session_channel(sn, CDFS4_BOTH);
 
 	/*
 	 * Nuke slot replay cache for this session
 	 */
-	if (sp->sn_replay) {
-		slrc_table_destroy(sp->sn_replay);
-		sp->sn_replay = NULL;
+	if (sn->sn_replay) {
+		slrc_table_destroy(sn->sn_replay);
+		sn->sn_replay = NULL;
 	}
 
 	/*
 	 * Remove reference to parent data struct
 	 */
-	if (sp->sn_clnt)
-		rfs4_client_rele(sp->sn_clnt);
+	if (sn->sn_clnt)
+		rfs4_client_rele(sn->sn_clnt);
 }
 
 static bool_t
 mds_session_expiry(rfs4_entry_t u_entry)
 {
-	mds_session_t	*sp = (mds_session_t *)u_entry;
+	mds_session_t	*sn = (mds_session_t *)u_entry;
 
-	if (sp == NULL || rfs4_dbe_is_invalid(sp->dbe))
+	if (sn == NULL || rfs4_dbe_is_invalid(sn->sn_dbe))
 		return (TRUE);
 
-	if (rfs4_lease_expired(sp->sn_clnt))
+	if (rfs4_lease_expired(sn->sn_clnt))
 		return (TRUE);
 
 	return (FALSE);
@@ -910,14 +911,14 @@ void
 mds_kill_session_callout(rfs4_entry_t u_entry, void *arg)
 {
 	rfs4_client_t *cp = (rfs4_client_t *)arg;
-	mds_session_t *sp = (mds_session_t *)u_entry;
+	mds_session_t *sn = (mds_session_t *)u_entry;
 
-	if (sp->sn_clnt == cp && !(rfs4_dbe_is_invalid(sp->dbe))) {
+	if (sn->sn_clnt == cp && !(rfs4_dbe_is_invalid(sn->sn_dbe))) {
 		/*
 		 * client is going away; so no need to check for
 		 * CB channel traffic before destroying a session.
 		 */
-		rfs4_dbe_invalidate(sp->dbe);
+		rfs4_dbe_invalidate(sn->sn_dbe);
 	}
 }
 
@@ -926,7 +927,7 @@ mds_clean_up_sessions(rfs4_client_t *cp)
 {
 	nfs_server_instance_t *instp;
 
-	instp = dbe_to_instp(cp->dbe);
+	instp = dbe_to_instp(cp->rc_dbe);
 
 	if (instp->mds_session_tab != NULL)
 		rfs4_dbe_walk(instp->mds_session_tab,
@@ -1300,9 +1301,9 @@ mds_layout_create(rfs4_entry_t u_entry, void *arg)
 	int i;
 	bool_t rc = TRUE;
 
-	instp = dbe_to_instp(lp->dbe);
+	instp = dbe_to_instp(lp->mlo_dbe);
 
-	lp->mlo_id = rfs4_dbe_getid(lp->dbe);
+	lp->mlo_id = rfs4_dbe_getid(lp->mlo_dbe);
 
 	lp->mlo_type = LAYOUT4_NFSV4_1_FILES;
 	lp->mlo_lc.lc_stripe_unit = lc->lc_stripe_unit;
@@ -1349,7 +1350,7 @@ mds_layout_destroy(rfs4_entry_t u_entry)
 	rw_enter(&instp->mds_mpd_lock, RW_WRITER);
 	if (lp->mlo_mpd != NULL) {
 		list_remove(&lp->mlo_mpd->mpd_layouts_list, lp);
-		rfs4_dbe_rele(lp->mlo_mpd->dbe);
+		rfs4_dbe_rele(lp->mlo_mpd->mpd_dbe);
 		lp->mlo_mpd = NULL;
 	}
 	rw_exit(&instp->mds_mpd_lock);
@@ -1409,18 +1410,18 @@ mds_add_layout(layout_core_t *lc)
 static uint32_t
 mds_layout_grant_hash(void *key)
 {
-	mds_layout_grant_t *lgp = (mds_layout_grant_t *)key;
+	mds_layout_grant_t *lg = (mds_layout_grant_t *)key;
 
-	return (ADDRHASH(lgp->cp) ^ ADDRHASH(lgp->fp));
+	return (ADDRHASH(lg->lo_cp) ^ ADDRHASH(lg->lo_fp));
 }
 
 static bool_t
 mds_layout_grant_compare(rfs4_entry_t u_entry, void *key)
 {
-	mds_layout_grant_t *lgp = (mds_layout_grant_t *)u_entry;
-	mds_layout_grant_t *klgp = (mds_layout_grant_t *)key;
+	mds_layout_grant_t *lg = (mds_layout_grant_t *)u_entry;
+	mds_layout_grant_t *klg = (mds_layout_grant_t *)key;
 
-	return (lgp->cp == klgp->cp && lgp->fp == klgp->fp);
+	return (lg->lo_cp == klg->lo_cp && lg->lo_fp == klg->lo_fp);
 }
 
 static void *
@@ -1441,15 +1442,15 @@ mds_layout_grant_id_hash(void *key)
 static bool_t
 mds_layout_grant_id_compare(rfs4_entry_t entry, void *key)
 {
-	mds_layout_grant_t *lgp = (mds_layout_grant_t *)entry;
+	mds_layout_grant_t *lg = (mds_layout_grant_t *)entry;
 	stateid_t *id = (stateid_t *)key;
 	bool_t rc;
 
 	if (id->v41_bits.type != LAYOUTID)
 		return (FALSE);
 
-	rc = (lgp->lo_stateid.v41_bits.boottime == id->v41_bits.boottime &&
-	    lgp->lo_stateid.v41_bits.state_ident == id->v41_bits.state_ident);
+	rc = (lg->lo_stateid.v41_bits.boottime == id->v41_bits.boottime &&
+	    lg->lo_stateid.v41_bits.state_ident == id->v41_bits.state_ident);
 
 	return (rc);
 }
@@ -1457,9 +1458,9 @@ mds_layout_grant_id_compare(rfs4_entry_t entry, void *key)
 static void *
 mds_layout_grant_id_mkkey(rfs4_entry_t entry)
 {
-	mds_layout_grant_t *lgp = (mds_layout_grant_t *)entry;
+	mds_layout_grant_t *lg = (mds_layout_grant_t *)entry;
 
-	return (&lgp->lo_stateid);
+	return (&lg->lo_stateid);
 }
 #endif
 
@@ -1467,29 +1468,29 @@ mds_layout_grant_id_mkkey(rfs4_entry_t entry)
 static bool_t
 mds_layout_grant_create(rfs4_entry_t u_entry, void *arg)
 {
-	mds_layout_grant_t *lgp = (mds_layout_grant_t *)u_entry;
-	rfs4_file_t *fp = ((mds_layout_grant_t *)arg)->fp;
-	rfs4_client_t *cp = ((mds_layout_grant_t *)arg)->cp;
+	mds_layout_grant_t *lg = (mds_layout_grant_t *)u_entry;
+	rfs4_file_t *fp = ((mds_layout_grant_t *)arg)->lo_fp;
+	rfs4_client_t *cp = ((mds_layout_grant_t *)arg)->lo_cp;
 
-	rfs4_dbe_hold(fp->dbe);
+	rfs4_dbe_hold(fp->rf_dbe);
 
-	lgp->lo_status = LO_GRANTED;
-	lgp->lo_stateid = mds_create_stateid(lgp->dbe, LAYOUTID);
-	lgp->fp = fp;
-	lgp->cp = cp;
-	lgp->lor_seqid = lgp->lor_reply = 0;
-	mutex_init(&lgp->lo_lock, NULL, MUTEX_DEFAULT, NULL);
+	lg->lo_status = LO_GRANTED;
+	lg->lo_stateid = mds_create_stateid(lg->lo_dbe, LAYOUTID);
+	lg->lo_fp = fp;
+	lg->lo_cp = cp;
+	lg->lor_seqid = lg->lor_reply = 0;
+	mutex_init(&lg->lo_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	/* Init layout grant lists for remque/insque */
-	lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
-	    &lgp->lo_grant_list;
-	lgp->lo_grant_list.lgp = lgp;
+	lg->lo_grant_list.next = lg->lo_grant_list.prev =
+	    &lg->lo_grant_list;
+	lg->lo_grant_list.lg = lg;
 
-	lgp->clientgrantlist.next = lgp->clientgrantlist.prev =
-	    &lgp->clientgrantlist;
-	lgp->clientgrantlist.lgp = lgp;
+	lg->lo_clientgrantlist.next = lg->lo_clientgrantlist.prev =
+	    &lg->lo_clientgrantlist;
+	lg->lo_clientgrantlist.lg = lg;
 
-	lgp->lo_range = nfs_range_create();
+	lg->lo_range = nfs_range_create();
 
 	return (TRUE);
 }
@@ -1498,39 +1499,40 @@ mds_layout_grant_create(rfs4_entry_t u_entry, void *arg)
 static void
 mds_layout_grant_destroy(rfs4_entry_t entry)
 {
-	mds_layout_grant_t *lgp = (mds_layout_grant_t *)entry;
+	mds_layout_grant_t *lg = (mds_layout_grant_t *)entry;
 
-	mutex_destroy(&lgp->lo_lock);
+	mutex_destroy(&lg->lo_lock);
 
-	nfs_range_destroy(lgp->lo_range);
-	lgp->lo_range = NULL;
+	nfs_range_destroy(lg->lo_range);
+	lg->lo_range = NULL;
 }
 
 mds_layout_grant_t *
 rfs41_findlogrant(struct compound_state *cs, rfs4_file_t *fp,
     rfs4_client_t *cp, bool_t *create)
 {
-	mds_layout_grant_t lg, *lgp;
+	mds_layout_grant_t args, *lg;
 
-	lg.cp = cp;
-	lg.fp = fp;
+	args.lo_cp = cp;
+	args.lo_fp = fp;
 
-	lgp = (mds_layout_grant_t *)rfs4_dbsearch(
-	    cs->instp->mds_layout_grant_idx, &lg, create, &lg, RFS4_DBS_VALID);
+	lg = (mds_layout_grant_t *)rfs4_dbsearch(
+	    cs->instp->mds_layout_grant_idx, &args, create,
+	    &args, RFS4_DBS_VALID);
 
-	return (lgp);
+	return (lg);
 }
 
 void
-rfs41_lo_grant_hold(mds_layout_grant_t *lgp)
+rfs41_lo_grant_hold(mds_layout_grant_t *lg)
 {
-	rfs4_dbe_hold(lgp->dbe);
+	rfs4_dbe_hold(lg->lo_dbe);
 }
 
 void
-rfs41_lo_grant_rele(mds_layout_grant_t *lgp)
+rfs41_lo_grant_rele(mds_layout_grant_t *lg)
 {
-	rfs4_dbe_rele(lgp->dbe);
+	rfs4_dbe_rele(lg->lo_dbe);
 }
 
 /*
@@ -1542,20 +1544,20 @@ rfs41_lo_grant_rele(mds_layout_grant_t *lgp)
 static uint32_t
 mds_ever_grant_hash(void *key)
 {
-	mds_ever_grant_t *egp = (mds_ever_grant_t *)key;
+	mds_ever_grant_t *eg = (mds_ever_grant_t *)key;
 
-	return (ADDRHASH(egp->cp) ^ ADDRHASH(egp->eg_key));
+	return (ADDRHASH(eg->eg_cp) ^ ADDRHASH(eg->eg_key));
 }
 
 static bool_t
 mds_ever_grant_compare(rfs4_entry_t u_entry, void *key)
 {
-	mds_ever_grant_t *egp = (mds_ever_grant_t *)u_entry;
-	mds_ever_grant_t *kegp = (mds_ever_grant_t *)key;
+	mds_ever_grant_t *eg = (mds_ever_grant_t *)u_entry;
+	mds_ever_grant_t *keg = (mds_ever_grant_t *)key;
 
-	return (egp->cp == kegp->cp &&
-	    egp->eg_fsid.val[0] == kegp->eg_fsid.val[0] &&
-	    egp->eg_fsid.val[1] == kegp->eg_fsid.val[1]);
+	return (eg->eg_cp == keg->eg_cp &&
+	    eg->eg_fsid.val[0] == keg->eg_fsid.val[0] &&
+	    eg->eg_fsid.val[1] == keg->eg_fsid.val[1]);
 }
 
 static void *
@@ -1567,10 +1569,10 @@ mds_ever_grant_mkkey(rfs4_entry_t entry)
 static bool_t
 mds_ever_grant_fsid_compare(rfs4_entry_t entry, void *key)
 {
-	mds_ever_grant_t *egp = (mds_ever_grant_t *)entry;
+	mds_ever_grant_t *eg = (mds_ever_grant_t *)entry;
 	int64_t g_key = (int64_t)(uintptr_t)key;
 
-	return (egp->eg_key == g_key);
+	return (eg->eg_key == g_key);
 }
 
 #ifdef NOT_USED_NOW
@@ -1583,9 +1585,9 @@ mds_ever_grant_fsid_hash(void *key)
 static void *
 mds_ever_grant_fsid_mkkey(rfs4_entry_t entry)
 {
-	mds_ever_grant_t *egp = (mds_ever_grant_t *)entry;
+	mds_ever_grant_t *eg = (mds_ever_grant_t *)entry;
 
-	return ((void*)(uintptr_t)egp->eg_key);
+	return ((void*)(uintptr_t)eg->eg_key);
 }
 #endif
 
@@ -1593,11 +1595,11 @@ mds_ever_grant_fsid_mkkey(rfs4_entry_t entry)
 static bool_t
 mds_ever_grant_create(rfs4_entry_t u_entry, void *arg)
 {
-	mds_ever_grant_t *egp = (mds_ever_grant_t *)u_entry;
-	rfs4_client_t *cp = ((mds_ever_grant_t *)arg)->cp;
+	mds_ever_grant_t *eg = (mds_ever_grant_t *)u_entry;
+	rfs4_client_t *cp = ((mds_ever_grant_t *)arg)->eg_cp;
 
-	egp->cp = cp;
-	egp->eg_fsid = ((mds_ever_grant_t *)arg)->eg_fsid;
+	eg->eg_cp = cp;
+	eg->eg_fsid = ((mds_ever_grant_t *)arg)->eg_fsid;
 
 	return (TRUE);
 }
@@ -1612,66 +1614,67 @@ mds_ever_grant_t *
 rfs41_findevergrant(rfs4_client_t *cp, vnode_t *vp, bool_t *create)
 {
 	nfs_server_instance_t *instp;
-	mds_ever_grant_t eg, *egp;
+	mds_ever_grant_t args, *eg;
 
-	instp = dbe_to_instp(cp->dbe);
-	eg.cp = cp;
-	eg.eg_fsid = vp->v_vfsp->vfs_fsid;
+	instp = dbe_to_instp(cp->rc_dbe);
+	args.eg_cp = cp;
+	args.eg_fsid = vp->v_vfsp->vfs_fsid;
 
-	egp = (mds_ever_grant_t *)rfs4_dbsearch(
-	    instp->mds_ever_grant_idx, &eg, create, &eg, RFS4_DBS_VALID);
+	eg = (mds_ever_grant_t *)rfs4_dbsearch(
+	    instp->mds_ever_grant_idx, &args, create, &args,
+	    RFS4_DBS_VALID);
 
-	return (egp);
+	return (eg);
 }
 
 void
-rfs41_ever_grant_rele(mds_ever_grant_t *egp)
+rfs41_ever_grant_rele(mds_ever_grant_t *eg)
 {
-	rfs4_dbe_rele(egp->dbe);
+	rfs4_dbe_rele(eg->eg_dbe);
 }
 
 void
 mds_kill_eg_callout(rfs4_entry_t u_entry, void *arg)
 {
-	mds_ever_grant_t *egp = (mds_ever_grant_t *)u_entry;
+	mds_ever_grant_t *eg = (mds_ever_grant_t *)u_entry;
 	rfs4_client_t *cp = (rfs4_client_t *)arg;
 
-	if (egp->cp == cp) {
-		egp->cp = NULL;
-		rfs4_dbe_invalidate(egp->dbe);
-		rfs4_dbe_rele_nolock(egp->dbe);
+	if (eg->eg_cp == cp) {
+		eg->eg_cp = NULL;
+		rfs4_dbe_invalidate(eg->eg_dbe);
+		rfs4_dbe_rele_nolock(eg->eg_dbe);
 	}
 }
 
 void
 mds_clean_up_grants(rfs4_client_t *cp)
 {
-	mds_layout_grant_t *lgp;
+	mds_layout_grant_t *lg;
 	nfs_server_instance_t *instp;
 
-	rfs4_dbe_lock(cp->dbe);
-	while (cp->clientgrantlist.next->lgp != NULL) {
-		lgp = cp->clientgrantlist.next->lgp;
-		remque(&lgp->clientgrantlist);
-		lgp->clientgrantlist.next = lgp->clientgrantlist.prev =
-		    &lgp->clientgrantlist;
-		lgp->cp = NULL;
+	rfs4_dbe_lock(cp->rc_dbe);
+	while (cp->rc_clientgrantlist.next->lg != NULL) {
+		lg = cp->rc_clientgrantlist.next->lg;
+		remque(&lg->lo_clientgrantlist);
+		lg->lo_clientgrantlist.next = lg->lo_clientgrantlist.prev =
+		    &lg->lo_clientgrantlist;
+		lg->lo_cp = NULL;
 
-		rfs4_dbe_lock(lgp->fp->dbe);
-		remque(&lgp->lo_grant_list);
-		rfs4_dbe_unlock(lgp->fp->dbe);
+		rfs4_dbe_lock(lg->lo_fp->rf_dbe);
+		remque(&lg->lo_grant_list);
+		rfs4_dbe_unlock(lg->lo_fp->rf_dbe);
 
-		lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
-		    &lgp->lo_grant_list;
-		rfs4_file_rele(lgp->fp);
+		lg->lo_grant_list.next = lg->lo_grant_list.prev =
+		    &lg->lo_grant_list;
+		rfs4_file_rele(lg->lo_fp);
 
-		lgp->fp = NULL;
-		rfs4_dbe_invalidate(lgp->dbe);
-		rfs41_lo_grant_rele(lgp);
+		lg->lo_fp = NULL;
+		rfs4_dbe_invalidate(lg->lo_dbe);
+		rfs41_lo_grant_rele(lg);
 	}
 
-	instp = dbe_to_instp(cp->dbe);
-	rfs4_dbe_unlock(cp->dbe);
+	instp = dbe_to_instp(cp->rc_dbe);
+	rfs4_dbe_unlock(cp->rc_dbe);
 
 	rw_enter(&instp->mds_ever_grant_lock, RW_READER);
 	rfs4_dbe_walk(instp->mds_ever_grant_tab, mds_kill_eg_callout, cp);
@@ -1686,30 +1689,30 @@ struct grant_arg {
 void
 mds_rm_grant_callout(rfs4_entry_t u_entry, void *arg)
 {
-	mds_layout_grant_t *lgp = (mds_layout_grant_t *)u_entry;
+	mds_layout_grant_t *lg = (mds_layout_grant_t *)u_entry;
 	struct grant_arg *ga = (struct grant_arg *)arg;
-	vnode_t *vp = lgp->fp->vp;
+	vnode_t *vp = lg->lo_fp->rf_vp;
 
-	if (ga->cp == lgp->cp && vp && ga->vp->v_vfsp == vp->v_vfsp) {
-		rfs4_dbe_lock(lgp->cp->dbe);
-		remque(&lgp->clientgrantlist);
-		rfs4_dbe_unlock(lgp->cp->dbe);
+	if (ga->cp == lg->lo_cp && vp && ga->vp->v_vfsp == vp->v_vfsp) {
+		rfs4_dbe_lock(lg->lo_cp->rc_dbe);
+		remque(&lg->lo_clientgrantlist);
+		rfs4_dbe_unlock(lg->lo_cp->rc_dbe);
 
-		lgp->clientgrantlist.next = lgp->clientgrantlist.prev =
-		    &lgp->clientgrantlist;
-		lgp->cp = NULL;
+		lg->lo_clientgrantlist.next = lg->lo_clientgrantlist.prev =
+		    &lg->lo_clientgrantlist;
+		lg->lo_cp = NULL;
 
-		rfs4_dbe_lock(lgp->fp->dbe);
-		remque(&lgp->lo_grant_list);
-		rfs4_dbe_unlock(lgp->fp->dbe);
+		rfs4_dbe_lock(lg->lo_fp->rf_dbe);
+		remque(&lg->lo_grant_list);
+		rfs4_dbe_unlock(lg->lo_fp->rf_dbe);
 
-		lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
-		    &lgp->lo_grant_list;
-		rfs4_file_rele(lgp->fp);
+		lg->lo_grant_list.next = lg->lo_grant_list.prev =
+		    &lg->lo_grant_list;
+		rfs4_file_rele(lg->lo_fp);
 
-		lgp->fp = NULL;
-		rfs4_dbe_invalidate(lgp->dbe);
-		rfs4_dbe_rele_nolock(lgp->dbe);
+		lg->lo_fp = NULL;
+		rfs4_dbe_invalidate(lg->lo_dbe);
+		rfs4_dbe_rele_nolock(lg->lo_dbe);
 	}
 }
 
@@ -1721,7 +1724,7 @@ mds_clean_grants_by_fsid(rfs4_client_t *cp, vnode_t *vp)
 
 	ga.cp = cp;
 	ga.vp = vp;
-	instp = dbe_to_instp(cp->dbe);
+	instp = dbe_to_instp(cp->rc_dbe);
 
 	rw_enter(&instp->mds_layout_grant_lock, RW_READER);
 	rfs4_dbe_walk(instp->mds_layout_grant_tab, mds_rm_grant_callout, &ga);
@@ -1744,7 +1747,7 @@ rfs41_lo_seqid(stateid_t *sp)
 }
 
 bool_t
-rfs41_lo_still_granted(mds_layout_grant_t *lgp)
+rfs41_lo_still_granted(mds_layout_grant_t *lg)
 {
 	bool_t	found = TRUE;
 
@@ -1758,20 +1761,21 @@ rfs41_lo_still_granted(mds_layout_grant_t *lgp)
 	 * to be released and reaped.  In this case, the status may not
 	 * have been updated.
 	 */
-	rfs4_dbe_lock(lgp->dbe);
-	if (lgp->lo_status == LO_RETURNED || lgp->lo_status == LO_RECALLED ||
-	    lgp->cp == NULL)
+	rfs4_dbe_lock(lg->lo_dbe);
+	if (lg->lo_status == LO_RETURNED || lg->lo_status == LO_RECALLED ||
+	    lg->lo_cp == NULL)
 		found = FALSE;
-	rfs4_dbe_unlock(lgp->dbe);
+	rfs4_dbe_unlock(lg->lo_dbe);
 
 	return (found);
 }
 
 static void
-rfs41_revoke_layout(mds_layout_grant_t *lgp)
+rfs41_revoke_layout(mds_layout_grant_t *lg)
 {
 	cmn_err(CE_NOTE, "rfs41_revoke_layout: layout revoked");
-	rfs41_seq4_hold(&lgp->cp->seq4, SEQ4_STATUS_RECALLABLE_STATE_REVOKED);
+	rfs41_seq4_hold(&lg->lo_cp->rc_seq4,
+	    SEQ4_STATUS_RECALLABLE_STATE_REVOKED);
 
 	/* XXX - rest of this function TBD */
 }
@@ -1791,20 +1795,20 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	CLIENT			*ch;
 	int			 numops;
 	int			 argsz;
-	mds_session_t		*sp;
+	mds_session_t		*sn;
 	slot_ent_t		*p;
-	mds_layout_grant_t	*lgp;
+	mds_layout_grant_t	*lg;
 	uint32_t		 sc = 0;
 	int			 retried = 0;
 
 	DTRACE_PROBE1(nfssrv__i__sess_lorecall_fh, mds_lorec_t *, lorec);
-	if ((sp = lorec->lor_sess) == NULL) {
+	if ((sn = lorec->lor_sess) == NULL) {
 		kmem_free(lorec, sizeof (mds_lorec_t));
 		return;
 
-	} else if (!SN_CB_CHAN_EST(sp)) {
+	} else if (!SN_CB_CHAN_EST(sn)) {
 		kmem_free(lorec, sizeof (mds_lorec_t));
-		rfs41_session_rele(sp);
+		rfs41_session_rele(sn);
 		return;
 	}
 
@@ -1813,17 +1817,17 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	 */
 	switch (lorec->lor_type) {
 	case LAYOUTRECALL4_FILE:
-		if (lorec->lor_lgp == NULL)
+		if (lorec->lor_lg == NULL)
 			return;
-		lgp = lorec->lor_lgp;
+		lg = lorec->lor_lg;
 		break;
 
 	case LAYOUTRECALL4_FSID:
-		sp->sn_clnt->bulk_recall = LAYOUTRETURN4_FSID;
+		sn->sn_clnt->rc_bulk_recall = LAYOUTRETURN4_FSID;
 		break;
 
 	case LAYOUTRECALL4_ALL:
-		sp->sn_clnt->bulk_recall = LAYOUTRETURN4_ALL;
+		sn->sn_clnt->rc_bulk_recall = LAYOUTRETURN4_ALL;
 		break;
 	default:
 		break;
@@ -1845,7 +1849,7 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	(void) str_to_utf8("cb_lo_recall", &cb4_args.tag);
 	cb4_args.minorversion = CB4_MINOR_v1;
 
-	cb4_args.callback_ident = sp->sn_bc.progno;
+	cb4_args.callback_ident = sn->sn_bc.progno;
 	cb4_args.array_len = numops;
 	cb4_args.array = argops;
 
@@ -1855,12 +1859,12 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	/*
 	 * CB_SEQUENCE
 	 */
-	bcopy(sp->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
-	p = svc_slot_alloc(sp);
+	bcopy(sn->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
+	p = svc_slot_alloc(sn);
 	mutex_enter(&p->se_lock);
 	cbsap->csa_slotid = p->se_sltno;
 	cbsap->csa_sequenceid = p->se_seqid;
-	cbsap->csa_highest_slotid = svc_slot_maxslot(sp);
+	cbsap->csa_highest_slotid = svc_slot_maxslot(sn);
 	cbsap->csa_cachethis = FALSE;
 
 	/* no referring calling list for lo recall */
@@ -1889,7 +1893,7 @@ mds_do_lorecall(mds_lorec_t *lorec)
 		lorf->lor_fh.nfs_fh4_len = lorec->lor_fh.fh_len;
 		lorf->lor_fh.nfs_fh4_val = (char *)&lorec->lor_fh.fh_buf;
 		bcopy(&lorec->lor_stid, &lorf->lor_stateid, sizeof (stateid4));
-		(void) atomic_swap_32(&lgp->lor_reply, 0);
+		(void) atomic_swap_32(&lg->lor_reply, 0);
 		break;
 
 	case LAYOUTRECALL4_FSID:
@@ -1905,15 +1909,15 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	 * Set up the timeout for the callback and make the actual call.
 	 * Timeout will be 80% of the lease period.
 	 */
-	timeout.tv_sec = (dbe_to_instp(sp->dbe)->lease_period * 80) / 100;
+	timeout.tv_sec = (dbe_to_instp(sn->sn_dbe)->lease_period * 80) / 100;
 	timeout.tv_usec = 0;
 retry:
-	ch = rfs41_cb_getch(sp);
+	ch = rfs41_cb_getch(sn);
 	(void) CLNT_CONTROL(ch, CLSET_XID, (char *)&zilch);
 	call_stat = clnt_call(ch, CB_COMPOUND,
 	    xdr_CB_COMPOUND4args_srv, (caddr_t)&cb4_args,
 	    xdr_CB_COMPOUND4res, (caddr_t)&cb4_res, timeout);
-	rfs41_cb_freech(sp, ch);
+	rfs41_cb_freech(sn, ch);
 
 	if (call_stat != RPC_SUCCESS) {
 		switch (lorec->lor_type) {
@@ -1921,7 +1925,7 @@ retry:
 			if (!retried)
 				delay(SEC_TO_TICK(rfs4_lease_time));
 
-			if (rfs41_lo_still_granted(lgp)) {
+			if (rfs41_lo_still_granted(lg)) {
 				if (!retried) {
 					retried = 1;
 					goto retry;
@@ -1932,16 +1936,16 @@ retry:
 				 * still granted lest we assert a SEQ4 flag
 				 * that will never be turned off.
 				 */
-				rfs41_revoke_layout(lgp);
+				rfs41_revoke_layout(lg);
 			}
 			sc = (call_stat == RPC_CANTSEND ||
 			    call_stat == RPC_CANTRECV);
-			rfs41_cb_path_down(sp, sc);
+			rfs41_cb_path_down(sn, sc);
 			goto done;
 
 		case LAYOUTRECALL4_FSID:
 		case LAYOUTRECALL4_ALL:
-			sp->sn_clnt->bulk_recall = 0;
+			sn->sn_clnt->rc_bulk_recall = 0;
 			/*
 			 * XXX - how do we determine if layouts still
 			 *	 outstanding for fsid/all cases ?
@@ -1957,7 +1961,7 @@ retry:
 		 */
 		switch (lorec->lor_type) {
 		case LAYOUTRECALL4_FILE:
-			(void) atomic_swap_32(&lgp->lor_reply, 1);
+			(void) atomic_swap_32(&lg->lor_reply, 1);
 			break;
 
 		case LAYOUTRECALL4_FSID:
@@ -1997,7 +2001,7 @@ retry:
 				if (!retried)
 					delay(SEC_TO_TICK(rfs4_lease_time));
 
-				granted = rfs41_lo_still_granted(lgp);
+				granted = rfs41_lo_still_granted(lg);
 				if (!granted)
 					break;
 
@@ -2007,7 +2011,7 @@ retry:
 				}
 
 				if (granted)
-					rfs41_revoke_layout(lgp);
+					rfs41_revoke_layout(lg);
 				break;
 				}
 
@@ -2021,8 +2025,8 @@ retry:
 		case NFS4ERR_BAD_STATEID:	/* XXX - retry BAD_STATEID ? */
 		default:
 			if (lorec->lor_type == LAYOUTRECALL4_FILE)
-				if (rfs41_lo_still_granted(lgp))
-					rfs41_revoke_layout(lgp);
+				if (rfs41_lo_still_granted(lg))
+					rfs41_revoke_layout(lg);
 			break;
 		}
 
@@ -2032,15 +2036,15 @@ done:
 	kmem_free(lorec, sizeof (mds_lorec_t));
 	rfs4freeargres(&cb4_args, &cb4_res);
 
-	svc_slot_free(sp, p);
-	rfs41_session_rele(sp);
+	svc_slot_free(sn, p);
+	rfs41_session_rele(sn);
 
 	/*
 	 * Per-type post-processing
 	 */
 	switch (lorec->lor_type) {
 	case LAYOUTRECALL4_FILE:
-		rfs41_lo_grant_rele(lgp);
+		rfs41_lo_grant_rele(lg);
 		break;
 
 	case LAYOUTRECALL4_FSID:
@@ -2056,19 +2060,19 @@ done:
 static void
 all_lor(rfs4_entry_t entry, void *args)
 {
-	mds_session_t	*sp = (mds_session_t *)entry;
+	mds_session_t	*sn = (mds_session_t *)entry;
 	mds_lorec_t	*lrp = (mds_lorec_t *)args;
 	mds_lorec_t	*lorec;
 
-	if (sp == NULL || lrp == NULL)
+	if (sn == NULL || lrp == NULL)
 		return;
 
-	ASSERT(rfs4_dbe_islocked(sp->dbe));
+	ASSERT(rfs4_dbe_islocked(sn->sn_dbe));
 	lorec = kmem_zalloc(sizeof (mds_lorec_t), KM_SLEEP);
 	bcopy(args, lorec, sizeof (mds_lorec_t));
 
-	rfs4_dbe_hold(sp->dbe);
-	lorec->lor_sess = sp;
+	rfs4_dbe_hold(sn->sn_dbe);
+	lorec->lor_sess = sn;
 
 	(void) thread_create(NULL, 0, mds_do_lorecall, lorec, 0, &p0, TS_RUN,
 	    minclsyspri);
@@ -2081,22 +2085,22 @@ static void
 fsid_lor(rfs4_entry_t u_entry, void *args)
 {
 	mds_lorec_t		*lrp = (mds_lorec_t *)args;
-	mds_ever_grant_t	*egp = (mds_ever_grant_t *)u_entry;
-	mds_ever_grant_t	 eg;
+	mds_ever_grant_t	*eg = (mds_ever_grant_t *)u_entry;
+	mds_ever_grant_t	key;
 	vnode_t			*vp = NULL;
 
-	if (egp == NULL || lrp == NULL || rfs4_dbe_is_invalid(egp->dbe))
+	if (eg == NULL || lrp == NULL || rfs4_dbe_is_invalid(eg->eg_dbe))
 		return;
 
-	ASSERT(rfs4_dbe_islocked(egp->dbe));
+	ASSERT(rfs4_dbe_islocked(eg->eg_dbe));
 	if ((vp = (vnode_t *)lrp->lor_vp) == NULL)
 		return;
 
-	eg.eg_fsid = vp->v_vfsp->vfs_fsid;
+	key.eg_fsid = vp->v_vfsp->vfs_fsid;
 	if (mds_ever_grant_fsid_compare(u_entry,
-	    (void *)(uintptr_t)eg.eg_key)) {
+	    (void *)(uintptr_t)key.eg_key)) {
 		mds_lorec_t	*lorec;
-		mds_session_t	*sp;
+		mds_session_t	*sn;
 		nfs_server_instance_t	*instp;
 
 		instp = dbe_to_instp(u_entry->dbe);
@@ -2104,13 +2108,13 @@ fsid_lor(rfs4_entry_t u_entry, void *args)
 		lorec = kmem_zalloc(sizeof (mds_lorec_t), KM_SLEEP);
 		bcopy(args, lorec, sizeof (mds_lorec_t));
 
-		ASSERT(egp->cp != NULL);
-		sp = mds_findsession_by_clid(instp, egp->cp->clientid);
-		if (sp == NULL) {
+		ASSERT(eg->eg_cp != NULL);
+		sn = mds_findsession_by_clid(instp, eg->eg_cp->rc_clientid);
+		if (sn == NULL) {
 			kmem_free(lorec, sizeof (mds_lorec_t));
 			return;
 		}
-		lorec->lor_sess = sp;	/* hold courtesy of findsession */
+		lorec->lor_sess = sn;	/* hold courtesy of findsession */
 
 		(void) thread_create(NULL, 0, mds_do_lorecall, lorec, 0, &p0,
 		    TS_RUN, minclsyspri);
@@ -2157,7 +2161,7 @@ mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 	rfs4_file_t		*fp = NULL;
 	rfs4_client_t		*cp = NULL;
 	rfs41_grant_list_t	*glp = NULL;
-	mds_session_t		*sp = NULL;
+	mds_session_t		*sn = NULL;
 
 	lorec.lor_type = args->lo_type;
 	switch (args->lo_type) {
@@ -2241,15 +2245,16 @@ mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 		 * the clients that have an active layout for the file,
 		 * only. Stop the blasting !
 		 */
-		glp = fp->lo_grant_list.next;
-		for (; glp && glp->lgp; glp = glp->next) {
+		glp = fp->rf_lo_grant_list.next;
+		for (; glp && glp->lg; glp = glp->next) {
 
-			if ((cp = glp->lgp->cp) == NULL)
+			if ((cp = glp->lg->lo_cp) == NULL)
 				continue;	/* internal inconsistency ? */
 
-			rfs41_lo_grant_hold(glp->lgp);
-			sp = mds_findsession_by_clid(mds_server, cp->clientid);
-			if (sp != NULL) {
+			rfs41_lo_grant_hold(glp->lg);
+			sn = mds_findsession_by_clid(mds_server,
+			    cp->rc_clientid);
+			if (sn != NULL) {
 				/*
 				 * Recall in progress !
 				 *
@@ -2258,25 +2263,25 @@ mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 				 * the layout grant info; this will eventually
 				 * be used for layout race detection.
 				 */
-				rfs4_dbe_lock(glp->lgp->dbe);
+				rfs4_dbe_lock(glp->lg->lo_dbe);
 
-				glp->lgp->lo_status = LO_RECALL_INPROG;
-				rfs41_lo_seqid(&glp->lgp->lo_stateid);
+				glp->lg->lo_status = LO_RECALL_INPROG;
+				rfs41_lo_seqid(&glp->lg->lo_stateid);
 
-				mutex_enter(&glp->lgp->lo_lock);
-				glp->lgp->lor_seqid =
-				    glp->lgp->lo_stateid.v41_bits.chgseq;
-				mutex_exit(&glp->lgp->lo_lock);
+				mutex_enter(&glp->lg->lo_lock);
+				glp->lg->lor_seqid =
+				    glp->lg->lo_stateid.v41_bits.chgseq;
+				mutex_exit(&glp->lg->lo_lock);
 
-				bcopy(&glp->lgp->lo_stateid.stateid,
+				bcopy(&glp->lg->lo_stateid.stateid,
 				    &lorec.lor_stid, sizeof (stateid4));
-				lorec.lor_lgp = glp->lgp;
-				rfs41_lo_grant_hold(glp->lgp);
+				lorec.lor_lg = glp->lg;
+				rfs41_lo_grant_hold(glp->lg);
 
-				rfs4_dbe_unlock(glp->lgp->dbe);
-				file_lor((rfs4_entry_t)sp, (void *)&lorec);
+				rfs4_dbe_unlock(glp->lg->lo_dbe);
+				file_lor((rfs4_entry_t)sn, (void *)&lorec);
 			}
-			rfs41_lo_grant_rele(glp->lgp);
+			rfs41_lo_grant_rele(glp->lg);
 		}
 		break;
 
@@ -2349,7 +2354,7 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 	CLIENT			*ch;
 	int			 numops;
 	int			 argsz;
-	mds_session_t		*sp;
+	mds_session_t		*sn;
 	slot_ent_t		*p;
 	notify4			 no;
 	char			*xdr_buf = NULL;
@@ -2361,14 +2366,14 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 
 	if (ndp->nd_sess == NULL)
 		return;
-	sp = ndp->nd_sess;
+	sn = ndp->nd_sess;
 
 	/*
 	 * XXX - until we fix blasting _all_ sessions for one notification,
 	 *	make sure that the session in question at least has the
 	 *	back chan established.
 	 */
-	if (!SN_CB_CHAN_EST(sp))
+	if (!SN_CB_CHAN_EST(sn))
 		return;
 
 	/*
@@ -2387,7 +2392,7 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 	(void) str_to_utf8("cb_notify_device", &cb4_args.tag);
 	cb4_args.minorversion = CB4_MINOR_v1;
 
-	cb4_args.callback_ident = sp->sn_bc.progno;
+	cb4_args.callback_ident = sn->sn_bc.progno;
 	cb4_args.array_len = numops;
 	cb4_args.array = argops;
 
@@ -2397,12 +2402,12 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 	/*
 	 * CB_SEQUENCE
 	 */
-	bcopy(sp->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
-	p = svc_slot_alloc(sp);
+	bcopy(sn->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
+	p = svc_slot_alloc(sn);
 	mutex_enter(&p->se_lock);
 	cbsap->csa_slotid = p->se_sltno;
 	cbsap->csa_sequenceid = p->se_seqid;
-	cbsap->csa_highest_slotid = svc_slot_maxslot(sp);
+	cbsap->csa_highest_slotid = svc_slot_maxslot(sn);
 	cbsap->csa_cachethis = FALSE;
 
 	/* no referring calling list for device notifications */
@@ -2468,15 +2473,15 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 	 * Timeout will be 80% of the lease period.
 	 */
 	timeout.tv_sec =
-	    (dbe_to_instp(sp->dbe)->lease_period * 80) / 100;
+	    (dbe_to_instp(sn->sn_dbe)->lease_period * 80) / 100;
 	timeout.tv_usec = 0;
 
-	ch = rfs41_cb_getch(sp);
+	ch = rfs41_cb_getch(sn);
 	(void) CLNT_CONTROL(ch, CLSET_XID, (char *)&zilch);
 	call_stat = clnt_call(ch, CB_COMPOUND,
 	    xdr_CB_COMPOUND4args_srv, (caddr_t)&cb4_args,
 	    xdr_CB_COMPOUND4res, (caddr_t)&cb4_res, timeout);
-	rfs41_cb_freech(sp, ch);
+	rfs41_cb_freech(sn, ch);
 
 	/*
 	 * Errors from the client are harmless for now, since this
@@ -2502,7 +2507,7 @@ done:
 	kmem_free(ndp, sizeof (*ndp));
 	if (xdr_buf)
 		kmem_free(xdr_buf, xdr_size);
-	svc_slot_free(sp, p);
+	svc_slot_free(sn, p);
 }
 
 static void
@@ -2763,17 +2768,17 @@ mds_mpd_list(rfs4_entry_t entry, void *arg)
 	 * If this entry is invalid or we should skip it
 	 * go to the next one..
 	 */
-	if (rfs4_dbe_skip_or_invalid(mp->dbe))
+	if (rfs4_dbe_skip_or_invalid(mp->mpd_dbe))
 		return;
 
-	dlip = &(mdl->dl[mdl->count]);
+	dlip = &(mdl->mdl_dl[mdl->mdl_count]);
 
 	mds_set_deviceid(mp->mpd_id, dlip);
 
 	/*
 	 * bump to the next devlist_item4
 	 */
-	mdl->count++;
+	mdl->mdl_count++;
 }
 
 /* ARGSUSED */

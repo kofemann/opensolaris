@@ -433,8 +433,8 @@ mds_cbcheck(rfs4_state_t *sp)
 	mds_session_t *sessp;
 	rfs4_cbstate_t  cbs = CB_NONE;
 
-	if (! (sessp = mds_findsession_by_clid(dbe_to_instp(sp->dbe),
-	    sp->owner->client->clientid)))
+	if (!(sessp = mds_findsession_by_clid(dbe_to_instp(sp->rs_dbe),
+	    sp->rs_owner->ro_client->rc_clientid)))
 		return (CB_UNINIT);
 
 	if (SN_CB_CHAN_EST(sessp) && SN_CB_CHAN_OK(sessp))
@@ -451,10 +451,8 @@ mds_cbcheck(rfs4_state_t *sp)
 rfs4_cbstate_t
 rfs4_cbcheck(rfs4_state_t *sp)
 {
-	return (sp->owner->client->cbinfo.cb_state);
+	return (sp->rs_owner->ro_client->rc_cbinfo.cb_state);
 }
-
-
 
 void
 rfs4_init_compound_state(struct compound_state *cs)
@@ -512,7 +510,7 @@ rfs4_clnt_in_grace(rfs4_client_t *cp)
 {
 	ASSERT(rfs4_dbe_refcnt(cp->rc_dbe) > 0);
 
-	return (rfs4_in_grace(dbe_to_instp(cp->dbe)));
+	return (rfs4_in_grace(dbe_to_instp(cp->rc_dbe)));
 }
 
 /*
@@ -6292,16 +6290,16 @@ rfs4_do_open(struct compound_state *cs, struct svc_req *req,
 	int first_open;
 
 	/* get the file struct and hold a lock on it during initial open */
-	file = rfs4_findfile_withlock(cs->instp, cs->vp, &cs->fh, &fcreate);
-	if (file == NULL) {
+	fp = rfs4_findfile_withlock(cs->instp, cs->vp, &cs->fh, &fcreate);
+	if (fp == NULL) {
 		NFS4_DEBUG(rfs4_debug,
 		    (CE_NOTE, "rfs4_do_open: can't find file"));
 		resp->status = NFS4ERR_SERVERFAULT;
 		return;
 	}
 
-	state = rfs4_findstate_by_owner_file(cs, oo, file, &screate);
-	if (state == NULL) {
+	sp = rfs4_findstate_by_owner_file(cs, oo, fp, &screate);
+	if (sp == NULL) {
 		NFS4_DEBUG(rfs4_debug,
 		    (CE_NOTE, "rfs4_do_open: can't find state"));
 		resp->status = NFS4ERR_RESOURCE;
@@ -6443,8 +6441,8 @@ rfs4_do_open(struct compound_state *cs, struct svc_req *req,
 
 			/* Not a fully formed open; "close" it */
 			if (screate == TRUE)
-				rfs4_state_close(state, FALSE, FALSE, cs->cr);
-			rfs4_state_rele(state);
+				rfs4_state_close(sp, FALSE, FALSE, cs->cr);
+			rfs4_state_rele(sp);
 			if (err == EAGAIN && (ct.cc_flags & CC_WOULDBLOCK))
 				resp->status = NFS4ERR_DELAY;
 			else
@@ -6484,9 +6482,9 @@ rfs4_do_open(struct compound_state *cs, struct svc_req *req,
 	 * set the recall flag.
 	 */
 
-	dsp = rfs4_grant_delegation(cs, deleg, state, &recall);
+	dsp = rfs4_grant_delegation(cs, deleg, sp, &recall);
 
-	cs->deleg = (fp->rf_dinfo.rd_dtype == OPEN_DELEGATE_WRITE);
+	cs->deleg = (fp->rf_dinfo->rd_dtype == OPEN_DELEGATE_WRITE);
 
 	next_stateid(&sp->rs_stateid);
 
@@ -6634,7 +6632,7 @@ rfs4_do_opendelcur(struct compound_state *cs, struct svc_req *req,
 		return;
 	}
 
-	ASSERT(dsp->rds_finfo->rf_dinfo.rd_dtype != OPEN_DELEGATE_NONE);
+	ASSERT(dsp->rds_finfo->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE);
 
 	/*
 	 * New lock owner, create state. Since this was probably called
@@ -6653,7 +6651,7 @@ rfs4_do_opendelcur(struct compound_state *cs, struct svc_req *req,
 	}
 
 	/* Mark progress for delegation returns */
-	dsp->rds_finfo->rf_dinfo.rd_time_lastwrite = gethrestime_sec();
+	dsp->rds_finfo->rf_dinfo->rd_time_lastwrite = gethrestime_sec();
 	rfs4_deleg_state_rele(dsp);
 	rfs4_do_open(cs, req, oo, DELEG_NONE,
 	    args->share_access, args->share_deny, resp, 1);
@@ -6690,16 +6688,16 @@ rfs4_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 	}
 
 	/* get the file struct and hold a lock on it during initial open */
-	file = rfs4_findfile_withlock(cs->instp, cs->vp, NULL, &create);
-	if (file == NULL) {
+	fp = rfs4_findfile_withlock(cs->instp, cs->vp, NULL, &create);
+	if (fp == NULL) {
 		NFS4_DEBUG(rfs4_debug,
 		    (CE_NOTE, "rfs4_do_opendelprev: can't find file"));
 		resp->status = NFS4ERR_SERVERFAULT;
 		return;
 	}
 
-	state = rfs4_findstate_by_owner_file(cs, oo, file, &create);
-	if (state == NULL) {
+	sp = rfs4_findstate_by_owner_file(cs, oo, fp, &create);
+	if (sp == NULL) {
 		NFS4_DEBUG(rfs4_debug,
 		    (CE_NOTE, "rfs4_do_opendelprev: can't find state"));
 		resp->status = NFS4ERR_SERVERFAULT;
@@ -6712,7 +6710,7 @@ rfs4_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 	rfs4_dbe_lock(fp->rf_dbe);
 	if (args->share_access != sp->rs_share_access ||
 	    args->share_deny != sp->rs_share_deny ||
-	    sp->rs_finfo->rf_dinfo.rd_dtype == OPEN_DELEGATE_NONE) {
+	    sp->rs_finfo->rf_dinfo->rd_dtype == OPEN_DELEGATE_NONE) {
 		NFS4_DEBUG(rfs4_debug,
 		    (CE_NOTE, "rfs4_do_opendelprev: state mixup"));
 		rfs4_dbe_unlock(fp->rf_dbe);
@@ -6725,7 +6723,7 @@ rfs4_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 	rfs4_dbe_unlock(fp->rf_dbe);
 	rfs4_dbe_unlock(sp->rs_dbe);
 
-	dsp = rfs4_finddeleg(cs, state, &dcreate);
+	dsp = rfs4_finddeleg(cs, sp, &dcreate);
 	if (dsp == NULL) {
 		rfs4_state_rele(sp);
 		rfs4_file_rele(fp);
@@ -6819,7 +6817,7 @@ rfs4_check_open_seqid(seqid4 seqid, rfs4_openowner_t *op, nfs_resop4 *resop)
 	rfs4_chkseq_t rc;
 
 	rfs4_dbe_lock(op->ro_dbe);
-	rc = rfs4_check_seqid(op->ro_open_seqid, &op->ro_reply, seqid, resop,
+	rc = rfs4_check_seqid(op->ro_open_seqid, op->ro_reply, seqid, resop,
 	    TRUE);
 	rfs4_dbe_unlock(op->ro_dbe);
 
@@ -6836,7 +6834,7 @@ rfs4_check_olo_seqid(seqid4 olo_seqid, rfs4_openowner_t *op, nfs_resop4 *resop)
 	rfs4_chkseq_t rc;
 
 	rfs4_dbe_lock(op->ro_dbe);
-	rc = rfs4_check_seqid(op->ro_open_seqid, &op->ro_reply,
+	rc = rfs4_check_seqid(op->ro_open_seqid, op->ro_reply,
 	    olo_seqid, resop, FALSE);
 	rfs4_dbe_unlock(op->ro_dbe);
 
@@ -6900,7 +6898,7 @@ rfs4_op_open(nfs_argop4 *argop, nfs_resop4 *resop,
 		goto end;
 	}
 
-	can_reclaim = cp->can_reclaim;
+	can_reclaim = cp->rc_can_reclaim;
 
 	/*
 	 * Find the open_owner for use from this point forward.  Take
@@ -7318,7 +7316,7 @@ rfs4_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 		goto end;
 	case NFS4_CHECK_STATEID_REPLAY:
 		/* Check the sequence id for the open owner */
-		switch (rfs4_check_open_seqid(args->seqid, sp->owner,
+		switch (rfs4_check_open_seqid(args->seqid, sp->rs_owner,
 		    resop)) {
 		case NFS4_CHKSEQ_OKAY:
 			/*
@@ -7840,7 +7838,7 @@ rfs4_op_close(nfs_argop4 *argop, nfs_resop4 *resop,
 		goto end;
 	case NFS4_CHECK_STATEID_REPLAY:
 		/* Check the sequence id for the open owner */
-		switch (rfs4_check_open_seqid(args->seqid, sp->owner,
+		switch (rfs4_check_open_seqid(args->seqid, sp->rs_owner,
 		    resop)) {
 		case NFS4_CHKSEQ_OKAY:
 			/*
@@ -8212,7 +8210,7 @@ retry:
 		ASSERT(resop->resop == OP_LOCK);
 		lres = &resop->nfs_resop4_u.oplock;
 		status = NFS4ERR_DENIED;
-		if (lock_denied(dbe_to_instp(sp->dbe),
+		if (lock_denied(dbe_to_instp(sp->rs_dbe),
 		    &lres->LOCK4res_u.denied, &flock) == NFS4ERR_EXPIRED)
 			goto retry;
 		break;
@@ -8591,10 +8589,11 @@ rfs4_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 		goto out;
 	}
 
-	if (lsp->rls_state->rs_finfo->rf_dinfo.rd_dtype == OPEN_DELEGATE_WRITE)
+	if (lsp->rls_state->rs_finfo->rf_dinfo->rd_dtype == OPEN_DELEGATE_WRITE)
 		cs->deleg = TRUE;
 
 	status = rfs4_do_lock(lsp, args->locktype,
+	    args->locker.locker4_u.lock_owner.lock_seqid,
 	    args->offset, args->length, cs->cr, resop);
 
 out:
@@ -8763,7 +8762,7 @@ rfs4_op_locku(nfs_argop4 *argop, nfs_resop4 *resop,
 		goto out;
 	}
 
-	status = rfs4_do_lock(lsp, args->locktype,
+	status = rfs4_do_lock(lsp, args->locktype, args->seqid,
 	    args->offset, args->length, cs->cr, resop);
 
 out:

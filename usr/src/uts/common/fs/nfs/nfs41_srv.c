@@ -290,7 +290,6 @@ nfsstat4 check_open_access(uint32_t,
 nfsstat4 rfs4_client_sysid(rfs4_client_t *, sysid_t *);
 int	vop_shrlock(vnode_t *, int, struct shrlock *, int);
 int 	rfs4_shrlock(rfs4_state_t *, int);
-int	rfs4_share(rfs4_state_t *);
 
 static void	mds_free_reply(nfs_resop4 *, compound_state_t *);
 
@@ -304,8 +303,6 @@ rfs4_lo_state_t *mds_findlo_state_by_owner(rfs4_lockowner_t *,
 	    rfs4_state_t *, bool_t *);
 
 bool_t in_flavor_list(int, int *, int);
-
-boolean_t do_rfs_label_check(bslabel_t *, vnode_t *, int);
 
 nfsstat4 attrmap4_to_vattrmask(attrmap4 *, struct nfs4_svgetit_arg *);
 
@@ -544,12 +541,12 @@ mds_validate_stateid(int mode, struct compound_state *cs, vnode_t *vp,
 		fp = rfs4_findfile(cs->instp, vp, NULL, &create);
 		if (fp == NULL)
 			return (NFS4_OK);
-		if (fp->dinfo->dtype == OPEN_DELEGATE_NONE) {
+		if (fp->rf_dinfo->rd_dtype == OPEN_DELEGATE_NONE) {
 			rfs4_file_rele(fp);
 			return (NFS4_OK);
 		}
 		if (mode == FWRITE ||
-		    fp->dinfo->dtype == OPEN_DELEGATE_WRITE) {
+		    fp->rf_dinfo->rd_dtype == OPEN_DELEGATE_WRITE) {
 			rfs4_recall_deleg(fp, trunc, NULL);
 			rfs4_file_rele(fp);
 			return (NFS4ERR_DELAY);
@@ -569,37 +566,37 @@ mds_validate_stateid(int mode, struct compound_state *cs, vnode_t *vp,
 	 */
 	if (lsp != NULL) {
 		/* Is associated server instance in its grace period? */
-		if (rfs4_clnt_in_grace(lsp->locker->client)) {
+		if (rfs4_clnt_in_grace(lsp->rls_locker->rl_client)) {
 			rfs4_lo_state_rele(lsp, FALSE);
 			if (sp != NULL)
-				rfs4_dbe_rele(sp->dbe);
+				rfs4_dbe_rele(sp->rs_dbe);
 			return (NFS4ERR_GRACE);
 		}
 
-		if (lsp->lockid.v41_bits.chgseq != 0) {
+		if (lsp->rls_lockid.v41_bits.chgseq != 0) {
 			/* Seqid in the future? - that's bad */
-			if (lsp->lockid.v41_bits.chgseq <
+			if (lsp->rls_lockid.v41_bits.chgseq <
 			    id->v41_bits.chgseq) {
 				rfs4_lo_state_rele(lsp, FALSE);
 				if (sp != NULL)
-					rfs4_dbe_rele(sp->dbe);
+					rfs4_dbe_rele(sp->rs_dbe);
 				return (NFS4ERR_BAD_STATEID);
 			}
 			/* Seqid in the past? - that's old */
-			if (lsp->lockid.v41_bits.chgseq >
+			if (lsp->rls_lockid.v41_bits.chgseq >
 			    id->v41_bits.chgseq) {
 				rfs4_lo_state_rele(lsp, FALSE);
 				if (sp != NULL)
-					rfs4_dbe_rele(sp->dbe);
+					rfs4_dbe_rele(sp->rs_dbe);
 				return (NFS4ERR_OLD_STATEID);
 			}
 		}
 
 		/* Ensure specified filehandle matches */
-		if (lsp->state->finfo->vp != vp) {
+		if (lsp->rls_state->rs_finfo->rf_vp != vp) {
 			rfs4_lo_state_rele(lsp, FALSE);
 			if (sp != NULL)
-				rfs4_dbe_rele(sp->dbe);
+				rfs4_dbe_rele(sp->rs_dbe);
 			return (NFS4ERR_BAD_STATEID);
 		}
 		rfs4_lo_state_rele(lsp, FALSE);
@@ -615,39 +612,39 @@ mds_validate_stateid(int mode, struct compound_state *cs, vnode_t *vp,
 		 */
 		if (id->v41_bits.type == OPENID) {
 			/* Is associated server instance in its grace period? */
-			if (rfs4_clnt_in_grace(sp->owner->client)) {
-				rfs4_dbe_rele(sp->dbe);
+			if (rfs4_clnt_in_grace(sp->rs_owner->ro_client)) {
+				rfs4_dbe_rele(sp->rs_dbe);
 				return (NFS4ERR_GRACE);
 			}
 
-			if (sp->stateid.v41_bits.chgseq != 0) {
+			if (sp->rs_stateid.v41_bits.chgseq != 0) {
 				/* Seqid in the future? - that's bad */
-				if (sp->stateid.v41_bits.chgseq <
+				if (sp->rs_stateid.v41_bits.chgseq <
 				    id->v41_bits.chgseq) {
-					rfs4_dbe_rele(sp->dbe);
+					rfs4_dbe_rele(sp->rs_dbe);
 					return (NFS4ERR_BAD_STATEID);
 				}
 				/* Seqid in the past - that's old */
-				if (sp->stateid.v41_bits.chgseq >
+				if (sp->rs_stateid.v41_bits.chgseq >
 				    id->v41_bits.chgseq) {
-					rfs4_dbe_rele(sp->dbe);
+					rfs4_dbe_rele(sp->rs_dbe);
 					return (NFS4ERR_OLD_STATEID);
 				}
 			}
 
 			/* Ensure specified filehandle matches */
-			if (sp->finfo->vp != vp) {
-				rfs4_dbe_rele(sp->dbe);
+			if (sp->rs_finfo->rf_vp != vp) {
+				rfs4_dbe_rele(sp->rs_dbe);
 				return (NFS4ERR_BAD_STATEID);
 			}
 		}
-		if (sp->owner->need_confirm) {
-			rfs4_dbe_rele(sp->dbe);
+		if (sp->rs_owner->ro_need_confirm) {
+			rfs4_dbe_rele(sp->rs_dbe);
 			return (NFS4ERR_BAD_STATEID);
 		}
 
-		if (sp->closed == TRUE) {
-			rfs4_dbe_rele(sp->dbe);
+		if (sp->rs_closed == TRUE) {
+			rfs4_dbe_rele(sp->rs_dbe);
 			return (NFS4ERR_OLD_STATEID);
 		}
 
@@ -661,7 +658,7 @@ mds_validate_stateid(int mode, struct compound_state *cs, vnode_t *vp,
 		 * delegation if desired
 		 */
 		if (deleg &&
-		    (sp->finfo->dinfo->dtype == OPEN_DELEGATE_WRITE))
+		    (sp->rs_finfo->rf_dinfo->rd_dtype == OPEN_DELEGATE_WRITE))
 			*deleg = TRUE;
 
 		/*
@@ -672,38 +669,38 @@ mds_validate_stateid(int mode, struct compound_state *cs, vnode_t *vp,
 		 * enough. Callers of this routine are
 		 * currently insulated from the state stuff.
 		 */
-		rfs4_update_lease(sp->owner->client);
+		rfs4_update_lease(sp->rs_owner->ro_client);
 
 		/*
 		 * If a delegation is present on this file and
 		 * this is a WRITE, then update the lastwrite
 		 * time to indicate that activity is present.
 		 */
-		if (sp->finfo->dinfo->dtype == OPEN_DELEGATE_WRITE &&
+		if (sp->rs_finfo->rf_dinfo->rd_dtype == OPEN_DELEGATE_WRITE &&
 		    mode == FWRITE) {
-			sp->finfo->dinfo->time_lastwrite =
+			sp->rs_finfo->rf_dinfo->rd_time_lastwrite =
 			    gethrestime_sec();
 		}
 
-		rfs4_dbe_rele(sp->dbe);
+		rfs4_dbe_rele(sp->rs_dbe);
 		return (stat);
 	}
 
 	if (dsp != NULL) {
 		/* Is associated server instance in its grace period? */
-		if (rfs4_clnt_in_grace(dsp->client)) {
+		if (rfs4_clnt_in_grace(dsp->rds_client)) {
 			rfs4_deleg_state_rele(dsp);
 			return (NFS4ERR_GRACE);
 		}
 
-		if ((dsp->delegid.v41_bits.chgseq != 0) &&
-		    (dsp->delegid.v41_bits.chgseq != id->v41_bits.chgseq)) {
+		if ((dsp->rds_delegid.v41_bits.chgseq != 0) &&
+		    (dsp->rds_delegid.v41_bits.chgseq != id->v41_bits.chgseq)) {
 			rfs4_deleg_state_rele(dsp);
 			return (NFS4ERR_BAD_STATEID);
 		}
 
 		/* Ensure specified filehandle matches */
-		if (dsp->finfo->vp != vp) {
+		if (dsp->rds_finfo->rf_vp != vp) {
 			rfs4_deleg_state_rele(dsp);
 			return (NFS4ERR_BAD_STATEID);
 		}
@@ -712,19 +709,19 @@ mds_validate_stateid(int mode, struct compound_state *cs, vnode_t *vp,
 		 * delegation if desired
 		 */
 		if (deleg &&
-		    (dsp->finfo->dinfo->dtype == OPEN_DELEGATE_WRITE))
+		    (dsp->rds_finfo->rf_dinfo->rd_dtype == OPEN_DELEGATE_WRITE))
 			*deleg = TRUE;
 
-		rfs4_update_lease(dsp->client);
+		rfs4_update_lease(dsp->rds_client);
 
 		/*
 		 * If a delegation is present on this file and
 		 * this is a WRITE, then update the lastwrite
 		 * time to indicate that activity is present.
 		 */
-		if (dsp->finfo->dinfo->dtype == OPEN_DELEGATE_WRITE &&
+		if (dsp->rds_finfo->rf_dinfo->rd_dtype == OPEN_DELEGATE_WRITE &&
 		    mode == FWRITE) {
-			dsp->finfo->dinfo->time_lastwrite =
+			dsp->rds_finfo->rf_dinfo->rd_time_lastwrite =
 			    gethrestime_sec();
 		}
 
@@ -1268,7 +1265,7 @@ mds_op_access(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		    "got client label from request(1)",
 		    struct svc_req *, req);
 		if (!blequal(&l_admin_low->tsl_label, clabel)) {
-			if ((tslabel = nfs_getflabel(vp)) == NULL) {
+			if ((tslabel = nfs_getflabel(vp, cs->exi)) == NULL) {
 				*cs->statusp = resp->status = puterrno4(EACCES);
 				goto final;
 			}
@@ -1801,12 +1798,12 @@ mds_op_delegreturn(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		goto final;
 
 	/* Ensure specified filehandle matches */
-	if (cs->vp != dsp->finfo->vp) {
+	if (cs->vp != dsp->rds_finfo->rf_vp) {
 		resp->status = *cs->statusp = NFS4ERR_BAD_STATEID;
 	} else
 		rfs4_return_deleg(dsp, FALSE);
 
-	rfs4_update_lease(dsp->client);
+	rfs4_update_lease(dsp->rds_client);
 
 	rfs4_deleg_state_rele(dsp);
 
@@ -2283,7 +2280,8 @@ mds_do_lookup(char *nm, uint_t buflen, struct svc_req *req,
 		    "got client label from request(1)", struct svc_req *, req);
 
 		if (!blequal(&l_admin_low->tsl_label, clabel)) {
-			if (!do_rfs_label_check(clabel, vp, DOMINANCE_CHECK)) {
+			if (!do_rfs_label_check(clabel, vp,
+			    DOMINANCE_CHECK, cs->exi)) {
 				error = EACCES;
 				goto err_out;
 			}
@@ -3134,7 +3132,7 @@ mds_op_reclaim_complete(nfs_argop4 *argop, nfs_resop4 *resop,
 
 	cp = cs->cp;
 
-	if (cp->reclaim_completed) {
+	if (cp->rc_reclaim_completed) {
 		*cs->statusp = resp->rcr_status = NFS4ERR_COMPLETE_ALREADY;
 		return;
 	}
@@ -3145,10 +3143,10 @@ mds_op_reclaim_complete(nfs_argop4 *argop, nfs_resop4 *resop,
 		return;
 	}
 
-	cp->reclaim_completed = 1;
+	cp->rc_reclaim_completed = 1;
 
 	/* did we have reclaimable state stored for this client? */
-	if (cp->can_reclaim)
+	if (cp->rc_can_reclaim)
 		atomic_add_32(&(cs->instp->reclaim_cnt), -1);
 
 	*cs->statusp = resp->rcr_status = NFS4_OK;
@@ -3217,7 +3215,7 @@ do_ctl_mds_remove(vnode_t *vp, rfs4_file_t *fp, compound_state_t *cs)
 	 * the errors are ignored and will not be retried.  This may
 	 * cause leaked space on the the data server.
 	 */
-	if (fp->layoutp != NULL) {
+	if (fp->rf_mlo != NULL) {
 		error = vop_fid_pseudo(vp, &fid);
 		if (error) {
 			DTRACE_PROBE(nfss__e__vop_fid_pseudo_failed);
@@ -3228,7 +3226,7 @@ do_ctl_mds_remove(vnode_t *vp, rfs4_file_t *fp, compound_state_t *cs)
 		}
 
 		error = ctl_mds_clnt_remove_file(cs->instp, cs->exi->exi_fsid,
-		    nfs41_fid, fp->layoutp);
+		    nfs41_fid, fp->rf_mlo);
 	} else
 		DTRACE_PROBE(nfss__i__layout_is_null_cannot_remove);
 
@@ -3358,7 +3356,8 @@ mds_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		    "got client label from request(1)",
 		    struct svc_req *, req);
 		if (!blequal(&l_admin_low->tsl_label, clabel)) {
-			if (!do_rfs_label_check(clabel, vp, EQUALITY_CHECK)) {
+			if (!do_rfs_label_check(clabel, vp,
+			    EQUALITY_CHECK, cs->exi)) {
 				*cs->statusp = resp->status = NFS4ERR_ACCESS;
 				kmem_free(nm, len);
 				if (in_crit)
@@ -3420,11 +3419,11 @@ mds_op_remove(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 			struct vattr va;
 			vnode_t *tvp;
 
-			rfs4_dbe_lock(fp->dbe);
-			tvp = fp->vp;
+			rfs4_dbe_lock(fp->rf_dbe);
+			tvp = fp->rf_vp;
 			if (tvp)
 				VN_HOLD(tvp);
-			rfs4_dbe_unlock(fp->dbe);
+			rfs4_dbe_unlock(fp->rf_dbe);
 
 			if (tvp) {
 				/*
@@ -3645,7 +3644,7 @@ mds_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		    struct svc_req *, req);
 		if (!blequal(&l_admin_low->tsl_label, clabel)) {
 			if (!do_rfs_label_check(clabel, ndvp,
-			    EQUALITY_CHECK)) {
+			    EQUALITY_CHECK, cs->exi)) {
 				*cs->statusp = resp->status = NFS4ERR_ACCESS;
 				goto final;
 			}
@@ -3730,11 +3729,11 @@ mds_op_rename(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		struct vattr va;
 		vnode_t *tvp;
 
-		rfs4_dbe_lock(fp->dbe);
-		tvp = fp->vp;
+		rfs4_dbe_lock(fp->rf_dbe);
+		tvp = fp->rf_vp;
 		if (tvp)
 			VN_HOLD(tvp);
-		rfs4_dbe_unlock(fp->dbe);
+		rfs4_dbe_unlock(fp->rf_dbe);
 
 		if (tvp) {
 			va.va_mask = AT_NLINK;
@@ -3978,7 +3977,7 @@ mds_op_setattr(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 		    struct svc_req *, req);
 		if (!blequal(&l_admin_low->tsl_label, clabel)) {
 			if (!do_rfs_label_check(clabel, cs->vp,
-			    EQUALITY_CHECK)) {
+			    EQUALITY_CHECK, cs->exi)) {
 				*cs->statusp = resp->status = NFS4ERR_ACCESS;
 				goto final;
 			}
@@ -4559,7 +4558,8 @@ mds_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
 		    "got client label from request(1)",
 		    struct svc_req *, req);
 		if (!blequal(&l_admin_low->tsl_label, clabel)) {
-			if (!do_rfs_label_check(clabel, dvp, EQUALITY_CHECK)) {
+			if (!do_rfs_label_check(clabel, dvp,
+			    EQUALITY_CHECK, cs->exi)) {
 				return (NFS4ERR_ACCESS);
 			}
 		}
@@ -4817,7 +4817,7 @@ mds_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
 			    != NULL) {
 				if (rfs4_check_delegated_byfp(cs->instp,
 				    FWRITE, fp, (reqsize == 0), FALSE, FALSE,
-				    &cs->cp->clientid)) {
+				    &cs->cp->rc_clientid)) {
 
 					rfs4_file_rele(fp);
 					rfs4_rele_deleg_policy(cs->instp);
@@ -4941,9 +4941,10 @@ rfs41_rs_record(struct compound_state *cs, stateid_type_t type, void *p)
 #endif	/* DEBUG_VERBOSE */
 
 		/* delegation state id stored in rfs4_deleg_state_t */
-		bcopy(cs->sp->sn_sessid, dsp->rs.sessid, sizeof (sessionid4));
-		dsp->rs.seqid = cs->seqid;
-		dsp->rs.slotno = cs->slotno;
+		bcopy(cs->sp->sn_sessid, dsp->rds_rs.sessid,
+		    sizeof (sessionid4));
+		dsp->rds_rs.seqid = cs->seqid;
+		dsp->rds_rs.slotno = cs->slotno;
 		rfs41_deleg_rs_hold(dsp);
 
 		/* add it to slrc slot to track slot-reuse case */
@@ -4954,7 +4955,7 @@ rfs41_rs_record(struct compound_state *cs, stateid_type_t type, void *p)
 		slotent->se_p = (rfs4_deleg_state_t *)dsp;
 		mutex_exit(&slotent->se_lock);
 
-		rfs4_dbe_hold(dsp->dbe);	/* added ref to deleg_state */
+		rfs4_dbe_hold(dsp->rds_dbe);	/* added ref to deleg_state */
 		break;
 
 	case LAYOUTID:
@@ -4984,7 +4985,7 @@ rfs41_rs_erase(void *p)
 #endif	/* DEBUG_VERBOSE */
 
 	ASSERT(dsp != NULL);
-	if (dsp->rs.refcnt > 0) {
+	if (dsp->rds_rs.refcnt > 0) {
 		rfs41_deleg_rs_rele(dsp);
 		rfs4_deleg_state_rele(dsp);
 	}
@@ -5007,8 +5008,8 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 		OPEN4res *resp, int deleg_cur,
 		mds_layout_t *plo)
 {
-	rfs4_state_t *state;
-	rfs4_file_t *file;
+	rfs4_state_t *sp;
+	rfs4_file_t *fp;
 	bool_t screate = TRUE;
 	bool_t fcreate = TRUE;
 	uint32_t amodes;
@@ -5024,30 +5025,30 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	int err;
 
 	/* get the file struct and hold a lock on it during initial open */
-	file = rfs4_findfile_withlock(cs->instp, cs->vp, &cs->fh, &fcreate);
-	if (file == NULL) {
+	fp = rfs4_findfile_withlock(cs->instp, cs->vp, &cs->fh, &fcreate);
+	if (fp == NULL) {
 		DTRACE_PROBE(nfss__e__no_file);
 		resp->status = NFS4ERR_SERVERFAULT;
 		return;
 	}
 
-	state = rfs4_findstate_by_owner_file(cs, oo, file, &screate);
-	if (state == NULL) {
+	sp = rfs4_findstate_by_owner_file(cs, oo, fp, &screate);
+	if (sp == NULL) {
 		DTRACE_PROBE(nfss__e__no_state);
 		resp->status = NFS4ERR_RESOURCE;
 		/* No need to keep any reference */
-		rfs4_file_rele_withunlock(file);
+		rfs4_file_rele_withunlock(fp);
 		return;
 	}
 
 	/* try to get the sysid before continuing */
-	if ((status = rfs4_client_sysid(oo->client, &sysid)) != NFS4_OK) {
+	if ((status = rfs4_client_sysid(oo->ro_client, &sysid)) != NFS4_OK) {
 		resp->status = status;
-		rfs4_file_rele(file);
+		rfs4_file_rele(fp);
 		/* Not a fully formed open; "close" it */
 		if (screate == TRUE)
-			rfs4_state_close(state, FALSE, FALSE, cs->cr);
-		rfs4_state_rele(state);
+			rfs4_state_close(sp, FALSE, FALSE, cs->cr);
+		rfs4_state_rele(sp);
 		return;
 	}
 
@@ -5056,12 +5057,12 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	 * Note that this means the file was just created.
 	 */
 	if (plo) {
-		ASSERT(file->layoutp == NULL);
-		if (file->layoutp) {
-			rfs4_dbe_rele(file->layoutp->dbe);
+		ASSERT(fp->rf_mlo == NULL);
+		if (fp->rf_mlo) {
+			rfs4_dbe_rele(fp->rf_mlo->mlo_dbe);
 		}
 
-		file->layoutp = plo;
+		fp->rf_mlo = plo;
 	}
 
 	/* Calculate the fflags for this OPEN */
@@ -5074,8 +5075,8 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	 * Calculate the new deny and access mode that this open is adding to
 	 * the file for this open owner;
 	 */
-	dmodes = (deny & ~state->share_deny);
-	amodes = (access & ~state->share_access);
+	dmodes = (deny & ~sp->rs_share_deny);
+	amodes = (access & ~sp->rs_share_access);
 
 	/*
 	 * Check to see the client has already sent an open for this
@@ -5091,7 +5092,7 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	if (dmodes || amodes) {
 		shr.s_access = (short)access;
 		shr.s_deny = (short)deny;
-		shr.s_pid = rfs4_dbe_getid(oo->dbe);
+		shr.s_pid = rfs4_dbe_getid(oo->ro_dbe);
 		shr.s_sysid = sysid;
 		shr_loco.sl_pid = shr.s_pid;
 		shr_loco.sl_id = shr.s_sysid;
@@ -5103,40 +5104,40 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 			resp->status = err == EAGAIN ?
 			    NFS4ERR_SHARE_DENIED : puterrno4(err);
 
-			rfs4_file_rele(file);
+			rfs4_file_rele(fp);
 			/* Not a fully formed open; "close" it */
 			if (screate == TRUE)
-				rfs4_state_close(state, FALSE, FALSE, cs->cr);
-			rfs4_state_rele(state);
+				rfs4_state_close(sp, FALSE, FALSE, cs->cr);
+			rfs4_state_rele(sp);
 			return;
 		}
 	}
 
-	rfs4_dbe_lock(state->dbe);
-	rfs4_dbe_lock(file->dbe);
+	rfs4_dbe_lock(sp->rs_dbe);
+	rfs4_dbe_lock(fp->rf_dbe);
 
 	/*
 	 * Check to see if this file is delegated and if so, if a
 	 * recall needs to be done.
 	 */
-	if (rfs4_check_recall(state, access)) {
-		rfs4_dbe_unlock(file->dbe);
-		rfs4_dbe_unlock(state->dbe);
-		rfs4_recall_deleg(file, FALSE, state->owner->client);
+	if (rfs4_check_recall(sp, access)) {
+		rfs4_dbe_unlock(fp->rf_dbe);
+		rfs4_dbe_unlock(sp->rs_dbe);
+		rfs4_recall_deleg(fp, FALSE, sp->rs_owner->ro_client);
 		delay(NFS4_DELEGATION_CONFLICT_DELAY);
-		rfs4_dbe_lock(state->dbe);
-		rfs4_dbe_lock(file->dbe);
+		rfs4_dbe_lock(sp->rs_dbe);
+		rfs4_dbe_lock(fp->rf_dbe);
 		/* Let's see if the delegation was returned */
-		if (rfs4_check_recall(state, access)) {
-			rfs4_dbe_unlock(file->dbe);
-			rfs4_dbe_unlock(state->dbe);
-			rfs4_file_rele(file);
-			rfs4_update_lease(state->owner->client);
+		if (rfs4_check_recall(sp, access)) {
+			rfs4_dbe_unlock(fp->rf_dbe);
+			rfs4_dbe_unlock(sp->rs_dbe);
+			rfs4_file_rele(fp);
+			rfs4_update_lease(sp->rs_owner->ro_client);
 			(void) vop_shrlock(cs->vp, F_UNSHARE, &shr, fflags);
 			/* Not a fully formed open; "close" it */
 			if (screate == TRUE)
-				rfs4_state_close(state, FALSE, FALSE, cs->cr);
-			rfs4_state_rele(state);
+				rfs4_state_close(sp, FALSE, FALSE, cs->cr);
+			rfs4_state_rele(sp);
 			resp->status = NFS4ERR_DELAY;
 			return;
 		}
@@ -5155,7 +5156,7 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	 * However, if this is open with CLAIM_DELEGATE_CUR, then don't
 	 * call VOP_OPEN(), just do the open upgrade.
 	 */
-	if (((state->share_access & OPEN4_SHARE_ACCESS_BOTH) == 0) &&
+	if (((sp->rs_share_access & OPEN4_SHARE_ACCESS_BOTH) == 0) &&
 	    !deleg_cur) {
 		ct.cc_sysid = sysid;
 		ct.cc_pid = shr.s_pid;
@@ -5163,14 +5164,14 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 		ct.cc_flags = CC_DONTBLOCK;
 		err = VOP_OPEN(&cs->vp, fflags, cs->cr, &ct);
 		if (err) {
-			rfs4_dbe_unlock(file->dbe);
-			rfs4_dbe_unlock(state->dbe);
-			rfs4_file_rele(file);
+			rfs4_dbe_unlock(fp->rf_dbe);
+			rfs4_dbe_unlock(sp->rs_dbe);
+			rfs4_file_rele(fp);
 			(void) vop_shrlock(cs->vp, F_UNSHARE, &shr, fflags);
 			/* Not a fully formed open; "close" it */
 			if (screate == TRUE)
-				rfs4_state_close(state, FALSE, FALSE, cs->cr);
-			rfs4_state_rele(state);
+				rfs4_state_close(sp, FALSE, FALSE, cs->cr);
+			rfs4_state_rele(sp);
 			if (err == EAGAIN && (ct.cc_flags & CC_WOULDBLOCK))
 				resp->status = NFS4ERR_DELAY;
 			else
@@ -5184,25 +5185,25 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 		 */
 		fflags = 0;
 		if (amodes & OPEN4_SHARE_ACCESS_READ)
-				fflags |= FREAD;
+			fflags |= FREAD;
 		if (amodes & OPEN4_SHARE_ACCESS_WRITE)
-				fflags |= FWRITE;
+			fflags |= FWRITE;
 		vn_open_upgrade(cs->vp, fflags);
 	}
 
 	if (dmodes & OPEN4_SHARE_DENY_READ)
-		file->deny_read++;
+		fp->rf_deny_read++;
 	if (dmodes & OPEN4_SHARE_DENY_WRITE)
-		file->deny_write++;
-	file->share_deny |= deny;
-	state->share_deny |= deny;
+		fp->rf_deny_write++;
+	fp->rf_share_deny |= deny;
+	sp->rs_share_deny |= deny;
 
 	if (amodes & OPEN4_SHARE_ACCESS_READ)
-		file->access_read++;
+		fp->rf_access_read++;
 	if (amodes & OPEN4_SHARE_ACCESS_WRITE)
-		file->access_write++;
-	file->share_access |= access;
-	state->share_access |= access;
+		fp->rf_access_write++;
+	fp->rf_share_access |= access;
+	sp->rs_share_access |= access;
 
 	/*
 	 * Check for delegation here. if the deleg argument is not
@@ -5210,16 +5211,16 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	 * we must honor the delegation requested. If necessary we can
 	 * set the recall flag.
 	 */
-	dsp = rfs4_grant_delegation(cs, deleg, state, &recall);
+	dsp = rfs4_grant_delegation(cs, deleg, sp, &recall);
 
-	cs->deleg = (file->dinfo->dtype == OPEN_DELEGATE_WRITE);
+	cs->deleg = (fp->rf_dinfo->rd_dtype == OPEN_DELEGATE_WRITE);
 
-	next_stateid(&state->stateid);
+	next_stateid(&sp->rs_stateid);
 
-	resp->stateid = state->stateid.stateid;
+	resp->stateid = sp->rs_stateid.stateid;
 
-	rfs4_dbe_unlock(file->dbe);
-	rfs4_dbe_unlock(state->dbe);
+	rfs4_dbe_unlock(fp->rf_dbe);
+	rfs4_dbe_unlock(sp->rs_dbe);
 
 	if (dsp) {
 		rfs4_set_deleg_response(dsp, &resp->delegation, NULL, recall);
@@ -5233,8 +5234,8 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 #endif
 	}
 
-	rfs4_file_rele(file);
-	rfs4_state_rele(state);
+	rfs4_file_rele(fp);
+	rfs4_state_rele(sp);
 
 	resp->status = NFS4_OK;
 }
@@ -5477,7 +5478,7 @@ mds_do_opendelcur(struct compound_state *cs, struct svc_req *req,
 		return;
 	}
 
-	ASSERT(dsp->finfo->dinfo->dtype != OPEN_DELEGATE_NONE);
+	ASSERT(dsp->rds_finfo->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE);
 
 	/*
 	 * New lock owner, create state. Since this was probably called
@@ -5486,8 +5487,8 @@ mds_do_opendelcur(struct compound_state *cs, struct svc_req *req,
 
 	ASSERT(cs->vp != NULL);
 	VN_RELE(cs->vp);
-	VN_HOLD(dsp->finfo->vp);
-	cs->vp = dsp->finfo->vp;
+	VN_HOLD(dsp->rds_finfo->rf_vp);
+	cs->vp = dsp->rds_finfo->rf_vp;
 
 	if (error = mknfs41_fh(&cs->fh, cs->vp, cs->exi)) {
 		rfs4_deleg_state_rele(dsp);
@@ -5496,7 +5497,7 @@ mds_do_opendelcur(struct compound_state *cs, struct svc_req *req,
 	}
 
 	/* Mark progress for delegation returns */
-	dsp->finfo->dinfo->time_lastwrite = gethrestime_sec();
+	dsp->rds_finfo->rf_dinfo->rd_time_lastwrite = gethrestime_sec();
 	rfs4_deleg_state_rele(dsp);
 	mds_do_open(cs, req, oo, DELEG_NONE,
 	    (args->share_access & 0xff),
@@ -5518,8 +5519,8 @@ mds_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 	 *
 	 * Return the delgation possibly seting the recall flag.
 	 */
-	rfs4_file_t *file;
-	rfs4_state_t *state;
+	rfs4_file_t *fp;
+	rfs4_state_t *sp;
 	bool_t create = FALSE;
 	bool_t dcreate = FALSE;
 	rfs4_deleg_state_t *dsp;
@@ -5529,71 +5530,70 @@ mds_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 	/* Note we ignore oflags */
 	resp->status = mds_lookupfile(&args->open_claim4_u.file_delegate_prev,
 	    req, cs, (args->share_access & 0xff), &resp->cinfo);
-
 	if (resp->status != NFS4_OK) {
 		return;
 	}
 
 	/* get the file struct and hold a lock on it during initial open */
-	file = rfs4_findfile_withlock(cs->instp, cs->vp, NULL, &create);
-	if (file == NULL) {
+	fp = rfs4_findfile_withlock(cs->instp, cs->vp, NULL, &create);
+	if (fp == NULL) {
 		DTRACE_PROBE(nfss__e__no_file);
 		resp->status = NFS4ERR_SERVERFAULT;
 		return;
 	}
 
-	state = rfs4_findstate_by_owner_file(cs, oo, file, &create);
-	if (state == NULL) {
+	sp = rfs4_findstate_by_owner_file(cs, oo, fp, &create);
+	if (sp == NULL) {
 		DTRACE_PROBE(nfss__e__no_state);
 		resp->status = NFS4ERR_SERVERFAULT;
-		rfs4_file_rele_withunlock(file);
+		rfs4_file_rele_withunlock(fp);
 		return;
 	}
 
-	rfs4_dbe_lock(state->dbe);
-	rfs4_dbe_lock(file->dbe);
-	if ((args->share_access & 0xff) != state->share_access ||
-	    args->share_deny != state->share_deny ||
-	    state->finfo->dinfo->dtype == OPEN_DELEGATE_NONE) {
-		DTRACE_PROBE2(nfss__e__state_mixup, rfs4_state_t *, state,
+	rfs4_dbe_lock(sp->rs_dbe);
+	rfs4_dbe_lock(fp->rf_dbe);
+	if ((args->share_access & 0xff) != sp->rs_share_access ||
+	    args->share_deny != sp->rs_share_deny ||
+	    sp->rs_finfo->rf_dinfo->rd_dtype == OPEN_DELEGATE_NONE) {
+		DTRACE_PROBE2(nfss__e__state_mixup, rfs4_state_t *, sp,
 		    OPEN4args *, args);
-		rfs4_dbe_unlock(file->dbe);
-		rfs4_dbe_unlock(state->dbe);
-		rfs4_file_rele(file);
-		rfs4_state_rele(state);
+		rfs4_dbe_unlock(fp->rf_dbe);
+		rfs4_dbe_unlock(sp->rs_dbe);
+		rfs4_file_rele(fp);
+		rfs4_state_rele(sp);
 		resp->status = NFS4ERR_SERVERFAULT;
 		return;
 	}
-	rfs4_dbe_unlock(file->dbe);
-	rfs4_dbe_unlock(state->dbe);
+	rfs4_dbe_unlock(fp->rf_dbe);
+	rfs4_dbe_unlock(sp->rs_dbe);
 
-	dsp = rfs4_finddeleg(cs, state, &dcreate);
+	dsp = rfs4_finddeleg(cs, sp, &dcreate);
 	if (dsp == NULL) {
 		DTRACE_PROBE(nfss__e__no_deleg);
-		rfs4_state_rele(state);
-		rfs4_file_rele(file);
+		rfs4_state_rele(sp);
+		rfs4_file_rele(fp);
 		resp->status = NFS4ERR_SERVERFAULT;
 		return;
 	}
 
-	next_stateid(&state->stateid);
+	next_stateid(&sp->rs_stateid);
 
-	resp->stateid = state->stateid.stateid;
+	resp->stateid = sp->rs_stateid.stateid;
 
-	resp->delegation.delegation_type = dsp->dtype;
+	resp->delegation.delegation_type = dsp->rds_dtype;
 
-	if (dsp->dtype == OPEN_DELEGATE_READ) {
+	if (dsp->rds_dtype == OPEN_DELEGATE_READ) {
 		open_read_delegation4 *rv =
 		    &resp->delegation.open_delegation4_u.read;
 
-		rv->stateid = dsp->delegid.stateid;
+		rv->stateid = dsp->rds_delegid.stateid;
 		rv->recall = FALSE; /* no policy in place to set to TRUE */
 		ace = &rv->permissions;
 	} else {
 		open_write_delegation4 *rv =
 		    &resp->delegation.open_delegation4_u.write;
 
-		rv->stateid = dsp->delegid.stateid;
+		rv->stateid = dsp->rds_delegid.stateid;
 		rv->recall = FALSE;  /* no policy in place to set to TRUE */
 		ace = &rv->permissions;
 		rv->space_limit.limitby = NFS_LIMIT_SIZE;
@@ -5608,8 +5608,8 @@ mds_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 	ace->who.utf8string_val = 0;
 
 	rfs4_deleg_state_rele(dsp);
-	rfs4_state_rele(state);
-	rfs4_file_rele(file);
+	rfs4_state_rele(sp);
+	rfs4_file_rele(fp);
 }
 
 static void
@@ -5635,8 +5635,8 @@ mds_op_open(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	cp = cs->cp;
-	owner->clientid = cp->clientid;
-	can_reclaim = cp->can_reclaim;
+	owner->clientid = cp->rc_clientid;
+	can_reclaim = cp->rc_can_reclaim;
 
 retry:
 	create = TRUE;
@@ -5648,7 +5648,7 @@ retry:
 	}
 
 	/* Need to serialize access to the stateid space */
-	rfs4_sw_enter(&oo->oo_sw);
+	rfs4_sw_enter(&oo->ro_sw);
 
 	/* Grace only applies to regular-type OPENs */
 	if (rfs4_clnt_in_grace(cp) &&
@@ -5678,7 +5678,7 @@ retry:
 	/*
 	 * OPEN_CONFIRM is mandatory not to impl in 4.1.
 	 */
-	oo->need_confirm = FALSE;
+	oo->ro_need_confirm = FALSE;
 	resp->rflags |= OPEN4_RESULT_LOCKTYPE_POSIX;
 
 	/*
@@ -5746,7 +5746,7 @@ out:
 		break;
 	}
 	*cs->statusp = resp->status;
-	rfs4_sw_exit(&oo->oo_sw);
+	rfs4_sw_exit(&oo->ro_sw);
 	rfs4_openowner_rele(oo);
 
 final:
@@ -5797,14 +5797,14 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	/* Ensure specified filehandle matches */
-	if (cs->vp != sp->finfo->vp) {
+	if (cs->vp != sp->rs_finfo->rf_vp) {
 		rfs4_state_rele(sp);
 		*cs->statusp = resp->status = NFS4ERR_BAD_STATEID;
 		goto final;
 	}
 
 	/* hold off other access to open_owner while we tinker */
-	rfs4_sw_enter(&sp->owner->oo_sw);
+	rfs4_sw_enter(&sp->rs_owner->ro_sw);
 
 	rc = mds_check_stateid_seqid(sp, &args->open_stateid);
 	switch (rc) {
@@ -5833,7 +5833,7 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 		break;
 	}
 
-	rfs4_dbe_lock(sp->dbe);
+	rfs4_dbe_lock(sp->rs_dbe);
 	/*
 	 * Check that the new access modes and deny modes are valid.
 	 * Check that no invalid bits are set.
@@ -5841,7 +5841,7 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	if ((access & ~(OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE)) ||
 	    (deny & ~(OPEN4_SHARE_DENY_READ | OPEN4_SHARE_DENY_WRITE))) {
 		*cs->statusp = resp->status = NFS4ERR_INVAL;
-		rfs4_dbe_unlock(sp->dbe);
+		rfs4_dbe_unlock(sp->rs_dbe);
 		goto end;
 	}
 
@@ -5857,12 +5857,12 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * access & sp->share_access == R != access, so the new access mode
 	 * is invalid.
 	 */
-	if ((access & sp->share_access) != access ||
-	    (deny & sp->share_deny) != deny ||
+	if ((access & sp->rs_share_access) != access ||
+	    (deny & sp->rs_share_deny) != deny ||
 	    (access &
 	    (OPEN4_SHARE_ACCESS_READ | OPEN4_SHARE_ACCESS_WRITE)) == 0) {
 		*cs->statusp = resp->status = NFS4ERR_INVAL;
-		rfs4_dbe_unlock(sp->dbe);
+		rfs4_dbe_unlock(sp->rs_dbe);
 		goto end;
 	}
 
@@ -5872,12 +5872,12 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * spec effectively requires that open downgrade be atomic.
 	 * At present, fs_shrlock does not have this capability.
 	 */
-	rfs4_dbe_unlock(sp->dbe);
+	rfs4_dbe_unlock(sp->rs_dbe);
 	rfs4_unshare(sp);
-	rfs4_dbe_lock(sp->dbe);
+	rfs4_dbe_lock(sp->rs_dbe);
 
-	fp = sp->finfo;
-	rfs4_dbe_lock(fp->dbe);
+	fp = sp->rs_finfo;
+	rfs4_dbe_lock(fp->rf_dbe);
 
 	/*
 	 * If the current mode has deny read and the new mode
@@ -5885,11 +5885,11 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * and if it goes to zero turn off the deny read bit
 	 * on the file.
 	 */
-	if ((sp->share_deny & OPEN4_SHARE_DENY_READ) &&
+	if ((sp->rs_share_deny & OPEN4_SHARE_DENY_READ) &&
 	    (deny & OPEN4_SHARE_DENY_READ) == 0) {
-		fp->deny_read--;
-		if (fp->deny_read == 0)
-			fp->share_deny &= ~OPEN4_SHARE_DENY_READ;
+		fp->rf_deny_read--;
+		if (fp->rf_deny_read == 0)
+			fp->rf_share_deny &= ~OPEN4_SHARE_DENY_READ;
 	}
 
 	/*
@@ -5898,11 +5898,11 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * and if it goes to zero turn off the deny write bit
 	 * on the file.
 	 */
-	if ((sp->share_deny & OPEN4_SHARE_DENY_WRITE) &&
+	if ((sp->rs_share_deny & OPEN4_SHARE_DENY_WRITE) &&
 	    (deny & OPEN4_SHARE_DENY_WRITE) == 0) {
-		fp->deny_write--;
-		if (fp->deny_write == 0)
-			fp->share_deny &= ~OPEN4_SHARE_DENY_WRITE;
+		fp->rf_deny_write--;
+		if (fp->rf_deny_write == 0)
+			fp->rf_share_deny &= ~OPEN4_SHARE_DENY_WRITE;
 	}
 
 	/*
@@ -5912,11 +5912,11 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * on the file. set fflags to FREAD for the call to
 	 * vn_open_downgrade().
 	 */
-	if ((sp->share_access & OPEN4_SHARE_ACCESS_READ) &&
+	if ((sp->rs_share_access & OPEN4_SHARE_ACCESS_READ) &&
 	    (access & OPEN4_SHARE_ACCESS_READ) == 0) {
-		fp->access_read--;
-		if (fp->access_read == 0)
-			fp->share_access &= ~OPEN4_SHARE_ACCESS_READ;
+		fp->rf_access_read--;
+		if (fp->rf_access_read == 0)
+			fp->rf_share_access &= ~OPEN4_SHARE_ACCESS_READ;
 		fflags |= FREAD;
 	}
 
@@ -5927,24 +5927,24 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * on the file. set fflags to FWRITE for the call to
 	 * vn_open_downgrade().
 	 */
-	if ((sp->share_access & OPEN4_SHARE_ACCESS_WRITE) &&
+	if ((sp->rs_share_access & OPEN4_SHARE_ACCESS_WRITE) &&
 	    (access & OPEN4_SHARE_ACCESS_WRITE) == 0) {
-		fp->access_write--;
-		if (fp->access_write == 0)
-			fp->share_deny &= ~OPEN4_SHARE_ACCESS_WRITE;
+		fp->rf_access_write--;
+		if (fp->rf_access_write == 0)
+			fp->rf_share_deny &= ~OPEN4_SHARE_ACCESS_WRITE;
 		fflags |= FWRITE;
 	}
 
 	/* Set the new access and deny modes */
-	sp->share_access = access;
-	sp->share_deny = deny;
+	sp->rs_share_access = access;
+	sp->rs_share_deny = deny;
 	/* Check that the file is still accessible */
-	ASSERT(fp->share_access);
+	ASSERT(fp->rf_share_access);
 
-	rfs4_dbe_unlock(fp->dbe);
+	rfs4_dbe_unlock(fp->rf_dbe);
 
-	rfs4_dbe_unlock(sp->dbe);
-	if ((status = rfs4_share(sp)) != NFS4_OK) {
+	rfs4_dbe_unlock(sp->rs_dbe);
+	if ((status = rfs4_share(sp, access, deny)) != NFS4_OK) {
 		*cs->statusp = resp->status = NFS4ERR_SERVERFAULT;
 		goto end;
 	}
@@ -5957,19 +5957,19 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	if ((fflags & (FREAD|FWRITE)) != 0)
 		vn_open_downgrade(cs->vp, fflags);
 
-	rfs4_dbe_lock(sp->dbe);
+	rfs4_dbe_lock(sp->rs_dbe);
 
 	/* Update the stateid */
-	next_stateid(&sp->stateid);
-	resp->open_stateid = sp->stateid.stateid;
+	next_stateid(&sp->rs_stateid);
+	resp->open_stateid = sp->rs_stateid.stateid;
 
-	rfs4_dbe_unlock(sp->dbe);
+	rfs4_dbe_unlock(sp->rs_dbe);
 
 	*cs->statusp = resp->status = NFS4_OK;
 	/* Update the lease */
-	rfs4_update_lease(sp->owner->client);
+	rfs4_update_lease(sp->rs_owner->ro_client);
 end:
-	rfs4_sw_exit(&sp->owner->oo_sw);
+	rfs4_sw_exit(&sp->rs_owner->ro_sw);
 	rfs4_state_rele(sp);
 
 final:
@@ -6010,14 +6010,14 @@ mds_op_close(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	/* Ensure specified filehandle matches */
-	if (cs->vp != sp->finfo->vp) {
+	if (cs->vp != sp->rs_finfo->rf_vp) {
 		rfs4_state_rele(sp);
 		*cs->statusp = resp->status = NFS4ERR_BAD_STATEID;
 		goto final;
 	}
 
 	/* hold off other access to open_owner while we tinker */
-	rfs4_sw_enter(&sp->owner->oo_sw);
+	rfs4_sw_enter(&sp->rs_owner->ro_sw);
 
 	rc = mds_check_stateid_seqid(sp, &args->open_stateid);
 	switch (rc) {
@@ -6046,21 +6046,21 @@ mds_op_close(nfs_argop4 *argop, nfs_resop4 *resop,
 		break;
 	}
 
-	rfs4_dbe_lock(sp->dbe);
+	rfs4_dbe_lock(sp->rs_dbe);
 
 	/* Update the stateid. */
-	next_stateid(&sp->stateid);
-	resp->open_stateid = sp->stateid.stateid;
+	next_stateid(&sp->rs_stateid);
+	resp->open_stateid = sp->rs_stateid.stateid;
 
-	rfs4_dbe_unlock(sp->dbe);
+	rfs4_dbe_unlock(sp->rs_dbe);
 
-	rfs4_update_lease(sp->owner->client);
+	rfs4_update_lease(sp->rs_owner->ro_client);
 	rfs4_state_close(sp, FALSE, FALSE, cs->cr);
 
 	*cs->statusp = resp->status = status;
 
 end:
-	rfs4_sw_exit(&sp->owner->oo_sw);
+	rfs4_sw_exit(&sp->rs_owner->ro_sw);
 	rfs4_state_rele(sp);
 
 final:
@@ -6082,17 +6082,17 @@ mds_lock_denied(nfs_server_instance_t *instp, LOCK4denied *dp,
 
 	lo = findlockowner_by_pid(instp, flk->l_pid);
 	if (lo != NULL) {
-		cp = lo->client;
+		cp = lo->rl_client;
 		if (rfs4_lease_expired(cp)) {
 			rfs4_lockowner_rele(lo);
-			rfs4_dbe_hold(cp->dbe);
+			rfs4_dbe_hold(cp->rc_dbe);
 			rfs4_client_close(cp);
 			return (NFS4ERR_EXPIRED);
 		}
-		dp->owner.clientid = lo->owner.clientid;
-		len = lo->owner.owner_len;
+		dp->owner.clientid = lo->rl_owner.clientid;
+		len = lo->rl_owner.owner_len;
 		dp->owner.owner_val = kmem_alloc(len, KM_SLEEP);
-		bcopy(lo->owner.owner_val, dp->owner.owner_val, len);
+		bcopy(lo->rl_owner.owner_val, dp->owner.owner_val, len);
 		dp->owner.owner_len = len;
 		rfs4_lockowner_rele(lo);
 		goto finish;
@@ -6177,14 +6177,14 @@ mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 		}
 
 		/* Ensure specified filehandle matches */
-		if (cs->vp != sp->finfo->vp) {
+		if (cs->vp != sp->rs_finfo->rf_vp) {
 			rfs4_state_rele(sp);
 			*cs->statusp = resp->status = NFS4ERR_BAD_STATEID;
 			goto final;
 		}
 
 		/* hold off other access to open_owner while we tinker */
-		rfs4_sw_enter(&sp->owner->oo_sw);
+		rfs4_sw_enter(&sp->rs_owner->ro_sw);
 
 		rc = mds_check_stateid_seqid(sp, stateid);
 		switch (rc) {
@@ -6216,7 +6216,7 @@ mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 		 * XXX since the _hash and _compare functions use
 		 * XXX that field.
 		 */
-		olo->lock_owner.clientid = cs->cp->clientid;
+		olo->lock_owner.clientid = cs->cp->rc_clientid;
 
 		lo = findlockowner(cs->instp, &olo->lock_owner, &lcreate);
 		if (lo == NULL) {
@@ -6226,7 +6226,7 @@ mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 
 		lsp = mds_findlo_state_by_owner(lo, sp, &create);
 		if (lsp == NULL) {
-			rfs4_update_lease(sp->owner->client);
+			rfs4_update_lease(sp->rs_owner->ro_client);
 			*cs->statusp = resp->status = NFS4ERR_SERVERFAULT;
 			rfs4_lockowner_rele(lo);
 			goto end;
@@ -6243,7 +6243,7 @@ mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 		 * existing lock_owner branch.
 		 */
 		if (create == FALSE) {
-			if (lsp->lock_completed == TRUE) {
+			if (lsp->rls_lock_completed == TRUE) {
 				*cs->statusp =
 				    resp->status = NFS4ERR_BAD_SEQID;
 				rfs4_lockowner_rele(lo);
@@ -6251,14 +6251,14 @@ mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 			}
 		}
 
-		rfs4_update_lease(sp->owner->client);
-		rfs4_dbe_lock(lsp->dbe);
+		rfs4_update_lease(sp->rs_owner->ro_client);
+		rfs4_dbe_lock(lsp->rls_dbe);
 
 		/* hold off other access to lsp while we tinker */
-		rfs4_sw_enter(&lsp->ls_sw);
+		rfs4_sw_enter(&lsp->rls_sw);
 		ls_sw_held = TRUE;
 
-		rfs4_dbe_unlock(lsp->dbe);
+		rfs4_dbe_unlock(lsp->rls_dbe);
 
 		rfs4_lockowner_rele(lo);
 	} else {
@@ -6281,14 +6281,14 @@ mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 		create = FALSE;	/* We didn't create lsp */
 
 		/* Ensure specified filehandle matches */
-		if (cs->vp != lsp->state->finfo->vp) {
+		if (cs->vp != lsp->rls_state->rs_finfo->rf_vp) {
 			rfs4_lo_state_rele(lsp, TRUE);
 			*cs->statusp = resp->status = NFS4ERR_BAD_STATEID;
 			goto final;
 		}
 
 		/* hold off other access to lsp while we tinker */
-		rfs4_sw_enter(&lsp->ls_sw);
+		rfs4_sw_enter(&lsp->rls_sw);
 		ls_sw_held = TRUE;
 
 		switch (rfs4_check_lo_stateid_seqid(lsp, stateid)) {
@@ -6337,7 +6337,7 @@ mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 			break;
 		}
 
-		rfs4_update_lease(lsp->locker->client);
+		rfs4_update_lease(lsp->rls_locker->rl_client);
 	}
 
 	/*
@@ -6352,14 +6352,14 @@ mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 		goto out;
 	}
 
-	cp = lsp->state->owner->client;
+	cp = lsp->rls_state->rs_owner->ro_client;
 
 	if (rfs4_clnt_in_grace(cp) && !args->reclaim) {
 		status = NFS4ERR_GRACE;
 		goto out;
 	}
 
-	if (rfs4_clnt_in_grace(cp) && args->reclaim && !cp->can_reclaim) {
+	if (rfs4_clnt_in_grace(cp) && args->reclaim && !cp->rc_can_reclaim) {
 		status = NFS4ERR_NO_GRACE;
 		goto out;
 	}
@@ -6369,7 +6369,7 @@ mds_op_lock(nfs_argop4 *argop, nfs_resop4 *resop,
 		goto out;
 	}
 
-	if (lsp->state->finfo->dinfo->dtype == OPEN_DELEGATE_WRITE)
+	if (lsp->rls_state->rs_finfo->rf_dinfo->rd_dtype == OPEN_DELEGATE_WRITE)
 		cs->deleg = TRUE;
 
 	status = rfs4_do_lock(lsp, args->locktype,
@@ -6380,14 +6380,14 @@ out:
 	*cs->statusp = resp->status = status;
 
 	if (status == NFS4_OK) {
-		resp->LOCK4res_u.lock_stateid = lsp->lockid.stateid;
-		lsp->lock_completed = TRUE;
+		resp->LOCK4res_u.lock_stateid = lsp->rls_lockid.stateid;
+		lsp->rls_lock_completed = TRUE;
 	}
 
 end:
 	if (lsp) {
 		if (ls_sw_held)
-			rfs4_sw_exit(&lsp->ls_sw);
+			rfs4_sw_exit(&lsp->rls_sw);
 		/*
 		 * If an sp obtained, then the lsp does not represent
 		 * a lock on the file struct.
@@ -6398,7 +6398,7 @@ end:
 			rfs4_lo_state_rele(lsp, TRUE);
 	}
 	if (sp) {
-		rfs4_sw_exit(&sp->owner->oo_sw);
+		rfs4_sw_exit(&sp->rs_owner->ro_sw);
 		rfs4_state_rele(sp);
 	}
 
@@ -6449,14 +6449,14 @@ mds_op_locku(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	/* Ensure specified filehandle matches */
-	if (cs->vp != lsp->state->finfo->vp) {
+	if (cs->vp != lsp->rls_state->rs_finfo->rf_vp) {
 		rfs4_lo_state_rele(lsp, TRUE);
 		*cs->statusp = resp->status = NFS4ERR_BAD_STATEID;
 		goto final;
 	}
 
 	/* hold off other access to lsp while we tinker */
-	rfs4_sw_enter(&lsp->ls_sw);
+	rfs4_sw_enter(&lsp->rls_sw);
 
 	switch (rfs4_check_lo_stateid_seqid(lsp, stateid)) {
 	case NFS4_CHECK_STATEID_OKAY:
@@ -6482,7 +6482,7 @@ mds_op_locku(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	rfs4_update_lock_sequence(lsp);
-	rfs4_update_lease(lsp->locker->client);
+	rfs4_update_lease(lsp->rls_locker->rl_client);
 
 	/*
 	 * NFS4 only allows locking on regular files, so
@@ -6496,7 +6496,7 @@ mds_op_locku(nfs_argop4 *argop, nfs_resop4 *resop,
 		goto out;
 	}
 
-	if (rfs4_clnt_in_grace(lsp->state->owner->client)) {
+	if (rfs4_clnt_in_grace(lsp->rls_state->rs_owner->ro_client)) {
 		status = NFS4ERR_GRACE;
 		goto out;
 	}
@@ -6508,10 +6508,10 @@ out:
 	*cs->statusp = resp->status = status;
 
 	if (status == NFS4_OK)
-		resp->lock_stateid = lsp->lockid.stateid;
+		resp->lock_stateid = lsp->rls_lockid.stateid;
 
 end:
-	rfs4_sw_exit(&lsp->ls_sw);
+	rfs4_sw_exit(&lsp->rls_sw);
 	rfs4_lo_state_rele(lsp, TRUE);
 
 final:
@@ -6552,7 +6552,7 @@ mds_op_lockt(nfs_argop4 *argop, nfs_resop4 *resop,
 		goto final;
 	}
 
-	args->owner.clientid = cs->cp->clientid;
+	args->owner.clientid = cs->cp->rc_clientid;
 
 	ct.cc_sysid = 0;
 	ct.cc_pid = 0;
@@ -6597,9 +6597,9 @@ mds_op_lockt(nfs_argop4 *argop, nfs_resop4 *resop,
 	lo = findlockowner(cs->instp, &args->owner, &create);
 
 	if (lo) {
-		pid = lo->pid;
+		pid = lo->rl_pid;
 		if ((resp->status =
-		    rfs4_client_sysid(lo->client, &sysid)) != NFS4_OK)
+		    rfs4_client_sysid(lo->rl_client, &sysid)) != NFS4_OK)
 		goto out;
 	} else {
 		pid = 0;
@@ -6666,24 +6666,24 @@ final:
 
 /* Renew Lease */
 void
-mds_refresh(mds_session_t *sp)
+mds_refresh(mds_session_t *sn)
 {
 	rfs4_client_t	*cp;
 
-	ASSERT(sp != NULL && sp->sn_clnt != NULL);
-	rfs4_dbe_lock(sp->dbe);
-	cp = sp->sn_clnt;
-	sp->sn_laccess = gethrestime_sec();
-	rfs4_dbe_unlock(sp->dbe);
+	ASSERT(sn != NULL && sn->sn_clnt != NULL);
+	rfs4_dbe_lock(sn->sn_dbe);
+	cp = sn->sn_clnt;
+	sn->sn_laccess = gethrestime_sec();
+	rfs4_dbe_unlock(sn->sn_dbe);
 
-	rfs4_dbe_hold(cp->dbe);
+	rfs4_dbe_hold(cp->rc_dbe);
 	rfs4_update_lease(cp);
 	rfs4_client_rele(cp);
 }
 
 
 nfsstat4
-mds_lease_chk(mds_session_t *sp)
+mds_lease_chk(mds_session_t *sn)
 {
 	rfs4_client_t	*cp;
 	nfsstat4	 error = NFS4_OK;
@@ -6692,8 +6692,8 @@ mds_lease_chk(mds_session_t *sp)
 	 * If the client lease expired, go ahead and invalidate
 	 * all the sessions associated with this clientid.
 	 */
-	ASSERT(sp != NULL && sp->sn_clnt != NULL);
-	cp = sp->sn_clnt;
+	ASSERT(sn != NULL && sn->sn_clnt != NULL);
+	cp = sn->sn_clnt;
 
 	if (rfs4_lease_expired(cp)) {
 		error = NFS4ERR_BADSESSION;
@@ -6745,7 +6745,7 @@ rfs4_free_cred_princ(rfs4_client_t *cp)
 	rpc_gss_principal_t	 ppl;
 
 	ASSERT(cp != NULL);
-	if ((p = cp->cr_set) == NULL)
+	if ((p = cp->rc_cr_set) == NULL)
 		return;
 
 	switch (p->cp_aflavor) {
@@ -6759,7 +6759,7 @@ rfs4_free_cred_princ(rfs4_client_t *cp)
 		break;
 	}
 	kmem_free(p, sizeof (cred_princ_t));
-	cp->cr_set = NULL;
+	cp->rc_cr_set = NULL;
 }
 
 static rpc_gss_principal_t
@@ -6863,18 +6863,18 @@ rfs4_cmp_cred_princ(cred_princ_t *p, struct compound_state *cs)
 rfs4_client_t *
 client_record(nfs_client_id4 *cip, struct compound_state *cs)
 {
-	rfs4_client_t	*ncp;
+	rfs4_client_t	*cp;
 	bool_t		 create = TRUE;
 
 	/*
 	 * 1. co_ownerid
 	 * 2. co_verifier
 	 */
-	ncp = findclient(cs->instp, cip, &create, NULL);
+	cp = findclient(cs->instp, cip, &create, NULL);
 
 	/* 3. principal */
-	if (ncp != NULL)
-		rfs4_set_cred_princ(&ncp->cr_set, cs);
+	if (cp != NULL)
+		rfs4_set_cred_princ(&cp->rc_cr_set, cs);
 
 	/*
 	 * Both of the following items of the 5-tuple are built as
@@ -6883,7 +6883,7 @@ client_record(nfs_client_id4 *cip, struct compound_state *cs)
 	 * 4. clientid;		created as part of findclient()
 	 * 5. confirmed;	cp->need_confirmed is initialized to TRUE
 	 */
-	return (ncp);
+	return (cp);
 }
 
 rfs4_client_t *
@@ -7147,7 +7147,7 @@ rfs41_set_trunkinfo(SVCXPRT *xprt, struct compound_state *cs, rfs4_client_t *cp,
 	 * start out w/some sane defaults
 	 * XXX - scope needs to be revisited.
 	 */
-	rok->eir_clientid = cp->clientid;
+	rok->eir_clientid = cp->rc_clientid;
 	rfs41_exid_so_major(&rok->eir_server_owner, cs);
 
 	ip_dump(svc_getlocaladdr(xprt), "inbound");
@@ -7157,19 +7157,19 @@ rfs41_set_trunkinfo(SVCXPRT *xprt, struct compound_state *cs, rfs4_client_t *cp,
 		return;
 
 	/* fastpath for 1st exid */
-	rfs4_dbe_lock(cp->dbe);
-	if (list_is_empty(&cp->trunkinfo)) {
-		list_insert_head(&cp->trunkinfo, tip);
+	rfs4_dbe_lock(cp->rc_dbe);
+	if (list_is_empty(&cp->rc_trunkinfo)) {
+		list_insert_head(&cp->rc_trunkinfo, tip);
 		ip_dump(tip->t_netbf, "first-in-list");
 		rok->eir_server_owner.so_minor_id =
-		    (uint64_t)(uintptr_t)&cp->trunkinfo;
-		rfs4_dbe_unlock(cp->dbe);
+		    (uint64_t)(uintptr_t)&cp->rc_trunkinfo;
+		rfs4_dbe_unlock(cp->rc_dbe);
 		return;
 	}
 
 	/* run thru trunkinfo list to see if IP has been seen */
-	for (p = list_head(&cp->trunkinfo); p != NULL;
-	    p = list_next(&cp->trunkinfo, p)) {
+	for (p = list_head(&cp->rc_trunkinfo); p != NULL;
+	    p = list_next(&cp->rc_trunkinfo, p)) {
 
 		/*
 		 * Is the IP already in list ?
@@ -7177,33 +7177,33 @@ rfs41_set_trunkinfo(SVCXPRT *xprt, struct compound_state *cs, rfs4_client_t *cp,
 		if (ip_addr_cmp(tip, p)) {
 			ip_dump(p->t_netbf, "already-in-list");
 			rok->eir_server_owner.so_minor_id =
-			    (uint64_t)(uintptr_t)&cp->trunkinfo;
-			rfs4_dbe_unlock(cp->dbe);
+			    (uint64_t)(uintptr_t)&cp->rc_trunkinfo;
+			rfs4_dbe_unlock(cp->rc_dbe);
 			return;
 		}
 	}
 
 	/* IP hasn't been seen; rerun list to see if equivalent exists */
-	for (p = list_head(&cp->trunkinfo); p != NULL;
-	    p = list_next(&cp->trunkinfo, p)) {
+	for (p = list_head(&cp->rc_trunkinfo); p != NULL;
+	    p = list_next(&cp->rc_trunkinfo, p)) {
 
 		/*
 		 * Do we have an equivalent (ie. transport) entry
 		 */
 		if (p->t_xtype == tip->t_xtype) {
-			list_insert_head(&cp->trunkinfo, tip);
+			list_insert_head(&cp->rc_trunkinfo, tip);
 			ip_dump(tip->t_netbf, "Equiv FOUND: inserted-in-list");
 			rok->eir_server_owner.so_minor_id =
-			    (uint64_t)(uintptr_t)&cp->trunkinfo;
-			rfs4_dbe_unlock(cp->dbe);
+			    (uint64_t)(uintptr_t)&cp->rc_trunkinfo;
+			rfs4_dbe_unlock(cp->rc_dbe);
 			return;
 		}
 	}
 
 	/* nothing in list has same IP addr or is equivalent to tip */
-	list_insert_head(&cp->trunkinfo, tip);
+	list_insert_head(&cp->rc_trunkinfo, tip);
 	ip_dump(tip->t_netbf, "No IP or Equiv FOUND: inserted-in-list");
-	rfs4_dbe_unlock(cp->dbe);
+	rfs4_dbe_unlock(cp->rc_dbe);
 	rok->eir_server_owner.so_minor_id = (uint64_t)(uintptr_t)&tip;
 }
 
@@ -7216,13 +7216,13 @@ mds_clean_up_trunkinfo(rfs4_client_t *cp)
 	if (cp == NULL)
 		return;
 
-	rfs4_dbe_lock(cp->dbe);
-	while (p = list_remove_head(&cp->trunkinfo)) {
+	rfs4_dbe_lock(cp->rc_dbe);
+	while (p = list_remove_head(&cp->rc_trunkinfo)) {
 		netbuf_destroy(p->t_netbf);
 		kmem_free(p, sizeof (rfs41_tie_t));
 	}
-	list_destroy(&cp->trunkinfo);
-	rfs4_dbe_unlock(cp->dbe);
+	list_destroy(&cp->rc_trunkinfo);
+	rfs4_dbe_unlock(cp->rc_dbe);
 }
 
 /*ARGSUSED*/
@@ -7299,8 +7299,8 @@ case1:			/* case 1 - utok */
 			cp = client_record(cip, cs);
 			ASSERT(cp != NULL);
 			*cs->statusp = resp->eir_status = NFS4_OK;
-			rok->eir_clientid = cp->clientid;
-			rok->eir_sequenceid = cp->contrived.xi_sid;
+			rok->eir_clientid = cp->rc_clientid;
+			rok->eir_sequenceid = cp->rc_contrived.xi_sid;
 			goto out;
 		}
 		/* no record and trying to update */
@@ -7309,10 +7309,10 @@ case1:			/* case 1 - utok */
 	}
 
 	/* record exists */
-	old_verifier_arg = cp->nfs_client.verifier;
+	old_verifier_arg = cp->rc_nfs_client.verifier;
 	if (CLID_REC_CONFIRMED(cp)) {
 		if (!update) {
-			if (!rfs4_cmp_cred_princ(cp->cr_set, cs)) {
+			if (!rfs4_cmp_cred_princ(cp->rc_cr_set, cs)) {
 				/* case 3 */
 				if (rfs4_lease_expired(cp)) {
 					rfs4_client_close(cp);
@@ -7327,12 +7327,12 @@ case1:			/* case 1 - utok */
 				rfs4_client_rele(cp);
 				goto final;
 
-			} else if (nfs_clid4_cmp(&cp->nfs_client, cip)) {
+			} else if (nfs_clid4_cmp(&cp->rc_nfs_client, cip)) {
 				/* case 2 - utok */
 				*cs->statusp = NFS4_OK;
 				resp->eir_status = NFS4_OK;
-				rok->eir_clientid = cp->clientid;
-				rok->eir_sequenceid = cp->contrived.xi_sid;
+				rok->eir_clientid = cp->rc_clientid;
+				rok->eir_sequenceid = cp->rc_contrived.xi_sid;
 				/* trickle down to "out" */
 
 			} else if (old_verifier_arg != cip->verifier) {
@@ -7346,14 +7346,14 @@ case1:			/* case 1 - utok */
 				 */
 				ocp = cp;
 				mds_clean_up_sessions(ocp);
-				rfs4_dbe_hide(ocp->dbe);
+				rfs4_dbe_hide(ocp->rc_dbe);
 				rfs4_client_rele(ocp);
 
 				cp = client_record(cip, cs);
 				ASSERT(cp != NULL);
 				*cs->statusp = resp->eir_status = NFS4_OK;
-				rok->eir_clientid = cp->clientid;
-				rok->eir_sequenceid = cp->contrived.xi_sid;
+				rok->eir_clientid = cp->rc_clientid;
+				rok->eir_sequenceid = cp->rc_contrived.xi_sid;
 				/* trickle down to "out" */
 			} else {
 				/* something is really wacky in srv state */
@@ -7364,14 +7364,14 @@ case1:			/* case 1 - utok */
 			}
 
 		} else { /* UPDATE */
-			if (rfs4_cmp_cred_princ(cp->cr_set, cs)) {
+			if (rfs4_cmp_cred_princ(cp->rc_cr_set, cs)) {
 				if (old_verifier_arg == cip->verifier) {
 					/* case 6 - utok */
 					*cs->statusp = NFS4_OK;
 					resp->eir_status = NFS4_OK;
-					rok->eir_clientid = cp->clientid;
+					rok->eir_clientid = cp->rc_clientid;
 					rok->eir_sequenceid =
-					    cp->contrived.xi_sid;
+					    cp->rc_contrived.xi_sid;
 					/* trickle down to "out" */
 				} else {
 					/* case 8 - utok */
@@ -7410,8 +7410,8 @@ out:
 	/*
 	 * State Protection Mojo
 	 */
-	cp->state_prot.sp_type = args->eia_state_protect.spa_how;
-	switch (cp->state_prot.sp_type) {
+	cp->rc_state_prot.sp_type = args->eia_state_protect.spa_how;
+	switch (cp->rc_state_prot.sp_type) {
 	case SP4_NONE:
 		break;
 
@@ -7494,7 +7494,7 @@ mds_op_create_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	CREATE_SESSION4resok	*rok = &resp->CREATE_SESSION4res_u.csr_resok4;
 	CREATE_SESSION4resok	*crp;
 	rfs4_client_t		*cp;
-	mds_session_t		*sp;
+	mds_session_t		*sn;
 	session41_create_t	 sca;
 	sequenceid4		 stseq;
 	sequenceid4		 agseq;
@@ -7532,16 +7532,17 @@ mds_op_create_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * Sequenceid processing (handling replay's, etc)
 	 */
 	agseq = args->csa_sequence;
-	stseq = cp->contrived.cs_slot.seqid;
+	stseq = cp->rc_contrived.cs_slot.seqid;
 	if (stseq == agseq) {
 		/*
 		 * If the same sequenceid, then must be a replay of a
 		 * previous CREATE_SESSION; return the cached result.
 		 */
 replay:
-		crp = (CREATE_SESSION4resok *)&cp->contrived.cs_res;
-		*cs->statusp = resp->csr_status = cp->contrived.cs_slot.status;
-		rok->csr_sequence = cp->contrived.cs_slot.seqid;
+		crp = (CREATE_SESSION4resok *)&cp->rc_contrived.cs_res;
+		*cs->statusp = resp->csr_status =
+		    cp->rc_contrived.cs_slot.status;
+		rok->csr_sequence = cp->rc_contrived.cs_slot.seqid;
 		bcopy(crp->csr_sessionid, rok->csr_sessionid,
 		    sizeof (sessionid4));
 		rok->csr_flags = crp->csr_flags;
@@ -7555,7 +7556,7 @@ replay:
 
 	if (stseq + 1 == agseq) {
 		/* Valid sequencing */
-		cp->contrived.cs_slot.seqid = args->csa_sequence;
+		cp->rc_contrived.cs_slot.seqid = args->csa_sequence;
 	} else {
 		/*
 		 * No way to differentiate MISORD_NEWREQ vs. MISORD_REPLAY,
@@ -7569,9 +7570,9 @@ replay:
 	/*
 	 * Clientid confirmation
 	 */
-	if (cp->need_confirm && cp->clientid == args->csa_clientid) {
-		if (rfs4_cmp_cred_princ(cp->cr_set, cs)) {
-			cp->need_confirm = FALSE;
+	if (cp->rc_need_confirm && cp->rc_clientid == args->csa_clientid) {
+		if (rfs4_cmp_cred_princ(cp->rc_cr_set, cs)) {
+			cp->rc_need_confirm = FALSE;
 		} else {
 			*cs->statusp = resp->csr_status = NFS4ERR_CLID_INUSE;
 			rfs4_client_rele(cp);
@@ -7586,17 +7587,17 @@ replay:
 	sca.cs_xprt = req->rq_xprt;
 	sca.cs_client = cp;
 	sca.cs_aotw = *args;
-	sp = mds_createsession(cs->instp, &sca);
+	sn = mds_createsession(cs->instp, &sca);
 
 	if (sca.cs_error) {
 		*cs->statusp = resp->csr_status = sca.cs_error;
 		rfs4_client_rele(cp);
-		if (sp != NULL)
-			rfs41_session_rele(sp);
+		if (sn != NULL)
+			rfs41_session_rele(sn);
 		goto final;
 	}
 
-	if (sp == NULL) {
+	if (sn == NULL) {
 		*cs->statusp = resp->csr_status = NFS4ERR_SERVERFAULT;
 		rfs4_client_rele(cp);
 		goto final;
@@ -7608,13 +7609,13 @@ replay:
 	 * csa_sequence == contrived.cc_sid, we can return the latest
 	 * cached result. (see replay: above)
 	 */
-	crp = (CREATE_SESSION4resok *)&cp->contrived.cs_res;
+	crp = (CREATE_SESSION4resok *)&cp->rc_contrived.cs_res;
 	*cs->statusp = resp->csr_status =
-	    cp->contrived.cs_slot.status = NFS4_OK;
-	rok->csr_sequence = cp->contrived.xi_sid;
-	bcopy(sp->sn_sessid, rok->csr_sessionid, sizeof (sessionid4));
-	bcopy(sp->sn_sessid, crp->csr_sessionid, sizeof (sessionid4));
-	rok->csr_flags = crp->csr_flags = sp->sn_csflags;
+	    cp->rc_contrived.cs_slot.status = NFS4_OK;
+	rok->csr_sequence = cp->rc_contrived.xi_sid;
+	bcopy(sn->sn_sessid, rok->csr_sessionid, sizeof (sessionid4));
+	bcopy(sn->sn_sessid, crp->csr_sessionid, sizeof (sessionid4));
+	rok->csr_flags = crp->csr_flags = sn->sn_csflags;
 
 	/*
 	 * XXX: struct assignment of channel4_attrs is broken because
@@ -7631,7 +7632,7 @@ replay:
 	 * from the in-kernel form to the OTW form.
 	 */
 	rok->csr_fore_chan_attrs =
-	    crp->csr_fore_chan_attrs = sp->sn_fore->cn_attrs;
+	    crp->csr_fore_chan_attrs = sn->sn_fore->cn_attrs;
 	rok->csr_back_chan_attrs = crp->csr_back_chan_attrs =
 	    args->csa_back_chan_attrs;
 
@@ -7645,7 +7646,7 @@ replay:
 	 * accounted for while session is being created.
 	 */
 	rfs4_client_rele(cp);
-	rfs41_session_rele(sp);
+	rfs41_session_rele(sn);
 
 final:
 	DTRACE_NFSV4_2(op__create__session__done,
@@ -7660,7 +7661,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 {
 	DESTROY_SESSION4args	*args = &argop->nfs_argop4_u.opdestroy_session;
 	DESTROY_SESSION4res	*resp = &resop->nfs_resop4_u.opdestroy_session;
-	mds_session_t		*sp;
+	mds_session_t		*sn;
 	rfs4_client_t		*cp;
 
 	DTRACE_NFSV4_2(op__destroy__session__start,
@@ -7706,8 +7707,8 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Find session and check for clientid and lease expiration
 	 */
-	if ((sp =
-	    mds_findsession_by_id(cs->instp, args->dsa_sessionid)) == NULL) {
+	if ((sn = mds_findsession_by_id(cs->instp,
+	    args->dsa_sessionid)) == NULL) {
 		*cs->statusp = resp->dsr_status = NFS4ERR_BADSESSION;
 		goto final;
 	}
@@ -7723,11 +7724,11 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * cred that was used to create the session matches and is in
 	 * concordance w/the state protection type used.
 	 */
-	if ((cp = sp->sn_clnt) != NULL) {
-		switch (cp->state_prot.sp_type) {
+	if ((cp = sn->sn_clnt) != NULL) {
+		switch (cp->rc_state_prot.sp_type) {
 		case SP4_MACH_CRED:
 			cmn_err(CE_NOTE, "op_destroy_session: SP4_MACH_CRED");
-			if (!rfs4_cmp_cred_princ(cp->cr_set, cs)) {
+			if (!rfs4_cmp_cred_princ(cp->rc_cr_set, cs)) {
 				*cs->statusp = resp->dsr_status = NFS4ERR_PERM;
 				goto final;
 			}
@@ -7750,7 +7751,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	/* session rele taken care of in mds_destroysession */
-	*cs->statusp = resp->dsr_status = mds_destroysession(sp);
+	*cs->statusp = resp->dsr_status = mds_destroysession(sn);
 
 final:
 	DTRACE_NFSV4_2(op__destroy__session__done,
@@ -7770,7 +7771,7 @@ mds_op_backchannel_ctl(nfs_argop4 *argop, nfs_resop4 *resop,
  * that need it and refreshing any stale/dead connections.
  */
 static void
-ping_cb_null_thr(mds_session_t *sp)
+ping_cb_null_thr(mds_session_t *sn)
 {
 	CLIENT			*ch = NULL;
 	struct timeval		 tv;
@@ -7781,7 +7782,7 @@ ping_cb_null_thr(mds_session_t *sp)
 	tv.tv_usec = 0;
 
 
-	if ((ch = rfs41_cb_getch(sp)) == NULL)
+	if ((ch = rfs41_cb_getch(sn)) == NULL)
 		goto out;
 
 	/*
@@ -7796,13 +7797,13 @@ ping_cb_null_thr(mds_session_t *sp)
 	 * just exit.
 	 */
 
-	rfs4_dbe_lock(sp->dbe);
-	if (sp->sn_bc.pnginprog != 0) {
-		rfs4_dbe_unlock(sp->dbe);
+	rfs4_dbe_lock(sn->sn_dbe);
+	if (sn->sn_bc.pnginprog != 0) {
+		rfs4_dbe_unlock(sn->sn_dbe);
 		goto out;
 	}
-	sp->sn_bc.pnginprog = 1;
-	rfs4_dbe_unlock(sp->dbe);
+	sn->sn_bc.pnginprog = 1;
+	rfs4_dbe_unlock(sn->sn_dbe);
 
 	/*
 	 * Get the number of untested conections
@@ -7819,11 +7820,11 @@ ping_cb_null_thr(mds_session_t *sp)
 	 */
 
 	if (conn_num == 0) {
-		rfs4_dbe_lock(sp->dbe);
-		sp->sn_bc.paths++;
-		if (sp->sn_bc.pngcnt)
-			sp->sn_bc.pngcnt--;
-		rfs4_dbe_unlock(sp->dbe);
+		rfs4_dbe_lock(sn->sn_dbe);
+		sn->sn_bc.paths++;
+		if (sn->sn_bc.pngcnt)
+			sn->sn_bc.pngcnt--;
+		rfs4_dbe_unlock(sn->sn_dbe);
 		goto out;
 	}
 
@@ -7837,17 +7838,17 @@ call_again:
 
 		cs = CLNT_CALL(ch, CB_NULL, xdr_void, NULL, xdr_void, NULL, tv);
 		if (cs == RPC_SUCCESS) {
-			rfs4_dbe_lock(sp->dbe);
-			sp->sn_bc.paths++;
-			sp->sn_bc.pngcnt--;
-			rfs4_dbe_unlock(sp->dbe);
+			rfs4_dbe_lock(sn->sn_dbe);
+			sn->sn_bc.paths++;
+			sn->sn_bc.pngcnt--;
+			rfs4_dbe_unlock(sn->sn_dbe);
 		}
 	}
 
-	rfs4_dbe_lock(sp->dbe);
-	if (sp->sn_bc.paths == 0)
-		sp->sn_bc.failed = 1;
-	rfs4_dbe_unlock(sp->dbe);
+	rfs4_dbe_lock(sn->sn_dbe);
+	if (sn->sn_bc.paths == 0)
+		sn->sn_bc.failed = 1;
+	rfs4_dbe_unlock(sn->sn_dbe);
 
 	if (!CLNT_CONTROL(ch, CLGET_CB_UNTESTED, (void *)&conn_num))
 		goto out;
@@ -7865,13 +7866,13 @@ call_again:
 		DTRACE_PROBE(nfss41__i__cb_null_failed_attempts);
 	}
 out:
-	rfs4_dbe_lock(sp->dbe);
-	sp->sn_bc.pnginprog = 0;
-	rfs4_dbe_unlock(sp->dbe);
+	rfs4_dbe_lock(sn->sn_dbe);
+	sn->sn_bc.pnginprog = 0;
+	rfs4_dbe_unlock(sn->sn_dbe);
 
 	if (ch != NULL) {
 		CLNT_CONTROL(ch, CLSET_CB_TEST_CLEAR, (void *)NULL);
-		rfs41_cb_freech(sp, ch);
+		rfs41_cb_freech(sn, ch);
 	}
 
 	thread_exit();
@@ -7889,7 +7890,7 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	SEQUENCE4args		*args = &argop->nfs_argop4_u.opsequence;
 	SEQUENCE4res		*resp = &resop->nfs_resop4_u.opsequence;
 	SEQUENCE4resok		*rok  = &resp->SEQUENCE4res_u.sr_resok4;
-	mds_session_t		*sp = cs->sp;
+	mds_session_t		*sn = cs->sp;
 	slot_ent_t		*slt;
 	slotid4			 slot   = args->sa_slotid;
 	nfsstat4		 status = NFS4_OK;
@@ -7910,7 +7911,7 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 
 	cs->sequenced++;
 
-	if ((status = mds_lease_chk(sp)) != NFS4_OK) {
+	if ((status = mds_lease_chk(sn)) != NFS4_OK) {
 		*cs->statusp = resp->sr_status = status;
 		goto final;
 	}
@@ -7926,24 +7927,25 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	 *	  client that there is currently a problem with the CB
 	 *	  path.
 	 */
-	rfs4_dbe_lock(sp->dbe);
-	if (SN_CB_CHAN_EST(sp)) {
-		if (SN_CB_CHAN_OK(sp)) {
-			if (sp->sn_bc.pngcnt > 0 && !sp->sn_bc.pnginprog)
+	rfs4_dbe_lock(sn->sn_dbe);
+	if (SN_CB_CHAN_EST(sn)) {
+		if (SN_CB_CHAN_OK(sn)) {
+			if (sn->sn_bc.pngcnt > 0 && !sn->sn_bc.pnginprog)
 				(void) thread_create(NULL, 0, ping_cb_null_thr,
-				    sp, 0, &p0, TS_RUN, minclsyspri);
+				    sn, 0, &p0, TS_RUN, minclsyspri);
 		} else {
 			cbstat |= SEQ4_STATUS_CB_PATH_DOWN;
 		}
 	}
-	cs->cp = sp->sn_clnt;
-	rfs4_dbe_hold(cs->cp->dbe);	/* compound state ref */
-	DTRACE_PROBE1(nfss41__i__compound_clid, clientid4, cs->cp->clientid);
+	cs->cp = sn->sn_clnt;
+	rfs4_dbe_hold(cs->cp->rc_dbe);	/* compound state ref */
+	DTRACE_PROBE1(nfss41__i__compound_clid, clientid4,
+	    cs->cp->rc_clientid);
 
 	/*
 	 * Valid range is [0, N-1]
 	 */
-	if (slot < 0 || slot >= sp->sn_replay->st_currw) {
+	if (slot < 0 || slot >= sn->sn_replay->st_currw) {
 		/* slot not in valid range */
 		cmn_err(CE_WARN, "mds_op_sequence: Bad Slot");
 		*cs->statusp = resp->sr_status = NFS4ERR_BADSLOT;
@@ -7959,7 +7961,7 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * checks and return NFS4_OK if everything looks kosher;
 	 * this reply will need to be cached by our caller.
 	 */
-	slt = slrc_slot_get(sp->sn_replay, slot);
+	slt = slrc_slot_get(sn->sn_replay, slot);
 	ASSERT(slt != NULL);
 	if (args->sa_sequenceid != slt->se_seqid + 1) {
 		cmn_err(CE_WARN, "mds_op_sequence: Misordered New Request");
@@ -7994,22 +7996,22 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	 */
 	cs->slotno = slot;
 	cs->seqid = slt->se_seqid;
-	sp->sn_laccess = gethrestime_sec();
+	sn->sn_laccess = gethrestime_sec();
 	rfs4_update_lease(cs->cp);
 
 	/*
 	 * Let's keep it simple for now
 	 */
-	bcopy(sp->sn_sessid, rok->sr_sessionid, sizeof (sessionid4));
+	bcopy(sn->sn_sessid, rok->sr_sessionid, sizeof (sessionid4));
 	rok->sr_sequenceid = slt->se_seqid;
 	rok->sr_slotid = slot;
-	rok->sr_highest_slotid = sp->sn_replay->st_currw;
-	rok->sr_target_highest_slotid = sp->sn_replay->st_currw;
+	rok->sr_highest_slotid = sn->sn_replay->st_currw;
+	rok->sr_target_highest_slotid = sn->sn_replay->st_currw;
 	rok->sr_status_flags |= cbstat;
 	*cs->statusp = resp->sr_status = NFS4_OK;
 
 sessrel:
-	rfs4_dbe_unlock(sp->dbe);
+	rfs4_dbe_unlock(sn->sn_dbe);
 
 final:
 	DTRACE_NFSV4_2(op__sequence__done,
@@ -8018,33 +8020,33 @@ final:
 }
 
 void
-rfs41_bc_setup(mds_session_t *sp)
+rfs41_bc_setup(mds_session_t *sn)
 {
 	sess_channel_t	*bcp;
 	sess_bcsd_t	*bsdp;
 	bool_t		bcp_init = FALSE;
 
-	ASSERT(sp != NULL);
-	rfs4_dbe_lock(sp->dbe);
+	ASSERT(sn != NULL);
+	rfs4_dbe_lock(sn->sn_dbe);
 
 	/*
 	 * If sn_back == NULL, setup and initialize the
 	 * back channel.
 	 */
-	if (sp->sn_back == NULL) {
+	if (sn->sn_back == NULL) {
 		bcp = rfs41_create_session_channel(CDFS4_BACK);
 		bcp_init = TRUE;
 	} else {
-		bcp = sp->sn_back;
+		bcp = sn->sn_back;
 	}
-	rfs4_dbe_unlock(sp->dbe);
+	rfs4_dbe_unlock(sn->sn_dbe);
 	ASSERT(bcp != NULL);
 
 	rw_enter(&bcp->cn_lock, RW_WRITER);
 	bcp->cn_dir |= CDFS4_BACK;
 
 	/* now set the conn's state so we know a ping is needed */
-	atomic_add_32(&sp->sn_bc.pngcnt, 1);
+	atomic_add_32(&sn->sn_bc.pngcnt, 1);
 
 	/*
 	 * Initialize back channel specific data
@@ -8070,21 +8072,21 @@ rfs41_bc_setup(mds_session_t *sp)
 	 * If no back channel yet, then we must've created one above.
 	 * Make sure we set the session's back channel appropriately.
 	 */
-	rfs4_dbe_lock(sp->dbe);
-	if (sp->sn_back == NULL)
-		sp->sn_back = bcp;
-	rfs4_dbe_unlock(sp->dbe);
+	rfs4_dbe_lock(sn->sn_dbe);
+	if (sn->sn_back == NULL)
+		sn->sn_back = bcp;
+	rfs4_dbe_unlock(sn->sn_dbe);
 }
 
 /*ARGSUSED*/
 void
 mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
-			struct svc_req *req, compound_state_t *cs)
+    struct svc_req *req, compound_state_t *cs)
 {
 	BIND_CONN_TO_SESSION4args	*args = &argop->a_bc2s;
 	BIND_CONN_TO_SESSION4res	*resp = &resop->r_bc2s;
 	BIND_CONN_TO_SESSION4resok	*rok = &resp->rok_bc2s;
-	mds_session_t			*sp;
+	mds_session_t			*sn;
 	SVCMASTERXPRT			*mxprt;
 	rpcprog_t			 prog;
 	SVCCB_ARGS			cbargs;
@@ -8096,18 +8098,18 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Find session and check for clientid and lease expiration
 	 */
-	if ((sp = mds_findsession_by_id(cs->instp, args->bctsa_sessid))
+	if ((sn = mds_findsession_by_id(cs->instp, args->bctsa_sessid))
 	    == NULL) {
 		*cs->statusp = resp->bctsr_status = NFS4ERR_BADSESSION;
 		goto final;
 	}
-	mds_refresh(sp);
+	mds_refresh(sn);
 
 	bzero(rok, sizeof (SEQUENCE4resok));
 
-	rfs4_dbe_lock(sp->dbe);
-	prog = sp->sn_bc.progno;
-	rfs4_dbe_unlock(sp->dbe);
+	rfs4_dbe_lock(sn->sn_dbe);
+	prog = sn->sn_bc.progno;
+	rfs4_dbe_unlock(sn->sn_dbe);
 
 	rok->bctsr_use_conn_in_rdma_mode = FALSE;
 	mxprt = (SVCMASTERXPRT *)req->rq_xprt->xp_master;
@@ -8117,7 +8119,7 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 		/* always map to Fore */
 		rok->bctsr_dir = CDFS4_FORE;
 		SVC_CTL(
-		    req->rq_xprt, SVCCTL_SET_TAG, (void *)sp->sn_sessid);
+		    req->rq_xprt, SVCCTL_SET_TAG, (void *)sn->sn_sessid);
 		break;
 
 	case CDFC4_BACK:
@@ -8125,21 +8127,22 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 		/* always map to Back */
 
 		rok->bctsr_dir = CDFS4_BACK;
-		rfs41_bc_setup(sp);
+		rfs41_bc_setup(sn);
 		SVC_CTL(
-		    req->rq_xprt, SVCCTL_SET_TAG, (void *)sp->sn_sessid);
+		    req->rq_xprt, SVCCTL_SET_TAG, (void *)sn->sn_sessid);
 
 		cbargs.xprt = mxprt;
 		cbargs.prog = prog;
 		cbargs.vers = NFS_CB;
 		cbargs.family = AF_INET;
-		cbargs.tag = (void *)sp->sn_sessid;
+		cbargs.tag = (void *)sn->sn_sessid;
 
 		SVC_CTL(req->rq_xprt, SVCCTL_SET_CBCONN, (void *)&cbargs);
 
 		/* Recall: these bits denote # of active back chan conns */
-		rfs41_seq4_hold(&sp->sn_seq4, SEQ4_STATUS_CB_PATH_DOWN_SESSION);
-		rfs41_seq4_hold(&sp->sn_clnt->seq4, SEQ4_STATUS_CB_PATH_DOWN);
+		rfs41_seq4_hold(&sn->sn_seq4, SEQ4_STATUS_CB_PATH_DOWN_SESSION);
+		rfs41_seq4_hold(&sn->sn_clnt->rc_seq4,
+		    SEQ4_STATUS_CB_PATH_DOWN);
 		break;
 
 	default:
@@ -8149,9 +8152,9 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Handcraft the results !
 	 */
-	bcopy(sp->sn_sessid, rok->bctsr_sessid, sizeof (sessionid4));
+	bcopy(sn->sn_sessid, rok->bctsr_sessid, sizeof (sessionid4));
 	*cs->statusp = NFS4_OK;
-	rfs41_session_rele(sp);
+	rfs41_session_rele(sn);
 
 final:
 	DTRACE_NFSV4_2(op__bind__conn__to__session__done,
@@ -8174,16 +8177,16 @@ mds_getdevicelist(nfs_server_instance_t *instp,
 	 * no table updates till we're done with this...
 	 */
 	rw_enter(&instp->mds_mpd_lock, RW_READER);
-	sz = instp->mds_mpd_tab->count * sizeof (deviceid4);
+	sz = instp->mds_mpd_tab->dbt_count * sizeof (deviceid4);
 
-	mdl.dl = kmem_alloc(sz, KM_SLEEP);
-	mdl.count = 0;
+	mdl.mdl_dl = kmem_alloc(sz, KM_SLEEP);
+	mdl.mdl_count = 0;
 
 	rfs4_dbe_walk(instp->mds_mpd_tab, mds_mpd_list, &mdl);
 	rw_exit(&instp->mds_mpd_lock);
 
-	*len = mdl.count;
-	*dlpp = mdl.dl;
+	*len = mdl.mdl_count;
+	*dlpp = mdl.mdl_dl;
 
 	return (NFS4_OK);
 }
@@ -8297,7 +8300,7 @@ final:
 	    GETDEVICEINFO4res *, resp);
 
 	if (mp != NULL)
-		rfs4_dbe_rele(mp->dbe);
+		rfs4_dbe_rele(mp->mpd_dbe);
 }
 
 int
@@ -8373,9 +8376,9 @@ mds_get_file_layout(nfs_server_instance_t *instp, vnode_t *vp,
 		return (NFS4ERR_LAYOUTUNAVAILABLE);
 
 	/* do we have a layout already ? */
-	if (fp->layoutp == NULL) {
+	if (fp->rf_mlo == NULL) {
 		/* Nope, read from disk */
-		if (mds_get_odl(vp, &fp->layoutp) != NFS4_OK) {
+		if (mds_get_odl(vp, &fp->rf_mlo) != NFS4_OK) {
 			/*
 			 * So how can we not have already gotten
 			 * a layout from the create or not have
@@ -8387,19 +8390,19 @@ mds_get_file_layout(nfs_server_instance_t *instp, vnode_t *vp,
 			/*
 			 * We've stuffed it in the rfs4_file_t!
 			 */
-			rfs4_dbe_hold(fp->layoutp->dbe);
+			rfs4_dbe_hold(fp->rf_mlo->mlo_dbe);
 		}
 	} else {
 		/*
 		 * We need to hold a reference to it
 		 */
-		rfs4_dbe_hold(fp->layoutp->dbe);
+		rfs4_dbe_hold(fp->rf_mlo->mlo_dbe);
 	}
 
 	/*
 	 * pass back the mds_layout
 	 */
-	*plp = (mds_layout_t *)fp->layoutp;
+	*plp = (mds_layout_t *)fp->rf_mlo;
 	rfs4_file_rele(fp);
 	return (NFS4_OK);
 }
@@ -8432,8 +8435,8 @@ mds_fetch_layout(struct compound_state *cs,
 	nfsv4_1_file_layout4 otw_flo;
 	nfs_fh4 *nfl_fh_list;
 	rfs4_file_t *fp;
-	mds_layout_grant_t *lgp;
-	mds_ever_grant_t *egp;
+	mds_layout_grant_t *lg;
+	mds_ever_grant_t *eg;
 
 	int i, err, nfl_size;
 	bool_t create;
@@ -8452,11 +8455,11 @@ mds_fetch_layout(struct compound_state *cs,
 	mp = mds_find_mpd(cs->instp, lp->mlo_mpd_id);
 	if (mp == NULL) {
 		DTRACE_PROBE1(nfss41__e__bad_devid, uint32_t, lp->mlo_mpd_id);
-		rfs4_dbe_rele(lp->dbe);
+		rfs4_dbe_rele(lp->mlo_dbe);
 		return (NFS4ERR_LAYOUTUNAVAILABLE);
 	}
 
-	rfs4_dbe_rele(mp->dbe);
+	rfs4_dbe_rele(mp->mpd_dbe);
 
 	bzero(&otw_flo, sizeof (otw_flo));
 
@@ -8482,7 +8485,7 @@ mds_fetch_layout(struct compound_state *cs,
 
 	nfl_fh_list = kmem_zalloc(nfl_size, KM_NOSLEEP);
 	if (nfl_fh_list == NULL) {
-		rfs4_dbe_rele(lp->dbe);
+		rfs4_dbe_rele(lp->mlo_dbe);
 		return (NFS4ERR_LAYOUTTRYLATER);
 	}
 
@@ -8503,7 +8506,7 @@ mds_fetch_layout(struct compound_state *cs,
 		if (err) {
 			mds_free_fh_list(nfl_fh_list,
 			    lp->mlo_lc.lc_stripe_count);
-			rfs4_dbe_rele(lp->dbe);
+			rfs4_dbe_rele(lp->mlo_dbe);
 			return (NFS4ERR_LAYOUTUNAVAILABLE);
 		}
 
@@ -8523,7 +8526,7 @@ mds_fetch_layout(struct compound_state *cs,
 	xdr_buffer = kmem_alloc(xdr_size, KM_NOSLEEP);
 	if (xdr_buffer == NULL) {
 		mds_free_fh_list(nfl_fh_list, lp->mlo_lc.lc_stripe_count);
-		rfs4_dbe_rele(lp->dbe);
+		rfs4_dbe_rele(lp->mlo_dbe);
 		return (NFS4ERR_LAYOUTTRYLATER);
 	}
 
@@ -8536,7 +8539,7 @@ mds_fetch_layout(struct compound_state *cs,
 	if (xdr_nfsv4_1_file_layout4(&xdr, &otw_flo) == FALSE) {
 		kmem_free(xdr_buffer, xdr_size);
 		mds_free_fh_list(nfl_fh_list, lp->mlo_lc.lc_stripe_count);
-		rfs4_dbe_rele(lp->dbe);
+		rfs4_dbe_rele(lp->mlo_dbe);
 		return (NFS4ERR_LAYOUTTRYLATER);
 	}
 
@@ -8548,31 +8551,32 @@ mds_fetch_layout(struct compound_state *cs,
 	/* what if fp == NULL??? */
 
 	create = TRUE;
-	lgp = rfs41_findlogrant(cs, fp, cs->cp, &create);
-	if (lgp == NULL) {
+	lg = rfs41_findlogrant(cs, fp, cs->cp, &create);
+	if (lg == NULL) {
 		printf("rfs41_findlogrant() returned NULL; create=%d\n ",
 		    create);
 		kmem_free(xdr_buffer, xdr_size);
 		mds_free_fh_list(nfl_fh_list, lp->mlo_lc.lc_stripe_count);
 		rfs4_file_rele(fp);
-		rfs4_dbe_rele(lp->dbe);
+		rfs4_dbe_rele(lp->mlo_dbe);
 		return (NFS4ERR_SERVERFAULT);
 	}
 
 	if (create == TRUE) {
 		/* Insert the grant on the client's list */
-		rfs4_dbe_lock(cs->cp->dbe);
-		insque(&lgp->clientgrantlist, cs->cp->clientgrantlist.prev);
-		rfs4_dbe_unlock(cs->cp->dbe);
+		rfs4_dbe_lock(cs->cp->rc_dbe);
+		insque(&lg->lo_clientgrantlist,
+		    cs->cp->rc_clientgrantlist.prev);
+		rfs4_dbe_unlock(cs->cp->rc_dbe);
 
 		/* Insert the grant on the file's list */
-		rfs4_dbe_lock(fp->dbe);
-		insque(&lgp->lo_grant_list, fp->lo_grant_list.prev);
-		rfs4_dbe_unlock(fp->dbe);
+		rfs4_dbe_lock(fp->rf_dbe);
+		insque(&lg->lo_grant_list, fp->rf_lo_grant_list.prev);
+		rfs4_dbe_unlock(fp->rf_dbe);
 	}
 	rfs4_file_rele(fp);
 
-	lgp->lop = lp;
+	lg->lo_lop = lp;
 
 	/*
 	 * We may have just created the layout grant, or it could have
@@ -8582,15 +8586,15 @@ mds_fetch_layout(struct compound_state *cs,
 	 * be on this grant and just have one range in the list that
 	 * covers the whole file.
 	 */
-	(void) nfs_range_set(lgp->lo_range, 0, -1);
+	(void) nfs_range_set(lg->lo_range, 0, -1);
 
 	/*
 	 * create the ever grant structure
 	 */
 	create = TRUE;
-	egp = rfs41_findevergrant(cs->cp, cs->vp, &create);
+	eg = rfs41_findevergrant(cs->cp, cs->vp, &create);
 	if (create == FALSE)
-		rfs41_ever_grant_rele(egp);
+		rfs41_ever_grant_rele(eg);
 
 	/*
 	 * Build layout get reply
@@ -8601,9 +8605,9 @@ mds_fetch_layout(struct compound_state *cs,
 	resp->LAYOUTGET4res_u.logr_resok4.logr_layout.logr_layout_val = logrp;
 	resp->LAYOUTGET4res_u.logr_resok4.logr_return_on_close = FALSE;
 	resp->LAYOUTGET4res_u.logr_will_signal_layout_avail = FALSE;
-	rfs41_lo_seqid(&lgp->lo_stateid);
+	rfs41_lo_seqid(&lg->lo_stateid);
 	resp->LAYOUTGET4res_u.logr_resok4.logr_stateid =
-	    lgp->lo_stateid.stateid;
+	    lg->lo_stateid.stateid;
 
 	logrp->lo_offset = 0;
 	logrp->lo_length = -1;
@@ -8613,7 +8617,7 @@ mds_fetch_layout(struct compound_state *cs,
 	logrp->lo_content.loc_body.loc_body_val = xdr_buffer;
 
 	mds_free_fh_list(nfl_fh_list, lp->mlo_lc.lc_stripe_count);
-	rfs4_dbe_rele(lp->dbe);
+	rfs4_dbe_rele(lp->mlo_dbe);
 	return (NFS4_OK);
 }
 
@@ -8624,20 +8628,20 @@ mds_get_lo_grant_by_cp(struct compound_state *cs)
 {
 	rfs4_file_t *fp;
 	rfs4_client_t *cp = cs->cp;
-	mds_layout_grant_t *lgp;
+	mds_layout_grant_t *lg;
 	bool_t create = FALSE;
 
-	if (cp->clientgrantlist.next->lgp == NULL)
+	if (cp->rc_clientgrantlist.next->lg == NULL)
 		return (NULL);
 
 	fp = rfs4_findfile(cs->instp, cs->vp, NULL, &create);
 	if (fp == NULL)
 		return (NULL);
 
-	lgp = rfs41_findlogrant(cs, fp, cp, &create);
+	lg = rfs41_findlogrant(cs, fp, cp, &create);
 	rfs4_file_rele(fp);
 
-	return (lgp);
+	return (lg);
 }
 
 /*
@@ -8659,7 +8663,7 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 	LAYOUTGET4res		*resp = &resop->nfs_resop4_u.oplayoutget;
 	nfsstat4		 nfsstat = NFS4_OK;
 	stateid_t		*arg_stateid;
-	mds_layout_grant_t	*lgp = NULL;
+	mds_layout_grant_t	*lg = NULL;
 	sequenceid4		 log_seqid;
 
 	DTRACE_NFSV4_2(op__layoutget__start,
@@ -8696,7 +8700,7 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * We may already have given this client a layout.  Better
 	 * get it, if it exists.
 	 */
-	lgp = mds_get_lo_grant_by_cp(cs);
+	lg = mds_get_lo_grant_by_cp(cs);
 
 	/*
 	 * first, only open, deleg, lock
@@ -8711,7 +8715,7 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 		 * have already handed it out and should have found
 		 * it above.
 		 */
-		if (lgp == NULL) {
+		if (lg == NULL) {
 			nfsstat = NFS4ERR_BAD_STATEID;
 			goto final;
 		}
@@ -8719,17 +8723,17 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 		/*
 		 * Layout race detection
 		 */
-		if (lgp->lo_status & LO_RECALL_INPROG) {
-			ASSERT(lgp->lor_seqid != 0);
-			if (log_seqid == (lgp->lor_seqid - 2)) {
+		if (lg->lo_status & LO_RECALL_INPROG) {
+			ASSERT(lg->lor_seqid != 0);
+			if (log_seqid == (lg->lor_seqid - 2)) {
 
 				/* case 1 - pending recall in prog */
 				nfsstat = NFS4ERR_RECALLCONFLICT;
-				rfs41_lo_grant_rele(lgp);
+				rfs41_lo_grant_rele(lg);
 				goto final;
 
-			} else if (log_seqid >= lgp->lor_seqid &&
-			    !lgp->lor_reply) {
+			} else if (log_seqid >= lg->lor_seqid &&
+			    !lg->lor_reply) {
 
 				/*
 				 * case 2 - server has NOT received
@@ -8737,31 +8741,31 @@ mds_op_layout_get(nfs_argop4 *argop, nfs_resop4 *resop,
 				 */
 				if (range_overlap) {
 					nfsstat = NFS4ERR_RECALLCONFLICT;
-					rfs41_lo_grant_rele(lgp);
+					rfs41_lo_grant_rele(lg);
 					goto final;
 				}
 
-			} else if (log_seqid == lgp->lor_seqid &&
-			    lgp->lor_reply) {
+			} else if (log_seqid == lg->lor_seqid &&
+			    lg->lor_reply) {
 
 				/*
 				 * case 3 - server HAS received
 				 * reply to cb_lorecall
 				 */
 				nfsstat = NFS4ERR_RETURNCONFLICT;
-				rfs41_lo_grant_rele(lgp);
+				rfs41_lo_grant_rele(lg);
 				goto final;
 			}
 		}
-		rfs41_lo_grant_rele(lgp);
+		rfs41_lo_grant_rele(lg);
 	} else {
 		/*
 		 * not using a layout stateid, so we better not
 		 * have handed one out already for this file or
 		 * this client gets an error.
 		 */
-		if (lgp != NULL) {
-			rfs41_lo_grant_rele(lgp);
+		if (lg != NULL) {
+			rfs41_lo_grant_rele(lg);
 			nfsstat = NFS4ERR_BAD_STATEID;
 			goto final;
 		}
@@ -8834,7 +8838,7 @@ mds_op_layout_commit(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	if (argp->loca_reclaim) {
-		if (!rfs4_clnt_in_grace(cp) || !cp->can_reclaim) {
+		if (!rfs4_clnt_in_grace(cp) || !cp->rc_can_reclaim) {
 			*cs->statusp = resp->locr_status = NFS4ERR_NO_GRACE;
 			goto final;
 		}
@@ -8845,20 +8849,20 @@ mds_op_layout_commit(nfs_argop4 *argop, nfs_resop4 *resop,
 		 * validate loca_stateid
 		 */
 
-		mds_layout_grant_t *lgp;
-		if ((lgp = mds_get_lo_grant_by_cp(cs)) == NULL) {
+		mds_layout_grant_t *lg;
+		if ((lg = mds_get_lo_grant_by_cp(cs)) == NULL) {
 			*cs->statusp = resp->locr_status = NFS4ERR_BADLAYOUT;
 			goto final;
 		}
 
-		if (layout_match(lgp->lo_stateid, argp->loca_stateid,
+		if (layout_match(lg->lo_stateid, argp->loca_stateid,
 		    &nfsstat) == 0) {
-			rfs41_lo_grant_rele(lgp);
+			rfs41_lo_grant_rele(lg);
 			*cs->statusp = resp->locr_status = NFS4ERR_BADLAYOUT;
 			goto final;
 		}
 
-		rfs41_lo_grant_rele(lgp);
+		rfs41_lo_grant_rele(lg);
 	}
 #endif
 	resp->LAYOUTCOMMIT4res_u.locr_resok4.locr_newsize.\
@@ -8950,7 +8954,7 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
     LAYOUTRETURN4res *resp)
 {
 	rfs4_file_t *fp;
-	mds_layout_grant_t *lgp;
+	mds_layout_grant_t *lg;
 	nfsstat4 status;
 	bool_t create = FALSE;
 	nfs_range_query_t remain;
@@ -8966,8 +8970,8 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 		return (NFS4ERR_SERVERFAULT);
 	}
 
-	lgp = rfs41_findlogrant(cs, fp, cs->cp, &create);
-	if (lgp == NULL) {
+	lg = rfs41_findlogrant(cs, fp, cs->cp, &create);
+	if (lg == NULL) {
 		/*
 		 * Is this really so bad?  If the server reboots and then
 		 * the client returns a layout, we won't have a grant
@@ -8978,8 +8982,8 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 		return (NFS4ERR_SERVERFAULT);
 	}
 
-	if (!layout_match(lgp->lo_stateid, lorf->lrf_stateid, &status)) {
-		rfs41_lo_grant_rele(lgp);
+	if (!layout_match(lg->lo_stateid, lorf->lrf_stateid, &status)) {
+		rfs41_lo_grant_rele(lg);
 		rfs4_file_rele(fp);
 		return (status);
 	}
@@ -8988,59 +8992,59 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 	 * Refer to Section 18.44.3 of draft-25 for the right
 	 * lrs_present mojo and corresponding stateid setting.
 	 */
-	rfs41_lo_seqid(&lgp->lo_stateid);
-	resp->lorr_stid_u.lrs_stateid = lgp->lo_stateid.stateid;
+	rfs41_lo_seqid(&lg->lo_stateid);
+	resp->lorr_stid_u.lrs_stateid = lg->lo_stateid.stateid;
 
-	remain = nfs_range_clear(lgp->lo_range, lorf->lrf_offset,
+	remain = nfs_range_clear(lg->lo_range, lorf->lrf_offset,
 	    lorf->lrf_length);
 
 #ifdef NOT_DONE
 	/* XXX - could (should?) be async operation */
 	/* need to add range to this */
-	mds_invalidate_ds_state(lgp->lo_stateid, cs->cp, LAYOUT);
+	mds_invalidate_ds_state(lg->lo_stateid, cs->cp, LAYOUT);
 #endif
 
 	/* if entire layout has been returned, clean up */
 	if (remain == NFS_RANGE_NONE) {
 
-		mutex_enter(&lgp->lo_lock);
-		if (lgp->lo_status == LO_RECALL_INPROG) {
-			lgp->lor_seqid = 0;  /* reset */
-			lgp->lo_status = LO_RECALLED;
+		mutex_enter(&lg->lo_lock);
+		if (lg->lo_status == LO_RECALL_INPROG) {
+			lg->lor_seqid = 0;  /* reset */
+			lg->lo_status = LO_RECALLED;
 		} else {
-			lgp->lo_status = LO_RETURNED;
+			lg->lo_status = LO_RETURNED;
 		}
-		mutex_exit(&lgp->lo_lock);
+		mutex_exit(&lg->lo_lock);
 
 		/* remove the layout grant from both lists */
-		rfs4_dbe_lock(lgp->cp->dbe);
+		rfs4_dbe_lock(lg->lo_cp->rc_dbe);
 
-		remque(&lgp->clientgrantlist);
-		lgp->clientgrantlist.next = lgp->clientgrantlist.prev =
-		    &lgp->clientgrantlist;
+		remque(&lg->lo_clientgrantlist);
+		lg->lo_clientgrantlist.next = lg->lo_clientgrantlist.prev =
+		    &lg->lo_clientgrantlist;
 
-		rfs4_dbe_unlock(lgp->cp->dbe);
+		rfs4_dbe_unlock(lg->lo_cp->rc_dbe);
 
-		lgp->cp = NULL;
+		lg->lo_cp = NULL;
 
-		rfs4_dbe_lock(lgp->fp->dbe);
+		rfs4_dbe_lock(lg->lo_fp->rf_dbe);
 
-		remque(&lgp->lo_grant_list);
-		lgp->lo_grant_list.next = lgp->lo_grant_list.prev =
-		    &lgp->lo_grant_list;
+		remque(&lg->lo_grant_list);
+		lg->lo_grant_list.next = lg->lo_grant_list.prev =
+		    &lg->lo_grant_list;
 
-		rfs4_dbe_unlock(lgp->fp->dbe);
+		rfs4_dbe_unlock(lg->lo_fp->rf_dbe);
 
-		rfs4_file_rele(lgp->fp);
-		lgp->fp = NULL;
+		rfs4_file_rele(lg->lo_fp);
+		lg->lo_fp = NULL;
 
-		rfs4_dbe_invalidate(lgp->dbe);
-		rfs41_lo_grant_rele(lgp);
+		rfs4_dbe_invalidate(lg->lo_dbe);
+		rfs41_lo_grant_rele(lg);
 
 #ifdef RECALL_ENGINE
-		if (&fp->lo_grant_list == fp->lo_grant_list.next) {
-			fp->layout->flag = LAYOUT_RETURNED;
-			rfs4_dbe_cv_broadcast(fp->dbe);
+		if (&fp->rf_lo_grant_list == fp->rf_lo_grant_list.next) {
+			fp->rf_mlo->mlo_flags = LAYOUT_RETURNED;
+			rfs4_dbe_cv_broadcast(fp->rf_dbe);
 		}
 #endif
 
@@ -9061,7 +9065,7 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 	}
 
 	rfs4_file_rele(fp);
-	rfs41_lo_grant_rele(lgp);
+	rfs41_lo_grant_rele(lg);
 
 	return (NFS4_OK);
 }
@@ -9072,7 +9076,7 @@ mds_return_layout_file(layoutreturn_file4 *lorf, struct compound_state *cs,
 void
 mds_return_layout_fsid(struct compound_state *cs)
 {
-	mds_ever_grant_t *egp;
+	mds_ever_grant_t *eg;
 	bool_t create = FALSE;
 
 	/*
@@ -9085,13 +9089,13 @@ mds_return_layout_fsid(struct compound_state *cs)
 	 * 1) ever_grant
 	 * 2) layout_grants
 	 */
-	egp = rfs41_findevergrant(cs->cp, cs->vp, &create);
-	if (egp != NULL) {
-		rfs4_dbe_lock(egp->dbe);
-		egp->cp = NULL;
-		rfs4_dbe_invalidate(egp->dbe);
-		rfs4_dbe_unlock(egp->dbe);
-		rfs41_ever_grant_rele(egp);
+	eg = rfs41_findevergrant(cs->cp, cs->vp, &create);
+	if (eg != NULL) {
+		rfs4_dbe_lock(eg->eg_dbe);
+		eg->eg_cp = NULL;
+		rfs4_dbe_invalidate(eg->eg_dbe);
+		rfs4_dbe_unlock(eg->eg_dbe);
+		rfs41_ever_grant_rele(eg);
 	}
 
 	mds_clean_grants_by_fsid(cs->cp, cs->vp);
@@ -9151,8 +9155,8 @@ mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * XXX what if it is a bulk recall for FSID, but this client is
 	 * doing a return of type FILE for a file on a different FSID?
 	 */
-	if (cp->bulk_recall &&
-	    cp->bulk_recall != args->lora_layoutreturn.lr_returntype) {
+	if (cp->rc_bulk_recall &&
+	    cp->rc_bulk_recall != args->lora_layoutreturn.lr_returntype) {
 		nfsstat = NFS4ERR_RECALLCONFLICT;
 		goto final;
 	}
@@ -9183,7 +9187,7 @@ mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
 		cmn_err(CE_NOTE, "loreturn: LAYOUTRETURN4_FSID");
 		nfsstat = NFS4ERR_NOTSUPP;
 #endif
-		cp->bulk_recall = 0;
+		cp->rc_bulk_recall = 0;
 		break;
 
 	case LAYOUTRETURN4_ALL:
@@ -9198,7 +9202,7 @@ mds_op_layout_return(nfs_argop4 *argop, nfs_resop4 *resop,
 		cmn_err(CE_NOTE, "loreturn: LAYOUTRETURN4_ALL");
 		nfsstat = NFS4ERR_NOTSUPP;
 #endif
-		cp->bulk_recall = 0;
+		cp->rc_bulk_recall = 0;
 		break;
 
 	default:

@@ -64,7 +64,7 @@ extern void mds_set_deviceid(id_t, deviceid4 *);
  * encoded value for a nfsv4_1_file_layout_ds_addr4
  */
 typedef struct mds_mpd {
-	rfs4_dbe_t	*dbe;
+	rfs4_dbe_t	*mpd_dbe;
 	id_t		mpd_id;
 	uint_t 		mpd_encoded_len;
 	char 		*mpd_encoded_val;
@@ -75,8 +75,8 @@ typedef struct mds_mpd {
  * Used to build the reply to getdevicelist
  */
 typedef struct mds_device_list {
-	int count;
-	deviceid4 *dl;
+	int		mdl_count;
+	deviceid4	*mdl_dl;
 } mds_device_list_t;
 
 typedef struct layout_core {
@@ -100,7 +100,7 @@ typedef struct layout_core {
  * through the MDS or Data-servers.
  */
 typedef struct mds_layout {
-	rfs4_dbe_t	*dbe;
+	rfs4_dbe_t	*mlo_dbe;
 	int		mlo_id;
 	layouttype4 	mlo_type;
 
@@ -119,7 +119,7 @@ typedef struct mds_layout {
 #define	LO_RETURNED		0x00000008
 
 typedef struct mds_layout_grant {
-	rfs4_dbe_t	*dbe;
+	rfs4_dbe_t	*lo_dbe;
 	stateid_t	lo_stateid;
 	uint32_t	lo_status;
 	kmutex_t	lo_lock;
@@ -127,10 +127,10 @@ typedef struct mds_layout_grant {
 		uint32_t	lr_seqid;
 		uint32_t	lr_reply;
 	}		 lo_rec;
-	mds_layout_t    *lop;
-	rfs4_client_t   *cp;
-	rfs4_file_t	*fp;
-	rfs41_grant_list_t clientgrantlist;
+	mds_layout_t    *lo_lop;
+	rfs4_client_t   *lo_cp;
+	rfs4_file_t	*lo_fp;
+	rfs41_grant_list_t lo_clientgrantlist;
 	rfs41_grant_list_t lo_grant_list;
 	nfs_range_t	*lo_range;
 } mds_layout_grant_t;
@@ -139,8 +139,8 @@ typedef struct mds_layout_grant {
 #define	lor_reply	lo_rec.lr_reply
 
 typedef struct mds_ever_grant {
-	rfs4_dbe_t	*dbe;
-	rfs4_client_t   *cp;
+	rfs4_dbe_t	*eg_dbe;
+	rfs4_client_t   *eg_cp;
 	union {
 		fsid_t	fsid;
 		int64_t	key;

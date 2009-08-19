@@ -150,7 +150,7 @@ typedef struct nfs_server_instance {
 	int		deleg_wlp;
 
 	rfs4_cbstate_t	(*deleg_cbcheck)(struct rfs4_state *);
-	void	(*deleg_cbrecall)(rfs4_deleg_state_t *, bool_t);
+	void	(*deleg_cbrecall)(struct rfs4_deleg_state *, bool_t);
 	void	(*exi_clean_func)(struct nfs_server_instance *,
 	    struct exportinfo *);
 	void	(*clnt_clear)(struct rfs4_client *);

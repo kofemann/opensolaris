@@ -79,9 +79,9 @@ recall_read_delegations(
 	 * Put a hold on this 'fp' such that it will be treated
 	 * the same as the rest of the array!
 	 */
-	rfs4_dbe_lock(fp->dbe);
-	rfs4_dbe_hold(fp->dbe);
-	rfs4_dbe_unlock(fp->dbe);
+	rfs4_dbe_lock(fp->rf_dbe);
+	rfs4_dbe_hold(fp->rf_dbe);
+	rfs4_dbe_unlock(fp->rf_dbe);
 
 	/*
 	 * More than one instance could have given out read delegations to this
@@ -120,15 +120,15 @@ recall_read_delegations(
 	 * a delegation.  If so, send a recall.
 	 */
 	for (i = 1; i < cnt; i++) {
-		rfs4_dbe_lock(fpa[i]->dbe);
-		if (fpa[i]->dinfo->dtype == OPEN_DELEGATE_NONE ||
-		    rfs4_dbe_is_invalid(fpa[i]->dbe) ||
-		    (rfs4_dbe_refcnt(fpa[i]->dbe) == 0)) {
-			rfs4_dbe_unlock(fpa[i]->dbe);
+		rfs4_dbe_lock(fpa[i]->rf_dbe);
+		if (fpa[i]->rf_dinfo->rd_dtype == OPEN_DELEGATE_NONE ||
+		    rfs4_dbe_is_invalid(fpa[i]->rf_dbe) ||
+		    (rfs4_dbe_refcnt(fpa[i]->rf_dbe) == 0)) {
+			rfs4_dbe_unlock(fpa[i]->rf_dbe);
 			fpa[i] = NULL;
 		} else {
-			rfs4_dbe_hold(fpa[i]->dbe);
-			rfs4_dbe_unlock(fpa[i]->dbe);
+			rfs4_dbe_hold(fpa[i]->rf_dbe);
+			rfs4_dbe_unlock(fpa[i]->rf_dbe);
 			rfs4_recall_deleg(fpa[i], FALSE, NULL);
 		}
 	}
@@ -142,13 +142,13 @@ recall_read_delegations(
 	 */
 	for (i = 0; i < cnt; i++) {
 		if (fpa[i] != NULL) {
-			rfs4_dbe_lock(fpa[i]->dbe);
-			if (fpa[i]->dinfo->dtype != OPEN_DELEGATE_NONE) {
+			rfs4_dbe_lock(fpa[i]->rf_dbe);
+			if (fpa[i]->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE) {
 				active = i;
 				break;
 			}
-			rfs4_dbe_rele_nolock(fpa[i]->dbe);
-			rfs4_dbe_unlock(fpa[i]->dbe);
+			rfs4_dbe_rele_nolock(fpa[i]->rf_dbe);
+			rfs4_dbe_unlock(fpa[i]->rf_dbe);
 			fpa[i] = NULL;	/* this one is done */
 		}
 	}
@@ -166,7 +166,7 @@ recall_read_delegations(
 	 */
 	if (ct && ct->cc_flags & CC_DONTBLOCK) {
 		ASSERT(fpa[active] != NULL);
-		rfs4_dbe_unlock(fpa[active]->dbe);
+		rfs4_dbe_unlock(fpa[active]->rf_dbe);
 		ct->cc_flags |= CC_WOULDBLOCK;
 
 		/*
@@ -193,14 +193,14 @@ recall_read_delegations(
 	 */
 wait:
 	ASSERT(fpa[active] != NULL);
-	while (fpa[active]->dinfo->dtype != OPEN_DELEGATE_NONE) {
-		rc = rfs4_dbe_twait(fpa[active]->dbe,
-		    lbolt +
-		    SEC_TO_TICK(dbe_to_instp(fpa[active]->dbe)->lease_period));
+	while (fpa[active]->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE) {
+		rc = rfs4_dbe_twait(fpa[active]->rf_dbe,
+		    lbolt + SEC_TO_TICK(dbe_to_instp(
+		    fpa[active]->rf_dbe)->lease_period));
 		if (rc == -1) { /* timed out */
-			rfs4_dbe_unlock(fpa[active]->dbe);
+			rfs4_dbe_unlock(fpa[active]->rf_dbe);
 			rfs4_recall_deleg(fpa[active], FALSE, NULL);
-			rfs4_dbe_lock(fpa[active]->dbe);
+			rfs4_dbe_lock(fpa[active]->rf_dbe);
 
 			/*
 			 * Send recalls to any other instance's clients who
@@ -209,21 +209,21 @@ wait:
 			for (i = active + 1; i < cnt; i++) {
 				if (fpa[i] == NULL)
 					continue;
-				rfs4_dbe_lock(fpa[i]->dbe);
-				if (fpa[i]->dinfo->dtype !=
+				rfs4_dbe_lock(fpa[i]->rf_dbe);
+				if (fpa[i]->rf_dinfo->rd_dtype !=
 				    OPEN_DELEGATE_NONE) {
-					rfs4_dbe_unlock(fpa[i]->dbe);
+					rfs4_dbe_unlock(fpa[i]->rf_dbe);
 					rfs4_recall_deleg(fpa[i], FALSE, NULL);
 				} else {
 					rfs4_file_rele(fpa[i]);
-					rfs4_dbe_unlock(fpa[i]->dbe);
+					rfs4_dbe_unlock(fpa[i]->rf_dbe);
 					fpa[i] = NULL;	/* this one is done */
 				}
 			}
 		}
 	}
-	rfs4_dbe_rele_nolock(fpa[active]->dbe);
-	rfs4_dbe_unlock(fpa[active]->dbe);
+	rfs4_dbe_rele_nolock(fpa[active]->rf_dbe);
+	rfs4_dbe_unlock(fpa[active]->rf_dbe);
 	fpa[active] = NULL;
 
 	/* have they all completed returning the delegations? */
@@ -235,14 +235,14 @@ wait:
 		 * We found one which was not done, so lock it
 		 * and start waiting again!
 		 */
-		rfs4_dbe_lock(fpa[i]->dbe);
-		if (fpa[i]->dinfo->dtype != OPEN_DELEGATE_NONE) {
+		rfs4_dbe_lock(fpa[i]->rf_dbe);
+		if (fpa[i]->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE) {
 			active = i;
 			goto wait;
 		}
 
-		rfs4_dbe_rele_nolock(fpa[i]->dbe);
-		rfs4_dbe_unlock(fpa[i]->dbe);
+		rfs4_dbe_rele_nolock(fpa[i]->rf_dbe);
+		rfs4_dbe_unlock(fpa[i]->rf_dbe);
 		fpa[i] = NULL;
 	}
 
@@ -264,7 +264,7 @@ recall_all_delegations(rfs4_file_t *fp, bool_t trunc, caller_context_t *ct)
 	delay(NFS4_DELEGATION_CONFLICT_DELAY);
 
 	rfs4_dbe_lock(fp->rf_dbe);
-	if (fp->rf_dinfo.rd_dtype == OPEN_DELEGATE_NONE) {
+	if (fp->rf_dinfo->rd_dtype == OPEN_DELEGATE_NONE) {
 		rfs4_dbe_unlock(fp->rf_dbe);
 		return (0);
 	}
@@ -276,9 +276,49 @@ recall_all_delegations(rfs4_file_t *fp, bool_t trunc, caller_context_t *ct)
 	}
 
 	rfs4_dbe_lock(fp->rf_dbe);
-	while (fp->rf_dinfo.rd_dtype != OPEN_DELEGATE_NONE) {
+	while (fp->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE) {
 		rc = rfs4_dbe_twait(fp->rf_dbe,
 		    lbolt +
+		    SEC_TO_TICK(dbe_to_instp(fp->rf_dbe)->lease_period));
+		if (rc == -1) { /* timed out */
+			rfs4_dbe_unlock(fp->rf_dbe);
+			rfs4_recall_deleg(fp, trunc, NULL);
+			rfs4_dbe_lock(fp->rf_dbe);
+		}
+	}
+	rfs4_dbe_unlock(fp->rf_dbe);
+
+	return (0);
+}
+
+/*
+ * this is the function to recall a write delegation.  there can only be
+ * one write delegation handed out to a client.  there is no need to check
+ * the other server instances to see if they have delegated this file.
+ */
+int
+recall_write_delegation(rfs4_file_t *fp, bool_t trunc, caller_context_t *ct)
+{
+	clock_t rc;
+
+	rfs4_recall_deleg(fp, trunc, NULL);
+	delay(NFS4_DELEGATION_CONFLICT_DELAY);
+
+	rfs4_dbe_lock(fp->rf_dbe);
+	if (fp->rf_dinfo->rd_dtype == OPEN_DELEGATE_NONE) {
+		rfs4_dbe_unlock(fp->rf_dbe);
+		return (0);
+	}
+	rfs4_dbe_unlock(fp->rf_dbe);
+
+	if (ct && ct->cc_flags & CC_DONTBLOCK) {
+		ct->cc_flags |= CC_WOULDBLOCK;
+		return (NFS4ERR_DELAY);
+	}
+
+	rfs4_dbe_lock(fp->rf_dbe);
+	while (fp->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE) {
+		rc = rfs4_dbe_twait(fp->rf_dbe, lbolt +
 		    SEC_TO_TICK(dbe_to_instp(fp->rf_dbe)->lease_period));
 		if (rc == -1) { /* timed out */
 			rfs4_dbe_unlock(fp->rf_dbe);
@@ -322,7 +362,7 @@ deleg_wr_open(femarg_t *arg, int mode, cred_t *cr, caller_context_t *ct)
 	nfs_server_instance_t *instp;
 
 	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-	instp = dbe_to_instp(fp->dbe);
+	instp = dbe_to_instp(fp->rf_dbe);
 
 	/*
 	 * Now that the NFSv4 server calls VOP_OPEN, we need to check to
@@ -354,7 +394,7 @@ deleg_wr_read(femarg_t *arg, uio_t *uiop, int ioflag, cred_t *cr,
 	nfs_server_instance_t *instp;
 
 	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-	instp = dbe_to_instp(fp->dbe);
+	instp = dbe_to_instp(fp->rf_dbe);
 
 	/* use caller context to compare caller to delegation owner */
 	if (ct == NULL || ct->cc_caller_id != instp->caller_id) {
@@ -398,7 +438,7 @@ deleg_wr_write(femarg_t *arg, uio_t *uiop, int ioflag, cred_t *cr,
 	nfs_server_instance_t *instp;
 
 	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-	instp = dbe_to_instp(fp->dbe);
+	instp = dbe_to_instp(fp->rf_dbe);
 
 	/* use caller context to compare caller to delegation owner */
 	if (ct == NULL || ct->cc_caller_id != instp->caller_id) {
@@ -437,7 +477,7 @@ deleg_wr_setattr(femarg_t *arg, vattr_t *vap, int flags, cred_t *cr,
 	nfs_server_instance_t *instp;
 
 	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-	instp = dbe_to_instp(fp->dbe);
+	instp = dbe_to_instp(fp->rf_dbe);
 
 	/*
 	 * Use caller context to compare caller to delegation owner
@@ -483,7 +523,7 @@ deleg_wr_rwlock(femarg_t *arg, int write_lock, caller_context_t *ct)
 	nfs_server_instance_t *instp;
 
 	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-	instp = dbe_to_instp(fp->dbe);
+	instp = dbe_to_instp(fp->rf_dbe);
 
 	/* use caller context to compare caller to delegation owner */
 	if (ct == NULL || ct->cc_caller_id != instp->caller_id) {
@@ -520,7 +560,7 @@ deleg_wr_space(femarg_t *arg, int cmd, flock64_t *bfp, int flag,
 	nfs_server_instance_t *instp;
 
 	fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
-	instp = dbe_to_instp(fp->dbe);
+	instp = dbe_to_instp(fp->rf_dbe);
 
 	/* use caller context to compare caller to delegation owner */
 	if (ct == NULL || ct->cc_caller_id != instp->caller_id) {
@@ -609,7 +649,7 @@ deleg_wr_vnevent(femarg_t *arg, vnevent_t vnevent, vnode_t *dvp, char *name,
 		fp = (rfs4_file_t *)arg->fa_fnode->fn_available;
 		rfs4_recall_deleg(fp, trunc, NULL);
 		rfs4_dbe_lock(fp->rf_dbe);
-		while (fp->rf_dinfo.rd_dtype != OPEN_DELEGATE_NONE) {
+		while (fp->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE) {
 			rc = rfs4_dbe_twait(fp->rf_dbe,
 			    lbolt + SEC_TO_TICK(
 			    dbe_to_instp(fp->rf_dbe)->lease_period));

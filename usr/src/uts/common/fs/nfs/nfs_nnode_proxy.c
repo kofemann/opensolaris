@@ -88,7 +88,7 @@ proxy_get_layout(nnode_proxy_data_t *mnd)
 void
 proxy_free_layout(nnode_proxy_data_t *mnd)
 {
-	rfs4_dbe_rele(mnd->mnd_layout->dbe);
+	rfs4_dbe_rele(mnd->mnd_layout->mlo_dbe);
 	mnd->mnd_layout = NULL;
 }
 

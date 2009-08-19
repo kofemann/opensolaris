@@ -114,7 +114,7 @@ struct mds_layout_grant;
 typedef struct rfs41_grant_list {
 	struct rfs41_grant_list *next;
 	struct rfs41_grant_list *prev;
-	struct mds_layout_grant	*lgp;
+	struct mds_layout_grant	*lg;
 } rfs41_grant_list_t;
 
 /*
@@ -537,6 +537,7 @@ typedef struct rfs41_tie {
 	}		 t_ipaddr_u;
 } rfs41_tie_t;
 
+struct rfs4_deleg_state;
 #include <nfs/nfs_serv_inst.h>
 
 extern void rfs4_hold_deleg_policy(nfs_server_instance_t *);
@@ -954,7 +955,7 @@ typedef struct rfs4_file {
 	uint32_t	rf_deny_write;
 	krwlock_t	rf_file_rwlock;
 	struct rfs41_grant_list rf_lo_grant_list;
-	struct mds_layout    *rf_layoutp;
+	struct mds_layout    *rf_mlo;
 } rfs4_file_t;
 
 /*
@@ -995,7 +996,7 @@ typedef struct {
  *	CB_GSS_CONTEXT_EXPIRED, BACKCHANNEL_FAULT
  */
 typedef struct mds_session {
-	rfs4_dbe_t		*dbe;
+	rfs4_dbe_t		*sn_dbe;
 	sessionid4		 sn_sessid;	/* session id */
 	rfs4_client_t		*sn_clnt;	/* back ptr to client state */
 	sess_channel_t		*sn_fore;	/* fore chan for this session */
@@ -1020,7 +1021,8 @@ typedef struct mds_session {
 
 #define	SN_CB_CHAN_EST(x)	(((mds_session_t *)(x))->sn_back != NULL)
 #define	SN_CB_CHAN_OK(x)	(((mds_session_t *)(x))->sn_bc.failed == 0)
-#define	CLID_REC_CONFIRMED(x)	(((rfs4_client_t *)(x))->need_confirm == FALSE)
+#define	CLID_REC_CONFIRMED(x)	\
+    (((rfs4_client_t *)(x))->rc_need_confirm == FALSE)
 
 struct mds_lorec {
 	mds_session_t		*lor_sess;
@@ -1029,7 +1031,7 @@ struct mds_lorec {
 	nfs4_fhandle_t		 lor_fh;
 	stateid4		 lor_stid;
 	vnode_t			*lor_vp;
-	struct mds_layout_grant	*lor_lgp;
+	struct mds_layout_grant	*lor_lg;
 };
 typedef struct mds_lorec mds_lorec_t;
 
@@ -1146,6 +1148,7 @@ extern	rfs4_file_t	*rfs4_findfile_withlock(nfs_server_instance_t *,
 						vnode_t *, nfs_fh4 *,
 						bool_t *);
 extern	void		rfs4_file_rele(rfs4_file_t *);
+extern	void		rfs4_file_rele_withunlock(rfs4_file_t *);
 
 /* General collection of "get state" functions */
 extern	int		rfs4_check_stateid_seqid(rfs4_state_t *, stateid4 *);
@@ -1232,7 +1235,8 @@ extern void rfs4_mon_rele(void *);
 extern fem_t	*deleg_rdops;
 extern fem_t	*deleg_wrops;
 
-extern	void	rfs4_unshare(rfs4_state_t *);
+extern	int	rfs4_share(rfs4_state_t *, uint32_t, uint32_t);
+extern	int	rfs4_unshare(rfs4_state_t *);
 extern	void	rfs4_set_deleg_policy(nfs_server_instance_t *,
     srv_deleg_policy_t);
 #ifdef DEBUG
