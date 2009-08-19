@@ -727,8 +727,7 @@ typedef struct rfs4_client {
 	rfs4_cbinfo_t		rc_cbinfo;
 	cred_princ_t		*rc_cr_set;
 	sysid_t			rc_sysidt;
-	rfs4_openowner_list_t	rc_openownerlist;
-	rfs4_deleg_list_t	rc_clientdeleglist;
+	list_t			rc_openownerlist;
 	rfs4_ss_pn_t		*rc_ss_pn;
 	struct sockaddr_storage rc_cl_addr;
 	rfs41_csr_t		rc_contrived;
@@ -771,8 +770,8 @@ typedef struct rfs4_openowner {
 	seqid4			ro_open_seqid;
 	rfs4_state_wait_t	ro_sw;
 	cred_princ_t		*ro_cr_set;
-	rfs4_state_list_t	ro_ownerstateids;
-	rfs4_openowner_list_t	ro_openownerlist;
+	list_t			ro_statelist;
+	list_node_t		ro_node;
 	nfs_fh4			ro_reply_fh;
 	nfs_resop4		ro_reply[1];
 } rfs4_openowner_t;
@@ -872,7 +871,6 @@ typedef struct rfs4_deleg_state {
 	struct rfs4_file	*rds_finfo;
 	rfs4_client_t		*rds_client;
 	list_node_t		rds_node;
-	rfs4_deleg_list_t	rds_clientdeleglist;
 	rfs41_drs_info_t	rds_rs;			/* 4.1 only */
 } rfs4_deleg_state_t;
 
@@ -948,7 +946,7 @@ typedef struct rfs4_file {
 	rfs4_dbe_t	*rf_dbe;
 	vnode_t		*rf_vp;
 	nfs_fh4		rf_filehandle;
-	rfs4_deleg_list_t rf_delegationlist;
+	list_t		rf_delegstatelist;
 	rfs4_dinfo_t	rf_dinfo[1];
 	uint32_t	rf_share_deny;
 	uint32_t	rf_share_access;
