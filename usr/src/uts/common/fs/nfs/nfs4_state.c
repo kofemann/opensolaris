@@ -1685,6 +1685,17 @@ rfs4_file_rele(rfs4_file_t *fp)
 	rfs4_dbe_rele(fp->rf_dbe);
 }
 
+/*
+ * Used to unlock the file rw lock and the file's dbe entry
+ * Only used to pair with rfs4_findfile_withlock()
+ */
+void
+rfs4_file_rele_withunlock(rfs4_file_t *fp)
+{
+	rw_exit(&fp->file_rwlock);
+	rfs4_dbe_rele(fp->dbe);
+}
+
 typedef struct {
     vnode_t *vp;
     nfs_fh4 *fh;

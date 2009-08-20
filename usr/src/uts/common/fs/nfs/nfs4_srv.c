@@ -6304,8 +6304,7 @@ rfs4_do_open(struct compound_state *cs, struct svc_req *req,
 		    (CE_NOTE, "rfs4_do_open: can't find state"));
 		resp->status = NFS4ERR_RESOURCE;
 		/* No need to keep any reference */
-		rw_exit(&fp->rf_file_rwlock);
-		rfs4_file_rele(fp);
+		rfs4_file_rele_withunlock(fp);
 		return;
 	}
 
@@ -6701,8 +6700,7 @@ rfs4_do_opendelprev(struct compound_state *cs, struct svc_req *req,
 		NFS4_DEBUG(rfs4_debug,
 		    (CE_NOTE, "rfs4_do_opendelprev: can't find state"));
 		resp->status = NFS4ERR_SERVERFAULT;
-		rw_exit(&fp->rf_file_rwlock);
-		rfs4_file_rele(fp);
+		rfs4_file_rele_withunlock(fp);
 		return;
 	}
 
