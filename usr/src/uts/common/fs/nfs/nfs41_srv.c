@@ -288,8 +288,6 @@ static void mds_op_reclaim_complete(nfs_argop4 *, nfs_resop4 *,
 nfsstat4 check_open_access(uint32_t,
 			struct compound_state *, struct svc_req *);
 nfsstat4 rfs4_client_sysid(rfs4_client_t *, sysid_t *);
-int	vop_shrlock(vnode_t *, int, struct shrlock *, int);
-int 	rfs4_shrlock(rfs4_state_t *, int);
 
 static void	mds_free_reply(nfs_resop4 *, compound_state_t *);
 
@@ -5003,10 +5001,8 @@ int	rsec = 0;
 /*ARGSUSED*/
 static void
 mds_do_open(struct compound_state *cs, struct svc_req *req,
-		rfs4_openowner_t *oo, delegreq_t deleg,
-		uint32_t access, uint32_t deny,
-		OPEN4res *resp, int deleg_cur,
-		mds_layout_t *plo)
+    rfs4_openowner_t *oo, delegreq_t deleg, uint32_t access, uint32_t deny,
+    OPEN4res *resp, int deleg_cur, mds_layout_t *plo)
 {
 	rfs4_state_t *sp;
 	rfs4_file_t *fp;
@@ -5015,14 +5011,13 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	uint32_t amodes;
 	uint32_t dmodes;
 	rfs4_deleg_state_t *dsp;
-	struct shrlock shr;
-	struct shr_locowner shr_loco;
 	sysid_t sysid;
 	nfsstat4 status;
 	caller_context_t ct;
 	int fflags = 0;
 	int recall = 0;
 	int err;
+	int first_open;
 
 	/* get the file struct and hold a lock on it during initial open */
 	fp = rfs4_findfile_withlock(cs->instp, cs->vp, &cs->fh, &fcreate);
@@ -5071,12 +5066,16 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	if (access & OPEN4_SHARE_ACCESS_WRITE)
 		fflags |= FWRITE;
 
+	rfs4_dbe_lock(sp->rs_dbe);
+
 	/*
 	 * Calculate the new deny and access mode that this open is adding to
 	 * the file for this open owner;
 	 */
 	dmodes = (deny & ~sp->rs_share_deny);
 	amodes = (access & ~sp->rs_share_access);
+
+	first_open = (sp->rs_share_access & OPEN4_SHARE_ACCESS_BOTH) == 0;
 
 	/*
 	 * Check to see the client has already sent an open for this
@@ -5090,19 +5089,9 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	 */
 
 	if (dmodes || amodes) {
-		shr.s_access = (short)access;
-		shr.s_deny = (short)deny;
-		shr.s_pid = rfs4_dbe_getid(oo->ro_dbe);
-		shr.s_sysid = sysid;
-		shr_loco.sl_pid = shr.s_pid;
-		shr_loco.sl_id = shr.s_sysid;
-		shr.s_owner = (caddr_t)&shr_loco;
-		shr.s_own_len = sizeof (shr_loco);
-
-		if ((err = vop_shrlock(cs->vp, F_SHARE, &shr, fflags)) != 0) {
-
-			resp->status = err == EAGAIN ?
-			    NFS4ERR_SHARE_DENIED : puterrno4(err);
+		if ((err = rfs4_share(sp, access, deny)) != 0) {
+			rfs4_dbe_unlock(sp->rs_dbe);
+			resp->status = err;
 
 			rfs4_file_rele(fp);
 			/* Not a fully formed open; "close" it */
@@ -5113,12 +5102,17 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 		}
 	}
 
-	rfs4_dbe_lock(sp->rs_dbe);
 	rfs4_dbe_lock(fp->rf_dbe);
 
 	/*
 	 * Check to see if this file is delegated and if so, if a
 	 * recall needs to be done.
+	 * This only checke the delegations for this instance.  If another
+	 * instance has a delegation for this file, then the conflict
+	 * detection will be done in the monitor on OPEN.  We just need to
+	 * check if we have a delegation and if the calling client is the
+	 * owner.  The monitor doesn't have enough info to determine if the
+	 * caller is the owner of the delegation or not.
 	 */
 	if (rfs4_check_recall(sp, access)) {
 		rfs4_dbe_unlock(fp->rf_dbe);
@@ -5126,14 +5120,31 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 		rfs4_recall_deleg(fp, FALSE, sp->rs_owner->ro_client);
 		delay(NFS4_DELEGATION_CONFLICT_DELAY);
 		rfs4_dbe_lock(sp->rs_dbe);
+
+		/* if state closed while lock was dropped */
+		if (sp->rs_closed) {
+			if (dmodes || amodes)
+				(void) rfs4_unshare(sp);
+			rfs4_dbe_unlock(sp->rs_dbe);
+			rfs4_file_rele(fp);
+			/* Not a fully formed open; "close" it */
+			if (screate == TRUE)
+				rfs4_state_close(sp, FALSE, FALSE, cs->cr);
+			rfs4_state_rele(sp);
+			resp->status = NFS4ERR_OLD_STATEID;
+			return;
+		}
+
 		rfs4_dbe_lock(fp->rf_dbe);
 		/* Let's see if the delegation was returned */
 		if (rfs4_check_recall(sp, access)) {
 			rfs4_dbe_unlock(fp->rf_dbe);
+			if (dmodes || amodes)
+				(void) rfs4_unshare(sp);
 			rfs4_dbe_unlock(sp->rs_dbe);
 			rfs4_file_rele(fp);
 			rfs4_update_lease(sp->rs_owner->ro_client);
-			(void) vop_shrlock(cs->vp, F_UNSHARE, &shr, fflags);
+
 			/* Not a fully formed open; "close" it */
 			if (screate == TRUE)
 				rfs4_state_close(sp, FALSE, FALSE, cs->cr);
@@ -5156,18 +5167,19 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 	 * However, if this is open with CLAIM_DELEGATE_CUR, then don't
 	 * call VOP_OPEN(), just do the open upgrade.
 	 */
-	if (((sp->rs_share_access & OPEN4_SHARE_ACCESS_BOTH) == 0) &&
-	    !deleg_cur) {
+	if (first_open && !deleg_cur) {
 		ct.cc_sysid = sysid;
-		ct.cc_pid = shr.s_pid;
+		ct.cc_pid = rfs4_dbe_getid(sp->rs_owner->ro_dbe);
 		ct.cc_caller_id = cs->instp->caller_id;
 		ct.cc_flags = CC_DONTBLOCK;
 		err = VOP_OPEN(&cs->vp, fflags, cs->cr, &ct);
 		if (err) {
 			rfs4_dbe_unlock(fp->rf_dbe);
+			if (dmodes || amodes)
+				(void) rfs4_unshare(sp);
 			rfs4_dbe_unlock(sp->rs_dbe);
 			rfs4_file_rele(fp);
-			(void) vop_shrlock(cs->vp, F_UNSHARE, &shr, fflags);
+
 			/* Not a fully formed open; "close" it */
 			if (screate == TRUE)
 				rfs4_state_close(sp, FALSE, FALSE, cs->cr);
@@ -5190,20 +5202,19 @@ mds_do_open(struct compound_state *cs, struct svc_req *req,
 			fflags |= FWRITE;
 		vn_open_upgrade(cs->vp, fflags);
 	}
+	sp->rs_opened = TRUE;
 
 	if (dmodes & OPEN4_SHARE_DENY_READ)
 		fp->rf_deny_read++;
 	if (dmodes & OPEN4_SHARE_DENY_WRITE)
 		fp->rf_deny_write++;
 	fp->rf_share_deny |= deny;
-	sp->rs_share_deny |= deny;
 
 	if (amodes & OPEN4_SHARE_ACCESS_READ)
 		fp->rf_access_read++;
 	if (amodes & OPEN4_SHARE_ACCESS_WRITE)
 		fp->rf_access_write++;
 	fp->rf_share_access |= access;
-	sp->rs_share_access |= access;
 
 	/*
 	 * Check for delegation here. if the deleg argument is not
@@ -5872,9 +5883,7 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * spec effectively requires that open downgrade be atomic.
 	 * At present, fs_shrlock does not have this capability.
 	 */
-	rfs4_dbe_unlock(sp->rs_dbe);
 	rfs4_unshare(sp);
-	rfs4_dbe_lock(sp->rs_dbe);
 
 	fp = sp->rs_finfo;
 	rfs4_dbe_lock(fp->rf_dbe);
@@ -5935,16 +5944,15 @@ mds_op_open_downgrade(nfs_argop4 *argop, nfs_resop4 *resop,
 		fflags |= FWRITE;
 	}
 
-	/* Set the new access and deny modes */
-	sp->rs_share_access = access;
-	sp->rs_share_deny = deny;
 	/* Check that the file is still accessible */
 	ASSERT(fp->rf_share_access);
 
 	rfs4_dbe_unlock(fp->rf_dbe);
 
+	status = rfs4_share(sp, access, deny);
 	rfs4_dbe_unlock(sp->rs_dbe);
-	if ((status = rfs4_share(sp, access, deny)) != NFS4_OK) {
+
+	if (status != NFS4_OK) {
 		*cs->statusp = resp->status = NFS4ERR_SERVERFAULT;
 		goto end;
 	}
