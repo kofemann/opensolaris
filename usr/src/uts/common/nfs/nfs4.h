@@ -331,7 +331,6 @@ typedef struct {
 /*
  * DSS: distributed stable storage
  */
-
 typedef struct rfs4_dss_path {
 	struct rfs4_dss_path	*next; /* for insque/remque */
 	struct rfs4_dss_path	*prev; /* for insque/remque */

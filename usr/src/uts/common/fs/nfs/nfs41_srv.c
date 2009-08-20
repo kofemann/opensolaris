@@ -6666,15 +6666,15 @@ final:
 
 /* Renew Lease */
 void
-mds_refresh(mds_session_t *sn)
+mds_refresh(mds_session_t *sp)
 {
 	rfs4_client_t	*cp;
 
-	ASSERT(sn != NULL && sn->sn_clnt != NULL);
-	rfs4_dbe_lock(sn->sn_dbe);
-	cp = sn->sn_clnt;
-	sn->sn_laccess = gethrestime_sec();
-	rfs4_dbe_unlock(sn->sn_dbe);
+	ASSERT(sp != NULL && sp->sn_clnt != NULL);
+	rfs4_dbe_lock(sp->sn_dbe);
+	cp = sp->sn_clnt;
+	sp->sn_laccess = gethrestime_sec();
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	rfs4_dbe_hold(cp->rc_dbe);
 	rfs4_update_lease(cp);
@@ -6683,7 +6683,7 @@ mds_refresh(mds_session_t *sn)
 
 
 nfsstat4
-mds_lease_chk(mds_session_t *sn)
+mds_lease_chk(mds_session_t *sp)
 {
 	rfs4_client_t	*cp;
 	nfsstat4	 error = NFS4_OK;
@@ -6692,8 +6692,8 @@ mds_lease_chk(mds_session_t *sn)
 	 * If the client lease expired, go ahead and invalidate
 	 * all the sessions associated with this clientid.
 	 */
-	ASSERT(sn != NULL && sn->sn_clnt != NULL);
-	cp = sn->sn_clnt;
+	ASSERT(sp != NULL && sp->sn_clnt != NULL);
+	cp = sp->sn_clnt;
 
 	if (rfs4_lease_expired(cp)) {
 		error = NFS4ERR_BADSESSION;
@@ -7494,7 +7494,7 @@ mds_op_create_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	CREATE_SESSION4resok	*rok = &resp->CREATE_SESSION4res_u.csr_resok4;
 	CREATE_SESSION4resok	*crp;
 	rfs4_client_t		*cp;
-	mds_session_t		*sn;
+	mds_session_t		*sp;
 	session41_create_t	 sca;
 	sequenceid4		 stseq;
 	sequenceid4		 agseq;
@@ -7587,17 +7587,17 @@ replay:
 	sca.cs_xprt = req->rq_xprt;
 	sca.cs_client = cp;
 	sca.cs_aotw = *args;
-	sn = mds_createsession(cs->instp, &sca);
+	sp = mds_createsession(cs->instp, &sca);
 
 	if (sca.cs_error) {
 		*cs->statusp = resp->csr_status = sca.cs_error;
 		rfs4_client_rele(cp);
-		if (sn != NULL)
-			rfs41_session_rele(sn);
+		if (sp != NULL)
+			rfs41_session_rele(sp);
 		goto final;
 	}
 
-	if (sn == NULL) {
+	if (sp == NULL) {
 		*cs->statusp = resp->csr_status = NFS4ERR_SERVERFAULT;
 		rfs4_client_rele(cp);
 		goto final;
@@ -7613,9 +7613,9 @@ replay:
 	*cs->statusp = resp->csr_status =
 	    cp->rc_contrived.cs_slot.status = NFS4_OK;
 	rok->csr_sequence = cp->rc_contrived.xi_sid;
-	bcopy(sn->sn_sessid, rok->csr_sessionid, sizeof (sessionid4));
-	bcopy(sn->sn_sessid, crp->csr_sessionid, sizeof (sessionid4));
-	rok->csr_flags = crp->csr_flags = sn->sn_csflags;
+	bcopy(sp->sn_sessid, rok->csr_sessionid, sizeof (sessionid4));
+	bcopy(sp->sn_sessid, crp->csr_sessionid, sizeof (sessionid4));
+	rok->csr_flags = crp->csr_flags = sp->sn_csflags;
 
 	/*
 	 * XXX: struct assignment of channel4_attrs is broken because
@@ -7632,7 +7632,7 @@ replay:
 	 * from the in-kernel form to the OTW form.
 	 */
 	rok->csr_fore_chan_attrs =
-	    crp->csr_fore_chan_attrs = sn->sn_fore->cn_attrs;
+	    crp->csr_fore_chan_attrs = sp->sn_fore->cn_attrs;
 	rok->csr_back_chan_attrs = crp->csr_back_chan_attrs =
 	    args->csa_back_chan_attrs;
 
@@ -7646,7 +7646,7 @@ replay:
 	 * accounted for while session is being created.
 	 */
 	rfs4_client_rele(cp);
-	rfs41_session_rele(sn);
+	rfs41_session_rele(sp);
 
 final:
 	DTRACE_NFSV4_2(op__create__session__done,
@@ -7661,7 +7661,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 {
 	DESTROY_SESSION4args	*args = &argop->nfs_argop4_u.opdestroy_session;
 	DESTROY_SESSION4res	*resp = &resop->nfs_resop4_u.opdestroy_session;
-	mds_session_t		*sn;
+	mds_session_t		*sp;
 	rfs4_client_t		*cp;
 
 	DTRACE_NFSV4_2(op__destroy__session__start,
@@ -7707,7 +7707,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Find session and check for clientid and lease expiration
 	 */
-	if ((sn = mds_findsession_by_id(cs->instp,
+	if ((sp = mds_findsession_by_id(cs->instp,
 	    args->dsa_sessionid)) == NULL) {
 		*cs->statusp = resp->dsr_status = NFS4ERR_BADSESSION;
 		goto final;
@@ -7724,7 +7724,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * cred that was used to create the session matches and is in
 	 * concordance w/the state protection type used.
 	 */
-	if ((cp = sn->sn_clnt) != NULL) {
+	if ((cp = sp->sn_clnt) != NULL) {
 		switch (cp->rc_state_prot.sp_type) {
 		case SP4_MACH_CRED:
 			cmn_err(CE_NOTE, "op_destroy_session: SP4_MACH_CRED");
@@ -7751,7 +7751,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	}
 
 	/* session rele taken care of in mds_destroysession */
-	*cs->statusp = resp->dsr_status = mds_destroysession(sn);
+	*cs->statusp = resp->dsr_status = mds_destroysession(sp);
 
 final:
 	DTRACE_NFSV4_2(op__destroy__session__done,
@@ -7771,7 +7771,7 @@ mds_op_backchannel_ctl(nfs_argop4 *argop, nfs_resop4 *resop,
  * that need it and refreshing any stale/dead connections.
  */
 static void
-ping_cb_null_thr(mds_session_t *sn)
+ping_cb_null_thr(mds_session_t *sp)
 {
 	CLIENT			*ch = NULL;
 	struct timeval		 tv;
@@ -7782,7 +7782,7 @@ ping_cb_null_thr(mds_session_t *sn)
 	tv.tv_usec = 0;
 
 
-	if ((ch = rfs41_cb_getch(sn)) == NULL)
+	if ((ch = rfs41_cb_getch(sp)) == NULL)
 		goto out;
 
 	/*
@@ -7797,13 +7797,13 @@ ping_cb_null_thr(mds_session_t *sn)
 	 * just exit.
 	 */
 
-	rfs4_dbe_lock(sn->sn_dbe);
-	if (sn->sn_bc.pnginprog != 0) {
-		rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	if (sp->sn_bc.pnginprog != 0) {
+		rfs4_dbe_unlock(sp->sn_dbe);
 		goto out;
 	}
-	sn->sn_bc.pnginprog = 1;
-	rfs4_dbe_unlock(sn->sn_dbe);
+	sp->sn_bc.pnginprog = 1;
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	/*
 	 * Get the number of untested conections
@@ -7820,11 +7820,11 @@ ping_cb_null_thr(mds_session_t *sn)
 	 */
 
 	if (conn_num == 0) {
-		rfs4_dbe_lock(sn->sn_dbe);
-		sn->sn_bc.paths++;
-		if (sn->sn_bc.pngcnt)
-			sn->sn_bc.pngcnt--;
-		rfs4_dbe_unlock(sn->sn_dbe);
+		rfs4_dbe_lock(sp->sn_dbe);
+		sp->sn_bc.paths++;
+		if (sp->sn_bc.pngcnt)
+			sp->sn_bc.pngcnt--;
+		rfs4_dbe_unlock(sp->sn_dbe);
 		goto out;
 	}
 
@@ -7838,17 +7838,17 @@ call_again:
 
 		cs = CLNT_CALL(ch, CB_NULL, xdr_void, NULL, xdr_void, NULL, tv);
 		if (cs == RPC_SUCCESS) {
-			rfs4_dbe_lock(sn->sn_dbe);
-			sn->sn_bc.paths++;
-			sn->sn_bc.pngcnt--;
-			rfs4_dbe_unlock(sn->sn_dbe);
+			rfs4_dbe_lock(sp->sn_dbe);
+			sp->sn_bc.paths++;
+			sp->sn_bc.pngcnt--;
+			rfs4_dbe_unlock(sp->sn_dbe);
 		}
 	}
 
-	rfs4_dbe_lock(sn->sn_dbe);
-	if (sn->sn_bc.paths == 0)
-		sn->sn_bc.failed = 1;
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	if (sp->sn_bc.paths == 0)
+		sp->sn_bc.failed = 1;
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	if (!CLNT_CONTROL(ch, CLGET_CB_UNTESTED, (void *)&conn_num))
 		goto out;
@@ -7866,13 +7866,13 @@ call_again:
 		DTRACE_PROBE(nfss41__i__cb_null_failed_attempts);
 	}
 out:
-	rfs4_dbe_lock(sn->sn_dbe);
-	sn->sn_bc.pnginprog = 0;
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	sp->sn_bc.pnginprog = 0;
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	if (ch != NULL) {
 		CLNT_CONTROL(ch, CLSET_CB_TEST_CLEAR, (void *)NULL);
-		rfs41_cb_freech(sn, ch);
+		rfs41_cb_freech(sp, ch);
 	}
 
 	thread_exit();
@@ -7890,7 +7890,7 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	SEQUENCE4args		*args = &argop->nfs_argop4_u.opsequence;
 	SEQUENCE4res		*resp = &resop->nfs_resop4_u.opsequence;
 	SEQUENCE4resok		*rok  = &resp->SEQUENCE4res_u.sr_resok4;
-	mds_session_t		*sn = cs->sp;
+	mds_session_t		*sp = cs->sp;
 	slot_ent_t		*slt;
 	slotid4			 slot   = args->sa_slotid;
 	nfsstat4		 status = NFS4_OK;
@@ -7911,7 +7911,7 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 
 	cs->sequenced++;
 
-	if ((status = mds_lease_chk(sn)) != NFS4_OK) {
+	if ((status = mds_lease_chk(sp)) != NFS4_OK) {
 		*cs->statusp = resp->sr_status = status;
 		goto final;
 	}
@@ -7927,17 +7927,17 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	 *	  client that there is currently a problem with the CB
 	 *	  path.
 	 */
-	rfs4_dbe_lock(sn->sn_dbe);
-	if (SN_CB_CHAN_EST(sn)) {
-		if (SN_CB_CHAN_OK(sn)) {
-			if (sn->sn_bc.pngcnt > 0 && !sn->sn_bc.pnginprog)
+	rfs4_dbe_lock(sp->sn_dbe);
+	if (SN_CB_CHAN_EST(sp)) {
+		if (SN_CB_CHAN_OK(sp)) {
+			if (sp->sn_bc.pngcnt > 0 && !sp->sn_bc.pnginprog)
 				(void) thread_create(NULL, 0, ping_cb_null_thr,
-				    sn, 0, &p0, TS_RUN, minclsyspri);
+				    sp, 0, &p0, TS_RUN, minclsyspri);
 		} else {
 			cbstat |= SEQ4_STATUS_CB_PATH_DOWN;
 		}
 	}
-	cs->cp = sn->sn_clnt;
+	cs->cp = sp->sn_clnt;
 	rfs4_dbe_hold(cs->cp->rc_dbe);	/* compound state ref */
 	DTRACE_PROBE1(nfss41__i__compound_clid, clientid4,
 	    cs->cp->rc_clientid);
@@ -7945,7 +7945,7 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Valid range is [0, N-1]
 	 */
-	if (slot < 0 || slot >= sn->sn_replay->st_currw) {
+	if (slot < 0 || slot >= sp->sn_replay->st_currw) {
 		/* slot not in valid range */
 		cmn_err(CE_WARN, "mds_op_sequence: Bad Slot");
 		*cs->statusp = resp->sr_status = NFS4ERR_BADSLOT;
@@ -7961,7 +7961,7 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * checks and return NFS4_OK if everything looks kosher;
 	 * this reply will need to be cached by our caller.
 	 */
-	slt = slrc_slot_get(sn->sn_replay, slot);
+	slt = slrc_slot_get(sp->sn_replay, slot);
 	ASSERT(slt != NULL);
 	if (args->sa_sequenceid != slt->se_seqid + 1) {
 		cmn_err(CE_WARN, "mds_op_sequence: Misordered New Request");
@@ -7996,22 +7996,22 @@ mds_op_sequence(nfs_argop4 *argop, nfs_resop4 *resop,
 	 */
 	cs->slotno = slot;
 	cs->seqid = slt->se_seqid;
-	sn->sn_laccess = gethrestime_sec();
+	sp->sn_laccess = gethrestime_sec();
 	rfs4_update_lease(cs->cp);
 
 	/*
 	 * Let's keep it simple for now
 	 */
-	bcopy(sn->sn_sessid, rok->sr_sessionid, sizeof (sessionid4));
+	bcopy(sp->sn_sessid, rok->sr_sessionid, sizeof (sessionid4));
 	rok->sr_sequenceid = slt->se_seqid;
 	rok->sr_slotid = slot;
-	rok->sr_highest_slotid = sn->sn_replay->st_currw;
-	rok->sr_target_highest_slotid = sn->sn_replay->st_currw;
+	rok->sr_highest_slotid = sp->sn_replay->st_currw;
+	rok->sr_target_highest_slotid = sp->sn_replay->st_currw;
 	rok->sr_status_flags |= cbstat;
 	*cs->statusp = resp->sr_status = NFS4_OK;
 
 sessrel:
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 final:
 	DTRACE_NFSV4_2(op__sequence__done,
@@ -8020,33 +8020,33 @@ final:
 }
 
 void
-rfs41_bc_setup(mds_session_t *sn)
+rfs41_bc_setup(mds_session_t *sp)
 {
 	sess_channel_t	*bcp;
 	sess_bcsd_t	*bsdp;
 	bool_t		bcp_init = FALSE;
 
-	ASSERT(sn != NULL);
-	rfs4_dbe_lock(sn->sn_dbe);
+	ASSERT(sp != NULL);
+	rfs4_dbe_lock(sp->sn_dbe);
 
 	/*
 	 * If sn_back == NULL, setup and initialize the
 	 * back channel.
 	 */
-	if (sn->sn_back == NULL) {
+	if (sp->sn_back == NULL) {
 		bcp = rfs41_create_session_channel(CDFS4_BACK);
 		bcp_init = TRUE;
 	} else {
-		bcp = sn->sn_back;
+		bcp = sp->sn_back;
 	}
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_unlock(sp->sn_dbe);
 	ASSERT(bcp != NULL);
 
 	rw_enter(&bcp->cn_lock, RW_WRITER);
 	bcp->cn_dir |= CDFS4_BACK;
 
 	/* now set the conn's state so we know a ping is needed */
-	atomic_add_32(&sn->sn_bc.pngcnt, 1);
+	atomic_add_32(&sp->sn_bc.pngcnt, 1);
 
 	/*
 	 * Initialize back channel specific data
@@ -8072,10 +8072,10 @@ rfs41_bc_setup(mds_session_t *sn)
 	 * If no back channel yet, then we must've created one above.
 	 * Make sure we set the session's back channel appropriately.
 	 */
-	rfs4_dbe_lock(sn->sn_dbe);
-	if (sn->sn_back == NULL)
-		sn->sn_back = bcp;
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	if (sp->sn_back == NULL)
+		sp->sn_back = bcp;
+	rfs4_dbe_unlock(sp->sn_dbe);
 }
 
 /*ARGSUSED*/
@@ -8086,7 +8086,7 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	BIND_CONN_TO_SESSION4args	*args = &argop->a_bc2s;
 	BIND_CONN_TO_SESSION4res	*resp = &resop->r_bc2s;
 	BIND_CONN_TO_SESSION4resok	*rok = &resp->rok_bc2s;
-	mds_session_t			*sn;
+	mds_session_t			*sp;
 	SVCMASTERXPRT			*mxprt;
 	rpcprog_t			 prog;
 	SVCCB_ARGS			cbargs;
@@ -8098,18 +8098,18 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Find session and check for clientid and lease expiration
 	 */
-	if ((sn = mds_findsession_by_id(cs->instp, args->bctsa_sessid))
+	if ((sp = mds_findsession_by_id(cs->instp, args->bctsa_sessid))
 	    == NULL) {
 		*cs->statusp = resp->bctsr_status = NFS4ERR_BADSESSION;
 		goto final;
 	}
-	mds_refresh(sn);
+	mds_refresh(sp);
 
 	bzero(rok, sizeof (SEQUENCE4resok));
 
-	rfs4_dbe_lock(sn->sn_dbe);
-	prog = sn->sn_bc.progno;
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	prog = sp->sn_bc.progno;
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	rok->bctsr_use_conn_in_rdma_mode = FALSE;
 	mxprt = (SVCMASTERXPRT *)req->rq_xprt->xp_master;
@@ -8119,7 +8119,7 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 		/* always map to Fore */
 		rok->bctsr_dir = CDFS4_FORE;
 		SVC_CTL(
-		    req->rq_xprt, SVCCTL_SET_TAG, (void *)sn->sn_sessid);
+		    req->rq_xprt, SVCCTL_SET_TAG, (void *)sp->sn_sessid);
 		break;
 
 	case CDFC4_BACK:
@@ -8127,21 +8127,21 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 		/* always map to Back */
 
 		rok->bctsr_dir = CDFS4_BACK;
-		rfs41_bc_setup(sn);
+		rfs41_bc_setup(sp);
 		SVC_CTL(
-		    req->rq_xprt, SVCCTL_SET_TAG, (void *)sn->sn_sessid);
+		    req->rq_xprt, SVCCTL_SET_TAG, (void *)sp->sn_sessid);
 
 		cbargs.xprt = mxprt;
 		cbargs.prog = prog;
 		cbargs.vers = NFS_CB;
 		cbargs.family = AF_INET;
-		cbargs.tag = (void *)sn->sn_sessid;
+		cbargs.tag = (void *)sp->sn_sessid;
 
 		SVC_CTL(req->rq_xprt, SVCCTL_SET_CBCONN, (void *)&cbargs);
 
 		/* Recall: these bits denote # of active back chan conns */
-		rfs41_seq4_hold(&sn->sn_seq4, SEQ4_STATUS_CB_PATH_DOWN_SESSION);
-		rfs41_seq4_hold(&sn->sn_clnt->rc_seq4,
+		rfs41_seq4_hold(&sp->sn_seq4, SEQ4_STATUS_CB_PATH_DOWN_SESSION);
+		rfs41_seq4_hold(&sp->sn_clnt->rc_seq4,
 		    SEQ4_STATUS_CB_PATH_DOWN);
 		break;
 
@@ -8152,9 +8152,9 @@ mds_op_bind_conn_to_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	/*
 	 * Handcraft the results !
 	 */
-	bcopy(sn->sn_sessid, rok->bctsr_sessid, sizeof (sessionid4));
+	bcopy(sp->sn_sessid, rok->bctsr_sessid, sizeof (sessionid4));
 	*cs->statusp = NFS4_OK;
-	rfs41_session_rele(sn);
+	rfs41_session_rele(sp);
 
 final:
 	DTRACE_NFSV4_2(op__bind__conn__to__session__done,

@@ -103,7 +103,6 @@ typedef struct mds_layout {
 	rfs4_dbe_t	*mlo_dbe;
 	int		mlo_id;
 	layouttype4 	mlo_type;
-
 	layout_core_t	mlo_lc;
 	uint32_t	mlo_flags;
 	rfs4_file_t	*mlo_fp;

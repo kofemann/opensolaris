@@ -372,27 +372,27 @@ sessid_hash(void *key)
 static bool_t
 sessid_compare(rfs4_entry_t entry, void *key)
 {
-	mds_session_t	*sn = (mds_session_t *)entry;
+	mds_session_t	*sp = (mds_session_t *)entry;
 	sessionid4	*idp = (sessionid4 *)key;
 
-	return (bcmp(idp, &sn->sn_sessid, sizeof (sessionid4)) == 0);
+	return (bcmp(idp, &sp->sn_sessid, sizeof (sessionid4)) == 0);
 }
 
 static void *
 sessid_mkkey(rfs4_entry_t entry)
 {
-	mds_session_t *sn = (mds_session_t *)entry;
+	mds_session_t *sp = (mds_session_t *)entry;
 
-	return (&sn->sn_sessid);
+	return (&sp->sn_sessid);
 }
 
 static bool_t
 sess_clid_compare(rfs4_entry_t entry, void *key)
 {
-	mds_session_t *sn = (mds_session_t *)entry;
+	mds_session_t *sp = (mds_session_t *)entry;
 	clientid4 *idp = key;
 
-	return (*idp == sn->sn_clnt->rc_clientid);
+	return (*idp == sp->sn_clnt->rc_clientid);
 }
 
 static void *
@@ -402,38 +402,38 @@ sess_clid_mkkey(rfs4_entry_t entry)
 }
 
 void
-rfs41_session_rele(mds_session_t *sn)
+rfs41_session_rele(mds_session_t *sp)
 {
-	rfs4_dbe_rele(sn->sn_dbe);
+	rfs4_dbe_rele(sp->sn_dbe);
 }
 
 mds_session_t *
 mds_findsession_by_id(nfs_server_instance_t *instp, sessionid4 sessid)
 {
-	mds_session_t	*sn;
+	mds_session_t	*sp;
 	rfs4_index_t	*idx = instp->mds_session_idx;
 	bool_t		 create = FALSE;
 
 	rw_enter(&instp->findsession_lock, RW_READER);
-	sn = (mds_session_t *)rfs4_dbsearch(idx, sessid, &create, NULL,
+	sp = (mds_session_t *)rfs4_dbsearch(idx, sessid, &create, NULL,
 	    RFS4_DBS_VALID);
 	rw_exit(&instp->findsession_lock);
 
-	return (sn);
+	return (sp);
 }
 
 mds_session_t *
 mds_findsession_by_clid(nfs_server_instance_t *instp, clientid4 clid)
 {
-	mds_session_t	*sn;
+	mds_session_t	*sp;
 	bool_t		 create = FALSE;
 
 	rw_enter(&instp->findsession_lock, RW_READER);
-	sn = (mds_session_t *)rfs4_dbsearch(instp->mds_sess_clientid_idx, &clid,
+	sp = (mds_session_t *)rfs4_dbsearch(instp->mds_sess_clientid_idx, &clid,
 	    &create, NULL, RFS4_DBS_VALID);
 	rw_exit(&instp->findsession_lock);
 
-	return (sn);
+	return (sp);
 }
 
 /*
@@ -448,16 +448,16 @@ mds_findsession_by_clid(nfs_server_instance_t *instp, clientid4 clid)
 mds_session_t	*
 mds_createsession(nfs_server_instance_t *instp, session41_create_t *ap)
 {
-	mds_session_t	*sn = NULL;
+	mds_session_t	*sp = NULL;
 	rfs4_index_t	*idx = instp->mds_session_idx;
 
 	rw_enter(&instp->findsession_lock, RW_WRITER);
-	if ((sn = (mds_session_t *)rfs4_dbcreate(idx, (void *)ap)) == NULL) {
+	if ((sp = (mds_session_t *)rfs4_dbcreate(idx, (void *)ap)) == NULL) {
 		DTRACE_PROBE1(mds__srv__createsession__fail,
 		    session41_create_t *, ap);
 	}
 	rw_exit(&instp->findsession_lock);
-	return (sn);
+	return (sp);
 }
 
 /*
@@ -467,15 +467,15 @@ mds_createsession(nfs_server_instance_t *instp, session41_create_t *ap)
  * been established.
  */
 nfsstat4
-mds_session_inval(mds_session_t	*sn)
+mds_session_inval(mds_session_t	*sp)
 {
 	nfsstat4	status;
 
-	ASSERT(sn != NULL);
-	ASSERT(rfs4_dbe_islocked(sn->sn_dbe));
+	ASSERT(sp != NULL);
+	ASSERT(rfs4_dbe_islocked(sp->sn_dbe));
 
-	if (SN_CB_CHAN_EST(sn)) {
-		sess_channel_t	*bcp = sn->sn_back;
+	if (SN_CB_CHAN_EST(sp)) {
+		sess_channel_t	*bcp = sp->sn_back;
 		sess_bcsd_t	*bsdp;
 
 		rw_enter(&bcp->cn_lock, RW_READER);
@@ -494,7 +494,7 @@ mds_session_inval(mds_session_t	*sn)
 
 	/* only invalidate sess if no bc traffic */
 	if (status == NFS4_OK)
-		rfs4_dbe_invalidate(sn->sn_dbe);
+		rfs4_dbe_invalidate(sp->sn_dbe);
 
 	return (status);
 }
@@ -505,13 +505,13 @@ mds_session_inval(mds_session_t	*sn)
  * 3) Eventually the session will be reaped by the reaper_thread
  */
 nfsstat4
-mds_destroysession(mds_session_t *sn)
+mds_destroysession(mds_session_t *sp)
 {
 	nfsstat4	cbs;
 
-	rfs4_dbe_lock(sn->sn_dbe);
-	cbs = mds_session_inval(sn);
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	cbs = mds_session_inval(sp);
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	/*
 	 * The reference/hold maintained from the session to the client
@@ -519,7 +519,7 @@ mds_destroysession(mds_session_t *sn)
 	 * in turn calls mds_session_destroy.
 	 */
 	if (cbs == NFS4_OK)
-		rfs41_session_rele(sn);
+		rfs41_session_rele(sp);
 
 	return (cbs);
 }
@@ -663,7 +663,7 @@ back:
 static bool_t
 mds_session_create(rfs4_entry_t u_entry, void *arg)
 {
-	mds_session_t		*sn = (mds_session_t *)u_entry;
+	mds_session_t		*sp = (mds_session_t *)u_entry;
 	session41_create_t	*ap = (session41_create_t *)arg;
 	sess_channel_t		*ocp = NULL;
 	sid			*sidp;
@@ -676,48 +676,48 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	nfs_server_instance_t *instp;
 	int			max_slots;
 
-	ASSERT(sn != NULL);
-	if (sn == NULL)
+	ASSERT(sp != NULL);
+	if (sp == NULL)
 		return (FALSE);
 
-	instp = dbe_to_instp(sn->sn_dbe);
+	instp = dbe_to_instp(sp->sn_dbe);
 
 	/*
 	 * Back pointer/ref to parent data struct (rfs4_client_t)
 	 */
-	sn->sn_clnt = (rfs4_client_t *)ap->cs_client;
-	rfs4_dbe_hold(sn->sn_clnt->rc_dbe);
+	sp->sn_clnt = (rfs4_client_t *)ap->cs_client;
+	rfs4_dbe_hold(sp->sn_clnt->rc_dbe);
 	mxprt = (SVCMASTERXPRT *)ap->cs_xprt->xp_master;
 
 	/*
 	 * Handcrafting the session id
 	 */
-	sidp = (sid *)&sn->sn_sessid;
+	sidp = (sid *)&sp->sn_sessid;
 	sidp->impl_id.pad0 = 0x00000000;
 	sidp->impl_id.pad1 = 0xFFFFFFFF;
 	sidp->impl_id.start_time = instp->start_time;
-	sidp->impl_id.s_id = (uint32_t)rfs4_dbe_getid(sn->sn_dbe);
+	sidp->impl_id.s_id = (uint32_t)rfs4_dbe_getid(sp->sn_dbe);
 
 	/*
 	 * Process csa_flags; note that CREATE_SESSION4_FLAG_CONN_BACK_CHAN
 	 * is processed below since it affects direction and setup of the
 	 * backchannel accordingly.
 	 */
-	sn->sn_csflags = 0;
+	sp->sn_csflags = 0;
 	if (ap->cs_aotw.csa_flags & CREATE_SESSION4_FLAG_PERSIST)
 		/* XXX - Worry about persistence later */
-		sn->sn_csflags &= ~CREATE_SESSION4_FLAG_PERSIST;
+		sp->sn_csflags &= ~CREATE_SESSION4_FLAG_PERSIST;
 
 	if (ap->cs_aotw.csa_flags & CREATE_SESSION4_FLAG_CONN_RDMA)
 		/* XXX - No RDMA for now */
-		sn->sn_csflags &= ~CREATE_SESSION4_FLAG_CONN_RDMA;
+		sp->sn_csflags &= ~CREATE_SESSION4_FLAG_CONN_RDMA;
 
 	/*
 	 * Initialize some overall sessions values
 	 */
-	sn->sn_bc.progno = ap->cs_aotw.csa_cb_program;
-	sn->sn_laccess = gethrestime_sec();
-	sn->sn_flags = 0;
+	sp->sn_bc.progno = ap->cs_aotw.csa_cb_program;
+	sp->sn_laccess = gethrestime_sec();
+	sp->sn_flags = 0;
 
 	/*
 	 * Check if client has specified that the FORE channel should
@@ -729,12 +729,12 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 
 	if (bdrpc) {
 		SVCCB_ARGS cbargs;
-		prog = sn->sn_bc.progno;
+		prog = sp->sn_bc.progno;
 		cbargs.xprt = mxprt;
 		cbargs.prog = prog;
 		cbargs.vers = NFS_CB;
 		cbargs.family = AF_INET;
-		cbargs.tag = (void *)sn->sn_sessid;
+		cbargs.tag = (void *)sp->sn_sessid;
 
 		if (SVC_CTL(ap->cs_xprt, SVCCTL_SET_CBCONN, (void *)&cbargs)) {
 			/*
@@ -751,11 +751,11 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	/*
 	 * Session's channel flags depending on bdrpc
 	 */
-	sn->sn_bdrpc = bdrpc;
-	dir = sn->sn_bdrpc ? (CDFS4_FORE | CDFS4_BACK) : CDFS4_FORE;
+	sp->sn_bdrpc = bdrpc;
+	dir = sp->sn_bdrpc ? (CDFS4_FORE | CDFS4_BACK) : CDFS4_FORE;
 	ocp = rfs41_create_session_channel(dir);
 	ocp->cn_dir = dir;
-	sn->sn_fore = ocp;
+	sp->sn_fore = ocp;
 
 	/*
 	 * XXX: Let's not worry about channel attribute enforcement now.
@@ -770,7 +770,7 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	 * No need for locks/synchronization at this time,
 	 * since we're barely creating the session.
 	 */
-	if (sn->sn_bdrpc) {
+	if (sp->sn_bdrpc) {
 		/*
 		 * bcsd got built as part of the channel's construction.
 		 */
@@ -779,8 +779,8 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 			    "<Internal Inconsistency>");
 		}
 		slrc_table_create(&bsdp->bsd_stok, slrc_slot_size);
-		sn->sn_csflags |= CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
-		sn->sn_back = ocp;
+		sp->sn_csflags |= CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
+		sp->sn_back = ocp;
 
 	} else {
 		/*
@@ -790,8 +790,8 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 		 * at that point along with its corresponding slot (see
 		 * rfs41_bc_setup).
 		 */
-		sn->sn_csflags &= ~CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
-		sn->sn_back = NULL;
+		sp->sn_csflags &= ~CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
+		sp->sn_back = NULL;
 		prog = 0;
 
 		/*
@@ -810,10 +810,10 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	 * sn_bc fields are all initialized to 0 (via zalloc)
 	 */
 
-	SVC_CTL(ap->cs_xprt, SVCCTL_SET_TAG, (void *)sn->sn_sessid);
+	SVC_CTL(ap->cs_xprt, SVCCTL_SET_TAG, (void *)sp->sn_sessid);
 
-	if (sn->sn_bdrpc) {
-		atomic_add_32(&sn->sn_bc.pngcnt, 1);
+	if (sp->sn_bdrpc) {
+		atomic_add_32(&sp->sn_bc.pngcnt, 1);
 	}
 
 	/*
@@ -823,10 +823,10 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	 * by virtue of the z-alloc.
 	 */
 	max_slots = ocp->cn_attrs.ca_maxrequests;
-	slrc_table_create(&sn->sn_replay, max_slots);
+	slrc_table_create(&sp->sn_replay, max_slots);
 
 	/* only initialize bits relevant to session scope */
-	bzero(&sn->sn_seq4, sizeof (bit_attr_t) * BITS_PER_WORD);
+	bzero(&sp->sn_seq4, sizeof (bit_attr_t) * BITS_PER_WORD);
 	for (i = 1; i <= SEQ4_HIGH_BIT && i != 0; i <<= 1) {
 		uint32_t idx = log2(i);
 
@@ -835,7 +835,7 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 		case SEQ4_STATUS_CB_GSS_CONTEXTS_EXPIRED:
 		case SEQ4_STATUS_CB_PATH_DOWN_SESSION:
 		case SEQ4_STATUS_BACKCHANNEL_FAULT:
-			sn->sn_seq4[idx].ba_bit = i;
+			sp->sn_seq4[idx].ba_bit = i;
 			break;
 		default:
 			/* already bzero'ed */
@@ -843,13 +843,13 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 		}
 	}
 
-	if (sn->sn_bdrpc) {
+	if (sp->sn_bdrpc) {
 		/*
 		 * Recall that for CB_PATH_DOWN[_SESSION], the refcnt
 		 * indicates the number of active back channel conns
 		 */
-		rfs41_seq4_hold(&sn->sn_seq4, SEQ4_STATUS_CB_PATH_DOWN_SESSION);
-		rfs41_seq4_hold(&sn->sn_clnt->rc_seq4,
+		rfs41_seq4_hold(&sp->sn_seq4, SEQ4_STATUS_CB_PATH_DOWN_SESSION);
+		rfs41_seq4_hold(&sp->sn_clnt->rc_seq4,
 		    SEQ4_STATUS_CB_PATH_DOWN);
 	}
 	return (TRUE);
@@ -859,10 +859,10 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 static void
 mds_session_destroy(rfs4_entry_t u_entry)
 {
-	mds_session_t	*sn = (mds_session_t *)u_entry;
+	mds_session_t	*sp = (mds_session_t *)u_entry;
 	sess_bcsd_t	*bsdp;
 
-	if (SN_CB_CHAN_EST(sn) && ((bsdp = CTOBSD(sn->sn_back)) != NULL))
+	if (SN_CB_CHAN_EST(sp) && ((bsdp = CTOBSD(sp->sn_back)) != NULL))
 		slrc_table_destroy(bsdp->bsd_stok);
 
 	/*
@@ -876,32 +876,32 @@ mds_session_destroy(rfs4_entry_t u_entry)
 	/*
 	 * Remove the fore and back channels.
 	 */
-	rfs41_destroy_session_channel(sn, CDFS4_BOTH);
+	rfs41_destroy_session_channel(sp, CDFS4_BOTH);
 
 	/*
 	 * Nuke slot replay cache for this session
 	 */
-	if (sn->sn_replay) {
-		slrc_table_destroy(sn->sn_replay);
-		sn->sn_replay = NULL;
+	if (sp->sn_replay) {
+		slrc_table_destroy(sp->sn_replay);
+		sp->sn_replay = NULL;
 	}
 
 	/*
 	 * Remove reference to parent data struct
 	 */
-	if (sn->sn_clnt)
-		rfs4_client_rele(sn->sn_clnt);
+	if (sp->sn_clnt)
+		rfs4_client_rele(sp->sn_clnt);
 }
 
 static bool_t
 mds_session_expiry(rfs4_entry_t u_entry)
 {
-	mds_session_t	*sn = (mds_session_t *)u_entry;
+	mds_session_t	*sp = (mds_session_t *)u_entry;
 
-	if (sn == NULL || rfs4_dbe_is_invalid(sn->sn_dbe))
+	if (sp == NULL || rfs4_dbe_is_invalid(sp->sn_dbe))
 		return (TRUE);
 
-	if (rfs4_lease_expired(sn->sn_clnt))
+	if (rfs4_lease_expired(sp->sn_clnt))
 		return (TRUE);
 
 	return (FALSE);
@@ -911,14 +911,14 @@ void
 mds_kill_session_callout(rfs4_entry_t u_entry, void *arg)
 {
 	rfs4_client_t *cp = (rfs4_client_t *)arg;
-	mds_session_t *sn = (mds_session_t *)u_entry;
+	mds_session_t *sp = (mds_session_t *)u_entry;
 
-	if (sn->sn_clnt == cp && !(rfs4_dbe_is_invalid(sn->sn_dbe))) {
+	if (sp->sn_clnt == cp && !(rfs4_dbe_is_invalid(sp->sn_dbe))) {
 		/*
 		 * client is going away; so no need to check for
 		 * CB channel traffic before destroying a session.
 		 */
-		rfs4_dbe_invalidate(sn->sn_dbe);
+		rfs4_dbe_invalidate(sp->sn_dbe);
 	}
 }
 
@@ -1795,20 +1795,20 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	CLIENT			*ch;
 	int			 numops;
 	int			 argsz;
-	mds_session_t		*sn;
+	mds_session_t		*sp;
 	slot_ent_t		*p;
 	mds_layout_grant_t	*lg;
 	uint32_t		 sc = 0;
 	int			 retried = 0;
 
 	DTRACE_PROBE1(nfssrv__i__sess_lorecall_fh, mds_lorec_t *, lorec);
-	if ((sn = lorec->lor_sess) == NULL) {
+	if ((sp = lorec->lor_sess) == NULL) {
 		kmem_free(lorec, sizeof (mds_lorec_t));
 		return;
 
-	} else if (!SN_CB_CHAN_EST(sn)) {
+	} else if (!SN_CB_CHAN_EST(sp)) {
 		kmem_free(lorec, sizeof (mds_lorec_t));
-		rfs41_session_rele(sn);
+		rfs41_session_rele(sp);
 		return;
 	}
 
@@ -1823,11 +1823,11 @@ mds_do_lorecall(mds_lorec_t *lorec)
 		break;
 
 	case LAYOUTRECALL4_FSID:
-		sn->sn_clnt->rc_bulk_recall = LAYOUTRETURN4_FSID;
+		sp->sn_clnt->rc_bulk_recall = LAYOUTRETURN4_FSID;
 		break;
 
 	case LAYOUTRECALL4_ALL:
-		sn->sn_clnt->rc_bulk_recall = LAYOUTRETURN4_ALL;
+		sp->sn_clnt->rc_bulk_recall = LAYOUTRETURN4_ALL;
 		break;
 	default:
 		break;
@@ -1849,7 +1849,7 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	(void) str_to_utf8("cb_lo_recall", &cb4_args.tag);
 	cb4_args.minorversion = CB4_MINOR_v1;
 
-	cb4_args.callback_ident = sn->sn_bc.progno;
+	cb4_args.callback_ident = sp->sn_bc.progno;
 	cb4_args.array_len = numops;
 	cb4_args.array = argops;
 
@@ -1859,12 +1859,12 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	/*
 	 * CB_SEQUENCE
 	 */
-	bcopy(sn->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
-	p = svc_slot_alloc(sn);
+	bcopy(sp->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
+	p = svc_slot_alloc(sp);
 	mutex_enter(&p->se_lock);
 	cbsap->csa_slotid = p->se_sltno;
 	cbsap->csa_sequenceid = p->se_seqid;
-	cbsap->csa_highest_slotid = svc_slot_maxslot(sn);
+	cbsap->csa_highest_slotid = svc_slot_maxslot(sp);
 	cbsap->csa_cachethis = FALSE;
 
 	/* no referring calling list for lo recall */
@@ -1909,15 +1909,15 @@ mds_do_lorecall(mds_lorec_t *lorec)
 	 * Set up the timeout for the callback and make the actual call.
 	 * Timeout will be 80% of the lease period.
 	 */
-	timeout.tv_sec = (dbe_to_instp(sn->sn_dbe)->lease_period * 80) / 100;
+	timeout.tv_sec = (dbe_to_instp(sp->sn_dbe)->lease_period * 80) / 100;
 	timeout.tv_usec = 0;
 retry:
-	ch = rfs41_cb_getch(sn);
+	ch = rfs41_cb_getch(sp);
 	(void) CLNT_CONTROL(ch, CLSET_XID, (char *)&zilch);
 	call_stat = clnt_call(ch, CB_COMPOUND,
 	    xdr_CB_COMPOUND4args_srv, (caddr_t)&cb4_args,
 	    xdr_CB_COMPOUND4res, (caddr_t)&cb4_res, timeout);
-	rfs41_cb_freech(sn, ch);
+	rfs41_cb_freech(sp, ch);
 
 	if (call_stat != RPC_SUCCESS) {
 		switch (lorec->lor_type) {
@@ -1940,12 +1940,12 @@ retry:
 			}
 			sc = (call_stat == RPC_CANTSEND ||
 			    call_stat == RPC_CANTRECV);
-			rfs41_cb_path_down(sn, sc);
+			rfs41_cb_path_down(sp, sc);
 			goto done;
 
 		case LAYOUTRECALL4_FSID:
 		case LAYOUTRECALL4_ALL:
-			sn->sn_clnt->rc_bulk_recall = 0;
+			sp->sn_clnt->rc_bulk_recall = 0;
 			/*
 			 * XXX - how do we determine if layouts still
 			 *	 outstanding for fsid/all cases ?
@@ -2036,8 +2036,8 @@ done:
 	kmem_free(lorec, sizeof (mds_lorec_t));
 	rfs4freeargres(&cb4_args, &cb4_res);
 
-	svc_slot_free(sn, p);
-	rfs41_session_rele(sn);
+	svc_slot_free(sp, p);
+	rfs41_session_rele(sp);
 
 	/*
 	 * Per-type post-processing
@@ -2060,19 +2060,19 @@ done:
 static void
 all_lor(rfs4_entry_t entry, void *args)
 {
-	mds_session_t	*sn = (mds_session_t *)entry;
+	mds_session_t	*sp = (mds_session_t *)entry;
 	mds_lorec_t	*lrp = (mds_lorec_t *)args;
 	mds_lorec_t	*lorec;
 
-	if (sn == NULL || lrp == NULL)
+	if (sp == NULL || lrp == NULL)
 		return;
 
-	ASSERT(rfs4_dbe_islocked(sn->sn_dbe));
+	ASSERT(rfs4_dbe_islocked(sp->sn_dbe));
 	lorec = kmem_zalloc(sizeof (mds_lorec_t), KM_SLEEP);
 	bcopy(args, lorec, sizeof (mds_lorec_t));
 
-	rfs4_dbe_hold(sn->sn_dbe);
-	lorec->lor_sess = sn;
+	rfs4_dbe_hold(sp->sn_dbe);
+	lorec->lor_sess = sp;
 
 	(void) thread_create(NULL, 0, mds_do_lorecall, lorec, 0, &p0, TS_RUN,
 	    minclsyspri);
@@ -2100,7 +2100,7 @@ fsid_lor(rfs4_entry_t u_entry, void *args)
 	if (mds_ever_grant_fsid_compare(u_entry,
 	    (void *)(uintptr_t)key.eg_key)) {
 		mds_lorec_t	*lorec;
-		mds_session_t	*sn;
+		mds_session_t	*sp;
 		nfs_server_instance_t	*instp;
 
 		instp = dbe_to_instp(u_entry->dbe);
@@ -2109,12 +2109,12 @@ fsid_lor(rfs4_entry_t u_entry, void *args)
 		bcopy(args, lorec, sizeof (mds_lorec_t));
 
 		ASSERT(eg->eg_cp != NULL);
-		sn = mds_findsession_by_clid(instp, eg->eg_cp->rc_clientid);
-		if (sn == NULL) {
+		sp = mds_findsession_by_clid(instp, eg->eg_cp->rc_clientid);
+		if (sp == NULL) {
 			kmem_free(lorec, sizeof (mds_lorec_t));
 			return;
 		}
-		lorec->lor_sess = sn;	/* hold courtesy of findsession */
+		lorec->lor_sess = sp;	/* hold courtesy of findsession */
 
 		(void) thread_create(NULL, 0, mds_do_lorecall, lorec, 0, &p0,
 		    TS_RUN, minclsyspri);
@@ -2161,7 +2161,7 @@ mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 	rfs4_file_t		*fp = NULL;
 	rfs4_client_t		*cp = NULL;
 	rfs41_grant_list_t	*glp = NULL;
-	mds_session_t		*sn = NULL;
+	mds_session_t		*sp = NULL;
 
 	lorec.lor_type = args->lo_type;
 	switch (args->lo_type) {
@@ -2252,9 +2252,9 @@ mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 				continue;	/* internal inconsistency ? */
 
 			rfs41_lo_grant_hold(glp->lg);
-			sn = mds_findsession_by_clid(mds_server,
+			sp = mds_findsession_by_clid(mds_server,
 			    cp->rc_clientid);
-			if (sn != NULL) {
+			if (sp != NULL) {
 				/*
 				 * Recall in progress !
 				 *
@@ -2279,7 +2279,7 @@ mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 				rfs41_lo_grant_hold(glp->lg);
 
 				rfs4_dbe_unlock(glp->lg->lo_dbe);
-				file_lor((rfs4_entry_t)sn, (void *)&lorec);
+				file_lor((rfs4_entry_t)sp, (void *)&lorec);
 			}
 			rfs41_lo_grant_rele(glp->lg);
 		}
@@ -2354,7 +2354,7 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 	CLIENT			*ch;
 	int			 numops;
 	int			 argsz;
-	mds_session_t		*sn;
+	mds_session_t		*sp;
 	slot_ent_t		*p;
 	notify4			 no;
 	char			*xdr_buf = NULL;
@@ -2366,14 +2366,14 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 
 	if (ndp->nd_sess == NULL)
 		return;
-	sn = ndp->nd_sess;
+	sp = ndp->nd_sess;
 
 	/*
 	 * XXX - until we fix blasting _all_ sessions for one notification,
 	 *	make sure that the session in question at least has the
 	 *	back chan established.
 	 */
-	if (!SN_CB_CHAN_EST(sn))
+	if (!SN_CB_CHAN_EST(sp))
 		return;
 
 	/*
@@ -2392,7 +2392,7 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 	(void) str_to_utf8("cb_notify_device", &cb4_args.tag);
 	cb4_args.minorversion = CB4_MINOR_v1;
 
-	cb4_args.callback_ident = sn->sn_bc.progno;
+	cb4_args.callback_ident = sp->sn_bc.progno;
 	cb4_args.array_len = numops;
 	cb4_args.array = argops;
 
@@ -2402,12 +2402,12 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 	/*
 	 * CB_SEQUENCE
 	 */
-	bcopy(sn->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
-	p = svc_slot_alloc(sn);
+	bcopy(sp->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
+	p = svc_slot_alloc(sp);
 	mutex_enter(&p->se_lock);
 	cbsap->csa_slotid = p->se_sltno;
 	cbsap->csa_sequenceid = p->se_seqid;
-	cbsap->csa_highest_slotid = svc_slot_maxslot(sn);
+	cbsap->csa_highest_slotid = svc_slot_maxslot(sp);
 	cbsap->csa_cachethis = FALSE;
 
 	/* no referring calling list for device notifications */
@@ -2473,15 +2473,15 @@ mds_do_notify_device(mds_notify_device_t *ndp)
 	 * Timeout will be 80% of the lease period.
 	 */
 	timeout.tv_sec =
-	    (dbe_to_instp(sn->sn_dbe)->lease_period * 80) / 100;
+	    (dbe_to_instp(sp->sn_dbe)->lease_period * 80) / 100;
 	timeout.tv_usec = 0;
 
-	ch = rfs41_cb_getch(sn);
+	ch = rfs41_cb_getch(sp);
 	(void) CLNT_CONTROL(ch, CLSET_XID, (char *)&zilch);
 	call_stat = clnt_call(ch, CB_COMPOUND,
 	    xdr_CB_COMPOUND4args_srv, (caddr_t)&cb4_args,
 	    xdr_CB_COMPOUND4res, (caddr_t)&cb4_res, timeout);
-	rfs41_cb_freech(sn, ch);
+	rfs41_cb_freech(sp, ch);
 
 	/*
 	 * Errors from the client are harmless for now, since this
@@ -2507,7 +2507,7 @@ done:
 	kmem_free(ndp, sizeof (*ndp));
 	if (xdr_buf)
 		kmem_free(xdr_buf, xdr_size);
-	svc_slot_free(sn, p);
+	svc_slot_free(sp, p);
 }
 
 static void

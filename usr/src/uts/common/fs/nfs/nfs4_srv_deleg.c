@@ -697,15 +697,15 @@ rfs41_cb_chinit(uint32_t cbprog)
 }
 
 CLIENT *
-rfs41_cb_getch(mds_session_t *sn)
+rfs41_cb_getch(mds_session_t *sp)
 {
 	CLIENT *cbch = NULL;
 	sess_channel_t *bcp;
 	sess_bcsd_t *bsdp;
 
-	rfs4_dbe_lock(sn->sn_dbe);
-	bcp = SNTOBC(sn);
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	bcp = SNTOBC(sp);
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	rw_enter(&bcp->cn_lock, RW_READER);
 	bsdp = CTOBSD(bcp);
@@ -715,8 +715,8 @@ rfs41_cb_getch(mds_session_t *sn)
 		bsdp->bsd_ch_free--;
 		cbch = bsdp->bsd_clnt[bsdp->bsd_ch_free];
 	} else {
-		cbch = rfs41_cb_chinit(sn->sn_bc.progno);
-		CLNT_CONTROL(cbch, CLSET_TAG, (void *)sn->sn_sessid);
+		cbch = rfs41_cb_chinit(sp->sn_bc.progno);
+		CLNT_CONTROL(cbch, CLSET_TAG, (void *)sp->sn_sessid);
 	}
 
 	rw_exit(&bsdp->bsd_rwlock);
@@ -725,14 +725,14 @@ rfs41_cb_getch(mds_session_t *sn)
 }
 
 void
-rfs41_cb_freech(mds_session_t *sn, CLIENT *ch)
+rfs41_cb_freech(mds_session_t *sp, CLIENT *ch)
 {
 	sess_channel_t *bcp;
 	sess_bcsd_t *bsdp;
 
-	rfs4_dbe_lock(sn->sn_dbe);
-	bcp = SNTOBC(sn);
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	bcp = SNTOBC(sp);
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	rw_enter(&bcp->cn_lock, RW_READER);
 	bsdp = CTOBSD(bcp);
@@ -762,15 +762,15 @@ rfs41_cb_freech(mds_session_t *sn, CLIENT *ch)
  * destroy it.
  */
 void
-rfs41_cb_chflush(mds_session_t *sn)
+rfs41_cb_chflush(mds_session_t *sp)
 {
 	CLIENT *ch;
 	sess_channel_t *bcp;
 	sess_bcsd_t *bsdp;
 
-	rfs4_dbe_lock(sn->sn_dbe);
-	bcp = SNTOBC(sn);
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	bcp = SNTOBC(sp);
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	rw_enter(&bcp->cn_lock, RW_READER);
 	bsdp = CTOBSD(bcp);
@@ -947,15 +947,15 @@ rfs4freeargres(CB_COMPOUND4args *args, CB_COMPOUND4res *resp)
 }
 
 slotid4
-svc_slot_maxslot(mds_session_t *sn)
+svc_slot_maxslot(mds_session_t *sp)
 {
 	slotid4		 ms;
 	sess_channel_t	*bcp;
 	sess_bcsd_t	*bsdp;
 
-	rfs4_dbe_lock(sn->sn_dbe);
-	bcp = SNTOBC(sn);
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	bcp = SNTOBC(sp);
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	rw_enter(&bcp->cn_lock, RW_READER);
 	if ((bsdp = CTOBSD(bcp)) == NULL)
@@ -973,15 +973,15 @@ svc_slot_maxslot(mds_session_t *sn)
  * Server-side slot allocations from BC's slot table.
  */
 slot_ent_t *
-svc_slot_alloc(mds_session_t *sn)
+svc_slot_alloc(mds_session_t *sp)
 {
 	slot_ent_t	*p;
 	sess_channel_t	*bcp;
 	sess_bcsd_t	*bsdp;
 
-	rfs4_dbe_lock(sn->sn_dbe);
-	bcp = SNTOBC(sn);
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	bcp = SNTOBC(sp);
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	rw_enter(&bcp->cn_lock, RW_READER);
 	if ((bsdp = CTOBSD(bcp)) == NULL)
@@ -999,16 +999,16 @@ svc_slot_alloc(mds_session_t *sn)
  * Server-side slot allocations from BC's slot table.
  */
 void
-svc_slot_free(mds_session_t *sn, slot_ent_t *p)
+svc_slot_free(mds_session_t *sp, slot_ent_t *p)
 {
 	sess_channel_t	*bcp;
 	sess_bcsd_t	*bsdp;
 
-	ASSERT(sn != NULL);
+	ASSERT(sp != NULL);
 	ASSERT(p != NULL);
-	rfs4_dbe_lock(sn->sn_dbe);
-	bcp = SNTOBC(sn);
-	rfs4_dbe_unlock(sn->sn_dbe);
+	rfs4_dbe_lock(sp->sn_dbe);
+	bcp = SNTOBC(sp);
+	rfs4_dbe_unlock(sp->sn_dbe);
 
 	rw_enter(&bcp->cn_lock, RW_READER);
 	if ((bsdp = CTOBSD(bcp)) == NULL)
@@ -1203,7 +1203,8 @@ rfs41_file_still_delegated(rfs4_deleg_state_t *dsp)
 		return (FALSE);
 	}
 
-	if (fp->rf_delegationlist.next->dsp == NULL) {	/* check deleg cnt */
+	/* check deleg cnt */
+	if (list_next(&fp->rf_delegstatelist, dsp) == NULL) {
 		rfs4_dbe_unlock(fp->rf_dbe);
 		return (FALSE);
 	}
@@ -1238,23 +1239,23 @@ rfs41_cb_seq_rcl_args(CB_SEQUENCE4args *ap, rfs4_deleg_state_t *dsp)
 }
 
 void
-rfs41_cb_path_down(mds_session_t *sn, uint32_t sonly)
+rfs41_cb_path_down(mds_session_t *sp, uint32_t sonly)
 {
 	uint32_t	cp_flag = SEQ4_STATUS_CB_PATH_DOWN;
 	uint32_t	sn_flag = SEQ4_STATUS_CB_PATH_DOWN_SESSION;
 	uint32_t	idx = log2(sn_flag);
 
-	ASSERT(sn != NULL);
-	ASSERT(sn->sn_clnt != NULL);
+	ASSERT(sp != NULL);
+	ASSERT(sp->sn_clnt != NULL);
 
 	/* NB - refcnt for both these bits == active cb connections */
 
 	/* session */
-	sn->sn_seq4[idx].ba_sonly = sonly;
-	rfs41_seq4_rele(&sn->sn_seq4, sn_flag);
+	sp->sn_seq4[idx].ba_sonly = sonly;
+	rfs41_seq4_rele(&sp->sn_seq4, sn_flag);
 
 	/* clientid */
-	rfs41_seq4_rele(&sn->sn_clnt->rc_seq4, cp_flag);
+	rfs41_seq4_rele(&sp->sn_clnt->rc_seq4, cp_flag);
 }
 
 /*
@@ -1268,7 +1269,7 @@ mds_do_cb_recall(rfs4_deleg_state_t *dsp, bool_t trunc)
 	CB_COMPOUND4res		cb4_res;
 	CB_SEQUENCE4args	*cbsap;
 	CB_RECALL4args		*cbrap;
-	mds_session_t		*sn;
+	mds_session_t		*sp;
 	slot_ent_t		*p;
 	nfs_cb_argop4		*argops;
 	int			numops;
@@ -1285,9 +1286,9 @@ mds_do_cb_recall(rfs4_deleg_state_t *dsp, bool_t trunc)
 	/*
 	 * get the session id
 	 */
-	sn = mds_findsession_by_clid(dbe_to_instp(dsp->rds_dbe),
+	sp = mds_findsession_by_clid(dbe_to_instp(dsp->rds_dbe),
 	    dsp->rds_client->rc_clientid);
-	if (sn == NULL) {
+	if (sp == NULL) {
 		/*
 		 * this shouldn't ever happen.  if it does, just
 		 * increment a counter for now and return.
@@ -1312,7 +1313,7 @@ mds_do_cb_recall(rfs4_deleg_state_t *dsp, bool_t trunc)
 	(void) str_to_utf8("mds_cb_recall", &cb4_args.tag);
 	cb4_args.minorversion = CB4_MINOR_v1;
 
-	cb4_args.callback_ident = sn->sn_bc.progno;
+	cb4_args.callback_ident = sp->sn_bc.progno;
 	cb4_args.array_len = numops;
 	cb4_args.array = argops;
 
@@ -1322,12 +1323,12 @@ mds_do_cb_recall(rfs4_deleg_state_t *dsp, bool_t trunc)
 	/*
 	 * CB_SEQUENCE
 	 */
-	bcopy(sn->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
-	p = svc_slot_alloc(sn);
+	bcopy(sp->sn_sessid, cbsap->csa_sessionid, sizeof (sessionid4));
+	p = svc_slot_alloc(sp);
 	mutex_enter(&p->se_lock);
 	cbsap->csa_slotid = p->se_sltno;
 	cbsap->csa_sequenceid = p->se_seqid;
-	cbsap->csa_highest_slotid = svc_slot_maxslot(sn);
+	cbsap->csa_highest_slotid = svc_slot_maxslot(sp);
 	cbsap->csa_cachethis = FALSE;
 
 	/*
@@ -1380,12 +1381,12 @@ mds_do_cb_recall(rfs4_deleg_state_t *dsp, bool_t trunc)
 	timeout.tv_usec = 0;
 
 retry:
-	ch = rfs41_cb_getch(sn);
+	ch = rfs41_cb_getch(sp);
 	(void) CLNT_CONTROL(ch, CLSET_XID, (char *)&zilch);
 	call_stat = clnt_call(ch, CB_COMPOUND,
 	    xdr_CB_COMPOUND4args_srv, (caddr_t)&cb4_args,
 	    xdr_CB_COMPOUND4res, (caddr_t)&cb4_res, timeout);
-	rfs41_cb_freech(sn, ch);
+	rfs41_cb_freech(sp, ch);
 
 	/*
 	 * If the back channel is down, then mark session(s) appropriately
@@ -1413,7 +1414,7 @@ retry:
 			rfs41_revoke_deleg(dsp);
 		}
 		sc = (call_stat == RPC_CANTSEND || call_stat == RPC_CANTRECV);
-		rfs41_cb_path_down(sn, sc);
+		rfs41_cb_path_down(sp, sc);
 		goto done;
 
 	} else if (cb4_res.status != NFS4_OK) {
@@ -1452,10 +1453,10 @@ retry:
 done:
 	if (rcl)
 		rfs41_deleg_rs_rele(dsp);
-	svc_slot_free(sn, p);
+	svc_slot_free(sp, p);
 
 	rfs4freeargres(&cb4_args, &cb4_res);
-	rfs41_session_rele(sn);
+	rfs41_session_rele(sp);
 }
 
 struct recall_arg {
@@ -1548,12 +1549,11 @@ do_recall_file(struct master_recall_args *map)
 	mutex_init(&cpr_lock, NULL, MUTEX_DEFAULT, NULL);
 	CALLB_CPR_INIT(&cpr_info, &cpr_lock, callb_generic_cpr,	"v4RecallFile");
 
-	recall_count = 0;
-
 	/*
 	 * iterate over the file delegation list and
 	 * recall..
 	 */
+	recall_count = 0;
 	for (dsp = list_head(&fp->rf_delegstatelist); dsp != NULL;
 	    dsp = list_next(&fp->rf_delegstatelist, dsp)) {
 
@@ -2303,7 +2303,8 @@ rfs4_deleg_state(struct compound_state *cs,
 	/*
 	 * Place on delegation list for file
 	 */
-	insque(&dsp->rds_delegationlist, fp->delegationlist.prev);
+	ASSERT(!list_link_active(&dsp->rds_node));
+	list_insert_tail(&fp->rf_delegstatelist, dsp);
 
 	dsp->rds_dtype = fp->rf_dinfo->rd_dtype = dtype;
 
@@ -2345,7 +2346,7 @@ rfs4_return_deleg(rfs4_deleg_state_t *dsp, bool_t revoked)
 
 	instp = dbe_to_instp(fp->rf_dbe);
 	if (instp->inst_flags & NFS_INST_v41) {
-		mds_session_t	*sn;
+		mds_session_t	*sp;
 		slotid4		 slot;
 		slot_ent_t	*slp;
 		extern void rfs41_rs_erase(void *);
@@ -2359,24 +2360,20 @@ rfs4_return_deleg(rfs4_deleg_state_t *dsp, bool_t revoked)
 			 * hold). But nothing to get too excited about.
 			 */
 			slot = dsp->rds_rs.slotno;
-			sn = mds_findsession_by_id(instp, dsp->rds_rs.sessid);
-			if (sn != NULL) {
-				rfs4_dbe_lock(sn->sn_dbe);
-				ASSERT(sn->sn_replay != NULL);
-				slp = slrc_slot_get(sn->sn_replay, slot);
+			sp = mds_findsession_by_id(instp, dsp->rds_rs.sessid);
+			if (sp != NULL) {
+				rfs4_dbe_lock(sp->sn_dbe);
+				ASSERT(sp->sn_replay != NULL);
+				slp = slrc_slot_get(sp->sn_replay, slot);
 				if (slp->se_p == dsp) {
 					rfs41_rs_erase(dsp);
 					slp->se_p = NULL;
 				}
-				rfs4_dbe_unlock(sn->sn_dbe);
-				rfs41_session_rele(sn);
+				rfs4_dbe_unlock(sp->sn_dbe);
+				rfs41_session_rele(sp);
 			}
 		}
 	}
-
-	remque(&dsp->rds_delegationlist);
-	dsp->rds_delegationlist.next = dsp->rds_delegationlist.prev =
-	    &dsp->rds_delegationlist;
 
 	/*
 	 * If no more delegations then remove the FEM
