@@ -1692,8 +1692,8 @@ rfs4_file_rele(rfs4_file_t *fp)
 void
 rfs4_file_rele_withunlock(rfs4_file_t *fp)
 {
-	rw_exit(&fp->file_rwlock);
-	rfs4_dbe_rele(fp->dbe);
+	rw_exit(&fp->rf_file_rwlock);
+	rfs4_dbe_rele(fp->rf_dbe);
 }
 
 typedef struct {
