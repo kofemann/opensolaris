@@ -55,8 +55,9 @@ static nnode_vn_md_t *nnode_vn_md_alloc(void);
 static void nnode_vn_md_free(void *);
 static nnode_vn_state_t *nnode_vn_state_alloc(void);
 static void nnode_vn_state_free(void *);
-void nnode_data_setup(nnode_seed_t *, vnode_t *, fsid_t, int, char *);
-void nnode_vn_data_setup(nnode_seed_t *, vnode_t *);
+void nnode_data_setup(nnode_seed_t *, vnode_t *, fsid_t, int, char *,
+    exportinfo_t *);
+void nnode_vn_data_setup(nnode_seed_t *, vnode_t *, exportinfo_t *);
 void nnode_proxy_data_setup(nnode_seed_t *, vnode_t *, fsid_t, int, char *);
 
 int nnode_vn_io_prep(void *, nnode_io_flags_t *, cred_t *,
@@ -144,7 +145,7 @@ nnode_vn_io_prep(void *vdata, nnode_io_flags_t *flags, cred_t *cr,
 	}
 
 	if ((clabel != NULL) && (!blequal(&l_admin_low->tsl_label, clabel)) &&
-	    (!do_rfs_label_check(clabel, vp, labelcheck))) {
+	    (!do_rfs_label_check(clabel, vp, labelcheck, data->nvd_exi))) {
 		rc = EACCES;
 		goto out;
 	}
@@ -565,6 +566,7 @@ nnode_vn_data_alloc(void)
 
 	rc = kmem_cache_alloc(nnode_vn_data_cache, KM_SLEEP);
 	rc->nvd_vp = NULL;
+	rc->nvd_exi = NULL;
 	rc->nvd_flags = 0;
 
 	return (rc);
@@ -624,6 +626,7 @@ nnode_vn_data_free(void *vdata)
 	if (data->nvd_vp)
 		VN_RELE(data->nvd_vp);
 
+/* TDH */
 	kmem_cache_free(nnode_vn_data_cache, data);
 }
 
@@ -650,11 +653,12 @@ nnode_vn_state_free(void *vstate)
 }
 
 void
-nnode_vn_data_setup(nnode_seed_t *seed, vnode_t *vp)
+nnode_vn_data_setup(nnode_seed_t *seed, vnode_t *vp, exportinfo_t *exi)
 {
 	nnode_vn_data_t *data;
 
 	data = nnode_vn_data_alloc();
+	data->nvd_exi = exi;
 	data->nvd_vp = vp;
 	/* no need to VN_HOLD; we steal the reference */
 	seed->ns_data = data;
@@ -663,12 +667,12 @@ nnode_vn_data_setup(nnode_seed_t *seed, vnode_t *vp)
 
 void
 nnode_data_setup(nnode_seed_t *seed, vnode_t *vp, fsid_t fsid,
-    int len, char *fid)
+    int len, char *fid, exportinfo_t *exi)
 {
 	if (nfs_ds_present)
 		nnode_proxy_data_setup(seed, vp, fsid, len, fid);
 	else
-		nnode_vn_data_setup(seed, vp);
+		nnode_vn_data_setup(seed, vp, exi);
 }
 
 /*
@@ -703,7 +707,7 @@ nnode_build_v3(nnode_seed_t *seed, void *vv3seed)
 	fsid = v3seed->nsv_fh->fh3_fsid;
 	fidlen = v3seed->nsv_fh->fh3_len;
 	fid = v3seed->nsv_fh->fh3_data;
-	nnode_data_setup(seed, vp, fsid, fidlen, fid);
+	nnode_data_setup(seed, vp, fsid, fidlen, fid, v3seed->nsv_exi);
 	md = nnode_vn_md_alloc();
 	md->nvm_vp = vp;
 	VN_HOLD(md->nvm_vp);
@@ -749,7 +753,9 @@ nnode_build_vp(nnode_seed_t *seed, void *vvpseed)
 	fsid = vpseed->nsv_fsid;
 	fidlen = vpseed->nsv_fidp->fid_len;
 	fid = vpseed->nsv_fidp->fid_data;
-	nnode_data_setup(seed, vpseed->nsv_vp, fsid, fidlen, fid);
+
+	/* XXX: Is it okay to pass NULL for the exi? */
+	nnode_data_setup(seed, vpseed->nsv_vp, fsid, fidlen, fid, NULL);
 	VN_HOLD(vpseed->nsv_vp);
 	md = nnode_vn_md_alloc();
 	md->nvm_vp = vpseed->nsv_vp;
@@ -813,7 +819,7 @@ nnode_build_v41(nnode_seed_t *seed, void *vfh)
 	fsid = fmt->fh.v1.export_fsid;
 	fidlen = fmt->fh.v1.obj_fid.len;
 	fid = fmt->fh.v1.obj_fid.val;
-	nnode_data_setup(seed, vp, fsid, fidlen, fid);
+	nnode_data_setup(seed, vp, fsid, fidlen, fid, exi);
 	md = nnode_vn_md_alloc();
 	md->nvm_vp = vp;
 	VN_HOLD(md->nvm_vp);
@@ -871,7 +877,7 @@ nnode_build_v4(nnode_seed_t *seed, void *vfh)
 	fsid = exi->exi_fsid;
 	fidlen = key->nfk_fid->fid_len;
 	fid = key->nfk_fid->fid_data;
-	nnode_data_setup(seed, vp, fsid, fidlen, fid);
+	nnode_data_setup(seed, vp, fsid, fidlen, fid, exi);
 	md = nnode_vn_md_alloc();
 	md->nvm_vp = vp;
 	VN_HOLD(md->nvm_vp);

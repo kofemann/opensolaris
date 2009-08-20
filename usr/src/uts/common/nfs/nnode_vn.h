@@ -44,6 +44,7 @@ typedef struct {
 	kmutex_t nvd_lock;
 	uint32_t nvd_flags;
 	vattr_t nvd_vattr;
+	exportinfo_t *nvd_exi;
 } nnode_vn_data_t;
 #define	NNODE_NVD_VATTR_VALID	0x01
 

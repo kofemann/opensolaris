@@ -109,7 +109,7 @@ ctl_mds_clnt_remove_file(nfs_server_instance_t *instp, fsid_t fsid,
 		ds_addrlist_t		*dp;
 		nfs_server_instance_t	*instp;
 
-		instp = dbe_to_instp(lp->dbe);
+		instp = dbe_to_instp(lp->mlo_dbe);
 
 		/*
 		 * We reuse the 0th fh!
