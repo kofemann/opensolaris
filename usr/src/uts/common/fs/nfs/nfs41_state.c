@@ -1472,6 +1472,9 @@ mds_layout_grant_create(rfs4_entry_t u_entry, void *arg)
 	rfs4_file_t *fp = ((mds_layout_grant_t *)arg)->lo_fp;
 	rfs4_client_t *cp = ((mds_layout_grant_t *)arg)->lo_cp;
 
+	/*
+	 * We hold onto the rfs4_file_t until we are done with it.
+	 */
 	rfs4_dbe_hold(fp->rf_dbe);
 
 	lg->lo_status = LO_GRANTED;
@@ -1500,6 +1503,12 @@ static void
 mds_layout_grant_destroy(rfs4_entry_t entry)
 {
 	mds_layout_grant_t *lg = (mds_layout_grant_t *)entry;
+
+	/*
+	 * The code which invalidated this node should have
+	 * gone ahead and released the rfs4_file_t.
+	 */
+	ASSERT(lgp->fp == NULL);
 
 	mutex_destroy(&lg->lo_lock);
 
@@ -1689,9 +1698,17 @@ struct grant_arg {
 void
 mds_rm_grant_callout(rfs4_entry_t u_entry, void *arg)
 {
-	mds_layout_grant_t *lg = (mds_layout_grant_t *)u_entry;
-	struct grant_arg *ga = (struct grant_arg *)arg;
-	vnode_t *vp = lg->lo_fp->rf_vp;
+	mds_layout_grant_t	*lg = (mds_layout_grant_t *)u_entry;
+	struct grant_arg	*ga = (struct grant_arg *)arg;
+	vnode_t			*vp;
+
+	if (rfs4_dbe_skip_or_invalid(lg->lo_dbe)) {
+		ASSERT(lg->lo_fp == NULL);
+		return;
+	}
+
+	ASSERT(lg->lo_fp != NULL);
+	vp = lg->lo_fp->rf_vp;
 
 	if (ga->cp == lg->lo_cp && vp && ga->vp->v_vfsp == vp->v_vfsp) {
 		rfs4_dbe_lock(lg->lo_cp->rc_dbe);
