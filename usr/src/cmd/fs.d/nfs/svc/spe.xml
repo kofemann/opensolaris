@@ -65,6 +65,13 @@
 	    	<service_fmri value='svc:/system/filesystem/minimal' />
 	</dependency>
 
+	<dependency name='server'
+	    grouping='require_all'
+	    restart_on='error'
+	    type='service'>
+	    	<service_fmri value='svc:/network/nfs/server' />
+	</dependency>
+
 	<exec_method
 	    type='method'
 	    name='start'

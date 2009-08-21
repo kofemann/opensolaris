@@ -95,7 +95,6 @@ sped_load(void)
 	const char	*whoami = "sped_load";
 	static int	setup_done = 0;
 
-
 	sped_daemon_load("/etc/policies.spe", "/etc/npools.spe");
 	sped_populate_policies(Spe_policies);
 	sped_populate_npools(Spe_npools);
@@ -173,8 +172,7 @@ daemon_init(void)
 static int
 start_svcs(void)
 {
-	sped_populate_policies(Spe_policies);
-	sped_populate_npools(Spe_npools);
+	sped_load();
 
 	/*
 	 * Wait for incoming calls
