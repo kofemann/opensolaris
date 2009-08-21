@@ -2193,7 +2193,6 @@ mds_do_lookup(char *nm, uint_t buflen, struct svc_req *req,
 	}
 
 	if (different_export) {
-
 		bzero(&fid, sizeof (fid));
 		fid.fid_len = MAXFIDSZ;
 		error = vop_fid_pseudo(vp, &fid);
@@ -3199,9 +3198,7 @@ do_ctl_mds_remove(vnode_t *vp, rfs4_file_t *fp, compound_state_t *cs)
 	 * Known Problems with this implementation of REMOVE:
 	 * 1. Not attempting to read a layout from disk could mean
 	 * that if an on-disk layout did exist, storage on the data
-	 * servers will not be freed.  Although, the implementation
-	 * doesn't currently persistenly store layouts so we'll never
-	 * run into this situation.
+	 * servers will not be freed.
 	 *
 	 * 2. The server populates the layout stored in the rfs4_file_t
 	 * when it receives a LAYOUTGET.  If the file has been written
@@ -3214,9 +3211,13 @@ do_ctl_mds_remove(vnode_t *vp, rfs4_file_t *fp, compound_state_t *cs)
 	 * cause leaked space on the the data server.
 	 */
 	if (fp->rf_mlo != NULL) {
+		bzero(&fid, sizeof (fid));
+		fid.fid_len = MAXFIDSZ;
+
 		error = vop_fid_pseudo(vp, &fid);
 		if (error) {
-			DTRACE_PROBE(nfss__e__vop_fid_pseudo_failed);
+			DTRACE_NFSV4_1(nfss__e__vop_fid_pseudo_failed,
+			    int, error);
 			return (error);
 		} else {
 			nfs41_fid.len = fid.fid_len;

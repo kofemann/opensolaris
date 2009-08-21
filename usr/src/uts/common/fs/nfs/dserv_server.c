@@ -138,11 +138,11 @@ static SVC_CALLOUT_TABLE dserv_sct = {
  * protocol)
  */
 struct ctl_mds_srv_disp {
-	void	(*proc)();
-	xdrproc_t decode_args;
-	xdrproc_t encode_reply;
-	void	(*resfree)();
-	char    *name;
+	void		(*proc)();
+	xdrproc_t	decode_args;
+	xdrproc_t	encode_reply;
+	void		(*resfree)();
+	char		*name;
 };
 
 union ctl_mds_srv_arg {
@@ -1154,66 +1154,100 @@ dserv_svc(dserv_svc_args_t *svcargs)
 }
 
 /* ARGSUSED */
-void
+static void
 ds_commit(DS_COMMITargs *argp, DS_COMMITres *resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
+
+final:
+
+	DTRACE_NFSV4_1(ds_op__commit__done, DS_COMMITres *, resp);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_getattr(DS_GETATTRargs *argp, DS_GETATTRres *resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
+
+final:
+
+	DTRACE_NFSV4_1(ds_op__getattr__done, DS_GETATTRres *, resp);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_invalidate(DS_INVALIDATEargs *argp, DS_INVALIDATEres *resp,
     struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
+
+final:
+
+	DTRACE_NFSV4_1(ds_op__invalidate__done, DS_INVALIDATEres *, resp);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_list(DS_LISTargs *argp, DS_LISTres *resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
+
+final:
+
+	DTRACE_NFSV4_1(ds_op__list__done, DS_LISTres *, resp);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_obj_move(DS_OBJ_MOVEargs *argp, DS_OBJ_MOVEres *resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
+
+final:
+
+	DTRACE_NFSV4_1(ds_op__obj_move__done, DS_OBJ_MOVEres *, resp);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_obj_move_abort(DS_OBJ_MOVE_ABORTargs *argp, DS_OBJ_MOVE_ABORTres *resp,
     struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
+
+final:
+
+	DTRACE_NFSV4_1(ds_op__obj_move_abort__done,
+	    DS_OBJ_MOVE_ABORTres *, resp);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_obj_move_status(DS_OBJ_MOVE_STATUSargs *argp, DS_OBJ_MOVE_STATUSres *resp,
     struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
+
+final:
+
+	DTRACE_NFSV4_1(ds_op__obj_move_status__done,
+	    DS_OBJ_MOVE_STATUSres *, resp);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_pnfsstat(DS_PNFSSTATargs *argp, DS_PNFSSTATres *resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
+
+final:
+
+	DTRACE_NFSV4_1(ds_op__pnfsstat__done, DS_PNFSSTATres *, resp);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_read(DS_READargs *argp, DS_READres *resp, struct svc_req *req)
 {
 	nnode_t *nn = NULL;
@@ -1235,7 +1269,7 @@ ds_read(DS_READargs *argp, DS_READres *resp, struct svc_req *req)
 	ds_fh = get_mds_ds_fh(otw_fh);
 	if ((ds_fh == NULL)) {
 		resp->status = DSERR_BADHANDLE;
-		return;
+		goto final;
 	}
 	nerr = nnode_from_fh_ds(&nn, ds_fh);
 	free_mds_ds_fh(ds_fh);
@@ -1245,10 +1279,10 @@ ds_read(DS_READargs *argp, DS_READres *resp, struct svc_req *req)
 		break;
 	case ESTALE:
 		resp->status = DSERR_STALE;
-		goto out;
+		goto final;
 	default:
 		resp->status = DSERR_BADHANDLE;
-		goto out;
+		goto final;
 	}
 
 	ct.cc_sysid = 0;
@@ -1262,7 +1296,7 @@ ds_read(DS_READargs *argp, DS_READres *resp, struct svc_req *req)
 	if (argp->count == 0) {
 		rrok->count = 0;
 		resp->status = DS_OK;
-		goto out;
+		goto final;
 	}
 
 	/*
@@ -1293,7 +1327,7 @@ ds_read(DS_READargs *argp, DS_READres *resp, struct svc_req *req)
 		    offset, length, NULL);
 		if (nerr != 0) {
 			resp->status = DSERR_INVAL;
-			goto out;
+			goto final;
 		}
 		prep = 1;
 
@@ -1303,7 +1337,7 @@ ds_read(DS_READargs *argp, DS_READres *resp, struct svc_req *req)
 			rrok->rdv.rdv_val[i].offset = offset;
 			rrok->rdv.rdv_val[i].data.data_len = 0;
 			rrok->rdv.rdv_val[i].data.data_val = NULL;
-			goto out;
+			goto final;
 		}
 
 		if (length > rfs4_tsize(req))
@@ -1329,7 +1363,7 @@ ds_read(DS_READargs *argp, DS_READres *resp, struct svc_req *req)
 			if (base != NULL)
 				kmem_free(base, length);
 			resp->status = DSERR_INVAL;
-			goto out;
+			goto final;
 		}
 
 		ASSERT(uio.uio_resid >= 0);
@@ -1357,11 +1391,15 @@ ds_read(DS_READargs *argp, DS_READres *resp, struct svc_req *req)
 
 	resp->status = DS_OK;
 
-out:
+final:
+
 	if (prep)
 		nnop_io_release(nn, nnioflags, &ct);
+
 	if (nn != NULL)
 		nnode_rele(&nn);
+
+	DTRACE_NFSV4_1(ds_op__read__done, DS_READres *, resp);
 }
 
 static void
@@ -1380,31 +1418,32 @@ ds_read_free(union ctl_mds_srv_res *dres)
 }
 
 /* ARGSUSED */
-void
+static void
 ctl_mds_srv_remove(CTL_MDS_REMOVEargs *argp, CTL_MDS_REMOVEres *resp,
     struct svc_req *req)
 {
-	nnode_t *nn = NULL;
-	nnode_io_flags_t nnioflags = NNODE_IO_REMOVE_OBJ;
+	nnode_t			*nn = NULL;
+	nnode_io_flags_t	nnioflags = NNODE_IO_REMOVE_OBJ;
 
 	if (argp->type == CTL_MDS_RM_OBJ) {
-		nnode_error_t nerr;
-		int error = 0;
-		int i;
+		nnode_error_t	nerr;
+		int		error = 0;
+		int		i;
 
 		/*
 		 * A CTL_MDS_REMOVE of type CTL_MDS_RM_OBJ allows the
 		 * removal of one to many objects.
 		 */
 		for (i = 0; i < argp->CTL_MDS_REMOVEargs_u.obj.obj_len; i++) {
-			mds_ds_fh *ds_fh;
-			nfs_fh4 *otw_fh =  &(argp->CTL_MDS_REMOVEargs_u.
+			mds_ds_fh	*ds_fh;
+
+			nfs_fh4	*otw_fh =  &(argp->CTL_MDS_REMOVEargs_u.
 			    obj.obj_val[i]);
 
 			ds_fh = get_mds_ds_fh(otw_fh);
 			if (ds_fh == NULL) {
 				resp->status = DSERR_BADHANDLE;
-				goto out;
+				goto final;
 			}
 
 			if (nn != NULL)
@@ -1417,12 +1456,12 @@ ctl_mds_srv_remove(CTL_MDS_REMOVEargs *argp, CTL_MDS_REMOVEres *resp,
 				break;
 			case ESTALE:
 				resp->status = DSERR_STALE;
-				goto out;
+				goto final;
 			default:
 				DTRACE_PROBE1(dserv__removefh__problem,
 				    nnode_error_t, nerr);
 				resp->status = DSERR_BADHANDLE;
-				goto out;
+				goto final;
 			}
 
 			/* Mark the object for removal. */
@@ -1445,7 +1484,7 @@ ctl_mds_srv_remove(CTL_MDS_REMOVEargs *argp, CTL_MDS_REMOVEres *resp,
 			    NULL);
 			if (nerr) {
 				resp->status = DSERR_IO;
-				goto out;
+				goto final;
 			}
 
 			/*
@@ -1466,7 +1505,7 @@ ctl_mds_srv_remove(CTL_MDS_REMOVEargs *argp, CTL_MDS_REMOVEres *resp,
 				break;
 			default:
 				resp->status = DSERR_IO;
-				goto out;
+				goto final;
 			}
 		}
 
@@ -1481,13 +1520,16 @@ ctl_mds_srv_remove(CTL_MDS_REMOVEargs *argp, CTL_MDS_REMOVEres *resp,
 		resp->status = DSERR_NOTSUPP;
 	}
 
-out:
+final:
+
 	/*
 	 * Remove the reference on the nnode.
 	 * The nnode will be garbage collected later.
 	 */
 	if (nn != NULL)
 		nnode_rele(&nn);
+
+	DTRACE_NFSV4_1(ds_op__remove__done, CTL_MDS_REMOVEres *, resp);
 }
 
 static int
@@ -1509,7 +1551,7 @@ dserv_nnode_remove_obj(void *vdnd)
 	if (error) {
 		dmu_tx_abort(tx);
 		kmem_free(hex_fid, strlen(hex_fid) + 1);
-		return (error);
+		goto final;
 	}
 
 	error = zap_remove(dnd->dnd_objset, DMU_PNFS_FID_TO_OBJID_OBJECT,
@@ -1522,32 +1564,46 @@ dserv_nnode_remove_obj(void *vdnd)
 	if (!error)
 		error = dmu_free_object(dnd->dnd_objset, dnd->dnd_object);
 
+final:
+
 	return (error);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_setattr(DS_SETATTRargs *argp, DS_SETATTRres *resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
+
+final:
+
+	DTRACE_NFSV4_1(ds_op__setattr__done, DS_SETATTRres *, resp);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_stat(DS_STATargs *argp, DS_STATres * resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
+
+final:
+
+	DTRACE_NFSV4_1(ds_op__stat__done, DS_STATres *, resp);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_snap(DS_SNAPargs *argp, DS_SNAPres *resp, struct svc_req *req)
 {
 	resp->status = DSERR_NOTSUPP;
+
+final:
+
+	DTRACE_NFSV4_1(ds_op__snap__done, DS_SNAPres *, resp);
 }
 
 /* ARGSUSED */
-void
+static void
 ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
 {
 	nnode_t *nn = NULL;
@@ -1569,7 +1625,7 @@ ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
 	ds_fh = get_mds_ds_fh(otw_fh);
 	if ((ds_fh == NULL)) {
 		resp->status = DSERR_BADHANDLE;
-		return;
+		goto final;
 	}
 	nerr = nnode_from_fh_ds(&nn, ds_fh);
 	free_mds_ds_fh(ds_fh);
@@ -1579,10 +1635,10 @@ ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
 		break;
 	case ESTALE:
 		resp->status = DSERR_STALE;
-		goto out;
+		goto final;
 	default:
 		resp->status = DSERR_BADHANDLE;
-		goto out;
+		goto final;
 	}
 
 	ct.cc_sysid = 0;
@@ -1596,7 +1652,7 @@ ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
 	if (argp->count == 0) {
 		wrok->wrv.wrv_len = 0;
 		resp->status = DS_OK;
-		goto out;
+		goto final;
 	}
 
 	/*
@@ -1624,7 +1680,7 @@ ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
 		if (nerr != 0) {
 			resp->status = DSERR_INVAL;
 			wrok->wrv.wrv_val[i] = 0;
-			goto out;
+			goto final;
 		}
 		prep = 1;
 
@@ -1649,7 +1705,7 @@ ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
 
 		if (nerr) {
 			resp->status = DSERR_INVAL;
-			goto out;
+			goto final;
 		}
 
 		ASSERT(uio.uio_resid >= 0);
@@ -1662,11 +1718,15 @@ ds_write(DS_WRITEargs *argp, DS_WRITEres *resp, struct svc_req *req)
 
 	resp->status = DS_OK;
 
-out:
+final:
+
 	if (prep)
 		nnop_io_release(nn, nnioflags, &ct);
+
 	if (nn != NULL)
 		nnode_rele(&nn);
+
+	DTRACE_NFSV4_1(ds_op__write__done, DS_WRITEres *, resp);
 }
 
 static void
@@ -1738,7 +1798,7 @@ dserv_dispatch(struct svc_req *req, SVCXPRT *xprt)
 	 * XXX - counters of any kind
 	 */
 	bzero(&dres, sizeof (union ctl_mds_srv_res));
-	(*disp->proc)(&darg, &dres, req);
+	(void) (*disp->proc)(&darg, &dres, req);
 
 	/*
 	 * send the reply
@@ -1760,7 +1820,6 @@ dserv_dispatch(struct svc_req *req, SVCXPRT *xprt)
 	if (!SVC_FREEARGS(xprt, disp->decode_args, (char *)&darg)) {
 		DTRACE_PROBE(dserv__e__svc_freeargs);
 	}
-
 }
 
 /* ARGSUSED */
@@ -1964,7 +2023,7 @@ dserv_nnode_data_getobject(dserv_nnode_data_t *dnd, int create)
 		rw_exit(&dnd->dnd_rwlock);
 		rw_enter(&dnd->dnd_rwlock, RW_WRITER);
 		if (dnd->dnd_flags & DSERV_NNODE_FLAG_OBJECT)
-			goto out;
+			goto final;
 	}
 
 	ASSERT(dnd->dnd_flags & DSERV_NNODE_FLAG_OBJSET);
@@ -1978,11 +2037,11 @@ dserv_nnode_data_getobject(dserv_nnode_data_t *dnd, int create)
 	if (rc != 0) {
 		DTRACE_PROBE1(dserv__e__dserv_getobject_get_object_state,
 		    nnode_error_t, rc);
-		goto out;
+		goto final;
 	}
 
 	dnd->dnd_flags |= DSERV_NNODE_FLAG_OBJECT;
-out:
+final:
 	rw_downgrade(&dnd->dnd_rwlock);
 	return (rc);
 }

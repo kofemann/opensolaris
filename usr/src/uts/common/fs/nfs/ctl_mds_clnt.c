@@ -83,19 +83,12 @@ int
 ctl_mds_clnt_remove_file(nfs_server_instance_t *instp, fsid_t fsid,
     nfs41_fid_t fid, mds_layout_t *lp)
 {
-	CTL_MDS_REMOVEargs args;
-	CTL_MDS_REMOVEres res;
-	int i, error = 0;
+	CTL_MDS_REMOVEargs	args;
+	CTL_MDS_REMOVEres	res;
 
-	/*
-	 * Right now all of the data server file handles for a single
-	 * file on the MDS are the same.  Due to this the CTL_MDS_REMOVEargs
-	 * can be formed once for all calls to the data servers.
-	 * This will need to change in the future in order to handle
-	 * when the MDS_SID is included in the file handle.  The MDS_SID
-	 * will be different for each different data server/pNFS dataset
-	 * that the layout involves.
-	 */
+	int	i;
+	int	error = 0;
+
 	args.type = CTL_MDS_RM_OBJ;
 	args.CTL_MDS_REMOVEargs_u.obj.obj_len = 1;
 	args.CTL_MDS_REMOVEargs_u.obj.obj_val = kmem_alloc(sizeof (nfs_fh4),
@@ -135,6 +128,8 @@ ctl_mds_clnt_remove_file(nfs_server_instance_t *instp, fsid_t fsid,
 		error = ctl_mds_clnt_call(dp, CTL_MDS_REMOVE,
 		    xdr_CTL_MDS_REMOVEargs, (caddr_t)&args,
 		    xdr_CTL_MDS_REMOVEres, (caddr_t)&res);
+
+		DTRACE_NFSV4_1(ctl_mds__i__remove_call, int, error);
 
 		/*
 		 * XXX: For now, ignore the error and results
