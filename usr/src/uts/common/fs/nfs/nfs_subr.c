@@ -3453,11 +3453,6 @@ nfs_subrinit(void)
 	kstat_t *nfs_debug_kstat;
 
 	/*
-	 * initialize the nfs_range utility
-	 */
-	nfs_range_init();
-
-	/*
 	 * Create a kstat to maintain debug statistics across all zones
 	 */
 	ndata = sizeof (clstat_debug) / sizeof (kstat_named_t);
@@ -3470,6 +3465,10 @@ nfs_subrinit(void)
 	}
 #endif
 
+	/*
+	 * initialize the nfs_range utility
+	 */
+	nfs_range_init();
 
 	/*
 	 * Allocate and initialize the rnode hash queues
