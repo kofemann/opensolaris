@@ -88,6 +88,16 @@ const dmu_object_type_info_t dmu_ot[DMU_OT_NUMTYPES] = {
 	{	zap_byteswap,		TRUE,	"ZFS user/group used"	},
 	{	zap_byteswap,		TRUE,	"ZFS user/group quota"	},
 	{	zap_byteswap,		TRUE,	"snapshot refcount tags"},
+	{	zap_byteswap,		TRUE,	"pNFS Dummy 01"		},
+	{	zap_byteswap,		TRUE,	"pNFS Dummy 02"		},
+	{	zap_byteswap,		TRUE,	"pNFS Dummy 03"		},
+	{	zap_byteswap,		TRUE,	"pNFS Dummy 04"		},
+	{	zap_byteswap,		TRUE,	"pNFS Dummy 05"		},
+	{	zap_byteswap,		TRUE,	"pNFS Dummy 06"		},
+	{	zap_byteswap,		TRUE,	"pNFS Dummy 07"		},
+	{	zap_byteswap,		TRUE,	"pNFS Dummy 08"		},
+	{	zap_byteswap,		TRUE,	"pNFS Dummy 09"		},
+	{	zap_byteswap,		TRUE,	"pNFS Dummy 10"		},
 	{	byteswap_uint8_array,	FALSE,	"pNFS Data"		},
 	{	zap_byteswap,		TRUE,	"pNFS FH Map"		}
 };

@@ -118,6 +118,17 @@ typedef enum dmu_object_type {
 	DMU_OT_USERGROUP_USED,		/* ZAP */
 	DMU_OT_USERGROUP_QUOTA,		/* ZAP */
 	DMU_OT_USERREFS,		/* ZAP */
+	/* List of dummy fields to stop flag days */
+	DMU_OT_DUMMY_01,
+	DMU_OT_DUMMY_02,
+	DMU_OT_DUMMY_03,
+	DMU_OT_DUMMY_04,
+	DMU_OT_DUMMY_05,
+	DMU_OT_DUMMY_06,
+	DMU_OT_DUMMY_07,
+	DMU_OT_DUMMY_08,
+	DMU_OT_DUMMY_09,
+	DMU_OT_DUMMY_10,
 	/* pNFS Data Server: */
 	DMU_OT_PNFS_DATA,
 	DMU_OT_PNFS_INFO,		/* ZAP */
