@@ -1508,7 +1508,7 @@ mds_layout_grant_destroy(rfs4_entry_t entry)
 	 * The code which invalidated this node should have
 	 * gone ahead and released the rfs4_file_t.
 	 */
-	ASSERT(lgp->fp == NULL);
+	ASSERT(lg->lo_fp == NULL);
 
 	mutex_destroy(&lg->lo_lock);
 
