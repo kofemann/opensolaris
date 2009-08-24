@@ -401,18 +401,6 @@ detail_mds_sid(mds_sid *ms, int index, char *indent)
 	    tohex(ms->val, ms->len));
 }
 
-static void
-detail_mds_remove_dataset_id(ctl_mds_remove_mds_dataset_id *id, char *indent)
-{
-	int	i;
-
-	detail_mds_sid(id->mds_sid, -1, indent);
-	for (i = 0; i < id->dataset_id.dataset_id_len; i++) {
-		sprintf(get_line(0, 0), "%s    MDS dataset id[%d] = %llu",
-		    indent, i, id->dataset_id.dataset_id_val[i]);
-	}
-}
-
 static bool_t
 detail_ds_guid_map(uint_t len, ds_guid_map *dg, char *legend, char *indent)
 {
@@ -655,7 +643,7 @@ ds_map_mds_dataset_id_args(char *line, bool_t summary)
 		sprintf(line, " MDI=%llu",
 		    args.mds_dataset_id);
 	} else {
-		sprintf(get_line(0, 0), "MDS dataset id = %llu",
+		sprintf(get_line(0, 0), "MDS datset id = %llu",
 		    args.mds_dataset_id);
 	}
 
@@ -1407,32 +1395,13 @@ static void
 mds_remove_args(char *line, bool_t summary)
 {
 	CTL_MDS_REMOVEargs	args;
-	ctl_mds_remove_mds_dataset_id	*id;
 
 	memset(&args, '\0', sizeof (args));
 	if (!xdr_CTL_MDS_REMOVEargs(&xdrm, &args))
 		longjmp(xdr_err, 1);
 
-	id = &args.CTL_MDS_REMOVEargs_u.dataset_info;
-
 	if (summary) {
-		if (args.type == CTL_MDS_RM_OBJ) {
-			sprintf(line, "obj %s",
-			    sum_fh4(&args.fh));
-		} else if (args.type == CTL_MDS_RM_MDS_DATASET_ID) {
-			/* XXX - what to put? */
-		} else {
-			sprintf(line, "(unknown remove type)");
-		}
 	} else {
-		if (args.type == CTL_MDS_RM_OBJ) {
-			detail_fh4(&args.target, "Object ");
-	  	} else if (args.type == CTL_MDS_RM_MDS_DATASET_ID) {
-			detail_mds_remove_dataset_id(id, "");
-		} else {
-			sprintf(get_line(0, 0),
-			    "Remove type unknown = %u", args.type);
-		}
 	}
 
 	xdr_free(xdr_CTL_MDS_REMOVEargs, (char *)&args);
