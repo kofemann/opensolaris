@@ -1744,7 +1744,7 @@ rfs4_file_create(rfs4_entry_t u_entry, void *arg)
 	rw_init(&fp->rf_file_rwlock, NULL, RW_DEFAULT, NULL);
 
 	mutex_enter(&vp->v_vsd_lock);
-	VERIFY(vsd_set(vp, instp->vkey, (void *)fp));
+	VERIFY(vsd_set(vp, instp->vkey, (void *)fp) == 0);
 	mutex_exit(&vp->v_vsd_lock);
 
 	return (TRUE);
