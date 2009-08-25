@@ -3251,6 +3251,8 @@ nfs4_free_lost_rqst(nfs4_lost_rqst_t *lrp, nfs4_server_t *sp)
 	component4 *filep;
 	nfs4_open_stream_t *osp;
 	int have_sync_lock;
+	nfs4_server_t *np;
+	slot_ent_t *slot;
 
 	NFS4_DEBUG(nfs4_lost_rqst_debug,
 	    (CE_NOTE, "nfs4_free_lost_rqst:"));
@@ -3261,6 +3263,14 @@ nfs4_free_lost_rqst(nfs4_lost_rqst_t *lrp, nfs4_server_t *sp)
 		if (filep->utf8string_val) {
 			kmem_free(filep->utf8string_val, filep->utf8string_len);
 			filep->utf8string_val = NULL;
+		}
+
+		if (lrp->lr_slot_srv) {
+			np = lrp->lr_slot_srv;
+			slot = lrp->lr_slot_ent;
+			if ((slot->se_state & SLOT_ERROR) == 0)
+				slot_free(np->ssx.slot_table, slot);
+			nfs4_server_rele(np);
 		}
 		break;
 	case OP_DELEGRETURN:
@@ -3900,6 +3910,11 @@ nfs4_save_lost_rqst(recov_info_t *recovp, nfs4_recov_t *action)
 		destfp->utf8string_val = srcfp->utf8string_val;
 		srcfp->utf8string_len = 0;
 		srcfp->utf8string_val = NULL;	/* make sure not reused */
+
+		destp->lr_slot_srv = lost_rqstp->lr_slot_srv;
+		destp->lr_slot_ent = lost_rqstp->lr_slot_ent;
+		lost_rqstp->lr_slot_srv = NULL;
+		lost_rqstp->lr_slot_ent = NULL;
 
 		*action = NR_LOST_STATE_RQST;
 	} else if (lost_rqstp->lr_op == OP_OPEN_DOWNGRADE) {

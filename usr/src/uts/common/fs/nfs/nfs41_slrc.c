@@ -444,6 +444,16 @@ slot_set_state(slot_ent_t *slot, int state)
 	mutex_exit(&slot->se_lock);
 }
 
+void
+slot_error_to_inuse(slot_ent_t *slot)
+{
+	mutex_enter(&slot->se_lock);
+	ASSERT(slot->se_state & SLOT_ERROR);
+	ASSERT(slot->se_state & SLOT_INUSE);
+	slot->se_state &= ~SLOT_ERROR;
+	mutex_exit(&slot->se_lock);
+}
+
 int
 slot_mark(stok_t *handle, slotid4 slid, sequenceid4 seqid)
 {

@@ -4834,11 +4834,16 @@ nfs4_call_slot_release(nfs4_call_t *cp)
 		if ((slot->se_state & SLOT_ERROR) == 0)
 			slot_free(np->ssx.slot_table, slot);
 		nfs4_server_rele(np);
-
-		cp->nc_flags &= ~NFS4_CALL_FLAG_SLOT_HELD;
-		cp->nc_slot_srv = NULL;
-		cp->nc_slot_ent = NULL;
+		nfs4_call_slot_clear(cp);
 	}
+}
+
+void
+nfs4_call_slot_clear(nfs4_call_t *cp)
+{
+	cp->nc_flags &= ~NFS4_CALL_FLAG_SLOT_HELD;
+	cp->nc_slot_srv = NULL;
+	cp->nc_slot_ent = NULL;
 }
 
 void

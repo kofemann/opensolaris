@@ -695,6 +695,8 @@ typedef enum nfs4_lock_call_type {
 	NFS4_LCK_CTYPE_REINSTATE
 } nfs4_lock_call_type_t;
 
+struct nfs4_server;
+
 /*
  * This structure holds the information for a lost open/close/open downgrade/
  * lock/locku request.  It is also used for requests that are queued up so
@@ -733,6 +735,8 @@ typedef struct nfs4_lost_rqst {
 			enum open_claim_type4	lru_oclaim;
 			stateid4		lru_ostateid; /* reopen only */
 			component4		lru_ofile;
+			struct nfs4_server	*lru_slot_srv;
+			slot_ent_t		*lru_slot_ent;
 		} lru_open_args;
 		struct {
 			uint32_t	lru_dg_access;
@@ -746,6 +750,8 @@ typedef struct nfs4_lost_rqst {
 #define	lr_oclaim	nfs4_lr_u.lru_open_args.lru_oclaim
 #define	lr_ostateid	nfs4_lr_u.lru_open_args.lru_ostateid
 #define	lr_ofile	nfs4_lr_u.lru_open_args.lru_ofile
+#define	lr_slot_srv	nfs4_lr_u.lru_open_args.lru_slot_srv
+#define	lr_slot_ent	nfs4_lr_u.lru_open_args.lru_slot_ent
 #define	lr_dg_acc	nfs4_lr_u.lru_open_dg_args.lru_dg_access
 #define	lr_dg_deny	nfs4_lr_u.lru_open_dg_args.lru_dg_deny
 #define	lr_ctype	nfs4_lr_u.lru_lockargs.lru_ctype
@@ -2427,6 +2433,7 @@ extern nfs4_call_t *nfs4_call_init(int, nfs_opnum4, nfs4_op_hint_t, int,
 extern void nfs4_call_hold(nfs4_call_t *);
 extern void nfs4_call_rele(nfs4_call_t *);
 extern void nfs4_call_slot_release(nfs4_call_t *);
+extern void nfs4_call_slot_clear(nfs4_call_t *);
 extern void nfs4_call_opresfree(nfs4_call_t *);
 extern COMPOUND4node_clnt *nfs4_op_generic(nfs4_call_t *, nfs_opnum4);
 extern SEQUENCE4res *nfs4_op_sequence(nfs4_call_t *);

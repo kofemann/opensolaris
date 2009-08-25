@@ -1020,8 +1020,7 @@ typedef struct mds_session {
 
 #define	SN_CB_CHAN_EST(x)	(((mds_session_t *)(x))->sn_back != NULL)
 #define	SN_CB_CHAN_OK(x)	(((mds_session_t *)(x))->sn_bc.failed == 0)
-#define	CLID_REC_CONFIRMED(x)	\
-    (((rfs4_client_t *)(x))->rc_need_confirm == FALSE)
+#define	CLID_REC_CONFIRMED(cp)	((cp)->rc_need_confirm == FALSE)
 
 struct mds_lorec {
 	mds_session_t		*lor_sess;
@@ -1725,6 +1724,7 @@ extern int		 slot_alloc(stok_t *, slt_wait_t, slot_ent_t **);
 extern void		 slot_free(stok_t *, slot_ent_t *);
 extern int		 slot_mark(stok_t *, slotid4, sequenceid4);
 extern void		 slot_set_state(slot_ent_t *, int);
+extern void		 slot_error_to_inuse(slot_ent_t *);
 extern nfsstat4		 slot_cb_status(stok_t *);
 extern slotid4		 svc_slot_maxslot(mds_session_t *);
 extern slot_ent_t	*svc_slot_alloc(mds_session_t *);

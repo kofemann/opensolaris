@@ -682,9 +682,9 @@ nfs4_open(vnode_t **vpp, int flag, cred_t *cr, caller_context_t *ct)
  * See if there's a "lost open" request to be saved and recovered.
  */
 static void
-nfs4open_save_lost_rqst(int error, nfs4_lost_rqst_t *lost_rqstp,
-    nfs4_open_owner_t *oop, cred_t *cr, vnode_t *vp,
-    vnode_t *dvp, OPEN4cargs *open_args)
+nfs4open_save_lost_rqst(nfs4_call_t *cp, int error,
+    nfs4_lost_rqst_t *lost_rqstp, nfs4_open_owner_t *oop, cred_t *cr,
+    vnode_t *vp, vnode_t *dvp, OPEN4cargs *open_args)
 {
 	vfs_t *vfsp;
 	char *srccfp;
@@ -726,6 +726,15 @@ nfs4open_save_lost_rqst(int error, nfs4_lost_rqst_t *lost_rqstp,
 	lost_rqstp->lr_ofile.utf8string_len = 0;
 	lost_rqstp->lr_ofile.utf8string_val = NULL;
 	(void) str_to_utf8(srccfp, &lost_rqstp->lr_ofile);
+	if ((cp->nc_flags & NFS4_CALL_FLAG_SLOT_HELD) &&
+	    (cp->nc_slot_ent->se_state & SLOT_ERROR)) {
+		lost_rqstp->lr_slot_srv = cp->nc_slot_srv;
+		lost_rqstp->lr_slot_ent = cp->nc_slot_ent;
+		nfs4_call_slot_clear(cp);
+	} else {
+		lost_rqstp->lr_slot_srv = NULL;
+		lost_rqstp->lr_slot_ent = NULL;
+	}
 	lost_rqstp->lr_putfirst = FALSE;
 }
 
@@ -1130,7 +1139,7 @@ recov_retry:
 		if (cp->nc_needs_recovery) {
 			nfs4_bseqid_entry_t *bsep = NULL;
 
-			nfs4open_save_lost_rqst(e.error, &lost_rqst, oop,
+			nfs4open_save_lost_rqst(cp, e.error, &lost_rqst, oop,
 			    cred_otw, vpi, dvp, open_args);
 
 			if (!e.error &&
@@ -1833,7 +1842,7 @@ top:
 		if (!is_recov && !frc_use_claim_previous &&
 		    (ep->error == EINTR || ep->error == ETIMEDOUT ||
 		    NFS4_FRC_UNMT_ERR(ep->error, vp->v_vfsp))) {
-			nfs4open_save_lost_rqst(ep->error, &lost_rqst, oop,
+			nfs4open_save_lost_rqst(cp, ep->error, &lost_rqst, oop,
 			    cred_otw, vp, NULL, open_args);
 			if (lost_rqst.lr_op == OP_OPEN)
 				cp->nc_lost_rqst = &lost_rqst;

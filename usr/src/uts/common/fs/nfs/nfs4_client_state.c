@@ -2226,8 +2226,21 @@ nfs4_resend_open_otw(vnode_t **vpp, nfs4_lost_rqst_t *resend_rqstp,
 	/* 3: getattr */
 	getattr_res = nfs4_op_getattr(cp, MI4_DEFAULT_ATTRMAP(mi));
 
+	/* reuse slot */
+	if (resend_rqstp->lr_slot_srv) {
+		ASSERT(resend_rqstp->lr_slot_ent != NULL);
+		ASSERT((cp->nc_flags & NFS4_CALL_FLAG_SLOT_HELD) == 0);
+		cp->nc_slot_srv = resend_rqstp->lr_slot_srv;
+		cp->nc_slot_ent = resend_rqstp->lr_slot_ent;
+		cp->nc_flags |= NFS4_CALL_FLAG_SLOT_HELD;
+		slot_error_to_inuse(cp->nc_slot_ent);
+		resend_rqstp->lr_slot_srv = NULL;
+		resend_rqstp->lr_slot_ent = NULL;
+	}
+
 	t = gethrtime();
 
+	cp->nc_rfs4call_flags = RFS4CALL_SHOLD;
 	rfs4call(cp, ep);
 
 	if (ep->error == 0 && nfs4_need_to_bump_seqid(&cp->nc_res)) {
@@ -2444,6 +2457,11 @@ nfs4_resend_open_otw(vnode_t **vpp, nfs4_lost_rqst_t *resend_rqstp,
 
 	/* accept delegation, if any */
 	nfs4_delegation_accept(rp, claim, op_res, garp, cr);
+
+	/* release the slot, add delegation to return list if recalled */
+	nfs4_call_slot_release(cp);
+	if (cp->nc_flags & NFS4_CALL_FLAG_SLOT_RECALLED)
+		nfs4_dlistadd(rp, NFS4_DR_PUSH | NFS4_DR_RECALL);
 
 	kmem_free(destcfp, destclen + 1);
 	nfs4args_copen_free(open_args);

@@ -1691,8 +1691,6 @@ rfs4call(nfs4_call_t *cp, nfs4_error_t *copy_ep)
 	    NFS4_CALL_FLAG_SLOT_RECALLED);
 
 	if (doseq) {
-		ASSERT((cp->nc_flags & NFS4_CALL_FLAG_SLOT_HELD) == 0);
-
 		/*
 		 * XXXrsb - The following code is likely to change.
 		 *
@@ -3404,7 +3402,7 @@ static void
 nfs4sequence_setup(nfs4_call_t *cp, nfs4_server_t *np)
 {
 	nfs4_session_t	*ssp = &np->ssx;
-	slot_ent_t *slot = NULL;
+	slot_ent_t *slot;
 	nfs_argop4 *argp;
 	COMPOUND4node_clnt *seq_node;
 
@@ -3417,16 +3415,20 @@ nfs4sequence_setup(nfs4_call_t *cp, nfs4_server_t *np)
 	    argp->nfs_argop4_u.opsequence.sa_sessionid,
 	    sizeof (sessionid4));
 
-	/*
-	 * Find a slot to use.
-	 */
-	(void) slot_alloc(ssp->slot_table, SLT_SLEEP, &slot);
-	ASSERT(slot != NULL);
+	if ((cp->nc_flags & NFS4_CALL_FLAG_SLOT_HELD) == 0) {
+		/*
+		 * Find a slot to use.
+		 */
+		(void) slot_alloc(ssp->slot_table, SLT_SLEEP, &slot);
+		ASSERT(slot != NULL);
 
-	nfs4_server_hold(np);
-	cp->nc_slot_srv = np;
-	cp->nc_slot_ent = slot;
-	cp->nc_flags |= NFS4_CALL_FLAG_SLOT_HELD;
+		nfs4_server_hold(np);
+		cp->nc_slot_srv = np;
+		cp->nc_slot_ent = slot;
+		cp->nc_flags |= NFS4_CALL_FLAG_SLOT_HELD;
+	} else {
+		slot = cp->nc_slot_ent;
+	}
 
 	/*
 	 * Update SEQUENCE args
