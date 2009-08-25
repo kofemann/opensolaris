@@ -2248,9 +2248,9 @@ mds_lorecall_cmd(struct mds_reclo_args *args, cred_t *cr)
 
 	switch (lorec.lor_type) {
 	case LAYOUTRECALL4_FILE:
-		mutex_enter(&vp->v_lock);
+		mutex_enter(&vp->v_vsd_lock);
 		fp = (rfs4_file_t *)vsd_get(vp, mds_server->vkey);
-		mutex_exit(&vp->v_lock);
+		mutex_exit(&vp->v_vsd_lock);
 		if (fp == NULL) {
 			error = EIO;
 			goto errout;

@@ -99,7 +99,7 @@ recall_read_delegations(
 
 	fpa[0] = fp;
 	cnt = 1;
-	mutex_enter(&vp->v_lock);
+	mutex_enter(&vp->v_vsd_lock);
 	for (instp = list_head(&nsi_head); instp != NULL;
 	    instp = list_next(&nsi_head, &instp->nsi_list)) {
 		rfs4_file_t	*temp;
@@ -110,7 +110,7 @@ recall_read_delegations(
 			fpa[cnt++] = temp;
 		}
 	}
-	mutex_exit(&vp->v_lock);
+	mutex_exit(&vp->v_vsd_lock);
 
 	ASSERT(cnt <= nsi_count);
 

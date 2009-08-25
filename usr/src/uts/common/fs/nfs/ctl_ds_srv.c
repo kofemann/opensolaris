@@ -274,9 +274,9 @@ mds_findfile_by_dsfh(nfs_server_instance_t *instp, mds_ds_fh *fhp)
 	if (vp == NULL)
 		return (NULL);
 
-	mutex_enter(&vp->v_lock);
+	mutex_enter(&vp->v_vsd_lock);
 	fp = (rfs4_file_t *)vsd_get(vp, instp->vkey);
-	mutex_exit(&vp->v_lock);
+	mutex_exit(&vp->v_vsd_lock);
 
 	if (fp == NULL)
 		return (NULL);
