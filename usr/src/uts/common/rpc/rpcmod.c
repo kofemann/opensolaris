@@ -1097,6 +1097,7 @@ static void	mir_wsrv(queue_t *q);
 static	void	mir_disconnect(queue_t *, mir_t *ir);
 static	int	mir_check_len(queue_t *, int32_t, mblk_t *);
 static	void	mir_timer(void *);
+static	void	mir_callback_thread(SVCCB *);
 
 extern void	(*mir_rele)(queue_t *, mblk_t *);
 extern void	(*mir_start)(queue_t *);
@@ -1117,24 +1118,16 @@ uint_t	clnt_max_msg_size = RPC_MAXDATASIZE;
 uint_t	svc_max_msg_size = RPC_MAXDATASIZE;
 uint_t	mir_krpc_cell_null;
 
-uint32_t	cb_live = 0;
 
 static void
-mir_callback_thread(SVCCB *svc_cb)
+mir_callback_server(SVCCB *svc_cb)
 {
 	callb_cpr_t	cprinfo;
 	kmutex_t	cpr_lock;
-	SVCXPRT		*clone_xprt;
-	mblk_t		*mp;
-	struct rpc_msg	msg;
-	struct svc_req	r;
-	char		*cred_area;
-	int		rqcred_size = 400; 	/* RQCRED_SIZE */
-	SVC_DISPATCH	*svc_nfs41_co = svc_cb->r_dispatch;
 
 	mutex_init(&cpr_lock, NULL, MUTEX_DEFAULT, NULL);
 	CALLB_CPR_INIT(&cprinfo, &cpr_lock, callb_generic_cpr,
-	    "mir_callback_thread");
+	    "mir_callback_server");
 
 	mutex_enter(&svc_cb->r_lock);
 
@@ -1151,87 +1144,136 @@ mir_callback_thread(SVCCB *svc_cb)
 
 		if (svc_cb->r_flags & SVCCB_NFS41_CB_THREAD_EXIT)
 			break;
-
-		mp = svc_cb->r_mp;
-		svc_cb->r_mp = NULL;
-		clone_xprt = svc_clone_init();
-
-		svc_init_clone_xprt(clone_xprt, svc_cb->r_q);
-		clone_xprt->xp_master = NULL;
-		clone_xprt->xp_msg_size = 2048; /* COTS_MAX_ALLOCSIZE */
-		cred_area = kmem_zalloc(2 * MAX_AUTH_BYTES + rqcred_size,
-		    KM_SLEEP);
-		msg.rm_call.cb_cred.oa_base = cred_area;
-		msg.rm_call.cb_verf.oa_base = &(cred_area[MAX_AUTH_BYTES]);
-		r.rq_clntcred = &(cred_area[2 * MAX_AUTH_BYTES]);
-
-		/*
-		 * underlying transport recv routine may modify mblk data
-		 * and make it difficult to extract label afterwards. So
-		 * get the label from the raw mblk data now.
-		 */
-		if (is_system_labeled()) {
-			mblk_t *lmp;
-
-			r.rq_label = kmem_alloc(sizeof (bslabel_t), KM_NOSLEEP);
-			if (r.rq_label == NULL) {
-				freemsg(mp);
-				continue;
-			}
-			if (DB_CRED(mp) != NULL)
-				lmp = mp;
-			else {
-				ASSERT(mp->b_cont != NULL);
-				lmp = mp->b_cont;
-				ASSERT(DB_CRED(lmp) != NULL);
-			}
-			bcopy(label2bslabel(crgetlabel(DB_CRED(lmp))),
-			    r.rq_label, sizeof (bslabel_t));
-		} else {
-			r.rq_label = NULL;
-		}
-
-		/*
-		 * Now receive the message.
-		 */
-		if (SVC_RECV(clone_xprt, mp, &msg)) {
-			void (*dispatchroutine) (struct svc_req *, SVCXPRT *);
-			bool_t no_dispatch;
-			enum auth_stat why;
-
-			/*
-			 * Find the registered program and call its
-			 * dispatch routine.
-			 */
-			r.rq_xprt = clone_xprt;
-			r.rq_prog = msg.rm_call.cb_prog;
-			r.rq_vers = msg.rm_call.cb_vers;
-			r.rq_proc = msg.rm_call.cb_proc;
-			r.rq_cred = msg.rm_call.cb_cred;
-
-			if ((why = sec_svc_msg(&r, &msg, &no_dispatch)) !=
-			    AUTH_OK) {
-				svcerr_auth(clone_xprt, why);
-				(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
-			} else if (no_dispatch) {
-				(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
-			} else {
-				dispatchroutine = svc_nfs41_co;
-				(*dispatchroutine) (&r, clone_xprt);
-				(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
-			}
-			if (r.rq_cred.oa_flavor == RPCSEC_GSS)
-				rpc_gss_cleanup(clone_xprt);
-		}
-		if (r.rq_label != NULL)
-			kmem_free(r.rq_label, sizeof (bslabel_t));
+		svc_cb->r_tcount++;
+		zthread_create(NULL, 0, mir_callback_thread, svc_cb, 0,
+		    minclsyspri);
 	}
 
-	mutex_exit(&svc_cb->r_lock);
-	cv_signal(&svc_cb->r_cbexit);
+	/*
+	 * If thread count is not zero, there are worker threads active.
+	 * The last worker thread will signal the mir_clear_cbinfo()
+	 * thread on completion.
+	 */
+	if (svc_cb->r_tcount == 0) {
+		mutex_exit(&svc_cb->r_lock);
+		cv_signal(&svc_cb->r_cbexit);
+	} else {
+		mutex_exit(&svc_cb->r_lock);
+	}
 
 	mutex_enter(&cpr_lock);
 	CALLB_CPR_EXIT(&cprinfo);
+
+	zthread_exit();
+
+}
+
+static void
+mir_callback_thread(SVCCB *svc_cb)
+{
+	SVCXPRT		*clone_xprt;
+	struct rpc_msg	msg;
+	struct svc_req	r;
+	char		*cred_area;
+	int		rqcred_size = 400;	/* RQCRED_SIZE */
+	mblk_t		*mp;
+	queue_t		*q;
+	SVC_DISPATCH	*cb_dispatch;
+
+	mutex_enter(&svc_cb->r_lock);
+	mp = svc_cb->r_mp;
+	svc_cb->r_mp = mp->b_next;
+	mp->b_next = (mblk_t *)0;
+	q = svc_cb->r_q;
+	cb_dispatch = svc_cb->r_dispatch;
+	mutex_exit(&svc_cb->r_lock);
+
+	clone_xprt = svc_clone_init();
+
+	svc_init_clone_xprt(clone_xprt, q);
+	clone_xprt->xp_master = NULL;
+	clone_xprt->xp_msg_size = 2048; /* COTS_MAX_ALLOCSIZE */
+	cred_area = kmem_zalloc(2 * MAX_AUTH_BYTES + rqcred_size,
+	    KM_SLEEP);
+	msg.rm_call.cb_cred.oa_base = cred_area;
+	msg.rm_call.cb_verf.oa_base = &(cred_area[MAX_AUTH_BYTES]);
+	r.rq_clntcred = &(cred_area[2 * MAX_AUTH_BYTES]);
+
+	/*
+	 * underlying transport recv routine may modify mblk data
+	 * and make it difficult to extract label afterwards. So
+	 * get the label from the raw mblk data now.
+	 */
+	if (is_system_labeled()) {
+		mblk_t *lmp;
+
+		r.rq_label = kmem_alloc(sizeof (bslabel_t), KM_NOSLEEP);
+		if (r.rq_label == NULL) {
+			freemsg(mp);
+			goto done;
+		}
+		if (DB_CRED(mp) != NULL)
+			lmp = mp;
+		else {
+			ASSERT(mp->b_cont != NULL);
+			lmp = mp->b_cont;
+			ASSERT(DB_CRED(lmp) != NULL);
+		}
+		bcopy(label2bslabel(crgetlabel(DB_CRED(lmp))),
+		    r.rq_label, sizeof (bslabel_t));
+	} else {
+		r.rq_label = NULL;
+	}
+
+	/*
+	 * Now receive the message.
+	 */
+	if (SVC_RECV(clone_xprt, mp, &msg)) {
+
+		bool_t no_dispatch;
+		enum auth_stat why;
+
+		/*
+		 * Find the registered program and call its
+		 * dispatch routine.
+		 */
+		r.rq_xprt = clone_xprt;
+		r.rq_prog = msg.rm_call.cb_prog;
+		r.rq_vers = msg.rm_call.cb_vers;
+		r.rq_proc = msg.rm_call.cb_proc;
+		r.rq_cred = msg.rm_call.cb_cred;
+
+		if ((why = sec_svc_msg(&r, &msg, &no_dispatch)) !=
+		    AUTH_OK) {
+			svcerr_auth(clone_xprt, why);
+			(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
+		} else if (no_dispatch) {
+			(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
+		} else {
+			(*cb_dispatch) (&r, clone_xprt);
+			(void) SVC_FREEARGS(clone_xprt, NULL, NULL);
+		}
+		if (r.rq_cred.oa_flavor == RPCSEC_GSS)
+			rpc_gss_cleanup(clone_xprt);
+	}
+	if (r.rq_label != NULL)
+		kmem_free(r.rq_label, sizeof (bslabel_t));
+
+done:
+
+	/*
+	 * If thread count is 0 and the callback server existed,
+	 * signal the thread waiting on our exit.
+	 */
+	mutex_enter(&svc_cb->r_lock);
+	svc_cb->r_tcount--;
+	if ((svc_cb->r_flags & SVCCB_NFS41_CB_THREAD_EXIT) &&
+	    (svc_cb->r_tcount == 0)) {
+		mutex_exit(&svc_cb->r_lock);
+		cv_signal(&svc_cb->r_cbexit);
+	} else {
+		mutex_exit(&svc_cb->r_lock);
+	}
 
 	zthread_exit();
 }
@@ -1261,7 +1303,7 @@ mir_set_cbinfo(queue_t *wq, void *info)
 	mir->mir_cb = scb;
 
 	scb->r_thread =
-	    zthread_create(NULL, 0, mir_callback_thread, scb, 0, minclsyspri);
+	    zthread_create(NULL, 0, mir_callback_server, scb, 0, minclsyspri);
 	ASSERT(scb->r_thread != NULL);
 	mutex_exit(&mir->mir_mutex);
 }
@@ -1608,6 +1650,14 @@ mir_queue_rele(queue_t *q)
 
 	mutex_enter(&mir->mir_mutex);
 	mir->mir_ref_cnt--;
+
+	/*
+	 * Wake up the thread waiting to close.
+	 */
+
+	if ((mir->mir_ref_cnt == 0) && mir->mir_closing)
+		cv_signal(&mir->mir_condvar);
+
 	mutex_exit(&mir->mir_mutex);
 }
 
@@ -1950,7 +2000,16 @@ mir_rput(queue_t *q, mblk_t *mp)
 					mutex_enter(&svccb->r_lock);
 					if (!(svccb->r_flags &
 					    SVCCB_NFS41_CB_THREAD_EXIT)) {
-						svccb->r_mp = head_mp;
+						/*
+						 * Queue the message and signal
+						 * the callback server.
+						 */
+						if (svccb->r_mp != NULL)
+							svccb->r_mp->b_next =
+							    head_mp;
+						else
+							svccb->r_mp = head_mp;
+
 						cv_signal(&svccb->r_cbwait);
 					} else {
 						freemsg(head_mp);

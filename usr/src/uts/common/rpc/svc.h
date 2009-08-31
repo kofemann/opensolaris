@@ -448,6 +448,7 @@ typedef struct __svccb {
 	kmutex_t	r_lock;
 	kcondvar_t	r_cbwait;
 	kcondvar_t	r_cbexit;
+	int		r_tcount;	/* worker threads active */
 	int		r_flags;
 	rpcprog_t	r_prog;
 	kthread_t	*r_thread;

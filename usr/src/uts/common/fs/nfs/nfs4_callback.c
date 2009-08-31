@@ -1151,6 +1151,8 @@ cb_slrc_epilogue(nfs4_server_t *np, CB_COMPOUND4res *res, slotid4 slot)
 				slt->se_status = NFS4_OK;
 				slt->se_buf = *(COMPOUND4res_srv *)res;
 				slt->se_state = SLRC_CACHED_OKAY;
+			} else {
+				slt->se_state = SLRC_EMPTY_SLOT;
 			}
 			break;
 		case SLRC_INPROG_REPLAY:
@@ -1158,6 +1160,7 @@ cb_slrc_epilogue(nfs4_server_t *np, CB_COMPOUND4res *res, slotid4 slot)
 			slt->se_status = NFS4_OK;
 			break;
 		default:
+			slt->se_state = SLRC_EMPTY_SLOT;
 			break;
 	}
 	cv_signal(&slt->se_wait);
@@ -1250,15 +1253,17 @@ cb_compound(CB_COMPOUND4args *args, CB_COMPOUND4res *resp, struct svc_req *req,
 			}
 			sbuf = cb_sequence(argop, resop, req, &cs, ncg,
 			    &cb_race);
-			if (*cs.statusp == NFS4_OK) {
+			if (*cs.statusp == NFS4_OK)
 				sequenced = TRUE;
-			}
+			else
+				break;
 			if (!mvers_0) {
 				seq_args =
 				    &argop->nfs_cb_argop4_u.opcbsequence;
 				slot = seq_args->csa_slotid;
 			}
 			if ((sbuf != NULL) && !mvers_0) {
+				/* this is a replay */
 				resp = sbuf;
 				goto epilogue;
 			}
@@ -1359,7 +1364,8 @@ epilogue:
 			CB_WARN("cb_compound: cannot find server\n");
 			*cs.statusp = resp->status = NFS4ERR_BADHANDLE;
 		} else {
-			cb_slrc_epilogue(np, resp, slot);
+			if (sequenced)
+				cb_slrc_epilogue(np, resp, slot);
 			mutex_exit(&np->s_lock);
 			nfs4_server_rele(np);
 		}

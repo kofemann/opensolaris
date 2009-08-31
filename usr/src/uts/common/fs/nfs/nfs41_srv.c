@@ -7507,6 +7507,7 @@ mds_op_create_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	session41_create_t	 sca;
 	sequenceid4		 stseq;
 	sequenceid4		 agseq;
+	extern slotid4		 bc_slot_tab;
 
 	DTRACE_NFSV4_2(op__create__session__start,
 	    struct compound_state *, cs,
@@ -7645,9 +7646,9 @@ replay:
 	rok->csr_back_chan_attrs = crp->csr_back_chan_attrs =
 	    args->csa_back_chan_attrs;
 
-	/* only send 1 callback at a time for now */
+	/* callbacks limited to bc_slot_tab for now */
 	rok->csr_back_chan_attrs.ca_maxrequests =
-	    crp->csr_back_chan_attrs.ca_maxrequests = 1;
+	    crp->csr_back_chan_attrs.ca_maxrequests = bc_slot_tab;
 	rfs4_update_lease(cp);
 
 	/*
@@ -7739,6 +7740,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 			cmn_err(CE_NOTE, "op_destroy_session: SP4_MACH_CRED");
 			if (!rfs4_cmp_cred_princ(cp->rc_cr_set, cs)) {
 				*cs->statusp = resp->dsr_status = NFS4ERR_PERM;
+				rfs41_session_rele(sp);
 				goto final;
 			}
 			break;
@@ -7753,6 +7755,7 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 
 		case SP4_NONE:
 			cmn_err(CE_NOTE, "op_destroy_session: SP4_NONE");
+			break;
 
 		default:
 			break;

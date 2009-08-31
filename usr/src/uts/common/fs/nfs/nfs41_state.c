@@ -61,6 +61,7 @@ extern void mds_do_cb_recall(struct rfs4_deleg_state *, bool_t);
  *	 good for proto.
  */
 slotid4 slrc_slot_size = MAXSLOTS;
+slotid4	bc_slot_tab = 10;	/* back chan limited to 10 slots */
 
 /* The values below are rfs4_lease_time units */
 
@@ -778,7 +779,7 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 			cmn_err(CE_PANIC, "Back Chan Spec Data Not Set\t"
 			    "<Internal Inconsistency>");
 		}
-		slrc_table_create(&bsdp->bsd_stok, slrc_slot_size);
+		slrc_table_create(&bsdp->bsd_stok, bc_slot_tab);
 		sp->sn_csflags |= CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
 		sp->sn_back = ocp;
 

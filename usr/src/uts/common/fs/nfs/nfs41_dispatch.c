@@ -253,7 +253,7 @@ rfs41_slrc_epilogue(mds_session_t *sess, COMPOUND4args_srv *cap,
 			    COMPOUND4res *, &slt->se_buf,
 			    nfs_resop4 *, slt->se_buf.array);
 		} else {
-			slt->se_state = SLRC_SERVER_ERROR;
+			slt->se_state = SLRC_EMPTY_SLOT;
 			error = 1;
 		}
 		break;

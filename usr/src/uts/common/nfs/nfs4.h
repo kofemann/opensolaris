@@ -374,7 +374,7 @@ extern void	rfs41_seq4_rele(void *, uint32_t);
  */
 
 /* se_state values */
-#define	SLRC_SERVER_ERROR	0x00000001
+#define	SLRC_EMPTY_SLOT		0x00000001
 #define	SLRC_CACHED_OKAY	0x00000002
 #define	SLRC_CACHED_PURGING	0x00000004
 #define	SLRC_INPROG_NEWREQ	0x00000008
