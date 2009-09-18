@@ -462,6 +462,7 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 {
 	layoutstats_t *stats;
 	layoutstats_t *decoded_stats;
+	layoutspecs_t	*los;
 	stripe_info_t *si_list_val;
 	netaddr4 *mpl_list_val;
 	layoutiomode4 iomode;
@@ -475,7 +476,7 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 	int mpl_len;
 	char record[4096], str_time[MAX_COLUMNS], *buf_pos;
 	char hostname[2048], ipaddress[1024], netid[1024];
-	int i = 0;
+	int lonum, i = 0;
 
 	/*
 	 * XDR decode the buffer that came from the kernel
@@ -499,11 +500,12 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 		return;
 	}
 
+
 	/*
 	 * Print out the details embedded in the decoded structure.
 	 */
 	sprintf(record, "Number of layouts: %d",
-	    decoded_stats->plo_num_layouts);
+	    decoded_stats->plo_data.total_layouts);
 	printf("%-s\n", record);
 	sprintf(record, "Proxy I/O count: %" PRIu64,
 	    decoded_stats->proxy_iocount);
@@ -511,156 +513,183 @@ print_layoutstats(char *filename, struct  pnfs_getflo_args *plo_args)
 	sprintf(record, "DS I/O count: %" PRIu64,
 	    decoded_stats->ds_iocount);
 	printf("%-s\n", record);
-	if (decoded_stats->plo_num_layouts == 0) {
+	if (decoded_stats->plo_data.total_layouts == 0) {
 		free(decoded_stats);
 		return;
 	}
-	/* XXX: No multi-segment layout support */
-	sprintf(record, "Layout [%d]:", 0);
-	printf("%-s\n", record);
 
-	append_musec(decoded_stats->plo_creation_sec,
-	    decoded_stats->plo_creation_musec, str_time);
-	printf("\tLayout obtained at: %s", str_time);
-	iomode = decoded_stats->iomode;
-	lo_status = decoded_stats->plo_status;
-	if (lo_status == 0) {
-		sprintf(record, "status: UNKNOWN");
-	} else {
+	for (lonum = 0; lonum < decoded_stats->plo_data.total_layouts;
+	    lonum++) {
+		sprintf(record, "Layout [%d]:", lonum);
+		printf("%s\n", record);
 
-		if (lo_status & (PLO_UNAVAIL | PLO_GET | PLO_BAD)) {
-			sprintf(record, "status: UNAVAILABLE");
+		los = &decoded_stats->plo_data.lo_specs[lonum];
+
+		if (los->plo_creation_sec != 0 &&
+		    los->plo_creation_musec != 0) {
+			append_musec(los->plo_creation_sec,
+			    los->plo_creation_musec, str_time);
+			printf("\tLayout obtained at: %s", str_time);
 		}
-		if (lo_status & (PLO_ROC | PLO_RETURN | PLO_RECALL |
-		    PLO_COM2MDS | R4LAYOUTVALID)) {
+		iomode = los->iomode;
+		lo_status = los->plo_status;
+		if (lo_status & (PLO_UNAVAIL | PLO_GET | PLO_BAD |
+		    PLO_RETURN | PLO_RECALL)) {
+			sprintf(record, "status: UNAVAILABLE");
+		} else {
 			sprintf(record, "status: AVAILABLE");
 		}
 		if (lo_status & PLO_TRYLATER) {
 			sprintf(record, "status: TRYLATER");
 		}
-	}
 
-	cur_rec_size = strlen(record);
-	buf_pos = record;
-	record[cur_rec_size] = ',';
-	buf_pos += cur_rec_size + 1;
-
-	switch (iomode) {
-	case LAYOUTIOMODE4_READ:
-		sprintf(buf_pos, " iomode: LAYOUTIOMODE_READ");
-		break;
-	case LAYOUTIOMODE4_RW:
-		sprintf(buf_pos, " iomode: LAYOUTIOMODE_RW");
-		break;
-	case LAYOUTIOMODE4_ANY:
-		sprintf(buf_pos, " iomode: LAYOUTIOMODE_ANY");
-		break;
-	}
-
-	printf("\t%-s\n", record);
-	if (decoded_stats->plo_length == ALL_ONES) {
-		sprintf(record, "offset: %" PRIu64 ", length: EOF",
-		    decoded_stats->plo_offset);
-	} else {
-		sprintf(record, "offset: %" PRIu64 ", length: %" PRIu64,
-		    decoded_stats->plo_offset, decoded_stats->plo_length);
-	}
-	printf("\t%-s\n", record);
-	sprintf(record, "num stripes: %d, stripe unit: %d",
-	    decoded_stats->plo_stripe_count, decoded_stats->plo_stripe_unit);
-	printf("\t%-s\n", record);
-
-	/*
-	 * Print data server specific information for each stripe of the
-	 * layout.
-	 */
-	si_list_len = decoded_stats->
-	    plo_stripe_info_list.plo_stripe_info_list_len;
-	if (decoded_stats->plo_stripe_count == 0 || si_list_len == 0) {
-		sprintf(record, "Data server information not"
-		    " available");
-		printf("\t%-s\n", record);
-		free(decoded_stats);
-		return;
-	}
-	si_list_val = decoded_stats->
-	    plo_stripe_info_list.plo_stripe_info_list_val;
-	do {
-		sprintf(record, "\tStripe [%d]:", i);
-		printf("%-s\n", record);
-		mpl_len = si_list_val[i].multipath_list.multipath_list_len;
-		mpl_list_val = si_list_val[i].multipath_list.multipath_list_val;
-		if (mpl_len != 0 && mpl_list_val != NULL) {
-			for (j = 0; j < mpl_len; j++) {
-				na = &(mpl_list_val[j]);
-				error = lookup_name_port(na, &port, hostname,
-				    ipaddress);
-				if (error == 0) {
-					sprintf(record, "%s:%s:%s:%ld",
-					    na->na_r_netid, hostname,
-					    ipaddress, port);
-				}
-				if (error == EADDRDEC) {
-					sprintf(record, "Decoding of universal"
-					    " address failed\n");
-					printf("\t\t%-s", record);
-					sprintf(record, "%s:%s", na->na_r_netid,
-					    na->na_r_addr);
-				}
-				if (error == EADDRTRAN) {
-					sprintf(record, "IP address to hostname"
-					    " translation failed");
-					printf("\t\t%-s", record);
-					sprintf(record, "%s:%s:%s",
-					    na->na_r_netid, ipaddress, port);
-				}
-				printf("\t\t%-s", record);
-
-				/*
-				 * Do a NULL procedure ping to check the status
-				 * of the data server.
-				 */
-				error = null_procedure_ping(hostname,
-				    na->na_r_netid, &ds_status);
-				if (error == 0) {
-					record[strlen(record)] = ' ';
-					if (ds_status == RPC_SUCCESS) {
-						sprintf(record, " OK");
-					} else {
-						sprintf(record, " FAILED (%s)",
-						    clnt_sperrno(ds_status));
-					}
-					printf("%-s\n", record);
-				} else {
-					sprintf(record, " CANNOT DETERMINE");
-					printf("%-s\n", record);
-					switch (error) {
-					case ENETCONF:
-						fprintf(stderr, "\t\tNetwork"
-						" address error\n");
-						break;
-					case ENETADDR:
-						netdir_perror("\t\tnfsstat");
-						break;
-					default:
-						clnt_pcreateerror(
-						"\t\tnfsstat");
-						break;
-					}
-				}
-			}
-		} else {
-			sprintf(record, "Data server information"
-			    " not available");
-			printf("\t\t%-s\n", record);
+		cur_rec_size = strlen(record);
+		buf_pos = record;
+		record[cur_rec_size] = ',';
+		buf_pos += cur_rec_size + 1;
+		switch (iomode) {
+		case LAYOUTIOMODE4_READ:
+			sprintf(buf_pos, " iomode: LAYOUTIOMODE_READ");
+			break;
+		case LAYOUTIOMODE4_RW:
+			sprintf(buf_pos, " iomode: LAYOUTIOMODE_RW");
+			break;
+		case LAYOUTIOMODE4_ANY:
+			sprintf(buf_pos, " iomode: LAYOUTIOMODE_ANY");
+			break;
+		default:
+			sprintf(buf_pos, "iomode INVALID");
 			break;
 		}
-	i++;
-	} while (i < decoded_stats->plo_stripe_count);
+
+		printf("\t%-s\n", record);
+		if (los->plo_length == ALL_ONES) {
+			sprintf(record, "offset: %" PRIu64 ", length: EOF",
+			    los->plo_offset);
+		} else {
+			sprintf(record, "offset: %" PRIu64 ", length: %"
+			    PRIu64, los->plo_offset, los->plo_length);
+		}
+		printf("\t%-s\n", record);
+		sprintf(record, "num stripes: %d, stripe unit: %d",
+		    los->plo_stripe_count, los->plo_stripe_unit);
+		printf("\t%-s\n", record);
+
+		/*
+		 * Print data server specific information for each stripe of
+		 * the layout.
+		 */
+		si_list_val = los->plo_stripe_info_list.
+		    plo_stripe_info_list_val;
+		if (los->plo_stripe_count == 0 || si_list_val == NULL) {
+			printf("los stcnt %d, list cnt %d, listval %p",
+			    los->plo_stripe_count,
+			    los->plo_stripe_info_list.plo_stripe_info_list_len,
+			    los->plo_stripe_info_list.
+			    plo_stripe_info_list_val);
+			sprintf(record, "Data server information not"
+			    " available");
+			printf("\t%s\n", record);
+			continue;
+		}
+		do {
+			sprintf(record, "\tStripe [%d]:", i);
+			printf("%-s\n", record);
+			mpl_len = si_list_val[i].multipath_list.
+			    multipath_list_len;
+			mpl_list_val = si_list_val[i].
+			    multipath_list.multipath_list_val;
+			if (mpl_len != 0 && mpl_list_val != NULL) {
+				for (j = 0; j < mpl_len; j++) {
+					na = &(mpl_list_val[j]);
+					error = lookup_name_port(na, &port,
+					    hostname, ipaddress);
+					if (error == 0) {
+						sprintf(record, "%s:%s:%s:%ld",
+						    na->na_r_netid,
+						    hostname, ipaddress,
+						    port);
+					}
+					if (error == EADDRDEC) {
+						sprintf(record,
+						    "Decoding of universal"
+						    " address failed\n");
+						printf("\t\t%-s", record);
+						sprintf(record, "%s:%s",
+						    na->na_r_netid,
+						    na->na_r_addr);
+					}
+					if (error == EADDRTRAN) {
+						sprintf(record,
+						    "IP address to "
+						    "hostname"
+						    " translation failed");
+						printf("\t\t%-s", record);
+						sprintf(record, "%s:%s:%s",
+						    na->na_r_netid,
+						    ipaddress, port);
+					}
+					printf("\t\t%-s", record);
+
+					/*
+					 * Do a NULL procedure ping to check
+					 * the status of the data server.
+					 */
+					error = null_procedure_ping(
+					    hostname,
+					    na->na_r_netid,
+					    &ds_status);
+					if (error == 0) {
+						record[strlen(record)] = ' ';
+						if (ds_status == RPC_SUCCESS) {
+							sprintf(record, " OK");
+						} else {
+							sprintf(record,
+							    "FAILED (%s)",
+							    clnt_sperrno(
+							    ds_status));
+						}
+					} else {
+						sprintf(record,
+						    " STATUS UNKNOWN %d",
+						    error);
+						switch (error) {
+						case ETLI:
+							clnt_pcreateerror(
+							    "\t\tnfsstat");
+							break;
+						case ENETCONF:
+							fprintf(stderr,
+							    "\t\tNetwork"
+							    " address "
+							    "error\n");
+							break;
+						case ENETADDR:
+							netdir_perror(
+							    "\t\tnfsstat");
+							break;
+						default:
+							fprintf(stderr,
+							    "Unknown "
+							    "error\n");
+						}
+					}
+					printf("%-s\n", record);
+				}
+			} else {
+				sprintf(record, "Data server information"
+				    " not available");
+				printf("\t\t%-s\n", record);
+				break;
+			}
+			i++;
+		} while (i < los->plo_stripe_count);
+		i = 0;
+	}
 	/*
 	 * Free memory
 	 */
-	free(decoded_stats);
+	xdr_free((xdrproc_t)xdr_layoutstats_t, (char *)decoded_stats);
 }
 
 static int

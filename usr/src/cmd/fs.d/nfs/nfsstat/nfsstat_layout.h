@@ -89,23 +89,30 @@ typedef struct stripe_info {
 	} multipath_list;
 } stripe_info_t;
 
-typedef struct layoutstats {
-	uint32_t plo_num_layouts;
+typedef struct layoutspecs {
 	uint32_t plo_stripe_count;
 	uint32_t plo_stripe_unit;
 	uint32_t plo_status;
 	uint32_t iomode;
 	offset4 plo_offset;
 	length4 plo_length;
-	uint64_t proxy_iocount;
-	uint64_t ds_iocount;
 	int64_t plo_creation_sec;
 	int64_t	plo_creation_musec;
 	struct {
 		uint_t plo_stripe_info_list_len;
 		stripe_info_t *plo_stripe_info_list_val;
 	} plo_stripe_info_list;
+} layoutspecs_t;
+
+typedef struct layoutstats {
+	uint64_t proxy_iocount;
+	uint64_t ds_iocount;
+	struct {
+		uint_t	total_layouts;
+		layoutspecs_t	*lo_specs;
+	} plo_data;
 } layoutstats_t;
+
 
 extern bool_t xdr_offset4(XDR *xdrs, offset4 *objp);
 extern bool_t xdr_length4(XDR *xdrs, length4 *objp);

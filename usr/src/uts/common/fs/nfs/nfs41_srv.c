@@ -8812,7 +8812,9 @@ mds_op_layout_get_free(nfs_resop4 *resop, compound_state_t *cs)
 	if ((resp->logr_status == NFS4_OK) && (lo != NULL)) {
 		kmem_free(lo->lo_content.loc_body.loc_body_val,
 		    lo->lo_content.loc_body.loc_body_len);
-		kmem_free(lo, sizeof (layout4));
+		kmem_free(lo, sizeof (layout4) *
+		    resp->LAYOUTGET4res_u.logr_resok4.
+		    logr_layout.logr_layout_len);
 	}
 }
 

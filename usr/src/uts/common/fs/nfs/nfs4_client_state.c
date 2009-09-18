@@ -2912,8 +2912,11 @@ nfs4create_session(mntinfo4_t *mi, servinfo4_t *svp, cred_t *cr,
 	/* Start a thread to keep the lease active. */
 	nfs4start_hb_thread(mi, svp, np, ep, cr);
 	if (ep->error || ep->stat) {
-		cmn_err(CE_WARN, "nfs4 hb_thread start failed");
+		cmn_err(CE_WARN, "nfs4 hb_thread start failed-stat %d er %d",
+		    ep->stat, ep->error);
+#if 0
 		nfs4destroy_session(np, mi, svp, ep, N4DS_DESTROY_OTW);
+#endif
 		return;
 	}
 	mutex_enter(&np->s_lock);

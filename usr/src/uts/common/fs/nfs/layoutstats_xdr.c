@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -44,13 +44,10 @@ xdr_stripe_info_t(xdrs, objp)
 }
 
 bool_t
-xdr_layoutstats_t(xdrs, objp)
+xdr_layoutspecs_t(xdrs, objp)
 	XDR *xdrs;
-	layoutstats_t *objp;
+	layoutspecs_t *objp;
 {
-
-	if (!xdr_uint32_t(xdrs, &objp->plo_num_layouts))
-		return (FALSE);
 	if (!xdr_uint32_t(xdrs, &objp->plo_stripe_count))
 		return (FALSE);
 	if (!xdr_uint32_t(xdrs, &objp->plo_stripe_unit))
@@ -63,10 +60,6 @@ xdr_layoutstats_t(xdrs, objp)
 		return (FALSE);
 	if (!xdr_length4(xdrs, &objp->plo_length))
 		return (FALSE);
-	if (!xdr_uint64_t(xdrs, &objp->proxy_iocount))
-		return (FALSE);
-	if (!xdr_uint64_t(xdrs, &objp->ds_iocount))
-		return (FALSE);
 	if (!xdr_int64_t(xdrs, &objp->plo_creation_sec))
 		return (FALSE);
 	if (!xdr_int64_t(xdrs, &objp->plo_creation_musec))
@@ -77,5 +70,22 @@ xdr_layoutstats_t(xdrs, objp)
 	    plo_stripe_info_list_len, ~0,
 	    sizeof (stripe_info_t), (xdrproc_t)xdr_stripe_info_t))
 		return (FALSE);
+	return (TRUE);
+}
+
+bool_t
+xdr_layoutstats_t(XDR *xdrs, layoutstats_t *objp)
+{
+
+	if (!xdr_uint64_t(xdrs, &objp->proxy_iocount))
+		return (FALSE);
+	if (!xdr_uint64_t(xdrs, &objp->ds_iocount))
+		return (FALSE);
+
+	if (!xdr_array(xdrs, (char **)&objp->plo_data.lo_specs,
+	    (uint_t *)&objp->plo_data.total_layouts, ~0,
+	    sizeof (layoutspecs_t), (xdrproc_t)xdr_layoutspecs_t))
+		return (FALSE);
+
 	return (TRUE);
 }

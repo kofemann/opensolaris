@@ -252,7 +252,7 @@ r4inactive(rnode4_t *rp, cred_t *cr)
 	rp->r_secattr = NULL;
 	xattr = rp->r_xattr_dir;
 	rp->r_xattr_dir = NULL;
-	pnfs_layout_return(vp, cr, rp->r_lostateid, LR_SYNC);
+	pnfs_layout_return(vp, cr, LR_SYNC, NULL, PNFS_LAYOUTRETURN_FILE);
 	mutex_exit(&rp->r_statelock);
 
 	/*
@@ -657,6 +657,7 @@ start:
 	mutex_init(&rp->r_statelock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&rp->r_statev4_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&rp->r_os_lock, NULL, MUTEX_DEFAULT, NULL);
+	mutex_init(&rp->r_lo_lock, NULL, MUTEX_DEFAULT, NULL);
 	rp->created_v4 = 0;
 	list_create(&rp->r_layout, sizeof (pnfs_layout_t),
 	    offsetof(pnfs_layout_t, plo_list));
@@ -742,6 +743,7 @@ uninit_rnode4(rnode4_t *rp)
 	mutex_destroy(&rp->r_statelock);
 	mutex_destroy(&rp->r_statev4_lock);
 	mutex_destroy(&rp->r_os_lock);
+	mutex_destroy(&rp->r_lo_lock);
 	cv_destroy(&rp->r_cv);
 	cv_destroy(&rp->r_commit.c_cv);
 	cv_destroy(&rp->r_lowait);
@@ -762,6 +764,7 @@ rp4_addfree(rnode4_t *rp, cred_t *cr)
 	vnode_t *vp;
 	vnode_t *xattr;
 	struct vfs *vfsp;
+	pnfs_layout_t	*lo, *nextlo;
 
 	vp = RTOV4(rp);
 	ASSERT(vp->v_count >= 1);
@@ -805,11 +808,28 @@ rp4_addfree(rnode4_t *rp, cred_t *cr)
 			    NFS4_DR_FORCE|NFS4_DR_PUSH|NFS4_DR_REOPEN);
 		}
 		/*
-		 * Return the layout, if present
+		 * Return the layouts, if any, including removing and
+		 * freeing layouts that are unavailable.
 		 */
-		mutex_enter(&rp->r_statelock);
-		pnfs_layout_return(vp, cr, rp->r_lostateid, LR_SYNC);
-		mutex_exit(&rp->r_statelock);
+		mutex_enter(&rp->r_lo_lock);
+
+		lo = list_head(&rp->r_layout);
+		while (lo != NULL) {
+			nextlo = list_next(&rp->r_layout, lo);
+			if (lo->plo_flags & PLO_UNAVAIL) {
+				ASSERT(lo->plo_refcount == 1);
+				pnfs_layout_rele(rp, lo);
+			}
+			lo = nextlo;
+		}
+
+		if (!(list_is_empty(&rp->r_layout))) {
+			mutex_exit(&rp->r_lo_lock);
+			pnfs_layout_return(vp, cr, LR_SYNC, NULL,
+			    PNFS_LAYOUTRETURN_FILE);
+		} else {
+			mutex_exit(&rp->r_lo_lock);
+		}
 
 		r4inactive(rp, cr);
 
@@ -881,14 +901,26 @@ again:
 	 * It's ok to drop the locks out of order, so long as they are
 	 * always taken in the right order.
 	 */
-	mutex_enter(&rp->r_statelock);
-	if (rp->r_flags & R4LAYOUTVALID) {
+	mutex_enter(&rp->r_lo_lock);
+
+	lo = list_head(&rp->r_layout);
+	while (lo != NULL) {
+		nextlo = list_next(&rp->r_layout, lo);
+		if (lo->plo_flags & PLO_UNAVAIL) {
+			ASSERT(lo->plo_refcount == 1);
+			pnfs_layout_rele(rp, lo);
+		}
+		lo = nextlo;
+	}
+
+	if (!(list_is_empty(&rp->r_layout))) {
 		rw_exit(&rp->r_hashq->r_lock);
-		pnfs_layout_return(vp, cr, rp->r_lostateid, LR_SYNC);
-		mutex_exit(&rp->r_statelock);
+		mutex_exit(&rp->r_lo_lock);
+		pnfs_layout_return(vp, cr, LR_SYNC, NULL,
+		    PNFS_LAYOUTRETURN_FILE);
 		goto again;
 	}
-	mutex_exit(&rp->r_statelock);
+	mutex_exit(&rp->r_lo_lock);
 
 	/*
 	 * Now that we have the hash queue lock, and we know there
@@ -1175,54 +1207,7 @@ check_rtable4(struct vfs *vfsp)
 	return (0);
 }
 
-/* ARGSUSED */
-void
-layoutreturn_all(struct vfs *vfsp, cred_t *cr)
-{
-	rnode4_t *rp;
-	vnode_t *vp;
-	int index;
 
-	for (index = 0; index < rtable4size; index++) {
-start_again:
-		rw_enter(&rtable4[index].r_lock, RW_READER);
-		for (rp = rtable4[index].r_hashf;
-		    rp != (rnode4_t *)(&rtable4[index]);
-		    rp = rp->r_hashf) {
-			vp = RTOV4(rp);
-			if (vp->v_vfsp == vfsp) {
-				mutex_enter(&rp->r_statelock);
-				if (rp->r_flags & R4LAYOUTVALID) {
-					VN_HOLD(vp);
-					rw_exit(&rtable4[index].r_lock);
-
-					pnfs_layout_return(vp, cr,
-					    rp->r_lostateid, LR_SYNC);
-
-					/*
-					 * pnfs_layout_return() may choose
-					 * not to make otw calls. But we are
-					 * unmounting. So make sure to free
-					 * all layouts unconditionally.
-					 */
-					pnfs_layout_rele(rp);
-
-					/*
-					 * Release r_statelock first, since,
-					 * VN_RELE() could end up calling
-					 * nfs4_inactive(), which acquires
-					 * r_statelock again.
-					 */
-					mutex_exit(&rp->r_statelock);
-					VN_RELE(vp);
-					goto start_again;
-				}
-				mutex_exit(&rp->r_statelock);
-			}
-		}
-		rw_exit(&rtable4[index].r_lock);
-	}
-}
 
 /*
  * Destroy inactive vnodes from the hash queues which
@@ -2023,5 +2008,51 @@ r4_dup_check(rnode4_t *checkrp, vfs_t *vfsp)
 			rw_exit(&rtable4[index].r_lock);
 	}
 }
+
+/* ARGSUSED */
+void
+layoutreturn_all(struct vfs *vfsp, cred_t *cr)
+{
+	rnode4_t *rp;
+	vnode_t *vp;
+	int index;
+	pnfs_layout_t	*lo, *nextlo;
+
+	for (index = 0; index < rtable4size; index++) {
+start_again:
+		rw_enter(&rtable4[index].r_lock, RW_READER);
+		for (rp = rtable4[index].r_hashf;
+		    rp != (rnode4_t *)(&rtable4[index]);
+		    rp = rp->r_hashf) {
+			vp = RTOV4(rp);
+			if (vp->v_vfsp == vfsp) {
+				mutex_enter(&rp->r_lo_lock);
+				lo = list_head(&rp->r_layout);
+				while (lo != NULL) {
+					nextlo = list_next(&rp->r_layout, lo);
+					ASSERT(!(lo->plo_flags & PLO_BAD));
+					if (lo->plo_flags & PLO_UNAVAIL) {
+						ASSERT(lo->plo_refcount == 1);
+						pnfs_layout_rele(rp, lo);
+					}
+					lo = nextlo;
+				}
+
+				if (pnfs_rnode_holds_layouts(rp)) {
+					VN_HOLD(vp);
+					mutex_exit(&rp->r_lo_lock);
+					rw_exit(&rtable4[index].r_lock);
+					pnfs_layout_return(vp, cr, LR_SYNC,
+					    NULL, PNFS_LAYOUTRETURN_FILE);
+					VN_RELE(vp);
+					goto start_again;
+				}
+				mutex_exit(&rp->r_lo_lock);
+			}
+		}
+		rw_exit(&rtable4[index].r_lock);
+	}
+}
+
 
 #endif /* DEBUG */

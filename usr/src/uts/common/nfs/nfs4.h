@@ -1668,12 +1668,10 @@ extern void	vs_ace4_destroy(vsecattr_t *);
 extern void	vs_aent_destroy(vsecattr_t *);
 struct rnode4;
 extern void	pnfs_getdevicelist(struct mntinfo4 *, cred_t *);
-extern void	pnfs_layoutget(vnode_t *, cred_t *, layoutiomode4);
+
 extern void	pnfs_layout_set(struct mntinfo4 *, struct rnode4 *);
 #define	LR_ASYNC	0
 #define	LR_SYNC		1
-extern void	pnfs_layout_return(vnode_t *, cred_t *, stateid4, int);
-extern void	pnfs_layout_rele(struct rnode4 *);
 
 extern void	layoutreturn_all(struct vfs *, cred_t *);
 extern int	pnfs_read(vnode_t *, caddr_t, offset_t, int, size_t *,
@@ -1757,11 +1755,12 @@ extern void	mds_sstor_init(nfs_server_instance_t *);
 extern void	mds_compound_free(COMPOUND4res *);
 extern void	rfs4_state_fini(nfs_server_instance_t *);
 
-extern void   pnfs_layoutreturn_bulk(struct mntinfo4 *, cred_t *, int);
 struct nfs4_fsidlt;
 struct nfs4_server;
-extern void   pnfs_layout_discard(struct rnode4 *, struct nfs4_fsidlt *,
-    struct nfs4_server *);
+
+extern void   pnfs_layoutreturn_bulk(struct mntinfo4 *, cred_t *, int,
+    struct nfs4_server *, struct nfs4_fsidlt *);
+
 extern void	pnfs_trash_devtree(struct nfs4_server *);
 
 struct notify_deviceid_change4;

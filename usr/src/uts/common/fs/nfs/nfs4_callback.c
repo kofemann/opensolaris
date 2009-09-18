@@ -162,6 +162,17 @@ struct cb_recall_pass {
 	bool_t		truncate;
 };
 
+struct cb_lor {
+	nfs4_server_t		*lor_np;
+	nfs4_fsidlt_t		*lor_ltp;
+	rnode4_t		*lor_rp;
+	pnfs_lo_matches_t	*lor_lom;
+	int			lor_type;
+};
+
+
+static void layoutrecall_file_thread(struct cb_lor *);
+static void layoutrecall_bulk_thread(struct cb_lor *);
 static nfs4_open_stream_t *get_next_deleg_stream(rnode4_t *, int);
 static void nfs4delegreturn_thread(struct cb_recall_pass *);
 static int deleg_reopen(vnode_t *, bool_t *, struct nfs4_callback_globals *,
@@ -324,6 +335,7 @@ nfs4_cbconn_thread(nfs4_server_t *np)
 	mutex_enter(&cpr_lock);
 	CALLB_CPR_EXIT(&cpr_info);
 	cv_signal(&cbi->cb_destroy_wait);
+	mutex_destroy(&cpr_lock);
 	zthread_exit();
 }
 
@@ -666,14 +678,41 @@ cb_getattr_free(nfs_cb_resop4 *resop)
 		    obj_attributes.attrlist4, cb_getattr_bytes);
 }
 
+int
+nfs4layoutrecall_thread(nfs4_server_t *np, nfs4_fsidlt_t *ltp, rnode4_t *rp,
+	pnfs_lo_matches_t *lom, int recalltype)
+{
+	struct cb_lor	*cl;
+
+	cl = kmem_alloc(sizeof (*cl), KM_NOSLEEP);
+	if (cl == NULL)
+		return (NFS4ERR_DELAY);
+
+	cl->lor_np = np;
+	cl->lor_ltp = ltp;
+	cl->lor_rp = rp;
+	cl->lor_type = recalltype;
+	cl->lor_lom = lom;
+
+	/*
+	 * Grab a reference on the nfs4_server_t, for the thread created
+	 * below.  These threads are responsible for dropping this reference.
+	 */
+	nfs4_server_hold(np);
+	if (recalltype == PNFS_LAYOUTRECALL_FILE) {
+		(void) zthread_create(NULL, 0, layoutrecall_file_thread,
+		    cl, 0, minclsyspri);
+	} else {
+		(void) zthread_create(NULL, 0, layoutrecall_bulk_thread,
+		    cl, 0, minclsyspri);
+	}
+	return (NFS4_OK);
+}
+
 static nfsstat4
 layoutrecall_all(nfs4_server_t *np)
 {
-	vnode_t *vp;
-	rnode4_t *rp;
-	mntinfo4_t *mi = NULL;
-	nfs4_fsidlt_t *ltp;
-	nfsstat4 nstatus = NFS4ERR_NOMATCHING_LAYOUT;
+	int	error;
 
 	/*
 	 * Walk thru all of the layout trees, and discard all
@@ -681,113 +720,269 @@ layoutrecall_all(nfs4_server_t *np)
 	 * from this particular server, then do LAYOUTRETURN4_ALL.
 	 */
 	mutex_enter(&np->s_lt_lock);
-	for (ltp = avl_first(&np->s_fsidlt); ltp;
-	    ltp = AVL_NEXT(&np->s_fsidlt, ltp)) {
-		mutex_enter(&ltp->lt_rlt_lock);
-		for (rp = avl_first(&ltp->lt_rlayout_tree); rp;
-		    rp = AVL_NEXT(&ltp->lt_rlayout_tree, rp)) {
+	if (np->s_locnt == 0) {
+		mutex_exit(&np->s_lt_lock);
+		return (NFS4ERR_NOMATCHING_LAYOUT);
+	}
 
+	if (np->s_lobulkblock > 0) {
+		mutex_exit(&np->s_lt_lock);
+		return (NFS4ERR_DELAY);
+	}
+
+	np->s_lobulkblock++;
+	np->s_loflags |= PNFS_CBLORECALL;
+	mutex_exit(&np->s_lt_lock);
+
+	error = nfs4layoutrecall_thread(np, NULL, NULL, NULL,
+	    PNFS_LAYOUTRECALL_ALL);
+
+	return (error);
+}
+
+
+void
+layoutrecall_bulk_thread(struct cb_lor *cl)
+{
+	nfs4_server_t		*np = cl->lor_np;
+	nfs4_fsidlt_t		*savedltp = NULL, *ltp = cl->lor_ltp;
+	callb_cpr_t		cpr_info;
+	kmutex_t		cpr_lock;
+	vnode_t			*vp;
+	rnode4_t		*rp;
+	mntinfo4_t		*mi = NULL;
+	pnfs_layout_t		*layout, *next;
+	rnode4_t		*found;
+
+	mutex_init(&cpr_lock, NULL, MUTEX_DEFAULT, NULL);
+
+	CALLB_CPR_INIT(&cpr_info, &cpr_lock, callb_generic_cpr,
+	    "cblorall");
+
+	if (cl->lor_type == PNFS_LAYOUTRECALL_FSID) {
+		mutex_enter(&ltp->lt_rlt_lock);
+		while (ltp->lt_loinuse > 0) {
+			cv_wait(&ltp->lt_lowait, &ltp->lt_rlt_lock);
+		}
+		ASSERT(ltp->lt_loinuse == 0);
+	} else {
+		mutex_enter(&np->s_lt_lock);
+		while (np->s_loinuse > 0) {
+			cv_wait(&np->s_lowait, &np->s_lt_lock);
+		}
+		ASSERT(np->s_loinuse == 0);
+		ltp = avl_first(&np->s_fsidlt);
+		mutex_enter(&ltp->lt_rlt_lock);
+	}
+
+	while (ltp) {
+		rp = avl_first(&ltp->lt_rlayout_tree);
+		while (rp) {
 			vp = RTOV4(rp);
 			VN_HOLD(vp);
-			pnfs_layout_discard(rp, ltp, np);
+
 			/*
-			 * Hold the mi to prevent it from disappearing
-			 * after we drop the reference on the vnode.  This
-			 * will remain held until we send the request down
-			 * the taskq.
+			 * Grab a hold of the mi here so it does not
+			 * get removed before layoutreturn
+			 * can use it for the rfs4call.
 			 */
 			if (mi == NULL) {
 				mi = VTOMI4(vp);
 				MI4_HOLD(mi);
 			}
-			VN_RELE(vp);
-			nstatus = NFS4_OK;
-		}
-		mutex_exit(&ltp->lt_rlt_lock);
-	}
-	mutex_exit(&np->s_lt_lock);
-	if (nstatus == NFS4_OK) {
-		pnfs_layoutreturn_bulk(mi, kcred, LAYOUTRETURN4_ALL);
-		MI4_RELE(mi);
-	}
-	return (nstatus);
-}
+			mutex_enter(&rp->r_lo_lock);
 
+			layout = list_head(&rp->r_layout);
+			ASSERT(rp->r_fsidlt == ltp);
+			/*
+			 * Grab the next rnode in the tree now because
+			 * pnfs_trim_fsid_tree should remove this one.
+			 */
+			found = AVL_NEXT(&ltp->lt_rlayout_tree, rp);
+
+			while (layout) {
+				ASSERT(layout->plo_inusecnt == 0);
+				layout->plo_flags |= PLO_BAD;
+				next = list_next(&rp->r_layout, layout);
+				pnfs_decr_layout_refcnt(rp, layout);
+				pnfs_trim_fsid_tree(rp, ltp, FALSE);
+				bzero(&rp->r_lostateid,
+				    sizeof (rp->r_lostateid));
+				layout = next;
+			}
+			mutex_exit(&rp->r_lo_lock);
+			VN_RELE(vp);
+
+			rp = found;
+		}
+
+		mutex_exit(&ltp->lt_rlt_lock);
+		if (cl->lor_type == PNFS_LAYOUTRECALL_FSID) {
+			savedltp = ltp;
+			ltp = NULL;
+		} else {
+			ltp = AVL_NEXT(&np->s_fsidlt, ltp);
+			if (ltp)
+				mutex_enter(&ltp->lt_rlt_lock);
+			else
+				mutex_exit(&np->s_lt_lock);
+		}
+	}
+
+	pnfs_layoutreturn_bulk(mi, kcred, cl->lor_type, np, savedltp);
+
+	MI4_RELE(mi);
+
+	mutex_enter(&np->s_lt_lock);
+	np->s_lobulkblock--;
+	np->s_loflags &= ~PNFS_CBLORECALL;
+	if (cl->lor_type == PNFS_LAYOUTRECALL_FSID) {
+		ASSERT(savedltp != NULL);
+		mutex_enter(&savedltp->lt_rlt_lock);
+		savedltp->lt_lobulkblock--;
+		savedltp->lt_flags &= ~PNFS_CBLORECALL;
+		mutex_exit(&savedltp->lt_rlt_lock);
+		mutex_exit(&np->s_lt_lock);
+	} else {
+		mutex_exit(&np->s_lt_lock);
+	}
+
+	kmem_free(cl, sizeof (*cl));
+	nfs4_server_rele(np);
+
+	mutex_enter(&cpr_lock);
+	CALLB_CPR_EXIT(&cpr_info);
+	mutex_destroy(&cpr_lock);
+
+	zthread_exit();
+}
 
 static nfsstat4
 layoutrecall_fsid(fsid4 *recallfsid, nfs4_server_t *np)
 {
-	vnode_t *vp;
-	rnode4_t *rp;
-	mntinfo4_t *mi = NULL;
-	nfs4_fsidlt_t *ltp, lt;
-	nfsstat4 nstatus = NFS4ERR_NOMATCHING_LAYOUT;
+	nfs4_fsidlt_t 	*ltp, lt;
+	rnode4_t	*rp;
+	int		error;
 
 	lt.lt_fsid.major = recallfsid->major;
 	lt.lt_fsid.minor = recallfsid->minor;
 
 	mutex_enter(&np->s_lt_lock);
+
+	/*
+	 * If a layoutrecall_all is active or pending, then delay.
+	 */
+	if (np->s_loflags & PNFS_CBLORECALL) {
+		mutex_exit(&np->s_lt_lock);
+		return (NFS4ERR_DELAY);
+	}
+
 	ltp = avl_find(&np->s_fsidlt, &lt, NULL);
+	mutex_enter(&ltp->lt_rlt_lock);
 
 	/*
 	 * If no matching fsid layout tree is found, then no layouts exist
 	 * for this fsid.
 	 */
-	if (ltp == NULL) {
+	if (ltp->lt_locnt == 0) {
+		mutex_exit(&ltp->lt_rlt_lock);
 		mutex_exit(&np->s_lt_lock);
-		return (nstatus);
+		return (NFS4ERR_NOMATCHING_LAYOUT);
+	}
+
+	/*
+	 * If we are handling another fsid lorecall for this fsid
+	 * return DELAY.
+	 */
+	if (ltp->lt_flags & PNFS_CBLORECALL) {
+		mutex_exit(&ltp->lt_rlt_lock);
+		mutex_exit(&np->s_lt_lock);
+		return (NFS4ERR_DELAY);
 	}
 
 	/*
 	 * Found a matching fsid tree, return and free all
 	 * layouts on this tree.
 	 */
-	mutex_enter(&ltp->lt_rlt_lock);
-	mutex_exit(&np->s_lt_lock);
 
-	for (rp = avl_first(&ltp->lt_rlayout_tree); rp;
-	    rp = AVL_NEXT(&ltp->lt_rlayout_tree, rp)) {
-		/*
-		 * For each rnode on this fsid's layout tree,
-		 * discard the layout.  We do not return each
-		 * layout individually, instead we return in
-		 * bulk, at the end.
-		 */
-		vp = RTOV4(rp);
-		VN_HOLD(vp);
-		pnfs_layout_discard(rp, ltp, np);
-		if (mi == NULL) {
-			mi = VTOMI4(vp);
-			MI4_HOLD(mi);
-		}
-		VN_RELE(vp);
-		nstatus = NFS4_OK;
+	rp = avl_first(&ltp->lt_rlayout_tree);
+	if (rp == NULL) {
+		mutex_exit(&ltp->lt_rlt_lock);
+		mutex_exit(&np->s_lt_lock);
+		return (NFS4ERR_NOMATCHING_LAYOUT);
 	}
+
+
+	/*
+	 * Increment lobulkblock in nfs4_server indicating that
+	 * a layoutrecall_all can not execute now and must return DELAY.
+	 */
+	np->s_lobulkblock++;
+
+	/*
+	 * Mark the fsidlt also as bulkblocking, we can not execute another
+	 * layoutrecall_fsid for this fsid now.  And mark that we are
+	 * currently executing an fsid bulk layoutrecall for this fsid.
+	 */
+	ltp->lt_lobulkblock++;
+	ltp->lt_flags |= PNFS_CBLORECALL;
+
+	/*
+	 * Release All locks, return success, so success can be
+	 * sent as the reply to this cb_layoutrecall op, and
+	 * spawn a thread to handle the actual layoutreturns.
+	 */
+	mutex_exit(&np->s_lt_lock);
 	mutex_exit(&ltp->lt_rlt_lock);
-	if (nstatus == NFS4_OK) {
-		pnfs_layoutreturn_bulk(mi, kcred, LAYOUTRETURN4_FSID);
-		MI4_RELE(mi);
-	}
-	return (nstatus);
+
+	error = nfs4layoutrecall_thread(np, ltp, NULL, NULL,
+	    PNFS_LAYOUTRECALL_FSID);
+
+	return (error);
 }
 
+/*
+ * XXXKLR, the CB_LAYOUTRECALL4args will have to be passed to these
+ * layoutrecall functions, so they have knowledge of the iomode, and
+ * clora_changed bits.
+ *
+ * XXXKLR - Clora changes functionality must also be added.
+ */
 static nfsstat4
 layoutrecall_file(layoutrecall_file4 *lrf, nfs4_server_t *np)
 {
-	nfs_fh4		*rawfh = &lrf->lor_fh;
-	nfs4_sharedfh_t sfh;
-	vnode_t		*vp;
-	rnode4_t	lrp, *rp;
-	nfs4_fsidlt_t	*ltp;
-	nfsstat4 nstatus = NFS4ERR_NOMATCHING_LAYOUT;
+	nfs_fh4			*rawfh = &lrf->lor_fh;
+	nfs4_sharedfh_t 	sfh;
+	vnode_t			*vp;
+	rnode4_t		lrp, *rp;
+	nfs4_fsidlt_t		*ltp;
+	pnfs_lo_matches_t	*lom = NULL;
+	nfsstat4 		nstatus = NFS4ERR_NOMATCHING_LAYOUT;
 
 	bcopy(rawfh, &sfh, sizeof (*rawfh));
 	lrp.r_fh = &sfh;
 
+	mutex_enter(&np->s_lock);
+
 	mutex_enter(&np->s_lt_lock);
+	if (np->s_loflags & PNFS_CBLORECALL) {
+		mutex_exit(&np->s_lt_lock);
+		mutex_exit(&np->s_lock);
+		return (NFS4ERR_DELAY);
+	}
+
+	if (avl_first(&np->s_fsidlt) == NULL) {
+		mutex_exit(&np->s_lt_lock);
+		mutex_exit(&np->s_lock);
+		return (NFS4ERR_NOMATCHING_LAYOUT);
+	}
+
+	np->s_lobulkblock++;
+
 	/*
 	 * Look thru the fsid layout trees until we find a matching
-	 * rnode on an fsid layout tree's rnode layout tree.
+	 * rnode on an fsid layout tree's rnode layout tree.  We don't
+	 * have the matching fsid to directly lookup the fsidlt structure.
 	 */
 	for (ltp = avl_first(&np->s_fsidlt); ltp;
 	    ltp = AVL_NEXT(&np->s_fsidlt, ltp)) {
@@ -797,35 +992,157 @@ layoutrecall_file(layoutrecall_file4 *lrf, nfs4_server_t *np)
 		 * file handle.
 		 */
 		mutex_enter(&ltp->lt_rlt_lock);
+
 		rp = avl_find(&ltp->lt_rlayout_tree, &lrp, NULL);
+
 		if (rp != NULL) {
+			if (ltp->lt_flags & PNFS_CBLORECALL) {
+				np->s_lobulkblock--;
+				mutex_exit(&ltp->lt_rlt_lock);
+				mutex_exit(&np->s_lt_lock);
+				mutex_exit(&np->s_lock);
+				return (nstatus);
+			}
+			ltp->lt_lobulkblock++;
+			mutex_exit(&ltp->lt_rlt_lock);
+			mutex_exit(&np->s_lt_lock);
+
 			vp = RTOV4(rp);
 			VN_HOLD(vp);
-			mutex_enter(&rp->r_statelock);
+			mutex_exit(&np->s_lock);
+
 			/*
-			 * Since this client will only hold one layout
-			 * for an rnode at a time, if we get a
+			 * Since this client will never ask for a layout that
+			 * it already holds, if we get a
 			 * layoutrecall, the stateid it has should match
 			 * ours!.
 			 */
+			mutex_enter(&rp->r_statelock);
 			if (lrf->lor_stateid.seqid !=
 			    rp->r_lostateid.seqid + 1) {
-				cmn_err(CE_WARN, "our layout stateids are"
-				    "out of sync! rnode: %p", (void *)rp);
+				cmn_err(CE_PANIC, "our layout stateids are"
+				    "out of sync! rnode: %p %p %p", (void *)rp,
+				    (void *)&lrf->lor_stateid,
+				    (void *)&rp->r_lostateid);
 			}
-			pnfs_layout_return(vp, kcred, lrf->lor_stateid,
-			    LR_ASYNC);
+
+			rp->r_lostateid = lrf->lor_stateid;
 			mutex_exit(&rp->r_statelock);
-			mutex_exit(&ltp->lt_rlt_lock);
-			VN_RELE(vp);
-			nstatus = NFS4_OK;
+
+			lom = pnfs_find_layouts(np, rp, kcred, LAYOUTIOMODE4_RW,
+			    lrf->lor_offset, lrf->lor_length, LOM_RECALL);
+
+			if (lom == NULL || (lom != NULL &&
+			    !(lom->lm_flags & LOMSTAT_MATCHFOUND))) {
+				pnfs_release_layouts(np, rp, lom, LOM_RECALL);
+
+				mutex_enter(&np->s_lt_lock);
+				mutex_enter(&ltp->lt_rlt_lock);
+				np->s_lobulkblock--;
+				ltp->lt_lobulkblock--;
+				mutex_exit(&ltp->lt_rlt_lock);
+				mutex_exit(&np->s_lt_lock);
+				VN_RELE(vp);
+				return (nstatus);
+			}
+
+			if (lom->lm_flags & LOMSTAT_DELAY) {
+				pnfs_release_layouts(np, rp, lom, LOM_RECALL);
+
+				mutex_enter(&np->s_lt_lock);
+				mutex_enter(&ltp->lt_rlt_lock);
+				np->s_lobulkblock--;
+				ltp->lt_lobulkblock--;
+				mutex_exit(&ltp->lt_rlt_lock);
+				mutex_exit(&np->s_lt_lock);
+				VN_RELE(vp);
+				return (NFS4ERR_DELAY);
+			}
+
+			nstatus = nfs4layoutrecall_thread(np, ltp, rp,
+			    lom, PNFS_LAYOUTRECALL_FILE);
 			break;
+		} else {
+			mutex_exit(&ltp->lt_rlt_lock);
 		}
-		mutex_exit(&ltp->lt_rlt_lock);
 	}
-	mutex_exit(&np->s_lt_lock);
+
 	return (nstatus);
 }
+
+
+void
+layoutrecall_file_thread(struct cb_lor *cl)
+{
+	rnode4_t		*rp = cl->lor_rp;
+	pnfs_lo_matches_t	*lom = cl->lor_lom;
+	vnode_t			*vp = RTOV4(cl->lor_rp);
+	nfs4_fsidlt_t		*fsidlt = cl->lor_ltp;
+	callb_cpr_t		cpr_info;
+	kmutex_t		cpr_lock;
+	pnfs_lol_t		*lol;
+	pnfs_layout_t		*layout;
+
+	mutex_init(&cpr_lock, NULL, MUTEX_DEFAULT, NULL);
+	CALLB_CPR_INIT(&cpr_info, &cpr_lock, callb_generic_cpr, "cblorfile");
+
+	if (cl->lor_rp == NULL || cl->lor_np == NULL || rp->r_fsidlt == NULL)
+		cmn_err(CE_WARN, "cl %p", (void *)cl);
+	ASSERT(cl->lor_rp != NULL);
+	ASSERT(cl->lor_np != NULL);
+	ASSERT(rp->r_fsidlt != NULL);
+
+	mutex_enter(&rp->r_lo_lock);
+	if (lom->lm_flags & LOMSTAT_NEEDSWAIT) {
+		/*
+		 * We can't just return the layout because when the
+		 * list was created we had layouts in use by I/O.
+		 * Check for those here, and wait for the I/O to complete.
+		 */
+		for (lol = list_head(&lom->lm_layouts); lol != NULL;
+		    lol = list_next(&lom->lm_layouts, lol)) {
+			layout = lol->l_layout;
+			if (layout->plo_inusecnt > 0) {
+				layout->plo_flags |= PLO_LOWAITER;
+				while (layout->plo_inusecnt > 0) {
+					cv_wait(&layout->plo_wait,
+					    &rp->r_lo_lock);
+				}
+				layout->plo_flags &= ~PLO_LOWAITER;
+			}
+		}
+	}
+	mutex_exit(&rp->r_lo_lock);
+
+	/*
+	 * Must grab the fsidlt here because pnfs_layout_return can
+	 * zero this field when removing the layout from the rnode, and
+	 * then removing the rnode from the fsidlt.  The fsidlt itself
+	 * will exist until the file system is unmounted.
+	 */
+
+	pnfs_layout_return(vp, kcred, LR_SYNC, lom,
+	    PNFS_LAYOUTRECALL_FILE);
+
+	pnfs_release_layouts(cl->lor_np, rp, lom, LOM_RECALL);
+	VN_RELE(vp);
+
+	mutex_enter(&cl->lor_np->s_lt_lock);
+	mutex_enter(&fsidlt->lt_rlt_lock);
+	cl->lor_np->s_lobulkblock--;
+	fsidlt->lt_lobulkblock--;
+	mutex_exit(&fsidlt->lt_rlt_lock);
+	mutex_exit(&cl->lor_np->s_lt_lock);
+
+	nfs4_server_rele(cl->lor_np);
+
+	mutex_enter(&cpr_lock);
+	CALLB_CPR_EXIT(&cpr_info);
+	mutex_destroy(&cpr_lock);
+	zthread_exit();
+
+}
+
 
 static void
 cb_layoutrecall(nfs_cb_argop4 *argop, nfs_cb_resop4 *resop, struct svc_req *req,
@@ -1258,8 +1575,7 @@ cb_compound(CB_COMPOUND4args *args, CB_COMPOUND4res *resp, struct svc_req *req,
 			else
 				break;
 			if (!mvers_0) {
-				seq_args =
-				    &argop->nfs_cb_argop4_u.opcbsequence;
+				seq_args = &argop->nfs_cb_argop4_u.opcbsequence;
 				slot = seq_args->csa_slotid;
 			}
 			if ((sbuf != NULL) && !mvers_0) {

@@ -396,7 +396,8 @@ typedef enum nfs4_tag_type {
 	TAG_SEQUENCE,
 	TAG_DESTROY_SESSION,
 	TAG_PNFS_GETDEVINFO,
-	TAG_RECLAIM_COMPLETE
+	TAG_RECLAIM_COMPLETE,
+	TAG_LAYOUTCOMMIT
 } nfs4_tag_type_t;
 
 #define	NFS4_TAG_INITIALIZER	{				\
@@ -543,7 +544,9 @@ typedef enum nfs4_tag_type {
 		{TAG_PNFS_GETDEVINFO,		"getdeviceinf", \
 			{0x67657464, 0x65766963, 0x65696e66}},	\
 		{TAG_RECLAIM_COMPLETE,		"reclaim complete", \
-			{0x7265636c, 0x61696d20, 0x636f6d70}}	\
+			{0x7265636c, 0x61696d20, 0x636f6d70}},	\
+		{TAG_LAYOUTCOMMIT,		"layoutcommit", \
+			{0x6c61796f, 0x75742063, 0x6f6d6d69}} \
 	}
 
 /*
@@ -1336,7 +1339,18 @@ typedef struct nfs4_fsidlt
 	avl_node_t	lt_node; /* link to nfs4_fsidlt tree */
 	kmutex_t	lt_rlt_lock; /* rnode layout tree lock */
 	avl_tree_t	lt_rlayout_tree; /* rnode layout tree by fh */
+	uint_t		lt_lobulkblock;	/* operations blocking bulk lor */
+	uint_t		lt_loinuse; /* layouts in use */
+	uint_t		lt_locnt; /* valid layouts held for FSID */
+	kcondvar_t	lt_lowait; /* condition variable */
+	uint_t		lt_flags; /* layout flags */
 } nfs4_fsidlt_t;
+
+/*
+ * s_loflags and lt_flags bit field values for nfs4_server and nfs4_fsidlt
+ */
+#define	PNFS_CBLORECALL	0x01	/* Layout Recall Active Or Pending */
+#define	PNFS_CBLOWAITER 0x02	/* Thread waiting for Bulk Lyaout Recall */
 
 /*
  * Max slots and available slots can be accessed by stok_t->st_currw
@@ -1390,6 +1404,11 @@ typedef struct nfs4_server {
 	struct nfs4_callback_globals *zone_globals;	/* globals */
 	kcondvar_t		ssx_wait;	/* wait for destroy session */
 	servinfo4_t		*s_ds_svp; /* for dataservers, the servinfo4 */
+	uint_t			s_lobulkblock; /* active ops block bulk lor */
+	uint_t			s_loinuse; /* active ops using layouts */
+	uint_t			s_loflags; /* layout flags */
+	uint_t			s_locnt; /* Valid layouts held for clientid */
+	kcondvar_t		s_lowait; /* bulk lor waiting here */
 	kmutex_t		s_lt_lock; /* layout tree lock */
 	avl_tree_t		s_fsidlt; /* fsid layout tree */
 	avl_tree_t		s_devid_tree;	/* Device ID tree */

@@ -609,7 +609,6 @@ pnfs_trash_devtree(nfs4_server_t *n4sp)
 			pnfs_rele_device(n4sp, dp);
 		}
 	}
-
 	avl_destroy(&n4sp->s_devid_tree);
 	mutex_exit(&n4sp->s_lock);
 }
@@ -636,19 +635,574 @@ nfs4_pnfs_fini()
 	kmem_cache_destroy(task_layoutreturn_cache);
 }
 
-static int
-pnfs_use_layout(rnode4_t *rp)
+
+/*
+ * pnfs_find_layouts returns a pnfs_lo_matches_t structure with a linked
+ * list of pnfs_lol_t structures matching the layouts for the byte range
+ * requested.  If a NULL is returned, no valid matching layouts were found.
+ */
+pnfs_lo_matches_t *
+pnfs_find_layouts(nfs4_server_t *np, rnode4_t *rp, cred_t *cr,
+layoutiomode4 iomode, offset4 off, length4 len, int use)
 {
-	ASSERT(MUTEX_HELD(&rp->r_statelock));
-	if (! (rp->r_flags & R4LAYOUTVALID))
-		return (0);
+	pnfs_lo_matches_t	*lom = NULL;
+	pnfs_layout_t		*lo;
+	pnfs_lol_t		*nlol, *lol;
+	int			dologet = TRUE;
+	length4			length;
+	offset4			offset = off;
+	length4			end, lomend, loend;
+	nfs4_fsidlt_t		lt, *newltp = NULL, *ltp;
+	avl_index_t		where;
+	rnode4_t		*rfound;
+	int			cvstat = 0, count = 0;
+#ifdef DEBUG
+	offset4			prevend = 0;
+#endif
+
+	end = PNFS_LAYOUTEND;
+	lom = kmem_zalloc(sizeof (*lom), KM_SLEEP);
+
+	list_create(&lom->lm_layouts, sizeof (pnfs_lol_t),
+	    offsetof(pnfs_lol_t, l_node));
 
 	/*
-	 * check i/o mode
-	 * check layout segments, not just all-or-nothing
+	 * For recall if we find a layout marked PLO_GET, PLO_RETURN or
+	 * PLO_RECALL, will will only return a lom with an empty
+	 * lol list, which is marked LOM_DELAY.  This is to notify the
+	 * caller that the thread needs to delay here to wait for
+	 * the pnfs_layout states to change.  The recall thread when
+	 * seeing this should return NFS4ERR_DELAY to the mds.
+	 * For recall, if we find layouts in use, we will still add them
+	 * to the lol list, but not wait for them in this function.
+	 * The lom will be flagged as LOM_NEEDSWAIT, which can indicate to the
+	 * caller that it needs to wait for the inuse counts to go ot zero for
+	 * one or more layouts on the list.
 	 */
-	return (1);
+	if (use == LOM_RECALL) {
+		lom->lm_offset = offset = 0;
+		lom->lm_length = length = PNFS_LAYOUTEND;
+	} else {
+		lom->lm_offset = offset = off;
+		lom->lm_length = length = len;
+	}
+
+	mutex_enter(&rp->r_statelock);
+	lt.lt_fsid.major = rp->r_srv_fsid.major;
+	lt.lt_fsid.minor = rp->r_srv_fsid.minor;
+	mutex_exit(&rp->r_statelock);
+
+
+	mutex_enter(&np->s_lt_lock);
+	ltp = avl_find(&np->s_fsidlt, &lt, &where);
+	if (ltp == NULL) {
+		mutex_exit(&np->s_lt_lock);
+		newltp = kmem_zalloc(sizeof (*ltp), KM_SLEEP);
+		mutex_enter(&np->s_lt_lock);
+		ltp = avl_find(&np->s_fsidlt, &lt, &where);
+		if (ltp) {
+			kmem_free(newltp, sizeof (*newltp));
+			mutex_enter(&ltp->lt_rlt_lock);
+		} else {
+			ltp = newltp;
+			mutex_init(&ltp->lt_rlt_lock, NULL, MUTEX_DEFAULT,
+			    NULL);
+			avl_create(&ltp->lt_rlayout_tree, layoutcmp,
+			    sizeof (rnode4_t), offsetof(rnode4_t, r_avl));
+			cv_init(&ltp->lt_lowait, NULL, CV_DEFAULT, NULL);
+			ltp->lt_fsid = lt.lt_fsid;
+			mutex_enter(&ltp->lt_rlt_lock);
+			avl_insert(&np->s_fsidlt, ltp, where);
+		}
+	} else {
+		mutex_enter(&ltp->lt_rlt_lock);
+	}
+	ASSERT(MUTEX_HELD(&ltp->lt_rlt_lock));
+	mutex_enter(&rp->r_lo_lock);
+	rfound = avl_find(&ltp->lt_rlayout_tree, rp, &where);
+	if (rfound == NULL && use == LOM_USE)
+		avl_insert(&ltp->lt_rlayout_tree, rp, where);
+	mutex_enter(&rp->r_statelock);
+	if (rp->r_fsidlt == NULL) {
+		rp->r_fsidlt = ltp;
+	}
+	ASSERT(rp->r_fsidlt == ltp);
+	mutex_exit(&rp->r_statelock);
+	mutex_exit(&rp->r_lo_lock);
+
+#ifdef DEBUG
+	if (use == LOM_RETURN)
+		ASSERT(off == 0 && length == PNFS_LAYOUTEND);
+#endif
+
+	lomend = (length == PNFS_LAYOUTEND ? PNFS_LAYOUTEND : off + length);
+
+	/*
+	 * If there are any bulk layoutrecalls active, no layouts will be
+	 * returned.  We can enhance this later and wait here until bulk
+	 * layoutsrecalls have completed.
+	 */
+
+	if (np->s_loflags & PNFS_CBLORECALL) {
+		mutex_exit(&np->s_lt_lock);
+		mutex_exit(&ltp->lt_rlt_lock);
+		kmem_free(lom, sizeof (*lom));
+		return (NULL);
+	}
+
+	if (ltp->lt_flags & PNFS_CBLORECALL) {
+		mutex_exit(&ltp->lt_rlt_lock);
+		mutex_exit(&np->s_lt_lock);
+		kmem_free(lom, sizeof (*lom));
+		return (NULL);
+	}
+
+	/*
+	 * If we are gathering the layouts to do I/O or a commit we will
+	 * mark the layouts as "inuse" to prevent the layouts from being
+	 * returned while in use.  We also need to track if layouts are
+	 * "in use" at the fsid level and the clientid level. This is done
+	 * in the nfs4_fsidlt and nfs4_server structures.
+	 * The inuse counts in the nfs4_server and nfs4_fsid cause a
+	 * bulk layoutrecall from blasting away layouts that may be in use,
+	 * or are about to be in use.
+	 *
+	 * Here are a couple things that may look strange but are
+	 * expected:
+	 * 1) On the first layoutget for the clientid the nfs4_server's
+	 * lo_inuse can be 1, but the locnt is still 0.  Same goes for the
+	 * first layoutget for an fsid.  This occurs because we increment
+	 * the inuse cnt before we increment the locnt when new layouts
+	 * are obtained with layoutget OTW. This is okay as we really
+	 * do not have the layout yet.  The bulk
+	 * layoutrecall threads will still se the layoutcount as 0
+	 * and return NFS4ERR_NOMATCHING_LAYOUT.
+	 *
+	 * 2) If we receive a bulk layoutrecall after incrementing the
+	 * loinuse counters, but before we do the layoutget OTW, and we
+	 * determine we need to do a LAYOUTGET otw, then the
+	 * pnfs_task_layoutget function will detect this.  It will see that
+	 * the PNFS_CBLORECALL bit set in the nfs4_server or nfs4_fsid,
+	 * and will return doing nothing.  At this point the bulk layoutrecall
+	 * thread will be waiting for the loinuse counter to go to zero.
+	 * pnfs_find_layouts will find no matching layouts, decrement
+	 * the loinuse counter and wake the bulk layoutrecall thread.
+	 *
+	 * 3) We could also be gathering the layouts for a layoutreturn
+	 * for rnode inactivation for example.  In this case the use flag
+	 * will be LOM_RETURN.  We have not incremented any lo_inuse
+	 * counters.  A bulk layoutrecall can occur while pnfs_find_layouts
+	 * is building the list of layouts.  This is okay.  The bulk layout
+	 * recall will hold the r_lo_lock and simply pnfs_layout_rele these
+	 * layouts.  The list is protected by the r_lo_lock.  These layouts
+	 * will be marked BAD, so if the bulk layoutrecall occurs before
+	 * pnfs_find_layouts hold the r_lo_lock, it will simply ignore
+	 * these bad layouts.  If the bulk layoutrecall comes in after
+	 * the layoutreturn is into pnfs_task_layoutreturn, it will see
+	 * the bulkblock incremented and return NFS4ERR_DELAY.
+	 */
+
+	if (use == LOM_USE || use == LOM_COMMIT) {
+		np->s_loinuse++;
+		ltp->lt_loinuse++;
+	}
+
+	mutex_exit(&ltp->lt_rlt_lock);
+	mutex_exit(&np->s_lt_lock);
+
+	mutex_enter(&rp->r_lo_lock);
+	lo = list_head(&rp->r_layout);
+
+	while ((dologet == TRUE) || (dologet == FALSE && lo != NULL)) {
+		/*
+		 * Any Layouts to process?  If not we have reached the end
+		 * of the list.
+		 */
+		if (lo == NULL) {
+			if (use != LOM_USE)
+				break;
+			/*
+			 * We need to do layoutget OTW.  If we are holding
+			 * any layouts in the lom list, we need to drop these
+			 * because we will re-search this list again after
+			 * the layoutget.  Layoutget will drop the
+			 * r_statelock and the list we have already built
+			 * may change.
+			 */
+			lol = list_head(&lom->lm_layouts);
+			while (lol) {
+				if (lol->l_layout)
+					pnfs_layout_rele(rp, lol->l_layout);
+				nlol = list_next(&lom->lm_layouts, lol);
+				list_remove(&lom->lm_layouts, lol);
+				kmem_free(lol, sizeof (*lol));
+				lol = nlol;
+			}
+			pnfs_layoutget(RTOV(rp), cr, off, iomode);
+			mutex_enter(&rp->r_lo_lock);
+			offset = lom->lm_offset;
+			prevend = 0;
+			loend = 0;
+			lo = list_head(&rp->r_layout);
+			dologet = FALSE;
+			continue;
+		}
+
+		/*
+		 * Is this layout BAD, if so,skip.  If it is
+		 * unavailable put it in the list only if it is
+		 * for the LOM_USE case.  This tells thes I/O
+		 * path that this section must go to proxy I/O.
+		 * It all prevents another layoutget.
+		 */
+		if ((lo->plo_flags & PLO_BAD) || (use != LOM_USE &&
+		    (lo->plo_flags & PLO_UNAVAIL))) {
+			lo = list_next(&rp->r_layout, lo);
+				continue;
+		}
+
+		/*
+		 * If the offset we are looking for is greater than the
+		 * end of this layout's offset, get the next layout.
+		 */
+		loend = lo->plo_length == PNFS_LAYOUTEND ? PNFS_LAYOUTEND :
+		    lo->plo_offset + lo->plo_length;
+#ifdef DEBUG
+		ASSERT(prevend != PNFS_LAYOUTEND);
+		if (prevend != lo->plo_offset)
+			cmn_err(CE_WARN, "%llu, %llu %p",
+			    (unsigned long long)prevend,
+			    (unsigned long long)lo->plo_offset,
+			    (void *)lo);
+		ASSERT(prevend == lo->plo_offset);
+		prevend = loend;
+#endif
+		if (offset >= loend) {
+			lo = list_next(&rp->r_layout, lo);
+			continue;
+		}
+
+		/*
+		 * The only gaps we will see in the layout range of layouts on
+		 * an rnode are at the end of the file.  Thus if the offset we
+		 * are looking for is less than the end of this layout, this
+		 * must be the layout we are searching for.
+		 */
+		ASSERT(offset >= lo->plo_offset);
+
+		/*
+		 * We need this layout!
+		 */
+		pnfs_layout_hold(rp, lo);
+
+		/*
+		 * If we stumble acrossed a layout that
+		 * has a GET/RETURN or RECALL in progress,
+		 * wait for that to finish.  We must then
+		 * release all lol's we have and start over after waking
+		 * because we had to drop the r_statelock which
+		 * locks the rnodes layout list.  The lol's and the
+		 * layouts they map could change by the time we
+		 * are woken up again.  We must drop everything,
+		 * and start over again.
+		 */
+		if (lo->plo_flags & (PLO_GET|PLO_RETURN|PLO_RECALL)) {
+			/*
+			 * If this is a layoutrecall wanting these layouts
+			 * don't wait!  Simply set the flag in the lom
+			 * release anything we have grabbed, and return.
+			 */
+			if (use == LOM_RECALL) {
+				lom->lm_flags |= LOMSTAT_DELAY;
+			} else {
+				lo->plo_flags |= PLO_LOWAITER;
+				cvstat = 0;
+				while ((lo->plo_flags &
+				    (PLO_GET|PLO_RETURN|PLO_RECALL)) &&
+				    !(lo->plo_flags & PLO_BAD) &&
+				    cvstat != EINTR) {
+					cvstat = cv_wait_sig(&lo->plo_wait,
+					    &rp->r_lo_lock);
+				}
+				lo->plo_flags &= ~PLO_LOWAITER;
+				if (cvstat == EINTR)
+					lom->lm_status = EINTR;
+			}
+
+			lol = list_head(&lom->lm_layouts);
+			while (lol) {
+				if (lol->l_layout)
+					pnfs_layout_rele(rp, lol->l_layout);
+				nlol = list_next(&lom->lm_layouts, lol);
+				list_remove(&lom->lm_layouts, lol);
+				kmem_free(lol, sizeof (*lol));
+				lol = nlol;
+			}
+			/*
+			 * Start over.	Do the pnfs_layout_rele
+			 * below since we did the hold of this layout
+			 * above, but this layout did not exist in the
+			 * lom->lm_layouts list yet.
+			 */
+			pnfs_layout_rele(rp, lo);
+			if (use == LOM_RECALL || lom->lm_status == EINTR) {
+				mutex_exit(&rp->r_lo_lock);
+				return (lom);
+			}
+			lo = list_head(&rp->r_layout);
+			offset = lom->lm_offset;
+			prevend = 0;
+			loend = 0;
+			lom->lm_flags &= ~LOMSTAT_MATCHFOUND;
+			if (use == LOM_RECALL) {
+				mutex_exit(&rp->r_lo_lock);
+				return (lom);
+			}
+			continue;
+		}
+
+		if (use == LOM_RETURN || use == LOM_RECALL) {
+			if (use == LOM_RETURN)
+				lo->plo_flags |= PLO_RETURN;
+			if (use == LOM_RECALL)
+				lo->plo_flags |= PLO_RECALL;
+			if (lo->plo_inusecnt > 0) {
+				if (use == LOM_RECALL) {
+					lom->lm_flags |= LOMSTAT_NEEDSWAIT;
+				} else {
+					lo->plo_flags |= PLO_LOWAITER;
+					cvstat = 0;
+					while (lo->plo_inusecnt &&
+					    cvstat != EINTR) {
+						cvstat = cv_wait_sig(
+						    &lo->plo_wait,
+						    &rp->r_lo_lock);
+					}
+					lo->plo_flags &= ~PLO_LOWAITER;
+					if (cvstat == EINTR)
+						lom->lm_status = EINTR;
+
+					if (lom->lm_status == EINTR) {
+						lol =
+						    list_head(&lom->lm_layouts);
+						while (lol) {
+							if (lol->l_layout) {
+								lol->l_layout->
+								    plo_flags
+								    &=
+								    ~PLO_RETURN;
+							pnfs_layout_rele(rp,
+							    lol->l_layout);
+							}
+							nlol = list_next
+							    (&lom->lm_layouts,
+							    lol);
+							list_remove(
+							    &lom->lm_layouts,
+							    lol);
+							kmem_free(lol,
+							    sizeof (*lol));
+							lol = nlol;
+						}
+						mutex_exit(&rp->r_lo_lock);
+						return (lom);
+					}
+				/*
+				 * XXXKLR - We dropped the r_lo_lock, do we
+				 * have to recheck our list, could the layout
+				 * have changed?  We set the RETURN/RECALL,
+				 * and have holds on the layout, what could
+				 * change other than the inusecnt?  Could be
+				 * marked PLO_BAD by recovery, but layout
+				 * recovery is not yet coded.  Make sure to
+				 * check for this here when recovery is coded.
+				 */
+				}
+			}
+		}
+
+
+		lol = kmem_zalloc(sizeof (*lol), KM_SLEEP);
+		lol->l_layout = lo;
+		lol->l_offset = lo->plo_offset;
+		lol->l_length = lo->plo_length;
+		list_insert_tail(&lom->lm_layouts, lol);
+		lom->lm_flags |= LOMSTAT_MATCHFOUND;
+
+		end = lo->plo_length == PNFS_LAYOUTEND ? lo->plo_length :
+		    lo->plo_length + lo->plo_offset;
+		offset = end;
+
+		if (end >= lomend) {
+			/*
+			 * We have found all that we need.
+			 */
+			break;
+		}
+		lo = list_next(&rp->r_layout, lo);
+	}
+
+	if ((use == LOM_USE || use == LOM_COMMIT) &&
+	    (!(list_is_empty(&lom->lm_layouts)))) {
+		count = 0;
+		for (lol = list_head(&lom->lm_layouts); lol;
+		    lol = list_next(&lom->lm_layouts, lol)) {
+			/*
+			 * Don't count the unavailable layouts
+			 * against the inuse counters.
+			 */
+			if (!(lol->l_layout->plo_flags & PLO_UNAVAIL)) {
+				count++;
+				lol->l_layout->plo_inusecnt++;
+			}
+		}
+		/*
+		 * Increment the layout in use counters on the
+		 * nfs4_server and nfs4_fsidlt.  Add the total
+		 * count of layouts found minus 1 to account for the
+		 * initial inuse counter added at the beginning of this
+		 * function.
+		 */
+		mutex_exit(&rp->r_lo_lock);
+		mutex_enter(&np->s_lt_lock);
+		mutex_enter(&ltp->lt_rlt_lock);
+		np->s_loinuse += count - 1;
+		ltp->lt_loinuse += count - 1;
+		mutex_exit(&ltp->lt_rlt_lock);
+		mutex_exit(&np->s_lt_lock);
+	} else {
+		mutex_exit(&rp->r_lo_lock);
+	}
+
+
+	/*
+	 * If there are not any layouts in the lom, just free it and return
+	 * NULL.
+	 */
+	if (list_is_empty(&lom->lm_layouts)) {
+		kmem_free(lom, sizeof (*lom));
+		lom = NULL;
+		/*
+		 * If we found no matches we need to
+		 * decrement the inuse counters added at the
+		 * beginning of this function.
+		 */
+		if (use == LOM_USE || use == LOM_COMMIT) {
+			mutex_enter(&np->s_lt_lock);
+			mutex_enter(&ltp->lt_rlt_lock);
+			np->s_loinuse -= 1;
+			if (np->s_loinuse == 0)
+				cv_broadcast(&np->s_lowait);
+			ltp->lt_loinuse -= 1;
+			if (ltp->lt_loinuse == 0)
+				cv_broadcast(&ltp->lt_lowait);
+			mutex_exit(&ltp->lt_rlt_lock);
+			mutex_exit(&np->s_lt_lock);
+		}
+	} else {
+		lol = list_head(&lom->lm_layouts);
+		lom->lm_offset = lol->l_offset;
+		lol = list_tail(&lom->lm_layouts);
+		lom->lm_length = lol->l_length == PNFS_LAYOUTEND ?
+		    PNFS_LAYOUTEND : lom->lm_offset + (lol->l_offset +
+		    lol->l_length) - 1;
+	}
+
+	return (lom);
 }
+
+
+void
+pnfs_release_layouts(nfs4_server_t *np, rnode4_t *rp, pnfs_lo_matches_t *lom,
+int use)
+{
+	pnfs_lol_t	*lol = NULL, *nlol;
+	pnfs_layout_t	*layout = NULL;
+	nfs4_fsidlt_t	*ltp = NULL;
+	int		count = 0;
+
+	mutex_enter(&rp->r_lo_lock);
+
+	ASSERT(lom != NULL);
+	lol = list_head(&lom->lm_layouts);
+
+	if (lol != NULL) {
+		layout = lol->l_layout;
+	} else {
+		mutex_exit(&rp->r_lo_lock);
+		kmem_free(lom, sizeof (*lom));
+		return;
+	}
+
+	mutex_enter(&rp->r_statelock);
+	ltp = rp->r_fsidlt;
+	ASSERT(ltp != NULL);
+	mutex_exit(&rp->r_statelock);
+
+	while (layout) {
+		if (use == LOM_USE || use == LOM_COMMIT) {
+			/*
+			 * For unavailable layouts all we really need
+			 * to do is decrement the reference count and
+			 * free the lol/lom.
+			 */
+			if (!(layout->plo_flags & PLO_UNAVAIL)) {
+				count++;
+				ASSERT(layout->plo_inusecnt != 0);
+				layout->plo_inusecnt--;
+				if ((layout->plo_flags & PLO_LOWAITER) &&
+				    layout->plo_inusecnt == 0) {
+					cv_broadcast(&layout->plo_wait);
+				}
+			}
+		}
+
+		if (use == LOM_RETURN) {
+			ASSERT(layout->plo_inusecnt == 0);
+			layout->plo_flags &= ~PLO_RETURN;
+		}
+
+		if (use == LOM_RECALL) {
+			ASSERT(layout->plo_inusecnt == 0);
+			layout->plo_flags &= ~PLO_RECALL;
+		}
+
+		pnfs_layout_rele(rp, layout);
+
+		lol->l_layout = NULL;
+		nlol = list_next(&lom->lm_layouts, lol);
+		list_remove(&lom->lm_layouts, lol);
+		kmem_free(lol, sizeof (*lol));
+		lol = nlol;
+		if (lol != NULL)
+			layout = lol->l_layout;
+		else
+			layout = NULL;
+	}
+	mutex_exit(&rp->r_lo_lock);
+
+	ASSERT(list_is_empty(&lom->lm_layouts));
+	kmem_free(lom, sizeof (*lom));
+
+	if ((use != LOM_USE && use != LOM_COMMIT) || count == 0)
+		return;
+
+	mutex_enter(&np->s_lt_lock);
+	mutex_enter(&ltp->lt_rlt_lock);
+
+	if (use == LOM_USE || use == LOM_COMMIT) {
+		np->s_loinuse -= count;
+		if (np->s_loinuse == 0)
+			cv_broadcast(&np->s_lowait);
+		ASSERT(ltp->lt_loinuse > 0);
+		ltp->lt_loinuse -= count;
+		if (ltp->lt_loinuse == 0)
+			cv_broadcast(&ltp->lt_lowait);
+	}
+	mutex_exit(&ltp->lt_rlt_lock);
+	mutex_exit(&np->s_lt_lock);
+}
+
 
 /*
  * Find pages that touch the stripe in the layout
@@ -1148,7 +1702,7 @@ stripe_dev_prepare(
 	multipath_list4 *mpl_item;
 	netaddr4 *nap;
 	nfs4_server_t *mdsp;
-	servinfo4_t *svp;	/* servinfo4 for the target DS */
+	servinfo4_t	*svp;	/* servinfo4 for the target DS */
 	int error = 0;
 	deviceid4 did;
 
@@ -1515,8 +2069,10 @@ pnfs_task_write(void *v)
 	 * for sparse stripes.  Subtract one to convert
 	 * to the offset of the last byte written.
 	 */
+
 	rp->r_last_write_offset = MAX(rp->r_last_write_offset,
 	    task->wt_voff + task->wt_count - 1);
+
 	gethrestime(&rp->r_attr.va_mtime);
 	rp->r_attr.va_ctime = rp->r_attr.va_mtime;
 	/*
@@ -1779,53 +2335,29 @@ out:
 	return (e.error ? EAGAIN : e.error);
 }
 
-void
-layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
+
+static void
+pnfs_update_layout(pnfs_layout_t *layout, LAYOUTGET4resok *lores,
+nfsv4_1_file_layout4 *file_layout4, layout4 *l4, mntinfo4_t *mi)
 {
-	pnfs_layout_t *layout = NULL;
-	layout4 *l4;
-	nfsv4_1_file_layout4	*file_layout4;
-	XDR xdr;
-	int i;
-	timespec_t now;
+	int			i;
+	timespec_t		now;
 
-	if ((res == NULL) || (res->logr_status != NFS4_OK))
+	/*
+	 * If the layout is NOT marked PLO_GET, then the mds returned a layout
+	 * to us that we already have, and have not specifically asked for, as
+	 * part of a bigger byte range request than we have asked for.  This is
+	 * okay, we don't need to update the pnfs_layout because we already
+	 * have this information.
+	 * XXXKLR-In debug we could add code to verify that the layout the
+	 * mds returned is the same as the one we have.
+	 */
+	if (!(layout->plo_flags & PLO_GET))
 		return;
 
-	if (res->LAYOUTGET4res_u.logr_resok4.logr_layout.logr_layout_len > 1) {
-		cmn_err(CE_WARN, "too many entries in layout; dropping");
-		return;
-	}
-
-	l4 = res->LAYOUTGET4res_u.logr_resok4.logr_layout.logr_layout_val;
-
-	if (l4->lo_content.loc_type != LAYOUT4_NFSV4_1_FILES) {
-		cmn_err(CE_WARN, "non-file layout; dropping");
-		return;
-	}
-
-	/* XXX deal with byte ranges and i/o modes */
-
-	/* XXX decode opaque layout */
-
-	xdrmem_create(&xdr,
-	    l4->lo_content.loc_body.loc_body_val,
-	    l4->lo_content.loc_body.loc_body_len,
-	    XDR_DECODE);
-	file_layout4 = kmem_zalloc(sizeof (*file_layout4), KM_SLEEP);
-	if (!xdr_nfsv4_1_file_layout4(&xdr, file_layout4)) {
-		cmn_err(CE_WARN, "could not decode file_layouttype4");
-		return;
-	}
-
-	layout = kmem_cache_alloc(pnfs_layout_cache, KM_SLEEP);
 	layout->plo_iomode = l4->lo_iomode;
-	layout->plo_flags = 0;
-	layout->plo_offset = l4->lo_offset;
-	layout->plo_length = l4->lo_length;
-	layout->plo_inusecnt = 0;
 
-	if (res->LAYOUTGET4res_u.logr_resok4.logr_return_on_close)
+	if (lores->logr_return_on_close)
 		layout->plo_flags |= PLO_ROC;
 
 	if (file_layout4->nfl_util & NFL4_UFLG_COMMIT_THRU_MDS)
@@ -1839,16 +2371,7 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 	    STRIPE4_DENSE : STRIPE4_SPARSE;
 	layout->plo_stripe_unit =
 	    file_layout4->nfl_util & NFL4_UFLG_STRIPE_UNIT_SIZE_MASK;
-#ifdef	WEBXXX
-	if (file_layout4->N_LEN > 0) {
-		cmn_err(CE_WARN,
-		    "dropping layout due to complex devices %p len %d lenny %d",
-		    (void *)l4->lo_content.loc_body.loc_body_val,
-		    l4->lo_content.loc_body.loc_body_len, file_layout4->N_LEN);
-		/* XXX free memory and stuff */
-		return;
-	}
-#endif
+
 	/* stripe count is the number of file handles in the list */
 	layout->plo_stripe_count =
 	    file_layout4->nfl_fh_list.nfl_fh_list_len;
@@ -1857,121 +2380,367 @@ layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 	    sizeof (stripe_dev_t *), KM_SLEEP);
 	for (i = 0; i < layout->plo_stripe_count; i++) {
 		stripe_dev_t *sd;
-
 		sd = stripe_dev_alloc();
 		layout->plo_stripe_dev[i] = sd;
 		sd->std_fh = sfh4_get(
 		    &file_layout4->nfl_fh_list.nfl_fh_list_val[i], mi);
 		DEV_ASSIGN(sd->std_devid, file_layout4->nfl_deviceid);
 	}
-	/* XXX free memory and stuff */
-	layout->plo_refcount = 1;
 
-	rp->r_lostateid = res->LAYOUTGET4res_u.logr_resok4.logr_stateid;
-	rp->r_flags |= R4LAYOUTVALID;
-	/*
-	 * Insert pnfs_layout_t into list, just add at head for now since we
-	 * are only dealing with single layouts.
-	 */
 	gethrestime(&now);
 	layout->plo_creation_sec = now.tv_sec;
-	layout->plo_creation_musec = now.tv_nsec / (NANOSEC / MICROSEC);
-	list_insert_head(&rp->r_layout, layout);
+	layout->plo_creation_musec = now.tv_sec / (NANOSEC / MICROSEC);
 }
 
 void
-pnfs_layout_discard(rnode4_t *rp, nfs4_fsidlt_t *ltp, nfs4_server_t *np)
+layoutget_to_layout(LAYOUTGET4res *res, rnode4_t *rp, mntinfo4_t *mi)
 {
-	ASSERT(MUTEX_HELD(&ltp->lt_rlt_lock));
-	mutex_enter(&rp->r_statelock);
-	if (!(rp->r_flags & R4LAYOUTVALID)) {
-		mutex_exit(&rp->r_statelock);
+	layout4			*l4;
+	nfsv4_1_file_layout4	*file_layout4;
+	XDR			xdr;
+	int			locnt;
+	offset4			loend, l4end;
+	pnfs_layout_t		*newlayout, *layout = NULL;
+
+	ASSERT(res != NULL);
+	ASSERT(res->logr_status == NFS4_OK);
+
+	if ((res == NULL) || (res->logr_status != NFS4_OK))
 		return;
-	}
-	pnfs_layout_rele(rp);
-	if (list_head(&rp->r_layout)) {
+
+	ASSERT(res->LAYOUTGET4res_u.logr_resok4.logr_layout.logr_layout_len >=
+	    1);
+
+	ASSERT(MUTEX_HELD(&rp->r_lo_lock));
+
+	/*
+	 * The loop below will walk thru the layouts returned from the mds
+	 * and find the pnfs_layout structure whose offset and range
+	 * match.  This pnfs_layout structure has no information in it
+	 * and was simply a place holder to indicate we had a layoutget
+	 * in progress.  Once this pnfs_layout structure is found, its
+	 * contents will be updated with the information about the
+	 * layout that the MDS has returned.
+	 */
+	locnt = 0;
+	while (locnt < res->LAYOUTGET4res_u.logr_resok4.logr_layout.
+	    logr_layout_len) {
+
+		l4 = &res->LAYOUTGET4res_u.logr_resok4.logr_layout.
+		    logr_layout_val[locnt];
+		if (l4->lo_content.loc_type != LAYOUT4_NFSV4_1_FILES) {
+			/*
+			 * XXXKLR - Need to handle this?  Or just ignore okay?
+			 */
+			cmn_err(CE_WARN, "non-file layout; ignoring");
+			locnt++;
+			layout = NULL;
+			continue;
+		}
+
+		if (layout == NULL) {
+			/*
+			 * Find the matching pnfs_layout for this returned
+			 * layout, we haven't processed this L4 yet.
+			 */
+			l4end = (l4->lo_length == PNFS_LAYOUTEND ?
+			    l4->lo_length : l4->lo_length + l4->lo_offset - 1);
+
+			for (layout = list_head(&rp->r_layout); layout;
+			    list_next(&rp->r_layout, layout)) {
+				if (layout->plo_flags & (PLO_BAD|PLO_UNAVAIL))
+					continue;
+				loend = (layout->plo_length ==
+				    PNFS_LAYOUTEND ? PNFS_LAYOUTEND :
+				    layout->plo_length + layout->plo_offset
+				    - 1);
+				if (l4->lo_offset >= layout->plo_offset &&
+				    l4end <= loend)
+					/*
+					 * We want to start with this layout.
+					 */
+					break;
+			}
+		}
+
 		/*
-		 * There are still layouts present.  This will
-		 * need to be handled by synchronizing layout
-		 * usage with recalls, but this is good enough
-		 * for now.
+		 * We MUST find a matching layout as one was created
+		 * prior to the layoutget otw.
 		 */
-		mutex_exit(&rp->r_statelock);
-		cmn_err(CE_WARN, "pnfs_layout_discard: dangling layout");
-		return;
+		ASSERT(layout != NULL);
+
+		/*
+		 * XDR decode the returned layout into the file_layout4
+		 * structure.
+		 */
+		xdrmem_create(&xdr,
+		    l4->lo_content.loc_body.loc_body_val,
+		    l4->lo_content.loc_body.loc_body_len,
+		    XDR_DECODE);
+
+		file_layout4 = kmem_zalloc(sizeof (*file_layout4), KM_SLEEP);
+
+		/*
+		 * XXXKLR - Handle the error differently...do not return
+		 * must cleanup, and then what?	 Return error and let
+		 * caller cleanup pnfs_layout_t structures probably.
+		 */
+		if (!xdr_nfsv4_1_file_layout4(&xdr, file_layout4)) {
+			cmn_err(CE_WARN, "could not decode file_layouttype4");
+			kmem_free(file_layout4, sizeof (*file_layout4));
+			return;
+		}
+
+		if (!(layout->plo_flags & PLO_GET)) {
+			/*
+			 * We didn't ask for this layout range
+			 * because we already have it. Skip the L4
+			 * and continue to the next.
+			 */
+			layout = NULL;
+			locnt++;
+			continue;
+		}
+
+		/*
+		 * According to the draft, table 13, the MDS MUST return
+		 * a layout whose beginning offset is either equal to or less
+		 * than the offset we asked for.  If it is less than,
+		 * then we did not ask for a layout starting at 0.  The only
+		 * time we do this is when we already have these layouts.  And
+		 * when this happens these pnfs_layout structures will not have
+		 * PLO_GET set.  This check is done above, and if so we don't
+		 * get here.  So if we get here, our offsets should match.
+		 * XXXKLR - If the MDS gives us a layout whose offset is >
+		 * than what we asked for, this is a bug as it does not follow
+		 * the protocol.  We really should be passing our layoutget
+		 * arguments to this function so we can do some validation
+		 * checking and handle errors appopriately.  For now we will
+		 * just ASSERT.
+		 */
+		ASSERT(l4->lo_offset == layout->plo_offset);
+
+		l4end = (l4->lo_length == PNFS_LAYOUTEND ? l4->lo_length :
+		    l4->lo_length + l4->lo_offset - 1);
+
+		loend = (layout->plo_length == PNFS_LAYOUTEND ?
+		    PNFS_LAYOUTEND : layout->plo_length + layout->plo_offset
+		    - 1);
+
+		ASSERT(l4end <= loend);
+		if (l4->lo_offset == layout->plo_offset && l4end == loend) {
+			/*
+			 * Exact Match! Now update this pnfs_layout with
+			 * the results of the layoutget.
+			 */
+			pnfs_update_layout(layout,
+			    &res->LAYOUTGET4res_u.logr_resok4,
+			    file_layout4, l4, mi);
+			/*
+			 * Mark that we have good results for this layout.
+			 */
+			layout->plo_flags |= PLO_PROCESSED;
+			locnt++;
+			layout = list_next(&rp->r_layout, layout);
+#ifdef DEBUG
+			if (locnt < res->LAYOUTGET4res_u.logr_resok4.
+			    logr_layout.logr_layout_len)
+				ASSERT(layout != NULL);
+#endif
+			continue;
+		}
+
+		/*
+		 * If the starting offsets match, but the ending
+		 * offsets do not, then since we only are handling
+		 * gaps at the end of the file, this must be for the
+		 * ending of the file, or the MDS returned more than
+		 * one layout mapping the same byte range as the
+		 * pnfs_layout.
+		 */
+		if (l4->lo_offset == layout->plo_offset && l4end <= loend) {
+			/*
+			 * Gap at end
+			 */
+			layout->plo_length = l4->lo_length;
+			pnfs_update_layout(layout,
+			    &res->LAYOUTGET4res_u.logr_resok4,
+			    file_layout4, l4, mi);
+			layout->plo_flags |= PLO_PROCESSED;
+
+			if (layout->plo_length == PNFS_LAYOUTEND) {
+				/*
+				 * this should be the end.
+				 */
+				ASSERT(locnt > res->LAYOUTGET4res_u.
+				    logr_resok4.logr_layout.
+				    logr_layout_len);
+				break;
+			}
+
+			/*
+			 * This pnfs_layout is being represented by more than
+			 * one layout returned from the mds. Lets look at the
+			 * next returned layout.
+			 */
+			locnt++;
+
+			/*
+			 * Here we must create a new layout and insert it into
+			 * the list and use it for the next l4 layout
+			 * we process.	However, if we have no more
+			 * L4's to process, no need for this
+			 */
+			if (locnt < res->LAYOUTGET4res_u.logr_resok4.
+			    logr_layout.logr_layout_len) {
+				l4 = &res->LAYOUTGET4res_u.logr_resok4.
+				    logr_layout.
+				    logr_layout_val[locnt];
+				newlayout = kmem_cache_alloc(
+				    pnfs_layout_cache, KM_SLEEP);
+				newlayout->plo_inusecnt = 0;
+				newlayout->plo_creation_sec = 0;
+				newlayout->plo_creation_musec = 0;
+				newlayout->plo_stripe_count = 0;
+				newlayout->plo_stripe_dev = NULL;
+				newlayout->plo_first_stripe_index = 0;
+				newlayout->plo_stripe_unit = 0;
+				newlayout->plo_stripe_type = 0;
+				newlayout->plo_flags = (PLO_GET|PLO_PROCESSED);
+				newlayout->plo_refcount = 0;
+				pnfs_layout_hold(rp, newlayout);
+				newlayout->plo_iomode = l4->lo_iomode;
+				ASSERT(l4->lo_iomode == LAYOUTIOMODE4_RW);
+				newlayout->plo_offset = l4->lo_offset;
+				newlayout->plo_flags |= PLO_GET;
+				newlayout->plo_length = l4->lo_length;
+				pnfs_update_layout(newlayout,
+				    &res->LAYOUTGET4res_u.logr_resok4,
+				    file_layout4, l4, mi);
+				pnfs_insert_layout(layout, rp, newlayout);
+				layout = newlayout;
+				locnt++;
+			}
+			continue;
+		}
+
+		/*
+		 * XXXKLR - If we get here the MDS returned a bogus layout
+		 * range.  When we send the layoutget arguments we used to
+		 * this function and validate them and return errors when they
+		 * are bogus we will never get here.
+		 */
+		ASSERT(l4end <= loend);
 	}
-	rp->r_flags &= ~ R4LAYOUTVALID;
-	mutex_exit(&rp->r_statelock);
-	avl_remove(&ltp->lt_rlayout_tree, rp);
-	nfs4_server_rele(np);
+	kmem_free(file_layout4, sizeof (*file_layout4));
+	ASSERT(MUTEX_HELD(&rp->r_lo_lock));
 }
 
 static void
 pnfs_task_layoutreturn(void *v)
 {
-	task_layoutreturn_t *task = v;
-	mntinfo4_t *mi = task->tlr_mi;
-	nfs4_server_t *np;
-	nfs4_fsidlt_t *ltp, lt;
-	rnode4_t *found, *rp;
-	nfs4_call_t *cp;
-	LAYOUTRETURN4args *arg;
-	LAYOUTRETURN4res *lrres;
-	layoutreturn_file4 *lrf;
-	nfs4_error_t e = {0, NFS4_OK, RPC_SUCCESS};
-	nfs4_recov_state_t recov_state;
-	avl_index_t where;
+	task_layoutreturn_t 	*task = v;
+	mntinfo4_t 		*mi = task->tlr_mi;
+	nfs4_server_t		*np;
+	nfs4_fsidlt_t		*ltp;
+	rnode4_t 		*rp = NULL;
+	nfs4_call_t		*cp;
+	LAYOUTRETURN4args 	*arg;
+	LAYOUTRETURN4res 	*lrres;
+	layoutreturn_file4 	*lrf;
+	nfs4_error_t 		e = {0, NFS4_OK, RPC_SUCCESS};
+	nfs4_recov_state_t 	recov_state;
+	pnfs_layout_t		*layout;
+	pnfs_lol_t		*lol;
+	int 			returned = 0;
 
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 
+	if (task->tlr_vp != NULL &&
+	    (task->tlr_return_type == PNFS_LAYOUTRECALL_FILE ||
+	    task->tlr_return_type == PNFS_LAYOUTRETURN_FILE))
+		rp = VTOR4(task->tlr_vp);
+
+	if (task->tlr_aflag == LR_ASYNC && (rp != NULL))
+		mutex_enter(&rp->r_statelock);
+	if (task->tlr_aflag == LR_SYNC && (rp != NULL))
+		ASSERT(MUTEX_HELD(&rp->r_statelock));
+
+	if (rp) {
+		/*
+		 * Hmm, does this need to be a sig wait? Maybe for
+		 * return but not for recall.
+		 */
+		mutex_enter(&rp->r_statelock);
+		ASSERT(!(rp->r_flags & R4OTWLO));
+		while (rp->r_flags & R4OTWLO) {
+			(void) cv_wait(&rp->r_lowait, &rp->r_statelock);
+		}
+		rp->r_flags |= R4OTWLO;
+		mutex_exit(&rp->r_statelock);
+	}
+
 	cp = nfs4_call_init(TAG_PNFS_LAYOUTRETURN, OP_LAYOUTRETURN, OH_OTHER,
 	    FALSE, mi, NULL, NULL, task->tlr_cr);
 
-	/*
-	 * XXX - todo need to pass vp for LAYOUTRETURN4_FILE
-	 * XXX - if start_op fails, should we remove the layout from the tree?
-	 */
 	if (nfs4_start_op(cp, &recov_state))
 		goto out;
 
-	if (task->tlr_return_type == LAYOUTRETURN4_FILE) {
-		rp = VTOR4(task->tlr_vp);
+	if (task->tlr_return_type == PNFS_LAYOUTRETURN_FILE ||
+	    task->tlr_return_type == PNFS_LAYOUTRECALL_FILE) {
 		(void) nfs4_op_cputfh(cp, rp->r_fh);
-	} else if (task->tlr_return_type == LAYOUTRETURN4_FSID) {
+	} else if (task->tlr_return_type == PNFS_LAYOUTRECALL_FSID) {
 		(void) nfs4_op_cputfh(cp, mi->mi_rootfh);
 	} else {
-		ASSERT(task->tlr_return_type == LAYOUTRETURN4_ALL);
+		ASSERT(task->tlr_return_type == PNFS_LAYOUTRECALL_ALL);
 	}
 
 	lrres = nfs4_op_layoutreturn(cp, &arg);
-	arg->lora_layoutreturn.lr_returntype = task->tlr_return_type;
+
+	if (task->tlr_return_type == PNFS_LAYOUTRETURN_FILE ||
+	    task->tlr_return_type == PNFS_LAYOUTRECALL_FILE)
+		arg->lora_layoutreturn.lr_returntype =
+		    LAYOUTRETURN4_FILE;
+	else if (task->tlr_return_type == PNFS_LAYOUTRECALL_FSID)
+		arg->lora_layoutreturn.lr_returntype =
+		    LAYOUTRETURN4_FSID;
+	else if (task->tlr_return_type == PNFS_LAYOUTRECALL_ALL)
+		arg->lora_layoutreturn.lr_returntype =
+		    LAYOUTRETURN4_ALL;
+
 	lrf = &arg->lora_layoutreturn.layoutreturn4_u.lr_layout;
 	lrf->lrf_offset = task->tlr_offset;
 	lrf->lrf_length = task->tlr_length;
-	lrf->lrf_stateid = task->tlr_stateid;
+
+	if (rp) {
+		mutex_enter(&rp->r_statelock);
+		lrf->lrf_stateid = rp->r_lostateid;
+		mutex_exit(&rp->r_statelock);
+	}
+
 	lrf->lrf_body.lrf_body_len = 0;
 	arg->lora_reclaim = task->tlr_reclaim;
 	arg->lora_iomode = task->tlr_iomode;
-	arg->lora_layout_type = task->tlr_layout_type;
+	arg->lora_layout_type = LAYOUT4_NFSV4_1_FILES;
 
 	rfs4call(cp, &e);
 
 	/* XXX need needs_recovery/start_recovery logic here */
 
-	if (task->tlr_return_type == LAYOUTRETURN4_FSID ||
-	    task->tlr_return_type == LAYOUTRETURN4_ALL)
+	if (task->tlr_return_type == PNFS_LAYOUTRECALL_FSID ||
+	    task->tlr_return_type == PNFS_LAYOUTRECALL_ALL)
 		goto done;
 
 	if (e.error == 0 && e.stat == NFS4_OK) {
 		if (lrres->lorr_status == NFS4_OK) {
+			ASSERT(arg->lora_layoutreturn.lr_returntype ==
+			    LAYOUTRETURN4_FILE);
 			if (lrres->LAYOUTRETURN4res_u.lorr_stateid.
 			    lrs_present == FALSE) {
-
 				mutex_enter(&rp->r_statelock);
 				rp->r_lostateid = clnt_special0;
 				mutex_exit(&rp->r_statelock);
-
 				if (!stateid4_cmp(&lrres->LAYOUTRETURN4res_u.
 				    lorr_stateid.layoutreturn_stateid_u.
 				    lrs_stateid, &clnt_special0)) {
@@ -1984,20 +2753,11 @@ pnfs_task_layoutreturn(void *v)
 				/*
 				 * XXXKLR We really should not see a layout
 				 * stateid returned here since the client
-				 * only ever tries to hold one layout
-				 * on a file at one time.  However
-				 * because we have released the
-				 * r_statelock, it is possible that
-				 * another layoutget could have occurred
-				 * after the pnfs_layout_rele() from
-				 * pnfs_layoutreturn(), but before we
-				 * have returned this layout, and thus
-				 * I can see that this would result in
-				 * this layoutreturn getting a new
-				 * layoutstateid.  Issue a warning for
-				 * now incase other things then look
-				 * strange, but this is in the process of
-				 * being fixed.
+				 * will never issue a layoutget on a layout it
+				 * already has.  Issue a warning for
+				 * now, so if this does occur we know it and
+				 * can then start tracing it.  Address this
+				 * when adding error handling.
 				 */
 				cmn_err(CE_WARN, "LAYOUTRETURN Updating"
 				    "layout Stateid");
@@ -2009,80 +2769,314 @@ pnfs_task_layoutreturn(void *v)
 			}
 		}
 	}
-	np = find_nfs4_server(mi);
-	ASSERT(np != NULL);
-	mutex_exit(&np->s_lock);
-	mutex_enter(&np->s_lt_lock);
 
-	lt.lt_fsid.major = rp->r_srv_fsid.major;
-	lt.lt_fsid.minor = rp->r_srv_fsid.minor;
-
-	ltp = avl_find(&np->s_fsidlt, &lt, &where);
-	ASSERT(ltp != NULL);
-	if (ltp) {
-		mutex_enter(&ltp->lt_rlt_lock);
-		mutex_exit(&np->s_lt_lock);
-		found = avl_find(&ltp->lt_rlayout_tree, rp, &where);
-		if (found) {
-			/*
-			 * Remove from rnode by file handle avl tree, and also
-			 * from the rnode by fsid avl tree.  And decrement
-			 * refcnt of nfs4_server_t that occurred when an
-			 * rnode was put onto an fsid's tree.
-			 */
-			avl_remove(&ltp->lt_rlayout_tree, rp);
-			nfs4_server_rele(np);
-		}
-		mutex_exit(&ltp->lt_rlt_lock);
-	} else {
-		mutex_exit(&np->s_lt_lock);
-	}
-
-	nfs4_server_rele(np);
 done:
 	nfs4_end_op(cp, &recov_state);
-	/*
-	 * At this point, we don't worry about failure.  We will either
-	 * be asked to return the layout again, or the servers will stop
-	 * honoring the layout.  Either way, we (the client) are through
-	 * with the layout, and have tried to return it.
-	 */
 
 out:
+	/*
+	 * Even if the otw fails, we will still drop this layout.
+	 * Make sure to decrement counters.
+	 */
+	if (task->tlr_return_type == PNFS_LAYOUTRECALL_ALL) {
+		np = task->tlr_np;
+		mutex_enter(&np->s_lt_lock);
+		for (ltp = avl_first(&np->s_fsidlt); ltp;
+		    ltp = AVL_NEXT(&np->s_fsidlt, ltp)) {
+			mutex_enter(&ltp->lt_rlt_lock);
+			np->s_locnt -= ltp->lt_locnt;
+			ltp->lt_locnt = 0;
+			mutex_exit(&ltp->lt_rlt_lock);
+		}
+		mutex_exit(&np->s_lt_lock);
+	} else if (task->tlr_return_type == PNFS_LAYOUTRECALL_FSID) {
+		np = task->tlr_np;
+		ltp = task->tlr_lt;
+		mutex_enter(&np->s_lt_lock);
+		mutex_enter(&ltp->lt_rlt_lock);
+		np->s_locnt -= ltp->lt_locnt;
+		ltp->lt_locnt = 0;
+		mutex_exit(&ltp->lt_rlt_lock);
+		mutex_exit(&np->s_lt_lock);
+	} else {
+		ASSERT(task->tlr_return_type == PNFS_LAYOUTRECALL_FILE ||
+		    task->tlr_return_type == PNFS_LAYOUTRETURN_FILE);
+		np = task->tlr_np;
+		ltp = task->tlr_lt;
+		ASSERT(rp != NULL);
+		ASSERT(task->tlr_lom != NULL);
+		lol = list_head(&task->tlr_lom->lm_layouts);
+		layout = lol->l_layout;
+		ASSERT(layout != NULL);
+		mutex_enter(&rp->r_lo_lock);
+		while (layout) {
+			/*
+			 * Mark this layout as bad so other threads that
+			 * may have reference on it, know that it has
+			 * been returned and no longer valid.  These would
+			 * be threads waiting on the plo_wait cv.
+			 */
+			ASSERT(layout->plo_flags & PLO_RETURN ||
+			    (layout->plo_flags & PLO_RECALL));
+			layout->plo_flags |= PLO_BAD;
+			if (layout->plo_flags & PLO_LOWAITER)
+				cv_broadcast(&layout->plo_wait);
+			ASSERT(layout->plo_refcount >= 2);
+			pnfs_layout_rele(rp, layout);
+			returned++;
+			lol = list_next(&task->tlr_lom->lm_layouts, lol);
+			if (lol != NULL)
+				layout = lol->l_layout;
+			else
+				layout = NULL;
+		}
+		mutex_exit(&rp->r_lo_lock);
+
+		/*
+		 * For a PNFS_LAYOUTRETURN_FILE decrement the
+		 * bulk block counters.  These were update
+		 * by pnfs_layout_return.  The layoutrecall
+		 * versions of this layoutreturn are responsible
+		 * for decrementing these counters.
+		 */
+		if (task->tlr_return_type == PNFS_LAYOUTRETURN_FILE) {
+			mutex_enter(&np->s_lt_lock);
+			mutex_enter(&ltp->lt_rlt_lock);
+			np->s_lobulkblock--;
+			ltp->lt_lobulkblock--;
+			mutex_exit(&ltp->lt_rlt_lock);
+			mutex_exit(&np->s_lt_lock);
+		}
+
+		/*
+		 * Decrement the total number of layouts
+		 * this clientid and the fsid now hold after returning
+		 * these layouts.
+		 */
+		mutex_enter(&np->s_lt_lock);
+		mutex_enter(&ltp->lt_rlt_lock);
+		np->s_locnt -= returned;
+		ltp->lt_locnt -= returned;
+		mutex_exit(&ltp->lt_rlt_lock);
+		mutex_exit(&np->s_lt_lock);
+
+		mutex_enter(&rp->r_statelock);
+		rp->r_flags &= ~R4OTWLO;
+		if (rp->r_flags & R4LOWAITER)
+			cv_broadcast(&rp->r_lowait);
+		mutex_exit(&rp->r_statelock);
+	}
+
+	if (task->tlr_aflag == LR_ASYNC) {
+		mutex_enter(&np->s_lock);
+		nfs4_server_rele_lockt(task->tlr_np);
+	}
 	nfs4_call_rele(cp);
 	task_layoutreturn_free(task);
 }
 
+void
+pnfs_insert_layout(pnfs_layout_t *afterthis, rnode4_t *rp,
+pnfs_layout_t *lo)
+{
+	uint64_t	layoutend;
+	pnfs_layout_t	*layout;
+
+	ASSERT(MUTEX_HELD(&rp->r_lo_lock));
+#ifdef DEBUG
+	for (layout = list_head(&rp->r_layout); layout;
+	    layout = list_next(&rp->r_layout, layout)) {
+		layoutend = layout->plo_offset == PNFS_LAYOUTEND ?
+		    PNFS_LAYOUTEND : layout->plo_offset + layout->plo_length;
+		if (lo->plo_offset >= layout->plo_offset &&
+		    lo->plo_offset < layoutend &&
+		    ((layout->plo_flags & PLO_BAD) != PLO_BAD)) {
+			cmn_err(CE_PANIC, "bad layout insert %p %p",
+			    (void *)lo, (void *)layout);
+		}
+	}
+#endif
+
+	list_insert_after(&rp->r_layout, afterthis, lo);
+}
+
 int pnfs_no_layoutget;
 
+/*
+ * LAYOUTGET may or may not use the offset provided by the caller.  If
+ * a layout already exists on the file, the LAYOUTGET request will
+ * use the last valid layout on the list to deterime the offset to use.
+ * It determines the offset based on the last layout's offset and lenght,
+ * to obtain a list of contiguious layout ranges.  This offset may be less than
+ * the offset requested by the caller.
+ *
+ * layoutget can fail for any reason.  The results will be noted when
+ * the caller (pnfs_find_layouts basically), re-searches the rnodes
+ * layout list and does not find the layout(s) needed, builds a partial, list
+ * or return a NULL back to its caller (pnfs_read or pnfs_write), who will
+ * fail over to proxy I/O.
+ */
 static void
 pnfs_task_layoutget(void *v)
 {
-	task_layoutget_t *task = v;
-	mntinfo4_t *mi = task->tlg_mi;
-	nfs4_server_t *np;
-	rnode4_t *rp = VTOR4(task->tlg_vp);
-	nfs4_call_t *cp;
-	LAYOUTGET4args *arg;
-	LAYOUTGET4res *resp;
-	nfs4_error_t e = {0, NFS4_OK, RPC_SUCCESS};
-	int trynext_sid = 0;
-	rnode4_t	*found;
-	avl_index_t	where;
-	nfs4_fsidlt_t lt, *ltp;
-	cred_t *cr = task->tlg_cred;
-	nfs4_recov_state_t recov_state;
-	nfs4_stateid_types_t sid_types;
+	task_layoutget_t 	*task = v;
+	mntinfo4_t		*mi = task->tlg_mi;
+	nfs4_server_t 		*np = NULL;
+	pnfs_layout_t		*layout, *lastlayout;
+	rnode4_t 		*rp = VTOR4(task->tlg_vp);
+	nfs4_call_t 		*cp;
+	LAYOUTGET4args 		*arg;
+	LAYOUTGET4res 		*resp;
+	nfs4_error_t 		e = {0, NFS4_OK, RPC_SUCCESS};
+	int 			trynext_sid = 0;
+	offset4			logoffset = 0;
+	nfs4_fsidlt_t		*ltp;
+	cred_t 			*cr = task->tlg_cred;
+	nfs4_recov_state_t 	recov_state;
+	nfs4_stateid_types_t 	sid_types;
+	int			newlayouts = 0;
+
+	if (pnfs_no_layoutget)
+		goto out;
+
+	ASSERT(MUTEX_HELD(&rp->r_lo_lock));
+
+	lastlayout = list_tail(&rp->r_layout);
+
+	/*
+	 * We are walking the rnodes layout list from the end to the
+	 * beginning to determine the last byte mapped by a layout.
+	 * This last byte will be used as the offset for the layoutget
+	 * to attempt to get a layout from the last byte to the end of the
+	 * layout.
+	 *
+	 * We should never see an UNAVAIL layout here because of the
+	 * way layouts are obtained and returned.  We do layoutget for
+	 * the entire range of the file, if that is UNAVAIL, we won't
+	 * be in here trying another layoutget.  If a previous layoutget
+	 * resulted in only a portion of the file, we could be in here trying
+	 * to get the remainder.  If this occurred previously, the remainder
+	 * would map to the end of the file.  Its possible that section
+	 * was unavailable and we have an UNAVAIL on the list, but still we
+	 * would not be in this function trying to do another layoutget.
+	 */
+	while (lastlayout != NULL) {
+		ASSERT(!(lastlayout->plo_flags & PLO_UNAVAIL));
+		if (lastlayout->plo_flags & (PLO_BAD)) {
+			lastlayout = list_prev(&rp->r_layout, lastlayout);
+			continue;
+		}
+		logoffset = lastlayout->plo_length == PNFS_LAYOUTEND ?
+		    PNFS_LAYOUTEND : lastlayout->plo_offset +
+		    lastlayout->plo_length;
+		break;
+	}
+
+	/*
+	 * Create a pnfs_layout structure for this range.
+	 */
+	layout = kmem_cache_alloc(pnfs_layout_cache, KM_SLEEP);
+	layout->plo_inusecnt = 0;
+	layout->plo_creation_sec = 0;
+	layout->plo_creation_musec = 0;
+	layout->plo_stripe_count = 0;
+	layout->plo_stripe_dev = NULL;
+	layout->plo_first_stripe_index = 0;
+	layout->plo_stripe_unit = 0;
+	layout->plo_stripe_type = 0;
+
+	layout->plo_refcount = 0;
+	pnfs_layout_hold(rp, layout);
+	layout->plo_offset = logoffset;
+	layout->plo_length = PNFS_LAYOUTEND;
+	layout->plo_flags = PLO_GET;
+
+	pnfs_insert_layout(lastlayout, rp, layout);
+
+	mutex_enter(&rp->r_statelock);
+	ltp = rp->r_fsidlt;
+	mutex_exit(&rp->r_statelock);
+	ASSERT(ltp != NULL);
+
+	/*
+	 * We grab this extra hold here for security.  We need to release the
+	 * rnodes layout list lock (r_lo_lock) to grab the nfs4_server's
+	 * s_lt_lock and the fsid lt_rlt_lock.  Its possible at that time
+	 * a bulk layoutrecall to come in and pnfs_layout_rele's this layout.
+	 * Our extra hold here prevents the layout from being removed from the
+	 * rnode and being freed. We check if the layoutrecall occurs after
+	 * regrabbing the r_lo_lock, by checking for PLO_BAD.  If PLO_BAD is
+	 * set this layout has been returned by a bulk layoutrecall.  All we
+	 * have to do here is drop our reference and be done.
+	 */
+	pnfs_layout_hold(rp, layout);
+	mutex_exit(&rp->r_lo_lock);
+
+
+	recov_state.rs_flags = 0;
+	recov_state.rs_num_retry_despite_err = 0;
+
+	np = find_nfs4_server_nolock(mi);
+	ASSERT(np != NULL);
+	mutex_exit(&np->s_lock);
+
+
+	/*
+	 * If there is a bulk CB_LAYOUTRECALL active, we are done.  The
+	 * bulk layoutrecall will rele this layout.  Its also possible a
+	 * bulk layoutrecall executed and completed and is no longer active
+	 * between the time we dropped the r_lo_lock and grabbed the s_lt_lock.
+	 * If this occurred the layout we added above would be marked bad, and
+	 * our additional hold we added above is keeping this layout on the
+	 * rnode list.  Release it, we are done.
+	 */
+	mutex_enter(&np->s_lt_lock);
+	if (np->s_loflags & PNFS_CBLORECALL) {
+		mutex_exit(&np->s_lt_lock);
+		mutex_enter(&rp->r_lo_lock);
+		layout->plo_flags &= ~PLO_GET;
+		if (layout->plo_flags & PLO_LOWAITER)
+			cv_broadcast(&layout->plo_wait);
+		pnfs_layout_rele(rp, layout);
+		mutex_exit(&rp->r_lo_lock);
+		return;
+	}
+
+	mutex_enter(&ltp->lt_rlt_lock);
+
+	if (ltp->lt_flags & PNFS_CBLORECALL) {
+		mutex_exit(&ltp->lt_rlt_lock);
+		mutex_exit(&np->s_lt_lock);
+		mutex_enter(&rp->r_lo_lock);
+		layout->plo_flags &= ~PLO_GET;
+		if (layout->plo_flags & PLO_LOWAITER)
+			cv_broadcast(&layout->plo_wait);
+		pnfs_layout_rele(rp, layout);
+		mutex_exit(&rp->r_lo_lock);
+		return;
+	}
+
+	np->s_lobulkblock++;
+	ltp->lt_lobulkblock++;
+
+	mutex_exit(&ltp->lt_rlt_lock);
+	mutex_exit(&np->s_lt_lock);
+
+	/*
+	 * Release the extra hold we had from above.
+	 */
+	mutex_enter(&rp->r_lo_lock);
+	pnfs_layout_rele(rp, layout);
+	mutex_exit(&rp->r_lo_lock);
 
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
 
 	/*
-	 * This code assumes we don't already have a layout and
-	 * therefore, just use the delegation, lock or open stateID.
-	 * If this function is used to get more layouts when we already
-	 * have one, then it will need to be changed to grab the current
-	 * layout stateid.
+	 * If we don't already have a layout, just use the delegation,
+	 * lock or open stateID.  Otherwise use the current layout statid.
+	 * The fact that we have the R4OTWLO bit set in the rnode, blocks
+	 * other threads from changing this stateid until we clear this bit.
 	 */
 	nfs4_init_stateid_types(&sid_types);
 
@@ -2090,123 +3084,166 @@ recov_retry:
 	cp = nfs4_call_init(TAG_PNFS_LAYOUTGET, OP_LAYOUTGET, OH_OTHER, FALSE,
 	    mi, NULL, NULL, cr);
 
-	if (pnfs_no_layoutget)
+	/*
+	 * Must do start op before getting args from rnode that
+	 * can change.
+	 */
+	if (nfs4_start_op(cp, &recov_state)) {
+		mutex_enter(&rp->r_lo_lock);
 		goto out;
+	}
 
 	(void) nfs4_op_cputfh(cp, rp->r_fh);
 	resp = nfs4_op_layoutget(cp, &arg);
 
 	arg->loga_layout_type = LAYOUT4_NFSV4_1_FILES;
 	arg->loga_iomode = task->tlg_iomode;
-	arg->loga_offset = 0;
-	arg->loga_length = ~0;
-	arg->loga_minlength = 8192; /* XXX */
+	arg->loga_offset = logoffset;
+	arg->loga_length = PNFS_LAYOUTEND;
+	arg->loga_minlength = 8192;
 	arg->loga_maxcount = mi->mi_tsize;
-	arg->loga_stateid = nfs4_get_stateid(cr, rp, -1, mi, OP_READ,
-	    &sid_types, (GETSID_LAYOUT | trynext_sid));
+
+
+
+	mutex_enter(&rp->r_statelock);
+	if (rp->r_lostateid.seqid == 0) {
+		arg->loga_stateid = nfs4_get_stateid(cr, rp, -1, mi, OP_READ,
+		    &sid_types, (GETSID_LAYOUT | trynext_sid));
+	} else {
+		arg->loga_stateid = rp->r_lostateid;
+	}
+	mutex_exit(&rp->r_statelock);
+
 
 	/*
 	 * If we ended up with the special stateid, this means the
 	 * file isn't opened and does not have a delegation stateid to use
 	 * either.  At this point we can not get a layout.
 	 */
-	if (sid_types.cur_sid_type == SPEC_SID)
+	if (sid_types.cur_sid_type == SPEC_SID) {
+		mutex_enter(&rp->r_lo_lock);
 		goto out;
-
-	if (nfs4_start_op(cp, &recov_state))
-		goto out;
+	}
 
 	rfs4call(cp, &e);
 
+	nfs4_end_op(cp, &recov_state);
+
 	if ((e.error == 0) && (e.stat == NFS4_OK)) {
-		mutex_enter(&rp->r_statelock);
-		if (rp->r_flags & R4LAYOUTVALID) {
-			pnfs_layout_return(task->tlg_vp, cr, rp->r_lostateid,
-			    LR_ASYNC);
-		}
+		mutex_enter(&rp->r_lo_lock);
 		layoutget_to_layout(resp, rp, mi);
+		/*
+		 * Update the layout stateid in the rnode.
+		 */
+		mutex_enter(&rp->r_statelock);
+		rp->r_lostateid = resp->LAYOUTGET4res_u.logr_resok4.
+		    logr_stateid;
 		mutex_exit(&rp->r_statelock);
-
-		/*
-		 * Create fsid layout tree if one doesn't exist
-		 * and add the rnode to its rnode layout tree.
-		 */
-		lt.lt_fsid.major = rp->r_srv_fsid.major;
-		lt.lt_fsid.minor = rp->r_srv_fsid.minor;
-		np = find_nfs4_server(mi);
-		ASSERT(np != NULL);
-		mutex_exit(&np->s_lock);
-
-		mutex_enter(&np->s_lt_lock);
-		/*
-		 * Find the fsid layout node for the fsid of this rnode.
-		 * If none found, no layouts have occurred for this fsid,
-		 * so create a new fsid layout tree node and insert it
-		 * into the tree.
-		 *
-		 * Insert the rnode into the rnode layout tree in the fsid
-		 * node.
-		 */
-		ltp = avl_find(&np->s_fsidlt, &lt, &where);
-		if (ltp == NULL) {
-			ltp = kmem_alloc(sizeof (*ltp), KM_SLEEP);
-			ltp->lt_fsid.major = lt.lt_fsid.major;
-			ltp->lt_fsid.minor = lt.lt_fsid.minor;
-			mutex_init(&ltp->lt_rlt_lock, NULL,
-			    MUTEX_DEFAULT, NULL);
-			avl_create(&ltp->lt_rlayout_tree, layoutcmp,
-			    sizeof (rnode4_t), offsetof(rnode4_t, r_avl));
-			avl_insert(&np->s_fsidlt, ltp, where);
-		}
-		mutex_enter(&ltp->lt_rlt_lock);
-		mutex_exit(&np->s_lt_lock);
-		found = avl_find(&ltp->lt_rlayout_tree, rp, &where);
-		if (found == NULL) {
-			/*
-			 * When adding an rnode to the fsid layout tree,
-			 * increment the nfs4_server_t's refcnt.  This is done
-			 * here instead of when the nfs4_fsid is added to the
-			 * nfs4_server_t's fsid layout tree, because, the
-			 * nfs4_fsidlt_t's on the nfs4_server_t structure
-			 * will exist until the nfs4_server_t is destroyed,
-			 * even if there are no rnodes the nfs4_fsid's
-			 * rnode layout tree.
-			 */
-			avl_insert(&ltp->lt_rlayout_tree, rp, where);
-			nfs4_server_hold(np);
-		}
-		mutex_exit(&ltp->lt_rlt_lock);
-		nfs4_server_rele(np);
 	} else if (e.error == 0 && cp->nc_res.status == NFS4ERR_BAD_STATEID &&
 	    sid_types.cur_sid_type != OPEN_SID) {
 		nfs4_save_stateid(&arg->loga_stateid, &sid_types);
 		trynext_sid = GETSID_TRYNEXT;
-		nfs4_end_op(cp, &recov_state);
 		nfs4_call_rele(cp);
 		goto recov_retry;
 	} else if (e.error == 0 &&
 	    cp->nc_res.status == NFS4ERR_LAYOUTUNAVAILABLE) {
-		mutex_enter(&rp->r_statelock);
-		rp->r_flags |= R4LAYOUTUNAVAIL;
-		mutex_exit(&rp->r_statelock);
+		/*
+		 * Mark the layouts we tried to get as unavailable, but
+		 * leave them on the rnode list to prevent further
+		 * layoutgets.
+		 */
+		mutex_enter(&rp->r_lo_lock);
+		for (layout = list_head(&rp->r_layout); layout;
+		    layout = list_next(&rp->r_layout, layout)) {
+			if (layout->plo_flags & PLO_GET) {
+				layout->plo_flags &= ~PLO_GET;
+				layout->plo_flags |= PLO_UNAVAIL;
+				if (layout->plo_flags & PLO_LOWAITER) {
+					cv_broadcast(&layout->plo_wait);
+				}
+			}
+		}
+	} else {
+		mutex_enter(&rp->r_lo_lock);
 	}
 
-	nfs4_end_op(cp, &recov_state);
-
 out:
-	nfs4_call_rele(cp);
+	ASSERT(MUTEX_HELD(&rp->r_lo_lock));
+
+	/*
+	 * Okay, here we need to clear the PLO_GET bit, wake any
+	 * waiters, mark layouts as bad if the mds did not return one and
+	 * rele them so they will be removed from the list.
+	 */
+	layout = list_head(&rp->r_layout);
+	while (layout) {
+		if ((layout->plo_flags & PLO_GET) &&
+		    !(layout->plo_flags & PLO_PROCESSED)) {
+			/*
+			 * MDS did not return a layout for this byte
+			 * range.  Mark this as BAD, release the layout.
+			 */
+			layout->plo_flags &= ~PLO_GET;
+			if (layout->plo_flags & PLO_LOWAITER)
+				cv_broadcast(&layout->plo_wait);
+			lastlayout = list_next(&rp->r_layout, layout);
+			layout->plo_flags |= PLO_BAD;
+			pnfs_layout_rele(rp, layout);
+			layout = lastlayout;
+		} else if ((layout->plo_flags & (PLO_GET|PLO_PROCESSED))) {
+			/*
+			 * We got a layout from the MDS for this pnfs_layout!
+			 * Clear the GET and PROCESSED bits, and wake any
+			 * waiters.
+			 */
+			newlayouts++;
+			layout->plo_flags &= ~(PLO_GET|PLO_PROCESSED);
+			if (layout->plo_flags & PLO_LOWAITER) {
+				cv_broadcast(&layout->plo_wait);
+			}
+			layout = list_next(&rp->r_layout, layout);
+		} else {
+			layout = list_next(&rp->r_layout, layout);
+		}
+
+	}
+
+	mutex_exit(&rp->r_lo_lock);
+
+	/*
+	 * Decrement the bulkblock counters incremented above.  Increment
+	 * total new layouts added from this layoutget to the nfs4_server and
+	 * nfs4_fsid layout counts.
+	 */
+	mutex_enter(&np->s_lt_lock);
+	np->s_lobulkblock--;
+	np->s_locnt += newlayouts;
+	mutex_exit(&np->s_lt_lock);
+
+	mutex_enter(&ltp->lt_rlt_lock);
+	ltp->lt_lobulkblock--;
+	ltp->lt_locnt += newlayouts;
+	mutex_exit(&ltp->lt_rlt_lock);
+
 	mutex_enter(&rp->r_statelock);
-	rp->r_flags &= ~R4LOGET;
-	cv_broadcast(&rp->r_lowait);
+	rp->r_flags &= ~R4OTWLO;
+	if (rp->r_flags & R4LOWAITER) {
+		cv_broadcast(&rp->r_lowait);
+	}
 	mutex_exit(&rp->r_statelock);
 
+	mutex_enter(&np->s_lock);
+	nfs4_server_rele_lockt(np);
+
+	nfs4_call_rele(cp);
 	if (! (task->tlg_flags & TLG_NOFREE))
 		task_layoutget_free(task);
 }
 
 
 void
-pnfs_sync_layoutget(vnode_t *vp, cred_t *cr, layoutiomode4 mode)
+pnfs_sync_layoutget(vnode_t *vp, cred_t *cr, layoutiomode4 mode,
+	offset4 offset, int flags)
 {
 	task_layoutget_t task;
 	mntinfo4_t *mi = VTOMI4(vp);
@@ -2216,12 +3253,30 @@ pnfs_sync_layoutget(vnode_t *vp, cred_t *cr, layoutiomode4 mode)
 	task.tlg_mi = mi;
 	task.tlg_vp = vp;
 	task.tlg_iomode = mode;
+	task.tlg_flags |= flags;
+	task.tlg_offset = offset;
 
 	pnfs_task_layoutget(&task);
 }
 
+int
+pnfs_rnode_holds_layouts(rnode4_t *rp)
+{
+	int		total = 0;
+	pnfs_layout_t	*lo;
+
+	ASSERT(MUTEX_HELD(&rp->r_lo_lock));
+
+	for (lo = list_head(&rp->r_layout); lo;
+	    lo = list_next(&rp->r_layout, lo)) {
+		if (!(lo->plo_flags & (PLO_BAD|PLO_UNAVAIL)))
+			total++;
+	}
+	return (total);
+}
+
 void
-pnfs_layoutget(vnode_t *vp, cred_t *cr, layoutiomode4 mode)
+pnfs_layoutget(vnode_t *vp, cred_t *cr, offset4 offset, layoutiomode4 iomode)
 {
 	task_layoutget_t *task;
 	mntinfo4_t *mi = VTOMI4(vp);
@@ -2232,11 +3287,6 @@ pnfs_layoutget(vnode_t *vp, cred_t *cr, layoutiomode4 mode)
 	 * to get a layout, cause if server does layoutrecall by fsid
 	 * we won't know the fsid of this rnode.
 	 */
-#if 0
-	/* this check is not correct, fsid == 0 is perfectly valid */
-	if (rp->r_srv_fsid.major == 0 && rp->r_srv_fsid.minor == 0)
-		return;
-#endif
 
 	mutex_enter(&rp->r_statelock);
 
@@ -2245,14 +3295,15 @@ pnfs_layoutget(vnode_t *vp, cred_t *cr, layoutiomode4 mode)
 	 * for it to finish and return.  It is still up
 	 * to the caller to determine if a layout exists.
 	 */
-	if (rp->r_flags & R4LOGET) {
-		(void) cv_wait_sig(&rp->r_lowait, &rp->r_statelock);
-		mutex_exit(&rp->r_statelock);
-		return;
+	ASSERT(!(rp->r_flags & R4OTWLO));
+
+	while (rp->r_flags & R4OTWLO) {
+		cv_wait(&rp->r_lowait, &rp->r_statelock);
 	}
 
-	rp->r_flags |= R4LOGET;
+	rp->r_flags |= R4OTWLO;
 	rp->r_last_layoutget = lbolt;
+
 	mutex_exit(&rp->r_statelock);
 
 	task = kmem_cache_alloc(task_layoutget_cache, KM_SLEEP);
@@ -2262,8 +3313,9 @@ pnfs_layoutget(vnode_t *vp, cred_t *cr, layoutiomode4 mode)
 	MI4_HOLD(mi);
 	task->tlg_mi = mi;
 	VN_HOLD(vp);
+	task->tlg_offset = offset;
 	task->tlg_vp = vp;
-	task->tlg_iomode = mode;
+	task->tlg_iomode = iomode;
 
 	/*
 	 * For demo only.  Grab the layout synchronously.  This is
@@ -2275,113 +3327,209 @@ pnfs_layoutget(vnode_t *vp, cred_t *cr, layoutiomode4 mode)
 #else
 	pnfs_task_layoutget(task);
 #endif
+	ASSERT(!(rp->r_flags & R4OTWLO));
 }
 
 void
-pnfs_layout_return(vnode_t *vp, cred_t *cr, stateid4 losid, int aflag)
+pnfs_layout_return(vnode_t *vp, cred_t *cr, int aflag,
+	pnfs_lo_matches_t *lom, int type)
 {
-	rnode4_t *rp = VTOR4(vp);
-	mntinfo4_t *mi = VTOMI4(vp);
-	task_layoutreturn_t *task;
-	pnfs_layout_t *layout;
-	layoutiomode4 iomode;
-
-	if (! (rp->r_flags & R4LAYOUTVALID))
-		return;
+	rnode4_t 		*rp = VTOR4(vp);
+	mntinfo4_t 		*mi = VTOMI4(vp);
+	task_layoutreturn_t 	*task;
+	layoutiomode4 		iomode = LAYOUTIOMODE4_RW;
+	nfs4_server_t		*np;
+	nfs4_fsidlt_t		*ltp;
+	pnfs_lo_matches_t	*retlom = NULL;
 
 	if ((aflag == LR_SYNC) &&
 	    (nfs_zone() != mi->mi_zone)) {
 		return;
 	}
 
-	ASSERT(MUTEX_HELD(&rp->r_statelock));
-
-	layout = list_head(&rp->r_layout);
-
-	if (layout == NULL)
+	mutex_enter(&rp->r_lo_lock);
+	if (lom == NULL && list_is_empty(&rp->r_layout)) {
+		mutex_exit(&rp->r_lo_lock);
 		return;
+	}
+	mutex_exit(&rp->r_lo_lock);
 
-	iomode = layout->plo_iomode;
+	mutex_enter(&rp->r_statelock);
+	ltp = rp->r_fsidlt;
+	mutex_exit(&rp->r_statelock);
 
-	rp->r_flags &= ~R4LAYOUTVALID;
-	pnfs_layout_rele(rp);
+	ASSERT(ltp != NULL);
+
+	np = find_nfs4_server_nolock(mi);
+	mutex_exit(&np->s_lock);
+
+	if (lom == NULL) {
+		/*
+		 * Caller sent NULL lom, which means return all
+		 * layouts on the rnode from offset 0 to EOF.
+		 * First make sure there are no bulk layoutrecalls
+		 * in progress.  If so, no need to return the
+		 * layout, it will be dropped by the bulk layout
+		 * recall.
+		 *
+		 */
+		mutex_enter(&np->s_lt_lock);
+		if (np->s_loflags & PNFS_CBLORECALL) {
+			mutex_exit(&np->s_lt_lock);
+			return;
+		}
+
+		mutex_enter(&ltp->lt_rlt_lock);
+		if (ltp->lt_flags & PNFS_CBLORECALL) {
+			mutex_exit(&ltp->lt_rlt_lock);
+			mutex_exit(&np->s_lt_lock);
+			return;
+		}
+		np->s_lobulkblock++;
+		ltp->lt_lobulkblock++;
+		mutex_exit(&ltp->lt_rlt_lock);
+		mutex_exit(&np->s_lt_lock);
+
+		retlom = pnfs_find_layouts(np, rp, cr, iomode, 0,
+		    PNFS_LAYOUTEND, LOM_RETURN);
+		if (retlom == NULL) {
+			/*
+			 * If we have not layouts to return decrement the
+			 * bulkblock counters.  Normally the pnfs_task_
+			 * layoutreturn will decrement them, which must
+			 * happen while we have this crazy async
+			 * function wrapper here.
+			 */
+			mutex_enter(&np->s_lt_lock);
+			mutex_enter(&ltp->lt_rlt_lock);
+			np->s_lobulkblock--;
+			ltp->lt_lobulkblock--;
+			mutex_exit(&ltp->lt_rlt_lock);
+			mutex_exit(&np->s_lt_lock);
+
+			mutex_enter(&np->s_lock);
+			nfs4_server_rele_lockt(np);
+			return;
+		} else {
+			ASSERT(!(list_is_empty(&retlom->lm_layouts)));
+		}
+	}
 
 	task = kmem_cache_alloc(task_layoutreturn_cache, KM_SLEEP);
 	VN_HOLD(vp);
 	task->tlr_vp = vp;
 	task->tlr_mi = mi;
+	task->tlr_np = np;
+	task->tlr_lt = ltp;
 	MI4_HOLD(mi);
 	task->tlr_cr = cr;
 	crhold(cr);
 
 	task->tlr_offset = 0;
-	task->tlr_length = ~0;
+	task->tlr_length = PNFS_LAYOUTEND;
 	task->tlr_reclaim = 0; /* XXX */
 	task->tlr_iomode = iomode;
 	task->tlr_layout_type = LAYOUT4_NFSV4_1_FILES;
-	task->tlr_stateid = losid;
-	task->tlr_return_type = LAYOUTRETURN4_FILE;
+	task->tlr_return_type = type;
+	task->tlr_lom = lom == NULL ? retlom : lom;
 
-	if (aflag == LR_ASYNC)
+	ASSERT(aflag == LR_SYNC);
+
+	if (aflag == LR_ASYNC) {
 		(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
 		    pnfs_task_layoutreturn, task, 0);
-	else {
-		/* drop the mutex for the otw call */
-		mutex_exit(&rp->r_statelock);
+	} else {
 		pnfs_task_layoutreturn(task);
-		mutex_enter(&rp->r_statelock);
+		if (retlom != NULL)
+			pnfs_release_layouts(np, rp, retlom, LOM_RETURN);
+		mutex_enter(&np->s_lock);
+		nfs4_server_rele_lockt(np);
 	}
 }
 
 void
-pnfs_layoutreturn_bulk(mntinfo4_t *mi, cred_t *cr, int how)
+pnfs_layoutreturn_bulk(mntinfo4_t *mi, cred_t *cr, int how,
+struct nfs4_server *np, struct nfs4_fsidlt *lt)
 {
 	task_layoutreturn_t *task;
 
 	task = kmem_cache_alloc(task_layoutreturn_cache, KM_SLEEP);
 	task->tlr_vp = NULL;
 	task->tlr_mi = mi;
+	task->tlr_np = np;
+	task->tlr_lt = lt;
 	MI4_HOLD(mi);
 	task->tlr_cr = cr;
 	crhold(cr);
 
 	task->tlr_offset = 0;
-	task->tlr_length = ~0;
+	task->tlr_length = PNFS_LAYOUTEND;
 	/* the spec says reclaim is always false for FSID or ALL */
 	task->tlr_reclaim = 0;
 	task->tlr_iomode = LAYOUTIOMODE4_ANY;
 	task->tlr_layout_type = LAYOUT4_NFSV4_1_FILES;
-	task->tlr_stateid = clnt_special0;
 	task->tlr_return_type = how;
+	task->tlr_aflag = LR_SYNC;
 
-	(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
-	    pnfs_task_layoutreturn, task, 0);
+	pnfs_task_layoutreturn(task);
 }
 
 void
 pnfs_layout_hold(rnode4_t *rp, pnfs_layout_t *layout)
 {
-	ASSERT(MUTEX_HELD(&rp->r_statelock));
+	ASSERT(MUTEX_HELD(&rp->r_lo_lock));
 	layout->plo_refcount++;
 }
 
 void
-pnfs_layout_rele(rnode4_t *rp)
+pnfs_trim_fsid_tree(rnode4_t *rp, nfs4_fsidlt_t *ltp, int locklt)
 {
-	pnfs_layout_t	*layout = NULL;
-	int i;
 
-	ASSERT(MUTEX_HELD(&rp->r_statelock));
+	rnode4_t	*found;
+	avl_index_t	where;
 
-	/*
-	 * Only 1 layout for now.
-	 */
-	layout = list_head(&rp->r_layout);
-	if (layout == NULL)
-		return;
+	if (locklt) {
+		mutex_exit(&rp->r_lo_lock);
+		/*
+		 * Need to grab fsidlt lock, but must first drop
+		 * r_lo_lock.  Regrab it, and again check if
+		 * the rnode layout list is still empty.  If so remove
+		 * the rnode from the fsidlt tree.
+		 */
+		mutex_enter(&ltp->lt_rlt_lock);
+		mutex_enter(&rp->r_lo_lock);
+		if (!(list_is_empty(&rp->r_layout))) {
+			mutex_exit(&ltp->lt_rlt_lock);
+			return;
+		}
+	}
+
+	found = avl_find(&ltp->lt_rlayout_tree, rp, &where);
+	ASSERT(found != NULL);
+	if (found)
+		avl_remove(&ltp->lt_rlayout_tree, rp);
+
+	if (locklt)
+		mutex_exit(&ltp->lt_rlt_lock);
+
+	mutex_enter(&rp->r_statelock);
+	rp->r_fsidlt = NULL;
+	mutex_exit(&rp->r_statelock);
+}
+
+void
+pnfs_decr_layout_refcnt(rnode4_t *rp, pnfs_layout_t *layout)
+{
+	int 		i;
+
+	ASSERT(MUTEX_HELD(&rp->r_lo_lock));
+
+	ASSERT(!(list_is_empty(&rp->r_layout)));
+
 	layout->plo_refcount--;
 	if (layout->plo_refcount > 0)
 		return;
+
 	ASSERT((layout->plo_flags & (PLO_RETURN|PLO_GET|PLO_RECALL)) == 0);
 	ASSERT(layout->plo_inusecnt == 0);
 
@@ -2390,10 +3538,26 @@ pnfs_layout_rele(rnode4_t *rp)
 	for (i = 0; i < layout->plo_stripe_count; i++)
 		stripe_dev_rele(layout->plo_stripe_dev + i);
 
-	kmem_free(layout->plo_stripe_dev,
-	    layout->plo_stripe_count * sizeof (stripe_dev_t *));
+	if (layout->plo_stripe_count != 0)
+		kmem_free(layout->plo_stripe_dev,
+		    layout->plo_stripe_count * sizeof (stripe_dev_t *));
 
 	kmem_cache_free(pnfs_layout_cache, layout);
+}
+
+void
+pnfs_layout_rele(rnode4_t *rp, pnfs_layout_t *layout)
+{
+	nfs4_fsidlt_t	*ltp;
+
+	pnfs_decr_layout_refcnt(rp, layout);
+
+	mutex_enter(&rp->r_statelock);
+	ltp = rp->r_fsidlt;
+	mutex_exit(&rp->r_statelock);
+
+	if (list_is_empty(&rp->r_layout) && ltp != NULL)
+		pnfs_trim_fsid_tree(rp, ltp, TRUE);
 }
 
 void
@@ -2404,61 +3568,114 @@ pnfs_start_read(read_task_t *task)
 	 * Synchronize with recovery actions.  If either the MDS or
 	 * the target DS are in recovery, or need recovery, then
 	 * start_op will block.
-	 * end_op is called before starting task to avoid possible race.
 	 */
 	if ((cp->nc_e.error = nfs4_start_op(cp, &task->rt_recov_state)) != 0) {
 		cmn_err(CE_WARN, "pnfs_start_read: start_op failed");
 		return;
 	}
 	nfs4_end_op(cp, &task->rt_recov_state);
-
 	(void) taskq_dispatch(cp->nc_mi->mi_pnfs_io_taskq,
 	    pnfs_task_read, task, 0);
-
 }
 
 int
 pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
     cred_t *cr, bool_t async, struct uio *uiop)
 {
-	rnode4_t *rp = VTOR4(vp);
-	mntinfo4_t *mi = VTOMI4(vp);
-	int i, error = 0;
-	int remaining = 0;
-	file_io_read_t *job;
-	read_task_t *task, *next;
-	pnfs_layout_t *layout = NULL;
-	uint32_t stripenum, stripeoff;
-	length4 stripewidth;
-	nfs4_stateid_types_t sid_types;
-	offset_t orig_off = off;
-	int orig_count = count;
-	uio_t *uio_sav = NULL;
-	caddr_t xbase;
-	int nosig;
-	int more_work, too_much;
+	rnode4_t		*rp = VTOR4(vp);
+	mntinfo4_t		*mi = VTOMI4(vp);
+	int			i, error = 0;
+	int			remaining = 0;
+	file_io_read_t		*job;
+	read_task_t		*task, *next;
+	pnfs_layout_t		*layout = NULL;
+	uint32_t		stripenum, stripeoff;
+	length4 		stripewidth, lomend, ioend;
+	nfs4_stateid_types_t 	sid_types;
+	offset_t		orig_off = off;
+	int			orig_count = count;
+	uio_t			*uio_sav = NULL;
+	caddr_t			xbase;
+	pnfs_lo_matches_t	*lom = NULL;
+	pnfs_lol_t		*lol = NULL;
+	length4			lcount;
+	nfs4_server_t		*np;
+	int			nosig;
+	int			more_work, too_much;
 
-	mutex_enter(&rp->r_statelock);
-	layout = list_head(&rp->r_layout);
-	if ((!(rp->r_flags & (R4LAYOUTVALID|R4LAYOUTUNAVAIL)) ||
-	    layout == NULL)) {
-		mutex_exit(&rp->r_statelock);
-		pnfs_layoutget(vp, cr, LAYOUTIOMODE4_RW);
+	np = find_nfs4_server_nolock(mi);
+	ASSERT(np != NULL);
+	if (np != NULL)
+		mutex_exit(&np->s_lock);
+	else
+		return (EAGAIN);
+
+	lom = pnfs_find_layouts(np, rp, cr, LAYOUTIOMODE4_RW, off,
+	    (length4)count, LOM_USE);
+
+	if (lom == NULL) {
 		mutex_enter(&rp->r_statelock);
-		layout = list_head(&rp->r_layout);
-	}
-
-
-	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
-		/*
-		 * Now we will do proxy I/O
-		 */
-		VTOR4(vp)->r_proxyio_count++;
+		rp->r_proxyio_count++;
 		mutex_exit(&rp->r_statelock);
+		nfs4_server_rele(np);
 		return (EAGAIN);
 	}
-	pnfs_layout_hold(rp, layout);
-	mutex_exit(&rp->r_statelock);
+
+	/*
+	 * For now if we have any layouts as UNAVAIL, punt the entier
+	 * I/O to proxy I/O.
+	 */
+	for (lol = list_head(&lom->lm_layouts); lol;
+	    lol = list_next(&lom->lm_layouts, lol)) {
+		if (lol->l_layout->plo_flags & PLO_UNAVAIL) {
+			pnfs_release_layouts(np, rp, lom, LOM_USE);
+			mutex_enter(&rp->r_statelock);
+			rp->r_proxyio_count++;
+			mutex_exit(&rp->r_statelock);
+			nfs4_server_rele(np);
+			return (EAGAIN);
+		}
+		ASSERT(lol->l_layout->plo_inusecnt != 0);
+	}
+
+	lomend = lom->lm_length == PNFS_LAYOUTEND ? PNFS_LAYOUTEND :
+	    lom->lm_offset + lom->lm_length;
+	ioend = off + count - 1;
+
+	/*
+	 * We will have no gaps except at the end of the file. If the range
+	 * of layouts we got back does not cover the full range of bytes we
+	 * need, for now simply fail back to proxy I/O.
+	 */
+	lol = list_head(&lom->lm_layouts);
+	ASSERT(lol != NULL);
+
+	if (lol == NULL || off < lom->lm_offset || off > lomend ||
+	    ioend < lom->lm_offset || ioend > lomend) {
+		pnfs_release_layouts(np, rp, lom, LOM_USE);
+		mutex_enter(&rp->r_statelock);
+		rp->r_proxyio_count++;
+		mutex_exit(&rp->r_statelock);
+		nfs4_server_rele(np);
+		return (EAGAIN);
+	}
+
+	for (lol = list_head(&lom->lm_layouts); lol;
+	    lol = list_next(&lom->lm_layouts, lol)) {
+		layout = lol->l_layout;
+		ASSERT(layout != NULL);
+
+		for (i = 0; i < layout->plo_stripe_count; i++) {
+			error = stripe_dev_prepare(mi,
+			    layout->plo_stripe_dev[i],
+			    layout->plo_first_stripe_index, i, cr);
+			if (error) {
+				pnfs_release_layouts(np, rp, lom, LOM_USE);
+				nfs4_server_rele(np);
+				return (error);
+			}
+		}
+	}
 
 	/*
 	 * Check for a user address in the uio.  If so, then
@@ -2472,22 +3689,23 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		xbase = base = kmem_alloc(count, KM_SLEEP);
 	}
 
-	for (i = 0; i < layout->plo_stripe_count; i++) {
-		error = stripe_dev_prepare(mi, layout->plo_stripe_dev[i],
-		    layout->plo_first_stripe_index, i, cr);
-		if (error) {
-			mutex_enter(&rp->r_statelock);
-			pnfs_layout_rele(rp);
-			mutex_exit(&rp->r_statelock);
-			return (error);
-		}
-	}
 
 	job = file_io_read_alloc();
 	job->fir_count = count;
 	nfs4_init_stateid_types(&sid_types);
 	job->fir_stateid = nfs4_get_stateid(cr, rp, curproc->p_pidp->pid_id,
 	    mi, OP_READ, &sid_types, (async ? GETSID_TRYNEXT : 0));
+
+	lol = list_head(&lom->lm_layouts);
+	layout = lol->l_layout;
+	lcount = lol->l_layout->plo_length;
+
+#ifdef DEBUG
+	if (layout->plo_offset > off) {
+		cmn_err(CE_PANIC, "Missing beginning READ layout, partial I/O "
+		    "to layout and Proxy I/O Not Yet Supported");
+	}
+#endif
 
 	while (count > 0) {
 		stripenum = off / layout->plo_stripe_unit;
@@ -2511,6 +3729,8 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 			    + stripeoff;
 		task->rt_count = MIN(layout->plo_stripe_unit - stripeoff,
 		    count);
+		task->rt_count = MIN(task->rt_count, lcount);
+
 		task->rt_base = base;
 		if (uiop) {
 			task->rt_free_uio = uiop->uio_iovcnt * sizeof (iovec_t);
@@ -2527,6 +3747,7 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		}
 		task->rt_call = nfs4_call_init(TAG_PNFS_READ, OP_READ, OH_READ,
 		    FALSE, mi, vp, NULL, cr);
+		task->rt_call->nc_vp1 = vp;
 		task->rt_call->nc_ds_servinfo = task->rt_dev->std_svp;
 		task->rt_recov_state.rs_flags = 0;
 		task->rt_recov_state.rs_num_retry_despite_err = 0;
@@ -2535,6 +3756,26 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		if (base)
 			base += task->rt_count;
 		count -= task->rt_count;
+
+		lcount = (lcount == PNFS_LAYOUTEND ? PNFS_LAYOUTEND :
+		    lcount - task->rt_count);
+		ASSERT(lcount >= 0 || lcount == PNFS_LAYOUTEND);
+
+		if (lcount != PNFS_LAYOUTEND && lcount == 0) {
+			lol = list_next(&lom->lm_layouts, lol);
+			if (lol != NULL) {
+				layout = lol->l_layout;
+				lcount = layout->plo_length;
+#ifdef DEBUG
+			} else if (count > 0) {
+				cmn_err(CE_PANIC, "UNIMPLEMENTED READ Request"
+				    " Only A Partial Layout Exists "
+				    "Can't fulfill this I/O"
+				    " request until Partial Proxy I/O"
+				    " is implememnted.");
+#endif
+			}
+		}
 
 		mutex_enter(&job->fir_lock);
 		list_insert_head(&job->fir_task_list, task);
@@ -2664,6 +3905,7 @@ more:
 	}
 
 	error = job->fir_error;
+
 	if (job->fir_eof) {
 		if (job->fir_eof_offset < orig_off ||
 		    job->fir_eof_offset > orig_off + orig_count) {
@@ -2678,14 +3920,13 @@ more:
 
 	if (uio_sav) {
 		if (error == 0)
-			error = uiomove(xbase, (orig_count - *residp), UIO_READ,
-			    uio_sav);
+			error = uiomove(xbase, (orig_count - *residp),
+			    UIO_READ, uio_sav);
 		kmem_free(xbase, orig_count);
 	}
+	pnfs_release_layouts(np, rp, lom, LOM_USE);
 
-	mutex_enter(&rp->r_statelock);
-	pnfs_layout_rele(rp);
-	mutex_exit(&rp->r_statelock);
+	nfs4_server_rele(np);
 
 	(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
 	    pnfs_task_read_free, job, 0);
@@ -2701,14 +3942,12 @@ pnfs_start_write(write_task_t *task)
 	 * Synchronize with recovery actions.  If either the MDS or
 	 * the target DS are in recovery, or need recovery, then
 	 * start_op will block.
-	 * end_op is called before starting task to avoid possible race.
 	 */
 	if ((cp->nc_e.error = nfs4_start_op(cp, &task->wt_recov_state)) != 0) {
 		cmn_err(CE_WARN, "pnfs_start_write: start_op failed");
 		return;
 	}
 	nfs4_end_op(cp, &task->wt_recov_state);
-
 	(void) taskq_dispatch(cp->nc_mi->mi_pnfs_io_taskq,
 	    pnfs_task_write, task, 0);
 }
@@ -2717,50 +3956,95 @@ int
 pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
     cred_t *cr, stable_how4 *stab_comm)
 {
-	int i, error = 0;
-	file_io_write_t *job;
-	write_task_t *task, *next;
-	rnode4_t *rp = VTOR4(vp);
-	pnfs_layout_t *layout;
-	uint32_t stripenum, stripeoff;
-	length4 stripewidth;
-	mntinfo4_t *mi = VTOMI4(vp);
-	int remaining = 0;
-	nfs4_stateid_types_t sid_types;
-	int nosig;
-	int more_work, too_much;
+	int 			i, error = 0;
+	file_io_write_t 	*job;
+	write_task_t 		*task, *next;
+	rnode4_t 		*rp = VTOR4(vp);
+	pnfs_layout_t 		*layout;
+	uint32_t 		stripenum, stripeoff;
+	length4 		stripewidth;
+	mntinfo4_t 		*mi = VTOMI4(vp);
+	int 			remaining = 0;
+	nfs4_stateid_types_t 	sid_types;
+	int 			nosig;
+	pnfs_lo_matches_t	*lom;
+	pnfs_lol_t		*lol;
+	length4			lcount;
+	length4			ploend, ioend, lomend;
+	nfs4_server_t		*np;
+	int			more_work, too_much;
 
-	mutex_enter(&rp->r_statelock);
-	layout = list_head(&rp->r_layout);
-	if ((layout == NULL || !(rp->r_flags &
-	    (R4LAYOUTUNAVAIL|R4LAYOUTVALID)))) {
-		mutex_exit(&rp->r_statelock);
-		pnfs_layoutget(vp, cr, LAYOUTIOMODE4_RW);
+	np = find_nfs4_server_nolock(mi);
+	ASSERT(np != NULL);
+	if (np != NULL)
+		mutex_exit(&np->s_lock);
+	else
+		return (EAGAIN);
+
+	lom = pnfs_find_layouts(np, rp, cr, LAYOUTIOMODE4_RW, off,
+	    (length4)count, LOM_USE);
+
+	if (lom == NULL) {
 		mutex_enter(&rp->r_statelock);
-		layout = list_head(&rp->r_layout);
-	}
-
-	/* XXX refactor needed with pnfs_read() above */
-	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
-		/*
-		 * We will now resort to proxy I/O.
-		 */
-		VTOR4(vp)->r_proxyio_count++;
+		rp->r_proxyio_count++;
 		mutex_exit(&rp->r_statelock);
+		nfs4_server_rele(np);
 		return (EAGAIN);
 	}
 
-	pnfs_layout_hold(rp, layout);
-	mutex_exit(&rp->r_statelock);
-
-	for (i = 0; i < layout->plo_stripe_count; i++) {
-		error = stripe_dev_prepare(mi, layout->plo_stripe_dev[i],
-		    layout->plo_first_stripe_index, i, cr);
-		if (error) {
+	/*
+	 * For now if we have any layouts as UNAVAIL, punt the entier
+	 * I/O to proxy I/O.
+	 */
+	for (lol = list_head(&lom->lm_layouts); lol;
+	    lol = list_next(&lom->lm_layouts, lol)) {
+		if (lol->l_layout->plo_flags & PLO_UNAVAIL) {
+			pnfs_release_layouts(np, rp, lom, LOM_USE);
 			mutex_enter(&rp->r_statelock);
-			pnfs_layout_rele(rp);
+			rp->r_proxyio_count++;
 			mutex_exit(&rp->r_statelock);
-			return (error);
+			nfs4_server_rele(np);
+			return (EAGAIN);
+		}
+		ASSERT(lol->l_layout->plo_inusecnt != 0);
+	}
+
+	lomend = lom->lm_length == PNFS_LAYOUTEND ? PNFS_LAYOUTEND :
+	    lom->lm_offset + lom->lm_length;
+	ioend = off + count - 1;
+
+	/*
+	 * We will have no gaps except at the end of the file.  If the range
+	 * of layouts we got back does not cover the full range of bytes we
+	 * need, for now simply fail back to proxy I/O.
+	 */
+	lol = list_head(&lom->lm_layouts);
+	ASSERT(lol != NULL);
+
+	if (lol == NULL || off < lom->lm_offset || off > lomend ||
+	    ioend < lom->lm_offset || ioend > lomend) {
+		pnfs_release_layouts(np, rp, lom, LOM_USE);
+		mutex_enter(&rp->r_statelock);
+		rp->r_proxyio_count++;
+		mutex_exit(&rp->r_statelock);
+		nfs4_server_rele(np);
+		return (EAGAIN);
+	}
+
+	for (lol = list_head(&lom->lm_layouts); lol;
+	    lol = list_next(&lom->lm_layouts, lol)) {
+		layout = lol->l_layout;
+		ASSERT(layout != NULL);
+
+		for (i = 0; i < layout->plo_stripe_count; i++) {
+			error = stripe_dev_prepare(mi,
+			    layout->plo_stripe_dev[i],
+			    layout->plo_first_stripe_index, i, cr);
+			if (error) {
+				pnfs_release_layouts(np, rp, lom, LOM_USE);
+				nfs4_server_rele(np);
+				return (error);
+			}
 		}
 	}
 
@@ -2771,6 +4055,26 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 	job->fiw_vp = vp;
 	job->fiw_stable_how = *stab_comm;
 	job->fiw_stable_result = FILE_SYNC4;
+
+
+	lol = list_head(&lom->lm_layouts);
+	layout = lol->l_layout;
+	lcount = lol->l_layout->plo_length;
+	ploend = layout->plo_length == PNFS_LAYOUTEND ? layout->plo_length :
+	    layout->plo_offset + layout->plo_length - 1;
+#ifdef DEBUG
+	if (layout->plo_offset > off) {
+		cmn_err(CE_PANIC, "layout off %llu, write off %llu - "
+		    "layout len %llu write len %llu ploend %llu"
+		    " Missing beginning WRITE layout, partial I/O"
+		    "to layout and Proxy I/O Not Yet Supported",
+		    (unsigned long long)layout->plo_offset,
+		    (unsigned long long)off,
+		    (unsigned long long)layout->plo_length,
+		    (unsigned long long)count, (unsigned long long)ploend);
+	}
+#endif
+
 	while (count > 0) {
 		stripenum = off / layout->plo_stripe_unit;
 		stripeoff = off % layout->plo_stripe_unit;
@@ -2796,6 +4100,7 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		/* XXX do we need a more conservative calculation? */
 		task->wt_count = MIN(layout->plo_stripe_unit - stripeoff,
 		    count);
+		task->wt_count = MIN(task->wt_count, lcount);
 		task->wt_call = nfs4_call_init(TAG_PNFS_WRITE, OP_WRITE,
 		    OH_WRITE, FALSE, mi, vp, NULL, cr);
 		task->wt_call->nc_ds_servinfo = task->wt_dev->std_svp;
@@ -2805,6 +4110,34 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		off += task->wt_count;
 		base += task->wt_count;
 		count -= task->wt_count;
+
+		lcount = (lcount == PNFS_LAYOUTEND ? PNFS_LAYOUTEND :
+		    lcount - task->wt_count);
+#ifdef DEBUG
+		if (lcount != PNFS_LAYOUTEND && (signed long long)lcount < 0) {
+			cmn_err(CE_PANIC, "bogus lcount %llu, task count %d",
+			    (unsigned long long)lcount, task->wt_count);
+		}
+#endif
+
+		ASSERT(lcount >= 0 || lcount == PNFS_LAYOUTEND);
+		if (lcount == 0) {
+			lol = list_next(&lom->lm_layouts, lol);
+			if (lol != NULL) {
+				layout = lol->l_layout;
+				lcount = layout->plo_length;
+#ifdef DEBUG
+			} else if (count > 0) {
+				cmn_err(CE_PANIC, "UNIMPLEMENNTED WRITE "
+				    "Request"
+				    " Only A Partial Layout Exists "
+				    "Can't fulfill this I/O"
+				    " request until Partial Proxy I/O"
+				    " is implememnted.");
+#endif
+			}
+		}
+
 		++remaining;
 
 		mutex_enter(&job->fiw_lock);
@@ -2888,8 +4221,8 @@ more:
 			 * removed.
 			 */
 			nfs4_call_rele(cp);
-			task->wt_call = nfs4_call_init(TAG_PNFS_WRITE, OP_WRITE,
-			    OH_WRITE, FALSE, mi, vp, NULL, cr);
+			task->wt_call = nfs4_call_init(TAG_PNFS_WRITE,
+			    OP_WRITE, OH_WRITE, FALSE, mi, vp, NULL, cr);
 			task->wt_call->nc_ds_servinfo = task->wt_dev->std_svp;
 			mutex_exit(&job->fiw_lock);
 			pnfs_start_write(task);
@@ -2939,9 +4272,9 @@ more:
 	*stab_comm = job->fiw_stable_result;
 	mutex_exit(&job->fiw_lock);
 
-	mutex_enter(&rp->r_statelock);
-	pnfs_layout_rele(rp);
-	mutex_exit(&rp->r_statelock);
+	pnfs_release_layouts(np, rp, lom, LOM_USE);
+
+	nfs4_server_rele(np);
 
 	(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
 	    pnfs_task_write_free, job, 0);
@@ -2949,34 +4282,116 @@ more:
 	return (error);
 }
 
+
+int
+pnfs_getdevice_layoutstats(nfs4_server_t *np, layoutspecs_t *los,
+	pnfs_layout_t *flayout, mntinfo4_t *mi, cred_t *cr)
+{
+	deviceid4	deviceid;
+	devnode_t	*dip = NULL;
+	uint32_t	stp_ndx, mpl_index, num_servers;
+	int		stripe_num;
+	int		error;
+	stripe_info_t	*si_node;
+	multipath_list4	*mpl_item;
+
+	DEV_ASSIGN(deviceid, flayout->plo_deviceid);
+
+	dip = NULL;
+	error = pnfs_get_device(mi, np, flayout->plo_deviceid, cr,
+	    &dip, PGD_NO_OTW);
+
+	if (dip != NULL && error == 0) {
+		/*
+		 * Stripe_info_list_len has already been filled in by
+		 * the caller based on the number of stripes listed in
+		 * the layout.
+		 */
+		ASSERT(los->plo_stripe_info_list.plo_stripe_info_list_len !=
+		    0);
+		los->plo_stripe_info_list.plo_stripe_info_list_val =
+		    kmem_zalloc(los->plo_stripe_info_list.
+		    plo_stripe_info_list_len *
+		    sizeof (stripe_info_t), KM_NOSLEEP);
+		if (los->plo_stripe_info_list.plo_stripe_info_list_val ==
+		    NULL)
+			return (ENOMEM);
+
+		los->plo_devnode = dip;
+		for (stripe_num = 0; stripe_num < flayout->plo_stripe_count;
+		    stripe_num++) {
+			si_node = &los->plo_stripe_info_list.
+			    plo_stripe_info_list_val[stripe_num];
+			si_node->stripe_index = stripe_num;
+			stp_ndx = (stripe_num +
+			    flayout->plo_first_stripe_index) %
+			    dip->dn_ds_addrs.stripe_indices_len;
+			mpl_index =
+			    dip->dn_ds_addrs.stripe_indices[stp_ndx];
+			mpl_item = &dip->dn_ds_addrs.mpl_val[mpl_index];
+			num_servers = mpl_item->multipath_list4_len;
+			si_node->multipath_list.multipath_list_len =
+			    num_servers;
+			si_node->multipath_list.multipath_list_val =
+			    mpl_item->multipath_list4_val;
+
+			}
+	} else {
+		los->plo_stripe_info_list.plo_stripe_info_list_len = 0;
+		los->plo_stripe_info_list.plo_stripe_info_list_val = NULL;
+	}
+
+	return (0);
+}
+
+static void
+pnfs_layoutstats_cleanup(layoutstats_t *lostats, nfs4_server_t *np)
+{
+	int		i;
+	layoutspecs_t	*los;
+
+	ASSERT(np != NULL);
+
+	mutex_enter(&np->s_lock);
+	for (i = 0; i < lostats->plo_data.total_layouts; i++) {
+		los = &lostats->plo_data.lo_specs[i];
+		if (los->plo_stripe_info_list.plo_stripe_info_list_val) {
+			kmem_free(los->plo_stripe_info_list.
+			    plo_stripe_info_list_val,
+			    los->plo_stripe_count *
+			    sizeof (stripe_info_t));
+		}
+		if (los->plo_devnode) {
+			pnfs_rele_device(np, los->plo_devnode);
+		}
+	}
+	nfs4_server_rele_lockt(np);
+}
+
+
 /*
  * Gather layout statistics, XDR encode them, and copy them to the user space.
  */
 int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
     model_t model, cred_t *cr)
 {
-	char *user_filename; /* Filename from the user space */
-	char *data_buffer; /* Hold the XDR encoded stream */
-	char *user_data_buffer; /* User space buffer */
-	uint_t xdr_len;
-	uint32_t *kernel_bufsize; /* Buffer size for the user space */
-	uint32_t user_bufsize;
-	uint32_t stp_ndx, mpl_index, num_servers;
-	int stripe_num, error;
-	vnode_t *vp;
-	rnode4_t *rp;
-	mntinfo4_t *mi;
-	XDR xdrarg;
-	layoutstats_t lostats;
-	pnfs_layout_t *flayout;
-	multipath_list4 *mpl_item;
-	devnode_t *dip = NULL;
-	stripe_info_t *si_node = NULL;
-	nfsstat_lo_errcodes_t ec;
-	nfs4_server_t *np;
-	deviceid4 deviceid;
-	uint_t plo_first_stripe_index;
-	bool_t encode_failed;
+	char 			*user_filename; /* User filename */
+	char 			*data_buffer; /* XDR encoded stream */
+	char 			*user_data_buffer; /* User buffer */
+	uint_t			xdr_len;
+	uint32_t 		*kernel_bufsize; /* User Buffer size */
+	uint32_t 		user_bufsize;
+	vnode_t 		*vp;
+	rnode4_t 		*rp;
+	mntinfo4_t 		*mi;
+	XDR			 xdrarg;
+	layoutstats_t 		lostats;
+	layoutspecs_t 		*los;
+	pnfs_layout_t 		*flayout;
+	nfsstat_lo_errcodes_t 	ec;
+	nfs4_server_t		*np;
+	bool_t			encode_failed;
+
 
 	/*
 	 * Get arguments.
@@ -2993,6 +4408,7 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	if (ec) {
 		return (ec);
 	}
+
 	if (vp == NULL) {
 		ec = ESYSCALL;
 		return (ec);
@@ -3044,83 +4460,120 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 	 * Obtain the layout and proxy I/O and non-proxy I/O counts for
 	 * the file.
 	 */
+
 	mutex_enter(&rp->r_statelock);
+
 	lostats.proxy_iocount = rp->r_proxyio_count;
 	lostats.ds_iocount = rp->r_dsio_count;
-	flayout = list_head(&rp->r_layout);
-	if (((flayout == NULL) && (lostats.proxy_iocount == 0)) ||
-	    !(rp->r_flags & R4LAYOUTVALID)) {
+	lostats.plo_data.total_layouts = 0;
+
+	for (flayout = list_head(&rp->r_layout); flayout;
+	    flayout = list_next(&rp->r_layout, flayout)) {
+		if (!(flayout->plo_flags & PLO_BAD))
+			lostats.plo_data.total_layouts++;
+	}
+
+	if ((lostats.plo_data.total_layouts == 0) &&
+	    (lostats.proxy_iocount == 0)) {
 		mutex_exit(&rp->r_statelock);
 		VN_RELE(vp);
 		ec = ENOLAYOUT;
 		return (ec);
 	}
 
-	lostats.plo_num_layouts = 0;
-	lostats.plo_stripe_info_list.plo_stripe_info_list_val = NULL;
-	lostats.plo_stripe_info_list.plo_stripe_info_list_len = 0;
-	lostats.plo_stripe_count = 0;
+	/*
+	 * We don't want to hold the r_statelock over a kmem alloc that
+	 * could sleep.  But, if we release the r_statelock, kmem_alloc,
+	 * then grab the statelock again, the list can change.  It can
+	 * maybe change to empty, or from empty to entries,
+	 * or the number
+	 * of entries on it can change.  This then presents issues as to
+	 * what entrys, if any do we return statistic on.
+	 * Instead of dealing with this, simply do the kmem_alloc with
+	 * KM_NOSLEEP.  If we get back null, return an error.
+	 */
+	los = kmem_zalloc((sizeof (*los) *
+	    lostats.plo_data.total_layouts), KM_NOSLEEP);
+
+	if (los == NULL) {
+		mutex_exit(&rp->r_statelock);
+		VN_RELE(vp);
+		return (EAGAIN);
+	}
+
+	lostats.plo_data.lo_specs = los;
 
 	/*
 	 * Now pluck the fields off the layout.
 	 */
-	if (flayout != NULL) {
-		/* XXX: No multi-segment layouts */
-		lostats.plo_num_layouts = 1;
-		lostats.plo_stripe_count = flayout->plo_stripe_count;
-		lostats.plo_status = flayout->plo_flags;
-		lostats.plo_stripe_unit = flayout->plo_stripe_unit;
-		lostats.iomode = flayout->plo_iomode;
-		lostats.plo_offset = flayout->plo_offset;
-		lostats.plo_length = flayout->plo_length;
-		lostats.plo_creation_sec = flayout->plo_creation_sec;
-		lostats.plo_creation_musec = flayout->plo_creation_musec;
-		DEV_ASSIGN(deviceid, flayout->plo_deviceid);
-		plo_first_stripe_index = flayout->plo_first_stripe_index;
-		flayout = NULL;
-		mutex_exit(&rp->r_statelock);
-
-		dip = NULL;
+	if (lostats.plo_data.total_layouts != 0) {
+		flayout = list_head(&rp->r_layout);
 		np = find_nfs4_server_nolock(mi);
 		if (np) {
-			error = pnfs_get_device(mi, np, deviceid, cr, &dip,
-			    PGD_NO_OTW);
+			/*
+			 * Got the nfs4_server_t, but we don't need to hold
+			 * the lock, just need the reference count on it
+			 * that find_nfs4_server_nolock() gives, so release
+			 * mutex.
+			 */
 			mutex_exit(&np->s_lock);
+		} else {
+			/*
+			 * Why would we NOT get an nfs4_server_t?  Not sure
+			 * if this would ever happen, assert for now, but
+			 * add code to prevent dereferencing a NULL np pointer
+			 * futher in this code if this does happen on a non-
+			 * debug system.
+			 */
+			ASSERT(np != NULL);
+			mutex_exit(&rp->r_statelock);
+			VN_RELE(vp);
+			return (EAGAIN);
 		}
 
-		if ((dip != NULL) && (error != EINPROGRESS) &&
-		    (error != ENODEV)) {
-			lostats.plo_stripe_info_list.plo_stripe_info_list_len =
-			    lostats.plo_stripe_count;
-			lostats.plo_stripe_info_list.plo_stripe_info_list_val =
-			    kmem_zalloc(lostats.plo_stripe_count *
-			    sizeof (stripe_info_t), KM_SLEEP);
-
-			/*
-			 * The reference count on *dip is sufficient for
-			 * accessing these fields.
-			 */
-			for (stripe_num = 0; stripe_num <
-			    lostats.plo_stripe_count; stripe_num++) {
-				si_node = &lostats.plo_stripe_info_list.
-				    plo_stripe_info_list_val[stripe_num];
-				si_node->stripe_index = stripe_num;
-				stp_ndx = (stripe_num +
-				    plo_first_stripe_index) %
-				    dip->dn_ds_addrs.stripe_indices_len;
-				mpl_index = dip->dn_ds_addrs.
-				    stripe_indices[stp_ndx];
-				mpl_item = &dip->dn_ds_addrs.mpl_val[mpl_index];
-				num_servers = mpl_item->multipath_list4_len;
-				si_node->multipath_list.
-				    multipath_list_len = num_servers;
-				si_node->multipath_list.multipath_list_val =
-				    mpl_item->multipath_list4_val;
+		while (flayout) {
+			if (flayout->plo_flags & (PLO_BAD|PLO_UNAVAIL)) {
+				flayout = list_next(&rp->r_layout, flayout);
+				los++;
 			}
+
+			los->plo_stripe_count =
+			    flayout->plo_stripe_count;
+			los->plo_stripe_info_list.
+			    plo_stripe_info_list_len =
+			    flayout->plo_stripe_count;
+			los->plo_status = flayout->plo_flags;
+			los->plo_stripe_unit =
+			    flayout->plo_stripe_unit;
+			los->iomode = flayout->plo_iomode;
+			los->plo_offset = flayout->plo_offset;
+			los->plo_length = flayout->plo_length;
+
+			los->plo_creation_sec =
+			    flayout->plo_creation_sec;
+			los->plo_creation_musec =
+			    flayout->plo_creation_musec;
+			ec = pnfs_getdevice_layoutstats(np, los, flayout, mi,
+			    cr);
+			if (ec) {
+				pnfs_layoutstats_cleanup(&lostats, np);
+				mutex_exit(&rp->r_statelock);
+				VN_RELE(vp);
+				return (ec);
+			}
+
+			flayout = list_next(&rp->r_layout, flayout);
+			los++;
 		}
 	} else {
-		mutex_exit(&rp->r_statelock);
+		los->plo_stripe_info_list.
+		    plo_stripe_info_list_val = NULL;
+		los->plo_stripe_info_list.
+		    plo_stripe_info_list_len = 0;
+		los->plo_stripe_count = 0;
 	}
+
+	mutex_exit(&rp->r_statelock);
 
 	/*
 	 * Get the user buffer and fill it with XDR encoded stream.
@@ -3131,32 +4584,15 @@ int pnfs_collect_layoutstats(struct pnfs_getflo_args *args,
 
 	encode_failed = !xdr_layoutstats_t(&xdrarg, &lostats);
 
-	/*
-	 * The layout details been safely copied into another buffer,
-	 * release locks and free kmem allocated memory. DO NOT USE
-	 * xdr_free. It will free up kernel data structures, since we
-	 * are using those pointers in the layoutstats data structure.
-	 */
-	if (np) {
-		mutex_enter(&np->s_lock);
-		if (dip) {
-			pnfs_rele_device(np, dip);
-			dip = NULL;
-		}
-		nfs4_server_rele_lockt(np);
-		np = NULL;
-	}
 	VN_RELE(vp);
 
-	if (lostats.plo_stripe_info_list.plo_stripe_info_list_val)
-		kmem_free(lostats.plo_stripe_info_list.plo_stripe_info_list_val,
-		    lostats.plo_stripe_count * sizeof (stripe_info_t));
+	pnfs_layoutstats_cleanup(&lostats, np);
 
 	if (encode_failed) {
 		kmem_free(data_buffer, xdr_len);
-		DTRACE_PROBE(nfsstat__e__xdr_layoutstats_t_failed);
-		ec = ESYSCALL;
-		return (ec);
+		cmn_err(CE_WARN, "nfsstat: xdr_layoutstats_t failed"
+		    "in the kernel");
+		return (ESYSCALL);
 	}
 
 	/*
@@ -3326,58 +4762,122 @@ int
 pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
     cred_t *cr)
 {
-	int i, error = 0;
-	file_io_commit_t *job = NULL;
-	commit_task_t *task;
-	rnode4_t *rp = VTOR4(vp);
-	pnfs_layout_t *layout;
-	length4 stripewidth;
-	mntinfo4_t *mi = VTOMI4(vp);
-	int remaining = 0;
-	nfs4_stateid_types_t sid_types;
-	int nosig;
-	page_t *pp;
-	offset4 off, ps, pe;
-	commit_extent_t *exts, *ext;
-	int exts_size;
-	uint32_t sui;
+	int 			i, error = 0;
+	file_io_commit_t 	*job = NULL;
+	commit_task_t 		*task;
 
+	rnode4_t 		*rp = VTOR4(vp);
+	pnfs_layout_t 		*layout;
+	length4 		stripewidth, ioend, lomend;
+	mntinfo4_t 		*mi = VTOMI4(vp);
+	int 			remaining = 0;
+	nfs4_stateid_types_t 	sid_types;
+	int 			nosig;
+	page_t 			*pp;
+	offset4 		off, ps, pe, lend;
+	commit_extent_t 	*exts, *ext;
+	int 			exts_size, ext_index, stripe_count = 0;
+	uint32_t		sui;
+	nfs4_server_t		*np;
+	pnfs_lo_matches_t	*lom;
+	pnfs_lol_t		*lol;
+	offset4			lastwriteoff = 0;
+	nfs4_call_t		*cp;
+	LAYOUTCOMMIT4args	*la;
+	nfs4_error_t		e = { 0, NFS4_OK, RPC_SUCCESS };
+	nfs4_recov_state_t	recov_state;
+
+	np = find_nfs4_server_nolock(mi);
+	ASSERT(np != NULL);
+	mutex_exit(&np->s_lock);
+
+	pe = offset + count - 1;
 	mutex_enter(&rp->r_statelock);
-	layout = list_head(&rp->r_layout);
-	if ((layout == NULL || !(rp->r_flags &
-	    (R4LAYOUTUNAVAIL|R4LAYOUTVALID)))) {
-		mutex_exit(&rp->r_statelock);
-		pnfs_layoutget(vp, cr, LAYOUTIOMODE4_RW);
-		mutex_enter(&rp->r_statelock);
-		layout = list_head(&rp->r_layout);
-	}
 
-	if (layout == NULL || !(rp->r_flags & R4LAYOUTVALID)) {
-		mutex_exit(&rp->r_statelock);
+	if ((rp->r_flags & R4LASTBYTE) && (rp->r_last_write_offset > offset) &&
+	    (rp->r_last_write_offset <= pe))
+		lastwriteoff = rp->r_last_write_offset;
+	mutex_exit(&rp->r_statelock);
+
+	lom = pnfs_find_layouts(np, rp, cr, LAYOUTIOMODE4_RW, offset, count,
+	    LOM_COMMIT);
+
+	if (lom == NULL) {
+		mutex_enter(&np->s_lock);
+		nfs4_server_rele_lockt(np);
 		return (EAGAIN);
 	}
 
-	pnfs_layout_hold(rp, layout);
-	mutex_exit(&rp->r_statelock);
+	lomend = lom->lm_length == PNFS_LAYOUTEND ? PNFS_LAYOUTEND :
+	    lom->lm_offset + lom->lm_length;
+	ioend = offset + count - 1;
 
-	for (i = 0; i < layout->plo_stripe_count; i++) {
-		error = stripe_dev_prepare(mi, layout->plo_stripe_dev[i],
-		    layout->plo_first_stripe_index, i, cr);
-		if (error) {
-			nfs4_set_pageerror(plist);
-			mutex_enter(&rp->r_statelock);
-			pnfs_layout_rele(rp);
-			mutex_exit(&rp->r_statelock);
-			return (error);
+	/*
+	 * We should have the layouts because we have data that needs to
+	 * be committed, which means we did a write to the DS.  Currently
+	 * we MAY return the layout without commiting the data.  This is a
+	 * bug and will be fixed in the future by guarenteeing that
+	 * layoutreturn commits the data before returning the layout.
+	 * For now if we don't have a layout for the range we want,
+	 * spit out a message.
+	 */
+	lol = list_head(&lom->lm_layouts);
+	ASSERT(lol != NULL);
+
+	if (lol == NULL || offset < lom->lm_offset || offset > lomend ||
+	    ioend < lom->lm_offset || ioend > lomend) {
+		cmn_err(CE_WARN, "PNFS_COMMIT missing layouts in range"
+		    "%llu to %llu for rnode %p",
+		    (unsigned long long)offset,
+		    (unsigned long long)ioend,
+		    (void *)rp);
+	}
+
+	lol = list_head(&lom->lm_layouts);
+	while (lol) {
+		layout = lol->l_layout;
+		ASSERT(layout != NULL);
+		/*
+		 * We should never end up with an unavailable or bad
+		 * layout here.  Well for now we might because we
+		 * are not doing a pnfs_commit in layout return.
+		 * Spit out a message for now incase it helps for
+		 * debugging later.
+		 */
+		if (layout->plo_flags & (PLO_BAD|PLO_UNAVAIL)) {
+			cmn_err(CE_WARN, "Commiting to a bogus layout");
 		}
+
+		for (i = 0; i < layout->plo_stripe_count; i++) {
+			stripe_count += layout->plo_stripe_count;
+		}
+
+		lol = list_next(&lom->lm_layouts, lol);
 	}
 
 	/*
 	 * Allocate an array of extents (offset, length).
 	 * One extent for each stripe device.
 	 */
-	exts_size = sizeof (commit_extent_t) * layout->plo_stripe_count;
+	exts_size = sizeof (commit_extent_t) * stripe_count;
 	exts = kmem_zalloc(exts_size, KM_SLEEP);
+
+	ext_index = 0;
+	lol = list_head(&lom->lm_layouts);
+	while (lol) {
+		/*
+		 * Walk thru the commit_extents allocated and
+		 * setup pointers to the lol structures.
+		 */
+		layout = lol->l_layout;
+		for (i = 0; i < layout->plo_stripe_count; i++) {
+			ext = &exts[ext_index];
+			ext->ce_lol = lol;
+			ext_index++;
+			ASSERT(ext_index <= stripe_count);
+		}
+		lol = list_next(&lom->lm_layouts, lol);
+	}
 
 	/*
 	 * Walk the list of pages and update the extents array.
@@ -3385,9 +4885,51 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 	 * offset and length that needs to be committed for each device.
 	 */
 	pp = plist;
+	ext_index = 0;
+
 	do {
 		ps = pp->p_offset;
+		/*
+		 * Find the appropriate commit_extent by looking at
+		 * the layout it represents.  The first commmit extent
+		 * found whose layout holds the page starting byte
+		 * is the base of the commit extents for the layout.
+		 * Since the layout can map to more than one data server
+		 * we then need to index from this base commit extent
+		 * using the stripe unit size of the layout and the stripe
+		 * count of the layout.
+		 */
+		for (ext_index = 0; ext_index < stripe_count; ext_index++) {
+			ext = &exts[ext_index];
+			lol = ext->ce_lol;
+			lend = (lol->l_length == PNFS_LAYOUTEND) ?
+			    PNFS_LAYOUTEND : lol->l_offset + lol->l_length;
+			if (ps >= ext->ce_lol->l_offset && (ps < lend))
+				break;
+		}
+		/*
+		 * We MUST have a match, otherwise pnfs_find_layouts
+		 * gave us back a bogus list.
+		 */
+#ifdef DEBUG
+		if (ext_index == stripe_count)
+			cmn_err(CE_PANIC, "bogus index %d %d %p", ext_index,
+			    stripe_count, (void *)exts);
+#endif
+
+		layout = lol->l_layout;
+		lend = ((layout->plo_length == PNFS_LAYOUTEND) ?
+		    PNFS_LAYOUTEND : layout->plo_offset + layout->plo_length);
+		ASSERT(ps >= layout->plo_offset && (ps <= lend));
+		/*
+		 * XXXKLR Ugh!  How do we handle pages that span layouts?
+		 * Assert for now that this doesn't happen, deal with this
+		 * later...by either not accepting layouts whose
+		 * size is less than a page size, or forcing sync
+		 * writes to such layouts.
+		 */
 		pe = ps + PAGESIZE - 1;
+		ASSERT(pe > layout->plo_offset && pe < lend);
 
 		/*
 		 * Step through the page by stripe unit width
@@ -3396,6 +4938,7 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 		do {
 			sui = (ps / layout->plo_stripe_unit) %
 			    layout->plo_stripe_count;
+			sui += ext_index;
 			ext = &exts[sui];
 			if (ext->ce_length == 0) {
 				ext->ce_offset = pp->p_offset;
@@ -3413,77 +4956,199 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 		} while (ps < pe);
 	} while ((pp = pp->p_next) != plist);
 
-	if (layout->plo_flags & PLO_COMMIT_MDS) {
-		error = pnfs_commit_mds(vp, plist, layout, exts,
-		    offset, count, cr);
-	} else {
-		job = file_io_commit_alloc();
-		nfs4_init_stateid_types(&sid_types);
-		job->fic_vp = vp;
-		job->fic_plist = plist;
-		stripewidth = layout->plo_stripe_unit *
-		    layout->plo_stripe_count;
-		for (i = 0; i < layout->plo_stripe_count; i++) {
-			ext = &exts[i];
-			/* skip data servers that do not need commit */
-			if (ext->ce_length == 0)
-				continue;
-			task = kmem_cache_alloc(commit_task_cache, KM_SLEEP);
-			task->cm_job = job;
-			task->cm_cred = cr;
-			crhold(task->cm_cred);
-			task->cm_layout = layout;
-			off = ext->ce_offset;
-			if (layout->plo_stripe_type == STRIPE4_DENSE)
-				task->cm_offset = (off / stripewidth)
-				    * layout->plo_stripe_unit
-				    + (off % layout->plo_stripe_unit);
-			else
-				task->cm_offset = off;
-			task->cm_sui = i;
-			task->cm_dev = layout->plo_stripe_dev[i];
-			stripe_dev_hold(task->cm_dev);
-			task->cm_count = ext->ce_length;
-			task->cm_call = nfs4_call_init(TAG_PNFS_COMMIT,
-			    OP_COMMIT, OH_COMMIT, FALSE, mi, vp, NULL, cr);
-			task->cm_call->nc_ds_servinfo = task->cm_dev->std_svp;
-			task->cm_recov_state.rs_flags = 0;
-			task->cm_recov_state.rs_num_retry_despite_err = 0;
 	/*
-	 * XXXcommit - Add the task to the job list here.
-	 * Convert task dispatching to pnfs_commit_start()
-	 * which will coordinate with recovery.
+	 * XXXKLR this needs cleaned up too.  Since we can have
+	 * multiple layouts, we may end up with more than one dispatched
+	 * to MDS, or some to MDS and still others to DS.  Need to
+	 * do commits to MDS async then in another task, so we don't need to
+	 * wait for them to complete here before dispatching commits to the
+	 * DSes
 	 */
-			++remaining;
+	ext_index = 0;
+	job = file_io_commit_alloc();
+	for (lol = list_head(&lom->lm_layouts); lol;
+	    lol = list_next(&lom->lm_layouts, lol)) {
+		layout = lol->l_layout;
+		ASSERT(layout != NULL);
+		if (layout->plo_flags & PLO_COMMIT_MDS) {
+			error = pnfs_commit_mds(vp, plist, layout,
+			    &exts[ext_index], offset, count, cr);
+		} else {
+			nfs4_init_stateid_types(&sid_types);
+			job->fic_vp = vp;
+			job->fic_plist = plist;
+			stripewidth = layout->plo_stripe_unit *
+			    layout->plo_stripe_count;
+			for (i = 0; i < layout->plo_stripe_count; i++) {
+				ext = &exts[i + ext_index];
+				/* skip data servers that do not need commit */
+				if (ext->ce_length == 0) {
+					ext_index += layout->plo_stripe_count;
+					continue;
+				}
+				task = kmem_cache_alloc(
+				    commit_task_cache, KM_SLEEP);
+				task->cm_job = job;
+				task->cm_cred = cr;
+				crhold(task->cm_cred);
+				task->cm_layout = layout;
+				off = ext->ce_offset;
+				if (layout->plo_stripe_type ==
+				    STRIPE4_DENSE)
+					task->cm_offset =
+					    (off / stripewidth)
+					    * layout->plo_stripe_unit +
+					    (off % layout->plo_stripe_unit);
+				else
+					task->cm_offset = off;
+				task->cm_sui = i;
+				task->cm_dev = layout->plo_stripe_dev[i];
+				stripe_dev_hold(task->cm_dev);
+				task->cm_count = ext->ce_length;
+				/*
+				 * XXXcommit - reconcile vp, cr, opnum, and
+				 * ophint between
+				 * the commit_task_t and the nfs4_call_t.
+				 */
+				task->cm_call = nfs4_call_init(TAG_PNFS_COMMIT,
+				    OP_COMMIT, OH_COMMIT, FALSE, mi, vp, NULL,
+				    cr);
+				task->cm_call->nc_ds_servinfo =
+				    task->cm_dev->std_svp;
+				task->cm_recov_state.rs_flags = 0;
+				task->cm_recov_state.rs_num_retry_despite_err
+				    = 0;
 
-			(void) taskq_dispatch(mi->mi_pnfs_io_taskq,
-			    pnfs_task_commit, task, 0);
+				/*
+				 * XXXcommit - Add the task to the job list
+				 * here. Convert task dispatching to
+				 * pnfs_commit_start() which will
+				 * coordinate with recovery.
+				 */
+				++remaining;
+				(void) taskq_dispatch
+				    (mi->mi_pnfs_io_taskq,
+				    pnfs_task_commit, task,
+				    0);
+			}
+
 		}
+		ext_index += layout->plo_stripe_count;
+	}
 
+	if (job) {
 		mutex_enter(&job->fic_lock);
 		job->fic_remaining += remaining;
 		while (job->fic_remaining > 0) {
-			nosig = cv_wait_sig(&job->fic_cv, &job->fic_lock);
+			nosig = cv_wait_sig(&job->fic_cv,
+			    &job->fic_lock);
 			if ((nosig == 0) && (job->fic_error == 0))
 				job->fic_error = EINTR;
 		}
-	/*
-	 * XXXcommit - loop through the task list to see if the task
-	 * needs to be redispatched or if recovery needs to be initiated.
-	 */
+
+		/*
+		 * XXXcommit - loop through the task list to see if the task
+		 * needs to be redispatched or if recovery needs to be
+		 * initiated.
+		 */
 		error = job->fic_error;
 		mutex_exit(&job->fic_lock);
 	}
 
-	mutex_enter(&rp->r_statelock);
-	pnfs_layout_rele(rp);
-	mutex_exit(&rp->r_statelock);
+	recov_state.rs_flags = 0;
+	recov_state.rs_num_retry_despite_err = 0;
+
+	if (!error && lastwriteoff != 0) {
+recov_retry:
+		cp = nfs4_call_init(TAG_LAYOUTCOMMIT, OP_LAYOUTCOMMIT,
+		    OH_OTHER, FALSE, mi, NULL, NULL, cr);
+
+		e.error = nfs4_start_op(cp, &recov_state);
+		/*
+		 * XXXKLR - If there is an error here we won't clear
+		 * the R4LASTBYTE bit.  Next pnfs_commit will possibly
+		 * then do the layoutcommit.  However, if there isn't
+		 * another pnfs_commit(), we need a way to make sure
+		 * the layoutcommit() is sent to the MDS.  Possibly
+		 * set a bit here, R4FORCELASTBYTE, maybe, which
+		 * close can check and send the layoutcommit?  Would
+		 * we also need to save the last_write_offset here to
+		 * in another field in the rnode?  Need to look into this
+		 * error handling more.
+		 */
+		if (e.error)
+			goto out;
+
+
+		/* putfh target fh */
+		(void) nfs4_op_cputfh(cp, rp->r_fh);
+
+		(void) nfs4_op_layoutcommit(cp, &la);
+
+		mutex_enter(&rp->r_statelock);
+		(void) nfs4_op_cputfh(cp, rp->r_fh);
+		la->loca_stateid = pnfs_get_losid(rp);
+		mutex_exit(&rp->r_statelock);
+
+		la->loca_last_write_offset.newoffset4_u.no_offset =
+		    lastwriteoff;
+		la->loca_offset = 0;
+		la->loca_length = PNFS_LAYOUTEND;
+		la->loca_reclaim = FALSE;
+		la->loca_last_write_offset.no_newoffset = TRUE;
+		la->loca_time_modify.nt_timechanged = FALSE;
+		la->loca_layoutupdate.lou_type = LAYOUT4_NFSV4_1_FILES;
+		la->loca_layoutupdate.lou_body.lou_body_len = 0;
+		la->loca_layoutupdate.lou_body.lou_body_val = NULL;
+
+		rfs4call(cp, &e);
+
+		nfs4_needs_recovery(cp);
+		if (cp->nc_needs_recovery) {
+			/*
+			 * XXXKLR - If we need recovery, start it here
+			 * and just bail for now.  Recovery may actually
+			 * handle the layoutcommit, but we are not
+			 * guarenteed to still even be holding the layout
+			 * after recovery.
+			 */
+			NFS4_DEBUG(nfs4_client_recov_debug, (CE_NOTE,
+			    "nfs4_pnfs_commit_layoutcommit: "
+			    "initiating recovery\n"));
+			(void) nfs4_start_recovery(cp);
+			nfs4_end_op(cp, &recov_state);
+			nfs4_call_rele(cp);
+			goto recov_retry;
+		}
+
+		nfs4_end_op(cp, &recov_state);
+		nfs4_call_rele(cp);
+
+		if (e.error)
+			goto out;
+		mutex_enter(&rp->r_statelock);
+		/*
+		 * Is it possible that another write could have
+		 * occurred that extended the last byte written
+		 * beyond lastwriteoffset?  If so we do not want
+		 * to clear the R4LASTBYTE.
+		 */
+		if (lastwriteoff == rp->r_last_write_offset)
+			rp->r_flags &= ~ R4LASTBYTE;
+		mutex_exit(&rp->r_statelock);
+	}
+
+
+out:
+	pnfs_release_layouts(np, rp, lom, LOM_COMMIT);
 
 	kmem_free(exts, exts_size);
 
-	if (job)
-		(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
-		    pnfs_task_commit_free, job, 0);
+	mutex_enter(&np->s_lock);
+	nfs4_server_rele_lockt(np);
+
+	(void) taskq_dispatch(mi->mi_pnfs_other_taskq,
+	    pnfs_task_commit_free, job, 0);
 
 	return (error);
 }

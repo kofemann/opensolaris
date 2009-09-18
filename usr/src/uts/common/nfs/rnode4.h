@@ -190,6 +190,8 @@ typedef struct r4hashq {
  *
  *	r_os_lock:	Protects r_open_streams.
  *
+ *	r_lo_lock;	Protects the layout list.
+ *
  *
  * The following members are protected by the mutex rp4freelist_lock:
  *	r_freef
@@ -349,6 +351,7 @@ typedef struct rnode4 {
 	nfs4_stub_type_t	r_stub_type;
 					/* e.g. mirror-mount */
 	uint_t		r_inmap;	/* to serialize read/write and mmap */
+	kmutex_t	r_lo_lock;	/* Layout List Lock */
 	list_t 		r_layout;	/* pNFS layout(s) */
 	uint64_t	r_proxyio_count; /* Counter for proxy I/O */
 	uint64_t	r_dsio_count; 	/* Counter for DS I/O */
@@ -357,6 +360,7 @@ typedef struct rnode4 {
 	clock_t		r_last_layoutget; /* time of last layoutget attempt */
 	offset4		r_last_write_offset; /* used in LAYOUTCOMMIT */
 	avl_node_t	r_avl;		/* layout avl tree */
+	nfs4_fsidlt_t	*r_fsidlt;	/* fsidlt this rnode is in */
 } rnode4_t;
 
 #define	r_vnode	r_svnode.sv_r_vnode
@@ -388,7 +392,8 @@ typedef struct rnode4 {
 #define	R4LAYOUTVALID	0x400000 /* a pNFS layout is available */
 #define	R4LASTBYTE	0x800000 /* pNFS last_write_offset is valid */
 #define	R4LAYOUTUNAVAIL 0x1000000 /* to be moved to pnfs_layout later */
-#define	R4LOGET		0x2000000 /* Layout Get In Progress */
+#define	R4OTWLO		0x2000000 /* OTW Layout Op In Progress */
+#define	R4LOWAITER	0x4000000 /* Thread waiting for layout stateid */
 
 /*
  * Convert between vnode and rnode

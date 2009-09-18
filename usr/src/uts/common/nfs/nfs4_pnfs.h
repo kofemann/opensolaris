@@ -114,6 +114,8 @@ enum stripetype4 {
 	STRIPE4_DENSE = 1
 };
 
+#define	PNFS_LAYOUTEND	0xffffffffffffffff
+
 /* per-rnode generic layout */
 typedef struct pnfs_layout {
 	list_node_t		plo_list;
@@ -135,17 +137,73 @@ typedef struct pnfs_layout {
 	int64_t			plo_creation_musec;
 } pnfs_layout_t;
 
-/* Layout Flag Fields */
-
+/*
+ * Layout Flag Fields
+ * NOTE: PLO_RETURN, PLO_GET and PLO_RECALL can only be set or cleared
+ * when the code path "owns" the R4OTWLO bit in the rnode.  However
+ * PLO_RETURN, PLO_GET and PLO_RECALL, can still be checked by only
+ * having to hold the rnode's r_statelock.
+ */
 #define	PLO_ROC		0x1	/* Return Layout On Close */
-#define	PLO_COMMIT_MDS	0x02	/* Commit to MDS */
-#define	PLO_RETURN	0x04	/* Layout Being Returned */
-#define	PLO_GET		0x08	/* Layoutget In Progress */
-#define	PLO_RECALL	0x10	/* Layout Being Recalled */
-#define	PLO_BAD		0x20	/* Layout Is Bad */
-#define	PLO_UNAVAIL	0x40	/* Layout Unavailable From MDS */
-#define	PLO_TRYLATER	0x100	/* RETRY From MDS on Layoutget, Try Later */
+#define	PLO_RETURN	0x02	/* Layout Being Returned. */
+#define	PLO_GET		0x04	/* Layoutget in Progress */
+#define	PLO_RECALL	0x08	/* Layout Being Recalled */
+#define	PLO_BAD		0x10	/* Layout is Bad */
+#define	PLO_UNAVAIL	0x20	/* Layout Unavailable from MDS */
+#define	PLO_COM2MDS	0x40	/* Commit To MDS */
+#define	PLO_TRYLATER	0x80	/* RETRY from MDS on LAYOUTGET, try later */
+#define	PLO_COMMIT_MDS	0x100	/* Commit to MDS */
+#define	PLO_LOWAITER	0x200	/* Thread waiting for this layout */
+#define	PLO_PROCESSED	0x400	/* LAYOUTGET processed this layout */
 
+typedef struct pnfs_lo_matches {
+	list_t		lm_layouts;
+	offset4 	lm_offset;
+	length4 	lm_length;
+	uint_t		lm_status;
+	uint_t		lm_flags;
+	layoutiomode4	lm_mode;
+} pnfs_lo_matches_t;
+
+/*
+ * Status Flags For lm_status field of pnfs_lo_matches
+ */
+#define	LOMSTAT_MATCHFOUND	0x1
+#define	LOMSTAT_NEEDSWAIT	0x02
+#define	LOMSTAT_DELAY		0x04
+
+/*
+ * Use bits passed to pnfs_find_layouts() identifying why the layout list
+ * is to be acquired.
+ */
+#define	LOM_USE		0x2
+#define	LOM_RETURN	0x4
+#define	LOM_RECALL	0x8
+#define	LOM_COMMIT	0x10
+
+/*
+ * LOM status bits, indicating status of the layout list returned, if any.
+ */
+#define	LOM_STAT_SUCCESS	0x0
+#define	LOM_STAT_RECALLED	0x01    /* Layout(s) recalled */
+
+typedef struct pnfs_lol {
+	list_node_t	l_node;
+	pnfs_layout_t	*l_layout;
+	offset4		l_offset;
+	length4		l_length;
+	int		l_flags;
+} pnfs_lol_t;
+
+
+/*
+ * Flag bits telling the layoutreturn code what type of return
+ * it is doing and if it is from a return, or initiated by a recall.
+ */
+#define	PNFS_LAYOUTRECALL_FILE	0x01
+#define	PNFS_LAYOUTRECALL_FSID	0x02
+#define	PNFS_LAYOUTRECALL_ALL	0x04
+#define	PNFS_LAYOUTRETURN_FILE	0x08
 
 /* a batch of read i/o work requested of pNFS */
 typedef struct {
@@ -230,6 +288,7 @@ typedef struct {
 typedef struct {
 	offset4 ce_offset;
 	length4 ce_length;
+	pnfs_lol_t	*ce_lol;
 } commit_extent_t;
 
 typedef struct {
@@ -238,58 +297,90 @@ typedef struct {
 } task_get_devicelist_t;
 
 typedef struct {
-	mntinfo4_t *tlg_mi;
-	vnode_t *tlg_vp;
-	cred_t *tlg_cred;
-	layoutiomode4 tlg_iomode;
-	uint32_t tlg_flags;
+	mntinfo4_t 		*tlg_mi;
+	vnode_t 		*tlg_vp;
+	cred_t 			*tlg_cred;
+	layoutiomode4 		tlg_iomode;
+	uint32_t 		tlg_flags;
+	offset4			tlg_offset;
 } task_layoutget_t;
+
 #define	TLG_NOFREE (0x01)
+#define	TLG_USE		LOM_USE
+#define	TLG_RETURN	LOM_RETURN
+#define	TLG_RECALL	LOM_RECALL
 
 typedef struct {
-	mntinfo4_t *tlr_mi;
-	vnode_t *tlr_vp;
-	cred_t *tlr_cr;
-	offset4 tlr_offset;
-	length4 tlr_length;
-	bool_t tlr_reclaim;
-	layoutiomode4 tlr_iomode;
-	layouttype4 tlr_layout_type;
-	stateid4 tlr_stateid;
-	layoutreturn_type4 tlr_return_type;
+	mntinfo4_t 		*tlr_mi;
+	vnode_t 		*tlr_vp;
+	cred_t 			*tlr_cr;
+	offset4 		tlr_offset;
+	length4 		tlr_length;
+	bool_t 			tlr_reclaim;
+	layoutiomode4 		tlr_iomode;
+	layouttype4 		tlr_layout_type;
+	pnfs_lo_matches_t	*tlr_lom;
+	layoutreturn_type4 	tlr_return_type;
+	int			tlr_aflag;
+	nfs4_server_t		*tlr_np;
+	nfs4_fsidlt_t		*tlr_lt;
 } task_layoutreturn_t;
 
+extern void	pnfs_layout_return(vnode_t *, cred_t *, int,
+	pnfs_lo_matches_t *, int);
 
+extern pnfs_lo_matches_t *
+pnfs_find_layouts(nfs4_server_t *, struct rnode4 *, cred_t *,
+layoutiomode4, offset4, length4, int);
+
+extern	int	pnfs_rnode_holds_layouts(struct rnode4 *);
+extern void	pnfs_layoutget(vnode_t *, cred_t *, offset4, layoutiomode4);
 extern void	pnfs_layout_hold(struct rnode4 *, struct pnfs_layout *);
+extern void	pnfs_layout_rele(struct rnode4 *, struct pnfs_layout *);
+extern void	pnfs_decr_layout_refcnt(struct rnode4 *, struct pnfs_layout *);
+extern void	pnfs_trim_fsid_tree(struct rnode4 *, struct nfs4_fsidlt *, int);
+extern void	pnfs_release_layouts(nfs4_server_t *np, struct rnode4 *,
+	struct pnfs_lo_matches *, int);
+extern void    	pnfs_insert_layout(pnfs_layout_t *, struct rnode4 *,
+	struct pnfs_layout *);
+
 
 /*
  * Layout data structures that get XDR encoded/decoded into the buffer
  * passed via the system call for getting layout information.
  */
 typedef struct stripe_info {
-	uint32_t stripe_index;
+	uint32_t 	stripe_index;
 	struct {
 		uint_t multipath_list_len;
 		struct netaddr4 *multipath_list_val;
 	} multipath_list;
 } stripe_info_t;
 
-typedef struct layoutstats {
-	uint32_t plo_num_layouts;
-	uint32_t plo_stripe_count;
-	uint32_t plo_stripe_unit;
-	uint32_t plo_status;
-	layoutiomode4 iomode;
-	offset4 plo_offset;
-	length4 plo_length;
-	uint64_t proxy_iocount;
-	uint64_t ds_iocount;
-	int64_t plo_creation_sec;
-	int64_t plo_creation_musec;
+
+typedef struct layoutspecs {
+	uint32_t 	plo_stripe_count;
+	uint32_t 	plo_stripe_unit;
+	uint32_t 	plo_status;
+	layoutiomode4 	iomode;
+	offset4 	plo_offset;
+	length4 	plo_length;
+	int64_t 	plo_creation_sec;
+	int64_t 	plo_creation_musec;
+	devnode_t	*plo_devnode;
 	struct {
 		uint_t plo_stripe_info_list_len;
 		stripe_info_t *plo_stripe_info_list_val;
 	} plo_stripe_info_list;
+} layoutspecs_t;
+
+typedef struct layoutstats {
+	uint64_t	proxy_iocount;
+	uint64_t	ds_iocount;
+	struct {
+		uint_t		total_layouts;
+		layoutspecs_t	*lo_specs;
+	} plo_data;
 } layoutstats_t;
 
 /*

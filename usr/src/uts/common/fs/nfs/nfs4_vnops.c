@@ -2347,7 +2347,6 @@ nfs4close_otw(rnode4_t *rp, cred_t *cred_otw, nfs4_open_owner_t *oop,
 {
 	CLOSE4res *close_res;
 	GETATTR4res *getattr_res;
-	LAYOUTCOMMIT4args *la;
 	mntinfo4_t *mi;
 	seqid4 seqid;
 	vnode_t *vp;
@@ -2355,6 +2354,7 @@ nfs4close_otw(rnode4_t *rp, cred_t *cred_otw, nfs4_open_owner_t *oop,
 	hrtime_t t;
 	nfs4_call_t *cp;
 	int ctag;
+	LAYOUTCOMMIT4args *la;
 
 	ASSERT(nfs_zone() == VTOMI4(RTOV4(rp))->mi_zone);
 
@@ -2383,19 +2383,8 @@ nfs4close_otw(rnode4_t *rp, cred_t *cred_otw, nfs4_open_owner_t *oop,
 	/* putfh target fh */
 	(void) nfs4_op_cputfh(cp, rp->r_fh);
 
-	/*
-	 * If pNFS is in effect, send a layoutcommit with close
-	 * before the getattr.
-	 */
 	mutex_enter(&rp->r_statelock);
-	if (rp->r_flags & R4LAYOUTVALID) {
-		/*
-		 * Our implementation only cares about newoffset, the last
-		 * byte written.  However, we go through with the
-		 * layoutcommit any time we have a layout (and presumably
-		 * we did a pnfs_write), because other implementations
-		 * require this.
-		 */
+	if (!(list_is_empty(&rp->r_layout)) && (rp->r_flags & R4LASTBYTE)) {
 		(void) nfs4_op_layoutcommit(cp, &la);
 
 		la->loca_offset = 0;
@@ -2417,6 +2406,7 @@ nfs4close_otw(rnode4_t *rp, cred_t *cred_otw, nfs4_open_owner_t *oop,
 		la->loca_layoutupdate.lou_body.lou_body_val = NULL;
 	}
 	mutex_exit(&rp->r_statelock);
+
 
 	getattr_res = nfs4_op_getattr(cp, MI4_DEFAULT_ATTRMAP(mi));
 
@@ -4598,7 +4588,7 @@ nfs4_inactive(vnode_t *vp, cred_t *cr, caller_context_t *ct)
 		return;
 	}
 
-	if (rp->r_flags & R4LAYOUTVALID) {
+	if (!(list_is_empty(&rp->r_layout))) {
 		mutex_exit(&rp->r_statev4_lock);
 		mutex_exit(&rp->r_statelock);
 		mutex_exit(&rp->r_os_lock);
@@ -4716,9 +4706,8 @@ redo:
 		}
 	}
 
-	mutex_enter(&rp->r_statelock);
-	pnfs_layout_return(vp, cr, rp->r_lostateid, LR_SYNC);
-	mutex_exit(&rp->r_statelock);
+	pnfs_layout_return(vp, cr, LR_SYNC, NULL,
+	    PNFS_LAYOUTRETURN_FILE);
 
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
@@ -7029,9 +7018,9 @@ nfs4_remove(vnode_t *dvp, char *nm, cred_t *cr, caller_context_t *ct, int flags)
 	 * not because the layout is no longer valid, but the
 	 * removal may cause the file handle to go stale.
 	 */
-	mutex_enter(&rp->r_statelock);
-	pnfs_layout_return(vp, cr, rp->r_lostateid, LR_SYNC);
-	mutex_exit(&rp->r_statelock);
+	pnfs_layout_return(vp, cr, LR_SYNC, NULL,
+	    PNFS_LAYOUTRETURN_FILE);
+
 	(void) nfs4delegreturn(rp, NFS4_DR_REOPEN);
 	recov_state.rs_flags = 0;
 	recov_state.rs_num_retry_despite_err = 0;
@@ -7540,9 +7529,8 @@ link_call:
 		}
 
 		/* Return the layout of the file being renamed over */
-		mutex_enter(&VTOR4(nvp)->r_statelock);
-		pnfs_layout_return(nvp, cr, rp->r_lostateid, LR_SYNC);
-		mutex_exit(&VTOR4(nvp)->r_statelock);
+		pnfs_layout_return(nvp, cr, LR_SYNC, NULL,
+		    PNFS_LAYOUTRETURN_FILE);
 
 		(void) nfs4delegreturn(VTOR4(nvp), NFS4_DR_PUSH|NFS4_DR_REOPEN);
 
@@ -7609,9 +7597,8 @@ link_call:
 	 * be returned?
 	 */
 #ifdef	NOTYET
-	mutex_enter(&rp->r_statelock);
-	pnfs_layout_return(ovp, cr, rp->r_lostateid, LR_SYNC);
-	mutex_exit(&rp->r_statelock);
+	pnfs_layout_return(ovp, cr, LR_SYNC, NULL,
+	    PNFS_LAYOUTRETURN_FILE);
 #endif
 
 	(void) nfs4delegreturn(VTOR4(ovp), NFS4_DR_PUSH|NFS4_DR_REOPEN);
@@ -9099,22 +9086,7 @@ write_again:
 			mutex_exit(&rp->r_statelock);
 			if (count < 0)
 				cmn_err(CE_PANIC, "nfs4_bio: write count < 0");
-#ifdef DEBUG
-			if (count == 0) {
-				zoneid_t zoneid = getzoneid();
 
-				zcmn_err(zoneid, CE_WARN,
-				    "nfs4_bio: zero length write at %lld",
-				    offset);
-				zcmn_err(zoneid, CE_CONT, "flags=0x%x, "
-				    "b_bcount=%ld, file size=%lld",
-				    rp->r_flags, (long)bp->b_bcount,
-				    rp->r_size);
-				sfh4_printfhandle(VTOR4(bp->b_vp)->r_fh);
-				if (nfs4_bio_do_stop)
-					debug_enter("nfs4_bio");
-			}
-#endif
 			error = nfs4write(bp->b_vp, bp->b_un.b_addr, offset,
 			    count, cred_otw, stab_comm);
 			if (error == EACCES && last_time == FALSE) {
