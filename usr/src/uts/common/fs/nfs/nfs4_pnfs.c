@@ -841,7 +841,9 @@ layoutiomode4 iomode, offset4 off, length4 len, int use)
 			pnfs_layoutget(RTOV(rp), cr, off, iomode);
 			mutex_enter(&rp->r_lo_lock);
 			offset = lom->lm_offset;
+#ifdef DEBUG
 			prevend = 0;
+#endif
 			loend = 0;
 			lo = list_head(&rp->r_layout);
 			dologet = FALSE;
@@ -951,7 +953,9 @@ layoutiomode4 iomode, offset4 off, length4 len, int use)
 			}
 			lo = list_head(&rp->r_layout);
 			offset = lom->lm_offset;
+#ifdef DEBUG
 			prevend = 0;
+#endif
 			loend = 0;
 			lom->lm_flags &= ~LOMSTAT_MATCHFOUND;
 			if (use == LOM_RECALL) {
