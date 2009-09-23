@@ -727,7 +727,7 @@ typedef struct rfs4_client {
 	sysid_t			rc_sysidt;
 	list_t			rc_openownerlist;
 	rfs4_ss_pn_t		*rc_ss_pn;
-	struct sockaddr_storage rc_cl_addr;
+	struct sockaddr_storage rc_addr;
 	rfs41_csr_t		rc_contrived;
 	rfs41_sprot_t		rc_state_prot;
 	struct rfs41_grant_list	rc_clientgrantlist;

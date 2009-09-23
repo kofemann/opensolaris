@@ -636,7 +636,7 @@ rfs4_ss_clid(struct compound_state *cs, rfs4_client_t *cp, struct svc_req *req)
 	 */
 	if (ca->sa_family == AF_INET) {
 
-		bcopy(svc_getrpccaller(req->rq_xprt)->buf, &cp->rc_cl_addr,
+		bcopy(svc_getrpccaller(req->rq_xprt)->buf, &cp->rc_addr,
 		    sizeof (struct sockaddr_in));
 		b = (uchar_t *)&((struct sockaddr_in *)ca)->sin_addr;
 		(void) sprintf(buf, "%03d.%03d.%03d.%03d", b[0] & 0xFF,
@@ -645,7 +645,7 @@ rfs4_ss_clid(struct compound_state *cs, rfs4_client_t *cp, struct svc_req *req)
 		struct sockaddr_in6 *sin6;
 
 		sin6 = (struct sockaddr_in6 *)ca;
-		bcopy(svc_getrpccaller(req->rq_xprt)->buf, &cp->rc_cl_addr,
+		bcopy(svc_getrpccaller(req->rq_xprt)->buf, &cp->rc_addr,
 		    sizeof (struct sockaddr_in6));
 		(void) kinet_ntop6((uchar_t *)&sin6->sin6_addr,
 		    buf, INET6_ADDRSTRLEN);
@@ -714,7 +714,7 @@ rfs4_client_scrub(rfs4_entry_t ent, void *arg)
 	struct in_addr   clr_in;
 	nfs_server_instance_t *instp;
 
-	if (clr->addr_type != cp->rc_cl_addr.ss_family) {
+	if (clr->addr_type != cp->rc_addr.ss_family) {
 		return;
 	}
 
@@ -728,7 +728,7 @@ rfs4_client_scrub(rfs4_entry_t ent, void *arg)
 			break;
 		}
 
-		ent_sin6 = (struct sockaddr_in6 *)&cp->rc_cl_addr;
+		ent_sin6 = (struct sockaddr_in6 *)&cp->rc_addr;
 
 		/*
 		 * now compare, and if equivalent mark entry
@@ -745,7 +745,7 @@ rfs4_client_scrub(rfs4_entry_t ent, void *arg)
 			break;
 		}
 
-		ent_sin = (struct sockaddr_in *)&cp->rc_cl_addr;
+		ent_sin = (struct sockaddr_in *)&cp->rc_addr;
 
 		/*
 		 * now compare, and if equivalent mark entry

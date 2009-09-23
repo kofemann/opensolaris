@@ -3167,6 +3167,8 @@ recov_retry:
 				}
 			}
 		}
+
+		DTRACE_PROBE(nfsc__layout__unavailable);
 	} else {
 		mutex_enter(&rp->r_lo_lock);
 	}
