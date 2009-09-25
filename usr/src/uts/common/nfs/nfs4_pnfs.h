@@ -123,6 +123,7 @@ typedef struct pnfs_layout {
 	int			plo_flags;
 	offset4			plo_offset;
 	length4			plo_length;
+	offset4			plo_pattern_offset;
 	uint32_t		plo_inusecnt;
 	kcondvar_t		plo_wait;
 	deviceid4		plo_deviceid;
@@ -286,9 +287,9 @@ typedef struct {
 } commit_task_t;
 
 typedef struct {
-	offset4 ce_offset;
-	length4 ce_length;
-	pnfs_lol_t	*ce_lol;
+	offset4 	ce_offset;
+	length4 	ce_length;
+	pnfs_layout_t	*ce_lo;
 } commit_extent_t;
 
 typedef struct {

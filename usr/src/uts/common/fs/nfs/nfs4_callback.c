@@ -995,76 +995,77 @@ layoutrecall_file(layoutrecall_file4 *lrf, nfs4_server_t *np)
 
 		rp = avl_find(&ltp->lt_rlayout_tree, &lrp, NULL);
 
-		if (rp != NULL) {
-			if (ltp->lt_flags & PNFS_CBLORECALL) {
-				np->s_lobulkblock--;
-				mutex_exit(&ltp->lt_rlt_lock);
-				mutex_exit(&np->s_lt_lock);
-				mutex_exit(&np->s_lock);
-				return (nstatus);
-			}
-			ltp->lt_lobulkblock++;
+		if (rp == NULL) {
+			mutex_exit(&ltp->lt_rlt_lock);
+			continue;
+		}
+
+		if (ltp->lt_flags & PNFS_CBLORECALL) {
+			np->s_lobulkblock--;
 			mutex_exit(&ltp->lt_rlt_lock);
 			mutex_exit(&np->s_lt_lock);
-
-			vp = RTOV4(rp);
-			VN_HOLD(vp);
 			mutex_exit(&np->s_lock);
-
-			/*
-			 * Since this client will never ask for a layout that
-			 * it already holds, if we get a
-			 * layoutrecall, the stateid it has should match
-			 * ours!.
-			 */
-			mutex_enter(&rp->r_statelock);
-			if (lrf->lor_stateid.seqid !=
-			    rp->r_lostateid.seqid + 1) {
-				cmn_err(CE_PANIC, "our layout stateids are"
-				    "out of sync! rnode: %p %p %p", (void *)rp,
-				    (void *)&lrf->lor_stateid,
-				    (void *)&rp->r_lostateid);
-			}
-
-			rp->r_lostateid = lrf->lor_stateid;
-			mutex_exit(&rp->r_statelock);
-
-			lom = pnfs_find_layouts(np, rp, kcred, LAYOUTIOMODE4_RW,
-			    lrf->lor_offset, lrf->lor_length, LOM_RECALL);
-
-			if (lom == NULL || (lom != NULL &&
-			    !(lom->lm_flags & LOMSTAT_MATCHFOUND))) {
-				pnfs_release_layouts(np, rp, lom, LOM_RECALL);
-
-				mutex_enter(&np->s_lt_lock);
-				mutex_enter(&ltp->lt_rlt_lock);
-				np->s_lobulkblock--;
-				ltp->lt_lobulkblock--;
-				mutex_exit(&ltp->lt_rlt_lock);
-				mutex_exit(&np->s_lt_lock);
-				VN_RELE(vp);
-				return (nstatus);
-			}
-
-			if (lom->lm_flags & LOMSTAT_DELAY) {
-				pnfs_release_layouts(np, rp, lom, LOM_RECALL);
-
-				mutex_enter(&np->s_lt_lock);
-				mutex_enter(&ltp->lt_rlt_lock);
-				np->s_lobulkblock--;
-				ltp->lt_lobulkblock--;
-				mutex_exit(&ltp->lt_rlt_lock);
-				mutex_exit(&np->s_lt_lock);
-				VN_RELE(vp);
-				return (NFS4ERR_DELAY);
-			}
-
-			nstatus = nfs4layoutrecall_thread(np, ltp, rp,
-			    lom, PNFS_LAYOUTRECALL_FILE);
-			break;
-		} else {
-			mutex_exit(&ltp->lt_rlt_lock);
+			return (nstatus);
 		}
+		ltp->lt_lobulkblock++;
+		mutex_exit(&ltp->lt_rlt_lock);
+		mutex_exit(&np->s_lt_lock);
+
+		vp = RTOV4(rp);
+		VN_HOLD(vp);
+		mutex_exit(&np->s_lock);
+
+		/*
+		 * Since this client will never ask for a layout that
+		 * it already holds, if we get a
+		 * layoutrecall, the stateid it has should match
+		 * ours!.
+		 */
+		mutex_enter(&rp->r_statelock);
+		if (lrf->lor_stateid.seqid !=
+		    rp->r_lostateid.seqid + 1) {
+			cmn_err(CE_PANIC, "our layout stateids are"
+			    "out of sync! rnode: %p %p %p", (void *)rp,
+			    (void *)&lrf->lor_stateid,
+			    (void *)&rp->r_lostateid);
+		}
+
+		rp->r_lostateid = lrf->lor_stateid;
+		mutex_exit(&rp->r_statelock);
+
+		lom = pnfs_find_layouts(np, rp, kcred, LAYOUTIOMODE4_RW,
+		    lrf->lor_offset, lrf->lor_length, LOM_RECALL);
+
+		if (lom == NULL || (lom != NULL &&
+		    !(lom->lm_flags & LOMSTAT_MATCHFOUND))) {
+			pnfs_release_layouts(np, rp, lom, LOM_RECALL);
+
+			mutex_enter(&np->s_lt_lock);
+			mutex_enter(&ltp->lt_rlt_lock);
+			np->s_lobulkblock--;
+			ltp->lt_lobulkblock--;
+			mutex_exit(&ltp->lt_rlt_lock);
+			mutex_exit(&np->s_lt_lock);
+			VN_RELE(vp);
+			return (nstatus);
+		}
+
+		if (lom->lm_flags & LOMSTAT_DELAY) {
+			pnfs_release_layouts(np, rp, lom, LOM_RECALL);
+
+			mutex_enter(&np->s_lt_lock);
+			mutex_enter(&ltp->lt_rlt_lock);
+			np->s_lobulkblock--;
+			ltp->lt_lobulkblock--;
+			mutex_exit(&ltp->lt_rlt_lock);
+			mutex_exit(&np->s_lt_lock);
+			VN_RELE(vp);
+			return (NFS4ERR_DELAY);
+		}
+
+		nstatus = nfs4layoutrecall_thread(np, ltp, rp,
+		    lom, PNFS_LAYOUTRECALL_FILE);
+		break;
 	}
 
 	return (nstatus);

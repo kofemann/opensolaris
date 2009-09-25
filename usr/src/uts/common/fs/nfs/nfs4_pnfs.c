@@ -855,7 +855,7 @@ layoutiomode4 iomode, offset4 off, length4 len, int use)
 		 * unavailable put it in the list only if it is
 		 * for the LOM_USE case.  This tells thes I/O
 		 * path that this section must go to proxy I/O.
-		 * It all prevents another layoutget.
+		 * It also prevents another layoutget.
 		 */
 		if ((lo->plo_flags & PLO_BAD) || (use != LOM_USE &&
 		    (lo->plo_flags & PLO_UNAVAIL))) {
@@ -965,64 +965,60 @@ layoutiomode4 iomode, offset4 off, length4 len, int use)
 			continue;
 		}
 
-		if (use == LOM_RETURN || use == LOM_RECALL) {
-			if (use == LOM_RETURN)
-				lo->plo_flags |= PLO_RETURN;
-			if (use == LOM_RECALL)
-				lo->plo_flags |= PLO_RECALL;
-			if (lo->plo_inusecnt > 0) {
-				if (use == LOM_RECALL) {
-					lom->lm_flags |= LOMSTAT_NEEDSWAIT;
-				} else {
-					lo->plo_flags |= PLO_LOWAITER;
-					cvstat = 0;
-					while (lo->plo_inusecnt &&
-					    cvstat != EINTR) {
-						cvstat = cv_wait_sig(
-						    &lo->plo_wait,
-						    &rp->r_lo_lock);
-					}
-					lo->plo_flags &= ~PLO_LOWAITER;
-					if (cvstat == EINTR)
-						lom->lm_status = EINTR;
+		if (use == LOM_RETURN)
+			lo->plo_flags |= PLO_RETURN;
+		else if (use == LOM_RECALL)
+			lo->plo_flags |= PLO_RECALL;
 
-					if (lom->lm_status == EINTR) {
-						lol =
-						    list_head(&lom->lm_layouts);
-						while (lol) {
-							if (lol->l_layout) {
-								lol->l_layout->
-								    plo_flags
-								    &=
-								    ~PLO_RETURN;
-							pnfs_layout_rele(rp,
-							    lol->l_layout);
-							}
-							nlol = list_next
-							    (&lom->lm_layouts,
-							    lol);
-							list_remove(
-							    &lom->lm_layouts,
-							    lol);
-							kmem_free(lol,
-							    sizeof (*lol));
-							lol = nlol;
-						}
-						mutex_exit(&rp->r_lo_lock);
-						return (lom);
-					}
-				/*
-				 * XXXKLR - We dropped the r_lo_lock, do we
-				 * have to recheck our list, could the layout
-				 * have changed?  We set the RETURN/RECALL,
-				 * and have holds on the layout, what could
-				 * change other than the inusecnt?  Could be
-				 * marked PLO_BAD by recovery, but layout
-				 * recovery is not yet coded.  Make sure to
-				 * check for this here when recovery is coded.
-				 */
-				}
+		if (use == LOM_RECALL && lo->plo_inusecnt != 0) {
+			/*
+			 * We want to return this layout either
+			 * from a layoutreturn or a layoutrecall, however
+			 * the layout is in use.
+			 */
+			lom->lm_flags |= LOMSTAT_NEEDSWAIT;
+		} else if (use == LOM_RETURN && lo->plo_inusecnt != 0) {
+			lo->plo_flags |= PLO_LOWAITER;
+			cvstat = 0;
+			while (lo->plo_inusecnt && cvstat != EINTR) {
+				cvstat = cv_wait_sig(&lo->plo_wait,
+				    &rp->r_lo_lock);
 			}
+			lo->plo_flags &= ~PLO_LOWAITER;
+			if (cvstat == EINTR)
+				lom->lm_status = EINTR;
+
+			if (lom->lm_status == EINTR) {
+				lol = list_head(&lom->lm_layouts);
+				while (lol) {
+					if (lol->l_layout) {
+						lol->l_layout->
+						    plo_flags &= ~PLO_RETURN;
+						pnfs_layout_rele(rp,
+						    lol->l_layout);
+					}
+					nlol = list_next(&lom->lm_layouts,
+					    lol);
+					list_remove(
+					    &lom->lm_layouts,
+					    lol);
+					kmem_free(lol,
+					    sizeof (*lol));
+					lol = nlol;
+				}
+				mutex_exit(&rp->r_lo_lock);
+				return (lom);
+			}
+			/*
+			 * XXXKLR - We dropped the r_lo_lock, do we
+			 * have to recheck our list, could the layout
+			 * have changed?  We set the RETURN/RECALL,
+			 * and have holds on the layout, what could
+			 * change other than the inusecnt?  Could be
+			 * marked PLO_BAD by recovery, but layout
+			 * recovery is not yet coded.  Make sure to
+			 * check for this here when recovery is coded.
+			 */
 		}
 
 
@@ -2359,6 +2355,7 @@ nfsv4_1_file_layout4 *file_layout4, layout4 *l4, mntinfo4_t *mi)
 	if (!(layout->plo_flags & PLO_GET))
 		return;
 
+	layout->plo_pattern_offset = file_layout4->nfl_pattern_offset;
 	layout->plo_iomode = l4->lo_iomode;
 
 	if (lores->logr_return_on_close)
@@ -3728,9 +3725,10 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		task->rt_cred = cr;
 		crhold(cr);
 
-		task->rt_offset = off;
+		ASSERT(off >= layout->plo_pattern_offset);
+		task->rt_offset = off - layout->plo_pattern_offset;
 		if (layout->plo_stripe_type == STRIPE4_DENSE)
-			task->rt_offset = (off / stripewidth)
+			task->rt_offset = (task->rt_offset / stripewidth)
 			    * layout->plo_stripe_unit
 			    + stripeoff;
 		task->rt_count = MIN(layout->plo_stripe_unit - stripeoff,
@@ -4092,10 +4090,11 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		task->wt_cred = cr;
 		task->wt_layout = layout;
 		crhold(task->wt_cred);
-		task->wt_offset = off;
+		ASSERT(off >= layout->plo_pattern_offset);
+		task->wt_offset = off - layout->plo_pattern_offset;
 		task->wt_voff = off;
 		if (layout->plo_stripe_type == STRIPE4_DENSE)
-			task->wt_offset = (off / stripewidth)
+			task->wt_offset = (task->wt_offset / stripewidth)
 			    * layout->plo_stripe_unit
 			    + stripeoff;
 		task->wt_sui = stripenum % layout->plo_stripe_count;
@@ -4878,7 +4877,7 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 		layout = lol->l_layout;
 		for (i = 0; i < layout->plo_stripe_count; i++) {
 			ext = &exts[ext_index];
-			ext->ce_lol = lol;
+			ext->ce_lo = lol->l_layout;
 			ext_index++;
 			ASSERT(ext_index <= stripe_count);
 		}
@@ -4907,10 +4906,11 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 		 */
 		for (ext_index = 0; ext_index < stripe_count; ext_index++) {
 			ext = &exts[ext_index];
-			lol = ext->ce_lol;
-			lend = (lol->l_length == PNFS_LAYOUTEND) ?
-			    PNFS_LAYOUTEND : lol->l_offset + lol->l_length;
-			if (ps >= ext->ce_lol->l_offset && (ps < lend))
+			layout = ext->ce_lo;
+			lend = (layout->plo_length == PNFS_LAYOUTEND) ?
+			    PNFS_LAYOUTEND : layout->plo_offset +
+			    layout->plo_length;
+			if (ps >= layout->plo_offset && (ps < lend))
 				break;
 		}
 		/*
@@ -4923,7 +4923,6 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 			    stripe_count, (void *)exts);
 #endif
 
-		layout = lol->l_layout;
 		lend = ((layout->plo_length == PNFS_LAYOUTEND) ?
 		    PNFS_LAYOUTEND : layout->plo_offset + layout->plo_length);
 		ASSERT(ps >= layout->plo_offset && (ps <= lend));
@@ -4999,14 +4998,15 @@ pnfs_commit(vnode_t *vp, page_t *plist, offset4 offset, count4 count,
 				crhold(task->cm_cred);
 				task->cm_layout = layout;
 				off = ext->ce_offset;
+				ASSERT(off >= layout->plo_pattern_offset);
+				task->cm_offset = off -
+				    layout->plo_pattern_offset;
 				if (layout->plo_stripe_type ==
 				    STRIPE4_DENSE)
 					task->cm_offset =
-					    (off / stripewidth)
+					    (task->cm_offset / stripewidth)
 					    * layout->plo_stripe_unit +
 					    (off % layout->plo_stripe_unit);
-				else
-					task->cm_offset = off;
 				task->cm_sui = i;
 				task->cm_dev = layout->plo_stripe_dev[i];
 				stripe_dev_hold(task->cm_dev);

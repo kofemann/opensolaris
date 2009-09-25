@@ -252,8 +252,8 @@ r4inactive(rnode4_t *rp, cred_t *cr)
 	rp->r_secattr = NULL;
 	xattr = rp->r_xattr_dir;
 	rp->r_xattr_dir = NULL;
-	pnfs_layout_return(vp, cr, LR_SYNC, NULL, PNFS_LAYOUTRETURN_FILE);
 	mutex_exit(&rp->r_statelock);
+	pnfs_layout_return(vp, cr, LR_SYNC, NULL, PNFS_LAYOUTRETURN_FILE);
 
 	/*
 	 * Free the access cache entries.
