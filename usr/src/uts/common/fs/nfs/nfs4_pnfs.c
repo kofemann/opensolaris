@@ -655,7 +655,7 @@ layoutiomode4 iomode, offset4 off, length4 len, int use)
 	nfs4_fsidlt_t		lt, *newltp = NULL, *ltp;
 	avl_index_t		where;
 	rnode4_t		*rfound;
-	int			cvstat = 0, count = 0;
+	int			rpadded = 0, cvstat = 0, count = 0;
 #ifdef DEBUG
 	offset4			prevend = 0;
 #endif
@@ -720,8 +720,13 @@ layoutiomode4 iomode, offset4 off, length4 len, int use)
 	ASSERT(MUTEX_HELD(&ltp->lt_rlt_lock));
 	mutex_enter(&rp->r_lo_lock);
 	rfound = avl_find(&ltp->lt_rlayout_tree, rp, &where);
-	if (rfound == NULL && use == LOM_USE)
-		avl_insert(&ltp->lt_rlayout_tree, rp, where);
+	if (use == LOM_USE) {
+		rp->r_activefinds++;
+		if (rfound == NULL) {
+			avl_insert(&ltp->lt_rlayout_tree, rp, where);
+			rpadded = 1;
+		}
+	}
 	mutex_enter(&rp->r_statelock);
 	if (rp->r_fsidlt == NULL) {
 		rp->r_fsidlt = ltp;
@@ -747,6 +752,24 @@ layoutiomode4 iomode, offset4 off, length4 len, int use)
 		mutex_exit(&np->s_lt_lock);
 		mutex_exit(&ltp->lt_rlt_lock);
 		kmem_free(lom, sizeof (*lom));
+		if (use == LOM_USE) {
+			if (rpadded) {
+				mutex_enter(&ltp->lt_rlt_lock);
+				mutex_enter(&rp->r_lo_lock);
+				rp->r_activefinds--;
+				if (list_is_empty(&rp->r_layout) &&
+				    rp->r_activefinds == 0) {
+					ASSERT(ltp != NULL);
+					avl_remove(&ltp->lt_rlayout_tree, rp);
+				}
+				mutex_exit(&rp->r_lo_lock);
+				mutex_exit(&ltp->lt_rlt_lock);
+			} else {
+				mutex_enter(&rp->r_lo_lock);
+				rp->r_activefinds--;
+				mutex_exit(&rp->r_lo_lock);
+			}
+		}
 		return (NULL);
 	}
 
@@ -754,6 +777,25 @@ layoutiomode4 iomode, offset4 off, length4 len, int use)
 		mutex_exit(&ltp->lt_rlt_lock);
 		mutex_exit(&np->s_lt_lock);
 		kmem_free(lom, sizeof (*lom));
+
+		if (use == LOM_USE) {
+			if (rpadded) {
+				mutex_enter(&ltp->lt_rlt_lock);
+				mutex_enter(&rp->r_lo_lock);
+				if (list_is_empty(&rp->r_layout) &&
+				    rp->r_activefinds == 0) {
+					ASSERT(ltp != NULL);
+					avl_remove(&ltp->lt_rlayout_tree, rp);
+				}
+				rp->r_activefinds--;
+				mutex_exit(&rp->r_lo_lock);
+				mutex_exit(&ltp->lt_rlt_lock);
+			} else {
+				mutex_enter(&rp->r_lo_lock);
+				rp->r_activefinds--;
+				mutex_exit(&rp->r_lo_lock);
+			}
+		}
 		return (NULL);
 	}
 
@@ -838,6 +880,7 @@ layoutiomode4 iomode, offset4 off, length4 len, int use)
 				kmem_free(lol, sizeof (*lol));
 				lol = nlol;
 			}
+			ASSERT(rp->r_fsidlt != NULL);
 			pnfs_layoutget(RTOV(rp), cr, off, iomode);
 			mutex_enter(&rp->r_lo_lock);
 			offset = lom->lm_offset;
@@ -1108,6 +1151,24 @@ layoutiomode4 iomode, offset4 off, length4 len, int use)
 		    lol->l_length) - 1;
 	}
 
+	if (use == LOM_USE) {
+		if (rpadded) {
+			mutex_enter(&ltp->lt_rlt_lock);
+			mutex_enter(&rp->r_lo_lock);
+			if (list_is_empty(&rp->r_layout) &&
+			    rp->r_activefinds == 0) {
+				ASSERT(ltp != NULL);
+				avl_remove(&ltp->lt_rlayout_tree, rp);
+			}
+			rp->r_activefinds--;
+			mutex_exit(&rp->r_lo_lock);
+			mutex_exit(&ltp->lt_rlt_lock);
+		} else {
+			mutex_enter(&rp->r_lo_lock);
+			rp->r_activefinds--;
+			mutex_exit(&rp->r_lo_lock);
+		}
+	}
 	return (lom);
 }
 
@@ -1160,11 +1221,13 @@ int use)
 		if (use == LOM_RETURN) {
 			ASSERT(layout->plo_inusecnt == 0);
 			layout->plo_flags &= ~PLO_RETURN;
+			cv_broadcast(&layout->plo_wait);
 		}
 
 		if (use == LOM_RECALL) {
 			ASSERT(layout->plo_inusecnt == 0);
 			layout->plo_flags &= ~PLO_RECALL;
+			cv_broadcast(&layout->plo_wait);
 		}
 
 		pnfs_layout_rele(rp, layout);
@@ -2863,8 +2926,7 @@ out:
 
 		mutex_enter(&rp->r_statelock);
 		rp->r_flags &= ~R4OTWLO;
-		if (rp->r_flags & R4LOWAITER)
-			cv_broadcast(&rp->r_lowait);
+		cv_broadcast(&rp->r_lowait);
 		mutex_exit(&rp->r_statelock);
 	}
 
@@ -3040,6 +3102,11 @@ pnfs_task_layoutget(void *v)
 			cv_broadcast(&layout->plo_wait);
 		pnfs_layout_rele(rp, layout);
 		mutex_exit(&rp->r_lo_lock);
+
+		mutex_enter(&rp->r_statelock);
+		rp->r_flags &= ~R4OTWLO;
+		cv_broadcast(&rp->r_lowait);
+		mutex_exit(&rp->r_statelock);
 		return;
 	}
 
@@ -3054,6 +3121,12 @@ pnfs_task_layoutget(void *v)
 			cv_broadcast(&layout->plo_wait);
 		pnfs_layout_rele(rp, layout);
 		mutex_exit(&rp->r_lo_lock);
+
+		mutex_enter(&rp->r_statelock);
+		rp->r_flags &= ~R4OTWLO;
+		cv_broadcast(&rp->r_lowait);
+		mutex_exit(&rp->r_statelock);
+
 		return;
 	}
 
@@ -3230,9 +3303,7 @@ out:
 
 	mutex_enter(&rp->r_statelock);
 	rp->r_flags &= ~R4OTWLO;
-	if (rp->r_flags & R4LOWAITER) {
-		cv_broadcast(&rp->r_lowait);
-	}
+	cv_broadcast(&rp->r_lowait);
 	mutex_exit(&rp->r_statelock);
 
 	mutex_enter(&np->s_lock);
@@ -3291,18 +3362,50 @@ pnfs_layoutget(vnode_t *vp, cred_t *cr, offset4 offset, layoutiomode4 iomode)
 	 * we won't know the fsid of this rnode.
 	 */
 
-	mutex_enter(&rp->r_statelock);
-
 	/*
 	 * If a Layoutget is in progress, simply wait
 	 * for it to finish and return.  It is still up
 	 * to the caller to determine if a layout exists.
+	 * The assert below was added because it was thought that
+	 * we would never see a waiter here with single layouts being
+	 * returned from the MDS.  The ASSERT was a double check
+	 * to see when we would have mutliple threads doing a layoutget.
+	 * Turns out this does happen with single layouts.  It can occur
+	 * when multiple threads are executing at the same time trying to
+	 * find the same layout, when the client does not hold any.  One
+	 * thread is executing pnfs_task_layoutget, after the rfs4call.  The
+	 * layoutget fails with an error (invalid layout type for example).
+	 * The pnfs_layout is marked bad and the pnfs_task_layoutget is
+	 * waiting for a mutex after doing this.  The other thread is
+	 * executing pnfs_find_layouts, holds the r_statelock lets say
+	 * sees the plo_bad pnfs_layouts, skips it, does not find any
+	 * layout on the list, and calls pnfs_layoutget.  The pnfs_task_
+	 * layoutget thread has not yet cleared the R4OTWLO bit, thus
+	 * we will wait below.
 	 */
+#if 0
 	ASSERT(!(rp->r_flags & R4OTWLO));
+#endif
+	/*
+	 * If we need to wait here, wait here. However when we are done
+	 * waiting, simply return.  We had to drop the r_lo_lock, which
+	 * means that the state of the layout list could have completely
+	 * changed, it could be that the layout we want we now have.
+	 * pnfs_find_layouts will start over and walk the list again, so
+	 * just return.
+	 */
+	if (rp->r_flags & R4OTWLO) {
+		mutex_exit(&rp->r_lo_lock);
 
-	while (rp->r_flags & R4OTWLO) {
-		cv_wait(&rp->r_lowait, &rp->r_statelock);
+		mutex_enter(&rp->r_statelock);
+		while (rp->r_flags & R4OTWLO) {
+			cv_wait(&rp->r_lowait, &rp->r_statelock);
+		}
+		mutex_exit(&rp->r_statelock);
+		return;
 	}
+
+	mutex_enter(&rp->r_statelock);
 
 	rp->r_flags |= R4OTWLO;
 	rp->r_last_layoutget = lbolt;
@@ -3330,7 +3433,6 @@ pnfs_layoutget(vnode_t *vp, cred_t *cr, offset4 offset, layoutiomode4 iomode)
 #else
 	pnfs_task_layoutget(task);
 #endif
-	ASSERT(!(rp->r_flags & R4OTWLO));
 }
 
 void
@@ -3398,9 +3500,9 @@ pnfs_layout_return(vnode_t *vp, cred_t *cr, int aflag,
 		if (retlom == NULL) {
 			/*
 			 * If we have not layouts to return decrement the
-			 * bulkblock counters.  Normally the pnfs_task_
-			 * layoutreturn will decrement them, which must
-			 * happen while we have this crazy async
+			 * bulkblock counters.  Normally the
+			 * pnfs_task_layoutreturn will decrement them,
+			 * which must happen while we have this crazy async
 			 * function wrapper here.
 			 */
 			mutex_enter(&np->s_lt_lock);
@@ -3559,7 +3661,8 @@ pnfs_layout_rele(rnode4_t *rp, pnfs_layout_t *layout)
 	ltp = rp->r_fsidlt;
 	mutex_exit(&rp->r_statelock);
 
-	if (list_is_empty(&rp->r_layout) && ltp != NULL)
+	if (list_is_empty(&rp->r_layout) && ltp != NULL &&
+	    rp->r_activefinds == 0)
 		pnfs_trim_fsid_tree(rp, ltp, TRUE);
 }
 

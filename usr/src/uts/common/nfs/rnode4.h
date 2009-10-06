@@ -355,6 +355,7 @@ typedef struct rnode4 {
 	list_t 		r_layout;	/* pNFS layout(s) */
 	uint64_t	r_proxyio_count; /* Counter for proxy I/O */
 	uint64_t	r_dsio_count; 	/* Counter for DS I/O */
+	uint64_t	r_activefinds;	/* pnfs_find_layouts active on rnode */
 	stateid4	r_lostateid;	/* layout stateid */
 	kcondvar_t	r_lowait;	/* Wait For Layout */
 	clock_t		r_last_layoutget; /* time of last layoutget attempt */
@@ -393,7 +394,6 @@ typedef struct rnode4 {
 #define	R4LASTBYTE	0x800000 /* pNFS last_write_offset is valid */
 #define	R4LAYOUTUNAVAIL 0x1000000 /* to be moved to pnfs_layout later */
 #define	R4OTWLO		0x2000000 /* OTW Layout Op In Progress */
-#define	R4LOWAITER	0x4000000 /* Thread waiting for layout stateid */
 
 /*
  * Convert between vnode and rnode

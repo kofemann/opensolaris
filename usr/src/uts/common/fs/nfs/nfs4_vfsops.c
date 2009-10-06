@@ -2503,11 +2503,13 @@ nfs4_unmount(vfs_t *vfsp, int flag, cred_t *cr)
 
 		return (0);
 	}
-
+#if 0
 	/*
 	 * return all layouts before nfs4_async_stop_sig() is called
 	 */
 	layoutreturn_all(vfsp, cr);
+#endif
+
 	/*
 	 * Wait until all asynchronous putpage operations on
 	 * this file system are complete before flushing rnodes
