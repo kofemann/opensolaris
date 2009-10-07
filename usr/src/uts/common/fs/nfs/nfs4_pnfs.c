@@ -3195,6 +3195,7 @@ recov_retry:
 	 * either.  At this point we can not get a layout.
 	 */
 	if (sid_types.cur_sid_type == SPEC_SID) {
+		nfs4_end_op(cp, &recov_state);
 		mutex_enter(&rp->r_lo_lock);
 		goto out;
 	}
@@ -3837,6 +3838,7 @@ pnfs_read(vnode_t *vp, caddr_t base, offset_t off, int count, size_t *residp,
 		task->rt_count = MIN(layout->plo_stripe_unit - stripeoff,
 		    count);
 		task->rt_count = MIN(task->rt_count, lcount);
+		task->rt_count = MIN(task->rt_count, mi->mi_tsize);
 
 		task->rt_base = base;
 		if (uiop) {
@@ -4209,6 +4211,7 @@ pnfs_write(vnode_t *vp, caddr_t base, u_offset_t off, int count,
 		task->wt_count = MIN(layout->plo_stripe_unit - stripeoff,
 		    count);
 		task->wt_count = MIN(task->wt_count, lcount);
+		task->wt_count = MIN(task->wt_count, mi->mi_stsize);
 		task->wt_call = nfs4_call_init(TAG_PNFS_WRITE, OP_WRITE,
 		    OH_WRITE, FALSE, mi, vp, NULL, cr);
 		task->wt_call->nc_ds_servinfo = task->wt_dev->std_svp;
