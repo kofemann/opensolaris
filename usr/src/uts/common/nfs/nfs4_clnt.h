@@ -784,7 +784,8 @@ typedef enum {
 	NR_LOST_STATE_RQST,
 	NR_STALE,
 	NR_BADSESSION,
-	NR_BC2S
+	NR_BC2S,
+	NR_SEQRETRY
 } nfs4_recov_t;
 
 /*
@@ -2261,7 +2262,6 @@ extern void	nfs4_mnt_recov_kstat_init(vfs_t *);
 extern void	nfs4_mi_kstat_inc_delay(mntinfo4_t *);
 extern void	nfs4_mi_kstat_inc_no_grace(mntinfo4_t *);
 extern char	*nfs4_stat_to_str(nfsstat4);
-extern char	*nfs4_op_to_str(nfs_opnum4);
 extern void	nfs4exchange_id_otw(mntinfo4_t *, servinfo4_t *, cred_t *,
 			nfs4_server_t *, nfs4_error_t *, int *);
 extern void	nfs4session_init(void);

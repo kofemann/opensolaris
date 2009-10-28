@@ -285,6 +285,8 @@ static void mds_op_layout_return(nfs_argop4 *, nfs_resop4 *,
 static void mds_op_reclaim_complete(nfs_argop4 *, nfs_resop4 *,
     struct svc_req *, compound_state_t *);
 
+static int	seq_chk_limits(nfs_argop4 *, nfs_resop4 *, compound_state_t *);
+
 nfsstat4 check_open_access(uint32_t,
 			struct compound_state *, struct svc_req *);
 nfsstat4 rfs4_client_sysid(rfs4_client_t *, sysid_t *);
@@ -370,6 +372,7 @@ mds_op_notsup(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
 	DTRACE_NFSV4_1(op__notsup__done,
 	    struct compound_state *, cs);
 }
+
 /* ARGSUSED */
 static void
 mds_op_illegal(nfs_argop4 *argop, nfs_resop4 *resop, struct svc_req *req,
@@ -4195,7 +4198,13 @@ rfs41_op_dispatch(compound_state_t *cs,
 		goto bail;
 	}
 
-	(*mds_disptab[op].dis_op)(argop, resop, req, cs);
+	if (seq_chk_limits(argop, resop, cs)) {
+		DTRACE_PROBE2(nfss41__i__scl_error,
+		    char *, nfs4_op_to_str(op),
+		    char *, nfs41_strerror(*cs->statusp));
+	} else {
+		(*mds_disptab[op].dis_op)(argop, resop, req, cs);
+	}
 
 bail:
 	if (*cs->statusp != NFS4_OK)
@@ -4364,13 +4373,6 @@ out:
 	    COMPOUND4res *, resp);
 }
 
-/*
- * XXX: ?? is this tracked by an issue number i wonder ??
- *
- * XXX because of what appears to be duplicate calls to rfs4_compound_free
- * XXX zero out the tag and array values. Need to investigate why the
- * XXX calls occur, but at least prevent the panic for now.
- */
 void
 rfs41_compound_free(COMPOUND4res *resp, compound_state_t *cs)
 {
@@ -4393,6 +4395,8 @@ rfs41_compound_free(COMPOUND4res *resp, compound_state_t *cs)
 
 	if (resp->array != NULL) {
 		kmem_free(resp->array, resp->array_len * sizeof (nfs_resop4));
+		resp->array = NULL;
+		resp->array_len = 0;
 	}
 }
 
@@ -7285,6 +7289,7 @@ mds_op_exchange_id(nfs_argop4 *argop, nfs_resop4 *resop,
 
 	/*
 	 * EXCHANGE_ID's may be preceded by SEQUENCE
+	 *
 	 * Check that eia_flags only has "valid" spec bits
 	 * and that no 'eir_flag' ONLY bits are specified.
 	 */
@@ -7513,7 +7518,6 @@ mds_op_create_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	    struct compound_state *, cs,
 	    CREATE_SESSION4args *, args);
 
-
 	/*
 	 * A CREATE_SESSION request can be prefixed by OP_SEQUENCE.
 	 * In this case, the newly created session has no relation
@@ -7594,7 +7598,7 @@ replay:
 	 * Session creation
 	 */
 	sca.cs_error = 0;
-	sca.cs_xprt = req->rq_xprt;
+	sca.cs_req = req;
 	sca.cs_client = cp;
 	sca.cs_aotw = *args;
 	sp = mds_createsession(cs->instp, &sca);
@@ -7673,31 +7677,25 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	DESTROY_SESSION4res	*resp = &resop->nfs_resop4_u.opdestroy_session;
 	mds_session_t		*sp;
 	rfs4_client_t		*cp;
+	int			 vsc = 0;
 
 	DTRACE_NFSV4_2(op__destroy__session__start,
 	    struct compound_state *, cs,
 	    DESTROY_SESSION4args *, args);
 
 	/*
-	 *  XXXX: More work need on this function.
-	 *
-	 * (draft-17) - If this compound was started with
-	 * SEQUENCE, make sure that the sessid referenced
-	 * in the SEQUENCE op matches the sessid referenced
-	 * in the DESTROY_SESSION op. If it DOES, then
-	 * DESTROY_SESSION MUST be the last op in the COMPOUND.
-	 *
-	 * XXX - Still need to Code
-	 * XXX - if the sessionid in SEQ differs
-	 *	 from DESTROY_SESSION, we'll want to verify
-	 *	 that both sessions are sharing the connection.
+	 * As noted in section 18.37.3 of draft-29, the DESTROY_SESSION
+	 * MAY be the only op in the compound...
 	 */
 	if (cs->sp != NULL) {
 		/* we must be in a compound with a sequence */
 		if (bcmp(args->dsa_sessionid, cs->sp->sn_sessid,
 		    sizeof (sessionid4)) == 0) {
 			/*
-			 * same sess as seq, must be last op in compound
+			 * ... if the compound is SEQUENCE'd _AND_ the
+			 * sessid's of the SEQUENCE and DESTROY_SESSION
+			 * ops match, then the DESTROY_SESSION op MUST
+			 * be the last op in the compound.
 			 */
 			if ((cs->op_len - 1) != cs->op_ndx) {
 				/*
@@ -7711,6 +7709,23 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 				goto final;
 			}
 			/* utok */
+
+		} else {
+			/*
+			 * if we're here, it's because the compound is
+			 * SEQUENCE'd and the session being destroyed is
+			 * NOT the same session being used for SEQUENCE.
+			 * Hi/low watermarks accounted in seq_chk_limits.
+			 */
+			DTRACE_PROBE(nfss41__i__destroy_encap_session);
+
+			/*
+			 * XXX - Remember that if the sessid in SEQUENCE
+			 *	differs from DESTROY_SESSION, we'll want
+			 *	to verify that both sessions are sharing
+			 *	the connection.
+			 */
+			vsc = 1;
 		}
 	}
 
@@ -7727,7 +7742,13 @@ mds_op_destroy_session(nfs_argop4 *argop, nfs_resop4 *resop,
 	 * Verify that "this" connection is associated
 	 * w/the session being targeted for destruction.
 	 */
-	/* XXX - placeholder - XXX */
+	if (vsc) {
+		/*
+		 * XXX - Still need to Code. placeholder
+		 *	 for verification of shared conn
+		 */
+		DTRACE_PROBE(nfss41__i__destroy_session_conn_verify);
+	}
 
 	/*
 	 * Once we can trace back to the rfs4_client struct, verify the
@@ -9248,4 +9269,144 @@ tohex(const void *bytes, int len)
 	}
 
 	return (rc);
+}
+
+extern slotid4 slrc_slot_size;
+
+nfsstat4
+sess_chan_limits(sess_channel_t *scp)
+{
+	count4	maxreqs;
+
+	ASSERT(scp != NULL);
+	if (scp == NULL)
+		return (NFS4ERR_SERVERFAULT);
+
+	maxreqs = scp->cn_attrs.ca_maxrequests;
+	if (maxreqs > slrc_slot_size) {
+		scp->cn_attrs.ca_maxrequests = slrc_slot_size;
+		DTRACE_PROBE4(nfss41__i__sesschanlim,
+		    char *, "maxreqs: ", count4, maxreqs,
+		    char *, "\tAdjusting to: ", count4, slrc_slot_size);
+	}
+
+	/*
+	 * Lower limit should be set to smallest sane COMPOUND. Even
+	 * though a singleton SEQUENCE op is the very smallest COMPOUND,
+	 * it's also quite boring. For all practical purposes, the lower
+	 * limit for creating a sess is limited to:
+	 *
+	 *		[SEQUENCE + PUTROOTFH + GETFH]
+	 *
+	 * XXX - can't limit READ's to a specific threshold, otherwise
+	 *	 we artificially limit the clients to perform reads of
+	 *	 AT LEAST that granularity, which is WRONG !!! Same goes
+	 *	 for READDIR's and GETATTR's.
+	 */
+	if (scp->cn_attrs.ca_maxresponsesize < (sizeof (SEQUENCE4res) +
+	    sizeof (PUTROOTFH4res) + sizeof (GETFH4res)))
+		return (NFS4ERR_TOOSMALL);
+	return (NFS4_OK);
+}
+
+static int
+seq_chk_limits(nfs_argop4 *argop, nfs_resop4 *resop, compound_state_t *cs)
+{
+	sess_channel_t	*fcp;
+	void		*args;
+	void		*resp;
+	attrmap4	 am;
+
+	ASSERT(cs != NULL);
+	if (!cs->sequenced)
+		return (0);
+
+	ASSERT(argop->argop == resop->resop);
+	ASSERT(cs->sp != NULL && cs->sp->sn_fore != NULL);
+
+	fcp = cs->sp->sn_fore;
+	switch (argop->argop) {
+	case OP_READ:
+		args = (READ4args *)&argop->nfs_argop4_u.opread;
+		resp = (READ4res *)&resop->nfs_resop4_u.opread;
+
+		cs->rqst_sz += sizeof (READ4args);
+		cs->resp_sz += sizeof (READ4res) + ((READ4args *)args)->count;
+		break;
+
+	case OP_READDIR:
+		args = (READDIR4args *)&argop->nfs_argop4_u.opreaddir;
+		resp = (READDIR4res *)&resop->nfs_resop4_u.opreaddir;
+
+		cs->rqst_sz += sizeof (READDIR4args);
+		cs->resp_sz += sizeof (READDIR4res) +
+		    ((READDIR4args *)args)->maxcount;
+		break;
+
+	case OP_GETATTR:
+		args = (GETATTR4args *)&argop->nfs_argop4_u.opgetattr;
+		resp = (GETATTR4res *)&resop->nfs_resop4_u.opgetattr;
+
+		/*
+		 * ACL and FS_LOCATIONS attrs can be variable sized;
+		 * we'll need to post-process this COMPOUND to make
+		 * sure the GETATTR reply is w/in session limits.
+		 * This must occur w/in mds_op_getattr itself.
+		 */
+		cs->rqst_sz += sizeof (GETATTR4args);
+		am = ((GETATTR4args *)args)->attr_request;
+		if (ATTR_ISSET(am, ACL) || ATTR_ISSET(am, FS_LOCATIONS)) {
+			DTRACE_PROBE(nfss41__i__seqchklim);
+			cs->post_proc = 1;
+			return (0);
+		}
+		break;
+
+	case OP_GETDEVICEINFO:
+		args = (GETDEVICEINFO4args *)
+		    &argop->nfs_argop4_u.opgetdeviceinfo;
+		resp = (GETDEVICEINFO4res *)
+		    &resop->nfs_resop4_u.opgetdeviceinfo;
+
+		cs->rqst_sz += sizeof (GETDEVICEINFO4args);
+		cs->resp_sz += sizeof (GETDEVICEINFO4res)
+		    + ((GETDEVICEINFO4args *)args)->gdia_maxcount;
+		break;
+
+	case OP_LAYOUTGET:
+		args = (LAYOUTGET4args *)&argop->nfs_argop4_u.oplayoutget;
+		resp = (LAYOUTGET4res *)&resop->nfs_resop4_u.oplayoutget;
+
+		cs->rqst_sz += sizeof (LAYOUTGET4args);
+		cs->resp_sz += sizeof (LAYOUTGET4res)
+		    + ((LAYOUTGET4args *)args)->loga_maxcount;
+		break;
+
+	default:
+		break;
+	}
+
+	/* Request */
+	if (cs->rqst_sz > fcp->cn_attrs.ca_maxrequestsize) {
+		*cs->statusp = NFS4ERR_REQ_TOO_BIG;
+		SET_RESOP4(resop, NFS4ERR_REQ_TOO_BIG);
+		return (1);
+	}
+
+	/* Response */
+	if (cs->resp_sz > fcp->cn_attrs.ca_maxresponsesize) {
+		*cs->statusp = NFS4ERR_REP_TOO_BIG;
+		SET_RESOP4(resop, NFS4ERR_REP_TOO_BIG);
+		return (1);
+	}
+
+	/* sa_cachethis == 1; max cached response */
+	if (cs->sact) {
+		if (cs->resp_sz > fcp->cn_attrs.ca_maxresponsesize_cached) {
+			*cs->statusp = NFS4ERR_REP_TOO_BIG_TO_CACHE;
+			SET_RESOP4(resop, NFS4ERR_REP_TOO_BIG_TO_CACHE);
+			return (1);
+		}
+	}
+	return (0);
 }

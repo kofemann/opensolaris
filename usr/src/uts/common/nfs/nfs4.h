@@ -985,7 +985,7 @@ typedef struct rfs4_file {
 typedef struct {
 	nfsstat4		 cs_error;
 	rfs4_client_t		*cs_client;
-	SVCXPRT			*cs_xprt;
+	struct svc_req		*cs_req;
 	CREATE_SESSION4args	 cs_aotw;
 } session41_create_t;
 
@@ -1409,6 +1409,10 @@ typedef struct compound_state {
 	int		op_ndx;
 	int 		op_len;
 	nfs_server_instance_t *instp;
+	int		sact;		/* sa_cachethis */
+	size_t		rqst_sz;	/* request size */
+	size_t		resp_sz;	/* response size */
+	int		post_proc;
 } compound_state_t;
 
 void rfs41_compound_free(COMPOUND4res *, compound_state_t *);
@@ -1773,10 +1777,12 @@ extern nfsstat4	pnfs_delete_device(struct nfs4_server *,
 extern void	 rfs41_lo_seqid(stateid_t *);
 extern void	 rfs4freeargres(CB_COMPOUND4args *, CB_COMPOUND4res *);
 extern char	*nfs41_strerror(nfsstat4);
+extern char	*nfs4_op_to_str(nfs_opnum4);
 extern void	 mds_clean_up_sessions(rfs4_client_t *);
 extern void	 mds_clean_up_grants(rfs4_client_t *);
 extern void	 mds_clean_up_trunkinfo(rfs4_client_t *);
 extern char	*tohex(const void *, int);
+extern nfsstat4	 sess_chan_limits(sess_channel_t *);
 
 /*
  * NFS4.1 Slot replay cache.

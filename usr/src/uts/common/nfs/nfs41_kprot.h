@@ -1385,6 +1385,9 @@ typedef struct nfs_resop4 nfs_resop4;
 #define	rcl_val		rcl_referring_calls.rcl_referring_calls_val
 #define	lorr_stid_u	LAYOUTRETURN4res_u.lorr_stateid.layoutreturn_stateid_u
 
+#define	SET_RESOP4(r, v)	\
+	*((nfsstat4 *)&((nfs_resop4 *)(r))->nfs_resop4_u) = v
+
 struct COMPOUND4args_srv {
 	utf8string	tag;
 	uint32_t	minorversion;

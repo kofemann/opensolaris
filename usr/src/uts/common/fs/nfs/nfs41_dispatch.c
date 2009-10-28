@@ -92,6 +92,31 @@ seqop_error(COMPOUND4args_srv *ap, COMPOUND4res *rp)
 	resop->nfs_resop4_u.opsequence.sr_status = rp->status;
 }
 
+static int
+seqop_singleton(COMPOUND4res_srv *resp)
+{
+	ASSERT(resp != NULL && resp->array != NULL);
+	ASSERT(resp->array->resop == OP_SEQUENCE);
+
+	/*
+	 * No need to check sr_status here, as
+	 * seq_failed already checks that scenario.
+	 */
+	return (resp->array_len == 1);
+}
+
+static int
+seqop_failed(COMPOUND4res_srv *resp)
+{
+	SEQUENCE4res	*rp;
+
+	ASSERT(resp != NULL && resp->array != NULL);
+	ASSERT(resp->array->resop == OP_SEQUENCE);
+	rp = &resp->array->nfs_resop4_u.opsequence;
+
+	return (rp->sr_status != NFS4_OK);
+}
+
 /*
  * If this function successfully completes the compound state
  * will contain a session pointer.
@@ -117,9 +142,9 @@ rfs41_find_and_set_session(COMPOUND4args_srv *ap, struct compound_state *cs)
 		return (NFS4ERR_BADSLOT);
 	}
 	cs->sp = sp;
+	cs->sact = ap->sargs->sa_cachethis;
 	return (NFS4_OK);
 }
-
 
 slrc_stat_t
 rfs41_slrc_prologue(mds_session_t *sess, COMPOUND4args_srv *cap,
@@ -219,14 +244,51 @@ rfs41_compute_seq4_flags(COMPOUND4res *rp, compound_state_t *cs)
 	rok->sr_status_flags |= sflags;
 }
 
+/*
+ * Handling section 2.10.6.1.3 of spec. If sa_cachethis is FALSE,
+ * server MUST still cache the successful SEQUENCE and the next
+ * operation pre-populated w/the NFS4ERR_RETRY_UNCACHED_REP error.
+ */
+void
+rfs41_slrc_cache_contrived(slot_ent_t *slp, COMPOUND4res_srv *rsp)
+{
+	COMPOUND4res_srv	*crp = NULL;
+	int			 len = 2;
+
+	crp = kmem_zalloc(sizeof (COMPOUND4res_srv), KM_SLEEP);
+
+	/* status */
+	crp->status = NFS4ERR_RETRY_UNCACHED_REP;
+
+	/* tag */
+	crp->tag.utf8string_val = kmem_alloc(rsp->tag.utf8string_len, KM_SLEEP);
+	crp->tag.utf8string_len = rsp->tag.utf8string_len;
+	bcopy(rsp->tag.utf8string_val, crp->tag.utf8string_val,
+	    crp->tag.utf8string_len);
+
+	/* ops */
+	crp->array_len = len;
+	crp->array = kmem_zalloc(len * sizeof (nfs_resop4), KM_SLEEP);
+	crp->array[0] = rsp->array[0];			/* SEQUENCE */
+
+	/* now capture the next op and overload its result */
+	crp->array[1].resop = rsp->array[1].resop;	/* NEXT OP */
+	SET_RESOP4(&crp->array[1], crp->status);
+
+	/* cache it */
+	slp->se_status = crp->status;
+	slp->se_buf = *crp;
+	slp->se_state = SLRC_CACHED_OKAY;
+}
+
 int
-rfs41_slrc_epilogue(mds_session_t *sess, COMPOUND4args_srv *cap,
+rfs41_slrc_epilogue(mds_session_t *sp, COMPOUND4args_srv *cap,
     COMPOUND4res_srv *resp, compound_state_t *cs)
 {
-	int	error = 0;
-	stok_t *handle = sess->sn_replay;
-	slot_ent_t *slt = NULL;
-	slotid4 slot = cap->sargs->sa_slotid;
+	int		 error = 0;
+	stok_t		*handle = sp->sn_replay;
+	slot_ent_t	*slt = NULL;
+	slotid4		 slot = cap->sargs->sa_slotid;
 
 	/* compute SEQ4 flags before caching response */
 	rfs41_compute_seq4_flags((COMPOUND4res *)resp, cs);
@@ -235,28 +297,34 @@ rfs41_slrc_epilogue(mds_session_t *sess, COMPOUND4args_srv *cap,
 	mutex_enter(&slt->se_lock);
 	switch (slt->se_state) {
 	case SLRC_INPROG_NEWREQ:
-		if (resp->status == NFS4_OK) {
-			if (slt->se_buf.array != NULL) {
-				slt->se_state = SLRC_CACHED_PURGING;
-				DTRACE_PROBE2(nfss41__i__cache_evict,
-				    COMPOUND4res *, &slt->se_buf,
-				    nfs_resop4 *, slt->se_buf.array);
-				rfs41_compound_free(
-				    (COMPOUND4res *)&slt->se_buf,
-				    cs);
-			}
-			slt->se_status = NFS4_OK;
+		/*
+		 * Evict existing entry, if one exists
+		 */
+		if (slt->se_buf.array != NULL) {
+			slt->se_state = SLRC_CACHED_PURGING;
+			DTRACE_PROBE2(nfss41__i__cache_evict,
+			    COMPOUND4res *, &slt->se_buf, slot_ent_t *, slt);
+			rfs41_compound_free((COMPOUND4res *)&slt->se_buf, cs);
+		}
+
+		/*
+		 * Cache depending on sa_cachethis
+		 */
+		if (cs->sact || seqop_singleton(resp)) {
+			slt->se_status = resp->status;
 			slt->se_buf = *resp;
 			slt->se_state = SLRC_CACHED_OKAY;
 
 			DTRACE_PROBE2(nfss41__i__cache_insert,
-			    COMPOUND4res *, &slt->se_buf,
-			    nfs_resop4 *, slt->se_buf.array);
+			    COMPOUND4res *, &slt->se_buf, slot_ent_t *, slt);
 		} else {
-			slt->se_state = SLRC_EMPTY_SLOT;
-			error = 1;
+			rfs41_slrc_cache_contrived(slt, resp);
+
+			DTRACE_PROBE2(nfss41__i__no_cache,
+			    COMPOUND4res *, &slt->se_buf, slot_ent_t *, slt);
 		}
 		break;
+
 	default:
 		error = 1;
 		break;
@@ -356,7 +424,8 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 	COMPOUND4res_srv	*rbp;
 	COMPOUND4args_srv	*cap;
 	int			 error = 0;
-	int			 rv, replay_flag = 0;
+	int			 rpcerr = 0;
+	int			 replay = 0;
 
 	cs = rfs41_compound_state_alloc(mds_server);
 	bzero(&res_buf, sizeof (COMPOUND4res_srv));
@@ -417,8 +486,8 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 				goto reply;
 
 			case SEQRES_REPLAY:
-				replay_flag = 1;
-				goto  reply;
+				replay = 1;
+				goto reply;
 
 			case SEQRES_BADSESSION:
 				cmn_err(CE_WARN,
@@ -435,23 +504,35 @@ rfs41_dispatch(struct svc_req *req, SVCXPRT *xprt, char *ap)
 	/* Regular processing */
 	curthread->t_flag |= T_DONTPEND;
 	mds_compound(cs, (COMPOUND4args *)cap, (COMPOUND4res *)rbp,
-	    NULL, req, &rv);
+	    NULL, req, &rpcerr);
 	curthread->t_flag &= ~T_DONTPEND;
 
-	if (rv)	{	/* short ckt epilogue and sendreply on error */
-		error = rv;
+	/*
+	 * On RPC error, short ckt epilogue and sendreply
+	 */
+	if (rpcerr) {
+		error = rpcerr;
 		goto out;
 	}
 
 	if (curthread->t_flag & T_WOULDBLOCK) {
 		curthread->t_flag &= ~T_WOULDBLOCK;
 		rfs41_compound_state_free(cs);
-		return (1);		/* XXX - this may have to change */
+		return (1);
 	}
 
 slrc:
-	if (cs->sp)		/* only cache SEQUENCE'd compounds */
-		(void) rfs41_slrc_epilogue(cs->sp, cap, rbp, cs);
+	if (cs->sp) {
+		if (seqop_failed(rbp)) {
+			/*
+			 * Don't make modifications to the
+			 * slot for failed SEQUENCE ops.
+			 */
+			DTRACE_PROBE1(nfss41__i__dispatch, COMPOUND4res *, rbp);
+		} else {
+			(void) rfs41_slrc_epilogue(cs->sp, cap, rbp, cs);
+		}
+	}
 
 reply:
 	/*
@@ -463,19 +544,12 @@ reply:
 		svcerr_systemerr(xprt);
 		error++;
 	}
-	if (replay_flag) {
+
+	if (replay) {
 		(void) rfs41_slrc_cacheok(cs->sp, cap);
-		replay_flag = 0;
+		replay = 0;
 	}
 out:
-	/*
-	 * Only free on error. Otherwise, it stays in the
-	 * slot replay cache until ejected by the next
-	 * request for the slot.
-	 */
-	if (rbp->status)
-		rfs41_compound_free((COMPOUND4res *)rbp, cs);
-
 	rfs41_compound_state_free(cs);
 	return (error);
 }

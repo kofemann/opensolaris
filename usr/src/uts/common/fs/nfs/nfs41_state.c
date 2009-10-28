@@ -61,7 +61,7 @@ extern void mds_do_cb_recall(struct rfs4_deleg_state *, bool_t);
  *	 good for proto.
  */
 slotid4 slrc_slot_size = MAXSLOTS;
-slotid4	bc_slot_tab = 0;	/* back chan slots is set by client */
+slotid4	bc_slot_tab = 0;	/* backchan slots are set by client */
 
 /* The values below are rfs4_lease_time units */
 
@@ -674,8 +674,10 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	rpcprog_t		 prog;
 	channel_dir_from_server4 dir;
 	sess_bcsd_t		*bsdp;
-	nfs_server_instance_t *instp;
-	int			max_slots;
+	nfs_server_instance_t	*instp;
+	int			 max_slots;
+	nfsstat4		 sle;
+	struct svc_req		*req;
 
 	ASSERT(sp != NULL);
 	if (sp == NULL)
@@ -688,7 +690,8 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	 */
 	sp->sn_clnt = (rfs4_client_t *)ap->cs_client;
 	rfs4_dbe_hold(sp->sn_clnt->rc_dbe);
-	mxprt = (SVCMASTERXPRT *)ap->cs_xprt->xp_master;
+	req = (struct svc_req *)ap->cs_req;
+	mxprt = (SVCMASTERXPRT *)req->rq_xprt->xp_master;
 
 	/*
 	 * Handcrafting the session id
@@ -737,7 +740,7 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 		cbargs.family = AF_INET;
 		cbargs.tag = (void *)sp->sn_sessid;
 
-		if (SVC_CTL(ap->cs_xprt, SVCCTL_SET_CBCONN, (void *)&cbargs)) {
+		if (SVC_CTL(req->rq_xprt, SVCCTL_SET_CBCONN, (void *)&cbargs)) {
 			/*
 			 * Couldn't create a bi-dir RPC connection. Reset
 			 * bdrpc so that the session's channel flags are
@@ -759,13 +762,15 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	sp->sn_fore = ocp;
 
 	/*
-	 * XXX: Let's not worry about channel attribute enforcement now.
-	 *	This should occur as part of the COMPOUND processing (in
-	 *	the dispatch routine); not on channel creation.
+	 * Check if channel attrs will be flexible enough for future
+	 * purposes. Channel attribute enforcement is done as part of
+	 * COMPOUND processing.
 	 */
 	ocp->cn_attrs = ap->cs_aotw.csa_fore_chan_attrs;
-	if (ocp->cn_attrs.ca_maxrequests > slrc_slot_size)
-		ocp->cn_attrs.ca_maxrequests = slrc_slot_size;
+	if (sle = sess_chan_limits(ocp)) {
+		ap->cs_error = sle;
+		return (FALSE);
+	}
 
 	/*
 	 * No need for locks/synchronization at this time,
@@ -812,7 +817,7 @@ mds_session_create(rfs4_entry_t u_entry, void *arg)
 	 * sn_bc fields are all initialized to 0 (via zalloc)
 	 */
 
-	SVC_CTL(ap->cs_xprt, SVCCTL_SET_TAG, (void *)sp->sn_sessid);
+	SVC_CTL(req->rq_xprt, SVCCTL_SET_TAG, (void *)sp->sn_sessid);
 
 	if (sp->sn_bdrpc) {
 		atomic_add_32(&sp->sn_bc.pngcnt, 1);

@@ -352,6 +352,7 @@ nfs4_needs_recovery(nfs4_call_t *cp)
 		case NFS4ERR_CONN_NOT_BOUND_TO_SESSION:
 		case NFS4ERR_SEQ_MISORDERED:
 		case NFS4ERR_SEQ_FALSE_RETRY:
+		case NFS4ERR_RETRY_UNCACHED_REP:
 			recov = 1;
 			break;
 #ifdef DEBUG
@@ -876,6 +877,15 @@ again:
 			mutex_exit(&mi->mi_lock);
 		}
 		break;
+
+	case NR_SEQRETRY:
+		/*
+		 * We end up here on a NFS4ERR_RETRY_UNCACHED_REP. Since
+		 * the replay was for an idempotent non-modifying request,
+		 * just retry the request again (slotid/seqid will change
+		 * this time around).
+		 */
+		goto out_no_thread;
 
 	/*
 	 * XXXrecovery:  We ultimately need to keep DS and MDS errors
@@ -4124,7 +4134,9 @@ errs_to_action(recov_info_t *recovp, nfs4_server_t *sp, int unmounted)
 		case NFS4ERR_CONN_NOT_BOUND_TO_SESSION:
 			action = NR_BC2S;
 			break;
-
+		case NFS4ERR_RETRY_UNCACHED_REP:
+			action = NR_SEQRETRY;
+			break;
 		default:
 			nfs4_queue_event(RE_UNEXPECTED_STATUS, mi, NULL, 0,
 			    NULL, NULL, stat, NULL, 0, TAG_NONE, TAG_NONE,

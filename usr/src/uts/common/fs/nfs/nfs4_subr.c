@@ -3398,13 +3398,101 @@ rnode4info(rnode4_t *rp)
 }
 #endif
 
+/*
+ * Flags which dictate whether to cache the response on the server
+ * (NB: the server is free to cache anyway). We ask the server to
+ * cache in the case of non-idempotent requests and idempotent
+ * modifying requests.
+ */
+int nfs41arg_non_idemp_table[] = {
+	0,
+	0,
+	0,
+	0,		/* OP_ACCESS = 3 */
+	1,		/* OP_CLOSE = 4 */
+	0,		/* OP_COMMIT = 5 */
+	1,		/* OP_CREATE = 6 */
+	1,		/* OP_DELEGPURGE = 7 */
+	1,		/* OP_DELEGRETURN = 8 */
+	0,		/* OP_GETATTR = 9 */
+	0,		/* OP_GETFH = 10 */
+	1,		/* OP_LINK = 11 */
+	1,		/* OP_LOCK = 12 */
+	1,		/* OP_LOCKT = 13 */
+	1,		/* OP_LOCKU = 14 */
+	0,		/* OP_LOOKUP = 15 */
+	0,		/* OP_LOOKUPP = 16 */
+	0,		/* OP_NVERIFY = 17 */
+	1,		/* OP_OPEN = 18 */
+	1,		/* OP_OPENATTR = 19 */
+	1,		/* OP_OPEN_CONFIRM = 20 */
+	1,		/* OP_OPEN_DOWNGRADE = 21 */
+	0,		/* OP_PUTFH = 22 */
+	0,		/* OP_PUTPUBFH = 23 */
+	0,		/* OP_PUTROOTFH = 24 */
+	0,		/* OP_READ = 25 */
+	0,		/* OP_READDIR = 26 */
+	0,		/* OP_READLINK = 27 */
+	1,		/* OP_REMOVE = 28 */
+	1,		/* OP_RENAME = 29 */
+	1,		/* OP_RENEW = 30 */
+	0,		/* OP_RESTOREFH = 31 */
+	0,		/* OP_SAVEFH = 32 */
+	0,		/* OP_SECINFO = 33 */
+	1,		/* OP_SETATTR = 34 */
+	1,		/* OP_SETCLIENTID = 35 */
+	1,		/* OP_SETCLIENTID_CONFIRM = 36 */
+	1,		/* OP_VERIFY = 37 */
+	1,		/* OP_WRITE = 38 */
+	1,		/* OP_RELEASE_LOCKOWNER = 39 */
+	1,		/* OP_BACKCHANNEL_CTL = 40 */
+	0,		/* OP_BIND_CONN_TO_SESSION = 41 */
+	1,		/* OP_EXCHANGE_ID = 42 */
+	1,		/* OP_CREATE_SESSION = 43 */
+	1,		/* OP_DESTROY_SESSION = 44 */
+	1,		/* OP_FREE_STATEID = 45 */
+	1,		/* OP_GET_DIR_DELEGATION = 46 */
+	0,		/* OP_GETDEVICEINFO = 47 */
+	0,		/* OP_GETDEVICELIST = 48 */
+	1,		/* OP_LAYOUTCOMMIT = 49 */
+	0,		/* OP_LAYOUTGET = 50 */
+	1,		/* OP_LAYOUTRETURN = 51 */
+	0,		/* OP_SECINFO_NO_NAME = 52 */
+	0,		/* OP_SEQUENCE = 53 */
+	1,		/* OP_SET_SSV = 54 */
+	0,		/* OP_TEST_STATEID = 55 */
+	1,		/* OP_WANT_DELEGATION = 56 */
+	1,		/* OP_DESTROY_CLIENTID = 57 */
+	1,		/* OP_RECLAIM_COMPLETE = 58 */
+	0		/* OP_ILLEGAL = 10044 */
+};
+
+/*
+ * Returns non-zero if the compound
+ * contains non-idempotent operations
+ */
+static int
+n41args_ni_chk(COMPOUND4args_clnt *argsp)
+{
+	int			 i;
+	COMPOUND4node_clnt	*node;
+
+	for (node = list_head(&argsp->args); node != NULL;
+	    node = list_next(&argsp->args, node)) {
+		i = REAL_OP4(node->arg.argop);
+		if (nfs41arg_non_idemp_table[i] == 1)
+			return (1);
+	}
+	return (0);
+}
+
 static void
 nfs4sequence_setup(nfs4_call_t *cp, nfs4_server_t *np)
 {
-	nfs4_session_t	*ssp = &np->ssx;
-	slot_ent_t *slot;
-	nfs_argop4 *argp;
-	COMPOUND4node_clnt *seq_node;
+	nfs4_session_t		*ssp = &np->ssx;
+	slot_ent_t		*slot;
+	nfs_argop4		*argp;
+	COMPOUND4node_clnt	*seq_node;
 
 	seq_node = list_head(&cp->nc_args.args);
 	ASSERT(seq_node != NULL);
@@ -3438,7 +3526,8 @@ nfs4sequence_setup(nfs4_call_t *cp, nfs4_server_t *np)
 	    ssp->slot_table->st_fslots;
 	mutex_exit(&ssp->slot_table->st_lock);
 	mutex_enter(&slot->se_lock);
-	argp->nfs_argop4_u.opsequence.sa_cachethis = 0;	/* XXX - for BAT */
+	argp->nfs_argop4_u.opsequence.sa_cachethis =
+	    n41args_ni_chk(&cp->nc_args);
 	argp->nfs_argop4_u.opsequence.sa_sequenceid = slot->se_seqid;
 	argp->nfs_argop4_u.opsequence.sa_slotid = slot->se_sltno;
 	/* XXX - rick - need sr_target_highest_slotid */
