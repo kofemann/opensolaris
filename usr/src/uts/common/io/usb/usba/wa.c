@@ -1272,8 +1272,8 @@ wusb_wa_clear_dev_ep(usba_pipe_handle_data_t *ph)
 	    "wusb_wa_clear_dev_ep:clear endpoint = 0x%02x", ept_addr);
 	if (ept_addr != 0) {
 	/* only clear non-default endpoints */
-		usb_clr_feature(ph->p_dip, USB_DEV_REQ_RCPT_EP, 0, ept_addr,
-		    USB_FLAGS_SLEEP, NULL, NULL);
+		(void) usb_clr_feature(ph->p_dip, USB_DEV_REQ_RCPT_EP, 0,
+		    ept_addr, USB_FLAGS_SLEEP, NULL, NULL);
 	}
 }
 
@@ -2432,8 +2432,8 @@ wusb_wa_xfer_timeout_handler(void *arg)
 				 * aborted, wait it.
 				 */
 				if ((wr->wr_has_aborted == 0) &&
-				    (cv_timedwait(&wr->wr_cv, &hdl->rp_mutex,
-				    ddi_get_lbolt() + drv_usectohz(100 * 1000))
+				    (cv_reltimedwait(&wr->wr_cv, &hdl->rp_mutex,
+				    drv_usectohz(100 * 1000), TR_CLOCK_TICK)
 				    >= 0)) {
 				    /* 100ms, random number, long enough? */
 

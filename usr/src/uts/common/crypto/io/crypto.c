@@ -2632,8 +2632,15 @@ cipher_init(dev_t dev, caddr_t arg, int mode, int (*init)(crypto_provider_t,
 		fg = CRYPTO_FG_DECRYPT;
 	}
 
-	if ((rv = kcf_get_hardware_provider(mech.cm_type, CRYPTO_MECH_INVALID,
-	    CHECK_RESTRICT_FALSE, sp->sd_provider, &real_provider, fg))
+	/* We need the key length for provider selection so copy it in now. */
+	if (!copyin_key(mode, sp, STRUCT_FADDR(encrypt_init, ei_key), &key,
+	    &key_rctl_bytes, &key_rctl_chk, &rv, &error)) {
+		goto out;
+	}
+
+	if ((rv = kcf_get_hardware_provider(mech.cm_type, &key,
+	    CRYPTO_MECH_INVALID, NULL, CHECK_RESTRICT_FALSE, sp->sd_provider,
+	    &real_provider, fg))
 	    != CRYPTO_SUCCESS) {
 		goto out;
 	}
@@ -2650,11 +2657,6 @@ cipher_init(dev_t dev, caddr_t arg, int mode, int (*init)(crypto_provider_t,
 	} else {
 		if (rv != CRYPTO_SUCCESS)
 			goto out;
-	}
-
-	if (!copyin_key(mode, sp, STRUCT_FADDR(encrypt_init, ei_key), &key,
-	    &key_rctl_bytes, &key_rctl_chk, &rv, &error)) {
-		goto out;
 	}
 
 	rv = (init)(real_provider, sp->sd_provider_session->ps_session,
@@ -2804,11 +2806,12 @@ cipher(dev_t dev, caddr_t arg, int mode,
 	ctxpp = (single == crypto_encrypt_single) ?
 	    &sp->sd_encr_ctx : &sp->sd_decr_ctx;
 
-	/* in-place is specified by setting output NULL */
 	if (do_inplace)
+		/* specify in-place buffers with output = NULL */
 		rv = (single)(*ctxpp, &encr, NULL, NULL);
 	else
 		rv = (single)(*ctxpp, &data, &encr, NULL);
+
 	if (KCF_CONTEXT_DONE(rv))
 		*ctxpp = NULL;
 
@@ -2884,6 +2887,7 @@ cipher_update(dev_t dev, caddr_t arg, int mode,
 	crypto_ctx_t **ctxpp;
 	crypto_data_t data, encr;
 	size_t datalen, encrlen, need = 0;
+	boolean_t do_inplace;
 	char *encrbuf;
 	int error = 0;
 	int rv;
@@ -2931,7 +2935,9 @@ cipher_update(dev_t dev, caddr_t arg, int mode,
 		goto out;
 	}
 
-	need = datalen + encrlen;
+	do_inplace = (STRUCT_FGET(encrypt_update, eu_flags) &
+	    CRYPTO_INPLACE_OPERATION) != 0;
+	need = do_inplace ? datalen : datalen + encrlen;
 
 	if ((rv = CRYPTO_BUFFER_CHECK(sp, need, rctl_chk)) !=
 	    CRYPTO_SUCCESS) {
@@ -2948,12 +2954,21 @@ cipher_update(dev_t dev, caddr_t arg, int mode,
 		goto out;
 	}
 
-	INIT_RAW_CRYPTO_DATA(encr, encrlen);
+	if (do_inplace) {
+		/* specify in-place buffers with output = input */
+		encr = data;
+	} else {
+		INIT_RAW_CRYPTO_DATA(encr, encrlen);
+	}
 
 	ctxpp = (update == crypto_encrypt_update) ?
 	    &sp->sd_encr_ctx : &sp->sd_decr_ctx;
 
-	rv = (update)(*ctxpp, &data, &encr, NULL);
+	if (do_inplace)
+		/* specify in-place buffers with output = NULL */
+		rv = (update)(*ctxpp, &encr, NULL, NULL);
+	else
+		rv = (update)(*ctxpp, &data, &encr, NULL);
 
 	if (rv == CRYPTO_SUCCESS || rv == CRYPTO_BUFFER_TOO_SMALL) {
 		if (rv == CRYPTO_SUCCESS) {
@@ -2985,7 +3000,7 @@ out:
 	if (data.cd_raw.iov_base != NULL)
 		kmem_free(data.cd_raw.iov_base, datalen);
 
-	if (encr.cd_raw.iov_base != NULL)
+	if (!do_inplace && (encr.cd_raw.iov_base != NULL))
 		kmem_free(encr.cd_raw.iov_base, encrlen);
 
 	if (error != 0)
@@ -3184,9 +3199,9 @@ digest_init(dev_t dev, caddr_t arg, int mode, int *rval)
 		goto out;
 	}
 
-	if ((rv = kcf_get_hardware_provider(mech.cm_type, CRYPTO_MECH_INVALID,
-	    CHECK_RESTRICT_FALSE, sp->sd_provider, &real_provider,
-	    CRYPTO_FG_DIGEST)) != CRYPTO_SUCCESS) {
+	if ((rv = kcf_get_hardware_provider(mech.cm_type, NULL,
+	    CRYPTO_MECH_INVALID, NULL, CHECK_RESTRICT_FALSE, sp->sd_provider,
+	    &real_provider, CRYPTO_FG_DIGEST)) != CRYPTO_SUCCESS) {
 		goto out;
 	}
 
@@ -3874,9 +3889,15 @@ sign_verify_init(dev_t dev, caddr_t arg, int mode,
 		ctxpp = &sp->sd_verify_recover_ctx;
 	}
 
-	if ((rv = kcf_get_hardware_provider(mech.cm_type, CRYPTO_MECH_INVALID,
-	    CHECK_RESTRICT_FALSE, sp->sd_provider, &real_provider, fg))
-	    != CRYPTO_SUCCESS) {
+	/* We need the key length for provider selection so copy it in now. */
+	if (!copyin_key(mode, sp, STRUCT_FADDR(sign_init, si_key), &key,
+	    &key_rctl_bytes, &key_rctl_chk, &rv, &error)) {
+		goto out;
+	}
+
+	if ((rv = kcf_get_hardware_provider(mech.cm_type, &key,
+	    CRYPTO_MECH_INVALID, NULL, CHECK_RESTRICT_FALSE, sp->sd_provider,
+	    &real_provider, fg)) != CRYPTO_SUCCESS) {
 		goto out;
 	}
 
@@ -3892,11 +3913,6 @@ sign_verify_init(dev_t dev, caddr_t arg, int mode,
 	} else {
 		if (rv != CRYPTO_SUCCESS)
 			goto out;
-	}
-
-	if (!copyin_key(mode, sp, STRUCT_FADDR(sign_init, si_key), &key,
-	    &key_rctl_bytes, &key_rctl_chk, &rv, &error)) {
-		goto out;
 	}
 
 	rv = (init)(real_provider, sp->sd_provider_session->ps_session,
@@ -5304,9 +5320,9 @@ object_generate_key(dev_t dev, caddr_t arg, int mode, int *rval)
 	bcopy(STRUCT_FADDR(generate_key, gk_mechanism), &mech.cm_type,
 	    sizeof (crypto_mech_type_t));
 
-	if ((rv = kcf_get_hardware_provider(mech.cm_type, CRYPTO_MECH_INVALID,
-	    CHECK_RESTRICT_FALSE, sp->sd_provider, &real_provider,
-	    CRYPTO_FG_GENERATE)) != CRYPTO_SUCCESS) {
+	if ((rv = kcf_get_hardware_provider(mech.cm_type, NULL,
+	    CRYPTO_MECH_INVALID, NULL, CHECK_RESTRICT_FALSE, sp->sd_provider,
+	    &real_provider, CRYPTO_FG_GENERATE)) != CRYPTO_SUCCESS) {
 		goto release_minor;
 	}
 
@@ -5433,9 +5449,9 @@ nostore_generate_key(dev_t dev, caddr_t arg, int mode, int *rval)
 	bcopy(STRUCT_FADDR(generate_key, ngk_mechanism), &mech.cm_type,
 	    sizeof (crypto_mech_type_t));
 
-	if ((rv = kcf_get_hardware_provider(mech.cm_type, CRYPTO_MECH_INVALID,
-	    CHECK_RESTRICT_FALSE, sp->sd_provider, &real_provider,
-	    CRYPTO_FG_GENERATE)) != CRYPTO_SUCCESS) {
+	if ((rv = kcf_get_hardware_provider(mech.cm_type, NULL,
+	    CRYPTO_MECH_INVALID, NULL, CHECK_RESTRICT_FALSE, sp->sd_provider,
+	    &real_provider, CRYPTO_FG_GENERATE)) != CRYPTO_SUCCESS) {
 		goto release_minor;
 	}
 
@@ -5570,9 +5586,9 @@ object_generate_key_pair(dev_t dev, caddr_t arg, int mode, int *rval)
 	bcopy(STRUCT_FADDR(generate_key_pair, kp_mechanism), &mech.cm_type,
 	    sizeof (crypto_mech_type_t));
 
-	if ((rv = kcf_get_hardware_provider(mech.cm_type, CRYPTO_MECH_INVALID,
-	    CHECK_RESTRICT_FALSE, sp->sd_provider, &real_provider,
-	    CRYPTO_FG_GENERATE_KEY_PAIR)) != CRYPTO_SUCCESS) {
+	if ((rv = kcf_get_hardware_provider(mech.cm_type, NULL,
+	    CRYPTO_MECH_INVALID, NULL, CHECK_RESTRICT_FALSE, sp->sd_provider,
+	    &real_provider, CRYPTO_FG_GENERATE_KEY_PAIR)) != CRYPTO_SUCCESS) {
 		goto release_minor;
 	}
 
@@ -5736,9 +5752,9 @@ nostore_generate_key_pair(dev_t dev, caddr_t arg, int mode, int *rval)
 	bcopy(STRUCT_FADDR(generate_key_pair, nkp_mechanism), &mech.cm_type,
 	    sizeof (crypto_mech_type_t));
 
-	if ((rv = kcf_get_hardware_provider(mech.cm_type, CRYPTO_MECH_INVALID,
-	    CHECK_RESTRICT_FALSE, sp->sd_provider, &real_provider,
-	    CRYPTO_FG_GENERATE_KEY_PAIR)) != CRYPTO_SUCCESS) {
+	if ((rv = kcf_get_hardware_provider(mech.cm_type, NULL,
+	    CRYPTO_MECH_INVALID, NULL, CHECK_RESTRICT_FALSE, sp->sd_provider,
+	    &real_provider, CRYPTO_FG_GENERATE_KEY_PAIR)) != CRYPTO_SUCCESS) {
 		goto release_minor;
 	}
 
@@ -5909,9 +5925,17 @@ object_wrap_key(dev_t dev, caddr_t arg, int mode, int *rval)
 	bcopy(STRUCT_FADDR(wrap_key, wk_mechanism), &mech.cm_type,
 	    sizeof (crypto_mech_type_t));
 
-	if ((rv = kcf_get_hardware_provider(mech.cm_type, CRYPTO_MECH_INVALID,
-	    CHECK_RESTRICT_FALSE, sp->sd_provider, &real_provider,
-	    CRYPTO_FG_WRAP)) != CRYPTO_SUCCESS) {
+	/* We need the key length for provider selection so copy it in now. */
+	if (!copyin_key(mode, sp, STRUCT_FADDR(wrap_key, wk_wrapping_key), &key,
+	    &key_rctl_bytes, &key_rctl_chk, &rv, &error)) {
+		goto out;
+	}
+
+	wrapped_key_len = STRUCT_FGET(wrap_key, wk_wrapped_key_len);
+
+	if ((rv = kcf_get_hardware_provider(mech.cm_type, &key,
+	    CRYPTO_MECH_INVALID, NULL, CHECK_RESTRICT_FALSE, sp->sd_provider,
+	    &real_provider, CRYPTO_FG_WRAP)) != CRYPTO_SUCCESS) {
 		goto out;
 	}
 
@@ -5928,13 +5952,6 @@ object_wrap_key(dev_t dev, caddr_t arg, int mode, int *rval)
 		if (rv != CRYPTO_SUCCESS)
 			goto out;
 	}
-
-	if (!copyin_key(mode, sp, STRUCT_FADDR(wrap_key, wk_wrapping_key), &key,
-	    &key_rctl_bytes, &key_rctl_chk, &rv, &error)) {
-		goto out;
-	}
-
-	wrapped_key_len = STRUCT_FGET(wrap_key, wk_wrapped_key_len);
 
 	/*
 	 * Don't allocate output buffer unless both buffer pointer and
@@ -6069,9 +6086,16 @@ object_unwrap_key(dev_t dev, caddr_t arg, int mode, int *rval)
 	bcopy(STRUCT_FADDR(unwrap_key, uk_mechanism), &mech.cm_type,
 	    sizeof (crypto_mech_type_t));
 
-	if ((rv = kcf_get_hardware_provider(mech.cm_type, CRYPTO_MECH_INVALID,
-	    CHECK_RESTRICT_FALSE, sp->sd_provider, &real_provider,
-	    CRYPTO_FG_UNWRAP)) != CRYPTO_SUCCESS) {
+	/* We need the key length for provider selection so copy it in now. */
+	if (!copyin_key(mode, sp, STRUCT_FADDR(unwrap_key, uk_unwrapping_key),
+	    &unwrapping_key, &unwrapping_key_rctl_bytes,
+	    &unwrapping_key_rctl_chk, &rv, &error)) {
+		goto release_minor;
+	}
+
+	if ((rv = kcf_get_hardware_provider(mech.cm_type, &unwrapping_key,
+	    CRYPTO_MECH_INVALID, NULL, CHECK_RESTRICT_FALSE, sp->sd_provider,
+	    &real_provider, CRYPTO_FG_UNWRAP)) != CRYPTO_SUCCESS) {
 		goto release_minor;
 	}
 
@@ -6088,12 +6112,6 @@ object_unwrap_key(dev_t dev, caddr_t arg, int mode, int *rval)
 	} else {
 		if (rv != CRYPTO_SUCCESS)
 			goto release_minor;
-	}
-
-	if (!copyin_key(mode, sp, STRUCT_FADDR(unwrap_key, uk_unwrapping_key),
-	    &unwrapping_key, &unwrapping_key_rctl_bytes,
-	    &unwrapping_key_rctl_chk, &rv, &error)) {
-		goto release_minor;
 	}
 
 	count = STRUCT_FGET(unwrap_key, uk_count);
@@ -6233,9 +6251,15 @@ object_derive_key(dev_t dev, caddr_t arg, int mode, int *rval)
 	bcopy(STRUCT_FADDR(derive_key, dk_mechanism), &mech.cm_type,
 	    sizeof (crypto_mech_type_t));
 
-	if ((rv = kcf_get_hardware_provider(mech.cm_type, CRYPTO_MECH_INVALID,
-	    CHECK_RESTRICT_FALSE, sp->sd_provider, &real_provider,
-	    CRYPTO_FG_DERIVE)) != CRYPTO_SUCCESS) {
+	/* We need the key length for provider selection so copy it in now. */
+	if (!copyin_key(mode, sp, STRUCT_FADDR(derive_key, dk_base_key),
+	    &base_key, &key_rctl_bytes, &key_rctl_chk, &rv, &error)) {
+		goto release_minor;
+	}
+
+	if ((rv = kcf_get_hardware_provider(mech.cm_type, &base_key,
+	    CRYPTO_MECH_INVALID, NULL, CHECK_RESTRICT_FALSE, sp->sd_provider,
+	    &real_provider, CRYPTO_FG_DERIVE)) != CRYPTO_SUCCESS) {
 		goto release_minor;
 	}
 
@@ -6252,11 +6276,6 @@ object_derive_key(dev_t dev, caddr_t arg, int mode, int *rval)
 	} else {
 		if (rv != CRYPTO_SUCCESS)
 			goto release_minor;
-	}
-
-	if (!copyin_key(mode, sp, STRUCT_FADDR(derive_key, dk_base_key),
-	    &base_key, &key_rctl_bytes, &key_rctl_chk, &rv, &error)) {
-		goto release_minor;
 	}
 
 	count = STRUCT_FGET(derive_key, dk_count);
@@ -6388,9 +6407,15 @@ nostore_derive_key(dev_t dev, caddr_t arg, int mode, int *rval)
 	bcopy(STRUCT_FADDR(derive_key, ndk_mechanism), &mech.cm_type,
 	    sizeof (crypto_mech_type_t));
 
-	if ((rv = kcf_get_hardware_provider(mech.cm_type, CRYPTO_MECH_INVALID,
-	    CHECK_RESTRICT_FALSE, sp->sd_provider, &real_provider,
-	    CRYPTO_FG_DERIVE)) != CRYPTO_SUCCESS) {
+	/* We need the key length for provider selection so copy it in now. */
+	if (!copyin_key(mode, sp, STRUCT_FADDR(derive_key, ndk_base_key),
+	    &base_key, &key_rctl_bytes, &key_rctl_chk, &rv, &error)) {
+		goto release_minor;
+	}
+
+	if ((rv = kcf_get_hardware_provider(mech.cm_type, &base_key,
+	    CRYPTO_MECH_INVALID, NULL, CHECK_RESTRICT_FALSE, sp->sd_provider,
+	    &real_provider, CRYPTO_FG_DERIVE)) != CRYPTO_SUCCESS) {
 		goto release_minor;
 	}
 
@@ -6407,11 +6432,6 @@ nostore_derive_key(dev_t dev, caddr_t arg, int mode, int *rval)
 	} else {
 		if (rv != CRYPTO_SUCCESS)
 			goto release_minor;
-	}
-
-	if (!copyin_key(mode, sp, STRUCT_FADDR(derive_key, ndk_base_key),
-	    &base_key, &key_rctl_bytes, &key_rctl_chk, &rv, &error)) {
-		goto release_minor;
 	}
 
 	in_count = STRUCT_FGET(derive_key, ndk_in_count);

@@ -27,6 +27,7 @@
 #define	_LIBDLADM_H
 
 #include <sys/dls_mgmt.h>
+#include <sys/dld.h>
 #include <sys/dlpi.h>
 
 /*
@@ -66,6 +67,9 @@ extern "C" {
  *
  *  - DLADM_OPT_HWRINGS:
  *    Requires a hardware group of rings when creating a vnic.
+ *
+ *  - DLADM_OPT_NOREFRESH:
+ *    Do not refresh the daemon after setting parameter (used by STP mcheck).
  */
 #define	DLADM_OPT_ACTIVE	0x00000001
 #define	DLADM_OPT_PERSIST	0x00000002
@@ -75,6 +79,7 @@ extern "C" {
 #define	DLADM_OPT_ANCHOR	0x00000020
 #define	DLADM_OPT_VLAN		0x00000040
 #define	DLADM_OPT_HWRINGS	0x00000080
+#define	DLADM_OPT_NOREFRESH	0x00000100
 
 #define	DLADM_WALK_TERMINATE	0
 #define	DLADM_WALK_CONTINUE	-1
@@ -111,6 +116,11 @@ typedef enum {
 	DLADM_STATUS_VIDINVAL,
 	DLADM_STATUS_NONOTIF,
 	DLADM_STATUS_TRYAGAIN,
+	DLADM_STATUS_IPTUNTYPE,
+	DLADM_STATUS_IPTUNTYPEREQD,
+	DLADM_STATUS_BADIPTUNLADDR,
+	DLADM_STATUS_BADIPTUNRADDR,
+	DLADM_STATUS_ADDRINUSE,
 	DLADM_STATUS_BADTIMEVAL,
 	DLADM_STATUS_INVALIDMACADDR,
 	DLADM_STATUS_INVALIDMACADDRNIC,
@@ -148,7 +158,9 @@ typedef enum {
 	DLADM_STATUS_NOTDEFINED,
 	DLADM_STATUS_BADPROP,
 	DLADM_STATUS_MINMAXBW,
-	DLADM_STATUS_NO_HWRINGS
+	DLADM_STATUS_NO_HWRINGS,
+	DLADM_STATUS_PERMONLY,
+	DLADM_STATUS_OPTMISSING
 } dladm_status_t;
 
 typedef enum {
@@ -213,6 +225,12 @@ extern boolean_t	dladm_valid_linkname(const char *);
 extern boolean_t	dladm_str2interval(char *, uint32_t *);
 extern dladm_status_t	dladm_str2bw(char *, uint64_t *);
 extern const char	*dladm_bw2str(int64_t, char *);
+extern dladm_status_t	dladm_str2pri(char *, mac_priority_level_t *);
+extern const char	*dladm_pri2str(mac_priority_level_t, char *);
+extern dladm_status_t	dladm_str2protect(char *, uint32_t *);
+extern const char	*dladm_protect2str(uint32_t, char *);
+extern dladm_status_t	dladm_str2ipv4addr(char *, void *);
+extern const char	*dladm_ipv4addr2str(void *, char *);
 
 extern dladm_status_t	dladm_parse_flow_props(char *, dladm_arg_list_t **,
 			    boolean_t);
@@ -234,6 +252,8 @@ extern dladm_status_t	dladm_usage_summary(int (*)(dladm_usage_t *, void *),
 			    int, char *, void *);
 extern dladm_status_t	dladm_usage_dates(int (*)(dladm_usage_t *, void *),
 			    int, char *, char *, void *);
+extern dladm_status_t	dladm_zone_boot(dladm_handle_t, zoneid_t);
+extern dladm_status_t	dladm_zone_halt(dladm_handle_t, zoneid_t);
 
 #ifdef	__cplusplus
 }

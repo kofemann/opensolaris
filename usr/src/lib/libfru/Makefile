@@ -2,9 +2,8 @@
 # CDDL HEADER START
 #
 # The contents of this file are subject to the terms of the
-# Common Development and Distribution License, Version 1.0 only
-# (the "License").  You may not use this file except in compliance
-# with the License.
+# Common Development and Distribution License (the "License").
+# You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
 # or http://www.opensolaris.org/os/licensing.
@@ -20,19 +19,24 @@
 # CDDL HEADER END
 #
 #
-# Copyright (c) 2000-2001 by Sun Microsystems, Inc.
-# All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+# Use is subject to license terms.
 #
 # lib/libfru/Makefile
-#
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 #
 
 include	$(SRC)/lib/Makefile.lib
 
-SUBDIRS = libfrureg $(MACH)
-$(BUILD64)SUBDIRS += $(MACH64)
-SUBDIRS += .WAIT libfrupicl libfrupicltree
+SUBDIRS_i386 = libfrureg $(MACH)
+$(BUILD64)SUBDIRS_i386 += $(MACH64)
+SUBDIRS_sparc = libfrureg $(MACH)
+$(BUILD64)SUBDIRS_sparc += $(MACH64)
+SUBDIRS_i386 += .WAIT libnvfru libfruraw conf
+SUBDIRS_sparc += .WAIT libfrupicl libfrupicltree libnvfru libfruraw
+
+SUBDIRS = $(SUBDIRS_$(MACH))
+
+
 
 # conditional assignments
 all :=      	TARGET= all
@@ -66,9 +70,10 @@ clobber:  po_clean
 po_clean:
 	$(RM) $(POFILE)
 
-check: $(CHECKHDRS)
-
 $(SUBDIRS): FRC
 	@cd $@; pwd; $(MAKE) $(TARGET)
+
+install_h check: $(CHECKHDRS)
+	@cd libnvfru; pwd; $(MAKE) $@
 
 FRC:

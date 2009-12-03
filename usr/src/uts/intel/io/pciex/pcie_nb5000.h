@@ -40,6 +40,15 @@ extern "C" {
 	(did) == 0x4000 || (did) == 0x4001 || (did) == 0x4003 || \
 	((did) >= 0x4021 && (did) <= 0x402e))
 
+#define	INTEL_NB5100_PCIE_DEV_ID(did) (((did) >= 0x65e2 && (did) <= 0x65e7) || \
+	((did) >= 0x65f7 && (did) <= 0x65fa))
+
+#define	INTEL_NB5500_PCIE_DEV_ID(did) (((did) >= 0x3408 && (did) <= 0x3411) || \
+	(did) == 0x3420 || (did) == 0x3403)
+
+#define	INTEL_NB5520_PCIE_DEV_ID(did) (((did) >= 0x3408 && (did) <= 0x3411) || \
+	(did) == 0x3421 || (did) == 0x3406)
+
 #define	INTEL_ESB2_SW_PCIE_DEV_ID(did) (((did) >= 0x3500 && (did) <= 0x3503) ||\
 	((did) >= 0x3510 && (did) <= 0x351B))
 

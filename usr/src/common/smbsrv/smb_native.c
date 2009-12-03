@@ -79,8 +79,6 @@ smbnative_os_value(const char *native_os)
 		{ NATIVE_OS_WIN95,	"Windows 4.0"		},
 		{ NATIVE_OS_WIN2000,	"Windows 5.0"		},
 		{ NATIVE_OS_WIN2000,	"Windows 5.1"		},
-		{ NATIVE_OS_WIN2000,	"Windows 2000 5.0"	},
-		{ NATIVE_OS_NT5_1,	"Windows 2000 5.1"	},
 		{ NATIVE_OS_WIN2000,	"Windows 2000"		},
 		{ NATIVE_OS_WIN2000,	"Windows 2002"		},
 		{ NATIVE_OS_WIN2000,	"Windows .NET"		},
@@ -107,7 +105,7 @@ smbnative_os_value(const char *native_os)
 		name = os_table[i].sn_name;
 		len = strlen(name);
 
-		if (utf8_strncasecmp(name, native_os, len) == 0)
+		if (smb_strcasecmp(name, native_os, len) == 0)
 			return (os_table[i].sn_value);
 	}
 
@@ -161,8 +159,8 @@ smbnative_lm_value(const char *native_lm)
 		name = lm_table[i].sn_name;
 		len = strlen(name);
 
-		if ((utf8_strncasecmp(name, native_lm, len) == 0) ||
-		    (utf8_strncasecmp(&name[1], native_lm, len - 1) == 0)) {
+		if ((smb_strcasecmp(name, native_lm, len) == 0) ||
+		    (smb_strcasecmp(&name[1], native_lm, len - 1) == 0)) {
 			return (lm_table[i].sn_value);
 		}
 	}
@@ -211,8 +209,8 @@ smbnative_pdc_value(const char *native_lm)
 		name = pdc_table[i].sn_name;
 		len = strlen(name);
 
-		if ((utf8_strncasecmp(name, native_lm, len) == 0) ||
-		    (utf8_strncasecmp(&name[1], native_lm, len - 1) == 0)) {
+		if ((smb_strcasecmp(name, native_lm, len) == 0) ||
+		    (smb_strcasecmp(&name[1], native_lm, len - 1) == 0)) {
 			return (pdc_table[i].sn_value);
 		}
 	}

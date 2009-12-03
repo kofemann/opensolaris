@@ -19,14 +19,12 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_SYS_SCSI_SCSI_PKT_H
 #define	_SYS_SCSI_SCSI_PKT_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/scsi/scsi_types.h>
 
@@ -106,6 +104,9 @@ struct scsi_pkt {
 	/* private: iff scsi_pkt_allocated_correctly() */
 	int	pkt_path_instance;	/* pHCI transport path */
 
+	/* stage-temporary: iff scsi_pkt_allocated_correctly() */
+	void	*pkt_stmp;		/* temporary for current pkt stage */
+
 #ifdef	SCSI_SIZE_CLEAN_VERIFY
 	/*
 	 * Must be last: Building a driver with-and-without
@@ -162,6 +163,12 @@ struct scsi_pkt {
 #define	FLAG_ISOLATE		0x00040000
 
 /*
+ * pkg_flag for TLR
+ */
+#define	FLAG_TLR		0x00080000
+
+
+/*
  * Following define is for scsi_vhci.
  *   NOQUEUE            If pHCI cannot transport the command to the device,
  *                      do not queue the pkt in pHCI. Return immediately with
@@ -174,6 +181,7 @@ struct scsi_pkt {
  */
 #define	FLAG_NOQUEUE		0x80000000
 #define	FLAG_PKT_PATH_INSTANCE	0x40000000	/* Tell vhci the path to use */
+#define	FLAG_PKT_COMP_CALLED	0x20000000	/* Set once pkt_comp called */
 
 /*
  * Definitions for the pkt_reason field.
@@ -193,6 +201,7 @@ struct scsi_pkt {
 #define	CMD_CMD_OVR	8	/* Command Overrun */
 #define	CMD_STS_OVR	9	/* Status Overrun */
 #define	CMD_TERMINATED	22	/* Command transport terminated on request */
+#define	CMD_TLR_OFF	23	/* don't support TLR */
 
 /*
  * Following defines are appropriate for SCSI parallel bus.

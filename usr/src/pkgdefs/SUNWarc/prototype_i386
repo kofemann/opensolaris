@@ -89,6 +89,7 @@ f none usr/lib/amd64/llib-lidmap.ln 644 root bin
 f none usr/lib/amd64/llib-lform.ln 644 root bin
 s none usr/lib/amd64/llib-lgen.ln=../../../lib/amd64/llib-lgen.ln
 f none usr/lib/amd64/llib-lgss.ln 644 root bin
+f none usr/lib/amd64/llib-lhotplug.ln 644 root bin
 s none usr/lib/amd64/llib-lintl.ln=../../../lib/amd64/llib-lintl.ln
 f none usr/lib/amd64/llib-lipmi.ln 644 root bin
 f none usr/lib/amd64/llib-lipp.ln 644 root bin
@@ -114,6 +115,7 @@ f none usr/lib/amd64/llib-l300s.ln 644 root bin
 f none usr/lib/amd64/llib-l4014.ln 644 root bin
 f none usr/lib/amd64/llib-l450.ln 644 root bin
 s none usr/lib/amd64/llib-lpthread.ln=../../../lib/amd64/llib-lpthread.ln
+f none usr/lib/amd64/llib-lreparse.ln 644 root bin
 s none usr/lib/amd64/llib-lresolv.ln=../../../lib/amd64/llib-lresolv.ln
 s none usr/lib/amd64/llib-lrpcsvc.ln=../../../lib/amd64/llib-lrpcsvc.ln
 s none usr/lib/amd64/llib-lrt.ln=../../../lib/amd64/llib-lrt.ln
@@ -167,5 +169,6 @@ s none usr/ccs/lib/amd64/values-xpg6.o=../../../lib/amd64/values-xpg6.o
 d none usr/lib/scsi/amd64 755 root bin
 f none usr/lib/scsi/amd64/llib-lscsi.ln 644 root bin
 f none usr/lib/scsi/amd64/llib-lses.ln 644 root bin
+s none usr/lib/amd64/llib-lfdisk.ln=../../../lib/amd64/llib-lfdisk.ln
 s none usr/lib/llib-lfdisk=../../lib/llib-lfdisk
 s none usr/lib/llib-lfdisk.ln=../../lib/llib-lfdisk.ln

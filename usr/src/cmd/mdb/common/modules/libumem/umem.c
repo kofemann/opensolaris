@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include "umem.h"
 
@@ -32,6 +30,7 @@
 
 #include <alloca.h>
 #include <limits.h>
+#include <mdb/mdb_whatis.h>
 
 #include "misc.h"
 #include "leaky.h"
@@ -144,29 +143,6 @@ umem_statechange_cb(void *arg)
 
 	been_ready = 1;
 	(void) mdb_walk("umem_cache", (mdb_walk_cb_t)umem_init_walkers, NULL);
-}
-
-int
-umem_init(void)
-{
-	mdb_walker_t w = {
-		"umem_cache", "walk list of umem caches", umem_cache_walk_init,
-		umem_cache_walk_step, umem_cache_walk_fini
-	};
-
-	if (mdb_add_walker(&w) == -1) {
-		mdb_warn("failed to add umem_cache walker");
-		return (-1);
-	}
-
-	if (umem_update_variables() == -1)
-		return (-1);
-
-	/* install a callback so that our variables are always up-to-date */
-	(void) mdb_callback_add(MDB_CALLBACK_STCHG, umem_statechange_cb, NULL);
-	umem_statechange_cb(NULL);
-
-	return (0);
 }
 
 int
@@ -1847,259 +1823,340 @@ freedby(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	return (allocdby_common(addr, flags, "freedby"));
 }
 
-typedef struct whatis {
-	uintptr_t w_addr;
-	const umem_cache_t *w_cache;
-	const vmem_t *w_vmem;
-	int w_found;
-	uint_t w_verbose;
-	uint_t w_freemem;
-	uint_t w_all;
-	uint_t w_bufctl;
-} whatis_t;
+typedef struct whatis_info {
+	mdb_whatis_t *wi_w;
+	const umem_cache_t *wi_cache;
+	const vmem_t *wi_vmem;
+	vmem_t *wi_msb_arena;
+	size_t wi_slab_size;
+	int wi_slab_found;
+	uint_t wi_freemem;
+} whatis_info_t;
+
+/* call one of our dcmd functions with "-v" and the provided address */
+static void
+whatis_call_printer(mdb_dcmd_f *dcmd, uintptr_t addr)
+{
+	mdb_arg_t a;
+	a.a_type = MDB_TYPE_STRING;
+	a.a_un.a_str = "-v";
+
+	mdb_printf(":\n");
+	(void) (*dcmd)(addr, DCMD_ADDRSPEC, 1, &a);
+}
 
 static void
-whatis_print_umem(uintptr_t addr, uintptr_t baddr, whatis_t *w)
+whatis_print_umem(whatis_info_t *wi, uintptr_t maddr, uintptr_t addr,
+    uintptr_t baddr)
 {
-	/* LINTED pointer cast may result in improper alignment */
-	uintptr_t btaddr = (uintptr_t)UMEM_BUFTAG(w->w_cache, addr);
-	intptr_t stat;
+	mdb_whatis_t *w = wi->wi_w;
+	const umem_cache_t *cp = wi->wi_cache;
+	int quiet = (mdb_whatis_flags(w) & WHATIS_QUIET);
 
-	if (w->w_cache->cache_flags & UMF_REDZONE) {
-		umem_buftag_t bt;
+	int call_printer = (!quiet && (cp->cache_flags & UMF_AUDIT));
 
-		if (mdb_vread(&bt, sizeof (bt), btaddr) == -1)
-			goto done;
+	mdb_whatis_report_object(w, maddr, addr, "");
 
-		stat = (intptr_t)bt.bt_bufctl ^ bt.bt_bxstat;
+	if (baddr != 0 && !call_printer)
+		mdb_printf("bufctl %p ", baddr);
 
-		if (stat != UMEM_BUFTAG_ALLOC && stat != UMEM_BUFTAG_FREE)
-			goto done;
+	mdb_printf("%s from %s",
+	    (wi->wi_freemem == FALSE) ? "allocated" : "freed", cp->cache_name);
+
+	if (call_printer && baddr != 0) {
+		whatis_call_printer(bufctl, baddr);
+		return;
+	}
+	mdb_printf("\n");
+}
+
+/*ARGSUSED*/
+static int
+whatis_walk_umem(uintptr_t addr, void *ignored, whatis_info_t *wi)
+{
+	mdb_whatis_t *w = wi->wi_w;
+
+	uintptr_t cur;
+	size_t size = wi->wi_cache->cache_bufsize;
+
+	while (mdb_whatis_match(w, addr, size, &cur))
+		whatis_print_umem(wi, cur, addr, NULL);
+
+	return (WHATIS_WALKRET(w));
+}
+
+/*ARGSUSED*/
+static int
+whatis_walk_bufctl(uintptr_t baddr, const umem_bufctl_t *bcp, whatis_info_t *wi)
+{
+	mdb_whatis_t *w = wi->wi_w;
+
+	uintptr_t cur;
+	uintptr_t addr = (uintptr_t)bcp->bc_addr;
+	size_t size = wi->wi_cache->cache_bufsize;
+
+	while (mdb_whatis_match(w, addr, size, &cur))
+		whatis_print_umem(wi, cur, addr, baddr);
+
+	return (WHATIS_WALKRET(w));
+}
+
+
+static int
+whatis_walk_seg(uintptr_t addr, const vmem_seg_t *vs, whatis_info_t *wi)
+{
+	mdb_whatis_t *w = wi->wi_w;
+
+	size_t size = vs->vs_end - vs->vs_start;
+	uintptr_t cur;
+
+	/* We're not interested in anything but alloc and free segments */
+	if (vs->vs_type != VMEM_ALLOC && vs->vs_type != VMEM_FREE)
+		return (WALK_NEXT);
+
+	while (mdb_whatis_match(w, vs->vs_start, size, &cur)) {
+		mdb_whatis_report_object(w, cur, vs->vs_start, "");
 
 		/*
-		 * provide the bufctl ptr if it has useful information
+		 * If we're not printing it seperately, provide the vmem_seg
+		 * pointer if it has a stack trace.
 		 */
-		if (baddr == 0 && (w->w_cache->cache_flags & UMF_AUDIT))
-			baddr = (uintptr_t)bt.bt_bufctl;
+		if ((mdb_whatis_flags(w) & WHATIS_QUIET) &&
+		    ((mdb_whatis_flags(w) & WHATIS_BUFCTL) != 0 ||
+		    (vs->vs_type == VMEM_ALLOC && vs->vs_depth != 0))) {
+			mdb_printf("vmem_seg %p ", addr);
+		}
+
+		mdb_printf("%s from %s vmem arena",
+		    (vs->vs_type == VMEM_ALLOC) ? "allocated" : "freed",
+		    wi->wi_vmem->vm_name);
+
+		if (!mdb_whatis_flags(w) & WHATIS_QUIET)
+			whatis_call_printer(vmem_seg, addr);
+		else
+			mdb_printf("\n");
 	}
 
-done:
-	if (baddr == 0)
-		mdb_printf("%p is %p+%p, %s from %s\n",
-		    w->w_addr, addr, w->w_addr - addr,
-		    w->w_freemem == FALSE ? "allocated" : "freed",
-		    w->w_cache->cache_name);
-	else
-		mdb_printf("%p is %p+%p, bufctl %p %s from %s\n",
-		    w->w_addr, addr, w->w_addr - addr, baddr,
-		    w->w_freemem == FALSE ? "allocated" : "freed",
-		    w->w_cache->cache_name);
-}
-
-/*ARGSUSED*/
-static int
-whatis_walk_umem(uintptr_t addr, void *ignored, whatis_t *w)
-{
-	if (w->w_addr < addr || w->w_addr >= addr + w->w_cache->cache_bufsize)
-		return (WALK_NEXT);
-
-	whatis_print_umem(addr, 0, w);
-	w->w_found++;
-	return (w->w_all == TRUE ? WALK_NEXT : WALK_DONE);
+	return (WHATIS_WALKRET(w));
 }
 
 static int
-whatis_walk_seg(uintptr_t addr, const vmem_seg_t *vs, whatis_t *w)
+whatis_walk_vmem(uintptr_t addr, const vmem_t *vmem, whatis_info_t *wi)
 {
-	if (w->w_addr < vs->vs_start || w->w_addr >= vs->vs_end)
-		return (WALK_NEXT);
-
-	mdb_printf("%p is %p+%p ", w->w_addr,
-	    vs->vs_start, w->w_addr - vs->vs_start);
-
-	/*
-	 * Always provide the vmem_seg pointer if it has a stack trace.
-	 */
-	if (w->w_bufctl == TRUE ||
-	    (vs->vs_type == VMEM_ALLOC && vs->vs_depth != 0)) {
-		mdb_printf("(vmem_seg %p) ", addr);
-	}
-
-	mdb_printf("%sfrom %s vmem arena\n", w->w_freemem == TRUE ?
-	    "freed " : "", w->w_vmem->vm_name);
-
-	w->w_found++;
-	return (w->w_all == TRUE ? WALK_NEXT : WALK_DONE);
-}
-
-static int
-whatis_walk_vmem(uintptr_t addr, const vmem_t *vmem, whatis_t *w)
-{
+	mdb_whatis_t *w = wi->wi_w;
 	const char *nm = vmem->vm_name;
-	w->w_vmem = vmem;
-	w->w_freemem = FALSE;
+	wi->wi_vmem = vmem;
 
-	if (w->w_verbose)
+	if (mdb_whatis_flags(w) & WHATIS_VERBOSE)
 		mdb_printf("Searching vmem arena %s...\n", nm);
 
-	if (mdb_pwalk("vmem_alloc",
-	    (mdb_walk_cb_t)whatis_walk_seg, w, addr) == -1) {
+	if (mdb_pwalk("vmem_seg",
+	    (mdb_walk_cb_t)whatis_walk_seg, wi, addr) == -1) {
 		mdb_warn("can't walk vmem seg for %p", addr);
 		return (WALK_NEXT);
 	}
 
-	if (w->w_found && w->w_all == FALSE)
-		return (WALK_DONE);
-
-	if (w->w_verbose)
-		mdb_printf("Searching vmem arena %s for free virtual...\n", nm);
-
-	w->w_freemem = TRUE;
-
-	if (mdb_pwalk("vmem_free",
-	    (mdb_walk_cb_t)whatis_walk_seg, w, addr) == -1) {
-		mdb_warn("can't walk vmem seg for %p", addr);
-		return (WALK_NEXT);
-	}
-
-	return (w->w_found && w->w_all == FALSE ? WALK_DONE : WALK_NEXT);
+	return (WHATIS_WALKRET(w));
 }
 
 /*ARGSUSED*/
 static int
-whatis_walk_bufctl(uintptr_t baddr, const umem_bufctl_t *bcp, whatis_t *w)
+whatis_walk_slab(uintptr_t saddr, const umem_slab_t *sp, whatis_info_t *wi)
 {
-	uintptr_t addr;
+	mdb_whatis_t *w = wi->wi_w;
 
-	if (bcp == NULL)
-		return (WALK_NEXT);
-
-	addr = (uintptr_t)bcp->bc_addr;
-
-	if (w->w_addr < addr || w->w_addr >= addr + w->w_cache->cache_bufsize)
-		return (WALK_NEXT);
-
-	whatis_print_umem(addr, baddr, w);
-	w->w_found++;
-	return (w->w_all == TRUE ? WALK_NEXT : WALK_DONE);
+	/* It must overlap with the slab data, or it's not interesting */
+	if (mdb_whatis_overlaps(w,
+	    (uintptr_t)sp->slab_base, wi->wi_slab_size)) {
+		wi->wi_slab_found++;
+		return (WALK_DONE);
+	}
+	return (WALK_NEXT);
 }
 
 static int
-whatis_walk_cache(uintptr_t addr, const umem_cache_t *c, whatis_t *w)
+whatis_walk_cache(uintptr_t addr, const umem_cache_t *c, whatis_info_t *wi)
 {
+	mdb_whatis_t *w = wi->wi_w;
 	char *walk, *freewalk;
 	mdb_walk_cb_t func;
+	int do_bufctl;
 
-	if (w->w_bufctl == FALSE) {
-		walk = "umem";
-		freewalk = "freemem";
-		func = (mdb_walk_cb_t)whatis_walk_umem;
-	} else {
+	/* Override the '-b' flag as necessary */
+	if (!(c->cache_flags & UMF_HASH))
+		do_bufctl = FALSE;	/* no bufctls to walk */
+	else if (c->cache_flags & UMF_AUDIT)
+		do_bufctl = TRUE;	/* we always want debugging info */
+	else
+		do_bufctl = ((mdb_whatis_flags(w) & WHATIS_BUFCTL) != 0);
+
+	if (do_bufctl) {
 		walk = "bufctl";
 		freewalk = "freectl";
 		func = (mdb_walk_cb_t)whatis_walk_bufctl;
+	} else {
+		walk = "umem";
+		freewalk = "freemem";
+		func = (mdb_walk_cb_t)whatis_walk_umem;
 	}
 
-	if (w->w_verbose)
+	wi->wi_cache = c;
+
+	if (mdb_whatis_flags(w) & WHATIS_VERBOSE)
 		mdb_printf("Searching %s...\n", c->cache_name);
 
-	w->w_cache = c;
-	w->w_freemem = FALSE;
+	/*
+	 * If more then two buffers live on each slab, figure out if we're
+	 * interested in anything in any slab before doing the more expensive
+	 * umem/freemem (bufctl/freectl) walkers.
+	 */
+	wi->wi_slab_size = c->cache_slabsize - c->cache_maxcolor;
+	if (!(c->cache_flags & UMF_HASH))
+		wi->wi_slab_size -= sizeof (umem_slab_t);
 
-	if (mdb_pwalk(walk, func, w, addr) == -1) {
+	if ((wi->wi_slab_size / c->cache_chunksize) > 2) {
+		wi->wi_slab_found = 0;
+		if (mdb_pwalk("umem_slab", (mdb_walk_cb_t)whatis_walk_slab, wi,
+		    addr) == -1) {
+			mdb_warn("can't find umem_slab walker");
+			return (WALK_DONE);
+		}
+		if (wi->wi_slab_found == 0)
+			return (WALK_NEXT);
+	}
+
+	wi->wi_freemem = FALSE;
+	if (mdb_pwalk(walk, func, wi, addr) == -1) {
 		mdb_warn("can't find %s walker", walk);
 		return (WALK_DONE);
 	}
 
-	if (w->w_found && w->w_all == FALSE)
+	if (mdb_whatis_done(w))
 		return (WALK_DONE);
 
 	/*
 	 * We have searched for allocated memory; now search for freed memory.
 	 */
-	if (w->w_verbose)
+	if (mdb_whatis_flags(w) & WHATIS_VERBOSE)
 		mdb_printf("Searching %s for free memory...\n", c->cache_name);
 
-	w->w_freemem = TRUE;
+	wi->wi_freemem = TRUE;
 
-	if (mdb_pwalk(freewalk, func, w, addr) == -1) {
+	if (mdb_pwalk(freewalk, func, wi, addr) == -1) {
 		mdb_warn("can't find %s walker", freewalk);
 		return (WALK_DONE);
 	}
 
-	return (w->w_found && w->w_all == FALSE ? WALK_DONE : WALK_NEXT);
+	return (WHATIS_WALKRET(w));
 }
 
 static int
-whatis_walk_touch(uintptr_t addr, const umem_cache_t *c, whatis_t *w)
+whatis_walk_touch(uintptr_t addr, const umem_cache_t *c, whatis_info_t *wi)
 {
-	if (c->cache_cflags & UMC_NOTOUCH)
+	if (c->cache_arena == wi->wi_msb_arena ||
+	    (c->cache_cflags & UMC_NOTOUCH))
 		return (WALK_NEXT);
 
-	return (whatis_walk_cache(addr, c, w));
+	return (whatis_walk_cache(addr, c, wi));
 }
 
 static int
-whatis_walk_notouch(uintptr_t addr, const umem_cache_t *c, whatis_t *w)
+whatis_walk_metadata(uintptr_t addr, const umem_cache_t *c, whatis_info_t *wi)
 {
-	if (!(c->cache_cflags & UMC_NOTOUCH))
+	if (c->cache_arena != wi->wi_msb_arena)
 		return (WALK_NEXT);
 
-	return (whatis_walk_cache(addr, c, w));
+	return (whatis_walk_cache(addr, c, wi));
+}
+
+static int
+whatis_walk_notouch(uintptr_t addr, const umem_cache_t *c, whatis_info_t *wi)
+{
+	if (c->cache_arena == wi->wi_msb_arena ||
+	    !(c->cache_cflags & UMC_NOTOUCH))
+		return (WALK_NEXT);
+
+	return (whatis_walk_cache(addr, c, wi));
+}
+
+/*ARGSUSED*/
+static int
+whatis_run_umem(mdb_whatis_t *w, void *ignored)
+{
+	whatis_info_t wi;
+
+	bzero(&wi, sizeof (wi));
+	wi.wi_w = w;
+
+	/* umem's metadata is allocated from the umem_internal_arena */
+	if (mdb_readvar(&wi.wi_msb_arena, "umem_internal_arena") == -1)
+		mdb_warn("unable to readvar \"umem_internal_arena\"");
+
+	/*
+	 * We process umem caches in the following order:
+	 *
+	 *	non-UMC_NOTOUCH, non-metadata	(typically the most interesting)
+	 *	metadata			(can be huge with UMF_AUDIT)
+	 *	UMC_NOTOUCH, non-metadata	(see umem_walk_all())
+	 */
+	if (mdb_walk("umem_cache", (mdb_walk_cb_t)whatis_walk_touch,
+	    &wi) == -1 ||
+	    mdb_walk("umem_cache", (mdb_walk_cb_t)whatis_walk_metadata,
+	    &wi) == -1 ||
+	    mdb_walk("umem_cache", (mdb_walk_cb_t)whatis_walk_notouch,
+	    &wi) == -1) {
+		mdb_warn("couldn't find umem_cache walker");
+		return (1);
+	}
+	return (0);
+}
+
+/*ARGSUSED*/
+static int
+whatis_run_vmem(mdb_whatis_t *w, void *ignored)
+{
+	whatis_info_t wi;
+
+	bzero(&wi, sizeof (wi));
+	wi.wi_w = w;
+
+	if (mdb_walk("vmem_postfix",
+	    (mdb_walk_cb_t)whatis_walk_vmem, &wi) == -1) {
+		mdb_warn("couldn't find vmem_postfix walker");
+		return (1);
+	}
+	return (0);
 }
 
 int
-whatis(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
+umem_init(void)
 {
-	whatis_t w;
+	mdb_walker_t w = {
+		"umem_cache", "walk list of umem caches", umem_cache_walk_init,
+		umem_cache_walk_step, umem_cache_walk_fini
+	};
 
-	if (!(flags & DCMD_ADDRSPEC))
-		return (DCMD_USAGE);
+	if (mdb_add_walker(&w) == -1) {
+		mdb_warn("failed to add umem_cache walker");
+		return (-1);
+	}
 
-	w.w_verbose = FALSE;
-	w.w_bufctl = FALSE;
-	w.w_all = FALSE;
+	if (umem_update_variables() == -1)
+		return (-1);
 
-	if (mdb_getopts(argc, argv,
-	    'v', MDB_OPT_SETBITS, TRUE, &w.w_verbose,
-	    'a', MDB_OPT_SETBITS, TRUE, &w.w_all,
-	    'b', MDB_OPT_SETBITS, TRUE, &w.w_bufctl, NULL) != argc)
-		return (DCMD_USAGE);
-
-	w.w_addr = addr;
-	w.w_found = 0;
+	/* install a callback so that our variables are always up-to-date */
+	(void) mdb_callback_add(MDB_CALLBACK_STCHG, umem_statechange_cb, NULL);
+	umem_statechange_cb(NULL);
 
 	/*
-	 * Mappings and threads should eventually be added here.
+	 * Register our ::whatis callbacks.
 	 */
-	if (mdb_walk("umem_cache",
-	    (mdb_walk_cb_t)whatis_walk_touch, &w) == -1) {
-		mdb_warn("couldn't find umem_cache walker");
-		return (DCMD_ERR);
-	}
+	mdb_whatis_register("umem", whatis_run_umem, NULL,
+	    WHATIS_PRIO_ALLOCATOR, WHATIS_REG_NO_ID);
+	mdb_whatis_register("vmem", whatis_run_vmem, NULL,
+	    WHATIS_PRIO_ALLOCATOR, WHATIS_REG_NO_ID);
 
-	if (w.w_found && w.w_all == FALSE)
-		return (DCMD_OK);
-
-	if (mdb_walk("umem_cache",
-	    (mdb_walk_cb_t)whatis_walk_notouch, &w) == -1) {
-		mdb_warn("couldn't find umem_cache walker");
-		return (DCMD_ERR);
-	}
-
-	if (w.w_found && w.w_all == FALSE)
-		return (DCMD_OK);
-
-	if (mdb_walk("vmem_postfix",
-	    (mdb_walk_cb_t)whatis_walk_vmem, &w) == -1) {
-		mdb_warn("couldn't find vmem_postfix walker");
-		return (DCMD_ERR);
-	}
-
-	if (w.w_found == 0)
-		mdb_printf("%p is unknown\n", addr);
-
-	return (DCMD_OK);
+	return (0);
 }
 
 typedef struct umem_log_cpu {

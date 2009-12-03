@@ -220,6 +220,8 @@ idm_conn_event_locked(idm_conn_t *ic, idm_conn_event_t event,
 {
 	idm_conn_event_ctx_t	*event_ctx;
 
+	ASSERT(mutex_owned(&ic->ic_state_mutex));
+
 	idm_sm_audit_event(&ic->ic_state_audit, SAS_IDM_CONN,
 	    (int)ic->ic_state, (int)event, event_info);
 
@@ -458,6 +460,7 @@ idm_state_s2_xpt_wait(idm_conn_t *ic, idm_conn_event_ctx_t *event_ctx)
 		/* T4 */
 		idm_update_state(ic, CS_S4_IN_LOGIN, event_ctx);
 		break;
+	case CE_TRANSPORT_FAIL:
 	case CE_CONNECT_FAIL:
 	case CE_LOGOUT_OTHER_CONN_RCV:
 	case CE_TX_PROTOCOL_ERROR:
@@ -566,7 +569,13 @@ idm_state_s4_in_login(idm_conn_t *ic, idm_conn_event_ctx_t *event_ctx)
 		idm_update_state(ic, CS_S9_INIT_ERROR, event_ctx);
 		break;
 	case CE_LOGIN_FAIL_SND_DONE:
+		pdu = (idm_pdu_t *)event_ctx->iec_info;
+		/* restore client callback */
+		pdu->isp_callback =  ic->ic_client_callback;
+		ic->ic_client_callback = NULL;
+		idm_pdu_complete(pdu, pdu->isp_status);
 		(void) idm_notify_client(ic, CN_LOGIN_FAIL, NULL);
+		(void) untimeout(ic->ic_state_timeout);
 		idm_update_state(ic, CS_S9_INIT_ERROR, event_ctx);
 		break;
 	case CE_LOGIN_FAIL_SND:
@@ -675,6 +684,7 @@ idm_state_s5_logged_in(idm_conn_t *ic, idm_conn_event_ctx_t *event_ctx)
 	case CE_MISC_RX:
 	case CE_TX_PROTOCOL_ERROR:
 	case CE_RX_PROTOCOL_ERROR:
+	case CE_LOGIN_TIMEOUT:
 		/* Don't care */
 		break;
 	default:
@@ -790,6 +800,7 @@ idm_state_s6_in_logout(idm_conn_t *ic, idm_conn_event_ctx_t *event_ctx)
 	case CE_RX_PROTOCOL_ERROR:
 	case CE_MISC_TX:
 	case CE_MISC_RX:
+	case CE_LOGIN_TIMEOUT:
 		/* Don't care */
 		break;
 	default:
@@ -869,6 +880,7 @@ idm_state_s7_logout_req(idm_conn_t *ic, idm_conn_event_ctx_t *event_ctx)
 	case CE_RX_PROTOCOL_ERROR:
 	case CE_MISC_TX:
 	case CE_MISC_RX:
+	case CE_LOGIN_TIMEOUT:
 		/* Don't care */
 		break;
 	default:
@@ -924,6 +936,7 @@ idm_state_s8_cleanup(idm_conn_t *ic, idm_conn_event_ctx_t *event_ctx)
 	case CE_MISC_TX:
 	case CE_MISC_RX:
 	case CE_TRANSPORT_FAIL:
+	case CE_LOGIN_TIMEOUT:
 	case CE_LOGOUT_TIMEOUT:
 		/* Don't care */
 		break;
@@ -986,6 +999,7 @@ idm_state_s10_in_cleanup(idm_conn_t *ic, idm_conn_event_ctx_t *event_ctx)
 	case CE_RX_PROTOCOL_ERROR:
 	case CE_MISC_TX:
 	case CE_MISC_RX:
+	case CE_LOGIN_TIMEOUT:
 	case CE_LOGOUT_TIMEOUT:
 		/* Don't care */
 		break;
@@ -1122,6 +1136,7 @@ idm_update_state(idm_conn_t *ic, idm_conn_state_t new_state,
 		break;
 	case CS_S4_IN_LOGIN:
 		if (ic->ic_conn_type == CONN_TYPE_INI) {
+			(void) idm_notify_client(ic, CN_READY_FOR_LOGIN, NULL);
 			mutex_enter(&ic->ic_state_mutex);
 			ic->ic_state_flags |= CF_LOGIN_READY;
 			cv_signal(&ic->ic_state_cv);
@@ -1142,8 +1157,8 @@ idm_update_state(idm_conn_t *ic, idm_conn_state_t new_state,
 
 		if (ic->ic_reinstate_conn) {
 			/* Connection reinstatement is complete */
-			idm_conn_event_locked(ic->ic_reinstate_conn,
-			    CE_CONN_REINSTATE_SUCCESS, NULL, CT_NONE);
+			idm_conn_event(ic->ic_reinstate_conn,
+			    CE_CONN_REINSTATE_SUCCESS, NULL);
 		}
 		break;
 	case CS_S6_IN_LOGOUT:
@@ -1498,6 +1513,7 @@ idm_notify_client(idm_conn_t *ic, idm_client_notify_t cn, uintptr_t data)
 	 * for now lets just call the client's notify function and return
 	 * the status.
 	 */
+	ASSERT(!mutex_owned(&ic->ic_state_mutex));
 	cn = (cn > CN_MAX) ? CN_MAX : cn;
 	IDM_SM_LOG(CE_NOTE, "idm_notify_client: ic=%p %s(%d)\n",
 	    (void *)ic, idm_cn_strings[cn], cn);

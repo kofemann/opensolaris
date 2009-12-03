@@ -69,12 +69,15 @@ static boolean_t iscsid_boot_init_config(iscsi_hba_t *ihp);
 static iscsi_sess_t *iscsi_add_boot_sess(iscsi_hba_t *ihp, int isid);
 static boolean_t iscsid_make_entry(ib_boot_prop_t *boot_prop_entry,
     entry_t *entry);
+static boolean_t iscsid_check_active_boot_conn(iscsi_hba_t *ihp);
 
 extern int modrootloaded;
 int iscsi_configroot_retry = 20;
 static boolean_t iscsi_configroot_printed = FALSE;
 static int iscsi_net_up = 0;
 extern ib_boot_prop_t   *iscsiboot_prop;
+
+#define	ISCSI_CONFIGROOT_DELAY	1
 
 /*
  * iSCSI target discovery thread table
@@ -338,6 +341,7 @@ iscsid_start(iscsi_hba_t *ihp) {
 boolean_t
 iscsid_stop(iscsi_hba_t *ihp) {
 	boolean_t		rval = B_FALSE;
+	iscsi_sess_t		*isp = NULL;
 
 	if (iscsid_disable_discovery(ihp,
 	    ISCSI_ALL_DISCOVERY_METHODS) == B_FALSE) {
@@ -350,6 +354,19 @@ iscsid_stop(iscsi_hba_t *ihp) {
 	rw_enter(&ihp->hba_sess_list_rwlock, RW_READER);
 	if (ihp->hba_sess_list == NULL) {
 		rval = B_TRUE;
+	} else {
+		/*
+		 * If only boot session is left, that is OK.
+		 * Otherwise, we should consider stop failed.
+		 */
+		rval = B_TRUE;
+		for (isp = ihp->hba_sess_list; isp != NULL;
+		    isp = isp->sess_next) {
+			if (isp->sess_boot == B_FALSE) {
+				rval = B_FALSE;
+				break;
+			}
+		}
 	}
 	rw_exit(&ihp->hba_sess_list_rwlock);
 
@@ -705,13 +722,26 @@ iscsid_do_isns_query(iscsi_hba_t *ihp)
 	    ihp->hba_alias,
 	    ISNS_INITIATOR_NODE_TYPE,
 	    &pg_list);
-	if ((query_status != isns_ok &&
-	    query_status != isns_op_partially_failed) ||
-	    pg_list == NULL) {
+
+	if (pg_list == NULL) {
 		DTRACE_PROBE1(iscsid_do_isns_query_status,
 		    int, query_status);
 		return;
 	}
+
+	if ((query_status != isns_ok &&
+	    query_status != isns_op_partially_failed)) {
+		DTRACE_PROBE1(iscsid_do_isns_query_status,
+		    int, query_status);
+		pg_sz = sizeof (isns_portal_group_list_t);
+		if (pg_list->pg_out_cnt > 0) {
+			pg_sz += (pg_list->pg_out_cnt - 1) *
+			    sizeof (isns_portal_group_t);
+		}
+		kmem_free(pg_list, pg_sz);
+		return;
+	}
+
 	iscsid_add_pg_list_to_cache(ihp, pg_list);
 
 	pg_sz = sizeof (isns_portal_group_list_t);
@@ -764,22 +794,36 @@ iscsid_config_one(iscsi_hba_t *ihp, char *name, boolean_t protect)
 				 */
 				iscsi_boot_session_create(ihp,
 				    iscsiboot_prop);
-			} else {
-				/*
-				 * The boot session has been created, if
-				 * the target lun has not been online,
-				 * we should wait here for a while
-				 */
-				do {
-					lun_online =
-					    iscsiboot_prop->boot_tgt.lun_online;
-					if (lun_online == 0) {
-						delay(SEC_TO_TICK(1));
-						cur_sec++;
-					}
-				} while ((lun_online == 0) &&
-				    (cur_sec < iscsi_boot_max_delay));
+				retry++;
+				continue;
 			}
+			rc = iscsid_check_active_boot_conn(ihp);
+			if (rc == B_FALSE) {
+				/*
+				 * no active connection for the boot
+				 * session, retry the login until
+				 * one is found or the retry count
+				 * is exceeded
+				 */
+				delay(SEC_TO_TICK(ISCSI_CONFIGROOT_DELAY));
+				retry++;
+				continue;
+			}
+			/*
+			 * The boot session has been created with active
+			 * connection. If the target lun has not been online,
+			 * we should wait here for a while
+			 */
+			do {
+				lun_online =
+				    iscsiboot_prop->boot_tgt.lun_online;
+				if (lun_online == 0) {
+					delay(SEC_TO_TICK(
+					    ISCSI_CONFIGROOT_DELAY));
+					cur_sec++;
+				}
+			} while ((lun_online == 0) &&
+			    (cur_sec < iscsi_boot_max_delay));
 			retry++;
 		}
 		if (!rc) {
@@ -852,22 +896,36 @@ iscsid_config_all(iscsi_hba_t *ihp, boolean_t protect)
 				 */
 				iscsi_boot_session_create(ihp,
 				    iscsiboot_prop);
-			} else {
-				/*
-				 * The boot session has been created, if
-				 * the target lun has not been online,
-				 * we should wait here for a while
-				 */
-				do {
-					lun_online =
-					    iscsiboot_prop->boot_tgt.lun_online;
-					if (lun_online == 0) {
-						delay(SEC_TO_TICK(1));
-						cur_sec++;
-					}
-				} while ((lun_online == 0) &&
-				    (cur_sec < iscsi_boot_max_delay));
+				retry++;
+				continue;
 			}
+			rc = iscsid_check_active_boot_conn(ihp);
+			if (rc == B_FALSE) {
+				/*
+				 * no active connection for the boot
+				 * session, retry the login until
+				 * one is found or the retry count
+				 * is exceeded
+				 */
+				delay(SEC_TO_TICK(ISCSI_CONFIGROOT_DELAY));
+				retry++;
+				continue;
+			}
+			/*
+			 * The boot session has been created with active
+			 * connection. If the target lun has not been online,
+			 * we should wait here for a while
+			 */
+			do {
+				lun_online =
+				    iscsiboot_prop->boot_tgt.lun_online;
+				if (lun_online == 0) {
+					delay(SEC_TO_TICK(
+					    ISCSI_CONFIGROOT_DELAY));
+					cur_sec++;
+				}
+			} while ((lun_online == 0) &&
+			    (cur_sec < iscsi_boot_max_delay));
 			retry++;
 		}
 		if (!rc) {
@@ -2432,4 +2490,34 @@ iscsi_chk_bootlun_mpxio(iscsi_hba_t *ihp)
 		 */
 		return (ihp->hba_mpxio_enabled);
 	}
+}
+
+static boolean_t
+iscsid_check_active_boot_conn(iscsi_hba_t *ihp)
+{
+	iscsi_sess_t	*isp = NULL;
+	iscsi_conn_t	*icp = NULL;
+
+	rw_enter(&ihp->hba_sess_list_rwlock, RW_READER);
+	isp = ihp->hba_sess_list;
+	while (isp != NULL) {
+		if (isp->sess_boot == B_TRUE) {
+			rw_enter(&isp->sess_conn_list_rwlock, RW_READER);
+			icp = isp->sess_conn_list;
+			while (icp != NULL) {
+				if (icp->conn_state ==
+				    ISCSI_CONN_STATE_LOGGED_IN) {
+					rw_exit(&isp->sess_conn_list_rwlock);
+					rw_exit(&ihp->hba_sess_list_rwlock);
+					return (B_TRUE);
+				}
+				icp = icp->conn_next;
+			}
+			rw_exit(&isp->sess_conn_list_rwlock);
+		}
+		isp = isp->sess_next;
+	}
+	rw_exit(&ihp->hba_sess_list_rwlock);
+
+	return (B_FALSE);
 }

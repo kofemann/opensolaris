@@ -31,7 +31,7 @@
  * error code.
  */
 
-#include <smbsrv/smb_incl.h>
+#include <smbsrv/smb_kproto.h>
 #include <smbsrv/smb_fsops.h>
 #include <sys/nbmlock.h>
 #include <sys/param.h>
@@ -725,7 +725,7 @@ smb_lock_create(
 	 * Calculate the absolute end time so that we can use it
 	 * in cv_timedwait.
 	 */
-	lock->l_end_time = lbolt + MSEC_TO_TICK(timeout);
+	lock->l_end_time = ddi_get_lbolt() + MSEC_TO_TICK(timeout);
 	if (timeout == UINT_MAX)
 		lock->l_flags |= SMB_LOCK_FLAG_INDEFINITE;
 

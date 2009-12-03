@@ -69,7 +69,6 @@ void convert_to_network();
 void convert_from_network();
 static void convert_old(struct ohdr *);
 extern sigjmp_buf jmp_env, ojmp_env;
-static dlpi_info_t dlinfo;
 static char *bufp;	/* pointer to read buffer */
 
 static int strioctl(int, int, int, int, void *);
@@ -119,6 +118,7 @@ open_datalink(dlpi_handle_t *dhp, const char *linkname)
 	int retval;
 	int flags = DLPI_PASSIVE | DLPI_RAW;
 	dlpi_walk_arg_t dwa;
+	dlpi_info_t dlinfo;
 
 	if (linkname == NULL) {
 		/*
@@ -161,10 +161,6 @@ open_datalink(dlpi_handle_t *dhp, const char *linkname)
 		(void) fprintf(stderr, "snoop: WARNING: Mac Type = %x "
 		    "not supported\n", dlinfo.di_mactype);
 	}
-
-	/* for backward compatibility, allow known interface mtu_sizes */
-	if (interface->mtu_size > dlinfo.di_max_sdu)
-		dlinfo.di_max_sdu = interface->mtu_size;
 
 	return (interface->try_kernel_filter);
 }
@@ -417,19 +413,6 @@ scan(char *buf, int len, int filter, int cap, int old, void (*proc)(),
 			goto err;
 		}
 
-		if (nhdrp->sbh_totlen >
-		    (dlinfo.di_max_sdu + MAX_HDRTRAILER)) {
-			if (cap)
-				(void) fprintf(stderr, "(warning) packet length"
-				    " greater than MTU in capture file");
-			else
-				(void) fprintf(stderr, "(warning) packet length"
-				    " greater than MTU in buffer");
-
-			(void) fprintf(stderr, " offset %d: length=%d\n",
-			    bp - buf, nhdrp->sbh_totlen);
-		}
-
 		/*
 		 * Check for incomplete packet.  We are conservative here,
 		 * since we don't know how good the checking is in other
@@ -448,7 +431,7 @@ scan(char *buf, int len, int filter, int cap, int old, void (*proc)(),
 
 		header_okay = 1;
 		if (!filter ||
-		    want_packet(pktp,
+		    want_packet((uchar_t *)pktp,
 		    nhdrp->sbh_msglen,
 		    nhdrp->sbh_origlen)) {
 			count++;
@@ -689,7 +672,6 @@ cap_open_read(const char *name)
 		if (mprotect(cap_buffp, cap_len, PROT_READ | PROT_WRITE) < 0)
 			pr_err("mprotect: %s: %m", name);
 	}
-	dlinfo.di_max_sdu = MAXINT;	/* Decode any stored packet. */
 }
 
 void

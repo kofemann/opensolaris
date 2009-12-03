@@ -316,8 +316,17 @@ CTFMERGE_GENUNIX 	= \
 # built will be used as the label.  If no ID is available, or if patch mode
 # is not being used, the value of $VERSION will be used.
 #
+# For the ease of developers dropping modules onto possibly unrelated systems,
+# you can set NO_GENUNIX_MERGE= in the environment to skip uniquifying against
+# genunix.
+#
+NO_GENUNIX_UNIQUIFY=$(POUND_SIGN)
+SKIP_GENUNIX_UNIQUIFY=no
+$(NO_GENUNIX_UNIQUIFY)SKIP_GENUNIX_UNIQUIFY=yes
+
 CTFMERGE_UNIQUIFY_AGAINST_GENUNIX	= \
 	@label="-L VERSION" ; \
+	uniq= ; \
 	if [ -z "$(PATCH_BUILD)" ] ; then \
 		uniq="-D BASE" ; \
 		set -- `$(CTFFINDMOD) -n -r -t $(PMTMO_FILE) $@` ; \
@@ -328,10 +337,15 @@ CTFMERGE_UNIQUIFY_AGAINST_GENUNIX	= \
 			fi ; \
 		fi ; \
 	fi ; \
-	mergecmd="$(CTFMERGE) $(CTFMRGFLAGS)" ; \
-	cmd="$$mergecmd $$label -d $(CTFMERGE_GENUNIX) $$uniq -o $@" ; \
-	echo $$cmd "$(OBJECTS) $(CTFEXTRAOBJS)" ; \
-	$$cmd $(OBJECTS) $(CTFEXTRAOBJS)
+	if [ "$(SKIP_GENUNIX_UNIQUIFY)" = "yes" ]; then \
+		uniq= ; \
+	else \
+		uniq="-d $(CTFMERGE_GENUNIX) $$uniq" ; \
+	fi ; \
+	cmd="$(CTFMERGE) $(CTFMRGFLAGS) $$label $$uniq" ; \
+	cmd="$$cmd -o $@ $(OBJECTS) $(CTFEXTRAOBJS)" ; \
+	echo $$cmd ; \
+	$$cmd
 
 #
 # Used to merge the genunix module.  genunix has special requirements in
@@ -416,7 +430,6 @@ ROOT_MISC_DIR_32	= $(ROOT_MOD_DIR)/misc
 ROOT_KGSS_DIR_32	= $(ROOT_MOD_DIR)/misc/kgss
 ROOT_SCSI_VHCI_DIR_32	= $(ROOT_MOD_DIR)/misc/scsi_vhci
 ROOT_QLC_FW_DIR_32	= $(ROOT_MOD_DIR)/misc/qlc
-
 ROOT_EMLXS_FW_DIR_32	= $(ROOT_MOD_DIR)/misc/emlxs
 ROOT_NLMISC_DIR_32	= $(ROOT_MOD_DIR)/misc
 ROOT_MACH_DIR_32	= $(ROOT_MOD_DIR)/mach
@@ -543,6 +556,7 @@ USR_MOD_DIRS_32		+= $(USR_STRMOD_DIR_32) $(USR_SYS_DIR_32)
 USR_MOD_DIRS_32		+= $(USR_MISC_DIR_32) $(USR_DACF_DIR_32)
 USR_MOD_DIRS_32		+= $(USR_PCBE_DIR_32)
 USR_MOD_DIRS_32		+= $(USR_DTRACE_DIR_32) $(USR_BRAND_DIR_32)
+USR_MOD_DIRS_32		+= $(USR_SOCK_DIR_32)
 
 #
 #
@@ -593,7 +607,7 @@ KMODS = $(GENUNIX_KMODS) $(PARALLEL_KMODS)
 $(PARALLEL_KMODS): $(GENUNIX_KMODS)
 
 $(CLOSED_BUILD)CLOSED_KMODS = $(CLOSED_DRV_KMODS) $(CLOSED_TOD_KMODS) \
-	$(CLOSED_MISC_KMODS) \
+	$(CLOSED_MISC_KMODS) $(CLOSED_CPU_KMODS) \
 	$(CLOSED_NLMISC_KMODS) $(CLOSED_DRV_KMODS_$(CLASS))
 
 LINT_KMODS = $(DRV_KMODS) $(EXEC_KMODS) $(FS_KMODS) $(SCHED_KMODS) \
@@ -640,11 +654,6 @@ $(CODE_COVERAGE)$(OBJS_DIR)/unix_bb.ln  := CPPFLAGS     += -DKCOV
 #	Do not let unix_bb.o get compiled with -xa!
 #
 $(OBJS_DIR)/unix_bb.o	:= XAOPT =
-
-#
-#	MPSAS support
-#
-MPSAS_BUILD:sh=		echo \\043
 
 #
 # Privilege files

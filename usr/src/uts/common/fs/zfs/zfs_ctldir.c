@@ -311,14 +311,13 @@ zfsctl_common_access(vnode_t *vp, int mode, int flags, cred_t *cr,
 static void
 zfsctl_common_getattr(vnode_t *vp, vattr_t *vap)
 {
-	zfsctl_node_t	*zcp = vp->v_data;
 	timestruc_t	now;
 
 	vap->va_uid = 0;
 	vap->va_gid = 0;
 	vap->va_rdev = 0;
 	/*
-	 * We are a purly virtual object, so we have no
+	 * We are a purely virtual object, so we have no
 	 * blocksize or allocated blocks.
 	 */
 	vap->va_blksize = 0;
@@ -333,7 +332,6 @@ zfsctl_common_getattr(vnode_t *vp, vattr_t *vap)
 	 */
 	gethrestime(&now);
 	vap->va_atime = now;
-	vap->va_mtime = vap->va_ctime = zcp->zc_cmtime;
 }
 
 /*ARGSUSED*/
@@ -416,10 +414,12 @@ zfsctl_root_getattr(vnode_t *vp, vattr_t *vap, int flags, cred_t *cr,
     caller_context_t *ct)
 {
 	zfsvfs_t *zfsvfs = vp->v_vfsp->vfs_data;
+	zfsctl_node_t *zcp = vp->v_data;
 
 	ZFS_ENTER(zfsvfs);
 	vap->va_nodeid = ZFSCTL_INO_ROOT;
 	vap->va_nlink = vap->va_size = NROOT_ENTRIES;
+	vap->va_mtime = vap->va_ctime = zcp->zc_cmtime;
 
 	zfsctl_common_getattr(vp, vap);
 	ZFS_EXIT(zfsvfs);
@@ -853,8 +853,7 @@ zfsctl_snapdir_lookup(vnode_t *dvp, char *nm, vnode_t **vpp, pathname_t *pnp,
 		 */
 		return (err == EILSEQ ? ENOENT : err);
 	}
-	if (dmu_objset_open(snapname, DMU_OST_ZFS,
-	    DS_MODE_USER | DS_MODE_READONLY, &snap) != 0) {
+	if (dmu_objset_hold(snapname, FTAG, &snap) != 0) {
 		mutex_exit(&sdp->sd_lock);
 		ZFS_EXIT(zfsvfs);
 		return (ENOENT);
@@ -866,7 +865,7 @@ zfsctl_snapdir_lookup(vnode_t *dvp, char *nm, vnode_t **vpp, pathname_t *pnp,
 	*vpp = sep->se_root = zfsctl_snapshot_mknode(dvp, dmu_objset_id(snap));
 	avl_insert(&sdp->sd_snaps, sep, where);
 
-	dmu_objset_close(snap);
+	dmu_objset_rele(snap, FTAG);
 domount:
 	mountpoint_len = strlen(refstr_value(dvp->v_vfsp->vfs_mntpt)) +
 	    strlen("/.zfs/snapshot/") + strlen(nm) + 1;
@@ -1102,6 +1101,7 @@ zfsctl_snapdir_getattr(vnode_t *vp, vattr_t *vap, int flags, cred_t *cr,
 	zfsctl_common_getattr(vp, vap);
 	vap->va_nodeid = gfs_file_inode(vp);
 	vap->va_nlink = vap->va_size = avl_numnodes(&sdp->sd_snaps) + 2;
+	vap->va_ctime = vap->va_mtime = dmu_objset_snap_cmtime(zfsvfs->z_os);
 	ZFS_EXIT(zfsvfs);
 
 	return (0);

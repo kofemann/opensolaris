@@ -118,6 +118,20 @@ typedef	void		*_RESTRICT_KYWD Psocklen_t;
 #define	SO_DGRAM_ERRIND	0x0200		/* Application wants delayed error */
 #define	SO_RECVUCRED	0x0400		/* Application wants ucred of sender */
 
+/*
+ * Socket options are passed using a signed integer, but it is also rare
+ * for more than one to ever be passed at the same time with setsockopt
+ * and only one at a time can be retrieved with getsockopt.
+ *
+ * Since the lower numbers cannot be renumbered for compatibility reasons,
+ * it would seem that we need to start a new number space (0x40000000 -
+ * 0x7fffffff) for those that don't need to be stored as a bit flag
+ * somewhere. This limits the flag options to 30 but that seems to be
+ * plenty, anyway. 0x40000000 is reserved for future use.
+ */
+#define	SO_ATTACH_FILTER	0x40000001
+#define	SO_DETACH_FILTER	0x40000002
+
 #ifdef _KERNEL
 #define	SO_SND_COPYAVOID 0x0800		/* Internal: use zero-copy */
 #define	SO_SND_BUFINFO	0x1000		/* Internal: get buffer info */
@@ -162,6 +176,8 @@ struct so_snd_bufinfo {
 #define	SCM_TIMESTAMP	SO_TIMESTAMP	/* socket control message timestamp */
 #define	SO_ALLZONES	0x1014		/* bind in all zones */
 #define	SO_EXCLBIND	0x1015		/* exclusive binding */
+#define	SO_MAC_IMPLICIT	0x1016		/* hide mac labels on wire */
+#define	SO_VRRP		0x1017		/* VRRP control socket */
 
 #ifdef	_KERNEL
 #define	SO_SRCADDR	0x2001		/* Internal: AF_UNIX source address */
@@ -207,6 +223,7 @@ struct	linger {
 #if !defined(_XPG4_2) || defined(__EXTENSIONS__)
 #define	SOL_ROUTE	0xfffe		/* options for routing socket level */
 #endif
+#define	SOL_PACKET	0xfffd		/* options for packet level */
 
 /*
  * Address families.
@@ -248,8 +265,10 @@ struct	linger {
 #define	AF_NCA		28		/* NCA socket */
 #define	AF_POLICY	29		/* Security Policy DB socket */
 #define	AF_INET_OFFLOAD	30		/* Sun private; do not use */
+#define	AF_TRILL	31		/* TRILL interface */
+#define	AF_PACKET	32		/* PF_PACKET Linux socket interface */
 
-#define	AF_MAX		30
+#define	AF_MAX		32
 
 /*
  * Protocol families, same as address families for now.
@@ -287,6 +306,8 @@ struct	linger {
 #define	PF_NCA		AF_NCA
 #define	PF_POLICY	AF_POLICY
 #define	PF_INET_OFFLOAD	AF_INET_OFFLOAD	/* Sun private; do not use */
+#define	PF_TRILL	AF_TRILL
+#define	PF_PACKET	AF_PACKET
 
 #define	PF_MAX		AF_MAX
 

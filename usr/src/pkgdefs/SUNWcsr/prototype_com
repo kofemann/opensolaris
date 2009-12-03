@@ -268,13 +268,12 @@ s none etc/security/audit/localhost/files=../../../../var/audit
 e renamenew etc/security/audit_class 644 root sys
 e renamenew etc/security/audit_control 644 root sys
 e renamenew etc/security/audit_event 644 root sys
-e renamenew etc/security/audit_startup 744 root sys
 e renamenew etc/security/audit_user 644 root sys
 e renamenew etc/security/audit_warn 740 root sys
 f none etc/security/bsmconv 740 root sys
 f none etc/security/bsmunconv 740 root sys
 e policyconf etc/security/policy.conf 644 root sys
-e renameold etc/security/crypt.conf 644 root sys
+e renamenew etc/security/crypt.conf 644 root sys
 d none etc/security/dev 755 root sys
 f none etc/security/dev/audio 400 root bin
 f none etc/security/dev/fd0 400 root bin
@@ -363,6 +362,7 @@ f none lib/svc/method/ldap-client 0555 root bin
 f none lib/svc/method/manifest-import 0555 root bin
 f none lib/svc/method/mpxio-upgrade 0555 root bin
 f none lib/svc/method/net-init 0555 root bin
+f none lib/svc/method/net-iptun 0555 root bin
 f none lib/svc/method/net-loopback 0555 root bin
 f none lib/svc/method/net-nwam	0555 root bin
 f none lib/svc/method/net-physical 0555 root bin
@@ -374,6 +374,7 @@ f none lib/svc/method/svc-auditd 0555 root bin
 f none lib/svc/method/svc-consadm 0555 root bin
 f none lib/svc/method/svc-cron 0555 root bin
 f none lib/svc/method/svc-forwarding 0555 root bin
+f none lib/svc/method/svc-hotplug 0555 root bin
 f none lib/svc/method/svc-legacy-routing 0555 root bin
 f none lib/svc/method/svc-dlmgmtd 0555 root bin
 f none lib/svc/method/svc-nscd 0555 root bin
@@ -393,6 +394,8 @@ f none lib/svc/share/ipf_include.sh 0444 root bin
 f none lib/svc/share/net_include.sh 0444 root bin
 f none lib/svc/share/routing_include.sh 0444 root bin
 f none lib/svc/share/smf_include.sh 0444 root bin
+f none lib/svc/share/mfsthistory 0444 root bin
+f none lib/svc/share/manifest_cleanup.ksh 0444 root bin
 d none mnt 755 root sys
 d none opt 755 root sys
 d none proc 555 root root
@@ -434,6 +437,7 @@ f none sbin/su.static 555 root sys
 s none sbin/su=../usr/bin/su
 f none sbin/swapadd 744 root sys
 f none sbin/sync 555 root bin
+f none sbin/tzreload 555 root bin
 f none sbin/uadmin 555 root sys
 f none sbin/umount 555 root bin
 f none sbin/umountall 555 root sys
@@ -505,6 +509,7 @@ f manifest var/svc/manifest/network/inetd.xml 0444 root sys
 f manifest var/svc/manifest/network/inetd-upgrade.xml 0444 root sys
 f seedmanifest var/svc/manifest/network/dlmgmt.xml 0444 root sys
 f manifest var/svc/manifest/network/network-initial.xml 0444 root sys
+f manifest var/svc/manifest/network/network-iptun.xml 0444 root sys
 f manifest var/svc/manifest/network/network-loopback.xml 0444 root sys
 f manifest var/svc/manifest/network/network-physical.xml 0444 root sys
 f manifest var/svc/manifest/network/network-routing-setup.xml 0444 root sys
@@ -527,6 +532,7 @@ d none var/svc/manifest/network/ssl 0755 root sys
 f manifest var/svc/manifest/network/ssl/kssl-proxy.xml 0444 root sys
 d none var/svc/manifest/network/shares 0755 root sys
 f manifest var/svc/manifest/network/shares/group.xml 0444 root sys
+f manifest var/svc/manifest/network/shares/reparsed.xml 0444 root sys
 d none var/svc/manifest/platform 755 root sys
 d none var/svc/manifest/site 755 root sys
 d none var/svc/manifest/system 755 root sys
@@ -541,6 +547,7 @@ f manifest var/svc/manifest/system/filesystem/local-fs.xml 0444 root sys
 f manifest var/svc/manifest/system/filesystem/minimal-fs.xml 0444 root sys
 f manifest var/svc/manifest/system/filesystem/root-fs.xml 0444 root sys
 f manifest var/svc/manifest/system/filesystem/usr-fs.xml 0444 root sys
+f manifest var/svc/manifest/system/hotplug.xml 0444 root sys
 d none var/svc/manifest/system/security 755 root sys
 f manifest var/svc/manifest/system/auditd.xml 0444 root sys
 f manifest var/svc/manifest/system/consadm.xml 0444 root sys

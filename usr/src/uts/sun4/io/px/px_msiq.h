@@ -81,20 +81,12 @@ typedef struct px_msi_eq_to_devino {
 	int	devino_no;
 } px_msi_eq_to_devino_t;
 
-/*
- * Default MSIQ Configurations
- */
-#define	PX_DEFAULT_MSIQ_CNT		36
-#define	PX_DEFAULT_MSIQ_REC_CNT		128
-#define	PX_DEFAULT_MSIQ_1ST_MSIQ_ID	0
-#define	PX_DEFAULT_MSIQ_1ST_DEVINO	24
-
 extern	int	px_msiq_attach(px_t *px_p);
 extern	void	px_msiq_detach(px_t *px_p);
 extern	void	px_msiq_resume(px_t *px_p);
 
 extern	int	px_msiq_alloc(px_t *px_p, msiq_rec_type_t rec_type,
-		    msiqid_t *msiq_id_p);
+		    msgcode_t msg_code, msiqid_t *msiq_id_p);
 extern	int	px_msiq_alloc_based_on_cpuid(px_t *px_p,
 		    msiq_rec_type_t rec_type, cpuid_t cpuid,
 		    msiqid_t *msiq_id_p);

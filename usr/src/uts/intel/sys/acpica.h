@@ -170,6 +170,7 @@ extern int acpica_get_bdf(dev_info_t *, int *, int *, int *);
 extern ACPI_STATUS acpica_eval_int(ACPI_HANDLE, char *, int *);
 extern void acpica_ddi_save_resources(dev_info_t *);
 extern void acpica_ddi_restore_resources(dev_info_t *);
+extern void acpi_reset_system(void);
 extern void acpica_get_global_FADT(ACPI_TABLE_FADT **);
 extern void acpica_write_cpupm_capabilities(boolean_t, boolean_t);
 
@@ -193,6 +194,8 @@ extern void acpica_clear_core_feature(uint64_t);
 extern uint64_t acpica_get_devcfg_feature(uint64_t);
 extern void acpica_set_devcfg_feature(uint64_t);
 extern void acpica_clear_devcfg_feature(uint64_t);
+
+void scan_d2a_map(void);
 
 #ifdef __cplusplus
 }

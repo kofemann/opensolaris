@@ -253,9 +253,11 @@ iscsi_conn_offline(iscsi_conn_t *icp)
 	case ISCSI_CONN_STATE_FREE:
 		break;
 	case ISCSI_CONN_STATE_LOGGED_IN:
-		if (icp->conn_state_ffp)
+		if (icp->conn_state_ffp) {
+			/* Hold is released in iscsi_handle_logout */
+			idm_conn_hold(icp->conn_ic);
 			(void) iscsi_handle_logout(icp);
-		else {
+		} else {
 			icp->conn_state_destroy = B_FALSE;
 			mutex_exit(&icp->conn_state_mutex);
 			return (ISCSI_STATUS_INTERNAL_ERROR);
@@ -386,7 +388,9 @@ iscsi_client_notify(idm_conn_t *ic, idm_client_notify_t icn, uintptr_t data)
 	 * Don't access icp if the notification is CN_CONNECT_DESTROY
 	 * since icp may have already been freed.
 	 *
-	 * Handle CN_FFP_ENABLED and CN_CONNECT_DESTROY immediately
+	 * In particular, we cannot audit the CN_CONNECT_DESTROY event.
+	 *
+	 * Handle a few cases immediately, the rest in a task queue.
 	 */
 	switch (icn) {
 	case CN_CONNECT_FAIL:
@@ -395,17 +399,28 @@ iscsi_client_notify(idm_conn_t *ic, idm_client_notify_t icn, uintptr_t data)
 		 * Wakeup any thread waiting for login stuff to happen.
 		 */
 		ASSERT(icp != NULL);
+
+		mutex_enter(&icp->conn_state_mutex);
+		idm_sm_audit_event(&icp->conn_state_audit,
+		    SAS_ISCSI_CONN, icp->conn_state, icn, data);
+		mutex_exit(&icp->conn_state_mutex);
 		iscsi_login_update_state(icp, LOGIN_ERROR);
 		return (IDM_STATUS_SUCCESS);
+
 	case CN_READY_FOR_LOGIN:
 		idm_conn_hold(ic); /* Released in CN_CONNECT_LOST */
+		ASSERT(icp != NULL);
+
 		mutex_enter(&icp->conn_state_mutex);
+		idm_sm_audit_event(&icp->conn_state_audit,
+		    SAS_ISCSI_CONN, icp->conn_state, icn, data);
 		icp->conn_state_idm_connected = B_TRUE;
 		cv_broadcast(&icp->conn_state_change);
 		mutex_exit(&icp->conn_state_mutex);
 
 		iscsi_login_update_state(icp, LOGIN_READY);
 		return (IDM_STATUS_SUCCESS);
+
 	case CN_CONNECT_DESTROY:
 		/*
 		 * We released any dependecies we had on this object in
@@ -417,6 +432,10 @@ iscsi_client_notify(idm_conn_t *ic, idm_client_notify_t icn, uintptr_t data)
 	}
 
 	ASSERT(icp != NULL);
+	mutex_enter(&icp->conn_state_mutex);
+	idm_sm_audit_event(&icp->conn_state_audit,
+	    SAS_ISCSI_CONN, icp->conn_state, icn, data);
+	mutex_exit(&icp->conn_state_mutex);
 	isp = icp->conn_sess;
 
 	/*
@@ -478,13 +497,14 @@ iscsi_client_notify_task(void *cn_task_void)
 
 		/*
 		 * This logic assumes that the IDM login-snooping code
-		 * and the initiator login code will agree on whether
-		 * the connection is in FFP.  The reason we do this
-		 * is that we don't want to process CN_FFP_DISABLED until
-		 * CN_FFP_ENABLED has been full handled.
+		 * and the initiator login code will agree to go when
+		 * the connection is in FFP or final error received.
+		 * The reason we do this is that we don't want to process
+		 * CN_FFP_DISABLED until CN_FFP_ENABLED has been full handled.
 		 */
 		mutex_enter(&icp->conn_login_mutex);
-		while (icp->conn_login_state != LOGIN_FFP) {
+		while ((icp->conn_login_state != LOGIN_FFP) &&
+		    (icp->conn_login_state != LOGIN_ERROR)) {
 			cv_wait(&icp->conn_login_cv, &icp->conn_login_mutex);
 		}
 		mutex_exit(&icp->conn_login_mutex);
@@ -524,8 +544,13 @@ iscsi_client_notify_task(void *cn_task_void)
 
 		case FD_CONN_FAIL:
 		default:
-			iscsi_conn_update_state_locked(icp,
-			    ISCSI_CONN_STATE_FAILED);
+			if (icp->conn_state == ISCSI_CONN_STATE_IN_LOGIN) {
+				iscsi_conn_update_state_locked(icp,
+				    ISCSI_CONN_STATE_FREE);
+			} else {
+				iscsi_conn_update_state_locked(icp,
+				    ISCSI_CONN_STATE_FAILED);
+			}
 			break;
 		}
 
@@ -544,7 +569,8 @@ iscsi_client_notify_task(void *cn_task_void)
 		 * what CN_CONNECT_LOST means to us.
 		 */
 		in_login = (boolean_t)data;
-		if (in_login) {
+		if (in_login ||
+		    (icp->conn_prev_state == ISCSI_CONN_STATE_IN_LOGIN)) {
 			mutex_enter(&icp->conn_state_mutex);
 
 			icp->conn_state_idm_connected = B_FALSE;

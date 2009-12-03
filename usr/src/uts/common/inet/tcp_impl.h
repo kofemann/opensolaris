@@ -70,41 +70,6 @@ extern "C" {
 }
 
 /*
- * Before caching the conn IRE, we need to make sure certain TCP
- * states are in sync with the ire. The mismatch could occur if the
- * TCP state has been set in tcp_adapt_ire() using a different IRE,
- * e.g if an address was not present during an initial connect(),
- * tcp_adapt_ire() will set the state using the interface route.
- * Subsequently, if the address is added to the local machine, the
- * retransmitted SYN will get the correct (loopback) IRE, but the TCP
- * state (tcp_loopback and tcp_localnet) will remain out of sync.
- * This is especially an issue with TCP fusion which relies on the
- * TCP state to be accurate.
- *
- * This check/change should be made only if the TCP is not yet in
- * the established state, else it would lead to inconsistencies.
- */
-#define	TCP_CHECK_IREINFO(tcp, ire) {					\
-	if ((tcp)->tcp_state < TCPS_ESTABLISHED) {			\
-		if (((ire)->ire_type & (IRE_LOOPBACK | 			\
-		    IRE_LOCAL)) && !(tcp)->tcp_loopback) {		\
-			(tcp)->tcp_loopback = B_TRUE;			\
-		} else if ((tcp)->tcp_loopback && 			\
-		    !((ire)->ire_type & (IRE_LOOPBACK | IRE_LOCAL))) {	\
-			(tcp)->tcp_loopback = B_FALSE;			\
-		}							\
-		if ((tcp)->tcp_ipversion == IPV4_VERSION) {		\
-			(tcp)->tcp_localnet =				\
-			    ((ire)->ire_gateway_addr == 0);		\
-		} else {						\
-			(tcp)->tcp_localnet =				\
-			    IN6_IS_ADDR_UNSPECIFIED(			\
-			    &(ire)->ire_gateway_addr_v6);		\
-		}							\
-	}								\
-}
-
-/*
  * Write-side flow-control is implemented via the per instance STREAMS
  * write-side Q by explicitly setting QFULL to stop the flow of mblk_t(s)
  * and clearing QFULL and calling qbackenable() to restart the flow based
@@ -168,8 +133,8 @@ typedef struct tcpparam_s {
 #define	tcps_rexmit_interval_min	tcps_params[22].tcp_param_val
 #define	tcps_deferred_ack_interval	tcps_params[23].tcp_param_val
 #define	tcps_snd_lowat_fraction		tcps_params[24].tcp_param_val
-#define	tcps_sth_rcv_hiwat		tcps_params[25].tcp_param_val
-#define	__tcps_not_used1		tcps_params[26].tcp_param_val
+#define	__tcps_not_used1		tcps_params[25].tcp_param_val
+#define	__tcps_not_used2		tcps_params[26].tcp_param_val
 #define	tcps_dupack_fast_retransmit	tcps_params[27].tcp_param_val
 #define	tcps_ignore_path_mtu		tcps_params[28].tcp_param_val
 #define	tcps_smallest_anon_port		tcps_params[29].tcp_param_val
@@ -190,7 +155,7 @@ typedef struct tcpparam_s {
 #define	tcps_slow_start_after_idle	tcps_params[44].tcp_param_val
 #define	tcps_slow_start_initial		tcps_params[45].tcp_param_val
 #define	tcps_sack_permitted		tcps_params[46].tcp_param_val
-#define	__tcps_not_used2		tcps_params[47].tcp_param_val
+#define	__tcps_not_used3		tcps_params[47].tcp_param_val
 #define	tcps_ipv6_hoplimit		tcps_params[48].tcp_param_val
 #define	tcps_mss_def_ipv6		tcps_params[49].tcp_param_val
 #define	tcps_mss_max_ipv6		tcps_params[50].tcp_param_val
@@ -205,25 +170,27 @@ typedef struct tcpparam_s {
 #define	tcps_keepalive_abort_interval_high	tcps_params[59].tcp_param_max
 #define	tcps_keepalive_abort_interval		tcps_params[59].tcp_param_val
 #define	tcps_keepalive_abort_interval_low	tcps_params[59].tcp_param_min
+#define	tcps_dev_flow_ctl		tcps_params[60].tcp_param_val
 
 extern struct qinit tcp_rinitv4, tcp_rinitv6;
 extern boolean_t do_tcp_fusion;
 
 extern int	tcp_maxpsz_set(tcp_t *, boolean_t);
 extern void	tcp_timers_stop(tcp_t *);
-extern void	tcp_rcv_enqueue(tcp_t *, mblk_t *, uint_t);
+extern void	tcp_rcv_enqueue(tcp_t *, mblk_t *, uint_t, cred_t *);
 extern void	tcp_push_timer(void *);
 extern timeout_id_t tcp_timeout(conn_t *, void (*)(void *), clock_t);
 extern clock_t	tcp_timeout_cancel(conn_t *, timeout_id_t);
 
-extern void	tcp_fuse(tcp_t *, uchar_t *, tcph_t *);
+extern void	tcp_fuse(tcp_t *, uchar_t *, tcpha_t *);
 extern void	tcp_unfuse(tcp_t *);
 extern boolean_t tcp_fuse_output(tcp_t *, mblk_t *, uint32_t);
 extern void	tcp_fuse_output_urg(tcp_t *, mblk_t *);
 extern boolean_t tcp_fuse_rcv_drain(queue_t *, tcp_t *, mblk_t **);
 extern size_t	tcp_fuse_set_rcv_hiwat(tcp_t *, size_t);
-extern int	tcp_fuse_maxpsz_set(tcp_t *);
-extern void	tcp_fuse_backenable(tcp_t *tcp);
+extern int	tcp_fuse_maxpsz(tcp_t *);
+extern void	tcp_fuse_backenable(tcp_t *);
+extern int	tcp_rwnd_set(tcp_t *, uint32_t);
 
 /*
  * Object to represent database of options to search passed to
@@ -240,6 +207,11 @@ extern int tcp_fallback(sock_lower_handle_t, queue_t *, boolean_t,
 
 extern sock_downcalls_t sock_tcp_downcalls;
 
+
+extern int	tcp_opt_default(queue_t *, t_scalar_t, t_scalar_t, uchar_t *);
+extern int	tcp_tpi_opt_get(queue_t *, t_scalar_t, t_scalar_t, uchar_t *);
+extern int	tcp_tpi_opt_set(queue_t *, uint_t, int, int, uint_t, uchar_t *,
+		    uint_t *, uchar_t *, void *, cred_t *);
 
 #endif	/* _KERNEL */
 

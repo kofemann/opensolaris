@@ -34,7 +34,6 @@ PLATFORM	 = sun4v
 LINKED_PLATFORMS += SUNW,Sun-Fire-T1000
 LINKED_PLATFORMS += SUNW,SPARC-Enterprise-T5120
 LINKED_PLATFORMS += SUNW,SPARC-Enterprise-T5220
-LINKED_PLATFORMS += SUNW,SPARC-Enterprise-T3120
 LINKED_PLATFORMS += SUNW,T5140
 LINKED_PLATFORMS += SUNW,T5240
 LINKED_PLATFORMS += SUNW,T5440
@@ -222,8 +221,6 @@ FDOFFSETS 	 = $(UTSBASE)/sun/io/fd_offsets.in
 MACHINE_DEFS	= -D$(PLATFORM) -D_MACHDEP -DSFMMU
 MACHINE_DEFS	+= -DMAX_MEM_NODES=8
 
-$(MPSAS_BUILD)MACHINE_DEFS      += -DMPSAS
-
 #
 #	Software workarounds for hardware "features"
 #
@@ -344,6 +341,7 @@ DRV_KMODS	+= px
 DRV_KMODS	+= qcn
 DRV_KMODS	+= rootnex
 DRV_KMODS       += su
+DRV_KMODS	+= tpm
 DRV_KMODS	+= trapstat
 DRV_KMODS	+= vcc
 DRV_KMODS	+= vdc
@@ -406,7 +404,7 @@ MISC_KMODS	+= md5
 #
 #	Brand modules
 #
-BRAND_KMODS	+= sn1_brand
+BRAND_KMODS	+= sn1_brand s10_brand
 
 #
 #	Software Cryptographic Providers (/kernel/crypto):
@@ -433,9 +431,9 @@ XMODS		+=
 #
 #	cpu modules
 #
-CPU_KMODS	+= generic niagara niagara2 vfalls rock
+CPU_KMODS	+= generic niagara niagara2 vfalls
 
-LINT_CPU_KMODS	+= generic rock
+LINT_CPU_KMODS	+= generic
 
 #
 #	Performance Counter BackEnd Modules (/usr/kernel/pcbe):
@@ -443,4 +441,3 @@ LINT_CPU_KMODS	+= generic rock
 PCBE_KMODS	+= niagara_pcbe
 PCBE_KMODS	+= niagara2_pcbe
 PCBE_KMODS	+= vfalls_pcbe
-PCBE_KMODS	+= rock_pcbe

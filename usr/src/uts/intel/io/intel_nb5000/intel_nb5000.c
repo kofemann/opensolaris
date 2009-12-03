@@ -132,10 +132,30 @@ fat_memory_error(const nb_regs_t *rp, void *data)
 		sp->bank = (nrecmema >> 12) & BANK_MASK;
 		sp->cas = (nrecmemb >> 16) & CAS_MASK;
 		sp->ras = nrecmemb & RAS_MASK;
-		sp->pa = dimm_getphys(sp->branch, sp->rank, sp->bank, sp->ras,
-		    sp->cas);
-		sp->offset = dimm_getoffset(sp->branch, sp->rank, sp->bank,
-		    sp->ras, sp->cas);
+		/*
+		 * If driver was built with closed tree present then we will
+		 * have Intel proprietary code for finding physaddr
+		 */
+		if (&dimm_getphys) {
+			sp->pa = dimm_getphys((uint16_t)sp->branch,
+			    (uint16_t)sp->rank, (uint64_t)sp->bank,
+			    (uint64_t)sp->ras, (uint64_t)sp->cas);
+			if (sp->pa >= MAXPHYS_ADDR)
+				sp->pa = -1ULL;
+		} else {
+			sp->pa = -1ULL;
+		}
+		/*
+		 * If there is an offset decoder use it otherwise encode
+		 * rank/bank/ras/cas
+		 */
+		if (&dimm_getoffset) {
+			sp->offset = dimm_getoffset(sp->branch, sp->rank,
+			    sp->bank, sp->ras, sp->cas);
+		} else {
+			sp->offset = TCODE_OFFSET(sp->rank, sp->bank, sp->ras,
+			    sp->cas);
+		}
 	} else {
 		if ((ferr_fat_fbd & ERR_FAT_FBD_M3) != 0)
 			intr = "nb.fbd.otf";	/* thermal temp > Tmid M3 */
@@ -300,10 +320,26 @@ nf_memory_error(const nb_regs_t *rp, void *data)
 		}
 	}
 	if (sp->ras != -1) {
-		sp->pa = dimm_getphys(sp->branch, sp->rank, sp->bank, sp->ras,
-		    sp->cas);
-		sp->offset = dimm_getoffset(sp->branch, sp->rank, sp->bank,
-		    sp->ras, sp->cas);
+		/*
+		 * If driver was built with closed tree present then we will
+		 * have Intel proprietary code for finding physaddr
+		 */
+		if (&dimm_getphys) {
+			sp->pa = dimm_getphys((uint16_t)sp->branch,
+			    (uint16_t)sp->rank, (uint64_t)sp->bank,
+			    (uint64_t)sp->ras, (uint64_t)sp->cas);
+			if (sp->pa >= MAXPHYS_ADDR)
+				sp->pa = -1ULL;
+		} else {
+			sp->pa = -1ULL;
+		}
+		if (&dimm_getoffset) {
+			sp->offset = dimm_getoffset(sp->branch, sp->rank,
+			    sp->bank, sp->ras, sp->cas);
+		} else {
+			sp->offset = TCODE_OFFSET(sp->rank, sp->bank, sp->ras,
+			    sp->cas);
+		}
 	}
 	return (intr);
 }
@@ -450,10 +486,26 @@ nf_mem_error(const nb_regs_t *rp, void *data)
 		}
 	}
 	if (sp->ras != -1) {
-		sp->pa = dimm_getphys(sp->branch, sp->rank, sp->bank, sp->ras,
-		    sp->cas);
-		sp->offset = dimm_getoffset(sp->branch, sp->rank, sp->bank,
-		    sp->ras, sp->cas);
+		/*
+		 * If driver was built with closed tree present then we will
+		 * have Intel proprietary code for finding physaddr
+		 */
+		if (&dimm_getphys) {
+			sp->pa = dimm_getphys((uint16_t)sp->branch,
+			    (uint16_t)sp->rank, (uint64_t)sp->bank,
+			    (uint64_t)sp->ras, (uint64_t)sp->cas);
+			if (sp->pa >= MAXPHYS_ADDR)
+				sp->pa = -1ULL;
+		} else {
+			sp->pa = -1ULL;
+		}
+		if (&dimm_getoffset) {
+			sp->offset = dimm_getoffset(sp->branch, sp->rank,
+			    sp->bank, sp->ras, sp->cas);
+		} else {
+			sp->offset = TCODE_OFFSET(sp->rank, sp->bank, sp->ras,
+			    sp->cas);
+		}
 	}
 	return (intr);
 }
@@ -1204,11 +1256,12 @@ log_nf_fbd_err(nb_regs_t *rp, int willpanic, int *interpose)
 	}
 }
 
-static void
+static int
 log_nf_mem_err(nb_regs_t *rp, int willpanic, int *interpose)
 {
 	int channel, branch;
 	int t = 0;
+	int rt = 0;
 
 	rp->flag = NB_REG_LOG_NF_MEM;
 
@@ -1259,6 +1312,14 @@ log_nf_mem_err(nb_regs_t *rp, int willpanic, int *interpose)
 			SPCPS_WR(branch);
 		}
 	}
+	if (nb_mode == NB_MEMORY_SINGLE_CHANNEL && channel != 0) {
+		/*
+		 * In the single channel mode, all dimms are on the channel 0.
+		 * Invalidate this error if the channel number is invalid.
+		 */
+		rt = 1;
+	}
+	return (rt);
 }
 
 static void
@@ -1280,7 +1341,7 @@ log_ferr(uint64_t ferr, uint32_t *nerrp, nb_logout_t *log, int willpanic)
 		log_nf_fbd_err(rp, willpanic, &interpose);
 		*nerrp = nerr & ~GE_NERR_FBD_NF;
 	} else if ((ferr & GE_MEM_NF) != 0) {
-		log_nf_mem_err(rp, willpanic, &interpose);
+		spurious = log_nf_mem_err(rp, willpanic, &interpose);
 		*nerrp = nerr & ~GE_NERR_MEM_NF;
 	} else if ((ferr & (GE_FERR_FSB_FATAL | GE_FERR_FSB_NF)) != 0) {
 		log_fsb_err(ferr, rp, willpanic, &interpose);
@@ -1326,7 +1387,7 @@ log_nerr(uint32_t *errp, nb_logout_t *log, int willpanic)
 		log_nf_fbd_err(rp, willpanic, &interpose);
 		*errp = err & ~GE_NERR_FBD_NF;
 	} else if ((err & GE_NERR_MEM_NF) != 0) {
-		log_nf_mem_err(rp, willpanic, &interpose);
+		spurious = log_nf_mem_err(rp, willpanic, &interpose);
 		*errp = err & ~GE_NERR_MEM_NF;
 	} else if ((err & (GE_NERR_FSB_FATAL | GE_NERR_FSB_NF)) != 0) {
 		log_fsb_err(GE_NERR_TO_FERR_FSB(err), rp, willpanic,

@@ -65,6 +65,7 @@
 #include <sys/atomic.h>
 #include <sys/signal.h>
 #include <sys/byteorder.h>
+#include <sys/sdt.h>
 #include <sys/fs/dv_node.h>	/* devfs_clean */
 
 #include "mr_sas.h"
@@ -81,8 +82,9 @@
  * Local static data
  */
 static void	*mrsas_state = NULL;
-static int 	debug_level_g = CL_NONE;
-boolean_t mrsas_relaxed_ordering = B_TRUE;
+static volatile boolean_t	mrsas_relaxed_ordering = B_TRUE;
+static volatile int 	debug_level_g = CL_NONE;
+static volatile int 	msi_enable = 1;
 
 #pragma weak scsi_hba_open
 #pragma weak scsi_hba_close
@@ -262,7 +264,6 @@ mrsas_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	off_t		reglength = 0;
 	int		intr_types = 0;
 	char		*data;
-	int		msi_enable = 0;
 
 	scsi_hba_tran_t		*tran;
 	ddi_dma_attr_t  tran_dma_attr;
@@ -457,13 +458,12 @@ mrsas_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			 */
 			instance->func_ptr->disable_intr(instance);
 
-			msi_enable = 0;
 			if (ddi_prop_lookup_string(DDI_DEV_T_ANY, dip, 0,
 			    "mrsas-enable-msi", &data) == DDI_SUCCESS) {
-				if (strncmp(data, "yes", 3) == 0) {
-					msi_enable = 1;
-					con_log(CL_ANN, (CE_WARN,
-					    "msi_enable = %d ENABLED",
+				if (strncmp(data, "no", 3) == 0) {
+					msi_enable = 0;
+					con_log(CL_ANN1, (CE_WARN,
+					    "msi_enable = %d disabled",
 					    msi_enable));
 				}
 				ddi_prop_free(data);
@@ -771,7 +771,8 @@ mrsas_getinfo(dev_info_t *dip, ddi_info_cmd_t cmd,  void *arg, void **resultp)
 			}
 			break;
 		case DDI_INFO_DEVT2INSTANCE:
-			*resultp = (void *)instance;
+			*resultp = (void *)(intptr_t)
+			    (MINOR2INST(getminor((dev_t)arg)));
 			rval = DDI_SUCCESS;
 			break;
 		default:
@@ -1274,6 +1275,9 @@ mrsas_tran_start(struct scsi_address *ap, register struct scsi_pkt *pkt)
 	if ((pkt->pkt_flags & FLAG_NOINTR) == 0) {
 		if (instance->fw_outstanding > instance->max_fw_cmds) {
 			con_log(CL_ANN, (CE_CONT, "mr_sas:Firmware busy"));
+			DTRACE_PROBE2(start_tran_err,
+			    uint16_t, instance->fw_outstanding,
+			    uint16_t, instance->max_fw_cmds);
 			return_mfi_pkt(instance, cmd);
 			return (TRAN_BUSY);
 		}
@@ -1318,8 +1322,10 @@ mrsas_tran_start(struct scsi_address *ap, register struct scsi_pkt *pkt)
 			((struct scsi_status *)pkt->pkt_scbp)->sts_busy = 1;
 		}
 
-		return_mfi_pkt(instance, cmd);
 		(void) mrsas_common_check(instance, cmd);
+		DTRACE_PROBE2(start_nointr_done, uint8_t, hdr->cmd,
+		    uint8_t, hdr->cmd_status);
+		return_mfi_pkt(instance, cmd);
 
 		if (pkt->pkt_comp) {
 			(*pkt->pkt_comp)(pkt);
@@ -1568,6 +1574,8 @@ mrsas_isr(struct mrsas_instance *instance)
 	    producer, consumer));
 	if (producer == consumer) {
 		con_log(CL_ANN1, (CE_WARN, "producer = consumer case"));
+		DTRACE_PROBE2(isr_pc_err, uint32_t, producer,
+		    uint32_t, consumer);
 		return (DDI_INTR_CLAIMED);
 	}
 	mutex_enter(&instance->completed_pool_mtx);
@@ -1965,6 +1973,8 @@ get_ctrl_info(struct mrsas_instance *instance,
 	if (!cmd) {
 		con_log(CL_ANN, (CE_WARN,
 		    "Failed to get a cmd for ctrl info"));
+		DTRACE_PROBE2(info_mfi_err, uint16_t, instance->fw_outstanding,
+		    uint16_t, instance->max_fw_cmds);
 		return (DDI_FAILURE);
 	}
 	/* Clear the frame buffer and assign back the context id */
@@ -2022,10 +2032,10 @@ get_ctrl_info(struct mrsas_instance *instance,
 		ret = -1;
 	}
 
-	return_mfi_pkt(instance, cmd);
 	if (mrsas_common_check(instance, cmd) != DDI_SUCCESS) {
 		ret = -1;
 	}
+	return_mfi_pkt(instance, cmd);
 
 	return (ret);
 }
@@ -2047,6 +2057,8 @@ abort_aen_cmd(struct mrsas_instance *instance,
 	if (!cmd) {
 		con_log(CL_ANN, (CE_WARN,
 		    "Failed to get a cmd for ctrl info"));
+		DTRACE_PROBE2(abort_mfi_err, uint16_t, instance->fw_outstanding,
+		    uint16_t, instance->max_fw_cmds);
 		return (DDI_FAILURE);
 	}
 	/* Clear the frame buffer and assign back the context id */
@@ -2085,8 +2097,9 @@ abort_aen_cmd(struct mrsas_instance *instance,
 	instance->aen_cmd->abort_aen = 1;
 	instance->aen_cmd = 0;
 
-	return_mfi_pkt(instance, cmd);
 	(void) mrsas_common_check(instance, cmd);
+
+	return_mfi_pkt(instance, cmd);
 
 	return (ret);
 }
@@ -2190,13 +2203,16 @@ init_mfi(struct mrsas_instance *instance)
 	/* issue the init frame in polled mode */
 	if (instance->func_ptr->issue_cmd_in_poll_mode(instance, cmd)) {
 		con_log(CL_ANN, (CE_WARN, "failed to init firmware"));
+		return_mfi_pkt(instance, cmd);
+		goto fail_fw_init;
+	}
+
+	if (mrsas_common_check(instance, cmd) != DDI_SUCCESS) {
+		return_mfi_pkt(instance, cmd);
 		goto fail_fw_init;
 	}
 
 	return_mfi_pkt(instance, cmd);
-	if (mrsas_common_check(instance, cmd) != DDI_SUCCESS) {
-		goto fail_fw_init;
-	}
 
 	/* gather misc FW related information */
 	if (!get_ctrl_info(instance, &ctrl_info)) {
@@ -2206,10 +2222,6 @@ init_mfi(struct mrsas_instance *instance)
 	} else {
 		instance->max_sectors_per_req = instance->max_num_sge *
 		    PAGESIZE / 512;
-	}
-
-	if (mrsas_check_acc_handle(instance->regmap_handle) != DDI_SUCCESS) {
-		goto fail_fw_init;
 	}
 
 	return (DDI_SUCCESS);
@@ -2386,6 +2398,8 @@ get_seq_num(struct mrsas_instance *instance,
 
 	if (!cmd) {
 		cmn_err(CE_WARN, "mr_sas: failed to get a cmd");
+		DTRACE_PROBE2(seq_num_mfi_err, uint16_t,
+		    instance->fw_outstanding, uint16_t, instance->max_fw_cmds);
 		return (ENOMEM);
 	}
 	/* Clear the frame buffer and assign back the context id */
@@ -2447,10 +2461,12 @@ get_seq_num(struct mrsas_instance *instance,
 	if (mrsas_free_dma_obj(instance, dcmd_dma_obj) != DDI_SUCCESS)
 		ret = DDI_FAILURE;
 
-	return_mfi_pkt(instance, cmd);
 	if (mrsas_common_check(instance, cmd) != DDI_SUCCESS) {
 		ret = DDI_FAILURE;
 	}
+
+	return_mfi_pkt(instance, cmd);
+
 	return (ret);
 }
 
@@ -2748,6 +2764,9 @@ mrsas_softintr(struct mrsas_instance *instance)
 			    "CDB[0] = %x completed for %s: size %lx context %x",
 			    pkt->pkt_cdbp[0], ((acmd->islogical) ? "LD" : "PD"),
 			    acmd->cmd_dmacount, hdr->context));
+			DTRACE_PROBE3(softintr_cdb, uint8_t, pkt->pkt_cdbp[0],
+			    uint_t, acmd->cmd_cdblen, ulong_t,
+			    acmd->cmd_dmacount);
 
 			if (pkt->pkt_cdbp[0] == SCMD_INQUIRY) {
 				struct scsi_inquiry	*inq;
@@ -2775,6 +2794,9 @@ mrsas_softintr(struct mrsas_instance *instance)
 					}
 				}
 			}
+
+			DTRACE_PROBE2(softintr_done, uint8_t, hdr->cmd,
+			    uint8_t, hdr->cmd_status);
 
 			switch (hdr->cmd_status) {
 			case MFI_STAT_OK:
@@ -2869,8 +2891,6 @@ mrsas_softintr(struct mrsas_instance *instance)
 
 			atomic_add_16(&instance->fw_outstanding, (-1));
 
-			return_mfi_pkt(instance, cmd);
-
 			(void) mrsas_common_check(instance, cmd);
 
 			if (acmd->cmd_dmahandle) {
@@ -2882,6 +2902,8 @@ mrsas_softintr(struct mrsas_instance *instance)
 					pkt->pkt_statistics = 0;
 				}
 			}
+
+			return_mfi_pkt(instance, cmd);
 
 			/* Call the callback routine */
 			if (((pkt->pkt_flags & FLAG_NOINTR) == 0) &&
@@ -3286,6 +3308,8 @@ build_cmd(struct mrsas_instance *instance, struct scsi_address *ap,
 
 	/* get the command packet */
 	if (!(cmd = get_mfi_pkt(instance))) {
+		DTRACE_PROBE2(build_cmd_mfi_err, uint16_t,
+		    instance->fw_outstanding, uint16_t, instance->max_fw_cmds);
 		return (NULL);
 	}
 
@@ -3297,6 +3321,8 @@ build_cmd(struct mrsas_instance *instance, struct scsi_address *ap,
 
 	cmd->pkt = pkt;
 	cmd->cmd = acmd;
+	DTRACE_PROBE3(build_cmds, uint8_t, pkt->pkt_cdbp[0],
+	    ulong_t, acmd->cmd_dmacount, ulong_t, acmd->cmd_dma_len);
 
 	/* lets get the command directions */
 	if (acmd->cmd_flags & CFLAG_DMASEND) {
@@ -3554,6 +3580,7 @@ issue_mfi_pthru(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 			    "could not allocate data transfer buffer."));
 			return (DDI_FAILURE);
 		}
+		(void) memset(pthru_dma_obj.buffer, 0, xferlen);
 
 		/* If IOCTL requires DMA WRITE, do ddi_copyin IOCTL data copy */
 		if (kpthru->flags & MFI_FRAME_DIR_WRITE) {
@@ -3573,7 +3600,7 @@ issue_mfi_pthru(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 	}
 
 	ddi_put8(acc_handle, &pthru->cmd, kpthru->cmd);
-	ddi_put8(acc_handle, &pthru->sense_len, kpthru->sense_len);
+	ddi_put8(acc_handle, &pthru->sense_len, 0);
 	ddi_put8(acc_handle, &pthru->cmd_status, 0);
 	ddi_put8(acc_handle, &pthru->scsi_status, 0);
 	ddi_put8(acc_handle, &pthru->target_id, kpthru->target_id);
@@ -3620,6 +3647,8 @@ issue_mfi_pthru(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 
 	con_log(CL_ANN, (CE_NOTE, "issue_mfi_pthru: cmd_status %x, "
 	    "scsi_status %x", kpthru->cmd_status, kpthru->scsi_status));
+	DTRACE_PROBE3(issue_pthru, uint8_t, kpthru->cmd, uint8_t,
+	    kpthru->cmd_status, uint8_t, kpthru->scsi_status);
 
 	if (xferlen) {
 		/* free kernel buffer */
@@ -3684,6 +3713,7 @@ issue_mfi_dcmd(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 			    "could not allocate data transfer buffer."));
 			return (DDI_FAILURE);
 		}
+		(void) memset(dcmd_dma_obj.buffer, 0, xferlen);
 
 		/* If IOCTL requires DMA WRITE, do ddi_copyin IOCTL data copy */
 		if (kdcmd->flags & MFI_FRAME_DIR_WRITE) {
@@ -3738,6 +3768,8 @@ issue_mfi_dcmd(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 	}
 
 	kdcmd->cmd_status = ddi_get8(acc_handle, &dcmd->cmd_status);
+	DTRACE_PROBE3(issue_dcmd, uint32_t, kdcmd->opcode, uint8_t,
+	    kdcmd->cmd, uint8_t, kdcmd->cmd_status);
 
 	if (xferlen) {
 		/* free kernel buffer */
@@ -3835,6 +3867,7 @@ issue_mfi_smp(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 			    "could not allocate data transfer buffer."));
 			return (DDI_FAILURE);
 		}
+		(void) memset(request_dma_obj.buffer, 0, request_xferlen);
 
 		/* If IOCTL requires DMA WRITE, do ddi_copyin IOCTL data copy */
 		for (i = 0; i < request_xferlen; i++) {
@@ -3865,6 +3898,7 @@ issue_mfi_smp(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 			    "could not allocate data transfer buffer."));
 			return (DDI_FAILURE);
 		}
+		(void) memset(response_dma_obj.buffer, 0, response_xferlen);
 
 		/* If IOCTL requires DMA WRITE, do ddi_copyin IOCTL data copy */
 		for (i = 0; i < response_xferlen; i++) {
@@ -3975,7 +4009,7 @@ issue_mfi_smp(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 	ksmp->cmd_status = ddi_get8(acc_handle, &smp->cmd_status);
 	con_log(CL_ANN1, (CE_NOTE, "issue_mfi_smp: smp->cmd_status = %d",
 	    ddi_get8(acc_handle, &smp->cmd_status)));
-
+	DTRACE_PROBE2(issue_smp, uint8_t, ksmp->cmd, uint8_t, ksmp->cmd_status);
 
 	if (request_xferlen) {
 		/* free kernel buffer */
@@ -4068,6 +4102,7 @@ issue_mfi_stp(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 			    "could not allocate data transfer buffer."));
 			return (DDI_FAILURE);
 		}
+		(void) memset(fis_dma_obj.buffer, 0, fis_xferlen);
 
 		/* If IOCTL requires DMA WRITE, do ddi_copyin IOCTL data copy */
 		for (i = 0; i < fis_xferlen; i++) {
@@ -4100,6 +4135,7 @@ issue_mfi_stp(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 			    "could not allocate data transfer buffer."));
 			return (DDI_FAILURE);
 		}
+		(void) memset(data_dma_obj.buffer, 0, data_xferlen);
 
 		/* If IOCTL requires DMA WRITE, do ddi_copyin IOCTL data copy */
 		for (i = 0; i < data_xferlen; i++) {
@@ -4167,6 +4203,7 @@ issue_mfi_stp(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 	}
 
 	kstp->cmd_status = ddi_get8(acc_handle, &stp->cmd_status);
+	DTRACE_PROBE2(issue_stp, uint8_t, kstp->cmd, uint8_t, kstp->cmd_status);
 
 	if (fis_xferlen) {
 		/* free kernel buffer */
@@ -4328,6 +4365,8 @@ handle_mfi_ioctl(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 	if (!cmd) {
 		con_log(CL_ANN, (CE_WARN, "mr_sas: "
 		    "failed to get a cmd packet"));
+		DTRACE_PROBE2(mfi_ioctl_err, uint16_t,
+		    instance->fw_outstanding, uint16_t, instance->max_fw_cmds);
 		return (DDI_FAILURE);
 	}
 
@@ -4359,10 +4398,11 @@ handle_mfi_ioctl(struct mrsas_instance *instance, struct mrsas_ioctl *ioctl,
 		break;
 	}
 
-
-	return_mfi_pkt(instance, cmd);
 	if (mrsas_common_check(instance, cmd) != DDI_SUCCESS)
 		rval = DDI_FAILURE;
+
+	return_mfi_pkt(instance, cmd);
+
 	return (rval);
 }
 
@@ -4449,13 +4489,17 @@ register_mfi_aen(struct mrsas_instance *instance, uint32_t seq_num,
 			}
 		}
 	} else {
-		curr_aen.word = class_locale_word;
+		curr_aen.word = LE_32(class_locale_word);
+		curr_aen.members.locale = LE_16(curr_aen.members.locale);
 	}
 
 	cmd = get_mfi_pkt(instance);
 
-	if (!cmd)
+	if (!cmd) {
+		DTRACE_PROBE2(mfi_aen_err, uint16_t, instance->fw_outstanding,
+		    uint16_t, instance->max_fw_cmds);
 		return (ENOMEM);
+	}
 	/* Clear the frame buffer and assign back the context id */
 	(void) memset((char *)&cmd->frame[0], 0, sizeof (union mrsas_frame));
 	ddi_put32(cmd->frame_dma_obj.acc_handle, &cmd->frame->hdr.context,
@@ -4732,7 +4776,7 @@ intr_ack_ppc(struct mrsas_instance *instance)
 	}
 
 	if (mrsas_check_acc_handle(instance->regmap_handle) != DDI_SUCCESS) {
-		ddi_fm_service_impact(instance->dip, DDI_SERVICE_UNAFFECTED);
+		ddi_fm_service_impact(instance->dip, DDI_SERVICE_LOST);
 		ret = DDI_INTR_UNCLAIMED;
 	}
 
@@ -5380,6 +5424,7 @@ mrsas_service_evt(struct mrsas_instance *instance, int tgt, int lun, int event,
 		kmem_free(mrevt, sizeof (struct mrsas_eventinfo));
 		return (DDI_FAILURE);
 	}
+	DTRACE_PROBE3(service_evt, int, tgt, int, lun, int, event);
 	return (DDI_SUCCESS);
 }
 

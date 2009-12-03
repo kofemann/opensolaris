@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -81,6 +81,7 @@
 #include <sys/console.h>
 #include <sys/reboot.h>
 #include <sys/attr.h>
+#include <sys/zio.h>
 #include <sys/spa.h>
 #include <sys/lofi.h>
 #include <sys/bootprops.h>
@@ -811,6 +812,7 @@ vfs_mountroot(void)
 	char		*path;
 	size_t		plen;
 	struct vfssw	*vswp;
+	proc_t		*p;
 
 	rw_init(&vfssw_lock, NULL, RW_DEFAULT, NULL);
 	rw_init(&vfslist, NULL, RW_DEFAULT, NULL);
@@ -834,9 +836,22 @@ vfs_mountroot(void)
 	vfs_setmntpoint(rootvfs, "/");
 	if (VFS_ROOT(rootvfs, &rootdir))
 		panic("vfs_mountroot: no root vnode");
-	PTOU(curproc)->u_cdir = rootdir;
-	VN_HOLD(PTOU(curproc)->u_cdir);
-	PTOU(curproc)->u_rdir = NULL;
+
+	/*
+	 * At this point, the process tree consists of p0 and possibly some
+	 * direct children of p0.  (i.e. there are no grandchildren)
+	 *
+	 * Walk through them all, setting their current directory.
+	 */
+	mutex_enter(&pidlock);
+	for (p = practive; p != NULL; p = p->p_next) {
+		ASSERT(p == &p0 || p->p_parent == &p0);
+
+		PTOU(p)->u_cdir = rootdir;
+		VN_HOLD(PTOU(p)->u_cdir);
+		PTOU(p)->u_rdir = NULL;
+	}
+	mutex_exit(&pidlock);
 
 	/*
 	 * Setup the global zone's rootvp, now that it exists.
@@ -2964,6 +2979,30 @@ vfs_mnttab_poll(timespec_t *old, struct pollhead **phpp)
 	}
 }
 
+/* Provide a unique and monotonically-increasing timestamp. */
+void
+vfs_mono_time(timespec_t *ts)
+{
+	static volatile hrtime_t hrt;		/* The saved time. */
+	hrtime_t	newhrt, oldhrt;		/* For effecting the CAS. */
+	timespec_t	newts;
+
+	/*
+	 * Try gethrestime() first, but be prepared to fabricate a sensible
+	 * answer at the first sign of any trouble.
+	 */
+	gethrestime(&newts);
+	newhrt = ts2hrt(&newts);
+	for (;;) {
+		oldhrt = hrt;
+		if (newhrt <= hrt)
+			newhrt = hrt + 1;
+		if (cas64((uint64_t *)&hrt, oldhrt, newhrt) == oldhrt)
+			break;
+	}
+	hrt2ts(newhrt, ts);
+}
+
 /*
  * Update the mnttab modification time and wake up any waiters for
  * mnttab changes
@@ -3490,6 +3529,18 @@ void
 vfs_list_add(struct vfs *vfsp)
 {
 	zone_t *zone;
+
+	/*
+	 * Typically, the vfs_t will have been created on behalf of the file
+	 * system in vfs_init, where it will have been provided with a
+	 * vfs_impl_t. This, however, might be lacking if the vfs_t was created
+	 * by an unbundled file system. We therefore check for such an example
+	 * before stamping the vfs_t with its creation time for the benefit of
+	 * mntfs.
+	 */
+	if (vfsp->vfs_implp == NULL)
+		vfsimpl_setup(vfsp);
+	vfs_mono_time(&vfsp->vfs_hrctime);
 
 	/*
 	 * The zone that owns the mount is the one that performed the mount.
@@ -4252,6 +4303,8 @@ vfsinit(void)
 	}
 
 	xattr_init();
+
+	reparse_point_init();
 }
 
 vfs_t *
@@ -4489,7 +4542,6 @@ extern int hvmboot_rootconf();
 #endif /* __x86 */
 
 extern ib_boot_prop_t *iscsiboot_prop;
-extern void iscsi_boot_prop_free();
 
 int
 rootconf()
@@ -4542,8 +4594,13 @@ rootconf()
 		return (EINVAL);
 	}
 
-	if (netboot || iscsiboot_prop)
+	if (netboot || iscsiboot_prop) {
 		ret = strplumb();
+		if (ret != 0) {
+			cmn_err(CE_WARN, "Cannot plumb network device %d", ret);
+			return (EFAULT);
+		}
+	}
 
 	if ((ret == 0) && iscsiboot_prop) {
 		ret = modload("drv", "iscsi");

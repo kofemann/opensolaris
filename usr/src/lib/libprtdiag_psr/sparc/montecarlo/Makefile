@@ -19,10 +19,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 # lib/libprtdiag_psr/sparc/montecarlo/Makefile
 
@@ -56,6 +54,8 @@ LINKED_PRTDIAG_DIRS	= \
 #
 PLATFORM=SUNW,UltraSPARC-IIi-Netract
 
+$(USR_PLAT_DIR)/$(PLATFORM)/lib/libprtdiag_psr.so.1 := FILEMODE= 0755
+
 .KEEP_STATE:
 
 PLATLIBS= $(PLATFORM:%=$(USR_PLAT_DIR)/%/lib/)
@@ -76,10 +76,10 @@ $(USR_PSM_LIB_DIR)/%: % $(USR_PSM_LIB_DIR)
 	$(INS.file)
 
 $(LINKED_DIRS):	$(USR_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(LINKED_LIB_DIRS):	$(LINKED_DIRS)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(LINKED_PRTDIAG_DIRS):	$(LINKED_LIB_DIRS)
 	-$(INS.slink6)

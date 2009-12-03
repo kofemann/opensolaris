@@ -52,9 +52,9 @@
 
 #include <smbsrv/smb_door_svc.h>
 #include <smbsrv/smb_ioctl.h>
+#include <smbsrv/string.h>
 #include <smbsrv/libsmb.h>
 #include <smbsrv/libsmbns.h>
-#include <smbsrv/libsmbrdr.h>
 #include <smbsrv/libmlsvc.h>
 #include "smbd.h"
 
@@ -387,13 +387,6 @@ smbd_daemonize_fini(int fd, int exit_status)
 
 	(void) close(fd);
 
-	if ((fd = open("/dev/null", O_RDWR)) >= 0) {
-		(void) fcntl(fd, F_DUP2FD, STDIN_FILENO);
-		(void) fcntl(fd, F_DUP2FD, STDOUT_FILENO);
-		(void) fcntl(fd, F_DUP2FD, STDERR_FILENO);
-		(void) close(fd);
-	}
-
 	pset = priv_allocset();
 	if (pset == NULL)
 		return;
@@ -441,8 +434,7 @@ smbd_service_init(void)
 		return (1);
 	}
 
-
-	(void) oem_language_set("english");
+	smb_codepage_init();
 
 	if (!smb_wka_init()) {
 		smbd_report("out of memory");
@@ -453,7 +445,7 @@ smbd_service_init(void)
 		smbd_report("NIC monitoring failed to start");
 
 	(void) dyndns_start();
-	smbrdr_init();
+	smb_ipc_init();
 
 	if (smb_netbios_start() != 0)
 		smbd_report("NetBIOS services failed to start");
@@ -467,7 +459,7 @@ smbd_service_init(void)
 	}
 
 	smbd.s_secmode = smb_config_get_secmode();
-	if ((rc = nt_domain_init(smbd.s_secmode)) != 0) {
+	if ((rc = smb_domain_init(smbd.s_secmode)) != 0) {
 		if (rc == SMB_DOMAIN_NOMACHINE_SID) {
 			smbd_report(
 			    "no machine SID: check idmap configuration");
@@ -552,9 +544,10 @@ smbd_service_fini(void)
 	smb_lgrp_stop();
 	smb_ccache_remove(SMB_CCACHE_PATH);
 	smb_pwd_fini();
-	nt_domain_fini();
+	smb_domain_fini();
 	mlsvc_fini();
 	smb_ads_fini();
+	smb_netbios_stop();
 }
 
 

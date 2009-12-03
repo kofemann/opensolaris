@@ -43,6 +43,7 @@ usr/include/bsm/audit_private.h		sparc
 usr/include/bsm/devalloc.h		sparc
 usr/include/security/pam_impl.h		sparc
 usr/include/passwdutil.h		sparc
+usr/include/sys/clock_impl.h		sparc
 #
 # Private/Internal libraries of the Cryptographic Framework.
 #
@@ -77,44 +78,32 @@ usr/lib/libdhcpsvc.so			sparc
 #
 usr/include/sys/aggr.h			sparc
 usr/include/sys/aggr_impl.h		sparc
-usr/include/sys/dld.h			sparc
 usr/include/sys/dld_impl.h		sparc
 usr/include/sys/dld_ioc.h		sparc
 usr/include/sys/dls.h			sparc
-usr/include/sys/dls_mgmt.h		sparc
 usr/include/sys/dls_impl.h		sparc
-usr/include/sys/mac.h			sparc
 usr/include/sys/mac_client.h		sparc
 usr/include/sys/mac_client_impl.h	sparc
-usr/include/sys/mac_flow.h		sparc
 usr/include/sys/mac_flow_impl.h		sparc
 usr/include/sys/mac_impl.h		sparc
 usr/include/sys/mac_provider.h		sparc
 usr/include/sys/mac_soft_ring.h		sparc
+usr/include/inet/iptun.h		sparc
 #
 # Private GLDv3 userland libraries and headers
 #
-usr/include/sys/vnic.h		sparc
-usr/include/sys/vnic_impl.h	sparc
-usr/include/libdladm.h		sparc
-usr/include/libdlether.h	sparc
 usr/include/libdladm_impl.h	sparc
-usr/include/libdllink.h		sparc
 usr/include/libdlaggr.h		sparc
+usr/include/libdlether.h	sparc
 usr/include/libdlflow.h		sparc
 usr/include/libdlflow_impl.h	sparc
+usr/include/libdliptun.h	sparc
+usr/include/libdlmgmt.h		sparc
+usr/include/libdlsim.h		sparc
+usr/include/libdlstat.h		sparc
+usr/include/libdlvnic.h		sparc
 usr/include/libdlwlan.h		sparc
 usr/include/libdlwlan_impl.h	sparc
-usr/include/libdlvnic.h		sparc
-usr/include/libdlvlan.h		sparc
-usr/include/libdlmgmt.h		sparc
-usr/include/libdlstat.h		sparc
-usr/include/libdlsim.h		sparc
-lib/libdladm.so			sparc
-lib/llib-ldladm.ln		sparc
-lib/sparcv9/libdladm.so		sparc
-lib/sparcv9/llib-ldladm.ln	sparc
-lib/llib-ldladm			sparc
 #
 # Virtual Network Interface Card (VNIC)
 #
@@ -366,7 +355,6 @@ usr/share/lib/locale/com/sun/dhcpmgr/cli/dhcpconfig/ResourceBundle.properties	sp
 usr/share/lib/locale/com/sun/dhcpmgr/cli/dhtadm/ResourceBundle.properties	sparc
 usr/share/lib/locale/com/sun/dhcpmgr/cli/pntadm/ResourceBundle.properties	sparc
 #
-usr/include/inet/arp_impl.h		sparc
 usr/include/inet/rawip_impl.h		sparc
 usr/include/inet/udp_impl.h		sparc
 usr/include/inet/tcp_impl.h		sparc
@@ -374,7 +362,6 @@ usr/include/inet/ip_impl.h		sparc
 usr/include/inet/ip_ndp.h		sparc
 usr/include/inet/ip2mac.h		sparc
 usr/include/inet/ip2mac_impl.h		sparc
-usr/include/inet/tun.h			sparc
 usr/include/protocols/ripngd.h		sparc
 usr/include/libmail.h			sparc
 usr/include/s_string.h			sparc
@@ -393,15 +380,10 @@ usr/include/sys/sha1.h			sparc
 usr/include/sys/sha1_consts.h		sparc
 usr/include/sys/sha2.h			sparc
 usr/include/sys/sha2_consts.h		sparc
-usr/include/inet/tun.h			sparc
 #
 # The following are win and graphics related also ignore and do NOT replace.
 #
 usr/include/sys/ieeefp.h		sparc
-usr/include/sys/memvar.h		sparc
-usr/include/sys/pixrect.h		sparc
-usr/include/sys/pr_planegroups.h	sparc
-usr/include/sys/pr_impl_util.h		sparc
 usr/include/sys/winlockio.h		sparc
 #
 # these are just funky entries - they are fixed up
@@ -668,17 +650,24 @@ var/svc/manifest/network/ssh.xml	sparc
 usr/platform/sun4u/include/sys/fc_plat.h	sparc
 usr/platform/sun4u/include/sys/fcode.h		sparc
 #
+# Private net80211 headers
+usr/include/sys/net80211.h		sparc
+usr/include/sys/net80211_crypto.h	sparc
+usr/include/sys/net80211_ht.h		sparc
+usr/include/sys/net80211_proto.h	sparc
+#
+usr/include/net/wpa.h			sparc
+#
 # PPPoE files not delivered to customers.
 #
 usr/include/net/pppoe.h			sparc
 usr/include/net/sppptun.h		sparc
 #
+# Simnet
 usr/include/net/simnet.h		sparc
-usr/include/net/wpa.h			sparc
-# Private net80211 headers
-usr/include/sys/net80211.h		sparc
-usr/include/sys/net80211_proto.h	sparc
-usr/include/sys/net80211_crypto.h	sparc
+#
+# Bridging internal data structures
+usr/include/net/bridge_impl.h		sparc
 #
 # User<->kernel interface used by cfgadm/USB only
 #
@@ -811,12 +800,6 @@ usr/lib/sparcv9/libcmdutils.so		sparc
 # Private interfaces in libsec
 #
 usr/include/aclutils.h			sparc
-#
-# Entries for the SCM IFD Handler which are used only to build
-# the SCM IFD Handler and are not delivered to customers.
-#
-usr/include/scm_ifdh.h			sparc
-usr/include/scm_protocol.h		sparc
 #
 # USB skeleton driver stays in sync with the rest of USB but doesn't ship.
 #
@@ -1086,18 +1069,8 @@ usr/include/sys/srn.h			sparc
 #
 usr/include/smbsrv			sparc
 usr/include/smbsrv/alloc.h		sparc
-usr/include/smbsrv/cifs.h		sparc
-usr/include/smbsrv/codepage.h		sparc
-usr/include/smbsrv/cp_cyrillic.h	sparc
-usr/include/smbsrv/cp_latin1.h		sparc
-usr/include/smbsrv/cp_latin2.h		sparc
-usr/include/smbsrv/cp_latin3.h		sparc
-usr/include/smbsrv/cp_latin4.h		sparc
-usr/include/smbsrv/cp_latin5.h		sparc
-usr/include/smbsrv/cp_latin6.h		sparc
 usr/include/smbsrv/cp_unicode.h		sparc
 usr/include/smbsrv/cp_usascii.h		sparc
-usr/include/smbsrv/ctype.h		sparc
 usr/include/smbsrv/doserror.h		sparc
 usr/include/smbsrv/hash_table.h		sparc
 usr/include/smbsrv/libmlrpc.h		sparc
@@ -1105,7 +1078,6 @@ usr/include/smbsrv/libmlsvc.h		sparc
 usr/include/smbsrv/libsmb.h		sparc
 usr/include/smbsrv/libsmbns.h		sparc
 usr/include/smbsrv/libsmbrdr.h		sparc
-usr/include/smbsrv/lm.h			sparc
 usr/include/smbsrv/lmdfs.h		sparc
 usr/include/smbsrv/lmerr.h		sparc
 usr/include/smbsrv/mac_cifs.h		sparc
@@ -1121,14 +1093,11 @@ usr/include/smbsrv/nterror.h		sparc
 usr/include/smbsrv/ntifs.h		sparc
 usr/include/smbsrv/ntlocale.h		sparc
 usr/include/smbsrv/ntstatus.h		sparc
-usr/include/smbsrv/oem.h		sparc
 usr/include/smbsrv/smb.h		sparc
 usr/include/smbsrv/smb_common_door.h	sparc
 usr/include/smbsrv/smb_door_svc.h	sparc
 usr/include/smbsrv/smb_fsops.h		sparc
-usr/include/smbsrv/smb_i18n.h		sparc
 usr/include/smbsrv/smb_idmap.h		sparc
-usr/include/smbsrv/smb_incl.h		sparc
 usr/include/smbsrv/smb_inet.h		sparc
 usr/include/smbsrv/smb_ioctl.h		sparc
 usr/include/smbsrv/smb_kproto.h		sparc
@@ -1140,7 +1109,6 @@ usr/include/smbsrv/smb_sid.h		sparc
 usr/include/smbsrv/smb_token.h		sparc
 usr/include/smbsrv/smb_vops.h		sparc
 usr/include/smbsrv/smb_xdr.h		sparc
-usr/include/smbsrv/smbfmt.h		sparc
 usr/include/smbsrv/smbinfo.h		sparc
 usr/include/smbsrv/string.h		sparc
 usr/include/smbsrv/svrapi.h		sparc
@@ -1357,6 +1325,17 @@ usr/include/sys/scsi/adapters/qusmail.h	sparc
 usr/include/sys/stmf_sbd_ioctl.h	sparc
 
 #
+# proxy port provider interface
+#
+usr/include/sys/pppt_ic_if.h		sparc
+usr/include/sys/pppt_ioctl.h		sparc
+
+# proxy daemon lint library
+usr/lib/llib-lstmfproxy			sparc
+usr/lib/llib-lstmfproxy.ln		sparc
+usr/lib/sparcv9/llib-lstmfproxy.ln	sparc
+
+#
 # portable object file and dictionary used by libfmd_msg test
 #
 usr/lib/fm/dict/TEST.dict		sparc
@@ -1369,3 +1348,22 @@ usr/include/rpcsvc/idmap_prot.x		sparc
 
 # Private idmap directory API
 usr/include/directory.h			sparc
+# librstp is private for bridging
+#
+usr/include/stp_bpdu.h		sparc
+usr/include/stp_in.h		sparc
+usr/include/stp_vectors.h	sparc
+usr/lib/librstp.so		sparc
+usr/lib/llib-lrstp		sparc
+usr/lib/llib-lrstp.ln		sparc
+
+# Private nvfru API
+usr/include/nvfru.h			sparc
+
+# vrrp
+usr/include/libvrrpadm.h		sparc
+usr/lib/libvrrpadm.so			sparc
+usr/lib/llib-lvrrpadm.ln		sparc
+usr/lib/sparcv9/libvrrpadm.so		sparc
+usr/lib/sparcv9/llib-lvrrpadm.ln	sparc
+usr/lib/llib-lvrrpadm			sparc

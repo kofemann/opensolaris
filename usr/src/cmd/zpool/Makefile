@@ -19,10 +19,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 
 PROG= zpool
@@ -32,10 +30,17 @@ POFILES=$(OBJS:%.o=%.po)
 POFILE= zpool.po
 
 include ../Makefile.cmd
+include ../Makefile.ctf
+
+STATCOMMONDIR = $(SRC)/cmd/stat/common
+
+STAT_COMMON_OBJS = timestamp.o
+STAT_COMMON_SRCS = $(STAT_COMMON_OBJS:%.o=$(STATCOMMONDIR)/%.c)
+SRCS += $(STAT_COMMON_SRCS)
 
 LDLIBS += -lzfs -lnvpair -ldevid -lefi -ldiskmgt -luutil -lumem
 
-INCS += -I../../common/zfs
+INCS += -I../../common/zfs -I$(STATCOMMONDIR)
 
 CPPFLAGS += -D_LARGEFILE64_SOURCE=1 -D_REENTRANT $(INCS)
 $(NOT_RELEASE_BUILD)CPPFLAGS += -DDEBUG
@@ -50,9 +55,13 @@ ROOTUSRSBINLINKS = $(PROG:%=$(ROOTUSRSBIN)/%)
 
 all: $(PROG)
 
-$(PROG): $(OBJS)
-	$(LINK.c) -o $@ $(OBJS) $(LDLIBS)
+$(PROG): $(OBJS) $(STAT_COMMON_OBJS)
+	$(LINK.c) -o $@ $(OBJS) $(STAT_COMMON_OBJS) $(LDLIBS)
 	$(POST_PROCESS)
+
+%.o:    $(STATCOMMONDIR)/%.c
+	$(COMPILE.c) $<
+	$(POST_PROCESS_O)
 
 install: all $(ROOTSBINPROG) $(ROOTUSRSBINLINKS)
 
@@ -61,7 +70,7 @@ $(POFILE): $(POFILES)
 	$(CAT) $(POFILES) > $@
 
 clean:
-	$(RM) $(OBJS)
+	$(RM) $(OBJS) $(STAT_COMMON_OBJS)
 
 lint:	lint_SRCS
 

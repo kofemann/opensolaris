@@ -199,7 +199,8 @@ fcoet_send_cmd_response(fct_cmd_t *cmd, uint32_t ioflags)
 
 send_cmd_rsp_error:
 	(void) snprintf(info, 160, "fcoet_send_cmd_response: can not handle "
-	    "FCT_IOF_FORCE_FCA_DONE for cmd %p, ioflags-%x", cmd, ioflags);
+	    "FCT_IOF_FORCE_FCA_DONE for cmd %p, ioflags-%x", (void *)cmd,
+	    ioflags);
 	info[159] = 0;
 	(void) fct_port_shutdown(CMD2SS(cmd)->ss_port,
 	    STMF_RFLAG_FATAL_ERROR | STMF_RFLAG_RESET, info);
@@ -234,6 +235,7 @@ fcoet_xfer_scsi_data(fct_cmd_t *cmd, stmf_data_buf_t *dbuf, uint32_t ioflags)
 		 * If it's write type command, we need send xfer_rdy now
 		 * We may need to consider bidirectional command later
 		 */
+		dbuf->db_sglist_length = 0;
 		frm = CMD2SS(cmd)->ss_eport->eport_alloc_frame(
 		    CMD2SS(cmd)->ss_eport, sizeof (fcoe_fcp_xfer_rdy_t) +
 		    FCFH_SIZE, NULL);
@@ -296,7 +298,7 @@ fcoet_xfer_scsi_data(fct_cmd_t *cmd, stmf_data_buf_t *dbuf, uint32_t ioflags)
 		if (idx != frm_num - 1) {
 			FFM_F_CTL(0x800008, frm);
 		} else {
-			FFM_F_CTL(0x880008, frm);
+			FFM_F_CTL(0x880008 | (data_size - left_size), frm);
 		}
 
 		FFM_OXID(cmd->cmd_oxid, frm);

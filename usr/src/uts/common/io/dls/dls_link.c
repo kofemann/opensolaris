@@ -98,17 +98,17 @@ i_dls_link_destructor(void *buf, void *arg)
  * - Strip the padding and skip over the header. Note that because some
  *   DLS consumers only check the db_ref count of the first mblk, we
  *   pullup the message into a single mblk. Because the original message
- *   is freed as the result of message pulling up, dls_link_header_info()
+ *   is freed as the result of message pulling up, mac_vlan_header_info()
  *   is called again to update the mhi_saddr and mhi_daddr pointers in the
- *   mhip. Further, the dls_link_header_info() function ensures that the
+ *   mhip. Further, the mac_vlan_header_info() function ensures that the
  *   size of the pulled message is greater than the MAC header size,
  *   therefore we can directly advance b_rptr to point at the payload.
  *
  * We choose to use a macro for performance reasons.
  */
-#define	DLS_PREPARE_PKT(dlp, mp, mhip, err) {				\
+#define	DLS_PREPARE_PKT(mh, mp, mhip, err) {				\
 	mblk_t *nextp = (mp)->b_next;					\
-	if (((err) = dls_link_header_info((dlp), (mp), (mhip))) == 0) {	\
+	if (((err) = mac_vlan_header_info((mh), (mp), (mhip))) == 0) {	\
 		DLS_STRIP_PADDING((mhip)->mhi_pktsize, (mp));		\
 		if (MBLKL((mp)) < (mhip)->mhi_hdrsize) {		\
 			mblk_t *newmp;					\
@@ -118,7 +118,7 @@ i_dls_link_destructor(void *buf, void *arg)
 				(mp)->b_next = NULL;			\
 				freemsg((mp));				\
 				(mp) = newmp;				\
-				VERIFY(dls_link_header_info((dlp),	\
+				VERIFY(mac_vlan_header_info((mh),	\
 				    (mp), (mhip)) == 0);		\
 				(mp)->b_next = nextp;			\
 				(mp)->b_rptr += (mhip)->mhi_hdrsize;	\
@@ -158,17 +158,18 @@ i_dls_link_subchain(dls_link_t *dlp, mblk_t *mp, const mac_header_info_t *mhip,
 		uint16_t cvid, cpri;
 		int err;
 
-		DLS_PREPARE_PKT(dlp, mp, &cmhi, err);
+		DLS_PREPARE_PKT(dlp->dl_mh, mp, &cmhi, err);
 		if (err != 0)
 			break;
 
 		prevp->b_next = mp;
 
 		/*
-		 * The source, destination, sap, vlan id and the MSGNOLOOP
-		 * flag must all match in a given subchain.
+		 * The source, destination, sap, vlan tag must all match in
+		 * a given subchain.
 		 */
-		if (memcmp(mhip->mhi_daddr, cmhi.mhi_daddr, addr_size) != 0 ||
+		if (mhip->mhi_saddr == NULL || cmhi.mhi_saddr == NULL ||
+		    memcmp(mhip->mhi_daddr, cmhi.mhi_daddr, addr_size) != 0 ||
 		    memcmp(mhip->mhi_saddr, cmhi.mhi_saddr, addr_size) != 0 ||
 		    mhip->mhi_bindsap != cmhi.mhi_bindsap) {
 			/*
@@ -358,7 +359,7 @@ i_dls_link_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
 		 */
 		accepted = B_FALSE;
 
-		DLS_PREPARE_PKT(dlp, mp, &mhi, err);
+		DLS_PREPARE_PKT(dlp->dl_mh, mp, &mhi, err);
 		if (err != 0) {
 			atomic_add_32(&(dlp->dl_unknowns), 1);
 			nextp = mp->b_next;
@@ -390,12 +391,13 @@ i_dls_link_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
 			/*
 			 * Don't pass the packets up if they are tagged
 			 * packets and:
-			 *  - their VID and priority are both zero (invalid
+			 *  - their VID and priority are both zero and the
+			 *    original packet isn't using the PVID (invalid
 			 *    packets).
 			 *  - their sap is ETHERTYPE_VLAN and their VID is
 			 *    zero as they have already been sent upstreams.
 			 */
-			if ((vid == VLAN_ID_NONE &&
+			if ((vid == VLAN_ID_NONE && !mhi.mhi_ispvid &&
 			    VLAN_PRI(mhi.mhi_tci) == 0) ||
 			    (mhi.mhi_bindsap == ETHERTYPE_VLAN &&
 			    vid == VLAN_ID_NONE)) {
@@ -506,7 +508,7 @@ dls_rx_vlan_promisc(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
 	void				*ds_rx_arg;
 	int				err;
 
-	DLS_PREPARE_PKT(dlp, mp, &mhi, err);
+	DLS_PREPARE_PKT(dlp->dl_mh, mp, &mhi, err);
 	if (err != 0)
 		goto drop;
 
@@ -551,7 +553,7 @@ dls_rx_promisc(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
 	dls_head_t			*dhp;
 	mod_hash_key_t			key;
 
-	DLS_PREPARE_PKT(dlp, mp, &mhi, err);
+	DLS_PREPARE_PKT(dlp->dl_mh, mp, &mhi, err);
 	if (err != 0)
 		goto drop;
 
@@ -599,6 +601,7 @@ i_dls_link_destroy(dls_link_t *dlp)
 	dlp->dl_mch = NULL;
 	dlp->dl_mip = NULL;
 	dlp->dl_unknowns = 0;
+	dlp->dl_nonip_cnt = 0;
 	kmem_cache_free(i_dls_link_cachep, dlp);
 }
 
@@ -765,7 +768,8 @@ dls_link_devinfo(dev_t dev)
 
 	if ((drv = ddi_major_to_name(getmajor(dev))) == NULL)
 		return (NULL);
-	(void) snprintf(macname, MAXNAMELEN, "%s%d", drv, getminor(dev) - 1);
+	(void) snprintf(macname, MAXNAMELEN, "%s%d", drv,
+	    DLS_MINOR2INST(getminor(dev)));
 
 	/*
 	 * The code below assumes that the name constructed above is the
@@ -857,51 +861,51 @@ dls_link_setzid(const char *name, zoneid_t zid)
 		goto done;
 
 	/*
-	 * Check whether this dlp is used by its own zones, if yes,
-	 * we cannot change its zoneid.
+	 * Check whether this dlp is used by its own zone.  If yes, we cannot
+	 * change its zoneid.
 	 */
 	if (dlp->dl_zone_ref != 0) {
 		err = EBUSY;
 		goto done;
 	}
 
+	dlp->dl_zid = zid;
+
 	if (zid == GLOBAL_ZONEID) {
 		/*
-		 * Move the link from the local zone to the global zone,
-		 * and release the reference to this link.  At the same time
-		 * reset the link's active state so that an aggregation is
-		 * allowed to be created over it.
+		 * The link is moving from a non-global zone to the global
+		 * zone, so we need to release the reference that was held
+		 * when the link was originally assigned to the non-global
+		 * zone.
 		 */
-		dlp->dl_zid = zid;
-		dls_mac_active_clear(dlp);
 		dls_link_rele(dlp);
-		goto done;
-	} else if (old_zid == GLOBAL_ZONEID) {
-		/*
-		 * Move the link from the global zone to the local zone,
-		 * and hold a reference to this link.  Also, set the link
-		 * to the "active" state so that the global zone is
-		 * not able to create an aggregation over this link.
-		 * TODO: revisit once we allow creating aggregations
-		 * within a local zone.
-		 */
-		if ((err = dls_mac_active_set(dlp)) != 0) {
-			if (err != ENXIO)
-				err = EBUSY;
-			goto done;
-		}
-		dlp->dl_zid = zid;
-		return (0);
-	} else {
-		/*
-		 * Move the link from a local zone to another local zone.
-		 */
-		dlp->dl_zid = zid;
 	}
 
 done:
-	dls_link_rele(dlp);
+	/*
+	 * We only keep the reference to this link open if the link has
+	 * successfully moved from the global zone to a non-global zone.
+	 */
+	if (err != 0 || old_zid != GLOBAL_ZONEID)
+		dls_link_rele(dlp);
 	return (err);
+}
+
+int
+dls_link_getzid(const char *name, zoneid_t *zidp)
+{
+	dls_link_t	*dlp;
+	int		err = 0;
+
+	if ((err = dls_link_hold(name, &dlp)) != 0)
+		return (err);
+
+	ASSERT(MAC_PERIM_HELD(dlp->dl_mh));
+
+	*zidp = dlp->dl_zid;
+
+	dls_link_rele(dlp);
+	return (0);
 }
 
 void
@@ -1010,59 +1014,4 @@ dls_link_remove(dls_link_t *dlp, dld_str_t *dsp)
 		dhp->dh_removing = B_FALSE;
 		mutex_exit(&dhp->dh_lock);
 	}
-}
-
-int
-dls_link_header_info(dls_link_t *dlp, mblk_t *mp, mac_header_info_t *mhip)
-{
-	boolean_t	is_ethernet = (dlp->dl_mip->mi_media == DL_ETHER);
-	int		err = 0;
-
-	/*
-	 * Packets should always be at least 16 bit aligned.
-	 */
-	ASSERT(IS_P2ALIGNED(mp->b_rptr, sizeof (uint16_t)));
-
-	if ((err = mac_header_info(dlp->dl_mh, mp, mhip)) != 0)
-		return (err);
-
-	/*
-	 * If this is a VLAN-tagged Ethernet packet, then the SAP in the
-	 * mac_header_info_t as returned by mac_header_info() is
-	 * ETHERTYPE_VLAN. We need to grab the ethertype from the VLAN header.
-	 */
-	if (is_ethernet && (mhip->mhi_bindsap == ETHERTYPE_VLAN)) {
-		struct ether_vlan_header *evhp;
-		uint16_t sap;
-		mblk_t *tmp = NULL;
-		size_t size;
-
-		size = sizeof (struct ether_vlan_header);
-		if (MBLKL(mp) < size) {
-			/*
-			 * Pullup the message in order to get the MAC header
-			 * infomation. Note that this is a read-only function,
-			 * we keep the input packet intact.
-			 */
-			if ((tmp = msgpullup(mp, size)) == NULL)
-				return (EINVAL);
-
-			mp = tmp;
-		}
-		evhp = (struct ether_vlan_header *)mp->b_rptr;
-		sap = ntohs(evhp->ether_type);
-		(void) mac_sap_verify(dlp->dl_mh, sap, &mhip->mhi_bindsap);
-		mhip->mhi_hdrsize = sizeof (struct ether_vlan_header);
-		mhip->mhi_tci = ntohs(evhp->ether_tci);
-		mhip->mhi_istagged = B_TRUE;
-		freemsg(tmp);
-
-		if (VLAN_CFI(mhip->mhi_tci) != ETHER_CFI)
-			return (EINVAL);
-	} else {
-		mhip->mhi_istagged = B_FALSE;
-		mhip->mhi_tci = 0;
-	}
-
-	return (0);
 }

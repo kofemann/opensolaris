@@ -111,7 +111,6 @@ static void	nfs4sequence(mntinfo4_t *, nfs4_server_t *, servinfo4_t *,
 		    nfs4_error_t *);
 static void	nfs4_attrcache_va(vnode_t *, nfs4_ga_res_t *, int);
 static void	nfs4_pgflush_thread(pgflush_t *);
-static void	flush_pages(vnode_t *, cred_t *);
 static int	nfs4_call_construct(void *, void *, int);
 static void	nfs4_call_destroy(void *, void *);
 
@@ -311,7 +310,7 @@ nfs4_purge_caches(vnode_t *vp, int purge_dnlc, cred_t *cr, int asyncpg)
 	if (nfs4_has_pages(vp) && !pgflush) {
 		if (!asyncpg) {
 			(void) nfs4_waitfor_purge_complete(vp);
-			flush_pages(vp, cr);
+			nfs4_flush_pages(vp, cr);
 		} else {
 			pgflush_t *args;
 
@@ -352,8 +351,8 @@ nfs4_purge_caches(vnode_t *vp, int purge_dnlc, cred_t *cr, int asyncpg)
  * ones.
  */
 
-static void
-flush_pages(vnode_t *vp, cred_t *cr)
+void
+nfs4_flush_pages(vnode_t *vp, cred_t *cr)
 {
 	int error;
 	rnode4_t *rp = VTOR4(vp);
@@ -382,7 +381,7 @@ nfs4_pgflush_thread(pgflush_t *args)
 	rp->r_pgflush = curthread;
 	mutex_exit(&rp->r_statelock);
 
-	flush_pages(args->vp, args->cr);
+	nfs4_flush_pages(args->vp, args->cr);
 
 	mutex_enter(&rp->r_statelock);
 	rp->r_pgflush = NULL;
@@ -1419,8 +1418,9 @@ nfs4_async_start(struct vfs *vfsp)
 				zthread_exit();
 				/* NOTREACHED */
 			}
-			time_left = cv_timedwait(&mi->mi_async_work_cv,
-			    &mi->mi_async_lock, nfs_async_timeout + lbolt);
+			time_left = cv_reltimedwait(&mi->mi_async_work_cv,
+			    &mi->mi_async_lock, nfs_async_timeout,
+			    TR_CLOCK_TICK);
 
 			CALLB_CPR_SAFE_END(&cprinfo, &mi->mi_async_lock);
 
@@ -2626,6 +2626,7 @@ void
 nfs4_write_error(vnode_t *vp, int error, cred_t *cr)
 {
 	mntinfo4_t *mi;
+	clock_t now = ddi_get_lbolt();
 
 	mi = VTOMI4(vp);
 	/*
@@ -2647,7 +2648,7 @@ nfs4_write_error(vnode_t *vp, int error, cred_t *cr)
 	 * messages from the same file system.
 	 */
 	if ((error != ENOSPC && error != EDQUOT) ||
-	    lbolt - mi->mi_printftime > 0) {
+	    now - mi->mi_printftime > 0) {
 		zoneid_t zoneid = mi->mi_zone->zone_id;
 
 #ifdef DEBUG
@@ -2668,7 +2669,7 @@ nfs4_write_error(vnode_t *vp, int error, cred_t *cr)
 				    crgetuid(curthread->t_cred),
 				    crgetgid(curthread->t_cred));
 			}
-			mi->mi_printftime = lbolt +
+			mi->mi_printftime = now +
 			    nfs_write_error_interval * hz;
 		}
 		sfh4_printfhandle(VTOR4(vp)->r_fh);
@@ -3050,6 +3051,14 @@ nfs_free_mi4(mntinfo4_t *mi)
 	int i;
 	servinfo4_t 		*svp;
 
+	/*
+	 * Code introduced here should be carefully evaluated to make
+	 * sure none of the freed resources are accessed either directly
+	 * or indirectly after freeing them. For eg: Introducing calls to
+	 * NFS4_DEBUG that use mntinfo4_t structure member after freeing
+	 * the structure members or other routines calling back into NFS
+	 * accessing freed mntinfo4_t structure member.
+	 */
 	if (mi->mi_flags & MI4_PNFS)
 		nfs4_pnfs_fini_mi(mi);
 	mutex_enter(&mi->mi_lock);
@@ -3060,8 +3069,6 @@ nfs_free_mi4(mntinfo4_t *mi)
 	ASSERT(mi->mi_threads == 0);
 	ASSERT(mi->mi_manager_thread == NULL);
 	mutex_exit(&mi->mi_async_lock);
-	svp = mi->mi_servers;
-	sv4_free(svp);
 	if (mi->mi_io_kstats) {
 		kstat_delete(mi->mi_io_kstats);
 		mi->mi_io_kstats = NULL;
@@ -3087,6 +3094,8 @@ nfs_free_mi4(mntinfo4_t *mi)
 		sfh4_rele(&mi->mi_rootfh);
 	if (mi->mi_srvparentfh != NULL)
 		sfh4_rele(&mi->mi_srvparentfh);
+	svp = mi->mi_servers;
+	sv4_free(svp);
 	mutex_destroy(&mi->mi_lock);
 	mutex_destroy(&mi->mi_async_lock);
 	mutex_destroy(&mi->mi_msg_list_lock);
@@ -3448,8 +3457,8 @@ nfs4_renew_lease_thread(nfs4_server_t *sp)
 			mutex_enter(&cpr_lock);
 			CALLB_CPR_SAFE_BEGIN(&cpr_info);
 			mutex_exit(&cpr_lock);
-			time_left = cv_timedwait(&sp->cv_thread_exit,
-			    &sp->s_lock, tick_delay + lbolt);
+			time_left = cv_reltimedwait(&sp->cv_thread_exit,
+			    &sp->s_lock, tick_delay, TR_CLOCK_TICK);
 			mutex_enter(&cpr_lock);
 			CALLB_CPR_SAFE_END(&cpr_info, &cpr_lock);
 			mutex_exit(&cpr_lock);
@@ -3484,8 +3493,8 @@ nfs4_renew_lease_thread(nfs4_server_t *sp)
 		mutex_enter(&cpr_lock);
 		CALLB_CPR_SAFE_BEGIN(&cpr_info);
 		mutex_exit(&cpr_lock);
-		time_left = cv_timedwait(&sp->cv_thread_exit, &sp->s_lock,
-		    tick_delay + lbolt);
+		time_left = cv_reltimedwait(&sp->cv_thread_exit, &sp->s_lock,
+		    tick_delay, TR_CLOCK_TICK);
 		mutex_enter(&cpr_lock);
 		CALLB_CPR_SAFE_END(&cpr_info, &cpr_lock);
 		mutex_exit(&cpr_lock);

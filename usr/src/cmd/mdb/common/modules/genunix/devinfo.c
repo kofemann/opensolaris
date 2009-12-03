@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -41,20 +41,11 @@
 #include <mdb/mdb_ks.h>
 
 #include "nvpair.h"
+#include "devinfo.h"
 
 #define	DEVINFO_TREE_INDENT	4	/* Indent for devs one down in tree */
 #define	DEVINFO_PROP_INDENT	4	/* Indent for properties */
 #define	DEVINFO_PROPLIST_INDENT	8	/* Indent for properties lists */
-
-
-/*
- * Options for prtconf/devinfo dcmd.
- */
-#define	DEVINFO_VERBOSE	0x1
-#define	DEVINFO_PARENT	0x2
-#define	DEVINFO_CHILD	0x4
-#define	DEVINFO_ALLBOLD	0x8
-#define	DEVINFO_SUMMARY	0x10
 
 /*
  * devinfo node state map. Used by devinfo() and devinfo_audit().
@@ -954,11 +945,6 @@ exit:
 	mdb_dec_indent(DEVINFO_PROP_INDENT);
 }
 
-typedef struct devinfo_cb_data {
-	uintptr_t	di_base;
-	uint_t		di_flags;
-} devinfo_cb_data_t;
-
 static int
 devinfo_print(uintptr_t addr, struct dev_info *dev, devinfo_cb_data_t *data)
 {
@@ -1290,6 +1276,8 @@ devnames(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 		{ "DN_OPEN_RETURNS_EINTR", \
 				DN_OPEN_RETURNS_EINTR, DN_OPEN_RETURNS_EINTR},
 		{ "DN_SCSI_SIZE_CLEAN",	DN_SCSI_SIZE_CLEAN, DN_SCSI_SIZE_CLEAN},
+		{ "DN_NETWORK_PHYSDRIVER", \
+				DN_NETWORK_PHYSDRIVER, DN_NETWORK_PHYSDRIVER},
 		{ NULL, 0, 0 }
 	};
 

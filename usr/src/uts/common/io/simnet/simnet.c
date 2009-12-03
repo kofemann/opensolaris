@@ -54,12 +54,14 @@
 #include <inet/wifi_ioctl.h>
 #include <sys/thread.h>
 #include <sys/synch.h>
+#include <sys/sunddi.h>
 
 #include "simnet_impl.h"
 
 #define	SIMNETINFO		"Simulated Network Driver"
 
 static dev_info_t *simnet_dip;
+static ddi_taskq_t *simnet_rxq;
 
 static int simnet_getinfo(dev_info_t *, ddi_info_cmd_t, void *, void **);
 static int simnet_attach(dev_info_t *, ddi_attach_cmd_t);
@@ -72,13 +74,13 @@ static uint8_t *mcastaddr_lookup(simnet_dev_t *, const uint8_t *);
 
 static dld_ioc_info_t simnet_ioc_list[] = {
 	{SIMNET_IOC_CREATE, DLDCOPYINOUT, sizeof (simnet_ioc_create_t),
-	    simnet_ioc_create, {PRIV_SYS_DL_CONFIG}},
+	    simnet_ioc_create, secpolicy_dl_config},
 	{SIMNET_IOC_DELETE, DLDCOPYIN, sizeof (simnet_ioc_delete_t),
-	    simnet_ioc_delete, {PRIV_SYS_DL_CONFIG}},
+	    simnet_ioc_delete, secpolicy_dl_config},
 	{SIMNET_IOC_INFO, DLDCOPYINOUT, sizeof (simnet_ioc_info_t),
-	    simnet_ioc_info, {NULL}},
+	    simnet_ioc_info, NULL},
 	{SIMNET_IOC_MODIFY, DLDCOPYIN, sizeof (simnet_ioc_modify_t),
-	    simnet_ioc_modify, {PRIV_SYS_DL_CONFIG}},
+	    simnet_ioc_modify, secpolicy_dl_config}
 };
 
 DDI_DEFINE_STREAM_OPS(simnet_dev_ops, nulldev, nulldev, simnet_attach,
@@ -166,13 +168,16 @@ _info(struct modinfo *modinfop)
 	return (mod_info(&modlinkage, modinfop));
 }
 
-static void
+static boolean_t
 simnet_init(void)
 {
+	if ((simnet_rxq = ddi_taskq_create(simnet_dip, "simnet", 1,
+	    TASKQ_DEFAULTPRI, 0)) == NULL)
+		return (B_FALSE);
 	rw_init(&simnet_dev_lock, NULL, RW_DEFAULT, NULL);
 	list_create(&simnet_dev_list, sizeof (simnet_dev_t),
 	    offsetof(simnet_dev_t, sd_listnode));
-	simnet_count = 0;
+	return (B_TRUE);
 }
 
 static void
@@ -181,6 +186,7 @@ simnet_fini(void)
 	ASSERT(simnet_count == 0);
 	rw_destroy(&simnet_dev_lock);
 	list_destroy(&simnet_dev_list);
+	ddi_taskq_destroy(simnet_rxq);
 }
 
 /*ARGSUSED*/
@@ -208,12 +214,14 @@ simnet_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			/* we only allow instance 0 to attach */
 			return (DDI_FAILURE);
 		}
+
 		if (dld_ioc_register(SIMNET_IOC, simnet_ioc_list,
 		    DLDIOCCNT(simnet_ioc_list)) != 0)
 			return (DDI_FAILURE);
 
 		simnet_dip = dip;
-		simnet_init();
+		if (!simnet_init())
+			return (DDI_FAILURE);
 		return (DDI_SUCCESS);
 
 	case DDI_RESUME:
@@ -237,9 +245,9 @@ simnet_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		if (simnet_count > 0)
 			return (DDI_FAILURE);
 
-		simnet_dip = NULL;
-		simnet_fini();
 		dld_ioc_unregister(SIMNET_IOC);
+		simnet_fini();
+		simnet_dip = NULL;
 		return (DDI_SUCCESS);
 
 	case DDI_SUSPEND:
@@ -256,6 +264,7 @@ simnet_dev_lookup(datalink_id_t link_id)
 {
 	simnet_dev_t *sdev;
 
+	ASSERT(RW_LOCK_HELD(&simnet_dev_lock));
 	for (sdev = list_head(&simnet_dev_list); sdev != NULL;
 	    sdev = list_next(&simnet_dev_list, sdev)) {
 		if (!(sdev->sd_flags & SDF_SHUTDOWN) &&
@@ -388,6 +397,7 @@ simnet_ioc_create(void *karg, intptr_t arg, int mode, cred_t *cred, int *rvalp)
 
 	sdev->sd_type = create_arg->sic_type;
 	sdev->sd_link_id = create_arg->sic_link_id;
+	sdev->sd_zoneid = crgetzoneid(cred);
 	sdev->sd_refcount++;
 	mutex_init(&sdev->sd_instlock, NULL, MUTEX_DRIVER, NULL);
 	cv_init(&sdev->sd_threadwait, NULL, CV_DRIVER, NULL);
@@ -411,7 +421,8 @@ simnet_ioc_create(void *karg, intptr_t arg, int mode, cred_t *cred, int *rvalp)
 		goto exit;
 	}
 
-	if ((err = dls_devnet_create(sdev->sd_mh, sdev->sd_link_id)) != 0) {
+	if ((err = dls_devnet_create(sdev->sd_mh, sdev->sd_link_id,
+	    crgetzoneid(cred))) != 0) {
 		simnet_dev_unref(sdev);
 		goto exit;
 	}
@@ -436,6 +447,7 @@ simnet_remove_peer(simnet_dev_t *sdev)
 	simnet_dev_t *sdev_peer;
 	datalink_id_t peer_link_id = DATALINK_INVALID_LINKID;
 
+	ASSERT(RW_WRITE_HELD(&simnet_dev_lock));
 	if ((sdev_peer = sdev->sd_peer_dev) != NULL) {
 		ASSERT(sdev == sdev_peer->sd_peer_dev);
 		sdev_peer->sd_peer_dev = NULL;
@@ -463,6 +475,12 @@ simnet_ioc_modify(void *karg, intptr_t arg, int mode, cred_t *cred, int *rvalp)
 		return (ENOENT);
 	}
 
+	if (sdev->sd_zoneid != crgetzoneid(cred)) {
+		rw_exit(&simnet_dev_lock);
+		simnet_dev_unref(sdev);
+		return (ENOENT);
+	}
+
 	if (sdev->sd_link_id == modify_arg->sim_peer_link_id) {
 		/* Cannot peer with self */
 		rw_exit(&simnet_dev_lock);
@@ -478,13 +496,21 @@ simnet_ioc_modify(void *karg, intptr_t arg, int mode, cred_t *cred, int *rvalp)
 		return (0);
 	}
 
-	if (modify_arg->sim_peer_link_id != DATALINK_INVALID_LINKID &&
-	    (sdev_peer = simnet_dev_lookup(modify_arg->sim_peer_link_id)) ==
-	    NULL) {
-		/* Peer simnet device not available */
-		rw_exit(&simnet_dev_lock);
-		simnet_dev_unref(sdev);
-		return (ENOENT);
+	if (modify_arg->sim_peer_link_id != DATALINK_INVALID_LINKID) {
+		sdev_peer = simnet_dev_lookup(modify_arg->sim_peer_link_id);
+		if (sdev_peer == NULL) {
+			/* Peer simnet device not available */
+			rw_exit(&simnet_dev_lock);
+			simnet_dev_unref(sdev);
+			return (ENOENT);
+		}
+		if (sdev_peer->sd_zoneid != sdev->sd_zoneid) {
+			/* The two peers must be in the same zone (for now). */
+			rw_exit(&simnet_dev_lock);
+			simnet_dev_unref(sdev);
+			simnet_dev_unref(sdev_peer);
+			return (EACCES);
+		}
 	}
 
 	/* First remove any previous peer */
@@ -520,6 +546,12 @@ simnet_ioc_delete(void *karg, intptr_t arg, int mode, cred_t *cred, int *rvalp)
 	rw_enter(&simnet_dev_lock, RW_WRITER);
 	if ((sdev = simnet_dev_lookup(delete_arg->sid_link_id)) == NULL) {
 		rw_exit(&simnet_dev_lock);
+		return (ENOENT);
+	}
+
+	if (sdev->sd_zoneid != crgetzoneid(cred)) {
+		rw_exit(&simnet_dev_lock);
+		simnet_dev_unref(sdev);
 		return (ENOENT);
 	}
 
@@ -560,7 +592,8 @@ simnet_ioc_delete(void *karg, intptr_t arg, int mode, cred_t *cred, int *rvalp)
 	return (err);
 fail:
 	/* Re-create simnet instance and add any previous peer */
-	(void) dls_devnet_create(sdev->sd_mh, sdev->sd_link_id);
+	(void) dls_devnet_create(sdev->sd_mh, sdev->sd_link_id,
+	    crgetzoneid(cred));
 	sdev->sd_flags &= ~SDF_SHUTDOWN;
 
 	ASSERT(sdev->sd_peer_dev == NULL);
@@ -590,6 +623,10 @@ simnet_ioc_info(void *karg, intptr_t arg, int mode, cred_t *cred, int *rvalp)
 	simnet_ioc_info_t *info_arg = karg;
 	simnet_dev_t *sdev;
 
+	/* Make sure that the simnet link is visible from the caller's zone. */
+	if (!dls_devnet_islinkvisible(info_arg->sii_link_id, crgetzoneid(cred)))
+		return (ENOENT);
+
 	rw_enter(&simnet_dev_lock, RW_READER);
 	if ((sdev = simnet_dev_lookup(info_arg->sii_link_id)) == NULL) {
 		rw_exit(&simnet_dev_lock);
@@ -607,16 +644,44 @@ simnet_ioc_info(void *karg, intptr_t arg, int mode, cred_t *cred, int *rvalp)
 	return (0);
 }
 
-static void
-simnet_rx(simnet_dev_t *sdev, mblk_t *mp)
+static boolean_t
+simnet_thread_ref(simnet_dev_t *sdev)
 {
+	mutex_enter(&sdev->sd_instlock);
+	if (sdev->sd_flags & SDF_SHUTDOWN ||
+	    !(sdev->sd_flags & SDF_STARTED)) {
+		mutex_exit(&sdev->sd_instlock);
+		return (B_FALSE);
+	}
+	sdev->sd_threadcount++;
+	mutex_exit(&sdev->sd_instlock);
+	return (B_TRUE);
+}
+
+static void
+simnet_thread_unref(simnet_dev_t *sdev)
+{
+	mutex_enter(&sdev->sd_instlock);
+	if (--sdev->sd_threadcount == 0)
+		cv_broadcast(&sdev->sd_threadwait);
+	mutex_exit(&sdev->sd_instlock);
+}
+
+static void
+simnet_rx(void *arg)
+{
+	mblk_t *mp = arg;
 	mac_header_info_t hdr_info;
+	simnet_dev_t *sdev;
+
+	sdev = (simnet_dev_t *)mp->b_next;
+	mp->b_next = NULL;
 
 	/* Check for valid packet header */
 	if (mac_header_info(sdev->sd_mh, mp, &hdr_info) != 0) {
 		freemsg(mp);
 		sdev->sd_stats.recv_errors++;
-		return;
+		goto rx_done;
 	}
 
 	/*
@@ -630,14 +695,14 @@ simnet_rx(simnet_dev_t *sdev, mblk_t *mp)
 		    bcmp(hdr_info.mhi_daddr, sdev->sd_mac_addr,
 		    ETHERADDRL) != 0) {
 			freemsg(mp);
-			return;
+			goto rx_done;
 		} else if (hdr_info.mhi_dsttype == MAC_ADDRTYPE_MULTICAST) {
 			mutex_enter(&sdev->sd_instlock);
 			if (mcastaddr_lookup(sdev, hdr_info.mhi_daddr) ==
 			    NULL) {
 				mutex_exit(&sdev->sd_instlock);
 				freemsg(mp);
-				return;
+				goto rx_done;
 			}
 			mutex_exit(&sdev->sd_instlock);
 		}
@@ -646,6 +711,8 @@ simnet_rx(simnet_dev_t *sdev, mblk_t *mp)
 	sdev->sd_stats.recv_count++;
 	sdev->sd_stats.rbytes += msgdsize(mp);
 	mac_rx(sdev->sd_mh, NULL, mp);
+rx_done:
+	simnet_thread_unref(sdev);
 }
 
 static mblk_t *
@@ -675,31 +742,18 @@ simnet_m_tx(void *arg, mblk_t *mp_chain)
 	 * (reader lock) and increment the threadcount of the peer, the peer
 	 * MAC cannot be disabled in simnet_ioc_delete.
 	 */
-	mutex_enter(&sdev_rx->sd_instlock);
-	if (sdev_rx->sd_flags & SDF_SHUTDOWN ||
-	    !(sdev_rx->sd_flags & SDF_STARTED)) {
-		mutex_exit(&sdev_rx->sd_instlock);
+	if (!simnet_thread_ref(sdev_rx)) {
 		rw_exit(&simnet_dev_lock);
 		freemsgchain(mp_chain);
 		return (NULL);
 	}
-	sdev_rx->sd_threadcount++;
-	mutex_exit(&sdev_rx->sd_instlock);
 	rw_exit(&simnet_dev_lock);
 
-	mutex_enter(&sdev->sd_instlock);
-	if (sdev->sd_flags & SDF_SHUTDOWN ||
-	    !(sdev->sd_flags & SDF_STARTED)) {
-		mutex_exit(&sdev->sd_instlock);
-		mutex_enter(&sdev_rx->sd_instlock);
-		if (--sdev_rx->sd_threadcount == 0)
-			cv_broadcast(&sdev_rx->sd_threadwait);
-		mutex_exit(&sdev_rx->sd_instlock);
+	if (!simnet_thread_ref(sdev)) {
+		simnet_thread_unref(sdev_rx);
 		freemsgchain(mp_chain);
 		return (NULL);
 	}
-	sdev->sd_threadcount++;
-	mutex_exit(&sdev->sd_instlock);
 
 	while ((mp = mpnext) != NULL) {
 		int len;
@@ -743,19 +797,29 @@ simnet_m_tx(void *arg, mblk_t *mp_chain)
 			continue;
 		}
 
-		sdev->sd_stats.xmit_count++;
-		sdev->sd_stats.obytes += len;
-		simnet_rx(sdev_rx, mp);
+		/* Hold reference for taskq receive processing per-pkt */
+		if (!simnet_thread_ref(sdev_rx)) {
+			freemsg(mp);
+			freemsgchain(mpnext);
+			break;
+		}
+
+		/* Use taskq for pkt receive to avoid kernel stack explosion */
+		mp->b_next = (mblk_t *)sdev_rx;
+		if (ddi_taskq_dispatch(simnet_rxq, simnet_rx, mp,
+		    DDI_NOSLEEP) == DDI_SUCCESS) {
+			sdev->sd_stats.xmit_count++;
+			sdev->sd_stats.obytes += len;
+		} else {
+			simnet_thread_unref(sdev_rx);
+			mp->b_next = NULL;
+			freemsg(mp);
+			sdev_rx->sd_stats.recv_errors++;
+		}
 	}
 
-	mutex_enter(&sdev->sd_instlock);
-	if (--sdev->sd_threadcount == 0)
-		cv_broadcast(&sdev->sd_threadwait);
-	mutex_exit(&sdev->sd_instlock);
-	mutex_enter(&sdev_rx->sd_instlock);
-	if (--sdev_rx->sd_threadcount == 0)
-		cv_broadcast(&sdev_rx->sd_threadwait);
-	mutex_exit(&sdev_rx->sd_instlock);
+	simnet_thread_unref(sdev);
+	simnet_thread_unref(sdev_rx);
 	return (NULL);
 }
 
@@ -920,6 +984,7 @@ mcastaddr_lookup(simnet_dev_t *sdev, const uint8_t *addrp)
 	int idx;
 	uint8_t *maddrptr;
 
+	ASSERT(MUTEX_HELD(&sdev->sd_instlock));
 	maddrptr = sdev->sd_mcastaddrs;
 	for (idx = 0; idx < sdev->sd_mcastaddr_count; idx++) {
 		if (bcmp(maddrptr, addrp, ETHERADDRL) == 0)

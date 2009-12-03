@@ -38,6 +38,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <alloca.h>
 #include <stdarg.h>
 #include <limits.h>
 #include <signal.h>
@@ -62,6 +63,9 @@
 #include <zlib.h>
 #include <sys/lockfs.h>
 #include <sys/filio.h>
+#ifdef i386
+#include <libfdisk.h>
+#endif
 
 #if !defined(_OPB)
 #include <sys/ucode.h>
@@ -192,6 +196,7 @@ char *menu_cmds[] = {
 	"chainloader",	/* CHAINLOADER_CMD */
 	"args",		/* ARGS_CMD */
 	"findroot",	/* FINDROOT_CMD */
+	"bootfs",	/* BOOTFS_CMD */
 	NULL
 };
 
@@ -248,7 +253,6 @@ static void parse_args(int, char *argv[]);
 static error_t bam_menu(char *, char *, int, char *[]);
 static error_t bam_archive(char *, char *);
 
-static void bam_exit(int);
 static void bam_lock(void);
 static void bam_unlock(void);
 
@@ -262,6 +266,7 @@ static void menu_free(menu_t *);
 static void filelist_free(filelist_t *);
 static error_t list2file(char *, char *, char *, line_t *);
 static error_t list_entry(menu_t *, char *, char *);
+static error_t list_setting(menu_t *, char *, char *);
 static error_t delete_all_entries(menu_t *, char *, char *);
 static error_t update_entry(menu_t *mp, char *menu_root, char *opt);
 static error_t update_temp(menu_t *mp, char *dummy, char *opt);
@@ -270,7 +275,6 @@ static error_t update_archive(char *, char *);
 static error_t list_archive(char *, char *);
 static error_t update_all(char *, char *);
 static error_t read_list(char *, filelist_t *);
-static error_t set_global(menu_t *, char *, int);
 static error_t set_option(menu_t *, char *, char *);
 static error_t set_kernel(menu_t *, menu_cmd_t, char *, char *, size_t);
 static error_t get_kernel(menu_t *, menu_cmd_t, char *, size_t);
@@ -302,6 +306,9 @@ static subcmd_defn_t menu_subcmds[] = {
 	"update_entry",		OPT_REQ,	update_entry, 0, /* menu */
 	"update_temp",		OPT_OPTIONAL,	update_temp, 0,	/* reboot */
 	"upgrade",		OPT_ABSENT,	upgrade_menu, 0, /* menu */
+	"list_setting",		OPT_OPTIONAL,	list_setting, 1, /* menu */
+	"disable_hypervisor",	OPT_ABSENT,	cvt_to_metal, 0, /* menu */
+	"enable_hypervisor",	OPT_ABSENT,	cvt_to_hyper, 0, /* menu */
 	NULL,			0,		NULL, 0	/* must be last */
 };
 
@@ -530,7 +537,7 @@ main(int argc, char *argv[])
 	}
 
 	if (ret != BAM_SUCCESS)
-		bam_exit(1);
+		bam_exit((ret == BAM_NOCHANGE) ? 2 : 1);
 
 	bam_unlock();
 	return (0);
@@ -592,13 +599,17 @@ parse_args(int argc, char *argv[])
 /*
  * A combination of public and private commands are parsed here.
  * The internal syntax and the corresponding functionality are:
- *	-a update	-- update-archive
- *	-a list		-- list-archive
- *	-a update-all	-- (reboot to sync all mounted OS archive)
- *	-m update_entry	-- update-menu
- *	-m list_entry	-- list-menu
- *	-m update_temp	-- (reboot -- [boot-args])
- *	-m delete_all_entries -- (called from install)
+ *	-a update			-- update-archive
+ *	-a list				-- list-archive
+ *	-a update-all			-- (reboot to sync all mnted OS archive)
+ *	-m update_entry			-- update-menu
+ *	-m list_entry			-- list-menu
+ *	-m update_temp			-- (reboot -- [boot-args])
+ *	-m delete_all_entries		-- (called from install)
+ *	-m enable_hypervisor [args]	-- cvt_to_hyper
+ *	-m disable_hypervisor		-- cvt_to_metal
+ *	-m list_setting [entry] [value]	-- list_setting
+ *
  * A set of private flags is there too:
  *	-F		-- purge the cache directories and rebuild them
  *	-e		-- use the (faster) archive update approach (used by
@@ -615,7 +626,7 @@ parse_args_internal(int argc, char *argv[])
 	opterr = 0;
 
 	error = 0;
-	while ((c = getopt(argc, argv, "a:d:fm:no:veFCR:p:Z")) != -1) {
+	while ((c = getopt(argc, argv, "a:d:fm:no:veFCR:p:XZ")) != -1) {
 		switch (c) {
 		case 'a':
 			if (bam_cmd) {
@@ -697,6 +708,9 @@ parse_args_internal(int argc, char *argv[])
 				error = 1;
 				bam_error(INVALID_PLAT, bam_platform);
 			}
+			break;
+		case 'X':
+			bam_is_hv = BAM_HV_PRESENT;
 			break;
 		case 'Z':
 			bam_zfs = 1;
@@ -792,7 +806,12 @@ check_subcmd_and_options(
 		}
 		if (bam_argc == 1)
 			sync_menu = 0;
-	} else if (bam_argc || bam_argv) {
+	} else if (((strcmp(subcmd, "enable_hypervisor") != 0) &&
+	    (strcmp(subcmd, "list_setting") != 0)) && (bam_argc || bam_argv)) {
+		/*
+		 * Of the remaining subcommands, only "enable_hypervisor" and
+		 * "list_setting" take trailing arguments.
+		 */
 		bam_error(TRAILING_ARGS);
 		usage();
 		return (BAM_ERROR);
@@ -883,6 +902,69 @@ is_safe_exec(char *path)
 
 	if (sb.st_mode & S_IWOTH || sb.st_mode & S_IWGRP) {
 		bam_error(PATH_EXEC_PERMS, path);
+		return (BAM_ERROR);
+	}
+
+	return (BAM_SUCCESS);
+}
+
+static error_t
+list_setting(menu_t *mp, char *which, char *setting)
+{
+	line_t	*lp;
+	entry_t	*ent;
+
+	char	*p = which;
+	int	entry;
+
+	int	found;
+
+	assert(which);
+	assert(setting);
+
+	if (*which != NULL) {
+		/*
+		 * If "which" is not a number, assume it's a setting we want
+		 * to look for and so set up the routine to look for "which"
+		 * in the default entry.
+		 */
+		while (*p != NULL)
+			if (!(isdigit((int)*p++))) {
+				setting = which;
+				which = mp->curdefault->arg;
+				break;
+			}
+	} else {
+		which = mp->curdefault->arg;
+	}
+
+	entry = atoi(which);
+
+	for (ent = mp->entries; ((ent != NULL) && (ent->entryNum != entry));
+	    ent = ent->next)
+		;
+
+	if (!ent) {
+		bam_error(NO_MATCH_ENTRY);
+		return (BAM_ERROR);
+	}
+
+	found = (*setting == NULL);
+
+	for (lp = ent->start; lp != NULL; lp = lp->next) {
+		if ((*setting == NULL) && (lp->flags != BAM_COMMENT))
+			bam_print(PRINT, lp->line);
+		else if (strcmp(setting, lp->cmd) == 0) {
+			bam_print(PRINT, lp->arg);
+			found = 1;
+		}
+
+		if (lp == ent->end)
+			break;
+	}
+
+	if (!found) {
+		bam_error(NO_MATCH_ENTRY);
 		return (BAM_ERROR);
 	}
 
@@ -1024,13 +1106,16 @@ bam_menu(char *subcmd, char *opt, int largc, char *largv[])
 	/*
 	 * If listing the menu, display the menu location
 	 */
-	if (strcmp(subcmd, "list_entry") == 0) {
+	if (strcmp(subcmd, "list_entry") == 0)
 		bam_print(GRUB_MENU_PATH, menu_path);
+
+	if ((menu = menu_read(menu_path)) == NULL) {
+		bam_error(CANNOT_LOCATE_GRUB_MENU_FILE, menu_path);
+		if (special != NULL)
+			free(special);
+
+		return (BAM_ERROR);
 	}
-
-
-	menu = menu_read(menu_path);
-	assert(menu);
 
 	/*
 	 * We already checked the following case in
@@ -1040,7 +1125,8 @@ bam_menu(char *subcmd, char *opt, int largc, char *largv[])
 	if (strcmp(subcmd, "set_option") == 0) {
 		assert(largc == 1 && largv[0] && largv[1] == NULL);
 		opt = largv[0];
-	} else {
+	} else if ((strcmp(subcmd, "enable_hypervisor") != 0) &&
+	    (strcmp(subcmd, "list_setting") != 0)) {
 		assert(largc == 0 && largv == NULL);
 	}
 
@@ -1054,13 +1140,68 @@ bam_menu(char *subcmd, char *opt, int largc, char *largv[])
 	 * Once the sub-cmd handler has run
 	 * only the line field is guaranteed to have valid values
 	 */
-	if (strcmp(subcmd, "update_entry") == 0)
+	if (strcmp(subcmd, "update_entry") == 0) {
 		ret = f(menu, menu_root, osdev);
-	else if (strcmp(subcmd, "upgrade") == 0)
+	} else if (strcmp(subcmd, "upgrade") == 0) {
 		ret = f(menu, bam_root, menu_root);
-	else if (strcmp(subcmd, "list_entry") == 0)
+	} else if (strcmp(subcmd, "list_entry") == 0) {
 		ret = f(menu, menu_path, opt);
-	else
+	} else if (strcmp(subcmd, "list_setting") == 0) {
+		ret = f(menu, ((largc > 0) ? largv[0] : ""),
+		    ((largc > 1) ? largv[1] : ""));
+	} else if (strcmp(subcmd, "disable_hypervisor") == 0) {
+		if (is_sparc()) {
+			bam_error(NO_SPARC, subcmd);
+			ret = BAM_ERROR;
+		} else {
+			ret = f(menu, bam_root, NULL);
+		}
+	} else if (strcmp(subcmd, "enable_hypervisor") == 0) {
+		if (is_sparc()) {
+			bam_error(NO_SPARC, subcmd);
+			ret = BAM_ERROR;
+		} else {
+			char *extra_args = NULL;
+
+			/*
+			 * Compress all arguments passed in the largv[] array
+			 * into one string that can then be appended to the
+			 * end of the kernel$ string the routine to enable the
+			 * hypervisor will build.
+			 *
+			 * This allows the caller to supply arbitrary unparsed
+			 * arguments, such as dom0 memory settings or APIC
+			 * options.
+			 *
+			 * This concatenation will be done without ANY syntax
+			 * checking whatsoever, so it's the responsibility of
+			 * the caller to make sure the arguments are valid and
+			 * do not duplicate arguments the conversion routines
+			 * may create.
+			 */
+			if (largc > 0) {
+				int extra_len, i;
+
+				for (extra_len = 0, i = 0; i < largc; i++)
+					extra_len += strlen(largv[i]);
+
+				/*
+				 * Allocate space for argument strings,
+				 * intervening spaces and terminating NULL.
+				 */
+				extra_args = alloca(extra_len + largc);
+
+				(void) strcpy(extra_args, largv[0]);
+
+				for (i = 1; i < largc; i++) {
+					(void) strcat(extra_args, " ");
+					(void) strcat(extra_args, largv[i]);
+				}
+			}
+
+			ret = f(menu, bam_root, extra_args);
+		}
+	} else
 		ret = f(menu, NULL, opt);
 
 	if (ret == BAM_WRITE) {
@@ -1182,7 +1323,7 @@ bam_print_stderr(char *format, ...)
 	va_end(ap);
 }
 
-static void
+void
 bam_exit(int excode)
 {
 	restore_env();
@@ -1416,7 +1557,6 @@ list2file(char *root, char *tmp, char *final, line_t *start)
 		bam_error(CHOWN_FAIL, tmpfile, strerror(errno));
 		return (BAM_ERROR);
 	}
-
 
 	/*
 	 * Do an atomic rename
@@ -4066,6 +4206,7 @@ line_parser(menu_t *mp, char *str, int *lineNum, int *entryNum)
 	static line_t *prev = NULL;
 	static entry_t *curr_ent = NULL;
 	static int in_liveupgrade = 0;
+	static int is_libbe_ent = 0;
 
 	line_t	*lp;
 	char *cmd, *sep, *arg;
@@ -4096,6 +4237,8 @@ line_parser(menu_t *mp, char *str, int *lineNum, int *entryNum)
 			in_liveupgrade = 1;
 		} else if (strstr(arg, BAM_LU_FTR) != NULL) {
 			in_liveupgrade = 0;
+		} else if (strstr(arg, BAM_LIBBE_FTR) != NULL) {
+			is_libbe_ent = 1;
 		}
 	} else if (*str == '\0') {	/* blank line */
 		cmd = sep = arg = NULL;
@@ -4213,7 +4356,12 @@ line_parser(menu_t *mp, char *str, int *lineNum, int *entryNum)
 		mp->old_rc_default = lp;
 	} else if (lp->flags == BAM_ENTRY ||
 	    (lp->flags == BAM_COMMENT &&
-	    strcmp(lp->arg, BAM_BOOTADM_FTR) == 0)) {
+	    ((strcmp(lp->arg, BAM_BOOTADM_FTR) == 0) || is_libbe_ent))) {
+		if (is_libbe_ent) {
+			curr_ent->flags |= BAM_ENTRY_LIBBE;
+			is_libbe_ent = 0;
+		}
+
 		boot_entry_addline(curr_ent, lp);
 	}
 	append_line(mp, lp);
@@ -4329,9 +4477,9 @@ menu_read(char *menu_path)
 
 	fp = fopen(menu_path, "r");
 	if (fp == NULL) { /* Let the caller handle this error */
-		return (mp);
+		free(mp);
+		return (NULL);
 	}
-
 
 	/* Note: GRUB boot entry number starts with 0 */
 	line = LINE_INIT;
@@ -4487,7 +4635,8 @@ add_boot_entry(menu_t *mp,
 	char *findroot,
 	char *kernel,
 	char *mod_kernel,
-	char *module)
+	char *module,
+	char *bootfs)
 {
 	int		lineNum;
 	int		entryNum;
@@ -4569,6 +4718,12 @@ add_boot_entry(menu_t *mp,
 	line_parser(mp, linebuf, &lineNum, &entryNum);
 	BAM_DPRINTF((D_ADD_FINDROOT_NUM, fcn, lineNum, entryNum));
 
+	if (bootfs != NULL) {
+		(void) snprintf(linebuf, sizeof (linebuf), "%s%s%s",
+		    menu_cmds[BOOTFS_CMD], menu_cmds[SEP_CMD], bootfs);
+		line_parser(mp, linebuf, &lineNum, &entryNum);
+	}
+
 	(void) snprintf(linebuf, sizeof (linebuf), "%s%s%s",
 	    menu_cmds[k_cmd], menu_cmds[SEP_CMD], kernel);
 	line_parser(mp, linebuf, &lineNum, &entryNum);
@@ -4590,15 +4745,15 @@ add_boot_entry(menu_t *mp,
 	return (entryNum);
 }
 
-static error_t
-do_delete(menu_t *mp, int entryNum)
+error_t
+delete_boot_entry(menu_t *mp, int entryNum, int quiet)
 {
 	line_t		*lp;
 	line_t		*freed;
 	entry_t		*ent;
 	entry_t		*tmp;
-	int		deleted;
-	const char	*fcn = "do_delete()";
+	int		deleted = 0;
+	const char	*fcn = "delete_boot_entry()";
 
 	assert(entryNum != ENTRY_INIT);
 
@@ -4607,9 +4762,17 @@ do_delete(menu_t *mp, int entryNum)
 	ent = mp->entries;
 	while (ent) {
 		lp = ent->start;
-		/* check entry number and make sure it's a bootadm entry */
-		if (lp->flags != BAM_COMMENT ||
-		    strcmp(lp->arg, BAM_BOOTADM_HDR) != 0 ||
+
+		/*
+		 * Check entry number and make sure it's a modifiable entry.
+		 *
+		 * Guidelines:
+		 *	+ We can modify a bootadm-created entry
+		 *	+ We can modify a libbe-created entry
+		 */
+		if ((lp->flags != BAM_COMMENT &&
+		    (((ent->flags & BAM_ENTRY_LIBBE) == 0) &&
+		    strcmp(lp->arg, BAM_BOOTADM_HDR) != 0)) ||
 		    (entryNum != ALL_ENTRIES && lp->entryNum != entryNum)) {
 			ent = ent->next;
 			continue;
@@ -4643,7 +4806,8 @@ do_delete(menu_t *mp, int entryNum)
 	assert(tmp == NULL);
 
 	if (!deleted && entryNum != ALL_ENTRIES) {
-		bam_error(NO_BOOTADM_MATCH);
+		if (quiet == DBE_PRINTERR)
+			bam_error(NO_BOOTADM_MATCH);
 		return (BAM_ERROR);
 	}
 
@@ -4670,7 +4834,7 @@ delete_all_entries(menu_t *mp, char *dummy, char *opt)
 		return (BAM_SUCCESS);
 	}
 
-	if (do_delete(mp, ALL_ENTRIES) != BAM_SUCCESS) {
+	if (delete_boot_entry(mp, ALL_ENTRIES, DBE_PRINTERR) != BAM_SUCCESS) {
 		return (BAM_ERROR);
 	}
 
@@ -4723,6 +4887,11 @@ get_partition(char *device)
 	struct mboot *mboot;
 	char boot_sect[SECTOR_SIZE];
 	char *wholedisk, *slice;
+#ifdef i386
+	ext_part_t *epp;
+	uint32_t secnum, numsec;
+	int rval, pno, ext_partno = -1;
+#endif
 
 	/* form whole disk (p0) */
 	slice = device + strlen(device) - 2;
@@ -4736,11 +4905,33 @@ get_partition(char *device)
 
 	/* read boot sector */
 	fd = open(wholedisk, O_RDONLY);
-	free(wholedisk);
 	if (fd == -1 || read(fd, boot_sect, SECTOR_SIZE) != SECTOR_SIZE) {
 		return (partno);
 	}
 	(void) close(fd);
+
+#ifdef i386
+	/* Read/Initialize extended partition information */
+	if ((rval = libfdisk_init(&epp, wholedisk, NULL, FDISK_READ_DISK))
+	    != FDISK_SUCCESS) {
+		switch (rval) {
+			/*
+			 * FDISK_EBADLOGDRIVE and FDISK_ENOLOGDRIVE can
+			 * be considered as soft errors and hence
+			 * we do not return
+			 */
+			case FDISK_EBADLOGDRIVE:
+				break;
+			case FDISK_ENOLOGDRIVE:
+				break;
+			default:
+				free(wholedisk);
+				return (partno);
+				break;
+		}
+	}
+#endif
+	free(wholedisk);
 
 	/* parse fdisk table */
 	mboot = (struct mboot *)((void *)boot_sect);
@@ -4753,13 +4944,34 @@ get_partition(char *device)
 				break;
 			}
 		} else {	/* look for solaris partition, old and new */
+#ifdef i386
+			if ((part->systid == SUNIXOS &&
+			    (fdisk_is_linux_swap(epp, part->relsect,
+			    NULL) != 0)) || part->systid == SUNIXOS2) {
+#else
 			if (part->systid == SUNIXOS ||
 			    part->systid == SUNIXOS2) {
+#endif
 				partno = i;
 				break;
 			}
+
+#ifdef i386
+			if (fdisk_is_dos_extended(part->systid))
+				ext_partno = i;
+#endif
 		}
 	}
+#ifdef i386
+	/* If no primary solaris partition, check extended partition */
+	if ((partno == -1) && (ext_partno != -1)) {
+		rval = fdisk_get_solaris_part(epp, &pno, &secnum, &numsec);
+		if (rval == FDISK_SUCCESS) {
+			partno = pno - 1;
+		}
+	}
+	libfdisk_fini(&epp);
+#endif
 	return (partno);
 }
 
@@ -6816,7 +7028,6 @@ get_grubsign(char *osroot, char *osdev)
 	const char	*fcn = "get_grubsign()";
 
 	BAM_DPRINTF((D_FUNC_ENTRY2, fcn, osroot, osdev));
-
 	fstype = get_fstype(osroot);
 	INJECT_ERROR1("GET_GRUBSIGN_FSTYPE", fstype = NULL);
 	if (fstype == NULL) {
@@ -7081,7 +7292,7 @@ zfs_get_physical(char *special, char ***physarray, int *n)
 		if (strncmp(lp->line, "/dev/dsk/", strlen("/dev/dsk/")) != 0 &&
 		    strncmp(lp->line, "/dev/rdsk/",
 		    strlen("/dev/rdsk/")) != 0)  {
-			(void) snprintf(dsk, sizeof (dsk), "/dev/dsk/%s",
+			(void) snprintf(dsk, sizeof (dsk), "/dev/rdsk/%s",
 			    lp->line);
 		} else {
 			(void) strlcpy(dsk, lp->line, sizeof (dsk));
@@ -7681,7 +7892,7 @@ update_boot_entry(menu_t *mp, char *title, char *findroot, char *root,
 	if (ent == NULL) {
 		BAM_DPRINTF((D_ENTRY_NOT_FOUND_CREATING, fcn, findroot));
 		return (add_boot_entry(mp, title, findroot,
-		    kernel, mod_kernel, module));
+		    kernel, mod_kernel, module, NULL));
 	}
 
 	/* replace title of existing entry and update findroot line */
@@ -8107,7 +8318,7 @@ update_temp(menu_t *mp, char *dummy, char *opt)
 			BAM_DPRINTF((D_TRANSIENT_NOTFOUND, fcn));
 			return (BAM_SUCCESS);
 		}
-		(void) do_delete(mp, entry);
+		(void) delete_boot_entry(mp, entry, DBE_PRINTERR);
 		restore_default_entry(mp, BAM_OLDDEF, mp->olddefault);
 		mp->olddefault = NULL;
 		BAM_DPRINTF((D_RESTORED_DEFAULT, fcn));
@@ -8291,7 +8502,7 @@ update_temp(menu_t *mp, char *dummy, char *opt)
 	}
 	free(fstype);
 	entry = add_boot_entry(mp, REBOOT_TITLE, signbuf, kernbuf,
-	    NULL, NULL);
+	    NULL, NULL, NULL);
 	INJECT_ERROR1("REBOOT_ADD_BOOT_ENTRY", entry = BAM_ERROR);
 	if (entry == BAM_ERROR) {
 		bam_error(REBOOT_WITH_ARGS_ADD_ENTRY_FAILED);
@@ -8308,7 +8519,7 @@ update_temp(menu_t *mp, char *dummy, char *opt)
 	return (BAM_WRITE);
 }
 
-static error_t
+error_t
 set_global(menu_t *mp, char *globalcmd, int val)
 {
 	line_t		*lp;
@@ -8668,7 +8879,7 @@ get_set_kernel(
 		    (strncmp(kernelp->arg, DIRECT_BOOT_KERNEL,
 		    sizeof (DIRECT_BOOT_KERNEL) - 1) == 0))) {
 			kernelp = NULL;
-			(void) do_delete(mp, entryNum);
+			(void) delete_boot_entry(mp, entryNum, DBE_PRINTERR);
 			restore_default_entry(mp, BAM_OLD_RC_DEF,
 			    mp->old_rc_default);
 			mp->old_rc_default = NULL;
@@ -8774,9 +8985,23 @@ get_set_kernel(
 		    strchr(signbuf, ')') == NULL);
 
 		if (optnum == KERNEL_CMD) {
-			BAM_DPRINTF((D_GET_SET_KERNEL_NEW_KERN, fcn, new_path));
-			entryNum = add_boot_entry(mp, BOOTENV_RC_TITLE,
-			    signbuf, new_path, NULL, NULL);
+			if (strcmp(fstype, "zfs") == 0) {
+				new_str_len = strlen(new_path) +
+				    strlen(ZFS_BOOT) + 8;
+				new_arg = s_calloc(1, new_str_len);
+				(void) snprintf(new_arg, new_str_len, "%s %s",
+				    new_path, ZFS_BOOT);
+				BAM_DPRINTF((D_GET_SET_KERNEL_NEW_KERN, fcn,
+				    new_arg));
+				entryNum = add_boot_entry(mp, BOOTENV_RC_TITLE,
+				    signbuf, new_arg, NULL, NULL, NULL);
+				free(new_arg);
+			} else {
+				BAM_DPRINTF((D_GET_SET_KERNEL_NEW_KERN, fcn,
+				    new_path));
+				entryNum = add_boot_entry(mp, BOOTENV_RC_TITLE,
+				    signbuf, new_path, NULL, NULL, NULL);
+			}
 		} else {
 			new_str_len = strlen(path) + 8;
 			if (strcmp(fstype, "zfs") == 0) {
@@ -8793,7 +9018,7 @@ get_set_kernel(
 
 			BAM_DPRINTF((D_GET_SET_KERNEL_NEW_ARG, fcn, new_arg));
 			entryNum = add_boot_entry(mp, BOOTENV_RC_TITLE,
-			    signbuf, new_arg, NULL, DIRECT_BOOT_ARCHIVE);
+			    signbuf, new_arg, NULL, DIRECT_BOOT_ARCHIVE, NULL);
 			free(new_arg);
 		}
 		free(fstype);

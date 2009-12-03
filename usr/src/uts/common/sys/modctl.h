@@ -269,6 +269,7 @@ struct modlinkage {
 #define	MODISRETIRED		42
 #define	MODDEVEMPTYDIR		43
 #define	MODREMDRVALIAS		44
+#define	MODHPOPS		45
 
 /*
  * sub cmds for MODEVENTS
@@ -288,6 +289,15 @@ struct modlinkage {
 #define	MODDEVNAME_PROFILE	3
 #define	MODDEVNAME_RECONFIG	4
 #define	MODDEVNAME_SYSAVAIL	5
+
+/*
+ * subcmds for MODHPOPS
+ */
+#define	MODHPOPS_CHANGE_STATE	0
+#define	MODHPOPS_CREATE_PORT	1
+#define	MODHPOPS_REMOVE_PORT	2
+#define	MODHPOPS_BUS_GET	3
+#define	MODHPOPS_BUS_SET	4
 
 
 /*
@@ -332,6 +342,11 @@ struct modconfig32 {
 
 /* flags for modconfig */
 #define	MOD_UNBIND_OVERRIDE	0x01		/* fail unbind if in use */
+#define	MOD_ADDMAJBIND_UPDATE	0x02		/* update only, do not load */
+
+/* flags for MODLOADDRVCONF - modctl_load_drvconf() */
+#define	MOD_LOADDRVCONF_RECONF	0x01		/* complete configuration */
+						/* after update-only */
 
 /*
  * Max module path length
@@ -580,12 +595,13 @@ extern modctl_t *mod_load_requisite(modctl_t *, char *);
 extern modctl_t *mod_find_by_filename(char *, char *);
 extern uintptr_t	modgetsymvalue(char *, int);
 
+extern int	driver_installed(major_t);
 extern void	mod_rele_dev_by_major(major_t);
 extern struct dev_ops *mod_hold_dev_by_major(major_t);
 extern struct dev_ops *mod_hold_dev_by_devi(dev_info_t *);
 extern void	mod_rele_dev_by_devi(dev_info_t *);
 
-extern int make_devname(char *, major_t);
+extern int make_devname(char *, major_t, int);
 extern int gmatch(const char *, const char *);
 
 extern void make_aliases(struct bind **);

@@ -65,9 +65,6 @@ extern "C" {
 /* Work around problematic Linux PAM modules handling of PAM_TTY */
 #define	PAM_TTY_KLUDGE 1
 
-/* Use PIPES instead of a socketpair() */
-/* #undef USE_PIPES */
-
 /* Define if your snprintf is busted */
 /* #undef BROKEN_SNPRINTF */
 
@@ -278,9 +275,6 @@ extern "C" {
 
 /* Define if your libraries define login() */
 /* #undef HAVE_LOGIN */
-
-/* Define if your libraries define daemon() */
-/* #undef HAVE_DAEMON */
 
 /* Define if your libraries define getpagesize() */
 #define	HAVE_GETPAGESIZE 1

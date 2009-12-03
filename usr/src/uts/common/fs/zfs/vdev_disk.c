@@ -62,6 +62,16 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *ashift)
 		return (EINVAL);
 	}
 
+	/*
+	 * Reopen the device if it's not currently open. Otherwise,
+	 * just update the physical size of the device.
+	 */
+	if (vd->vdev_tsd != NULL) {
+		ASSERT(vd->vdev_reopening);
+		dvd = vd->vdev_tsd;
+		goto skip_open;
+	}
+
 	dvd = vd->vdev_tsd = kmem_zalloc(sizeof (vdev_disk_t), KM_SLEEP);
 
 	/*
@@ -79,13 +89,6 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *ashift)
 	 *
 	 * 3. Otherwise, the device may have moved.  Try opening the device
 	 *    by the devid instead.
-	 *
-	 * If the vdev is part of the root pool, we avoid opening it by path
-	 * unless we're adding (i.e. attaching) it to the vdev namespace.
-	 * We do this because there is no /dev path available early in boot,
-	 * and if we try to open the device by path at a later point, we can
-	 * deadlock when devfsadm attempts to open the underlying backing store
-	 * file.
 	 */
 	if (vd->vdev_devid != NULL) {
 		if (ddi_devid_str_decode(vd->vdev_devid, &dvd->vd_devid,
@@ -97,8 +100,7 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *ashift)
 
 	error = EINVAL;		/* presume failure */
 
-	if (vd->vdev_path != NULL && (!spa_is_root(spa) ||
-	    spa_lookup_by_guid(spa, vd->vdev_guid, B_FALSE) == NULL)) {
+	if (vd->vdev_path != NULL) {
 		ddi_devid_t devid;
 
 		if (vd->vdev_wholedisk == -1ULL) {
@@ -169,8 +171,7 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *ashift)
 		 * as above.  This hasn't been used in a very long time and we
 		 * don't need to propagate its oddities to this edge condition.
 		 */
-		if (error && vd->vdev_path != NULL && (!spa_is_root(spa) ||
-		    spa_lookup_by_guid(spa, vd->vdev_guid, B_FALSE) == NULL))
+		if (error && vd->vdev_path != NULL)
 			error = ldi_open_by_name(vd->vdev_path, spa_mode(spa),
 			    kcred, &dvd->vd_lh, zfs_li);
 	}
@@ -205,6 +206,7 @@ vdev_disk_open(vdev_t *vd, uint64_t *psize, uint64_t *ashift)
 		kmem_free(physpath, MAXPATHLEN);
 	}
 
+skip_open:
 	/*
 	 * Determine the actual size of the device.
 	 */
@@ -247,7 +249,7 @@ vdev_disk_close(vdev_t *vd)
 {
 	vdev_disk_t *dvd = vd->vdev_tsd;
 
-	if (dvd == NULL)
+	if (vd->vdev_reopening || dvd == NULL)
 		return;
 
 	if (dvd->vd_minor != NULL)
@@ -318,6 +320,11 @@ vdev_disk_ioctl_free(zio_t *zio)
 	kmem_free(zio->io_vsd, sizeof (struct dk_callback));
 }
 
+static const zio_vsd_ops_t vdev_disk_vsd_ops = {
+	vdev_disk_ioctl_free,
+	zio_vsd_default_cksum_report
+};
+
 static void
 vdev_disk_ioctl_done(void *zio_arg, int error)
 {
@@ -358,7 +365,7 @@ vdev_disk_io_start(zio_t *zio)
 			}
 
 			zio->io_vsd = dkc = kmem_alloc(sizeof (*dkc), KM_SLEEP);
-			zio->io_vsd_free = vdev_disk_ioctl_free;
+			zio->io_vsd_ops = &vdev_disk_vsd_ops;
 
 			dkc->dkc_callback = vdev_disk_ioctl_done;
 			dkc->dkc_flag = FLUSH_VOLATILE;
@@ -430,12 +437,19 @@ vdev_disk_io_done(zio_t *zio)
 	 * asynchronous removal of the device. Otherwise, probe the device and
 	 * make sure it's still accessible.
 	 */
-	if (zio->io_error == EIO) {
+	if (zio->io_error == EIO && !vd->vdev_remove_wanted) {
 		vdev_disk_t *dvd = vd->vdev_tsd;
 		int state = DKIO_NONE;
 
 		if (ldi_ioctl(dvd->vd_lh, DKIOCSTATE, (intptr_t)&state,
 		    FKIOCTL, kcred, NULL) == 0 && state != DKIO_INSERTED) {
+			/*
+			 * We post the resource as soon as possible, instead of
+			 * when the async removal actually happens, because the
+			 * DE is using this information to discard previous I/O
+			 * errors.
+			 */
+			zfs_post_remove(zio->io_spa, vd);
 			vd->vdev_remove_wanted = B_TRUE;
 			spa_async_request(zio->io_spa, SPA_ASYNC_REMOVE);
 		}

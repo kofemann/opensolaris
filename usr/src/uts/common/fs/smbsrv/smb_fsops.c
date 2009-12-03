@@ -27,9 +27,6 @@
 #include <sys/nbmlock.h>
 #include <smbsrv/smb_fsops.h>
 #include <smbsrv/smb_kproto.h>
-#include <smbsrv/ntstatus.h>
-#include <smbsrv/ntaccess.h>
-#include <smbsrv/smb_incl.h>
 #include <acl/acl_common.h>
 #include <sys/fcntl.h>
 #include <sys/flock.h>
@@ -340,6 +337,8 @@ smb_fsop_create(smb_request_t *sr, cred_t *cr, smb_node_t *dnode,
 		flags = SMB_IGNORE_CASE;
 	if (SMB_TREE_SUPPORTS_CATIA(sr))
 		flags |= SMB_CATIA;
+	if (SMB_TREE_SUPPORTS_ABE(sr))
+		flags |= SMB_ABE;
 
 	if (smb_is_stream_name(name)) {
 		fname = kmem_alloc(MAXNAMELEN, KM_SLEEP);
@@ -358,7 +357,8 @@ smb_fsop_create(smb_request_t *sr, cred_t *cr, smb_node_t *dnode,
 
 	if (smb_maybe_mangled_name(name)) {
 		longname = kmem_alloc(MAXNAMELEN, KM_SLEEP);
-		rc = smb_unmangle_name(dnode, name, longname, MAXNAMELEN);
+		rc = smb_unmangle_name(dnode, name, longname,
+		    MAXNAMELEN, flags);
 		kmem_free(longname, MAXNAMELEN);
 
 		if (rc == 0)
@@ -575,10 +575,13 @@ smb_fsop_mkdir(
 		return (EROFS);
 	if (SMB_TREE_SUPPORTS_CATIA(sr))
 		flags |= SMB_CATIA;
+	if (SMB_TREE_SUPPORTS_ABE(sr))
+		flags |= SMB_ABE;
 
 	if (smb_maybe_mangled_name(name)) {
 		longname = kmem_alloc(MAXNAMELEN, KM_SLEEP);
-		rc = smb_unmangle_name(dnode, name, longname, MAXNAMELEN);
+		rc = smb_unmangle_name(dnode, name, longname,
+		    MAXNAMELEN, flags);
 		kmem_free(longname, MAXNAMELEN);
 
 		/*
@@ -733,8 +736,11 @@ smb_fsop_remove(
 			}
 			longname = kmem_alloc(MAXNAMELEN, KM_SLEEP);
 
+			if (SMB_TREE_SUPPORTS_ABE(sr))
+				flags |= SMB_ABE;
+
 			rc = smb_unmangle_name(dnode, name,
-			    longname, MAXNAMELEN);
+			    longname, MAXNAMELEN, flags);
 
 			if (rc == 0) {
 				/*
@@ -866,7 +872,11 @@ smb_fsop_rmdir(
 			return (rc);
 
 		longname = kmem_alloc(MAXNAMELEN, KM_SLEEP);
-		rc = smb_unmangle_name(dnode, name, longname, MAXNAMELEN);
+
+		if (SMB_TREE_SUPPORTS_ABE(sr))
+			flags |= SMB_ABE;
+		rc = smb_unmangle_name(dnode, name, longname,
+		    MAXNAMELEN, flags);
 
 		if (rc == 0) {
 			/*
@@ -959,8 +969,8 @@ smb_fsop_getattr(smb_request_t *sr, cred_t *cr, smb_node_t *snode,
  * into this routine.
  */
 int
-smb_fsop_link(smb_request_t *sr, cred_t *cr, smb_node_t *to_dnode,
-    smb_node_t *from_fnode, char *to_name)
+smb_fsop_link(smb_request_t *sr, cred_t *cr, smb_node_t *from_fnode,
+    smb_node_t *to_dnode, char *to_name)
 {
 	char	*longname = NULL;
 	int	flags = 0;
@@ -989,10 +999,13 @@ smb_fsop_link(smb_request_t *sr, cred_t *cr, smb_node_t *to_dnode,
 		flags = SMB_IGNORE_CASE;
 	if (SMB_TREE_SUPPORTS_CATIA(sr))
 		flags |= SMB_CATIA;
+	if (SMB_TREE_SUPPORTS_ABE(sr))
+		flags |= SMB_ABE;
 
 	if (smb_maybe_mangled_name(to_name)) {
 		longname = kmem_alloc(MAXNAMELEN, KM_SLEEP);
-		rc = smb_unmangle_name(to_dnode, to_name, longname, MAXNAMELEN);
+		rc = smb_unmangle_name(to_dnode, to_name,
+		    longname, MAXNAMELEN, flags);
 		kmem_free(longname, MAXNAMELEN);
 
 		if (rc == 0)
@@ -1086,6 +1099,28 @@ smb_fsop_rename(
 	    (ACE_DELETE | ACE_ADD_FILE)))
 		return (EACCES);
 
+	/*
+	 * SMB checks access on open and retains an access granted
+	 * mask for use while the file is open.  ACL changes should
+	 * not affect access to an open file.
+	 *
+	 * If the rename is being performed on an ofile:
+	 * - Check the ofile's access granted mask to see if the
+	 *   rename is permitted - requires DELETE access.
+	 * - If the file system does access checking, set the
+	 *   ATTR_NOACLCHECK flag to ensure that the file system
+	 *   does not check permissions on subsequent calls.
+	 */
+	if (sr && sr->fid_ofile) {
+		rc = smb_ofile_access(sr->fid_ofile, cr, DELETE);
+		if (rc != NT_STATUS_SUCCESS)
+			return (EACCES);
+
+		if (smb_tree_has_feature(sr->tid_tree,
+		    SMB_TREE_ACEMASKONACCESS))
+			flags = ATTR_NOACLCHECK;
+	}
+
 	rc = smb_vop_rename(from_dnode->vp, from_name, to_dnode->vp,
 	    to_name, flags, cr);
 
@@ -1116,7 +1151,8 @@ smb_fsop_rename(
  * Please document any direct call to explain the reason
  * for avoiding this wrapper.
  *
- * It is assumed that a reference exists on snode coming into this routine.
+ * It is assumed that a reference exists on snode coming into
+ * this function.
  * A null smb_request might be passed to this function.
  */
 int
@@ -1149,6 +1185,11 @@ smb_fsop_setattr(
 	    ACE_WRITE_ATTRIBUTES | ACE_WRITE_NAMED_ATTRS) == 0)
 		return (EACCES);
 
+	/*
+	 * The file system cannot detect pending READDONLY
+	 * (i.e. if the file has been opened readonly but
+	 * not yet closed) so we need to test READONLY here.
+	 */
 	if (sr && (set_attr->sa_mask & SMB_AT_SIZE)) {
 		if (sr->fid_ofile) {
 			if (SMB_OFILE_IS_READONLY(sr->fid_ofile))
@@ -1159,14 +1200,29 @@ smb_fsop_setattr(
 		}
 	}
 
-	/* sr could be NULL in some cases */
+	/*
+	 * SMB checks access on open and retains an access granted
+	 * mask for use while the file is open.  ACL changes should
+	 * not affect access to an open file.
+	 *
+	 * If the setattr is being performed on an ofile:
+	 * - Check the ofile's access granted mask to see if the
+	 *   setattr is permitted.
+	 *   UID, GID - require WRITE_OWNER
+	 *   SIZE, ALLOCSZ - require FILE_WRITE_DATA
+	 *   all other attributes require FILE_WRITE_ATTRIBUTES
+	 *
+	 * - If the file system does access checking, set the
+	 *   ATTR_NOACLCHECK flag to ensure that the file system
+	 *   does not check permissions on subsequent calls.
+	 */
 	if (sr && sr->fid_ofile) {
 		sa_mask = set_attr->sa_mask;
 		access = 0;
 
-		if (sa_mask & SMB_AT_SIZE) {
+		if (sa_mask & (SMB_AT_SIZE | SMB_AT_ALLOCSZ)) {
 			access |= FILE_WRITE_DATA;
-			sa_mask &= ~SMB_AT_SIZE;
+			sa_mask &= ~(SMB_AT_SIZE | SMB_AT_ALLOCSZ);
 		}
 
 		if (sa_mask & (SMB_AT_UID|SMB_AT_GID)) {
@@ -1611,6 +1667,13 @@ smb_fsop_lookup_name(
  *
  * Other smb_fsop_* routines will call SMB_TREE_CONTAINS_NODE() to prevent
  * operations on files not in the parent mount.
+ *
+ * Case sensitivity flags (SMB_IGNORE_CASE, SMB_CASE_SENSITIVE):
+ * if SMB_CASE_SENSITIVE is set, the SMB_IGNORE_CASE flag will NOT be set
+ * based on the tree's case sensitivity. However, if the SMB_IGNORE_CASE
+ * flag is set in the flags value passed as a parameter, a case insensitive
+ * lookup WILL be done (regardless of whether SMB_CASE_SENSITIVE is set
+ * or not).
  */
 int
 smb_fsop_lookup(
@@ -1641,10 +1704,14 @@ smb_fsop_lookup(
 	if (SMB_TREE_CONTAINS_NODE(sr, dnode) == 0)
 		return (EACCES);
 
-	if (SMB_TREE_IS_CASEINSENSITIVE(sr))
-		flags |= SMB_IGNORE_CASE;
+	if (!(flags & SMB_CASE_SENSITIVE)) {
+		if (SMB_TREE_IS_CASEINSENSITIVE(sr))
+			flags |= SMB_IGNORE_CASE;
+	}
 	if (SMB_TREE_SUPPORTS_CATIA(sr))
 		flags |= SMB_CATIA;
+	if (SMB_TREE_SUPPORTS_ABE(sr))
+		flags |= SMB_ABE;
 
 	od_name = kmem_alloc(MAXNAMELEN, KM_SLEEP);
 
@@ -1658,7 +1725,8 @@ smb_fsop_lookup(
 		}
 
 		longname = kmem_alloc(MAXNAMELEN, KM_SLEEP);
-		rc = smb_unmangle_name(dnode, name, longname, MAXNAMELEN);
+		rc = smb_unmangle_name(dnode, name, longname,
+		    MAXNAMELEN, flags);
 		if (rc != 0) {
 			kmem_free(od_name, MAXNAMELEN);
 			kmem_free(longname, MAXNAMELEN);

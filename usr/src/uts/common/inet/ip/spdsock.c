@@ -42,6 +42,7 @@
 #include <sys/cmn_err.h>
 #include <sys/suntpi.h>
 #include <sys/policy.h>
+#include <sys/dls.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -56,12 +57,12 @@
 #include <inet/proto_set.h>
 #include <inet/nd.h>
 #include <inet/ip_if.h>
-#include <inet/tun.h>
 #include <inet/optcom.h>
-#include <inet/ipsec_info.h>
 #include <inet/ipsec_impl.h>
 #include <inet/spdsock.h>
 #include <inet/sadb.h>
+#include <inet/iptun.h>
+#include <inet/iptun/iptun_impl.h>
 
 #include <sys/isa_defs.h>
 
@@ -1148,9 +1149,8 @@ spdsock_addrule(queue_t *q, ipsec_policy_head_t *iph, mblk_t *mp,
 
 fail:
 	rw_exit(&iph->iph_lock);
-	while ((--rulep) >= &rules[0]) {
-		IPPOL_REFRELE(rulep->pol, spds->spds_netstack);
-	}
+	while ((--rulep) >= &rules[0])
+		IPPOL_REFRELE(rulep->pol);
 	ipsec_actvec_free(actp, nact);
 fail2:
 	if (itp != NULL) {
@@ -1420,11 +1420,16 @@ spdsock_dump_finish(spdsock_t *ss, int error)
 	mblk_t *m;
 	ipsec_policy_head_t *iph = ss->spdsock_dump_head;
 	mblk_t *req = ss->spdsock_dump_req;
+	netstack_t *ns = ss->spdsock_spds->spds_netstack;
 
 	rw_enter(&iph->iph_lock, RW_READER);
 	m = spdsock_dump_ruleset(req, iph, ss->spdsock_dump_count, error);
 	rw_exit(&iph->iph_lock);
-	IPPH_REFRELE(iph, ss->spdsock_spds->spds_netstack);
+	IPPH_REFRELE(iph, ns);
+	if (ss->spdsock_itp != NULL) {
+		ITP_REFRELE(ss->spdsock_itp, ns);
+		ss->spdsock_itp = NULL;
+	}
 	ss->spdsock_dump_req = NULL;
 	freemsg(req);
 
@@ -2144,13 +2149,11 @@ spdsock_clone(queue_t *q, mblk_t *mp, spd_if_t *tunname)
 					active = (spmsg->spd_msg_spdid ==
 					    SPD_ACTIVE);
 					audit_pf_policy(SPD_CLONE, cr,
-					    ns, ITP_NAME(itp), active, ENOENT,
-					    cpid);
+					    ns, NULL, active, ENOENT, cpid);
 				}
 				return;
 			}
 			spdsock_clone_node(itp, &error, NULL);
-			ITP_REFRELE(itp, ns);
 			if (audit_active) {
 				boolean_t active;
 				spd_msg_t *spmsg = (spd_msg_t *)mp->b_rptr;
@@ -2162,6 +2165,7 @@ spdsock_clone(queue_t *q, mblk_t *mp, spd_if_t *tunname)
 				audit_pf_policy(SPD_CLONE, cr, ns,
 				    ITP_NAME(itp), active, error, cpid);
 			}
+			ITP_REFRELE(itp, ns);
 		}
 	} else {
 		error = ipsec_clone_system_policy(ns);
@@ -2355,7 +2359,7 @@ spdsock_alglist(queue_t *q, mblk_t *mp)
  * Process a SPD_DUMPALGS request.
  */
 
-#define	ATTRPERALG	7	/* fixed attributes per algs */
+#define	ATTRPERALG	9	/* fixed attributes per algs */
 
 void
 spdsock_dumpalgs(queue_t *q, mblk_t *mp)
@@ -2382,7 +2386,8 @@ spdsock_dumpalgs(queue_t *q, mblk_t *mp)
 	 * ALG / MINBITS / MAXBITS / DEFBITS / INCRBITS / {END, NEXT}
 	 *
 	 * ALG_ID / ALG_PROTO / ALG_INCRBITS / ALG_NKEYSIZES / ALG_KEYSIZE*
-	 * ALG_NBLOCKSIZES / ALG_BLOCKSIZE* / ALG_MECHNAME / {END, NEXT}
+	 * ALG_NBLOCKSIZES / ALG_BLOCKSIZE* / ALG_NPARAMS / ALG_PARAMS* /
+	 * ALG_MECHNAME / ALG_FLAGS / {END, NEXT}
 	 */
 
 	/*
@@ -2397,7 +2402,8 @@ spdsock_dumpalgs(queue_t *q, mblk_t *mp)
 			alg = ipss->ipsec_alglists[algtype][algid];
 			alg_size = sizeof (struct spd_attribute) *
 			    (ATTRPERALG + alg->alg_nkey_sizes +
-			    alg->alg_nblock_sizes) + CRYPTO_MAX_MECH_NAME;
+			    alg->alg_nblock_sizes + alg->alg_nparams) +
+			    CRYPTO_MAX_MECH_NAME;
 			size += alg_size;
 		}
 	}
@@ -2466,7 +2472,6 @@ spdsock_dumpalgs(queue_t *q, mblk_t *mp)
 			EMIT(SPD_ATTR_ALG_ID, algid);
 			EMIT(SPD_ATTR_ALG_PROTO, algproto[algtype]);
 			EMIT(SPD_ATTR_ALG_INCRBITS, alg->alg_increment);
-
 			EMIT(SPD_ATTR_ALG_NKEYSIZES, alg->alg_nkey_sizes);
 			for (i = 0; i < alg->alg_nkey_sizes; i++)
 				EMIT(SPD_ATTR_ALG_KEYSIZE,
@@ -2476,6 +2481,13 @@ spdsock_dumpalgs(queue_t *q, mblk_t *mp)
 			for (i = 0; i < alg->alg_nblock_sizes; i++)
 				EMIT(SPD_ATTR_ALG_BLOCKSIZE,
 				    alg->alg_block_sizes[i]);
+
+			EMIT(SPD_ATTR_ALG_NPARAMS, alg->alg_nparams);
+			for (i = 0; i < alg->alg_nparams; i++)
+				EMIT(SPD_ATTR_ALG_PARAMS,
+				    alg->alg_params[i]);
+
+			EMIT(SPD_ATTR_ALG_FLAGS, alg->alg_flags);
 
 			EMIT(SPD_ATTR_ALG_MECHNAME, CRYPTO_MAX_MECH_NAME);
 			bcopy(alg->alg_mech_name, attr, CRYPTO_MAX_MECH_NAME);
@@ -2505,8 +2517,8 @@ error:
  * be invoked either once IPsec is loaded on a cached request, or
  * when a request is received while IPsec is loaded.
  */
-static void
-spdsock_do_updatealg(spd_ext_t *extv[], int *diag, spd_stack_t *spds)
+static int
+spdsock_do_updatealg(spd_ext_t *extv[], spd_stack_t *spds)
 {
 	struct spd_ext_actions *actp;
 	struct spd_attribute *attr, *endattr;
@@ -2515,17 +2527,15 @@ spdsock_do_updatealg(spd_ext_t *extv[], int *diag, spd_stack_t *spds)
 	ipsec_algtype_t alg_type = 0;
 	boolean_t skip_alg = B_TRUE, doing_proto = B_FALSE;
 	uint_t i, cur_key, cur_block, algid;
+	int diag = -1;
 
-	*diag = -1;
 	ASSERT(MUTEX_HELD(&spds->spds_alg_lock));
 
 	/* parse the message, building the list of algorithms */
 
 	actp = (struct spd_ext_actions *)extv[SPD_EXT_ACTION];
-	if (actp == NULL) {
-		*diag = SPD_DIAGNOSTIC_NO_ACTION_EXT;
-		return;
-	}
+	if (actp == NULL)
+		return (SPD_DIAGNOSTIC_NO_ACTION_EXT);
 
 	start = (uint64_t *)actp;
 	end = (start + actp->spd_actions_len);
@@ -2539,6 +2549,7 @@ spdsock_do_updatealg(spd_ext_t *extv[], int *diag, spd_stack_t *spds)
 
 #define	ALG_KEY_SIZES(a)   (((a)->alg_nkey_sizes + 1) * sizeof (uint16_t))
 #define	ALG_BLOCK_SIZES(a) (((a)->alg_nblock_sizes + 1) * sizeof (uint16_t))
+#define	ALG_PARAM_SIZES(a) (((a)->alg_nparams + 1) * sizeof (uint16_t))
 
 	while (attr < endattr) {
 		switch (attr->spd_attr_tag) {
@@ -2569,7 +2580,7 @@ spdsock_do_updatealg(spd_ext_t *extv[], int *diag, spd_stack_t *spds)
 				ss1dbg(spds, ("spdsock_do_updatealg: "
 				    "invalid alg id %d\n",
 				    attr->spd_attr_value));
-				*diag = SPD_DIAGNOSTIC_ALG_ID_RANGE;
+				diag = SPD_DIAGNOSTIC_ALG_ID_RANGE;
 				goto bail;
 			}
 			alg->alg_id = attr->spd_attr_value;
@@ -2609,10 +2620,20 @@ spdsock_do_updatealg(spd_ext_t *extv[], int *diag, spd_stack_t *spds)
 			    cur_key >= alg->alg_nkey_sizes) {
 				ss1dbg(spds, ("spdsock_do_updatealg: "
 				    "too many key sizes\n"));
-				*diag = SPD_DIAGNOSTIC_ALG_NUM_KEY_SIZES;
+				diag = SPD_DIAGNOSTIC_ALG_NUM_KEY_SIZES;
 				goto bail;
 			}
 			alg->alg_key_sizes[cur_key++] = attr->spd_attr_value;
+			break;
+
+		case SPD_ATTR_ALG_FLAGS:
+			/*
+			 * Flags (bit mask). The alg_flags element of
+			 * ipsecalg_flags_t is only 8 bits wide. The
+			 * user can set the VALID bit, but we will ignore it
+			 * and make the decision is the algorithm is valid.
+			 */
+			alg->alg_flags |= (uint8_t)attr->spd_attr_value;
 			break;
 
 		case SPD_ATTR_ALG_NBLOCKSIZES:
@@ -2635,10 +2656,41 @@ spdsock_do_updatealg(spd_ext_t *extv[], int *diag, spd_stack_t *spds)
 			    cur_block >= alg->alg_nblock_sizes) {
 				ss1dbg(spds, ("spdsock_do_updatealg: "
 				    "too many block sizes\n"));
-				*diag = SPD_DIAGNOSTIC_ALG_NUM_BLOCK_SIZES;
+				diag = SPD_DIAGNOSTIC_ALG_NUM_BLOCK_SIZES;
 				goto bail;
 			}
 			alg->alg_block_sizes[cur_block++] =
+			    attr->spd_attr_value;
+			break;
+
+		case SPD_ATTR_ALG_NPARAMS:
+			if (alg->alg_params != NULL) {
+				kmem_free(alg->alg_params,
+				    ALG_PARAM_SIZES(alg));
+			}
+			alg->alg_nparams = attr->spd_attr_value;
+			/*
+			 * Allocate room for the trailing zero block size
+			 * value as well.
+			 */
+			alg->alg_params = kmem_zalloc(ALG_PARAM_SIZES(alg),
+			    KM_SLEEP);
+			cur_block = 0;
+			break;
+
+		case SPD_ATTR_ALG_PARAMS:
+			if (alg->alg_params == NULL ||
+			    cur_block >= alg->alg_nparams) {
+				ss1dbg(spds, ("spdsock_do_updatealg: "
+				    "too many params\n"));
+				diag = SPD_DIAGNOSTIC_ALG_NUM_BLOCK_SIZES;
+				goto bail;
+			}
+			/*
+			 * Array contains: iv_len, icv_len, salt_len
+			 * Any additional parameters are currently ignored.
+			 */
+			alg->alg_params[cur_block++] =
 			    attr->spd_attr_value;
 			break;
 
@@ -2648,7 +2700,7 @@ spdsock_do_updatealg(spd_ext_t *extv[], int *diag, spd_stack_t *spds)
 			if (attr->spd_attr_value > CRYPTO_MAX_MECH_NAME) {
 				ss1dbg(spds, ("spdsock_do_updatealg: "
 				    "mech name too long\n"));
-				*diag = SPD_DIAGNOSTIC_ALG_MECH_NAME_LEN;
+				diag = SPD_DIAGNOSTIC_ALG_MECH_NAME_LEN;
 				goto bail;
 			}
 			mech_name = (char *)(attr + 1);
@@ -2686,6 +2738,7 @@ spdsock_do_updatealg(spd_ext_t *extv[], int *diag, spd_stack_t *spds)
 
 #undef	ALG_KEY_SIZES
 #undef	ALG_BLOCK_SIZES
+#undef	ALG_PARAM_SIZES
 
 	/* update the algorithm tables */
 	spdsock_merge_algs(spds);
@@ -2696,6 +2749,7 @@ bail:
 		for (algid = 0; algid < IPSEC_MAX_ALGS; algid++)
 		if (spds->spds_algs[alg_type][algid] != NULL)
 			ipsec_alg_free(spds->spds_algs[alg_type][algid]);
+	return (diag);
 }
 
 /*
@@ -2748,9 +2802,12 @@ spdsock_updatealg(queue_t *q, mblk_t *mp, spd_ext_t *extv[])
 		int diag;
 
 		mutex_enter(&spds->spds_alg_lock);
-		spdsock_do_updatealg(extv, &diag, spds);
-		mutex_exit(&spds->spds_alg_lock);
+		diag = spdsock_do_updatealg(extv, spds);
 		if (diag == -1) {
+			/* Keep the lock held while we walk the SA tables. */
+			sadb_alg_update(IPSEC_ALG_ALL, 0, 0,
+			    spds->spds_netstack);
+			mutex_exit(&spds->spds_alg_lock);
 			spd_echo(q, mp);
 			if (audit_active) {
 				cred_t *cr;
@@ -2762,6 +2819,7 @@ spdsock_updatealg(queue_t *q, mblk_t *mp, spd_ext_t *extv[])
 				    cpid);
 			}
 		} else {
+			mutex_exit(&spds->spds_alg_lock);
 			spdsock_diag(q, mp, diag);
 			if (audit_active) {
 				cred_t *cr;
@@ -2774,58 +2832,6 @@ spdsock_updatealg(queue_t *q, mblk_t *mp, spd_ext_t *extv[])
 			}
 		}
 	}
-}
-
-/*
- * With a reference-held ill, dig down and find an instance of "tun", and
- * assign its tunnel policy pointer, while reference-holding it.  Also,
- * release ill's refrence when finished.
- *
- * We'll be messing with q_next, so be VERY careful.
- */
-static void
-find_tun_and_set_itp(ill_t *ill, ipsec_tun_pol_t *itp)
-{
-	queue_t *q;
-	tun_t *tun;
-
-	/* Don't bother if this ill is going away. */
-	if (ill->ill_flags & ILL_CONDEMNED) {
-		ill_refrele(ill);
-		return;
-	}
-
-
-	q = ill->ill_wq;
-	claimstr(q);	/* Lighter-weight than freezestr(). */
-
-	do {
-		/* Use strcmp() because "tun" is bounded. */
-		if (strcmp(q->q_qinfo->qi_minfo->mi_idname, "tun") == 0) {
-			/* Aha!  Got it. */
-			tun = (tun_t *)q->q_ptr;
-			if (tun != NULL) {
-				mutex_enter(&tun->tun_lock);
-				if (tun->tun_itp != itp) {
-					ASSERT(tun->tun_itp == NULL);
-					ITP_REFHOLD(itp);
-					tun->tun_itp = itp;
-				}
-				mutex_exit(&tun->tun_lock);
-				goto release_and_return;
-			}
-			/*
-			 * Else assume this is some other module named "tun"
-			 * and move on, hoping we find one that actually has
-			 * something in q_ptr.
-			 */
-		}
-		q = q->q_next;
-	} while (q != NULL);
-
-release_and_return:
-	releasestr(ill->ill_wq);
-	ill_refrele(ill);
 }
 
 /*
@@ -2847,7 +2853,7 @@ get_appropriate_polhead(queue_t *q, mblk_t *mp, spd_if_t *tunname, int spdid,
 	spdsock_t *ss = (spdsock_t *)q->q_ptr;
 	netstack_t *ns = ss->spdsock_spds->spds_netstack;
 	uint64_t gen;	/* Placeholder */
-	ill_t *v4, *v6;
+	datalink_id_t linkid;
 
 	active = (spdid == SPD_ACTIVE);
 	*itpp = NULL;
@@ -2890,19 +2896,13 @@ get_appropriate_polhead(queue_t *q, mblk_t *mp, spd_if_t *tunname, int spdid,
 			}
 		}
 		/*
-		 * Troll the plumbed tunnels and see if we have a
-		 * match.  We need to do this always in case we add
-		 * policy AFTER plumbing a tunnel.
+		 * Troll the plumbed tunnels and see if we have a match.  We
+		 * need to do this always in case we add policy AFTER plumbing
+		 * a tunnel.
 		 */
-		v4 = ill_lookup_on_name(tname, B_FALSE, B_FALSE, NULL,
-		    NULL, NULL, &errno, NULL, ns->netstack_ip);
-		if (v4 != NULL)
-			find_tun_and_set_itp(v4, itp);
-		v6 = ill_lookup_on_name(tname, B_FALSE, B_TRUE, NULL,
-		    NULL, NULL, &errno, NULL, ns->netstack_ip);
-		if (v6 != NULL)
-			find_tun_and_set_itp(v6, itp);
-		ASSERT(itp != NULL);
+		if (dls_mgmt_get_linkid(tname, &linkid) == 0)
+			iptun_set_policy(linkid, itp);
+
 		*itpp = itp;
 		/* For spdsock dump state, set the polhead's name. */
 		if (msgtype == SPD_DUMP) {
@@ -3120,10 +3120,7 @@ spdsock_update_pending_algs(netstack_t *ns)
 
 	mutex_enter(&spds->spds_alg_lock);
 	if (spds->spds_algs_pending) {
-		int diag;
-
-		spdsock_do_updatealg(spds->spds_extv_algs, &diag,
-		    spds);
+		(void) spdsock_do_updatealg(spds->spds_extv_algs, spds);
 		spds->spds_algs_pending = B_FALSE;
 	}
 	mutex_exit(&spds->spds_alg_lock);
@@ -3268,7 +3265,7 @@ spdsock_opt_get(queue_t *q, int level, int name, uchar_t *ptr)
 int
 spdsock_opt_set(queue_t *q, uint_t mgmt_flags, int level, int name,
     uint_t inlen, uchar_t *invalp, uint_t *outlenp, uchar_t *outvalp,
-    void *thisdg_attrs, cred_t *cr, mblk_t *mblk)
+    void *thisdg_attrs, cred_t *cr)
 {
 	int *i1 = (int *)invalp;
 	spdsock_t *ss = (spdsock_t *)q->q_ptr;
@@ -3340,11 +3337,9 @@ spdsock_wput_other(queue_t *q, mblk_t *mp)
 			}
 			if (((union T_primitives *)mp->b_rptr)->type ==
 			    T_SVR4_OPTMGMT_REQ) {
-				(void) svr4_optcom_req(q, mp, cr,
-				    &spdsock_opt_obj, B_FALSE);
+				svr4_optcom_req(q, mp, cr, &spdsock_opt_obj);
 			} else {
-				(void) tpi_optcom_req(q, mp, cr,
-				    &spdsock_opt_obj, B_FALSE);
+				tpi_optcom_req(q, mp, cr, &spdsock_opt_obj);
 			}
 			break;
 		case T_DATA_REQ:
@@ -3623,7 +3618,7 @@ spdsock_merge_algs(spd_stack_t *spds)
 			 */
 			if (alg->alg_id == SADB_EALG_NULL) {
 				alg->alg_mech_type = CRYPTO_MECHANISM_INVALID;
-				alg->alg_flags = ALG_FLAG_VALID;
+				alg->alg_flags |= ALG_FLAG_VALID;
 				continue;
 			}
 
@@ -3637,7 +3632,7 @@ spdsock_merge_algs(spd_stack_t *spds)
 				}
 			}
 			alg->alg_mech_type = mt;
-			alg->alg_flags = algflags;
+			alg->alg_flags |= algflags;
 		}
 	}
 

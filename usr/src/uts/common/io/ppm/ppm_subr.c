@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * ppm driver subroutines
@@ -399,6 +397,9 @@ ppm_lookup_dev(dev_info_t *dip)
 	char path[MAXNAMELEN];
 	ppm_domain_t *domp;
 	ppm_db_t *dbp;
+#ifdef	__x86
+	char *devtype = NULL;
+#endif	/* __x86 */
 
 	PPM_GET_PATHNAME(dip, path);
 	for (domp = ppm_domain_p; domp; domp = domp->next) {
@@ -411,6 +412,25 @@ ppm_lookup_dev(dev_info_t *dip)
 				if (dip == ddi_root_node() &&
 				    strcmp(dbp->name, "/") == 0)
 					return (domp);
+
+#ifdef	__x86
+				/*
+				 * Special rule to catch all CPU devices on x86.
+				 */
+				if (domp->model == PPMD_CPU &&
+				    strcmp(dbp->name, "/") == 0 &&
+				    ddi_prop_lookup_string(DDI_DEV_T_ANY, dip,
+				    DDI_PROP_DONTPASS, "device_type",
+				    &devtype) == DDI_SUCCESS) {
+					if (strcmp(devtype, "cpu") == 0) {
+						ddi_prop_free(devtype);
+						return (domp);
+					} else {
+						ddi_prop_free(devtype);
+					}
+				}
+#endif	/* __x86 */
+
 				if (ppm_match_devs(path, dbp) == 0)
 					return (domp);
 			}
@@ -1046,7 +1066,7 @@ ppm_convert(char *symbol, uint_t *val)
 
 	if ((s = strchr(symbol, '=')) == NULL) {
 		cmn_err(CE_WARN, "ppm_convert: token \"%s\" syntax error in "
-		    "ppm.conf file, line(%d)", symbol,  __LINE__);
+		    "ppm.conf file", symbol);
 		return (*val = (uint_t)-1);
 	}
 	s++;
@@ -1057,7 +1077,7 @@ ppm_convert(char *symbol, uint_t *val)
 	}
 
 	cmn_err(CE_WARN, "ppm_convert: Unrecognizable token \"%s\" "
-	    "in ppm.conf file, line %d", symbol, __LINE__);
+	    "in ppm.conf file", symbol);
 	return (*val = (uint_t)-1);
 }
 
@@ -1209,7 +1229,7 @@ ppm_parse_dc(char **dc_namep, ppm_dc_t *dc)
 
 		/* we encounted unrecognized field, flag error */
 		cmn_err(CE_WARN, "%s: Unrecognized token \"%s\" in ppm.conf "
-		    "file, line(%d)!", str, dclist[i], __LINE__);
+		    "file!", str, dclist[i]);
 		return (-1);
 	}
 

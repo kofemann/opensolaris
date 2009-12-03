@@ -38,11 +38,8 @@
 #include <sys/hsvc.h>
 #include <px_obj.h>
 #include <sys/machsystm.h>
-#include <sys/hotplug/pci/pcihp.h>
 #include "px_lib4v.h"
 #include "px_err.h"
-#include <vm/vm_dep.h>
-#include <vm/hat_sfmmu.h>
 
 /* mask for the ranges property in calculating the real PFN range */
 uint_t px_ranges_phi_mask = ((1 << 28) -1);
@@ -79,7 +76,7 @@ px_lib_dev_init(dev_info_t *dip, devhandle_t *dev_hdl)
 	 */
 	if ((hsvc_version(HSVC_GROUP_INTR, &mjrnum, &mnrnum) == 0) &&
 	    (mjrnum > 1)) {
-		cmn_err(CE_WARN, "niumx: unsupported intr api group: "
+		cmn_err(CE_WARN, "px: unsupported intr api group: "
 		    "maj:0x%lx, min:0x%lx", mjrnum, mnrnum);
 		return (ENOTSUP);
 	}
@@ -105,7 +102,7 @@ px_lib_dev_init(dev_info_t *dip, devhandle_t *dev_hdl)
 	 * any indirect PCI config access services
 	 */
 	(void) ddi_prop_update_int(makedevice(ddi_driver_major(dip),
-	    PCIHP_AP_MINOR_NUM(ddi_get_instance(dip), PCIHP_DEVCTL_MINOR)), dip,
+	    PCI_MINOR_NUM(ddi_get_instance(dip), PCI_DEVCTL_MINOR)), dip,
 	    PCI_BUS_CONF_MAP_PROP, 1);
 
 	DBG(DBG_ATTACH, dip, "px_lib_dev_init: dev_hdl 0x%llx\n", *dev_hdl);
@@ -138,7 +135,7 @@ px_lib_dev_fini(dev_info_t *dip)
 	DBG(DBG_DETACH, dip, "px_lib_dev_fini: dip 0x%p\n", dip);
 
 	(void) ddi_prop_remove(makedevice(ddi_driver_major(dip),
-	    PCIHP_AP_MINOR_NUM(ddi_get_instance(dip), PCIHP_DEVCTL_MINOR)), dip,
+	    PCI_MINOR_NUM(ddi_get_instance(dip), PCI_DEVCTL_MINOR)), dip,
 	    PCI_BUS_CONF_MAP_PROP);
 
 	if (--px_vpci_users == 0)
@@ -547,9 +544,6 @@ px_lib_dma_sync(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
 	else
 		sync_dir = HVIO_DMA_SYNC_DIR_TO_DEV;
 
-	if (force_sync_icache_after_dma == 0 && !icache_is_coherent)
-		sync_dir |= HVIO_DMA_SYNC_DIR_NO_ICACHE_FLUSH;
-
 	off += mp->dmai_offset;
 	pg_off = off & MMU_PAGEOFFSET;
 
@@ -560,27 +554,12 @@ px_lib_dma_sync(dev_info_t *dip, dev_info_t *rdip, ddi_dma_handle_t handle,
 	end = MMU_BTOPR(off + len - 1);
 	for (idx = MMU_BTOP(off); idx < end; idx++,
 	    len -= bytes_synced, pg_off = 0) {
-		size_t bytes_to_sync =  MIN(len, MMU_PAGESIZE - pg_off);
+		size_t bytes_to_sync = bytes_to_sync =
+		    MIN(len, MMU_PAGESIZE - pg_off);
 
-		while (hvio_dma_sync(hdl,
-		    MMU_PTOB(PX_GET_MP_PFN(mp, idx)) + pg_off,
-		    bytes_to_sync, sync_dir, &bytes_synced) != H_EOK) {
-
-			if (!(sync_dir & HVIO_DMA_SYNC_DIR_NO_ICACHE_FLUSH)) {
-				bytes_synced = 0;
-				break;
-			}
-
-			/*
-			 * Some versions of firmware do not support
-			 * this sync_dir flag. If the call fails clear
-			 * the flag and retry the call. Also, set the
-			 * global so that we dont set the sync_dir
-			 * flag again.
-			 */
-			sync_dir &= ~HVIO_DMA_SYNC_DIR_NO_ICACHE_FLUSH;
-			force_sync_icache_after_dma = 1;
-		}
+		if (hvio_dma_sync(hdl, MMU_PTOB(PX_GET_MP_PFN(mp, idx)) +
+		    pg_off, bytes_to_sync, sync_dir, &bytes_synced) != H_EOK)
+			break;
 
 		DBG(DBG_LIB_DMA, dip, "px_lib_dma_sync: Called hvio_dma_sync "
 		    "ra = %p bytes to sync = %x bytes synced %x\n",
@@ -1192,13 +1171,13 @@ px_pci_config_get(ddi_acc_impl_t *handle, uint32_t *addr, int size)
 	uint32_t pci_dev_addr = px_pvt->raddr;
 	uint32_t vaddr = px_pvt->vaddr;
 	uint16_t off = (uint16_t)(uintptr_t)(addr - vaddr) & 0xfff;
-	uint32_t rdata = 0;
+	uint64_t rdata = 0;
 
 	if (px_lib_config_get(px_pvt->dip, pci_dev_addr, off,
 	    size, (pci_cfg_data_t *)&rdata) != DDI_SUCCESS)
 		/* XXX update error kstats */
 		return (0xffffffff);
-	return (rdata);
+	return ((uint32_t)rdata);
 }
 
 static void
@@ -1528,7 +1507,7 @@ px_lib_log_safeacc_err(px_t *px_p, ddi_acc_handle_t handle, int fme_flag,
 {
 	uint32_t	addr_high, addr_low;
 	pcie_req_id_t	bdf = PCIE_INVALID_BDF;
-	px_ranges_t	*ranges_p;
+	pci_ranges_t	*ranges_p;
 	int		range_len, i;
 	ddi_acc_impl_t *hp = (ddi_acc_impl_t *)handle;
 	ddi_fm_error_t derr;
@@ -1548,7 +1527,7 @@ px_lib_log_safeacc_err(px_t *px_p, ddi_acc_handle_t handle, int fme_flag,
 	 * Make sure this failed load came from this PCIe port.  Check by
 	 * matching the upper 32 bits of the address with the ranges property.
 	 */
-	range_len = px_p->px_ranges_length / sizeof (px_ranges_t);
+	range_len = px_p->px_ranges_length / sizeof (pci_ranges_t);
 	i = 0;
 	for (ranges_p = px_p->px_ranges_p; i < range_len; i++, ranges_p++) {
 		if (ranges_p->parent_high == addr_high) {
@@ -1955,13 +1934,13 @@ px_pmeq_intr(caddr_t arg)
  */
 uint32_t
 px_fab_get(px_t *px_p, pcie_req_id_t bdf, uint16_t offset) {
-	uint32_t 	data = 0;
+	uint64_t 	data = 0;
 
 	(void) hvio_config_get(px_p->px_dev_hdl,
 	    (bdf << PX_RA_BDF_SHIFT), offset, 4,
 	    (pci_cfg_data_t *)&data);
 
-	return (data);
+	return ((uint32_t)data);
 }
 
 void

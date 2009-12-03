@@ -200,6 +200,9 @@ void	hat_thread_exit(kthread_t *);
  *	given to the specified virtual protection.  If vprot is ~PROT_WRITE,
  *	then remove write permission, leaving the other permissions
  *	unchanged.  If vprot is ~PROT_USER, remove user permissions.
+ *
+ * void hat_flush_range(hat, addr, size)
+ *	Invalidate a virtual address translation for the local CPU.
  */
 
 void	hat_memload(struct hat *, caddr_t, struct page *, uint_t, uint_t);
@@ -218,6 +221,7 @@ void	hat_unlock_region(struct hat *, caddr_t, size_t, hat_region_cookie_t);
 void	hat_unload(struct hat *, caddr_t, size_t, uint_t);
 void	hat_unload_callback(struct hat *, caddr_t, size_t, uint_t,
 		hat_callback_t *);
+void	hat_flush_range(struct hat *, caddr_t, size_t);
 void	hat_sync(struct hat *, caddr_t, size_t, uint_t);
 void	hat_map(struct hat *, caddr_t, size_t, uint_t);
 void	hat_setattr(struct hat *, caddr_t, size_t, uint_t);
@@ -424,25 +428,6 @@ void	hat_setstat(struct as *, caddr_t, size_t, uint_t);
 #define	HAT_STRUCTURE_BE	0x1000
 #define	HAT_STRUCTURE_LE	0x2000
 #define	HAT_ENDIAN_MASK		0x3000
-
-/*
- * Attributes for non-coherent I-cache support.
- *
- * We detect if an I-cache has been filled by first resetting
- * execute permission in a tte entry. This forces a trap when
- * an instruction fetch first occurs in that page. In "soft
- * execute mode", the hardware execute permission is cleared
- * and a different software execution bit is set in the tte.
- *
- * HAT_ATTR_TEXT: set this flag to avoid the extra trap associated
- * with soft execute mode. Same meaning as HAT_LOAD_TEXT.
- *
- * HAT_ATTR_NOSOFTEXEC: set this flag when installing a permanent
- * mapping, or installing a mapping that will never be
- * freed. Overrides soft execute mode.
- */
-#define	HAT_ATTR_TEXT		0x4000
-#define	HAT_ATTR_NOSOFTEXEC	0x8000
 
 /* flags for hat_softlock */
 #define	HAT_COW			0x0001

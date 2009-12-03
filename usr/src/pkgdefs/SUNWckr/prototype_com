@@ -72,6 +72,7 @@ d none kernel/drv 755 root sys
 f none kernel/drv/aggr.conf 644 root sys
 f none kernel/drv/arp.conf 644 root sys
 f none kernel/drv/bl.conf 644 root sys
+f none kernel/drv/bridge.conf 644 root sys
 f none kernel/drv/clone.conf 644 root sys
 f none kernel/drv/cn.conf 644 root sys
 f none kernel/drv/conskbd.conf 644 root sys
@@ -90,6 +91,7 @@ f none kernel/drv/ipnet.conf 644 root sys
 f none kernel/drv/ippctl.conf 644 root sys
 f none kernel/drv/ipsecah.conf 644 root sys
 f none kernel/drv/ipsecesp.conf 644 root sys
+f none kernel/drv/iptun.conf 644 root sys
 f none kernel/drv/iwscn.conf 644 root sys
 f none kernel/drv/keysock.conf 644 root sys
 f none kernel/drv/kmdb.conf 644 root sys

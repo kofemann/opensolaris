@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -87,6 +87,12 @@ extern "C" {
 #define	MAX_TASKID	999999
 #define	MAX_MAXPID	999999
 #define	MAXEPHUID	0xfffffffcu	/* max ephemeral user id */
+
+#define	FAMOUS_PID_SCHED	0
+#define	FAMOUS_PID_INIT		1
+#define	FAMOUS_PID_PAGEOUT	2
+#define	FAMOUS_PID_FSFLUSH	3
+#define	FAMOUS_PIDS		4
 #endif
 
 #ifdef DEBUG
@@ -95,7 +101,6 @@ extern "C" {
 #else
 #define	DEFAULT_MAXPID	30000
 #define	DEFAULT_JUMPPID	0
-
 #endif
 
 #define	MAXUID		2147483647	/* max user id */
@@ -119,7 +124,8 @@ extern "C" {
  * configurable parameter NGROUPS_MAX.
  */
 #define	NGROUPS_UMIN	0
-#define	NGROUPS_UMAX	32
+#define	NGROUPS_UMAX	1024
+#define	NGROUPS_OLDMAX	32
 
 /*
  * NGROUPS_MAX_DEFAULT: *MUST* match NGROUPS_MAX value in limits.h.

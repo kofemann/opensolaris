@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include <strings.h>
 #include <libintl.h>
+#include <libscf.h>
 
 #include <libstmf.h>
 #include <libiscsit.h>
@@ -50,6 +51,8 @@
 /* Default RADIUS server port */
 #define	DEFAULT_RADIUS_PORT	1812
 
+/* The iscsit SMF service FMRI */
+#define	ISCSIT_FMRI		"svc:/network/iscsi/target:default"
 /*
  * The kernel reserves target portal group tag value 1 as the default.
  */
@@ -79,6 +82,15 @@ it_validate_tgtprops(nvlist_t *nvl, nvlist_t *errs);
 
 static int
 it_validate_iniprops(nvlist_t *nvl, nvlist_t *errs);
+
+static boolean_t
+is_iscsit_enabled(void);
+
+static void
+iqnstr(char *s);
+
+static void
+euistr(char *s);
 
 /*
  * Function:  it_config_load()
@@ -168,18 +180,21 @@ it_config_commit(it_config_t *cfg)
 		return (EINVAL);
 	}
 
-	iscsit_fd = open(ISCSIT_NODE, O_RDWR|O_EXCL);
-	if (iscsit_fd == -1) {
-		ret = errno;
-		return (ret);
-	}
-
 	ret = it_config_to_nv(cfg, &cfgnv);
 	if (ret == 0) {
 		ret = nvlist_size(cfgnv, &pnv_size, NV_ENCODE_NATIVE);
 	}
 
-	if (ret == 0) {
+	/*
+	 * If the iscsit service is enabled, send the changes to the
+	 * kernel first.  Kernel will be the final sanity check before
+	 * the config is saved persistently.
+	 *
+	 * This somewhat leaves open the simultaneous-change hole
+	 * that STMF was trying to solve, but is a better sanity
+	 * check and allows for graceful handling of target renames.
+	 */
+	if ((ret == 0) && is_iscsit_enabled()) {
 		packednv = malloc(pnv_size);
 		if (!packednv) {
 			ret = ENOMEM;
@@ -187,24 +202,26 @@ it_config_commit(it_config_t *cfg)
 			ret = nvlist_pack(cfgnv, &packednv, &pnv_size,
 			    NV_ENCODE_NATIVE, 0);
 		}
-	}
 
-	/*
-	 * Send the changes to the kernel first, for now.  Kernel
-	 * will be the final sanity check before config is saved
-	 * persistently.
-	 *
-	 * XXX - this leaves open the simultaneous-change hole
-	 * that STMF was trying to solve, but is a better sanity
-	 * check.   Final decision on save order/config generation
-	 * number TBD.
-	 */
-	if (ret == 0) {
-		iop.set_cfg_vers = ISCSIT_API_VERS0;
-		iop.set_cfg_pnvlist = packednv;
-		iop.set_cfg_pnvlist_len = pnv_size;
-		if ((ioctl(iscsit_fd, ISCSIT_IOC_SET_CONFIG, &iop)) != 0) {
-			ret = errno;
+		if (ret == 0) {
+			iscsit_fd = open(ISCSIT_NODE, O_RDWR|O_EXCL);
+			if (iscsit_fd != -1) {
+				iop.set_cfg_vers = ISCSIT_API_VERS0;
+				iop.set_cfg_pnvlist = packednv;
+				iop.set_cfg_pnvlist_len = pnv_size;
+				if ((ioctl(iscsit_fd, ISCSIT_IOC_SET_CONFIG,
+				    &iop)) != 0) {
+					ret = errno;
+				}
+
+				(void) close(iscsit_fd);
+			} else {
+				ret = errno;
+			}
+		}
+
+		if (packednv != NULL) {
+			free(packednv);
 		}
 	}
 
@@ -214,6 +231,8 @@ it_config_commit(it_config_t *cfg)
 	 * the active service.
 	 */
 	if (ret == 0) {
+		boolean_t	changed = B_FALSE;
+
 		tgtp = cfg->config_tgt_list;
 		for (; tgtp != NULL; tgtp = tgtp->tgt_next) {
 			if (!tgtp->tgt_properties) {
@@ -223,7 +242,15 @@ it_config_commit(it_config_t *cfg)
 			    PROP_OLD_TARGET_NAME)) {
 				(void) nvlist_remove_all(tgtp->tgt_properties,
 				    PROP_OLD_TARGET_NAME);
+				changed = B_TRUE;
 			}
+		}
+
+		if (changed) {
+			/* rebuild the config nvlist */
+			nvlist_free(cfgnv);
+			cfgnv = NULL;
+			ret = it_config_to_nv(cfg, &cfgnv);
 		}
 	}
 
@@ -256,12 +283,6 @@ it_config_commit(it_config_t *cfg)
 				it_config_free(rcfg);
 			}
 		}
-	}
-
-	(void) close(iscsit_fd);
-
-	if (packednv) {
-		free(packednv);
 	}
 
 	if (cfgnv) {
@@ -499,41 +520,41 @@ it_tgt_create(it_config_t *cfg, it_tgt_t **tgt, char *tgt_name)
 	int		ret = 0;
 	it_tgt_t	*ptr;
 	it_tgt_t	*cfgtgt;
-	char		*namep = tgt_name;
+	char		*namep;
 	char		buf[ISCSI_NAME_LEN_MAX + 1];
 
 	if (!cfg || !tgt) {
 		return (EINVAL);
 	}
 
-	if (!namep) {
+	if (!tgt_name) {
 		/* generate a name */
-
 		ret = it_iqn_generate(buf, sizeof (buf), NULL);
 		if (ret != 0) {
 			return (ret);
 		}
-		namep = buf;
 	} else {
 		/* validate the passed-in name */
-		if (!validate_iscsi_name(namep)) {
+		if (!validate_iscsi_name(tgt_name)) {
 			return (EFAULT);
 		}
+		(void) strlcpy(buf, tgt_name, sizeof (buf));
+		canonical_iscsi_name(buf);
+	}
+	namep = buf;
+
+	/* make sure this name isn't already on the list */
+	cfgtgt = cfg->config_tgt_list;
+	while (cfgtgt != NULL) {
+		if (strcasecmp(namep, cfgtgt->tgt_name) == 0) {
+			return (EEXIST);
+		}
+		cfgtgt = cfgtgt->tgt_next;
 	}
 
 	/* Too many targets? */
 	if (cfg->config_tgt_count >= MAX_TARGETS) {
 		return (E2BIG);
-	}
-
-
-	/* make sure this name isn't already on the list */
-	cfgtgt = cfg->config_tgt_list;
-	while (cfgtgt != NULL) {
-		if (strcmp(namep, cfgtgt->tgt_name) == 0) {
-			return (EEXIST);
-		}
-		cfgtgt = cfgtgt->tgt_next;
 	}
 
 	ptr = calloc(1, sizeof (it_tgt_t));
@@ -585,6 +606,12 @@ it_tgt_setprop(it_config_t *cfg, it_tgt_t *tgt, nvlist_t *proplist,
 	if (!cfg || !tgt || !proplist) {
 		return (EINVAL);
 	}
+
+	/* verify the target name in case the target node is renamed */
+	if (!validate_iscsi_name(tgt->tgt_name)) {
+		return (EINVAL);
+	}
+	canonical_iscsi_name(tgt->tgt_name);
 
 	if (errlist) {
 		(void) nvlist_alloc(errlist, 0, 0);
@@ -694,7 +721,7 @@ it_tgt_delete(it_config_t *cfg, it_tgt_t *tgt, boolean_t force)
 
 	ptgt = cfg->config_tgt_list;
 	while (ptgt != NULL) {
-		if (strcmp(tgt->tgt_name, ptgt->tgt_name) == 0) {
+		if (strcasecmp(tgt->tgt_name, ptgt->tgt_name) == 0) {
 			break;
 		}
 		prev = ptgt;
@@ -1275,7 +1302,7 @@ it_ini_create(it_config_t *cfg, it_ini_t **ini, char *ini_node_name)
 
 	ptr = cfg->config_ini_list;
 	while (ptr) {
-		if (strcmp(ptr->ini_name, ini_node_name) == 0) {
+		if (strcasecmp(ptr->ini_name, ini_node_name) == 0) {
 			break;
 		}
 		ptr = ptr->ini_next;
@@ -1422,7 +1449,7 @@ it_ini_delete(it_config_t *cfg, it_ini_t *ini)
 
 	ptr = cfg->config_ini_list;
 	while (ptr) {
-		if (strcmp(ptr->ini_name, ini->ini_name) == 0) {
+		if (strcasecmp(ptr->ini_name, ini->ini_name) == 0) {
 			break;
 		}
 		prev = ptr;
@@ -1857,7 +1884,7 @@ validate_iscsi_name(char *in_name)
 		return (B_FALSE);
 	}
 
-	if (strncasecmp(in_name, "iqn.", 4) == 0) {
+	if (IS_IQN_NAME(in_name)) {
 		/*
 		 * IQN names are iqn.yyyy-mm.<xxx>
 		 */
@@ -1900,7 +1927,7 @@ validate_iscsi_name(char *in_name)
 		if (in_len > ISCSI_NAME_LEN_MAX) {
 			return (B_FALSE);
 		}
-	} else if (strncasecmp(in_name, "eui.", 4) == 0) {
+	} else if (IS_EUI_NAME(in_name)) {
 		/*
 		 * EUI names are "eui." + 16 hex chars
 		 */
@@ -1918,4 +1945,67 @@ validate_iscsi_name(char *in_name)
 	}
 
 	return (B_TRUE);
+}
+
+static boolean_t
+is_iscsit_enabled(void)
+{
+	char		*state;
+
+	state = smf_get_state(ISCSIT_FMRI);
+	if (state != NULL) {
+		if (strcmp(state, SCF_STATE_STRING_ONLINE) == 0) {
+			return (B_TRUE);
+		}
+	}
+
+	return (B_FALSE);
+}
+
+/*
+ * Function:  canonical_iscsi_name()
+ *
+ * Fold the iqn iscsi name to lower-case and the EUI-64 identifier of
+ * the eui iscsi name to upper-case.
+ * Ensures the passed-in string is a valid IQN or EUI iSCSI name
+ */
+void
+canonical_iscsi_name(char *tgt)
+{
+	if (IS_IQN_NAME(tgt)) {
+		/* lowercase iqn names */
+		iqnstr(tgt);
+	} else {
+		/* uppercase EUI-64 identifier */
+		euistr(tgt);
+	}
+}
+
+/*
+ * Fold an iqn name to lower-case.
+ */
+static void
+iqnstr(char *s)
+{
+	if (s != NULL) {
+		while (*s) {
+			*s = tolower(*s);
+			s++;
+		}
+	}
+}
+
+/*
+ * Fold the EUI-64 identifier of a eui name to upper-case.
+ */
+static void
+euistr(char *s)
+{
+	if (s != NULL) {
+		char *l = s + 4;
+		while (*l) {
+			*l = toupper(*l);
+			l++;
+		}
+	}
 }

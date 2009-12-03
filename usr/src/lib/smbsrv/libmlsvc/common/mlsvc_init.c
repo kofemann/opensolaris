@@ -52,12 +52,15 @@ mlsvc_init(void)
 	pthread_attr_t tattr;
 	int rc;
 
+	smb_proc_initsem();
+
 	if (smb_logon_init() != NT_STATUS_SUCCESS)
 		return (-1);
 
 	if ((rc = smb_dclocator_init()) != 0)
 		return (rc);
 
+	ndr_rpc_init();
 	srvsvc_initialize();
 	wkssvc_initialize();
 	lsarpc_initialize();
@@ -84,6 +87,7 @@ mlsvc_fini(void)
 	smb_logon_fini();
 	svcctl_finalize();
 	logr_finalize();
+	ndr_rpc_fini();
 }
 
 /*ARGSUSED*/

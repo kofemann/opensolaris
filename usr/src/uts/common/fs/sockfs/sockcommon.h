@@ -167,7 +167,7 @@ extern int 	so_acceptq_enqueue(struct sonode *, struct sonode *);
 extern int 	so_acceptq_enqueue_locked(struct sonode *, struct sonode *);
 extern int	so_acceptq_dequeue(struct sonode *, boolean_t,
     struct sonode **);
-extern void	so_acceptq_flush(struct sonode *);
+extern void	so_acceptq_flush(struct sonode *, boolean_t);
 
 	/* connect */
 extern int 	so_wait_connected(struct sonode *, boolean_t, sock_connid_t);
@@ -184,8 +184,7 @@ extern int	so_dequeue_msg(struct sonode *, mblk_t **, struct uio *,
 extern void	so_enqueue_msg(struct sonode *, mblk_t *, size_t);
 extern void	so_process_new_message(struct sonode *, mblk_t *, mblk_t *);
 
-extern mblk_t	*socopyinuio(uio_t *, ssize_t, size_t, ssize_t, size_t, int *,
-    cred_t *);
+extern mblk_t	*socopyinuio(uio_t *, ssize_t, size_t, ssize_t, size_t, int *);
 extern mblk_t 	*socopyoutuio(mblk_t *, struct uio *, ssize_t, int *);
 
 extern boolean_t somsghasdata(mblk_t *);

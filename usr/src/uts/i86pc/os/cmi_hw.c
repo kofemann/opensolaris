@@ -48,6 +48,18 @@
 #include <sys/trap.h>
 #include <sys/mca_x86.h>
 #include <sys/processor.h>
+#include <sys/cmn_err.h>
+#include <sys/nvpair.h>
+#include <sys/fm/util.h>
+#include <sys/fm/protocol.h>
+#include <sys/fm/smb/fmsmb.h>
+#include <sys/cpu_module_impl.h>
+
+/*
+ * Variable which determines if the SMBIOS supports x86 generic topology; or
+ * if legacy topolgy enumeration will occur.
+ */
+extern int x86gentopo_legacy;
 
 /*
  * Outside of this file consumers use the opaque cmi_hdl_t.  This
@@ -58,8 +70,10 @@ typedef struct cmi_hdl_impl {
 	enum cmi_hdl_class cmih_class;		/* Handle nature */
 	const struct cmi_hdl_ops *cmih_ops;	/* Operations vector */
 	uint_t cmih_chipid;			/* Chipid of cpu resource */
+	uint_t cmih_procnodeid;			/* Nodeid of cpu resource */
 	uint_t cmih_coreid;			/* Core within die */
 	uint_t cmih_strandid;			/* Thread within core */
+	uint_t cmih_procnodes_per_pkg;		/* Nodes in a processor */
 	boolean_t cmih_mstrand;			/* cores are multithreaded */
 	volatile uint32_t *cmih_refcntp;	/* Reference count pointer */
 	uint64_t cmih_msrsrc;			/* MSR data source flags */
@@ -70,6 +84,9 @@ typedef struct cmi_hdl_impl {
 	const struct cmi_mc_ops *cmih_mcops;	/* Memory-controller ops */
 	void *cmih_mcdata;			/* Memory-controller data */
 	uint64_t cmih_flags;			/* See CMIH_F_* below */
+	uint16_t cmih_smbiosid;			/* SMBIOS Type 4 struct ID */
+	uint_t cmih_smb_chipid;			/* SMBIOS factored chipid */
+	nvlist_t *cmih_smb_bboard;		/* SMBIOS bboard nvlist */
 } cmi_hdl_impl_t;
 
 #define	IMPLHDL(ophdl)	((cmi_hdl_impl_t *)ophdl)
@@ -90,8 +107,11 @@ struct cmi_hdl_ops {
 	uint_t (*cmio_model)(cmi_hdl_impl_t *);
 	uint_t (*cmio_stepping)(cmi_hdl_impl_t *);
 	uint_t (*cmio_chipid)(cmi_hdl_impl_t *);
+	uint_t (*cmio_procnodeid)(cmi_hdl_impl_t *);
 	uint_t (*cmio_coreid)(cmi_hdl_impl_t *);
 	uint_t (*cmio_strandid)(cmi_hdl_impl_t *);
+	uint_t (*cmio_procnodes_per_pkg)(cmi_hdl_impl_t *);
+	uint_t (*cmio_strand_apicid)(cmi_hdl_impl_t *);
 	uint32_t (*cmio_chiprev)(cmi_hdl_impl_t *);
 	const char *(*cmio_chiprevstr)(cmi_hdl_impl_t *);
 	uint32_t (*cmio_getsockettype)(cmi_hdl_impl_t *);
@@ -108,6 +128,9 @@ struct cmi_hdl_ops {
 	cmi_errno_t (*cmio_msrinterpose)(cmi_hdl_impl_t *, uint_t, uint64_t);
 	void (*cmio_int)(cmi_hdl_impl_t *, int);
 	int (*cmio_online)(cmi_hdl_impl_t *, int, int *);
+	uint16_t (*cmio_smbiosid) (cmi_hdl_impl_t *);
+	uint_t (*cmio_smb_chipid)(cmi_hdl_impl_t *);
+	nvlist_t *(*cmio_smb_bboard)(cmi_hdl_impl_t *);
 };
 
 static const struct cmi_hdl_ops cmi_hdl_ops;
@@ -591,6 +614,18 @@ ntv_chipid(cmi_hdl_impl_t *hdl)
 }
 
 static uint_t
+ntv_procnodeid(cmi_hdl_impl_t *hdl)
+{
+	return (hdl->cmih_procnodeid);
+}
+
+static uint_t
+ntv_procnodes_per_pkg(cmi_hdl_impl_t *hdl)
+{
+	return (hdl->cmih_procnodes_per_pkg);
+}
+
+static uint_t
 ntv_coreid(cmi_hdl_impl_t *hdl)
 {
 	return (hdl->cmih_coreid);
@@ -600,6 +635,30 @@ static uint_t
 ntv_strandid(cmi_hdl_impl_t *hdl)
 {
 	return (hdl->cmih_strandid);
+}
+
+static uint_t
+ntv_strand_apicid(cmi_hdl_impl_t *hdl)
+{
+	return (cpuid_get_apicid(HDLPRIV(hdl)));
+}
+
+static uint16_t
+ntv_smbiosid(cmi_hdl_impl_t *hdl)
+{
+	return (hdl->cmih_smbiosid);
+}
+
+static uint_t
+ntv_smb_chipid(cmi_hdl_impl_t *hdl)
+{
+	return (hdl->cmih_smb_chipid);
+}
+
+static nvlist_t *
+ntv_smb_bboard(cmi_hdl_impl_t *hdl)
+{
+	return (hdl->cmih_smb_bboard);
 }
 
 static uint32_t
@@ -847,6 +906,18 @@ xpv_chipid(cmi_hdl_impl_t *hdl)
 }
 
 static uint_t
+xpv_procnodeid(cmi_hdl_impl_t *hdl)
+{
+	return (hdl->cmih_procnodeid);
+}
+
+static uint_t
+xpv_procnodes_per_pkg(cmi_hdl_impl_t *hdl)
+{
+	return (hdl->cmih_procnodes_per_pkg);
+}
+
+static uint_t
 xpv_coreid(cmi_hdl_impl_t *hdl)
 {
 	return (hdl->cmih_coreid);
@@ -856,6 +927,30 @@ static uint_t
 xpv_strandid(cmi_hdl_impl_t *hdl)
 {
 	return (hdl->cmih_strandid);
+}
+
+static uint_t
+xpv_strand_apicid(cmi_hdl_impl_t *hdl)
+{
+	return (xen_physcpu_initial_apicid(HDLPRIV(hdl)));
+}
+
+static uint16_t
+xpv_smbiosid(cmi_hdl_impl_t *hdl)
+{
+	return (hdl->cmih_smbiosid);
+}
+
+static uint_t
+xpv_smb_chipid(cmi_hdl_impl_t *hdl)
+{
+	return (hdl->cmih_smb_chipid);
+}
+
+static nvlist_t *
+xpv_smb_bboard(cmi_hdl_impl_t *hdl)
+{
+	return (hdl->cmih_smb_bboard);
 }
 
 extern uint32_t _cpuid_chiprev(uint_t, uint_t, uint_t, uint_t);
@@ -930,7 +1025,8 @@ xpv_rdmsr(cmi_hdl_impl_t *hdl, uint_t msr, uint64_t *valp)
 static cmi_errno_t
 xpv_wrmsr_cmn(cmi_hdl_impl_t *hdl, uint_t msr, uint64_t val, boolean_t intpose)
 {
-	struct xen_mc_msrinject mci;
+	xen_mc_t xmc;
+	struct xen_mc_msrinject *mci = &xmc.u.mc_msrinject;
 
 	if (!(hdl->cmih_flags & CMIH_F_INJACTV))
 		return (CMIERR_NOTSUP);		/* for injection use only! */
@@ -941,13 +1037,13 @@ xpv_wrmsr_cmn(cmi_hdl_impl_t *hdl, uint_t msr, uint64_t val, boolean_t intpose)
 	if (panicstr)
 		return (CMIERR_DEADLOCK);
 
-	mci.mcinj_cpunr = xen_physcpu_logical_id(HDLPRIV(hdl));
-	mci.mcinj_flags = intpose ? MC_MSRINJ_F_INTERPOSE : 0;
-	mci.mcinj_count = 1;	/* learn to batch sometime */
-	mci.mcinj_msr[0].reg = msr;
-	mci.mcinj_msr[0].value = val;
+	mci->mcinj_cpunr = xen_physcpu_logical_id(HDLPRIV(hdl));
+	mci->mcinj_flags = intpose ? MC_MSRINJ_F_INTERPOSE : 0;
+	mci->mcinj_count = 1;	/* learn to batch sometime */
+	mci->mcinj_msr[0].reg = msr;
+	mci->mcinj_msr[0].value = val;
 
-	return (HYPERVISOR_mca(XEN_MC_msrinject, (xen_mc_arg_t *)&mci) ==
+	return (HYPERVISOR_mca(XEN_MC_msrinject, &xmc) ==
 	    0 ?  CMI_SUCCESS : CMIERR_NOTSUP);
 }
 
@@ -967,7 +1063,8 @@ xpv_msrinterpose(cmi_hdl_impl_t *hdl, uint_t msr, uint64_t val)
 static void
 xpv_int(cmi_hdl_impl_t *hdl, int int_no)
 {
-	struct xen_mc_mceinject mce;
+	xen_mc_t xmc;
+	struct xen_mc_mceinject *mce = &xmc.u.mc_mceinject;
 
 	if (!(hdl->cmih_flags & CMIH_F_INJACTV))
 		return;
@@ -977,9 +1074,9 @@ xpv_int(cmi_hdl_impl_t *hdl, int int_no)
 		    int_no);
 	}
 
-	mce.mceinj_cpunr = xen_physcpu_logical_id(HDLPRIV(hdl));
+	mce->mceinj_cpunr = xen_physcpu_logical_id(HDLPRIV(hdl));
 
-	(void) HYPERVISOR_mca(XEN_MC_mceinject, (xen_mc_arg_t *)&mce);
+	(void) HYPERVISOR_mca(XEN_MC_mceinject, &xmc);
 }
 
 static int
@@ -1146,10 +1243,20 @@ cmi_hdl_create(enum cmi_hdl_class class, uint_t chipid, uint_t coreid,
 #ifdef __xpv
 	hdl->cmih_msrsrc = CMI_MSR_FLAG_RD_INTERPOSEOK |
 	    CMI_MSR_FLAG_WR_INTERPOSEOK;
-#else	/* __xpv */
+
+	/*
+	 * XXX: need hypervisor support for procnodeid, for now assume
+	 * single-node processors (procnodeid = chipid)
+	 */
+	hdl->cmih_procnodeid = xen_physcpu_chipid((xen_mc_lcpu_cookie_t)priv);
+	hdl->cmih_procnodes_per_pkg = 1;
+#else   /* __xpv */
 	hdl->cmih_msrsrc = CMI_MSR_FLAG_RD_HWOK | CMI_MSR_FLAG_RD_INTERPOSEOK |
 	    CMI_MSR_FLAG_WR_HWOK | CMI_MSR_FLAG_WR_INTERPOSEOK;
-#endif
+	hdl->cmih_procnodeid = cpuid_get_procnodeid((cpu_t *)priv);
+	hdl->cmih_procnodes_per_pkg =
+	    cpuid_get_procnodes_per_pkg((cpu_t *)priv);
+#endif  /* __xpv */
 
 	ent = cmi_hdl_ent_lookup(chipid, coreid, strandid);
 	if (ent->cmae_refcnt != 0 || ent->cmae_hdlp != NULL) {
@@ -1183,6 +1290,51 @@ cmi_hdl_create(enum cmi_hdl_class class, uint_t chipid, uint_t coreid,
 	ent->cmae_refcnt = 1;
 
 	return ((cmi_hdl_t)hdl);
+}
+
+void
+cmi_read_smbios(cmi_hdl_t ophdl)
+{
+
+	uint_t strand_apicid;
+	uint_t chip_inst;
+	uint16_t smb_id;
+	int rc = 0;
+
+	cmi_hdl_impl_t *hdl = IMPLHDL(ophdl);
+
+	/* set x86gentopo compatibility */
+	fm_smb_fmacompat();
+
+#ifndef __xpv
+	strand_apicid = ntv_strand_apicid(hdl);
+#else
+	strand_apicid = xpv_strand_apicid(hdl);
+#endif
+
+	if (!x86gentopo_legacy) {
+		/*
+		 * If fm_smb_chipinst() or fm_smb_bboard() fails,
+		 * topo reverts to legacy mode
+		 */
+		rc = fm_smb_chipinst(strand_apicid, &chip_inst, &smb_id);
+		if (rc == 0) {
+			hdl->cmih_smb_chipid = chip_inst;
+			hdl->cmih_smbiosid = smb_id;
+		} else {
+#ifdef DEBUG
+			cmn_err(CE_NOTE, "!cmi reads smbios chip info failed");
+#endif /* DEBUG */
+			return;
+		}
+
+		hdl->cmih_smb_bboard  = fm_smb_bboard(strand_apicid);
+#ifdef DEBUG
+		if (hdl->cmih_smb_bboard == NULL)
+			cmn_err(CE_NOTE,
+			    "!cmi reads smbios base boards info failed");
+#endif /* DEBUG */
+	}
 }
 
 void
@@ -1396,13 +1548,19 @@ CMI_HDL_OPFUNC(family, uint_t)
 CMI_HDL_OPFUNC(model, uint_t)
 CMI_HDL_OPFUNC(stepping, uint_t)
 CMI_HDL_OPFUNC(chipid, uint_t)
+CMI_HDL_OPFUNC(procnodeid, uint_t)
 CMI_HDL_OPFUNC(coreid, uint_t)
 CMI_HDL_OPFUNC(strandid, uint_t)
+CMI_HDL_OPFUNC(procnodes_per_pkg, uint_t)
+CMI_HDL_OPFUNC(strand_apicid, uint_t)
 CMI_HDL_OPFUNC(chiprev, uint32_t)
 CMI_HDL_OPFUNC(chiprevstr, const char *)
 CMI_HDL_OPFUNC(getsockettype, uint32_t)
 CMI_HDL_OPFUNC(getsocketstr, const char *)
 CMI_HDL_OPFUNC(logical_id, id_t)
+CMI_HDL_OPFUNC(smbiosid, uint16_t)
+CMI_HDL_OPFUNC(smb_chipid, uint_t)
+CMI_HDL_OPFUNC(smb_bboard, nvlist_t *)
 
 boolean_t
 cmi_hdl_is_cmt(cmi_hdl_t ophdl)
@@ -1436,6 +1594,15 @@ uint_t
 cmi_ntv_hwchipid(cpu_t *cp)
 {
 	return (cpuid_get_chipid(cp));
+}
+
+/*
+ * Return hardware node instance; cpuid_get_procnodeid provides this directly.
+ */
+uint_t
+cmi_ntv_hwprocnodeid(cpu_t *cp)
+{
+	return (cpuid_get_procnodeid(cp));
 }
 
 /*
@@ -1728,8 +1895,11 @@ static const struct cmi_hdl_ops cmi_hdl_ops = {
 	xpv_model,		/* cmio_model */
 	xpv_stepping,		/* cmio_stepping */
 	xpv_chipid,		/* cmio_chipid */
+	xpv_procnodeid,		/* cmio_procnodeid */
 	xpv_coreid,		/* cmio_coreid */
 	xpv_strandid,		/* cmio_strandid */
+	xpv_procnodes_per_pkg,	/* cmio_procnodes_per_pkg */
+	xpv_strand_apicid,	/* cmio_strand_apicid */
 	xpv_chiprev,		/* cmio_chiprev */
 	xpv_chiprevstr,		/* cmio_chiprevstr */
 	xpv_getsockettype,	/* cmio_getsockettype */
@@ -1741,7 +1911,10 @@ static const struct cmi_hdl_ops cmi_hdl_ops = {
 	xpv_wrmsr,		/* cmio_wrmsr */
 	xpv_msrinterpose,	/* cmio_msrinterpose */
 	xpv_int,		/* cmio_int */
-	xpv_online		/* cmio_online */
+	xpv_online,		/* cmio_online */
+	xpv_smbiosid,		/* cmio_smbiosid */
+	xpv_smb_chipid,		/* cmio_smb_chipid */
+	xpv_smb_bboard		/* cmio_smb_bboard */
 
 #else	/* __xpv */
 
@@ -1754,8 +1927,11 @@ static const struct cmi_hdl_ops cmi_hdl_ops = {
 	ntv_model,		/* cmio_model */
 	ntv_stepping,		/* cmio_stepping */
 	ntv_chipid,		/* cmio_chipid */
+	ntv_procnodeid,		/* cmio_procnodeid */
 	ntv_coreid,		/* cmio_coreid */
 	ntv_strandid,		/* cmio_strandid */
+	ntv_procnodes_per_pkg,	/* cmio_procnodes_per_pkg */
+	ntv_strand_apicid,	/* cmio_strand_apicid */
 	ntv_chiprev,		/* cmio_chiprev */
 	ntv_chiprevstr,		/* cmio_chiprevstr */
 	ntv_getsockettype,	/* cmio_getsockettype */
@@ -1767,6 +1943,9 @@ static const struct cmi_hdl_ops cmi_hdl_ops = {
 	ntv_wrmsr,		/* cmio_wrmsr */
 	ntv_msrinterpose,	/* cmio_msrinterpose */
 	ntv_int,		/* cmio_int */
-	ntv_online		/* cmio_online */
+	ntv_online,		/* cmio_online */
+	ntv_smbiosid,		/* cmio_smbiosid */
+	ntv_smb_chipid,		/* cmio_smb_chipid */
+	ntv_smb_bboard		/* cmio_smb_bboard */
 #endif
 };

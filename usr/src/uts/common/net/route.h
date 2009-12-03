@@ -130,7 +130,8 @@ struct rtentry {
 #define	RTF_PROTO1	0x8000		/* protocol specific routing flag */
 #define	RTF_MULTIRT	0x10000		/* multiroute */
 #define	RTF_SETSRC	0x20000		/* set default outgoing src address */
-
+#define	RTF_INDIRECT	0x40000		/* gateway not directly reachable */
+#define	RTF_KERNEL	0x80000		/* created by kernel; can't delete */
 
 /*
  * OLD statistics not used by the kernel. The kernel uses <inet/mib2.h>.
@@ -179,6 +180,8 @@ typedef struct rt_msghdr {
 #define	RTM_NEWADDR	0xc	/* address being added to iface */
 #define	RTM_DELADDR	0xd	/* address being removed from iface */
 #define	RTM_IFINFO	0xe	/* iface going up/down etc. */
+#define	RTM_CHGADDR	0xf	/* address added/changed (even while down) */
+#define	RTM_FREEADDR	0x10	/* address removed (even while down) */
 
 #define	RTV_MTU		0x1	/* init or lock _mtu */
 #define	RTV_HOPCOUNT	0x2	/* init or lock _hopcount */

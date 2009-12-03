@@ -274,8 +274,9 @@ boolean_t mac_latency_optimize = B_TRUE;
 	ASSERT(MUTEX_HELD(&(mac_srs)->srs_lock));			\
 	ASSERT(((mac_srs)->srs_type & SRST_TX) ||			\
 	    MUTEX_HELD(&(mac_srs)->srs_bw->mac_bw_lock));		\
-	if ((mac_srs)->srs_bw->mac_bw_curr_time != lbolt) {    		\
-		(mac_srs)->srs_bw->mac_bw_curr_time = lbolt;   		\
+	clock_t now = ddi_get_lbolt();					\
+	if ((mac_srs)->srs_bw->mac_bw_curr_time != now) {		\
+		(mac_srs)->srs_bw->mac_bw_curr_time = now;		\
 		(mac_srs)->srs_bw->mac_bw_used = 0;	       		\
 		if ((mac_srs)->srs_bw->mac_bw_state & SRS_BW_ENFORCED)	\
 			(mac_srs)->srs_bw->mac_bw_state &= ~SRS_BW_ENFORCED; \
@@ -550,9 +551,11 @@ mac_rx_srs_proto_fanout(mac_soft_ring_set_t *mac_srs, mblk_t *head)
 	/*
 	 * Special clients (eg. VLAN, non ether, etc) need DLS
 	 * processing in the Rx path. SRST_DLS_BYPASS will be clear for
-	 * such SRSs.
+	 * such SRSs. Another way of disabling bypass is to set the
+	 * MCIS_RX_BYPASS_DISABLE flag.
 	 */
-	dls_bypass = ((mac_srs->srs_type & SRST_DLS_BYPASS) != 0);
+	dls_bypass = ((mac_srs->srs_type & SRST_DLS_BYPASS) != 0) &&
+	    ((mcip->mci_state_flags & MCIS_RX_BYPASS_DISABLE) == 0);
 
 	bzero(headmp, MAX_SR_TYPES * sizeof (mblk_t *));
 	bzero(tailmp, MAX_SR_TYPES * sizeof (mblk_t *));
@@ -933,9 +936,11 @@ mac_rx_srs_fanout(mac_soft_ring_set_t *mac_srs, mblk_t *head)
 	/*
 	 * Special clients (eg. VLAN, non ether, etc) need DLS
 	 * processing in the Rx path. SRST_DLS_BYPASS will be clear for
-	 * such SRSs.
+	 * such SRSs. Another way of disabling bypass is to set the
+	 * MCIS_RX_BYPASS_DISABLE flag.
 	 */
-	dls_bypass = ((mac_srs->srs_type & SRST_DLS_BYPASS) != 0);
+	dls_bypass = ((mac_srs->srs_type & SRST_DLS_BYPASS) != 0) &&
+	    ((mcip->mci_state_flags & MCIS_RX_BYPASS_DISABLE) == 0);
 
 	/*
 	 * Since the softrings are never destroyed and we always
@@ -1809,14 +1814,16 @@ mac_rx_srs_drain_bw(mac_soft_ring_set_t *mac_srs, uint_t proc_type)
 	int			cnt = 0;
 	mac_client_impl_t	*mcip = mac_srs->srs_mcip;
 	mac_srs_rx_t		*srs_rx = &mac_srs->srs_rx;
+	clock_t			now;
 
 	ASSERT(MUTEX_HELD(&mac_srs->srs_lock));
 	ASSERT(mac_srs->srs_type & SRST_BW_CONTROL);
 again:
 	/* Check if we are doing B/W control */
 	mutex_enter(&mac_srs->srs_bw->mac_bw_lock);
-	if (mac_srs->srs_bw->mac_bw_curr_time != lbolt) {
-		mac_srs->srs_bw->mac_bw_curr_time = lbolt;
+	now = ddi_get_lbolt();
+	if (mac_srs->srs_bw->mac_bw_curr_time != now) {
+		mac_srs->srs_bw->mac_bw_curr_time = now;
 		mac_srs->srs_bw->mac_bw_used = 0;
 		if (mac_srs->srs_bw->mac_bw_state & SRS_BW_ENFORCED)
 			mac_srs->srs_bw->mac_bw_state &= ~SRS_BW_ENFORCED;
@@ -2856,6 +2863,7 @@ mac_tx_bw_mode(mac_soft_ring_set_t *mac_srs, mblk_t *mp_chain,
 	mblk_t			*tail;
 	mac_tx_cookie_t		cookie = NULL;
 	mac_srs_tx_t		*srs_tx = &mac_srs->srs_tx;
+	clock_t			now;
 
 	ASSERT(TX_BANDWIDTH_MODE(mac_srs));
 	ASSERT(mac_srs->srs_type & SRST_BW_CONTROL);
@@ -2882,8 +2890,9 @@ mac_tx_bw_mode(mac_soft_ring_set_t *mac_srs, mblk_t *mp_chain,
 		return (cookie);
 	}
 	MAC_COUNT_CHAIN(mac_srs, mp_chain, tail, cnt, sz);
-	if (mac_srs->srs_bw->mac_bw_curr_time != lbolt) {
-		mac_srs->srs_bw->mac_bw_curr_time = lbolt;
+	now = ddi_get_lbolt();
+	if (mac_srs->srs_bw->mac_bw_curr_time != now) {
+		mac_srs->srs_bw->mac_bw_curr_time = now;
 		mac_srs->srs_bw->mac_bw_used = 0;
 	} else if (mac_srs->srs_bw->mac_bw_used >
 	    mac_srs->srs_bw->mac_bw_limit) {
@@ -2958,6 +2967,7 @@ mac_tx_srs_drain(mac_soft_ring_set_t *mac_srs, uint_t proc_type)
 	boolean_t		is_subflow;
 	mac_tx_stats_t		stats;
 	mac_srs_tx_t		*srs_tx = &mac_srs->srs_tx;
+	clock_t			now;
 
 	saved_pkt_count = 0;
 	ASSERT(mutex_owned(&mac_srs->srs_lock));
@@ -3024,8 +3034,9 @@ mac_tx_srs_drain(mac_soft_ring_set_t *mac_srs, uint_t proc_type)
 			    mac_srs->srs_bw->mac_bw_limit)
 				continue;
 
-			if (mac_srs->srs_bw->mac_bw_curr_time != lbolt) {
-				mac_srs->srs_bw->mac_bw_curr_time = lbolt;
+			now = ddi_get_lbolt();
+			if (mac_srs->srs_bw->mac_bw_curr_time != now) {
+				mac_srs->srs_bw->mac_bw_curr_time = now;
 				mac_srs->srs_bw->mac_bw_used = sz;
 				continue;
 			}
@@ -3110,8 +3121,9 @@ mac_tx_srs_drain(mac_soft_ring_set_t *mac_srs, uint_t proc_type)
 			    mac_srs->srs_bw->mac_bw_limit)
 				continue;
 
-			if (mac_srs->srs_bw->mac_bw_curr_time != lbolt) {
-				mac_srs->srs_bw->mac_bw_curr_time = lbolt;
+			now = ddi_get_lbolt();
+			if (mac_srs->srs_bw->mac_bw_curr_time != now) {
+				mac_srs->srs_bw->mac_bw_curr_time = now;
 				mac_srs->srs_bw->mac_bw_used = 0;
 				continue;
 			}
@@ -3279,7 +3291,9 @@ mac_tx_send(mac_client_handle_t mch, mac_ring_handle_t ring, mblk_t *mp_chain,
 			    msgdsize(mp));
 
 			CHECK_VID_AND_ADD_TAG(mp);
-			MAC_TX(mip, ring, mp, src_mcip);
+			MAC_TX(mip, ring, mp,
+			    ((src_mcip->mci_state_flags & MCIS_SHARE_BOUND) !=
+			    0));
 
 			/*
 			 * If the driver is out of descriptors and does a
@@ -3406,7 +3420,9 @@ mac_tx_send(mac_client_handle_t mch, mac_ring_handle_t ring, mblk_t *mp_chain,
 			 * Unknown destination, send via the underlying
 			 * NIC.
 			 */
-			MAC_TX(mip, ring, mp, src_mcip);
+			MAC_TX(mip, ring, mp,
+			    ((src_mcip->mci_state_flags & MCIS_SHARE_BOUND) !=
+			    0));
 			if (mp != NULL) {
 				/*
 				 * Adjust for the last packet that

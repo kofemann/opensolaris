@@ -29,10 +29,9 @@
 #include <sys/atomic.h>
 #include <sys/kidmap.h>
 #include <sys/time.h>
-#include <smbsrv/smb_incl.h>
+#include <sys/cpuvar.h>
+#include <smbsrv/smb_kproto.h>
 #include <smbsrv/smb_fsops.h>
-#include <smbsrv/string.h>
-#include <smbsrv/mbuf.h>
 #include <smbsrv/smbinfo.h>
 #include <smbsrv/smb_xdr.h>
 #include <smbsrv/smb_vops.h>
@@ -40,9 +39,6 @@
 
 #include <sys/sid.h>
 #include <sys/priv_names.h>
-
-#define	SMB_NAME83_BASELEN		8
-#define	SMB_NAME83_EXTLEN		3
 
 static void smb_replace_wildcards(char *);
 
@@ -77,7 +73,7 @@ int
 smb_ascii_or_unicode_strlen(struct smb_request *sr, char *str)
 {
 	if (sr->smb_flg2 & SMB_FLAGS2_UNICODE)
-		return (mts_wcequiv_strlen(str));
+		return (smb_wcequiv_strlen(str));
 	return (strlen(str));
 }
 
@@ -85,7 +81,7 @@ int
 smb_ascii_or_unicode_strlen_null(struct smb_request *sr, char *str)
 {
 	if (sr->smb_flg2 & SMB_FLAGS2_UNICODE)
-		return (mts_wcequiv_strlen(str) + 2);
+		return (smb_wcequiv_strlen(str) + 2);
 	return (strlen(str) + 1);
 }
 
@@ -310,7 +306,7 @@ smb_stream_parse_name(char *path, char *filename, char *stream)
 	if (stype == NULL)
 		(void) strlcat(stream, ":$DATA", MAXNAMELEN);
 	else
-		(void) utf8_strupr(stype);
+		(void) smb_strupr(stype);
 }
 
 /*
@@ -396,7 +392,7 @@ microtime(timestruc_t *tvp)
 int32_t
 clock_get_milli_uptime()
 {
-	return (TICK_TO_MSEC(lbolt));
+	return (TICK_TO_MSEC(ddi_get_lbolt()));
 }
 
 int /*ARGSUSED*/
@@ -1109,15 +1105,14 @@ static boolean_t
 smb_thread_continue_timedwait_locked(smb_thread_t *thread, int ticks)
 {
 	boolean_t	result;
-	clock_t		finish_time = lbolt + ticks;
 
 	/* -1 means don't block */
 	if (ticks != -1 && !thread->sth_kill) {
 		if (ticks == 0) {
 			cv_wait(&thread->sth_cv, &thread->sth_mtx);
 		} else {
-			(void) cv_timedwait(&thread->sth_cv, &thread->sth_mtx,
-			    finish_time);
+			(void) cv_reltimedwait(&thread->sth_cv,
+			    &thread->sth_mtx, (clock_t)ticks, TR_CLOCK_TICK);
 		}
 	}
 	result = (thread->sth_kill == 0);
@@ -1262,8 +1257,8 @@ smb_rwx_rwwait(
 			rc = 1;
 			cv_wait(&rwx->rwx_cv, &rwx->rwx_mutex);
 		} else {
-			rc = cv_timedwait(&rwx->rwx_cv, &rwx->rwx_mutex,
-			    lbolt + timeout);
+			rc = cv_reltimedwait(&rwx->rwx_cv, &rwx->rwx_mutex,
+			    timeout, TR_CLOCK_TICK);
 		}
 	}
 	mutex_exit(&rwx->rwx_mutex);
@@ -1440,7 +1435,7 @@ smb_idmap_batch_destroy(smb_idmap_batch_t *sib)
 		for (i = 0; i < sib->sib_nmap; i++) {
 			domsid = sib->sib_maps[i].sim_domsid;
 			if (domsid)
-				kmem_free(domsid, strlen(domsid) + 1);
+				smb_mfree(domsid);
 		}
 	}
 
@@ -1474,7 +1469,7 @@ smb_idmap_batch_getid(idmap_get_handle_t *idmaph, smb_idmap_t *sim,
 	smb_sid_tostr(sid, strsid);
 	if (smb_sid_splitstr(strsid, &sim->sim_rid) != 0)
 		return (IDMAP_ERR_SID);
-	sim->sim_domsid = smb_kstrdup(strsid, strlen(strsid) + 1);
+	sim->sim_domsid = smb_strdup(strsid);
 
 	switch (idtype) {
 	case SMB_IDMAP_USER:
@@ -1613,9 +1608,12 @@ smb_idmap_batch_getmappings(smb_idmap_batch_t *sib)
 }
 
 uint64_t
-unix_to_nt_time(timestruc_t *unix_time)
+smb_time_unix_to_nt(timestruc_t *unix_time)
 {
 	uint64_t nt_time;
+
+	if ((unix_time->tv_sec == 0) && (unix_time->tv_nsec == 0))
+		return (0);
 
 	nt_time = unix_time->tv_sec;
 	nt_time *= 10000000;  /* seconds to 100ns */
@@ -1623,22 +1621,51 @@ unix_to_nt_time(timestruc_t *unix_time)
 	return (nt_time + NT_TIME_BIAS);
 }
 
-uint32_t
-nt_to_unix_time(uint64_t nt_time, timestruc_t *unix_time)
+void
+smb_time_nt_to_unix(uint64_t nt_time, timestruc_t *unix_time)
 {
 	uint32_t seconds;
 
+	ASSERT(unix_time);
+
+	if ((nt_time == 0) || (nt_time == -1)) {
+		unix_time->tv_sec = 0;
+		unix_time->tv_nsec = 0;
+		return;
+	}
+
 	nt_time -= NT_TIME_BIAS;
 	seconds = nt_time / 10000000;
-	if (unix_time) {
-		unix_time->tv_sec = seconds;
-		unix_time->tv_nsec = (nt_time  % 10000000) * 100;
-	}
-	return (seconds);
+	unix_time->tv_sec = seconds;
+	unix_time->tv_nsec = (nt_time  % 10000000) * 100;
 }
 
 /*
- * smb_dos_to_ux_time
+ * smb_time_gmt_to_local, smb_time_local_to_gmt
+ *
+ * Apply the gmt offset to convert between local time and gmt
+ */
+int32_t
+smb_time_gmt_to_local(smb_request_t *sr, int32_t gmt)
+{
+	if ((gmt == 0) || (gmt == -1))
+		return (0);
+
+	return (gmt - sr->sr_gmtoff);
+}
+
+int32_t
+smb_time_local_to_gmt(smb_request_t *sr, int32_t local)
+{
+	if ((local == 0) || (local == -1))
+		return (0);
+
+	return (local + sr->sr_gmtoff);
+}
+
+
+/*
+ * smb_time_dos_to_unix
  *
  * Convert SMB_DATE & SMB_TIME values to a unix timestamp.
  *
@@ -1650,7 +1677,7 @@ nt_to_unix_time(uint64_t nt_time, timestruc_t *unix_time)
  * so that the caller can identify and handle this special case.
  */
 int32_t
-smb_dos_to_ux_time(int16_t date, int16_t time)
+smb_time_dos_to_unix(int16_t date, int16_t time)
 {
 	struct tm	atm;
 
@@ -1669,12 +1696,18 @@ smb_dos_to_ux_time(int16_t date, int16_t time)
 	return (smb_timegm(&atm));
 }
 
-int32_t
-smb_ux_to_dos_time(int32_t ux_time, int16_t *date_p, int16_t *time_p)
+void
+smb_time_unix_to_dos(int32_t ux_time, int16_t *date_p, int16_t *time_p)
 {
 	struct tm	atm;
 	int		i;
 	time_t		tmp_time;
+
+	if (ux_time == 0) {
+		*date_p = 0;
+		*time_p = 0;
+		return;
+	}
 
 	tmp_time = (time_t)ux_time;
 	(void) smb_gmtime_r(&tmp_time, &atm);
@@ -1699,7 +1732,6 @@ smb_ux_to_dos_time(int32_t ux_time, int16_t *date_p, int16_t *time_p)
 
 		*time_p = (short)i;
 	}
-	return (ux_time);
 }
 
 
@@ -1996,23 +2028,6 @@ smb_cred_is_member(cred_t *cr, smb_sid_t *sid)
 
 	ksid_rele(&ksid1);
 	return (rc);
-}
-
-/*
- * smb_kstrdup
- *
- * Duplicate the given string s.
- */
-char *
-smb_kstrdup(const char *s, size_t n)
-{
-	char *s2;
-
-	ASSERT(s);
-	ASSERT(n);
-	s2 = kmem_alloc(n, KM_SLEEP);
-	(void) strlcpy(s2, s, n);
-	return (s2);
 }
 
 /*

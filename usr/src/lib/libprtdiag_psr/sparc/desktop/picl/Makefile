@@ -19,10 +19,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 # lib/libprtdiag_psr/sparc/desktop/picl/Makefile
 
@@ -57,7 +55,6 @@ LINKED_PLATFORMS	+= SUNW,Serverblade1
 LINKED_PLATFORMS	+= SUNW,Sun-Fire-V240
 LINKED_PLATFORMS	+= SUNW,Sun-Fire-V250
 LINKED_PLATFORMS	+= SUNW,Sun-Fire-V440
-LINKED_PLATFORMS	+= TAD,SPARCLE
 
 LINKED_DIRS		= $(LINKED_PLATFORMS:%=$(USR_PLAT_DIR)/%)
 LINKED_LIB_DIRS		= $(LINKED_PLATFORMS:%=$(USR_PLAT_DIR)/%/lib)
@@ -70,6 +67,8 @@ LINKED_PRTDIAG_DIRS	= \
 # link to /usr/platform/SUNW,Sun-Blade-100/lib/libprtdiag_psr.so
 #
 PLATFORM=	SUNW,Sun-Blade-100
+
+$(USR_PLAT_DIR)/$(PLATFORM)/lib/libprtdiag_psr.so.1 := FILEMODE= 0755
 
 .KEEP_STATE:
 
@@ -91,10 +90,10 @@ $(USR_PSM_LIB_DIR):
 	$(INS.dir)
 
 $(LINKED_DIRS):	$(USR_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(LINKED_LIB_DIRS):	$(LINKED_DIRS)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(LINKED_PRTDIAG_DIRS):	$(LINKED_LIB_DIRS)
 	-$(INS.slink6)

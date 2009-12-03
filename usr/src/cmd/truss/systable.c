@@ -265,7 +265,7 @@ const struct systable systable[] = {
 {"plock",	1, DEC, NOV, PLK},				/*  45 */
 {"setgid",	1, DEC, NOV, UNS},				/*  46 */
 {"getgid",	0, UNS, UNS},					/*  47 */
-{"signal",	2, HEX, NOV, SIG, ACT},				/*  48 */
+{ NULL,		8, HEX, HEX, HEX, HEX, HEX, HEX, HEX, HEX, HEX, HEX},
 {"msgsys",	6, DEC, NOV, DEC, DEC, DEC, DEC, DEC, DEC},	/*  49 */
 {"sysi86",	4, HEX, NOV, S86, HEX, HEX, HEX, DEC, DEC},	/*  50 */
 {"acct",	1, DEC, NOV, STG},				/*  51 */
@@ -330,7 +330,7 @@ const struct systable systable[] = {
 {"waitid",	4, DEC, NOV, IDT, DEC, HEX, WOP},		/* 107 */
 {"sigsendsys",	2, DEC, NOV, HEX, SIG},				/* 108 */
 {"hrtsys",	5, DEC, NOV, DEC, HEX, HEX, HEX, HEX},		/* 109 */
-{ NULL,		8, HEX, HEX, HEX, HEX, HEX, HEX, HEX, HEX, HEX, HEX},
+{"utimesys",	5, DEC, NOV, DEC, HEX, HEX, HEX, HEX},		/* 110 */
 {"sigresend",	3, DEC, NOV, SIG, HEX, HEX},			/* 111 */
 {"priocntlsys",	5, DEC, NOV, DEC, HEX, DEC, PC4, PC5},		/* 112 */
 {"pathconf",	2, DEC, NOV, STG, PTC},				/* 113 */
@@ -430,7 +430,7 @@ const struct systable systable[] = {
 {"pset",	5, DEC, NOV, DEC, HEX, HEX, HEX, HEX},		/* 207 */
 {"sparc_utrap_install", 5, DEC, NOV, UTT, UTH, UTH, HEX, HEX},	/* 208 */
 {"resolvepath",	3, DEC, NOV, STG, RLK, DEC},			/* 209 */
-{"lwp_mutex_timedlock", 2, DEC, NOV, HEX, HEX},			/* 210 */
+{"lwp_mutex_timedlock", 3, DEC, NOV, HEX, HEX, HEX},		/* 210 */
 {"lwp_sema_timedwait", 3, DEC, NOV, HEX, HEX, DEC},		/* 211 */
 {"lwp_rwlock_sys", 3, DEC, NOV, DEC, HEX, HEX},			/* 212 */
 {"getdents64",	3, DEC, NOV, DEC, HEX, UNS},			/* 213 */
@@ -471,7 +471,7 @@ const struct systable systable[] = {
 {"ntp_gettime",	1, DEC, NOV, HEX},				/* 248 */
 {"ntp_adjtime",	1, DEC, NOV, HEX},				/* 249 */
 {"lwp_mutex_unlock", 1, DEC, NOV, HEX},				/* 250 */
-{"lwp_mutex_trylock", 1, DEC, NOV, HEX},			/* 251 */
+{"lwp_mutex_trylock", 2, DEC, NOV, HEX, HEX},			/* 251 */
 {"lwp_mutex_register", 2, DEC, NOV, HEX, HEX},			/* 252 */
 {"cladm",	3, DEC, NOV, CLC, CLF, HEX},			/* 253 */
 {"uucopy",	3, DEC, NOV, HEX, HEX, UNS},			/* 254 */
@@ -505,16 +505,6 @@ const	struct systable fcntltable[] = {
 {"fcntl",	3, DEC, NOV, DEC, FCN, FFG},			/* 2: F_SETFL */
 };
 #define	NFCNTLCODE	(sizeof (fcntltable) / sizeof (struct systable))
-
-const	struct systable sigtable[] = {
-{"signal",	2, HEX, NOV, SIG, ACT},				/* 0 */
-{"sigset",	2, HEX, NOV, SIX, ACT},				/* 1 */
-{"sighold",	1, HEX, NOV, SIX},				/* 2 */
-{"sigrelse",	1, HEX, NOV, SIX},				/* 3 */
-{"sigignore",	1, HEX, NOV, SIX},				/* 4 */
-{"sigpause",	1, HEX, NOV, SIX},				/* 5 */
-};
-#define	NSIGCODE	(sizeof (sigtable) / sizeof (struct systable))
 
 const	struct systable msgtable[] = {
 {"msgget",	3, DEC, NOV, HID, KEY, MSF},			/* 0 */
@@ -837,6 +827,12 @@ const	struct systable sidsystable[] = {
 };
 #define	NSIDSYSCODE	(sizeof (sidsystable) / sizeof (struct systable))
 
+const	struct systable utimesystable[] = {
+{"futimens",	3, DEC, NOV, HID, DEC, HEX},			/* 0 */
+{"utimensat",	5, DEC, NOV, HID, ATC, STG, HEX, UTF},		/* 1 */
+};
+#define	NUTIMESYSCODE	(sizeof (utimesystable) / sizeof (struct systable))
+
 const	struct sysalias sysalias[] = {
 	{ "exit",	SYS_exit	},
 	{ "fork",	SYS_forksys	},
@@ -853,11 +849,6 @@ const	struct sysalias sysalias[] = {
 	{ "getpgid",	SYS_pgrpsys	},
 	{ "setpgid",	SYS_pgrpsys	},
 	{ "getegid",	SYS_getgid	},
-	{ "sigset",	SYS_signal	},
-	{ "sighold",	SYS_signal	},
-	{ "sigrelse",	SYS_signal	},
-	{ "sigignore",	SYS_signal	},
-	{ "sigpause",	SYS_signal	},
 	{ "msgget",	SYS_msgsys	},
 	{ "msgctl",	SYS_msgsys	},
 	{ "msgctl64",	SYS_msgsys	},
@@ -994,6 +985,8 @@ const	struct sysalias sysalias[] = {
 	{ "rctlsys_lst",	SYS_rctlsys	},
 	{ "rctlsys_ctl",	SYS_rctlsys	},
 	{ "allocids",		SYS_sidsys	},
+	{ "futimens",		SYS_utimesys	},
+	{ "utimensat",		SYS_utimesys	},
 	{  NULL,	0	}	/* end-of-list */
 };
 
@@ -1014,10 +1007,6 @@ subsys(int syscall, int subcode)
 		case SYS_open64:
 			if ((unsigned)subcode < NOPEN64CODE)
 				stp = &open64table[subcode];
-			break;
-		case SYS_signal:	/* signal() + sigset() family */
-			if ((unsigned)subcode < NSIGCODE)
-				stp = &sigtable[subcode];
 			break;
 		case SYS_msgsys:	/* msgsys() */
 			if ((unsigned)subcode < NMSGCODE)
@@ -1143,6 +1132,10 @@ subsys(int syscall, int subcode)
 			if ((unsigned)subcode < NSIDSYSCODE)
 				stp = &sidsystable[subcode];
 			break;
+		case SYS_utimesys:	/* utime family */
+			if ((unsigned)subcode < NUTIMESYSCODE)
+				stp = &utimesystable[subcode];
+			break;
 		}
 	}
 
@@ -1252,16 +1245,6 @@ getsubcode(private_t *pri)
 				subcode = arg0;
 			}
 			break;
-		case SYS_signal:	/* signal() + sigset() family */
-			switch (arg0 & ~SIGNO_MASK) {
-			default:	subcode = 0;	break;
-			case SIGDEFER:	subcode = 1;	break;
-			case SIGHOLD:	subcode = 2;	break;
-			case SIGRELSE:	subcode = 3;	break;
-			case SIGIGNORE:	subcode = 4;	break;
-			case SIGPAUSE:	subcode = 5;	break;
-			}
-			break;
 		case SYS_kaio:		/* kaio() */
 			subcode = arg0 & ~AIO_POLL_BIT;
 			break;
@@ -1303,6 +1286,7 @@ getsubcode(private_t *pri)
 		case SYS_labelsys:	/* labelsys */
 		case SYS_rctlsys:	/* rctlsys */
 		case SYS_sidsys:	/* sidsys */
+		case SYS_utimesys:	/* utimesys */
 			subcode = arg0;
 			break;
 		case SYS_fcntl:		/* fcntl() */
@@ -1335,7 +1319,6 @@ maxsyscalls()
 	return (PRMAXSYS + 1
 	    + NOPENCODE - 1
 	    + NOPEN64CODE - 1
-	    + NSIGCODE - 1
 	    + NMSGCODE - 1
 	    + NSEMCODE - 1
 	    + NSHMCODE - 1
@@ -1366,7 +1349,8 @@ maxsyscalls()
 	    + NLABELCODE - 1
 	    + NRCTLCODE - 1
 	    + NFORKCODE - 1
-	    + NSIDSYSCODE - 1);
+	    + NSIDSYSCODE - 1
+	    + NUTIMESYSCODE - 1);
 }
 
 /*
@@ -1380,8 +1364,6 @@ nsubcodes(int syscall)
 		return (NOPENCODE);
 	case SYS_open64:
 		return (NOPEN64CODE);
-	case SYS_signal:	/* signal() + sigset() family */
-		return (NSIGCODE);
 	case SYS_msgsys:	/* msgsys() */
 		return (NMSGCODE);
 	case SYS_semsys:	/* semsys() */
@@ -1444,6 +1426,8 @@ nsubcodes(int syscall)
 		return (NFORKCODE);
 	case SYS_sidsys:
 		return (NSIDSYSCODE);
+	case SYS_utimesys:
+		return (NUTIMESYSCODE);
 	default:
 		return (1);
 	}
@@ -1483,9 +1467,11 @@ const char * const afcodes[] = {
 	"KEY",		/* 27 */
 	"NCA",		/* 28 */
 	"POLICY",	/* 29 */
-	"RDS"		/* 30 */
+	"RDS",		/* 30 */
+	"TRILL",	/* 31 */
+	"PACKET"	/* 32 */
 };
-#if MAX_AFCODES != 31
+#if MAX_AFCODES != 33
 #error Need to update address-family table
 #endif
 

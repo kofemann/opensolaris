@@ -83,6 +83,7 @@ extern "C" {
 #define	FM_SUSPECT_FAULT_LIST		"fault-list"
 #define	FM_SUSPECT_FAULT_SZ		"fault-list-sz"
 #define	FM_SUSPECT_FAULT_STATUS		"fault-status"
+#define	FM_SUSPECT_INJECTED		"__injected"
 #define	FM_SUSPECT_MESSAGE		"message"
 #define	FM_SUSPECT_RETIRE		"retire"
 #define	FM_SUSPECT_RESPONSE		"response"
@@ -122,6 +123,7 @@ extern "C" {
 #define	FM_RSRC_ASRU_REPAIRED		"repaired"
 #define	FM_RSRC_ASRU_REPLACED		"replaced"
 #define	FM_RSRC_ASRU_ACQUITTED		"acquitted"
+#define	FM_RSRC_ASRU_RESOLVED		"resolved"
 #define	FM_RSRC_ASRU_UNUSABLE		"unusable"
 #define	FM_RSRC_ASRU_EVENT		"event"
 
@@ -170,6 +172,7 @@ extern "C" {
 
 /* FMRI authority-type member names */
 #define	FM_FMRI_AUTH_CHASSIS		"chassis-id"
+#define	FM_FMRI_AUTH_PRODUCT_SN		"product-sn"
 #define	FM_FMRI_AUTH_PRODUCT		"product-id"
 #define	FM_FMRI_AUTH_DOMAIN		"domain-id"
 #define	FM_FMRI_AUTH_SERVER		"server-id"
@@ -320,6 +323,8 @@ extern void fm_fmri_mem_set(nvlist_t *, int, const nvlist_t *, const char *,
 extern void fm_authority_set(nvlist_t *, int, const char *, const char *,
     const char *, const char *);
 extern void fm_fmri_zfs_set(nvlist_t *, int, uint64_t, uint64_t);
+extern void fm_fmri_hc_create(nvlist_t *, int, const nvlist_t *, nvlist_t *,
+    nvlist_t *, int, ...);
 
 extern uint64_t fm_ena_increment(uint64_t);
 extern uint64_t fm_ena_generate(uint64_t, uchar_t);

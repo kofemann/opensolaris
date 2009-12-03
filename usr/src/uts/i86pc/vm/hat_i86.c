@@ -2436,6 +2436,35 @@ hat_unload_callback(
 }
 
 /*
+ * Invalidate a virtual address translation on a slave CPU during
+ * panic() dumps.
+ */
+void
+hat_flush_range(hat_t *hat, caddr_t va, size_t size)
+{
+	ssize_t sz;
+	caddr_t endva = va + size;
+
+	while (va < endva) {
+		sz = hat_getpagesize(hat, va);
+		if (sz < 0) {
+#ifdef __xpv
+			xen_flush_tlb();
+#else
+			flush_all_tlb_entries();
+#endif
+			break;
+		}
+#ifdef __xpv
+		xen_flush_va(va);
+#else
+		mmu_tlbflush_entry(va);
+#endif
+		va += sz;
+	}
+}
+
+/*
  * synchronize mapping with software data structures
  *
  * This interface is currently only used by the working set monitor

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -42,6 +42,8 @@
 #include <sys/fibre-channel/ulp/fcsm.h>
 #include <FCHBAPort.h>
 #include <HBAList.h>
+
+#define EXCPT_RETRY_COUNT    10
 
 using namespace std;
 const string FCHBA::FCSM_DRIVER_PATH = "/devices/pseudo/fcsm@0:fcsm";
@@ -128,6 +130,12 @@ FCHBA::FCHBA(string path) : HBA() {
 	    log.debug("About to add port %d (%s)", i, nextPath);
 	    addPort(new FCHBAPort(nextPath));
 	}
+    } catch (BusyException &e) {
+        throw e;
+    } catch (TryAgainException &e) {
+	throw e;
+    } catch (UnavailableException &e) {
+	throw e;
     } catch (HBAException &e) {
 	log.internalError(
 		"Unable to construct HBA.");
@@ -202,6 +210,51 @@ HBA_ADAPTERATTRIBUTES FCHBA::getHBAAttributes() {
     memcpy(&attributes.NodeWWN, &attrs.NodeWWN, 8);
 
     return (attributes);
+}
+
+int FCHBA::doForceLip() {
+    Trace	 log("FCHBA::doForceLip");
+    int		 fd;
+    fcio_t	 fcio;
+    uint64_t	 wwn  = 0;
+    HBAPort	*port = getPortByIndex(0);
+
+    errno = 0;
+    if ((fd = open(port->getPath().c_str(), O_RDONLY | O_EXCL)) == -1) {
+	if (errno == EBUSY) {
+	    throw BusyException();
+	} else if (errno == EAGAIN) {
+	    throw TryAgainException();
+	} else if (errno == ENOTSUP) {
+	    throw NotSupportedException();
+	} else {
+	    throw IOError(port);
+	}
+    }
+
+    memset(&fcio, 0, sizeof (fcio));
+    fcio.fcio_cmd = FCIO_RESET_LINK;
+    fcio.fcio_xfer = FCIO_XFER_WRITE;
+    fcio.fcio_ilen = sizeof (wwn);
+    fcio.fcio_ibuf = (caddr_t)&wwn;
+
+    errno = 0;
+    if (ioctl(fd, FCIO_CMD, &fcio) != 0) {
+	close(fd);
+
+	if (errno == EBUSY) {
+	    throw BusyException();
+	} else if (errno == EAGAIN) {
+	    throw TryAgainException();
+	} else if (errno == ENOTSUP) {
+	    throw NotSupportedException();
+	} else {
+	    throw IOError("Unable to reinitialize the link");
+	}
+    } else {
+        close(fd);
+	return (fcio.fcio_errno);
+    }
 }
 
 HBA_ADAPTERATTRIBUTES FCHBA::npivGetHBAAttributes() {
@@ -358,11 +411,35 @@ void FCHBA::loadAdapters(vector<HBA*> &list) {
 
     close(fd);
     log.debug("Detected %d adapters", pathList->numAdapters);
-    for (int i = 0; i < pathList->numAdapters; i++) {
+    for (int i = 0, times =0; i < pathList->numAdapters;) {
 	try {
 	    HBA *hba = new FCHBA(pathList->hbaPaths[i]);
 	    list.insert(list.begin(), hba);
-	} catch (...) {
+	    i++;
+	} catch (BusyException &e) {
+            sleep(1);
+            if (times++ > EXCPT_RETRY_COUNT) {
+                i++; 
+                times = 0;
+            }
+	    continue;
+	} catch (TryAgainException &e) {
+	    sleep(1);
+	    if (times++ > EXCPT_RETRY_COUNT) {
+		i++; 
+		times = 0;
+	    }  
+	    continue;
+	} catch (UnavailableException &e) {
+	    sleep(1);
+	    if (times++ > EXCPT_RETRY_COUNT) {
+		i++; 
+		times = 0;
+	    }  
+	    continue;
+	} catch (HBAException &e) {
+	    i++;
+	    times = 0;
 	    log.debug(
 		"Ignoring partial failure while loading an HBA");
 	}

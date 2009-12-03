@@ -54,6 +54,9 @@
 #include <sys/hsvc.h>
 #include <sys/ldoms.h>
 #include <sys/kldc.h>
+#include <sys/clock_impl.h>
+#include <sys/suspend.h>
+#include <sys/dumphdr.h>
 
 /*
  * hvdump_buf_va is a pointer to the currently-configured hvdump_buf.
@@ -318,6 +321,8 @@ panic_idle(void)
 
 	CPU->cpu_m.in_prom = 1;
 	membar_stld();
+
+	dumpsys_helper();
 
 	for (;;)
 		;
@@ -961,7 +966,9 @@ syncfpu(void)
 
 void
 sticksync_slave(void)
-{}
+{
+	suspend_sync_tick_stick_npt();
+}
 
 void
 sticksync_master(void)
@@ -1075,20 +1082,7 @@ kdi_cpu_init(int dcache_size, int dcache_linesize, int icache_size,
 void
 kdi_flush_caches(void)
 {
-	/*
-	 * May not be implemented by all sun4v architectures.
-	 *
-	 * Cannot use hsvc_version to see if the group is already
-	 * negotiated or not because, this function is called by
-	 * KMDB when it is at the console prompt which is running
-	 * at highest PIL. hsvc_version grabs an adaptive mutex and
-	 * this is a no-no at this PIL level.
-	 */
-	if (hsvc_kdi_mem_iflush_negotiated) {
-		uint64_t	status = hv_mem_iflush_all();
-		if (status != H_EOK)
-			cmn_err(CE_PANIC, "Flushing all I$ entries failed");
-	}
+	/* Not required on sun4v architecture. */
 }
 
 /*ARGSUSED*/
@@ -1101,16 +1095,6 @@ kdi_get_stick(uint64_t *stickp)
 void
 cpu_kdi_init(kdi_t *kdi)
 {
-	/*
-	 * Any API negotiation this early in the boot will be unsuccessful.
-	 * Therefore firmware for Sun4v platforms that have incoherent I$ are
-	 * assumed to support pre-negotiated MEM_IFLUSH APIs. Successful
-	 * invokation the MEM_IFLUSH_ALL is a test for is availability.
-	 * Set a flag if successful indicating its availabitlity.
-	 */
-	if (hv_mem_iflush_all() == 0)
-		hsvc_kdi_mem_iflush_negotiated = B_TRUE;
-
 	kdi->kdi_flush_caches = kdi_flush_caches;
 	kdi->mkdi_cpu_init = kdi_cpu_init;
 	kdi->mkdi_cpu_ready_iter = kdi_cpu_ready_iter;
@@ -1130,6 +1114,8 @@ static hsvc_info_t soft_state_hsvc = {
 static void
 sun4v_system_claim(void)
 {
+	lbolt_debug_entry();
+
 	watchdog_suspend();
 	kldc_debug_enter();
 	/*
@@ -1161,6 +1147,8 @@ sun4v_system_release(void)
 		    &SOLARIS_SOFT_STATE_SAVED_MSG);
 		soft_state_saved_state = -1;
 	}
+
+	lbolt_debug_return();
 }
 
 void

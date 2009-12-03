@@ -31,6 +31,7 @@
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
 #include <sys/stream.h>
+#include <sys/mkdev.h>
 #include <sys/mac_flow.h>
 #include <sys/mac.h>
 
@@ -89,6 +90,7 @@ typedef enum {
 	MAC_CAPAB_NO_NATIVEVLAN	= 0x0008, /* boolean only, no data */
 	MAC_CAPAB_NO_ZCOPY	= 0x0010, /* boolean only, no data */
 	MAC_CAPAB_LEGACY	= 0x0020, /* data is mac_capab_legacy_t */
+	MAC_CAPAB_VRRP		= 0x0040, /* data is mac_capab_vrrp_t */
 
 	/*
 	 * Public Capabilities
@@ -392,6 +394,11 @@ typedef struct  mac_capab_share_s {
 	mac_unbind_share_t	ms_sunbind;	/* Unbind a share */
 } mac_capab_share_t;
 
+typedef struct mac_capab_vrrp_s {
+	/* IPv6 or IPv4? */
+	int		mcv_af;
+} mac_capab_vrrp_t;
+
 /*
  * MAC registration interface
  */
@@ -444,8 +451,10 @@ extern void 			mac_rx(mac_handle_t, mac_resource_handle_t,
 extern void 			mac_rx_ring(mac_handle_t, mac_ring_handle_t,
 				    mblk_t *, uint64_t);
 extern void 			mac_link_update(mac_handle_t, link_state_t);
+extern void 			mac_link_redo(mac_handle_t, link_state_t);
 extern void 			mac_unicst_update(mac_handle_t,
 				    const uint8_t *);
+extern void			mac_dst_update(mac_handle_t, const uint8_t *);
 extern void			mac_tx_update(mac_handle_t);
 extern void			mac_tx_ring_update(mac_handle_t,
 				    mac_ring_handle_t);
@@ -465,6 +474,8 @@ extern int			mac_margin_add(mac_handle_t, uint32_t *,
 				    boolean_t);
 extern void			mac_init_ops(struct dev_ops *, const char *);
 extern void			mac_fini_ops(struct dev_ops *);
+extern int			mac_devt_to_instance(dev_t);
+extern minor_t			mac_private_minor(void);
 
 extern mactype_register_t	*mactype_alloc(uint_t);
 extern void			mactype_free(mactype_register_t *);

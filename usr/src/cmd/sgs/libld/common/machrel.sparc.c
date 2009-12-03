@@ -1269,7 +1269,7 @@ ld_do_activerelocs(Ofl_desc *ofl)
 				    arsp->rel_osdesc->os_outdata->d_buf;
 
 				DBG_CALL(Dbg_reloc_doact(ofl->ofl_lml,
-				    ELF_DBG_LD, M_MACH, SHT_RELA,
+				    ELF_DBG_LD_ACT, M_MACH, SHT_RELA,
 				    arsp->rel_rtype, R1addr, value,
 				    arsp->rel_sname, arsp->rel_osdesc));
 
@@ -1368,8 +1368,7 @@ ld_do_activerelocs(Ofl_desc *ofl)
 			    (uintptr_t)_elf_getxoff(arsp->rel_isdesc->
 			    is_indata));
 
-			/*LINTED*/
-			DBG_CALL(Dbg_reloc_doact(ofl->ofl_lml, ELF_DBG_LD,
+			DBG_CALL(Dbg_reloc_doact(ofl->ofl_lml, ELF_DBG_LD_ACT,
 			    M_MACH, SHT_RELA, arsp->rel_rtype, EC_NATPTR(addr),
 			    value, arsp->rel_sname, arsp->rel_osdesc));
 			addr += (uintptr_t)arsp->rel_osdesc->os_outdata->d_buf;
@@ -1433,8 +1432,7 @@ ld_add_outrel(Word flags, Rel_desc *rsp, Ofl_desc *ofl)
 	 * symbol in a static executable, it's best to disable them here
 	 * instead of through out the relocation code.
 	 */
-	if ((ofl->ofl_flags & (FLG_OF_STATIC | FLG_OF_EXEC)) ==
-	    (FLG_OF_STATIC | FLG_OF_EXEC))
+	if (OFL_IS_STATIC_EXEC(ofl))
 		return (1);
 
 	/*
@@ -2098,9 +2096,11 @@ ld_allocate_got(Ofl_desc * ofl)
 	 * Assign bias to GOT symbols.
 	 */
 	addr = -neggotoffset * M_GOT_ENTSIZE;
-	if (sdp = ld_sym_find(MSG_ORIG(MSG_SYM_GOFTBL), SYM_NOHASH, 0, ofl))
+	if ((sdp = ld_sym_find(MSG_ORIG(MSG_SYM_GOFTBL), SYM_NOHASH,
+	    NULL, ofl)) != NULL)
 		sdp->sd_sym->st_value = addr;
-	if (sdp = ld_sym_find(MSG_ORIG(MSG_SYM_GOFTBL_U), SYM_NOHASH, 0, ofl))
+	if ((sdp = ld_sym_find(MSG_ORIG(MSG_SYM_GOFTBL_U), SYM_NOHASH,
+	    NULL, ofl)) != NULL)
 		sdp->sd_sym->st_value = addr;
 
 	if (ofl->ofl_tlsldgotndx) {
@@ -2120,7 +2120,7 @@ ld_fillin_gotplt(Ofl_desc *ofl)
 		Sym_desc	*sdp;
 
 		if ((sdp = ld_sym_find(MSG_ORIG(MSG_SYM_DYNAMIC_U),
-		    SYM_NOHASH, 0, ofl)) != NULL) {
+		    SYM_NOHASH, NULL, ofl)) != NULL) {
 			uchar_t	*genptr;
 
 			genptr = ((uchar_t *)ofl->ofl_osgot->os_outdata->d_buf +
@@ -2244,6 +2244,32 @@ ld_targ_init_sparc(void)
 		{			/* Target_nullfunc */
 			nullfunc_tmpl,		/* nf_template */
 			sizeof (nullfunc_tmpl),	/* nf_size */
+		},
+		{			/* Target_fillfunc */
+			/*
+			 * On sparc, special filling of executable sections
+			 * is undesirable, and the default 0 fill supplied
+			 * by libelf is preferred:
+			 *
+			 * -	0 fill is interpreted as UNIMP instructions,
+			 *	which cause an illegal_instruction_trap. These
+			 *	serve as a sentinel against poorly written
+			 *	code. The sparc architecture manual discusses
+			 *	this as providing a measure of runtime safety.
+			 *
+			 * -	The one place where a hole should conceivably
+			 *	be filled with NOP instructions is in the
+			 *	.init/.fini sections. However, the sparc
+			 *	assembler sizes the sections it generates
+			 *	to a multiple of the section alignment, and as
+			 *	such, takes the filling task out of our hands.
+			 *	Furthermore, the sparc assembler uses 0-fill
+			 *	for this, forcing the authors of sparc
+			 *	assembler for .init/.fini sections to be aware
+			 *	of this case and explicitly supply NOP fill.
+			 *	Hence, there is no role for the link-editor.
+			 */
+			NULL			/* ff_execfill */
 		},
 		{			/* Target_machrel */
 			reloc_table,

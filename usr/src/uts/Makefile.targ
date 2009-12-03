@@ -74,12 +74,14 @@ MOD_LINT_LIB	= $(LINT_LIB_DIR)/llib-l$(LINT_MODULE).ln
 
 $(MOD_LINT_LIB):	$(LINT_LIB_DIR) $(LINTS)
 	@-$(ECHO) "\n$(OBJS_DIR)/$(MODULE): (library construction):"
-	@$(LINT) -o $(LINT_MODULE)-$(OBJS_DIR) $(LINTFLAGS) $(LINTS)
+	@($(LINT) -o $(LINT_MODULE)-$(OBJS_DIR) \
+		$(LINTFLAGS) $(LINTS) $(LTAIL))
 	@$(MV) llib-l$(LINT_MODULE)-$(OBJS_DIR).ln $@
 
 $(LINT_MODULE).lint:	$(MOD_LINT_LIB) $(LINT_LIB) $(GEN_LINT_LIB)
 	@-$(ECHO) "\n$(OBJS_DIR)/$(LINT_MODULE): global crosschecks:"
-	@$(LINT) $(LINTFLAGS) $(MOD_LINT_LIB) $(LINT_LIB) $(GEN_LINT_LIB)
+	@($(LINT) $(LINTFLAGS) $(MOD_LINT_LIB) \
+		$(LINT_LIB) $(GEN_LINT_LIB) $(LTAIL))
 
 #
 # Since assym.h is a derived file, the dependency must be explicit for
@@ -133,13 +135,13 @@ $(LINTS_DIR)/vers.ln: $(SRC)/uts/common/os/vers.c
 #	Installation targets and rules:
 #
 $(ROOT_MOD_DIR) $(USR_MOD_DIR):
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(ROOT_MOD_DIRS_32):	$(ROOT_MOD_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(USR_MOD_DIRS_32):	$(USR_MOD_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(ROOT_MOD_DIR)/%:	$(OBJS_DIR)/% $(ROOT_MOD_DIR) FRC
 	$(INS.file)
@@ -192,6 +194,9 @@ $(ROOT_KGSS_DIR)/%:	$(OBJS_DIR)/% $(ROOT_KGSS_DIR) FRC
 $(ROOT_SCSI_VHCI_DIR)/%: $(OBJS_DIR)/% $(ROOT_SCSI_VHCI_DIR) FRC
 	$(INS.file)
 
+$(ROOT_PMCS_FW_DIR)/%:	$(OBJS_DIR)/% $(ROOT_PMCS_FW_DIR) FRC
+	$(INS.file)
+
 $(ROOT_QLC_FW_DIR)/%:	$(OBJS_DIR)/% $(ROOT_QLC_FW_DIR) FRC
 	$(INS.file)
 
@@ -217,6 +222,9 @@ $(USR_FS_DIR)/%:	$(OBJS_DIR)/% $(USR_FS_DIR) FRC
 	$(INS.file)
 
 $(USR_SCHED_DIR)/%:	$(OBJS_DIR)/% $(USR_SCHED_DIR) FRC
+	$(INS.file)
+
+$(USR_SOCK_DIR)/%:	$(OBJS_DIR)/% $(USR_SOCK_DIR) FRC
 	$(INS.file)
 
 $(USR_STRMOD_DIR)/%:	$(OBJS_DIR)/% $(USR_STRMOD_DIR) FRC
@@ -249,13 +257,13 @@ include $(SRC)/Makefile.psm.targ
 #	Target for 64b modules
 #
 $(ROOT_KERN_DIR_64):
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(ROOT_KERN_DIR_64)/%:	$(OBJS_DIR)/% $(ROOT_KERN_DIR_64) FRC
 	$(INS.file)
 
 %/$(SUBDIR64):		%
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 #
 #	Targets for '.conf' file installation.

@@ -63,7 +63,7 @@ int vhci_mpapi_get_vhci(dev_info_t *, void *);
 void vhci_mpapi_set_path_state(dev_info_t *, mdi_pathinfo_t *, int);
 void vhci_mpapi_synthesize_tpg_data(struct scsi_vhci *, scsi_vhci_lun_t *,
     mdi_pathinfo_t *);
-void vhci_mpapi_update_tpg_data(struct scsi_address *, char *);
+void vhci_mpapi_update_tpg_data(struct scsi_address *, char *, int);
 int vhci_mpapi_update_tpg_acc_state_for_lu(struct scsi_vhci *,
     scsi_vhci_lun_t *);
 
@@ -125,6 +125,8 @@ static int vhci_mpapi_ioctl(dev_t dev, struct scsi_vhci *, void *,
 static int vhci_mpapi_add_to_list(mpapi_list_header_t *, mpapi_item_list_t *);
 static mpapi_item_list_t *vhci_mpapi_create_item(struct scsi_vhci *,
     uint8_t, void *);
+static mpapi_item_list_t *vhci_mpapi_get_alua_item(struct scsi_vhci *,
+    void *, void *, void *);
 static mpapi_item_list_t *vhci_mpapi_get_tpg_item(struct scsi_vhci *,
     uint32_t, void *, char *, void *);
 static mpapi_list_header_t *vhci_mpapi_create_list_head();
@@ -908,6 +910,8 @@ vhci_get_path_list_for_mp_lu(struct scsi_vhci *vhci, mp_iocdata_t *mpioc,
 	uint64_t		*oid = (uint64_t *)(input_data);
 	mpapi_item_list_t	*ilist, *mplu_path_list = NULL;
 	mpapi_lu_data_t		*mplup;
+	mpapi_path_data_t	*mppathp;
+	mdi_pathinfo_t		*pip;
 
 	ilist = vhci->mp_priv->obj_hdr_list[MP_OBJECT_TYPE_MULTIPATH_LU]->head;
 
@@ -934,14 +938,33 @@ vhci_get_path_list_for_mp_lu(struct scsi_vhci *vhci, mp_iocdata_t *mpioc,
 	}
 
 	while (mplu_path_list != NULL) {
-		if (count < list_len) {
-			oid_list[count] = (uint64_t)mplu_path_list->
-			    item->oid.raw_oid;
-		} else {
-			rval = MP_MORE_DATA;
+		mppathp  = (mpapi_path_data_t *)(mplu_path_list->item->idata);
+		/* skip a path that should be hidden. */
+		if (!(mppathp->hide)) {
+			pip = (mdi_pathinfo_t *)mppathp->resp;
+			mdi_hold_path(pip);
+			/*
+			 * check if the pip is marked as device removed.
+			 * When pi_flag MDI_PATHINFO_FLAGS_DEVICE_REMOVED is set
+			 * the node should have been destroyed but did not
+			 * due to open on the client node.
+			 * The driver tracks such a node through the hide flag
+			 * and doesn't report it throuth ioctl response.
+			 * The devinfo driver doesn't report such a path.
+			 */
+			if (!(MDI_PI_FLAGS_IS_DEVICE_REMOVED(pip))) {
+				if (count < list_len) {
+					oid_list[count] =
+					    (uint64_t)mplu_path_list->
+					    item->oid.raw_oid;
+				} else {
+					rval = MP_MORE_DATA;
+				}
+				count++;
+			}
+			mdi_rele_path(pip);
 		}
 		mplu_path_list = mplu_path_list->next;
-		count++;
 	}
 
 	mpioc->mp_alen = (uint32_t)(count * sizeof (uint64_t));
@@ -972,6 +995,8 @@ vhci_get_path_list_for_init_port(struct scsi_vhci *vhci, mp_iocdata_t *mpioc,
 	uint64_t		*oid = (uint64_t *)(input_data);
 	mpapi_item_list_t	*ilist, *mpinit_path_list = NULL;
 	mpapi_initiator_data_t	*mpinitp;
+	mpapi_path_data_t	*mppathp;
+	mdi_pathinfo_t		*pip;
 
 	ilist = vhci->mp_priv->
 	    obj_hdr_list[MP_OBJECT_TYPE_INITIATOR_PORT]->head;
@@ -1016,14 +1041,33 @@ vhci_get_path_list_for_init_port(struct scsi_vhci *vhci, mp_iocdata_t *mpioc,
 	}
 
 	while (mpinit_path_list != NULL) {
-		if (count < list_len) {
-			oid_list[count] = (uint64_t)mpinit_path_list->
-			    item->oid.raw_oid;
-		} else {
-			rval = MP_MORE_DATA;
+		mppathp  = (mpapi_path_data_t *)(mpinit_path_list->item->idata);
+		/* skip a path that should be hidden. */
+		if (!(mppathp->hide)) {
+			pip = (mdi_pathinfo_t *)mppathp->resp;
+			mdi_hold_path(pip);
+			/*
+			 * check if the pip is marked as device removed.
+			 * When pi_flag MDI_PATHINFO_FLAGS_DEVICE_REMOVED is set
+			 * the node should have been destroyed but did not
+			 * due to open on the client node.
+			 * The driver tracks such a node through the hide flag
+			 * and doesn't report it throuth ioctl response.
+			 * The devinfo driver doesn't report such a path.
+			 */
+			if (!(MDI_PI_FLAGS_IS_DEVICE_REMOVED(pip))) {
+				if (count < list_len) {
+					oid_list[count] =
+					    (uint64_t)mpinit_path_list->
+					    item->oid.raw_oid;
+				} else {
+					rval = MP_MORE_DATA;
+				}
+				count++;
+			}
+			mdi_rele_path(pip);
 		}
 		mpinit_path_list = mpinit_path_list->next;
-		count++;
 	}
 
 	mpioc->mp_alen = (uint32_t)(count * sizeof (uint64_t));
@@ -1054,6 +1098,8 @@ vhci_get_path_list_for_target_port(struct scsi_vhci *vhci, mp_iocdata_t *mpioc,
 	uint64_t		*oid = (uint64_t *)(input_data);
 	mpapi_item_list_t	*ilist, *mptp_path_list = NULL;
 	mpapi_tport_data_t	*mptpp;
+	mpapi_path_data_t	*mppathp;
+	mdi_pathinfo_t		*pip;
 
 	ilist = vhci->mp_priv->obj_hdr_list[MP_OBJECT_TYPE_TARGET_PORT]->head;
 
@@ -1080,14 +1126,33 @@ vhci_get_path_list_for_target_port(struct scsi_vhci *vhci, mp_iocdata_t *mpioc,
 	}
 
 	while (mptp_path_list != NULL) {
-		if (count < list_len) {
-			oid_list[count] =
-			    (uint64_t)mptp_path_list->item->oid.raw_oid;
-		} else {
-			rval = MP_MORE_DATA;
+		mppathp  = (mpapi_path_data_t *)(mptp_path_list->item->idata);
+		/* skip a path that should be hidden. */
+		if (!(mppathp->hide)) {
+			pip = (mdi_pathinfo_t *)mppathp->resp;
+			mdi_hold_path(pip);
+			/*
+			 * check if the pip is marked as device removed.
+			 * When pi_flag MDI_PATHINFO_FLAGS_DEVICE_REMOVED is set
+			 * the node should have been destroyed but did not
+			 * due to open on the client node.
+			 * The driver tracks such a node through the hide flag
+			 * and doesn't report it throuth ioctl response.
+			 * The devinfo driver doesn't report such a path.
+			 */
+			if (!(MDI_PI_FLAGS_IS_DEVICE_REMOVED(pip))) {
+				if (count < list_len) {
+					oid_list[count] =
+					    (uint64_t)mptp_path_list->
+					    item->oid.raw_oid;
+				} else {
+					rval = MP_MORE_DATA;
+				}
+				count++;
+			}
+			mdi_rele_path(pip);
 		}
 		mptp_path_list = mptp_path_list->next;
-		count++;
 	}
 
 	mpioc->mp_alen = (uint32_t)(count * sizeof (uint64_t));
@@ -1592,7 +1657,12 @@ vhci_set_tpg_access_state(struct scsi_vhci *vhci, mp_iocdata_t *mpioc,
 			} else {
 				vhci_update_pathstates((void *)svl);
 			}
-			if (desired_state != mptpgd->prop.accessState) {
+			if (desired_state != mptpgd->prop.accessState &&
+			    (desired_state != MP_DRVR_ACCESS_STATE_ACTIVE ||
+			    (mptpgd->prop.accessState !=
+			    MP_DRVR_ACCESS_STATE_ACTIVE_OPTIMIZED &&
+			    mptpgd->prop.accessState !=
+			    MP_DRVR_ACCESS_STATE_ACTIVE_NONOPTIMIZED))) {
 				VHCI_DEBUG(1, (CE_WARN, NULL, "vhci_set_tpg_"
 				    "access_state: TPGAccessState NOT Set: "
 				    "des_state=%x, cur_state=%x", desired_state,
@@ -2559,21 +2629,26 @@ vhci_mpapi_create_item(struct scsi_vhci *vhci, uint8_t obj_type, void* res)
 			if (strncmp(interconnect,
 			    INTERCONNECT_FABRIC_STR,
 			    strlen(interconnect)) == 0) {
-				mp_interconnect_type = 2;
+				mp_interconnect_type =
+				    MP_DRVR_TRANSPORT_TYPE_FC;
 			} else if (strncmp(interconnect,
 			    INTERCONNECT_PARALLEL_STR,
 			    strlen(interconnect)) == 0) {
-				mp_interconnect_type = 3;
+				mp_interconnect_type =
+				    MP_DRVR_TRANSPORT_TYPE_SPI;
 			} else if (strncmp(interconnect,
 			    INTERCONNECT_ISCSI_STR,
 			    strlen(interconnect)) == 0) {
-				mp_interconnect_type = 4;
+				mp_interconnect_type =
+				    MP_DRVR_TRANSPORT_TYPE_ISCSI;
 			} else if (strncmp(interconnect,
 			    INTERCONNECT_IBSRP_STR,
 			    strlen(interconnect)) == 0) {
-				mp_interconnect_type = 5;
+				mp_interconnect_type =
+				    MP_DRVR_TRANSPORT_TYPE_IFB;
 			} else {
-				mp_interconnect_type = 0;
+				mp_interconnect_type =
+				    MP_DRVR_TRANSPORT_TYPE_UNKNOWN;
 			}
 
 			init = kmem_zalloc(
@@ -2685,7 +2760,8 @@ vhci_mpapi_create_item(struct scsi_vhci *vhci, uint8_t obj_type, void* res)
 			    sizeof (lu->prop.deviceFileName));
 
 			if ((svl != NULL) &&
-			    SCSI_FAILOVER_IS_ASYM(svl)) {
+			    (SCSI_FAILOVER_IS_ASYM(svl) ||
+			    SCSI_FAILOVER_IS_TPGS(svl->svl_fops))) {
 				lu->prop.asymmetric = 1;
 			}
 
@@ -2761,6 +2837,7 @@ vhci_mpapi_create_item(struct scsi_vhci *vhci, uint8_t obj_type, void* res)
 			path->resp = res;
 			path->path_name = pname;
 			path->valid = 1;
+			path->hide = 0;
 			path->prop.id = item->oid.raw_oid;
 			item->idata = (void *)path;
 			vhci_mpapi_log_sysevent(vhci->vhci_dip,
@@ -2885,6 +2962,7 @@ vhci_update_mpapi_data(struct scsi_vhci *vhci, scsi_vhci_lun_t *vlun,
 		 */
 		pd = path_list->item->idata;
 		pd->valid = 1;
+		pd->hide = 0;
 		pd->resp = pip;
 	}
 
@@ -3004,6 +3082,69 @@ vhci_update_mpapi_data(struct scsi_vhci *vhci, scsi_vhci_lun_t *vlun,
 		kmem_free(path_class, MPAPI_SCSI_MAXPCLASSLEN);
 	}
 
+}
+
+/*
+ * Routine to search (& return if found) a TPG object with a specified
+ * tpg_id and rel_tp_id for a specified vlun structure. Returns NULL
+ * if either TPG object or the lu item is not found.
+ * This routine is used for TPGS(ALUA) devices.
+ */
+/* ARGSUSED */
+static mpapi_item_list_t *
+vhci_mpapi_get_alua_item(struct scsi_vhci *vhci, void *vlun, void *tpg_id,
+    void *tp)
+{
+	mpapi_list_header_t	*this_tpghdr;
+	mpapi_item_list_t	*tpglist, *this_lulist, *this_tpglist;
+	mpapi_tpg_data_t	*tpgdata, *this_tpgdata;
+
+	VHCI_DEBUG(6, (CE_NOTE, NULL, "vhci_mpapi_get_alua_item: ENTER: vlun="
+	    "%p, tpg_id=%s, tp=%s\n",
+	    (void *)vlun, (char *)tpg_id, (char *)tp));
+
+	/*
+	 * Check if target port is already in any existing group
+	 */
+	tpglist = vhci->mp_priv->obj_hdr_list[MP_OBJECT_TYPE_TARGET_PORT_GROUP]
+	    ->head;
+	while (tpglist != NULL) {
+		tpgdata = tpglist->item->idata;
+
+		if ((tpgdata) &&
+		    (vhci_mpapi_check_tp_in_tpg(tpgdata, tp) == 1) &&
+		    (strcmp(tpgdata->resp, tpg_id) == 0)) {
+			return (tpglist);
+		} else {
+			tpglist = tpglist->next;
+		}
+	}
+
+	/*
+	 * If target port is not existed, search TPG associated
+	 * with this LU to see if this LU has a TPG with the same
+	 * tpg_id.
+	 */
+	this_lulist = vhci_get_mpapi_item(vhci, NULL,
+	    MP_OBJECT_TYPE_MULTIPATH_LU, vlun);
+	if (this_lulist != NULL) {
+		this_tpghdr = ((mpapi_lu_data_t *)(this_lulist->item->idata))
+		    ->tpg_list;
+		this_tpglist = this_tpghdr->head;
+		while (this_tpglist != NULL) {
+			this_tpgdata = this_tpglist->item->idata;
+			if ((this_tpgdata) &&
+			    (strcmp(this_tpgdata->resp, tpg_id) == 0)) {
+				return (this_tpglist);
+			} else {
+				this_tpglist = this_tpglist->next;
+			}
+		}
+	}
+
+	VHCI_DEBUG(4, (CE_WARN, NULL, "vhci_mpapi_get_tpg_item: Returns NULL"));
+
+	return (NULL);
 }
 
 /*
@@ -3297,7 +3438,8 @@ vhci_mpapi_synthesize_tpg_data(struct scsi_vhci *vhci, scsi_vhci_lun_t *vlun,
  */
 /* ARGSUSED */
 void
-vhci_mpapi_update_tpg_data(struct scsi_address *ap, char *ptr)
+vhci_mpapi_update_tpg_data(struct scsi_address *ap, char *ptr,
+    int rel_tgt_port)
 {
 	struct scsi_vhci_lun	*vlun;
 	struct scsi_vhci	*vhci;
@@ -3487,12 +3629,23 @@ vhci_mpapi_update_tpg_data(struct scsi_address *ap, char *ptr)
 	}
 
 	/*
-	 * Create Level 1 & Level 2 data structures
-	 * Parse REPORT_TARGET_PORT_GROUP data & update mpapi database.
+	 * Building Target Port list is different here.
+	 * For each different Relative Target Port. we have a new MPAPI
+	 * Target Port OID generated.
+	 * Just find out the main Target Port property here.
 	 */
+	tgt_port = NULL;
+	if (mdi_prop_lookup_string(pip, SCSI_ADDR_PROP_TARGET_PORT,
+	    &tgt_port) != DDI_PROP_SUCCESS) {
+		/* XXX: target-port prop not found */
+		tgt_port = (char *)mdi_pi_get_addr(pip);
+		VHCI_DEBUG(1, (CE_WARN, NULL, "vhci_mpapi_update_tpg_data: "
+		    "mdi_prop_lookup_string() returned failure; "
+		    "Hence tgt_port = %p", (void *)tgt_port));
+	}
 
-	tpg_list = vhci_get_mpapi_item(vhci, NULL,
-	    MP_OBJECT_TYPE_TARGET_PORT_GROUP, &tpg_id);
+	/* Search for existing group that contains this target port */
+	tpg_list = vhci_mpapi_get_alua_item(vhci, vlun, &tpg_id, tgt_port);
 	if (tpg_list == NULL) {
 		tpg_list = vhci_mpapi_create_item(vhci,
 		    MP_OBJECT_TYPE_TARGET_PORT_GROUP, &tpg_id);
@@ -3544,22 +3697,6 @@ vhci_mpapi_update_tpg_data(struct scsi_address *ap, char *ptr)
 	}
 
 	/*
-	 * Building Target Port list is different here.
-	 * For each different Relative Target Port. we have a new MPAPI
-	 * Target Port OID generated.
-	 * Just find out the main Target Port property here.
-	 */
-	tgt_port = NULL;
-	if (mdi_prop_lookup_string(pip, SCSI_ADDR_PROP_TARGET_PORT,
-	    &tgt_port) != DDI_PROP_SUCCESS) {
-		/* XXX: target-port prop not found */
-		tgt_port = (char *)mdi_pi_get_addr(pip);
-		VHCI_DEBUG(1, (CE_WARN, NULL, "vhci_mpapi_update_tpg_data: "
-		    "mdi_prop_lookup_string() returned failure; "
-		    "Hence tgt_port = %p", (void *)tgt_port));
-	}
-
-	/*
 	 * Level 1, Relative Target Port + Target Port Creation
 	 */
 	rel_tport_cnt = (ptr[7] & 0xff);
@@ -3568,6 +3705,11 @@ vhci_mpapi_update_tpg_data(struct scsi_address *ap, char *ptr)
 		rel_tid = 0;
 		rel_tid |= ((ptr[2] & 0Xff) << 8);
 		rel_tid |= (ptr[3] & 0xff);
+
+		if (rel_tid != rel_tgt_port) {
+			ptr += 4;
+			continue;
+		}
 
 		VHCI_DEBUG(4, (CE_NOTE, NULL, "vhci_mpapi_update_tpg_data: "
 		    "TgtPort=%s, RelTgtPort=%x\n", tgt_port, rel_tid));
@@ -3906,14 +4048,27 @@ vhci_mpapi_set_path_state(dev_info_t *vdip, mdi_pathinfo_t *pip, int state)
 	}
 
 	/*
+	 * Check if the pathinfo is uninitialized(destroyed).
+	 */
+	if (state == MP_DRVR_PATH_STATE_UNINIT) {
+		pp->hide = 1;
+		VHCI_DEBUG(6, (CE_NOTE, NULL, "vhci_mpapi_set_path_state: "
+		    "path(pip: %p) is uninited(destroyed).",
+		    (void *)pip));
+	} else {
+		pp->hide = 0;
+	}
+	/*
 	 * Find if there are any paths at all to the lun
 	 */
 	if ((state == MP_DRVR_PATH_STATE_REMOVED) || (state ==
 	    MP_DRVR_PATH_STATE_PATH_ERR) || (state ==
 	    MP_DRVR_PATH_STATE_LU_ERR) || (state ==
-	    MP_DRVR_PATH_STATE_UNKNOWN)) {
+	    MP_DRVR_PATH_STATE_UNKNOWN) || pp->hide) {
 		pp->valid = 0;
-
+		VHCI_DEBUG(6, (CE_NOTE, NULL, "vhci_mpapi_set_path_state: "
+		    "path(pip: %p) is not okay state.  Set to invalid.",
+		    (void *)pip));
 		svp = (scsi_vhci_priv_t *)mdi_pi_get_vhci_private(pip);
 		svl = svp->svp_svl;
 		/*
@@ -3936,6 +4091,9 @@ vhci_mpapi_set_path_state(dev_info_t *vdip, mdi_pathinfo_t *pip, int state)
 			if (lu_list != NULL) {
 				ld = lu_list->item->idata;
 				ld->valid = 0;
+				VHCI_DEBUG(6, (CE_NOTE, NULL,
+				    "vhci_mpapi_set_path_state: "
+				    " Invalidated LU(%s)", svl->svl_lun_wwn));
 			}
 		}
 	}
@@ -4197,7 +4355,8 @@ vhci_mpapi_chk_last_path(mdi_pathinfo_t *pip)
 		    MDI_PI_IS_STANDBY(ret_pip) ||
 		    MDI_PI_IS_INIT(ret_pip)) &&
 		    !(MDI_PI_IS_DISABLE(ret_pip) ||
-		    MDI_PI_IS_TRANSIENT(ret_pip))) {
+		    MDI_PI_IS_TRANSIENT(ret_pip) ||
+		    MDI_PI_FLAGS_IS_DEVICE_REMOVED(ret_pip))) {
 			count++;
 		}
 		mdi_pi_unlock(ret_pip);

@@ -199,7 +199,7 @@ _init(void)
 		mutex_init(&fcoet_mutex, 0, MUTEX_DRIVER, 0);
 		ret = mod_install(&modlinkage);
 		if (ret) {
-			stmf_deregister_port_provider(fcoet_pp);
+			(void) stmf_deregister_port_provider(fcoet_pp);
 			stmf_free(fcoet_pp);
 			mutex_destroy(&fcoet_mutex);
 			ddi_soft_state_fini(&fcoet_state);
@@ -217,7 +217,7 @@ _fini(void)
 
 	ret = mod_remove(&modlinkage);
 	if (ret == 0) {
-		stmf_deregister_port_provider(fcoet_pp);
+		(void) stmf_deregister_port_provider(fcoet_pp);
 		stmf_free(fcoet_pp);
 		mutex_destroy(&fcoet_mutex);
 		ddi_soft_state_fini(&fcoet_state);
@@ -453,6 +453,8 @@ fcoet_attach_init(fcoet_soft_state_t *ss)
 	client_fcoet.ect_port_event = fcoet_port_event;
 	client_fcoet.ect_release_sol_frame = fcoet_release_sol_frame;
 	client_fcoet.ect_client_port_struct = ss;
+	client_fcoet.ect_fcoe_ver = FCOE_VER_NOW;
+	FCOET_LOG(__FUNCTION__, "version: %x %x", FCOE_VER_NOW, fcoe_ver_now);
 	ret = ddi_prop_get_int(DDI_DEV_T_ANY, ss->ss_dip,
 	    DDI_PROP_DONTPASS | DDI_PROP_NOTPROM, "mac_id", -1);
 	if (ret == -1) {
@@ -757,9 +759,8 @@ fcoet_watchdog(void *arg)
 		}
 
 		atomic_or_32(&ss->ss_flags, SS_FLAG_DOG_WAITING);
-		(void) cv_timedwait(&ss->ss_watch_cv,
-		    &ss->ss_watch_mutex, ddi_get_lbolt() +
-		    (clock_t)tmp_delay);
+		(void) cv_reltimedwait(&ss->ss_watch_cv, &ss->ss_watch_mutex,
+		    (clock_t)tmp_delay, TR_CLOCK_TICK);
 		atomic_and_32(&ss->ss_flags, ~SS_FLAG_DOG_WAITING);
 	}
 

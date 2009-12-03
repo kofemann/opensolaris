@@ -29,6 +29,7 @@
 #include <sys/modhash.h>
 #include <sys/mac_client.h>
 #include <sys/mac_provider.h>
+#include <sys/note.h>
 #include <net/if.h>
 #include <sys/mac_flow_impl.h>
 #include <netinet/ip6.h>
@@ -36,6 +37,27 @@
 #ifdef	__cplusplus
 extern "C" {
 #endif
+
+/*
+ * This is the first minor number available for MAC provider private
+ * use.  This makes it possible to deliver a driver that is both a MAC
+ * provider and a regular character/block device.  See PSARC 2009/380
+ * for more detail about the construction of such devices.  The value
+ * chosen leaves half of the 32-bit minor numbers (which are really
+ * only 18 bits wide) available for driver private use.  Drivers can
+ * easily identify their private number by the presence of this value
+ * in the bits that make up the minor number, since its just the
+ * highest bit available for such minor numbers.
+ */
+#define	MAC_PRIVATE_MINOR		((MAXMIN32 + 1) / 2)
+
+/*
+ * The maximum minor number that corresponds to a real instance.  This
+ * limits the number of physical ports that a mac provider can offer.
+ * Note that this macro must be synchronized with DLS_MAX_MINOR in
+ * <sys/dls.h>
+ */
+#define	MAC_MAX_MINOR			1000
 
 typedef struct mac_margin_req_s	mac_margin_req_t;
 
@@ -259,23 +281,49 @@ struct mac_group_s {
 
 #define	MAC_DEFAULT_GROUP(mh)		(((mac_impl_t *)mh)->mi_rx_groups)
 
-#define	MAC_RING_TX_DEFAULT(mip, mp)			\
-	((mip->mi_default_tx_ring == NULL) ?		\
-	mip->mi_tx(mip->mi_driver, mp) :		\
-	mac_ring_tx(mip->mi_default_tx_ring, mp))
-
-#define	MAC_TX(mip, ring, mp, mcip) {					\
+#define	MAC_RING_TX(mhp, rh, mp, rest) {				\
+	mac_ring_handle_t mrh = rh;					\
+	mac_impl_t *mimpl = (mac_impl_t *)mhp;				\
 	/*								\
-	 * If the MAC client has a bound Hybrid I/O share,		\
-	 * send the packet through the default tx ring, since		\
-	 * the tx rings of this client are now mapped in the		\
-	 * guest domain and not accessible from this domain.		\
+	 * Send packets through a selected tx ring, or through the 	\
+	 * default handler if there is no selected ring.		\
 	 */								\
-	if ((mcip->mci_state_flags & MCIS_SHARE_BOUND) != 0 ||		\
-	    (ring == NULL))						\
-		mp = MAC_RING_TX_DEFAULT(mip, mp);			\
-	else								\
-		mp = mac_ring_tx(ring, mp);				\
+	if (mrh == NULL)						\
+		mrh = mimpl->mi_default_tx_ring;			\
+	if (mrh == NULL) {						\
+		rest = mimpl->mi_tx(mimpl->mi_driver, mp);		\
+	} else {							\
+		rest = mac_hwring_tx(mrh, mp);				\
+	}								\
+}
+
+/*
+ * This is the final stop before reaching the underlying driver
+ * or aggregation, so this is where the bridging hook is implemented.
+ * Packets that are bridged will return through mac_bridge_tx(), with
+ * rh nulled out if the bridge chooses to send output on a different
+ * link due to forwarding.
+ */
+#define	MAC_TX(mip, rh, mp, share_bound) {				\
+	/*								\
+	 * If there is a bound Hybrid I/O share, send packets through 	\
+	 * the default tx ring. (When there's a bound Hybrid I/O share,	\
+	 * the tx rings of this client are mapped in the guest domain 	\
+	 * and not accessible from here.)				\
+	 */								\
+	_NOTE(CONSTANTCONDITION)					\
+	if (share_bound)						\
+		rh = NULL;						\
+	/*								\
+	 * Grab the proper transmit pointer and handle. Special 	\
+	 * optimization: we can test mi_bridge_link itself atomically,	\
+	 * and if that indicates no bridge send packets through tx ring.\
+	 */								\
+	if (mip->mi_bridge_link == NULL) {				\
+		MAC_RING_TX(mip, rh, mp, mp);				\
+	} else {							\
+		mp = mac_bridge_tx(mip, rh, mp);			\
+	}								\
 }
 
 /* mci_tx_flag */
@@ -355,11 +403,13 @@ struct mac_impl_s {
 	uint32_t		mi_ref;			/* i_mac_impl_lock */
 	uint_t			mi_active;		/* SL */
 	link_state_t		mi_linkstate;		/* none */
-	link_state_t		mi_lastlinkstate;	/* none */
+	link_state_t		mi_lowlinkstate;	/* none */
+	link_state_t		mi_lastlowlinkstate;	/* none */
 	uint_t			mi_devpromisc;		/* SL */
 	kmutex_t		mi_lock;
 	uint8_t			mi_addr[MAXMACADDRLEN];	/* mi_rw_lock */
 	uint8_t			mi_dstaddr[MAXMACADDRLEN]; /* mi_rw_lock */
+	boolean_t		mi_dstaddr_set;
 
 	/*
 	 * The mac perimeter. All client initiated create/modify operations
@@ -454,6 +504,7 @@ struct mac_impl_s {
 	 * applied to the MAC client when it is created.
 	 */
 	mac_resource_props_t	mi_resource_props;	/* SL */
+	uint16_t		mi_pvid;		/* SL */
 
 	minor_t			mi_minor;		/* WO */
 	uint32_t		mi_oref;		/* SL */
@@ -473,6 +524,15 @@ struct mac_impl_s {
 	 */
 	mac_capab_share_t	mi_share_capab;
 
+	/*
+	 * Bridging hooks and limit values.  Uses mutex and reference counts
+	 * (bridging only) for data path.  Limits need no synchronization.
+	 */
+	mac_handle_t		mi_bridge_link;
+	kmutex_t		mi_bridge_lock;
+	uint32_t		mi_llimit;
+	uint32_t		mi_ldecay;
+
 /* This should be the last block in this structure */
 #ifdef DEBUG
 #define	MAC_PERIM_STACK_DEPTH	15
@@ -489,6 +549,8 @@ struct mac_impl_s {
 #define	MIS_EXCLUSIVE		0x0010
 #define	MIS_EXCLUSIVE_HELD	0x0020
 #define	MIS_LEGACY		0x0040
+#define	MIS_NO_ACTIVE		0x0080
+#define	MIS_POLL_DISABLE	0x0100
 
 #define	mi_getstat	mi_callbacks->mc_getstat
 #define	mi_start	mi_callbacks->mc_start
@@ -585,7 +647,8 @@ extern int mac_group_addmac(mac_group_t *, const uint8_t *);
 extern int mac_group_remmac(mac_group_t *, const uint8_t *);
 extern int mac_rx_group_add_flow(mac_client_impl_t *, flow_entry_t *,
     mac_group_t *);
-extern mblk_t *mac_ring_tx(mac_ring_handle_t, mblk_t *);
+extern mblk_t *mac_hwring_tx(mac_ring_handle_t, mblk_t *);
+extern mblk_t *mac_bridge_tx(mac_impl_t *, mac_ring_handle_t, mblk_t *);
 extern mac_ring_t *mac_reserve_tx_ring(mac_impl_t *, mac_ring_t *);
 extern void mac_release_tx_ring(mac_ring_handle_t);
 extern mac_group_t *mac_reserve_tx_group(mac_impl_t *, mac_share_handle_t);
@@ -685,6 +748,20 @@ extern void mac_rx_group_remove_client(mac_group_t *, mac_client_impl_t *)
 ;
 extern int i_mac_group_add_ring(mac_group_t *, mac_ring_t *, int);
 extern void i_mac_group_rem_ring(mac_group_t *, mac_ring_t *, boolean_t);
+
+extern void mac_poll_state_change(mac_handle_t, boolean_t);
+
+extern mblk_t *mac_protect_check(mac_client_handle_t, mblk_t *);
+extern int mac_protect_set(mac_client_handle_t, mac_resource_props_t *);
+extern boolean_t mac_protect_enabled(mac_client_handle_t, uint32_t);
+extern int mac_protect_validate(mac_resource_props_t *);
+extern void mac_protect_update(mac_resource_props_t *, mac_resource_props_t *);
+
+/* Global callbacks into the bridging module (when loaded) */
+extern mac_bridge_tx_t mac_bridge_tx_cb;
+extern mac_bridge_rx_t mac_bridge_rx_cb;
+extern mac_bridge_ref_t mac_bridge_ref_cb;
+extern mac_bridge_ls_t mac_bridge_ls_cb;
 
 #ifdef	__cplusplus
 }

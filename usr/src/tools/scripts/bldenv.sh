@@ -264,7 +264,7 @@ shift
 # must match the getopts in nightly.sh
 OPTIND=1
 NIGHTLY_OPTIONS="-${NIGHTLY_OPTIONS#-}"
-while getopts '+AaBCDdFfGIilMmNnOopRrS:tUuWwXxz' FLAG "$NIGHTLY_OPTIONS"
+while getopts '+0AaBCDdFfGIilMmNnOopRrS:tUuWwXxz' FLAG "$NIGHTLY_OPTIONS"
 do
 	case "$FLAG" in
 	  O)	flags.O=true  ;;
@@ -277,6 +277,16 @@ do
 	  *)	;;
 	esac
 done
+
+POUND_SIGN="#"
+# have we set RELEASE_DATE in our env file?
+if [ -z "$RELEASE_DATE" ]; then
+	RELEASE_DATE=$(LC_ALL=C date +"%B %Y")
+fi
+BUILD_DATE=$(LC_ALL=C date +%Y-%b-%d)
+BASEWSDIR=$(basename $CODEMGR_WS)
+DEV_CM="\"@(#)SunOS Internal Development: $LOGNAME $BUILD_DATE [$BASEWSDIR]\""
+export DEV_CM RELEASE_DATE POUND_SIGN
 
 export INTERNAL_RELEASE_BUILD=
 
@@ -380,7 +390,6 @@ if "${flags.o}" ; then
 else
 	unset CH
 fi
-POUND_SIGN="#"
 DEF_STRIPFLAG="-s"
 
 TMPDIR="/tmp"
@@ -392,7 +401,8 @@ export o_FLAG="$(${flags.o} && print 'y' || print 'n')"
 export \
 	PATH TMPDIR \
 	POUND_SIGN \
-	DEF_STRIPFLAG
+	DEF_STRIPFLAG \
+	RELEASE_DATE
 unset \
 	CFLAGS \
 	LD_LIBRARY_PATH

@@ -239,9 +239,19 @@ ufs_quiesce(struct ulockfs *ulp)
 	int error = 0;
 	ulockfs_info_t *head;
 	ulockfs_info_t *info;
+	klwp_t *lwp = ttolwp(curthread);
 
 	head = (ulockfs_info_t *)tsd_get(ufs_lockfs_key);
 	SEARCH_ULOCKFSP(head, ulp, info);
+
+	/*
+	 * We have to keep /proc away from stopping us after we applied
+	 * the softlock but before we got a chance to clear it again.
+	 * prstop() may pagefault and become stuck on the softlock still
+	 * pending.
+	 */
+	if (lwp != NULL)
+		lwp->lwp_nostop++;
 
 	/*
 	 * Set a softlock to suspend future ufs_vnops so that
@@ -267,7 +277,8 @@ ufs_quiesce(struct ulockfs *ulp)
 			if (!ulp->ul_vnops_cnt && !ULOCKFS_IS_FWLOCK(ulp))
 				goto out;
 		}
-		if (!cv_timedwait_sig(&ulp->ul_cv, &ulp->ul_lock, lbolt + hz)) {
+		if (!cv_reltimedwait_sig(&ulp->ul_cv, &ulp->ul_lock, hz,
+		    TR_CLOCK_TICK)) {
 			error = EINTR;
 			goto out;
 		}
@@ -278,6 +289,9 @@ out:
 	 * unlock the soft lock
 	 */
 	ULOCKFS_CLR_SLOCK(ulp);
+
+	if (lwp != NULL)
+		lwp->lwp_nostop--;
 
 	return (error);
 }

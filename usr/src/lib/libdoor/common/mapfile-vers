@@ -48,6 +48,7 @@ SUNWprivate_1.1 {
 	door_server_create = FUNCTION;
 	door_ucred = FUNCTION;
 	door_unbind = FUNCTION;
+	door_xcreate = FUNCTION;
     local:
 	*;
 };

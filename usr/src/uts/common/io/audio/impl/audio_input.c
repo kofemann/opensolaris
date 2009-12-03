@@ -40,29 +40,25 @@
 void									\
 auimpl_import_##NAME(audio_engine_t *eng, audio_stream_t *sp)		\
 {									\
-	int	nch = eng->e_nchan;					\
-	int32_t *out;							\
-	TYPE	*in;							\
-	int	ch;							\
-	void	*data;							\
-	int	vol;							\
-									\
-	data = sp->s_cnv_src;						\
-	ch = 0;								\
-	in = (void *)(eng->e_data + (eng->e_tidx * eng->e_framesz));	\
-	out = data;							\
-	vol = sp->s_gain_eff;						\
+	int		fragfr = eng->e_fragfr;				\
+	int		nch = eng->e_nchan;				\
+	unsigned	tidx = eng->e_tidx;				\
+	int32_t 	*out = (void *)sp->s_cnv_src;			\
+	TYPE		*in = (void *)eng->e_data;			\
+	int		ch = 0;						\
+	int		vol = sp->s_gain_eff;				\
 									\
 	do {	/* for each channel */					\
-		TYPE *ip;						\
+		TYPE 	*ip;						\
 		int32_t *op;						\
-		int i;							\
+		int 	i;						\
+		int 	incr = eng->e_chincr[ch];			\
 									\
 		/* get value and adjust next channel offset */		\
 		op = out++;						\
-		ip = in++;						\
+		ip = in + eng->e_choffs[ch] + (tidx * incr);		\
 									\
-		i = eng->e_fragfr;					\
+		i = fragfr;						\
 									\
 		do {	/* for each frame */				\
 			int32_t	sample = (TYPE)SWAP(*ip);		\
@@ -72,7 +68,7 @@ auimpl_import_##NAME(audio_engine_t *eng, audio_stream_t *sp)		\
 			scaled /= AUDIO_VOL_SCALE;			\
 									\
 			*op = scaled;					\
-			ip += nch;					\
+			ip += incr;					\
 			op += nch;					\
 									\
 		} while (--i);						\
@@ -145,7 +141,6 @@ void
 auimpl_input_callback(audio_engine_t *eng)
 {
 	int		fragfr = eng->e_fragfr;
-	boolean_t	overrun;
 	audio_client_t	*c;
 
 	/* consume all fragments in the buffer */
@@ -191,9 +186,6 @@ auimpl_input_callback(audio_engine_t *eng)
 				eng->e_errors++;
 				sp->s_errors += count - space;
 				count = space;
-				overrun = B_TRUE;
-			} else {
-				overrun = B_FALSE;
 			}
 
 			auimpl_produce_fragment(sp, count);
@@ -203,13 +195,9 @@ auimpl_input_callback(audio_engine_t *eng)
 
 			mutex_exit(&sp->s_lock);
 
-			mutex_enter(&c->c_lock);
-			if (overrun) {
-				c->c_do_notify = B_TRUE;
+			if (c->c_input != NULL) {
+				c->c_input(c);
 			}
-			c->c_do_input = B_TRUE;
-			cv_broadcast(&c->c_cv);
-			mutex_exit(&c->c_lock);
 		}
 
 		/*

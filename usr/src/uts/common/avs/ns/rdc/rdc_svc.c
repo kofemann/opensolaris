@@ -123,9 +123,9 @@ _rdc_sync_event_notify(int operation, char *volume, char *group)
 		cv_signal(&rdc_sync_event.cv);
 
 		rdc_sync_event.kernel_waiting = 1;
-		time = cv_timedwait_sig(&rdc_sync_event.done_cv,
-		    &rdc_sync_event.mutex,
-		    nsc_lbolt() + rdc_sync_event_timeout);
+		time = cv_reltimedwait_sig(&rdc_sync_event.done_cv,
+		    &rdc_sync_event.mutex, rdc_sync_event_timeout,
+		    TR_CLOCK_TICK);
 		if (time == (clock_t)0 || time == (clock_t)-1) {
 			/* signalled or timed out */
 			ack = 0;
@@ -1040,6 +1040,8 @@ r_net_write6(SVCXPRT *xprt)
 					    RDC_MAXPENDQ, group->seqack,
 					    diskio.seq, maxseq, group->seq);
 #endif
+				DTRACE_PROBE2(qsize_exceeded, int, diskio.seq,
+				    int, maxseq);
 					if (!(rdc_get_vflags(urdc) &
 					    RDC_VOL_FAILED)) {
 						rdc_many_enter(krdc);
@@ -2564,6 +2566,7 @@ rdc_setbitind(int *pendcnt, net_pendvec_t *pvec, rdc_net_dataset_t *dset,
 	pvec[pc].alen = dset->fbalen;
 	pvec[pc].pindex = pindex;
 	*pendcnt = pc + 1;
+	DTRACE_PROBE1(pvec_reply, int, seq);
 }
 
 /*

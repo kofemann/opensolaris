@@ -140,6 +140,8 @@ COMMON_HDRDIRS= common/avs \
 		common/inet/ipf/netinet \
 		common/inet/kssl \
 		common/inet/nca \
+		common/inet/sockmods/netpacket \
+		common/io/bpf/net \
 		common/ipp \
 		common/net \
 		common/netinet \
@@ -163,7 +165,7 @@ $(CLOSED_BUILD)COMMON_HDRDIRS += $(CLOSED)/uts/common/sys
 # other directories that should be included and do not yet have the
 # necessary Makefile support.  See 6414855.)
 #
-DYNHDRDIRS = common/rpcsvc common/idmap
+DYNHDRDIRS = common/rpcsvc common/idmap common/sys
 
 sparc_HDRDIRS= sun/sys
 i386_HDRDIRS= i86pc/vm i86xpv/vm

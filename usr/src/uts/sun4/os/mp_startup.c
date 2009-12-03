@@ -405,7 +405,7 @@ setup_cpu_common(int cpuid)
 	 * Initialize the CPUs physical ID cache, and processor groups
 	 */
 	pghw_physid_create(cp);
-	pg_cpu_init(cp);
+	(void) pg_cpu_init(cp, B_FALSE);
 
 	if ((rval = cpu_intrq_setup(cp)) != 0) {
 		return (rval);
@@ -673,12 +673,7 @@ start_other_cpus(int flag)
 	 * initializing it.
 	 */
 	if (CPUSET_ISNULL(cpu_bringup_set)) {
-#ifdef MPSAS
-		/* just CPU 0 */
-		CPUSET_ADD(cpu_bringup_set, 0);
-#else
 		CPUSET_ALL(cpu_bringup_set);
-#endif
 	}
 
 	if (&cpu_feature_init)

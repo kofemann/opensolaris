@@ -34,6 +34,10 @@ typedef	stmf_status_t	sbd_status_t;
 extern char sbd_vendor_id[];
 extern char sbd_product_id[];
 extern char sbd_revision[];
+extern char *sbd_mgmt_url;
+extern uint16_t sbd_mgmt_url_alloc_size;
+extern krwlock_t sbd_global_prop_lock;
+
 /*
  * Error codes
  */
@@ -189,6 +193,8 @@ typedef struct sbd_lu {
 	char		*sl_name;		/* refers to meta or data */
 
 	/* Metadata */
+	kmutex_t	sl_metadata_lock;
+	krwlock_t	sl_access_state_lock;
 	char		*sl_alias;
 	char		*sl_meta_filename;	/* If applicable */
 	char		*sl_mgmt_url;
@@ -209,6 +215,7 @@ typedef struct sbd_lu {
 	uint16_t	sl_alias_alloc_size;
 	uint16_t	sl_mgmt_url_alloc_size;
 	uint8_t		sl_serial_no_alloc_size;
+	uint8_t		sl_access_state;
 	uint64_t	sl_meta_offset;
 
 	/* zfs metadata */

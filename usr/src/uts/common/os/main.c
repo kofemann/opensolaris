@@ -370,10 +370,7 @@ main(void)
 	extern int	pm_adjust_timestamps(dev_info_t *, void *);
 	extern void	start_other_cpus(int);
 	extern void	sysevent_evc_thrinit();
-	extern void	lgrp_main_init(void);
-	extern void	lgrp_main_mp_init(void);
 #if defined(__x86)
-	extern void	cpupm_post_startup(void);
 	extern void	fastboot_post_startup(void);
 #endif
 	/*
@@ -389,9 +386,9 @@ main(void)
 	ASSERT_STACK_ALIGNED();
 
 	/*
-	 * Setup the first lgroup, and home t0
+	 * Setup root lgroup and leaf lgroup for CPU 0
 	 */
-	lgrp_setup();
+	lgrp_init(LGRP_INIT_STAGE2);
 
 	/*
 	 * Once 'startup()' completes, the thread_reaper() daemon would be
@@ -420,8 +417,10 @@ main(void)
 	/*
 	 * May need to probe to determine latencies from CPU 0 after
 	 * gethrtime() comes alive in cbe_init() and before enabling interrupts
+	 * and copy and release any temporary memory allocated with BOP_ALLOC()
+	 * before release_bootstrap() frees boot memory
 	 */
-	lgrp_plat_probe();
+	lgrp_init(LGRP_INIT_STAGE3);
 
 	/*
 	 * Call all system initialization functions.
@@ -450,6 +449,12 @@ main(void)
 	 */
 	(void) spl0();
 	interrupts_unleashed = 1;
+
+	/*
+	 * Create kmem cache for proc structures
+	 */
+	process_cache = kmem_cache_create("process_cache", sizeof (proc_t),
+	    0, NULL, NULL, NULL, NULL, NULL, 0);
 
 	vfs_mountroot();	/* Mount the root file system */
 	errorq_init();		/* after vfs_mountroot() so DDI root is ready */
@@ -501,12 +506,6 @@ main(void)
 	setupclock(0);
 
 	/*
-	 * Create kmem cache for proc structures
-	 */
-	process_cache = kmem_cache_create("process_cache", sizeof (proc_t),
-	    0, NULL, NULL, NULL, NULL, NULL, 0);
-
-	/*
 	 * Initialize process 0's lwp directory and lwpid hash table.
 	 */
 	p->p_lwpdir = p->p_lwpfree = p0_lwpdir;
@@ -530,11 +529,10 @@ main(void)
 	sysevent_evc_thrinit();
 
 	/*
-	 * main lgroup initialization
-	 * This must be done after post_startup(), but before
+	 * This must be done after post_startup() but before
 	 * start_other_cpus()
 	 */
-	lgrp_main_init();
+	lgrp_init(LGRP_INIT_STAGE4);
 
 	/*
 	 * Perform MP initialization, if any.
@@ -552,7 +550,7 @@ main(void)
 	/*
 	 * Finish lgrp initialization after all CPUS are brought online.
 	 */
-	lgrp_main_mp_init();
+	lgrp_init(LGRP_INIT_STAGE5);
 
 	/*
 	 * After mp_init(), number of cpus are known (this is
@@ -573,30 +571,38 @@ main(void)
 	 */
 	pm_cfb_setup_intr();
 #if defined(__x86)
-	cpupm_post_startup();
 	fastboot_post_startup();
 #endif
 
 	/*
 	 * Make init process; enter scheduling loop with system process.
+	 *
+	 * Note that we manually assign the pids for these processes, for
+	 * historical reasons.  If more pre-assigned pids are needed,
+	 * FAMOUS_PIDS will have to be updated.
 	 */
 
 	/* create init process */
-	if (newproc(start_init, NULL, defaultcid, 59, NULL))
+	if (newproc(start_init, NULL, defaultcid, 59, NULL,
+	    FAMOUS_PID_INIT))
 		panic("main: unable to fork init.");
 
 	/* create pageout daemon */
-	if (newproc(pageout, NULL, syscid, maxclsyspri - 1, NULL))
+	if (newproc(pageout, NULL, syscid, maxclsyspri - 1, NULL,
+	    FAMOUS_PID_PAGEOUT))
 		panic("main: unable to fork pageout()");
 
 	/* create fsflush daemon */
-	if (newproc(fsflush, NULL, syscid, minclsyspri, NULL))
+	if (newproc(fsflush, NULL, syscid, minclsyspri, NULL,
+	    FAMOUS_PID_FSFLUSH))
 		panic("main: unable to fork fsflush()");
 
 	/* create cluster process if we're a member of one */
 	if (cluster_bootflags & CLUSTER_BOOTED) {
-		if (newproc(cluster_wrapper, NULL, syscid, minclsyspri, NULL))
+		if (newproc(cluster_wrapper, NULL, syscid, minclsyspri,
+		    NULL, 0)) {
 			panic("main: unable to fork cluster()");
+		}
 	}
 
 	/*

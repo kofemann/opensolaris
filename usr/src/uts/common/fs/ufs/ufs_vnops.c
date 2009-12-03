@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -1351,6 +1351,7 @@ rdip(struct inode *ip, struct uio *uio, int ioflag, cred_t *cr)
 	int dofree, directio_status;
 	krw_t rwtype;
 	o_mode_t type;
+	clock_t	now;
 
 	vp = ITOV(ip);
 
@@ -1419,7 +1420,8 @@ rdip(struct inode *ip, struct uio *uio, int ioflag, cred_t *cr)
 		/*
 		 * We update smallfile2 and smallfile1 at most every second.
 		 */
-		if (lbolt >= smallfile_update) {
+		now = ddi_get_lbolt();
+		if (now >= smallfile_update) {
 			uint64_t percpufreeb;
 			if (smallfile1_d == 0) smallfile1_d = SMALLFILE1_D;
 			if (smallfile2_d == 0) smallfile2_d = SMALLFILE2_D;
@@ -1429,7 +1431,7 @@ rdip(struct inode *ip, struct uio *uio, int ioflag, cred_t *cr)
 			smallfile1 = MAX(smallfile1, smallfile);
 			smallfile1 = MAX(smallfile1, smallfile64);
 			smallfile2 = MAX(smallfile1, smallfile2);
-			smallfile_update = lbolt + hz;
+			smallfile_update = now + hz;
 		}
 
 		dofree = freebehind &&
@@ -4965,7 +4967,7 @@ ufs_getpage_miss(struct vnode *vp, u_offset_t off, size_t len, struct seg *seg,
 		} else if (ufsvfsp->vfs_snapshot) {
 			fssnap_strategy(&ufsvfsp->vfs_snapshot, bp);
 		} else {
-			ufsvfsp->vfs_iotstamp = lbolt;
+			ufsvfsp->vfs_iotstamp = ddi_get_lbolt();
 			ub.ub_getpages.value.ul++;
 			(void) bdev_strategy(bp);
 			lwp_stat_update(LWP_STAT_INBLK, 1);
@@ -5068,7 +5070,7 @@ ufs_getpage_ra(struct vnode *vp, u_offset_t off, struct seg *seg, caddr_t addr)
 	} else if (ufsvfsp->vfs_snapshot) {
 		fssnap_strategy(&ufsvfsp->vfs_snapshot, bp);
 	} else {
-		ufsvfsp->vfs_iotstamp = lbolt;
+		ufsvfsp->vfs_iotstamp = ddi_get_lbolt();
 		ub.ub_getras.value.ul++;
 		(void) bdev_strategy(bp);
 		lwp_stat_update(LWP_STAT_INBLK, 1);
@@ -5542,7 +5544,7 @@ ufs_putapage(
 		} else if (ufsvfsp->vfs_snapshot) {
 			fssnap_strategy(&ufsvfsp->vfs_snapshot, bp);
 		} else {
-			ufsvfsp->vfs_iotstamp = lbolt;
+			ufsvfsp->vfs_iotstamp = ddi_get_lbolt();
 			ub.ub_putasyncs.value.ul++;
 			(void) bdev_strategy(bp);
 			lwp_stat_update(LWP_STAT_OUBLK, 1);
@@ -5553,7 +5555,7 @@ ufs_putapage(
 		} else if (ufsvfsp->vfs_snapshot) {
 			fssnap_strategy(&ufsvfsp->vfs_snapshot, bp);
 		} else {
-			ufsvfsp->vfs_iotstamp = lbolt;
+			ufsvfsp->vfs_iotstamp = ddi_get_lbolt();
 			ub.ub_putsyncs.value.ul++;
 			(void) bdev_strategy(bp);
 			lwp_stat_update(LWP_STAT_OUBLK, 1);
@@ -5892,8 +5894,17 @@ ufs_l_pathconf(struct vnode *vp, int cmd, ulong_t *valp, struct cred *cr,
 		    (vp->v_type == VREG || vp->v_type == VDIR);
 		break;
 
+	case _PC_TIMESTAMP_RESOLUTION:
+		/*
+		 * UFS keeps only microsecond timestamp resolution.
+		 * This is historical and will probably never change.
+		 */
+		*valp = 1000L;
+		break;
+
 	default:
 		error = fs_pathconf(vp, cmd, valp, cr, ct);
+		break;
 	}
 
 	if (ulp != NULL) {
@@ -6056,7 +6067,7 @@ ufs_pageio(struct vnode *vp, page_t *pp, u_offset_t io_off, size_t io_len,
 		bp->b_un.b_addr = (caddr_t)0;
 		bp->b_file = ip->i_vnode;
 
-		ufsvfsp->vfs_iotstamp = lbolt;
+		ufsvfsp->vfs_iotstamp = ddi_get_lbolt();
 		ub.ub_pageios.value.ul++;
 		if (ufsvfsp->vfs_snapshot)
 			fssnap_strategy(&(ufsvfsp->vfs_snapshot), bp);

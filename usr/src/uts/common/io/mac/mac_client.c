@@ -422,6 +422,12 @@ mac_name(mac_handle_t mh)
 	return (((mac_impl_t *)mh)->mi_name);
 }
 
+int
+mac_type(mac_handle_t mh)
+{
+	return (((mac_impl_t *)mh)->mi_type->mt_type);
+}
+
 char *
 mac_client_name(mac_client_handle_t mch)
 {
@@ -569,6 +575,9 @@ mac_client_stat_get(mac_client_handle_t mch, uint_t stat)
 	case MAC_STAT_PROMISC:
 		val = mac_stat_get((mac_handle_t)mip, MAC_STAT_PROMISC);
 		break;
+	case MAC_STAT_LOWLINK_STATE:
+		val = mac_stat_get((mac_handle_t)mip, MAC_STAT_LOWLINK_STATE);
+		break;
 	case MAC_STAT_IFSPEED:
 		val = mac_client_ifspeed(mcip);
 		break;
@@ -645,6 +654,8 @@ mac_stat_get(mac_handle_t mh, uint_t stat)
 			return (mip->mi_linkstate == LINK_STATE_UP);
 		case MAC_STAT_PROMISC:
 			return (mip->mi_devpromisc != 0);
+		case MAC_STAT_LOWLINK_STATE:
+			return (mip->mi_lowlinkstate);
 		default:
 			ASSERT(B_FALSE);
 		}
@@ -1001,6 +1012,21 @@ mac_unicast_primary_info(mac_handle_t mh, char *client_name, boolean_t *in_use)
 		}
 	}
 	rw_exit(&mip->mi_rw_lock);
+}
+
+/*
+ * Return the current destination MAC address of the specified MAC.
+ */
+boolean_t
+mac_dst_get(mac_handle_t mh, uint8_t *addr)
+{
+	mac_impl_t *mip = (mac_impl_t *)mh;
+
+	rw_enter(&mip->mi_rw_lock, RW_READER);
+	if (mip->mi_dstaddr_set)
+		bcopy(mip->mi_dstaddr, addr, mip->mi_type->mt_addr_length);
+	rw_exit(&mip->mi_rw_lock);
+	return (mip->mi_dstaddr_set);
 }
 
 /*
@@ -1368,7 +1394,7 @@ mac_client_close(mac_client_handle_t mch, uint16_t flags)
 }
 
 /*
- * Enable bypass for the specified MAC client.
+ * Set the rx bypass receive callback.
  */
 boolean_t
 mac_rx_bypass_set(mac_client_handle_t mch, mac_direct_rx_t rx_fn, void *arg1)
@@ -1392,8 +1418,22 @@ mac_rx_bypass_set(mac_client_handle_t mch, mac_direct_rx_t rx_fn, void *arg1)
 	 */
 	mcip->mci_direct_rx_fn = rx_fn;
 	mcip->mci_direct_rx_arg = arg1;
-	mcip->mci_state_flags |= MCIS_CLIENT_POLL_CAPABLE;
 	return (B_TRUE);
+}
+
+/*
+ * Enable/Disable rx bypass. By default, bypass is assumed to be enabled.
+ */
+void
+mac_rx_bypass_enable(mac_client_handle_t mch)
+{
+	((mac_client_impl_t *)mch)->mci_state_flags &= ~MCIS_RX_BYPASS_DISABLE;
+}
+
+void
+mac_rx_bypass_disable(mac_client_handle_t mch)
+{
+	((mac_client_impl_t *)mch)->mci_state_flags |= MCIS_RX_BYPASS_DISABLE;
 }
 
 /*
@@ -1828,6 +1868,8 @@ mac_get_passive_primary_client(mac_impl_t *mip)
  * Note also the tuple (MAC address, VID) must be unique
  * for the MAC clients defined on top of the same underlying MAC
  * instance, unless the MAC_UNICAST_NODUPCHECK is specified.
+ *
+ * In no case can a client use the PVID for the MAC, if the MAC has one set.
  */
 int
 i_mac_unicast_add(mac_client_handle_t mch, uint8_t *mac_addr, uint16_t flags,
@@ -1849,6 +1891,13 @@ i_mac_unicast_add(mac_client_handle_t mch, uint8_t *mac_addr, uint16_t flags,
 
 	/* when VID is non-zero, the underlying MAC can not be VNIC */
 	ASSERT(!((mip->mi_state_flags & MIS_IS_VNIC) && (vid != 0)));
+
+	/*
+	 * Check for an attempted use of the current Port VLAN ID, if enabled.
+	 * No client may use it.
+	 */
+	if (mip->mi_pvid != 0 && vid == mip->mi_pvid)
+		return (EBUSY);
 
 	/*
 	 * Check whether it's the primary client and flag it.
@@ -1945,8 +1994,9 @@ i_mac_unicast_add(mac_client_handle_t mch, uint8_t *mac_addr, uint16_t flags,
 	 *  - this is an exclusive active mac client but
 	 *	a. there is already active mac clients exist, or
 	 *	b. fastpath streams are already plumbed on this legacy device
+	 *  - the mac creator has disallowed active mac clients.
 	 */
-	if (mip->mi_state_flags & MIS_EXCLUSIVE) {
+	if (mip->mi_state_flags & (MIS_EXCLUSIVE|MIS_NO_ACTIVE)) {
 		if (fastpath_disabled)
 			mac_fastpath_enable((mac_handle_t)mip);
 		return (EBUSY);
@@ -2617,6 +2667,7 @@ mac_promisc_add(mac_client_handle_t mch, mac_client_promisc_type_t type,
 	mpip->mpi_no_phys = ((flags & MAC_PROMISC_FLAGS_NO_PHYS) != 0);
 	mpip->mpi_strip_vlan_tag =
 	    ((flags & MAC_PROMISC_FLAGS_VLAN_TAG_STRIP) != 0);
+	mpip->mpi_no_copy = ((flags & MAC_PROMISC_FLAGS_NO_COPY) != 0);
 
 	mcbi = &mip->mi_promisc_cb_info;
 	mutex_enter(mcbi->mcbi_lockp);
@@ -2754,7 +2805,7 @@ mac_tx_cookie_t
 mac_tx(mac_client_handle_t mch, mblk_t *mp_chain, uintptr_t hint,
     uint16_t flag, mblk_t **ret_mp)
 {
-	mac_tx_cookie_t		cookie;
+	mac_tx_cookie_t		cookie = NULL;
 	int			error;
 	mac_tx_percpu_t		*mytx;
 	mac_soft_ring_set_t	*srs;
@@ -2775,6 +2826,15 @@ mac_tx(mac_client_handle_t mch, mblk_t *mp_chain, uintptr_t hint,
 		}
 	}
 
+	/*
+	 * If mac protection is enabled, only the permissible packets will be
+	 * returned by mac_protect_check().
+	 */
+	if ((mcip->mci_flent->
+	    fe_resource_props.mrp_mask & MRP_PROTECT) != 0 &&
+	    (mp_chain = mac_protect_check(mch, mp_chain)) == NULL)
+		goto done;
+
 	if (mcip->mci_subflow_tab != NULL &&
 	    mcip->mci_subflow_tab->ft_flow_count > 0 &&
 	    mac_flow_lookup(mcip->mci_subflow_tab, mp_chain,
@@ -2793,6 +2853,16 @@ mac_tx(mac_client_handle_t mch, mblk_t *mp_chain, uintptr_t hint,
 	}
 
 	srs = flent->fe_tx_srs;
+	/*
+	 * This is to avoid panics with PF_PACKET that can call mac_tx()
+	 * against an interface that is not capable of sending. A rewrite
+	 * of the mac datapath is required to remove this limitation.
+	 */
+	if (srs == NULL) {
+		freemsgchain(mp_chain);
+		goto done;
+	}
+
 	srs_tx = &srs->srs_tx;
 	if (srs_tx->st_mode == SRS_TX_DEFAULT &&
 	    (srs->srs_state & SRS_ENQUEUED) == 0 &&
@@ -2832,7 +2902,8 @@ mac_tx(mac_client_handle_t mch, mblk_t *mp_chain, uintptr_t hint,
 		obytes = (mp_chain->b_cont == NULL ? MBLKL(mp_chain) :
 		    msgdsize(mp_chain));
 
-		MAC_TX(mip, srs_tx->st_arg2, mp_chain, mcip);
+		MAC_TX(mip, srs_tx->st_arg2, mp_chain,
+		    ((mcip->mci_state_flags & MCIS_SHARE_BOUND) != 0));
 
 		if (mp_chain == NULL) {
 			cookie = NULL;
@@ -3084,9 +3155,6 @@ mac_resource_set_common(mac_client_handle_t mch, mac_resource_add_t add,
 	mcip->mci_resource_restart = restart;
 	mcip->mci_resource_bind = bind;
 	mcip->mci_resource_arg = arg;
-
-	if (arg == NULL)
-		mcip->mci_state_flags &= ~MCIS_CLIENT_POLL_CAPABLE;
 }
 
 void
@@ -3111,6 +3179,7 @@ mac_client_poll_enable(mac_client_handle_t mch)
 	flent = mcip->mci_flent;
 	ASSERT(flent != NULL);
 
+	mcip->mci_state_flags |= MCIS_CLIENT_POLL_CAPABLE;
 	for (i = 0; i < flent->fe_rx_srs_cnt; i++) {
 		mac_srs = (mac_soft_ring_set_t *)flent->fe_rx_srs[i];
 		ASSERT(mac_srs->srs_mcip == mcip);
@@ -3133,6 +3202,7 @@ mac_client_poll_disable(mac_client_handle_t mch)
 	flent = mcip->mci_flent;
 	ASSERT(flent != NULL);
 
+	mcip->mci_state_flags &= ~MCIS_CLIENT_POLL_CAPABLE;
 	for (i = 0; i < flent->fe_rx_srs_cnt; i++) {
 		mac_srs = (mac_soft_ring_set_t *)flent->fe_rx_srs[i];
 		ASSERT(mac_srs->srs_mcip == mcip);
@@ -3176,15 +3246,20 @@ mac_client_set_resources(mac_client_handle_t mch, mac_resource_props_t *mrp)
 
 	if ((mrp->mrp_mask & MRP_MAXBW) || (mrp->mrp_mask & MRP_PRIORITY)) {
 		err = mac_resource_ctl_set(mch, mrp);
-		if (err != 0) {
-			i_mac_perim_exit(mip);
-			return (err);
-		}
+		if (err != 0)
+			goto done;
 	}
 
-	if (mrp->mrp_mask & MRP_CPUS)
+	if (mrp->mrp_mask & MRP_CPUS) {
 		err = mac_cpu_set(mch, mrp);
+		if (err != 0)
+			goto done;
+	}
 
+	if (mrp->mrp_mask & MRP_PROTECT)
+		err = mac_protect_set(mch, mrp);
+
+done:
 	i_mac_perim_exit(mip);
 	return (err);
 }
@@ -3223,18 +3298,28 @@ static void
 mac_promisc_dispatch_one(mac_promisc_impl_t *mpip, mblk_t *mp,
     boolean_t loopback)
 {
-	mblk_t *mp_copy;
+	mblk_t *mp_copy, *mp_next;
 
-	mp_copy = copymsg(mp);
-	if (mp_copy == NULL)
-		return;
+	if (!mpip->mpi_no_copy || mpip->mpi_strip_vlan_tag) {
+		mp_copy = copymsg(mp);
+		if (mp_copy == NULL)
+			return;
+
+		if (mpip->mpi_strip_vlan_tag) {
+			mp_copy = mac_strip_vlan_tag_chain(mp_copy);
+			if (mp_copy == NULL)
+				return;
+		}
+		mp_next = NULL;
+	} else {
+		mp_copy = mp;
+		mp_next = mp->b_next;
+	}
 	mp_copy->b_next = NULL;
 
-	if (mpip->mpi_strip_vlan_tag) {
-		if ((mp_copy = mac_strip_vlan_tag_chain(mp_copy)) == NULL)
-			return;
-	}
 	mpip->mpi_fn(mpip->mpi_arg, NULL, mp_copy, loopback);
+	if (mp_copy == mp)
+		mp->b_next = mp_next;
 }
 
 /*
@@ -3297,6 +3382,10 @@ mac_promisc_dispatch(mac_impl_t *mip, mblk_t *mp_chain,
 				 * The sender doesn't want to receive
 				 * copies of the packets it sends.
 				 */
+				continue;
+
+			/* this client doesn't need any packets (bridge) */
+			if (mpip->mpi_fn == NULL)
 				continue;
 
 			/*
@@ -3412,14 +3501,18 @@ mac_info_get(const char *name, mac_info_t *minfop)
 
 /*
  * To get the capabilities that MAC layer cares about, such as rings, factory
- * mac address, vnic or not, it should directly invoke this function
+ * mac address, vnic or not, it should directly invoke this function.  If the
+ * link is part of a bridge, then the only "capability" it has is the inability
+ * to do zero copy.
  */
 boolean_t
 i_mac_capab_get(mac_handle_t mh, mac_capab_t cap, void *cap_data)
 {
 	mac_impl_t *mip = (mac_impl_t *)mh;
 
-	if (mip->mi_callbacks->mc_callbacks & MC_GETCAPAB)
+	if (mip->mi_bridge_link != NULL)
+		return (cap == MAC_CAPAB_NO_ZCOPY);
+	else if (mip->mi_callbacks->mc_callbacks & MC_GETCAPAB)
 		return (mip->mi_getcapab(mip->mi_driver, cap, cap_data));
 	else
 		return (B_FALSE);
@@ -3470,9 +3563,15 @@ mblk_t *
 mac_header(mac_handle_t mh, const uint8_t *daddr, uint32_t sap, mblk_t *payload,
     size_t extra_len)
 {
-	mac_impl_t *mip = (mac_impl_t *)mh;
+	mac_impl_t	*mip = (mac_impl_t *)mh;
+	const uint8_t	*hdr_daddr;
 
-	return (mip->mi_type->mt_ops.mtops_header(mip->mi_addr, daddr, sap,
+	/*
+	 * If the MAC is point-to-point with a fixed destination address, then
+	 * we must always use that destination in the MAC header.
+	 */
+	hdr_daddr = (mip->mi_dstaddr_set ? mip->mi_dstaddr : daddr);
+	return (mip->mi_type->mt_ops.mtops_header(mip->mi_addr, hdr_daddr, sap,
 	    mip->mi_pdata, payload, extra_len));
 }
 
@@ -3483,6 +3582,62 @@ mac_header_info(mac_handle_t mh, mblk_t *mp, mac_header_info_t *mhip)
 
 	return (mip->mi_type->mt_ops.mtops_header_info(mp, mip->mi_pdata,
 	    mhip));
+}
+
+int
+mac_vlan_header_info(mac_handle_t mh, mblk_t *mp, mac_header_info_t *mhip)
+{
+	mac_impl_t	*mip = (mac_impl_t *)mh;
+	boolean_t	is_ethernet = (mip->mi_info.mi_media == DL_ETHER);
+	int		err = 0;
+
+	/*
+	 * Packets should always be at least 16 bit aligned.
+	 */
+	ASSERT(IS_P2ALIGNED(mp->b_rptr, sizeof (uint16_t)));
+
+	if ((err = mac_header_info(mh, mp, mhip)) != 0)
+		return (err);
+
+	/*
+	 * If this is a VLAN-tagged Ethernet packet, then the SAP in the
+	 * mac_header_info_t as returned by mac_header_info() is
+	 * ETHERTYPE_VLAN. We need to grab the ethertype from the VLAN header.
+	 */
+	if (is_ethernet && (mhip->mhi_bindsap == ETHERTYPE_VLAN)) {
+		struct ether_vlan_header *evhp;
+		uint16_t sap;
+		mblk_t *tmp = NULL;
+		size_t size;
+
+		size = sizeof (struct ether_vlan_header);
+		if (MBLKL(mp) < size) {
+			/*
+			 * Pullup the message in order to get the MAC header
+			 * infomation. Note that this is a read-only function,
+			 * we keep the input packet intact.
+			 */
+			if ((tmp = msgpullup(mp, size)) == NULL)
+				return (EINVAL);
+
+			mp = tmp;
+		}
+		evhp = (struct ether_vlan_header *)mp->b_rptr;
+		sap = ntohs(evhp->ether_type);
+		(void) mac_sap_verify(mh, sap, &mhip->mhi_bindsap);
+		mhip->mhi_hdrsize = sizeof (struct ether_vlan_header);
+		mhip->mhi_tci = ntohs(evhp->ether_tci);
+		mhip->mhi_istagged = B_TRUE;
+		freemsg(tmp);
+
+		if (VLAN_CFI(mhip->mhi_tci) != ETHER_CFI)
+			return (EINVAL);
+	} else {
+		mhip->mhi_istagged = B_FALSE;
+		mhip->mhi_tci = 0;
+	}
+
+	return (0);
 }
 
 mblk_t *
@@ -3575,6 +3730,9 @@ mac_update_resources(mac_resource_props_t *nmrp, mac_resource_props_t *cmrp,
 		}
 		if (nmrp->mrp_mask & MRP_CPUS)
 			MAC_COPY_CPUS(nmrp, cmrp);
+
+		if (nmrp->mrp_mask & MRP_PROTECT)
+			mac_protect_update(nmrp, cmrp);
 	}
 }
 
@@ -3672,6 +3830,55 @@ mac_get_resources(mac_handle_t mh, mac_resource_props_t *mrp)
 		}
 	}
 	bcopy(&mip->mi_resource_props, mrp, sizeof (mac_resource_props_t));
+}
+
+int
+mac_set_pvid(mac_handle_t mh, uint16_t pvid)
+{
+	mac_impl_t *mip = (mac_impl_t *)mh;
+	mac_client_impl_t *mcip;
+	mac_unicast_impl_t *muip;
+
+	i_mac_perim_enter(mip);
+	if (pvid != 0) {
+		for (mcip = mip->mi_clients_list; mcip != NULL;
+		    mcip = mcip->mci_client_next) {
+			for (muip = mcip->mci_unicast_list; muip != NULL;
+			    muip = muip->mui_next) {
+				if (muip->mui_vid == pvid) {
+					i_mac_perim_exit(mip);
+					return (EBUSY);
+				}
+			}
+		}
+	}
+	mip->mi_pvid = pvid;
+	i_mac_perim_exit(mip);
+	return (0);
+}
+
+uint16_t
+mac_get_pvid(mac_handle_t mh)
+{
+	mac_impl_t *mip = (mac_impl_t *)mh;
+
+	return (mip->mi_pvid);
+}
+
+uint32_t
+mac_get_llimit(mac_handle_t mh)
+{
+	mac_impl_t *mip = (mac_impl_t *)mh;
+
+	return (mip->mi_llimit);
+}
+
+uint32_t
+mac_get_ldecay(mac_handle_t mh)
+{
+	mac_impl_t *mip = (mac_impl_t *)mh;
+
+	return (mip->mi_ldecay);
 }
 
 /*
@@ -4027,6 +4234,12 @@ mac_validate_props(mac_resource_props_t *mrp)
 		if (fanout < 0 || fanout > MCM_CPUS)
 			return (EINVAL);
 	}
+
+	if (mrp->mrp_mask & MRP_PROTECT) {
+		int err = mac_protect_validate(mrp);
+		if (err != 0)
+			return (err);
+	}
 	return (0);
 }
 
@@ -4107,42 +4320,31 @@ mac_unmark_exclusive(mac_handle_t mh)
 }
 
 /*
- * Set the MTU for the specified device. The function returns EBUSY if
- * another MAC client prevents the caller to become the exclusive client.
- * Returns EAGAIN if the client is started.
+ * Set the MTU for the specified MAC.  Note that this mechanism depends on
+ * the driver calling mac_maxsdu_update() to update the link MTU if it was
+ * successful in setting its MTU.
+ *
+ * Note that there is potential for improvement here.  A better model might be
+ * to not require drivers to call mac_maxsdu_update(), but rather have this
+ * function update mi_sdu_max and send notifications if the driver setprop
+ * callback succeeds.  This would remove the burden and complexity from
+ * drivers.
  */
 int
 mac_set_mtu(mac_handle_t mh, uint_t new_mtu, uint_t *old_mtu_arg)
 {
 	mac_impl_t *mip = (mac_impl_t *)mh;
 	uint_t old_mtu;
-	int rv;
-	boolean_t exclusive = B_FALSE;
+	int rv = 0;
 
 	i_mac_perim_enter(mip);
 
-	if ((mip->mi_callbacks->mc_callbacks & MC_SETPROP) == 0 ||
-	    (mip->mi_callbacks->mc_callbacks & MC_GETPROP) == 0) {
+	if (!(mip->mi_callbacks->mc_callbacks & (MC_SETPROP|MC_GETPROP))) {
 		rv = ENOTSUP;
 		goto bail;
 	}
 
-	if ((rv = mac_mark_exclusive(mh)) != 0)
-		goto bail;
-	exclusive = B_TRUE;
-
-	if (mip->mi_active > 0) {
-		/*
-		 * The MAC instance is started, for example due to the
-		 * presence of a promiscuous clients. Fail the operation
-		 * since the MAC's MTU cannot be changed while the NIC
-		 * is started.
-		 */
-		rv = EAGAIN;
-		goto bail;
-	}
-
-	mac_sdu_get(mh, NULL, &old_mtu);
+	old_mtu = mip->mi_sdu_max;
 
 	if (old_mtu != new_mtu) {
 		rv = mip->mi_callbacks->mc_setprop(mip->mi_driver,
@@ -4150,8 +4352,6 @@ mac_set_mtu(mac_handle_t mh, uint_t new_mtu, uint_t *old_mtu_arg)
 	}
 
 bail:
-	if (exclusive)
-		mac_unmark_exclusive(mh);
 	i_mac_perim_exit(mip);
 
 	if (rv == 0 && old_mtu_arg != NULL)

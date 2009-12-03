@@ -103,11 +103,11 @@ static int64_t		tv2ns(struct timeval *);
  * The state of a phyint that is capable of being probed, is completely
  * specified by the 3-tuple <pi_state, pg_state, I>.
  *
- * A phyint starts in either PI_RUNNING or PI_FAILED, depending on the state
- * of the link (according to the driver).  If the phyint is also configured
- * with a test address (the common case) and probe targets, then a phyint must
- * also successfully be able to send and receive probes in order to remain in
- * the PI_RUNNING state (otherwise, it transitions to PI_FAILED).
+ * A phyint starts in either PI_RUNNING or PI_OFFLINE, depending on whether
+ * IFF_OFFLINE is set.  If the phyint is also configured with a test address
+ * (the common case) and probe targets, then a phyint must also successfully
+ * be able to send and receive probes in order to remain in the PI_RUNNING
+ * state (otherwise, it transitions to PI_FAILED).
  *
  * Further, if a PI_RUNNING phyint is configured with a test address but is
  * unable to find any probe targets, it will transition to the PI_NOTARGETS
@@ -220,7 +220,8 @@ probe(struct phyint_instance *pii, uint_t probe_type, hrtime_t start_hrtime)
 	struct sockaddr_storage targ;	/* target address */
 	uint_t	targaddrlen;		/* targed address length */
 	int	pr_ndx;			/* probe index in pii->pii_probes[] */
-	boolean_t sent = _B_TRUE;
+	boolean_t sent = _B_FALSE;
+	int	rval;
 
 	if (debug & D_TARGET) {
 		logdebug("probe(%s %s %d %lld)\n", AF_STR(pii->pii_af),
@@ -296,10 +297,19 @@ probe(struct phyint_instance *pii, uint_t probe_type, hrtime_t start_hrtime)
 	 */
 	sent_hrtime = gethrtime();
 	(void) gettimeofday(&sent_tv, NULL);
-	if (sendto(pii->pii_probe_sock, &probe_pkt, sizeof (probe_pkt), 0,
-	    (struct sockaddr *)&targ, targaddrlen) != sizeof (probe_pkt)) {
+	rval = sendto(pii->pii_probe_sock, &probe_pkt, sizeof (probe_pkt), 0,
+	    (struct sockaddr *)&targ, targaddrlen);
+	/*
+	 * If the send would block, this may either be transient or a hang in a
+	 * lower layer. We pretend the probe was actually sent, the daemon will
+	 * not see a reply to the probe and will fail the interface if normal
+	 * failure detection criteria are met.
+	 */
+	if (rval == sizeof (probe_pkt) ||
+	    (rval == -1 && errno == EWOULDBLOCK)) {
+		sent = _B_TRUE;
+	} else {
 		logperror_pii(pii, "probe: probe sendto");
-		sent = _B_FALSE;
 	}
 
 	/*
@@ -900,10 +910,10 @@ incoming_echo_reply(struct phyint_instance *pii, struct pr_icmp *reply,
 			pg->pg_fdt = pg->pg_probeint * (NUM_PROBE_FAILS + 2);
 			last_fdt_bumpup_time = gethrtime();
 			if (pg != phyint_anongroup) {
-				logerr("Cannot meet requested failure detection"
-				    " time of %d ms on (%s %s) new failure"
-				    " detection time for group \"%s\" is %d"
-				    " ms\n", user_failure_detection_time,
+				logtrace("Cannot meet requested failure"
+				    " detection time of %d ms on (%s %s) new"
+				    " failure detection time for group \"%s\""
+				    " is %d ms\n", user_failure_detection_time,
 				    AF_STR(pii->pii_af), pii->pii_name,
 				    pg->pg_name, pg->pg_fdt);
 			}
@@ -921,10 +931,10 @@ incoming_echo_reply(struct phyint_instance *pii, struct pr_icmp *reply,
 			    user_failure_detection_time);
 			pg->pg_probeint = pg->pg_fdt / (NUM_PROBE_FAILS + 2);
 			if (pg != phyint_anongroup) {
-				logerr("Improved failure detection time %d ms "
-				    "on (%s %s) for group \"%s\"\n", pg->pg_fdt,
-				    AF_STR(pii->pii_af), pii->pii_name,
-				    pg->pg_name);
+				logtrace("Improved failure detection time %d ms"
+				    " on (%s %s) for group \"%s\"\n",
+				    pg->pg_fdt, AF_STR(pii->pii_af),
+				    pii->pii_name, pg->pg_name);
 			}
 			if (user_failure_detection_time == pg->pg_fdt) {
 				/* Avoid any truncation or rounding errors */
@@ -1346,7 +1356,7 @@ phyint_activate_another(struct phyint *pi)
 		return;
 
 	for (pi2 = pi->pi_group->pg_phyint; pi2 != NULL; pi2 = pi2->pi_pgnext) {
-		if (pi == pi2 || pi2->pi_state != PI_RUNNING ||
+		if (pi == pi2 || !phyint_is_functioning(pi2) ||
 		    !(pi2->pi_flags & IFF_INACTIVE))
 			continue;
 
@@ -1360,11 +1370,11 @@ phyint_activate_another(struct phyint *pi)
 }
 
 /*
- * Transition a phyint back to PI_RUNNING (from PI_FAILED or PI_OFFLINE).  The
- * caller must ensure that the transition is appropriate.  Clears IFF_OFFLINE
- * or IFF_FAILED, as appropriate.  Also sets IFF_INACTIVE on this or other
- * interfaces as appropriate (see comment below).  Finally, also updates the
- * phyint's group state to account for the change.
+ * Transition a phyint to PI_RUNNING.  The caller must ensure that the
+ * transition is appropriate.  Clears IFF_OFFLINE or IFF_FAILED if
+ * appropriate.  Also sets IFF_INACTIVE on this or other interfaces as
+ * appropriate (see comment below).  Finally, also updates the phyint's group
+ * state to account for the change.
  */
 void
 phyint_transition_to_running(struct phyint *pi)
@@ -1373,6 +1383,7 @@ phyint_transition_to_running(struct phyint *pi)
 	struct phyint *actstandbypi = NULL;
 	uint_t nactive = 0, nnonstandby = 0;
 	boolean_t onlining = (pi->pi_state == PI_OFFLINE);
+	boolean_t initial = (pi->pi_state == PI_INIT);
 	uint64_t set, clear;
 
 	/*
@@ -1401,12 +1412,11 @@ phyint_transition_to_running(struct phyint *pi)
 			if (!(pi2->pi_flags & IFF_STANDBY))
 				nnonstandby++;
 
-			if (pi2->pi_state == PI_RUNNING) {
-				if (!(pi2->pi_flags & IFF_INACTIVE)) {
-					nactive++;
-					if (pi2->pi_flags & IFF_STANDBY)
-						actstandbypi = pi2;
-				}
+			if (phyint_is_functioning(pi2) &&
+			    !(pi2->pi_flags & IFF_INACTIVE)) {
+				nactive++;
+				if (pi2->pi_flags & IFF_STANDBY)
+					actstandbypi = pi2;
 			}
 		}
 	}
@@ -1422,7 +1432,7 @@ phyint_transition_to_running(struct phyint *pi)
 	} else if (onlining || failback_enabled) {		/* case 2 */
 		if (nactive >= nnonstandby && actstandbypi != NULL)
 			(void) change_pif_flags(actstandbypi, IFF_INACTIVE, 0);
-	} else if (!GROUP_FAILED(pi->pi_group)) {		/* case 3 */
+	} else if (!initial && !GROUP_FAILED(pi->pi_group)) {	/* case 3 */
 		set |= IFF_INACTIVE;
 	}
 	(void) change_pif_flags(pi, set, clear);
@@ -1433,6 +1443,47 @@ phyint_transition_to_running(struct phyint *pi)
 	 * Update the group state to account for the change.
 	 */
 	phyint_group_refresh_state(pi->pi_group);
+}
+
+/*
+ * Adjust IFF_INACTIVE on the provided `pi' to trend the group configuration
+ * to have at least one active interface and as many active interfaces as
+ * non-standby interfaces.
+ */
+void
+phyint_standby_refresh_inactive(struct phyint *pi)
+{
+	struct phyint *pi2;
+	uint_t nactive = 0, nnonstandby = 0;
+
+	/*
+	 * All phyints in the anonymous group are effectively in their own
+	 * group and thus active regardless of whether they're marked standby.
+	 */
+	if (pi->pi_group == phyint_anongroup) {
+		(void) change_pif_flags(pi, 0, IFF_INACTIVE);
+		return;
+	}
+
+	/*
+	 * If the phyint isn't functioning we can't consider it.
+	 */
+	if (!phyint_is_functioning(pi))
+		return;
+
+	for (pi2 = pi->pi_group->pg_phyint; pi2 != NULL; pi2 = pi2->pi_pgnext) {
+		if (!(pi2->pi_flags & IFF_STANDBY))
+			nnonstandby++;
+
+		if (phyint_is_functioning(pi2) &&
+		    !(pi2->pi_flags & IFF_INACTIVE))
+			nactive++;
+	}
+
+	if (nactive == 0 || nactive < nnonstandby)
+		(void) change_pif_flags(pi, 0, IFF_INACTIVE);
+	else if (nactive > nnonstandby)
+		(void) change_pif_flags(pi, IFF_INACTIVE, 0);
 }
 
 /*

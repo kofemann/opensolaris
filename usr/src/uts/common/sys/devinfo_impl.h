@@ -64,6 +64,9 @@ extern "C" {
 /* new public flag for the layered drivers framework */
 #define	DINFOLYR	(DIIOC | 0x40)	/* get device layering information */
 
+/* new public flag for the hotplug framework */
+#define	DINFOHP		(DIIOC | 0x400000)  /* include hotplug information */
+
 /*
  * Straight ioctl commands, not bitwise operation
  */
@@ -119,6 +122,7 @@ extern "C" {
 #define	DI_LINK(addr)		((struct di_link *)((void *)(addr)))
 #define	DI_LNODE(addr)		((struct di_lnode *)((void *)(addr)))
 #define	DI_PRIV_FORMAT(addr)	((struct di_priv_format *)((void *)(addr)))
+#define	DI_HP(addr)		((struct di_hp *)((void *)(addr)))
 
 /*
  * multipath component definitions:  Follows the registered component of
@@ -269,12 +273,15 @@ struct di_node {	/* useful info to export for each tree node */
 	di_off_t top_phci;
 	di_off_t next_phci;
 	uint32_t multipath_component;	/* stores MDI_COMPONENT_* value. */
-
 	/*
 	 * devi_flags field
 	 */
 	uint32_t flags;
 	uint32_t di_pad2;	/* 4 byte padding for 32bit x86 app. */
+	/*
+	 * offset to hotplug nodes.
+	 */
+	di_off_t hp_data;
 };
 
 /*
@@ -317,6 +324,23 @@ struct di_path {
 	uint_t		path_snap_state; /* describes valid fields */
 	int		path_instance;	/* path instance */
 	uint64_t 	user_private_data;
+	uint_t		path_flags;	/* path flags */
+};
+
+/*
+ * chain of hotplug information structures
+ */
+struct di_hp {
+	di_off_t	self;		/* make it self addressable */
+	di_off_t	next;		/* next one in chain */
+	di_off_t	hp_name;	/* name of hotplug connection */
+	int		hp_connection;	/* connection number */
+	int		hp_depends_on;	/* connection number depended upon */
+	int		hp_state;	/* current hotplug state */
+	int		hp_type;	/* connection type: PCI, ... */
+	di_off_t	hp_type_str;	/* description of connection type */
+	uint32_t	hp_last_change;	/* timestamp of last change */
+	di_off_t	hp_child;	/* child device node */
 };
 
 /*
@@ -329,6 +353,11 @@ struct di_path {
 #define	DI_PATH_SNAP_NOCLINK	0x10	/* client linkage not in snapshot */
 #define	DI_PATH_SNAP_NOPLINK	0x20	/* phci linkage not in snapshot */
 #define	DI_PATH_SNAP_LINKS	0x40	/* linkages have been postprocessed */
+
+/*
+ * Flags for path_flags
+ */
+#define	DI_PATH_FLAGS_DEVICE_REMOVED	0x01	/* peer of DI_DEVICE_REMOVED */
 
 /*
  * path properties

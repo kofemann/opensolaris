@@ -493,7 +493,8 @@ extern kcondvar_t ntfy_list_cv;
 
 boolean_t kcf_get_next_logical_provider_member(kcf_provider_desc_t *,
     kcf_provider_desc_t *, kcf_provider_desc_t **);
-extern int kcf_get_hardware_provider(crypto_mech_type_t, crypto_mech_type_t,
+extern int kcf_get_hardware_provider(crypto_mech_type_t, crypto_key_t *,
+    crypto_mech_type_t, crypto_key_t *,
     boolean_t, kcf_provider_desc_t *, kcf_provider_desc_t **,
     crypto_func_group_t);
 extern int kcf_get_hardware_provider_nomech(offset_t, offset_t,
@@ -502,10 +503,11 @@ extern void kcf_free_triedlist(kcf_prov_tried_t *);
 extern kcf_prov_tried_t *kcf_insert_triedlist(kcf_prov_tried_t **,
     kcf_provider_desc_t *, int);
 extern kcf_provider_desc_t *kcf_get_mech_provider(crypto_mech_type_t,
-    kcf_mech_entry_t **, int *, kcf_prov_tried_t *, crypto_func_group_t,
-    boolean_t, size_t);
+    crypto_key_t *, kcf_mech_entry_t **, int *, kcf_prov_tried_t *,
+    crypto_func_group_t, boolean_t, size_t);
 extern kcf_provider_desc_t *kcf_get_dual_provider(crypto_mechanism_t *,
-    crypto_mechanism_t *, kcf_mech_entry_t **, crypto_mech_type_t *,
+    crypto_key_t *, crypto_mechanism_t *, crypto_key_t *,
+    kcf_mech_entry_t **, crypto_mech_type_t *,
     crypto_mech_type_t *, int *, kcf_prov_tried_t *,
     crypto_func_group_t, crypto_func_group_t, boolean_t, size_t);
 extern crypto_ctx_t *kcf_new_ctx(crypto_call_req_t  *, kcf_provider_desc_t *,
@@ -522,6 +524,7 @@ extern void kcf_free_context(kcf_context_t *);
 
 extern int kcf_svc_wait(int *);
 extern int kcf_svc_do_run(void);
+extern int kcf_need_fips140_verification(kcf_provider_desc_t *);
 extern int kcf_need_signature_verification(kcf_provider_desc_t *);
 extern void kcf_verify_signature(void *);
 extern struct modctl *kcf_get_modctl(crypto_provider_info_t *);

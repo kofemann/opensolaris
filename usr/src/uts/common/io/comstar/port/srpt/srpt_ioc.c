@@ -161,14 +161,13 @@ srpt_ioc_attach()
 
 	hca_cnt = ibt_get_hca_list(&guid);
 	if (hca_cnt < 1) {
+		/*
+		 * not a fatal error.  Service will be up and
+		 * waiting for ATTACH events.
+		 */
 		SRPT_DPRINTF_L2("ioc_attach, no HCA found");
-		ibt_detach(srpt_ctxt->sc_ibt_hdl);
-		srpt_ctxt->sc_ibt_hdl = NULL;
-		return (DDI_FAILURE);
+		return (DDI_SUCCESS);
 	}
-
-	list_create(&srpt_ctxt->sc_ioc_list, sizeof (srpt_ioc_t),
-	    offsetof(srpt_ioc_t, ioc_node));
 
 	for (hca_ndx = 0; hca_ndx < hca_cnt; hca_ndx++) {
 		SRPT_DPRINTF_L2("ioc_attach, adding I/O"
@@ -214,9 +213,7 @@ srpt_ioc_detach()
 		srpt_ioc_fini(ioc);
 	}
 
-	list_destroy(&srpt_ctxt->sc_ioc_list);
-
-	ibt_detach(srpt_ctxt->sc_ibt_hdl);
+	(void) ibt_detach(srpt_ctxt->sc_ibt_hdl);
 	srpt_ctxt->sc_ibt_hdl = NULL;
 }
 
@@ -533,6 +530,9 @@ srpt_ioc_port_active(ibt_async_event_t *event)
 {
 	ibt_status_t		status;
 	srpt_ioc_t		*ioc;
+	srpt_target_port_t	*tgt = NULL;
+	boolean_t		online_target = B_FALSE;
+	stmf_change_status_t	cstatus;
 
 	ASSERT(event != NULL);
 
@@ -551,7 +551,8 @@ srpt_ioc_port_active(ibt_async_event_t *event)
 		return;
 	}
 
-	if (ioc->ioc_tgt_port == NULL) {
+	tgt = ioc->ioc_tgt_port;
+	if (tgt == NULL) {
 		SRPT_DPRINTF_L2("ioc_port_active, no I/O Controller target"
 		    " undefined");
 		return;
@@ -563,17 +564,44 @@ srpt_ioc_port_active(ibt_async_event_t *event)
 	 * with any STMF initiated target state transitions.  If
 	 * SRP is off-line then the service handle is NULL.
 	 */
-	mutex_enter(&ioc->ioc_tgt_port->tp_lock);
+	mutex_enter(&tgt->tp_lock);
 
-	if (ioc->ioc_tgt_port->tp_ibt_svc_hdl != NULL) {
-		status = srpt_ioc_svc_bind(ioc->ioc_tgt_port, event->ev_port);
-		if (status != IBT_SUCCESS &&
-		    status != IBT_HCA_PORT_NOT_ACTIVE) {
+	if (tgt->tp_ibt_svc_hdl != NULL) {
+		status = srpt_ioc_svc_bind(tgt, event->ev_port);
+		if ((status != IBT_SUCCESS) &&
+		    (status != IBT_HCA_PORT_NOT_ACTIVE)) {
 			SRPT_DPRINTF_L1("ioc_port_active, bind failed (%d)",
 			    status);
 		}
+	} else {
+		/* if we were offline because of no ports, try onlining now */
+		if ((tgt->tp_num_active_ports == 0) &&
+		    (tgt->tp_requested_state != tgt->tp_state) &&
+		    (tgt->tp_requested_state == SRPT_TGT_STATE_ONLINE)) {
+			online_target = B_TRUE;
+			cstatus.st_completion_status = STMF_SUCCESS;
+			cstatus.st_additional_info = "port active";
+		}
 	}
-	mutex_exit(&ioc->ioc_tgt_port->tp_lock);
+
+	mutex_exit(&tgt->tp_lock);
+
+	if (online_target) {
+		stmf_status_t	ret;
+
+		ret = stmf_ctl(STMF_CMD_LPORT_ONLINE, tgt->tp_lport, &cstatus);
+
+		if (ret == STMF_SUCCESS) {
+			SRPT_DPRINTF_L1("ioc_port_active, port %d active, "
+			    "target %016llx online requested", event->ev_port,
+			    (u_longlong_t)ioc->ioc_guid);
+		} else if (ret != STMF_ALREADY) {
+			SRPT_DPRINTF_L1("ioc_port_active, port %d active, "
+			    "target %016llx failed online request: %d",
+			    event->ev_port, (u_longlong_t)ioc->ioc_guid,
+			    (int)ret);
+		}
+	}
 }
 
 /*
@@ -586,6 +614,8 @@ srpt_ioc_port_down(ibt_async_event_t *event)
 	srpt_target_port_t	*tgt;
 	srpt_channel_t		*ch;
 	srpt_channel_t		*next_ch;
+	boolean_t		offline_target = B_FALSE;
+	stmf_change_status_t	cstatus;
 
 	SRPT_DPRINTF_L3("ioc_port_down event handler, invoked");
 
@@ -631,7 +661,34 @@ srpt_ioc_port_down(ibt_async_event_t *event)
 	}
 	mutex_exit(&tgt->tp_ch_list_lock);
 
+	tgt->tp_num_active_ports--;
+
+	/* if we have no active ports, take the target offline */
+	if ((tgt->tp_num_active_ports == 0) &&
+	    (tgt->tp_state == SRPT_TGT_STATE_ONLINE)) {
+		cstatus.st_completion_status = STMF_SUCCESS;
+		cstatus.st_additional_info = "no ports active";
+		offline_target = B_TRUE;
+	}
+
 	mutex_exit(&tgt->tp_lock);
+
+	if (offline_target) {
+		stmf_status_t	ret;
+
+		ret = stmf_ctl(STMF_CMD_LPORT_OFFLINE, tgt->tp_lport, &cstatus);
+
+		if (ret == STMF_SUCCESS) {
+			SRPT_DPRINTF_L1("ioc_port_down, port %d down, target "
+			    "%016llx offline requested", event->ev_port,
+			    (u_longlong_t)ioc->ioc_guid);
+		} else if (ret != STMF_ALREADY) {
+			SRPT_DPRINTF_L1("ioc_port_down, port %d down, target "
+			    "%016llx failed offline request: %d",
+			    event->ev_port,
+			    (u_longlong_t)ioc->ioc_guid, (int)ret);
+		}
+	}
 }
 
 /*
@@ -776,7 +833,7 @@ srpt_ioc_svc_bind(srpt_target_port_t *tgt, uint_t portnum)
 		    new_gid.gid_prefix != port->hwp_gid.gid_prefix) {
 			SRPT_DPRINTF_L2("ioc_svc_bind, unregister current"
 			    " bind");
-			ibt_unbind_service(tgt->tp_ibt_svc_hdl,
+			(void) ibt_unbind_service(tgt->tp_ibt_svc_hdl,
 			    port->hwp_bind_hdl);
 			port->hwp_bind_hdl = NULL;
 		}
@@ -795,6 +852,7 @@ srpt_ioc_svc_bind(srpt_target_port_t *tgt, uint_t portnum)
 		SRPT_DPRINTF_L1("ioc_svc_bind, bind error (%d)", status);
 		return (status);
 	}
+	tgt->tp_num_active_ports++;
 	port->hwp_gid.gid_prefix = new_gid.gid_prefix;
 	port->hwp_gid.gid_guid = new_gid.gid_guid;
 
@@ -816,6 +874,7 @@ srpt_ioc_svc_unbind(srpt_target_port_t *tgt, uint_t portnum)
 {
 	srpt_hw_port_t		*port;
 	srpt_session_t		sess;
+	ibt_status_t		ret;
 
 	if (tgt == NULL) {
 		SRPT_DPRINTF_L2("ioc_svc_unbind, SCSI target does not exist");
@@ -838,11 +897,18 @@ srpt_ioc_svc_unbind(srpt_target_port_t *tgt, uint_t portnum)
 
 	if (tgt->tp_ibt_svc_hdl != NULL && port->hwp_bind_hdl != NULL) {
 		SRPT_DPRINTF_L2("ioc_svc_unbind, unregister current bind");
-		ibt_unbind_service(tgt->tp_ibt_svc_hdl, port->hwp_bind_hdl);
+		ret = ibt_unbind_service(tgt->tp_ibt_svc_hdl,
+		    port->hwp_bind_hdl);
+		if (ret != IBT_SUCCESS) {
+			SRPT_DPRINTF_L1(
+			    "ioc_svc_unbind, unregister port %d failed: %d",
+			    portnum, ret);
+		} else {
+			port->hwp_bind_hdl = NULL;
+			port->hwp_gid.gid_prefix = 0;
+			port->hwp_gid.gid_guid = 0;
+		}
 	}
-	port->hwp_bind_hdl = NULL;
-	port->hwp_gid.gid_prefix = 0;
-	port->hwp_gid.gid_guid = 0;
 }
 
 /*

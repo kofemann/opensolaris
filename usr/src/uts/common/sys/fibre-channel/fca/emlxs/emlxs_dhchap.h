@@ -21,9 +21,8 @@
 
 /*
  * Copyright 2009 Emulex.  All rights reserved.
- * Use is subject to License terms.
+ * Use is subject to license terms.
  */
-
 
 #ifndef _EMLXS_DHCHAP_H
 #define	_EMLXS_DHCHAP_H
@@ -135,10 +134,6 @@ extern "C" {
 /* hash funcs hash length in byte */
 #define	SHA1_LEN		0x00000014	/* 20 bytes */
 #define	MD5_LEN			0x00000010	/* 16 bytes */
-
-/*
- * #define	AUTH_IKEv2		 0x04 #define	AUTH_IKEv2_AUTH	 0x05
- */
 
 #define	HBA_SECURITY			0x20
 

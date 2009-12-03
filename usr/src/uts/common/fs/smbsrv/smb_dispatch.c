@@ -135,7 +135,7 @@
  *			empty if an error.
  */
 
-#include <smbsrv/smb_incl.h>
+#include <smbsrv/smb_kproto.h>
 #include <smbsrv/smb_kstat.h>
 #include <sys/sdt.h>
 
@@ -1158,7 +1158,7 @@ smbsr_lookup_xa(smb_request_t *sr)
 }
 
 void
-smbsr_disconnect_file(smb_request_t *sr)
+smbsr_release_file(smb_request_t *sr)
 {
 	smb_ofile_t	*of = sr->fid_ofile;
 

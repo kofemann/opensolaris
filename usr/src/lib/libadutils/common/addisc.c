@@ -672,7 +672,7 @@ srv_query(res_state state, const char *svc_name, const char *dname,
 		char **rrname, uint32_t *ttl)
 {
 	idmap_ad_disc_ds_t *srv;
-	idmap_ad_disc_ds_t *srv_res;
+	idmap_ad_disc_ds_t *srv_res = NULL;
 	union {
 		HEADER hdr;
 		uchar_t buf[NS_MAXMSG];
@@ -708,11 +708,12 @@ srv_query(res_state state, const char *svc_name, const char *dname,
 			return (NULL);
 		}
 	} else if (dname != NULL) {
-		len = res_nquerydomain(state, svc_name, dname, C_IN, T_SRV,
-		    msg.buf, sizeof (msg.buf));
 		logger(LOG_DEBUG,
 		    "Querying DNS for SRV RRs named '%s' for '%s' ",
 		    svc_name, dname);
+
+		len = res_nquerydomain(state, svc_name, dname, C_IN, T_SRV,
+		    msg.buf, sizeof (msg.buf));
 
 		if (len < 0) {
 			logger(LOG_DEBUG,
@@ -747,6 +748,11 @@ srv_query(res_state state, const char *svc_name, const char *dname,
 	/* 3. walk through the answer section */
 
 	srv_res = calloc(ancount + 1, sizeof (idmap_ad_disc_ds_t));
+	if (srv_res == NULL) {
+		logger(LOG_ERR, "Out of memory");
+		return (NULL);
+	}
+
 	*ttl = (uint32_t)-1;
 
 	for (srv = srv_res, cnt = ancount;
@@ -756,10 +762,15 @@ srv_query(res_state state, const char *svc_name, const char *dname,
 		    sizeof (namebuf));
 		if (len < 0) {
 			logger(LOG_ERR, "DNS query invalid message format");
-			return (NULL);
+			goto err;
 		}
-		if (rrname != NULL && *rrname == NULL)
+		if (rrname != NULL && *rrname == NULL) {
 			*rrname = strdup(namebuf);
+			if (*rrname == NULL) {
+				logger(LOG_ERR, "Out of memory");
+				goto err;
+			}
+		}
 		ptr += len;
 		NS_GET16(type, ptr);
 		NS_GET16(class, ptr);
@@ -767,7 +778,7 @@ srv_query(res_state state, const char *svc_name, const char *dname,
 		NS_GET16(size, ptr);
 		if ((end = ptr + size) > eom) {
 			logger(LOG_ERR, "DNS query invalid message format");
-			return (NULL);
+			goto err;
 		}
 
 		if (type != T_SRV) {
@@ -782,7 +793,7 @@ srv_query(res_state state, const char *svc_name, const char *dname,
 		    sizeof (srv->host));
 		if (len < 0) {
 			logger(LOG_ERR, "DNS query invalid SRV record");
-			return (NULL);
+			goto err;
 		}
 
 		if (rttl < *ttl)
@@ -802,6 +813,14 @@ srv_query(res_state state, const char *svc_name, const char *dname,
 		    (int (*)(const void *, const void *))srvcmp);
 
 	return (srv_res);
+
+err:
+	free(srv_res);
+	if (rrname != NULL) {
+		free(*rrname);
+		*rrname = NULL;
+	}
+	return (NULL);
 }
 
 
@@ -833,7 +852,6 @@ ldap_lookup_init(idmap_ad_disc_ds_t *ds)
 		ldversion = LDAP_VERSION3;
 		(void) ldap_set_option(ld, LDAP_OPT_PROTOCOL_VERSION,
 		    &ldversion);
-
 		(void) ldap_set_option(ld, LDAP_OPT_REFERRALS,
 		    LDAP_OPT_OFF);
 		(void) ldap_set_option(ld, LDAP_OPT_TIMELIMIT, &zero);
@@ -843,6 +861,14 @@ ldap_lookup_init(idmap_ad_disc_ds_t *ds)
 		    &timeoutms);
 		(void) ldap_set_option(ld, LDAP_OPT_RESTART,
 		    LDAP_OPT_ON);
+
+		rc = adutils_set_thread_functions(ld);
+		if (rc != LDAP_SUCCESS) {
+			/* Error has already been logged */
+			(void) ldap_unbind(ld);
+			ld = NULL;
+			continue;
+		}
 
 		rc = ldap_sasl_interactive_bind_s(ld, "" /* binddn */,
 		    saslmech, NULL, NULL, saslflags, &saslcallback,
@@ -1037,6 +1063,7 @@ ldap_lookup_domains_in_forest(LDAP **ld, idmap_ad_disc_ds_t *globalCatalogs)
 		adutils_sid_t	sid;
 		char		*sid_str;
 		char 		*name;
+		char		*dn;
 
 		sid_ber = ldap_get_values_len(*ld, entry,
 		    "objectSid");
@@ -1054,7 +1081,9 @@ ldap_lookup_domains_in_forest(LDAP **ld, idmap_ad_disc_ds_t *globalCatalogs)
 		strcpy(domains[ndomains].sid, sid_str);
 		free(sid_str);
 
-		name = DN_to_DNS(ldap_get_dn(*ld, entry));
+		dn = ldap_get_dn(*ld, entry);
+		name = DN_to_DNS(dn);
+		free(dn);
 		if (name == NULL)
 			goto err;
 

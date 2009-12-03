@@ -35,7 +35,7 @@
 #include <sys/list.h>
 #include <sys/spa_impl.h>
 #include <sys/vdev_impl.h>
-#include <sys/zio_compress.h>
+#include <ctype.h>
 
 #ifndef _KERNEL
 #include "../genunix/list.h"
@@ -46,15 +46,6 @@
 #else
 #define	ZFS_OBJ_NAME	"libzpool.so.1"
 #endif
-
-static char *
-local_strdup(const char *s)
-{
-	char *s1 = mdb_alloc(strlen(s) + 1, UM_SLEEP);
-
-	(void) strcpy(s1, s);
-	return (s1);
-}
 
 static int
 getmember(uintptr_t addr, const char *type, mdb_ctf_id_t *idp,
@@ -127,27 +118,6 @@ getrefcount(uintptr_t addr, mdb_ctf_id_t *id,
 	off /= 8;
 
 	return (GETMEMBID(addr + off, &rc_id, rc_count, *rc));
-}
-
-static int
-read_symbol(char *sym_name, void **bufp)
-{
-	GElf_Sym sym;
-
-	if (mdb_lookup_by_obj(MDB_TGT_OBJ_EVERY, sym_name, &sym)) {
-		mdb_warn("can't find symbol %s", sym_name);
-		return (DCMD_ERR);
-	}
-
-	*bufp = mdb_alloc(sym.st_size, UM_SLEEP);
-
-	if (mdb_vread(*bufp, sym.st_size, sym.st_value) == -1) {
-		mdb_warn("can't read data for symbol %s", sym_name);
-		mdb_free(*bufp, sym.st_size);
-		return (DCMD_ERR);
-	}
-
-	return (DCMD_OK);
 }
 
 static int verbose;
@@ -241,7 +211,7 @@ static int
 objset_name(uintptr_t addr, char *buf)
 {
 	static int gotid;
-	static mdb_ctf_id_t osi_id, ds_id;
+	static mdb_ctf_id_t os_id, ds_id;
 	uintptr_t os_dsl_dataset;
 	char ds_snapname[MAXNAMELEN];
 	uintptr_t ds_dir;
@@ -249,9 +219,9 @@ objset_name(uintptr_t addr, char *buf)
 	buf[0] = '\0';
 
 	if (!gotid) {
-		if (mdb_ctf_lookup_by_name("struct objset_impl",
-		    &osi_id) == -1) {
-			mdb_warn("couldn't find struct objset_impl");
+		if (mdb_ctf_lookup_by_name("struct objset",
+		    &os_id) == -1) {
+			mdb_warn("couldn't find struct objset");
 			return (DCMD_ERR);
 		}
 		if (mdb_ctf_lookup_by_name("struct dsl_dataset",
@@ -263,7 +233,7 @@ objset_name(uintptr_t addr, char *buf)
 		gotid = TRUE;
 	}
 
-	if (GETMEMBID(addr, &osi_id, os_dsl_dataset, os_dsl_dataset))
+	if (GETMEMBID(addr, &os_id, os_dsl_dataset, os_dsl_dataset))
 		return (DCMD_ERR);
 
 	if (os_dsl_dataset == 0) {
@@ -304,30 +274,6 @@ enum_lookup(char *out, size_t size, mdb_ctf_id_t id, int val,
 
 /* ARGSUSED */
 static int
-zio_pipeline(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
-{
-	mdb_ctf_id_t pipe_enum;
-	int i;
-	char stage[1024];
-
-	if (mdb_ctf_lookup_by_name("enum zio_stage", &pipe_enum) == -1) {
-		mdb_warn("Could not find enum zio_stage");
-		return (DCMD_ERR);
-	}
-
-	for (i = 0; i < 32; i++) {
-		if (addr & (1U << i)) {
-			enum_lookup(stage, sizeof (stage), pipe_enum, i,
-			    "ZIO_STAGE_");
-			mdb_printf("    %s\n", stage);
-		}
-	}
-
-	return (DCMD_OK);
-}
-
-/* ARGSUSED */
-static int
 zfs_params(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 {
 	/*
@@ -350,9 +296,8 @@ zfs_params(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 		"metaslab_aliquot",
 		"reference_tracking_enable",
 		"reference_history",
-		"zio_taskq_threads",
 		"spa_max_replication_override",
-		"spa_mode",
+		"spa_mode_global",
 		"zfs_flags",
 		"zfs_txg_synctime",
 		"zfs_txg_timeout",
@@ -368,6 +313,8 @@ zfs_params(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 		"zfs_vdev_max_pending",
 		"zfs_vdev_min_pending",
 		"zfs_scrub_limit",
+		"zfs_no_scrub_io",
+		"zfs_no_scrub_prefetch",
 		"zfs_vdev_time_shift",
 		"zfs_vdev_ramp_rate",
 		"zfs_vdev_aggregation_limit",
@@ -382,9 +329,8 @@ zfs_params(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 		"zio_injection_enabled",
 		"zvol_immediate_write_sz",
 	};
-	int i;
 
-	for (i = 0; i < sizeof (params) / sizeof (params[0]); i++) {
+	for (int i = 0; i < sizeof (params) / sizeof (params[0]); i++) {
 		int sz;
 		uint64_t val64;
 		uint32_t *val32p = (uint32_t *)&val64;
@@ -406,73 +352,33 @@ zfs_params(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 static int
 blkptr(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 {
-	blkptr_t bp;
-	dmu_object_type_info_t *doti;
-	zio_compress_info_t *zct;
-	zio_checksum_info_t *zci;
-	int i;
-	char buf[MAXPATHLEN];
+	mdb_ctf_id_t type_enum, checksum_enum, compress_enum;
+	char type[80], checksum[80], compress[80];
+	blkptr_t blk, *bp = &blk;
+	char buf[BP_SPRINTF_LEN];
 
-	if (mdb_vread(&bp, sizeof (blkptr_t), addr) == -1) {
+	if (mdb_vread(&blk, sizeof (blkptr_t), addr) == -1) {
 		mdb_warn("failed to read blkptr_t");
 		return (DCMD_ERR);
 	}
 
-	if (read_symbol("dmu_ot", (void **)&doti) != DCMD_OK)
+	if (mdb_ctf_lookup_by_name("enum dmu_object_type", &type_enum) == -1 ||
+	    mdb_ctf_lookup_by_name("enum zio_checksum", &checksum_enum) == -1 ||
+	    mdb_ctf_lookup_by_name("enum zio_compress", &compress_enum) == -1) {
+		mdb_warn("Could not find blkptr enumerated types");
 		return (DCMD_ERR);
-	for (i = 0; i < DMU_OT_NUMTYPES; i++) {
-		mdb_readstr(buf, sizeof (buf), (uintptr_t)doti[i].ot_name);
-		doti[i].ot_name = local_strdup(buf);
 	}
 
-	if (read_symbol("zio_checksum_table", (void **)&zci) != DCMD_OK)
-		return (DCMD_ERR);
-	for (i = 0; i < ZIO_CHECKSUM_FUNCTIONS; i++) {
-		mdb_readstr(buf, sizeof (buf), (uintptr_t)zci[i].ci_name);
-		zci[i].ci_name = local_strdup(buf);
-	}
+	enum_lookup(type, sizeof (type), type_enum,
+	    BP_GET_TYPE(bp), "DMU_OT_");
+	enum_lookup(checksum, sizeof (checksum), checksum_enum,
+	    BP_GET_CHECKSUM(bp), "ZIO_CHECKSUM_");
+	enum_lookup(compress, sizeof (compress), compress_enum,
+	    BP_GET_COMPRESS(bp), "ZIO_COMPRESS_");
 
-	if (read_symbol("zio_compress_table", (void **)&zct) != DCMD_OK)
-		return (DCMD_ERR);
-	for (i = 0; i < ZIO_COMPRESS_FUNCTIONS; i++) {
-		mdb_readstr(buf, sizeof (buf), (uintptr_t)zct[i].ci_name);
-		zct[i].ci_name = local_strdup(buf);
-	}
+	SPRINTF_BLKPTR(mdb_snprintf, '\n', buf, bp, type, checksum, compress);
 
-	/*
-	 * Super-ick warning:  This code is also duplicated in
-	 * cmd/zdb.c .   Yeah, I hate code replication, too.
-	 */
-	for (i = 0; i < BP_GET_NDVAS(&bp); i++) {
-		dva_t *dva = &bp.blk_dva[i];
-
-		mdb_printf("DVA[%d]: vdev_id %lld / %llx\n", i,
-		    DVA_GET_VDEV(dva), DVA_GET_OFFSET(dva));
-		mdb_printf("DVA[%d]:       GANG: %-5s  GRID:  %04x\t"
-		    "ASIZE: %llx\n", i, DVA_GET_GANG(dva) ? "TRUE" : "FALSE",
-		    DVA_GET_GRID(dva), DVA_GET_ASIZE(dva));
-		mdb_printf("DVA[%d]: :%llu:%llx:%llx:%s%s%s%s\n", i,
-		    DVA_GET_VDEV(dva), DVA_GET_OFFSET(dva), BP_GET_PSIZE(&bp),
-		    BP_SHOULD_BYTESWAP(&bp) ? "e" : "",
-		    !DVA_GET_GANG(dva) && BP_GET_LEVEL(&bp) != 0 ? "i" : "",
-		    DVA_GET_GANG(dva) ? "g" : "",
-		    BP_GET_COMPRESS(&bp) != 0 ? "d" : "");
-	}
-	mdb_printf("LSIZE:  %-16llx\t\tPSIZE: %llx\n",
-	    BP_GET_LSIZE(&bp), BP_GET_PSIZE(&bp));
-	mdb_printf("ENDIAN: %6s\t\t\t\t\tTYPE:  %s\n",
-	    BP_GET_BYTEORDER(&bp) ? "LITTLE" : "BIG",
-	    doti[BP_GET_TYPE(&bp)].ot_name);
-	mdb_printf("BIRTH:  %-16llx   LEVEL: %-2d\tFILL:  %llx\n",
-	    bp.blk_birth, BP_GET_LEVEL(&bp), bp.blk_fill);
-	mdb_printf("CKFUNC: %-16s\t\tCOMP:  %s\n",
-	    zci[BP_GET_CHECKSUM(&bp)].ci_name,
-	    zct[BP_GET_COMPRESS(&bp)].ci_name);
-	mdb_printf("CKSUM:  %llx:%llx:%llx:%llx\n",
-	    bp.blk_cksum.zc_word[0],
-	    bp.blk_cksum.zc_word[1],
-	    bp.blk_cksum.zc_word[2],
-	    bp.blk_cksum.zc_word[3]);
+	mdb_printf("%s\n", buf);
 
 	return (DCMD_OK);
 }
@@ -2145,6 +2051,114 @@ zfs_blkstats(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	return (DCMD_OK);
 }
 
+/* ARGSUSED */
+static int
+reference_cb(uintptr_t addr, const void *ignored, void *arg)
+{
+	static int gotid;
+	static mdb_ctf_id_t ref_id;
+	uintptr_t ref_holder;
+	uintptr_t ref_removed;
+	uint64_t ref_number;
+	boolean_t holder_is_str;
+	char holder_str[128];
+	boolean_t removed = (boolean_t)arg;
+
+	if (!gotid) {
+		if (mdb_ctf_lookup_by_name("struct reference", &ref_id) == -1) {
+			mdb_warn("couldn't find struct reference");
+			return (WALK_ERR);
+		}
+		gotid = TRUE;
+	}
+
+	if (GETMEMBID(addr, &ref_id, ref_holder, ref_holder) ||
+	    GETMEMBID(addr, &ref_id, ref_removed, ref_removed) ||
+	    GETMEMBID(addr, &ref_id, ref_number, ref_number))
+		return (WALK_ERR);
+
+	if (mdb_readstr(holder_str, sizeof (holder_str), ref_holder) != -1) {
+		char *cp;
+		holder_is_str = B_TRUE;
+		for (cp = holder_str; *cp; cp++) {
+			if (!isprint(*cp)) {
+				holder_is_str = B_FALSE;
+				break;
+			}
+		}
+	} else {
+		holder_is_str = B_FALSE;
+	}
+
+	if (removed)
+		mdb_printf("removed ");
+	mdb_printf("reference ");
+	if (ref_number != 1)
+		mdb_printf("with count=%llu ", ref_number);
+	mdb_printf("with tag %p", (void*)ref_holder);
+	if (holder_is_str)
+		mdb_printf(" \"%s\"", holder_str);
+	mdb_printf(", held at:\n");
+
+	(void) mdb_call_dcmd("whatis", addr, DCMD_ADDRSPEC, 0, NULL);
+
+	if (removed) {
+		mdb_printf("removed at:\n");
+		(void) mdb_call_dcmd("whatis", ref_removed,
+		    DCMD_ADDRSPEC, 0, NULL);
+	}
+
+	mdb_printf("\n");
+
+	return (WALK_NEXT);
+}
+
+/* ARGSUSED */
+static int
+refcount(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
+{
+	uint64_t rc_count, rc_removed_count;
+	uintptr_t rc_list, rc_removed;
+	static int gotid;
+	static mdb_ctf_id_t rc_id;
+	ulong_t off;
+
+	if (!(flags & DCMD_ADDRSPEC))
+		return (DCMD_USAGE);
+
+	if (!gotid) {
+		if (mdb_ctf_lookup_by_name("struct refcount", &rc_id) == -1) {
+			mdb_warn("couldn't find struct refcount");
+			return (DCMD_ERR);
+		}
+		gotid = TRUE;
+	}
+
+	if (GETMEMBID(addr, &rc_id, rc_count, rc_count) ||
+	    GETMEMBID(addr, &rc_id, rc_removed_count, rc_removed_count))
+		return (DCMD_ERR);
+
+	mdb_printf("refcount_t at %p has %llu current holds, "
+	    "%llu recently released holds\n",
+	    addr, (longlong_t)rc_count, (longlong_t)rc_removed_count);
+
+	if (rc_count > 0)
+		mdb_printf("current holds:\n");
+	if (mdb_ctf_offsetof(rc_id, "rc_list", &off) == -1)
+		return (DCMD_ERR);
+	rc_list = addr + off/NBBY;
+	mdb_pwalk("list", reference_cb, (void*)B_FALSE, rc_list);
+
+	if (rc_removed_count > 0)
+		mdb_printf("released holds:\n");
+	if (mdb_ctf_offsetof(rc_id, "rc_removed", &off) == -1)
+		return (DCMD_ERR);
+	rc_removed = addr + off/NBBY;
+	mdb_pwalk("list", reference_cb, (void*)B_TRUE, rc_removed);
+
+	return (DCMD_OK);
+}
+
 /*
  * MDB module linkage information:
  *
@@ -2158,7 +2172,7 @@ static const mdb_dcmd_t dcmds[] = {
 	{ "dbuf", ":", "print dmu_buf_impl_t", dbuf },
 	{ "dbuf_stats", ":", "dbuf stats", dbuf_stats },
 	{ "dbufs",
-	    "\t[-O objset_impl_t*] [-n objset_name | \"mos\"] "
+	    "\t[-O objset_t*] [-n objset_name | \"mos\"] "
 	    "[-o object | \"mdn\"] \n"
 	    "\t[-l level] [-b blkid | \"bonus\"]",
 	    "find dmu_buf_impl_t's that match specified criteria", dbufs },
@@ -2181,11 +2195,11 @@ static const mdb_dcmd_t dcmds[] = {
 	    "zio_t summary", zio_print },
 	{ "zio_state", "?", "print out all zio_t structures on system or "
 	    "for a particular pool", zio_state },
-	{ "zio_pipeline", ":", "decode a zio pipeline", zio_pipeline },
 	{ "zfs_blkstats", ":[-v]",
 	    "given a spa_t, print block type stats from last scrub",
 	    zfs_blkstats },
 	{ "zfs_params", "", "print zfs tunable parameters", zfs_params },
+	{ "refcount", "", "print refcount_t holders", refcount },
 	{ NULL }
 };
 

@@ -87,18 +87,19 @@ ixgbe_ring_tx(void *arg, mblk_t *mp)
 	size_t mbsize;
 	int desc_num;
 	boolean_t copy_done, eop;
-	mblk_t *current_mp, *next_mp, *nmp;
+	mblk_t *current_mp, *next_mp, *nmp, *pull_mp = NULL;
 	tx_control_block_t *tcb;
 	ixgbe_tx_context_t tx_context, *ctx;
 	link_list_t pending_list;
 	uint32_t len, hdr_frag_len, hdr_len;
 	uint32_t copy_thresh;
-	mblk_t *new_mp;
-	mblk_t *pre_mp;
+	mblk_t *hdr_new_mp = NULL;
+	mblk_t *hdr_pre_mp = NULL;
+	mblk_t *hdr_nmp = NULL;
 
 	ASSERT(mp->b_next == NULL);
 
-	copy_thresh = tx_ring->copy_thresh;
+	copy_thresh = ixgbe->tx_copy_thresh;
 
 	/* Get the mblk size */
 	mbsize = 0;
@@ -138,7 +139,7 @@ ixgbe_ring_tx(void *arg, mblk_t *mp)
 	 * Check and recycle tx descriptors.
 	 * The recycle threshold here should be selected carefully
 	 */
-	if (tx_ring->tbd_free < tx_ring->recycle_thresh) {
+	if (tx_ring->tbd_free < ixgbe->tx_recycle_thresh) {
 		tx_ring->tx_recycle(tx_ring);
 	}
 
@@ -147,7 +148,7 @@ ixgbe_ring_tx(void *arg, mblk_t *mp)
 	 * overload_threshold, assert overload, return mp;
 	 * and we need to re-schedule the tx again.
 	 */
-	if (tx_ring->tbd_free < tx_ring->overload_thresh) {
+	if (tx_ring->tbd_free < ixgbe->tx_overload_thresh) {
 		tx_ring->reschedule = B_TRUE;
 		IXGBE_DEBUG_STAT(tx_ring->stat_overload);
 		return (mp);
@@ -172,13 +173,12 @@ ixgbe_ring_tx(void *arg, mblk_t *mp)
 		/* find the last fragment of the header */
 		len = MBLKL(mp);
 		ASSERT(len > 0);
-		nmp = mp;
-		pre_mp = NULL;
+		hdr_nmp = mp;
 		hdr_len = ctx->ip_hdr_len + ctx->mac_hdr_len + ctx->l4_hdr_len;
 		while (len < hdr_len) {
-			pre_mp = nmp;
-			nmp = nmp->b_cont;
-			len += MBLKL(nmp);
+			hdr_pre_mp = hdr_nmp;
+			hdr_nmp = hdr_nmp->b_cont;
+			len += MBLKL(hdr_nmp);
 		}
 		/*
 		 * If the header and the payload are in different mblks,
@@ -188,7 +188,7 @@ ixgbe_ring_tx(void *arg, mblk_t *mp)
 		if (len == hdr_len)
 			goto adjust_threshold;
 
-		hdr_frag_len = hdr_len - (len - MBLKL(nmp));
+		hdr_frag_len = hdr_len - (len - MBLKL(hdr_nmp));
 		/*
 		 * There are two cases we need to reallocate a mblk for the
 		 * last header fragment:
@@ -197,8 +197,8 @@ ixgbe_ring_tx(void *arg, mblk_t *mp)
 		 * 2. the header is in a single mblk shared with the payload
 		 * and the header is physical memory non-contiguous
 		 */
-		if ((nmp != mp) ||
-		    (P2NPHASE((uintptr_t)nmp->b_rptr, ixgbe->sys_page_size)
+		if ((hdr_nmp != mp) ||
+		    (P2NPHASE((uintptr_t)hdr_nmp->b_rptr, ixgbe->sys_page_size)
 		    < hdr_len)) {
 			IXGBE_DEBUG_STAT(tx_ring->stat_lso_header_fail);
 			/*
@@ -206,18 +206,19 @@ ixgbe_ring_tx(void *arg, mblk_t *mp)
 			 * expect to bcopy into pre-allocated page-aligned
 			 * buffer
 			 */
-			new_mp = allocb(hdr_frag_len, NULL);
-			if (!new_mp)
+			hdr_new_mp = allocb(hdr_frag_len, NULL);
+			if (!hdr_new_mp)
 				return (mp);
-			bcopy(nmp->b_rptr, new_mp->b_rptr, hdr_frag_len);
+			bcopy(hdr_nmp->b_rptr, hdr_new_mp->b_rptr,
+			    hdr_frag_len);
 			/* link the new header fragment with the other parts */
-			new_mp->b_wptr = new_mp->b_rptr + hdr_frag_len;
-			new_mp->b_cont = nmp;
-			if (pre_mp)
-				pre_mp->b_cont = new_mp;
-			nmp->b_rptr += hdr_frag_len;
-			if (hdr_frag_len == hdr_len)
-				mp = new_mp;
+			hdr_new_mp->b_wptr = hdr_new_mp->b_rptr + hdr_frag_len;
+			hdr_new_mp->b_cont = hdr_nmp;
+			if (hdr_pre_mp)
+				hdr_pre_mp->b_cont = hdr_new_mp;
+			else
+				mp = hdr_new_mp;
+			hdr_nmp->b_rptr += hdr_frag_len;
 		}
 adjust_threshold:
 		/*
@@ -400,34 +401,69 @@ adjust_threshold:
 		/*
 		 * pull up the mblk and send it out with bind way
 		 */
-		if ((nmp = msgpullup(mp, -1)) == NULL) {
-			freemsg(mp);
-			return (NULL);
-		} else {
-			freemsg(mp);
-			mp = nmp;
+		if ((pull_mp = msgpullup(mp, -1)) == NULL) {
+			tx_ring->reschedule = B_TRUE;
+
+			/*
+			 * If new mblk has been allocted for the last header
+			 * fragment of a LSO packet, we should restore the
+			 * modified mp.
+			 */
+			if (hdr_new_mp) {
+				hdr_new_mp->b_cont = NULL;
+				freeb(hdr_new_mp);
+				hdr_nmp->b_rptr -= hdr_frag_len;
+				if (hdr_pre_mp)
+					hdr_pre_mp->b_cont = hdr_nmp;
+				else
+					mp = hdr_nmp;
+			}
+			return (mp);
 		}
 
 		LINK_LIST_INIT(&pending_list);
+		desc_total = 0;
+
+		/*
+		 * if the packet is a LSO packet, we simply
+		 * transmit the header in one descriptor using the copy way
+		 */
+		if ((ctx != NULL) && ctx->lso_flag) {
+			hdr_len = ctx->ip_hdr_len + ctx->mac_hdr_len +
+			    ctx->l4_hdr_len;
+
+			tcb = ixgbe_get_free_list(tx_ring);
+			if (tcb == NULL) {
+				IXGBE_DEBUG_STAT(tx_ring->stat_fail_no_tcb);
+				goto tx_failure;
+			}
+			desc_num = ixgbe_tx_copy(tx_ring, tcb, pull_mp,
+			    hdr_len, B_TRUE);
+			LIST_PUSH_TAIL(&pending_list, &tcb->link);
+			desc_total  += desc_num;
+
+			pull_mp->b_rptr += hdr_len;
+		}
+
 		tcb = ixgbe_get_free_list(tx_ring);
 		if (tcb == NULL) {
 			IXGBE_DEBUG_STAT(tx_ring->stat_fail_no_tcb);
-			freemsg(mp);
-			return (NULL);
+			goto tx_failure;
+		}
+		if ((ctx != NULL) && ctx->lso_flag) {
+			desc_num = ixgbe_tx_bind(tx_ring, tcb, pull_mp,
+			    mbsize - hdr_len);
+		} else {
+			desc_num = ixgbe_tx_bind(tx_ring, tcb, pull_mp,
+			    mbsize);
+		}
+		if (desc_num < 0) {
+			goto tx_failure;
 		}
 		LIST_PUSH_TAIL(&pending_list, &tcb->link);
 
-		desc_num = ixgbe_tx_bind(tx_ring, tcb, mp, mbsize);
-		if ((desc_num < 0) ||
-		    ((desc_num + 1) > IXGBE_TX_DESC_LIMIT)) {
-			ixgbe_free_tcb(tcb);
-			ixgbe_put_free_list(tx_ring, &pending_list);
-			freemsg(mp);
-			return (NULL);
-		}
-
-		desc_total = desc_num;
-		tcb->mp = mp;
+		desc_total += desc_num;
+		tcb->mp = pull_mp;
 	}
 
 	/*
@@ -440,7 +476,6 @@ adjust_threshold:
 	}
 
 	mutex_enter(&tx_ring->tx_lock);
-
 	/*
 	 * If the number of free tx descriptors is not enough for transmit
 	 * then return mp.
@@ -462,9 +497,38 @@ adjust_threshold:
 
 	mutex_exit(&tx_ring->tx_lock);
 
+	/*
+	 * now that the transmission succeeds, need to free the original
+	 * mp if we used the pulling up mblk for transmission.
+	 */
+	if (pull_mp) {
+		freemsg(mp);
+	}
+
 	return (NULL);
 
 tx_failure:
+	/*
+	 * If transmission fails, need to free the pulling up mblk.
+	 */
+	if (pull_mp) {
+		freemsg(pull_mp);
+	}
+
+	/*
+	 * If new mblk has been allocted for the last header
+	 * fragment of a LSO packet, we should restore the
+	 * modified mp.
+	 */
+	if (hdr_new_mp) {
+		hdr_new_mp->b_cont = NULL;
+		freeb(hdr_new_mp);
+		hdr_nmp->b_rptr -= hdr_frag_len;
+		if (hdr_pre_mp)
+			hdr_pre_mp->b_cont = hdr_nmp;
+		else
+			mp = hdr_nmp;
+	}
 	/*
 	 * Discard the mblk and free the used resources
 	 */
@@ -1126,6 +1190,7 @@ ixgbe_tx_recycle_legacy(ixgbe_tx_ring_t *tx_ring)
 	boolean_t desc_done;
 	tx_control_block_t *tcb;
 	link_list_t pending_list;
+	ixgbe_t *ixgbe = tx_ring->ixgbe;
 
 	mutex_enter(&tx_ring->recycle_lock);
 
@@ -1136,7 +1201,7 @@ ixgbe_tx_recycle_legacy(ixgbe_tx_ring_t *tx_ring)
 		tx_ring->stall_watchdog = 0;
 		if (tx_ring->reschedule) {
 			tx_ring->reschedule = B_FALSE;
-			mac_tx_ring_update(tx_ring->ixgbe->mac_hdl,
+			mac_tx_ring_update(ixgbe->mac_hdl,
 			    tx_ring->ring_handle);
 		}
 		mutex_exit(&tx_ring->recycle_lock);
@@ -1149,8 +1214,7 @@ ixgbe_tx_recycle_legacy(ixgbe_tx_ring_t *tx_ring)
 	DMA_SYNC(&tx_ring->tbd_area, DDI_DMA_SYNC_FORKERNEL);
 
 	if (ixgbe_check_dma_handle(tx_ring->tbd_area.dma_handle) != DDI_FM_OK) {
-		ddi_fm_service_impact(tx_ring->ixgbe->dip,
-		    DDI_SERVICE_DEGRADED);
+		ddi_fm_service_impact(ixgbe->dip, DDI_SERVICE_DEGRADED);
 	}
 
 	LINK_LIST_INIT(&pending_list);
@@ -1240,10 +1304,10 @@ ixgbe_tx_recycle_legacy(ixgbe_tx_ring_t *tx_ring)
 	 */
 	atomic_add_32(&tx_ring->tbd_free, desc_num);
 
-	if ((tx_ring->tbd_free >= tx_ring->resched_thresh) &&
+	if ((tx_ring->tbd_free >= ixgbe->tx_resched_thresh) &&
 	    (tx_ring->reschedule)) {
 		tx_ring->reschedule = B_FALSE;
-		mac_tx_ring_update(tx_ring->ixgbe->mac_hdl,
+		mac_tx_ring_update(ixgbe->mac_hdl,
 		    tx_ring->ring_handle);
 	}
 	mutex_exit(&tx_ring->recycle_lock);
@@ -1285,11 +1349,8 @@ ixgbe_tx_recycle_head_wb(ixgbe_tx_ring_t *tx_ring)
 	int desc_num;
 	tx_control_block_t *tcb;
 	link_list_t pending_list;
+	ixgbe_t *ixgbe = tx_ring->ixgbe;
 
-	/*
-	 * The mutex_tryenter() is used to avoid unnecessary
-	 * lock contention.
-	 */
 	mutex_enter(&tx_ring->recycle_lock);
 
 	ASSERT(tx_ring->tbd_free <= tx_ring->ring_size);
@@ -1299,7 +1360,7 @@ ixgbe_tx_recycle_head_wb(ixgbe_tx_ring_t *tx_ring)
 		tx_ring->stall_watchdog = 0;
 		if (tx_ring->reschedule) {
 			tx_ring->reschedule = B_FALSE;
-			mac_tx_ring_update(tx_ring->ixgbe->mac_hdl,
+			mac_tx_ring_update(ixgbe->mac_hdl,
 			    tx_ring->ring_handle);
 		}
 		mutex_exit(&tx_ring->recycle_lock);
@@ -1322,7 +1383,7 @@ ixgbe_tx_recycle_head_wb(ixgbe_tx_ring_t *tx_ring)
 	    DDI_DMA_SYNC_FORKERNEL);
 
 	if (ixgbe_check_dma_handle(tx_ring->tbd_area.dma_handle) != DDI_FM_OK) {
-		ddi_fm_service_impact(tx_ring->ixgbe->dip,
+		ddi_fm_service_impact(ixgbe->dip,
 		    DDI_SERVICE_DEGRADED);
 	}
 
@@ -1387,10 +1448,10 @@ ixgbe_tx_recycle_head_wb(ixgbe_tx_ring_t *tx_ring)
 	 */
 	atomic_add_32(&tx_ring->tbd_free, desc_num);
 
-	if ((tx_ring->tbd_free >= tx_ring->resched_thresh) &&
+	if ((tx_ring->tbd_free >= ixgbe->tx_resched_thresh) &&
 	    (tx_ring->reschedule)) {
 		tx_ring->reschedule = B_FALSE;
-		mac_tx_ring_update(tx_ring->ixgbe->mac_hdl,
+		mac_tx_ring_update(ixgbe->mac_hdl,
 		    tx_ring->ring_handle);
 	}
 	mutex_exit(&tx_ring->recycle_lock);

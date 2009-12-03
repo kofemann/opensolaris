@@ -43,6 +43,7 @@ typedef struct {
 	char	*s_buf;
 	const char **s_fields;	/* array of pointers to the fields in s_buf */
 	uint_t	s_nfields;	/* the number of fields in s_buf */
+	uint_t	s_currfield;	/* the current field being processed */
 } split_t;
 static void splitfree(split_t *);
 static split_t *split_str(const char *, uint_t);
@@ -62,8 +63,11 @@ typedef struct ofmt_state_s {
 	struct winsize	os_winsize;
 	int		os_nrow;
 	boolean_t	os_parsable;
+	boolean_t	os_wrap;
 	int		os_nbad;
 	char		**os_badfields;
+	boolean_t	os_multiline;
+	int		os_maxnamelen;	/* longest name (f. multiline) */
 } ofmt_state_t;
 /*
  * A B_TRUE return value from the callback function will print out the contents
@@ -74,6 +78,12 @@ typedef struct ofmt_state_s {
  */
 #define	OFMT_VAL_UNDEF		"--"
 #define	OFMT_VAL_UNKNOWN	"?"
+
+/*
+ * The maximum number of rows supported by the OFMT_WRAP option.
+ */
+#define	OFMT_MAX_ROWS		128
+
 static void ofmt_print_header(ofmt_state_t *);
 static void ofmt_print_field(ofmt_state_t *, ofmt_field_t *, const char *,
     boolean_t);
@@ -167,19 +177,24 @@ splitfree(split_t *sp)
  * Open a handle to be used for printing formatted output.
  */
 ofmt_status_t
-ofmt_open(const char *str, ofmt_field_t *template, uint_t flags,
+ofmt_open(const char *str, const ofmt_field_t *template, uint_t flags,
     uint_t maxcols, ofmt_handle_t *ofmt)
 {
 	split_t		*sp;
 	uint_t		i, j, of_index;
+	const ofmt_field_t *ofp;
 	ofmt_field_t	*of;
 	ofmt_state_t	*os;
 	int		nfields = 0;
 	ofmt_status_t	err = OFMT_SUCCESS;
-	boolean_t	parsable = (flags & OFMT_PARSABLE);
+	boolean_t	parsable = ((flags & OFMT_PARSABLE) != 0);
+	boolean_t	wrap = ((flags & OFMT_WRAP) != 0);
+	boolean_t	multiline = (flags & OFMT_MULTILINE);
 
 	*ofmt = NULL;
 	if (parsable) {
+		if (multiline)
+			return (OFMT_EPARSEMULTI);
 		/*
 		 * For parsable output mode, the caller always needs
 		 * to specify precisely which fields are to be selected,
@@ -189,10 +204,12 @@ ofmt_open(const char *str, ofmt_field_t *template, uint_t flags,
 			return (OFMT_EPARSENONE);
 		if (strcmp(str, "all") == 0)
 			return (OFMT_EPARSEALL);
+		if (wrap)
+			return (OFMT_EPARSEWRAP);
 	}
 	if (template == NULL)
 		return (OFMT_ENOTEMPLATE);
-	for (of = template; of->of_name != NULL; of++)
+	for (ofp = template; ofp->of_name != NULL; ofp++)
 		nfields++;
 	/*
 	 * split str into the columns selected, or construct the
@@ -215,6 +232,9 @@ ofmt_open(const char *str, ofmt_field_t *template, uint_t flags,
 	*ofmt = os;
 	os->os_fields = (ofmt_field_t *)&os[1];
 	os->os_parsable = parsable;
+	os->os_wrap = wrap;
+
+	os->os_multiline = multiline;
 	of = os->os_fields;
 	of_index = 0;
 	/*
@@ -246,6 +266,11 @@ ofmt_open(const char *str, ofmt_field_t *template, uint_t flags,
 		of[of_index].of_name = strdup(template[j].of_name);
 		if (of[of_index].of_name == NULL)
 			goto nomem;
+		if (multiline) {
+			int n = strlen(of[of_index].of_name);
+
+			os->os_maxnamelen = MAX(n, os->os_maxnamelen);
+		}
 		of[of_index].of_width = template[j].of_width;
 		of[of_index].of_id = template[j].of_id;
 		of[of_index].of_cb = template[j].of_cb;
@@ -296,14 +321,13 @@ ofmt_print_field(ofmt_state_t *os, ofmt_field_t *ofp, const char *value,
 	uint_t	width = ofp->of_width;
 	uint_t	valwidth;
 	uint_t	compress;
-	boolean_t parsable = os->os_parsable;
 	char	c;
 
 	/*
 	 * Parsable fields are separated by ':'. If such a field contains
 	 * a ':' or '\', this character is prefixed by a '\'.
 	 */
-	if (parsable) {
+	if (os->os_parsable) {
 		if (os->os_nfields == 1) {
 			(void) printf("%s", value);
 			return;
@@ -315,10 +339,14 @@ ofmt_print_field(ofmt_state_t *os, ofmt_field_t *ofp, const char *value,
 		}
 		if (!os->os_lastfield)
 			(void) putchar(':');
-		return;
-	} else {
+	} else if (os->os_multiline) {
 		if (value[0] == '\0')
 			value = OFMT_VAL_UNDEF;
+		(void) printf("%*.*s: %s", os->os_maxnamelen,
+		    os->os_maxnamelen, ofp->of_name, value);
+		if (!os->os_lastfield)
+			(void) putchar('\n');
+	} else {
 		if (os->os_lastfield) {
 			(void) printf("%s", value);
 			os->os_overflow = 0;
@@ -342,7 +370,42 @@ ofmt_print_field(ofmt_state_t *os, ofmt_field_t *ofp, const char *value,
 }
 
 /*
- * print one row of output values for the selected columns.
+ * Print enough to fit the field width.
+ */
+static void
+ofmt_fit_width(split_t **spp, uint_t width, char *value, uint_t bufsize)
+{
+	split_t		*sp = *spp;
+	char		*ptr = value, *lim = ptr + bufsize;
+	int		i, nextlen;
+
+	if (sp == NULL) {
+		sp = split_str(value, OFMT_MAX_ROWS);
+		if (sp == NULL)
+			return;
+
+		*spp = sp;
+	}
+	for (i = sp->s_currfield; i < sp->s_nfields; i++) {
+		ptr += snprintf(ptr, lim - ptr, "%s,", sp->s_fields[i]);
+		if (i + 1 == sp->s_nfields) {
+			nextlen = 0;
+			if (ptr > value)
+				ptr[-1] = '\0';
+		} else {
+			nextlen = strlen(sp->s_fields[i + 1]);
+		}
+
+		if (strlen(value) + nextlen > width || ptr >= lim) {
+			i++;
+			break;
+		}
+	}
+	sp->s_currfield = i;
+}
+
+/*
+ * Print one or more rows of output values for the selected columns.
  */
 void
 ofmt_print(ofmt_handle_t ofmt, void *arg)
@@ -351,28 +414,78 @@ ofmt_print(ofmt_handle_t ofmt, void *arg)
 	int i;
 	char value[1024];
 	ofmt_field_t *of;
-	boolean_t escsep;
+	boolean_t escsep, more_rows;
 	ofmt_arg_t ofarg;
+	split_t **sp = NULL;
 
-	if ((os->os_nrow++ % os->os_winsize.ws_row) == 0 && !os->os_parsable) {
+	if (os->os_wrap) {
+		sp = calloc(sizeof (split_t *), os->os_nfields);
+		if (sp == NULL)
+			return;
+	}
+
+	if ((os->os_nrow++ % os->os_winsize.ws_row) == 0 && !os->os_parsable &&
+	    !os->os_multiline) {
 		ofmt_print_header(os);
 		os->os_nrow++;
 	}
 
+	if (os->os_multiline && os->os_nrow > 1)
+		(void) putchar('\n');
+
 	of = os->os_fields;
 	escsep = (os->os_nfields > 1);
+	more_rows = B_FALSE;
 	for (i = 0; i < os->os_nfields; i++) {
 		os->os_lastfield = (i + 1 == os->os_nfields);
 		value[0] = '\0';
 		ofarg.ofmt_id = of[i].of_id;
 		ofarg.ofmt_cbarg = arg;
-		if ((*of[i].of_cb)(&ofarg, value, sizeof (value)))
-			ofmt_print_field(os, &of[i], value, escsep);
-		else
+
+		if ((*of[i].of_cb)(&ofarg, value, sizeof (value))) {
+			if (os->os_wrap) {
+				/*
+				 * 'value' will be split at comma boundaries
+				 * and stored into sp[i].
+				 */
+				ofmt_fit_width(&sp[i], of[i].of_width, value,
+				    sizeof (value));
+				if (sp[i] != NULL &&
+				    sp[i]->s_currfield < sp[i]->s_nfields)
+					more_rows = B_TRUE;
+			}
+			ofmt_print_field(os, &of[i],
+			    (*value == '\0' && !os->os_parsable) ?
+			    OFMT_VAL_UNDEF : value, escsep);
+		} else {
 			ofmt_print_field(os, &of[i], OFMT_VAL_UNKNOWN, escsep);
+		}
 	}
 	(void) putchar('\n');
+
+	while (more_rows) {
+		more_rows = B_FALSE;
+		for (i = 0; i < os->os_nfields; i++) {
+			os->os_lastfield = (i + 1 == os->os_nfields);
+			value[0] = '\0';
+
+			ofmt_fit_width(&sp[i], of[i].of_width,
+			    value, sizeof (value));
+			if (sp[i] != NULL &&
+			    sp[i]->s_currfield < sp[i]->s_nfields)
+				more_rows = B_TRUE;
+
+			ofmt_print_field(os, &of[i], value, escsep);
+		}
+		(void) putchar('\n');
+	}
 	(void) fflush(stdout);
+
+	if (sp != NULL) {
+		for (i = 0; i < os->os_nfields; i++)
+			splitfree(sp[i]);
+		free(sp);
+	}
 }
 
 /*
@@ -456,11 +569,17 @@ ofmt_strerror(ofmt_handle_t ofmt, ofmt_status_t err, char *buf, uint_t bufsize)
 	case OFMT_ENOFIELDS:
 		s = "no valid output fields";
 		break;
+	case OFMT_EPARSEMULTI:
+		s = "multiline mode incompatible with parsable mode";
+		break;
 	case OFMT_EPARSEALL:
 		s = "output field `all' invalid in parsable mode";
 		break;
 	case OFMT_EPARSENONE:
 		s = "output fields must be specified in parsable mode";
+		break;
+	case OFMT_EPARSEWRAP:
+		s = "parsable mode is incompatible with wrap mode";
 		break;
 	case OFMT_ENOTEMPLATE:
 		s = "no template provided for fields";

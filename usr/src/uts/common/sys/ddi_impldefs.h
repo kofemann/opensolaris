@@ -39,7 +39,12 @@
 #include <sys/epm.h>
 #include <sys/ddidmareq.h>
 #include <sys/ddi_intr.h>
+#include <sys/ddi_hp.h>
+#include <sys/ddi_hp_impl.h>
 #include <sys/ddi_isa.h>
+#include <sys/id_space.h>
+#include <sys/modhash.h>
+#include <sys/bitset.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -66,12 +71,12 @@ typedef enum {
  * Definitions for generic callback mechanism.
  */
 typedef enum {
-	DDI_CB_INTR_ADD,
-	DDI_CB_INTR_REMOVE
+	DDI_CB_INTR_ADD,		/* More available interrupts */
+	DDI_CB_INTR_REMOVE		/* Fewer available interrupts */
 } ddi_cb_action_t;
 
 typedef enum {
-	DDI_CB_FLAG_INTR = 0x1
+	DDI_CB_FLAG_INTR = 0x1		/* Driver is IRM aware */
 } ddi_cb_flags_t;
 
 #define	DDI_CB_FLAG_VALID(f)	((f) & DDI_CB_FLAG_INTR)
@@ -105,7 +110,7 @@ typedef struct devi_port {
 		} port;
 		uint64_t type64;
 	} info;
-	void	 *priv_p;
+	void	*priv_p;
 } devi_port_t;
 
 typedef struct devi_bus_priv {
@@ -116,6 +121,7 @@ typedef struct devi_bus_priv {
 struct iommulib_unit;
 typedef struct iommulib_unit *iommulib_handle_t;
 typedef uint8_t	ndi_flavor_t;
+struct ddi_hp_cn_handle;
 
 struct dev_info  {
 
@@ -145,7 +151,7 @@ struct dev_info  {
 	struct dev_info *devi_next;	/* Next instance of this device */
 	kmutex_t devi_lock;		/* Protects per-devinfo data */
 
-	/* logical parents for busop primitives	 */
+	/* logical parents for busop primitives */
 
 	struct dev_info *devi_bus_map_fault;	/* bus_map_fault parent	 */
 	struct dev_info *devi_bus_dma_map;	/* bus_dma_map parent	 */
@@ -228,8 +234,8 @@ struct dev_info  {
 
 	uint_t		devi_cpr_flags;
 
-	/* For interrupt support */
-	devinfo_intr_t		*devi_intr_p;
+	/* Owned by DDI interrupt framework */
+	devinfo_intr_t	*devi_intr_p;
 
 	void		*devi_nex_pm;		/* nexus PM private */
 
@@ -264,6 +270,9 @@ struct dev_info  {
 	ndi_flavor_t	devi_flavor;		/* flavor assigned by parent */
 	ndi_flavor_t	devi_flavorv_n;		/* number of child-flavors */
 	void		**devi_flavorv;		/* child-flavor specific data */
+
+	/* Owned by hotplug framework */
+	struct ddi_hp_cn_handle *devi_hp_hdlp;   /* hotplug handle list */
 };
 
 #define	DEVI(dev_info_type)	((struct dev_info *)(dev_info_type))
@@ -395,12 +404,13 @@ struct dev_info  {
 
 #define	DEVI_SET_DEVICE_REMOVED(dip)	{				\
 	ASSERT(mutex_owned(&DEVI(dip)->devi_lock));			\
-	DEVI(dip)->devi_state |= DEVI_DEVICE_REMOVED;			\
+	DEVI(dip)->devi_state |= DEVI_DEVICE_REMOVED | DEVI_S_REPORT;	\
 	}
 
 #define	DEVI_SET_DEVICE_REINSERTED(dip)	{				\
 	ASSERT(mutex_owned(&DEVI(dip)->devi_lock));			\
 	DEVI(dip)->devi_state &= ~DEVI_DEVICE_REMOVED;			\
+	DEVI(dip)->devi_state |= DEVI_S_REPORT;				\
 	}
 
 /* Bus state change macros */
@@ -691,11 +701,14 @@ struct ddi_minor {
  *
  * DDI_HIDDEN_NODE indicates that the node should not show up in snapshots
  * or in /devices.
+ *
+ * DDI_HOTPLUG_NODE indicates that the node created by nexus hotplug.
  */
 #define	DDI_PERSISTENT			0x01
 #define	DDI_AUTO_ASSIGNED_NODEID	0x02
 #define	DDI_VHCI_NODE			0x04
 #define	DDI_HIDDEN_NODE			0x08
+#define	DDI_HOTPLUG_NODE		0x10
 
 #define	DEVI_VHCI_NODE(dip)						\
 	(DEVI(dip)->devi_node_attributes & DDI_VHCI_NODE)
@@ -741,16 +754,37 @@ struct ddi_parent_private_data {
 #define	sparc_pd_getintr(dev, n)	(&DEVI_PD(dev)->par_intr[(n)])
 #define	sparc_pd_getrng(dev, n)		(&DEVI_PD(dev)->par_rng[(n)])
 
+#ifdef _KERNEL
 /*
- * This data structure is entirely private to the soft state allocator.
+ * This data structure is private to the indexed soft state allocator.
  */
-struct i_ddi_soft_state {
+typedef struct i_ddi_soft_state {
 	void		**array;	/* the array of pointers */
-	kmutex_t	lock;	/* serialize access to this struct */
-	size_t		size;	/* how many bytes per state struct */
+	kmutex_t	lock;		/* serialize access to this struct */
+	size_t		size;		/* how many bytes per state struct */
 	size_t		n_items;	/* how many structs herein */
 	struct i_ddi_soft_state *next;	/* 'dirty' elements */
-};
+} i_ddi_soft_state;
+
+/*
+ * This data structure is private to the stringhashed soft state allocator.
+ */
+typedef struct i_ddi_soft_state_bystr {
+	size_t		ss_size;	/* how many bytes per state struct */
+	mod_hash_t	*ss_mod_hash;	/* hash implementation */
+} i_ddi_soft_state_bystr;
+
+/*
+ * This data structure is private to the ddi_strid_* implementation
+ */
+typedef struct i_ddi_strid {
+	size_t		strid_chunksz;
+	size_t		strid_spacesz;
+	id_space_t	*strid_space;
+	mod_hash_t	*strid_byid;
+	mod_hash_t	*strid_bystr;
+} i_ddi_strid;
+#endif /* _KERNEL */
 
 /*
  * Solaris DDI DMA implementation structure and function definitions.

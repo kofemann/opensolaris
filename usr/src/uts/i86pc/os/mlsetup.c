@@ -49,10 +49,10 @@
 #include <sys/machsystm.h>
 #include <sys/ontrap.h>
 #include <sys/bootconf.h>
+#include <sys/boot_console.h>
 #include <sys/kdi_machimpl.h>
 #include <sys/archsystm.h>
 #include <sys/promif.h>
-#include <sys/bootconf.h>
 #include <sys/pci_cfgspace.h>
 #ifdef __xpv
 #include <sys/hypervisor.h>
@@ -78,6 +78,21 @@ static unsigned char dummy_cpu_pri[MAXIPL + 1] = {
 	0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf, 0xf
 };
 
+/*
+ * Set console mode
+ */
+static void
+set_console_mode(uint8_t val)
+{
+	struct bop_regs rp = {0};
+
+	rp.eax.byte.ah = 0x0;
+	rp.eax.byte.al = val;
+	rp.ebx.word.bx = 0x0;
+
+	BOP_DOINT(bootops, 0x10, &rp);
+}
+
 
 /*
  * Setup routine called right before main(). Interposing this function
@@ -90,6 +105,8 @@ mlsetup(struct regs *rp)
 	extern struct classfuncs sys_classfuncs;
 	extern disp_t cpu0_disp;
 	extern char t0stack[];
+	extern int post_fastreboot;
+	extern int console;
 
 	ASSERT_STACK_ALIGNED();
 
@@ -138,6 +155,22 @@ mlsetup(struct regs *rp)
 		cpuid_feature_edx_exclude = (uint32_t)prop_value;
 
 	/*
+	 * Initialize idt0, gdt0, ldt0_default, ktss0 and dftss.
+	 */
+	init_desctbls();
+
+	/*
+	 * lgrp_init() and possibly cpuid_pass1() need PCI config
+	 * space access
+	 */
+#if defined(__xpv)
+	if (DOMAIN_IS_INITDOMAIN(xen_info))
+		pci_cfgspace_init();
+#else
+	pci_cfgspace_init();
+#endif
+
+	/*
 	 * The first lightweight pass (pass0) through the cpuid data
 	 * was done in locore before mlsetup was called.  Do the next
 	 * pass in C code.
@@ -149,11 +182,6 @@ mlsetup(struct regs *rp)
 	 * minimum) this value may be altered.
 	 */
 	x86_feature = cpuid_pass1(cpu[0]);
-
-	/*
-	 * Initialize idt0, gdt0, ldt0_default, ktss0 and dftss.
-	 */
-	init_desctbls();
 
 #if !defined(__xpv)
 
@@ -304,6 +332,13 @@ mlsetup(struct regs *rp)
 		kdi_idt_sync();
 
 	/*
+	 * Explicitly set console to text mode (0x3) if this is a boot
+	 * post Fast Reboot, and the console is set to CONS_SCREEN_TEXT.
+	 */
+	if (post_fastreboot && console == CONS_SCREEN_TEXT)
+		set_console_mode(0x3);
+
+	/*
 	 * If requested (boot -d) drop into kmdb.
 	 *
 	 * This must be done after cpu_list_init() on the 64-bit kernel
@@ -314,14 +349,6 @@ mlsetup(struct regs *rp)
 		kmdb_enter();
 
 	cpu_vm_data_init(CPU);
-
-	/* lgrp_init() needs PCI config space access */
-#if defined(__xpv)
-	if (DOMAIN_IS_INITDOMAIN(xen_info))
-		pci_cfgspace_init();
-#else
-	pci_cfgspace_init();
-#endif
 
 	rp->r_fp = 0;	/* terminate kernel stack traces! */
 
@@ -340,7 +367,7 @@ mlsetup(struct regs *rp)
 	/*
 	 * Initialize the lgrp framework
 	 */
-	lgrp_init();
+	lgrp_init(LGRP_INIT_STAGE1);
 
 	if (boothowto & RB_HALT) {
 		prom_printf("unix: kernel halted by -h flag\n");

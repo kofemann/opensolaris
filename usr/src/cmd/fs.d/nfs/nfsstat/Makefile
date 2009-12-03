@@ -33,7 +33,15 @@ COMMON=	nfs_sec.o nfsstat_layout.o
 OBJS=	nfsstat.o $(COMMON)
 SRCS=	nfsstat.c nfsstat_layout.c ../lib/nfs_sec.c
 
-LDLIBS += -lkstat -lnsl 
+STATCOMMONDIR = $(SRC)/cmd/stat/common
+
+STAT_COMMON_OBJS = timestamp.o
+STAT_COMMON_SRCS = $(STAT_COMMON_OBJS:%.o=$(STATCOMMONDIR)/%.c)
+SRCS += $(STAT_COMMON_SRCS)
+OBJS += $(STAT_COMMON_OBJS)
+
+CPPFLAGS += -I$(STATCOMMONDIR)
+LDLIBS += -lkstat -lnsl
 
 $(PROG):	$(OBJS)
 		$(LINK.c) -o $@ $(LDLIBS) $(OBJS)
@@ -47,6 +55,9 @@ all:		$(PROG)
 
 nfs_sec.o:	../lib/nfs_sec.c
 		$(COMPILE.c) ../lib/nfs_sec.c
+
+%.o:    $(STATCOMMONDIR)/%.c
+	$(COMPILE.c) $<
 
 nfsstat_layout.o:nfsstat_layout.c
 		$(COMPILE.c) nfsstat_layout.c

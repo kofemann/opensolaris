@@ -27,7 +27,7 @@ PROG= bootadm
 
 SBINLINKS= $(PROG)
 
-OBJS= bootadm.o bootadm_upgrade.o
+OBJS= bootadm.o bootadm_upgrade.o bootadm_hyper.o
 SRCS = $(OBJS:.o=.c)
 
 include ../Makefile.com
@@ -35,7 +35,8 @@ include ../Makefile.com
 
 .KEEP_STATE:
 
-LDLIBS +=	-lnvpair -lgen -ladm -lefi -lscf -lz
+LDLIBS_i386= -lfdisk
+LDLIBS +=	-lnvpair -lgen -ladm -lefi -lscf -lz $(LDLIBS_$(MACH))
 
 # Writing into string literals is incorrect.  We need to match gcc's
 # behavior, which causes us to take SIGSEGV on such a write.
@@ -45,6 +46,7 @@ CPPFLAGS +=	-I../../../uts/common -I../../../common
 
 LINTFLAGS += -erroff=E_INCONS_ARG_DECL2
 LINTFLAGS += -erroff=E_INCONS_VAL_TYPE_DECL2
+LINTFLAGS += -erroff=E_NAME_DEF_NOT_USED2
 
 all: $(PROG)
 

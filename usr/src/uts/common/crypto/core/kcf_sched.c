@@ -536,13 +536,14 @@ kcf_resubmit_request(kcf_areq_node_t *areq)
 		return (error);
 
 	if (mech1 && !mech2) {
-		new_pd = kcf_get_mech_provider(mech1->cm_type, NULL, &error,
-		    areq->an_tried_plist, fg,
+		new_pd = kcf_get_mech_provider(mech1->cm_type, NULL, NULL,
+		    &error, areq->an_tried_plist, fg,
 		    (areq->an_reqarg.cr_flag & CRYPTO_RESTRICTED), 0);
 	} else {
 		ASSERT(mech1 != NULL && mech2 != NULL);
 
-		new_pd = kcf_get_dual_provider(mech1, mech2, NULL, &prov_mt1,
+		new_pd = kcf_get_dual_provider(mech1, NULL, mech2, NULL,
+		    NULL, &prov_mt1,
 		    &prov_mt2, &error, areq->an_tried_plist, fg, fg,
 		    (areq->an_reqarg.cr_flag & CRYPTO_RESTRICTED), 0);
 	}
@@ -1044,7 +1045,7 @@ kcf_svc_do_run(void)
 {
 	int error = 0;
 	clock_t rv;
-	clock_t timeout_val;
+	clock_t timeout_val = drv_usectohz(kcf_idlethr_timeout);
 	kcf_areq_node_t *req;
 	kcf_context_t *ictx;
 	kcf_provider_desc_t *pd;
@@ -1055,12 +1056,9 @@ kcf_svc_do_run(void)
 		mutex_enter(&gswq->gs_lock);
 
 		while ((req = kcf_dequeue()) == NULL) {
-			timeout_val = ddi_get_lbolt() +
-			    drv_usectohz(kcf_idlethr_timeout);
-
 			KCF_ATOMIC_INCR(kcfpool->kp_idlethreads);
-			rv = cv_timedwait_sig(&gswq->gs_cv, &gswq->gs_lock,
-			    timeout_val);
+			rv = cv_reltimedwait_sig(&gswq->gs_cv,
+			    &gswq->gs_lock, timeout_val, TR_CLOCK_TICK);
 			KCF_ATOMIC_DECR(kcfpool->kp_idlethreads);
 
 			switch (rv) {
@@ -1461,7 +1459,7 @@ int
 kcf_svc_wait(int *nthrs)
 {
 	clock_t rv;
-	clock_t timeout_val;
+	clock_t timeout_val = drv_usectohz(kcf_idlethr_timeout);
 
 	if (kcfpool == NULL)
 		return (ENOENT);
@@ -1478,11 +1476,8 @@ kcf_svc_wait(int *nthrs)
 
 	/* Go to sleep, waiting for the signaled flag. */
 	while (!kcfpool->kp_signal_create_thread) {
-		timeout_val = ddi_get_lbolt() +
-		    drv_usectohz(kcf_idlethr_timeout);
-
-		rv = cv_timedwait_sig(&kcfpool->kp_user_cv,
-		    &kcfpool->kp_user_lock, timeout_val);
+		rv = cv_reltimedwait_sig(&kcfpool->kp_user_cv,
+		    &kcfpool->kp_user_lock, timeout_val, TR_CLOCK_TICK);
 		switch (rv) {
 		case 0:
 			/* Interrupted, return to handle exit or signal */
@@ -1940,7 +1935,7 @@ out:
 		mac_tmpl = (crypto_ctx_template_t)mops->mo_templ;
 
 		/* No expected recoverable failures, so no retry list */
-		pd = kcf_get_mech_provider(mops->mo_framework_mechtype,
+		pd = kcf_get_mech_provider(mops->mo_framework_mechtype, NULL,
 		    &me, &error, NULL, CRYPTO_FG_MAC_ATOMIC,
 		    (areq->an_reqarg.cr_flag & CRYPTO_RESTRICTED), ct->dd_len2);
 
@@ -1972,7 +1967,7 @@ out:
 		ct = (crypto_dual_data_t *)dcrops->dop_ciphertext;
 		/* No expected recoverable failures, so no retry list */
 		pd = kcf_get_mech_provider(dcrops->dop_framework_mechtype,
-		    NULL, &error, NULL, CRYPTO_FG_DECRYPT_ATOMIC,
+		    NULL, NULL, &error, NULL, CRYPTO_FG_DECRYPT_ATOMIC,
 		    (areq->an_reqarg.cr_flag & CRYPTO_RESTRICTED), ct->dd_len1);
 
 		if (pd == NULL) {

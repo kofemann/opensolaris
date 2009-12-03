@@ -29,9 +29,11 @@ SRCS= ../$(PROG).c ../zdb_il.c
 OBJS= $(PROG).o zdb_il.o
 
 include ../../Makefile.cmd
+include ../../Makefile.ctf
 
 INCS += -I../../../lib/libzpool/common 
 INCS +=	-I../../../uts/common/fs/zfs
+INCS +=	-I../../../common/zfs
 
 LDLIBS += -lzpool -lumem -lnvpair -lzfs -lavl
 

@@ -37,7 +37,7 @@
 #include "pcihrt.h"
 
 extern int pci_boot_debug;
-extern int pci_bios_nbus;
+extern int pci_bios_maxbus;
 #define	dprintf	if (pci_boot_debug) printf
 
 static int tbl_init = 0;
@@ -104,7 +104,7 @@ acpi_pci_probe(void)
 	if (acpi_resource_discovery == 0)
 		return;
 
-	for (bus = 0; bus < pci_bios_nbus; bus++) {
+	for (bus = 0; bus <= pci_bios_maxbus; bus++) {
 		/* if no dip or no ACPI handle, no resources to discover */
 		dip = pci_bus_res[bus].dip;
 		if ((dip == NULL) ||
@@ -227,7 +227,7 @@ bus_res_fini(void)
 {
 	int bus;
 
-	for (bus = 0; bus < pci_bios_nbus; bus++) {
+	for (bus = 0; bus <= pci_bios_maxbus; bus++) {
 		memlist_free_all(&acpi_io_res[bus]);
 		memlist_free_all(&acpi_mem_res[bus]);
 		memlist_free_all(&acpi_pmem_res[bus]);
@@ -340,6 +340,12 @@ acpi_wr_cb(ACPI_RESOURCE *rp, void *context)
 		break;
 
 	case ACPI_RESOURCE_TYPE_ADDRESS64:
+	/*
+	 * We comment out this block because we currently cannot deal with
+	 * PCI 64-bit addresses. Will revisit this when we add PCI 64-bit MMIO
+	 * support.
+	 */
+#if 0
 		if (rp->Data.Address64.AddressLength == 0)
 			break;
 		acpi_cb_cnt++;
@@ -347,9 +353,11 @@ acpi_wr_cb(ACPI_RESOURCE *rp, void *context)
 		    rp->Data.Address64.Info.TypeSpecific, bus),
 		    rp->Data.Address64.Minimum,
 		    rp->Data.Address64.AddressLength);
+#endif
 		break;
 
 	case ACPI_RESOURCE_TYPE_EXTENDED_ADDRESS64:
+#if 0	/* Will revisit this when we add PCI 64-bit MMIO support */
 		if (rp->Data.ExtAddress64.AddressLength == 0)
 			break;
 		acpi_cb_cnt++;
@@ -357,6 +365,7 @@ acpi_wr_cb(ACPI_RESOURCE *rp, void *context)
 		    rp->Data.ExtAddress64.Info.TypeSpecific, bus),
 		    rp->Data.ExtAddress64.Minimum,
 		    rp->Data.ExtAddress64.AddressLength);
+#endif
 		break;
 
 	case ACPI_RESOURCE_TYPE_EXTENDED_IRQ:

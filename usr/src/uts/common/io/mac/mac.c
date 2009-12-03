@@ -350,6 +350,16 @@ static kmutex_t		i_mactype_lock;
 int mac_tx_percpu_cnt;
 int mac_tx_percpu_cnt_max = 128;
 
+/*
+ * Call back functions for the bridge module.  These are guaranteed to be valid
+ * when holding a reference on a link or when holding mip->mi_bridge_lock and
+ * mi_bridge_link is non-NULL.
+ */
+mac_bridge_tx_t mac_bridge_tx_cb;
+mac_bridge_rx_t mac_bridge_rx_cb;
+mac_bridge_ref_t mac_bridge_ref_cb;
+mac_bridge_ls_t mac_bridge_ls_cb;
+
 static int i_mac_constructor(void *, void *, int);
 static void i_mac_destructor(void *, void *);
 static int i_mac_ring_ctor(void *, void *, int);
@@ -417,11 +427,11 @@ mac_init(void)
 
 	/*
 	 * Allocate an id space to manage minor numbers. The range of the
-	 * space will be from MAC_MAX_MINOR+1 to MAXMIN32 (maximum legal
-	 * minor number is MAXMIN, but id_t is type of integer and does not
-	 * allow MAXMIN).
+	 * space will be from MAC_MAX_MINOR+1 to MAC_PRIVATE_MINOR-1.  This
+	 * leaves half of the 32-bit minors available for driver private use.
 	 */
-	minor_ids = id_space_create("mac_minor_ids", MAC_MAX_MINOR+1, MAXMIN32);
+	minor_ids = id_space_create("mac_minor_ids", MAC_MAX_MINOR+1,
+	    MAC_PRIVATE_MINOR-1);
 	ASSERT(minor_ids != NULL);
 	minor_count = 0;
 
@@ -452,10 +462,27 @@ mac_fini(void)
 	return (0);
 }
 
+/*
+ * Initialize a GLDv3 driver's device ops.  A driver that manages its own ops
+ * (e.g. softmac) may pass in a NULL ops argument.
+ */
 void
 mac_init_ops(struct dev_ops *ops, const char *name)
 {
-	dld_init_ops(ops, name);
+	major_t major = ddi_name_to_major((char *)name);
+
+	/*
+	 * By returning on error below, we are not letting the driver continue
+	 * in an undefined context.  The mac_register() function will faill if
+	 * DN_GLDV3_DRIVER isn't set.
+	 */
+	if (major == DDI_MAJOR_T_NONE)
+		return;
+	LOCK_DEV_OPS(&devnamesp[major].dn_lock);
+	devnamesp[major].dn_flags |= (DN_GLDV3_DRIVER | DN_NETWORK_DRIVER);
+	UNLOCK_DEV_OPS(&devnamesp[major].dn_lock);
+	if (ops != NULL)
+		dld_init_ops(ops, name);
 }
 
 void
@@ -473,7 +500,6 @@ i_mac_constructor(void *buf, void *arg, int kmflag)
 	bzero(buf, sizeof (mac_impl_t));
 
 	mip->mi_linkstate = LINK_STATE_UNKNOWN;
-	mip->mi_nclients = 0;
 
 	mutex_init(&mip->mi_lock, NULL, MUTEX_DRIVER, NULL);
 	rw_init(&mip->mi_rw_lock, NULL, RW_DRIVER, NULL);
@@ -485,6 +511,9 @@ i_mac_constructor(void *buf, void *arg, int kmflag)
 	cv_init(&mip->mi_notify_cb_info.mcbi_cv, NULL, CV_DRIVER, NULL);
 	mip->mi_promisc_cb_info.mcbi_lockp = &mip->mi_promisc_lock;
 	cv_init(&mip->mi_promisc_cb_info.mcbi_cv, NULL, CV_DRIVER, NULL);
+
+	mutex_init(&mip->mi_bridge_lock, NULL, MUTEX_DEFAULT, NULL);
+
 	return (0);
 }
 
@@ -533,6 +562,8 @@ i_mac_destructor(void *buf, void *arg)
 	mutex_destroy(&mip->mi_notify_lock);
 	cv_destroy(&mip->mi_notify_cb_info.mcbi_cv);
 	mutex_destroy(&mip->mi_ring_lock);
+
+	ASSERT(mip->mi_bridge_link == NULL);
 }
 
 /* ARGSUSED */
@@ -1426,35 +1457,54 @@ mac_hwrings_rx_process(void *arg, mac_resource_handle_t srs,
  */
 int
 mac_hwrings_get(mac_client_handle_t mch, mac_group_handle_t *hwgh,
-    mac_ring_handle_t *hwrh)
+    mac_ring_handle_t *hwrh, mac_ring_type_t rtype)
 {
 	mac_client_impl_t	*mcip = (mac_client_impl_t *)mch;
-	flow_entry_t		*flent = mcip->mci_flent;
-	mac_group_t		*grp = flent->fe_rx_ring_group;
-	mac_ring_t		*ring;
 	int			cnt = 0;
 
-	/*
-	 * The mac client did not reserve any RX group, return directly.
-	 * This is probably because the underlying MAC does not support
-	 * any RX groups.
-	 */
-	*hwgh = NULL;
-	if (grp == NULL)
-		return (0);
+	switch (rtype) {
+	case MAC_RING_TYPE_RX: {
+		flow_entry_t	*flent = mcip->mci_flent;
+		mac_group_t	*grp;
+		mac_ring_t	*ring;
 
-	/*
-	 * This RX group must be reserved by this mac client.
-	 */
-	ASSERT((grp->mrg_state == MAC_GROUP_STATE_RESERVED) &&
-	    (mch == (mac_client_handle_t)(MAC_RX_GROUP_ONLY_CLIENT(grp))));
-
-	for (ring = grp->mrg_rings; ring != NULL; ring = ring->mr_next) {
-		ASSERT(cnt < MAX_RINGS_PER_GROUP);
-		hwrh[cnt++] = (mac_ring_handle_t)ring;
+		grp = flent->fe_rx_ring_group;
+		/*
+		 * The mac client did not reserve any RX group, return directly.
+		 * This is probably because the underlying MAC does not support
+		 * any groups.
+		 */
+		*hwgh = NULL;
+		if (grp == NULL)
+			return (0);
+		/*
+		 * This group must be reserved by this mac client.
+		 */
+		ASSERT((grp->mrg_state == MAC_GROUP_STATE_RESERVED) &&
+		    (mch == (mac_client_handle_t)
+		    (MAC_RX_GROUP_ONLY_CLIENT(grp))));
+		for (ring = grp->mrg_rings;
+		    ring != NULL; ring = ring->mr_next, cnt++) {
+			ASSERT(cnt < MAX_RINGS_PER_GROUP);
+			hwrh[cnt] = (mac_ring_handle_t)ring;
+		}
+		*hwgh = (mac_group_handle_t)grp;
+		return (cnt);
 	}
-	*hwgh = (mac_group_handle_t)grp;
-	return (cnt);
+	case MAC_RING_TYPE_TX: {
+		mac_soft_ring_set_t	*tx_srs;
+		mac_srs_tx_t		*tx;
+
+		tx_srs = MCIP_TX_SRS(mcip);
+		tx = &tx_srs->srs_tx;
+		for (; cnt < tx->st_ring_count; cnt++)
+			hwrh[cnt] = tx->st_rings[cnt];
+		return (cnt);
+	}
+	default:
+		ASSERT(B_FALSE);
+		return (-1);
+	}
 }
 
 /*
@@ -1522,6 +1572,20 @@ mac_hwring_poll(mac_ring_handle_t rh, int bytes_to_pickup)
 	mac_ring_info_t *info = &rr_ring->mr_info;
 
 	return (info->mri_poll(info->mri_driver, bytes_to_pickup));
+}
+
+/*
+ * Send packets through the selected tx ring.
+ */
+mblk_t *
+mac_hwring_tx(mac_ring_handle_t rh, mblk_t *mp)
+{
+	mac_ring_t *ring = (mac_ring_t *)rh;
+	mac_ring_info_t *info = &ring->mr_info;
+
+	ASSERT(ring->mr_type == MAC_RING_TYPE_TX &&
+	    ring->mr_state >= MR_INUSE);
+	return (info->mri_tx(info->mri_driver, mp));
 }
 
 int
@@ -2651,7 +2715,8 @@ mactype_unregister(const char *ident)
 	}
 	ASSERT(mtp == (mactype_t *)val);
 
-	kmem_free(mtp->mt_brdcst_addr, mtp->mt_addr_length);
+	if (mtp->mt_brdcst_addr != NULL)
+		kmem_free(mtp->mt_brdcst_addr, mtp->mt_addr_length);
 	kmem_free(mtp, sizeof (mactype_t));
 done:
 	mutex_exit(&i_mactype_lock);
@@ -2659,33 +2724,16 @@ done:
 }
 
 /*
- * Returns TRUE when the specified property is intended for the MAC framework,
- * as opposed to driver defined properties.
- */
-static boolean_t
-mac_is_macprop(mac_prop_t *macprop)
-{
-	switch (macprop->mp_id) {
-	case MAC_PROP_MAXBW:
-	case MAC_PROP_PRIO:
-	case MAC_PROP_BIND_CPU:
-		return (B_TRUE);
-	default:
-		return (B_FALSE);
-	}
-}
-
-/*
  * mac_set_prop() sets mac or hardware driver properties:
- * 	mac properties include maxbw, priority, and cpu binding list. Driver
- *	properties are private properties to the hardware, such as mtu, speed
- *	etc.
+ * 	MAC resource properties include maxbw, priority, and cpu binding list.
+ *	Driver properties are private properties to the hardware, such as mtu
+ *	and speed.  There's one other MAC property -- the PVID.
  * If the property is a driver property, mac_set_prop() calls driver's callback
  * function to set it.
- * If the property is a mac property, mac_set_prop() invokes mac_set_resources()
- * which will cache the property value in mac_impl_t and may call
- * mac_client_set_resource() to update property value of the primary mac client,
- * if it exists.
+ * If the property is a mac resource property, mac_set_prop() invokes
+ * mac_set_resources() which will cache the property value in mac_impl_t and
+ * may call mac_client_set_resource() to update property value of the primary
+ * mac client, if it exists.
  */
 int
 mac_set_prop(mac_handle_t mh, mac_prop_t *macprop, void *val, uint_t valsize)
@@ -2695,17 +2743,28 @@ mac_set_prop(mac_handle_t mh, mac_prop_t *macprop, void *val, uint_t valsize)
 
 	ASSERT(MAC_PERIM_HELD(mh));
 
-	/* If it is mac property, call mac_set_resources() */
-	if (mac_is_macprop(macprop)) {
+	switch (macprop->mp_id) {
+	case MAC_PROP_MAXBW:
+	case MAC_PROP_PRIO:
+	case MAC_PROP_PROTECT:
+	case MAC_PROP_BIND_CPU: {
 		mac_resource_props_t mrp;
 
+		/* If it is mac property, call mac_set_resources() */
 		if (valsize < sizeof (mac_resource_props_t))
 			return (EINVAL);
-		bzero(&mrp, sizeof (mac_resource_props_t));
 		bcopy(val, &mrp, sizeof (mrp));
-		return (mac_set_resources(mh, &mrp));
+		err = mac_set_resources(mh, &mrp);
+		break;
 	}
-	switch (macprop->mp_id) {
+
+	case MAC_PROP_PVID:
+		if (valsize < sizeof (uint16_t) ||
+		    (mip->mi_state_flags & MIS_IS_VNIC))
+			return (EINVAL);
+		err = mac_set_pvid(mh, *(uint16_t *)val);
+		break;
+
 	case MAC_PROP_MTU: {
 		uint32_t mtu;
 
@@ -2715,6 +2774,25 @@ mac_set_prop(mac_handle_t mh, mac_prop_t *macprop, void *val, uint_t valsize)
 		err = mac_set_mtu(mh, mtu, NULL);
 		break;
 	}
+
+	case MAC_PROP_LLIMIT:
+	case MAC_PROP_LDECAY: {
+		uint32_t learnval;
+
+		if (valsize < sizeof (learnval) ||
+		    (mip->mi_state_flags & MIS_IS_VNIC))
+			return (EINVAL);
+		bcopy(val, &learnval, sizeof (learnval));
+		if (learnval == 0 && macprop->mp_id == MAC_PROP_LDECAY)
+			return (EINVAL);
+		if (macprop->mp_id == MAC_PROP_LLIMIT)
+			mip->mi_llimit = learnval;
+		else
+			mip->mi_ldecay = learnval;
+		err = 0;
+		break;
+	}
+
 	default:
 		/* For other driver properties, call driver's callback */
 		if (mip->mi_callbacks->mc_callbacks & MC_SETPROP) {
@@ -2745,19 +2823,39 @@ mac_get_prop(mac_handle_t mh, mac_prop_t *macprop, void *val, uint_t valsize,
 	is_getprop = (mip->mi_callbacks->mc_callbacks & MC_GETPROP);
 	is_setprop = (mip->mi_callbacks->mc_callbacks & MC_SETPROP);
 
-	/* If mac property, read from cache */
-	if (mac_is_macprop(macprop)) {
+	switch (macprop->mp_id) {
+	case MAC_PROP_MAXBW:
+	case MAC_PROP_PRIO:
+	case MAC_PROP_PROTECT:
+	case MAC_PROP_BIND_CPU: {
 		mac_resource_props_t mrp;
 
+		/* If mac property, read from cache */
 		if (valsize < sizeof (mac_resource_props_t))
 			return (EINVAL);
-		bzero(&mrp, sizeof (mac_resource_props_t));
 		mac_get_resources(mh, &mrp);
 		bcopy(&mrp, val, sizeof (mac_resource_props_t));
 		return (0);
 	}
 
-	switch (macprop->mp_id) {
+	case MAC_PROP_PVID:
+		if (valsize < sizeof (uint16_t) ||
+		    (mip->mi_state_flags & MIS_IS_VNIC))
+			return (EINVAL);
+		*(uint16_t *)val = mac_get_pvid(mh);
+		return (0);
+
+	case MAC_PROP_LLIMIT:
+	case MAC_PROP_LDECAY:
+		if (valsize < sizeof (uint32_t) ||
+		    (mip->mi_state_flags & MIS_IS_VNIC))
+			return (EINVAL);
+		if (macprop->mp_id == MAC_PROP_LLIMIT)
+			bcopy(&mip->mi_llimit, val, sizeof (mip->mi_llimit));
+		else
+			bcopy(&mip->mi_ldecay, val, sizeof (mip->mi_ldecay));
+		return (0);
+
 	case MAC_PROP_MTU: {
 		uint32_t sdu;
 		mac_propval_range_t range;
@@ -3429,19 +3527,32 @@ mac_release_tx_ring(mac_ring_handle_t rh)
 }
 
 /*
- * Send packets through a selected tx ring.
+ * This is the entry point for packets transmitted through the bridging code.
+ * If no bridge is in place, MAC_RING_TX transmits using tx ring. The 'rh'
+ * pointer may be NULL to select the default ring.
  */
 mblk_t *
-mac_ring_tx(mac_ring_handle_t rh, mblk_t *mp)
+mac_bridge_tx(mac_impl_t *mip, mac_ring_handle_t rh, mblk_t *mp)
 {
-	mac_ring_t *ring = (mac_ring_t *)rh;
-	mac_ring_info_t *info = &ring->mr_info;
+	mac_handle_t mh;
 
-	ASSERT(ring->mr_type == MAC_RING_TYPE_TX);
-	ASSERT(ring->mr_state >= MR_INUSE);
-	ASSERT(info->mri_tx != NULL);
+	/*
+	 * Once we take a reference on the bridge link, the bridge
+	 * module itself can't unload, so the callback pointers are
+	 * stable.
+	 */
+	mutex_enter(&mip->mi_bridge_lock);
+	if ((mh = mip->mi_bridge_link) != NULL)
+		mac_bridge_ref_cb(mh, B_TRUE);
+	mutex_exit(&mip->mi_bridge_lock);
+	if (mh == NULL) {
+		MAC_RING_TX(mip, rh, mp, mp);
+	} else {
+		mp = mac_bridge_tx_cb(mh, rh, mp);
+		mac_bridge_ref_cb(mh, B_FALSE);
+	}
 
-	return (info->mri_tx(info->mri_driver, mp));
+	return (mp);
 }
 
 /*
@@ -5247,4 +5358,61 @@ mac_client_tx_notify(mac_client_handle_t mch, mac_tx_notify_t callb_func,
 	i_mac_perim_exit(mcip->mci_mip);
 
 	return ((mac_tx_notify_handle_t)mtnfp);
+}
+
+void
+mac_bridge_vectors(mac_bridge_tx_t txf, mac_bridge_rx_t rxf,
+    mac_bridge_ref_t reff, mac_bridge_ls_t lsf)
+{
+	mac_bridge_tx_cb = txf;
+	mac_bridge_rx_cb = rxf;
+	mac_bridge_ref_cb = reff;
+	mac_bridge_ls_cb = lsf;
+}
+
+int
+mac_bridge_set(mac_handle_t mh, mac_handle_t link)
+{
+	mac_impl_t *mip = (mac_impl_t *)mh;
+	int retv;
+
+	mutex_enter(&mip->mi_bridge_lock);
+	if (mip->mi_bridge_link == NULL) {
+		mip->mi_bridge_link = link;
+		retv = 0;
+	} else {
+		retv = EBUSY;
+	}
+	mutex_exit(&mip->mi_bridge_lock);
+	if (retv == 0) {
+		mac_poll_state_change(mh, B_FALSE);
+		mac_capab_update(mh);
+	}
+	return (retv);
+}
+
+/*
+ * Disable bridging on the indicated link.
+ */
+void
+mac_bridge_clear(mac_handle_t mh, mac_handle_t link)
+{
+	mac_impl_t *mip = (mac_impl_t *)mh;
+
+	mutex_enter(&mip->mi_bridge_lock);
+	ASSERT(mip->mi_bridge_link == link);
+	mip->mi_bridge_link = NULL;
+	mutex_exit(&mip->mi_bridge_lock);
+	mac_poll_state_change(mh, B_TRUE);
+	mac_capab_update(mh);
+}
+
+void
+mac_no_active(mac_handle_t mh)
+{
+	mac_impl_t *mip = (mac_impl_t *)mh;
+
+	i_mac_perim_enter(mip);
+	mip->mi_state_flags |= MIS_NO_ACTIVE;
+	i_mac_perim_exit(mip);
 }

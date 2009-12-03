@@ -551,7 +551,7 @@ svcctl_scm_enum_services(svcctl_manager_context_t *mgr_ctx, uint8_t *buf,
 {
 	svcctl_svc_node_t *node;
 	int base_offset, offset;
-	mts_wchar_t *w_name;
+	smb_wchar_t *w_name;
 	char *a_name;
 	char *node_name;
 	size_t namelen;
@@ -573,7 +573,7 @@ svcctl_scm_enum_services(svcctl_manager_context_t *mgr_ctx, uint8_t *buf,
 		}
 	}
 
-	offset = base_offset;
+	offset = buflen;
 	node = uu_avl_first(mgr_ctx->mc_svcs);
 
 	for (ns = 0; ((ns < *resume_handle) && (node != NULL)); ++ns)
@@ -587,38 +587,36 @@ svcctl_scm_enum_services(svcctl_manager_context_t *mgr_ctx, uint8_t *buf,
 	for (ns = 0; ((ns < numsvcs) && (node != NULL)); ++ns) {
 		node_name = node->sn_name;
 		namelen = strlen(node_name) + 1;
-		svc[ns].svc_name = offset;
-
 		if (use_wchar) {
+			offset -= SVCCTL_WNSTRLEN(node_name);
 			/*LINTED E_BAD_PTR_CAST_ALIGN*/
-			w_name = (mts_wchar_t *)&buf[offset];
-			(void) mts_mbstowcs(w_name, node_name, namelen);
-			offset += SVCCTL_WNSTRLEN(node_name);
+			w_name = (smb_wchar_t *)&buf[offset];
+			(void) smb_mbstowcs(w_name, node_name, namelen);
 		} else {
+			offset -= namelen;
 			a_name = (char *)&buf[offset];
 			(void) strlcpy(a_name, node_name, namelen);
-			offset += namelen;
 		}
+		svc[ns].svc_name = offset;
 
-		if (offset >= buflen)
+		if (offset <= base_offset)
 			break;
 
 		node_name = node->sn_fmri;
 		namelen = strlen(node_name) + 1;
-		svc[ns].display_name = offset;
-
 		if (use_wchar) {
+			offset -= SVCCTL_WNSTRLEN(node_name);
 			/*LINTED E_BAD_PTR_CAST_ALIGN*/
-			w_name = (mts_wchar_t *)&buf[offset];
-			(void) mts_mbstowcs(w_name, node_name, namelen);
-			offset += SVCCTL_WNSTRLEN(node_name);
+			w_name = (smb_wchar_t *)&buf[offset];
+			(void) smb_mbstowcs(w_name, node_name, namelen);
 		} else {
+			offset -= namelen;
 			a_name = (char *)&buf[offset];
 			(void) strlcpy(a_name, node_name, namelen);
-			offset += namelen;
 		}
+		svc[ns].display_name = offset;
 
-		if (offset >= buflen)
+		if (offset <= base_offset)
 			break;
 
 		svc[ns].svc_status.cur_state =
@@ -656,8 +654,8 @@ svcctl_scm_cb_bytes_needed(void *svc_node, void *byte_cnt)
 	svcctl_svc_node_t *node = svc_node;
 	int *cnt = byte_cnt;
 
-	*cnt += (strlen(node->sn_fmri) + 1) * sizeof (mts_wchar_t);
-	*cnt += (strlen(node->sn_name) + 1) * sizeof (mts_wchar_t);
+	*cnt += (strlen(node->sn_fmri) + 1) * sizeof (smb_wchar_t);
+	*cnt += (strlen(node->sn_name) + 1) * sizeof (smb_wchar_t);
 
 	return (UU_WALK_NEXT);
 }

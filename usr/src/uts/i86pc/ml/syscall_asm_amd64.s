@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -127,15 +127,17 @@
  * We assume that the %rsp- and %r15-stashing fields in the CPU structure
  * are still unused.
  *
- * When the callback is invoked, we will be on the user's %gs and
- * the stack will look like this:
+ * Check if a brand_mach_ops callback is defined for the specified callback_id
+ * type.  If so invoke it with the kernel's %gs value loaded and the following
+ * data on the stack:
  *
  * stack:  --------------------------------------
- *         | callback pointer			|
- *    |    | user stack pointer			|
- *    |    | lwp pointer			|
- *    v    | userland return address		|
- *         | callback wrapper return addr	|
+ *      40 | user %gs				|
+ *      32 | callback pointer			|
+ *    | 24 | user stack pointer			|
+ *    | 16 | lwp pointer			|
+ *    v  8 | userland return address		|
+ *       0 | callback wrapper return addr	|
  *         --------------------------------------
  *
  */
@@ -144,7 +146,7 @@
 	movq	%r15, %gs:CPU_RTMP_R15	/* save %r15			*/ ;\
 	movq	%gs:CPU_THREAD, %r15	/* load the thread pointer	*/ ;\
 	movq	T_STACK(%r15), %rsp	/* switch to the kernel stack	*/ ;\
-	subq	$16, %rsp		/* save space for two pointers	*/ ;\
+	subq	$24, %rsp		/* save space for 3 pointers	*/ ;\
 	pushq	%r14			/* save %r14			*/ ;\
 	movq	%gs:CPU_RTMP_RSP, %r14					   ;\
 	movq	%r14, 8(%rsp)		/* stash the user stack pointer	*/ ;\
@@ -160,10 +162,12 @@
 	movq	%r15, 16(%rsp)		/* save the callback pointer	*/ ;\
 	movq	%gs:CPU_RTMP_RSP, %r15	/* grab the user stack pointer	*/ ;\
 	pushq	(%r15)			/* push the return address	*/ ;\
-	movq	%gs:CPU_RTMP_R15, %r15	/* restore %r15			*/ ;\
-	SWAPGS				/* user gsbase                  */ ;\
-	call	*24(%rsp)		/* call callback		*/ ;\
+	SWAPGS				/* user gsbase			*/ ;\
+	mov	%gs, %r15		/* get %gs			*/ ;\
+	movq	%r15, 32(%rsp)		/* save %gs on stack		*/ ;\
 	SWAPGS				/* kernel gsbase		*/ ;\
+	movq	%gs:CPU_RTMP_R15, %r15	/* restore %r15			*/ ;\
+	call	*24(%rsp)		/* call callback		*/ ;\
 1:	movq	%gs:CPU_RTMP_R15, %r15	/* restore %r15			*/ ;\
 	movq	%gs:CPU_RTMP_RSP, %rsp	/* restore the stack pointer	*/
 
@@ -362,12 +366,11 @@ __no_rupdate_msg:
  * [1] They used to, and we relied on it, but this was broken in 3.1.1.
  * Sigh.
  */
-
 #if defined(__xpv)
-#define	XPV_SYSCALL_PROD		\
-	XPV_TRAP_POP;			\
-	movq	(%rsp), %rcx;		\
-	movq	0x10(%rsp), %r11
+#define	XPV_SYSCALL_PROD						\
+	movq	0x10(%rsp), %rcx;					\
+	movq	0x20(%rsp), %r11;					\
+	movq	0x28(%rsp), %rsp
 #else
 #define	XPV_SYSCALL_PROD /* nothing */
 #endif
@@ -402,18 +405,14 @@ size_t _allsyscalls_size;
 	XPV_SYSCALL_PROD
 
 noprod_sys_syscall:
-	ASSERT_UPCALL_MASK_IS_SET
 
 	movq	%r15, %gs:CPU_RTMP_R15
-#if defined(__xpv)
-	movq	0x18(%rsp), %r15		/* save user stack */
-	movq	%r15, %gs:CPU_RTMP_RSP
-#else
 	movq	%rsp, %gs:CPU_RTMP_RSP
-#endif	/* __xpv */
 
 	movq	%gs:CPU_THREAD, %r15
-	movq	T_STACK(%r15), %rsp
+	movq	T_STACK(%r15), %rsp	/* switch from user to kernel stack */
+
+	ASSERT_UPCALL_MASK_IS_SET
 
 	movl	$UCS_SEL, REGOFF_CS(%rsp)
 	movq	%rcx, REGOFF_RIP(%rsp)		/* syscall: %rip -> %rcx */
@@ -585,11 +584,44 @@ _syscall_invoke:
          * in sn1_brand_syscall_callback for an example.
          */
 	ASSERT_UPCALL_MASK_IS_SET
-	SWAPGS				/* user gsbase */
-        ALTENTRY(nopop_sys_syscall_sysretq)
+#if defined(__xpv)
 	SYSRETQ
+        ALTENTRY(nopop_sys_syscall_swapgs_sysretq)
+
+	/*
+	 * We can only get here after executing a brand syscall
+	 * interposition callback handler and simply need to
+	 * "sysretq" back to userland. On the hypervisor this
+	 * involves the iret hypercall which requires us to construct
+	 * just enough of the stack needed for the hypercall.
+	 * (rip, cs, rflags, rsp, ss).
+	 */
+	movq    %rsp, %gs:CPU_RTMP_RSP		/* save user's rsp */
+	movq	%gs:CPU_THREAD, %r11
+	movq	T_STACK(%r11), %rsp
+
+	movq	%rcx, REGOFF_RIP(%rsp)
+	movl	$UCS_SEL, REGOFF_CS(%rsp)
+	movq	%gs:CPU_RTMP_RSP, %r11
+	movq	%r11, REGOFF_RSP(%rsp)
+	pushfq
+	popq	%r11				/* hypercall enables ints */
+	movq	%r11, REGOFF_RFL(%rsp)
+	movl	$UDS_SEL, REGOFF_SS(%rsp)
+	addq	$REGOFF_RIP, %rsp
+	/*
+	 * XXPV: see comment in SYSRETQ definition for future optimization
+	 *       we could take.
+	 */
+	ASSERT_UPCALL_MASK_IS_SET
+	SYSRETQ
+#else
+        ALTENTRY(nopop_sys_syscall_swapgs_sysretq)
+	SWAPGS				/* user gsbase */
+	SYSRETQ
+#endif
         /*NOTREACHED*/
-        SET_SIZE(nopop_sys_syscall_sysretq)
+        SET_SIZE(nopop_sys_syscall_swapgs_sysretq)
 
 _syscall_pre:
 	call	pre_syscall
@@ -809,10 +841,10 @@ _syscall32_save:
 	movl	REGOFF_RSP(%rsp), %esp
 
 	ASSERT_UPCALL_MASK_IS_SET
+        ALTENTRY(nopop_sys_syscall32_swapgs_sysretl)
 	SWAPGS				/* user gsbase */
-        ALTENTRY(nopop_sys_syscall32_sysretl)
 	SYSRETL
-        SET_SIZE(nopop_sys_syscall32_sysretl)
+        SET_SIZE(nopop_sys_syscall32_swapgs_sysretl)
 	/*NOTREACHED*/
 
 _full_syscall_postsys32:
@@ -1071,9 +1103,11 @@ sys_sysenter()
 	pushq	REGOFF_RFL(%rsp)
 	popfq
 	movl	REGOFF_RSP(%rsp), %ecx	/* sysexit: %ecx -> %esp */
+        ALTENTRY(sys_sysenter_swapgs_sysexit)
 	swapgs
 	sti
 	sysexit
+	SET_SIZE(sys_sysenter_swapgs_sysexit)
 	SET_SIZE(sys_sysenter)
 	SET_SIZE(_sys_sysenter_post_swapgs)
 	SET_SIZE(brand_sys_sysenter)
@@ -1169,6 +1203,17 @@ nopop_syscall_int:
 	movb	$1, T_POST_SYS(%r15)
 	CLEAN_CS
 	jmp	_syscall32_save
+	/*
+	 * There should be no instructions between this label and SWAPGS/IRET
+	 * or we could end up breaking branded zone support. See the usage of
+	 * this label in lx_brand_int80_callback and sn1_brand_int91_callback
+	 * for examples.
+	 */
+        ALTENTRY(sys_sysint_swapgs_iret)
+	SWAPGS				/* user gsbase */
+	IRET
+	/*NOTREACHED*/
+	SET_SIZE(sys_sysint_swapgs_iret)
 	SET_SIZE(sys_syscall_int)
 	SET_SIZE(brand_sys_syscall_int)
 

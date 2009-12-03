@@ -39,11 +39,12 @@
 #include "../../../../common/pci/pci_strings.h"
 #include <sys/apic.h>
 #include <io/pciex/pcie_nvidia.h>
-#include <io/hotplug/pciehpc/pciehpc_acpi.h>
+#include <sys/hotplug/pci/pciehpc_acpi.h>
 #include <sys/acpi/acpi.h>
 #include <sys/acpica.h>
 #include <sys/intel_iommu.h>
 #include <sys/iommulib.h>
+#include <sys/devcache.h>
 
 #define	pci_getb	(*pci_getb_func)
 #define	pci_getw	(*pci_getw_func)
@@ -99,7 +100,7 @@ struct pci_devfunc {
 };
 
 extern int pseudo_isa;
-extern int pci_bios_nbus;
+extern int pci_bios_maxbus;
 static uchar_t max_dev_pci = 32;	/* PCI standard */
 int pci_boot_debug = 0;
 extern struct memlist *find_bus_res(int, int);
@@ -134,6 +135,15 @@ static void populate_bus_res(uchar_t bus);
 static void memlist_remove_list(struct memlist **list,
     struct memlist *remove_list);
 
+static void pci_scan_bbn(void);
+static int pci_unitaddr_cache_valid(void);
+static int pci_bus_unitaddr(int);
+static void pci_unitaddr_cache_create(void);
+
+static int pci_cache_unpack_nvlist(nvf_handle_t, nvlist_t *, char *);
+static int pci_cache_pack_nvlist(nvf_handle_t, nvlist_t **);
+static void pci_cache_free_list(nvf_handle_t);
+
 extern int pci_slot_names_prop(int, char *, int);
 
 /* set non-zero to force PCI peer-bus renumbering */
@@ -149,15 +159,305 @@ static struct {
 } isa_res;
 
 /*
+ * PCI unit-address cache management
+ */
+static nvf_ops_t pci_unitaddr_cache_ops = {
+	"/etc/devices/pci_unitaddr_persistent",	/* path to cache */
+	pci_cache_unpack_nvlist,		/* read in nvlist form */
+	pci_cache_pack_nvlist,			/* convert to nvlist form */
+	pci_cache_free_list,			/* free data list */
+	NULL					/* write complete callback */
+};
+
+typedef struct {
+	list_node_t	pua_nodes;
+	int		pua_index;
+	int		pua_addr;
+} pua_node_t;
+
+nvf_handle_t	puafd_handle;
+int		pua_cache_valid = 0;
+
+
+/*ARGSUSED*/
+static ACPI_STATUS
+pci_process_acpi_device(ACPI_HANDLE hdl, UINT32 level, void *ctx, void **rv)
+{
+	ACPI_BUFFER	rb;
+	ACPI_OBJECT	ro;
+	ACPI_DEVICE_INFO *adi;
+	int		busnum;
+
+	/*
+	 * Use AcpiGetObjectInfo() to find the device _HID
+	 * If not a PCI root-bus, ignore this device and continue
+	 * the walk
+	 */
+
+	rb.Length = ACPI_ALLOCATE_BUFFER;
+	if (ACPI_FAILURE(AcpiGetObjectInfo(hdl, &rb)))
+		return (AE_OK);
+
+	adi = rb.Pointer;
+	if (!(adi->Valid & ACPI_VALID_HID)) {
+		AcpiOsFree(adi);
+		return (AE_OK);
+	}
+
+	if (strncmp(adi->HardwareId.Value, PCI_ROOT_HID_STRING,
+	    sizeof (PCI_ROOT_HID_STRING)) &&
+	    strncmp(adi->HardwareId.Value, PCI_EXPRESS_ROOT_HID_STRING,
+	    sizeof (PCI_EXPRESS_ROOT_HID_STRING))) {
+		AcpiOsFree(adi);
+		return (AE_OK);
+	}
+
+	AcpiOsFree(adi);
+
+	/*
+	 * XXX: ancient Big Bear broken _BBN will result in two
+	 * bus 0 _BBNs being found, so we need to handle duplicate
+	 * bus 0 gracefully.  However, broken _BBN does not
+	 * hide a childless root-bridge so no need to work-around it
+	 * here
+	 */
+	rb.Pointer = &ro;
+	rb.Length = sizeof (ro);
+	if (ACPI_SUCCESS(AcpiEvaluateObjectTyped(hdl, "_BBN",
+	    NULL, &rb, ACPI_TYPE_INTEGER))) {
+		busnum = ro.Integer.Value;
+
+		/*
+		 * Ignore invalid _BBN return values here (rather
+		 * than panic) and emit a warning; something else
+		 * may suffer failure as a result of the broken BIOS.
+		 */
+		if ((busnum < 0) || (busnum > pci_bios_maxbus)) {
+			cmn_err(CE_WARN,
+			    "pci_process_acpi_device: invalid _BBN 0x%x\n",
+			    busnum);
+			return (AE_CTRL_DEPTH);
+		}
+
+		/* PCI with valid _BBN */
+		if (pci_bus_res[busnum].par_bus == (uchar_t)-1 &&
+		    pci_bus_res[busnum].dip == NULL)
+			create_root_bus_dip((uchar_t)busnum);
+		return (AE_CTRL_DEPTH);
+	}
+
+	/* PCI and no _BBN, continue walk */
+	return (AE_OK);
+}
+
+/*
+ * Scan the ACPI namespace for all top-level instances of _BBN
+ * in order to discover childless root-bridges (which enumeration
+ * may not find; root-bridges are inferred by the existence of
+ * children).  This scan should find all root-bridges that have
+ * been enumerated, and any childless root-bridges not enumerated.
+ * Root-bridge for bus 0 may not have a _BBN object.
+ */
+static void
+pci_scan_bbn()
+{
+	void *rv;
+
+	(void) AcpiGetDevices(NULL, pci_process_acpi_device, NULL, &rv);
+}
+
+static void
+pci_unitaddr_cache_init(void)
+{
+
+	puafd_handle = nvf_register_file(&pci_unitaddr_cache_ops);
+	ASSERT(puafd_handle);
+
+	list_create(nvf_list(puafd_handle), sizeof (pua_node_t),
+	    offsetof(pua_node_t, pua_nodes));
+
+	rw_enter(nvf_lock(puafd_handle), RW_WRITER);
+	(void) nvf_read_file(puafd_handle);
+	rw_exit(nvf_lock(puafd_handle));
+}
+
+/*
+ * Format of /etc/devices/pci_unitaddr_persistent:
+ *
+ * The persistent record of unit-address assignments contains
+ * a list of name/value pairs, where name is a string representation
+ * of the "index value" of the PCI root-bus and the value is
+ * the assigned unit-address.
+ *
+ * The "index value" is simply the zero-based index of the PCI
+ * root-buses ordered by physical bus number; first PCI bus is 0,
+ * second is 1, and so on.
+ */
+
+/*ARGSUSED*/
+static int
+pci_cache_unpack_nvlist(nvf_handle_t hdl, nvlist_t *nvl, char *name)
+{
+	long		index;
+	int32_t		value;
+	nvpair_t	*np;
+	pua_node_t	*node;
+
+	np = NULL;
+	while ((np = nvlist_next_nvpair(nvl, np)) != NULL) {
+		/* name of nvpair is index value */
+		if (ddi_strtol(nvpair_name(np), NULL, 10, &index) != 0)
+			continue;
+
+		if (nvpair_value_int32(np, &value) != 0)
+			continue;
+
+		node = kmem_zalloc(sizeof (pua_node_t), KM_SLEEP);
+		node->pua_index = index;
+		node->pua_addr = value;
+		list_insert_tail(nvf_list(hdl), node);
+	}
+
+	pua_cache_valid = 1;
+	return (DDI_SUCCESS);
+}
+
+static int
+pci_cache_pack_nvlist(nvf_handle_t hdl, nvlist_t **ret_nvl)
+{
+	int		rval;
+	nvlist_t	*nvl, *sub_nvl;
+	list_t		*listp;
+	pua_node_t	*pua;
+	char		buf[13];
+
+	ASSERT(RW_WRITE_HELD(nvf_lock(hdl)));
+
+	rval = nvlist_alloc(&nvl, NV_UNIQUE_NAME, KM_SLEEP);
+	if (rval != DDI_SUCCESS) {
+		nvf_error("%s: nvlist alloc error %d\n",
+		    nvf_cache_name(hdl), rval);
+		return (DDI_FAILURE);
+	}
+
+	sub_nvl = NULL;
+	rval = nvlist_alloc(&sub_nvl, NV_UNIQUE_NAME, KM_SLEEP);
+	if (rval != DDI_SUCCESS)
+		goto error;
+
+	listp = nvf_list(hdl);
+	for (pua = list_head(listp); pua != NULL;
+	    pua = list_next(listp, pua)) {
+		(void) snprintf(buf, sizeof (buf), "%d", pua->pua_index);
+		rval = nvlist_add_int32(sub_nvl, buf, pua->pua_addr);
+		if (rval != DDI_SUCCESS)
+			goto error;
+	}
+
+	rval = nvlist_add_nvlist(nvl, "table", sub_nvl);
+	if (rval != DDI_SUCCESS)
+		goto error;
+	nvlist_free(sub_nvl);
+
+	*ret_nvl = nvl;
+	return (DDI_SUCCESS);
+
+error:
+	if (sub_nvl)
+		nvlist_free(sub_nvl);
+	ASSERT(nvl);
+	nvlist_free(nvl);
+	*ret_nvl = NULL;
+	return (DDI_FAILURE);
+}
+
+static void
+pci_cache_free_list(nvf_handle_t hdl)
+{
+	list_t		*listp;
+	pua_node_t	*pua;
+
+	ASSERT(RW_WRITE_HELD(nvf_lock(hdl)));
+
+	listp = nvf_list(hdl);
+	for (pua = list_head(listp); pua != NULL;
+	    pua = list_next(listp, pua)) {
+		list_remove(listp, pua);
+		kmem_free(pua, sizeof (pua_node_t));
+	}
+}
+
+
+static int
+pci_unitaddr_cache_valid(void)
+{
+
+	/* read only, no need for rw lock */
+	return (pua_cache_valid);
+}
+
+
+static int
+pci_bus_unitaddr(int index)
+{
+	pua_node_t	*pua;
+	list_t		*listp;
+	int		addr;
+
+	rw_enter(nvf_lock(puafd_handle), RW_READER);
+
+	addr = -1;	/* default return if no match */
+	listp = nvf_list(puafd_handle);
+	for (pua = list_head(listp); pua != NULL;
+	    pua = list_next(listp, pua)) {
+		if (pua->pua_index == index) {
+			addr = pua->pua_addr;
+			break;
+		}
+	}
+
+	rw_exit(nvf_lock(puafd_handle));
+	return (addr);
+}
+
+static void
+pci_unitaddr_cache_create(void)
+{
+	int		i, index;
+	pua_node_t	*node;
+	list_t		*listp;
+
+	rw_enter(nvf_lock(puafd_handle), RW_WRITER);
+
+	index = 0;
+	listp = nvf_list(puafd_handle);
+	for (i = 0; i <= pci_bios_maxbus; i++) {
+		/* skip non-root (peer) PCI busses */
+		if ((pci_bus_res[i].par_bus != (uchar_t)-1) ||
+		    (pci_bus_res[i].dip == NULL))
+			continue;
+		node = kmem_zalloc(sizeof (pua_node_t), KM_SLEEP);
+		node->pua_index = index++;
+		node->pua_addr = pci_bus_res[i].root_addr;
+		list_insert_tail(listp, node);
+	}
+
+	(void) nvf_mark_dirty(puafd_handle);
+	rw_exit(nvf_lock(puafd_handle));
+	nvf_wake_daemon();
+}
+
+
+/*
  * Enumerate all PCI devices
  */
 void
-pci_setup_tree()
+pci_setup_tree(void)
 {
 	uint_t i, root_bus_addr = 0;
 
 	alloc_res_array();
-	for (i = 0; i <= pci_bios_nbus; i++) {
+	for (i = 0; i <= pci_bios_maxbus; i++) {
 		pci_bus_res[i].par_bus = (uchar_t)-1;
 		pci_bus_res[i].root_addr = (uchar_t)-1;
 		pci_bus_res[i].sub_bus = i;
@@ -170,7 +470,7 @@ pci_setup_tree()
 	/*
 	 * Now enumerate peer busses
 	 *
-	 * We loop till pci_bios_nbus. On most systems, there is
+	 * We loop till pci_bios_maxbus. On most systems, there is
 	 * one more bus at the high end, which implements the ISA
 	 * compatibility bus. We don't care about that.
 	 *
@@ -181,7 +481,7 @@ pci_setup_tree()
 	 *	However, we stop enumerating phantom peers with no
 	 *	device below.
 	 */
-	for (i = 1; i <= pci_bios_nbus; i++) {
+	for (i = 1; i <= pci_bios_maxbus; i++) {
 		if (pci_bus_res[i].dip == NULL) {
 			pci_bus_res[i].root_addr = root_bus_addr++;
 		}
@@ -235,7 +535,7 @@ pci_roots_have_bbn(void)
 	/*
 	 * Scan the PCI busses and look for at least 1 _BBN
 	 */
-	for (i = 0; i <= pci_bios_nbus; i++) {
+	for (i = 0; i <= pci_bios_maxbus; i++) {
 		/* skip non-root (peer) PCI busses */
 		if (pci_bus_res[i].par_bus != (uchar_t)-1)
 			continue;
@@ -301,7 +601,7 @@ pci_renumber_root_busses(void)
 	if (!pci_roots_have_bbn())
 		return;
 
-	for (i = 0; i <= pci_bios_nbus; i++) {
+	for (i = 0; i <= pci_bios_maxbus; i++) {
 		/* skip non-root (peer) PCI busses */
 		if (pci_bus_res[i].par_bus != (uchar_t)-1)
 			continue;
@@ -346,12 +646,12 @@ remove_subtractive_res()
 	int i, j;
 	struct memlist *list;
 
-	for (i = 0; i <= pci_bios_nbus; i++) {
+	for (i = 0; i <= pci_bios_maxbus; i++) {
 		if (pci_bus_res[i].subtractive) {
 			/* remove used io ports */
 			list = pci_bus_res[i].io_used;
 			while (list) {
-				for (j = 0; j <= pci_bios_nbus; j++)
+				for (j = 0; j <= pci_bios_maxbus; j++)
 					(void) memlist_remove(
 					    &pci_bus_res[j].io_avail,
 					    list->address, list->size);
@@ -360,7 +660,7 @@ remove_subtractive_res()
 			/* remove used mem resource */
 			list = pci_bus_res[i].mem_used;
 			while (list) {
-				for (j = 0; j <= pci_bios_nbus; j++) {
+				for (j = 0; j <= pci_bios_maxbus; j++) {
 					(void) memlist_remove(
 					    &pci_bus_res[j].mem_avail,
 					    list->address, list->size);
@@ -373,7 +673,7 @@ remove_subtractive_res()
 			/* remove used prefetchable mem resource */
 			list = pci_bus_res[i].pmem_used;
 			while (list) {
-				for (j = 0; j <= pci_bios_nbus; j++) {
+				for (j = 0; j <= pci_bios_maxbus; j++) {
 					(void) memlist_remove(
 					    &pci_bus_res[j].pmem_avail,
 					    list->address, list->size);
@@ -600,7 +900,7 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 	int rv, cap_ptr, physhi;
 	dev_info_t *dip;
 	uint16_t cmd_reg;
-	struct memlist *list;
+	struct memlist *list, *scratch_list;
 
 	/* skip root (peer) PCI busses */
 	if (pci_bus_res[secbus].par_bus == (uchar_t)-1)
@@ -785,13 +1085,13 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 	io_limit = ((io_limit & 0xf0) << 8) | 0xfff;
 
 	/* Form list of all resources passed (avail + used) */
-	list = memlist_dup(pci_bus_res[secbus].io_avail);
-	memlist_merge(&pci_bus_res[secbus].io_used, &list);
+	scratch_list = memlist_dup(pci_bus_res[secbus].io_avail);
+	memlist_merge(&pci_bus_res[secbus].io_used, &scratch_list);
 
 	if ((pci_bus_res[parbus].io_reprogram ||
 	    (io_base > io_limit) ||
 	    (!(cmd_reg & PCI_COMM_IO))) &&
-	    !list_is_vga_only(list, IO)) {
+	    !list_is_vga_only(scratch_list, IO)) {
 		if (pci_bus_res[secbus].io_used) {
 			memlist_subsume(&pci_bus_res[secbus].io_used,
 			    &pci_bus_res[secbus].io_avail);
@@ -857,6 +1157,7 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 			    bus, dev, func, io_base, io_limit);
 		}
 	}
+	memlist_free_all(&scratch_list);
 
 	/*
 	 * Check memory space as we did I/O space.
@@ -866,13 +1167,13 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 	mem_limit = (uint_t)pci_getw(bus, dev, func, PCI_BCNF_MEM_LIMIT);
 	mem_limit = ((mem_limit & 0xfff0) << 16) | 0xfffff;
 
-	list = memlist_dup(pci_bus_res[secbus].mem_avail);
-	memlist_merge(&pci_bus_res[secbus].mem_used, &list);
+	scratch_list = memlist_dup(pci_bus_res[secbus].mem_avail);
+	memlist_merge(&pci_bus_res[secbus].mem_used, &scratch_list);
 
 	if ((pci_bus_res[parbus].mem_reprogram ||
 	    (mem_base > mem_limit) ||
 	    (!(cmd_reg & PCI_COMM_MAE))) &&
-	    !list_is_vga_only(list, MEM)) {
+	    !list_is_vga_only(scratch_list, MEM)) {
 		if (pci_bus_res[secbus].mem_used) {
 			memlist_subsume(&pci_bus_res[secbus].mem_used,
 			    &pci_bus_res[secbus].mem_avail);
@@ -959,6 +1260,7 @@ fix_ppb_res(uchar_t secbus, boolean_t prog_sub)
 			    bus, dev, func, mem_base, mem_limit);
 		}
 	}
+	memlist_free_all(&scratch_list);
 
 cmd_enable:
 	if (pci_bus_res[secbus].io_avail)
@@ -976,14 +1278,47 @@ pci_reprogram(void)
 	int bus;
 
 	/*
-	 * Excise phantom roots if possible
+	 * Scan ACPI namespace for _BBN objects, make sure that
+	 * childless root-bridges appear in devinfo tree
 	 */
-	pci_renumber_root_busses();
+	pci_scan_bbn();
+	pci_unitaddr_cache_init();
+
+	/*
+	 * Fix-up unit-address assignments if cache is available
+	 */
+	if (pci_unitaddr_cache_valid()) {
+		int pci_regs[] = {0, 0, 0};
+		int	new_addr;
+		int	index = 0;
+
+		for (bus = 0; bus <= pci_bios_maxbus; bus++) {
+			/* skip non-root (peer) PCI busses */
+			if ((pci_bus_res[bus].par_bus != (uchar_t)-1) ||
+			    (pci_bus_res[bus].dip == NULL))
+				continue;
+
+			new_addr = pci_bus_unitaddr(index);
+			if (pci_bus_res[bus].root_addr != new_addr) {
+				/* update reg property for node */
+				pci_regs[0] = pci_bus_res[bus].root_addr =
+				    new_addr;
+				(void) ndi_prop_update_int_array(
+				    DDI_DEV_T_NONE, pci_bus_res[bus].dip,
+				    "reg", (int *)pci_regs, 3);
+			}
+			index++;
+		}
+	} else {
+		/* perform legacy processing */
+		pci_renumber_root_busses();
+		pci_unitaddr_cache_create();
+	}
 
 	/*
 	 * Do root-bus resource discovery
 	 */
-	for (bus = 0; bus <= pci_bios_nbus; bus++) {
+	for (bus = 0; bus <= pci_bios_maxbus; bus++) {
 		/* skip non-root (peer) PCI busses */
 		if (pci_bus_res[bus].par_bus != (uchar_t)-1)
 			continue;
@@ -1013,13 +1348,27 @@ pci_reprogram(void)
 		    isa_res.io_used);
 		memlist_remove_list(&pci_bus_res[bus].mem_avail,
 		    isa_res.mem_used);
+
+		/*
+		 * 3. Exclude <1M address range here in case below reserved
+		 * ranges for BIOS data area, ROM area etc are wrongly reported
+		 * in ACPI resource producer entries for PCI root bus.
+		 * 	00000000 - 000003FF	RAM
+		 * 	00000400 - 000004FF	BIOS data area
+		 * 	00000500 - 0009FFFF	RAM
+		 * 	000A0000 - 000BFFFF	VGA RAM
+		 * 	000C0000 - 000FFFFF	ROM area
+		 */
+		(void) memlist_remove(&pci_bus_res[bus].mem_avail, 0, 0x100000);
+		(void) memlist_remove(&pci_bus_res[bus].pmem_avail,
+		    0, 0x100000);
 	}
 
 	memlist_free_all(&isa_res.io_used);
 	memlist_free_all(&isa_res.mem_used);
 
 	/* add bus-range property for root/peer bus nodes */
-	for (i = 0; i <= pci_bios_nbus; i++) {
+	for (i = 0; i <= pci_bios_maxbus; i++) {
 		/* create bus-range property on root/peer buses */
 		if (pci_bus_res[i].par_bus == (uchar_t)-1)
 			add_bus_range_prop(i);
@@ -1041,10 +1390,10 @@ pci_reprogram(void)
 
 	/* reprogram the non-subtractive PPB */
 	if (pci_reconfig)
-		for (i = 0; i <= pci_bios_nbus; i++)
+		for (i = 0; i <= pci_bios_maxbus; i++)
 			fix_ppb_res(i, B_FALSE);
 
-	for (i = 0; i <= pci_bios_nbus; i++) {
+	for (i = 0; i <= pci_bios_maxbus; i++) {
 		/* configure devices not configured by BIOS */
 		if (pci_reconfig) {
 			/*
@@ -1058,7 +1407,7 @@ pci_reprogram(void)
 	}
 
 	/* All dev programmed, so we can create available prop */
-	for (i = 0; i <= pci_bios_nbus; i++)
+	for (i = 0; i <= pci_bios_maxbus; i++)
 		add_bus_available_prop(i);
 }
 
@@ -1390,7 +1739,7 @@ add_pci_fixes(void)
 {
 	int i;
 
-	for (i = 0; i <= pci_bios_nbus; i++) {
+	for (i = 0; i <= pci_bios_maxbus; i++) {
 		/*
 		 * For each bus, apply needed fixes to the appropriate devices.
 		 * This must be done before the main enumeration loop because
@@ -1517,7 +1866,6 @@ process_devfunc(uchar_t bus, uchar_t dev, uchar_t func, uchar_t header,
 	int pciex = 0;
 	ushort_t is_pci_bridge = 0;
 	struct pci_devfunc *devlist = NULL, *entry = NULL;
-	iommu_private_t *private;
 	gfx_entry_t *gfxp;
 
 	ushort_t deviceid = pci_getw(bus, dev, func, PCI_CONF_DEVID);
@@ -1744,36 +2092,7 @@ process_devfunc(uchar_t bus, uchar_t dev, uchar_t func, uchar_t header,
 		reprogram = 0;	/* don't reprogram pci-ide bridge */
 	}
 
-	/* allocate and set up iommu private */
-	private = kmem_alloc(sizeof (iommu_private_t), KM_SLEEP);
-	private->idp_seg = 0;
-	private->idp_bus = bus;
-	private->idp_devfn = (dev << 3) | func;
-	private->idp_sec = 0;
-	private->idp_sub = 0;
-	private->idp_bbp_type = IOMMU_PPB_NONE;
-	/* record the bridge */
-	private->idp_is_bridge = ((basecl == PCI_CLASS_BRIDGE) &&
-	    (subcl == PCI_BRIDGE_PCI));
-	if (private->idp_is_bridge) {
-		private->idp_sec = pci_getb(bus, dev, func, PCI_BCNF_SECBUS);
-		private->idp_sub = pci_getb(bus, dev, func, PCI_BCNF_SUBBUS);
-		if (pciex && is_pci_bridge)
-			private->idp_bbp_type = IOMMU_PPB_PCIE_PCI;
-		else if (pciex)
-			private->idp_bbp_type = IOMMU_PPB_PCIE_PCIE;
-		else
-			private->idp_bbp_type = IOMMU_PPB_PCI_PCI;
-	}
-	/* record the special devices */
-	private->idp_is_display = (is_display(classcode) ? B_TRUE : B_FALSE);
-	private->idp_is_lpc = ((basecl == PCI_CLASS_BRIDGE) &&
-	    (subcl == PCI_BRIDGE_ISA));
-	private->idp_intel_domain = NULL;
-	/* hook the private to dip */
-	DEVI(dip)->devi_iommu_private = private;
-
-	if (private->idp_is_display == B_TRUE) {
+	if (is_display(classcode)) {
 		gfxp = kmem_zalloc(sizeof (*gfxp), KM_SLEEP);
 		gfxp->g_dip = dip;
 		gfxp->g_prev = NULL;
@@ -1792,6 +2111,7 @@ process_devfunc(uchar_t bus, uchar_t dev, uchar_t func, uchar_t header,
 
 	if (reprogram && (entry != NULL))
 		entry->reprogram = B_TRUE;
+
 }
 
 /*
@@ -2052,21 +2372,32 @@ add_reg_props(dev_info_t *dip, uchar_t bus, uchar_t dev, uchar_t func,
 	 * required size of the address space.  Restore the base
 	 * register contents.
 	 *
-	 * Do not disable I/O and memory access; this isn't necessary
-	 * since no driver is yet attached to this device, and disabling
-	 * I/O and memory access has the side-effect of disabling PCI-PCI
-	 * bridge mappings, which makes the bridge transparent to secondary-
-	 * bus activity (see sections 4.1-4.3 of the PCI-PCI Bridge
-	 * Spec V1.2).
+	 * Do not disable I/O and memory access for bridges; this
+	 * has the side-effect of making the bridge transparent to
+	 * secondary-bus activity (see sections 4.1-4.3 of the
+	 * PCI-PCI Bridge Spec V1.2).  For non-bridges, disable
+	 * I/O and memory access to avoid difficulty with USB
+	 * emulation (see OHCI spec1.0a appendix B
+	 * "Host Controller Mapping")
 	 */
 	end = PCI_CONF_BASE0 + max_basereg * sizeof (uint_t);
 	for (j = 0, offset = PCI_CONF_BASE0; offset < end;
 	    j++, offset += bar_sz) {
+		uint_t	command;
+
 		/* determine the size of the address space */
 		base = pci_getl(bus, dev, func, offset);
+		if (baseclass != PCI_CLASS_BRIDGE) {
+			command = (uint_t)pci_getw(bus, dev, func,
+			    PCI_CONF_COMM);
+			pci_putw(bus, dev, func, PCI_CONF_COMM,
+			    command & ~(PCI_COMM_MAE | PCI_COMM_IO));
+		}
 		pci_putl(bus, dev, func, offset, 0xffffffff);
 		value = pci_getl(bus, dev, func, offset);
 		pci_putl(bus, dev, func, offset, base);
+		if (baseclass != PCI_CLASS_BRIDGE)
+			pci_putw(bus, dev, func, PCI_CONF_COMM, command);
 
 		/* construct phys hi,med.lo, size hi, lo */
 		if ((pciide && j < 4) || (base & PCI_BASE_SPACE_IO)) {
@@ -2423,8 +2754,8 @@ add_ppb_props(dev_info_t *dip, uchar_t bus, uchar_t dev, uchar_t func,
 	 * Some BIOSes lie about max pci busses, we allow for
 	 * such mistakes here
 	 */
-	if (subbus > pci_bios_nbus) {
-		pci_bios_nbus = subbus;
+	if (subbus > pci_bios_maxbus) {
+		pci_bios_maxbus = subbus;
 		alloc_res_array();
 	}
 
@@ -2857,7 +3188,7 @@ alloc_res_array(void)
 	int old_max;
 	void *old_res;
 
-	if (array_max > pci_bios_nbus + 1)
+	if (array_max > pci_bios_maxbus + 1)
 		return;	/* array is big enough */
 
 	old_max = array_max;
@@ -2866,7 +3197,7 @@ alloc_res_array(void)
 	if (array_max == 0)
 		array_max = 16;	/* start with a reasonable number */
 
-	while (array_max < pci_bios_nbus + 1)
+	while (array_max < pci_bios_maxbus + 1)
 		array_max <<= 1;
 	pci_bus_res = (struct pci_bus_resource *)kmem_zalloc(
 	    array_max * sizeof (struct pci_bus_resource), KM_SLEEP);

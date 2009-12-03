@@ -58,7 +58,7 @@
  *
  */
 
-const uint16_t auimpl_db_table[AUDIO_DB_SIZE + 1] = {
+static const uint16_t auimpl_db_table[AUDIO_DB_SIZE + 1] = {
 	0,   0,   1,   1,   1,   1,   1,   1,   2,   2,
 	2,   2,   3,   3,   4,   4,   5,   5,   6,   7,
 	8,   9,   10,  11,  12,  14,  16,  18,  20,  22,
@@ -66,6 +66,10 @@ const uint16_t auimpl_db_table[AUDIO_DB_SIZE + 1] = {
 	80,  90,  101, 114, 128, 143, 161, 181, 203, 228,
 	256
 };
+
+static list_t			auimpl_clients;
+static krwlock_t		auimpl_client_lock;
+static audio_client_ops_t	*audio_client_ops[AUDIO_MN_TYPE_MASK + 1];
 
 void *
 auclnt_get_private(audio_client_t *c)
@@ -641,7 +645,8 @@ auclnt_get_channels(audio_stream_t *sp)
 	return (sp->s_user_parms->p_nchan);
 }
 
-void
+
+static void
 auimpl_set_gain_master(audio_stream_t *sp, uint8_t gain)
 {
 	uint32_t	scaled;
@@ -669,10 +674,38 @@ auimpl_set_gain_master(audio_stream_t *sp, uint8_t gain)
 		sp->s_gain_eff = sp->s_gain_scaled;
 	}
 	mutex_exit(&sp->s_lock);
+}
 
-	/*
-	 * No need to notify clients, since they can't see this update.
-	 */
+int
+auimpl_set_pcmvol(void *arg, uint64_t val)
+{
+	audio_dev_t	*d = arg;
+	list_t		*l = &d->d_clients;
+	audio_client_t	*c;
+
+	if (val > 100) {
+		return (EINVAL);
+	}
+	rw_enter(&auimpl_client_lock, RW_WRITER);
+	d->d_pcmvol = val & 0xff;
+	rw_downgrade(&auimpl_client_lock);
+
+	for (c = list_head(l); c; c = list_next(l, c)) {
+		/* don't need to check is_active here, its safe */
+		auimpl_set_gain_master(&c->c_ostream, (uint8_t)val);
+	}
+	rw_exit(&auimpl_client_lock);
+
+	return (0);
+}
+
+int
+auimpl_get_pcmvol(void *arg, uint64_t *val)
+{
+	audio_dev_t	*d = arg;
+
+	*val = d->d_pcmvol;
+	return (0);
 }
 
 void
@@ -706,7 +739,7 @@ auclnt_set_gain(audio_stream_t *sp, uint8_t gain)
 	}
 	mutex_exit(&sp->s_lock);
 
-	auclnt_notify_dev(sp->s_client->c_dev);
+	atomic_inc_uint(&sp->s_client->c_dev->d_serial);
 }
 
 uint8_t
@@ -734,7 +767,7 @@ auclnt_set_muted(audio_stream_t *sp, boolean_t muted)
 	}
 	mutex_exit(&sp->s_lock);
 
-	auclnt_notify_dev(sp->s_client->c_dev);
+	atomic_inc_uint(&sp->s_client->c_dev->d_serial);
 }
 
 boolean_t
@@ -795,7 +828,7 @@ auclnt_set_paused(audio_stream_t *sp)
 
 	auclnt_stop(sp);
 
-	auclnt_notify_dev(sp->s_client->c_dev);
+	atomic_inc_uint(&sp->s_client->c_dev->d_serial);
 }
 
 void
@@ -841,10 +874,6 @@ auclnt_get_oflag(audio_client_t *c)
  * These routines should not be accessed by client "personality"
  * implementations, but are for private framework use only.
  */
-
-static list_t			auimpl_clients;
-static krwlock_t		auimpl_client_lock;
-static audio_client_ops_t	*audio_client_ops[AUDIO_MN_TYPE_MASK + 1];
 
 void
 auimpl_client_init(void)
@@ -940,64 +969,6 @@ audio_stream_fini(audio_stream_t *sp)
 	}
 }
 
-void
-auimpl_client_task(void *arg)
-{
-	audio_client_t		*c = arg;
-
-	mutex_enter(&c->c_lock);
-
-	for (;;) {
-		if (c->c_closing) {
-			break;
-		}
-
-		if (c->c_do_output) {
-			c->c_do_output = B_FALSE;
-
-			mutex_exit(&c->c_lock);
-			if (c->c_output != NULL)
-				c->c_output(c);
-			mutex_enter(&c->c_lock);
-			continue;
-		}
-
-		if (c->c_do_input) {
-			c->c_do_input = B_FALSE;
-
-			mutex_exit(&c->c_lock);
-			if (c->c_input != NULL)
-				c->c_input(c);
-			mutex_enter(&c->c_lock);
-			continue;
-		}
-
-		if (c->c_do_notify) {
-			c->c_do_notify = B_FALSE;
-
-			mutex_exit(&c->c_lock);
-			if (c->c_notify != NULL)
-				c->c_notify(c);
-			mutex_enter(&c->c_lock);
-			continue;
-		}
-
-		if (c->c_do_drain) {
-			c->c_do_drain = B_FALSE;
-
-			mutex_exit(&c->c_lock);
-			if (c->c_drain != NULL)
-				c->c_drain(c);
-			mutex_enter(&c->c_lock);
-			continue;
-		}
-
-		/* if we got here, we had no work to do */
-		cv_wait(&c->c_cv, &c->c_lock);
-	}
-	mutex_exit(&c->c_lock);
-}
-
 int
 auclnt_start_drain(audio_client_t *c)
 {
@@ -1051,8 +1022,6 @@ auimpl_client_create(dev_t dev)
 	list_t			*list = &auimpl_clients;
 	minor_t			minor;
 	audio_dev_t		*d;
-	char			scratch[80];
-	static uint64_t		unique = 0;
 
 	/* validate minor number */
 	minor = getminor(dev) & AUDIO_MN_TYPE_MASK;
@@ -1086,14 +1055,6 @@ auimpl_client_create(dev_t dev)
 	c->c_origminor =	getminor(dev);
 	c->c_ops =		*ops;
 
-	(void) snprintf(scratch, sizeof (scratch), "auclnt%" PRIx64,
-	    atomic_inc_64_nv(&unique));
-	c->c_tq = ddi_taskq_create(NULL, scratch, 1, TASKQ_DEFAULTPRI, 0);
-	if (c->c_tq == NULL) {
-		audio_dev_warn(d, "client taskq_create failed");
-		goto failed;
-	}
-
 	/*
 	 * We hold the client lock here.
 	 */
@@ -1120,9 +1081,6 @@ auimpl_client_create(dev_t dev)
 
 failed:
 	auimpl_dev_release(d);
-	if (c->c_tq != NULL) {
-		ddi_taskq_destroy(c->c_tq);
-	}
 	audio_stream_fini(&c->c_ostream);
 	audio_stream_fini(&c->c_istream);
 	mutex_destroy(&c->c_lock);
@@ -1146,14 +1104,28 @@ auimpl_client_destroy(audio_client_t *c)
 	auimpl_dev_release(c->c_dev);
 	c->c_dev = NULL;
 
-	ddi_taskq_destroy(c->c_tq);
-
 	mutex_destroy(&c->c_lock);
 	cv_destroy(&c->c_cv);
 
 	audio_stream_fini(&c->c_istream);
 	audio_stream_fini(&c->c_ostream);
 	kmem_free(c, sizeof (*c));
+}
+
+void
+auimpl_client_activate(audio_client_t *c)
+{
+	rw_enter(&auimpl_client_lock, RW_WRITER);
+	c->c_is_active = B_TRUE;
+	rw_exit(&auimpl_client_lock);
+}
+
+void
+auimpl_client_deactivate(audio_client_t *c)
+{
+	rw_enter(&auimpl_client_lock, RW_WRITER);
+	c->c_is_active = B_FALSE;
+	rw_exit(&auimpl_client_lock);
 }
 
 void
@@ -1165,21 +1137,16 @@ auclnt_close(audio_client_t *c)
 	auclnt_stop(&c->c_istream);
 	auclnt_stop(&c->c_ostream);
 
-	rw_enter(&d->d_clnt_lock, RW_WRITER);
+	rw_enter(&auimpl_client_lock, RW_WRITER);
 	list_remove(&d->d_clients, c);
-	rw_exit(&d->d_clnt_lock);
+	rw_exit(&auimpl_client_lock);
 
 	mutex_enter(&c->c_lock);
 	/* if in transition need to wait for other thread to release */
 	while (c->c_refcnt) {
 		cv_wait(&c->c_cv, &c->c_lock);
 	}
-	c->c_closing = B_TRUE;
-	cv_broadcast(&c->c_cv);
 	mutex_exit(&c->c_lock);
-
-	/* make sure taskq has drained */
-	ddi_taskq_wait(c->c_tq);
 
 	/* release any engines that we were holding */
 	auimpl_engine_close(&c->c_ostream);
@@ -1212,7 +1179,7 @@ auclnt_hold_by_devt(dev_t dev)
 	for (c = list_head(list); c != NULL; c = list_next(list, c)) {
 		if ((c->c_major == mj) && (c->c_minor == mn)) {
 			mutex_enter(&c->c_lock);
-			if (c->c_is_open) {
+			if (c->c_is_active) {
 				c->c_refcnt++;
 				mutex_exit(&c->c_lock);
 			} else {
@@ -1237,6 +1204,12 @@ auclnt_release(audio_client_t *c)
 	mutex_exit(&c->c_lock);
 }
 
+unsigned
+auclnt_dev_get_serial(audio_dev_t *d)
+{
+	return (d->d_serial);
+}
+
 void
 auclnt_dev_walk_clients(audio_dev_t *d,
     int (*walker)(audio_client_t *, void *),
@@ -1246,9 +1219,11 @@ auclnt_dev_walk_clients(audio_dev_t *d,
 	audio_client_t	*c;
 	int		rv;
 
-	rw_enter(&d->d_clnt_lock, RW_READER);
+	rw_enter(&auimpl_client_lock, RW_READER);
 restart:
 	for (c = list_head(l); c != NULL; c = list_next(l, c)) {
+		if (!c->c_is_active)
+			continue;
 		rv = (walker(c, arg));
 		if (rv == AUDIO_WALK_STOP) {
 			break;
@@ -1256,7 +1231,7 @@ restart:
 			goto restart;
 		}
 	}
-	rw_exit(&d->d_clnt_lock);
+	rw_exit(&auimpl_client_lock);
 }
 
 
@@ -1305,23 +1280,17 @@ auclnt_open(audio_client_t *c, unsigned fmts, int oflag)
 		}
 	}
 
-	if (ddi_taskq_dispatch(c->c_tq, auimpl_client_task, c, DDI_NOSLEEP) !=
-	    DDI_SUCCESS) {
-		audio_dev_warn(d, "unable to start client taskq");
-		rv = ENOMEM;
-	}
-
 done:
 	if (rv != 0) {
 		/* close any engines that we opened */
 		auimpl_engine_close(&c->c_ostream);
 		auimpl_engine_close(&c->c_istream);
 	} else {
-		rw_enter(&d->d_clnt_lock, RW_WRITER);
+		rw_enter(&auimpl_client_lock, RW_WRITER);
 		list_insert_tail(&d->d_clients, c);
 		c->c_ostream.s_gain_master = d->d_pcmvol;
 		c->c_istream.s_gain_master = 100;
-		rw_exit(&d->d_clnt_lock);
+		rw_exit(&auimpl_client_lock);
 		auclnt_set_gain(&c->c_ostream, 100);
 		auclnt_set_gain(&c->c_istream, 100);
 	}
@@ -1457,22 +1426,6 @@ auclnt_get_dev_capab(audio_dev_t *dev)
 	/* AC3: deal with formats that don't support mixing */
 
 	return (caps);
-}
-
-void
-auclnt_notify_dev(audio_dev_t *dev)
-{
-	list_t *l = &dev->d_clients;
-	audio_client_t *c;
-
-	rw_enter(&dev->d_clnt_lock, RW_READER);
-	for (c = list_head(l); c != NULL; c = list_next(l, c)) {
-		mutex_enter(&c->c_lock);
-		c->c_do_notify = B_TRUE;
-		cv_broadcast(&c->c_cv);
-		mutex_exit(&c->c_lock);
-	}
-	rw_exit(&dev->d_clnt_lock);
 }
 
 uint64_t

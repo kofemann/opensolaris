@@ -95,14 +95,18 @@
 #include <sys/brand.h>
 #include <libcontract.h>
 #include <libcontract_priv.h>
+#include <sys/brand.h>
 #include <sys/contract/process.h>
 #include <sys/ctfs.h>
+#include <libdladm.h>
+#include <sys/dls_mgmt.h>
 
 #include <libzonecfg.h>
 #include "zoneadmd.h"
 
 static char *progname;
 char *zone_name;	/* zone which we are managing */
+char default_brand[MAXNAMELEN];
 char brand_name[MAXNAMELEN];
 boolean_t zone_isnative;
 boolean_t zone_iscluster;
@@ -730,8 +734,9 @@ do_subproc(zlog_t *zlogp, char *cmdbuf, char **retstr)
 	}
 
 	while (fgets(inbuf, 1024, file) != NULL) {
-		if (retstr == NULL && zlogp != &logsys) {
-			zerror(zlogp, B_FALSE, "%s", inbuf);
+		if (retstr == NULL) {
+			if (zlogp != &logsys)
+				zerror(zlogp, B_FALSE, "%s", inbuf);
 		} else {
 			char *p;
 
@@ -771,6 +776,10 @@ zone_bootup(zlog_t *zlogp, const char *bootargs, int zstate)
 	char cmdbuf[MAXPATHLEN];
 	fs_callback_t cb;
 	brand_handle_t bh;
+	zone_iptype_t iptype;
+	boolean_t links_loaded = B_FALSE;
+	dladm_status_t status;
+	char errmsg[DLADM_STRSIZE];
 	int err;
 
 	if (brand_prestatechg(zlogp, zstate, Z_BOOT) != 0)
@@ -858,6 +867,22 @@ zone_bootup(zlog_t *zlogp, const char *bootargs, int zstate)
 	}
 
 	/*
+	 * Exclusive stack zones interact with the dlmgmtd running in the
+	 * global zone.  dladm_zone_boot() tells dlmgmtd that this zone is
+	 * booting, and loads its datalinks from the zone's datalink
+	 * configuration file.
+	 */
+	if (vplat_get_iptype(zlogp, &iptype) == 0 && iptype == ZS_EXCLUSIVE) {
+		status = dladm_zone_boot(dld_handle, zoneid);
+		if (status != DLADM_STATUS_OK) {
+			zerror(zlogp, B_FALSE, "unable to load zone datalinks: "
+			    " %s", dladm_status2str(status, errmsg));
+			goto bad;
+		}
+		links_loaded = B_TRUE;
+	}
+
+	/*
 	 * If there is a brand 'boot' callback, execute it now to give the
 	 * brand one last chance to do any additional setup before the zone
 	 * is booted.
@@ -894,6 +919,8 @@ bad:
 	 * state, RUNNING, and then invoke the hook as if we're halting.
 	 */
 	(void) brand_poststatechg(zlogp, ZONE_STATE_RUNNING, Z_HALT);
+	if (links_loaded)
+		(void) dladm_zone_halt(dld_handle, zoneid);
 	return (-1);
 }
 
@@ -1213,11 +1240,11 @@ server(void *cookie, char *args, size_t alen, door_desc_t *dp,
 			eventstream_write(Z_EVT_ZONE_READIED);
 
 			/*
-			 * Get a handle to the native brand info.
-			 * We must always use the native brand file system
+			 * Get a handle to the default brand info.
+			 * We must always use the default brand file system
 			 * list when mounting the zone.
 			 */
-			if ((bh = brand_open(NATIVE_BRAND_NAME)) == NULL) {
+			if ((bh = brand_open(default_brand)) == NULL) {
 				rval = -1;
 				break;
 			}
@@ -1721,15 +1748,43 @@ main(int argc, char *argv[])
 		return (1);
 	}
 
+	if (zonecfg_default_brand(default_brand,
+	    sizeof (default_brand)) != Z_OK) {
+		zerror(zlogp, B_FALSE, "unable to determine default brand");
+		return (1);
+	}
+
 	/* Get a handle to the brand info for this zone */
-	if ((zone_get_brand(zone_name, brand_name, sizeof (brand_name))
-	    != Z_OK) || (bh = brand_open(brand_name)) == NULL) {
+	if (zone_get_brand(zone_name, brand_name, sizeof (brand_name))
+	    != Z_OK) {
 		zerror(zlogp, B_FALSE, "unable to determine zone brand");
 		return (1);
 	}
-	zone_isnative = brand_is_native(bh);
-	zone_iscluster = (strcmp(brand_name, CLUSTER_BRAND_NAME) == 0);
+	zone_isnative = (strcmp(brand_name, NATIVE_BRAND_NAME) == 0);
 	zone_islabeled = (strcmp(brand_name, LABELED_BRAND_NAME) == 0);
+
+	/*
+	 * In the alternate root environment, the only supported
+	 * operations are mount and unmount.  In this case, just treat
+	 * the zone as native if it is cluster.  Cluster zones can be
+	 * native for the purpose of LU or upgrade, and the cluster
+	 * brand may not exist in the miniroot (such as in net install
+	 * upgrade).
+	 */
+	if (strcmp(brand_name, CLUSTER_BRAND_NAME) == 0) {
+		zone_iscluster = B_TRUE;
+		if (zonecfg_in_alt_root()) {
+			(void) strlcpy(brand_name, default_brand,
+			    sizeof (brand_name));
+		}
+	} else {
+		zone_iscluster = B_FALSE;
+	}
+
+	if ((bh = brand_open(brand_name)) == NULL) {
+		zerror(zlogp, B_FALSE, "unable to open zone brand");
+		return (1);
+	}
 
 	/* Get state change brand hooks. */
 	if (brand_callback_init(bh, zone_name) == -1) {
@@ -2002,10 +2057,16 @@ main(int argc, char *argv[])
 	 * fdetach(), the door will go unreferenced; once any
 	 * outstanding requests (like the door thread doing Z_HALT) are
 	 * done, the door will get an UNREF notification; when it handles
-	 * the UNREF, the door server will cause the exit.
+	 * the UNREF, the door server will cause the exit.  It's possible
+	 * that fdetach() can fail because the file is in use, in which
+	 * case we'll retry the operation.
 	 */
 	assert(!MUTEX_HELD(&lock));
-	(void) fdetach(zone_door_path);
+	for (;;) {
+		if ((fdetach(zone_door_path) == 0) || (errno != EBUSY))
+			break;
+		yield();
+	}
 
 	for (;;)
 		(void) pause();

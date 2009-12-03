@@ -44,16 +44,13 @@
 
 #include <smbsrv/libsmbrdr.h>
 #include <smbsrv/netbios.h>
-#include <smbsrv/cifs.h>
-#include <smbsrv/ntstatus.h>
 #include <smbrdr.h>
-#include <smbrdr_ipc_util.h>
 
 #define	SMBRDR_DOMAIN_MAX		32
 
 static uint16_t smbrdr_ports[] = {
-	SMB_SRVC_TCP_PORT,
-	SSN_SRVC_TCP_PORT
+	IPPORT_SMB,
+	IPPORT_NETBIOS_SSN
 };
 
 static int smbrdr_nports = sizeof (smbrdr_ports) / sizeof (smbrdr_ports[0]);
@@ -66,7 +63,7 @@ static struct sdb_session *smbrdr_session_init(char *, char *);
 static int smbrdr_trnsprt_connect(struct sdb_session *, uint16_t);
 static int smbrdr_session_connect(char *, char *);
 static int smbrdr_smb_negotiate(struct sdb_session *);
-static int smbrdr_echo(struct sdb_session *);
+static int smbrdr_smb_echo(struct sdb_session *);
 static void smbrdr_session_disconnect(struct sdb_session *, int);
 
 
@@ -77,21 +74,10 @@ smbrdr_session_clear(struct sdb_session *session)
 }
 
 /*
- * Entry pointy for smbrdr initialization.
- */
-void
-smbrdr_init(void)
-{
-	smbrdr_ipc_init();
-}
-
-/*
- * mlsvc_disconnect
- *
  * Disconnects the session with given server.
  */
 void
-mlsvc_disconnect(char *server)
+smbrdr_disconnect(const char *server)
 {
 	struct sdb_session *session;
 
@@ -231,9 +217,8 @@ smbrdr_trnsprt_connect(struct sdb_session *sess, uint16_t port)
 	struct sockaddr_in sin;
 	struct sockaddr_in6 sin6;
 	int sock, rc;
-	mts_wchar_t unicode_server_name[SMB_PI_MAX_DOMAIN];
+	smb_wchar_t unicode_server_name[SMB_PI_MAX_DOMAIN];
 	char server_name[SMB_PI_MAX_DOMAIN];
-	unsigned int cpid = oem_get_smb_cpid();
 	char ipstr[INET6_ADDRSTRLEN];
 
 	if ((sock = socket(sess->srv_ipaddr.a_family, SOCK_STREAM, 0)) <= 0) {
@@ -265,10 +250,10 @@ smbrdr_trnsprt_connect(struct sdb_session *sess, uint16_t port)
 		return (-1);
 	}
 
-	(void) mts_mbstowcs(unicode_server_name, sess->srv_name,
+	(void) smb_mbstowcs(unicode_server_name, sess->srv_name,
 	    SMB_PI_MAX_DOMAIN);
-	rc = unicodestooems(server_name, unicode_server_name,
-	    SMB_PI_MAX_DOMAIN, cpid);
+	rc = ucstooem(server_name, unicode_server_name, SMB_PI_MAX_DOMAIN,
+	    OEM_CPG_850);
 	if (rc == 0) {
 		syslog(LOG_DEBUG, "smbrdr: unicode conversion failed");
 		if (sock != 0)
@@ -282,7 +267,7 @@ smbrdr_trnsprt_connect(struct sdb_session *sess, uint16_t port)
 	 * Otherwise, we're doing NetBIOS-less SMB, i.e. SMB over TCP,
 	 * which is typically on port 445.
 	 */
-	if (port == SSN_SRVC_TCP_PORT) {
+	if (port == IPPORT_NETBIOS_SSN) {
 		if (smb_getnetbiosname(hostname, MAXHOSTNAMELEN) != 0) {
 			syslog(LOG_DEBUG, "smbrdr: no hostname");
 			if (sock != 0)
@@ -429,11 +414,11 @@ smbrdr_session_init(char *domain_controller, char *domain)
 			smbrdr_session_clear(session);
 			(void) strlcpy(session->srv_name, domain_controller,
 			    MAXHOSTNAMELEN);
-			(void) utf8_strupr(session->srv_name);
+			(void) smb_strupr(session->srv_name);
 
 			session->srv_ipaddr = ipaddr;
 			(void) strlcpy(session->domain, domain, MAXHOSTNAMELEN);
-			(void) utf8_strupr(session->domain);
+			(void) smb_strupr(session->domain);
 
 			(void) smb_config_getstr(SMB_CI_NBSCOPE, session->scope,
 			    sizeof (session->scope));
@@ -532,7 +517,7 @@ smbrdr_session_unlock(struct sdb_session *session)
  *            the pointer.
  */
 struct sdb_session *
-smbrdr_session_lock(char *server, char *username, int lmode)
+smbrdr_session_lock(const char *server, const char *username, int lmode)
 {
 	struct sdb_session *session;
 	int i;
@@ -563,39 +548,6 @@ smbrdr_session_lock(char *server, char *username, int lmode)
 	}
 
 	return (NULL);
-}
-
-/*
- * smbrdr_session_info
- *
- * Return session information related to the specified
- * named pipe (fid).
- */
-int
-smbrdr_session_info(int fid, smbrdr_session_info_t *si)
-{
-	struct sdb_session *session;
-	struct sdb_netuse *netuse;
-	struct sdb_ofile *ofile;
-
-	if (si == NULL)
-		return (-1);
-
-	if ((ofile = smbrdr_ofile_get(fid)) == NULL) {
-		syslog(LOG_DEBUG,
-		    "smbrdr_session_info: unknown file (%d)", fid);
-		return (-1);
-	}
-
-	netuse = ofile->netuse;
-	session = netuse->session;
-
-	si->si_server_os = session->remote_os;
-	si->si_server_lm = session->remote_lm;
-	si->si_dc_type = session->pdc_type;
-
-	smbrdr_ofile_put(ofile);
-	return (0);
 }
 
 /*
@@ -635,11 +587,8 @@ smbrdr_dump_sessions(void)
 	}
 }
 
-/*
- * mlsvc_echo
- */
 int
-mlsvc_echo(char *server)
+smbrdr_echo(const char *server)
 {
 	struct sdb_session *session;
 	int res = 0;
@@ -647,7 +596,7 @@ mlsvc_echo(char *server)
 	if ((session = smbrdr_session_lock(server, 0, SDB_SLCK_WRITE)) == 0)
 		return (1);
 
-	if (smbrdr_echo(session) != 0) {
+	if (smbrdr_smb_echo(session) != 0) {
 		session->state = SDB_SSTATE_STALE;
 		res = -1;
 	}
@@ -657,8 +606,6 @@ mlsvc_echo(char *server)
 }
 
 /*
- * smbrdr_echo
- *
  * This request can be used to test the connection to the server. The
  * server should echo the data sent. The server should ignore the tid
  * in the header, so this request when there are no tree connections.
@@ -667,7 +614,7 @@ mlsvc_echo(char *server)
  * Return 0 on success. Otherwise return a -ve error code.
  */
 static int
-smbrdr_echo(struct sdb_session *session)
+smbrdr_smb_echo(struct sdb_session *session)
 {
 	static char *echo_str = "smbrdr";
 	smbrdr_handle_t srh;

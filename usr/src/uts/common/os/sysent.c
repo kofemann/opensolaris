@@ -109,7 +109,6 @@ int	setpgrp();
 int	setuid();
 uintptr_t	shmsys();
 uint64_t	sidsys();
-int	ssig();
 int	sigprocmask();
 int	sigsuspend();
 int	sigaltstack();
@@ -132,6 +131,7 @@ int	umount();
 int	umount2();
 int	unlink();
 int	utime();
+int	utimesys();
 int64_t	utssys32();
 int64_t	utssys64();
 int	uucopy();
@@ -485,7 +485,7 @@ struct sysent sysent[NSYSCALL] =
 	/* 45 */ SYSENT_LOADABLE(),			/* (was proc lock) */
 	/* 46 */ SYSENT_CI("setgid",		setgid,		1),
 	/* 47 */ SYSENT_2CI("getgid",		getgid,		0),
-	/* 48 */ SYSENT_CI("sig",		ssig,		2),
+	/* 48 */ SYSENT_LOADABLE(),			/* (was ssig) */
 	/* 49 */ SYSENT_LOADABLE(),			/* msgsys */
 	/* 50 */ IF_x86(
 			SYSENT_CI("sysi86",	sysi86,		4),
@@ -565,7 +565,7 @@ struct sysent sysent[NSYSCALL] =
 	/* 109 */ IF_x86(
 			SYSENT_AP("hrtsys",	hrtsys,		5),
 			SYSENT_LOADABLE()),
-	/* 110 */ SYSENT_LOADABLE(),
+	/* 110 */ SYSENT_CI("utimesys",		utimesys,	5),
 	/* 111 */ SYSENT_CI("sigresend",	sigresend,	3),
 	/* 112 */ SYSENT_CL("priocntlsys",	priocntlsys,	5),
 	/* 113 */ SYSENT_CL("pathconf",		pathconf,	2),
@@ -697,7 +697,7 @@ struct sysent sysent[NSYSCALL] =
 		SYSENT_CI("sparc_utrap_install", sparc_utrap_install, 5),
 		SYSENT_NOSYS()),
 	/* 209 */ SYSENT_CI("resolvepath",	resolvepath,	3),
-	/* 210 */ SYSENT_CI("lwp_mutex_timedlock", lwp_mutex_timedlock,	2),
+	/* 210 */ SYSENT_CI("lwp_mutex_timedlock", lwp_mutex_timedlock,	3),
 	/* 211 */ SYSENT_CI("lwp_sema_timedwait", lwp_sema_timedwait,	3),
 	/* 212 */ SYSENT_CI("lwp_rwlock_sys",	lwp_rwlock_sys,	3),
 	/*
@@ -771,7 +771,7 @@ struct sysent sysent[NSYSCALL] =
 	/* 248 */ SYSENT_CI("ntp_gettime",	ntp_gettime,	1),
 	/* 249 */ SYSENT_CI("ntp_adjtime",	ntp_adjtime,	1),
 	/* 250 */ SYSENT_CI("lwp_mutex_unlock",	lwp_mutex_unlock,	1),
-	/* 251 */ SYSENT_CI("lwp_mutex_trylock", lwp_mutex_trylock,	1),
+	/* 251 */ SYSENT_CI("lwp_mutex_trylock", lwp_mutex_trylock,	2),
 	/* 252 */ SYSENT_CI("lwp_mutex_register", lwp_mutex_register,	2),
 	/* 253 */ SYSENT_CI("cladm",		cladm,		3),
 	/* 254 */ SYSENT_CI("uucopy",		uucopy,		3),
@@ -888,7 +888,7 @@ struct sysent sysent32[NSYSCALL] =
 	/* 45 */ SYSENT_LOADABLE32(),			/* (was proc lock) */
 	/* 46 */ SYSENT_CI("setgid",		setgid,		1),
 	/* 47 */ SYSENT_2CI("getgid",		getgid,		0),
-	/* 48 */ SYSENT_CI("sig",		ssig,		2),
+	/* 48 */ SYSENT_LOADABLE32(),			/* (was ssig) */
 	/* 49 */ SYSENT_LOADABLE32(),			/* msgsys */
 	/* 50 */ IF_386_ABI(
 			SYSENT_CI("sysi86",	sysi86,		4),
@@ -962,7 +962,7 @@ struct sysent sysent32[NSYSCALL] =
 	/* 109 */ IF_x86(
 			SYSENT_AP("hrtsys",	hrtsys,		5),
 			SYSENT_LOADABLE32()),
-	/* 110 */ SYSENT_LOADABLE32(),
+	/* 110 */ SYSENT_CI("utimesys",		utimesys,	5),
 	/* 111 */ SYSENT_CI("sigresend",	sigresend,	3),
 	/* 112 */ SYSENT_CI("priocntlsys",	priocntlsys,	5),
 	/* 113 */ SYSENT_CI("pathconf",		pathconf,	2),
@@ -1073,7 +1073,7 @@ struct sysent sysent32[NSYSCALL] =
 	/* 207 */ SYSENT_LOADABLE32(),		/* pset */
 	/* 208 */ SYSENT_LOADABLE32(),
 	/* 209 */ SYSENT_CI("resolvepath",	resolvepath,	3),
-	/* 210 */ SYSENT_CI("lwp_mutex_timedlock", lwp_mutex_timedlock, 2),
+	/* 210 */ SYSENT_CI("lwp_mutex_timedlock", lwp_mutex_timedlock, 3),
 	/* 211 */ SYSENT_CI("lwp_sema_timedwait", lwp_sema_timedwait,	3),
 	/* 212 */ SYSENT_CI("lwp_rwlock_sys",	lwp_rwlock_sys,	3),
 	/*
@@ -1117,7 +1117,7 @@ struct sysent sysent32[NSYSCALL] =
 	/* 248 */ SYSENT_CI("ntp_gettime",	ntp_gettime,	1),
 	/* 249 */ SYSENT_CI("ntp_adjtime",	ntp_adjtime,	1),
 	/* 250 */ SYSENT_CI("lwp_mutex_unlock",	lwp_mutex_unlock,	1),
-	/* 251 */ SYSENT_CI("lwp_mutex_trylock", lwp_mutex_trylock,	1),
+	/* 251 */ SYSENT_CI("lwp_mutex_trylock", lwp_mutex_trylock,	2),
 	/* 252 */ SYSENT_CI("lwp_mutex_register", lwp_mutex_register,	2),
 	/* 253 */ SYSENT_CI("cladm",		cladm,		3),
 	/* 254 */ SYSENT_CI("uucopy",		uucopy,		3),

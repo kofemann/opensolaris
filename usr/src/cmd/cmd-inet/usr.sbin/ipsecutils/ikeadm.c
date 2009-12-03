@@ -1284,6 +1284,8 @@ dbgstr(int bit)
 		return (gettext("Door interface"));
 	case D_CONFIG:
 		return (gettext("Config file processing"));
+	case D_LABEL:
+		return (gettext("MAC label processing"));
 	default:
 		(void) snprintf(rtn, MAXLINESIZE,
 		    gettext("<unknown flag 0x%x>"), bit);
@@ -1796,50 +1798,40 @@ print_keys(char *prefix, ike_p1_key_t *keyp, int size)
 		case IKE_KEY_PRESHARED:
 			(void) printf(gettext("%s Pre-shared key (%d bytes): "),
 			    prefix, len);
-			(void) dump_key((uint8_t *)(p + 1), SADB_8TO1(len),
-			    stdout);
 			break;
 		case IKE_KEY_SKEYID:
 			(void) printf(gettext("%s SKEYID (%d bytes): "),
 			    prefix, len);
-			(void) dump_key((uint8_t *)(p + 1), SADB_8TO1(len),
-			    stdout);
 			break;
 		case IKE_KEY_SKEYID_D:
 			(void) printf(gettext("%s SKEYID_d (%d bytes): "),
 			    prefix, len);
-			(void) dump_key((uint8_t *)(p + 1), SADB_8TO1(len),
-			    stdout);
 			break;
 		case IKE_KEY_SKEYID_A:
 			(void) printf(gettext("%s SKEYID_a (%d bytes): "),
 			    prefix, len);
-			(void) dump_key((uint8_t *)(p + 1), SADB_8TO1(len),
-			    stdout);
 			break;
 		case IKE_KEY_SKEYID_E:
 			(void) printf(gettext("%s SKEYID_e (%d bytes): "),
 			    prefix, len);
-			(void) dump_key((uint8_t *)(p + 1), SADB_8TO1(len),
-			    stdout);
 			break;
 		case IKE_KEY_ENCR:
 			(void) printf(gettext("%s Encryption key (%d bytes): "),
 			    prefix, len);
-			(void) dump_key((uint8_t *)(p + 1), SADB_8TO1(len),
-			    stdout);
 			break;
 		case IKE_KEY_IV:
 			(void) printf(
 			    gettext("%s Initialization vector (%d bytes): "),
 			    prefix, len);
-			(void) dump_key((uint8_t *)(p + 1), SADB_8TO1(len),
-			    stdout);
 			break;
 		default:
 			(void) printf(gettext("%s Unidentified key info %p %d"),
 			    prefix, p, p1klen);
+			goto badkey;
 		}
+		(void) dump_key((uint8_t *)(p + 1), SADB_8TO1(len), 0,
+		    stdout, B_FALSE);
+badkey:
 		(void) printf("\n");
 		assert(IS_P2ALIGNED(p1klen, 8));
 		curp += (p1klen >> 2);
@@ -1947,7 +1939,7 @@ print_ps(ike_ps_t *ps)
 		keyp = (uint8_t *)((int)(ps) + ps->ps_key_off);
 		(void) printf(gettext("PSKEY: Pre-shared key (%d bytes): "),
 		    ps->ps_key_len);
-		(void) dump_key(keyp, ps->ps_key_bits, stdout);
+		(void) dump_key(keyp, ps->ps_key_bits, 0, stdout, B_FALSE);
 		(void) printf("\n");
 	}
 

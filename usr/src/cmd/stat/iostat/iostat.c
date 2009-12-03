@@ -64,6 +64,8 @@
 
 #define	REPRINT 19
 
+#define	NUMBER_OF_ERR_COUNTERS	3
+
 /*
  * It's really a pseudo-gigabyte. We use 1000000000 bytes so that the disk
  * labels don't look bad. 1GB is really 1073741824 bytes.
@@ -126,7 +128,7 @@ static	uint_t	do_conversions;		/* display disks as cXtYdZ (-n) */
 static	uint_t	do_megabytes;		/* display data in MB/sec (-M) */
 static  uint_t	do_controller;		/* display controller info (-C) */
 static  uint_t	do_raw;			/* emit raw format (-r) */
-extern	uint_t	timestamp_fmt;		/* timestamp  each display (-T) */
+static	uint_t	timestamp_fmt = NODATE;	/* timestamp  each display (-T) */
 static	uint_t	do_devid;		/* -E should show devid */
 
 /*
@@ -293,6 +295,10 @@ main(int argc, char **argv)
 		if (formatter_list) {
 			format_t *tmp;
 			tmp = formatter_list;
+
+			if (timestamp_fmt != NODATE)
+				print_timestamp(timestamp_fmt);
+
 			while (tmp) {
 				(tmp->nfunc)();
 				tmp = tmp->next;
@@ -554,6 +560,8 @@ printxhdr(void)
 static void
 show_disk(void *v1, void *v2, void *data)
 {
+	uint32_t err_counters[NUMBER_OF_ERR_COUNTERS];
+	boolean_t display_err_counters = do_disk & DISK_ERRORS;
 	struct iodev_snapshot *old = (struct iodev_snapshot *)v1;
 	struct iodev_snapshot *new = (struct iodev_snapshot *)v2;
 	int *count = (int *)data;
@@ -568,7 +576,6 @@ show_disk(void *v1, void *v2, void *data)
 	uint64_t w_delta;
 	uint64_t r_delta;
 	int doit = 1;
-	int i;
 	uint_t toterrs;
 	char *fstr;
 
@@ -775,6 +782,30 @@ show_disk(void *v1, void *v2, void *data)
 		}
 	}
 
+	/*
+	 * The error counters are read first (if asked for and if they are
+	 * available).
+	 */
+	bzero(err_counters, sizeof (err_counters));
+	toterrs = 0;
+	if (display_err_counters && (new->is_errors.ks_data != NULL)) {
+		kstat_named_t	*knp;
+		int		i;
+
+		knp = KSTAT_NAMED_PTR(&new->is_errors);
+		for (i = 0; i < NUMBER_OF_ERR_COUNTERS; i++) {
+			switch (knp[i].data_type) {
+				case KSTAT_DATA_ULONG:
+				case KSTAT_DATA_ULONGLONG:
+					err_counters[i] = knp[i].value.ui32;
+					toterrs += knp[i].value.ui32;
+					break;
+				default:
+					break;
+			}
+		}
+	}
+
 	switch (do_disk & DISK_IO_MASK) {
 	case DISK_OLD:
 		if (do_raw == 0)
@@ -794,8 +825,10 @@ show_disk(void *v1, void *v2, void *data)
 		if (suppress_zero) {
 			if (fzero(rps) && fzero(wps) && fzero(krps) &&
 			    fzero(kwps) && fzero(avw) && fzero(avr) &&
-			    fzero(serv) && fzero(w_pct) && fzero(r_pct)) {
+			    fzero(serv) && fzero(w_pct) && fzero(r_pct) &&
+			    (toterrs == 0)) {
 				doit = 0;
+				display_err_counters = B_FALSE;
 			} else if (do_conversions == 0) {
 				if (do_raw == 0) {
 					push_out("%-*.*s",
@@ -833,52 +866,22 @@ show_disk(void *v1, void *v2, void *data)
 		break;
 	}
 
-	if (do_disk & DISK_ERRORS) {
-		if ((do_disk == DISK_ERRORS)) {
-			if (do_raw == 0)
+	if (display_err_counters) {
+		char	*efstr;
+		int	i;
+
+		if (do_raw == 0) {
+			if (do_disk == DISK_ERRORS)
 				push_out(two_blanks);
-		}
-
-		if (new->is_errors.ks_data) {
-			kstat_named_t *knp;
-			char *efstr;
-
-			if (do_raw == 0)
-				efstr = "%3u ";
-			else
-				efstr = "%u";
-			toterrs = 0;
-			knp = KSTAT_NAMED_PTR(&new->is_errors);
-			for (i = 0; i < 3; i++) {
-				switch (knp[i].data_type) {
-					case KSTAT_DATA_ULONG:
-						push_out(efstr,
-						    knp[i].value.ui32);
-						toterrs += knp[i].value.ui32;
-						break;
-					case KSTAT_DATA_ULONGLONG:
-						/*
-						 * We're only set up to
-						 * write out the low
-						 * order 32-bits so
-						 * just grab that.
-						 */
-						push_out(efstr,
-						    knp[i].value.ui32);
-						toterrs += knp[i].value.ui32;
-						break;
-					default:
-						break;
-				}
-			}
-			push_out(efstr, toterrs);
+			efstr = "%3u ";
 		} else {
-			if (do_raw == 0)
-				push_out("  0   0   0   0 ");
-			else
-				push_out("0,0,0,0");
+			efstr = "%u";
 		}
 
+		for (i = 0; i < NUMBER_OF_ERR_COUNTERS; i++)
+			push_out(efstr, err_counters[i]);
+
+		push_out(efstr, toterrs);
 	}
 
 	if (suppress_zero == 0 || doit == 1) {
@@ -1355,9 +1358,6 @@ do_format(void)
 		 */
 		dh_len = strlen(disk_header) - 2;
 	}
-
-	if (timestamp_fmt != NODATE)
-		setup(print_timestamp);
 
 	/*
 	 * -n *and* (-E *or* -e *or* -x)

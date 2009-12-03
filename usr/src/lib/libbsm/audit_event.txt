@@ -511,6 +511,21 @@
 6300:AUE_nwam_attach:attach nwam user:ss
 6301:AUE_nwam_detach:detach nwam user:ss
 #
+# ilbd(1M) events
+#
+6310:AUE_ilb_create_healthcheck:create ILB health check:as
+6311:AUE_ilb_delete_healthcheck:delete ILB health check:as
+6312:AUE_ilb_create_rule:create ILB rule:as
+6313:AUE_ilb_delete_rule:delete ILB rule:as
+6314:AUE_ilb_disable_rule:disable ILB rule:as
+6315:AUE_ilb_enable_rule:enable ILB rule:as
+6316:AUE_ilb_add_server:add ILB server:as
+6317:AUE_ilb_disable_server:disable ILB server:as
+6318:AUE_ilb_enable_server:enable ILB server:as
+6319:AUE_ilb_remove_server:remove ILB server:as
+6320:AUE_ilb_create_servergroup:create ILB server group:as
+6321:AUE_ilb_delete_servergroup:delete ILB server group:as
+#
 # TCSD(8) events
 #
 6400:AUE_tpm_takeownership:take ownership of TPM:as
@@ -533,6 +548,11 @@
 6417:AUE_tpm_physicalpresence:set the TPM physical presence flag:as
 6418:AUE_tpm_fieldupgrade:update TPM protected capabilities:as
 6419:AUE_tpm_resetlockvalue:reset TPM failed authorization attempt lock:as
+#
+# hotplugd(1m) events
+#
+6500:AUE_hotplug_state:change hotplug connection state:ss
+6501:AUE_hotplug_set:set hotplug bus private options:ss
 
 #
 # Trusted Extensions events:

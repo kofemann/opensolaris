@@ -78,9 +78,9 @@ sctp_kstat_update(kstat_t *kp, int rw)
 	 * individual set of statistics.
 	 */
 	SET_MIB(sctps->sctps_mib.sctpCurrEstab, 0);
-	sctp = sctps->sctps_gsctp;
 	sctp_prev = NULL;
 	mutex_enter(&sctps->sctps_g_lock);
+	sctp = list_head(&sctps->sctps_g_list);
 	while (sctp != NULL) {
 		mutex_enter(&sctp->sctp_reflock);
 		if (sctp->sctp_condemned) {
@@ -110,11 +110,15 @@ sctp_kstat_update(kstat_t *kp, int rw)
 		if (sctp->sctp_obchunks) {
 			UPDATE_MIB(&sctps->sctps_mib, sctpOutCtrlChunks,
 			    sctp->sctp_obchunks);
+			UPDATE_LOCAL(sctp->sctp_cum_obchunks,
+			    sctp->sctp_obchunks);
 			sctp->sctp_obchunks = 0;
 		}
 
 		if (sctp->sctp_odchunks) {
 			UPDATE_MIB(&sctps->sctps_mib, sctpOutOrderChunks,
+			    sctp->sctp_odchunks);
+			UPDATE_LOCAL(sctp->sctp_cum_odchunks,
 			    sctp->sctp_odchunks);
 			sctp->sctp_odchunks = 0;
 		}
@@ -122,11 +126,15 @@ sctp_kstat_update(kstat_t *kp, int rw)
 		if (sctp->sctp_oudchunks) {
 			UPDATE_MIB(&sctps->sctps_mib, sctpOutUnorderChunks,
 			    sctp->sctp_oudchunks);
+			UPDATE_LOCAL(sctp->sctp_cum_oudchunks,
+			    sctp->sctp_oudchunks);
 			sctp->sctp_oudchunks = 0;
 		}
 
 		if (sctp->sctp_rxtchunks) {
 			UPDATE_MIB(&sctps->sctps_mib, sctpRetransChunks,
+			    sctp->sctp_rxtchunks);
+			UPDATE_LOCAL(sctp->sctp_cum_rxtchunks,
 			    sctp->sctp_rxtchunks);
 			sctp->sctp_rxtchunks = 0;
 		}
@@ -140,17 +148,23 @@ sctp_kstat_update(kstat_t *kp, int rw)
 		if (sctp->sctp_ibchunks) {
 			UPDATE_MIB(&sctps->sctps_mib, sctpInCtrlChunks,
 			    sctp->sctp_ibchunks);
+			UPDATE_LOCAL(sctp->sctp_cum_ibchunks,
+			    sctp->sctp_ibchunks);
 			sctp->sctp_ibchunks = 0;
 		}
 
 		if (sctp->sctp_idchunks) {
 			UPDATE_MIB(&sctps->sctps_mib, sctpInOrderChunks,
 			    sctp->sctp_idchunks);
+			UPDATE_LOCAL(sctp->sctp_cum_idchunks,
+			    sctp->sctp_idchunks);
 			sctp->sctp_idchunks = 0;
 		}
 
 		if (sctp->sctp_iudchunks) {
 			UPDATE_MIB(&sctps->sctps_mib, sctpInUnorderChunks,
+			    sctp->sctp_iudchunks);
+			UPDATE_LOCAL(sctp->sctp_cum_iudchunks,
 			    sctp->sctp_iudchunks);
 			sctp->sctp_iudchunks = 0;
 		}
@@ -457,8 +471,8 @@ sctp_snmp_get_mib2(queue_t *q, mblk_t *mpctl, sctp_stack_t *sctps)
 	SET_MIB(sctps->sctps_mib.sctpCurrEstab, 0);
 
 	idx = 0;
-	sctp = sctps->sctps_gsctp;
 	mutex_enter(&sctps->sctps_g_lock);
+	sctp = list_head(&sctps->sctps_g_list);
 	while (sctp != NULL) {
 		mutex_enter(&sctp->sctp_reflock);
 		if (sctp->sctp_condemned) {
@@ -483,26 +497,40 @@ sctp_snmp_get_mib2(queue_t *q, mblk_t *mpctl, sctp_stack_t *sctps)
 		sctp->sctp_opkts = 0;
 		UPDATE_MIB(&sctps->sctps_mib,
 		    sctpOutCtrlChunks, sctp->sctp_obchunks);
+		UPDATE_LOCAL(sctp->sctp_cum_obchunks,
+		    sctp->sctp_obchunks);
 		sctp->sctp_obchunks = 0;
 		UPDATE_MIB(&sctps->sctps_mib,
 		    sctpOutOrderChunks, sctp->sctp_odchunks);
+		UPDATE_LOCAL(sctp->sctp_cum_odchunks,
+		    sctp->sctp_odchunks);
 		sctp->sctp_odchunks = 0;
 		UPDATE_MIB(&sctps->sctps_mib, sctpOutUnorderChunks,
+		    sctp->sctp_oudchunks);
+		UPDATE_LOCAL(sctp->sctp_cum_oudchunks,
 		    sctp->sctp_oudchunks);
 		sctp->sctp_oudchunks = 0;
 		UPDATE_MIB(&sctps->sctps_mib,
 		    sctpRetransChunks, sctp->sctp_rxtchunks);
+		UPDATE_LOCAL(sctp->sctp_cum_rxtchunks,
+		    sctp->sctp_rxtchunks);
 		sctp->sctp_rxtchunks = 0;
 		UPDATE_MIB(&sctps->sctps_mib,
 		    sctpInSCTPPkts, sctp->sctp_ipkts);
 		sctp->sctp_ipkts = 0;
 		UPDATE_MIB(&sctps->sctps_mib,
 		    sctpInCtrlChunks, sctp->sctp_ibchunks);
+		UPDATE_LOCAL(sctp->sctp_cum_ibchunks,
+		    sctp->sctp_ibchunks);
 		sctp->sctp_ibchunks = 0;
 		UPDATE_MIB(&sctps->sctps_mib,
 		    sctpInOrderChunks, sctp->sctp_idchunks);
+		UPDATE_LOCAL(sctp->sctp_cum_idchunks,
+		    sctp->sctp_idchunks);
 		sctp->sctp_idchunks = 0;
 		UPDATE_MIB(&sctps->sctps_mib, sctpInUnorderChunks,
+		    sctp->sctp_iudchunks);
+		UPDATE_LOCAL(sctp->sctp_cum_iudchunks,
 		    sctp->sctp_iudchunks);
 		sctp->sctp_iudchunks = 0;
 		UPDATE_MIB(&sctps->sctps_mib,
@@ -513,8 +541,8 @@ sctp_snmp_get_mib2(queue_t *q, mblk_t *mpctl, sctp_stack_t *sctps)
 		sctp->sctp_reassmsgs = 0;
 
 		sce.sctpAssocId = ntohl(sctp->sctp_lvtag);
-		sce.sctpAssocLocalPort = ntohs(sctp->sctp_lport);
-		sce.sctpAssocRemPort = ntohs(sctp->sctp_fport);
+		sce.sctpAssocLocalPort = ntohs(sctp->sctp_connp->conn_lport);
+		sce.sctpAssocRemPort = ntohs(sctp->sctp_connp->conn_fport);
 
 		RUN_SCTP(sctp);
 		if (sctp->sctp_primary != NULL) {
@@ -619,15 +647,22 @@ done:
 			mlp.tme_flags |= MIB2_TMEF_ANONMLP;
 			needattr = B_TRUE;
 		}
-		if (connp->conn_mac_exempt) {
+		switch (connp->conn_mac_mode) {
+		case CONN_MAC_DEFAULT:
+			break;
+		case CONN_MAC_AWARE:
 			mlp.tme_flags |= MIB2_TMEF_MACEXEMPT;
 			needattr = B_TRUE;
+			break;
+		case CONN_MAC_IMPLICIT:
+			mlp.tme_flags |= MIB2_TMEF_MACIMPLICIT;
+			needattr = B_TRUE;
+			break;
 		}
-		if (connp->conn_fully_bound &&
-		    connp->conn_effective_cred != NULL) {
+		if (sctp->sctp_connp->conn_ixa->ixa_tsl != NULL) {
 			ts_label_t *tsl;
 
-			tsl = crgetlabel(connp->conn_effective_cred);
+			tsl = sctp->sctp_connp->conn_ixa->ixa_tsl;
 			mlp.tme_flags |= MIB2_TMEF_IS_LABELED;
 			mlp.tme_doi = label2doi(tsl);
 			mlp.tme_label = *label2bslabel(tsl);

@@ -200,16 +200,22 @@ DRV_KMODS	+= audio
 DRV_KMODS	+= audio1575
 DRV_KMODS	+= audio810
 DRV_KMODS	+= audiocmi
+DRV_KMODS	+= audioemu10k
 DRV_KMODS	+= audioens
 DRV_KMODS	+= audiohd
 DRV_KMODS	+= audioixp
+DRV_KMODS	+= audiols
+DRV_KMODS	+= audiop16x
 DRV_KMODS	+= audiopci
+DRV_KMODS	+= audiosolo
 DRV_KMODS	+= audiots
 DRV_KMODS	+= audiovia823x
 DRV_KMODS_32	+= audiovia97
 DRV_KMODS	+= bl 
 DRV_KMODS	+= bge
 DRV_KMODS	+= bofi
+DRV_KMODS	+= bpf
+DRV_KMODS	+= bridge
 DRV_KMODS	+= bscbus
 DRV_KMODS	+= bscv
 DRV_KMODS	+= chxge
@@ -256,6 +262,7 @@ DRV_KMODS	+= ipw
 DRV_KMODS	+= iwh
 DRV_KMODS	+= iwi
 DRV_KMODS	+= iwk
+DRV_KMODS	+= iwp
 DRV_KMODS	+= iwscn
 DRV_KMODS	+= kb8042
 DRV_KMODS	+= keysock
@@ -273,6 +280,7 @@ DRV_KMODS	+= mm
 DRV_KMODS	+= mouse8042
 DRV_KMODS	+= mpt_sas
 DRV_KMODS	+= mr_sas
+DRV_KMODS	+= mwl 
 DRV_KMODS	+= nca
 DRV_KMODS	+= nsmb
 DRV_KMODS	+= nulldriver
@@ -295,6 +303,7 @@ DRV_KMODS	+= ptc
 DRV_KMODS	+= ptm
 DRV_KMODS	+= pts
 DRV_KMODS	+= ptsl
+DRV_KMODS	+= qlge
 DRV_KMODS	+= radeon
 DRV_KMODS	+= ral
 DRV_KMODS	+= ramdisk
@@ -332,6 +341,7 @@ DRV_KMODS	+= tcp6
 DRV_KMODS	+= tl
 DRV_KMODS	+= tnf
 DRV_KMODS	+= tpm
+DRV_KMODS	+= trill
 DRV_KMODS	+= udp
 DRV_KMODS	+= udp6
 DRV_KMODS	+= ucode
@@ -346,6 +356,7 @@ DRV_KMODS	+= wc
 DRV_KMODS	+= winlock
 DRV_KMODS	+= wpi
 DRV_KMODS	+= xge
+DRV_KMODS	+= yge
 DRV_KMODS	+= zcons
 DRV_KMODS	+= zyd
 DRV_KMODS	+= simnet
@@ -354,10 +365,13 @@ DRV_KMODS	+= stmf_sbd
 DRV_KMODS	+= fct
 DRV_KMODS	+= fcoe
 DRV_KMODS	+= fcoet
+DRV_KMODS	+= fcoei
 DRV_KMODS	+= qlt
 DRV_KMODS	+= iscsit
+DRV_KMODS	+= pppt
 DRV_KMODS	+= ncall nsctl sdbc nskern sv
 DRV_KMODS	+= ii rdc rdcsrv rdcstub 
+DRV_KMODS	+= iptun
 
 #
 # Don't build some of these for OpenSolaris, since they will be
@@ -368,6 +382,7 @@ $(CLOSED_BUILD)DRV_KMODS	+= dca
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= bmc
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= elxl
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= glm
+$(CLOSED_BUILD)CLOSED_DRV_KMODS		+= intel_nhmex
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= iprb
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= llc2
 $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= marvell88sx
@@ -384,6 +399,7 @@ $(CLOSED_BUILD)CLOSED_DRV_KMODS		+= acpi_toshiba
 #
 
 DRV_KMODS	+= afe
+DRV_KMODS	+= atge
 DRV_KMODS	+= bfe
 DRV_KMODS	+= dmfe
 DRV_KMODS	+= e1000g
@@ -394,7 +410,6 @@ DRV_KMODS	+= rge
 DRV_KMODS	+= rtls
 DRV_KMODS	+= sfe
 DRV_KMODS	+= amd8111s
-DRV_KMODS	+= amd_iommu
 DRV_KMODS	+= igb
 DRV_KMODS	+= ixgbe
 DRV_KMODS	+= vr
@@ -425,6 +440,7 @@ DRV_KMODS	+= emul64
 #
 DRV_KMODS	+= options
 DRV_KMODS	+= scsi_vhci
+DRV_KMODS	+= pmcs
 DRV_KMODS	+= arcmsr
 DRV_KMODS	+= fcp
 DRV_KMODS	+= fcip
@@ -499,7 +515,7 @@ MISC_KMODS	+= md_sp
 #
 #	Brand modules
 #
-BRAND_KMODS	+= sn1_brand lx_brand
+BRAND_KMODS	+= sn1_brand s10_brand lx_brand
 DRV_KMODS	+= lx_systrace lx_ptm lx_audio
 STRMOD_KMODS	+= ldlinux
 
@@ -511,7 +527,7 @@ EXEC_KMODS	+= elfexec intpexec shbinexec javaexec
 #
 #	Scheduling Class Modules (/kernel/sched):
 #
-SCHED_KMODS	+= IA RT TS RT_DPTBL TS_DPTBL FSS FX FX_DPTBL
+SCHED_KMODS	+= IA RT TS RT_DPTBL TS_DPTBL FSS FX FX_DPTBL SDC
 
 #
 #	File System Modules (/kernel/fs):
@@ -524,10 +540,10 @@ FS_KMODS	+= smbfs
 #
 #	Streams Modules (/kernel/strmod):
 #
-STRMOD_KMODS	+= 6to4tun atun bufmod connld dedump ldterm pckt pfmod pipemod
+STRMOD_KMODS	+= bufmod connld dedump ldterm pckt pfmod pipemod
 STRMOD_KMODS	+= ptem redirmod rpcmod rlmod telmod timod
 STRMOD_KMODS	+= spppasyn spppcomp
-STRMOD_KMODS	+= tirdwr ttcompat tun
+STRMOD_KMODS	+= tirdwr ttcompat
 STRMOD_KMODS	+= usbkbm
 STRMOD_KMODS	+= usbms
 STRMOD_KMODS	+= usb_ah
@@ -599,13 +615,13 @@ MISC_KMODS	+= kmech_krb5
 MISC_KMODS	+= ksocket
 MISC_KMODS	+= mac
 MISC_KMODS	+= mii
+MISC_KMODS	+= mwlfw
 MISC_KMODS	+= net80211
 MISC_KMODS	+= nfs_dlboot
 MISC_KMODS	+= nfssrv
 MISC_KMODS	+= neti
 MISC_KMODS	+= pci_autoconfig
 MISC_KMODS	+= pcicfg
-MISC_KMODS	+= pciehpc
 MISC_KMODS	+= pcihp
 MISC_KMODS	+= pcmcia
 MISC_KMODS	+= rpcsec
@@ -693,6 +709,7 @@ SVVS		+= svvs
 $(CLOSED_BUILD)CLOSED_XMODS =		\
 	adpu320		\
 	bnx		\
+	bnxe		\
 	lsimega		\
 	sdpib		\
 	spwr
@@ -710,13 +727,17 @@ PCBE_KMODS	+= p123_pcbe p4_pcbe opteron_pcbe core_pcbe
 #
 #	MAC-Type Plugin Modules (/kernel/mac)
 #
+MAC_KMODS	+= mac_6to4
 MAC_KMODS	+= mac_ether
+MAC_KMODS	+= mac_ipv4
+MAC_KMODS	+= mac_ipv6
 MAC_KMODS	+= mac_wifi
 MAC_KMODS	+= mac_ib
 
 #
 # socketmod (kernel/socketmod)
 #
+SOCKET_KMODS	+= sockpfp
 SOCKET_KMODS	+= socksctp
 SOCKET_KMODS    += socksdp
 

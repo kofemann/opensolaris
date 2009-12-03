@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -321,20 +321,10 @@ hv_api_set_version(uint64_t api_group, uint64_t major, uint64_t minor,
 
 /*ARGSUSED*/
 uint64_t
-hv_mem_iflush(uint64_t real_addr, uint64_t length, uint64_t *flushed_len)
-{ return (0); }
-
-/*ARGSUSED*/
-uint64_t
-hv_mem_iflush_all()
-{ return (0); }
-
-/*ARGSUSED*/
-uint64_t
 hv_tm_enable(uint64_t enable)
 { return (0); }
 
-/*ARGSUSED*/
+/*ARGSUSED*/	
 uint64_t
 hv_mach_set_watchdog(uint64_t timeout, uint64_t *time_remaining)
 { return (0); }
@@ -357,6 +347,20 @@ hv_soft_state_set(uint64_t state, uint64_t string)
 /*ARGSUSED*/	
 uint64_t
 hv_soft_state_get(uint64_t string, uint64_t *state)
+{ return (0); }
+
+uint64_t
+hv_guest_suspend(void)
+{ return (0); }
+
+/*ARGSUSED*/	
+uint64_t
+hv_set_tick_npt(uint64_t npt)
+{ return (0); }
+
+/*ARGSUSED*/	
+uint64_t
+hv_set_stick_npt(uint64_t npt)
 { return (0); }
 
 #else	/* lint || __lint */
@@ -742,34 +746,7 @@ hv_soft_state_get(uint64_t string, uint64_t *state)
 	SET_SIZE(hv_mem_sync)
 
 	/*
-	 * HV_MEM_IFLUSH
-	 * 	arg0 memory real address
-	 * 	arg1 flush length
-	 *	ret0 status
-	 *	ret1 flushed length
-	 *
-	 */
-	ENTRY(hv_mem_iflush)
-	mov	%o2, %o4
-	mov	HV_MEM_IFLUSH, %o5
-	ta	FAST_TRAP
-	retl
-	stx	%o1, [%o4]
-	SET_SIZE(hv_mem_iflush)
-
-	/*
-	 * HV_MEM_IFLUSH_ALL
-	 *	ret0 status
-	 */
-	ENTRY(hv_mem_iflush_all)
-	mov	HV_MEM_IFLUSH_ALL, %o5
-	ta	FAST_TRAP
-	retl
-	nop
-	SET_SIZE(hv_mem_iflush_all)
-
-	/*
-	 * uint64_t hv_rk_tm_enable(uint64_t enable)
+	 * uint64_t hv_tm_enable(uint64_t enable)
 	 */
 	ENTRY(hv_tm_enable)
 	mov	HV_TM_ENABLE, %o5
@@ -1274,5 +1251,26 @@ hv_soft_state_get(uint64_t string, uint64_t *state)
 	retl
 	stx	%o1, [%o2]
 	SET_SIZE(hv_soft_state_get)
+
+	ENTRY(hv_guest_suspend)
+	mov	GUEST_SUSPEND, %o5
+	ta	FAST_TRAP
+	retl
+	nop
+	SET_SIZE(hv_guest_suspend)
+
+	ENTRY(hv_tick_set_npt)
+	mov	TICK_SET_NPT, %o5
+	ta	FAST_TRAP
+	retl
+	nop
+	SET_SIZE(hv_tick_set_npt)
+
+	ENTRY(hv_stick_set_npt)
+	mov	STICK_SET_NPT, %o5
+	ta	FAST_TRAP
+	retl
+	nop
+	SET_SIZE(hv_stick_set_npt)
 
 #endif	/* lint || __lint */

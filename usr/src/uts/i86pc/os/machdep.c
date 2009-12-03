@@ -130,6 +130,8 @@
 #include <sys/traptrace.h>
 #endif	/* TRAPTRACE */
 
+#include <sys/clock_impl.h>
+
 extern void audit_enterprom(int);
 extern void audit_exitprom(int);
 
@@ -265,12 +267,16 @@ mdboot(int cmd, int fcn, char *mdep, boolean_t invoke_cb)
 	}
 
 	/*
-	 * If the system is panicking, the preloaded kernel is valid,
-	 * and fastreboot_onpanic has been set, choose Fast Reboot.
+	 * If the system is panicking, the preloaded kernel is valid, and
+	 * fastreboot_onpanic has been set, and the system has been up for
+	 * longer than fastreboot_onpanic_uptime (default to 10 minutes),
+	 * choose Fast Reboot.
 	 */
 	if (fcn == AD_BOOT && panicstr && newkernel.fi_valid &&
-	    fastreboot_onpanic)
+	    fastreboot_onpanic &&
+	    (panic_lbolt - lbolt_at_boot) > fastreboot_onpanic_uptime) {
 		fcn = AD_FASTREBOOT;
+	}
 
 	/*
 	 * Try to quiesce devices.
@@ -420,25 +426,48 @@ debug_enter(
 void
 reset(void)
 {
+	extern	void acpi_reset_system();
 #if !defined(__xpv)
 	ushort_t *bios_memchk;
 
 	/*
-	 * Can't use psm_map_phys before the hat is initialized.
+	 * Can't use psm_map_phys or acpi_reset_system before the hat is
+	 * initialized.
 	 */
 	if (khat_running) {
 		bios_memchk = (ushort_t *)psm_map_phys(0x472,
 		    sizeof (ushort_t), PROT_READ | PROT_WRITE);
 		if (bios_memchk)
 			*bios_memchk = 0x1234;	/* bios memory check disable */
+
+		if (options_dip != NULL &&
+		    ddi_prop_exists(DDI_DEV_T_ANY, ddi_root_node(), 0,
+		    "efi-systab")) {
+			efi_reset();
+		}
+
+		/*
+		 * The problem with using stubs is that we can call
+		 * acpi_reset_system only after the kernel is up and running.
+		 *
+		 * We should create a global state to keep track of how far
+		 * up the kernel is but for the time being we will depend on
+		 * bootops. bootops cleared in startup_end().
+		 */
+		if (bootops == NULL)
+			acpi_reset_system();
 	}
 
-	if (ddi_prop_exists(DDI_DEV_T_ANY, ddi_root_node(), 0, "efi-systab"))
-		efi_reset();
 	pc_reset();
 #else
-	if (IN_XPV_PANIC())
+	if (IN_XPV_PANIC()) {
+		if (khat_running && bootops == NULL) {
+			acpi_reset_system();
+		}
+
 		pc_reset();
+	}
+
 	(void) HYPERVISOR_shutdown(SHUTDOWN_reboot);
 	panic("HYPERVISOR_shutdown() failed");
 #endif
@@ -848,6 +877,8 @@ panic_idle(void)
 	splx(ipltospl(CLOCK_LEVEL));
 	(void) setjmp(&curthread->t_pcb);
 
+	dumpsys_helper();
+
 #ifndef __xpv
 	for (;;)
 		i86_halt();
@@ -1171,6 +1202,13 @@ num_phys_pages()
 	return (npages);
 }
 
+/* cpu threshold for compressed dumps */
+#ifdef _LP64
+uint_t dump_plat_mincpu = DUMP_PLAT_X86_64_MINCPU;
+#else
+uint_t dump_plat_mincpu = DUMP_PLAT_X86_32_MINCPU;
+#endif
+
 int
 dump_plat_addr()
 {
@@ -1328,4 +1366,25 @@ dtrace_linear_pc(struct regs *rp, proc_t *p, caddr_t *linearp)
 	}
 
 	return (0);
+}
+
+/*
+ * We need to post a soft interrupt to reprogram the lbolt cyclic when
+ * switching from event to cyclic driven lbolt. The following code adds
+ * and posts the softint for x86.
+ */
+static ddi_softint_hdl_impl_t lbolt_softint_hdl =
+	{0, NULL, NULL, NULL, 0, NULL, NULL, NULL};
+
+void
+lbolt_softint_add(void)
+{
+	(void) add_avsoftintr((void *)&lbolt_softint_hdl, LOCK_LEVEL,
+	    (avfunc)lbolt_ev_to_cyclic, "lbolt_ev_to_cyclic", NULL, NULL);
+}
+
+void
+lbolt_softint_post(void)
+{
+	(*setsoftint)(CBE_LOCK_PIL, lbolt_softint_hdl.ih_pending);
 }

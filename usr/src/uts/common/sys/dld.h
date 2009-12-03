@@ -202,7 +202,7 @@ typedef struct dld_ioc_rename {
 
 typedef struct dld_ioc_zid {
 	zoneid_t	diz_zid;
-	char		diz_link[MAXLINKNAMELEN];
+	datalink_id_t	diz_linkid;
 } dld_ioc_zid_t;
 
 /*
@@ -395,7 +395,8 @@ typedef struct dld_capab_poll_s {
 /*
  * Currently supported flags for LSO.
  */
-#define	DLD_LSO_TX_BASIC_TCP_IPV4	0x01	/* TCP LSO capability */
+#define	DLD_LSO_BASIC_TCP_IPV4	0x01	/* TCP LSO over IPv4 capability */
+#define	DLD_LSO_BASIC_TCP_IPV6	0x02	/* TCP LSO over IPv6 capability */
 
 typedef struct dld_capab_lso_s {
 	uint_t  lso_flags;	/* capability flags */
@@ -403,6 +404,7 @@ typedef struct dld_capab_lso_s {
 } dld_capab_lso_t;
 
 int	dld_getinfo(dev_info_t *, ddi_info_cmd_t, void *, void **);
+int	dld_devt_to_instance(dev_t);
 int	dld_open(queue_t *, dev_t *, int, int, cred_t *);
 int	dld_close(queue_t *);
 void	dld_wput(queue_t *, mblk_t *);
@@ -418,7 +420,7 @@ int	dld_add_flow(datalink_id_t, char *, flow_desc_t *,
     mac_resource_props_t *);
 int	dld_remove_flow(char *);
 int	dld_modify_flow(char *, mac_resource_props_t *);
-int	dld_walk_flow(dld_ioc_walkflow_t *, intptr_t);
+int	dld_walk_flow(dld_ioc_walkflow_t *, intptr_t, cred_t *);
 
 #endif
 

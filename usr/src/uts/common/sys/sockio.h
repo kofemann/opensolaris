@@ -210,12 +210,7 @@ extern "C" {
 #define	SIOCTMYSITE	_IOWR('i', 146, struct sioc_addrreq)
 							/* In this site? */
 
-#define	SIOCGTUNPARAM	_IOR('i',  147, struct iftun_req)
-							/* get tunnel */
-							/* parameters */
-#define	SIOCSTUNPARAM	_IOW('i',  148, struct iftun_req)
-							/* set tunnel */
-							/* parameters */
+/* 147 and 148 were SIOC*TUNPARAM ioctls.  Feel free to re-use. */
 
 #define	SIOCFIPSECONFIG	_IOW('i',  149, 0)		/* Flush Policy  */
 #define	SIOCSIPSECONFIG	_IOW('i',  150, 0)		/* Set Policy */
@@ -314,6 +309,14 @@ extern "C" {
 #define	SIOCSENABLESDP	_IOWR('i', 183, int)    /*  Enable SDP */
 
 #define	SIOCSQPTR	_IOWR('i', 184, int)    /* set q_ptr of stream */
+
+#define	SIOCGIFHWADDR	_IOWR('i', 185, int)	/* PF_PACKET */
+#define	SIOCGSTAMP	_IOWR('i', 186, struct timeval)	/* PF_PACKET */
+
+/*
+ * Private ioctl for Integrated Load Balancer.  The ioctl length varies.
+ */
+#define	SIOCILB		_IOWR('i', 187, 0)
 
 #ifdef	__cplusplus
 }

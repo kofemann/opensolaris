@@ -149,6 +149,7 @@ e1000g_rx_setup(struct e1000g *Adapter)
 	uint32_t rctl;
 	uint32_t rxdctl;
 	uint32_t ert;
+	uint16_t phy_data;
 	int i;
 	int size;
 	e1000g_rx_data_t *rx_data;
@@ -320,6 +321,25 @@ e1000g_rx_setup(struct e1000g *Adapter)
 		E1000_WRITE_REG(hw, E1000_ERT, ert);
 	}
 
+	/* Workaround errata on 82577/8 adapters with large frames */
+	if ((hw->mac.type == e1000_pchlan) &&
+	    (Adapter->default_mtu > ETHERMTU)) {
+
+		(void) e1000_read_phy_reg(hw, PHY_REG(770, 26), &phy_data);
+		phy_data &= 0xfff8;
+		phy_data |= (1 << 2);
+		(void) e1000_write_phy_reg(hw, PHY_REG(770, 26), phy_data);
+
+		if (hw->phy.type == e1000_phy_82577) {
+			(void) e1000_read_phy_reg(hw, 22, &phy_data);
+			phy_data &= 0x0fff;
+			phy_data |= (1 << 14);
+			(void) e1000_write_phy_reg(hw, 0x10, 0x2823);
+			(void) e1000_write_phy_reg(hw, 0x11, 0x0003);
+			(void) e1000_write_phy_reg(hw, 22, phy_data);
+		}
+	}
+
 	reg_val =
 	    E1000_RXCSUM_TUOFL |	/* TCP/UDP checksum offload Enable */
 	    E1000_RXCSUM_IPOFL;		/* IP checksum offload Enable */
@@ -421,6 +441,7 @@ e1000g_receive(e1000g_rx_ring_t *rx_ring, mblk_t **tail, uint_t sz)
 	if (e1000g_check_dma_handle(rx_data->rbd_dma_handle) != DDI_FM_OK) {
 		ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_DEGRADED);
 		Adapter->e1000g_state |= E1000G_ERROR;
+		return (NULL);
 	}
 
 	current_desc = rx_data->rbd_next;
@@ -429,7 +450,7 @@ e1000g_receive(e1000g_rx_ring_t *rx_ring, mblk_t **tail, uint_t sz)
 		 * don't send anything up. just clear the RFD
 		 */
 		E1000G_DEBUG_STAT(rx_ring->stat_none);
-		return (ret_mp);
+		return (NULL);
 	}
 
 	max_size = Adapter->max_frame_size - ETHERFCSL - VLAN_TAGSZ;
@@ -492,6 +513,8 @@ e1000g_receive(e1000g_rx_ring_t *rx_ring, mblk_t **tail, uint_t sz)
 			ddi_fm_service_impact(Adapter->dip,
 			    DDI_SERVICE_DEGRADED);
 			Adapter->e1000g_state |= E1000G_ERROR;
+
+			goto rx_drop;
 		}
 
 		accept_frame = (current_desc->errors == 0) ||
@@ -624,6 +647,7 @@ e1000g_receive(e1000g_rx_ring_t *rx_ring, mblk_t **tail, uint_t sz)
 
 				need_copy = B_FALSE;
 			} else {
+				/* EMPTY */
 				E1000G_DEBUG_STAT(rx_ring->stat_no_freepkt);
 			}
 		}

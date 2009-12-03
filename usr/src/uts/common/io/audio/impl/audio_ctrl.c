@@ -28,6 +28,7 @@
 #include <sys/sysmacros.h>
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
+#include <sys/atomic.h>
 
 #include "audio_impl.h"
 
@@ -239,34 +240,6 @@ audio_dev_del_control(audio_ctrl_t *ctrl)
 	kmem_free(ctrl, sizeof (*ctrl));
 }
 
-static int
-auimpl_set_pcmvol(void *arg, uint64_t val)
-{
-	audio_dev_t	*d = arg;
-	list_t		*l = &d->d_clients;
-	audio_client_t	*c;
-
-	if (val > 100) {
-		return (EINVAL);
-	}
-	rw_enter(&d->d_clnt_lock, RW_WRITER);
-	d->d_pcmvol = val & 0xff;
-	for (c = list_head(l); c; c = list_next(l, c)) {
-		auimpl_set_gain_master(&c->c_ostream, (uint8_t)val);
-	}
-	rw_exit(&d->d_clnt_lock);
-	return (0);
-}
-
-static int
-auimpl_get_pcmvol(void *arg, uint64_t *val)
-{
-	audio_dev_t	*d = arg;
-
-	*val = d->d_pcmvol;
-	return (0);
-}
-
 int
 audio_dev_add_soft_volume(audio_dev_t *d)
 {
@@ -292,15 +265,14 @@ audio_dev_add_soft_volume(audio_dev_t *d)
  * values since they have changed.
  *
  * There will be a routine that allows a client to register
- * a callback. All callbacks registered to this device should
- * get called from this routine.
+ * a callback.   For now we just update the serial number.
  *
  * d                - The device that needs updates.
  */
 void
 audio_dev_update_controls(audio_dev_t *d)
 {
-	auclnt_notify_dev(d);
+	atomic_inc_uint(&d->d_serial);
 }
 
 

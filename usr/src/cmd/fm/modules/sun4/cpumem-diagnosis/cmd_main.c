@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * CPU/Memory error diagnosis engine for the UltraSPARC III, IV, T1,
@@ -322,7 +320,7 @@ static cmd_subscriber_t cmd_subscribers[] = {
 	{ "ereport.cpu.*.dac",		cmd_ce,		CMD_ERRCL_DAC },
 	{ "ereport.cpu.*.dsc",		cmd_ce,		CMD_ERRCL_DSC },
 	{ "ereport.cpu.*.dau",		cmd_ue_train,	CMD_ERRCL_DAU },
-	{ "ereport.cpu.*.dbu",		cmd_nop_train,	CMD_ERRCL_DBU },
+	{ "ereport.cpu.*.dbu",		cmd_fw_defect,	CMD_ERRCL_DBU },
 	{ "ereport.cpu.*.dsu",		cmd_ue,		CMD_ERRCL_DSU },
 	{ "ereport.cpu.*.sbdpc",	cmd_miscregs_train,
 	    CMD_ERRCL_SBDPC | CMD_CPU_LEVEL_THREAD },
@@ -369,6 +367,7 @@ static cmd_subscriber_t cmd_subscribers[] = {
 	{ "ereport.cpu.*.fdr", 		cmd_lfu_pe,	CMD_CPU_LEVEL_CHIP },
 	{ "ereport.cpu.*.to",  		cmd_lfu_pe,	CMD_CPU_LEVEL_CHIP },
 	{ "ereport.cpu.*.snptyp",	cmd_lfu_pe,	CMD_CPU_LEVEL_CHIP },
+	{ "ereport.fm.ferg.invalid",	cmd_fw_defect },
 #endif /* sun4u */
 	{ "ereport.cpu.*.fpu.hwcopy",	cmd_fpu },
 	{ NULL, NULL }
@@ -409,6 +408,10 @@ cmd_timeout(fmd_hdl_t *hdl, id_t id, void *arg)
 		case CMD_TIMERTYPE_DP:
 
 			cmd_dp_timeout(hdl, id);
+			break;
+		case CMD_TIMERTYPE_ANONYMOUS_TAG_ERROR:
+
+			cmd_Lxcache_anonymous_tag_error_timeout(hdl, id);
 			break;
 #endif
 
@@ -678,6 +681,7 @@ _fmd_init(fmd_hdl_t *hdl)
 	fmd_hdl_subscribe(hdl, "ereport.cpu.ultraSPARC-T2.*");
 	fmd_hdl_subscribe(hdl, "ereport.cpu.ultraSPARC-T2plus.*");
 	fmd_hdl_subscribe(hdl, "ereport.cpu.ultraSPARC-T1.*");
+	fmd_hdl_subscribe(hdl, "ereport.fm.ferg.invalid");
 
 	fmd_hdl_subscribe(hdl, "ereport.io.tom.ecc.drce");
 	fmd_hdl_subscribe(hdl, "ereport.io.tom.ecc.dwce");

@@ -49,6 +49,7 @@ extern "C" {
 #define	DLIOCNATIVE	(DLIOC|2)	/* Native traffic mode */
 #define	DLIOCMARGININFO	(DLIOC|3)	/* margin size info */
 #define	DLIOCIPNETINFO	(DLIOC|4)	/* ipnet header */
+#define	DLIOCLOWLINK	(DLIOC|5)	/* low-level link up/down */
 #define	DLIOCHDRINFO	(DLIOC|10)	/* IP fast-path */
 #define	DL_IOC_HDR_INFO	DLIOCHDRINFO
 
@@ -56,11 +57,13 @@ extern "C" {
 
 typedef struct dl_ipnetinfo {
 	uint8_t		dli_version;	/* DL_IPNETINFO_* version */
-	uint8_t		dli_ipver;	/* packet IP header version */
-	uint16_t	dli_len;	/* length of dl_ipnetinfo_t */
-	uint32_t	dli_pad;	/* alignment pad */
-	uint64_t	dli_srczone; 	/* packet source zone ID (if any) */
-	uint64_t	dli_dstzone;	/* packet dest zone ID (if any) */
+	uint8_t		dli_family;	/* packet IP header version */
+	uint16_t	dli_htype;
+	uint32_t	dli_pktlen;	/* length of dl_ipnetinfo_t */
+	uint32_t	dli_ifindex;
+	uint32_t	dli_grifindex;
+	uint32_t	dli_zsrc; 	/* packet source zone ID (if any) */
+	uint32_t	dli_zdst;	/* packet dest zone ID (if any) */
 } dl_ipnetinfo_t;
 
 /*
@@ -276,6 +279,7 @@ typedef struct dl_ipnetinfo {
 #define	DL_WIFI		0x80000004ul	/* IEEE 802.11 */
 #define	DL_IPNET	0x80000005ul	/* ipnet(7D) link */
 #define	SUNW_DL_IPMP	0x80000006ul	/* IPMP stub interface */
+#define	DL_6TO4		0x80000007ul	/* 6to4 Tunnel Link */
 
 /*
  * DLPI provider service supported.
@@ -360,6 +364,7 @@ typedef struct dl_ipnetinfo {
 #define	DL_CURR_PHYS_ADDR	0x02	/* current physical address */
 #define	DL_IPV6_TOKEN		0x03	/* IPv6 interface token */
 #define	DL_IPV6_LINK_LAYER_ADDR	0x04	/* Neighbor Discovery format */
+#define	DL_CURR_DEST_ADDR	0x05	/* current destination address */
 
 /*
  * DLPI flag definitions
@@ -588,16 +593,14 @@ union	DL_qos_types {
 					/* dl_data is dl_capab_id_t */
 #define	DL_CAPAB_HCKSUM		0x01	/* Checksum offload */
 					/* dl_data is dl_capab_hcksum_t */
-#define	DL_CAPAB_IPSEC_AH	0x02	/* IPsec AH acceleration */
-					/* dl_data is dl_capab_ipsec_t */
-#define	DL_CAPAB_IPSEC_ESP	0x03	/* IPsec ESP acceleration */
-					/* dl_data is dl_capab_ipsec_t */
 #define	DL_CAPAB_MDT		0x04	/* Multidata Transmit capability */
 					/* dl_data is dl_capab_mdt_t */
 #define	DL_CAPAB_ZEROCOPY	0x05	/* Zero-copy capability */
 					/* dl_data is dl_capab_zerocopy_t */
 #define	DL_CAPAB_DLD		0x06	/* dld capability */
 					/* dl_data is dl_capab_dld_t */
+#define	DL_CAPAB_VRRP		0x07	/* vrrp capability */
+					/* dl_data is dl_capab_vrrp_t */
 
 typedef struct {
 	t_uscalar_t	dl_cap;		/* capability type */
@@ -606,45 +609,8 @@ typedef struct {
 } dl_capability_sub_t;
 
 /*
- * Definitions and structures needed for DL_CONTROL_REQ and DL_CONTROL_ACK
- * primitives.
- * Extensible message to send down control information to the DLS provider.
- * The response is a DL_CONTROL_ACK or DL_ERROR_ACK.
- *
- * Different types of control operations will define different format for the
- * key and data fields. ADD requires key and data fields; if the <type, key>
- * matches an already existing entry a DL_ERROR_ACK will be returned. DELETE
- * requires a key field; if the <type, key> does not exist, a DL_ERROR_ACK
- * will be returned. FLUSH requires neither a key nor data; it
- * unconditionally removes all entries for the specified type. GET requires a
- * key field; the get operation returns the data for the <type, key>. If
- * <type, key> doesn't exist a DL_ERROR_ACK is returned. UPDATE requires key
- * and data fields; if <type, key> doesn't exist a DL_ERROR_ACK is returned.
- */
-
-/*
- * Control operations
- */
-#define	DL_CO_ADD	0x01	/* Add new entry matching for <type,key> */
-#define	DL_CO_DELETE	0x02	/* Delete the entry matching <type,key> */
-#define	DL_CO_FLUSH	0x03	/* Purge all entries of <type> */
-#define	DL_CO_GET	0x04	/* Get the data for the <type,key> */
-#define	DL_CO_UPDATE	0x05	/* Update the data for <type,key> */
-#define	DL_CO_SET	0x06	/* Add or update as appropriate */
-
-/*
- * Control types (dl_type field of dl_control_req_t and dl_control_ack_t)
- */
-#define	DL_CT_IPSEC_AH	0x01	/* AH; key=spi,dest_addr; */
-				/* data=keying material */
-#define	DL_CT_IPSEC_ESP	0x02	/* ESP; key=spi,des_taddr; */
-				/* data=keying material */
-
-/*
  * Module ID token to be included in new sub-capability structures.
- * Existing sub-capabilities lacking an identification token, e.g. IPSEC
- * hardware acceleration, need to be encapsulated within the ID sub-
- * capability.  Access to this structure must be done through
+ * Access to this structure must be done through
  * dlcapab{set,check}qid().
  */
 typedef struct {
@@ -714,6 +680,13 @@ typedef struct {
 #define	HCKSUM_IPHDRCKSUM	0x10	/* IPv4 Header checksum offload */
 					/* capability */
 #ifdef _KERNEL
+
+/*
+ * VRRP sub-capability (follows dl_capability_sub_t)
+ */
+typedef struct {
+	int	vrrp_af;	/* IPv4 or IPv6 */
+} dl_capab_vrrp_t;
 
 /*
  * The DL_CAPAB_DLD capability enables the capabilities of gldv3-based drivers

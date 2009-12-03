@@ -58,7 +58,6 @@ extern "C" {
 #include <smbsrv/smb_xdr.h>
 #include <smbsrv/netbios.h>
 #include <smbsrv/smb_vops.h>
-#include <smbsrv/ntifs.h>
 
 struct smb_disp_entry;
 struct smb_request;
@@ -306,11 +305,6 @@ typedef struct {
 
 typedef uint32_t 	UTIME;		/* seconds since Jan 1 1970 */
 
-typedef struct smb_malloc_list {
-	struct smb_malloc_list	*forw;
-	struct smb_malloc_list	*back;
-} smb_malloc_list;
-
 typedef struct smb_llist {
 	krwlock_t	ll_lock;
 	list_t		ll_list;
@@ -507,6 +501,7 @@ typedef struct smb_node {
 	volatile int		flags;	/* FILE_NOTIFY_CHANGE_* */
 	volatile int		waiting_event; /* # of clients requesting FCN */
 	smb_times_t		n_timestamps; /* cached timestamps */
+	u_offset_t		n_allocsz; /* cached file allocation size */
 	smb_oplock_t		n_oplock;
 	struct smb_node		*n_dnode; /* directory node */
 	struct smb_node		*n_unode; /* unnamed stream node */
@@ -518,31 +513,14 @@ typedef struct smb_node {
 	smb_audit_buf_node_t	*n_audit_buf;
 } smb_node_t;
 
-#define	NODE_FLAGS_NOTIFY_CHANGE	0x10000fff
-#define	NODE_OPLOCKS_IN_FORCE		0x0000f000
-#define	NODE_OPLOCK_NONE		0x00000000
-#define	NODE_EXCLUSIVE_OPLOCK		0x00001000
-#define	NODE_BATCH_OPLOCK		0x00002000
-#define	NODE_LEVEL_II_OPLOCK		0x00003000
-#define	NODE_CAP_LEVEL_II		0x00010000
-#define	NODE_PROTOCOL_LOCK		0x00020000
-#define	NODE_FLAGS_WRITE_THROUGH	0x00100000
-#define	NODE_FLAGS_SYNCATIME		0x00200000
-#define	NODE_FLAGS_LOCKED		0x00400000
-#define	NODE_XATTR_DIR			0x01000000
-#define	NODE_FLAGS_CREATED		0x04000000
-#define	NODE_FLAGS_CHANGED		0x08000000
 #define	NODE_FLAGS_WATCH_TREE		0x10000000
-#define	NODE_FLAGS_SET_SIZE		0x20000000
+#define	NODE_FLAGS_NOTIFY_CHANGE	\
+	(NODE_FLAGS_WATCH_TREE | FILE_NOTIFY_VALID_MASK)
+#define	NODE_FLAGS_CHANGED		0x08000000
+#define	NODE_FLAGS_WRITE_THROUGH	0x00100000
+#define	NODE_XATTR_DIR			0x01000000
 #define	NODE_FLAGS_DELETE_ON_CLOSE	0x40000000
 #define	NODE_FLAGS_EXECUTABLE		0x80000000
-
-#define	OPLOCK_TYPE(n)			((n)->flags & NODE_OPLOCKS_IN_FORCE)
-#define	OPLOCKS_IN_FORCE(n)		(OPLOCK_TYPE(n) != NODE_OPLOCK_NONE)
-#define	EXCLUSIVE_OPLOCK_IN_FORCE(n)	\
-	(OPLOCK_TYPE(n) == NODE_EXCLUSIVE_OPLOCK)
-#define	BATCH_OPLOCK_IN_FORCE(n)	(OPLOCK_TYPE(n) == NODE_BATCH_OPLOCK)
-#define	LEVEL_II_OPLOCK_IN_FORCE(n)	(OPLOCK_TYPE(n) == NODE_LEVEL_II_OPLOCK)
 
 #define	SMB_NODE_VFS(node)	((node)->vp->v_vfsp)
 #define	SMB_NODE_FSID(node)	((node)->vp->v_vfsp->vfs_fsid)
@@ -567,7 +545,7 @@ typedef struct smb_node {
  */
 #define	SMB_SESSION_INACTIVITY_TIMEOUT		(15 * 60)
 
-#define	SMB_SESSION_OFILE_MAX				(16 * 1024)
+#define	SMB_SESSION_OFILE_MAX			(16 * 1024)
 
 /*
  * When a connection is set up we need to remember both the client
@@ -835,6 +813,7 @@ typedef struct smb_user {
 #define	SMB_TREE_NFS_MOUNTED		0x00001000
 #define	SMB_TREE_UNICODE_ON_DISK	0x00002000
 #define	SMB_TREE_CATIA			0x00004000
+#define	SMB_TREE_ABE			0x00008000
 
 typedef enum {
 	SMB_TREE_STATE_CONNECTED = 0,
@@ -896,6 +875,10 @@ typedef struct smb_tree {
 	(((sr) && (sr)->tid_tree) ?                                     \
 	smb_tree_has_feature((sr)->tid_tree, SMB_TREE_CATIA) : 0)
 
+#define	SMB_TREE_SUPPORTS_ABE(sr)            				\
+	(((sr) && (sr)->tid_tree) ?                                     \
+	smb_tree_has_feature((sr)->tid_tree, SMB_TREE_ABE) : 0)
+
 /*
  * SMB_TREE_CONTAINS_NODE is used to check that a node is in the same
  * file system as the tree.
@@ -950,7 +933,7 @@ typedef struct smb_opipe {
 
 /*
  * The of_ftype	of an open file should contain the SMB_FTYPE value
- * (cifs.h) returned when the file/pipe was opened. The following
+ * returned when the file/pipe was opened. The following
  * assumptions are currently made:
  *
  * File Type	    Node       PipeInfo
@@ -1035,6 +1018,7 @@ typedef struct smb_ofile {
 #define	SMB_ODIR_FLAG_XATTR		0x0004
 #define	SMB_ODIR_FLAG_EDIRENT		0x0008
 #define	SMB_ODIR_FLAG_CATIA		0x0010
+#define	SMB_ODIR_FLAG_ABE		0x0020
 
 typedef enum {
 	SMB_ODIR_STATE_OPEN = 0,
@@ -1192,16 +1176,7 @@ typedef struct smb_fqi {
 	smb_node_t	*fq_fnode;
 	smb_attr_t	fq_fattr;
 	char		fq_last_comp[MAXNAMELEN];
-	char		fq_od_name[MAXNAMELEN];
 } smb_fqi_t;
-
-#define	SMB_NULL_FQI_NODES(fqi) \
-	(fqi).fq_fnode = NULL;	\
-	(fqi).fq_dnode = NULL;
-
-#define	FQM_DIR_MUST_EXIST	1
-#define	FQM_PATH_MUST_EXIST	2
-#define	FQM_PATH_MUST_NOT_EXIST 3
 
 #define	OPLOCK_MIN_TIMEOUT	(5 * 1000)
 #define	OPLOCK_STD_TIMEOUT	(15 * 1000)
@@ -1234,6 +1209,7 @@ typedef struct open_param {
 	uint32_t	action_taken;
 	uint64_t	fileid;
 	uint32_t	rootdirfid;
+	smb_ofile_t	*dir;
 	/* This is only set by NTTransactCreate */
 	struct smb_sd	*sd;
 	uint8_t		op_oplock_level;
@@ -1407,7 +1383,7 @@ typedef struct smb_request {
 	struct mbuf_chain	command;
 	struct mbuf_chain	reply;
 	struct mbuf_chain	raw_data;
-	smb_malloc_list		request_storage;
+	list_t			sr_storage;
 	struct smb_xa		*r_xa;
 	int			andx_prev_wct;
 	int 			cur_reply_offset;
@@ -1461,6 +1437,7 @@ typedef struct smb_request {
 		smb_fqi_t	fqi;
 		smb_fqi_t	dst_fqi;
 		uint16_t	info_level;
+		uint16_t	flags;
 	    } dirop;
 
 	    open_param_t	open;
@@ -1472,14 +1449,23 @@ typedef struct smb_request {
 	kthread_t		*sr_worker;
 } smb_request_t;
 
-#define	SMB_READ_PROTOCOL(smb_nh_ptr) \
-	LE_IN32(((smb_nethdr_t *)(smb_nh_ptr))->sh_protocol)
+/*
+ * SMB request-specific memory node.
+ */
+typedef struct smb_srm {
+	list_node_t	srm_lnd;
+	size_t		srm_size;
+	smb_request_t	*srm_sr;
+} smb_srm_t;
+
+#define	SMB_READ_PROTOCOL(hdr) \
+	LE_IN32(((smb_hdr_t *)(hdr))->protocol)
 
 #define	SMB_PROTOCOL_MAGIC_INVALID(rd_sr) \
 	(SMB_READ_PROTOCOL((rd_sr)->sr_request_buf) != SMB_PROTOCOL_MAGIC)
 
-#define	SMB_READ_COMMAND(smb_nh_ptr) \
-	(((smb_nethdr_t *)(smb_nh_ptr))->sh_command)
+#define	SMB_READ_COMMAND(hdr) \
+	(((smb_hdr_t *)(hdr))->command)
 
 #define	SMB_IS_WRITERAW(rd_sr) \
 	(SMB_READ_COMMAND((rd_sr)->sr_request_buf) == SMB_COM_WRITE_RAW)
@@ -1531,8 +1517,7 @@ typedef struct smb_xa {
 	int32_t	smb_timeout;	/* number of milliseconds to await completion */
 	uint32_t	smb_suwcnt;	/* set up word count */
 
-
-	char			*xa_smb_trans_name;
+	char			*xa_pipe_name;
 
 	int			req_disp_param;
 	int			req_disp_data;
@@ -1644,18 +1629,6 @@ typedef struct smb_server {
 
 #define	SMB_NEW_KID()	atomic_inc_64_nv(&smb_kids)
 #define	SMB_UNIQ_FID()	atomic_inc_32_nv(&smb_fids)
-
-/*
- * This is to be used by Trans2SetFileInfo
- * and Trans2SetPathInfo
- */
-typedef struct smb_trans2_setinfo {
-	uint16_t level;
-	struct smb_xa *ts_xa;
-	struct smb_node *node;
-	char *path;
-	char name[MAXNAMELEN];
-} smb_trans2_setinfo_t;
 
 #define	SMB_IS_STREAM(node) ((node)->n_unode)
 

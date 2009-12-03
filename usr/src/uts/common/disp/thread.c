@@ -24,7 +24,6 @@
  * Use is subject to license terms.
  */
 
-
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/sysmacros.h>
@@ -99,7 +98,10 @@ thread_free_lock_t	*thread_free_lock;
 
 extern int nthread;
 
+/* System Scheduling classes. */
 id_t	syscid;				/* system scheduling class ID */
+id_t	sysdccid = CLASS_UNUSED;	/* reset when SDC loads */
+
 void	*segkp_thread;			/* cookie for segkp pool */
 
 int lwp_cache_sz = 32;
@@ -431,7 +433,7 @@ thread_create(
 	t->t_clfuncs = &sys_classfuncs.thread;
 	t->t_cid = syscid;
 	t->t_pri = pri;
-	t->t_stime = lbolt;
+	t->t_stime = ddi_get_lbolt();
 	t->t_schedflag = TS_LOAD | TS_DONT_SWAP;
 	t->t_bind_cpu = PBIND_NONE;
 	t->t_bindflag = (uchar_t)default_binding_mode;

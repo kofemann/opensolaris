@@ -19,10 +19,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-#ident	"%Z%%M%	%I%	%E% SMI"
 #
 #	This makefile drives the production of the zfs file system
 #	kernel module.
@@ -59,8 +57,11 @@ INSTALL_TARGET	= $(BINARY) $(ROOTMODULE) $(ROOTLINK) $(ROOT_CONFFILE)
 #
 #	Overrides and depends_on
 #
+#	We require sched/SDC because by the time vfs_mountroot() runs,
+#	we can no longer load modules through OBP.
+#
 MODSTUBS_DIR	 = $(OBJS_DIR)
-LDFLAGS		+= -dy -Nfs/specfs -Ncrypto/swrand -Nmisc/idmap
+LDFLAGS		+= -dy -Nfs/specfs -Ncrypto/swrand -Nmisc/idmap -Nsched/SDC
 
 INC_PATH	+= -I$(UTSBASE)/common/fs/zfs
 INC_PATH	+= -I$(SRC)/common

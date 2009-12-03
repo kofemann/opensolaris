@@ -2438,14 +2438,6 @@ nfs4delegreturn_cleanup_impl(rnode4_t *rp, nfs4_server_t *np,
 	boolean_t need_rele = B_FALSE;
 
 	/*
-	 * Nothing todo if OPEN_DELEGATE_NONE. Return before calling
-	 * find_nfs4_server_all(), since we might be called from
-	 * nfs4_recov_tread() after nfs4_server_t has been freed.
-	 */
-	if (rp->r_deleg_type == OPEN_DELEGATE_NONE)
-		return;
-
-	/*
 	 * Caller must be holding mi_recovlock in read mode
 	 * to call here.  This is provided by start_op.
 	 * Delegation management requires to grab s_lock
@@ -2454,13 +2446,22 @@ nfs4delegreturn_cleanup_impl(rnode4_t *rp, nfs4_server_t *np,
 
 	if (np == NULL) {
 		np = find_nfs4_server_all(mi, 1);
-		ASSERT(np != NULL);
+		if (np == NULL)
+			return;
 		need_rele = B_TRUE;
 	} else {
 		mutex_enter(&np->s_lock);
 	}
 
 	mutex_enter(&rp->r_statev4_lock);
+
+	if (rp->r_deleg_type == OPEN_DELEGATE_NONE) {
+		mutex_exit(&rp->r_statev4_lock);
+		mutex_exit(&np->s_lock);
+		if (need_rele)
+			nfs4_server_rele(np);
+		return;
+	}
 
 	/*
 	 * Free the cred originally held when

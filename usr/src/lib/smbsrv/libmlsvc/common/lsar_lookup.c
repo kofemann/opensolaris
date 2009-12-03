@@ -103,7 +103,7 @@ lsar_query_security_desc(mlsvc_handle_t *lsa_handle)
  */
 DWORD
 lsar_query_info_policy(mlsvc_handle_t *lsa_handle, WORD infoClass,
-    nt_domain_t *info)
+    smb_domain_t *info)
 {
 	struct mslsa_QueryInfoPolicy arg;
 	struct mslsa_PrimaryDomainInfo *pd_info;
@@ -119,7 +119,7 @@ lsar_query_info_policy(mlsvc_handle_t *lsa_handle, WORD infoClass,
 
 	opnum = LSARPC_OPNUM_QueryInfoPolicy;
 
-	bzero(info, sizeof (nt_domain_t));
+	bzero(info, sizeof (smb_domain_t));
 	bzero(&arg, sizeof (struct mslsa_QueryInfoPolicy));
 	(void) memcpy(&arg.handle, lsa_handle, sizeof (mslsa_handle_t));
 
@@ -137,8 +137,8 @@ lsar_query_info_policy(mlsvc_handle_t *lsa_handle, WORD infoClass,
 			pd_info = &arg.ru.pd_info;
 
 			smb_sid_tostr((smb_sid_t *)pd_info->sid, sidstr);
-			info->di_type = NT_DOMAIN_PRIMARY;
-			nt_domain_set_basic_info(sidstr,
+			info->di_type = SMB_DOMAIN_PRIMARY;
+			smb_domain_set_basic_info(sidstr,
 			    (char *)pd_info->name.str, "", info);
 
 			status = NT_STATUS_SUCCESS;
@@ -148,8 +148,8 @@ lsar_query_info_policy(mlsvc_handle_t *lsa_handle, WORD infoClass,
 			ad_info = &arg.ru.ad_info;
 
 			smb_sid_tostr((smb_sid_t *)ad_info->sid, sidstr);
-			info->di_type = NT_DOMAIN_ACCOUNT;
-			nt_domain_set_basic_info(sidstr,
+			info->di_type = SMB_DOMAIN_ACCOUNT;
+			smb_domain_set_basic_info(sidstr,
 			    (char *)ad_info->name.str, "", info);
 
 			status = NT_STATUS_SUCCESS;
@@ -161,8 +161,8 @@ lsar_query_info_policy(mlsvc_handle_t *lsa_handle, WORD infoClass,
 			    guid_str);
 			smb_sid_tostr((smb_sid_t *)dns_info->sid, sidstr);
 
-			info->di_type = NT_DOMAIN_PRIMARY;
-			nt_domain_set_dns_info(sidstr,
+			info->di_type = SMB_DOMAIN_PRIMARY;
+			smb_domain_set_dns_info(sidstr,
 			    (char *)dns_info->nb_domain.str,
 			    (char *)dns_info->dns_domain.str,
 			    (char *)dns_info->forest.str,
@@ -239,10 +239,10 @@ lsar_lookup_names(mlsvc_handle_t *lsa_handle, char *name, smb_account_t *info)
 				name = p;
 		}
 
-		length = mts_wcequiv_strlen(name) + sizeof (mts_wchar_t);
+		length = smb_wcequiv_strlen(name) + sizeof (smb_wchar_t);
 		arg.lookup_level = MSLSA_LOOKUP_LEVEL_1;
 	} else {
-		length = mts_wcequiv_strlen(name);
+		length = smb_wcequiv_strlen(name);
 		arg.lookup_level = MSLSA_LOOKUP_LEVEL_1;
 	}
 
@@ -594,9 +594,9 @@ lsar_lookup_priv_value(mlsvc_handle_t *lsa_handle, char *name,
 	bzero(&arg, sizeof (struct mslsa_LookupPrivValue));
 	(void) memcpy(&arg.handle, lsa_handle, sizeof (mslsa_handle_t));
 
-	length = mts_wcequiv_strlen(name);
+	length = smb_wcequiv_strlen(name);
 	if (ndr_rpc_server_os(lsa_handle) == NATIVE_OS_WIN2000)
-		length += sizeof (mts_wchar_t);
+		length += sizeof (smb_wchar_t);
 
 	arg.name.length = length;
 	arg.name.allosize = length;
@@ -682,7 +682,7 @@ lsar_lookup_priv_display_name(mlsvc_handle_t *lsa_handle, char *name,
 	bzero(&arg, sizeof (struct mslsa_LookupPrivDisplayName));
 	(void) memcpy(&arg.handle, lsa_handle, sizeof (mslsa_handle_t));
 
-	length = mts_wcequiv_strlen(name);
+	length = smb_wcequiv_strlen(name);
 	arg.name.length = length;
 	arg.name.allosize = length;
 	arg.name.str = (unsigned char *)name;
@@ -827,7 +827,7 @@ lsar_lookup_names2(mlsvc_handle_t *lsa_handle, char *name, smb_account_t *info)
 	arg.name_table = (struct mslsa_lup_name_table *)&name_table;
 	name_table.n_entry = 1;
 
-	length = mts_wcequiv_strlen(name) + sizeof (mts_wchar_t);
+	length = smb_wcequiv_strlen(name) + sizeof (smb_wchar_t);
 	name_table.name[0].length = length;
 	name_table.name[0].allosize = length;
 	name_table.name[0].str = (unsigned char *)name;
@@ -884,7 +884,8 @@ lsar_set_trusted_domains_ex(struct mslsa_EnumTrustedDomainBufEx *enum_buf,
 		return;
 
 	list->td_num = 0;
-	list->td_domains = calloc(enum_buf->entries_read, sizeof (nt_domain_t));
+	list->td_domains = calloc(enum_buf->entries_read,
+	    sizeof (smb_domain_t));
 
 	if (list->td_domains == NULL)
 		return;
@@ -892,7 +893,7 @@ lsar_set_trusted_domains_ex(struct mslsa_EnumTrustedDomainBufEx *enum_buf,
 	list->td_num = enum_buf->entries_read;
 	for (i = 0; i < list->td_num; i++) {
 		smb_sid_tostr((smb_sid_t *)enum_buf->info[i].sid, sidstr);
-		nt_domain_set_trust_info(
+		smb_domain_set_trust_info(
 		    sidstr,
 		    (char *)enum_buf->info[i].nb_name.str,
 		    (char *)enum_buf->info[i].dns_name.str,
@@ -914,7 +915,8 @@ lsar_set_trusted_domains(struct mslsa_EnumTrustedDomainBuf *enum_buf,
 		return;
 
 	list->td_num = 0;
-	list->td_domains = calloc(enum_buf->entries_read, sizeof (nt_domain_t));
+	list->td_domains = calloc(enum_buf->entries_read,
+	    sizeof (smb_domain_t));
 
 	if (list->td_domains == NULL)
 		return;
@@ -922,7 +924,7 @@ lsar_set_trusted_domains(struct mslsa_EnumTrustedDomainBuf *enum_buf,
 	list->td_num = enum_buf->entries_read;
 	for (i = 0; i < list->td_num; i++) {
 		smb_sid_tostr((smb_sid_t *)enum_buf->info[i].sid, sidstr);
-		nt_domain_set_trust_info(
+		smb_domain_set_trust_info(
 		    sidstr, (char *)enum_buf->info[i].name.str,
 		    "", 0, 0, 0, &list->td_domains[i]);
 	}

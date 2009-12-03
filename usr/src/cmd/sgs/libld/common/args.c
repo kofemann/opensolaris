@@ -55,6 +55,21 @@
  *    -z nosighandler		suppress the registration of the signal handler
  *				used to manage SIGBUS.
  */
+
+/*
+ * The following flags are committed, and will not be removed, but are
+ * not publically documented, either because they are obsolete, or because
+ * they exist to work around defects in other software and are not of
+ * sufficient interest otherwise.
+ *
+ *    OPTION			MEANING
+ *
+ *    -Wl,...			compiler drivers and configuration tools
+ *				have been known to pass this compiler option
+ *				to ld(1).  Strip off the "-Wl," prefix and
+ *			        process the remainder (...) as a normal option.
+ */
+
 #include	<sys/link.h>
 #include	<stdio.h>
 #include	<fcntl.h>
@@ -92,7 +107,6 @@ static Boolean	Bgflag	= FALSE;
 static Boolean	Blflag	= FALSE;
 static Boolean	Beflag	= FALSE;
 static Boolean	Bsflag	= FALSE;
-static Boolean	Btflag	= FALSE;
 static Boolean	Dflag	= FALSE;
 static Boolean	Gflag	= FALSE;
 static Boolean	Vflag	= FALSE;
@@ -198,6 +212,7 @@ usage_mesg(Boolean detail)
 	(void) fprintf(stderr, MSG_INTL(MSG_ARG_DETAIL_ZT));
 	(void) fprintf(stderr, MSG_INTL(MSG_ARG_DETAIL_ZTO));
 	(void) fprintf(stderr, MSG_INTL(MSG_ARG_DETAIL_ZTW));
+	(void) fprintf(stderr, MSG_INTL(MSG_ARG_DETAIL_ZWRAP));
 	(void) fprintf(stderr, MSG_INTL(MSG_ARG_DETAIL_ZV));
 }
 
@@ -335,6 +350,19 @@ check_flags(Ofl_desc * ofl, int argc)
 		ofl->ofl_flags |= FLG_OF_FATAL;
 	}
 
+	if (ofl->ofl_filtees && !Gflag) {
+		if (ofl->ofl_flags & FLG_OF_AUX) {
+			eprintf(ofl->ofl_lml, ERR_FATAL,
+			    MSG_INTL(MSG_MARG_ST_ONLYAVL),
+			    MSG_INTL(MSG_MARG_FILTER_AUX));
+		} else {
+			eprintf(ofl->ofl_lml, ERR_FATAL,
+			    MSG_INTL(MSG_MARG_ST_ONLYAVL),
+			    MSG_INTL(MSG_MARG_FILTER));
+		}
+		ofl->ofl_flags |= FLG_OF_FATAL;
+	}
+
 	if (dflag != SET_FALSE) {
 		/*
 		 * Set -Bdynamic on by default, setting is rechecked as input
@@ -447,25 +475,6 @@ check_flags(Ofl_desc * ofl, int argc)
 				    MSG_INTL(MSG_MARG_SONAME));
 				ofl->ofl_flags |= FLG_OF_FATAL;
 			}
-			if (Btflag) {
-				eprintf(ofl->ofl_lml, ERR_FATAL,
-				    MSG_INTL(MSG_ARG_DY_INCOMP),
-				    MSG_ORIG(MSG_ARG_BTRANS));
-				ofl->ofl_flags |= FLG_OF_FATAL;
-			}
-			if (ofl->ofl_filtees) {
-				if (ofl->ofl_flags & FLG_OF_AUX) {
-					eprintf(ofl->ofl_lml, ERR_FATAL,
-					    MSG_INTL(MSG_MARG_DY_INCOMP),
-					    MSG_INTL(MSG_MARG_FILTER_AUX));
-				} else {
-					eprintf(ofl->ofl_lml, ERR_FATAL,
-					    MSG_INTL(MSG_MARG_DY_INCOMP),
-					    MSG_INTL(MSG_MARG_FILTER));
-				}
-				ofl->ofl_flags |= FLG_OF_FATAL;
-			}
-
 		} else if (!rflag) {
 			/*
 			 * Shared library.
@@ -493,13 +502,6 @@ check_flags(Ofl_desc * ofl, int argc)
 				ofl->ofl_flags |= FLG_OF_SYMBOLIC;
 				ofl->ofl_dtflags |= DF_SYMBOLIC;
 			}
-
-			if (Btflag) {
-				ofl->ofl_dtflags_1 |=
-				    (DF_1_TRANS | DF_1_DIRECT);
-				ofl->ofl_flags |= FLG_OF_SYMINFO;
-			}
-
 		} else {
 			/*
 			 * Dynamic relocatable object.
@@ -542,18 +544,6 @@ check_flags(Ofl_desc * ofl, int argc)
 		if (ofl->ofl_config) {
 			eprintf(ofl->ofl_lml, ERR_FATAL,
 			    MSG_INTL(MSG_ARG_ST_INCOMP), MSG_ORIG(MSG_ARG_C));
-			ofl->ofl_flags |= FLG_OF_FATAL;
-		}
-		if (ofl->ofl_filtees) {
-			if (ofl->ofl_flags & FLG_OF_AUX) {
-				eprintf(ofl->ofl_lml, ERR_FATAL,
-				    MSG_INTL(MSG_MARG_ST_INCOMP),
-				    MSG_INTL(MSG_MARG_FILTER_AUX));
-			} else {
-				eprintf(ofl->ofl_lml, ERR_FATAL,
-				    MSG_INTL(MSG_MARG_ST_INCOMP),
-				    MSG_INTL(MSG_MARG_FILTER));
-			}
 			ofl->ofl_flags |= FLG_OF_FATAL;
 		}
 		if (ztflag) {
@@ -630,6 +620,13 @@ check_flags(Ofl_desc * ofl, int argc)
 	 */
 	if (_elf_sys_encoding() != ld_targ.t_m.m_data)
 		ofl->ofl_flags1 |= FLG_OF1_ENCDIFF;
+
+	/*
+	 * If the target has special executable section filling requirements,
+	 * register the fill function with libelf
+	 */
+	if (ld_targ.t_ff.ff_execfill != NULL)
+		_elf_execfill(ld_targ.t_ff.ff_execfill);
 
 	/*
 	 * Initialize string tables.  Symbol definitions within mapfiles can
@@ -1311,6 +1308,17 @@ parseopt_pass1(Ofl_desc *ofl, int argc, char **argv, int *error)
 					/* Don't report cascading errors */
 					ofl->ofl_ars_gsandx = -1;
 				}
+
+			/*
+			 * If -z wrap is seen, enter the symbol to be wrapped
+			 * into the wrap AVL tree.
+			 */
+			} else if (strncmp(optarg, MSG_ORIG(MSG_ARG_WRAP),
+			    MSG_ARG_WRAP_SIZE) == 0) {
+				if (ld_wrap_enter(ofl,
+				    optarg + MSG_ARG_WRAP_SIZE) == NULL)
+					return (S_ERROR);
+
 			/*
 			 * The following options just need validation as they
 			 * are interpreted on the second pass through the
@@ -1405,15 +1413,18 @@ parseopt_pass1(Ofl_desc *ofl, int argc, char **argv, int *error)
 				ofl->ofl_flags |= FLG_OF_PROCRED;
 			else if (strcmp(optarg, MSG_ORIG(MSG_STR_LOCAL)) == 0)
 				Blflag = TRUE;
-			else if (strcmp(optarg,
-			    MSG_ORIG(MSG_ARG_TRANSLATOR)) == 0)
-				Btflag = TRUE;
 			else if (strcmp(optarg, MSG_ORIG(MSG_ARG_GROUP)) == 0)
 				Bgflag = TRUE;
 			else if (strcmp(optarg,
 			    MSG_ORIG(MSG_STR_ELIMINATE)) == 0)
 				Beflag = TRUE;
-			else if (strcmp(optarg, MSG_ORIG(MSG_STR_LD_DYNAMIC)) &&
+			else if (strcmp(optarg,
+			    MSG_ORIG(MSG_ARG_TRANSLATOR)) == 0) {
+				eprintf(ofl->ofl_lml, ERR_WARNING,
+				    MSG_INTL(MSG_ARG_UNSUPPORTED),
+				    MSG_ORIG(MSG_ARG_BTRANSLATOR));
+			} else if (strcmp(optarg,
+			    MSG_ORIG(MSG_STR_LD_DYNAMIC)) &&
 			    strcmp(optarg, MSG_ORIG(MSG_ARG_STATIC))) {
 				eprintf(ofl->ofl_lml, ERR_FATAL,
 				    MSG_INTL(MSG_ARG_ILLEGAL),

@@ -46,6 +46,8 @@
 #include <net/if.h>
 #include <sys/sockio.h>
 #include <sys/ksocket.h>
+#include <sys/filio.h>		/* FIONBIO */
+#include <sys/iscsi_protocol.h>
 #include <sys/idm/idm.h>
 #include <sys/idm/idm_so.h>
 #include <sys/idm/idm_text.h>
@@ -66,7 +68,8 @@ static idm_status_t idm_so_conn_create_common(idm_conn_t *ic, ksocket_t new_so);
 static void idm_so_conn_destroy_common(idm_conn_t *ic);
 static void idm_so_conn_connect_common(idm_conn_t *ic);
 
-static void idm_set_ini_preconnect_options(idm_so_conn_t *sc);
+static void idm_set_ini_preconnect_options(idm_so_conn_t *sc,
+    boolean_t boot_conn);
 static void idm_set_ini_postconnect_options(idm_so_conn_t *sc);
 static void idm_set_tgt_connect_options(ksocket_t so);
 static idm_status_t idm_i_so_tx(idm_pdu_t *pdu);
@@ -101,6 +104,8 @@ static kv_status_t idm_so_negotiate_key_values(idm_conn_t *it,
     nvlist_t *request_nvl, nvlist_t *response_nvl, nvlist_t *negotiated_nvl);
 static void idm_so_notice_key_values(idm_conn_t *it,
     nvlist_t *negotiated_nvl);
+static kv_status_t idm_so_declare_key_values(idm_conn_t *it,
+    nvlist_t *config_nvl, nvlist_t *outgoing_nvl);
 static boolean_t idm_so_conn_is_capable(idm_conn_req_t *ic,
     idm_transport_caps_t *caps);
 static idm_status_t idm_so_buf_alloc(idm_buf_t *idb, uint64_t buflen);
@@ -152,9 +157,11 @@ idm_transport_ops_t idm_so_transport_ops = {
 	idm_so_ini_conn_create,		/* it_ini_conn_create */
 	idm_so_ini_conn_destroy,	/* it_ini_conn_destroy */
 	idm_so_ini_conn_connect,	/* it_ini_conn_connect */
-	idm_so_conn_disconnect		/* it_ini_conn_disconnect */
+	idm_so_conn_disconnect,		/* it_ini_conn_disconnect */
+	idm_so_declare_key_values	/* it_declare_key_values */
 };
 
+kmutex_t	idm_so_timed_socket_mutex;
 /*
  * idm_so_init()
  * Sockets transport initialization
@@ -178,6 +185,9 @@ idm_so_init(idm_transport_t *it)
 
 	/* Set the sockets transport ops */
 	it->it_ops = &idm_so_transport_ops;
+
+	mutex_init(&idm_so_timed_socket_mutex, NULL, MUTEX_DEFAULT, NULL);
+
 }
 
 /*
@@ -190,6 +200,7 @@ idm_so_fini(void)
 	kmem_cache_destroy(idm.idm_so_128k_buf_cache);
 	kmem_cache_destroy(idm.idm_sotx_pdu_cache);
 	kmem_cache_destroy(idm.idm_sorx_pdu_cache);
+	mutex_destroy(&idm_so_timed_socket_mutex);
 }
 
 ksocket_t
@@ -237,7 +248,8 @@ idm_sodestroy(ksocket_t ks)
 int
 idm_ss_compare(const struct sockaddr_storage *cmp_ss1,
     const struct sockaddr_storage *cmp_ss2,
-    boolean_t v4_mapped_as_v4)
+    boolean_t v4_mapped_as_v4,
+    boolean_t compare_ports)
 {
 	struct sockaddr_storage			mapped_v4_ss1, mapped_v4_ss2;
 	const struct sockaddr_storage		*ss1, *ss2;
@@ -280,8 +292,9 @@ idm_ss_compare(const struct sockaddr_storage *cmp_ss1,
 	/*
 	 * Compare ports, then address family, then ip address
 	 */
-	if (((struct sockaddr_in *)ss1)->sin_port !=
-	    ((struct sockaddr_in *)ss2)->sin_port) {
+	if (compare_ports &&
+	    (((struct sockaddr_in *)ss1)->sin_port !=
+	    ((struct sockaddr_in *)ss2)->sin_port)) {
 		if (((struct sockaddr_in *)ss1)->sin_port >
 		    ((struct sockaddr_in *)ss2)->sin_port)
 			return (1);
@@ -381,7 +394,7 @@ idm_get_ipaddr(idm_addr_list_t **ipaddr_p)
 	struct sockaddr_in	*sin;
 	struct sockaddr_in6	*sin6;
 	idm_addr_t		*ip;
-	idm_addr_list_t		*ipaddr;
+	idm_addr_list_t		*ipaddr = NULL;
 	int			size_ipaddr;
 
 	*ipaddr_p = NULL;
@@ -673,7 +686,7 @@ idm_iov_sorecv(ksocket_t so, iovec_t *iop, int iovlen, size_t total_len)
 }
 
 static void
-idm_set_ini_preconnect_options(idm_so_conn_t *sc)
+idm_set_ini_preconnect_options(idm_so_conn_t *sc, boolean_t boot_conn)
 {
 	int	conn_abort = 10000;
 	int	conn_notify = 2000;
@@ -683,11 +696,14 @@ idm_set_ini_preconnect_options(idm_so_conn_t *sc)
 	(void) ksocket_setsockopt(sc->ic_so, IPPROTO_TCP,
 	    TCP_CONN_NOTIFY_THRESHOLD, (char *)&conn_notify, sizeof (int),
 	    CRED());
-	(void) ksocket_setsockopt(sc->ic_so, IPPROTO_TCP,
-	    TCP_CONN_ABORT_THRESHOLD, (char *)&conn_abort, sizeof (int),
-	    CRED());
-	(void) ksocket_setsockopt(sc->ic_so, IPPROTO_TCP, TCP_ABORT_THRESHOLD,
-	    (char *)&abort, sizeof (int), CRED());
+	if (boot_conn == B_FALSE) {
+		(void) ksocket_setsockopt(sc->ic_so, IPPROTO_TCP,
+		    TCP_CONN_ABORT_THRESHOLD, (char *)&conn_abort, sizeof (int),
+		    CRED());
+		(void) ksocket_setsockopt(sc->ic_so, IPPROTO_TCP,
+		    TCP_ABORT_THRESHOLD,
+		    (char *)&abort, sizeof (int), CRED());
+	}
 }
 
 static void
@@ -760,6 +776,12 @@ idm_sorecvhdr(idm_conn_t *ic, idm_pdu_t *pdu)
 	pdu->isp_hdrlen = sizeof (iscsi_hdr_t) +
 	    (bhs->hlength * sizeof (uint32_t));
 	pdu->isp_datalen = n2h24(bhs->dlength);
+	if (ic->ic_conn_type == CONN_TYPE_TGT &&
+	    pdu->isp_datalen > ic->ic_conn_params.max_recv_dataseglen) {
+		IDM_CONN_LOG(CE_WARN,
+		    "idm_sorecvhdr: exceeded the max data segment length");
+		return (IDM_STATUS_FAIL);
+	}
 	if (bhs->hlength > IDM_SORX_CACHE_AHSLEN) {
 		/* Allocate a new header segment and change the callback */
 		new_hdr = kmem_alloc(pdu->isp_hdrlen, KM_SLEEP);
@@ -848,7 +870,7 @@ idm_so_ini_conn_create(idm_conn_req_t *cr, idm_conn_t *ic)
 
 	so_conn = ic->ic_transport_private;
 	/* Set up socket options */
-	idm_set_ini_preconnect_options(so_conn);
+	idm_set_ini_preconnect_options(so_conn, cr->cr_boot_conn);
 
 	return (IDM_STATUS_SUCCESS);
 }
@@ -985,6 +1007,10 @@ idm_so_conn_create_common(idm_conn_t *ic, ksocket_t new_so)
 
 	/* Set the scoreboarding flag on this connection */
 	ic->ic_conn_flags |= IDM_CONN_USE_SCOREBOARD;
+	ic->ic_conn_params.max_recv_dataseglen =
+	    ISCSI_DEFAULT_MAX_RECV_SEG_LEN;
+	ic->ic_conn_params.max_xmit_dataseglen =
+	    ISCSI_DEFAULT_MAX_XMIT_SEG_LEN;
 
 	/*
 	 * Initialize tx thread mutex and list
@@ -1023,10 +1049,10 @@ idm_so_conn_connect_common(idm_conn_t *ic)
 	t_addrlen = sizeof (struct sockaddr_in6);
 
 	/* Set the local and remote addresses in the idm conn handle */
-	ksocket_getsockname(so_conn->ic_so, (struct sockaddr *)&t_addr,
+	(void) ksocket_getsockname(so_conn->ic_so, (struct sockaddr *)&t_addr,
 	    &t_addrlen, CRED());
 	bcopy(&t_addr, &ic->ic_laddr, t_addrlen);
-	ksocket_getpeername(so_conn->ic_so, (struct sockaddr *)&t_addr,
+	(void) ksocket_getpeername(so_conn->ic_so, (struct sockaddr *)&t_addr,
 	    &t_addrlen, CRED());
 	bcopy(&t_addr, &ic->ic_raddr, t_addrlen);
 
@@ -1291,7 +1317,7 @@ idm_so_svc_port_watcher(void *arg)
 static idm_status_t
 idm_so_free_task_rsrc(idm_task_t *idt)
 {
-	idm_buf_t	*idb;
+	idm_buf_t	*idb, *next_idb;
 
 	/*
 	 * There is nothing to cleanup on initiator connections
@@ -1310,8 +1336,8 @@ idm_so_free_task_rsrc(idm_task_t *idt)
 	 */
 	mutex_enter(&idt->idt_mutex);
 
-	for (idb = list_head(&idt->idt_outbufv); idb != NULL;
-	    idb = list_next(&idt->idt_outbufv, idb)) {
+	for (idb = list_head(&idt->idt_outbufv); idb != NULL; idb = next_idb) {
+		next_idb = list_next(&idt->idt_outbufv, idb);
 		if (idb->idb_in_transport) {
 			/*
 			 * idm_buf_rx_from_ini_done releases idt->idt_mutex
@@ -1327,8 +1353,8 @@ idm_so_free_task_rsrc(idm_task_t *idt)
 		}
 	}
 
-	for (idb = list_head(&idt->idt_inbufv); idb != NULL;
-	    idb = list_next(&idt->idt_inbufv, idb)) {
+	for (idb = list_head(&idt->idt_inbufv); idb != NULL; idb = next_idb) {
+		next_idb = list_next(&idt->idt_inbufv, idb);
 		/*
 		 * We want to remove these items from the tx_list as well,
 		 * but knowing it's in the idt_inbufv list is not a guarantee
@@ -1380,6 +1406,7 @@ idm_so_notice_key_values(idm_conn_t *it, nvlist_t *negotiated_nvl)
 	int			nvrc;
 	idm_status_t		idm_status;
 	const idm_kv_xlate_t	*ikvx;
+	uint64_t		num_val;
 
 	for (nvp = nvlist_next_nvpair(negotiated_nvl, NULL);
 	    nvp != NULL; nvp = next_nvp) {
@@ -1398,12 +1425,64 @@ idm_so_notice_key_values(idm_conn_t *it, nvlist_t *negotiated_nvl)
 			    negotiated_nvl, ikvx->ik_key_name);
 			ASSERT(nvrc == 0);
 			break;
+		case KI_MAX_RECV_DATA_SEGMENT_LENGTH:
+			/*
+			 * Just pass the value down to idm layer.
+			 * No need to remove it from negotiated_nvl list here.
+			 */
+			nvrc = nvpair_value_uint64(nvp, &num_val);
+			ASSERT(nvrc == 0);
+			it->ic_conn_params.max_xmit_dataseglen =
+			    (uint32_t)num_val;
+			break;
 		default:
 			break;
 		}
 	}
 }
 
+/*
+ * idm_so_declare_key_values() declares the key values for this connection
+ */
+/* ARGSUSED */
+static kv_status_t
+idm_so_declare_key_values(idm_conn_t *it, nvlist_t *config_nvl,
+    nvlist_t *outgoing_nvl)
+{
+	char			*nvp_name;
+	nvpair_t		*nvp;
+	nvpair_t		*next_nvp;
+	kv_status_t		kvrc;
+	int			nvrc = 0;
+	const idm_kv_xlate_t	*ikvx;
+	uint64_t		num_val;
+
+	for (nvp = nvlist_next_nvpair(config_nvl, NULL);
+	    nvp != NULL && nvrc == 0; nvp = next_nvp) {
+		next_nvp = nvlist_next_nvpair(config_nvl, nvp);
+		nvp_name = nvpair_name(nvp);
+
+		ikvx = idm_lookup_kv_xlate(nvp_name, strlen(nvp_name));
+		switch (ikvx->ik_key_id) {
+		case KI_MAX_RECV_DATA_SEGMENT_LENGTH:
+			if ((nvrc = nvpair_value_uint64(nvp, &num_val)) != 0) {
+				break;
+			}
+			if (outgoing_nvl &&
+			    (nvrc = nvlist_add_uint64(outgoing_nvl,
+			    nvp_name, num_val)) != 0) {
+				break;
+			}
+			it->ic_conn_params.max_recv_dataseglen =
+			    (uint32_t)num_val;
+			break;
+		default:
+			break;
+		}
+	}
+	kvrc = idm_nvstat_to_kvstat(nvrc);
+	return (kvrc);
+}
 
 static idm_status_t
 idm_so_handle_digest(idm_conn_t *it, nvpair_t *digest_choice,
@@ -2219,8 +2298,10 @@ idm_i_so_tx(idm_pdu_t *pdu)
  * DataSN starts with 0 for the first data PDU of an input command and advances
  * by 1 for each subsequent data PDU. Each sequence will have its own F bit,
  * which is set to 1 for the last data PDU of a sequence.
+ * If the initiator supports phase collapse, the status bit must be set along
+ * with the F bit to indicate that the status is shipped together with the last
+ * Data-In PDU.
  *
- * Scope for Prototype build:
  * The data PDUs within a sequence will be sent in order with the buffer offset
  * in increasing order. i.e. initiator and target must have negotiated the
  * "DataPDUInOrder" to "Yes". The order between sequences is not enforced.
@@ -2312,6 +2393,7 @@ idm_so_buf_rx_from_ini(idm_task_t *idt, idm_buf_t *idb)
 
 	pdu = kmem_cache_alloc(idm.idm_sotx_pdu_cache, KM_SLEEP);
 	pdu->isp_ic = idt->idt_ic;
+	pdu->isp_flags = 0;	/* initialize isp_flags */
 	bzero(pdu->isp_hdr, sizeof (iscsi_rtt_hdr_t));
 
 	/* iSCSI layer fills the TTT, ITT, StatSN, ExpCmdSN, MaxCmdSN */
@@ -2489,7 +2571,7 @@ idm_so_send_buf_region(idm_task_t *idt, idm_buf_t *idb,
 
 	ic = idt->idt_ic;
 
-	max_dataseglen = 8192; /* Need value from login negotiation */
+	max_dataseglen = ic->ic_conn_params.max_xmit_dataseglen;
 	remainder = buf_region_length;
 
 	while (remainder) {
@@ -2509,6 +2591,7 @@ idm_so_send_buf_region(idm_task_t *idt, idm_buf_t *idb,
 		/* Data PDU headers will always be sizeof (iscsi_hdr_t) */
 		pdu = kmem_cache_alloc(idm.idm_sotx_pdu_cache, KM_SLEEP);
 		pdu->isp_ic = ic;
+		pdu->isp_flags = 0;	/* initialize isp_flags */
 
 		/*
 		 * We've already built a build a header template
@@ -2530,9 +2613,26 @@ idm_so_send_buf_region(idm_task_t *idt, idm_buf_t *idb,
 		hton24(bhs->dlength, chunk);
 		bhs->offset = htonl(idb->idb_bufoffset + data_offset);
 
+		/* setup data */
+		pdu->isp_data	=  (uint8_t *)idb->idb_buf + data_offset;
+		pdu->isp_datalen = (uint_t)chunk;
+
 		if (chunk == remainder) {
 			bhs->flags = ISCSI_FLAG_FINAL; /* F bit set to 1 */
+			/* Piggyback the status with the last data PDU */
+			if (idt->idt_flags & IDM_TASK_PHASECOLLAPSE_REQ) {
+				pdu->isp_flags |= IDM_PDU_SET_STATSN |
+				    IDM_PDU_ADVANCE_STATSN;
+				(*idt->idt_ic->ic_conn_ops.icb_update_statsn)
+				    (idt, pdu);
+				idt->idt_flags |=
+				    IDM_TASK_PHASECOLLAPSE_SUCCESS;
+
+			}
 		}
+
+		remainder	-= chunk;
+		data_offset	+= chunk;
 
 		/* Instrument the data-send DTrace probe. */
 		if (IDM_PDU_OPCODE(pdu) == ISCSI_OP_SCSI_DATA_RSP) {
@@ -2541,11 +2641,6 @@ idm_so_send_buf_region(idm_task_t *idt, idm_buf_t *idb,
 			    iscsi_data_rsp_hdr_t *,
 			    (iscsi_data_rsp_hdr_t *)pdu->isp_hdr);
 		}
-		/* setup data */
-		pdu->isp_data	=  (uint8_t *)idb->idb_buf + data_offset;
-		pdu->isp_datalen = (uint_t)chunk;
-		remainder	-= chunk;
-		data_offset	+= chunk;
 
 		/*
 		 * Now that we're done working with idt_exp_datasn,
@@ -2688,13 +2783,18 @@ idm_sotx_thread(void *arg)
 		mutex_exit(&so_conn->ic_tx_mutex);
 
 		switch (object->idm_tx_obj_magic) {
-		case IDM_PDU_MAGIC:
+		case IDM_PDU_MAGIC: {
+			idm_pdu_t *pdu = (idm_pdu_t *)object;
 			DTRACE_PROBE2(soconn__tx__pdu, idm_conn_t *, ic,
 			    idm_pdu_t *, (idm_pdu_t *)object);
 
+			if (pdu->isp_flags & IDM_PDU_SET_STATSN) {
+				/* No IDM task */
+				(ic->ic_conn_ops.icb_update_statsn)(NULL, pdu);
+			}
 			status = idm_i_so_tx((idm_pdu_t *)object);
 			break;
-
+		}
 		case IDM_BUF_MAGIC: {
 			idm_buf_t *idb = (idm_buf_t *)object;
 			idm_task_t *idt = idb->idb_task_binding;
@@ -2821,4 +2921,214 @@ idm_so_socket_set_block(struct sonode *node)
 {
 	(void) VOP_SETFL(node->so_vnode, node->so_flag,
 	    (node->so_state & (~FNONBLOCK)), CRED(), NULL);
+}
+
+
+/*
+ * Called by kernel sockets when the connection has been accepted or
+ * rejected. In early volo, a "disconnect" callback was sent instead of
+ * "connectfailed", so we check for both.
+ */
+/* ARGSUSED */
+void
+idm_so_timed_socket_connect_cb(ksocket_t ks,
+    ksocket_callback_event_t ev, void *arg, uintptr_t info)
+{
+	idm_so_timed_socket_t	*itp = arg;
+	ASSERT(itp != NULL);
+	ASSERT(ev == KSOCKET_EV_CONNECTED ||
+	    ev == KSOCKET_EV_CONNECTFAILED ||
+	    ev == KSOCKET_EV_DISCONNECTED);
+
+	mutex_enter(&idm_so_timed_socket_mutex);
+	itp->it_callback_called = B_TRUE;
+	if (ev == KSOCKET_EV_CONNECTED) {
+		itp->it_socket_error_code = 0;
+	} else {
+		/* Make sure the error code is non-zero on error */
+		if (info == 0)
+			info = ECONNRESET;
+		itp->it_socket_error_code = (int)info;
+	}
+	cv_signal(&itp->it_cv);
+	mutex_exit(&idm_so_timed_socket_mutex);
+}
+
+int
+idm_so_timed_socket_connect(ksocket_t ks,
+    struct sockaddr_storage *sa, int sa_sz, int login_max_usec)
+{
+	clock_t			conn_login_max;
+	int			rc, nonblocking, rval;
+	idm_so_timed_socket_t	it;
+	ksocket_callbacks_t	ks_cb;
+
+	conn_login_max = ddi_get_lbolt() + drv_usectohz(login_max_usec);
+
+	/*
+	 * Set to non-block socket mode, with callback on connect
+	 * Early volo used "disconnected" instead of "connectfailed",
+	 * so set callback to look for both.
+	 */
+	bzero(&it, sizeof (it));
+	ks_cb.ksock_cb_flags = KSOCKET_CB_CONNECTED |
+	    KSOCKET_CB_CONNECTFAILED | KSOCKET_CB_DISCONNECTED;
+	ks_cb.ksock_cb_connected = idm_so_timed_socket_connect_cb;
+	ks_cb.ksock_cb_connectfailed = idm_so_timed_socket_connect_cb;
+	ks_cb.ksock_cb_disconnected = idm_so_timed_socket_connect_cb;
+	cv_init(&it.it_cv, NULL, CV_DEFAULT, NULL);
+	rc = ksocket_setcallbacks(ks, &ks_cb, &it, CRED());
+	if (rc != 0)
+		return (rc);
+
+	/* Set to non-blocking mode */
+	nonblocking = 1;
+	rc = ksocket_ioctl(ks, FIONBIO, (intptr_t)&nonblocking, &rval,
+	    CRED());
+	if (rc != 0)
+		goto cleanup;
+
+	bzero(&it, sizeof (it));
+	for (;;) {
+		/*
+		 * Warning -- in a loopback scenario, the call to
+		 * the connect_cb can occur inside the call to
+		 * ksocket_connect. Do not hold the mutex around the
+		 * call to ksocket_connect.
+		 */
+		rc = ksocket_connect(ks, (struct sockaddr *)sa, sa_sz, CRED());
+		if (rc == 0 || rc == EISCONN) {
+			/* socket success or already success */
+			rc = 0;
+			break;
+		}
+		if ((rc != EINPROGRESS) && (rc != EALREADY)) {
+			break;
+		}
+
+		/* TCP connect still in progress. See if out of time. */
+		if (ddi_get_lbolt() > conn_login_max) {
+			/*
+			 * Connection retry timeout,
+			 * failed connect to target.
+			 */
+			rc = ETIMEDOUT;
+			break;
+		}
+
+		/*
+		 * TCP connect still in progress.  Sleep until callback.
+		 * Do NOT go to sleep if the callback already occurred!
+		 */
+		mutex_enter(&idm_so_timed_socket_mutex);
+		if (!it.it_callback_called) {
+			(void) cv_timedwait(&it.it_cv,
+			    &idm_so_timed_socket_mutex, conn_login_max);
+		}
+		if (it.it_callback_called) {
+			rc = it.it_socket_error_code;
+			mutex_exit(&idm_so_timed_socket_mutex);
+			break;
+		}
+		/* If timer expires, go call ksocket_connect one last time. */
+		mutex_exit(&idm_so_timed_socket_mutex);
+	}
+
+	/* resume blocking mode */
+	nonblocking = 0;
+	(void) ksocket_ioctl(ks, FIONBIO, (intptr_t)&nonblocking, &rval,
+	    CRED());
+cleanup:
+	(void) ksocket_setcallbacks(ks, NULL, NULL, CRED());
+	cv_destroy(&it.it_cv);
+	if (rc != 0) {
+		idm_soshutdown(ks);
+	}
+	return (rc);
+}
+
+
+void
+idm_addr_to_sa(idm_addr_t *dportal, struct sockaddr_storage *sa)
+{
+	int			dp_addr_size;
+	struct sockaddr_in	*sin;
+	struct sockaddr_in6	*sin6;
+
+	/* Build sockaddr_storage for this portal (idm_addr_t) */
+	bzero(sa, sizeof (*sa));
+	dp_addr_size = dportal->a_addr.i_insize;
+	if (dp_addr_size == sizeof (struct in_addr)) {
+		/* IPv4 */
+		sa->ss_family = AF_INET;
+		sin = (struct sockaddr_in *)sa;
+		sin->sin_port = htons(dportal->a_port);
+		bcopy(&dportal->a_addr.i_addr.in4,
+		    &sin->sin_addr, sizeof (struct in_addr));
+	} else if (dp_addr_size == sizeof (struct in6_addr)) {
+		/* IPv6 */
+		sa->ss_family = AF_INET6;
+		sin6 = (struct sockaddr_in6 *)sa;
+		sin6->sin6_port = htons(dportal->a_port);
+		bcopy(&dportal->a_addr.i_addr.in6,
+		    &sin6->sin6_addr, sizeof (struct in6_addr));
+	} else {
+		ASSERT(0);
+	}
+}
+
+
+/*
+ * return a human-readable form of a sockaddr_storage, in the form
+ * [ip-address]:port.  This is used in calls to logging functions.
+ * If several calls to idm_sa_ntop are made within the same invocation
+ * of a logging function, then each one needs its own buf.
+ */
+const char *
+idm_sa_ntop(const struct sockaddr_storage *sa,
+    char *buf, size_t size)
+{
+	static const char bogus_ip[] = "[0].-1";
+	char tmp[INET6_ADDRSTRLEN];
+
+	switch (sa->ss_family) {
+	case AF_INET6:
+		{
+			const struct sockaddr_in6 *in6 =
+			    (const struct sockaddr_in6 *) sa;
+
+			if (inet_ntop(in6->sin6_family,
+			    &in6->sin6_addr, tmp, sizeof (tmp)) == NULL) {
+				goto err;
+			}
+			if (strlen(tmp) + sizeof ("[].65535") > size) {
+				goto err;
+			}
+			/* struct sockaddr_storage gets port info from v4 loc */
+			(void) snprintf(buf, size, "[%s].%u", tmp,
+			    ntohs(in6->sin6_port));
+			return (buf);
+		}
+	case AF_INET:
+		{
+			const struct sockaddr_in *in =
+			    (const struct sockaddr_in *) sa;
+
+			if (inet_ntop(in->sin_family, &in->sin_addr,
+			    tmp, sizeof (tmp)) == NULL) {
+				goto err;
+			}
+			if (strlen(tmp) + sizeof ("[].65535") > size) {
+				goto err;
+			}
+			(void) snprintf(buf, size,  "[%s].%u", tmp,
+			    ntohs(in->sin_port));
+			return (buf);
+		}
+	default:
+		break;
+	}
+err:
+	(void) snprintf(buf, size, "%s", bogus_ip);
+	return (buf);
 }

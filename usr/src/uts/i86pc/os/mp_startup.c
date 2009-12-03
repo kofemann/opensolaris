@@ -1405,7 +1405,8 @@ start_other_cpus(int cprboot)
 	}
 
 done:
-	workaround_errata_end();
+	if (get_hwenv() == HW_NATIVE)
+		workaround_errata_end();
 	mach_cpucontext_fini();
 
 	cmi_post_mpstartup();
@@ -1586,7 +1587,7 @@ mp_startup(void)
 	 */
 	mutex_enter(&cpu_lock);
 	pghw_physid_create(cp);
-	pg_cpu_init(cp);
+	(void) pg_cpu_init(cp, B_FALSE);
 	pg_cmt_cpu_startup(cp);
 	mutex_exit(&cpu_lock);
 

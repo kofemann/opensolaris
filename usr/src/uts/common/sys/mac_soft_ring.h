@@ -41,7 +41,7 @@ extern "C" {
 
 #define	S_RING_NAMELEN 64
 
-#define	MAX_SR_FANOUT	32
+#define	MAX_SR_FANOUT	24
 
 extern boolean_t mac_soft_ring_enable;
 extern boolean_t mac_latency_optimize;
@@ -131,6 +131,9 @@ typedef struct mac_srs_tx_s {
 	void		*st_arg1;
 	void		*st_arg2;
 	mac_group_t	*st_group;	/* TX group for share */
+	uint32_t	st_ring_count;	/* no. of tx rings */
+	mac_ring_handle_t	*st_rings;
+
 	boolean_t	st_woken_up;
 
 	/*

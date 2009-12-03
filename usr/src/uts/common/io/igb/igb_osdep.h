@@ -48,6 +48,7 @@ extern "C" {
 #include <sys/dditypes.h>
 #include <sys/sunddi.h>
 #include <sys/pci.h>
+#include <sys/pci_cap.h>
 #include <sys/atomic.h>
 #include <sys/note.h>
 #include "igb_debug.h"
@@ -68,7 +69,7 @@ extern "C" {
 #define	DEBUGOUT3(S, A, B, C)
 #endif
 
-#define	DEBUGFUNC(F)
+#define	DEBUGFUNC(f)
 
 #define	OS_DEP(hw)		((struct igb_osdep *)((hw)->back))
 

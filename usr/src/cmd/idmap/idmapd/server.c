@@ -524,8 +524,17 @@ list_mappings_cb(void *parg, int argc, char **argv, char **colnames)
 		case IDMAP_MAP_TYPE_LOCAL_SID:
 			break;
 
+		case IDMAP_MAP_TYPE_IDMU:
+			how->idmap_how_u.idmu.dn =
+			    strdup(argv[12]);
+			how->idmap_how_u.idmu.attr =
+			    strdup(argv[13]);
+			how->idmap_how_u.idmu.value =
+			    strdup(argv[14]);
+			break;
+
 		default:
-			/* Unknow mapping type */
+			/* Unknown mapping type */
 			assert(FALSE);
 		}
 
@@ -551,7 +560,6 @@ idmap_list_mappings_1_svc(int64_t lastrowid, uint64_t limit, int32_t flag,
 	time_t		curtime;
 
 	(void) memset(result, 0, sizeof (*result));
-	lbuf[0] = rbuf[0] = 0;
 
 	/* Current time */
 	errno = 0;
@@ -579,6 +587,8 @@ idmap_list_mappings_1_svc(int64_t lastrowid, uint64_t limit, int32_t flag,
 	if (limit > 0)
 		(void) snprintf(lbuf, sizeof (lbuf),
 		    "LIMIT %" PRIu64, limit + 1ULL);
+	else
+		lbuf[0] = '\0';
 
 	(void) snprintf(rbuf, sizeof (rbuf), "rowid > %" PRIu64, lastrowid);
 
@@ -695,7 +705,6 @@ idmap_list_namerules_1_svc(idmap_namerule rule, uint64_t lastrowid,
 {
 
 	sqlite		*db = NULL;
-	char		w2ubuf[15], u2wbuf[15];
 	char		lbuf[30], rbuf[30];
 	char		*sql = NULL;
 	char		*expr = NULL;
@@ -703,7 +712,6 @@ idmap_list_namerules_1_svc(idmap_namerule rule, uint64_t lastrowid,
 	idmap_retcode	retcode;
 
 	(void) memset(result, 0, sizeof (*result));
-	lbuf[0] = rbuf[0] = 0;
 
 	result->retcode = validate_rule(&rule);
 	if (result->retcode != IDMAP_SUCCESS)
@@ -718,22 +726,6 @@ idmap_list_namerules_1_svc(idmap_namerule rule, uint64_t lastrowid,
 	if (result->retcode != IDMAP_SUCCESS)
 		goto out;
 
-	result->retcode = IDMAP_ERR_INTERNAL;
-
-	w2ubuf[0] = u2wbuf[0] = 0;
-	if (rule.direction == IDMAP_DIRECTION_BI) {
-		(void) snprintf(w2ubuf, sizeof (w2ubuf), "AND w2u_order > 0");
-		(void) snprintf(u2wbuf, sizeof (u2wbuf), "AND u2w_order > 0");
-	} else if (rule.direction == IDMAP_DIRECTION_W2U) {
-		(void) snprintf(w2ubuf, sizeof (w2ubuf), "AND w2u_order > 0");
-		(void) snprintf(u2wbuf, sizeof (u2wbuf),
-		    "AND (u2w_order = 0 OR u2w_order ISNULL)");
-	} else if (rule.direction == IDMAP_DIRECTION_U2W) {
-		(void) snprintf(w2ubuf, sizeof (w2ubuf),
-		    "AND (w2u_order = 0 OR w2u_order ISNULL)");
-		(void) snprintf(u2wbuf, sizeof (u2wbuf), "AND u2w_order > 0");
-	}
-
 	result->retcode = gen_sql_expr_from_rule(&rule, &expr);
 	if (result->retcode != IDMAP_SUCCESS)
 		goto out;
@@ -744,6 +736,8 @@ idmap_list_namerules_1_svc(idmap_namerule rule, uint64_t lastrowid,
 	if (limit > 0)
 		(void) snprintf(lbuf, sizeof (lbuf),
 		    "LIMIT %" PRIu64, limit + 1ULL);
+	else
+		lbuf[0] = '\0';
 
 	(void) snprintf(rbuf, sizeof (rbuf), "rowid > %" PRIu64, lastrowid);
 
@@ -754,8 +748,8 @@ idmap_list_namerules_1_svc(idmap_namerule rule, uint64_t lastrowid,
 	sql = sqlite_mprintf("SELECT rowid, is_user, is_wuser, windomain, "
 	    "winname_display, is_nt4, unixname, w2u_order, u2w_order "
 	    "FROM namerules WHERE "
-	    " %s %s %s %s %s;",
-	    rbuf, expr, w2ubuf, u2wbuf, lbuf);
+	    " %s %s %s;",
+	    rbuf, expr, lbuf);
 
 	if (sql == NULL) {
 		result->retcode = IDMAP_ERR_MEMORY;
@@ -1069,9 +1063,10 @@ idmap_get_prop_1_svc(idmap_prop_type request,
 		    pgcfg->nldap_winname_attr);
 		result->auto_discovered = FALSE;
 		break;
-	case PROP_DS_NAME_MAPPING_ENABLED:
-		result->value.idmap_prop_val_u.boolval =
-		    pgcfg->ds_name_mapping_enabled;
+	case PROP_DIRECTORY_BASED_MAPPING:
+		STRDUP_CHECK(result->value.idmap_prop_val_u.utf8val,
+		    enum_lookup(pgcfg->directory_based_mapping,
+		    directory_mapping_map));
 		result->auto_discovered = FALSE;
 		break;
 	default:

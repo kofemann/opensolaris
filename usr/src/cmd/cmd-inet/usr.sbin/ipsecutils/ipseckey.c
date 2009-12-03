@@ -399,6 +399,7 @@ parsesatype(char *type, char *ebuf)
 #define	NEXTIDENT	7
 #define	NEXTADDR4	8
 #define	NEXTADDR6	9
+#define	NEXTLABEL	10
 
 #define	TOK_EOF			0
 #define	TOK_UNKNOWN		1
@@ -454,6 +455,11 @@ parsesatype(char *type, char *ebuf)
 #define	TOK_REPLAY_VALUE	51
 #define	TOK_IDLE_ADDTIME	52
 #define	TOK_IDLE_USETIME	53
+#define	TOK_RESERVED		54
+#define	TOK_LABEL		55
+#define	TOK_OLABEL		56
+#define	TOK_IMPLABEL		57
+
 
 static struct toktable {
 	char *string;
@@ -538,9 +544,15 @@ static struct toktable {
 	{"outbound",		TOK_FLAG_OUTBOUND,	NULL},
 	{"inbound",		TOK_FLAG_INBOUND,	NULL},
 
+	{"reserved_bits",	TOK_RESERVED,		NEXTNUM},
 	{"replay_value",	TOK_REPLAY_VALUE,	NEXTNUM},
 	{"idle_addtime",	TOK_IDLE_ADDTIME,	NEXTNUM},
 	{"idle_usetime",	TOK_IDLE_USETIME,	NEXTNUM},
+
+	{"label",		TOK_LABEL,		NEXTLABEL},
+	{"outer-label",		TOK_OLABEL,		NEXTLABEL},
+	{"implicit-label",	TOK_IMPLABEL,		NEXTLABEL},
+
 	{NULL,			TOK_UNKNOWN,		NEXTEOF}
 };
 
@@ -627,6 +639,11 @@ parsealg(char *alg, int proto_num, char *ebuf)
 		uint8_t alg_num;
 
 		alg_num = algent->a_alg_num;
+		if (ALG_FLAG_COUNTERMODE & algent->a_alg_flags)
+			WARN1(ep, ebuf, gettext(
+			    "Using manual keying with a Counter mode algorithm "
+			    "such as \"%s\" may be insecure!\n"),
+			    algent->a_names[0]);
 		freeipsecalgent(algent);
 
 		return (alg_num);
@@ -803,7 +820,7 @@ parseaddr(char *addr, struct hostent **hpp, boolean_t v6only, char *ebuf)
 	(((hd) >= 'a' && (hd) <= 'f') ? ((hd) - 'a' + 10) : ((hd) - 'A' + 10)))
 
 static struct sadb_key *
-parsekey(char *input, char *ebuf)
+parsekey(char *input, char *ebuf, uint_t reserved_bits)
 {
 	struct sadb_key *retval;
 	uint_t i, hexlen = 0, bits, alloclen;
@@ -860,7 +877,9 @@ parsekey(char *input, char *ebuf)
 	if (retval == NULL)
 		Bail("malloc(parsekey)");
 	retval->sadb_key_len = SADB_8TO64(alloclen);
-	retval->sadb_key_reserved = 0;
+
+	retval->sadb_key_reserved = reserved_bits;
+
 	if (bits == 0)
 		retval->sadb_key_bits = (hexlen + (hexlen & 0x1)) << 2;
 	else
@@ -898,6 +917,58 @@ parsekey(char *input, char *ebuf)
 
 	handle_errors(ep, NULL, B_FALSE, B_FALSE);
 	return (retval);
+}
+
+#include <tsol/label.h>
+
+#define	PARSELABEL_BAD_TOKEN ((struct sadb_sens *)-1)
+
+static struct sadb_sens *
+parselabel(int token, char *label)
+{
+	bslabel_t *sl = NULL;
+	int err, len;
+	sadb_sens_t *sens;
+	int doi = 1;  /* XXX XXX DEFAULT_DOI XXX XXX */
+
+	err = str_to_label(label, &sl, MAC_LABEL, L_DEFAULT, NULL);
+	if (err < 0)
+		return (NULL);
+
+	len = ipsec_convert_sl_to_sens(doi, sl, NULL);
+
+	sens = malloc(len);
+	if (sens == NULL) {
+		Bail("malloc parsed label");
+		/* Should exit before reaching here... */
+		return (NULL);
+	}
+
+	(void) ipsec_convert_sl_to_sens(doi, sl, sens);
+
+	switch (token) {
+	case TOK_LABEL:
+		break;
+
+	case TOK_OLABEL:
+		sens->sadb_sens_exttype = SADB_X_EXT_OUTER_SENS;
+		break;
+
+	case TOK_IMPLABEL:
+		sens->sadb_sens_exttype = SADB_X_EXT_OUTER_SENS;
+		sens->sadb_x_sens_flags = SADB_X_SENS_IMPLICIT;
+		break;
+
+	default:
+		free(sens);
+		/*
+		 * Return a different return code for a bad label, but really,
+		 * this would be a caller error.
+		 */
+		return (PARSELABEL_BAD_TOKEN);
+	}
+
+	return (sens);
 }
 
 /*
@@ -1581,10 +1652,12 @@ doaddup(int cmd, int satype, char *argv[], char *ebuf)
 	struct sadb_lifetime *hard = NULL, *soft = NULL;  /* Current? */
 	struct sadb_lifetime *idle = NULL;
 	struct sadb_x_replay_ctr *replay_ctr = NULL;
+	struct sadb_sens *label = NULL, *olabel = NULL;
 	struct sockaddr_in6 *sin6;
 	/* MLS TODO:  Need sensitivity eventually. */
 	int next, token, sa_len, alloclen, totallen = sizeof (msg), prefix;
 	uint32_t spi = 0;
+	uint_t reserved_bits = 0;
 	uint8_t	sadb_msg_type;
 	char *thiscmd, *pstr;
 	boolean_t readstate = B_FALSE, unspec_src = B_FALSE;
@@ -2251,7 +2324,7 @@ doaddup(int cmd, int satype, char *argv[], char *ebuf)
 				    "encryption algorithm.\n"));
 				break;
 			}
-			encrypt = parsekey(*argv, ebuf);
+			encrypt = parsekey(*argv, ebuf, reserved_bits);
 			argv++;
 			if (encrypt == NULL) {
 				ERROR(ep, ebuf, gettext(
@@ -2268,7 +2341,7 @@ doaddup(int cmd, int satype, char *argv[], char *ebuf)
 				    " authentication key.\n"));
 				break;
 			}
-			auth = parsekey(*argv, ebuf);
+			auth = parsekey(*argv, ebuf, 0);
 			argv++;
 			if (auth == NULL) {
 				ERROR(ep, ebuf, gettext(
@@ -2510,6 +2583,41 @@ doaddup(int cmd, int satype, char *argv[], char *ebuf)
 				break;
 			}
 			argv++;
+			break;
+		case TOK_RESERVED:
+			if (encrypt != NULL)
+				ERROR(ep, ebuf, gettext(
+				    "Reserved bits need to be "
+				    "specified before key.\n"));
+			reserved_bits = (uint_t)parsenum(*argv,
+			    B_TRUE, ebuf);
+			argv++;
+			break;
+		case TOK_LABEL:
+			label = parselabel(token, *argv);
+			argv++;
+			if (label == NULL) {
+				ERROR(ep, ebuf,
+				    gettext("Malformed security label\n"));
+				break;
+			} else if (label == PARSELABEL_BAD_TOKEN) {
+				Bail("Internal token value error");
+			}
+			totallen += SADB_64TO8(label->sadb_sens_len);
+			break;
+
+		case TOK_OLABEL:
+		case TOK_IMPLABEL:
+			olabel = parselabel(token, *argv);
+			argv++;
+			if (label == NULL) {
+				ERROR(ep, ebuf,
+				    gettext("Malformed security label\n"));
+				break;
+			} else if (label == PARSELABEL_BAD_TOKEN) {
+				Bail("Internal token value error");
+			}
+			totallen += SADB_64TO8(olabel->sadb_sens_len);
 			break;
 		default:
 			ERROR1(ep, ebuf, gettext(
@@ -2811,6 +2919,20 @@ doaddup(int cmd, int satype, char *argv[], char *ebuf)
 		free(replay_ctr);
 	}
 
+	if (label != NULL) {
+		bcopy(label, nexthdr, SADB_64TO8(label->sadb_sens_len));
+		nexthdr += label->sadb_sens_len;
+		free(label);
+		label = NULL;
+	}
+
+	if (olabel != NULL) {
+		bcopy(olabel, nexthdr, SADB_64TO8(olabel->sadb_sens_len));
+		nexthdr += olabel->sadb_sens_len;
+		free(olabel);
+		olabel = NULL;
+	}
+
 	if (cflag) {
 		/*
 		 * Assume the checked cmd would have worked if it was actually
@@ -2836,7 +2958,6 @@ doaddup(int cmd, int satype, char *argv[], char *ebuf)
 		freehostent(natt_lhp);
 	if (natt_rhp != NULL && natt_rhp != &dummy.he)
 		freehostent(natt_rhp);
-
 	free(ebuf);
 	free(buffer);
 }
@@ -3492,14 +3613,40 @@ main(int argc, char *argv[])
 		case 'f':
 			if (dosave)
 				usage();
+
+			/*
+			 * Use stat() to check and see if the user inadvertently
+			 * passed in a bad pathname, or the name of a directory.
+			 * We should also check to see if the filename is a
+			 * pipe. We use stat() here because fopen() will block
+			 * unless the other end of the pipe is open. This would
+			 * be undesirable, especially if this is called at boot
+			 * time. If we ever need to support reading from a pipe
+			 * or special file, this should be revisited.
+			 */
+			if (stat(optarg, &sbuf) == -1) {
+				EXIT_BADCONFIG2("Invalid pathname: %s\n",
+				    optarg);
+			}
+			if (!(sbuf.st_mode & S_IFREG)) {
+				EXIT_BADCONFIG2("%s - Not a regular file\n",
+				    optarg);
+			}
 			infile = fopen(optarg, "r");
 			if (infile == NULL) {
 				EXIT_BADCONFIG2("Unable to open configuration "
 				    "file: %s\n", optarg);
 			}
 			/*
-			 * Check file permissions/ownership and warn or
-			 * fail depending on state of SMF control.
+			 * The input file contains keying information, because
+			 * this is sensative, we should only accept data from
+			 * this file if the file is root owned and only readable
+			 * by privileged users. If the command is being run by
+			 * the administrator, issue a warning, if this is run by
+			 * smf(5) (IE: boot time) and the permissions are too
+			 * open, we will fail, the SMF service will end up in
+			 * maintenace mode. The check is made with fstat() to
+			 * eliminate any possible TOT to TOU window.
 			 */
 			if (fstat(fileno(infile), &sbuf) == -1) {
 				(void) fclose(infile);
@@ -3513,10 +3660,10 @@ main(int argc, char *argv[])
 					    "%s has insecure permissions.",
 					    optarg);
 				} else 	{
-					(void) fprintf(stderr, "%s %s\n",
-					    optarg, gettext(
-					    "has insecure permissions, will be "
-					    "rejected in permanent config."));
+					(void) fprintf(stderr, gettext(
+					    "Config file %s has insecure "
+					    "permissions, will be rejected in "
+					    "permanent config.\n"), optarg);
 				}
 			}
 			configfile = strdup(optarg);

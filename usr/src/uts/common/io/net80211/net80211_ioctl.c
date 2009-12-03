@@ -72,6 +72,8 @@ static int wl_set_delkey(struct ieee80211com *, const void *);
 static int wl_set_mlme(struct ieee80211com *, const void *);
 static int wl_set_wpakey(struct ieee80211com *, const void *);
 static void wl_get_suprates(struct ieee80211com *, void *);
+static int wl_set_createibss(struct ieee80211com *, const void *);
+static void wl_get_createibss(struct ieee80211com *, void *);
 
 static size_t
 wifi_strnlen(const char *s, size_t n)
@@ -496,34 +498,10 @@ wifi_cfg_createibss(struct ieee80211com *ic, uint32_t cmd, mblk_t **mp)
 
 	switch (cmd) {
 	case WLAN_GET_PARAM:
-		*ow_ibss = (ic->ic_flags & IEEE80211_F_IBSSON) ? 1 : 0;
+		wl_get_createibss(ic, ow_ibss);
 		break;
 	case  WLAN_SET_PARAM:
-		ieee80211_dbg(IEEE80211_MSG_CONFIG, "wifi_cfg_createibss: "
-		    "set createibss=%u\n", *iw_ibss);
-		if ((ic->ic_caps & IEEE80211_C_IBSS) == 0) {
-			outp->wldp_result = WL_LACK_FEATURE;
-			err = ENOTSUP;
-			break;
-		}
-		if (*iw_ibss) { /* create ibss */
-			if ((ic->ic_flags & IEEE80211_F_IBSSON) == 0) {
-				ic->ic_flags |= IEEE80211_F_IBSSON;
-				ic->ic_opmode = IEEE80211_M_IBSS;
-				/*
-				 * Yech, slot time may change depending on the
-				 * operating mode so reset it to be sure
-				 * everything is setup appropriately.
-				 */
-				ieee80211_reset_erp(ic);
-				err = ENETRESET;
-			}
-		} else {
-			if (ic->ic_flags & IEEE80211_F_IBSSON) {
-				ic->ic_flags &= ~IEEE80211_F_IBSSON;
-				err = ENETRESET;
-			}
-		}
+		err = wl_set_createibss(ic, iw_ibss);
 		break;
 	default:
 		ieee80211_err("wifi_cfg_bsstype: unknown command %x\n", cmd);
@@ -708,17 +686,18 @@ static void
 wifi_wait_scan(struct ieee80211com *ic)
 {
 	ieee80211_impl_t *im = ic->ic_private;
+	clock_t delta = drv_usectohz(WAIT_SCAN_MAX * 1000);
 
 	while ((ic->ic_flags & (IEEE80211_F_SCAN | IEEE80211_F_ASCAN)) != 0) {
-		if (cv_timedwait_sig(&im->im_scan_cv, &ic->ic_genlock,
-		    ddi_get_lbolt() + drv_usectohz(WAIT_SCAN_MAX * 1000)) !=
-		    0) {
+		if (cv_reltimedwait_sig(&im->im_scan_cv, &ic->ic_genlock,
+		    delta, TR_CLOCK_TICK) != 0) {
 			break;
 		}
 	}
 }
 
 #define	WIFI_HAVE_CAP(in, flag)	(((in)->in_capinfo & (flag)) ? 1 : 0)
+#define	WIFI_HAVE_HTCAP(in)	(((in)->in_htcap != 0) ? 1 : 0)
 
 /*
  * Callback function used by ieee80211_iterate_nodes() in
@@ -768,6 +747,7 @@ wifi_read_ap(void *arg, struct ieee80211_node *in)
 		    (wl_ofdm_t *)&((conf->wl_phy_conf).wl_phy_ofdm_conf);
 		ofdm->wl_ofdm_subtype = WL_OFDM;
 		ofdm->wl_ofdm_frequency = chan->ich_freq;
+		ofdm->wl_ofdm_ht_enabled = WIFI_HAVE_HTCAP(in);
 	} else {
 		switch (in->in_phytype) {
 		case IEEE80211_T_FH: {
@@ -809,6 +789,7 @@ wifi_read_ap(void *arg, struct ieee80211_node *in)
 			    WIFI_HAVE_CAP(in, IEEE80211_CAPINFO_DSSSOFDM);
 			erp->wl_erp_sst_enabled = WIFI_HAVE_CAP(in,
 			    IEEE80211_CAPINFO_SHORT_SLOTTIME);
+			erp->wl_erp_ht_enabled = WIFI_HAVE_HTCAP(in);
 			break;
 		} /* case IEEE80211_T_OFDM */
 		} /* switch in->in_phytype */
@@ -1863,12 +1844,15 @@ wl_set_phy(struct ieee80211com *ic, const void* wldp_buf)
 	return (err);
 }
 
+#define	WIFI_HT_MODE(in)	(((in)->in_flags & IEEE80211_NODE_HT) ? 1 : 0)
+
 static int
 wl_get_phy(struct ieee80211com *ic, void *wldp_buf)
 {
 	int err = 0;
 	wl_phy_conf_t *ow_phy;
 	struct ieee80211_channel *ch = ic->ic_curchan;
+	struct ieee80211_node *in = ic->ic_bss;
 
 	ow_phy = (wl_phy_conf_t *)wldp_buf;
 	bzero(wldp_buf, sizeof (wl_phy_conf_t));
@@ -1878,6 +1862,7 @@ wl_get_phy(struct ieee80211com *ic, void *wldp_buf)
 		wl_ofdm_t *ofdm = (wl_ofdm_t *)ow_phy;
 		ofdm->wl_ofdm_subtype = WL_OFDM;
 		ofdm->wl_ofdm_frequency = ch->ich_freq;
+		ofdm->wl_ofdm_ht_enabled = WIFI_HT_MODE(in);
 	} else {
 		switch (ic->ic_phytype) {
 		case IEEE80211_T_FH: {
@@ -1899,6 +1884,7 @@ wl_get_phy(struct ieee80211com *ic, void *wldp_buf)
 			erp->wl_erp_subtype = WL_ERP;
 			erp->wl_erp_channel =
 			    ieee80211_chan2ieee(ic, ch);
+			erp->wl_erp_ht_enabled = WIFI_HT_MODE(in);
 			break;
 		}
 		default:
@@ -2334,6 +2320,52 @@ wl_get_suprates(struct ieee80211com *ic, void *wldp_buf)
 }
 
 /*
+ * MAC_PROP_WL_CREATE_IBSS
+ */
+static int
+wl_set_createibss(struct ieee80211com *ic, const void *wldp_buf)
+{
+	wl_create_ibss_t *iw_ibss = (wl_create_ibss_t *)wldp_buf;
+	int err = 0;
+
+	ieee80211_dbg(IEEE80211_MSG_CONFIG, "wl_set_ibss: "
+	    "set createibss=%u\n", *iw_ibss);
+
+	if ((ic->ic_caps & IEEE80211_C_IBSS) == 0) {
+		err = ENOTSUP;
+		return (err);
+	}
+	if (*iw_ibss) {
+		if ((ic->ic_flags & IEEE80211_F_IBSSON) == 0) {
+			ic->ic_flags |= IEEE80211_F_IBSSON;
+			ic->ic_opmode = IEEE80211_M_IBSS;
+			/*
+			 * Yech, slot time may change depending on the
+			 * operating mode so reset it to be sure
+			 * everything is setup appropriately.
+			 */
+			ieee80211_reset_erp(ic);
+			err = ENETRESET;
+		}
+	} else {
+		if (ic->ic_flags & IEEE80211_F_IBSSON) {
+			ic->ic_flags &= ~IEEE80211_F_IBSSON;
+			err = ENETRESET;
+		}
+	}
+
+	return (err);
+}
+
+static void
+wl_get_createibss(struct ieee80211com *ic, void *wldp_buf)
+{
+	wl_create_ibss_t *ow_ibss = (wl_create_ibss_t *)wldp_buf;
+
+	*ow_ibss = (ic->ic_flags & IEEE80211_F_IBSSON)? 1 : 0;
+}
+
+/*
  * Typically invoked by drivers in response to request for
  * information or to change settings from the userland.
  *
@@ -2398,6 +2430,9 @@ ieee80211_setprop(void *ic_arg, const char *pr_name, mac_prop_id_t wldp_pr_num,
 		break;
 	case MAC_PROP_WL_MLME:
 		err = wl_set_mlme(ic, wldp_buf);
+		break;
+	case MAC_PROP_WL_CREATE_IBSS:
+		err = wl_set_createibss(ic, wldp_buf);
 		break;
 	case MAC_PROP_WL_LINKSTATUS:
 	case MAC_PROP_WL_ESS_LIST:
@@ -2487,6 +2522,10 @@ ieee80211_getprop(void *ic_arg, const char *pr_name, mac_prop_id_t wldp_pr_num,
 	case MAC_PROP_WL_SCANRESULTS:
 		*perm = MAC_PROP_PERM_READ;
 		wl_get_scanresults(ic, wldp_buf);
+		break;
+	case MAC_PROP_WL_CREATE_IBSS:
+		*perm = MAC_PROP_PERM_READ;
+		wl_get_createibss(ic, wldp_buf);
 		break;
 	case MAC_PROP_WL_KEY_TAB:
 	case MAC_PROP_WL_KEY:

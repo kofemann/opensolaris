@@ -55,8 +55,9 @@ cpudrv_get_cpu_id(dev_info_t *dip,  processorid_t *cpu_id)
 /*
  * A noop for this machine type.
  */
+/* ARGSUSED */
 boolean_t
-cpudrv_power_ready(void)
+cpudrv_power_ready(cpu_t *cp)
 {
 	return (B_TRUE);
 }

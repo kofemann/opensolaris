@@ -122,7 +122,8 @@ typedef struct idm_refcnt_s {
  * connection create, or during key-value negotiation at login
  */
 typedef struct idm_conn_params_s {
-	uint32_t		max_dataseglen;
+	uint32_t		max_recv_dataseglen;
+	uint32_t		max_xmit_dataseglen;
 	uint32_t		conn_login_max;
 	uint32_t		conn_login_interval;
 	boolean_t		nonblock_socket;
@@ -259,6 +260,7 @@ typedef struct idm_task_s {
 	 */
 	int			idt_transport_hdrlen;
 	void			*idt_transport_hdr;
+	uint32_t		idt_flags;	/* phase collapse */
 } idm_task_t;
 
 int idm_task_constructor(void *task_void, void *arg, int flags);
@@ -266,6 +268,9 @@ void idm_task_destructor(void *task_void, void *arg);
 
 #define	IDM_TASKIDS_MAX		16384
 #define	IDM_BUF_MAGIC		0x49425546	/* "IBUF" */
+
+#define	IDM_TASK_PHASECOLLAPSE_REQ	0x00000001 /* request phase collapse */
+#define	IDM_TASK_PHASECOLLAPSE_SUCCESS	0x00000002 /* phase collapse success */
 
 /* Protect with task mutex */
 typedef struct idm_buf_s {
@@ -391,6 +396,8 @@ typedef struct {
 #define	IDM_PDU_ADDL_HDR	0x00000002
 #define	IDM_PDU_ADDL_DATA	0x00000004
 #define	IDM_PDU_LOGIN_TX	0x00000008
+#define	IDM_PDU_SET_STATSN	0x00000010
+#define	IDM_PDU_ADVANCE_STATSN	0x00000020
 
 #define	OSD_EXT_CDB_AHSLEN	(200 - 15)
 #define	BIDI_AHS_LENGTH		5

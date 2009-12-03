@@ -20,14 +20,12 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_SYS_MACHPRIVREGS_H
 #define	_SYS_MACHPRIVREGS_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/hypervisor.h>
 
@@ -374,7 +372,17 @@ extern "C" {
 	ud2	/* die nastily if we return! */
 
 #define	IRET	HYPERVISOR_IRET(0)
-#define	SYSRETQ	HYPERVISOR_IRET(VGCF_IN_SYSCALL)
+
+/*
+ * XXPV: Normally we would expect to use sysret to return from kernel to
+ *       user mode when using the syscall instruction. The iret hypercall
+ *       does support both iret and sysret semantics. For us to use sysret
+ *	 style would require that we use the hypervisor's private descriptors
+ *	 that obey syscall instruction's imposed segment selector ordering.
+ *	 With iret we can use whatever %cs value we choose. We should fix
+ *	 this to use sysret one day.
+ */
+#define	SYSRETQ	HYPERVISOR_IRET(0)
 #define	SYSRETL	ud2		/* 32-bit syscall/sysret not supported */
 #define	SWAPGS	/* empty - handled in hypervisor */
 

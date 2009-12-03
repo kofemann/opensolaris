@@ -423,6 +423,12 @@ extern long nrnode;
 #define	NFS4_INITIAL_DELAY_INTERVAL	 1
 #define	NFS4_MAX_DELAY_INTERVAL		20
 
+/* Used for check_rtable4 */
+#define	NFSV4_RTABLE4_OK		0
+#define	NFSV4_RTABLE4_NOT_FREE_LIST	1
+#define	NFSV4_RTABLE4_DIRTY_PAGES	2
+#define	NFSV4_RTABLE4_POS_R_COUNT	3
+
 extern rnode4_t	*r4find(r4hashq_t *, nfs4_sharedfh_t *, struct vfs *);
 extern rnode4_t	*r4find_unlocked(nfs4_sharedfh_t *, struct vfs *);
 extern void	r4flush(struct vfs *, cred_t *);

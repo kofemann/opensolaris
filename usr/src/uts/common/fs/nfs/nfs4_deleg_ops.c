@@ -278,7 +278,7 @@ recall_all_delegations(rfs4_file_t *fp, bool_t trunc, caller_context_t *ct)
 	rfs4_dbe_lock(fp->rf_dbe);
 	while (fp->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE) {
 		rc = rfs4_dbe_twait(fp->rf_dbe,
-		    lbolt +
+		    ddi_get_lbolt() +
 		    SEC_TO_TICK(dbe_to_instp(fp->rf_dbe)->lease_period));
 		if (rc == -1) { /* timed out */
 			rfs4_dbe_unlock(fp->rf_dbe);
@@ -651,7 +651,7 @@ deleg_wr_vnevent(femarg_t *arg, vnevent_t vnevent, vnode_t *dvp, char *name,
 		rfs4_dbe_lock(fp->rf_dbe);
 		while (fp->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE) {
 			rc = rfs4_dbe_twait(fp->rf_dbe,
-			    lbolt + SEC_TO_TICK(
+			    ddi_get_lbolt() + SEC_TO_TICK(
 			    dbe_to_instp(fp->rf_dbe)->lease_period));
 			if (rc == -1) { /* timed out */
 				rfs4_dbe_unlock(fp->rf_dbe);

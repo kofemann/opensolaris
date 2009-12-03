@@ -197,6 +197,8 @@ typedef struct fct_dbuf_store {
 			    stmf_data_buf_t *dbuf);
 } fct_dbuf_store_t;
 
+#define	FCT_FCA_MODREV_1	1
+
 typedef struct fct_local_port {
 	void			*port_fct_private;
 	void			*port_fca_private;
@@ -247,6 +249,7 @@ typedef struct fct_local_port {
 	fct_status_t		(*port_info)(uint32_t cmd,
 		struct fct_local_port *port, void *arg, uint8_t *buf,
 		uint32_t *bufsizep);
+	int		port_fca_version;
 } fct_local_port_t;
 
 /*
@@ -346,6 +349,7 @@ typedef struct fct_port_stat {
 #define	FCT_CMD_PORT_OFFLINE_COMPLETE	(STMF_LPORT_CTL_CMDS | 0x04)
 #define	FCT_ACK_PORT_ONLINE_COMPLETE	(STMF_LPORT_CTL_CMDS | 0x05)
 #define	FCT_ACK_PORT_OFFLINE_COMPLETE	(STMF_LPORT_CTL_CMDS | 0x06)
+#define	FCT_CMD_FORCE_LIP		(STMF_LPORT_CTL_CMDS | 0x07)
 
 /*
  * IO flags for cmd flow.

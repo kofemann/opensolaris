@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -43,8 +43,10 @@ static int check_hardware_provider(char *, char *, int *, int *);
  * Display the mechanism list for a kernel software provider.
  * This implements part of the "cryptoadm list -m" command.
  *
- * Parameters phardlist and psoftlist are supplied by get_kcfconf_info().
- * If NULL, this function obtains it by calling get_kcfconf_info() internally.
+ * Parameters phardlist and psoftlist are supplied by
+ * get_soft_info().
+ * If NULL, this function obtains it by calling getent_kef() and
+ * then get_kcfconf_info() via get_soft_info() internally.
  */
 int
 list_mechlist_for_soft(char *provname,
@@ -113,8 +115,10 @@ list_mechlist_for_hard(char *provname)
  * Display the policy information for a kernel software provider.
  * This implements part of the "cryptoadm list -p" command.
  *
- * Parameters phardlist and psoftlist are supplied by get_kcfconf_info().
- * If NULL, this function obtains it by calling get_kcfconf_info() internally.
+ * Parameters phardlist and psoftlist are supplied by
+ * getent_kef().
+ * If NULL, this function obtains it by calling get_kcfconf_info()
+ * via getent_kef() internally.
  */
 int
 list_policy_for_soft(char *provname,
@@ -165,10 +169,12 @@ list_policy_for_soft(char *provname,
  * Display the policy information for a kernel hardware provider.
  * This implements part of the "cryptoadm list -p" command.
  *
- * Parameters phardlist and psoftlist are supplied by get_kcfconf_info().
- * If NULL, this function obtains it by calling get_kcfconf_info() internally.
- * Parameter pdevlist is supplied by get_dev_list().
- * If NULL, this function obtains it by calling get_dev_list() internally.
+ * Parameters phardlist and psoftlist are supplied by getent_kef().
+ * If NULL, this function obtains it by calling get_kcfconf_info() via
+ * getent_kef() internally.
+ * Parameter pdevlist is supplied by check_kernel_for_hard().
+ * If NULL, this function obtains it by calling get_dev_list() via
+ * check_kernel_for_hard() internally.
  */
 int
 list_policy_for_hard(char *provname,
@@ -1186,6 +1192,21 @@ refresh(void)
 				break;
 			}
 			free(pload_dev_dis);
+		}
+	}
+
+	/*
+	 * handle fips_status=enabled|disabled
+	 */
+	{
+		int	pkcs11_fips_mode = 0;
+
+		/* Get FIPS-140 status from pkcs11.conf */
+		fips_status_pkcs11conf(&pkcs11_fips_mode);
+		if (pkcs11_fips_mode == CRYPTO_FIPS_MODE_ENABLED) {
+			rc = do_fips_actions(FIPS140_ENABLE, REFRESH);
+		} else {
+			rc = do_fips_actions(FIPS140_DISABLE, REFRESH);
 		}
 	}
 

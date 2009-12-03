@@ -580,7 +580,7 @@ disk_di_node_add(di_node_t node, char *devid, disk_cbdata_t *cbp)
 
 	/* Establish the devinfo dpath */
 	if ((path = di_devfs_path(node)) == NULL) {
-		topo_mod_seterrno(mod, errno);
+		(void) topo_mod_seterrno(mod, errno);
 		goto error;
 	}
 
@@ -611,7 +611,7 @@ disk_di_node_add(di_node_t node, char *devid, disk_cbdata_t *cbp)
 	pnode = NULL;
 	while ((pnode = di_path_client_next_path(node, pnode)) != NULL) {
 		if ((ret = di_path_prop_lookup_strings(pnode,
-		    "target-port", &s)) > 0)
+		    SCSI_ADDR_PROP_TARGET_PORT, &s)) > 0)
 			portcount += ret;
 		pathcount++;
 	}
@@ -627,16 +627,17 @@ disk_di_node_add(di_node_t node, char *devid, disk_cbdata_t *cbp)
 			goto error;
 
 		if ((ret = di_prop_lookup_strings(DDI_DEV_T_ANY, node,
-		    "target-port", &s)) > 0) {
+		    SCSI_ADDR_PROP_TARGET_PORT, &s)) > 0) {
 			if ((dnode->ddn_target_port = topo_mod_zalloc(mod,
 			    ret * sizeof (uintptr_t))) == NULL)
 				goto error;
-
 			dnode->ddn_target_port_count = ret;
 
 			for (i = 0; i < ret; i++) {
 				if ((dnode->ddn_target_port[i] =
-				    topo_mod_strdup(mod, s)) == NULL)
+				    topo_mod_strdup(mod,
+				    scsi_wwnstr_skip_ua_prefix(s))) ==
+				    NULL)
 					goto error;
 
 				s += strlen(s) + 1;
@@ -661,7 +662,7 @@ disk_di_node_add(di_node_t node, char *devid, disk_cbdata_t *cbp)
 		while ((pnode = di_path_client_next_path(node,
 		    pnode)) != NULL) {
 			if ((path = di_path_devfs_path(pnode)) == NULL) {
-				topo_mod_seterrno(mod, errno);
+				(void) topo_mod_seterrno(mod, errno);
 				goto error;
 			}
 
@@ -672,10 +673,12 @@ disk_di_node_add(di_node_t node, char *devid, disk_cbdata_t *cbp)
 				goto error;
 
 			if ((ret = di_path_prop_lookup_strings(pnode,
-			    "target-port", &s)) > 0) {
+			    SCSI_ADDR_PROP_TARGET_PORT, &s)) > 0) {
 				for (i = 0; i < ret; i++) {
 					if ((dnode->ddn_target_port[portcount] =
-					    topo_mod_strdup(mod, s)) == NULL)
+					    topo_mod_strdup(mod,
+					    scsi_wwnstr_skip_ua_prefix(s))) ==
+					    NULL)
 						goto error;
 
 					portcount++;
@@ -787,13 +790,13 @@ disk_list_gather(topo_mod_t *mod, topo_list_t *listp)
 
 	if ((devtree = topo_mod_devinfo(mod)) == DI_NODE_NIL) {
 		topo_mod_dprintf(mod, "disk_list_gather: "
-		    "di_init failed");
+		    "topo_mod_devinfo() failed");
 		return (-1);
 	}
 
 	if ((devhdl = di_devlink_init(NULL, 0)) == DI_NODE_NIL) {
 		topo_mod_dprintf(mod, "disk_list_gather: "
-		    "di_devlink_init failed");
+		    "di_devlink_init() failed");
 		return (-1);
 	}
 

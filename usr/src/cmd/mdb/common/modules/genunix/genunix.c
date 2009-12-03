@@ -58,8 +58,6 @@
 #include <sys/sysconf.h>
 #include <sys/task.h>
 #include <sys/project.h>
-#include <sys/taskq.h>
-#include <sys/taskq_impl.h>
 #include <sys/errorq_impl.h>
 #include <sys/cred_impl.h>
 #include <sys/zone.h>
@@ -68,43 +66,47 @@
 #include <sys/port_impl.h>
 
 #include "avl.h"
+#include "bio.h"
+#include "bitset.h"
 #include "combined.h"
 #include "contract.h"
 #include "cpupart_mdb.h"
+#include "ctxop.h"
+#include "cyclic.h"
+#include "damap.h"
 #include "devinfo.h"
-#include "irm.h"
-#include "leaky.h"
-#include "lgrp.h"
-#include "pg.h"
+#include "findstack.h"
+#include "fm.h"
 #include "group.h"
-#include "list.h"
-#include "log.h"
+#include "irm.h"
 #include "kgrep.h"
 #include "kmem.h"
-#include "bio.h"
-#include "streams.h"
-#include "cyclic.h"
-#include "findstack.h"
-#include "ndievents.h"
+#include "ldi.h"
+#include "leaky.h"
+#include "lgrp.h"
+#include "list.h"
+#include "log.h"
+#include "mdi.h"
+#include "memory.h"
 #include "mmd.h"
+#include "modhash.h"
+#include "ndievents.h"
 #include "net.h"
 #include "netstack.h"
 #include "nvpair.h"
-#include "ctxop.h"
-#include "tsd.h"
-#include "thread.h"
-#include "memory.h"
-#include "sobj.h"
-#include "sysevent.h"
+#include "pg.h"
 #include "rctl.h"
+#include "sobj.h"
+#include "streams.h"
+#include "sysevent.h"
+#include "taskq.h"
+#include "thread.h"
+#include "tsd.h"
 #include "tsol.h"
 #include "typegraph.h"
-#include "ldi.h"
 #include "vfs.h"
 #include "zone.h"
-#include "modhash.h"
-#include "mdi.h"
-#include "fm.h"
+#include "hotplug.h"
 
 /*
  * Surely this is defined somewhere...
@@ -2158,10 +2160,19 @@ static datafmt_t vmemfmt[] = {
 static int
 kmastat_cpu_avail(uintptr_t addr, const kmem_cpu_cache_t *ccp, int *avail)
 {
-	if (ccp->cc_rounds > 0)
-		*avail += ccp->cc_rounds;
-	if (ccp->cc_prounds > 0)
-		*avail += ccp->cc_prounds;
+	short rounds, prounds;
+
+	if (KMEM_DUMPCC(ccp)) {
+		rounds = ccp->cc_dump_rounds;
+		prounds = ccp->cc_dump_prounds;
+	} else {
+		rounds = ccp->cc_rounds;
+		prounds = ccp->cc_prounds;
+	}
+	if (rounds > 0)
+		*avail += rounds;
+	if (prounds > 0)
+		*avail += prounds;
 
 	return (WALK_NEXT);
 }
@@ -3081,7 +3092,6 @@ cpu_walk_step(mdb_walk_state_t *wsp)
 
 typedef struct cpuinfo_data {
 	intptr_t cid_cpu;
-	uintptr_t cid_lbolt;
 	uintptr_t **cid_ithr;
 	char	cid_print_head;
 	char	cid_print_thr;
@@ -3208,13 +3218,8 @@ cpuinfo_walk_cpu(uintptr_t addr, const cpu_t *cpu, cpuinfo_data_t *cid)
 	    cpu->cpu_kprunrun ? "yes" : "no");
 
 	if (cpu->cpu_last_swtch) {
-		clock_t lbolt;
-
-		if (mdb_vread(&lbolt, sizeof (lbolt), cid->cid_lbolt) == -1) {
-			mdb_warn("failed to read lbolt at %p", cid->cid_lbolt);
-			return (WALK_ERR);
-		}
-		mdb_printf("t-%-4d ", lbolt - cpu->cpu_last_swtch);
+		mdb_printf("t-%-4d ",
+		    (clock_t)mdb_get_lbolt() - cpu->cpu_last_swtch);
 	} else {
 		mdb_printf("%-6s ", "-");
 	}
@@ -3393,8 +3398,6 @@ cpuinfo(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 {
 	uint_t verbose = FALSE;
 	cpuinfo_data_t cid;
-	GElf_Sym sym;
-	clock_t lbolt;
 
 	cid.cid_print_ithr = FALSE;
 	cid.cid_print_thr = FALSE;
@@ -3431,26 +3434,6 @@ cpuinfo(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 			mdb_warn("couldn't walk thread");
 			return (DCMD_ERR);
 		}
-	}
-
-	if (mdb_lookup_by_name("panic_lbolt", &sym) == -1) {
-		mdb_warn("failed to find panic_lbolt");
-		return (DCMD_ERR);
-	}
-
-	cid.cid_lbolt = (uintptr_t)sym.st_value;
-
-	if (mdb_vread(&lbolt, sizeof (lbolt), cid.cid_lbolt) == -1) {
-		mdb_warn("failed to read panic_lbolt");
-		return (DCMD_ERR);
-	}
-
-	if (lbolt == 0) {
-		if (mdb_lookup_by_name("lbolt", &sym) == -1) {
-			mdb_warn("failed to find lbolt");
-			return (DCMD_ERR);
-		}
-		cid.cid_lbolt = (uintptr_t)sym.st_value;
 	}
 
 	if (mdb_walk("cpu", (mdb_walk_cb_t)cpuinfo_walk_cpu, &cid) == -1) {
@@ -3851,115 +3834,6 @@ sysfile(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	return (DCMD_OK);
 }
 
-/*
- * Dump a taskq_ent_t given its address.
- */
-/*ARGSUSED*/
-int
-taskq_ent(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
-{
-	taskq_ent_t	taskq_ent;
-	GElf_Sym	sym;
-	char		buf[MDB_SYM_NAMLEN+1];
-
-
-	if (!(flags & DCMD_ADDRSPEC)) {
-		mdb_warn("expected explicit taskq_ent_t address before ::\n");
-		return (DCMD_USAGE);
-	}
-
-	if (mdb_vread(&taskq_ent, sizeof (taskq_ent_t), addr) == -1) {
-		mdb_warn("failed to read taskq_ent_t at %p", addr);
-		return (DCMD_ERR);
-	}
-
-	if (DCMD_HDRSPEC(flags)) {
-		mdb_printf("%<u>%-?s    %-?s    %-s%</u>\n",
-		"ENTRY", "ARG", "FUNCTION");
-	}
-
-	if (mdb_lookup_by_addr((uintptr_t)taskq_ent.tqent_func, MDB_SYM_EXACT,
-	    buf, sizeof (buf), &sym) == -1) {
-		(void) strcpy(buf, "????");
-	}
-
-	mdb_printf("%-?p    %-?p    %s\n", addr, taskq_ent.tqent_arg, buf);
-
-	return (DCMD_OK);
-}
-
-/*
- * Given the address of the (taskq_t) task queue head, walk the queue listing
- * the address of every taskq_ent_t.
- */
-int
-taskq_walk_init(mdb_walk_state_t *wsp)
-{
-	taskq_t	tq_head;
-
-
-	if (wsp->walk_addr == NULL) {
-		mdb_warn("start address required\n");
-		return (WALK_ERR);
-	}
-
-
-	/*
-	 * Save the address of the list head entry.  This terminates the list.
-	 */
-	wsp->walk_data = (void *)
-	    ((size_t)wsp->walk_addr + offsetof(taskq_t, tq_task));
-
-
-	/*
-	 * Read in taskq head, set walk_addr to point to first taskq_ent_t.
-	 */
-	if (mdb_vread((void *)&tq_head, sizeof (taskq_t), wsp->walk_addr) ==
-	    -1) {
-		mdb_warn("failed to read taskq list head at %p",
-		    wsp->walk_addr);
-	}
-	wsp->walk_addr = (uintptr_t)tq_head.tq_task.tqent_next;
-
-
-	/*
-	 * Check for null list (next=head)
-	 */
-	if (wsp->walk_addr == (uintptr_t)wsp->walk_data) {
-		return (WALK_DONE);
-	}
-
-	return (WALK_NEXT);
-}
-
-
-int
-taskq_walk_step(mdb_walk_state_t *wsp)
-{
-	taskq_ent_t	tq_ent;
-	int		status;
-
-
-	if (mdb_vread((void *)&tq_ent, sizeof (taskq_ent_t), wsp->walk_addr) ==
-	    -1) {
-		mdb_warn("failed to read taskq_ent_t at %p", wsp->walk_addr);
-		return (DCMD_ERR);
-	}
-
-	status = wsp->walk_callback(wsp->walk_addr, (void *)&tq_ent,
-	    wsp->walk_cbdata);
-
-	wsp->walk_addr = (uintptr_t)tq_ent.tqent_next;
-
-
-	/* Check if we're at the last element (next=head) */
-	if (wsp->walk_addr == (uintptr_t)wsp->walk_data) {
-		return (WALK_DONE);
-	}
-
-	return (status);
-}
-
 int
 didmatch(uintptr_t addr, const kthread_t *thr, kt_did_t *didp)
 {
@@ -4282,6 +4156,41 @@ panicinfo(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	return (DCMD_OK);
 }
 
+/*
+ * ::time dcmd, which will print a hires timestamp of when we entered the
+ * debugger, or the lbolt value if used with the -l option.
+ *
+ */
+/*ARGSUSED*/
+static int
+time(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
+{
+	uint_t opt_lbolt = FALSE;
+
+	if (mdb_getopts(argc, argv, 'l', MDB_OPT_SETBITS, TRUE, &opt_lbolt,
+	    NULL) != argc)
+		return (DCMD_USAGE);
+
+	if (opt_lbolt)
+		mdb_printf("%ld\n", mdb_get_lbolt());
+	else
+		mdb_printf("%lld\n", mdb_gethrtime());
+
+	return (DCMD_OK);
+}
+
+void
+time_help(void)
+{
+	mdb_printf("Prints the system time in nanoseconds.\n\n"
+	    "::time will return the timestamp at which we dropped into, \n"
+	    "if called from, kmdb(1); the core dump's high resolution \n"
+	    "time if inspecting one; or the running hires time if we're \n"
+	    "looking at a live system.\n\n"
+	    "Switches:\n"
+	    "  -l   prints the number of clock ticks since system boot\n");
+}
+
 static const mdb_dcmd_t dcmds[] = {
 
 	/* from genunix.c */
@@ -4323,19 +4232,17 @@ static const mdb_dcmd_t dcmds[] = {
 		"print sysevent subclass list", sysevent_subclass_list},
 	{ "system", NULL, "print contents of /etc/system file", sysfile },
 	{ "task", NULL, "display kernel task(s)", task },
-	{ "taskq_entry", ":", "display a taskq_ent_t", taskq_ent },
+	{ "time", "[-l]", "display system time", time, time_help },
 	{ "vnode2path", ":[-F]", "vnode address to pathname", vnode2path },
 	{ "vnode2smap", ":[offset]", "translate vnode to smap", vnode2smap },
 	{ "whereopen", ":", "given a vnode, dumps procs which have it open",
 	    whereopen },
 
-	/* from zone.c */
-	{ "zone", "?", "display kernel zone(s)", zoneprt },
-	{ "zsd", ":[-v] [zsd_key]", "display zone-specific-data entries for "
-	    "selected zones", zsd },
-
 	/* from bio.c */
 	{ "bufpagefind", ":addr", "find page_t on buf_t list", bufpagefind },
+
+	/* from bitset.c */
+	{ "bitset", ":", "display a bitset", bitset, bitset_help },
 
 	/* from contract.c */
 	{ "contract", "?", "display a contract", cmd_contract },
@@ -4351,6 +4258,9 @@ static const mdb_dcmd_t dcmds[] = {
 	{ "cycinfo", "?", "dump cyc_cpu info", cycinfo },
 	{ "cyclic", ":", "developer information", cyclic },
 	{ "cyctrace", "?", "dump cyclic trace buffer", cyctrace },
+
+	/* from damap.c */
+	{ "damap", ":", "display a damap_t", damap, damap_help },
 
 	/* from devinfo.c */
 	{ "devbindings", "?[-qs] [device-name | major-num]",
@@ -4402,6 +4312,9 @@ static const mdb_dcmd_t dcmds[] = {
 		"print unique kernel thread stacks",
 		stacks, stacks_help },
 
+	/* from group.c */
+	{ "group", "?[-q]", "display a group", group},
+
 	/* from irm.c */
 	{ "irmpools", NULL, "display interrupt pools", irmpools_dcmd },
 	{ "irmreqs", NULL, "display interrupt requests in an interrupt pool",
@@ -4437,8 +4350,6 @@ static const mdb_dcmd_t dcmds[] = {
 	{ "vmem_seg", ":[-sv] [-c caller] [-e earliest] [-l latest] "
 		"[-m minsize] [-M maxsize] [-t thread] [-T type]",
 		"print or filter a vmem_seg", vmem_seg, vmem_seg_help },
-	{ "whatis", ":[-abiv]", "given an address, return information", whatis,
-		whatis_help },
 	{ "whatthread", ":[-v]", "print threads whose stack contains the "
 		"given address", whatthread },
 
@@ -4459,6 +4370,22 @@ static const mdb_dcmd_t dcmds[] = {
 
 	/* from log.c */
 	{ "msgbuf", "?[-v]", "print most recent console messages", msgbuf },
+
+	/* from mdi.c */
+	{ "mdipi", NULL, "given a path, dump mdi_pathinfo "
+		"and detailed pi_prop list", mdipi },
+	{ "mdiprops", NULL, "given a pi_prop, dump the pi_prop list",
+		mdiprops },
+	{ "mdiphci", NULL, "given a phci, dump mdi_phci and "
+		"list all paths", mdiphci },
+	{ "mdivhci", NULL, "given a vhci, dump mdi_vhci and list "
+		"all phcis", mdivhci },
+	{ "mdiclient_paths", NULL, "given a path, walk mdi_pathinfo "
+		"client links", mdiclient_paths },
+	{ "mdiphci_paths", NULL, "given a path, walk through mdi_pathinfo "
+		"phci links", mdiphci_paths },
+	{ "mdiphcis", NULL, "given a phci, walk through mdi_phci ph_next links",
+		mdiphcis },
 
 	/* from memory.c */
 	{ "page", "?", "display a summarized page_t", page },
@@ -4488,6 +4415,8 @@ static const mdb_dcmd_t dcmds[] = {
 		modent_help },
 
 	/* from net.c */
+	{ "dladm", "?<sub-command> [flags]", "show data link information",
+		dladm, dladm_help },
 	{ "mi", ":[-p] [-d | -m]", "filter and display MI object or payload",
 		mi },
 	{ "netstat", "[-arv] [-f inet | inet6 | unix] [-P tcp | udp | icmp]",
@@ -4507,10 +4436,7 @@ static const mdb_dcmd_t dcmds[] = {
 
 	/* from pg.c */
 	{ "pg", "?[-q]", "display a pg", pg},
-	/* from group.c */
-	{ "group", "?[-q]", "display a group", group},
 
-	/* from log.c */
 	/* from rctl.c */
 	{ "rctl_dict", "?", "print systemwide default rctl definitions",
 		rctl_dict },
@@ -4552,6 +4478,11 @@ static const mdb_dcmd_t dcmds[] = {
 		"filter and display STREAM sync queue", syncq, syncq_help },
 	{ "syncq2q", ":", "print queue for a given syncq", syncq2q },
 
+	/* from taskq.c */
+	{ "taskq", ":[-atT] [-m min_maxq] [-n name]",
+	    "display a taskq", taskq, taskq_help },
+	{ "taskq_entry", ":", "display a taskq_ent_t", taskq_ent },
+
 	/* from thread.c */
 	{ "thread", "?[-bdfimps]", "display a summarized kthread_t", thread,
 		thread_help },
@@ -4585,21 +4516,14 @@ static const mdb_dcmd_t dcmds[] = {
 	{ "pfiles", ":[-fp]", "print process file information", pfiles,
 		pfiles_help },
 
-	/* from mdi.c */
-	{ "mdipi", NULL, "given a path, dump mdi_pathinfo "
-		"and detailed pi_prop list", mdipi },
-	{ "mdiprops", NULL, "given a pi_prop, dump the pi_prop list",
-		mdiprops },
-	{ "mdiphci", NULL, "given a phci, dump mdi_phci and "
-		"list all paths", mdiphci },
-	{ "mdivhci", NULL, "given a vhci, dump mdi_vhci and list "
-		"all phcis", mdivhci },
-	{ "mdiclient_paths", NULL, "given a path, walk mdi_pathinfo "
-		"client links", mdiclient_paths },
-	{ "mdiphci_paths", NULL, "given a path, walk through mdi_pathinfo "
-		"phci links", mdiphci_paths },
-	{ "mdiphcis", NULL, "given a phci, walk through mdi_phci ph_next links",
-		mdiphcis },
+	/* from zone.c */
+	{ "zone", "?", "display kernel zone(s)", zoneprt },
+	{ "zsd", ":[-v] [zsd_key]", "display zone-specific-data entries for "
+	    "selected zones", zsd },
+
+	/* from hotplug.c */
+	{ "hotplug", "?[-p]", "display a registered hotplug attachment",
+	    hotplug, hotplug_help },
 
 	{ NULL }
 };
@@ -4664,18 +4588,10 @@ static const mdb_walker_t walkers[] = {
 		sysevent_subclass_list_walk_fini},
 	{ "task", "given a task pointer, walk its processes",
 		task_walk_init, task_walk_step, NULL },
-	{ "taskq_entry", "given a taskq_t*, list all taskq_ent_t in the list",
-		taskq_walk_init, taskq_walk_step, NULL, NULL },
 
 	/* from avl.c */
 	{ AVL_WALK_NAME, AVL_WALK_DESC,
 		avl_walk_init, avl_walk_step, avl_walk_fini },
-
-	/* from zone.c */
-	{ "zone", "walk a list of kernel zones",
-		zone_walk_init, zone_walk_step, NULL },
-	{ "zsd", "walk list of zsd entries for a zone",
-		zsd_walk_init, zsd_walk_step, NULL },
 
 	/* from bio.c */
 	{ "buf", "walk the bio buf hash",
@@ -4744,6 +4660,10 @@ static const mdb_walker_t walkers[] = {
 	{ "devinfo_fmc",
 		"walk a fault management handle cache active list",
 		devinfo_fmc_walk_init, devinfo_fmc_walk_step, NULL },
+
+	/* from group.c */
+	{ "group", "walk all elements of a group",
+		group_walk_init, group_walk_step, NULL },
 
 	/* from irm.c */
 	{ "irmpools", "walk global list of interrupt pools",
@@ -4822,13 +4742,23 @@ static const mdb_walker_t walkers[] = {
 	{ "lgrp_rsrc_cpu", "walk lgroup CPU resources of given lgroup",
 		lgrp_rsrc_cpu_walk_init, lgrp_set_walk_step, NULL },
 
-	/* from group.c */
-	{ "group", "walk all elements of a group",
-		group_walk_init, group_walk_step, NULL },
-
 	/* from list.c */
 	{ LIST_WALK_NAME, LIST_WALK_DESC,
 		list_walk_init, list_walk_step, list_walk_fini },
+
+	/* from mdi.c */
+	{ "mdipi_client_list", "Walker for mdi_pathinfo pi_client_link",
+		mdi_pi_client_link_walk_init,
+		mdi_pi_client_link_walk_step,
+		mdi_pi_client_link_walk_fini },
+	{ "mdipi_phci_list", "Walker for mdi_pathinfo pi_phci_link",
+		mdi_pi_phci_link_walk_init,
+		mdi_pi_phci_link_walk_step,
+		mdi_pi_phci_link_walk_fini },
+	{ "mdiphci_list", "Walker for mdi_phci ph_next link",
+		mdi_phci_ph_next_walk_init,
+		mdi_phci_ph_next_walk_step,
+		mdi_phci_ph_next_walk_fini },
 
 	/* from memory.c */
 	{ "page", "walk all pages, or those from the specified vnode",
@@ -4857,8 +4787,6 @@ static const mdb_walker_t walkers[] = {
 		NULL, modchain_walk_step, NULL },
 
 	/* from net.c */
-	{ "ar", "walk ar_t structures using MI for all stacks",
-		mi_payload_walk_init, mi_payload_walk_step, NULL, &mi_ar_arg },
 	{ "icmp", "walk ICMP control structures using MI for all stacks",
 		mi_payload_walk_init, mi_payload_walk_step, NULL,
 		&mi_icmp_arg },
@@ -4866,14 +4794,16 @@ static const mdb_walker_t walkers[] = {
 		mi_walk_init, mi_walk_step, mi_walk_fini, NULL },
 	{ "sonode", "given a sonode, walk its children",
 		sonode_walk_init, sonode_walk_step, sonode_walk_fini, NULL },
-	{ "ar_stacks", "walk all the ar_stack_t",
-		ar_stacks_walk_init, ar_stacks_walk_step, NULL },
 	{ "icmp_stacks", "walk all the icmp_stack_t",
 		icmp_stacks_walk_init, icmp_stacks_walk_step, NULL },
 	{ "tcp_stacks", "walk all the tcp_stack_t",
 		tcp_stacks_walk_init, tcp_stacks_walk_step, NULL },
 	{ "udp_stacks", "walk all the udp_stack_t",
 		udp_stacks_walk_init, udp_stacks_walk_step, NULL },
+
+	/* from netstack.c */
+	{ "netstack", "walk a list of kernel netstacks",
+		netstack_walk_init, netstack_walk_step, NULL },
 
 	/* from nvpair.c */
 	{ NVPAIR_WALKER_NAME, NVPAIR_WALKER_DESCR,
@@ -4908,6 +4838,14 @@ static const mdb_walker_t walkers[] = {
 		str_walk_init, strr_walk_step, str_walk_fini },
 	{ "writeq", "walk write queue side of stdata",
 		str_walk_init, strw_walk_step, str_walk_fini },
+
+	/* from taskq.c */
+	{ "taskq_thread", "given a taskq_t, list all of its threads",
+		taskq_thread_walk_init,
+		taskq_thread_walk_step,
+		taskq_thread_walk_fini },
+	{ "taskq_entry", "given a taskq_t*, list all taskq_ent_t in the list",
+		taskq_ent_walk_init, taskq_ent_walk_step, NULL },
 
 	/* from thread.c */
 	{ "deathrow", "walk threads on both lwp_ and thread_deathrow",
@@ -4950,25 +4888,11 @@ static const mdb_walker_t walkers[] = {
 	{ "vfs", "walk file system list",
 		vfs_walk_init, vfs_walk_step },
 
-	/* from mdi.c */
-	{ "mdipi_client_list", "Walker for mdi_pathinfo pi_client_link",
-		mdi_pi_client_link_walk_init,
-		mdi_pi_client_link_walk_step,
-		mdi_pi_client_link_walk_fini },
-
-	{ "mdipi_phci_list", "Walker for mdi_pathinfo pi_phci_link",
-		mdi_pi_phci_link_walk_init,
-		mdi_pi_phci_link_walk_step,
-		mdi_pi_phci_link_walk_fini },
-
-	{ "mdiphci_list", "Walker for mdi_phci ph_next link",
-		mdi_phci_ph_next_walk_init,
-		mdi_phci_ph_next_walk_step,
-		mdi_phci_ph_next_walk_fini },
-
-	/* from netstack.c */
-	{ "netstack", "walk a list of kernel netstacks",
-		netstack_walk_init, netstack_walk_step, NULL },
+	/* from zone.c */
+	{ "zone", "walk a list of kernel zones",
+		zone_walk_init, zone_walk_step, NULL },
+	{ "zsd", "walk list of zsd entries for a zone",
+		zsd_walk_init, zsd_walk_step, NULL },
 
 	{ NULL }
 };

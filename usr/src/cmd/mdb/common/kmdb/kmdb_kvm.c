@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -43,7 +43,6 @@
 
 #include <strings.h>
 #include <dlfcn.h>
-#include <sys/kdi_impl.h>
 #include <sys/isa_defs.h>
 #include <sys/kobj.h>
 #include <sys/kobj_impl.h>
@@ -218,7 +217,6 @@ ssize_t
 kmt_writer(void *buf, size_t nbytes, uint64_t addr)
 {
 	kmt_bcopy(buf, (void *)(uintptr_t)addr, nbytes);
-	mdb.m_kdi->kdi_flush_caches();
 	return (nbytes);
 }
 
@@ -692,7 +690,7 @@ kmt_mod_create(mdb_tgt_t *t, struct modctl *ctlp, char *name)
 	struct module *mod;
 
 	km->km_name = mdb_alloc(strlen(name) + 1, UM_SLEEP);
-	strcpy(km->km_name, name);
+	(void) strcpy(km->km_name, name);
 
 	bcopy(ctlp, &km->km_modctl, sizeof (struct modctl));
 

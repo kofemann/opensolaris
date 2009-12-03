@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -821,7 +821,8 @@ nexthash:
 		 * of requested URI, check for expire or request no cache
 		 * purge.
 		 */
-		if (uri->expire >= 0 && uri->expire <= lbolt || ruri->nocache) {
+		if (uri->expire >= 0 && uri->expire <= ddi_get_lbolt() ||
+		    ruri->nocache) {
 			/*
 			 * URI has expired or request specified to not use
 			 * the cached version, unlink the URI from the hash
@@ -2091,10 +2092,6 @@ nl7c_parse(struct sonode *so, boolean_t nonblocking, boolean_t *ret)
 			mp->b_rptr = (unsigned char *)cp;
 		}
 		nl7c_uri_hit++;
-		/* If conditional request check for substitute response */
-		if (ruri->conditional) {
-			uri = nl7c_http_cond(ruri, uri);
-		}
 		/* If logging enabled log request */
 		if (nl7c_logd_enabled) {
 			ipaddr_t faddr;
@@ -2109,6 +2106,12 @@ nl7c_parse(struct sonode *so, boolean_t nonblocking, boolean_t *ret)
 			/* XXX need to pass response type, e.g. 200, 304 */
 			nl7c_logd_log(ruri, uri, sti->sti_nl7c_rtime, faddr);
 		}
+
+		/* If conditional request check for substitute response */
+		if (ruri->conditional) {
+			uri = nl7c_http_cond(ruri, uri);
+		}
+
 		/*
 		 * Release reference on request URI, send the response out
 		 * the socket, release reference on response uri, set the

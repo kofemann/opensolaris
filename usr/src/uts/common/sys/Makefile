@@ -105,6 +105,7 @@ CHKHDRS=			\
 	cladm.h			\
 	class.h			\
 	clconf.h		\
+	clock_impl.h		\
 	cmlb.h			\
 	cmn_err.h		\
 	compress.h		\
@@ -113,7 +114,7 @@ CHKHDRS=			\
 	conf.h			\
 	consdev.h		\
 	console.h		\
-        consplat.h              \
+	consplat.h		\
 	vt.h			\
 	vtdaemon.h		\
 	kd.h			\
@@ -142,10 +143,14 @@ CHKHDRS=			\
 	cyclic_impl.h		\
 	dacf.h			\
 	dacf_impl.h		\
+	damap.h			\
+	damap_impl.h		\
 	dc_ki.h			\
 	ddi.h			\
 	ddifm.h			\
 	ddifm_impl.h		\
+	ddi_hp.h		\
+	ddi_hp_impl.h		\
 	ddi_intr.h		\
 	ddi_intr_impl.h		\
 	ddi_impldefs.h		\
@@ -181,7 +186,7 @@ CHKHDRS=			\
 	dls.h			\
 	dls_mgmt.h		\
 	dls_impl.h		\
-	dma_i8237A.h            \
+	dma_i8237A.h		\
 	dnlc.h			\
 	door.h			\
 	door_data.h		\
@@ -191,9 +196,9 @@ CHKHDRS=			\
 	dumpadm.h		\
 	dumphdr.h		\
 	ecppsys.h		\
-	ecppio.h                \
-	ecppreg.h               \
-	ecppvar.h               \
+	ecppio.h		\
+	ecppreg.h		\
+	ecppvar.h		\
 	efi_partition.h		\
 	elf.h			\
 	elf_386.h		\
@@ -239,8 +244,8 @@ CHKHDRS=			\
 	fss.h			\
 	fsspriocntl.h		\
 	fsid.h			\
-	fssnap.h                \
-	fssnap_if.h             \
+	fssnap.h		\
+	fssnap_if.h		\
 	fstyp.h			\
 	ftrace.h		\
 	fx.h			\
@@ -386,21 +391,22 @@ CHKHDRS=			\
 	multidata_impl.h	\
 	mutex.h			\
 	nbmlock.h		\
-	ndifm.h		\
+	ndifm.h			\
 	ndi_impldefs.h		\
 	net80211.h		\
 	net80211_crypto.h	\
+	net80211_ht.h		\
 	net80211_proto.h	\
 	netconfig.h		\
 	neti.h			\
 	netstack.h		\
 	nexusdefs.h		\
 	note.h			\
-	nvpair.h                \
-	nvpair_impl.h           \
+	nvpair.h		\
+	nvpair_impl.h		\
 	objfs.h			\
 	objfs_impl.h		\
-	ontrap.h                \
+	ontrap.h		\
 	open.h			\
 	openpromio.h		\
 	panic.h			\
@@ -434,7 +440,9 @@ CHKHDRS=			\
 	port_impl.h		\
 	port_kernel.h		\
 	portif.h		\
-	ppmio.h                 \
+	ppmio.h			\
+	pppt_ic_if.h		\
+	pppt_ioctl.h		\
 	priocntl.h		\
 	priv.h			\
 	priv_impl.h		\
@@ -504,6 +512,7 @@ CHKHDRS=			\
 	stat.h			\
 	statfs.h		\
 	statvfs.h		\
+	stdbool.h		\
 	stdint.h		\
 	stermio.h		\
 	stmf.h			\
@@ -531,11 +540,13 @@ CHKHDRS=			\
 	suntty.h		\
 	swap.h			\
 	synch.h			\
+	sysdc.h			\
+	sysdc_impl.h		\
 	syscall.h		\
 	sysconf.h		\
 	sysconfig.h		\
 	sysevent.h		\
-	sysevent_impl.h         \
+	sysevent_impl.h		\
 	sysinfo.h		\
 	syslog.h		\
 	sysmacros.h		\
@@ -728,7 +739,7 @@ IDMHDRS=		\
 	idm_impl.h	\
 	idm_so.h	\
 	idm_text.h	\
-	idm_transport.h \
+	idm_transport.h	\
 	idm_conn_sm.h
 
 ISCSITHDRS=		\
@@ -876,13 +887,14 @@ SCSIIMPLHDRS=		\
 	commands.h	\
 	inquiry.h	\
 	mode.h		\
-	sas_transport.h	\
+	scsi_reset_notify.h \
+	scsi_sas.h	\
 	sense.h		\
 	services.h	\
+	smp_transport.h	\
+	spc3_types.h	\
 	status.h	\
 	transport.h	\
-	scsi_reset_notify.h \
-	spc3_types.h	\
 	types.h		\
 	uscsi.h		\
 	usmp.h
@@ -952,7 +964,8 @@ SYSEVENTHDRS=		\
 	eventdefs.h	\
 	ipmp.h		\
 	pwrctl.h	\
-	svm.h
+	svm.h		\
+	vrrp.h
 
 CONTRACTHDRS=		\
 	process.h	\
@@ -1294,6 +1307,11 @@ usb/usbdevs.h: $(USBDEVS_AWK) $(USBDEVS_DATA)
 
 LVMDERIVED_H:
 	cd $(SRC)/uts/common/sys/lvm; pwd; $(MAKE)
+
+clean:
+	$(RM) $(GENHDRS)
+
+clobber:	clean
 
 check:	$(CHECKHDRS)
 

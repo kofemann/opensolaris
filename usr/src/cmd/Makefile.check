@@ -49,6 +49,7 @@ MANIFEST_TOPDIRS=			\
 	kbd				\
 	keyserv				\
 	ldapcachemgr			\
+	ldmad				\
 	lms				\
 	mms				\
 	dlmgmtd				\
@@ -66,6 +67,7 @@ MANIFEST_TOPDIRS=			\
 	sckmd				\
 	sf880drd			\
 	smserverd			\
+	stmfproxy			\
 	stmfsvc				\
 	stmsboot			\
 	syseventd			\
@@ -80,6 +82,7 @@ MANIFEST_SUBDIRS=			\
 	agents/snmp/snmprelayd		\
 	boot/scripts			\
 	cmd-crypto/scripts		\
+	cmd-inet/usr.lib/ilbd		\
 	cmd-inet/usr.lib/in.chargend	\
 	cmd-inet/usr.lib/in.daytimed	\
 	cmd-inet/usr.lib/in.dhcpd	\
@@ -91,6 +94,7 @@ MANIFEST_SUBDIRS=			\
 	cmd-inet/usr.lib/inetd		\
 	cmd-inet/usr.lib/mdnsd		\
 	cmd-inet/usr.lib/slpd		\
+	cmd-inet/usr.lib/vrrpd		\
 	cmd-inet/usr.lib/wpad		\
 	cmd-inet/usr.sbin		\
 	cmd-inet/usr.sbin/in.ftpd	\
@@ -146,7 +150,6 @@ MANIFEST_SUBDIRS=			\
 	ypcmd/ypupdated
 
 $(CLOSED_BUILD)MANIFEST_SUBDIRS +=		\
-	$(CLOSED)/cmd/smartcard/daemon		\
 	$(CLOSED)/cmd/cmd-inet/usr.lib/in.iked
 
 DTEST_SUBDIRS= \

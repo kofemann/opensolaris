@@ -397,7 +397,6 @@ stubs_base:
 	MODULE(ipsecah,drv);
 	WSTUB(ipsecah,	ipsec_construct_inverse_acquire,	nomod_zero);
 	WSTUB(ipsecah,	sadb_acquire,		nomod_zero);
-	WSTUB(ipsecah,	sadb_ill_download,	nomod_zero); 	
 	WSTUB(ipsecah,	ipsecah_algs_changed,	nomod_zero);
 	WSTUB(ipsecah,	sadb_alg_update,	nomod_zero);
 	WSTUB(ipsecah,	sadb_unlinkassoc,	nomod_zero);
@@ -659,6 +658,15 @@ stubs_base:
 #endif
 
 /*
+ * Stubs for sysdc
+ */
+#ifndef SDC_MODULE
+	MODULE(SDC,sched);
+	NO_UNLOAD_STUB(SDC, sysdc_thread_enter,		nomod_zero);
+	END_MODULE(SDC);
+#endif
+
+/*
  * Stubs for ts_dptbl
  */
 #ifndef TS_DPTBL_MODULE
@@ -764,6 +772,7 @@ stubs_base:
 	STUB(consconfig, consconfig,	0);
 	STUB(consconfig, consconfig_get_usb_kb_path,	0);
 	STUB(consconfig, consconfig_get_usb_ms_path,	0);
+	STUB(consconfig, consconfig_console_is_ready,	0);
 	END_MODULE(consconfig);
 #endif
 
@@ -1033,35 +1042,13 @@ stubs_base:
 #endif
 
 /*
- * Stubs for PCI configurator module (misc/pcicfg.e).
+ * Stubs for PCI configurator module (misc/pcicfg).
  */
-#ifndef	PCICFG_E_MODULE
-	MODULE(pcicfg.e,misc);
-	STUB(pcicfg.e, pcicfg_configure, 0);
-	STUB(pcicfg.e, pcicfg_unconfigure, 0);
-	END_MODULE(pcicfg.e);
-#endif
-
-/*
- * Stubs for PCIEHPC (pci-ex hot plug support) module (misc/pciehpc).
- */
-#ifndef	PCIEHPC_MODULE
-	MODULE(pciehpc,misc);
-	STUB(pciehpc, pciehpc_init, 0);
-	STUB(pciehpc, pciehpc_uninit, 0);
-	WSTUB(pciehpc, pciehpc_intr, 0);
-	END_MODULE(pciehpc);
-#endif
-
-/*
- * Stubs for PCISHPC (pci/pci-x shpc hot plug support) module (misc/pcishpc).
- */
-#ifndef	PCISHPC_MODULE
-	MODULE(pcishpc,misc);
-	STUB(pcishpc, pcishpc_init, 0);
-	STUB(pcishpc, pcishpc_uninit, 0);
-	WSTUB(pcishpc, pcishpc_intr, 0);
-	END_MODULE(pcishpc);
+#ifndef	PCICFG_MODULE
+	MODULE(pcicfg,misc);
+	STUB(pcicfg, pcicfg_configure, 0);
+	STUB(pcicfg, pcicfg_unconfigure, 0);
+	END_MODULE(pcicfg);
 #endif
 
 #ifndef PCIHP_MODULE
@@ -1206,9 +1193,10 @@ stubs_base:
 	MODULE(dld,drv);
 	STUB(dld, dld_init_ops, nomod_void);
 	STUB(dld, dld_fini_ops, nomod_void);
+	STUB(dld, dld_autopush, nomod_minus_one);
+	STUB(dld, dld_devt_to_instance, nomod_minus_one);
 	STUB(dld, dld_ioc_register, nomod_einval);
 	STUB(dld, dld_ioc_unregister, nomod_void);
-	STUB(dld, dld_autopush, nomod_minus_one);
 	END_MODULE(dld);
 #endif
 
@@ -1237,6 +1225,14 @@ stubs_base:
 	STUB(softmac, softmac_rele_device, nomod_void);
 	STUB(softmac, softmac_recreate, nomod_void);
 	END_MODULE(softmac);
+#endif
+
+#ifndef IPTUN_MODULE
+	MODULE(iptun,drv);
+	STUB(iptun, iptun_create, nomod_einval);
+	STUB(iptun, iptun_delete, nomod_einval);
+	STUB(iptun, iptun_set_policy, nomod_einval);
+	END_MODULE(iptun);
 #endif
 
 /*

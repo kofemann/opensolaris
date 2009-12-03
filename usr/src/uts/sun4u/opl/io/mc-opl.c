@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 /*
@@ -446,8 +446,8 @@ mc_polling_thread()
 	mc_pollthr_running = 1;
 	while (!(mc_poll_cmd & MC_POLL_EXIT)) {
 		mc_polling();
-		cv_timedwait(&mc_polling_cv, &mc_polling_lock,
-		    ddi_get_lbolt() + mc_timeout_period);
+		cv_reltimedwait(&mc_polling_cv, &mc_polling_lock,
+		    mc_timeout_period, TR_CLOCK_TICK);
 	}
 	mc_pollthr_running = 0;
 
@@ -3516,8 +3516,10 @@ mc_get_mem_sid_dimm(mc_opl_t *mcp, char *dname, char *buf,
 	int		ret = ENODEV;
 	mc_dimm_info_t	*d = NULL;
 
-	if ((d = mcp->mc_dimm_list) == NULL)
-		return (ENOTSUP);
+	if ((d = mcp->mc_dimm_list) == NULL) {
+		MC_LOG("mc_get_mem_sid_dimm: mc_dimm_list is NULL\n");
+		return (EINVAL);
+		}
 
 	for (; d != NULL; d = d->md_next) {
 		if (strcmp(d->md_dimmname, dname) == 0) {

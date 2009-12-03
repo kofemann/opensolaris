@@ -1044,20 +1044,38 @@ iscsi_rx_process_reject_rsp(idm_conn_t *ic, idm_pdu_t *pdu)
 	iscsi_hdr_t		*old_ihp	= NULL;
 	iscsi_conn_t		*icp		= ic->ic_handle;
 	uint8_t			*data 		= pdu->isp_data;
-	iscsi_hdr_t		*ihp		= (iscsi_hdr_t *)irrhp;
-	idm_status_t		status;
-	iscsi_cmd_t		*icmdp	= NULL;
+	idm_status_t		status		= IDM_STATUS_SUCCESS;
+	int			i		= 0;
 
 	ASSERT(data != NULL);
 	isp = icp->conn_sess;
 	ASSERT(isp != NULL);
 
-	mutex_enter(&icp->conn_queue_active.mutex);
-	if ((status = iscsi_rx_chk(icp, isp, (iscsi_scsi_rsp_hdr_t *)irrhp,
-	    &icmdp)) != IDM_STATUS_SUCCESS) {
-		mutex_exit(&icp->conn_queue_active.mutex);
-		return (status);
+	/*
+	 * In RFC3720 section 10.17, this 4 bytes should be all 0xff.
+	 */
+	for (i = 0; i < 4; i++) {
+		if (irrhp->must_be_ff[i] != 0xff) {
+			return (IDM_STATUS_PROTOCOL_ERROR);
+		}
 	}
+	mutex_enter(&isp->sess_cmdsn_mutex);
+
+	if (icp->conn_expstatsn == ntohl(irrhp->statsn)) {
+		icp->conn_expstatsn++;
+	} else {
+		cmn_err(CE_WARN, "iscsi connection(%u/%x) protocol error - "
+		    "received status out of order statsn:0x%x "
+		    "expstatsn:0x%x", icp->conn_oid, irrhp->opcode,
+		    ntohl(irrhp->statsn), icp->conn_expstatsn);
+		mutex_exit(&isp->sess_cmdsn_mutex);
+		return (IDM_STATUS_PROTOCOL_ERROR);
+	}
+	/* update expcmdsn and maxcmdsn */
+	iscsi_update_flow_control(isp, ntohl(irrhp->maxcmdsn),
+	    ntohl(irrhp->expcmdsn));
+
+	mutex_exit(&isp->sess_cmdsn_mutex);
 
 	/* If we don't have the rejected header we can't do anything */
 	dlength = n2h24(irrhp->dlength);
@@ -1098,7 +1116,8 @@ iscsi_rx_process_reject_rsp(idm_conn_t *ic, idm_pdu_t *pdu)
 			 */
 			break;
 		case ISCSI_OP_SCSI_TASK_MGT_MSG:
-			(void) iscsi_rx_process_rejected_tsk_mgt(ic, old_ihp);
+			status =
+			    iscsi_rx_process_rejected_tsk_mgt(ic, old_ihp);
 			break;
 		default:
 			cmn_err(CE_WARN, "iscsi connection(%u) protocol error "
@@ -1126,14 +1145,14 @@ iscsi_rx_process_reject_rsp(idm_conn_t *ic, idm_pdu_t *pdu)
 	case ISCSI_REJECT_LONG_OPERATION_REJECT:
 	case ISCSI_REJECT_NEGOTIATION_RESET:
 	default:
-		cmn_err(CE_WARN, "iscsi connection(%u) closing connection - "
-		    "target requested itt:0x%x reason:0x%x",
-		    icp->conn_oid, ihp->itt, irrhp->reason);
+		cmn_err(CE_WARN, "iscsi connection(%u/%x) closing connection - "
+		    "target requested reason:0x%x",
+		    icp->conn_oid, irrhp->opcode, irrhp->reason);
 		status = IDM_STATUS_PROTOCOL_ERROR;
 		break;
 	}
 
-	return (IDM_STATUS_SUCCESS);
+	return (status);
 }
 
 
@@ -1422,6 +1441,9 @@ iscsi_rx_process_async_rsp(idm_conn_t *ic, idm_pdu_t *pdu)
 		icp->conn_async_logout = B_TRUE;
 		mutex_exit(&icp->conn_state_mutex);
 
+		/* Hold is released in iscsi_handle_logout. */
+		idm_conn_hold(ic);
+
 		/* Target has requested this connection to logout. */
 		itp = kmem_zalloc(sizeof (iscsi_task_t), KM_SLEEP);
 		itp->t_arg = icp;
@@ -1429,6 +1451,7 @@ iscsi_rx_process_async_rsp(idm_conn_t *ic, idm_pdu_t *pdu)
 		if (ddi_taskq_dispatch(isp->sess_taskq,
 		    (void(*)())iscsi_logout_start, itp, DDI_SLEEP) !=
 		    DDI_SUCCESS) {
+			idm_conn_rele(ic);
 			/* Disconnect if we couldn't dispatch the task */
 			idm_ini_conn_disconnect(ic);
 		}
@@ -1478,6 +1501,9 @@ iscsi_rx_process_async_rsp(idm_conn_t *ic, idm_pdu_t *pdu)
 		 * now we will request a logout.  We can't
 		 * just ignore this or it might force corruption?
 		 */
+
+		/* Hold is released in iscsi_handle_logout */
+		idm_conn_hold(ic);
 		itp = kmem_zalloc(sizeof (iscsi_task_t), KM_SLEEP);
 		itp->t_arg = icp;
 		itp->t_blocking = B_FALSE;
@@ -1485,6 +1511,7 @@ iscsi_rx_process_async_rsp(idm_conn_t *ic, idm_pdu_t *pdu)
 		    (void(*)())iscsi_logout_start, itp, DDI_SLEEP) !=
 		    DDI_SUCCESS) {
 			/* Disconnect if we couldn't dispatch the task */
+			idm_conn_rele(ic);
 			idm_ini_conn_disconnect(ic);
 		}
 		break;
@@ -2656,7 +2683,8 @@ iscsi_handle_reset(iscsi_sess_t *isp, int level, iscsi_lun_t *ilp)
 }
 
 /*
- * iscsi_lgoout_start - task handler for deferred logout
+ * iscsi_logout_start - task handler for deferred logout
+ * Acquire a hold before call, released in iscsi_handle_logout
  */
 static void
 iscsi_logout_start(void *arg)
@@ -2674,6 +2702,7 @@ iscsi_logout_start(void *arg)
 /*
  * iscsi_handle_logout - This function will issue a logout for
  * the session from a specific connection.
+ * Acquire idm_conn_hold before call.  Released internally.
  */
 iscsi_status_t
 iscsi_handle_logout(iscsi_conn_t *icp)
@@ -2691,11 +2720,17 @@ iscsi_handle_logout(iscsi_conn_t *icp)
 	ASSERT(mutex_owned(&icp->conn_state_mutex));
 
 	/*
-	 * We may want to explicitly disconnect if something goes wrong so
-	 * grab a hold to ensure that the IDM connection context can't
-	 * disappear.
+	 * If the connection has already gone down (e.g. if the transport
+	 * failed between when this LOGOUT was generated and now) then we
+	 * can and must skip sending the LOGOUT.  Check the same condition
+	 * we use below to determine that connection has "settled".
 	 */
-	idm_conn_hold(ic);
+	if ((icp->conn_state == ISCSI_CONN_STATE_FREE) ||
+	    (icp->conn_state == ISCSI_CONN_STATE_FAILED) ||
+	    (icp->conn_state == ISCSI_CONN_STATE_POLLING)) {
+		idm_conn_rele(ic);
+		return (0);
+	}
 
 	icmdp = iscsi_cmd_alloc(icp, KM_SLEEP);
 	ASSERT(icmdp != NULL);

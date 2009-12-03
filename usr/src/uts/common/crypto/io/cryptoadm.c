@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -48,6 +48,7 @@
 #include <sys/crypto/sched_impl.h>
 #include <sys/crypto/ioctladmin.h>
 #include <c2/audit.h>
+#include <sys/disp.h>
 
 /*
  * DDI entry points.
@@ -61,6 +62,7 @@ static int cryptoadm_ioctl(dev_t, int, intptr_t, int, cred_t *, int *);
 
 extern void audit_cryptoadm(int, char *, crypto_mech_name_t *, uint_t,
     uint_t, uint32_t, int);
+
 /*
  * Module linkage.
  */
@@ -170,6 +172,7 @@ cryptoadm_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
+	mutex_init(&fips140_mode_lock, NULL, MUTEX_DEFAULT, NULL);
 	cryptoadm_dip = dip;
 
 	return (DDI_SUCCESS);
@@ -802,6 +805,79 @@ out2:
 	return (error);
 }
 
+/*
+ * This function enables/disables FIPS140 mode or gets the current
+ * FIPS 140 mode status.
+ *
+ * CRYPTO_FIPS140_STATUS: Returns back the value of global_fips140_mode.
+ * CRYPTO_FIPS140_SET: Recognizes 2 operations from userland:
+ *                     FIPS140_ENABLE or FIPS140_DISABLE. These can only be
+ *                     called when global_fips140_mode is FIPS140_MODE_UNSET
+ *                     as they are only operations that can be performed at
+ *                     bootup.
+ */
+/* ARGSUSED */
+static int
+fips140_actions(dev_t dev, caddr_t arg, int mode, int *rval, int cmd)
+{
+	crypto_fips140_t fips140_info;
+	uint32_t rv = CRYPTO_SUCCESS;
+	int error = 0;
+
+	if (copyin(arg, &fips140_info, sizeof (crypto_fips140_t)) != 0)
+		return (EFAULT);
+
+	switch (cmd) {
+	case CRYPTO_FIPS140_STATUS:
+		fips140_info.fips140_status = global_fips140_mode;
+		break;
+	case CRYPTO_FIPS140_SET:
+		/* If the mode has been determined, there is nothing to set */
+		mutex_enter(&fips140_mode_lock);
+
+		if (fips140_info.fips140_op == FIPS140_ENABLE &&
+		    global_fips140_mode == FIPS140_MODE_UNSET) {
+			/*
+			 * If FIPS 140 is enabled, all approriate modules
+			 * must be loaded and validated.  This can be done in
+			 * the background as the rest of the OS comes up.
+			 */
+			global_fips140_mode = FIPS140_MODE_VALIDATING;
+			(void) thread_create(NULL, 0, kcf_fips140_validate,
+			    NULL, 0, &p0, TS_RUN, MAXCLSYSPRI);
+			cv_signal(&cv_fips140);
+
+		} else if (fips140_info.fips140_op == FIPS140_DISABLE &&
+		    global_fips140_mode == FIPS140_MODE_UNSET) {
+			/*
+			 * If FIPS 140 is not enabled, any modules that are
+			 * waiting for validation must be released so they
+			 * can be verified.
+			 */
+			global_fips140_mode = FIPS140_MODE_DISABLED;
+			kcf_activate();
+			cv_signal(&cv_fips140);
+
+		} else if (fips140_info.fips140_op != FIPS140_DISABLE &&
+		    fips140_info.fips140_op != FIPS140_ENABLE) {
+			rv = CRYPTO_ARGUMENTS_BAD;
+		}
+
+		mutex_exit(&fips140_mode_lock);
+		break;
+
+	default:
+		rv = CRYPTO_ARGUMENTS_BAD;
+	}
+
+	fips140_info.fips140_return_value = rv;
+
+	if (copyout(&fips140_info, arg, sizeof (crypto_fips140_t)) != 0)
+		error = EFAULT;
+
+	return (error);
+}
+
 static int
 cryptoadm_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *c,
     int *rval)
@@ -818,6 +894,7 @@ cryptoadm_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *c,
 	case CRYPTO_POOL_WAIT:
 	case CRYPTO_POOL_RUN:
 	case CRYPTO_LOAD_DOOR:
+	case CRYPTO_FIPS140_SET:
 		if ((error = drv_priv(c)) != 0)
 			return (error);
 	default:
@@ -886,6 +963,18 @@ cryptoadm_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *c,
 
 	case CRYPTO_LOAD_DOOR:
 		return (load_door(dev, ARG, mode, rval));
+	case CRYPTO_FIPS140_STATUS:
+		return (fips140_actions(dev, ARG, mode, rval, cmd));
+	case CRYPTO_FIPS140_SET: {
+		int err;
+
+		err = fips140_actions(dev, ARG, mode, rval, cmd);
+		if (audit_active)
+			audit_cryptoadm(CRYPTO_FIPS140_SET, NULL, NULL,
+			    0, 0, 0, err);
+		return (err);
 	}
+	}
+
 	return (EINVAL);
 }

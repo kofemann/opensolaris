@@ -33,6 +33,7 @@ FILES=	\
 		$(ROOTDIR)/map.execdata \
 		$(ROOTDIR)/map.filter \
 		$(ROOTDIR)/map.bssalign \
+		$(ROOTDIR)/map.noexbss \
 		$(ROOTDIR)/map.noexstk
 
 install:	$(DIRS) $(FILES)

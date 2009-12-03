@@ -87,6 +87,7 @@ extern "C" {
 #include <xen/public/vcpu.h>
 #include <xen/public/version.h>
 #include <xen/public/hvm/params.h>
+#include <xen/public/arch-x86/xen-mca.h>
 
 extern shared_info_t *HYPERVISOR_shared_info;
 extern void *HYPERVISOR_console_page;
@@ -132,6 +133,7 @@ extern int xen_physcpu_stepping(xen_mc_lcpu_cookie_t);
 extern id_t xen_physcpu_chipid(xen_mc_lcpu_cookie_t);
 extern id_t xen_physcpu_coreid(xen_mc_lcpu_cookie_t);
 extern id_t xen_physcpu_strandid(xen_mc_lcpu_cookie_t);
+extern id_t xen_physcpu_initial_apicid(xen_mc_lcpu_cookie_t);
 extern boolean_t xen_physcpu_is_cmt(xen_mc_lcpu_cookie_t);
 extern id_t xen_physcpu_logical_id(xen_mc_lcpu_cookie_t);
 extern uint64_t xen_physcpu_mcg_cap(xen_mc_lcpu_cookie_t);
@@ -242,7 +244,9 @@ extern long HYPERVISOR_event_channel_op(int, void *); /* does return long */
 extern long HYPERVISOR_physdev_op(int, void *);
 extern long HYPERVISOR_hvm_op(int cmd, void *);
 /* *** __HYPERVISOR_kexec_op *** NOT IMPLEMENTED */
-extern long HYPERVISOR_mca(uint32_t, xen_mc_arg_t *);
+#if defined(__xpv)
+extern long HYPERVISOR_mca(uint32_t, xen_mc_t *);
+#endif
 
 /*
  * HYPERCALL HELPER ROUTINES

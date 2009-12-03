@@ -296,8 +296,6 @@ COMSYSOBJS=			\
 	umask.o			\
 	umount2.o		\
 	unlink.o		\
-	utime.o			\
-	utimes.o		\
 	utssys.o		\
 	uucopy.o		\
 	vhangup.o		\
@@ -392,6 +390,7 @@ PORTGEN=			\
 	csetlen.o		\
 	ctime.o			\
 	ctime_r.o		\
+	daemon.o		\
 	deflt.o			\
 	directio.o		\
 	dirname.o		\
@@ -838,6 +837,7 @@ PORTSYS=			\
 	time_util.o		\
 	ucontext.o		\
 	ustat.o			\
+	utimesys.o		\
 	zone.o
 
 PORTREGEX=			\
@@ -955,6 +955,11 @@ CPPFLAGS += -DWORDEXP_KSH93=$(ON_BUILD_KSH93_AS_BINKSH)
 # Inform the run-time linker about libc specialized initialization
 RTLDINFO =	-z rtldinfo=tls_rtldinfo
 DYNFLAGS +=	$(RTLDINFO)
+
+# Force libc's internal references to be resolved immediately upon loading
+# in order to avoid critical region problems.  Since almost all libc symbols
+# are marked 'protected' in the mapfiles, this is a minimal set (15 to 20).
+DYNFLAGS +=	-znow
 
 DYNFLAGS +=	$(EXTN_DYNFLAGS)
 

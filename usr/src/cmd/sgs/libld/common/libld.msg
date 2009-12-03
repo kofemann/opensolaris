@@ -228,6 +228,8 @@
 			 text\n"
 @ MSG_ARG_DETAIL_ZTW	"\t[-z textwarn]\twarn if there are relocations \
 			 against text\n"
+@ MSG_ARG_DETAIL_ZWRAP	"\t[-z wrap=symbol], [-wrap=symbol], [--wrap=symbol]\n\
+			 \t\t\twrap symbol references\n"
 @ MSG_ARG_DETAIL_ZV	"\t[-z verbose]\t\
 			 generate warnings for suspicious processings\n"
 
@@ -652,11 +654,14 @@
 @ MSG_STR_ISALIST	"$ISALIST"
 @ MSG_STR_OSNAME	"$OSNAME"
 @ MSG_STR_OSREL		"$OSREL"
+@ MSG_STR_UU_REAL_U	"__real_"
+@ MSG_STR_UU_WRAP_U	"__wrap_"
 
 @ MSG_FMT_ARMEM		"%s(%s)"
 @ MSG_FMT_COLPATH	"%s:%s"
 @ MSG_FMT_SYMNAM	"`%s'"
 @ MSG_FMT_NULLSYMNAM	"%s[%d]"
+@ MSG_FMT_STRCAT	"%s%s"
 
 @ MSG_PTH_RTLD		"/usr/lib/ld.so.1"
 
@@ -820,6 +825,7 @@
 			 object (-dn, -r, --relocatable)"
 @ MSG_MARG_ST_INCOMP	"%s is incompatible with building a static \
 			 object (-dn, -r, --relocatable)"
+@ MSG_MARG_ST_ONLYAVL	"%s is only available when building a shared object"
 @ MSG_ARG_INCOMP	"option %s and %s are incompatible"
 @ MSG_MARG_INCOMP	"%s and %s are incompatible"
 @ MSG_ARG_MTONCE	"option %s appears more than once, first setting taken"
@@ -833,6 +839,7 @@
 @ MSG_ARG_NODEFLIB	"the default library search path has been suppressed, \
 			 but no runpaths have been specified via %s"
 @ MSG_ARG_NOENTRY	"entry point symbol `%s' is undefined"
+@ MSG_ARG_UNSUPPORTED	"option %s is no longer supported; ignored"
 
 @ MSG_ARG_FLAGS		"flags processing errors"
 @ MSG_ARG_FILES		"file processing errors. No output written to %s"
@@ -1001,7 +1008,7 @@
 			 after `-'"
 @ MSG_MAP_EXPVERS	"%s: %lld: expected a `;' or version reference \
 			 after `}'"
-@ MSG_MAP_MULTFILTEE	"%s: %lld: multiple filtee definitions unsupported"
+@ MSG_MAP_MULTFILTEE	"%s: %lld: multiple filtee definitions are unsupported"
 @ MSG_MAP_NOFILTER	"%s: %lld: filtee definition required"
 @ MSG_MAP_BADSF1	"%s: %lld: unknown software capabilities: 0x%llx; \
 			 ignored"
@@ -1011,6 +1018,8 @@
 			 when building a dynamic executable"
 @ MSG_MAP_NOEXVLSZ	"%s: %lld: value and size attributes are incompatible \
 			 with extern or parent symbols"
+@ MSG_MAP_FLTR_ONLYAVL	"%s: %lld: symbol filtering is only available when \
+			 building a shared object"
 
 @ MSG_MAP_SEGSAME	"segments `%s' and `%s' have the same assigned \
 			 virtual address"
@@ -1125,7 +1134,7 @@
 @ MSG_ARG_BLOCAL	"-Blocal"
 @ MSG_ARG_BNODIRECT	"-Bnodirect"
 @ MSG_ARG_BSYMBOLIC	"-Bsymbolic"
-@ MSG_ARG_BTRANS	"-Btrans"
+@ MSG_ARG_BTRANSLATOR	"-Btranslator"
 @ MSG_ARG_C		"-c"
 @ MSG_ARG_D		"-d"
 @ MSG_ARG_DY		"-dy"
@@ -1207,6 +1216,7 @@
 @ MSG_ARG_NOSIGHANDLER	"nosighandler"
 @ MSG_ARG_GLOBAUDIT	"globalaudit"
 @ MSG_ARG_TARGET	"target="
+@ MSG_ARG_WRAP		"wrap="
 @ MSG_ARG_HELP		"help"
 @ MSG_ARG_GROUP		"group"
 @ MSG_ARG_REDUCE	"reduce"
@@ -1239,6 +1249,7 @@
 @ MSG_ARG_T_UNDEF	"-undefined"
 @ MSG_ARG_T_VERSION	"-version"
 @ MSG_ARG_T_WHOLEARC	"-whole-archive"
+@ MSG_ARG_T_WRAP	"-wrap"
 @ MSG_ARG_T_OPAR	"("
 @ MSG_ARG_T_CPAR	")"
 

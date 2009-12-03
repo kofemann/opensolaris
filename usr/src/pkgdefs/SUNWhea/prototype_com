@@ -242,6 +242,7 @@ d none usr/include/inet 755 root bin
 f none usr/include/inet/arp.h 644 root bin
 f none usr/include/inet/common.h 644 root bin
 f none usr/include/inet/ip.h 644 root bin
+f none usr/include/inet/ip_arp.h 644 root bin
 f none usr/include/inet/ip_if.h 644 root bin
 f none usr/include/inet/ip_ire.h 644 root bin
 f none usr/include/inet/ip_ftable.h 644 root bin
@@ -299,9 +300,13 @@ f none usr/include/libcontract.h 644 root bin
 f none usr/include/libctf.h 644 root bin
 f none usr/include/libdevinfo.h 644 root bin
 f none usr/include/libdevice.h 644 root bin
+f none usr/include/libdladm.h 644 root bin
+f none usr/include/libdlbridge.h 644 root bin
+f none usr/include/libdllink.h 644 root bin
 f none usr/include/libdserv.h 644 root bin
 f none usr/include/libdserv_impl.h 644 root bin
 f none usr/include/libdlpi.h 644 root bin
+f none usr/include/libdlvlan.h 644 root bin
 f none usr/include/libelf.h 644 root bin
 f none usr/include/libfstyp.h 644 root bin
 f none usr/include/libfstyp_module.h 644 root bin
@@ -357,6 +362,7 @@ f none usr/include/ndbm.h 644 root bin
 f none usr/include/ndpd.h 644 root bin
 d none usr/include/net 755 root bin
 f none usr/include/net/af.h 644 root bin
+f none usr/include/net/bridge.h 644 root bin
 f none usr/include/net/if.h 644 root bin
 f none usr/include/net/if_arp.h 644 root bin
 f none usr/include/net/if_dl.h 644 root bin
@@ -369,6 +375,7 @@ f none usr/include/net/pppio.h 644 root bin
 f none usr/include/net/vjcompress.h 644 root bin
 f none usr/include/net/route.h 644 root bin
 f none usr/include/net/radix.h 644 root bin
+f none usr/include/net/trill.h 644 root bin
 f none usr/include/netconfig.h 644 root bin
 f none usr/include/netdb.h 644 root bin
 f none usr/include/netdir.h 644 root bin
@@ -401,6 +408,7 @@ f none usr/include/netinet/tcp_var.h 644 root bin
 f none usr/include/netinet/tcpip.h 644 root bin
 f none usr/include/netinet/udp.h 644 root bin
 f none usr/include/netinet/udp_var.h 644 root bin
+f none usr/include/netinet/vrrp.h 644 root bin
 d none usr/include/nfs 755 root bin
 f none usr/include/nfs/auth.h 644 root bin
 f none usr/include/nfs/export.h 644 root bin
@@ -494,6 +502,7 @@ f none usr/include/regexp.h 644 root bin
 f none usr/include/regexpr.h 644 root bin
 f none usr/include/resolv.h 644 root bin
 f none usr/include/rje.h 644 root bin
+f none usr/include/rp_plugin.h 644 root bin
 d none usr/include/iso 755 root bin
 s none usr/include/iso/assert_iso.h=../assert.h
 f none usr/include/iso/ctype_c99.h 644 root bin
@@ -777,10 +786,14 @@ f none usr/include/sys/cyclic.h 644 root bin
 f none usr/include/sys/cyclic_impl.h 644 root bin
 f none usr/include/sys/dacf.h 644 root bin
 f none usr/include/sys/dacf_impl.h 644 root bin
+f none usr/include/sys/damap.h 644 root bin
+f none usr/include/sys/damap_impl.h 644 root bin
 f none usr/include/sys/dc_ki.h 644 root bin
 f none usr/include/sys/ddi.h 644 root bin
 f none usr/include/sys/ddifm.h 644 root bin
 f none usr/include/sys/ddifm_impl.h 644 root bin
+f none usr/include/sys/ddi_hp.h 644 root bin
+f none usr/include/sys/ddi_hp_impl.h 644 root bin
 f none usr/include/sys/ddi_impldefs.h 644 root bin
 f none usr/include/sys/ddi_implfuncs.h 644 root bin
 f none usr/include/sys/ddi_intr.h 644 root bin
@@ -809,8 +822,13 @@ f none usr/include/sys/disp.h 644 root bin
 f none usr/include/sys/dkbad.h 644 root bin
 f none usr/include/sys/dkio.h 644 root bin
 f none usr/include/sys/dklabel.h 644 root bin
+d none usr/include/sys/dktp 755 root bin
+f none usr/include/sys/dktp/dadkio.h 644 root bin
+f none usr/include/sys/dktp/fdisk.h 644 root bin
 f none usr/include/sys/dl.h 644 root bin
+f none usr/include/sys/dld.h 644 root bin
 f none usr/include/sys/dlpi.h 644 root bin
+f none usr/include/sys/dls_mgmt.h 644 root bin
 f none usr/include/sys/dma_i8237A.h 644 root bin
 f none usr/include/sys/door.h 644 root bin
 f none usr/include/sys/door_data.h 644 root bin
@@ -842,6 +860,7 @@ f none usr/include/sys/exacct_impl.h 644 root bin
 f none usr/include/sys/exec.h 644 root bin
 f none usr/include/sys/exechdr.h 644 root bin
 f none usr/include/sys/fault.h 644 root bin
+f none usr/include/sys/fbio.h 0644 root bin
 f none usr/include/sys/fbuf.h 644 root bin
 d none usr/include/sys/fc4 755 root bin
 f none usr/include/sys/fc4/fc.h 644 root bin
@@ -938,6 +957,7 @@ f none usr/include/sys/fs/ufs_quota.h 644 root bin
 f none usr/include/sys/fs/ufs_snap.h 644 root bin
 f none usr/include/sys/fs/ufs_trans.h 644 root bin
 f none usr/include/sys/fs/zfs.h 644 root bin
+f none usr/include/sys/fs_reparse.h 644 root bin
 f none usr/include/sys/fs_subr.h 644 root bin
 f none usr/include/sys/fsid.h 644 root bin
 f none usr/include/sys/fssnap.h 644 root bin
@@ -1064,6 +1084,8 @@ f none usr/include/sys/lvm/mdvar.h 644 root bin
 f none usr/include/sys/lwp.h 644 root bin
 f none usr/include/sys/lwp_timer_impl.h 644 root bin
 f none usr/include/sys/lwp_upimutex_impl.h 644 root bin
+f none usr/include/sys/mac.h 644 root bin
+f none usr/include/sys/mac_flow.h 644 root bin
 f none usr/include/sys/machelf.h 644 root bin
 f none usr/include/sys/machlock.h 644 root bin
 f none usr/include/sys/machsig.h 644 root bin
@@ -1112,6 +1134,7 @@ f none usr/include/sys/nvpair.h 644 root bin
 f none usr/include/sys/nvpair_impl.h 644 root bin
 f none usr/include/sys/objfs.h 644 root bin
 f none usr/include/sys/objfs_impl.h 644 root bin
+f none usr/include/sys/obpdefs.h 644 root bin
 f none usr/include/sys/old_procfs.h 644 root bin
 f none usr/include/sys/open.h 644 root bin
 f none usr/include/sys/openpromio.h 644 root bin
@@ -1226,10 +1249,11 @@ d none usr/include/sys/scsi/impl 755 root bin
 f none usr/include/sys/scsi/impl/commands.h 644 root bin
 f none usr/include/sys/scsi/impl/inquiry.h 644 root bin
 f none usr/include/sys/scsi/impl/mode.h 644 root bin
-f none usr/include/sys/scsi/impl/sas_transport.h 644 root bin
 f none usr/include/sys/scsi/impl/scsi_reset_notify.h 644 root bin
+f none usr/include/sys/scsi/impl/scsi_sas.h 644 root bin
 f none usr/include/sys/scsi/impl/sense.h 644 root bin
 f none usr/include/sys/scsi/impl/services.h 644 root bin
+f none usr/include/sys/scsi/impl/smp_transport.h 644 root bin
 f none usr/include/sys/scsi/impl/spc3_types.h 644 root bin
 f none usr/include/sys/scsi/impl/status.h 644 root bin
 f none usr/include/sys/scsi/impl/transport.h 644 root bin
@@ -1251,6 +1275,7 @@ f none usr/include/sys/scsi/targets/sesio.h 644 root bin
 f none usr/include/sys/scsi/targets/sgendef.h 644 root bin
 f none usr/include/sys/scsi/targets/sddef.h 644 root bin
 f none usr/include/sys/scsi/targets/smp.h 644 root bin
+f none usr/include/sys/scsi/targets/stdef.h 644 root bin
 f none usr/include/sys/select.h 644 root bin
 f none usr/include/sys/sem.h 644 root bin
 f none usr/include/sys/sem_impl.h 644 root bin
@@ -1277,6 +1302,7 @@ f none usr/include/sys/socket_impl.h 644 root bin
 f none usr/include/sys/socketvar.h 644 root bin
 f none usr/include/sys/sockio.h 644 root bin
 f none usr/include/sys/socket_proto.h 644 root bin
+f none usr/include/sys/spl.h 644 root bin
 f none usr/include/sys/sservice.h 644 root bin
 f none usr/include/sys/squeue.h 644 root bin
 f none usr/include/sys/squeue_impl.h 644 root bin
@@ -1285,6 +1311,7 @@ f none usr/include/sys/stat.h 644 root bin
 f none usr/include/sys/stat_impl.h 644 root bin
 f none usr/include/sys/statfs.h 644 root bin
 f none usr/include/sys/statvfs.h 644 root bin
+f none usr/include/sys/stdbool.h 644 root bin
 f none usr/include/sys/stdint.h 644 root bin
 f none usr/include/sys/stermio.h 644 root bin
 f none usr/include/sys/stream.h 644 root bin
@@ -1311,6 +1338,8 @@ f none usr/include/sys/syscall.h 644 root bin
 f none usr/include/sys/sysconf.h 644 root bin
 f none usr/include/sys/sysconfig.h 644 root bin
 f none usr/include/sys/sysconfig_impl.h 644 root bin
+f none usr/include/sys/sysdc.h 644 root bin
+f none usr/include/sys/sysdc_impl.h 644 root bin
 d none usr/include/sys/sysevent 755 root bin
 f none usr/include/sys/sysevent/ap_driver.h 644 root bin
 f none usr/include/sys/sysevent/domain.h 644 root bin
@@ -1321,6 +1350,7 @@ f none usr/include/sys/sysevent/ipmp.h 644 root bin
 f none usr/include/sys/sysevent/dev.h 644 root bin
 f none usr/include/sys/sysevent/pwrctl.h 644 root bin
 f none usr/include/sys/sysevent/svm.h 644 root bin
+f none usr/include/sys/sysevent/vrrp.h 644 root bin
 f none usr/include/sys/sysevent.h 644 root bin
 f none usr/include/sys/sysevent_impl.h 644 root bin
 f none usr/include/sys/sysinfo.h 644 root bin
@@ -1400,6 +1430,7 @@ f none usr/include/sys/vfs.h 644 root bin
 f none usr/include/sys/vfs_opreg.h 644 root bin
 f none usr/include/sys/vfstab.h 644 root bin
 f none usr/include/sys/videodev2.h 644 root bin
+f none usr/include/sys/visual_io.h 644 root bin
 f none usr/include/sys/vm.h 644 root bin
 f none usr/include/sys/vm_usage.h 644 root bin
 f none usr/include/sys/vmem.h 644 root bin
@@ -1443,6 +1474,7 @@ f none usr/include/tsol/label.h 644 root bin
 f none usr/include/tzfile.h 644 root bin
 f none usr/include/ucontext.h 644 root bin
 f none usr/include/ucred.h 644 root bin
+f none usr/include/uid_stp.h 644 root bin
 f none usr/include/user_attr.h 644 root bin
 f none usr/include/ulimit.h 644 root bin
 f none usr/include/umem.h 644 root bin
@@ -1490,6 +1522,7 @@ f none usr/include/wordexp.h 644 root bin
 f none usr/include/xti.h 644 root bin
 f none usr/include/xti_inet.h 644 root bin
 f none usr/include/zone.h 644 root bin
+d none usr/platform 755 root sys
 d none usr/share 755 root sys
 d none usr/share/src 755 root sys
 d none usr/share/src/uts 755 root bin

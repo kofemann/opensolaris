@@ -174,7 +174,7 @@ mod_setup(void)
 	num_devs = read_binding_file(majbind, mb_hashtab, make_mbind);
 	/*
 	 * Since read_binding_file is common code, it doesn't enforce that all
-	 * of the binding file entries have major numbers <= MAXMAJ32.  Thus,
+	 * of the binding file entries have major numbers <= MAXMAJ32.	Thus,
 	 * ensure that we don't allocate some massive amount of space due to a
 	 * bad entry.  We can't have major numbers bigger than MAXMAJ32
 	 * until file system support for larger major numbers exists.
@@ -647,21 +647,28 @@ modctl_update_driver_aliases(int add, int *data)
 		 * number.
 		 */
 		(void) make_mbind(mc.drvname, mc.major, NULL, mb_hashtab);
-		if ((rv = make_devname(mc.drvname, mc.major)) != 0)
+		if ((rv = make_devname(mc.drvname, mc.major,
+		    (mc.flags & MOD_ADDMAJBIND_UPDATE) ?
+		    DN_DRIVER_INACTIVE : 0)) != 0) {
 			goto error;
+		}
 
 		if (mc.drvclass[0] != '\0')
 			add_class(mc.drvname, mc.drvclass);
-		(void) i_ddi_load_drvconf(mc.major);
+		if ((mc.flags & MOD_ADDMAJBIND_UPDATE) == 0) {
+			(void) i_ddi_load_drvconf(mc.major);
+		}
 	}
 
 	/*
 	 * Ensure that all nodes are bound to the most appropriate driver
 	 * possible, attempting demotion and rebind when a more appropriate
-	 * driver now exists.
+	 * driver now exists.  But not when adding a driver update-only.
 	 */
-	i_ddi_bind_devs();
-	i_ddi_di_cache_invalidate(KM_SLEEP);
+	if ((add == 0) || ((mc.flags & MOD_ADDMAJBIND_UPDATE) == 0)) {
+		i_ddi_bind_devs();
+		i_ddi_di_cache_invalidate();
+	}
 
 error:
 	if (mc.num_aliases > 0) {
@@ -711,7 +718,7 @@ modctl_rem_major(major_t major)
 	(void) i_ddi_unload_drvconf(major);
 	i_ddi_unbind_devs(major);
 	i_ddi_bind_devs();
-	i_ddi_di_cache_invalidate(KM_SLEEP);
+	i_ddi_di_cache_invalidate();
 
 	/* purge all the bindings to this driver */
 	purge_mbind(major, mb_hashtab);
@@ -784,10 +791,24 @@ new_vfs_in_modpath()
 }
 
 static int
-modctl_load_drvconf(major_t major)
+modctl_load_drvconf(major_t major, int flags)
 {
 	int ret;
 
+	/*
+	 * devfsadm -u - read all new driver.conf files
+	 * and bind and configure devices for new drivers.
+	 */
+	if (flags & MOD_LOADDRVCONF_RECONF) {
+		(void) i_ddi_load_drvconf(DDI_MAJOR_T_NONE);
+		i_ddi_bind_devs();
+		i_ddi_di_cache_invalidate();
+		return (0);
+	}
+
+	/*
+	 * update_drv <drv> - reload driver.conf for the specified driver
+	 */
 	if (major != DDI_MAJOR_T_NONE) {
 		ret = i_ddi_load_drvconf(major);
 		if (ret == 0)
@@ -1211,7 +1232,7 @@ modctl_devid2paths(ddi_devid_t udevid, char *uminor_name, uint_t flag,
 	char		*minor_name = NULL;
 	dev_info_t	*dip = NULL;
 	int		circ;
-	struct ddi_minor_data   *dmdp;
+	struct ddi_minor_data	*dmdp;
 	char		*path = NULL;
 	int		ulens;
 	int		lens;
@@ -1977,7 +1998,7 @@ modctl_remdrv_cleanup(const char *u_drvname)
 	 * instance of a device bound to the driver being
 	 * removed, remove any underlying devfs attribute nodes.
 	 *
-	 * This is a two-step process.  First we go through
+	 * This is a two-step process.	First we go through
 	 * the instance data itself, constructing a list of
 	 * the nodes discovered.  The second step is then
 	 * to find and remove any devfs attribute nodes
@@ -2240,6 +2261,67 @@ err:
 	return (ret);
 }
 
+static int
+modctl_hp(int subcmd, const char *path, char *cn_name, uintptr_t arg,
+    uintptr_t rval)
+{
+	int error = 0;
+	size_t pathsz, namesz;
+	char *devpath, *cn_name_str;
+
+	if (path == NULL)
+		return (EINVAL);
+
+	devpath = kmem_zalloc(MAXPATHLEN, KM_SLEEP);
+	error = copyinstr(path, devpath, MAXPATHLEN, &pathsz);
+	if (error != 0) {
+		kmem_free(devpath, MAXPATHLEN);
+		return (EFAULT);
+	}
+
+	cn_name_str = kmem_zalloc(MAXNAMELEN, KM_SLEEP);
+	error = copyinstr(cn_name, cn_name_str, MAXNAMELEN, &namesz);
+	if (error != 0) {
+		kmem_free(devpath, MAXPATHLEN);
+		kmem_free(cn_name_str, MAXNAMELEN);
+
+		return (EFAULT);
+	}
+
+	switch (subcmd) {
+	case MODHPOPS_CHANGE_STATE:
+		error = ddihp_modctl(DDI_HPOP_CN_CHANGE_STATE, devpath,
+		    cn_name_str, arg, NULL);
+		break;
+	case MODHPOPS_CREATE_PORT:
+		/* Create an empty PORT */
+		error = ddihp_modctl(DDI_HPOP_CN_CREATE_PORT, devpath,
+		    cn_name_str, NULL, NULL);
+		break;
+	case MODHPOPS_REMOVE_PORT:
+		/* Remove an empty PORT */
+		error = ddihp_modctl(DDI_HPOP_CN_REMOVE_PORT, devpath,
+		    cn_name_str, NULL, NULL);
+		break;
+	case MODHPOPS_BUS_GET:
+		error = ddihp_modctl(DDI_HPOP_CN_GET_PROPERTY, devpath,
+		    cn_name_str, arg, rval);
+		break;
+	case MODHPOPS_BUS_SET:
+		error = ddihp_modctl(DDI_HPOP_CN_SET_PROPERTY, devpath,
+		    cn_name_str, arg, rval);
+		break;
+	default:
+		error = ENOTSUP;
+		break;
+	}
+
+	kmem_free(devpath, MAXPATHLEN);
+	kmem_free(cn_name_str, MAXNAMELEN);
+
+	return (error);
+}
+
 int
 modctl_moddevname(int subcmd, uintptr_t a1, uintptr_t a2)
 {
@@ -2400,7 +2482,7 @@ modctl(int cmd, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4,
 #endif
 		break;
 
-	case MODGETDEVFSPATH:   	/* get path name of (dev_t,spec) type */
+	case MODGETDEVFSPATH:		/* get path name of (dev_t,spec) type */
 		if (get_udatamodel() == DATAMODEL_NATIVE) {
 			error = modctl_devfspath((dev_t)a1, (int)a2,
 			    (uint_t)a3, (char *)a4);
@@ -2418,7 +2500,7 @@ modctl(int cmd, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4,
 		    (uint_t *)a3);
 		break;
 
-	case MODGETDEVFSPATH_MI:   	/* get path name of (major,instance) */
+	case MODGETDEVFSPATH_MI:	/* get path name of (major,instance) */
 		error = modctl_devfspath_mi((major_t)a1, (int)a2,
 		    (uint_t)a3, (char *)a4);
 		break;
@@ -2437,7 +2519,7 @@ modctl(int cmd, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4,
 		break;
 
 	case MODLOADDRVCONF:	/* load driver.conf file for major */
-		error = modctl_load_drvconf((major_t)a1);
+		error = modctl_load_drvconf((major_t)a1, (int)a2);
 		break;
 
 	case MODUNLOADDRVCONF:	/* unload driver.conf file for major */
@@ -2513,6 +2595,11 @@ modctl(int cmd, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4,
 
 	case MODUNRETIRE:	/* unretire device named by physpath a1 */
 		error = modctl_unretire((char *)a1);
+		break;
+
+	case MODHPOPS:	/* hotplug operations */
+		/* device named by physpath a2 and Connection name a3 */
+		error = modctl_hp((int)a1, (char *)a2, (char *)a3, a4, a5);
 		break;
 
 	default:
@@ -3214,7 +3301,7 @@ modgetsymname(uintptr_t value, ulong_t *offset)
 
 /*
  * Lookup a symbol in a specified module.  These are wrapper routines that
- * call kobj_lookup().  kobj_lookup() may go away but these wrappers will
+ * call kobj_lookup().	kobj_lookup() may go away but these wrappers will
  * prevent callers from noticing.
  */
 uintptr_t
@@ -3788,7 +3875,7 @@ void
 mod_uninstall_daemon(void)
 {
 	callb_cpr_t	cprinfo;
-	clock_t		ticks = 0;
+	clock_t		ticks;
 
 	mod_aul_thread = curthread;
 
@@ -3803,10 +3890,9 @@ mod_uninstall_daemon(void)
 		 * the default for a non-DEBUG kernel.
 		 */
 		if (mod_uninstall_interval) {
-			ticks = ddi_get_lbolt() +
-			    drv_usectohz(mod_uninstall_interval * 1000000);
-			(void) cv_timedwait(&mod_uninstall_cv,
-			    &mod_uninstall_lock, ticks);
+			ticks = drv_usectohz(mod_uninstall_interval * 1000000);
+			(void) cv_reltimedwait(&mod_uninstall_cv,
+			    &mod_uninstall_lock, ticks, TR_CLOCK_TICK);
 		} else {
 			cv_wait(&mod_uninstall_cv, &mod_uninstall_lock);
 		}
@@ -4150,7 +4236,7 @@ mod_make_requisite(struct modctl *dependent, struct modctl *on_mod)
 		 * which are dependent on it from being uninstalled and
 		 * unloaded. "on_mod"'s mod_ref count decremented in
 		 * mod_release_requisites when the "dependent" module
-		 * unload is complete.  "on_mod" must be loaded, but may not
+		 * unload is complete.	"on_mod" must be loaded, but may not
 		 * yet be installed.
 		 */
 		on_mod->mod_ref++;
@@ -4172,8 +4258,9 @@ mod_release_requisites(struct modctl *modp)
 	struct modctl *req;
 	struct modctl_list *start = NULL, *mod_garbage;
 
+	ASSERT(!quiesce_active);
 	ASSERT(modp->mod_busy);
-	ASSERT(!MUTEX_HELD(&mod_lock));
+	ASSERT(MUTEX_NOT_HELD(&mod_lock));
 
 	mutex_enter(&mod_lock);		/* needed for manipulation of req */
 	for (modl = modp->mod_requisites; modl; modl = next) {

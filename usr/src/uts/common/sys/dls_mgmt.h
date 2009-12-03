@@ -27,7 +27,8 @@
 #define	_DLS_MGMT_H
 
 #include <sys/types.h>
-#include <sys/dld.h>
+#include <sys/param.h>
+#include <sys/zone.h>
 
 /*
  * Data-Link Services Module
@@ -43,12 +44,15 @@ typedef enum {
 	DATALINK_CLASS_AGGR		= 0x04,
 	DATALINK_CLASS_VNIC		= 0x08,
 	DATALINK_CLASS_ETHERSTUB	= 0x10,
-	DATALINK_CLASS_SIMNET		= 0x20
+	DATALINK_CLASS_SIMNET		= 0x20,
+	DATALINK_CLASS_BRIDGE		= 0x40,
+	DATALINK_CLASS_IPTUN		= 0x60
 } datalink_class_t;
 
 #define	DATALINK_CLASS_ALL	(DATALINK_CLASS_PHYS |	\
 	DATALINK_CLASS_VLAN | DATALINK_CLASS_AGGR | DATALINK_CLASS_VNIC | \
-	DATALINK_CLASS_ETHERSTUB | DATALINK_CLASS_SIMNET)
+	DATALINK_CLASS_ETHERSTUB | DATALINK_CLASS_SIMNET | \
+	DATALINK_CLASS_BRIDGE | DATALINK_CLASS_IPTUN)
 
 /*
  * A combination of flags and media.
@@ -89,7 +93,8 @@ typedef uint64_t	datalink_media_t;
 /*
  * The door file for the dlmgmtd (data-link management) daemon.
  */
-#define	DLMGMT_DOOR	"/etc/svc/volatile/dladm/dlmgmt_door"
+#define	DLMGMT_TMPFS_DIR	"/etc/svc/volatile/dladm"
+#define	DLMGMT_DOOR		DLMGMT_TMPFS_DIR "/dlmgmt_door"
 
 /*
  * Door upcall commands.
@@ -102,6 +107,7 @@ typedef uint64_t	datalink_media_t;
 #define	DLMGMT_CMD_GETNEXT		6
 #define	DLMGMT_CMD_DLS_UPDATE		7
 #define	DLMGMT_CMD_LINKPROP_INIT	8
+#define	DLMGMT_CMD_SETZONEID		9
 #define	DLMGMT_CMD_BASE			128
 
 /*
@@ -174,13 +180,20 @@ typedef struct dlmgmt_door_linkprop_init {
 	datalink_id_t		ld_linkid;
 } dlmgmt_door_linkprop_init_t;
 
+typedef struct dlmgmt_door_setzoneid {
+	int			ld_cmd;
+	datalink_id_t		ld_linkid;
+	zoneid_t		ld_zoneid;
+} dlmgmt_door_setzoneid_t;
+
 /* upcall return value */
 typedef struct dlmgmt_retval_s {
 	uint_t			lr_err; /* return error code */
 } dlmgmt_retval_t;
 
 typedef dlmgmt_retval_t	dlmgmt_destroy_retval_t,
-			dlmgmt_linkprop_init_retval_t;
+			dlmgmt_linkprop_init_retval_t,
+			dlmgmt_setzoneid_retval_t;
 
 struct dlmgmt_linkid_retval_s {
 	uint_t			lr_err;

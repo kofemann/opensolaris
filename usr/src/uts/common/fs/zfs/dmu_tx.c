@@ -48,6 +48,8 @@ dmu_tx_create_dd(dsl_dir_t *dd)
 		tx->tx_pool = dd->dd_pool;
 	list_create(&tx->tx_holds, sizeof (dmu_tx_hold_t),
 	    offsetof(dmu_tx_hold_t, txh_node));
+	list_create(&tx->tx_callbacks, sizeof (dmu_tx_callback_t),
+	    offsetof(dmu_tx_callback_t, dcb_node));
 #ifdef ZFS_DEBUG
 	refcount_create(&tx->tx_space_written);
 	refcount_create(&tx->tx_space_freed);
@@ -58,9 +60,9 @@ dmu_tx_create_dd(dsl_dir_t *dd)
 dmu_tx_t *
 dmu_tx_create(objset_t *os)
 {
-	dmu_tx_t *tx = dmu_tx_create_dd(os->os->os_dsl_dataset->ds_dir);
+	dmu_tx_t *tx = dmu_tx_create_dd(os->os_dsl_dataset->ds_dir);
 	tx->tx_objset = os;
-	tx->tx_lastsnap_txg = dsl_dataset_prev_snap_txg(os->os->os_dsl_dataset);
+	tx->tx_lastsnap_txg = dsl_dataset_prev_snap_txg(os->os_dsl_dataset);
 	return (tx);
 }
 
@@ -98,7 +100,7 @@ dmu_tx_hold_object_impl(dmu_tx_t *tx, objset_t *os, uint64_t object,
 	int err;
 
 	if (object != DMU_NEW_OBJECT) {
-		err = dnode_hold(os->os, object, tx, &dn);
+		err = dnode_hold(os, object, tx, &dn);
 		if (err) {
 			tx->tx_err = err;
 			return (NULL);
@@ -161,38 +163,47 @@ dmu_tx_check_ioerr(zio_t *zio, dnode_t *dn, int level, uint64_t blkid)
 }
 
 static void
-dmu_tx_count_indirects(dmu_tx_hold_t *txh, dmu_buf_impl_t *db,
-    boolean_t freeable, dmu_buf_impl_t **history)
+dmu_tx_count_twig(dmu_tx_hold_t *txh, dnode_t *dn, dmu_buf_impl_t *db,
+    int level, uint64_t blkid, boolean_t freeable, uint64_t *history)
 {
-	int i = db->db_level + 1;
-	dnode_t *dn = db->db_dnode;
+	objset_t *os = dn->dn_objset;
+	dsl_dataset_t *ds = os->os_dsl_dataset;
+	int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+	dmu_buf_impl_t *parent = NULL;
+	blkptr_t *bp = NULL;
+	uint64_t space;
 
-	if (i >= dn->dn_nlevels)
+	if (level >= dn->dn_nlevels || history[level] == blkid)
 		return;
 
-	db = db->db_parent;
-	if (db == NULL) {
-		uint64_t lvls = dn->dn_nlevels - i;
+	history[level] = blkid;
 
-		txh->txh_space_towrite += lvls << dn->dn_indblkshift;
-		return;
+	space = (level == 0) ? dn->dn_datablksz : (1ULL << dn->dn_indblkshift);
+
+	if (db == NULL || db == dn->dn_dbuf) {
+		ASSERT(level != 0);
+		db = NULL;
+	} else {
+		ASSERT(db->db_dnode == dn);
+		ASSERT(db->db_level == level);
+		ASSERT(db->db.db_size == space);
+		ASSERT(db->db_blkid == blkid);
+		bp = db->db_blkptr;
+		parent = db->db_parent;
 	}
 
-	if (db != history[i]) {
-		dsl_dataset_t *ds = dn->dn_objset->os_dsl_dataset;
-		uint64_t space = 1ULL << dn->dn_indblkshift;
+	freeable = (bp && (freeable ||
+	    dsl_dataset_block_freeable(ds, bp->blk_birth)));
 
-		freeable = (db->db_blkptr && (freeable ||
-		    dsl_dataset_block_freeable(ds, db->db_blkptr->blk_birth)));
-		if (freeable)
-			txh->txh_space_tooverwrite += space;
-		else
-			txh->txh_space_towrite += space;
-		if (db->db_blkptr)
-			txh->txh_space_tounref += space;
-		history[i] = db;
-		dmu_tx_count_indirects(txh, db, freeable, history);
-	}
+	if (freeable)
+		txh->txh_space_tooverwrite += space;
+	else
+		txh->txh_space_towrite += space;
+	if (bp)
+		txh->txh_space_tounref += bp_get_dsize(os->os_spa, bp);
+
+	dmu_tx_count_twig(txh, dn, parent, level + 1,
+	    blkid >> epbs, freeable, history);
 }
 
 /* ARGSUSED */
@@ -213,7 +224,7 @@ dmu_tx_count_write(dmu_tx_hold_t *txh, uint64_t off, uint64_t len)
 	max_ibs = DN_MAX_INDBLKSHIFT;
 
 	if (dn) {
-		dmu_buf_impl_t *last[DN_MAX_LEVELS];
+		uint64_t history[DN_MAX_LEVELS];
 		int nlvls = dn->dn_nlevels;
 		int delta;
 
@@ -289,29 +300,18 @@ dmu_tx_count_write(dmu_tx_hold_t *txh, uint64_t off, uint64_t len)
 		 * If this write is not off the end of the file
 		 * we need to account for overwrites/unref.
 		 */
-		if (start <= dn->dn_maxblkid)
-			bzero(last, sizeof (dmu_buf_impl_t *) * DN_MAX_LEVELS);
+		if (start <= dn->dn_maxblkid) {
+			for (int l = 0; l < DN_MAX_LEVELS; l++)
+				history[l] = -1ULL;
+		}
 		while (start <= dn->dn_maxblkid) {
-			spa_t *spa = txh->txh_tx->tx_pool->dp_spa;
-			dsl_dataset_t *ds = dn->dn_objset->os_dsl_dataset;
 			dmu_buf_impl_t *db;
 
 			rw_enter(&dn->dn_struct_rwlock, RW_READER);
 			db = dbuf_hold_level(dn, 0, start, FTAG);
 			rw_exit(&dn->dn_struct_rwlock);
-			if (db->db_blkptr && dsl_dataset_block_freeable(ds,
-			    db->db_blkptr->blk_birth)) {
-				dprintf_bp(db->db_blkptr, "can free old%s", "");
-				txh->txh_space_tooverwrite += dn->dn_datablksz;
-				txh->txh_space_tounref += dn->dn_datablksz;
-				dmu_tx_count_indirects(txh, db, TRUE, last);
-			} else {
-				txh->txh_space_towrite += dn->dn_datablksz;
-				if (db->db_blkptr)
-					txh->txh_space_tounref +=
-					    bp_get_dasize(spa, db->db_blkptr);
-				dmu_tx_count_indirects(txh, db, FALSE, last);
-			}
+			dmu_tx_count_twig(txh, dn, db, 0, start, B_FALSE,
+			    history);
 			dbuf_rele(db, FTAG);
 			if (++start > end) {
 				/*
@@ -376,7 +376,7 @@ static void
 dmu_tx_count_dnode(dmu_tx_hold_t *txh)
 {
 	dnode_t *dn = txh->txh_dnode;
-	dnode_t *mdn = txh->txh_tx->tx_objset->os->os_meta_dnode;
+	dnode_t *mdn = txh->txh_tx->tx_objset->os_meta_dnode;
 	uint64_t space = mdn->dn_datablksz +
 	    ((mdn->dn_nlevels-1) << mdn->dn_indblkshift);
 
@@ -459,7 +459,7 @@ dmu_tx_count_free(dmu_tx_hold_t *txh, uint64_t off, uint64_t len)
 			bp += blkid + i;
 			if (dsl_dataset_block_freeable(ds, bp->blk_birth)) {
 				dprintf_bp(bp, "can free old%s", "");
-				space += bp_get_dasize(spa, bp);
+				space += bp_get_dsize(spa, bp);
 			}
 			unref += BP_GET_ASIZE(bp);
 		}
@@ -536,7 +536,7 @@ dmu_tx_count_free(dmu_tx_hold_t *txh, uint64_t off, uint64_t len)
 		for (i = 0; i < tochk; i++) {
 			if (dsl_dataset_block_freeable(ds, bp[i].blk_birth)) {
 				dprintf_bp(&bp[i], "can free old%s", "");
-				space += bp_get_dasize(spa, &bp[i]);
+				space += bp_get_dsize(spa, &bp[i]);
 			}
 			unref += BP_GET_ASIZE(bp);
 		}
@@ -581,6 +581,8 @@ dmu_tx_hold_free(dmu_tx_t *tx, uint64_t object, uint64_t off, uint64_t len)
 	if (len != DMU_OBJECT_END)
 		dmu_tx_count_write(txh, off+len, 1);
 
+	dmu_tx_count_dnode(txh);
+
 	if (off >= (dn->dn_maxblkid+1) * dn->dn_datablksz)
 		return;
 	if (len == DMU_OBJECT_END)
@@ -623,7 +625,6 @@ dmu_tx_hold_free(dmu_tx_t *tx, uint64_t object, uint64_t off, uint64_t len)
 		}
 	}
 
-	dmu_tx_count_dnode(txh);
 	dmu_tx_count_free(txh, off, len);
 }
 
@@ -688,7 +689,7 @@ dmu_tx_hold_zap(dmu_tx_t *tx, uint64_t object, int add, const char *name)
 		 * access the name in this fat-zap so that we'll check
 		 * for i/o errors to the leaf blocks, etc.
 		 */
-		err = zap_lookup(&dn->dn_objset->os, dn->dn_object, name,
+		err = zap_lookup(dn->dn_objset, dn->dn_object, name,
 		    8, 0, NULL);
 		if (err == EIO) {
 			tx->tx_err = err;
@@ -696,7 +697,7 @@ dmu_tx_hold_zap(dmu_tx_t *tx, uint64_t object, int add, const char *name)
 		}
 	}
 
-	err = zap_count_write(&dn->dn_objset->os, dn->dn_object, name, add,
+	err = zap_count_write(dn->dn_objset, dn->dn_object, name, add,
 	    &txh->txh_space_towrite, &txh->txh_space_tooverwrite);
 
 	/*
@@ -771,7 +772,7 @@ dmu_tx_dirty_buf(dmu_tx_t *tx, dmu_buf_impl_t *db)
 	dnode_t *dn = db->db_dnode;
 
 	ASSERT(tx->tx_txg != 0);
-	ASSERT(tx->tx_objset == NULL || dn->dn_objset == tx->tx_objset->os);
+	ASSERT(tx->tx_objset == NULL || dn->dn_objset == tx->tx_objset);
 	ASSERT3U(dn->dn_object, ==, db->db.db_object);
 
 	if (tx->tx_anyobj)
@@ -931,7 +932,7 @@ dmu_tx_try_assign(dmu_tx_t *tx, uint64_t txg_how)
 	 * assume that we won't be able to free or overwrite anything.
 	 */
 	if (tx->tx_objset &&
-	    dsl_dataset_prev_snap_txg(tx->tx_objset->os->os_dsl_dataset) >
+	    dsl_dataset_prev_snap_txg(tx->tx_objset->os_dsl_dataset) >
 	    tx->tx_lastsnap_txg) {
 		towrite += tooverwrite;
 		tooverwrite = tofree = 0;
@@ -1112,8 +1113,13 @@ dmu_tx_commit(dmu_tx_t *tx)
 	if (tx->tx_tempreserve_cookie)
 		dsl_dir_tempreserve_clear(tx->tx_tempreserve_cookie, tx);
 
+	if (!list_is_empty(&tx->tx_callbacks))
+		txg_register_callbacks(&tx->tx_txgh, &tx->tx_callbacks);
+
 	if (tx->tx_anyobj == FALSE)
 		txg_rele_to_sync(&tx->tx_txgh);
+
+	list_destroy(&tx->tx_callbacks);
 	list_destroy(&tx->tx_holds);
 #ifdef ZFS_DEBUG
 	dprintf("towrite=%llu written=%llu tofree=%llu freed=%llu\n",
@@ -1142,6 +1148,14 @@ dmu_tx_abort(dmu_tx_t *tx)
 		if (dn != NULL)
 			dnode_rele(dn, tx);
 	}
+
+	/*
+	 * Call any registered callbacks with an error code.
+	 */
+	if (!list_is_empty(&tx->tx_callbacks))
+		dmu_tx_do_callbacks(&tx->tx_callbacks, ECANCELED);
+
+	list_destroy(&tx->tx_callbacks);
 	list_destroy(&tx->tx_holds);
 #ifdef ZFS_DEBUG
 	refcount_destroy_many(&tx->tx_space_written,
@@ -1157,4 +1171,32 @@ dmu_tx_get_txg(dmu_tx_t *tx)
 {
 	ASSERT(tx->tx_txg != 0);
 	return (tx->tx_txg);
+}
+
+void
+dmu_tx_callback_register(dmu_tx_t *tx, dmu_tx_callback_func_t *func, void *data)
+{
+	dmu_tx_callback_t *dcb;
+
+	dcb = kmem_alloc(sizeof (dmu_tx_callback_t), KM_SLEEP);
+
+	dcb->dcb_func = func;
+	dcb->dcb_data = data;
+
+	list_insert_tail(&tx->tx_callbacks, dcb);
+}
+
+/*
+ * Call all the commit callbacks on a list, with a given error code.
+ */
+void
+dmu_tx_do_callbacks(list_t *cb_list, int error)
+{
+	dmu_tx_callback_t *dcb;
+
+	while (dcb = list_head(cb_list)) {
+		list_remove(cb_list, dcb);
+		dcb->dcb_func(dcb->dcb_data, error);
+		kmem_free(dcb, sizeof (dmu_tx_callback_t));
+	}
 }

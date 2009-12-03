@@ -1,4 +1,8 @@
 /*
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+ * Use is subject to license terms.
+ */
+/*
  * Copyright (c) 2001 Kevin Steves.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -25,15 +29,14 @@
 #include "includes.h"
 RCSID("$OpenBSD: groupaccess.c,v 1.5 2002/03/04 17:27:39 stevesk Exp $");
 
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
-
 #include "groupaccess.h"
 #include "xmalloc.h"
 #include "match.h"
 #include "log.h"
+#include <alloca.h>
 
-static int ngroups;
-static char *groups_byname[NGROUPS_UMAX + 1];	/* +1 for base/primary group */
+static int ngroups, ngroups_lim;
+static char **groups_byname;
 
 /*
  * Initialize group access list for user with primary (base) and
@@ -42,14 +45,20 @@ static char *groups_byname[NGROUPS_UMAX + 1];	/* +1 for base/primary group */
 int
 ga_init(const char *user, gid_t base)
 {
-	gid_t groups_bygid[NGROUPS_UMAX + 1];
+	gid_t *groups_bygid;
 	int i, j;
 	struct group *gr;
 
-	if (ngroups > 0)
+	if (ngroups_lim == 0) {
+		/* Add one for the base gid */
+		ngroups_lim = sysconf(_SC_NGROUPS_MAX) + 1;
+		groups_byname = malloc(sizeof (char *) * ngroups_lim);
+	} else if (ngroups > 0)
 		ga_free();
 
-	ngroups = sizeof(groups_bygid) / sizeof(gid_t);
+	groups_bygid = alloca(ngroups_lim * sizeof (gid_t));
+
+	ngroups = ngroups_lim;
 	if (getgrouplist(user, base, groups_bygid, &ngroups) == -1)
 		log("getgrouplist: groups list too small");
 	for (i = 0, j = 0; i < ngroups; i++)
@@ -70,8 +79,32 @@ ga_match(char * const *groups, int n)
 	for (i = 0; i < ngroups; i++)
 		for (j = 0; j < n; j++)
 			if (match_pattern(groups_byname[i], groups[j]))
-				return 1;
-	return 0;
+				return (1);
+	return (0);
+}
+
+/*
+ * Return 1 if one of user's groups matches group_pattern list.
+ * Return 0 on negated or no match.
+ */
+int
+ga_match_pattern_list(const char *group_pattern)
+{
+	int i, found = 0;
+	size_t len = strlen(group_pattern);
+
+	for (i = 0; i < ngroups; i++) {
+		switch (match_pattern_list(groups_byname[i],
+		    group_pattern, len, 0)) {
+		case -1:
+			return (0);	/* Negated match wins */
+		case 0:
+			continue;
+		case 1:
+			found = 1;
+		}
+	}
+	return (found);
 }
 
 /*

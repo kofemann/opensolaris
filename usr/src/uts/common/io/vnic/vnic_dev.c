@@ -24,6 +24,7 @@
  */
 
 #include <sys/types.h>
+#include <sys/cred.h>
 #include <sys/sysmacros.h>
 #include <sys/conf.h>
 #include <sys/cmn_err.h>
@@ -196,6 +197,7 @@ vnic_unicast_add(vnic_t *vnic, vnic_mac_addr_type_t vnic_addr_type,
 
 	switch (vnic_addr_type) {
 	case VNIC_MAC_ADDR_TYPE_FIXED:
+	case VNIC_MAC_ADDR_TYPE_VRID:
 		/*
 		 * The MAC address value to assign to the VNIC
 		 * is already provided in mac_addr_arg. addr_len_ptr_arg
@@ -318,8 +320,9 @@ vnic_unicast_add(vnic_t *vnic, vnic_mac_addr_type_t vnic_addr_type,
 int
 vnic_dev_create(datalink_id_t vnic_id, datalink_id_t linkid,
     vnic_mac_addr_type_t *vnic_addr_type, int *mac_len, uchar_t *mac_addr,
-    int *mac_slot, uint_t mac_prefix_len, uint16_t vid,
-    mac_resource_props_t *mrp, uint32_t flags, vnic_ioc_diag_t *diag)
+    int *mac_slot, uint_t mac_prefix_len, uint16_t vid, vrid_t vrid,
+    int af, mac_resource_props_t *mrp, uint32_t flags, vnic_ioc_diag_t *diag,
+    cred_t *credp)
 {
 	vnic_t *vnic;
 	mac_register_t *mac;
@@ -352,6 +355,8 @@ vnic_dev_create(datalink_id_t vnic_id, datalink_id_t linkid,
 
 	vnic->vn_id = vnic_id;
 	vnic->vn_link_id = linkid;
+	vnic->vn_vrid = vrid;
+	vnic->vn_af = af;
 
 	if (!is_anchor) {
 		if (linkid == DATALINK_INVALID_LINKID) {
@@ -492,7 +497,8 @@ vnic_dev_create(datalink_id_t vnic_id, datalink_id_t linkid,
 	if (!is_anchor)
 		mac_set_upper_mac(vnic->vn_mch, vnic->vn_mh);
 
-	if ((err = dls_devnet_create(vnic->vn_mh, vnic->vn_id)) != 0) {
+	err = dls_devnet_create(vnic->vn_mh, vnic->vn_id, crgetzoneid(credp));
+	if (err != 0) {
 		VERIFY(is_anchor || mac_margin_remove(vnic->vn_lower_mh,
 		    vnic->vn_margin) == 0);
 		(void) mac_unregister(vnic->vn_mh);
@@ -553,7 +559,7 @@ vnic_dev_modify(datalink_id_t vnic_id, uint_t modify_mask,
 
 /* ARGSUSED */
 int
-vnic_dev_delete(datalink_id_t vnic_id, uint32_t flags)
+vnic_dev_delete(datalink_id_t vnic_id, uint32_t flags, cred_t *credp)
 {
 	vnic_t *vnic = NULL;
 	mod_hash_val_t val;
@@ -582,7 +588,8 @@ vnic_dev_delete(datalink_id_t vnic_id, uint32_t flags)
 	 * any new claims on mac_impl_t.
 	 */
 	if ((rc = mac_disable(vnic->vn_mh)) != 0) {
-		(void) dls_devnet_create(vnic->vn_mh, vnic_id);
+		(void) dls_devnet_create(vnic->vn_mh, vnic_id,
+		    crgetzoneid(credp));
 		rw_exit(&vnic_lock);
 		return (rc);
 	}
@@ -755,6 +762,16 @@ vnic_m_capab_get(void *arg, mac_capab_t cap, void *cap_data)
 	case MAC_CAPAB_NO_NATIVEVLAN:
 	case MAC_CAPAB_NO_ZCOPY:
 		return (B_TRUE);
+	case MAC_CAPAB_VRRP: {
+		mac_capab_vrrp_t *vrrp_capab = cap_data;
+
+		if (vnic->vn_vrid != 0) {
+			if (vrrp_capab != NULL)
+				vrrp_capab->mcv_af = vnic->vn_af;
+			return (B_TRUE);
+		}
+		return (B_FALSE);
+	}
 	default:
 		return (B_FALSE);
 	}
@@ -866,10 +883,14 @@ vnic_m_getprop(void *m_driver, const char *pr_name, mac_prop_id_t pr_num,
 }
 
 int
-vnic_info(vnic_info_t *info)
+vnic_info(vnic_info_t *info, cred_t *credp)
 {
 	vnic_t		*vnic;
 	int		err;
+
+	/* Make sure that the VNIC link is visible from the caller's zone. */
+	if (!dls_devnet_islinkvisible(info->vn_vnic_id, crgetzoneid(credp)))
+		return (ENOENT);
 
 	rw_enter(&vnic_lock, RW_WRITER);
 
@@ -888,6 +909,8 @@ vnic_info(vnic_info_t *info)
 	info->vn_mac_prefix_len = 0;
 	info->vn_vid = vnic->vn_vid;
 	info->vn_force = vnic->vn_force;
+	info->vn_vrid = vnic->vn_vrid;
+	info->vn_af = vnic->vn_af;
 
 	bzero(&info->vn_resource_props, sizeof (mac_resource_props_t));
 	if (vnic->vn_mch != NULL)

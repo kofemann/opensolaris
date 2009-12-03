@@ -61,6 +61,7 @@ typedef enum sbd_ret {
 	SBD_RET_NOT_FOUND,
 	SBD_RET_INSUFFICIENT_BUF_SPACE,
 	SBD_RET_WRITE_CACHE_SET_FAILED,
+	SBD_RET_ACCESS_STATE_FAILED,
 
 	SBD_RET_MAX_VAL
 } sbd_ret_t;
@@ -72,6 +73,9 @@ typedef enum sbd_ret {
 #define	SBD_IOCTL_MODIFY_LU				SBD_IOCTL_DEF(4)
 #define	SBD_IOCTL_GET_LU_PROPS				SBD_IOCTL_DEF(5)
 #define	SBD_IOCTL_GET_LU_LIST				SBD_IOCTL_DEF(6)
+#define	SBD_IOCTL_SET_LU_STANDBY			SBD_IOCTL_DEF(7)
+#define	SBD_IOCTL_SET_GLOBAL_LU				SBD_IOCTL_DEF(8)
+#define	SBD_IOCTL_GET_GLOBAL_LU				SBD_IOCTL_DEF(9)
 
 typedef struct sbd_create_and_reg_lu {
 	uint32_t	slu_struct_size;
@@ -86,10 +90,10 @@ typedef struct sbd_create_and_reg_lu {
 			slu_mgmt_url_valid:1,
 			slu_guid_valid:1,
 			slu_company_id_valid:1,
+			slu_host_id_valid:1,
 			slu_writeback_cache_disable_valid:1,
 			slu_writeback_cache_disable:1,
 			slu_write_protected:1;
-
 	uint16_t	slu_meta_fname_off;
 	uint64_t	slu_lu_size;
 	uint16_t	slu_data_fname_off;
@@ -100,13 +104,41 @@ typedef struct sbd_create_and_reg_lu {
 	uint32_t	slu_company_id;
 	uint16_t	slu_alias_off;
 	uint16_t	slu_mgmt_url_off;
-	uint32_t	slu_rsvd1;
+	uint32_t	slu_host_id;
 	char		slu_rev[4];
 	char		slu_vid[8];
 	char		slu_pid[16];
 	uint8_t		slu_guid[16];
 	char		slu_buf[8];	/* likely more than 8 */
 } sbd_create_and_reg_lu_t;
+
+typedef struct sbd_global_props {
+	uint32_t	mlu_struct_size;
+	uint32_t	mlu_vid_valid:1,
+			mlu_pid_valid:1,
+			mlu_rev_valid:1,
+			mlu_serial_valid:1,
+			mlu_mgmt_url_valid:1,
+			mlu_company_id_valid:1,
+			mlu_host_id_valid:1;
+	uint16_t	mlu_serial_off;
+	uint8_t		mlu_serial_size;
+	uint8_t		mlu_rsvd1;
+	uint32_t	mlu_company_id;
+	uint16_t	mlu_mgmt_url_off;
+	uint16_t	rsvd1;
+	uint32_t	mlu_host_id;
+	uint32_t	mlu_buf_size_needed;
+	char		mlu_rev[4];
+	char		mlu_vid[8];
+	char		mlu_pid[16];
+	char		mlu_buf[8];	/* likely more than 8 */
+} sbd_global_props_t;
+
+typedef struct sbd_set_lu_standby {
+	uint8_t		stlu_guid[16];
+} sbd_set_lu_standby_t;
+
 
 typedef struct sbd_import_lu {
 	uint32_t	ilu_struct_size;
@@ -126,7 +158,9 @@ typedef struct sbd_modify_lu {
 			mlu_write_protected_valid:1,
 			mlu_write_protected:1,
 			mlu_by_guid:1,
-			mlu_by_fname:1;
+			mlu_by_fname:1,
+			mlu_standby_valid:1,
+			mlu_standby:1;
 	uint64_t	mlu_lu_size;
 	uint16_t	mlu_alias_off;
 	uint16_t	mlu_mgmt_url_off;
@@ -148,6 +182,14 @@ typedef struct sbd_delete_lu {
 	uint8_t		dlu_meta_name[8];
 } sbd_delete_lu_t;
 
+/*
+ * sbd access states
+ */
+#define	SBD_LU_ACTIVE			1
+#define	SBD_LU_TRANSITION_TO_ACTIVE	2
+#define	SBD_LU_STANDBY			3
+#define	SBD_LU_TRANSITION_TO_STANDBY	4
+
 typedef struct sbd_lu_props {
 	uint32_t	slp_input_guid:1,	/* GUID or meta filename */
 			slp_separate_meta:1,
@@ -163,7 +205,6 @@ typedef struct sbd_lu_props {
 			slp_writeback_cache_disable_cur:1,
 			slp_writeback_cache_disable_saved:1,
 			slp_write_protected:1;
-
 	uint16_t	slp_meta_fname_off;
 	uint16_t	slp_data_fname_off;
 	uint64_t	slp_lu_size;
@@ -173,7 +214,7 @@ typedef struct sbd_lu_props {
 	uint16_t	slp_mgmt_url_off;
 	uint32_t	slp_buf_size_needed;	/* Upon return */
 	uint16_t	slp_serial_size;
-	uint16_t	slp_rsvd;
+	uint16_t	slp_access_state;
 	char		slp_rev[4];
 	char		slp_vid[8];
 	char		slp_pid[16];

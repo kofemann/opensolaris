@@ -19,10 +19,9 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
 #
 #	This makefile drives the production of the sha2 crypto kernel module.
 #
@@ -33,17 +32,17 @@
 #	Path to the base of the uts directory tree (usually /usr/src/uts).
 #
 UTSBASE	= ../..
-COMDIR	= $(COMMONBASE)/crypto/sha2
+COMDIR	= $(COMMONBASE)/crypto
 
 #
 #	Define the module and object file sets.
 #
 MODULE		= sha2
-LINTS		= $(SHA2_OBJS:%.o=$(LINTS_DIR)/%.ln)
 SHA2_OBJS_32    =
 SHA2_OBJS_64    = sha512-x86_64.o sha256-x86_64.o
 SHA2_OBJS       += $(SHA2_OBJS_$(CLASS))
 OBJECTS		= $(SHA2_OBJS:%=$(OBJS_DIR)/%)
+LINTS		= $(SHA2_OBJS:%.o=$(LINTS_DIR)/%.ln)
 ROOTMODULE	= $(ROOT_CRYPTO_DIR)/$(MODULE)
 ROOTLINK	= $(ROOT_MISC_DIR)/$(MODULE)
 
@@ -65,14 +64,12 @@ LINT_TARGET	= $(MODULE).lint
 INSTALL_TARGET	= $(BINARY) $(ROOTMODULE) $(ROOTLINK)
 
 #
-# For now, disable these lint checks; maintainers should endeavor
-# to investigate and remove these for maximum lint coverage.
-# Please do not carry these forward to new Makefiles.
+# Linkage dependencies
 #
-LINTTAGS	+= -erroff=E_BAD_PTR_CAST_ALIGN
-LINTTAGS	+= -erroff=E_SUPPRESSION_DIRECTIVE_UNUSED
-LINTTAGS	+= -erroff=E_PTRDIFF_OVERFLOW
-LINTTAGS	+= -erroff=E_ASSIGN_NARROW_CONV
+LDFLAGS += -dy -Nmisc/kcf
+
+CFLAGS += -I$(COMDIR)
+LINTFLAGS	+= -I$(COMDIR)
 
 #
 #	Default build targets.
@@ -110,8 +107,8 @@ $(OBJS_DIR)/%.o: %.s
 $(OBJS_DIR)/%.ln: %.s
 	@($(LHEAD) $(LINT.c) ${@F:.ln=.s} $(LTAIL))
 
-sha512-x86_64.s: $(COMDIR)/amd64/sha512-x86_64.pl
+sha512-x86_64.s: $(COMDIR)/sha2/amd64/sha512-x86_64.pl
 	$(PERL) $? $@
 
-sha256-x86_64.s: $(COMDIR)/amd64/sha512-x86_64.pl
+sha256-x86_64.s: $(COMDIR)/sha2/amd64/sha512-x86_64.pl
 	$(PERL) $? $@

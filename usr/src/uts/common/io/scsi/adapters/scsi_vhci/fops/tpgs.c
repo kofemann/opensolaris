@@ -248,7 +248,7 @@ std_path_activate(struct scsi_device *sd, char *pathclass,
 		return (0);
 	}
 
-	if (mode != SCSI_IMPLICIT_FAILOVER) {
+	if (mode == SCSI_EXPLICIT_FAILOVER) {
 		VHCI_DEBUG(4, (CE_NOTE, NULL,
 		    "!mode is EXPLICIT for %p xlf %x\n",
 		    (void *)sd, xlf));
@@ -436,7 +436,8 @@ std_analyze_sense(struct scsi_device *sd, uint8_t *sense,
 		    " sense:%x\n", skey, asc, ascq, rval));
 	} else if ((skey == KEY_NOT_READY) &&
 	    (asc == STD_LOGICAL_UNIT_NOT_ACCESSIBLE) &&
-	    (ascq == STD_TGT_PORT_UNAVAILABLE)) {
+	    ((ascq == STD_TGT_PORT_UNAVAILABLE) ||
+	    (ascq == STD_TGT_PORT_STANDBY))) {
 		rval = SCSI_SENSE_INACTIVE;
 		VHCI_DEBUG(4, (CE_NOTE, NULL, "!std_analyze_sense:"
 		    " sense_key:%x, add_code: %x, qual_code:%x"

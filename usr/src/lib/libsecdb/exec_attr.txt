@@ -101,6 +101,7 @@ File System Management:solaris:cmd:::/usr/sbin/quotaoff:uid=0;gid=sys
 File System Management:solaris:cmd:::/usr/sbin/quotaon:uid=0;gid=sys
 File System Management:solaris:cmd:::/usr/sbin/raidctl:privs=sys_config,sys_devices;euid=0
 File System Management:suser:cmd:::/usr/sbin/ramdiskadm:euid=0
+File System Management:solaris:cmd:::/usr/sbin/sasinfo:privs=sys_devices
 File System Management:solaris:cmd:::/usr/sbin/sbdadm:privs=sys_devices
 File System Management:suser:cmd:::/usr/sbin/share:uid=0;gid=root
 File System Management:suser:cmd:::/usr/sbin/sharemgr:uid=0;gid=root
@@ -294,12 +295,12 @@ Software Installation:suser:cmd:::/usr/sbin/pkgrm:uid=0;gid=bin
 System Event Management:suser:cmd:::/usr/sbin/syseventadm:uid=0
 User Management:suser:cmd:::/usr/sbin/grpck:euid=0
 User Management:suser:cmd:::/usr/sbin/pwck:euid=0
-User Management:solaris:cmd:::/usr/sbin/useradd:euid=0
-User Management:solaris:cmd:::/usr/sbin/userdel:euid=0
-User Management:solaris:cmd:::/usr/sbin/usermod:euid=0
-User Management:solaris:cmd:::/usr/sbin/roleadd:euid=0
-User Management:solaris:cmd:::/usr/sbin/roledel:euid=0
-User Management:solaris:cmd:::/usr/sbin/rolemod:euid=0
+User Management:solaris:cmd:::/usr/sbin/useradd:uid=0
+User Management:solaris:cmd:::/usr/sbin/userdel:uid=0
+User Management:solaris:cmd:::/usr/sbin/usermod:uid=0
+User Management:solaris:cmd:::/usr/sbin/roleadd:uid=0
+User Management:solaris:cmd:::/usr/sbin/roledel:uid=0
+User Management:solaris:cmd:::/usr/sbin/rolemod:uid=0
 User Management:solaris:cmd:::/usr/sbin/groupadd:uid=0
 User Management:solaris:cmd:::/usr/sbin/groupdel:uid=0
 User Management:solaris:cmd:::/usr/sbin/groupmod:uid=0

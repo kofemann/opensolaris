@@ -383,6 +383,11 @@ extern "C" {
 #define	CPUID_CSTATE_ARAT	(0x4)
 
 /*
+ * Intel ENERGY_PERF_BIAS MSR indicated by feature bit CPUID.6.ECX[3].
+ */
+#define	CPUID_EPB_SUPPORT	(1 << 3)
+
+/*
  * x86_type is a legacy concept; this is supplanted
  * for most purposes by x86_feature; modern CPUs
  * should be X86_TYPE_OTHER
@@ -550,6 +555,8 @@ extern "C" {
 #define	X86_SOCKET_AM2R2	_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000200)
 #define	X86_SOCKET_AM3		_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000400)
 #define	X86_SOCKET_G34		_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x000800)
+#define	X86_SOCKET_ASB2		_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x001000)
+#define	X86_SOCKET_C32		_X86_SOCKET_MKVAL(X86_VENDOR_AMD, 0x002000)
 
 #if !defined(_ASM)
 
@@ -620,6 +627,8 @@ extern id_t cpuid_get_coreid(struct cpu *);
 extern int cpuid_get_pkgcoreid(struct cpu *);
 extern int cpuid_get_clogid(struct cpu *);
 extern uint32_t cpuid_get_apicid(struct cpu *);
+extern uint_t cpuid_get_procnodeid(struct cpu *cpu);
+extern uint_t cpuid_get_procnodes_per_pkg(struct cpu *cpu);
 extern int cpuid_is_cmt(struct cpu *);
 extern int cpuid_syscall32_insn(struct cpu *);
 extern int getl2cacheinfo(struct cpu *, int *, int *, int *);
@@ -653,6 +662,7 @@ extern uint32_t *cpuid_mwait_alloc(struct cpu *);
 extern void cpuid_mwait_free(struct cpu *);
 extern int cpuid_deep_cstates_supported(void);
 extern int cpuid_arat_supported(void);
+extern int cpuid_iepb_supported(struct cpu *);
 extern int vmware_platform(void);
 #endif
 

@@ -88,14 +88,11 @@ COMMON_SUBDIRS=		\
 	chmod		\
 	chown		\
 	chroot		\
-	cksum		\
 	clear		\
 	clinfo		\
 	cmd-crypto	\
 	cmd-inet	\
-	cmp		\
 	col		\
-	comm		\
 	compress	\
 	consadm		\
 	coreadm		\
@@ -108,7 +105,6 @@ COMMON_SUBDIRS=		\
 	ctrun		\
 	ctstat		\
 	ctwatch		\
-	cut		\
 	datadm		\
 	date		\
 	dc		\
@@ -197,6 +193,8 @@ COMMON_SUBDIRS=		\
 	head		\
 	hostid		\
 	hostname	\
+	hotplug		\
+	hotplugd	\
 	hwdata		\
 	id		\
 	idmap		\
@@ -219,7 +217,6 @@ COMMON_SUBDIRS=		\
 	isns		\
 	itadm		\
 	java		\
-	join		\
 	kbd		\
 	keyserv		\
 	killall		\
@@ -228,6 +225,7 @@ COMMON_SUBDIRS=		\
 	kstat		\
 	last		\
 	lastcomm	\
+	latencytop	\
 	ldap		\
 	ldapcachemgr	\
 	lgrpinfo	\
@@ -244,7 +242,6 @@ COMMON_SUBDIRS=		\
 	logger		\
 	login		\
 	logins		\
-	logname		\
 	look		\
 	ls		\
 	luxadm		\
@@ -294,7 +291,6 @@ COMMON_SUBDIRS=		\
 	pagesize	\
 	passmgmt	\
 	passwd		\
-	paste		\
 	pathchk		\
 	pbind		\
 	pcidr		\
@@ -351,10 +347,10 @@ COMMON_SUBDIRS=		\
 	rpcgen		\
 	rpcinfo		\
 	rpcsvc		\
-	rpld		\
 	runat		\
 	sa		\
 	saf		\
+	sasinfo		\
 	savecore	\
 	sbdadm		\
 	script		\
@@ -383,6 +379,7 @@ COMMON_SUBDIRS=		\
 	ssh		\
 	stat		\
 	stmfadm		\
+	stmfproxy	\
 	stmfsvc		\
 	stmsboot	\
 	streams		\
@@ -402,7 +399,6 @@ COMMON_SUBDIRS=		\
 	tbl		\
 	tcopy		\
 	tcpd		\
-	tee		\
 	terminfo	\
 	th_tools	\
 	tic		\
@@ -419,10 +415,10 @@ COMMON_SUBDIRS=		\
 	tsol		\
 	tty		\
 	ttymon		\
+	tzreload	\
 	uadmin		\
 	ul		\
 	uname		\
-	uniq		\
 	units		\
 	unlink		\
 	unpack		\
@@ -434,12 +430,12 @@ COMMON_SUBDIRS=		\
 	vi		\
 	volcheck	\
 	volrmmount	\
+	vrrpadm		\
 	vscan		\
 	vt		\
 	w		\
 	wall		\
 	wbem		\
-	wc		\
 	which		\
 	who		\
 	whodo		\
@@ -463,6 +459,7 @@ COMMON_SUBDIRS=		\
 	zonename	\
 	zpool		\
 	zlook		\
+	zstreamdump	\
 	ztest
 
 $(CLOSED_BUILD)COMMON_SUBDIRS += \
@@ -478,8 +475,7 @@ $(CLOSED_BUILD)COMMON_SUBDIRS += \
 	$(CLOSED)/cmd/printf	\
 	$(CLOSED)/cmd/sed	\
 	$(CLOSED)/cmd/sed_xpg4	\
-	$(CLOSED)/cmd/smartcard	\
-	$(CLOSED)/cmd/tail	\
+ODE	$(CLOSED)/cmd/tail	\
 	$(CLOSED)/cmd/tr_xpg4
 
 i386_SUBDIRS=		\
@@ -500,6 +496,7 @@ sparc_SUBDIRS=		\
 	drd		\
 	fps		\
 	fruadm		\
+	ldmad		\
 	oplhpd		\
 	prtdscp		\
 	prtfru		\
@@ -545,12 +542,9 @@ MSGSUBDIRS=		\
 	chgrp		\
 	chmod		\
 	chown		\
-	cksum		\
 	cmd-crypto	\
 	cmd-inet	\
-	cmp		\
 	col		\
-	comm		\
 	compress	\
 	consadm		\
 	coreadm		\
@@ -562,7 +556,6 @@ MSGSUBDIRS=		\
 	ctrun		\
 	ctstat		\
 	ctwatch		\
-	cut		\
 	datadm		\
 	date		\
 	dc		\
@@ -606,6 +599,7 @@ MSGSUBDIRS=		\
 	halt		\
 	head		\
 	hostname	\
+	hotplug		\
 	id		\
 	idmap		\
 	isaexec		\
@@ -614,7 +608,6 @@ MSGSUBDIRS=		\
 	iscsid		\
 	isns		\
 	itadm		\
-	join		\
 	kbd		\
 	krb5		\
 	ksh		\
@@ -628,7 +621,6 @@ MSGSUBDIRS=		\
 	logadm		\
 	logger		\
 	logins		\
-	logname		\
 	ls		\
 	luxadm		\
 	lvm		\
@@ -652,7 +644,6 @@ MSGSUBDIRS=		\
 	pack		\
 	passwd		\
 	passmgmt	\
-	paste		\
 	pathchk		\
 	pfexec		\
 	pg		\
@@ -687,6 +678,7 @@ MSGSUBDIRS=		\
 	rmformat	\
 	rmmount		\
 	rmvolmgr	\
+	sasinfo		\
 	sbdadm		\
 	scadm		\
 	script		\
@@ -712,7 +704,6 @@ MSGSUBDIRS=		\
 	tabs		\
 	tar		\
 	tbl		\
-	tee		\
 	time		\
 	tnf		\
 	touch		\
@@ -721,9 +712,9 @@ MSGSUBDIRS=		\
 	tsol		\
 	tty		\
 	ttymon		\
+	tzreload	\
 	ul		\
 	uname		\
-	uniq		\
 	units		\
 	unlink		\
 	unpack		\
@@ -732,9 +723,9 @@ MSGSUBDIRS=		\
 	vi		\
 	volcheck	\
 	volrmmount	\
+	vrrpadm		\
 	w		\
 	wbem		\
-	wc		\
 	who		\
 	whodo		\
 	wracct		\

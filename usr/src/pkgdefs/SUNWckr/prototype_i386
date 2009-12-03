@@ -68,11 +68,10 @@ f none kernel/drv/arp 755 root sys
 f none kernel/drv/acpi_drv 755 root sys
 f none kernel/drv/acpi_drv.conf 644 root sys
 f none kernel/drv/acpi_toshiba 755 root sys
-f none kernel/drv/amd_iommu 755 root sys
-f none kernel/drv/amd_iommu.conf 644 root sys
 f none kernel/drv/bl 755 root sys
 f none kernel/drv/bmc 755 root sys
 f none kernel/drv/bmc.conf 644 root sys
+f none kernel/drv/bridge 755 root sys
 f none kernel/drv/bscbus 755 root sys
 f none kernel/drv/bscbus.conf 644 root sys
 f none kernel/drv/bscv 755 root sys
@@ -95,12 +94,15 @@ f none kernel/drv/intel_nb5000 755 root sys
 f none kernel/drv/intel_nb5000.conf 644 root sys
 f none kernel/drv/intel_nhm 755 root sys
 f none kernel/drv/intel_nhm.conf 644 root sys
+f none kernel/drv/intel_nhmex 755 root sys
+f none kernel/drv/intel_nhmex.conf 644 root sys
 f none kernel/drv/ip 755 root sys
 f none kernel/drv/ip6 755 root sys
 f none kernel/drv/ipnet 755 root sys
 f none kernel/drv/ippctl 755 root sys
 f none kernel/drv/ipsecah 755 root sys
 f none kernel/drv/ipsecesp 755 root sys
+f none kernel/drv/iptun 755 root sys
 f none kernel/drv/iwscn 755 root sys
 f none kernel/drv/kb8042 755 root sys
 f none kernel/drv/keysock 755 root sys
@@ -181,7 +183,10 @@ f none kernel/genunix 755 root sys
 f none kernel/ipp/ipgpc 755 root sys
 d none boot/acpi 755 root sys
 d none boot/acpi/tables 755 root sys
+f none kernel/mac/mac_6to4 755 root sys
 f none kernel/mac/mac_ether 755 root sys
+f none kernel/mac/mac_ipv4 755 root sys
+f none kernel/mac/mac_ipv6 755 root sys
 f none kernel/mac/mac_wifi 755 root sys
 f none kernel/mac/mac_ib 755 root sys
 d none kernel/misc/scsi_vhci 755 root sys
@@ -223,7 +228,6 @@ f none kernel/misc/mii 755 root sys
 f none kernel/misc/net80211 755 root sys
 f none kernel/misc/neti 755 root sys
 f none kernel/misc/pcicfg 755 root sys
-f none kernel/misc/pciehpc 755 root sys
 f none kernel/misc/pcihp 755 root sys
 f none kernel/misc/pci_autoconfig 755 root sys
 f none kernel/misc/pcmcia 755 root sys
@@ -235,11 +239,10 @@ l none kernel/misc/sha2=../../kernel/crypto/sha2
 f none kernel/misc/strplumb 755 root sys
 f none kernel/misc/tem 755 root sys
 f none kernel/misc/tlimod 755 root sys
+f none kernel/sched/SDC 755 root sys
 f none kernel/sched/TS 755 root sys
 f none kernel/sched/TS_DPTBL 755 root sys
-f none kernel/strmod/6to4tun 755 root sys
 l none kernel/strmod/arp=../../kernel/drv/arp
-f none kernel/strmod/atun 755 root sys
 f none kernel/strmod/bufmod 755 root sys
 f none kernel/strmod/connld 755 root sys
 f none kernel/strmod/dedump 755 root sys
@@ -260,7 +263,6 @@ l none kernel/strmod/tcp=../../kernel/drv/tcp
 f none kernel/strmod/timod 755 root sys
 f none kernel/strmod/tirdwr 755 root sys
 f none kernel/strmod/ttcompat 755 root sys
-f none kernel/strmod/tun 755 root sys
 l none kernel/strmod/udp=../../kernel/drv/udp
 l none kernel/sys/autofs=../../kernel/fs/autofs
 f none kernel/sys/c2audit 755 root sys
@@ -295,9 +297,9 @@ f none kernel/drv/amd64/aggr 755 root sys
 f none kernel/drv/amd64/arp 755 root sys
 f none kernel/drv/amd64/acpi_drv 755 root sys
 f none kernel/drv/amd64/acpi_toshiba 755 root sys
-f none kernel/drv/amd64/amd_iommu 755 root sys
 f none kernel/drv/amd64/bl 755 root sys
 f none kernel/drv/amd64/bmc 755 root sys
+f none kernel/drv/amd64/bridge 755 root sys
 f none kernel/drv/amd64/bscbus 755 root sys
 f none kernel/drv/amd64/bscv 755 root sys
 f none kernel/drv/amd64/clone 755 root sys
@@ -316,12 +318,14 @@ f none kernel/drv/amd64/icmp 755 root sys
 f none kernel/drv/amd64/icmp6 755 root sys
 f none kernel/drv/amd64/intel_nb5000 755 root sys
 f none kernel/drv/amd64/intel_nhm 755 root sys
+f none kernel/drv/amd64/intel_nhmex 755 root sys
 f none kernel/drv/amd64/ip 755 root sys
 f none kernel/drv/amd64/ip6 755 root sys
 f none kernel/drv/amd64/ipnet 755 root sys
 f none kernel/drv/amd64/ippctl 755 root sys
 f none kernel/drv/amd64/ipsecah 755 root sys
 f none kernel/drv/amd64/ipsecesp 755 root sys
+f none kernel/drv/amd64/iptun 755 root sys
 f none kernel/drv/amd64/iwscn 755 root sys
 f none kernel/drv/amd64/kb8042 755 root sys
 f none kernel/drv/amd64/keysock 755 root sys
@@ -397,7 +401,10 @@ f none kernel/fs/amd64/ufs 755 root sys
 d none kernel/ipp/amd64 755 root sys
 f none kernel/ipp/amd64/ipgpc 755 root sys
 d none kernel/mac/amd64 755 root sys
+f none kernel/mac/amd64/mac_6to4 755 root sys
 f none kernel/mac/amd64/mac_ether 755 root sys
+f none kernel/mac/amd64/mac_ipv4 755 root sys
+f none kernel/mac/amd64/mac_ipv6 755 root sys
 f none kernel/mac/amd64/mac_wifi 755 root sys
 f none kernel/mac/amd64/mac_ib 755 root sys
 d none kernel/misc/scsi_vhci/amd64 755 root sys
@@ -441,7 +448,6 @@ f none kernel/misc/amd64/mii 755 root sys
 f none kernel/misc/amd64/net80211 755 root sys
 f none kernel/misc/amd64/neti 755 root sys
 f none kernel/misc/amd64/pcicfg 755 root sys
-f none kernel/misc/amd64/pciehpc 755 root sys
 f none kernel/misc/amd64/pcihp 755 root sys
 f none kernel/misc/amd64/pci_autoconfig 755 root sys
 f none kernel/misc/amd64/pcmcia 755 root sys
@@ -454,12 +460,11 @@ f none kernel/misc/amd64/strplumb 755 root sys
 f none kernel/misc/amd64/tem 755 root sys
 f none kernel/misc/amd64/tlimod 755 root sys
 d none kernel/sched/amd64 755 root sys
+f none kernel/sched/amd64/SDC 755 root sys
 f none kernel/sched/amd64/TS 755 root sys
 f none kernel/sched/amd64/TS_DPTBL 755 root sys
 d none kernel/strmod/amd64 755 root sys
-f none kernel/strmod/amd64/6to4tun 755 root sys
 l none kernel/strmod/amd64/arp=../../../kernel/drv/amd64/arp
-f none kernel/strmod/amd64/atun 755 root sys
 f none kernel/strmod/amd64/bufmod 755 root sys
 f none kernel/strmod/amd64/connld 755 root sys
 f none kernel/strmod/amd64/dedump 755 root sys
@@ -480,7 +485,6 @@ l none kernel/strmod/amd64/tcp=../../../kernel/drv/amd64/tcp
 f none kernel/strmod/amd64/timod 755 root sys
 f none kernel/strmod/amd64/tirdwr 755 root sys
 f none kernel/strmod/amd64/ttcompat 755 root sys
-f none kernel/strmod/amd64/tun 755 root sys
 l none kernel/strmod/amd64/udp=../../../kernel/drv/amd64/udp
 d none kernel/sys/amd64 755 root sys
 l none kernel/sys/amd64/autofs=../../../kernel/fs/amd64/autofs
@@ -511,9 +515,11 @@ l none kernel/socketmod/rts=../../kernel/drv/rts
 l none kernel/socketmod/tcp=../../kernel/drv/tcp
 l none kernel/socketmod/udp=../../kernel/drv/udp
 f none kernel/socketmod/socksctp 755 root sys
+f none kernel/socketmod/trill 755 root sys
 d none kernel/socketmod/amd64 755 root sys
 l none kernel/socketmod/amd64/icmp=../../../kernel/drv/amd64/icmp
 l none kernel/socketmod/amd64/rts=../../../kernel/drv/amd64/rts
 l none kernel/socketmod/amd64/tcp=../../../kernel/drv/amd64/tcp
 l none kernel/socketmod/amd64/udp=../../../kernel/drv/amd64/udp
 f none kernel/socketmod/amd64/socksctp 755 root sys
+f none kernel/socketmod/amd64/trill 755 root sys

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -35,7 +35,6 @@
 extern "C" {
 #endif
 
-#define	_PATH_KCF_CONF		"/etc/crypto/kcf.conf"
 #define	_PATH_KCFD		"/lib/crypto/kcfd"
 #define	TMPFILE_TEMPLATE	"/etc/crypto/admXXXXXX"
 
@@ -55,6 +54,9 @@ extern "C" {
 #define	ADD_MODE	1
 #define	DELETE_MODE	2
 #define	MODIFY_MODE	3
+
+#define	REFRESH		1
+#define	NOT_REFRESH	0
 
 typedef char prov_name_t[MAXNAMELEN];
 typedef char mech_name_t[CRYPTO_MAX_MECH_NAME];
@@ -94,6 +96,8 @@ extern void free_mechlist(mechlist_t *);
 
 /* adm_kef_util */
 extern boolean_t is_device(char *);
+extern int fips_update_pkcs11conf(int);
+extern void fips_status_pkcs11conf(int *);
 extern char *ent2str(entry_t *);
 extern entry_t *getent_kef(char *provname,
 		entrylist_t *pdevlist, entrylist_t *psoftlist);
@@ -165,6 +169,7 @@ extern int get_dev_list(crypto_get_dev_list_t **);
 extern int get_soft_info(char *provname, mechlist_t **ppmechlist,
 		entrylist_t *phardlist, entrylist_t *psoftlist);
 extern int get_soft_list(crypto_get_soft_list_t **);
+extern int do_fips_actions(int, int);
 
 /* adm_metaslot */
 extern int list_metaslot_info(boolean_t, boolean_t, mechlist_t *);

@@ -50,6 +50,9 @@ struct utsname utsname = {
 	"userland", "libzpool", "1", "1", "na"
 };
 
+/* this only exists to have its address taken */
+struct proc p0;
+
 /*
  * =========================================================================
  * threads
@@ -269,7 +272,7 @@ cv_timedwait(kcondvar_t *cv, kmutex_t *mp, clock_t abstime)
 	clock_t delta;
 
 top:
-	delta = abstime - lbolt;
+	delta = abstime - ddi_get_lbolt();
 	if (delta <= 0)
 		return (-1);
 
@@ -442,6 +445,24 @@ vn_close(vnode_t *vp)
 	close(vp->v_fd);
 	spa_strfree(vp->v_path);
 	umem_free(vp, sizeof (vnode_t));
+}
+
+/*
+ * At a minimum we need to update the size since vdev_reopen()
+ * will no longer call vn_openat().
+ */
+int
+fop_getattr(vnode_t *vp, vattr_t *vap)
+{
+	struct stat64 st;
+
+	if (fstat64(vp->v_fd, &st) == -1) {
+		close(vp->v_fd);
+		return (errno);
+	}
+
+	vap->va_size = st.st_size;
+	return (0);
 }
 
 #ifdef ZFS_DEBUG
@@ -779,7 +800,8 @@ kernel_init(int mode)
 	dprintf("physmem = %llu pages (%.2f GB)\n", physmem,
 	    (double)physmem * sysconf(_SC_PAGE_SIZE) / (1ULL << 30));
 
-	(void) snprintf(hw_serial, sizeof (hw_serial), "%ld", gethostid());
+	(void) snprintf(hw_serial, sizeof (hw_serial), "%ld",
+	    (mode & FWRITE) ? gethostid() : 0);
 
 	VERIFY((random_fd = open("/dev/random", O_RDONLY)) != -1);
 	VERIFY((urandom_fd = open("/dev/urandom", O_RDONLY)) != -1);
@@ -793,6 +815,8 @@ void
 kernel_fini(void)
 {
 	spa_fini();
+
+	system_taskq_fini();
 
 	close(random_fd);
 	close(urandom_fd);
@@ -883,4 +907,28 @@ ksiddomain_rele(ksiddomain_t *ksid)
 {
 	spa_strfree(ksid->kd_name);
 	umem_free(ksid, sizeof (ksiddomain_t));
+}
+
+/*
+ * Do not change the length of the returned string; it must be freed
+ * with strfree().
+ */
+char *
+kmem_asprintf(const char *fmt, ...)
+{
+	int size;
+	va_list adx;
+	char *buf;
+
+	va_start(adx, fmt);
+	size = vsnprintf(NULL, 0, fmt, adx) + 1;
+	va_end(adx);
+
+	buf = kmem_alloc(size, KM_SLEEP);
+
+	va_start(adx, fmt);
+	size = vsnprintf(buf, size, fmt, adx);
+	va_end(adx);
+
+	return (buf);
 }

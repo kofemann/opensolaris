@@ -63,6 +63,8 @@ extern "C" {
 #define	ERR_FORK_FAIL	"Fork failed; cannot exec : %s\n"
 #define	ERR_PROG_IN_USE	"add_drv/rem_drv currently busy; try later\n"
 #define	ERR_NOT_ROOT	"You must be root to run this program.\n"
+#define	ERR_NOT_GLOBAL_ZONE	\
+"add_drv/rem_drv can only be run from the global zone.\n"
 #define	ERR_BAD_LINE	"Bad line in file %s : %s\n"
 #define	ERR_CANNOT_OPEN	"Cannot open (%s): %s.\n"
 #define	ERR_MIS_TOK	"Option (%s) : missing token: (%s)\n"
@@ -98,8 +100,10 @@ extern "C" {
 			"larger\nthan the maximum allowed value %u.\n"
 
 #define	ERR_CREAT_LOCK	"Failed to create lock file(%s): %s\n"
+#define	ERR_STAT_LOCK	"Failed to stat lock file(%s): %s\n"
 #define	ERR_LOCK	"Failed to lock the lock file(%s): %s\n"
 #define	ERR_UNLOCK	"Failed to unlock the lock file(%s): %s\n"
+#define	ERR_OWNER_LOCK	"Lock file(%s) not owned by user\n"
 
 #define	ERR_LOCATION	\
 "Warning: %s-bit version of driver found at %s.\n"
@@ -118,6 +122,9 @@ extern "C" {
 #define	ERR_SYSINFO_ARCH	"Failed to identify system architecture.\n"
 #define	ERR_PATH_SPEC	"Error: driver may not be specified by path (%s)\n"
 #define	ERR_CREATE_RECONFIG	"Error: Could not create /reconfigure.\n"
+
+#define	INFO_UPDATE_ONLY	\
+"System updated but %s driver not yet configured.\n"
 
 /* update_drv messages */
 #define	UPD_DRV_USAGE	\

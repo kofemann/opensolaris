@@ -594,43 +594,24 @@ uidacct(objset_t *os, boolean_t isgroup, uint64_t fuid,
 	ASSERT(err == 0);
 }
 
-static void
-zfs_space_delta_cb(objset_t *os, dmu_object_type_t bonustype,
-    void *oldbonus, void *newbonus,
-    uint64_t oldused, uint64_t newused, dmu_tx_t *tx)
+static int
+zfs_space_delta_cb(dmu_object_type_t bonustype, void *bonus,
+    uint64_t *userp, uint64_t *groupp)
 {
-	znode_phys_t *oldznp = oldbonus;
-	znode_phys_t *newznp = newbonus;
+	znode_phys_t *znp = bonus;
 
 	if (bonustype != DMU_OT_ZNODE)
-		return;
+		return (ENOENT);
 
-	/* We charge 512 for the dnode (if it's allocated). */
-	if (oldznp->zp_gen != 0)
-		oldused += DNODE_SIZE;
-	if (newznp->zp_gen != 0)
-		newused += DNODE_SIZE;
-
-	if (oldznp->zp_uid == newznp->zp_uid) {
-		uidacct(os, B_FALSE, oldznp->zp_uid, newused-oldused, tx);
-	} else {
-		uidacct(os, B_FALSE, oldznp->zp_uid, -oldused, tx);
-		uidacct(os, B_FALSE, newznp->zp_uid, newused, tx);
-	}
-
-	if (oldznp->zp_gid == newznp->zp_gid) {
-		uidacct(os, B_TRUE, oldznp->zp_gid, newused-oldused, tx);
-	} else {
-		uidacct(os, B_TRUE, oldznp->zp_gid, -oldused, tx);
-		uidacct(os, B_TRUE, newznp->zp_gid, newused, tx);
-	}
+	*userp = znp->zp_uid;
+	*groupp = znp->zp_gid;
+	return (0);
 }
 
 static void
 fuidstr_to_sid(zfsvfs_t *zfsvfs, const char *fuidstr,
     char *domainbuf, int buflen, uid_t *ridp)
 {
-	extern uint64_t strtonum(const char *str, char **nptr);
 	uint64_t fuid;
 	const char *domain;
 
@@ -835,32 +816,30 @@ zfs_usergroup_overquota(zfsvfs_t *zfsvfs, boolean_t isgroup, uint64_t fuid)
 }
 
 int
-zfsvfs_create(const char *osname, int mode, zfsvfs_t **zvp)
+zfsvfs_create(const char *osname, zfsvfs_t **zvp)
 {
 	objset_t *os;
 	zfsvfs_t *zfsvfs;
 	uint64_t zval;
 	int i, error;
 
-	if (error = dsl_prop_get_integer(osname, "readonly", &zval, NULL))
-		return (error);
-	if (zval)
-		mode |= DS_MODE_READONLY;
+	zfsvfs = kmem_zalloc(sizeof (zfsvfs_t), KM_SLEEP);
 
-	error = dmu_objset_open(osname, DMU_OST_ZFS, mode, &os);
-	if (error == EROFS) {
-		mode |= DS_MODE_READONLY;
-		error = dmu_objset_open(osname, DMU_OST_ZFS, mode, &os);
-	}
-	if (error)
+	/*
+	 * We claim to always be readonly so we can open snapshots;
+	 * other ZPL code will prevent us from writing to snapshots.
+	 */
+	error = dmu_objset_own(osname, DMU_OST_ZFS, B_TRUE, zfsvfs, &os);
+	if (error) {
+		kmem_free(zfsvfs, sizeof (zfsvfs_t));
 		return (error);
+	}
 
 	/*
 	 * Initialize the zfs-specific filesystem structure.
 	 * Should probably make this a kmem cache, shuffle fields,
 	 * and just bzero up to z_hold_mtx[].
 	 */
-	zfsvfs = kmem_zalloc(sizeof (zfsvfs_t), KM_SLEEP);
 	zfsvfs->z_vfs = NULL;
 	zfsvfs->z_parent = zfsvfs;
 	zfsvfs->z_max_blksz = SPA_MAXBLOCKSIZE;
@@ -948,7 +927,7 @@ zfsvfs_create(const char *osname, int mode, zfsvfs_t **zvp)
 	return (0);
 
 out:
-	dmu_objset_close(os);
+	dmu_objset_disown(os, zfsvfs);
 	*zvp = NULL;
 	kmem_free(zfsvfs, sizeof (zfsvfs_t));
 	return (error);
@@ -966,13 +945,13 @@ zfsvfs_setup(zfsvfs_t *zfsvfs, boolean_t mounting)
 	/*
 	 * Set the objset user_ptr to track its zfsvfs.
 	 */
-	mutex_enter(&zfsvfs->z_os->os->os_user_ptr_lock);
+	mutex_enter(&zfsvfs->z_os->os_user_ptr_lock);
 	dmu_objset_set_user(zfsvfs->z_os, zfsvfs);
-	mutex_exit(&zfsvfs->z_os->os->os_user_ptr_lock);
+	mutex_exit(&zfsvfs->z_os->os_user_ptr_lock);
 
 	zfsvfs->z_log = zil_open(zfsvfs->z_os, zfs_get_data);
 	if (zil_disable) {
-		zil_destroy(zfsvfs->z_log, 0);
+		zil_destroy(zfsvfs->z_log, B_FALSE);
 		zfsvfs->z_log = NULL;
 	}
 
@@ -1070,6 +1049,7 @@ zfs_set_fuid_feature(zfsvfs_t *zfsvfs)
 		vfs_set_feature(zfsvfs->z_vfs, VFSFT_ACEMASKONACCESS);
 		vfs_set_feature(zfsvfs->z_vfs, VFSFT_ACLONCREATE);
 		vfs_set_feature(zfsvfs->z_vfs, VFSFT_ACCESS_FILTER);
+		vfs_set_feature(zfsvfs->z_vfs, VFSFT_REPARSE);
 	}
 }
 
@@ -1084,7 +1064,7 @@ zfs_domount(vfs_t *vfsp, char *osname)
 	ASSERT(vfsp);
 	ASSERT(osname);
 
-	error = zfsvfs_create(osname, DS_MODE_OWNER, &zfsvfs);
+	error = zfsvfs_create(osname, &zfsvfs);
 	if (error)
 		return (error);
 	zfsvfs->z_vfs = vfsp;
@@ -1146,9 +1126,9 @@ zfs_domount(vfs_t *vfsp, char *osname)
 		xattr_changed_cb(zfsvfs, pval);
 		zfsvfs->z_issnap = B_TRUE;
 
-		mutex_enter(&zfsvfs->z_os->os->os_user_ptr_lock);
+		mutex_enter(&zfsvfs->z_os->os_user_ptr_lock);
 		dmu_objset_set_user(zfsvfs->z_os, zfsvfs);
-		mutex_exit(&zfsvfs->z_os->os->os_user_ptr_lock);
+		mutex_exit(&zfsvfs->z_os->os_user_ptr_lock);
 	} else {
 		error = zfsvfs_setup(zfsvfs, B_TRUE);
 	}
@@ -1157,7 +1137,7 @@ zfs_domount(vfs_t *vfsp, char *osname)
 		zfsctl_create(zfsvfs);
 out:
 	if (error) {
-		dmu_objset_close(zfsvfs->z_os);
+		dmu_objset_disown(zfsvfs->z_os, zfsvfs);
 		zfsvfs_free(zfsvfs);
 	} else {
 		atomic_add_32(&zfs_active_fs_count, 1);
@@ -1265,6 +1245,139 @@ zfs_parse_bootfs(char *bpath, char *outpath)
 	*slashp = '/';
 
 	return (error);
+}
+
+/*
+ * zfs_check_global_label:
+ *	Check that the hex label string is appropriate for the dataset
+ *	being mounted into the global_zone proper.
+ *
+ *	Return an error if the hex label string is not default or
+ *	admin_low/admin_high.  For admin_low labels, the corresponding
+ *	dataset must be readonly.
+ */
+int
+zfs_check_global_label(const char *dsname, const char *hexsl)
+{
+	if (strcasecmp(hexsl, ZFS_MLSLABEL_DEFAULT) == 0)
+		return (0);
+	if (strcasecmp(hexsl, ADMIN_HIGH) == 0)
+		return (0);
+	if (strcasecmp(hexsl, ADMIN_LOW) == 0) {
+		/* must be readonly */
+		uint64_t rdonly;
+
+		if (dsl_prop_get_integer(dsname,
+		    zfs_prop_to_name(ZFS_PROP_READONLY), &rdonly, NULL))
+			return (EACCES);
+		return (rdonly ? 0 : EACCES);
+	}
+	return (EACCES);
+}
+
+/*
+ * zfs_mount_label_policy:
+ *	Determine whether the mount is allowed according to MAC check.
+ *	by comparing (where appropriate) label of the dataset against
+ *	the label of the zone being mounted into.  If the dataset has
+ *	no label, create one.
+ *
+ *	Returns:
+ *		 0 :	access allowed
+ *		>0 :	error code, such as EACCES
+ */
+static int
+zfs_mount_label_policy(vfs_t *vfsp, char *osname)
+{
+	int		error, retv;
+	zone_t		*mntzone = NULL;
+	ts_label_t	*mnt_tsl;
+	bslabel_t	*mnt_sl;
+	bslabel_t	ds_sl;
+	char		ds_hexsl[MAXNAMELEN];
+
+	retv = EACCES;				/* assume the worst */
+
+	/*
+	 * Start by getting the dataset label if it exists.
+	 */
+	error = dsl_prop_get(osname, zfs_prop_to_name(ZFS_PROP_MLSLABEL),
+	    1, sizeof (ds_hexsl), &ds_hexsl, NULL);
+	if (error)
+		return (EACCES);
+
+	/*
+	 * If labeling is NOT enabled, then disallow the mount of datasets
+	 * which have a non-default label already.  No other label checks
+	 * are needed.
+	 */
+	if (!is_system_labeled()) {
+		if (strcasecmp(ds_hexsl, ZFS_MLSLABEL_DEFAULT) == 0)
+			return (0);
+		return (EACCES);
+	}
+
+	/*
+	 * Get the label of the mountpoint.  If mounting into the global
+	 * zone (i.e. mountpoint is not within an active zone and the
+	 * zoned property is off), the label must be default or
+	 * admin_low/admin_high only; no other checks are needed.
+	 */
+	mntzone = zone_find_by_any_path(refstr_value(vfsp->vfs_mntpt), B_FALSE);
+	if (mntzone->zone_id == GLOBAL_ZONEID) {
+		uint64_t zoned;
+
+		zone_rele(mntzone);
+
+		if (dsl_prop_get_integer(osname,
+		    zfs_prop_to_name(ZFS_PROP_ZONED), &zoned, NULL))
+			return (EACCES);
+		if (!zoned)
+			return (zfs_check_global_label(osname, ds_hexsl));
+		else
+			/*
+			 * This is the case of a zone dataset being mounted
+			 * initially, before the zone has been fully created;
+			 * allow this mount into global zone.
+			 */
+			return (0);
+	}
+
+	mnt_tsl = mntzone->zone_slabel;
+	ASSERT(mnt_tsl != NULL);
+	label_hold(mnt_tsl);
+	mnt_sl = label2bslabel(mnt_tsl);
+
+	if (strcasecmp(ds_hexsl, ZFS_MLSLABEL_DEFAULT) == 0) {
+		/*
+		 * The dataset doesn't have a real label, so fabricate one.
+		 */
+		char *str = NULL;
+
+		if (l_to_str_internal(mnt_sl, &str) == 0 &&
+		    dsl_prop_set(osname, zfs_prop_to_name(ZFS_PROP_MLSLABEL),
+		    ZPROP_SRC_LOCAL, 1, strlen(str) + 1, str) == 0)
+			retv = 0;
+		if (str != NULL)
+			kmem_free(str, strlen(str) + 1);
+	} else if (hexstr_to_label(ds_hexsl, &ds_sl) == 0) {
+		/*
+		 * Now compare labels to complete the MAC check.  If the
+		 * labels are equal then allow access.  If the mountpoint
+		 * label dominates the dataset label, allow readonly access.
+		 * Otherwise, access is denied.
+		 */
+		if (blequal(mnt_sl, &ds_sl))
+			retv = 0;
+		else if (bldominates(mnt_sl, &ds_sl)) {
+			vfs_setmntopt(vfsp, MNTOPT_RO, NULL, 0);
+			retv = 0;
+		}
+	}
+
+	label_rele(mnt_tsl);
+	zone_rele(mntzone);
+	return (retv);
 }
 
 static int
@@ -1455,6 +1568,10 @@ zfs_mount(vfs_t *vfsp, vnode_t *mvp, struct mounta *uap, cred_t *cr)
 		error = EPERM;
 		goto out;
 	}
+
+	error = zfs_mount_label_policy(vfsp, osname);
+	if (error)
+		goto out;
 
 	/*
 	 * When doing a remount, we simply refresh our temporary properties
@@ -1725,14 +1842,14 @@ zfs_umount(vfs_t *vfsp, int fflag, cred_t *cr)
 		/*
 		 * Unset the objset user_ptr.
 		 */
-		mutex_enter(&os->os->os_user_ptr_lock);
+		mutex_enter(&os->os_user_ptr_lock);
 		dmu_objset_set_user(os, NULL);
-		mutex_exit(&os->os->os_user_ptr_lock);
+		mutex_exit(&os->os_user_ptr_lock);
 
 		/*
 		 * Finally release the objset
 		 */
-		dmu_objset_close(os);
+		dmu_objset_disown(os, zfsvfs);
 	}
 
 	/*
@@ -1835,17 +1952,13 @@ zfs_vget(vfs_t *vfsp, vnode_t **vpp, fid_t *fidp)
  * 'z_teardown_inactive_lock' write held.
  */
 int
-zfs_suspend_fs(zfsvfs_t *zfsvfs, char *name, int *modep)
+zfs_suspend_fs(zfsvfs_t *zfsvfs)
 {
 	int error;
 
 	if ((error = zfsvfs_teardown(zfsvfs, B_FALSE)) != 0)
 		return (error);
-
-	*modep = zfsvfs->z_os->os_mode;
-	if (name)
-		dmu_objset_name(zfsvfs->z_os, name);
-	dmu_objset_close(zfsvfs->z_os);
+	dmu_objset_disown(zfsvfs->z_os, zfsvfs);
 
 	return (0);
 }
@@ -1854,14 +1967,15 @@ zfs_suspend_fs(zfsvfs_t *zfsvfs, char *name, int *modep)
  * Reopen zfsvfs_t::z_os and release VOPs.
  */
 int
-zfs_resume_fs(zfsvfs_t *zfsvfs, const char *osname, int mode)
+zfs_resume_fs(zfsvfs_t *zfsvfs, const char *osname)
 {
 	int err;
 
 	ASSERT(RRW_WRITE_HELD(&zfsvfs->z_teardown_lock));
 	ASSERT(RW_WRITE_HELD(&zfsvfs->z_teardown_inactive_lock));
 
-	err = dmu_objset_open(osname, DMU_OST_ZFS, mode, &zfsvfs->z_os);
+	err = dmu_objset_own(osname, DMU_OST_ZFS, B_FALSE, zfsvfs,
+	    &zfsvfs->z_os);
 	if (err) {
 		zfsvfs->z_os = NULL;
 	} else {

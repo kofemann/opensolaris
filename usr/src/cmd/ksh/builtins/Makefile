@@ -30,25 +30,37 @@ PROG= alias
 ALIASPROG= \
 	bg \
 	cd \
+	cksum \
+	cmp \
+	comm \
 	command \
+	cut \
 	fc \
 	fg \
 	getopts \
 	hash \
 	jobs \
+	join \
 	kill \
+	logname \
+	paste \
+	print \
 	read \
 	rev \
 	sleep \
 	sum \
+	tee \
 	test \
 	type \
 	ulimit \
 	umask \
 	unalias \
-	wait
+	uniq \
+	wait \
+	wc
 
 include ../../Makefile.cmd
+$(SPARC_BLD)include ../../Makefile.cmd.64
 
 ROOTALIASPROG= $(ALIASPROG:%=$(ROOTBIN)/%)
 
@@ -61,8 +73,6 @@ all: $(PROG)
 $(ROOTBIN)/%: $(ROOTBIN)/alias
 	$(INS.link)
 
-include ../../Makefile.cmd
-
 .KEEP_STATE:
 
 # Set common AST build flags (e.g., needed to support the math stuff).
@@ -73,11 +83,18 @@ OBJECTS= \
 
 SRCS=	$(OBJECTS:%.o=%.c)
 
-LDLIBS += -lshell -last
+LDLIBS += -lshell -lcmd -last
 
 CPPFLAGS = \
 	$(DTEXTDOM) $(DTS_ERRNO) \
-	-I$(ROOT)/usr/include/ast
+	-I$(ROOT)/usr/include/ast \
+	-I$(ROOT)/usr/include
+
+# Enable workaround for a crash in /usr/bin/alias when invalid
+# options are passed (e.g. $ /usr/bin/alias -c #). The shell
+# code will call an error handler which does a |longjmp()| but
+# somehow the code failed to do the |setjmp()| before this point.
+CPPFLAGS += -DWORKAROUND_FOR_ALIAS_CRASH
 
 CFLAGS += \
 	$(ASTCFLAGS)

@@ -40,6 +40,7 @@
 #include <sys/mac_client_impl.h>
 #include <sys/mac_client_priv.h>
 #include <sys/mac_soft_ring.h>
+#include <sys/dld.h>
 #include <sys/modctl.h>
 #include <sys/fs/dv_node.h>
 #include <sys/thread.h>
@@ -63,21 +64,16 @@ static void i_mac_notify_thread(void *);
 
 typedef void (*mac_notify_default_cb_fn_t)(mac_impl_t *);
 
-typedef struct mac_notify_default_cb_s {
-	mac_notify_type_t		mac_notify_type;
-	mac_notify_default_cb_fn_t	mac_notify_cb_fn;
-}mac_notify_default_cb_t;
-
-mac_notify_default_cb_t mac_notify_cb_list[] = {
-	{ MAC_NOTE_LINK,		mac_fanout_recompute},
-	{ MAC_NOTE_UNICST,		NULL},
-	{ MAC_NOTE_TX,			NULL},
-	{ MAC_NOTE_DEVPROMISC,		NULL},
-	{ MAC_NOTE_FASTPATH_FLUSH,	NULL},
-	{ MAC_NOTE_SDU_SIZE,		NULL},
-	{ MAC_NOTE_MARGIN,		NULL},
-	{ MAC_NOTE_CAPAB_CHG,		NULL},
-	{ MAC_NNOTE,			NULL},
+static const mac_notify_default_cb_fn_t mac_notify_cb_list[MAC_NNOTE] = {
+	mac_fanout_recompute,	/* MAC_NOTE_LINK */
+	NULL,		/* MAC_NOTE_UNICST */
+	NULL,		/* MAC_NOTE_TX */
+	NULL,		/* MAC_NOTE_DEVPROMISC */
+	NULL,		/* MAC_NOTE_FASTPATH_FLUSH */
+	NULL,		/* MAC_NOTE_SDU_SIZE */
+	NULL,		/* MAC_NOTE_MARGIN */
+	NULL,		/* MAC_NOTE_CAPAB_CHG */
+	NULL		/* MAC_NOTE_LOWLINK */
 };
 
 /*
@@ -131,6 +127,10 @@ mac_register(mac_register_t *mregp, mac_handle_t *mhp)
 	boolean_t		style2_created = B_FALSE;
 	char			*driver;
 	minor_t			minor = 0;
+
+	/* A successful call to mac_init_ops() sets the DN_GLDV3_DRIVER flag. */
+	if (!GLDV3_DRV(ddi_driver_major(mregp->m_dip)))
+		return (EINVAL);
 
 	/* Find the required MAC-Type plugin. */
 	if ((mtype = mactype_getplugin(mregp->m_type_ident)) == NULL)
@@ -188,6 +188,13 @@ mac_register(mac_register_t *mregp, mac_handle_t *mhp)
 	mip->mi_dip = mregp->m_dip;
 	mip->mi_clients_list = NULL;
 	mip->mi_nclients = 0;
+
+	/* Set the default IEEE Port VLAN Identifier */
+	mip->mi_pvid = 1;
+
+	/* Default bridge link learning protection values */
+	mip->mi_llimit = 1000;
+	mip->mi_ldecay = 200;
 
 	driver = (char *)ddi_driver_name(mip->mi_dip);
 
@@ -249,6 +256,7 @@ mac_register(mac_register_t *mregp, mac_handle_t *mhp)
 		if (mregp->m_dst_addr != NULL) {
 			bcopy(mregp->m_dst_addr, mip->mi_dstaddr,
 			    mip->mi_type->mt_addr_length);
+			mip->mi_dstaddr_set = B_TRUE;
 		}
 	} else if (mregp->m_src_addr != NULL) {
 		goto fail;
@@ -260,20 +268,31 @@ mac_register(mac_register_t *mregp, mac_handle_t *mhp)
 	 * driver can update this information by calling
 	 * mac_pdata_update().
 	 */
-	if (mregp->m_pdata != NULL) {
+	if (mip->mi_type->mt_ops.mtops_ops & MTOPS_PDATA_VERIFY) {
 		/*
-		 * Verify that the plugin supports MAC plugin data and that
-		 * the supplied data is valid.
+		 * Verify if the supplied plugin data is valid.  Note that
+		 * even if the caller passed in a NULL pointer as plugin data,
+		 * we still need to verify if that's valid as the plugin may
+		 * require plugin data to function.
 		 */
-		if (!(mip->mi_type->mt_ops.mtops_ops & MTOPS_PDATA_VERIFY))
-			goto fail;
 		if (!mip->mi_type->mt_ops.mtops_pdata_verify(mregp->m_pdata,
 		    mregp->m_pdata_size)) {
 			goto fail;
 		}
-		mip->mi_pdata = kmem_alloc(mregp->m_pdata_size, KM_SLEEP);
-		bcopy(mregp->m_pdata, mip->mi_pdata, mregp->m_pdata_size);
-		mip->mi_pdata_size = mregp->m_pdata_size;
+		if (mregp->m_pdata != NULL) {
+			mip->mi_pdata =
+			    kmem_alloc(mregp->m_pdata_size, KM_SLEEP);
+			bcopy(mregp->m_pdata, mip->mi_pdata,
+			    mregp->m_pdata_size);
+			mip->mi_pdata_size = mregp->m_pdata_size;
+		}
+	} else if (mregp->m_pdata != NULL) {
+		/*
+		 * The caller supplied non-NULL plugin data, but the plugin
+		 * does not recognize plugin data.
+		 */
+		err = EINVAL;
+		goto fail;
 	}
 
 	/*
@@ -301,7 +320,7 @@ mac_register(mac_register_t *mregp, mac_handle_t *mhp)
 		mip->mi_phy_dev = mip->mi_capab_legacy.ml_dev;
 	} else {
 		mip->mi_phy_dev = makedevice(ddi_driver_major(mip->mi_dip),
-		    ddi_get_instance(mip->mi_dip) + 1);
+		    mip->mi_minor);
 	}
 
 	/*
@@ -382,13 +401,7 @@ mac_register(mac_register_t *mregp, mac_handle_t *mhp)
 	/* Zero out any properties. */
 	bzero(&mip->mi_resource_props, sizeof (mac_resource_props_t));
 
-	/* set the gldv3 flag in dn_flags */
-	dnp = &devnamesp[ddi_driver_major(mip->mi_dip)];
-	LOCK_DEV_OPS(&dnp->dn_lock);
-	dnp->dn_flags |= (DN_GLDV3_DRIVER | DN_NETWORK_DRIVER);
-	UNLOCK_DEV_OPS(&dnp->dn_lock);
-
-	if (mip->mi_minor < MAC_MAX_MINOR + 1) {
+	if (mip->mi_minor <= MAC_MAX_MINOR) {
 		/* Create a style-2 DLPI device */
 		if (ddi_create_minor_node(mip->mi_dip, driver, S_IFCHR, 0,
 		    DDI_NT_NET, CLONE_DEV) != DDI_SUCCESS)
@@ -537,7 +550,7 @@ mac_unregister(mac_handle_t mh)
 	}
 	mip->mi_mmrp = NULL;
 
-	mip->mi_linkstate = LINK_STATE_UNKNOWN;
+	mip->mi_linkstate = mip->mi_lowlinkstate = LINK_STATE_UNKNOWN;
 	kmem_free(mip->mi_info.mi_unicst_addr, mip->mi_type->mt_addr_length);
 	mip->mi_info.mi_unicst_addr = NULL;
 
@@ -577,6 +590,8 @@ mac_unregister(mac_handle_t mh)
 	mip->mi_state_flags = 0;
 
 	mac_unregister_priv_prop(mip);
+
+	ASSERT(mip->mi_bridge_link == NULL);
 	kmem_cache_free(i_mac_impl_cachep, mip);
 
 	return (0);
@@ -607,11 +622,58 @@ mac_rx_ring(mac_handle_t mh, mac_ring_handle_t mrh, mblk_t *mp_chain,
 }
 
 /*
- * This function is invoked for each packet received by the underlying
- * driver.
+ * This function is invoked for each packet received by the underlying driver.
  */
 void
 mac_rx(mac_handle_t mh, mac_resource_handle_t mrh, mblk_t *mp_chain)
+{
+	mac_impl_t *mip = (mac_impl_t *)mh;
+
+	/*
+	 * Check if the link is part of a bridge.  If not, then we don't need
+	 * to take the lock to remain consistent.  Make this common case
+	 * lock-free and tail-call optimized.
+	 */
+	if (mip->mi_bridge_link == NULL) {
+		mac_rx_common(mh, mrh, mp_chain);
+	} else {
+		/*
+		 * Once we take a reference on the bridge link, the bridge
+		 * module itself can't unload, so the callback pointers are
+		 * stable.
+		 */
+		mutex_enter(&mip->mi_bridge_lock);
+		if ((mh = mip->mi_bridge_link) != NULL)
+			mac_bridge_ref_cb(mh, B_TRUE);
+		mutex_exit(&mip->mi_bridge_lock);
+		if (mh == NULL) {
+			mac_rx_common((mac_handle_t)mip, mrh, mp_chain);
+		} else {
+			mac_bridge_rx_cb(mh, mrh, mp_chain);
+			mac_bridge_ref_cb(mh, B_FALSE);
+		}
+	}
+}
+
+/*
+ * Special case function: this allows snooping of packets transmitted and
+ * received by TRILL. By design, they go directly into the TRILL module.
+ */
+void
+mac_trill_snoop(mac_handle_t mh, mblk_t *mp)
+{
+	mac_impl_t *mip = (mac_impl_t *)mh;
+
+	if (mip->mi_promisc_list != NULL)
+		mac_promisc_dispatch(mip, mp, NULL);
+}
+
+/*
+ * This is the upward reentry point for packets arriving from the bridging
+ * module and from mac_rx for links not part of a bridge.
+ */
+void
+mac_rx_common(mac_handle_t mh, mac_resource_handle_t mrh, mblk_t *mp_chain)
 {
 	mac_impl_t		*mip = (mac_impl_t *)mh;
 	mac_ring_t		*mr = (mac_ring_t *)mrh;
@@ -733,12 +795,60 @@ mac_link_update(mac_handle_t mh, link_state_t link)
 	/*
 	 * Save the link state.
 	 */
+	mip->mi_lowlinkstate = link;
+
+	/*
+	 * Send a MAC_NOTE_LOWLINK notification.  This tells the notification
+	 * thread to deliver both lower and upper notifications.
+	 */
+	i_mac_notify(mip, MAC_NOTE_LOWLINK);
+}
+
+/*
+ * Notify the MAC layer about a link state change due to bridging.
+ */
+void
+mac_link_redo(mac_handle_t mh, link_state_t link)
+{
+	mac_impl_t	*mip = (mac_impl_t *)mh;
+
+	/*
+	 * Save the link state.
+	 */
 	mip->mi_linkstate = link;
 
 	/*
-	 * Send a MAC_NOTE_LINK notification.
+	 * Send a MAC_NOTE_LINK notification.  Only upper notifications are
+	 * made.
 	 */
 	i_mac_notify(mip, MAC_NOTE_LINK);
+}
+
+/* MINOR NODE HANDLING */
+
+/*
+ * Given a dev_t, return the instance number (PPA) associated with it.
+ * Drivers can use this in their getinfo(9e) implementation to lookup
+ * the instance number (i.e. PPA) of the device, to use as an index to
+ * their own array of soft state structures.
+ *
+ * Returns -1 on error.
+ */
+int
+mac_devt_to_instance(dev_t devt)
+{
+	return (dld_devt_to_instance(devt));
+}
+
+/*
+ * This function returns the first minor number that is available for
+ * driver private use.  All minor numbers smaller than this are
+ * reserved for GLDv3 use.
+ */
+minor_t
+mac_private_minor(void)
+{
+	return (MAC_PRIVATE_MINOR);
 }
 
 /* OTHER CONTROL INFORMATION */
@@ -776,6 +886,20 @@ mac_unicst_update(mac_handle_t mh, const uint8_t *addr)
 	 * Send a MAC_NOTE_UNICST notification.
 	 */
 	i_mac_notify(mip, MAC_NOTE_UNICST);
+}
+
+void
+mac_dst_update(mac_handle_t mh, const uint8_t *addr)
+{
+	mac_impl_t	*mip = (mac_impl_t *)mh;
+
+	if (mip->mi_type->mt_addr_length == 0)
+		return;
+
+	i_mac_perim_enter(mip);
+	bcopy(addr, mip->mi_dstaddr, mip->mi_type->mt_addr_length);
+	i_mac_perim_exit(mip);
+	i_mac_notify(mip, MAC_NOTE_DEST);
 }
 
 /*
@@ -846,10 +970,10 @@ i_mac_log_link_state(mac_impl_t *mip)
 	/*
 	 * If no change, then it is not interesting.
 	 */
-	if (mip->mi_lastlinkstate == mip->mi_linkstate)
+	if (mip->mi_lastlowlinkstate == mip->mi_lowlinkstate)
 		return;
 
-	switch (mip->mi_linkstate) {
+	switch (mip->mi_lowlinkstate) {
 	case LINK_STATE_UP:
 		if (mip->mi_type->mt_ops.mtops_ops & MTOPS_LINK_DETAILS) {
 			char det[200];
@@ -867,7 +991,7 @@ i_mac_log_link_state(mac_impl_t *mip)
 		/*
 		 * Only transitions from UP to DOWN are interesting
 		 */
-		if (mip->mi_lastlinkstate != LINK_STATE_UNKNOWN)
+		if (mip->mi_lastlowlinkstate != LINK_STATE_UNKNOWN)
 			cmn_err(CE_NOTE, "!%s link down", mip->mi_name);
 		break;
 
@@ -877,7 +1001,7 @@ i_mac_log_link_state(mac_impl_t *mip)
 		 */
 		break;
 	}
-	mip->mi_lastlinkstate = mip->mi_linkstate;
+	mip->mi_lastlowlinkstate = mip->mi_lowlinkstate;
 }
 
 /*
@@ -919,10 +1043,28 @@ i_mac_notify_thread(void *arg)
 		mutex_exit(mcbi->mcbi_lockp);
 
 		/*
-		 * Log link changes.
+		 * Log link changes on the actual link, but then do reports on
+		 * synthetic state (if part of a bridge).
 		 */
-		if ((bits & (1 << MAC_NOTE_LINK)) != 0)
+		if ((bits & (1 << MAC_NOTE_LOWLINK)) != 0) {
+			link_state_t newstate;
+			mac_handle_t mh;
+
 			i_mac_log_link_state(mip);
+			newstate = mip->mi_lowlinkstate;
+			if (mip->mi_bridge_link != NULL) {
+				mutex_enter(&mip->mi_bridge_lock);
+				if ((mh = mip->mi_bridge_link) != NULL) {
+					newstate = mac_bridge_ls_cb(mh,
+					    newstate);
+				}
+				mutex_exit(&mip->mi_bridge_lock);
+			}
+			if (newstate != mip->mi_linkstate) {
+				mip->mi_linkstate = newstate;
+				bits |= 1 << MAC_NOTE_LINK;
+			}
+		}
 
 		/*
 		 * Do notification callbacks for each notification type.
@@ -932,8 +1074,8 @@ i_mac_notify_thread(void *arg)
 				continue;
 			}
 
-			if (mac_notify_cb_list[type].mac_notify_cb_fn)
-				mac_notify_cb_list[type].mac_notify_cb_fn(mip);
+			if (mac_notify_cb_list[type] != NULL)
+				(*mac_notify_cb_list[type])(mip);
 
 			/*
 			 * Walk the list of notifications.

@@ -61,8 +61,6 @@ typedef uintptr_t pc_t;
 extern int hz;			/* system clock rate */
 extern struct vnode *rootdir;	/* pointer to vnode of root directory */
 extern struct vnode *devicesdir;	/* pointer to /devices vnode */
-extern volatile clock_t lbolt;	/* time in HZ since last boot */
-extern volatile int64_t lbolt64;	/* lbolt computed as 64-bit value */
 extern int interrupts_unleashed;	/* set after the spl0() in main() */
 
 extern char runin;		/* scheduling flag */
@@ -175,6 +173,7 @@ hrtime_t untimeout_generic(callout_id_t, int);
 clock_t untimeout_default(callout_id_t, int);
 void delay(clock_t);
 int delay_sig(clock_t);
+void delay_random(clock_t);
 int nodev();
 int nulldev();
 major_t getudev(void);
@@ -183,6 +182,7 @@ dev_t expldev(dev32_t);
 int bcmp(const void *, const void *, size_t) __PURE;
 int stoi(char **);
 void numtos(ulong_t, char *);
+char *kmem_asprintf(const char *fmt, ...);
 int strident_valid(const char *);
 void strident_canon(char *, size_t);
 int getsubopt(char **optionsp, char * const *tokens, char **valuep);

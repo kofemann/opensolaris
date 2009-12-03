@@ -54,6 +54,10 @@
 #include <sys/disp.h>
 #include <sys/kobj.h>
 #include <sys/crc32.h>
+#include <sys/ddi_hp.h>
+#include <sys/ddi_hp_impl.h>
+#include <sys/sysmacros.h>
+#include <sys/list.h>
 
 
 #ifdef DEBUG
@@ -231,6 +235,12 @@ typedef struct i_lnode {
 	i_link_t	*link_out;
 } i_lnode_t;
 
+typedef struct i_hp {
+	di_off_t	hp_off;		/* Offset of di_hp_t in snapshot */
+	dev_info_t	*hp_child;	/* Child devinfo node of the di_hp_t */
+	list_node_t	hp_link;	/* List linkage */
+} i_hp_t;
+
 /*
  * Soft state associated with each instance of driver open.
  */
@@ -246,6 +256,8 @@ static struct di_state {
 
 	mod_hash_t	*lnode_hash;
 	mod_hash_t	*link_hash;
+
+	list_t		hp_list;
 } **di_states;
 
 static kmutex_t di_lock;	/* serialize instance assignment */
@@ -298,6 +310,8 @@ static di_off_t di_getmdata(struct ddi_minor_data *, di_off_t *, di_off_t,
     struct di_state *);
 static di_off_t di_getppdata(struct dev_info *, di_off_t *, struct di_state *);
 static di_off_t di_getdpdata(struct dev_info *, di_off_t *, struct di_state *);
+static di_off_t di_gethpdata(ddi_hp_cn_handle_t *, di_off_t *,
+    struct di_state *);
 static di_off_t di_getprop(int, struct ddi_prop **, di_off_t *,
     struct di_state *, struct dev_info *);
 static void di_allocmem(struct di_state *, size_t);
@@ -320,6 +334,7 @@ static int di_cache_update(struct di_state *st);
 static void di_cache_print(di_cache_debug_t msglevel, char *fmt, ...);
 static int build_vhci_list(dev_info_t *vh_devinfo, void *arg);
 static int build_phci_list(dev_info_t *ph_devinfo, void *arg);
+static void di_hotplug_children(struct di_state *st);
 
 extern int modrootloaded;
 extern void mdi_walk_vhcis(int (*)(dev_info_t *, void *), void *);
@@ -647,7 +662,7 @@ di_ioctl(dev_t dev, int cmd, intptr_t arg, int mode, cred_t *credp, int *rvalp)
 		rv = i_ddi_devs_attached(i);
 		modunload_enable();
 
-		i_ddi_di_cache_invalidate(KM_SLEEP);
+		i_ddi_di_cache_invalidate();
 
 		return ((rv == DDI_SUCCESS)? 0 : ENXIO);
 
@@ -1341,6 +1356,11 @@ di_snapshot(struct di_state *st)
 	    di_key_dtor, mod_hash_null_valdtor, di_hash_byptr,
 	    NULL, di_key_cmp, KM_SLEEP);
 
+	if (DINFOHP & st->command) {
+		list_create(&st->hp_list, sizeof (i_hp_t),
+		    offsetof(i_hp_t, hp_link));
+	}
+
 	/*
 	 * copy the device tree
 	 */
@@ -1348,6 +1368,10 @@ di_snapshot(struct di_state *st)
 
 	if (DINFOPATH & st->command) {
 		mdi_walk_vhcis(build_vhci_list, st);
+	}
+
+	if (DINFOHP & st->command) {
+		di_hotplug_children(st);
 	}
 
 	ddi_release_devi(rootnode);
@@ -1696,7 +1720,8 @@ di_copynode(struct dev_info *node, struct di_stack *dsp, struct di_state *st)
 {
 	di_off_t	off;
 	struct di_node	*me;
-	size_t		size;	struct dev_info *n;
+	size_t		size;
+	struct dev_info *n;
 
 	dcmn_err2((CE_CONT, "di_copynode: depth = %x\n", dsp->depth));
 	ASSERT((node != NULL) && (node == TOP_NODE(dsp)));
@@ -1820,7 +1845,7 @@ di_copynode(struct dev_info *node, struct di_stack *dsp, struct di_state *st)
 	/*
 	 * An optimization to skip mutex_enter when not needed.
 	 */
-	if (!((DINFOMINOR | DINFOPROP | DINFOPATH) & st->command)) {
+	if (!((DINFOMINOR | DINFOPROP | DINFOPATH | DINFOHP) & st->command)) {
 		goto priv_data;
 	}
 
@@ -1873,7 +1898,7 @@ path:
 
 property:
 	if (!(DINFOPROP & st->command)) {
-		goto priv_data;
+		goto hotplug_data;
 	}
 
 	if (node->devi_drv_prop_ptr) {	/* driver property list */
@@ -1911,6 +1936,16 @@ property:
 			    &node->devi_global_prop_list->prop_list,
 			    &me->glob_prop, st, node);
 		}
+	}
+
+hotplug_data:
+	if (!(DINFOHP & st->command)) {
+		goto priv_data;
+	}
+
+	if (node->devi_hp_hdlp) {	/* hotplug data */
+		me->hp_data = off;
+		off = di_gethpdata(node->devi_hp_hdlp, &me->hp_data, st);
 	}
 
 priv_data:
@@ -2638,6 +2673,19 @@ path_state_convert(mdi_pathinfo_state_t st)
 	}
 }
 
+static uint_t
+path_flags_convert(uint_t pi_path_flags)
+{
+	uint_t	di_path_flags = 0;
+
+	/* MDI_PATHINFO_FLAGS_HIDDEN nodes not in snapshot */
+
+	if (pi_path_flags & MDI_PATHINFO_FLAGS_DEVICE_REMOVED)
+		di_path_flags |= DI_PATH_FLAGS_DEVICE_REMOVED;
+
+	return (di_path_flags);
+}
+
 
 static di_off_t
 di_path_getprop(mdi_pathinfo_t *pip, di_off_t *off_p,
@@ -2793,12 +2841,18 @@ di_getpath_data(dev_info_t *dip, di_off_t *off_p, di_off_t noff,
 
 	pip = NULL;
 	while (pip = (*next_pip)(dip, pip)) {
-		mdi_pathinfo_state_t state;
 		di_off_t stored_offset;
 
 		dcmn_err((CE_WARN, "marshalling pip = %p", (void *)pip));
 
 		mdi_pi_lock(pip);
+
+		/* We don't represent hidden paths in the snapshot */
+		if (mdi_pi_ishidden(pip)) {
+			dcmn_err((CE_WARN, "hidden, skip"));
+			mdi_pi_unlock(pip);
+			continue;
+		}
 
 		if (di_pip_find(st, pip, &stored_offset) != -1) {
 			/*
@@ -2856,8 +2910,8 @@ di_getpath_data(dev_info_t *dip, di_off_t *off_p, di_off_t noff,
 		 */
 		di_register_pip(st, pip, me->self);
 
-		state = mdi_pi_get_state(pip);
-		me->path_state = path_state_convert(state);
+		me->path_state = path_state_convert(mdi_pi_get_state(pip));
+		me->path_flags = path_flags_convert(mdi_pi_get_flags(pip));
 
 		me->path_instance = mdi_pi_get_path_instance(pip);
 
@@ -3425,6 +3479,88 @@ di_getdpdata(struct dev_info *node, di_off_t *off_p, struct di_state *st)
 
 	return (di_getprvdata(dpdp, node,
 	    ddi_get_driver_private((dev_info_t *)node), off_p, st));
+}
+
+/*
+ * Copy hotplug data associated with a devinfo node into the snapshot.
+ */
+static di_off_t
+di_gethpdata(ddi_hp_cn_handle_t *hp_hdl, di_off_t *off_p,
+    struct di_state *st)
+{
+	struct i_hp	*hp;
+	struct di_hp	*me;
+	size_t		size;
+	di_off_t	off;
+
+	dcmn_err2((CE_CONT, "di_gethpdata:\n"));
+
+	/*
+	 * check memory first
+	 */
+	off = di_checkmem(st, *off_p, sizeof (struct di_hp));
+	*off_p = off;
+
+	do {
+		me = DI_HP(di_mem_addr(st, off));
+		me->self = off;
+		me->hp_name = 0;
+		me->hp_connection = (int)hp_hdl->cn_info.cn_num;
+		me->hp_depends_on = (int)hp_hdl->cn_info.cn_num_dpd_on;
+		(void) ddihp_cn_getstate(hp_hdl);
+		me->hp_state = (int)hp_hdl->cn_info.cn_state;
+		me->hp_type = (int)hp_hdl->cn_info.cn_type;
+		me->hp_type_str = 0;
+		me->hp_last_change = (uint32_t)hp_hdl->cn_info.cn_last_change;
+		me->hp_child = 0;
+
+		/*
+		 * Child links are resolved later by di_hotplug_children().
+		 * Store a reference to this di_hp_t in the list used later
+		 * by di_hotplug_children().
+		 */
+		hp = kmem_zalloc(sizeof (i_hp_t), KM_SLEEP);
+		hp->hp_off = off;
+		hp->hp_child = hp_hdl->cn_info.cn_child;
+		list_insert_tail(&st->hp_list, hp);
+
+		off += sizeof (struct di_hp);
+
+		/* Add name of this di_hp_t to the snapshot */
+		if (hp_hdl->cn_info.cn_name) {
+			size = strlen(hp_hdl->cn_info.cn_name) + 1;
+			me->hp_name = off = di_checkmem(st, off, size);
+			(void) strcpy(di_mem_addr(st, off),
+			    hp_hdl->cn_info.cn_name);
+			off += size;
+		}
+
+		/* Add type description of this di_hp_t to the snapshot */
+		if (hp_hdl->cn_info.cn_type_str) {
+			size = strlen(hp_hdl->cn_info.cn_type_str) + 1;
+			me->hp_type_str = off = di_checkmem(st, off, size);
+			(void) strcpy(di_mem_addr(st, off),
+			    hp_hdl->cn_info.cn_type_str);
+			off += size;
+		}
+
+		/*
+		 * Set link to next in the chain of di_hp_t nodes,
+		 * or terminate the chain when processing the last node.
+		 */
+		if (hp_hdl->next != NULL) {
+			off = di_checkmem(st, off, sizeof (struct di_hp));
+			me->next = off;
+		} else {
+			me->next = 0;
+		}
+
+		/* Update pointer to next in the chain */
+		hp_hdl = hp_hdl->next;
+
+	} while (hp_hdl);
+
+	return (off);
 }
 
 /*
@@ -4055,4 +4191,25 @@ di_cache_print(di_cache_debug_t msglevel, char *fmt, ...)
 	va_start(ap, fmt);
 	vcmn_err(msglevel, fmt, ap);
 	va_end(ap);
+}
+
+static void
+di_hotplug_children(struct di_state *st)
+{
+	di_off_t	off;
+	struct di_hp	*hp;
+	struct i_hp	*hp_list_node;
+
+	while (hp_list_node = (struct i_hp *)list_remove_head(&st->hp_list)) {
+
+		if ((hp_list_node->hp_child != NULL) &&
+		    (di_dip_find(st, hp_list_node->hp_child, &off) == 0)) {
+			hp = DI_HP(di_mem_addr(st, hp_list_node->hp_off));
+			hp->hp_child = off;
+		}
+
+		kmem_free(hp_list_node, sizeof (i_hp_t));
+	}
+
+	list_destroy(&st->hp_list);
 }

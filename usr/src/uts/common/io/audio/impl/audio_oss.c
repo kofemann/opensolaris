@@ -78,7 +78,6 @@ struct ossclient {
 struct ossdev {
 	audio_dev_t		*d_dev;
 
-	uint_t			d_modify_cnt;	/* flag apps of ctrl changes */
 	uint_t			d_nctrl;	/* num actual controls */
 	uint_t			d_nalloc;	/* num allocated controls */
 	audio_ctrl_t		**d_ctrls;	/* array of control handles */
@@ -604,7 +603,6 @@ oss_cnt_devs(void)
 static int
 sndctl_dsp_speed(audio_client_t *c, int *ratep)
 {
-	int		rv;
 	int		rate;
 	int		oflag;
 
@@ -612,13 +610,13 @@ sndctl_dsp_speed(audio_client_t *c, int *ratep)
 
 	oflag = auclnt_get_oflag(c);
 	if (oflag & FREAD) {
-		if ((rv = auclnt_set_rate(auclnt_input_stream(c), rate)) != 0)
-			return (rv);
+		(void) auclnt_set_rate(auclnt_input_stream(c), rate);
+		*ratep = auclnt_get_rate(auclnt_input_stream(c));
 	}
 
 	if (oflag & FWRITE) {
-		if ((rv = auclnt_set_rate(auclnt_output_stream(c), rate)) != 0)
-			return (rv);
+		(void) auclnt_set_rate(auclnt_output_stream(c), rate);
+		*ratep = auclnt_get_rate(auclnt_output_stream(c));
 	}
 
 	return (0);
@@ -627,7 +625,6 @@ sndctl_dsp_speed(audio_client_t *c, int *ratep)
 static int
 sndctl_dsp_setfmt(audio_client_t *c, int *fmtp)
 {
-	int		rv;
 	int		fmt;
 	int		i;
 	int		oflag;
@@ -643,23 +640,20 @@ sndctl_dsp_setfmt(audio_client_t *c, int *fmtp)
 			}
 		}
 		if (fmt == AUDIO_FORMAT_NONE) {
-			/* if format not known, return ENOTSUP */
-			return (ENOTSUP);
+			/* if format not known, return */
+			goto done;
 		}
 
 		if (oflag & FWRITE) {
-			rv = auclnt_set_format(auclnt_output_stream(c), fmt);
-			if (rv != 0)
-				return (rv);
+			(void) auclnt_set_format(auclnt_output_stream(c), fmt);
 		}
 
 		if (oflag & FREAD) {
-			rv = auclnt_set_format(auclnt_input_stream(c), fmt);
-			if (rv != 0)
-				return (rv);
+			(void) auclnt_set_format(auclnt_input_stream(c), fmt);
 		}
 	}
 
+done:
 	if (oflag & FWRITE) {
 		fmt = auclnt_get_format(auclnt_output_stream(c));
 	} else if (oflag & FREAD) {
@@ -699,7 +693,6 @@ sndctl_dsp_getfmts(audio_client_t *c, int *fmtsp)
 static int
 sndctl_dsp_channels(audio_client_t *c, int *chanp)
 {
-	int		rv;
 	int		nchan;
 	int		oflag;
 
@@ -708,16 +701,13 @@ sndctl_dsp_channels(audio_client_t *c, int *chanp)
 	nchan = *chanp;
 	if (nchan != 0) {
 		if (oflag & FWRITE) {
-			rv = auclnt_set_channels(auclnt_output_stream(c),
+			(void) auclnt_set_channels(auclnt_output_stream(c),
 			    nchan);
-			if (rv != 0)
-				return (rv);
 		}
 
 		if (oflag & FREAD) {
-			rv = auclnt_set_channels(auclnt_input_stream(c), nchan);
-			if (rv != 0)
-				return (rv);
+			(void) auclnt_set_channels(auclnt_input_stream(c),
+			    nchan);
 		}
 	}
 
@@ -774,6 +764,16 @@ sndctl_dsp_getcaps(audio_client_t *c, int *capsp)
 		osscaps |= PCM_CAP_INPUT;
 	if (ncaps & AUDIO_CLIENT_CAP_DUPLEX)
 		osscaps |= PCM_CAP_DUPLEX;
+
+	if (osscaps != 0) {
+		osscaps |= PCM_CAP_TRIGGER | PCM_CAP_BATCH;
+		if (!(ncaps & AUDIO_CLIENT_CAP_OPAQUE)) {
+			osscaps |= PCM_CAP_FREERATE | PCM_CAP_MULTI;
+		}
+	} else {
+		/* This is the sndstat device! */
+		osscaps = PCM_CAP_VIRTUAL;
+	}
 
 	*capsp = osscaps;
 	return (0);
@@ -1306,18 +1306,16 @@ sndctl_audioinfo(audio_client_t *c, oss_audioinfo *si)
 	}
 
 	if (si->caps != 0) {
-		/* AC3: PCM_CAP_MULTI would be wrong for an AC3 only device */
-		si->caps |= PCM_CAP_BATCH | PCM_CAP_TRIGGER | PCM_CAP_MULTI;
 		/* MMAP: we add PCM_CAP_MMAP when we we support it */
+		si->caps |= PCM_CAP_TRIGGER | PCM_CAP_BATCH;
 		si->enabled = 1;
 		si->rate_source = si->dev;
 
-		/* we can convert PCM formats */
-		if ((si->iformats | si->oformats) &
-		    AUDIO_FORMAT_PCM) {
+		/* we can convert and mix PCM formats */
+		if (!(cap & AUDIO_CLIENT_CAP_OPAQUE)) {
 			si->min_channels = min(2, si->max_channels);
 			si->min_rate = min(5000, si->max_rate);
-			si->caps |= PCM_CAP_FREERATE;
+			si->caps |= PCM_CAP_FREERATE | PCM_CAP_MULTI;
 		}
 		(void) snprintf(si->devnode, sizeof (si->devnode),
 		    "/dev/sound/%s:%ddsp",
@@ -1346,12 +1344,7 @@ static int
 sound_mixer_info(audio_client_t *c, mixer_info *mi)
 {
 	audio_dev_t	*d;
-	ossdev_t	*odev;
-	ossclient_t	*sc;
 	const char	*name;
-
-	sc = auclnt_get_private(c);
-	odev = sc->o_ossdev;
 
 	d = auclnt_get_dev(c);
 
@@ -1359,7 +1352,7 @@ sound_mixer_info(audio_client_t *c, mixer_info *mi)
 	(void) snprintf(mi->id, sizeof (mi->id), "%s", name);
 	(void) snprintf(mi->name, sizeof (mi->name), "%s", name);
 	(void) snprintf(mi->handle, sizeof (mi->handle), "%s", name);
-	mi->modify_counter = odev->d_modify_cnt;
+	mi->modify_counter = (int)auclnt_dev_get_serial(d);
 	mi->card_number = auclnt_get_dev_index(d);
 	mi->port_number = 0;
 	return (0);
@@ -1439,7 +1432,7 @@ sndctl_mixerinfo(audio_client_t *c, oss_mixerinfo *mi)
 	(void) snprintf(mi->name, sizeof (mi->name), "%s", name);
 	(void) snprintf(mi->id, sizeof (mi->id), "%s", name);
 	(void) snprintf(mi->handle, sizeof (mi->handle), "%s", name);
-	mi->modify_counter = odev->d_modify_cnt;
+	mi->modify_counter = (int)auclnt_dev_get_serial(d);
 	mi->card_number = auclnt_get_dev_index(d);
 	mi->legacy_device = auclnt_get_dev_number(d);
 	if (mi->legacy_device >= 0) {
@@ -1893,6 +1886,7 @@ oss_ioctl(audio_client_t *c, int cmd, intptr_t arg, int mode, cred_t *credp,
 	case SNDCTL_DSP_GETCHANNELMASK:
 	case SNDCTL_DSP_BIND_CHANNEL:
 	case SNDCTL_DSP_SETSYNCRO:
+	case SNDCTL_DSP_NONBLOCK:
 	default:
 		rv = EINVAL;
 		break;
@@ -1922,19 +1916,6 @@ static void
 oss_input(audio_client_t *c)
 {
 	auclnt_pollwakeup(c, POLLIN | POLLRDNORM);
-}
-
-static void
-oss_notify(audio_client_t *c)
-{
-	audio_dev_t	*d;
-	ossdev_t	*odev;
-
-	d = auclnt_get_dev(c);
-	if ((odev = auclnt_get_dev_minor_data(d, AUDIO_MINOR_DSP)) == NULL) {
-		return;
-	}
-	odev->d_modify_cnt++;
 }
 
 static int
@@ -2578,7 +2559,6 @@ static struct audio_client_ops oss_ops = {
 	NULL,		/* mmap */
 	oss_input,
 	oss_output,
-	NULL,		/* notify */
 	NULL,		/* drain */
 };
 
@@ -2595,7 +2575,6 @@ static struct audio_client_ops ossmix_ops = {
 	NULL,   /* mmap */
 	NULL,	/* input */
 	NULL,   /* output */
-	oss_notify,
 	NULL,	/* drain */
 	NULL,	/* wput */
 	NULL,	/* wsrv */
@@ -2615,7 +2594,6 @@ static struct audio_client_ops sndstat_ops = {
 	NULL,	/* mmap */
 	NULL,	/* input */
 	NULL,	/* output */
-	NULL,	/* notify */
 	NULL,	/* drain */
 	NULL,	/* wput */
 	NULL,	/* wsrv */

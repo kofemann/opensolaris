@@ -52,7 +52,7 @@ include $(UTSBASE)/sparc/Makefile.sparc
 #	lock_lint rules
 #
 all:	warlock warlock.1394 warlock.ecpp warlock.scsi \
-	warlock.smartcard warlock.usb warlock.ib warlock.sata warlock.wc
+	warlock.usb warlock.ib warlock.sata warlock.wc
 
 warlock: $(MODULE).ok 
 
@@ -109,9 +109,6 @@ warlock.1394:
 warlock.ecpp:
 	@cd ../ecpp; $(MAKE) clean; $(MAKE) warlock
 
-warlock.smartcard:
-$(CLOSED_BUILD)	@cd $(CLOSED)/uts/sun4u/scmi2c; $(MAKE) clean; $(MAKE) warlock
-
 warlock.ib:
 	@cd ../ibmf; $(MAKE) clean; $(MAKE) warlock
 	@cd ../ib; $(MAKE) clean; $(MAKE) warlock
@@ -129,11 +126,6 @@ warlock.sata:
 	@cd ../nv_sata; $(MAKE) clean; $(MAKE) warlock
 $(CLOSED_BUILD)	@cd $(CLOSED)/uts/sparc/marvell88sx; \
 		$(MAKE) clean; $(MAKE) warlock
-
-warlock.sdcard:
-	@cd ../sda; $(MAKE) clean; $(MAKE) warlock
-	@cd ../sdhost; $(MAKE) clean; $(MAKE) warlock
-	@cd ../wbsd; $(MAKE) clean; $(MAKE) warlock
 
 warlock.wc:
 	@cd ../wc; $(MAKE) clean; $(MAKE) warlock

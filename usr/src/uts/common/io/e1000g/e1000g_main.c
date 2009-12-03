@@ -46,7 +46,7 @@
 
 static char ident[] = "Intel PRO/1000 Ethernet";
 static char e1000g_string[] = "Intel(R) PRO/1000 Network Connection";
-static char e1000g_version[] = "Driver Ver. 5.3.11";
+static char e1000g_version[] = "Driver Ver. 5.3.18";
 
 /*
  * Proto types for DDI entry points
@@ -94,6 +94,8 @@ static void e1000g_init_unicst(struct e1000g *);
 static int e1000g_unicst_set(struct e1000g *, const uint8_t *, int);
 static int e1000g_alloc_rx_data(struct e1000g *);
 static void e1000g_release_multicast(struct e1000g *);
+static void e1000g_pch_limits(struct e1000g *);
+static uint32_t e1000g_mtu2maxframe(uint32_t);
 
 /*
  * Local routines
@@ -116,6 +118,7 @@ static void stop_watchdog_timer(struct e1000g *);
 static void stop_link_timer(struct e1000g *);
 static void stop_82547_timer(e1000g_tx_ring_t *);
 static void e1000g_force_speed_duplex(struct e1000g *);
+static void e1000g_setup_max_mtu(struct e1000g *);
 static void e1000g_get_max_frame_size(struct e1000g *);
 static boolean_t is_valid_mac_addr(uint8_t *);
 static void e1000g_unattach(dev_info_t *, struct e1000g *);
@@ -668,7 +671,8 @@ e1000g_regs_map(struct e1000g *Adapter)
 	/* ICH needs to map flash memory */
 	if (hw->mac.type == e1000_ich8lan ||
 	    hw->mac.type == e1000_ich9lan ||
-	    hw->mac.type == e1000_ich10lan) {
+	    hw->mac.type == e1000_ich10lan ||
+	    hw->mac.type == e1000_pchlan) {
 		/* get flash size */
 		if (ddi_dev_regsize(devinfo, ICH_FLASH_REG_SET,
 		    &mem_size) != DDI_SUCCESS) {
@@ -766,6 +770,9 @@ e1000g_set_driver_params(struct e1000g *Adapter)
 	Adapter->strip_crc = B_FALSE;
 #endif
 
+	/* setup the maximum MTU size of the chip */
+	e1000g_setup_max_mtu(Adapter);
+
 	/* Get conf file properties */
 	e1000g_get_conf(Adapter);
 
@@ -776,6 +783,9 @@ e1000g_set_driver_params(struct e1000g *Adapter)
 
 	/* Get Jumbo Frames settings in conf file */
 	e1000g_get_max_frame_size(Adapter);
+
+	/* enforce PCH limits */
+	e1000g_pch_limits(Adapter);
 
 	/* Set Rx/Tx buffer size */
 	e1000g_set_bufsize(Adapter);
@@ -807,6 +817,47 @@ e1000g_set_driver_params(struct e1000g *Adapter)
 	Adapter->rx_bcopy_thresh = DEFAULT_RX_BCOPY_THRESHOLD;
 
 	return (DDI_SUCCESS);
+}
+
+static void
+e1000g_setup_max_mtu(struct e1000g *Adapter)
+{
+	struct e1000_mac_info *mac = &Adapter->shared.mac;
+	struct e1000_phy_info *phy = &Adapter->shared.phy;
+
+	switch (mac->type) {
+	/* types that do not support jumbo frames */
+	case e1000_ich8lan:
+	case e1000_82573:
+	case e1000_82583:
+		Adapter->max_mtu = ETHERMTU;
+		break;
+	/* ich9 supports jumbo frames except on one phy type */
+	case e1000_ich9lan:
+		if (phy->type == e1000_phy_ife)
+			Adapter->max_mtu = ETHERMTU;
+		else
+			Adapter->max_mtu = MAXIMUM_MTU_9K;
+		break;
+	/* pch can do jumbo frames up to 4K */
+	case e1000_pchlan:
+		Adapter->max_mtu = MAXIMUM_MTU_4K;
+		break;
+	/* types with a special limit */
+	case e1000_82571:
+	case e1000_82572:
+	case e1000_82574:
+	case e1000_80003es2lan:
+	case e1000_ich10lan:
+		Adapter->max_mtu = MAXIMUM_MTU_9K;
+		break;
+	/* default limit is 16K */
+	default:
+		Adapter->max_mtu = FRAME_SIZE_UPTO_16K -
+		    sizeof (struct ether_vlan_header) - ETHERFCSL -
+		    E1000G_IPALIGNPRESERVEROOM;
+		break;
+	}
 }
 
 static void
@@ -1099,6 +1150,9 @@ e1000g_destroy_locks(struct e1000g *Adapter)
 	mutex_destroy(&Adapter->link_lock);
 	mutex_destroy(&Adapter->watchdog_lock);
 	rw_destroy(&Adapter->chip_lock);
+
+	/* destory mutex initialized in shared code */
+	e1000_destroy_hw_mutex(&Adapter->shared);
 }
 
 static int
@@ -1280,6 +1334,8 @@ e1000g_init(struct e1000g *Adapter)
 		pba = E1000_PBA_10K;
 	} else if (hw->mac.type == e1000_ich10lan) {
 		pba = E1000_PBA_10K;
+	} else if (hw->mac.type == e1000_pchlan) {
+		pba = E1000_PBA_26K;
 	} else {
 		/*
 		 * Total FIFO is 40K
@@ -1361,11 +1417,7 @@ e1000g_init(struct e1000g *Adapter)
 	 * Restore LED settings to the default from EEPROM
 	 * to meet the standard for Sun platforms.
 	 */
-	if ((hw->mac.type != e1000_82541) &&
-	    (hw->mac.type != e1000_82541_rev_2) &&
-	    (hw->mac.type != e1000_82547) &&
-	    (hw->mac.type != e1000_82547_rev_2))
-		(void) e1000_cleanup_led(hw);
+	(void) e1000_cleanup_led(hw);
 
 	/* Disable Smart Power Down */
 	phy_spd_state(hw, B_FALSE);
@@ -1382,7 +1434,8 @@ e1000g_init(struct e1000g *Adapter)
 	 * Setup and initialize the mctable structures.  After this routine
 	 * completes  Multicast table will be set
 	 */
-	e1000g_setup_multicast(Adapter);
+	e1000_update_mc_addr_list(hw,
+	    (uint8_t *)Adapter->mcast_table, Adapter->mcast_count);
 	msec_delay(5);
 
 	/*
@@ -1411,11 +1464,6 @@ e1000g_init(struct e1000g *Adapter)
 		    (void *)Adapter, link_timeout);
 	}
 	mutex_exit(&Adapter->link_lock);
-
-	/* Enable PCI-Ex master */
-	if (hw->bus.type == e1000_bus_type_pci_express) {
-		e1000_enable_pciex_master(hw);
-	}
 
 	/* Save the state of the phy */
 	e1000g_get_phy_state(Adapter);
@@ -1501,20 +1549,33 @@ e1000g_free_rx_data(e1000g_rx_data_t *rx_data)
 static boolean_t
 e1000g_link_up(struct e1000g *Adapter)
 {
-	struct e1000_hw *hw;
-	boolean_t link_up;
+	struct e1000_hw *hw = &Adapter->shared;
+	boolean_t link_up = B_FALSE;
 
-	hw = &Adapter->shared;
-
-	(void) e1000_check_for_link(hw);
-
-	if ((E1000_READ_REG(hw, E1000_STATUS) & E1000_STATUS_LU) ||
-	    ((!hw->mac.get_link_status) && (hw->mac.type == e1000_82543)) ||
-	    ((hw->phy.media_type == e1000_media_type_internal_serdes) &&
-	    (hw->mac.serdes_has_link))) {
-		link_up = B_TRUE;
-	} else {
-		link_up = B_FALSE;
+	/*
+	 * get_link_status is set in the interrupt handler on link-status-change
+	 * or rx sequence error interrupt.  get_link_status will stay
+	 * false until the e1000_check_for_link establishes link only
+	 * for copper adapters.
+	 */
+	switch (hw->phy.media_type) {
+	case e1000_media_type_copper:
+		if (hw->mac.get_link_status) {
+			(void) e1000_check_for_link(hw);
+			link_up = !hw->mac.get_link_status;
+		} else {
+			link_up = B_TRUE;
+		}
+		break;
+	case e1000_media_type_fiber:
+		(void) e1000_check_for_link(hw);
+		link_up = (E1000_READ_REG(hw, E1000_STATUS) &
+		    E1000_STATUS_LU);
+		break;
+	case e1000_media_type_internal_serdes:
+		(void) e1000_check_for_link(hw);
+		link_up = hw->mac.serdes_has_link;
+		break;
 	}
 
 	return (link_up);
@@ -1965,6 +2026,11 @@ e1000g_reset_adapter(struct e1000g *Adapter)
 
 	rw_enter(&Adapter->chip_lock, RW_WRITER);
 
+	if (!(Adapter->e1000g_state & E1000G_STARTED)) {
+		rw_exit(&Adapter->chip_lock);
+		return (B_TRUE);
+	}
+
 	e1000g_stop(Adapter, B_FALSE);
 
 	if (e1000g_start(Adapter, B_FALSE) != DDI_SUCCESS) {
@@ -2025,8 +2091,10 @@ e1000g_intr_pciexpress(caddr_t arg)
 	Adapter = (struct e1000g *)(uintptr_t)arg;
 	icr = E1000_READ_REG(&Adapter->shared, E1000_ICR);
 
-	if (e1000g_check_acc_handle(Adapter->osdep.reg_handle) != DDI_FM_OK)
+	if (e1000g_check_acc_handle(Adapter->osdep.reg_handle) != DDI_FM_OK) {
 		ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_DEGRADED);
+		return (DDI_INTR_CLAIMED);
+	}
 
 	if (icr & E1000_ICR_INT_ASSERTED) {
 		/*
@@ -2061,8 +2129,10 @@ e1000g_intr(caddr_t arg)
 	Adapter = (struct e1000g *)(uintptr_t)arg;
 	icr = E1000_READ_REG(&Adapter->shared, E1000_ICR);
 
-	if (e1000g_check_acc_handle(Adapter->osdep.reg_handle) != DDI_FM_OK)
+	if (e1000g_check_acc_handle(Adapter->osdep.reg_handle) != DDI_FM_OK) {
 		ddi_fm_service_impact(Adapter->dip, DDI_SERVICE_DEGRADED);
+		return (DDI_INTR_CLAIMED);
+	}
 
 	if (icr) {
 		/*
@@ -2402,11 +2472,8 @@ multicst_add(struct e1000g *Adapter, const uint8_t *multiaddr)
 	 */
 	e1000g_clear_interrupt(Adapter);
 
-	e1000g_setup_multicast(Adapter);
-
-	if ((hw->mac.type == e1000_82542) &&
-	    (hw->revision_id == E1000_REVISION_2))
-		e1000g_rx_setup(Adapter);
+	e1000_update_mc_addr_list(hw,
+	    (uint8_t *)Adapter->mcast_table, Adapter->mcast_count);
 
 	e1000g_mask_interrupt(Adapter);
 
@@ -2462,11 +2529,8 @@ multicst_remove(struct e1000g *Adapter, const uint8_t *multiaddr)
 	 */
 	e1000g_clear_interrupt(Adapter);
 
-	e1000g_setup_multicast(Adapter);
-
-	if ((hw->mac.type == e1000_82542) &&
-	    (hw->revision_id == E1000_REVISION_2))
-		e1000g_rx_setup(Adapter);
+	e1000_update_mc_addr_list(hw,
+	    (uint8_t *)Adapter->mcast_table, Adapter->mcast_count);
 
 	e1000g_mask_interrupt(Adapter);
 
@@ -2486,98 +2550,6 @@ e1000g_release_multicast(struct e1000g *Adapter)
 		    Adapter->mcast_alloc_count * sizeof (struct ether_addr));
 		Adapter->mcast_table = NULL;
 	}
-}
-
-/*
- * e1000g_setup_multicast - setup multicast data structures
- *
- * This routine initializes all of the multicast related structures.
- */
-void
-e1000g_setup_multicast(struct e1000g *Adapter)
-{
-	uint8_t *mc_addr_list;
-	uint32_t mc_addr_count;
-	uint32_t rctl;
-	struct e1000_hw *hw;
-
-	hw = &Adapter->shared;
-
-	/*
-	 * The e1000g has the ability to do perfect filtering of 16
-	 * addresses. The driver uses one of the e1000g's 16 receive
-	 * address registers for its node/network/mac/individual address.
-	 * So, we have room for up to 15 multicast addresses in the CAM,
-	 * additional MC addresses are handled by the MTA (Multicast Table
-	 * Array)
-	 */
-
-	rctl = E1000_READ_REG(hw, E1000_RCTL);
-
-	mc_addr_list = (uint8_t *)Adapter->mcast_table;
-
-	ASSERT(Adapter->mcast_count <= Adapter->mcast_max_num);
-
-	mc_addr_count = Adapter->mcast_count;
-	/*
-	 * The Wiseman 2.0 silicon has an errata by which the receiver will
-	 * hang  while writing to the receive address registers if the receiver
-	 * is not in reset before writing to the registers. Updating the RAR
-	 * is done during the setting up of the multicast table, hence the
-	 * receiver has to be put in reset before updating the multicast table
-	 * and then taken out of reset at the end
-	 */
-	/*
-	 * if WMI was enabled then dis able it before issueing the global
-	 * reset to the hardware.
-	 */
-	/*
-	 * Only required for WISEMAN_2_0
-	 */
-	if ((hw->mac.type == e1000_82542) &&
-	    (hw->revision_id == E1000_REVISION_2)) {
-		e1000_pci_clear_mwi(hw);
-		/*
-		 * The e1000g must be in reset before changing any RA
-		 * registers. Reset receive unit.  The chip will remain in
-		 * the reset state until software explicitly restarts it.
-		 */
-		E1000_WRITE_REG(hw, E1000_RCTL, E1000_RCTL_RST);
-		/* Allow receiver time to go in to reset */
-		msec_delay(5);
-	}
-
-	e1000_update_mc_addr_list(hw, mc_addr_list, mc_addr_count,
-	    Adapter->unicst_total, hw->mac.rar_entry_count);
-
-	/*
-	 * Only for Wiseman_2_0
-	 * If MWI was enabled then re-enable it after issueing (as we
-	 * disabled it up there) the receive reset command.
-	 * Wainwright does not have a receive reset command and only thing
-	 * close to it is global reset which will require tx setup also
-	 */
-	if ((hw->mac.type == e1000_82542) &&
-	    (hw->revision_id == E1000_REVISION_2)) {
-		/*
-		 * if WMI was enabled then reenable it after issueing the
-		 * global or receive reset to the hardware.
-		 */
-
-		/*
-		 * Take receiver out of reset
-		 * clear E1000_RCTL_RST bit (and all others)
-		 */
-		E1000_WRITE_REG(hw, E1000_RCTL, 0);
-		msec_delay(5);
-		if (hw->bus.pci_cmd_word & CMD_MEM_WRT_INVALIDATE)
-			e1000_pci_set_mwi(hw);
-	}
-
-	/*
-	 * Restore original value
-	 */
-	E1000_WRITE_REG(hw, E1000_RCTL, rctl);
 }
 
 int
@@ -2861,6 +2833,7 @@ e1000g_ring_start(mac_ring_driver_t rh, uint64_t mr_gen_num)
  * Though not offering virtualization ability per se, exposing the
  * group/ring still enables the polling and interrupt toggling.
  */
+/* ARGSUSED */
 void
 e1000g_fill_ring(void *arg, mac_ring_type_t rtype, const int grp_index,
     const int ring_index, mac_ring_info_t *infop, mac_ring_handle_t rh)
@@ -2888,6 +2861,7 @@ e1000g_fill_ring(void *arg, mac_ring_type_t rtype, const int grp_index,
 	mintr->mi_disable = e1000g_rx_ring_intr_disable;
 }
 
+/* ARGSUSED */
 static void
 e1000g_fill_group(void *arg, mac_ring_type_t rtype, const int grp_index,
     mac_group_info_t *infop, mac_group_handle_t gh)
@@ -2994,13 +2968,11 @@ e1000g_m_setprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
     uint_t pr_valsize, const void *pr_val)
 {
 	struct e1000g *Adapter = arg;
-	struct e1000_mac_info *mac = &Adapter->shared.mac;
-	struct e1000_phy_info *phy = &Adapter->shared.phy;
+	struct e1000_hw *hw = &Adapter->shared;
 	struct e1000_fc_info *fc = &Adapter->shared.fc;
 	int err = 0;
 	link_flowctrl_t flowctrl;
 	uint32_t cur_mtu, new_mtu;
-	uint64_t tmp = 0;
 
 	rw_enter(&Adapter->chip_lock, RW_WRITER);
 
@@ -3021,26 +2993,50 @@ e1000g_m_setprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 
 	switch (pr_num) {
 		case MAC_PROP_EN_1000FDX_CAP:
+			if (hw->phy.media_type != e1000_media_type_copper) {
+				err = ENOTSUP;
+				break;
+			}
 			Adapter->param_en_1000fdx = *(uint8_t *)pr_val;
 			Adapter->param_adv_1000fdx = *(uint8_t *)pr_val;
 			goto reset;
 		case MAC_PROP_EN_100FDX_CAP:
+			if (hw->phy.media_type != e1000_media_type_copper) {
+				err = ENOTSUP;
+				break;
+			}
 			Adapter->param_en_100fdx = *(uint8_t *)pr_val;
 			Adapter->param_adv_100fdx = *(uint8_t *)pr_val;
 			goto reset;
 		case MAC_PROP_EN_100HDX_CAP:
+			if (hw->phy.media_type != e1000_media_type_copper) {
+				err = ENOTSUP;
+				break;
+			}
 			Adapter->param_en_100hdx = *(uint8_t *)pr_val;
 			Adapter->param_adv_100hdx = *(uint8_t *)pr_val;
 			goto reset;
 		case MAC_PROP_EN_10FDX_CAP:
+			if (hw->phy.media_type != e1000_media_type_copper) {
+				err = ENOTSUP;
+				break;
+			}
 			Adapter->param_en_10fdx = *(uint8_t *)pr_val;
 			Adapter->param_adv_10fdx = *(uint8_t *)pr_val;
 			goto reset;
 		case MAC_PROP_EN_10HDX_CAP:
+			if (hw->phy.media_type != e1000_media_type_copper) {
+				err = ENOTSUP;
+				break;
+			}
 			Adapter->param_en_10hdx = *(uint8_t *)pr_val;
 			Adapter->param_adv_10hdx = *(uint8_t *)pr_val;
 			goto reset;
 		case MAC_PROP_AUTONEG:
+			if (hw->phy.media_type != e1000_media_type_copper) {
+				err = ENOTSUP;
+				break;
+			}
 			Adapter->param_adv_autoneg = *(uint8_t *)pr_val;
 			goto reset;
 		case MAC_PROP_FLOWCTRL:
@@ -3066,6 +3062,8 @@ e1000g_m_setprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			}
 reset:
 			if (err == 0) {
+				/* check PCH limits & reset the link */
+				e1000g_pch_limits(Adapter);
 				if (e1000g_reset_link(Adapter) != DDI_SUCCESS)
 					err = EINVAL;
 			}
@@ -3083,43 +3081,40 @@ reset:
 			err = ENOTSUP; /* read-only prop. Can't set this. */
 			break;
 		case MAC_PROP_MTU:
+			/* adapter must be stopped for an MTU change */
+			if (Adapter->e1000g_state & E1000G_STARTED) {
+				err = EBUSY;
+				break;
+			}
+
 			cur_mtu = Adapter->default_mtu;
+
+			/* get new requested MTU */
 			bcopy(pr_val, &new_mtu, sizeof (new_mtu));
 			if (new_mtu == cur_mtu) {
 				err = 0;
 				break;
 			}
 
-			tmp = new_mtu + sizeof (struct ether_vlan_header) +
-			    ETHERFCSL;
-			if ((tmp < DEFAULT_FRAME_SIZE) ||
-			    (tmp > MAXIMUM_FRAME_SIZE)) {
+			if ((new_mtu < DEFAULT_MTU) ||
+			    (new_mtu > Adapter->max_mtu)) {
 				err = EINVAL;
 				break;
 			}
 
-			/* ich8 does not support jumbo frames */
-			if ((mac->type == e1000_ich8lan) &&
-			    (tmp > DEFAULT_FRAME_SIZE)) {
-				err = EINVAL;
-				break;
-			}
-			/* ich9 does not do jumbo frames on one phy type */
-			if ((mac->type == e1000_ich9lan) &&
-			    (phy->type == e1000_phy_ife) &&
-			    (tmp > DEFAULT_FRAME_SIZE)) {
-				err = EINVAL;
-				break;
-			}
-			if (Adapter->e1000g_state & E1000G_STARTED) {
-				err = EBUSY;
-				break;
-			}
-
+			/* inform MAC framework of new MTU */
 			err = mac_maxsdu_update(Adapter->mh, new_mtu);
+
 			if (err == 0) {
-				Adapter->max_frame_size = (uint32_t)tmp;
 				Adapter->default_mtu = new_mtu;
+				Adapter->max_frame_size =
+				    e1000g_mtu2maxframe(new_mtu);
+
+				/*
+				 * check PCH limits & set buffer sizes to
+				 * match new MTU
+				 */
+				e1000g_pch_limits(Adapter);
 				e1000g_set_bufsize(Adapter);
 			}
 			break;
@@ -3141,6 +3136,7 @@ e1000g_m_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 {
 	struct e1000g *Adapter = arg;
 	struct e1000_fc_info *fc = &Adapter->shared.fc;
+	struct e1000_hw *hw = &Adapter->shared;
 	int err = 0;
 	link_flowctrl_t flowctrl;
 	uint64_t tmp = 0;
@@ -3174,6 +3170,8 @@ e1000g_m_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 				err = EINVAL;
 			break;
 		case MAC_PROP_AUTONEG:
+			if (hw->phy.media_type != e1000_media_type_copper)
+				*perm = MAC_PROP_PERM_READ;
 			*(uint8_t *)pr_val = Adapter->param_adv_autoneg;
 			break;
 		case MAC_PROP_FLOWCTRL:
@@ -3201,6 +3199,8 @@ e1000g_m_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			*(uint8_t *)pr_val = Adapter->param_adv_1000fdx;
 			break;
 		case MAC_PROP_EN_1000FDX_CAP:
+			if (hw->phy.media_type != e1000_media_type_copper)
+				*perm = MAC_PROP_PERM_READ;
 			*(uint8_t *)pr_val = Adapter->param_en_1000fdx;
 			break;
 		case MAC_PROP_ADV_1000HDX_CAP:
@@ -3216,6 +3216,8 @@ e1000g_m_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			*(uint8_t *)pr_val = Adapter->param_adv_100fdx;
 			break;
 		case MAC_PROP_EN_100FDX_CAP:
+			if (hw->phy.media_type != e1000_media_type_copper)
+				*perm = MAC_PROP_PERM_READ;
 			*(uint8_t *)pr_val = Adapter->param_en_100fdx;
 			break;
 		case MAC_PROP_ADV_100HDX_CAP:
@@ -3223,6 +3225,8 @@ e1000g_m_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			*(uint8_t *)pr_val = Adapter->param_adv_100hdx;
 			break;
 		case MAC_PROP_EN_100HDX_CAP:
+			if (hw->phy.media_type != e1000_media_type_copper)
+				*perm = MAC_PROP_PERM_READ;
 			*(uint8_t *)pr_val = Adapter->param_en_100hdx;
 			break;
 		case MAC_PROP_ADV_10FDX_CAP:
@@ -3230,6 +3234,8 @@ e1000g_m_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			*(uint8_t *)pr_val = Adapter->param_adv_10fdx;
 			break;
 		case MAC_PROP_EN_10FDX_CAP:
+			if (hw->phy.media_type != e1000_media_type_copper)
+				*perm = MAC_PROP_PERM_READ;
 			*(uint8_t *)pr_val = Adapter->param_en_10fdx;
 			break;
 		case MAC_PROP_ADV_10HDX_CAP:
@@ -3237,6 +3243,8 @@ e1000g_m_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			*(uint8_t *)pr_val = Adapter->param_adv_10hdx;
 			break;
 		case MAC_PROP_EN_10HDX_CAP:
+			if (hw->phy.media_type != e1000_media_type_copper)
+				*perm = MAC_PROP_PERM_READ;
 			*(uint8_t *)pr_val = Adapter->param_en_10hdx;
 			break;
 		case MAC_PROP_ADV_100T4_CAP:
@@ -3260,7 +3268,7 @@ e1000g_m_getprop(void *arg, const char *pr_name, mac_prop_id_t pr_num,
 			range.mpr_count = 1;
 			range.mpr_type = MAC_PROPVAL_UINT32;
 			range.range_uint32[0].mpur_min = DEFAULT_MTU;
-			range.range_uint32[0].mpur_max = MAXIMUM_MTU;
+			range.range_uint32[0].mpur_max = Adapter->max_mtu;
 			/* following MAC type do not support jumbo frames */
 			if ((mac->type == e1000_ich8lan) ||
 			    ((mac->type == e1000_ich9lan) && (phy->type ==
@@ -3316,9 +3324,11 @@ e1000g_set_priv_prop(struct e1000g *Adapter, const char *pr_name,
 			else
 				e1000g_clear_tx_interrupt(Adapter);
 			if (e1000g_check_acc_handle(
-			    Adapter->osdep.reg_handle) != DDI_FM_OK)
+			    Adapter->osdep.reg_handle) != DDI_FM_OK) {
 				ddi_fm_service_impact(Adapter->dip,
 				    DDI_SERVICE_DEGRADED);
+				err = EIO;
+			}
 		}
 		return (err);
 	}
@@ -3335,9 +3345,11 @@ e1000g_set_priv_prop(struct e1000g *Adapter, const char *pr_name,
 			Adapter->tx_intr_delay = (uint32_t)result;
 			E1000_WRITE_REG(hw, E1000_TIDV, Adapter->tx_intr_delay);
 			if (e1000g_check_acc_handle(
-			    Adapter->osdep.reg_handle) != DDI_FM_OK)
+			    Adapter->osdep.reg_handle) != DDI_FM_OK) {
 				ddi_fm_service_impact(Adapter->dip,
 				    DDI_SERVICE_DEGRADED);
+				err = EIO;
+			}
 		}
 		return (err);
 	}
@@ -3355,9 +3367,11 @@ e1000g_set_priv_prop(struct e1000g *Adapter, const char *pr_name,
 			E1000_WRITE_REG(hw, E1000_TADV,
 			    Adapter->tx_intr_abs_delay);
 			if (e1000g_check_acc_handle(
-			    Adapter->osdep.reg_handle) != DDI_FM_OK)
+			    Adapter->osdep.reg_handle) != DDI_FM_OK) {
 				ddi_fm_service_impact(Adapter->dip,
 				    DDI_SERVICE_DEGRADED);
+				err = EIO;
+			}
 		}
 		return (err);
 	}
@@ -3400,9 +3414,11 @@ e1000g_set_priv_prop(struct e1000g *Adapter, const char *pr_name,
 			Adapter->rx_intr_delay = (uint32_t)result;
 			E1000_WRITE_REG(hw, E1000_RDTR, Adapter->rx_intr_delay);
 			if (e1000g_check_acc_handle(
-			    Adapter->osdep.reg_handle) != DDI_FM_OK)
+			    Adapter->osdep.reg_handle) != DDI_FM_OK) {
 				ddi_fm_service_impact(Adapter->dip,
 				    DDI_SERVICE_DEGRADED);
+				err = EIO;
+			}
 		}
 		return (err);
 	}
@@ -3420,9 +3436,11 @@ e1000g_set_priv_prop(struct e1000g *Adapter, const char *pr_name,
 			E1000_WRITE_REG(hw, E1000_RADV,
 			    Adapter->rx_intr_abs_delay);
 			if (e1000g_check_acc_handle(
-			    Adapter->osdep.reg_handle) != DDI_FM_OK)
+			    Adapter->osdep.reg_handle) != DDI_FM_OK) {
 				ddi_fm_service_impact(Adapter->dip,
 				    DDI_SERVICE_DEGRADED);
+				err = EIO;
+			}
 		}
 		return (err);
 	}
@@ -3442,9 +3460,11 @@ e1000g_set_priv_prop(struct e1000g *Adapter, const char *pr_name,
 				E1000_WRITE_REG(hw, E1000_ITR,
 				    Adapter->intr_throttling_rate);
 				if (e1000g_check_acc_handle(
-				    Adapter->osdep.reg_handle) != DDI_FM_OK)
+				    Adapter->osdep.reg_handle) != DDI_FM_OK) {
 					ddi_fm_service_impact(Adapter->dip,
 					    DDI_SERVICE_DEGRADED);
+					err = EIO;
+				}
 			} else
 				err = EINVAL;
 		}
@@ -3920,11 +3940,16 @@ e1000g_reset_link(struct e1000g *Adapter)
 {
 	struct e1000_mac_info *mac;
 	struct e1000_phy_info *phy;
+	struct e1000_hw *hw;
 	boolean_t invalid;
 
 	mac = &Adapter->shared.mac;
 	phy = &Adapter->shared.phy;
+	hw = &Adapter->shared;
 	invalid = B_FALSE;
+
+	if (hw->phy.media_type != e1000_media_type_copper)
+		goto out;
 
 	if (Adapter->param_adv_autoneg == 1) {
 		mac->autoneg = B_TRUE;
@@ -3954,7 +3979,8 @@ e1000g_reset_link(struct e1000g *Adapter)
 		mac->autoneg = B_FALSE;
 
 		/*
-		 * 1000fdx and 1000hdx are not supported for forced link
+		 * For Intel copper cards, 1000fdx and 1000hdx are not
+		 * supported for forced link
 		 */
 		if (Adapter->param_adv_100fdx == 1)
 			mac->forced_speed_duplex = ADVERTISE_100_FULL;
@@ -3971,14 +3997,13 @@ e1000g_reset_link(struct e1000g *Adapter)
 
 	if (invalid) {
 		e1000g_log(Adapter, CE_WARN,
-		    "Invalid link sets. Setup link to"
+		    "Invalid link settings. Setup link to "
 		    "support autonegotiation with all link capabilities.");
 		mac->autoneg = B_TRUE;
-		phy->autoneg_advertised = ADVERTISE_1000_FULL |
-		    ADVERTISE_100_FULL | ADVERTISE_100_HALF |
-		    ADVERTISE_10_FULL | ADVERTISE_10_HALF;
+		phy->autoneg_advertised = AUTONEG_ADVERTISE_SPEED_DEFAULT;
 	}
 
+out:
 	return (e1000_setup_link(&Adapter->shared));
 }
 
@@ -4213,8 +4238,6 @@ static void
 e1000g_get_max_frame_size(struct e1000g *Adapter)
 {
 	int max_frame;
-	struct e1000_mac_info *mac = &Adapter->shared.mac;
-	struct e1000_phy_info *phy = &Adapter->shared.phy;
 
 	/*
 	 * get value out of config file
@@ -4240,35 +4263,68 @@ e1000g_get_max_frame_size(struct e1000g *Adapter)
 		    E1000G_IPALIGNPRESERVEROOM;
 		break;
 	case 3:
-		if (mac->type >= e1000_82571)
-			Adapter->default_mtu = MAXIMUM_MTU;
-		else
-			Adapter->default_mtu = FRAME_SIZE_UPTO_16K -
-			    sizeof (struct ether_vlan_header) - ETHERFCSL -
-			    E1000G_IPALIGNPRESERVEROOM;
+		Adapter->default_mtu = FRAME_SIZE_UPTO_16K -
+		    sizeof (struct ether_vlan_header) - ETHERFCSL -
+		    E1000G_IPALIGNPRESERVEROOM;
 		break;
 	default:
 		Adapter->default_mtu = ETHERMTU;
 		break;
 	}	/* switch */
 
-	Adapter->max_frame_size = Adapter->default_mtu +
-	    sizeof (struct ether_vlan_header) + ETHERFCSL;
+	/*
+	 * If the user configed MTU is larger than the deivce's maximum MTU,
+	 * the MTU is set to the deivce's maximum value.
+	 */
+	if (Adapter->default_mtu > Adapter->max_mtu)
+		Adapter->default_mtu = Adapter->max_mtu;
 
-	/* ich8 does not do jumbo frames */
-	if (mac->type == e1000_ich8lan) {
-		Adapter->default_mtu = ETHERMTU;
-		Adapter->max_frame_size = ETHERMTU +
-		    sizeof (struct ether_vlan_header) + ETHERFCSL;
-	}
+	Adapter->max_frame_size = e1000g_mtu2maxframe(Adapter->default_mtu);
+}
 
-	/* ich9 does not do jumbo frames on one phy type */
-	if ((mac->type == e1000_ich9lan) &&
-	    (phy->type == e1000_phy_ife)) {
-		Adapter->default_mtu = ETHERMTU;
-		Adapter->max_frame_size = ETHERMTU +
-		    sizeof (struct ether_vlan_header) + ETHERFCSL;
+/*
+ * e1000g_pch_limits - Apply limits of the PCH silicon type
+ *
+ * At any frame size larger than the ethernet default,
+ * prevent linking at 10/100 speeds.
+ */
+static void
+e1000g_pch_limits(struct e1000g *Adapter)
+{
+	struct e1000_hw *hw = &Adapter->shared;
+
+	/* only applies to PCH silicon type */
+	if (hw->mac.type != e1000_pchlan)
+		return;
+
+	/* only applies to frames larger than ethernet default */
+	if (Adapter->max_frame_size > DEFAULT_FRAME_SIZE) {
+		hw->mac.autoneg = B_TRUE;
+		hw->phy.autoneg_advertised = ADVERTISE_1000_FULL;
+
+		Adapter->param_adv_autoneg = 1;
+		Adapter->param_adv_1000fdx = 1;
+
+		Adapter->param_adv_100fdx = 0;
+		Adapter->param_adv_100hdx = 0;
+		Adapter->param_adv_10fdx = 0;
+		Adapter->param_adv_10hdx = 0;
+
+		e1000g_param_sync(Adapter);
 	}
+}
+
+/*
+ * e1000g_mtu2maxframe - convert given MTU to maximum frame size
+ */
+static uint32_t
+e1000g_mtu2maxframe(uint32_t mtu)
+{
+	uint32_t maxframe;
+
+	maxframe = mtu + sizeof (struct ether_vlan_header) + ETHERFCSL;
+
+	return (maxframe);
 }
 
 static void
@@ -5244,10 +5300,10 @@ e1000g_set_external_loopback_1000(struct e1000g *Adapter)
 			ctrl_ext = E1000_READ_REG(hw, E1000_CTRL_EXT);
 			ctrl_ext |= (E1000_CTRL_EXT_SDP4_DATA |
 			    E1000_CTRL_EXT_SDP6_DATA |
-			    E1000_CTRL_EXT_SDP7_DATA |
+			    E1000_CTRL_EXT_SDP3_DATA |
 			    E1000_CTRL_EXT_SDP4_DIR |
 			    E1000_CTRL_EXT_SDP6_DIR |
-			    E1000_CTRL_EXT_SDP7_DIR);	/* 0x0DD0 */
+			    E1000_CTRL_EXT_SDP3_DIR);	/* 0x0DD0 */
 			E1000_WRITE_REG(hw, E1000_CTRL_EXT, ctrl_ext);
 
 			/*
@@ -5491,6 +5547,7 @@ e1000g_add_intrs(struct e1000g *Adapter)
 		rc = e1000g_intr_add(Adapter, DDI_INTR_TYPE_MSI);
 
 		if (rc != DDI_SUCCESS) {
+			/* EMPTY */
 			E1000G_DEBUGLOG_0(Adapter, E1000G_WARN_LEVEL,
 			    "Add MSI failed, trying Legacy interrupts\n");
 		} else {
@@ -5553,6 +5610,7 @@ e1000g_intr_add(struct e1000g *Adapter, int intr_type)
 	}
 
 	if (avail < count) {
+		/* EMPTY */
 		E1000G_DEBUGLOG_2(Adapter, E1000G_WARN_LEVEL,
 		    "Interrupts count: %d, available: %d\n",
 		    count, avail);
@@ -5578,6 +5636,7 @@ e1000g_intr_add(struct e1000g *Adapter, int intr_type)
 	}
 
 	if (actual < count) {
+		/* EMPTY */
 		E1000G_DEBUGLOG_2(Adapter, E1000G_WARN_LEVEL,
 		    "Interrupts requested: %d, received: %d\n",
 		    count, actual);
@@ -5748,83 +5807,130 @@ e1000g_get_phy_state(struct e1000g *Adapter)
 {
 	struct e1000_hw *hw = &Adapter->shared;
 
-	(void) e1000_read_phy_reg(hw, PHY_CONTROL, &Adapter->phy_ctrl);
-	(void) e1000_read_phy_reg(hw, PHY_STATUS, &Adapter->phy_status);
-	(void) e1000_read_phy_reg(hw, PHY_AUTONEG_ADV, &Adapter->phy_an_adv);
-	(void) e1000_read_phy_reg(hw, PHY_AUTONEG_EXP, &Adapter->phy_an_exp);
-	(void) e1000_read_phy_reg(hw, PHY_EXT_STATUS, &Adapter->phy_ext_status);
-	(void) e1000_read_phy_reg(hw, PHY_1000T_CTRL, &Adapter->phy_1000t_ctrl);
-	(void) e1000_read_phy_reg(hw, PHY_1000T_STATUS,
-	    &Adapter->phy_1000t_status);
-	(void) e1000_read_phy_reg(hw, PHY_LP_ABILITY, &Adapter->phy_lp_able);
+	if (hw->phy.media_type == e1000_media_type_copper) {
+		(void) e1000_read_phy_reg(hw, PHY_CONTROL, &Adapter->phy_ctrl);
+		(void) e1000_read_phy_reg(hw, PHY_STATUS, &Adapter->phy_status);
+		(void) e1000_read_phy_reg(hw, PHY_AUTONEG_ADV,
+		    &Adapter->phy_an_adv);
+		(void) e1000_read_phy_reg(hw, PHY_AUTONEG_EXP,
+		    &Adapter->phy_an_exp);
+		(void) e1000_read_phy_reg(hw, PHY_EXT_STATUS,
+		    &Adapter->phy_ext_status);
+		(void) e1000_read_phy_reg(hw, PHY_1000T_CTRL,
+		    &Adapter->phy_1000t_ctrl);
+		(void) e1000_read_phy_reg(hw, PHY_1000T_STATUS,
+		    &Adapter->phy_1000t_status);
+		(void) e1000_read_phy_reg(hw, PHY_LP_ABILITY,
+		    &Adapter->phy_lp_able);
 
-	Adapter->param_autoneg_cap =
-	    (Adapter->phy_status & MII_SR_AUTONEG_CAPS) ? 1 : 0;
-	Adapter->param_pause_cap =
-	    (Adapter->phy_an_adv & NWAY_AR_PAUSE) ? 1 : 0;
-	Adapter->param_asym_pause_cap =
-	    (Adapter->phy_an_adv & NWAY_AR_ASM_DIR) ? 1 : 0;
-	Adapter->param_1000fdx_cap =
-	    ((Adapter->phy_ext_status & IEEE_ESR_1000T_FD_CAPS) ||
-	    (Adapter->phy_ext_status & IEEE_ESR_1000X_FD_CAPS)) ? 1 : 0;
-	Adapter->param_1000hdx_cap =
-	    ((Adapter->phy_ext_status & IEEE_ESR_1000T_HD_CAPS) ||
-	    (Adapter->phy_ext_status & IEEE_ESR_1000X_HD_CAPS)) ? 1 : 0;
-	Adapter->param_100t4_cap =
-	    (Adapter->phy_status & MII_SR_100T4_CAPS) ? 1 : 0;
-	Adapter->param_100fdx_cap =
-	    ((Adapter->phy_status & MII_SR_100X_FD_CAPS) ||
-	    (Adapter->phy_status & MII_SR_100T2_FD_CAPS)) ? 1 : 0;
-	Adapter->param_100hdx_cap =
-	    ((Adapter->phy_status & MII_SR_100X_HD_CAPS) ||
-	    (Adapter->phy_status & MII_SR_100T2_HD_CAPS)) ? 1 : 0;
-	Adapter->param_10fdx_cap =
-	    (Adapter->phy_status & MII_SR_10T_FD_CAPS) ? 1 : 0;
-	Adapter->param_10hdx_cap =
-	    (Adapter->phy_status & MII_SR_10T_HD_CAPS) ? 1 : 0;
+		Adapter->param_autoneg_cap =
+		    (Adapter->phy_status & MII_SR_AUTONEG_CAPS) ? 1 : 0;
+		Adapter->param_pause_cap =
+		    (Adapter->phy_an_adv & NWAY_AR_PAUSE) ? 1 : 0;
+		Adapter->param_asym_pause_cap =
+		    (Adapter->phy_an_adv & NWAY_AR_ASM_DIR) ? 1 : 0;
+		Adapter->param_1000fdx_cap =
+		    ((Adapter->phy_ext_status & IEEE_ESR_1000T_FD_CAPS) ||
+		    (Adapter->phy_ext_status & IEEE_ESR_1000X_FD_CAPS)) ? 1 : 0;
+		Adapter->param_1000hdx_cap =
+		    ((Adapter->phy_ext_status & IEEE_ESR_1000T_HD_CAPS) ||
+		    (Adapter->phy_ext_status & IEEE_ESR_1000X_HD_CAPS)) ? 1 : 0;
+		Adapter->param_100t4_cap =
+		    (Adapter->phy_status & MII_SR_100T4_CAPS) ? 1 : 0;
+		Adapter->param_100fdx_cap =
+		    ((Adapter->phy_status & MII_SR_100X_FD_CAPS) ||
+		    (Adapter->phy_status & MII_SR_100T2_FD_CAPS)) ? 1 : 0;
+		Adapter->param_100hdx_cap =
+		    ((Adapter->phy_status & MII_SR_100X_HD_CAPS) ||
+		    (Adapter->phy_status & MII_SR_100T2_HD_CAPS)) ? 1 : 0;
+		Adapter->param_10fdx_cap =
+		    (Adapter->phy_status & MII_SR_10T_FD_CAPS) ? 1 : 0;
+		Adapter->param_10hdx_cap =
+		    (Adapter->phy_status & MII_SR_10T_HD_CAPS) ? 1 : 0;
 
-	Adapter->param_adv_autoneg = hw->mac.autoneg;
-	Adapter->param_adv_pause =
-	    (Adapter->phy_an_adv & NWAY_AR_PAUSE) ? 1 : 0;
-	Adapter->param_adv_asym_pause =
-	    (Adapter->phy_an_adv & NWAY_AR_ASM_DIR) ? 1 : 0;
-	Adapter->param_adv_1000hdx =
-	    (Adapter->phy_1000t_ctrl & CR_1000T_HD_CAPS) ? 1 : 0;
-	Adapter->param_adv_100t4 =
-	    (Adapter->phy_an_adv & NWAY_AR_100T4_CAPS) ? 1 : 0;
-	if (Adapter->param_adv_autoneg == 1) {
-		Adapter->param_adv_1000fdx =
-		    (Adapter->phy_1000t_ctrl & CR_1000T_FD_CAPS) ? 1 : 0;
-		Adapter->param_adv_100fdx =
-		    (Adapter->phy_an_adv & NWAY_AR_100TX_FD_CAPS) ? 1 : 0;
-		Adapter->param_adv_100hdx =
-		    (Adapter->phy_an_adv & NWAY_AR_100TX_HD_CAPS) ? 1 : 0;
-		Adapter->param_adv_10fdx =
-		    (Adapter->phy_an_adv & NWAY_AR_10T_FD_CAPS) ? 1 : 0;
-		Adapter->param_adv_10hdx =
-		    (Adapter->phy_an_adv & NWAY_AR_10T_HD_CAPS) ? 1 : 0;
+		Adapter->param_adv_autoneg = hw->mac.autoneg;
+		Adapter->param_adv_pause =
+		    (Adapter->phy_an_adv & NWAY_AR_PAUSE) ? 1 : 0;
+		Adapter->param_adv_asym_pause =
+		    (Adapter->phy_an_adv & NWAY_AR_ASM_DIR) ? 1 : 0;
+		Adapter->param_adv_1000hdx =
+		    (Adapter->phy_1000t_ctrl & CR_1000T_HD_CAPS) ? 1 : 0;
+		Adapter->param_adv_100t4 =
+		    (Adapter->phy_an_adv & NWAY_AR_100T4_CAPS) ? 1 : 0;
+		if (Adapter->param_adv_autoneg == 1) {
+			Adapter->param_adv_1000fdx =
+			    (Adapter->phy_1000t_ctrl & CR_1000T_FD_CAPS)
+			    ? 1 : 0;
+			Adapter->param_adv_100fdx =
+			    (Adapter->phy_an_adv & NWAY_AR_100TX_FD_CAPS)
+			    ? 1 : 0;
+			Adapter->param_adv_100hdx =
+			    (Adapter->phy_an_adv & NWAY_AR_100TX_HD_CAPS)
+			    ? 1 : 0;
+			Adapter->param_adv_10fdx =
+			    (Adapter->phy_an_adv & NWAY_AR_10T_FD_CAPS) ? 1 : 0;
+			Adapter->param_adv_10hdx =
+			    (Adapter->phy_an_adv & NWAY_AR_10T_HD_CAPS) ? 1 : 0;
+		}
+
+		Adapter->param_lp_autoneg =
+		    (Adapter->phy_an_exp & NWAY_ER_LP_NWAY_CAPS) ? 1 : 0;
+		Adapter->param_lp_pause =
+		    (Adapter->phy_lp_able & NWAY_LPAR_PAUSE) ? 1 : 0;
+		Adapter->param_lp_asym_pause =
+		    (Adapter->phy_lp_able & NWAY_LPAR_ASM_DIR) ? 1 : 0;
+		Adapter->param_lp_1000fdx =
+		    (Adapter->phy_1000t_status & SR_1000T_LP_FD_CAPS) ? 1 : 0;
+		Adapter->param_lp_1000hdx =
+		    (Adapter->phy_1000t_status & SR_1000T_LP_HD_CAPS) ? 1 : 0;
+		Adapter->param_lp_100t4 =
+		    (Adapter->phy_lp_able & NWAY_LPAR_100T4_CAPS) ? 1 : 0;
+		Adapter->param_lp_100fdx =
+		    (Adapter->phy_lp_able & NWAY_LPAR_100TX_FD_CAPS) ? 1 : 0;
+		Adapter->param_lp_100hdx =
+		    (Adapter->phy_lp_able & NWAY_LPAR_100TX_HD_CAPS) ? 1 : 0;
+		Adapter->param_lp_10fdx =
+		    (Adapter->phy_lp_able & NWAY_LPAR_10T_FD_CAPS) ? 1 : 0;
+		Adapter->param_lp_10hdx =
+		    (Adapter->phy_lp_able & NWAY_LPAR_10T_HD_CAPS) ? 1 : 0;
+	} else {
+		/*
+		 * 1Gig Fiber adapter only offers 1Gig Full Duplex. Meaning,
+		 * it can only work with 1Gig Full Duplex Link Partner.
+		 */
+		Adapter->param_autoneg_cap = 0;
+		Adapter->param_pause_cap = 1;
+		Adapter->param_asym_pause_cap = 1;
+		Adapter->param_1000fdx_cap = 1;
+		Adapter->param_1000hdx_cap = 0;
+		Adapter->param_100t4_cap = 0;
+		Adapter->param_100fdx_cap = 0;
+		Adapter->param_100hdx_cap = 0;
+		Adapter->param_10fdx_cap = 0;
+		Adapter->param_10hdx_cap = 0;
+
+		Adapter->param_adv_autoneg = 0;
+		Adapter->param_adv_pause = 1;
+		Adapter->param_adv_asym_pause = 1;
+		Adapter->param_adv_1000fdx = 1;
+		Adapter->param_adv_1000hdx = 0;
+		Adapter->param_adv_100t4 = 0;
+		Adapter->param_adv_100fdx = 0;
+		Adapter->param_adv_100hdx = 0;
+		Adapter->param_adv_10fdx = 0;
+		Adapter->param_adv_10hdx = 0;
+
+		Adapter->param_lp_autoneg = 0;
+		Adapter->param_lp_pause = 0;
+		Adapter->param_lp_asym_pause = 0;
+		Adapter->param_lp_1000fdx = 0;
+		Adapter->param_lp_1000hdx = 0;
+		Adapter->param_lp_100t4 = 0;
+		Adapter->param_lp_100fdx = 0;
+		Adapter->param_lp_100hdx = 0;
+		Adapter->param_lp_10fdx = 0;
+		Adapter->param_lp_10hdx = 0;
 	}
-
-	Adapter->param_lp_autoneg =
-	    (Adapter->phy_an_exp & NWAY_ER_LP_NWAY_CAPS) ? 1 : 0;
-	Adapter->param_lp_pause =
-	    (Adapter->phy_lp_able & NWAY_LPAR_PAUSE) ? 1 : 0;
-	Adapter->param_lp_asym_pause =
-	    (Adapter->phy_lp_able & NWAY_LPAR_ASM_DIR) ? 1 : 0;
-	Adapter->param_lp_1000fdx =
-	    (Adapter->phy_1000t_status & SR_1000T_LP_FD_CAPS) ? 1 : 0;
-	Adapter->param_lp_1000hdx =
-	    (Adapter->phy_1000t_status & SR_1000T_LP_HD_CAPS) ? 1 : 0;
-	Adapter->param_lp_100t4 =
-	    (Adapter->phy_lp_able & NWAY_LPAR_100T4_CAPS) ? 1 : 0;
-	Adapter->param_lp_100fdx =
-	    (Adapter->phy_lp_able & NWAY_LPAR_100TX_FD_CAPS) ? 1 : 0;
-	Adapter->param_lp_100hdx =
-	    (Adapter->phy_lp_able & NWAY_LPAR_100TX_HD_CAPS) ? 1 : 0;
-	Adapter->param_lp_10fdx =
-	    (Adapter->phy_lp_able & NWAY_LPAR_10T_FD_CAPS) ? 1 : 0;
-	Adapter->param_lp_10hdx =
-	    (Adapter->phy_lp_able & NWAY_LPAR_10T_HD_CAPS) ? 1 : 0;
 }
 
 /*
@@ -5992,13 +6098,18 @@ e1000g_get_def_val(struct e1000g *Adapter, mac_prop_id_t pr_num,
     uint_t pr_valsize, void *pr_val)
 {
 	link_flowctrl_t fl;
+	struct e1000_hw *hw = &Adapter->shared;
 	int err = 0;
 
 	ASSERT(pr_valsize > 0);
 	switch (pr_num) {
 	case MAC_PROP_AUTONEG:
-		*(uint8_t *)pr_val =
-		    ((Adapter->phy_status & MII_SR_AUTONEG_CAPS) ? 1 : 0);
+		if (hw->phy.media_type != e1000_media_type_copper)
+			*(uint8_t *)pr_val = 0;
+		else
+			*(uint8_t *)pr_val =
+			    ((Adapter->phy_status & MII_SR_AUTONEG_CAPS)
+			    ? 1 : 0);
 		break;
 	case MAC_PROP_FLOWCTRL:
 		if (pr_valsize < sizeof (link_flowctrl_t))
@@ -6008,37 +6119,54 @@ e1000g_get_def_val(struct e1000g *Adapter, mac_prop_id_t pr_num,
 		break;
 	case MAC_PROP_ADV_1000FDX_CAP:
 	case MAC_PROP_EN_1000FDX_CAP:
-		*(uint8_t *)pr_val =
-		    ((Adapter->phy_ext_status & IEEE_ESR_1000T_FD_CAPS) ||
-		    (Adapter->phy_ext_status & IEEE_ESR_1000X_FD_CAPS)) ? 1 : 0;
+		if (hw->phy.media_type != e1000_media_type_copper)
+			*(uint8_t *)pr_val = 1;
+		else
+			*(uint8_t *)pr_val =
+			    ((Adapter->phy_ext_status &
+			    IEEE_ESR_1000T_FD_CAPS) ||
+			    (Adapter->phy_ext_status & IEEE_ESR_1000X_FD_CAPS))
+			    ? 1 : 0;
 		break;
 	case MAC_PROP_ADV_1000HDX_CAP:
 	case MAC_PROP_EN_1000HDX_CAP:
-		*(uint8_t *)pr_val =
-		    ((Adapter->phy_ext_status & IEEE_ESR_1000T_HD_CAPS) ||
-		    (Adapter->phy_ext_status & IEEE_ESR_1000X_HD_CAPS)) ? 1 : 0;
+		*(uint8_t *)pr_val = 0;
 		break;
 	case MAC_PROP_ADV_100FDX_CAP:
 	case MAC_PROP_EN_100FDX_CAP:
-		*(uint8_t *)pr_val =
-		    ((Adapter->phy_status & MII_SR_100X_FD_CAPS) ||
-		    (Adapter->phy_status & MII_SR_100T2_FD_CAPS)) ? 1 : 0;
+		if (hw->phy.media_type != e1000_media_type_copper)
+			*(uint8_t *)pr_val = 0;
+		else
+			*(uint8_t *)pr_val =
+			    ((Adapter->phy_status & MII_SR_100X_FD_CAPS) ||
+			    (Adapter->phy_status & MII_SR_100T2_FD_CAPS))
+			    ? 1 : 0;
 		break;
 	case MAC_PROP_ADV_100HDX_CAP:
 	case MAC_PROP_EN_100HDX_CAP:
-		*(uint8_t *)pr_val =
-		    ((Adapter->phy_status & MII_SR_100X_HD_CAPS) ||
-		    (Adapter->phy_status & MII_SR_100T2_HD_CAPS)) ? 1 : 0;
+		if (hw->phy.media_type != e1000_media_type_copper)
+			*(uint8_t *)pr_val = 0;
+		else
+			*(uint8_t *)pr_val =
+			    ((Adapter->phy_status & MII_SR_100X_HD_CAPS) ||
+			    (Adapter->phy_status & MII_SR_100T2_HD_CAPS))
+			    ? 1 : 0;
 		break;
 	case MAC_PROP_ADV_10FDX_CAP:
 	case MAC_PROP_EN_10FDX_CAP:
-		*(uint8_t *)pr_val =
-		    (Adapter->phy_status & MII_SR_10T_FD_CAPS) ? 1 : 0;
+		if (hw->phy.media_type != e1000_media_type_copper)
+			*(uint8_t *)pr_val = 0;
+		else
+			*(uint8_t *)pr_val =
+			    (Adapter->phy_status & MII_SR_10T_FD_CAPS) ? 1 : 0;
 		break;
 	case MAC_PROP_ADV_10HDX_CAP:
 	case MAC_PROP_EN_10HDX_CAP:
-		*(uint8_t *)pr_val =
-		    (Adapter->phy_status & MII_SR_10T_HD_CAPS) ? 1 : 0;
+		if (hw->phy.media_type != e1000_media_type_copper)
+			*(uint8_t *)pr_val = 0;
+		else
+			*(uint8_t *)pr_val =
+			    (Adapter->phy_status & MII_SR_10T_HD_CAPS) ? 1 : 0;
 		break;
 	default:
 		err = ENOTSUP;
@@ -6089,6 +6217,7 @@ e1000g_get_driver_control(struct e1000_hw *hw)
 	case e1000_ich8lan:
 	case e1000_ich9lan:
 	case e1000_ich10lan:
+	case e1000_pchlan:
 		ctrl_ext = E1000_READ_REG(hw, E1000_CTRL_EXT);
 		E1000_WRITE_REG(hw, E1000_CTRL_EXT,
 		    ctrl_ext | E1000_CTRL_EXT_DRV_LOAD);
@@ -6122,6 +6251,7 @@ e1000g_release_driver_control(struct e1000_hw *hw)
 	case e1000_ich8lan:
 	case e1000_ich9lan:
 	case e1000_ich10lan:
+	case e1000_pchlan:
 		ctrl_ext = E1000_READ_REG(hw, E1000_CTRL_EXT);
 		E1000_WRITE_REG(hw, E1000_CTRL_EXT,
 		    ctrl_ext & ~E1000_CTRL_EXT_DRV_LOAD);

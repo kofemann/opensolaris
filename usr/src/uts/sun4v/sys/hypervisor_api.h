@@ -110,8 +110,6 @@ extern "C" {
 
 #define	HV_MEM_SCRUB		0x31
 #define	HV_MEM_SYNC		0x32
-#define	HV_MEM_IFLUSH		0x33
-#define	HV_MEM_IFLUSH_ALL	0x34
 
 #define	HV_INTR_SEND		0x42
 
@@ -169,7 +167,14 @@ extern "C" {
 #define	MMU_STAT_AREA		0xfc
 #endif /* SET_MMU_STATS */
 
+#define	HV_TPM_GET		0x176
+#define	HV_TPM_PUT		0x177
+
 #define	HV_TM_ENABLE		0x180
+
+#define	GUEST_SUSPEND		0x181
+#define	TICK_SET_NPT		0x182
+#define	STICK_SET_NPT		0x183
 
 #define	HV_RA2PA		0x200
 #define	HV_HPRIV		0x201
@@ -199,12 +204,6 @@ extern "C" {
 #define	MAP_DTLB		0x1
 #define	MAP_ITLB		0x2
 
-/*
- * Definitions for TLB Search Order functions
- */
-#define	TLB_SO_DATA		0x1
-#define	TLB_SO_INS 		0x2
-#define	TLB_SO_ID 		TLB_SO_DATA | TLB_SO_INS
 
 /*
  * Interrupt state manipulation definitions.
@@ -325,7 +324,6 @@ struct mmu_stat {
  */
 #define	HVIO_DMA_SYNC_DIR_TO_DEV		0x01
 #define	HVIO_DMA_SYNC_DIR_FROM_DEV		0x02
-#define	HVIO_DMA_SYNC_DIR_NO_ICACHE_FLUSH	0x04
 
 /*
  * LDC Channel States
@@ -360,9 +358,6 @@ extern uint64_t hv_mem_scrub(uint64_t real_addr, uint64_t length,
     uint64_t *scrubbed_len);
 extern uint64_t hv_mem_sync(uint64_t real_addr, uint64_t length,
     uint64_t *flushed_len);
-extern uint64_t hv_mem_iflush(uint64_t real_addr, uint64_t length,
-    uint64_t *flushed_len);
-extern uint64_t hv_mem_iflush_all(void);
 extern uint64_t hv_tm_enable(uint64_t enable);
 
 extern uint64_t hv_service_recv(uint64_t s_id, uint64_t buf_pa,
@@ -450,6 +445,10 @@ extern uint64_t hvldc_intr_gettarget(uint64_t dev_hdl, uint32_t devino,
     uint32_t *cpuid);
 extern uint64_t hvldc_intr_settarget(uint64_t dev_hdl, uint32_t devino,
     uint32_t cpuid);
+
+extern uint64_t	hv_guest_suspend(void);
+extern uint64_t	hv_tick_set_npt(uint64_t npt);
+extern uint64_t	hv_stick_set_npt(uint64_t npt);
 
 #endif /* ! _ASM */
 

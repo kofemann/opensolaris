@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <stdio.h>
 #include <sys/types.h>
@@ -3399,6 +3397,18 @@ parse_port(int type, char *port_str, ips_conf_t *conf)
 	return (0);
 }
 
+static boolean_t
+combined_mode(ips_act_props_t *iap)
+{
+	struct ipsecalgent *alg;
+
+	alg = getipsecalgbynum(iap->iap_eencr.alg_id, IPSEC_PROTO_ESP, NULL);
+	if (alg != NULL)
+		freeipsecalgent(alg);
+
+	return (ALG_FLAG_COMBINED & alg->a_alg_flags);
+}
+
 static int
 valid_algorithm(int proto_num, const char *str)
 {
@@ -3446,6 +3456,7 @@ static int
 parse_ipsec_alg(char *str, ips_act_props_t *iap, int alg_type)
 {
 	int alg_value;
+	int remainder;
 	char tstr[VALID_ALG_LEN];
 	char *lens = NULL;
 	char *l1_str;
@@ -3461,8 +3472,10 @@ parse_ipsec_alg(char *str, ips_act_props_t *iap, int alg_type)
 	 * Make sure that we get a null terminated string.
 	 * For a bad input, we truncate at VALID_ALG_LEN.
 	 */
+	remainder = strlen(str);
 	(void) strlcpy(tstr, str, VALID_ALG_LEN);
 	lens = strtok(tstr, "()");
+	remainder -= strlen(lens);
 	lens = strtok(NULL, "()");
 
 	if (lens != NULL) {
@@ -3470,6 +3483,15 @@ parse_ipsec_alg(char *str, ips_act_props_t *iap, int alg_type)
 		int len2 = SPD_MAX_MAXBITS;
 		int len_all = strlen(lens);
 		int dot_start = (lens[0] == '.');
+
+		/*
+		 * Check to see if the keylength arg is at the end of the
+		 * token, the "()" is 2 characters.
+		 */
+		remainder -= strlen(lens);
+		if (remainder > 2)
+			return (1);
+
 		l1_str = strtok(lens, ".");
 		l2_str = strtok(NULL, ".");
 		if (l1_str != NULL) {
@@ -4151,7 +4173,8 @@ form_ipsec_conf(act_prop_t *act_props, ips_conf_t *cptr)
 	int tok_count = 0;
 	struct protoent *pent;
 	boolean_t saddr, daddr, ipsec_aalg, ipsec_ealg, ipsec_eaalg, dir;
-	boolean_t old_style, new_style;
+	boolean_t old_style, new_style, auth_covered, is_no_alg;
+	boolean_t is_combined_mode;
 	struct in_addr mask;
 	int line_no;
 	int ret;
@@ -4179,7 +4202,7 @@ form_ipsec_conf(act_prop_t *act_props, ips_conf_t *cptr)
 
 	(void) memset(cptr, 0, sizeof (ips_conf_t));
 	saddr = daddr = ipsec_aalg = ipsec_ealg = ipsec_eaalg = dir = B_FALSE;
-	old_style = new_style = B_FALSE;
+	old_style = new_style = is_no_alg = is_combined_mode = B_FALSE;
 	/*
 	 * Get the Pattern. NULL pattern is valid.
 	 */
@@ -4735,7 +4758,7 @@ form_ipsec_conf(act_prop_t *act_props, ips_conf_t *cptr)
 			new_style = B_TRUE;
 		}
 
-		ipsec_aalg = ipsec_ealg = ipsec_eaalg = B_FALSE;
+		ipsec_aalg = ipsec_ealg = ipsec_eaalg = auth_covered = B_FALSE;
 		tok_count = 0;
 
 		for (k = 0; action_table[k].string; k++) {
@@ -4792,7 +4815,8 @@ form_ipsec_conf(act_prop_t *act_props, ips_conf_t *cptr)
 				    |SPD_RULE_FLAG_OUTBOUND;
 			break;
 		case TOK_bypass:
-			/* do something? */
+		case TOK_drop:
+			is_no_alg = B_TRUE;
 			break;
 		}
 
@@ -4846,6 +4870,7 @@ form_ipsec_conf(act_prop_t *act_props, ips_conf_t *cptr)
 					return (-1);
 				}
 				ipsec_aalg = B_TRUE;
+				auth_covered = B_TRUE;
 				break;
 			case SPD_ATTR_ESP_ENCR:
 				/*
@@ -4877,6 +4902,7 @@ form_ipsec_conf(act_prop_t *act_props, ips_conf_t *cptr)
 					    IPSEC_CONF_IPSEC_EALGS, line_no);
 					return (-1);
 				}
+				is_combined_mode = combined_mode(iap);
 				ipsec_ealg = B_TRUE;
 				break;
 			case SPD_ATTR_ESP_AUTH:
@@ -4911,6 +4937,7 @@ form_ipsec_conf(act_prop_t *act_props, ips_conf_t *cptr)
 					return (-1);
 				}
 				ipsec_eaalg = B_TRUE;
+				auth_covered = B_TRUE;
 				break;
 			case IPS_SA:
 				i++, line_no++;
@@ -4977,6 +5004,25 @@ form_ipsec_conf(act_prop_t *act_props, ips_conf_t *cptr)
 
 				break;
 			}
+		}
+
+		if (is_combined_mode) {
+			if (ipsec_eaalg) {
+				warnx(gettext("ERROR: Rule on line %d: "
+				    "Combined mode and esp authentication not "
+				    "supported together."),
+				    arg_indices[line_no] == 0 ? 1 :
+				    arg_indices[line_no]);
+				return (-1);
+			}
+			auth_covered = B_TRUE;
+		}
+		/* Warn here about no authentication! */
+		if (!auth_covered && !is_no_alg) {
+			warnx(gettext("DANGER:  Rule on line %d "
+			    "has encryption with no authentication."),
+			    arg_indices[line_no] == 0 ? 1 :
+			    arg_indices[line_no]);
 		}
 
 		if (!ipsec_ealg && ipsec_eaalg) {

@@ -586,10 +586,11 @@ iscsi_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			    ihp->hba_isid[5]);
 
 			if (ddi_prop_update_string(DDI_DEV_T_NONE, dip,
-			    "initiator-port", init_port_name) !=
+			    SCSI_ADDR_PROP_INITIATOR_PORT, init_port_name) !=
 			    DDI_PROP_SUCCESS) {
 				cmn_err(CE_WARN, "iscsi_attach: Creating "
-				    "initiator-port property on iSCSI "
+				    SCSI_ADDR_PROP_INITIATOR_PORT
+				    " property on iSCSI "
 				    "HBA(%s) with dip(%d) Failed",
 				    (char *)ihp->hba_name,
 				    ddi_get_instance(dip));
@@ -1758,10 +1759,10 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 		    ihp->hba_isid[5]);
 
 		if (ddi_prop_update_string(DDI_DEV_T_NONE,
-		    ihp->hba_dip, "initiator-port",
+		    ihp->hba_dip, SCSI_ADDR_PROP_INITIATOR_PORT,
 		    init_port_name) != DDI_PROP_SUCCESS) {
 			cmn_err(CE_WARN, "iscsi_ioctl: Updating "
-			    "initiator-port property on iSCSI "
+			    SCSI_ADDR_PROP_INITIATOR_PORT " property on iSCSI "
 			    "HBA(%s) with dip(%d) Failed",
 			    (char *)ihp->hba_name,
 			    ddi_get_instance(ihp->hba_dip));
@@ -1886,8 +1887,13 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 
 		if ((e.e_oid != ihp->hba_oid) &&
 		    (e.e_oid != ISCSI_OID_NOTSET)) {
+			boolean_t rval1, rval2, rval3;
 			uchar_t	    *t_name;
 			iscsi_sess_t *t_isp;
+			boolean_t    t_rtn = B_TRUE;
+			persistent_param_t  t_param;
+			iscsi_config_sess_t t_ics;
+			persistent_tunable_param_t t_tpsg;
 
 			rw_enter(&ihp->hba_sess_list_rwlock, RW_READER);
 			/*
@@ -1924,6 +1930,22 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 			name = kmem_zalloc(ISCSI_MAX_NAME_LEN, KM_SLEEP);
 			(void) strncpy((char *)name, (char *)t_name,
 			    ISCSI_MAX_NAME_LEN);
+
+			t_ics.ics_in = 1;
+			rval1 = persistent_param_get((char *)name, &t_param);
+			rval2 = persistent_get_config_session((char *)name,
+			    &t_ics);
+			rval3 = persistent_get_tunable_param((char *)name,
+			    &t_tpsg);
+
+			if ((rval1 == B_FALSE) && (rval2 == B_FALSE) &&
+			    (rval3 == B_FALSE)) {
+				/* no any target parameters get */
+				kmem_free(name, ISCSI_MAX_NAME_LEN);
+				rw_exit(&ihp->hba_sess_list_rwlock);
+				rtn = EIO;
+				break;
+			}
 
 			if (persistent_param_clear((char *)name) == B_FALSE) {
 				kmem_free(name, ISCSI_MAX_NAME_LEN);
@@ -1976,14 +1998,8 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 						 */
 						if (!ISCSI_SUCCESS(
 						    iscsi_sess_destroy(isp))) {
-							kmem_free(ics,
-							    sizeof (*ics));
-							kmem_free(name,
-							    ISCSI_MAX_NAME_LEN);
-						rw_exit(&ihp->
-						    hba_sess_list_rwlock);
-							rtn = EBUSY;
-							break;
+							t_rtn = B_FALSE;
+							continue;
 						}
 						isp = ihp->hba_sess_list;
 					} else {
@@ -2016,6 +2032,38 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 						    sess_state_mutex);
 					}
 				}
+			}
+			if (t_rtn == B_FALSE) {
+				boolean_t t_rval = B_TRUE;
+				/* Failure!, restore target's parameters */
+				if (rval1 == B_TRUE) {
+					rval1 = persistent_param_set(
+					    (char *)name, &t_param);
+					if (rval1 == B_FALSE) {
+						t_rval = B_FALSE;
+					}
+				}
+				if (rval2 == B_TRUE) {
+					rval2 = persistent_set_config_session(
+					    (char *)name, &t_ics);
+					if (rval2 == B_FALSE) {
+						t_rval = B_FALSE;
+					}
+				}
+				if (rval3 == B_TRUE) {
+					rval3 = persistent_set_tunable_param(
+					    (char *)name, &t_tpsg);
+					if (rval3 == B_FALSE) {
+						t_rval = B_FALSE;
+					}
+				}
+				if (t_rval == B_FALSE) {
+					cmn_err(CE_WARN, "Failed to restore "
+					    "target's parameters after remove "
+					    "session related to target "
+					    "parameters failure.");
+				}
+				rtn = EBUSY;
 			}
 			kmem_free(ics, sizeof (*ics));
 			kmem_free(name, ISCSI_MAX_NAME_LEN);
@@ -2487,8 +2535,6 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 			}
 
 			if (name == NULL) {
-				rw_exit(
-				    &ihp->hba_sess_list_rwlock);
 				rtn = EFAULT;
 				break;
 			}
@@ -2588,7 +2634,8 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 			break;
 		}
 
-		if (target->te_entry.e_vers != ISCSI_INTERFACE_VERSION) {
+		if ((target->te_entry.e_vers != ISCSI_INTERFACE_VERSION) ||
+		    (target->te_entry.e_insize == 0)) {
 			kmem_free(target, sizeof (*target));
 			rtn = EINVAL;
 			break;
@@ -3726,8 +3773,6 @@ iscsi_ioctl(dev_t dev, int cmd, intptr_t arg, int mode,
 		}
 
 		if (name == NULL) {
-			rw_exit(
-			    &ihp->hba_sess_list_rwlock);
 			rtn = EFAULT;
 			break;
 		}
@@ -4709,10 +4754,11 @@ iscsi_virt_lun_init(dev_info_t *hba_dip, dev_info_t *lun_dip,
 		    ilp->lun_sess->sess_name, ilp->lun_sess->sess_tpgt_conf);
 	}
 
-	if (mdi_prop_update_string(pip, "target-port",
-	    target_port_name) != DDI_PROP_SUCCESS) {
-		cmn_err(CE_WARN, "iscsi_virt_lun_init: Creating 'target-port' "
-		"property on Path(%p) for Target(%s), Lun(%d) Failed",
+	if (mdi_prop_update_string(pip,
+	    SCSI_ADDR_PROP_TARGET_PORT, target_port_name) != DDI_PROP_SUCCESS) {
+		cmn_err(CE_WARN, "iscsi_virt_lun_init: Creating '"
+		    SCSI_ADDR_PROP_TARGET_PORT "' property on Path(%p) "
+		    "for Target(%s), Lun(%d) Failed",
 		    (void *)pip, ilp->lun_sess->sess_name, ilp->lun_num);
 	}
 
@@ -4825,10 +4871,10 @@ iscsi_phys_lun_init(dev_info_t *hba_dip, dev_info_t *lun_dip,
 	}
 
 	if (ddi_prop_update_string(DDI_DEV_T_NONE, lun_dip,
-	    "target-port", target_port_name) != DDI_PROP_SUCCESS) {
-		cmn_err(CE_WARN, "iscsi_phys_lun_init: Creating 'target-port' "
-		    "property on Target(%s), Lun(%d) Failed",
-		    ilp->lun_sess->sess_name, ilp->lun_num);
+	    SCSI_ADDR_PROP_TARGET_PORT, target_port_name) != DDI_PROP_SUCCESS) {
+		cmn_err(CE_WARN, "iscsi_phys_lun_init: Creating '"
+		    SCSI_ADDR_PROP_TARGET_PORT "' property on Target(%s), "
+		    "Lun(%d) Failed", ilp->lun_sess->sess_name, ilp->lun_num);
 	}
 
 	return (rtn);

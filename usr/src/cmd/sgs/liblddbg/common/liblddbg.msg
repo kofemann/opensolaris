@@ -953,6 +953,7 @@
 			 discarded file=%s"
 @ MSG_SYM_DISCARD_DUP	"symbol[%d]=%s;  discarded duplicate: originates from \
 			 file=%s"
+@ MSG_SYM_WRAP		"symbol[%d]=%s renamed to %s (-z wrap)"
 
 @ MSG_SYM_AOUT		"symbol=%s;  (original AOUT name)"
 @ MSG_SYM_LOOKUP	"symbol=%s;  lookup in file=%s  [ %s ]"
@@ -1115,7 +1116,6 @@
 
 @ MSG_CAP_HWFILTR_1	"dir=%s;  hardware capability directory filtered by %s"
 @ MSG_CAP_HWFILTR_2	"dir=%s;  no hardware capability objects found"
-
 
 
 @ MSG_ELF_HEADER	"ELF Header"
@@ -1291,10 +1291,11 @@
 			 offset     addend  section        symbol"
 @ MSG_REL_LDSN_TITLE_32	"         type                       \
 			 offset             section        symbol"
-@ MSG_REL_LDSV_TITLE_32	"         type                       \
-			 offset      value  section        symbol"
 @ MSG_REL_LDSA_ENTRY_32	" %5s %-24s %#10llx %#10llx  %-14.14s %s  %s"
 @ MSG_REL_LDSN_ENTRY_32	" %5s %-24s %#10llx             %-14.14s %s  %s"
+
+@ MSG_REL_LDSV_TITLE_32	"         type                       \
+			 offset      value  section        symbol"
 
 # TRANSLATION_NOTE - the following strings are used by ld(1).  These strings
 # provide for a series of one or more 32-bit relocation table entries, using
@@ -1304,11 +1305,11 @@
 			 offset     addend  section / symbol"
 @ MSG_REL_LDLN_TITLE_32	"         type                       \
 			 offset             section / symbol"
-@ MSG_REL_LDLV_TITLE_32	"         type                       \
-			 offset      value  section / symbol"
 @ MSG_REL_LDLA_ENTRY_32	" %5s %-24s %#10llx %#10llx  %-14s %s  %s"
 @ MSG_REL_LDLN_ENTRY_32	" %5s %-24s %#10llx             %-14s %s  %s"
 
+@ MSG_REL_LDLV_TITLE_32	"         type                       \
+			 offset      value  section / symbol"
 
 # TRANSLATION_NOTE - the following strings are used by elfdump(1).  These
 # strings provide for a series of one or more 64-bit relocation table entries,
@@ -1355,10 +1356,11 @@
 			 offset             addend  section        symbol"
 @ MSG_REL_LDSN_TITLE_64	"         type                               \
 			 offset                     section        symbol"
-@ MSG_REL_LDSV_TITLE_64	"         type                               \
-			 offset              value  section        symbol"
 @ MSG_REL_LDSA_ENTRY_64	" %5s %-24s %#18llx %#18llx  %-14.14s %s  %s"
 @ MSG_REL_LDSN_ENTRY_64	" %5s %-24s %#18llx                     %-14.14s %s  %s"
+
+@ MSG_REL_LDSV_TITLE_64	"         type                               \
+			 offset              value  section        symbol"
 
 # TRANSLATION_NOTE - the following strings are used by ld(1).  These strings
 # provide for a series of one or more 64-bit relocation table entries, using
@@ -1368,10 +1370,11 @@
 			 offset             addend  section / symbol"
 @ MSG_REL_LDLN_TITLE_64	"         type                               \
 			 offset                     section / symbol"
-@ MSG_REL_LDLV_TITLE_64	"         type                               \
-			 offset              value  section / symbol"
 @ MSG_REL_LDLA_ENTRY_64	" %5s %-24s %#18llx %#18llx  %-14s %s  %s"
 @ MSG_REL_LDLN_ENTRY_64	" %5s %-24s %#18llx                     %-14s %s  %s"
+
+@ MSG_REL_LDLV_TITLE_64	"         type                               \
+			 offset              value  section / symbol"
 
 @ _END_
 

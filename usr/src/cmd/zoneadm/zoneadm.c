@@ -64,8 +64,6 @@
 #include <limits.h>
 #include <dirent.h>
 #include <uuid/uuid.h>
-#include <libdlpi.h>
-
 #include <fcntl.h>
 #include <door.h>
 #include <macros.h>
@@ -76,11 +74,12 @@
 #include <libscf.h>
 #include <procfs.h>
 #include <strings.h>
-
 #include <pool.h>
 #include <sys/pool.h>
 #include <sys/priocntl.h>
 #include <sys/fsspriocntl.h>
+#include <libdladm.h>
+#include <libdllink.h>
 
 #include "zoneadm.h"
 
@@ -163,6 +162,7 @@ static int detach_func(int argc, char *argv[]);
 static int attach_func(int argc, char *argv[]);
 static int mark_func(int argc, char *argv[]);
 static int apply_func(int argc, char *argv[]);
+static int sysboot_func(int argc, char *argv[]);
 static int sanity_check(char *zone, int cmd_num, boolean_t running,
     boolean_t unsafe_when_running, boolean_t force);
 static int cmd_match(char *cmd);
@@ -189,7 +189,8 @@ static struct cmd cmdtab[] = {
 	{ CMD_DETACH,		"detach",	SHELP_DETACH,	detach_func },
 	{ CMD_ATTACH,		"attach",	SHELP_ATTACH,	attach_func },
 	{ CMD_MARK,		"mark",		SHELP_MARK,	mark_func },
-	{ CMD_APPLY,		"apply",	NULL,		apply_func }
+	{ CMD_APPLY,		"apply",	NULL,		apply_func },
+	{ CMD_SYSBOOT,		"sysboot",	NULL,		sysboot_func }
 };
 
 /* global variables */
@@ -197,6 +198,7 @@ static struct cmd cmdtab[] = {
 /* set early in main(), never modified thereafter, used all over the place */
 static char *execname;
 static char target_brand[MAXNAMELEN];
+static char default_brand[MAXPATHLEN];
 static char *locale;
 char *target_zone;
 static char *target_uuid;
@@ -524,7 +526,7 @@ lookup_zone_info(const char *zone_name, zoneid_t zid, zone_entry_t *zent)
 	 */
 	if (getzoneid() != GLOBAL_ZONEID) {
 		assert(is_system_labeled() != 0);
-		(void) strlcpy(zent->zbrand, NATIVE_BRAND_NAME,
+		(void) strlcpy(zent->zbrand, default_brand,
 		    sizeof (zent->zbrand));
 	} else if (zone_get_brand(zent->zname, zent->zbrand,
 	    sizeof (zent->zbrand)) != Z_OK) {
@@ -1698,6 +1700,14 @@ sanity_check(char *zone, int cmd_num, boolean_t running,
 				return (Z_ERR);
 			}
 			break;
+		case CMD_SYSBOOT:
+			if (state != ZONE_STATE_INSTALLED) {
+				zerror(gettext("%s operation is invalid for %s "
+				    "zones."), cmd_to_str(cmd_num),
+				    zone_state_str(state));
+				return (Z_ERR);
+			}
+			break;
 		}
 	}
 	return (Z_OK);
@@ -2483,7 +2493,10 @@ verify_handle(int cmd_num, zone_dochandle_t handle, char *argv[])
 	int err;
 	boolean_t in_alt_root;
 	zone_iptype_t iptype;
-	dlpi_handle_t dh;
+	dladm_handle_t dh;
+	dladm_status_t status;
+	datalink_id_t linkid;
+	char errmsg[DLADM_STRSIZE];
 
 	in_alt_root = zonecfg_in_alt_root();
 	if (in_alt_root)
@@ -2556,27 +2569,25 @@ verify_handle(int cmd_num, zone_dochandle_t handle, char *argv[])
 			}
 
 			/*
-			 * Verify that the physical interface can be opened.
+			 * Verify that the datalink exists and that it isn't
+			 * already assigned to a zone.
 			 */
-			err = dlpi_open(nwiftab.zone_nwif_physical, &dh, 0);
-			if (err != DLPI_SUCCESS) {
+			if ((status = dladm_open(&dh)) == DLADM_STATUS_OK) {
+				status = dladm_name2info(dh,
+				    nwiftab.zone_nwif_physical, &linkid, NULL,
+				    NULL, NULL);
+				dladm_close(dh);
+			}
+			if (status != DLADM_STATUS_OK) {
 				(void) fprintf(stderr,
 				    gettext("WARNING: skipping network "
-				    "interface '%s' which cannot be opened: "
-				    "dlpi error (%s).\n"),
+				    "interface '%s': %s\n"),
 				    nwiftab.zone_nwif_physical,
-				    dlpi_strerror(err));
+				    dladm_status2str(status, errmsg));
 				break;
-			} else {
-				dlpi_close(dh);
 			}
-			/*
-			 * Verify whether the physical interface is already
-			 * used by a zone.
-			 */
 			dl_owner_zid = ALL_ZONES;
-			if (zone_check_datalink(&dl_owner_zid,
-			    nwiftab.zone_nwif_physical) != 0)
+			if (zone_check_datalink(&dl_owner_zid, linkid) != 0)
 				break;
 
 			/*
@@ -5402,6 +5413,77 @@ apply_func(int argc, char *argv[])
 	return (res);
 }
 
+/*
+ * This is an undocumented interface that is invoked by the zones SMF service
+ * for installed zones that won't automatically boot.
+ */
+/* ARGSUSED */
+static int
+sysboot_func(int argc, char *argv[])
+{
+	int err;
+	zone_dochandle_t zone_handle;
+	brand_handle_t brand_handle;
+	char cmdbuf[MAXPATHLEN];
+	char zonepath[MAXPATHLEN];
+
+	/*
+	 * This subcommand can only be executed in the global zone on non-global
+	 * zones.
+	 */
+	if (zonecfg_in_alt_root())
+		return (usage(B_FALSE));
+	if (sanity_check(target_zone, CMD_SYSBOOT, B_FALSE, B_TRUE, B_FALSE) !=
+	    Z_OK)
+		return (Z_ERR);
+
+	/*
+	 * Fetch the sysboot hook from the target zone's brand.
+	 */
+	if ((zone_handle = zonecfg_init_handle()) == NULL) {
+		zperror(cmd_to_str(CMD_SYSBOOT), B_TRUE);
+		return (Z_ERR);
+	}
+	if ((err = zonecfg_get_handle(target_zone, zone_handle)) != Z_OK) {
+		errno = err;
+		zperror(cmd_to_str(CMD_SYSBOOT), B_TRUE);
+		zonecfg_fini_handle(zone_handle);
+		return (Z_ERR);
+	}
+	if ((err = zonecfg_get_zonepath(zone_handle, zonepath,
+	    sizeof (zonepath))) != Z_OK) {
+		errno = err;
+		zperror(cmd_to_str(CMD_SYSBOOT), B_TRUE);
+		zonecfg_fini_handle(zone_handle);
+		return (Z_ERR);
+	}
+	if ((brand_handle = brand_open(target_brand)) == NULL) {
+		zerror(gettext("missing or invalid brand during %s operation: "
+		    "%s"), cmd_to_str(CMD_SYSBOOT), target_brand);
+		zonecfg_fini_handle(zone_handle);
+		return (Z_ERR);
+	}
+	err = get_hook(brand_handle, cmdbuf, sizeof (cmdbuf), brand_get_sysboot,
+	    target_zone, zonepath);
+	brand_close(brand_handle);
+	zonecfg_fini_handle(zone_handle);
+	if (err != Z_OK) {
+		zerror(gettext("unable to get brand hook from brand %s for %s "
+		    "operation"), target_brand, cmd_to_str(CMD_SYSBOOT));
+		return (Z_ERR);
+	}
+
+	/*
+	 * If the hook wasn't defined (which is OK), then indicate success and
+	 * return.  Otherwise, execute the hook.
+	 */
+	if (cmdbuf[0] != '\0')
+		return ((subproc_status(gettext("brand sysboot operation"),
+		    do_subproc(cmdbuf), B_FALSE) == ZONE_SUBPROC_OK) ? Z_OK :
+		    Z_BRAND_ERROR);
+	return (Z_OK);
+}
+
 static int
 help_func(int argc, char *argv[])
 {
@@ -5570,6 +5652,13 @@ main(int argc, char **argv)
 	 */
 	zonecfg_init_lock_file(target_zone, &zone_lock_env);
 
+	/* Figure out what the system's default brand is */
+	if (zonecfg_default_brand(default_brand,
+	    sizeof (default_brand)) != Z_OK) {
+		zerror(gettext("unable to determine default brand"));
+		return (Z_ERR);
+	}
+
 	/*
 	 * If we are going to be operating on a single zone, retrieve its
 	 * brand type and determine whether it is native or not.
@@ -5580,6 +5669,20 @@ main(int argc, char **argv)
 		    sizeof (target_brand)) != Z_OK) {
 			zerror(gettext("missing or invalid brand"));
 			exit(Z_ERR);
+		}
+		/*
+		 * In the alternate root environment, the only supported
+		 * operations are mount and unmount.  In this case, just treat
+		 * the zone as native if it is cluster.  Cluster zones can be
+		 * native for the purpose of LU or upgrade, and the cluster
+		 * brand may not exist in the miniroot (such as in net install
+		 * upgrade).
+		 */
+		if (strcmp(target_brand, CLUSTER_BRAND_NAME) == 0) {
+			if (zonecfg_in_alt_root()) {
+				(void) strlcpy(target_brand, default_brand,
+				    sizeof (target_brand));
+			}
 		}
 	}
 

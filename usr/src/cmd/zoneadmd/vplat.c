@@ -1037,8 +1037,8 @@ mount_one_dev_symlink_cb(void *arg, const char *source, const char *target)
 	return (di_prof_add_symlink(prof, source, target));
 }
 
-static int
-get_iptype(zlog_t *zlogp, zone_iptype_t *iptypep)
+int
+vplat_get_iptype(zlog_t *zlogp, zone_iptype_t *iptypep)
 {
 	zone_dochandle_t handle;
 
@@ -1085,17 +1085,13 @@ mount_one_dev(zlog_t *zlogp, char *devpath, zone_mnt_t mount_cmd)
 
 	/*
 	 * Get a handle to the brand info for this zone.
-	 * If we are mounting the zone, then we must always use the native
+	 * If we are mounting the zone, then we must always use the default
 	 * brand device mounts.
 	 */
 	if (ALT_MOUNT(mount_cmd)) {
-		(void) strlcpy(brand, NATIVE_BRAND_NAME, sizeof (brand));
+		(void) strlcpy(brand, default_brand, sizeof (brand));
 	} else {
-		if (zone_get_brand(zone_name, brand, sizeof (brand)) != Z_OK) {
-			zerror(zlogp, B_FALSE,
-			    "unable to determine zone brand");
-			goto cleanup;
-		}
+		(void) strlcpy(brand, brand_name, sizeof (brand));
 	}
 
 	if ((bh = brand_open(brand)) == NULL) {
@@ -1103,7 +1099,7 @@ mount_one_dev(zlog_t *zlogp, char *devpath, zone_mnt_t mount_cmd)
 		goto cleanup;
 	}
 
-	if (get_iptype(zlogp, &iptype) < 0) {
+	if (vplat_get_iptype(zlogp, &iptype) < 0) {
 		zerror(zlogp, B_TRUE, "unable to determine ip-type");
 		goto cleanup;
 	}
@@ -1763,18 +1759,13 @@ mount_filesystems(zlog_t *zlogp, zone_mnt_t mount_cmd)
 	}
 
 	/*
-	 * If we are mounting the zone, then we must always use the native
+	 * If we are mounting the zone, then we must always use the default
 	 * brand global mounts.
 	 */
 	if (ALT_MOUNT(mount_cmd)) {
-		(void) strlcpy(brand, NATIVE_BRAND_NAME, sizeof (brand));
+		(void) strlcpy(brand, default_brand, sizeof (brand));
 	} else {
-		if (zone_get_brand(zone_name, brand, sizeof (brand)) != Z_OK) {
-			zerror(zlogp, B_FALSE,
-			    "unable to determine zone brand");
-			zonecfg_fini_handle(handle);
-			return (-1);
-		}
+		(void) strlcpy(brand, brand_name, sizeof (brand));
 	}
 
 	/* Get a handle to the brand info for this zone */
@@ -2535,7 +2526,7 @@ zdlerror(zlog_t *zlogp, dladm_status_t err, const char *dlname, const char *str)
 }
 
 static int
-add_datalink(zlog_t *zlogp, char *zone_name, char *dlname)
+add_datalink(zlog_t *zlogp, char *zone_name, datalink_id_t linkid, char *dlname)
 {
 	dladm_status_t err;
 
@@ -2548,25 +2539,11 @@ add_datalink(zlog_t *zlogp, char *zone_name, char *dlname)
 	}
 
 	/* Set zoneid of this link. */
-	err = dladm_setzid(dld_handle, dlname, zone_name);
+	err = dladm_set_linkprop(dld_handle, linkid, "zone", &zone_name, 1,
+	    DLADM_OPT_ACTIVE);
 	if (err != DLADM_STATUS_OK) {
 		zdlerror(zlogp, err, dlname,
 		    "WARNING: unable to add network interface");
-		return (-1);
-	}
-
-	return (0);
-}
-
-static int
-remove_datalink(zlog_t *zlogp, char *dlname)
-{
-	dladm_status_t err;
-
-	err = dladm_setzid(dld_handle, dlname, GLOBAL_ZONENAME);
-	if (err != DLADM_STATUS_OK) {
-		zdlerror(zlogp, err, dlname,
-		    "unable to release network interface");
 		return (-1);
 	}
 	return (0);
@@ -2584,6 +2561,7 @@ configure_exclusive_network_interfaces(zlog_t *zlogp)
 	struct zone_nwiftab nwiftab;
 	char rootpath[MAXPATHLEN];
 	char path[MAXPATHLEN];
+	datalink_id_t linkid;
 	di_prof_t prof = NULL;
 	boolean_t added = B_FALSE;
 
@@ -2637,8 +2615,10 @@ configure_exclusive_network_interfaces(zlog_t *zlogp)
 		 * created in that case.  The /dev/net entry is always
 		 * accessible.
 		 */
-		if (add_datalink(zlogp, zone_name, nwiftab.zone_nwif_physical)
-		    == 0) {
+		if (dladm_name2info(dld_handle, nwiftab.zone_nwif_physical,
+		    &linkid, NULL, NULL, NULL) == DLADM_STATUS_OK &&
+		    add_datalink(zlogp, zone_name, linkid,
+		    nwiftab.zone_nwif_physical) == 0) {
 			added = B_TRUE;
 		} else {
 			(void) zonecfg_endnwifent(handle);
@@ -2662,104 +2642,25 @@ configure_exclusive_network_interfaces(zlog_t *zlogp)
 	return (0);
 }
 
-/*
- * Get the list of the data-links from kernel, and try to remove it
- */
 static int
-unconfigure_exclusive_network_interfaces_run(zlog_t *zlogp, zoneid_t zoneid)
+unconfigure_exclusive_network_interfaces(zlog_t *zlogp, zoneid_t zoneid)
 {
-	char *dlnames, *ptr;
-	int dlnum, dlnum_saved, i;
+	int dlnum = 0;
 
-	dlnum = 0;
+	/*
+	 * The kernel shutdown callback for the dls module should have removed
+	 * all datalinks from this zone.  If any remain, then there's a
+	 * problem.
+	 */
 	if (zone_list_datalink(zoneid, &dlnum, NULL) != 0) {
 		zerror(zlogp, B_TRUE, "unable to list network interfaces");
 		return (-1);
 	}
-again:
-	/* this zone doesn't have any data-links */
-	if (dlnum == 0)
-		return (0);
-
-	dlnames = malloc(dlnum * LIFNAMSIZ);
-	if (dlnames == NULL) {
-		zerror(zlogp, B_TRUE, "memory allocation failed");
+	if (dlnum != 0) {
+		zerror(zlogp, B_FALSE,
+		    "datalinks remain in zone after shutdown");
 		return (-1);
 	}
-	dlnum_saved = dlnum;
-
-	if (zone_list_datalink(zoneid, &dlnum, dlnames) != 0) {
-		zerror(zlogp, B_TRUE, "unable to list network interfaces");
-		free(dlnames);
-		return (-1);
-	}
-	if (dlnum_saved < dlnum) {
-		/* list increased, try again */
-		free(dlnames);
-		goto again;
-	}
-	ptr = dlnames;
-	for (i = 0; i < dlnum; i++) {
-		/* Remove access control information */
-		if (remove_datalink(zlogp, ptr) != 0) {
-			free(dlnames);
-			return (-1);
-		}
-		ptr += LIFNAMSIZ;
-	}
-	free(dlnames);
-	return (0);
-}
-
-/*
- * Get the list of the data-links from configuration, and try to remove it
- */
-static int
-unconfigure_exclusive_network_interfaces_static(zlog_t *zlogp)
-{
-	zone_dochandle_t handle;
-	struct zone_nwiftab nwiftab;
-
-	if ((handle = zonecfg_init_handle()) == NULL) {
-		zerror(zlogp, B_TRUE, "getting zone configuration handle");
-		return (-1);
-	}
-	if (zonecfg_get_snapshot_handle(zone_name, handle) != Z_OK) {
-		zerror(zlogp, B_FALSE, "invalid configuration");
-		zonecfg_fini_handle(handle);
-		return (-1);
-	}
-	if (zonecfg_setnwifent(handle) != Z_OK) {
-		zonecfg_fini_handle(handle);
-		return (0);
-	}
-	for (;;) {
-		if (zonecfg_getnwifent(handle, &nwiftab) != Z_OK)
-			break;
-		/* Remove access control information */
-		if (remove_datalink(zlogp, nwiftab.zone_nwif_physical)
-		    != 0) {
-			(void) zonecfg_endnwifent(handle);
-			zonecfg_fini_handle(handle);
-			return (-1);
-		}
-	}
-	(void) zonecfg_endnwifent(handle);
-	zonecfg_fini_handle(handle);
-	return (0);
-}
-
-/*
- * Remove the access control information from the kernel for the exclusive
- * network interfaces.
- */
-static int
-unconfigure_exclusive_network_interfaces(zlog_t *zlogp, zoneid_t zoneid)
-{
-	if (unconfigure_exclusive_network_interfaces_run(zlogp, zoneid) != 0) {
-		return (unconfigure_exclusive_network_interfaces_static(zlogp));
-	}
-
 	return (0);
 }
 
@@ -3237,6 +3138,134 @@ validate_datasets(zlog_t *zlogp)
 	libzfs_fini(hdl);
 
 	return (0);
+}
+
+/*
+ * Return true if the path is its own zfs file system.  We determine this
+ * by stat-ing the path to see if it is zfs and stat-ing the parent to see
+ * if it is a different fs.
+ */
+boolean_t
+is_zonepath_zfs(char *zonepath)
+{
+	int res;
+	char *path;
+	char *parent;
+	struct statvfs64 buf1, buf2;
+
+	if (statvfs64(zonepath, &buf1) != 0)
+		return (B_FALSE);
+
+	if (strcmp(buf1.f_basetype, "zfs") != 0)
+		return (B_FALSE);
+
+	if ((path = strdup(zonepath)) == NULL)
+		return (B_FALSE);
+
+	parent = dirname(path);
+	res = statvfs64(parent, &buf2);
+	free(path);
+
+	if (res != 0)
+		return (B_FALSE);
+
+	if (buf1.f_fsid == buf2.f_fsid)
+		return (B_FALSE);
+
+	return (B_TRUE);
+}
+
+/*
+ * Verify the MAC label in the root dataset for the zone.
+ * If the label exists, it must match the label configured for the zone.
+ * Otherwise if there's no label on the dataset, create one here.
+ */
+
+static int
+validate_rootds_label(zlog_t *zlogp, char *rootpath, m_label_t *zone_sl)
+{
+	int		error = -1;
+	zfs_handle_t	*zhp;
+	libzfs_handle_t	*hdl;
+	m_label_t	ds_sl;
+	char		zonepath[MAXPATHLEN];
+	char		ds_hexsl[MAXNAMELEN];
+
+	if (!is_system_labeled())
+		return (0);
+
+	if (zone_get_zonepath(zone_name, zonepath, sizeof (zonepath)) != Z_OK) {
+		zerror(zlogp, B_TRUE, "unable to determine zone path");
+		return (-1);
+	}
+
+	if (!is_zonepath_zfs(zonepath))
+		return (0);
+
+	if ((hdl = libzfs_init()) == NULL) {
+		zerror(zlogp, B_FALSE, "opening ZFS library");
+		return (-1);
+	}
+
+	if ((zhp = zfs_path_to_zhandle(hdl, rootpath,
+	    ZFS_TYPE_FILESYSTEM)) == NULL) {
+		zerror(zlogp, B_FALSE, "cannot open ZFS dataset for path '%s'",
+		    rootpath);
+		libzfs_fini(hdl);
+		return (-1);
+	}
+
+	/* Get the mlslabel property if it exists. */
+	if ((zfs_prop_get(zhp, ZFS_PROP_MLSLABEL, ds_hexsl, MAXNAMELEN,
+	    NULL, NULL, 0, B_TRUE) != 0) ||
+	    (strcmp(ds_hexsl, ZFS_MLSLABEL_DEFAULT) == 0)) {
+		char		*str2 = NULL;
+
+		/*
+		 * No label on the dataset (or default only); create one.
+		 * (Only do this automatic labeling for the labeled brand.)
+		 */
+		if (strcmp(brand_name, LABELED_BRAND_NAME) != 0) {
+			error = 0;
+			goto out;
+		}
+
+		error = l_to_str_internal(zone_sl, &str2);
+		if (error)
+			goto out;
+		if (str2 == NULL) {
+			error = -1;
+			goto out;
+		}
+		if ((error = zfs_prop_set(zhp,
+		    zfs_prop_to_name(ZFS_PROP_MLSLABEL), str2)) != 0) {
+			zerror(zlogp, B_FALSE, "cannot set 'mlslabel' "
+			    "property for root dataset at '%s'\n", rootpath);
+		}
+		free(str2);
+		goto out;
+	}
+
+	/* Convert the retrieved dataset label to binary form. */
+	error = hexstr_to_label(ds_hexsl, &ds_sl);
+	if (error) {
+		zerror(zlogp, B_FALSE, "invalid 'mlslabel' "
+		    "property on root dataset at '%s'\n", rootpath);
+		goto out;			/* exit with error */
+	}
+
+	/*
+	 * Perform a MAC check by comparing the zone label with the
+	 * dataset label.
+	 */
+	error = (!blequal(zone_sl, &ds_sl));
+	if (error)
+		zerror(zlogp, B_FALSE, "Rootpath dataset has mismatched label");
+out:
+	zfs_close(zhp);
+	libzfs_fini(hdl);
+
+	return (error);
 }
 
 /*
@@ -4071,7 +4100,7 @@ vplat_create(zlog_t *zlogp, zone_mnt_t mount_cmd)
 	if (zonecfg_in_alt_root())
 		resolve_lofs(zlogp, rootpath, sizeof (rootpath));
 
-	if (get_iptype(zlogp, &iptype) < 0) {
+	if (vplat_get_iptype(zlogp, &iptype) < 0) {
 		zerror(zlogp, B_TRUE, "unable to determine ip-type");
 		return (-1);
 	}
@@ -4112,6 +4141,8 @@ vplat_create(zlog_t *zlogp, zone_mnt_t mount_cmd)
 		} else {
 			goto error;
 		}
+		if (validate_rootds_label(zlogp, rootpath, zlabel) != 0)
+			goto error;
 	}
 
 	kzone = zone_name;
@@ -4233,16 +4264,14 @@ vplat_create(zlog_t *zlogp, zone_mnt_t mount_cmd)
 		if (setup_zone_hostid(zlogp, zone_name, zoneid) != Z_OK)
 			goto error;
 
-		if ((zone_get_brand(zone_name, attr.ba_brandname,
-		    MAXNAMELEN) != Z_OK) ||
-		    (bh = brand_open(attr.ba_brandname)) == NULL) {
+		if ((bh = brand_open(brand_name)) == NULL) {
 			zerror(zlogp, B_FALSE,
 			    "unable to determine brand name");
 			goto error;
 		}
 
 		if (!is_system_labeled() &&
-		    (strcmp(attr.ba_brandname, LABELED_BRAND_NAME) == 0)) {
+		    (strcmp(brand_name, LABELED_BRAND_NAME) == 0)) {
 			brand_close(bh);
 			zerror(zlogp, B_FALSE,
 			    "cannot boot labeled zone on unlabeled system");
@@ -4262,7 +4291,10 @@ vplat_create(zlog_t *zlogp, zone_mnt_t mount_cmd)
 		brand_close(bh);
 
 		if (strlen(modname) > 0) {
-			(void) strlcpy(attr.ba_modname, modname, MAXPATHLEN);
+			(void) strlcpy(attr.ba_brandname, brand_name,
+			    sizeof (attr.ba_brandname));
+			(void) strlcpy(attr.ba_modname, modname,
+			    sizeof (attr.ba_modname));
 			if (zone_setattr(zoneid, ZONE_ATTR_BRAND, &attr,
 			    sizeof (attr) != 0)) {
 				zerror(zlogp, B_TRUE,
@@ -4407,7 +4439,7 @@ vplat_bringup(zlog_t *zlogp, zone_mnt_t mount_cmd, zoneid_t zoneid)
 	if (mount_cmd == Z_MNT_BOOT) {
 		zone_iptype_t iptype;
 
-		if (get_iptype(zlogp, &iptype) < 0) {
+		if (vplat_get_iptype(zlogp, &iptype) < 0) {
 			zerror(zlogp, B_TRUE, "unable to determine ip-type");
 			lofs_discard_mnttab();
 			return (-1);
@@ -4511,8 +4543,9 @@ vplat_teardown(zlog_t *zlogp, boolean_t unmount_cmd, boolean_t rebooting)
 	char pool_err[128];
 	char zpath[MAXPATHLEN];
 	char cmdbuf[MAXPATHLEN];
-	char brand[MAXNAMELEN];
 	brand_handle_t bh = NULL;
+	dladm_status_t status;
+	char errmsg[DLADM_STRSIZE];
 	ushort_t flags;
 
 	kzone = zone_name;
@@ -4553,8 +4586,7 @@ vplat_teardown(zlog_t *zlogp, boolean_t unmount_cmd, boolean_t rebooting)
 	}
 
 	/* Get a handle to the brand info for this zone */
-	if ((zone_get_brand(zone_name, brand, sizeof (brand)) != Z_OK) ||
-	    (bh = brand_open(brand)) == NULL) {
+	if ((bh = brand_open(brand_name)) == NULL) {
 		zerror(zlogp, B_FALSE, "unable to determine zone brand");
 		return (-1);
 	}
@@ -4583,7 +4615,7 @@ vplat_teardown(zlog_t *zlogp, boolean_t unmount_cmd, boolean_t rebooting)
 
 		if (zone_getattr(zoneid, ZONE_ATTR_FLAGS, &flags,
 		    sizeof (flags)) < 0) {
-			if (get_iptype(zlogp, &iptype) < 0) {
+			if (vplat_get_iptype(zlogp, &iptype) < 0) {
 				zerror(zlogp, B_TRUE, "unable to determine "
 				    "ip-type");
 				goto error;
@@ -4610,6 +4642,12 @@ vplat_teardown(zlog_t *zlogp, boolean_t unmount_cmd, boolean_t rebooting)
 				zerror(zlogp, B_FALSE, "unable to unconfigure "
 				    "network interfaces in zone");
 				goto error;
+			}
+			status = dladm_zone_halt(dld_handle, zoneid);
+			if (status != DLADM_STATUS_OK) {
+				zerror(zlogp, B_FALSE, "unable to notify "
+				    "dlmgmtd of zone halt: %s",
+				    dladm_status2str(status, errmsg));
 			}
 			break;
 		}

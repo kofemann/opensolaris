@@ -28,13 +28,14 @@
  * open and create SMB interface functions.
  */
 
-#include <smbsrv/smb_incl.h>
-#include <smbsrv/smb_fsops.h>
-#include <smbsrv/nterror.h>
-#include <smbsrv/ntstatus.h>
-#include <smbsrv/smbinfo.h>
+#include <sys/types.h>
+#include <sys/cmn_err.h>
 #include <sys/fcntl.h>
 #include <sys/nbmlock.h>
+#include <smbsrv/string.h>
+#include <smbsrv/smb_kproto.h>
+#include <smbsrv/smb_fsops.h>
+#include <smbsrv/smbinfo.h>
 
 volatile uint32_t smb_fids = 0;
 
@@ -44,7 +45,7 @@ static void smb_delete_new_object(smb_request_t *);
 static int smb_set_open_timestamps(smb_request_t *, smb_ofile_t *, boolean_t);
 
 static char *smb_pathname_strdup(smb_request_t *, const char *);
-static char *smb_pathname_strcat(char *, const char *);
+static char *smb_pathname_strcat(smb_request_t *, char *, const char *);
 
 /*
  * smb_access_generic_to_file
@@ -177,16 +178,22 @@ smb_ofun_to_crdisposition(uint16_t  ofun)
 uint32_t
 smb_common_open(smb_request_t *sr)
 {
-	uint32_t status = NT_STATUS_SUCCESS;
-	int count;
+	open_param_t	*parg;
+	uint32_t	status = NT_STATUS_SUCCESS;
+	int		count;
+
+	parg = kmem_alloc(sizeof (*parg), KM_SLEEP);
+	bcopy(&sr->arg.open, parg, sizeof (*parg));
 
 	for (count = 0; count <= 4; count++) {
-		if (count)
+		if (count != 0)
 			delay(MSEC_TO_TICK(400));
 
 		status = smb_open_subr(sr);
 		if (status != NT_STATUS_SHARING_VIOLATION)
 			break;
+
+		bcopy(parg, &sr->arg.open, sizeof (*parg));
 	}
 
 	if (status == NT_STATUS_SHARING_VIOLATION) {
@@ -198,6 +205,8 @@ smb_common_open(smb_request_t *sr)
 		smbsr_error(sr, NT_STATUS_OBJECT_NAME_NOT_FOUND,
 		    ERRDOS, ERROR_FILE_NOT_FOUND);
 	}
+
+	kmem_free(parg, sizeof (*parg));
 
 	return (status);
 }
@@ -441,14 +450,11 @@ smb_open_subr(smb_request_t *sr)
 
 	if (rc == 0) {
 		last_comp_found = B_TRUE;
-		(void) strcpy(op->fqi.fq_od_name,
-		    op->fqi.fq_fnode->od_name);
 		rc = smb_node_getattr(sr, op->fqi.fq_fnode,
 		    &op->fqi.fq_fattr);
 		if (rc != 0) {
 			smb_node_release(op->fqi.fq_fnode);
 			smb_node_release(op->fqi.fq_dnode);
-			SMB_NULL_FQI_NODES(op->fqi);
 			smbsr_error(sr, NT_STATUS_INTERNAL_ERROR,
 			    ERRDOS, ERROR_INTERNAL_ERROR);
 			return (sr->smb_error.status);
@@ -459,7 +465,6 @@ smb_open_subr(smb_request_t *sr)
 		rc = 0;
 	} else {
 		smb_node_release(op->fqi.fq_dnode);
-		SMB_NULL_FQI_NODES(op->fqi);
 		smbsr_errno(sr, rc);
 		return (sr->smb_error.status);
 	}
@@ -481,7 +486,6 @@ smb_open_subr(smb_request_t *sr)
 
 			smb_node_release(op->fqi.fq_fnode);
 			smb_node_release(op->fqi.fq_dnode);
-			SMB_NULL_FQI_NODES(op->fqi);
 			smbsr_error(sr, NT_STATUS_ACCESS_DENIED, ERRDOS,
 			    ERRnoaccess);
 			return (NT_STATUS_ACCESS_DENIED);
@@ -501,7 +505,6 @@ smb_open_subr(smb_request_t *sr)
 			if (op->create_options & FILE_NON_DIRECTORY_FILE) {
 				smb_node_release(node);
 				smb_node_release(dnode);
-				SMB_NULL_FQI_NODES(op->fqi);
 				smbsr_error(sr, NT_STATUS_FILE_IS_A_DIRECTORY,
 				    ERRDOS, ERROR_ACCESS_DENIED);
 				return (NT_STATUS_FILE_IS_A_DIRECTORY);
@@ -511,7 +514,6 @@ smb_open_subr(smb_request_t *sr)
 			    (op->nt_flags & NT_CREATE_FLAG_OPEN_TARGET_DIR)) {
 				smb_node_release(node);
 				smb_node_release(dnode);
-				SMB_NULL_FQI_NODES(op->fqi);
 				smbsr_error(sr, NT_STATUS_NOT_A_DIRECTORY,
 				    ERRDOS, ERROR_DIRECTORY);
 				return (NT_STATUS_NOT_A_DIRECTORY);
@@ -525,7 +527,6 @@ smb_open_subr(smb_request_t *sr)
 		if (node->flags & NODE_FLAGS_DELETE_ON_CLOSE) {
 			smb_node_release(node);
 			smb_node_release(dnode);
-			SMB_NULL_FQI_NODES(op->fqi);
 			smbsr_error(sr, NT_STATUS_DELETE_PENDING,
 			    ERRDOS, ERROR_ACCESS_DENIED);
 			return (NT_STATUS_DELETE_PENDING);
@@ -537,7 +538,6 @@ smb_open_subr(smb_request_t *sr)
 		if (op->create_disposition == FILE_CREATE) {
 			smb_node_release(node);
 			smb_node_release(dnode);
-			SMB_NULL_FQI_NODES(op->fqi);
 			smbsr_error(sr, NT_STATUS_OBJECT_NAME_COLLISION,
 			    ERRDOS, ERROR_FILE_EXISTS);
 			return (NT_STATUS_OBJECT_NAME_COLLISION);
@@ -557,7 +557,6 @@ smb_open_subr(smb_request_t *sr)
 				    FILE_APPEND_DATA)) {
 					smb_node_release(node);
 					smb_node_release(dnode);
-					SMB_NULL_FQI_NODES(op->fqi);
 					smbsr_error(sr, NT_STATUS_ACCESS_DENIED,
 					    ERRDOS, ERRnoaccess);
 					return (NT_STATUS_ACCESS_DENIED);
@@ -582,7 +581,6 @@ smb_open_subr(smb_request_t *sr)
 				smb_node_unlock(node);
 				smb_node_release(node);
 				smb_node_release(dnode);
-				SMB_NULL_FQI_NODES(op->fqi);
 				smbsr_error(sr, NT_STATUS_ACCESS_DENIED,
 				    ERRDOS, ERRnoaccess);
 				return (NT_STATUS_ACCESS_DENIED);
@@ -596,7 +594,6 @@ smb_open_subr(smb_request_t *sr)
 			smb_node_unlock(node);
 			smb_node_release(node);
 			smb_node_release(dnode);
-			SMB_NULL_FQI_NODES(op->fqi);
 			return (status);
 		}
 
@@ -609,7 +606,6 @@ smb_open_subr(smb_request_t *sr)
 			smb_node_unlock(node);
 			smb_node_release(node);
 			smb_node_release(dnode);
-			SMB_NULL_FQI_NODES(op->fqi);
 
 			if (status == NT_STATUS_PRIVILEGE_NOT_HELD) {
 				smbsr_error(sr, status,
@@ -631,7 +627,6 @@ smb_open_subr(smb_request_t *sr)
 				smb_node_unlock(node);
 				smb_node_release(node);
 				smb_node_release(dnode);
-				SMB_NULL_FQI_NODES(op->fqi);
 				smbsr_error(sr, NT_STATUS_ACCESS_DENIED,
 				    ERRDOS, ERROR_ACCESS_DENIED);
 				return (NT_STATUS_ACCESS_DENIED);
@@ -654,7 +649,6 @@ smb_open_subr(smb_request_t *sr)
 				smb_node_unlock(node);
 				smb_node_release(node);
 				smb_node_release(dnode);
-				SMB_NULL_FQI_NODES(op->fqi);
 				smbsr_errno(sr, rc);
 				return (sr->smb_error.status);
 			}
@@ -671,7 +665,6 @@ smb_open_subr(smb_request_t *sr)
 					smb_node_unlock(node);
 					smb_node_release(node);
 					smb_node_release(dnode);
-					SMB_NULL_FQI_NODES(op->fqi);
 					return (sr->smb_error.status);
 				}
 			}
@@ -696,7 +689,6 @@ smb_open_subr(smb_request_t *sr)
 		if ((op->create_disposition == FILE_OPEN) ||
 		    (op->create_disposition == FILE_OVERWRITE)) {
 			smb_node_release(dnode);
-			SMB_NULL_FQI_NODES(op->fqi);
 			smbsr_error(sr, NT_STATUS_OBJECT_NAME_NOT_FOUND,
 			    ERRDOS, ERROR_FILE_NOT_FOUND);
 			return (NT_STATUS_OBJECT_NAME_NOT_FOUND);
@@ -705,7 +697,6 @@ smb_open_subr(smb_request_t *sr)
 		if ((is_dir == 0) && (!is_stream) &&
 		    smb_is_invalid_filename(op->fqi.fq_last_comp)) {
 			smb_node_release(dnode);
-			SMB_NULL_FQI_NODES(op->fqi);
 			smbsr_error(sr, NT_STATUS_OBJECT_NAME_INVALID,
 			    ERRDOS, ERROR_INVALID_NAME);
 			return (NT_STATUS_OBJECT_NAME_INVALID);
@@ -752,7 +743,6 @@ smb_open_subr(smb_request_t *sr)
 			if (rc != 0) {
 				smb_node_unlock(dnode);
 				smb_node_release(dnode);
-				SMB_NULL_FQI_NODES(op->fqi);
 				smbsr_errno(sr, rc);
 				return (sr->smb_error.status);
 			}
@@ -769,7 +759,6 @@ smb_open_subr(smb_request_t *sr)
 				smb_node_release(node);
 				smb_node_unlock(dnode);
 				smb_node_release(dnode);
-				SMB_NULL_FQI_NODES(op->fqi);
 				return (status);
 			}
 		} else {
@@ -785,7 +774,6 @@ smb_open_subr(smb_request_t *sr)
 			if (rc != 0) {
 				smb_node_unlock(dnode);
 				smb_node_release(dnode);
-				SMB_NULL_FQI_NODES(op->fqi);
 				smbsr_errno(sr, rc);
 				return (sr->smb_error.status);
 			}
@@ -796,7 +784,6 @@ smb_open_subr(smb_request_t *sr)
 
 		created = B_TRUE;
 		op->action_taken = SMB_OACT_CREATED;
-		node->flags |= NODE_FLAGS_CREATED;
 	}
 
 	if (max_requested) {
@@ -857,7 +844,6 @@ smb_open_subr(smb_request_t *sr)
 		if (created)
 			smb_node_unlock(dnode);
 		smb_node_release(dnode);
-		SMB_NULL_FQI_NODES(op->fqi);
 		return (status);
 	}
 
@@ -896,7 +882,6 @@ smb_open_subr(smb_request_t *sr)
 
 	smb_node_release(node);
 	smb_node_release(dnode);
-	SMB_NULL_FQI_NODES(op->fqi);
 
 	return (NT_STATUS_SUCCESS);
 }
@@ -975,7 +960,7 @@ smb_validate_object_name(smb_pathname_t *pn)
 {
 	if (pn->pn_fname &&
 	    strlen(pn->pn_fname) == 5 &&
-	    mts_isdigit(pn->pn_fname[3]) &&
+	    smb_isdigit(pn->pn_fname[3]) &&
 	    pn->pn_fname[4] == ':') {
 		return (NT_STATUS_OBJECT_NAME_INVALID);
 	}
@@ -1015,8 +1000,8 @@ smb_delete_new_object(smb_request_t *sr)
  * smb_pathname_setup
  * Parse path: pname/fname:sname:stype
  *
- * Elements of the smb_pathname_t structure are allocated using
- * smbsr_malloc and will thus be free'd when the sr is destroyed.
+ * Elements of the smb_pathname_t structure are allocated using request
+ * specific storage and will be free'd when the sr is destroyed.
  *
  * Eliminate duplicate slashes in pn->pn_path.
  * Populate pn structure elements with the individual elements
@@ -1072,10 +1057,10 @@ smb_pathname_setup(smb_request_t *sr, smb_pathname_t *pn)
 	pn->pn_sname = smb_pathname_strdup(sr, sname);
 	pn->pn_stype = strchr(pn->pn_sname + 1, ':');
 	if (pn->pn_stype) {
-		(void) utf8_strupr(pn->pn_stype);
+		(void) smb_strupr(pn->pn_stype);
 	} else {
 		len = strlen(pn->pn_sname);
-		pn->pn_sname = smb_pathname_strcat(pn->pn_sname, ":$DATA");
+		pn->pn_sname = smb_pathname_strcat(sr, pn->pn_sname, ":$DATA");
 		pn->pn_stype = pn->pn_sname + len;
 	}
 	++pn->pn_stype;
@@ -1085,8 +1070,9 @@ smb_pathname_setup(smb_request_t *sr, smb_pathname_t *pn)
  * smb_pathname_strdup
  *
  * Duplicate NULL terminated string s.
- * The new string buffer is allocated using smbsr_malloc and
- * will thus be free'd when the sr is destroyed.
+ *
+ * The new string is allocated using request specific storage and will
+ * be free'd when the sr is destroyed.
  */
 static char *
 smb_pathname_strdup(smb_request_t *sr, const char *s)
@@ -1095,7 +1081,7 @@ smb_pathname_strdup(smb_request_t *sr, const char *s)
 	size_t n;
 
 	n = strlen(s) + 1;
-	s2 = (char *)smbsr_malloc(&sr->request_storage, n);
+	s2 = smb_srm_alloc(sr, n);
 	(void) strlcpy(s2, s, n);
 	return (s2);
 }
@@ -1107,16 +1093,16 @@ smb_pathname_strdup(smb_request_t *sr, const char *s)
  * concatenating  NULL terminated string s2.
  * Append s2 and return resulting NULL terminated string.
  *
- * The string buffer is reallocated using smbsr_realloc
- * and will thus be free'd when the sr is destroyed.
+ * The string buffer is reallocated using request specific
+ * storage and will be free'd when the sr is destroyed.
  */
 static char *
-smb_pathname_strcat(char *s1, const char *s2)
+smb_pathname_strcat(smb_request_t *sr, char *s1, const char *s2)
 {
 	size_t n;
 
 	n = strlen(s1) + strlen(s2) + 1;
-	s1 = smbsr_realloc(s1, n);
+	s1 = smb_srm_realloc(sr, s1, n);
 	(void) strlcat(s1, s2, n);
 	return (s1);
 }

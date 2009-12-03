@@ -288,7 +288,7 @@ iser_ib_unbind_service(idm_svc_t *idm_svc)
 		    is_sbind != NULL;
 		    is_sbind = next_sb) {
 			next_sb = list_next(&iser_svc->is_sbindlist, is_sbind);
-			ibt_unbind_service(iser_svc->is_srvhdl,
+			(void) ibt_unbind_service(iser_svc->is_srvhdl,
 			    is_sbind->is_sbindhdl);
 			list_remove(&iser_svc->is_sbindlist, is_sbind);
 			kmem_free(is_sbind, sizeof (iser_sbind_t));
@@ -305,9 +305,9 @@ iser_ib_deregister_service(idm_svc_t *idm_svc)
 	if (idm_svc != NULL && idm_svc->is_iser_svc != NULL) {
 
 		iser_svc = (iser_svc_t *)idm_svc->is_iser_svc;
-		ibt_deregister_service(iser_state->is_ibhdl,
+		(void) ibt_deregister_service(iser_state->is_ibhdl,
 		    iser_svc->is_srvhdl);
-		ibt_release_ip_sid(iser_svc->is_svcid);
+		(void) ibt_release_ip_sid(iser_svc->is_svcid);
 	}
 }
 
@@ -350,63 +350,135 @@ iser_ib_get_paths(ibt_ip_addr_t *local_ip, ibt_ip_addr_t *remote_ip,
 }
 
 /*
+ * iser_ib_alloc_channel_nopathlookup
+ *
+ * This function allocates a reliable connected channel. This function does
+ * not invoke ibt_get_ip_paths() to do the path lookup. The HCA GUID and
+ * port are input to this function.
+ */
+iser_chan_t *
+iser_ib_alloc_channel_nopathlookup(ib_guid_t hca_guid, uint8_t hca_port)
+{
+	iser_hca_t	*hca;
+	iser_chan_t	*chan;
+
+	/* Lookup the hca using the gid in the path info */
+	hca = iser_ib_guid2hca(hca_guid);
+	if (hca == NULL) {
+		ISER_LOG(CE_NOTE, "iser_ib_alloc_channel_nopathlookup: failed "
+		    "to lookup HCA(%llx) handle", (longlong_t)hca_guid);
+		return (NULL);
+	}
+
+	chan = iser_ib_alloc_rc_channel(hca, hca_port);
+	if (chan == NULL) {
+		ISER_LOG(CE_NOTE, "iser_ib_alloc_channel_nopathlookup: failed "
+		    "to alloc channel on HCA(%llx) %d",
+		    (longlong_t)hca_guid, hca_port);
+		return (NULL);
+	}
+
+	ISER_LOG(CE_NOTE, "iser_ib_alloc_channel_pathlookup success: "
+	    "chanhdl (0x%p), HCA(%llx) %d",
+	    (void *)chan->ic_chanhdl, (longlong_t)hca_guid, hca_port);
+
+	return (chan);
+}
+
+/*
+ * iser_ib_alloc_channel_pathlookup
+ *
+ * This function allocates a reliable connected channel but first invokes
+ * ibt_get_ip_paths() with the given local and remote addres to get the
+ * HCA lgid and the port number.
+ */
+iser_chan_t *
+iser_ib_alloc_channel_pathlookup(
+    ibt_ip_addr_t *local_ip, ibt_ip_addr_t *remote_ip)
+{
+	ibt_path_info_t		ibt_path;
+	ibt_path_ip_src_t	path_src_ip;
+	ib_gid_t		lgid;
+	uint8_t			hca_port; /* from path */
+	iser_hca_t		*hca;
+	iser_chan_t		*chan;
+	int			status;
+
+	/* Lookup a path to the given destination */
+	status = iser_ib_get_paths(
+	    local_ip, remote_ip, &ibt_path, &path_src_ip);
+
+	if (status != ISER_STATUS_SUCCESS) {
+		ISER_LOG(CE_NOTE, "iser_ib_alloc_channel_pathlookup: faild "
+		    "Path lookup IP:[%llx to %llx] failed: status (%d)",
+		    (longlong_t)local_ip->un.ip4addr,
+		    (longlong_t)remote_ip->un.ip4addr,
+		    status);
+		return (NULL);
+	}
+
+	/* get the local gid from the path info */
+	lgid = ibt_path.pi_prim_cep_path.cep_adds_vect.av_sgid;
+
+	/* get the hca port from the path info */
+	hca_port = ibt_path.pi_prim_cep_path.cep_hca_port_num;
+
+	/* Lookup the hca using the gid in the path info */
+	hca = iser_ib_gid2hca(lgid);
+	if (hca == NULL) {
+		ISER_LOG(CE_NOTE, "iser_ib_alloc_channel_pathlookup: failed "
+		    "to lookup HCA (%llx) handle",
+		    (longlong_t)hca->hca_guid);
+		return (NULL);
+	}
+
+	chan = iser_ib_alloc_rc_channel(hca, hca_port);
+	if (chan == NULL) {
+		ISER_LOG(CE_NOTE, "iser_ib_alloc_channel_pathlookup: failed "
+		    "to alloc channel from IP:[%llx to %llx] on HCA (%llx) %d",
+		    (longlong_t)local_ip->un.ip4addr,
+		    (longlong_t)remote_ip->un.ip4addr,
+		    (longlong_t)hca->hca_guid, hca_port);
+		return (NULL);
+	}
+
+	ISER_LOG(CE_NOTE, "iser_ib_alloc_channel_pathlookup success: "
+	    "chanhdl (0x%p), IP:[%llx to %llx], lgid (%llx:%llx), HCA(%llx) %d",
+	    (void *)chan->ic_chanhdl,
+	    (longlong_t)local_ip->un.ip4addr,
+	    (longlong_t)remote_ip->un.ip4addr,
+	    (longlong_t)lgid.gid_prefix, (longlong_t)lgid.gid_guid,
+	    (longlong_t)hca->hca_guid, hca_port);
+
+	chan->ic_ibt_path	= ibt_path;
+	chan->ic_localip	= path_src_ip.ip_primary;
+	chan->ic_remoteip	= *remote_ip;
+
+	return (chan);
+}
+
+/*
  * iser_ib_alloc_rc_channel
  *
  * This function allocates a reliable communication channel using the specified
  * channel attributes.
  */
 iser_chan_t *
-iser_ib_alloc_rc_channel(ibt_ip_addr_t *local_ip, ibt_ip_addr_t *remote_ip)
+iser_ib_alloc_rc_channel(iser_hca_t *hca, uint8_t hca_port)
 {
 
 	iser_chan_t			*chan;
-	ib_gid_t			lgid;
-	uint8_t				hca_port; /* from path */
-	iser_hca_t			*hca;
-	ibt_path_ip_src_t		path_src_ip;
 	ibt_rc_chan_alloc_args_t	chanargs;
 	uint_t				sq_size, rq_size;
 	int				status;
 
 	chan = kmem_zalloc(sizeof (iser_chan_t), KM_SLEEP);
 
-	mutex_init(&chan->ic_lock, NULL, MUTEX_DRIVER, NULL);
+	mutex_init(&chan->ic_chan_lock, NULL, MUTEX_DRIVER, NULL);
 	mutex_init(&chan->ic_sq_post_lock, NULL, MUTEX_DRIVER, NULL);
 
-	/* Lookup a path to the given destination */
-	status = iser_ib_get_paths(local_ip, remote_ip, &chan->ic_ibt_path,
-	    &path_src_ip);
-
-	if (status != ISER_STATUS_SUCCESS) {
-		ISER_LOG(CE_NOTE, "iser_ib_get_paths failed: status (%d)",
-		    status);
-		mutex_destroy(&chan->ic_lock);
-		mutex_destroy(&chan->ic_sq_post_lock);
-		kmem_free(chan, sizeof (iser_chan_t));
-		return (NULL);
-	}
-
-	/* get the local gid from the path info */
-	lgid = chan->ic_ibt_path.pi_prim_cep_path.cep_adds_vect.av_sgid;
-
-	/* get the hca port from the path info */
-	hca_port = chan->ic_ibt_path.pi_prim_cep_path.cep_hca_port_num;
-
-	/* Lookup the hca using the gid in the path info */
-	hca = iser_ib_gid2hca(lgid);
-	if (hca == NULL) {
-		ISER_LOG(CE_NOTE, "iser_ib_alloc_rc_channel: failed "
-		    "to lookup HCA handle");
-		mutex_destroy(&chan->ic_lock);
-		mutex_destroy(&chan->ic_sq_post_lock);
-		kmem_free(chan, sizeof (iser_chan_t));
-		return (NULL);
-	}
-
-	/* Set up the iSER channel handle with HCA and IP data */
+	/* Set up the iSER channel handle with HCA */
 	chan->ic_hca		= hca;
-	chan->ic_localip	= path_src_ip.ip_primary;
-	chan->ic_remoteip	= *remote_ip;
 
 	/*
 	 * Determine the queue sizes, based upon the HCA query data.
@@ -443,13 +515,13 @@ iser_ib_alloc_rc_channel(ibt_ip_addr_t *local_ip, ibt_ip_addr_t *remote_ip)
 	    &chan->ic_sendcq);
 	if (status != ISER_STATUS_SUCCESS) {
 		iser_ib_fini_qp(&chan->ic_qp);
-		mutex_destroy(&chan->ic_lock);
+		mutex_destroy(&chan->ic_chan_lock);
 		mutex_destroy(&chan->ic_sq_post_lock);
 		kmem_free(chan, sizeof (iser_chan_t));
 		return (NULL);
 	}
 	ibt_set_cq_handler(chan->ic_sendcq, iser_ib_sendcq_handler, chan);
-	ibt_enable_cq_notify(chan->ic_sendcq, IBT_NEXT_COMPLETION);
+	(void) ibt_enable_cq_notify(chan->ic_sendcq, IBT_NEXT_COMPLETION);
 
 	/* Set up the Receive Completion Queue */
 	status = iser_ib_setup_cq(hca->hca_hdl, chan->ic_recvcq_sz,
@@ -457,13 +529,13 @@ iser_ib_alloc_rc_channel(ibt_ip_addr_t *local_ip, ibt_ip_addr_t *remote_ip)
 	if (status != ISER_STATUS_SUCCESS) {
 		(void) ibt_free_cq(chan->ic_sendcq);
 		iser_ib_fini_qp(&chan->ic_qp);
-		mutex_destroy(&chan->ic_lock);
+		mutex_destroy(&chan->ic_chan_lock);
 		mutex_destroy(&chan->ic_sq_post_lock);
 		kmem_free(chan, sizeof (iser_chan_t));
 		return (NULL);
 	}
 	ibt_set_cq_handler(chan->ic_recvcq, iser_ib_recvcq_handler, chan);
-	ibt_enable_cq_notify(chan->ic_recvcq, IBT_NEXT_COMPLETION);
+	(void) ibt_enable_cq_notify(chan->ic_recvcq, IBT_NEXT_COMPLETION);
 
 	/* Setup the channel arguments */
 	iser_ib_setup_chanargs(hca_port, chan->ic_sendcq, chan->ic_recvcq,
@@ -477,7 +549,7 @@ iser_ib_alloc_rc_channel(ibt_ip_addr_t *local_ip, ibt_ip_addr_t *remote_ip)
 		(void) ibt_free_cq(chan->ic_sendcq);
 		(void) ibt_free_cq(chan->ic_recvcq);
 		iser_ib_fini_qp(&chan->ic_qp);
-		mutex_destroy(&chan->ic_lock);
+		mutex_destroy(&chan->ic_chan_lock);
 		mutex_destroy(&chan->ic_sq_post_lock);
 		kmem_free(chan, sizeof (iser_chan_t));
 		return (NULL);
@@ -485,14 +557,6 @@ iser_ib_alloc_rc_channel(ibt_ip_addr_t *local_ip, ibt_ip_addr_t *remote_ip)
 
 	/* Set the 'channel' as the client private data */
 	(void) ibt_set_chan_private(chan->ic_chanhdl, chan);
-
-	ISER_LOG(CE_NOTE, "iser_ib_alloc_rc_channel success: "
-	    "chanhdl (0x%p), IP:[%llx to %llx], lgid (%llx:%llx), HCA(%llx) %d",
-	    (void *)chan->ic_chanhdl,
-	    (longlong_t)local_ip->un.ip4addr,
-	    (longlong_t)remote_ip->un.ip4addr,
-	    (longlong_t)lgid.gid_prefix, (longlong_t)lgid.gid_guid,
-	    (longlong_t)hca->hca_guid, hca_port);
 
 	return (chan);
 }
@@ -510,7 +574,7 @@ iser_ib_open_rc_channel(iser_chan_t *chan)
 	ibt_rc_returns_t	ocreturns;
 	int			status;
 
-	mutex_enter(&chan->ic_lock);
+	mutex_enter(&chan->ic_chan_lock);
 
 	/*
 	 * For connection establishment, the initiator sends a CM REQ using the
@@ -537,7 +601,7 @@ iser_ib_open_rc_channel(iser_chan_t *chan)
 	    sizeof (iser_private_data_t), &iser_priv_data);
 	if (status != IBT_SUCCESS) {
 		ISER_LOG(CE_NOTE, "iser_ib_open_rc_channel failed: %d", status);
-		mutex_exit(&chan->ic_lock);
+		mutex_exit(&chan->ic_chan_lock);
 		return (status);
 	}
 
@@ -566,11 +630,11 @@ iser_ib_open_rc_channel(iser_chan_t *chan)
 
 	if (status != IBT_SUCCESS) {
 		ISER_LOG(CE_NOTE, "iser_ib_open_rc_channel failed: %d", status);
-		mutex_exit(&chan->ic_lock);
+		mutex_exit(&chan->ic_chan_lock);
 		return (status);
 	}
 
-	mutex_exit(&chan->ic_lock);
+	mutex_exit(&chan->ic_chan_lock);
 	return (IDM_STATUS_SUCCESS);
 }
 
@@ -584,14 +648,14 @@ iser_ib_close_rc_channel(iser_chan_t *chan)
 {
 	int			status;
 
-	mutex_enter(&chan->ic_lock);
+	mutex_enter(&chan->ic_chan_lock);
 	status = ibt_close_rc_channel(chan->ic_chanhdl, IBT_BLOCKING, NULL,
 	    0, NULL, NULL, 0);
 	if (status != IBT_SUCCESS) {
 		ISER_LOG(CE_NOTE, "iser_ib_close_rc_channel: "
 		    "ibt_close_rc_channel failed: status (%d)", status);
 	}
-	mutex_exit(&chan->ic_lock);
+	mutex_exit(&chan->ic_chan_lock);
 }
 
 /*
@@ -638,11 +702,11 @@ iser_ib_free_rc_channel(iser_chan_t *chan)
 	chan->ic_chanhdl = NULL;
 
 	/* Free the CQs */
-	ibt_free_cq(chan->ic_sendcq);
-	ibt_free_cq(chan->ic_recvcq);
+	(void) ibt_free_cq(chan->ic_sendcq);
+	(void) ibt_free_cq(chan->ic_recvcq);
 
 	/* Free the chan handle */
-	mutex_destroy(&chan->ic_lock);
+	mutex_destroy(&chan->ic_chan_lock);
 	kmem_free(chan, sizeof (iser_chan_t));
 }
 
@@ -707,7 +771,6 @@ iser_ib_post_recv(ibt_channel_hdl_t chanhdl)
 	uint_t		nposted;
 	int		status, i;
 	iser_qp_t	*iser_qp;
-	ib_gid_t	lgid;
 
 	/* Pull our iSER channel handle from the private data */
 	chan = (iser_chan_t *)ibt_get_chan_private(chanhdl);
@@ -726,11 +789,8 @@ iser_ib_post_recv(ibt_channel_hdl_t chanhdl)
 	/* get the QP handle from the iser_chan */
 	iser_qp = &chan->ic_qp;
 
-	/* get the local gid from the path info */
-	lgid = chan->ic_ibt_path.pi_prim_cep_path.cep_adds_vect.av_sgid;
+	hca = chan->ic_hca;
 
-	/* get the hca port from the path info */
-	hca = iser_ib_gid2hca(lgid);
 	if (hca == NULL) {
 		ISER_LOG(CE_NOTE, "iser_ib_post_recv: unable to retrieve "
 		    "HCA handle");
@@ -894,7 +954,12 @@ iser_ib_handle_portup_event(ibt_hca_hdl_t hdl, ibt_async_event_t *event)
 
 		/* HCA is just made available, first port on that HCA */
 		hca = iser_ib_alloc_hca(event->ev_hca_guid);
-
+		if (hca == NULL) {
+			ISER_LOG(CE_NOTE, "iser_ib_handle_portup_event "
+			    "iser_ib_alloc_hca failed: HCA(0x%llx) port(%d)",
+			    (longlong_t)event->ev_hca_guid, event->ev_port);
+			return;
+		}
 		mutex_enter(&iser_state->is_hcalist_lock);
 		list_insert_tail(&iser_state->is_hcalist, hca);
 		iser_state->is_num_hcas++;
@@ -1661,7 +1726,7 @@ iser_ib_deactivate_port(ib_guid_t hca_guid, ib_gid_t gid)
 		is_sbind = iser_ib_get_bind(iser_svc, hca_guid, gid);
 		if (is_sbind != NULL) {
 			/* This service is still bound, tear it down */
-			ibt_unbind_service(iser_svc->is_srvhdl,
+			(void) ibt_unbind_service(iser_svc->is_srvhdl,
 			    is_sbind->is_sbindhdl);
 			list_remove(&iser_svc->is_sbindlist, is_sbind);
 			kmem_free(is_sbind, sizeof (iser_sbind_t));

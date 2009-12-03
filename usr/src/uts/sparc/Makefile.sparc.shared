@@ -201,12 +201,12 @@ ALL_DEFS	 = $(MACHINE_DEFS) $(DEBUG_DEFS) $(OPTION_DEFS)
 #
 #	Common Drivers (usually pseudo drivers) (/kernel/drv):
 #
-DRV_KMODS	+= aggr arp bl bofi clone cn conskbd consms cpuid
+DRV_KMODS	+= aggr arp audio bl bofi clone cn conskbd consms cpuid
 DRV_KMODS	+= crypto cryptoadm devinfo dump
 DRV_KMODS	+= dserv
 DRV_KMODS	+= dtrace fasttrap fbt lockstat profile sdt systrace dcpc
 DRV_KMODS	+= fssnap icmp icmp6 ip ip6 ipnet ipsecah
-DRV_KMODS	+= ipsecesp iwscn keysock kmdb kstat ksyms llc1
+DRV_KMODS	+= ipsecesp iptun iwscn keysock kmdb kstat ksyms llc1
 DRV_KMODS	+= lofi
 DRV_KMODS	+= log logindmux kssl mm nca physmem pm poll pool
 DRV_KMODS	+= pseudo ptc ptm pts ptsl ramdisk random rsm rts sad
@@ -227,6 +227,8 @@ DRV_KMODS	+= vscan
 DRV_KMODS	+= nsmb
 DRV_KMODS	+= fm
 DRV_KMODS	+= nulldriver
+DRV_KMODS	+= bridge trill
+DRV_KMODS	+= bpf
 
 #
 # Don't build some of these for OpenSolaris, since they will be
@@ -246,6 +248,12 @@ $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= se
 #
 
 DRV_KMODS	+= afe
+DRV_KMODS	+= audio1575
+DRV_KMODS	+= audioens
+DRV_KMODS	+= audiols
+DRV_KMODS	+= audiop16x
+DRV_KMODS	+= audiopci
+DRV_KMODS	+= audiots
 DRV_KMODS	+= e1000g
 DRV_KMODS	+= hxge
 DRV_KMODS	+= mxfe
@@ -260,11 +268,12 @@ DRV_KMODS	+= ixgbe
 DRV_KMODS	+= vr
 DRV_KMODS	+= mr_sas
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= ixgb
+DRV_KMODS	+= yge
 
 #
 #	Machine Specific Driver Modules (/kernel/drv):
 #
-DRV_KMODS	+= audio audio1575 audioens audiocs audiots audiopci
+DRV_KMODS	+= audiocs
 DRV_KMODS	+= bge bpp dmfe eri esp fas hme qfe
 DRV_KMODS	+= openeepr options sd ses st
 DRV_KMODS	+= ssd
@@ -294,9 +303,7 @@ DRV_KMODS	+= fcip
 DRV_KMODS	+= fcsm
 DRV_KMODS	+= fp
 DRV_KMODS	+= qlc
-DRV_KMODS	+= sdcard
-DRV_KMODS	+= sdhost
-DRV_KMODS	+= wbsd
+DRV_KMODS	+= qlge
 DRV_KMODS	+= dda
 DRV_KMODS	+= dmd
 DRV_KMODS	+= stmf
@@ -304,13 +311,16 @@ DRV_KMODS	+= stmf_sbd
 DRV_KMODS	+= fct
 DRV_KMODS	+= fcoe
 DRV_KMODS	+= fcoet
+DRV_KMODS	+= fcoei
 DRV_KMODS	+= qlt
 DRV_KMODS	+= iscsit
+DRV_KMODS	+= pppt
 DRV_KMODS	+= ncall nsctl sdbc nskern sv
 DRV_KMODS	+= ii rdc rdcsrv rdcstub 
 DRV_KMODS	+= iscsi
 DRV_KMODS	+= emlxs
 DRV_KMODS	+= srpt
+DRV_KMODS	+= pmcs
 
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= ifp
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= uata
@@ -350,7 +360,7 @@ EXEC_KMODS	+= aoutexec elfexec intpexec shbinexec javaexec
 #
 #	Scheduling Class Modules (/kernel/sched):
 #
-SCHED_KMODS	+= RT TS RT_DPTBL TS_DPTBL IA FSS FX FX_DPTBL
+SCHED_KMODS	+= RT TS RT_DPTBL TS_DPTBL IA FSS FX FX_DPTBL SDC
 
 #
 #	File System Modules (/kernel/fs):
@@ -362,10 +372,10 @@ FS_KMODS	+= ctfs objfs sharefs dcfs smbfs
 #
 #	Streams Modules (/kernel/strmod):
 #
-STRMOD_KMODS	+= 6to4tun atun bufmod connld dedump ldterm ms pckt pfmod
+STRMOD_KMODS	+= bufmod connld dedump ldterm ms pckt pfmod
 STRMOD_KMODS	+= pipemod ptem redirmod rpcmod rlmod telmod timod
 STRMOD_KMODS	+= spppasyn spppcomp
-STRMOD_KMODS	+= tirdwr ttcompat tun
+STRMOD_KMODS	+= tirdwr ttcompat
 STRMOD_KMODS	+= usbkbm usbms usb_ah
 STRMOD_KMODS	+= drcompat
 STRMOD_KMODS	+= cryptmod
@@ -391,7 +401,7 @@ MISC_KMODS	+= kmech_krb5
 MISC_KMODS	+= fssnap_if
 MISC_KMODS	+= hidparser kbtrans usba usba10 usbs49_fw
 MISC_KMODS	+= s1394
-MISC_KMODS	+= hpcsvc pcihp pciehpc pcishpc
+MISC_KMODS	+= hpcsvc pcihp
 MISC_KMODS	+= rsmops
 MISC_KMODS	+= kcf
 MISC_KMODS	+= ksocket
@@ -408,7 +418,7 @@ MISC_KMODS	+= ctf
 MISC_KMODS	+= mac dls
 MISC_KMODS	+= cmlb
 MISC_KMODS	+= tem
-MISC_KMODS	+= pcicfg.e fcodem fcpci
+MISC_KMODS	+= pcicfg fcodem fcpci
 MISC_KMODS	+= scsi_vhci_f_sym scsi_vhci_f_tpgs scsi_vhci_f_asym_sun
 MISC_KMODS	+= scsi_vhci_f_sym_hds
 MISC_KMODS	+= scsi_vhci_f_tape scsi_vhci_f_tpgs_tape
@@ -421,7 +431,6 @@ MISC_KMODS	+= qlc_fw_2500
 MISC_KMODS	+= qlc_fw_6322
 MISC_KMODS	+= qlc_fw_8100
 MISC_KMODS	+= blk2scsa
-MISC_KMODS	+= sda
 MISC_KMODS	+= spuni
 MISC_KMODS	+= hwa1480_fw uwba
 MISC_KMODS	+= mii
@@ -490,13 +499,17 @@ DACF_KMODS	+= net_dacf
 #
 #	MAC-Type Plugin Modules (/kernel/mac)
 #
+MAC_KMODS	+= mac_6to4
 MAC_KMODS	+= mac_ether
+MAC_KMODS	+= mac_ipv4
+MAC_KMODS	+= mac_ipv6
 MAC_KMODS	+= mac_wifi
 MAC_KMODS	+= mac_ib
 
 #
 # socketmod (kernel/socketmod)
 #
+SOCKET_KMODS	+= sockpfp
 SOCKET_KMODS	+= socksctp
 SOCKET_KMODS	+= socksdp
 

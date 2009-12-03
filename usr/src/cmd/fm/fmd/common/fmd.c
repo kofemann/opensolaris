@@ -72,6 +72,7 @@ const char _fmd_version[] = "1.2";		/* daemon version string */
 static char _fmd_plat[MAXNAMELEN];		/* native platform string */
 static char _fmd_isa[MAXNAMELEN];		/* native instruction set */
 static struct utsname _fmd_uts;			/* native uname(2) info */
+static char _fmd_psn[MAXNAMELEN];		/* product serial number */
 static char _fmd_csn[MAXNAMELEN];		/* chassis serial number */
 static char _fmd_prod[MAXNAMELEN];		/* product name string */
 
@@ -227,10 +228,11 @@ static const fmd_conf_formal_t _fmd_conf[] = {
 { "agent.path", &fmd_conf_path, _fmd_agent_path }, /* path for agents */
 { "alloc_msecs", &fmd_conf_uint32, "10" },	/* msecs before alloc retry */
 { "alloc_tries", &fmd_conf_uint32, "3" },	/* max # of alloc retries */
+{ "product_sn", &fmd_conf_string, _fmd_psn },	/* product serial number */
 { "chassis", &fmd_conf_string, _fmd_csn },	/* chassis serial number */
 { "ckpt.dir", &fmd_conf_string, "var/fm/fmd/ckpt" }, /* ckpt directory path */
-{ "ckpt.dirmode", &fmd_conf_int32, "0700" },	/* ckpt directory perm mode */
-{ "ckpt.mode", &fmd_conf_int32, "0400" },	/* ckpt file perm mode */
+{ "ckpt.dirmode", &fmd_conf_int32, "0755" },	/* ckpt directory perm mode */
+{ "ckpt.mode", &fmd_conf_int32, "0644" },	/* ckpt file perm mode */
 { "ckpt.restore", &fmd_conf_bool, "true" },	/* restore checkpoints? */
 { "ckpt.save", &fmd_conf_bool, "true" },	/* save checkpoints? */
 { "ckpt.zero", &fmd_conf_bool, "false" },	/* zero checkpoints on start? */
@@ -286,6 +288,7 @@ static const fmd_conf_formal_t _fmd_conf[] = {
 { "rpc.api.prog", &fmd_conf_uint32, "100170" },	/* FMD_API rpc program num */
 { "rpc.rcvsize", &fmd_conf_size, "128k" },	/* rpc receive buffer size */
 { "rpc.sndsize", &fmd_conf_size, "128k" },	/* rpc send buffer size */
+{ "rsrc.pollperiod", &fmd_conf_time, "1h" },	/* aged rsrcs poller period */
 { "rsrc.age", &fmd_conf_time, "30d" },		/* max age of old rsrc log */
 { "rsrc.zero", &fmd_conf_bool, "false" },	/* zero rsrc cache on start? */
 { "schemedir", &fmd_conf_string, _fmd_scheme_path }, /* path for scheme mods */
@@ -364,7 +367,7 @@ fmd_create(fmd_t *dp, const char *arg0, const char *root, const char *conf)
 {
 	fmd_conf_path_t *pap;
 	char file[PATH_MAX];
-	const char *name;
+	const char *name, *psn, *csn;
 	fmd_stat_t *sp;
 	int i;
 
@@ -383,10 +386,15 @@ fmd_create(fmd_t *dp, const char *arg0, const char *root, const char *conf)
 
 	if ((shp = smbios_open(NULL, SMB_VERSION, 0, NULL)) != NULL) {
 		if ((id = smbios_info_system(shp, &s1)) != SMB_ERR &&
-		    smbios_info_common(shp, id, &s2) != SMB_ERR) {
+		    smbios_info_common(shp, id, &s2) != SMB_ERR)
 			fmd_cleanup_auth_str(_fmd_prod, s2.smbi_product);
-			fmd_cleanup_auth_str(_fmd_csn, s2.smbi_serial);
-		}
+
+		if ((psn = smbios_psn(shp)) != NULL)
+			fmd_cleanup_auth_str(_fmd_psn, psn);
+
+		if ((csn = smbios_csn(shp)) != NULL)
+			fmd_cleanup_auth_str(_fmd_csn, csn);
+
 		smbios_close(shp);
 	} else if ((rooth = di_init("/", DINFOPROP)) != DI_NODE_NIL &&
 	    (promh = di_prom_init()) != DI_PROM_HANDLE_NIL) {
@@ -698,12 +706,12 @@ fmd_gc(fmd_t *dp, id_t id, hrtime_t hrt)
 static void
 fmd_clear_aged_rsrcs(fmd_t *dp, id_t id, hrtime_t hrt)
 {
-	hrtime_t delta;
+	hrtime_t period;
 
 	fmd_asru_clear_aged_rsrcs();
-	(void) fmd_conf_getprop(dp->d_conf, "rsrc.age", &delta);
+	(void) fmd_conf_getprop(dp->d_conf, "rsrc.pollperiod", &period);
 	(void) fmd_timerq_install(dp->d_timers, dp->d_rmod->mod_timerids,
-	    (fmd_timer_f *)fmd_clear_aged_rsrcs, dp, NULL, delta/10);
+	    (fmd_timer_f *)fmd_clear_aged_rsrcs, dp, NULL, period);
 }
 
 /*

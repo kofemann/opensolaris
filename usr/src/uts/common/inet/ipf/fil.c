@@ -618,7 +618,6 @@ static INLINE int frpr_fragment6(fin)
 fr_info_t *fin;
 {
 	struct ip6_frag *frag;
-	int extoff = 0;
 
 	fin->fin_flx |= FI_FRAG;
 
@@ -627,43 +626,25 @@ fr_info_t *fin;
 	 * else after the fragment.
 	 */
 	if (frpr_ipv6exthdr(fin, 0, IPPROTO_FRAGMENT) == IPPROTO_NONE)
-		goto badv6frag;
-
-	if (frpr_pullup(fin, sizeof(*frag)) == -1)
-		goto badv6frag;
+		return IPPROTO_NONE;
 
 	frag = (struct ip6_frag *)((char *)fin->fin_dp - sizeof(*frag));
-	/*
-	 * Fragment but no fragmentation info set?  Bad packet...
-	 */
-	if (frag->ip6f_offlg == 0)
-		goto badv6frag;
-
-	fin->fin_id = frag->ip6f_ident;
-	fin->fin_dp = (char *)frag + sizeof(*frag);
-	fin->fin_dlen -= sizeof(*frag);
-	/* length of hdrs(after frag hdr) + data */
-	extoff = sizeof(*frag);
 
 	/*
-	 * If the frag is not the last one and the payload length
-	 * is not multiple of 8, it must be dropped.
+	 * If this fragment isn't the last then the packet length must
+	 * be a multiple of 8.
 	 */
-	if (((frag->ip6f_offlg & IP6F_MORE_FRAG) && (fin->fin_dlen & 7)) ||
-	    (frag->ip6f_offlg == 0)) {
-badv6frag:
-		fin->fin_dp = (char *)fin->fin_dp - extoff;
-		fin->fin_dlen += extoff;
-		fin->fin_flx |= FI_BAD;
-		return IPPROTO_NONE;
+	if ((frag->ip6f_offlg & IP6F_MORE_FRAG) != 0) {
+		fin->fin_flx |= FI_MOREFRAG;
+
+		if ((fin->fin_plen & 0x7) != 0)
+			fin->fin_flx |= FI_BAD;
 	}
 
+	fin->fin_id = frag->ip6f_ident;
 	fin->fin_off = ntohs(frag->ip6f_offlg & IP6F_OFF_MASK);
 	if (fin->fin_off != 0)
 		fin->fin_flx |= FI_FRAGBODY;
-
-	if (frag->ip6f_offlg & IP6F_MORE_FRAG)
-		fin->fin_flx |= FI_MOREFRAG;
 
 	return frag->ip6f_nxt;
 }
@@ -2151,6 +2132,7 @@ fr_info_t *fin;
 u_32_t *passp;
 {
 	frentry_t *fr;
+	fr_info_t *fc;
 	u_32_t pass;
 	int out;
 	ipf_stack_t *ifs = fin->fin_ifs;
@@ -2164,13 +2146,51 @@ u_32_t *passp;
 	else
 #endif
 		fin->fin_fr = ifs->ifs_ipfilter[out][ifs->ifs_fr_active];
-	if (fin->fin_fr != NULL)
+
+	/*
+	 * If there are no rules loaded skip all checks and return.
+	 */
+	if (fin->fin_fr == NULL) {
+
+		if ((pass & FR_NOMATCH)) {
+			IPF_BUMP(ifs->ifs_frstats[out].fr_nom);
+		}
+
+		return (NULL);
+	}
+
+	fc = &ifs->ifs_frcache[out][CACHE_HASH(fin)];
+	READ_ENTER(&ifs->ifs_ipf_frcache);
+	if (!bcmp((char *)fin, (char *)fc, FI_CSIZE)) {
+		/*
+		 * copy cached data so we can unlock the mutexes earlier.
+		 */
+		bcopy((char *)fc, (char *)fin, FI_COPYSIZE);
+		RWLOCK_EXIT(&ifs->ifs_ipf_frcache);
+		IPF_BUMP(ifs->ifs_frstats[out].fr_chit);
+
+		if ((fr = fin->fin_fr) != NULL) {
+			IPF_BUMP(fr->fr_hits);
+			pass = fr->fr_flags;
+		}
+	} else {
+		RWLOCK_EXIT(&ifs->ifs_ipf_frcache);
+
 		pass = fr_scanlist(fin, ifs->ifs_fr_pass);
+
+		if (((pass & FR_KEEPSTATE) == 0) &&
+		    ((fin->fin_flx & FI_DONTCACHE) == 0)) {
+			WRITE_ENTER(&ifs->ifs_ipf_frcache);
+			bcopy((char *)fin, (char *)fc, FI_COPYSIZE);
+			RWLOCK_EXIT(&ifs->ifs_ipf_frcache);
+		}
+
+		fr = fin->fin_fr;
+	}
 
 	if ((pass & FR_NOMATCH)) {
 		IPF_BUMP(ifs->ifs_frstats[out].fr_nom);
 	}
-	fr = fin->fin_fr;
 
 	/*
 	 * Apply packets per second rate-limiting to a rule as required.
@@ -2577,6 +2597,9 @@ ipf_stack_t *ifs;
 	 */
 	if ((fr != NULL) && (pass & FR_DUP)) {
 		mc = M_DUPLICATE(fin->fin_m);
+#ifdef _KERNEL
+		mc->b_rptr += fin->fin_ipoff;
+#endif
 	}
 
 	if (pass & (FR_RETRST|FR_RETICMP)) {
@@ -3520,6 +3543,7 @@ ipf_stack_t *ifs;
 	int flushed = 0, set;
 
 	WRITE_ENTER(&ifs->ifs_ipf_mutex);
+	bzero((char *)ifs->ifs_frcache, sizeof (ifs->ifs_frcache));
 
 	set = ifs->ifs_fr_active;
 	if ((flags & FR_INACTIVE) == FR_INACTIVE)
@@ -3911,6 +3935,101 @@ ipf_stack_t *ifs;
 	RWLOCK_EXIT(&ifs->ifs_ipf_mutex);
 }
 
+#if SOLARIS2 >= 10
+/* ------------------------------------------------------------------------ */
+/* Function:    fr_syncindex						    */
+/* Returns:     void							    */
+/* Parameters:  rules	  - list of rules to be sync'd			    */
+/*		ifp	  - interface, which is being sync'd		    */
+/*		newifp	  - new ifindex value for interface		    */
+/*                                                                          */
+/* Function updates all NIC indecis, which match ifp, in every rule. Every  */
+/* NIC index matching ifp, will be updated to newifp.			    */
+/* ------------------------------------------------------------------------ */
+static void fr_syncindex(rules, ifp, newifp)
+frentry_t *rules;
+void *ifp;
+void *newifp;
+{
+	int i;
+	frentry_t *fr;
+
+	for (fr = rules; fr != NULL; fr = fr->fr_next) {
+		/*
+		 * Lookup all the interface names that are part of the rule.
+		 */
+		for (i = 0; i < 4; i++)
+			if (fr->fr_ifas[i] == ifp)
+				fr->fr_ifas[i] = newifp;
+
+		for (i = 0; i < 2; i++) {
+			if (fr->fr_tifs[i].fd_ifp == ifp)
+				fr->fr_tifs[i].fd_ifp = newifp;
+		}
+
+		if (fr->fr_dif.fd_ifp == ifp)
+			fr->fr_dif.fd_ifp = newifp;
+	}
+}
+
+/* ------------------------------------------------------------------------ */
+/* Function:    fr_ifindexsync						    */
+/* Returns:     void							    */
+/* Parameters:	ifp	  - interface, which is being sync'd		    */
+/*		newifp	  - new ifindex value for interface		    */
+/*              ifs	  - IPF's stack					    */
+/*                                                                          */
+/* Function assumes ipf_mutex is locked exclusively.			    */
+/* 									    */
+/* Function updates the NIC references in rules with new interfaces index   */
+/* (newifp). Function must process active lists:			    */
+/*	with accounting rules (IPv6 and IPv4)				    */
+/*	with inbound rules (IPv6 and IPv4)				    */
+/*	with outbound rules (IPv6 and IPv4)				    */
+/* Function also has to take care of rule groups.			    */
+/*                                                                          */
+/* NOTE: The ipf_mutex is grabbed exclusively by caller (which is always    */
+/* nic_event_hook). The hook function also updates state entries, NAT rules */
+/* and NAT entries. We want to do all these update atomically to keep the   */
+/* NIC references consistent. The ipf_mutex will synchronize event with	    */
+/* fr_check(), which processes packets,	so no packet will enter fr_check(), */
+/* while NIC references will be synchronized.				    */
+/* ------------------------------------------------------------------------ */
+void fr_ifindexsync(ifp, newifp, ifs)
+void *ifp;
+void *newifp;
+ipf_stack_t *ifs;
+{
+	unsigned int	i;
+	frentry_t *rule_lists[8];
+	unsigned int	rules = sizeof (rule_lists) / sizeof (frentry_t *);
+
+	rule_lists[0] = ifs->ifs_ipacct[0][ifs->ifs_fr_active];
+	rule_lists[1] =	ifs->ifs_ipacct[1][ifs->ifs_fr_active];
+	rule_lists[2] =	ifs->ifs_ipfilter[0][ifs->ifs_fr_active];
+	rule_lists[3] =	ifs->ifs_ipfilter[1][ifs->ifs_fr_active];
+	rule_lists[4] =	ifs->ifs_ipacct6[0][ifs->ifs_fr_active];
+	rule_lists[5] =	ifs->ifs_ipacct6[1][ifs->ifs_fr_active];
+	rule_lists[6] =	ifs->ifs_ipfilter6[0][ifs->ifs_fr_active];
+	rule_lists[7] =	ifs->ifs_ipfilter6[1][ifs->ifs_fr_active];
+
+	for (i = 0; i < rules; i++) {
+		fr_syncindex(rule_lists[i], ifp, newifp);
+	} 
+
+	/*
+	 * Update rule groups.
+	 */
+	for (i = 0; i < IPL_LOGSIZE; i++) {
+		frgroup_t *g;
+
+		for (g = ifs->ifs_ipfgroups[i][0]; g != NULL; g = g->fg_next)
+			fr_syncindex(g->fg_start, ifp, newifp);
+		for (g = ifs->ifs_ipfgroups[i][1]; g != NULL; g = g->fg_next)
+			fr_syncindex(g->fg_start, ifp, newifp);
+	}
+}
+#endif
 
 /*
  * In the functions below, bcopy() is called because the pointer being
@@ -4504,6 +4623,7 @@ ipf_stack_t *ifs;
 		fp->fr_cksum += *p;
 
 	WRITE_ENTER(&ifs->ifs_ipf_mutex);
+	bzero((char *)ifs->ifs_frcache, sizeof (ifs->ifs_frcache));
 
 	for (; (f = *ftail) != NULL; ftail = &f->fr_next) {
 		if ((fp->fr_cksum != f->fr_cksum) ||

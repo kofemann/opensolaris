@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -35,7 +35,6 @@
  * software developed by the University of California, Berkeley, and its
  * contributors.
  */
-
 
 #include <sys/types.h>
 #include <sys/t_lock.h>
@@ -617,7 +616,7 @@ remountfs(struct vfs *vfsp, dev_t dev, void *raw_argsp, int args_len)
 		ufsvfsp->vfs_forcedirectio = 1;
 	else	/* default is no direct I/O */
 		ufsvfsp->vfs_forcedirectio = 0;
-	ufsvfsp->vfs_iotstamp = lbolt;
+	ufsvfsp->vfs_iotstamp = ddi_get_lbolt();
 
 	/*
 	 * set largefiles flag in ufsvfs equal to the
@@ -646,7 +645,8 @@ remountfs(struct vfs *vfsp, dev_t dev, void *raw_argsp, int args_len)
 	 * XXX UFSMNT_ONERROR_RDONLY rather than UFSMNT_ONERROR_PANIC
 	 */
 #define	BOOT_TIME_LIMIT	(180*hz)
-	if (!(flags & UFSMNT_ONERROR_FLGMASK) && lbolt < BOOT_TIME_LIMIT) {
+	if (!(flags & UFSMNT_ONERROR_FLGMASK) &&
+	    ddi_get_lbolt() < BOOT_TIME_LIMIT) {
 		cmn_err(CE_WARN, "%s is required to be mounted onerror=%s",
 		    ufsvfsp->vfs_fs->fs_fsmnt, UFSMNT_ONERROR_PANIC_STR);
 		flags |= UFSMNT_ONERROR_PANIC;
@@ -1185,7 +1185,7 @@ mountfs(struct vfs *vfsp, enum whymountroot why, struct vnode *devvp,
 		ufsvfsp->vfs_forcedirectio = 1;
 	else if (flags & UFSMNT_NOFORCEDIRECTIO)
 		ufsvfsp->vfs_forcedirectio = 0;
-	ufsvfsp->vfs_iotstamp = lbolt;
+	ufsvfsp->vfs_iotstamp = ddi_get_lbolt();
 
 	ufsvfsp->vfs_nindiroffset = fsp->fs_nindir - 1;
 	ufsvfsp->vfs_nindirshift = highbit(ufsvfsp->vfs_nindiroffset);
@@ -1444,7 +1444,7 @@ ufs_unmount(struct vfs *vfsp, int fflag, struct cred *cr)
 	}
 
 	/* let all types of writes go through */
-	ufsvfsp->vfs_iotstamp = lbolt;
+	ufsvfsp->vfs_iotstamp = ddi_get_lbolt();
 
 	/* coordinate with global hlock thread */
 	if (TRANS_ISTRANS(ufsvfsp) && (ufsvfsp->vfs_validfs == UT_HLOCKING)) {
@@ -2053,7 +2053,7 @@ ufs_vget(struct vfs *vfsp, struct vnode **vpp, struct fid *fidp)
 	 * it to the caller, presumably NFS, as it's no longer valid.
 	 */
 	if (ip->i_gen != ufid->ufid_gen || ip->i_mode == 0 ||
-	    (ip->i_flag & IDEL)) {
+	    (ip->i_nlink <= 0)) {
 		VN_RELE(ITOV(ip));
 		error = EINVAL;
 		goto errout;

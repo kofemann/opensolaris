@@ -73,7 +73,7 @@
 #include <sys/zfs_rlock.h>
 #include <sys/extdirent.h>
 #include <sys/kidmap.h>
-#include <sys/cred_impl.h>
+#include <sys/cred.h>
 #include <sys/attr.h>
 
 /*
@@ -598,6 +598,25 @@ zfs_write(vnode_t *vp, uio_t *uio, int ioflag, cred_t *cr, caller_context_t *ct)
 	zilog = zfsvfs->z_log;
 
 	/*
+	 * Validate file offset
+	 */
+	woff = ioflag & FAPPEND ? zp->z_phys->zp_size : uio->uio_loffset;
+	if (woff < 0) {
+		ZFS_EXIT(zfsvfs);
+		return (EINVAL);
+	}
+
+	/*
+	 * Check for mandatory locks before calling zfs_range_lock()
+	 * in order to prevent a deadlock with locks set via fcntl().
+	 */
+	if (MANDMODE((mode_t)zp->z_phys->zp_mode) &&
+	    (error = chklock(vp, FWRITE, woff, n, uio->uio_fmode, ct)) != 0) {
+		ZFS_EXIT(zfsvfs);
+		return (error);
+	}
+
+	/*
 	 * Pre-fault the pages to ensure slow (eg NFS) pages
 	 * don't hold up txg.
 	 */
@@ -608,34 +627,25 @@ zfs_write(vnode_t *vp, uio_t *uio, int ioflag, cred_t *cr, caller_context_t *ct)
 	 */
 	if (ioflag & FAPPEND) {
 		/*
-		 * Range lock for a file append:
-		 * The value for the start of range will be determined by
-		 * zfs_range_lock() (to guarantee append semantics).
-		 * If this write will cause the block size to increase,
-		 * zfs_range_lock() will lock the entire file, so we must
-		 * later reduce the range after we grow the block size.
+		 * Obtain an appending range lock to guarantee file append
+		 * semantics.  We reset the write offset once we have the lock.
 		 */
 		rl = zfs_range_lock(zp, 0, n, RL_APPEND);
+		woff = rl->r_off;
 		if (rl->r_len == UINT64_MAX) {
-			/* overlocked, zp_size can't change */
-			woff = uio->uio_loffset = zp->z_phys->zp_size;
-		} else {
-			woff = uio->uio_loffset = rl->r_off;
+			/*
+			 * We overlocked the file because this write will cause
+			 * the file block size to increase.
+			 * Note that zp_size cannot change with this lock held.
+			 */
+			woff = zp->z_phys->zp_size;
 		}
+		uio->uio_loffset = woff;
 	} else {
-		woff = uio->uio_loffset;
 		/*
-		 * Validate file offset
-		 */
-		if (woff < 0) {
-			ZFS_EXIT(zfsvfs);
-			return (EINVAL);
-		}
-
-		/*
-		 * If we need to grow the block size then zfs_range_lock()
-		 * will lock a wider range than we request here.
-		 * Later after growing the block size we reduce the range.
+		 * Note that if the file block size will change as a result of
+		 * this write, then this range lock will lock the entire file
+		 * so that we can re-write the block safely.
 		 */
 		rl = zfs_range_lock(zp, woff, n, RL_WRITER);
 	}
@@ -649,15 +659,6 @@ zfs_write(vnode_t *vp, uio_t *uio, int ioflag, cred_t *cr, caller_context_t *ct)
 	if ((woff + n) > limit || woff > (limit - n))
 		n = limit - woff;
 
-	/*
-	 * Check for mandatory locks
-	 */
-	if (MANDMODE((mode_t)zp->z_phys->zp_mode) &&
-	    (error = chklock(vp, FWRITE, woff, n, uio->uio_fmode, ct)) != 0) {
-		zfs_range_unlock(rl);
-		ZFS_EXIT(zfsvfs);
-		return (error);
-	}
 	end_size = MAX(zp->z_phys->zp_size, woff + n);
 
 	/*
@@ -837,21 +838,25 @@ again:
 }
 
 void
-zfs_get_done(dmu_buf_t *db, void *vzgd)
+zfs_get_done(zgd_t *zgd, int error)
 {
-	zgd_t *zgd = (zgd_t *)vzgd;
-	rl_t *rl = zgd->zgd_rl;
-	vnode_t *vp = ZTOV(rl->r_zp);
-	objset_t *os = rl->r_zp->z_zfsvfs->z_os;
+	znode_t *zp = zgd->zgd_private;
+	objset_t *os = zp->z_zfsvfs->z_os;
 
-	dmu_buf_rele(db, vzgd);
-	zfs_range_unlock(rl);
+	if (zgd->zgd_db)
+		dmu_buf_rele(zgd->zgd_db, zgd);
+
+	zfs_range_unlock(zgd->zgd_rl);
+
 	/*
 	 * Release the vnode asynchronously as we currently have the
 	 * txg stopped from syncing.
 	 */
-	VN_RELE_ASYNC(vp, dsl_pool_vnrele_taskq(dmu_objset_pool(os)));
-	zil_add_block(zgd->zgd_zilog, zgd->zgd_bp);
+	VN_RELE_ASYNC(ZTOV(zp), dsl_pool_vnrele_taskq(dmu_objset_pool(os)));
+
+	if (error == 0 && zgd->zgd_bp)
+		zil_add_block(zgd->zgd_zilog, zgd->zgd_bp);
+
 	kmem_free(zgd, sizeof (zgd_t));
 }
 
@@ -868,20 +873,21 @@ zfs_get_data(void *arg, lr_write_t *lr, char *buf, zio_t *zio)
 	zfsvfs_t *zfsvfs = arg;
 	objset_t *os = zfsvfs->z_os;
 	znode_t *zp;
-	uint64_t off = lr->lr_offset;
+	uint64_t object = lr->lr_foid;
+	uint64_t offset = lr->lr_offset;
+	uint64_t size = lr->lr_length;
+	blkptr_t *bp = &lr->lr_blkptr;
 	dmu_buf_t *db;
-	rl_t *rl;
 	zgd_t *zgd;
-	int dlen = lr->lr_length;		/* length of user data */
 	int error = 0;
 
-	ASSERT(zio);
-	ASSERT(dlen != 0);
+	ASSERT(zio != NULL);
+	ASSERT(size != 0);
 
 	/*
 	 * Nothing to do if the file has been removed
 	 */
-	if (zfs_zget(zfsvfs, lr->lr_foid, &zp) != 0)
+	if (zfs_zget(zfsvfs, object, &zp) != 0)
 		return (ENOENT);
 	if (zp->z_unlinked) {
 		/*
@@ -893,6 +899,10 @@ zfs_get_data(void *arg, lr_write_t *lr, char *buf, zio_t *zio)
 		return (ENOENT);
 	}
 
+	zgd = (zgd_t *)kmem_zalloc(sizeof (zgd_t), KM_SLEEP);
+	zgd->zgd_zilog = zfsvfs->z_log;
+	zgd->zgd_private = zp;
+
 	/*
 	 * Write records come in two flavors: immediate and indirect.
 	 * For small writes it's cheaper to store the data with the
@@ -901,17 +911,16 @@ zfs_get_data(void *arg, lr_write_t *lr, char *buf, zio_t *zio)
 	 * we don't have to write the data twice.
 	 */
 	if (buf != NULL) { /* immediate write */
-		rl = zfs_range_lock(zp, off, dlen, RL_READER);
+		zgd->zgd_rl = zfs_range_lock(zp, offset, size, RL_READER);
 		/* test for truncation needs to be done while range locked */
-		if (off >= zp->z_phys->zp_size) {
+		if (offset >= zp->z_phys->zp_size) {
 			error = ENOENT;
-			goto out;
+		} else {
+			error = dmu_read(os, object, offset, size, buf,
+			    DMU_READ_NO_PREFETCH);
 		}
-		VERIFY(0 == dmu_read(os, lr->lr_foid, off, dlen, buf,
-		    DMU_READ_NO_PREFETCH));
+		ASSERT(error == 0 || error == ENOENT);
 	} else { /* indirect write */
-		uint64_t boff; /* block starting offset */
-
 		/*
 		 * Have to lock the whole block to ensure when it's
 		 * written out and it's checksum is being calculated
@@ -919,68 +928,58 @@ zfs_get_data(void *arg, lr_write_t *lr, char *buf, zio_t *zio)
 		 * blocksize after we get the lock in case it's changed!
 		 */
 		for (;;) {
-			if (ISP2(zp->z_blksz)) {
-				boff = P2ALIGN_TYPED(off, zp->z_blksz,
-				    uint64_t);
-			} else {
-				boff = 0;
-			}
-			dlen = zp->z_blksz;
-			rl = zfs_range_lock(zp, boff, dlen, RL_READER);
-			if (zp->z_blksz == dlen)
+			uint64_t blkoff;
+			size = zp->z_blksz;
+			blkoff = ISP2(size) ? P2PHASE(offset, size) : offset;
+			offset -= blkoff;
+			zgd->zgd_rl = zfs_range_lock(zp, offset, size,
+			    RL_READER);
+			if (zp->z_blksz == size)
 				break;
-			zfs_range_unlock(rl);
+			offset += blkoff;
+			zfs_range_unlock(zgd->zgd_rl);
 		}
 		/* test for truncation needs to be done while range locked */
-		if (off >= zp->z_phys->zp_size) {
+		if (lr->lr_offset >= zp->z_phys->zp_size)
 			error = ENOENT;
-			goto out;
-		}
-		zgd = (zgd_t *)kmem_alloc(sizeof (zgd_t), KM_SLEEP);
-		zgd->zgd_rl = rl;
-		zgd->zgd_zilog = zfsvfs->z_log;
-		zgd->zgd_bp = &lr->lr_blkptr;
 #ifdef DEBUG
 		if (zil_fault_io) {
 			error = EIO;
 			zil_fault_io = 0;
-		} else {
-			error = dmu_buf_hold(os, lr->lr_foid, boff, zgd, &db);
 		}
-#else
-		error = dmu_buf_hold(os, lr->lr_foid, boff, zgd, &db);
 #endif
-		if (error != 0) {
-			kmem_free(zgd, sizeof (zgd_t));
-			goto out;
-		}
-
-		ASSERT(boff == db->db_offset);
-		lr->lr_blkoff = off - boff;
-		error = dmu_sync(zio, db, &lr->lr_blkptr,
-		    lr->lr_common.lrc_txg, zfs_get_done, zgd);
-		ASSERT((error && error != EINPROGRESS) ||
-		    lr->lr_length <= zp->z_blksz);
 		if (error == 0)
-			zil_add_block(zfsvfs->z_log, &lr->lr_blkptr);
-		/*
-		 * If we get EINPROGRESS, then we need to wait for a
-		 * write IO initiated by dmu_sync() to complete before
-		 * we can release this dbuf.  We will finish everything
-		 * up in the zfs_get_done() callback.
-		 */
-		if (error == EINPROGRESS)
-			return (0);
-		dmu_buf_rele(db, zgd);
-		kmem_free(zgd, sizeof (zgd_t));
+			error = dmu_buf_hold(os, object, offset, zgd, &db);
+
+		if (error == 0) {
+			zgd->zgd_db = db;
+			zgd->zgd_bp = bp;
+
+			ASSERT(db->db_offset == offset);
+			ASSERT(db->db_size == size);
+
+			error = dmu_sync(zio, lr->lr_common.lrc_txg,
+			    zfs_get_done, zgd);
+			ASSERT(error || lr->lr_length <= zp->z_blksz);
+
+			/*
+			 * On success, we need to wait for the write I/O
+			 * initiated by dmu_sync() to complete before we can
+			 * release this dbuf.  We will finish everything up
+			 * in the zfs_get_done() callback.
+			 */
+			if (error == 0)
+				return (0);
+
+			if (error == EALREADY) {
+				lr->lr_common.lrc_txtype = TX_WRITE2;
+				error = 0;
+			}
+		}
 	}
-out:
-	zfs_range_unlock(rl);
-	/*
-	 * Release the vnode asynchronously as we currently have the
-	 * txg stopped from syncing.
-	 */
-	VN_RELE_ASYNC(ZTOV(zp), dsl_pool_vnrele_taskq(dmu_objset_pool(os)));
+
+	zfs_get_done(zgd, error);
+
 	return (error);
 }
 
@@ -2370,6 +2369,12 @@ zfs_getattr(vnode_t *vp, vattr_t *vap, int flags, cred_t *cr,
 			ZFS_TIME_DECODE(&xoap->xoa_createtime, pzp->zp_crtime);
 			XVA_SET_RTN(xvap, XAT_CREATETIME);
 		}
+
+		if (XVA_ISSET_REQ(xvap, XAT_REPARSE)) {
+			xoap->xoa_reparse =
+			    ((pzp->zp_flags & ZFS_REPARSE) != 0);
+			XVA_SET_RTN(xvap, XAT_REPARSE);
+		}
 	}
 
 	ZFS_TIME_DECODE(&vap->va_atime, pzp->zp_atime);
@@ -2669,6 +2674,12 @@ top:
 				XVA_CLR_REQ(xvap, XAT_AV_QUARANTINED);
 				XVA_SET_REQ(&tmpxvattr, XAT_AV_QUARANTINED);
 			}
+		}
+
+		if (XVA_ISSET_REQ(xvap, XAT_REPARSE)) {
+			mutex_exit(&zp->z_lock);
+			ZFS_EXIT(zfsvfs);
+			return (EPERM);
 		}
 
 		if (need_policy == FALSE &&
@@ -3913,7 +3924,10 @@ zfs_inactive(vnode_t *vp, cred_t *cr, caller_context_t *ct)
 		}
 
 		mutex_enter(&zp->z_lock);
-		vp->v_count = 0; /* count arrives as 1 */
+		mutex_enter(&vp->v_lock);
+		ASSERT(vp->v_count == 1);
+		vp->v_count = 0;
+		mutex_exit(&vp->v_lock);
 		mutex_exit(&zp->z_lock);
 		rw_exit(&zfsvfs->z_teardown_inactive_lock);
 		zfs_znode_free(zp);
@@ -3980,7 +3994,6 @@ zfs_frlock(vnode_t *vp, int cmd, flock64_t *bfp, int flag, offset_t offset,
 {
 	znode_t *zp = VTOZ(vp);
 	zfsvfs_t *zfsvfs = zp->z_zfsvfs;
-	int error;
 
 	ZFS_ENTER(zfsvfs);
 	ZFS_VERIFY_ZP(zp);
@@ -3995,9 +4008,8 @@ zfs_frlock(vnode_t *vp, int cmd, flock64_t *bfp, int flag, offset_t offset,
 		ZFS_EXIT(zfsvfs);
 		return (EAGAIN);
 	}
-	error = fs_frlock(vp, cmd, bfp, flag, offset, flk_cbp, cr, ct);
 	ZFS_EXIT(zfsvfs);
-	return (error);
+	return (fs_frlock(vp, cmd, bfp, flag, offset, flk_cbp, cr, ct));
 }
 
 /*
@@ -4486,6 +4498,11 @@ zfs_pathconf(vnode_t *vp, int cmd, ulong_t *valp, cred_t *cr,
 
 	case _PC_MIN_HOLE_SIZE:
 		*valp = (ulong_t)SPA_MINBLOCKSIZE;
+		return (0);
+
+	case _PC_TIMESTAMP_RESOLUTION:
+		/* nanosecond timestamp resolution */
+		*valp = 1L;
 		return (0);
 
 	default:

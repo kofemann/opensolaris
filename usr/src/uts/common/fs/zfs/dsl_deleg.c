@@ -75,8 +75,6 @@
 #include <sys/dsl_synctask.h>
 #include <sys/dsl_deleg.h>
 #include <sys/spa.h>
-#include <sys/spa_impl.h>
-#include <sys/zio_checksum.h> /* for the default checksum value */
 #include <sys/zap.h>
 #include <sys/fs/zfs.h>
 #include <sys/cred.h>
@@ -589,7 +587,7 @@ dsl_deleg_access(const char *dsname, const char *perm, cred_t *cr)
 
 			if (dsl_prop_get_dd(dd,
 			    zfs_prop_to_name(ZFS_PROP_ZONED),
-			    8, 1, &zoned, NULL) != 0)
+			    8, 1, &zoned, NULL, B_FALSE) != 0)
 				break;
 			if (!zoned)
 				break;
@@ -739,5 +737,5 @@ dsl_deleg_destroy(objset_t *mos, uint64_t zapobj, dmu_tx_t *tx)
 boolean_t
 dsl_delegation_on(objset_t *os)
 {
-	return (os->os->os_spa->spa_delegation);
+	return (!!spa_delegation(os->os_spa));
 }

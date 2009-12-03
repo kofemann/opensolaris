@@ -41,9 +41,6 @@
 #include <sys/nxge/nxge_txdma.h>
 #include <sys/nxge/nxge_hio.h>
 
-#define	NXGE_HIO_SHARE_MIN_CHANNELS 2
-#define	NXGE_HIO_SHARE_MAX_CHANNELS 2
-
 /*
  * External prototypes
  */
@@ -135,9 +132,10 @@ nxge_hio_init(nxge_t *nxge)
 	int i;
 
 	nhd = (nxge_hio_data_t *)nxge->nxge_hw_p->hio;
-	if (nhd == 0) {
+	if (nhd == NULL) {
 		nhd = KMEM_ZALLOC(sizeof (*nhd), KM_SLEEP);
 		MUTEX_INIT(&nhd->lock, NULL, MUTEX_DRIVER, NULL);
+		nhd->type = NXGE_HIO_TYPE_SERVICE;
 		nxge->nxge_hw_p->hio = (uintptr_t)nhd;
 	}
 
@@ -969,8 +967,7 @@ static void nxge_hio_dc_unshare(nxge_t *, nxge_hio_vr_t *,
  *	Any domain
  */
 int
-nxge_hio_init(
-	nxge_t *nxge)
+nxge_hio_init(nxge_t *nxge)
 {
 	nxge_hio_data_t *nhd;
 	int i, region;
@@ -979,6 +976,10 @@ nxge_hio_init(
 	if (nhd == 0) {
 		nhd = KMEM_ZALLOC(sizeof (*nhd), KM_SLEEP);
 		MUTEX_INIT(&nhd->lock, NULL, MUTEX_DRIVER, NULL);
+		if (isLDOMguest(nxge))
+			nhd->type = NXGE_HIO_TYPE_GUEST;
+		else
+			nhd->type = NXGE_HIO_TYPE_SERVICE;
 		nxge->nxge_hw_p->hio = (uintptr_t)nhd;
 	}
 
@@ -1057,23 +1058,6 @@ nxge_hio_init(
 		NXGE_DEBUG_MSG((nxge, HIO_CTL,
 		    "Hybrid IO-capable service domain"));
 		return (NXGE_OK);
-	} else {
-		/*
-		 * isLDOMguest(nxge) == B_TRUE
-		 */
-		nx_vio_fp_t *vio;
-		nhd->type = NXGE_HIO_TYPE_GUEST;
-
-		vio = &nhd->hio.vio;
-		vio->__register = (vio_net_resource_reg_t)
-		    modgetsymvalue("vio_net_resource_reg", 0);
-		vio->unregister = (vio_net_resource_unreg_t)
-		    modgetsymvalue("vio_net_resource_unreg", 0);
-
-		if (vio->__register == 0 || vio->unregister == 0) {
-			NXGE_ERROR_MSG((nxge, VIR_CTL, "vio_net is absent!"));
-			return (NXGE_ERROR);
-		}
 	}
 
 	return (0);
@@ -1144,12 +1128,16 @@ nxge_hio_clear_unicst(p_nxge_t nxgep, const uint8_t *mac_addr)
 static int
 nxge_hio_add_mac(void *arg, const uint8_t *mac_addr)
 {
-	nxge_ring_group_t *group = (nxge_ring_group_t *)arg;
-	p_nxge_t nxge = group->nxgep;
-	int rv;
-	nxge_hio_vr_t *vr;	/* The Virtualization Region */
+	nxge_ring_group_t	*group = (nxge_ring_group_t *)arg;
+	p_nxge_t		nxge = group->nxgep;
+	int			rv;
+	nxge_hio_vr_t		*vr;	/* The Virtualization Region */
 
 	ASSERT(group->type == MAC_RING_TYPE_RX);
+	ASSERT(group->nxgep != NULL);
+
+	if (isLDOMguest(group->nxgep))
+		return (0);
 
 	mutex_enter(nxge->genlock);
 
@@ -1174,8 +1162,7 @@ nxge_hio_add_mac(void *arg, const uint8_t *mac_addr)
 	/*
 	 * Program the mac address for the group.
 	 */
-	if ((rv = nxge_hio_group_mac_add(nxge, group,
-	    mac_addr)) != 0) {
+	if ((rv = nxge_hio_group_mac_add(nxge, group, mac_addr)) != 0) {
 		return (rv);
 	}
 
@@ -1206,6 +1193,10 @@ nxge_hio_rem_mac(void *arg, const uint8_t *mac_addr)
 	int rv, slot;
 
 	ASSERT(group->type == MAC_RING_TYPE_RX);
+	ASSERT(group->nxgep != NULL);
+
+	if (isLDOMguest(group->nxgep))
+		return (0);
 
 	mutex_enter(nxge->genlock);
 
@@ -1253,14 +1244,16 @@ nxge_hio_group_start(mac_group_driver_t gdriver)
 	int			dev_gindex;
 
 	ASSERT(group->type == MAC_RING_TYPE_RX);
+	ASSERT(group->nxgep != NULL);
 
-#ifdef later
 	ASSERT(group->nxgep->nxge_mac_state == NXGE_MAC_STARTED);
-#endif
 	if (group->nxgep->nxge_mac_state != NXGE_MAC_STARTED)
 		return (ENXIO);
 
 	mutex_enter(group->nxgep->genlock);
+	if (isLDOMguest(group->nxgep))
+		goto nxge_hio_group_start_exit;
+
 	dev_gindex = group->nxgep->pt_config.hw_config.def_mac_rxdma_grpid +
 	    group->gindex;
 	rdc_grp_p = &group->nxgep->pt_config.rdc_grps[dev_gindex];
@@ -1289,9 +1282,9 @@ nxge_hio_group_start(mac_group_driver_t gdriver)
 
 	(void) nxge_init_fzc_rdc_tbl(group->nxgep, rdc_grp_p, rdctbl);
 
+nxge_hio_group_start_exit:
 	group->started = B_TRUE;
 	mutex_exit(group->nxgep->genlock);
-
 	return (0);
 }
 
@@ -1305,6 +1298,9 @@ nxge_hio_group_stop(mac_group_driver_t gdriver)
 	mutex_enter(group->nxgep->genlock);
 	group->started = B_FALSE;
 
+	if (isLDOMguest(group->nxgep))
+		goto nxge_hio_group_stop_exit;
+
 	/*
 	 * Unbind the RDC table previously bound for this group.
 	 *
@@ -1314,6 +1310,7 @@ nxge_hio_group_stop(mac_group_driver_t gdriver)
 	if (group->gindex != 0)
 		(void) nxge_fzc_rdc_tbl_unbind(group->nxgep, group->rdctbl);
 
+nxge_hio_group_stop_exit:
 	mutex_exit(group->nxgep->genlock);
 }
 
@@ -1334,20 +1331,26 @@ nxge_hio_group_get(void *arg, mac_ring_type_t type, int groupid,
 		group->gindex = groupid;
 		group->sindex = 0;	/* not yet bound to a share */
 
-		dev_gindex = nxgep->pt_config.hw_config.def_mac_rxdma_grpid +
-		    groupid;
+		if (!isLDOMguest(nxgep)) {
+			dev_gindex =
+			    nxgep->pt_config.hw_config.def_mac_rxdma_grpid +
+			    groupid;
 
-		if (nxgep->pt_config.hw_config.def_mac_rxdma_grpid ==
-		    dev_gindex)
-			group->port_default_grp = B_TRUE;
+			if (nxgep->pt_config.hw_config.def_mac_rxdma_grpid ==
+			    dev_gindex)
+				group->port_default_grp = B_TRUE;
+
+			infop->mgi_count =
+			    nxgep->pt_config.rdc_grps[dev_gindex].max_rdcs;
+		} else {
+			infop->mgi_count = NXGE_HIO_SHARE_MAX_CHANNELS;
+		}
 
 		infop->mgi_driver = (mac_group_driver_t)group;
 		infop->mgi_start = nxge_hio_group_start;
 		infop->mgi_stop = nxge_hio_group_stop;
 		infop->mgi_addmac = nxge_hio_add_mac;
 		infop->mgi_remmac = nxge_hio_rem_mac;
-		infop->mgi_count =
-		    nxgep->pt_config.rdc_grps[dev_gindex].max_rdcs;
 		break;
 
 	case MAC_RING_TYPE_TX:
@@ -1918,15 +1921,12 @@ nxge_hio_unshare(
 }
 
 int
-nxge_hio_addres(
-	nxge_hio_vr_t *vr,
-	mac_ring_type_t type,
-	uint64_t *map)
+nxge_hio_addres(nxge_hio_vr_t *vr, mac_ring_type_t type, uint64_t *map)
 {
 	nxge_t		*nxge = (nxge_t *)vr->nxge;
 	nxge_grp_t	*group;
 	int		groupid;
-	int		i;
+	int		i, rv = 0;
 	int		max_dcs;
 
 	NXGE_DEBUG_MSG((nxge, HIO_CTL, "==> nxge_hio_addres"));
@@ -1959,8 +1959,6 @@ nxge_hio_addres(
 
 	for (i = 0; i < max_dcs; i++) {
 		if (group->map & (1 << i)) {
-			int rv;
-
 			if ((rv = nxge_hio_dc_share(nxge, vr, type, i)) < 0) {
 				if (*map == 0) /* Couldn't get even one DC. */
 					return (-rv);
@@ -1971,8 +1969,13 @@ nxge_hio_addres(
 		}
 	}
 
-	NXGE_DEBUG_MSG((nxge, HIO_CTL, "<== nxge_hio_addres"));
+	if ((*map == 0) || (rv != 0)) {
+		NXGE_DEBUG_MSG((nxge, HIO_CTL,
+		    "<== nxge_hio_addres: rv(%x)", rv));
+		return (EIO);
+	}
 
+	NXGE_DEBUG_MSG((nxge, HIO_CTL, "<== nxge_hio_addres"));
 	return (0);
 }
 

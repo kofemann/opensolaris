@@ -298,6 +298,13 @@ typedef struct srpt_target_port_s {
 
 	uint_t			tp_nports;
 	srpt_hw_port_t		*tp_hw_port;
+	/*
+	 * track the number of active ports so we can offline the target if
+	 * none
+	 */
+	uint32_t		tp_num_active_ports;
+	/* state STMF wants the target in.  We may be offline due to no ports */
+	srpt_target_state_t	tp_requested_state;
 } srpt_target_port_t;
 
 /*
@@ -479,13 +486,9 @@ extern srpt_ctxt_t *srpt_ctxt;
 /*
  * srpt_errlevel can be set in the debugger to enable additional logging.
  * You can also add set srpt:srpt_errlevel={0,1,2,3,4} in /etc/system.
- * The default log level is L2 for debug builds, otherwise L1.
+ * The default log level is L1.
  */
-#ifdef	DEBUG
-#define	SRPT_LOG_DEFAULT_LEVEL SRPT_LOG_L2
-#else
 #define	SRPT_LOG_DEFAULT_LEVEL SRPT_LOG_L1
-#endif
 
 extern uint_t srpt_errlevel;
 

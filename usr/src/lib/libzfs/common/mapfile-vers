@@ -39,10 +39,22 @@
 
 SUNWprivate_1.1 {
     global:
+	fletcher_2_native;
+	fletcher_2_byteswap;
+	fletcher_4_native;
+	fletcher_4_byteswap;
+	fletcher_4_incremental_native;
+	fletcher_4_incremental_byteswap;
+	hist_event_table;
 	libzfs_errno;
 	libzfs_error_action;
 	libzfs_error_description;
 	libzfs_fini;
+	libzfs_fru_compare;
+	libzfs_fru_devpath;
+	libzfs_fru_lookup;
+	libzfs_fru_notself;
+	libzfs_fru_refresh;
 	libzfs_init;
 	libzfs_mnttab_cache;
 	libzfs_print_on_error;
@@ -62,6 +74,7 @@ SUNWprivate_1.1 {
 	zfs_get_user_props;
 	zfs_get_type;
 	zfs_hold;
+	zfs_hold_range;
 	zfs_iscsi_perm_check;
 	zfs_is_mounted;
 	zfs_is_shared;
@@ -74,6 +87,7 @@ SUNWprivate_1.1 {
 	zfs_iter_pnfs;
 	zfs_iter_root;
 	zfs_iter_snapshots;
+	zfs_iter_snapshots_sorted;
 	zfs_mount;
 	zfs_name_to_prop;
 	zfs_name_valid;
@@ -89,6 +103,7 @@ SUNWprivate_1.1 {
 	zfs_prop_get;
 	zfs_prop_get_int;
 	zfs_prop_get_numeric;
+	zfs_prop_get_recvd;
 	zfs_prop_get_table;
 	zfs_prop_get_userquota_int;
 	zfs_prop_get_userquota;
@@ -108,6 +123,7 @@ SUNWprivate_1.1 {
 	zfs_receive;
 	zfs_refresh_properties;
 	zfs_release;
+	zfs_release_range;
 	zfs_rename;
 	zfs_rollback;
 	zfs_send;
@@ -137,13 +153,15 @@ SUNWprivate_1.1 {
 	zfs_userquota_prop_prefixes;
 	zpool_add;
 	zpool_clear;
+	zpool_clear_label;
 	zpool_close;
 	zpool_create;
-	zpool_create_zvol_links;
 	zpool_destroy;
 	zpool_disable_datasets;
+	zpool_dump_ddt;
 	zpool_enable_datasets;
 	zpool_expand_proplist;
+	zpool_explain_recover;
 	zpool_export;
 	zpool_export_force;
 	zpool_find_import;
@@ -153,6 +171,7 @@ SUNWprivate_1.1 {
 	zpool_find_import_cached;
 	zpool_find_vdev;
 	zpool_find_vdev_by_physpath;
+	zpool_fru_set;
 	zpool_get_config;
 	zpool_get_errlog;
 	zpool_get_handle;
@@ -163,6 +182,7 @@ SUNWprivate_1.1 {
 	zpool_get_prop_int;
 	zpool_get_state;
 	zpool_get_status;
+	zpool_history_unpack;
 	zpool_import;
 	zpool_import_props;
 	zpool_import_status;
@@ -181,7 +201,6 @@ SUNWprivate_1.1 {
 	zpool_prop_values;
 	zpool_read_label;
 	zpool_refresh_stats;
-	zpool_remove_zvol_links;
 	zpool_scrub;
 	zpool_set_history_str;
 	zpool_set_prop;

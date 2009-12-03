@@ -799,15 +799,18 @@ nfs4open_otw(vnode_t *dvp, char *file_name, struct vattr *in_va,
 	if (create_flag && in_va) {
 
 		/*
-		 * If the parent's directory has the setgid bit set
+		 * If there is grpid mount flag used or
+		 * the parent's directory has the setgid bit set
 		 * _and_ the client was able to get a valid mapping
 		 * for the parent dir's owner_group, we want to
 		 * append NVERIFY(owner_group == dva.va_gid) and
 		 * SETATTR to the CREATE compound.
 		 */
 		mutex_enter(&drp->r_statelock);
-		if (drp->r_attr.va_mode & VSGID &&
+		if ((VTOMI4(dvp)->mi_flags & MI4_GRPID ||
+		    drp->r_attr.va_mode & VSGID) &&
 		    drp->r_attr.va_gid != GID_NOBODY) {
+			in_va->va_mask |= AT_GID;
 			in_va->va_gid = drp->r_attr.va_gid;
 			setgid_flag = 1;
 		}
@@ -2707,7 +2710,7 @@ nfs4_write(vnode_t *vp, struct uio *uiop, int ioflag, cred_t *cr,
 		if (nfs_rw_lock_held(&rp->r_rwlock, RW_READER)) {
 			nfs_rw_exit(&rp->r_rwlock);
 			if (nfs_rw_enter_sig(&rp->r_rwlock, RW_WRITER,
-			    INTR(vp)))
+			    INTR4(vp)))
 				return (EINTR);
 		}
 
@@ -2847,8 +2850,24 @@ nfs4_fwrite:
 		mutex_enter(&rp->r_statelock);
 		while ((mi->mi_max_threads != 0 &&
 		    rp->r_awcount > 2 * mi->mi_max_threads) ||
-		    rp->r_gcount > 0)
-			cv_wait(&rp->r_cv, &rp->r_statelock);
+		    rp->r_gcount > 0) {
+			if (INTR4(vp)) {
+				klwp_t *lwp = ttolwp(curthread);
+
+				if (lwp != NULL)
+					lwp->lwp_nostop++;
+				if (!cv_wait_sig(&rp->r_cv, &rp->r_statelock)) {
+					mutex_exit(&rp->r_statelock);
+					if (lwp != NULL)
+						lwp->lwp_nostop--;
+					error = EINTR;
+					goto bottom;
+				}
+				if (lwp != NULL)
+					lwp->lwp_nostop--;
+			} else
+				cv_wait(&rp->r_cv, &rp->r_statelock);
+		}
 		mutex_exit(&rp->r_statelock);
 
 		/*
@@ -9981,7 +10000,7 @@ nfs4_map(vnode_t *vp, offset_t off, struct as *as, caddr_t *addrp,
 	 * r_inmap after we release r_lkserlock.
 	 */
 
-	if (nfs_rw_enter_sig(&rp->r_rwlock, RW_WRITER, INTR(vp)))
+	if (nfs_rw_enter_sig(&rp->r_rwlock, RW_WRITER, INTR4(vp)))
 		return (EINTR);
 	atomic_add_int(&rp->r_inmap, 1);
 	nfs_rw_exit(&rp->r_rwlock);
@@ -13472,6 +13491,7 @@ nfs4frlock_final_cleanup(nfs4_lock_call_type_t ctype,
 	mntinfo4_t	*mi = cp->nc_mi;
 	rnode4_t	*rp = VTOR4(vp);
 	int		error = *errorp;
+	int	do_flush_pages = 0;
 
 	ASSERT(nfs_zone() == mi->mi_zone);
 	/*
@@ -13495,22 +13515,11 @@ nfs4frlock_final_cleanup(nfs4_lock_call_type_t ctype,
 		 * work since VOP_PUTPAGE can call nfs4_commit which calls
 		 * nfs4_start_fop. We flush the pages below after calling
 		 * nfs4_end_op above
+		 * The flush of the page cache must be done after
+		 * nfs4_end_open_seqid_sync() to avoid a 4-way hang.
 		 */
-		if (!error && resp && resp->status == NFS4_OK) {
-			int error;
-
-			error = VOP_PUTPAGE(vp, (u_offset_t)0,
-			    0, B_INVAL, cred, NULL);
-
-			if (error && (error == ENOSPC || error == EDQUOT)) {
-				rnode4_t *rp = VTOR4(vp);
-
-				mutex_enter(&rp->r_statelock);
-				if (!rp->r_error)
-					rp->r_error = error;
-				mutex_exit(&rp->r_statelock);
-			}
-		}
+		if (!error && resp && resp->status == NFS4_OK)
+			do_flush_pages = 1;
 	}
 
 	/* free the reference on the lock owner */
@@ -13528,6 +13537,9 @@ nfs4frlock_final_cleanup(nfs4_lock_call_type_t ctype,
 		NFS4_END_OSEQID_SYNC(oop, mi);
 		open_owner_rele(oop);
 	}
+
+	if (do_flush_pages)
+		nfs4_flush_pages(vp, cred);
 
 	(void) convoff(vp, flk, whence, offset);
 

@@ -111,6 +111,7 @@ alloc(struct inode *ip, daddr_t bpref, int size, daddr_t *bnp, cred_t *cr)
 	int err;
 	char *errmsg = NULL;
 	size_t len;
+	clock_t	now;
 
 	ufsvfsp = ip->i_ufsvfs;
 	fs = ufsvfsp->vfs_fs;
@@ -158,10 +159,11 @@ alloc(struct inode *ip, daddr_t bpref, int size, daddr_t *bnp, cred_t *cr)
 	    (size_t *)NULL);
 
 nospace:
+	now = ddi_get_lbolt();
 	mutex_enter(&ufsvfsp->vfs_lock);
-	if ((lbolt - ufsvfsp->vfs_lastwhinetime) > (hz << 2) &&
+	if ((now - ufsvfsp->vfs_lastwhinetime) > (hz << 2) &&
 	    (!(TRANS_ISTRANS(ufsvfsp)) || !(ip->i_flag & IQUIET))) {
-		ufsvfsp->vfs_lastwhinetime = lbolt;
+		ufsvfsp->vfs_lastwhinetime = now;
 		cmn_err(CE_NOTE, "alloc: %s: file system full", fs->fs_fsmnt);
 	}
 	mutex_exit(&ufsvfsp->vfs_lock);
@@ -187,6 +189,7 @@ realloccg(struct inode *ip, daddr_t bprev, daddr_t bpref, int osize,
 	int err;
 	char *errmsg = NULL;
 	size_t len;
+	clock_t	now;
 
 	ufsvfsp = ip->i_ufsvfs;
 	fs = ufsvfsp->vfs_fs;
@@ -260,10 +263,11 @@ realloccg(struct inode *ip, daddr_t bprev, daddr_t bpref, int osize,
 	    (size_t *)NULL);
 
 nospace:
+	now = ddi_get_lbolt();
 	mutex_enter(&ufsvfsp->vfs_lock);
-	if ((lbolt - ufsvfsp->vfs_lastwhinetime) > (hz << 2) &&
+	if ((now - ufsvfsp->vfs_lastwhinetime) > (hz << 2) &&
 	    (!(TRANS_ISTRANS(ufsvfsp)) || !(ip->i_flag & IQUIET))) {
-		ufsvfsp->vfs_lastwhinetime = lbolt;
+		ufsvfsp->vfs_lastwhinetime = now;
 		cmn_err(CE_NOTE,
 		    "realloccg %s: file system full", fs->fs_fsmnt);
 	}
@@ -1985,9 +1989,12 @@ contigpref(ufsvfs_t *ufsvfsp, size_t nb, size_t minb)
 			/* find a free block */
 			for (; cgbno < cgblks; ++cgbno) {
 				if (isblock(fs, blksfree, cgbno)) {
-					if (startcg != -1)
+					if (startcg != -1) {
+						brelse(bp);
+						savecg = startcg;
+						savebno = cgbno;
 						goto done;
-					else
+					} else
 						break;
 				}
 			}
@@ -2011,11 +2018,6 @@ contigpref(ufsvfs_t *ufsvfsp, size_t nb, size_t minb)
 	}
 
 done:
-	if (startcg != -1) {
-		brelse(bp);
-		savecg = startcg;
-		savebno = cgbno;
-	}
 
 	/* convert block offset in cg to frag offset in cg */
 	savebno = blkstofrags(fs, savebno);

@@ -52,7 +52,9 @@
 #include <sys/modhash.h>
 #include <sys/id_space.h>
 #include <sys/strsun.h>
+#include <sys/cred.h>
 #include <sys/dlpi.h>
+#include <sys/zone.h>
 #include <sys/mac_provider.h>
 #include <sys/dls.h>
 #include <sys/vlan.h>
@@ -487,7 +489,14 @@ aggr_grp_add_port(aggr_grp_t *grp, datalink_id_t port_linkid, boolean_t force,
 {
 	aggr_port_t *port, **cport;
 	mac_perim_handle_t mph;
+	zoneid_t port_zoneid = ALL_ZONES;
 	int err;
+
+	/* The port must be int the same zone as the aggregation. */
+	if (zone_check_datalink(&port_zoneid, port_linkid) != 0)
+		port_zoneid = GLOBAL_ZONEID;
+	if (grp->lg_zoneid != port_zoneid)
+		return (EBUSY);
 
 	/*
 	 * lg_mh could be NULL when the function is called during the creation
@@ -623,7 +632,8 @@ aggr_add_pseudo_rx_group(aggr_port_t *port, aggr_pseudo_rx_group_t *rx_grp)
 	/*
 	 * Get the list the the underlying HW rings.
 	 */
-	hw_rh_cnt = mac_hwrings_get(port->lp_mch, &port->lp_hwgh, hw_rh);
+	hw_rh_cnt = mac_hwrings_get(port->lp_mch, &port->lp_hwgh, hw_rh,
+	    MAC_RING_TYPE_RX);
 
 	if (port->lp_hwgh != NULL) {
 		/*
@@ -689,7 +699,8 @@ aggr_rem_pseudo_rx_group(aggr_port_t *port, aggr_pseudo_rx_group_t *rx_grp)
 		goto done;
 
 	ASSERT(rx_grp->arg_gh != NULL);
-	hw_rh_cnt = mac_hwrings_get(port->lp_mch, &hwgh, hw_rh);
+	hw_rh_cnt = mac_hwrings_get(port->lp_mch, &hwgh, hw_rh,
+	    MAC_RING_TYPE_RX);
 
 	/*
 	 * If hw_rh_cnt is 0, it means that the underlying port does not
@@ -980,7 +991,8 @@ aggr_grp_modify(datalink_id_t linkid, uint8_t update_mask, uint32_t policy,
 int
 aggr_grp_create(datalink_id_t linkid, uint32_t key, uint_t nports,
     laioc_port_t *ports, uint32_t policy, boolean_t mac_fixed, boolean_t force,
-    uchar_t *mac_addr, aggr_lacp_mode_t lacp_mode, aggr_lacp_timer_t lacp_timer)
+    uchar_t *mac_addr, aggr_lacp_mode_t lacp_mode, aggr_lacp_timer_t lacp_timer,
+    cred_t *credp)
 {
 	aggr_grp_t *grp = NULL;
 	aggr_port_t *port;
@@ -1010,6 +1022,7 @@ aggr_grp_create(datalink_id_t linkid, uint32_t key, uint_t nports,
 	grp->lg_closing = B_FALSE;
 	grp->lg_force = force;
 	grp->lg_linkid = linkid;
+	grp->lg_zoneid = crgetzoneid(credp);
 	grp->lg_ifspeed = 0;
 	grp->lg_link_state = LINK_STATE_UNKNOWN;
 	grp->lg_link_duplex = LINK_DUPLEX_UNKNOWN;
@@ -1082,7 +1095,8 @@ aggr_grp_create(datalink_id_t linkid, uint32_t key, uint_t nports,
 	if (err != 0)
 		goto bail;
 
-	if ((err = dls_devnet_create(grp->lg_mh, grp->lg_linkid)) != 0) {
+	err = dls_devnet_create(grp->lg_mh, grp->lg_linkid, crgetzoneid(credp));
+	if (err != 0) {
 		(void) mac_unregister(grp->lg_mh);
 		grp->lg_mh = NULL;
 		goto bail;
@@ -1386,7 +1400,7 @@ bail:
 }
 
 int
-aggr_grp_delete(datalink_id_t linkid)
+aggr_grp_delete(datalink_id_t linkid, cred_t *cred)
 {
 	aggr_grp_t *grp = NULL;
 	aggr_port_t *port, *cport;
@@ -1421,7 +1435,7 @@ aggr_grp_delete(datalink_id_t linkid)
 	 * fail the operation.
 	 */
 	if ((err = mac_disable(grp->lg_mh)) != 0) {
-		(void) dls_devnet_create(grp->lg_mh, linkid);
+		(void) dls_devnet_create(grp->lg_mh, linkid, crgetzoneid(cred));
 		rw_exit(&aggr_grp_lock);
 		return (err);
 	}
@@ -1490,12 +1504,19 @@ aggr_grp_free(aggr_grp_t *grp)
 int
 aggr_grp_info(datalink_id_t linkid, void *fn_arg,
     aggr_grp_info_new_grp_fn_t new_grp_fn,
-    aggr_grp_info_new_port_fn_t new_port_fn)
+    aggr_grp_info_new_port_fn_t new_port_fn, cred_t *cred)
 {
 	aggr_grp_t	*grp;
 	aggr_port_t	*port;
 	mac_perim_handle_t mph, pmph;
 	int		rc = 0;
+
+	/*
+	 * Make sure that the aggregation link is visible from the caller's
+	 * zone.
+	 */
+	if (!dls_devnet_islinkvisible(linkid, crgetzoneid(cred)))
+		return (ENOENT);
 
 	rw_enter(&aggr_grp_lock, RW_READER);
 

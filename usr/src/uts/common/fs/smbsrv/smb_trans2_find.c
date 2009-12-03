@@ -202,7 +202,7 @@
  *  STRING FileName;                   Files full length name
  */
 
-#include <smbsrv/smb_incl.h>
+#include <smbsrv/smb_kproto.h>
 #include <smbsrv/msgbuf.h>
 #include <smbsrv/smb_fsops.h>
 
@@ -664,9 +664,9 @@ smb_trans2_find_mbc_encode(smb_request_t *sr, smb_xa_t *xa,
 			    fileinfo->fi_cookie);
 
 		(void) smb_mbc_encodef(&xa->rep_data_mb, "%yyyllwbu", sr,
-		    smb_gmt2local(sr, fileinfo->fi_crtime.tv_sec),
-		    smb_gmt2local(sr, fileinfo->fi_atime.tv_sec),
-		    smb_gmt2local(sr, fileinfo->fi_mtime.tv_sec),
+		    smb_time_gmt_to_local(sr, fileinfo->fi_crtime.tv_sec),
+		    smb_time_gmt_to_local(sr, fileinfo->fi_atime.tv_sec),
+		    smb_time_gmt_to_local(sr, fileinfo->fi_mtime.tv_sec),
 		    dsize32,
 		    asize32,
 		    fileinfo->fi_dosattr,
@@ -686,7 +686,7 @@ smb_trans2_find_mbc_encode(smb_request_t *sr, smb_xa_t *xa,
 		 * Regardless of whether unicode or ascii, a single
 		 * termination byte is used.
 		 */
-		buflen = namelen + sizeof (mts_wchar_t);
+		buflen = namelen + sizeof (smb_wchar_t);
 		tmpbuf = kmem_zalloc(buflen, KM_SLEEP);
 		smb_msgbuf_init(&mb, (uint8_t *)tmpbuf, buflen, mb_flags);
 		if (smb_msgbuf_encode(&mb, "u", fileinfo->fi_name) < 0) {
@@ -697,9 +697,9 @@ smb_trans2_find_mbc_encode(smb_request_t *sr, smb_xa_t *xa,
 		tmpbuf[namelen] = '\0';
 
 		(void) smb_mbc_encodef(&xa->rep_data_mb, "%yyyllwlb#c", sr,
-		    smb_gmt2local(sr, fileinfo->fi_crtime.tv_sec),
-		    smb_gmt2local(sr, fileinfo->fi_atime.tv_sec),
-		    smb_gmt2local(sr, fileinfo->fi_mtime.tv_sec),
+		    smb_time_gmt_to_local(sr, fileinfo->fi_crtime.tv_sec),
+		    smb_time_gmt_to_local(sr, fileinfo->fi_atime.tv_sec),
+		    smb_time_gmt_to_local(sr, fileinfo->fi_mtime.tv_sec),
 		    dsize32,
 		    asize32,
 		    fileinfo->fi_dosattr,
@@ -768,7 +768,7 @@ smb_trans2_find_mbc_encode(smb_request_t *sr, smb_xa_t *xa,
 			smb_msgbuf_term(&mb);
 			return (-1);
 		}
-		shortlen = mts_wcequiv_strlen(fileinfo->fi_shortname);
+		shortlen = smb_wcequiv_strlen(fileinfo->fi_shortname);
 
 		(void) smb_mbc_encodef(&xa->rep_data_mb, "%llTTTTqqlllb.24cu",
 		    sr,

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -41,8 +41,10 @@ typedef struct ipdropper_s {
 
 void ip_drop_register(ipdropper_t *, char *);
 void ip_drop_unregister(ipdropper_t *);
-void ip_drop_packet(mblk_t *, boolean_t, ill_t *, ire_t *, struct kstat_named *,
+void ip_drop_packet(mblk_t *, boolean_t, ill_t *, struct kstat_named *,
     ipdropper_t *);
+void ip_drop_input(char *, mblk_t *, ill_t *);
+void ip_drop_output(char *, mblk_t *, ill_t *);
 
 /*
  * ip_dropstats - When a protocol developer comes up with a new reason to
@@ -106,6 +108,7 @@ struct ip_dropstats {
 	kstat_named_t ipds_esp_icmp;
 	kstat_named_t ipds_esp_nat_t_ipsec;
 	kstat_named_t ipds_esp_nat_t_ka;
+	kstat_named_t ipds_esp_iv_wrap;
 
 	/* AH-specific drop statistics. */
 	kstat_named_t ipds_ah_nomem;

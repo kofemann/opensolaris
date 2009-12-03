@@ -19,10 +19,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-#ident	"%Z%%M%	%I%	%E% SMI"
 #
 # lib/libprtdiag_psr/sparc/cherrystone/Makefile
 
@@ -57,6 +55,8 @@ LINKED_PRTDIAG_DIRS	= \
 #
 PLATFORM=SUNW,Sun-Fire-480R
 
+$(USR_PLAT_DIR)/$(PLATFORM)/lib/libprtdiag_psr.so.1 := FILEMODE= 0755
+
 .KEEP_STATE:
 
 PLATLIBS= $(USR_PLAT_DIR)/$(PLATFORM)/lib/
@@ -77,10 +77,10 @@ $(USR_PSM_LIB_DIR):
 	cd $(UTSBASE)/sun4u/cherrystone; pwd ; $(MAKE) $(USR_PSM_LIB_DIR)
 
 $(LINKED_DIRS):	$(USR_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(LINKED_LIB_DIRS):	$(LINKED_DIRS)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(LINKED_PRTDIAG_DIRS):	$(USR_PLAT_DIR)
 	-$(INS.slink6)

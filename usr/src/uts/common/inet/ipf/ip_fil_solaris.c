@@ -22,7 +22,6 @@ static const char rcsid[] = "@(#)$Id: ip_fil_solaris.c,v 2.62.2.19 2005/07/13 21
 #include <sys/systm.h>
 #include <sys/strsubr.h>
 #include <sys/cred.h>
-#include <sys/cred_impl.h>
 #include <sys/ddi.h>
 #include <sys/sunddi.h>
 #include <sys/ksynch.h>
@@ -260,6 +259,7 @@ ipf_stack_t *ifs;
 	ifs->ifs_fr_pass = (IPF_DEFAULT_PASS)|FR_NOMATCH;
 #endif
 
+	bzero((char *)ifs->ifs_frcache, sizeof(ifs->ifs_frcache));
 	MUTEX_INIT(&ifs->ifs_ipf_rw, "ipf rw mutex");
 	MUTEX_INIT(&ifs->ifs_ipf_timeoutlock, "ipf timeout lock mutex");
 	RWLOCK_INIT(&ifs->ifs_ipf_ipidfrag, "ipf IP NAT-Frag rwlock");
@@ -553,7 +553,7 @@ int *rp;
 		return EBUSY;
 	}
 
-	error = fr_ioctlswitch(unit, (caddr_t)data, cmd, mode, cp->cr_uid,
+	error = fr_ioctlswitch(unit, (caddr_t)data, cmd, mode, crgetuid(cp),
 			       curproc, ifs);
 	if (error != -1) {
 		RWLOCK_EXIT(&ifs->ifs_ipf_global);
@@ -576,9 +576,17 @@ int *rp;
 
 			RWLOCK_EXIT(&ifs->ifs_ipf_global);
 			WRITE_ENTER(&ifs->ifs_ipf_global);
-			ifs->ifs_fr_enable_active = 1;
-			error = fr_enableipf(ifs, enable);
-			ifs->ifs_fr_enable_active = 0;
+
+			/*
+			 * We must recheck fr_enable_active here, since we've
+			 * dropped ifs_ipf_global from R in order to get it
+			 * exclusively.
+			 */
+			if (ifs->ifs_fr_enable_active == 0) {
+				ifs->ifs_fr_enable_active = 1;
+				error = fr_enableipf(ifs, enable);
+				ifs->ifs_fr_enable_active = 0;
+			}
 		}
 		break;
 	case SIOCIPFSET :
@@ -643,6 +651,8 @@ int *rp;
 			error = EPERM;
 		else {
 			WRITE_ENTER(&ifs->ifs_ipf_mutex);
+			bzero((char *)ifs->ifs_frcache,
+			    sizeof (ifs->ifs_frcache));
 			error = COPYOUT((caddr_t)&ifs->ifs_fr_active,
 					(caddr_t)data,
 					sizeof(ifs->ifs_fr_active));
@@ -748,12 +758,12 @@ int *rp;
 #endif
 		break;
 	case SIOCIPFITER :
-		error = ipf_frruleiter((caddr_t)data, cp->cr_uid,
+		error = ipf_frruleiter((caddr_t)data, crgetuid(cp),
 				       curproc, ifs);
 		break;
 
 	case SIOCGENITER :
-		error = ipf_genericiter((caddr_t)data, cp->cr_uid,
+		error = ipf_genericiter((caddr_t)data, crgetuid(cp),
 					curproc, ifs);
 		break;
 
@@ -762,7 +772,7 @@ int *rp;
 		if (error != 0) {
 			error = EFAULT;
 		} else {
-			error = ipf_deltoken(tmp, cp->cr_uid, curproc, ifs);
+			error = ipf_deltoken(tmp, crgetuid(cp), curproc, ifs);
 		}
 		break;
 
@@ -2044,6 +2054,10 @@ int ipf_nic_event_v4(hook_event_token_t event, hook_data_t info, void *arg)
 	struct sockaddr_in *sin;
 	hook_nic_event_t *hn;
 	ipf_stack_t *ifs = arg;
+	void *new_ifp = NULL;
+
+	if (ifs->ifs_fr_running <= 0)
+		return (0);
 
 	hn = (hook_nic_event_t *)info;
 
@@ -2082,6 +2096,36 @@ int ipf_nic_event_v4(hook_event_token_t event, hook_data_t info, void *arg)
 		}
 		break;
 
+#if SOLARIS2 >= 10
+	case NE_IFINDEX_CHANGE :
+		WRITE_ENTER(&ifs->ifs_ipf_mutex);
+
+		if (hn->hne_data != NULL) {
+			/*
+			 * The netinfo passes interface index as int (hne_data should be
+			 * handled as a pointer to int), which is always 32bit. We need to
+			 * convert it to void pointer here, since interfaces are
+			 * represented as pointers to void in IPF. The pointers are 64 bits
+			 * long on 64bit platforms. Doing something like
+			 *	(void *)((int) x)
+			 * will throw warning:
+			 *   "cast to pointer from integer of different size"
+			 * during 64bit compilation.
+			 *
+			 * The line below uses (size_t) to typecast int to
+			 * size_t, which might be 64bit/32bit (depending
+			 * on architecture). Once we have proper 64bit/32bit
+			 * type (size_t), we can safely convert it to void pointer.
+			 */
+			new_ifp = (void *)(size_t)*((int *)hn->hne_data);
+			fr_ifindexsync((void *)hn->hne_nic, new_ifp, ifs);
+			fr_natifindexsync((void *)hn->hne_nic, new_ifp, ifs);
+			fr_stateifindexsync((void *)hn->hne_nic, new_ifp, ifs);
+		}
+		RWLOCK_EXIT(&ifs->ifs_ipf_mutex);
+		break;
+#endif
+
 	default :
 		break;
 	}
@@ -2104,6 +2148,10 @@ int ipf_nic_event_v6(hook_event_token_t event, hook_data_t info, void *arg)
 	struct sockaddr_in6 *sin6;
 	hook_nic_event_t *hn;
 	ipf_stack_t *ifs = arg;
+	void *new_ifp = NULL;
+
+	if (ifs->ifs_fr_running <= 0)
+		return (0);
 
 	hn = (hook_nic_event_t *)info;
 
@@ -2132,6 +2180,36 @@ int ipf_nic_event_v6(hook_event_token_t event, hook_data_t info, void *arg)
 				       ifs);
 		}
 		break;
+
+#if SOLARIS2 >= 10
+	case NE_IFINDEX_CHANGE :
+		WRITE_ENTER(&ifs->ifs_ipf_mutex);
+		if (hn->hne_data != NULL) {
+			/*
+			 * The netinfo passes interface index as int (hne_data should be
+			 * handled as a pointer to int), which is always 32bit. We need to
+			 * convert it to void pointer here, since interfaces are
+			 * represented as pointers to void in IPF. The pointers are 64 bits
+			 * long on 64bit platforms. Doing something like
+			 *	(void *)((int) x)
+			 * will throw warning:
+			 *   "cast to pointer from integer of different size"
+			 * during 64bit compilation.
+			 *
+			 * The line below uses (size_t) to typecast int to
+			 * size_t, which might be 64bit/32bit (depending
+			 * on architecture). Once we have proper 64bit/32bit
+			 * type (size_t), we can safely convert it to void pointer.
+			 */
+			new_ifp = (void *)(size_t)*((int *)hn->hne_data);
+			fr_ifindexsync((void *)hn->hne_nic, new_ifp, ifs);
+			fr_natifindexsync((void *)hn->hne_nic, new_ifp, ifs);
+			fr_stateifindexsync((void *)hn->hne_nic, new_ifp, ifs);
+		}
+		RWLOCK_EXIT(&ifs->ifs_ipf_mutex);
+		break;
+#endif
+
 	default :
 		break;
 	}

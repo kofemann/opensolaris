@@ -34,6 +34,7 @@
 #include <sys/sysmacros.h>
 
 #include <sys/sha1.h>
+#include <sha1/sha1_impl.h>
 
 /*
  * The sha1 module is created with two modlinkages:
@@ -58,39 +59,6 @@ static struct modlinkage modlinkage = {
 	MODREV_1, &modlmisc, &modlcrypto, NULL
 };
 
-/*
- * CSPI information (entry points, provider info, etc.)
- */
-
-typedef enum sha1_mech_type {
-	SHA1_MECH_INFO_TYPE,		/* SUN_CKM_SHA1 */
-	SHA1_HMAC_MECH_INFO_TYPE,	/* SUN_CKM_SHA1_HMAC */
-	SHA1_HMAC_GEN_MECH_INFO_TYPE	/* SUN_CKM_SHA1_HMAC_GENERAL */
-} sha1_mech_type_t;
-
-#define	SHA1_DIGEST_LENGTH	20	/* SHA1 digest length in bytes */
-#define	SHA1_HMAC_BLOCK_SIZE	64	/* SHA1-HMAC block size */
-#define	SHA1_HMAC_MIN_KEY_LEN	1	/* SHA1-HMAC min key length in bytes */
-#define	SHA1_HMAC_MAX_KEY_LEN	INT_MAX /* SHA1-HMAC max key length in bytes */
-#define	SHA1_HMAC_INTS_PER_BLOCK	(SHA1_HMAC_BLOCK_SIZE/sizeof (uint32_t))
-
-/*
- * Context for SHA1 mechanism.
- */
-typedef struct sha1_ctx {
-	sha1_mech_type_t	sc_mech_type;	/* type of context */
-	SHA1_CTX		sc_sha1_ctx;	/* SHA1 context */
-} sha1_ctx_t;
-
-/*
- * Context for SHA1-HMAC and SHA1-HMAC-GENERAL mechanisms.
- */
-typedef struct sha1_hmac_ctx {
-	sha1_mech_type_t	hc_mech_type;	/* type of context */
-	uint32_t		hc_digest_len;	/* digest len in bytes */
-	SHA1_CTX		hc_icontext;	/* inner SHA1 context */
-	SHA1_CTX		hc_ocontext;	/* outer SHA1 context */
-} sha1_hmac_ctx_t;
 
 /*
  * Macros to access the SHA1 or SHA1-HMAC contexts from a context passed
@@ -103,7 +71,7 @@ typedef struct sha1_hmac_ctx {
 /* to extract the digest length passed as mechanism parameter */
 #define	PROV_SHA1_GET_DIGEST_LEN(m, len) {				\
 	if (IS_P2ALIGNED((m)->cm_param, sizeof (ulong_t)))		\
-		(len) = (uint32_t)*((ulong_t *)mechanism->cm_param);	\
+		(len) = (uint32_t)*((ulong_t *)(void *)mechanism->cm_param); \
 	else {								\
 		ulong_t tmp_ulong;					\
 		bcopy((m)->cm_param, &tmp_ulong, sizeof (ulong_t));	\
@@ -195,6 +163,12 @@ static crypto_ctx_ops_t sha1_ctx_ops = {
 	sha1_free_context
 };
 
+static void sha1_POST(int *);
+
+static crypto_fips140_ops_t sha1_fips140_ops = {
+	sha1_POST
+};
+
 static crypto_ops_t sha1_crypto_ops = {
 	&sha1_control_ops,
 	&sha1_digest_ops,
@@ -209,11 +183,14 @@ static crypto_ops_t sha1_crypto_ops = {
 	NULL,
 	NULL,
 	NULL,
-	&sha1_ctx_ops
+	&sha1_ctx_ops,
+	NULL,
+	NULL,
+	&sha1_fips140_ops
 };
 
 static crypto_provider_info_t sha1_prov_info = {
-	CRYPTO_SPI_VERSION_1,
+	CRYPTO_SPI_VERSION_4,
 	"SHA1 Software Provider",
 	CRYPTO_SW_PROVIDER,
 	{&modlinkage},
@@ -1472,4 +1449,15 @@ sha1_free_context(crypto_ctx_t *ctx)
 	ctx->cc_provider_private = NULL;
 
 	return (CRYPTO_SUCCESS);
+}
+
+/*
+ * SHA-1 Power-Up Self-Test
+ */
+void
+sha1_POST(int *rc)
+{
+
+	*rc = fips_sha1_post();
+
 }

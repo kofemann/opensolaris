@@ -23,6 +23,7 @@
  * Use is subject to license terms.
  */
 
+#include <smbsrv/smb_kproto.h>
 
 /*
  * smb_com_search
@@ -194,8 +195,6 @@
  * circuit to the consumer.
  */
 
-#include <smbsrv/smb_incl.h>
-
 /* *** smb_com_search *** */
 
 smb_sdrc_t
@@ -329,7 +328,7 @@ smb_com_search(smb_request_t *sr)
 			(void) strlcpy(name, fileinfo.fi_name,
 			    SMB_SHORTNAMELEN - 1);
 			if (to_upper)
-				(void) utf8_strupr(name);
+				(void) smb_strupr(name);
 		} else {
 			(void) strlcpy(name, fileinfo.fi_shortname,
 			    SMB_SHORTNAMELEN - 1);
@@ -340,7 +339,7 @@ smb_com_search(smb_request_t *sr)
 		    fileinfo.fi_name83, fileinfo.fi_name83+9,
 		    index, odid, client_key,
 		    fileinfo.fi_dosattr & 0xff,
-		    smb_gmt2local(sr, fileinfo.fi_mtime.tv_sec),
+		    smb_time_gmt_to_local(sr, fileinfo.fi_mtime.tv_sec),
 		    (int32_t)fileinfo.fi_size,
 		    name);
 
@@ -476,7 +475,7 @@ smb_com_find(smb_request_t *sr)
 		    fileinfo.fi_name83, fileinfo.fi_name83+9,
 		    index, odid, client_key,
 		    fileinfo.fi_dosattr & 0xff,
-		    smb_gmt2local(sr, fileinfo.fi_mtime.tv_sec),
+		    smb_time_gmt_to_local(sr, fileinfo.fi_mtime.tv_sec),
 		    (int32_t)fileinfo.fi_size,
 		    name);
 
@@ -654,7 +653,7 @@ smb_com_find_unique(struct smb_request *sr)
 		    fileinfo.fi_name83, fileinfo.fi_name83+9,
 		    index, odid, client_key,
 		    fileinfo.fi_dosattr & 0xff,
-		    smb_gmt2local(sr, fileinfo.fi_mtime.tv_sec),
+		    smb_time_gmt_to_local(sr, fileinfo.fi_mtime.tv_sec),
 		    (int32_t)fileinfo.fi_size,
 		    name);
 

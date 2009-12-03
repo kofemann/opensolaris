@@ -21,9 +21,8 @@
 
 /*
  * Copyright 2009 Emulex.  All rights reserved.
- * Use is subject to License terms.
+ * Use is subject to license terms.
  */
-
 
 #ifndef _EMLXS_ADAPTERS_H
 #define	_EMLXS_ADAPTERS_H
@@ -149,8 +148,33 @@ typedef enum emlxs_adapter
 	LPev12000M_M8,
 	LPev12002M_M8,
 	LPev12054_HP,
-	LPev12054E_HP
+	LPev12054E_HP,
 
+	/* TigerShark (94) */
+	OCe10101,	/* Generic Single Channel */
+	OCe10102,	/* Generic Dual Channel */
+	OCe10101_F_S,
+	OCe10102_F_S,
+	OCem10102_F_S,
+	OCe10101_I_S,
+	OCe10102_I_S,
+	OCem10102_I_S,
+	OCe10101_N_S,
+	OCe10102_N_S,
+	OCem10102_N_S,
+
+	/* TomCat (105) */
+	OCe11101,	/* Generic Single Channel */
+	OCe11102,	/* Generic Dual Channel */
+	OCe11101_F_S,
+	OCe11102_F_S,
+	OCem11102_F_S,
+	OCe11101_I_S,
+	OCe11102_I_S,
+	OCem11102_I_S,
+	OCe11101_N_S,
+	OCe11102_N_S,
+	OCem11102_N_S
 } emlxs_adapter_t;
 
 
@@ -426,6 +450,35 @@ typedef enum emlxs_adapter
 #define	PCI_SSDID_LPe1205_SP2		0xf12b
 #define	PCI_SSDID_LPe1205_SP3		0xf12c
 
+/* TigerShark */
+#define	PCI_DEVICE_ID_OCe10100		0x704
+
+#define	PCI_SSDID_OCe10101		0x704
+#define	PCI_SSDID_OCe10102		0x704
+#define	PCI_SSDID_OCe10101_F_S		0xe680
+#define	PCI_SSDID_OCe10102_F_S		0xe682
+#define	PCI_SSDID_OCem10102_F_S		0xe68e
+#define	PCI_SSDID_OCe10101_I_S		0xe6a0
+#define	PCI_SSDID_OCe10102_I_S		0xe6a2
+#define	PCI_SSDID_OCem10102_I_S		0xe6ae
+#define	PCI_SSDID_OCe10101_N_S		0xe690
+#define	PCI_SSDID_OCe10102_N_S		0xe692
+#define	PCI_SSDID_OCem10102_N_S		0xe69e
+
+/* TomCat */
+#define	PCI_DEVICE_ID_OCe11100		0x714
+
+#define	PCI_SSDID_OCe11101		0x714
+#define	PCI_SSDID_OCe11102		0x714
+#define	PCI_SSDID_OCe11101_F_S		0xe780
+#define	PCI_SSDID_OCe11102_F_S		0xe782
+#define	PCI_SSDID_OCem11102_F_S		0xe78e
+#define	PCI_SSDID_OCe11101_I_S		0xe7a0
+#define	PCI_SSDID_OCe11102_I_S		0xe7a2
+#define	PCI_SSDID_OCem11102_I_S		0xe7ae
+#define	PCI_SSDID_OCe11101_N_S		0xe790
+#define	PCI_SSDID_OCe11102_N_S		0xe792
+#define	PCI_SSDID_OCem11102_N_S		0xe79e
 
 /* JEDEC codes */
 #define	FIREFLY_JEDEC_ID	0x1ACC
@@ -460,6 +513,7 @@ typedef struct emlxs_model
 #define	EMLXS_MSI_SUPPORTED	0x00000002
 #define	EMLXS_MSIX_SUPPORTED	0x00000004
 #define	EMLXS_E2E_SUPPORTED	0x00000010 /* End-to-end authentication */
+#define	EMLXS_FCOE_SUPPORTED	0x00000100 /* Hornet is excluded */
 #define	EMLXS_SUN_BRANDED	0x10000000
 #define	EMLXS_NOT_SUPPORTED	0x80000000
 
@@ -476,7 +530,7 @@ typedef struct emlxs_model
 #define	EMLXS_NEPTUNE_CHIP	0x00000040
 #define	EMLXS_SATURN_CHIP	0x00000080
 #define	EMLXS_PROTEUS_CHIP	0x00000100
-#define	EMLXS_TIGERSHARK_CHIP	0x00000200
+#define	EMLXS_BE_CHIP		0x00000200
 
 	emlxs_fwid_t	fwid;
 	uint32_t	intr_limit;
@@ -2899,13 +2953,566 @@ emlxs_model_t   emlxs_pci_model[] =
 		{0x79, 0},
 		{0},
 		{0x78, 0},
+	},
+
+	/* TigerShark */
+
+	{
+		OCe10101,
+		PCI_DEVICE_ID_OCe10100,
+		PCI_SSDID_OCe10101,
+		"OCe10101",
+		"Emulex OneConnect OCe10101, FCoE Initiator",
+		"Emulex",
+		EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		1,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe10102,
+		PCI_DEVICE_ID_OCe10100,
+		PCI_SSDID_OCe10102,
+		"OCe10102",
+		"Emulex OneConnect OCe10102, FCoE Initiator",
+		"Emulex",
+		EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe10101_F_S,
+		PCI_DEVICE_ID_OCe10100,
+		PCI_SSDID_OCe10101_F_S,
+		"OCe10101-F-S",
+		"Emulex OneConnect OCe10101-F-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		1,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe10102_F_S,
+		PCI_DEVICE_ID_OCe10100,
+		PCI_SSDID_OCe10102_F_S,
+		"OCe10102-F-S",
+		"Emulex OneConnect OCe10102-F-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCem10102_F_S,
+		PCI_DEVICE_ID_OCe10100,
+		PCI_SSDID_OCem10102_F_S,
+		"OCem10102-F-S",
+		"Emulex OneConnect OCem10102-F-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe10101_I_S,
+		PCI_DEVICE_ID_OCe10100,
+		PCI_SSDID_OCe10101_I_S,
+		"OCe10101-I-S",
+		"Emulex OneConnect OCe10101-I-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		1,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe10102_I_S,
+		PCI_DEVICE_ID_OCe10100,
+		PCI_SSDID_OCe10102_I_S,
+		"OCe10102-I-S",
+		"Emulex OneConnect OCe10102-I-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCem10102_I_S,
+		PCI_DEVICE_ID_OCe10100,
+		PCI_SSDID_OCem10102_I_S,
+		"OCem10102-I-S",
+		"Emulex OneConnect OCem10102-I-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe10101_N_S,
+		PCI_DEVICE_ID_OCe10100,
+		PCI_SSDID_OCe10101_N_S,
+		"OCe10101-N-S",
+		"Emulex OneConnect OCe10101-N-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		1,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe10102_N_S,
+		PCI_DEVICE_ID_OCe10100,
+		PCI_SSDID_OCe10102_N_S,
+		"OCe10102-N-S",
+		"Emulex OneConnect OCe10102-N-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCem10102_N_S,
+		PCI_DEVICE_ID_OCe10100,
+		PCI_SSDID_OCem10102_N_S,
+		"OCem10102-N-S",
+		"Emulex OneConnect OCem10102-N-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	/* TomCat */
+
+	{
+		OCe11101,
+		PCI_DEVICE_ID_OCe11100,
+		PCI_SSDID_OCe11101,
+		"OCe11101",
+		"Emulex OneConnect OCe11101, FCoE Initiator",
+		"Emulex",
+		EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		1,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe11102,
+		PCI_DEVICE_ID_OCe11100,
+		PCI_SSDID_OCe11102,
+		"OCe11102",
+		"Emulex OneConnect OCe11102-F, FCoE Initiator",
+		"Emulex",
+		EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe11101_F_S,
+		PCI_DEVICE_ID_OCe11100,
+		PCI_SSDID_OCe11101_F_S,
+		"OCe11101-F-S",
+		"Emulex OneConnect OCe11101-F-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		1,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe11102_F_S,
+		PCI_DEVICE_ID_OCe11100,
+		PCI_SSDID_OCe11102_F_S,
+		"OCe11102-F-S",
+		"Emulex OneConnect OCe11102-F-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCem11102_F_S,
+		PCI_DEVICE_ID_OCe11100,
+		PCI_SSDID_OCem11102_F_S,
+		"OCem11102-F-S",
+		"Emulex OneConnect OCem11102-F-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe11101_I_S,
+		PCI_DEVICE_ID_OCe11100,
+		PCI_SSDID_OCe11101_I_S,
+		"OCe11101-I-S",
+		"Emulex OneConnect OCe11101-I-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		1,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe11102_I_S,
+		PCI_DEVICE_ID_OCe11100,
+		PCI_SSDID_OCe11102_I_S,
+		"OCe11102-I-S",
+		"Emulex OneConnect OCe11102-I-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCem11102_I_S,
+		PCI_DEVICE_ID_OCe11100,
+		PCI_SSDID_OCem11102_I_S,
+		"OCem11102-I-S",
+		"Emulex OneConnect OCem11102-I-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe11101_N_S,
+		PCI_DEVICE_ID_OCe11100,
+		PCI_SSDID_OCe11101_N_S,
+		"OCe11101-N-S",
+		"Emulex OneConnect OCe11101-N-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		1,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCe11102_N_S,
+		PCI_DEVICE_ID_OCe11100,
+		PCI_SSDID_OCe11102_N_S,
+		"OCe11102-N-S",
+		"Emulex OneConnect OCe11102-N-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
+	},
+
+	{
+		OCem11102_N_S,
+		PCI_DEVICE_ID_OCe11100,
+		PCI_SSDID_OCem11102_N_S,
+		"OCem11102-N-S",
+		"Emulex OneConnect OCem11102-N-S, FCoE Initiator",
+		"Emulex",
+		EMLXS_SUN_BRANDED | EMLXS_INTX_SUPPORTED | EMLXS_MSI_SUPPORTED |
+			EMLXS_MSIX_SUPPORTED | EMLXS_E2E_SUPPORTED |
+			EMLXS_FCOE_SUPPORTED,
+		EMLXS_BE_CHIP,
+		FW_NOT_PROVIDED,
+		EMLXS_INTR_NO_LIMIT,
+		EMLXS_SLI4_MASK,
+		2,
+		{0x78, 0},
+		{0x79, 0x7A, 0x7B, 0x7D, 0x7E, 0x7F, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x79, 0},
+		{0},
+		{0x78, 0},
 	}
 
 };	/* emlxs_pci_model[] */
 
-#define	EMLXS_PCI_MODEL_COUNT \
-	(sizeof (emlxs_pci_model) / sizeof (emlxs_model_t))
-
+int emlxs_pci_model_count =
+	(sizeof (emlxs_pci_model) / sizeof (emlxs_model_t));
 
 #endif	/* EMLXS_MODEL_DEF */
 

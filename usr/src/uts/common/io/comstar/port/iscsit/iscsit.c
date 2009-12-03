@@ -141,9 +141,6 @@ void
 iscsit_set_cmdsn(iscsit_conn_t *ict, idm_pdu_t *rx_pdu);
 
 static void
-iscsit_calc_rspsn(iscsit_conn_t *ict, idm_pdu_t *resp);
-
-static void
 iscsit_deferred_dispatch(idm_pdu_t *rx_pdu);
 
 static void
@@ -373,10 +370,9 @@ iscsit_drv_ioctl(dev_t drv, int cmd, intptr_t argp, int flag, cred_t *cred,
 {
 	iscsit_ioc_set_config_t		setcfg;
 	iscsit_ioc_set_config32_t	setcfg32;
-	/* iscsit_ioc_get_config_t	getcfg; */
-	char				*cfg_pnvlist;
-	nvlist_t			*cfg_nvlist;
-	it_config_t			*cfg;
+	char				*cfg_pnvlist = NULL;
+	nvlist_t			*cfg_nvlist = NULL;
+	it_config_t			*cfg = NULL;
 	idm_status_t			idmrc;
 	int				rc = 0;
 
@@ -429,11 +425,14 @@ iscsit_drv_ioctl(dev_t drv, int cmd, intptr_t argp, int flag, cred_t *cred,
 	/* Handle ioctl request (enable/disable have already been handled) */
 	switch (cmd) {
 	case ISCSIT_IOC_SET_CONFIG:
+		/* Any errors must set state back to ISE_ENABLED */
 		switch (ddi_model_convert_from(flag & FMODELS)) {
 		case DDI_MODEL_ILP32:
 			if (ddi_copyin((void *)argp, &setcfg32,
-			    sizeof (iscsit_ioc_set_config32_t), flag) != 0)
-				return (EFAULT);
+			    sizeof (iscsit_ioc_set_config32_t), flag) != 0) {
+				rc = EFAULT;
+				goto cleanup;
+			}
 
 			setcfg.set_cfg_pnvlist =
 			    (char *)((uintptr_t)setcfg32.set_cfg_pnvlist);
@@ -443,14 +442,20 @@ iscsit_drv_ioctl(dev_t drv, int cmd, intptr_t argp, int flag, cred_t *cred,
 			break;
 		case DDI_MODEL_NONE:
 			if (ddi_copyin((void *)argp, &setcfg,
-			    sizeof (iscsit_ioc_set_config_t), flag) != 0)
-				return (EFAULT);
+			    sizeof (iscsit_ioc_set_config_t), flag) != 0) {
+				rc = EFAULT;
+				goto cleanup;
+			}
 			break;
+		default:
+			rc = EFAULT;
+			goto cleanup;
 		}
 
 		/* Check API version */
 		if (setcfg.set_cfg_vers != ISCSIT_API_VERS0) {
-			return (EINVAL);
+			rc = EINVAL;
+			goto cleanup;
 		}
 
 		/* Config is in packed nvlist format so unpack it */
@@ -460,34 +465,34 @@ iscsit_drv_ioctl(dev_t drv, int cmd, intptr_t argp, int flag, cred_t *cred,
 
 		if (ddi_copyin(setcfg.set_cfg_pnvlist, cfg_pnvlist,
 		    setcfg.set_cfg_pnvlist_len, flag) != 0) {
-			kmem_free(cfg_pnvlist, setcfg.set_cfg_pnvlist_len);
-			return (EFAULT);
+			rc = EFAULT;
+			goto cleanup;
 		}
 
-		if (nvlist_unpack(cfg_pnvlist, setcfg.set_cfg_pnvlist_len,
-		    &cfg_nvlist, KM_SLEEP) != 0) {
-			kmem_free(cfg_pnvlist, setcfg.set_cfg_pnvlist_len);
-			return (EINVAL);
+		rc = nvlist_unpack(cfg_pnvlist, setcfg.set_cfg_pnvlist_len,
+		    &cfg_nvlist, KM_SLEEP);
+		if (rc != 0) {
+			goto cleanup;
 		}
 
 		/* Translate nvlist */
-		if (it_nv_to_config(cfg_nvlist, &cfg) != 0) {
+		rc = it_nv_to_config(cfg_nvlist, &cfg);
+		if (rc != 0) {
 			cmn_err(CE_WARN, "Configuration is invalid");
-			kmem_free(cfg_pnvlist, setcfg.set_cfg_pnvlist_len);
-			nvlist_free(cfg_nvlist);
-			return (EINVAL);
+			goto cleanup;
 		}
 
 		/* Update config */
-		if (iscsit_config_merge(cfg) != 0) {
-			kmem_free(cfg_pnvlist, setcfg.set_cfg_pnvlist_len);
-			nvlist_free(cfg_nvlist);
-			return (EIO);
-		}
+		rc = iscsit_config_merge(cfg);
+		/* FALLTHROUGH */
 
-		it_config_free_cmn(cfg);
-		kmem_free(cfg_pnvlist, setcfg.set_cfg_pnvlist_len);
-		nvlist_free(cfg_nvlist);
+cleanup:
+		if (cfg)
+			it_config_free_cmn(cfg);
+		if (cfg_pnvlist)
+			kmem_free(cfg_pnvlist, setcfg.set_cfg_pnvlist_len);
+		if (cfg_nvlist)
+			nvlist_free(cfg_nvlist);
 
 		/*
 		 * Now that the reconfig is complete set our state back to
@@ -533,12 +538,13 @@ iscsit_drv_ioctl(dev_t drv, int cmd, intptr_t argp, int flag, cred_t *cred,
 		iscsit_global.global_svc_state = ISE_DISABLED;
 		ISCSIT_GLOBAL_UNLOCK();
 		break;
+
 	default:
 		rc = EINVAL;
+		ISCSIT_GLOBAL_LOCK(RW_WRITER);
+		iscsit_global.global_svc_state = ISE_ENABLED;
+		ISCSIT_GLOBAL_UNLOCK();
 	}
-
-	/* Don't forget to clear ISE_BUSY state */
-	ASSERT(iscsit_global.global_svc_state != ISE_BUSY);
 
 	return (rc);
 }
@@ -940,6 +946,48 @@ iscsit_client_notify(idm_conn_t *ic, idm_client_notify_t icn,
 	return (rc);
 }
 
+/*
+ * iscsit_update_statsn is invoked for all the PDUs which have the StatSN
+ * field in the header. The StatSN is incremented if the IDM_PDU_ADVANCE_STATSN
+ * flag is set in the pdu flags field. The StatSN is connection-wide and is
+ * protected by the mutex ict_statsn_mutex. For Data-In PDUs, if the flag
+ * IDM_TASK_PHASECOLLAPSE_REQ is set, the status (phase-collapse) is also filled
+ */
+void
+iscsit_update_statsn(idm_task_t *idm_task, idm_pdu_t *pdu)
+{
+	iscsi_scsi_rsp_hdr_t *rsp = (iscsi_scsi_rsp_hdr_t *)pdu->isp_hdr;
+	iscsit_conn_t *ict = (iscsit_conn_t *)pdu->isp_ic->ic_handle;
+	iscsit_task_t *itask = NULL;
+	scsi_task_t *task = NULL;
+
+	mutex_enter(&ict->ict_statsn_mutex);
+	rsp->statsn = htonl(ict->ict_statsn);
+	if (pdu->isp_flags & IDM_PDU_ADVANCE_STATSN)
+		ict->ict_statsn++;
+	mutex_exit(&ict->ict_statsn_mutex);
+
+	/*
+	 * The last SCSI Data PDU passed for a command may also contain the
+	 * status if the status indicates termination with no expections, i.e.
+	 * no sense data or response involved. If the command completes with
+	 * an error, then the response and sense data will be sent in a
+	 * separate iSCSI Response PDU.
+	 */
+	if ((idm_task) && (idm_task->idt_flags & IDM_TASK_PHASECOLLAPSE_REQ)) {
+		itask = idm_task->idt_private;
+		task = itask->it_stmf_task;
+
+		rsp->cmd_status = task->task_scsi_status;
+		rsp->flags	|= ISCSI_FLAG_DATA_STATUS;
+		if (task->task_status_ctrl & TASK_SCTRL_OVER) {
+			rsp->flags |= ISCSI_FLAG_CMD_OVERFLOW;
+		} else if (task->task_status_ctrl & TASK_SCTRL_UNDER) {
+			rsp->flags |= ISCSI_FLAG_CMD_UNDERFLOW;
+		}
+		rsp->residual_count = htonl(task->task_resid);
+	}
+}
 
 void
 iscsit_build_hdr(idm_task_t *idm_task, idm_pdu_t *pdu, uint8_t opcode)
@@ -962,6 +1010,7 @@ iscsit_build_hdr(idm_task_t *idm_task, idm_pdu_t *pdu, uint8_t opcode)
 	/* Maintain current statsn for RTT responses */
 	dh->statsn = (opcode == ISCSI_OP_RTT_RSP) ?
 	    htonl(itask->it_ict->ict_statsn) : 0;
+
 	dh->expcmdsn = htonl(itask->it_ict->ict_sess->ist_expcmdsn);
 	dh->maxcmdsn = htonl(itask->it_ict->ict_sess->ist_maxcmdsn);
 
@@ -972,7 +1021,7 @@ iscsit_build_hdr(idm_task_t *idm_task, idm_pdu_t *pdu, uint8_t opcode)
 	 * data.dlength
 	 * data.datasn
 	 * data.offset
-	 * residual_count and cmd_status (if we ever implement phase collapse)
+	 * statsn, residual_count and cmd_status (for phase collapse)
 	 * rtt.rttsn
 	 * rtt.data_offset
 	 * rtt.data_length
@@ -997,12 +1046,19 @@ iscsit_keepalive(idm_conn_t *ic)
 	 */
 	nop_in_pdu = idm_pdu_alloc(sizeof (*nop_in), 0);
 	idm_pdu_init(nop_in_pdu, ic, NULL, NULL);
-
 	nop_in = (iscsi_nop_in_hdr_t *)nop_in_pdu->isp_hdr;
 	bzero(nop_in, sizeof (*nop_in));
 	nop_in->opcode = ISCSI_OP_NOOP_IN;
 	nop_in->flags = ISCSI_FLAG_FINAL;
 	nop_in->itt = ISCSI_RSVD_TASK_TAG;
+	/*
+	 * When the target sends a NOP-In as a Ping, the target transfer tag
+	 * is set to a valid (not reserved) value and the initiator task tag
+	 * is set to ISCSI_RSVD_TASK_TAG (0xffffffff). In this case the StatSN
+	 * will always contain the next sequence number but the StatSN for the
+	 * connection is not advanced after this PDU is sent.
+	 */
+	nop_in_pdu->isp_flags |= IDM_PDU_SET_STATSN;
 	/*
 	 * This works because we don't currently allocate ttt's anywhere else
 	 * in iscsit so as long as we stay out of IDM's range we are safe.
@@ -1049,6 +1105,7 @@ iscsit_conn_accept(idm_conn_t *ic)
 	ict->ict_keepalive_ttt = IDM_TASKIDS_MAX; /* Avoid IDM TT range */
 	ic->ic_handle = ict;
 	mutex_init(&ict->ict_mutex, NULL, MUTEX_DRIVER, NULL);
+	mutex_init(&ict->ict_statsn_mutex, NULL, MUTEX_DRIVER, NULL);
 	idm_refcnt_init(&ict->ict_refcnt, ict);
 
 	/*
@@ -1235,22 +1292,27 @@ iscsit_dbuf_alloc(scsi_task_t *task, uint32_t size, uint32_t *pminsize,
 	idm_buf_t *idm_buffer;
 	iscsit_buf_t	*ibuf;
 	stmf_data_buf_t *result;
+	uint32_t	bsize;
 
 	/*
-	 * Once the iSER picture is better understood it might make sense
-	 * to pre-allocate some registered buffers, similar to what
-	 * fct/qlt are doing.  In the meantime hopefully stmf can allocate
-	 * these things quickly.
-	 *
-	 * We can't support a transfer larger than MaxBurstLength bytes.
+	 * If the requested size is larger than MaxBurstLength and the
+	 * given pminsize is also larger than MaxBurstLength, then the
+	 * allocation fails (dbuf = NULL) and pminsize is modified to
+	 * be equal to MaxBurstLength. stmf/sbd then should re-invoke
+	 * this function with the corrected values for transfer.
 	 */
-	if (size > itask->it_ict->ict_op.op_max_burst_length) {
+	ASSERT(pminsize);
+	if (size <= itask->it_ict->ict_op.op_max_burst_length) {
+		bsize = size;
+	} else if (*pminsize <= itask->it_ict->ict_op.op_max_burst_length) {
+		bsize = itask->it_ict->ict_op.op_max_burst_length;
+	} else {
 		*pminsize = itask->it_ict->ict_op.op_max_burst_length;
 		return (NULL);
 	}
 
 	/* Alloc buffer */
-	idm_buffer = idm_buf_alloc(itask->it_ict->ict_ic, NULL, size);
+	idm_buffer = idm_buf_alloc(itask->it_ict->ict_ic, NULL, bsize);
 	if (idm_buffer != NULL) {
 		result = stmf_alloc(STMF_STRUCT_DATA_BUF,
 		    sizeof (iscsit_buf_t), 0);
@@ -1261,8 +1323,8 @@ iscsit_dbuf_alloc(scsi_task_t *task, uint32_t size, uint32_t *pminsize,
 			ibuf->ibuf_stmf_buf = result;
 			ibuf->ibuf_is_immed = B_FALSE;
 			result->db_flags = DB_DONT_CACHE;
-			result->db_buf_size = size;
-			result->db_data_size = size;
+			result->db_buf_size = bsize;
+			result->db_data_size = bsize;
 			result->db_sglist_length = 1;
 			result->db_sglist[0].seg_addr = idm_buffer->idb_buf;
 			result->db_sglist[0].seg_length =
@@ -1303,6 +1365,7 @@ iscsit_xfer_scsi_data(scsi_task_t *task, stmf_data_buf_t *dbuf,
     uint32_t ioflags)
 {
 	iscsit_task_t *iscsit_task = task->task_port_private;
+	iscsit_sess_t *ict_sess = iscsit_task->it_ict->ict_sess;
 	iscsit_buf_t *ibuf = dbuf->db_port_private;
 	int idm_rc;
 
@@ -1319,26 +1382,34 @@ iscsit_xfer_scsi_data(scsi_task_t *task, stmf_data_buf_t *dbuf,
 	ASSERT(ibuf->ibuf_is_immed == B_FALSE);
 	if (dbuf->db_flags & DB_DIRECTION_TO_RPORT) {
 		/*
+		 * The DB_SEND_STATUS_GOOD flag in the STMF data buffer allows
+		 * the port provider to phase-collapse, i.e. send the status
+		 * along with the final data PDU for the command. The port
+		 * provider passes this request to the transport layer by
+		 * setting a flag IDM_TASK_PHASECOLLAPSE_REQ in the task.
+		 */
+		if (dbuf->db_flags & DB_SEND_STATUS_GOOD)
+			iscsit_task->it_idm_task->idt_flags |=
+			    IDM_TASK_PHASECOLLAPSE_REQ;
+		/*
 		 * IDM will call iscsit_build_hdr so lock now to serialize
 		 * access to the SN values.  We need to lock here to enforce
 		 * lock ordering
 		 */
-		rw_enter(&iscsit_task->it_ict->ict_sess->ist_sn_rwlock,
-		    RW_READER);
+		rw_enter(&ict_sess->ist_sn_rwlock, RW_READER);
 		idm_rc = idm_buf_tx_to_ini(iscsit_task->it_idm_task,
 		    ibuf->ibuf_idm_buf, dbuf->db_relative_offset,
 		    dbuf->db_data_size, &iscsit_buf_xfer_cb, dbuf);
-		rw_exit(&iscsit_task->it_ict->ict_sess->ist_sn_rwlock);
+		rw_exit(&ict_sess->ist_sn_rwlock);
 
 		return (iscsit_idm_to_stmf(idm_rc));
 	} else if (dbuf->db_flags & DB_DIRECTION_FROM_RPORT) {
 		/* Grab the SN lock (see comment above) */
-		rw_enter(&iscsit_task->it_ict->ict_sess->ist_sn_rwlock,
-		    RW_READER);
+		rw_enter(&ict_sess->ist_sn_rwlock, RW_READER);
 		idm_rc = idm_buf_rx_from_ini(iscsit_task->it_idm_task,
 		    ibuf->ibuf_idm_buf, dbuf->db_relative_offset,
 		    dbuf->db_data_size, &iscsit_buf_xfer_cb, dbuf);
-		rw_exit(&iscsit_task->it_ict->ict_sess->ist_sn_rwlock);
+		rw_exit(&ict_sess->ist_sn_rwlock);
 
 		return (iscsit_idm_to_stmf(idm_rc));
 	}
@@ -1363,13 +1434,24 @@ iscsit_buf_xfer_cb(idm_buf_t *idb, idm_status_t status)
 	}
 
 	/*
-	 * COMSTAR currently requires port providers to support
-	 * the DB_SEND_STATUS_GOOD flag even if phase collapse is
-	 * not supported.  So we will roll our own... pretend we are
-	 * COMSTAR and ask for a status PDU.
+	 * For ISCSI over TCP (not iSER), the last SCSI Data PDU passed
+	 * for a successful command contains the status as requested by
+	 * by COMSTAR (via the DB_SEND_STATUS_GOOD flag). But the iSER
+	 * transport does not support phase-collapse. So pretend we are
+	 * COMSTAR and send the status in a separate PDU now.
 	 */
-	if ((dbuf->db_flags & DB_SEND_STATUS_GOOD) &&
+	if (idb->idb_task_binding->idt_flags & IDM_TASK_PHASECOLLAPSE_SUCCESS) {
+		/*
+		 * Mark task complete, remove task from the session task
+		 * list and notify COMSTAR that the status has been sent.
+		 */
+		iscsit_task_done(itask);
+		itask->it_idm_task->idt_state = TASK_COMPLETE;
+		stmf_send_status_done(itask->it_stmf_task,
+		    iscsit_idm_to_stmf(status), STMF_IOF_LPORT_DONE);
+	} else if ((dbuf->db_flags & DB_SEND_STATUS_GOOD) &&
 	    status == IDM_STATUS_SUCCESS) {
+
 		/*
 		 * If iscsit_send_scsi_status succeeds then the TX PDU
 		 * callback will call stmf_send_status_done and set
@@ -1451,11 +1533,14 @@ iscsit_send_scsi_status(scsi_task_t *task, uint32_t ioflags)
 		/*
 		 * Fast path.  Cached status PDU's are already
 		 * initialized.  We just need to fill in
-		 * connection and task information.
+		 * connection and task information. StatSN is
+		 * incremented by 1 for every status sent a
+		 * connection.
 		 */
 		pdu = kmem_cache_alloc(iscsit_status_pdu_cache, KM_SLEEP);
 		pdu->isp_ic = itask->it_ict->ict_ic;
 		pdu->isp_private = itask;
+		pdu->isp_flags |= IDM_PDU_SET_STATSN | IDM_PDU_ADVANCE_STATSN;
 
 		rsp = (iscsi_scsi_rsp_hdr_t *)pdu->isp_hdr;
 		rsp->itt = itask->it_itt;
@@ -1478,6 +1563,7 @@ iscsit_send_scsi_status(scsi_task_t *task, uint32_t ioflags)
 		pdu = idm_pdu_alloc(sizeof (iscsi_hdr_t), resp_datalen);
 		idm_pdu_init(pdu, itask->it_ict->ict_ic, itask,
 		    iscsit_send_status_done);
+		pdu->isp_flags |= IDM_PDU_SET_STATSN | IDM_PDU_ADVANCE_STATSN;
 
 		rsp = (iscsi_scsi_rsp_hdr_t *)pdu->isp_hdr;
 		bzero(rsp, sizeof (*rsp));
@@ -1995,6 +2081,13 @@ iscsit_send_direct_scsi_resp(iscsit_conn_t *ict, idm_pdu_t *rx_pdu,
 
 	rsp_pdu = idm_pdu_alloc(sizeof (iscsi_scsi_rsp_hdr_t), 0);
 	idm_pdu_init(rsp_pdu, ic, NULL, NULL);
+	/*
+	 * StatSN is incremented by 1 for every response sent on
+	 * a connection except for responses sent as a result of
+	 * a retry or SNACK
+	 */
+	rsp_pdu->isp_flags |= IDM_PDU_SET_STATSN | IDM_PDU_ADVANCE_STATSN;
+
 	resp = (iscsi_scsi_rsp_hdr_t *)rsp_pdu->isp_hdr;
 
 	resp->opcode = ISCSI_OP_SCSI_RSP;
@@ -2024,6 +2117,13 @@ iscsit_send_task_mgmt_resp(idm_pdu_t *tm_resp_pdu, uint8_t tm_status)
 {
 	iscsi_scsi_task_mgt_rsp_hdr_t	*tm_resp;
 
+	/*
+	 * The target must take note of the last-sent StatSN.
+	 * The StatSN is to be incremented after sending a
+	 * task management response. Digest recovery can only
+	 * work if StatSN is incremented.
+	 */
+	tm_resp_pdu->isp_flags |= IDM_PDU_SET_STATSN | IDM_PDU_ADVANCE_STATSN;
 	tm_resp = (iscsi_scsi_task_mgt_rsp_hdr_t *)tm_resp_pdu->isp_hdr;
 	tm_resp->response = tm_status;
 
@@ -2247,6 +2347,14 @@ iscsit_pdu_op_noop(iscsit_conn_t *ict, idm_pdu_t *rx_pdu)
 		bcopy(rx_pdu->isp_data, resp->isp_data, resp_datalen);
 	}
 
+	/*
+	 * When sending a NOP-In as a response to a NOP-Out from the initiator,
+	 * the target must respond with the same initiator task tag that was
+	 * provided in the NOP-Out request, the target transfer tag must be
+	 * ISCSI_RSVD_TASK_TAG (0xffffffff) and StatSN will contain the next
+	 * status sequence number. The StatSN for the connection is advanced
+	 * after this PDU is sent.
+	 */
 	in = (iscsi_nop_in_hdr_t *)resp->isp_hdr;
 	bzero(in, sizeof (*in));
 	in->opcode = ISCSI_OP_NOOP_IN;
@@ -2255,7 +2363,7 @@ iscsit_pdu_op_noop(iscsit_conn_t *ict, idm_pdu_t *rx_pdu)
 	in->itt		= out->itt;
 	in->ttt		= ISCSI_RSVD_TASK_TAG;
 	hton24(in->dlength, resp_datalen);
-
+	resp->isp_flags |= IDM_PDU_SET_STATSN | IDM_PDU_ADVANCE_STATSN;
 	/* Any other field in resp to be set? */
 	iscsit_pdu_tx(resp);
 	idm_pdu_complete(rx_pdu, IDM_STATUS_SUCCESS);
@@ -2283,7 +2391,12 @@ iscsit_pdu_op_logout_cmd(iscsit_conn_t	*ict, idm_pdu_t *rx_pdu)
 	/* Allocate a PDU to respond */
 	resp = idm_pdu_alloc(sizeof (iscsi_hdr_t), 0);
 	idm_pdu_init(resp, ict->ict_ic, NULL, NULL);
-
+	/*
+	 * The StatSN is to be sent to the initiator,
+	 * it is not required to increment the number
+	 * as the connection is terminating.
+	 */
+	resp->isp_flags |= IDM_PDU_SET_STATSN;
 	/*
 	 * Logout results in the immediate termination of all tasks except
 	 * if the logout reason is ISCSI_LOGOUT_REASON_RECOVERY.  The
@@ -2336,64 +2449,26 @@ iscsit_set_cmdsn(iscsit_conn_t *ict, idm_pdu_t *rx_pdu)
 }
 
 /*
- * Update local StatSN and set SNs in response
- */
-static void
-iscsit_calc_rspsn(iscsit_conn_t *ict, idm_pdu_t *resp)
-{
-	iscsit_sess_t *ist;
-	iscsi_scsi_rsp_hdr_t *rsp;
-
-	/* Get iSCSI session handle */
-	ist = ict->ict_sess;
-
-	rsp = (iscsi_scsi_rsp_hdr_t *)resp->isp_hdr;
-
-	/* Update StatSN */
-	rsp->statsn = htonl(ict->ict_statsn);
-	switch (IDM_PDU_OPCODE(resp)) {
-	case ISCSI_OP_RTT_RSP:
-		/* Do nothing */
-		break;
-	case ISCSI_OP_NOOP_IN:
-		/*
-		 * Refer to section 10.19.1, RFC3720.
-		 * Advance only if target is responding initiator
-		 */
-		if (((iscsi_nop_in_hdr_t *)rsp)->ttt == ISCSI_RSVD_TASK_TAG)
-			ict->ict_statsn++;
-		break;
-	case ISCSI_OP_SCSI_DATA_RSP:
-		if (rsp->flags & ISCSI_FLAG_DATA_STATUS)
-			ict->ict_statsn++;
-		else
-			rsp->statsn = 0;
-		break;
-	default:
-		ict->ict_statsn++;
-		break;
-	}
-
-	/* Set ExpCmdSN and MaxCmdSN */
-	rsp->maxcmdsn = htonl(ist->ist_maxcmdsn);
-	rsp->expcmdsn = htonl(ist->ist_expcmdsn);
-}
-
-/*
  * Wrapper funtion, calls iscsi_calc_rspsn and idm_pdu_tx
  */
 void
 iscsit_pdu_tx(idm_pdu_t *pdu)
 {
 	iscsit_conn_t *ict = pdu->isp_ic->ic_handle;
+	iscsi_scsi_rsp_hdr_t *rsp = (iscsi_scsi_rsp_hdr_t *)pdu->isp_hdr;
+	iscsit_sess_t *ist = ict->ict_sess;
 
 	/*
-	 * Protect ict->ict_statsn, ist->ist_maxcmdsn, and ist->ist_expcmdsn
-	 * (which are used by iscsit_calc_rspsn) with the session mutex
-	 * (ist->ist_sn_mutex).
+	 * The command sequence numbers are session-wide and must stay
+	 * consistent across the transfer, so protect the cmdsn with a
+	 * reader lock on the session. The status sequence number will
+	 * be updated just before the transport layer transmits the PDU.
 	 */
-	rw_enter(&ict->ict_sess->ist_sn_rwlock, RW_WRITER);
-	iscsit_calc_rspsn(ict, pdu);
+
+	rw_enter(&ict->ict_sess->ist_sn_rwlock, RW_READER);
+	/* Set ExpCmdSN and MaxCmdSN */
+	rsp->maxcmdsn = htonl(ist->ist_maxcmdsn);
+	rsp->expcmdsn = htonl(ist->ist_expcmdsn);
 	idm_pdu_tx(pdu);
 	rw_exit(&ict->ict_sess->ist_sn_rwlock);
 }
@@ -2417,8 +2492,14 @@ iscsit_send_async_event(iscsit_conn_t *ict, uint8_t event)
 		return;
 	}
 
+	/*
+	 * A asynchronous message is sent by the target to request a logout.
+	 * The StatSN for the connection is advanced after the PDU is sent
+	 * to allow for initiator and target state synchronization.
+	 */
 	idm_pdu_init(abt, ict->ict_ic, NULL, NULL);
 	abt->isp_datalen = 0;
+	abt->isp_flags |= IDM_PDU_SET_STATSN | IDM_PDU_ADVANCE_STATSN;
 
 	async_abt = (iscsi_async_evt_hdr_t *)abt->isp_hdr;
 	bzero(async_abt, sizeof (*async_abt));
@@ -2461,7 +2542,8 @@ iscsit_send_reject(iscsit_conn_t *ict, idm_pdu_t *rejected_pdu, uint8_t reason)
 		return;
 	}
 	idm_pdu_init(reject_pdu, ict->ict_ic, NULL, NULL);
-
+	/* StatSN is advanced after a Reject PDU */
+	reject_pdu->isp_flags |= IDM_PDU_SET_STATSN | IDM_PDU_ADVANCE_STATSN;
 	reject_pdu->isp_datalen = rejected_pdu->isp_hdrlen;
 	bcopy(rejected_pdu->isp_hdr, reject_pdu->isp_data,
 	    rejected_pdu->isp_hdrlen);

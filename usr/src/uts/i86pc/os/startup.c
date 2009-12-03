@@ -668,7 +668,6 @@ void
 startup(void)
 {
 #if !defined(__xpv)
-	extern void startup_bios_disk(void);
 	extern void startup_pci_bios(void);
 	extern int post_fastreboot;
 #endif
@@ -706,10 +705,7 @@ startup(void)
 	startup_xen_mca();
 #endif
 	startup_modules();
-#if !defined(__xpv)
-	if (!post_fastreboot)
-		startup_bios_disk();
-#endif
+
 	startup_end();
 	progressbar_start();
 }
@@ -1513,6 +1509,9 @@ startup_modules(void)
 	if (modload("fs", "dev") == -1)
 		halt("Can't load dev");
 
+	if (modload("fs", "procfs") == -1)
+		halt("Can't load procfs");
+
 	(void) modloadonly("sys", "lbl_edition");
 
 	dispinit();
@@ -1548,6 +1547,18 @@ startup_modules(void)
 	 * then invoke bus specific code to probe devices.
 	 */
 	setup_ddi();
+
+#ifdef __xpv
+	if (DOMAIN_IS_INITDOMAIN(xen_info))
+#endif
+	{
+		/*
+		 * Load the System Management BIOS into the global ksmbios
+		 * handle, if an SMBIOS is present on this system.
+		 */
+		ksmbios = smbios_open(NULL, SMB_VERSION, ksmbios_flags, NULL);
+	}
+
 
 	/*
 	 * Set up the CPU module subsystem for the boot cpu in the native
@@ -2190,12 +2201,6 @@ post_startup(void)
 	if (DOMAIN_IS_INITDOMAIN(xen_info))
 #endif
 	{
-		/*
-		 * Load the System Management BIOS into the global ksmbios
-		 * handle, if an SMBIOS is present on this system.
-		 */
-		ksmbios = smbios_open(NULL, SMB_VERSION, ksmbios_flags, NULL);
-
 #if defined(__xpv)
 		xpv_panic_init();
 #else

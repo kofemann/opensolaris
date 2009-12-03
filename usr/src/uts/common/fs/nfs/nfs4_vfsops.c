@@ -593,7 +593,7 @@ nfs4_copyin(char *data, int datalen, struct nfs_args *nargs)
 		goto errout;
 	}
 
-	nargs->addr = kmem_alloc(sizeof (struct netbuf), KM_SLEEP);
+	nargs->addr = kmem_zalloc(sizeof (struct netbuf), KM_SLEEP);
 	userbufptr = STRUCT_FGETP(addr_tmp, buf);
 	addr.len = STRUCT_FGET(addr_tmp, len);
 	addr.buf = kmem_alloc(addr.len, KM_SLEEP);
@@ -3479,6 +3479,7 @@ remove_mi(nfs4_server_t *sp, mntinfo4_t *mi)
 	/* Now mark the mntinfo4's links as being removed */
 	mi->mi_clientid_prev = mi->mi_clientid_next = NULL;
 	mi->mi_srv = NULL;
+	mi->mi_srvset_cnt++;
 
 	VFS_RELE(mi->mi_vfsp);
 }
@@ -3523,11 +3524,10 @@ nfs4_remove_mi_from_server(mntinfo4_t *mi, nfs4_server_t *esp)
 	}
 
 	(void) nfs_rw_enter_sig(&mi->mi_recovlock, RW_READER, 0);
-	sp = mi->mi_srv;
-	if (sp != NULL) {
-		mutex_enter(&sp->s_lock);
+	if (sp = find_nfs4_server_all(mi, 1)) {
 		nfs4_remove_mi_from_server_nolock(mi, sp);
 		mutex_exit(&sp->s_lock);
+		nfs4_server_rele(sp);
 	}
 	nfs_rw_exit(&mi->mi_recovlock);
 }
@@ -3898,17 +3898,31 @@ servinfo4_to_nfs4_server(servinfo4_t *srv_p)
 }
 
 /*
- * find_nfs4_server() and find_nfs4_server_all() are used to find
- * a nfs4_server_t to which the mntinfo4_t was already linked.
- * this is in contrast to searching a new nfs4_server_t, by walking
- * the nfs4_server_lst list, needed e.g. when doing a failover.
- *
  * Locks the nfs4_server down if it is found and returns a reference that
  * must eventually be freed.
- *
- * Returns NULL it no match is found.  This means one of two things: either
- * mi is in the process of being mounted, or mi has been unmounted.
- *
+ */
+static nfs4_server_t *
+lookup_nfs4_server(nfs4_server_t *sp, int any_state)
+{
+	nfs4_server_t *np;
+
+	mutex_enter(&nfs4_server_lst_lock);
+	for (np = nfs4_server_lst.forw; np != &nfs4_server_lst; np = np->forw) {
+		mutex_enter(&np->s_lock);
+		if (np == sp && np->s_refcnt > 0 &&
+		    (np->s_thread_exit != NFS4_THREAD_EXIT || any_state)) {
+			mutex_exit(&nfs4_server_lst_lock);
+			np->s_refcnt++;
+			return (np);
+		}
+		mutex_exit(&np->s_lock);
+	}
+	mutex_exit(&nfs4_server_lst_lock);
+
+	return (NULL);
+}
+
+/*
  * The caller should be holding mi->mi_recovlock, and it should continue to
  * hold the lock until done with the returned nfs4_server_t.  Once
  * mi->mi_recovlock is released, there is no guarantee that the returned
@@ -3917,7 +3931,10 @@ servinfo4_to_nfs4_server(servinfo4_t *srv_p)
 nfs4_server_t *
 find_nfs4_server(mntinfo4_t *mi)
 {
-	return (find_nfs4_server_all(mi, 0));
+	ASSERT(nfs_rw_lock_held(&mi->mi_recovlock, RW_READER) ||
+	    nfs_rw_lock_held(&mi->mi_recovlock, RW_WRITER));
+
+	return (lookup_nfs4_server(mi->mi_srv, 0));
 }
 
 /*
@@ -3942,26 +3959,19 @@ find_nfs4_server_nolock(mntinfo4_t *mi)
 }
 
 /*
- * Same as above, but takes an "all" parameter which can be
+ * Same as above, but takes an "any_state" parameter which can be
  * set to 1 if the caller wishes to find nfs4_server_t's which
  * have been marked for termination by the exit of the renew
  * thread.  This should only be used by operations which are
  * cleaning up and will not cause an OTW op.
  */
 nfs4_server_t *
-find_nfs4_server_all(mntinfo4_t *mi, int all)
+find_nfs4_server_all(mntinfo4_t *mi, int any_state)
 {
-	nfs4_server_t *np = mi->mi_srv;
-
 	ASSERT(nfs_rw_lock_held(&mi->mi_recovlock, RW_READER) ||
 	    nfs_rw_lock_held(&mi->mi_recovlock, RW_WRITER));
 
-	if (np && (np->s_thread_exit != NFS4_THREAD_EXIT || all)) {
-		mutex_enter(&np->s_lock);
-		np->s_refcnt++;
-		return (np);
-	}
-	return (NULL);
+	return (lookup_nfs4_server(mi->mi_srv, any_state));
 }
 
 /* ARGSUSED */
@@ -3991,6 +4001,17 @@ find_nfs4_server_by_servinfo4(servinfo4_t *svp)
 	 * add_new_nfs4_server without a race.
 	 */
 	return (NULL);
+}
+
+/*
+ * Lock sp, but only if it's still active (in the list and hasn't been
+ * flagged as exiting) or 'any_state' is non-zero.
+ * Returns TRUE if sp got locked and adds a reference to sp.
+ */
+bool_t
+nfs4_server_vlock(nfs4_server_t *sp, int any_state)
+{
+	return (lookup_nfs4_server(sp, any_state) != NULL);
 }
 
 /*
@@ -4229,30 +4250,6 @@ destroy_nfs4_server(nfs4_server_t *sp)
 	cv_destroy(&sp->wait_cb_null);
 	nfs_rw_destroy(&sp->s_recovlock);
 	kmem_free(sp, sizeof (*sp));
-}
-
-/*
- * Lock sp, but only if it's still active (in the list and hasn't been
- * flagged as exiting) or 'all' is non-zero.
- * Returns TRUE if sp got locked and adds a reference to sp.
- */
-bool_t
-nfs4_server_vlock(nfs4_server_t *sp, int all)
-{
-	nfs4_server_t *np;
-
-	mutex_enter(&nfs4_server_lst_lock);
-	for (np = nfs4_server_lst.forw; np != &nfs4_server_lst; np = np->forw) {
-		if (sp == np && (np->s_thread_exit != NFS4_THREAD_EXIT ||
-		    all != 0)) {
-			mutex_enter(&np->s_lock);
-			np->s_refcnt++;
-			mutex_exit(&nfs4_server_lst_lock);
-			return (TRUE);
-		}
-	}
-	mutex_exit(&nfs4_server_lst_lock);
-	return (FALSE);
 }
 
 /*

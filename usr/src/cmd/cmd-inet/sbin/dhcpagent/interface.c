@@ -111,6 +111,23 @@ insert_pif(const char *pname, boolean_t isv6, int *error)
 	}
 	pif->pif_index = lifr.lifr_index;
 
+	/*
+	 * Check if this is a VRRP interface. If yes, its IP addresses (the
+	 * VRRP virtual addresses) cannot be configured using DHCP.
+	 */
+	if (ioctl(fd, SIOCGLIFFLAGS, &lifr) == -1) {
+		*error = (errno == ENXIO) ? DHCP_IPC_E_INVIF : DHCP_IPC_E_INT;
+		dhcpmsg(MSG_ERR, "insert_pif: SIOCGLIFFLAGS for %s", pname);
+		goto failure;
+	}
+
+	if (lifr.lifr_flags & IFF_VRRP) {
+		*error = DHCP_IPC_E_INVIF;
+		dhcpmsg(MSG_ERROR, "insert_pif: VRRP virtual addresses over %s "
+		    "cannot be configured using DHCP", pname);
+		goto failure;
+	}
+
 	if (ioctl(fd, SIOCGLIFMTU, &lifr) == -1) {
 		*error = (errno == ENXIO) ? DHCP_IPC_E_INVIF : DHCP_IPC_E_INT;
 		dhcpmsg(MSG_ERR, "insert_pif: SIOCGLIFMTU for %s", pname);
@@ -1116,12 +1133,11 @@ attach_lif(const char *lname, boolean_t isv6, int *error)
  *		   by DHCP.
  *
  *   input: dhcp_lif_t *: the logical interface
- *	    boolean_t: B_TRUE if adopting
  *  output: int: set to DHCP_IPC_E_* if operation fails
  */
 
 int
-set_lif_dhcp(dhcp_lif_t *lif, boolean_t is_adopting)
+set_lif_dhcp(dhcp_lif_t *lif)
 {
 	int fd;
 	int err;
@@ -1152,18 +1168,14 @@ set_lif_dhcp(dhcp_lif_t *lif, boolean_t is_adopting)
 	}
 
 	/*
-	 * if DHCPRUNNING is already set on the interface and we're
-	 * not adopting it, the agent probably crashed and burned.
-	 * note it, but don't let it stop the proceedings.  we're
-	 * pretty sure we're not already running, since we wouldn't
-	 * have been able to bind to our IPC port.
+	 * If IFF_DHCPRUNNING is already set on the interface and we're not
+	 * adopting it, the agent probably crashed and burned.  Note it, but
+	 * don't let it stop the proceedings (we're pretty sure we're not
+	 * already running, since we were able to bind to our IPC port).
 	 */
-
 	if (lifr.lifr_flags & IFF_DHCPRUNNING) {
-		if (!is_adopting) {
-			dhcpmsg(MSG_WARNING, "set_lif_dhcp: DHCP flag already "
-			    "set on %s", lif->lif_name);
-		}
+		dhcpmsg(MSG_VERBOSE, "set_lif_dhcp: IFF_DHCPRUNNING already set"
+		    " on %s", lif->lif_name);
 	} else {
 		/*
 		 * If the lif is on an interface under IPMP, IFF_NOFAILOVER

@@ -18,6 +18,7 @@
  *
  * CDDL HEADER END
  */
+
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
@@ -1756,7 +1757,7 @@ nxge_rx_intr(void *arg1, void *arg2)
 	uint8_t			channel;
 	npi_handle_t		handle;
 	rx_dma_ctl_stat_t	cs;
-	p_rx_rcr_ring_t		rcr_ring;
+	p_rx_rcr_ring_t		rcrp;
 	mblk_t			*mp = NULL;
 
 	if (ldvp == NULL) {
@@ -1789,7 +1790,7 @@ nxge_rx_intr(void *arg1, void *arg2)
 	/*
 	 * Get the ring to enable us to process packets.
 	 */
-	rcr_ring = nxgep->rx_rcr_rings->rcr_rings[ldvp->vdma_index];
+	rcrp = nxgep->rx_rcr_rings->rcr_rings[ldvp->vdma_index];
 
 	/*
 	 * The RCR ring lock must be held when packets
@@ -1799,7 +1800,7 @@ nxge_rx_intr(void *arg1, void *arg2)
 	 * (will cause fatal errors such as rcrincon bit set)
 	 * and the setting of the poll_flag.
 	 */
-	MUTEX_ENTER(&rcr_ring->lock);
+	MUTEX_ENTER(&rcrp->lock);
 
 	/*
 	 * Get the control and status for this channel.
@@ -1840,12 +1841,12 @@ nxge_rx_intr(void *arg1, void *arg2)
 				    mgm.value);
 			}
 		}
-		MUTEX_EXIT(&rcr_ring->lock);
+		MUTEX_EXIT(&rcrp->lock);
 		return (DDI_INTR_CLAIMED);
 	}
 
-	ASSERT(rcr_ring->ldgp == ldgp);
-	ASSERT(rcr_ring->ldvp == ldvp);
+	ASSERT(rcrp->ldgp == ldgp);
+	ASSERT(rcrp->ldvp == ldvp);
 
 	RXDMA_REG_READ64(handle, RX_DMA_CTL_STAT_REG, channel, &cs.value);
 
@@ -1856,8 +1857,8 @@ nxge_rx_intr(void *arg1, void *arg2)
 	    cs.bits.hdw.rcrto,
 	    cs.bits.hdw.rcrthres));
 
-	if (rcr_ring->poll_flag == 0) {
-		mp = nxge_rx_pkts(nxgep, rcr_ring, cs, -1);
+	if (!rcrp->poll_flag) {
+		mp = nxge_rx_pkts(nxgep, rcrp, cs, -1);
 	}
 
 	/* error events. */
@@ -1873,27 +1874,34 @@ nxge_rx_intr(void *arg1, void *arg2)
 	 * these two edge triggered bits.
 	 */
 	cs.value &= RX_DMA_CTL_STAT_WR1C;
-	cs.bits.hdw.mex = rcr_ring->poll_flag ? 0 : 1;
+	cs.bits.hdw.mex = rcrp->poll_flag ? 0 : 1;
 	RXDMA_REG_WRITE64(handle, RX_DMA_CTL_STAT_REG, channel,
 	    cs.value);
 
 	/*
 	 * If the polling mode is enabled, disable the interrupt.
 	 */
-	if (rcr_ring->poll_flag) {
+	if (rcrp->poll_flag) {
 		NXGE_DEBUG_MSG((nxgep, NXGE_ERR_CTL,
 		    "==> nxge_rx_intr: rdc %d ldgp $%p ldvp $%p "
 		    "(disabling interrupts)", channel, ldgp, ldvp));
+
 		/*
 		 * Disarm this logical group if this is a single device
 		 * group.
 		 */
 		if (ldgp->nldvs == 1) {
-			ldgimgm_t mgm;
-			mgm.value = 0;
-			mgm.bits.ldw.arm = 0;
-			NXGE_REG_WR64(handle,
-			    LDGIMGN_REG + LDSV_OFFSET(ldgp->ldg), mgm.value);
+			if (isLDOMguest(nxgep)) {
+				ldgp->arm = B_FALSE;
+				nxge_hio_ldgimgn(nxgep, ldgp);
+			} else {
+				ldgimgm_t mgm;
+				mgm.value = 0;
+				mgm.bits.ldw.arm = 0;
+				NXGE_REG_WR64(handle,
+				    LDGIMGN_REG + LDSV_OFFSET(ldgp->ldg),
+				    mgm.value);
+			}
 		}
 	} else {
 		/*
@@ -1920,24 +1928,11 @@ nxge_rx_intr(void *arg1, void *arg2)
 		    "==> nxge_rx_intr: rdc %d ldgp $%p "
 		    "exiting ISR (and call mac_rx_ring)", channel, ldgp));
 	}
-	MUTEX_EXIT(&rcr_ring->lock);
+	MUTEX_EXIT(&rcrp->lock);
 
 	if (mp != NULL) {
-		if (!isLDOMguest(nxgep))
-			mac_rx_ring(nxgep->mach, rcr_ring->rcr_mac_handle, mp,
-			    rcr_ring->rcr_gen_num);
-#if defined(sun4v)
-		else {			/* isLDOMguest(nxgep) */
-			nxge_hio_data_t *nhd = (nxge_hio_data_t *)
-			    nxgep->nxge_hw_p->hio;
-			nx_vio_fp_t *vio = &nhd->hio.vio;
-
-			if (vio->cb.vio_net_rx_cb) {
-				(*vio->cb.vio_net_rx_cb)
-				    (nxgep->hio_vr->vhp, mp);
-			}
-		}
-#endif
+		mac_rx_ring(nxgep->mach, rcrp->rcr_mac_handle, mp,
+		    rcrp->rcr_gen_num);
 	}
 	NXGE_DEBUG_MSG((nxgep, RX_CTL, "<== nxge_rx_intr: DDI_INTR_CLAIMED"));
 	return (DDI_INTR_CLAIMED);
@@ -2720,6 +2715,7 @@ nxge_enable_poll(void *arg)
 	uint32_t		channel;
 
 	if (ring_handle == NULL) {
+		ASSERT(ring_handle != NULL);
 		return (0);
 	}
 
@@ -2760,6 +2756,7 @@ nxge_disable_poll(void *arg)
 	uint32_t		channel;
 
 	if (ring_handle == NULL) {
+		ASSERT(ring_handle != NULL);
 		return (0);
 	}
 
@@ -2816,12 +2813,18 @@ nxge_disable_poll(void *arg)
 		    "==> nxge_disable_poll: rdc %d ldgp $%p (enable intr)",
 		    ringp->rdc, ldgp));
 		if (ldgp->nldvs == 1) {
-			ldgimgm_t	mgm;
-			mgm.value = 0;
-			mgm.bits.ldw.arm = 1;
-			mgm.bits.ldw.timer = ldgp->ldg_timer;
-			NXGE_REG_WR64(handle,
-			    LDGIMGN_REG + LDSV_OFFSET(ldgp->ldg), mgm.value);
+			if (isLDOMguest(nxgep)) {
+				ldgp->arm = B_TRUE;
+				nxge_hio_ldgimgn(nxgep, ldgp);
+			} else {
+				ldgimgm_t	mgm;
+				mgm.value = 0;
+				mgm.bits.ldw.arm = 1;
+				mgm.bits.ldw.timer = ldgp->ldg_timer;
+				NXGE_REG_WR64(handle,
+				    LDGIMGN_REG + LDSV_OFFSET(ldgp->ldg),
+				    mgm.value);
+			}
 		}
 		ringp->poll_flag = 0;
 	}
@@ -4266,12 +4269,13 @@ nxge_rxdma_start_channel(p_nxge_t nxgep, uint16_t channel,
 
 	if (isLDOMguest(nxgep)) {
 		/* Add interrupt handler for this channel. */
-		if (nxge_hio_intr_add(nxgep, VP_BOUND_RX, channel)
-		    != NXGE_OK) {
+		status = nxge_hio_intr_add(nxgep, VP_BOUND_RX, channel);
+		if (status != NXGE_OK) {
 			NXGE_ERROR_MSG((nxgep, NXGE_ERR_CTL,
 			    " nxge_rxdma_start_channel: "
 			    " nxge_hio_intr_add failed (0x%08x channel %d)",
-		    status, channel));
+			    status, channel));
+			return (status);
 		}
 	}
 
@@ -4554,7 +4558,6 @@ nxge_rxdma_fatal_err_recover(p_nxge_t nxgep, uint16_t channel)
 	rbrp = (p_rx_rbr_ring_t)nxgep->rx_rbr_rings->rbr_rings[channel];
 	rcrp = (p_rx_rcr_ring_t)nxgep->rx_rcr_rings->rcr_rings[channel];
 
-	MUTEX_ENTER(&rcrp->lock);
 	MUTEX_ENTER(&rbrp->lock);
 	MUTEX_ENTER(&rbrp->post_lock);
 
@@ -4649,20 +4652,17 @@ nxge_rxdma_fatal_err_recover(p_nxge_t nxgep, uint16_t channel)
 
 	MUTEX_EXIT(&rbrp->post_lock);
 	MUTEX_EXIT(&rbrp->lock);
-	MUTEX_EXIT(&rcrp->lock);
 
 	NXGE_ERROR_MSG((nxgep, NXGE_ERR_CTL,
 	    "Recovery Successful, RxDMAChannel#%d Restored",
 	    channel));
 	NXGE_DEBUG_MSG((nxgep, RX_CTL, "==> nxge_rxdma_fatal_err_recover"));
-
 	return (NXGE_OK);
+
 fail:
 	MUTEX_EXIT(&rbrp->post_lock);
 	MUTEX_EXIT(&rbrp->lock);
-	MUTEX_EXIT(&rcrp->lock);
 	NXGE_ERROR_MSG((nxgep, NXGE_ERR_CTL, "Recovery failed"));
-
 	return (NXGE_ERROR | rs);
 }
 
@@ -4671,6 +4671,7 @@ nxge_rx_port_fatal_err_recover(p_nxge_t nxgep)
 {
 	nxge_grp_set_t *set = &nxgep->rx_set;
 	nxge_status_t status = NXGE_OK;
+	p_rx_rcr_ring_t rcrp;
 	int rdc;
 
 	NXGE_DEBUG_MSG((nxgep, RX_CTL, "<== nxge_rx_port_fatal_err_recover"));
@@ -4687,10 +4688,16 @@ nxge_rx_port_fatal_err_recover(p_nxge_t nxgep)
 
 	for (rdc = 0; rdc < NXGE_MAX_RDCS; rdc++) {
 		if ((1 << rdc) & set->owned.map) {
-			if (nxge_rxdma_fatal_err_recover(nxgep, rdc)
-			    != NXGE_OK) {
-				NXGE_ERROR_MSG((nxgep, NXGE_ERR_CTL,
-				    "Could not recover channel %d", rdc));
+			rcrp = nxgep->rx_rcr_rings->rcr_rings[rdc];
+			if (rcrp != NULL) {
+				MUTEX_ENTER(&rcrp->lock);
+				if (nxge_rxdma_fatal_err_recover(nxgep,
+				    rdc) != NXGE_OK) {
+					NXGE_ERROR_MSG((nxgep, NXGE_ERR_CTL,
+					    "Could not recover "
+					    "channel %d", rdc));
+				}
+				MUTEX_EXIT(&rcrp->lock);
 			}
 		}
 	}

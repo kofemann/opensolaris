@@ -2050,8 +2050,9 @@ nfs_async_start(struct vfs *vfsp)
 				zthread_exit();
 				/* NOTREACHED */
 			}
-			time_left = cv_timedwait(&mi->mi_async_work_cv,
-			    &mi->mi_async_lock, nfs_async_timeout + lbolt);
+			time_left = cv_reltimedwait(&mi->mi_async_work_cv,
+			    &mi->mi_async_lock, nfs_async_timeout,
+			    TR_CLOCK_TICK);
 
 			CALLB_CPR_SAFE_END(&cprinfo, &mi->mi_async_lock);
 
@@ -2553,6 +2554,7 @@ void
 nfs_write_error(vnode_t *vp, int error, cred_t *cr)
 {
 	mntinfo_t *mi;
+	clock_t now;
 
 	mi = VTOMI(vp);
 	/*
@@ -2566,8 +2568,9 @@ nfs_write_error(vnode_t *vp, int error, cred_t *cr)
 	 * No use in flooding the console with ENOSPC
 	 * messages from the same file system.
 	 */
+	now = ddi_get_lbolt();
 	if ((error != ENOSPC && error != EDQUOT) ||
-	    lbolt - mi->mi_printftime > 0) {
+	    now - mi->mi_printftime > 0) {
 		zoneid_t zoneid = mi->mi_zone->zone_id;
 
 #ifdef DEBUG
@@ -2587,7 +2590,7 @@ nfs_write_error(vnode_t *vp, int error, cred_t *cr)
 				    MSG("^User: userid=%d, groupid=%d\n"),
 				    crgetuid(CRED()), crgetgid(CRED()));
 			}
-			mi->mi_printftime = lbolt +
+			mi->mi_printftime = now +
 			    nfs_write_error_interval * hz;
 		}
 		nfs_printfhandle(&VTOR(vp)->r_fh);

@@ -21,10 +21,9 @@
 #
 # uts/intel/sha1/Makefile
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
 #
 #	This makefile drives the production of the sha1 crypto kernel module.
 #
@@ -35,17 +34,17 @@
 #	Path to the base of the uts directory tree (usually /usr/src/uts).
 #
 UTSBASE	= ../..
-COMDIR = $(COMMONBASE)/crypto/sha1
+COMDIR = $(COMMONBASE)/crypto
 
 #
 #	Define the module and object file sets.
 #
 MODULE		= sha1
-LINTS		= $(SHA1_OBJS:%.o=$(LINTS_DIR)/%.ln)
 SHA1_OBJS_32	=
 SHA1_OBJS_64	= sha1-x86_64.o
 SHA1_OBJS	+= $(SHA1_OBJS_$(CLASS))
 OBJECTS		= $(SHA1_OBJS:%=$(OBJS_DIR)/%)
+LINTS		= $(SHA1_OBJS:%.o=$(LINTS_DIR)/%.ln)
 ROOTMODULE	= $(ROOT_CRYPTO_DIR)/$(MODULE)
 ROOTLINK	= $(ROOT_MISC_DIR)/$(MODULE)
 
@@ -60,12 +59,12 @@ include $(UTSBASE)/intel/Makefile.intel
 CLEANFILES += sha1-x86_64.s
 
 #
-# For now, disable these lint checks; maintainers should endeavor
-# to investigate and remove these for maximum lint coverage.
-# Please do not carry these forward to new Makefiles.
+# Linkage dependencies
 #
-LINTTAGS	+= -erroff=E_BAD_PTR_CAST_ALIGN
-LINTTAGS	+= -erroff=E_PTRDIFF_OVERFLOW
+LDFLAGS += -dy -Nmisc/kcf
+
+CFLAGS += -I$(COMDIR)
+LINTFLAGS	+= -I$(COMDIR)
 
 
 #
@@ -107,9 +106,9 @@ include $(UTSBASE)/intel/Makefile.targ
 $(OBJS_DIR)/sha1-x86_64.o: sha1-x86_64.s
 	$(COMPILE.s) -o $@ ${@F:.o=.s}
 	$(POST_PROCESS_O)
- 
+
 $(OBJS_DIR)/sha1-x86_64.ln: sha1-x86_64.s
 	@($(LHEAD) $(LINT.c) ${@F:.ln=.s} $(LTAIL))
 
-sha1-x86_64.s: $(COMDIR)/amd64/sha1-x86_64.pl
+sha1-x86_64.s: $(COMDIR)/sha1/amd64/sha1-x86_64.pl
 	$(PERL) $? $@

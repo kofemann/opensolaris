@@ -36,6 +36,14 @@
 #
 # MAPFILE HEADER END
 #
+SUNW_1.3 {
+    global:
+	gss_add_buffer_set_member;
+	gss_create_empty_buffer_set;
+	GSS_C_INQ_SSPI_SESSION_KEY;
+	gss_inquire_sec_context_by_oid;
+	gss_release_buffer_set;
+} SUNW_1.2;
 
 SUNW_1.2 {
     global:
@@ -112,6 +120,7 @@ SUNWprivate_1.1 {
 	gsscred_set_options;
 	gss_get_group_info;
 	__gss_get_kmodName;
+	__gss_get_mechanism;
 	__gss_get_mechanisms;
 	__gss_get_mech_info;
 	__gss_get_mech_type;

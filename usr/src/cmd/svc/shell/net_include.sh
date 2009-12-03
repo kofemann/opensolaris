@@ -141,41 +141,6 @@ in_list()
 }
 
 #
-# get_inactive_ifname groupname
-#
-# Return the name of an inactive interface in `groupname', if one exists.
-#
-get_inactive_ifname()
-{
-	ORIGIFS="$IFS"
-	/sbin/ipmpstat -gP -o groupname,interfaces |
-	while IFS=: read groupname ifnames; do
-		#
-		# Skip other IPMP groups.
-	        #
-		[ "$groupname" != "$1" ] && continue
-
-		#
-		# Standby interfaces are always enclosed in ()'s, so look
-		# for the first interface name starting with a "(", and
-		# strip those off.
-		#
-		IFS=" "
-		for ifname in $ifnames; do
-			case "$ifname" in
-			'('*)	IFS="()"
-				echo $ifname
-				IFS="$ORIGIFS"
-				return
-				;;
-			*)	;;
-			esac
-		done
-	done
-	IFS="$ORIGIFS"
-}
-
-#
 # get_groupifname groupname
 #
 # Return the IPMP meta-interface name for the group, if it exists.
@@ -304,37 +269,6 @@ get_group_for_type()
 }
 
 #
-# get_standby_for_type interface type list
-#
-# Look through the set of hostname files associated with the same physical
-# interface as "interface", and print the standby value ("standby",
-# "-standby", or nothing).  Only hostname files associated with the
-# physical interface or logical interface zero can set this flag.
-#
-get_standby_for_type()
-{
-	physical=`get_physical $1`
-	type=$2
-
-	#
-	# The last setting of "standby" or "-standby" is the one that
-	# counts, which is the reason for the second while loop.
-	#
-	shift 2
-	for ifname in "$@"; do
-		if if_comp "$physical" $ifname; then 
-			get_hostname_ipmpinfo $ifname $type standby -standby
-		fi
-	done | while :; do
-		read keyword || {
-		    	echo "$iftype"
-			break
-		}
-		iftype="$keyword"
-	done
-}
-
-#
 # get_group interface
 #
 # If there is both an inet and inet6 version of an interface, the group
@@ -349,21 +283,23 @@ get_group()
 }
 
 #
-# is_standby interface
+# Given the interface name and the address family (inet or inet6), determine
+# whether this is a VRRP VNIC.
 #
-# If there is both an inet and inet6 version of an interface, the
-# "standby" or "-standby" flag could be set in either set of hostname
-# files.  Since inet6 is configured after inet, if there's a setting in
-# both files, inet6 wins.
+# This is used to determine whether to bring the interface up
 #
-is_standby()
-{
-	standby=`get_standby_for_type $1 inet6 $inet6_list`
-	[ -z "$standby" ] && standby=`get_standby_for_type $1 inet $inet_list`
-	[ "$standby" = "standby" ]
+not_vrrp_interface() {
+	macaddrtype=`/sbin/dladm show-vnic $1 -o MACADDRTYPE -p 2>/dev/null`
+
+	case "$macaddrtype" in
+	'vrrp'*''$2'')	vrrp=1
+			;;
+        *)		vrrp=0
+			;;
+	esac
+	return $vrrp
 }
 
-#
 # doDHCPhostname interface
 # Pass to this function the name of an interface.  It will return
 # true if one should enable the use of DHCP client-side host name
@@ -396,6 +332,9 @@ doDHCPhostname()
 # the old style address which results in the interface being brought up 
 # and the netmask and broadcast address being set ($inet_oneline_epilogue).
 #
+# Note that if the interface is a VRRP interface, do not bring the address
+# up ($inet_oneline_epilogue_no_up).
+#
 # If there are multiple lines we assume the file contains a list of
 # commands to the processor with neither the implied bringing up of the
 # interface nor the setting of the default netmask and broadcast address.
@@ -403,6 +342,7 @@ doDHCPhostname()
 # Return non-zero if any command fails so that the caller may alert
 # users to errors in the configuration.
 #
+inet_oneline_epilogue_no_up="netmask + broadcast +"
 inet_oneline_epilogue="netmask + broadcast + up"
 
 inet_process_hostname()
@@ -446,8 +386,17 @@ inet_process_hostname()
 			#
 			[ -z "$ifcmds" ] && return $retval
 			if [ $multiple_lines = false ]; then
+				#
 				# The traditional one-line hostname file.
-				ifcmds="$ifcmds $inet_oneline_epilogue"
+				# Note that we only bring it up if the
+				# interface is not a VRRP VNIC.
+				#
+				if not_vrrp_interface $2 $3; then
+					estr="$inet_oneline_epilogue"
+				else
+					estr="$inet_oneline_epilogue_no_up"
+				fi
+				ifcmds="$ifcmds $estr"
 			fi
 
 			#
@@ -544,23 +493,21 @@ move_addresses()
 
 		#
 		# The hostname files are processed twice.  In the first
-		# pass, we are looking for all commands that apply
-		# to the non-additional interface address.  These may be
-		# scattered over several files.  We won't know
-		# whether the address represents a failover address
-		# or not until we've read all the files associated with the
-		# interface.
+		# pass, we are looking for all commands that apply to the
+		# non-additional interface address.  These may be
+		# scattered over several files.  We won't know whether the
+		# address represents a failover address or not until we've
+		# read all the files associated with the interface.
 		#
 		# In the first pass through the hostname files, all
-		# additional logical interface commands are removed.
-		# The remaining commands are concatenated together and
-		# passed to ifparse to determine whether the 
-		# non-additional logical interface address is a failover
-		# address.  If it as a failover address, the
-		# address may not be the first item on the line,
-		# so we can't just substitute "addif" for "set".
-		# We prepend an "addif $zaddr" command, and let
-		# the embedded "set" command set the address later.	
+		# additional logical interface commands are removed.  The
+		# remaining commands are concatenated together and passed
+		# to ifparse to determine whether the non-additional
+		# logical interface address is a failover address.  If it
+		# as a failover address, the address may not be the first
+		# item on the line, so we can't just substitute "addif"
+		# for "set".  We prepend an "addif $zaddr" command, and
+		# let the embedded "set" command set the address later.
 		#
 		/sbin/ifparse -f $type `
 			for item in $list; do
@@ -591,23 +538,10 @@ move_addresses()
 			done
 		fi
 
-		#
-		# Check if this was an active interface in the group.  If so,
-		# activate another IP interface (if possible)
-		#
-		is_standby $ifname || inactive=`get_inactive_ifname $group`
-		[ -n "$inactive" ] && /sbin/ifconfig $inactive $type -standby
-
 		in_list physical_comp $ifname $processed || { 
 			processed="$processed $ifname"
-			echo " $ifname (moved to $grifname\c"	   > /dev/msglog
-			if [ -n "$inactive" ]; then
-				echo " and cleared 'standby' on\c" > /dev/msglog
-				echo " $inactive to compensate\c"  > /dev/msglog
-			fi
-			echo ")\c"				   > /dev/msglog
+			echo " $ifname (moved to $grifname)\c" > /dev/msglog
 		}
-		inactive=""
 	done
 	echo "." >/dev/msglog
 }
@@ -643,7 +577,13 @@ if_configure()
 		if [ $? != 0 ]; then
 			fail="$fail $1"
 		elif [ "$type" = inet6 ]; then
-		    	/sbin/ifconfig $1 inet6 up || fail="$fail $1"
+			#
+			# only bring the interface up if it is not a
+			# VRRP VNIC
+			#
+			if not_vrrp_interface $1 $type; then
+			    	/sbin/ifconfig $1 inet6 up || fail="$fail $1"
+			fi
 		fi
 		echo " $1\c"
 		shift
@@ -714,4 +654,59 @@ net_reconfigure ()
 	#
 	/sbin/dladm init-phys
 	return 0
+}
+
+#
+# Check for use of the default "Port VLAN Identifier" (PVID) -- VLAN 1.
+# If there is one for a given interface, then warn the user and force the
+# PVID to zero (if it's not already set).  We do this by generating a list
+# of interfaces with VLAN 1 in use first, and then parsing out the
+# corresponding base datalink entries to check for ones without a
+# "default_tag" property.
+#
+update_pvid()
+{
+	datalink=/etc/dladm/datalink.conf
+
+	(
+		# Find datalinks using VLAN 1 explicitly
+		# configured by dladm
+		/usr/bin/nawk '
+			/^#/ || NF < 2 { next }
+			{ linkdata[$1]=$2; }
+			/;vid=int,1;/ {
+				sub(/.*;linkover=int,/, "", $2);
+				sub(/;.*/, "", $2);
+				link=linkdata[$2];
+				sub(/name=string,/, "", link);
+				sub(/;.*/, "", link);
+				print link;
+			}' $datalink
+	) | ( /usr/bin/sort -u; echo END; cat $datalink ) | /usr/bin/nawk '
+	    /^END$/ { state=1; }
+	    state == 0 { usingpvid[++nusingpvid]=$1; next; }
+	    /^#/ || NF < 2 { next; }
+	    {
+		# If it is already present and has a tag set,
+		# then believe it.
+		if (!match($2, /;default_tag=/))
+			next;
+		sub(/name=string,/, "", $2);
+		sub(/;.*/, "", $2);
+		for (i = 1; i <= nusingpvid; i++) {
+			if (usingpvid[i] == $2)
+				usingpvid[i]="";
+		}
+	    }
+	    END {
+		for (i = 1; i <= nusingpvid; i++) {
+			if (usingpvid[i] != "") {
+				printf("Warning: default VLAN tag set to 0" \
+				    " on %s\n", usingpvid[i]);
+				cmd=sprintf("dladm set-linkprop -p " \
+				    "default_tag=0 %s\n", usingpvid[i]);
+				system(cmd);
+			}
+		}
+	    }'
 }

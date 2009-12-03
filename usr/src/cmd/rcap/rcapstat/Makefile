@@ -19,10 +19,9 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-# ident	"%Z%%M%	%I%	%E% SMI"
 
 .KEEP_STATE:
 .SUFFIXES:
@@ -34,10 +33,16 @@ SRCS = 		rcapstat.c \
 		utils.c
 
 LINTSRCS =	$(COMMON_DIR)/utils.c \
-		rcapstat.c
+		rcapstat.c \
+		$(STAT_COMMON_SRCS)
+
+STATCOMMONDIR = $(SRC)/cmd/stat/common
+
+STAT_COMMON_OBJS = timestamp.o
+STAT_COMMON_SRCS = $(STAT_COMMON_OBJS:%.o=$(STATCOMMONDIR)/%.c)
 
 $(NOT_RELEASE_BUILD)CPPFLAGS 	+= -DDEBUG
-CPPFLAGS 			+= -I$(COMMON_DIR)
+CPPFLAGS 			+= -I$(COMMON_DIR) -I$(STATCOMMONDIR)
 LDLIBS 				+= -lumem -lzonecfg -lscf
 LDFLAGS				+= $(MAPFILE.NGB:%=-M%)
 
@@ -58,17 +63,20 @@ all: $(PROG) $(MAPFILE.NGB)
 
 include ../Makefile.com
 
-$(PROG): $(OBJS)
-	$(LINK.c) $(OBJS) -o $@ $(LDLIBS)
+$(PROG): $(OBJS) $(STAT_COMMON_OBJS)
+	$(LINK.c) $(OBJS) $(STAT_COMMON_OBJS) -o $@ $(LDLIBS)
 	$(POST_PROCESS)
+
+%.o : $(STATCOMMONDIR)/%.c
+	$(COMPILE.c) -o $@ $<
+	$(POST_PROCESS_O)
 
 $(POFILE): $(POFILES)
 	$(RM) $@
 	$(CAT) $(POFILES) > $@
 
-
 clean:
-	$(RM) $(OBJS)
+	$(RM) $(OBJS) $(STAT_COMMON_OBJS)
 
 lint:
 	$(LINT.c) $(LINTSRCS)

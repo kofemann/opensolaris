@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #	This makefile drives the production of all implementation architecture
@@ -60,19 +60,6 @@ LINT_LIBS	 = $(LINT_LIB) \
 		   $(LINT_KMODS:%=$(LINT_LIB_DIR)/llib-l%.ln) \
 		   $(CLOSED_LINT_KMODS:%=$(LINT_LIB_DIR)/llib-l%.ln) \
 		   $(SPARC_LINTS:%=$(SPARC_LIB_DIR)/llib-l%.ln)
-
-# EXPORT DELETE START
-#
-# CRYPTO_EK_KMODS modules go in the encryption pack (SUNWcry*)
-# They need to be listed separately since they duplicate global symbols
-# causing the 2nd pass of lint on the kernel to complain. CRYPTO_EK_KMODS
-# should not be listed in the lint target.
-#
-# Don't build this for OpenSolaris, since it will be replaced by
-# a binary that is signed by Sun RE.
-#
-$(CLOSED_BUILD)CRYPTO_EK_KMODS	+= arcfour2048
-# EXPORT DELETE END
 
 def		:=	TARGET= def
 all		:=	TARGET= all
@@ -152,7 +139,7 @@ install_h check:	install_platforms $(IMPLEMENTATIONS) FRC
 # here in kernel land.
 #
 $(ROOT_PLAT_DIRS): $(ROOT_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(LINKED_PLATFORMS:%=$(ROOT_PLAT_DIR)/%): $(ROOT_PLAT_DIR)
 	$(INS.slink1)
@@ -166,7 +153,7 @@ $(LINKED_PLATFORMS:%=$(ROOT_PLAT_DIR)/%): $(ROOT_PLAT_DIR)
 # that are linked to it.
 #
 $(USR_PLAT_DIR)/$(IMPLEMENTED_PLATFORM):	$(USR_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 #
 # create the links in /usr/platform/ foreach $(LINKED_PLATFORMS)
@@ -221,76 +208,76 @@ $(USR_DESKTOP_SBIN_DIR):	$(USR_DESKTOP_DIR)
 	$(INS.slink5)
 
 $(USR_DESKTOP_LIB_DIR):		$(USR_DESKTOP_DIR)
-	-$(INS.dir.root.bin)
+	-$(INS.dir)
 
 $(USR_STPAUL_DIR):		$(USR_SUN4V_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(USR_STPAUL_SBIN_DIR):		$(USR_STPAUL_DIR)
 	$(INS.slink5)
 
 $(USR_STPAUL_LIB_DIR):		$(USR_STPAUL_DIR)
-	-$(INS.dir.root.bin)
+	-$(INS.dir)
 
 $(USR_HURON_DIR):		$(USR_SUN4V_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(USR_HURON_SBIN_DIR):		$(USR_HURON_DIR)
 	$(INS.slink5)
 
 $(USR_HURON_LIB_DIR):		$(USR_HURON_DIR)
-	-$(INS.dir.root.bin)
+	-$(INS.dir)
 
 $(USR_GLENDALE_DIR):		$(USR_SUN4V_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(USR_GLENDALE_SBIN_DIR):		$(USR_GLENDALE_DIR)
 	$(INS.slink5)
 
 $(USR_GLENDALE_LIB_DIR):		$(USR_GLENDALE_DIR)
-	-$(INS.dir.root.bin)
+	-$(INS.dir)
 
 $(USR_MARAMBA_DIR):		$(USR_SUN4V_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(USR_MARAMBA_SBIN_DIR):	$(USR_MARAMBA_DIR)
 	$(INS.slink5)
 
 $(USR_MARAMBA_LIB_DIR):		$(USR_MARAMBA_DIR)
-	-$(INS.dir.root.bin)
+	-$(INS.dir)
 
 $(USR_THUNDER_DIR):		$(USR_SUN4V_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(USR_THUNDER_SBIN_DIR):	$(USR_THUNDER_DIR)
 	$(INS.slink5)
 
 $(USR_THUNDER_LIB_DIR):		$(USR_THUNDER_DIR)
-	-$(INS.dir.root.bin)
+	-$(INS.dir)
 
 $(USR_TURGO_DIR):		$(USR_SUN4V_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(USR_TURGO_SBIN_DIR):		$(USR_TURGO_DIR)
 	$(INS.slink5)
 
 $(USR_TURGO_LIB_DIR):		$(USR_TURGO_DIR)
-	-$(INS.dir.root.bin)
+	-$(INS.dir)
 
 $(USR_CONGO_DIR):		$(USR_SUN4V_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(USR_CONGO_SBIN_DIR):		$(USR_CONGO_DIR)
 	$(INS.slink5)
 
 $(USR_CONGO_LIB_DIR):		$(USR_CONGO_DIR)
-	-$(INS.dir.root.bin)
+	-$(INS.dir)
 
 $(USR_MONZA_DIR):		$(USR_SUN4V_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(USR_MONZA_SBIN_DIR):		$(USR_MONZA_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(USR_MONZA_SBIN_LINKS):	$(USR_MONZA_SBIN_DIR)
 	$(INS.slink7)

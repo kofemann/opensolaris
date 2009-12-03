@@ -1415,10 +1415,13 @@ process_rtm_ifinfo(if_msghdr_t *ifm, int type)
 
 	/*
 	 * If IFF_STANDBY has changed, indicate that the interface has changed
-	 * types.
+	 * types and refresh IFF_INACTIVE if need be.
 	 */
-	if ((old_flags ^ pii->pii_flags) & IFF_STANDBY)
+	if ((old_flags ^ pii->pii_flags) & IFF_STANDBY) {
 		phyint_changed(pi);
+		if (pii->pii_flags & IFF_STANDBY)
+			phyint_standby_refresh_inactive(pi);
+	}
 
 	/* Has just the IFF_RUNNING flag changed state ? */
 	if ((old_flags ^ pii->pii_flags) != IFF_RUNNING) {
@@ -2872,7 +2875,7 @@ mibwalk(void (*proc)(mib_item_t *))
 	 * us information concerning IRE_MARK_TESTHIDDEN routes.
 	 */
 	req = (struct opthdr *)&tor[1];
-	req->level = EXPER_IP_AND_TESTHIDDEN;
+	req->level = EXPER_IP_AND_ALL_IRES;
 	req->name  = 0;
 	req->len   = 0;
 

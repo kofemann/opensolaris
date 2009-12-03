@@ -34,7 +34,6 @@ isadma 35
 fd 36
 su 37
 openeepr 38
-cgsix 39
 udp 41
 tcp 42
 rts 43
@@ -228,4 +227,8 @@ nulldriver 280
 ipnet 281
 dcpc 282
 simnet 283
-dserv 284
+bridge 284
+iptun 285
+iptunq 286
+bpf 287
+dserv 288

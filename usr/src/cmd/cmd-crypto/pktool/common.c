@@ -462,13 +462,13 @@ int
 Str2KeyType(char *algm, KMF_KEY_ALG *ktype, KMF_ALGORITHM_INDEX *sigAlg)
 {
 	if (algm == NULL) {
-		*sigAlg = KMF_ALGID_MD5WithRSA;
+		*sigAlg = KMF_ALGID_SHA1WithRSA;
 		*ktype = KMF_RSA;
 	} else if (strcasecmp(algm, "DSA") == 0) {
 		*sigAlg = KMF_ALGID_SHA1WithDSA;
 		*ktype = KMF_DSA;
 	} else if (strcasecmp(algm, "RSA") == 0) {
-		*sigAlg = KMF_ALGID_MD5WithRSA;
+		*sigAlg = KMF_ALGID_SHA1WithRSA;
 		*ktype = KMF_RSA;
 	} else {
 		return (-1);
@@ -1128,6 +1128,7 @@ free_eku_list(EKU_LIST *ekus)
 		}
 		free(ekus->ekulist);
 		free(ekus->critlist);
+		free(ekus);
 	}
 }
 
@@ -1165,6 +1166,10 @@ verify_ekunames(char *ekuliststr, EKU_LIST **ekulist)
 
 	if (ekuliststr == NULL || strlen(ekuliststr) == 0)
 		return (0);
+
+	ekus = calloc(sizeof (EKU_LIST), 1);
+	if (ekus == NULL)
+		return (KMF_ERR_MEMORY);
 
 	/*
 	 * The list should be comma separated list of EKU Names.

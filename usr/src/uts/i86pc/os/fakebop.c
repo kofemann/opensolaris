@@ -124,7 +124,7 @@ static void build_firmware_properties(void);
 static int early_allocation = 1;
 
 int force_fastreboot = 0;
-int fastreboot_onpanic = 0;
+volatile int fastreboot_onpanic = 0;
 int post_fastreboot = 0;
 #ifdef	__xpv
 int fastreboot_capable = 0;
@@ -139,7 +139,7 @@ int fastreboot_capable = 1;
  */
 multiboot_info_t saved_mbi;
 mb_memory_map_t saved_mmap[FASTBOOT_SAVED_MMAP_COUNT];
-struct sol_netinfo saved_drives[FASTBOOT_SAVED_DRIVES_COUNT];
+uint8_t saved_drives[FASTBOOT_SAVED_DRIVES_SIZE];
 char saved_cmdline[FASTBOOT_SAVED_CMDLINE_LEN];
 int saved_cmdline_len = 0;
 size_t saved_file_size[FASTBOOT_MAX_FILES_MAP];
@@ -696,10 +696,17 @@ done:
 
 		consoledev = outputdev + v_len + 1;
 		v_len = do_bsys_getproplen(NULL, "console");
-		if (v_len > 0)
+		if (v_len > 0) {
 			(void) do_bsys_getprop(NULL, "console", consoledev);
-		else
+			if (post_fastreboot &&
+			    strcmp(consoledev, "graphics") == 0) {
+				bsetprops("console", "text");
+				v_len = strlen("text");
+				bcopy("text", consoledev, v_len);
+			}
+		} else {
 			v_len = 0;
+		}
 		consoledev[v_len] = 0;
 		bcons_init2(inputdev, outputdev, consoledev);
 	} else {
@@ -1087,9 +1094,9 @@ build_fastboot_cmdline(void)
  * Fast Reboot.
  */
 static void
-save_boot_info(multiboot_info_t *mbi)
+save_boot_info(multiboot_info_t *mbi, struct xboot_info *xbi)
 {
-	mb_module_t *mbp;
+	struct boot_modules *modp;
 	int i;
 
 	bcopy(mbi, &saved_mbi, sizeof (multiboot_info_t));
@@ -1102,27 +1109,33 @@ save_boot_info(multiboot_info_t *mbi)
 		    mbi->mmap_length);
 	}
 
-	if (mbi->drives_length > sizeof (saved_drives)) {
-		DBG(mbi->drives_length);
-		DBG_MSG("mbi->drives_length too big: clearing "
-		    "fastreboot_capable\n");
-		fastreboot_capable = 0;
+	if ((mbi->flags & MB_INFO_DRIVE_INFO) != 0) {
+		if (mbi->drives_length > sizeof (saved_drives)) {
+			DBG(mbi->drives_length);
+			DBG_MSG("mbi->drives_length too big: clearing "
+			    "fastreboot_capable\n");
+			fastreboot_capable = 0;
+		} else {
+			bcopy((void *)(uintptr_t)mbi->drives_addr,
+			    (void *)saved_drives, mbi->drives_length);
+		}
 	} else {
-		bcopy((void *)(uintptr_t)mbi->drives_addr, (void *)saved_drives,
-		    mbi->drives_length);
+		saved_mbi.drives_length = 0;
+		saved_mbi.drives_addr = NULL;
 	}
 
 	/*
 	 * Current file sizes.  Used by fastboot.c to figure out how much
 	 * memory to reserve for panic reboot.
+	 * Use the module list from the dboot-constructed xboot_info
+	 * instead of the list referenced by the multiboot structure
+	 * because that structure may not be addressable now.
 	 */
 	saved_file_size[FASTBOOT_NAME_UNIX] = FOUR_MEG - PAGESIZE;
-	for (i = 0, mbp = (mb_module_t *)(uintptr_t)mbi->mods_addr;
-	    i < mbi->mods_count; i++, mbp += sizeof (mb_module_t)) {
-		saved_file_size[FASTBOOT_NAME_BOOTARCHIVE] +=
-		    mbp->mod_end - mbp->mod_start;
+	for (i = 0, modp = (struct boot_modules *)(uintptr_t)xbi->bi_modules;
+	    i < xbi->bi_module_cnt; i++, modp++) {
+		saved_file_size[FASTBOOT_NAME_BOOTARCHIVE] += modp->bm_size;
 	}
-
 }
 #endif	/* __xpv */
 
@@ -1379,9 +1392,9 @@ build_boot_properties(void)
 	/*
 	 * Save various boot information for Fast Reboot
 	 */
-	save_boot_info(mbi);
+	save_boot_info(mbi, xbootp);
 
-	if (mbi != NULL && mbi->flags & 0x2) {
+	if (mbi != NULL && mbi->flags & MB_INFO_BOOTDEV) {
 		boot_device = mbi->boot_device >> 24;
 		if (boot_device == 0x20)
 			netboot++;
@@ -1561,9 +1574,11 @@ bop_traceback(bop_frame_t *frame)
 {
 	pc_t pc;
 	int cnt;
-	int a;
 	char *ksym;
 	ulong_t off;
+#if defined(__i386)
+	int a;
+#endif
 
 	bop_printf(NULL, "Stack traceback:\n");
 	for (cnt = 0; cnt < 30; ++cnt) {	/* up to 30 frames */
@@ -1581,8 +1596,8 @@ bop_traceback(bop_frame_t *frame)
 			bop_printf(NULL, "\n");
 			break;
 		}
-		for (a = 0; a < 6; ++a) {	/* try for 6 args */
 #if defined(__i386)
+		for (a = 0; a < 6; ++a) {	/* try for 6 args */
 			if ((void *)&frame->arg[a] == (void *)frame->old_frame)
 				break;
 			if (a == 0)
@@ -1590,14 +1605,14 @@ bop_traceback(bop_frame_t *frame)
 			else
 				bop_printf(NULL, ",");
 			bop_printf(NULL, "0x%lx", frame->arg[a]);
-#endif
 		}
-		bop_printf(NULL, ")\n");
+		bop_printf(NULL, ")");
+#endif
+		bop_printf(NULL, "\n");
 	}
 }
 
 struct trapframe {
-	ulong_t frame_ptr;	/* %[er]bp pushed by our code */
 	ulong_t error_code;	/* optional */
 	ulong_t inst_ptr;
 	ulong_t code_seg;
@@ -1609,8 +1624,9 @@ struct trapframe {
 };
 
 void
-bop_trap(struct trapframe *tf)
+bop_trap(ulong_t *tfp)
 {
+	struct trapframe *tf = (struct trapframe *)tfp;
 	bop_frame_t fakeframe;
 	static int depth = 0;
 
@@ -1620,23 +1636,27 @@ bop_trap(struct trapframe *tf)
 	if (++depth > 2)
 		bop_panic("Nested trap");
 
+	bop_printf(NULL, "Unexpected trap\n");
+
 	/*
 	 * adjust the tf for optional error_code by detecting the code selector
 	 */
 	if (tf->code_seg != bcode_sel)
-		tf = (struct trapframe *)((uintptr_t)tf - sizeof (ulong_t));
+		tf = (struct trapframe *)(tfp - 1);
+	else
+		bop_printf(NULL, "error code           0x%lx\n",
+		    tf->error_code & 0xffffffff);
 
-	bop_printf(NULL, "Unexpected trap\n");
 	bop_printf(NULL, "instruction pointer  0x%lx\n", tf->inst_ptr);
-	bop_printf(NULL, "error code, optional 0x%lx\n",
-	    tf->error_code & 0xffffffff);
 	bop_printf(NULL, "code segment         0x%lx\n", tf->code_seg & 0xffff);
 	bop_printf(NULL, "flags register       0x%lx\n", tf->flags_reg);
 #ifdef __amd64
-	bop_printf(NULL, "return %%rsp         0x%lx\n", tf->stk_ptr);
-	bop_printf(NULL, "return %%ss          0x%lx\n", tf->stk_seg & 0xffff);
+	bop_printf(NULL, "return %%rsp          0x%lx\n", tf->stk_ptr);
+	bop_printf(NULL, "return %%ss           0x%lx\n", tf->stk_seg & 0xffff);
 #endif
-	fakeframe.old_frame = (bop_frame_t *)tf->frame_ptr;
+
+	/* grab %[er]bp pushed by our code from the stack */
+	fakeframe.old_frame = (bop_frame_t *)*(tfp - 3);
 	fakeframe.retaddr = (pc_t)tf->inst_ptr;
 	bop_printf(NULL, "Attempting stack backtrace:\n");
 	bop_traceback(&fakeframe);
@@ -1690,8 +1710,6 @@ _start(struct xboot_info *xbp)
 	HYPERVISOR_shared_info = (void *)xbootp->bi_shared_info;
 	xen_info = xbootp->bi_xen_start_info;
 #endif
-	bcons_init((void *)xbootp->bi_cmdline);
-	have_console = 1;
 
 #ifndef __xpv
 	if (*((uint32_t *)(FASTBOOT_SWTCH_PA + FASTBOOT_STACK_OFFSET)) ==
@@ -1700,6 +1718,9 @@ _start(struct xboot_info *xbp)
 		*((uint32_t *)(FASTBOOT_SWTCH_PA + FASTBOOT_STACK_OFFSET)) = 0;
 	}
 #endif
+
+	bcons_init((void *)xbootp->bi_cmdline);
+	have_console = 1;
 
 	/*
 	 * enable debugging

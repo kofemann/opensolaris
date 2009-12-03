@@ -48,6 +48,8 @@ static idm_status_t iser_tgt_enable_datamover(idm_conn_t *ic);
 static idm_status_t iser_ini_enable_datamover(idm_conn_t *ic);
 static void iser_notice_key_values(struct idm_conn_s *ic,
     nvlist_t *negotiated_nvl);
+static kv_status_t iser_declare_key_values(struct idm_conn_s *ic,
+    nvlist_t *config_nvl, nvlist_t *outgoing_nvl);
 static idm_status_t iser_free_task_rsrcs(idm_task_t *idt);
 static kv_status_t iser_negotiate_key_values(idm_conn_t *ic,
     nvlist_t *request_nvl, nvlist_t *response_nvl, nvlist_t *negotiated_nvl);
@@ -114,7 +116,8 @@ idm_transport_ops_t iser_transport_ops = {
 	&iser_ini_conn_create,		/* it_ini_conn_create */
 	&iser_conn_destroy,		/* it_ini_conn_destroy */
 	&iser_ini_conn_connect,		/* it_ini_conn_connect */
-	&iser_conn_disconnect		/* it_ini_conn_disconnect */
+	&iser_conn_disconnect,		/* it_ini_conn_disconnect */
+	&iser_declare_key_values	/* it_declare_key_values */
 };
 
 /*
@@ -339,7 +342,7 @@ iser_tgt_svc_create(idm_svc_req_t *sr, idm_svc_t *is)
 	if (rc != DDI_SUCCESS) {
 		ISER_LOG(CE_NOTE, "iser_tgt_svc_create: iser_register_service "
 		    "failed on port (%d): rc (0x%x)", sr->sr_port, rc);
-		ibt_release_ip_sid(iser_svc->is_svcid);
+		(void) ibt_release_ip_sid(iser_svc->is_svcid);
 		list_destroy(&iser_svc->is_sbindlist);
 		idm_refcnt_destroy(&iser_svc->is_refcnt);
 		kmem_free(iser_svc, sizeof (iser_svc_t));
@@ -841,6 +844,32 @@ iser_handle_numerical(nvpair_t *nvp, uint64_t value, const idm_kv_xlate_t *ikvx,
 }
 
 /*
+ * iser_declare_key_values() declares the declarative key values for
+ * this connection.
+ */
+/* ARGSUSED */
+static kv_status_t
+iser_declare_key_values(idm_conn_t *ic, nvlist_t *config_nvl,
+    nvlist_t *outgoing_nvl)
+{
+	kv_status_t		kvrc;
+	int			nvrc = 0;
+	int			rc;
+	uint64_t		uint64_val;
+
+	if ((rc = nvlist_lookup_uint64(config_nvl,
+	    ISER_KV_KEY_NAME_MAX_OUTSTANDING_PDU, &uint64_val)) != ENOENT) {
+		ASSERT(rc == 0);
+		if (outgoing_nvl) {
+			nvrc = nvlist_add_uint64(outgoing_nvl,
+			    ISER_KV_KEY_NAME_MAX_OUTSTANDING_PDU, uint64_val);
+		}
+	}
+	kvrc = idm_nvstat_to_kvstat(nvrc);
+	return (kvrc);
+}
+
+/*
  * iser_notice_key_values() activates the negotiated key values for
  * this connection.
  */
@@ -990,7 +1019,8 @@ iser_buf_tx_to_ini(idm_task_t *idt, idm_buf_t *idb)
 		ISER_LOG(CE_WARN, "iser_buf_tx_to_ini: failed "
 		    "iser_xfer_buf_to_ini: idt (0x%p) idb (0x%p)",
 		    (void *) idt, (void *) idb);
-		idm_status = IDM_STATUS_FAIL;
+		idm_buf_tx_to_ini_done(idt, idb, IDM_STATUS_ABORTED);
+		return (IDM_STATUS_FAIL);
 	}
 
 	/*
@@ -1020,10 +1050,11 @@ iser_buf_rx_from_ini(idm_task_t *idt, idm_buf_t *idb)
 	iser_status = iser_xfer_buf_from_ini(idt, idb);
 
 	if (iser_status != ISER_STATUS_SUCCESS) {
-		ISER_LOG(CE_WARN, "iser_buf_tx_from_ini: failed "
-		    "iser_xfer_buf_to_ini: idt (0x%p) idb (0x%p)",
+		ISER_LOG(CE_WARN, "iser_buf_rx_from_ini: failed "
+		    "iser_xfer_buf_from_ini: idt (0x%p) idb (0x%p)",
 		    (void *) idt, (void *) idb);
-		idm_status = IDM_STATUS_FAIL;
+		idm_buf_rx_from_ini_done(idt, idb, IDM_STATUS_ABORTED);
+		return (IDM_STATUS_FAIL);
 	}
 
 	/*

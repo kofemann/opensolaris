@@ -407,7 +407,6 @@ typedef struct mptsas_slots {
 	m_raidconfig_t		m_raidconfig[MPTSAS_MAX_RAIDCONFIGS];
 	uint8_t			m_num_raid_configs;
 	uint16_t		m_tags;
-	uint32_t		m_buffer;
 	size_t			m_size;
 	uint16_t		m_n_slots;
 	mptsas_cmd_t		*m_slot[1];
@@ -586,7 +585,7 @@ typedef struct mptsas {
 	struct mptsas *m_next;
 
 	scsi_hba_tran_t		*m_tran;
-	sas_hba_tran_t		*m_smptran;
+	smp_hba_tran_t		*m_smptran;
 	kmutex_t		m_mutex;
 	kcondvar_t		m_cv;
 	kcondvar_t		m_passthru_cv;
@@ -726,6 +725,7 @@ typedef struct mptsas {
 	uint32_t	m_free_index;
 	uint32_t	m_post_index;
 	uint8_t		m_reply_frame_size;
+	uint32_t	m_ioc_capabilities;
 
 	/*
 	 * indicates if the firmware was upload by the driver
@@ -791,6 +791,7 @@ typedef struct mptsas {
 	/*
 	 * Event recording
 	 */
+	uint8_t			m_event_index;
 	uint32_t		m_event_number;
 	uint32_t		m_event_mask[4];
 	mptsas_event_entry_t	m_events[MPTSAS_EVENT_QUEUE_SIZE];
@@ -966,13 +967,6 @@ typedef struct mptsas_dma_alloc_state
 #define	MPTSAS_PASS_THRU_TIME_DEFAULT	60	/* 60 seconds */
 
 /*
- * macro for getting value in micro-seconds since last boot to be used as
- * timeout in cv_timedwait call.
- */
-#define	MPTSAS_CV_TIMEOUT(timeout)  (ddi_get_lbolt() + \
-    drv_usectohz(timeout * MICROSEC))
-
-/*
  * macro to return the effective address of a given per-target field
  */
 #define	EFF_ADDR(start, offset)		((start) + (offset))
@@ -1135,6 +1129,11 @@ typedef struct mptsas_dma_alloc_state
 #define	MPTSAS_CMD_TIMEOUT		0x0010
 
 /*
+ * response code tlr flag
+ */
+#define	MPTSAS_SCSI_RESPONSE_CODE_TLR_OFF	0x02
+
+/*
  * System Events
  */
 #ifndef	DDI_VENDOR_LSI
@@ -1237,6 +1236,7 @@ int mptsas_set_ioc_params(mptsas_t *mpt);
 int mptsas_get_manufacture_page5(mptsas_t *mpt);
 int mptsas_get_sas_port_page0(mptsas_t *mpt, uint32_t page_address,
     uint64_t *sas_wwn, uint8_t *portwidth);
+int mptsas_get_bios_page3(mptsas_t *mpt,  uint32_t *bios_version);
 
 /*
  * RAID functions

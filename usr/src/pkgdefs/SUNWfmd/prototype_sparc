@@ -56,6 +56,8 @@ f none usr/lib/fm/sparcv9/libdiagcode.so.1 755 root bin
 s none usr/lib/fm/sparcv9/libdiagcode.so=libdiagcode.so.1
 f none usr/lib/fm/sparcv9/libdiskstatus.so.1 755 root bin
 s none usr/lib/fm/sparcv9/libdiskstatus.so=libdiskstatus.so.1
+f none usr/lib/fm/sparcv9/libfmevent.so.1 755 root bin
+s none usr/lib/fm/sparcv9/libfmevent.so=libfmevent.so.1
 f none usr/lib/fm/sparcv9/llib-lfmd_agent.ln 644 root bin
 f none usr/lib/fm/sparcv9/llib-ldiagcode.ln 644 root bin
 f none usr/lib/fm/sparcv9/llib-ldiskstatus.ln 644 root bin
@@ -77,6 +79,7 @@ f none usr/lib/fm/sparcv9/llib-lldom.ln 644 root bin
 f none usr/lib/fm/sparcv9/libfmd_snmp.so.1 755 root bin
 s none usr/lib/fm/sparcv9/libfmd_snmp.so=libfmd_snmp.so.1
 f none usr/lib/fm/sparcv9/llib-lfmd_snmp.ln 644 root bin
+f none usr/lib/fm/sparcv9/llib-lfmevent.ln 644 root bin
 f none usr/lib/fm/sparcv9/libtopo.so.1 755 root bin
 s none usr/lib/fm/sparcv9/libtopo.so=libtopo.so.1
 f none usr/lib/fm/sparcv9/llib-ltopo.ln 644 root bin
@@ -231,7 +234,6 @@ d none usr/platform/SUNW,SPARC-Enterprise-T5120/lib/fm/topo 755 root bin
 d none usr/platform/SUNW,SPARC-Enterprise-T5120/lib/fm/topo/maps 755 root bin
 f none usr/platform/SUNW,SPARC-Enterprise-T5120/lib/fm/topo/maps/SPARC-Enterprise-T5120-hc-topology.xml 444 root bin
 f none usr/platform/SUNW,SPARC-Enterprise-T5120/lib/fm/topo/maps/SPARC-Enterprise-T5220-hc-topology.xml 444 root bin
-f none usr/platform/SUNW,SPARC-Enterprise-T5120/lib/fm/topo/maps/SPARC-Enterprise-T3120-hc-topology.xml 444 root bin
 d none usr/platform/SUNW,T5140 755 root sys
 d none usr/platform/SUNW,T5140/lib 755 root bin
 d none usr/platform/SUNW,T5140/lib/fm 755 root bin

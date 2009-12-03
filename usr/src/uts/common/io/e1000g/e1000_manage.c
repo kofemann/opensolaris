@@ -24,7 +24,7 @@
  */
 
 /*
- * IntelVersion: 1.27 sol_anvik_patch
+ * IntelVersion: 1.27 v3-1-10-1_2009-9-18_Release14-6
  */
 
 #include "e1000_api.h"

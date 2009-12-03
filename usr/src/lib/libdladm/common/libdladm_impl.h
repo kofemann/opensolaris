@@ -26,6 +26,9 @@
 #ifndef _LIBDLADM_IMPL_H
 #define	_LIBDLADM_IMPL_H
 
+#include <sys/types.h>
+#include <sys/mac.h>
+#include <sys/mac_flow.h>
 #include <libdladm.h>
 #include <stdio.h>
 
@@ -56,9 +59,7 @@ extern dladm_status_t   i_dladm_rw_db(dladm_handle_t, const char *, mode_t,
 			    FILE *), void *, boolean_t);
 extern dladm_status_t	i_dladm_get_state(dladm_handle_t, datalink_id_t,
 			    link_state_t *);
-
-extern const char	*dladm_pri2str(mac_priority_level_t, char *);
-extern dladm_status_t	dladm_str2pri(char *, mac_priority_level_t *);
+extern void		dladm_find_setbits32(uint32_t, uint32_t *, uint32_t *);
 extern dladm_status_t	dladm_parse_args(char *, dladm_arg_list_t **,
 			    boolean_t);
 extern void		dladm_free_args(dladm_arg_list_t *);
@@ -92,6 +93,8 @@ extern void		dladm_free_args(dladm_arg_list_t *);
 #define	FMADDRSLOT	"maddrslot"	/* uint64_t */
 #define	FMADDRPREFIXLEN	"maddrpreflen"	/* uint64_t */
 #define	FHWRINGS	"hwrings"	/* boolean_t */
+#define	FVRID		"vrid"		/* uint64_t */
+#define	FVRAF		"vraf"		/* uint64_t */
 
 /*
  * Set for simlinks only
@@ -137,10 +140,10 @@ extern dladm_status_t	dladm_flow_proplist_extract(dladm_arg_list_t *,
  * rp_extract extracts the kernel structure from the val_desc_t created
  * by the pd_check function.
  */
-typedef	dladm_status_t	rp_extractf_t(val_desc_t *propval, void *arg,
-				uint_t cnt);
+typedef	dladm_status_t	rp_extractf_t(val_desc_t *, uint_t, void *);
 extern rp_extractf_t	do_extract_maxbw, do_extract_priority,
-			do_extract_cpus;
+			do_extract_cpus, do_extract_protection,
+			do_extract_allowedips;
 
 typedef struct resource_prop_s {
 	/*
@@ -153,6 +156,11 @@ typedef struct resource_prop_s {
 	 */
 	rp_extractf_t	*rp_extract;
 } resource_prop_t;
+
+/*
+ * Set for bridged links only
+ */
+#define	FBRIDGE		"bridge"	/* string */
 
 #ifdef	__cplusplus
 }

@@ -54,10 +54,20 @@ extern int		do_polled_io;
  * we used to set the callback_done value to NULL after the callback
  * but this interfered with esp/fas drivers that also set the callback
  * to NULL to prevent callbacks during error recovery
- * to prevent confusion, create a truly unique value
+ * to prevent confusion, create a truly unique value.
+ * The scsi_callback_done() function is used to detect a packet
+ * completion being called a second time.
  */
-static int scsi_callback_done;
-#define	CALLBACK_DONE ((void (*)(struct scsi_pkt *))(&scsi_callback_done))
+/* ARGSUSED */
+void
+scsi_callback_done(struct scsi_pkt *pkt)
+{
+	cmn_err(CE_PANIC,
+	    "%s: duplicate scsi_callback_done() on same scsi_pkt(9s)",
+	    mod_containing_pc(caller()));
+}
+
+#define	CALLBACK_DONE (scsi_callback_done)
 
 static void
 scsi_flag_nointr_comp(struct scsi_pkt *pkt)
@@ -127,6 +137,9 @@ scsi_transport(struct scsi_pkt *pkt)
 #endif	/* DEBUG */
 	}
 
+	/* Some retryed packets come with this flag not cleared */
+	pkt->pkt_flags &= ~FLAG_PKT_COMP_CALLED;
+
 	/*
 	 * Check if we are required to do polled I/O. We can
 	 * get scsi_pkts that don't have the FLAG_NOINTR bit
@@ -188,7 +201,6 @@ scsi_transport(struct scsi_pkt *pkt)
 	} else {
 		uint_t	savef;
 		void	(*savec)();
-		int	status;
 
 #ifdef SCSI_POLL_STAT
 		mutex_enter(&scsi_flag_nointr_mutex);
@@ -202,7 +214,7 @@ scsi_transport(struct scsi_pkt *pkt)
 		pkt->pkt_flags &= ~FLAG_NOINTR;
 		pkt->pkt_flags |= FLAG_IMMEDIATE_CB;
 
-		if ((status = (*A_TO_TRAN(ap)->tran_start)(ap, pkt)) ==
+		if ((rval = (*A_TO_TRAN(ap)->tran_start)(ap, pkt)) ==
 		    TRAN_ACCEPT) {
 			mutex_enter(&scsi_flag_nointr_mutex);
 			while (pkt->pkt_comp != CALLBACK_DONE) {
@@ -214,6 +226,6 @@ scsi_transport(struct scsi_pkt *pkt)
 
 		pkt->pkt_flags = savef;
 		pkt->pkt_comp = savec;
-		return (status);
+		return (rval);
 	}
 }

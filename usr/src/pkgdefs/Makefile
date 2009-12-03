@@ -34,8 +34,6 @@ sparc_SUBDIRS= \
 	SUNWcar.u  \
 	SUNWcar.v  \
 	SUNWcart200.v \
-	SUNWcg6.u \
-	SUNWcg6h  \
 	SUNWcpc.u \
 	SUNWcpc.v \
 	SUNWcpr.u \
@@ -54,7 +52,6 @@ sparc_SUBDIRS= \
 	SUNWefc.u \
 	SUNWefck \
 	SUNWerid \
-	SUNWfruid \
 	SUNWfruip.u \
 	SUNWfsr \
 	SUNWfsu \
@@ -62,8 +59,6 @@ sparc_SUBDIRS= \
 	SUNWidn.u \
 	SUNWifp  \
 	SUNWifph \
-	SUNWjcom \
-	SUNWjib \
 	SUNWkvm.c  \
 	SUNWkvm.d  \
 	SUNWkvm.m  \
@@ -84,22 +79,20 @@ sparc_SUBDIRS= \
 	SUNWiopc.u \
 	SUNWiopc.v \
 	SUNWpdu	  \
+	SUNWpmcsr  \
+	SUNWpmcsu  \
 	SUNWpstl.u \
 	SUNWqfed \
 	SUNWqus \
 	SUNWsckmr \
 	SUNWsckmu.u \
 	SUNWsckm.u \
-	SUNWscmhdlr \
 	SUNWsfdr.u \
 	SUNWsfdrr.u \
 	SUNWssad  \
-	SUNWstc.u \
 	SUNWus.u \
-	SUNWusat10.v \
 	SUNWust1.v \
-	SUNWust2.v \
-	SUNWwbsd
+	SUNWust2.v
 
 i386_SUBDIRS= \
 	SUNWad810 \
@@ -115,9 +108,12 @@ i386_SUBDIRS= \
 	SUNWarn \
 	SUNWatheros \
 	SUNWatigfx \
+	SUNWatge \
 	SUNWatu \
 	SUNWaudiocmi \
+	SUNWaudioemu10k \
 	SUNWaudiohd \
+	SUNWaudiosolo \
 	SUNWaudiovia97 \
 	SUNWbfe	\
 	SUNWcakr.i \
@@ -126,21 +122,23 @@ i386_SUBDIRS= \
 	SUNWcarx.i  \
 	SUNWcpc.i \
 	SUNWcpr.i \
-	SUNWdfb.i  \
 	SUNWdrmr \
 	SUNWgrub \
 	SUNWgrubS \
 	SUNWdcopy \
 	SUNWfipe \
+	SUNWfruip.i \
 	SUNWipw \
 	SUNWiwh	\
 	SUNWiwi \
 	SUNWiwk \
+	SUNWiwp \
 	SUNWkvm.i \
 	SUNWlxr \
 	SUNWlxu \
 	SUNWmegasas \
 	SUNWmv88sx \
+	SUNWmwl	\
 	SUNWbcmsata \
 	SUNWnge \
 	SUNWntfsprogs \
@@ -149,6 +147,8 @@ i386_SUBDIRS= \
 	SUNWonmtst.i \
 	SUNWos86r  \
 	SUNWparted  \
+	SUNWpmcsr \
+	SUNWpmcsu \
 	SUNWpsdcr  \
 	SUNWpsdir  \
 	SUNWpsh \
@@ -159,8 +159,8 @@ i386_SUBDIRS= \
 	SUNWrum \
 	SUNWrwd	\
 	SUNWrwn	\
+	SUNWsdcard \
 	SUNWsi3124 \
-	SUNWtpm \
 	SUNWuath \
 	SUNWural \
 	SUNWurtw \
@@ -176,6 +176,7 @@ i386_SUBDIRS= \
 
 i386_XMODS= \
 	BRCMbnx \
+	BRCMbnxe \
 	SUNWadpu320 \
 	SUNWlsimega
 
@@ -191,6 +192,8 @@ COMMON_SUBDIRS= \
 	SUNWaudd  \
 	SUNWaudf  \
 	SUNWaudh  \
+	SUNWaudiols \
+	SUNWaudiop16x \
 	SUNWaudit \
 	SUNWatfsr  \
 	SUNWatfsu  \
@@ -205,6 +208,8 @@ COMMON_SUBDIRS= \
 	SUNWbipr \
 	SUNWbnur  \
 	SUNWbnuu  \
+	SUNWbridger \
+	SUNWbridgeu \
 	SUNWbsr \
 	SUNWbsu \
 	SUNWbtool  \
@@ -227,7 +232,6 @@ COMMON_SUBDIRS= \
 	SUNWcstl \
 	SUNWdcaf \
 	SUNWdcar \
-	SUNWdfbh  \
 	SUNWdhcm  \
 	SUNWdhcsb  \
 	SUNWdhcsr  \
@@ -258,9 +262,11 @@ COMMON_SUBDIRS= \
 	SUNWfcoe \
 	SUNWfcoeu \
 	SUNWfcoet \
+	SUNWfcoei \
 	SUNWfilebench \
 	SUNWfmd  \
 	SUNWfmdr  \
+	SUNWfruid \
 	SUNWfss \
 	SUNWftdur \
 	SUNWftduu \
@@ -288,6 +294,8 @@ COMMON_SUBDIRS= \
 	SUNWiir \
 	SUNWiiu \
 	SUNWigb \
+	SUNWilb \
+	SUNWilbr \
 	SUNWima \
 	SUNWimac \
 	SUNWimar \
@@ -320,13 +328,12 @@ COMMON_SUBDIRS= \
 	SUNWixgbe \
 	SUNWkrbr \
 	SUNWkrbu \
+	SUNWlatencytop \
 	SUNWldskint \
 	SUNWlibsasl \
 	SUNWllc \
 	SUNWllcr\
 	SUNWlldap \
-	SUNWlp-cmds \
-	SUNWlpr-cmds \
 	SUNWkey  \
 	SUNWloc  \
 	SUNWluxop \
@@ -364,24 +371,20 @@ COMMON_SUBDIRS= \
 	SUNWnisu  \
 	SUNWnwamintr \
 	SUNWnwamintu \
-	SUNWocf \
-	SUNWocfd \
-	SUNWocfh \
-	SUNWocfr \
 	SUNWonfmes \
 	SUNWonzfsr \
 	SUNWonzfs \
 	SUNWosdem \
 	SUNWypr \
 	SUNWypu \
-	SUNWpamsc \
+	SUNWpacketh \
+	SUNWpacketu \
 	SUNWpapi \
 	SUNWpcan \
 	SUNWpcelx \
 	SUNWpcmci  \
 	SUNWpcmcu  \
 	SUNWpcmem \
-	SUNWpcr	\
 	SUNWpcser \
 	SUNWpcu	\
 	SUNWpcwl \
@@ -399,6 +402,7 @@ COMMON_SUBDIRS= \
 	SUNWpoolr \
 	SUNWpowertop \
 	SUNWppm \
+	SUNWppmr \
 	SUNWpppd \
 	SUNWpppdu \
 	SUNWpppdr \
@@ -438,6 +442,8 @@ COMMON_SUBDIRS= \
 	SUNWrsm	\
 	SUNWrsmo \
 	SUNWrtls \
+	SUNWs10brandr \
+	SUNWs10brandu \
 	SUNWsacom \
 	SUNWsasnm \
 	SUNWsbp2 \
@@ -448,7 +454,6 @@ COMMON_SUBDIRS= \
 	SUNWscplp  \
 	SUNWscsa1394  \
 	SUNWscsip \
-	SUNWsdcard \
 	SUNWses \
 	SUNWsfe \
 	SUNWslpr \
@@ -472,8 +477,6 @@ COMMON_SUBDIRS= \
 	SUNWspnego \
 	SUNWspsvr \
 	SUNWspsvu \
-	SUNWsra  \
-	SUNWsrh  \
 	SUNWsrptr  \
 	SUNWsrptu  \
 	SUNWsshcu \
@@ -496,6 +499,7 @@ COMMON_SUBDIRS= \
 	SUNWtnfc  \
 	SUNWtnfd  \
 	SUNWtoo  \
+	SUNWtpm \
 	SUNWtsg  \
 	SUNWtsr  \
 	SUNWtsu  \
@@ -520,6 +524,8 @@ COMMON_SUBDIRS= \
 	SUNWusbu \
 	SUNWuwb \
 	SUNWvr \
+	SUNWvrrpr \
+	SUNWvrrpu \
 	SUNWvscankr \
 	SUNWvscanr \
 	SUNWvscanu \
@@ -531,6 +537,7 @@ COMMON_SUBDIRS= \
 	SUNWxcu6  \
 	SUNWxwdv \
 	SUNWxge \
+	SUNWyge \
 	SUNWzfskr \
 	SUNWzfsr \
 	SUNWzfsu \
@@ -543,7 +550,6 @@ COMMON_XMODS= \
 	SUNWibsdpib \
 	SUNWkdcr \
 	SUNWkdcu \
-	SUNWstatl \
 	SUNWsvvs \
 	SUNWwbint \
 	SUNWwbsup

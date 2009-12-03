@@ -64,17 +64,12 @@ f none usr/lib/cfgadm/sparcv9/sdcard.so.1 755 root bin
 s none usr/lib/cfgadm/sparcv9/sdcard.so=./sdcard.so.1
 f none usr/lib/cfgadm/sparcv9/pci.so.1 755 root bin
 s none usr/lib/cfgadm/sparcv9/pci.so=./pci.so.1
+f none usr/lib/cfgadm/sparcv9/shp.so.1 755 root bin
+s none usr/lib/cfgadm/sparcv9/shp.so=./shp.so.1
 f none usr/lib/cfgadm/sparcv9/usb.so.1 755 root bin
 s none usr/lib/cfgadm/sparcv9/usb.so=./usb.so.1
 f none usr/lib/cfgadm/sparcv9/ib.so.1 755 root bin
 s none usr/lib/cfgadm/sparcv9/ib.so=./ib.so.1
-d none usr/lib/dns/sparcv9 755 root bin
-# EXPORT DELETE START
-f none usr/lib/dns/sparcv9/cylink.so.1 755 root bin
-f none usr/lib/dns/sparcv9/dnssafe.so.1 755 root bin
-# EXPORT DELETE END
-f none usr/lib/dns/sparcv9/irs.so.1 755 root bin
-d none usr/lib/fp/libp/sparcv9 755 root bin
 d none usr/lib/iconv/sparcv9 755 root bin
 d none usr/lib/lwp/sparcv9 755 root bin
 s none usr/lib/lwp/64=sparcv9
@@ -145,6 +140,8 @@ f none usr/lib/security/sparcv9/pkcs11_kernel.so.1 755 root bin
 s none usr/lib/security/sparcv9/pkcs11_kernel.so=./pkcs11_kernel.so.1
 f none usr/lib/security/sparcv9/pkcs11_softtoken.so.1 755 root bin
 s none usr/lib/security/sparcv9/pkcs11_softtoken.so=./pkcs11_softtoken.so.1
+f none usr/lib/security/sparcv9/pkcs11_tpm.so.1 755 root bin
+s none usr/lib/security/sparcv9/pkcs11_tpm.so=./pkcs11_tpm.so.1
 s none usr/lib/64=sparcv9
 d none usr/lib/sparcv9 755 root bin
 f none usr/lib/sparcv9/libadutils.so.1 755 root bin
@@ -177,6 +174,8 @@ f none usr/lib/sparcv9/libform.so.1 755 root bin
 s none usr/lib/sparcv9/libform.so=libform.so.1
 s none usr/lib/sparcv9/libgen.so.1=../../../lib/sparcv9/libgen.so.1
 s none usr/lib/sparcv9/libgen.so=../../../lib/sparcv9/libgen.so.1
+f none usr/lib/sparcv9/libhotplug.so.1 755 root bin
+s none usr/lib/sparcv9/libhotplug.so=libhotplug.so.1
 f none usr/lib/sparcv9/libidmap.so.1 755 root bin
 s none usr/lib/sparcv9/libidmap.so=./libidmap.so.1
 f none usr/lib/sparcv9/libike.so.1 755 root bin
@@ -287,6 +286,8 @@ s none usr/lib/sparcv9/libpthread.so.1=../../../lib/sparcv9/libpthread.so.1
 s none usr/lib/sparcv9/libpthread.so=../../../lib/sparcv9/libpthread.so.1
 s none usr/lib/sparcv9/librcm.so.1=../../../lib/sparcv9/librcm.so.1
 s none usr/lib/sparcv9/librcm.so=../../../lib/sparcv9/librcm.so.1
+f none usr/lib/sparcv9/libreparse.so.1 755 root bin
+s none usr/lib/sparcv9/libreparse.so=libreparse.so.1
 s none usr/lib/sparcv9/libresolv.so.2=../../../lib/sparcv9/libresolv.so.2
 s none usr/lib/sparcv9/libresolv.so=../../../lib/sparcv9/libresolv.so.2
 s none usr/lib/sparcv9/librestart.so.1=../../../lib/sparcv9/librestart.so.1

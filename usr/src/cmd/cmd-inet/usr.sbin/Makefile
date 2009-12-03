@@ -54,6 +54,7 @@ NSLPROG=	6to4relay arp gettable hostconfig in.comsat in.rarpd \
 CMDPROG=	in.telnetd
 K5PROGS=	in.telnetd in.rlogind in.rshd
 TSNETPROG=	route
+DLADMPROG=	6to4relay ndd
 DEFAULTFILES=	telnetd.dfl
 
 PROGSRCS=	$(PROG:%=%.c)
@@ -64,14 +65,14 @@ K5RSHDOBJS=	in.rshd.o
 K5TELNETOBJS=	in.telnetd.o
 SRCS=		$(PROGSRCS) $(OTHERSRC)
 
-SUBDIRS=	bootconfchk htable ifconfig in.ftpd in.rdisc in.routed \
+SUBDIRS=	bootconfchk htable ifconfig ilbadm in.ftpd in.rdisc in.routed \
 		in.talkd inetadm inetconv ipmpstat ipqosconf ipsecutils \
 		kssl/kssladm kssl/ksslcfg ping routeadm snoop sppptun \
 		traceroute wificonfig
 
-MSGSUBDIRS=	bootconfchk htable ifconfig in.ftpd in.routed in.talkd inetadm \
-		inetconv ipmpstat ipqosconf ipsecutils kssl/ksslcfg routeadm \
-		sppptun snoop wificonfig
+MSGSUBDIRS=	bootconfchk htable ifconfig ilbadm in.ftpd in.routed in.talkd \
+		inetadm inetconv ipmpstat ipqosconf ipsecutils kssl/ksslcfg \
+		routeadm sppptun snoop wificonfig
 
 # As programs get lint-clean, add them here and to the 'lint' target.
 # Eventually this hack should go away, and all in PROG should be
@@ -83,9 +84,9 @@ LINTCLEAN=	6to4relay arp in.rlogind in.rshd in.telnetd in.tftpd \
 # they're all clean, replace the dependency of the lint target
 # with SUBDIRS.  Also (sigh) deal with the commented-out build lines
 # for the lint rule.
-LINTSUBDIRS=	bootconfchk in.rdisc in.routed in.talkd inetadm inetconv \
-		ipmpstat ipqosconf ipsecutils ping routeadm sppptun traceroute \
-		wificonfig
+LINTSUBDIRS=	bootconfchk ilbadm in.rdisc in.routed in.talkd inetadm \
+		inetconv ipmpstat ipqosconf ipsecutils ping routeadm sppptun \
+		traceroute wificonfig
 # And as programs are verified not to attempt to write into constants,
 # -xstrconst should be used to ensure they stay that way.
 CONSTCLEAN=
@@ -144,12 +145,12 @@ $(K5PROGS)		:=	CPPFLAGS += -I$(SRC)/head \
 				-I$(SRC)/lib/pam_modules/krb5
 LDLIBS +=	$(K5LIBS)
 $(TSNETPROG)		:=	LDLIBS += -ltsnet
+$(DLADMPROG)		:=	LDLIBS += -ldladm
 
 in.rarpd		:=	LDLIBS += -linetutil -ldlpi
 if_mpadm		:=	LDLIBS += -linetutil -lipmp
 if_mpadm.po		:=	XGETFLAGS += -a
 route			:=	CPPFLAGS += -DNDEBUG
-ndd			:=	LDLIBS += -ldladm
 gettable in.comsat	:=	LDFLAGS += $(MAPFILE.NGB:%=-M%)
 
 .KEEP_STATE:
@@ -227,7 +228,7 @@ clobber: $(SUBDIRS)
 	-$(RM) $(CLEANFILES) $(CLOBBERFILES)
 
 lint: $(LINTSUBDIRS)
-	$(LINT.c) 6to4relay.c $(LDLIBS) -lsocket -lnsl
+	$(LINT.c) 6to4relay.c $(LDLIBS) -lsocket -ldladm
 	$(LINT.c) arp.c $(LDLIBS) -lsocket -lnsl
 	@# $(LINT.c) in.rexecd.c $(LDLIBS) -lbsm -lpam
 	$(LINT.c) -erroff=E_NAME_USED_NOT_DEF2 -erroff=E_NAME_DEF_NOT_USED2 \

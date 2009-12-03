@@ -33,6 +33,7 @@
 #include <rpc/rpc.h>
 #include <nfs/nfs4.h>
 #include <nfs/nfs4_db_impl.h>
+#include <sys/sdt.h>
 
 static int rfs4_reap_interval = RFS4_REAP_INTERVAL;
 
@@ -40,6 +41,17 @@ static void rfs4_dbe_reap(rfs4_table_t *, time_t, uint32_t);
 static void rfs4_dbe_destroy(rfs4_dbe_t *);
 static rfs4_dbe_t *rfs4_dbe_create(rfs4_table_t *, id_t, rfs4_entry_t);
 static void rfs4_start_reaper(rfs4_table_t *);
+
+/*
+ * t_lowat - integer percentage of table entries	/etc/system only
+ * t_hiwat - integer percentage of table entries	/etc/system only
+ * t_lreap - integer percentage of table reap time	mdb or /etc/system
+ * t_hreap - integer percentage of table reap time	mdb or /etc/system
+ */
+uint32_t	t_lowat = 50;	/* reap at t_lreap when id's in use hit 50% */
+uint32_t	t_hiwat = 75;	/* reap at t_hreap when id's in use hit 75% */
+time_t		t_lreap = 50;	/* default to 50% of table's reap interval */
+time_t		t_hreap = 10;	/* default to 10% of table's reap interval */
 
 krwlock_t nsi_lock;
 
@@ -260,12 +272,11 @@ rfs4_table_create(nfs_server_instance_t *instp, char *tabname,
     uint32_t maxentries, id_t start)
 {
 	rfs4_database_t *db;
-	rfs4_table_t *table;
-
-	int len;
-	char *tbl_inst_name = "";
-	char *cache_name;
-	char *id_name;
+	rfs4_table_t	*table;
+	int		 len;
+	char		*tbl_inst_name = "";
+	char		*cache_name;
+	char		*id_name;
 
 	table = kmem_alloc(sizeof (rfs4_table_t), KM_SLEEP);
 	table->dbt_instp = instp;
@@ -313,6 +324,11 @@ rfs4_table_create(nfs_server_instance_t *instp, char *tabname,
 		    maxentries + start);
 		kmem_free(id_name, len + 10);
 	}
+	ASSERT(t_lowat != 0);
+	table->dbt_id_lwat = (maxentries * t_lowat) / 100;
+	ASSERT(t_hiwat != 0);
+	table->dbt_id_hwat = (maxentries * t_hiwat) / 100;
+	table->dbt_id_reap = MIN(rfs4_reap_interval, max_cache_time);
 	table->dbt_maxentries = maxentries;
 	table->dbt_create = create;
 	table->dbt_destroy = destroy;
@@ -534,6 +550,36 @@ rfs4_dbe_create(rfs4_table_t *table, id_t id, rfs4_entry_t data)
 	return (entry);
 }
 
+static void
+rfs4_dbe_tabreap_adjust(rfs4_table_t *table)
+{
+	clock_t		tabreap;
+	clock_t		reap_int;
+	uint32_t	in_use;
+
+	/*
+	 * Adjust the table's reap interval based on the
+	 * number of id's currently in use. Each table's
+	 * default remains the same if id usage subsides.
+	 */
+	ASSERT(MUTEX_HELD(&table->dbt_reaper_cv_lock));
+	tabreap = MIN(rfs4_reap_interval, table->dbt_max_cache_time);
+
+	in_use = table->dbt_count + 1;	/* see rfs4_dbe_create */
+	if (in_use >= table->dbt_id_hwat) {
+		ASSERT(t_hreap != 0);
+		reap_int = (tabreap * t_hreap) / 100;
+	} else if (in_use >= table->dbt_id_lwat) {
+		ASSERT(t_lreap != 0);
+		reap_int = (tabreap * t_lreap) / 100;
+	} else {
+		reap_int = tabreap;
+	}
+	table->dbt_id_reap = reap_int;
+	DTRACE_PROBE2(table__reap__interval, char *,
+	    table->dbt_name, time_t, table->dbt_id_reap);
+}
+
 /*
  * If *create is TRUE and we end up creating an entry, then the entry will
  * have a refcnt of 2. The entry may not be reaped until the hold done here
@@ -546,14 +592,14 @@ rfs4_entry_t
 rfs4_dbsearch(rfs4_index_t *idx, void *key, bool_t *create, void *arg,
     rfs4_dbsearch_type_t dbsearch_type)
 {
-	int already_done;
-	uint32_t i;
-	rfs4_table_t *table = idx->dbi_table;
-	rfs4_index_t *ip;
-	rfs4_bucket_t *bp;
-	rfs4_link_t *l;
-	rfs4_dbe_t *entry;
-	id_t id = -1;
+	int		 already_done;
+	uint32_t	 i;
+	rfs4_table_t	*table = idx->dbi_table;
+	rfs4_index_t	*ip;
+	rfs4_bucket_t	*bp;
+	rfs4_link_t	*l;
+	rfs4_dbe_t	*entry;
+	id_t		 id = -1;
 
 	/*
 	 * figure out the bucket in idx based on the passed in key value
@@ -619,17 +665,18 @@ retry:
 	}
 
 	if (table->dbt_id_space && id == -1) {
-		/* get an id but don't sleep for it */
-		id = id_alloc_nosleep(table->dbt_id_space);
-		if (id == -1) {
-			rw_exit(bp->dbk_lock);
+		rw_exit(bp->dbk_lock);
 
-			/* get an id, ok to sleep for it here */
-			id = id_alloc(table->dbt_id_space);
+		/* get an id, ok to sleep for it here */
+		id = id_alloc(table->dbt_id_space);
+		ASSERT(id != -1);
 
-			rw_enter(bp->dbk_lock, RW_WRITER);
-			goto retry;
-		}
+		mutex_enter(&table->dbt_reaper_cv_lock);
+		rfs4_dbe_tabreap_adjust(table);
+		mutex_exit(&table->dbt_reaper_cv_lock);
+
+		rw_enter(bp->dbk_lock, RW_WRITER);
+		goto retry;
 	}
 
 	/* get an exclusive lock on the bucket */
@@ -851,23 +898,21 @@ rfs4_dbe_reap(rfs4_table_t *table, time_t cache_time, uint32_t desired)
 	}
 }
 
-
 static void
 reaper_thread(caddr_t *arg)
 {
-	rfs4_table_t *table = (rfs4_table_t *)arg;
-	clock_t rc, time;
+	rfs4_table_t	*table = (rfs4_table_t *)arg;
+	clock_t		 rc;
 
 	CALLB_CPR_INIT(&table->dbt_reaper_cpr_info, &table->dbt_reaper_cv_lock,
 	    callb_generic_cpr, "nfsv4Reaper");
 
-	time = MIN(rfs4_reap_interval, table->dbt_max_cache_time);
 	mutex_enter(&table->dbt_reaper_cv_lock);
 	do {
 		CALLB_CPR_SAFE_BEGIN(&table->dbt_reaper_cpr_info);
-		rc = cv_timedwait_sig(&table->dbt_reaper_wait,
+		rc = cv_reltimedwait_sig(&table->dbt_reaper_wait,
 		    &table->dbt_reaper_cv_lock,
-		    lbolt + SEC_TO_TICK(time));
+		    SEC_TO_TICK(table->dbt_id_reap), TR_CLOCK_TICK);
 		CALLB_CPR_SAFE_END(&table->dbt_reaper_cpr_info,
 		    &table->dbt_reaper_cv_lock);
 		rfs4_dbe_reap(table, table->dbt_max_cache_time, 0);

@@ -30,8 +30,8 @@
 #include <sys/socketvar.h>
 #include <sys/sdt.h>
 #include <smbsrv/netbios.h>
-#include <smbsrv/smb_incl.h>
-#include <smbsrv/smb_i18n.h>
+#include <smbsrv/smb_kproto.h>
+#include <smbsrv/string.h>
 #include <inet/tcp.h>
 
 static volatile uint64_t smb_kids;
@@ -219,10 +219,9 @@ smb_session_request(struct smb_session *session)
 	char 			client_name[NETBIOS_NAME_SZ];
 	struct mbuf_chain 	mbc;
 	char 			*names = NULL;
-	mts_wchar_t		*wbuf = NULL;
+	smb_wchar_t		*wbuf = NULL;
 	smb_xprt_t		hdr;
 	char *p;
-	unsigned int cpid = oem_get_smb_cpid();
 	int rc1, rc2;
 
 	session->keep_alive = smb_keep_alive;
@@ -283,10 +282,10 @@ smb_session_request(struct smb_session *session)
 	 * multi-byte format.  We also need to strip off any
 	 * spaces added as part of the NetBIOS name encoding.
 	 */
-	wbuf = kmem_alloc((SMB_PI_MAX_HOST * sizeof (mts_wchar_t)), KM_SLEEP);
-	(void) oemstounicodes(wbuf, client_name, SMB_PI_MAX_HOST, cpid);
-	(void) mts_wcstombs(session->workstation, wbuf, SMB_PI_MAX_HOST);
-	kmem_free(wbuf, (SMB_PI_MAX_HOST * sizeof (mts_wchar_t)));
+	wbuf = kmem_alloc((SMB_PI_MAX_HOST * sizeof (smb_wchar_t)), KM_SLEEP);
+	(void) oemtoucs(wbuf, client_name, SMB_PI_MAX_HOST, OEM_CPG_850);
+	(void) smb_wcstombs(session->workstation, wbuf, SMB_PI_MAX_HOST);
+	kmem_free(wbuf, (SMB_PI_MAX_HOST * sizeof (smb_wchar_t)));
 
 	if ((p = strchr(session->workstation, ' ')) != 0)
 		*p = '\0';
@@ -314,14 +313,14 @@ smb_session_xprt_gethdr(smb_session_t *session, smb_xprt_t *ret_hdr)
 		return (rc);
 
 	switch (session->s_local_port) {
-	case SSN_SRVC_TCP_PORT:
+	case IPPORT_NETBIOS_SSN:
 		ret_hdr->xh_type = buf[0];
 		ret_hdr->xh_length = (((uint32_t)buf[1] & 1) << 16) |
 		    ((uint32_t)buf[2] << 8) |
 		    ((uint32_t)buf[3]);
 		break;
 
-	case SMB_SRVC_TCP_PORT:
+	case IPPORT_SMB:
 		ret_hdr->xh_type = buf[0];
 
 		if (ret_hdr->xh_type != 0) {
@@ -358,14 +357,14 @@ smb_session_xprt_puthdr(smb_session_t *session, smb_xprt_t *hdr,
 	}
 
 	switch (session->s_local_port) {
-	case SSN_SRVC_TCP_PORT:
+	case IPPORT_NETBIOS_SSN:
 		buf[0] = hdr->xh_type;
 		buf[1] = ((hdr->xh_length >> 16) & 1);
 		buf[2] = (hdr->xh_length >> 8) & 0xff;
 		buf[3] = hdr->xh_length & 0xff;
 		break;
 
-	case SMB_SRVC_TCP_PORT:
+	case IPPORT_SMB:
 		buf[0] = hdr->xh_type;
 		buf[1] = (hdr->xh_length >> 16) & 0xff;
 		buf[2] = (hdr->xh_length >> 8) & 0xff;
@@ -486,7 +485,7 @@ smb_session_daemon(smb_session_list_t *se)
 	if (session == NULL)
 		return (EINVAL);
 
-	if (session->s_local_port == SSN_SRVC_TCP_PORT) {
+	if (session->s_local_port == IPPORT_NETBIOS_SSN) {
 		rc = smb_session_request(session);
 		if (rc) {
 			smb_rwx_rwenter(&session->s_lock, RW_WRITER);
@@ -631,7 +630,7 @@ smb_session_message(smb_session_t *session)
 }
 
 /*
- * Port will be SSN_SRVC_TCP_PORT or SMB_SRVC_TCP_PORT.
+ * Port will be IPPORT_NETBIOS_SSN or IPPORT_SMB.
  */
 smb_session_t *
 smb_session_create(ksocket_t new_so, uint16_t port, smb_server_t *sv,
@@ -641,6 +640,7 @@ smb_session_create(ksocket_t new_so, uint16_t port, smb_server_t *sv,
 	socklen_t		slen;
 	struct sockaddr_in6	sin6;
 	smb_session_t		*session;
+	int64_t			now;
 
 	session = kmem_cache_alloc(sv->si_cache_session, KM_SLEEP);
 	bzero(session, sizeof (smb_session_t));
@@ -650,12 +650,14 @@ smb_session_create(ksocket_t new_so, uint16_t port, smb_server_t *sv,
 		return (NULL);
 	}
 
+	now = ddi_get_lbolt64();
+
 	session->s_kid = SMB_NEW_KID();
 	session->s_state = SMB_SESSION_STATE_INITIALIZED;
 	session->native_os = NATIVE_OS_UNKNOWN;
-	session->opentime = lbolt64;
+	session->opentime = now;
 	session->keep_alive = smb_keep_alive;
-	session->activity_timestamp = lbolt64;
+	session->activity_timestamp = now;
 
 	smb_slist_constructor(&session->s_req_list, sizeof (smb_request_t),
 	    offsetof(smb_request_t, sr_session_lnd));
@@ -1039,8 +1041,8 @@ smb_session_lookup_user(smb_session_t *session, char *domain, char *name)
 	user = smb_llist_head(ulist);
 	while (user) {
 		ASSERT(user->u_magic == SMB_USER_MAGIC);
-		if (!utf8_strcasecmp(user->u_name, name) &&
-		    !utf8_strcasecmp(user->u_domain, domain)) {
+		if (!smb_strcasecmp(user->u_name, name, 0) &&
+		    !smb_strcasecmp(user->u_domain, domain, 0)) {
 			if (smb_user_hold(user))
 				break;
 		}
@@ -1123,14 +1125,14 @@ smb_session_isclient(smb_session_t *sn, const char *client)
 
 	client += strspn(client, "\\");
 
-	if (utf8_strcasecmp(client, sn->workstation) == 0)
+	if (smb_strcasecmp(client, sn->workstation, 0) == 0)
 		return (B_TRUE);
 
 	ipaddr = &sn->ipaddr;
 	if (smb_inet_ntop(ipaddr, buf, SMB_IPSTRLEN(ipaddr->a_family)) == NULL)
 		return (B_FALSE);
 
-	if (utf8_strcasecmp(client, buf) == 0)
+	if (smb_strcasecmp(client, buf, 0) == 0)
 		return (B_TRUE);
 
 	return (B_FALSE);
@@ -1161,13 +1163,12 @@ smb_request_alloc(smb_session_t *session, int req_length)
 	bzero(sr, sizeof (smb_request_t));
 
 	mutex_init(&sr->sr_mutex, NULL, MUTEX_DEFAULT, NULL);
+	smb_srm_init(sr);
 	sr->session = session;
 	sr->sr_server = session->s_server;
 	sr->sr_gmtoff = session->s_server->si_gmtoff;
 	sr->sr_cache = session->s_server->si_cache_request;
 	sr->sr_cfg = &session->s_cfg;
-	sr->request_storage.forw = &sr->request_storage;
-	sr->request_storage.back = &sr->request_storage;
 	sr->command.max_bytes = req_length;
 	sr->reply.max_bytes = smb_maxbufsize;
 	sr->sr_req_length = req_length;
@@ -1204,8 +1205,7 @@ smb_request_free(smb_request_t *sr)
 
 	sr->session = NULL;
 
-	/* Release any temp storage */
-	smbsr_free_malloc_list(&sr->request_storage);
+	smb_srm_fini(sr);
 
 	if (sr->sr_request_buf)
 		kmem_free(sr->sr_request_buf, sr->sr_req_length);

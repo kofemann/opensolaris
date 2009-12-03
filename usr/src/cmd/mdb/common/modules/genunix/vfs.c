@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -485,13 +485,20 @@ pfiles_dig_pathname(uintptr_t vp, char *path)
 		 */
 		if (v.v_type == VSOCK) {
 			struct sonode sonode;
+			struct sockparams sockparams;
 
 			if (pfiles_get_sonode(&v, &sonode) == -1) {
 				return (-1);
 			}
+			if (mdb_vread(&sockparams, sizeof (sockparams),
+			    (uintptr_t)sonode.so_sockparams) == -1) {
+				mdb_warn("failed to read sockparams");
+				return (-1);
+			}
+
 			if (!SOCK_IS_NONSTR(&sonode)) {
-				struct sockparams *sp = sonode.so_sockparams;
-				vp = (uintptr_t)sp->sp_sdev_info.sd_vnode;
+				vp = (uintptr_t)
+				    sockparams.sp_sdev_info.sd_vnode;
 			} else {
 				vp = NULL;
 			}
@@ -565,8 +572,9 @@ sctp_getsockaddr(sctp_t *sctp, struct sockaddr *addr)
 	sin_t			*sin4;
 	int			scanned = 0;
 	boolean_t		skip_lback = B_FALSE;
+	conn_t			*connp = sctp->sctp_connp;
 
-	addr->sa_family = sctp->sctp_family;
+	addr->sa_family = connp->conn_family;
 	if (sctp->sctp_nsaddrs == 0)
 		goto done;
 
@@ -629,18 +637,18 @@ sctp_getsockaddr(sctp_t *sctp, struct sockaddr *addr)
 				continue;
 			}
 
-			switch (sctp->sctp_family) {
+			switch (connp->conn_family) {
 			case AF_INET:
 				/* LINTED: alignment */
 				sin4 = (sin_t *)addr;
 				if ((sctp->sctp_state <= SCTPS_LISTEN) &&
 				    sctp->sctp_bound_to_all) {
 					sin4->sin_addr.s_addr = INADDR_ANY;
-					sin4->sin_port = sctp->sctp_lport;
+					sin4->sin_port = connp->conn_lport;
 				} else {
 					sin4 += added;
 					sin4->sin_family = AF_INET;
-					sin4->sin_port = sctp->sctp_lport;
+					sin4->sin_port = connp->conn_lport;
 					IN6_V4MAPPED_TO_INADDR(&laddr,
 					    &sin4->sin_addr);
 				}
@@ -653,15 +661,14 @@ sctp_getsockaddr(sctp_t *sctp, struct sockaddr *addr)
 				    sctp->sctp_bound_to_all) {
 					bzero(&sin6->sin6_addr,
 					    sizeof (sin6->sin6_addr));
-					sin6->sin6_port = sctp->sctp_lport;
+					sin6->sin6_port = connp->conn_lport;
 				} else {
 					sin6 += added;
 					sin6->sin6_family = AF_INET6;
-					sin6->sin6_port = sctp->sctp_lport;
+					sin6->sin6_port = connp->conn_lport;
 					sin6->sin6_addr = laddr;
 				}
-				sin6->sin6_flowinfo = sctp->sctp_ip6h->ip6_vcf &
-				    ~IPV6_VERS_AND_FLOW_MASK;
+				sin6->sin6_flowinfo = connp->conn_flowinfo;
 				sin6->sin6_scope_id = 0;
 				sin6->__sin6_src_id = 0;
 				break;
@@ -705,11 +712,12 @@ sctp_getpeeraddr(sctp_t *sctp, struct sockaddr *addr)
 	struct sockaddr_in6	*sin6;
 	sctp_faddr_t		sctp_primary;
 	in6_addr_t		faddr;
+	conn_t			*connp = sctp->sctp_connp;
 
 	if (sctp->sctp_faddrs == NULL)
 		return (-1);
 
-	addr->sa_family = sctp->sctp_family;
+	addr->sa_family = connp->conn_family;
 	if (mdb_vread(&sctp_primary, sizeof (sctp_faddr_t),
 	    (uintptr_t)sctp->sctp_primary) == -1) {
 		mdb_warn("failed to read sctp primary faddr");
@@ -717,12 +725,12 @@ sctp_getpeeraddr(sctp_t *sctp, struct sockaddr *addr)
 	}
 	faddr = sctp_primary.faddr;
 
-	switch (sctp->sctp_family) {
+	switch (connp->conn_family) {
 	case AF_INET:
 		/* LINTED: alignment */
 		sin4 = (struct sockaddr_in *)addr;
 		IN6_V4MAPPED_TO_INADDR(&faddr, &sin4->sin_addr);
-		sin4->sin_port = sctp->sctp_fport;
+		sin4->sin_port = connp->conn_fport;
 		sin4->sin_family = AF_INET;
 		break;
 
@@ -730,7 +738,7 @@ sctp_getpeeraddr(sctp_t *sctp, struct sockaddr *addr)
 		/* LINTED: alignment */
 		sin6 = (struct sockaddr_in6 *)addr;
 		sin6->sin6_addr = faddr;
-		sin6->sin6_port = sctp->sctp_fport;
+		sin6->sin6_port = connp->conn_fport;
 		sin6->sin6_family = AF_INET6;
 		sin6->sin6_flowinfo = 0;
 		sin6->sin6_scope_id = 0;
@@ -790,7 +798,7 @@ tcpip_sock_print(struct sonode *socknode)
 
 		mdb_printf("socket: ");
 		mdb_nhconvert(&port, &conn_t.conn_lport, sizeof (port));
-		mdb_printf("AF_INET %I %d ", conn_t.conn_src, port);
+		mdb_printf("AF_INET %I %d ", conn_t.conn_laddr_v4, port);
 
 		/*
 		 * If this is a listening socket, we don't print
@@ -800,7 +808,8 @@ tcpip_sock_print(struct sonode *socknode)
 		    IPCL_IS_UDP(&conn_t) && IPCL_IS_CONNECTED(&conn_t)) {
 			mdb_printf("remote: ");
 			mdb_nhconvert(&port, &conn_t.conn_fport, sizeof (port));
-			mdb_printf("AF_INET %I %d ", conn_t.conn_rem, port);
+			mdb_printf("AF_INET %I %d ", conn_t.conn_faddr_v4,
+			    port);
 		}
 
 		break;
@@ -819,7 +828,7 @@ tcpip_sock_print(struct sonode *socknode)
 
 		mdb_printf("socket: ");
 		mdb_nhconvert(&port, &conn_t.conn_lport, sizeof (port));
-		mdb_printf("AF_INET6 %N %d ", &conn_t.conn_srcv6, port);
+		mdb_printf("AF_INET6 %N %d ", &conn_t.conn_laddr_v4, port);
 
 		/*
 		 * If this is a listening socket, we don't print
@@ -829,7 +838,8 @@ tcpip_sock_print(struct sonode *socknode)
 		    IPCL_IS_UDP(&conn_t) && IPCL_IS_CONNECTED(&conn_t)) {
 			mdb_printf("remote: ");
 			mdb_nhconvert(&port, &conn_t.conn_fport, sizeof (port));
-			mdb_printf("AF_INET6 %N %d ", &conn_t.conn_remv6, port);
+			mdb_printf("AF_INET6 %N %d ", &conn_t.conn_faddr_v6,
+			    port);
 		}
 
 		break;
@@ -847,6 +857,7 @@ static int
 sctp_sock_print(struct sonode *socknode)
 {
 	sctp_t sctp_t;
+	conn_t conns;
 
 	struct sockaddr *laddr = mdb_alloc(sizeof (struct sockaddr), UM_SLEEP);
 	struct sockaddr *faddr = mdb_alloc(sizeof (struct sockaddr), UM_SLEEP);
@@ -856,6 +867,14 @@ sctp_sock_print(struct sonode *socknode)
 		mdb_warn("failed to read sctp_t");
 		return (-1);
 	}
+
+	if (mdb_vread(&conns, sizeof (conn_t),
+	    (uintptr_t)sctp_t.sctp_connp) == -1) {
+		mdb_warn("failed to read conn_t at %p",
+		    (uintptr_t)sctp_t.sctp_connp);
+		return (-1);
+	}
+	sctp_t.sctp_connp = &conns;
 
 	if (sctp_getsockaddr(&sctp_t, laddr) == 0) {
 		mdb_printf("socket:");

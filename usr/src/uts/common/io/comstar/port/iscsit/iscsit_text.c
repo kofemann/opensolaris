@@ -220,7 +220,7 @@ iscsit_add_default_portals(iscsit_conn_t *ict, idm_addr_list_t *ipaddr_p,
 				 * do not match the incoming connection.
 				 */
 				if (idm_ss_compare(&ss, &ict->ict_ic->ic_laddr,
-				    B_TRUE) != 0)
+				    B_TRUE, B_TRUE) != 0)
 					continue;
 				break;
 			case 2:
@@ -229,7 +229,7 @@ iscsit_add_default_portals(iscsit_conn_t *ict, idm_addr_list_t *ipaddr_p,
 				 * remaining portals.
 				 */
 				if (idm_ss_compare(&ss, &ict->ict_ic->ic_laddr,
-				    B_TRUE) == 0)
+				    B_TRUE, B_TRUE) == 0)
 					continue;
 				break;
 			}
@@ -273,8 +273,8 @@ iscsit_add_portals(iscsit_conn_t *ict, iscsit_tpgt_t *tpg_list,
 				 * On the first pass, skip portals that
 				 * do not match the incoming connection.
 				 */
-				if (idm_ss_compare(ss,
-				    &ict->ict_ic->ic_laddr, B_TRUE) != 0)
+				if (idm_ss_compare(ss, &ict->ict_ic->ic_laddr,
+				    B_TRUE, B_TRUE) != 0)
 					continue;
 				break;
 			case 2:
@@ -282,8 +282,8 @@ iscsit_add_portals(iscsit_conn_t *ict, iscsit_tpgt_t *tpg_list,
 				 * On the second pass, process the
 				 * remaining portals.
 				 */
-				if (idm_ss_compare(ss,
-				    &ict->ict_ic->ic_laddr, B_TRUE) == 0)
+				if (idm_ss_compare(ss, &ict->ict_ic->ic_laddr,
+				    B_TRUE, B_TRUE) == 0)
 					continue;
 				break;
 			}
@@ -397,6 +397,8 @@ iscsit_send_next_text_response(iscsit_conn_t *ict, idm_pdu_t *rx_pdu)
 	 */
 	resp = idm_pdu_alloc(sizeof (iscsi_hdr_t), len);
 	idm_pdu_init(resp, ict->ict_ic, ict, iscsit_text_resp_complete_cb);
+	/* Advance the StatSN for each Text Response sent */
+	resp->isp_flags |= IDM_PDU_SET_STATSN | IDM_PDU_ADVANCE_STATSN;
 	base = ict->ict_text_rsp_buf + ict->ict_text_rsp_off;
 	bcopy(base, resp->isp_data, len);
 	/*

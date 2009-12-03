@@ -86,6 +86,8 @@ extern mutex_t msglock;
 extern boolean_t in_death_throes;
 extern boolean_t bringup_failure_recovery;
 extern char *zone_name;
+extern char brand_name[MAXNAMELEN];
+extern char default_brand[MAXNAMELEN];
 extern char boot_args[BOOTARGS_MAX];
 extern char bad_boot_arg[BOOTARGS_MAX];
 extern boolean_t zone_isnative;
@@ -131,6 +133,7 @@ typedef enum {
 extern zoneid_t vplat_create(zlog_t *, zone_mnt_t);
 extern int vplat_bringup(zlog_t *, zone_mnt_t, zoneid_t);
 extern int vplat_teardown(zlog_t *, boolean_t, boolean_t);
+extern int vplat_get_iptype(zlog_t *, zone_iptype_t *);
 
 /*
  * Filesystem mounting interfaces.

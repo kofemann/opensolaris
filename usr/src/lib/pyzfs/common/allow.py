@@ -204,8 +204,8 @@ def args_to_perms(parser, options, who, perms):
 perms_subcmd = dict(
     create=_("Must also have the 'mount' ability"),
     destroy=_("Must also have the 'mount' ability"),
-    snapshot=_("Must also have the 'mount' ability"),
-    rollback=_("Must also have the 'mount' ability"),
+    snapshot="",
+    rollback="",
     clone=_("""Must also have the 'create' ability and 'mount'
 \t\t\t\tability in the origin file system"""),
     promote=_("""Must also have the 'mount'
@@ -322,7 +322,7 @@ def do_allow():
 		if sys.argv[2] == "-h":
 			# hack to make "zfs allow -h" work
 			usage()
-		ds = zfs.dataset.Dataset(sys.argv[2])
+		ds = zfs.dataset.Dataset(sys.argv[2], snaps=False)
 
 		p = dict()
 		for (fs, raw) in ds.get_fsacl().items():

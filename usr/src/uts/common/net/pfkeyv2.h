@@ -206,7 +206,7 @@ typedef struct sadb_sens {
 	uint8_t sadb_sens_sens_len;		/* 64-bit words */
 	uint8_t sadb_sens_integ_level;
 	uint8_t sadb_sens_integ_len;		/* 64-bit words */
-	uint32_t sadb_sens_reserved;
+	uint32_t sadb_x_sens_flags;
 	/*
 	 * followed by two uint64_t arrays
 	 * uint64_t sadb_sens_bitmap[sens_bitmap_len];
@@ -215,7 +215,16 @@ typedef struct sadb_sens {
 } sadb_sens_t;
 
 /*
- * A proposal extension.  This is found in an ACQUIRE message, and it
+ * We recycled the formerly reserved word for flags.
+ */
+
+#define	sadb_sens_reserved sadb_x_sens_flags
+
+#define	SADB_X_SENS_IMPLICIT 0x1	 /* implicit labelling */
+#define	SADB_X_SENS_UNLABELED 0x2	 /* peer is unlabeled */
+
+/*
+ * a proposal extension.  This is found in an ACQUIRE message, and it
  * proposes what sort of SA the kernel would like to ACQUIRE.
  */
 
@@ -384,16 +393,11 @@ typedef struct sadb_x_algb {
 
 #define	sadb_x_algb_reserved sadb_x_algb_union.sadb_x_algb_ureserved
 #define	sadb_x_algb_increment sadb_x_algb_union.sadb_x_algb_udefaults[0]
-#define	sadb_x_algb_defincr sadb_x_algb_union.sadb_x_algb_udefaults[1]
+#define	sadb_x_algb_saltbits sadb_x_algb_union.sadb_x_algb_udefaults[1]
 /*
  * alg_increment: the number of bits from a key length to the next
- * alg_defincr: the number of increments from the smallest possible
- * key to the default key length
  */
 } sadb_x_algb_t;
-/* useful macros for dealing with defincr */
-#define	SADB_ALG_DEFAULT_LEN(min, incr, defincr) ((min) + ((defincr) * (incr)))
-#define	SADB_ALG_DEFAULT_INCR(min, incr, default) (((default) - (min)) / (incr))
 
 /* Now, the actual sadb_alg structure, which will have alignment in it. */
 typedef struct sadb_alg {
@@ -409,7 +413,7 @@ typedef struct sadb_alg {
 #define	sadb_alg_reserved sadb_x_alg_u.sadb_x_alg_actual.sadb_x_algb_reserved
 #define	sadb_x_alg_increment \
 	sadb_x_alg_u.sadb_x_alg_actual.sadb_x_algb_increment
-#define	sadb_x_alg_defincr sadb_x_alg_u.sadb_x_alg_actual.sadb_x_algb_defincr
+#define	sadb_x_alg_saltbits sadb_x_alg_u.sadb_x_alg_actual.sadb_x_algb_saltbits
 } sadb_alg_t;
 
 /*
@@ -625,7 +629,13 @@ typedef struct sadb_x_edump {
 #define	SADB_EALG_BLOWFISH	7
 #define	SADB_EALG_NULL		11
 #define	SADB_EALG_AES		12
-#define	SADB_EALG_MAX		12
+#define	SADB_EALG_AES_CCM_8	14
+#define	SADB_EALG_AES_CCM_12	15
+#define	SADB_EALG_AES_CCM_16	16
+#define	SADB_EALG_AES_GCM_8	18
+#define	SADB_EALG_AES_GCM_12	19
+#define	SADB_EALG_AES_GCM_16	20
+#define	SADB_EALG_MAX		20
 
 /*
  * Extension header values.
@@ -661,8 +671,9 @@ typedef struct sadb_x_edump {
 #define	SADB_X_EXT_REPLAY_VALUE		24
 #define	SADB_X_EXT_EDUMP		25
 #define	SADB_X_EXT_LIFETIME_IDLE	26
+#define	SADB_X_EXT_OUTER_SENS		27
 
-#define	SADB_EXT_MAX			26
+#define	SADB_EXT_MAX			27
 
 /*
  * Identity types.
@@ -808,7 +819,9 @@ typedef struct sadb_x_edump {
 #define	SADB_X_DIAGNOSTIC_BAD_CTX		80
 #define	SADB_X_DIAGNOSTIC_INVALID_REPLAY	81
 #define	SADB_X_DIAGNOSTIC_MISSING_LIFETIME	82
-#define	SADB_X_DIAGNOSTIC_MAX			82
+
+#define	SADB_X_DIAGNOSTIC_BAD_LABEL		83
+#define	SADB_X_DIAGNOSTIC_MAX			83
 
 /* Algorithm type for sadb_x_algdesc above... */
 

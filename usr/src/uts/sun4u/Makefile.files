@@ -148,7 +148,7 @@ MEM_CACHE_OBJS	+= mem_cache.o panther_asm.o
 
 BIGNUM_PSR_OBJS	+= mont_mulf_kernel_v9.o
 
-AES_OBJS	+= aes.o aes_impl.o aes_modes.o aes_crypt_asm.o
+AES_OBJS	+= aes.o aes_impl.o aes_modes.o aes_crypt_asm.o fips_aes_util.o
 
 DES_OBJS	+= des_crypt_asm.o
 
@@ -186,6 +186,7 @@ SBD_OBJS	+= sbd.o sbd_cpu.o sbd_mem.o sbd_io.o
 #			Brand modules
 #
 SN1_BRAND_OBJS	= sn1_brand.o sn1_brand_asm.o
+S10_BRAND_OBJS	= s10_brand.o s10_brand_asm.o
 
 #
 #			Performance Counter BackEnd (PCBE) Modules

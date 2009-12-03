@@ -215,10 +215,15 @@
 #include <sys/priv.h>
 #include <sys/socketvar.h>
 #include <sys/zone.h>
+#include <netinet/in.h>
+#include <netinet/in_systm.h>
+#include <netinet/ip.h>
+#include <netinet/ip_icmp.h>
+#include <netinet/ip_var.h>
+#include <netinet/tcp.h>
 #include <smbsrv/smb_kproto.h>
+#include <smbsrv/string.h>
 #include <smbsrv/netbios.h>
-#include <smbsrv/smb_incl.h>
-#include <smbsrv/cifs.h>
 #include <smbsrv/smb_fsops.h>
 #include <smbsrv/smb_share.h>
 #include <smbsrv/smb_door_svc.h>
@@ -559,6 +564,7 @@ smb_server_start(smb_ioc_start_t *ioc)
 	mutex_enter(&sv->sv_mutex);
 	switch (sv->sv_state) {
 	case SMB_SERVER_STATE_CONFIGURED:
+		smb_codepage_init();
 
 		sv->sv_thread_pool = taskq_create("smb_workers",
 		    sv->sv_cfg.skc_maxworkers, SMB_WORKER_PRIORITY,
@@ -588,8 +594,6 @@ smb_server_start(smb_ioc_start_t *ioc)
 			cmn_err(CE_WARN, "Cannot open opipe door");
 			break;
 		}
-
-		(void) oem_language_set("english");
 
 		sv->sv_state = SMB_SERVER_STATE_RUNNING;
 		mutex_exit(&sv->sv_mutex);
@@ -652,7 +656,7 @@ smb_server_nbt_listen(smb_ioc_listen_t *ioc)
 	/*
 	 * netbios must be ipv4
 	 */
-	rc = smb_server_listen(sv, &sv->sv_nbt_daemon, SSN_SRVC_TCP_PORT,
+	rc = smb_server_listen(sv, &sv->sv_nbt_daemon, IPPORT_NETBIOS_SSN,
 	    AF_INET, ioc->error);
 
 	if (rc) {
@@ -700,10 +704,10 @@ smb_server_tcp_listen(smb_ioc_listen_t *ioc)
 
 	if (sv->sv_cfg.skc_ipv6_enable)
 		rc = smb_server_listen(sv, &sv->sv_tcp_daemon,
-		    SMB_SRVC_TCP_PORT, AF_INET6, ioc->error);
+		    IPPORT_SMB, AF_INET6, ioc->error);
 	else
 		rc = smb_server_listen(sv, &sv->sv_tcp_daemon,
-		    SMB_SRVC_TCP_PORT, AF_INET, ioc->error);
+		    IPPORT_SMB, AF_INET, ioc->error);
 	if (rc) {
 		mutex_enter(&sv->sv_mutex);
 		sv->sv_tcp_daemon.ld_kth = NULL;

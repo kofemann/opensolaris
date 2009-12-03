@@ -85,6 +85,7 @@ static int mach_intr_ops(dev_info_t *, ddi_intr_handle_impl_t *,
 static void mach_notify_error(int level, char *errmsg);
 static hrtime_t dummy_hrtime(void);
 static void dummy_scalehrtime(hrtime_t *);
+static uint64_t dummy_unscalehrtime(hrtime_t);
 void cpu_idle(void);
 static void cpu_wakeup(cpu_t *, int);
 #ifndef __xpv
@@ -133,6 +134,7 @@ void (*psm_enable_intr)(int)	= mp_enable_intr;
 hrtime_t (*gethrtimef)(void)	= dummy_hrtime;
 hrtime_t (*gethrtimeunscaledf)(void)	= dummy_hrtime;
 void (*scalehrtimef)(hrtime_t *)	= dummy_scalehrtime;
+uint64_t (*unscalehrtimef)(hrtime_t)	= dummy_unscalehrtime;
 int (*psm_translate_irq)(dev_info_t *, int) = mach_translate_irq;
 void (*gethrestimef)(timestruc_t *) = pc_gethrestime;
 void (*psm_notify_error)(int, char *) = (void (*)(int, char *))NULL;
@@ -229,6 +231,11 @@ pg_plat_hw_shared(cpu_t *cp, pghw_type_t hw)
 		} else {
 			return (0);
 		}
+	case PGHW_PROCNODE:
+		if (cpuid_get_procnodes_per_pkg(cp) > 1)
+			return (1);
+		else
+			return (0);
 	case PGHW_CHIP:
 		if (x86_feature & (X86_CMP|X86_HTT))
 			return (1);
@@ -284,6 +291,8 @@ pg_plat_hw_instance_id(cpu_t *cpu, pghw_type_t hw)
 		return (cpuid_get_coreid(cpu));
 	case PGHW_CACHE:
 		return (cpuid_get_last_lvl_cacheid(cpu));
+	case PGHW_PROCNODE:
+		return (cpuid_get_procnodeid(cpu));
 	case PGHW_CHIP:
 		return (cpuid_get_chipid(cpu));
 	case PGHW_POW_ACTIVE:
@@ -307,6 +316,7 @@ pg_plat_hw_rank(pghw_type_t hw1, pghw_type_t hw2)
 	static pghw_type_t hw_hier[] = {
 		PGHW_IPIPE,
 		PGHW_CACHE,
+		PGHW_PROCNODE,
 		PGHW_CHIP,
 		PGHW_POW_IDLE,
 		PGHW_POW_ACTIVE,
@@ -371,6 +381,12 @@ dummy_hrtime(void)
 static void
 dummy_scalehrtime(hrtime_t *ticks)
 {}
+
+static uint64_t
+dummy_unscalehrtime(hrtime_t nsecs)
+{
+	return ((uint64_t)nsecs);
+}
 
 /*
  * Supports Deep C-State power saving idle loop.
@@ -1505,7 +1521,7 @@ mach_cpu_create_devinfo(cpu_t *cp, dev_info_t **dipp)
 	 * create a child node for cpu identified as 'cpu_id'
 	 */
 	ndi_devi_enter(cpu_nex_devi, &circ);
-	dip = ddi_add_child(cpu_nex_devi, "cpu", DEVI_SID_NODEID, cp->cpu_id);
+	dip = ddi_add_child(cpu_nex_devi, "cpu", DEVI_SID_NODEID, -1);
 	if (dip == NULL) {
 		cmn_err(CE_CONT,
 		    "?failed to create device node for cpu%d.\n", cp->cpu_id);
@@ -1646,6 +1662,7 @@ pg_cmt_load_bal_hw(pghw_type_t hw)
 {
 	if (hw == PGHW_IPIPE ||
 	    hw == PGHW_FPU ||
+	    hw == PGHW_PROCNODE ||
 	    hw == PGHW_CHIP)
 		return (1);
 	else

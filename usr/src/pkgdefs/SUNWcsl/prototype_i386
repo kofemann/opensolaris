@@ -67,6 +67,8 @@ f none usr/lib/cfgadm/amd64/sdcard.so.1 755 root bin
 s none usr/lib/cfgadm/amd64/sdcard.so=./sdcard.so.1
 f none usr/lib/cfgadm/amd64/pci.so.1 755 root bin
 s none usr/lib/cfgadm/amd64/pci.so=./pci.so.1
+f none usr/lib/cfgadm/amd64/shp.so.1 755 root bin
+s none usr/lib/cfgadm/amd64/shp.so=./shp.so.1
 f none usr/lib/cfgadm/amd64/usb.so.1 755 root bin
 s none usr/lib/cfgadm/amd64/usb.so=./usb.so.1
 f none usr/lib/cfgadm/amd64/ib.so.1 755 root bin
@@ -75,13 +77,6 @@ f none usr/lib/cfgadm/sata.so.1	755 root	bin
 s none usr/lib/cfgadm/sata.so=./sata.so.1
 f none usr/lib/cfgadm/amd64/sata.so.1 755 root	bin
 s none usr/lib/cfgadm/amd64/sata.so=./sata.so.1
-d none usr/lib/dns/amd64 755 root bin
-# EXPORT DELETE START
-f none usr/lib/dns/amd64/cylink.so.1 755 root bin
-f none usr/lib/dns/amd64/dnssafe.so.1 755 root bin
-# EXPORT DELETE END
-f none usr/lib/dns/amd64/irs.so.1 755 root bin
-d none usr/lib/fp/libp/amd64 755 root bin
 d none usr/lib/iconv/amd64 755 root bin
 d none usr/lib/lwp/amd64 755 root bin
 s none usr/lib/lwp/64=amd64
@@ -153,8 +148,6 @@ f none usr/lib/security/amd64/pkcs11_softtoken.so.1 755 root bin
 s none usr/lib/security/amd64/pkcs11_softtoken.so=./pkcs11_softtoken.so.1
 f none usr/lib/security/amd64/pkcs11_tpm.so.1 755 root bin
 s none usr/lib/security/amd64/pkcs11_tpm.so=./pkcs11_tpm.so.1
-f none usr/lib/security/pkcs11_tpm.so.1 755 root bin
-s none usr/lib/security/pkcs11_tpm.so=./pkcs11_tpm.so.1
 s none usr/lib/64=amd64
 d none usr/lib/amd64 755 root bin
 f none usr/lib/amd64/libadutils.so.1 755 root bin
@@ -187,6 +180,8 @@ f none usr/lib/amd64/libform.so.1 755 root bin
 s none usr/lib/amd64/libform.so=libform.so.1
 s none usr/lib/amd64/libgen.so.1=../../../lib/amd64/libgen.so.1
 s none usr/lib/amd64/libgen.so=../../../lib/amd64/libgen.so.1
+f none usr/lib/amd64/libhotplug.so.1 755 root bin
+s none usr/lib/amd64/libhotplug.so=libhotplug.so.1
 f none usr/lib/amd64/libidmap.so.1 755 root bin
 s none usr/lib/amd64/libidmap.so=./libidmap.so.1
 f none usr/lib/amd64/libike.so.1 755 root bin
@@ -301,6 +296,8 @@ s none usr/lib/amd64/libpthread.so.1=../../../lib/amd64/libpthread.so.1
 s none usr/lib/amd64/libpthread.so=../../../lib/amd64/libpthread.so.1
 s none usr/lib/amd64/librcm.so.1=../../../lib/amd64/librcm.so.1
 s none usr/lib/amd64/librcm.so=../../../lib/amd64/librcm.so.1
+f none usr/lib/amd64/libreparse.so.1 755 root bin
+s none usr/lib/amd64/libreparse.so=libreparse.so.1
 s none usr/lib/amd64/libresolv.so.2=../../../lib/amd64/libresolv.so.2
 s none usr/lib/amd64/libresolv.so=../../../lib/amd64/libresolv.so.2
 s none usr/lib/amd64/librpcsvc.so.1=../../../lib/amd64/librpcsvc.so.1
@@ -370,6 +367,8 @@ f none usr/lib/amd64/passwdutil.so.1 755 root bin
 f none usr/lib/amd64/straddr.so.2 755 root bin
 s none usr/lib/amd64/straddr.so=straddr.so.2
 f none usr/lib/amd64/watchmalloc.so.1 755 root bin
+s none usr/lib/amd64/libfdisk.so.1=../../../lib/amd64/libfdisk.so.1
+s none usr/lib/amd64/libfdisk.so=../../../lib/amd64/libfdisk.so.1
 s none usr/lib/libfdisk.so.1=../../lib/libfdisk.so.1
 s none usr/lib/libfdisk.so=../../lib/libfdisk.so.1
 d none usr/xpg4/lib/amd64 755 root bin

@@ -207,7 +207,7 @@ sosctp_init(struct sonode *so, struct sonode *pso, struct cred *cr, int flags)
 		upcalls = &sosctp_assoc_upcalls;
 	}
 	so->so_proto_handle = (sock_lower_handle_t)sctp_create(so, NULL,
-	    so->so_family, SCTP_CAN_BLOCK, upcalls, &sbl, cr);
+	    so->so_family, so->so_type, SCTP_CAN_BLOCK, upcalls, &sbl, cr);
 	if (so->so_proto_handle == NULL)
 		return (ENOMEM);
 
@@ -350,6 +350,7 @@ sosctp_connect(struct sonode *so, const struct sockaddr *name,
     socklen_t namelen, int fflag, int flags, struct cred *cr)
 {
 	int error = 0;
+	pid_t pid = curproc->p_pid;
 
 	ASSERT(so->so_type == SOCK_STREAM);
 
@@ -404,7 +405,7 @@ sosctp_connect(struct sonode *so, const struct sockaddr *name,
 	mutex_exit(&so->so_lock);
 
 	error = sctp_connect((struct sctp_s *)so->so_proto_handle,
-	    name, namelen);
+	    name, namelen, cr, pid);
 
 	mutex_enter(&so->so_lock);
 	if (error == 0) {
@@ -662,7 +663,7 @@ done:
 
 int
 sosctp_uiomove(mblk_t *hdr_mp, ssize_t count, ssize_t blk_size, int wroff,
-    struct uio *uiop, int flags, cred_t *cr)
+    struct uio *uiop, int flags)
 {
 	ssize_t size;
 	int error;
@@ -683,8 +684,7 @@ sosctp_uiomove(mblk_t *hdr_mp, ssize_t count, ssize_t blk_size, int wroff,
 		 * packets, each mblk will have the extra space before
 		 * data to accommodate what SCTP wants to put in there.
 		 */
-		while ((mp = allocb_cred(size + wroff, cr,
-		    curproc->p_pid)) == NULL) {
+		while ((mp = allocb(size + wroff, BPRI_MED)) == NULL) {
 			if ((uiop->uio_fmode & (FNDELAY|FNONBLOCK)) ||
 			    (flags & MSG_DONTWAIT)) {
 				return (EAGAIN);
@@ -887,7 +887,7 @@ sosctp_sendmsg(struct sonode *so, struct nmsghdr *msg, struct uio *uiop,
 
 	/* Copy in the message. */
 	if ((error = sosctp_uiomove(mctl, count, ss->ss_wrsize, ss->ss_wroff,
-	    uiop, flags, cr)) != 0) {
+	    uiop, flags)) != 0) {
 		goto error_ret;
 	}
 	error = sctp_sendmsg((struct sctp_s *)so->so_proto_handle, mctl, 0);
@@ -1091,7 +1091,7 @@ sosctp_seq_sendmsg(struct sonode *so, struct nmsghdr *msg, struct uio *uiop,
 
 	/* Copy in the message. */
 	if ((error = sosctp_uiomove(mctl, count, ssa->ssa_wrsize,
-	    ssa->ssa_wroff, uiop, flags, cr)) != 0) {
+	    ssa->ssa_wroff, uiop, flags)) != 0) {
 		goto lock_rele;
 	}
 	error = sctp_sendmsg((struct sctp_s *)ssa->ssa_conn, mctl, 0);
@@ -1225,46 +1225,20 @@ sosctp_getsockopt(struct sonode *so, int level, int option_name,
 	void	*optbuf = &buffer;
 	int	error = 0;
 
-
 	if (level == SOL_SOCKET) {
 		switch (option_name) {
 		/* Not supported options */
 		case SO_SNDTIMEO:
 		case SO_RCVTIMEO:
 		case SO_EXCLBIND:
-			error = ENOPROTOOPT;
-			eprintsoline(so, error);
-			goto done;
-
-		case SO_TYPE:
-		case SO_ERROR:
-		case SO_DEBUG:
-		case SO_ACCEPTCONN:
-		case SO_REUSEADDR:
-		case SO_KEEPALIVE:
-		case SO_DONTROUTE:
-		case SO_BROADCAST:
-		case SO_USELOOPBACK:
-		case SO_OOBINLINE:
-		case SO_SNDBUF:
-		case SO_RCVBUF:
-		case SO_SNDLOWAT:
-		case SO_RCVLOWAT:
-		case SO_DGRAM_ERRIND:
-		case SO_PROTOTYPE:
-		case SO_DOMAIN:
-			if (maxlen < (t_uscalar_t)sizeof (int32_t)) {
-				error = EINVAL;
-				eprintsoline(so, error);
-				goto done;
-			}
-			break;
-		case SO_LINGER:
-			if (maxlen < (t_uscalar_t)sizeof (struct linger)) {
-				error = EINVAL;
-				eprintsoline(so, error);
-				goto done;
-			}
+			eprintsoline(so, ENOPROTOOPT);
+			return (ENOPROTOOPT);
+		default:
+			error = socket_getopt_common(so, level, option_name,
+			    optval, optlenp, flags);
+			if (error >= 0)
+				return (error);
+			/* Pass the request to the protocol */
 			break;
 		}
 	}
@@ -1303,7 +1277,7 @@ free:
 	if (optbuf != &buffer) {
 		kmem_free(optbuf, maxlen);
 	}
-done:
+
 	return (error);
 }
 
@@ -1719,6 +1693,7 @@ sosctp_ioctl(struct sonode *so, int cmd, intptr_t arg, int mode,
 		 */
 		if ((nfd = ufalloc(0)) == -1) {
 			eprintsoline(so, EMFILE);
+			SOCKPARAMS_DEC_REF(sp);
 			return (EMFILE);
 		}
 
@@ -1808,6 +1783,7 @@ sosctp_ioctl(struct sonode *so, int cmd, intptr_t arg, int mode,
 		return (0);
 
 err:
+		SOCKPARAMS_DEC_REF(sp);
 		setf(nfd, NULL);
 		eprintsoline(so, error);
 		return (error);
@@ -1901,7 +1877,7 @@ sosctp_fini(struct sonode *so, struct cred *cr)
 	so_rcv_flush(so);
 
 	/* Free all pending connections */
-	so_acceptq_flush(so);
+	so_acceptq_flush(so, B_TRUE);
 
 	ssi = ss->ss_assocs;
 	for (i = 0; i < ss->ss_maxassoc; i++, ssi++) {
@@ -2091,15 +2067,10 @@ sctp_assoc_recv(sock_upper_handle_t handle, mblk_t *mp, size_t len, int flags,
 	mutex_enter(&so->so_lock);
 
 	/*
-	 * Override b_flag for SCTP sockfs internal use
-	 */
-	mp->b_flag = (short)flags;
-
-	/*
 	 * For notify messages, need to fill in association id.
 	 * For data messages, sndrcvinfo could be in ancillary data.
 	 */
-	if (flags & SCTP_NOTIFICATION) {
+	if (mp->b_flag & SCTP_NOTIFICATION) {
 		mp2 = mp->b_cont;
 		sn = (union sctp_notification *)mp2->b_rptr;
 		switch (sn->sn_header.sn_type) {

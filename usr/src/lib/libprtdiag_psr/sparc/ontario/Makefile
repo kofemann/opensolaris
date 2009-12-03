@@ -19,10 +19,8 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-#
-#ident	"%Z%%M%	%I%	%E% SMI"
 #
 # lib/libprtdiag_psr/sparc/ontario/Makefile
 
@@ -55,6 +53,8 @@ LINTFLAGS += $(IFLAGS)
 
 PLATFORM=SUNW,Sun-Fire-T200
 
+$(USR_PLAT_DIR)/$(PLATFORM)/lib/libprtdiag_psr.so.1 := FILEMODE= 0755
+
 .KEEP_STATE:
 
 PLATLIBS= $(USR_PLAT_DIR)/$(PLATFORM)/lib
@@ -69,13 +69,13 @@ $(USR_PSM_LIB_DIR)/%: % $(USR_PSM_LIB_DIR)
 	$(INS.file)
 
 $(USR_PSM_LIB_DIR):
-	$(INS.dir.root.sys)
+	$(INS.dir)
 
 $(LINKED_DIRS):	$(USR_PLAT_DIR)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(LINKED_LIB_DIRS):	$(LINKED_DIRS)
-	-$(INS.dir.root.sys)
+	-$(INS.dir)
 
 $(LINKED_PRTDIAG_DIRS):	$(USR_PLAT_DIR)
 	-$(INS.slink6)

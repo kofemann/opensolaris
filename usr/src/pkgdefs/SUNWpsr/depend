@@ -47,6 +47,5 @@ P SUNWcnetr	Core Solaris Network Infrastructure (Root)
 P SUNWcsu	Core Solaris, (Usr)
 P SUNWcsd	Core Solaris Devices
 P SUNWcsl	Core Solaris Libraries
-P SUNWpcr	Solaris Print - Client, (root)
-P SUNWppm	Solaris Print Manager
+P SUNWcslr	Core Solaris Libraries (Root)
 I SUNWlpr	LP Print Service, (root)

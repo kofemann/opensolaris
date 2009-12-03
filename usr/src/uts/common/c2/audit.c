@@ -60,7 +60,7 @@
 #include <sys/disp.h>		/* for servicing_interrupt() */
 #include <sys/devpolicy.h>
 #include <sys/crypto/ioctladmin.h>
-#include <sys/cred_impl.h>
+#include <sys/cred.h>
 #include <inet/kssl/kssl.h>
 #include <net/pfpolicy.h>
 
@@ -283,10 +283,10 @@ audit_savepath(
 	 *	closes.
 	 */
 	if ((tad->tad_flag == 0 && !(tad->tad_ctrl & PAD_SAVPATH)) ||
-		((tad->tad_ctrl & PAD_PATHFND) &&
-		!(kctx->auk_policy & AUDIT_PATH)) ||
-		(tad->tad_ctrl & PAD_NOPATH)) {
-			return (0);
+	    ((tad->tad_ctrl & PAD_PATHFND) &&
+	    !(kctx->auk_policy & AUDIT_PATH)) ||
+	    (tad->tad_ctrl & PAD_NOPATH)) {
+		return (0);
 	}
 
 	tad->tad_ctrl |= PAD_NOPATH;		/* prevent possible reentry */
@@ -437,10 +437,10 @@ audit_addcomponent(struct pathname *pnp)
 	 *	closes.
 	 */
 	if ((tad->tad_flag == 0 && !(tad->tad_ctrl & PAD_SAVPATH)) ||
-		((tad->tad_ctrl & PAD_PATHFND) &&
-		!(kctx->auk_policy & AUDIT_PATH)) ||
-		(tad->tad_ctrl & PAD_NOPATH)) {
-			return;
+	    ((tad->tad_ctrl & PAD_PATHFND) &&
+	    !(kctx->auk_policy & AUDIT_PATH)) ||
+	    (tad->tad_ctrl & PAD_NOPATH)) {
+		return;
 	}
 
 	return;
@@ -499,10 +499,10 @@ audit_anchorpath(struct pathname *pnp, int flag)
 	 *	closes.
 	 */
 	if ((tad->tad_flag == 0 && !(tad->tad_ctrl & PAD_SAVPATH)) ||
-		((tad->tad_ctrl & PAD_PATHFND) &&
-		!(kctx->auk_policy & AUDIT_PATH)) ||
-		(tad->tad_ctrl & PAD_NOPATH)) {
-			return;
+	    ((tad->tad_ctrl & PAD_PATHFND) &&
+	    !(kctx->auk_policy & AUDIT_PATH)) ||
+	    (tad->tad_ctrl & PAD_NOPATH)) {
+		return;
 	}
 
 	if (flag) {
@@ -570,11 +570,11 @@ audit_symlink(struct pathname *pnp, struct pathname *sympath)
 	 *	closes.
 	 */
 	if ((tad->tad_flag == 0 &&
-		!(tad->tad_ctrl & PAD_SAVPATH)) ||
-		((tad->tad_ctrl & PAD_PATHFND) &&
-		!(kctx->auk_policy & AUDIT_PATH)) ||
-		(tad->tad_ctrl & PAD_NOPATH)) {
-			return;
+	    !(tad->tad_ctrl & PAD_SAVPATH)) ||
+	    ((tad->tad_ctrl & PAD_PATHFND) &&
+	    !(kctx->auk_policy & AUDIT_PATH)) ||
+	    (tad->tad_ctrl & PAD_NOPATH)) {
+		return;
 	}
 
 	/*
@@ -1391,7 +1391,7 @@ audit_symlink_create(vnode_t *dvp, char *sname, char *target, int error)
 		return;
 
 	error = VOP_LOOKUP(dvp, sname, &vp, NULL, 0, NULL, CRED(),
-			NULL, NULL, NULL);
+	    NULL, NULL, NULL);
 	if (error == 0) {
 		audit_attributes(vp);
 		VN_RELE(vp);
@@ -1448,7 +1448,7 @@ audit_vncreate_finish(struct vnode *vp, int error)
 	}
 
 	if (!error && ((tad->tad_event == AUE_MKNOD) ||
-			(tad->tad_event == AUE_MKDIR))) {
+	    (tad->tad_event == AUE_MKDIR))) {
 		audit_attributes(vp);
 	}
 
@@ -2180,6 +2180,11 @@ audit_cryptoadm(int cmd, char *module_name, crypto_mech_name_t *mech_names,
 			    "op=CRYPTO_LOAD_DOOR, return_val=%d", rv);
 		break;
 
+	case CRYPTO_FIPS140_SET:
+		(void) snprintf(buffer, sizeof (buffer),
+		    "op=CRYPTO_FIPS140_SET, fips_state=%d", rv);
+		break;
+
 	default:
 		return;
 	}
@@ -2224,7 +2229,7 @@ audit_cryptoadm(int cmd, char *module_name, crypto_mech_name_t *mech_names,
 	AS_INC(as_generated, 1, kctx);
 	AS_INC(as_kernel, 1, kctx);
 
-	au_close(kctx, (caddr_t *)&ad, AU_OK, AUE_CRYPTOADM, 0);
+	au_close(kctx, (caddr_t *)&ad, AU_OK, AUE_CRYPTOADM, tad->tad_evmod);
 }
 
 /*
@@ -2258,12 +2263,13 @@ audit_kssl(int cmd, void *params, int error)
 	case KSSL_ADD_ENTRY: {
 		char buf[32];
 		kssl_params_t *kp = (kssl_params_t *)params;
-		struct sockaddr_in *saddr = &(kp->kssl_addr);
+		struct sockaddr_in6 *saddr = &kp->kssl_addr;
 
 		au_write((caddr_t *)&ad, au_to_text("op=KSSL_ADD_ENTRY"));
-		au_write((caddr_t *)&ad, au_to_in_addr(&(saddr->sin_addr)));
+		au_write((caddr_t *)&ad,
+		    au_to_in_addr_ex((int32_t *)&saddr->sin6_addr));
 		(void) snprintf(buf, sizeof (buf), "SSL port=%d",
-		    saddr->sin_port);
+		    saddr->sin6_port);
 		au_write((caddr_t *)&ad, au_to_text(buf));
 
 		(void) snprintf(buf, sizeof (buf), "proxy port=%d",
@@ -2274,12 +2280,13 @@ audit_kssl(int cmd, void *params, int error)
 
 	case KSSL_DELETE_ENTRY: {
 		char buf[32];
-		struct sockaddr_in *saddr = (struct sockaddr_in *)params;
+		struct sockaddr_in6 *saddr = (struct sockaddr_in6 *)params;
 
 		au_write((caddr_t *)&ad, au_to_text("op=KSSL_DELETE_ENTRY"));
-		au_write((caddr_t *)&ad, au_to_in_addr(&(saddr->sin_addr)));
+		au_write((caddr_t *)&ad,
+		    au_to_in_addr_ex((int32_t *)&saddr->sin6_addr));
 		(void) snprintf(buf, sizeof (buf), "SSL port=%d",
-		    saddr->sin_port);
+		    saddr->sin6_port);
 		au_write((caddr_t *)&ad, au_to_text(buf));
 		break;
 	}
@@ -2294,7 +2301,7 @@ audit_kssl(int cmd, void *params, int error)
 	AS_INC(as_generated, 1, kctx);
 	AS_INC(as_kernel, 1, kctx);
 
-	au_close(kctx, (caddr_t *)&ad, AU_OK, AUE_CONFIGKSSL, 0);
+	au_close(kctx, (caddr_t *)&ad, AU_OK, AUE_CONFIGKSSL, tad->tad_evmod);
 }
 
 /*
@@ -2398,8 +2405,8 @@ audit_pf_policy(int cmd, cred_t *cred, netstack_t *ns, char *tun,
 		nszone = zone_find_by_id(netstackid_to_zoneid(
 		    ns->netstack_stackid));
 		if (nszone != NULL) {
-			if (strncmp(cred->cr_zone->zone_name, nszone->zone_name,
-			    ZONENAME_MAX) != 0) {
+			if (strncmp(crgetzone(cred)->zone_name,
+			    nszone->zone_name, ZONENAME_MAX) != 0) {
 				token_t *ztoken;
 
 				ztoken = au_to_zonename(0, nszone);
@@ -2426,7 +2433,7 @@ audit_pf_policy(int cmd, cred_t *cred, netstack_t *ns, char *tun,
 		AS_INC(as_kernel, 1, kctx);
 
 	}
-	au_close(kctx, (caddr_t *)&ad, flag, tad->tad_event, 0);
+	au_close(kctx, (caddr_t *)&ad, flag, tad->tad_event, tad->tad_evmod);
 
 	/*
 	 * clear the ctrl flag so that we don't have spurious collection of

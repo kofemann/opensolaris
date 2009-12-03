@@ -175,13 +175,15 @@ so_acceptq_dequeue(struct sonode *so, boolean_t dontblock,
 }
 
 /*
- * void so_acceptq_flush(struct sonode *so)
+ * void so_acceptq_flush(struct sonode *so, boolean_t doclose)
  *
  * Removes all pending connections from a listening socket, and
  * frees the associated resources.
  *
  * Arguments
- *   so	    - listening socket
+ *   so	     - listening socket
+ *   doclose - make a close downcall for each socket on the accept queue
+ *             (Note, only SCTP and SDP sockets rely on this)
  *
  * Return values:
  *   None.
@@ -193,26 +195,26 @@ so_acceptq_dequeue(struct sonode *so, boolean_t dontblock,
  *   would come in, or so_lock needs to be obtained.
  */
 void
-so_acceptq_flush(struct sonode *so)
+so_acceptq_flush(struct sonode *so, boolean_t doclose)
 {
 	struct sonode *nso;
 
-	nso = so->so_acceptq_head;
-
-	while (nso != NULL) {
-		struct sonode *nnso = NULL;
-
-		nnso = nso->so_acceptq_next;
+	while ((nso = so->so_acceptq_head) != NULL) {
+		so->so_acceptq_head = nso->so_acceptq_next;
 		nso->so_acceptq_next = NULL;
-		/*
-		 * Since the socket is on the accept queue, there can
-		 * only be one reference. We drop the reference and
-		 * just blow off the socket.
-		 */
-		ASSERT(nso->so_count == 1);
-		nso->so_count--;
+
+		if (doclose) {
+			(void) socket_close(nso, 0, CRED());
+		} else {
+			/*
+			 * Since the socket is on the accept queue, there can
+			 * only be one reference. We drop the reference and
+			 * just blow off the socket.
+			 */
+			ASSERT(nso->so_count == 1);
+			nso->so_count--;
+		}
 		socket_destroy(nso);
-		nso = nnso;
 	}
 
 	so->so_acceptq_head = NULL;
@@ -309,11 +311,8 @@ so_snd_wait_qnotfull_locked(struct sonode *so, boolean_t dontblock)
 			 */
 			error = cv_wait_sig(&so->so_snd_cv, &so->so_lock);
 		} else {
-			clock_t now;
-
-			time_to_wait(&now, so->so_sndtimeo);
-			error = cv_timedwait_sig(&so->so_snd_cv, &so->so_lock,
-			    now);
+			error = cv_reltimedwait_sig(&so->so_snd_cv,
+			    &so->so_lock, so->so_sndtimeo, TR_CLOCK_TICK);
 		}
 		if (error == 0)
 			return (EINTR);
@@ -469,7 +468,7 @@ socket_sendsig(struct sonode *so, int event)
 /* Copy userdata into a new mblk_t */
 mblk_t *
 socopyinuio(uio_t *uiop, ssize_t iosize, size_t wroff, ssize_t maxblk,
-    size_t tail_len, int *errorp, cred_t *cr)
+    size_t tail_len, int *errorp)
 {
 	mblk_t	*head = NULL, **tail = &head;
 
@@ -497,11 +496,7 @@ socopyinuio(uio_t *uiop, ssize_t iosize, size_t wroff, ssize_t maxblk,
 
 		blocksize = MIN(iosize, maxblk);
 		ASSERT(blocksize >= 0);
-		if (is_system_labeled())
-			mp = allocb_cred(wroff + blocksize + tail_len,
-			    cr, curproc->p_pid);
-		else
-			mp = allocb(wroff + blocksize + tail_len, BPRI_MED);
+		mp = allocb(wroff + blocksize + tail_len, BPRI_MED);
 		if (mp == NULL) {
 			*errorp = ENOMEM;
 			return (head);
@@ -973,10 +968,9 @@ try_again:
 					error = cv_wait_sig(&so->so_rcv_cv,
 					    &so->so_lock);
 				} else {
-					clock_t now;
-					time_to_wait(&now, so->so_rcvtimeo);
-					error = cv_timedwait_sig(&so->so_rcv_cv,
-					    &so->so_lock, now);
+					error = cv_reltimedwait_sig(
+					    &so->so_rcv_cv, &so->so_lock,
+					    so->so_rcvtimeo, TR_CLOCK_TICK);
 				}
 				so->so_rcv_wakeup = B_FALSE;
 				so->so_rcv_wanted = 0;
@@ -1560,6 +1554,7 @@ so_strioc_nread(struct sonode *so, intptr_t arg, int mode, int32_t *rvalp)
 	int retval;
 	int count = 0;
 	mblk_t *mp;
+	clock_t wakeup = drv_usectohz(10);
 
 	if (so->so_downcalls == NULL ||
 	    so->so_downcalls->sd_recv_uio != NULL)
@@ -1577,8 +1572,8 @@ so_strioc_nread(struct sonode *so, intptr_t arg, int mode, int32_t *rvalp)
 
 		so->so_flag |= SOWANT;
 		/* Do a timed sleep, in case the reader goes to sleep. */
-		(void) cv_timedwait(&so->so_state_cv, &so->so_lock,
-		    lbolt + drv_usectohz(10));
+		(void) cv_reltimedwait(&so->so_state_cv, &so->so_lock, wakeup,
+		    TR_CLOCK_TICK);
 	}
 
 	/*
@@ -1668,6 +1663,11 @@ socket_strioc_common(struct sonode *so, int cmd, intptr_t arg, int mode,
 	}
 }
 
+/*
+ * This is called for all socket types to verify that the buffer size is large
+ * enough for the option, and if we can, handle the request as well. Most
+ * options will be forwarded to the protocol.
+ */
 int
 socket_getopt_common(struct sonode *so, int level, int option_name,
     void *optval, socklen_t *optlenp, int flags)
@@ -2335,7 +2335,7 @@ so_tpi_fallback(struct sonode *so, struct cred *cr)
 	 * Now flush the acceptq, this will destroy all sockets. They will
 	 * be recreated in sotpi_accept().
 	 */
-	so_acceptq_flush(so);
+	so_acceptq_flush(so, B_FALSE);
 
 	mutex_enter(&so->so_lock);
 	so->so_state |= SS_FALLBACK_COMP;

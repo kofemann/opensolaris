@@ -24,7 +24,7 @@
  */
 
 /*
- * IntelVersion: 1.16 sol_anvik_patch
+ * IntelVersion: 1.16 v3-1-10-1_2009-9-18_Release14-6
  */
 #ifndef _E1000_82571_H_
 #define	_E1000_82571_H_

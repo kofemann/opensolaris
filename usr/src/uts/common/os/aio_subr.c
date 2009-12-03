@@ -207,6 +207,7 @@ aio_done(struct buf *bp)
 	void (*func)();
 	int use_port = 0;
 	int reqp_flags = 0;
+	int send_signal = 0;
 
 	p = bp->b_proc;
 	as = p->p_as;
@@ -385,6 +386,19 @@ aio_done(struct buf *bp)
 		cv_broadcast(&aiop->aio_waitcv);
 	}
 
+	/*
+	 * No need to set this flag for pollq, portq, lio requests.
+	 * If this is an old Solaris aio request, and the process has
+	 * a SIGIO signal handler enabled, then send a SIGIO signal.
+	 */
+	if (!sigev && !use_port && head == NULL &&
+	    (reqp->aio_req_flags & AIO_SOLARIS) &&
+	    (func = PTOU(p)->u_signal[SIGIO - 1]) != SIG_DFL &&
+	    (func != SIG_IGN)) {
+		send_signal = 1;
+		reqp->aio_req_flags |= AIO_SIGNALLED;
+	}
+
 	mutex_exit(&aiop->aio_mutex);
 	mutex_exit(&aiop->aio_portq_mutex);
 
@@ -402,18 +416,9 @@ aio_done(struct buf *bp)
 
 	if (sigev)
 		aio_sigev_send(p, sigev);
-	else if (!use_port && head == NULL) {
-		/*
-		 * Send a SIGIO signal when the process has a handler enabled.
-		 */
-		if ((func = PTOU(p)->u_signal[SIGIO - 1]) !=
-		    SIG_DFL && (func != SIG_IGN)) {
-			psignal(p, SIGIO);
-			mutex_enter(&aiop->aio_mutex);
-			reqp->aio_req_flags |= AIO_SIGNALLED;
-			mutex_exit(&aiop->aio_mutex);
-		}
-	}
+	else if (send_signal)
+		psignal(p, SIGIO);
+
 	if (pkevp)
 		port_send_event(pkevp);
 	if (lio_sigev)
@@ -771,6 +776,12 @@ aio_cleanup(int flag)
 	 */
 
 	mutex_enter(&aiop->aio_mutex);
+	/*
+	 * If there has never been an old solaris aio request
+	 * issued by this process, then do not send a SIGIO signal.
+	 */
+	if (!(aiop->aio_flags & AIO_SOLARIS_REQ))
+		signalled = 1;
 	cv_broadcast(&aiop->aio_waitcv);
 	mutex_exit(&aiop->aio_mutex);
 
@@ -911,8 +922,12 @@ aio_cleanup_cleanupq(aio_t *aiop, aio_req_t *qhead, int exitflg)
 			aio_req_free(aiop, reqp);
 		else
 			aio_enq(&aiop->aio_doneq, reqp, AIO_DONEQ);
-		if (!exitflg && reqp->aio_req_flags & AIO_SIGNALLED)
-			signalled++;
+		if (!exitflg) {
+			if (reqp->aio_req_flags & AIO_SIGNALLED)
+				signalled++;
+			else
+				reqp->aio_req_flags |= AIO_SIGNALLED;
+		}
 		mutex_exit(&aiop->aio_mutex);
 	} while ((reqp = next) != qhead);
 	return (signalled);

@@ -44,8 +44,10 @@ extern "C" {
 #define	MCINTEL_NVLIST_DIMMS	"memory-dimms"
 #define	MCINTEL_NVLIST_DIMMSZ	"memory-dimm-size"
 #define	MCINTEL_NVLIST_NRANKS	"dimm-max-ranks"
+#define	MCINTEL_NVLIST_NDIMMS	"dimm-max-dimms"
 #define	MCINTEL_NVLIST_RANKS	"dimm-ranks"
 #define	MCINTEL_NVLIST_1ST_RANK	"dimm-start-rank"
+#define	MCINTEL_NVLIST_DIMM_NUM	"dimm-number"
 #define	MCINTEL_NVLIST_ROWS	"dimm-rows"
 #define	MCINTEL_NVLIST_COL	"dimm-column"
 #define	MCINTEL_NVLIST_BANK	"dimm-banks"
@@ -223,6 +225,23 @@ extern "C" {
 #define	INTEL_QP_U2	0x34028086
 #define	INTEL_QP_U3	0x34048086
 #define	INTEL_QP_U4	0x34078086
+#define	INTEL_QP_JF	0x37208086
+#define	INTEL_QP_JF0	0x37008086
+#define	INTEL_QP_JF1	0x37018086
+#define	INTEL_QP_JF2	0x37028086
+#define	INTEL_QP_JF3	0x37038086
+#define	INTEL_QP_JF4	0x37048086
+#define	INTEL_QP_JF5	0x37058086
+#define	INTEL_QP_JF6	0x37068086
+#define	INTEL_QP_JF7	0x37078086
+#define	INTEL_QP_JF8	0x37088086
+#define	INTEL_QP_JF9	0x37098086
+#define	INTEL_QP_JFa	0x370a8086
+#define	INTEL_QP_JFb	0x370b8086
+#define	INTEL_QP_JFc	0x370c8086
+#define	INTEL_QP_JFd	0x370d8086
+#define	INTEL_QP_JFe	0x370e8086
+#define	INTEL_QP_JFf	0x370f8086
 
 /* Intel QuickPath Bus Interconnect Errors */
 
@@ -269,6 +288,26 @@ extern "C" {
 #define	MSR_MC_MISC_MEM_CHANNEL_SHIFT	18
 #define	MSR_MC_MISC_MEM_SYNDROME	0xffffffff00000000ULL
 #define	MSR_MC_MISC_MEM_SYNDROME_SHIFT	32
+
+#define	OFFSET_ROW_BANK_COL	0x8000000000000000ULL
+#define	OFFSET_RANK_SHIFT	52
+#define	OFFSET_RAS_SHIFT	32
+#define	OFFSET_BANK_SHIFT	24
+#define	TCODE_OFFSET(rank, bank, ras, cas) (OFFSET_ROW_BANK_COL | \
+	((uint64_t)(rank) << OFFSET_RANK_SHIFT) | \
+	((uint64_t)(ras) << OFFSET_RAS_SHIFT) | \
+	((uint64_t)(bank) << OFFSET_BANK_SHIFT) | (cas))
+
+#define	MAX_CAS_MASK	0xFFFFFF
+#define	MAX_BANK_MASK	0xFF
+#define	MAX_RAS_MASK	0xFFFFF
+#define	MAX_RANK_MASK	0x7FF
+#define	TCODE_OFFSET_RANK(tcode) \
+	(((tcode) >> OFFSET_RANK_SHIFT) & MAX_RANK_MASK)
+#define	TCODE_OFFSET_RAS(tcode) (((tcode) >> OFFSET_RAS_SHIFT) & MAX_RAS_MASK)
+#define	TCODE_OFFSET_BANK(tcode) \
+	(((tcode) >> OFFSET_BANK_SHIFT) & MAX_BANK_MASK)
+#define	TCODE_OFFSET_CAS(tcode) ((tcode) & MAX_CAS_MASK)
 
 #ifdef __cplusplus
 }

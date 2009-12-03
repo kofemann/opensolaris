@@ -515,9 +515,15 @@ extern "C" {
 #define	AC97_VENDOR_EMC			0x454d4300	/* eMicro */
 #define	AC97_VENDOR_EV			0x000f8300	/* Ectiva */
 #define	AC97_VENDOR_ESS			0x45838300	/* ESS */
+#define	AC97_VENDOR_HRS			0x48525300	/* Intersil */
 #define	AC97_VENDOR_ICE			0x49434500	/* ICEnsemble */
+#define	AC97_VENDOR_ITE			0x49544500	/* ITE */
+#define	AC97_VENDOR_NSC			0x4e534300	/* National */
+#define	AC97_VENDOR_PSC			0x50534300	/* Philips */
+#define	AC97_VENDOR_SIL			0x53494c00	/* Silicon Labs */
 #define	AC97_VENDOR_ST			0x83847600	/* SigmaTel */
 #define	AC97_VENDOR_TRA			0x54524100	/* TriTech */
+#define	AC97_VENDOR_TXN			0x54584e00	/* TI */
 #define	AC97_VENDOR_VIA			0x56494100	/* VIA */
 #define	AC97_VENDOR_WML			0x574d4c00	/* Wolfson */
 #define	AC97_VENDOR_YMH			0x594d4800	/* Yamaha */
@@ -567,6 +573,7 @@ extern "C" {
 #define	AC97_CODEC_ES1921		0x45838308
 #define	AC97_CODEC_EV1938		0x000f8384
 #define	AC97_CODEC_ICE1232		0x49434511
+#define	AC97_CODEC_LM4550		0x4e534350
 #define	AC97_CODEC_STAC9700		0x83847600
 #define	AC97_CODEC_STAC9701		0x83847601
 #define	AC97_CODEC_STAC9701_2		0xc250c250
@@ -601,10 +608,51 @@ extern "C" {
 typedef struct ac97 ac97_t;
 typedef void (*ac97_wr_t)(void *, uint8_t, uint16_t);
 typedef uint16_t (*ac97_rd_t)(void *, uint8_t);
+typedef struct ac97_ctrl ac97_ctrl_t;
+typedef boolean_t (*ac97_ctrl_walk_t)(ac97_ctrl_t *, void *);
 
+/*
+ * Old style initialization.  The driver simply calls ac97_alloc()
+ * followed by ac97_init().  These interfaces should not be used in
+ * new drivers.
+ */
 ac97_t *ac97_alloc(dev_info_t *, ac97_rd_t, ac97_wr_t, void *);
-void ac97_free(ac97_t *);
 int ac97_init(ac97_t *, audio_dev_t *);
+
+/*
+ * New style initialization.  The driver will call ac97_allocate(),
+ * then it can call ac97_register_controls() to register controls.
+ * Or, if it doesn't want all controls registered, it can find
+ * controls with ac97_find_control(), and register them individually
+ * with ac97_register_control().  ac97_alloc()
+ *
+ * Note that adjusting the set of controls should only be performed
+ * while the driver is single threaded, during attach or detach
+ * processing.  The AC'97 framework does not provide any locks
+ * surrounding its internal list of controls.  Note however that
+ * changes to the controls made from within the framework (e.g. by
+ * someone accessing the control via the audio framework) are safe.
+ */
+ac97_t *ac97_allocate(audio_dev_t *, dev_info_t *, ac97_rd_t, ac97_wr_t,
+    void *);
+void ac97_probe_controls(ac97_t *);
+void ac97_register_controls(ac97_t *);
+void ac97_unregister_controls(ac97_t *);
+
+void ac97_walk_controls(ac97_t *, ac97_ctrl_walk_t, void *);
+ac97_ctrl_t *ac97_control_find(ac97_t *, const char *);
+void ac97_control_register(ac97_ctrl_t *);
+void ac97_control_unregister(ac97_ctrl_t *);
+void ac97_control_remove(ac97_ctrl_t *);
+const char *ac97_control_name(ac97_ctrl_t *);
+const audio_ctrl_desc_t *ac97_control_desc(ac97_ctrl_t *);
+int ac97_control_get(ac97_ctrl_t *, uint64_t *);
+int ac97_control_set(ac97_ctrl_t *, uint64_t);
+
+/*
+ * Bits common to both new style and old style initialization.
+ */
+void ac97_free(ac97_t *);
 void ac97_suspend(ac97_t *);
 void ac97_resume(ac97_t *);
 void ac97_reset(ac97_t *);

@@ -60,6 +60,9 @@ $(OBJS_DIR)/%.o:		$(SRC)/common/util/i386/%.s
 $(OBJS_DIR)/%.o:		$(UTSBASE)/intel/brand/sn1/%.s
 	$(COMPILE.s) -o $@ $<
 
+$(OBJS_DIR)/%.o:		$(UTSBASE)/intel/brand/solaris10/%.s
+	$(COMPILE.s) -o $@ $<
+
 $(OBJS_DIR)/%.o:		$(UTSBASE)/intel/dtrace/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
@@ -153,10 +156,6 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/intel/io/amd8111s/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
-$(OBJS_DIR)/%.o:		$(UTSBASE)/intel/io/amd_iommu/%.c
-	$(COMPILE.c) -o $@ $<
-	$(CTFCONVERT_O)
-
 $(OBJS_DIR)/%.o:		$(UTSBASE)/intel/io/amr/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
@@ -166,10 +165,6 @@ $(OBJS_DIR)/%.o:		$(UTSBASE)/intel/io/drm/%.c
 	$(CTFCONVERT_O)
 
 $(OBJS_DIR)/%.o:		$(UTSBASE)/intel/io/hotplug/pcicfg/%.c
-	$(COMPILE.c) -o $@ $<
-	$(CTFCONVERT_O)
-
-$(OBJS_DIR)/%.o:		$(UTSBASE)/intel/io/hotplug/pciehpc/%.c
 	$(COMPILE.c) -o $@ $<
 	$(CTFCONVERT_O)
 
@@ -319,6 +314,9 @@ $(LINTS_DIR)/%.ln:		$(SRC)/common/util/i386/%.s
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/brand/sn1/%.s
 	@($(LHEAD) $(LINT.s) $< $(LTAIL))
 
+$(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/brand/solaris10/%.s
+	@($(LHEAD) $(LINT.s) $< $(LTAIL))
+
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/dtrace/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
@@ -394,9 +392,6 @@ $(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/io/agpmaster/%.c
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/io/amd8111s/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
-$(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/io/amd_iommu/%.c
-	@($(LHEAD) $(LINT.c) $< $(LTAIL))
-
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/io/amr/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
@@ -409,7 +404,7 @@ $(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/io/drm/%.c
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/io/hotplug/pcicfg/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
-$(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/io/hotplug/pciehpc/%.c
+$(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/io/hotplug/pci/%.c
 	@($(LHEAD) $(LINT.c) $< $(LTAIL))
 
 $(LINTS_DIR)/%.ln:		$(UTSBASE)/intel/io/intel_nb5000/%.c

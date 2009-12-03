@@ -36,6 +36,8 @@ HTMLENTS = \
 	DevCDRW.html \
 	DevGrant.html \
 	DevRevoke.html \
+        HotplugHeader.html \
+	HotplugModify.html \
 	JobHeader.html \
 	AuthJobsAdmin.html \
 	JobsGrant.html \
@@ -72,9 +74,11 @@ HTMLENTS = \
 	SmfExAcctTaskStates.html \
 	SmfExAcctNetStates.html \
 	SmfHeader.html \
+	SmfILBStates.html \
 	SmfInetdStates.html \
 	SmfIPsecStates.html \
 	SmfManageHeader.html \
+	SmfManageHotplug.html \
 	SmfMDNSStates.html \
 	SmfModifyAppl.html \
 	SmfModifyDepend.html \
@@ -86,6 +90,7 @@ HTMLENTS = \
 	SmfNDMPStates.html \
 	SmfNWAMStates.html \
 	SmfPowerStates.html \
+	SmfReparseStates.html \
 	SmfRoutingStates.html \
 	SmfSendmailStates.html \
 	SmfSshStates.html \
@@ -116,7 +121,10 @@ HTMLENTS = \
 	SmfValueVt.html	\
 	SmfWpaStates.html \
 	NetworkAutoconf.html \
+	NetworkILBconf.html \
+	NetworkILBenable.html \
 	NetworkHeader.html \
+	NetworkVRRP.html \
 	WifiConfig.html \
 	WifiWep.html \
 	LinkSecurity.html \

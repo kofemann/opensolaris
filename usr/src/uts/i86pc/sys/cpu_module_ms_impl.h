@@ -20,14 +20,12 @@
  */
 
 /*
- * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #ifndef	_CPU_MODULE_MS_IMPL_H
 #define	_CPU_MODULE_MS_IMPL_H
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/cpu_module_ms.h>
 #include <sys/cpuvar.h>
@@ -47,9 +45,9 @@ typedef uint32_t cms_api_ver_t;
 	(((v) & 0xfff00000) == _CMS_API_VERSION_MAGIC)
 #define	CMS_API_VERSION_TOPRINT(v) ((v) & 0x000fffff)
 
-#define	CMS_API_VERSION_0	_CMS_API_VERSION(0)
+#define	CMS_API_VERSION_1	_CMS_API_VERSION(1)
 
-#define	CMS_API_VERSION		CMS_API_VERSION_0
+#define	CMS_API_VERSION		CMS_API_VERSION_1
 
 typedef struct cms_ops {
 	int (*cms_init)(cmi_hdl_t, void **);
@@ -71,7 +69,7 @@ typedef struct cms_ops {
 	    uint64_t, void *);
 	void (*cms_ereport_class)(cmi_hdl_t, cms_cookie_t, const char **,
 	    const char **);
-	nvlist_t *(*cms_ereport_detector)(cmi_hdl_t, cms_cookie_t,
+	nvlist_t *(*cms_ereport_detector)(cmi_hdl_t, int, cms_cookie_t,
 	    nv_alloc_t *);
 	boolean_t (*cms_ereport_includestack)(cmi_hdl_t, cms_cookie_t);
 	void (*cms_ereport_add_logout)(cmi_hdl_t, nvlist_t *,

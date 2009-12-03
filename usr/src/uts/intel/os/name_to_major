@@ -155,4 +155,10 @@ nulldriver 260
 ipnet 261
 intel_nhm 262
 simnet 263
-dserv 264
+acpinex 264
+bridge 265
+iptun 266
+iptunq 267
+bpf 268
+intel_nhmex 269
+dserv 270

@@ -37,6 +37,8 @@ include ../Makefile.i86pc
 FILEMODE = 644
 
 HDRS=  \
+	acpidev.h	\
+	amd_iommu.h	\
 	asm_misc.h	\
 	clock.h		\
 	cram.h		\
@@ -82,7 +84,7 @@ install_h:	$(ROOTDIRS) .WAIT $(ROOTHDRS) $(ROOTLINK)
 check:		$(CHECKHDRS)
 
 $(ROOTDIRS):
-	$(INS.dir.root.bin)
+	$(INS.dir)
 
 $(ROOTLINK):	$(ROOTDIRS)
 	-$(RM) -r $@; $(SYMLINK) $(LINKDEST) $@

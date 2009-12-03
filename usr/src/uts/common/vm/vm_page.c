@@ -620,7 +620,7 @@ add_physmem(
 		 * initialize other fields in the page_t
 		 */
 		PP_SETFREE(pp);
-		page_clr_all_props(pp, 0);
+		page_clr_all_props(pp);
 		PP_SETAGED(pp);
 		pp->p_offset = (u_offset_t)-1;
 		pp->p_next = pp;
@@ -2662,7 +2662,7 @@ page_free(page_t *pp, int dontneed)
 	PP_SETFREE(pp);
 	ASSERT(pp->p_vnode == NULL || !IS_VMODSORT(pp->p_vnode) ||
 	    !hat_ismod(pp));
-	page_clr_all_props(pp, 0);
+	page_clr_all_props(pp);
 	ASSERT(!hat_page_getshare(pp));
 
 	/*
@@ -2803,7 +2803,7 @@ page_free_pages(page_t *pp)
 		ASSERT(tpp->p_szc == szc);
 
 		PP_SETFREE(tpp);
-		page_clr_all_props(tpp, 0);
+		page_clr_all_props(tpp);
 		PP_SETAGED(tpp);
 		tpp->p_offset = (u_offset_t)-1;
 		ASSERT(tpp->p_next == tpp);
@@ -3149,7 +3149,7 @@ page_destroy_pages(page_t *pp)
 		ASSERT(tpp->p_szc == szc);
 
 		PP_SETFREE(tpp);
-		page_clr_all_props(tpp, 0);
+		page_clr_all_props(tpp);
 		PP_SETAGED(tpp);
 		ASSERT(tpp->p_next == tpp);
 		ASSERT(tpp->p_prev == tpp);
@@ -3525,7 +3525,7 @@ page_do_hashout(page_t *pp)
 		page_vpsub(&vp->v_pages, pp);
 
 	pp->p_hash = NULL;
-	page_clr_all_props(pp, 1);
+	page_clr_all_props(pp);
 	PP_CLRSWAP(pp);
 	pp->p_vnode = NULL;
 	pp->p_offset = (u_offset_t)-1;
@@ -4267,6 +4267,8 @@ retry:
 	return (pp);
 }
 
+#define	SYNC_PROGRESS_NPAGES	1000
+
 /*
  * Returns a count of dirty pages that are in the process
  * of being written out.  If 'cleanit' is set, try to push the page.
@@ -4277,10 +4279,20 @@ page_busy(int cleanit)
 	page_t *page0 = page_first();
 	page_t *pp = page0;
 	pgcnt_t nppbusy = 0;
+	int counter = 0;
 	u_offset_t off;
 
 	do {
 		vnode_t *vp = pp->p_vnode;
+
+		/*
+		 * Reset the sync timeout. The page list is very long
+		 * on large memory systems.
+		 */
+		if (++counter > SYNC_PROGRESS_NPAGES) {
+			counter = 0;
+			vfs_syncprogress();
+		}
 
 		/*
 		 * A page is a candidate for syncing if it is:
@@ -4299,7 +4311,6 @@ page_busy(int cleanit)
 		    hat_ismod(pp) && !IS_SWAPVP(vp) && vp->v_vfsp != NULL &&
 		    vfs_can_sync(vp->v_vfsp)) {
 			nppbusy++;
-			vfs_syncprogress();
 
 			if (!cleanit)
 				continue;
@@ -4322,6 +4333,7 @@ page_busy(int cleanit)
 		}
 	} while ((pp = page_next(pp)) != page0);
 
+	vfs_syncprogress();
 	return (nppbusy);
 }
 
@@ -4542,7 +4554,7 @@ page_do_relocate_hash(page_t *new, page_t *old)
 	old->p_vnode = NULL;
 	PP_CLRSWAP(old);
 	old->p_offset = (u_offset_t)-1;
-	page_clr_all_props(old, 1);
+	page_clr_all_props(old);
 
 	/*
 	 * Wake up processes waiting for this page.  The page's
@@ -4888,7 +4900,7 @@ do_page_relocate(
 
 	for (i = 0; i < npgs; i++) {
 		ppattr = hat_page_getattr(targ, (P_MOD | P_REF | P_RO));
-		page_clr_all_props(repl, 0);
+		page_clr_all_props(repl);
 		page_set_props(repl, ppattr);
 		page_relocate_hash(repl, targ);
 
@@ -4899,7 +4911,7 @@ do_page_relocate(
 		 * page_relocate_hash(), they no longer
 		 * have any meaning.
 		 */
-		page_clr_all_props(targ, 0);
+		page_clr_all_props(targ);
 		ASSERT(targ->p_next == targ);
 		ASSERT(targ->p_prev == targ);
 		page_list_concat(&pl, &targ);
@@ -4983,7 +4995,7 @@ page_free_replacement_page(page_t *pplist)
 		pp = pplist;
 		if (pp->p_szc == 0) {
 			page_sub(&pplist, pp);
-			page_clr_all_props(pp, 0);
+			page_clr_all_props(pp);
 			PP_SETFREE(pp);
 			PP_SETAGED(pp);
 			page_list_add(pp, PG_FREE_LIST | PG_LIST_TAIL);
@@ -4997,7 +5009,7 @@ page_free_replacement_page(page_t *pplist)
 			do {
 				ASSERT(PAGE_EXCL(tpp));
 				ASSERT(!hat_page_is_mapped(tpp));
-				page_clr_all_props(tpp, 0);
+				page_clr_all_props(tpp);
 				PP_SETFREE(tpp);
 				PP_SETAGED(tpp);
 			} while ((tpp = tpp->p_next) != pp);
@@ -6110,25 +6122,9 @@ page_set_props(page_t *pp, uint_t flags)
 	pp->p_nrm |= (uchar_t)flags;
 }
 
-extern void mach_sync_icache_pp(page_t *);
-#pragma weak mach_sync_icache_pp
-
-/*
- * Flush I-cache if the page is being reassigned.  The hashout flag is
- * set when a page has been removed from a hash chain (i.e. vnode
- * pages). If the page stays on the hash chain there is a chance it
- * will be re-used, therefore there is no need to flush the
- * I-cache. However, if the page is being removed from a hash chain
- * then the page can be used for any new purpose, and the I-cache must
- * be flushed.
- */
-/* ARGSUSED */
 void
-page_clr_all_props(page_t *pp, int hashout)
+page_clr_all_props(page_t *pp)
 {
-	if (&mach_sync_icache_pp != NULL && hashout) {
-		mach_sync_icache_pp(pp);
-	}
 	pp->p_nrm = 0;
 }
 
@@ -6444,7 +6440,8 @@ page_capture_add_hash(page_t *pp, uint_t szc, uint_t flags, void *datap)
 		if (pc_cb[cb_index].duration == -1) {
 			bp1->expires = (clock_t)-1;
 		} else {
-			bp1->expires = lbolt + pc_cb[cb_index].duration;
+			bp1->expires = ddi_get_lbolt() +
+			    pc_cb[cb_index].duration;
 		}
 	} else {
 		/* There's no callback registered so don't add to the hash */
@@ -6882,7 +6879,7 @@ page_capture_take_action(page_t *pp, uint_t flags, void *datap)
 	 * Check for expiration time first as we can just free it up if it's
 	 * expired.
 	 */
-	if (lbolt > bp1->expires && bp1->expires != -1) {
+	if (ddi_get_lbolt() > bp1->expires && bp1->expires != -1) {
 		kmem_free(bp1, sizeof (*bp1));
 		return (ret);
 	}
@@ -7221,7 +7218,8 @@ page_capture_async()
 		bp1 = page_capture_hash[i].lists[0].next;
 		while (bp1 != &page_capture_hash[i].lists[0]) {
 			/* Check expiration time */
-			if ((lbolt > bp1->expires && bp1->expires != -1) ||
+			if ((ddi_get_lbolt() > bp1->expires &&
+			    bp1->expires != -1) ||
 			    page_deleted(bp1->pp)) {
 				page_capture_hash[i].lists[0].next = bp1->next;
 				bp1->next->prev =
@@ -7376,13 +7374,13 @@ page_capture_thread(void)
 		if (outstanding) {
 			page_capture_handle_outstanding();
 			CALLB_CPR_SAFE_BEGIN(&c);
-			(void) cv_timedwait(&pc_cv, &pc_thread_mutex,
-			    lbolt + pc_thread_shortwait);
+			(void) cv_reltimedwait(&pc_cv, &pc_thread_mutex,
+			    pc_thread_shortwait, TR_CLOCK_TICK);
 			CALLB_CPR_SAFE_END(&c, &pc_thread_mutex);
 		} else {
 			CALLB_CPR_SAFE_BEGIN(&c);
-			(void) cv_timedwait(&pc_cv, &pc_thread_mutex,
-			    lbolt + pc_thread_longwait);
+			(void) cv_reltimedwait(&pc_cv, &pc_thread_mutex,
+			    pc_thread_longwait, TR_CLOCK_TICK);
 			CALLB_CPR_SAFE_END(&c, &pc_thread_mutex);
 		}
 	}

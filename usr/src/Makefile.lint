@@ -65,26 +65,27 @@ COMMON_SUBDIRS = \
 	cmd/chmod \
 	cmd/chown \
 	cmd/chroot \
-	cmd/cksum \
 	cmd/clinfo \
 	cmd/cmd-crypto \
 	cmd/cmd-inet/lib \
 	cmd/cmd-inet/sbin \
 	cmd/cmd-inet/usr.bin \
+	cmd/cmd-inet/usr.lib/bridged \
 	cmd/cmd-inet/usr.lib/dsvclockd \
+	cmd/cmd-inet/usr.lib/ilbd \
 	cmd/cmd-inet/usr.lib/in.dhcpd \
 	cmd/cmd-inet/usr.lib/in.mpathd \
 	cmd/cmd-inet/usr.lib/in.ndpd \
 	cmd/cmd-inet/usr.lib/inetd \
 	cmd/cmd-inet/usr.lib/pppoe \
 	cmd/cmd-inet/usr.lib/slpd \
+	cmd/cmd-inet/usr.lib/vrrpd \
 	cmd/cmd-inet/usr.lib/wpad \
 	cmd/cmd-inet/usr.lib/wanboot \
 	cmd/cmd-inet/usr.sadm \
 	cmd/cmd-inet/usr.sbin \
-	cmd/cmp \
+	cmd/cmd-inet/usr.sbin/ilbadm \
 	cmd/col \
-	cmd/comm \
 	cmd/compress \
 	cmd/consadm \
 	cmd/coreadm \
@@ -95,7 +96,6 @@ COMMON_SUBDIRS = \
 	cmd/ctrun \
 	cmd/ctstat \
 	cmd/ctwatch \
-	cmd/cut \
 	cmd/date \
 	cmd/dd \
 	cmd/deroff \
@@ -159,6 +159,8 @@ COMMON_SUBDIRS = \
 	cmd/head \
 	cmd/hostid \
 	cmd/hostname \
+	cmd/hotplug \
+	cmd/hotplugd \
 	cmd/idmap \
 	cmd/init \
 	cmd/intrstat \
@@ -172,7 +174,6 @@ COMMON_SUBDIRS = \
 	cmd/iscsitsvc \
 	cmd/isns \
 	cmd/itadm \
-	cmd/join \
 	cmd/kbd \
 	cmd/killall \
 	cmd/last \
@@ -187,7 +188,6 @@ COMMON_SUBDIRS = \
 	cmd/logger \
 	cmd/login \
 	cmd/logins \
-	cmd/logname \
 	cmd/ls \
 	cmd/luxadm \
 	cmd/lvm \
@@ -232,6 +232,7 @@ COMMON_SUBDIRS = \
 	cmd/pools \
 	cmd/power \
 	cmd/powertop \
+	cmd/latencytop \
 	cmd/ppgsz \
 	cmd/praudit \
 	cmd/prctl \
@@ -287,22 +288,22 @@ COMMON_SUBDIRS = \
 	cmd/syseventd \
 	cmd/syslogd \
 	cmd/tabs \
-	cmd/tee \
 	cmd/th_tools \
 	cmd/tip \
 	cmd/touch \
 	cmd/truss \
 	cmd/tty \
+	cmd/tzreload \
 	cmd/uadmin \
 	cmd/ul \
 	cmd/users \
 	cmd/utmp_update \
 	cmd/utmpd \
 	cmd/valtools \
+	cmd/vrrpadm \
 	cmd/vt \
 	cmd/wall \
 	cmd/wbem \
-	cmd/wc \
 	cmd/who \
 	cmd/whodo \
 	cmd/wracct \
@@ -327,6 +328,7 @@ COMMON_SUBDIRS = \
 	lib/auditd_plugins \
 	lib/brand/native \
 	lib/brand/sn1 \
+	lib/brand/solaris10 \
 	lib/cfgadm_plugins/sdcard \
 	lib/crypt_modules \
 	lib/extendedFILE \
@@ -366,7 +368,9 @@ COMMON_SUBDIRS = \
 	lib/libgen \
 	lib/libgrubmgmt \
 	lib/libgss \
+	lib/libhotplug \
 	lib/libidmap \
+	lib/libilb \
 	lib/libinetcfg \
 	lib/libinetsvc \
 	lib/libinetutil \
@@ -403,7 +407,9 @@ COMMON_SUBDIRS = \
 	lib/libraidcfg \
 	lib/librcm \
 	lib/librdc \
+	lib/libreparse \
 	lib/librestart \
+	lib/librstp \
 	lib/librt \
 	lib/libscf \
 	lib/libsec \
@@ -424,6 +430,7 @@ COMMON_SUBDIRS = \
 	lib/libunistat \
 	lib/libuuid \
 	lib/libuutil \
+	lib/libvrrpadm \
 	lib/libwanboot \
 	lib/libwanbootutil \
 	lib/libxnet \
@@ -464,11 +471,9 @@ $(CLOSED_BUILD)COMMON_SUBDIRS += \
 	$(CLOSED)/cmd/cmd-inet/usr.lib/in.iked \
 	$(CLOSED)/cmd/pax \
 	$(CLOSED)/cmd/sed_xpg4 \
-	$(CLOSED)/cmd/smartcard \
 	$(CLOSED)/cmd/tail \
 	$(CLOSED)/cmd/tr_xpg4 \
-	$(CLOSED)/lib/libc_i18n \
-	$(CLOSED)/lib/smartcard
+	$(CLOSED)/lib/libc_i18n
 
 i386_SUBDIRS= \
 	cmd/biosdev \
@@ -484,6 +489,7 @@ sparc_SUBDIRS= \
 	cmd/drd \
 	cmd/fps \
 	cmd/fruadm \
+	cmd/ldmad \
 	cmd/prtdscp \
 	cmd/prtfru \
 	cmd/sckmd \

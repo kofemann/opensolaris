@@ -319,7 +319,7 @@ extern "C" {
 #define	EMASK_5000_FBD_RES	(EMASK_FBD_M24|EMASK_FBD_M16)
 #define	EMASK_FBD_RES	(nb_chipset == INTEL_NB_5400 ? 0 : EMASK_5000_FBD_RES)
 
-#define	EMASK_FBD_FATAL	(EMASK_FBD_M23|EMASK_FBD_M3|EMASK_FBD_M2|EMASK_FBD_M1)
+#define	EMASK_FBD_FATAL	(EMASK_FBD_M3|EMASK_FBD_M2|EMASK_FBD_M1)
 #define	EMASK_FBD_NF (EMASK_FBD_M28|EMASK_FBD_M27|EMASK_FBD_M26|EMASK_FBD_M25| \
 	EMASK_FBD_M22|EMASK_FBD_M21|EMASK_FBD_M20|EMASK_FBD_M19|EMASK_FBD_M18| \
 	EMASK_FBD_M17|EMASK_FBD_M15|EMASK_FBD_M14|EMASK_FBD_M13|EMASK_FBD_M12| \
@@ -332,6 +332,9 @@ extern "C" {
 	EMASK_FBD_M15|EMASK_FBD_M14|EMASK_FBD_M13|EMASK_FBD_M12| \
 	EMASK_FBD_M11|EMASK_FBD_M10|EMASK_FBD_M9|EMASK_FBD_M8|EMASK_FBD_M7| \
 	EMASK_FBD_M6|EMASK_FBD_M5|EMASK_FBD_M4)
+#define	EMASK_7300_FBD_FATAL	(EMASK_FBD_M23|EMASK_FBD_M3|EMASK_FBD_M2| \
+	EMASK_FBD_M1)
+#define	EMASK_7300_FBD_NF	EMASK_FBD_NF
 
 /* FERR_NF_MEM: MC First non-fatal errors */
 #define	ERR_MEM_CH_SHIFT	28	/* channel index in nf_mem */
@@ -429,8 +432,10 @@ extern "C" {
 #define	EMASK_INT_B2	0x02	/* B2Msk Multi-tag hit SF */
 #define	EMASK_INT_B1	0x01	/* B1Msk DM parity error */
 
-/* MCH 5000 errata 2 */
+/* MCH 5000 errata 2: disable B1 */
 #define	EMASK_INT_5000	EMASK_INT_B1
+/* MCH 5100: mask all except B3 and B5 */
+#define	EMASK_INT_5100	(~(EMASK_INT_B5|EMASK_INT_B3) & 0xff)
 /* MCH 7300 errata 17 & 20 */
 #define	EMASK_INT_7300	(EMASK_INT_B3|EMASK_INT_B1)
 /* MCH 7300 errata 17,20 & 21 */
@@ -440,6 +445,9 @@ extern "C" {
 #define	EMASK_INT_FATAL (EMASK_INT_B7|EMASK_INT_B4|EMASK_INT_B3|EMASK_INT_B2| \
 	EMASK_INT_B1)
 #define	EMASK_INT_NF	(EMASK_INT_B8|EMASK_INT_B6|EMASK_INT_B5)
+#define	EMASK_INT_5100_FATAL	(EMASK_INT_B3|EMASK_INT_B1)
+#define	EMASK_INT_5100_NF	(EMASK_INT_B5)
+
 #define	GE_FBD_FATAL ((nb_chipset == INTEL_NB_5400) ? GE_FERR_FBD_FATAL : \
 	(nb_chipset == INTEL_NB_5100) ? 0 : \
 	(GE_FERR_FBD0_FATAL|GE_FERR_FBD1_FATAL|GE_FERR_FBD2_FATAL| \
@@ -937,7 +945,7 @@ extern "C" {
 	nb_pci_getl(0, 16, 1, 0xc0, 0))
 #define	NRECFGLOG_RD(branch)	(nb_chipset == INTEL_NB_5400 ? \
 	nb_pci_getl(0, (branch) ? 22 : 21, 1, 0x74, 0) : \
-	nb_pci_getl(0, 16, 1, 0xc4, 0))
+	nb_pci_getl(0, 16, 1, nb_chipset == INTEL_NB_7300 ? 0x74 : 0xc4, 0))
 #define	NRECFBDA_RD(branch)	(nb_chipset == INTEL_NB_5400 ? \
 	nb_pci_getl(0, (branch) ? 22 : 21, 1, 0xc4, 0) : \
 	nb_pci_getl(0, 16, 1, nb_chipset == INTEL_NB_7300 ? 0xc4 : 0xc8, 0))
@@ -1370,12 +1378,16 @@ extern "C" {
 
 #define	DMIR_RANKS(dmir, rank0, rank1, rank2, rank3) \
 	if (nb_chipset == INTEL_NB_5000P || nb_chipset == INTEL_NB_5000X || \
-	    nb_chipset == INTEL_NB_5000V || nb_chipset == INTEL_NB_5000Z || \
-	    nb_chipset == INTEL_NB_5100) { \
-		rank0 = (dmir) & 3; \
-		rank1 = ((dmir) >> 3) & 3; \
-		rank2 = ((dmir) >> 6) & 3; \
-		rank3 = ((dmir) >> 9) & 3; \
+	    nb_chipset == INTEL_NB_5000V || nb_chipset == INTEL_NB_5000Z) { \
+		rank0 = (dmir) & 0x7; \
+		rank1 = ((dmir) >> 3) & 0x7; \
+		rank2 = ((dmir) >> 6) & 0x7; \
+		rank3 = ((dmir) >> 9) & 0x7; \
+	} else if (nb_chipset == INTEL_NB_5100) { \
+		rank0 = (dmir) & 0x7; \
+		rank1 = ((dmir) >> 4) & 0x7; \
+		rank2 = ((dmir) >> 8) & 0x7; \
+		rank3 = ((dmir) >> 12) & 0x7; \
 	} else { \
 		rank0 = (dmir) & 0xf; \
 		rank1 = ((dmir) >> 4) & 0xf; \

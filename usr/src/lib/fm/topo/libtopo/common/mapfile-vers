@@ -60,7 +60,9 @@ SUNWprivate {
 	topo_fmri_setprop;
 	topo_fmri_str2nvl;
 	topo_fmri_strcmp;
+	topo_fmri_strcmp_noauth;
 	topo_fmri_strhash;
+	topo_fmri_strhash_noauth;
 	topo_fmri_unretire;
 	topo_fmri_unusable;
 	topo_hdl_alloc;
@@ -119,6 +121,7 @@ SUNWprivate {
 	topo_mod_unregister;
 	topo_mod_walk_init;
 	topo_mod_zalloc;
+	topo_mod_smbios;
 	topo_node_asru;
 	topo_node_asru_set;
 	topo_node_bind;

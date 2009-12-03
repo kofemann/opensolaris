@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -48,6 +48,7 @@
 #include <sys/fm/util.h>
 #include <sys/fm/protocol.h>
 #include <sys/fm/cpu/AMD.h>
+#include <sys/fm/smb/fmsmb.h>
 #include <sys/acpi/acpi.h>
 #include <sys/acpi/acpi_pci.h>
 #include <sys/acpica.h>
@@ -59,6 +60,8 @@
 #define	AO_F_REVS_FG (X86_CHIPREV_AMD_F_REV_F | X86_CHIPREV_AMD_F_REV_G)
 
 int ao_mca_smi_disable = 1;		/* attempt to disable SMI polling */
+
+extern int x86gentopo_legacy;	/* x86 generic topology support */
 
 struct ao_ctl_init {
 	uint32_t ctl_revmask;	/* rev(s) to which this applies */
@@ -402,7 +405,7 @@ static void
 ao_nb_cfg(ao_ms_data_t *ao, uint32_t rev)
 {
 	const struct ao_nb_cfg *nbcp = &ao_cfg_extra[0];
-	uint_t chipid = pg_plat_hw_instance_id(CPU, PGHW_CHIP);
+	uint_t procnodeid = pg_plat_hw_instance_id(CPU, PGHW_PROCNODE);
 	uint32_t val;
 
 	/*
@@ -413,7 +416,7 @@ ao_nb_cfg(ao_ms_data_t *ao, uint32_t rev)
 	 * memory errors.
 	 */
 	ao->ao_ms_shared->aos_bcfg_nb_cfg = val =
-	    ao_pcicfg_read(chipid, MC_FUNC_MISCCTL, MC_CTL_REG_NBCFG);
+	    ao_pcicfg_read(procnodeid, MC_FUNC_MISCCTL, MC_CTL_REG_NBCFG);
 
 	switch (ao_nb_watchdog_policy) {
 	case AO_NB_WDOG_LEAVEALONE:
@@ -458,26 +461,25 @@ ao_nb_cfg(ao_ms_data_t *ao, uint32_t rev)
 		nbcp++;
 	}
 
-	ao_pcicfg_write(chipid, MC_FUNC_MISCCTL, MC_CTL_REG_NBCFG, val);
+	ao_pcicfg_write(procnodeid, MC_FUNC_MISCCTL, MC_CTL_REG_NBCFG, val);
 }
 
 static void
 ao_dram_cfg(ao_ms_data_t *ao, uint32_t rev)
 {
-	uint_t chipid = pg_plat_hw_instance_id(CPU, PGHW_CHIP);
+	uint_t procnodeid = pg_plat_hw_instance_id(CPU, PGHW_PROCNODE);
 	union mcreg_dramcfg_lo dcfglo;
 
 	ao->ao_ms_shared->aos_bcfg_dcfg_lo = MCREG_VAL32(&dcfglo) =
-	    ao_pcicfg_read(chipid, MC_FUNC_DRAMCTL, MC_DC_REG_DRAMCFGLO);
+	    ao_pcicfg_read(procnodeid, MC_FUNC_DRAMCTL, MC_DC_REG_DRAMCFGLO);
 	ao->ao_ms_shared->aos_bcfg_dcfg_hi =
-	    ao_pcicfg_read(chipid, MC_FUNC_DRAMCTL, MC_DC_REG_DRAMCFGHI);
-
+	    ao_pcicfg_read(procnodeid, MC_FUNC_DRAMCTL, MC_DC_REG_DRAMCFGHI);
 #ifdef OPTERON_ERRATUM_172
 	if (X86_CHIPREV_MATCH(rev, AO_F_REVS_FG) &&
 	    MCREG_FIELD_F_revFG(&dcfglo, ParEn)) {
 		MCREG_FIELD_F_revFG(&dcfglo, ParEn) = 0;
-		ao_pcicfg_write(chipid, MC_FUNC_DRAMCTL, MC_DC_REG_DRAMCFGLO,
-		    MCREG_VAL32(&dcfglo));
+		ao_pcicfg_write(procnodeid, MC_FUNC_DRAMCTL,
+		    MC_DC_REG_DRAMCFGLO, MCREG_VAL32(&dcfglo));
 	}
 #endif
 }
@@ -498,12 +500,12 @@ int ao_nb_cfg_sparectl_noseize = 0;
 static void
 ao_sparectl_cfg(ao_ms_data_t *ao)
 {
-	uint_t chipid = pg_plat_hw_instance_id(CPU, PGHW_CHIP);
+	uint_t procnodeid = pg_plat_hw_instance_id(CPU, PGHW_PROCNODE);
 	union mcreg_sparectl sparectl;
 	int chan, cs;
 
 	ao->ao_ms_shared->aos_bcfg_nb_sparectl = MCREG_VAL32(&sparectl) =
-	    ao_pcicfg_read(chipid, MC_FUNC_MISCCTL, MC_CTL_REG_SPARECTL);
+	    ao_pcicfg_read(procnodeid, MC_FUNC_MISCCTL, MC_CTL_REG_SPARECTL);
 
 	if (ao_nb_cfg_sparectl_noseize)
 		return;	/* stash BIOS value, but no changes */
@@ -525,7 +527,7 @@ ao_sparectl_cfg(ao_ms_data_t *ao)
 
 		for (cs = 0; cs < MC_CHIP_NCS; cs++) {
 			MCREG_FIELD_F_revFG(&sparectl, EccErrCntDramCs) = cs;
-			ao_pcicfg_write(chipid, MC_FUNC_MISCCTL,
+			ao_pcicfg_write(procnodeid, MC_FUNC_MISCCTL,
 			    MC_CTL_REG_SPARECTL, MCREG_VAL32(&sparectl));
 		}
 	}
@@ -617,9 +619,11 @@ ao_ereport_synd(ao_ms_data_t *ao, uint64_t status, uint_t *typep,
 }
 
 static nvlist_t *
-ao_ereport_create_resource_elem(nv_alloc_t *nva, mc_unum_t *unump, int dimmnum)
+ao_ereport_create_resource_elem(cmi_hdl_t hdl, nv_alloc_t *nva,
+    mc_unum_t *unump, int dimmnum)
 {
 	nvlist_t *nvl, *snvl;
+	nvlist_t *board_list = NULL;
 
 	if ((nvl = fm_nvlist_create(nva)) == NULL)	/* freed by caller */
 		return (NULL);
@@ -632,12 +636,31 @@ ao_ereport_create_resource_elem(nv_alloc_t *nva, mc_unum_t *unump, int dimmnum)
 	(void) nvlist_add_uint64(snvl, FM_FMRI_HC_SPECIFIC_OFFSET,
 	    unump->unum_offset);
 
-	fm_fmri_hc_set(nvl, FM_HC_SCHEME_VERSION, NULL, snvl, 5,
-	    "motherboard", unump->unum_board,
-	    "chip", unump->unum_chip,
-	    "memory-controller", unump->unum_mc,
-	    "dimm", unump->unum_dimms[dimmnum],
-	    "rank", unump->unum_rank);
+	if (!x86gentopo_legacy) {
+		board_list = cmi_hdl_smb_bboard(hdl);
+
+		if (board_list == NULL) {
+			fm_nvlist_destroy(nvl,
+			    nva ? FM_NVA_RETAIN : FM_NVA_FREE);
+			fm_nvlist_destroy(snvl,
+			    nva ? FM_NVA_RETAIN : FM_NVA_FREE);
+			return (NULL);
+		}
+
+		fm_fmri_hc_create(nvl, FM_HC_SCHEME_VERSION, NULL, snvl,
+		    board_list, 4,
+		    "chip", cmi_hdl_smb_chipid(hdl),
+		    "memory-controller", unump->unum_mc,
+		    "dimm", unump->unum_dimms[dimmnum],
+		    "rank", unump->unum_rank);
+	} else {
+		fm_fmri_hc_set(nvl, FM_HC_SCHEME_VERSION, NULL, snvl, 5,
+		    "motherboard", unump->unum_board,
+		    "chip", unump->unum_chip,
+		    "memory-controller", unump->unum_mc,
+		    "dimm", unump->unum_dimms[dimmnum],
+		    "rank", unump->unum_rank);
+	}
 
 	fm_nvlist_destroy(snvl, nva ? FM_NVA_RETAIN : FM_NVA_FREE);
 
@@ -645,7 +668,8 @@ ao_ereport_create_resource_elem(nv_alloc_t *nva, mc_unum_t *unump, int dimmnum)
 }
 
 static void
-ao_ereport_add_resource(nvlist_t *payload, nv_alloc_t *nva, mc_unum_t *unump)
+ao_ereport_add_resource(cmi_hdl_t hdl, nvlist_t *payload, nv_alloc_t *nva,
+    mc_unum_t *unump)
 {
 
 	nvlist_t *elems[MC_UNUM_NDIMM];
@@ -656,7 +680,7 @@ ao_ereport_add_resource(nvlist_t *payload, nv_alloc_t *nva, mc_unum_t *unump)
 		if (unump->unum_dimms[i] == MC_INVALNUM)
 			break;
 
-		if ((elems[nelems] = ao_ereport_create_resource_elem(nva,
+		if ((elems[nelems] = ao_ereport_create_resource_elem(hdl, nva,
 		    unump, i)) == NULL)
 			break;
 
@@ -711,7 +735,7 @@ ao_ms_ereport_add_logout(cmi_hdl_t hdl, nvlist_t *ereport,
 		    cmi_mc_patounum(addr, aed->aed_addrvalid_hi,
 		    aed->aed_addrvalid_lo, synd, syndtype, &unum) ==
 		    CMI_SUCCESS)
-			ao_ereport_add_resource(ereport, nva, &unum);
+			ao_ereport_add_resource(hdl, ereport, nva, &unum);
 	}
 }
 
@@ -859,7 +883,7 @@ ao_ms_mca_init(cmi_hdl_t hdl, int nbanks)
 	if (ao_chip_once(ao, AO_CFGONCE_DRAMCFG) == B_TRUE)
 		ao_dram_cfg(ao, rev);
 
-	ao_chip_scrubber_enable(hdl, ao);
+	ao_procnode_scrubber_enable(hdl, ao);
 }
 
 /*

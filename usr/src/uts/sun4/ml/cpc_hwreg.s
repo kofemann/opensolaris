@@ -2,9 +2,8 @@
  * CDDL HEADER START
  *
  * The contents of this file are subject to the terms of the
- * Common Development and Distribution License, Version 1.0 only
- * (the "License").  You may not use this file except in compliance
- * with the License.
+ * Common Development and Distribution License (the "License").
+ * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
  * or http://www.opensolaris.org/os/licensing.
@@ -20,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 1999-2001,2003 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * Routines for manipulating the UltraSPARC performance
@@ -54,10 +51,6 @@ ultra_setpic(uint64_t pic)
 
 uint64_t
 ultra_getpic(void)
-{ return (0); }
-
-uint64_t
-ultra_gettick(void)
 { return (0); }
 
 #else	/* lint || __lint */
@@ -91,18 +84,5 @@ ultra_gettick(void)
 	retl
 	rd	%pic, %o0
 	SET_SIZE(ultra_getpic)
-
-/*
- * This isn't the routine you're looking for.
- *
- * The routine simply returns the value of %tick on the *current* processor.
- * Most of the time, gettick() [which in turn maps to %stick on platforms
- * that have different CPU %tick rates] is what you want.
- */
-
-	ENTRY(ultra_gettick)
-	retl
-	rdpr	%tick, %o0
-	SET_SIZE(ultra_gettick)
 
 #endif	/* lint || __lint */

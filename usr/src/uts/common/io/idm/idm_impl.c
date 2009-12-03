@@ -38,8 +38,15 @@
 
 #include <sys/idm/idm.h>
 #include <sys/idm/idm_so.h>
+#include <hd_crc.h>
 
 extern idm_transport_t  idm_transport_list[];
+/*
+ * -1 - uninitialized
+ * 0  - applicable
+ * others - NA
+ */
+static int iscsi_crc32_hd = -1;
 
 void
 idm_pdu_rx(idm_conn_t *ic, idm_pdu_t *pdu)
@@ -381,6 +388,11 @@ idm_svc_conn_create(idm_svc_t *is, idm_transport_type_t tt,
 	idm_conn_t	*ic;
 	idm_status_t	rc;
 
+	/*
+	 * Skip some work if we can already tell we are going offline.
+	 * Otherwise we will destroy this connection later as part of
+	 * shutting down the svc.
+	 */
 	mutex_enter(&is->is_mutex);
 	if (!is->is_online) {
 		mutex_exit(&is->is_mutex);
@@ -894,6 +906,16 @@ idm_crc32c(void *address, unsigned long length)
 
 	ASSERT(address != NULL);
 
+	if (iscsi_crc32_hd == -1) {
+		if (hd_crc32_avail((uint32_t *)idm_crc32c_table) == B_TRUE) {
+			iscsi_crc32_hd = 0;
+		} else {
+			iscsi_crc32_hd = 1;
+		}
+	}
+	if (iscsi_crc32_hd == 0)
+		return (HW_CRC32(buffer, length, crc));
+
 	while (length--) {
 		crc = idm_crc32c_table[(crc ^ *buffer++) & 0xFFL] ^
 		    (crc >> 8);
@@ -926,6 +948,17 @@ idm_crc32c_continued(void *address, unsigned long length, uint32_t crc)
 #endif
 
 	ASSERT(address != NULL);
+
+	if (iscsi_crc32_hd == -1) {
+		if (hd_crc32_avail((uint32_t *)idm_crc32c_table) == B_TRUE) {
+			iscsi_crc32_hd = 0;
+		} else {
+			iscsi_crc32_hd = 1;
+		}
+	}
+	if (iscsi_crc32_hd == 0)
+		return (HW_CRC32_CONT(buffer, length, crc));
+
 
 #ifdef	_BIG_ENDIAN
 	byte0 = (uint8_t)((crc >> 24) & 0xFF);
@@ -993,7 +1026,7 @@ idm_task_constructor(void *hdl, void *arg, int flags)
 	 * transport that requires a different size, we'll revisit this.
 	 */
 	idt->idt_transport_hdr = (void *)(idt + 1); /* pointer arithmetic */
-
+	idt->idt_flags = 0;
 	return (0);
 }
 
@@ -1051,7 +1084,7 @@ void
 idm_wd_thread(void *arg)
 {
 	idm_conn_t	*ic;
-	clock_t		wake_time;
+	clock_t		wake_time = SEC_TO_TICK(IDM_WD_INTERVAL);
 	clock_t		idle_time;
 
 	/* Record the thread id for thread_join() */
@@ -1136,9 +1169,8 @@ idm_wd_thread(void *arg)
 			mutex_exit(&ic->ic_state_mutex);
 		}
 
-		wake_time = ddi_get_lbolt() + SEC_TO_TICK(IDM_WD_INTERVAL);
-		(void) cv_timedwait(&idm.idm_wd_cv, &idm.idm_global_mutex,
-		    wake_time);
+		(void) cv_reltimedwait(&idm.idm_wd_cv, &idm.idm_global_mutex,
+		    wake_time, TR_CLOCK_TICK);
 	}
 	mutex_exit(&idm.idm_global_mutex);
 

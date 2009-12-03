@@ -45,6 +45,7 @@ static proto_reqfunc_t proto_info_req, proto_attach_req, proto_detach_req,
 
 static void proto_capability_advertise(dld_str_t *, mblk_t *);
 static int dld_capab_poll_disable(dld_str_t *, dld_capab_poll_t *);
+static boolean_t check_mod_above(queue_t *, const char *);
 
 #define	DL_ACK_PENDING(state) \
 	((state) == DL_ATTACH_PENDING || \
@@ -446,6 +447,9 @@ proto_bind_req(dld_str_t *dsp, mblk_t *mp)
 	 * Bind the channel such that it can receive packets.
 	 */
 	sap = dlp->dl_sap;
+	dsp->ds_nonip = !check_mod_above(dsp->ds_rq, "ip") &&
+	    !check_mod_above(dsp->ds_rq, "arp");
+
 	err = dls_bind(dsp, sap);
 	if (err != 0) {
 		switch (err) {
@@ -839,43 +843,46 @@ proto_physaddr_req(dld_str_t *dsp, mblk_t *mp)
 {
 	dl_phys_addr_req_t *dlp = (dl_phys_addr_req_t *)mp->b_rptr;
 	queue_t		*q = dsp->ds_wq;
-	t_uscalar_t	dl_err;
-	char		*addr;
+	t_uscalar_t	dl_err = 0;
+	char		*addr = NULL;
 	uint_t		addr_length;
 
 	if (MBLKL(mp) < sizeof (dl_phys_addr_req_t)) {
 		dl_err = DL_BADPRIM;
-		goto failed;
+		goto done;
 	}
 
 	if (dsp->ds_dlstate == DL_UNATTACHED ||
 	    DL_ACK_PENDING(dsp->ds_dlstate)) {
 		dl_err = DL_OUTSTATE;
-		goto failed;
-	}
-
-	if (dlp->dl_addr_type != DL_CURR_PHYS_ADDR &&
-	    dlp->dl_addr_type != DL_FACT_PHYS_ADDR) {
-		dl_err = DL_UNSUPPORTED;
-		goto failed;
+		goto done;
 	}
 
 	addr_length = dsp->ds_mip->mi_addr_length;
 	if (addr_length > 0) {
 		addr = kmem_alloc(addr_length, KM_SLEEP);
-		if (dlp->dl_addr_type == DL_CURR_PHYS_ADDR)
+		switch (dlp->dl_addr_type) {
+		case DL_CURR_PHYS_ADDR:
 			mac_unicast_primary_get(dsp->ds_mh, (uint8_t *)addr);
-		else
+			break;
+		case DL_FACT_PHYS_ADDR:
 			bcopy(dsp->ds_mip->mi_unicst_addr, addr, addr_length);
-
-		dlphysaddrack(q, mp, addr, (t_uscalar_t)addr_length);
-		kmem_free(addr, addr_length);
-	} else {
-		dlphysaddrack(q, mp, NULL, 0);
+			break;
+		case DL_CURR_DEST_ADDR:
+			if (!mac_dst_get(dsp->ds_mh, (uint8_t *)addr))
+				dl_err = DL_NOTSUPPORTED;
+			break;
+		default:
+			dl_err = DL_UNSUPPORTED;
+		}
 	}
-	return;
-failed:
-	dlerrorack(q, mp, DL_PHYS_ADDR_REQ, dl_err, 0);
+done:
+	if (dl_err == 0)
+		dlphysaddrack(q, mp, addr, (t_uscalar_t)addr_length);
+	else
+		dlerrorack(q, mp, DL_PHYS_ADDR_REQ, dl_err, 0);
+	if (addr != NULL)
+		kmem_free(addr, addr_length);
 }
 
 /*
@@ -907,6 +914,17 @@ proto_setphysaddr_req(dld_str_t *dsp, mblk_t *mp)
 
 	if ((err = dls_active_set(dsp)) != 0) {
 		dl_err = DL_SYSERR;
+		goto failed2;
+	}
+
+	/*
+	 * If mac-nospoof is enabled and the link is owned by a
+	 * non-global zone, changing the mac address is not allowed.
+	 */
+	if (dsp->ds_dlp->dl_zid != GLOBAL_ZONEID &&
+	    mac_protect_enabled(dsp->ds_mch, MPT_MACNOSPOOF)) {
+		dls_active_clear(dsp, B_FALSE);
+		err = EACCES;
 		goto failed2;
 	}
 
@@ -979,14 +997,14 @@ failed:
 }
 
 static boolean_t
-check_ip_above(queue_t *q)
+check_mod_above(queue_t *q, const char *mod)
 {
 	queue_t		*next_q;
 	boolean_t	ret = B_TRUE;
 
 	claimstr(q);
 	next_q = q->q_next;
-	if (strcmp(next_q->q_qinfo->qi_minfo->mi_idname, "ip") != 0)
+	if (strcmp(next_q->q_qinfo->qi_minfo->mi_idname, mod) != 0)
 		ret = B_FALSE;
 	releasestr(q);
 	return (ret);
@@ -1108,7 +1126,8 @@ proto_notify_req(dld_str_t *dsp, mblk_t *mp)
 	    DL_NOTE_LINK_DOWN |
 	    DL_NOTE_CAPAB_RENEG |
 	    DL_NOTE_FASTPATH_FLUSH |
-	    DL_NOTE_SPEED;
+	    DL_NOTE_SPEED |
+	    DL_NOTE_SDU_SIZE;
 
 	if (MBLKL(mp) < sizeof (dl_notify_req_t)) {
 		dl_err = DL_BADPRIM;
@@ -1459,7 +1478,7 @@ dld_capab_lso(dld_str_t *dsp, void *data, uint_t flags)
 			lso->lso_flags = 0;
 			/* translate the flag for mac clients */
 			if ((mac_lso.lso_flags & LSO_TX_BASIC_TCP_IPV4) != 0)
-				lso->lso_flags |= DLD_LSO_TX_BASIC_TCP_IPV4;
+				lso->lso_flags |= DLD_LSO_BASIC_TCP_IPV4;
 			dsp->ds_lso = B_TRUE;
 			dsp->ds_lso_max = lso->lso_max;
 		} else {
@@ -1491,7 +1510,8 @@ dld_capab(dld_str_t *dsp, uint_t type, void *data, uint_t flags)
 	 * completes. So we limit the check to DLD_ENABLE case.
 	 */
 	if ((flags == DLD_ENABLE && type != DLD_CAPAB_PERIM) &&
-	    (dsp->ds_sap != ETHERTYPE_IP || !check_ip_above(dsp->ds_rq))) {
+	    (dsp->ds_sap != ETHERTYPE_IP ||
+	    !check_mod_above(dsp->ds_rq, "ip"))) {
 		return (ENOTSUP);
 	}
 
@@ -1532,6 +1552,8 @@ proto_capability_advertise(dld_str_t *dsp, mblk_t *mp)
 	dl_capab_dld_t		dld;
 	dl_capab_hcksum_t	hcksum;
 	dl_capab_zerocopy_t	zcopy;
+	dl_capab_vrrp_t		vrrp;
+	mac_capab_vrrp_t	vrrp_capab;
 	uint8_t			*ptr;
 	queue_t			*q = dsp->ds_wq;
 	mblk_t			*mp1;
@@ -1539,6 +1561,7 @@ proto_capability_advertise(dld_str_t *dsp, mblk_t *mp)
 	boolean_t		hcksum_capable = B_FALSE;
 	boolean_t		zcopy_capable = B_FALSE;
 	boolean_t		dld_capable = B_FALSE;
+	boolean_t		vrrp_capable = B_FALSE;
 
 	/*
 	 * Initially assume no capabilities.
@@ -1578,10 +1601,20 @@ proto_capability_advertise(dld_str_t *dsp, mblk_t *mp)
 	/*
 	 * Direct capability negotiation interface between IP and DLD
 	 */
-	if (dsp->ds_sap == ETHERTYPE_IP && check_ip_above(dsp->ds_rq)) {
+	if (dsp->ds_sap == ETHERTYPE_IP && check_mod_above(dsp->ds_rq, "ip")) {
 		dld_capable = B_TRUE;
 		subsize += sizeof (dl_capability_sub_t) +
 		    sizeof (dl_capab_dld_t);
+	}
+
+	/*
+	 * Check if vrrp is supported on this interface. If so, reserve
+	 * space for that capability.
+	 */
+	if (mac_capab_get(dsp->ds_mh, MAC_CAPAB_VRRP, &vrrp_capab)) {
+		vrrp_capable = B_TRUE;
+		subsize += sizeof (dl_capability_sub_t) +
+		    sizeof (dl_capab_vrrp_t);
 	}
 
 	/*
@@ -1637,6 +1670,21 @@ proto_capability_advertise(dld_str_t *dsp, mblk_t *mp)
 		dlcapabsetqid(&(zcopy.zerocopy_mid), dsp->ds_rq);
 		bcopy(&zcopy, ptr, sizeof (dl_capab_zerocopy_t));
 		ptr += sizeof (dl_capab_zerocopy_t);
+	}
+
+	/*
+	 * VRRP capability negotiation
+	 */
+	if (vrrp_capable) {
+		dlsp = (dl_capability_sub_t *)ptr;
+		dlsp->dl_cap = DL_CAPAB_VRRP;
+		dlsp->dl_length = sizeof (dl_capab_vrrp_t);
+		ptr += sizeof (dl_capability_sub_t);
+
+		bzero(&vrrp, sizeof (dl_capab_vrrp_t));
+		vrrp.vrrp_af = vrrp_capab.mcv_af;
+		bcopy(&vrrp, ptr, sizeof (dl_capab_vrrp_t));
+		ptr += sizeof (dl_capab_vrrp_t);
 	}
 
 	/*

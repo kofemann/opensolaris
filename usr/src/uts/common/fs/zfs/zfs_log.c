@@ -47,14 +47,6 @@
 #include <sys/ddi.h>
 #include <sys/dsl_dataset.h>
 
-#define	ZFS_HANDLE_REPLAY(zilog, tx) \
-	if (zilog->zl_replay) { \
-		dsl_dataset_dirty(dmu_objset_ds(zilog->zl_os), tx); \
-		zilog->zl_replayed_seq[dmu_tx_get_txg(tx) & TXG_MASK] = \
-		    zilog->zl_replaying_seq; \
-		return; \
-	}
-
 /*
  * These zfs_log_* functions must be called within a dmu tx, in one
  * of 2 contexts depending on zilog->z_replay:
@@ -175,6 +167,9 @@ zfs_log_xvattr(lr_attr_t *lrattr, xvattr_t *xvap)
 		ZFS_TIME_ENCODE(&xoap->xoa_createtime, crtime);
 	if (XVA_ISSET_REQ(xvap, XAT_AV_SCANSTAMP))
 		bcopy(xoap->xoa_av_scanstamp, scanstamp, AV_SCANSTAMP_SZ);
+	if (XVA_ISSET_REQ(xvap, XAT_REPARSE))
+		*attrs |= (xoap->xoa_reparse == 0) ? 0 :
+		    XAT0_REPARSE;
 }
 
 static void *
@@ -248,10 +243,8 @@ zfs_log_create(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 	size_t namesize = strlen(name) + 1;
 	size_t fuidsz = 0;
 
-	if (zilog == NULL)
+	if (zil_replaying(zilog, tx))
 		return;
-
-	ZFS_HANDLE_REPLAY(zilog, tx); /* exits if replay */
 
 	/*
 	 * If we have FUIDs present then add in space for
@@ -353,10 +346,8 @@ zfs_log_remove(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 	lr_remove_t *lr;
 	size_t namesize = strlen(name) + 1;
 
-	if (zilog == NULL)
+	if (zil_replaying(zilog, tx))
 		return;
-
-	ZFS_HANDLE_REPLAY(zilog, tx); /* exits if replay */
 
 	itx = zil_itx_create(txtype, sizeof (*lr) + namesize);
 	lr = (lr_remove_t *)&itx->itx_lr;
@@ -379,10 +370,8 @@ zfs_log_link(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 	lr_link_t *lr;
 	size_t namesize = strlen(name) + 1;
 
-	if (zilog == NULL)
+	if (zil_replaying(zilog, tx))
 		return;
-
-	ZFS_HANDLE_REPLAY(zilog, tx); /* exits if replay */
 
 	itx = zil_itx_create(txtype, sizeof (*lr) + namesize);
 	lr = (lr_link_t *)&itx->itx_lr;
@@ -408,10 +397,8 @@ zfs_log_symlink(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 	size_t namesize = strlen(name) + 1;
 	size_t linksize = strlen(link) + 1;
 
-	if (zilog == NULL)
+	if (zil_replaying(zilog, tx))
 		return;
-
-	ZFS_HANDLE_REPLAY(zilog, tx); /* exits if replay */
 
 	itx = zil_itx_create(txtype, sizeof (*lr) + namesize + linksize);
 	lr = (lr_create_t *)&itx->itx_lr;
@@ -444,10 +431,8 @@ zfs_log_rename(zilog_t *zilog, dmu_tx_t *tx, uint64_t txtype,
 	size_t snamesize = strlen(sname) + 1;
 	size_t dnamesize = strlen(dname) + 1;
 
-	if (zilog == NULL)
+	if (zil_replaying(zilog, tx))
 		return;
-
-	ZFS_HANDLE_REPLAY(zilog, tx); /* exits if replay */
 
 	itx = zil_itx_create(txtype, sizeof (*lr) + snamesize + dnamesize);
 	lr = (lr_rename_t *)&itx->itx_lr;
@@ -474,14 +459,17 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 	itx_wr_state_t write_state;
 	boolean_t slogging;
 	uintptr_t fsync_cnt;
+	ssize_t immediate_write_sz;
 
-	if (zilog == NULL || zp->z_unlinked)
+	if (zil_replaying(zilog, tx) || zp->z_unlinked)
 		return;
 
-	ZFS_HANDLE_REPLAY(zilog, tx); /* exits if replay */
+	immediate_write_sz = (zilog->zl_logbias == ZFS_LOGBIAS_THROUGHPUT)
+	    ? 0 : zfs_immediate_write_sz;
 
-	slogging = spa_has_slogs(zilog->zl_spa);
-	if (resid > zfs_immediate_write_sz && !slogging && resid <= zp->z_blksz)
+	slogging = spa_has_slogs(zilog->zl_spa) &&
+	    (zilog->zl_logbias == ZFS_LOGBIAS_LATENCY);
+	if (resid > immediate_write_sz && !slogging && resid <= zp->z_blksz)
 		write_state = WR_INDIRECT;
 	else if (ioflag & (FSYNC | FDSYNC))
 		write_state = WR_COPIED;
@@ -510,8 +498,7 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 		lr = (lr_write_t *)&itx->itx_lr;
 		if (write_state == WR_COPIED && dmu_read(zp->z_zfsvfs->z_os,
 		    zp->z_id, off, len, lr + 1, DMU_READ_NO_PREFETCH) != 0) {
-			kmem_free(itx, offsetof(itx_t, itx_lr) +
-			    itx->itx_lr.lrc_reclen);
+			zil_itx_destroy(itx);
 			itx = zil_itx_create(txtype, sizeof (*lr));
 			lr = (lr_write_t *)&itx->itx_lr;
 			write_state = WR_NEED_COPY;
@@ -552,10 +539,8 @@ zfs_log_truncate(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 	uint64_t seq;
 	lr_truncate_t *lr;
 
-	if (zilog == NULL || zp->z_unlinked)
+	if (zil_replaying(zilog, tx) || zp->z_unlinked)
 		return;
-
-	ZFS_HANDLE_REPLAY(zilog, tx); /* exits if replay */
 
 	itx = zil_itx_create(txtype, sizeof (*lr));
 	lr = (lr_truncate_t *)&itx->itx_lr;
@@ -582,11 +567,8 @@ zfs_log_setattr(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 	size_t		recsize = sizeof (lr_setattr_t);
 	void		*start;
 
-
-	if (zilog == NULL || zp->z_unlinked)
+	if (zil_replaying(zilog, tx) || zp->z_unlinked)
 		return;
-
-	ZFS_HANDLE_REPLAY(zilog, tx); /* exits if replay */
 
 	/*
 	 * If XVATTR set, then log record size needs to allow
@@ -651,10 +633,8 @@ zfs_log_acl(zilog_t *zilog, dmu_tx_t *tx, znode_t *zp,
 	size_t txsize;
 	size_t aclbytes = vsecp->vsa_aclentsz;
 
-	if (zilog == NULL || zp->z_unlinked)
+	if (zil_replaying(zilog, tx) || zp->z_unlinked)
 		return;
-
-	ZFS_HANDLE_REPLAY(zilog, tx); /* exits if replay */
 
 	txtype = (zp->z_zfsvfs->z_version < ZPL_VERSION_FUID) ?
 	    TX_ACL_V0 : TX_ACL;

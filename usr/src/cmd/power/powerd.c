@@ -31,7 +31,6 @@
 #include <string.h>
 #include <errno.h>
 #include <pwd.h>
-#include <procfs.h>
 #include <dirent.h>
 #include <thread.h>
 #include <limits.h>
@@ -408,7 +407,7 @@ autos3_monitor(void)
 	ret = ioctl(fd, SRN_IOC_AUTOSX, NULL);
 	if (ret == -1) {
 		logerror("Ioctl SRN_IOC_AUTOSX failed: %s", strerror(errno));
-		close(fd);
+		(void) close(fd);
 		thr_exit((void *) errno);
 	}
 	poll_fd.fd = fd;
@@ -423,7 +422,7 @@ autos3_monitor(void)
 				continue;
 			default:
 				logerror("Poll error: %s", strerror(errno));
-				close(fd);
+				(void) close(fd);
 				thr_exit((void *) errno);
 			}
 		}
@@ -431,7 +430,7 @@ autos3_monitor(void)
 		ret = ioctl(fd, SRN_IOC_NEXTEVENT, &srn_event);
 		if (ret == -1) {
 			logerror("ioctl error: %s", strerror(errno));
-			close(fd);
+			(void) close(fd);
 			thr_exit((void *) errno);
 		}
 		switch (srn_event.ae_type) {
@@ -462,7 +461,7 @@ read_cpr_config(void)
 
 	if (read(asfd, (void *)&asinfo, sizeof (asinfo)) != sizeof (asinfo)) {
 		logerror("Unable to read CPR config file '%s'", CPR_CONFIG);
-		close(asfd);
+		(void) close(asfd);
 		return (-1);
 	}
 
@@ -721,14 +720,14 @@ check_shutdown(time_t *now, hrtime_t *hr_now)
 		"Since autowakeup time is less than 3 minutes away, "
 		"autoshutdown will not occur.");
 						shutdown_time = *now + 180;
-						close(tod_fd);
+						(void) close(tod_fd);
 						return;
 					}
 					if (ioctl(tod_fd, TOD_SET_ALARM,
 					    &wakeup_time) == -1) {
 						logerror("Unable to program TOD"
 						    " alarm for autowakeup.");
-						close(tod_fd);
+						(void) close(tod_fd);
 						return;
 					}
 				}
@@ -741,7 +740,7 @@ check_shutdown(time_t *now, hrtime_t *hr_now)
 					    NULL) == -1)
 						logerror("Unable to clear "
 						    "alarm in TOD device.");
-					close(tod_fd);
+					(void) close(tod_fd);
 				}
 
 				(void) time(now);
@@ -861,7 +860,7 @@ is_ok2shutdown(time_t *now)
 
 ckdone:
 	if (prom_fd != -1)
-		close(prom_fd);
+		(void) close(prom_fd);
 	return (ret);
 }
 
@@ -1008,7 +1007,7 @@ poweroff(const char *msg, char **cmd_argv)
 
 	if (stat("/dev/console", &statbuf) == -1 ||
 	    (pwd = getpwuid(statbuf.st_uid)) == NULL) {
-		mutex_unlock(&poweroff_mutex);
+		(void) mutex_unlock(&poweroff_mutex);
 		return (1);
 	}
 
@@ -1017,7 +1016,7 @@ poweroff(const char *msg, char **cmd_argv)
 
 	if (*cmd_argv == NULL) {
 		logerror("No command to run.");
-		mutex_unlock(&poweroff_mutex);
+		(void) mutex_unlock(&poweroff_mutex);
 		return (1);
 	}
 
@@ -1027,7 +1026,7 @@ poweroff(const char *msg, char **cmd_argv)
 		free(home);
 		free(user);
 		logerror("No memory.");
-		mutex_unlock(&poweroff_mutex);
+		(void) mutex_unlock(&poweroff_mutex);
 		return (1);
 	}
 	(void) strcpy(home, ehome);
@@ -1060,7 +1059,7 @@ poweroff(const char *msg, char **cmd_argv)
 		free(home);
 		free(user);
 		if (child == -1) {
-			mutex_unlock(&poweroff_mutex);
+			(void) mutex_unlock(&poweroff_mutex);
 			return (1);
 		}
 	}
@@ -1069,11 +1068,11 @@ poweroff(const char *msg, char **cmd_argv)
 		pid = wait(&status);
 	if (WEXITSTATUS(status)) {
 		(void) syslog(LOG_ERR, "Failed to exec \"%s\".", cmd_argv[0]);
-		mutex_unlock(&poweroff_mutex);
+		(void) mutex_unlock(&poweroff_mutex);
 		return (1);
 	}
 
-	mutex_unlock(&poweroff_mutex);
+	(void) mutex_unlock(&poweroff_mutex);
 	return (0);
 }
 
@@ -1252,7 +1251,7 @@ attach_devices(void *arg)
 {
 	di_node_t root_node;
 
-	sleep(60);	/* let booting finish first */
+	(void) sleep(60);	/* let booting finish first */
 
 	if ((root_node = di_init("/", DINFOFORCE)) == DI_NODE_NIL) {
 		logerror("Failed to attach devices.");
@@ -1283,20 +1282,15 @@ open_pidfile(char *me)
 	int fd;
 	const char *e1 = "%s: Cannot open pid file for read: ";
 	const char *e2 = "%s: Cannot unlink obsolete pid file: ";
-	const char *e3 = "%s: Cannot open /proc for pid %ld: ";
-	const char *e4 = "%s: Cannot read /proc for pid %ld: ";
-	const char *e5 = "%s: Another instance (pid %ld) is trying to exit"
-	    "and may be hung.  Please contact sysadmin.\n";
-	const char *e6 = "%s: Another daemon is running\n";
-	const char *e7 = "%s: Cannot create pid file: ";
+	const char *e3 = "%s: Either another daemon is running or the"
+	    " process is defunct (pid %d). \n";
+	const char *e4 = "%s: Cannot create pid file: ";
 
 again:
 	if ((fd = open(pidpath, O_CREAT | O_EXCL | O_WRONLY, 0444)) == -1) {
 		if (errno  == EEXIST) {
 			FILE *fp;
-			int ps_fd;
 			pid_t pid;
-			psinfo_t ps_info;
 
 			if ((fp = fopen(pidpath, "r")) == NULL) {
 				(void) fprintf(stderr, e1, me);
@@ -1317,11 +1311,9 @@ again:
 					goto again;
 			}
 
-			/* Is pid for a running process? */
-			(void) sprintf(scratch, "/proc/%ld/psinfo", pid);
-			ps_fd = open(scratch, O_RDONLY | O_NDELAY);
-			if (ps_fd == -1) {
-				if (errno == ENOENT) {
+			/* Is pid for a running process */
+			if (kill(pid, 0) == -1) {
+				if (errno == ESRCH) {
 					if (unlink(pidpath) == -1) {
 						(void) fprintf(stderr, e2, me);
 						perror(NULL);
@@ -1329,26 +1321,13 @@ again:
 					} else	/* try without obsolete file */
 						goto again;
 				}
+			} else {    /* powerd deamon still running or defunct */
 				(void) fprintf(stderr, e3, me, pid);
 				return (-1);
 			}
-			if (read(ps_fd, &ps_info,
-			    sizeof (ps_info)) != sizeof (ps_info)) {
-				(void) fprintf(stderr, e4, me, pid);
-				perror(NULL);
-				(void) close(ps_fd);
-				return (-1);
-			}
-			(void) close(ps_fd);
-			if (ps_info.pr_nlwp == 0) {	/* defunct process */
-				(void) fprintf(stderr, e5, me, pid);
-				return (-1);
-			} else {	/* instance of daemon already running */
-				(void) fprintf(stderr, e6, me);
-				return (-1);
-			}
+
 		} else {	/* create failure not due to existing file */
-			(void) fprintf(stderr, e7, me);
+			(void) fprintf(stderr, e4, me);
 			perror(NULL);
 			return (-1);
 		}

@@ -193,11 +193,10 @@ FP hardware exhibits Pentium floating point divide problem\n");
 	 * is present, and builds a tree of prototype dev_info nodes
 	 * corresponding to the hardware which identified itself.
 	 */
-#if !defined(SAS) && !defined(MPSAS)
+
 	/*
-	 * Check for disabled drivers and initialize root node.
+	 * Initialize root node.
 	 */
-	check_driver_disable();
 	i_ddi_init_root();
 
 	/* reprogram devices not set up by firmware (BIOS) */
@@ -220,8 +219,6 @@ FP hardware exhibits Pentium floating point divide problem\n");
 	else
 		(void) i_ddi_attach_hw_nodes("isa");
 #endif
-
-#endif	/* !SAS && !MPSAS */
 }
 
 /*
@@ -2514,6 +2511,10 @@ pci_peekpoke_check(dev_info_t *dip, dev_info_t *rdip,
 void
 impl_setup_ddi(void)
 {
+#if !defined(__xpv)
+	extern void startup_bios_disk(void);
+	extern int post_fastreboot;
+#endif
 	dev_info_t *xdip, *isa_dip;
 	rd_existing_t rd_mem_prop;
 	int err;
@@ -2555,11 +2556,20 @@ impl_setup_ddi(void)
 	 */
 	get_boot_properties();
 
-	/* do bus dependent probes. */
-	impl_bus_initialprobe();
-
 	/* not framebuffer should be enumerated, if present */
 	get_vga_properties();
+
+	/*
+	 * Check for administratively disabled drivers.
+	 */
+	check_driver_disable();
+
+#if !defined(__xpv)
+	if (!post_fastreboot)
+		startup_bios_disk();
+#endif
+	/* do bus dependent probes. */
+	impl_bus_initialprobe();
 }
 
 dev_t
@@ -2657,6 +2667,8 @@ impl_bus_initialprobe(void)
 	if (modload("misc", "pci_autoconfig") < 0) {
 		panic("failed to load misc/pci_autoconfig");
 	}
+
+	(void) modload("misc", "acpidev");
 
 	if (modload("drv", "isa") < 0)
 		panic("failed to load drv/isa");

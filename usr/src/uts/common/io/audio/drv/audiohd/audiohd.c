@@ -42,7 +42,7 @@ static int audiohd_resume(audiohd_state_t *);
 static int audiohd_suspend(audiohd_state_t *);
 
 /* interrupt handler */
-static uint_t audiohd_intr(caddr_t);
+static uint_t audiohd_intr(caddr_t, caddr_t);
 
 /*
  * Local routines
@@ -149,6 +149,7 @@ audiohd_set_chipset_info(audiohd_state_t *statep)
 	devid = pci_config_get16(statep->hda_pci_handle, PCI_CONF_VENID);
 	devid <<= 16;
 	devid |= pci_config_get16(statep->hda_pci_handle, PCI_CONF_DEVID);
+	statep->devid = devid;
 
 	name = AUDIOHD_DEV_CONFIG;
 	vers = AUDIOHD_DEV_VERSION;
@@ -170,21 +171,25 @@ audiohd_set_chipset_info(audiohd_state_t *statep)
 		name = "Intel HD Audio";
 		vers = "ICH9";
 		break;
+	case 0x80863a3e:
+		name = "Intel HD Audio";
+		vers = "ICH10";
+		break;
+	case 0x10de026c:
+		name = "NVIDIA HD Audio";
+		vers = "MCP51";
+		break;
 	case 0x10de0371:
 		name = "NVIDIA HD Audio";
 		vers = "MCP55";
 		break;
-	case 0x10de03f0:
-		name = "NVIDIA HD Audio";
-		vers = "MCP61A";
-		break;
-	case 0x10de026c:
-		name = "NVIDIA HD Audio";
-		vers = "6151";
-		break;
 	case 0x10de03e4:
 		name = "NVIDIA HD Audio";
 		vers = "MCP61";
+		break;
+	case 0x10de03f0:
+		name = "NVIDIA HD Audio";
+		vers = "MCP61A";
 		break;
 	case 0x10de044a:
 		name = "NVIDIA HD Audio";
@@ -193,6 +198,14 @@ audiohd_set_chipset_info(audiohd_state_t *statep)
 	case 0x10de055c:
 		name = "NVIDIA HD Audio";
 		vers = "MCP67";
+		break;
+	case 0x10de0774:
+		name = "NVIDIA HD Audio";
+		vers = "MCP78S";
+		break;
+	case 0x10de0ac0:
+		name = "NVIDIA HD Audio";
+		vers = "MCP79";
 		break;
 	case 0x1002437b:
 		name = "ATI HD Audio";
@@ -212,11 +225,174 @@ audiohd_set_chipset_info(audiohd_state_t *statep)
 	audio_dev_set_version(statep->adev, vers);
 }
 
+
+/*
+ * audiohd_add_intrs:
+ *
+ * Register FIXED or MSI interrupts.
+ */
+static int
+audiohd_add_intrs(audiohd_state_t *statep, int intr_type)
+{
+	dev_info_t 		*dip = statep->hda_dip;
+	ddi_intr_handle_t	ihandle;
+	int 			avail;
+	int 			actual;
+	int 			intr_size;
+	int 			count;
+	int 			i, j;
+	int 			ret, flag;
+
+	/* Get number of interrupts */
+	ret = ddi_intr_get_nintrs(dip, intr_type, &count);
+	if ((ret != DDI_SUCCESS) || (count == 0)) {
+		audio_dev_warn(statep->adev,
+		    "ddi_intr_get_nintrs() failure, ret: %d, count: %d",
+		    ret, count);
+		return (DDI_FAILURE);
+	}
+
+	/* Get number of available interrupts */
+	ret = ddi_intr_get_navail(dip, intr_type, &avail);
+	if ((ret != DDI_SUCCESS) || (avail == 0)) {
+		audio_dev_warn(statep->adev, "ddi_intr_get_navail() failure, "
+		    "ret: %d, avail: %d", ret, avail);
+		return (DDI_FAILURE);
+	}
+
+	if (avail < 1) {
+		audio_dev_warn(statep->adev,
+		    "Interrupts count: %d, available: %d",
+		    count, avail);
+	}
+
+	/* Allocate an array of interrupt handles */
+	intr_size = count * sizeof (ddi_intr_handle_t);
+	statep->htable = kmem_alloc(intr_size, KM_SLEEP);
+	statep->intr_rqst = count;
+
+	flag = (intr_type == DDI_INTR_TYPE_MSI) ?
+	    DDI_INTR_ALLOC_STRICT:DDI_INTR_ALLOC_NORMAL;
+
+	/* Call ddi_intr_alloc() */
+	ret = ddi_intr_alloc(dip, statep->htable, intr_type, 0,
+	    count, &actual, flag);
+	if (ret != DDI_SUCCESS || actual == 0) {
+		/* ddi_intr_alloc() failed  */
+		kmem_free(statep->htable, intr_size);
+		return (DDI_FAILURE);
+	}
+
+	if (actual < 1) {
+		audio_dev_warn(statep->adev,
+		    "Interrupts requested: %d, received: %d",
+		    count, actual);
+	}
+
+	statep->intr_cnt = actual;
+
+	/*
+	 * Get priority for first msi, assume remaining are all the same
+	 */
+	if ((ret = ddi_intr_get_pri(statep->htable[0], &statep->intr_pri)) !=
+	    DDI_SUCCESS) {
+		audio_dev_warn(statep->adev, "ddi_intr_get_pri() failed %d",
+		    ret);
+		/* Free already allocated intr */
+		for (i = 0; i < actual; i++) {
+			(void) ddi_intr_free(statep->htable[i]);
+		}
+		kmem_free(statep->htable, intr_size);
+		return (DDI_FAILURE);
+	}
+
+	/* Test for high level mutex */
+	if (statep->intr_pri >= ddi_intr_get_hilevel_pri()) {
+		audio_dev_warn(statep->adev,
+		    "Hi level interrupt not supported");
+		for (i = 0; i < actual; i++)
+			(void) ddi_intr_free(statep->htable[i]);
+		kmem_free(statep->htable, intr_size);
+		return (DDI_FAILURE);
+	}
+
+	/* Call ddi_intr_add_handler() */
+	for (i = 0; i < actual; i++) {
+		if ((ret = ddi_intr_add_handler(statep->htable[i], audiohd_intr,
+		    (caddr_t)statep, (caddr_t)(uintptr_t)i)) != DDI_SUCCESS) {
+			audio_dev_warn(statep->adev, "ddi_intr_add_handler() "
+			    "failed %d", ret);
+			/* Remove already added intr */
+			for (j = 0; j < i; j++) {
+				ihandle = statep->htable[j];
+				(void) ddi_intr_remove_handler(ihandle);
+			}
+			/* Free already allocated intr */
+			for (i = 0; i < actual; i++) {
+				(void) ddi_intr_free(statep->htable[i]);
+			}
+			kmem_free(statep->htable, intr_size);
+			return (DDI_FAILURE);
+		}
+	}
+
+	if ((ret = ddi_intr_get_cap(statep->htable[0], &statep->intr_cap))
+	    != DDI_SUCCESS) {
+		audio_dev_warn(statep->adev,
+		    "ddi_intr_get_cap() failed %d", ret);
+		for (i = 0; i < actual; i++) {
+			(void) ddi_intr_remove_handler(statep->htable[i]);
+			(void) ddi_intr_free(statep->htable[i]);
+		}
+		kmem_free(statep->htable, intr_size);
+		return (DDI_FAILURE);
+	}
+
+	for (i = 0; i < actual; i++) {
+		(void) ddi_intr_clr_mask(statep->htable[i]);
+	}
+
+	return (DDI_SUCCESS);
+}
+
+/*
+ * audiohd_rem_intrs:
+ *
+ * Unregister FIXED or MSI interrupts
+ */
+static void
+audiohd_rem_intrs(audiohd_state_t *statep)
+{
+
+	int i;
+
+	/* Disable all interrupts */
+	if (statep->intr_cap & DDI_INTR_FLAG_BLOCK) {
+		/* Call ddi_intr_block_disable() */
+		(void) ddi_intr_block_disable(statep->htable, statep->intr_cnt);
+	} else {
+		for (i = 0; i < statep->intr_cnt; i++) {
+			(void) ddi_intr_disable(statep->htable[i]);
+		}
+	}
+
+	/* Call ddi_intr_remove_handler() */
+	for (i = 0; i < statep->intr_cnt; i++) {
+		(void) ddi_intr_remove_handler(statep->htable[i]);
+		(void) ddi_intr_free(statep->htable[i]);
+	}
+
+	kmem_free(statep->htable,
+	    statep->intr_rqst * sizeof (ddi_intr_handle_t));
+}
+
 static int
 audiohd_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 {
 	audiohd_state_t		*statep;
 	int			instance;
+	int 			intr_types;
+	int			i, rc = 0;
 
 	instance = ddi_get_instance(dip);
 	switch (cmd) {
@@ -289,15 +465,68 @@ audiohd_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	/* disable interrupts and clear interrupt status */
 	audiohd_disable_intr(statep);
 
-	/* set up the interrupt handler */
-	if (ddi_add_intr(dip, 0, &statep->hda_intr_cookie,
-	    (ddi_idevice_cookie_t *)NULL, audiohd_intr, (caddr_t)statep) !=
-	    DDI_SUCCESS) {
+	/*
+	 * Get supported interrupt types
+	 */
+	if (ddi_intr_get_supported_types(dip, &intr_types) != DDI_SUCCESS) {
 		audio_dev_warn(statep->adev,
-		    "bad interrupt specification ");
+		    "ddi_intr_get_supported_types failed");
 		goto error;
 	}
-	statep->intr_added = B_TRUE;
+
+	/*
+	 * Add the h/w interrupt handler and initialise mutexes
+	 */
+
+	if ((intr_types & DDI_INTR_TYPE_MSI) && statep->msi_enable) {
+		if (audiohd_add_intrs(statep, DDI_INTR_TYPE_MSI) ==
+		    DDI_SUCCESS) {
+			statep->intr_type = DDI_INTR_TYPE_MSI;
+			statep->intr_added = B_TRUE;
+		}
+	}
+	if (!(statep->intr_added) &&
+	    (intr_types & DDI_INTR_TYPE_FIXED)) {
+		/* MSI registration failed, trying FIXED interrupt type */
+		if (audiohd_add_intrs(statep, DDI_INTR_TYPE_FIXED) !=
+		    DDI_SUCCESS) {
+			audio_dev_warn(statep->adev, "FIXED interrupt "
+			    "registration failed");
+			goto error;
+		}
+		/* FIXED interrupt type is supported */
+		statep->intr_type = DDI_INTR_TYPE_FIXED;
+		statep->intr_added = B_TRUE;
+	}
+	if (!(statep->intr_added)) {
+		audio_dev_warn(statep->adev, "No interrupts registered");
+		goto error;
+	}
+	mutex_init(&statep->hda_mutex, NULL, MUTEX_DRIVER,
+	    DDI_INTR_PRI(statep->intr_pri));
+
+	/*
+	 * Now that mutex lock is initialized, enable interrupts.
+	 */
+	if (statep->intr_cap & DDI_INTR_FLAG_BLOCK) {
+		/* Call ddi_intr_block_enable() for MSI interrupts */
+		rc = ddi_intr_block_enable(statep->htable, statep->intr_cnt);
+		if (rc != DDI_SUCCESS) {
+			audio_dev_warn(statep->adev,
+			    "Enable block intr failed: %d\n", rc);
+			return (DDI_FAILURE);
+		}
+	} else {
+		/* Call ddi_intr_enable for MSI or FIXED interrupts */
+		for (i = 0; i < statep->intr_cnt; i++) {
+			rc = ddi_intr_enable(statep->htable[i]);
+			if (rc != DDI_SUCCESS) {
+				audio_dev_warn(statep->adev,
+				    "Enable intr failed: %d\n", rc);
+				return (DDI_FAILURE);
+			}
+		}
+	}
 
 	/*
 	 * Register audio controls.
@@ -449,14 +678,12 @@ audiohd_free_path(audiohd_state_t *statep)
 static void
 audiohd_destroy(audiohd_state_t *statep)
 {
-	dev_info_t		*dip = statep->hda_dip;
-
 	mutex_enter(&statep->hda_mutex);
 	audiohd_stop_dma(statep);
 	audiohd_disable_intr(statep);
 	mutex_exit(&statep->hda_mutex);
 	if (statep->intr_added) {
-		ddi_remove_intr(dip, 0, statep->hda_intr_cookie);
+		audiohd_rem_intrs(statep);
 	}
 	if (statep->hda_ksp)
 		kstat_delete(statep->hda_ksp);
@@ -771,6 +998,7 @@ audiohd_reset_port(audiohd_port_t *port)
 
 	return (DDI_SUCCESS);
 }
+
 static int
 audiohd_engine_open(void *arg, int flag,
     unsigned *fragfrp, unsigned *nfragsp, caddr_t *bufp)
@@ -800,7 +1028,6 @@ audiohd_start_port(audiohd_port_t *port)
 	audiohd_state_t	*statep = port->statep;
 
 	ASSERT(mutex_owned(&statep->hda_mutex));
-
 	/* if suspended, then do nothing else */
 	if (statep->suspended) {
 		return;
@@ -862,21 +1089,18 @@ audiohd_update_port(audiohd_port_t *port)
 	audiohd_state_t		*statep = port->statep;
 
 	pos = AUDIOHD_REG_GET32(port->regoff + AUDIOHD_SDREG_OFFSET_LPIB);
-	pos &= AUDIOHD_POS_MASK;
-	if (pos > port->curpos)
-		len = (pos - port->curpos) & AUDIOHD_POS_MASK;
+	/* Convert the position into a frame count */
+	pos /= (port->nchan * 2);
+
+	if (pos >= port->curpos)
+		len = (pos - port->curpos);
 	else {
-		len = pos + port->samp_size * AUDIOHD_BDLE_NUMS - port->curpos;
-		len &= AUDIOHD_POS_MASK;
+		len = pos + port->nframes - port->curpos;
 	}
-	port->curpos += len;
-	if (port->curpos >= port->samp_size * AUDIOHD_BDLE_NUMS)
-		port->curpos -= port->samp_size * AUDIOHD_BDLE_NUMS;
 
-	port->len = len;
-	port->count += len / (port->nchan * 2);
-
-
+	ASSERT(len <= port->nframes);
+	port->curpos = pos;
+	port->count += len;
 }
 
 static uint64_t
@@ -887,7 +1111,8 @@ audiohd_engine_count(void *arg)
 	uint64_t	val;
 
 	mutex_enter(&statep->hda_mutex);
-	audiohd_update_port(port);
+	if (port->started && !statep->suspended)
+		audiohd_update_port(port);
 	val = port->count;
 	mutex_exit(&statep->hda_mutex);
 	return (val);
@@ -913,8 +1138,8 @@ audiohd_engine_sync(void *arg, unsigned nframes)
 
 	_NOTE(ARGUNUSED(nframes));
 
-	(void) ddi_dma_sync(port->samp_dmah, port->curpos,
-	    port->len, port->sync_dir);
+	(void) ddi_dma_sync(port->samp_dmah, 0,
+	    0, port->sync_dir);
 
 }
 
@@ -2106,6 +2331,9 @@ audiohd_beep_off(void *arg)
 static void
 audiohd_beep_freq(void *arg, int freq)
 {
+	hda_codec_t 	*codec = ((audiohd_widget_t *)arg)->codec;
+	uint32_t	vid = codec->vid >> 16;
+
 	_NOTE(ARGUNUSED(arg));
 	if (freq == 0) {
 		audiohd_beep_divider = 0;
@@ -2114,7 +2342,20 @@ audiohd_beep_freq(void *arg, int freq)
 			freq = AUDIOHDC_MAX_BEEP_GEN;
 		else if (freq < AUDIOHDC_MIX_BEEP_GEN)
 			freq = AUDIOHDC_MIX_BEEP_GEN;
-		audiohd_beep_divider = AUDIOHDC_SAMPR48000 / freq;
+
+		switch (vid) {
+		case AUDIOHD_VID_SIGMATEL:
+			/*
+			 * Sigmatel HD codec specification:
+			 * frequency = 48000 * (257 - Divider) / 1024
+			 */
+			audiohd_beep_divider = 257 - freq * 1024 /
+			    AUDIOHDC_SAMPR48000;
+			break;
+		default:
+			audiohd_beep_divider = AUDIOHDC_SAMPR48000 / freq;
+			break;
+		}
 	}
 
 	if (audiohd_beep_vol == 0)
@@ -2143,19 +2384,12 @@ audiohd_init_state(audiohd_state_t *statep, dev_info_t *dip)
 	}
 	statep->adev = adev;
 	statep->intr_added = B_FALSE;
+	statep->msi_enable = ddi_prop_get_int(DDI_DEV_T_ANY, dip,
+	    DDI_PROP_DONTPASS, "msi_enable", B_TRUE);
 
 	/* set device information */
 	audio_dev_set_description(adev, AUDIOHD_DEV_CONFIG);
 	audio_dev_set_version(adev, AUDIOHD_DEV_VERSION);
-
-	if (ddi_get_iblock_cookie(dip, (uint_t)0, &statep->hda_intr_cookie) !=
-	    DDI_SUCCESS) {
-		audio_dev_warn(statep->adev,
-		    "cannot get iblock cookie");
-		return (DDI_FAILURE);
-	}
-	mutex_init(&statep->hda_mutex, NULL,
-	    MUTEX_DRIVER, statep->hda_intr_cookie);
 
 	statep->hda_rirb_rp = 0;
 
@@ -2579,7 +2813,6 @@ audiohd_init_controller(audiohd_state_t *statep)
 		return (DDI_FAILURE);
 	}
 
-
 	AUDIOHD_REG_SET32(AUDIOHD_REG_SYNC, 0); /* needn't sync stream */
 
 	/* Initialize RIRB */
@@ -2602,6 +2835,15 @@ audiohd_init_controller(audiohd_state_t *statep)
 	AUDIOHD_REG_SET16(AUDIOHD_REG_CORBWP, 0);
 	AUDIOHD_REG_SET16(AUDIOHD_REG_CORBRP, 0);
 	AUDIOHD_REG_SET8(AUDIOHD_REG_CORBCTL, AUDIOHDR_CORBCTL_DMARUN);
+
+	/* work around for some chipsets which could not enable MSI */
+	switch (statep->devid) {
+	case AUDIOHD_CONTROLLER_MCP51:
+		statep->msi_enable = B_FALSE;
+		break;
+	default:
+		break;
+	}
 
 	return (DDI_SUCCESS);
 }	/* audiohd_init_controller() */
@@ -2978,6 +3220,9 @@ audiohd_set_codec_info(hda_codec_t *codec)
 	char buf[256];
 
 	switch (codec->vid) {
+	case 0x10134206:
+		(void) snprintf(buf, sizeof (buf), "Cirrus HD codec: CS4206");
+		break;
 	case 0x10ec0260:
 		(void) snprintf(buf, sizeof (buf), "Realtek HD codec: ALC260");
 		break;
@@ -2987,8 +3232,14 @@ audiohd_set_codec_info(hda_codec_t *codec)
 	case 0x10ec0268:
 		(void) snprintf(buf, sizeof (buf), "Realtek HD codec: ALC268");
 		break;
+	case 0x10ec0272:
+		(void) snprintf(buf, sizeof (buf), "Realtek HD codec: ALC272");
+		break;
 	case 0x10ec0662:
 		(void) snprintf(buf, sizeof (buf), "Realtek HD codec: ALC662");
+		break;
+	case 0x10ec0663:
+		(void) snprintf(buf, sizeof (buf), "Realtek HD codec: ALC663");
 		break;
 	case 0x10ec861:
 		(void) snprintf(buf, sizeof (buf), "Realtek HD codec: ALC861");
@@ -3010,6 +3261,14 @@ audiohd_set_codec_info(hda_codec_t *codec)
 		break;
 	case 0x10ec0888:
 		(void) snprintf(buf, sizeof (buf), "Realtek HD codec: ALC888");
+		break;
+	case 0x10de0002:
+		(void) snprintf(buf, sizeof (buf),
+		    "nVidia HD codec: MCP78 HDMI");
+		break;
+	case 0x10de0007:
+		(void) snprintf(buf, sizeof (buf),
+		    "nVidia HD codec: MCP7A HDMI");
 		break;
 	case 0x13f69880:
 		(void) snprintf(buf, sizeof (buf), "CMedia HD codec: CMI19880");
@@ -3040,6 +3299,13 @@ audiohd_set_codec_info(hda_codec_t *codec)
 	case 0x11d4198b:
 		(void) snprintf(buf, sizeof (buf),
 		    "Analog Devices HD codec: AD1988B");
+		break;
+	case 0x14f15051:
+		(void) snprintf(buf, sizeof (buf),
+		    "Conexant HD codec: CX20561");
+		break;
+	case 0x80862802:
+		(void) snprintf(buf, sizeof (buf), "Intel HD codec: HDMI");
 		break;
 	case 0x83847690:
 		(void) snprintf(buf, sizeof (buf),
@@ -3225,6 +3491,9 @@ audiohd_create_codec(audiohd_state_t *statep)
 		codec->vid = audioha_codec_verb_get(statep, i,
 		    AUDIOHDC_NODE_ROOT, AUDIOHDC_VERB_GET_PARAM,
 		    AUDIOHDC_PAR_VENDOR_ID);
+		if (codec->vid == (uint32_t)(-1))
+			continue;
+
 		codec->revid =
 		    audioha_codec_verb_get(statep, i,
 		    AUDIOHDC_NODE_ROOT, AUDIOHDC_VERB_GET_PARAM,
@@ -3531,12 +3800,14 @@ audiohd_build_output_path(hda_codec_t *codec)
 	uint8_t			mixer_allow = 1;
 
 	/*
-	 * work around for laptops which have IDT audio chipset, such as
-	 * HP mini 1000 laptop, Dell Lattitude 6400. We don't allow mixer
-	 * widget on such path, which leads to speaker loud hiss noise.
+	 * Work around for laptops which have IDT or AD audio chipset, such as
+	 * HP mini 1000 laptop, Dell Lattitude 6400, Lenovo T60. We don't
+	 * allow mixer widget on such path, which leads to speaker
+	 * loud hiss noise.
 	 */
 	if (codec->vid == AUDIOHD_CODEC_IDT7608 ||
-	    codec->vid == AUDIOHD_CODEC_IDT76B2)
+	    codec->vid == AUDIOHD_CODEC_IDT76B2 ||
+	    codec->vid == AUDIOHD_CODEC_AD1981)
 		mixer_allow = 0;
 	/* search an exclusive mixer widget path. This is preferred */
 	audiohd_do_build_output_path(codec, mixer_allow, &mnum, 1, 0);
@@ -5138,12 +5409,13 @@ audiohd_allocate_port(audiohd_state_t *statep)
 
 		port->format = AUDIOHD_FMT_PCM;
 		port->fragfr = 48000 / port->intrs;
-		port->fragfr = (port->fragfr + AUDIOHD_FRAGFR_ALIGN - 1) & ~
-		    (AUDIOHD_FRAGFR_ALIGN - 1);
+		port->fragfr = AUDIOHD_ROUNDUP(port->fragfr,
+		    AUDIOHD_FRAGFR_ALIGN);
 		port->samp_size = port->fragfr * port->nchan * 2;
-		port->samp_size = (port->samp_size +
-		    AUDIOHD_BDLE_BUF_ALIGN - 1) & ~
-		    (AUDIOHD_BDLE_BUF_ALIGN - 1);
+		port->samp_size = AUDIOHD_ROUNDUP(port->samp_size,
+		    AUDIOHD_BDLE_BUF_ALIGN);
+		port->nframes = port->samp_size * AUDIOHD_BDLE_NUMS /
+		    (port->nchan * 2);
 
 		/* allocate dma handle */
 		rc = ddi_dma_alloc_handle(dip, &dma_attr, DDI_DMA_SLEEP,
@@ -5153,16 +5425,35 @@ audiohd_allocate_port(audiohd_state_t *statep)
 			    rc);
 			return (DDI_FAILURE);
 		}
-		/* allocate DMA buffer */
+
+		/*
+		 * Warning: please be noted that allocating the dma memory
+		 * with the flag IOMEM_DATA_UNCACHED is a hack due
+		 * to an incorrect cache synchronization on NVidia MCP79
+		 * chipset which causes the audio distortion problem,
+		 * and that it should be fixed later. There should be
+		 * no reason you have to allocate UNCACHED memory. In
+		 * complex architectures with nested IO caches,
+		 * reliance on this flag might lead to failure.
+		 */
 		rc = ddi_dma_mem_alloc(port->samp_dmah, port->samp_size *
 		    AUDIOHD_BDLE_NUMS,
 		    &hda_dev_accattr,
-		    DDI_DMA_CONSISTENT,
+		    DDI_DMA_CONSISTENT | IOMEM_DATA_UNCACHED,
 		    DDI_DMA_SLEEP, NULL, &port->samp_kaddr,
 		    &real_size, &port->samp_acch);
 		if (rc == DDI_FAILURE) {
-			audio_dev_warn(adev, "dma_mem_alloc failed");
-			return (DDI_FAILURE);
+			if (ddi_dma_mem_alloc(port->samp_dmah,
+			    port->samp_size * AUDIOHD_BDLE_NUMS,
+			    &hda_dev_accattr,
+			    DDI_DMA_CONSISTENT,
+			    DDI_DMA_SLEEP, NULL,
+			    &port->samp_kaddr, &real_size,
+			    &port->samp_acch) != DDI_SUCCESS) {
+				audio_dev_warn(adev,
+				    "ddi_dma_mem_alloc failed");
+				return (DDI_FAILURE);
+			}
 		}
 
 		/* bind DMA buffer */
@@ -5512,6 +5803,7 @@ audiohd_suspend(audiohd_state_t *statep)
 	/* Disable h/w */
 	audiohd_disable_intr(statep);
 	audiohd_stop_dma(statep);
+	audiohd_fini_pci(statep);
 	mutex_exit(&statep->hda_mutex);
 
 	return (DDI_SUCCESS);
@@ -5766,14 +6058,16 @@ audiohd_pin_sense(audiohd_state_t *statep, uint32_t resp, uint32_t respex)
  *	DDI_INTR_UNCLAIMED  Interrupt not claimed, and thus ignored
  */
 static uint_t
-audiohd_intr(caddr_t arg)
+audiohd_intr(caddr_t arg1, caddr_t arg2)
 {
-	audiohd_state_t	*statep = (audiohd_state_t *)arg;
+	audiohd_state_t	*statep = (void *)arg1;
 	uint32_t	status;
 	uint32_t	regbase;
 	uint32_t	resp, respex;
 	uint8_t		sdstatus, rirbsts;
 	int		i, ret;
+
+	_NOTE(ARGUNUSED(arg2))
 	audio_engine_t	*do_adc = NULL;
 	audio_engine_t	*do_dac = NULL;
 
@@ -6037,9 +6331,11 @@ audioha_codec_verb_get(void *arg, uint8_t caddr, uint8_t wid,
 		return (resp);
 	}
 
-	audio_dev_warn(statep->adev, "timeout when get "
-	    " response from codec: wid=%d, verb=0x%04x, param=0x%04x",
-	    wid, verb, param);
+	if (wid != AUDIOHDC_NODE_ROOT && param != AUDIOHDC_PAR_VENDOR_ID) {
+		audio_dev_warn(statep->adev,  "timeout when get "
+		    "response from codec: wid=%d, verb=0x%04x, param=0x%04x",
+		    wid, verb, param);
+	}
 
 	return ((uint32_t)(-1));
 
@@ -6079,7 +6375,7 @@ audioha_codec_4bit_verb_get(void *arg, uint8_t caddr, uint8_t wid,
 	}
 
 	audio_dev_warn(statep->adev,  "timeout when get "
-	    " response from codec: wid=%d, verb=0x%04x, param=0x%04x",
+	    "response from codec: wid=%d, verb=0x%04x, param=0x%04x",
 	    wid, verb, param);
 
 	return ((uint32_t)(-1));

@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -112,6 +112,7 @@ extern void		mddb_setexit(mddb_set_t *s);
 extern void		*lookup_entry(struct nm_next_hdr *, set_t,
 				side_t, mdkey_t, md_dev64_t, int);
 extern struct nm_next_hdr	*get_first_record(set_t, int, int);
+extern dev_t		getrootdev(void);
 
 struct mdq_anchor	md_done_daemon; /* done request queue */
 struct mdq_anchor	md_mstr_daemon; /* mirror error, WOW requests */
@@ -715,7 +716,7 @@ md_ioctl_lock_exit(int code, int flags, mdi_unit_t *ui, int ioctl_end)
 				mddb_parse_msg->msg_lb_flags[i] =
 				    lbp->lb_locators[i].l_flags;
 			}
-			kresult = kmem_zalloc(sizeof (md_mn_kresult_t),
+			kresult = kmem_alloc(sizeof (md_mn_kresult_t),
 			    KM_SLEEP);
 			while (rval != 0) {
 				flag = 0;
@@ -1125,8 +1126,20 @@ md_unit_decopen(
 
 	/* teardown kstat, return success */
 	if (! (ui->ui_lock & MD_UL_OPEN)) {
-		mutex_exit(&ui->ui_mx);
-		md_kstat_destroy(mnum);
+
+		/*
+		 * We have a race condition inherited from specfs between
+		 * open() and close() calls. This results in the kstat
+		 * for a pending I/O being torn down, and then a panic.
+		 * To avoid this, only tear the kstat down if there are
+		 * no other readers on this device.
+		 */
+		if (ui->ui_readercnt > 1) {
+			mutex_exit(&ui->ui_mx);
+		} else {
+			mutex_exit(&ui->ui_mx);
+			md_kstat_destroy(mnum);
+		}
 		return (0);
 	}
 
@@ -1333,6 +1346,7 @@ callb_md_cpr(void *arg, int code)
 {
 	callb_cpr_t *cp = (callb_cpr_t *)arg;
 	int ret = 0;				/* assume success */
+	clock_t delta;
 
 	mutex_enter(cp->cc_lockp);
 
@@ -1355,10 +1369,11 @@ callb_md_cpr(void *arg, int code)
 		mutex_exit(&md_cpr_resync.md_resync_mutex);
 
 		cp->cc_events |= CALLB_CPR_START;
+		delta = CPR_KTHREAD_TIMEOUT_SEC * hz;
 		while (!(cp->cc_events & CALLB_CPR_SAFE))
-			/* cv_timedwait() returns -1 if it times out. */
-			if ((ret = cv_timedwait(&cp->cc_callb_cv, cp->cc_lockp,
-			    lbolt + CPR_KTHREAD_TIMEOUT_SEC * hz)) == -1)
+			/* cv_reltimedwait() returns -1 if it times out. */
+			if ((ret = cv_reltimedwait(&cp->cc_callb_cv,
+			    cp->cc_lockp, delta, TR_CLOCK_TICK)) == -1)
 				break;
 			break;
 
@@ -3380,6 +3395,7 @@ md_probe_one(probe_req_t *reqp)
 	mdi_unit_t		*ui;
 	md_probedev_impl_t	*p;
 	int			err = 0;
+	set_t			setno;
 
 	p = (md_probedev_impl_t *)reqp->private_handle;
 	/*
@@ -3389,20 +3405,41 @@ md_probe_one(probe_req_t *reqp)
 	 * locks this will prevent a metaclear operation being performed
 	 * on the metadevice because metaclear takes the readerlock (via
 	 * openclose lock).
+	 * To avoid a potential deadlock with the probe_fcn() causing i/o to
+	 * be issued to the writerlock'd metadevice we only grab the writerlock
+	 * if the unit is not an SVM root device.
 	 */
 	while (md_ioctl_lock_enter() == EINTR)
 		;
+	setno = MD_MIN2SET(reqp->mnum);
 	ui = MDI_UNIT(reqp->mnum);
 	if (ui != NULL) {
-		(void) md_unit_writerlock_common(ui, 0);
+		int	writer_grabbed;
+		dev_t	svm_root;
+
+		if ((setno == MD_LOCAL_SET) && root_is_svm) {
+			svm_root = getrootdev();
+
+			if (getminor(svm_root) == reqp->mnum) {
+				writer_grabbed = 0;
+			} else {
+				writer_grabbed = 1;
+				(void) md_unit_writerlock_common(ui, 0);
+			}
+		} else {
+			writer_grabbed = 1;
+			(void) md_unit_writerlock_common(ui, 0);
+		}
 		(void) md_ioctl_lock_exit(0, 0, 0, FALSE);
 		err = (*reqp->probe_fcn)(ui, reqp->mnum);
-		md_unit_writerexit(ui);
+		if (writer_grabbed) {
+			md_unit_writerexit(ui);
+		}
 	} else {
 		(void) md_ioctl_lock_exit(0, 0, 0, FALSE);
 	}
 
-	/* update the info info in the probe structure */
+	/* update the info in the probe structure */
 
 	mutex_enter(PROBE_MX(p));
 	if (err != 0) {
@@ -3884,9 +3921,11 @@ md_vtoc_to_efi_record(mddb_recid_t vtoc_recid, set_t setno)
  * mirror owner, and MD_MSGF_DIRECTED will be set in the flags.  Non-owner
  * nodes will not receive these messages.
  *
- * For the case where md_mn_is_commd_present() is false, we rely on the
- * "result" having been kmem_zalloc()ed which, in effect, sets MDMNE_NULL for
- * kmmr_comm_state making MDMN_KSEND_MSG_OK() result in 0.
+ * For the case where md_mn_is_commd_present() is false, we simply pre-set
+ * the result->kmmr_comm_state to MDMNE_RPC_FAIL.
+ * This covers the case where the service mdcommd has been killed and so we do
+ * not get a 'new' result structure copied back. Instead we return with the
+ * supplied result field, and we need to flag a failure to the caller.
  */
 int
 mdmn_ksend_message(
@@ -3904,6 +3943,15 @@ mdmn_ksend_message(
 	uint_t		retry_noise_cnt = 0;
 	int		rval;
 	k_sigset_t	oldmask, newmask;
+
+	/*
+	 * Ensure that we default to a recoverable failure state if the
+	 * door upcall cannot pass the request on to rpc.mdcommd.
+	 * This may occur when shutting the node down while there is still
+	 * a mirror resync or metadevice state update occurring.
+	 */
+	result->kmmr_comm_state = MDMNE_RPC_FAIL;
+	result->kmmr_exitval = ~0;
 
 	if (size > MDMN_MAX_KMSG_DATA)
 		return (ENOMEM);
@@ -4059,7 +4107,7 @@ mdmn_send_capability_message(minor_t mnum, volcap_t vc, IOLOCK *lockp)
 
 	if (lockp)
 		IOLOCK_RETURN_RELEASE(0, lockp);
-	kres = kmem_zalloc(sizeof (md_mn_kresult_t), KM_SLEEP);
+	kres = kmem_alloc(sizeof (md_mn_kresult_t), KM_SLEEP);
 
 	/*
 	 * Mask signals for the mdmd_ksend_message call.  This keeps the door
@@ -4106,7 +4154,7 @@ mdmn_clear_all_capabilities(minor_t mnum)
 	 * The check open message doesn't have to be logged, nor should the
 	 * result be stored in the MCT. We want an up-to-date state.
 	 */
-	kresult = kmem_zalloc(sizeof (md_mn_kresult_t), KM_SLEEP);
+	kresult = kmem_alloc(sizeof (md_mn_kresult_t), KM_SLEEP);
 
 	/*
 	 * Mask signals for the mdmd_ksend_message call.  This keeps the door
@@ -4167,6 +4215,7 @@ callb_md_mrs_cpr(void *arg, int code)
 {
 	callb_cpr_t *cp = (callb_cpr_t *)arg;
 	int ret = 0;				/* assume success */
+	clock_t delta;
 
 	mutex_enter(cp->cc_lockp);
 
@@ -4179,10 +4228,11 @@ callb_md_mrs_cpr(void *arg, int code)
 		 */
 		md_mn_clear_commd_present();
 		cp->cc_events |= CALLB_CPR_START;
+		delta = CPR_KTHREAD_TIMEOUT_SEC * hz;
 		while (!(cp->cc_events & CALLB_CPR_SAFE))
 			/* cv_timedwait() returns -1 if it times out. */
-			if ((ret = cv_timedwait(&cp->cc_callb_cv, cp->cc_lockp,
-			    lbolt + CPR_KTHREAD_TIMEOUT_SEC * hz)) == -1)
+			if ((ret = cv_reltimedwait(&cp->cc_callb_cv,
+			    cp->cc_lockp, delta, TR_CLOCK_TICK)) == -1)
 				break;
 			break;
 

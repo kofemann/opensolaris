@@ -25,7 +25,8 @@
  */
 
 #include "nge.h"
-static uint32_t	nge_watchdog_count	= 1 << 29;
+static uint32_t	nge_watchdog_count	= 1 << 5;
+static uint32_t	nge_watchdog_check	= 1 << 3;
 extern boolean_t nge_enable_msi;
 static void nge_sync_mac_modes(nge_t *);
 
@@ -1126,11 +1127,6 @@ nge_chip_reset(nge_t *ngep)
 		nge_reg_put32(ngep, NGE_PM_CNTL2, pm_cntl2.cntl_val);
 	}
 
-	/*
-	 * Reset the external phy
-	 */
-	if (!nge_phy_reset(ngep))
-		return (DDI_FAILURE);
 	ngep->nge_chip_state = NGE_CHIP_RESET;
 	return (DDI_SUCCESS);
 }
@@ -1307,12 +1303,12 @@ nge_chip_start(nge_t *ngep)
 	intr_mask.mask_bits.reint = NGE_SET;
 	intr_mask.mask_bits.rcint = NGE_SET;
 	intr_mask.mask_bits.miss = NGE_SET;
-	intr_mask.mask_bits.teint = NGE_CLEAR;
-	intr_mask.mask_bits.tcint = NGE_SET;
+	intr_mask.mask_bits.teint = NGE_SET;
+	intr_mask.mask_bits.tcint = NGE_CLEAR;
 	intr_mask.mask_bits.stint = NGE_CLEAR;
 	intr_mask.mask_bits.mint = NGE_CLEAR;
 	intr_mask.mask_bits.rfint = NGE_CLEAR;
-	intr_mask.mask_bits.tfint = NGE_CLEAR;
+	intr_mask.mask_bits.tfint = NGE_SET;
 	intr_mask.mask_bits.feint = NGE_SET;
 	intr_mask.mask_bits.resv10 = NGE_CLEAR;
 	intr_mask.mask_bits.resv11 = NGE_CLEAR;
@@ -1463,6 +1459,7 @@ nge_sync_mac_modes(nge_t *ngep)
 	nge_bkoff_cntl bk_cntl;
 	nge_mac2phy m2p;
 	nge_rx_cntrl0 rx_cntl0;
+	nge_tx_cntl tx_cntl;
 	nge_dev_spec_param_t	*dev_param_p;
 
 	dev_param_p = &ngep->dev_spec_param;
@@ -1539,11 +1536,30 @@ nge_sync_mac_modes(nge_t *ngep)
 	nge_reg_put32(ngep, NGE_BKOFF_CNTL, bk_cntl.cntl_val);
 
 	rx_cntl0.cntl_val = nge_reg_get32(ngep, NGE_RX_CNTL0);
-	if (ngep->param_link_rx_pause && dev_param_p->rx_pause_frame)
-		rx_cntl0.cntl_bits.paen = NGE_SET;
-	else
-		rx_cntl0.cntl_bits.paen = NGE_CLEAR;
-	nge_reg_put32(ngep, NGE_RX_CNTL0, rx_cntl0.cntl_val);
+	if (ngep->param_link_rx_pause && dev_param_p->rx_pause_frame) {
+		if (rx_cntl0.cntl_bits.paen == NGE_CLEAR) {
+			rx_cntl0.cntl_bits.paen = NGE_SET;
+			nge_reg_put32(ngep, NGE_RX_CNTL0, rx_cntl0.cntl_val);
+	}
+	} else {
+		if (rx_cntl0.cntl_bits.paen == NGE_SET) {
+			rx_cntl0.cntl_bits.paen = NGE_CLEAR;
+			nge_reg_put32(ngep, NGE_RX_CNTL0, rx_cntl0.cntl_val);
+		}
+	}
+
+	tx_cntl.cntl_val = nge_reg_get32(ngep, NGE_TX_CNTL);
+	if (ngep->param_link_tx_pause && dev_param_p->tx_pause_frame) {
+		if (tx_cntl.cntl_bits.paen == NGE_CLEAR) {
+			tx_cntl.cntl_bits.paen = NGE_SET;
+			nge_reg_put32(ngep, NGE_TX_CNTL, tx_cntl.cntl_val);
+		}
+	} else {
+		if (tx_cntl.cntl_bits.paen == NGE_SET) {
+			tx_cntl.cntl_bits.paen = NGE_CLEAR;
+			nge_reg_put32(ngep, NGE_TX_CNTL, tx_cntl.cntl_val);
+		}
+	}
 }
 
 /*
@@ -1620,6 +1636,8 @@ static boolean_t
 nge_factotum_stall_check(nge_t *ngep)
 {
 	uint32_t dogval;
+	send_ring_t *srp;
+	srp = ngep->send;
 	/*
 	 * Specific check for Tx stall ...
 	 *
@@ -1634,21 +1652,19 @@ nge_factotum_stall_check(nge_t *ngep)
 	 * All of which should ensure that we don't get into a state
 	 * where packets are left pending indefinitely!
 	 */
+	if (ngep->watchdog == 0 &&
+	    srp->tx_free < srp->desc.nslots)
+		ngep->watchdog = 1;
 	dogval = nge_atomic_shl32(&ngep->watchdog, 1);
-	if (dogval < nge_watchdog_count) {
-		ngep->stall_cknum = 0;
-	} else {
-		ngep->stall_cknum++;
-	}
-	if (ngep->stall_cknum < 16) {
+	if (dogval >= nge_watchdog_check)
+		nge_tx_recycle(ngep, B_FALSE);
+	if (dogval < nge_watchdog_count)
 		return (B_FALSE);
-	} else {
-		ngep->stall_cknum = 0;
+	else {
 		ngep->statistics.sw_statistics.tx_stall++;
 		return (B_TRUE);
 	}
 }
-
 
 
 /*
@@ -1733,12 +1749,8 @@ nge_intr_handle(nge_t *ngep, nge_intr_src *pintr_src)
 	if (pintr_src->int_bits.miss)
 		ngep->statistics.sw_statistics.rx_nobuffer++;
 
-	btx = (pintr_src->int_bits.teint | pintr_src->int_bits.tcint)
+	btx = (pintr_src->int_bits.teint | pintr_src->int_bits.tfint)
 	    != 0 ? B_TRUE : B_FALSE;
-	if (pintr_src->int_bits.stint && ngep->poll)
-		ngep->stint_count ++;
-	if (ngep->poll && (ngep->stint_count % ngep->param_tx_n_intr == 0))
-		btx = B_TRUE;
 	if (btx)
 		nge_tx_recycle(ngep, B_TRUE);
 	if (brx)
@@ -1753,8 +1765,6 @@ nge_intr_handle(nge_t *ngep, nge_intr_src *pintr_src)
 				    ngep->param_poll_quiet_time) {
 					ngep->poll = B_FALSE;
 					ngep->quiet_time = 0;
-					ngep->stint_count = 0;
-					nge_tx_recycle(ngep, B_TRUE);
 				}
 			} else
 				ngep->quiet_time = 0;
@@ -1822,9 +1832,6 @@ nge_chip_intr(caddr_t arg1, caddr_t arg2)
 		intr_mask.mask_val = nge_reg_get32(ngep, NGE_INTR_MASK);
 		intr_mask.mask_bits.stint = NGE_SET;
 		intr_mask.mask_bits.rcint = NGE_CLEAR;
-		intr_mask.mask_bits.reint = NGE_CLEAR;
-		intr_mask.mask_bits.tcint = NGE_CLEAR;
-		intr_mask.mask_bits.teint = NGE_CLEAR;
 		nge_reg_put32(ngep, NGE_INTR_MASK, intr_mask.mask_val);
 		ngep->ch_intr_mode = B_TRUE;
 	} else if ((ngep->ch_intr_mode) && (!ngep->poll)) {

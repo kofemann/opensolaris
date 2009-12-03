@@ -64,7 +64,14 @@ extern "C" {
  * fast reboot.
  */
 #define	FASTBOOT_SAVED_MMAP_COUNT	32
-#define	FASTBOOT_SAVED_DRIVES_COUNT	9
+
+#define	FASTBOOT_SAVED_DRIVES_MAX	8
+#define	FASTBOOT_SAVED_DRIVES_PORT_MAX	128
+#define	FASTBOOT_SAVED_DRIVES_SIZE	\
+	((offsetof(struct mb_drive_info, drive_ports) +	\
+	FASTBOOT_SAVED_DRIVES_PORT_MAX * sizeof (uint16_t)) *	\
+	FASTBOOT_SAVED_DRIVES_MAX)
+
 #define	FASTBOOT_SAVED_CMDLINE_LEN	MMU_PAGESIZE
 
 
@@ -166,8 +173,12 @@ extern int fastreboot_capable;
 extern int force_fastreboot;
 
 /* If set, fast reboot after panic. */
-extern int fastreboot_onpanic;
+extern volatile int fastreboot_onpanic;
 extern char fastreboot_onpanic_cmdline[FASTBOOT_SAVED_CMDLINE_LEN];
+
+/* Variables for avoiding panic/reboot loop */
+extern clock_t fastreboot_onpanic_uptime;
+extern clock_t lbolt_at_boot, panic_lbolt;
 
 #endif	/* _ASM */
 

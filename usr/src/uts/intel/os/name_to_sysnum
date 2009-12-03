@@ -45,7 +45,6 @@ times			43
 profil			44
 setgid			46
 getgid			47
-ssig			48
 msgsys			49
 sysi86			50
 sysacct			51
@@ -97,6 +96,8 @@ getloadavg		105
 nfs			106
 waitsys			107
 sigsendsys		108
+hrtsys			109
+utimesys		110
 sigresend		111
 priocntlsys		112
 pathconf		113

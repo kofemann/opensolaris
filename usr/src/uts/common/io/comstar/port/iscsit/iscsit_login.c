@@ -189,6 +189,11 @@ iscsit_process_negotiated_values(iscsit_conn_t *ict);
 static void
 login_resp_complete_cb(idm_pdu_t *pdu, idm_status_t status);
 
+static idm_status_t
+iscsit_add_declarative_keys(iscsit_conn_t *ict);
+
+uint64_t max_dataseglen_target = ISCSIT_MAX_RECV_DATA_SEGMENT_LENGTH;
+
 idm_status_t
 iscsit_login_sm_init(iscsit_conn_t *ict)
 {
@@ -885,8 +890,8 @@ login_sm_send_next_response(iscsit_conn_t *ict, idm_pdu_t *pdu)
 	hton24(lh_resp->dlength, pdu->isp_datalen);
 
 	/*
-	 * If this is going to be the last PDU of a login response
-	 * that moves us to FFP then generate the ILE_LOGIN_FFP event.
+	 * If the login is successful, this login response will contain
+	 * the next StatSN and advance the StatSN for the connection.
 	 */
 	if (lh_resp->status_class == ISCSI_STATUS_CLASS_SUCCESS) {
 		ASSERT(ict->ict_sess != NULL);
@@ -906,6 +911,7 @@ login_sm_send_next_response(iscsit_conn_t *ict, idm_pdu_t *pdu)
 		}
 
 		iscsit_conn_hold(ict);
+		pdu->isp_flags |= IDM_PDU_SET_STATSN | IDM_PDU_ADVANCE_STATSN;
 		iscsit_pdu_tx(pdu);
 	} else {
 		/*
@@ -1050,6 +1056,14 @@ request_fail:
 		nvlist_free(lsm->icl_response_nvlist);
 		lsm->icl_response_nvlist = NULL;
 	}
+	/* Make sure we already set the login error */
+	if (ict->ict_login_sm.icl_login_resp_err_class ==
+	    ISCSI_STATUS_CLASS_SUCCESS) {
+		SET_LOGIN_ERROR(ict,
+		    ISCSI_STATUS_CLASS_TARGET_ERR,
+		    ISCSI_LOGIN_STATUS_TARGET_ERROR);
+	}
+	iscsit_login_sm_event(ict, ILE_LOGIN_RESP_READY, NULL);
 }
 
 
@@ -1854,6 +1868,16 @@ login_sm_process_nvlist(iscsit_conn_t *ict)
 		lsm->icl_login_transit = B_FALSE;
 	}
 
+	/* Prepend the declarative params */
+	if (!ict->ict_op.op_declarative_params_set &&
+	    lsm->icl_login_csg == ISCSI_OP_PARMS_NEGOTIATION_STAGE) {
+		if (iscsit_add_declarative_keys(ict) != IDM_STATUS_SUCCESS) {
+			idm_status = IDM_STATUS_FAIL;
+			return (idm_status);
+		}
+		ict->ict_op.op_declarative_params_set = B_TRUE;
+	}
+
 	/* Now, move on and process the rest of the pairs */
 	nvp = nvlist_next_nvpair(lsm->icl_request_nvlist, NULL);
 	while (nvp != NULL) {
@@ -2261,11 +2285,12 @@ iscsit_handle_operational_key(iscsit_conn_t *ict, nvpair_t *nvp,
 		    ISCSI_MAX_CONNECTIONS,
 		    ISCSIT_MAX_CONNECTIONS);
 		break;
+		/* this is a declartive param */
 	case KI_MAX_RECV_DATA_SEGMENT_LENGTH:
 		kvrc = iscsit_handle_numerical(ict, nvp, num_val, ikvx,
 		    ISCSI_MIN_RECV_DATA_SEGMENT_LENGTH,
 		    ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH,
-		    ISCSIT_MAX_RECV_DATA_SEGMENT_LENGTH);
+		    ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH);
 		break;
 	case KI_MAX_BURST_LENGTH:
 		kvrc = iscsit_handle_numerical(ict, nvp, num_val, ikvx,
@@ -2412,22 +2437,27 @@ iscsit_handle_boolean(iscsit_conn_t *ict, nvpair_t *nvp, boolean_t value,
 	kv_status_t		kvrc;
 	int			nvrc;
 
-	if (value != iscsit_value) {
-		/* Respond back to initiator with our value */
-		value = iscsit_value;
-		lsm->icl_login_transit = B_FALSE;
-		nvrc = 0;
+	if (ikvx->ik_declarative) {
+		nvrc = nvlist_add_nvpair(lsm->icl_negotiated_values, nvp);
 	} else {
-		/* Add this to our negotiated values */
-		nvrc = nvlist_add_nvpair(lsm->icl_negotiated_values,
-		    nvp);
+		if (value != iscsit_value) {
+			/* Respond back to initiator with our value */
+			value = iscsit_value;
+			lsm->icl_login_transit = B_FALSE;
+			nvrc = 0;
+		} else {
+			/* Add this to our negotiated values */
+			nvrc = nvlist_add_nvpair(lsm->icl_negotiated_values,
+			    nvp);
+		}
+
+		/* Response of Simple-value Negotiation */
+		if (nvrc == 0) {
+			nvrc = nvlist_add_boolean_value(
+			    lsm->icl_response_nvlist, ikvx->ik_key_name, value);
+		}
 	}
 
-	/* Response of Simple-value Negotiation */
-	if (nvrc == 0 && !ikvx->ik_declarative) {
-		nvrc = nvlist_add_boolean_value(
-		    lsm->icl_response_nvlist, ikvx->ik_key_name, value);
-	}
 	kvrc = idm_nvstat_to_kvstat(nvrc);
 
 	return (kvrc);
@@ -2446,6 +2476,9 @@ iscsit_handle_numerical(iscsit_conn_t *ict, nvpair_t *nvp, uint64_t value,
 	/* Validate against standard */
 	if ((value < iscsi_min_value) || (value > iscsi_max_value)) {
 		kvrc = KV_VALUE_ERROR;
+	} else if (ikvx->ik_declarative) {
+		nvrc = nvlist_add_nvpair(lsm->icl_negotiated_values, nvp);
+		kvrc = idm_nvstat_to_kvstat(nvrc);
 	} else {
 		if (value > iscsit_max_value) {
 			/* Respond back to initiator with our value */
@@ -2459,7 +2492,7 @@ iscsit_handle_numerical(iscsit_conn_t *ict, nvpair_t *nvp, uint64_t value,
 		}
 
 		/* Response of Simple-value Negotiation */
-		if (nvrc == 0 && !ikvx->ik_declarative) {
+		if (nvrc == 0) {
 			nvrc = nvlist_add_uint64(lsm->icl_response_nvlist,
 			    ikvx->ik_key_name, value);
 		}
@@ -2576,4 +2609,40 @@ iscsit_process_negotiated_values(iscsit_conn_t *ict)
 		ASSERT(nvrc == 0);
 		ict->ict_op.op_error_recovery_level = uint64_val;
 	}
+}
+
+static idm_status_t
+iscsit_add_declarative_keys(iscsit_conn_t *ict)
+{
+	nvlist_t		*cfg_nv = NULL;
+	kv_status_t		kvrc;
+	int			nvrc;
+	iscsit_conn_login_t	*lsm = &ict->ict_login_sm;
+	uint8_t			error_class;
+	uint8_t			error_detail;
+	idm_status_t		idm_status;
+
+	if ((nvrc = nvlist_alloc(&cfg_nv, NV_UNIQUE_NAME, KM_NOSLEEP)) != 0) {
+		kvrc = idm_nvstat_to_kvstat(nvrc);
+		goto alloc_fail;
+	}
+	if ((nvrc = nvlist_add_uint64(cfg_nv, "MaxRecvDataSegmentLength",
+	    max_dataseglen_target)) != 0) {
+		kvrc = idm_nvstat_to_kvstat(nvrc);
+		goto done;
+	}
+
+	kvrc = idm_declare_key_values(ict->ict_ic, cfg_nv,
+	    lsm->icl_response_nvlist);
+done:
+	nvlist_free(cfg_nv);
+alloc_fail:
+	idm_kvstat_to_error(kvrc, &error_class, &error_detail);
+	if (error_class == ISCSI_STATUS_CLASS_SUCCESS) {
+		idm_status = IDM_STATUS_SUCCESS;
+	} else {
+		SET_LOGIN_ERROR(ict, error_class, error_detail);
+		idm_status = IDM_STATUS_FAIL;
+	}
+	return (idm_status);
 }

@@ -1983,7 +1983,7 @@ mir_rput(queue_t *q, mblk_t *mp)
 					 * This marker is used in mir_timer().
 					 */
 					mir->mir_clntreq = 1;
-					mir->mir_use_timestamp = lbolt;
+					mir->mir_use_timestamp = ddi_get_lbolt();
 				} else
 					freemsg(head_mp);
 				break;
@@ -2686,6 +2686,7 @@ mir_timer(void *arg)
 	queue_t *wq = (queue_t *)arg;
 	mir_t *mir = (mir_t *)wq->q_ptr;
 	boolean_t notify;
+	clock_t now;
 
 	mutex_enter(&mir->mir_mutex);
 
@@ -2724,17 +2725,18 @@ mir_timer(void *arg)
 		 * The timer interval can be changed for individual
 		 * streams with the ND variable "mir_idle_timeout".
 		 */
+		now = ddi_get_lbolt();
 		if (mir->mir_clntreq > 0 && mir->mir_use_timestamp +
-		    MSEC_TO_TICK(mir->mir_idle_timeout) - lbolt >= 0) {
+		    MSEC_TO_TICK(mir->mir_idle_timeout) - now >= 0) {
 			clock_t tout;
 
 			tout = mir->mir_idle_timeout -
-			    TICK_TO_MSEC(lbolt - mir->mir_use_timestamp);
+			    TICK_TO_MSEC(now - mir->mir_use_timestamp);
 			if (tout < 0)
 				tout = 1000;
 #if 0
 			printf("mir_timer[%d < %d + %d]: reset client timer "
-			    "to %d (ms)\n", TICK_TO_MSEC(lbolt),
+			    "to %d (ms)\n", TICK_TO_MSEC(now),
 			    TICK_TO_MSEC(mir->mir_use_timestamp),
 			    mir->mir_idle_timeout, tout);
 #endif
@@ -2744,7 +2746,7 @@ mir_timer(void *arg)
 			return;
 		}
 #if 0
-printf("mir_timer[%d]: doing client timeout\n", lbolt / hz);
+printf("mir_timer[%d]: doing client timeout\n", now / hz);
 #endif
 		/*
 		 * We are disconnecting, but not necessarily
@@ -2869,7 +2871,7 @@ mir_wput(queue_t *q, mblk_t *mp)
 		 * connection is active.
 		 */
 		mir->mir_clntreq = 1;
-		mir->mir_use_timestamp = lbolt;
+		mir->mir_use_timestamp = ddi_get_lbolt();
 	}
 
 	/*

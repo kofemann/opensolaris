@@ -22,7 +22,6 @@
 # Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#
 
 include ../Makefile.master
 
@@ -147,13 +146,16 @@ SUBDIRS += \
 	nametoaddr	\
 	ncad_addr	\
 	hbaapi		\
+	smhba		\
 	sun_fc		\
+	sun_sas		\
 	gss_mechs/mech_krb5	.WAIT	\
 	libkrb5	.WAIT	\
 	krb5	.WAIT	\
 	libsmbfs	\
 	libfcoe		\
 	libstmf		\
+	libstmfproxy	\
 	libnsctl	\
 	libunistat	\
 	libdscfg	\
@@ -161,8 +163,6 @@ SUBDIRS += \
 	libinstzones	\
 	libpkg
 
-$(CLOSED_BUILD)SUBDIRS += \
-	$(CLOSED)/lib/smartcard
 SUBDIRS += \
 	passwdutil	\
 	pam_modules	\
@@ -183,6 +183,7 @@ SUBDIRS += \
 	libdhcpagent	\
 	libdhcpdu	\
 	libdhcputil	\
+	libxnet		\
 	libipsecutil
 $(CLOSED_BUILD)SUBDIRS += \
 	$(CLOSED)/lib/libike
@@ -206,7 +207,6 @@ SUBDIRS += \
 	libwrap		\
 	libxcurses	\
 	libxcurses2	\
-	libxnet		\
 	libbrand	.WAIT   \
 	libzonecfg	\
 	libzoneinfo	\
@@ -253,14 +253,21 @@ SUBDIRS += \
 	libnfs		\
 	libipmi		\
 	libexacct/demo	\
+	libvrrpadm	\
 	libvscan	\
 	libgrubmgmt	\
 	smbsrv		\
+	libilb		\
 	scsi		\
 	mms		\
 	libima		\
 	libsun_ima	\
 	mpapi		\
+	librstp		\
+	libreparse	\
+	libhotplug	\
+	libfruutils	.WAIT	\
+	libfru		\
 	$($(MACH)_SUBDIRS)
 
 i386_SUBDIRS=		\
@@ -277,8 +284,6 @@ sparc_SUBDIRS= .WAIT	\
 	libprtdiag_psr	\
 	libpri		\
 	librsc		\
-	libfruutils	.WAIT	\
-	libfru		\
 	storage		\
 	libpcp		\
 	libtsalarm
@@ -327,6 +332,7 @@ MSGSUBDIRS=		\
 	libidmap	\
 	libinetcfg	\
 	libipmp		\
+	libilb		\
 	libinetutil	\
 	libinstzones	\
 	libnsl		\
@@ -348,6 +354,7 @@ MSGSUBDIRS=		\
 	libsum		\
 	libtsol		\
 	libuutil	\
+	libvrrpadm	\
 	libvscan	\
 	libwanboot	\
 	libwanbootutil	\
@@ -359,9 +366,8 @@ MSGSUBDIRS=		\
 	mpss		\
 	pam_modules	\
 	pyzfs		\
-	rpcsec_gss
-$(CLOSED_BUILD)MSGSUBDIRS += \
-	$(CLOSED)/lib/smartcard
+	rpcsec_gss	\
+	libreparse
 MSGSUBDIRS += \
 	$($(MACH)_MSGSUBDIRS)
 
@@ -401,6 +407,7 @@ HDRSUBDIRS=		\
 	libdtrace_jni	\
 	libelfsign	\
 	libeti		\
+	libfru		\
 	libfstyp	\
 	libgen		\
 	libwanboot	\
@@ -409,6 +416,7 @@ HDRSUBDIRS=		\
 	libinetcfg	\
 	libinetsvc	\
 	libinetutil	\
+	libinstzones	\
 	libipmi		\
 	libipmp		\
 	libipp		\
@@ -442,6 +450,7 @@ HDRSUBDIRS=		\
 	librestart	\
 	librpcsvc	\
 	librsm		\
+	librstp		\
 	libsasl		\
 	libsec		\
 	libshell	\
@@ -450,6 +459,7 @@ HDRSUBDIRS=		\
 	libsqlite	\
 	libfcoe		\
 	libstmf		\
+	libstmfproxy	\
 	libsum		\
 	libsysevent	\
 	libtecla	\
@@ -458,6 +468,7 @@ HDRSUBDIRS=		\
 	libtnfprobe	\
 	libtsnet	\
 	libtsol		\
+	libvrrpadm	\
 	libvolmgt	\
 	libumem		\
 	libunistat	\
@@ -483,20 +494,22 @@ HDRSUBDIRS=		\
 	libvscan	\
 	libgrubmgmt	\
 	smbsrv		\
+	libilb		\
 	libdserv	\
 	libnfs		\
 	scsi		\
 	hbaapi		\
+	smhba		\
 	libima		\
 	libsun_ima	\
 	mpapi		\
 	mms		\
+	libreparse	\
 	$($(MACH)_HDRSUBDIRS)
 
 $(CLOSED_BUILD)HDRSUBDIRS += \
 	$(CLOSED)/lib/libc_i18n	\
-	$(CLOSED)/lib/libike	\
-	$(CLOSED)/lib/smartcard
+	$(CLOSED)/lib/libike
 
 i386_HDRSUBDIRS=	\
 	libparted	\
@@ -549,9 +562,6 @@ _msg:			$(MSGSUBDIRS:%=%-nodepend) .WAIT _dc
 
 _dc:			$(DCSUBDIRS:%=%-nodepend)
 
-# dependencies for pam_modules (see below)
-$(CLOSED_BUILD)SMARTCARD=	$(CLOSED)/lib/smartcard
-
 #
 # Library interdependencies are called out explicitly here
 #
@@ -590,7 +600,9 @@ libmapid:	libresolv
 libnwam:	libdoor
 librdc:		libsocket libnsl libnsctl libunistat libdscfg
 libuuid:	libdlpi
+$(CLOSED_BUILD)libike:	libipsecutil libxnet libcryptoutil
 libinetutil:	libsocket
+libipsecutil:	libtecla libsocket
 libinstzones:	libzonecfg libcontract
 libpkg:		libwanboot libscf libadm
 libsecdb:	libnsl
@@ -601,6 +613,7 @@ libshell:	libast libcmd libdll libsocket libsecdb
 libsip:		libmd5
 libsmbfs:	libsocket libnsl libkrb5
 libsocket:	libnsl
+libstmfproxy: 	libstmf libsocket libnsl libpthread
 libsum: 	libast
 libldap5:	libsasl libsocket libnsl libmd
 libsldap:	libldap5 libtsol libnsl libc libscf libresolv
@@ -615,7 +628,7 @@ libwrap:	libnsl libsocket
 libwanboot:	libnvpair libresolv libnsl libsocket libdevinfo libinetutil \
 		libdhcputil
 libwanbootutil:	libnsl
-pam_modules:	libproject passwdutil $(SMARTCARD) smbsrv
+pam_modules:	libproject passwdutil smbsrv
 libscf:		libuutil libmd libgen libsmbios
 libinetsvc:	libscf
 librestart:	libuutil libscf
@@ -624,8 +637,8 @@ librestart:	libuutil libscf
 pkcs11:		libcryptoutil
 print:		libldap5
 udapl/udapl_tavor:	udapl/libdat
-libzfs:		libdevinfo libdevid libgen libnvpair libuutil libiscsitgt \
-		libavl libefi libidmap
+libzfs:		libdevid libgen libnvpair libuutil libiscsitgt \
+		libadm libavl libefi libidmap
 libzfs_jni:	libdiskmgt libnvpair libzfs
 libzpool:	libavl libumem libnvpair
 libsec:		libavl libidmap
@@ -637,11 +650,17 @@ libexacct/demo:	libexacct libproject libsocket libnsl
 libtsalarm:	libpcp
 smbsrv:		libsocket libnsl libmd libxnet libpthread librt \
 		libshare libidmap pkcs11 libsqlite
+libvrrpadm:	libsocket libdladm
 libvscan:	libscf
 scsi:		libnvpair
 mpapi:		libpthread libdevinfo libsysevent libnvpair
 libgrubmgmt:	libdevinfo libzfs libfstyp
 pyzfs:		libnvpair libsec libidmap libzfs
+libreparse:	libnvpair
+libhotplug:	libnvpair
+cfgadm_plugins:	libhotplug
+libilb:		libsocket
+$(INTEL_BUILD)libdiskmgt:libfdisk
 
 #
 # The reason this rule checks for the existence of the

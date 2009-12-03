@@ -110,8 +110,6 @@ $(CLOSED_BUILD)CLOSED_HDRS=	\
 	memtestio_sr.h		\
 	memtestio_u.h
 
-$(CLOSED_BUILD)CLOSED_I2CHDRS =	clients/scmi2c.h
-
 I2CHDRS =	clients/max1617.h misc/i2c_svc.h clients/i2c_client.h	\
 		clients/hpc3130.h clients/lm75.h	\
 		clients/pcf8591.h clients/ssc050.h $(CLOSED_I2CHDRS)
@@ -165,10 +163,10 @@ check:	$(CHECKHDRS)
 # install rules
 #
 $(USR_PSM_MON_DIR):	$(USR_PSM_ISYS_DIR)
-	$(INS.dir.root.bin)
+	$(INS.dir)
 
 $(USR_PSM_ISYS_I2C_DIRS):
-	$(INS.dir.root.bin)
+	$(INS.dir)
 
 $(USR_PSM_ISYS_DIR)/%:	$(CLOSED)/uts/sun4u/sys/% $(USR_PSM_ISYS_DIR)
 	$(INS.file)
@@ -186,7 +184,7 @@ $(USR_PSM_MON_DIR)/%:	mon/% $(USR_PSM_MON_DIR)
 	$(INS.file)
 
 $(ROOTDIRS):
-	$(INS.dir.root.bin)
+	$(INS.dir)
 
 # -r because this used to be a directory and is now a link.
 $(ROOTLINK):	$(ROOTDIRS)

@@ -71,6 +71,7 @@ f none kernel/drv/sparcv9/aggr 755 root sys
 f none kernel/drv/sparcv9/arp 755 root sys
 f none kernel/drv/sparcv9/bl 755 root sys
 f none kernel/drv/sparcv9/bpp 755 root sys
+f none kernel/drv/sparcv9/bridge 755 root sys
 f none kernel/drv/sparcv9/clone 755 root sys
 f none kernel/drv/sparcv9/cn 755 root sys
 f none kernel/drv/sparcv9/conskbd 755 root sys
@@ -92,6 +93,7 @@ f none kernel/drv/sparcv9/ip6 755 root sys
 f none kernel/drv/sparcv9/ippctl 755 root sys
 f none kernel/drv/sparcv9/ipsecah 755 root sys
 f none kernel/drv/sparcv9/ipsecesp 755 root sys
+f none kernel/drv/sparcv9/iptun 755 root sys
 f none kernel/drv/sparcv9/isp 755 root sys
 f none kernel/drv/sparcv9/iwscn 755 root sys
 f none kernel/drv/sparcv9/kb8042 755 root sys
@@ -165,7 +167,10 @@ f none kernel/fs/sparcv9/ufs 755 root sys
 d none kernel/ipp/sparcv9 755 root sys
 f none kernel/ipp/sparcv9/ipgpc 755 root sys
 d none kernel/mac/sparcv9 755 root sys
+f none kernel/mac/sparcv9/mac_6to4 755 root sys
 f none kernel/mac/sparcv9/mac_ether 755 root sys
+f none kernel/mac/sparcv9/mac_ipv4 755 root sys
+f none kernel/mac/sparcv9/mac_ipv6 755 root sys
 f none kernel/mac/sparcv9/mac_wifi 755 root sys
 f none kernel/mac/sparcv9/mac_ib 755 root sys
 f none kernel/misc/sparcv9/bignum 755 root sys
@@ -205,8 +210,6 @@ f none kernel/misc/sparcv9/mii 755 root sys
 f none kernel/misc/sparcv9/neti 755 root sys
 f none kernel/misc/sparcv9/pcie 755 root sys
 f none kernel/misc/sparcv9/pcihp 755 root sys
-f none kernel/misc/sparcv9/pciehpc 755 root sys
-f none kernel/misc/sparcv9/pcishpc 755 root sys
 f none kernel/misc/sparcv9/pcmcia 755 root sys
 f none kernel/misc/sparcv9/rpcsec 755 root sys
 f none kernel/misc/sparcv9/scsi 755 root sys
@@ -217,12 +220,11 @@ f none kernel/misc/sparcv9/swapgeneric 755 root sys
 f none kernel/misc/sparcv9/tlimod 755 root sys
 f none kernel/misc/sparcv9/tem 755 root sys
 d none kernel/sched/sparcv9 755 root sys
+f none kernel/sched/sparcv9/SDC 755 root sys
 f none kernel/sched/sparcv9/TS 755 root sys
 f none kernel/sched/sparcv9/TS_DPTBL 755 root sys
 d none kernel/strmod/sparcv9 755 root sys
-f none kernel/strmod/sparcv9/6to4tun 755 root sys
 l none kernel/strmod/sparcv9/arp=../../../kernel/drv/sparcv9/arp
-f none kernel/strmod/sparcv9/atun 755 root sys
 f none kernel/strmod/sparcv9/bufmod 755 root sys
 f none kernel/strmod/sparcv9/connld 755 root sys
 f none kernel/strmod/sparcv9/dedump 755 root sys
@@ -244,7 +246,6 @@ l none kernel/strmod/sparcv9/tcp=../../../kernel/drv/sparcv9/tcp
 f none kernel/strmod/sparcv9/timod 755 root sys
 f none kernel/strmod/sparcv9/tirdwr 755 root sys
 f none kernel/strmod/sparcv9/ttcompat 755 root sys
-f none kernel/strmod/sparcv9/tun 755 root sys
 l none kernel/strmod/sparcv9/udp=../../../kernel/drv/sparcv9/udp
 f none kernel/strmod/sparcv9/vuid3ps2 755 root sys
 d none kernel/sys/sparcv9 755 root sys
@@ -272,3 +273,4 @@ l none kernel/socketmod/sparcv9/rts=../../../kernel/drv/sparcv9/rts
 l none kernel/socketmod/sparcv9/tcp=../../../kernel/drv/sparcv9/tcp
 l none kernel/socketmod/sparcv9/udp=../../../kernel/drv/sparcv9/udp
 f none kernel/socketmod/sparcv9/socksctp 755 root sys
+f none kernel/socketmod/sparcv9/trill 755 root sys

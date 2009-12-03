@@ -1,5 +1,5 @@
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  *
  * Copyright (c) 1983, 1988, 1993
@@ -687,8 +687,8 @@ rtm_type_name(uchar_t type)
 		"RTM_NEWADDR",
 		"RTM_DELADDR",
 		"RTM_IFINFO",
-		"RTM_NEWMADDR",
-		"RTM_DELMADDR"
+		"RTM_CHGMADDR",
+		"RTM_FREEMADDR"
 	};
 #define	NEW_RTM_PAT	"RTM type %#x"
 	static char name0[sizeof (NEW_RTM_PAT) + 2];
@@ -716,6 +716,8 @@ dump_rt_msg(const char *act, struct rt_msghdr *rtm, int mlen)
 	switch (rtm->rtm_type) {
 	case RTM_NEWADDR:
 	case RTM_DELADDR:
+	case RTM_FREEADDR:
+	case RTM_CHGADDR:
 		mtype = "ifam";
 		break;
 	case RTM_IFINFO:
@@ -737,6 +739,8 @@ dump_rt_msg(const char *act, struct rt_msghdr *rtm, int mlen)
 	switch (rtm->rtm_type) {
 	case RTM_NEWADDR:
 	case RTM_DELADDR:
+	case RTM_CHGADDR:
+	case RTM_FREEADDR:
 		ifam = (struct ifa_msghdr *)rtm;
 		trace_misc("ifam: msglen %d version %d type %d addrs %X",
 		    ifam->ifam_msglen, ifam->ifam_version, ifam->ifam_type,
@@ -1228,6 +1232,10 @@ rtm_add(struct rt_msghdr *rtm,
 static void
 rtm_lose(struct rt_msghdr *rtm, struct rt_addrinfo *info)
 {
+	struct rt_spare new, *rts, *losing_rts = NULL;
+	struct rt_entry *rt;
+	int i, spares;
+
 	if (INFO_GATE(info) == NULL || INFO_GATE(info)->ss_family != AF_INET) {
 		trace_act("ignore %s without gateway",
 		    rtm_type_name(rtm->rtm_type));
@@ -1235,6 +1243,36 @@ rtm_lose(struct rt_msghdr *rtm, struct rt_addrinfo *info)
 		return;
 	}
 
+	rt = rtfind(S_ADDR(INFO_DST(info)));
+	if (rt != NULL) {
+		spares = 0;
+		for (i = 0; i < rt->rt_num_spares;  i++) {
+			rts = &rt->rt_spares[i];
+			if (rts->rts_gate == S_ADDR(INFO_GATE(info))) {
+				losing_rts = rts;
+				continue;
+			}
+			if (rts->rts_gate != 0 && rts->rts_ifp != &dummy_ifp)
+				spares++;
+		}
+	}
+	if (rt == NULL || losing_rts == NULL) {
+		trace_act("Ignore RTM_LOSING because no route found"
+		    " for %s through %s",
+		    naddr_ntoa(S_ADDR(INFO_DST(info))),
+		    naddr_ntoa(S_ADDR(INFO_GATE(info))));
+		return;
+	}
+	if (spares == 0) {
+		trace_act("Got RTM_LOSING, but no alternatives to gw %s."
+		    " deprecating route to metric 15",
+		    naddr_ntoa(S_ADDR(INFO_GATE(info))));
+		new = *losing_rts;
+		new.rts_metric = HOPCNT_INFINITY - 1;
+		rtchange(rt, rt->rt_state, &new, 0);
+		return;
+	}
+	trace_act("Got RTM_LOSING. Found a route with %d alternates", spares);
 	if (rdisc_ok)
 		rdisc_age(S_ADDR(INFO_GATE(info)));
 	age(S_ADDR(INFO_GATE(info)));
@@ -1603,6 +1641,9 @@ read_rt(void)
 			    ((ifp->int_if_flags ^ m.ifm.ifm_flags) &
 			    IFF_UP) != 0)
 				ifscan_timer.tv_sec = now.tv_sec;
+			continue;
+		} else if (m.r.rtm.rtm_type == RTM_CHGADDR ||
+		    m.r.rtm.rtm_type == RTM_FREEADDR) {
 			continue;
 		} else {
 			if (m.r.rtm.rtm_index != 0)
@@ -2254,7 +2295,6 @@ rtfind(in_addr_t dst)
 	dst_sock.sin_addr.s_addr = dst;
 	return ((struct rt_entry *)rhead->rnh_matchaddr(&dst_sock, rhead));
 }
-
 
 /* add a route to the table */
 void

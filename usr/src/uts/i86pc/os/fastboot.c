@@ -136,12 +136,31 @@ static uintptr_t fake_va = FASTBOOT_FAKE_VA;
 int reserve_mem_enabled = 1;
 
 /*
+ * Mutex to protect fastreboot_onpanic.
+ */
+kmutex_t fastreboot_config_mutex;
+
+/*
  * Amount of memory below PA 1G to reserve for constructing the multiboot
  * data structure and the page tables as we tend to run out of those
  * when more drivers are loaded.
  */
 static size_t fastboot_mbi_size = 0x2000;	/* 8K */
 static size_t fastboot_pagetable_size = 0x5000;	/* 20K */
+
+/*
+ * Minimum system uptime in clock_t before Fast Reboot should be used
+ * on panic.  Will be initialized in fastboot_post_startup().
+ */
+clock_t fastreboot_onpanic_uptime = LONG_MAX;
+
+/*
+ * lbolt value when the system booted.  This value will be used if the system
+ * panics to calculate how long the system has been up.  If the uptime is less
+ * than fastreboot_onpanic_uptime, a reboot through BIOS will be performed to
+ * avoid a potential panic/reboot loop.
+ */
+clock_t lbolt_at_boot = LONG_MAX;
 
 /*
  * Use below 1G for page tables as
@@ -189,7 +208,7 @@ static ddi_dma_attr_t fastboot_dma_attr = {
  */
 extern multiboot_info_t saved_mbi;
 extern mb_memory_map_t saved_mmap[FASTBOOT_SAVED_MMAP_COUNT];
-extern struct sol_netinfo saved_drives[FASTBOOT_SAVED_DRIVES_COUNT];
+extern uint8_t saved_drives[FASTBOOT_SAVED_DRIVES_SIZE];
 extern char saved_cmdline[FASTBOOT_SAVED_CMDLINE_LEN];
 extern int saved_cmdline_len;
 extern size_t saved_file_size[];
@@ -220,7 +239,7 @@ static void fastboot_build_pagetables(fastboot_info_t *);
 static int fastboot_build_mbi(char *, fastboot_info_t *);
 static void fastboot_free_file(fastboot_file_t *);
 
-static const char fastboot_enomem_msg[] = "Fastboot: Couldn't allocate 0x%"
+static const char fastboot_enomem_msg[] = "!Fastboot: Couldn't allocate 0x%"
 	PRIx64" bytes below %s to do fast reboot";
 
 static void
@@ -471,7 +490,7 @@ fastboot_build_mbi(char *mdep, fastboot_info_t *nk)
 		if ((nk->fi_new_mbi_va =
 		    (uintptr_t)contig_alloc(size, &fastboot_below_1G_dma_attr,
 		    PAGESIZE, 0)) == NULL) {
-			cmn_err(CE_WARN, fastboot_enomem_msg,
+			cmn_err(CE_NOTE, fastboot_enomem_msg,
 			    (uint64_t)size, "1G");
 			return (-1);
 		}
@@ -557,6 +576,12 @@ fastboot_build_mbi(char *mdep, fastboot_info_t *nk)
 		bcopy((void *)saved_cmdline, (void *)(start_addr_va + offs),
 		    arglen);
 	}
+
+	/* clear fields and flags that are not copied */
+	bzero(&mbi->config_table,
+	    sizeof (*mbi) - offsetof(multiboot_info_t, config_table));
+	mbi->flags &= ~(MB_INFO_CONFIG_TABLE | MB_INFO_BOOT_LOADER_NAME |
+	    MB_INFO_APM_TABLE | MB_INFO_VIDEO_INFO);
 
 	return (0);
 }
@@ -862,7 +887,8 @@ fastboot_load_kernel(char *mdep)
 	int		is_retry = 0;
 	uint64_t	end_addr;
 
-	ASSERT(fastreboot_capable);
+	if (!fastreboot_capable)
+		return;
 
 	if (newkernel.fi_valid)
 		fastboot_free_newkernel(&newkernel);
@@ -923,14 +949,14 @@ load_kernel_retry:
 
 		if ((file = kobj_open_file(fastboot_filename[i])) ==
 		    (struct _buf *)-1) {
-			cmn_err(CE_WARN, "Fastboot: Couldn't open %s",
+			cmn_err(CE_NOTE, "!Fastboot: Couldn't open %s",
 			    fastboot_filename[i]);
 			goto err_out;
 		}
 
 		if (kobj_get_filesize(file, &fsize) != 0) {
-			cmn_err(CE_WARN,
-			    "Fastboot: Couldn't get filesize for %s",
+			cmn_err(CE_NOTE,
+			    "!Fastboot: Couldn't get filesize for %s",
 			    fastboot_filename[i]);
 			goto err_out;
 		}
@@ -943,7 +969,7 @@ load_kernel_retry:
 		 */
 		end_addr += fsize_roundup;
 		if (end_addr > fastboot_below_1G_dma_attr.dma_attr_addr_hi) {
-			cmn_err(CE_WARN, "Fastboot: boot archive is too big");
+			cmn_err(CE_NOTE, "!Fastboot: boot archive is too big");
 			goto err_out;
 		}
 
@@ -959,8 +985,8 @@ load_kernel_retry:
 				 * If we have already tried and didn't succeed,
 				 * just give up.
 				 */
-				cmn_err(CE_WARN,
-				    "Fastboot: boot archive is too big");
+				cmn_err(CE_NOTE,
+				    "!Fastboot: boot archive is too big");
 				goto err_out;
 			} else {
 				/* Set the flag so we don't keep retrying */
@@ -988,14 +1014,14 @@ load_kernel_retry:
 
 		if ((buf = contig_alloc(fsize, &dma_attr, PAGESIZE, 0))
 		    == NULL) {
-			cmn_err(CE_WARN, fastboot_enomem_msg, fsize, "64G");
+			cmn_err(CE_NOTE, fastboot_enomem_msg, fsize, "64G");
 			goto err_out;
 		}
 
 		va = P2ROUNDUP_TYPED((uintptr_t)buf, PAGESIZE, uintptr_t);
 
 		if (kobj_read_file(file, (char *)va, fsize, 0) < 0) {
-			cmn_err(CE_WARN, "Fastboot: Couldn't read %s",
+			cmn_err(CE_NOTE, "!Fastboot: Couldn't read %s",
 			    fastboot_filename[i]);
 			goto err_out;
 		}
@@ -1021,7 +1047,7 @@ load_kernel_retry:
 			    (x86pte_t *)contig_alloc(pt_size,
 			    &fastboot_below_1G_dma_attr, PAGESIZE, 0))
 			    == NULL) {
-				cmn_err(CE_WARN, fastboot_enomem_msg,
+				cmn_err(CE_NOTE, fastboot_enomem_msg,
 				    (uint64_t)pt_size, "1G");
 				goto err_out;
 			}
@@ -1066,7 +1092,7 @@ load_kernel_retry:
 			 */
 			for (j = 0; j < SELFMAG; j++) {
 				if (ehdr->e_ident[j] != ELFMAG[j]) {
-					cmn_err(CE_WARN, "Fastboot: Bad ELF "
+					cmn_err(CE_NOTE, "!Fastboot: Bad ELF "
 					    "signature");
 					goto err_out;
 				}
@@ -1082,13 +1108,13 @@ load_kernel_retry:
 				if (fastboot_elf32_find_loadables((void *)va,
 				    fsize, &fb->fb_sections[0],
 				    &fb->fb_sectcnt, &dboot_start_offset) < 0) {
-					cmn_err(CE_WARN, "Fastboot: ELF32 "
+					cmn_err(CE_NOTE, "!Fastboot: ELF32 "
 					    "program section failure");
 					goto err_out;
 				}
 
 				if (fb->fb_sectcnt == 0) {
-					cmn_err(CE_WARN, "Fastboot: No ELF32 "
+					cmn_err(CE_NOTE, "!Fastboot: No ELF32 "
 					    "program sections found");
 					goto err_out;
 				}
@@ -1115,14 +1141,14 @@ load_kernel_retry:
 				if (fastboot_elf64_find_dboot_load_offset(
 				    (void *)va, fsize, &dboot_start_offset)
 				    != 0) {
-					cmn_err(CE_WARN, "Fastboot: Couldn't "
+					cmn_err(CE_NOTE, "!Fastboot: Couldn't "
 					    "find ELF64 dboot entry offset");
 					goto err_out;
 				}
 
 				if ((x86_feature & X86_64) == 0 ||
 				    (x86_feature & X86_PAE) == 0) {
-					cmn_err(CE_WARN, "Fastboot: Cannot "
+					cmn_err(CE_NOTE, "!Fastboot: Cannot "
 					    "reboot to %s: "
 					    "not a 64-bit capable system",
 					    kern_bootfile);
@@ -1144,7 +1170,7 @@ load_kernel_retry:
 					    sizeof (BOOTARCHIVE64));
 				}
 			} else {
-				cmn_err(CE_WARN, "Fastboot: Unknown ELF type");
+				cmn_err(CE_NOTE, "!Fastboot: Unknown ELF type");
 				goto err_out;
 			}
 
@@ -1208,7 +1234,7 @@ load_kernel_retry:
 			if ((newkernel.fi_pagetable_va = (uintptr_t)
 			    contig_alloc(size, &fastboot_below_1G_dma_attr,
 			    MMU_PAGESIZE, 0)) == NULL) {
-				cmn_err(CE_WARN, fastboot_enomem_msg,
+				cmn_err(CE_NOTE, fastboot_enomem_msg,
 				    (uint64_t)size, "1G");
 				goto err_out;
 			}
@@ -1379,7 +1405,7 @@ fastboot_get_bootprop(void)
 			fastreboot_onpanic = val;
 		ddi_prop_free(propstr);
 	} else if (ret != DDI_PROP_NOT_FOUND && ret != DDI_PROP_UNDEFINED) {
-		cmn_err(CE_WARN, "%s value is invalid, will be ignored",
+		cmn_err(CE_NOTE, "!%s value is invalid, will be ignored",
 		    FASTREBOOT_ONPANIC);
 	}
 
@@ -1388,7 +1414,7 @@ fastboot_get_bootprop(void)
 	    FASTREBOOT_ONPANIC_CMDLINE, fastreboot_onpanic_cmdline, &len);
 
 	if (ret == DDI_PROP_BUF_TOO_SMALL)
-		cmn_err(CE_WARN, "%s value is too long, will be ignored",
+		cmn_err(CE_NOTE, "!%s value is too long, will be ignored",
 		    FASTREBOOT_ONPANIC_CMDLINE);
 }
 
@@ -1399,8 +1425,16 @@ fastboot_get_bootprop(void)
 void
 fastboot_post_startup()
 {
+	lbolt_at_boot = ddi_get_lbolt();
+
+	/* Default to 10 minutes */
+	if (fastreboot_onpanic_uptime == LONG_MAX)
+		fastreboot_onpanic_uptime = SEC_TO_TICK(10 * 60);
+
 	if (!fastreboot_capable)
 		return;
+
+	mutex_enter(&fastreboot_config_mutex);
 
 	fastboot_get_bootprop();
 
@@ -1408,6 +1442,8 @@ fastboot_post_startup()
 		fastboot_load_kernel(fastreboot_onpanic_cmdline);
 	else if (reserve_mem_enabled)
 		fastboot_reserve_mem(&newkernel);
+
+	mutex_exit(&fastreboot_config_mutex);
 }
 
 /*
@@ -1421,15 +1457,69 @@ void
 fastboot_update_config(const char *mdep)
 {
 	uint8_t boot_config = (uint8_t)*mdep;
-	int cur_fastreboot_onpanic = fastreboot_onpanic;
+	int cur_fastreboot_onpanic;
 
 	if (!fastreboot_capable)
 		return;
 
+	mutex_enter(&fastreboot_config_mutex);
+
+	cur_fastreboot_onpanic = fastreboot_onpanic;
 	fastreboot_onpanic = boot_config & UA_FASTREBOOT_ONPANIC;
+
 	if (fastreboot_onpanic && (!cur_fastreboot_onpanic ||
 	    !newkernel.fi_valid))
 		fastboot_load_kernel(fastreboot_onpanic_cmdline);
 	if (cur_fastreboot_onpanic && !fastreboot_onpanic)
 		fastboot_free_newkernel(&newkernel);
+
+	mutex_exit(&fastreboot_config_mutex);
+}
+
+/*
+ * This is the interface to be called by other kernel components to
+ * disable fastreboot_onpanic.
+ */
+void
+fastreboot_disable()
+{
+	uint8_t boot_config = (uint8_t)(~UA_FASTREBOOT_ONPANIC);
+	fastboot_update_config((const char *)&boot_config);
+}
+
+/*
+ * This is the interface to be called by fm_panic() in case FMA has diagnosed
+ * a terminal machine check exception.  It does not free up memory allocated
+ * for the backup kernel.  General disabling fastreboot_onpanic in a
+ * non-panicking situation must go through fastboot_update_config().
+ */
+void
+fastreboot_disable_highpil()
+{
+	fastreboot_onpanic = 0;
+}
+
+
+/*
+ * A simplified interface for uadmin to call to update the configuration
+ * setting and load a new kernel if necessary.
+ */
+void
+fastboot_update_and_load(int fcn, char *mdep)
+{
+	if (fcn != AD_FASTREBOOT) {
+		/*
+		 * If user has explicitly requested reboot to prom,
+		 * or uadmin(1M) was invoked with other functions,
+		 * don't try to fast reboot after dumping.
+		 */
+		fastreboot_disable();
+	}
+
+	mutex_enter(&fastreboot_config_mutex);
+
+	if (fastreboot_onpanic)
+		fastboot_load_kernel(mdep);
+
+	mutex_exit(&fastreboot_config_mutex);
 }

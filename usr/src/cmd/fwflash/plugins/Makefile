@@ -24,15 +24,12 @@
 #
 # cmd/fwflash/plugins
 #
+include $(SRC)/Makefile.master
 
-include $(SRC)/cmd/Makefile.cmd
+COMMON_SUBDIRS=	$(MACH)
+$(CLOSED_BUILD)COMMON_SUBDIRS += $(CLOSED)/cmd/fwflash/plugins 
 
-COMMON_SUBDIRS=	$(MACH) transport
-CLOSED_SUBDIRS= $(CLOSED)/cmd/fwflash/plugins 
-
-SUBDIRS=	$(COMMON_SUBDIRS) $(CLOSED_SUBDIRS)
-
-MSGSUBDIRS=	$(COMMON_SUBDIRS) $(CLOSED_SUBDIRS)
+SUBDIRS=	$(COMMON_SUBDIRS)
 
 all :=		TARGET= all
 install :=	TARGET= install
@@ -42,19 +39,10 @@ lint :=		TARGET= lint
 _msg :=		TARGET= _msg
 msg :=		TARGET= msg
 
-include $(SRC)/cmd/fwflash/Makefile.com
-
 
 .KEEP_STATE:
 
-all:		$(SUBDIRS)
-lint:		$(SUBDIRS)
-install:	$(SUBDIRS)
-clean:		$(SUBDIRS)
-clobber:	$(SUBDIRS)
-
-
-msg _msg:	$(MSGSUBDIRS)
+all clean clobber install lint msg _msg:		$(SUBDIRS)
 
 
 $(SUBDIRS): FRC

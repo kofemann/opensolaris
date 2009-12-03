@@ -32,7 +32,7 @@
 #include <sys/door_data.h>
 #include <sys/uio.h>
 #include <sys/ksynch.h>
-#include <smbsrv/smb_incl.h>
+#include <smbsrv/smb_kproto.h>
 #include <smbsrv/smb_xdr.h>
 
 #define	SMB_OPIPE_ISOPEN(OPIPE)	\
@@ -170,13 +170,13 @@ smb_opipe_lookup(const char *path)
 
 	name = path;
 	name += strspn(name, "\\");
-	if (utf8_strncasecmp(name, "PIPE", 4) == 0) {
+	if (smb_strcasecmp(name, "PIPE", 4) == 0) {
 		path += 4;
 		name += strspn(name, "\\");
 	}
 
 	for (i = 0; i < sizeof (named_pipes) / sizeof (named_pipes[0]); ++i) {
-		if (utf8_strcasecmp(name, named_pipes[i]) == 0)
+		if (smb_strcasecmp(name, named_pipes[i], 0) == 0)
 			return (named_pipes[i]);
 	}
 
@@ -232,7 +232,7 @@ smb_opipe_fid(void)
 	mutex_enter(&smb_opipe_fid_mutex);
 
 	if (opipe_fid == 0)
-		opipe_fid = lbolt << 11;
+		opipe_fid = ddi_get_lbolt() << 11;
 
 	do {
 		++opipe_fid;

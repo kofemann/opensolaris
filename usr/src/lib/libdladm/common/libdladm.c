@@ -30,6 +30,8 @@
 #include <strings.h>
 #include <dirent.h>
 #include <stdlib.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/dld.h>
@@ -52,6 +54,7 @@ static media_type_t media_type_table[] =  {
 	{ DL_IB,	"Infiniband" },
 	{ DL_IPV4,	"IPv4Tunnel" },
 	{ DL_IPV6,	"IPv6Tunnel" },
+	{ DL_6TO4,	"6to4Tunnel" },
 	{ DL_CSMACD,	"CSMA/CD" },
 	{ DL_TPB,	"TokenBus" },
 	{ DL_TPR,	"TokenRing" },
@@ -78,6 +81,18 @@ static media_type_t media_type_table[] =  {
 	{ DL_OTHER, 	"Other" }
 };
 #define	MEDIATYPECOUNT	(sizeof (media_type_table) / sizeof (media_type_t))
+
+typedef struct {
+	uint32_t	lp_type;
+	char		*lp_name;
+} link_protect_t;
+
+static link_protect_t link_protect_types[] = {
+	{ MPT_MACNOSPOOF, "mac-nospoof" },
+	{ MPT_IPNOSPOOF, "ip-nospoof" },
+	{ MPT_RESTRICTED, "restricted" }
+};
+#define	LPTYPES	(sizeof (link_protect_types) / sizeof (link_protect_t))
 
 dladm_status_t
 dladm_open(dladm_handle_t *handle)
@@ -345,6 +360,27 @@ dladm_status2str(dladm_status_t status, char *buf)
 	case DLADM_STATUS_NO_HWRINGS:
 		s = "request hw rings failed";
 		break;
+	case DLADM_STATUS_PERMONLY:
+		s = "change must be persistent";
+		break;
+	case DLADM_STATUS_OPTMISSING:
+		s = "optional software not installed";
+		break;
+	case DLADM_STATUS_IPTUNTYPE:
+		s = "invalid IP tunnel type";
+		break;
+	case DLADM_STATUS_IPTUNTYPEREQD:
+		s = "IP tunnel type required";
+		break;
+	case DLADM_STATUS_BADIPTUNLADDR:
+		s = "invalid local IP tunnel address";
+		break;
+	case DLADM_STATUS_BADIPTUNRADDR:
+		s = "invalid remote IP tunnel address";
+		break;
+	case DLADM_STATUS_ADDRINUSE:
+		s = "address already in use";
+		break;
 	default:
 		s = "<unknown error>";
 		break;
@@ -393,6 +429,8 @@ dladm_errno2status(int err)
 		return (DLADM_STATUS_FLOW_INCOMPATIBLE);
 	case EALREADY:
 		return (DLADM_STATUS_FLOW_IDENTICAL);
+	case EADDRINUSE:
+		return (DLADM_STATUS_ADDRINUSE);
 	default:
 		return (DLADM_STATUS_FAILED);
 	}
@@ -567,8 +605,14 @@ dladm_class2str(datalink_class_t class, char *buf)
 	case DATALINK_CLASS_ETHERSTUB:
 		s = "etherstub";
 		break;
+	case DATALINK_CLASS_IPTUN:
+		s = "iptun";
+		break;
 	case DATALINK_CLASS_SIMNET:
 		s = "simnet";
+		break;
+	case DATALINK_CLASS_BRIDGE:
+		s = "bridge";
 		break;
 	default:
 		s = "unknown";
@@ -738,7 +782,7 @@ dladm_valid_linkname(const char *link)
 	size_t		len = strlen(link);
 	const char	*cp;
 
-	if (len + 1 >= MAXLINKNAMELEN)
+	if (len >= MAXLINKNAMELEN)
 		return (B_FALSE);
 
 	/*
@@ -749,10 +793,10 @@ dladm_valid_linkname(const char *link)
 
 	/*
 	 * The legal characters in a link name are:
-	 * alphanumeric (a-z,  A-Z,  0-9), and the underscore ('_').
+	 * alphanumeric (a-z,  A-Z,  0-9), underscore ('_'), and '.'.
 	 */
 	for (cp = link; *cp != '\0'; cp++) {
-		if ((isalnum(*cp) == 0) && (*cp != '_'))
+		if ((isalnum(*cp) == 0) && (*cp != '_') && (*cp != '.'))
 			return (B_FALSE);
 	}
 
@@ -804,6 +848,82 @@ dladm_pri2str(mac_priority_level_t pri, char *buf)
 	}
 	(void) snprintf(buf, DLADM_STRSIZE, "%s", dgettext(TEXT_DOMAIN, s));
 	return (buf);
+}
+
+/*
+ * Convert protect string to a value.
+ */
+dladm_status_t
+dladm_str2protect(char *token, uint32_t *ptype)
+{
+	link_protect_t	*lp;
+	int		i;
+
+	for (i = 0; i < LPTYPES; i++) {
+		lp = &link_protect_types[i];
+		if (strcmp(token, lp->lp_name) == 0) {
+			*ptype = lp->lp_type;
+			return (DLADM_STATUS_OK);
+		}
+	}
+	return (DLADM_STATUS_BADVAL);
+}
+
+/*
+ * Convert protect value to a string.
+ */
+const char *
+dladm_protect2str(uint32_t ptype, char *buf)
+{
+	const char	*s = "--";
+	link_protect_t	*lp;
+	int		i;
+
+	for (i = 0; i < LPTYPES; i++) {
+		lp = &link_protect_types[i];
+		if (lp->lp_type == ptype) {
+			s = lp->lp_name;
+			break;
+		}
+	}
+	(void) snprintf(buf, DLADM_STRSIZE, "%s", dgettext(TEXT_DOMAIN, s));
+	return (buf);
+}
+
+/*
+ * Convert an IPv4 address to/from a string.
+ */
+const char *
+dladm_ipv4addr2str(void *addr, char *buf)
+{
+	if (inet_ntop(AF_INET, addr, buf, INET_ADDRSTRLEN) == NULL)
+		buf[0] = 0;
+
+	return (buf);
+}
+
+dladm_status_t
+dladm_str2ipv4addr(char *token, void *addr)
+{
+	return (inet_pton(AF_INET, token, addr) == 1 ?
+	    DLADM_STATUS_OK : DLADM_STATUS_INVALID_IP);
+}
+
+/*
+ * Find the set bits in a mask.
+ * This is used for expanding a bitmask into individual sub-masks
+ * which can be used for further processing.
+ */
+void
+dladm_find_setbits32(uint32_t mask, uint32_t *list, uint32_t *cnt)
+{
+	int	i, c = 0;
+
+	for (i = 0; i < 32; i++) {
+		if (((1 << i) & mask) != 0)
+			list[c++] = 1 << i;
+	}
+	*cnt = c;
 }
 
 void

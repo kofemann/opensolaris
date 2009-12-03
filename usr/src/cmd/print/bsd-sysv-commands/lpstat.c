@@ -403,7 +403,7 @@ report_printer(papi_service_t svc, char *name, papi_printer_t printer,
 
 	switch (pstat) {
 	case 0x03:	/* idle */
-		printf(gettext("idle. enabled"));
+		printf(gettext("is idle. enabled"));
 		break;
 	case 0x04: /* processing */
 		status = papiPrinterListJobs(svc, name, NULL,
@@ -414,7 +414,6 @@ report_printer(papi_service_t svc, char *name, papi_printer_t printer,
 				int i = 0;
 				int32_t jobid = 0;
 				int32_t jstate = 0;
-				int flag = 0;
 
 				for (i = 0; j[i] != NULL; ++i) {
 					papi_attribute_t **attr =
@@ -424,18 +423,33 @@ report_printer(papi_service_t svc, char *name, papi_printer_t printer,
 					    NULL, "job-state", &jstate);
 					papiAttributeListGetInteger(attr,
 					    NULL, "job-id", &jobid);
+					/*
+					 * For lpd protocol "job-id-requested"
+					 * should be read.
+					 */
+					papiAttributeListGetInteger(attr,
+					    NULL, "job-id-requested", &jobid);
 
 					/*
-					 * If the job-state is in
-					 * RS_PRINTING then only print.
+					 * When lpd protocol is used job-state
+					 * cannot be retrieved, therefore
+					 * job-state will be 0.
+					 * When ipp protocol is used, the
+					 * active/printing job-state will be
+					 * RS_PRINTING (0x0008) post s10u5.
+					 * For pre-s10u5 job-state will be
+					 * RS_ACTIVE (0x05). So print only when
+					 * the job-state is RS_PRINTING (0x0008)
+					 * or RS_ACTIVE (0x05) or 0
 					 */
-					if (jstate == 0x0008) {
-						if (flag == 0)
-							printf(gettext
-							    ("now printing"\
-							    " %s-%d. enabled"),
-							    name, jobid);
-						flag = 1;
+					if ((jstate == 0x0008) ||
+					    (jstate == 0x05) ||
+					    (jstate == 0)) {
+						printf(gettext
+						    ("now printing"\
+						    " %s-%d. enabled"),
+						    name, jobid);
+						break;
 					}
 				}
 				papiJobListFree(j);
@@ -769,6 +783,8 @@ report_job(char *printer, papi_job_t job, int show_rank, int verbose)
 	int32_t id = -1;
 	static int check = 0;
 	static char *uri = NULL;
+	static char *puri = NULL;	/* printer-uri */
+	static char *pname = NULL;	/* printer-name */
 
 	(void) papiAttributeListGetString(attrs, NULL,
 	    "job-originating-user-name", &user);
@@ -779,14 +795,79 @@ report_job(char *printer, papi_job_t job, int show_rank, int verbose)
 	(void) papiAttributeListGetString(attrs, NULL,
 	    "job-originating-host-name", &host);
 
-	if (check == 0) {
+	/*
+	 * When lpstat is called for multiple printers
+	 * internally the function 'report_job' gets
+	 * called multiple times with different printer-names.
+	 * The following block of code handles the case when lpstat is
+	 * executed for multiple printers. In other words when 'report_job'
+	 * is called multiple times for different printers for
+	 * one lpstat command
+	 * For e.g: lpstat printer1 printer2 printer3
+	 */
+	if (pname == NULL) {
 		/*
+		 * When lpstat is queried for the first time
+		 * pname is NULL so this part of the code gets executed.
 		 * Read the attribute "job-printer-uri"
-		 * just once
+		 * first time
 		 */
 		(void) papiAttributeListGetString(attrs, NULL,
 		    "job-printer-uri", &uri);
-		check = 1;
+
+		if (printer != NULL) {
+			/*
+			 * Set pname to the printer that is being
+			 * queried so that this can be used later
+			 * if 'report_job' is called multiple times for
+			 * different printers for one lpstat command
+			 */
+			pname = printer;
+		}
+
+		if (uri != NULL) {
+			/*
+			 * Set puri so that "job-printer-uri" corresponding
+			 * to a particular printer can be used later when
+			 * lpstat is queried for the same printer as
+			 * "job-printer-uri" for a printer is read just once.
+			 */
+			puri = strdup(uri);
+		}
+	} else {
+		/*
+		 * This part of the code will get executed when
+		 * 'report_job' is called more than once for the same
+		 * lpstat command
+		 */
+		if (printer != NULL) {
+			if (strcasecmp(pname, printer) != 0) {
+				/*
+				 * Read the job-printer-uri as
+				 * it will be different for
+				 * different printers
+				 */
+				uri = NULL;
+				(void) papiAttributeListGetString(attrs,
+				    NULL, "job-printer-uri", &uri);
+				pname = printer;
+				if (uri != NULL)
+					puri = strdup(uri);
+				else
+					puri = NULL;
+			} else {
+				/*
+				 * Same printer queried twice
+				 * uri should be the same as
+				 * already read in the previous call
+				 * to 'report_job'.
+				 * For the same printer 'job-printer-uri'
+				 * is read just once because only in the
+				 * first call it contains the host information
+				 */
+				uri = puri;
+			}
+		}
 	}
 
 	if (host) {

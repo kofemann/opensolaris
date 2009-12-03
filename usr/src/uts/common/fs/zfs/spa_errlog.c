@@ -58,7 +58,6 @@
  * This is a stripped-down version of strtoull, suitable only for converting
  * lowercase hexidecimal numbers that don't overflow.
  */
-#ifdef _KERNEL
 uint64_t
 strtonum(const char *str, char **nptr)
 {
@@ -85,7 +84,6 @@ strtonum(const char *str, char **nptr)
 
 	return (val);
 }
-#endif
 
 /*
  * Convert a bookmark to a string.
@@ -134,7 +132,7 @@ spa_log_error(spa_t *spa, zio_t *zio)
 	 * If we are trying to import a pool, ignore any errors, as we won't be
 	 * writing to the pool any time soon.
 	 */
-	if (spa->spa_load_state == SPA_LOAD_TRYIMPORT)
+	if (spa_load_state(spa) == SPA_LOAD_TRYIMPORT)
 		return;
 
 	mutex_enter(&spa->spa_errlist_lock);

@@ -47,7 +47,8 @@ typedef enum vdev_dtl_type {
 extern boolean_t zfs_nocacheflush;
 
 extern int vdev_open(vdev_t *);
-extern void vdev_open_children(vdev_t *vd);
+extern void vdev_open_children(vdev_t *);
+extern boolean_t vdev_uses_zvols(vdev_t *);
 extern int vdev_validate(vdev_t *);
 extern void vdev_close(vdev_t *);
 extern int vdev_create(vdev_t *, uint64_t txg, boolean_t isreplace);
@@ -79,18 +80,17 @@ extern void vdev_clear_stats(vdev_t *vd);
 extern void vdev_stat_update(zio_t *zio, uint64_t psize);
 extern void vdev_scrub_stat_update(vdev_t *vd, pool_scrub_type_t type,
     boolean_t complete);
-extern int vdev_getspec(spa_t *spa, uint64_t vdev, char **vdev_spec);
 extern void vdev_propagate_state(vdev_t *vd);
 extern void vdev_set_state(vdev_t *vd, boolean_t isopen, vdev_state_t state,
     vdev_aux_t aux);
 
-extern void vdev_space_update(vdev_t *vd, int64_t space_delta,
-    int64_t alloc_delta, boolean_t update_root);
+extern void vdev_space_update(vdev_t *vd,
+    int64_t alloc_delta, int64_t defer_delta, int64_t space_delta);
 
 extern uint64_t vdev_psize_to_asize(vdev_t *vd, uint64_t psize);
 
-extern int vdev_fault(spa_t *spa, uint64_t guid);
-extern int vdev_degrade(spa_t *spa, uint64_t guid);
+extern int vdev_fault(spa_t *spa, uint64_t guid, vdev_aux_t aux);
+extern int vdev_degrade(spa_t *spa, uint64_t guid, vdev_aux_t aux);
 extern int vdev_online(spa_t *spa, uint64_t guid, uint64_t flags,
     vdev_state_t *);
 extern int vdev_offline(spa_t *spa, uint64_t guid, uint64_t flags);
@@ -121,6 +121,7 @@ extern int vdev_config_sync(vdev_t **svd, int svdcount, uint64_t txg,
 extern void vdev_state_dirty(vdev_t *vd);
 extern void vdev_state_clean(vdev_t *vd);
 
+extern void vdev_top_config_generate(spa_t *spa, nvlist_t *config);
 extern nvlist_t *vdev_config_generate(spa_t *spa, vdev_t *vd,
     boolean_t getstats, boolean_t isspare, boolean_t isl2cache);
 

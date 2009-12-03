@@ -50,6 +50,8 @@ extern "C" {
 
 extern boolean_t mac_rx_bypass_set(mac_client_handle_t, mac_direct_rx_t,
     void *);
+extern void mac_rx_bypass_enable(mac_client_handle_t);
+extern void mac_rx_bypass_disable(mac_client_handle_t);
 
 extern const mac_info_t *mac_info(mac_handle_t);
 extern boolean_t mac_info_get(const char *, mac_info_t *);
@@ -68,6 +70,7 @@ extern boolean_t mac_sap_verify(mac_handle_t, uint32_t, uint32_t *);
 extern mblk_t *mac_header(mac_handle_t, const uint8_t *, uint32_t, mblk_t *,
     size_t);
 extern int mac_header_info(mac_handle_t, mblk_t *, mac_header_info_t *);
+extern int mac_vlan_header_info(mac_handle_t, mblk_t *, mac_header_info_t *);
 extern mblk_t *mac_header_cook(mac_handle_t, mblk_t *);
 extern mblk_t *mac_header_uncook(mac_handle_t, mblk_t *);
 
@@ -120,7 +123,7 @@ extern void	mac_rx_client_quiesce(mac_client_handle_t);
 extern void	mac_rx_client_restart(mac_client_handle_t);
 extern void	mac_srs_perm_quiesce(mac_client_handle_t, boolean_t);
 extern int	mac_hwrings_get(mac_client_handle_t, mac_group_handle_t *,
-		    mac_ring_handle_t *);
+		    mac_ring_handle_t *, mac_ring_type_t);
 extern void	mac_hwring_setup(mac_ring_handle_t, mac_resource_handle_t);
 extern void	mac_hwring_teardown(mac_ring_handle_t);
 extern int	mac_hwring_disable_intr(mac_ring_handle_t);

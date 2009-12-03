@@ -27,6 +27,7 @@
 SHELL=/usr/bin/ksh93
 
 include ../Makefile.cmd
+$(SPARC_BLD)include ../Makefile.cmd.64
 
 .KEEP_STATE:
 

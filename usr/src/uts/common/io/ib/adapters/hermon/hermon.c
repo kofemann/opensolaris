@@ -2377,8 +2377,9 @@ hermon_soft_state_init(hermon_state_t *state)
 	if (state->hs_devlim.log_max_gso_sz) {
 		hca_attr->hca_max_lso_size =
 		    (1 << state->hs_devlim.log_max_gso_sz);
-		/* More work needed in hermon_post_send for larger values */
-		hca_attr->hca_max_lso_hdr_size = 0x2c;	/* IPv4 only */
+		/* 64 = ctrl & datagram seg, 4 = LSO seg, 16 = 1 SGL */
+		hca_attr->hca_max_lso_hdr_size =
+		    state->hs_devlim.max_desc_sz_sq - (64 + 4 + 16);
 	}
 
 	caps |= IBT_HCA_WQE_SIZE_INFO;
@@ -2955,7 +2956,7 @@ hermon_inithca_set(hermon_state_t *state, hermon_hw_initqueryhca_t *inithca)
 			inithca->context.rdmardc_baseaddr_l =
 			    (icm[i].icm_baseaddr & 0xFFFFFFFF) >> 5;
 			inithca->context.log_num_rdmardc =
-			    icm[i].log_num_entries;
+			    cfg->cp_log_num_rdb - cfg->cp_log_num_qp;
 			break;
 
 		case HERMON_MCG:
@@ -3373,6 +3374,10 @@ hermon_hca_port_init(hermon_state_t *state)
 			goto init_ports_fail;
 		}
 
+		/* Set mtu_cap to 4096 bytes */
+		initport->mmc = 1;	/* set the change bit */
+		initport->mtu_cap = 5;	/* for 4096 bytes */
+
 		/* Validate the max port width */
 		maxval  = state->hs_queryport.ib_port_wid;
 		val	= cfgprof->cp_max_port_width;
@@ -3386,6 +3391,10 @@ hermon_hca_port_init(hermon_state_t *state)
 		if (val > maxval) {
 			goto init_ports_fail;
 		}
+
+		/* Since we're doing mtu_cap, cut vl_cap down */
+		initport->mvc = 1;	/* set this change bit */
+		initport->vl_cap = 3;	/* 3 means vl0-vl3, 4 total */
 
 		/* Validate max GID table size */
 		maxval  = ((uint64_t)1 << state->hs_queryport.log_max_gid);

@@ -56,12 +56,6 @@ CFLAGS += $(CCVERBOSE) $(C_BIGPICFLAGS)
 CFLAGS64 += $(C_BIGPICFLAGS)
 CPPFLAGS += -I$(SRCDIR)
 
-# The md5 and sha1 code is very careful about data alignment
-# but lint doesn't know that, so just shut lint up.
-LINTFLAGS += -erroff=E_SUPPRESSION_DIRECTIVE_UNUSED
-LINTFLAGS64 += -erroff=E_SUPPRESSION_DIRECTIVE_UNUSED
-
-
 ROOTLINT= $(LINTSRC:%=$(ROOTLIBDIR)/%)
 
 .KEEP_STATE:
@@ -105,13 +99,13 @@ INS.slink6 = $(RM) -r $@; $(SYMLINK) ../../$(PLATFORM)/lib/$(MODULE) $@
 INS.slink64 = $(RM) -r $@; $(SYMLINK) ../../../$(PLATFORM)/lib/$(MACH64)/$(MODULE) $@
 
 $(LIBMD_PSR_DIRS):
-	-$(INS.dir.root.bin)
+	-$(INS.dir)
 
 $(LIBMD_PSR_LINKS): $(LIBMD_PSR_DIRS)
 	-$(INS.slink6)
 
 $(LIBMD_PSR64_DIRS):
-	-$(INS.dir.root.bin)
+	-$(INS.dir)
 
 $(LIBMD_PSR64_LINKS): $(LIBMD_PSR64_DIRS)
 	-$(INS.slink64)

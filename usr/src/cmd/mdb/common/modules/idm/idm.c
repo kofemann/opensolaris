@@ -23,7 +23,9 @@
  * Use is subject to license terms.
  */
 
-#include <sys/mdb_modapi.h>
+#include <mdb/mdb_modapi.h>
+#include <mdb/mdb_ks.h>
+
 #include <sys/cpuvar.h>
 #include <sys/conf.h>
 #include <sys/file.h>
@@ -47,6 +49,7 @@
 #define	ISCSI_CMD_SM_STRINGS
 #define	ISCSI_ICS_NAMES
 #define	ISCSI_LOGIN_STATE_NAMES
+#define	IDM_CN_NOTIFY_STRINGS
 #include <sys/idm/idm.h>
 #include <iscsi.h>
 #include <iscsit.h>
@@ -160,6 +163,7 @@ static const char *iscsi_iscsit_login_state(unsigned int state);
 static const char *iscsi_iscsi_cmd_state(unsigned int state);
 static const char *iscsi_iscsi_sess_state(unsigned int state);
 static const char *iscsi_iscsi_conn_state(unsigned int state);
+static const char *iscsi_iscsi_conn_event(unsigned int event);
 static const char *iscsi_iscsi_login_state(unsigned int state);
 
 static void iscsi_format_timestamp(char *ts_str, int strlen,
@@ -1809,6 +1813,12 @@ iscsi_sm_audit_impl(uintptr_t addr)
 				event_name=
 				    iscsi_iscsi_sess_event(sar->sar_event);
 				break;
+			case SAS_ISCSI_CONN:
+				state_name =
+				    iscsi_iscsi_conn_state(sar->sar_state);
+				event_name=
+				    iscsi_iscsi_conn_event(sar->sar_event);
+				break;
 			default:
 				state_name = event_name = "N/A";
 				break;
@@ -1938,6 +1948,13 @@ static const char *
 iscsi_idm_conn_state(unsigned int state)
 {
 	return ((state < CS_MAX_STATE) ? idm_cs_name[state] : "N/A");
+}
+
+static const char *
+iscsi_iscsi_conn_event(unsigned int event)
+{
+
+	return ((event < CN_MAX) ? idm_cn_strings[event] : "N/A");
 }
 
 /*ARGSUSED*/
@@ -2126,13 +2143,13 @@ static int
 iscsi_isns_portal_cb(uintptr_t addr, const void *walker_data, void *data)
 {
 	iscsi_dcmd_ctrl_t *idc = (iscsi_dcmd_ctrl_t *)data;
-	isns_portal_list_t portal;
+	isns_portal_t portal;
 	char portal_addr[PORTAL_STR_LEN];
 	struct sockaddr_storage *ss;
 	char			ts_string[40];
 
-	if (mdb_vread(&portal, sizeof (isns_portal_list_t), addr) !=
-	    sizeof (isns_portal_list_t)) {
+	if (mdb_vread(&portal, sizeof (isns_portal_t), addr) !=
+	    sizeof (isns_portal_t)) {
 		return (WALK_ERR);
 	}
 
@@ -2146,18 +2163,24 @@ iscsi_isns_portal_cb(uintptr_t addr, const void *walker_data, void *data)
 		mdb_printf("(v6): %s", portal_addr);
 	}
 
-	if (portal.portal_iscsit == NULL) {
+	if (portal.portal_default == B_TRUE) {
 		mdb_printf(" (Default portal)\n");
 	} else {
 		mdb_printf("\n");
 	}
-
-	if ((portal.portal_iscsit != NULL) && (idc->idc_verbose)) {
-		iscsi_portal_impl((uintptr_t)portal.portal_iscsit, idc);
+	if (portal.portal_iscsit != NULL) {
+		mdb_printf("(Part of TPG: 0x%x)\n", portal.portal_iscsit);
 	}
 
 	iscsi_format_timestamp(ts_string, 40, &portal.portal_esi_timestamp);
 	mdb_printf("Portal ESI timestamp: 0x%p\n\n", ts_string);
+
+	if ((portal.portal_iscsit != NULL) && (idc->idc_verbose)) {
+		mdb_inc_indent(4);
+		iscsi_portal_impl((uintptr_t)portal.portal_iscsit, idc);
+		mdb_dec_indent(4);
+	}
+
 
 	return (WALK_NEXT);
 }
@@ -2168,18 +2191,35 @@ iscsi_isns_portals(iscsi_dcmd_ctrl_t *idc)
 	GElf_Sym sym;
 	uintptr_t portal_list;
 
-	if (mdb_lookup_by_name("portal_list", &sym) == -1) {
-		mdb_warn("failed to find symbol 'portal_list'");
+	mdb_printf("All Active Portals:\n");
+
+	if (mdb_lookup_by_name("isns_all_portals", &sym) == -1) {
+		mdb_warn("failed to find symbol 'isns_all_portals'");
 		return (DCMD_ERR);
 	}
 
 	portal_list = (uintptr_t)sym.st_value;
 	idc->idc_header = 1;
 
-	if (mdb_pwalk("list", iscsi_isns_portal_cb, idc, portal_list) == -1) {
-		mdb_warn("avl walk failed for portal_list");
+	if (mdb_pwalk("avl", iscsi_isns_portal_cb, idc, portal_list) == -1) {
+		mdb_warn("avl walk failed for isns_all_portals");
 		return (DCMD_ERR);
 	}
+	mdb_printf("\nPortals from TPGs:\n");
+
+	if (mdb_lookup_by_name("isns_tpg_portals", &sym) == -1) {
+		mdb_warn("failed to find symbol 'isns_tpg_portals'");
+		return (DCMD_ERR);
+	}
+
+	portal_list = (uintptr_t)sym.st_value;
+	idc->idc_header = 1;
+
+	if (mdb_pwalk("avl", iscsi_isns_portal_cb, idc, portal_list) == -1) {
+		mdb_warn("avl walk failed for isns_tpg_portals");
+		return (DCMD_ERR);
+	}
+
 
 	return (0);
 }
@@ -2188,9 +2228,9 @@ iscsi_isns_portals(iscsi_dcmd_ctrl_t *idc)
 static int
 iscsi_isns_targets_cb(uintptr_t addr, const void *walker_data, void *data)
 {
-	iscsi_dcmd_ctrl_t *idc = (iscsi_dcmd_ctrl_t *)data;
-	isns_target_t	itarget;
-	int		rc = 0;
+	iscsi_dcmd_ctrl_t	*idc = (iscsi_dcmd_ctrl_t *)data;
+	isns_target_t		itarget;
+	int			rc = 0;
 
 	if (mdb_vread(&itarget, sizeof (isns_target_t), addr) !=
 	    sizeof (isns_target_t)) {
@@ -2199,10 +2239,13 @@ iscsi_isns_targets_cb(uintptr_t addr, const void *walker_data, void *data)
 
 	idc->idc_header = 1;
 
-	mdb_printf("Target: %p\n", itarget.target);
+	mdb_printf("Target: %p\n", addr);
 	mdb_inc_indent(4);
 	mdb_printf("Registered: %s\n",
 	    (itarget.target_registered) ? "Yes" : "No");
+	mdb_printf("Update needed: %s\n",
+	    (itarget.target_update_needed) ? "Yes" : "No");
+	mdb_printf("Target Info: %p\n", itarget.target_info);
 
 	rc = iscsi_tgt_impl((uintptr_t)itarget.target, idc);
 
@@ -2243,26 +2286,20 @@ iscsi_isns_targets(iscsi_dcmd_ctrl_t *idc)
 static int
 iscsi_isns_servers_cb(uintptr_t addr, const void *walker_data, void *data)
 {
-	GElf_Sym		sym;
 	iscsit_isns_svr_t	server;
 	char			server_addr[PORTAL_STR_LEN];
 	struct sockaddr_storage *ss;
 	clock_t			lbolt;
+	iscsi_dcmd_ctrl_t	*idc = (iscsi_dcmd_ctrl_t *)data;
+	uintptr_t		avl_addr;
 
 	if (mdb_vread(&server, sizeof (iscsit_isns_svr_t), addr) !=
 	    sizeof (iscsit_isns_svr_t)) {
 		return (WALK_ERR);
 	}
 
-	if (mdb_lookup_by_name("lbolt", &sym) == -1) {
-		mdb_warn("failed to find symbol 'lbolt'");
-		return (DCMD_ERR);
-	}
-
-	if (mdb_vread(&lbolt, sizeof (clock_t), sym.st_value) !=
-	    sizeof (clock_t)) {
+	if ((lbolt = (clock_t)mdb_get_lbolt()) == -1)
 		return (WALK_ERR);
-	}
 
 	mdb_printf("iSNS server %p:\n", addr);
 	mdb_inc_indent(4);
@@ -2276,13 +2313,39 @@ iscsi_isns_servers_cb(uintptr_t addr, const void *walker_data, void *data)
 		mdb_printf("(v6): %s\n", server_addr);
 	}
 
-	mdb_printf("Last ESI message : %d seconds ago\n",
+	mdb_printf("ESI Interval: %d seconds\n",
+	    server.svr_esi_interval);
+	mdb_printf("Last message: %d seconds ago\n",
 	    ((lbolt - server.svr_last_msg) / 100));
 	mdb_printf("Client registered: %s\n",
 	    (server.svr_registered) ? "Yes" : "No");
+	mdb_printf("Retry Count: %d\n",
+	    server.svr_retry_count);
+	mdb_printf("Targets Changes Pending: %s\n",
+	    (server.svr_targets_changed) ? "Yes" : "No");
+	mdb_printf("Delete Pending: %s\n",
+	    (server.svr_delete_needed) ? "Yes" : "No");
+	mdb_printf("Replace-All Needed: %s\n",
+	    (server.svr_reset_needed) ? "Yes" : "No");
+
+	if (idc->idc_verbose) {
+		idc->idc_header = 1;
+		idc->u.child.idc_tgt = 1;
+
+		mdb_inc_indent(2);
+		avl_addr = addr + offsetof(iscsit_isns_svr_t,
+		    svr_target_list);
+		if (mdb_pwalk("avl", iscsi_isns_targets_cb, idc,
+		    avl_addr) == -1) {
+			mdb_warn("avl walk failed for svr_target_list");
+			return (WALK_ERR);
+		}
+		mdb_dec_indent(2);
+	}
+
 	mdb_dec_indent(4);
 
-	return (WALK_ERR);
+	return (WALK_NEXT);
 }
 
 static int

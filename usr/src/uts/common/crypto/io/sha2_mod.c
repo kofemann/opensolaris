@@ -33,6 +33,7 @@
 #include <sys/sysmacros.h>
 #define	_SHA2_IMPL
 #include <sys/sha2.h>
+#include <sha2/sha2_impl.h>
 
 /*
  * The sha2 module is created with two modlinkages:
@@ -58,28 +59,6 @@ static struct modlinkage modlinkage = {
 };
 
 /*
- * CSPI information (entry points, provider info, etc.)
- */
-
-/*
- * Context for SHA2 mechanism.
- */
-typedef struct sha2_ctx {
-	sha2_mech_type_t	sc_mech_type;	/* type of context */
-	SHA2_CTX		sc_sha2_ctx;	/* SHA2 context */
-} sha2_ctx_t;
-
-/*
- * Context for SHA2 HMAC and HMAC GENERAL mechanisms.
- */
-typedef struct sha2_hmac_ctx {
-	sha2_mech_type_t	hc_mech_type;	/* type of context */
-	uint32_t		hc_digest_len;	/* digest len in bytes */
-	SHA2_CTX		hc_icontext;	/* inner SHA2 context */
-	SHA2_CTX		hc_ocontext;	/* outer SHA2 context */
-} sha2_hmac_ctx_t;
-
-/*
  * Macros to access the SHA2 or SHA2-HMAC contexts from a context passed
  * by KCF to one of the entry points.
  */
@@ -90,7 +69,7 @@ typedef struct sha2_hmac_ctx {
 /* to extract the digest length passed as mechanism parameter */
 #define	PROV_SHA2_GET_DIGEST_LEN(m, len) {				\
 	if (IS_P2ALIGNED((m)->cm_param, sizeof (ulong_t)))		\
-		(len) = (uint32_t)*((ulong_t *)(m)->cm_param);	\
+		(len) = (uint32_t)*((ulong_t *)(void *)(m)->cm_param);	\
 	else {								\
 		ulong_t tmp_ulong;					\
 		bcopy((m)->cm_param, &tmp_ulong, sizeof (ulong_t));	\
@@ -210,6 +189,12 @@ static crypto_ctx_ops_t sha2_ctx_ops = {
 	sha2_free_context
 };
 
+static void sha2_POST(int *);
+
+static crypto_fips140_ops_t sha2_fips140_ops = {
+	sha2_POST
+};
+
 static crypto_ops_t sha2_crypto_ops = {
 	&sha2_control_ops,
 	&sha2_digest_ops,
@@ -224,11 +209,14 @@ static crypto_ops_t sha2_crypto_ops = {
 	NULL,
 	NULL,
 	NULL,
-	&sha2_ctx_ops
+	&sha2_ctx_ops,
+	NULL,
+	NULL,
+	&sha2_fips140_ops
 };
 
 static crypto_provider_info_t sha2_prov_info = {
-	CRYPTO_SPI_VERSION_1,
+	CRYPTO_SPI_VERSION_4,
 	"SHA2 Software Provider",
 	CRYPTO_SW_PROVIDER,
 	{&modlinkage},
@@ -942,7 +930,7 @@ sha2_mac_init(crypto_ctx_t *ctx, crypto_mechanism_t *mechanism,
 	uint_t sha_digest_len, sha_hmac_block_size;
 
 	/*
-	 * Set the digest length and block size to values approriate to the
+	 * Set the digest length and block size to values appropriate to the
 	 * mechanism
 	 */
 	switch (mechanism->cm_type) {
@@ -1063,7 +1051,7 @@ sha2_mac_final(crypto_ctx_t *ctx, crypto_data_t *mac, crypto_req_handle_t req)
 
 	ASSERT(ctx->cc_provider_private != NULL);
 
-	/* Set the digest lengths to values approriate to the mechanism */
+	/* Set the digest lengths to values appropriate to the mechanism */
 	switch (PROV_SHA2_HMAC_CTX(ctx)->hc_mech_type) {
 	case SHA256_HMAC_MECH_INFO_TYPE:
 		sha_digest_len = digest_len = SHA256_DIGEST_LENGTH;
@@ -1187,7 +1175,7 @@ sha2_mac_atomic(crypto_provider_handle_t provider,
 	uint_t keylen_in_bytes = CRYPTO_BITS2BYTES(key->ck_length);
 
 	/*
-	 * Set the digest length and block size to values approriate to the
+	 * Set the digest length and block size to values appropriate to the
 	 * mechanism
 	 */
 	switch (mechanism->cm_type) {
@@ -1329,7 +1317,7 @@ sha2_mac_verify_atomic(crypto_provider_handle_t provider,
 	uint_t keylen_in_bytes = CRYPTO_BITS2BYTES(key->ck_length);
 
 	/*
-	 * Set the digest length and block size to values approriate to the
+	 * Set the digest length and block size to values appropriate to the
 	 * mechanism
 	 */
 	switch (mechanism->cm_type) {
@@ -1547,7 +1535,7 @@ sha2_create_ctx_template(crypto_provider_handle_t provider,
 	uint32_t sha_digest_len, sha_hmac_block_size;
 
 	/*
-	 * Set the digest length and block size to values approriate to the
+	 * Set the digest length and block size to values appropriate to the
 	 * mechanism
 	 */
 	switch (mechanism->cm_type) {
@@ -1630,4 +1618,15 @@ sha2_free_context(crypto_ctx_t *ctx)
 	ctx->cc_provider_private = NULL;
 
 	return (CRYPTO_SUCCESS);
+}
+
+/*
+ * SHA-2 Power-Up Self-Test
+ */
+void
+sha2_POST(int *rc)
+{
+
+	*rc = fips_sha2_post();
+
 }

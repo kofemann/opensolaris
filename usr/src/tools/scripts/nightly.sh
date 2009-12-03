@@ -44,9 +44,6 @@
 #
 #	For example: LINTDIRS="$SRC/uts n $SRC/stand y $SRC/psm y"
 #
-# -A flag in NIGHTLY_OPTIONS checks ABI diffs in .so files
-# This option requires a couple of scripts.
-#
 # OPTHOME and TEAMWARE may be set in the environment to override /opt
 # and /opt/teamware defaults.
 #
@@ -106,6 +103,7 @@ normal_build() {
 
 	typeset orig_p_FLAG="$p_FLAG"
 	typeset orig_a_FLAG="$a_FLAG"
+	typeset orig_zero_FLAG="$zero_FLAG"
 
 	suffix=""
 	open_only=""
@@ -116,6 +114,7 @@ normal_build() {
 			open_only="open-only"
 			p_FLAG=n
 			a_FLAG=n
+			zero_FLAG=n
 			;;
 		esac
 	done
@@ -155,6 +154,7 @@ normal_build() {
 
 	p_FLAG="$orig_p_FLAG"
 	a_FLAG="$orig_a_FLAG"
+	zero_FLAG="$orig_zero_FLAG"
 }
 
 #
@@ -757,6 +757,22 @@ build() {
 		echo "\n==== Not creating $LABEL packages ====\n" >> $LOGFILE
 	fi
 
+	if [[ "$zero_FLAG" = "y" ]]; then
+		if [[ -d "${G11N_PKGDIR}" ]]; then
+			echo "\n==== Building globalization package" \
+			    "$(basename ${G11N_PKGDIR}) ($LABEL) ====\n" \
+			    >> $LOGFILE
+			cd $G11N_PKGDIR
+			/bin/time $MAKE -e install 2>&1 | \
+			    tee -a $SRC/${INSTALLOG}.out >> $LOGFILE
+			cd $SRC
+		else
+			echo "\n==== Skipping nonexistent globalization" \
+			    "package $(basename ${G11N_PKGDIR})" \
+			    "($LABEL) ====\n" >> $LOGFILE
+		fi
+	fi
+
 	ROOT=$ORIGROOT
 }
 
@@ -1109,11 +1125,12 @@ Where:
 non-DEBUG is the default build type. Build options can be set in the
 NIGHTLY_OPTIONS variable in the <env_file> as follows:
 
+	-0	build the globalization package
 	-A	check for ABI differences in .so files
 	-C	check for cstyle/hdrchk errors
 	-D	do a build with DEBUG on
 	-F	do _not_ do a non-DEBUG build
-	-G	gate keeper default group of options (-au)
+	-G	gate keeper default group of options (-0au)
 	-I	integration engineer default group of options (-ampu)
 	-M	do not run pmodes (safe file permission checker)
 	-N	do not run protocmp
@@ -1152,6 +1169,7 @@ NIGHTLY_OPTIONS variable in the <env_file> as follows:
 #
 
 # default values for low-level FLAGS; G I R are group FLAGS
+zero_FLAG=n
 A_FLAG=n
 a_FLAG=n
 C_FLAG=n
@@ -1381,9 +1399,11 @@ check_closed_tree
 #
 NIGHTLY_OPTIONS=-${NIGHTLY_OPTIONS#-}
 OPTIND=1
-while getopts AaBCDdFfGIilMmNnOoPpRrS:TtUuWwXxz FLAG $NIGHTLY_OPTIONS
+while getopts 0AaBCDdFfGIilMmNnOoPpRrS:TtUuWwXxz FLAG $NIGHTLY_OPTIONS
 do
 	case $FLAG in
+	  0 )   zero_FLAG=y
+	  	;;
 	  A )	A_FLAG=y
 		;;
 	  a )	a_FLAG=y
@@ -1398,7 +1418,8 @@ do
 		;;
 	  f )	f_FLAG=y
 		;;
-	  G )	a_FLAG=y
+	  G )   zero_FLAG=y
+	  	a_FLAG=y
 		u_FLAG=y
 		;;
 	  I )	a_FLAG=y
@@ -1515,10 +1536,17 @@ else
 	PROTOCMPTERSE="protocmp.terse -gu"
 fi
 POUND_SIGN="#"
+# have we set RELEASE_DATE in our env file?
+if [ -z "$RELEASE_DATE" ]; then
+	RELEASE_DATE=$(LC_ALL=C date +"%B %Y")
+fi
+BUILD_DATE=$(LC_ALL=C date +%Y-%b-%d)
+BASEWSDIR=$(basename $CODEMGR_WS)
+DEV_CM="\"@(#)SunOS Internal Development: $LOGNAME $BUILD_DATE [$BASEWSDIR]\""
 
-# we export POUND_SIGN to speed up the build process -- prevents evaluation of
-# the Makefile.master definitions.
-export o_FLAG X_FLAG POUND_SIGN
+# we export POUND_SIGN, RELEASE_DATE and DEV_CM to speed up the build process
+# by avoiding repeated shell invocations to evaluate Makefile.master definitions.
+export o_FLAG X_FLAG POUND_SIGN RELEASE_DATE DEV_CM
 
 maketype="distributed"
 MAKE=dmake
@@ -2001,11 +2029,23 @@ if [ "$f_FLAG" = "y" ]; then
 		    "builds; ignoring -f\n" | tee -a $mail_msg_file >> $LOGFILE
 		f_FLAG=n
 	fi
-	if [ "$p_FLAG" != "y" -o "$l_FLAG" != "y" ]; then
-		echo "WARNING: the -f flag requires -l and -p; ignoring -f\n" | \
-		    tee -a $mail_msg_file >> $LOGFILE
+	if [ "${l_FLAG}${p_FLAG}" != "yy" ]; then
+		echo "WARNING: the -f flag requires -l, and -p;" \
+		    "ignoring -f\n" | tee -a $mail_msg_file >> $LOGFILE
 		f_FLAG=n
 	fi
+	if [ "${f_FLAG}${zero_FLAG}" = "yn" ]; then
+		echo "WARNING: the -f flag implies -0; enabling -0\n" \
+		    | tee -a $mail_msg_file >> $LOGFILE
+		zero_FLAG=y
+	fi
+fi
+
+if [ "$zero_FLAG" = "y" -a -z "$G11N_PKGDIR" ]; then
+	echo "WARNING: the -0 flag requires that G11N_PKGDIR be set" \
+	    "in the environment; ignoring -0\n" \
+	    | tee -a $mail_msg_file >> $LOGFILE
+	zero_FLAG=n
 fi
 
 if [ "$w_FLAG" = "y" -a ! -d $ROOT ]; then
@@ -2989,127 +3029,92 @@ if [ "$U_FLAG" = "y" -a "$build_ok" = "y" ]; then
 fi
 
 #
-# do shared library interface verification
+# ELF verification: ABI (-A) and runtime (-r) checks
 #
+if [[ ($build_ok = y) && ( ($A_FLAG = y) || ($r_FLAG = y) ) ]]; then
+	# Directory ELF-data.$MACH holds the files produced by these tests.
+	elf_ddir=$SRC/ELF-data.$MACH
 
-if [ "$A_FLAG" = "y" -a "$build_ok" = "y" ]; then
-	echo "\n==== Check versioning and ABI information ====\n"  | \
-	    tee -a $LOGFILE >> $mail_msg_file
-
-	rm -rf $SRC/interfaces.ref
-	if [ -d $SRC/interfaces.out ]; then
-		mv $SRC/interfaces.out $SRC/interfaces.ref
+	# If there is a previous ELF-data backup directory, remove it. Then,
+	# rotate current ELF-data directory into its place and create a new
+	# empty directory
+	rm -rf $elf_ddir.ref
+	if [[ -d $elf_ddir ]]; then
+		mv $elf_ddir $elf_ddir.ref
 	fi
-	rm -rf $SRC/interfaces.out
-	mkdir -p $SRC/interfaces.out
+	mkdir -p $elf_ddir
 
-	intf_check -V -m -o -b $SRC/tools/abi/etc \
-		-d $SRC/interfaces.out $checkroot 2>&1 | sort \
-		> $SRC/interfaces.out/log
+	# Call find_elf to produce a list of the ELF objects in the proto area.
+	# This list is passed to check_rtime and interface_check, preventing
+	# them from separately calling find_elf to do the same work twice.
+	find_elf -fr $checkroot > $elf_ddir/object_list
 
-	# report any ERROR found in log file
-	fgrep 'ERROR' $SRC/interfaces.out/log | sed 's/^ERROR: //' | \
-		tee -a $LOGFILE >> $mail_msg_file
+	if [[ $A_FLAG = y ]]; then
+	       	echo "\n==== Check versioning and ABI information ====\n"  | \
+		    tee -a $LOGFILE >> $mail_msg_file
 
-	if [ ! -d $SRC/interfaces.ref ] ; then
-		mkdir -p $SRC/interfaces.ref
-		if [ -d  $SRC/interfaces.out ]; then
-			cp -r $SRC/interfaces.out/* $SRC/interfaces.ref
+		# Produce interface description for the proto. Report errors.
+		interface_check -o -w $elf_ddir -f object_list \
+			-i interface -E interface.err
+		if [[ -s $elf_ddir/interface.err ]]; then
+			tee -a $LOGFILE < $elf_ddir/interface.err \
+				>> $mail_msg_file
+		fi
+
+	       	echo "\n==== Compare versioning and ABI information to" \
+		    "baseline ====\n"  | tee -a $LOGFILE >> $mail_msg_file
+
+		# Compare new interface to baseline interface. Report errors.
+		interface_cmp -d -o $SRC/tools/abi/interface.$MACH \
+			$elf_ddir/interface > $elf_ddir/interface.cmp
+		if [[ -s $elf_ddir/interface.cmp ]]; then
+			tee -a $LOGFILE < $elf_ddir/interface.cmp \
+				>> $mail_msg_file
 		fi
 	fi
 
-	echo "\n==== Diff versioning warnings (since last build) ====\n" | \
-	    tee -a $LOGFILE >> $mail_msg_file
-
-	out_vers=`grep ^VERSION $SRC/interfaces.out/log`;
-	ref_vers=`grep ^VERSION $SRC/interfaces.ref/log`;
-
-	# Report any differences in WARNING messages between last
-	# and current build.
-	if [ "$out_vers" = "$ref_vers" ]; then
-		diff $SRC/interfaces.ref/log $SRC/interfaces.out/log | \
-		    fgrep 'WARNING' | sed 's/WARNING: //' | \
+	if [[ $r_FLAG = y ]]; then
+		echo "\n==== Check ELF runtime attributes ====\n" | \
 		    tee -a $LOGFILE >> $mail_msg_file
+
+		# If we're doing a debug build the proto area will be left
+		# with debuggable objects, thus don't assert -s.
+		if [[ $D_FLAG = y ]]; then
+			rtime_sflag=""
+		else
+			rtime_sflag="-s"
+		fi
+		check_rtime -i -m -v $rtime_sflag -o -w $elf_ddir \
+			-D object_list  -f object_list -E runtime.err \
+			-I runtime.attr.raw
+
+		# check_rtime -I output needs to be sorted in order to 
+		# compare it to that from previous builds.
+		sort $elf_ddir/runtime.attr.raw > $elf_ddir/runtime.attr
+		rm $elf_ddir/runtime.attr.raw
+
+		# Report errors
+		if [[ -s $elf_ddir/runtime.err ]]; then
+			tee -a $LOGFILE < $elf_ddir/runtime.err \
+				>> $mail_msg_file
+		fi
+
+		# If there is an ELF-data directory from a previous build,
+		# then diff the attr files. These files contain information
+		# about dependencies, versioning, and runpaths. There is some
+		# overlap with the ABI checking done above, but this also
+		# flushes out non-ABI interface differences along with the
+		# other information.
+		echo "\n==== Diff ELF runtime attributes" \
+		    "(since last build) ====\n" | \
+		    tee -a $LOGFILE >> $mail_msg_file >> $mail_msg_file
+
+		if [[ -f $elf_ddir.ref/runtime.attr ]]; then
+			diff $elf_ddir.ref/runtime.attr \
+				$elf_ddir/runtime.attr \
+				>> $mail_msg_file
+		fi
 	fi
-fi
-
-if [ "$r_FLAG" = "y" -a "$build_ok" = "y" ]; then
-	echo "\n==== Check ELF runtime attributes ====\n" | \
-	    tee -a $LOGFILE >> $mail_msg_file
-
-	LDDWRONG="wrong class"
-	CRLERROR="^crle:"
-	CRLECONF="^crle: configuration file:"
-
-	RUNTIMEREF=$SRC/runtime-${MACH}.ref
-	RUNTIMEOUT=$SRC/runtime-${MACH}.out
-
-	rm -f $RUNTIMEREF
-	if [ -f $RUNTIMEOUT ]; then
-		egrep -v "$LDDWRONG|$CRLERROR|$CRLECONF" \
-			$RUNTIMEOUT > $RUNTIMEREF
-	fi
-
-	# If we're doing a debug build the proto area will be left with
-	# debuggable objects, thus don't assert -s.
-	if [ "$D_FLAG" = "y" ]; then
-		rtime_sflag=""
-	else
-		rtime_sflag="-s"
-	fi
-	check_rtime -d $checkroot -i -m -v -o $rtime_sflag $checkroot 2>&1 | \
-	    egrep -v ": unreferenced object=$checkroot/.*/lib(w|intl|thread|pthread).so" | \
-	    egrep -v ": unused object=$checkroot/.*/lib(w|intl|thread|pthread).so" | \
-	    sort > $RUNTIMEOUT
-
-	# Determine any processing errors that will affect the final output
-	# and display these first.
-	grep -l "$LDDWRONG" $RUNTIMEOUT > /dev/null
-	if (( $? == 0 )) ; then
-	    echo "WARNING: wrong class message detected.  ldd(1) was unable" | \
-		tee -a $LOGFILE >> $mail_msg_file
-	    echo "to execute an object, thus it could not be checked fully." | \
-		tee -a $LOGFILE >> $mail_msg_file
-	    echo "Perhaps a 64-bit object was encountered on a 32-bit system," | \
-		tee -a $LOGFILE >> $mail_msg_file
-	    echo "or an i386 object was encountered on a sparc system?\n" | \
-		tee -a $LOGFILE >> $mail_msg_file
-	fi
-	grep -l "$CRLECONF" $RUNTIMEOUT > /dev/null
-	if (( $? == 0 )) ; then
-	    echo "WARNING: creation of an alternative dependency cache failed." | \
-		tee -a $LOGFILE >> $mail_msg_file
-	    echo "Dependencies will bind to the base system libraries.\n" | \
-		tee -a $LOGFILE >> $mail_msg_file
-	    grep "$CRLECONF" $RUNTIMEOUT | \
-		tee -a $LOGFILE >> $mail_msg_file
-	    grep "$CRLERROR" $RUNTIMEOUT | grep -v "$CRLECONF" | \
-		tee -a $LOGFILE >> $mail_msg_file
-	    echo "\n" | tee -a $LOGFILE >> $mail_msg_file
-	fi
-
-	egrep '<dependency no longer necessary>' $RUNTIMEOUT | \
-	    tee -a $LOGFILE >> $mail_msg_file
-
-	# NEEDED= and RPATH= are generated by the -i option
-	# VERDEF= and VERSION= are generated by the -v option.
-	# These lines are informational; report anything else that we
-	# haven't already.
-	egrep -v "NEEDED=|RPATH=|VERDEF=|VERSION=" $RUNTIMEOUT \
-		| egrep -v "$LDDWRONG|$CRLERROR|$CRLECONF" \
-		| tee -a $LOGFILE >> $mail_msg_file
-
-	# probably should compare against a 'known ok runpaths' list
-	if [ ! -f $RUNTIMEREF ]; then
-		egrep -v "$LDDWRONG|$CRLERROR|$CRLECONF" \
-			$RUNTIMEOUT >  $RUNTIMEREF
-	fi
-
-	echo "\n==== Diff ELF runtime attributes (since last build) ====\n" \
-	    >> $mail_msg_file
-
-	egrep -v "$LDDWRONG|$CRLERROR|$CRLECONF" $RUNTIMEOUT | \
-	    diff $RUNTIMEREF - >> $mail_msg_file
 fi
 
 # DEBUG lint of kernel begins
@@ -3159,19 +3164,9 @@ if [ "$f_FLAG" = "y" -a "$build_ok" = "y" ]; then
 		mv $SRC/unref-${MACH}.out $SRC/unref-${MACH}.ref
 	fi
 
-	#
-	# For any SCM other than teamware, we want to disable the
-	# managed-by-SCCS test in findunref
-	#
-	findunref_all=""
-	if [ "$SCM_TYPE" != teamware ]; then
-		findunref_all="-a"
-	fi
- 
-	findunref $findunref_all -t $SRC/.build.tstamp $SRC/.. \
+	findunref -S $SCM_TYPE -t $SRC/.build.tstamp -s usr $CODEMGR_WS \
 	    ${TOOLS}/findunref/exception_list 2>> $mail_msg_file | \
-	    sort | sed -e s=^./src/=./= -e s=^./closed/=../closed/= \
-	    > $SRC/unref-${MACH}.out
+	    sort > $SRC/unref-${MACH}.out
 
 	if [ ! -f $SRC/unref-${MACH}.ref ]; then
 		cp $SRC/unref-${MACH}.out $SRC/unref-${MACH}.ref

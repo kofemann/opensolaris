@@ -36,6 +36,7 @@
 #include <termio.h>
 #include <stddef.h>
 #include <limits.h>
+#include <fcntl.h>
 #include <ctype.h>
 #include <sys/types.h>
 #include <sys/mman.h>
@@ -490,43 +491,9 @@ prt_opn(private_t *pri, int raw, long val)	/* print open code */
 }
 
 void
-prt_sig(private_t *pri, int raw, long val) /* print signal name plus flags */
+prt_sig(private_t *pri, int raw, long val)	/* print signal name */
 {
-	const char *s = raw? NULL : sigarg(pri, (int)val);
-
-	if (s == NULL)
-		prt_hex(pri, 0, val);
-	else
-		outstring(pri, s);
-}
-
-/* print signal name, masked with SIGNO_MASK */
-void
-prt_six(private_t *pri, int raw, long val)
-{
-	const char *s = raw? NULL : sigarg(pri, (int)val & SIGNO_MASK);
-
-	if (s == NULL)
-		prt_hex(pri, 0, val);
-	else
-		outstring(pri, s);
-}
-
-void
-prt_act(private_t *pri, int raw, long val)	/* print signal action value */
-{
-	const char *s;
-
-	if (raw)
-		s = NULL;
-	else if (val == (int)SIG_DFL)
-		s = "SIG_DFL";
-	else if (val == (int)SIG_IGN)
-		s = "SIG_IGN";
-	else if (val == (int)SIG_HOLD)
-		s = "SIG_HOLD";
-	else
-		s = NULL;
+	const char *s = raw? NULL : signame(pri, (int)val);
 
 	if (s == NULL)
 		prt_hex(pri, 0, val);
@@ -1139,6 +1106,7 @@ prt_mod(private_t *pri, int raw, long val)	/* print modctl() code */
 		case MODGETDEVFSPATH_MI:
 					s = "MODGETDEVFSPATH_MI"; break;
 		case MODREMDRVALIAS:	s = "MODREMDRVALIAS"; break;
+		case MODHPOPS:	s = "MODHPOPS"; break;
 		}
 	}
 
@@ -1793,7 +1761,11 @@ sol_optname(private_t *pri, long val)
 		case SO_ERROR:		return ("SO_ERROR");
 		case SO_TYPE:		return ("SO_TYPE");
 		case SO_PROTOTYPE:	return ("SO_PROTOTYPE");
+		case SO_ANON_MLP:	return ("SO_ANON_MLP");
+		case SO_MAC_EXEMPT:	return ("SO_MAC_EXEMPT");
 		case SO_ALLZONES:	return ("SO_ALLZONES");
+		case SO_MAC_IMPLICIT:	return ("SO_MAC_IMPLICIT");
+		case SO_VRRP:		return ("SO_VRRP");
 		case SO_EXCLBIND:	return ("SO_EXCLBIND");
 		case SO_DOMAIN:		return ("SO_DOMAIN");
 
@@ -2626,6 +2598,20 @@ prt_fxf(private_t *pri, int raw, long val)
 }
 
 /*
+ * Print utimensat() flag
+ */
+void
+prt_utf(private_t *pri, int raw, long val)
+{
+	if (val == 0)
+		outstring(pri, "0");
+	else if (!raw && val == AT_SYMLINK_NOFOLLOW)
+		outstring(pri, "AT_SYMLINK_NOFOLLOW");
+	else
+		prt_hex(pri, 0, val);
+}
+
+/*
  * Array of pointers to print functions, one for each format.
  */
 void (* const Print[])() = {
@@ -2641,7 +2627,7 @@ void (* const Print[])() = {
 	prt_uts,	/* UTS -- print utssys code */
 	prt_opn,	/* OPN -- print open code */
 	prt_sig,	/* SIG -- print signal name plus flags */
-	prt_act,	/* ACT -- print signal action value */
+	prt_nov,	/* Was ACT, now available for reuse */
 	prt_msc,	/* MSC -- print msgsys command */
 	prt_msf,	/* MSF -- print msgsys flags */
 	prt_smc,	/* SMC -- print semsys command */
@@ -2653,7 +2639,7 @@ void (* const Print[])() = {
 	prt_rst,	/* RST -- print string returned by syscall */
 	prt_smf,	/* SMF -- print streams message flags */
 	prt_ioa,	/* IOA -- print ioctl argument */
-	prt_six,	/* SIX -- print signal, masked with SIGNO_MASK */
+	prt_nov,	/* Was SIX, now available for reuse */
 	prt_mtf,	/* MTF -- print mount flags */
 	prt_mft,	/* MFT -- print mount file system type */
 	prt_iob,	/* IOB -- print contents of I/O buffer */
@@ -2726,5 +2712,6 @@ void (* const Print[])() = {
 	prt_spf,	/* SPF -- print rctlsys_projset() flags */
 	prt_un1,	/* UN1 -- as prt_uns except for -1 */
 	prt_mob,	/* MOB -- print mmapobj() flags */
+	prt_utf,	/* UTF -- print utimensat() flag */
 	prt_dec,	/* HID -- hidden argument, make this the last one */
 };

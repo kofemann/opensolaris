@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -43,11 +43,11 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/time.h>
-
+#include <netinet/in.h>
 #include <stdio.h>
 #include <pthread.h>
 
-#include <smbsrv/cifs.h>
+#include <smbsrv/smb.h>
 
 #define	MAX_NETBIOS_NAME_SIZE	16
 
@@ -124,7 +124,7 @@ nb_keep_alive(int fd, short port)
 	int nothing;
 	int rc;
 
-	if (port == SMB_SRVC_TCP_PORT)
+	if (port == IPPORT_SMB)
 		return (0);
 
 	(void) mutex_lock(&nb_mutex);

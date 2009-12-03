@@ -40,7 +40,7 @@ OBJS = $(MYOBJS)
 SRCS = $(MYOBJS:%.o=%.c)
 
 include ../../Makefile.cmd
-include ../Makefile.ctf
+include ../../Makefile.ctf
 
 NATIVE_BUILD=$(POUND_SIGN)
 $(NATIVE_BUILD)PROG = $(MYPROG:%=%-native)
@@ -69,8 +69,7 @@ $(NATIVE_BUILD)CFLAGS =	$(NATIVE_CFLAGS)
 $(NATIVE_BUILD)CPPFLAGS = $(MYCPPFLAGS) -I$(LIBUUTIL)/common -I$(LIBSCF)/inc
 $(NATIVE_BUILD)CPPFLAGS += -DNATIVE_BUILD
 $(NATIVE_BUILD)LDFLAGS =
-$(NATIVE_BUILD)LDLIBS = -L$(LIBUUTIL)/native -R $(LIBUUTIL)/native \
-	$(MYLDLIBS) -ldoor
+$(NATIVE_BUILD)LDLIBS = -L$(LIBUUTIL)/native -R $(LIBUUTIL)/native $(MYLDLIBS)
 
 DIRMODE = 0755
 FILEMODE = 0555
@@ -96,11 +95,11 @@ native: FRC
 	@NATIVE_BUILD= $(MAKE) $(MFLAGS) all
 
 $(PROG): $(OBJS)
-	$(LINK.c) -o $@ $(OBJS) $(LDLIBS) $(CTFMERGE_HOOK)
+	$(LINK.c) -o $@ $(OBJS) $(LDLIBS)
 	$(POST_PROCESS)
 
 %-native.o: %.c
-	$(COMPILE.c) -o $@ $< $(CTFCONVERT_HOOK)
+	$(COMPILE.c) -o $@ $<
 	$(POST_PROCESS_O)
 
 $(ROOTCMDDIR)/%: %.sh

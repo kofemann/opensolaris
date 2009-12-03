@@ -59,6 +59,7 @@
 	<privilege set="default" name="net_bindmlp" />
 	<privilege set="default" name="net_icmpaccess" />
 	<privilege set="default" name="net_mac_aware" />
+	<privilege set="default" name="net_observability" />
 	<privilege set="default" name="net_privaddr" />
 	<privilege set="default" name="net_rawaccess" ip-type="exclusive" />
 	<privilege set="default" name="proc_chroot" />
@@ -71,6 +72,7 @@
 	<privilege set="default" name="sys_acct" />
 	<privilege set="default" name="sys_admin" />
 	<privilege set="default" name="sys_ip_config" ip-type="exclusive" />
+	<privilege set="default" name="sys_iptun_config" ip-type="exclusive" />
 	<privilege set="default" name="sys_mount" />
 	<privilege set="default" name="sys_nfs" />
 	<privilege set="default" name="sys_resource" />

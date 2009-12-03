@@ -46,6 +46,7 @@ HTMLENTS = \
 	RtFileSysMngmnt.html \
 	RtFileSysSecurity.html \
 	RtFTPMngmnt.html \
+	RtHotplugMngmnt.html \
 	RtInetdMngmnt.html \
 	RtIPFilterMngmnt.html \
 	RtKerberosClntMngmnt.html \
@@ -59,6 +60,7 @@ HTMLENTS = \
 	RtNameServiceAdmin.html \
 	RtNameServiceSecure.html \
 	RtNetAutoconf.html \
+	RtNetILB.html \
 	RtNetIPsec.html \
 	RtNetMngmnt.html \
 	RtNetObservability.html \
@@ -66,9 +68,11 @@ HTMLENTS = \
 	RtNetWifiMngmnt.html \
 	RtNetWifiSecure.html \
 	RtNetLinkSecure.html \
+	RtNetVRRP.html \
 	RtObAccessMngmnt.html \
 	RtPrntAdmin.html \
 	RtProcManagement.html \
+	RtReparseMngmnt.html \
 	RtRightsDelegate.html \
 	RtSMBMngmnt.html \
 	RtSMBFSMngmnt.html \

@@ -26,7 +26,7 @@
  * Use is subject to license terms of the CDDL.
  */
 
-/* IntelVersion: 1.107 v2008-10-7 */
+/* IntelVersion: 1.128 scm_100809_154340 */
 
 #include "igb_api.h"
 
@@ -138,7 +138,17 @@ e1000_set_mac_type(struct e1000_hw *hw)
 	case E1000_DEV_ID_82576_FIBER:
 	case E1000_DEV_ID_82576_SERDES:
 	case E1000_DEV_ID_82576_QUAD_COPPER:
+	case E1000_DEV_ID_82576_NS:
+	case E1000_DEV_ID_82576_NS_SERDES:
+	case E1000_DEV_ID_82576_SERDES_QUAD:
 		mac->type = e1000_82576;
+		break;
+	case E1000_DEV_ID_82580_COPPER:
+	case E1000_DEV_ID_82580_FIBER:
+	case E1000_DEV_ID_82580_SERDES:
+	case E1000_DEV_ID_82580_SGMII:
+	case E1000_DEV_ID_82580_COPPER_DUAL:
+		mac->type = e1000_82580;
 		break;
 	default:
 		/* Should never have loaded on this device */
@@ -195,6 +205,7 @@ e1000_setup_init_funcs(struct e1000_hw *hw, bool init_device)
 	switch (hw->mac.type) {
 	case e1000_82575:
 	case e1000_82576:
+	case e1000_82580:
 		e1000_init_function_pointers_82575(hw);
 		break;
 	default:
@@ -278,26 +289,17 @@ e1000_write_vfta(struct e1000_hw *hw, u32 offset, u32 value)
  * @hw: pointer to the HW structure
  * @mc_addr_list: array of multicast addresses to program
  * @mc_addr_count: number of multicast addresses to program
- * @rar_used_count: the first RAR register free to program
- * @rar_count: total number of supported Receive Address Registers
  *
- * Updates the Receive Address Registers and Multicast Table Array.
+ * Updates the Multicast Table Array.
  * The caller must have a packed mc_addr_list of multicast addresses.
- * The parameter rar_count will usually be hw->mac.rar_entry_count
- * unless there are workarounds that change this.  Currently no func pointer
- * exists and all implementations are handled in the generic version of this
- * function.
  */
 void
 e1000_update_mc_addr_list(struct e1000_hw *hw, u8 *mc_addr_list,
-    u32 mc_addr_count, u32 rar_used_count, u32 rar_count)
+    u32 mc_addr_count)
 {
 	if (hw->mac.ops.update_mc_addr_list)
 		hw->mac.ops.update_mc_addr_list(hw,
-		    mc_addr_list,
-		    mc_addr_count,
-		    rar_used_count,
-		    rar_count);
+		    mc_addr_list, mc_addr_count);
 }
 
 /*
@@ -475,6 +477,22 @@ e1000_blink_led(struct e1000_hw *hw)
 {
 	if (hw->mac.ops.blink_led)
 		return (hw->mac.ops.blink_led(hw));
+
+	return (E1000_SUCCESS);
+}
+
+/*
+ * e1000_id_led_init - store LED configurations in SW
+ * @hw: pointer to the HW structure
+ *
+ * Initializes the LED config in SW. This is a function pointer entry point
+ * called by drivers.
+ */
+s32
+e1000_id_led_init(struct e1000_hw *hw)
+{
+	if (hw->mac.ops.id_led_init)
+		return (hw->mac.ops.id_led_init(hw));
 
 	return (E1000_SUCCESS);
 }

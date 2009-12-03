@@ -28,6 +28,7 @@
 #include "ixgbe_sw.h"
 
 static char ident[] = "Intel 10Gb Ethernet";
+static char ixgbe_version[] = "ixgbe 1.1.2";
 
 /*
  * Local function protoypes
@@ -47,9 +48,9 @@ static void ixgbe_tx_clean(ixgbe_t *);
 static boolean_t ixgbe_tx_drain(ixgbe_t *);
 static boolean_t ixgbe_rx_drain(ixgbe_t *);
 static int ixgbe_alloc_rings(ixgbe_t *);
-static int ixgbe_init_rings(ixgbe_t *);
 static void ixgbe_free_rings(ixgbe_t *);
-static void ixgbe_fini_rings(ixgbe_t *);
+static int ixgbe_alloc_rx_data(ixgbe_t *);
+static void ixgbe_free_rx_data(ixgbe_t *);
 static void ixgbe_setup_rings(ixgbe_t *);
 static void ixgbe_setup_rx(ixgbe_t *);
 static void ixgbe_setup_tx(ixgbe_t *);
@@ -62,6 +63,7 @@ static int ixgbe_unicst_find(ixgbe_t *, const uint8_t *);
 static void ixgbe_setup_multicst(ixgbe_t *);
 static void ixgbe_get_hw_state(ixgbe_t *);
 static void ixgbe_get_conf(ixgbe_t *);
+static void ixgbe_init_params(ixgbe_t *);
 static int ixgbe_get_prop(ixgbe_t *, char *, int, int, int);
 static void ixgbe_driver_link_check(void *);
 static void ixgbe_sfp_check(void *);
@@ -111,6 +113,21 @@ static int ixgbe_fm_error_cb(dev_info_t *dip, ddi_fm_error_t *err,
     const void *impl_data);
 static void ixgbe_fm_init(ixgbe_t *);
 static void ixgbe_fm_fini(ixgbe_t *);
+
+mac_priv_prop_t ixgbe_priv_props[] = {
+	{"_tx_copy_thresh", MAC_PROP_PERM_RW},
+	{"_tx_recycle_thresh", MAC_PROP_PERM_RW},
+	{"_tx_overload_thresh", MAC_PROP_PERM_RW},
+	{"_tx_resched_thresh", MAC_PROP_PERM_RW},
+	{"_rx_copy_thresh", MAC_PROP_PERM_RW},
+	{"_rx_limit_per_intr", MAC_PROP_PERM_RW},
+	{"_intr_throttling", MAC_PROP_PERM_RW},
+	{"_adv_pause_cap", MAC_PROP_PERM_READ},
+	{"_adv_asym_pause_cap", MAC_PROP_PERM_READ}
+};
+
+#define	IXGBE_MAX_PRIV_PROPS \
+	(sizeof (ixgbe_priv_props) / sizeof (mac_priv_prop_t))
 
 static struct cb_ops ixgbe_cb_ops = {
 	nulldev,		/* cb_open */
@@ -179,7 +196,12 @@ static lb_property_t lb_mac = {
 	internal, "MAC", IXGBE_LB_INTERNAL_MAC
 };
 
-#define	IXGBE_M_CALLBACK_FLAGS	(MC_IOCTL | MC_GETCAPAB)
+static lb_property_t lb_external = {
+	external, "External", IXGBE_LB_EXTERNAL
+};
+
+#define	IXGBE_M_CALLBACK_FLAGS \
+	(MC_IOCTL | MC_GETCAPAB | MC_SETPROP | MC_GETPROP)
 
 static mac_callbacks_t ixgbe_m_callbacks = {
 	IXGBE_M_CALLBACK_FLAGS,
@@ -191,7 +213,11 @@ static mac_callbacks_t ixgbe_m_callbacks = {
 	NULL,
 	NULL,
 	ixgbe_m_ioctl,
-	ixgbe_m_getcapab
+	ixgbe_m_getcapab,
+	NULL,
+	NULL,
+	ixgbe_m_setprop,
+	ixgbe_m_getprop
 };
 
 /*
@@ -204,6 +230,10 @@ static adapter_info_t ixgbe_82598eb_cap = {
 	32,		/* maximum number of tx queues */
 	1,		/* minimum number of tx queues */
 	8,		/* default number of tx queues */
+	16366,		/* maximum MTU size */
+	0xFFFF,		/* maximum interrupt throttle rate */
+	0,		/* minimum interrupt throttle rate */
+	200,		/* default interrupt throttle rate */
 	18,		/* maximum total msix vectors */
 	16,		/* maximum number of ring vectors */
 	2,		/* maximum number of other vectors */
@@ -220,6 +250,10 @@ static adapter_info_t ixgbe_82599eb_cap = {
 	128,		/* maximum number of tx queues */
 	1,		/* minimum number of tx queues */
 	8,		/* default number of tx queues */
+	15500,		/* maximum MTU size */
+	0xFF8,		/* maximum interrupt throttle rate */
+	0,		/* minimum interrupt throttle rate */
+	200,		/* default interrupt throttle rate */
 	64,		/* maximum total msix vectors */
 	16,		/* maximum number of ring vectors */
 	2,		/* maximum number of other vectors */
@@ -450,15 +484,6 @@ ixgbe_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 	}
 
 	/*
-	 * Initialize DMA and hardware settings for rx/tx rings
-	 */
-	if (ixgbe_init_rings(ixgbe) != IXGBE_SUCCESS) {
-		ixgbe_error(ixgbe, "Failed to initialize rings");
-		goto attach_fail;
-	}
-	ixgbe->attach_progress |= ATTACH_PROGRESS_INIT_RINGS;
-
-	/*
 	 * Initialize statistics
 	 */
 	if (ixgbe_init_stats(ixgbe) != IXGBE_SUCCESS) {
@@ -466,15 +491,6 @@ ixgbe_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 		goto attach_fail;
 	}
 	ixgbe->attach_progress |= ATTACH_PROGRESS_STATS;
-
-	/*
-	 * Initialize NDD parameters
-	 */
-	if (ixgbe_nd_init(ixgbe) != IXGBE_SUCCESS) {
-		ixgbe_error(ixgbe, "Failed to initialize ndd");
-		goto attach_fail;
-	}
-	ixgbe->attach_progress |= ATTACH_PROGRESS_NDD;
 
 	/*
 	 * Register the driver to the MAC
@@ -496,6 +512,7 @@ ixgbe_attach(dev_info_t *devinfo, ddi_attach_cmd_t cmd)
 	}
 	ixgbe->attach_progress |= ATTACH_PROGRESS_ENABLE_INTR;
 
+	ixgbe_log(ixgbe, "%s", ixgbe_version);
 	ixgbe->ixgbe_state |= IXGBE_INITIALIZED;
 
 	return (DDI_SUCCESS);
@@ -565,7 +582,7 @@ ixgbe_detach(dev_info_t *devinfo, ddi_detach_cmd_t cmd)
 	mutex_enter(&ixgbe->gen_lock);
 	if (ixgbe->ixgbe_state & IXGBE_STARTED) {
 		ixgbe->ixgbe_state &= ~IXGBE_STARTED;
-		ixgbe_stop(ixgbe);
+		ixgbe_stop(ixgbe, B_TRUE);
 		mutex_exit(&ixgbe->gen_lock);
 		/* Disable and stop the watchdog timer */
 		ixgbe_disable_watchdog_timer(ixgbe);
@@ -605,13 +622,6 @@ ixgbe_unconfigure(dev_info_t *devinfo, ixgbe_t *ixgbe)
 	}
 
 	/*
-	 * Free ndd parameters
-	 */
-	if (ixgbe->attach_progress & ATTACH_PROGRESS_NDD) {
-		ixgbe_nd_cleanup(ixgbe);
-	}
-
-	/*
 	 * Free statistics
 	 */
 	if (ixgbe->attach_progress & ATTACH_PROGRESS_STATS) {
@@ -644,13 +654,6 @@ ixgbe_unconfigure(dev_info_t *devinfo, ixgbe_t *ixgbe)
 	 */
 	if (ixgbe->attach_progress & ATTACH_PROGRESS_PROPS) {
 		(void) ddi_prop_remove_all(devinfo);
-	}
-
-	/*
-	 * Release the DMA resources of rx/tx rings
-	 */
-	if (ixgbe->attach_progress & ATTACH_PROGRESS_INIT_RINGS) {
-		ixgbe_fini_rings(ixgbe);
 	}
 
 	/*
@@ -729,6 +732,8 @@ ixgbe_register_mac(ixgbe_t *ixgbe)
 	mac->m_min_sdu = 0;
 	mac->m_max_sdu = ixgbe->default_mtu;
 	mac->m_margin = VLAN_TAGSZ;
+	mac->m_priv_props = ixgbe_priv_props;
+	mac->m_priv_prop_count = IXGBE_MAX_PRIV_PROPS;
 	mac->m_v12n = MAC_VIRT_LEVEL1;
 
 	status = mac_register(mac, &ixgbe->mac_hdl);
@@ -845,6 +850,8 @@ ixgbe_init_properties(ixgbe_t *ixgbe)
 	 * jumbo frames, ring number, descriptor number, etc.
 	 */
 	ixgbe_get_conf(ixgbe);
+
+	ixgbe_init_params(ixgbe);
 }
 
 /*
@@ -902,11 +909,6 @@ ixgbe_init_driver_settings(ixgbe_t *ixgbe)
 		rx_ring = &ixgbe->rx_rings[i];
 		rx_ring->index = i;
 		rx_ring->ixgbe = ixgbe;
-
-		rx_ring->ring_size = ixgbe->rx_ring_size;
-		rx_ring->free_list_size = ixgbe->rx_ring_size;
-		rx_ring->copy_thresh = ixgbe->rx_copy_thresh;
-		rx_ring->limit_per_intr = ixgbe->rx_limit_per_intr;
 	}
 
 	for (i = 0; i < ixgbe->num_tx_rings; i++) {
@@ -921,10 +923,6 @@ ixgbe_init_driver_settings(ixgbe_t *ixgbe)
 		tx_ring->ring_size = ixgbe->tx_ring_size;
 		tx_ring->free_list_size = ixgbe->tx_ring_size +
 		    (ixgbe->tx_ring_size >> 1);
-		tx_ring->copy_thresh = ixgbe->tx_copy_thresh;
-		tx_ring->recycle_thresh = ixgbe->tx_recycle_thresh;
-		tx_ring->overload_thresh = ixgbe->tx_overload_thresh;
-	tx_ring->resched_thresh = ixgbe->tx_resched_thresh;
 	}
 
 	/*
@@ -954,8 +952,6 @@ ixgbe_init_locks(ixgbe_t *ixgbe)
 	for (i = 0; i < ixgbe->num_rx_rings; i++) {
 		rx_ring = &ixgbe->rx_rings[i];
 		mutex_init(&rx_ring->rx_lock, NULL,
-		    MUTEX_DRIVER, DDI_INTR_PRI(ixgbe->intr_pri));
-		mutex_init(&rx_ring->recycle_lock, NULL,
 		    MUTEX_DRIVER, DDI_INTR_PRI(ixgbe->intr_pri));
 	}
 
@@ -991,7 +987,6 @@ ixgbe_destroy_locks(ixgbe_t *ixgbe)
 	for (i = 0; i < ixgbe->num_rx_rings; i++) {
 		rx_ring = &ixgbe->rx_rings[i];
 		mutex_destroy(&rx_ring->rx_lock);
-		mutex_destroy(&rx_ring->recycle_lock);
 	}
 
 	for (i = 0; i < ixgbe->num_tx_rings; i++) {
@@ -1018,7 +1013,7 @@ ixgbe_resume(dev_info_t *devinfo)
 	mutex_enter(&ixgbe->gen_lock);
 
 	if (ixgbe->ixgbe_state & IXGBE_STARTED) {
-		if (ixgbe_start(ixgbe) != IXGBE_SUCCESS) {
+		if (ixgbe_start(ixgbe, B_FALSE) != IXGBE_SUCCESS) {
 			mutex_exit(&ixgbe->gen_lock);
 			return (DDI_FAILURE);
 		}
@@ -1048,8 +1043,11 @@ ixgbe_suspend(dev_info_t *devinfo)
 	mutex_enter(&ixgbe->gen_lock);
 
 	ixgbe->ixgbe_state |= IXGBE_SUSPENDED;
-
-	ixgbe_stop(ixgbe);
+	if (!(ixgbe->ixgbe_state & IXGBE_STARTED)) {
+		mutex_exit(&ixgbe->gen_lock);
+		return (DDI_SUCCESS);
+	}
+	ixgbe_stop(ixgbe, B_FALSE);
 
 	mutex_exit(&ixgbe->gen_lock);
 
@@ -1118,11 +1116,6 @@ ixgbe_init(ixgbe_t *ixgbe)
 	hw->fc.send_xon = B_TRUE;
 
 	/*
-	 * Don't wait for auto-negotiation to complete
-	 */
-	hw->phy.autoneg_wait_to_complete = B_FALSE;
-
-	/*
 	 * Initialize link settings
 	 */
 	(void) ixgbe_driver_setup_link(ixgbe, B_FALSE);
@@ -1157,62 +1150,13 @@ init_fail:
 }
 
 /*
- * ixgbe_init_rings - Allocate DMA resources for all rx/tx rings and
- * initialize relevant hardware settings.
- */
-static int
-ixgbe_init_rings(ixgbe_t *ixgbe)
-{
-	int i;
-
-	/*
-	 * Allocate buffers for all the rx/tx rings
-	 */
-	if (ixgbe_alloc_dma(ixgbe) != IXGBE_SUCCESS)
-		return (IXGBE_FAILURE);
-
-	/*
-	 * Setup the rx/tx rings
-	 */
-	mutex_enter(&ixgbe->gen_lock);
-
-	for (i = 0; i < ixgbe->num_rx_rings; i++)
-		mutex_enter(&ixgbe->rx_rings[i].rx_lock);
-	for (i = 0; i < ixgbe->num_tx_rings; i++)
-		mutex_enter(&ixgbe->tx_rings[i].tx_lock);
-
-	ixgbe_setup_rings(ixgbe);
-
-	for (i = ixgbe->num_tx_rings - 1; i >= 0; i--)
-		mutex_exit(&ixgbe->tx_rings[i].tx_lock);
-	for (i = ixgbe->num_rx_rings - 1; i >= 0; i--)
-		mutex_exit(&ixgbe->rx_rings[i].rx_lock);
-
-	mutex_exit(&ixgbe->gen_lock);
-
-	return (IXGBE_SUCCESS);
-}
-
-/*
- * ixgbe_fini_rings - Release DMA resources of all rx/tx rings.
- */
-static void
-ixgbe_fini_rings(ixgbe_t *ixgbe)
-{
-	/*
-	 * Release the DMA/memory resources of rx/tx rings
-	 */
-	ixgbe_free_dma(ixgbe);
-}
-
-/*
  * ixgbe_chip_start - Initialize and start the chipset hardware.
  */
 static int
 ixgbe_chip_start(ixgbe_t *ixgbe)
 {
 	struct ixgbe_hw *hw = &ixgbe->hw;
-	int i;
+	int ret_val, i;
 
 	ASSERT(mutex_owned(&ixgbe->gen_lock));
 
@@ -1237,9 +1181,17 @@ ixgbe_chip_start(ixgbe_t *ixgbe)
 	/*
 	 * Configure/Initialize hardware
 	 */
-	if (ixgbe_init_hw(hw) != IXGBE_SUCCESS) {
-		ixgbe_error(ixgbe, "Failed to initialize hardware");
-		return (IXGBE_FAILURE);
+	ret_val = ixgbe_init_hw(hw);
+	if (ret_val != IXGBE_SUCCESS) {
+		if (ret_val == IXGBE_ERR_EEPROM_VERSION) {
+			ixgbe_error(ixgbe,
+			    "This 82599 device is pre-release and contains"
+			    " outdated firmware, please contact your hardware"
+			    " vendor for a replacement.");
+		} else {
+			ixgbe_error(ixgbe, "Failed to initialize hardware");
+			return (IXGBE_FAILURE);
+		}
 	}
 
 	/*
@@ -1312,83 +1264,32 @@ ixgbe_chip_stop(ixgbe_t *ixgbe)
 static int
 ixgbe_reset(ixgbe_t *ixgbe)
 {
-	int i;
+	/*
+	 * Disable and stop the watchdog timer
+	 */
+	ixgbe_disable_watchdog_timer(ixgbe);
 
 	mutex_enter(&ixgbe->gen_lock);
 
 	ASSERT(ixgbe->ixgbe_state & IXGBE_STARTED);
 	ixgbe->ixgbe_state &= ~IXGBE_STARTED;
 
-	/*
-	 * Disable the adapter interrupts to stop any rx/tx activities
-	 * before draining pending data and resetting hardware.
-	 */
-	ixgbe_disable_adapter_interrupts(ixgbe);
+	ixgbe_stop(ixgbe, B_FALSE);
 
-	/*
-	 * Drain the pending transmit packets
-	 */
-	(void) ixgbe_tx_drain(ixgbe);
-
-	for (i = 0; i < ixgbe->num_rx_rings; i++)
-		mutex_enter(&ixgbe->rx_rings[i].rx_lock);
-	for (i = 0; i < ixgbe->num_tx_rings; i++)
-		mutex_enter(&ixgbe->tx_rings[i].tx_lock);
-
-	/*
-	 * Stop the chipset hardware
-	 */
-	ixgbe_chip_stop(ixgbe);
-
-	/*
-	 * Clean the pending tx data/resources
-	 */
-	ixgbe_tx_clean(ixgbe);
-
-	/*
-	 * Start the chipset hardware
-	 */
-	if (ixgbe_chip_start(ixgbe) != IXGBE_SUCCESS) {
-		ixgbe_fm_ereport(ixgbe, DDI_FM_DEVICE_INVAL_STATE);
-		goto reset_failure;
+	if (ixgbe_start(ixgbe, B_FALSE) != IXGBE_SUCCESS) {
+		mutex_exit(&ixgbe->gen_lock);
+		return (IXGBE_FAILURE);
 	}
-
-	if (ixgbe_check_acc_handle(ixgbe->osdep.reg_handle) != DDI_FM_OK) {
-		goto reset_failure;
-	}
-
-	/*
-	 * Setup the rx/tx rings
-	 */
-	ixgbe_setup_rings(ixgbe);
-
-	/*
-	 * Enable adapter interrupts
-	 * The interrupts must be enabled after the driver state is START
-	 */
-	ixgbe_enable_adapter_interrupts(ixgbe);
-
-	for (i = ixgbe->num_tx_rings - 1; i >= 0; i--)
-		mutex_exit(&ixgbe->tx_rings[i].tx_lock);
-	for (i = ixgbe->num_rx_rings - 1; i >= 0; i--)
-		mutex_exit(&ixgbe->rx_rings[i].rx_lock);
 
 	ixgbe->ixgbe_state |= IXGBE_STARTED;
 	mutex_exit(&ixgbe->gen_lock);
 
+	/*
+	 * Enable and start the watchdog timer
+	 */
+	ixgbe_enable_watchdog_timer(ixgbe);
+
 	return (IXGBE_SUCCESS);
-
-reset_failure:
-	for (i = ixgbe->num_tx_rings - 1; i >= 0; i--)
-		mutex_exit(&ixgbe->tx_rings[i].tx_lock);
-	for (i = ixgbe->num_rx_rings - 1; i >= 0; i--)
-		mutex_exit(&ixgbe->rx_rings[i].rx_lock);
-
-	mutex_exit(&ixgbe->gen_lock);
-
-	ddi_fm_service_impact(ixgbe->dip, DDI_SERVICE_LOST);
-
-	return (IXGBE_FAILURE);
 }
 
 /*
@@ -1505,9 +1406,8 @@ ixgbe_tx_drain(ixgbe_t *ixgbe)
 static boolean_t
 ixgbe_rx_drain(ixgbe_t *ixgbe)
 {
-	ixgbe_rx_ring_t *rx_ring;
-	boolean_t done;
-	int i, j;
+	boolean_t done = B_TRUE;
+	int i;
 
 	/*
 	 * Polling the rx free list to check if those rx buffers held by
@@ -1520,13 +1420,7 @@ ixgbe_rx_drain(ixgbe_t *ixgbe)
 	 * Otherwise return B_FALSE;
 	 */
 	for (i = 0; i < RX_DRAIN_TIME; i++) {
-
-		done = B_TRUE;
-		for (j = 0; j < ixgbe->num_rx_rings; j++) {
-			rx_ring = &ixgbe->rx_rings[j];
-			done = done &&
-			    (rx_ring->rcb_free == rx_ring->free_list_size);
-		}
+		done = (ixgbe->rcb_pending == 0);
 
 		if (done)
 			break;
@@ -1541,11 +1435,29 @@ ixgbe_rx_drain(ixgbe_t *ixgbe)
  * ixgbe_start - Start the driver/chipset.
  */
 int
-ixgbe_start(ixgbe_t *ixgbe)
+ixgbe_start(ixgbe_t *ixgbe, boolean_t alloc_buffer)
 {
 	int i;
 
 	ASSERT(mutex_owned(&ixgbe->gen_lock));
+
+	if (alloc_buffer) {
+		if (ixgbe_alloc_rx_data(ixgbe) != IXGBE_SUCCESS) {
+			ixgbe_error(ixgbe,
+			    "Failed to allocate software receive rings");
+			return (IXGBE_FAILURE);
+		}
+
+		/* Allocate buffers for all the rx/tx rings */
+		if (ixgbe_alloc_dma(ixgbe) != IXGBE_SUCCESS) {
+			ixgbe_error(ixgbe, "Failed to allocate DMA resource");
+			return (IXGBE_FAILURE);
+		}
+
+		ixgbe->tx_ring_init = B_TRUE;
+	} else {
+		ixgbe->tx_ring_init = B_FALSE;
+	}
 
 	for (i = 0; i < ixgbe->num_rx_rings; i++)
 		mutex_enter(&ixgbe->rx_rings[i].rx_lock);
@@ -1597,7 +1509,7 @@ start_failure:
  * ixgbe_stop - Stop the driver/chipset.
  */
 void
-ixgbe_stop(ixgbe_t *ixgbe)
+ixgbe_stop(ixgbe_t *ixgbe, boolean_t free_buffer)
 {
 	int i;
 
@@ -1636,6 +1548,19 @@ ixgbe_stop(ixgbe_t *ixgbe)
 		mutex_exit(&ixgbe->tx_rings[i].tx_lock);
 	for (i = ixgbe->num_rx_rings - 1; i >= 0; i--)
 		mutex_exit(&ixgbe->rx_rings[i].rx_lock);
+
+	if (ixgbe->link_state == LINK_STATE_UP) {
+		ixgbe->link_state = LINK_STATE_UNKNOWN;
+		mac_link_update(ixgbe->mac_hdl, ixgbe->link_state);
+	}
+
+	if (free_buffer) {
+		/*
+		 * Release the DMA/memory resources of rx/tx rings
+		 */
+		ixgbe_free_dma(ixgbe);
+		ixgbe_free_rx_data(ixgbe);
+	}
 }
 
 /*
@@ -1714,6 +1639,50 @@ ixgbe_free_rings(ixgbe_t *ixgbe)
 	}
 }
 
+static int
+ixgbe_alloc_rx_data(ixgbe_t *ixgbe)
+{
+	ixgbe_rx_ring_t *rx_ring;
+	int i;
+
+	for (i = 0; i < ixgbe->num_rx_rings; i++) {
+		rx_ring = &ixgbe->rx_rings[i];
+		if (ixgbe_alloc_rx_ring_data(rx_ring) != IXGBE_SUCCESS)
+			goto alloc_rx_rings_failure;
+	}
+	return (IXGBE_SUCCESS);
+
+alloc_rx_rings_failure:
+	ixgbe_free_rx_data(ixgbe);
+	return (IXGBE_FAILURE);
+}
+
+static void
+ixgbe_free_rx_data(ixgbe_t *ixgbe)
+{
+	ixgbe_rx_ring_t *rx_ring;
+	ixgbe_rx_data_t *rx_data;
+	int i;
+
+	for (i = 0; i < ixgbe->num_rx_rings; i++) {
+		rx_ring = &ixgbe->rx_rings[i];
+
+		mutex_enter(&ixgbe->rx_pending_lock);
+		rx_data = rx_ring->rx_data;
+
+		if (rx_data != NULL) {
+			rx_data->flag |= IXGBE_RX_STOPPED;
+
+			if (rx_data->rcb_pending == 0) {
+				ixgbe_free_rx_ring_data(rx_data);
+				rx_ring->rx_data = NULL;
+			}
+		}
+
+		mutex_exit(&ixgbe->rx_pending_lock);
+	}
+}
+
 /*
  * ixgbe_setup_rings - Setup rx/tx rings.
  */
@@ -1736,6 +1705,7 @@ static void
 ixgbe_setup_rx_ring(ixgbe_rx_ring_t *rx_ring)
 {
 	ixgbe_t *ixgbe = rx_ring->ixgbe;
+	ixgbe_rx_data_t *rx_data = rx_ring->rx_data;
 	struct ixgbe_hw *hw = &ixgbe->hw;
 	rx_control_block_t *rcb;
 	union ixgbe_adv_rx_desc	*rbd;
@@ -1749,8 +1719,8 @@ ixgbe_setup_rx_ring(ixgbe_rx_ring_t *rx_ring)
 	ASSERT(mutex_owned(&ixgbe->gen_lock));
 
 	for (i = 0; i < ixgbe->rx_ring_size; i++) {
-		rcb = rx_ring->work_list[i];
-		rbd = &rx_ring->rbd_ring[i];
+		rcb = rx_data->work_list[i];
+		rbd = &rx_data->rbd_ring[i];
 
 		rbd->read.pkt_addr = rcb->rx_buf.dma_address;
 		rbd->read.hdr_addr = NULL;
@@ -1759,36 +1729,24 @@ ixgbe_setup_rx_ring(ixgbe_rx_ring_t *rx_ring)
 	/*
 	 * Initialize the length register
 	 */
-	size = rx_ring->ring_size * sizeof (union ixgbe_adv_rx_desc);
+	size = rx_data->ring_size * sizeof (union ixgbe_adv_rx_desc);
 	IXGBE_WRITE_REG(hw, IXGBE_RDLEN(rx_ring->index), size);
 
 	/*
 	 * Initialize the base address registers
 	 */
-	buf_low = (uint32_t)rx_ring->rbd_area.dma_address;
-	buf_high = (uint32_t)(rx_ring->rbd_area.dma_address >> 32);
+	buf_low = (uint32_t)rx_data->rbd_area.dma_address;
+	buf_high = (uint32_t)(rx_data->rbd_area.dma_address >> 32);
 	IXGBE_WRITE_REG(hw, IXGBE_RDBAH(rx_ring->index), buf_high);
 	IXGBE_WRITE_REG(hw, IXGBE_RDBAL(rx_ring->index), buf_low);
 
 	/*
 	 * Setup head & tail pointers
 	 */
-	IXGBE_WRITE_REG(hw, IXGBE_RDT(rx_ring->index), rx_ring->ring_size - 1);
+	IXGBE_WRITE_REG(hw, IXGBE_RDT(rx_ring->index), rx_data->ring_size - 1);
 	IXGBE_WRITE_REG(hw, IXGBE_RDH(rx_ring->index), 0);
 
-	rx_ring->rbd_next = 0;
-
-	/*
-	 * Note: Considering the case that the chipset is being reset
-	 * and there are still some buffers held by the upper layer,
-	 * we should not reset the values of rcb_head, rcb_tail and
-	 * rcb_free if the state is not IXGBE_UNKNOWN.
-	 */
-	if (ixgbe->ixgbe_state == IXGBE_UNKNOWN) {
-		rx_ring->rcb_head = 0;
-		rx_ring->rcb_tail = 0;
-		rx_ring->rcb_free = rx_ring->free_list_size;
-	}
+	rx_data->rbd_next = 0;
 
 	/*
 	 * Setup the Receive Descriptor Control Register (RXDCTL)
@@ -1995,13 +1953,7 @@ ixgbe_setup_tx_ring(ixgbe_tx_ring_t *tx_ring)
 	tx_ring->tbd_tail = 0;
 	tx_ring->tbd_free = tx_ring->ring_size;
 
-	/*
-	 * Note: Considering the case that the chipset is being reset,
-	 * and there are still some tcb in the pending list,
-	 * we should not reset the values of tcb_head, tcb_tail and
-	 * tcb_free if the state is not IXGBE_UNKNOWN.
-	 */
-	if (ixgbe->ixgbe_state == IXGBE_UNKNOWN) {
+	if (ixgbe->tx_ring_init == B_TRUE) {
 		tx_ring->tcb_head = 0;
 		tx_ring->tcb_tail = 0;
 		tx_ring->tcb_free = tx_ring->free_list_size;
@@ -2370,7 +2322,7 @@ ixgbe_get_conf(ixgbe_t *ixgbe)
 	 * frame check sequence.
 	 */
 	ixgbe->default_mtu = ixgbe_get_prop(ixgbe, PROP_DEFAULT_MTU,
-	    MIN_MTU, MAX_MTU, DEFAULT_MTU);
+	    MIN_MTU, ixgbe->capab->max_mtu, DEFAULT_MTU);
 
 	ixgbe->max_frame_size = ixgbe->default_mtu +
 	    sizeof (struct ether_vlan_header) + ETHERFCSL;
@@ -2475,24 +2427,45 @@ ixgbe_get_conf(ixgbe_t *ixgbe)
 	    MIN_RX_LIMIT_PER_INTR, MAX_RX_LIMIT_PER_INTR,
 	    DEFAULT_RX_LIMIT_PER_INTR);
 
+	ixgbe->intr_throttling[0] = ixgbe_get_prop(ixgbe, PROP_INTR_THROTTLING,
+	    ixgbe->capab->min_intr_throttle,
+	    ixgbe->capab->max_intr_throttle,
+	    ixgbe->capab->def_intr_throttle);
 	/*
-	 * Interrupt throttling is per 256ns in 82598 and 2 usec increments
-	 * in 82599.
+	 * 82599 requires the interupt throttling rate is
+	 * a multiple of 8. This is enforced by the register
+	 * definiton.
 	 */
-	switch (hw->mac.type) {
-	case ixgbe_mac_82598EB:
-		ixgbe->intr_throttling[0] = ixgbe_get_prop(ixgbe,
-		    PROP_INTR_THROTTLING,
-		    MIN_INTR_THROTTLING, MAX_INTR_THROTTLING_82598,
-		    DEFAULT_INTR_THROTTLING_82598);
-		break;
-	case ixgbe_mac_82599EB:
-		ixgbe->intr_throttling[0] = ixgbe_get_prop(ixgbe,
-		    PROP_INTR_THROTTLING,
-		    MIN_INTR_THROTTLING, MAX_INTR_THROTTLING_82599,
-		    DEFAULT_INTR_THROTTLING_82599);
-		break;
-	}
+	if (hw->mac.type == ixgbe_mac_82599EB)
+		ixgbe->intr_throttling[0] = ixgbe->intr_throttling[0] & 0xFF8;
+}
+
+static void
+ixgbe_init_params(ixgbe_t *ixgbe)
+{
+	ixgbe->param_en_10000fdx_cap = 1;
+	ixgbe->param_en_1000fdx_cap = 1;
+	ixgbe->param_en_100fdx_cap = 1;
+	ixgbe->param_adv_10000fdx_cap = 1;
+	ixgbe->param_adv_1000fdx_cap = 1;
+	ixgbe->param_adv_100fdx_cap = 1;
+
+	ixgbe->param_pause_cap = 1;
+	ixgbe->param_asym_pause_cap = 1;
+	ixgbe->param_rem_fault = 0;
+
+	ixgbe->param_adv_autoneg_cap = 1;
+	ixgbe->param_adv_pause_cap = 1;
+	ixgbe->param_adv_asym_pause_cap = 1;
+	ixgbe->param_adv_rem_fault = 0;
+
+	ixgbe->param_lp_10000fdx_cap = 0;
+	ixgbe->param_lp_1000fdx_cap = 0;
+	ixgbe->param_lp_100fdx_cap = 0;
+	ixgbe->param_lp_autoneg_cap = 0;
+	ixgbe->param_lp_pause_cap = 0;
+	ixgbe->param_lp_asym_pause_cap = 0;
+	ixgbe->param_lp_rem_fault = 0;
 }
 
 /*
@@ -2534,44 +2507,32 @@ ixgbe_get_prop(ixgbe_t *ixgbe,
 int
 ixgbe_driver_setup_link(ixgbe_t *ixgbe, boolean_t setup_hw)
 {
-	struct ixgbe_mac_info *mac;
-	struct ixgbe_phy_info *phy;
-	boolean_t invalid;
+	u32 autoneg_advertised = 0;
 
-	mac = &ixgbe->hw.mac;
-	phy = &ixgbe->hw.phy;
-	invalid = B_FALSE;
+	/*
+	 * No half duplex support with 10Gb parts
+	 */
+	if (ixgbe->param_adv_10000fdx_cap == 1)
+		autoneg_advertised |= IXGBE_LINK_SPEED_10GB_FULL;
 
-	if (ixgbe->param_adv_autoneg_cap == 1) {
-		mac->autoneg = B_TRUE;
-		phy->autoneg_advertised = 0;
+	if (ixgbe->param_adv_1000fdx_cap == 1)
+		autoneg_advertised |= IXGBE_LINK_SPEED_1GB_FULL;
 
-		/*
-		 * No half duplex support with 10Gb parts
-		 */
-		if (ixgbe->param_adv_10000fdx_cap == 1)
-			phy->autoneg_advertised |= IXGBE_LINK_SPEED_10GB_FULL;
+	if (ixgbe->param_adv_100fdx_cap == 1)
+		autoneg_advertised |= IXGBE_LINK_SPEED_100_FULL;
 
-		if (ixgbe->param_adv_1000fdx_cap == 1)
-			phy->autoneg_advertised |= IXGBE_LINK_SPEED_1GB_FULL;
+	if (ixgbe->param_adv_autoneg_cap == 1 && autoneg_advertised == 0) {
+		ixgbe_notice(ixgbe, "Invalid link settings. Setup link "
+		    "to autonegotiation with full link capabilities.");
 
-		if (ixgbe->param_adv_100fdx_cap == 1)
-			phy->autoneg_advertised |= IXGBE_LINK_SPEED_100_FULL;
-
-		if (phy->autoneg_advertised == 0)
-			invalid = B_TRUE;
-	} else {
-		ixgbe->hw.mac.autoneg = B_FALSE;
-	}
-
-	if (invalid) {
-		ixgbe_notice(ixgbe, "Invalid link settings. Setup link to "
-		    "autonegotiation with full link capabilities.");
-		ixgbe->hw.mac.autoneg = B_TRUE;
+		autoneg_advertised = IXGBE_LINK_SPEED_10GB_FULL |
+		    IXGBE_LINK_SPEED_1GB_FULL |
+		    IXGBE_LINK_SPEED_100_FULL;
 	}
 
 	if (setup_hw) {
-		if (ixgbe_setup_link(&ixgbe->hw) != IXGBE_SUCCESS) {
+		if (ixgbe_setup_link(&ixgbe->hw, autoneg_advertised,
+		    ixgbe->param_adv_autoneg_cap, B_TRUE) != IXGBE_SUCCESS) {
 			ixgbe_notice(ixgbe, "Setup link failed on this "
 			    "device.");
 			return (IXGBE_FAILURE);
@@ -2666,16 +2627,14 @@ ixgbe_sfp_check(void *arg)
 	ixgbe_t *ixgbe = (ixgbe_t *)arg;
 	uint32_t eicr = ixgbe->eicr;
 	struct ixgbe_hw *hw = &ixgbe->hw;
-	uint32_t autoneg;
 
 	if (eicr & IXGBE_EICR_GPI_SDP1) {
 		/* clear the interrupt */
 		IXGBE_WRITE_REG(hw, IXGBE_EICR, IXGBE_EICR_GPI_SDP1);
 
 		/* if link up, do multispeed fiber setup */
-		(void) ixgbe_get_link_capabilities(hw, &autoneg,
-		    &hw->mac.autoneg);
-		(void) ixgbe_setup_link_speed(hw, autoneg, B_TRUE, B_TRUE);
+		(void) ixgbe_setup_link(hw, IXGBE_LINK_SPEED_82599_AUTONEG,
+		    B_TRUE, B_TRUE);
 		ixgbe_driver_link_check(ixgbe);
 	} else if (eicr & IXGBE_EICR_GPI_SDP2) {
 		/* clear the interrupt */
@@ -2685,9 +2644,8 @@ ixgbe_sfp_check(void *arg)
 		(void) hw->mac.ops.setup_sfp(hw);
 
 		/* do multispeed fiber setup */
-		(void) ixgbe_get_link_capabilities(hw, &autoneg,
-		    &hw->mac.autoneg);
-		(void) ixgbe_setup_link_speed(hw, autoneg, B_TRUE, B_TRUE);
+		(void) ixgbe_setup_link(hw, IXGBE_LINK_SPEED_82599_AUTONEG,
+		    B_TRUE, B_TRUE);
 		ixgbe_driver_link_check(ixgbe);
 	}
 }
@@ -2740,7 +2698,9 @@ ixgbe_stall_check(ixgbe_t *ixgbe)
 	result = B_FALSE;
 	for (i = 0; i < ixgbe->num_tx_rings; i++) {
 		tx_ring = &ixgbe->tx_rings[i];
-		tx_ring->tx_recycle(tx_ring);
+		if (tx_ring->tbd_free <= ixgbe->tx_recycle_thresh) {
+			tx_ring->tx_recycle(tx_ring);
+		}
 
 		if (tx_ring->recycle_fail > 0)
 			tx_ring->stall_watchdog++;
@@ -3067,6 +3027,7 @@ ixgbe_loopback_ioctl(ixgbe_t *ixgbe, struct iocblk *iocp, mblk_t *mp)
 
 		value = sizeof (lb_normal);
 		value += sizeof (lb_mac);
+		value += sizeof (lb_external);
 
 		lbsp = (lb_info_sz_t *)(uintptr_t)mp->b_cont->b_rptr;
 		*lbsp = value;
@@ -3075,6 +3036,7 @@ ixgbe_loopback_ioctl(ixgbe_t *ixgbe, struct iocblk *iocp, mblk_t *mp)
 	case LB_GET_INFO:
 		value = sizeof (lb_normal);
 		value += sizeof (lb_mac);
+		value += sizeof (lb_external);
 
 		size = value;
 		if (iocp->ioc_count != size)
@@ -3085,6 +3047,7 @@ ixgbe_loopback_ioctl(ixgbe_t *ixgbe, struct iocblk *iocp, mblk_t *mp)
 
 		lbpp[value++] = lb_normal;
 		lbpp[value++] = lb_mac;
+		lbpp[value++] = lb_external;
 		break;
 
 	case LB_GET_MODE:
@@ -3124,12 +3087,8 @@ ixgbe_loopback_ioctl(ixgbe_t *ixgbe, struct iocblk *iocp, mblk_t *mp)
 static boolean_t
 ixgbe_set_loopback_mode(ixgbe_t *ixgbe, uint32_t mode)
 {
-	struct ixgbe_hw *hw;
-
 	if (mode == ixgbe->loopback_mode)
 		return (B_TRUE);
-
-	hw = &ixgbe->hw;
 
 	ixgbe->loopback_mode = mode;
 
@@ -3137,9 +3096,7 @@ ixgbe_set_loopback_mode(ixgbe_t *ixgbe, uint32_t mode)
 		/*
 		 * Reset the chip
 		 */
-		hw->phy.autoneg_wait_to_complete = B_TRUE;
 		(void) ixgbe_reset(ixgbe);
-		hw->phy.autoneg_wait_to_complete = B_FALSE;
 		return (B_TRUE);
 	}
 
@@ -3149,6 +3106,9 @@ ixgbe_set_loopback_mode(ixgbe_t *ixgbe, uint32_t mode)
 	default:
 		mutex_exit(&ixgbe->gen_lock);
 		return (B_FALSE);
+
+	case IXGBE_LB_EXTERNAL:
+		break;
 
 	case IXGBE_LB_INTERNAL_MAC:
 		ixgbe_set_internal_mac_loopback(ixgbe);
@@ -3239,6 +3199,8 @@ ixgbe_intr_rx_work(ixgbe_rx_ring_t *rx_ring)
 static void
 ixgbe_intr_tx_work(ixgbe_tx_ring_t *tx_ring)
 {
+	ixgbe_t *ixgbe = tx_ring->ixgbe;
+
 	/*
 	 * Recycle the tx descriptors
 	 */
@@ -3248,7 +3210,7 @@ ixgbe_intr_tx_work(ixgbe_tx_ring_t *tx_ring)
 	 * Schedule the re-transmit
 	 */
 	if (tx_ring->reschedule &&
-	    (tx_ring->tbd_free >= tx_ring->resched_thresh)) {
+	    (tx_ring->tbd_free >= ixgbe->tx_resched_thresh)) {
 		tx_ring->reschedule = B_FALSE;
 		mac_tx_ring_update(tx_ring->ixgbe->mac_hdl,
 		    tx_ring->ring_handle);
@@ -3296,8 +3258,8 @@ ixgbe_intr_other_work(ixgbe_t *ixgbe, uint32_t eicr)
 		if ((ddi_taskq_dispatch(ixgbe->lsc_taskq,
 		    ixgbe_sfp_check, (void *)ixgbe,
 		    DDI_NOSLEEP)) != DDI_SUCCESS) {
-			ixgbe_log(ixgbe,
-			    "No memory available to dispatch taskq");
+			ixgbe_log(ixgbe, "No memory available to dispatch "
+			    "taskq for SFP check");
 		}
 	}
 }
@@ -3320,7 +3282,6 @@ ixgbe_intr_legacy(void *arg1, void *arg2)
 	_NOTE(ARGUNUSED(arg2));
 
 	mutex_enter(&ixgbe->gen_lock);
-
 	if (ixgbe->ixgbe_state & IXGBE_SUSPENDED) {
 		mutex_exit(&ixgbe->gen_lock);
 		return (DDI_INTR_UNCLAIMED);
@@ -3369,7 +3330,7 @@ ixgbe_intr_legacy(void *arg1, void *arg2)
 			 * Schedule the re-transmit
 			 */
 			tx_reschedule = (tx_ring->reschedule &&
-			    (tx_ring->tbd_free >= tx_ring->resched_thresh));
+			    (tx_ring->tbd_free >= ixgbe->tx_resched_thresh));
 		}
 
 		/* any interrupt type other than tx/rx */
@@ -4317,8 +4278,9 @@ ixgbe_get_hw_state(ixgbe_t *ixgbe)
 		    (pcs1g_anlp & IXGBE_PCS1GANLP_LPFD) ? 1 : 0;
 	}
 
-	ixgbe->param_1000fdx_cap = (pcs1g_ana & IXGBE_PCS1GANA_FDC)  ? 1 : 0;
-	ixgbe->param_100fdx_cap = (pcs1g_ana & IXGBE_PCS1GANA_FDC)  ? 1 : 0;
+	ixgbe->param_adv_1000fdx_cap =
+	    (pcs1g_ana & IXGBE_PCS1GANA_FDC)  ? 1 : 0;
+	ixgbe->param_adv_100fdx_cap = (pcs1g_ana & IXGBE_PCS1GANA_FDC)  ? 1 : 0;
 }
 
 /*
@@ -4633,6 +4595,13 @@ ixgbe_rx_ring_intr_enable(mac_intr_handle_t intrh)
 	ixgbe_enable_ivar(ixgbe, r_idx, 0);
 
 	BT_SET(ixgbe->vect_map[v_idx].rx_map, r_idx);
+
+	/*
+	 * To trigger a Rx interrupt to on this ring
+	 */
+	IXGBE_WRITE_REG(&ixgbe->hw, IXGBE_EICS, (1 << v_idx));
+	IXGBE_WRITE_FLUSH(&ixgbe->hw);
+
 	mutex_exit(&ixgbe->gen_lock);
 
 	return (0);
@@ -4650,7 +4619,6 @@ ixgbe_rx_ring_intr_disable(mac_intr_handle_t intrh)
 	int v_idx = rx_ring->intr_vector;
 
 	mutex_enter(&ixgbe->gen_lock);
-
 	ASSERT(BT_TEST(ixgbe->vect_map[v_idx].rx_map, r_idx) == 1);
 
 	/*

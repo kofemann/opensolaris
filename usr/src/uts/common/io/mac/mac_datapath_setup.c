@@ -1358,6 +1358,10 @@ mac_client_update_classifier(mac_client_impl_t *mcip, boolean_t enable)
 	rx_func = enable_classifier ? mac_rx_srs_subflow_process :
 	    mac_rx_srs_process;
 
+	/* Tell mac_srs_poll_state_change to disable polling if necessary */
+	if (mip->mi_state_flags & MIS_POLL_DISABLE)
+		enable_classifier = B_TRUE;
+
 	/*
 	 * If receive function has already been configured correctly for
 	 * current subflow configuration, do nothing.
@@ -1979,7 +1983,8 @@ mac_srs_create(mac_client_impl_t *mcip, flow_entry_t *flent, uint32_t srs_type,
 		ring->mr_classify_type = MAC_HW_CLASSIFIER;
 		ring->mr_flag |= MR_INCIPIENT;
 
-		if (FLOW_TAB_EMPTY(mcip->mci_subflow_tab) && mac_poll_enable)
+		if (!(mcip->mci_mip->mi_state_flags & MIS_POLL_DISABLE) &&
+		    FLOW_TAB_EMPTY(mcip->mci_subflow_tab) && mac_poll_enable)
 			mac_srs->srs_state |= SRS_POLLING_CAPAB;
 
 		mac_srs->srs_poll_thr = thread_create(NULL, 0,
@@ -2234,6 +2239,10 @@ mac_srs_group_teardown(mac_client_impl_t *mcip, flow_entry_t *flent,
 			mac_release_tx_group(tx_srs->srs_mcip->mci_mip,
 			    tx->st_group);
 			tx->st_group = NULL;
+		}
+		if (tx->st_ring_count != 0) {
+			kmem_free(tx->st_rings,
+			    sizeof (mac_ring_handle_t) * tx->st_ring_count);
 		}
 		if (tx->st_arg2 != NULL) {
 			ASSERT(tx_srs->srs_type & SRST_TX);
@@ -3203,7 +3212,7 @@ mac_tx_srs_setup(mac_client_impl_t *mcip, flow_entry_t *flent,
 	mac_impl_t *mip = mcip->mci_mip;
 	mac_soft_ring_set_t *tx_srs;
 	int i, tx_ring_count = 0, tx_rings_reserved = 0;
-	mac_ring_handle_t *tx_ring = NULL;
+	mac_ring_handle_t *tx_rings = NULL;
 	uint32_t soft_ring_type;
 	mac_group_t *grp = NULL;
 	mac_ring_t *ring;
@@ -3221,7 +3230,7 @@ mac_tx_srs_setup(mac_client_impl_t *mcip, flow_entry_t *flent,
 	}
 
 	if (tx_ring_count != 0) {
-		tx_ring = kmem_zalloc(sizeof (mac_ring_handle_t) *
+		tx_rings = kmem_zalloc(sizeof (mac_ring_handle_t) *
 		    tx_ring_count, KM_SLEEP);
 	}
 
@@ -3231,8 +3240,12 @@ mac_tx_srs_setup(mac_client_impl_t *mcip, flow_entry_t *flent,
 	 * NIC's.
 	 */
 	if (srs_type == SRST_FLOW ||
-	    (mcip->mci_state_flags & MCIS_NO_HWRINGS) != 0)
-		goto use_default_ring;
+	    (mcip->mci_state_flags & MCIS_NO_HWRINGS) != 0) {
+		/* use default ring */
+		tx_rings[0] = (void *)mip->mi_default_tx_ring;
+		tx_rings_reserved++;
+		goto rings_assigned;
+	}
 
 	if (mcip->mci_share != NULL)
 		ring = grp->mrg_rings;
@@ -3245,8 +3258,7 @@ mac_tx_srs_setup(mac_client_impl_t *mcip, flow_entry_t *flent,
 	 * then each Tx ring will have a Tx-side soft ring. All
 	 * these soft rings will be hang off Tx SRS.
 	 */
-	for (i = 0, tx_rings_reserved = 0;
-	    i < tx_ring_count; i++, tx_rings_reserved++) {
+	for (i = 0; i < tx_ring_count; i++) {
 		if (mcip->mci_share != NULL) {
 			/*
 			 * The ring was already chosen and associated
@@ -3255,42 +3267,39 @@ mac_tx_srs_setup(mac_client_impl_t *mcip, flow_entry_t *flent,
 			 * between the share and non-share cases.
 			 */
 			ASSERT(ring != NULL);
-			tx_ring[i] = (mac_ring_handle_t)ring;
+			tx_rings[i] = (mac_ring_handle_t)ring;
 			ring = ring->mr_next;
 		} else {
-			tx_ring[i] =
+			tx_rings[i] =
 			    (mac_ring_handle_t)mac_reserve_tx_ring(mip, NULL);
-			if (tx_ring[i] == NULL)
+			if (tx_rings[i] == NULL) {
+				/*
+				 * We have run out of Tx rings. So
+				 * give the default ring too.
+				 */
+				tx_rings[i] = (void *)mip->mi_default_tx_ring;
+				tx_rings_reserved++;
 				break;
+			}
 		}
+		tx_rings_reserved++;
 	}
+
+rings_assigned:
 	if (mac_tx_serialize || (mip->mi_v12n_level & MAC_VIRT_SERIALIZE))
 		serialize = B_TRUE;
 	/*
 	 * Did we get the requested number of tx rings?
-	 * There are 3 actions we can take depending upon the number
+	 * There are 2 actions we can take depending upon the number
 	 * of tx_rings we got.
-	 * 1) If we got none, then hook up the tx_srs with the
-	 * default ring.
-	 * 2) If we got one, then get the tx_ring from the soft ring,
+	 * 1) If we got one, then get the tx_ring from the soft ring,
 	 * save it in SRS and free up the soft ring.
-	 * 3) If we got more than 1, then do the tx fanout among the
+	 * 2) If we got more than 1, then do the tx fanout among the
 	 * rings we obtained.
 	 */
-	switch (tx_rings_reserved) {
-	case 1:
-		/*
-		 * No need to allocate Tx soft rings. Tx-side soft
-		 * rings are for Tx fanout case. Just use Tx SRS.
-		 */
-		/* FALLTHRU */
-
-	case 0:
-use_default_ring:
-		if (tx_rings_reserved == 0)
-			tx->st_arg2 = (void *)mip->mi_default_tx_ring;
-		else
-			tx->st_arg2 = (void *)tx_ring[0];
+	ASSERT(tx_rings_reserved != 0);
+	if (tx_rings_reserved == 1) {
+		tx->st_arg2 = (void *)tx_rings[0];
 		/* For ring_count of 0 or 1, set the tx_mode and return */
 		if (tx_srs->srs_type & SRST_BW_CONTROL)
 			tx->st_mode = SRS_TX_BW;
@@ -3298,18 +3307,9 @@ use_default_ring:
 			tx->st_mode = SRS_TX_SERIALIZE;
 		else
 			tx->st_mode = SRS_TX_DEFAULT;
-		break;
-
-	default:
+	} else {
 		/*
 		 * We got multiple Tx rings for Tx fanout.
-		 *
-		 * cpuid of -1 is passed. This creates an unbound
-		 * worker thread. Instead the code should get CPU
-		 * binding information and pass that to
-		 * mac_soft_ring_create(). This needs to be done
-		 * in conjunction with Rx-side soft ring
-		 * bindings.
 		 */
 		soft_ring_type = ST_RING_OTH | ST_RING_TX;
 		if (tx_srs->srs_type & SRST_BW_CONTROL) {
@@ -3322,7 +3322,7 @@ use_default_ring:
 		for (i = 0; i < tx_rings_reserved; i++) {
 			(void) mac_soft_ring_create(i, 0, NULL, soft_ring_type,
 			    maxclsyspri, mcip, tx_srs, -1, NULL, mcip,
-			    (mac_resource_handle_t)tx_ring[i]);
+			    (mac_resource_handle_t)tx_rings[i]);
 		}
 		mac_srs_update_fanout_list(tx_srs);
 	}
@@ -3332,8 +3332,12 @@ use_default_ring:
 	    int, tx->st_mode, int, tx_srs->srs_oth_ring_count);
 
 	if (tx_ring_count != 0) {
-		kmem_free(tx_ring,
-		    sizeof (mac_ring_handle_t) * tx_ring_count);
+		tx->st_ring_count = tx_rings_reserved;
+		tx->st_rings = kmem_zalloc(sizeof (mac_ring_handle_t) *
+		    tx_rings_reserved, KM_SLEEP);
+		for (i = 0; i < tx->st_ring_count; i++)
+			tx->st_rings[i] = tx_rings[i];
+		kmem_free(tx_rings, sizeof (mac_ring_handle_t) * tx_ring_count);
 	}
 }
 
@@ -3387,5 +3391,27 @@ mac_fanout_recompute(mac_impl_t *mip)
 			continue;
 		mac_fanout_recompute_client(mcip);
 	}
+	i_mac_perim_exit(mip);
+}
+
+/*
+ * Given a MAC, change the polling state for all its MAC clients.  'enable' is
+ * B_TRUE to enable polling or B_FALSE to disable.  Polling is enabled by
+ * default.
+ */
+void
+mac_poll_state_change(mac_handle_t mh, boolean_t enable)
+{
+	mac_impl_t *mip = (mac_impl_t *)mh;
+	mac_client_impl_t *mcip;
+
+	i_mac_perim_enter(mip);
+	if (enable)
+		mip->mi_state_flags &= ~MIS_POLL_DISABLE;
+	else
+		mip->mi_state_flags |= MIS_POLL_DISABLE;
+	for (mcip = mip->mi_clients_list; mcip != NULL;
+	    mcip = mcip->mci_client_next)
+		mac_client_update_classifier(mcip, B_TRUE);
 	i_mac_perim_exit(mip);
 }

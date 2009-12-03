@@ -93,8 +93,6 @@ ql_mailbox_command(ql_adapter_state_t *vha, mbx_cmd_t *mcp)
 	ql_adapter_state_t	*ha = vha->pha;
 	int			mbx_cmd = mcp->mb[0];
 
-	ASSERT(!MUTEX_HELD(&ha->mutex));
-
 	QL_PRINT_3(CE_CONT, "(%d): started\n", ha->instance);
 
 	/* Acquire mailbox register lock. */
@@ -112,10 +110,9 @@ ql_mailbox_command(ql_adapter_state_t *vha, mbx_cmd_t *mcp)
 		}
 
 		/* Set timeout after command that is running. */
-		timer = ddi_get_lbolt();
-		timer += (mcp->timeout + 20) * drv_usectohz(1000000);
-		cv_stat = cv_timedwait_sig(&ha->cv_mbx_wait,
-		    &ha->pha->mbx_mutex, timer);
+		timer = (mcp->timeout + 20) * drv_usectohz(1000000);
+		cv_stat = cv_reltimedwait_sig(&ha->cv_mbx_wait,
+		    &ha->pha->mbx_mutex, timer, TR_CLOCK_TICK);
 		if (cv_stat == -1 || cv_stat == 0) {
 			/*
 			 * The timeout time 'timer' was
@@ -164,14 +161,12 @@ ql_mailbox_command(ql_adapter_state_t *vha, mbx_cmd_t *mcp)
 	    !(ha->task_daemon_flags & (TASK_THREAD_CALLED |
 	    TASK_DAEMON_POWERING_DOWN)) &&
 	    !ddi_in_panic()) {
+		timer = mcp->timeout * drv_usectohz(1000000);
 		while (!(ha->mailbox_flags & (MBX_INTERRUPT | MBX_ABORT)) &&
 		    !(ha->task_daemon_flags & ISP_ABORT_NEEDED)) {
 
-			/* 30 seconds from now */
-			timer = ddi_get_lbolt();
-			timer += mcp->timeout * drv_usectohz(1000000);
-			if (cv_timedwait(&ha->cv_mbx_intr, &ha->pha->mbx_mutex,
-			    timer) == -1) {
+			if (cv_reltimedwait(&ha->cv_mbx_intr,
+			    &ha->pha->mbx_mutex, timer, TR_CLOCK_TICK) == -1) {
 				/*
 				 * The timeout time 'timer' was
 				 * reached without the condition
@@ -1797,8 +1792,6 @@ ql_get_port_database(ql_adapter_state_t *ha, ql_tgt_t *tq, uint8_t opt)
 	mbx_cmd_t		*mcp = &mc;
 	port_database_23_t	*pd23;
 
-	ASSERT(!MUTEX_HELD(&ha->mutex));
-
 	QL_PRINT_3(CE_CONT, "(%d): started\n", ha->instance);
 
 	pd23 = (port_database_23_t *)kmem_zalloc(PORT_DATABASE_SIZE, KM_SLEEP);
@@ -2953,6 +2946,99 @@ ql_rd_risc_ram(ql_adapter_state_t *ha, uint32_t risc_address, uint64_t bp,
 }
 
 /*
+ * ql_wrt_risc_ram_word
+ *	Write RISC RAM word.
+ *
+ * Input:
+ *	ha:		adapter state pointer.
+ *	risc_address:	risc ram word address.
+ *	data:		data.
+ *
+ * Returns:
+ *	ql local function return status code.
+ *
+ * Context:
+ *	Kernel context.
+ */
+int
+ql_wrt_risc_ram_word(ql_adapter_state_t *ha, uint32_t risc_address,
+    uint32_t data)
+{
+	int		rval;
+	mbx_cmd_t	mc = {0};
+	mbx_cmd_t	*mcp = &mc;
+
+	QL_PRINT_3(CE_CONT, "(%d): started\n", ha->instance);
+
+	mcp->mb[0] = MBC_WRITE_RAM_EXTENDED;
+	mcp->mb[1] = LSW(risc_address);
+	mcp->mb[2] = LSW(data);
+	mcp->mb[3] = MSW(data);
+	mcp->mb[8] = MSW(risc_address);
+	mcp->out_mb = MBX_8|MBX_3|MBX_2|MBX_1|MBX_0;
+	mcp->in_mb = MBX_0;
+	mcp->timeout = MAILBOX_TOV;
+
+	rval = ql_mailbox_command(ha, mcp);
+
+	if (rval != QL_SUCCESS) {
+		EL(ha, "failed, rval = %xh\n", rval);
+	} else {
+		/*EMPTY*/
+		QL_PRINT_3(CE_CONT, "(%d): done\n", ha->instance);
+	}
+
+	return (rval);
+}
+
+/*
+ * ql_rd_risc_ram_word
+ *	Read RISC RAM word.
+ *
+ * Input:
+ *	ha:		adapter state pointer.
+ *	risc_address:	risc ram word address.
+ *	data:		data pointer.
+ *
+ * Returns:
+ *	ql local function return status code.
+ *
+ * Context:
+ *	Kernel context.
+ */
+int
+ql_rd_risc_ram_word(ql_adapter_state_t *ha, uint32_t risc_address,
+    uint32_t *data)
+{
+	int		rval;
+	mbx_cmd_t	mc = {0};
+	mbx_cmd_t	*mcp = &mc;
+
+	QL_PRINT_3(CE_CONT, "(%d): started\n", ha->instance);
+
+	mcp->mb[0] = MBC_READ_RAM_EXTENDED;
+	mcp->mb[1] = LSW(risc_address);
+	mcp->mb[8] = MSW(risc_address);
+	mcp->out_mb = MBX_8|MBX_1|MBX_0;
+	mcp->in_mb = MBX_3|MBX_2|MBX_0;
+	mcp->timeout = MAILBOX_TOV;
+
+	rval = ql_mailbox_command(ha, mcp);
+
+	if (rval != QL_SUCCESS) {
+		EL(ha, "failed, rval = %xh\n", rval);
+	} else {
+		*data = mcp->mb[2];
+		if (CFG_IST(ha, CFG_CTRL_242581)) {
+			*data |= mcp->mb[3] << 16;
+		}
+		QL_PRINT_3(CE_CONT, "(%d): done\n", ha->instance);
+	}
+
+	return (rval);
+}
+
+/*
  * ql_issue_mbx_iocb
  *	Issue IOCB using mailbox command
  *
@@ -3643,8 +3729,7 @@ ql_diag_echo(ql_adapter_state_t *ha, uint16_t findex, caddr_t bp,
 	}
 
 	mcp->mb[0] = MBC_ECHO;
-	mcp->mb[1] = (uint16_t)(CFG_IST(ha, CFG_CTRL_81XX) ? opt :
-	    (opt | BIT_6));
+	mcp->mb[1] = opt;
 	mcp->mb[2] = findex;
 	mcp->mb[6] = LSW(MSD(mem_desc.cookie.dmac_laddress));
 	mcp->mb[7] = MSW(MSD(mem_desc.cookie.dmac_laddress));
@@ -3836,7 +3921,7 @@ ql_stop_firmware(ql_adapter_state_t *ha)
  *	ha:	adapter state pointer.
  *	mem:	pointer to dma memory object for command.
  *	dev:	Device address (A0h or A2h).
- *	addr:	Data address on SFP EEPROM (0–255).
+ *	addr:	Data address on SFP EEPROM (0-255).
  *
  * Returns:
  *	ql local function return status code.

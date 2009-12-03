@@ -86,6 +86,8 @@ typedef struct entry {
 #define	BAM_ENTRY_UPGFSKERNEL	0x800	/* Upgrade failsafe kernel entry */
 #define	BAM_ENTRY_UPGFSMODULE	0x1000  /* Upgrade failsafe module entry */
 
+#define	BAM_ENTRY_LIBBE		0x2000	/* entry created by libbe */
+
 typedef struct {
 	line_t	*start;
 	line_t	*end;
@@ -99,7 +101,8 @@ typedef enum {
 	BAM_ERROR = -1,	/* Must be negative. add_boot_entry() depends on it */
 	BAM_SUCCESS = 0,
 	BAM_WRITE = 2,
-	BAM_MSG	/* Used by upgrade_menu() */
+	BAM_MSG,	/* Used by upgrade_menu() */
+	BAM_NOCHANGE	/* Used by cvt_to_hyper()/cvt_to_metal() */
 } error_t;
 
 /*
@@ -122,7 +125,8 @@ typedef enum {
 	COMMENT_CMD,
 	CHAINLOADER_CMD,
 	ARGS_CMD,
-	FINDROOT_CMD
+	FINDROOT_CMD,
+	BOOTFS_CMD
 } menu_cmd_t;
 
 extern char *menu_cmds[];
@@ -157,11 +161,15 @@ extern int bam_debug;
 
 extern void bam_add_line(menu_t *mp, entry_t *entry, line_t *prev, line_t *lp);
 extern void update_numbering(menu_t *mp);
+extern error_t set_global(menu_t *, char *, int);
 extern error_t upgrade_menu(menu_t *, char *, char *);
+extern error_t cvt_to_hyper(menu_t *, char *, char *);
+extern error_t cvt_to_metal(menu_t *, char *, char *);
 extern void *s_calloc(size_t, size_t);
 extern void *s_realloc(void *, size_t);
 extern char *s_fgets(char *buf, int n, FILE *fp);
 extern void bam_error(char *format, ...);
+extern void bam_exit(int);
 extern void bam_print(char *, ...);
 extern void bam_print_stderr(char *format, ...);
 extern void bam_derror(char *format, ...);
@@ -169,7 +177,9 @@ extern error_t get_boot_cap(const char *osroot);
 extern char *get_special(char *);
 extern char *os_to_grubdisk(char *, int);
 extern void update_line(line_t *);
-extern int add_boot_entry(menu_t *, char *, char *, char *, char *, char *);
+extern int add_boot_entry(menu_t *, char *, char *, char *, char *, char *,
+    char *);
+extern error_t delete_boot_entry(menu_t *, int, int);
 extern int is_grub(const char *);
 extern char *get_grubsign(char *osroot, char *osdev);
 extern char *get_grubroot(char *osroot, char *osdev, char *menu_root);
@@ -194,6 +204,11 @@ extern int is_sparc(void);
 
 #define	BAM_OLDDEF	"BOOTADM SAVED DEFAULT: "
 #define	BAM_OLD_RC_DEF	"BOOTADM RC SAVED DEFAULT: "
+
+/*
+ * menu.lst comment created by libbe
+ */
+#define	BAM_LIBBE_FTR	"============ End of LIBBE entry ============="
 
 /* Title used for failsafe entries */
 #define	FAILSAFE_TITLE	"Solaris failsafe"
@@ -246,7 +261,6 @@ extern int is_sparc(void);
 #define	UPDATEDIR_64		"/platform/i86pc/amd64/updates"
 
 /* Hypervisors */
-#define	XEN_32			"/boot/xen.gz"
 #define	XEN_64			"/boot/amd64/xen.gz"
 #define	XEN_MENU		"/boot/$ISADIR/xen.gz"
 #define	HYPERVISOR_KERNEL	"/platform/i86xpv/kernel/$ISADIR/unix"
@@ -261,6 +275,10 @@ extern int is_sparc(void);
 
 /* A first guess at the number of entries in a menu */
 #define	BAM_ENTRY_NUM		10
+
+/* toggle for whether delete_boot_entry prints an error message or not */
+#define	DBE_PRINTERR		0
+#define	DBE_QUIET		1
 
 /*
  * Debugging defines

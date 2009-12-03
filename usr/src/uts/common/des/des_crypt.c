@@ -18,7 +18,9 @@
  *
  * CDDL HEADER END
  *
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ */
+/*
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -29,8 +31,6 @@
  * Portions of this source code were derived from Berkeley 4.3 BSD
  * under license from the Regents of the University of California.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 /*
  * des_crypt.c, DES encryption library routines
@@ -48,6 +48,7 @@
 #include <sys/strsun.h>
 #include <sys/note.h>
 #include <modes/modes.h>
+#define	_DES_FIPS_POST
 #include <des/des_impl.h>
 
 /* EXPORT DELETE START */
@@ -96,23 +97,11 @@ static struct modlinkage modlinkage = {
 	NULL
 };
 
-/*
- * CSPI information (entry points, provider info, etc.)
- */
-typedef enum des_mech_type {
-	DES_ECB_MECH_INFO_TYPE,		/* SUN_CKM_DES_ECB */
-	DES_CBC_MECH_INFO_TYPE,		/* SUN_CKM_DES_CBC */
-	DES_CFB_MECH_INFO_TYPE,		/* SUN_CKM_DES_CFB */
-	DES3_ECB_MECH_INFO_TYPE,	/* SUN_CKM_DES3_ECB */
-	DES3_CBC_MECH_INFO_TYPE,	/* SUN_CKM_DES3_CBC */
-	DES3_CFB_MECH_INFO_TYPE		/* SUN_CKM_DES3_CFB */
-} des_mech_type_t;
-
 /* EXPORT DELETE START */
 
 #define	DES_MIN_KEY_LEN		DES_MINBYTES
 #define	DES_MAX_KEY_LEN		DES_MAXBYTES
-#define	DES3_MIN_KEY_LEN	DES3_MINBYTES
+#define	DES3_MIN_KEY_LEN	DES3_MAXBYTES	/* no CKK_DES2 support */
 #define	DES3_MAX_KEY_LEN	DES3_MAXBYTES
 
 /* EXPORT DELETE END */
@@ -132,6 +121,7 @@ typedef enum des_mech_type {
 #ifndef DES3_MAX_KEY_LEN
 #define	DES3_MAX_KEY_LEN	0
 #endif
+
 
 /*
  * Mechanism info structure passed to KCF during registration.
@@ -231,6 +221,12 @@ static crypto_key_ops_t des_key_ops = {
 	des_key_check
 };
 
+static void des_POST(int *);
+
+static crypto_fips140_ops_t des_fips140_ops = {
+	des_POST
+};
+
 static crypto_ops_t des_crypto_ops = {
 	&des_control_ops,
 	NULL,
@@ -245,11 +241,14 @@ static crypto_ops_t des_crypto_ops = {
 	NULL,
 	&des_key_ops,
 	NULL,
-	&des_ctx_ops
+	&des_ctx_ops,
+	NULL,
+	NULL,
+	&des_fips140_ops
 };
 
 static crypto_provider_info_t des_prov_info = {
-	CRYPTO_SPI_VERSION_1,
+	CRYPTO_SPI_VERSION_4,
 	"DES Software Provider",
 	CRYPTO_SW_PROVIDER,
 	{&modlinkage},
@@ -417,9 +416,9 @@ init_keysched(crypto_key_t *key, void *newbie, des_strength_t strength)
 	 */
 	switch (key->ck_format) {
 	case CRYPTO_KEY_RAW:
-		if (strength == DES && key->ck_length != DES_MINBITS)
+		if (strength == DES && key->ck_length != DES_MAXBITS)
 			return (CRYPTO_KEY_SIZE_RANGE);
-		if (strength == DES3 && key->ck_length != DES3_MINBITS)
+		if (strength == DES3 && key->ck_length != DES3_MAXBITS)
 			return (CRYPTO_KEY_SIZE_RANGE);
 		break;
 	default:
@@ -483,7 +482,7 @@ des_common_init(crypto_ctx_t *ctx, crypto_mechanism_t *mechanism,
 		if (mechanism->cm_param != NULL &&
 		    mechanism->cm_param_len != DES_BLOCK_LEN)
 			return (CRYPTO_MECHANISM_PARAM_INVALID);
-		if (key->ck_length != DES_MINBITS)
+		if (key->ck_length != DES_MAXBITS)
 			return (CRYPTO_KEY_SIZE_RANGE);
 		strength = DES;
 		if (des_ctx == NULL)
@@ -496,7 +495,7 @@ des_common_init(crypto_ctx_t *ctx, crypto_mechanism_t *mechanism,
 		if (mechanism->cm_param != NULL &&
 		    mechanism->cm_param_len != DES_BLOCK_LEN)
 			return (CRYPTO_MECHANISM_PARAM_INVALID);
-		if (key->ck_length != DES3_MINBITS)
+		if (key->ck_length != DES3_MAXBITS)
 			return (CRYPTO_KEY_SIZE_RANGE);
 		strength = DES3;
 		if (des_ctx == NULL)
@@ -880,7 +879,7 @@ des_encrypt_atomic(crypto_provider_handle_t provider,
 		if (mechanism->cm_param_len > 0 &&
 		    mechanism->cm_param_len != DES_BLOCK_LEN)
 			return (CRYPTO_MECHANISM_PARAM_INVALID);
-		if (key->ck_length != DES3_MINBITS)
+		if (key->ck_length != DES3_MAXBITS)
 			return (CRYPTO_KEY_SIZE_RANGE);
 		strength = DES3;
 		break;
@@ -987,7 +986,7 @@ des_decrypt_atomic(crypto_provider_handle_t provider,
 		if (mechanism->cm_param_len > 0 &&
 		    mechanism->cm_param_len != DES_BLOCK_LEN)
 			return (CRYPTO_MECHANISM_PARAM_INVALID);
-		if (key->ck_length != DES3_MINBITS)
+		if (key->ck_length != DES3_MAXBITS)
 			return (CRYPTO_KEY_SIZE_RANGE);
 		strength = DES3;
 		break;
@@ -1155,7 +1154,7 @@ des_key_check(crypto_provider_handle_t pd, crypto_mechanism_t *mech,
 		break;
 	case DES3_ECB_MECH_INFO_TYPE:
 	case DES3_CBC_MECH_INFO_TYPE:
-		expectedkeylen = DES3_MINBITS;
+		expectedkeylen = DES3_MAXBITS;
 		strength = DES3;
 		break;
 	default:
@@ -1235,4 +1234,15 @@ des_common_init_ctx(des_ctx_t *des_ctx, crypto_spi_ctx_template_t *template,
 /* EXPORT DELETE END */
 
 	return (rv);
+}
+
+/*
+ * Triple DES Power-Up Self-Test
+ */
+void
+des_POST(int *rc)
+{
+
+	*rc = fips_des3_post();
+
 }

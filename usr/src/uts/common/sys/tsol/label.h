@@ -43,6 +43,10 @@ extern "C" {
 #define	EQUALITY_CHECK	0
 #define	DOMINANCE_CHECK	1
 
+/* Manifest human readable label names */
+#define	ADMIN_LOW	"ADMIN_LOW"
+#define	ADMIN_HIGH	"ADMIN_HIGH"
+
 /* Binary Label Structure Definitions */
 
 typedef	struct _mac_label_impl	m_label_t;
@@ -103,7 +107,21 @@ typedef	struct ts_label_s {
 
 #define	DEFAULT_DOI 1
 
-#define	TSLF_UNLABELED	0x00000001	/* peer is unlabeled */
+/*
+ * TSLF_UNLABELED is set in tsl_flags for  packets with no explicit label
+ * when the peer is unlabeled.
+ *
+ * TSLF_IMPLICIT_IN is set when a packet is received with no explicit label
+ * from a peer which is flagged in the tnrhdb as label-aware.
+ *
+ * TSLF_IMPLICIT_OUT is set when the packet should be sent without an
+ * explict label even if the peer or next-hop router is flagged in the
+ * tnrhdb as label-aware.
+ */
+
+#define	TSLF_UNLABELED		0x00000001	/* peer is unlabeled */
+#define	TSLF_IMPLICIT_IN	0x00000002	/* inbound implicit */
+#define	TSLF_IMPLICIT_OUT	0x00000004	/* outbound implicit */
 
 #define	CR_SL(cr)	(label2bslabel(crgetlabel(cr)))
 
@@ -130,6 +148,9 @@ extern int		getlabel(const char *, m_label_t *);
 extern int		fgetlabel(int, m_label_t *);
 extern int		_blinrange(const m_label_t *, const brange_t *);
 extern int		blinlset(const m_label_t *, const blset_t);
+
+extern int		l_to_str_internal(const m_label_t *, char **);
+extern int		hexstr_to_label(const char *, m_label_t *);
 
 /*
  * The use of '!!' here prevents users from referencing this function-like

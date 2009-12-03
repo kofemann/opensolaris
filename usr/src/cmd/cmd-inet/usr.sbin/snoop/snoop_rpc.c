@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -61,7 +61,6 @@ static void rpc_detail_reply(int, int, struct cache_struct *, char *, int len);
 static void print_creds(int);
 static void print_verif(int);
 static void stash_xid(ulong_t, int, int, int, int);
-int valid_rpc(char *, int);
 
 #define	LAST_FRAG ((ulong_t)1 << 31)
 
@@ -103,9 +102,10 @@ interpret_rpc(int flags, char *rpc, int fraglen, int type)
 		vers = getxdr_long();
 		proc = getxdr_long();
 		stash_xid(xid, pi_frame, prog, vers, proc);
-		if (!(flags & (F_SUM | F_DTAIL)))
+		if (!(flags & (F_SUM | F_DTAIL))) {
 			protoprint(flags, CALL, xid, prog, vers, proc,
 			    rpc, fraglen);
+		}
 	} else {
 		x = find_xid(xid);
 	}
@@ -346,20 +346,20 @@ print_creds(int xid)
 		    namekind,
 		    namekind == ADN_FULLNAME ?
 		    "fullname" : "nickname");
-			switch (namekind) {
-			case ADN_FULLNAME:
-				(void) showxdr_string(64,
-				    "   Network name = %s");
-				(void) showxdr_hex(8,
-				"   Conversation key = 0x%s (DES encrypted)");
-				(void) showxdr_hex(4,
-				"   Window = 0x%s (DES encrypted)");
-				break;
+		switch (namekind) {
+		case ADN_FULLNAME:
+			(void) showxdr_string(64,
+			    "   Network name = %s");
+			(void) showxdr_hex(8,
+			    "   Conversation key = 0x%s (DES encrypted)");
+			(void) showxdr_hex(4,
+			    "   Window = 0x%s (DES encrypted)");
+			break;
 
-			case ADN_NICKNAME:
-				(void) showxdr_hex(4, "   Nickname = 0x%s");
-				break;
-			};
+		case ADN_NICKNAME:
+			(void) showxdr_hex(4, "   Nickname = 0x%s");
+			break;
+		};
 		break;
 
 	case RPCSEC_GSS:

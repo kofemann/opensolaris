@@ -31,8 +31,10 @@
 #include <libdlwlan.h>
 #include <libdlvnic.h>
 #include <libdlvlan.h>
+#include <libdliptun.h>
 #include <libdlmgmt.h>
 #include <libdlflow.h>
 #include <libdlstat.h>
 #include <libdlether.h>
 #include <libdlsim.h>
+#include <libdlbridge.h>

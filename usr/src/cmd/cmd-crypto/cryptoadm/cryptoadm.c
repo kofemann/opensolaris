@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -208,6 +208,8 @@ usage(void)
 	    " [mechanism=<%s>]\n",
 	    gettext("provider-name"), gettext("mechanism-list"));
 	(void) fprintf(stderr,
+	    "  cryptoadm list fips-140\n");
+	(void) fprintf(stderr,
 	    "  cryptoadm disable provider=<%s>"
 	    " mechanism=<%s> | random | all\n",
 	    gettext("provider-name"), gettext("mechanism-list"));
@@ -215,6 +217,8 @@ usage(void)
 	    "  cryptoadm disable metaslot"
 	    " [auto-key-migrate] [mechanism=<%s>]\n",
 	    gettext("mechanism-list"));
+	(void) fprintf(stderr,
+	    "  cryptoadm disable fips-140\n");
 	(void) fprintf(stderr,
 	    "  cryptoadm enable provider=<%s>"
 	    " mechanism=<%s> | random | all\n",
@@ -225,6 +229,8 @@ usage(void)
 	    " | [default-keystore]] | [auto-key-migrate]\n",
 	    gettext("mechanism-list"), gettext("token-label"),
 	    gettext("slot-description"));
+	(void) fprintf(stderr,
+	    "  cryptoadm enable fips-140\n");
 	(void) fprintf(stderr,
 	    "  cryptoadm install provider=<%s>\n",
 	    gettext("provider-name"));
@@ -542,6 +548,15 @@ do_list(int argc, char **argv)
 	cryptoadm_provider_t	*prov = NULL;
 	int			rc = SUCCESS;
 
+	if ((argc == 3) && (strncmp(argv[2], FIPS_KEYWORD,
+	    strlen(FIPS_KEYWORD))) == 0) {
+		/*
+		 * cryptoadm list fips-140
+		 */
+		rc = do_fips_actions(FIPS140_STATUS, NOT_REFRESH);
+		return (rc);
+	}
+
 	argc -= 1;
 	argv += 1;
 
@@ -724,6 +739,15 @@ do_disable(int argc, char **argv)
 	int			rc = SUCCESS;
 	boolean_t		auto_key_migrate_flag = B_FALSE;
 
+	if ((argc == 3) && (strncmp(argv[2], FIPS_KEYWORD,
+	    strlen(FIPS_KEYWORD))) == 0) {
+		/*
+		 * cryptoadm disable fips-140
+		 */
+		rc = do_fips_actions(FIPS140_DISABLE, NOT_REFRESH);
+		return (rc);
+	}
+
 	if ((argc < 3) || (argc > 5)) {
 		usage();
 		return (ERROR_USAGE);
@@ -842,6 +866,15 @@ do_enable(int argc, char **argv)
 	char 			*alt_token = NULL, *alt_slot = NULL;
 	boolean_t		use_default = B_FALSE;
 	boolean_t		auto_key_migrate_flag = B_FALSE;
+
+	if ((argc == 3) && (strncmp(argv[2], FIPS_KEYWORD,
+	    strlen(FIPS_KEYWORD))) == 0) {
+		/*
+		 * cryptoadm enable fips-140
+		 */
+		rc = do_fips_actions(FIPS140_ENABLE, NOT_REFRESH);
+		return (rc);
+	}
 
 	if ((argc < 3) || (argc > 6)) {
 		usage();
@@ -1266,7 +1299,9 @@ list_simple_for_all(boolean_t verbose)
 	}
 
 	for (plibptr = pliblist; plibptr != NULL; plibptr = plibptr->next) {
-		if (strcmp(plibptr->puent->name, METASLOT_KEYWORD) != 0) {
+		/* skip metaslot and fips-140 entry */
+		if ((strcmp(plibptr->puent->name, METASLOT_KEYWORD) != 0) &&
+		    (strcmp(plibptr->puent->name, FIPS_KEYWORD) != 0)) {
 			(void) printf(gettext("Provider: %s\n"),
 			    plibptr->puent->name);
 			if (verbose) {
@@ -1403,8 +1438,9 @@ list_mechlist_for_all(boolean_t verbose)
 
 	plibptr = pliblist;
 	while (plibptr != NULL) {
-		/* skip metaslot entry */
-		if (strcmp(plibptr->puent->name, METASLOT_KEYWORD) != 0) {
+		/* skip metaslot and fips-140 entry */
+		if ((strcmp(plibptr->puent->name, METASLOT_KEYWORD) != 0) &&
+		    (strcmp(plibptr->puent->name, FIPS_KEYWORD) != 0)) {
 			(void) printf(gettext("\nProvider: %s\n"),
 			    plibptr->puent->name);
 			rv = list_mechlist_for_lib(plibptr->puent->name,
@@ -1572,9 +1608,11 @@ list_policy_for_all(void)
 		uentrylist_t	*plibptr = pliblist;
 
 		while (plibptr != NULL) {
-			/* skip metaslot entry */
-			if (strcmp(plibptr->puent->name,
-			    METASLOT_KEYWORD) != 0) {
+			/* skip metaslot and fips-140 entry */
+			if ((strcmp(plibptr->puent->name,
+			    METASLOT_KEYWORD) != 0) &&
+			    (strcmp(plibptr->puent->name,
+			    FIPS_KEYWORD) != 0)) {
 				if (print_uef_policy(plibptr->puent)
 				    == FAILURE) {
 					rc = FAILURE;

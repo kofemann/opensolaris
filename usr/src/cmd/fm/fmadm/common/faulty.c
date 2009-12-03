@@ -195,6 +195,7 @@ typedef struct host_id {
 	char *server;
 	char *platform;
 	char *domain;
+	char *product_sn;
 } hostid_t;
 
 typedef struct host_id_list {
@@ -214,6 +215,7 @@ typedef struct status_record {
 	name_list_t *fru;
 	name_list_t *serial;
 	uint8_t not_suppressed;
+	uint8_t injected;
 } status_record_t;
 
 typedef struct sr_list {
@@ -228,6 +230,7 @@ typedef struct resource_list {
 	sr_list_t *status_rec_list;
 	char *resource;
 	uint8_t not_suppressed;
+	uint8_t injected;
 	uint8_t max_pct;
 } resource_list_t;
 
@@ -258,14 +261,22 @@ format_date(char *buf, size_t len, uint64_t sec)
 		(void) snprintf(buf, len, "0x%llx", sec);
 	} else {
 		time_t tod = (time_t)sec;
-		(void) strftime(buf, len, "%b %d %T", localtime(&tod));
+		time_t now = time(NULL);
+		if (tod > now+60 ||
+		    tod < now - 6L*30L*24L*60L*60L) { /* 6 months ago */
+			(void) strftime(buf, len, "%b %d %Y    ",
+			    localtime(&tod));
+		} else {
+			(void) strftime(buf, len, "%b %d %T", localtime(&tod));
+		}
 	}
 
 	return (buf);
 }
 
 static hostid_t *
-find_hostid_in_list(char *platform, char *chassis, char *server, char *domain)
+find_hostid_in_list(char *platform, char *chassis, char *server, char *domain,
+    char *product_sn)
 {
 	hostid_t *rt = NULL;
 	host_id_list_t *hostp;
@@ -282,6 +293,8 @@ find_hostid_in_list(char *platform, char *chassis, char *server, char *domain)
 		    strcmp(hostp->hostid.server, server) == 0 &&
 		    (chassis == NULL || hostp->hostid.chassis == NULL ||
 		    strcmp(chassis, hostp->hostid.chassis) == 0) &&
+		    (product_sn == NULL || hostp->hostid.product_sn == NULL ||
+		    strcmp(product_sn, hostp->hostid.product_sn) == 0) &&
 		    (domain == NULL || hostp->hostid.domain == NULL ||
 		    strcmp(domain, hostp->hostid.domain) == 0)) {
 			rt = &hostp->hostid;
@@ -292,6 +305,8 @@ find_hostid_in_list(char *platform, char *chassis, char *server, char *domain)
 	if (rt == NULL) {
 		hostp = malloc(sizeof (host_id_list_t));
 		hostp->hostid.platform = strdup(platform);
+		hostp->hostid.product_sn =
+		    product_sn ? strdup(product_sn) : NULL;
 		hostp->hostid.server = strdup(server);
 		hostp->hostid.chassis = chassis ? strdup(chassis) : NULL;
 		hostp->hostid.domain = domain ? strdup(domain) : NULL;
@@ -307,6 +322,7 @@ static hostid_t *
 find_hostid(nvlist_t *nvl)
 {
 	char *platform = NULL, *chassis = NULL, *server = NULL, *domain = NULL;
+	char *product_sn = NULL;
 	nvlist_t *auth, *fmri;
 	hostid_t *rt = NULL;
 
@@ -314,11 +330,14 @@ find_hostid(nvlist_t *nvl)
 	    nvlist_lookup_nvlist(fmri, FM_FMRI_AUTHORITY, &auth) == 0) {
 		(void) nvlist_lookup_string(auth, FM_FMRI_AUTH_PRODUCT,
 		    &platform);
+		(void) nvlist_lookup_string(auth, FM_FMRI_AUTH_PRODUCT_SN,
+		    &product_sn);
 		(void) nvlist_lookup_string(auth, FM_FMRI_AUTH_SERVER, &server);
 		(void) nvlist_lookup_string(auth, FM_FMRI_AUTH_CHASSIS,
 		    &chassis);
 		(void) nvlist_lookup_string(auth, FM_FMRI_AUTH_DOMAIN, &domain);
-		rt = find_hostid_in_list(platform, chassis, server, domain);
+		rt = find_hostid_in_list(platform, chassis, server,
+		    domain, product_sn);
 	}
 	return (rt);
 }
@@ -426,7 +445,7 @@ get_fmri_label(char *fru)
 		twp = topo_walk_init(topo_handle, FM_FMRI_SCHEME_HC,
 		    tgetlabel, &td, &err);
 		if (twp) {
-			topo_walk_step(twp, TOPO_WALK_CHILD);
+			(void) topo_walk_step(twp, TOPO_WALK_CHILD);
 			topo_walk_fini(twp);
 		}
 	}
@@ -581,48 +600,6 @@ merge_name_list(name_list_t **list, name_list_t *new, int add_pct)
 	return (rt);
 }
 
-/*
- * compare entries in two lists return true if the two lists have identical
- * content. The two lists may not have entries in the same order, so we compare
- * the size of the list as well as trying to find every entry from one list in
- * the other.
- */
-static int
-cmp_name_list(name_list_t *lxp1, name_list_t *lxp2)
-{
-	name_list_t *lp1, *lp2;
-	int l1 = 0, l2 = 0, common = 0;
-
-	lp2 = lxp2;
-	while (lp2) {
-		l2++;
-		lp2 = lp2->next;
-		if (lp2 == lxp2)
-			break;
-	}
-	lp1 = lxp1;
-	while (lp1) {
-		l1++;
-		lp2 = lxp2;
-		while (lp2) {
-			if (strcmp(lp2->name, lp1->name) == 0) {
-				common++;
-				break;
-			}
-			lp2 = lp2->next;
-			if (lp2 == lxp2)
-				break;
-		}
-		lp1 = lp1->next;
-		if (lp1 == lxp1)
-			break;
-	}
-	if (l1 == l2 && l2 == common)
-		return (0);
-	else
-		return (1);
-}
-
 static name_list_t *
 alloc_name_list(char *name, uint8_t pct)
 {
@@ -640,29 +617,11 @@ alloc_name_list(char *name, uint8_t pct)
 	return (nlp);
 }
 
-static void
-free_name_list(name_list_t *list)
-{
-	name_list_t *next = list;
-	name_list_t *lp;
-
-	if (list) {
-		do {
-			lp = next;
-			next = lp->next;
-			if (lp->label)
-				free(lp->label);
-			free(lp->name);
-			free(lp);
-		} while (next != list);
-	}
-}
-
 static status_record_t *
 new_record_init(uurec_t *uurec_p, char *msgid, name_list_t *class,
     name_list_t *fru, name_list_t *asru, name_list_t *resource,
     name_list_t *serial, boolean_t not_suppressed,
-    hostid_t *hostid)
+    hostid_t *hostid, boolean_t injected)
 {
 	status_record_t *status_rec_p;
 
@@ -683,6 +642,7 @@ new_record_init(uurec_t *uurec_p, char *msgid, name_list_t *class,
 	status_rec_p->serial = serial;
 	status_rec_p->msgid = strdup(msgid);
 	status_rec_p->not_suppressed = not_suppressed;
+	status_rec_p->injected = injected;
 	return (status_rec_p);
 }
 
@@ -782,6 +742,7 @@ add_resource_list(status_record_t *status_rec_p, name_list_t *fp,
 	while (np) {
 		if (strcmp(fp->name, np->resource) == 0) {
 			np->not_suppressed |= status_rec_p->not_suppressed;
+			np->injected |= status_rec_p->injected;
 			srp = np->status_rec_list->status_record;
 			order = cmp_priority(status_rec_p->severity,
 			    srp->severity, status_rec_p->uurec->sec,
@@ -811,6 +772,7 @@ add_resource_list(status_record_t *status_rec_p, name_list_t *fp,
 		np = malloc(sizeof (resource_list_t));
 		np->resource = fp->name;
 		np->not_suppressed = status_rec_p->not_suppressed;
+		np->injected = status_rec_p->injected;
 		np->status_rec_list = NULL;
 		np->max_pct = fp->max_pct;
 		add_resource(status_rec_p, rpp, np);
@@ -840,75 +802,17 @@ static void
 catalog_new_record(uurec_t *uurec_p, char *msgid, name_list_t *class,
     name_list_t *fru, name_list_t *asru, name_list_t *resource,
     name_list_t *serial, boolean_t not_suppressed,
-    hostid_t *hostid)
+    hostid_t *hostid, boolean_t injected)
 {
 	status_record_t *status_rec_p;
 
 	status_rec_p = new_record_init(uurec_p, msgid, class, fru, asru,
-	    resource, serial, not_suppressed, hostid);
+	    resource, serial, not_suppressed, hostid, injected);
 	add_rec_list(status_rec_p, &status_rec_list);
 	if (status_rec_p->fru)
 		add_list(status_rec_p, status_rec_p->fru, &status_fru_list);
 	if (status_rec_p->asru)
 		add_list(status_rec_p, status_rec_p->asru, &status_asru_list);
-}
-
-/*
- * add uuid and diagnoses time to an existing record for similar fault on the
- * same fru
- */
-static void
-catalog_merge_record(status_record_t *status_rec_p, uurec_t *uurec_p,
-    name_list_t *asru, name_list_t *resource, name_list_t *serial,
-    boolean_t not_suppressed)
-{
-	uurec_t *uurec1_p;
-
-	status_rec_p->nrecs++;
-	/* add uurec in time order */
-	if (status_rec_p->uurec->sec > uurec_p->sec) {
-		uurec_p->next = status_rec_p->uurec;
-		uurec_p->prev = NULL;
-		status_rec_p->uurec = uurec_p;
-	} else {
-		uurec1_p = status_rec_p->uurec;
-		while (uurec1_p->next && uurec1_p->next->sec <= uurec_p->sec)
-			uurec1_p = uurec1_p->next;
-		if (uurec1_p->next)
-			uurec1_p->next->prev = uurec_p;
-		uurec_p->next = uurec1_p->next;
-		uurec_p->prev = uurec1_p;
-		uurec1_p->next = uurec_p;
-	}
-	status_rec_p->not_suppressed |= not_suppressed;
-	uurec_p->asru = merge_name_list(&status_rec_p->asru, asru, 0);
-	(void) merge_name_list(&status_rec_p->resource, resource, 0);
-	(void) merge_name_list(&status_rec_p->serial, serial, 0);
-}
-
-static status_record_t *
-record_in_catalog(name_list_t *class, name_list_t *fru,
-    char *msgid, hostid_t *host)
-{
-	sr_list_t *status_rec_p;
-	status_record_t *srp = NULL;
-
-	status_rec_p = status_rec_list;
-	while (status_rec_p) {
-		srp = status_rec_p->status_record;
-		if (host == srp->host &&
-		    cmp_name_list(class, srp->class) == 0 &&
-		    cmp_name_list(fru, srp->fru) == 0 &&
-		    strcmp(msgid, srp->msgid) == 0)
-			break;
-		if (status_rec_p->next == status_rec_list) {
-			srp = NULL;
-			break;
-		} else {
-			status_rec_p = status_rec_p->next;
-		}
-	}
-	return (srp);
 }
 
 static void
@@ -983,6 +887,15 @@ extract_record_info(nvlist_t *nvl, name_list_t **class_p,
 			(void) merge_name_list(fru_p, nlp, 1);
 		}
 		get_serial_no(lfru, serial_p, lpct);
+	} else if (nvlist_lookup_nvlist(nvl, FM_FAULT_RESOURCE, &rsrc) != 0) {
+		/*
+		 * No FRU or resource. But we want to display the repair status
+		 * somehow, so create a dummy FRU field.
+		 */
+		nlp = alloc_name_list(dgettext("FMD", "None"), lpct);
+		nlp->status = status & ~(FM_SUSPECT_UNUSABLE |
+		    FM_SUSPECT_DEGRADED);
+		(void) merge_name_list(fru_p, nlp, 1);
 	}
 	if (nvlist_lookup_nvlist(nvl, FM_FAULT_ASRU, &lasru) == 0) {
 		name = get_nvl2str_topo(lasru);
@@ -1019,16 +932,17 @@ add_fault_record_to_catalog(nvlist_t *nvl, uint64_t sec, char *uuid)
 	name_list_t *asru = NULL, *fru = NULL, *serial = NULL;
 	nvlist_t **nva;
 	uint8_t *ba;
-	status_record_t *status_rec_p;
 	uurec_t *uurec_p;
 	hostid_t *host;
 	boolean_t not_suppressed = 1;
 	boolean_t any_present = 0;
+	boolean_t injected = 0;
 
 	(void) nvlist_lookup_string(nvl, FM_SUSPECT_DIAG_CODE, &msgid);
 	(void) nvlist_lookup_uint32(nvl, FM_SUSPECT_FAULT_SZ, &size);
 	(void) nvlist_lookup_boolean_value(nvl, FM_SUSPECT_MESSAGE,
 	    &not_suppressed);
+	(void) nvlist_lookup_boolean_value(nvl, FM_SUSPECT_INJECTED, &injected);
 
 	if (size != 0) {
 		(void) nvlist_lookup_nvlist_array(nvl, FM_SUSPECT_FAULT_LIST,
@@ -1056,19 +970,8 @@ add_fault_record_to_catalog(nvlist_t *nvl, uint64_t sec, char *uuid)
 	uurec_p->event = NULL;
 	(void) nvlist_dup(nvl, &uurec_p->event, 0);
 	host = find_hostid(nvl);
-	if (not_suppressed && !opt_g)
-		status_rec_p = NULL;
-	else
-		status_rec_p = record_in_catalog(class, fru, msgid, host);
-	if (status_rec_p) {
-		catalog_merge_record(status_rec_p, uurec_p, asru, resource,
-		    serial, not_suppressed);
-		free_name_list(class);
-		free_name_list(fru);
-	} else {
-		catalog_new_record(uurec_p, msgid, class, fru, asru,
-		    resource, serial, not_suppressed, host);
-	}
+	catalog_new_record(uurec_p, msgid, class, fru, asru,
+	    resource, serial, not_suppressed, host, injected);
 }
 
 static void
@@ -1441,8 +1344,10 @@ print_sup_record(status_record_t *srp, int opt_i, int full)
 		    srp->host->domain);
 	(void) printf("\n%s %s", dgettext("FMD", "Platform    :"),
 	    srp->host->platform);
-	(void) printf("\t%s %s\n\n", dgettext("FMD", "Chassis_id  :"),
+	(void) printf("\t%s %s", dgettext("FMD", "Chassis_id  :"),
 	    srp->host->chassis ? srp->host->chassis : "");
+	(void) printf("\n%s %s\n\n", dgettext("FMD", "Product_sn  :"),
+	    srp->host->product_sn? srp->host->product_sn : "");
 	if (srp->class)
 		print_name_list(srp->class,
 		    dgettext("FMD", "Fault class :"), NULL, 0, srp->class->pct,
@@ -1461,10 +1366,17 @@ print_sup_record(status_record_t *srp, int opt_i, int full)
 	}
 	if (full || srp->fru == NULL || srp->asru == NULL) {
 		if (srp->resource) {
-			print_name_list(srp->resource,
-			    dgettext("FMD", "Problem in  :"),
-			    NULL, full ? 0 : max_display, 0, print_rsrc_status,
-			    full);
+			status = asru_same_status(srp->resource);
+			if (status != -1) {
+				print_name_list(srp->resource,
+				    dgettext("FMD", "Problem in  :"), NULL,
+				    full ? 0 : max_display, 0, NULL, full);
+				print_rsrc_status(status, "             ");
+			} else
+				print_name_list(srp->resource,
+				    dgettext("FMD", "Problem in  :"),
+				    NULL, full ? 0 : max_display, 0,
+				    print_rsrc_status, full);
 		}
 	}
 	if (srp->fru) {
@@ -1525,15 +1437,17 @@ print_status_record(status_record_t *srp, int summary, int opt_i, int full)
 	if (opt_i) {
 		ari_list = uurp->ari_uuid_list;
 		while (ari_list) {
-			(void) printf("%-15s %-37s %-14s %-9s\n",
+			(void) printf("%-15s %-37s %-14s %-9s %s\n",
 			    format_date(buf, sizeof (buf), uurp->sec),
-			    ari_list->ari_uuid, srp->msgid, srp->severity);
+			    ari_list->ari_uuid, srp->msgid, srp->severity,
+			    srp->injected ? dgettext("FMD", "injected") : "");
 			ari_list = ari_list->next;
 		}
 	} else {
-		(void) printf("%-15s %-37s %-14s %-9s\n",
+		(void) printf("%-15s %-37s %-14s %-9s %s\n",
 		    format_date(buf, sizeof (buf), uurp->sec),
-		    uurp->uuid, srp->msgid, srp->severity);
+		    uurp->uuid, srp->msgid, srp->severity,
+		    srp->injected ? dgettext("FMD", "injected") : "");
 	}
 
 	if (!summary)
@@ -1653,18 +1567,23 @@ print_fru(int summary, int opt_a, int opt_i, int page_feed)
 				slp = slp->next;
 			} while (slp != end);
 			if (status & FM_SUSPECT_NOT_PRESENT)
-				(void) printf(dgettext("FMD", "not present\n"));
+				(void) printf(dgettext("FMD", "not present"));
 			else if (status & FM_SUSPECT_FAULTY)
-				(void) printf(dgettext("FMD", "faulty\n"));
+				(void) printf(dgettext("FMD", "faulty"));
 			else if (status & FM_SUSPECT_REPLACED)
-				(void) printf(dgettext("FMD", "replaced\n"));
+				(void) printf(dgettext("FMD", "replaced"));
 			else if (status & FM_SUSPECT_REPAIRED)
 				(void) printf(dgettext("FMD",
-				    "repair attempted\n"));
+				    "repair attempted"));
 			else if (status & FM_SUSPECT_ACQUITTED)
-				(void) printf(dgettext("FMD", "acquitted\n"));
+				(void) printf(dgettext("FMD", "acquitted"));
 			else
-				(void) printf(dgettext("FMD", "removed\n"));
+				(void) printf(dgettext("FMD", "removed"));
+
+			if (tp->injected)
+				(void) printf(dgettext("FMD", " injected\n"));
+			else
+				(void) printf(dgettext("FMD", "\n"));
 
 			slp = tp->status_rec_list;
 			end = slp;
@@ -1765,7 +1684,11 @@ print_asru(int opt_a)
 				msg = "";
 				break;
 			}
-			(void) printf("%-69s %s\n", tp->resource, msg);
+			(void) printf("%-69s %s", tp->resource, msg);
+			if (tp->injected)
+				(void) printf(dgettext("FMD", " injected\n"));
+			else
+				(void) printf(dgettext("FMD", "\n"));
 		}
 		tp = tp->next;
 		if (tp == status_asru_list)
@@ -1909,7 +1832,7 @@ cmd_faulty(fmd_adm_t *adm, int argc, char *argv[])
 			rt = FMADM_EXIT_ERROR;
 			opt_p = 0;
 		} else {
-			dup2(fileno(fp), 1);
+			(void) dup2(fileno(fp), 1);
 			setbuf(stdout, NULL);
 			(void) fclose(fp);
 		}

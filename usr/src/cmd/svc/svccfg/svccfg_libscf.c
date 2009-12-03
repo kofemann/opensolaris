@@ -48,6 +48,8 @@
 
 #include <libxml/tree.h>
 
+#include <sys/param.h>
+
 #include "svccfg.h"
 #include "manifest_hash.h"
 
@@ -3288,6 +3290,169 @@ commit:
 }
 
 /*
+ * Used to add the manifests to the list of currently supported manifests.
+ * We could modify the existing manifest list removing entries if the files
+ * don't exist.
+ *
+ * Get the old list and the new file name
+ * If the new file name is in the list return
+ * If not then add the file to the list.
+ * As we process the list check to see if the files in the old list exist
+ * 	if not then remove the file from the list.
+ * Commit the list of manifest file names.
+ *
+ */
+static int
+upgrade_manifestfiles(pgroup_t *pg, const entity_t *ient,
+    const scf_snaplevel_t *running, void *ent)
+{
+	scf_propertygroup_t *ud_mfsts_pg = NULL;
+	scf_property_t *ud_prop = NULL;
+	scf_iter_t *ud_prop_iter;
+	scf_value_t *fname_value;
+	scf_callback_t cbdata;
+	pgroup_t *mfst_pgroup;
+	property_t *mfst_prop;
+	property_t *old_prop;
+	char *pname = malloc(MAXPATHLEN);
+	char *fval;
+	char *old_pname;
+	char *old_fval;
+	int no_upgrade_pg;
+	int mfst_seen;
+	int r;
+
+	const int issvc = (ient->sc_etype == SVCCFG_SERVICE_OBJECT);
+
+	/*
+	 * This should always be the service base on the code
+	 * path, and the fact that the manifests pg is a service
+	 * level property group only.
+	 */
+	ud_mfsts_pg = scf_pg_create(g_hndl);
+	ud_prop = scf_property_create(g_hndl);
+	ud_prop_iter = scf_iter_create(g_hndl);
+	fname_value = scf_value_create(g_hndl);
+
+	/* Fetch the "manifests" property group */
+	no_upgrade_pg = 0;
+	r = entity_get_pg(ent, issvc, SCF_PG_MANIFESTFILES,
+	    ud_mfsts_pg);
+	if (r != 0) {
+		switch (scf_error()) {
+		case SCF_ERROR_NOT_FOUND:
+			no_upgrade_pg = 1;
+			break;
+
+		case SCF_ERROR_DELETED:
+		case SCF_ERROR_CONNECTION_BROKEN:
+			return (scferror2errno(scf_error()));
+
+		case SCF_ERROR_NOT_SET:
+		case SCF_ERROR_INVALID_ARGUMENT:
+		case SCF_ERROR_HANDLE_MISMATCH:
+		case SCF_ERROR_NOT_BOUND:
+		default:
+			bad_error(running ? "scf_snaplevel_get_pg" :
+			    "entity_get_pg", scf_error());
+		}
+	}
+
+	if (no_upgrade_pg) {
+		cbdata.sc_handle = g_hndl;
+		cbdata.sc_parent = ent;
+		cbdata.sc_service = issvc;
+		cbdata.sc_flags = SCI_FORCE;
+		cbdata.sc_source_fmri = ient->sc_fmri;
+		cbdata.sc_target_fmri = ient->sc_fmri;
+
+		if (entity_pgroup_import(pg, &cbdata) != UU_WALK_NEXT)
+			return (cbdata.sc_err);
+
+		return (0);
+	}
+
+	/* Fetch the new manifests property group */
+	for (mfst_pgroup = uu_list_first(ient->sc_pgroups);
+	    mfst_pgroup != NULL;
+	    mfst_pgroup = uu_list_next(ient->sc_pgroups, mfst_pgroup)) {
+		if (strcmp(mfst_pgroup->sc_pgroup_name,
+		    SCF_PG_MANIFESTFILES) == 0)
+			break;
+	}
+
+	if ((r = scf_iter_pg_properties(ud_prop_iter, ud_mfsts_pg)) !=
+	    SCF_SUCCESS)
+		return (-1);
+
+	while ((r = scf_iter_next_property(ud_prop_iter, ud_prop)) == 1) {
+		mfst_seen = 0;
+		if (scf_property_get_name(ud_prop, pname, MAXPATHLEN) < 0)
+			continue;
+
+		for (mfst_prop = uu_list_first(mfst_pgroup->sc_pgroup_props);
+		    mfst_prop != NULL;
+		    mfst_prop = uu_list_next(mfst_pgroup->sc_pgroup_props,
+		    mfst_prop)) {
+			if (strcmp(mfst_prop->sc_property_name, pname) == 0) {
+				mfst_seen = 1;
+			}
+		}
+
+		/*
+		 * If the manifest is not seen then add it to the new mfst
+		 * property list to get proccessed into the repo.
+		 */
+		if (mfst_seen == 0) {
+			fval = malloc(MAXPATHLEN);
+
+			/*
+			 * If we cannot get the value then there is no
+			 * reason to attempt to attach the value to
+			 * the property group
+			 */
+			if (fval != NULL &&
+			    prop_get_val(ud_prop, fname_value) == 0 &&
+			    scf_value_get_astring(fname_value, fval,
+			    MAXPATHLEN) != -1)  {
+				/*
+				 * First check to see if the manifest is there
+				 * if not then there is no need to add it.
+				 */
+				if (access(fval, F_OK) == -1) {
+					free(fval);
+					continue;
+				}
+
+				old_pname = safe_strdup(pname);
+				old_fval = safe_strdup(fval);
+				old_prop = internal_property_create(old_pname,
+				    SCF_TYPE_ASTRING, 1, old_fval);
+
+				/*
+				 * Already checked to see if the property exists
+				 * in the group, and it does not.
+				 */
+				(void) internal_attach_property(mfst_pgroup,
+				    old_prop);
+			}
+		}
+	}
+
+	cbdata.sc_handle = g_hndl;
+	cbdata.sc_parent = ent;
+	cbdata.sc_service = issvc;
+	cbdata.sc_flags = SCI_FORCE;
+	cbdata.sc_source_fmri = ient->sc_fmri;
+	cbdata.sc_target_fmri = ient->sc_fmri;
+
+	if (entity_pgroup_import(mfst_pgroup, &cbdata) != UU_WALK_NEXT)
+		return (cbdata.sc_err);
+
+	return (r);
+}
+
+/*
  * prop is taken to be a property in the "dependents" property group of snpl,
  * which is taken to be the snaplevel of a last-import snapshot corresponding
  * to ient.  If prop is a valid dependents property, upgrade the dependent it
@@ -4698,6 +4863,9 @@ process_old_pg(const scf_propertygroup_t *lipg, entity_t *ient, void *ent,
 	if (strcmp(imp_str, "dependents") == 0)
 		return (upgrade_dependents(lipg, imp_snpl, ient, running, ent));
 
+	if (strcmp(imp_str, SCF_PG_MANIFESTFILES) == 0)
+		return (upgrade_manifestfiles(NULL, ient, running, ent));
+
 	if (mpg == NULL || mpg->sc_pgroup_delete) {
 		/* property group was deleted from manifest */
 		if (entity_get_pg(ent, issvc, imp_str, imp_pg2) != 0) {
@@ -5233,12 +5401,39 @@ upgrade_props(void *ent, scf_snaplevel_t *running, scf_snaplevel_t *snpl,
 			continue;
 		}
 
-		if (running != NULL)
+		if (strcmp(pg->sc_pgroup_name, SCF_PG_MANIFESTFILES) == 0) {
+			r = upgrade_manifestfiles(pg, ient, running, ent);
+			switch (r) {
+			case 0:
+				break;
+
+			case ECONNABORTED:
+			case ENOMEM:
+			case ENOSPC:
+			case ECANCELED:
+			case ENODEV:
+			case EBADF:
+			case EBUSY:
+			case EINVAL:
+			case EPERM:
+			case EROFS:
+			case EACCES:
+			case EEXIST:
+				return (r);
+
+			default:
+				bad_error("upgrade_manifestfiles", r);
+			}
+			continue;
+		}
+
+		if (running != NULL) {
 			r = scf_snaplevel_get_pg(running, pg->sc_pgroup_name,
 			    imp_pg);
-		else
+		} else {
 			r = entity_get_pg(ent, issvc, pg->sc_pgroup_name,
 			    imp_pg);
+		}
 		if (r != 0) {
 			scf_callback_t cbdata;
 
@@ -9218,6 +9413,8 @@ export_service(scf_service_t *svc, int flags)
 			} else if (strcmp(exp_str, SCF_PG_DEPENDENTS) == 0) {
 				export_dependents(exp_pg, &elts);
 				continue;
+			} else if (strcmp(exp_str, SCF_PG_MANIFESTFILES) == 0) {
+				continue;
 			}
 		} else if (strcmp(exp_str, SCF_GROUP_TEMPLATE) == 0) {
 			export_template(exp_pg, &elts, &template_elts);
@@ -9427,7 +9624,7 @@ make_archive(int flags)
 		if (strcmp(exp_str, SCF_LEGACY_SERVICE) == 0)
 			continue;
 
-		xmlAddChild(sb, export_service(svc, flags));
+		(void) xmlAddChild(sb, export_service(svc, flags));
 	}
 
 	free(exp_str);
@@ -9634,7 +9831,7 @@ lscf_profile_extract(const char *filename)
 			scfdie();
 
 		if (snode->children != NULL)
-			xmlAddChild(sb, snode);
+			(void) xmlAddChild(sb, snode);
 		else
 			xmlFreeNode(snode);
 	}

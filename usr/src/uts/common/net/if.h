@@ -147,7 +147,7 @@ struct ifnet {
 
 #define	IFF_IPV4	0x0001000000	/* IPv4 interface */
 #define	IFF_IPV6	0x0002000000	/* IPv6 interface */
-					/* 0x0004000000 was IFF_MIPRUNNING */
+#define	IFF_NOACCEPT	0x0004000000	/* no-accept mode VRRP ill */
 #define	IFF_NOFAILOVER	0x0008000000	/* in.mpathd(1M) test address */
 
 #define	IFF_FAILED	0x0010000000	/* Interface has failed */
@@ -168,20 +168,22 @@ struct ifnet {
 #define	IFF_VIRTUAL	0x2000000000ll	/* Does not send or receive packets */
 #define	IFF_DUPLICATE	0x4000000000ll	/* Local address already in use */
 #define	IFF_IPMP	0x8000000000ll	/* IPMP IP interface */
+#define	IFF_VRRP	0x10000000000ll	/* Managed by VRRP */
 
 /* flags that cannot be changed by userland on any interface */
 #define	IFF_CANTCHANGE \
 	(IFF_BROADCAST | IFF_POINTOPOINT | IFF_RUNNING | IFF_PROMISC | \
 	IFF_MULTICAST | IFF_MULTI_BCAST | IFF_UNNUMBERED | IFF_IPV4 | \
 	IFF_IPV6 | IFF_IPMP | IFF_FIXEDMTU | IFF_VIRTUAL | \
-	IFF_LOOPBACK | IFF_ALLMULTI | IFF_DUPLICATE | IFF_COS_ENABLED)
+	IFF_LOOPBACK | IFF_ALLMULTI | IFF_DUPLICATE | IFF_COS_ENABLED | \
+	IFF_VRRP)
 
 /* flags that cannot be changed by userland on an IPMP interface */
 #define	IFF_IPMP_CANTCHANGE 	IFF_FAILED
 
 /* flags that can never be set on an IPMP interface */
 #define	IFF_IPMP_INVALID	(IFF_STANDBY | IFF_INACTIVE | IFF_OFFLINE | \
-	IFF_NOFAILOVER | IFF_NOARP | IFF_NONUD | IFF_XRESOLV)
+	IFF_NOFAILOVER | IFF_NOARP | IFF_NONUD | IFF_XRESOLV | IFF_NOACCEPT)
 
 /*
  * Output queues (ifp->if_snd) and internetwork datagram level (pup level 1)
@@ -436,6 +438,7 @@ struct	ifreq {
 		char	ifru_oname[IFNAMSIZ];	/* other if name */
 		struct	sockaddr ifru_broadaddr;
 		int	ifru_index;		/* interface index */
+		uint_t	ifru_mtu;
 		short	ifru_flags;
 		int	ifru_metric;
 		char	ifru_data[1];		/* interface dependent data */
@@ -487,6 +490,7 @@ struct	ifreq {
 #define	ifr_data	ifr_ifru.ifru_data	/* for use by interface */
 #define	ifr_enaddr	ifr_ifru.ifru_enaddr	/* ethernet address */
 #define	ifr_index	ifr_ifru.ifru_index	/* interface index */
+#define	ifr_mtu		ifr_ifru.ifru_mtu	/* mtu */
 /* For setting ppa */
 #define	ifr_ppa		ifr_ifru.ifru_ppaflags.ifrup_ppa
 
@@ -680,54 +684,6 @@ typedef struct ifa_msghdr {
 	ushort_t ifam_index;	/* index for associated ifp */
 	int	ifam_metric;	/* value of ipif_metric */
 } ifa_msghdr_t;
-
-/* currently tunnels only support IPv4 or IPv6 */
-enum ifta_proto {
-	IFTAP_INVALID,
-	IFTAP_IPV4,
-	IFTAP_IPV6
-};
-
-#define	IFTUN_SECINFOLEN 8	/* In units of 32-bit words. */
-#define	IFTUN_VERSION 1		/* Current version number. */
-
-/*
- * Used by tunneling module to get/set a tunnel parameters using
- * SIOCTUN[SG]PARAM.
- *
- * There is a version number and an array of uint32_t at the end of this
- * ioctl because in a perfect world, the ipsec_req_t would be inside
- * tun_addreq.  Since this file is independent of IP (and IPsec), I have to
- * just leave room there, and have the appropriate handlers deal with the
- * security information.
- *
- * In the future, the sockaddr types and the ta_vers could be used together
- * to determine the nature of the security information that is at the end
- * of this ioctl.
- */
-struct iftun_req {
-	char		ifta_lifr_name[LIFNAMSIZ]; /* if name */
-	struct sockaddr_storage ifta_saddr;	/* source address */
-	struct sockaddr_storage ifta_daddr;	/* destination address */
-	uint_t		ifta_flags;		/* See below */
-	/* IP version information is read only */
-	enum ifta_proto	ifta_upper;		/* IP version above tunnel */
-	enum ifta_proto	ifta_lower;		/* IP version below tunnel */
-	uint_t		ifta_vers;		/* Version number */
-	uint32_t	ifta_secinfo[IFTUN_SECINFOLEN]; /* Security prefs. */
-	int16_t		ifta_encap_lim;		/* Encapsulation limit */
-	uint8_t		ifta_hop_limit;		/* Hop limit */
-	uint8_t		ifta_spare0;		/* Pad to 64-bit boundary */
-	uint32_t	ifta_spare1;
-};
-
-/* ifta_flags are set to indicate which members are valid */
-#define	IFTUN_SRC			0x01
-#define	IFTUN_DST			0x02
-#define	IFTUN_SECURITY			0x04	/* Pay attention to secinfo */
-#define	IFTUN_ENCAP			0x08	/* Pay attention to encap */
-#define	IFTUN_HOPLIMIT			0x10	/* Pay attention to hoplimit */
-#define	IFTUN_COMPLEX_SECURITY		0x20	/* Policy too big for ioctl */
 
 #endif /* !defined(_XOPEN_SOURCE) || defined(__EXTENSIONS__) */
 

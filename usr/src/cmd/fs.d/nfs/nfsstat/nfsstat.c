@@ -69,8 +69,10 @@
 #include <time.h>
 #include <strings.h>
 #include <ctype.h>
+#include <locale.h>
 #include <assert.h>
 
+#include "statcommon.h"
 #include <nfs/nfssys.h>
 extern int _nfssys(int, void *);
 
@@ -108,13 +110,13 @@ static void sa_print(int, int);
 static void req_print(kstat_t *, kstat_t *, int, int, int);
 static void req_print_v4(kstat_t *, kstat_t *, int, int, int);
 static void stat_print(const char *, kstat_t *, kstat_t *, int, int);
-static void kstat_sum(kstat_t *, kstat_t *, kstat_t *, kstat_t *);
+static void nfsstat_kstat_sum(kstat_t *, kstat_t *, kstat_t *, kstat_t *);
 static void stats_timer(int);
 static void safe_zalloc(void **, uint_t, int);
 static int safe_strtoi(char const *, char *);
 
-static void kstat_copy(kstat_t *, kstat_t *, int);
-static void fail(int, char *, ...);
+
+static void nfsstat_kstat_copy(kstat_t *, kstat_t *, int);
 static kid_t safe_kstat_read(kstat_ctl_t *, kstat_t *, void *);
 static kid_t safe_kstat_write(kstat_ctl_t *, kstat_t *, void *);
 
@@ -175,6 +177,12 @@ static old_kstat_t old_rfsreqcnt_v41_kstat;
 static old_kstat_t old_aclproccnt_v2_kstat, old_aclproccnt_v3_kstat;
 static old_kstat_t old_aclreqcnt_v2_kstat, old_aclreqcnt_v3_kstat;
 
+static uint_t timestamp_fmt = NODATE;
+
+#if !defined(TEXT_DOMAIN)		/* Should be defined by cc -D */
+#define	TEXT_DOMAIN "SYS_TEST"		/* Use this only if it isn't */
+#endif
+
 int
 main(int argc, char *argv[])
 {
@@ -196,7 +204,10 @@ main(int argc, char *argv[])
 	count = 0;
 	go_forever = 0;
 
-	while ((c = getopt(argc, argv, "cnrsmzav:l:")) != EOF) {
+	(void) setlocale(LC_ALL, "");
+	(void) textdomain(TEXT_DOMAIN);
+
+	while ((c = getopt(argc, argv, "cnrsmzav:T:l:")) != EOF) {
 		switch (c) {
 		case 'l':
 			lflag++;
@@ -231,6 +242,18 @@ main(int argc, char *argv[])
 				if ((vflag < 2) || (vflag > 4)) {
 					fail(0, "Invalid version number\n");
 				}
+			}
+			break;
+		case 'T':
+			if (optarg) {
+				if (*optarg == 'u')
+					timestamp_fmt = UDATE;
+				else if (*optarg == 'd')
+					timestamp_fmt = DDATE;
+				else
+					usage();
+			} else {
+				usage();
 			}
 			break;
 		case '?':
@@ -292,6 +315,8 @@ main(int argc, char *argv[])
 		if (mflag) {
 			mi_print();
 		} else {
+			if (timestamp_fmt != NODATE)
+				print_timestamp(timestamp_fmt);
 
 			if (sflag &&
 			    (rpc_clts_server_kstat == NULL ||
@@ -902,8 +927,8 @@ setup(void)
 	if ((kc = kstat_open()) == NULL)
 		fail(1, "kstat_open(): can't open /dev/kstat");
 
-	/* malloc space for our temporary kstat */
-	ksum_kstat = malloc(sizeof (kstat_t));
+	/* alloc space for our temporary kstat */
+	safe_zalloc((void **)&ksum_kstat, sizeof (kstat_t), 0);
 	/*
 	 * kstat_sum function assumes implicitly that ks_data is NULL. It may
 	 * not always be the case.
@@ -1046,7 +1071,7 @@ cn_print(int zflag, int vflag)
 		return;
 
 	if (vflag == 0) {
-		kstat_sum(nfs_client_kstat, nfs4_client_kstat,
+		nfsstat_kstat_sum(nfs_client_kstat, nfs4_client_kstat,
 		    nfs41_client_kstat, ksum_kstat);
 		stat_print("\nClient nfs (sum):", ksum_kstat,
 		    &old_ksum_kstat.kst, field_width, zflag);
@@ -1273,9 +1298,9 @@ req_print(kstat_t *req, kstat_t *req_old, int ver, int field_width,
 			knp[i].value.ui64 = 0;
 	}
 	if (knp_old != NULL)
-		kstat_copy(req, req_old, 1);
+		nfsstat_kstat_copy(req, req_old, 1);
 	else
-		kstat_copy(req, req_old, 0);
+		nfsstat_kstat_copy(req, req_old, 0);
 }
 
 /*
@@ -1398,9 +1423,9 @@ req_print_v4
 			kptr[i].value.ui64 = 0;
 	}
 	if (kptr_old != NULL)
-		kstat_copy(req, req_old, 1);
+		nfsstat_kstat_copy(req, req_old, 1);
 	else
-		kstat_copy(req, req_old, 0);
+		nfsstat_kstat_copy(req, req_old, 0);
 }
 
 static void
@@ -1449,13 +1474,13 @@ stat_print(const char *title_string, kstat_t *req, kstat_t  *req_old,
 	}
 
 	if (knp_old != NULL)
-		kstat_copy(req, req_old, 1);
+		nfsstat_kstat_copy(req, req_old, 1);
 	else
-		kstat_copy(req, req_old, 0);
+		nfsstat_kstat_copy(req, req_old, 0);
 }
 
 static void
-kstat_sum(kstat_t *kstat1, kstat_t *kstat2, kstat_t *kstat3, kstat_t *sum)
+nfs_kstat_sum(kstat_t *kstat1, kstat_t *kstat2, kstat_t *kstat3, kstat_t *sum)
 {
 	int i;
 	kstat_named_t *knp1, *knp2, *knp3, *knpsum;
@@ -1469,7 +1494,7 @@ kstat_sum(kstat_t *kstat1, kstat_t *kstat2, kstat_t *kstat3, kstat_t *sum)
 	knp3 = KSTAT_NAMED_PTR(kstat3);
 
 	if (sum->ks_data == NULL) {
-		kstat_copy(kstat1, sum, 0);
+		nfs_kstat_copy(kstat1, sum, 0);
 	}
 	knpsum = KSTAT_NAMED_PTR(sum);
 
@@ -1701,6 +1726,8 @@ mi_print(void)
 			printf(",readdironly");
 		if (mik.mik_flags & MI_ACL)
 			printf(",acl");
+		if (mik.mik_flags & MI_DIRECTIO)
+			printf(",forcedirectio");
 
 		if (mik.mik_vers >= NFS_V4) {
 			if (mik.mik_flags & MI4_MIRRORMOUNT)
@@ -1784,13 +1811,13 @@ void
 usage(void)
 {
 	fprintf(stderr, "Usage: nfsstat [-cnrsza [-v version] "
-	    "[interval [count]]\n");
+	    "[-T d|u] [interval [count]]\n");
 	fprintf(stderr, "Usage: nfsstat -m [pathname..]\n");
 	fprintf(stderr, "Usage: nfsstat -l filename\n");
 	exit(1);
 }
 
-static void
+void
 fail(int do_perror, char *message, ...)
 {
 	va_list args;
@@ -1873,7 +1900,7 @@ handle_sig(int x)
 }
 
 static void
-kstat_copy(kstat_t *src, kstat_t *dst, int fr)
+nfsstat_kstat_copy(kstat_t *src, kstat_t *dst, int fr)
 {
 
 	if (fr)
@@ -1891,14 +1918,13 @@ kstat_copy(kstat_t *src, kstat_t *dst, int fr)
 }
 
 /*
- * "Safe" allocators - if we return we're guaranteed
- * to have the desired space. We exit via fail
- * if we can't get the space.
+ * "Safe" allocators - if we return we're guaranteed to have the desired space
+ * allocated and zero-filled. We exit via fail if we can't get the space.
  */
 void
 safe_zalloc(void **ptr, uint_t size, int free_first)
 {
-	if (*ptr == NULL)
+	if (ptr == NULL)
 		fail(1, "invalid pointer");
 	if (free_first && *ptr != NULL)
 		free(*ptr);

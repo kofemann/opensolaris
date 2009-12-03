@@ -254,10 +254,13 @@ DRV_KMODS	+= pci-ide
 DRV_KMODS	+= xsvc
 DRV_KMODS	+= tzmon
 DRV_KMODS	+= acpi_drv 
+DRV_KMODS	+= acpinex
+DRV_KMODS	+= amd_iommu
 DRV_KMODS	+= ioat
 DRV_KMODS	+= fipe
 
 DRV_KMODS	+= cpudrv
+
 
 #
 # Platform Power Modules
@@ -271,6 +274,12 @@ CPU_KMODS	+= amd_opteron
 CPU_KMODS	+= generic_cpu
 CPU_KMODS	+= authenticamd
 CPU_KMODS	+= genuineintel
+
+#
+# Don't build some of these for OpenSolaris, since they will be
+# replaced by binaries that are signed by Sun Release Engineering.
+#
+$(CLOSED_BUILD)CLOSED_CPU_KMODS	+= intel_nhmex
 
 #
 #	Exec Class Modules (/kernel/exec):
@@ -301,6 +310,7 @@ SYS_KMODS	+=
 #	'Misc' Modules (/kernel/misc):
 #
 MISC_KMODS	+= gfx_private pcie
+MISC_KMODS	+= acpidev
 
 #
 #	'Dacf' modules (/kernel/dacf)

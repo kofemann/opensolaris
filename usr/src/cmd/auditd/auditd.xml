@@ -1,15 +1,14 @@
 <?xml version="1.0"?>
 <!DOCTYPE service_bundle SYSTEM "/usr/share/lib/xml/dtd/service_bundle.dtd.1">
 <!--
- Copyright 2005 Sun Microsystems, Inc.  All rights reserved.
+ Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  Use is subject to license terms.
 
  CDDL HEADER START
 
  The contents of this file are subject to the terms of the
- Common Development and Distribution License, Version 1.0 only
- (the "License").  You may not use this file except in compliance
- with the License.
+ Common Development and Distribution License (the "License").
+ You may not use this file except in compliance with the License.
 
  You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
  or http://www.opensolaris.org/os/licensing.
@@ -23,8 +22,6 @@
  information: Portions Copyright [yyyy] [name of copyright owner]
 
  CDDL HEADER END
-
-    ident	"%Z%%M%	%I%	%E% SMI"
 
     NOTE:  This service manifest is not editable; its contents will
     be overwritten by package or patch operations, including
@@ -60,13 +57,14 @@
 	<dependency
 		name='syslog'
 		type='service'
-		grouping='require_all'
+		grouping='optional_all'
 		restart_on='none'>
 		<service_fmri value='svc:/system/system-log' />
 	</dependency>
 
+
 	<dependent
-		name='auditd_multi-user'
+		name='multi-user'
 		grouping='optional_all'
 		restart_on='none'>
 		<service_fmri value='svc:/milestone/multi-user'/>
@@ -78,6 +76,7 @@
 		restart_on='none'>
 		<service_fmri value='svc:/system/console-login'/>
 	</dependent>
+
 
 	<exec_method
 		type='method'
@@ -92,7 +91,7 @@
 	<exec_method
 		type='method'
 		name='refresh'
-		exec=':kill -HUP'
+		exec='/lib/svc/method/svc-auditd'
 		timeout_seconds='30'>
 		<method_context>
 			<method_credential user='root' group='root' />
@@ -100,8 +99,8 @@
 	</exec_method>
 
 	<!--
-		auditd waits for c2audit to quiet down after catching a
-		-TERM before exiting; auditd's timeout is 20 seconds
+	  auditd waits for c2audit to quiet down after catching a -TERM
+	  before exiting; auditd's timeout is 20 seconds
 	-->
 
 	<exec_method
@@ -115,21 +114,86 @@
 	</exec_method>
 
 	<!-- SIGs HUP, TERM, and USR1 are all expected by auditd -->
-
 	<property_group name='startd' type='framework'>
 		<propval name='ignore_error' type='astring'
-		value='core,signal' />
+			value='core,signal' />
 	</property_group>
 
 	<property_group name='general' type='framework'>
-		<!-- to start stop auditd -->
+		<!-- to start/stop auditd -->
 		<propval name='action_authorization' type='astring'
+			value='solaris.audit.config' />
+		<propval name='value_authorization' type='astring'
 			value='solaris.audit.config' />
 	</property_group>
 
-	<instance name='default' enabled='false' />
+
+	<instance name='default' enabled='false'>
+
+	<!--
+	  Audit Queue Control Properties - see auditconfig(1M)
+	    
+	    Note, that the default value for all the queue control
+	    configuration parameters is 0, which makes auditd(1M) to
+	    use current active system parameters.
+	-->
+	<property_group name='queuectrl' type='application' >
+		<propval name='qbufsz' type='count'
+			value='0' />
+		<propval name='qdelay' type='count'
+			value='0' />
+		<propval name='qhiwater' type='count'
+			value='0' />
+		<propval name='qlowater' type='count'
+			value='0' />
+		<propval name='read_authorization' type='astring'
+			value='solaris.audit.config' />
+	</property_group>
+
+	<!--
+	  Audit Policies - see auditconfig(1M)
+
+	    Note, that "all" and "none" policies available as a
+	    auditconfig(1M) policy flags actually means a full/empty set
+	    of other policy flags. Thus they are not configurable in the
+	    auditd service manifest, but set all the policies to true
+	    (all) or false (none).
+	-->
+	<property_group name='policy' type='application' >
+		<propval name='ahlt' type='boolean'
+			value='false' />
+		<propval name='arge' type='boolean'
+			value='false' />
+		<propval name='argv' type='boolean'
+			value='false' />
+		<propval name='cnt' type='boolean'
+			value='true' />
+		<propval name='group' type='boolean'
+			value='false' />
+		<propval name='path' type='boolean'
+			value='false' />
+		<propval name='perzone' type='boolean'
+			value='false' />
+		<propval name='public' type='boolean'
+			value='false' />
+		<propval name='seq' type='boolean'
+			value='false' />
+		<propval name='trail' type='boolean'
+			value='false' />
+		<propval name='windata_down' type='boolean'
+			value='false' />
+		<propval name='windata_up' type='boolean'
+			value='false' />
+		<propval name='zonename' type='boolean'
+			value='false' />
+		<propval name='read_authorization' type='astring'
+			value='solaris.audit.config' />
+	</property_group>
+
+	</instance>
 
 	<stability value='Evolving' />
+
 
 	<template>
 		<common_name>
@@ -142,6 +206,9 @@
 				section='1M'
 				manpath='/usr/share/man'/>
 			<manpage title='audit'
+				section='1M'
+				manpath='/usr/share/man'/>
+			<manpage title='auditconfig'
 				section='1M'
 				manpath='/usr/share/man'/>
 	         </documentation>

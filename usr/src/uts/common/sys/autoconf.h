@@ -26,7 +26,6 @@
 #ifndef _SYS_AUTOCONF_H
 #define	_SYS_AUTOCONF_H
 
-
 /* Derived from autoconf.h, SunOS 4.1.1 1.15 */
 
 #ifdef	__cplusplus
@@ -75,6 +74,7 @@ struct devnames {
  */
 #define	DN_CONF_PARSED		0x0001
 #define	DN_DRIVER_BUSY		0x0002	/* for ddi_hold_installed_driver */
+#define	DN_DRIVER_INACTIVE	0x0004	/* driver not active */
 #define	DN_DRIVER_HELD		0x0020	/* held via ddi_hold_installed_driver */
 #define	DN_TAKEN_GETUDEV	0x0040	/* getudev() used this entry */
 #define	DN_DRIVER_REMOVED	0x0080	/* driver entry removed */
@@ -87,6 +87,7 @@ struct devnames {
 #define	DN_PHCI_DRIVER		0x2000	/* pHCI driver */
 #define	DN_OPEN_RETURNS_EINTR	0x4000	/* DDI_OPEN_RETURNS_EINTR prop */
 #define	DN_SCSI_SIZE_CLEAN	0x8000	/* driver is scsi_size_clean() */
+#define	DN_NETWORK_PHYSDRIVER	0x10000	/* physical network driver */
 
 #ifdef _KERNEL
 
@@ -111,6 +112,9 @@ struct devnames {
 #define	LDI_EV_DEBUG		0x8000  /* LDI events debug messages */
 #define	LDI_EV_TRACE		0x10000 /* LDI events trace messages */
 #define	DDI_INTR_IRM		0x20000 /* interrupt resource management */
+#define	DDI_HP_API		0x40000	/* Hotplug interface messages  */
+#define	DDI_HP_IMPL		0x80000	/* Hotplug implementation msgs */
+#define	DDI_HP_NEXUS		0x100000 /* Hotplug messages from nexuses */
 
 extern int ddidebug;
 
@@ -131,6 +135,9 @@ extern int ddidebug;
 #define	LDI_EVDBG(args)		if (ddidebug & LDI_EV_DEBUG) cmn_err args
 #define	LDI_EVTRC(args)		if (ddidebug & LDI_EV_TRACE) cmn_err args
 #define	DDI_INTR_IRMDBG(args)	if (ddidebug & DDI_INTR_IRM) cmn_err args
+#define	DDI_HP_APIDBG(args)	if (ddidebug & DDI_HP_API) cmn_err args
+#define	DDI_HP_IMPLDBG(args)	if (ddidebug & DDI_HP_IMPL) cmn_err args
+#define	DDI_HP_NEXDBG(args)	if (ddidebug & DDI_HP_NEXUS) cmn_err args
 #else
 #define	NDI_CONFIG_DEBUG(args)
 #define	BMDPRINTF(args)
@@ -148,6 +155,9 @@ extern int ddidebug;
 #define	LDI_EVDBG(args)		if (ddidebug & LDI_EV_DEBUG) cmn_err args
 #define	LDI_EVTRC(args)		if (ddidebug & LDI_EV_TRACE) cmn_err args
 #define	DDI_INTR_IRMDBG(args)
+#define	DDI_HP_APIDBG(args)
+#define	DDI_HP_IMPLDBG(args)
+#define	DDI_HP_NEXDBG(args)
 #endif
 
 
@@ -229,8 +239,10 @@ extern krwlock_t devinfo_tree_lock;		/* obsolete */
 #define	DRV_UNLOADABLE(opsp)	((opsp)->devo_refcnt == 0)
 #define	DEV_OPS_HELD(opsp)	((opsp)->devo_refcnt > 0)
 #define	NEXUS_DRV(opsp)		((opsp)->devo_bus_ops != NULL)
-#define	NETWORK_DRV(major)	(devnamesp[major].dn_flags & DN_NETWORK_DRIVER)
-#define	GLDV3_DRV(major)	(devnamesp[major].dn_flags & DN_GLDV3_DRIVER)
+#define	NETWORK_DRV(maj)	(devnamesp[(maj)].dn_flags & DN_NETWORK_DRIVER)
+#define	GLDV3_DRV(maj)		(devnamesp[(maj)].dn_flags & DN_GLDV3_DRIVER)
+#define	NETWORK_PHYSDRV(maj)	\
+			(devnamesp[(maj)].dn_flags & DN_NETWORK_PHYSDRIVER)
 
 extern void impl_rem_dev_props(dev_info_t *);
 extern void add_class(char *, char *);
@@ -265,7 +277,7 @@ extern void i_ddi_forceattach_drivers(void);
 extern int i_ddi_io_initialized(void);
 extern dev_info_t *i_ddi_create_branch(dev_info_t *, int);
 extern void i_ddi_add_devimap(dev_info_t *dip);
-extern void i_ddi_di_cache_invalidate(int kmflag);
+extern void i_ddi_di_cache_invalidate(void);
 extern void i_ddi_di_cache_free(struct di_cache *cache);
 
 /* devname_state - for /dev to denote reconfig and system available */

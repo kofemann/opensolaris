@@ -223,6 +223,14 @@ privilege PRIV_NET_MAC_AWARE
 	This privilege is interpreted only if the system is configured
 	with Trusted Extensions.
 
+privilege PRIV_NET_MAC_IMPLICIT
+
+	Allows a process to set SO_MAC_IMPLICIT option by using 
+	setsockopt(3SOCKET).  This allows a privileged process to 
+	transmit implicitly-labeled packets to a peer.
+	This privilege is interpreted only if the system is configured
+	with Trusted Extensions.
+
 privilege PRIV_NET_OBSERVABILITY
 
 	Allows a process to access /dev/lo0 and the devices in /dev/ipnet/
@@ -376,9 +384,14 @@ privilege PRIV_SYS_MOUNT
 	only control mounts performed from within said zone.
 	Outside the global zone, the "nodevices" option is always forced.
 
+privilege PRIV_SYS_IPTUN_CONFIG
+
+	Allows a process to configure IP tunnel links.
+
 privilege PRIV_SYS_DL_CONFIG
 
-	Allows a process to configure a system's datalink interfaces.
+	Allows a process to configure all classes of datalinks, including
+	configuration allowed by PRIV_SYS_IPTUN_CONFIG.
 
 privilege PRIV_SYS_IP_CONFIG
 

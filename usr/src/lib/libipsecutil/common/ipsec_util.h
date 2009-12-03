@@ -159,7 +159,7 @@ extern void bail_msg(char *, ...);
 extern int dump_sockaddr(struct sockaddr *, uint8_t, boolean_t, FILE *,
     boolean_t);
 
-extern int dump_key(uint8_t *, uint_t, FILE *);
+extern int dump_key(uint8_t *, uint_t, uint_t, FILE *, boolean_t);
 
 extern int dump_aalg(uint8_t, FILE *);
 
@@ -196,12 +196,18 @@ extern int dbgstr2num(char *);
 extern int parsedbgopts(char *);
 
 /*
- * OpenSSL library
+ * SSL library (OpenSSL)
  */
 #define	LIBSSL	"libssl.so"
 
 void libssl_load(void);
-boolean_t libssl_loaded;
+
+/*
+ * crypto library (OpenSSL)
+ */
+#define	LIBCRYPTO	"libcrypto.so"
+
+void libcrypto_load(void);
 
 /*
  * functions to manipulate the kmcookie-label mapping file
@@ -359,7 +365,7 @@ extern void print_address(FILE *, char *, struct sadb_address *, boolean_t);
 extern void print_asn1_name(FILE *, const unsigned char *, long);
 extern void print_key(FILE *, char *, struct sadb_key *);
 extern void print_ident(FILE *, char *, struct sadb_ident *);
-extern void print_sens(FILE *, char *, struct sadb_sens *);
+extern void print_sens(FILE *, char *, const struct sadb_sens *, boolean_t);
 extern void print_prop(FILE *, char *, struct sadb_prop *);
 extern void print_eprop(FILE *, char *, struct sadb_prop *);
 extern void print_supp(FILE *, char *, struct sadb_supported *);
@@ -376,6 +382,18 @@ extern boolean_t save_ident(struct sadb_ident *, FILE *);
 extern void save_assoc(uint64_t *, FILE *);
 extern FILE *opensavefile(char *);
 extern const char *do_inet_ntop(const void *, char *, size_t);
+
+/*
+ * Label conversion convenience functions.
+ */
+
+#include <tsol/label.h>
+
+extern void ipsec_convert_sens_to_bslabel(const struct sadb_sens *,
+    bslabel_t *);
+extern int ipsec_convert_sl_to_sens(int doi, bslabel_t *, struct sadb_sens *);
+extern void ipsec_convert_bslabel_to_string(bslabel_t *, char **);
+extern void ipsec_convert_bslabel_to_hex(bslabel_t *, char **);
 
 /*
  * These exit macros give a consistent exit behaviour for all

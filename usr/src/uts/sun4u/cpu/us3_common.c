@@ -19,11 +19,9 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <sys/types.h>
 #include <sys/systm.h>
@@ -76,6 +74,7 @@
 #include <sys/errorq.h>
 #include <sys/errclassify.h>
 #include <sys/pghw.h>
+#include <sys/clock_impl.h>
 
 #ifdef	CHEETAHPLUS_ERRATUM_25
 #include <sys/xc_impl.h>
@@ -908,8 +907,8 @@ mondo_recover(uint16_t cpuid, int bn)
 		return (retval);
 	}
 
-	CHEETAH_LIVELOCK_ENTRY_NEXT(histp)
-	CHEETAH_LIVELOCK_ENTRY_SET(histp, lbolt, lbolt);
+	CHEETAH_LIVELOCK_ENTRY_NEXT(histp);
+	CHEETAH_LIVELOCK_ENTRY_SET(histp, lbolt, LBOLT_WAITFREE);
 	CHEETAH_LIVELOCK_ENTRY_SET(histp, cpuid, cpuid);
 	CHEETAH_LIVELOCK_ENTRY_SET(histp, buddy, CPU->cpu_id);
 

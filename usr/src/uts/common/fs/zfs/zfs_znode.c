@@ -202,11 +202,8 @@ zfs_znode_move_impl(znode_t *ozp, znode_t *nzp)
 	nzp->z_dbuf = ozp->z_dbuf;
 
 	/*
-	 * Release any cached ACL, since it *may* have
-	 * zfs_acl_node_t's that directly references an
-	 * embedded ACL in the zp_acl of the old znode_phys_t
-	 *
-	 * It will be recached the next time the ACL is needed.
+	 * Since this is just an idle znode and kmem is already dealing with
+	 * memory pressure, release any cached ACL.
 	 */
 	if (ozp->z_acl_cached) {
 		zfs_acl_free(ozp->z_acl_cached);
@@ -571,6 +568,7 @@ zfs_znode_dmu_init(zfsvfs_t *zfsvfs, znode_t *zp, dmu_buf_t *db)
 	mutex_enter(&zp->z_lock);
 
 	ASSERT(zp->z_dbuf == NULL);
+	ASSERT(zp->z_acl_cached == NULL);
 	zp->z_dbuf = db;
 	nzp = dmu_buf_set_user_ie(db, zp, &zp->z_phys, znode_evict_error);
 
@@ -769,6 +767,8 @@ zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
 			    DMU_OT_ZNODE, sizeof (znode_phys_t) + bonuslen, tx);
 		}
 	}
+
+	ZFS_OBJ_HOLD_ENTER(zfsvfs, obj);
 	VERIFY(0 == dmu_bonus_hold(zfsvfs->z_os, obj, NULL, &db));
 	dmu_buf_will_dirty(db, tx);
 
@@ -827,12 +827,11 @@ zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
 	} else {
 		ZFS_TIME_ENCODE(&now, pzp->zp_mtime);
 	}
-
-	pzp->zp_mode = MAKEIMODE(vap->va_type, vap->va_mode);
+	pzp->zp_uid = acl_ids->z_fuid;
+	pzp->zp_gid = acl_ids->z_fgid;
+	pzp->zp_mode = acl_ids->z_mode;
 	if (!(flag & IS_ROOT_NODE)) {
-		ZFS_OBJ_HOLD_ENTER(zfsvfs, obj);
 		*zpp = zfs_znode_alloc(zfsvfs, db, 0);
-		ZFS_OBJ_HOLD_EXIT(zfsvfs, obj);
 	} else {
 		/*
 		 * If we are creating the root node, the "parent" we
@@ -840,12 +839,11 @@ zfs_mknode(znode_t *dzp, vattr_t *vap, dmu_tx_t *tx, cred_t *cr,
 		 */
 		*zpp = dzp;
 	}
-	pzp->zp_uid = acl_ids->z_fuid;
-	pzp->zp_gid = acl_ids->z_fgid;
-	pzp->zp_mode = acl_ids->z_mode;
 	VERIFY(0 == zfs_aclset_common(*zpp, acl_ids->z_aclp, cr, tx));
 	if (vap->va_mask & AT_XVATTR)
 		zfs_xvattr_set(*zpp, (xvattr_t *)vap);
+
+	ZFS_OBJ_HOLD_EXIT(zfsvfs, obj);
 }
 
 void
@@ -911,6 +909,10 @@ zfs_xvattr_set(znode_t *zp, xvattr_t *xvap)
 		zp->z_phys->zp_flags |= ZFS_BONUS_SCANSTAMP;
 		XVA_SET_RTN(xvap, XAT_AV_SCANSTAMP);
 	}
+	if (XVA_ISSET_REQ(xvap, XAT_REPARSE)) {
+		ZFS_ATTR_SET(zp, ZFS_REPARSE, xoap->xoa_reparse);
+		XVA_SET_RTN(xvap, XAT_REPARSE);
+	}
 }
 
 int
@@ -965,11 +967,25 @@ zfs_zget(zfsvfs_t *zfsvfs, uint64_t obj_num, znode_t **zpp)
 
 	/*
 	 * Not found create new znode/vnode
+	 * but only if file exists.
+	 *
+	 * There is a small window where zfs_vget() could
+	 * find this object while a file create is still in
+	 * progress.  Since a gen number can never be zero
+	 * we will check that to determine if its an allocated
+	 * file.
 	 */
-	zp = zfs_znode_alloc(zfsvfs, db, doi.doi_data_block_size);
+
+	if (((znode_phys_t *)db->db_data)->zp_gen != 0) {
+		zp = zfs_znode_alloc(zfsvfs, db, doi.doi_data_block_size);
+		*zpp = zp;
+		err = 0;
+	} else {
+		dmu_buf_rele(db, NULL);
+		err = ENOENT;
+	}
 	ZFS_OBJ_HOLD_EXIT(zfsvfs, obj_num);
-	*zpp = zp;
-	return (0);
+	return (err);
 }
 
 int
@@ -1002,6 +1018,13 @@ zfs_rezget(znode_t *zp)
 		ZFS_OBJ_HOLD_EXIT(zfsvfs, obj_num);
 		return (EIO);
 	}
+
+	mutex_enter(&zp->z_acl_lock);
+	if (zp->z_acl_cached) {
+		zfs_acl_free(zp->z_acl_cached);
+		zp->z_acl_cached = NULL;
+	}
+	mutex_exit(&zp->z_acl_lock);
 
 	zfs_znode_dmu_init(zfsvfs, zp, db);
 	zp->z_unlinked = (zp->z_phys->zp_links == 0);
@@ -1483,6 +1506,7 @@ zfs_create_fs(objset_t *os, cred_t *cr, nvlist_t *zplprops, dmu_tx_t *tx)
 	uint64_t	norm = 0;
 	nvpair_t	*elem;
 	int		error;
+	int		i;
 	znode_t		*rootzp = NULL;
 	vnode_t		*vp;
 	vattr_t		vattr;
@@ -1578,6 +1602,9 @@ zfs_create_fs(objset_t *os, cred_t *cr, nvlist_t *zplprops, dmu_tx_t *tx)
 	list_create(&zfsvfs.z_all_znodes, sizeof (znode_t),
 	    offsetof(znode_t, z_link_node));
 
+	for (i = 0; i != ZFS_OBJ_MTX_SZ; i++)
+		mutex_init(&zfsvfs.z_hold_mtx[i], NULL, MUTEX_DEFAULT, NULL);
+
 	ASSERT(!POINTER_IS_VALID(rootzp->z_zfsvfs));
 	rootzp->z_zfsvfs = &zfsvfs;
 	VERIFY(0 == zfs_acl_ids_create(rootzp, IS_ROOT_NODE, &vattr,
@@ -1602,6 +1629,9 @@ zfs_create_fs(objset_t *os, cred_t *cr, nvlist_t *zplprops, dmu_tx_t *tx)
 	error = zfs_create_share_dir(&zfsvfs, tx);
 
 	ASSERT(error == 0);
+
+	for (i = 0; i != ZFS_OBJ_MTX_SZ; i++)
+		mutex_destroy(&zfsvfs.z_hold_mtx[i]);
 }
 
 #endif /* _KERNEL */

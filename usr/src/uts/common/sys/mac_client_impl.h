@@ -77,6 +77,7 @@ typedef struct mac_promisc_impl_s {			/* Protected by */
 	boolean_t			mpi_no_tx_loop;	/* WO */
 	boolean_t			mpi_no_phys;	/* WO */
 	boolean_t			mpi_strip_vlan_tag;	/* WO */
+	boolean_t			mpi_no_copy;	/* WO */
 } mac_promisc_impl_t;
 
 typedef union mac_tx_percpu_s {
@@ -291,6 +292,7 @@ extern	int	mac_tx_percpu_cnt;
 #define	MCIS_USE_DATALINK_NAME		0x0400
 #define	MCIS_UNICAST_HW			0x0800
 #define	MCIS_REQ_HWRINGS		0x1000
+#define	MCIS_RX_BYPASS_DISABLE		0x2000
 
 /* in mac_client.c */
 extern void mac_promisc_client_dispatch(mac_client_impl_t *, mblk_t *);

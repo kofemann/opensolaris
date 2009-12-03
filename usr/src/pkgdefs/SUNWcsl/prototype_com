@@ -54,16 +54,12 @@ f none usr/lib/cfgadm/sdcard.so.1 755 root bin
 s none usr/lib/cfgadm/sdcard.so=./sdcard.so.1
 f none usr/lib/cfgadm/pci.so.1 755 root bin
 s none usr/lib/cfgadm/pci.so=./pci.so.1
+f none usr/lib/cfgadm/shp.so.1 755 root bin
+s none usr/lib/cfgadm/shp.so=./shp.so.1
 f none usr/lib/cfgadm/usb.so.1 755 root bin
 s none usr/lib/cfgadm/usb.so=./usb.so.1
 f none usr/lib/cfgadm/ib.so.1 755 root bin
 s none usr/lib/cfgadm/ib.so=./ib.so.1
-d none usr/lib/dns 755 root bin
-# EXPORT DELETE START
-f none usr/lib/dns/cylink.so.1 755 root bin
-f none usr/lib/dns/dnssafe.so.1 755 root bin
-# EXPORT DELETE END
-f none usr/lib/dns/irs.so.1 755 root bin
 f none usr/lib/extendedFILE.so.1 755 root bin
 f none usr/lib/lib.b 444 root bin
 s none usr/lib/libadm.so=../../lib/libadm.so.1
@@ -134,6 +130,8 @@ f none usr/lib/libfstyp.so.1 755 root bin
 s none usr/lib/libgen.so.1=../../lib/libgen.so.1
 s none usr/lib/libgen.so=../../lib/libgen.so.1
 s none usr/ccs/lib/libgen.so=../../../lib/libgen.so.1
+s none usr/lib/libhotplug.so=./libhotplug.so.1
+f none usr/lib/libhotplug.so.1 755 root bin
 f none usr/lib/libidmap.so.1 755 root bin
 s none usr/lib/libidmap.so=./libidmap.so.1
 f none usr/lib/libinetsvc.so.1 755 root bin
@@ -210,6 +208,8 @@ s none usr/lib/libpthread.so=../../lib/libpthread.so.1
 s none usr/lib/libpthread.so.1=../../lib/libpthread.so.1
 s none usr/lib/librcm.so=../../lib/librcm.so.1
 s none usr/lib/librcm.so.1=../../lib/librcm.so.1
+f none usr/lib/libreparse.so.1 755 root bin
+s none usr/lib/libreparse.so=./libreparse.so.1
 s none usr/lib/libresolv.so=../../lib/libresolv.so.2
 s none usr/lib/libresolv.so.1=../../lib/libresolv.so.1
 s none usr/lib/libresolv.so.2=../../lib/libresolv.so.2
@@ -358,6 +358,8 @@ f none usr/lib/security/pkcs11_kernel.so.1 755 root bin
 s none usr/lib/security/pkcs11_kernel.so=./pkcs11_kernel.so.1
 f none usr/lib/security/pkcs11_softtoken.so.1 755 root bin
 s none usr/lib/security/pkcs11_softtoken.so=./pkcs11_softtoken.so.1
+f none usr/lib/security/pkcs11_tpm.so.1 755 root bin
+s none usr/lib/security/pkcs11_tpm.so=./pkcs11_tpm.so.1
 d none usr/lib/scsi 755 root bin
 f none usr/lib/scsi/libscsi.so.1 755 root bin
 s none usr/lib/scsi/libscsi.so=./libscsi.so.1

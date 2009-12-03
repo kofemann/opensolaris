@@ -18,18 +18,21 @@
  *
  * CDDL HEADER END
  */
+
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 QLogic Corporation.  All rights reserved.
+ * Use is subject to license terms.
+ */
+
+/*
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
 #include <sys/conf.h>
 #include <sys/ddi.h>
-#include <sys/stat.h>
-#include <sys/pci.h>
 #include <sys/sunddi.h>
 #include <sys/modctl.h>
-#include <sys/atomic.h>
 
 #include <stmf_defines.h>
 #include <fct_defines.h>
@@ -52,8 +55,6 @@ static qlt_dmem_bucket_t bucket2K	= { 2048, BUF_COUNT_2K },
 			bucket64K	= { 65536, BUF_COUNT_64K },
 			bucket128k	= { (2 * 65536), BUF_COUNT_128K },
 			bucket256k	= { (4 * 65536), BUF_COUNT_256K };
-
-int qlt_256k_nbufs = 0;
 
 static qlt_dmem_bucket_t *dmem_buckets[] = { &bucket2K, &bucket8K,
 			&bucket64K, &bucket128k, &bucket256k, NULL };
@@ -89,23 +90,36 @@ qlt_dmem_init(qlt_state_t *qlt)
 	uint32_t bsize;
 	size_t len;
 
-	if (qlt_256k_nbufs) {
-		bucket256k.dmem_nbufs = qlt_256k_nbufs;
+	if (qlt->qlt_bucketcnt[0] != 0) {
+		bucket2K.dmem_nbufs = qlt->qlt_bucketcnt[0];
 	}
+	if (qlt->qlt_bucketcnt[1] != 0) {
+		bucket8K.dmem_nbufs = qlt->qlt_bucketcnt[1];
+	}
+	if (qlt->qlt_bucketcnt[2] != 0) {
+		bucket64K.dmem_nbufs = qlt->qlt_bucketcnt[2];
+	}
+	if (qlt->qlt_bucketcnt[3] != 0) {
+		bucket128k.dmem_nbufs = qlt->qlt_bucketcnt[3];
+	}
+	if (qlt->qlt_bucketcnt[4] != 0) {
+		bucket256k.dmem_nbufs = qlt->qlt_bucketcnt[4];
+	}
+
 	bsize = sizeof (dmem_buckets);
-	ndx = bsize/sizeof (void *);
+	ndx = (int)(bsize / sizeof (void *));
 	/*
 	 * The reason it is ndx - 1 everywhere is becasue the last bucket
 	 * pointer is NULL.
 	 */
 	qlt->dmem_buckets = (qlt_dmem_bucket_t **)kmem_zalloc(bsize +
-			((ndx - 1)*sizeof (qlt_dmem_bucket_t)), KM_SLEEP);
+	    ((ndx - 1) * (int)sizeof (qlt_dmem_bucket_t)), KM_SLEEP);
 	for (i = 0; i < (ndx - 1); i++) {
 		qlt->dmem_buckets[i] = (qlt_dmem_bucket_t *)
-			((uint8_t *)qlt->dmem_buckets + bsize +
-					(i*sizeof (qlt_dmem_bucket_t)));
+		    ((uint8_t *)qlt->dmem_buckets + bsize +
+		    (i * (int)sizeof (qlt_dmem_bucket_t)));
 		bcopy(dmem_buckets[i], qlt->dmem_buckets[i],
-					sizeof (qlt_dmem_bucket_t));
+		    sizeof (qlt_dmem_bucket_t));
 	}
 	bzero(&acc, sizeof (acc));
 	acc.devacc_attr_version = DDI_DEVICE_ATTR_V0;
@@ -113,28 +127,38 @@ qlt_dmem_init(qlt_state_t *qlt)
 	acc.devacc_attr_dataorder = DDI_STRICTORDER_ACC;
 	for (ndx = 0; (p = qlt->dmem_buckets[ndx]) != NULL; ndx++) {
 		bctl = (qlt_dmem_bctl_t *)kmem_zalloc(p->dmem_nbufs *
-				sizeof (qlt_dmem_bctl_t), KM_NOSLEEP);
-		if (bctl == NULL)
+		    sizeof (qlt_dmem_bctl_t), KM_NOSLEEP);
+		if (bctl == NULL) {
+			EL(qlt, "bctl==NULL\n");
 			goto alloc_bctl_failed;
+		}
 		p->dmem_bctls_mem = bctl;
 		mutex_init(&p->dmem_lock, NULL, MUTEX_DRIVER, NULL);
-		if (ddi_dma_alloc_handle(qlt->dip, &qlt_scsi_dma_attr,
-		    DDI_DMA_SLEEP, 0, &p->dmem_dma_handle) != DDI_SUCCESS)
+		if ((i = ddi_dma_alloc_handle(qlt->dip, &qlt_scsi_dma_attr,
+		    DDI_DMA_SLEEP, 0, &p->dmem_dma_handle)) != DDI_SUCCESS) {
+			EL(qlt, "ddi_dma_alloc_handle status=%xh\n", i);
 			goto alloc_handle_failed;
+		}
 
 		total_mem = p->dmem_buf_size * p->dmem_nbufs;
 
-		if (ddi_dma_mem_alloc(p->dmem_dma_handle, total_mem, &acc,
+		if ((i = ddi_dma_mem_alloc(p->dmem_dma_handle, total_mem, &acc,
 		    DDI_DMA_STREAMING, DDI_DMA_DONTWAIT, 0, (caddr_t *)&addr,
-		    &len, &p->dmem_acc_handle) != DDI_SUCCESS)
+		    &len, &p->dmem_acc_handle)) != DDI_SUCCESS) {
+			EL(qlt, "ddi_dma_mem_alloc status=%xh\n", i);
 			goto mem_alloc_failed;
+		}
 
-		if (ddi_dma_addr_bind_handle(p->dmem_dma_handle, NULL,
+		if ((i = ddi_dma_addr_bind_handle(p->dmem_dma_handle, NULL,
 		    (caddr_t)addr, total_mem, DDI_DMA_RDWR | DDI_DMA_STREAMING,
-		    DDI_DMA_DONTWAIT, 0, &cookie, &ncookie) != DDI_SUCCESS)
+		    DDI_DMA_DONTWAIT, 0, &cookie, &ncookie)) != DDI_SUCCESS) {
+			EL(qlt, "ddi_dma_addr_bind_handle status=%xh\n", i);
 			goto addr_bind_handle_failed;
-		if (ncookie != 1)
+		}
+		if (ncookie != 1) {
+			EL(qlt, "ncookie=%d\n", ncookie);
 			goto dmem_init_failed;
+		}
 
 		p->dmem_host_addr = host_addr = addr;
 		p->dmem_dev_addr = dev_addr = (uint64_t)cookie.dmac_laddress;
@@ -146,7 +170,7 @@ qlt_dmem_init(qlt_state_t *qlt)
 			prev = bctl;
 			bctl->bctl_bucket = p;
 			bctl->bctl_buf = db = stmf_alloc(STMF_STRUCT_DATA_BUF,
-							0, 0);
+			    0, 0);
 			db->db_port_private = bctl;
 			db->db_sglist[0].seg_addr = host_addr;
 			bctl->bctl_dev_addr = dev_addr;
@@ -209,12 +233,12 @@ qlt_dmem_fini(qlt_state_t *qlt)
 		ddi_dma_mem_free(&p->dmem_acc_handle);
 		ddi_dma_free_handle(&p->dmem_dma_handle);
 		kmem_free(p->dmem_bctls_mem,
-				p->dmem_nbufs * sizeof (qlt_dmem_bctl_t));
+		    p->dmem_nbufs * sizeof (qlt_dmem_bctl_t));
 		mutex_destroy(&p->dmem_lock);
 	}
 	kmem_free(qlt->dmem_buckets, sizeof (dmem_buckets) +
 	    (((sizeof (dmem_buckets)/sizeof (void *))-1)*
-		sizeof (qlt_dmem_bucket_t)));
+	    sizeof (qlt_dmem_bucket_t)));
 	qlt->dmem_buckets = NULL;
 }
 
@@ -232,75 +256,49 @@ stmf_data_buf_t *
 qlt_i_dmem_alloc(qlt_state_t *qlt, uint32_t size, uint32_t *pminsize,
 					uint32_t flags)
 {
-	qlt_dmem_bucket_t *p;
-	qlt_dmem_bctl_t *bctl;
-	int i;
-	uint32_t size_possible = 0;
+	qlt_dmem_bucket_t	*p;
+	qlt_dmem_bctl_t		*bctl;
+	int			i;
 
-	if (size > QLT_DMEM_MAX_BUF_SIZE) {
-		goto qlt_try_partial_alloc;
-	}
+	if ((size <= QLT_DMEM_MAX_BUF_SIZE) && (size > 0)) {
 
-	/* 1st try to do a full allocation */
-	for (i = 0; (p = qlt->dmem_buckets[i]) != NULL; i++) {
-		if ((p->dmem_buf_size >= size) && p->dmem_nbufs_free) {
-			mutex_enter(&p->dmem_lock);
-			bctl = p->dmem_bctl_free_list;
-			if (bctl == NULL) {
-				mutex_exit(&p->dmem_lock);
-				continue;
-			}
-			p->dmem_bctl_free_list = bctl->bctl_next;
-			p->dmem_nbufs_free--;
-			mutex_exit(&p->dmem_lock);
-			bctl->bctl_buf->db_data_size = size;
-			return (bctl->bctl_buf);
-		}
-	}
-
-qlt_try_partial_alloc:
-
-	/* Now go from high to low */
-	for (i = QLT_DMEM_NBUCKETS - 1; i >= 0; i--) {
-		p = qlt->dmem_buckets[i];
-		if (p->dmem_nbufs_free == 0)
-			continue;
-		if (!size_possible) {
-			size_possible = p->dmem_buf_size;
-		}
-		if (*pminsize > p->dmem_buf_size) {
-			/* At this point we know the request is failing. */
-			if (size_possible) {
-				/*
-				 * This caller is asking too much. We already
-				 * know what we can give, so get out.
-				 */
-				break;
-			} else {
-				/*
-				 * Lets continue to find out and tell what
-				 * we can give.
-				 */
-				continue;
+		for (i = 0; (p = qlt->dmem_buckets[i]) != NULL; i++) {
+			if (p->dmem_buf_size >= size) {
+				if (p->dmem_nbufs_free) {
+					mutex_enter(&p->dmem_lock);
+					bctl = p->dmem_bctl_free_list;
+					if (bctl == NULL) {
+						mutex_exit(&p->dmem_lock);
+						continue;
+					}
+					p->dmem_bctl_free_list =
+					    bctl->bctl_next;
+					p->dmem_nbufs_free--;
+					qlt->qlt_bufref[i]++;
+					mutex_exit(&p->dmem_lock);
+					bctl->bctl_buf->db_data_size = size;
+					return (bctl->bctl_buf);
+				} else {
+					qlt->qlt_bumpbucket++;
+				}
 			}
 		}
-		mutex_enter(&p->dmem_lock);
-		if (*pminsize <= p->dmem_buf_size) {
-			bctl = p->dmem_bctl_free_list;
-			if (bctl == NULL) {
-				/* Someone took it. */
-				size_possible = 0;
-				mutex_exit(&p->dmem_lock);
-				continue;
-			}
-			p->dmem_bctl_free_list = bctl->bctl_next;
-			p->dmem_nbufs_free--;
-			mutex_exit(&p->dmem_lock);
-			bctl->bctl_buf->db_data_size = p->dmem_buf_size;
-			return (bctl->bctl_buf);
-		}
 	}
-	*pminsize = size_possible;
+
+	*pminsize = QLT_DMEM_MAX_BUF_SIZE;
+
+	if (size <= 0x800) {
+		qlt->qlt_nullbufref[0]++;
+	} else if (size <= 0x2000) {
+		qlt->qlt_nullbufref[1]++;
+	} else if (size <= 0x10000) {
+		qlt->qlt_nullbufref[2]++;
+	} else if (size <= 0x20000) {
+		qlt->qlt_nullbufref[3]++;
+	} else {
+		qlt->qlt_nullbufref[4]++;
+	}
+
 	return (NULL);
 }
 
@@ -331,7 +329,7 @@ qlt_dmem_dma_sync(stmf_data_buf_t *dbuf, uint_t sync_type)
 	qlt_dmem_bctl_t *bctl = (qlt_dmem_bctl_t *)dbuf->db_port_private;
 	qlt_dmem_bucket_t *p = bctl->bctl_bucket;
 
-	(void) ddi_dma_sync(p->dmem_dma_handle, (unsigned long)
+	(void) ddi_dma_sync(p->dmem_dma_handle, (off_t)
 	    (bctl->bctl_dev_addr - p->dmem_dev_addr),
-		dbuf->db_data_size, sync_type);
+	    dbuf->db_data_size, sync_type);
 }

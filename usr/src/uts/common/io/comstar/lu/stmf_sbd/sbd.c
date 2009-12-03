@@ -51,6 +51,7 @@
 
 extern sbd_status_t sbd_pgr_meta_init(sbd_lu_t *sl);
 extern sbd_status_t sbd_pgr_meta_load(sbd_lu_t *sl);
+extern void sbd_pgr_reset(sbd_lu_t *sl);
 
 static int sbd_getinfo(dev_info_t *dip, ddi_info_cmd_t cmd, void *arg,
     void **result);
@@ -61,12 +62,25 @@ static int sbd_close(dev_t dev, int flag, int otype, cred_t *credp);
 static int stmf_sbd_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
     cred_t *credp, int *rval);
 void sbd_lp_cb(stmf_lu_provider_t *lp, int cmd, void *arg, uint32_t flags);
+stmf_status_t sbd_proxy_reg_lu(uint8_t *luid, void *proxy_reg_arg,
+    uint32_t proxy_reg_arg_len);
+stmf_status_t sbd_proxy_dereg_lu(uint8_t *luid, void *proxy_reg_arg,
+    uint32_t proxy_reg_arg_len);
+stmf_status_t sbd_proxy_msg(uint8_t *luid, void *proxy_arg,
+    uint32_t proxy_arg_len, uint32_t type);
 int sbd_create_register_lu(sbd_create_and_reg_lu_t *slu, int struct_sz,
     uint32_t *err_ret);
+int sbd_create_standby_lu(sbd_create_standby_lu_t *slu, uint32_t *err_ret);
+int sbd_set_lu_standby(sbd_set_lu_standby_t *stlu, uint32_t *err_ret);
 int sbd_import_lu(sbd_import_lu_t *ilu, int struct_sz, uint32_t *err_ret,
     int no_register, sbd_lu_t **slr);
+int sbd_import_active_lu(sbd_import_lu_t *ilu, sbd_lu_t *sl, uint32_t *err_ret);
 int sbd_delete_lu(sbd_delete_lu_t *dlu, int struct_sz, uint32_t *err_ret);
 int sbd_modify_lu(sbd_modify_lu_t *mlu, int struct_sz, uint32_t *err_ret);
+int sbd_set_global_props(sbd_global_props_t *mlu, int struct_sz,
+    uint32_t *err_ret);
+int sbd_get_global_props(sbd_global_props_t *oslp, uint32_t oslp_sz,
+    uint32_t *err_ret);
 int sbd_get_lu_props(sbd_lu_props_t *islp, uint32_t islp_sz,
     sbd_lu_props_t *oslp, uint32_t oslp_sz, uint32_t *err_ret);
 char *sbd_get_zvol_name(sbd_lu_t *sl);
@@ -80,6 +94,7 @@ int sbd_is_zvol(char *path);
 int sbd_zvolget(char *zvol_name, char **comstarprop);
 int sbd_zvolset(char *zvol_name, char *comstarprop);
 char sbd_ctoi(char c);
+void sbd_close_lu(sbd_lu_t *sl);
 
 static ldi_ident_t	sbd_zfs_ident;
 static stmf_lu_provider_t *sbd_lp;
@@ -87,9 +102,15 @@ static sbd_lu_t		*sbd_lu_list = NULL;
 static kmutex_t		sbd_lock;
 static dev_info_t	*sbd_dip;
 static uint32_t		sbd_lu_count = 0;
+
+/* Global property settings for the logical unit */
 char sbd_vendor_id[]	= "SUN     ";
 char sbd_product_id[]	= "COMSTAR         ";
 char sbd_revision[]	= "1.0 ";
+char *sbd_mgmt_url = NULL;
+uint16_t sbd_mgmt_url_alloc_size = 0;
+krwlock_t sbd_global_prop_lock;
+
 static char sbd_name[] = "sbd";
 
 static struct cb_ops sbd_cb_ops = {
@@ -151,10 +172,12 @@ _init(void)
 		return (ret);
 	sbd_lp = (stmf_lu_provider_t *)stmf_alloc(STMF_STRUCT_LU_PROVIDER,
 	    0, 0);
-	sbd_lp->lp_lpif_rev = LPIF_REV_1;
+	sbd_lp->lp_lpif_rev = LPIF_REV_2;
 	sbd_lp->lp_instance = 0;
 	sbd_lp->lp_name = sbd_name;
 	sbd_lp->lp_cb = sbd_lp_cb;
+	sbd_lp->lp_alua_support = 1;
+	sbd_lp->lp_proxy_msg = sbd_proxy_msg;
 	sbd_zfs_ident = ldi_ident_from_anon();
 
 	if (stmf_register_lu_provider(sbd_lp) != STMF_SUCCESS) {
@@ -163,6 +186,7 @@ _init(void)
 		return (EINVAL);
 	}
 	mutex_init(&sbd_lock, NULL, MUTEX_DRIVER, NULL);
+	rw_init(&sbd_global_prop_lock, NULL, RW_DRIVER, NULL);
 	return (0);
 }
 
@@ -209,6 +233,7 @@ _fini(void)
 	}
 	stmf_free(sbd_lp);
 	mutex_destroy(&sbd_lock);
+	rw_destroy(&sbd_global_prop_lock);
 	ldi_ident_release(sbd_zfs_ident);
 	return (0);
 }
@@ -320,6 +345,18 @@ stmf_sbd_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 		    ibuf, iocd->stmf_ibuf_size, &iocd->stmf_error);
 		bcopy(ibuf, obuf, iocd->stmf_obuf_size);
 		break;
+	case SBD_IOCTL_SET_LU_STANDBY:
+		if (iocd->stmf_ibuf_size < sizeof (sbd_set_lu_standby_t)) {
+			ret = EFAULT;
+			break;
+		}
+		if (iocd->stmf_obuf_size) {
+			ret = EINVAL;
+			break;
+		}
+		ret = sbd_set_lu_standby((sbd_set_lu_standby_t *)ibuf,
+		    &iocd->stmf_error);
+		break;
 	case SBD_IOCTL_IMPORT_LU:
 		if (iocd->stmf_ibuf_size <
 		    (sizeof (sbd_import_lu_t) - 8)) {
@@ -358,6 +395,30 @@ stmf_sbd_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 		}
 		ret = sbd_modify_lu((sbd_modify_lu_t *)ibuf,
 		    iocd->stmf_ibuf_size, &iocd->stmf_error);
+		break;
+	case SBD_IOCTL_SET_GLOBAL_LU:
+		if (iocd->stmf_ibuf_size < (sizeof (sbd_global_props_t) - 8)) {
+			ret = EFAULT;
+			break;
+		}
+		if (iocd->stmf_obuf_size) {
+			ret = EINVAL;
+			break;
+		}
+		ret = sbd_set_global_props((sbd_global_props_t *)ibuf,
+		    iocd->stmf_ibuf_size, &iocd->stmf_error);
+		break;
+	case SBD_IOCTL_GET_GLOBAL_LU:
+		if (iocd->stmf_ibuf_size) {
+			ret = EINVAL;
+			break;
+		}
+		if (iocd->stmf_obuf_size < sizeof (sbd_global_props_t)) {
+			ret = EINVAL;
+			break;
+		}
+		ret = sbd_get_global_props((sbd_global_props_t *)obuf,
+		    iocd->stmf_obuf_size, &iocd->stmf_error);
 		break;
 	case SBD_IOCTL_GET_LU_PROPS:
 		if (iocd->stmf_ibuf_size < (sizeof (sbd_lu_props_t) - 8)) {
@@ -592,9 +653,24 @@ sbd_read_meta(sbd_lu_t *sl, uint64_t offset, uint64_t size, uint8_t *buf)
 	io_buf = (uint8_t *)kmem_zalloc(io_size, KM_SLEEP);
 	ASSERT((starting_off + io_size) <= sl->sl_total_meta_size);
 
+	/*
+	 * Don't proceed if the device has been closed
+	 * This can occur on an access state change to standby or
+	 * a delete. The writer lock is acquired before closing the
+	 * lu. If importing, reading the metadata is valid, hence
+	 * the check on SL_OP_IMPORT_LU.
+	 */
+	rw_enter(&sl->sl_access_state_lock, RW_READER);
+	if ((sl->sl_flags & SL_MEDIA_LOADED) == 0 &&
+	    sl->sl_trans_op != SL_OP_IMPORT_LU) {
+		rw_exit(&sl->sl_access_state_lock);
+		ret = SBD_FILEIO_FAILURE;
+		goto sbd_read_meta_failure;
+	}
 	if (sl->sl_flags & SL_ZFS_META) {
 		if ((ret = sbd_read_zfs_meta(sl, io_buf, io_size,
 		    starting_off)) != SBD_SUCCESS) {
+			rw_exit(&sl->sl_access_state_lock);
 			goto sbd_read_meta_failure;
 		}
 	} else {
@@ -604,9 +680,11 @@ sbd_read_meta(sbd_lu_t *sl, uint64_t offset, uint64_t size, uint8_t *buf)
 
 		if (vret || resid) {
 			ret = SBD_FILEIO_FAILURE | vret;
+			rw_exit(&sl->sl_access_state_lock);
 			goto sbd_read_meta_failure;
 		}
 	}
+	rw_exit(&sl->sl_access_state_lock);
 
 	bcopy(io_buf + data_off, buf, size);
 	ret = SBD_SUCCESS;
@@ -652,9 +730,24 @@ sbd_write_meta(sbd_lu_t *sl, uint64_t offset, uint64_t size, uint8_t *buf)
 		goto sbd_write_meta_failure;
 	}
 	bcopy(buf, io_buf + data_off, size);
+	/*
+	 * Don't proceed if the device has been closed
+	 * This can occur on an access state change to standby or
+	 * a delete. The writer lock is acquired before closing the
+	 * lu. If importing, reading the metadata is valid, hence
+	 * the check on SL_OP_IMPORT_LU.
+	 */
+	rw_enter(&sl->sl_access_state_lock, RW_READER);
+	if ((sl->sl_flags & SL_MEDIA_LOADED) == 0 &&
+	    sl->sl_trans_op != SL_OP_IMPORT_LU) {
+		rw_exit(&sl->sl_access_state_lock);
+		ret = SBD_FILEIO_FAILURE;
+		goto sbd_write_meta_failure;
+	}
 	if (sl->sl_flags & SL_ZFS_META) {
 		if ((ret = sbd_write_zfs_meta(sl, io_buf, io_size,
 		    starting_off)) != SBD_SUCCESS) {
+			rw_exit(&sl->sl_access_state_lock);
 			goto sbd_write_meta_failure;
 		}
 	} else {
@@ -664,9 +757,11 @@ sbd_write_meta(sbd_lu_t *sl, uint64_t offset, uint64_t size, uint8_t *buf)
 
 		if (vret || resid) {
 			ret = SBD_FILEIO_FAILURE | vret;
+			rw_exit(&sl->sl_access_state_lock);
 			goto sbd_write_meta_failure;
 		}
 	}
+	rw_exit(&sl->sl_access_state_lock);
 
 	ret = SBD_SUCCESS;
 
@@ -763,9 +858,10 @@ sbd_swap_lu_info_1_1(sbd_lu_info_1_1_t *sli)
 	sli->sli_flags			= BSWAP_32(sli->sli_flags);
 	sli->sli_lu_size		= BSWAP_64(sli->sli_lu_size);
 	sli->sli_meta_fname_offset	= BSWAP_64(sli->sli_meta_fname_offset);
-	sli->sli_data_fname_offset	= BSWAP_16(sli->sli_data_fname_offset);
-	sli->sli_serial_offset		= BSWAP_16(sli->sli_serial_offset);
-	sli->sli_alias_offset		= BSWAP_16(sli->sli_alias_offset);
+	sli->sli_data_fname_offset	= BSWAP_64(sli->sli_data_fname_offset);
+	sli->sli_serial_offset		= BSWAP_64(sli->sli_serial_offset);
+	sli->sli_alias_offset		= BSWAP_64(sli->sli_alias_offset);
+	sli->sli_mgmt_url_offset	= BSWAP_64(sli->sli_mgmt_url_offset);
 }
 
 sbd_status_t
@@ -870,10 +966,12 @@ sbd_read_meta_section(sbd_lu_t *sl, sm_section_hdr_t **ppsms, uint16_t sms_id)
 	sm_section_hdr_t sms;
 	int alloced = 0;
 
+	mutex_enter(&sl->sl_metadata_lock);
 	if (((*ppsms) == NULL) || ((*ppsms)->sms_offset == 0)) {
 		bzero(&sms, sizeof (sm_section_hdr_t));
 		sms.sms_id = sms_id;
 		if ((ret = sbd_load_section_hdr(sl, &sms)) != SBD_SUCCESS) {
+			mutex_exit(&sl->sl_metadata_lock);
 			return (ret);
 		} else {
 			if ((*ppsms) == NULL) {
@@ -897,10 +995,31 @@ sbd_read_meta_section(sbd_lu_t *sl, sm_section_hdr_t **ppsms, uint16_t sms_id)
 				ret = SBD_META_CORRUPTED;
 		}
 	}
+	mutex_exit(&sl->sl_metadata_lock);
 
 	if ((ret != SBD_SUCCESS) && alloced)
 		kmem_free(*ppsms, sms.sms_size);
 	return (ret);
+}
+
+sbd_status_t
+sbd_load_section_hdr_unbuffered(sbd_lu_t *sl, sm_section_hdr_t *sms)
+{
+	sbd_status_t	ret;
+
+	/*
+	 * Bypass buffering and re-read the meta data from permanent storage.
+	 */
+	if (sl->sl_flags & SL_ZFS_META) {
+		if ((ret = sbd_open_zfs_meta(sl)) != SBD_SUCCESS) {
+			return (ret);
+		}
+	}
+	/* Re-get the meta sizes into sl */
+	if ((ret = sbd_load_meta_start(sl)) != SBD_SUCCESS) {
+		return (ret);
+	}
+	return (sbd_load_section_hdr(sl, sms));
 }
 
 sbd_status_t
@@ -910,26 +1029,41 @@ sbd_write_meta_section(sbd_lu_t *sl, sm_section_hdr_t *sms)
 	uint64_t off, s;
 	uint64_t unused_start;
 	sbd_status_t ret;
+	sbd_status_t write_meta_ret = SBD_SUCCESS;
 	uint8_t *cb;
-	int update_meta_start = 0;
+	int meta_size_changed = 0;
+	sm_section_hdr_t sms_before_unused = {0};
 
+	mutex_enter(&sl->sl_metadata_lock);
 write_meta_section_again:
 	if (sms->sms_offset) {
-		/* Verify that size has not changed */
+		/*
+		 * If the section already exists and the size is the
+		 * same as this new data then overwrite in place. If
+		 * the sizes are different then mark the existing as
+		 * unused and look for free space.
+		 */
 		ret = sbd_read_meta(sl, sms->sms_offset, sizeof (t),
 		    (uint8_t *)&t);
-		if (ret != SBD_SUCCESS)
+		if (ret != SBD_SUCCESS) {
+			mutex_exit(&sl->sl_metadata_lock);
 			return (ret);
+		}
 		if (t.sms_data_order != SMS_DATA_ORDER) {
 			sbd_swap_section_hdr(&t);
 		}
 		if (t.sms_id != sms->sms_id) {
+			mutex_exit(&sl->sl_metadata_lock);
 			return (SBD_INVALID_ARG);
 		}
 		if (t.sms_size == sms->sms_size) {
-			return (sbd_write_meta(sl, sms->sms_offset,
-			    sms->sms_size, (uint8_t *)sms));
+			ret = sbd_write_meta(sl, sms->sms_offset,
+			    sms->sms_size, (uint8_t *)sms);
+			mutex_exit(&sl->sl_metadata_lock);
+			return (ret);
 		}
+		sms_before_unused = t;
+
 		t.sms_id = SMS_ID_UNUSED;
 		/*
 		 * For unused sections we only use chksum of the header. for
@@ -938,10 +1072,13 @@ write_meta_section_again:
 		t.sms_chksum = sbd_calc_section_sum(&t, sizeof (t));
 		ret = sbd_write_meta(sl, t.sms_offset, sizeof (t),
 		    (uint8_t *)&t);
-		if (ret != SBD_SUCCESS)
+		if (ret != SBD_SUCCESS) {
+			mutex_exit(&sl->sl_metadata_lock);
 			return (ret);
+		}
 		sms->sms_offset = 0;
 	} else {
+		/* Section location is unknown, search for it. */
 		t.sms_id = sms->sms_id;
 		t.sms_data_order = SMS_DATA_ORDER;
 		ret = sbd_load_section_hdr(sl, &t);
@@ -951,29 +1088,44 @@ write_meta_section_again:
 			    sbd_calc_section_sum(sms, sms->sms_size);
 			goto write_meta_section_again;
 		} else if (ret != SBD_NOT_FOUND) {
+			mutex_exit(&sl->sl_metadata_lock);
 			return (ret);
 		}
 	}
 
 	/*
 	 * At this point we know that section does not already exist.
-	 * find space large enough to hold the section or grow meta if
+	 * Find space large enough to hold the section or grow meta if
 	 * possible.
 	 */
 	unused_start = 0;
-	s = 0;
+	s = 0;	/* size of space found */
+
+	/*
+	 * Search all sections for unused space of sufficient size.
+	 * The first one found is taken. Contiguous unused sections
+	 * will be combined.
+	 */
 	for (off = sl->sl_meta_offset + sizeof (sbd_meta_start_t);
 	    off < sl->sl_meta_size_used; off += t.sms_size) {
 		ret = sbd_read_meta(sl, off, sizeof (t), (uint8_t *)&t);
-		if (ret != SBD_SUCCESS)
+		if (ret != SBD_SUCCESS) {
+			mutex_exit(&sl->sl_metadata_lock);
 			return (ret);
+		}
 		if (t.sms_data_order != SMS_DATA_ORDER)
 			sbd_swap_section_hdr(&t);
-		if (t.sms_size == 0)
+		if (t.sms_size == 0) {
+			mutex_exit(&sl->sl_metadata_lock);
 			return (SBD_META_CORRUPTED);
+		}
 		if (t.sms_id == SMS_ID_UNUSED) {
 			if (unused_start == 0)
 				unused_start = off;
+			/*
+			 * Calculate size of the unused space, break out
+			 * if it satisfies the requirement.
+			 */
 			s = t.sms_size - unused_start + off;
 			if ((s == sms->sms_size) || (s >= (sms->sms_size +
 			    sizeof (t)))) {
@@ -987,19 +1139,24 @@ write_meta_section_again:
 	}
 
 	off = (unused_start == 0) ? sl->sl_meta_size_used : unused_start;
+	/*
+	 * If none found, how much room is at the end?
+	 * See if the data can be expanded.
+	 */
 	if (s == 0) {
 		s = sl->sl_total_meta_size - off;
-		/* Lets see if we can expand the metadata */
 		if (s >= sms->sms_size || !(sl->sl_flags & SL_SHARED_META)) {
 			s = sms->sms_size;
-			update_meta_start = 1;
+			meta_size_changed = 1;
 		} else {
 			s = 0;
 		}
 	}
 
-	if (s == 0)
+	if (s == 0) {
+		mutex_exit(&sl->sl_metadata_lock);
 		return (SBD_ALLOC_FAILURE);
+	}
 
 	sms->sms_offset = off;
 	sms->sms_chksum = sbd_calc_section_sum(sms, sms->sms_size);
@@ -1017,27 +1174,98 @@ write_meta_section_again:
 		t.sms_chksum = sbd_calc_section_sum(&t, sizeof (t));
 		bcopy(&t, cb + sms->sms_size, sizeof (t));
 	}
-	ret = sbd_write_meta(sl, off, s, cb);
-	kmem_free(cb, s);
-	if (ret != SBD_SUCCESS)
-		return (ret);
-
-	if (update_meta_start) {
+	/*
+	 * Two write events & statuses take place. Failure writing the
+	 * meta section takes precedence, can possibly be rolled back,
+	 * & gets reported. Else return status from writing the meta start.
+	 */
+	ret = SBD_SUCCESS; /* Set a default, it's not always loaded below. */
+	if (meta_size_changed) {
+		uint64_t old_meta_size;
 		uint64_t old_sz_used = sl->sl_meta_size_used; /* save a copy */
-		sl->sl_meta_size_used = off + s;
-		s = sl->sl_total_meta_size; /* save a copy */
-		if (sl->sl_total_meta_size < sl->sl_meta_size_used) {
-			uint64_t meta_align =
-			    (((uint64_t)1) << sl->sl_meta_blocksize_shift) - 1;
-			sl->sl_total_meta_size = (sl->sl_meta_size_used +
-			    meta_align) & (~meta_align);
-		}
-		ret = sbd_write_meta_start(sl, sl->sl_total_meta_size,
-		    sl->sl_meta_size_used);
-		if (ret != SBD_SUCCESS) {
+		old_meta_size = sl->sl_total_meta_size; /* save a copy */
+
+		write_meta_ret = sbd_write_meta(sl, off, s, cb);
+		if (write_meta_ret == SBD_SUCCESS) {
+			sl->sl_meta_size_used = off + s;
+			if (sl->sl_total_meta_size < sl->sl_meta_size_used) {
+				uint64_t meta_align =
+				    (((uint64_t)1) <<
+				    sl->sl_meta_blocksize_shift) - 1;
+				sl->sl_total_meta_size =
+				    (sl->sl_meta_size_used + meta_align) &
+				    (~meta_align);
+			}
+			ret = sbd_write_meta_start(sl, sl->sl_total_meta_size,
+			    sl->sl_meta_size_used);
+			if (ret != SBD_SUCCESS) {
+				sl->sl_meta_size_used = old_sz_used;
+				sl->sl_total_meta_size = old_meta_size;
+			}
+		} else {
 			sl->sl_meta_size_used = old_sz_used;
-			sl->sl_total_meta_size = s;
+			sl->sl_total_meta_size = old_meta_size;
 		}
+	} else {
+		write_meta_ret = sbd_write_meta(sl, off, s, cb);
+	}
+	if ((write_meta_ret != SBD_SUCCESS) &&
+	    (sms_before_unused.sms_offset != 0)) {
+		sm_section_hdr_t new_sms;
+		sm_section_hdr_t *unused_sms;
+		/*
+		 * On failure writing the meta section attempt to undo
+		 * the change to unused.
+		 * Re-read the meta data from permanent storage.
+		 * The section id can't exist for undo to be possible.
+		 * Read what should be the entire old section data and
+		 * insure the old data's still present by validating
+		 * against it's old checksum.
+		 */
+		new_sms.sms_id = sms->sms_id;
+		new_sms.sms_data_order = SMS_DATA_ORDER;
+		if (sbd_load_section_hdr_unbuffered(sl, &new_sms) !=
+		    SBD_NOT_FOUND) {
+			goto done;
+		}
+		unused_sms = kmem_zalloc(sms_before_unused.sms_size, KM_SLEEP);
+		if (sbd_read_meta(sl, sms_before_unused.sms_offset,
+		    sms_before_unused.sms_size,
+		    (uint8_t *)unused_sms) != SBD_SUCCESS) {
+			goto done;
+		}
+		if (unused_sms->sms_data_order != SMS_DATA_ORDER) {
+			sbd_swap_section_hdr(unused_sms);
+		}
+		if (unused_sms->sms_id != SMS_ID_UNUSED) {
+			goto done;
+		}
+		if (unused_sms->sms_offset != sms_before_unused.sms_offset) {
+			goto done;
+		}
+		if (unused_sms->sms_size != sms_before_unused.sms_size) {
+			goto done;
+		}
+		unused_sms->sms_id = sms_before_unused.sms_id;
+		if (sbd_calc_section_sum(unused_sms,
+		    sizeof (sm_section_hdr_t)) !=
+		    sbd_calc_section_sum(&sms_before_unused,
+		    sizeof (sm_section_hdr_t))) {
+			goto done;
+		}
+		unused_sms->sms_chksum =
+		    sbd_calc_section_sum(unused_sms, unused_sms->sms_size);
+		if (unused_sms->sms_chksum != sms_before_unused.sms_chksum) {
+			goto done;
+		}
+		(void) sbd_write_meta(sl, unused_sms->sms_offset,
+		    sizeof (sm_section_hdr_t), (uint8_t *)unused_sms);
+	}
+done:
+	mutex_exit(&sl->sl_metadata_lock);
+	kmem_free(cb, s);
+	if (write_meta_ret != SBD_SUCCESS) {
+		return (write_meta_ret);
 	}
 	return (ret);
 }
@@ -1154,6 +1382,22 @@ sbd_populate_and_register_lu(sbd_lu_t *sl, uint32_t *err_ret)
 		lu->lu_alias = sl->sl_alias;
 	} else {
 		lu->lu_alias = sl->sl_name;
+	}
+	if (sl->sl_access_state == SBD_LU_STANDBY) {
+		/* call set access state */
+		ret = stmf_set_lu_access(lu, STMF_LU_STANDBY);
+		if (ret != STMF_SUCCESS) {
+			*err_ret = SBD_RET_ACCESS_STATE_FAILED;
+			return (EIO);
+		}
+	}
+	/* set proxy_reg_cb_arg to meta filename */
+	if (sl->sl_meta_filename) {
+		lu->lu_proxy_reg_arg = sl->sl_meta_filename;
+		lu->lu_proxy_reg_arg_len = strlen(sl->sl_meta_filename) + 1;
+	} else {
+		lu->lu_proxy_reg_arg = sl->sl_data_filename;
+		lu->lu_proxy_reg_arg_len = strlen(sl->sl_data_filename) + 1;
 	}
 	lu->lu_lp = sbd_lp;
 	lu->lu_task_alloc = sbd_task_alloc;
@@ -1302,8 +1546,8 @@ odf_close_data_and_exit:
 	return (ret);
 }
 
-int
-sbd_close_delete_lu(sbd_lu_t *sl, int ret)
+void
+sbd_close_lu(sbd_lu_t *sl)
 {
 	int flag;
 
@@ -1313,6 +1557,7 @@ sbd_close_delete_lu(sbd_lu_t *sl, int ret)
 			rw_destroy(&sl->sl_zfs_meta_lock);
 			if (sl->sl_zfs_meta) {
 				kmem_free(sl->sl_zfs_meta, ZAP_MAXVALUELEN / 2);
+				sl->sl_zfs_meta = NULL;
 			}
 		} else {
 			flag = FREAD | FWRITE | FOFFMAX | FEXCL;
@@ -1335,10 +1580,68 @@ sbd_close_delete_lu(sbd_lu_t *sl, int ret)
 			sl->sl_flags &= ~SL_META_OPENED;
 		}
 	}
+}
+
+int
+sbd_set_lu_standby(sbd_set_lu_standby_t *stlu, uint32_t *err_ret)
+{
+	sbd_lu_t *sl;
+	sbd_status_t sret;
+	stmf_status_t stret;
+
+	sret = sbd_find_and_lock_lu(stlu->stlu_guid, NULL,
+	    SL_OP_MODIFY_LU, &sl);
+	if (sret != SBD_SUCCESS) {
+		if (sret == SBD_BUSY) {
+			*err_ret = SBD_RET_LU_BUSY;
+			return (EBUSY);
+		} else if (sret == SBD_NOT_FOUND) {
+			*err_ret = SBD_RET_NOT_FOUND;
+			return (ENOENT);
+		}
+		*err_ret = SBD_RET_ACCESS_STATE_FAILED;
+		return (EIO);
+	}
+
+	sl->sl_access_state = SBD_LU_TRANSITION_TO_STANDBY;
+	stret = stmf_set_lu_access((stmf_lu_t *)sl->sl_lu, STMF_LU_STANDBY);
+	if (stret != STMF_SUCCESS) {
+		sl->sl_trans_op = SL_OP_NONE;
+		*err_ret = SBD_RET_ACCESS_STATE_FAILED;
+		sl->sl_access_state = SBD_LU_TRANSITION_TO_STANDBY;
+		return (EIO);
+	}
+
+	/*
+	 * acquire the writer lock here to ensure we're not pulling
+	 * the rug from the vn_rdwr to the backing store
+	 */
+	rw_enter(&sl->sl_access_state_lock, RW_WRITER);
+	sbd_close_lu(sl);
+	rw_exit(&sl->sl_access_state_lock);
+
+	sl->sl_trans_op = SL_OP_NONE;
+	return (0);
+}
+
+int
+sbd_close_delete_lu(sbd_lu_t *sl, int ret)
+{
+
+	/*
+	 * acquire the writer lock here to ensure we're not pulling
+	 * the rug from the vn_rdwr to the backing store
+	 */
+	rw_enter(&sl->sl_access_state_lock, RW_WRITER);
+	sbd_close_lu(sl);
+	rw_exit(&sl->sl_access_state_lock);
+
 	if (sl->sl_flags & SL_LINKED)
 		sbd_unlink_lu(sl);
+	mutex_destroy(&sl->sl_metadata_lock);
 	mutex_destroy(&sl->sl_lock);
 	rw_destroy(&sl->sl_pgr->pgr_lock);
+	rw_destroy(&sl->sl_access_state_lock);
 	if (sl->sl_serial_no_alloc_size) {
 		kmem_free(sl->sl_serial_no, sl->sl_serial_no_alloc_size);
 	}
@@ -1369,6 +1672,7 @@ sbd_create_register_lu(sbd_create_and_reg_lu_t *slu, int struct_sz,
 	int ret = EIO;
 	int flag;
 	int wcd = 0;
+	uint32_t hid = 0;
 	enum vtype vt;
 
 	sz = struct_sz - sizeof (sbd_create_and_reg_lu_t) + 8 + 1;
@@ -1419,11 +1723,14 @@ sbd_create_register_lu(sbd_create_and_reg_lu_t *slu, int struct_sz,
 	sl->sl_pgr = (sbd_pgr_t *)(sl + 1);
 	rw_init(&sl->sl_pgr->pgr_lock, NULL, RW_DRIVER, NULL);
 	mutex_init(&sl->sl_lock, NULL, MUTEX_DRIVER, NULL);
+	mutex_init(&sl->sl_metadata_lock, NULL, MUTEX_DRIVER, NULL);
+	rw_init(&sl->sl_access_state_lock, NULL, RW_DRIVER, NULL);
 	p = ((char *)sl) + sizeof (sbd_lu_t) + sizeof (sbd_pgr_t);
 	sl->sl_data_filename = p;
 	(void) strcpy(sl->sl_data_filename, namebuf + slu->slu_data_fname_off);
 	p += strlen(sl->sl_data_filename) + 1;
 	sl->sl_meta_offset = SBD_META_OFFSET;
+	sl->sl_access_state = SBD_LU_ACTIVE;
 	if (slu->slu_meta_fname_valid) {
 		sl->sl_alias = sl->sl_name = sl->sl_meta_filename = p;
 		(void) strcpy(sl->sl_meta_filename, namebuf +
@@ -1595,9 +1902,11 @@ over_meta_open:
 		sl->sl_device_id[2] = 0;
 		bcopy(slu->slu_guid, sl->sl_device_id + 4, 16);
 	} else {
+		if (slu->slu_host_id_valid)
+			hid = slu->slu_host_id;
 		if (!slu->slu_company_id_valid)
 			slu->slu_company_id = COMPANY_ID_SUN;
-		if (stmf_scsilib_uniq_lu_id(slu->slu_company_id,
+		if (stmf_scsilib_uniq_lu_id2(slu->slu_company_id, hid,
 		    (scsi_devid_desc_t *)&sl->sl_device_id[0]) !=
 		    STMF_SUCCESS) {
 			*err_ret = SBD_RET_META_CREATION_FAILED;
@@ -1608,12 +1917,15 @@ over_meta_open:
 	}
 
 	/* Lets create the meta now */
+	mutex_enter(&sl->sl_metadata_lock);
 	if (sbd_write_meta_start(sl, sl->sl_total_meta_size,
 	    sizeof (sbd_meta_start_t)) != SBD_SUCCESS) {
+		mutex_exit(&sl->sl_metadata_lock);
 		*err_ret = SBD_RET_META_CREATION_FAILED;
 		ret = EIO;
 		goto scm_err_out;
 	}
+	mutex_exit(&sl->sl_metadata_lock);
 	sl->sl_meta_size_used = sl->sl_meta_offset + sizeof (sbd_meta_start_t);
 
 	if (sbd_write_lu_info(sl) != SBD_SUCCESS) {
@@ -1638,6 +1950,180 @@ over_meta_open:
 	return (0);
 
 scm_err_out:
+	return (sbd_close_delete_lu(sl, ret));
+}
+
+stmf_status_t
+sbd_proxy_msg(uint8_t *luid, void *proxy_arg, uint32_t proxy_arg_len,
+    uint32_t type)
+{
+	switch (type) {
+		case STMF_MSG_LU_ACTIVE:
+			return (sbd_proxy_reg_lu(luid, proxy_arg,
+			    proxy_arg_len));
+		case STMF_MSG_LU_REGISTER:
+			return (sbd_proxy_reg_lu(luid, proxy_arg,
+			    proxy_arg_len));
+		case STMF_MSG_LU_DEREGISTER:
+			return (sbd_proxy_dereg_lu(luid, proxy_arg,
+			    proxy_arg_len));
+		default:
+			return (STMF_INVALID_ARG);
+	}
+}
+
+
+/*
+ * register a standby logical unit
+ * proxy_reg_arg contains the meta filename
+ */
+stmf_status_t
+sbd_proxy_reg_lu(uint8_t *luid, void *proxy_reg_arg, uint32_t proxy_reg_arg_len)
+{
+	sbd_lu_t *sl;
+	sbd_status_t sret;
+	sbd_create_standby_lu_t *stlu;
+	int alloc_sz;
+	uint32_t err_ret = 0;
+	stmf_status_t stret = STMF_SUCCESS;
+
+	if (luid == NULL) {
+		return (STMF_INVALID_ARG);
+	}
+
+	do {
+		sret = sbd_find_and_lock_lu(luid, NULL, SL_OP_MODIFY_LU, &sl);
+	} while (sret == SBD_BUSY);
+
+	if (sret == SBD_NOT_FOUND) {
+		alloc_sz = sizeof (*stlu) + proxy_reg_arg_len - 8;
+		stlu = (sbd_create_standby_lu_t *)kmem_zalloc(alloc_sz,
+		    KM_SLEEP);
+		bcopy(luid, stlu->stlu_guid, 16);
+		if (proxy_reg_arg_len) {
+			bcopy(proxy_reg_arg, stlu->stlu_meta_fname,
+			    proxy_reg_arg_len);
+			stlu->stlu_meta_fname_size = proxy_reg_arg_len;
+		}
+		if (sbd_create_standby_lu(stlu, &err_ret) != 0) {
+			cmn_err(CE_WARN,
+			    "Unable to create standby logical unit for %s",
+			    stlu->stlu_meta_fname);
+			stret = STMF_FAILURE;
+		}
+		kmem_free(stlu, alloc_sz);
+		return (stret);
+	} else if (sret == SBD_SUCCESS) {
+		/*
+		 * if the lu is already registered, then the lu should now
+		 * be in standby mode
+		 */
+		sbd_it_data_t *it;
+		if (sl->sl_access_state != SBD_LU_STANDBY) {
+			mutex_enter(&sl->sl_lock);
+			sl->sl_access_state = SBD_LU_STANDBY;
+			for (it = sl->sl_it_list; it != NULL;
+			    it = it->sbd_it_next) {
+				it->sbd_it_ua_conditions |=
+				    SBD_UA_ASYMMETRIC_ACCESS_CHANGED;
+				it->sbd_it_flags &=
+				    ~SBD_IT_HAS_SCSI2_RESERVATION;
+				sl->sl_flags &= ~SL_LU_HAS_SCSI2_RESERVATION;
+			}
+			mutex_exit(&sl->sl_lock);
+			sbd_pgr_reset(sl);
+		}
+		sl->sl_trans_op = SL_OP_NONE;
+	} else {
+		cmn_err(CE_WARN, "could not find and lock logical unit");
+		stret = STMF_FAILURE;
+	}
+out:
+	return (stret);
+}
+
+/* ARGSUSED */
+stmf_status_t
+sbd_proxy_dereg_lu(uint8_t *luid, void *proxy_reg_arg,
+    uint32_t proxy_reg_arg_len)
+{
+	sbd_delete_lu_t dlu = {0};
+	uint32_t err_ret;
+
+	if (luid == NULL) {
+		cmn_err(CE_WARN, "de-register lu request had null luid");
+		return (STMF_INVALID_ARG);
+	}
+
+	bcopy(luid, &dlu.dlu_guid, 16);
+
+	if (sbd_delete_lu(&dlu, (int)sizeof (dlu), &err_ret) != 0) {
+		cmn_err(CE_WARN, "failed to delete de-register lu request");
+		return (STMF_FAILURE);
+	}
+
+	return (STMF_SUCCESS);
+}
+
+int
+sbd_create_standby_lu(sbd_create_standby_lu_t *slu, uint32_t *err_ret)
+{
+	sbd_lu_t *sl;
+	stmf_lu_t *lu;
+	int ret = EIO;
+	int alloc_sz;
+
+	alloc_sz = sizeof (sbd_lu_t) + sizeof (sbd_pgr_t) +
+	    slu->stlu_meta_fname_size;
+	lu = (stmf_lu_t *)stmf_alloc(STMF_STRUCT_STMF_LU, alloc_sz, 0);
+	if (lu == NULL) {
+		return (ENOMEM);
+	}
+	sl = (sbd_lu_t *)lu->lu_provider_private;
+	bzero(sl, alloc_sz);
+	sl->sl_lu = lu;
+	sl->sl_alloc_size = alloc_sz;
+
+	sl->sl_pgr = (sbd_pgr_t *)(sl + 1);
+	sl->sl_meta_filename = ((char *)sl) + sizeof (sbd_lu_t) +
+	    sizeof (sbd_pgr_t);
+
+	if (slu->stlu_meta_fname_size > 0) {
+		(void) strcpy(sl->sl_meta_filename, slu->stlu_meta_fname);
+	}
+	sl->sl_name = sl->sl_meta_filename;
+
+	sl->sl_device_id[3] = 16;
+	sl->sl_device_id[0] = 0xf1;
+	sl->sl_device_id[1] = 3;
+	sl->sl_device_id[2] = 0;
+	bcopy(slu->stlu_guid, sl->sl_device_id + 4, 16);
+	lu->lu_id = (scsi_devid_desc_t *)sl->sl_device_id;
+	sl->sl_access_state = SBD_LU_STANDBY;
+
+	rw_init(&sl->sl_pgr->pgr_lock, NULL, RW_DRIVER, NULL);
+	mutex_init(&sl->sl_lock, NULL, MUTEX_DRIVER, NULL);
+	mutex_init(&sl->sl_metadata_lock, NULL, MUTEX_DRIVER, NULL);
+	rw_init(&sl->sl_access_state_lock, NULL, RW_DRIVER, NULL);
+
+	sl->sl_trans_op = SL_OP_CREATE_REGISTER_LU;
+
+	if (sbd_link_lu(sl) != SBD_SUCCESS) {
+		*err_ret = SBD_RET_FILE_ALREADY_REGISTERED;
+		ret = EALREADY;
+		goto scs_err_out;
+	}
+
+	ret = sbd_populate_and_register_lu(sl, err_ret);
+	if (ret) {
+		goto scs_err_out;
+	}
+
+	sl->sl_trans_op = SL_OP_NONE;
+	atomic_add_32(&sbd_lu_count, 1);
+	return (0);
+
+scs_err_out:
 	return (sbd_close_delete_lu(sl, ret));
 }
 
@@ -1683,35 +2169,88 @@ sbd_import_lu(sbd_import_lu_t *ilu, int struct_sz, uint32_t *err_ret,
 	sbd_lu_info_1_1_t *sli = NULL;
 	int asz;
 	int ret = 0;
+	stmf_status_t stret;
 	int flag;
 	int wcd = 0;
 	int data_opened;
 	uint16_t sli_buf_sz;
 	uint8_t *sli_buf_copy = NULL;
 	enum vtype vt;
+	int standby = 0;
 	sbd_status_t sret;
 
 	if (no_register && slr == NULL) {
 		return (EINVAL);
 	}
 	ilu->ilu_meta_fname[struct_sz - sizeof (*ilu) + 8 - 1] = 0;
-	asz = strlen(ilu->ilu_meta_fname) + 1;
+	/*
+	 * check whether logical unit is already registered ALUA
+	 * For a standby logical unit, the meta filename is set. Use
+	 * that to search for an existing logical unit.
+	 */
+	sret = sbd_find_and_lock_lu(NULL, (uint8_t *)&(ilu->ilu_meta_fname),
+	    SL_OP_IMPORT_LU, &sl);
 
-	lu = (stmf_lu_t *)stmf_alloc(STMF_STRUCT_STMF_LU,
-	    sizeof (sbd_lu_t) + sizeof (sbd_pgr_t) + asz, 0);
-	if (lu == NULL) {
-		return (ENOMEM);
+	if (sret == SBD_SUCCESS) {
+		if (sl->sl_access_state != SBD_LU_ACTIVE) {
+			no_register = 1;
+			standby = 1;
+			lu = sl->sl_lu;
+			if (sl->sl_alias_alloc_size) {
+				kmem_free(sl->sl_alias,
+				    sl->sl_alias_alloc_size);
+				sl->sl_alias_alloc_size = 0;
+				sl->sl_alias = NULL;
+				lu->lu_alias = NULL;
+			}
+			if (sl->sl_meta_filename == NULL) {
+				sl->sl_meta_filename = sl->sl_data_filename;
+			} else if (sl->sl_data_fname_alloc_size) {
+				kmem_free(sl->sl_data_filename,
+				    sl->sl_data_fname_alloc_size);
+				sl->sl_data_fname_alloc_size = 0;
+			}
+			if (sl->sl_serial_no_alloc_size) {
+				kmem_free(sl->sl_serial_no,
+				    sl->sl_serial_no_alloc_size);
+				sl->sl_serial_no_alloc_size = 0;
+			}
+			if (sl->sl_mgmt_url_alloc_size) {
+				kmem_free(sl->sl_mgmt_url,
+				    sl->sl_mgmt_url_alloc_size);
+				sl->sl_mgmt_url_alloc_size = 0;
+			}
+		} else {
+			*err_ret = SBD_RET_FILE_ALREADY_REGISTERED;
+			sl->sl_trans_op = SL_OP_NONE;
+			return (EALREADY);
+		}
+	} else if (sret == SBD_NOT_FOUND) {
+		asz = strlen(ilu->ilu_meta_fname) + 1;
+
+		lu = (stmf_lu_t *)stmf_alloc(STMF_STRUCT_STMF_LU,
+		    sizeof (sbd_lu_t) + sizeof (sbd_pgr_t) + asz, 0);
+		if (lu == NULL) {
+			return (ENOMEM);
+		}
+		sl = (sbd_lu_t *)lu->lu_provider_private;
+		bzero(sl, sizeof (*sl));
+		sl->sl_lu = lu;
+		sl->sl_pgr = (sbd_pgr_t *)(sl + 1);
+		sl->sl_meta_filename = ((char *)sl) + sizeof (*sl) +
+		    sizeof (sbd_pgr_t);
+		(void) strcpy(sl->sl_meta_filename, ilu->ilu_meta_fname);
+		sl->sl_name = sl->sl_meta_filename;
+		rw_init(&sl->sl_pgr->pgr_lock, NULL, RW_DRIVER, NULL);
+		rw_init(&sl->sl_access_state_lock, NULL, RW_DRIVER, NULL);
+		mutex_init(&sl->sl_lock, NULL, MUTEX_DRIVER, NULL);
+		mutex_init(&sl->sl_metadata_lock, NULL, MUTEX_DRIVER, NULL);
+		sl->sl_trans_op = SL_OP_IMPORT_LU;
+	} else {
+		*err_ret = SBD_RET_META_FILE_LOOKUP_FAILED;
+		return (EIO);
 	}
-	sl = (sbd_lu_t *)lu->lu_provider_private;
-	bzero(sl, sizeof (*sl));
-	sl->sl_lu = lu;
-	sl->sl_pgr = (sbd_pgr_t *)(sl + 1);
-	sl->sl_meta_filename = ((char *)sl) + sizeof (*sl) + sizeof (sbd_pgr_t);
-	(void) strcpy(sl->sl_meta_filename, ilu->ilu_meta_fname);
-	sl->sl_name = sl->sl_meta_filename;
-	rw_init(&sl->sl_pgr->pgr_lock, NULL, RW_DRIVER, NULL);
-	mutex_init(&sl->sl_lock, NULL, MUTEX_DRIVER, NULL);
-	sl->sl_trans_op = SL_OP_IMPORT_LU;
+
 	/* we're only loading the metadata */
 	if (!no_register) {
 		if (sbd_link_lu(sl) != SBD_SUCCESS) {
@@ -1759,7 +2298,9 @@ sbd_import_lu(sbd_import_lu_t *ilu, int struct_sz, uint32_t *err_ret,
 	sl->sl_meta_offset = (sl->sl_flags & SL_ZFS_META) ? 0 : SBD_META_OFFSET;
 	sl->sl_flags |= SL_META_OPENED;
 
+	mutex_enter(&sl->sl_metadata_lock);
 	sret = sbd_load_meta_start(sl);
+	mutex_exit(&sl->sl_metadata_lock);
 	if (sret != SBD_SUCCESS) {
 		if (sret == SBD_META_CORRUPTED) {
 			*err_ret = SBD_RET_NO_META;
@@ -1777,8 +2318,9 @@ sbd_import_lu(sbd_import_lu_t *ilu, int struct_sz, uint32_t *err_ret,
 	    SMS_ID_LU_INFO_1_1);
 	if ((sret == SBD_NOT_FOUND) && ((sl->sl_flags & SL_ZFS_META) == 0)) {
 		ret = sbd_load_sli_1_0(sl, err_ret);
-		if (ret)
+		if (ret) {
 			goto sim_err_out;
+		}
 		goto sim_sli_loaded;
 	}
 	if (sret != SBD_SUCCESS) {
@@ -1818,30 +2360,6 @@ sbd_import_lu(sbd_import_lu_t *ilu, int struct_sz, uint32_t *err_ret,
 		goto sim_err_out;
 	}
 
-	if (sl->sl_flags & SL_ZFS_META) {
-		/* Verify that its the right zfs node and not some clone */
-		int same_zvol;
-		char *zvol_name = sbd_get_zvol_name(sl);
-
-		if ((sli->sli_flags & (SLI_ZFS_META |
-		    SLI_META_FNAME_VALID)) == 0) {
-			*err_ret = SBD_RET_NO_META;
-			ret = EIO;
-			kmem_free(zvol_name, strlen(zvol_name) + 1);
-			goto sim_err_out;
-		}
-		if (strcmp(zvol_name, (char *)sli_buf_copy +
-		    sli->sli_meta_fname_offset) != 0)
-			same_zvol = 0;
-		else
-			same_zvol = 1;
-		kmem_free(zvol_name, strlen(zvol_name) + 1);
-		if (!same_zvol) {
-			*err_ret = SBD_ZVOL_META_NAME_MISMATCH;
-			ret = EINVAL;
-			goto sim_err_out;
-		}
-	}
 	sl->sl_lu_size = sli->sli_lu_size;
 	sl->sl_data_blocksize_shift = sli->sli_data_blocksize_shift;
 	bcopy(sli->sli_device_id, sl->sl_device_id, 20);
@@ -1924,8 +2442,9 @@ sim_sli_loaded:
 	}
 
 	ret = sbd_open_data_file(sl, err_ret, 1, data_opened, 0);
-	if (ret)
+	if (ret) {
 		goto sim_err_out;
+	}
 
 	/*
 	 * set write cache disable on the device
@@ -1955,13 +2474,15 @@ sim_sli_loaded:
 	/* we're only loading the metadata */
 	if (!no_register) {
 		ret = sbd_populate_and_register_lu(sl, err_ret);
-		if (ret)
+		if (ret) {
 			goto sim_err_out;
+		}
 		atomic_add_32(&sbd_lu_count, 1);
 	}
 
 	bcopy(sl->sl_device_id + 4, ilu->ilu_ret_guid, 16);
 	sl->sl_trans_op = SL_OP_NONE;
+
 	if (sli) {
 		kmem_free(sli, sli->sli_sms_header.sms_size);
 		sli = NULL;
@@ -1970,9 +2491,39 @@ sim_sli_loaded:
 		kmem_free(sli_buf_copy, sli_buf_sz + 1);
 		sli_buf_copy = NULL;
 	}
-	if (no_register) {
+	if (no_register && !standby) {
 		*slr = sl;
 	}
+
+	/*
+	 * if this was imported from standby, set the access state
+	 * to active.
+	 */
+	if (standby) {
+		sbd_it_data_t *it;
+		mutex_enter(&sl->sl_lock);
+		sl->sl_access_state = SBD_LU_ACTIVE;
+		for (it = sl->sl_it_list; it != NULL;
+		    it = it->sbd_it_next) {
+			it->sbd_it_ua_conditions |=
+			    SBD_UA_ASYMMETRIC_ACCESS_CHANGED;
+			it->sbd_it_ua_conditions |= SBD_UA_POR;
+		}
+		mutex_exit(&sl->sl_lock);
+		/* call set access state */
+		stret = stmf_set_lu_access(lu, STMF_LU_ACTIVE);
+		if (stret != STMF_SUCCESS) {
+			*err_ret = SBD_RET_ACCESS_STATE_FAILED;
+			sl->sl_access_state = SBD_LU_STANDBY;
+			goto sim_err_out;
+		}
+		if (sl->sl_alias) {
+			lu->lu_alias = sl->sl_alias;
+		} else {
+			lu->lu_alias = sl->sl_name;
+		}
+	}
+	sl->sl_access_state = SBD_LU_ACTIVE;
 	return (0);
 
 sim_err_out:
@@ -1984,7 +2535,14 @@ sim_err_out:
 		kmem_free(sli_buf_copy, sli_buf_sz + 1);
 		sli_buf_copy = NULL;
 	}
-	return (sbd_close_delete_lu(sl, ret));
+
+	if (standby) {
+		*err_ret = SBD_RET_ACCESS_STATE_FAILED;
+		sl->sl_trans_op = SL_OP_NONE;
+		return (EIO);
+	} else {
+		return (sbd_close_delete_lu(sl, ret));
+	}
 }
 
 int
@@ -2062,6 +2620,12 @@ sbd_modify_lu(sbd_modify_lu_t *mlu, int struct_sz, uint32_t *err_ret)
 			return (ENOENT);
 		}
 		modify_unregistered = 1;
+	}
+
+	if (sl->sl_access_state != SBD_LU_ACTIVE) {
+		*err_ret = SBD_RET_ACCESS_STATE_FAILED;
+		ret = EINVAL;
+		goto smm_err_out;
 	}
 
 	/* check for write cache change */
@@ -2215,12 +2779,81 @@ smm_err_out:
 	return (ret);
 }
 
+int
+sbd_set_global_props(sbd_global_props_t *mlu, int struct_sz,
+    uint32_t *err_ret)
+{
+	sbd_lu_t *sl = NULL;
+	int ret = 0;
+	sbd_it_data_t *it;
+	uint32_t sz;
+
+	sz = struct_sz - sizeof (*mlu) + 8 + 1;
+
+	/* if there is data in the buf, null terminate it */
+	if (struct_sz > sizeof (*mlu)) {
+		mlu->mlu_buf[struct_sz - sizeof (*mlu) + 8 - 1] = 0;
+	}
+
+	*err_ret = 0;
+
+	/* Lets validate offsets */
+	if (((mlu->mlu_mgmt_url_valid) &&
+	    (mlu->mlu_mgmt_url_off >= sz))) {
+		return (EINVAL);
+	}
+
+	if (mlu->mlu_mgmt_url_valid) {
+		uint16_t url_sz;
+
+		url_sz = strlen((char *)mlu->mlu_buf + mlu->mlu_mgmt_url_off);
+		if (url_sz > 0)
+			url_sz++;
+
+		rw_enter(&sbd_global_prop_lock, RW_WRITER);
+		if (sbd_mgmt_url_alloc_size > 0 &&
+		    (url_sz == 0 || sbd_mgmt_url_alloc_size < url_sz)) {
+			kmem_free(sbd_mgmt_url, sbd_mgmt_url_alloc_size);
+			sbd_mgmt_url = NULL;
+			sbd_mgmt_url_alloc_size = 0;
+		}
+		if (url_sz > 0) {
+			if (sbd_mgmt_url_alloc_size == 0) {
+				sbd_mgmt_url = kmem_alloc(url_sz, KM_SLEEP);
+				sbd_mgmt_url_alloc_size = url_sz;
+			}
+			(void) strcpy(sbd_mgmt_url, (char *)mlu->mlu_buf +
+			    mlu->mlu_mgmt_url_off);
+		}
+		/*
+		 * check each lu to determine whether a UA is needed.
+		 */
+		mutex_enter(&sbd_lock);
+		for (sl = sbd_lu_list; sl; sl = sl->sl_next) {
+			if (sl->sl_mgmt_url) {
+				continue;
+			}
+			mutex_enter(&sl->sl_lock);
+			for (it = sl->sl_it_list; it != NULL;
+			    it = it->sbd_it_next) {
+				it->sbd_it_ua_conditions |=
+				    SBD_UA_MODE_PARAMETERS_CHANGED;
+			}
+			mutex_exit(&sl->sl_lock);
+		}
+		mutex_exit(&sbd_lock);
+		rw_exit(&sbd_global_prop_lock);
+	}
+	return (ret);
+}
+
 /* ARGSUSED */
 int
 sbd_delete_locked_lu(sbd_lu_t *sl, uint32_t *err_ret,
     stmf_state_change_info_t *ssi)
 {
 	int i;
+	stmf_status_t ret;
 
 	if ((sl->sl_state == STMF_STATE_OFFLINE) &&
 	    !sl->sl_state_not_acked) {
@@ -2231,22 +2864,21 @@ sbd_delete_locked_lu(sbd_lu_t *sl, uint32_t *err_ret,
 	    sl->sl_state_not_acked) {
 		return (EBUSY);
 	}
-	if (stmf_ctl(STMF_CMD_LU_OFFLINE, sl->sl_lu, ssi) != STMF_SUCCESS) {
+
+	ret = stmf_ctl(STMF_CMD_LU_OFFLINE, sl->sl_lu, ssi);
+	if ((ret != STMF_SUCCESS) && (ret != STMF_ALREADY)) {
 		return (EBUSY);
 	}
 
 	for (i = 0; i < 500; i++) {
-		if (sl->sl_state == STMF_STATE_OFFLINE)
-			break;
+		if ((sl->sl_state == STMF_STATE_OFFLINE) &&
+		    !sl->sl_state_not_acked) {
+			goto sdl_do_dereg;
+		}
 		delay(drv_usectohz(10000));
 	}
-
-	if ((sl->sl_state == STMF_STATE_OFFLINE) &&
-	    !sl->sl_state_not_acked) {
-		goto sdl_do_dereg;
-	}
-
 	return (EBUSY);
+
 sdl_do_dereg:;
 	if (stmf_deregister_lu(sl->sl_lu) != STMF_SUCCESS)
 		return (EBUSY);
@@ -2319,9 +2951,21 @@ sbd_data_read(sbd_lu_t *sl, uint64_t offset, uint64_t size, uint8_t *buf)
 	DTRACE_PROBE4(backing__store__read__start, sbd_lu_t *, sl,
 	    uint8_t *, buf, uint64_t, size, uint64_t, offset);
 
+	/*
+	 * Don't proceed if the device has been closed
+	 * This can occur on an access state change to standby or
+	 * a delete. The writer lock is acquired before closing the
+	 * lu.
+	 */
+	rw_enter(&sl->sl_access_state_lock, RW_READER);
+	if ((sl->sl_flags & SL_MEDIA_LOADED) == 0) {
+		rw_exit(&sl->sl_access_state_lock);
+		return (SBD_FAILURE);
+	}
 	ret = vn_rdwr(UIO_READ, sl->sl_data_vp, (caddr_t)buf, (ssize_t)size,
 	    (offset_t)offset, UIO_SYSSPACE, 0, RLIM64_INFINITY, CRED(),
 	    &resid);
+	rw_exit(&sl->sl_access_state_lock);
 
 	DTRACE_PROBE5(backing__store__read__end, sbd_lu_t *, sl,
 	    uint8_t *, buf, uint64_t, size, uint64_t, offset,
@@ -2361,9 +3005,21 @@ sbd_data_write(sbd_lu_t *sl, uint64_t offset, uint64_t size, uint8_t *buf)
 	DTRACE_PROBE4(backing__store__write__start, sbd_lu_t *, sl,
 	    uint8_t *, buf, uint64_t, size, uint64_t, offset);
 
+	/*
+	 * Don't proceed if the device has been closed
+	 * This can occur on an access state change to standby or
+	 * a delete. The writer lock is acquired before closing the
+	 * lu.
+	 */
+	rw_enter(&sl->sl_access_state_lock, RW_READER);
+	if ((sl->sl_flags & SL_MEDIA_LOADED) == 0) {
+		rw_exit(&sl->sl_access_state_lock);
+		return (SBD_FAILURE);
+	}
 	ret = vn_rdwr(UIO_WRITE, sl->sl_data_vp, (caddr_t)buf, (ssize_t)size,
 	    (offset_t)offset, UIO_SYSSPACE, ioflag, RLIM64_INFINITY, CRED(),
 	    &resid);
+	rw_exit(&sl->sl_access_state_lock);
 
 	DTRACE_PROBE5(backing__store__write__end, sbd_lu_t *, sl,
 	    uint8_t *, buf, uint64_t, size, uint64_t, offset,
@@ -2391,6 +3047,38 @@ over_sl_data_write:
 	}
 
 	return (SBD_SUCCESS);
+}
+
+int
+sbd_get_global_props(sbd_global_props_t *oslp, uint32_t oslp_sz,
+    uint32_t *err_ret)
+{
+	uint32_t sz = 0;
+	uint16_t off;
+
+	rw_enter(&sbd_global_prop_lock, RW_READER);
+	if (sbd_mgmt_url) {
+		sz += strlen(sbd_mgmt_url) + 1;
+	}
+	bzero(oslp, sizeof (*oslp) - 8);
+	oslp->mlu_buf_size_needed = sz;
+
+	if (sz > (oslp_sz - sizeof (*oslp) + 8)) {
+		*err_ret = SBD_RET_INSUFFICIENT_BUF_SPACE;
+		rw_exit(&sbd_global_prop_lock);
+		return (ENOMEM);
+	}
+
+	off = 0;
+	if (sbd_mgmt_url) {
+		oslp->mlu_mgmt_url_valid = 1;
+		oslp->mlu_mgmt_url_off = off;
+		(void) strcpy((char *)&oslp->mlu_buf[off], sbd_mgmt_url);
+		off += strlen(sbd_mgmt_url) + 1;
+	}
+
+	rw_exit(&sbd_global_prop_lock);
+	return (0);
 }
 
 int
@@ -2432,8 +3120,11 @@ sbd_get_lu_props(sbd_lu_props_t *islp, uint32_t islp_sz,
 		sz += strlen(sl->sl_alias) + 1;
 	}
 
+	rw_enter(&sbd_global_prop_lock, RW_READER);
 	if (sl->sl_mgmt_url) {
 		sz += strlen(sl->sl_mgmt_url) + 1;
+	} else if (sbd_mgmt_url) {
+		sz += strlen(sbd_mgmt_url) + 1;
 	}
 	bzero(oslp, sizeof (*oslp) - 8);
 	oslp->slp_buf_size_needed = sz;
@@ -2441,6 +3132,7 @@ sbd_get_lu_props(sbd_lu_props_t *islp, uint32_t islp_sz,
 	if (sz > (oslp_sz - sizeof (*oslp) + 8)) {
 		sl->sl_trans_op = SL_OP_NONE;
 		*err_ret = SBD_RET_INSUFFICIENT_BUF_SPACE;
+		rw_exit(&sbd_global_prop_lock);
 		return (ENOMEM);
 	}
 
@@ -2476,6 +3168,11 @@ sbd_get_lu_props(sbd_lu_props_t *islp, uint32_t islp_sz,
 		oslp->slp_mgmt_url_off = off;
 		(void) strcpy((char *)&oslp->slp_buf[off], sl->sl_mgmt_url);
 		off += strlen(sl->sl_mgmt_url) + 1;
+	} else if (sbd_mgmt_url) {
+		oslp->slp_mgmt_url_valid = 1;
+		oslp->slp_mgmt_url_off = off;
+		(void) strcpy((char *)&oslp->slp_buf[off], sbd_mgmt_url);
+		off += strlen(sbd_mgmt_url) + 1;
 	}
 	if (sl->sl_serial_no_size) {
 		oslp->slp_serial_off = off;
@@ -2488,6 +3185,8 @@ sbd_get_lu_props(sbd_lu_props_t *islp, uint32_t islp_sz,
 
 	oslp->slp_lu_size = sl->sl_lu_size;
 	oslp->slp_blksize = ((uint16_t)1) << sl->sl_data_blocksize_shift;
+
+	oslp->slp_access_state = sl->sl_access_state;
 
 	if (sl->sl_flags & SL_VID_VALID) {
 		oslp->slp_lu_vid = 1;
@@ -2518,6 +3217,7 @@ sbd_get_lu_props(sbd_lu_props_t *islp, uint32_t islp_sz,
 
 	sl->sl_trans_op = SL_OP_NONE;
 
+	rw_exit(&sbd_global_prop_lock);
 	return (0);
 }
 
@@ -2589,8 +3289,12 @@ sbd_open_zfs_meta(sbd_lu_t *sl)
 	int		len;
 	char		*file;
 
-	if (sbd_create_zfs_meta_object(sl) == SBD_FAILURE)
-		return (SBD_FAILURE);
+	if (sl->sl_zfs_meta == NULL) {
+		if (sbd_create_zfs_meta_object(sl) == SBD_FAILURE)
+			return (SBD_FAILURE);
+	} else {
+		bzero(sl->sl_zfs_meta, (ZAP_MAXVALUELEN / 2));
+	}
 
 	rw_enter(&sl->sl_zfs_meta_lock, RW_WRITER);
 	file = sbd_get_zvol_name(sl);
@@ -2640,6 +3344,15 @@ sbd_write_zfs_meta(sbd_lu_t *sl, uint8_t *buf, uint64_t sz, uint64_t off)
 	ASSERT(sl->sl_zfs_meta);
 	if ((off + sz) > (ZAP_MAXVALUELEN / 2 - 1)) {
 		return (SBD_META_CORRUPTED);
+	}
+	if ((off + sz) > sl->sl_meta_size_used) {
+		sl->sl_meta_size_used = off + sz;
+		if (sl->sl_total_meta_size < sl->sl_meta_size_used) {
+			uint64_t meta_align =
+			    (((uint64_t)1) << sl->sl_meta_blocksize_shift) - 1;
+			sl->sl_total_meta_size = (sl->sl_meta_size_used +
+			    meta_align) & (~meta_align);
+		}
 	}
 	ptr = ah_meta = kmem_zalloc(ZAP_MAXVALUELEN, KM_SLEEP);
 	rw_enter(&sl->sl_zfs_meta_lock, RW_WRITER);
@@ -2833,6 +3546,8 @@ sbd_zvolset(char *zvol_name, char *comstarprop)
 		cmn_err(CE_NOTE, "ioctl failed %d", rc);
 	}
 	kmem_free(zc, sizeof (zfs_cmd_t));
+	if (packed)
+		kmem_free(packed, len);
 out:
 	nvlist_free(nv);
 	(void) ldi_close(zfs_lh, FREAD|FWRITE, kcred);

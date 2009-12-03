@@ -27,7 +27,7 @@ ARCH = i86pc
 CLASS = arch
 DTDFILE = topology.dtd.1
 TOPOFILE = i86pc-hc-topology.xml chip-hc-topology.xml psu-hc-topology.xml \
-fan-hc-topology.xml chassis-hc-topology.xml
+fan-hc-topology.xml i86pc-legacy-hc-topology.xml chassis-hc-topology.xml
 
 SRCDIR = ../i86pc
 

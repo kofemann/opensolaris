@@ -183,13 +183,7 @@ struct audio_client {
 
 	kmutex_t		c_lock;
 	kcondvar_t		c_cv;
-	ddi_taskq_t		*c_tq;
-	boolean_t		c_do_output;
-	boolean_t		c_do_input;
-	boolean_t		c_do_notify;
-	boolean_t		c_do_drain;
-	boolean_t		c_closing;
-	boolean_t		c_is_open;
+	boolean_t		c_is_active;
 
 	/*
 	 * Client wide settings... e.g. ops vector, etc.
@@ -211,6 +205,7 @@ struct audio_client {
 #define	c_drain			c_ops.aco_drain
 #define	c_wput			c_ops.aco_wput
 #define	c_wsrv			c_ops.aco_wsrv
+#define	c_rsrv			c_ops.aco_rsrv
 
 	struct pollhead		c_pollhead;
 
@@ -329,6 +324,7 @@ struct audio_dev {
 #define	DEV_INPUT_CAP		(1U << 1)
 #define	DEV_DUPLEX_CAP		(1U << 2)
 #define	DEV_SNDSTAT_CAP		(1U << 3)
+#define	DEV_OPAQUE_CAP		(1U << 4)	/* AC3 are not mixable */
 
 	char			d_name[128];	/* generic description */
 	char			d_desc[128];	/* detailed config descr */
@@ -357,6 +353,8 @@ struct audio_dev {
 	list_t			d_controls;
 	audio_ctrl_t		*d_pcmvol_ctrl;
 	uint64_t		d_pcmvol;
+
+	volatile unsigned	d_serial;
 
 	/*
 	 * Linkage onto global list of devices.
@@ -441,9 +439,12 @@ void auimpl_client_init(void);
 void auimpl_client_fini(void);
 audio_client_t *auimpl_client_create(dev_t);
 void auimpl_client_destroy(audio_client_t *);
+void auimpl_client_activate(audio_client_t *);
+void auimpl_client_deactivate(audio_client_t *);
 int auimpl_create_minors(audio_dev_t *);
 void auimpl_remove_minors(audio_dev_t *);
-void auimpl_set_gain_master(audio_stream_t *, uint8_t);
+int auimpl_set_pcmvol(void *, uint64_t);
+int auimpl_get_pcmvol(void *, uint64_t *);
 
 /* audio_engine.c */
 void auimpl_dev_init(void);

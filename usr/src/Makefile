@@ -42,7 +42,7 @@ i386_SUBDIRS= psm grub
 
 SUBDIRS= $(COMMON_SUBDIRS) $($(MACH)_SUBDIRS)
 
-HDRSUBDIRS=	uts head lib cmd ucbhead
+HDRSUBDIRS=	uts head lib cmd
 
 # UCB headers are bug-for-bug compatible and not checkable against the header
 # standards.
@@ -52,7 +52,7 @@ CHKHDRSUBDIRS=	head uts lib
 #
 # Headers that can be built in parallel
 #
-PARALLEL_HEADERS = sysheaders userheaders libheaders ucbheaders cmdheaders
+PARALLEL_HEADERS = sysheaders userheaders libheaders cmdheaders
 
 #
 # Directories that can be built in parallel
@@ -93,7 +93,7 @@ _msg :=			TARGET= _msg
 #
 all: mapfiles closedbins sgs .WAIT $(SUBDIRS) pkg_all
 install: mapfiles closedbins sgs .WAIT $(SUBDIRS) pkg_all .WAIT _msg
-	@cd pkgdefs/SUNW0on; pwd; $(MAKE) _msg
+	@cd msg; pwd; $(MAKE) _msg
 	@rm -rf "$(ROOT)/catalog"
 
 mapfiles: bldtools
@@ -150,13 +150,13 @@ closedbins: FRC $(ROOTDIRS)
 .PARALLEL: $(PARALLEL_HEADERS) DUMMY
 .PARALLEL: $(PARALLEL_DIRS) DUMMY
 
-$(SUBDIRS) head ucbhead pkgdefs: FRC
+$(SUBDIRS) head pkgdefs: FRC
 	@cd $@; pwd; $(MAKE) $(TARGET)
 
 # librpcsvc has a dependency on headers installed by
 # userheaders, hence the .WAIT before libheaders.
 sgs: rootdirs .WAIT sysheaders userheaders .WAIT \
-	libheaders ucbheaders cmdheaders
+	libheaders cmdheaders
 
 #
 # Top-level setup target to setup the development environment that includes
@@ -192,9 +192,6 @@ libheaders: FRC
 
 sysheaders: FRC
 	@cd uts; pwd; $(MAKE) install_h
-
-ucbheaders: FRC
-	@cd ucbhead; pwd; $(MAKE) install_h
 
 cmdheaders: FRC
 	@cd cmd/fm; pwd; $(MAKE) install_h
@@ -261,7 +258,6 @@ EXPORT_SRC:
 	@cd lib/libsldap; pwd; $(MAKE) EXPORT_SRC
 	@cd lib/libsasl; pwd; $(MAKE) EXPORT_SRC
 	@cd lib/sasl_plugins; pwd; $(MAKE) EXPORT_SRC
-	@cd $(CLOSED)/lib/smartcard;	  pwd; $(MAKE) EXPORT_SRC
 	@cd lib/pam_modules/krb5;   pwd; $(MAKE) EXPORT_SRC
 	@cd lib/libresolv2; pwd; $(MAKE) EXPORT_SRC
 	@cd psm/stand/boot; pwd; $(MAKE) EXPORT_SRC

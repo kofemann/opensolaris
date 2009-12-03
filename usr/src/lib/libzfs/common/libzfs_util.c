@@ -94,8 +94,6 @@ libzfs_error_description(libzfs_handle_t *hdl)
 	case EZFS_VOLTOOBIG:
 		return (dgettext(TEXT_DOMAIN, "volume size exceeds limit for "
 		    "this system"));
-	case EZFS_VOLHASDATA:
-		return (dgettext(TEXT_DOMAIN, "volume has data"));
 	case EZFS_INVALIDNAME:
 		return (dgettext(TEXT_DOMAIN, "invalid name"));
 	case EZFS_BADRESTORE:
@@ -142,8 +140,6 @@ libzfs_error_description(libzfs_handle_t *hdl)
 		return (dgettext(TEXT_DOMAIN,
 		    "iscsitgt service need to be enabled by "
 		    "a privileged user"));
-	case EZFS_DEVLINKS:
-		return (dgettext(TEXT_DOMAIN, "failed to create /dev links"));
 	case EZFS_PERM:
 		return (dgettext(TEXT_DOMAIN, "permission denied"));
 	case EZFS_NOSPC:
@@ -218,6 +214,12 @@ libzfs_error_description(libzfs_handle_t *hdl)
 	case EZFS_REFTAG_HOLD:
 		return (dgettext(TEXT_DOMAIN, "tag already exists on this "
 		    "dataset"));
+	case EZFS_TAGTOOLONG:
+		return (dgettext(TEXT_DOMAIN, "tag too long"));
+	case EZFS_PIPEFAILED:
+		return (dgettext(TEXT_DOMAIN, "pipe create failed"));
+	case EZFS_THREADCREATEFAILED:
+		return (dgettext(TEXT_DOMAIN, "thread create failed"));
 	case EZFS_UNKNOWN:
 		return (dgettext(TEXT_DOMAIN, "unknown error"));
 	default:
@@ -378,7 +380,7 @@ zfs_standard_error_fmt(libzfs_handle_t *hdl, int error, const char *fmt, ...)
 		zfs_verror(hdl, EZFS_POOLUNAVAIL, fmt, ap);
 		break;
 	default:
-		zfs_error_aux(hdl, strerror(errno));
+		zfs_error_aux(hdl, strerror(error));
 		zfs_verror(hdl, EZFS_UNKNOWN, fmt, ap);
 		break;
 	}
@@ -610,6 +612,7 @@ libzfs_fini(libzfs_handle_t *hdl)
 	if (hdl->libzfs_log_str)
 		(void) free(hdl->libzfs_log_str);
 	zpool_free_handles(hdl);
+	libzfs_fru_clear(hdl, B_TRUE);
 	namespace_clear(hdl);
 	libzfs_mnttab_fini(hdl);
 	free(hdl);
@@ -686,7 +689,7 @@ int
 zcmd_alloc_dst_nvlist(libzfs_handle_t *hdl, zfs_cmd_t *zc, size_t len)
 {
 	if (len == 0)
-		len = 2048;
+		len = 4*1024;
 	zc->zc_nvlist_dst_size = len;
 	if ((zc->zc_nvlist_dst = (uint64_t)(uintptr_t)
 	    zfs_alloc(hdl, zc->zc_nvlist_dst_size)) == NULL)
@@ -812,6 +815,8 @@ zprop_print_headers(zprop_get_cbdata_t *cbp, zfs_type_t type)
 	    "PROPERTY"));
 	cbp->cb_colwidths[GET_COL_VALUE] = strlen(dgettext(TEXT_DOMAIN,
 	    "VALUE"));
+	cbp->cb_colwidths[GET_COL_RECVD] = strlen(dgettext(TEXT_DOMAIN,
+	    "RECEIVED"));
 	cbp->cb_colwidths[GET_COL_SOURCE] = strlen(dgettext(TEXT_DOMAIN,
 	    "SOURCE"));
 
@@ -825,7 +830,7 @@ zprop_print_headers(zprop_get_cbdata_t *cbp, zfs_type_t type)
 	 * inheriting from the longest name.  This is acceptable because in the
 	 * majority of cases 'SOURCE' is the last column displayed, and we don't
 	 * use the width anyway.  Note that the 'VALUE' column can be oversized,
-	 * if the name of the property is much longer the any values we find.
+	 * if the name of the property is much longer than any values we find.
 	 */
 	for (pl = cbp->cb_proplist; pl != NULL; pl = pl->pl_next) {
 		/*
@@ -856,6 +861,11 @@ zprop_print_headers(zprop_get_cbdata_t *cbp, zfs_type_t type)
 		    pl->pl_width > cbp->cb_colwidths[GET_COL_VALUE])
 			cbp->cb_colwidths[GET_COL_VALUE] = pl->pl_width;
 
+		/* 'RECEIVED' column. */
+		if (pl != cbp->cb_proplist &&
+		    pl->pl_recvd_width > cbp->cb_colwidths[GET_COL_RECVD])
+			cbp->cb_colwidths[GET_COL_RECVD] = pl->pl_recvd_width;
+
 		/*
 		 * 'NAME' and 'SOURCE' columns
 		 */
@@ -871,7 +881,7 @@ zprop_print_headers(zprop_get_cbdata_t *cbp, zfs_type_t type)
 	/*
 	 * Now go through and print the headers.
 	 */
-	for (i = 0; i < 4; i++) {
+	for (i = 0; i < ZFS_GET_NCOLS; i++) {
 		switch (cbp->cb_columns[i]) {
 		case GET_COL_NAME:
 			title = dgettext(TEXT_DOMAIN, "NAME");
@@ -882,6 +892,9 @@ zprop_print_headers(zprop_get_cbdata_t *cbp, zfs_type_t type)
 		case GET_COL_VALUE:
 			title = dgettext(TEXT_DOMAIN, "VALUE");
 			break;
+		case GET_COL_RECVD:
+			title = dgettext(TEXT_DOMAIN, "RECEIVED");
+			break;
 		case GET_COL_SOURCE:
 			title = dgettext(TEXT_DOMAIN, "SOURCE");
 			break;
@@ -890,7 +903,8 @@ zprop_print_headers(zprop_get_cbdata_t *cbp, zfs_type_t type)
 		}
 
 		if (title != NULL) {
-			if (i == 3 || cbp->cb_columns[i + 1] == 0)
+			if (i == (ZFS_GET_NCOLS - 1) ||
+			    cbp->cb_columns[i + 1] == GET_COL_NONE)
 				(void) printf("%s", title);
 			else
 				(void) printf("%-*s  ",
@@ -908,7 +922,7 @@ zprop_print_headers(zprop_get_cbdata_t *cbp, zfs_type_t type)
 void
 zprop_print_one_property(const char *name, zprop_get_cbdata_t *cbp,
     const char *propname, const char *value, zprop_source_t sourcetype,
-    const char *source)
+    const char *source, const char *recvd_value)
 {
 	int i;
 	const char *str;
@@ -923,7 +937,7 @@ zprop_print_one_property(const char *name, zprop_get_cbdata_t *cbp,
 	if (cbp->cb_first)
 		zprop_print_headers(cbp, cbp->cb_type);
 
-	for (i = 0; i < 4; i++) {
+	for (i = 0; i < ZFS_GET_NCOLS; i++) {
 		switch (cbp->cb_columns[i]) {
 		case GET_COL_NAME:
 			str = name;
@@ -960,14 +974,21 @@ zprop_print_one_property(const char *name, zprop_get_cbdata_t *cbp,
 				    "inherited from %s", source);
 				str = buf;
 				break;
+			case ZPROP_SRC_RECEIVED:
+				str = "received";
+				break;
 			}
+			break;
+
+		case GET_COL_RECVD:
+			str = (recvd_value == NULL ? "-" : recvd_value);
 			break;
 
 		default:
 			continue;
 		}
 
-		if (cbp->cb_columns[i + 1] == 0)
+		if (cbp->cb_columns[i + 1] == GET_COL_NONE)
 			(void) printf("%s", str);
 		else if (cbp->cb_scripted)
 			(void) printf("%s\t", str);
@@ -975,7 +996,6 @@ zprop_print_one_property(const char *name, zprop_get_cbdata_t *cbp,
 			(void) printf("%-*s  ",
 			    cbp->cb_colwidths[cbp->cb_columns[i]],
 			    str);
-
 	}
 
 	(void) printf("\n");
@@ -1037,7 +1057,7 @@ zfs_nicestrtonum(libzfs_handle_t *hdl, const char *value, uint64_t *num)
 		return (-1);
 	}
 
-	/* Rely on stroull() to process the numeric portion.  */
+	/* Rely on strtoull() to process the numeric portion.  */
 	errno = 0;
 	*num = strtoull(value, &end, 10);
 

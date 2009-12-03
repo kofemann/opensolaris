@@ -26,7 +26,7 @@
  * Use is subject to license terms of the CDDL.
  */
 
-/* IntelVersion: 1.61 v2008-10-7 */
+/* IntelVersion: 1.78 scm_100809_154340 */
 
 #ifndef _IGB_REGS_H
 #define	_IGB_REGS_H
@@ -43,6 +43,12 @@ extern "C" {
 #define	E1000_CTRL_EXT	0x00018  /* Extended Device Control - RW */
 #define	E1000_FLA	0x0001C  /* Flash Access - RW */
 #define	E1000_MDIC	0x00020  /* MDI Control - RW */
+#define	E1000_MDICNFG	0x00E04  /* MDI Config - RW */
+#define	E1000_REGISTER_SET_SIZE		0x20000 /* CSR Size */
+#define	E1000_EEPROM_INIT_CTRL_WORD_2	0x0F /* EEPROM Init Ctrl Word 2 */
+#define	E1000_BARCTRL			0x5BBC /* BAR ctrl reg */
+#define	E1000_BARCTRL_FLSIZE		0x0700 /* BAR ctrl Flsize */
+#define	E1000_BARCTRL_CSRSIZE		0x2000 /* BAR ctrl CSR size */
 #define	E1000_SCTL	0x00024  /* SerDes Control - RW */
 #define	E1000_FCAL	0x00028  /* Flow Control Address Low - RW */
 #define	E1000_FCAH	0x0002C  /* Flow Control Address High -RW */
@@ -91,17 +97,19 @@ extern "C" {
 #define	E1000_FLSWCNT	0x01038  /* FLASH Access Counter */
 #define	E1000_FLOP	0x0103C  /* FLASH Opcode Register */
 #define	E1000_I2CCMD	0x01028  /* SFPI2C Command Register - RW */
-#define	E1000_I2CPARAMS	0x0102C /* SFPI2C Parameters Register - RW */
+#define	E1000_I2CPARAMS	0x0102C  /* SFPI2C Parameters Register - RW */
 #define	E1000_WDSTP	0x01040  /* Watchdog Setup - RW */
 #define	E1000_SWDSTS	0x01044  /* SW Device Status - RW */
 #define	E1000_FRTIMER	0x01048  /* Free Running Timer - RW */
 #define	E1000_TCPTIMER	0x0104C  /* TCP Timer - RW */
 #define	E1000_VPDDIAG	0x01060  /* VPD Diagnostic - RO */
-#define	E1000_ICR_V2 0x01500  /* Interrupt Cause - new location - RC */
-#define	E1000_ICS_V2 0x01504  /* Interrupt Cause Set - new location - WO */
-#define	E1000_IMS_V2 0x01508  /* Interrupt Mask Set/Read - new location - RW */
-#define	E1000_IMC_V2 0x0150C  /* Interrupt Mask Clear - new location - WO */
-#define	E1000_IAM_V2 0x01510  /* Interrupt Ack Auto Mask - new location - RW */
+#define	E1000_ICR_V2	0x01500  /* Interrupt Cause - new location - RC */
+#define	E1000_ICS_V2	0x01504  /* Interrupt Cause Set - new location - WO */
+/* Interrupt Mask Set/Read - new location - RW */
+#define	E1000_IMS_V2	0x01508
+#define	E1000_IMC_V2	0x0150C  /* Interrupt Mask Clear - new location - WO */
+/* Interrupt Ack Auto Mask - new location - RW */
+#define	E1000_IAM_V2	0x01510
 #define	E1000_ERT	0x02008  /* Early Rx Threshold - RW */
 #define	E1000_FCRTL	0x02160  /* Flow Control Receive Threshold Low - RW */
 #define	E1000_FCRTH	0x02168  /* Flow Control Receive Threshold High - RW */
@@ -117,11 +125,8 @@ extern "C" {
 #define	E1000_RDPUCTL	0x025DC  /* DMA Rx Descriptor uC Control - RW */
 #define	E1000_PBDIAG	0x02458  /* Packet Buffer Diagnostic - RW */
 #define	E1000_RXPBS	0x02404  /* Rx Packet Buffer Size - RW */
-#define	E1000_RXCTL(_n)	(0x0C014 + (0x40 * (_n)))
-#define	E1000_RQDPC(_n)	(0x0C030 + (0x40 * (_n)))
-#define	E1000_TXCTL(_n)	(0x0E014 + (0x40 * (_n)))
-#define	E1000_RXCTL(_n)	(0x0C014 + (0x40 * (_n)))
-#define	E1000_RQDPC(_n)	(0x0C030 + (0x40 * (_n)))
+/* Same as RXPBS, renamed for newer adapters - RW */
+#define	E1000_IRPBS	0x02404
 #define	E1000_RDTR	0x02820  /* Rx Delay Timer - RW */
 #define	E1000_RADV	0x0282C  /* Rx Interrupt Absolute Delay Timer - RW */
 /*
@@ -147,12 +152,19 @@ extern "C" {
 #define	E1000_RDH(_n)		((_n) < 4 ?	\
 	(0x02810 + ((_n) * 0x100)) :	\
 	(0x0C010 + ((_n) * 0x40)))
+#define	E1000_RXCTL(_n)		((_n) < 4 ?	\
+	(0x02814 + ((_n) * 0x100)) :	\
+	(0x0C014 + ((_n) * 0x40)))
+#define	E1000_DCA_RXCTRL(_n)	E1000_RXCTL(_n)
 #define	E1000_RDT(_n)		((_n) < 4 ?	\
 	(0x02818 + ((_n) * 0x100)) :	\
 	(0x0C018 + ((_n) * 0x40)))
 #define	E1000_RXDCTL(_n)	((_n) < 4 ?	\
 	(0x02828 + ((_n) * 0x100)) :	\
 	(0x0C028 + ((_n) * 0x40)))
+#define	E1000_RQDPC(_n)		((_n) < 4 ?	\
+	(0x02830 + ((_n) * 0x100)) :	\
+	(0x0C030 + ((_n) * 0x40)))
 #define	E1000_TDBAL(_n)		((_n) < 4 ?	\
 	(0x03800 + ((_n) * 0x100)) :	\
 	(0x0E000 + ((_n) * 0x40)))
@@ -165,21 +177,23 @@ extern "C" {
 #define	E1000_TDH(_n)		((_n) < 4 ?	\
 	(0x03810 + ((_n) * 0x100)) :	\
 	(0x0E010 + ((_n) * 0x40)))
+#define	E1000_TXCTL(_n)		((_n) < 4 ?	\
+	(0x03814 + ((_n) * 0x100)) :	\
+	(0x0E014 + ((_n) * 0x40)))
+#define	E1000_DCA_TXCTRL(_n)	E1000_TXCTL(_n)
 #define	E1000_TDT(_n)		((_n) < 4 ?	\
 	(0x03818 + ((_n) * 0x100)) :	\
 	(0x0E018 + ((_n) * 0x40)))
 #define	E1000_TXDCTL(_n)	((_n) < 4 ?	\
 	(0x03828 + ((_n) * 0x100)) :	\
 	(0x0E028 + ((_n) * 0x40)))
-#define	E1000_TARC(_n)		(0x03840 + (_n << 8))
-#define	E1000_DCA_TXCTRL(_n)	(0x03814 + (_n << 8))
-#define	E1000_DCA_RXCTRL(_n)	(0x02814 + (_n << 8))
 #define	E1000_TDWBAL(_n)	((_n) < 4 ?	\
 	(0x03838 + ((_n) * 0x100)) :	\
 	(0x0E038 + ((_n) * 0x40)))
 #define	E1000_TDWBAH(_n)	((_n) < 4 ?	\
 	(0x0383C + ((_n) * 0x100)) :	\
 	(0x0E03C + ((_n) * 0x40)))
+#define	E1000_TARC(_n)		(0x03840 + ((_n) * 0x100))
 #define	E1000_RSRPD	0x02C00  /* Rx Small Packet Detect - RW */
 #define	E1000_RAID	0x02C08  /* Receive Ack Interrupt Delay - RW */
 #define	E1000_TXDMAC	0x03000  /* Tx DMA Control - RW */
@@ -201,6 +215,8 @@ extern "C" {
 /* Packet Buffer DWORD (_n) */
 #define	E1000_PBSLAD(_n)	(0x03110 + (0x4 * (_n)))
 #define	E1000_TXPBS	0x03404  /* Tx Packet Buffer Size - RW */
+/* Same as TXPBS, renamed for newer adpaters - RW */
+#define	E1000_ITPBS	0x03404
 #define	E1000_TDFH	0x03410  /* Tx Data FIFO Head - RW */
 #define	E1000_TDFT	0x03418  /* Tx Data FIFO Tail - RW */
 #define	E1000_TDFHS	0x03420  /* Tx Data FIFO Head Saved - RW */
@@ -426,6 +442,7 @@ extern "C" {
 #define	E1000_GIOCTL		0x05B44 /* GIO Analog Control Register */
 #define	E1000_SCCTL		0x05B4C /* PCIc PLL Configuration Register */
 #define	E1000_GCR		0x05B00 /* PCI-Ex Control */
+#define	E1000_GCR2		0x05B64 /* PCI-Ex Control #2 */
 #define	E1000_GSCL_1		0x05B10 /* PCI-Ex Statistic Control #1 */
 #define	E1000_GSCL_2		0x05B14 /* PCI-Ex Statistic Control #2 */
 #define	E1000_GSCL_3		0x05B18 /* PCI-Ex Statistic Control #3 */
@@ -434,6 +451,8 @@ extern "C" {
 #define	E1000_FACTPS		0x05B30
 #define	E1000_SWSM		0x05B50 /* SW Semaphore */
 #define	E1000_FWSM		0x05B54 /* FW Semaphore */
+/* Driver-only SW semaphore (not used by BOOT agents) */
+#define	E1000_SWSM2		0x05B58
 #define	E1000_DCA_ID		0x05B70 /* DCA Requester ID Information - RO */
 #define	E1000_DCA_CTRL		0x05B74 /* DCA Control - RW */
 #define	E1000_FFLT_DBG		0x05F04 /* Debug Register */
@@ -472,7 +491,6 @@ extern "C" {
 #define	E1000_VFTE	0x00C90 /* VF Transmit Enables */
 #define	E1000_QDE	0x02408 /* Queue Drop Enable - RW */
 #define	E1000_DTXSWC	0x03500 /* DMA Tx Switch Control - RW */
-#define	E1000_VLVF	0x05D00 /* VLAN Virtual Machine Filter - RW */
 #define	E1000_RPLOLR	0x05AF0 /* Replication Offload - RW */
 #define	E1000_UTA	0x0A000 /* Unicast Table Array - RW */
 #define	E1000_IOVTCL	0x05BBC /* IOV Control Register */
@@ -483,12 +501,15 @@ extern "C" {
 #define	E1000_VMBMEM(_n)	(0x00800 + (64 * (_n)))
 #define	E1000_VFVMBMEM(_n)	(0x00800 + (_n))
 #define	E1000_VMOLR(_n)		(0x05AD0 + (4 * (_n)))
+/* VLAN Virtual Machine Filter - RW */
+#define	E1000_VLVF(_n)		(0x05D00 + (4 * (_n)))
 
 /* Filtering Registers */
 #define	E1000_SAQF(_n)	(0x05980 + (4 * (_n))) /* Source Address Queue Fltr */
 #define	E1000_DAQF(_n)	(0x059A0 + (4 * (_n))) /* Dest Address Queue Fltr */
 #define	E1000_SPQF(_n)	(0x059C0 + (4 * (_n))) /* Source Port Queue Fltr */
 #define	E1000_FTQF(_n)	(0x059E0 + (4 * (_n))) /* 5-tuple Queue Fltr */
+#define	E1000_TTQF(_n)	(0x059E0 + (4 * (_n))) /* 2-tuple Queue Fltr */
 #define	E1000_SYNQF(_n)	(0x055FC + (4 * (_n))) /* SYN Packet Queue Fltr */
 #define	E1000_ETQF(_n)	(0x05CB0 + (4 * (_n))) /* EType Queue Fltr */
 
@@ -533,6 +554,15 @@ extern "C" {
 #define	E1000_RTTBCNIDX	0xB204  /* Tx BCN Congestion Point */
 #define	E1000_RTTBCNACH	0x0B214 /* Tx BCN Control High */
 #define	E1000_RTTBCNACL	0x0B210 /* Tx BCN Control Low */
+
+/* DMA Coalescing registers */
+#define	E1000_DMACR	0x02508 /* Control Register */
+#define	E1000_DMCTXTH	0x03550 /* Transmit Threshold */
+#define	E1000_DMCTLX	0x02514 /* Time to Lx Request */
+#define	E1000_DMCRTRH	0x05DD0 /* Receive Packet Rate Threshold */
+#define	E1000_DMCCNT	0x05DD4 /* Current RX Count */
+#define	E1000_FCRTC	0x02170 /* Flow Control Rx high watermark */
+#define	E1000_PCIEMISC	0x05BB8 /* PCIE misc config register */
 
 #ifdef __cplusplus
 }

@@ -34,14 +34,25 @@ extern "C" {
  */
 #define	AUDIOHD_VID_INTEL	0x8086
 #define	AUDIOHD_VID_ATI		0x1002
+#define	AUDIOHD_VID_CIRRUS	0x1013
 #define	AUDIOHD_VID_NVIDIA	0x10de
+#define	AUDIOHD_VID_REALTEK	0x10ec
+#define	AUDIOHD_VID_CONEXANT	0x14f1
 #define	AUDIOHD_VID_SIGMATEL	0x8384
+
+/*
+ * specific audiohd controller device id
+ */
+#define	AUDIOHD_CONTROLLER_MCP51	0x10de026c
 
 /*
  * specific codec id used by specific vendors
  */
 #define	AUDIOHD_CODEC_IDT7608	0x111d7608
 #define	AUDIOHD_CODEC_IDT76B2	0x111d76b2
+#define	AUDIOHD_CODEC_AD1981	0x11d41981
+#define	AUDIOHD_CODEC_ALC272	0x10ec0272
+#define	AUDIOHD_CODEC_ALC885	0x10ec0885
 #define	AUDIOHD_CODECID_ALC888	0x10ec0888
 #define	AUDIOHD_CODECID_SONY1	0x10ec0260
 #define	AUDIOHD_CODECID_SONY2	0x10ec0262
@@ -94,7 +105,7 @@ extern "C" {
 #define	AUDIOHD_SP_ON		1
 #define	AUDIOHD_SP_OFF		0
 
-#define	AUDIOHD_PORT_MAX		15
+#define	AUDIOHD_PORT_MAX	15
 #define	AUDIOHD_CODEC_MAX	16
 #define	AUDIOHD_MEMIO_LEN	0x4000
 
@@ -145,8 +156,8 @@ extern "C" {
 #define	AUDIOHD_PIN_VREF_L4	0x02
 #define	AUDIOHD_PIN_VREF_OFF	8
 #define	AUDIOHD_PIN_VREF_MASK	0xff
-#define	AUDIOHD_PIN_CLR_MASK		0xf
-#define	AUDIOHD_PIN_CLR_OFF		12
+#define	AUDIOHD_PIN_CLR_MASK	0xf
+#define	AUDIOHD_PIN_CLR_OFF	12
 
 
 #define	AUDIOHD_VERB_ADDR_OFF	28
@@ -155,7 +166,6 @@ extern "C" {
 #define	AUDIOHD_VERB_CMD16_OFF	16
 
 #define	AUDIOHD_RING_MAX_SIZE	0x00ff
-#define	AUDIOHD_POS_MASK	~0x00000003
 #define	AUDIOHD_REC_TAG_OFF	4
 #define	AUDIOHD_PLAY_TAG_OFF	4
 #define	AUDIOHD_PLAY_CTL_OFF	2
@@ -171,7 +181,8 @@ extern "C" {
 #define	AUDIOHD_CODEC_NUM_MASK	0x000000ff
 #define	AUDIOHD_CODEC_TYPE_MASK	0x000000ff
 
-#define	AUDIOHD_FRAGFR_ALIGN	16
+#define	AUDIOHD_ROUNDUP(x, algn)	(((x) + ((algn) - 1)) & ~((algn) - 1))
+#define	AUDIOHD_FRAGFR_ALIGN	64
 #define	AUDIOHD_BDLE_BUF_ALIGN	128
 #define	AUDIOHD_CMDIO_ENT_MASK	0x00ff	/* 256 entries for CORB/RIRB */
 #define	AUDIOHD_CDBIO_CORB_LEN	1024	/* 256 entries for CORB, 1024B */
@@ -678,7 +689,6 @@ typedef struct audiohd_port
 	unsigned		nframes;
 	uint64_t		count;
 	int			curpos;
-	int			len;
 	int			intrs;
 
 	uint_t			format;
@@ -789,7 +799,14 @@ struct audiohd_state {
 	caddr_t				hda_reg_base;
 	ddi_acc_handle_t		hda_pci_handle;
 	ddi_acc_handle_t		hda_reg_handle;
-	ddi_iblock_cookie_t		hda_intr_cookie;
+
+	ddi_intr_handle_t 	*htable; 	/* For array of interrupts */
+	int			intr_type;	/* What type of interrupt */
+	int			intr_rqst;	/* # of request intrs count */
+	int			intr_cnt;	/* # of intrs count returned */
+	uint_t			intr_pri;	/* Interrupt priority */
+	int			intr_cap;	/* Interrupt capabilities */
+	boolean_t		msi_enable;
 
 	audiohd_dma_t	hda_dma_corb;
 	audiohd_dma_t	hda_dma_rirb;
@@ -800,6 +817,7 @@ struct audiohd_state {
 
 
 	audio_dev_t	*adev;
+	uint32_t	devid;
 
 
 	int		hda_pint_freq;	/* play intr frequence */

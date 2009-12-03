@@ -513,7 +513,7 @@ zap_hash(uint64_t salt, const char *name)
 	 * those are the onces that we first pay attention to when
 	 * chosing the bucket.
 	 */
-	crc &= ~((1ULL << (64 - ZAP_HASHBITS)) - 1);
+	crc &= ~((1ULL << (64 - 28)) - 1);
 
 	return (crc);
 }
@@ -623,7 +623,8 @@ fzap_lookup(dnode_phys_t *zap_dnode, zap_phys_t *zap,
 	int blksft = zfs_log2(zap_dnode->dn_datablkszsec << DNODE_SHIFT);
 
 	/* Verify if this is a fat zap header block */
-	if (zap->zap_magic != (uint64_t)ZAP_MAGIC)
+	if (zap->zap_magic != (uint64_t)ZAP_MAGIC ||
+	    zap->zap_flags != 0)
 		return (ERR_FSYS_CORRUPT);
 
 	hash = zap_hash(zap->zap_salt, name);
@@ -1301,6 +1302,19 @@ zfs_mount(void)
 	adjpl = P2ALIGN(adjpl, (uint64_t)sizeof (vdev_label_t));
 
 	for (label = 0; label < VDEV_LABELS; label++) {
+
+		/*
+		 * some eltorito stacks don't give us a size and
+		 * we end up setting the size to MAXUINT, further
+		 * some of these devices stop working once a single
+		 * read past the end has been issued. Checking
+		 * for a maximum part_length and skipping the backup
+		 * labels at the end of the slice/partition/device
+		 * avoids breaking down on such devices.
+		 */
+		if (part_length == MAXUINT && label == 2)
+			break;
+
 		uint64_t sector = vdev_label_start(adjpl,
 		    label) >> SPA_MINBLOCKSHIFT;
 

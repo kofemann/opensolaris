@@ -102,6 +102,7 @@ typedef enum {
 #define	MAC_PROMISC_FLAGS_NO_TX_LOOP		0x0001
 #define	MAC_PROMISC_FLAGS_NO_PHYS		0x0002
 #define	MAC_PROMISC_FLAGS_VLAN_TAG_STRIP	0x0004
+#define	MAC_PROMISC_FLAGS_NO_COPY		0x0008
 
 /* flags passed to mac_tx() */
 #define	MAC_DROP_ON_NO_DESC	0x01 /* freemsg() if no tx descs */
@@ -146,6 +147,8 @@ extern int mac_unicast_primary_set(mac_handle_t, const uint8_t *);
 extern void mac_unicast_primary_get(mac_handle_t, uint8_t *);
 extern void mac_unicast_primary_info(mac_handle_t, char *, boolean_t *);
 
+extern boolean_t mac_dst_get(mac_handle_t, uint8_t *);
+
 extern int mac_addr_random(mac_client_handle_t, uint_t, uint8_t *,
     mac_diag_t *);
 
@@ -154,8 +157,6 @@ extern void mac_addr_factory_release(mac_client_handle_t, uint_t);
 extern void mac_addr_factory_value(mac_handle_t, int, uchar_t *, uint_t *,
     char *, boolean_t *);
 extern uint_t mac_addr_factory_num(mac_handle_t);
-
-extern uint_t mac_addr_len(mac_handle_t);
 
 extern mac_tx_notify_handle_t mac_client_tx_notify(mac_client_handle_t,
     mac_tx_notify_t, void *);
@@ -166,6 +167,12 @@ extern int mac_client_set_resources(mac_client_handle_t,
     mac_resource_props_t *);
 extern void mac_client_get_resources(mac_client_handle_t,
     mac_resource_props_t *);
+
+/* bridging-related interfaces */
+extern int mac_set_pvid(mac_handle_t, uint16_t);
+extern uint16_t mac_get_pvid(mac_handle_t);
+extern uint32_t mac_get_llimit(mac_handle_t);
+extern uint32_t mac_get_ldecay(mac_handle_t);
 
 extern int mac_share_capable(mac_handle_t);
 extern int mac_share_bind(mac_client_handle_t, uint64_t, uint64_t *);

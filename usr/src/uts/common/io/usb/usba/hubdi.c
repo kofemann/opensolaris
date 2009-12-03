@@ -47,6 +47,11 @@
 #include <sys/strsun.h>
 
 /*
+ * External functions
+ */
+extern boolean_t consconfig_console_is_ready(void);
+
+/*
  * Prototypes for static functions
  */
 static	int	usba_hubdi_bus_ctl(
@@ -145,8 +150,7 @@ usb_log_handle_t	hubdi_log_handle;
 uint_t			hubdi_errlevel = USB_LOG_L4;
 uint_t			hubdi_errmask = (uint_t)-1;
 uint8_t			hubdi_min_pm_threshold = 5; /* seconds */
-extern int modrootloaded;
-
+uint8_t			hubdi_reset_delay = 20; /* seconds */
 
 /*
  * initialize private data
@@ -1280,6 +1284,85 @@ usba_hubdi_bus_ctl(dev_info_t *dip,
 	return (retval);
 }
 
+/*
+ * hubd_config_one:
+ * 	enumerate one child according to 'port'
+ */
+
+static boolean_t
+hubd_config_one(hubd_t *hubd, int port)
+{
+	uint16_t	status, change;
+	dev_info_t	*hdip = hubd->h_dip;
+	dev_info_t	*rh_dip = hubd->h_usba_device->usb_root_hub_dip;
+	boolean_t	online_child = B_FALSE, found = B_FALSE;
+	int		prh_circ, rh_circ, circ;
+
+	USB_DPRINTF_L4(DPRINT_MASK_HOTPLUG, hubd->h_log_handle,
+	    "hubd_config_one:  started, hubd_reset_port = 0x%x", port);
+
+	ndi_hold_devi(hdip); /* so we don't race with detach */
+
+	mutex_enter(HUBD_MUTEX(hubd));
+
+	hubd_pm_busy_component(hubd, hubd->h_dip, 0);
+	hubd_stop_polling(hubd);
+
+	mutex_exit(HUBD_MUTEX(hubd));
+
+	/*
+	 * this ensures one config activity per system at a time.
+	 * we enter the parent PCI node to have this serialization.
+	 * this also excludes ioctls and deathrow thread
+	 */
+	ndi_devi_enter(ddi_get_parent(rh_dip), &prh_circ);
+	ndi_devi_enter(rh_dip, &rh_circ);
+
+	/* exclude other threads */
+	ndi_devi_enter(hdip, &circ);
+	mutex_enter(HUBD_MUTEX(hubd));
+
+	if (!hubd->h_children_dips[port]) {
+
+		(void) hubd_determine_port_status(hubd, port,
+		    &status, &change, HUBD_ACK_ALL_CHANGES);
+
+		if (status & PORT_STATUS_CCS) {
+			online_child |=	(hubd_handle_port_connect(hubd,
+			    port) == USB_SUCCESS);
+			found = online_child;
+		}
+	} else {
+		found = B_TRUE;
+	}
+
+	mutex_exit(HUBD_MUTEX(hubd));
+
+	ndi_devi_exit(hdip, circ);
+	ndi_devi_exit(rh_dip, rh_circ);
+	ndi_devi_exit(ddi_get_parent(rh_dip), prh_circ);
+
+	if (online_child) {
+		USB_DPRINTF_L3(DPRINT_MASK_HOTPLUG, hubd->h_log_handle,
+		    "hubd_config_one: onlining child");
+
+		(void) ndi_devi_online(hubd->h_dip, 0);
+	}
+
+	mutex_enter(HUBD_MUTEX(hubd));
+
+	hubd_start_polling(hubd, 0);
+	(void) hubd_pm_idle_component(hubd, hubd->h_dip, 0);
+
+	USB_DPRINTF_L4(DPRINT_MASK_HOTPLUG, hubd->h_log_handle,
+	    "hubd_config_one: exit");
+
+	mutex_exit(HUBD_MUTEX(hubd));
+
+	ndi_rele_devi(hdip);
+
+	return (found);
+}
 
 /*
  * bus enumeration entry points
@@ -1290,6 +1373,7 @@ hubd_bus_config(dev_info_t *dip, uint_t flag, ddi_bus_config_op_t op,
 {
 	hubd_t	*hubd = hubd_get_soft_state(dip);
 	int	rval, circ;
+	long port;
 
 	USB_DPRINTF_L4(DPRINT_MASK_PM, hubd->h_log_handle,
 	    "hubd_bus_config: op=%d", op);
@@ -1298,61 +1382,26 @@ hubd_bus_config(dev_info_t *dip, uint_t flag, ddi_bus_config_op_t op,
 		flag |= NDI_DEVI_DEBUG;
 	}
 
-	/*
-	 * NOTE: we want to delay the mountroot thread which
-	 * exclusively does a BUS_CONFIG_ONE, but not the
-	 * USB hotplug threads which do the asynchronous
-	 * enumeration exlusively via BUS_CONFIG_ALL.
-	 */
-	if (!modrootloaded && op == BUS_CONFIG_ONE) {
-		dev_info_t *cdip;
-		int port, found;
+	if (op == BUS_CONFIG_ONE) {
+		boolean_t found;
 		char cname[80];
-		int i;
 		char *name, *addr;
+
+		USB_DPRINTF_L2(DPRINT_MASK_PM, hubd->h_log_handle,
+		    "hubd_bus_config: op=%d (BUS_CONFIG_ONE)", op);
 
 		(void) snprintf(cname, 80, "%s", (char *)arg);
 		/* split name into "name@addr" parts */
 		i_ddi_parse_name(cname, &name, &addr, NULL);
-		USB_DPRINTF_L2(DPRINT_MASK_PM, hubd->h_log_handle,
-		    "hubd_bus_config: op=%d (BUS_CONFIG_ONE)", op);
-
-		found = 0;
-
-		/*
-		 * Wait until the device node on the rootpath has
-		 * been enumerated by USB hotplug thread. Current
-		 * set 10 seconds timeout because if the device is
-		 * behind multiple hubs, hub config time at each
-		 * layer needs several hundred milliseconds and
-		 * all config time maybe take several seconds.
-		 */
-
-		for (i = 0; i < 100; i++) {
-			mutex_enter(HUBD_MUTEX(hubd));
-			for (port = 1;
-			    port <= hubd->h_hub_descr.bNbrPorts; port++) {
-				cdip = hubd->h_children_dips[port];
-				if (!cdip || i_ddi_node_state(cdip) <
-				    DS_INITIALIZED)
-					continue;
-				if (strcmp(name, DEVI(cdip)->devi_node_name))
-					continue;
-				if (strcmp(addr, DEVI(cdip)->devi_addr))
-					continue;
-				found = 1;
-				break;
-			}
-			mutex_exit(HUBD_MUTEX(hubd));
-
-			if (found)
-				break;
-			delay(drv_usectohz(100000));
+		if (addr && *addr) {
+			(void) ddi_strtol(addr, NULL, 16, &port);
+		} else {
+			return (NDI_FAILURE);
 		}
+
+		found = hubd_config_one(hubd, port);
+
 		if (found == 0) {
-			cmn_err(CE_WARN,
-			    "hubd_bus_config: failed for config child %s",
-			    (char *)arg);
 			return (NDI_FAILURE);
 		}
 
@@ -3603,6 +3652,16 @@ hubd_hotplug_thread(void *arg)
 	USB_DPRINTF_L4(DPRINT_MASK_HOTPLUG, hubd->h_log_handle,
 	    "hubd_hotplug_thread:  started");
 
+	/*
+	 * Before console is init'd, we temporarily block the hotplug
+	 * threads so that BUS_CONFIG_ONE through hubd_bus_config() can be
+	 * processed quickly. This reduces the time needed for vfs_mountroot()
+	 * to mount the root FS from a USB disk.
+	 */
+	while (!consconfig_console_is_ready()) {
+		delay(drv_usectohz(10000));
+	}
+
 	kmem_free(arg, sizeof (hubd_hotplug_arg_t));
 
 	/*
@@ -3912,41 +3971,7 @@ hubd_hotplug_thread(void *arg)
 		USB_DPRINTF_L3(DPRINT_MASK_HOTPLUG, hubd->h_log_handle,
 		    "hubd_hotplug_thread: onlining children");
 
-		/*
-		 * When mountroot thread is doing BUS_CONFIG_ONE,
-		 * don't attach driver on irrelevant nodes, just
-		 * configure them to initialized status. Devfs
-		 * will induce the attach later.
-		 */
-		if (modrootloaded) {
-			(void) ndi_devi_online(hubd->h_dip, 0);
-		} else {
-			for (port = 1; port <= nports; port++) {
-				dev_info_t *dip;
-
-				mutex_enter(HUBD_MUTEX(hubd));
-				dip = hubd->h_children_dips[port];
-				mutex_exit(HUBD_MUTEX(hubd));
-				if (dip) {
-					int circ, rv;
-					dev_info_t *pdip = ddi_get_parent(dip);
-					ndi_devi_enter(pdip, &circ);
-					rv = i_ndi_config_node(dip,
-					    DS_INITIALIZED, 0);
-
-					if (rv != NDI_SUCCESS) {
-						USB_DPRINTF_L0(
-						    DPRINT_MASK_HOTPLUG,
-						    hubd->h_log_handle,
-						    "hubd_hotplug_thread:"
-						    "init node %s@%s failed",
-						    DEVI(dip)->devi_node_name,
-						    DEVI(dip)->devi_addr);
-					}
-					ndi_devi_exit(pdip, circ);
-				}
-			}
-		}
+		(void) ndi_devi_online(hubd->h_dip, 0);
 	}
 
 	/* now check if any disconnected devices need to be cleaned up */
@@ -4577,7 +4602,7 @@ hubd_reset_port(hubd_t *hubd, usb_port_t port)
 	uint16_t status;
 	uint16_t change;
 	int	i;
-	clock_t	current_time;
+	clock_t	delta;
 
 	USB_DPRINTF_L4(DPRINT_MASK_PORT, hubd->h_log_handle,
 	    "hubd_reset_port: port=%d", port);
@@ -4614,6 +4639,7 @@ hubd_reset_port(hubd_t *hubd, usb_port_t port)
 	/*
 	 * wait for port status change event
 	 */
+	delta = drv_usectohz(hubd_device_delay / 10);
 	for (i = 0; i < hubd_retry_enumerate; i++) {
 		/*
 		 * start polling ep1 for receiving notification on
@@ -4625,12 +4651,9 @@ hubd_reset_port(hubd_t *hubd, usb_port_t port)
 		 * sleep a max of 100ms for reset completion
 		 * notification to be received
 		 */
-		current_time = ddi_get_lbolt();
 		if (hubd->h_port_reset_wait & port_mask) {
-			rval = cv_timedwait(&hubd->h_cv_reset_port,
-			    &hubd->h_mutex,
-			    current_time +
-			    drv_usectohz(hubd_device_delay / 10));
+			rval = cv_reltimedwait(&hubd->h_cv_reset_port,
+			    &hubd->h_mutex, delta, TR_CLOCK_TICK);
 			if ((rval <= 0) &&
 			    (hubd->h_port_reset_wait & port_mask)) {
 				/* we got woken up because of a timeout */
@@ -8574,7 +8597,7 @@ usba_hubdi_decr_power_budget(dev_info_t *dip, usba_device_t *child_ud)
 static int
 hubd_wait_for_hotplug_exit(hubd_t *hubd)
 {
-	clock_t		until = ddi_get_lbolt() + drv_usectohz(1000000);
+	clock_t		until = drv_usectohz(1000000);
 	int		rval;
 
 	ASSERT(mutex_owned(HUBD_MUTEX(hubd)));
@@ -8582,8 +8605,8 @@ hubd_wait_for_hotplug_exit(hubd_t *hubd)
 	if (hubd->h_hotplug_thread) {
 		USB_DPRINTF_L3(DPRINT_MASK_HOTPLUG, hubd->h_log_handle,
 		    "waiting for hubd hotplug thread exit");
-		rval = cv_timedwait(&hubd->h_cv_hotplug_dev,
-		    &hubd->h_mutex, until);
+		rval = cv_reltimedwait(&hubd->h_cv_hotplug_dev,
+		    &hubd->h_mutex, until, TR_CLOCK_TICK);
 
 		if ((rval <= 0) && (hubd->h_hotplug_thread)) {
 
@@ -8616,6 +8639,8 @@ hubd_reset_thread(void *arg)
 	boolean_t	online_child = B_FALSE;
 	int		prh_circ, rh_circ, circ, devinst;
 	char		*devname;
+	int		i = 0;
+	int		rval = USB_FAILURE;
 
 	USB_DPRINTF_L4(DPRINT_MASK_HOTPLUG, hubd->h_log_handle,
 	    "hubd_reset_thread:  started, hubd_reset_port = 0x%x", reset_port);
@@ -8694,11 +8719,46 @@ hubd_reset_thread(void *arg)
 		mutex_exit(HUBD_MUTEX(hubd));
 		/* First disconnect the device */
 		hubd_post_event(hubd, reset_port, USBA_EVENT_TAG_HOT_REMOVAL);
+
+		/* delete cached dv_node's but drop locks first */
+		ndi_devi_exit(hdip, circ);
+		ndi_devi_exit(rh_dip, rh_circ);
+		ndi_devi_exit(ddi_get_parent(rh_dip), prh_circ);
+
+		(void) devfs_clean(rh_dip, NULL, DV_CLEAN_FORCE);
+
+		/*
+		 * workaround only for storage device. When it's able to force
+		 * detach a driver, this code can be removed safely.
+		 *
+		 * If we're to reset storage device and the device is used, we
+		 * will wait at most extra 20s for applications to exit and
+		 * close the device. This is especially useful for HAL-based
+		 * applications.
+		 */
+		if ((strcmp(devname, "scsa2usb") == 0) &&
+		    DEVI(child_dip)->devi_ref != 0) {
+			while (i++ < hubdi_reset_delay) {
+				mutex_enter(HUBD_MUTEX(hubd));
+				rval = hubd_delete_child(hubd, reset_port,
+				    NDI_DEVI_REMOVE, B_FALSE);
+				mutex_exit(HUBD_MUTEX(hubd));
+				if (rval == USB_SUCCESS)
+					break;
+
+				delay(drv_usectohz(1000000)); /* 1s */
+			}
+		}
+
+		ndi_devi_enter(ddi_get_parent(rh_dip), &prh_circ);
+		ndi_devi_enter(rh_dip, &rh_circ);
+		ndi_devi_enter(hdip, &circ);
+
 		mutex_enter(HUBD_MUTEX(hubd));
 
 		/* Then force detaching the device */
-		if (hubd_delete_child(hubd, reset_port, NDI_DEVI_REMOVE,
-		    B_FALSE) != USB_SUCCESS) {
+		if ((rval != USB_SUCCESS) && (hubd_delete_child(hubd,
+		    reset_port, NDI_DEVI_REMOVE, B_FALSE) != USB_SUCCESS)) {
 			USB_DPRINTF_L0(DPRINT_MASK_HOTPLUG, hubd->h_log_handle,
 			    "%s%d cannot be reset due to other applications "
 			    "are using it, please first close these "
@@ -8813,27 +8873,37 @@ usba_hubdi_reset_device(dev_info_t *dip, usb_dev_reset_lvl_t reset_level)
 	int			rval = USB_FAILURE;
 
 	if ((!dip) || usba_is_root_hub(dip)) {
+		USB_DPRINTF_L2(DPRINT_MASK_ATTA, hubdi_log_handle,
+		    "usba_hubdi_reset_device: NULL dip or root hub");
 
 		return (USB_INVALID_ARGS);
 	}
 
 	if (!usb_owns_device(dip)) {
+		USB_DPRINTF_L2(DPRINT_MASK_ATTA, hubdi_log_handle,
+		    "usba_hubdi_reset_device: Not owns the device");
 
 		return (USB_INVALID_PERM);
 	}
 
 	if ((reset_level != USB_RESET_LVL_REATTACH) &&
 	    (reset_level != USB_RESET_LVL_DEFAULT)) {
+		USB_DPRINTF_L2(DPRINT_MASK_ATTA, hubdi_log_handle,
+		    "usba_hubdi_reset_device: Unknown flags");
 
 		return (USB_INVALID_ARGS);
 	}
 
 	if ((hdip = ddi_get_parent(dip)) == NULL) {
+		USB_DPRINTF_L2(DPRINT_MASK_ATTA, hubdi_log_handle,
+		    "usba_hubdi_reset_device: fail to get parent hub");
 
 		return (USB_INVALID_ARGS);
 	}
 
 	if ((hubd = hubd_get_soft_state(hdip)) == NULL) {
+		USB_DPRINTF_L2(DPRINT_MASK_ATTA, hubdi_log_handle,
+		    "usba_hubdi_reset_device: fail to get hub softstate");
 
 		return (USB_INVALID_ARGS);
 	}

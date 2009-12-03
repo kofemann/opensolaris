@@ -37,7 +37,7 @@
  * that is not the case anymore.
  */
 
-#include <smbsrv/smb_incl.h>
+#include <smbsrv/smb_kproto.h>
 #include <smbsrv/smb_fsops.h>
 #include <inet/tcp.h>
 
@@ -454,6 +454,7 @@ smb_oplock_wait(smb_node_t *node)
 	smb_oplock_t	*ol = &node->n_oplock;
 
 	if ((ol->ol_xthread != NULL) && (ol->ol_xthread != curthread)) {
+		ASSERT(!MUTEX_HELD(&ol->ol_ofile->f_mutex));
 		while (ol->ol_xthread != NULL)
 			cv_wait(&ol->ol_cv, &node->n_mutex);
 	}

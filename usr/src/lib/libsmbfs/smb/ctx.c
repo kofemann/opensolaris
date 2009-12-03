@@ -241,6 +241,7 @@ smb_ctx_init(struct smb_ctx *ctx)
 		return (error);
 
 	ctx->ct_dev_fd = -1;
+	ctx->ct_door_fd = -1;
 	ctx->ct_tran_fd = -1;
 	ctx->ct_parsedlevel = SMBL_NONE;
 	ctx->ct_minlevel = SMBL_NONE;
@@ -396,6 +397,10 @@ smb_ctx_done(struct smb_ctx *ctx)
 	if (ctx->ct_dev_fd != -1) {
 		close(ctx->ct_dev_fd);
 		ctx->ct_dev_fd = -1;
+	}
+	if (ctx->ct_door_fd != -1) {
+		close(ctx->ct_door_fd);
+		ctx->ct_door_fd = -1;
 	}
 	if (ctx->ct_tran_fd != -1) {
 		close(ctx->ct_tran_fd);
@@ -847,6 +852,22 @@ smb_ctx_setsrvaddr(struct smb_ctx *ctx, const char *addr)
 	return (0);
 }
 
+/*
+ * API for library caller to set signing enabled, required
+ * Note: if not enable, ignore require
+ */
+int
+smb_ctx_setsigning(struct smb_ctx *ctx, int enable, int require)
+{
+	ctx->ct_vopt &= ~SMBVOPT_SIGNING_MASK;
+	if (enable) {
+		ctx->ct_vopt |=	SMBVOPT_SIGNING_ENABLED;
+		if (require)
+			ctx->ct_vopt |=	SMBVOPT_SIGNING_REQUIRED;
+	}
+	return (0);
+}
+
 static int
 smb_parse_owner(char *pair, uid_t *uid, gid_t *gid)
 {
@@ -1013,14 +1034,18 @@ smb_ctx_resolve(struct smb_ctx *ctx)
 #endif	/* KICONV_SUPPORT */
 
 	/*
-	 * Lookup the IP address.
-	 * Puts a list in ct_addrinfo
+	 * Lookup the IP address and fill in ct_addrinfo.
+	 *
+	 * Note: smb_ctx_getaddr() returns a EAI_xxx
+	 * error value like getaddrinfo(3), but this
+	 * function needs to return an errno value.
 	 */
 	error = smb_ctx_getaddr(ctx);
 	if (error) {
+		const char *ais = gai_strerror(error);
 		smb_error(dgettext(TEXT_DOMAIN,
-		    "can't get server address"), error);
-		return (error);
+		    "can't get server address, %s"), 0, ais);
+		return (ENODATA);
 	}
 	assert(ctx->ct_addrinfo != NULL);
 
@@ -1364,17 +1389,12 @@ smb_ctx_readrcsection(struct smb_ctx *ctx, const char *sname, int level)
 			 * "signing" was set in this section; override
 			 * the current signing settings.
 			 */
-			ctx->ct_vopt &= ~SMBVOPT_SIGNING_MASK;
 			if (strcmp(p, "disabled") == 0) {
-				/* leave flags zero (expr for lint) */
-				(void) ctx->ct_vopt;
+				smb_ctx_setsigning(ctx, FALSE, FALSE);
 			} else if (strcmp(p, "enabled") == 0) {
-				ctx->ct_vopt |=
-				    SMBVOPT_SIGNING_ENABLED;
+				smb_ctx_setsigning(ctx, TRUE, FALSE);
 			} else if (strcmp(p, "required") == 0) {
-				ctx->ct_vopt |=
-				    SMBVOPT_SIGNING_ENABLED |
-				    SMBVOPT_SIGNING_REQUIRED;
+				smb_ctx_setsigning(ctx, TRUE, TRUE);
 			} else {
 				/*
 				 * Unknown "signing" value.

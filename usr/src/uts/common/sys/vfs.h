@@ -41,6 +41,7 @@
 #include <sys/statvfs.h>
 #include <sys/refstr.h>
 #include <sys/avl.h>
+#include <sys/time.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -187,6 +188,8 @@ typedef struct vfs_impl {
 	vsk_anchor_t	*vi_vskap;		/* anchor for vopstats' kstat */
 	vopstats_t	*vi_fstypevsp;		/* ptr to per-fstype vopstats */
 	vopstats_t	vi_vopstats;		/* per-mount vnode op stats */
+
+	timespec_t	vi_hrctime; 		/* High-res creation time */
 } vfs_impl_t;
 
 
@@ -258,6 +261,7 @@ typedef struct vfs {
 #define	vfs_vskap	vfs_implp->vi_vskap
 #define	vfs_fstypevsp	vfs_implp->vi_fstypevsp
 #define	vfs_vopstats	vfs_implp->vi_vopstats
+#define	vfs_hrctime	vfs_implp->vi_hrctime
 
 /*
  * VFS flags.
@@ -297,6 +301,7 @@ typedef	uint64_t	vfs_feature_t;
 #define	VFSFT_ACEMASKONACCESS	0x100000020	/* Can use ACEMASK for access */
 #define	VFSFT_SYSATTR_VIEWS	0x100000040	/* Supports sysattr view i/f */
 #define	VFSFT_ACCESS_FILTER	0x100000080	/* dirents filtered by access */
+#define	VFSFT_REPARSE		0x100000100	/* Supports reparse point */
 
 /*
  * Argument structure for mount(2).

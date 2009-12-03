@@ -1891,117 +1891,650 @@ Use is subject to license terms.
 
 <!-- TPM events recorded by tcsd(8) -->
 
-    <event id="AUE_tpm_takeownership" instance_of="AUE_generic_basic"
+    <event id="AUE_generic_tpm" type="generic" omit="always">
+	<entry id="subject">
+	    <internal token="subject"/>
+	    <external opt="none"/>
+	</entry>
+	<entry id="message">
+		<internal token="text"/>
+		<external opt="optional" type="msg tpm_e"/>
+		<comment>TPM error message</comment>
+	</entry>
+	<entry id="return">
+	    <internal token="return"/>
+	    <external opt="none"/>
+	</entry>
+    </event>
+
+    <event id="AUE_tpm_takeownership" instance_of="AUE_generic_tpm"
 	header="0" idNo="99" omit="JNI">
 	<title>TPM_TakeOwnership</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_setoperatorauth" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_setoperatorauth" instance_of="AUE_generic_tpm"
 	header="0" idNo="100" omit="JNI">
 	<title>TPM_SetOperatorAuth</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_setownerinstall" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_setownerinstall" instance_of="AUE_generic_tpm"
 	header="0" idNo="101" omit="JNI">
 	<title>TPM_SetOwnerInstall</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_selftestfull" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_selftestfull" instance_of="AUE_generic_tpm"
 	header="0" idNo="102" omit="JNI">
 	<title>TPM_SelfTestFull</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_certifyselftest" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_certifyselftest" instance_of="AUE_generic_tpm"
 	header="0" idNo="103" omit="JNI">
 	<title>TPM_CertifySelfTest</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_continueselftest" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_continueselftest" instance_of="AUE_generic_tpm"
 	header="0" idNo="104" omit="JNI">
 	<title>TPM_ContinueSelfTest</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_ownersetdisable" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_ownersetdisable" instance_of="AUE_generic_tpm"
 	header="0" idNo="105" omit="JNI">
 	<title>TPM_OwnerSetDisable</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_ownerclear" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_ownerclear" instance_of="AUE_generic_tpm"
 	header="0" idNo="106" omit="JNI">
 	<title>TPM_OwnerClear</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_disableownerclear" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_disableownerclear" instance_of="AUE_generic_tpm"
 	header="0" idNo="107" omit="JNI">
 	<title>TPM_DisableOwnerClear</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_forceclear" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_forceclear" instance_of="AUE_generic_tpm"
 	header="0" idNo="108" omit="JNI">
 	<title>TPM_ForceClear</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_disableforceclear" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_disableforceclear" instance_of="AUE_generic_tpm"
 	header="0" idNo="109" omit="JNI">
 	<title>TPM_DisableForceClear</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_physicaldisable" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_physicaldisable" instance_of="AUE_generic_tpm"
 	header="0" idNo="110" omit="JNI">
 	<title>TPM_PhysicalDisable</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_physicalenable" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_physicalenable" instance_of="AUE_generic_tpm"
 	header="0" idNo="111" omit="JNI">
 	<title>TPM_PhysicalEnsable</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_physicaldeactivate" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_physicaldeactivate" instance_of="AUE_generic_tpm"
 	header="0" idNo="112" omit="JNI">
 	<title>TPM_PhysicalSetDeactivated</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_settempdeactivated" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_settempdeactivated" instance_of="AUE_generic_tpm"
 	header="0" idNo="113" omit="JNI">
 	<title>TPM_SetTempDeactivated</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_physicalpresence" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_physicalpresence" instance_of="AUE_generic_tpm"
 	header="0" idNo="114" omit="JNI">
 	<title>TPM_PhysicalPresence</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_fieldupgrade" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_fieldupgrade" instance_of="AUE_generic_tpm"
 	header="0" idNo="115" omit="JNI">
 	<title>TPM_FieldUpgrade</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
-    <event id="AUE_tpm_resetlockvalue" instance_of="AUE_generic_basic"
+    <event id="AUE_tpm_resetlockvalue" instance_of="AUE_generic_tpm"
 	header="0" idNo="116" omit="JNI">
 	<title>TPM_ResetLockValue</title>
 	<program>/usr/lib/tcsd</program>
 	<see>tcsd(8)</see>
     </event>
 
+<!-- hotplug events recorded by hotplugd(1m) -->
+
+    <event id="AUE_hotplug_state" header="0" idNo="117" omit="JNI">
+        <title>change hotplug connection state</title>
+        <program>/usr/lib/hotplugd</program>
+        <see>hotplugd(1M)</see>
+	<entry id="subject">
+	    <internal token="subject"/>
+	    <external opt="none"/>
+	</entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+        <entry id="device_path">
+            <internal token="path"/>
+            <external opt="required" type="char *"/>
+            <comment>device path</comment>
+        </entry>
+        <entry id="connection">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>connector or port</comment>
+        </entry>
+        <entry id="new_state">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>new connection state</comment>
+        </entry>
+        <entry id="old_state">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>old connection state</comment>
+        </entry>
+	<entry id="return">
+	    <internal token="return"/>
+	    <external opt="none"/>
+	</entry>
+    </event>
+
+    <event id="AUE_hotplug_set" header="0" idNo="118" omit="JNI">
+        <title>set hotplug bus private options</title>
+        <program>/usr/lib/hotplugd</program>
+        <see>hotplugd(1M)</see>
+	<entry id="subject">
+	    <internal token="subject"/>
+	    <external opt="none"/>
+	</entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+        <entry id="device_path">
+            <internal token="path"/>
+            <external opt="required" type="char *"/>
+            <comment>device path</comment>
+        </entry>
+        <entry id="connection">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>connector or port</comment>
+        </entry>
+        <entry id="options">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>bus private options</comment>
+        </entry>
+	<entry id="return">
+	    <internal token="return"/>
+	    <external opt="none"/>
+	</entry>
+    </event>
+
+    <event id="AUE_ilb_create_healthcheck" header="0" idNo="120" omit="JNI">
+        <title>Integrated Loadbalancer</title>
+        <program>/usr/sbin/ilbadm</program>
+        <see>ilbadm(1m)</see>
+        <entry id="subject">
+            <internal token="subject"/>
+            <external opt="none"/>
+        </entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+        <entry id="hc_test">
+            <internal token="path"/>
+            <external opt="required" type="char *"/>
+            <comment>healthcheck type-PING,TCP,UDP or 3rd party script</comment>
+        </entry>
+        <entry id="hc_name">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>healthcheck name</comment>
+        </entry>
+        <entry id="hc_timeout">
+            <internal token="text"/>
+            <external opt="required" type="int32_t" />
+            <comment>timeout(secs) to kill a hung healthcheck probe
+		- 0 means default value (see man page)
+	    </comment>
+        </entry>
+        <entry id="hc_count">
+            <internal token="text"/>
+            <external opt="required" type="int"/>
+            <comment>number of times to run a health check probe
+		before declaring a server to be dead - 0 means
+		default value (see man page)
+	    </comment>
+        </entry>
+        <entry id="hc_interval">
+            <internal token="text"/>
+            <external opt="required" type="int32_t"/>
+            <comment>time(secs) between 2 healthcheck events -
+		0 means default value(see man page)
+	    </comment>
+        </entry>
+        <entry id="return">
+            <internal token="return"/>
+	    <external opt="none"/>
+        </entry>
+    </event> 
+
+    <event id="AUE_ilb_delete_healthcheck" header="0" idNo="121" omit="JNI">
+        <title>Integrated Loadbalancer</title>
+        <program>/usr/sbin/ilbadm</program>
+        <see>ilbadm(1m)</see>
+        <entry id="subject">
+            <internal token="subject"/>
+            <external opt="none"/>
+        </entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+        <entry id="hc_name">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>healthcheck name</comment>
+        </entry>
+        <entry id="return">
+            <internal token="return"/>
+	    <external opt="none"/>
+        </entry>
+    </event>
+
+    <!--
+	virtual_address and proxy-src token are set to be char *.
+	But they should be in6_addr See audit bug 6864075 	.
+     -->
+    <event id="AUE_ilb_create_rule" header="0" idNo="122" omit="JNI">
+        <title>Integrated Loadbalancer</title>
+	<program>/usr/sbin/ilbadm</program>
+	<see>ilbadm(1m)</see>
+	<entry id="subject">
+	    <internal token="subject"/>
+	    <external opt="none"/>
+	</entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+	<entry id="virtual_ipaddress">
+	    <internal token="text"/>
+	    <external opt="required" type="char *"/>
+	    <comment>LB virtual IP address</comment>
+	</entry>
+	<entry id="min_port">
+	    <internal token="text"/>
+	    <external opt="required" type="uint32_t"/>
+	    <comment>minimum value in port range</comment>
+	</entry>
+	<entry id="max_port">
+	    <internal token="text"/>
+	    <external opt="required" type="uint32_t"/>
+	    <comment>maximum value in port range - max=min means single
+		port is specified
+	    </comment>
+	</entry>
+	<entry id="protocol">
+	    <internal token="text"/>
+	    <external opt="required" type="char *"/>
+	    <comment>protocol</comment>
+	</entry>
+        <entry id="algo_optype">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>[rr,hip,hipp,hipv],[dsr,nat,half-nat]</comment>
+        </entry>
+        <entry id="proxy_src">
+            <internal token="text"/>
+            <external opt="optional" type="char *"/>
+            <comment>proxy source address for NAT - may be single
+		address or a address range
+	    </comment>
+        </entry>
+        <entry id="persist_mask">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>prefix length</comment>
+        </entry>
+        <entry id="hcname">
+            <internal token="text"/>
+            <external opt="optional" type="char *"/>
+            <comment>healthcheck name</comment>
+        </entry>
+        <entry id="hcport">
+            <internal token="text"/>
+            <external opt="optional" type="char *"/>
+            <comment>healthcheck port - ANY(dynamically determined by ilbd)
+		or a positive integer
+	    </comment>
+        </entry>
+        <entry id="conndrain_timeout">
+            <internal token="text"/>
+            <external opt="required" type="uint32_t"/>
+            <comment>connection timeout for NAT/half-NAT in sec. - 0 means
+		no forced removal)
+	    </comment>
+	</entry>
+        <entry id="nat_timeout">
+            <internal token="text"/>
+            <external opt="required" type="uint32_t"/>
+            <comment>nat entry timeout for NAT/half-NAT in sec - 0 means
+		default value(see man page)
+	    </comment>
+	</entry>
+        <entry id="persist_timeout">
+            <internal token="text"/>
+            <external opt="required" type="uint32_t"/>
+            <comment>session persistence mapping in sec - 0 means no
+		persistence
+	    </comment>
+	</entry>
+        <entry id="server_group">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>server group name</comment>
+        </entry>
+        <entry id="rule_name">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>rule name</comment>
+        </entry>
+        <entry id="return">
+            <internal token="return"/>
+	    <external opt="none"/>
+        </entry>
+    </event>
+
+<!-- generic ILB rule event -->
+
+    <event id="AUE_generic_ILB_rule" type="generic" omit="always">
+	<entry id="subject">
+	    <internal token="subject"/>
+	    <external opt="none"/>
+	</entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+	<entry id="rule_name">
+	    <internal token="text"/>
+	    <external opt="required" type="char *"/>
+	    <comment>rule name - "all" means all rules</comment>
+	</entry>
+	<entry id="return">
+	    <internal token="return"/>
+	    <external opt="none"/>
+	</entry>
+    </event>
+
+<!--  instances of the ILB generic rule  event. -->
+    <event id="AUE_ilb_delete_rule" instance_of="AUE_generic_ILB_rule"
+        header="0" idNo="123">
+        <title>Integrated Loadbalancer</title>
+        <program>/usr/sbin/ilbadm</program>
+        <see>ilbadm(1m)</see>
+    </event>
+
+    <event id="AUE_ilb_disable_rule" instance_of="AUE_generic_ILB_rule"
+        header="0" idNo="124">
+        <title>Integrated Loadbalancer</title>
+        <program>/usr/sbin/ilbadm</program>
+        <see>ilbadm(1m)</see>
+    </event>
+
+    <event id="AUE_ilb_enable_rule" instance_of="AUE_generic_ILB_rule"
+        header="0" idNo="125">
+        <title>Integrated Loadbalancer</title>
+        <program>/usr/sbin/ilbadm</program>
+        <see>ilbadm(1m)</see>
+    </event>
+
+    <!--
+	server_ipaddress token is set to be char *. But it should be
+	in6_addr See audit bug 6864075.
+     -->
+    <event id="AUE_ilb_add_server" header="0" idNo="126" omit="JNI">
+        <title>Integrated Loadbalancer</title>
+        <program>/usr/sbin/ilbadm</program>
+        <see>ilbadm(1m)</see>
+        <entry id="subject">
+            <internal token="subject"/>
+            <external opt="none"/>
+        </entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+        <entry id="server_ipaddress">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>IP address</comment>
+        </entry>
+        <entry id="server_id">
+            <internal token="text"/>
+            <external opt="optional" type="char *"/>
+            <comment>serverid that corresponds IP address - empty
+		if authorization fails, user specified IP address
+		is invalid or server cannot be added because
+		server group is full
+	    </comment>  
+        </entry>
+        <entry id="server_group">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>server group name</comment>
+        </entry>
+	<entry id="server_minport">
+	    <internal token="text"/>
+	    <external opt="optional" type="uint32_t" />
+	    <comment>server's minimum value in port range - empty
+		means default value (see man page)
+	    </comment>
+	</entry>
+	<entry id="server_maxport">
+	    <internal token="text"/>
+	    <external opt="optional" type="uint32_t" />
+	    <comment>server's maximum value in port range - empty 
+		means default value(see man page)
+	    </comment>
+	</entry>
+        <entry id="return">
+            <internal token="return"/>
+	    <external opt="none"/>
+        </entry>
+    </event> 
+
+    <!--
+	server_ipaddress token is set to be char *. But it should be
+	in6_addr See audit bug 6864075.
+     -->
+    <event id="AUE_ilb_disable_server" header="0" idNo="127" omit="JNI">
+        <title>Integrated Loadbalancer</title>
+        <program>/usr/sbin/ilbadm</program>
+        <see>ilbadm(1m)</see>
+        <entry id="subject">
+            <internal token="subject"/>
+            <external opt="none"/>
+        </entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+        <entry id="server_id">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>serverid</comment>
+        </entry>
+        <entry id="server_ipaddress">
+            <internal token="text"/>
+            <external opt="optional" type="char *"/>
+            <comment>IPaddr corresponding to the serverid - empty
+		if authorization fails, or user specified serverid
+		is nonexistent
+	    </comment>
+        </entry>
+        <entry id="return">
+            <internal token="return"/>
+	    <external opt="none"/>
+        </entry>
+    </event> 
+
+    <!--
+	server_ipaddress token is set to be char *. But it should be
+	in6_addr See audit bug 6864075.
+     -->
+    <event id="AUE_ilb_enable_server" header="0" idNo="128" omit="JNI">
+        <title>Integrated Loadbalancer</title>
+        <program>/usr/sbin/ilbadm</program>
+        <see>ilbadm(1m)</see>
+        <entry id="subject">
+            <internal token="subject"/>
+            <external opt="none"/>
+        </entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+        <entry id="server_id">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>serverid</comment>
+        </entry>
+        <entry id="server_ipaddress">
+            <internal token="text"/>
+            <external opt="optional" type="char *"/>
+            <comment>IPaddr corresponding to the serverid - empty
+		if authorization fails, or user specified serverid
+		is nonexistent
+	    </comment>
+        </entry>
+        <entry id="return">
+            <internal token="return"/>
+	    <external opt="none"/>
+        </entry>
+    </event> 
+
+    <!--
+	server_ipaddress token is set to be char *. But it should be
+	in6_addr See audit bug 6864075 	.
+     -->
+    <event id="AUE_ilb_remove_server" header="0" idNo="129" omit="JNI">
+        <title>Integrated Loadbalancer</title>
+        <program>/usr/sbin/ilbadm</program>
+        <see>ilbadm(1m)</see>
+        <entry id="subject">
+            <internal token="subject"/>
+            <external opt="none"/>
+        </entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+        <entry id="server_id">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>serverid</comment>
+        </entry>
+        <entry id="server_group">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>server group name</comment>
+        </entry>
+        <entry id="server_ipaddress">
+            <internal token="text"/>
+            <external opt="optional" type="char *"/>
+            <comment>IPaddr corresponding to serverid - empty
+		if authorization fails or user specified serverid
+		serverid is nonexistent
+	    </comment>
+        </entry>
+        <entry id="return">
+            <internal token="return"/>
+	    <external opt="none"/>
+        </entry>
+    </event> 
+
+    <event id="AUE_ilb_create_servergroup" header="0" idNo="130" omit="JNI">
+        <title>Integrated Loadbalancer</title>
+        <program>/usr/sbin/ilbadm</program>
+        <see>ilbadm(1m)</see>
+        <entry id="subject">
+            <internal token="subject"/>
+            <external opt="none"/>
+        </entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+        <entry id="server_group">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>server group name</comment>
+        </entry>
+        <entry id="return">
+	    <internal token="return"/>
+	    <external opt="none"/>
+	</entry>
+    </event> 
+
+    <event id="AUE_ilb_delete_servergroup" header="0" idNo="131" omit="JNI">
+        <title>Integrated Loadbalancer</title>
+        <program>/usr/sbin/ilbadm</program>
+        <see>ilbadm(1m)</see>
+        <entry id="subject">
+            <internal token="subject"/>
+            <external opt="none"/>
+        </entry>
+	<entry id="auth_used">
+	    <internal token="uauth"/>
+	    <external opt="required" type="char *"/>
+	    <comment>authorization used</comment>
+	</entry>
+        <entry id="server_group">
+            <internal token="text"/>
+            <external opt="required" type="char *"/>
+            <comment>server group name</comment>
+        </entry>
+        <entry id="return">
+            <internal token="return"/>
+            <external opt="none"/>
+        </entry>
+    </event> 
+
 <!-- add new events here with the next higher idNo -->
-<!-- Highest idNo is 116, so next is 117, then fix this comment -->
+<!-- Highest idNo is 131, so next is 132, then fix this comment -->
 <!-- end of C Only events -->
 
 <!--
@@ -2036,8 +2569,21 @@ Use is subject to license terms.
     </token>
     <token id="groups">
     </token>
+    <!--
+    	the iport token take a single argument of type uint16_t
+	if there are any other tokens following it that have arguments
+	the last of the iport tokens in the event description must
+	be followed by a dummy iport token that is optional.
+	This is to ensure proper structure alignment across all
+	compliers and architectures.
+    -->
+    <token id="iport">
+    </token>
     <!-- pseudo token; in_addr and in_port of peer -->
     <token id="in_peer">
+    </token>
+    <!-- pseudo token; specified in_addr -->
+    <token id="in_remote">
     </token>
     <token id="ipc">
     </token>
@@ -2197,6 +2743,11 @@ Use is subject to license terms.
 	<msg id="AD_FTRACE_STOP">ftrace stop</msg>
     </msg_list>
 
+<!--
+      msg list for TPM errors that will be reported by tcsd(8).
+      This list must match the order of the TPM_E_* error codes defined
+      in /usr/include/tss/tpm_error.h (SUNWtss package)
+-->
     <msg_list id="tpm_e" header="0" start="4000" public="true">
 	<msg id="AUTHFAIL">Authentication failed</msg>
 	<msg id="BADINDEX">The index to a PCR, DIR or other register is incorrect</msg>
@@ -2301,6 +2852,7 @@ Use is subject to license terms.
 	<msg id="NEEDS_SELFTEST">SelfTestFull has not been run</msg>
 	<msg id="DOING_SELFTEST">The TPM is currently executing a full selftest</msg>
 	<msg id="DEFEND_LOCK_RUNNING">TPM is defending against dictionary attacks</msg>
+	<msg id="NO_MSG"></msg>
 	<!-- End TPM failure codes -->
     </msg_list>
 </specification>

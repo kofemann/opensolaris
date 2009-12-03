@@ -31,17 +31,20 @@
 GENUNIX_SRCS =		\
 	avl.c		\
 	bio.c		\
+	bitset.c	\
 	combined.c	\
 	contract.c	\
 	cpupart.c	\
 	ctxop.c		\
 	cyclic.c	\
+	damap.c		\
 	devinfo.c	\
 	dist.c		\
 	findstack.c	\
 	fm.c		\
 	genunix.c	\
 	group.c		\
+	hotplug.c	\
 	irm.c		\
 	kgrep.c		\
 	kmem.c		\
@@ -64,6 +67,7 @@ GENUNIX_SRCS =		\
 	sobj.c		\
 	streams.c	\
 	sysevent.c	\
+	taskq.c		\
 	thread.c	\
 	tsd.c		\
 	tsol.c		\

@@ -20,7 +20,7 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #	This makefile contains the common definitions for the sun4u unix
@@ -184,7 +184,6 @@ IMPLEMENTATIONS		+= lw8
 IMPLEMENTATIONS		+= makaha 
 IMPLEMENTATIONS		+= opl 
 IMPLEMENTATIONS		+= lw2plus 
-IMPLEMENTATIONS		+= douglas
 
 $(CLOSED_BUILD)CLOSED_IMPLEMENTATIONS	= chalupa 
 $(CLOSED_BUILD)CLOSED_IMPLEMENTATIONS	+= ents 
@@ -245,8 +244,6 @@ FDOFFSETS 	 = $(UTSBASE)/sun/io/fd_offsets.in
 #
 
 MACHINE_DEFS	= -D$(PLATFORM) -D_MACHDEP -DSFMMU
-
-$(MPSAS_BUILD)MACHINE_DEFS      += -DMPSAS
 
 #
 #	Software workarounds for hardware "features"
@@ -357,7 +354,6 @@ MACH_NOT_YET_KMODS	 = $(AUTOCONF_OBJS)
 #	XXX: How many of these are really machine specific?
 #
 DRV_KMODS	+= bbc_beep
-DRV_KMODS	+= cgsix
 DRV_KMODS	+= cpc
 DRV_KMODS	+= dma fd
 DRV_KMODS	+= rootnex sbusmem upa64s zs zsh
@@ -401,7 +397,6 @@ $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= ctsmc
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= m1535ppm
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= memtest
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= mi2cv
-$(CLOSED_BUILD)CLOSED_DRV_KMODS	+= scmi2c
 $(CLOSED_BUILD)CLOSED_DRV_KMODS	+= smbus_ara
 
 #
@@ -443,7 +438,7 @@ MISC_KMODS	+= gptwo_cpu gptwocfg
 #
 #	Brand modules
 #
-BRAND_KMODS	+= sn1_brand
+BRAND_KMODS	+= sn1_brand s10_brand
 
 #
 #	Software Cryptographic Providers (/kernel/crypto):

@@ -26,6 +26,7 @@
 #ifndef	_SYS_VNIC_IMPL_H
 #define	_SYS_VNIC_IMPL_H
 
+#include <sys/cred.h>
 #include <sys/mac_provider.h>
 #include <sys/mac_client.h>
 #include <sys/mac_client_priv.h>
@@ -53,6 +54,8 @@ typedef struct vnic_s {
 	uint8_t			vn_addr[MAXMACADDRLEN];
 	size_t			vn_addr_len;
 	uint16_t		vn_vid;
+	vrid_t			vn_vrid;
+	int			vn_af;
 	boolean_t		vn_force;
 	datalink_id_t		vn_link_id;
 	mac_notify_handle_t	vn_mnh;
@@ -71,18 +74,18 @@ typedef struct vnic_s {
 #define	vn_maddr_get		vn_mma_capab.maddr_get
 
 extern int vnic_dev_create(datalink_id_t, datalink_id_t, vnic_mac_addr_type_t *,
-    int *, uchar_t *, int *, uint_t, uint16_t, mac_resource_props_t *,
-    uint32_t, vnic_ioc_diag_t *);
+    int *, uchar_t *, int *, uint_t, uint16_t, vrid_t, int,
+    mac_resource_props_t *, uint32_t, vnic_ioc_diag_t *, cred_t *);
 extern int vnic_dev_modify(datalink_id_t, uint_t, vnic_mac_addr_type_t,
     uint_t, uchar_t *, uint_t, mac_resource_props_t *);
-extern int vnic_dev_delete(datalink_id_t, uint32_t);
+extern int vnic_dev_delete(datalink_id_t, uint32_t, cred_t *);
 
 extern void vnic_dev_init(void);
 extern void vnic_dev_fini(void);
 extern uint_t vnic_dev_count(void);
 extern dev_info_t *vnic_get_dip(void);
 
-extern int vnic_info(vnic_info_t *);
+extern int vnic_info(vnic_info_t *, cred_t *);
 
 #ifdef	__cplusplus
 }

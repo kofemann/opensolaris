@@ -148,10 +148,6 @@ all_zones_files="
 	etc/shadow
 	etc/skel/.profile
 	etc/skel/local.*
-	etc/smartcard/.keys
-	etc/smartcard/desktop.properties
-	etc/smartcard/ocf.classpath
-	etc/smartcard/opencard.properties
 	etc/ssh/ssh_config
 	etc/ssh/sshd_config
 	etc/syslog.conf
@@ -222,6 +218,7 @@ global_zone_only_files="
 	kernel/drv/mpt.conf
 	kernel/drv/mpt_sas.conf
 	kernel/drv/options.conf
+	kernel/drv/pmcs.conf
 	kernel/drv/qlc.conf
 	kernel/drv/ra.conf
 	kernel/drv/scsa2usb.conf
@@ -306,6 +303,7 @@ superfluous_nonglobal_zone_files="
 	lib/svc/method/devices-audio
 	lib/svc/method/fc-fabric
 	lib/svc/method/iscsi-initiator
+	lib/svc/method/ldoms-agents
 	lib/svc/method/npivconfig
 	lib/svc/method/sf880dr
 	lib/svc/method/svc-cvcd
@@ -313,6 +311,7 @@ superfluous_nonglobal_zone_files="
 	lib/svc/method/svc-drd
 	lib/svc/method/svc-dscp
 	lib/svc/method/svc-dumpadm
+	lib/svc/method/svc-fcoei
 	lib/svc/method/svc-fcoet
 	lib/svc/method/svc-intrd
 	lib/svc/method/svc-hal
@@ -383,6 +382,7 @@ superfluous_nonglobal_zone_files="
 	var/svc/manifest/system/device/devices-audio.xml
 	var/svc/manifest/system/device/devices-fc-fabric.xml
 	var/svc/manifest/system/dumpadm.xml
+	var/svc/manifest/system/fcoe_initiator.xml
 	var/svc/manifest/system/fcoe_target.xml
 	var/svc/manifest/system/filesystem/rmvolmgr.xml
 	var/svc/manifest/system/fmd.xml
@@ -495,7 +495,6 @@ smf_inetd_conversions="
 	metamedd
 	metamhd
 	name
-	ocfserv
 	printer
 	rexd
 	rquotad
@@ -806,6 +805,37 @@ update_aac_conf()
 	mv -f /tmp/aac.conf.$$ $conffile
 }
 
+update_etc_inet_sock2path()
+{
+	#
+	# The PF_PACKET module may need to be added to the configuration
+	# file socket sockets.
+	#
+	# When being added to the system, the socket itself will remain
+	# inactive until the next reboot when soconfig is run. When being
+	# removed, the kernel configuration stays active until the system
+	# is rebooted and the sockets will continue to work until it is
+	# unloaded from the kernel, after which applications will fail.
+	#
+	sockfile=$rootprefix/etc/inet/sock2path
+	xgrep=/usr/xpg4/bin/grep
+
+	${ZCAT} ${cpiodir}/generic.usr$ZFIX | cpio -it 2>/dev/null |
+	    ${xgrep} -q sockpfp
+	if [ $? -eq 1 ] ; then
+		${xgrep} -v -E '^	32	[14]	0	sockpfp' \
+		    ${sockfile} > /tmp/sock2path.tmp.$$
+		cp /tmp/sock2path.tmp.$$ ${sockfile}
+	else
+		if ! ${xgrep} -q -E \
+		    '^	31	[14]	0	sockpfp' ${sockfile}; then
+			echo '' >> ${sockfile}
+			echo '	32	1	0	sockpfp' >> ${sockfile}
+			echo '	32	4	0	sockpfp' >> ${sockfile}
+		fi
+	fi
+}
+
 # update x86 version mpt.conf for property tape
 mpttapeprop='[ 	]*tape[ 	]*=[ 	]*"sctp"[ 	]*;'
 update_mptconf_i386()
@@ -972,6 +1002,8 @@ nfsmapid_cfg() {
 BOOMER_PRESENT_SYS=false
 BOOMER_PRESENT_BFU=false
 BOOMER_DRIVERS="audio"
+AUSTR_PRESENT_SYS=false
+AUSTR_PRESENT_BFU=false
 
 check_boomer_sys() {
 	typeset root=$1
@@ -992,6 +1024,23 @@ check_boomer_bfu() {
 	    grep devices-audio.xml > /dev/null 2>&1
 }
 
+check_austr_sys() {
+	typeset root=$1
+	typeset n2m=$root/etc/name_to_major
+	typeset drv
+
+	if ! grep -w austr $n2m > /dev/null 2>&1; then
+		return 1
+	fi
+	return 0
+}
+
+check_austr_bfu() {
+	$ZCAT $cpiodir/generic.kernel$ZFIX | cpio -it 2>/dev/null |
+	    grep austr > /dev/null 2>&1
+}
+
+#
 #
 # Define global variables
 #
@@ -1269,6 +1318,7 @@ smf_obsolete_rc_files="
 	etc/init.d/acctadm
 	etc/init.d/audit
 	etc/init.d/autofs
+	etc/init.d/boot.server
 	etc/init.d/coreadm
 	etc/init.d/cron
 	etc/init.d/cryptosvc
@@ -1320,6 +1370,7 @@ smf_obsolete_rc_files="
 	etc/rc0.d/K07snmpdx
 	etc/rc0.d/K10rcapd
 	etc/rc0.d/K21dhcp
+	etc/rc0.d/K27boot.server
 	etc/rc0.d/K28kdc
 	etc/rc0.d/K28kdc.master
 	etc/rc0.d/K28nfs.server
@@ -1353,6 +1404,7 @@ smf_obsolete_rc_files="
 	etc/rc1.d/K07snmpdx
 	etc/rc1.d/K10rcapd
 	etc/rc1.d/K21dhcp
+	etc/rc1.d/K27boot.server
 	etc/rc1.d/K28kdc
 	etc/rc1.d/K28kdc.master
 	etc/rc1.d/K28nfs.server
@@ -1381,6 +1433,7 @@ smf_obsolete_rc_files="
 	etc/rc2.d/K05volmgt
 	etc/rc2.d/K07snmpdx
 	etc/rc2.d/K21dhcp
+	etc/rc2.d/K27boot.server
 	etc/rc2.d/K28kdc
 	etc/rc2.d/K28kdc.master
 	etc/rc2.d/K28nfs.server
@@ -1417,6 +1470,7 @@ smf_obsolete_rc_files="
 	etc/rc3.d/S13kdc.master
 	etc/rc3.d/S14kdc
 	etc/rc3.d/S15nfs.server
+	etc/rc3.d/S16boot.server
 	etc/rc3.d/S34dhcp
 	etc/rc3.d/S76snmpdx
 	etc/rc3.d/S81volmgt
@@ -1428,6 +1482,7 @@ smf_obsolete_rc_files="
 	etc/rcS.d/K07snmpdx
 	etc/rcS.d/K10rcapd
 	etc/rcS.d/K21dhcp
+	etc/rcS.d/K27boot.server
 	etc/rcS.d/K28kdc
 	etc/rcS.d/K28kdc.master
 	etc/rcS.d/K28nfs.server
@@ -1478,6 +1533,7 @@ smf_obsolete_manifests="
 	var/svc/manifest/network/datalink-init.xml
 	var/svc/manifest/network/iscsi_initiator.xml
 	var/svc/manifest/network/fcoe_config.xml
+	var/svc/manifest/network/rpc/ocfserv.xml
 "
 
 # smf services whose manifests have been renamed
@@ -1585,6 +1641,10 @@ smf_handle_new_services () {
 	    ! -f $rootprefix/var/svc/manifest/system/pools.xml &&
 	    -f $rootprefix/etc/pooladm.conf ]]; then
 		smf_enable svc:/system/pools:default
+	fi
+	if [[ $zone = global && $karch = sun4v &&
+	    ! -f $rootprefix/var/svc/manifest/platforms/sun4v/ldoms-agents.xml ]]; then
+		smf_enable svc:/ldoms/agents:default
 	fi
 }
 
@@ -2858,6 +2918,28 @@ if $ZCAT $cpiodir/generic.root$ZFIX | cpio -it 2>/dev/null | \
 fi
 
 #
+# The Clearview IP Tunneling project changes the format of the
+# /etc/dladm/datalink.conf file.  The conversion is done in the
+# dlmgmtd daemon, so there is no backwards conversion when bfu'ing
+# backwards.  The solution is to have bfu save the old file away when
+# bfu'ing across this project, and restore it when bfu'ing back.
+#
+datalink_file=$root/etc/dladm/datalink.conf
+datalink_backup=$root/etc/dladm/datalink.conf.bfusave
+datalink_action=none
+if [[ -f $datalink_file ]]; then
+	iptun_exists=false
+	if archive_file_exists generic.kernel "kernel/drv/iptun.conf"; then
+		iptun_exists=true
+	fi
+	if [[ ! -f $root/kernel/drv/iptun.conf ]] && $iptun_exists; then
+		datalink_action=save
+	elif [[ -f $root/kernel/drv/iptun.conf ]] && ! $iptun_exists; then
+	    	datalink_action=restore
+	fi
+fi
+
+#
 # Check whether the build is boot-archive or ufsboot sparc
 # boot based on the existence of a generic.boot archive
 #
@@ -2960,6 +3042,7 @@ bfucmd="
 	/usr/sbin/pkgrm
 	/usr/sbin/prtconf
 	/usr/sbin/reboot
+	/usr/sbin/rem_drv
 	/usr/sbin/sync
 	/usr/sbin/tar
 	/usr/sbin/uadmin
@@ -2986,9 +3069,37 @@ bfuscr="
 #
 bfuchameleons="
         /usr/bin/basename
+        /usr/bin/bg
+        /usr/bin/cd
+        /usr/bin/cksum
+        /usr/bin/cmp
+        /usr/bin/comm
+        /usr/bin/command
         /usr/bin/dirname
+        /usr/bin/cut
+        /usr/bin/fc
+        /usr/bin/fg
+        /usr/bin/getopts
+        /usr/bin/hash
+        /usr/bin/jobs
+        /usr/bin/join
+        /usr/bin/kill
+        /usr/bin/logname
+        /usr/bin/paste
+        /usr/bin/print
+        /usr/bin/read
+        /usr/bin/rev
         /usr/bin/sleep
         /usr/bin/sum
+        /usr/bin/tee
+        /usr/bin/test
+        /usr/bin/type
+        /usr/bin/ulimit
+        /usr/bin/umask
+        /usr/bin/unalias
+        /usr/bin/uniq
+        /usr/bin/wait
+        /usr/bin/wc
 "
 
 for chameleon in ${bfuchameleons} ; do
@@ -3847,6 +3958,44 @@ remove_eof_mobileip() {
 	printf '\n'
 }
 
+#
+# Remove EOF Smartcard framework
+#
+remove_eof_smartcard()
+{
+	# Packages to remove
+	typeset -r smartcard_pkg='SUNWjcom SUNWkib SUNWocf SUNWocfd SUNWocfh
+SUNWocfr SUNWpamsc SUNWscmhdlr'
+	typeset pkg
+
+	printf 'Removing EOF Smartcard... '
+
+	for pkg in $smartcard_pkgs
+	do
+		if [ -d $rootprefix/var/sadm/pkg/$pkg ]; then
+			rm -rf $rootprefix/var/sadm/pkg/$pkg
+			grep -vw $pkg $rootprefix/var/sadm/install/contents > \
+			    /tmp/contents.$$
+			cp /tmp/contents.$$ /var/sadm/install/contents.$$
+			rm /tmp/contents.$$
+		fi
+	done
+
+	#
+	# Remove smartcard headers, libraries,  Old readers and the 
+	# parts delivered from other consolidations
+	# that no longer work with the ON parts removed.
+	#
+	rm -rf  $usr/lib/smartcard \
+		$usr/share/lib/smartcard \
+		$usr/include/smartcard.h \
+		$usr/include/smartcard \
+		$root/etc/smartcard \
+		$root/platform/sun4u/kernel/drv/sparcv9/scmi2c
+
+	printf 'done.\n'
+}
+
 remove_properties() {
 
 	#
@@ -3997,6 +4146,23 @@ crypto_cleanup()
 	rm -f $rootprefix/platform/sun4v/kernel/drv/sparcv9/n2cp.esa
 
 	print "\n"
+}
+
+#
+# Remove old fips-140 entry from kcf.conf if it is found
+#
+cleanup_kcf_fips140()
+{
+
+	kcfconf=$rootprefix/etc/crypto/kcf.conf
+	kcfconftmp=/tmp/kcfconf.tmp.$$
+
+	if grep '^fips-140:' $kcfconf >/dev/null ; then
+		grep -v '^fips-140:' $kcfconf > $kcfconftmp
+		print "Removing obsolete fips-140 entry from kcf.conf"
+		cp $kcfconftmp $kcfconf
+		rm -f $kcfconftmp
+	fi 
 }
 
 #
@@ -6447,6 +6613,13 @@ mondo_loop() {
 	fi
 
 	#
+	# Remove EOF Smartcard support
+	#
+	if [ -d $usr/lib/smartcard ]; then
+		remove_eof_smartcard
+	fi
+
+	#
 	# Remove DMI
 	#
 	if [ -d $usr/lib/dmi -o \
@@ -7024,6 +7197,46 @@ mondo_loop() {
 	rm -f $usr/kernel/pcbe/sparcv9/pcbe.SUNW,UltraSPARC-T1
 
 	#
+	# Remove hotplug modules
+	#
+	rm -f $root/kernel/misc/pciehpc
+	rm -f $root/kernel/misc/amd64/pciehpc
+	rm -f $root/kernel/misc/sparcv9/pciehpc
+	rm -f $root/kernel/misc/sparcv9/pcishpc
+	rm -f $root/kernel/misc/sparcv9/pcicfg.e
+	rm -f $root/kernel/misc/sparcv9/pcicfg
+	rm -f $root/lib/svc/method/svc-hotplug
+	rm -f $root/var/svc/manifest/system/hotplug.xml
+	rm -f $usr/include/sys/ddi_hp.h
+	rm -f $usr/include/sys/ddi_hp_impl.h
+	rm -f $usr/lib/cfgadm/shp.so.1
+	rm -f $usr/lib/cfgadm/shp.so
+	rm -f $usr/lib/cfgadm/amd64/shp.so.1
+	rm -f $usr/lib/cfgadm/amd64/shp.so
+	rm -f $usr/lib/cfgadm/sparcv9/shp.so.1
+	rm -f $usr/lib/cfgadm/sparcv9/shp.so
+	rm -f $usr/lib/help/auths/locale/HotplugHeader.html
+	rm -f $usr/lib/help/auths/locale/HotplugModify.html
+	rm -f $usr/lib/help/auths/locale/SmfManageHotplug.html
+	rm -f $usr/lib/help/auths/locale/C/HotplugHeader.html
+	rm -f $usr/lib/help/auths/locale/C/HotplugModify.html
+	rm -f $usr/lib/help/auths/locale/C/SmfManageHotplug.html
+	rm -f $usr/lib/help/profiles/locale/RtHotplugMngmnt.html
+	rm -f $usr/lib/help/profiles/locale/C/RtHotplugMngmnt.html
+	rm -f $usr/lib/hotplugd
+	rm -f $usr/lib/libhotplug.so
+	rm -f $usr/lib/libhotplug.so.1
+	rm -f $usr/lib/amd64/libhotplug.so.1
+	rm -f $usr/lib/amd64/libhotplug.so
+	rm -f $usr/lib/sparcv9/libhotplug.so.1
+	rm -f $usr/lib/sparcv9/libhotplug.so
+	rm -f $usr/lib/llib-lhotplug
+	rm -f $usr/lib/llib-lhotplug.ln
+	rm -f $usr/lib/amd64/llib-lhotplug.ln
+	rm -f $usr/lib/sparcv9/llib-lhotplug.ln
+	rm -f $usr/sbin/hotplug
+
+	#
         # Remove the IPsec encryption and authentication modules.
         # IPsec now uses the Kernel Crypto Framework for crypto.
         #
@@ -7123,6 +7336,8 @@ mondo_loop() {
 	#
 	check_boomer_sys $root && BOOMER_PRESENT_SYS=true
 	check_boomer_bfu && BOOMER_PRESENT_BFU=true
+	check_austr_sys $root && AUSTR_PRESENT_SYS=true
+	check_austr_bfu $root && AUSTR_PRESENT_BFU=true
 
 	if $BOOMER_PRESENT_BFU; then
 	    rm -f $usr/include/sys/audiovar.h
@@ -7169,6 +7384,17 @@ mondo_loop() {
 
 		touch $root/reconfigure
 	fi
+	#
+	# If updating to a BFU where austr is removed, make sure we
+	# remove the driver from kernel state, and clean up the binaries.
+	#
+	if $AUSTR_PRESENT_SYS && ! $AUSTR_PRESENT_BFU; then
+		/tmp/bfubin/rem_drv -b $root austr >/dev/null 2>&1
+		rm -f $root/kernel/drv/austr
+		rm -f $root/kernel/drv/austr.conf
+		rm -f $root/kernel/drv/sparcv9/austr
+		rm -f $root/kernel/drv/amd64/austr
+	fi
 
 	#
 	# Diskless clients have already extracted /usr so don't delete this
@@ -7199,39 +7425,6 @@ mondo_loop() {
 	#
 	rm -f $root/kernel/misc/sparcv9/rpcib
 	rm -f $root/kernel/drv/sparcv9/rpcib
-
-	#
-	# Remove old smartcard header files
-	#
-
-	rm -f \
-		$usr/include/smartcard.h \
-		$usr/include/smartcard/ocf_authenticate.h \
-		$usr/include/smartcard/ocf_core.h \
-		$usr/include/smartcard/ocf_core_cardservices.h
-
-	#
-	# Remove smartcard libraries that should not have been shipped.
-	#
-	rm -rf  $usr/lib/smartcard/sparcv9/ \
-		$usr/share/lib/smartcard/scmtester.jar
-
-	#
-	# Remove external smartcard reader driver
-	#
-	rm -f $usr/share/lib/smartcard/scmrsr3.jar
-
-	#
-	# Remove old internal smartcard reader driver
-	#
-	rm -f $usr/share/lib/smartcard/scmiscr.jar
-	rm -f $usr/lib/smartcard/libSCMI2CNative.so
-	rm -f $usr/lib/smartcard/libSCMI2CNative.so.1
-
-	#
-	# Remove Smart OS
-	#
-	rm -f $usr/share/lib/smartcard/smartos.jar
 
 	#
 	# Remove drivers & header files for EOL of soc & pln drivers
@@ -7814,6 +8007,31 @@ mondo_loop() {
 	rm -f $root/kernel/drv/softmac
 	rm -f $root/kernel/drv/sparcv9/softmac
 	rm -f $root/kernel/drv/amd64/softmac
+	rm -f $root/kernel/drv/iptun.conf
+	rm -f $root/kernel/drv/iptun
+	rm -f $root/kernel/drv/sparcv9/iptun
+	rm -f $root/kernel/drv/amd64/iptun
+	rm -f $root/kernel/drv/iptunq.conf
+	rm -f $root/kernel/drv/iptunq
+	rm -f $root/kernel/drv/sparcv9/iptunq
+	rm -f $root/kernel/drv/amd64/iptunq
+
+	# Remove obsolete tunneling STREAMS modules
+	rm -f $root/kernel/strmod/6to4tun
+	rm -f $root/kernel/strmod/sparcv9/6to4tun
+	rm -f $root/kernel/strmod/amd64/6to4tun
+	rm -f $root/kernel/strmod/atun
+	rm -f $root/kernel/strmod/sparcv9/atun
+	rm -f $root/kernel/strmod/amd64/atun	
+	rm -f $root/kernel/strmod/tun
+	rm -f $root/kernel/strmod/sparcv9/tun
+	rm -f $root/kernel/strmod/amd64/tun
+
+	# Remove obsolete iptunq
+	rm -f $root/kernel/drv/iptunq
+	rm -f $root/kernel/drv/iptunq.conf
+	rm -f $root/kernel/drv/amd64/iptunq
+	rm -f $root/kernel/drv/sparcv9/iptunq
 
 	#
 	# Remove libtopo platform XML files that have been replaced by propmap
@@ -7840,6 +8058,138 @@ mondo_loop() {
 	rm -f $root/dev/rsd[0-9]*
 	rm -f $root/dev/sr[0-9]*
 	rm -f $root/dev/rsr[0-9]*
+
+	#
+	# Remove old amd_iommu driver
+	#
+
+	#
+	# old: need to remove going forwards:
+	#
+	rm -f $root/kernel/drv/amd_iommu
+	rm -f $root/kernel/drv/amd_iommu.conf
+	rm -f $root/kernel/drv/amd64/amd_iommu
+
+	#
+	# new: need to remove going backwards:
+	#
+	rm -f $root/platform/i86pc/kernel/drv/amd_iommu.conf
+	rm -f $root/platform/i86pc/kernel/drv/amd_iommu
+	rm -f $root/platform/i86pc/kernel/drv/amd64/amd_iommu
+
+	#
+	# Remove the UCB headers and lint libraries
+	#
+	rm -rf $usr/ucbinclude
+	rm -f $usr/ucblib/llib-lcurses
+	rm -f $usr/ucblib/llib-lcurses.ln
+	rm -f $usr/ucblib/llib-ldbm
+	rm -f $usr/ucblib/llib-ldbm.ln
+	rm -f $usr/ucblib/llib-lrpcsoc
+	rm -f $usr/ucblib/llib-lrpcsoc.ln
+	rm -f $usr/ucblib/llib-ltermcap
+	rm -f $usr/ucblib/llib-ltermcap.ln
+	rm -f $usr/ucblib/llib-lucb
+	rm -f $usr/ucblib/llib-lucb.ln
+	rm -f $usr/ucblib/amd64/llib-lcurses
+	rm -f $usr/ucblib/amd64/llib-lcurses.ln
+	rm -f $usr/ucblib/amd64/llib-ldbm
+	rm -f $usr/ucblib/amd64/llib-ldbm.ln
+	rm -f $usr/ucblib/amd64/llib-lrpcsoc.ln
+	rm -f $usr/ucblib/amd64/llib-ltermcap
+	rm -f $usr/ucblib/amd64/llib-ltermcap.ln
+	rm -f $usr/ucblib/amd64/llib-lucb
+	rm -f $usr/ucblib/amd64/llib-lucb.ln
+	rm -f $usr/ucblib/sparcv9/llib-lcurses
+	rm -f $usr/ucblib/sparcv9/llib-lcurses.ln
+	rm -f $usr/ucblib/sparcv9/llib-ldbm
+	rm -f $usr/ucblib/sparcv9/llib-ldbm.ln
+	rm -f $usr/ucblib/sparcv9/llib-lrpcsoc.ln
+	rm -f $usr/ucblib/sparcv9/llib-ltermcap
+	rm -f $usr/ucblib/sparcv9/llib-ltermcap.ln
+	rm -f $usr/ucblib/sparcv9/llib-lucb
+	rm -f $usr/ucblib/sparcv9/llib-lucb.ln
+
+	# Remove cgsix
+	rm -f $root/platform/sun4u/kernel/drv/sparcv9/cgsix
+	rm -f $usr/include/sys/cg6reg.h
+	rm -f $usr/include/sys/cg6thc.h
+	rm -f $usr/include/sys/cg6fbc.h
+	rm -f $usr/include/sys/cg6tec.h
+	rm -f $usr/include/sys/ramdac.h
+
+	# Remove ucb plotting bits
+	rm -rf $usr/ucb/aedplot
+	rm -rf $usr/ucb/atoplot
+	rm -rf $usr/ucb/bgplot
+	rm -rf $usr/ucb/crtplot
+	rm -rf $usr/ucb/dumbplot
+	rm -rf $usr/ucb/gigiplot
+	rm -rf $usr/ucb/hp7221plot
+	rm -rf $usr/ucb/hpplot
+	rm -rf $usr/ucb/implot
+	rm -rf $usr/ucb/plot
+	rm -rf $usr/ucb/plottoa
+	rm -rf $usr/ucb/t300
+	rm -rf $usr/ucb/t300s
+	rm -rf $usr/ucb/t4013
+	rm -rf $usr/ucb/t450
+	rm -rf $usr/ucb/tek
+	rm -rf $usr/ucb/vplot
+
+	#
+	# The pkg* commands should not be used after this point and before
+	# archive extraction as libcrypto/libssl may not be available.
+	#
+	# Remove old OpenSSL from /usr/sfw.
+	if [[ -f $root/lib/libcrypto.so.0.9.8 ]] ||
+	    archive_file_exists generic.lib "lib/libcrypto.so.0.9.8"; then
+
+		# SUNWopenssl-libraries
+		rm -f $root/usr/sfw/lib/libcrypto.so
+		rm -f $root/usr/sfw/lib/libcrypto.so.0.9.8
+		rm -f $root/usr/sfw/lib/llib-lcrypto
+		rm -f $root/usr/sfw/lib/llib-lcrypto.ln
+		rm -f $root/usr/sfw/lib/libssl.so
+		rm -f $root/usr/sfw/lib/libssl.so.0.9.8
+		rm -f $root/usr/sfw/lib/llib-lssl
+		rm -f $root/usr/sfw/lib/llib-lssl.ln
+		rm -f $root/usr/sfw/lib/amd64/libcrypto.so
+		rm -f $root/usr/sfw/lib/amd64/libcrypto.so.0.9.8
+		rm -f $root/usr/sfw/lib/amd64/llib-lcrypto.ln
+		rm -f $root/usr/sfw/lib/amd64/libssl.so
+		rm -f $root/usr/sfw/lib/amd64/libssl.so.0.9.8
+		rm -f $root/usr/sfw/lib/amd64/llib-lssl.ln
+		rm -f $root/usr/sfw/lib/sparcv9/libcrypto.so
+		rm -f $root/usr/sfw/lib/sparcv9/libcrypto.so.0.9.8
+		rm -f $root/usr/sfw/lib/sparcv9/llib-lcrypto.ln
+		rm -f $root/usr/sfw/lib/sparcv9/libssl.so
+		rm -f $root/usr/sfw/lib/sparcv9/libssl.so.0.9.8
+		rm -f $root/usr/sfw/lib/sparcv9/llib-lssl.ln
+		
+		# SUNWopenssl-commands
+		rm -f $root/usr/sfw/bin/CA.pl
+
+		# SUNWopenssl-include
+		rm -rf $root/usr/sfw/include/openssl
+
+		# SUNWopenssl-man
+		# Listing the man pages individually would add about 1000
+		# lines so it's simpler to pull them out of the package db.
+		opensslman=$(nawk -F '[ =]'\
+			'/usr\/sfw\/share\/man.* [fs] .*SUNWopenssl-man/ {print $1}' \
+			$root/var/sadm/install/contents)
+		for manpage in $opensslman
+		do
+			rm -f $root/$manpage
+		done
+	fi
+
+	if [[ $datalink_action = "save" ]]; then
+		cp -p $datalink_file $datalink_backup
+	elif [[ $datalink_action = "restore" && -f $datalink_backup ]]; then
+		mv $datalink_backup $datalink_file
+	fi
 
 	# End of pre-archive extraction hacks.
 
@@ -8328,6 +8678,11 @@ mondo_loop() {
 	# Remove bsmrecord.  Renamed to auditrecord.
 	rm -f $root/usr/sbin/bsmrecord
 
+	# Remove old fips-140 entry from kcf.conf
+	if [ -f $rootprefix/etc/crypto/kcf.conf ] ; then
+		cleanup_kcf_fips140
+	fi
+
 	print "\nFor each file in conflict, your version has been restored."
 	print "The new versions are under $rootprefix/bfu.conflicts."
 	print "\nMAKE SURE YOU RESOLVE ALL CONFLICTS BEFORE REBOOTING.\n"
@@ -8365,6 +8720,8 @@ mondo_loop() {
 	fixup_isa_bfu
 
 	update_aac_conf
+
+	update_etc_inet_sock2path
 
 	if [ $target_isa = i386 ]; then
 	    update_mptconf_i386

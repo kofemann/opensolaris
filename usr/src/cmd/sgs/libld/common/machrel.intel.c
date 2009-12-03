@@ -957,7 +957,7 @@ ld_do_activerelocs(Ofl_desc *ofl)
 				    arsp->rel_osdesc->os_outdata->d_buf;
 
 				DBG_CALL(Dbg_reloc_doact(ofl->ofl_lml,
-				    ELF_DBG_LD, M_MACH, SHT_REL,
+				    ELF_DBG_LD_ACT, M_MACH, SHT_REL,
 				    arsp->rel_rtype, R1addr, value,
 				    arsp->rel_sname, arsp->rel_osdesc));
 
@@ -1065,7 +1065,7 @@ ld_do_activerelocs(Ofl_desc *ofl)
 			    (uintptr_t)_elf_getxoff(arsp->rel_isdesc->
 			    is_indata));
 
-			DBG_CALL(Dbg_reloc_doact(ofl->ofl_lml, ELF_DBG_LD,
+			DBG_CALL(Dbg_reloc_doact(ofl->ofl_lml, ELF_DBG_LD_ACT,
 			    M_MACH, SHT_REL, arsp->rel_rtype, EC_NATPTR(addr),
 			    value, arsp->rel_sname, arsp->rel_osdesc));
 			addr += (uintptr_t)arsp->rel_osdesc->os_outdata->d_buf;
@@ -1151,8 +1151,7 @@ ld_add_outrel(Word flags, Rel_desc *rsp, Ofl_desc *ofl)
 	 * symbol in a static executable, it's best to disable them here
 	 * instead of through out the relocation code.
 	 */
-	if ((ofl->ofl_flags & (FLG_OF_STATIC | FLG_OF_EXEC)) ==
-	    (FLG_OF_STATIC | FLG_OF_EXEC))
+	if (OFL_IS_STATIC_EXEC(ofl))
 		return (1);
 
 	/*
@@ -1503,7 +1502,7 @@ ld_fillin_gotplt(Ofl_desc *ofl)
 		Sym_desc	*sdp;
 
 		if ((sdp = ld_sym_find(MSG_ORIG(MSG_SYM_DYNAMIC_U),
-		    SYM_NOHASH, 0, ofl)) != NULL) {
+		    SYM_NOHASH, NULL, ofl)) != NULL) {
 			uchar_t	*genptr;
 
 			genptr = ((uchar_t *)ofl->ofl_osgot->os_outdata->d_buf +
@@ -1598,6 +1597,29 @@ static const uchar_t nullfunc_tmpl[] = {	/* IA32 */
 
 
 /*
+ * Function used to provide fill padding in SHF_EXECINSTR sections
+ *
+ * entry:
+ *
+ *	base - base address of section being filled
+ *	offset - starting offset for fill within memory referenced by base
+ *	cnt - # bytes to be filled
+ *
+ * exit:
+ *	The fill has been completed.
+ */
+static void
+execfill(void *base, off_t off, size_t cnt)
+{
+	/*
+	 * 0x90 is an X86 NOP instruction in both 32 and 64-bit worlds.
+	 * There are no alignment constraints.
+	 */
+	(void) memset(off + (char *)base, 0x90, cnt);
+}
+
+
+/*
  * Return the ld_targ definition for this target.
  */
 const Target *
@@ -1686,6 +1708,9 @@ ld_targ_init_x86(void)
 		{			/* Target_nullfunc */
 			nullfunc_tmpl,		/* nf_template */
 			sizeof (nullfunc_tmpl),	/* nf_size */
+		},
+		{			/* Target_fillfunc */
+			execfill		/* ff_execfill */
 		},
 		{			/* Target_machrel */
 			reloc_table,

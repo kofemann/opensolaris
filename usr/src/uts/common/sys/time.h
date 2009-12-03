@@ -9,7 +9,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -344,6 +344,7 @@ extern	hrtime_t 	gethrtime_unscaled(void);
 extern	hrtime_t	gethrtime_max(void);
 extern	hrtime_t	gethrtime_waitfree(void);
 extern	void		scalehrtime(hrtime_t *);
+extern	uint64_t	unscalehrtime(hrtime_t);
 extern	void 		gethrestime(timespec_t *);
 extern	time_t 		gethrestime_sec(void);
 extern	void		gethrestime_lasttick(timespec_t *);
@@ -357,6 +358,9 @@ extern	void		timevaladd(struct timeval *, struct timeval *);
 extern	void		timevalsub(struct timeval *, struct timeval *);
 extern	void		timevalfix(struct timeval *);
 extern	void		dtrace_hres_tick(void);
+
+extern clock_t		ddi_get_lbolt(void);
+extern int64_t		ddi_get_lbolt64(void);
 
 #if defined(_SYSCALL32)
 extern	void		hrt2ts32(hrtime_t, timestruc32_t *);

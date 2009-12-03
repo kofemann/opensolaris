@@ -39,13 +39,20 @@
 
 SUNW_1.3 {
     global:
-	nvlist_lookup_nvpair;
 	nvlist_add_double;
+	nvlist_empty;
 	nvlist_lookup_double;
+	nvlist_prev_nvpair;
+	nvlist_remove_nvpair;
 	nvpair_value_double;
+} SUNW_1.2.2;
+
+SUNW_1.2.2 {		# s10u8 - SunOS 5.10 (Solaris 10) patch additions
+    global:
+	nvlist_lookup_nvpair;
 } SUNW_1.2.1;
 
-SUNW_1.2.1 {
+SUNW_1.2.1 {		# s10u7 - SunOS 5.10 (Solaris 10) patch additions
     global:
 	nvlist_exists;
 } SUNW_1.2;
@@ -162,6 +169,7 @@ SUNW_1.1 {
 
 SUNWprivate_1.1 {
     global:
+	dump_nvlist;
 	nvlist_add_hrtime;
 	nvlist_lookup_hrtime;
 	nvlist_print;

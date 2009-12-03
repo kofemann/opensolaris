@@ -22,6 +22,10 @@
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
+/*
+ * Copyright (c) 2009,  Intel Corporation.
+ * All Rights Reserved.
+ */
 
 /*
  * CPU Device driver. The driver is not DDI-compliant.
@@ -236,7 +240,6 @@ cpudrv_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 {
 	int			instance;
 	cpudrv_devstate_t	*cpudsp;
-	extern pri_t		maxclsyspri;
 
 	instance = ddi_get_instance(dip);
 
@@ -273,10 +276,6 @@ cpudrv_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			cpudrv_enabled = B_FALSE;
 			return (DDI_FAILURE);
 		}
-		if (!cpudrv_mach_init(cpudsp)) {
-			cpudrv_enabled = B_FALSE;
-			return (DDI_FAILURE);
-		}
 
 		mutex_init(&cpudsp->lock, NULL, MUTEX_DRIVER, NULL);
 		if (cpudrv_is_enabled(cpudsp)) {
@@ -304,12 +303,9 @@ cpudrv_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 			 * Taskq is used to dispatch routine to monitor CPU
 			 * activities.
 			 */
-			cpudsp->cpudrv_pm.tq = taskq_create_instance(
-			    "cpudrv_monitor",
-			    ddi_get_instance(dip), CPUDRV_TASKQ_THREADS,
-			    (maxclsyspri - 1), CPUDRV_TASKQ_MIN,
-			    CPUDRV_TASKQ_MAX,
-			    TASKQ_PREPOPULATE|TASKQ_CPR_SAFE);
+			cpudsp->cpudrv_pm.tq = ddi_taskq_create(dip,
+			    "cpudrv_monitor", CPUDRV_TASKQ_THREADS,
+			    TASKQ_DEFAULTPRI, 0);
 
 			mutex_init(&cpudsp->cpudrv_pm.timeout_lock, NULL,
 			    MUTEX_DRIVER, NULL);
@@ -342,8 +338,19 @@ cpudrv_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 		}
 
+		if (!cpudrv_mach_init(cpudsp)) {
+			cmn_err(CE_WARN, "cpudrv_attach: instance %d: "
+			    "cpudrv_mach_init failed", instance);
+			cpudrv_enabled = B_FALSE;
+			cpudrv_free(cpudsp);
+			ddi_soft_state_free(cpudrv_state, instance);
+			return (DDI_FAILURE);
+		}
+
 		CPUDRV_INSTALL_MAX_CHANGE_HANDLER(cpudsp);
 
+		(void) ddi_prop_update_int(DDI_DEV_T_NONE, dip,
+		    DDI_NO_AUTODETACH, 1);
 		ddi_report_dev(dip);
 		return (DDI_SUCCESS);
 
@@ -393,6 +400,42 @@ cpudrv_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	case DDI_DETACH:
 		DPRINTF(D_DETACH, ("cpudrv_detach: instance %d: "
 		    "DDI_DETACH called\n", instance));
+
+#if defined(__x86)
+		cpudsp = ddi_get_soft_state(cpudrv_state, instance);
+		ASSERT(cpudsp != NULL);
+
+		/*
+		 * Nothing to do for detach, if no doing active PM.
+		 */
+		if (!cpudrv_is_enabled(cpudsp))
+			return (DDI_SUCCESS);
+
+		/*
+		 * uninstall PPC/_TPC change notification handler
+		 */
+		CPUDRV_UNINSTALL_MAX_CHANGE_HANDLER(cpudsp);
+
+		/*
+		 * destruct platform specific resource
+		 */
+		if (!cpudrv_mach_fini(cpudsp))
+			return (DDI_FAILURE);
+
+		mutex_enter(&cpudsp->lock);
+		CPUDRV_MONITOR_FINI(cpudsp);
+		cv_destroy(&cpudsp->cpudrv_pm.timeout_cv);
+		mutex_destroy(&cpudsp->cpudrv_pm.timeout_lock);
+		ddi_taskq_destroy(cpudsp->cpudrv_pm.tq);
+		cpudrv_free(cpudsp);
+		mutex_exit(&cpudsp->lock);
+		mutex_destroy(&cpudsp->lock);
+		ddi_soft_state_free(cpudrv_state, instance);
+		(void) ddi_prop_update_int(DDI_DEV_T_NONE, dip,
+		    DDI_NO_AUTODETACH, 0);
+		return (DDI_SUCCESS);
+
+#else
 		/*
 		 * If the only thing supported by the driver is power
 		 * management, we can in future enhance the driver and
@@ -400,6 +443,7 @@ cpudrv_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		 * user has disabled CPU power management.
 		 */
 		return (DDI_FAILURE);
+#endif
 
 	case DDI_SUSPEND:
 		DPRINTF(D_DETACH, ("cpudrv_detach: instance %d: "
@@ -501,6 +545,11 @@ cpudrv_power(dev_info_t *dip, int comp, int level)
 		return (DDI_FAILURE);
 	}
 
+	/*
+	 * We're not ready until we can  get a cpu_t
+	 */
+	is_ready = (cpudrv_get_cpu(cpudsp) == DDI_SUCCESS);
+
 	mutex_enter(&cpudsp->lock);
 	cpudrvpm = &(cpudsp->cpudrv_pm);
 
@@ -537,19 +586,19 @@ cpudrv_power(dev_info_t *dip, int comp, int level)
 	 * take cross calls (cross calls fail silently if CPU is not ready
 	 * for it).
 	 *
-	 * Additionally, for x86 platforms we cannot power manage
-	 * any one instance, until all instances have been initialized.
-	 * That's because we don't know what the CPU domains look like
-	 * until all instances have been initialized.
+	 * Additionally, for x86 platforms we cannot power manage an instance,
+	 * until it has been initialized.
 	 */
-	is_ready = CPUDRV_XCALL_IS_READY(cpudsp->cpu_id);
-	if (!is_ready) {
-		DPRINTF(D_POWER, ("cpudrv_power: instance %d: "
-		    "CPU not ready for x-calls\n", instance));
-	} else if (!(is_ready = cpudrv_power_ready())) {
-		DPRINTF(D_POWER, ("cpudrv_power: instance %d: "
-		    "waiting for all CPUs to be power manageable\n",
-		    instance));
+	if (is_ready) {
+		is_ready = CPUDRV_XCALL_IS_READY(cpudsp->cpu_id);
+		if (!is_ready) {
+			DPRINTF(D_POWER, ("cpudrv_power: instance %d: "
+			    "CPU not ready for x-calls\n", instance));
+		} else if (!(is_ready = cpudrv_power_ready(cpudsp->cp))) {
+			DPRINTF(D_POWER, ("cpudrv_power: instance %d: "
+			    "waiting for all CPUs to be power manageable\n",
+			    instance));
+		}
 	}
 	if (!is_ready) {
 		CPUDRV_RESET_GOVERNOR_THREAD(cpudrvpm);
@@ -890,8 +939,8 @@ cpudrv_monitor_disp(void *arg)
 	 * The queue should be empty at this time.
 	 */
 	mutex_enter(&cpudsp->cpudrv_pm.timeout_lock);
-	if (!taskq_dispatch(cpudsp->cpudrv_pm.tq, cpudrv_monitor, arg,
-	    TQ_NOSLEEP)) {
+	if ((ddi_taskq_dispatch(cpudsp->cpudrv_pm.tq, cpudrv_monitor, arg,
+	    DDI_NOSLEEP)) != DDI_SUCCESS) {
 		mutex_exit(&cpudsp->cpudrv_pm.timeout_lock);
 		DPRINTF(D_PM_MONITOR, ("cpudrv_monitor_disp: failed to "
 		    "dispatch the cpudrv_monitor taskq\n"));
@@ -932,6 +981,11 @@ cpudrv_monitor(void *arg)
 	cnt = msnsecs[state] - cpupm->lastquan_mstate[state]; \
 	cpupm->lastquan_mstate[state] = msnsecs[state]
 
+	/*
+	 * We're not ready until we can  get a cpu_t
+	 */
+	is_ready = (cpudrv_get_cpu(cpudsp) == DDI_SUCCESS);
+
 	mutex_enter(&cpudsp->lock);
 	cpupm = &(cpudsp->cpudrv_pm);
 	if (cpupm->timeout_id == 0) {
@@ -946,19 +1000,20 @@ cpudrv_monitor(void *arg)
 	 * structure, if it is ready for cross calls. If this changes,
 	 * additional checks might be needed.
 	 *
-	 * Additionally, for x86 platforms we cannot power manage
-	 * any one instance, until all instances have been initialized.
-	 * That's because we don't know what the CPU domains look like
-	 * until all instances have been initialized.
+	 * Additionally, for x86 platforms we cannot power manage an
+	 * instance, until it has been initialized.
 	 */
-	is_ready = CPUDRV_XCALL_IS_READY(cpudsp->cpu_id);
-	if (!is_ready) {
-		DPRINTF(D_PM_MONITOR, ("cpudrv_monitor: instance %d: "
-		    "CPU not ready for x-calls\n", ddi_get_instance(dip)));
-	} else if (!(is_ready = cpudrv_power_ready())) {
-		DPRINTF(D_PM_MONITOR, ("cpudrv_monitor: instance %d: "
-		    "waiting for all CPUs to be power manageable\n",
-		    ddi_get_instance(dip)));
+	if (is_ready) {
+		is_ready = CPUDRV_XCALL_IS_READY(cpudsp->cpu_id);
+		if (!is_ready) {
+			DPRINTF(D_PM_MONITOR, ("cpudrv_monitor: instance %d: "
+			    "CPU not ready for x-calls\n",
+			    ddi_get_instance(dip)));
+		} else if (!(is_ready = cpudrv_power_ready(cpudsp->cp))) {
+			DPRINTF(D_PM_MONITOR, ("cpudrv_monitor: instance %d: "
+			    "waiting for all CPUs to be power manageable\n",
+			    ddi_get_instance(dip)));
+		}
 	}
 	if (!is_ready) {
 		/*
@@ -988,17 +1043,6 @@ cpudrv_monitor(void *arg)
 		goto do_return;
 	}
 
-	mutex_enter(&cpu_lock);
-	if (cpudsp->cp == NULL &&
-	    (cpudsp->cp = cpu_get(cpudsp->cpu_id)) == NULL) {
-		mutex_exit(&cpu_lock);
-		CPUDRV_MONITOR_INIT(cpudsp);
-		mutex_exit(&cpudsp->lock);
-		cmn_err(CE_WARN, "cpudrv_monitor: instance %d: can't get "
-		    "cpu_t", ddi_get_instance(dip));
-		goto do_return;
-	}
-
 	if (!cpupm->pm_started) {
 		cpupm->pm_started = B_TRUE;
 		cpudrv_set_supp_freqs(cpudsp);
@@ -1015,7 +1059,6 @@ cpudrv_monitor(void *arg)
 	 */
 	if (cpupm->lastquan_ticks == 0) {
 		cpupm->lastquan_ticks = NSEC_TO_TICK(gethrtime());
-		mutex_exit(&cpu_lock);
 		CPUDRV_MONITOR_INIT(cpudsp);
 		mutex_exit(&cpudsp->lock);
 		goto do_return;
@@ -1034,7 +1077,7 @@ cpudrv_monitor(void *arg)
 	tick_cnt = ticks - cpupm->lastquan_ticks;
 	ASSERT(tick_cnt != 0);
 	cpupm->lastquan_ticks = ticks;
-	mutex_exit(&cpu_lock);
+
 	/*
 	 * Time taken between recording the current counts and
 	 * arranging the next call of this routine is an error in our
@@ -1124,4 +1167,33 @@ do_return:
 	cpupm->timeout_count--;
 	cv_signal(&cpupm->timeout_cv);
 	mutex_exit(&cpupm->timeout_lock);
+}
+
+/*
+ * get cpu_t structure for cpudrv_devstate_t
+ */
+int
+cpudrv_get_cpu(cpudrv_devstate_t *cpudsp)
+{
+	ASSERT(cpudsp != NULL);
+
+	/*
+	 * return DDI_SUCCESS if cpudrv_devstate_t
+	 * already contains cpu_t structure
+	 */
+	if (cpudsp->cp != NULL)
+		return (DDI_SUCCESS);
+
+	if (MUTEX_HELD(&cpu_lock)) {
+		cpudsp->cp = cpu_get(cpudsp->cpu_id);
+	} else {
+		mutex_enter(&cpu_lock);
+		cpudsp->cp = cpu_get(cpudsp->cpu_id);
+		mutex_exit(&cpu_lock);
+	}
+
+	if (cpudsp->cp == NULL)
+		return (DDI_FAILURE);
+
+	return (DDI_SUCCESS);
 }

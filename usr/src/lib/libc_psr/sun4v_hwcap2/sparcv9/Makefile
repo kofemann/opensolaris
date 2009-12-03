@@ -19,7 +19,7 @@
 # CDDL HEADER END
 #
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 #
@@ -50,8 +50,10 @@ LIBC_PSR64_DIR	= $(ROOT_PSM_LIB_DIR)/$(MACH64)/libc_psr
 LIBC_PSR64_LIB	= $(LIBC_PSR64_DIR)/$(MODULE)
 INS.libc.64	= $(RM) -r $@; $(INS) -m $(FILEMODE) -f $(@D) $(MODULE)
 
+$(LIBC_PSR64_LIB) := FILEMODE= 0755
+
 $(LIBC_PSR64_DIR):
-	-$(INS.dir.root.bin)
+	-$(INS.dir)
 
 $(LIBC_PSR64_LIB): $(LIBC_PSR64_DIR) $(MODULE)
 	-$(INS.libc.64)

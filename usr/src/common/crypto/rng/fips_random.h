@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -38,7 +38,15 @@ extern "C" {
 #define	BYTES_IN_WORD		4
 #define	SHA1BYTES		(BYTES_IN_WORD * SHA1WORDS)
 
+#ifdef _KERNEL
+#define	SHA1_HASH_SIZE		20
+#define	CK_RV			int
+#define	CKR_OK			CRYPTO_SUCCESS
+#define	CKR_DEVICE_ERROR	CRYPTO_DEVICE_ERROR
+#endif
+
 extern void fips_random_inner(uint32_t *, uint32_t *, uint32_t *);
+extern int fips_rng_post(void);
 
 #ifdef	__cplusplus
 }

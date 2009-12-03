@@ -652,6 +652,7 @@ free_resources(picl_nodehdl_t subtree_root)
 
 	if (vol_props) {
 		free(vol_props);
+		vol_props = NULL;
 		n_vol_props = 0;
 		volprop_ndx = 0;
 	}
@@ -865,10 +866,6 @@ make_node(picl_nodehdl_t subtree_root, int row, int *snmp_syserr_p)
 				ADD_NODE(PICL_CLASS_RPM_SENSOR)
 				add_prop(nodeh, &proph, node_name, row,
 				    PP_SPEED, snmp_syserr_p);
-			} else if (sensor_type == SSST_HUMIDITY) {
-				ADD_NODE(PICL_CLASS_HUMIDITY_SENSOR)
-				add_prop(nodeh, &proph, node_name, row,
-				    PP_HUMIDITY, snmp_syserr_p);
 			} else {
 				ADD_NODE(PICL_CLASS_SENSOR)
 				add_prop(nodeh, &proph, node_name, row,
@@ -906,8 +903,6 @@ make_node(picl_nodehdl_t subtree_root, int row, int *snmp_syserr_p)
 				ADD_NODE(PICL_CLASS_RPM_INDICATOR)
 			} else if (sensor_type == SSST_PRESENCE) {
 				ADD_NODE(PICL_CLASS_PRESENCE_INDICATOR)
-			} else if (sensor_type == SSST_HUMIDITY) {
-				ADD_NODE(PICL_CLASS_HUMIDITY_INDICATOR)
 			} else {
 				ADD_NODE(PICL_CLASS_INDICATOR)
 			}

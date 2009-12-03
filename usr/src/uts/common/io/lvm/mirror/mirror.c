@@ -20,7 +20,7 @@
  */
 
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -216,6 +216,7 @@ static void
 send_poke_hotspares_msg(daemon_request_t *drq)
 {
 	int			rval;
+	int			nretries = 0;
 	md_mn_msg_pokehsp_t	pokehsp;
 	md_mn_kresult_t		*kresult;
 	set_t			setno = (set_t)drq->dq.qlen;
@@ -223,6 +224,8 @@ send_poke_hotspares_msg(daemon_request_t *drq)
 	pokehsp.pokehsp_setno = setno;
 
 	kresult = kmem_alloc(sizeof (md_mn_kresult_t), KM_SLEEP);
+
+retry_sphmsg:
 	rval = mdmn_ksend_message(setno, MD_MN_MSG_POKE_HOTSPARES,
 	    MD_MSGF_NO_LOG | MD_MSGF_NO_BCAST, 0, (char *)&pokehsp,
 	    sizeof (pokehsp), kresult);
@@ -234,6 +237,13 @@ send_poke_hotspares_msg(daemon_request_t *drq)
 			while (!md_mn_is_commd_present()) {
 				delay(md_hz);
 			}
+			/*
+			 * commd has become reachable again, so retry once.
+			 * If this fails we'll panic as the system is in an
+			 * unexpected state.
+			 */
+			if (nretries++ == 0)
+				goto retry_sphmsg;
 		}
 		cmn_err(CE_PANIC,
 		    "ksend_message failure: POKE_HOTSPARES");
@@ -419,6 +429,7 @@ check_comp_4_hotspares(
 	md_mn_kresult_t		*kresult;
 	mm_unit_t		*new_un;
 	int			rval;
+	int			nretries = 0;
 
 	mnum = MD_SID(un);
 	setno = MD_UN2SET(un);
@@ -475,6 +486,8 @@ check_comp_4_hotspares(
 		}
 
 		kresult = kmem_alloc(sizeof (md_mn_kresult_t), KM_SLEEP);
+
+cc4hs_msg:
 		rval = mdmn_ksend_message(setno, msgtype, msgflags, 0,
 		    (char *)&allochspmsg, sizeof (allochspmsg),
 		    kresult);
@@ -503,6 +516,13 @@ check_comp_4_hotspares(
 				while (!md_mn_is_commd_present()) {
 					delay(md_hz);
 				}
+				/*
+				 * commd has become reachable again, so retry
+				 * once. If this fails we'll panic as the
+				 * system is in an unexpected state.
+				 */
+				if (nretries++ == 0)
+					goto cc4hs_msg;
 			}
 			cmn_err(CE_PANIC,
 			    "ksend_message failure: ALLOCATE_HOTSPARE");
@@ -1813,6 +1833,91 @@ mirror_overlap_compare(const void *p1, const void *p2)
 	return (0);
 }
 
+/*
+ * Collapse any sparse submirror entries snarfed from the on-disk replica.
+ * Only the in-core entries are updated. The replica will be updated on-disk
+ * when the in-core replica is committed on shutdown of the SVM subsystem.
+ */
+static void
+collapse_submirrors(mm_unit_t *un)
+{
+	int			smi, nremovals, smiremove;
+	mm_submirror_t		*sm, *new_sm, *old_sm;
+	mm_submirror_ic_t	*smic;
+	int			nsmidx = un->un_nsm - 1;
+
+rescan:
+	nremovals = 0;
+	smiremove = -1;
+
+	for (smi = 0; smi <= nsmidx; smi++) {
+		sm = &un->un_sm[smi];
+
+		/*
+		 * Check to see if this submirror is marked as in-use.
+		 * If it isn't then it is a potential sparse entry and
+		 * may need to be cleared from the configuration.
+		 * The records should _already_ have been cleared by the
+		 * original mirror_detach() code, but we need to shuffle
+		 * any NULL entries in un_sm[] to the end of the array.
+		 * Any NULL un_smic[] entries need to be reset to the underlying
+		 * submirror/slice accessor functions.
+		 */
+		if (!SMS_BY_INDEX_IS(un, smi, SMS_INUSE)) {
+			nremovals++;
+			smiremove = smi;
+			break;
+		}
+	}
+
+	if (nremovals == 0) {
+		/*
+		 * Ensure that we have a matching contiguous set of un_smic[]
+		 * entries for the corresponding un_sm[] entries
+		 */
+		for (smi = 0; smi <= nsmidx; smi++) {
+			smic = &un->un_smic[smi];
+			sm = &un->un_sm[smi];
+
+			smic->sm_shared_by_blk =
+			    md_get_named_service(sm->sm_dev, 0,
+			    "shared by_blk", 0);
+			smic->sm_shared_by_indx =
+			    md_get_named_service(sm->sm_dev, 0,
+			    "shared by indx", 0);
+			smic->sm_get_component_count =
+			    (int (*)())md_get_named_service(sm->sm_dev, 0,
+			    "get component count", 0);
+			smic->sm_get_bcss =
+			    (int (*)())md_get_named_service(sm->sm_dev, 0,
+			    "get block count skip size", 0);
+		}
+		return;
+	}
+
+	/*
+	 * Reshuffle the submirror devices so that we do not have a dead record
+	 * in the middle of the array. Once we've done this we need to rescan
+	 * the mirror to check for any other holes.
+	 */
+	for (smi = 0; smi < NMIRROR; smi++) {
+		if (smi < smiremove)
+			continue;
+		if (smi > smiremove) {
+			old_sm = &un->un_sm[smi];
+			new_sm = &un->un_sm[smi - 1];
+			bcopy(old_sm, new_sm, sizeof (mm_submirror_t));
+			bzero(old_sm, sizeof (mm_submirror_t));
+		}
+	}
+
+	/*
+	 * Now we need to rescan the array to find the next potential dead
+	 * entry.
+	 */
+	goto rescan;
+}
+
 /* Return a -1 if optimized record unavailable and set should be released */
 int
 mirror_build_incore(mm_unit_t *un, int snarfing)
@@ -1838,6 +1943,17 @@ mirror_build_incore(mm_unit_t *un, int snarfing)
 	un->un_overlap_tree_flag = 0;
 	avl_create(&un->un_overlap_root, mirror_overlap_compare,
 	    sizeof (md_mps_t), offsetof(md_mps_t, ps_overlap_node));
+
+	/*
+	 * We need to collapse any sparse submirror entries into a non-sparse
+	 * array. This is to cover the case where we have an old replica image
+	 * which has not been updated (i.e. snarfed) since being modified.
+	 * The new code expects all submirror access to be sequential (i.e.
+	 * both the un_sm[] and un_smic[] entries correspond to non-empty
+	 * submirrors.
+	 */
+
+	collapse_submirrors(un);
 
 	for (i = 0; i < NMIRROR; i++)
 		build_submirror(un, i, snarfing);
@@ -2315,6 +2431,7 @@ set_sm_comp_state(
 	md_mn_msgtype_t		msgtype;
 	int			save_lock = 0;
 	mdi_unit_t		*ui_sm;
+	int			nretries = 0;
 
 	sm = &un->un_sm[smi];
 	smic = &un->un_smic[smi];
@@ -2473,6 +2590,7 @@ set_sm_comp_state(
 		}
 
 		kresult = kmem_alloc(sizeof (md_mn_kresult_t), KM_SLEEP);
+sscs_msg:
 		rval = mdmn_ksend_message(setno, msgtype, msgflags, 0,
 		    (char *)&stchmsg, sizeof (stchmsg), kresult);
 
@@ -2483,6 +2601,13 @@ set_sm_comp_state(
 				while (!md_mn_is_commd_present()) {
 					delay(md_hz);
 				}
+				/*
+				 * commd is now available; retry the message
+				 * one time. If that fails we fall through and
+				 * panic as the system is in an unexpected state
+				 */
+				if (nretries++ == 0)
+					goto sscs_msg;
 			}
 			cmn_err(CE_PANIC,
 			    "ksend_message failure: STATE_UPDATE");

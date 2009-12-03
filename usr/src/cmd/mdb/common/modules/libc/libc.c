@@ -25,6 +25,7 @@
  */
 
 #include <sys/mdb_modapi.h>
+#include <mdb/mdb_whatis.h>
 #include <procfs.h>
 #include <ucontext.h>
 #include <siginfo.h>
@@ -582,13 +583,14 @@ d_ulwp(uintptr_t addr, uint_t flags, int argc, const mdb_arg_t *argv)
 	    ulwp.ul_td_evbuf.eventnum,
 	    prt_addr(ulwp.ul_td_evbuf.eventdata, 0));
 
-	HD("td'enable  sync'reg   qtype      cv_wake    usropts");
-	mdb_printf(OFFSTR "%-10d %-10d %-10d %-10d ",
+	HD("td'enable  sync'reg   qtype      cv_wake    rtld       usropts");
+	mdb_printf(OFFSTR "%-10d %-10d %-10d %-10d %-10d ",
 	    OFFSET(ul_td_events_enable),
 	    ulwp.ul_td_events_enable,
 	    ulwp.ul_sync_obj_reg,
 	    ulwp.ul_qtype,
-	    ulwp.ul_cv_wake);
+	    ulwp.ul_cv_wake,
+	    ulwp.ul_rtld);
 	mdb_printf(ulwp.ul_usropts? "0x%x\n" : "%d\n",
 	    ulwp.ul_usropts);
 
@@ -914,6 +916,61 @@ ulwp_walk_step(mdb_walk_state_t *wsp)
 	return (wsp->walk_callback(addr, &ulwp, wsp->walk_cbdata));
 }
 
+/* Avoid classifying NULL pointers as part of the main stack on x86 */
+#define	MIN_STACK_ADDR		(0x10000ul)
+
+static int
+whatis_walk_ulwp(uintptr_t addr, const ulwp_t *ulwp, mdb_whatis_t *w)
+{
+	uintptr_t cur;
+	lwpid_t id = ulwp->ul_lwpid;
+	uintptr_t top, base, size;
+
+	while (mdb_whatis_match(w, addr, sizeof (ulwp_t), &cur))
+		mdb_whatis_report_object(w, cur, addr,
+		    "allocated as thread %#r's ulwp_t\n", id);
+
+	top = (uintptr_t)ulwp->ul_stktop;
+	size = ulwp->ul_stksiz;
+
+	/*
+	 * The main stack ends up being a little weird, especially if
+	 * the stack ulimit is unlimited.  This tries to take that into
+	 * account.
+	 */
+	if (size > top)
+		size = top;
+	if (top > MIN_STACK_ADDR && top - size < MIN_STACK_ADDR)
+		size = top - MIN_STACK_ADDR;
+
+	base = top - size;
+
+	while (mdb_whatis_match(w, base, size, &cur))
+		mdb_whatis_report_address(w, cur, "in [ stack tid=%#r ]\n", id);
+
+	if (ulwp->ul_ustack.ss_flags & SS_ONSTACK) {
+		base = (uintptr_t)ulwp->ul_ustack.ss_sp;
+		size = ulwp->ul_ustack.ss_size;
+
+		while (mdb_whatis_match(w, base, size, &cur))
+			mdb_whatis_report_address(w, cur,
+			    "in [ altstack tid=%#r ]\n", id);
+	}
+
+	return (WHATIS_WALKRET(w));
+}
+
+/*ARGSUSED*/
+static int
+whatis_run_ulwps(mdb_whatis_t *w, void *arg)
+{
+	if (mdb_walk("ulwps", (mdb_walk_cb_t)whatis_walk_ulwp, w) == -1) {
+		mdb_warn("couldn't find ulwps walker");
+		return (1);
+	}
+	return (0);
+}
+
 /*
  * =======================================================
  * End of thread (previously libthread) interfaces.
@@ -945,5 +1002,8 @@ static const mdb_modinfo_t modinfo = { MDB_API_VERSION, dcmds, walkers };
 const mdb_modinfo_t *
 _mdb_init(void)
 {
+	mdb_whatis_register("threads", whatis_run_ulwps, NULL,
+	    WHATIS_PRIO_EARLY, WHATIS_REG_NO_ID);
+
 	return (&modinfo);
 }

@@ -26,11 +26,28 @@
 LIBRARY= libzfs.a
 VERS= .1
 
-OBJS_SHARED= zfs_namecheck.o zprop_common.o zfs_prop.o zpool_prop.o \
-	zfs_deleg.o zfs_comutil.o
-OBJS_COMMON= libzfs_dataset.o libzfs_util.o libzfs_graph.o libzfs_mount.o \
-	libzfs_pool.o libzfs_changelist.o libzfs_config.o libzfs_import.o \
-	libzfs_status.o libzfs_sendrecv.o
+OBJS_SHARED=			\
+	zfs_comutil.o		\
+	zfs_deleg.o		\
+	zfs_fletcher.o		\
+	zfs_namecheck.o		\
+	zfs_prop.o		\
+	zpool_prop.o		\
+	zprop_common.o
+
+OBJS_COMMON=			\
+	libzfs_changelist.o	\
+	libzfs_config.o		\
+	libzfs_dataset.o	\
+	libzfs_fru.o		\
+	libzfs_graph.o		\
+	libzfs_import.o		\
+	libzfs_mount.o		\
+	libzfs_pool.o		\
+	libzfs_sendrecv.o	\
+	libzfs_status.o		\
+	libzfs_util.o
+
 OBJECTS= $(OBJS_COMMON) $(OBJS_SHARED)
 
 include ../../Makefile.lib
@@ -45,11 +62,12 @@ SRCDIR =	../common
 INCS += -I$(SRCDIR)
 INCS += -I../../../uts/common/fs/zfs
 INCS += -I../../../common/zfs
+INCS += -I../../libc/inc
 
 C99MODE=	-xc99=%all
 C99LMODE=	-Xc99=%all
-LDLIBS +=	-lc -lm -ldevinfo -ldevid -lgen -lnvpair -luutil -lavl -lefi \
-	-lidmap
+LDLIBS +=	-lc -lm -ldevid -lgen -lnvpair -luutil -lavl -lefi \
+	-ladm -lidmap -ltsol -lmd -lumem
 CPPFLAGS +=	$(INCS) -D_REENTRANT
 
 SRCS=	$(OBJS_COMMON:%.o=$(SRCDIR)/%.c)	\

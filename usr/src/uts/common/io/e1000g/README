@@ -682,3 +682,45 @@ Notes on packaging:
 ====
   This version has the following fix:
    6848586 rw_enter()/rw_exit() could be called on uninitialized rw lock
+
+5.3.12
+====
+  This version has the following fixes:
+   6846262 T2000 fma shows fault.io.pciex.device-interr in snv_115
+   6870404 e1000g_reset can call e1000g_start after releasing dma resources
+
+5.3.13
+====
+  This version has the following fixes:
+   6681751 e1000g minor_perm inconsistent between package postinstall script and default minor_perm file
+   6855964 e1000g driver corrupting LSO packets causes chipset hang and significant performance regression
+
+5.3.14
+====
+  This version has the following fixes:
+   6820747 kstat output incorrect for MMF version of e1000g making it impossible to troubleshoot
+   6847888 HW initialization updates for 82541 and 82547 chips
+
+5.3.15
+======
+  This version has the following fixes:
+   6797885 need to add support for network device (8086,10ea) in a new Intel system
+   6803799 need to add network device support (8086,10ef) for a new Intel system
+   6808388 e1000g inteface experience packet lost when switch between joining and leaving a multicast stream
+
+5.3.16
+======
+  This version has the following fixes:
+   6881588 e1000g functions should return when e1000g_check_dma_handle() fails
+   6888320 e1000g emits scary mutex message on the console
+
+5.3.17
+======
+  This version has the following fixes:
+   6893285 e1000g 'pciex8086,105e' with PHY type igp I/O devices have been retired
+   6895459 e1000g share code update v3-1-10-1
+
+5.3.18
+======
+  This version has the following fix:
+   6894476 e1000g is not lint clean

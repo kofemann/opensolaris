@@ -23,8 +23,6 @@
  * Use is subject to license terms.
  */
 
-#pragma ident	"@(#)smbns_netlogon.c	1.7	08/07/16 SMI"
-
 /*
  * This module handles the primary domain controller location protocol.
  * The document claims to be version 1.15 of the browsing protocol. It also
@@ -81,7 +79,7 @@ extern cond_t ntdomain_cv;
 void
 smb_netlogon_request(struct name_entry *server, char *domain)
 {
-	nt_domain_t di;
+	smb_domain_t di;
 	smb_sid_t *sid = NULL;
 	int protocol = NETLOGON_PROTO_NETLOGON;
 
@@ -94,7 +92,7 @@ smb_netlogon_request(struct name_entry *server, char *domain)
 	(void) mutex_unlock(&ntdomain_mtx);
 
 	smb_config_getdomaininfo(di.di_nbname, NULL, di.di_sid, NULL, NULL);
-	if (utf8_strcasecmp(di.di_nbname, domain) == 0) {
+	if (smb_strcasecmp(di.di_nbname, domain, 0) == 0) {
 		if ((sid = smb_sid_fromstr(di.di_sid)) != NULL)
 			protocol = NETLOGON_PROTO_SAMLOGON;
 	}
@@ -134,8 +132,7 @@ smb_netlogon_receive(struct datagram *datagram,
 	smb_msgbuf_t mb;
 	unsigned short opcode;
 	char src_name[SMB_PI_MAX_HOST];
-	mts_wchar_t unicode_src_name[SMB_PI_MAX_HOST];
-	unsigned int cpid = oem_get_smb_cpid();
+	smb_wchar_t unicode_src_name[SMB_PI_MAX_HOST];
 	uint32_t src_ipaddr;
 	char *junk;
 	char *primary;
@@ -151,9 +148,9 @@ smb_netlogon_receive(struct datagram *datagram,
 	 * Therefore, we need to convert it to unicode and
 	 * store it in multi-bytes format.
 	 */
-	(void) oemstounicodes(unicode_src_name, (char *)datagram->src.name,
-	    SMB_PI_MAX_HOST, cpid);
-	(void) mts_wcstombs(src_name, unicode_src_name, SMB_PI_MAX_HOST);
+	(void) oemtoucs(unicode_src_name, (char *)datagram->src.name,
+	    SMB_PI_MAX_HOST, OEM_CPG_850);
+	(void) smb_wcstombs(src_name, unicode_src_name, SMB_PI_MAX_HOST);
 
 	(void) trim_whitespace(src_name);
 
@@ -216,13 +213,13 @@ smb_netlogon_receive(struct datagram *datagram,
 		return;
 	}
 
-	if (domain == 0 || primary == 0) {
+	if (domain == NULL || primary == NULL) {
 		syslog(LOG_ERR, "NetLogonResponse: malformed packet");
 		smb_msgbuf_term(&mb);
 		return;
 	}
 
-	syslog(LOG_DEBUG, "DC Offer Dom=%s PDC=%s From=%s",
+	syslog(LOG_DEBUG, "DC Offer Domain=%s PDC=%s From=%s",
 	    domain, primary, src_name);
 
 	(void) mutex_lock(&ntdomain_mtx);
@@ -290,7 +287,7 @@ smb_netlogon_query(struct name_entry *server,
 	 * zero bytes that terminate the wchar string.
 	 */
 	data_length = sizeof (short) + name_lengths + (name_lengths & 1) +
-	    mts_wcequiv_strlen(hostname) + 2 + sizeof (long) + sizeof (short) +
+	    smb_wcequiv_strlen(hostname) + 2 + sizeof (long) + sizeof (short) +
 	    sizeof (short);
 
 	offset = smb_browser_load_transact_header(buffer,
@@ -383,8 +380,8 @@ smb_netlogon_samlogon(struct name_entry *server,
 
 	data_length = sizeof (short)
 	    + sizeof (short)
-	    + mts_wcequiv_strlen(hostname) + 2
-	    + mts_wcequiv_strlen(username) + 2
+	    + smb_wcequiv_strlen(hostname) + 2
+	    + smb_wcequiv_strlen(username) + 2
 	    + name_length
 	    + sizeof (long)
 	    + sizeof (long)
@@ -449,8 +446,8 @@ smb_netlogon_send(struct name_entry *name,
 		smb_init_name_struct((unsigned char *)domain, suffix[i],
 		    0, 0, 0, 0, 0, &dname);
 
-		syslog(LOG_DEBUG, "smb_netlogon_send");
-		smb_netbios_name_dump(&dname);
+		syslog(LOG_DEBUG, "SmbNetlogonSend");
+		smb_netbios_name_logf(&dname);
 		if ((dest = smb_name_find_name(&dname)) != 0) {
 			dest_dup = smb_netbios_name_dup(dest, 1);
 			smb_name_unlock_name(dest);
@@ -460,7 +457,8 @@ smb_netlogon_send(struct name_entry *name,
 				free(dest_dup);
 			}
 		} else {
-			syslog(LOG_DEBUG, "smbd: NBNS couldn't find %s<0x%X>",
+			syslog(LOG_DEBUG,
+			    "SmbNetlogonSend: could not find %s<0x%X>",
 			    domain, suffix[i]);
 		}
 	}

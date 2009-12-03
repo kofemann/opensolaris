@@ -86,6 +86,7 @@ SUNW_1.23 {		# SunOS 5.11 (Solaris 11)
 	clock_gettime;
 	clock_nanosleep;
 	clock_settime;
+	daemon;
 	dirfd;
 	door_bind;
 	door_call;
@@ -99,6 +100,7 @@ SUNW_1.23 {		# SunOS 5.11 (Solaris 11)
 	door_setparam;
 	door_ucred;
 	door_unbind;
+	door_xcreate;
 	err;
 	errx;
 	faccessat;
@@ -107,8 +109,8 @@ SUNW_1.23 {		# SunOS 5.11 (Solaris 11)
 	forkallx;
 	forkx;
 	fsetattr;
+	futimens;
 	getattrat;
-	getpagesizes2;
 	htonl;
 	htonll;
 	htons;
@@ -177,12 +179,15 @@ SUNW_1.23 {		# SunOS 5.11 (Solaris 11)
 	timer_getoverrun;
 	timer_gettime;
 	timer_settime;
+	u8_strcmp;
+	u8_validate;
 	uconv_u16tou32;
 	uconv_u16tou8;
 	uconv_u32tou16;
 	uconv_u32tou8;
 	uconv_u8tou16;
 	uconv_u8tou32;
+	utimensat;
 	vasprintf;
 	verr;
 	verrx;
@@ -191,12 +196,16 @@ SUNW_1.23 {		# SunOS 5.11 (Solaris 11)
 	vwarnx;
 	warn;
 	warnx;
+} SUNW_1.22.5;
+
+SUNW_1.22.5 {		# s10u8 - SunOS 5.10 (Solaris 10) patch additions
+    protected:
+	getpagesizes2;
 } SUNW_1.22.4;
 
 SUNW_1.22.4 {		# s10u7 - SunOS 5.10 (Solaris 10) patch additions
     protected:
-	u8_strcmp;
-	u8_validate;
+	SUNW_1.22.4;
 } SUNW_1.22.3;
 
 SUNW_1.22.3 {		# SunOS 5.10 (Solaris 10) patch additions
@@ -1706,6 +1715,14 @@ SUNWprivate_1.1 {
 	__towlower_std;
 	__towupper_bc;
 	__towupper_std;
+	tpool_create;
+	tpool_dispatch;
+	tpool_destroy;
+	tpool_wait;
+	tpool_suspend;
+	tpool_suspended;
+	tpool_resume;
+	tpool_member;
 	_trwctype;
 	__trwctype_std;
 	_ttyname_dev;

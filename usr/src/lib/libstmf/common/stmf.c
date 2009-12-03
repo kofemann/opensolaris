@@ -47,9 +47,12 @@
 #include <libstmf_impl.h>
 #include <sys/stmf_ioctl.h>
 #include <sys/stmf_sbd_ioctl.h>
+#include <sys/pppt_ioctl.h>
+#include <macros.h>
 
 #define	STMF_PATH    "/devices/pseudo/stmf@0:admin"
 #define	SBD_PATH    "/devices/pseudo/stmf_sbd@0:admin"
+#define	PPPT_PATH    "/devices/pseudo/pppt@0:pppt"
 
 #define	EUI "eui."
 #define	WWN "wwn."
@@ -57,7 +60,9 @@
 #define	LU_ASCII_GUID_SIZE 32
 #define	LU_GUID_SIZE 16
 #define	OUI_ASCII_SIZE 6
+#define	HOST_ID_ASCII_SIZE 8
 #define	OUI_SIZE 3
+#define	HOST_ID_SIZE 4
 #define	IDENT_LENGTH_BYTE 3
 
 /* various initial allocation values */
@@ -81,6 +86,9 @@
 #define	OPEN_SBD 0
 #define	OPEN_EXCL_SBD O_EXCL
 
+#define	OPEN_PPPT 0
+#define	OPEN_EXCL_PPPT O_EXCL
+
 #define	LOGICAL_UNIT_TYPE 0
 #define	TARGET_TYPE 1
 #define	STMF_SERVICE_TYPE 2
@@ -95,6 +103,7 @@
 
 static int openStmf(int, int *fd);
 static int openSbd(int, int *fd);
+static int openPppt(int, int *fd);
 static int groupIoctl(int fd, int cmd, stmfGroupName *);
 static int loadStore(int fd);
 static int initializeConfig();
@@ -116,6 +125,7 @@ static int removeGuidFromDiskStore(stmfGuid *);
 static int addGuidToDiskStore(stmfGuid *, char *);
 static int persistDiskGuid(stmfGuid *, char *, boolean_t);
 static int setDiskProp(luResourceImpl *, uint32_t, const char *);
+static int getDiskGlobalProp(uint32_t prop, char *propVal, size_t *propLen);
 static int checkHexUpper(char *);
 static int strToShift(const char *);
 static int niceStrToNum(const char *, uint64_t *);
@@ -129,7 +139,10 @@ static int groupListIoctl(stmfGroupList **, int);
 static int iLoadGroupFromPs(stmfGroupList **, int);
 static int groupMemberListIoctl(stmfGroupName *, stmfGroupProperties **, int);
 static int getProviderData(char *, nvlist_t **, int, uint64_t *);
+static int setDiskStandby(stmfGuid *luGuid);
+static int setDiskGlobalProp(uint32_t, const char *);
 static int viewEntryCompare(const void *, const void *);
+static void deleteNonActiveLus();
 
 static pthread_mutex_t persistenceTypeLock = PTHREAD_MUTEX_INITIALIZER;
 static int iPersistType = 0;
@@ -167,7 +180,7 @@ openStmf(int flag, int *fd)
 /*
  * Open for sbd module
  *
- * flag - open flag (OPEN_STMF, OPEN_EXCL_STMF)
+ * flag - open flag (OPEN_SBD, OPEN_EXCL_SBD)
  * fd - pointer to integer. On success, contains the stmf file descriptor
  */
 static int
@@ -187,6 +200,34 @@ openSbd(int flag, int *fd)
 		}
 		syslog(LOG_DEBUG, "openSbd:open failure:%s:errno(%d)",
 		    SBD_PATH, errno);
+	}
+
+	return (ret);
+}
+
+/*
+ * Open for pppt module
+ *
+ * flag - open flag (OPEN_PPPT, OPEN_EXCL_PPPT)
+ * fd - pointer to integer. On success, contains the stmf file descriptor
+ */
+static int
+openPppt(int flag, int *fd)
+{
+	int ret = STMF_STATUS_ERROR;
+
+	if ((*fd = open(PPPT_PATH, O_RDONLY | flag)) != -1) {
+		ret = STMF_STATUS_SUCCESS;
+	} else {
+		if (errno == EBUSY) {
+			ret = STMF_ERROR_BUSY;
+		} else if (errno == EACCES) {
+			ret = STMF_ERROR_PERM;
+		} else {
+			ret = STMF_STATUS_ERROR;
+		}
+		syslog(LOG_DEBUG, "openPppt:open failure:%s:errno(%d)",
+		    PPPT_PATH, errno);
 	}
 
 	return (ret);
@@ -1205,6 +1246,11 @@ createDiskLu(diskResource *disk, stmfGuid *createdGuid)
 		sbdLu->slu_company_id = disk->companyId;
 	}
 
+	if (disk->hostIdValid) {
+		sbdLu->slu_host_id_valid = 1;
+		sbdLu->slu_host_id = disk->hostId;
+	}
+
 	if (disk->blkSizeValid) {
 		sbdLu->slu_blksize_valid = 1;
 		sbdLu->slu_blksize = disk->blkSize;
@@ -1459,6 +1505,9 @@ diskError(uint32_t stmfError, int *ret)
 		case SBD_RET_WRITE_CACHE_SET_FAILED:
 			*ret = STMF_ERROR_WRITE_CACHE_SET;
 			break;
+		case SBD_RET_ACCESS_STATE_FAILED:
+			*ret = STMF_ERROR_ACCESS_STATE_SET;
+			break;
 		default:
 			*ret = STMF_STATUS_ERROR;
 			break;
@@ -1574,6 +1623,88 @@ deleteDiskLu(stmfGuid *luGuid)
 
 done:
 	(void) close(fd);
+	return (ret);
+}
+
+/*
+ * stmfLuStandby
+ *
+ * Purpose: Sets access state to standby
+ *
+ * luGuid - guid of registered logical unit
+ *
+ */
+int
+stmfLuStandby(stmfGuid *luGuid)
+{
+	int ret = STMF_STATUS_SUCCESS;
+	stmfLogicalUnitProperties luProps;
+
+	if (luGuid == NULL) {
+		return (STMF_ERROR_INVALID_ARG);
+	}
+
+	/* Check logical unit provider name to call correct dtype function */
+	if ((ret = stmfGetLogicalUnitProperties(luGuid, &luProps))
+	    != STMF_STATUS_SUCCESS) {
+		return (ret);
+	} else {
+		if (strcmp(luProps.providerName, "sbd") == 0) {
+			ret = setDiskStandby(luGuid);
+		} else if (luProps.status == STMF_LOGICAL_UNIT_UNREGISTERED) {
+			return (STMF_ERROR_NOT_FOUND);
+		} else {
+			return (STMF_ERROR_INVALID_ARG);
+		}
+	}
+
+	return (ret);
+}
+
+static int
+setDiskStandby(stmfGuid *luGuid)
+{
+	int ret = STMF_STATUS_SUCCESS;
+	stmf_iocdata_t sbdIoctl = {0};
+	sbd_set_lu_standby_t sbdLu = {0};
+	int ioctlRet;
+	int savedErrno;
+	int fd = 0;
+
+	/*
+	 * Open control node for sbd
+	 */
+	if ((ret = openSbd(OPEN_SBD, &fd)) != STMF_STATUS_SUCCESS)
+		return (ret);
+
+	bcopy(luGuid, &sbdLu.stlu_guid, sizeof (stmfGuid));
+
+	sbdIoctl.stmf_version = STMF_VERSION_1;
+	sbdIoctl.stmf_ibuf_size = sizeof (sbd_set_lu_standby_t);
+	sbdIoctl.stmf_ibuf = (uint64_t)(unsigned long)&sbdLu;
+
+	ioctlRet = ioctl(fd, SBD_IOCTL_SET_LU_STANDBY, &sbdIoctl);
+	if (ioctlRet != 0) {
+		savedErrno = errno;
+		switch (savedErrno) {
+			case EBUSY:
+				ret = STMF_ERROR_BUSY;
+				break;
+			case EPERM:
+			case EACCES:
+				ret = STMF_ERROR_PERM;
+				break;
+			default:
+				diskError(sbdIoctl.stmf_error, &ret);
+				if (ret == STMF_STATUS_ERROR) {
+					syslog(LOG_DEBUG,
+					"setDiskStandby:ioctl "
+					"error(%d) (%d) (%d)", ioctlRet,
+					    sbdIoctl.stmf_error, savedErrno);
+				}
+				break;
+		}
+	}
 	return (ret);
 }
 
@@ -1900,7 +2031,13 @@ persistDiskGuid(stmfGuid *guid, char *filename, boolean_t persist)
 				}
 				newData = B_TRUE;
 			} else {
-				ret = stmfRet;
+				/*
+				 * if we're persisting the data, it's
+				 * an error. Otherwise, just return
+				 */
+				if (persist) {
+					ret = stmfRet;
+				}
 				goto done;
 			}
 		}
@@ -2065,6 +2202,7 @@ getDiskAllProps(stmfGuid *luGuid, luResource *hdl)
 	ret = createDiskResource((luResourceImpl *)*hdl);
 	if (ret != STMF_STATUS_SUCCESS) {
 		free(*hdl);
+		free(sbdProps);
 		(void) close(fd);
 		return (ret);
 	}
@@ -2104,6 +2242,7 @@ getDiskAllProps(stmfGuid *luGuid, luResource *hdl)
 		ret = loadDiskPropsFromDriver((luResourceImpl *)*hdl, sbdProps);
 	}
 
+	free(sbdProps);
 	(void) close(fd);
 	return (ret);
 }
@@ -2208,6 +2347,258 @@ loadDiskPropsFromDriver(luResourceImpl *hdl, sbd_lu_props_t *sbdProps)
 	diskLu->luSizeValid = B_TRUE;
 	diskLu->luSize = sbdProps->slp_lu_size;
 
+	diskLu->accessState = sbdProps->slp_access_state;
+
+	return (ret);
+}
+
+/*
+ * stmfGetGlobalLuProp
+ *
+ * Purpose: get a global property for a device type
+ *
+ */
+int
+stmfGetGlobalLuProp(uint16_t dType, uint32_t prop, char *propVal,
+    size_t *propLen)
+{
+	int ret = STMF_STATUS_SUCCESS;
+	if (dType != STMF_DISK || propVal == NULL) {
+		return (STMF_ERROR_INVALID_ARG);
+	}
+
+	ret = getDiskGlobalProp(prop, propVal, propLen);
+
+	return (ret);
+}
+
+/*
+ * getDiskGlobalProp
+ *
+ * Purpose: get global property from sbd driver
+ *
+ */
+static int
+getDiskGlobalProp(uint32_t prop, char *propVal, size_t *propLen)
+{
+	int ret = STMF_STATUS_SUCCESS;
+	int fd;
+	sbd_global_props_t *sbdProps;
+	void *sbd_realloc;
+	int retryCnt = 0;
+	boolean_t retry;
+	int ioctlRet;
+	int savedErrno;
+	int sbdPropsSize = sizeof (*sbdProps) + MAX_SBD_PROPS;
+	stmf_iocdata_t sbdIoctl = {0};
+	size_t reqLen;
+
+	switch (prop) {
+		case STMF_LU_PROP_MGMT_URL:
+			break;
+		default:
+			return (STMF_ERROR_INVALID_PROP);
+	}
+
+	/*
+	 * Open control node for sbd
+	 */
+	if ((ret = openSbd(OPEN_SBD, &fd)) != STMF_STATUS_SUCCESS)
+		return (ret);
+
+	sbdProps = calloc(1, sbdPropsSize);
+	if (sbdProps == NULL) {
+		(void) close(fd);
+		return (STMF_ERROR_NOMEM);
+	}
+
+	do {
+		retry = B_FALSE;
+		sbdIoctl.stmf_version = STMF_VERSION_1;
+		sbdIoctl.stmf_obuf_size = sbdPropsSize;
+		sbdIoctl.stmf_obuf = (uint64_t)(unsigned long)sbdProps;
+		ioctlRet = ioctl(fd, SBD_IOCTL_GET_GLOBAL_LU, &sbdIoctl);
+		if (ioctlRet != 0) {
+			savedErrno = errno;
+			switch (savedErrno) {
+				case EBUSY:
+					ret = STMF_ERROR_BUSY;
+					break;
+				case EPERM:
+				case EACCES:
+					ret = STMF_ERROR_PERM;
+					break;
+				case ENOMEM:
+					if (sbdIoctl.stmf_error ==
+					    SBD_RET_INSUFFICIENT_BUF_SPACE &&
+					    retryCnt++ < 3) {
+						sbdPropsSize =
+						    sizeof (*sbdProps) +
+						    sbdProps->
+						    mlu_buf_size_needed;
+
+						sbd_realloc = sbdProps;
+						sbdProps = realloc(sbdProps,
+						    sbdPropsSize);
+						if (sbdProps == NULL) {
+							free(sbd_realloc);
+							ret = STMF_ERROR_NOMEM;
+							break;
+						}
+						retry = B_TRUE;
+					} else {
+						ret = STMF_ERROR_NOMEM;
+					}
+					break;
+				default:
+					syslog(LOG_DEBUG,
+					    "getDiskGlobalProp:ioctl error(%d)"
+					    "(%d)(%d)", ioctlRet,
+					    sbdIoctl.stmf_error, savedErrno);
+					ret = STMF_STATUS_ERROR;
+					break;
+			}
+
+		}
+	} while (retry);
+
+	if (ret != STMF_STATUS_SUCCESS) {
+		goto done;
+	}
+
+	switch (prop) {
+		case STMF_LU_PROP_MGMT_URL:
+			if (sbdProps->mlu_mgmt_url_valid == 0) {
+				ret = STMF_ERROR_NO_PROP;
+				goto done;
+			}
+			if ((reqLen = strlcpy(propVal, (char *)&(
+			    sbdProps->mlu_buf[sbdProps->mlu_mgmt_url_off]),
+			    *propLen)) >= *propLen) {
+				*propLen = reqLen + 1;
+				ret = STMF_ERROR_INVALID_ARG;
+				goto done;
+			}
+			break;
+	}
+
+done:
+	free(sbdProps);
+	(void) close(fd);
+	return (ret);
+}
+
+/*
+ * stmfSetGlobalLuProp
+ *
+ * Purpose: set a global property for a device type
+ *
+ */
+int
+stmfSetGlobalLuProp(uint16_t dType, uint32_t prop, const char *propVal)
+{
+	int ret = STMF_STATUS_SUCCESS;
+	if (dType != STMF_DISK || propVal == NULL) {
+		return (STMF_ERROR_INVALID_ARG);
+	}
+
+	ret = setDiskGlobalProp(prop, propVal);
+
+	return (ret);
+}
+
+/*
+ * setDiskGlobalProp
+ *
+ * Purpose: set properties for resource of type disk
+ *
+ * resourceProp - valid resource identifier
+ * propVal - valid resource value
+ */
+static int
+setDiskGlobalProp(uint32_t resourceProp, const char *propVal)
+{
+	int ret = STMF_STATUS_SUCCESS;
+	sbd_global_props_t *sbdGlobalProps = NULL;
+	int sbdGlobalPropsSize = 0;
+	int propLen;
+	int mluBufSize = 0;
+	int fd;
+	int savedErrno;
+	int ioctlRet;
+	stmf_iocdata_t sbdIoctl = {0};
+
+	switch (resourceProp) {
+		case STMF_LU_PROP_MGMT_URL:
+			break;
+		default:
+			return (STMF_ERROR_INVALID_PROP);
+			break;
+	}
+
+	/*
+	 * Open control node for sbd
+	 */
+	if ((ret = openSbd(OPEN_SBD, &fd)) != STMF_STATUS_SUCCESS)
+		return (ret);
+
+	propLen = strlen(propVal);
+	mluBufSize += propLen + 1;
+	sbdGlobalPropsSize += sizeof (sbd_global_props_t) - 8 +
+	    max(8, mluBufSize);
+	/*
+	 * 8 is the size of the buffer set aside for
+	 * concatenation of variable length fields
+	 */
+	sbdGlobalProps = (sbd_global_props_t *)calloc(1, sbdGlobalPropsSize);
+	if (sbdGlobalProps == NULL) {
+		(void) close(fd);
+		return (STMF_ERROR_NOMEM);
+	}
+
+	sbdGlobalProps->mlu_struct_size = sbdGlobalPropsSize;
+
+	switch (resourceProp) {
+		case STMF_LU_PROP_MGMT_URL:
+			sbdGlobalProps->mlu_mgmt_url_valid = 1;
+			bcopy(propVal, &(sbdGlobalProps->mlu_buf),
+			    propLen + 1);
+			break;
+		default:
+			ret = STMF_ERROR_NO_PROP;
+			goto done;
+	}
+
+	sbdIoctl.stmf_version = STMF_VERSION_1;
+	sbdIoctl.stmf_ibuf_size = sbdGlobalProps->mlu_struct_size;
+	sbdIoctl.stmf_ibuf = (uint64_t)(unsigned long)sbdGlobalProps;
+
+	ioctlRet = ioctl(fd, SBD_IOCTL_SET_GLOBAL_LU, &sbdIoctl);
+	if (ioctlRet != 0) {
+		savedErrno = errno;
+		switch (savedErrno) {
+			case EBUSY:
+				ret = STMF_ERROR_BUSY;
+				break;
+			case EPERM:
+			case EACCES:
+				ret = STMF_ERROR_PERM;
+				break;
+			default:
+				diskError(sbdIoctl.stmf_error, &ret);
+				if (ret == STMF_STATUS_ERROR) {
+					syslog(LOG_DEBUG,
+					"modifyDiskLu:ioctl "
+					"error(%d) (%d) (%d)", ioctlRet,
+					    sbdIoctl.stmf_error, savedErrno);
+				}
+				break;
+		}
+	}
+
+done:
+	free(sbdGlobalProps);
+	(void) close(fd);
 	return (ret);
 }
 
@@ -2255,7 +2646,37 @@ getDiskProp(luResourceImpl *hdl, uint32_t prop, char *propVal, size_t *propLen)
 {
 	int ret = STMF_STATUS_SUCCESS;
 	diskResource *diskLu = hdl->resource;
+	char accessState[20];
 	size_t reqLen;
+
+	if (prop == STMF_LU_PROP_ACCESS_STATE) {
+		if (diskLu->accessState == SBD_LU_ACTIVE) {
+			(void) strlcpy(accessState, STMF_ACCESS_ACTIVE,
+			    sizeof (accessState));
+		} else if (diskLu->accessState == SBD_LU_TRANSITION_TO_ACTIVE) {
+			(void) strlcpy(accessState,
+			    STMF_ACCESS_STANDBY_TO_ACTIVE,
+			    sizeof (accessState));
+		} else if (diskLu->accessState == SBD_LU_STANDBY) {
+			(void) strlcpy(accessState, STMF_ACCESS_STANDBY,
+			    sizeof (accessState));
+		} else if (diskLu->accessState ==
+		    SBD_LU_TRANSITION_TO_STANDBY) {
+			(void) strlcpy(accessState,
+			    STMF_ACCESS_ACTIVE_TO_STANDBY,
+			    sizeof (accessState));
+		}
+		if ((reqLen = strlcpy(propVal, accessState,
+		    *propLen)) >= *propLen) {
+			*propLen = reqLen + 1;
+			return (STMF_ERROR_INVALID_ARG);
+		}
+		return (0);
+	}
+
+	if (diskLu->accessState != SBD_LU_ACTIVE) {
+		return (STMF_ERROR_NO_PROP_STANDBY);
+	}
 
 	switch (prop) {
 		case STMF_LU_PROP_BLOCK_SIZE:
@@ -2428,7 +2849,9 @@ setDiskProp(luResourceImpl *hdl, uint32_t resourceProp, const char *propVal)
 	unsigned long long numericProp = 0;
 	char guidProp[LU_ASCII_GUID_SIZE + 1];
 	char ouiProp[OUI_ASCII_SIZE + 1];
+	char hostIdProp[HOST_ID_ASCII_SIZE + 1];
 	unsigned int oui[OUI_SIZE];
+	unsigned int hostId[HOST_ID_SIZE];
 	unsigned int guid[LU_GUID_SIZE];
 	int propSize;
 
@@ -2469,7 +2892,31 @@ setDiskProp(luResourceImpl *hdl, uint32_t resourceProp, const char *propVal)
 			diskLu->companyId += oui[0] << 16;
 			diskLu->companyId += oui[1] << 8;
 			diskLu->companyId += oui[2];
+			if (diskLu->companyId == 0) {
+				return (STMF_ERROR_INVALID_ARG);
+			}
 			diskLu->companyIdValid = B_TRUE;
+			break;
+		case STMF_LU_PROP_HOST_ID:
+			if ((strlcpy(hostIdProp, propVal,
+			    sizeof (hostIdProp))) >= sizeof (hostIdProp)) {
+				return (STMF_ERROR_INVALID_ARG);
+			}
+			if (checkHexUpper(hostIdProp) != 0) {
+				return (STMF_ERROR_INVALID_ARG);
+			}
+			(void) sscanf(hostIdProp, "%2X%2X%2X%2X",
+			    &hostId[0], &hostId[1], &hostId[2], &hostId[3]);
+
+			diskLu->hostId = 0;
+			diskLu->hostId += hostId[0] << 24;
+			diskLu->hostId += hostId[1] << 16;
+			diskLu->hostId += hostId[2] << 8;
+			diskLu->hostId += hostId[3];
+			if (diskLu->hostId == 0) {
+				return (STMF_ERROR_INVALID_ARG);
+			}
+			diskLu->hostIdValid = B_TRUE;
 			break;
 		case STMF_LU_PROP_GUID:
 			if (strlen(propVal) != LU_ASCII_GUID_SIZE) {
@@ -2569,6 +3016,9 @@ setDiskProp(luResourceImpl *hdl, uint32_t resourceProp, const char *propVal)
 				return (STMF_ERROR_INVALID_ARG);
 			}
 			diskLu->writebackCacheDisableValid = B_TRUE;
+			break;
+		case STMF_LU_PROP_ACCESS_STATE:
+			ret = STMF_ERROR_INVALID_PROP;
 			break;
 		default:
 			ret = STMF_ERROR_NO_PROP;
@@ -3541,7 +3991,7 @@ stmfGetSessionList(stmfDevid *devid, stmfSessionList **sessionList)
 	int cmd = STMF_IOCTL_SESSION_LIST;
 	int i;
 	stmf_iocdata_t stmfIoctl;
-	slist_scsi_session_t *fSessionList;
+	slist_scsi_session_t *fSessionList, *fSessionListP = NULL;
 	uint8_t ident[260];
 	uint32_t fSessionListSize;
 
@@ -3567,8 +4017,10 @@ stmfGetSessionList(stmfDevid *devid, stmfSessionList **sessionList)
 	fSessionListSize = ALLOC_SESSION;
 	fSessionListSize = fSessionListSize * (sizeof (slist_scsi_session_t));
 	fSessionList = (slist_scsi_session_t *)calloc(1, fSessionListSize);
+	fSessionListP = fSessionList;
 	if (fSessionList == NULL) {
-		return (STMF_ERROR_NOMEM);
+		ret = STMF_ERROR_NOMEM;
+		goto done;
 	}
 
 	ident[IDENT_LENGTH_BYTE] = devid->identLength;
@@ -3611,8 +4063,10 @@ stmfGetSessionList(stmfDevid *devid, stmfSessionList **sessionList)
 		    sizeof (slist_scsi_session_t);
 		fSessionList = realloc(fSessionList, fSessionListSize);
 		if (fSessionList == NULL) {
-			return (STMF_ERROR_NOMEM);
+			ret = STMF_ERROR_NOMEM;
+			goto done;
 		}
+		fSessionListP = fSessionList;
 		stmfIoctl.stmf_obuf_size = fSessionListSize;
 		stmfIoctl.stmf_obuf = (uint64_t)(unsigned long)fSessionList;
 		ioctlRet = ioctl(fd, cmd, &stmfIoctl);
@@ -3667,6 +4121,7 @@ stmfGetSessionList(stmfDevid *devid, stmfSessionList **sessionList)
 	}
 done:
 	(void) close(fd);
+	free(fSessionListP);
 	return (ret);
 }
 
@@ -3864,6 +4319,7 @@ stmfGetTargetProperties(stmfDevid *devid, stmfTargetProperties *targetProps)
 	int ioctlRet;
 	stmf_iocdata_t stmfIoctl;
 	sioc_target_port_props_t targetProperties;
+	scsi_devid_desc_t *scsiDevid;
 
 	if (devid == NULL || targetProps == NULL) {
 		return (STMF_ERROR_INVALID_ARG);
@@ -3931,6 +4387,10 @@ stmfGetTargetProperties(stmfDevid *devid, stmfTargetProperties *targetProps)
 	}
 	bcopy(targetProperties.tgt_alias, targetProps->alias,
 	    sizeof (targetProps->alias));
+
+	scsiDevid = (scsi_devid_desc_t *)&targetProperties.tgt_id;
+	targetProps->protocol = scsiDevid->protocol_id;
+
 done:
 	(void) close(fd);
 	return (ret);
@@ -4715,6 +5175,172 @@ out:
 }
 
 /*
+ * stmfGetAluaState
+ *
+ * Purpose - Get the alua state
+ *
+ */
+int
+stmfGetAluaState(boolean_t *enabled, uint32_t *node)
+{
+	int ret = STMF_STATUS_SUCCESS;
+	int fd;
+	stmf_iocdata_t stmfIoctl = {0};
+	stmf_alua_state_desc_t alua_state = {0};
+	int ioctlRet;
+
+	if (enabled == NULL || node == NULL) {
+		return (STMF_ERROR_INVALID_ARG);
+	}
+
+	/*
+	 * Open control node for stmf
+	 */
+	if ((ret = openStmf(OPEN_STMF, &fd)) != STMF_STATUS_SUCCESS)
+		return (ret);
+
+	/*
+	 * Issue ioctl to get the stmf state
+	 */
+	stmfIoctl.stmf_version = STMF_VERSION_1;
+	stmfIoctl.stmf_obuf_size = sizeof (alua_state);
+	stmfIoctl.stmf_obuf = (uint64_t)(unsigned long)&alua_state;
+	ioctlRet = ioctl(fd, STMF_IOCTL_GET_ALUA_STATE, &stmfIoctl);
+
+	(void) close(fd);
+
+	if (ioctlRet != 0) {
+		switch (errno) {
+			case EBUSY:
+				ret = STMF_ERROR_BUSY;
+				break;
+			case EPERM:
+			case EACCES:
+				ret = STMF_ERROR_PERM;
+				break;
+			default:
+				syslog(LOG_DEBUG,
+				    "getStmfState:ioctl errno(%d)", errno);
+				ret = STMF_STATUS_ERROR;
+				break;
+		}
+	} else {
+		if (alua_state.alua_state == 1) {
+			*enabled = B_TRUE;
+		} else {
+			*enabled = B_FALSE;
+		}
+		*node = alua_state.alua_node;
+	}
+
+	return (ret);
+}
+
+/*
+ * stmfSetAluaState
+ *
+ * Purpose - set the alua state to enabled/disabled
+ *
+ */
+int
+stmfSetAluaState(boolean_t enabled, uint32_t node)
+{
+	int ret = STMF_STATUS_SUCCESS;
+	int fd;
+	stmf_iocdata_t stmfIoctl = {0};
+	stmf_alua_state_desc_t alua_state = {0};
+	int ioctlRet;
+
+	if ((enabled != B_TRUE && enabled != B_FALSE) || (node > 1)) {
+		return (STMF_ERROR_INVALID_ARG);
+	}
+
+	if (enabled) {
+		alua_state.alua_state = 1;
+	}
+
+	alua_state.alua_node = node;
+
+	/*
+	 * Open control node for stmf
+	 */
+	if ((ret = openStmf(OPEN_STMF, &fd)) != STMF_STATUS_SUCCESS)
+		return (ret);
+
+	/*
+	 * Issue ioctl to get the stmf state
+	 */
+	stmfIoctl.stmf_version = STMF_VERSION_1;
+	stmfIoctl.stmf_ibuf_size = sizeof (alua_state);
+	stmfIoctl.stmf_ibuf = (uint64_t)(unsigned long)&alua_state;
+	ioctlRet = ioctl(fd, STMF_IOCTL_SET_ALUA_STATE, &stmfIoctl);
+
+	(void) close(fd);
+
+	if (ioctlRet != 0) {
+		switch (errno) {
+			case EBUSY:
+				ret = STMF_ERROR_BUSY;
+				break;
+			case EPERM:
+			case EACCES:
+				ret = STMF_ERROR_PERM;
+				break;
+			default:
+				syslog(LOG_DEBUG,
+				    "getStmfState:ioctl errno(%d)", errno);
+				ret = STMF_STATUS_ERROR;
+				break;
+		}
+	}
+	if (!enabled && ret == STMF_STATUS_SUCCESS) {
+		deleteNonActiveLus();
+	}
+
+	return (ret);
+}
+
+static void
+deleteNonActiveLus()
+{
+	int stmfRet;
+	int i;
+	stmfGuidList *luList;
+	luResource hdl = NULL;
+	char propVal[10];
+	size_t propValSize = sizeof (propVal);
+
+	stmfRet = stmfGetLogicalUnitList(&luList);
+	if (stmfRet != STMF_STATUS_SUCCESS) {
+		return;
+	}
+
+	for (i = 0; i < luList->cnt; i++) {
+		stmfRet = stmfGetLuResource(&luList->guid[i], &hdl);
+		if (stmfRet != STMF_STATUS_SUCCESS) {
+			goto err;
+		}
+		stmfRet = stmfGetLuProp(hdl, STMF_LU_PROP_ACCESS_STATE, propVal,
+		    &propValSize);
+		if (stmfRet != STMF_STATUS_SUCCESS) {
+			goto err;
+		}
+		if (propVal[0] == '0') {
+			(void) stmfFreeLuResource(hdl);
+			hdl = NULL;
+			continue;
+		}
+		(void) stmfDeleteLu(&luList->guid[i]);
+		(void) stmfFreeLuResource(hdl);
+		hdl = NULL;
+	}
+
+err:
+	stmfFreeMemory(luList);
+	(void) stmfFreeLuResource(hdl);
+}
+
+/*
  * stmfLoadConfig
  *
  * Purpose - load the configuration data from smf into stmf
@@ -4730,15 +5356,15 @@ stmfLoadConfig(void)
 
 	if (iGetPersistMethod() == STMF_PERSIST_NONE) {
 		stmfStateSet.state = STMF_STATE_OFFLINE;
-		stmfStateSet.config_state = STMF_CONFIG_INIT;
+
 		if ((ret = openStmf(OPEN_EXCL_STMF, &fd))
 		    != STMF_STATUS_SUCCESS) {
 			return (ret);
 		}
-		ret = setStmfState(fd, &stmfStateSet, STMF_SERVICE_TYPE);
-		if (ret != STMF_STATUS_SUCCESS) {
-			goto done;
-		}
+		/*
+		 * Configuration not stored persistently; nothing to
+		 * initialize so do not set to STMF_CONFIG_INIT.
+		 */
 		stmfStateSet.config_state = STMF_CONFIG_INIT_DONE;
 		goto done;
 	}
@@ -5813,6 +6439,296 @@ stmfGetPersistMethod(uint8_t *persistType, boolean_t serviceState)
 			*persistType = STMF_DEFAULT_PERSIST;
 		}
 		(void) pthread_mutex_unlock(&persistenceTypeLock);
+	}
+
+	return (ret);
+}
+
+/*
+ * stmfPostProxyMsg
+ *
+ * Purpose: Post a message to the proxy port provider
+ *
+ * buf - buffer containing message to post
+ * buflen - buffer length
+ */
+int
+stmfPostProxyMsg(int hdl, void *buf, uint32_t buflen)
+{
+	int ret = STMF_STATUS_SUCCESS;
+	int ioctlRet;
+	pppt_iocdata_t ppptIoctl = {0};
+
+	if (buf == NULL) {
+		return (STMF_ERROR_INVALID_ARG);
+	}
+
+	/*
+	 * Issue ioctl to post the message
+	 */
+	ppptIoctl.pppt_version = PPPT_VERSION_1;
+	ppptIoctl.pppt_buf_size = buflen;
+	ppptIoctl.pppt_buf = (uint64_t)(unsigned long)buf;
+	ioctlRet = ioctl(hdl, PPPT_MESSAGE, &ppptIoctl);
+	if (ioctlRet != 0) {
+		switch (errno) {
+			case EPERM:
+			case EACCES:
+				ret = STMF_ERROR_PERM;
+				break;
+			default:
+				ret = STMF_ERROR_POST_MSG_FAILED;
+				break;
+		}
+	}
+
+	return (ret);
+}
+
+/*
+ * stmfInitProxyDoor
+ *
+ * Purpose: Install door in proxy
+ *
+ * hdl - pointer to returned handle
+ * fd - door from door_create()
+ */
+int
+stmfInitProxyDoor(int *hdl, int door)
+{
+	int ret = STMF_STATUS_SUCCESS;
+	int ioctlRet;
+	int fd;
+	pppt_iocdata_t ppptIoctl = {0};
+
+	if (hdl == NULL) {
+		return (STMF_ERROR_INVALID_ARG);
+	}
+
+	/*
+	 * Open control node for pppt
+	 */
+	if ((ret = openPppt(OPEN_PPPT, &fd)) != STMF_STATUS_SUCCESS) {
+		return (ret);
+	}
+
+	/*
+	 * Issue ioctl to install the door
+	 */
+	ppptIoctl.pppt_version = PPPT_VERSION_1;
+	ppptIoctl.pppt_door_fd = (uint32_t)door;
+	ioctlRet = ioctl(fd, PPPT_INSTALL_DOOR, &ppptIoctl);
+	if (ioctlRet != 0) {
+		switch (errno) {
+			case EPERM:
+			case EACCES:
+				ret = STMF_ERROR_PERM;
+				break;
+			case EINVAL:
+				ret = STMF_ERROR_INVALID_ARG;
+				break;
+			case EBUSY:
+				ret = STMF_ERROR_DOOR_INSTALLED;
+				break;
+			default:
+				ret = STMF_STATUS_ERROR;
+				break;
+		}
+	}
+
+	/* return driver fd to caller */
+	*hdl = fd;
+	return (ret);
+}
+
+void
+stmfDestroyProxyDoor(int hdl)
+{
+	(void) close(hdl);
+}
+
+/*
+ * validateLunNumIoctl
+ *
+ * Purpose: Issues ioctl to check and get available lun# in view entry
+ *
+ * viewEntry - view entry to use
+ */
+static int
+validateLunNumIoctl(int fd, stmfViewEntry *viewEntry)
+{
+	int ret = STMF_STATUS_SUCCESS;
+	int ioctlRet;
+	stmf_iocdata_t stmfIoctl;
+	stmf_view_op_entry_t ioctlViewEntry;
+
+	bzero(&ioctlViewEntry, sizeof (ioctlViewEntry));
+	/*
+	 * don't set ve_ndx or ve_ndx_valid as ve_ndx_valid should be
+	 * false on input
+	 */
+	ioctlViewEntry.ve_lu_number_valid = viewEntry->luNbrValid;
+	ioctlViewEntry.ve_all_hosts = viewEntry->allHosts;
+	ioctlViewEntry.ve_all_targets = viewEntry->allTargets;
+
+	if (viewEntry->allHosts == B_FALSE) {
+		bcopy(viewEntry->hostGroup, &ioctlViewEntry.ve_host_group.name,
+		    sizeof (stmfGroupName));
+		ioctlViewEntry.ve_host_group.name_size =
+		    strlen((char *)viewEntry->hostGroup);
+	}
+	if (viewEntry->allTargets == B_FALSE) {
+		bcopy(viewEntry->targetGroup,
+		    &ioctlViewEntry.ve_target_group.name,
+		    sizeof (stmfGroupName));
+		ioctlViewEntry.ve_target_group.name_size =
+		    strlen((char *)viewEntry->targetGroup);
+	}
+	/* Validating the lun number */
+	if (viewEntry->luNbrValid) {
+		bcopy(viewEntry->luNbr, &ioctlViewEntry.ve_lu_nbr,
+		    sizeof (ioctlViewEntry.ve_lu_nbr));
+	}
+
+	bzero(&stmfIoctl, sizeof (stmfIoctl));
+	/*
+	 * Issue ioctl to validate lun# in the view entry
+	 */
+	stmfIoctl.stmf_version = STMF_VERSION_1;
+	stmfIoctl.stmf_ibuf_size = sizeof (ioctlViewEntry);
+	stmfIoctl.stmf_ibuf = (uint64_t)(unsigned long)&ioctlViewEntry;
+	stmfIoctl.stmf_obuf_size = sizeof (ioctlViewEntry);
+	stmfIoctl.stmf_obuf = (uint64_t)(unsigned long)&ioctlViewEntry;
+	ioctlRet = ioctl(fd, STMF_IOCTL_VALIDATE_VIEW, &stmfIoctl);
+
+	/* save available lun number */
+	if (!viewEntry->luNbrValid) {
+		bcopy(ioctlViewEntry.ve_lu_nbr, viewEntry->luNbr,
+		    sizeof (ioctlViewEntry.ve_lu_nbr));
+	}
+	if (ioctlRet != 0) {
+		switch (errno) {
+			case EBUSY:
+				ret = STMF_ERROR_BUSY;
+				break;
+			case EPERM:
+				ret = STMF_ERROR_PERM;
+				break;
+			case EACCES:
+				switch (stmfIoctl.stmf_error) {
+					case STMF_IOCERR_UPDATE_NEED_CFG_INIT:
+						ret = STMF_ERROR_CONFIG_NONE;
+						break;
+					default:
+						ret = STMF_ERROR_PERM;
+						break;
+				}
+				break;
+			default:
+				switch (stmfIoctl.stmf_error) {
+					case STMF_IOCERR_LU_NUMBER_IN_USE:
+						ret = STMF_ERROR_LUN_IN_USE;
+						break;
+					case STMF_IOCERR_VIEW_ENTRY_CONFLICT:
+						ret = STMF_ERROR_VE_CONFLICT;
+						break;
+					case STMF_IOCERR_UPDATE_NEED_CFG_INIT:
+						ret = STMF_ERROR_CONFIG_NONE;
+						break;
+					case STMF_IOCERR_INVALID_HG:
+						ret = STMF_ERROR_INVALID_HG;
+						break;
+					case STMF_IOCERR_INVALID_TG:
+						ret = STMF_ERROR_INVALID_TG;
+						break;
+					default:
+						syslog(LOG_DEBUG,
+						    "addViewEntryIoctl"
+						    ":error(%d)",
+						    stmfIoctl.stmf_error);
+						ret = STMF_STATUS_ERROR;
+						break;
+				}
+				break;
+		}
+	}
+	return (ret);
+}
+
+/*
+ * stmfValidateView
+ *
+ * Purpose: Validate or get lun # base on TG, HG of view entry
+ *
+ * viewEntry - view entry structure to use
+ */
+int
+stmfValidateView(stmfViewEntry *viewEntry)
+{
+	int ret;
+	int fd;
+	stmfViewEntry iViewEntry;
+
+	if (viewEntry == NULL) {
+		return (STMF_ERROR_INVALID_ARG);
+	}
+
+	/* initialize and set internal view entry */
+	bzero(&iViewEntry, sizeof (iViewEntry));
+
+	if (!viewEntry->allHosts) {
+		bcopy(viewEntry->hostGroup, iViewEntry.hostGroup,
+		    sizeof (iViewEntry.hostGroup));
+	} else {
+		iViewEntry.allHosts = B_TRUE;
+	}
+
+	if (!viewEntry->allTargets) {
+		bcopy(viewEntry->targetGroup, iViewEntry.targetGroup,
+		    sizeof (iViewEntry.targetGroup));
+	} else {
+		iViewEntry.allTargets = B_TRUE;
+	}
+
+	if (viewEntry->luNbrValid) {
+		iViewEntry.luNbrValid = B_TRUE;
+		bcopy(viewEntry->luNbr, iViewEntry.luNbr,
+		    sizeof (iViewEntry.luNbr));
+	}
+
+	/*
+	 * set users return view entry index valid flag to false
+	 * in case of failure
+	 */
+	viewEntry->veIndexValid = B_FALSE;
+
+	/* Check to ensure service exists */
+	if (psCheckService() != STMF_STATUS_SUCCESS) {
+		return (STMF_ERROR_SERVICE_NOT_FOUND);
+	}
+
+	/* call init */
+	ret = initializeConfig();
+	if (ret != STMF_STATUS_SUCCESS) {
+		return (ret);
+	}
+
+	/*
+	 * Open control node for stmf
+	 */
+	if ((ret = openStmf(OPEN_STMF, &fd)) != STMF_STATUS_SUCCESS)
+		return (ret);
+
+	/*
+	 * Validate lun# in the view entry from the driver
+	 */
+	ret = validateLunNumIoctl(fd, &iViewEntry);
+	(void) close(fd);
+
+	/* save available lun number */
+	if (!viewEntry->luNbrValid) {
+		bcopy(iViewEntry.luNbr, viewEntry->luNbr,
+		    sizeof (iViewEntry.luNbr));
 	}
 
 	return (ret);

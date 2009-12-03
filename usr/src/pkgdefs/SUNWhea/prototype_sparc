@@ -51,15 +51,8 @@ f none usr/include/asm/flush.h 644 root bin
 f none usr/include/rpc/ib.h 644 root bin
 f none usr/include/sys/bpp_var.h 644 root bin
 f none usr/include/sys/bpp_reg.h 644 root bin
-f none usr/include/sys/cg3var.h 644 root bin
-f none usr/include/sys/cg6fbc.h 644 root bin
-f none usr/include/sys/cg6tec.h 644 root bin
-f none usr/include/sys/cg6thc.h 644 root bin
 f none usr/include/sys/cmpregs.h 644 root bin
 f none usr/include/sys/dkmpio.h 644 root bin
-d none usr/include/sys/dktp 755 root bin
-f none usr/include/sys/dktp/dadkio.h 644 root bin
-f none usr/include/sys/dktp/fdisk.h 644 root bin
 f none usr/include/sys/dmaga.h 644 root bin
 f none usr/include/sys/fdreg.h 644 root bin
 f none usr/include/sys/fdvar.h 644 root bin
@@ -73,8 +66,6 @@ f none usr/include/sys/fpu/fpusystm.h 644 root bin
 f none usr/include/sys/fpu/globals.h 644 root bin
 f none usr/include/sys/fpu/ieee.h 644 root bin
 f none usr/include/sys/fsr.h 644 root bin
-f none usr/include/sys/obpdefs.h 644 root bin
-f none usr/include/sys/ramdac.h 644 root bin
 f none usr/include/sys/scsi/adapters/espcmd.h 644 root bin
 f none usr/include/sys/scsi/adapters/espreg.h 644 root bin
 f none usr/include/sys/scsi/adapters/espvar.h 644 root bin
@@ -83,14 +74,11 @@ f none usr/include/sys/scsi/adapters/ispmail.h 644 root bin
 f none usr/include/sys/scsi/adapters/ispreg.h 644 root bin
 f none usr/include/sys/scsi/adapters/ispvar.h 644 root bin
 f none usr/include/sys/scsi/targets/ssddef.h 644 root bin
-f none usr/include/sys/scsi/targets/stdef.h 644 root bin
 f none usr/include/sys/ser_async.h 644 root bin
 f none usr/include/sys/ser_zscc.h 644 root bin
-f none usr/include/sys/spl.h 644 root bin
 f none usr/include/sys/stp4020_reg.h 644 root bin
 f none usr/include/sys/stp4020_var.h 644 root bin
 f none usr/include/sys/zsdev.h 644 root bin
-d none usr/platform 755 root sys
 d none usr/platform/sun4u 755 root sys
 d none usr/platform/sun4u/include 755 root bin
 d none usr/platform/SUNW,SPARC-Enterprise 755 root sys
@@ -155,8 +143,6 @@ d none usr/platform/SUNW,Netra-CP2300 755 root sys
 d none usr/platform/SUNW,Netra-CP2300/include 755 root bin
 d none usr/platform/SUNW,Netra-CP3010 755 root sys
 d none usr/platform/SUNW,Netra-CP3010/include 755 root bin
-d none usr/platform/TAD,SPARCLE 755 root sys
-s none usr/platform/TAD,SPARCLE/include=../sun4u/include
 d none usr/platform/sun4u/include/sys 755 root bin
 f none usr/platform/sun4u/include/sys/ac.h 644 root bin
 f none usr/platform/sun4u/include/sys/async.h 644 root bin
@@ -189,7 +175,6 @@ d none usr/platform/sun4u/include/sys/i2c/clients 755 root bin
 f none usr/platform/sun4u/include/sys/i2c/misc/i2c_svc.h 644 root bin
 f none usr/platform/sun4u/include/sys/i2c/clients/max1617.h 644 root bin
 f none usr/platform/sun4u/include/sys/i2c/clients/i2c_client.h 644 root bin
-f none usr/platform/sun4u/include/sys/i2c/clients/scmi2c.h 644 root bin
 f none usr/platform/sun4u/include/sys/i2c/clients/hpc3130.h 644 root bin
 f none usr/platform/sun4u/include/sys/i2c/clients/lm75.h 644 root bin
 f none usr/platform/sun4u/include/sys/i2c/clients/pcf8591.h 644 root bin

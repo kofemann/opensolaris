@@ -44,7 +44,7 @@ static void	str_destructor(void *, void *);
 static mblk_t	*str_unitdata_ind(dld_str_t *, mblk_t *, boolean_t);
 static void	str_notify_promisc_on_phys(dld_str_t *);
 static void	str_notify_promisc_off_phys(dld_str_t *);
-static void	str_notify_phys_addr(dld_str_t *, const uint8_t *);
+static void	str_notify_phys_addr(dld_str_t *, uint_t, const uint8_t *);
 static void	str_notify_link_up(dld_str_t *);
 static void	str_notify_link_down(dld_str_t *);
 static void	str_notify_capab_reneg(dld_str_t *);
@@ -54,6 +54,7 @@ static void	ioc_native(dld_str_t *,  mblk_t *);
 static void	ioc_margin(dld_str_t *, mblk_t *);
 static void	ioc_raw(dld_str_t *, mblk_t *);
 static void	ioc_fast(dld_str_t *,  mblk_t *);
+static void	ioc_lowlink(dld_str_t *,  mblk_t *);
 static void	ioc(dld_str_t *, mblk_t *);
 static void	dld_ioc(dld_str_t *, mblk_t *);
 static void	dld_wput_nondata(dld_str_t *, mblk_t *);
@@ -128,6 +129,7 @@ static void		dld_taskq_dispatch(void);
 typedef struct i_dld_str_state_s {
 	major_t		ds_major;
 	minor_t		ds_minor;
+	int		ds_instance;
 	dev_info_t	*ds_dip;
 } i_dld_str_state_t;
 
@@ -151,8 +153,10 @@ i_dld_str_walker(mod_hash_key_t key, mod_hash_val_t *val, void *arg)
 		 * walk if we find a matching stream -- even if we fail
 		 * to obtain the devinfo.
 		 */
-		if (mh != NULL)
+		if (mh != NULL) {
 			statep->ds_dip = mac_devinfo_get(mh);
+			statep->ds_instance = DLS_MINOR2INST(mac_minor(mh));
+		}
 		return (MH_WALK_TERMINATE);
 	}
 	return (MH_WALK_CONTINUE);
@@ -176,13 +180,58 @@ dld_finddevinfo(dev_t dev)
 	state.ds_minor = getminor(dev);
 	state.ds_major = getmajor(dev);
 	state.ds_dip = NULL;
+	state.ds_instance = -1;
 
 	mod_hash_walk(str_hashp, i_dld_str_walker, &state);
 	return (state.ds_dip);
 }
 
+int
+dld_devt_to_instance(dev_t dev)
+{
+	minor_t			minor;
+	i_dld_str_state_t	state;
+
+	/*
+	 * GLDv3 numbers DLPI style 1 node as the instance number + 1.
+	 * Minor number 0 is reserved for the DLPI style 2 unattached
+	 * node.
+	 */
+
+	if ((minor = getminor(dev)) == 0)
+		return (-1);
+
+	/*
+	 * Check for unopened style 1 node.
+	 * Note that this doesn't *necessarily* work for legacy
+	 * devices, but this code is only called within the
+	 * getinfo(9e) implementation for true GLDv3 devices, so it
+	 * doesn't matter.
+	 */
+	if (minor > 0 && minor <= DLS_MAX_MINOR) {
+		return (DLS_MINOR2INST(minor));
+	}
+
+	state.ds_minor = getminor(dev);
+	state.ds_major = getmajor(dev);
+	state.ds_dip = NULL;
+	state.ds_instance = -1;
+
+	mod_hash_walk(str_hashp, i_dld_str_walker, &state);
+	return (state.ds_instance);
+}
+
 /*
  * devo_getinfo: getinfo(9e)
+ *
+ * NB: This may be called for a provider before the provider's
+ * instances are attached.  Hence, if a particular provider needs a
+ * special mapping (the mac instance != ddi_get_instance()), then it
+ * may need to provide its own implmentation using the
+ * mac_devt_to_instance() function, and translating the returned mac
+ * instance to a devinfo instance.  For dev_t's where the minor number
+ * is too large (i.e. > MAC_MAX_MINOR), the provider can call this
+ * function indirectly via the mac_getinfo() function.
  */
 /*ARGSUSED*/
 int
@@ -632,6 +681,7 @@ dld_str_destroy(dld_str_t *dsp)
 	dsp->ds_passivestate = DLD_UNINITIALIZED;
 	dsp->ds_mode = DLD_UNITDATA;
 	dsp->ds_native = B_FALSE;
+	dsp->ds_nonip = B_FALSE;
 
 	ASSERT(dsp->ds_datathr_cnt == 0);
 	ASSERT(dsp->ds_pending_head == NULL);
@@ -885,7 +935,7 @@ str_mdata_raw_put(dld_str_t *dsp, mblk_t *mp)
 		size += MBLKL(bp);
 	}
 
-	if (dls_link_header_info(dsp->ds_dlp, mp, &mhi) != 0)
+	if (mac_vlan_header_info(dsp->ds_mh, mp, &mhi) != 0)
 		goto discard;
 
 	mac_sdu_get(dsp->ds_mh, NULL, &max_sdu);
@@ -913,7 +963,8 @@ str_mdata_raw_put(dld_str_t *dsp, mblk_t *mp)
 		 * but both pri and VID are 0.
 		 */
 		pri = VLAN_PRI(mhi.mhi_tci);
-		if (mhi.mhi_istagged && (pri == 0) && (vid == VLAN_ID_NONE))
+		if (mhi.mhi_istagged && !mhi.mhi_ispvid && pri == 0 &&
+		    vid == VLAN_ID_NONE)
 			goto discard;
 
 		/*
@@ -1400,7 +1451,7 @@ str_unitdata_ind(dld_str_t *dsp, mblk_t *mp, boolean_t strip_vlan)
 	/*
 	 * Get the packet header information.
 	 */
-	if (dls_link_header_info(dsp->ds_dlp, mp, &mhi) != 0)
+	if (mac_vlan_header_info(dsp->ds_mh, mp, &mhi) != 0)
 		return (NULL);
 
 	/*
@@ -1515,7 +1566,7 @@ str_notify_promisc_off_phys(dld_str_t *dsp)
  * DL_NOTIFY_IND: DL_NOTE_PHYS_ADDR
  */
 static void
-str_notify_phys_addr(dld_str_t *dsp, const uint8_t *addr)
+str_notify_phys_addr(dld_str_t *dsp, uint_t addr_type, const uint8_t *addr)
 {
 	mblk_t		*mp;
 	dl_notify_ind_t	*dlip;
@@ -1535,7 +1586,7 @@ str_notify_phys_addr(dld_str_t *dsp, const uint8_t *addr)
 	dlip = (dl_notify_ind_t *)mp->b_rptr;
 	dlip->dl_primitive = DL_NOTIFY_IND;
 	dlip->dl_notification = DL_NOTE_PHYS_ADDR;
-	dlip->dl_data = DL_CURR_PHYS_ADDR;
+	dlip->dl_data = addr_type;
 	dlip->dl_addr_offset = sizeof (dl_notify_ind_t);
 	dlip->dl_addr_length = addr_length + sizeof (uint16_t);
 
@@ -1705,15 +1756,50 @@ str_notify(void *arg, mac_notify_type_t type)
 		/*
 		 * Send the appropriate DL_NOTIFY_IND.
 		 */
-		str_notify_phys_addr(dsp, addr);
+		str_notify_phys_addr(dsp, DL_CURR_PHYS_ADDR, addr);
 		break;
 
+	case MAC_NOTE_DEST:
+		/*
+		 * Only send up DL_NOTE_DEST_ADDR if the link has a
+		 * destination address.
+		 */
+		if (mac_dst_get(dsp->ds_mh, addr))
+			str_notify_phys_addr(dsp, DL_CURR_DEST_ADDR, addr);
+		break;
+
+	case MAC_NOTE_LOWLINK:
 	case MAC_NOTE_LINK:
+		/*
+		 * LOWLINK refers to the actual link status. For links that
+		 * are not part of a bridge instance LOWLINK and LINK state
+		 * are the same. But for a link part of a bridge instance
+		 * LINK state refers to the aggregate link status: "up" when
+		 * at least one link part of the bridge is up and is "down"
+		 * when all links part of the bridge are down.
+		 *
+		 * Clients can request to be notified of the LOWLINK state
+		 * using the DLIOCLOWLINK ioctl. Clients such as the bridge
+		 * daemon request lowlink state changes and upper layer clients
+		 * receive notifications of the aggregate link state changes
+		 * which is the default when requesting LINK UP/DOWN state
+		 * notifications.
+		 */
+
+		/*
+		 * Check that the notification type matches the one that we
+		 * want.  If we want lower-level link notifications, and this
+		 * is upper, or if we want upper and this is lower, then
+		 * ignore.
+		 */
+		if ((type == MAC_NOTE_LOWLINK) != dsp->ds_lowlink)
+			break;
 		/*
 		 * This notification is sent every time the MAC driver
 		 * updates the link state.
 		 */
-		switch (mac_client_stat_get(mch, MAC_STAT_LINK_STATE)) {
+		switch (mac_client_stat_get(mch, dsp->ds_lowlink ?
+		    MAC_STAT_LOWLINK_STATE : MAC_STAT_LINK_STATE)) {
 		case LINK_STATE_UP: {
 			uint64_t speed;
 			/*
@@ -1759,6 +1845,7 @@ str_notify(void *arg, mac_notify_type_t type)
 		str_notify_fastpath_flush(dsp);
 		break;
 
+	/* Unused notifications */
 	case MAC_NOTE_MARGIN:
 		break;
 
@@ -1926,6 +2013,9 @@ dld_ioc(dld_str_t *dsp, mblk_t *mp)
 		break;
 	case DLIOCHDRINFO:
 		ioc_fast(dsp, mp);
+		break;
+	case DLIOCLOWLINK:
+		ioc_lowlink(dsp, mp);
 		break;
 	default:
 		ioc(dsp, mp);
@@ -2113,6 +2203,27 @@ ioc_fast(dld_str_t *dsp, mblk_t *mp)
 	return;
 failed:
 	miocnak(q, mp, 0, err);
+}
+
+/*
+ * DLIOCLOWLINK: request actual link state changes. When the
+ * link is part of a bridge instance the client receives actual
+ * link state changes and not the aggregate link status. Used by
+ * the bridging daemon (bridged) for proper RSTP operation.
+ */
+static void
+ioc_lowlink(dld_str_t *dsp, mblk_t *mp)
+{
+	queue_t *q = dsp->ds_wq;
+	int err;
+
+	if ((err = miocpullup(mp, sizeof (int))) != 0) {
+		miocnak(q, mp, 0, err);
+	} else {
+		/* LINTED: alignment */
+		dsp->ds_lowlink = *(boolean_t *)mp->b_cont->b_rptr;
+		miocack(q, mp, 0, 0);
+	}
 }
 
 /*

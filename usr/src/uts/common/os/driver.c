@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -102,9 +102,12 @@ devi_probe(dev_info_t *devi)
 	 * away with not writing one of these .. so we
 	 * pretend we're 'nulldev' if we don't find one (sigh).
 	 */
-	if ((fn = ops->devo_probe) == NULL)
-		rv = DDI_PROBE_DONTCARE;
-	else
+	if ((fn = ops->devo_probe) == NULL) {
+		if (ddi_dev_is_sid(devi) == DDI_SUCCESS)
+			rv = DDI_PROBE_DONTCARE;
+		else
+			rv = DDI_PROBE_FAILURE;
+	} else
 		rv = (*fn)(devi);
 
 	switch (rv) {
@@ -405,9 +408,8 @@ dev_to_instance(dev_t dev)
 	void		*vinstance;
 	int		error;
 
-	/* verify that the major number is reasonable and driver is loaded */
-	if ((major >= devcnt) ||
-	    ((ops = mod_hold_dev_by_major(major)) == NULL))
+	/* verify that the driver is loaded */
+	if ((ops = mod_hold_dev_by_major(major)) == NULL)
 		return (-1);
 	ASSERT(CB_DRV_INSTALLED(ops));
 

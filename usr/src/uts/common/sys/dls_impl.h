@@ -60,6 +60,7 @@ struct dls_link_s {				/* Protected by */
 	zoneid_t		dl_zid;
 	uint_t			dl_zone_ref;
 	link_tagmode_t		dl_tagmode;		/* atomic */
+	uint_t			dl_nonip_cnt;		/* SL */
 };
 
 typedef struct dls_head_s {
@@ -82,8 +83,7 @@ extern void		dls_link_rele(dls_link_t *);
 extern int		dls_link_rele_by_name(const char *);
 extern void		dls_link_add(dls_link_t *, uint32_t, dld_str_t *);
 extern void		dls_link_remove(dls_link_t *, dld_str_t *);
-extern int		dls_link_header_info(dls_link_t *, mblk_t *,
-			    mac_header_info_t *);
+extern int		dls_link_getzid(const char *, zoneid_t *);
 extern int		dls_link_setzid(const char *, zoneid_t);
 extern dev_info_t	*dls_link_devinfo(dev_t);
 extern dev_t		dls_link_dev(dls_link_t *);
@@ -95,7 +95,8 @@ extern void		dls_mac_active_clear(dls_link_t *);
 extern void		dls_create_str_kstats(dld_str_t *);
 extern int		dls_stat_update(kstat_t *, dls_link_t *, int);
 extern int		dls_stat_create(const char *, int, const char *,
-			    int (*)(struct kstat *, int), void *, kstat_t **);
+			    zoneid_t, int (*)(struct kstat *, int), void *,
+			    kstat_t **);
 
 extern int		dls_devnet_open_by_dev(dev_t, dls_link_t **,
 			    dls_dl_handle_t *);

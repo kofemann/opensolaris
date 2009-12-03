@@ -20,19 +20,13 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
 include ../Makefile.lib
 
-sparc_SUBDIRS = \
-	libmdesc \
-	libldom
-
-i386_SUBDIRS =
-
-SUBDIRS = \
+common_SUBDIRS = \
 	libfmd_agent \
 	libdiagcode \
 	libdiskstatus \
@@ -40,8 +34,16 @@ SUBDIRS = \
 	libfmd_log \
 	libfmd_msg \
 	libfmd_snmp \
-	$($(MACH)_SUBDIRS) \
+	libfmevent \
 	topo
+
+sparc_SUBDIRS = \
+	libmdesc \
+	libldom
+
+i386_SUBDIRS =
+
+SUBDIRS = $(common_SUBDIRS) $($(MACH)_SUBDIRS)
 
 libldom: libmdesc libfmd_agent
 

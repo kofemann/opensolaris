@@ -161,6 +161,26 @@ typedef struct {
 } Target_nullfunc;
 
 /*
+ * Target_fill supplies machine code for fill bytes in executable output
+ * sections. Normally, libelf fills the gaps caused by alignment and size
+ * requirements of the constituent input sections with 0. Depending on the
+ * target architecture, it may be desirable to instead fill with executable
+ * NOP instructions. There are two reasons to do this:
+ *
+ * -	So that .init/.fini sections will not contain unexecutable gaps
+ *	that cause the executing program to trap and die.
+ *
+ * -	To eliminate confusing garbage instructions between sections containing
+ *	executable code when viewed with a dissassembler.
+ *
+ * The ff_execfill function is allowed to be NULL if the underlying target
+ * does not require a special fill for executable sections.
+ */
+typedef struct {
+	_elf_execfill_func_t	*ff_execfill;
+} Target_fillfunc;
+
+/*
  * Target_machrel holds pointers to the reloc_table and machrel functions
  * for a given target machine.
  *
@@ -217,7 +237,7 @@ typedef struct {
 	int		(* ms_mach_sym_typecheck)(Sym_desc *, Sym *,
 			    Ifl_desc *, Ofl_desc *);
 	const char	*(* ms_is_regsym)(Ofl_desc *, Ifl_desc *, Sym *,
-			    const char *, int, Word, const char *, Word *);
+			    const char *, int, Word, const char *, sd_flag_t *);
 	Sym_desc	*(* ms_reg_find)(Sym * sym, Ofl_desc * ofl);
 	int		(* ms_reg_enter)(Sym_desc *, Ofl_desc *);
 } Target_machsym;
@@ -226,6 +246,7 @@ typedef struct {
 	Target_mach	t_m;
 	Target_machid	t_id;
 	Target_nullfunc	t_nf;
+	Target_fillfunc	t_ff;
 	Target_machrel	t_mr;
 	Target_machsym	t_ms;
 } Target;
@@ -616,6 +637,7 @@ extern Sdf_desc		*sdf_find(const char *, APlist *);
 #define	ld_vers_promote		ld64_vers_promote
 #define	ld_vers_sym_process	ld64_vers_sym_process
 #define	ld_vers_verify		ld64_vers_verify
+#define	ld_wrap_enter		ld64_wrap_enter
 
 #else
 
@@ -703,6 +725,7 @@ extern Sdf_desc		*sdf_find(const char *, APlist *);
 #define	ld_vers_promote		ld32_vers_promote
 #define	ld_vers_sym_process	ld32_vers_sym_process
 #define	ld_vers_verify		ld32_vers_verify
+#define	ld_wrap_enter		ld32_wrap_enter
 
 #endif
 
@@ -803,13 +826,13 @@ extern void		ld_sym_adjust_vis(Sym_desc *, Ofl_desc *);
 extern int		ld_sym_avl_comp(const void *, const void *);
 extern uintptr_t	ld_sym_copy(Sym_desc *);
 extern Sym_desc		*ld_sym_enter(const char *, Sym *, Word, Ifl_desc *,
-			    Ofl_desc *, Word, Word, Word, Half, avl_index_t *);
+			    Ofl_desc *, Word, Word, sd_flag_t, avl_index_t *);
 extern Sym_desc		*ld_sym_find(const char *, Word, avl_index_t *,
 			    Ofl_desc *);
 extern uintptr_t	ld_sym_nodirect(Is_desc *, Ifl_desc *, Ofl_desc *);
 extern uintptr_t	ld_sym_process(Is_desc *, Ifl_desc *, Ofl_desc *);
 extern uintptr_t	ld_sym_resolve(Sym_desc *, Sym *, Ifl_desc *,
-			    Ofl_desc *, int, Word, Word);
+			    Ofl_desc *, int, Word, sd_flag_t);
 extern uintptr_t	ld_sym_spec(Ofl_desc *);
 
 extern Target		ld_targ;
@@ -831,6 +854,7 @@ extern void		ld_vers_promote(Sym_desc *, Word, Ifl_desc *,
 			    Ofl_desc *);
 extern int		ld_vers_sym_process(Lm_list *, Is_desc *, Ifl_desc *);
 extern int		ld_vers_verify(Ofl_desc *);
+extern WrapSymNode	*ld_wrap_enter(Ofl_desc *, const char *);
 
 extern uintptr_t	add_regsym(Sym_desc *, Ofl_desc *);
 extern Word		hashbkts(Word);

@@ -113,6 +113,8 @@ static const char *pname;
 #define	DEFAULTSHELL	"/sbin/sh"
 #define	DEF_PATH	"/usr/sbin:/usr/bin"
 
+#define	CLUSTER_BRAND_NAME	"cluster"
+
 /*
  * The ZLOGIN_BUFSIZ is larger than PIPE_BUF so we can be sure we're clearing
  * out the pipe when the child is exiting.  The ZLOGIN_RDBUFSIZ must be less
@@ -1677,6 +1679,7 @@ main(int argc, char **argv)
 	priv_set_t *privset;
 	int tmpl_fd;
 	char zonebrand[MAXNAMELEN];
+	char default_brand[MAXNAMELEN];
 	struct stat sb;
 	char kernzone[ZONENAME_MAX];
 	brand_handle_t bh;
@@ -1894,12 +1897,33 @@ main(int argc, char **argv)
 		return (1);
 	}
 
-	/* Get a handle to the brand info for this zone */
-	if ((zone_get_brand(zonename, zonebrand, sizeof (zonebrand)) != Z_OK) ||
-	    ((bh = brand_open(zonebrand)) == NULL)) {
+	if (zone_get_brand(zonename, zonebrand, sizeof (zonebrand)) != Z_OK) {
 		zerror(gettext("could not get brand for zone %s"), zonename);
 		return (1);
 	}
+	/*
+	 * In the alternate root environment, the only supported
+	 * operations are mount and unmount.  In this case, just treat
+	 * the zone as native if it is cluster.  Cluster zones can be
+	 * native for the purpose of LU or upgrade, and the cluster
+	 * brand may not exist in the miniroot (such as in net install
+	 * upgrade).
+	 */
+	if (zonecfg_default_brand(default_brand,
+	    sizeof (default_brand)) != Z_OK) {
+		zerror(gettext("unable to determine default brand"));
+		return (1);
+	}
+	if (zonecfg_in_alt_root() &&
+	    strcmp(zonebrand, CLUSTER_BRAND_NAME) == 0) {
+		(void) strlcpy(zonebrand, default_brand, sizeof (zonebrand));
+	}
+
+	if ((bh = brand_open(zonebrand)) == NULL) {
+		zerror(gettext("could not open brand for zone %s"), zonename);
+		return (1);
+	}
+
 	if ((new_args = prep_args(bh, login, proc_args)) == NULL) {
 		zperror(gettext("could not assemble new arguments"));
 		brand_close(bh);

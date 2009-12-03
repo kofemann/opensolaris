@@ -63,12 +63,12 @@ SUNWprivate {
 	brand_get_prestatechange;
 	brand_get_preuninstall;
 	brand_get_query;
+	brand_get_sysboot;
 	brand_get_uninstall;
 	brand_get_user_cmd;
 	brand_get_validatesnap;
 	brand_get_verify_adm;
 	brand_get_verify_cfg;
-	brand_is_native;
 	brand_open;
 	brand_platform_iter_devices;
 	brand_platform_iter_gmounts;

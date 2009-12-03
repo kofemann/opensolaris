@@ -146,6 +146,9 @@ static struct modlinkage softmac_modlinkage = {
 	NULL
 };
 
+static void softmac_dedicated_rx(void *, mac_resource_handle_t, mblk_t *,
+    mac_header_info_t *);
+
 /*ARGSUSED*/
 static int
 softmac_upper_constructor(void *buf, void *arg, int kmflag)
@@ -196,6 +199,7 @@ _init(void)
 {
 	int	err;
 
+	mac_init_ops(NULL, SOFTMAC_DEV_NAME);
 	softmac_init();
 
 	softmac_upper_cachep = kmem_cache_create("softmac_upper_cache",
@@ -366,7 +370,8 @@ softmac_mod_rput(queue_t *rq, mblk_t *mp)
 		if (dlp->dl_primitive == DL_UNITDATA_IND) {
 
 			if ((rxinfo = slp->sl_rxinfo) != NULL) {
-				rxinfo->slr_rx(rxinfo->slr_arg, NULL, mp, NULL);
+				softmac_dedicated_rx(slp->sl_sup, NULL, mp,
+				    NULL);
 				break;
 			}
 

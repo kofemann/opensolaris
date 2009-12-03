@@ -646,6 +646,10 @@ static int st_reset(struct scsi_tape *un, int reset_type);
 static void st_reset_notification(caddr_t arg);
 static const cmd_attribute *st_lookup_cmd_attribute(unsigned char cmd);
 
+static int st_set_target_TLR_mode(struct scsi_tape *un, ubufunc_t ubf);
+static int st_make_sure_mode_data_is_correct(struct scsi_tape *un,
+    ubufunc_t ubf);
+
 #ifdef	__x86
 /*
  * routines for I/O in big block size
@@ -1313,8 +1317,8 @@ st_detach(dev_info_t *devi, ddi_detach_cmd_t cmd)
 		    (un->un_pos.blkno != 0)) ||	/* Or within first file */
 		    ((un->un_pos.pmode == logical) &&
 		    (un->un_pos.lgclblkno > 0))) &&
-		    ((un->un_state != ST_STATE_CLOSED) &&
-		    (un->un_laststate != ST_STATE_CLOSING)))) {
+		    ((un->un_state == ST_STATE_CLOSED) &&
+		    (un->un_laststate == ST_STATE_CLOSING)))) {
 
 			ST_DEBUG(ST_DEVINFO, st_label, SCSI_DEBUG,
 			    "cannot detach: pmode=%d fileno=0x%x, blkno=0x%x"
@@ -1875,6 +1879,35 @@ st_known_tape_type(struct scsi_tape *un)
 			break;
 		}
 	}
+
+	if (un->un_dp->type != ST_TYPE_INVALID) {
+		int result;
+
+		/* try and enable TLR */
+		un->un_tlr_flag = TLR_SAS_ONE_DEVICE;
+		result = st_set_target_TLR_mode(un, st_uscsi_cmd);
+		if (result == EACCES) {
+			/*
+			 * From attach command failed.
+			 * Set dp type so is run again on open.
+			 */
+			un->un_dp->type = ST_TYPE_INVALID;
+			un->un_tlr_flag = TLR_NOT_KNOWN;
+		} else if (result == 0) {
+			if (scsi_ifgetcap(&un->un_sd->sd_address,
+			    "tran-layer-retries", 1) == -1) {
+				un->un_tlr_flag = TLR_NOT_SUPPORTED;
+				(void) st_set_target_TLR_mode(un, st_uscsi_cmd);
+			} else {
+				un->un_tlr_flag = TLR_SAS_ONE_DEVICE;
+			}
+		} else {
+			un->un_tlr_flag = TLR_NOT_SUPPORTED;
+		}
+	}
+
+
+
 
 	/*
 	 * If we didn't just make up this configuration and
@@ -9062,6 +9095,7 @@ st_make_uscsi_cmd(struct scsi_tape *un, struct uscsi_cmd *ucmd,
 	} else {
 		pkt->pkt_comp = st_intr;
 	}
+
 	st_add_recovery_info_to_pkt(un, bp, pkt);
 exit:
 	ASSERT(mutex_owned(ST_MUTEX));
@@ -9674,7 +9708,7 @@ st_intr(struct scsi_pkt *pkt)
 	if (un->un_multipath) {
 
 		struct uscsi_cmd *ucmd = BP_UCMD(bp);
-		int pkt_valid;
+		int pkt_valid = 0;
 
 		if (ucmd) {
 			/*
@@ -9696,7 +9730,13 @@ st_intr(struct scsi_pkt *pkt)
 		 */
 		if ((pkt_valid != 0) &&
 		    (un->un_last_path_instance != pkt->pkt_path_instance)) {
-			if (un->un_state > ST_STATE_OPENING) {
+			/*
+			 * Don't recover the path change if it was done
+			 * intentionally or if the device has not completely
+			 * opened yet.
+			 */
+			if (((pkt->pkt_flags & FLAG_PKT_PATH_INSTANCE) == 0) &&
+			    (un->un_state > ST_STATE_OPENING)) {
 				ST_RECOV(ST_DEVINFO, st_label, CE_NOTE,
 				    "Failover detected, action is %s\n",
 				    errstatenames[action]);
@@ -13084,8 +13124,6 @@ st_create_errstats(struct scsi_tape *un, int instance)
 				    ST_INQUIRY->inq_pid, 16);
 				(void) strncpy(&stp->st_revision.value.c[0],
 				    ST_INQUIRY->inq_revision, 4);
-				(void) strncpy(&stp->st_serial.value.c[0],
-				    ST_INQUIRY->inq_serial, 12);
 			}
 		}
 	}
@@ -16849,6 +16887,20 @@ st_recover(void *arg)
 		}
 
 		/*
+		 * If we have already set a scsi II reserve and get a
+		 * conflict on a scsi III type reserve fail without
+		 * any attempt to recover.
+		 */
+		if ((un->un_rsvd_status & ST_RESERVE | ST_PRESERVE_RESERVE) &&
+		    (errinfo->ei_failed_pkt.pkt_cdbp[0] ==
+		    SCMD_PERSISTENT_RESERVE_OUT) ||
+		    (errinfo->ei_failed_pkt.pkt_cdbp[0] ==
+		    SCMD_PERSISTENT_RESERVE_IN)) {
+			st_recov_ret(un, errinfo, COMMAND_DONE_EACCES);
+			return;
+		}
+
+		/*
 		 * If scsi II lost reserve try and get it back.
 		 */
 		if ((((un->un_rsvd_status &
@@ -16868,11 +16920,7 @@ st_recover(void *arg)
 			un->un_rsvd_status &= ~(ST_RELEASE | ST_LOST_RESERVE |
 			    ST_RESERVATION_CONFLICT | ST_INITIATED_RESET);
 		}
-		rval = st_check_mode_for_change(un, st_uscsi_rcmd);
-		if (rval) {
-			rval = st_gen_mode_select(un, st_uscsi_rcmd,
-			    un->un_mspl, sizeof (struct seq_mode));
-		}
+		rval = st_make_sure_mode_data_is_correct(un, st_uscsi_rcmd);
 		if (rval) {
 			st_recov_ret(un, errinfo, COMMAND_DONE_ERROR);
 			return;
@@ -16889,14 +16937,8 @@ st_recover(void *arg)
 			/*
 			 * See if mode sense changed.
 			 */
-			rval = st_check_mode_for_change(un, st_uscsi_rcmd);
-			if (rval) {
-				/*
-				 * If so change it back.
-				 */
-				rval = st_gen_mode_select(un, st_uscsi_rcmd,
-				    un->un_mspl, sizeof (struct seq_mode));
-			}
+			rval = st_make_sure_mode_data_is_correct(un,
+			    st_uscsi_rcmd);
 			if (rval) {
 				st_recov_ret(un, errinfo, COMMAND_DONE_ERROR);
 				return;
@@ -17016,6 +17058,12 @@ st_recov_cb(struct scsi_pkt *pkt)
 		break;
 	case CMD_TRAN_ERR:
 		action = QUE_COMMAND;
+		break;
+	case CMD_DEV_GONE:
+		if (un->un_multipath)
+			action = PATH_FAILED;
+		else
+			action = COMMAND_DONE_ERROR;
 		break;
 	default:
 		ST_DEBUG(ST_DEVINFO, st_label, CE_PANIC,
@@ -17448,6 +17496,27 @@ st_add_recovery_info_to_pkt(struct scsi_tape *un, buf_t *bp,
 	ST_CDB(ST_DEVINFO, "Unhanded CDB for position prediction",
 	    (char *)pkt->pkt_cdbp);
 
+}
+
+static int
+st_make_sure_mode_data_is_correct(struct scsi_tape *un, ubufunc_t ubf)
+{
+	int rval;
+
+	ST_FUNC(ST_DEVINFO, st_make_sure_mode_data_is_correct);
+
+	/*
+	 * check to see if mode data has changed.
+	 */
+	rval = st_check_mode_for_change(un, ubf);
+	if (rval) {
+		rval = st_gen_mode_select(un, ubf, un->un_mspl,
+		    sizeof (struct seq_mode));
+	}
+	if (un->un_tlr_flag != TLR_NOT_SUPPORTED) {
+		rval |= st_set_target_TLR_mode(un, ubf);
+	}
+	return (rval);
 }
 
 static int
@@ -18406,6 +18475,60 @@ st_reset(struct scsi_tape *un, int reset_type)
 	} while (rval == 0);
 	mutex_enter(ST_MUTEX);
 	return (rval);
+}
+
+#define	SAS_TLR_MOD_LEN sizeof (struct seq_mode)
+static int
+st_set_target_TLR_mode(struct scsi_tape *un, ubufunc_t ubf)
+{
+	int ret;
+	int amount = SAS_TLR_MOD_LEN;
+	struct seq_mode *mode_data;
+
+	ST_FUNC(ST_DEVINFO, st_set_target_TLR_mode);
+
+	mode_data = kmem_zalloc(SAS_TLR_MOD_LEN, KM_SLEEP);
+	ret = st_gen_mode_sense(un, ubf, 0x18, mode_data, amount);
+	if (ret != DDI_SUCCESS) {
+		if (ret != EACCES)
+			un->un_tlr_flag = TLR_NOT_SUPPORTED;
+		goto out;
+	}
+	if (mode_data->data_len != amount + 1) {
+		amount = mode_data->data_len + 1;
+	}
+	/* Must be SAS protocol */
+	if (mode_data->page.saslun.protocol_id != 6) {
+		un->un_tlr_flag = TLR_NOT_SUPPORTED;
+		ret = ENOTSUP;
+		goto out;
+	}
+	if (un->un_tlr_flag == TLR_SAS_ONE_DEVICE) {
+		if (mode_data->page.saslun.tran_layer_ret == 1)
+			goto out;
+		mode_data->page.saslun.tran_layer_ret = 1;
+	} else {
+		if (mode_data->page.saslun.tran_layer_ret == 0)
+			goto out;
+		mode_data->page.saslun.tran_layer_ret = 0;
+	}
+	ret = st_gen_mode_select(un, ubf, mode_data, amount);
+	if (ret != DDI_SUCCESS) {
+		if (ret != EACCES)
+			un->un_tlr_flag = TLR_NOT_SUPPORTED;
+	} else {
+		if (mode_data->page.saslun.tran_layer_ret == 0)
+			un->un_tlr_flag = TLR_NOT_KNOWN;
+		else
+			un->un_tlr_flag = TLR_SAS_ONE_DEVICE;
+	}
+#ifdef STDEBUG
+	st_clean_print(ST_DEVINFO, st_label, SCSI_DEBUG, "TLR data sent",
+	    (char *)mode_data, amount);
+#endif
+out:
+	kmem_free(mode_data, SAS_TLR_MOD_LEN);
+	return (ret);
 }
 
 

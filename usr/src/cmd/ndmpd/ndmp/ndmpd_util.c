@@ -1409,7 +1409,9 @@ ndmp_execute_cdb(ndmpd_session_t *session, char *adapter_name, int sid, int lun,
 	}
 
 	if (ioctl(fd, USCSICMD, &cmd) < 0) {
-		NDMP_LOG(LOG_ERR, "Failed to send command to device: %m");
+		if (errno != EIO && errno != 0)
+			NDMP_LOG(LOG_ERR,
+			    "Failed to send command to device: %m");
 		NDMP_LOG(LOG_DEBUG, "ioctl(USCSICMD) error: %m");
 		if (cmd.uscsi_status == 0)
 			reply.error = NDMP_IO_ERR;
@@ -2182,7 +2184,7 @@ char *
 cctime(time_t *t)
 {
 	char *bp, *cp;
-	char tbuf[BUFSIZ];
+	static char tbuf[BUFSIZ];
 
 	if (!t)
 		return ("");
@@ -2190,7 +2192,9 @@ cctime(time_t *t)
 	if (*t == (time_t)0)
 		return ("the epoch");
 
-	bp = ctime_r(t, tbuf, BUFSIZ);
+	if ((bp = ctime_r(t, tbuf, BUFSIZ)) == NULL)
+		return ("");
+
 	cp = strchr(bp, '\n');
 	if (cp)
 		*cp = '\0';

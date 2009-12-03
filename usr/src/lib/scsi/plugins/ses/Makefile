@@ -20,15 +20,15 @@
 #
 
 #
-# Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
-#ident	"%Z%%M%	%I%	%E% SMI"
 
 SUBDIRS = 			\
 	libses			\
 	ses2			\
 	LSILOGIC-SASX28-A.0	\
+	SUN			\
 	SUN-Storage-J4400	\
 	SUN-Storage-J4500
 

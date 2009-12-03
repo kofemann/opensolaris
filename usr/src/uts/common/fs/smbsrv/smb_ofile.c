@@ -160,7 +160,6 @@
  *       being queued in that list is NOT registered by incrementing the
  *       reference count.
  */
-#include <smbsrv/smb_incl.h>
 #include <smbsrv/smb_kproto.h>
 #include <smbsrv/smb_fsops.h>
 
@@ -340,6 +339,7 @@ smb_ofile_close(smb_ofile_t *of, uint32_t last_wtime)
 		ASSERT(of->f_refcnt);
 		ASSERT(of->f_state == SMB_OFILE_STATE_CLOSING);
 		of->f_state = SMB_OFILE_STATE_CLOSED;
+		mutex_exit(&of->f_mutex);
 		if (of->f_node != NULL) {
 			smb_node_dec_open_ofiles(of->f_node);
 			if (of->f_oplock_granted) {
@@ -347,7 +347,6 @@ smb_ofile_close(smb_ofile_t *of, uint32_t last_wtime)
 				of->f_oplock_granted = B_FALSE;
 			}
 		}
-		mutex_exit(&of->f_mutex);
 		return;
 	}
 	case SMB_OFILE_STATE_CLOSED:
@@ -483,16 +482,21 @@ smb_ofile_hold(smb_ofile_t *of)
  *
  */
 void
-smb_ofile_release(
-    smb_ofile_t		*of)
+smb_ofile_release(smb_ofile_t	*of)
 {
+	boolean_t	rb;
+
 	ASSERT(of);
 	ASSERT(of->f_magic == SMB_OFILE_MAGIC);
 
 	mutex_enter(&of->f_mutex);
-	if (of->f_oplock_exit)
-		if (smb_oplock_broadcast(of->f_node))
+	if (of->f_oplock_exit) {
+		mutex_exit(&of->f_mutex);
+		rb = smb_oplock_broadcast(of->f_node);
+		mutex_enter(&of->f_mutex);
+		if (rb)
 			of->f_oplock_exit = B_FALSE;
+	}
 	ASSERT(of->f_refcnt);
 	of->f_refcnt--;
 	switch (of->f_state) {
@@ -611,7 +615,7 @@ smb_ofile_disallow_fclose(smb_ofile_t *of)
 
 	case SMB_FTYPE_MESG_PIPE:
 		ASSERT(of->f_pipe);
-		if (utf8_strcasecmp(of->f_pipe->p_name, "SRVSVC") == 0)
+		if (smb_strcasecmp(of->f_pipe->p_name, "SRVSVC", 0) == 0)
 			return (B_TRUE);
 		break;
 	default:
@@ -759,6 +763,11 @@ smb_ofile_set_write_time_pending(smb_ofile_t *of)
 	mutex_exit(&of->f_mutex);
 }
 
+/*
+ * smb_ofile_write_time_pending
+ *
+ * Get and reset the write times pending flag.
+ */
 boolean_t
 smb_ofile_write_time_pending(smb_ofile_t *of)
 {
@@ -766,8 +775,10 @@ smb_ofile_write_time_pending(smb_ofile_t *of)
 
 	SMB_OFILE_VALID(of);
 	mutex_enter(&of->f_mutex);
-	if (of->f_flags & SMB_OFLAGS_TIMESTAMPS_PENDING)
+	if (of->f_flags & SMB_OFLAGS_TIMESTAMPS_PENDING) {
 		rc = B_TRUE;
+		of->f_flags &= ~SMB_OFLAGS_TIMESTAMPS_PENDING;
+	}
 	mutex_exit(&of->f_mutex);
 
 	return (rc);
@@ -777,16 +788,13 @@ smb_ofile_write_time_pending(smb_ofile_t *of)
  * smb_ofile_set_explicit_time_flag
  *
  * Note the timestamps specified in "what", as having been
- * explicity set for the ofile. Also clear the flag for pending
- * timestamps as the pending timestamps will have been applied
- * by the explicit set.
+ * explicity set for the ofile.
  */
 void
 smb_ofile_set_explicit_times(smb_ofile_t *of, uint32_t what)
 {
 	SMB_OFILE_VALID(of);
 	mutex_enter(&of->f_mutex);
-	of->f_flags &= ~SMB_OFLAGS_TIMESTAMPS_PENDING;
 	of->f_explicit_times |= (what & SMB_AT_TIMES);
 	mutex_exit(&of->f_mutex);
 }
@@ -1273,7 +1281,7 @@ smb_ofile_netinfo_init(smb_ofile_t *of, smb_netfileinfo_t *fi)
 	fi->fi_fid = of->f_fid;
 	fi->fi_uniqid = of->f_uniqid;
 	fi->fi_pathlen = strlen(buf) + 1;
-	fi->fi_path = smb_kstrdup(buf, fi->fi_pathlen);
+	fi->fi_path = smb_strdup(buf);
 	kmem_free(buf, MAXPATHLEN);
 
 	fi->fi_namelen = user->u_domain_len + user->u_name_len + 2;
@@ -1290,7 +1298,7 @@ smb_ofile_netinfo_fini(smb_netfileinfo_t *fi)
 		return;
 
 	if (fi->fi_path)
-		kmem_free(fi->fi_path, fi->fi_pathlen);
+		smb_mfree(fi->fi_path);
 	if (fi->fi_username)
 		kmem_free(fi->fi_username, fi->fi_namelen);
 

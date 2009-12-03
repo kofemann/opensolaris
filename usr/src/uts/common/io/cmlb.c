@@ -313,7 +313,8 @@ static boolean_t  cmlb_has_max_chs_vals(struct ipart *fdp);
 #endif
 
 #if defined(_SUNOS_VTOC_16)
-static void cmlb_convert_geometry(diskaddr_t capacity, struct dk_geom *cl_g);
+static void cmlb_convert_geometry(struct cmlb_lun *cl, diskaddr_t capacity,
+    struct dk_geom *cl_g, void *tg_cookie);
 #endif
 
 static int cmlb_dkio_get_geometry(struct cmlb_lun *cl, caddr_t arg, int flag,
@@ -349,7 +350,8 @@ static int cmlb_validate_ext_part(struct cmlb_lun *cl, int part, int epart,
 static int cmlb_is_linux_swap(struct cmlb_lun *cl, uint32_t part_start,
     void *tg_cookie);
 static int cmlb_dkio_get_virtgeom(struct cmlb_lun *cl, caddr_t arg, int flag);
-static int cmlb_dkio_get_phygeom(struct cmlb_lun *cl, caddr_t  arg, int flag);
+static int cmlb_dkio_get_phygeom(struct cmlb_lun *cl, caddr_t  arg, int flag,
+    void *tg_cookie);
 static int cmlb_dkio_partinfo(struct cmlb_lun *cl, dev_t dev, caddr_t arg,
     int flag);
 static int cmlb_dkio_extpartinfo(struct cmlb_lun *cl, dev_t dev, caddr_t arg,
@@ -1286,7 +1288,7 @@ cmlb_ioctl(cmlb_handle_t cmlbhandle, dev_t dev, int cmd, intptr_t arg,
 	case DKIOCG_PHYGEOM:
 		cmlb_dbg(CMLB_TRACE, cl, "DKIOCG_PHYGEOM\n");
 #if defined(__i386) || defined(__amd64)
-		err = cmlb_dkio_get_phygeom(cl, (caddr_t)arg, flag);
+		err = cmlb_dkio_get_phygeom(cl, (caddr_t)arg, flag, tg_cookie);
 #else
 		err = ENOTTY;
 #endif
@@ -1803,8 +1805,12 @@ no_solaris_partition:
  *     Context: Kernel thread only
  */
 static void
-cmlb_convert_geometry(diskaddr_t capacity, struct dk_geom *cl_g)
+cmlb_convert_geometry(struct cmlb_lun *cl, diskaddr_t capacity,
+    struct dk_geom *cl_g, void *tg_cookie)
 {
+
+	ASSERT(cl != NULL);
+	ASSERT(mutex_owned(CMLB_MUTEX(cl)));
 
 	/* Unlabeled SCSI floppy device */
 	if (capacity <= 0x1000) {
@@ -1839,6 +1845,15 @@ cmlb_convert_geometry(diskaddr_t capacity, struct dk_geom *cl_g)
 	 * 4211279100 (1.96TB)			255  	252
 	 * 5264098875 (2.45TB)			255  	315
 	 * ...
+	 *
+	 * For Solid State Drive(SSD), it uses 4K page size inside and may be
+	 * double with every new generation. If the I/O is not aligned with
+	 * page size on SSDs, SSDs perform a lot slower.
+	 * By default, Solaris partition starts from cylinder 1. It will be
+	 * misaligned even with 4K if using heads(255) and SPT(63). To
+	 * workaround the problem, if the device is SSD, we use heads(224) and
+	 * SPT multiple of 56. Thus the default Solaris partition starts from
+	 * a position that aligns with 128K on a 512 bytes sector size SSD.
 	 */
 
 	if (capacity <= 0x200000) {
@@ -1848,15 +1863,36 @@ cmlb_convert_geometry(diskaddr_t capacity, struct dk_geom *cl_g)
 		cl_g->dkg_nhead = 128;
 		cl_g->dkg_nsect = 32;
 	} else {
-		cl_g->dkg_nhead = 255;
+		tg_attribute_t tgattribute;
+		int is_solid_state;
+		unsigned short nhead;
+		unsigned short nsect;
 
-		/* make nsect be smallest multiple of 63 */
+		bzero(&tgattribute, sizeof (tg_attribute_t));
+
+		mutex_exit(CMLB_MUTEX(cl));
+		is_solid_state =
+		    (DK_TG_GETATTRIBUTE(cl, &tgattribute, tg_cookie) == 0) ?
+		    tgattribute.media_is_solid_state : FALSE;
+		mutex_enter(CMLB_MUTEX(cl));
+
+		if (is_solid_state) {
+			nhead = 224;
+			nsect = 56;
+		} else {
+			nhead = 255;
+			nsect = 63;
+		}
+
+		cl_g->dkg_nhead = nhead;
+
+		/* make nsect be smallest multiple of nhead */
 		cl_g->dkg_nsect = ((capacity +
-		    (UINT16_MAX * 255 * 63) - 1) /
-		    (UINT16_MAX * 255 * 63)) * 63;
+		    (UINT16_MAX * nhead * nsect) - 1) /
+		    (UINT16_MAX * nhead * nsect)) * nsect;
 
 		if (cl_g->dkg_nsect == 0)
-			cl_g->dkg_nsect = (UINT16_MAX / 63) * 63;
+			cl_g->dkg_nsect = (UINT16_MAX / nsect) * nsect;
 	}
 
 }
@@ -2215,6 +2251,30 @@ cmlb_is_linux_swap(struct cmlb_lun *cl, uint32_t part_start, void *tg_cookie)
 		return (ENOMEM);
 	}
 
+	/*
+	 * Check if there is a sane Solaris VTOC
+	 * If there is a valid vtoc, no need to lookup
+	 * for the linux swap signature.
+	 */
+	mutex_exit(CMLB_MUTEX(cl));
+	rval = DK_TG_READ(cl, buf, part_start + DK_LABEL_LOC,
+	    sec_sz, tg_cookie);
+	mutex_enter(CMLB_MUTEX(cl));
+	if (rval != 0) {
+		cmlb_dbg(CMLB_ERROR,  cl,
+		    "cmlb_is_linux_swap: disk vtoc read err\n");
+		rval = EIO;
+		goto done;
+	}
+
+	if ((((struct dk_label *)buf)->dkl_magic == DKL_MAGIC) &&
+	    (((struct dk_label *)buf)->dkl_vtoc.v_sanity == VTOC_SANE)) {
+		rval = -1;
+		goto done;
+	}
+
+
+	/* No valid vtoc, so check for linux swap signature */
 	linux_swap_magic = buf + sec_sz - 10;
 
 	for (i = 0; i < sizeof (linux_pg_size_arr)/sizeof (uint32_t); i++) {
@@ -2243,6 +2303,7 @@ cmlb_is_linux_swap(struct cmlb_lun *cl, uint32_t part_start, void *tg_cookie)
 		}
 	}
 
+done:
 	kmem_free(buf, sec_sz);
 	return (rval);
 }
@@ -2295,7 +2356,6 @@ cmlb_read_fdisk(struct cmlb_lun *cl, diskaddr_t capacity, void *tg_cookie)
 	struct ipart	*efdp2 = &eparts[1];
 	int		ext_part_exists = 0;
 	int		ld_count = 0;
-	int		is_linux_swap;
 #endif
 
 	ASSERT(cl != NULL);
@@ -2500,17 +2560,11 @@ cmlb_read_fdisk(struct cmlb_lun *cl, diskaddr_t capacity, void *tg_cookie)
 				cl->cl_fmap[j].fmap_systid = systid;
 				ld_count++;
 
-				is_linux_swap = 0;
-				if (efdp1->systid == SUNIXOS) {
-					if (cmlb_is_linux_swap(cl, abs_secnum,
-					    tg_cookie) == 0) {
-						is_linux_swap = 1;
-					}
-				}
-
-				if ((efdp1->systid == SUNIXOS) ||
-				    (efdp1->systid == SUNIXOS2)) {
-					if ((uidx == -1) && (!is_linux_swap)) {
+				if ((efdp1->systid == SUNIXOS &&
+				    (cmlb_is_linux_swap(cl, abs_secnum,
+				    tg_cookie) != 0)) ||
+				    efdp1->systid == SUNIXOS2) {
+					if (uidx == -1) {
 						uidx = 0;
 						solaris_offset = abs_secnum;
 						solaris_size = ext_numsect;
@@ -2539,14 +2593,10 @@ cmlb_read_fdisk(struct cmlb_lun *cl, diskaddr_t capacity, void *tg_cookie)
 		 */
 		if ((uidx == -1) || (fdp->bootid == ACTIVE)) {
 #if defined(__i386) || defined(__amd64)
-			is_linux_swap = 0;
-			if (fdp->systid == SUNIXOS) {
-				if (cmlb_is_linux_swap(cl, relsect,
-				    tg_cookie) == 0) {
-					is_linux_swap = 1;
-				}
-			}
-			if (!is_linux_swap) {
+			if (fdp->systid != SUNIXOS ||
+			    (fdp->systid == SUNIXOS &&
+			    (cmlb_is_linux_swap(cl, relsect,
+			    tg_cookie) != 0))) {
 #endif
 				uidx = i;
 				solaris_offset = relsect;
@@ -3327,7 +3377,7 @@ cmlb_build_default_label(struct cmlb_lun *cl, void *tg_cookie)
 			capacity = cl->cl_blockcount;
 
 
-		cmlb_convert_geometry(capacity, &cl_g);
+		cmlb_convert_geometry(cl, capacity, &cl_g, tg_cookie);
 		bcopy(&cl_g, &cl->cl_g, sizeof (cl->cl_g));
 		phys_spc = cl->cl_g.dkg_nhead * cl->cl_g.dkg_nsect;
 	}
@@ -4367,6 +4417,15 @@ cmlb_dkio_set_extvtoc(struct cmlb_lun *cl, dev_t dev, caddr_t arg, int flag,
 	cmlb_clear_efi(cl, tg_cookie);
 	ddi_remove_minor_node(CMLB_DEVINFO(cl), "wd");
 	ddi_remove_minor_node(CMLB_DEVINFO(cl), "wd,raw");
+	/*
+	 * cmlb_dkio_set_extvtoc creates duplicate minor nodes when
+	 * relabeling an SMI disk. To avoid that we remove them
+	 * before creating.
+	 * It should be OK to remove a non-existed minor node.
+	 */
+	ddi_remove_minor_node(CMLB_DEVINFO(cl), "h");
+	ddi_remove_minor_node(CMLB_DEVINFO(cl), "h,raw");
+
 	(void) cmlb_create_minor(CMLB_DEVINFO(cl), "h",
 	    S_IFBLK, (CMLBUNIT(dev) << CMLBUNIT_SHIFT) | WD_NODE,
 	    cl->cl_node_type, NULL, internal);
@@ -5381,7 +5440,8 @@ cmlb_dkio_get_virtgeom(struct cmlb_lun *cl, caddr_t arg, int flag)
 
 #if defined(__i386) || defined(__amd64)
 static int
-cmlb_dkio_get_phygeom(struct cmlb_lun *cl, caddr_t  arg, int flag)
+cmlb_dkio_get_phygeom(struct cmlb_lun *cl, caddr_t  arg, int flag,
+    void *tg_cookie)
 {
 	int err = 0;
 	diskaddr_t capacity;
@@ -5443,7 +5503,7 @@ cmlb_dkio_get_phygeom(struct cmlb_lun *cl, caddr_t  arg, int flag)
 			else
 				capacity = cl->cl_blockcount;
 
-			cmlb_convert_geometry(capacity, dkgp);
+			cmlb_convert_geometry(cl, capacity, dkgp, tg_cookie);
 			dkgp->dkg_acyl = 0;
 			dkgp->dkg_ncyl = capacity /
 			    (dkgp->dkg_nhead * dkgp->dkg_nsect);
