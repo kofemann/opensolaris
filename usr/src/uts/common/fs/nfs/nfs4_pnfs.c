@@ -3409,7 +3409,7 @@ pnfs_layoutget(vnode_t *vp, cred_t *cr, offset4 offset, layoutiomode4 iomode)
 	mutex_enter(&rp->r_statelock);
 
 	rp->r_flags |= R4OTWLO;
-	rp->r_last_layoutget = lbolt;
+	rp->r_last_layoutget = ddi_get_lbolt();
 
 	mutex_exit(&rp->r_statelock);
 
@@ -4845,7 +4845,7 @@ pnfs_getdevicelist(mntinfo4_t *mi, cred_t *cr)
 		return;
 
 	mutex_enter(&mi->mi_pnfs_lock);
-	mi->mi_last_getdevicelist = lbolt;
+	mi->mi_last_getdevicelist = ddi_get_lbolt();
 	mutex_exit(&mi->mi_pnfs_lock);
 
 	task = kmem_cache_alloc(task_get_devicelist_cache, KM_SLEEP);

@@ -195,7 +195,7 @@ wait:
 	ASSERT(fpa[active] != NULL);
 	while (fpa[active]->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE) {
 		rc = rfs4_dbe_twait(fpa[active]->rf_dbe,
-		    lbolt + SEC_TO_TICK(dbe_to_instp(
+		    ddi_get_lbolt() + SEC_TO_TICK(dbe_to_instp(
 		    fpa[active]->rf_dbe)->lease_period));
 		if (rc == -1) { /* timed out */
 			rfs4_dbe_unlock(fpa[active]->rf_dbe);
@@ -318,7 +318,7 @@ recall_write_delegation(rfs4_file_t *fp, bool_t trunc, caller_context_t *ct)
 
 	rfs4_dbe_lock(fp->rf_dbe);
 	while (fp->rf_dinfo->rd_dtype != OPEN_DELEGATE_NONE) {
-		rc = rfs4_dbe_twait(fp->rf_dbe, lbolt +
+		rc = rfs4_dbe_twait(fp->rf_dbe, ddi_get_lbolt() +
 		    SEC_TO_TICK(dbe_to_instp(fp->rf_dbe)->lease_period));
 		if (rc == -1) { /* timed out */
 			rfs4_dbe_unlock(fp->rf_dbe);

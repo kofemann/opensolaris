@@ -322,7 +322,7 @@ nfs4_cbconn_thread(nfs4_server_t *np)
 
 		mutex_enter(&cbi->cb_cbconn_lock);
 		(void) cv_timedwait(&cbi->cb_cbconn_wait,
-		    &cbi->cb_cbconn_lock, tick_delay + lbolt);
+		    &cbi->cb_cbconn_lock, tick_delay + ddi_get_lbolt());
 		mutex_exit(&cbi->cb_cbconn_lock);
 
 		mutex_enter(&cpr_lock);

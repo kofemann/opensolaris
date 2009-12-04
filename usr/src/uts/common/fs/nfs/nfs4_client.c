@@ -3292,7 +3292,7 @@ nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 		mutex_exit(&cpr_lock);
 
 		time_left = cv_timedwait(&np->cv_thread_exit,
-		    &np->s_lock, tick_delay + lbolt);
+		    &np->s_lock, tick_delay + ddi_get_lbolt());
 
 		mutex_enter(&cpr_lock);
 		CALLB_CPR_SAFE_END(&cpr_info, &cpr_lock);
@@ -3334,7 +3334,7 @@ nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 			 * session.
 			 */
 			clock_t	cur_time;
-			cur_time = lbolt;
+			cur_time = ddi_get_lbolt();
 			if (die_time) {
 				if (cur_time >= die_time) {
 					if (np->mntinfo4_list == NULL) {
@@ -3349,7 +3349,8 @@ nfs4_sequence_heartbeat_thread(nfs4_server_t *np)
 				}
 			} else {
 				die_time = SEC_TO_TICK
-				    (nfs4_sequence_hbt_timeout * 60) + lbolt;
+				    (nfs4_sequence_hbt_timeout * 60)
+				    + ddi_get_lbolt();
 			}
 		}
 	}
