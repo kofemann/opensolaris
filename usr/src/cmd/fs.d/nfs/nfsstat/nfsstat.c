@@ -1480,7 +1480,8 @@ stat_print(const char *title_string, kstat_t *req, kstat_t  *req_old,
 }
 
 static void
-nfs_kstat_sum(kstat_t *kstat1, kstat_t *kstat2, kstat_t *kstat3, kstat_t *sum)
+nfsstat_kstat_sum(kstat_t *kstat1, kstat_t *kstat2, kstat_t *kstat3,
+    kstat_t *sum)
 {
 	int i;
 	kstat_named_t *knp1, *knp2, *knp3, *knpsum;
@@ -1494,7 +1495,7 @@ nfs_kstat_sum(kstat_t *kstat1, kstat_t *kstat2, kstat_t *kstat3, kstat_t *sum)
 	knp3 = KSTAT_NAMED_PTR(kstat3);
 
 	if (sum->ks_data == NULL) {
-		nfs_kstat_copy(kstat1, sum, 0);
+		nfsstat_kstat_copy(kstat1, sum, 0);
 	}
 	knpsum = KSTAT_NAMED_PTR(sum);
 

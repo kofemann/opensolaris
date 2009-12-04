@@ -2176,7 +2176,7 @@ connmgr_cbget(struct netbuf *retryaddr, const struct timeval *waitp,
 		return (NULL);
 	}
 
-	prev_time = lbolt;
+	prev_time = ddi_get_lbolt();
 	lru_entry = NULL;
 
 	/*
@@ -2220,7 +2220,7 @@ connmgr_cbget(struct netbuf *retryaddr, const struct timeval *waitp,
 
 	if (lru_entry != NULL) {
 		CONN_HOLD(lru_entry);
-		lru_entry->x_time = lbolt;
+		lru_entry->x_time = ddi_get_lbolt();
 	}
 
 	mutex_exit(&tag->rt_lock);

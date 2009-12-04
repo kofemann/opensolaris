@@ -799,6 +799,7 @@ typedef struct rfs4_state {
 	uint32_t		rs_open_deny;
 	uint32_t		rs_share_access;
 	uint32_t		rs_share_deny;
+	unsigned		rs_opened:1;
 	unsigned		rs_closed:1;
 	list_t			rs_lostatelist;
 	list_node_t		rs_node;
