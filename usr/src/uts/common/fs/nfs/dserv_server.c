@@ -50,6 +50,8 @@
 
 uint32_t max_blksize = SPA_MAXBLOCKSIZE;
 
+char *pnfs_dmu_tag = "pNFS_TAG";	/* Tag used for DMU interfaces */
+
 static nnode_error_t dserv_nnode_from_fh_ds(nnode_t **, mds_ds_fh *);
 static void dserv_nnode_key_free(void *);
 static dserv_nnode_data_t *dserv_nnode_data_alloc(void);
@@ -479,8 +481,8 @@ get_mdsfs_objset(char *mdsfs_objset_name, objset_t **osp)
 	DTRACE_PROBE1(dserv__i__get_mdsfs_objset, char *,
 	    mdsfs_objset_name);
 
-	error = dmu_objset_open(mdsfs_objset_name, DMU_OST_PNFS,
-	    DS_MODE_OWNER, osp);
+	error = dmu_objset_own(mdsfs_objset_name, DMU_OST_PNFS, B_FALSE,
+	    pnfs_dmu_tag, osp);
 	return (error);
 }
 
@@ -498,14 +500,14 @@ get_create_mdsfs_objset(char *mdsfs_objset_name, objset_t **osp)
 		if (error == ENOENT) {
 			/* The object set needs to be created */
 			error = dmu_objset_create(mdsfs_objset_name,
-			    DMU_OST_PNFS, NULL, 0, NULL, NULL);
+			    DMU_OST_PNFS, 0, NULL, NULL);
 
 			if (error)
 				return (error);
 
 			/* Open the object set */
-			error = dmu_objset_open(mdsfs_objset_name,
-			    DMU_OST_PNFS, DS_MODE_OWNER, osp);
+			error = dmu_objset_own(mdsfs_objset_name,
+			    DMU_OST_PNFS, B_FALSE, pnfs_dmu_tag, osp);
 
 			if (error) {
 				DTRACE_PROBE2(

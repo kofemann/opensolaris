@@ -6048,7 +6048,7 @@ rfs4_createfile(OPEN4args *args, struct svc_req *req, struct compound_state *cs,
 		 * For EXCL create, attrset is set to the server attr
 		 * used to cache the client's verifier.
 		 */
-		ATTR_SET(*attrset, TIME_MODIFY_MASK);
+		ATTR_SET(*attrset, TIME_MODIFY);
 		break;
 	}
 

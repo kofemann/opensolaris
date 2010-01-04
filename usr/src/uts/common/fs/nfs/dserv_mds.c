@@ -517,7 +517,8 @@ dserv_mds_instance_teardown()
 			    list_head(&tmp->oro_open_mdsfs_objsets);
 			    tmp_mdsfs != NULL; tmp_mdsfs =
 			    list_head(&tmp->oro_open_mdsfs_objsets)) {
-				dmu_objset_close(tmp_mdsfs->omo_osp);
+				dmu_objset_disown(tmp_mdsfs->omo_osp,
+				    pnfs_dmu_tag);
 				list_remove(&tmp->oro_open_mdsfs_objsets,
 				    tmp_mdsfs);
 				kmem_cache_free(
@@ -525,7 +526,7 @@ dserv_mds_instance_teardown()
 				    tmp_mdsfs);
 			}
 
-			dmu_objset_close(tmp->oro_osp);
+			dmu_objset_disown(tmp->oro_osp, pnfs_dmu_tag);
 			list_remove(&inst->dmi_datasets, tmp);
 			kmem_cache_free(dserv_open_root_objset_cache,
 			    tmp);
@@ -786,10 +787,10 @@ populate_mds_sid_cache(objset_t *osp, dserv_mds_instance_t *inst)
 		return (error);
 
 	/*
-	 * dmu_obj_info.doi_physical_blks is the number of 512-byte blocks
+	 * dmu_obj_info.doi_physical_blks_512 is the number of 512-byte blocks
 	 * allocated to this object.
 	 */
-	size = dmu_obj_info.doi_physical_blks * 512;
+	size = dmu_obj_info.doi_physical_blocks_512 * 512;
 	buf = kmem_zalloc(size, KM_SLEEP);
 
 	error = dmu_read(osp, DMU_PNFS_METADATA_OBJECT, 0, size,
@@ -848,8 +849,8 @@ dserv_mds_addobjset(const char *objsetname)
 		}
 	}
 
-	error = dmu_objset_open(objsetname, DMU_OST_PNFS,
-	    DS_MODE_OWNER, &osp);
+	error = dmu_objset_own(objsetname, DMU_OST_PNFS, B_FALSE,
+	    pnfs_dmu_tag, &osp);
 	if (error)
 		goto out;
 

@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -70,6 +70,8 @@ void ds_dispatch(struct svc_req *, SVCXPRT *xprt);
  * rpcgen will generate fncalls for them within ds_xdr.c.
  */
 #include <nfs/ds_nfs_xdr.h>
+
+extern char *pnfs_dmu_tag;	/* Tag used for DMU interfaces */
 
 #ifdef	__cplusplus
 }
