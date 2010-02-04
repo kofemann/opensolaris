@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -102,7 +102,6 @@ struct taskq {
 	kcondvar_t	tq_wait_cv;
 	kcondvar_t	tq_exit_cv;
 	pri_t		tq_pri;		/* Scheduling priority */
-	zoneid_t	tq_zoneid;
 	uint_t		tq_flags;
 	int		tq_active;
 	int		tq_nthreads;

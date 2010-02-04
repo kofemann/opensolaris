@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -119,9 +119,6 @@
  *		use their own protocol for handling CPR issues. This flag is not
  *		supported for DYNAMIC task queues.  This flag is not compatible
  *		with TASKQ_THREADS_CPU_PCT.
- *
- *	  TASKQ_PERZONE: Confines the taskq threads to a particular zone as that
- *		of the caller
  *
  *	The 'pri' field specifies the default priority for the threads that
  *	service all scheduled tasks.
@@ -486,8 +483,6 @@
 #include <sys/sdt.h>
 #include <sys/sysdc.h>
 #include <sys/note.h>
-
-#include <sys/zone.h>
 
 static kmem_cache_t *taskq_ent_cache, *taskq_cache;
 
@@ -1349,7 +1344,6 @@ taskq_thread_create(taskq_t *tq)
 
 	tq->tq_flags |= TASKQ_THREAD_CREATED;
 	tq->tq_active++;
-
 	mutex_exit(&tq->tq_lock);
 
 	if (tq->tq_proc != &p0) {
@@ -1419,7 +1413,6 @@ taskq_thread(void *arg)
 	taskq_ent_t *tqe;
 	callb_cpr_t cprinfo;
 	hrtime_t start, end;
-	int gz = 1;
 
 	curthread->t_taskq = tq;	/* mark ourselves for taskq_member() */
 
@@ -1523,9 +1516,6 @@ taskq_thread(void *arg)
 		taskq_ent_free(tq, tqe);
 	}
 
-	if (tq->tq_zoneid != GLOBAL_ZONEID)
-		gz = 0;
-
 	if (tq->tq_nthreads_max == 1)
 		tq->tq_thread = NULL;
 	else
@@ -1569,7 +1559,6 @@ taskq_d_thread(taskq_ent_t *tqe)
 	kcondvar_t	*cv = &tqe->tqent_cv;
 	callb_cpr_t	cprinfo;
 	clock_t		w;
-	int 		gz = 1;
 
 	CALLB_CPR_INIT(&cprinfo, lock, callb_generic_cpr, tq->tq_name);
 
@@ -1682,14 +1671,9 @@ taskq_d_thread(taskq_ent_t *tqe)
 			tqe->tqent_thread = NULL;
 			mutex_enter(&tq->tq_lock);
 			tq->tq_tdeaths++;
-			if (tq->tq_zoneid != GLOBAL_ZONEID)
-				gz = 0;
 			mutex_exit(&tq->tq_lock);
 			CALLB_CPR_EXIT(&cprinfo);
 			kmem_cache_free(taskq_ent_cache, tqe);
-			if (!gz) {
-				zthread_exit();
-			}
 			thread_exit();
 		}
 	}
@@ -1844,11 +1828,6 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 	tq->tq_DC = dc;
 	list_link_init(&tq->tq_cpupct_link);
 
-	if (flags & TASKQ_PERZONE)
-		tq->tq_zoneid = getzoneid();
-	else
-		tq->tq_zoneid = GLOBAL_ZONEID;
-
 	if (max_nthreads > 1)
 		tq->tq_threadlist = kmem_alloc(
 		    sizeof (kthread_t *) * max_nthreads, KM_SLEEP);
@@ -1902,10 +1881,10 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 	}
 
 	if (flags & TASKQ_DYNAMIC) {
-		if ((tq->tq_kstat = kstat_create_zone("unix", instance,
+		if ((tq->tq_kstat = kstat_create("unix", instance,
 		    tq->tq_name, "taskq_d", KSTAT_TYPE_NAMED,
 		    sizeof (taskq_d_kstat) / sizeof (kstat_named_t),
-		    KSTAT_FLAG_VIRTUAL, tq->tq_zoneid)) != NULL) {
+		    KSTAT_FLAG_VIRTUAL)) != NULL) {
 			tq->tq_kstat->ks_lock = &taskq_d_kstat_lock;
 			tq->tq_kstat->ks_data = &taskq_d_kstat;
 			tq->tq_kstat->ks_update = taskq_d_kstat_update;
@@ -1913,10 +1892,10 @@ taskq_create_common(const char *name, int instance, int nthreads, pri_t pri,
 			kstat_install(tq->tq_kstat);
 		}
 	} else {
-		if ((tq->tq_kstat = kstat_create_zone("unix", instance,
-		    tq->tq_name, "taskq", KSTAT_TYPE_NAMED,
+		if ((tq->tq_kstat = kstat_create("unix", instance, tq->tq_name,
+		    "taskq", KSTAT_TYPE_NAMED,
 		    sizeof (taskq_kstat) / sizeof (kstat_named_t),
-		    KSTAT_FLAG_VIRTUAL, tq->tq_zoneid)) != NULL) {
+		    KSTAT_FLAG_VIRTUAL)) != NULL) {
 			tq->tq_kstat->ks_lock = &taskq_kstat_lock;
 			tq->tq_kstat->ks_data = &taskq_kstat;
 			tq->tq_kstat->ks_update = taskq_kstat_update;
@@ -2097,13 +2076,8 @@ taskq_bucket_extend(void *arg)
 	 * Create a thread in a TS_STOPPED state first. If it is successfully
 	 * created, place the entry on the free list and start the thread.
 	 */
-
-	if (tq->tq_zoneid == GLOBAL_ZONEID)
-		tqe->tqent_thread = thread_create(NULL, 0, taskq_d_thread, tqe,
-		    0, &p0, TS_STOPPED, tq->tq_pri);
-	else
-		tqe->tqent_thread = zthread_create_tstopped(
-		    NULL, 0, taskq_d_thread, tqe, 0, tq->tq_pri);
+	tqe->tqent_thread = thread_create(NULL, 0, taskq_d_thread, tqe,
+	    0, &p0, TS_STOPPED, tq->tq_pri);
 
 	/*
 	 * Once the entry is ready, link it to the the bucket free list.

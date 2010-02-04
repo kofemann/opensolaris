@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
+ * Copyright 2010 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
  */
 
@@ -424,13 +424,14 @@ task_layoutreturn_free(task_layoutreturn_t *task)
 void
 nfs4_pnfs_init_mi(mntinfo4_t *mi)
 {
-	mi->mi_pnfs_io_taskq = taskq_create("pnfs_io_taskq",
+	mi->mi_pnfs_io_taskq = taskq_create_proc("pnfs_io_taskq",
 	    nfs4_pnfs_io_nthreads,
-	    minclsyspri, 1, nfs4_pnfs_io_maxalloc, TASKQ_PERZONE);
-	mi->mi_pnfs_other_taskq = taskq_create("pnfs_other_taskq",
+	    minclsyspri, 1, nfs4_pnfs_io_maxalloc,
+	    mi->mi_zone->zone_zsched, 0);
+	mi->mi_pnfs_other_taskq = taskq_create_proc("pnfs_other_taskq",
 	    nfs4_pnfs_other_nthreads,
 	    minclsyspri, 1, nfs4_pnfs_other_maxalloc,
-	    TASKQ_PERZONE);
+	    mi->mi_zone->zone_zsched, 0);
 }
 
 void
